@@ -1025,6 +1025,13 @@ impl DotsAndBoxes {
 
     fn handle_event(&mut self, event: &Event) -> EventResult {
         match event {
+            // Every binding is on the key itself, so a key is the game's only
+            // with nothing but Shift held: a chord with Ctrl, Alt or the
+            // Windows key is the window's or the desktop's and arrives
+            // carrying its key -- Alt+N threw the game in play away.
+            Event::Key(ke) if ke.pressed && !textline::is_plain(ke.modifiers) => {
+                EventResult::Ignored
+            }
             Event::Key(ke) if ke.pressed => self.handle_key(ke.key),
             Event::Mouse(me) => self.handle_mouse(me),
             Event::Tick { elapsed_ms } => self.handle_tick(*elapsed_ms),
@@ -1926,6 +1933,50 @@ mod tests {
 
     fn small_app() -> DotsAndBoxes {
         DotsAndBoxes::with_config(3, GameMode::TwoPlayer, 99)
+    }
+
+    /// **A key held with Ctrl, Alt or the Windows key is not the game's**:
+    /// Alt+N threw the game in play away and Alt+3 started a smaller one,
+    /// each chord arriving carrying its key.
+    #[test]
+    fn a_key_held_with_a_modifier_is_not_the_games() {
+        use guitk::event::Modifiers;
+        let altgr = Modifiers {
+            alt: true,
+            ..Modifiers::ctrl()
+        };
+        let mut app = two_player_app();
+        app.handle_event(&Event::Key(guitk::probe::press(Key::Enter)));
+        assert_eq!(
+            app.moves_made(),
+            1,
+            "control: Enter draws the line under the cursor"
+        );
+        let (cursor, size, mode) = (app.cursor, app.grid_size(), app.mode);
+        for held in [
+            Modifiers::ctrl(),
+            Modifiers::alt(),
+            Modifiers::super_key(),
+            altgr,
+        ] {
+            for key in [Key::N, Key::Num3, Key::M, Key::Right, Key::Tab, Key::Enter] {
+                assert_eq!(
+                    app.handle_event(&Event::Key(guitk::probe::press_with(key, held))),
+                    EventResult::Ignored,
+                    "{held:?} {key:?} was taken"
+                );
+            }
+        }
+        assert_eq!(
+            app.moves_made(),
+            1,
+            "a chord drew a line or threw the game away"
+        );
+        assert_eq!(
+            (app.cursor, app.grid_size(), app.mode),
+            (cursor, size, mode),
+            "a chord changed the board"
+        );
     }
 
     /// Draw `line` while setting a fixture up, insisting it was really drawn.

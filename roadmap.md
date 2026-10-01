@@ -1342,14 +1342,22 @@ list moved to lane D on 2026-09-22):
     (`userspace/charwidth/licenses/`). Lane C is asked for the terminal's
     width query and the drawing rule, lane D for libc's `wcwidth` from the
     same data.
-  - `[B]` **Command names inside other programs, triaged** (§1045): the 148 in
+  - `[x]` `[B]` **Command names inside other programs, triaged** (§1045): the 148 in
     `scripts/multicall-aliases-baseline.txt`, each deleted (a subsystem SlateOS
     lacks) or kept; lane D is asked to install a kept name as the same file.
-  - `[B]` **A catalogue of every program** (§1053): generated from the
+    Lane B's half done 2026-10-01 (five passes): every name is decided, and
+    the 55 still in the ledger are all kept names waiting for lane D's
+    `name = producer` manifest lines
+    (`requests/b-d-stage-every-program-that-builds.md`, batches 1-6).
+  - `[x]` `[B]` **A catalogue of every program** (§1053): generated from the
     workspace, a line each on what it does, a gate that every binary is listed,
     and a new open question -- what SlateOS is for, each answer with what it
     would drop. Lane D is asked to raise `IMG_SIZE` and stage everything that
-    builds.
+    builds. Done 2026-10-01: `programs.md` from `scripts/program-catalogue.py`;
+    the gate is `scripts/test-program-catalogue.py`, which every boot test
+    runs (it names a program that was added without a row, and says to
+    regenerate); the question is `open-questions.md` B-Q23. The image half is
+    lane D's request.
   - `[x]` `[B]` **Shaped random numbers** (§1047): a userspace library (normal,
     exponential, Poisson, weighted choice) over a caller-given uniform source,
     and deliberately not reachable from the cryptographic one. Done

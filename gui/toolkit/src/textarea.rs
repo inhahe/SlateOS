@@ -203,7 +203,6 @@ pub struct TextArea {
     goal_x: Option<f32>,
     wrap: bool,
     scroll_y: f32,
-    clipboard: String,
     history: UndoHistory<Edit>,
     run: Run,
     /// Bumped by every change to the text, so a layout knows when it is stale.
@@ -256,7 +255,6 @@ impl TextArea {
             goal_x: None,
             wrap: true,
             scroll_y: 0.0,
-            clipboard: String::new(),
             history: UndoHistory::new(UNDO_LIMIT),
             run: Run::None,
             revision: 0,
@@ -351,17 +349,25 @@ impl TextArea {
         self.goal_x = None;
     }
 
-    /// What Ctrl+C put aside, for a caller that bridges it to a clipboard
-    /// service -- there is none yet, so it is this field's own, as
-    /// [`crate::textinput::TextInput`]'s is.
+    /// What the last cut or copy -- here or in any other of the program's
+    /// fields -- put on the program's clipboard ([`crate::clipboard`]).
     #[must_use]
-    pub fn clipboard(&self) -> &str {
-        &self.clipboard
+    #[allow(
+        clippy::unused_self,
+        reason = "kept as a method for callers written when each field had a clipboard"
+    )]
+    pub fn clipboard(&self) -> String {
+        crate::clipboard::text()
     }
 
-    /// Set what Ctrl+V pastes.
+    /// Set what Ctrl+V pastes, in this field and every other of the
+    /// program's.
+    #[allow(
+        clippy::unused_self,
+        reason = "kept as a method for callers written when each field had a clipboard"
+    )]
     pub fn set_clipboard(&mut self, text: String) {
-        self.clipboard = text;
+        crate::clipboard::set_text(&text);
     }
 
     /// Whether there is anything to undo.
@@ -708,12 +714,12 @@ impl TextArea {
         self.run = Run::None;
     }
 
-    /// Copy the selection to the clipboard. Nothing selected copies nothing
-    /// and leaves the clipboard as it was.
+    /// Copy the selection to the program's clipboard. Nothing selected
+    /// copies nothing and leaves the clipboard as it was.
     pub fn copy(&mut self) {
-        let selected = self.selected_text().to_string();
+        let selected = self.selected_text();
         if !selected.is_empty() {
-            self.clipboard = selected;
+            crate::clipboard::set_text(selected);
         }
     }
 
@@ -725,12 +731,13 @@ impl TextArea {
         }
     }
 
-    /// Insert the clipboard at the caret, over the selection if there is one.
+    /// Insert the program's clipboard at the caret, over the selection if
+    /// there is one.
     pub fn paste(&mut self) {
-        if self.clipboard.is_empty() {
+        let clip = crate::clipboard::text();
+        if clip.is_empty() {
             return;
         }
-        let clip = self.clipboard.clone();
         let range = self
             .selection_range()
             .map_or(self.cursor.byte..self.cursor.byte, |(from, to)| from..to);

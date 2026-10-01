@@ -33,10 +33,13 @@
 //!
 //! # The clipboard
 //!
-//! The view does not own one: Ctrl+C and Ctrl+X hand the text to the host
-//! ([`CodeViewEvent::Copy`], [`CodeViewEvent::Cut`]) and Ctrl+V asks the host
-//! for it ([`CodeViewEvent::Paste`]), which answers with
-//! [`CodeView::paste`] -- the system clipboard is the host's to reach.
+//! The program's ([`crate::clipboard`]), which every field in the toolkit
+//! shares: Ctrl+C and Ctrl+X put the text on it and say so
+//! ([`CodeViewEvent::Copy`], [`CodeViewEvent::Cut`]), and Ctrl+V pastes from
+//! it. Until 2026-09-30 the view asked its host to paste, the host being the
+//! one with a clipboard; now text copied in a text field pastes here and the
+//! other way round, and the system's clipboard, when programs can reach it,
+//! connects behind the program's for every field at once.
 //!
 //! # Colouring the code
 //!
@@ -123,12 +126,11 @@ pub enum CodeViewEvent {
     Changed,
     /// A caret or a selection moved, or the view scrolled: draw again.
     Moved,
-    /// Put this on the clipboard (Ctrl+C).
+    /// This was copied (Ctrl+C), and is on the program's clipboard.
     Copy(String),
-    /// This was cut: put it on the clipboard (Ctrl+X). The text changed.
+    /// This was cut (Ctrl+X), and is on the program's clipboard. The text
+    /// changed.
     Cut(String),
-    /// Ctrl+V: read the clipboard and hand it to [`CodeView::paste`].
-    Paste,
 }
 
 /// One row on screen: part of a line, or all of it.
@@ -335,8 +337,9 @@ impl CodeView {
         highlighter.highlights(self.editor.buffer(), first.range.start..last.range.end)
     }
 
-    /// Paste `text` at every caret: the host's answer to
-    /// [`CodeViewEvent::Paste`].
+    /// Paste `text` at every caret -- what Ctrl+V does with the program's
+    /// clipboard, for a host pasting something else: a menu's Paste Special,
+    /// a dropped file's name.
     pub fn paste(&mut self, text: &str) {
         self.editor.paste(text);
         self.after_edit();
@@ -1128,13 +1131,29 @@ impl CodeView {
             Key::A if ctrl => Some(self.moved(CodeEditor::select_all)),
             Key::D if ctrl => Some(self.moved(CodeEditor::add_next_occurrence)),
             Key::L if ctrl => Some(self.moved(CodeEditor::select_line)),
-            Key::C if ctrl => Some(CodeViewEvent::Copy(self.editor.copy())),
+            Key::C if ctrl => {
+                let copied = self.editor.copy();
+                if !copied.is_empty() {
+                    crate::clipboard::set_text(&copied);
+                }
+                Some(CodeViewEvent::Copy(copied))
+            }
             Key::X if ctrl => {
                 let cut = self.editor.cut();
+                if !cut.is_empty() {
+                    crate::clipboard::set_text(&cut);
+                }
                 self.after_edit();
                 Some(CodeViewEvent::Cut(cut))
             }
-            Key::V if ctrl => Some(CodeViewEvent::Paste),
+            Key::V if ctrl => {
+                let clip = crate::clipboard::text();
+                if clip.is_empty() {
+                    return Some(CodeViewEvent::Moved);
+                }
+                self.paste(&clip);
+                Some(CodeViewEvent::Changed)
+            }
             Key::Z if ctrl && shift => Some(self.history(CodeEditor::redo)),
             Key::Z if ctrl => Some(self.history(CodeEditor::undo)),
             Key::Y if ctrl => Some(self.history(CodeEditor::redo)),
@@ -2374,11 +2393,20 @@ mod tests {
             Some(CodeViewEvent::Cut("abc".to_owned()))
         );
         assert_eq!(v.editor().text(), "");
+        // Ctrl+V pastes the program's clipboard, where the cut put it.
+        assert_eq!(crate::clipboard::text(), "abc");
         assert_eq!(
             v.handle_key(&key(Key::V, true, false)),
-            Some(CodeViewEvent::Paste)
+            Some(CodeViewEvent::Changed)
         );
-        v.paste("x y x");
+        assert_eq!(v.editor().text(), "abc");
+        // And text a text field copied pastes here too.
+        let mut field = crate::textinput::TextInput::new();
+        field.insert_text("x y x");
+        field.select_all();
+        field.copy();
+        v.handle_key(&key(Key::A, true, false));
+        v.handle_key(&key(Key::V, true, false));
         assert_eq!(v.editor().text(), "x y x");
         v.editor_mut().set_selections(vec![Selection::caret(0)]);
         v.handle_key(&key(Key::D, true, false));

@@ -27,8 +27,10 @@ work and gives both of them the rest.
   `view.editor().text()`.
 - Forward keys to `handle_key` and pointer events to `handle_mouse` with the
   modifiers your window holds (mouse events carry none). Draw with `draw`.
-- The clipboard is yours: `CodeViewEvent::Copy(text)` and `Cut(text)` put
-  text on it, and on `CodeViewEvent::Paste` read it and call `paste`.
+- The clipboard is the program's (`guitk::clipboard`, since 2026-09-30),
+  shared with every text field: Ctrl+C, Ctrl+X and Ctrl+V use it without
+  you, and `CodeViewEvent::Copy(text)` / `Cut(text)` say what went on it.
+  (`CodeViewEvent::Paste`, which asked you to paste, is gone.)
 - `CodeViewEvent::Changed` is the moment to mark the document modified.
 - A file with `\r\n` line endings keeps its `\r`s as text; convert on open and
   back on save if the editor offers a line-ending setting.

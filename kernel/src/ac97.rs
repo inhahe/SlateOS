@@ -462,6 +462,7 @@ pub fn init(hhdm_offset: u64) -> KernelResult<()> {
     INITIALIZED.store(true, Ordering::Release);
 
     serial_println!("[ac97] Initialization complete");
+    pci::bind_driver(dev.address, "ac97");
     Ok(())
 }
 

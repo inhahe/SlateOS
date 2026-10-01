@@ -942,6 +942,9 @@ impl XhciController {
         // Scan ports for connected devices.
         ctrl.scan_ports();
 
+        // Reset, its rings set up, its ports scanned: the controller is this
+        // driver's.
+        pci::bind_driver(pci_dev.address, "xhci");
         Ok(ctrl)
     }
 

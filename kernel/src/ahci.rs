@@ -1004,6 +1004,9 @@ pub fn init(hhdm_offset: u64) {
             mmio_write32(abar_virt + HBA_IS, u32::MAX);
         }
 
+        // The controller is in AHCI mode under this driver, disks or not.
+        crate::pci::bind_driver(ctrl.address, "ahci");
+
         // Scan each implemented port.
         for port_num in 0..MAX_PORTS as u32 {
             if pi & (1 << port_num) == 0 {

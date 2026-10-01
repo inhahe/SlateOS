@@ -1052,6 +1052,8 @@ pub fn init(hhdm_offset: u64) {
             serial_println!("[nvme]   I/O queue creation failed: {:?}", e);
             continue;
         }
+        // Initialised, identified and queued: the controller is this driver's.
+        crate::pci::bind_driver(ctrl_pci.address, "nvme");
 
         // Register as block device.
         let dev_name = format!("nvme{}n1", total_devices);

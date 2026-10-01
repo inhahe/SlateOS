@@ -72,22 +72,23 @@ use super::number::{
     SYS_PROCESS_GET_CWD, SYS_PROCESS_GET_INITIAL_FDS, SYS_PROCESS_GET_NICE, SYS_PROCESS_GET_PGID,
     SYS_PROCESS_GET_PRIORITY, SYS_PROCESS_GET_RUSAGE, SYS_PROCESS_GET_SID, SYS_PROCESS_ID,
     SYS_PROCESS_IS_READY, SYS_PROCESS_KILL, SYS_PROCESS_PARENT_ID, SYS_PROCESS_SET_CREDENTIALS,
-    SYS_PROCESS_SET_CWD, SYS_PROCESS_SET_EXEC_FDS, SYS_PROCESS_SET_NICE, SYS_PROCESS_SET_PGID,
-    SYS_PROCESS_SET_PRIORITY, SYS_PROCESS_SET_SID, SYS_PROCESS_SETGROUPS, SYS_PROCESS_SPAWN,
-    SYS_PROCESS_SPAWN_EX, SYS_PROCESS_SPAWN_EX2, SYS_PROCESS_TRY_WAIT, SYS_PROCESS_UMASK,
-    SYS_PROCESS_WAIT, SYS_PROCESS_WAIT_STATUS, SYS_PTY_CLOSE, SYS_PTY_CREATE, SYS_PTY_DUP,
-    SYS_PTY_GET_PGRP, SYS_PTY_GET_TERMIOS, SYS_PTY_GET_WINSIZE, SYS_PTY_MASTER_READ,
-    SYS_PTY_MASTER_TRY_READ, SYS_PTY_MASTER_TRY_WRITE, SYS_PTY_MASTER_WRITE, SYS_PTY_POLL,
-    SYS_PTY_READABLE_BYTES, SYS_PTY_SET_PGRP, SYS_PTY_SET_TERMIOS, SYS_PTY_SET_WINSIZE,
-    SYS_PTY_SLAVE_ID, SYS_PTY_SLAVE_READ, SYS_PTY_SLAVE_TRY_READ, SYS_PTY_SLAVE_WRITE,
-    SYS_RLIMIT_GET, SYS_RLIMIT_SET, SYS_SCHED_GET_PROFILE, SYS_SCHED_GET_TIMESLICE,
-    SYS_SCHED_RECONFIGURE, SYS_SCHED_SET_PROFILE, SYS_SCHED_SET_TIMESLICE, SYS_SECUREBOOT_ENROLL,
-    SYS_SECUREBOOT_REMOVE, SYS_SECUREBOOT_VERIFY, SYS_SEM_CLOSE, SYS_SEM_CREATE, SYS_SEM_SIGNAL,
-    SYS_SEM_TRY_WAIT, SYS_SEM_WAIT, SYS_SEM_WAIT_TIMEOUT, SYS_SERVICE_ACCEPT,
-    SYS_SERVICE_ACCEPT_TIMEOUT, SYS_SERVICE_CONNECT, SYS_SERVICE_REGISTER, SYS_SERVICE_TRY_ACCEPT,
-    SYS_SERVICE_UNREGISTER, SYS_SET_EXCEPTION_HANDLER, SYS_SET_FS_BASE, SYS_SHM_CLOSE,
-    SYS_SHM_CREATE, SYS_SHM_MAP, SYS_SHM_MAP_AT, SYS_SHM_SIZE, SYS_SHM_UNMAP, SYS_SIGNAL_ALTSTACK,
-    SYS_SIGNAL_MASK, SYS_SIGNAL_PENDING, SYS_SIGNAL_QUEUE, SYS_SIGNAL_REGISTER, SYS_SIGNAL_SEND,
+    SYS_PROCESS_SET_CWD, SYS_PROCESS_SET_EXEC_CLOSE, SYS_PROCESS_SET_EXEC_FDS,
+    SYS_PROCESS_SET_NICE, SYS_PROCESS_SET_PGID, SYS_PROCESS_SET_PRIORITY, SYS_PROCESS_SET_SID,
+    SYS_PROCESS_SETGROUPS, SYS_PROCESS_SPAWN, SYS_PROCESS_SPAWN_EX, SYS_PROCESS_SPAWN_EX2,
+    SYS_PROCESS_TRY_WAIT, SYS_PROCESS_UMASK, SYS_PROCESS_WAIT, SYS_PROCESS_WAIT_STATUS,
+    SYS_PTY_CLOSE, SYS_PTY_CREATE, SYS_PTY_DUP, SYS_PTY_GET_PGRP, SYS_PTY_GET_TERMIOS,
+    SYS_PTY_GET_WINSIZE, SYS_PTY_MASTER_READ, SYS_PTY_MASTER_TRY_READ, SYS_PTY_MASTER_TRY_WRITE,
+    SYS_PTY_MASTER_WRITE, SYS_PTY_POLL, SYS_PTY_READABLE_BYTES, SYS_PTY_SET_PGRP,
+    SYS_PTY_SET_TERMIOS, SYS_PTY_SET_WINSIZE, SYS_PTY_SLAVE_ID, SYS_PTY_SLAVE_READ,
+    SYS_PTY_SLAVE_TRY_READ, SYS_PTY_SLAVE_WRITE, SYS_RLIMIT_GET, SYS_RLIMIT_SET,
+    SYS_SCHED_GET_PROFILE, SYS_SCHED_GET_TIMESLICE, SYS_SCHED_RECONFIGURE, SYS_SCHED_SET_PROFILE,
+    SYS_SCHED_SET_TIMESLICE, SYS_SECUREBOOT_ENROLL, SYS_SECUREBOOT_REMOVE, SYS_SECUREBOOT_VERIFY,
+    SYS_SEM_CLOSE, SYS_SEM_CREATE, SYS_SEM_SIGNAL, SYS_SEM_TRY_WAIT, SYS_SEM_WAIT,
+    SYS_SEM_WAIT_TIMEOUT, SYS_SERVICE_ACCEPT, SYS_SERVICE_ACCEPT_TIMEOUT, SYS_SERVICE_CONNECT,
+    SYS_SERVICE_REGISTER, SYS_SERVICE_TRY_ACCEPT, SYS_SERVICE_UNREGISTER,
+    SYS_SET_EXCEPTION_HANDLER, SYS_SET_FS_BASE, SYS_SHM_CLOSE, SYS_SHM_CREATE, SYS_SHM_MAP,
+    SYS_SHM_MAP_AT, SYS_SHM_SIZE, SYS_SHM_UNMAP, SYS_SIGNAL_ALTSTACK, SYS_SIGNAL_MASK,
+    SYS_SIGNAL_PENDING, SYS_SIGNAL_QUEUE, SYS_SIGNAL_REGISTER, SYS_SIGNAL_SEND,
     SYS_SIGNAL_STOP_SELF, SYS_SIGNAL_TGKILL, SYS_SLEEP, SYS_SOCKETPAIR_CLOSE,
     SYS_SOCKETPAIR_CREATE, SYS_SOCKETPAIR_POLL, SYS_SOCKETPAIR_READABLE_BYTES, SYS_SOCKETPAIR_RECV,
     SYS_SOCKETPAIR_RECV_TIMEOUT, SYS_SOCKETPAIR_SEND, SYS_SOCKETPAIR_SEND_TIMEOUT,
@@ -555,6 +556,7 @@ const fn build_v1_table() -> SyscallTable {
     handlers[SYS_SIGNAL_TGKILL as usize] = Some(handlers::sys_signal_tgkill);
     handlers[SYS_PROCESS_GET_PRIORITY as usize] = Some(handlers::sys_process_get_priority);
     handlers[SYS_PROCESS_SET_PRIORITY as usize] = Some(handlers::sys_process_set_priority);
+    handlers[SYS_PROCESS_SET_EXEC_CLOSE as usize] = Some(handlers::sys_process_set_exec_close);
     handlers[SYS_SIGNAL_MASK as usize] = Some(handlers::sys_signal_mask);
     handlers[SYS_SIGNAL_PENDING as usize] = Some(handlers::sys_signal_pending);
     handlers[SYS_SIGNAL_STOP_SELF as usize] = Some(handlers::sys_signal_stop_self);
@@ -1018,6 +1020,7 @@ pub fn self_test() -> KernelResult<()> {
     test_thread_join_timeout_registered()?;
     test_dispatch_signal_siginfo_frame()?;
     test_dispatch_priority_doors()?;
+    test_dispatch_exec_close()?;
     test_dispatch_secureboot_doors()?;
     test_dispatch_ipc_possession()?;
     test_dispatch_dropping_root_is_one_way()?;
@@ -2493,6 +2496,143 @@ fn test_dispatch_priority_doors() -> KernelResult<()> {
         "[syscall]   SYS_PROCESS_GET_PRIORITY (1088), SYS_PROCESS_SET_PRIORITY (1089), \
          SYS_PROCESS_SET_NICE's raise: OK"
     );
+    Ok(())
+}
+
+/// The close-on-exec handles of a native exec
+/// (`requests/b-ad-close-on-exec-does-not-close-on-a-native-exec.md`):
+///
+/// - `SYS_PROCESS_SET_EXEC_CLOSE` (1090) is wired: an empty list is
+///   accepted, and a list it must read from user memory is read from there;
+/// - the exec takes the list less the handles a kept descriptor names;
+/// - `handlers::close_handle_at_exec` closes a pipe end the process holds
+///   as `close()` would -- the reader sees end-of-file at once -- and leaves
+///   alone a console handle, a socket, a handle already closed, and another
+///   process's pipe.
+///
+/// `exec_process` calls these once the new image is in; that path itself is
+/// a ring-3 fixture's to prove (lane B's step 5).
+fn test_dispatch_exec_close() -> KernelResult<()> {
+    use crate::ipc::pipe::{self, PipeHandle};
+    use crate::proc::pcb::{self, ProcessId};
+    use crate::proc::spawn::fd_handle_type;
+    use crate::proc::thread::self_test_as_process;
+
+    const POLL_HANGUP: u16 = 0x10;
+
+    fn fail(msg: &str, pids: &[ProcessId]) -> KernelResult<()> {
+        serial_println!("[syscall]   FAIL: exec close: {}", msg);
+        for &p in pids {
+            pcb::destroy(p);
+        }
+        Err(KernelError::InternalError)
+    }
+    let args = |arg0: u64, arg1: u64| SyscallArgs {
+        arg0,
+        arg1,
+        arg2: 0,
+        arg3: 0,
+        arg4: 0,
+        arg5: 0,
+    };
+
+    let pid = pcb::create("exec-close", 0);
+    let other = pcb::create("exec-close-other", 0);
+    let pids = [pid, other];
+
+    // Wired: an empty list clears; a real list is read from user memory,
+    // which a kernel address is not.
+    let as_pid = |nr: u64, a: SyscallArgs| self_test_as_process(pid, || dispatch(nr, &a));
+    if as_pid(SYS_PROCESS_SET_EXEC_CLOSE, args(0, 0)).value != 0 {
+        return fail("an empty list was not accepted", &pids);
+    }
+    let entry = [0u64; 2];
+    let from_kernel_memory = as_pid(SYS_PROCESS_SET_EXEC_CLOSE, args(entry.as_ptr() as u64, 1));
+    if from_kernel_memory.value != i64::from(KernelError::InvalidAddress.code()) {
+        serial_println!(
+            "[syscall]   SYS_PROCESS_SET_EXEC_CLOSE read kernel memory: {}",
+            from_kernel_memory.value
+        );
+        return fail("the list was not read from user memory", &pids);
+    }
+
+    // A pipe for each process.
+    let mine = as_pid(SYS_PIPE_CREATE, args(0, 0));
+    let theirs = self_test_as_process(other, || dispatch(SYS_PIPE_CREATE, &args(0, 0)));
+    let (Ok(read_end), Ok(write_end), Ok(their_read), Ok(their_write)) = (
+        u64::try_from(mine.value),
+        u64::try_from(mine.value2),
+        u64::try_from(theirs.value),
+        u64::try_from(theirs.value2),
+    ) else {
+        return fail("could not create the scratch pipes", &pids);
+    };
+
+    // The exec keeps the read end under fd 3 and drops the write end: the
+    // read end is filtered out of the close list, the rest stay.
+    pcb::set_exec_inherited_fds(pid, alloc::vec![(3, fd_handle_type::PIPE, read_end)]);
+    pcb::set_exec_close_handles(
+        pid,
+        alloc::vec![
+            (fd_handle_type::PIPE, write_end),
+            (fd_handle_type::PIPE, read_end),
+            (fd_handle_type::TCP_SOCKET, 5),
+            (fd_handle_type::CONSOLE, 0),
+        ],
+    );
+    let taken = pcb::take_exec_close_handles(pid);
+    let want = alloc::vec![
+        (fd_handle_type::PIPE, write_end),
+        (fd_handle_type::TCP_SOCKET, 5),
+        (fd_handle_type::CONSOLE, 0),
+    ];
+    if taken != want || !pcb::take_exec_close_handles(pid).is_empty() {
+        serial_println!("[syscall]   took {:?}, want {:?} once", taken, want);
+        return fail("the close list was not taken less the kept handle", &pids);
+    }
+
+    // Closing the write end: the reader sees end-of-file at once.
+    let close = |ty, h| handlers::close_handle_at_exec(pid, ty, h);
+    if close(fd_handle_type::PIPE, write_end) != Ok(true)
+        || pipe::poll_status(PipeHandle::from_raw(read_end)) & POLL_HANGUP == 0
+        || pcb::owns_ipc_handle(pid, crate::cap::ResourceType::Pipe, write_end)
+    {
+        return fail(
+            "the dropped write end was not closed as close() closes it",
+            &pids,
+        );
+    }
+    // Left alone: a console handle, a socket, a handle already closed, and
+    // another process's pipe.
+    if close(fd_handle_type::CONSOLE, 0) != Ok(false)
+        || close(fd_handle_type::TCP_SOCKET, 5) != Ok(false)
+        || close(fd_handle_type::PIPE, write_end) != Ok(false)
+        || close(fd_handle_type::PIPE, their_write) != Ok(false)
+        || pipe::poll_status(PipeHandle::from_raw(their_read)) & POLL_HANGUP != 0
+    {
+        return fail(
+            "a handle that is not the process's to close was touched",
+            &pids,
+        );
+    }
+
+    // Clean up the rest as their owners would.
+    let leftover_mine = handlers::close_handle_at_exec(pid, fd_handle_type::PIPE, read_end);
+    let leftover_theirs = [their_read, their_write]
+        .map(|h| handlers::close_handle_at_exec(other, fd_handle_type::PIPE, h));
+    pcb::set_exec_inherited_fds(pid, alloc::vec::Vec::new());
+    for p in pids {
+        pcb::destroy(p);
+    }
+    if leftover_mine != Ok(true) || leftover_theirs != [Ok(true), Ok(true)] {
+        serial_println!(
+            "[syscall]   FAIL: exec close: cleanup closed {:?} / {:?}",
+            leftover_mine,
+            leftover_theirs
+        );
+        return Err(KernelError::InternalError);
+    }
+    serial_println!("[syscall]   SYS_PROCESS_SET_EXEC_CLOSE (1090), close at exec: OK");
     Ok(())
 }
 

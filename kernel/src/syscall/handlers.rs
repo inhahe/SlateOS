@@ -4281,6 +4281,102 @@ pub fn sys_process_set_exec_fds(args: &SyscallArgs) -> SyscallResult {
     SyscallResult::ok(recorded as i64)
 }
 
+/// `SYS_PROCESS_SET_EXEC_CLOSE` (1090) -- name the handles the caller's next
+/// successful `exec` closes: those of the descriptors libc drops as
+/// close-on-exec, which no kept descriptor shares.
+///
+/// `arg0`: pointer to an array of [`FdMapEntry`](crate::proc::spawn::FdMapEntry)
+/// (`handle_type` and `handle` are read; `fd` is ignored). `arg1`: the count.
+/// An empty list (`arg1 == 0` or a null pointer) clears it. A handle type the
+/// kernel does not know refuses the whole list (`InvalidArgument`), so a libc
+/// that names one learns it now rather than at exec. Returns the number of
+/// entries recorded.
+///
+/// See [`Process::exec_close_handles`](crate::proc::pcb::Process::exec_close_handles)
+/// for when the handles are closed, and [`close_handle_at_exec`] for how.
+pub fn sys_process_set_exec_close(args: &SyscallArgs) -> SyscallResult {
+    use crate::proc::pcb;
+    use crate::proc::spawn::{FdMapEntry, fd_handle_type};
+
+    let Some(pid) = caller_pid() else {
+        return SyscallResult::ok(0); // Kernel task: nothing to exec.
+    };
+    if args.arg1 == 0 || args.arg0 == 0 {
+        pcb::set_exec_close_handles(pid, alloc::vec::Vec::new());
+        return SyscallResult::ok(0);
+    }
+    let count = usize::try_from(args.arg1).unwrap_or(usize::MAX);
+    let entries = match crate::mm::user::read_user_items::<FdMapEntry>(args.arg0, count, FD_MAP_MAX)
+    {
+        Ok(entries) => entries,
+        Err(e) => return SyscallResult::err(e),
+    };
+    let mut handles = alloc::vec::Vec::with_capacity(entries.len());
+    for entry in &entries {
+        if entry.handle_type > fd_handle_type::PTY {
+            return SyscallResult::err(KernelError::InvalidArgument);
+        }
+        handles.push((entry.handle_type, entry.handle));
+    }
+    let recorded = handles.len();
+    pcb::set_exec_close_handles(pid, handles);
+    #[allow(clippy::cast_possible_wrap)]
+    SyscallResult::ok(recorded as i64)
+}
+
+/// Close one of process `pid`'s handles for its successful `exec`, as
+/// `close()` would close it: deregistered from the process, then released
+/// through its type's close path, so the last writer of a pipe gives its
+/// reader end-of-file and the last close of a pty master hangs the slave up.
+///
+/// `Ok(true)` when the handle was closed. `Ok(false)` when it was left open:
+/// - a console handle, which has nothing to release;
+/// - a handle the process does not hold, so the list cannot reach anyone
+///   else's;
+/// - a TCP or UDP socket. Those are not counted per process: a fork shares
+///   one rather than duplicating it, so closing it here would close it for
+///   every holder. It stays open, as it did before this existed.
+///
+/// `Err` is the close's own failure.
+///
+/// # Errors
+///
+/// What `fs::handle::close` answers for a file handle it cannot close.
+pub(crate) fn close_handle_at_exec(
+    pid: crate::proc::pcb::ProcessId,
+    handle_type: u8,
+    handle: u64,
+) -> KernelResult<bool> {
+    use crate::proc::pcb;
+    use crate::proc::spawn::fd_handle_type;
+
+    let resource = match handle_type {
+        fd_handle_type::FILE => ResourceType::File,
+        fd_handle_type::PIPE => ResourceType::Pipe,
+        fd_handle_type::EVENTFD => ResourceType::EventFd,
+        fd_handle_type::STREAM_SOCKET => ResourceType::StreamSocket,
+        fd_handle_type::PTY => ResourceType::Pty,
+        // CONSOLE, TCP_SOCKET, UDP_SOCKET: see above.
+        _ => return Ok(false),
+    };
+    if !pcb::owns_ipc_handle(pid, resource, handle) {
+        return Ok(false);
+    }
+    match handle_type {
+        fd_handle_type::FILE => {
+            crate::fs::handle::close(handle)?;
+        }
+        fd_handle_type::PIPE => pipe::close(PipeHandle::from_raw(handle)),
+        fd_handle_type::EVENTFD => eventfd::close(EventFdHandle::from_raw(handle)),
+        fd_handle_type::STREAM_SOCKET => {
+            stream_socket::close(StreamSocketHandle::from_raw(handle));
+        }
+        _ => close_pty_handle(crate::tty::pty::PtyHandle::from_raw(handle)),
+    }
+    pcb::deregister_ipc_handle(pid, resource, handle);
+    Ok(true)
+}
+
 /// `SYS_PROCESS_GET_ARGS` — retrieve initial argv/envp.
 ///
 /// Called by the child during startup to read argv and envp data

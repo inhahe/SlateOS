@@ -2043,6 +2043,33 @@ fn spawn_process_inner(
 /// `TASK_COMM_LEN - 1`).  The full field is 16 bytes including the NUL.
 const COMM_MAX_VISIBLE: usize = 15;
 
+/// Close the handles of process `pid`'s dropped close-on-exec descriptors
+/// (`exec_process` step 5b), each as `close()` would. A failure is
+/// reported and the rest still closed: the exec has already happened.
+fn close_handles_at_exec(pid: ProcessId, handles: &[(u8, u64)]) {
+    let mut closed = 0usize;
+    for &(handle_type, handle) in handles {
+        match crate::syscall::handlers::close_handle_at_exec(pid, handle_type, handle) {
+            Ok(true) => closed = closed.saturating_add(1),
+            Ok(false) => {}
+            Err(e) => serial_println!(
+                "[exec] WARNING: close-on-exec of type {} handle {:#x} on process {} failed: {:?}",
+                handle_type,
+                handle,
+                pid,
+                e
+            ),
+        }
+    }
+    if closed > 0 {
+        serial_println!(
+            "[exec] Closed {} close-on-exec handle(s) on process {}",
+            closed,
+            pid
+        );
+    }
+}
+
 /// Compute the `comm` basename for a new exec image the way Linux's
 /// `kbasename()` does: the path component after the final `/`, truncated
 /// to `TASK_COMM_LEN - 1` (15) bytes.
@@ -2071,7 +2098,11 @@ fn exec_comm_basename(src: &[u8]) -> &[u8] {
 ///    mapped frames and intermediate page table pages).
 /// 3. Loads the new ELF segments into the clean address space.
 /// 4. Allocates and maps a fresh user stack.
-/// 5. Returns [`ExecResult`] with the new entry point and stack pointer.
+/// 5. Closes the handles of the old native image's close-on-exec
+///    descriptors, which libc named beforehand (`SYS_PROCESS_SET_EXEC_CLOSE`;
+///    a Linux image's are closed from its kernel fd table). Any return before
+///    this point leaves them open, as POSIX requires of a failed exec.
+/// 6. Returns [`ExecResult`] with the new entry point and stack pointer.
 ///
 /// ## What It Does NOT Do
 ///
@@ -2123,6 +2154,11 @@ pub fn exec_process(
 ) -> KernelResult<ExecResult> {
     // Start of the span recorded into binfmt on success below.
     let elf_load_start_ns = crate::hrtimer::now_ns();
+    // The close-on-exec handles libc named for this attempt
+    // (`SYS_PROCESS_SET_EXEC_CLOSE`), taken now so that every attempt
+    // consumes them: closed below once the new image is in, dropped -- left
+    // open, as POSIX requires -- by any return before that.
+    let close_at_exec = pcb::take_exec_close_handles(pid);
     // Step 1: Parse and validate the ELF binary BEFORE tearing down
     // the old address space.  If the ELF is bad, the process keeps
     // running its old code.
@@ -2458,6 +2494,16 @@ pub fn exec_process(
         // design (design-decision #4), so drop any auxv carried over
         // from a previous Linux-ABI image.
         pcb::clear_linux_saved_auxv(pid);
+    }
+
+    // Step 5b: the old native image's close-on-exec descriptors.  Their
+    // fd table lived in userspace and is gone with the image; libc named
+    // their handles before this call, and this is past the point of no
+    // return, so they are closed now, as close() would close them -- a
+    // pipe's reader sees end-of-file now, not when the new program exits.
+    // A Linux image's were closed from its own fd table above.
+    if old_abi_mode != Some(pcb::AbiMode::Linux) {
+        close_handles_at_exec(pid, &close_at_exec);
     }
 
     // Step 6: Store argv/envp in the PCB for the new process image.

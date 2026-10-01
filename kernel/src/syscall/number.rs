@@ -1762,7 +1762,9 @@ pub const SYS_PROCESS_GET_INITIAL_FDS: u64 = 518;
 ///
 /// The recorded handles merely *alias* handles the process already owns
 /// (`ipc_handles`), which survive exec — they are not duplicated and are
-/// never closed by the kernel on this path.
+/// never closed by the kernel on this path.  The handles of the descriptors
+/// it does *not* keep, the close-on-exec ones, go to
+/// [`SYS_PROCESS_SET_EXEC_CLOSE`], which closes them at a successful exec.
 ///
 /// `arg0`: pointer to an array of `FdMapEntry`.
 /// `arg1`: entry count.
@@ -5759,6 +5761,38 @@ pub const SYS_PROCESS_GET_PRIORITY: u64 = 1088;
 /// fold: `NoSuchProcess` when nothing is named, else the last refusal, else 0.
 /// Chosen number 1089, next free slot after 1088.
 pub const SYS_PROCESS_SET_PRIORITY: u64 = 1089;
+
+// ---------------------------------------------------------------------------
+// Closing close-on-exec descriptors at a native exec (1090)
+// ---------------------------------------------------------------------------
+
+/// Name the handles the caller's next successful `exec` closes:
+/// `process_set_exec_close(entries_ptr, count) -> count`.
+///
+/// A native process's descriptor table is libc's, in userspace. Before
+/// `exec` libc hands the kernel the descriptors to *keep*
+/// ([`SYS_PROCESS_SET_EXEC_FDS`]). This is the other half: the handles of the
+/// descriptors it drops as close-on-exec and no kept descriptor shares. The
+/// kernel closes them once the new image is in, past the point of no return,
+/// each as `close()` would. So a close-on-exec pipe's reader sees end-of-file
+/// when the exec happens, not when the new program exits -- which is what
+/// `std::process::Command`'s fork path waits for, and what made it, the
+/// GUI terminal's first spawn and an sshd session hang until the child
+/// exited (`requests/b-ad-close-on-exec-does-not-close-on-a-native-exec.md`).
+///
+/// - `entries_ptr` points at `FdMapEntry`s, as `SYS_PROCESS_SET_EXEC_FDS`
+///   takes them. `handle_type` and `handle` are read; `fd` is ignored.
+/// - An empty list clears it. A handle type the kernel does not know refuses
+///   the whole list (`InvalidArgument`).
+/// - Every exec attempt takes the list. A failed one leaves the handles open,
+///   as POSIX requires, and drops the list, so send it before each attempt.
+/// - A handle the caller does not hold, a console handle, and a TCP or UDP
+///   socket are left open. Sockets are shared rather than counted across a
+///   fork, so closing one would close it for every holder.
+/// - A handle also named by a kept descriptor is not closed.
+///
+/// Chosen number 1090, next free slot after 1089.
+pub const SYS_PROCESS_SET_EXEC_CLOSE: u64 = 1090;
 
 // ---------------------------------------------------------------------------
 // Version info

@@ -180102,6 +180102,40 @@ was not given the same number.
   nothing. Fix: one `owner_process` resolution in the generators' common
   path.
 
+### A-TCP-AND-UDP-SOCKETS-ARE-NOT-COUNTED-PER-PROCESS -- 2026-10-01 -- OPEN (lane A)
+
+**In short:** a TCP or UDP socket here belongs to nobody in particular.
+Fork does not give the child its own reference (`proc::fork` treats
+`ResourceType::Socket` as a permission token, not a per-open object), and
+no process records which sockets it holds. So a socket cannot be closed for
+one process alone. Closing it closes it for every process that uses it, and
+a process that dies leaves its sockets open unless it closed them itself.
+
+**Who it bites:**
+- **Close-on-exec.** `SYS_PROCESS_SET_EXEC_CLOSE` (1090) closes a dropped
+  descriptor's handle at exec for every other type, but must leave sockets
+  open, or a child's exec would close the parent's connection. A
+  close-on-exec socket therefore lives in the child until the child exits.
+- **Exit.** A program that is killed holding connections leaves them open,
+  with nothing to time them out but the peer.
+- **Possession.** Any process with the `Socket` capability can name and use
+  any socket by its number (`sys_tcp_close` checks the capability type, not
+  possession) -- the hole channels had before 2026-10-01.
+
+**The proper fix:** do for sockets what was done for pipes:
+- register each TCP/UDP handle in the opener's `ipc_handles` (a resource
+  type of its own, not the `Socket` capability);
+- check possession in every socket syscall;
+- give fork a counted duplicate, with `close` dropping one reference and
+  the last one closing the connection;
+- release a dead process's sockets.
+
+Then `close_handle_at_exec` can take them like the others.
+
+**Reproduce.** Two processes with the `Socket` capability: one opens a TCP
+connection; the other calls `SYS_TCP_CLOSE` with that number, and the first
+process's connection is gone.
+
 ## Lane B: new entries
 
 Lane B (userland) appends new entries at the end of this section, above the

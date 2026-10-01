@@ -488,6 +488,20 @@ pub struct Process {
     /// `ipc_handles`, and the userspace `close()`/exit path releases each
     /// handle exactly once.  Consumed one-shot by the post-exec startup.
     pub exec_inherited_fds: Vec<(i32, u8, u64)>,
+    /// Handles to close when this process's next `exec` succeeds: those of
+    /// the descriptors libc drops as close-on-exec, as `(fd_handle_type,
+    /// handle)` (`SYS_PROCESS_SET_EXEC_CLOSE`). Without it, a dropped
+    /// descriptor's handle stayed open, unnamed, until the process exited,
+    /// so a close-on-exec pipe's reader saw no end-of-file for the life of
+    /// the new program
+    /// (`requests/b-ad-close-on-exec-does-not-close-on-a-native-exec.md`).
+    ///
+    /// Every exec attempt takes it ([`take_exec_close_handles`]): a
+    /// successful one closes the handles and a failed one drops the list,
+    /// leaving them open as POSIX requires. So a stale list can never reach
+    /// a later exec, and libc sends it before each attempt, with the
+    /// kept-descriptor list.
+    pub exec_close_handles: Vec<(u8, u64)>,
     /// Initial command-line arguments for the child process.
     ///
     /// Each element is one argument as a byte string (NOT null-terminated
@@ -1357,6 +1371,7 @@ impl Process {
             crash_info: None,
             initial_fds: Vec::new(),
             exec_inherited_fds: Vec::new(),
+            exec_close_handles: Vec::new(),
             initial_argv: Vec::new(),
             initial_envp: Vec::new(),
             // Persistent /proc snapshots — populated by set_initial_args
@@ -1818,6 +1833,7 @@ pub fn fork_create(
         // A fresh fork carries no pending exec fd-table snapshot; it is
         // populated only when this process later calls execve.
         exec_inherited_fds: Vec::new(),
+        exec_close_handles: Vec::new(),
         // argv/envp are not re-read by a forked child — its argument
         // vector already lives in its copy-on-write userspace memory.
         initial_argv: Vec::new(),
@@ -6722,6 +6738,35 @@ pub fn set_exec_inherited_fds(pid: ProcessId, fds: Vec<(i32, u8, u64)>) {
     if let Some(proc) = table.get_mut(&pid) {
         proc.exec_inherited_fds = fds;
     }
+}
+
+/// Record the handles process `pid`'s next successful `exec` closes
+/// ([`Process::exec_close_handles`]); an empty list clears it.
+pub fn set_exec_close_handles(pid: ProcessId, handles: Vec<(u8, u64)>) {
+    let mut table = PROCESS_TABLE.lock();
+    if let Some(proc) = table.get_mut(&pid) {
+        proc.exec_close_handles = handles;
+    }
+}
+
+/// Take the close-on-exec handle list, for an exec attempt that is starting
+/// -- less any handle the exec also keeps under a descriptor
+/// ([`Process::exec_inherited_fds`]). A handle that is both dropped and kept
+/// is still in use, and closing it would close the kept descriptor's file.
+/// Taken under one lock, so the two lists are compared as they stand.
+pub fn take_exec_close_handles(pid: ProcessId) -> Vec<(u8, u64)> {
+    let mut table = PROCESS_TABLE.lock();
+    let Some(proc) = table.get_mut(&pid) else {
+        return Vec::new();
+    };
+    let mut handles = core::mem::take(&mut proc.exec_close_handles);
+    handles.retain(|&(ty, h)| {
+        !proc
+            .exec_inherited_fds
+            .iter()
+            .any(|&(_, kept_ty, kept_h)| kept_ty == ty && kept_h == h)
+    });
+    handles
 }
 
 /// Take (move out) the exec-carried fd snapshot from a process's PCB.

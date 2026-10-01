@@ -4125,12 +4125,16 @@ fn copy_back(edit: &EditFile, caller: Caller, spent: bool) -> Result<(), String>
     };
     // Upstream's `sudo_check_temp_file`, word for word in its warnings.
     if !meta.is_file() {
-        eprintln!("sudoedit: {temp_shown}: not a regular file");
+        eprintln!(
+            "sudoedit: {}: not a regular file",
+            quoteaf_os(edit.temp.as_os_str())
+        );
         return Err(unmodified);
     }
     if meta.mode() & 0o7777 != 0o600 {
         eprintln!(
-            "sudoedit: {temp_shown}: bad file mode: 0{:o}",
+            "sudoedit: {}: bad file mode: 0{:o}",
+            quoteaf_os(edit.temp.as_os_str()),
             meta.mode() & 0o7777
         );
         return Err(unmodified);
@@ -4346,7 +4350,11 @@ fn edit_sudoers(path: &Path, strict: bool, editor: &[OsString]) -> i32 {
     {
         Ok(file) => file,
         Err(e) => {
-            eprintln!("visudo: {shown}: {}", errmsg::strerror(&e));
+            eprintln!(
+                "visudo: {}: {}",
+                quoteaf_os(path.as_os_str()),
+                errmsg::strerror(&e)
+            );
             return 1;
         }
     };
@@ -4377,7 +4385,11 @@ fn edit_sudoers(path: &Path, strict: bool, editor: &[OsString]) -> i32 {
     {
         Ok(meta) => meta,
         Err(e) => {
-            eprintln!("visudo: {shown}: {}", errmsg::strerror(&e));
+            eprintln!(
+                "visudo: {}: {}",
+                quoteaf_os(path.as_os_str()),
+                errmsg::strerror(&e)
+            );
             return 1;
         }
     };
@@ -4407,7 +4419,11 @@ fn edit_sudoers(path: &Path, strict: bool, editor: &[OsString]) -> i32 {
                 Ok(())
             });
         if let Err(e) = made {
-            eprintln!("visudo: {temp_shown}: {}", errmsg::strerror(&e));
+            eprintln!(
+                "visudo: {}: {}",
+                quoteaf_os(temp.as_os_str()),
+                errmsg::strerror(&e)
+            );
             return discard(1);
         }
     }
@@ -4456,7 +4472,11 @@ fn edit_sudoers(path: &Path, strict: bool, editor: &[OsString]) -> i32 {
         let text = match fs::read_to_string(&temp) {
             Ok(text) => text,
             Err(e) => {
-                eprintln!("visudo: {temp_shown}: {}", errmsg::strerror(&e));
+                eprintln!(
+                    "visudo: {}: {}",
+                    quoteaf_os(temp.as_os_str()),
+                    errmsg::strerror(&e)
+                );
                 return discard(1);
             }
         };
@@ -4464,7 +4484,7 @@ fn edit_sudoers(path: &Path, strict: bool, editor: &[OsString]) -> i32 {
         let fatal: Vec<&SyntaxError> = errors.iter().filter(|e| !e.is_warning).collect();
         if !fatal.is_empty() {
             for err in &fatal {
-                eprintln!("visudo: {temp_shown}: {err}");
+                eprintln!("visudo: {}: {err}", quoteaf_os(temp.as_os_str()));
             }
             match ask_what_now() {
                 WhatNow::Edit => continue,

@@ -767,6 +767,12 @@ pub mod oflags {
     pub const O_DIRECTORY: u32 = 0o200_000;
     pub const O_NOFOLLOW: u32 = 0o400_000;
     pub const O_CLOEXEC: u32 = 0o2_000_000;
+    /// `__O_TMPFILE`, the bit that alone means nothing: `O_TMPFILE` is it
+    /// together with `O_DIRECTORY`, so a kernel that ignores the bit still
+    /// refuses an open of a directory for writing.
+    pub const O_TMPFILE_BIT: u32 = 0o20_000_000;
+    /// `O_TMPFILE`: a file with no name, in the directory the path names.
+    pub const O_TMPFILE: u32 = O_TMPFILE_BIT | O_DIRECTORY;
 }
 
 /// Linux `fcntl` command numbers (subset).
@@ -1428,6 +1434,7 @@ pub const fn linux_errno_for(e: KernelError) -> i32 {
         KernelError::BrokenPipe => errno::EPIPE,
         KernelError::AddrInUse => errno::EADDRINUSE,
         KernelError::MsgSize => errno::EMSGSIZE,
+        KernelError::NoAddress => errno::ENODATA,
     }
 }
 
@@ -3138,8 +3145,17 @@ fn linux_execveat(frame: &mut crate::syscall::entry::SyscallFrame) -> i64 {
         if entry.kind != HandleKind::File {
             return -i64::from(errno::EACCES);
         }
+        // The name the descriptor was opened under, checked to name its file
+        // still (`handle_path`): exec loads by name. That name is the host
+        // path captured at open, and the loader applies the caller's
+        // namespace to what it is given, so it goes back to the caller's
+        // view first. A jailed caller's `fexecve` applied its jail twice
+        // until 2026-10-01.
         match crate::fs::handle::handle_path(entry.raw_handle) {
-            Ok(p) => p,
+            Ok(p) => match caller_pid() {
+                Some(pid) => crate::ipc::namespace::unjail_path_for(pid, &p),
+                None => p,
+            },
             Err(e) => return -i64::from(linux_errno_for(e)),
         }
     } else {
@@ -5556,6 +5572,48 @@ fn sys_lseek(args: &SyscallArgs) -> SyscallResult {
 }
 
 /// Translate Linux `O_*` flag bits to the kernel's `OpenFlags`.
+/// The mode a Linux create asks for, as the new file will have it: the twelve
+/// permission bits of `mode`, less the caller's umask (`umask(2)`;
+/// `pcb::get_umask`). A kernel caller has none and gets 022, Linux's default.
+///
+/// Until 2026-10-01 the Linux `open`, `openat`, `openat2`, `creat`, `mkdir`
+/// and `mkdirat` dropped `mode` and the umask both, so every file was made
+/// 0644 and every directory 0755: a key a program created 0600 was readable
+/// by everyone.
+fn linux_create_mode(mode: u64) -> u16 {
+    let umask = caller_pid().and_then(pcb::get_umask).unwrap_or(0o022);
+    u16::try_from(mode & 0o7777).unwrap_or(0) & !umask
+}
+
+/// What `O_TMPFILE` asks, checked as Linux's `build_open_flags` checks it.
+///
+/// `Ok(None)` without it. `Ok(Some(native flags))` with it: the access mode,
+/// `O_APPEND`, and `O_EXCL` (the file may never be given a name), for
+/// `fs::handle::open_tmpfile`. `EINVAL` for `__O_TMPFILE` without
+/// `O_DIRECTORY`, with `O_CREAT`, or without write access.
+fn linux_tmpfile_flags(flags: u32) -> Result<Option<u32>, i32> {
+    use crate::fs::handle::OpenFlags;
+    if flags & oflags::O_TMPFILE_BIT == 0 {
+        return Ok(None);
+    }
+    if flags & (oflags::O_TMPFILE | oflags::O_CREAT) != oflags::O_TMPFILE {
+        return Err(errno::EINVAL);
+    }
+    let access = flags & oflags::O_ACCMODE;
+    let mut bits = match access {
+        oflags::O_WRONLY => OpenFlags::WRITE.bits(),
+        oflags::O_RDWR => OpenFlags::READ.bits() | OpenFlags::WRITE.bits(),
+        _ => return Err(errno::EINVAL),
+    };
+    if flags & oflags::O_APPEND != 0 {
+        bits |= OpenFlags::APPEND.bits();
+    }
+    if flags & oflags::O_EXCL != 0 {
+        bits |= OpenFlags::EXCL.bits();
+    }
+    Ok(Some(bits))
+}
+
 fn translate_open_flags(linux_flags: u32) -> u32 {
     use crate::fs::handle::OpenFlags;
     let access = linux_flags & oflags::O_ACCMODE;
@@ -5577,6 +5635,11 @@ fn translate_open_flags(linux_flags: u32) -> u32 {
     }
     if linux_flags & oflags::O_DIRECTORY != 0 {
         bits |= OpenFlags::DIRECTORY.bits();
+    } else if access == oflags::O_RDONLY && linux_flags & (oflags::O_CREAT | oflags::O_TRUNC) == 0 {
+        // A read-only open of a directory without O_DIRECTORY opens it, as
+        // on Linux: `open(".", O_RDONLY)`, SQLite opening a directory to
+        // fsync it. It was EISDIR until 2026-10-01.
+        bits |= OpenFlags::DIRECTORY_ALLOWED.bits();
     }
     // O_EXCL (with O_CREAT) demands exclusive creation; O_NOFOLLOW refuses to
     // open a final-component symlink. Both are enforced in `fs::handle::open`,
@@ -5820,48 +5883,32 @@ fn try_open_evdev(path: &[u8], flags: u32) -> Option<SyscallResult> {
     }
 }
 
-/// Shared backend for `open` / `openat`.
-fn open_common(path_ptr: u64, path_len_hint: u64, flags: u32, no_symlinks: bool) -> SyscallResult {
+/// Shared backend for `open` / `openat` / `creat`. `mode` is the Linux
+/// `mode` argument, applied (less the umask) when the open creates the file.
+fn open_common(
+    path_ptr: u64,
+    path_len_hint: u64,
+    flags: u32,
+    mode: u64,
+    no_symlinks: bool,
+) -> SyscallResult {
     if path_ptr == 0 {
         return linux_err(errno::EFAULT);
     }
 
-    // Linux paths are NUL-terminated.  Scan up to a sane cap (matching
-    // sys_fs_open's internal 256-byte cap) to locate the terminator
-    // without trusting the caller-provided length.  We validate one
-    // page at a time to keep SMAP windows tight.
-    const MAX_PATH: usize = 256;
-    let mut tmp = [0u8; MAX_PATH];
-    let mut len = 0usize;
-    while len < MAX_PATH {
-        // SAFETY: copy_from_user validates each one-byte read.
-        let r = unsafe {
-            crate::mm::user::copy_from_user(
-                path_ptr.wrapping_add(len as u64),
-                tmp.as_mut_ptr().wrapping_add(len),
-                1,
-            )
-        };
-        if let Err(e) = r {
-            return linux_err(linux_errno_for(e));
-        }
-        if tmp[len] == 0 {
-            break;
-        }
-        len += 1;
-    }
-    if len == 0 || len >= MAX_PATH {
-        // Empty path or no terminator within MAX_PATH.
-        return linux_err(if len == 0 {
-            errno::ENOENT
-        } else {
-            errno::ENAMETOOLONG
-        });
+    // Linux paths are NUL-terminated, at most PATH_MAX (4096) bytes with the
+    // NUL. This read at most 255 until 2026-10-01 and answered ENAMETOOLONG
+    // past that, where Linux opens: a deep build tree's paths run past 255.
+    let tmp = match read_user_cstr(path_ptr, 4095) {
+        Ok(b) => b,
+        Err(e) => return linux_err(e),
+    };
+    let len = tmp.len();
+    if len == 0 {
+        return linux_err(errno::ENOENT);
     }
     // Synthetic device nodes (e.g. /dev/snd/pcmC0D0p) are intercepted before
     // the VFS open so they mint their own HandleKind instead of a File fd.
-    // `len < MAX_PATH` is guaranteed by the loop bound above, so `get(..len)`
-    // always yields the path slice; the fallback is unreachable.
     if let Some(path_slice) = tmp.get(..len) {
         if let Some(r) = try_open_alsa_pcm(path_slice, flags) {
             return r;
@@ -5910,12 +5957,34 @@ fn open_common(path_ptr: u64, path_len_hint: u64, flags: u32, no_symlinks: bool)
     // name.  Linux's `getname()` copies bytes and validates nothing either.
     let canon_path = Path::new(canon.as_slice());
 
-    let mut kernel_flags = translate_open_flags(flags);
     // openat2 RESOLVE_NO_SYMLINKS: enforce no-symlink resolution in the VFS.
-    if no_symlinks {
-        kernel_flags |= crate::fs::handle::OpenFlags::NO_SYMLINKS.bits();
-    }
-    let r = handlers::fs_open_kernel_path(canon_path, kernel_flags);
+    let no_symlinks_bit = if no_symlinks {
+        crate::fs::handle::OpenFlags::NO_SYMLINKS.bits()
+    } else {
+        0
+    };
+    let r = match linux_tmpfile_flags(flags) {
+        Err(e) => return linux_err(e),
+        // O_TMPFILE: a file with no name, in the directory the path names.
+        // EOPNOTSUPP where one cannot be kept, as Linux answers: glibc's
+        // `tmpfile` falls back on it.
+        Ok(Some(file_flags)) => {
+            let r = handlers::fs_open_tmpfile_kernel_path(
+                canon_path,
+                file_flags | no_symlinks_bit,
+                linux_create_mode(mode),
+            );
+            if r.value == SyscallResult::err(KernelError::NotSupported).value {
+                return linux_err(errno::EOPNOTSUPP);
+            }
+            r
+        }
+        Ok(None) => handlers::fs_open_kernel_path_mode(
+            canon_path,
+            translate_open_flags(flags) | no_symlinks_bit,
+            linux_create_mode(mode),
+        ),
+    };
     if r.value < 0 {
         return linux_from_native(r);
     }
@@ -5972,7 +6041,7 @@ fn open_common(path_ptr: u64, path_len_hint: u64, flags: u32, no_symlinks: bool)
 
 /// `open(path, flags, mode)` — equivalent to `openat(AT_FDCWD, path, flags, mode)`.
 fn sys_open(args: &SyscallArgs) -> SyscallResult {
-    open_common(args.arg0, 0, args.arg1 as u32, false)
+    open_common(args.arg0, 0, args.arg1 as u32, args.arg2, false)
 }
 
 /// Resolve a real (non-`AT_FDCWD`) directory `dirfd` to its **guest**
@@ -5995,6 +6064,11 @@ fn sys_open(args: &SyscallArgs) -> SyscallResult {
 fn dirfd_to_guest_dir(dirfd: i32) -> Result<crate::fs::path::PathBuf, SyscallResult> {
     let entry = lookup_caller_fd(dirfd)?;
     if entry.kind != HandleKind::File {
+        return Err(linux_err(errno::ENOTDIR));
+    }
+    // A descriptor of a file is no directory, whatever its name names now:
+    // `ENOTDIR` before the name is looked at.
+    if !crate::fs::handle::is_directory(entry.raw_handle) {
         return Err(linux_err(errno::ENOTDIR));
     }
     let host_path = match crate::fs::handle::handle_path(entry.raw_handle) {
@@ -6046,9 +6120,10 @@ fn sys_openat_ex(args: &SyscallArgs, no_symlinks: bool) -> SyscallResult {
     let dirfd = args.arg0 as i32;
     let path_ptr = args.arg1;
     let flags = args.arg2 as u32;
+    let mode = args.arg3;
 
     if dirfd == AT_FDCWD {
-        return open_common(path_ptr, 0, flags, no_symlinks);
+        return open_common(path_ptr, 0, flags, mode, no_symlinks);
     }
 
     // Peek at the first byte of the path: if it's '/', dirfd is ignored
@@ -6063,7 +6138,7 @@ fn sys_openat_ex(args: &SyscallArgs, no_symlinks: bool) -> SyscallResult {
     }
     if first == b'/' {
         // Absolute path — dirfd is ignored.
-        return open_common(path_ptr, 0, flags, no_symlinks);
+        return open_common(path_ptr, 0, flags, mode, no_symlinks);
     }
     if first == 0 {
         // Empty path under openat.  Linux's "empty path" semantics
@@ -6106,12 +6181,10 @@ fn sys_openat_ex(args: &SyscallArgs, no_symlinks: bool) -> SyscallResult {
     if combined.len() > 4095 {
         return linux_err(errno::ENAMETOOLONG);
     }
-    let path_str = match core::str::from_utf8(&combined) {
-        Ok(s) => s,
-        Err(_) => return linux_err(errno::EINVAL),
-    };
-
-    open_kernel_path_install(path_str, flags, no_symlinks, None)
+    // Bytes, not UTF-8: a name may hold any byte but `/` and NUL. This
+    // answered EINVAL for a non-UTF-8 path until 2026-10-01, so such a file
+    // could not be opened relative to a directory descriptor.
+    open_kernel_path_install(Path::new(&combined), flags, mode, no_symlinks, None)
 }
 
 /// Shared installer for "open by kernel-side absolute path".
@@ -6123,8 +6196,9 @@ fn sys_openat_ex(args: &SyscallArgs, no_symlinks: bool) -> SyscallResult {
 /// plus the FdEntry install that `open_common` does — so the resulting
 /// fd is indistinguishable from one minted by plain `open()`.
 fn open_kernel_path_install(
-    path: &str,
+    path: &Path,
     flags: u32,
+    mode: u64,
     no_symlinks: bool,
     beneath: Option<crate::fs::handle::Beneath<'_>>,
 ) -> SyscallResult {
@@ -6149,7 +6223,18 @@ fn open_kernel_path_install(
         return linux_err(linux_errno_for(e));
     }
 
-    let mut kernel_bits = translate_open_flags(flags);
+    let tmpfile = match linux_tmpfile_flags(flags) {
+        Ok(t) => t,
+        Err(e) => return linux_err(e),
+    };
+    // Making a file with no name asks for File WRITE, as every create does.
+    if tmpfile.is_some()
+        && let Err(e) =
+            handlers::require_cap_type(crate::cap::ResourceType::File, crate::cap::Rights::WRITE)
+    {
+        return linux_err(linux_errno_for(e));
+    }
+    let mut kernel_bits = tmpfile.unwrap_or_else(|| translate_open_flags(flags));
     // openat2 RESOLVE_NO_SYMLINKS: enforce no-symlink resolution in the VFS.
     if no_symlinks {
         kernel_bits |= crate::fs::handle::OpenFlags::NO_SYMLINKS.bits();
@@ -6160,12 +6245,21 @@ fn open_kernel_path_install(
     // identical, which is deliberate.  Lane B's request came from the two
     // implementations of openat2 drifting apart; a second install path here
     // would be the same mistake one layer down.
-    let opened = match beneath {
-        Some(b) => crate::fs::handle::open_beneath(b, kernel_flags),
-        None => crate::fs::handle::open(path, kernel_flags),
+    let create_mode = linux_create_mode(mode);
+    let opened = match (beneath, tmpfile.is_some()) {
+        (Some(b), false) => crate::fs::handle::open_beneath_with_mode(b, kernel_flags, create_mode),
+        (None, false) => crate::fs::handle::open_with_mode(path, kernel_flags, create_mode),
+        // O_TMPFILE: a file with no name, in the directory the path names.
+        (Some(b), true) => crate::fs::handle::open_tmpfile_beneath(b, kernel_flags, create_mode),
+        (None, true) => crate::fs::handle::open_tmpfile(path, kernel_flags, create_mode),
     };
     let raw_handle = match opened {
         Ok(h) => h,
+        // A filesystem that cannot keep a file with no name: EOPNOTSUPP, as
+        // Linux answers, which glibc's `tmpfile` falls back on.
+        Err(KernelError::NotSupported) if tmpfile.is_some() => {
+            return linux_err(errno::EOPNOTSUPP);
+        }
         Err(e) => return linux_err(linux_errno_for(e)),
     };
 
@@ -18729,17 +18823,17 @@ fn sys_fstatfs(args: &SyscallArgs) -> SyscallResult {
     // defaults are the honest answer there.
     let filled = if let Some(entry) = entry {
         if entry.kind == crate::proc::linux_fd::HandleKind::File {
-            match crate::fs::handle::handle_path(entry.raw_handle) {
-                Ok(path) => match crate::fs::Vfs::statvfs(&path) {
-                    Ok(info) => {
-                        fill_statfs_from_info(&mut buf, &info);
-                        true
-                    }
-                    Err(KernelError::NotFound) => return linux_err(errno::ENOENT),
-                    Err(e) => return linux_err(linux_errno_for(e)),
-                },
-                // Handle no longer resolvable — fall back to defaults.
-                Err(_) => false,
+            // The filesystem of the file the descriptor holds, whatever its
+            // name now (`fs::handle::HandleFile`).
+            match crate::fs::handle::HandleFile::of(entry.raw_handle).and_then(|f| f.statvfs()) {
+                Ok(info) => {
+                    fill_statfs_from_info(&mut buf, &info);
+                    true
+                }
+                // A descriptor closed in a race: the defaults.
+                Err(KernelError::InvalidHandle) => false,
+                Err(KernelError::NotFound) => return linux_err(errno::ENOENT),
+                Err(e) => return linux_err(linux_errno_for(e)),
             }
         } else {
             false
@@ -21023,21 +21117,22 @@ fn require_fs_write() -> Result<(), SyscallResult> {
 /// latter is actively misleading (it suggests the mount is the
 /// problem when in fact the caller's input is malformed).
 fn sys_mkdir(args: &SyscallArgs) -> SyscallResult {
-    mkdir_common(AT_FDCWD, args.arg0)
+    mkdir_common(AT_FDCWD, args.arg0, args.arg1)
 }
 
 /// `mkdirat(dirfd, path, mode)` — same Linux contract as `sys_mkdir`,
 /// see that body for empty-path ENOENT rationale (batch 482).
 fn sys_mkdirat(args: &SyscallArgs) -> SyscallResult {
     let dirfd = args.arg0 as i32;
-    mkdir_common(dirfd, args.arg1)
+    mkdir_common(dirfd, args.arg1, args.arg2)
 }
 
 /// Shared `mkdir`/`mkdirat` back-end: resolve the path, check the File-WRITE
 /// capability, then create the directory via the native VFS (which emits
-/// `IN_CREATE | IN_ISDIR`).  The Linux `mode` argument is not honoured — the
-/// native VFS does not yet track per-directory permission bits.
-fn mkdir_common(dirfd: i32, path_ptr: u64) -> SyscallResult {
+/// `IN_CREATE | IN_ISDIR`), with the permission bits of `mode` less the
+/// caller's umask (`linux_create_mode`). Until 2026-10-01 `mode` was dropped
+/// and every directory made 0755.
+fn mkdir_common(dirfd: i32, path_ptr: u64, mode: u64) -> SyscallResult {
     let path = match resolve_at_path(dirfd, path_ptr) {
         Ok(p) => p,
         Err(r) => return r,
@@ -21045,7 +21140,7 @@ fn mkdir_common(dirfd: i32, path_ptr: u64) -> SyscallResult {
     if let Err(r) = require_fs_write() {
         return r;
     }
-    match crate::fs::Vfs::mkdir(&path) {
+    match crate::fs::Vfs::mkdir_mode(&path, linux_create_mode(mode)) {
         Ok(()) => SyscallResult::ok(0),
         Err(e) => linux_err(linux_errno_for(e)),
     }
@@ -21698,11 +21793,40 @@ fn sys_fchmod(args: &SyscallArgs) -> SyscallResult {
         // fchmod on a pipe/console fd has no backing inode → EINVAL.
         return linux_err(errno::EINVAL);
     }
-    let path = match crate::fs::handle::handle_path(entry.raw_handle) {
-        Ok(p) => p,
-        Err(e) => return linux_err(linux_errno_for(e)),
-    };
-    chmod_apply(&path, args.arg1)
+    fchmod_fd(entry.raw_handle, args.arg1)
+}
+
+/// `fchmod`, and `fchmodat2(AT_EMPTY_PATH)` on a descriptor: through the file
+/// the descriptor holds, whatever its name now (`fs::handle::HandleFile`).
+///
+/// It went by the descriptor's name until 2026-10-01: a jailed caller's jail
+/// was applied to the name twice, and a file renamed while open was missed,
+/// or another file under its old name changed instead.
+fn fchmod_fd(raw_handle: u64, mode: u64) -> SyscallResult {
+    if let Err(r) = require_fs_write() {
+        return r;
+    }
+    let perms = u16::try_from(mode & 0o7777).unwrap_or(0);
+    match crate::fs::handle::HandleFile::of(raw_handle).and_then(|f| f.set_permissions(perms)) {
+        Ok(()) => SyscallResult::ok(0),
+        Err(e) => linux_err(linux_errno_for(e)),
+    }
+}
+
+/// `fchown`, and `fchownat(AT_EMPTY_PATH)` on a descriptor, as [`fchmod_fd`].
+/// An id of -1 leaves it as it is.
+fn fchown_fd(raw_handle: u64, uid_arg: u64, gid_arg: u64) -> SyscallResult {
+    if let Err(r) = require_fs_write() {
+        return r;
+    }
+    #[allow(clippy::cast_possible_truncation)]
+    let uid = uid_arg as u32;
+    #[allow(clippy::cast_possible_truncation)]
+    let gid = gid_arg as u32;
+    match crate::fs::handle::HandleFile::of(raw_handle).and_then(|f| f.set_owner(uid, gid)) {
+        Ok(()) => SyscallResult::ok(0),
+        Err(e) => linux_err(linux_errno_for(e)),
+    }
 }
 
 /// `fchmodat(dirfd, path, mode)` — Linux syscall #268.
@@ -21826,11 +21950,7 @@ fn sys_fchown(args: &SyscallArgs) -> SyscallResult {
         // fchown on a pipe/console fd has no backing inode → EINVAL.
         return linux_err(errno::EINVAL);
     }
-    let path = match crate::fs::handle::handle_path(entry.raw_handle) {
-        Ok(p) => p,
-        Err(e) => return linux_err(linux_errno_for(e)),
-    };
-    chown_apply(&path, args.arg1, args.arg2)
+    fchown_fd(entry.raw_handle, args.arg1, args.arg2)
 }
 
 /// `lchown(path, uid, gid)` — identical to chown without symlink
@@ -21892,16 +22012,8 @@ fn sys_fchownat(args: &SyscallArgs) -> SyscallResult {
             Some(p) => p,
             None => return linux_err(errno::EROFS),
         };
-        // AT_FDCWD with an empty path targets the cwd.
-        let path = if dirfd == AT_FDCWD {
-            // The cwd is stored as bytes and is used as bytes; the old
-            // `String::from_utf8(..).ok()` here turned a non-UTF-8 cwd into
-            // ENOENT, i.e. "your current directory does not exist".
-            match pcb::get_cwd(pid) {
-                Some(c) => PathBuf::from(c),
-                None => return linux_err(errno::ENOENT),
-            }
-        } else {
+        // A descriptor: its file, whatever its name now (`fchown_fd`).
+        if dirfd != AT_FDCWD {
             let entry = match pcb::linux_fd_lookup(pid, dirfd) {
                 Some(e) => e,
                 None => return linux_err(errno::EBADF),
@@ -21909,10 +22021,15 @@ fn sys_fchownat(args: &SyscallArgs) -> SyscallResult {
             if entry.kind != HandleKind::File {
                 return linux_err(errno::EINVAL);
             }
-            match crate::fs::handle::handle_path(entry.raw_handle) {
-                Ok(p) => p,
-                Err(e) => return linux_err(linux_errno_for(e)),
-            }
+            return fchown_fd(entry.raw_handle, args.arg2, args.arg3);
+        }
+        // AT_FDCWD with an empty path targets the cwd. The cwd is stored as
+        // bytes and is used as bytes; the old `String::from_utf8(..).ok()`
+        // here turned a non-UTF-8 cwd into ENOENT, i.e. "your current
+        // directory does not exist".
+        let path = match pcb::get_cwd(pid) {
+            Some(c) => PathBuf::from(c),
+            None => return linux_err(errno::ENOENT),
         };
         return chown_apply(&path, args.arg2, args.arg3);
     }
@@ -22309,15 +22426,19 @@ fn sys_ftruncate(args: &SyscallArgs) -> SyscallResult {
             if let Err(e) = rlimit_fsize_check_size_for_caller(new_size) {
                 return linux_err(e);
             }
-            let path = match crate::fs::handle::handle_path(entry.raw_handle) {
-                Ok(p) => p,
-                Err(e) => return linux_err(linux_errno_for(e)),
-            };
             if let Err(r) = require_fs_write() {
                 return r;
             }
-            match crate::fs::Vfs::truncate(&path, new_size) {
+            // Through the file the descriptor holds, whatever its name now
+            // (`fs::handle::ftruncate`). It went by the descriptor's name
+            // until 2026-10-01, so a file deleted while open -- SQLite's
+            // temporary files -- could not be truncated through its own
+            // descriptor, and a jailed caller's jail was applied twice.
+            match crate::fs::handle::ftruncate(entry.raw_handle, new_size) {
                 Ok(()) => SyscallResult::ok(0),
+                // Not a regular file: EINVAL, as Linux's `do_sys_ftruncate`
+                // answers for a directory.
+                Err(KernelError::IsADirectory) => linux_err(errno::EINVAL),
                 Err(e) => linux_err(linux_errno_for(e)),
             }
         }
@@ -22550,6 +22671,13 @@ fn link_common(
         Ok(p) => p,
         Err(r) => return r,
     };
+    // A followed `/proc/self/fd/N` is the descriptor's file itself.
+    if follow
+        && let Some(pid) = caller_pid()
+        && let Some(fd) = proc_self_fd(&oldpath, pid)
+    {
+        return link_fd(fd, &newpath);
+    }
     if let Err(r) = require_fs_write() {
         return r;
     }
@@ -22614,9 +22742,77 @@ fn sys_linkat(args: &SyscallArgs) -> SyscallResult {
     let olddirfd = args.arg0 as i32;
     #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
     let newdirfd = args.arg2 as i32;
+    // AT_EMPTY_PATH with an empty oldpath: the file `olddirfd` holds.
+    if flags & AT_EMPTY_PATH != 0 {
+        let mut first = 0u8;
+        // SAFETY: copy_from_user validates the one-byte user read; the
+        // pointer was checked readable above.
+        if let Err(e) = unsafe { crate::mm::user::copy_from_user(args.arg1, &raw mut first, 1) } {
+            return linux_err(linux_errno_for(e));
+        }
+        if first == 0 {
+            if caller_pid().is_none() {
+                return linux_err(errno::EROFS);
+            }
+            let new_path = match resolve_at_path(newdirfd, args.arg3) {
+                Ok(p) => p,
+                Err(r) => return r,
+            };
+            return link_fd(olddirfd, &new_path);
+        }
+    }
     // linkat follows a trailing symlink in oldpath only with AT_SYMLINK_FOLLOW.
     let follow = flags & 0x400 != 0;
     link_common(olddirfd, args.arg1, newdirfd, args.arg3, follow)
+}
+
+/// The descriptor a `/proc/self/fd/N` path names (also `/proc/<own pid>/fd/N`
+/// and `/proc/thread-self/fd/N`), for `linkat`'s `AT_SYMLINK_FOLLOW`. Linux
+/// follows that "magic link" to the open file itself, so a program can name
+/// an `O_TMPFILE` file without `AT_EMPTY_PATH`'s privilege: gnulib's and
+/// systemd's `link_tmpfile` do exactly that.
+fn proc_self_fd(path: &Path, pid: u64) -> Option<i32> {
+    let bytes = path.as_bytes();
+    let own = alloc::format!("/proc/{pid}/fd/");
+    let rest = bytes
+        .strip_prefix(b"/proc/self/fd/".as_slice())
+        .or_else(|| bytes.strip_prefix(b"/proc/thread-self/fd/".as_slice()))
+        .or_else(|| bytes.strip_prefix(own.as_bytes()))?;
+    if rest.is_empty() || !rest.iter().all(u8::is_ascii_digit) {
+        return None;
+    }
+    core::str::from_utf8(rest).ok()?.parse::<i32>().ok()
+}
+
+/// `linkat` of a descriptor's file: `AT_EMPTY_PATH`, or a followed
+/// `/proc/self/fd/N`. Through the file the descriptor holds
+/// (`fs::handle::link_handle`): an `O_TMPFILE` file opened without `O_EXCL`
+/// gets its first name, a file with one another; a file deleted while open,
+/// or made with `O_EXCL`, is `ENOENT`, as on Linux.
+///
+/// Until 2026-10-01 both forms answered `ENOENT` for every descriptor, so an
+/// `O_TMPFILE` file could not be published.
+fn link_fd(fd: i32, new_path: &Path) -> SyscallResult {
+    let entry = match lookup_caller_fd(fd) {
+        Ok(e) => e,
+        Err(r) => return r,
+    };
+    // Not a file of a filesystem: no name can be made for it there, as
+    // Linux answers for a pipe's inode.
+    if entry.kind != HandleKind::File {
+        return linux_err(errno::EXDEV);
+    }
+    if let Err(r) = require_fs_write() {
+        return r;
+    }
+    match crate::fs::handle::link_handle(entry.raw_handle, new_path) {
+        Ok(()) => SyscallResult::ok(0),
+        // A directory takes no second name, as `link(2)` answers.
+        Err(KernelError::IsADirectory) => linux_err(errno::EPERM),
+        // A filesystem without hard links, as Linux's vfat answers.
+        Err(KernelError::NotSupported) => linux_err(errno::EPERM),
+        Err(e) => linux_err(linux_errno_for(e)),
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -22639,6 +22835,15 @@ fn sys_linkat(args: &SyscallArgs) -> SyscallResult {
 //     exactly the Unix epoch (or any pre-epoch / negative instant) is treated
 //     as "leave unchanged" rather than written.
 // ---------------------------------------------------------------------------
+
+/// What `utimensat` stamps: the file behind a descriptor (the `futimens`
+/// form, a NULL path), or a path.
+enum UtimeTarget {
+    /// A descriptor's file, whatever its name now (`fs::handle::HandleFile`).
+    Fd(u64),
+    /// A path, resolved against the descriptor or the cwd.
+    Path(PathBuf),
+}
 
 /// `utimensat(dirfd, path, times[2], flags)`.
 ///
@@ -22785,6 +22990,11 @@ fn sys_utimensat(args: &SyscallArgs) -> SyscallResult {
         if dirfd == AT_FDCWD {
             return linux_err(errno::EBADF);
         }
+        // The futimens form takes no flags: Linux's `do_utimes_fd` answers
+        // EINVAL for any, before it looks at the descriptor.
+        if flags != 0 {
+            return linux_err(errno::EINVAL);
+        }
         let entry = match lookup_caller_fd(dirfd) {
             Ok(e) => e,
             Err(r) => return r,
@@ -22793,13 +23003,12 @@ fn sys_utimensat(args: &SyscallArgs) -> SyscallResult {
             // futimens on a non-file fd (pipe/console) has no backing path.
             return linux_err(errno::EINVAL);
         }
-        match crate::fs::handle::handle_path(entry.raw_handle) {
-            Ok(p) => p,
-            Err(e) => return linux_err(linux_errno_for(e)),
-        }
+        // The descriptor's file, whatever its name now. It went by the name
+        // until 2026-10-01, as `fchmod` did.
+        UtimeTarget::Fd(entry.raw_handle)
     } else {
         match resolve_at_path(dirfd, args.arg1) {
-            Ok(p) => p,
+            Ok(p) => UtimeTarget::Path(p),
             Err(r) => return r,
         }
     };
@@ -22827,10 +23036,14 @@ fn sys_utimensat(args: &SyscallArgs) -> SyscallResult {
     }
     // AT_SYMLINK_NOFOLLOW: stamp the link inode itself rather than its
     // target (closes known-issues B-CHOWN1 gap #1 for utimensat).
-    let res = if flags & AT_SYMLINK_NOFOLLOW != 0 {
-        crate::fs::Vfs::set_times_no_follow(&target, atime_ns, mtime_ns)
-    } else {
-        crate::fs::Vfs::set_times(&target, atime_ns, mtime_ns)
+    let res = match &target {
+        UtimeTarget::Fd(raw) => {
+            crate::fs::handle::HandleFile::of(*raw).and_then(|f| f.set_times(atime_ns, mtime_ns))
+        }
+        UtimeTarget::Path(p) if flags & AT_SYMLINK_NOFOLLOW != 0 => {
+            crate::fs::Vfs::set_times_no_follow(p, atime_ns, mtime_ns)
+        }
+        UtimeTarget::Path(p) => crate::fs::Vfs::set_times(p, atime_ns, mtime_ns),
     };
     match res {
         Ok(()) => SyscallResult::ok(0),
@@ -23739,36 +23952,31 @@ fn dispatch_inotify_read(entry: FdEntry, buf: u64, cap: u64) -> SyscallResult {
 
 /// `inotify_add_watch(fd, pathname, mask)`.
 fn sys_inotify_add_watch(args: &SyscallArgs) -> SyscallResult {
-    // Mirror Linux's `SYSCALL_DEFINE3(inotify_add_watch)` gate order
-    // (fs/notify/inotify/inotify_user.c):
-    //   1. if (mask & ~ALL_INOTIFY_BITS) return -EINVAL;
-    //   2. if ((mask & (IN_MASK_ADD|IN_MASK_CREATE)) ==
-    //          (IN_MASK_ADD|IN_MASK_CREATE)) return -EINVAL;
-    //   3. fdget(fd) — EBADF if fd is invalid;
-    //   4. f.file->f_op != inotify_fops → EINVAL;
-    //   5. user_path_at(pathname) → EFAULT on bad ptr, ENOENT, etc.
+    // Linux 6.6's `SYSCALL_DEFINE3(inotify_add_watch)` order
+    // (fs/notify/inotify/inotify_user.c:730-770):
+    //   1. mask & ~ALL_INOTIFY_BITS          -> EINVAL  (:746)
+    //   2. !(mask & ALL_INOTIFY_BITS)        -> EINVAL  (:753, a zero mask)
+    //   3. fdget(fd)                         -> EBADF   (:756)
+    //   4. IN_MASK_ADD and IN_MASK_CREATE    -> EINVAL  (:761, after fdget)
+    //   5. f.file->f_op != &inotify_fops     -> EINVAL  (:767)
+    //   6. user_path_at(pathname)            -> EFAULT, ENOENT, ...
     //
-    // Pre-batch sys_inotify_add_watch did (a) NULL path → EFAULT, (b)
-    // validate_user_read(path) → EFAULT, (c) mask == 0 → EINVAL, (d)
-    // fd lookup → EBADF.  That diverged from Linux in three ways:
-    //   * (fd=0, path=NULL, mask=valid): Linux returns EBADF (the fd
-    //     is stdin, not an inotify fd; user_path_at hasn't run yet
-    //     when the fdget/f_op check fires); we returned EFAULT.
-    //   * (fd=any, path=valid, mask=0): Linux accepts mask=0 (it just
-    //     filters down to no events; the watch is still added).  We
-    //     rejected it with EINVAL.  Pulled from a guess, not Linux.
-    //   * No bit-validity check for mask, so a probe with bogus
-    //     high bits walked past us to EBADF where Linux returns
-    //     EINVAL.
+    // Until 2026-10-01 a zero mask was accepted (a comment said Linux does;
+    // 6.6 refuses it at :753) and the ADD-and-CREATE test came before the
+    // descriptor (lane D's request
+    // `d-a-the-kernels-inotify-add-watch-is-not-in-6-6s-order`).
     //
-    // ALL_INOTIFY_BITS layout from include/uapi/linux/inotify.h:
-    //   IN_ACCESS=0x1 .. IN_MOVE_SELF=0x800 (low events: 0xFFF),
+    // ALL_INOTIFY_BITS, include/linux/inotify.h, from
+    // include/uapi/linux/inotify.h:
+    //   IN_ACCESS=0x1 .. IN_MOVE_SELF=0x800 (the events: 0xFFF),
     //   IN_UNMOUNT=0x2000, IN_Q_OVERFLOW=0x4000, IN_IGNORED=0x8000,
     //   IN_ONLYDIR=0x0100_0000, IN_DONT_FOLLOW=0x0200_0000,
     //   IN_EXCL_UNLINK=0x0400_0000, IN_MASK_CREATE=0x1000_0000,
     //   IN_MASK_ADD=0x2000_0000, IN_ISDIR=0x4000_0000,
-    //   IN_ONESHOT=0x8000_0000.
-    const ALL_INOTIFY_BITS: u32 = 0xF007_EFFF;
+    //   IN_ONESHOT=0x8000_0000: 0xF700_EFFF. It was written 0xF007_EFFF
+    //   until 2026-10-01, which refused IN_ONLYDIR, IN_DONT_FOLLOW and
+    //   IN_EXCL_UNLINK as unknown bits and took three that name nothing.
+    const ALL_INOTIFY_BITS: u32 = 0xF700_EFFF;
     const IN_MASK_CREATE: u32 = 0x1000_0000;
     const IN_MASK_ADD: u32 = 0x2000_0000;
 
@@ -23777,7 +23985,8 @@ fn sys_inotify_add_watch(args: &SyscallArgs) -> SyscallResult {
     if mask & !ALL_INOTIFY_BITS != 0 {
         return linux_err(errno::EINVAL);
     }
-    if (mask & (IN_MASK_ADD | IN_MASK_CREATE)) == (IN_MASK_ADD | IN_MASK_CREATE) {
+    // Something to watch for: at least one valid bit.
+    if mask & ALL_INOTIFY_BITS == 0 {
         return linux_err(errno::EINVAL);
     }
 
@@ -23795,12 +24004,17 @@ fn sys_inotify_add_watch(args: &SyscallArgs) -> SyscallResult {
         None => return linux_err(errno::EBADF),
     };
 
-    // Gate 4: f.file->f_op != inotify_fops → EINVAL (fd isn't an inotify fd).
+    // Gate 4: IN_MASK_ADD and IN_MASK_CREATE make no sense together.
+    if (mask & (IN_MASK_ADD | IN_MASK_CREATE)) == (IN_MASK_ADD | IN_MASK_CREATE) {
+        return linux_err(errno::EINVAL);
+    }
+
+    // Gate 5: f.file->f_op != inotify_fops → EINVAL (fd isn't an inotify fd).
     if entry.kind != crate::proc::linux_fd::HandleKind::Inotify {
         return linux_err(errno::EINVAL);
     }
 
-    // Gate 5: user_path_at(pathname).  NULL/unreadable → EFAULT; then
+    // Gate 6: user_path_at(pathname).  NULL/unreadable → EFAULT; then
     // canonicalize against the caller's cwd and confirm the target exists
     // (Linux's lookup walk returns ENOENT for a missing path, ENOTDIR when
     // IN_ONLYDIR was requested but the target is not a directory).
@@ -25589,13 +25803,21 @@ fn copy_file_range_overlaps(
 ) -> bool {
     use crate::proc::linux_fd::HandleKind;
     let same = match (in_kind, out_kind) {
-        (HandleKind::File, HandleKind::File) => matches!(
-            (
-                crate::fs::handle::handle_path(in_handle),
-                crate::fs::handle::handle_path(out_handle),
+        // The same file, whatever its names: by identity where the files
+        // have one, else by the names they were opened under.
+        (HandleKind::File, HandleKind::File) => match (
+            crate::fs::handle::file_identity(in_handle),
+            crate::fs::handle::file_identity(out_handle),
+        ) {
+            (Ok(Some(a)), Ok(Some(b))) => a == b,
+            _ => matches!(
+                (
+                    crate::fs::handle::handle_name(in_handle),
+                    crate::fs::handle::handle_name(out_handle),
+                ),
+                (Ok(a), Ok(b)) if a == b
             ),
-            (Ok(a), Ok(b)) if a == b
-        ),
+        },
         (HandleKind::MemFd, HandleKind::MemFd) => in_handle == out_handle,
         _ => false,
     };
@@ -32470,6 +32692,7 @@ fn sys_openat_beneath(args: &SyscallArgs, no_symlinks: bool) -> SyscallResult {
     let dirfd = args.arg0 as i32;
     let path_ptr = args.arg1;
     let flags = args.arg2 as u32;
+    let mode = args.arg3;
 
     const MAX_REL: usize = 4096;
     let rel_bytes = match read_user_cstr(path_ptr, MAX_REL) {
@@ -32545,13 +32768,11 @@ fn sys_openat_beneath(args: &SyscallArgs, no_symlinks: bool) -> SyscallResult {
     if combined.len() > 4095 {
         return linux_err(errno::ENAMETOOLONG);
     }
-    let Ok(path_str) = core::str::from_utf8(&combined) else {
-        return linux_err(errno::EINVAL);
-    };
-
+    // Bytes, not UTF-8, as in `sys_openat_ex`.
     open_kernel_path_install(
-        path_str,
+        Path::new(&combined),
         flags,
+        mode,
         no_symlinks,
         Some(crate::fs::handle::Beneath { base: &base, rel }),
     )
@@ -42145,13 +42366,13 @@ fn sys_mremap(args: &SyscallArgs) -> SyscallResult {
 /// EOF grows the file to `end`, zero-filling any gap left by the
 /// extending `write_at`.
 #[allow(clippy::cast_possible_truncation)]
-fn fallocate_zero_vfs(
-    path: &Path,
+fn fallocate_zero_file(
+    file: &crate::fs::handle::HandleFile,
     offset: u64,
     end: u64,
     keep_size: bool,
 ) -> crate::error::KernelResult<()> {
-    let size = crate::fs::Vfs::file_size(path)?;
+    let size = file.size()?;
     let zero_end = if keep_size { end.min(size) } else { end };
     if offset >= zero_end {
         return Ok(());
@@ -42167,13 +42388,13 @@ fn fallocate_zero_vfs(
         } else {
             remaining as usize
         };
-        crate::fs::Vfs::write_at(path, pos, zeros.get(..this).unwrap_or(&[]))?;
+        file.write(pos, zeros.get(..this).unwrap_or(&[]))?;
         pos = pos.saturating_add(this as u64);
     }
     Ok(())
 }
 
-/// `MemFd` counterpart of [`fallocate_zero_vfs`]: zero `[offset, end)` of
+/// `MemFd` counterpart of [`fallocate_zero_file`]: zero `[offset, end)` of
 /// an in-memory file. Same `keep_size` semantics. The in-memory backing
 /// never reclaims space, so `PUNCH_HOLE`/`ZERO_RANGE` are likewise just
 /// "reads return zero" on a memfd.
@@ -42216,13 +42437,17 @@ fn fallocate_zero_memfd(
 /// The move is a forward (ascending) memmove of the tail: the destination
 /// (`offset`) is strictly below the source (`offset+len`), so copying low
 /// addresses first never overwrites a not-yet-copied source byte.  Chunked
-/// through `Vfs::read_at`/`write_at` (every backend overrides both
-/// efficiently) so the whole file is never resident at once.  Our backends
+/// through the descriptor's file (`HandleFile::read`/`write`; every backend
+/// does both by range) so the whole file is never resident at once.  Our backends
 /// are non-sparse, so this is a true content collapse, not an extent splice;
 /// the result a reader observes is identical.
 #[allow(clippy::cast_possible_truncation)]
-fn fallocate_collapse_vfs(path: &Path, offset: u64, len: u64) -> crate::error::KernelResult<()> {
-    let size = crate::fs::Vfs::file_size(path)?;
+fn fallocate_collapse_file(
+    file: &crate::fs::handle::HandleFile,
+    offset: u64,
+    len: u64,
+) -> crate::error::KernelResult<()> {
+    let size = file.size()?;
     // end = offset + len; both validated < size by the caller, so the add
     // cannot overflow a real on-disk size, but stay defensive.
     let end = offset
@@ -42241,12 +42466,12 @@ fn fallocate_collapse_vfs(path: &Path, offset: u64, len: u64) -> crate::error::K
         };
         let src = end.saturating_add(moved);
         let dst = offset.saturating_add(moved);
-        let buf = crate::fs::Vfs::read_at(path, src, this)?;
-        crate::fs::Vfs::write_at(path, dst, &buf)?;
+        let buf = file.read(src, this)?;
+        file.write(dst, &buf)?;
         moved = moved.saturating_add(this as u64);
     }
     // Drop the now-duplicated tail: the file shrinks by exactly `len`.
-    crate::fs::Vfs::truncate(path, size.saturating_sub(len))
+    file.truncate(size.saturating_sub(len))
 }
 
 /// `FALLOC_FL_INSERT_RANGE`: insert a `len`-byte hole at `offset`, shifting
@@ -42264,14 +42489,18 @@ fn fallocate_collapse_vfs(path: &Path, offset: u64, len: u64) -> crate::error::K
 /// offset+len)` window is explicitly zeroed (the grow only zero-filled past
 /// the *old* EOF, not the interior hole the shift exposes).
 #[allow(clippy::cast_possible_truncation)]
-fn fallocate_insert_vfs(path: &Path, offset: u64, len: u64) -> crate::error::KernelResult<()> {
-    let size = crate::fs::Vfs::file_size(path)?;
+fn fallocate_insert_file(
+    file: &crate::fs::handle::HandleFile,
+    offset: u64,
+    len: u64,
+) -> crate::error::KernelResult<()> {
+    let size = file.size()?;
     let new_size = size
         .checked_add(len)
         .ok_or(crate::error::KernelError::InvalidArgument)?;
     // Grow first so the destination range exists; the extension past the old
     // EOF is zero-filled by `truncate`.
-    crate::fs::Vfs::truncate(path, new_size)?;
+    file.truncate(new_size)?;
     // Slide the tail `[offset, size)` up to `[offset+len, new_size)`, copying
     // from the end backwards so a chunk's destination never overlaps an
     // un-copied source chunk.
@@ -42288,8 +42517,8 @@ fn fallocate_insert_vfs(path: &Path, offset: u64, len: u64) -> crate::error::Ker
         let chunk_start = offset.saturating_add(remaining.saturating_sub(this as u64));
         let src = chunk_start;
         let dst = chunk_start.saturating_add(len);
-        let buf = crate::fs::Vfs::read_at(path, src, this)?;
-        crate::fs::Vfs::write_at(path, dst, &buf)?;
+        let buf = file.read(src, this)?;
+        file.write(dst, &buf)?;
         remaining = remaining.saturating_sub(this as u64);
     }
     // Zero the inserted hole `[offset, offset+len)` — the shift left stale
@@ -42304,7 +42533,7 @@ fn fallocate_insert_vfs(path: &Path, offset: u64, len: u64) -> crate::error::Ker
         } else {
             rem as usize
         };
-        crate::fs::Vfs::write_at(path, pos, zeros.get(..this).unwrap_or(&[]))?;
+        file.write(pos, zeros.get(..this).unwrap_or(&[]))?;
         pos = pos.saturating_add(this as u64);
     }
     Ok(())
@@ -42487,56 +42716,58 @@ fn sys_fallocate(args: &SyscallArgs) -> SyscallResult {
         }
         match entry.kind {
             HandleKind::File => {
-                let path = match crate::fs::handle::handle_path(entry.raw_handle) {
-                    Ok(p) => p,
-                    Err(e) => return linux_err(linux_errno_for(e)),
-                };
                 if let Err(r) = require_fs_write() {
                     return r;
                 }
+                // Through the file the descriptor holds, whatever its name
+                // now (`fs::handle::HandleFile`). It went by the descriptor's
+                // name until 2026-10-01: a jailed caller's jail was applied
+                // to the name twice, and a file deleted while open could not
+                // be grown through its own descriptor.
+                let file = match crate::fs::handle::HandleFile::writable(entry.raw_handle) {
+                    Ok(f) => f,
+                    Err(e) => return linux_err(linux_errno_for(e)),
+                };
+                let done = |r: crate::error::KernelResult<()>| match r {
+                    Ok(()) => SyscallResult::ok(0),
+                    Err(e) => linux_err(linux_errno_for(e)),
+                };
                 if mode == 0 {
                     // posix_fallocate: ensure logical size >= end; never
                     // shrink a file that is already larger.
-                    let cur = match crate::fs::Vfs::file_size(&path) {
-                        Ok(s) => s,
-                        Err(e) => return linux_err(linux_errno_for(e)),
+                    return match file.size() {
+                        Ok(cur) if cur < end_u64 => done(file.truncate(end_u64)),
+                        Ok(_) => SyscallResult::ok(0),
+                        Err(e) => linux_err(linux_errno_for(e)),
                     };
-                    if cur < end_u64 {
-                        return match crate::fs::Vfs::truncate(&path, end_u64) {
-                            Ok(()) => SyscallResult::ok(0),
-                            Err(e) => linux_err(linux_errno_for(e)),
-                        };
-                    }
-                    return SyscallResult::ok(0);
                 }
                 if mode == KEEP_SIZE {
                     // Reserve blocks for [0, end) without touching the
-                    // logical size — the VFS fallocate is exactly this.
-                    return match crate::fs::Vfs::fallocate(&path, end_u64) {
-                        Ok(()) => SyscallResult::ok(0),
-                        Err(e) => linux_err(linux_errno_for(e)),
-                    };
+                    // logical size.
+                    return done(file.fallocate(end_u64));
                 }
                 if mode & PUNCH_HOLE != 0 || mode & ZERO_RANGE != 0 {
                     // Zero the range so reads return zero. PUNCH_HOLE and
                     // ZERO_RANGE+KEEP_SIZE preserve i_size; ZERO_RANGE
                     // without KEEP_SIZE extends to `end` when past EOF.
-                    return match fallocate_zero_vfs(&path, offset_u64, end_u64, zero_keep_size) {
-                        Ok(()) => SyscallResult::ok(0),
-                        Err(e) => linux_err(linux_errno_for(e)),
-                    };
+                    return done(fallocate_zero_file(
+                        &file,
+                        offset_u64,
+                        end_u64,
+                        zero_keep_size,
+                    ));
                 }
                 // COLLAPSE_RANGE / INSERT_RANGE: real extent-shifting modes
                 // (ext4/xfs/f2fs in Linux).  Both require `offset` and `len`
                 // to be multiples of the filesystem block size (EINVAL
                 // otherwise) and shift file contents; our non-sparse backends
-                // realise them as a chunked data memmove (fallocate_*_vfs).
+                // realise them as a chunked data memmove (fallocate_*_file).
                 if mode & COLLAPSE_RANGE != 0 || mode & INSERT_RANGE != 0 {
                     // Block size for the alignment gate.  A backend that can't
                     // report one (block_size == 0) can't validate the Linux
                     // alignment contract, so fall back to EOPNOTSUPP rather
                     // than guess — exactly what an unsupported fs returns.
-                    let bsize = match crate::fs::Vfs::statvfs(&path) {
+                    let bsize = match file.statvfs() {
                         Ok(info) if info.block_size > 0 => info.block_size,
                         Ok(_) => return linux_err(errno::EOPNOTSUPP),
                         Err(e) => return linux_err(linux_errno_for(e)),
@@ -42547,7 +42778,7 @@ fn sys_fallocate(args: &SyscallArgs) -> SyscallResult {
                     if !offset_u64.is_multiple_of(bsize) || !len_u64.is_multiple_of(bsize) {
                         return linux_err(errno::EINVAL);
                     }
-                    let size = match crate::fs::Vfs::file_size(&path) {
+                    let size = match file.size() {
                         Ok(s) => s,
                         Err(e) => return linux_err(linux_errno_for(e)),
                     };
@@ -42557,10 +42788,7 @@ fn sys_fallocate(args: &SyscallArgs) -> SyscallResult {
                         if end_u64 >= size {
                             return linux_err(errno::EINVAL);
                         }
-                        return match fallocate_collapse_vfs(&path, offset_u64, len_u64) {
-                            Ok(()) => SyscallResult::ok(0),
-                            Err(e) => linux_err(linux_errno_for(e)),
-                        };
+                        return done(fallocate_collapse_file(&file, offset_u64, len_u64));
                     }
                     // INSERT_RANGE: the insertion point must lie strictly
                     // inside the file (Linux: offset >= size is EINVAL; extend
@@ -42577,10 +42805,7 @@ fn sys_fallocate(args: &SyscallArgs) -> SyscallResult {
                     if let Err(e) = rlimit_fsize_check_size_for_caller(new_size) {
                         return linux_err(e);
                     }
-                    return match fallocate_insert_vfs(&path, offset_u64, len_u64) {
-                        Ok(()) => SyscallResult::ok(0),
-                        Err(e) => linux_err(linux_errno_for(e)),
-                    };
+                    return done(fallocate_insert_file(&file, offset_u64, len_u64));
                 }
                 // UNSHARE_RANGE keeps the EOPNOTSUPP fallback (reflink/CoW
                 // concept our backends don't implement).
@@ -43394,10 +43619,9 @@ fn sys_chdir(args: &SyscallArgs) -> SyscallResult {
 ///   - ENOENT  — path no longer exists (rmdir between open and fchdir).
 ///
 /// Notes:
-///   - The fd does NOT have to have been opened with `O_DIRECTORY`; a
-///     plain `open("/dir", O_RDONLY)` succeeds with `IsADirectory`
-///     today, but if it ever stops doing that the stat check here is
-///     the source of truth.
+///   - The fd does NOT have to have been opened with `O_DIRECTORY`: a
+///     plain `open("/dir", O_RDONLY)` opens the directory
+///     (`OpenFlags::DIRECTORY_ALLOWED`).
 ///   - Kernel-context callers (no per-process fd table) see EBADF on
 ///     any valid fd — same shape as the rest of the Linux fd handlers.
 fn sys_fchdir(args: &SyscallArgs) -> SyscallResult {
@@ -43409,15 +43633,17 @@ fn sys_fchdir(args: &SyscallArgs) -> SyscallResult {
         Ok(e) => e,
         Err(r) => return r,
     };
-    if entry.kind != HandleKind::File {
+    if entry.kind != HandleKind::File || !crate::fs::handle::is_directory(entry.raw_handle) {
         return linux_err(errno::ENOTDIR);
     }
     let path = match crate::fs::handle::handle_path(entry.raw_handle) {
         Ok(p) => p,
         Err(e) => return linux_err(linux_errno_for(e)),
     };
-    // Confirm the backing object is still a directory.
-    match crate::fs::Vfs::stat(&path) {
+    // Confirm the backing object is still a directory. `_resolved`: the
+    // handle's path is the host path captured at open, and `Vfs::stat` would
+    // apply a jailed caller's jail to it a second time.
+    match crate::fs::Vfs::stat_resolved(&path) {
         Ok(stat_entry) => {
             if stat_entry.entry_type != crate::fs::EntryType::Directory {
                 return linux_err(errno::ENOTDIR);
@@ -43511,19 +43737,21 @@ fn sys_flock(args: &SyscallArgs) -> SyscallResult {
         return linux_err(errno::EBADF);
     }
     let handle = entry.raw_handle;
-    let path = match crate::fs::handle::handle_path(handle) {
-        Ok(p) => p,
+    // Keyed on the file the descriptor holds, not on what its name names now
+    // (`fs::handle::lock_key`); the name is the resolved host path captured
+    // at open, so no namespace is applied twice.
+    let (path, id) = match crate::fs::handle::lock_key(handle) {
+        Ok(k) => k,
         Err(e) => return linux_err(linux_errno_for(e)),
     };
-
-    // `handle_path` returns the resolved host path captured at open, so use
-    // the _resolved workers — re-resolving here would double-apply a chroot
-    // jail prefix and key the lock on the wrong path.
     let owner = crate::fs::vfs::flock_description_owner(handle);
     let result = match lock_type {
-        Some(lt) if op & LOCK_NB != 0 => crate::fs::Vfs::flock_resolved(&path, owner, lt),
-        Some(lt) => crate::fs::Vfs::flock_wait_resolved(&path, owner, lt),
-        None => crate::fs::Vfs::funlock_resolved(&path, owner),
+        Some(lt) if op & LOCK_NB != 0 => crate::fs::Vfs::flock_key(&path, id, owner, lt),
+        Some(lt) => crate::fs::Vfs::flock_wait_key(&path, id, owner, lt),
+        None => {
+            crate::fs::Vfs::funlock_key(&path, id, owner);
+            Ok(())
+        }
     };
     match result {
         Ok(()) => SyscallResult::ok(0),
@@ -45689,15 +45917,8 @@ fn sys_fchmodat2(args: &SyscallArgs) -> SyscallResult {
             Some(p) => p,
             None => return linux_err(errno::EROFS),
         };
-        let resolved = if dirfd == AT_FDCWD {
-            // The cwd is stored as bytes and is used as bytes; the old
-            // `String::from_utf8(..).ok()` here turned a non-UTF-8 cwd into
-            // ENOENT, i.e. "your current directory does not exist".
-            match pcb::get_cwd(pid) {
-                Some(c) => PathBuf::from(c),
-                None => return linux_err(errno::ENOENT),
-            }
-        } else {
+        // A descriptor: its file, whatever its name now (`fchmod_fd`).
+        if dirfd != AT_FDCWD {
             let entry = match pcb::linux_fd_lookup(pid, dirfd) {
                 Some(e) => e,
                 None => return linux_err(errno::EBADF),
@@ -45705,10 +45926,14 @@ fn sys_fchmodat2(args: &SyscallArgs) -> SyscallResult {
             if entry.kind != HandleKind::File {
                 return linux_err(errno::EINVAL);
             }
-            match crate::fs::handle::handle_path(entry.raw_handle) {
-                Ok(p) => p,
-                Err(e) => return linux_err(linux_errno_for(e)),
-            }
+            return fchmod_fd(entry.raw_handle, args.arg2);
+        }
+        // The cwd is stored as bytes and is used as bytes; the old
+        // `String::from_utf8(..).ok()` here turned a non-UTF-8 cwd into
+        // ENOENT, i.e. "your current directory does not exist".
+        let resolved = match pcb::get_cwd(pid) {
+            Some(c) => PathBuf::from(c),
+            None => return linux_err(errno::ENOENT),
         };
         return chmod_apply(&resolved, args.arg2);
     }
@@ -46063,7 +46288,7 @@ fn sys_futex2_wait(args: &SyscallArgs) -> SyscallResult {
 fn sys_creat(args: &SyscallArgs) -> SyscallResult {
     // O_WRONLY | O_CREAT | O_TRUNC.
     let flags = oflags::O_WRONLY | oflags::O_CREAT | oflags::O_TRUNC;
-    open_common(args.arg0, 0, flags, false)
+    open_common(args.arg0, 0, flags, args.arg1, false)
 }
 
 /// `uselib(library)` — deprecated dynamic-linker primitive.
@@ -49161,7 +49386,7 @@ pub fn self_test_rename_noreplace() -> crate::error::KernelResult<()> {
 /// File/MemFd source helpers it drives.
 ///
 /// Runs after the `/tmp` memfs mount so it can stage real files.  Exercises
-/// the `fallocate` PUNCH_HOLE / ZERO_RANGE zeroing path ([`fallocate_zero_vfs`]
+/// the `fallocate` PUNCH_HOLE / ZERO_RANGE zeroing path ([`fallocate_zero_file`]
 /// / [`fallocate_zero_memfd`]) directly, since the syscall entry needs a
 /// per-process Linux fd table absent in kernel boot context.
 ///
@@ -49227,8 +49452,24 @@ pub fn self_test_fallocate_range() -> crate::error::KernelResult<()> {
         }
     };
 
+    // Each call goes through a handle on the staged file, as the syscall's
+    // do (`HandleFile::writable`).
+    let through = |op: &dyn Fn(
+        &crate::fs::handle::HandleFile,
+    ) -> crate::error::KernelResult<()>|
+     -> crate::error::KernelResult<()> {
+        let h = crate::fs::handle::open(
+            path,
+            crate::fs::handle::OpenFlags::READ.union(crate::fs::handle::OpenFlags::WRITE),
+        )?;
+        let result = crate::fs::handle::HandleFile::writable(h).and_then(|f| op(&f));
+        // Best effort: this test's own scratch handle.
+        let _ = crate::fs::handle::close(h);
+        result
+    };
+
     // (1) ZERO_RANGE + KEEP_SIZE: zero [20,40), size stays 100.
-    fallocate_zero_vfs(path, 20, 40, true)?;
+    through(&|f| fallocate_zero_file(f, 20, 40, true))?;
     if !check(N, "ZERO_RANGE+KEEP", &|c| {
         c.get(..20).is_some_and(|h| h.iter().all(|&b| b == 0xAA))
             && c.get(20..40).is_some_and(|h| h.iter().all(|&b| b == 0))
@@ -49239,7 +49480,7 @@ pub fn self_test_fallocate_range() -> crate::error::KernelResult<()> {
     }
 
     // (2) PUNCH_HOLE: zero [50,60), size stays 100, range (1) still zero.
-    fallocate_zero_vfs(path, 50, 60, true)?;
+    through(&|f| fallocate_zero_file(f, 50, 60, true))?;
     if !check(N, "PUNCH_HOLE", &|c| {
         c.get(20..40).is_some_and(|h| h.iter().all(|&b| b == 0))
             && c.get(50..60).is_some_and(|h| h.iter().all(|&b| b == 0))
@@ -49250,7 +49491,7 @@ pub fn self_test_fallocate_range() -> crate::error::KernelResult<()> {
     }
 
     // (3) KEEP_SIZE range entirely past EOF → no-op, size unchanged.
-    fallocate_zero_vfs(path, 200, 250, true)?;
+    through(&|f| fallocate_zero_file(f, 200, 250, true))?;
     if !check(N, "past-EOF-keep-size", &|_| true) {
         let _ = crate::fs::Vfs::remove(path);
         return Err(KernelError::InternalError);
@@ -49267,7 +49508,7 @@ pub fn self_test_fallocate_range() -> crate::error::KernelResult<()> {
         );
         return Err(KernelError::InternalError);
     }
-    fallocate_zero_vfs(path, 90, 150, false)?;
+    through(&|f| fallocate_zero_file(f, 90, 150, false))?;
     if !check(150, "ZERO_RANGE-grow", &|c| {
         c.get(..90).is_some_and(|h| h.iter().all(|&b| b == 0xAA))
             && c.get(90..150).is_some_and(|h| h.iter().all(|&b| b == 0))
@@ -49335,7 +49576,7 @@ pub fn self_test_fallocate_range() -> crate::error::KernelResult<()> {
     if !stage_seq() {
         return Ok(());
     }
-    fallocate_collapse_vfs(path, 20, 20)?;
+    through(&|f| fallocate_collapse_file(f, 20, 20))?;
     let mut want_collapse = alloc::vec::Vec::new();
     want_collapse.extend_from_slice(seq.get(..20).unwrap_or(&[]));
     want_collapse.extend_from_slice(seq.get(40..).unwrap_or(&[]));
@@ -49350,7 +49591,7 @@ pub fn self_test_fallocate_range() -> crate::error::KernelResult<()> {
     if !stage_seq() {
         return Ok(());
     }
-    fallocate_insert_vfs(path, 30, 20)?;
+    through(&|f| fallocate_insert_file(f, 30, 20))?;
     let mut want_insert = alloc::vec::Vec::new();
     want_insert.extend_from_slice(seq.get(..30).unwrap_or(&[]));
     want_insert.extend_from_slice(&[0u8; 20]);
@@ -49366,8 +49607,8 @@ pub fn self_test_fallocate_range() -> crate::error::KernelResult<()> {
     if !stage_seq() {
         return Ok(());
     }
-    fallocate_insert_vfs(path, 40, 16)?;
-    fallocate_collapse_vfs(path, 40, 16)?;
+    through(&|f| fallocate_insert_file(f, 40, 16))?;
+    through(&|f| fallocate_collapse_file(f, 40, 16))?;
     if !expect(&seq, "INSERT+COLLAPSE-identity") {
         let _ = crate::fs::Vfs::remove(path);
         return Err(KernelError::InternalError);
@@ -51444,8 +51685,262 @@ pub fn self_test_fs() -> crate::error::KernelResult<()> {
     test_linux_mkdir_rmdir_unlink_roundtrip()?;
     test_linux_rename_roundtrip()?;
     test_linux_fcntl_record_locks()?;
+    test_linux_create_modes()?;
 
     serial_println!("[syscall/linux] Post-mount translation self-test PASSED");
+    Ok(())
+}
+
+/// What a Linux create stamps on the file it makes (`linux_create_mode`),
+/// against `/tmp`: the `mode` argument less the umask, through `open`,
+/// `creat`, `mkdir` and the byte-path installer `openat` uses; paths past
+/// 255 bytes, up to `PATH_MAX`; a name that is not UTF-8.
+///
+/// Kernel context, whose umask is Linux's default 022, but for one rung that
+/// lends the task a process to read that process's umask: a process's path
+/// argument would have to be in its own memory, which a kernel test's is
+/// not. A kernel caller cannot hold a descriptor, so each open creates the
+/// file, gives its handle back and answers `EBADF`: the file it leaves is the
+/// answer.
+#[inline(never)]
+fn test_linux_create_modes() -> crate::error::KernelResult<()> {
+    use crate::serial_println;
+
+    const DIR: &str = "/tmp/linux-create-modes";
+    fn fail(msg: &str) -> crate::error::KernelResult<()> {
+        serial_println!("[syscall/linux]   FAIL: create modes: {}", msg);
+        // Best effort: the scratch tree, whatever is left of it.
+        let _ = crate::fs::Vfs::remove_recursive(DIR);
+        Err(KernelError::InternalError)
+    }
+    let args = |arg0: u64, arg1: u64, arg2: u64| SyscallArgs {
+        arg0,
+        arg1,
+        arg2,
+        arg3: 0,
+        arg4: 0,
+        arg5: 0,
+    };
+    let mode_of = |p: &Path| {
+        crate::fs::Vfs::metadata(p)
+            .map(|m| m.permissions & 0o7777)
+            .ok()
+    };
+    let ebadf = i64::from(errno::EBADF).wrapping_neg();
+    let create = u64::from(oflags::O_CREAT | oflags::O_WRONLY);
+
+    // Best effort: a leftover from an earlier boot's failure.
+    let _ = crate::fs::Vfs::remove_recursive(DIR);
+    crate::fs::Vfs::mkdir(DIR)?;
+
+    // The umask: the calling process's own, else Linux's default.
+    let pid = pcb::create("linux-create-modes", 0);
+    let _ = pcb::set_umask(pid, 0o027);
+    let theirs = crate::proc::thread::self_test_as_process(pid, || linux_create_mode(0o777));
+    pcb::destroy(pid);
+    if theirs != 0o750
+        || linux_create_mode(0o777) != 0o755
+        || linux_create_mode(0o170_000 | 0o4755) != 0o4755
+    {
+        return fail("the umask was not applied, or a file-type bit got through");
+    }
+
+    // open(O_CREAT): the mode less the umask, setuid kept.
+    for (name, mode, want) in [
+        (&b"/tmp/linux-create-modes/key\0"[..], 0o600, 0o600),
+        (&b"/tmp/linux-create-modes/wide\0"[..], 0o777, 0o755),
+        (&b"/tmp/linux-create-modes/suid\0"[..], 0o4755, 0o4755),
+    ] {
+        let r = dispatch_linux(nr::OPEN, &args(name.as_ptr() as u64, create, mode)).value;
+        let path = Path::new(name.strip_suffix(b"\0").unwrap_or(name));
+        if r != ebadf || mode_of(path) != Some(want) {
+            serial_println!(
+                "[syscall/linux]   open(O_CREAT, {:o}) -> {}, mode {:?}",
+                mode,
+                r,
+                mode_of(path)
+            );
+            return fail("open(O_CREAT) did not stamp its mode less the umask");
+        }
+    }
+
+    // creat(path, mode).
+    let creat = b"/tmp/linux-create-modes/creat\0";
+    let r = dispatch_linux(nr::CREAT, &args(creat.as_ptr() as u64, 0o640, 0)).value;
+    if r != ebadf || mode_of(Path::new("/tmp/linux-create-modes/creat")) != Some(0o640) {
+        return fail("creat did not stamp its mode");
+    }
+
+    // mkdir: the permission bits and sticky, less the umask.
+    for (name, mode, want) in [
+        (&b"/tmp/linux-create-modes/private\0"[..], 0o700, 0o700),
+        (&b"/tmp/linux-create-modes/shared\0"[..], 0o1777, 0o1755),
+    ] {
+        let r = dispatch_linux(nr::MKDIR, &args(name.as_ptr() as u64, mode, 0)).value;
+        let path = Path::new(name.strip_suffix(b"\0").unwrap_or(name));
+        if r != 0 || mode_of(path) != Some(want) {
+            serial_println!(
+                "[syscall/linux]   mkdir({:o}) -> {}, mode {:?}",
+                mode,
+                r,
+                mode_of(path)
+            );
+            return fail("mkdir did not stamp its mode less the umask");
+        }
+    }
+
+    // A path past 255 bytes opens, as on Linux; one with no NUL in its first
+    // 4096 bytes is ENAMETOOLONG.
+    let mut deep = alloc::vec::Vec::from(&b"/tmp/linux-create-modes/"[..]);
+    deep.extend_from_slice(&[b'd'; 120]);
+    crate::fs::Vfs::mkdir(Path::new(&deep))?;
+    deep.push(b'/');
+    deep.extend_from_slice(&[b'e'; 120]);
+    crate::fs::Vfs::mkdir(Path::new(&deep))?;
+    deep.extend_from_slice(b"/file");
+    let deep_len = deep.len();
+    deep.push(0);
+    let r = dispatch_linux(nr::OPEN, &args(deep.as_ptr() as u64, create, 0o600)).value;
+    let deep_path = Path::new(deep.get(..deep_len).unwrap_or(&[]));
+    if deep_len <= 255 || r != ebadf || mode_of(deep_path) != Some(0o600) {
+        serial_println!(
+            "[syscall/linux]   open of a {}-byte path -> {}",
+            deep_len,
+            r
+        );
+        return fail("a path past 255 bytes was not opened");
+    }
+    let mut endless = alloc::vec![b'a'; 4100];
+    if let Some(first) = endless.first_mut() {
+        *first = b'/';
+    }
+    if let Some(last) = endless.last_mut() {
+        *last = 0;
+    }
+    let r = dispatch_linux(nr::OPEN, &args(endless.as_ptr() as u64, create, 0o600)).value;
+    if r != i64::from(errno::ENAMETOOLONG).wrapping_neg() {
+        serial_println!("[syscall/linux]   open of a 4099-byte path -> {}", r);
+        return fail("a path past PATH_MAX was not ENAMETOOLONG");
+    }
+
+    // The installer `openat` uses for a path relative to a directory
+    // descriptor takes bytes: a name that is not UTF-8 is created, with its
+    // mode. It answered EINVAL until 2026-10-01.
+    let odd = b"/tmp/linux-create-modes/\xff\xfe-odd";
+    let flags = oflags::O_CREAT | oflags::O_WRONLY;
+    let r = open_kernel_path_install(Path::new(odd), flags, 0o640, false, None).value;
+    if r != ebadf || mode_of(Path::new(odd)) != Some(0o640) {
+        serial_println!("[syscall/linux]   install of a non-UTF-8 name -> {}", r);
+        return fail("a name that is not UTF-8 was not created with its mode");
+    }
+
+    // A read-only open of a directory opens it (a kernel caller then gives
+    // the handle back: EBADF), as on Linux; one for writing is EISDIR. The
+    // first was EISDIR as well until 2026-10-01.
+    let dir = b"/tmp/linux-create-modes\0";
+    let ro = dispatch_linux(nr::OPEN, &args(dir.as_ptr() as u64, 0, 0)).value;
+    let rw = dispatch_linux(
+        nr::OPEN,
+        &args(dir.as_ptr() as u64, u64::from(oflags::O_RDWR), 0),
+    )
+    .value;
+    if ro != ebadf || rw != i64::from(errno::EISDIR).wrapping_neg() {
+        serial_println!(
+            "[syscall/linux]   open(dir, O_RDONLY) -> {}, open(dir, O_RDWR) -> {}",
+            ro,
+            rw
+        );
+        return fail("a read-only open of a directory did not open it");
+    }
+
+    // O_TMPFILE: the flags as Linux's `build_open_flags` takes them, an
+    // unnamed file in /tmp (a kernel caller gives its handle back: EBADF),
+    // and EOPNOTSUPP where one cannot be kept.
+    {
+        use crate::fs::handle::OpenFlags;
+        let rw_bits = OpenFlags::READ.bits() | OpenFlags::WRITE.bits();
+        let flag_cases = [
+            (oflags::O_TMPFILE | oflags::O_RDWR, Ok(Some(rw_bits))),
+            (
+                oflags::O_TMPFILE | oflags::O_WRONLY | oflags::O_EXCL,
+                Ok(Some(OpenFlags::WRITE.bits() | OpenFlags::EXCL.bits())),
+            ),
+            (oflags::O_TMPFILE | oflags::O_RDONLY, Err(errno::EINVAL)),
+            (oflags::O_TMPFILE_BIT | oflags::O_RDWR, Err(errno::EINVAL)),
+            (
+                oflags::O_TMPFILE | oflags::O_CREAT | oflags::O_RDWR,
+                Err(errno::EINVAL),
+            ),
+            (oflags::O_RDWR, Ok(None)),
+        ];
+        for (flags, want) in flag_cases {
+            if linux_tmpfile_flags(flags) != want {
+                serial_println!(
+                    "[syscall/linux]   O_TMPFILE flags {:o} -> {:?}, want {:?}",
+                    flags,
+                    linux_tmpfile_flags(flags),
+                    want
+                );
+                return fail("O_TMPFILE's flags were not taken as Linux takes them");
+            }
+        }
+        let tmp = b"/tmp\0";
+        let made = dispatch_linux(
+            nr::OPEN,
+            &args(
+                tmp.as_ptr() as u64,
+                u64::from(oflags::O_TMPFILE | oflags::O_RDWR),
+                0o600,
+            ),
+        )
+        .value;
+        let read_only = dispatch_linux(
+            nr::OPEN,
+            &args(tmp.as_ptr() as u64, u64::from(oflags::O_TMPFILE), 0o600),
+        )
+        .value;
+        if made != ebadf || read_only != i64::from(errno::EINVAL).wrapping_neg() {
+            serial_println!(
+                "[syscall/linux]   open(/tmp, O_TMPFILE|O_RDWR) -> {}, O_TMPFILE|O_RDONLY -> {}",
+                made,
+                read_only
+            );
+            return fail("O_TMPFILE did not open an unnamed file");
+        }
+        if crate::fs::selftest::is_mounted("/proc") {
+            let proc_dir = b"/proc\0";
+            let r = dispatch_linux(
+                nr::OPEN,
+                &args(
+                    proc_dir.as_ptr() as u64,
+                    u64::from(oflags::O_TMPFILE | oflags::O_RDWR),
+                    0o600,
+                ),
+            )
+            .value;
+            if r != i64::from(errno::EOPNOTSUPP).wrapping_neg() {
+                serial_println!("[syscall/linux]   open(/proc, O_TMPFILE|O_RDWR) -> {}", r);
+                return fail("O_TMPFILE where no unnamed file can be kept was not EOPNOTSUPP");
+            }
+        }
+        // linkat's `/proc/self/fd/N`: which paths name a descriptor.
+        let proc_fd = |p: &[u8]| proc_self_fd(Path::new(p), 42);
+        if proc_fd(b"/proc/self/fd/3") != Some(3)
+            || proc_fd(b"/proc/42/fd/17") != Some(17)
+            || proc_fd(b"/proc/thread-self/fd/0") != Some(0)
+            || proc_fd(b"/proc/43/fd/3").is_some()
+            || proc_fd(b"/proc/self/fd/").is_some()
+            || proc_fd(b"/proc/self/fd/3x").is_some()
+            || proc_fd(b"/tmp/self/fd/3").is_some()
+        {
+            return fail("a /proc/self/fd path was misread");
+        }
+    }
+
+    crate::fs::Vfs::remove_recursive(DIR)?;
+    serial_println!(
+        "[syscall/linux]   create modes: open/creat/mkdir take mode less the umask; paths to PATH_MAX, as bytes; open(dir, O_RDONLY); O_TMPFILE: OK"
+    );
     Ok(())
 }
 
@@ -76481,10 +76976,9 @@ pub fn self_test() -> crate::error::KernelResult<()> {
                 serial_println!("[syscall/linux]   FAIL: inotify_add_watch(NULL,mask=1) not EBADF");
                 return Err(KernelError::InternalError);
             }
-            // inotify_add_watch(_, path, mask=0) -> EBADF.  Pre-batch returned
-            // EINVAL on mask=0, but Linux accepts mask=0 (the watch is added
-            // and filters down to no events).  Now the fd lookup is the gate
-            // that fires.
+            // inotify_add_watch(_, path, mask=0) -> EINVAL, before the
+            // descriptor: 6.6 requires a valid bit (:753). It was EBADF here
+            // until 2026-10-01, on a comment that said Linux accepts it.
             let a = SyscallArgs {
                 arg0: 0,
                 arg1: 0x1000,
@@ -76493,9 +76987,46 @@ pub fn self_test() -> crate::error::KernelResult<()> {
                 arg4: 0,
                 arg5: 0,
             };
-            if dispatch_linux(nr::INOTIFY_ADD_WATCH, &a).value != -i64::from(errno::EBADF) {
-                serial_println!("[syscall/linux]   FAIL: inotify_add_watch(mask=0) not EBADF");
+            if dispatch_linux(nr::INOTIFY_ADD_WATCH, &a).value
+                != i64::from(errno::EINVAL).wrapping_neg()
+            {
+                serial_println!("[syscall/linux]   FAIL: inotify_add_watch(mask=0) not EINVAL");
                 return Err(KernelError::InternalError);
+            }
+            // The flags are valid bits: IN_ONLYDIR | IN_DONT_FOLLOW |
+            // IN_EXCL_UNLINK with IN_MODIFY passes the mask and meets the
+            // descriptor (EBADF in kernel context). ALL_INOTIFY_BITS was
+            // written 0xF007_EFFF until 2026-10-01 and refused all three as
+            // EINVAL; 0x0001_0000, which names nothing, it took.
+            for (mask, want, what) in [
+                (
+                    0x0700_0002_u64,
+                    errno::EBADF,
+                    "IN_ONLYDIR|IN_DONT_FOLLOW|IN_EXCL_UNLINK",
+                ),
+                (
+                    0x0001_0002_u64,
+                    errno::EINVAL,
+                    "0x0001_0000, no inotify bit",
+                ),
+            ] {
+                let a = SyscallArgs {
+                    arg0: 0,
+                    arg1: 0x1000,
+                    arg2: mask,
+                    arg3: 0,
+                    arg4: 0,
+                    arg5: 0,
+                };
+                if dispatch_linux(nr::INOTIFY_ADD_WATCH, &a).value != i64::from(want).wrapping_neg()
+                {
+                    serial_println!(
+                        "[syscall/linux]   FAIL: inotify_add_watch({}) not errno {}",
+                        what,
+                        want
+                    );
+                    return Err(KernelError::InternalError);
+                }
             }
             // inotify_add_watch(_, path, mask with bit outside ALL_INOTIFY_BITS)
             // -> EINVAL.  Bit 0x1000 (between IN_IGNORED and IN_ONLYDIR) is
@@ -76515,18 +77046,24 @@ pub fn self_test() -> crate::error::KernelResult<()> {
                 );
                 return Err(KernelError::InternalError);
             }
-            // inotify_add_watch(_, path, IN_MASK_ADD | IN_MASK_CREATE) -> EINVAL.
-            // The two flags are mutually exclusive; Linux rejects the combo.
+            // inotify_add_watch(bad fd, path, IN_MODIFY | IN_MASK_ADD |
+            // IN_MASK_CREATE) -> EBADF: 6.6 tests the pair after fdget
+            // (:761). It was EINVAL here, before the descriptor, until
+            // 2026-10-01.
             let a = SyscallArgs {
                 arg0: 0,
                 arg1: 0x1000,
-                arg2: 0x1000_0000 | 0x2000_0000,
+                arg2: 0x2 | 0x1000_0000 | 0x2000_0000,
                 arg3: 0,
                 arg4: 0,
                 arg5: 0,
             };
-            if dispatch_linux(nr::INOTIFY_ADD_WATCH, &a).value != -i64::from(errno::EINVAL) {
-                serial_println!("[syscall/linux]   FAIL: inotify_add_watch ADD+CREATE not EINVAL");
+            if dispatch_linux(nr::INOTIFY_ADD_WATCH, &a).value
+                != i64::from(errno::EBADF).wrapping_neg()
+            {
+                serial_println!(
+                    "[syscall/linux]   FAIL: inotify_add_watch(bad fd, ADD+CREATE) not EBADF"
+                );
                 return Err(KernelError::InternalError);
             }
             serial_println!("[syscall/linux]   inotify_add_watch mask/EBADF gating: OK");

@@ -207,6 +207,19 @@ fn node_list_xattrs(node: &MemFsNode) -> Vec<Vec<u8>> {
     node.xattrs.iter().map(|(k, _)| k.clone()).collect()
 }
 
+/// `utimensat` on a resolved node: each time that is not 0 is set, and the
+/// change time is now, as POSIX has it for any timestamp change. The change
+/// time was left as it was until 2026-10-01.
+fn node_set_times(node: &mut MemFsNode, accessed_ns: Timestamp, modified_ns: Timestamp) {
+    if accessed_ns != 0 {
+        node.accessed_ns = accessed_ns;
+    }
+    if modified_ns != 0 {
+        node.modified_ns = modified_ns;
+    }
+    node.changed_ns = metadata_now_ns();
+}
+
 impl MemFsNode {
     /// `len` bytes of the file from `offset`, fewer at its end; none past it.
     fn read_range(&self, offset: u64, len: usize) -> KernelResult<Vec<u8>> {
@@ -264,10 +277,11 @@ impl MemFsNode {
     /// Build a fresh node of `kind` with mode `permissions`, a newly
     /// allocated inode number and **one** link.
     ///
-    /// One link, not zero, because a node is only ever created in order to
-    /// be named: the three callers below each insert it under exactly one
-    /// name in the same operation.  Additional names go through
-    /// [`MemFs::add_link`], which is the only other place `links` grows.
+    /// One link, not zero, because a node is almost always created in order
+    /// to be named: the three callers below each insert it under exactly one
+    /// name in the same operation.  The exception, `create_unnamed`, sets it
+    /// to 0 itself.  Additional names go through [`MemFs::add_link`], which
+    /// is the only other place `links` grows.
     fn new(kind: MemFsNodeKind, permissions: u16) -> Self {
         let now = metadata_now_ns();
         Self {
@@ -1146,6 +1160,58 @@ impl FileSystem for MemFs {
         Ok(self.node(ino)?.to_file_meta(nlinks))
     }
 
+    fn create_unnamed(&mut self, dir: &Path, mode: u16) -> KernelResult<u64> {
+        let dir_ino = self.resolve_ino(dir)?;
+        let parent = self.node(dir_ino)?;
+        if !parent.is_dir() {
+            return Err(KernelError::NotADirectory);
+        }
+        // Nothing is made in an immutable directory, named or not.
+        if parent.attributes.contains(FileAttr::IMMUTABLE) {
+            return Err(KernelError::PermissionDenied);
+        }
+        let mut node = MemFsNode::new(MemFsNodeKind::File(Vec::new()), mode & 0o7777);
+        // No name, and one hold: the caller's (`pin_ino`'s count).
+        node.links = 0;
+        node.opens = 1;
+        let ino = node.ino;
+        self.inodes.insert(ino, node);
+        Ok(ino)
+    }
+
+    fn link_held_ino(&mut self, ino: u64, new_path: &Path) -> KernelResult<()> {
+        // Held, as the trait asks: a node with no name and no hold is gone.
+        if self.node(ino)?.opens == 0 {
+            return Err(KernelError::InvalidArgument);
+        }
+        self.link_ino(ino, new_path)
+    }
+
+    fn chmod_ino(&mut self, ino: u64, permissions: u16) -> KernelResult<()> {
+        let node = self.node_mut(ino)?;
+        node.permissions = permissions;
+        node.changed_ns = metadata_now_ns();
+        Ok(())
+    }
+
+    fn chown_ino(&mut self, ino: u64, uid: u32, gid: u32) -> KernelResult<()> {
+        let node = self.node_mut(ino)?;
+        node.uid = uid;
+        node.gid = gid;
+        node.changed_ns = metadata_now_ns();
+        Ok(())
+    }
+
+    fn utimes_ino(
+        &mut self,
+        ino: u64,
+        accessed_ns: Timestamp,
+        modified_ns: Timestamp,
+    ) -> KernelResult<()> {
+        node_set_times(self.node_mut(ino)?, accessed_ns, modified_ns);
+        Ok(())
+    }
+
     fn rename(&mut self, from: &Path, to: &Path) -> KernelResult<()> {
         // rename() does NOT follow the final component for either source
         // or destination — it moves the entry itself (including symlinks).
@@ -1380,13 +1446,7 @@ impl FileSystem for MemFs {
         accessed_ns: Timestamp,
         modified_ns: Timestamp,
     ) -> KernelResult<()> {
-        let node = self.resolve_mut(path)?;
-        if accessed_ns != 0 {
-            node.accessed_ns = accessed_ns;
-        }
-        if modified_ns != 0 {
-            node.modified_ns = modified_ns;
-        }
+        node_set_times(self.resolve_mut(path)?, accessed_ns, modified_ns);
         Ok(())
     }
 
@@ -1419,13 +1479,7 @@ impl FileSystem for MemFs {
         accessed_ns: Timestamp,
         modified_ns: Timestamp,
     ) -> KernelResult<()> {
-        let node = self.resolve_no_follow_mut(path)?;
-        if accessed_ns != 0 {
-            node.accessed_ns = accessed_ns;
-        }
-        if modified_ns != 0 {
-            node.modified_ns = modified_ns;
-        }
+        node_set_times(self.resolve_no_follow_mut(path)?, accessed_ns, modified_ns);
         Ok(())
     }
 

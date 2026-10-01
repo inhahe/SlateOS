@@ -33,63 +33,63 @@ use super::number::{
     SYS_CP_UNREGISTER, SYS_CP_WAIT, SYS_CPU_COUNT, SYS_CPU_CURRENT, SYS_CPU_TIMES, SYS_DEBUG_PRINT,
     SYS_DMA_ALLOC, SYS_DMA_ATTACH, SYS_DMA_DETACH, SYS_DMA_DOMAIN_CREATE, SYS_DMA_DOMAIN_DESTROY,
     SYS_DMA_FREE, SYS_DMA_MAP, SYS_DMA_UNMAP, SYS_DNS_CACHE_STATS, SYS_DNS_RESOLVE,
-    SYS_DNS_REVERSE_RESOLVE, SYS_DOMAINNAME_SET, SYS_DRM_ATOMIC_COMMIT, SYS_DRM_CLOSE,
-    SYS_DRM_CONNECTOR_STATUS, SYS_DRM_CRTC_INFO, SYS_DRM_CURSOR_MOVE, SYS_DRM_CURSOR_SET,
-    SYS_DRM_DISPLAY_SIZE, SYS_DRM_FB_CREATE, SYS_DRM_FB_DESTROY, SYS_DRM_FLUSH_REGION,
-    SYS_DRM_GEM_CREATE, SYS_DRM_GEM_DESTROY, SYS_DRM_GEM_MMAP, SYS_DRM_MODE_GET, SYS_DRM_OPEN,
-    SYS_DRM_PAGE_FLIP, SYS_EVENTFD_CLOSE, SYS_EVENTFD_CREATE, SYS_EVENTFD_HAS_VALUE,
-    SYS_EVENTFD_READ, SYS_EVENTFD_READ_TIMEOUT, SYS_EVENTFD_TRY_READ, SYS_EVENTFD_WRITE,
-    SYS_EVENTFD_WRITE_TIMEOUT, SYS_EXIT, SYS_FS_APPEND, SYS_FS_CHECK, SYS_FS_CLOSE, SYS_FS_COPY,
-    SYS_FS_DELETE, SYS_FS_DUP, SYS_FS_FALLOCATE, SYS_FS_FCHMODAT_PINNED, SYS_FS_FLOCK,
-    SYS_FS_FLOCK_HANDLE, SYS_FS_FORMAT, SYS_FS_FSTAT, SYS_FS_FSTATAT_PINNED, SYS_FS_FTRUNCATE,
-    SYS_FS_FUNLOCK, SYS_FS_GET_XATTR, SYS_FS_GETDENTS_PINNED, SYS_FS_HANDLE_PATH,
+    SYS_DNS_RESOLVE2, SYS_DNS_REVERSE_RESOLVE, SYS_DOMAINNAME_SET, SYS_DRM_ATOMIC_COMMIT,
+    SYS_DRM_CLOSE, SYS_DRM_CONNECTOR_STATUS, SYS_DRM_CRTC_INFO, SYS_DRM_CURSOR_MOVE,
+    SYS_DRM_CURSOR_SET, SYS_DRM_DISPLAY_SIZE, SYS_DRM_FB_CREATE, SYS_DRM_FB_DESTROY,
+    SYS_DRM_FLUSH_REGION, SYS_DRM_GEM_CREATE, SYS_DRM_GEM_DESTROY, SYS_DRM_GEM_MMAP,
+    SYS_DRM_MODE_GET, SYS_DRM_OPEN, SYS_DRM_PAGE_FLIP, SYS_EVENTFD_CLOSE, SYS_EVENTFD_CREATE,
+    SYS_EVENTFD_HAS_VALUE, SYS_EVENTFD_READ, SYS_EVENTFD_READ_TIMEOUT, SYS_EVENTFD_TRY_READ,
+    SYS_EVENTFD_WRITE, SYS_EVENTFD_WRITE_TIMEOUT, SYS_EXIT, SYS_FS_APPEND, SYS_FS_CHECK,
+    SYS_FS_CLOSE, SYS_FS_COPY, SYS_FS_DELETE, SYS_FS_DUP, SYS_FS_FALLOCATE, SYS_FS_FCHMODAT_PINNED,
+    SYS_FS_FLOCK, SYS_FS_FLOCK_HANDLE, SYS_FS_FORMAT, SYS_FS_FSTAT, SYS_FS_FSTATAT_PINNED,
+    SYS_FS_FTRUNCATE, SYS_FS_FUNLOCK, SYS_FS_GET_XATTR, SYS_FS_GETDENTS_PINNED, SYS_FS_HANDLE_PATH,
     SYS_FS_JOURNAL_CURSOR, SYS_FS_JOURNAL_FLUSH, SYS_FS_JOURNAL_READ, SYS_FS_LINK,
-    SYS_FS_LINKAT_PINNED, SYS_FS_LIST_DIR, SYS_FS_LIST_XATTRS, SYS_FS_LSTAT, SYS_FS_METADATA,
-    SYS_FS_MKDIR, SYS_FS_MKDIR_MODE, SYS_FS_MKDIRAT_PINNED, SYS_FS_MOUNT, SYS_FS_OPEN,
-    SYS_FS_OPEN_MODE, SYS_FS_OPENAT2, SYS_FS_PREAD, SYS_FS_PWRITE, SYS_FS_READ, SYS_FS_READ_FILE,
-    SYS_FS_READDIR_AT, SYS_FS_READLINK, SYS_FS_RECORD_LOCK, SYS_FS_REMOVE_XATTR, SYS_FS_RENAME,
-    SYS_FS_RENAMEAT_PINNED, SYS_FS_RMDIR, SYS_FS_SEEK, SYS_FS_SEEK_DATA, SYS_FS_SEEK_HOLE,
-    SYS_FS_SET_ATTR, SYS_FS_SET_OWNER, SYS_FS_SET_PERMS, SYS_FS_SET_TIMES, SYS_FS_SET_XATTR,
-    SYS_FS_STAT, SYS_FS_STATVFS, SYS_FS_SYMLINK, SYS_FS_SYMLINKAT_PINNED, SYS_FS_SYNC,
-    SYS_FS_TMPFILE, SYS_FS_TRASH, SYS_FS_TRASH_EMPTY, SYS_FS_TRASH_LIST, SYS_FS_TRASH_RESTORE,
-    SYS_FS_TRIM, SYS_FS_TRUNCATE, SYS_FS_UMOUNT, SYS_FS_UNLINKAT_PINNED, SYS_FS_UTIMENSAT_PINNED,
-    SYS_FS_WATCH_CLOSE, SYS_FS_WATCH_CREATE, SYS_FS_WATCH_READ, SYS_FS_WATCH_READ_RECORDS,
-    SYS_FS_WRITE, SYS_FS_WRITE_FILE, SYS_FUTEX_CMP_REQUEUE_PI, SYS_FUTEX_LOCK_PI,
-    SYS_FUTEX_LOCK_PI_TIMEOUT, SYS_FUTEX_REQUEUE, SYS_FUTEX_TRYLOCK_PI, SYS_FUTEX_UNLOCK_PI,
-    SYS_FUTEX_WAIT, SYS_FUTEX_WAIT_REQUEUE_PI, SYS_FUTEX_WAIT_TIMEOUT, SYS_FUTEX_WAKE,
-    SYS_GETRANDOM, SYS_HOSTNAME_SET, SYS_ICMP_PING, SYS_ICMP_PING_WAIT, SYS_IO_RING_DESTROY,
-    SYS_IO_RING_ENTER, SYS_IO_RING_SETUP, SYS_IRQ_REGISTER, SYS_IRQ_RELEASE, SYS_IRQ_WAIT,
-    SYS_ITIMER_GET, SYS_ITIMER_SET, SYS_KEYLAYOUT_SET, SYS_LOADAVG, SYS_LOG_READ,
-    SYS_MM_GET_PROFILE, SYS_MM_SET_PROFILE, SYS_MMAP, SYS_MPROTECT, SYS_MUNMAP,
-    SYS_NET_FW_ADD_RULE, SYS_NET_FW_DEL_RULE, SYS_NET_FW_ENABLE, SYS_NET_FW_FLUSH,
-    SYS_NET_FW_SET_POLICY, SYS_NET_IF_CONFIG, SYS_NET_IF_INFO, SYS_NET_RAW_CLOSE, SYS_NET_RAW_OPEN,
-    SYS_NET_RAW_RX, SYS_NET_RAW_TX, SYS_NET_ROUTE_ADD, SYS_NET_ROUTE_DEL, SYS_NET_ROUTE_LIST,
-    SYS_NET_STAT, SYS_NOTIFY_READY, SYS_NS_ATTACH, SYS_NS_BIND, SYS_NS_CREATE, SYS_NS_HIDE,
-    SYS_NS_QUERY, SYS_NS_UNBIND, SYS_PHYS_PAGES_AVAIL, SYS_PHYS_PAGES_TOTAL, SYS_PIPE_CLOSE,
-    SYS_PIPE_CREATE, SYS_PIPE_PEEK, SYS_PIPE_POLL, SYS_PIPE_READ, SYS_PIPE_READ_TIMEOUT,
-    SYS_PIPE_READABLE_BYTES, SYS_PIPE_TRY_READ, SYS_PIPE_TRY_WRITE, SYS_PIPE_WAIT_READABLE,
-    SYS_PIPE_WRITE, SYS_PIPE_WRITE_TIMEOUT, SYS_PORT_READ, SYS_PORT_WRITE, SYS_PROCESS_CHROOT,
-    SYS_PROCESS_COUNT, SYS_PROCESS_CRASH_INFO, SYS_PROCESS_GET_ARGS, SYS_PROCESS_GET_CREDENTIALS,
-    SYS_PROCESS_GET_CWD, SYS_PROCESS_GET_INITIAL_FDS, SYS_PROCESS_GET_NICE, SYS_PROCESS_GET_PGID,
-    SYS_PROCESS_GET_PRIORITY, SYS_PROCESS_GET_RUSAGE, SYS_PROCESS_GET_SID, SYS_PROCESS_ID,
-    SYS_PROCESS_IS_READY, SYS_PROCESS_KILL, SYS_PROCESS_PARENT_ID, SYS_PROCESS_SET_CREDENTIALS,
-    SYS_PROCESS_SET_CWD, SYS_PROCESS_SET_EXEC_CLOSE, SYS_PROCESS_SET_EXEC_FDS,
-    SYS_PROCESS_SET_NICE, SYS_PROCESS_SET_PGID, SYS_PROCESS_SET_PRIORITY, SYS_PROCESS_SET_SID,
-    SYS_PROCESS_SETGROUPS, SYS_PROCESS_SPAWN, SYS_PROCESS_SPAWN_EX, SYS_PROCESS_SPAWN_EX2,
-    SYS_PROCESS_TRY_WAIT, SYS_PROCESS_UMASK, SYS_PROCESS_WAIT, SYS_PROCESS_WAIT_STATUS,
-    SYS_PTY_CLOSE, SYS_PTY_CREATE, SYS_PTY_DUP, SYS_PTY_GET_PGRP, SYS_PTY_GET_TERMIOS,
-    SYS_PTY_GET_WINSIZE, SYS_PTY_MASTER_READ, SYS_PTY_MASTER_TRY_READ, SYS_PTY_MASTER_TRY_WRITE,
-    SYS_PTY_MASTER_WRITE, SYS_PTY_POLL, SYS_PTY_READABLE_BYTES, SYS_PTY_SET_PGRP,
-    SYS_PTY_SET_TERMIOS, SYS_PTY_SET_WINSIZE, SYS_PTY_SLAVE_ID, SYS_PTY_SLAVE_READ,
-    SYS_PTY_SLAVE_TRY_READ, SYS_PTY_SLAVE_WRITE, SYS_RLIMIT_GET, SYS_RLIMIT_SET,
-    SYS_SCHED_GET_PROFILE, SYS_SCHED_GET_TIMESLICE, SYS_SCHED_RECONFIGURE, SYS_SCHED_SET_PROFILE,
-    SYS_SCHED_SET_TIMESLICE, SYS_SECUREBOOT_ENROLL, SYS_SECUREBOOT_REMOVE, SYS_SECUREBOOT_VERIFY,
-    SYS_SEM_CLOSE, SYS_SEM_CREATE, SYS_SEM_SIGNAL, SYS_SEM_TRY_WAIT, SYS_SEM_WAIT,
-    SYS_SEM_WAIT_TIMEOUT, SYS_SERVICE_ACCEPT, SYS_SERVICE_ACCEPT_TIMEOUT, SYS_SERVICE_CONNECT,
-    SYS_SERVICE_REGISTER, SYS_SERVICE_TRY_ACCEPT, SYS_SERVICE_UNREGISTER,
-    SYS_SET_EXCEPTION_HANDLER, SYS_SET_FS_BASE, SYS_SHM_CLOSE, SYS_SHM_CREATE, SYS_SHM_MAP,
-    SYS_SHM_MAP_AT, SYS_SHM_SIZE, SYS_SHM_UNMAP, SYS_SIGNAL_ALTSTACK, SYS_SIGNAL_MASK,
-    SYS_SIGNAL_PENDING, SYS_SIGNAL_QUEUE, SYS_SIGNAL_REGISTER, SYS_SIGNAL_SEND,
+    SYS_FS_LINK_HANDLE, SYS_FS_LINKAT_PINNED, SYS_FS_LIST_DIR, SYS_FS_LIST_XATTRS, SYS_FS_LSTAT,
+    SYS_FS_METADATA, SYS_FS_MKDIR, SYS_FS_MKDIR_MODE, SYS_FS_MKDIRAT_PINNED, SYS_FS_MOUNT,
+    SYS_FS_OPEN, SYS_FS_OPEN_MODE, SYS_FS_OPENAT2, SYS_FS_PREAD, SYS_FS_PWRITE, SYS_FS_READ,
+    SYS_FS_READ_FILE, SYS_FS_READDIR_AT, SYS_FS_READLINK, SYS_FS_RECORD_LOCK, SYS_FS_REMOVE_XATTR,
+    SYS_FS_RENAME, SYS_FS_RENAMEAT_PINNED, SYS_FS_RMDIR, SYS_FS_SEEK, SYS_FS_SEEK_DATA,
+    SYS_FS_SEEK_HOLE, SYS_FS_SET_ATTR, SYS_FS_SET_OWNER, SYS_FS_SET_PERMS, SYS_FS_SET_STATUS_FLAGS,
+    SYS_FS_SET_TIMES, SYS_FS_SET_XATTR, SYS_FS_STAT, SYS_FS_STATVFS, SYS_FS_SYMLINK,
+    SYS_FS_SYMLINKAT_PINNED, SYS_FS_SYNC, SYS_FS_TMPFILE, SYS_FS_TRASH, SYS_FS_TRASH_EMPTY,
+    SYS_FS_TRASH_LIST, SYS_FS_TRASH_RESTORE, SYS_FS_TRIM, SYS_FS_TRUNCATE, SYS_FS_UMOUNT,
+    SYS_FS_UNLINKAT_PINNED, SYS_FS_UTIMENSAT_PINNED, SYS_FS_WATCH_CLOSE, SYS_FS_WATCH_CREATE,
+    SYS_FS_WATCH_READ, SYS_FS_WATCH_READ_RECORDS, SYS_FS_WRITE, SYS_FS_WRITE_FILE,
+    SYS_FUTEX_CMP_REQUEUE_PI, SYS_FUTEX_LOCK_PI, SYS_FUTEX_LOCK_PI_TIMEOUT, SYS_FUTEX_REQUEUE,
+    SYS_FUTEX_TRYLOCK_PI, SYS_FUTEX_UNLOCK_PI, SYS_FUTEX_WAIT, SYS_FUTEX_WAIT_REQUEUE_PI,
+    SYS_FUTEX_WAIT_TIMEOUT, SYS_FUTEX_WAKE, SYS_GETRANDOM, SYS_HOSTNAME_SET, SYS_ICMP_PING,
+    SYS_ICMP_PING_WAIT, SYS_IO_RING_DESTROY, SYS_IO_RING_ENTER, SYS_IO_RING_SETUP,
+    SYS_IRQ_REGISTER, SYS_IRQ_RELEASE, SYS_IRQ_WAIT, SYS_ITIMER_GET, SYS_ITIMER_SET,
+    SYS_KEYLAYOUT_SET, SYS_LOADAVG, SYS_LOG_READ, SYS_MM_GET_PROFILE, SYS_MM_SET_PROFILE, SYS_MMAP,
+    SYS_MPROTECT, SYS_MUNMAP, SYS_NET_FW_ADD_RULE, SYS_NET_FW_DEL_RULE, SYS_NET_FW_ENABLE,
+    SYS_NET_FW_FLUSH, SYS_NET_FW_SET_POLICY, SYS_NET_IF_CONFIG, SYS_NET_IF_INFO, SYS_NET_RAW_CLOSE,
+    SYS_NET_RAW_OPEN, SYS_NET_RAW_RX, SYS_NET_RAW_TX, SYS_NET_ROUTE_ADD, SYS_NET_ROUTE_DEL,
+    SYS_NET_ROUTE_LIST, SYS_NET_STAT, SYS_NOTIFY_READY, SYS_NS_ATTACH, SYS_NS_BIND, SYS_NS_CREATE,
+    SYS_NS_HIDE, SYS_NS_QUERY, SYS_NS_UNBIND, SYS_PHYS_PAGES_AVAIL, SYS_PHYS_PAGES_TOTAL,
+    SYS_PIPE_CLOSE, SYS_PIPE_CREATE, SYS_PIPE_PEEK, SYS_PIPE_POLL, SYS_PIPE_READ,
+    SYS_PIPE_READ_TIMEOUT, SYS_PIPE_READABLE_BYTES, SYS_PIPE_TRY_READ, SYS_PIPE_TRY_WRITE,
+    SYS_PIPE_WAIT_READABLE, SYS_PIPE_WRITE, SYS_PIPE_WRITE_TIMEOUT, SYS_PORT_READ, SYS_PORT_WRITE,
+    SYS_PROCESS_CHROOT, SYS_PROCESS_COUNT, SYS_PROCESS_CRASH_INFO, SYS_PROCESS_GET_ARGS,
+    SYS_PROCESS_GET_CREDENTIALS, SYS_PROCESS_GET_CWD, SYS_PROCESS_GET_INITIAL_FDS,
+    SYS_PROCESS_GET_NICE, SYS_PROCESS_GET_PGID, SYS_PROCESS_GET_PRIORITY, SYS_PROCESS_GET_RUSAGE,
+    SYS_PROCESS_GET_SID, SYS_PROCESS_ID, SYS_PROCESS_IS_READY, SYS_PROCESS_KILL,
+    SYS_PROCESS_PARENT_ID, SYS_PROCESS_SET_CREDENTIALS, SYS_PROCESS_SET_CWD,
+    SYS_PROCESS_SET_EXEC_CLOSE, SYS_PROCESS_SET_EXEC_FDS, SYS_PROCESS_SET_NICE,
+    SYS_PROCESS_SET_PGID, SYS_PROCESS_SET_PRIORITY, SYS_PROCESS_SET_SID, SYS_PROCESS_SETGROUPS,
+    SYS_PROCESS_SPAWN, SYS_PROCESS_SPAWN_EX, SYS_PROCESS_SPAWN_EX2, SYS_PROCESS_TRY_WAIT,
+    SYS_PROCESS_UMASK, SYS_PROCESS_WAIT, SYS_PROCESS_WAIT_STATUS, SYS_PTY_CLOSE, SYS_PTY_CREATE,
+    SYS_PTY_DUP, SYS_PTY_GET_PGRP, SYS_PTY_GET_TERMIOS, SYS_PTY_GET_WINSIZE, SYS_PTY_MASTER_READ,
+    SYS_PTY_MASTER_TRY_READ, SYS_PTY_MASTER_TRY_WRITE, SYS_PTY_MASTER_WRITE, SYS_PTY_POLL,
+    SYS_PTY_READABLE_BYTES, SYS_PTY_SET_PGRP, SYS_PTY_SET_TERMIOS, SYS_PTY_SET_WINSIZE,
+    SYS_PTY_SLAVE_ID, SYS_PTY_SLAVE_READ, SYS_PTY_SLAVE_TRY_READ, SYS_PTY_SLAVE_WRITE,
+    SYS_RLIMIT_GET, SYS_RLIMIT_SET, SYS_SCHED_GET_PROFILE, SYS_SCHED_GET_TIMESLICE,
+    SYS_SCHED_RECONFIGURE, SYS_SCHED_SET_PROFILE, SYS_SCHED_SET_TIMESLICE, SYS_SECUREBOOT_ENROLL,
+    SYS_SECUREBOOT_REMOVE, SYS_SECUREBOOT_VERIFY, SYS_SEM_CLOSE, SYS_SEM_CREATE, SYS_SEM_SIGNAL,
+    SYS_SEM_TRY_WAIT, SYS_SEM_WAIT, SYS_SEM_WAIT_TIMEOUT, SYS_SERVICE_ACCEPT,
+    SYS_SERVICE_ACCEPT_TIMEOUT, SYS_SERVICE_CONNECT, SYS_SERVICE_REGISTER, SYS_SERVICE_TRY_ACCEPT,
+    SYS_SERVICE_UNREGISTER, SYS_SET_EXCEPTION_HANDLER, SYS_SET_FS_BASE, SYS_SHM_CLOSE,
+    SYS_SHM_CREATE, SYS_SHM_MAP, SYS_SHM_MAP_AT, SYS_SHM_SIZE, SYS_SHM_UNMAP, SYS_SIGNAL_ALTSTACK,
+    SYS_SIGNAL_MASK, SYS_SIGNAL_PENDING, SYS_SIGNAL_QUEUE, SYS_SIGNAL_REGISTER, SYS_SIGNAL_SEND,
     SYS_SIGNAL_STOP_SELF, SYS_SIGNAL_TGKILL, SYS_SLEEP, SYS_SOCKETPAIR_CLOSE,
     SYS_SOCKETPAIR_CREATE, SYS_SOCKETPAIR_POLL, SYS_SOCKETPAIR_READABLE_BYTES, SYS_SOCKETPAIR_RECV,
     SYS_SOCKETPAIR_RECV_TIMEOUT, SYS_SOCKETPAIR_SEND, SYS_SOCKETPAIR_SEND_TIMEOUT,
@@ -562,6 +562,9 @@ const fn build_v1_table() -> SyscallTable {
     handlers[SYS_CPU_CURRENT as usize] = Some(handlers::sys_cpu_current);
     handlers[SYS_FS_RECORD_LOCK as usize] = Some(handlers::sys_fs_record_lock);
     handlers[SYS_FS_FLOCK_HANDLE as usize] = Some(handlers::sys_fs_flock_handle);
+    handlers[SYS_FS_SET_STATUS_FLAGS as usize] = Some(handlers::sys_fs_set_status_flags);
+    handlers[SYS_FS_LINK_HANDLE as usize] = Some(handlers::sys_fs_link_handle);
+    handlers[SYS_DNS_RESOLVE2 as usize] = Some(handlers::sys_dns_resolve2);
     handlers[SYS_SIGNAL_MASK as usize] = Some(handlers::sys_signal_mask);
     handlers[SYS_SIGNAL_PENDING as usize] = Some(handlers::sys_signal_pending);
     handlers[SYS_SIGNAL_STOP_SELF as usize] = Some(handlers::sys_signal_stop_self);
@@ -1231,9 +1234,260 @@ pub fn self_test_fs() -> KernelResult<()> {
     test_dispatch_record_lock()?;
     test_dispatch_flock()?;
     test_dispatch_fs_gates()?;
+    test_dispatch_status_flags()?;
+    test_dispatch_tmpfile()?;
+    test_dispatch_dns_resolve2()?;
 
     serial_println!("[syscall] Post-mount dispatch self-test PASSED");
     Ok(())
+}
+
+/// `SYS_DNS_RESOLVE2` (1097), answered from the kernel's hosts table so no
+/// query leaves the machine:
+/// - `localhost` as `AF_UNSPEC`: `::1` then `127.0.0.1`, canonical
+///   `localhost`, in the layout the number's doc gives;
+/// - as `AF_INET`, the one IPv4 record;
+/// - a buffer that cannot hold the answer is `BufferTooSmall`, with nothing
+///   written; a family that is not one of the three, `InvalidArgument`.
+fn test_dispatch_dns_resolve2() -> KernelResult<()> {
+    const AF_UNSPEC: u64 = 0;
+    const AF_INET: u64 = 2;
+    let name = b"localhost";
+    let resolve = |family: u64, out: &mut [u8]| {
+        dispatch(
+            SYS_DNS_RESOLVE2,
+            &SyscallArgs {
+                arg0: name.as_ptr() as u64,
+                arg1: name.len() as u64,
+                arg2: family,
+                arg3: out.as_mut_ptr() as u64,
+                arg4: out.len() as u64,
+                arg5: 0,
+            },
+        )
+        .value
+    };
+    let fail = |what: &str| {
+        serial_println!("[syscall]   FAIL: SYS_DNS_RESOLVE2: {}", what);
+        Err(KernelError::InternalError)
+    };
+
+    let mut out = [0xEEu8; 128];
+    let n = resolve(AF_UNSPEC, &mut out);
+    let mut want = alloc::vec::Vec::new();
+    want.extend_from_slice(&2u16.to_le_bytes());
+    want.extend_from_slice(&9u16.to_le_bytes());
+    want.extend_from_slice(b"localhost\0");
+    want.extend_from_slice(&10u16.to_le_bytes());
+    want.extend_from_slice(&[0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1]);
+    want.extend_from_slice(&2u16.to_le_bytes());
+    want.extend_from_slice(&[127, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
+    if n != 2 || out.get(..want.len()) != Some(want.as_slice()) {
+        serial_println!(
+            "[syscall]   AF_UNSPEC localhost -> {}, {:02x?}",
+            n,
+            out.get(..want.len())
+        );
+        return fail("localhost as AF_UNSPEC was not ::1 then 127.0.0.1, canonical localhost");
+    }
+    let mut out = [0u8; 64];
+    let n = resolve(AF_INET, &mut out);
+    if n != 1 || out.get(14..20) != Some([2u8, 0, 127, 0, 0, 1].as_slice()) {
+        return fail("localhost as AF_INET was not 127.0.0.1 alone");
+    }
+    let mut small = [0xEEu8; 8];
+    let too_small = resolve(AF_UNSPEC, &mut small);
+    if too_small != i64::from(KernelError::BufferTooSmall.code()) || small != [0xEE; 8] {
+        return fail("a buffer too small for the answer was written, or not refused");
+    }
+    let mut out = [0u8; 64];
+    if resolve(99, &mut out) != i64::from(KernelError::InvalidArgument.code()) {
+        return fail("an unknown family was accepted");
+    }
+    serial_println!(
+        "[syscall]   SYS_DNS_RESOLVE2 (1097): every address, the canonical name, the layout: OK"
+    );
+    Ok(())
+}
+
+/// `SYS_FS_TMPFILE` (648) and `SYS_FS_LINK_HANDLE` (1096), on `/tmp`:
+/// - a file made with no name is written through its handle, and named
+///   by the second door, after which its name reads what was written;
+/// - one made with `EXCL` is not named (`NotFound`);
+/// - flags that do not allow writing are `InvalidArgument`;
+/// - a process that does not hold the handle cannot name it
+///   (`InvalidHandle`).
+fn test_dispatch_tmpfile() -> KernelResult<()> {
+    use crate::fs::handle::{self, OpenFlags};
+    use crate::proc::pcb;
+    use crate::proc::thread::self_test_as_process;
+
+    const NAME: &str = "/tmp/tmpfile-dispatch-selftest";
+    let dir = b"/tmp";
+    let name = NAME.as_bytes();
+    let args = |arg0: u64, arg1: u64, arg2: u64| SyscallArgs {
+        arg0,
+        arg1,
+        arg2,
+        arg3: 0,
+        arg4: 0,
+        arg5: 0,
+    };
+    let rw = u64::from(OpenFlags::READ.union(OpenFlags::WRITE).bits());
+    let excl = rw | u64::from(OpenFlags::EXCL.bits());
+    let tmpfile = |flags: u64| {
+        dispatch(
+            SYS_FS_TMPFILE,
+            &args(dir.as_ptr() as u64, dir.len() as u64, flags),
+        )
+        .value
+    };
+    let link = |h: u64| {
+        dispatch(
+            SYS_FS_LINK_HANDLE,
+            &args(h, name.as_ptr() as u64, name.len() as u64),
+        )
+        .value
+    };
+    // Best effort: a leftover from an earlier boot's failure.
+    let _ = crate::fs::Vfs::remove(NAME);
+    let stranger = pcb::create("tmpfile-dispatch", 0);
+
+    let outcome = (|| -> Result<(), &'static str> {
+        let h = u64::try_from(tmpfile(rw)).map_err(|_| "SYS_FS_TMPFILE refused a writable open")?;
+        let wrote = handle::write(h, b"made unnamed");
+        let theirs = self_test_as_process(stranger, || link(h));
+        let named = link(h);
+        // Best effort: this test's own handle.
+        let _ = handle::close(h);
+        if wrote != Ok(12) {
+            return Err("the unnamed file was not written through its handle");
+        }
+        if theirs != i64::from(KernelError::InvalidHandle.code()) {
+            return Err("a process named a file through a handle it does not hold");
+        }
+        if named != 0
+            || crate::fs::Vfs::read_file(NAME).as_deref() != Ok(b"made unnamed".as_slice())
+        {
+            return Err("SYS_FS_LINK_HANDLE did not name the file with what was written");
+        }
+        let h = u64::try_from(tmpfile(excl)).map_err(|_| "SYS_FS_TMPFILE refused EXCL")?;
+        let _ = crate::fs::Vfs::remove(NAME);
+        let refused = link(h);
+        // Best effort: this test's own handle.
+        let _ = handle::close(h);
+        if refused != i64::from(KernelError::NotFound.code()) {
+            return Err("a file made with EXCL was named");
+        }
+        let read_only = u64::from(OpenFlags::READ.bits());
+        if tmpfile(read_only) != i64::from(KernelError::InvalidArgument.code()) {
+            return Err("a read-only unnamed file was made");
+        }
+        Ok(())
+    })();
+
+    pcb::destroy(stranger);
+    // Best effort: this test's scratch name.
+    let _ = crate::fs::Vfs::remove(NAME);
+    match outcome {
+        Ok(()) => {
+            serial_println!(
+                "[syscall]   tmpfile: SYS_FS_TMPFILE (648) makes it unnamed, SYS_FS_LINK_HANDLE (1096) names it: OK"
+            );
+            Ok(())
+        }
+        Err(msg) => {
+            serial_println!("[syscall]   FAIL: tmpfile: {}", msg);
+            Err(KernelError::InternalError)
+        }
+    }
+}
+
+/// `SYS_FS_SET_STATUS_FLAGS` (1095), on a file in `/tmp`:
+/// - with `APPEND` set, a write after a seek to 0 lands at the end;
+/// - cleared, the next lands at the cursor again;
+/// - a bit above bit 8 is `InvalidArgument`, a directory `IsADirectory`;
+/// - a process that does not hold the handle gets `InvalidHandle`.
+fn test_dispatch_status_flags() -> KernelResult<()> {
+    use crate::fs::handle::{self, OpenFlags, SeekFrom};
+    use crate::proc::pcb;
+    use crate::proc::thread::self_test_as_process;
+
+    const PATH: &str = "/tmp/status-flags-selftest";
+    let args = |arg0: u64, arg1: u64| SyscallArgs {
+        arg0,
+        arg1,
+        arg2: 0,
+        arg3: 0,
+        arg4: 0,
+        arg5: 0,
+    };
+    // Best effort: a leftover from an earlier boot's failure.
+    let _ = crate::fs::Vfs::remove(PATH);
+    crate::fs::Vfs::write_file(PATH, b"abc")?;
+    let h = handle::open(PATH, OpenFlags::READ.union(OpenFlags::WRITE))?;
+    let dir = handle::open("/tmp", OpenFlags::READ.union(OpenFlags::DIRECTORY))?;
+    let stranger = pcb::create("status-flags", 0);
+    let append = u64::from(OpenFlags::APPEND.bits());
+
+    let outcome = (|| -> Result<(), &'static str> {
+        let rewrite_at_start = |data: &[u8]| -> Result<(), &'static str> {
+            handle::seek(h, SeekFrom::Start(0)).map_err(|_| "a seek failed")?;
+            handle::write(h, data).map_err(|_| "a write failed")?;
+            Ok(())
+        };
+        let contents = || crate::fs::Vfs::read_file(PATH).unwrap_or_default();
+
+        if dispatch(SYS_FS_SET_STATUS_FLAGS, &args(h, append)).value != 0 {
+            return Err("setting APPEND was refused");
+        }
+        rewrite_at_start(b"d")?;
+        if contents() != b"abcd" {
+            return Err("a write with APPEND set did not land at the end");
+        }
+        if dispatch(SYS_FS_SET_STATUS_FLAGS, &args(h, 0)).value != 0 {
+            return Err("clearing APPEND was refused");
+        }
+        rewrite_at_start(b"X")?;
+        if contents() != b"Xbcd" {
+            return Err("a write with APPEND cleared did not land at the cursor");
+        }
+        if dispatch(SYS_FS_SET_STATUS_FLAGS, &args(h, 1 << 9)).value
+            != i64::from(KernelError::InvalidArgument.code())
+        {
+            return Err("a bit above bit 8 was accepted");
+        }
+        if dispatch(SYS_FS_SET_STATUS_FLAGS, &args(dir, append)).value
+            != i64::from(KernelError::IsADirectory.code())
+        {
+            return Err("a directory handle took APPEND");
+        }
+        let theirs = self_test_as_process(stranger, || {
+            dispatch(SYS_FS_SET_STATUS_FLAGS, &args(h, append)).value
+        });
+        if theirs != i64::from(KernelError::InvalidHandle.code()) {
+            return Err("a process set the flags of a handle it does not hold");
+        }
+        Ok(())
+    })();
+
+    pcb::destroy(stranger);
+    // Best effort, all three: scratch state this test made.
+    let _ = handle::close(dir);
+    let _ = handle::close(h);
+    let _ = crate::fs::Vfs::remove(PATH);
+    match outcome {
+        Ok(()) => {
+            serial_println!(
+                "[syscall]   status flags: SYS_FS_SET_STATUS_FLAGS (1095) sets and clears APPEND: OK"
+            );
+            Ok(())
+        }
+        Err(msg) => {
+            serial_println!("[syscall]   FAIL: status flags: {}", msg);
+            Err(KernelError::InternalError)
+        }
+    }
 }
 
 /// Verify the **native** `SYS_FS_OPENAT2` (661): its resolve-bit gate, the

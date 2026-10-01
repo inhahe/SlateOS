@@ -409,13 +409,7 @@ pub fn handle_scancode() {
     let pressed = scancode & 0x80 == 0;
     let code = scancode & 0x7F;
 
-    publish_evdev(code, extended, pressed);
-
-    if extended {
-        handle_extended(code, pressed);
-    } else {
-        handle_normal(code, pressed);
-    }
+    process_set1(extended, code, pressed);
 }
 
 /// Translate one scan code to a Linux keycode and publish it to
@@ -1477,18 +1471,6 @@ fn flush_output_buffer() {
 // USB HID keyboard integration
 // ---------------------------------------------------------------------------
 
-/// USB HID modifier bitmask constants (boot protocol report byte 0).
-const USB_MOD_LEFT_CTRL: u8 = 1 << 0;
-const USB_MOD_LEFT_SHIFT: u8 = 1 << 1;
-const USB_MOD_LEFT_ALT: u8 = 1 << 2;
-#[allow(dead_code)]
-const USB_MOD_LEFT_GUI: u8 = 1 << 3;
-const USB_MOD_RIGHT_CTRL: u8 = 1 << 4;
-const USB_MOD_RIGHT_SHIFT: u8 = 1 << 5;
-const USB_MOD_RIGHT_ALT: u8 = 1 << 6;
-#[allow(dead_code)]
-const USB_MOD_RIGHT_GUI: u8 = 1 << 7;
-
 /// Previous USB HID keyboard report state for detecting press/release.
 ///
 /// USB HID boot protocol sends a full snapshot of pressed keys each
@@ -1501,105 +1483,212 @@ static USB_PREV_KEYCODES: [AtomicU8; 6] = {
 };
 static USB_PREV_MODIFIERS: AtomicU8 = AtomicU8::new(0);
 
+/// The scan code set 1 code of a USB HID keyboard usage (page 0x07), and
+/// whether it is `0xE0`-prefixed: what a PS/2 keyboard sends for the same
+/// key, so a USB key goes the PS/2 path from there (`process_set1`).
+///
+/// The xHCI table this replaced was a table of `u8` and could not name an
+/// extended code: the arrows and the navigation block came out as the
+/// keypad's codes (`0x4B` is keypad 4, not Left), and Print Screen and Pause
+/// as nothing. `None` for a usage with no set-1 code (F13 and up, keypad =,
+/// the rollover error).
+#[must_use]
+fn usb_usage_to_set1(usage: u8) -> Option<(bool, u8)> {
+    let normal = |code: u8| Some((false, code));
+    let extended = |code: u8| Some((true, code));
+    match usage {
+        // Letters, in HID order a..z.
+        0x04 => normal(0x1E),
+        0x05 => normal(0x30),
+        0x06 => normal(0x2E),
+        0x07 => normal(0x20),
+        0x08 => normal(0x12),
+        0x09 => normal(0x21),
+        0x0A => normal(0x22),
+        0x0B => normal(0x23),
+        0x0C => normal(0x17),
+        0x0D => normal(0x24),
+        0x0E => normal(0x25),
+        0x0F => normal(0x26),
+        0x10 => normal(0x32),
+        0x11 => normal(0x31),
+        0x12 => normal(0x18),
+        0x13 => normal(0x19),
+        0x14 => normal(0x10),
+        0x15 => normal(0x13),
+        0x16 => normal(0x1F),
+        0x17 => normal(0x14),
+        0x18 => normal(0x16),
+        0x19 => normal(0x2F),
+        0x1A => normal(0x11),
+        0x1B => normal(0x2D),
+        0x1C => normal(0x15),
+        0x1D => normal(0x2C),
+        // 1..9, then 0: set 1's 0x02..=0x0B in the same order.
+        // (Within the range the subtraction cannot wrap.)
+        0x1E..=0x27 => normal(usage.wrapping_sub(0x1C)),
+        0x28 => normal(0x1C),        // Enter
+        0x29 => normal(0x01),        // Escape
+        0x2A => normal(0x0E),        // Backspace
+        0x2B => normal(0x0F),        // Tab
+        0x2C => normal(0x39),        // Space
+        0x2D => normal(0x0C),        // - _
+        0x2E => normal(0x0D),        // = +
+        0x2F => normal(0x1A),        // [ {
+        0x30 => normal(0x1B),        // ] }
+        0x31 | 0x32 => normal(0x2B), // \ |, and the non-US # ~ in its place
+        0x33 => normal(0x27),        // ; :
+        0x34 => normal(0x28),        // ' "
+        0x35 => normal(0x29),        // ` ~
+        0x36 => normal(0x33),        // , <
+        0x37 => normal(0x34),        // . >
+        0x38 => normal(0x35),        // / ?
+        0x39 => normal(0x3A),        // Caps Lock
+        // F1..F10 are set 1's 0x3B..=0x44; F11 and F12 are not next to them.
+        0x3A..=0x43 => normal(usage.wrapping_add(1)),
+        0x44 => normal(0x57),   // F11
+        0x45 => normal(0x58),   // F12
+        0x46 => extended(0x37), // Print Screen
+        0x47 => normal(0x46),   // Scroll Lock
+        0x48 => extended(0x46), // Pause, as its Ctrl+Break form: KEY_PAUSE
+        0x49 => extended(0x52), // Insert
+        0x4A => extended(0x47), // Home
+        0x4B => extended(0x49), // Page Up
+        0x4C => extended(0x53), // Delete
+        0x4D => extended(0x4F), // End
+        0x4E => extended(0x51), // Page Down
+        0x4F => extended(0x4D), // Right
+        0x50 => extended(0x4B), // Left
+        0x51 => extended(0x50), // Down
+        0x52 => extended(0x48), // Up
+        0x53 => normal(0x45),   // Num Lock
+        0x54 => extended(0x35), // keypad /
+        0x55 => normal(0x37),   // keypad *
+        0x56 => normal(0x4A),   // keypad -
+        0x57 => normal(0x4E),   // keypad +
+        0x58 => extended(0x1C), // keypad Enter
+        0x59 => normal(0x4F),   // keypad 1
+        0x5A => normal(0x50),   // keypad 2
+        0x5B => normal(0x51),   // keypad 3
+        0x5C => normal(0x4B),   // keypad 4
+        0x5D => normal(0x4C),   // keypad 5
+        0x5E => normal(0x4D),   // keypad 6
+        0x5F => normal(0x47),   // keypad 7
+        0x60 => normal(0x48),   // keypad 8
+        0x61 => normal(0x49),   // keypad 9
+        0x62 => normal(0x52),   // keypad 0
+        0x63 => normal(0x53),   // keypad .
+        0x64 => normal(0x56),   // the ISO key beside left Shift
+        0x65 => extended(0x5D), // Application (Menu)
+        0x66 => extended(0x5E), // Power
+        0x7F => extended(0x20), // Mute
+        0x80 => extended(0x30), // Volume Up
+        0x81 => extended(0x2E), // Volume Down
+        _ => None,
+    }
+}
+
+/// The set-1 code of each bit of a USB HID modifier byte, bit 0 first: left
+/// Ctrl, Shift, Alt, GUI, then the right four. The right Ctrl and Alt and
+/// both GUI keys are `0xE0`-prefixed, as on PS/2.
+const USB_MODIFIER_SET1: [(bool, u8); 8] = [
+    (false, 0x1D), // left Ctrl
+    (false, 0x2A), // left Shift
+    (false, 0x38), // left Alt
+    (true, 0x5B),  // left GUI: KEY_LEFTMETA
+    (true, 0x1D),  // right Ctrl
+    (false, 0x36), // right Shift
+    (true, 0x38),  // right Alt
+    (true, 0x5C),  // right GUI: KEY_RIGHTMETA
+];
+
+/// The HID usage a keyboard reports in every slot when more keys are down
+/// than it can tell apart ("ErrorRollOver"): the report says nothing about
+/// which keys are down, and is passed over.
+const USB_ROLLOVER: u8 = 0x01;
+
+/// The key transitions between two USB HID boot reports, as set-1 codes,
+/// each given to `emit` as `(extended, code, pressed)`: modifiers first, then
+/// releases, then presses. A report boot protocol cannot read -- the
+/// rollover error -- has none.
+///
+/// A callback rather than a list: the report is handled in the timer
+/// interrupt (`usb_hid_tick`), where nothing may allocate.
+fn usb_report_transitions(
+    prev_modifiers: u8,
+    prev_keys: [u8; 6],
+    modifiers: u8,
+    keys: [u8; 6],
+    mut emit: impl FnMut(bool, u8, bool),
+) {
+    if keys.contains(&USB_ROLLOVER) {
+        return;
+    }
+    let changed = prev_modifiers ^ modifiers;
+    for (bit, &(extended, code)) in USB_MODIFIER_SET1.iter().enumerate() {
+        let mask = 1u8 << bit;
+        if changed & mask != 0 {
+            emit(extended, code, modifiers & mask != 0);
+        }
+    }
+    let real = |usage: &&u8| **usage != 0 && **usage != USB_ROLLOVER;
+    for usage in prev_keys.iter().filter(real) {
+        if !keys.contains(usage)
+            && let Some((extended, code)) = usb_usage_to_set1(*usage)
+        {
+            emit(extended, code, false);
+        }
+    }
+    for usage in keys.iter().filter(real) {
+        if !prev_keys.contains(usage)
+            && let Some((extended, code)) = usb_usage_to_set1(*usage)
+        {
+            emit(extended, code, true);
+        }
+    }
+}
+
 /// Process a USB HID boot protocol keyboard report.
 ///
-/// Detects newly-pressed keys by comparing against the previous report,
-/// converts them to PS/2 scan codes via the xHCI HID-to-scancode table,
-/// and feeds the resulting characters into the shared ring buffer.
-///
-/// This allows USB keyboards to work identically to PS/2 keyboards
-/// from the kshell's perspective.
+/// Each change since the previous report -- a key or a modifier pressed or
+/// released -- goes the way the same key's scan code goes on PS/2
+/// (`process_set1`): to `/dev/input/event0`, which the desktop reads, and to
+/// the console. Until 2026-10-01 only new presses were turned into console
+/// characters: the desktop got no USB key at all, releases were lost, the
+/// Super keys were dropped, and the navigation keys came out as keypad keys
+/// (lane C's request `c-a-keys-that-never-reach-the-desktop`).
 ///
 /// # Arguments
 ///
 /// * `modifiers` — HID modifier bitmask (byte 0 of boot report)
 /// * `keycodes` — six keycode slots (bytes 2-7 of boot report)
 pub fn handle_usb_hid_report(modifiers: u8, keycodes: [u8; 6]) {
-    // Update modifier state from HID modifier byte.
-    let prev_mods = USB_PREV_MODIFIERS.swap(modifiers, Ordering::AcqRel);
-    update_usb_modifiers(modifiers, prev_mods);
-
-    // Load previous keycodes.
     let mut prev = [0u8; 6];
     for (slot, prev_slot) in USB_PREV_KEYCODES.iter().zip(prev.iter_mut()) {
         *prev_slot = slot.load(Ordering::Acquire);
     }
-
-    // Detect released keys (in prev but not in new) — used to clear
-    // modifier/state if needed; no character output for releases.
-    // (Modifier releases are already handled above via the modifier byte.)
-
-    // Detect newly pressed keys (in new but not in prev).
-    for &keycode in &keycodes {
-        if keycode == 0 || keycode == 1 {
-            // 0 = no key, 1 = error rollover (phantom keys).
-            continue;
-        }
-        // Check if this key was already pressed in the previous report.
-        let was_pressed = prev.contains(&keycode);
-        if !was_pressed {
-            // New key press — convert to PS/2 scan code and process.
-            if let Some(scancode) = usb_hid_to_scancode(keycode) {
-                // Feed through the existing PS/2 scan code → ASCII pipeline.
-                handle_usb_scancode(scancode, modifiers);
-            }
-        }
+    let prev_mods = USB_PREV_MODIFIERS.load(Ordering::Acquire);
+    // The rollover error says nothing about which keys are down: the last
+    // readable report stands.
+    if keycodes.contains(&USB_ROLLOVER) {
+        return;
     }
-
-    // Store current keycodes as previous for next comparison.
+    usb_report_transitions(prev_mods, prev, modifiers, keycodes, process_set1);
+    USB_PREV_MODIFIERS.store(modifiers, Ordering::Release);
     for (slot, &kc) in USB_PREV_KEYCODES.iter().zip(keycodes.iter()) {
         slot.store(kc, Ordering::Release);
     }
 }
 
-/// Update atomic modifier state from USB HID modifier bitmask changes.
-fn update_usb_modifiers(current: u8, _prev: u8) {
-    // USB HID modifier byte gives us the complete modifier state each
-    // report.  We update the global atomic modifier booleans directly
-    // (shared with PS/2 path).
-    LEFT_SHIFT.store(current & USB_MOD_LEFT_SHIFT != 0, Ordering::Release);
-    RIGHT_SHIFT.store(current & USB_MOD_RIGHT_SHIFT != 0, Ordering::Release);
-    LEFT_CTRL.store(current & USB_MOD_LEFT_CTRL != 0, Ordering::Release);
-    RIGHT_CTRL.store(current & USB_MOD_RIGHT_CTRL != 0, Ordering::Release);
-    LEFT_ALT.store(current & USB_MOD_LEFT_ALT != 0, Ordering::Release);
-    RIGHT_ALT.store(current & USB_MOD_RIGHT_ALT != 0, Ordering::Release);
-}
-
-/// Convert a USB HID usage code to a PS/2 scan code set 1 value.
-///
-/// Returns None for unmapped or reserved HID usage codes.
-fn usb_hid_to_scancode(hid_usage: u8) -> Option<u8> {
-    // Use the xhci module's HID_TO_SCANCODE table via the public API.
-    // Since we're in the same kernel, we can call it directly.
-    let report = crate::xhci::HidKeyboardReport {
-        modifiers: 0,
-        reserved: 0,
-        keycodes: [hid_usage, 0, 0, 0, 0, 0],
-    };
-    crate::xhci::hid_report_to_scancode(&report)
-}
-
-/// Process a PS/2 scan code generated from a USB HID keycode.
-///
-/// Uses the current modifier state (already updated from the HID
-/// modifier byte) to translate the scan code to an ASCII character
-/// and push it into the ring buffer.
-fn handle_usb_scancode(scancode: u8, _hid_modifiers: u8) {
-    // Handle Caps Lock toggle (HID usage 0x39 → PS/2 0x3A).
-    if scancode == 0x3A {
-        let old = CAPS_LOCK.load(Ordering::Acquire);
-        CAPS_LOCK.store(!old, Ordering::Release);
-        return;
-    }
-
-    // Convert to ASCII using the existing PS/2 scan code table.
-    // Modifier state has already been updated from the HID modifier byte.
-    if let Some(ch) = scancode_to_ascii(scancode) {
-        push_char(ch);
-    } else if let Some(ch) = extended_to_ascii(scancode) {
-        // Some HID keys (arrows, home, end, delete) map to "extended"
-        // PS/2 scan codes that produce special key constants.
-        push_char(ch);
+/// One decoded set-1 key transition, from either keyboard: published to
+/// `/dev/input/event0`, then given to the console (modifier state, Caps
+/// Lock, characters on presses).
+fn process_set1(extended: bool, code: u8, pressed: bool) {
+    publish_evdev(code, extended, pressed);
+    if extended {
+        handle_extended(code, pressed);
+    } else {
+        handle_normal(code, pressed);
     }
 }
 
@@ -1917,6 +2006,75 @@ fn layout_consumer_self_test() -> Result<(), &'static str> {
     ));
     Ok(())
 }
+
+/// The USB path: usages to set-1 codes (the extended ones included), and the
+/// transitions between reports -- presses and releases, modifiers with the
+/// Super keys, two keys at once, the rollover error passed over.
+fn usb_keys_self_test() -> Result<(), &'static str> {
+    /// One transition: `(extended, set-1 code, pressed)`.
+    type Transition = (bool, u8, bool);
+    let anchors = [
+        (0x04, Some((false, 0x1E))), // a
+        (0x1D, Some((false, 0x2C))), // z
+        (0x1E, Some((false, 0x02))), // 1
+        (0x27, Some((false, 0x0B))), // 0
+        (0x3A, Some((false, 0x3B))), // F1
+        (0x43, Some((false, 0x44))), // F10
+        (0x44, Some((false, 0x57))), // F11
+        (0x46, Some((true, 0x37))),  // Print Screen
+        (0x48, Some((true, 0x46))),  // Pause
+        (0x50, Some((true, 0x4B))),  // Left, not keypad 4
+        (0x5C, Some((false, 0x4B))), // keypad 4
+        (0x58, Some((true, 0x1C))),  // keypad Enter
+        (0x67, None),                // keypad =: no set-1 code
+        (0x01, None),                // the rollover error
+    ];
+    for (usage, want) in anchors {
+        if usb_usage_to_set1(usage) != want {
+            crate::serial_println!(
+                "[keyboard]   usage {:#04x} -> {:?}",
+                usage,
+                usb_usage_to_set1(usage)
+            );
+            return Err("a USB usage maps to the wrong set-1 code");
+        }
+    }
+    let run = |pm: u8, pk: [u8; 6], m: u8, k: [u8; 6]| {
+        let mut seen = alloc::vec::Vec::new();
+        usb_report_transitions(pm, pk, m, k, |e, c, p| seen.push((e, c, p)));
+        seen
+    };
+    let none = [0u8; 6];
+    let a_held = [0x04, 0, 0, 0, 0, 0];
+    let two = [0x50, 0x04, 0, 0, 0, 0];
+    let cases: [(alloc::vec::Vec<Transition>, &[Transition]); 6] = [
+        (run(0, none, 0, a_held), &[(false, 0x1E, true)]),
+        (run(0, a_held, 0, none), &[(false, 0x1E, false)]),
+        // Left Shift down, and the left Super key: E0 5B, KEY_LEFTMETA.
+        (
+            run(0, none, 0b0000_1010, none),
+            &[(false, 0x2A, true), (true, 0x5B, true)],
+        ),
+        // Right Super up.
+        (run(0x80, none, 0, none), &[(true, 0x5C, false)]),
+        // a stays, Left joins.
+        (run(0, a_held, 0, two), &[(true, 0x4B, true)]),
+        // The rollover error: nothing.
+        (run(0, a_held, 0, [0x01; 6]), &[]),
+    ];
+    for (got, want) in &cases {
+        if got.as_slice() != *want {
+            crate::serial_println!("[keyboard]   transitions {:?}, want {:?}", got, want);
+            return Err("USB report transitions are wrong");
+        }
+    }
+    crate::serial_println!(
+        "[keyboard]   USB: usages to set-1 codes, presses, releases, Super, rollover: OK"
+    );
+    Ok(())
+}
+
+/// The keyboard driver's self-test.
 pub fn self_test() -> Result<(), &'static str> {
     crate::serial_println!("[keyboard] Running self-test...");
 
@@ -1942,6 +2100,7 @@ pub fn self_test() -> Result<(), &'static str> {
     read_outcome_self_test()?;
     usb_hid_poller_self_test()?;
     layout_consumer_self_test()?;
+    usb_keys_self_test()?;
 
     crate::serial_println!("[keyboard] Self-test PASSED");
     Ok(())

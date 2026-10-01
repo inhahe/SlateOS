@@ -10664,6 +10664,50 @@ pub fn fs_open_kernel_path(
     }
 }
 
+/// [`fs_open_kernel_path`] with the permission bits a create stamps on a new
+/// file: the Linux `open` family's `mode`, already less the caller's umask.
+pub fn fs_open_kernel_path_mode(
+    path: impl AsRef<crate::fs::path::Path>,
+    flags_raw: u32,
+    create_mode: u16,
+) -> SyscallResult {
+    if let Err(e) = require_cap_type(crate::cap::ResourceType::File, crate::cap::Rights::READ) {
+        return SyscallResult::err(e);
+    }
+    let flags = crate::fs::handle::OpenFlags::from_bits(flags_raw);
+    match crate::fs::handle::open_with_mode(path, flags, create_mode) {
+        Ok(handle) => {
+            register_for_caller(ResourceType::File, handle);
+            #[allow(clippy::cast_possible_wrap)]
+            SyscallResult::ok(handle as i64)
+        }
+        Err(e) => SyscallResult::err(e),
+    }
+}
+
+/// A file with no name in directory `dir` (`fs::handle::open_tmpfile`), its
+/// handle registered to the caller: the Linux `O_TMPFILE` and the native
+/// `SYS_FS_TMPFILE`. Making a file asks for the File capability with WRITE,
+/// as the other creating calls do.
+pub fn fs_open_tmpfile_kernel_path(
+    dir: impl AsRef<crate::fs::path::Path>,
+    flags_raw: u32,
+    create_mode: u16,
+) -> SyscallResult {
+    if let Err(e) = require_cap_type(crate::cap::ResourceType::File, crate::cap::Rights::WRITE) {
+        return SyscallResult::err(e);
+    }
+    let flags = crate::fs::handle::OpenFlags::from_bits(flags_raw);
+    match crate::fs::handle::open_tmpfile(dir, flags, create_mode) {
+        Ok(handle) => {
+            register_for_caller(ResourceType::File, handle);
+            #[allow(clippy::cast_possible_wrap)]
+            SyscallResult::ok(handle as i64)
+        }
+        Err(e) => SyscallResult::err(e),
+    }
+}
+
 pub fn sys_fs_open(args: &SyscallArgs) -> SyscallResult {
     // Capability: require READ for read-only, WRITE for write.
     // We check the broader File capability — specific rights are
@@ -13413,17 +13457,20 @@ pub fn sys_fs_flock_handle(args: &SyscallArgs) -> SyscallResult {
     if let Err(e) = require_file_handle_owner(handle) {
         return SyscallResult::err(e);
     }
-    // The host path captured at open: the `_resolved` workers, so a jailed
-    // caller's jail is not applied twice.
-    let path = match crate::fs::handle::handle_path(handle) {
-        Ok(p) => p,
+    // Keyed on the file the handle holds, not on what its name names now
+    // (`fs::handle::lock_key`).
+    let (path, id) = match crate::fs::handle::lock_key(handle) {
+        Ok(k) => k,
         Err(e) => return SyscallResult::err(e),
     };
     let owner = crate::fs::vfs::flock_description_owner(handle);
     let result = match lock_type {
-        None => crate::fs::Vfs::funlock_resolved(&path, owner),
-        Some(lt) if op & FLOCK_NB != 0 => crate::fs::Vfs::flock_resolved(&path, owner, lt),
-        Some(lt) => crate::fs::Vfs::flock_wait_resolved(&path, owner, lt),
+        None => {
+            crate::fs::Vfs::funlock_key(&path, id, owner);
+            Ok(())
+        }
+        Some(lt) if op & FLOCK_NB != 0 => crate::fs::Vfs::flock_key(&path, id, owner, lt),
+        Some(lt) => crate::fs::Vfs::flock_wait_key(&path, id, owner, lt),
     };
     match result {
         Ok(()) => SyscallResult::ok(0),
@@ -13753,7 +13800,9 @@ pub fn sys_fs_handle_path(args: &SyscallArgs) -> SyscallResult {
         return SyscallResult::err(e);
     }
 
-    let path = match crate::fs::handle::handle_path(handle) {
+    // The name the handle was opened under, for the caller to show; not
+    // checked to name its file still (`fs::handle::handle_name`).
+    let path = match crate::fs::handle::handle_name(handle) {
         Ok(p) => p,
         Err(e) => return SyscallResult::err(e),
     };
@@ -13954,27 +14003,78 @@ pub fn sys_fs_readdir_at(args: &SyscallArgs) -> SyscallResult {
     SyscallResult::ok(result as i64)
 }
 
-/// `SYS_FS_TMPFILE` — a temporary file with no directory entry: refused,
-/// `NotSupported`, until an open file can outlive its name.
+/// `SYS_FS_TMPFILE` — a regular file with no name in a directory, as
+/// Linux's `O_TMPFILE` opens one (`fs::handle::open_tmpfile`): it exists only
+/// through the handle returned, and goes at its last close unless
+/// `SYS_FS_LINK_HANDLE` names it first.
 ///
-/// A handle here reaches its file by path (`fs::handle` re-resolves it on
-/// every read and write), so a file with no name cannot be read through its
-/// own handle. Until 2026-10-01 this call created a *named* file,
-/// `.tmp_<timestamp>` in the given directory, and returned a handle to it,
-/// which broke all three of its promises:
-/// - the file had a name anyone could open;
-/// - nothing ever deleted it, so every call left one behind;
-/// - the handle was never registered to the caller, so the caller's own
-///   reads, writes and close were refused as not its handle, and the open
-///   file leaked until reboot.
+/// `arg0`/`arg1`: the directory's path and its length. `arg2`: native open
+/// flags: the access mode, which must allow writing; `APPEND`; `EXCL`, which
+/// forbids naming it. The file's mode is 0600: the call has no mode
+/// argument, and a file no one else can name has no one else to share with.
 ///
-/// Nothing in the tree calls it: libc's `tmpfile` makes a named file and
-/// removes it itself (`posix/src/tempname.rs`). An honest refusal beats a
-/// door that leaks a file per call. It becomes real with the VFS redesign
-/// that lets a handle hold its file rather than its name (known-issues,
-/// lane B's tmpfile entry and lane A's `O_TMPFILE` todo).
-pub fn sys_fs_tmpfile(_args: &SyscallArgs) -> SyscallResult {
-    SyscallResult::err(KernelError::NotSupported)
+/// Until 2026-10-01 this made a *named* file that nothing deleted and
+/// returned a handle its caller could not use; it then refused
+/// (`NotSupported`) until handles held files rather than names
+/// (design-decisions §1508). It still refuses on a filesystem that cannot
+/// hold a file with no name (FAT, the pseudo filesystems).
+pub fn sys_fs_tmpfile(args: &SyscallArgs) -> SyscallResult {
+    let path_len = args.arg1 as usize;
+    if args.arg0 == 0 || path_len == 0 {
+        return SyscallResult::err(KernelError::InvalidArgument);
+    }
+    let dir = match read_user_path(args.arg0, path_len) {
+        Ok(p) => p,
+        Err(e) => return SyscallResult::err(e),
+    };
+    #[allow(clippy::cast_possible_truncation)]
+    let flags = args.arg2 as u32;
+    fs_open_tmpfile_kernel_path(&dir, flags, 0o600)
+}
+
+/// `SYS_FS_LINK_HANDLE` — give the file a handle holds a name: Linux's
+/// `linkat(fd, "", .., AT_EMPTY_PATH)`. See the number's doc.
+pub fn sys_fs_link_handle(args: &SyscallArgs) -> SyscallResult {
+    let handle = args.arg0;
+    let path_len = args.arg2 as usize;
+    if let Err(e) = require_file_handle_owner(handle) {
+        return SyscallResult::err(e);
+    }
+    if let Err(e) = require_cap_type(crate::cap::ResourceType::File, crate::cap::Rights::WRITE) {
+        return SyscallResult::err(e);
+    }
+    if args.arg1 == 0 || path_len == 0 {
+        return SyscallResult::err(KernelError::InvalidArgument);
+    }
+    let path = match read_user_path(args.arg1, path_len) {
+        Ok(p) => p,
+        Err(e) => return SyscallResult::err(e),
+    };
+    match crate::fs::handle::link_handle(handle, &path) {
+        Ok(()) => SyscallResult::ok(0),
+        Err(e) => SyscallResult::err(e),
+    }
+}
+
+/// `SYS_FS_SET_STATUS_FLAGS` — set an open description's status flags, as
+/// Linux's `fcntl(F_SETFL)` does. See the number's doc.
+pub fn sys_fs_set_status_flags(args: &SyscallArgs) -> SyscallResult {
+    use crate::fs::handle::OpenFlags;
+    /// Bits 0-8 are the native open flags; anything above names nothing.
+    const KNOWN: u64 = 0x1FF;
+    let handle = args.arg0;
+    if args.arg1 & !KNOWN != 0 {
+        return SyscallResult::err(KernelError::InvalidArgument);
+    }
+    if let Err(e) = require_file_handle_owner(handle) {
+        return SyscallResult::err(e);
+    }
+    #[allow(clippy::cast_possible_truncation)]
+    let flags = OpenFlags::from_bits(args.arg1 as u32);
+    match crate::fs::handle::set_status_flags(handle, flags) {
+        Ok(()) => SyscallResult::ok(0),
+        Err(e) => SyscallResult::err(e),
+    }
 }
 
 /// `SYS_FS_FALLOCATE` — pre-allocate disk space.
@@ -15606,6 +15706,105 @@ pub fn sys_ns_query(args: &SyscallArgs) -> SyscallResult {
 
     let ns_id = crate::ipc::namespace::query(pid);
     SyscallResult::ok(ns_id as i64)
+}
+
+/// `SYS_DNS_RESOLVE2` — every address of a name, its canonical name, and why
+/// there is none. See the number's doc.
+pub fn sys_dns_resolve2(args: &SyscallArgs) -> SyscallResult {
+    use crate::net::dns::{Address, Family};
+    /// `AF_UNSPEC`, `AF_INET`, `AF_INET6`, Linux's values, as the C library
+    /// passes them.
+    const AF_UNSPEC: u64 = 0;
+    const AF_INET: u64 = 2;
+    const AF_INET6: u64 = 10;
+    /// The same two families, as a record's `u16`.
+    const RECORD_V4: u16 = 2;
+    const RECORD_V6: u16 = 10;
+    /// The header: the record count and the canonical name's length.
+    const HEADER: usize = 4;
+    /// A record: its family (a `u16`) and 16 address bytes.
+    const RECORD: usize = 18;
+    /// At most this many records are given.
+    const MAX_RECORDS: usize = 64;
+
+    // DNS is a network operation, as for SYS_DNS_RESOLVE.
+    if let Err(e) = require_cap_type(crate::cap::ResourceType::Socket, crate::cap::Rights::READ) {
+        return SyscallResult::err(e);
+    }
+    let name_len = args.arg1 as usize;
+    let out_len = args.arg4 as usize;
+    if args.arg0 == 0 || name_len == 0 || args.arg3 == 0 {
+        return SyscallResult::err(KernelError::InvalidArgument);
+    }
+    let family = match args.arg2 {
+        AF_UNSPEC => Family::Any,
+        AF_INET => Family::V4,
+        AF_INET6 => Family::V6,
+        _ => return SyscallResult::err(KernelError::InvalidArgument),
+    };
+    // Checked before any query is sent, as SYS_DNS_RESOLVE checks its output.
+    if let Err(e) = crate::mm::user::validate_user_write(args.arg3, out_len) {
+        return SyscallResult::err(e);
+    }
+    // 253: the longest DNS name in presentation form (RFC 1035 §2.3.4); a
+    // longer one is refused, not cut, which would resolve another host.
+    let name_bytes = match crate::mm::user::read_user_vec(args.arg0, name_len, 253) {
+        Ok(b) => b,
+        Err(e) => return SyscallResult::err(e),
+    };
+    let Ok(name) = core::str::from_utf8(&name_bytes) else {
+        return SyscallResult::err(KernelError::InvalidArgument);
+    };
+    let found = match crate::net::dns::lookup(name, family) {
+        Ok(found) => found,
+        Err(e) => return SyscallResult::err(e),
+    };
+
+    let records = found
+        .addrs
+        .get(..found.addrs.len().min(MAX_RECORDS))
+        .unwrap_or(&[]);
+    let canonical = found.canonical.as_bytes();
+    let (Ok(count), Ok(canonical_len)) =
+        (u16::try_from(records.len()), u16::try_from(canonical.len()))
+    else {
+        return SyscallResult::err(KernelError::InternalError);
+    };
+    let needed = records
+        .len()
+        .checked_mul(RECORD)
+        .and_then(|r| r.checked_add(HEADER))
+        .and_then(|n| n.checked_add(canonical.len()))
+        .and_then(|n| n.checked_add(1));
+    let Some(needed) = needed.filter(|&n| n <= out_len) else {
+        return SyscallResult::err(KernelError::BufferTooSmall);
+    };
+    let mut out = alloc::vec::Vec::with_capacity(needed);
+    out.extend_from_slice(&count.to_le_bytes());
+    out.extend_from_slice(&canonical_len.to_le_bytes());
+    out.extend_from_slice(canonical);
+    out.push(0);
+    for addr in records {
+        match addr {
+            Address::V4(ip) => {
+                out.extend_from_slice(&RECORD_V4.to_le_bytes());
+                out.extend_from_slice(&ip.0);
+                out.extend_from_slice(&[0u8; 12]);
+            }
+            Address::V6(ip) => {
+                out.extend_from_slice(&RECORD_V6.to_le_bytes());
+                out.extend_from_slice(&ip.0);
+            }
+        }
+    }
+    // SAFETY: `validate_user_write(args.arg3, out_len)` passed above and
+    // `out.len() == needed <= out_len`; `copy_to_user` checks the range
+    // again, with SMAP, so a mapping changed while the query slept fails
+    // instead of faulting.
+    if let Err(e) = unsafe { crate::mm::user::copy_to_user(out.as_ptr(), args.arg3, out.len()) } {
+        return SyscallResult::err(e);
+    }
+    SyscallResult::ok(i64::from(count))
 }
 
 /// `SYS_DNS_RESOLVE` — resolve a hostname to an IPv4 address.

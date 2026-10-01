@@ -188,7 +188,8 @@ impl LockKey {
     ///
     /// `InvalidHandle` for a handle that is not open.
     pub fn for_handle(handle: u64) -> KernelResult<Self> {
-        let path = crate::fs::handle::handle_path(handle)?;
+        // The name to show the lock under; the key is the identity below.
+        let path = crate::fs::handle::handle_name(handle)?;
         // The identity of the file the handle holds, whatever its name now
         // (`fs::handle::file_identity`). No identity keys by the path, which
         // is what the table has always done for a file that has none: a

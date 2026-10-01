@@ -172,7 +172,8 @@ pub(crate) fn object_unlinked(unlinked: Unlinked, path: &Path) {
         return;
     }
     // A file held open lives on, unnamed, and its state with it: it ends at
-    // the last release (`Vfs::release_object`), which calls back here.
+    // the last hold's release (`vfs::FileHold`'s drop), which calls back
+    // here.
     if let Some(id) = unlinked.id
         && super::vfs::defer_forget_if_held(id, path)
     {

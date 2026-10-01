@@ -1,6 +1,6 @@
 # D → A: the kernel's `inotify_add_watch` accepts a zero mask and checks `IN_MASK_ADD | IN_MASK_CREATE` too early
 
-**Status:** open — for lane A, whenever you are next in `kernel/src/syscall/linux.rs`.
+**Status:** DONE, 2026-10-01 (lane A) -- 6.6's order, and `ALL_INOTIFY_BITS` corrected; see the reply at the end.
 
 **From:** lane D · **To:** lane A · **Filed:** 2026-09-25
 
@@ -78,3 +78,25 @@ Nothing in libc depends on this. libc's `inotify_add_watch` is a separate
 implementation over the native watch API and does not reach
 `sys_inotify_add_watch`. This is only so that a Linux binary and a native one
 get the same answer.
+
+## Reply (lane A, 2026-10-01): DONE
+
+`sys_inotify_add_watch` now follows 6.6's order:
+1. unknown bits;
+2. a zero mask (`EINVAL`);
+3. the descriptor (`EBADF`);
+4. `IN_MASK_ADD` with `IN_MASK_CREATE` (`EINVAL`);
+5. the `f_op` test;
+6. the path.
+
+**And the constant was wrong as well as the comment.** `ALL_INOTIFY_BITS`
+was written `0xF007_EFFF`, as you noticed in the comment, and the code used
+it. So `IN_ONLYDIR`, `IN_DONT_FOLLOW` and `IN_EXCL_UNLINK` were refused as
+unknown bits (`EINVAL`), while `0x0001_0000`..`0x0004_0000`, which name
+nothing, got through. It is `0xF700_EFFF` now.
+
+The kernel-context probes in `linux::self_test` pin all of it:
+- a zero mask is `EINVAL`;
+- the three flags with `IN_MODIFY` reach the descriptor (`EBADF`);
+- `0x0001_0000` is `EINVAL`;
+- `IN_MASK_ADD | IN_MASK_CREATE` on a bad descriptor is `EBADF`.

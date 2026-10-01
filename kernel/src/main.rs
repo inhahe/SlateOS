@@ -5892,6 +5892,12 @@ extern "C" fn kernel_main() -> ! {
                 selftest::Severity::Diagnostic,
                 fs::procfs::self_test_locks(),
             );
+            // /etc/mtab: a link to /proc/self/mounts, read as the table.
+            selftest::dispatch_debug(
+                "/etc/mtab",
+                selftest::Severity::Diagnostic,
+                fs::procfs::self_test_etc_mtab(),
+            );
             // netmon backs /proc/netmon and the `netmon` kshell command.  Its
             // init_defaults() previously seeded three FABRICATED connections (sshd
             // LISTEN :22, a browser ESTABLISHED to 93.184.216.34:443 with real-looking
@@ -9978,6 +9984,12 @@ extern "C" fn kernel_main() -> ! {
         serial_println!("[init] Note: /etc/startup.conf write: {:?}", e);
     } else {
         serial_println!("[init] Created /etc/startup.conf");
+    }
+    // `/etc/mtab`: the mount table at glibc's `MOUNTED` path, a link to
+    // `/proc/self/mounts` as on Linux (`fs::procfs::make_etc_mtab`). The
+    // self-test made it already; this is the boot's own, and a no-op then.
+    if let Err(e) = fs::procfs::make_etc_mtab() {
+        serial_println!("[init] WARNING: /etc/mtab could not be made: {:?}", e);
     }
 
     serial_println!(

@@ -91312,3 +91312,106 @@ read sees the file as it is now.
 
 **Revisit** if FAT needs held files: it would need an object identity of
 its own, such as the first cluster.
+
+## 1509. A file opened with `O_TMPFILE` is made with no name at all, and a descriptor's file can be given one without privilege
+
+**Date:** 2026-10-01 · **Decided by:** Claude (autonomous) · **Lane:** A
+
+**In short:** a program can ask for a scratch file that has no name, so
+that no other program can open it and nothing is left behind if it
+crashes. That is Linux's `O_TMPFILE`, and our native `SYS_FS_TMPFILE`.
+Here the file is now made with no name from the start, and it goes when
+its last descriptor closes. A program that wants to keep the file can give
+it a name once it is fully written. Linux programs do that with
+`linkat(fd, "", ..., AT_EMPTY_PATH)` or through `/proc/self/fd/N`; native
+programs use `SYS_FS_LINK_HANDLE`. A reader then never sees a half-written
+file under that name.
+
+**What changed** (known-issues `A-AN-OPEN-FILE-FOLLOWS-ITS-NAME`, step 5):
+- `FileSystem::create_unnamed(dir, mode)` makes a regular file with no
+  name, held once, and `link_held_ino(ino, path)` gives a held file a name.
+  - memfs: a node with no links and one open.
+  - ext4: an inode with link count 0, on the orphan list from birth, as
+    Linux's `ext4_tmpfile` makes one. A crash leaves it to the next mount.
+- `Vfs::create_unnamed_object` and `Vfs::link_object`; `fs::handle`'s
+  `open_tmpfile`, `open_tmpfile_beneath` and `link_handle`.
+- Linux: `O_TMPFILE` in `open`, `openat` and `openat2`. `linkat` of a
+  descriptor works by `AT_EMPTY_PATH`, and by `/proc/self/fd/N` followed.
+- Native: `SYS_FS_TMPFILE` (648) is real; `SYS_FS_LINK_HANDLE` is new
+  (1096).
+
+**Alternatives, the main one:**
+
+| | What changes | For | Against |
+|---|---|---|---|
+| **A. Made with no name, at the filesystem (chosen)** | the file never has a name | what `O_TMPFILE` promises: no one can open it, nothing left by a crash, no events about it | a filesystem call each in memfs and ext4 |
+| B. Create under a hidden name, hold it, unlink it | the file has a guessable name for an instant | no filesystem changes | during that instant, another program can list and open the "private" file; a crash between leaves it; watchers see it made and removed |
+
+**Smaller decisions that came with it:**
+
+| decision | alternative | why this one |
+|---|---|---|
+| `AT_EMPTY_PATH` links a descriptor's file for any caller | require a privilege, as Linux does for `AT_EMPTY_PATH` | Linux lets anyone do the same through `/proc/self/fd/N`, which gnulib and systemd use. We emulate that path, so a privilege on the other would protect nothing |
+| `/proc/self/fd/N` with `AT_SYMLINK_FOLLOW` is the descriptor's file, recognised in `linkat` | real magic links in the path walk | `linkat` is the one call programs use it with for this; magic links in the walk are a larger change of their own |
+| A file deleted while open, or made with `O_EXCL`, cannot be given a name (`ENOENT`) | allow it | Linux's `I_LINKABLE` rule: a deleted file stays deleted |
+| The native `SYS_FS_TMPFILE` makes mode 0600 | a mode argument | the call has none; a file no one else can name has no one else to share with |
+| The unnamed file is shown as `dir/#ino` | no name at all | what Linux shows in `/proc/<pid>/fd`; `handle_path` refuses it, so nothing acts on that name |
+
+**Consequences:**
+- On FAT and the pseudo filesystems `O_TMPFILE` answers `EOPNOTSUPP`, as
+  Linux does where a filesystem has no `->tmpfile`. glibc's `tmpfile`
+  falls back to a named file there.
+- Lane D's `tmpfile` can use `O_TMPFILE`, or unlink at once: both work on
+  memfs and ext4.
+
+**Revisit** if the path walk gains magic links: `/proc/self/fd/N` would
+then resolve to the file everywhere, not only in `linkat`.
+
+## 1510. The resolver answers what a DNS answer carries, in one cache of whole answers
+
+**Date:** 2026-10-01 · **Decided by:** Claude (autonomous) · **Lane:** A
+
+**In short:** asking the system for a name's address got one IPv4 address.
+If a name had several addresses, or IPv6 ones, or was an alias for another
+name, the rest was thrown away. "This name does not exist" and "this name
+has no address of that kind" were the same answer. A program now gets
+every address, the name at the end of any aliases, and the true reason
+when there is no address. The C library needs these to answer as glibc
+does (`getaddrinfo`, `gethostbyname`, `hostname -f`).
+
+**What changed:**
+- **`net::dns::lookup(name, family)`** gives every A and/or AAAA record and
+  the canonical name. It follows CNAMEs within a response and across
+  queries.
+- **The errors come apart:** NXDOMAIN is `NotFound`; NODATA is
+  `NoAddress`, a new `KernelError` (-707, `ENODATA`). SERVFAIL is
+  `WouldBlock` (try again), REFUSED is `ConnectionRefused`, and an
+  unreadable answer is `IoError`.
+- **One cache of whole answers**, per name and record type, replaces the A
+  cache and the AAAA cache. Each kept one address per name, with 0.0.0.0
+  as "not found". A negative answer is cached as itself; a timeout is not
+  cached.
+- **The kernel's hosts table** (`fs::nameservice`) is asked before the
+  network by every caller, not by `SYS_DNS_RESOLVE` alone.
+- **`SYS_DNS_RESOLVE2` (1097)** carries it all to userspace. `resolve` and
+  `resolve6` are the first address of a lookup.
+
+**Alternatives:**
+
+| | What changes | For | Against |
+|---|---|---|---|
+| **A. New call; the kernel resolver gives whole answers (chosen)** | getaddrinfo answers as glibc's | the cache, DHCP's servers and containers' names stay in one place, and the C library gets them by one call | a second DNS syscall beside 820 |
+| B. The C library does DNS itself, over UDP sockets, as glibc does | the kernel resolver serves only the kernel | no kernel change | a second resolver and cache; the C library would have to learn DHCP's servers and each container's names |
+| C. Widen 820 in place | one call | | changes a call existing binaries use |
+
+**Smaller decisions:**
+
+| decision | alternative | why this one |
+|---|---|---|
+| NODATA is a new error code, `NoAddress` | reuse `NoAttribute` (an object exists, an attribute does not) | the DNS case is its own; `getaddrinfo` maps it to `EAI_NODATA`, so it should not need guessing from a filesystem code |
+| Addresses in answer order, IPv6 first for `AF_UNSPEC`; no sorting | sort by RFC 6724 in the kernel | the sort needs the source addresses a connection would use, and glibc sorts in userspace; the C library has the rest of `getaddrinfo` |
+| `resolve`/`resolve6` keep answering `NotFound` for NODATA | return `NoAddress` | their kernel callers ask for one address and print a failure; nothing there would tell the two apart |
+| A truncated UDP answer (TC) is used for what it holds | retry over TCP | there is no TCP client in the resolver yet; recorded as open (known-issues `A-DNS-ANSWERED-ONE-ADDRESS-AND-ONE-ERROR`) |
+
+**Revisit** when the resolver gains TCP, or EDNS0, which would let one UDP
+answer carry more than 512 bytes.

@@ -662,117 +662,7 @@ impl FileSystem for Ext4Fs {
         }
 
         let ino = self.driver.resolve_path(path)?;
-        let inode = self.driver.read_inode(ino)?;
-
-        let mode = inode.i_mode & file_type::S_IFMT;
-        if mode != file_type::S_IFREG {
-            return Err(KernelError::NotSupported);
-        }
-
-        let current_size = inode_file_size(&inode);
-        let block_size = u64::from(self.driver.superblock().block_size);
-        if block_size == 0 {
-            return Err(KernelError::IoError);
-        }
-
-        // Calculate blocks currently allocated vs needed.
-        let current_blocks = current_size.saturating_add(block_size.saturating_sub(1)) / block_size;
-        let needed_blocks = size.saturating_add(block_size.saturating_sub(1)) / block_size;
-
-        if needed_blocks <= current_blocks {
-            // Already have enough allocated blocks.
-            return Ok(());
-        }
-
-        // For non-empty files, append an UNWRITTEN extent covering the
-        // new blocks.  This requires a depth-0 extent tree with room for
-        // one more entry.  If that fails (depth>0 or full), silently
-        // succeed — blocks will be allocated on demand when data is written.
-        if current_size != 0 {
-            let extra_blocks = needed_blocks.saturating_sub(current_blocks);
-            if extra_blocks == 0 || extra_blocks > 0x7FFF_u64 {
-                return Ok(());
-            }
-
-            let mut new_inode = inode;
-
-            // Goal: allocate adjacent to last existing extent for contiguity.
-            // Parse the extent tree to find the last physical block.
-            let last_extent_end = self
-                .driver
-                .last_extent_end(&new_inode)
-                .unwrap_or(u64::from(self.driver.superblock().raw.s_first_data_block));
-
-            #[allow(clippy::cast_possible_truncation)]
-            let extra_u16 = extra_blocks as u16;
-            #[allow(clippy::cast_possible_truncation)]
-            let logical_start = current_blocks as u32;
-
-            match self.driver.append_unwritten_extent(
-                &mut new_inode,
-                logical_start,
-                extra_u16,
-                last_extent_end,
-            ) {
-                Ok(_first_block) => {
-                    // Update block count (not file size — that's the point
-                    // of fallocate).
-                    let total_sectors = needed_blocks
-                        .saturating_mul(u64::from(self.driver.superblock().block_size / 512));
-                    set_inode_blocks_48(&mut new_inode, total_sectors);
-
-                    stamp_inode_mtime(&mut new_inode);
-                    self.driver.write_inode(ino, &new_inode)?;
-                    self.driver.invalidate_extent_cache(ino);
-                    self.driver.write_superblock()?;
-                    self.driver.write_group_descs()?;
-                    self.driver.flush()?;
-                }
-                Err(KernelError::NotSupported) => {
-                    // Can't add extent (tree too deep or full) — silently
-                    // succeed; blocks will be allocated on write.
-                }
-                Err(e) => return Err(e),
-            }
-
-            return Ok(());
-        }
-
-        // Allocate contiguous blocks via the driver (avoids split borrows).
-        let blocks_to_alloc = needed_blocks.min(0x7FFF_u64);
-
-        #[allow(clippy::cast_possible_truncation)]
-        let blocks_u32 = blocks_to_alloc as u32;
-        let goal = u64::from(self.driver.superblock().raw.s_first_data_block);
-
-        let first_block = self.driver.fallocate_blocks(goal, blocks_u32)?;
-
-        // Set up the extent tree with an UNWRITTEN extent.
-        // Unwritten extents have bit 15 set in ee_len, causing reads to
-        // return zeros instead of reading actual block data.
-        let mut new_inode = inode;
-        self.driver.init_extent_header_pub(&mut new_inode, 1);
-
-        // Set extent with UNWRITTEN flag (0x8000 | block_count).
-        #[allow(clippy::cast_possible_truncation)]
-        let block_count_u16 = blocks_to_alloc as u16;
-        self.driver
-            .set_single_extent_unwritten(&mut new_inode, 0, first_block, block_count_u16);
-
-        // Update block count (in 512-byte sectors) but NOT file size.
-        // File size stays 0 — reads past logical EOF return zeros.
-        let sectors = u64::from(blocks_u32)
-            .saturating_mul(u64::from(self.driver.superblock().block_size / 512));
-        set_inode_blocks_48(&mut new_inode, sectors);
-
-        stamp_inode_mtime(&mut new_inode);
-        self.driver.write_inode(ino, &new_inode)?;
-        self.driver.invalidate_extent_cache(ino);
-
-        self.driver.write_superblock()?;
-        self.driver.write_group_descs()?;
-        self.driver.flush()?;
-        Ok(())
+        self.fallocate_ino_u32(ino, size)
     }
 
     fn truncate(&mut self, path: &Path, size: u64) -> KernelResult<()> {
@@ -842,6 +732,104 @@ impl FileSystem for Ext4Fs {
 
     fn metadata_ino(&mut self, ino: u64) -> KernelResult<FileMeta> {
         self.meta_from_ino(ext4_ino(ino)?)
+    }
+
+    fn create_unnamed(&mut self, dir: &Path, mode: u16) -> KernelResult<u64> {
+        let dir_ino = self.driver.resolve_path(dir)?;
+        let dir_inode = self.driver.read_inode(dir_ino)?;
+        if dir_inode.i_mode & file_type::S_IFMT != file_type::S_IFDIR {
+            return Err(KernelError::NotADirectory);
+        }
+        // Nothing is made in an immutable directory, named or not.
+        if dir_inode.i_flags & inode_flags::IMMUTABLE != 0 {
+            return Err(KernelError::PermissionDenied);
+        }
+        // In the directory's group, as a named file would be.
+        let group = self.driver.superblock().inode_group(dir_ino);
+        let (ino, inode) = self
+            .driver
+            .create_inode(file_type::S_IFREG | (mode & 0o7777), group)?;
+        // Born unnamed, as Linux's `ext4_tmpfile` makes one: link count 0 and
+        // on the orphan list from the start, so a crash before its last close
+        // -- or before a `linkat` names it -- leaves it for the next mount to
+        // free (`reclaim_orphans`). Held once: the caller's.
+        self.pins.insert(ino, 1);
+        if let Err(e) = self.list_unnamed(ino, inode) {
+            self.pins.remove(&ino);
+            // Undo the create. On the list, reclaiming frees it; off it, it is
+            // freed directly. A failure here leaves it for `fsck`.
+            let undone = if self.orphans.remove(&ino) {
+                self.reclaim_orphan(ino)
+            } else {
+                self.driver
+                    .read_inode(ino)
+                    .and_then(|i| self.free_unlinked_inode(ino, i))
+            };
+            if let Err(u) = undone {
+                crate::serial_println!(
+                    "[ext4] WARNING: inode {} made with no name, not freed after {:?}: {:?}",
+                    ino,
+                    e,
+                    u
+                );
+            }
+            return Err(e);
+        }
+        Ok(u64::from(ino))
+    }
+
+    fn link_held_ino(&mut self, ino: u64, new_path: &Path) -> KernelResult<()> {
+        let ino = ext4_ino(ino)?;
+        if !self.pins.contains_key(&ino) {
+            return Err(KernelError::InvalidArgument);
+        }
+        self.link_ino_checked(ino, new_path)?;
+        // Named now: off the orphan list, so its last close does not free
+        // it. The name first, then the list: a failure between leaves it
+        // listed with a name, which the next mount only takes off the list.
+        if self.orphans.remove(&ino) {
+            let unlisted = self.unlist_orphan(ino).and_then(|()| {
+                let mut inode = self.driver.read_inode(ino)?;
+                // `i_dtime` held the list's next link; a live inode has none.
+                inode.i_dtime = 0;
+                self.driver.write_inode(ino, &inode)
+            });
+            if let Err(e) = unlisted {
+                crate::serial_println!(
+                    "[ext4] WARNING: inode {} named but left on the orphan list: {:?}; \
+                     the next mount takes it off",
+                    ino,
+                    e
+                );
+            }
+        }
+        self.driver.write_superblock()?;
+        self.driver.write_group_descs()?;
+        self.driver.flush()
+    }
+
+    fn chmod_ino(&mut self, ino: u64, permissions: u16) -> KernelResult<()> {
+        self.set_permissions_ino(ext4_ino(ino)?, permissions)
+    }
+
+    fn chown_ino(&mut self, ino: u64, uid: u32, gid: u32) -> KernelResult<()> {
+        self.set_owner_ino(ext4_ino(ino)?, uid, gid)
+    }
+
+    fn utimes_ino(
+        &mut self,
+        ino: u64,
+        accessed_ns: crate::fs::vfs::Timestamp,
+        modified_ns: crate::fs::vfs::Timestamp,
+    ) -> KernelResult<()> {
+        self.set_times_ino(ext4_ino(ino)?, accessed_ns, modified_ns)
+    }
+
+    fn fallocate_ino(&mut self, ino: u64, size: u64) -> KernelResult<()> {
+        if size == 0 {
+            return Ok(());
+        }
+        self.fallocate_ino_u32(ext4_ino(ino)?, size)
     }
 
     fn metadata(&mut self, path: &Path) -> KernelResult<FileMeta> {
@@ -1479,6 +1467,130 @@ impl Ext4Fs {
         }
     }
 
+    /// Reserve space for the first `size` bytes of inode `ino` without
+    /// changing its size: `fallocate` by inode, for a path and a held file
+    /// alike.
+    fn fallocate_ino_u32(&mut self, ino: u32, size: u64) -> KernelResult<()> {
+        let inode = self.driver.read_inode(ino)?;
+
+        let mode = inode.i_mode & file_type::S_IFMT;
+        if mode != file_type::S_IFREG {
+            return Err(KernelError::NotSupported);
+        }
+
+        let current_size = inode_file_size(&inode);
+        let block_size = u64::from(self.driver.superblock().block_size);
+        if block_size == 0 {
+            return Err(KernelError::IoError);
+        }
+
+        // Calculate blocks currently allocated vs needed. `block_size` is not
+        // 0 (checked above), so neither division fails.
+        let current_blocks = current_size
+            .saturating_add(block_size.saturating_sub(1))
+            .checked_div(block_size)
+            .ok_or(KernelError::IoError)?;
+        let needed_blocks = size
+            .saturating_add(block_size.saturating_sub(1))
+            .checked_div(block_size)
+            .ok_or(KernelError::IoError)?;
+
+        if needed_blocks <= current_blocks {
+            // Already have enough allocated blocks.
+            return Ok(());
+        }
+
+        // For non-empty files, append an UNWRITTEN extent covering the
+        // new blocks.  This requires a depth-0 extent tree with room for
+        // one more entry.  If that fails (depth>0 or full), silently
+        // succeed — blocks will be allocated on demand when data is written.
+        if current_size != 0 {
+            let extra_blocks = needed_blocks.saturating_sub(current_blocks);
+            if extra_blocks == 0 || extra_blocks > 0x7FFF_u64 {
+                return Ok(());
+            }
+
+            let mut new_inode = inode;
+
+            // Goal: allocate adjacent to last existing extent for contiguity.
+            // Parse the extent tree to find the last physical block.
+            let last_extent_end = self
+                .driver
+                .last_extent_end(&new_inode)
+                .unwrap_or(u64::from(self.driver.superblock().raw.s_first_data_block));
+
+            #[allow(clippy::cast_possible_truncation)]
+            let extra_u16 = extra_blocks as u16;
+            #[allow(clippy::cast_possible_truncation)]
+            let logical_start = current_blocks as u32;
+
+            match self.driver.append_unwritten_extent(
+                &mut new_inode,
+                logical_start,
+                extra_u16,
+                last_extent_end,
+            ) {
+                Ok(_first_block) => {
+                    // Update block count (not file size — that's the point
+                    // of fallocate).
+                    let total_sectors = needed_blocks
+                        .saturating_mul(u64::from(self.driver.superblock().block_size / 512));
+                    set_inode_blocks_48(&mut new_inode, total_sectors);
+
+                    stamp_inode_mtime(&mut new_inode);
+                    self.driver.write_inode(ino, &new_inode)?;
+                    self.driver.invalidate_extent_cache(ino);
+                    self.driver.write_superblock()?;
+                    self.driver.write_group_descs()?;
+                    self.driver.flush()?;
+                }
+                Err(KernelError::NotSupported) => {
+                    // Can't add extent (tree too deep or full) — silently
+                    // succeed; blocks will be allocated on write.
+                }
+                Err(e) => return Err(e),
+            }
+
+            return Ok(());
+        }
+
+        // Allocate contiguous blocks via the driver (avoids split borrows).
+        let blocks_to_alloc = needed_blocks.min(0x7FFF_u64);
+
+        #[allow(clippy::cast_possible_truncation)]
+        let blocks_u32 = blocks_to_alloc as u32;
+        let goal = u64::from(self.driver.superblock().raw.s_first_data_block);
+
+        let first_block = self.driver.fallocate_blocks(goal, blocks_u32)?;
+
+        // Set up the extent tree with an UNWRITTEN extent.
+        // Unwritten extents have bit 15 set in ee_len, causing reads to
+        // return zeros instead of reading actual block data.
+        let mut new_inode = inode;
+        self.driver.init_extent_header_pub(&mut new_inode, 1);
+
+        // Set extent with UNWRITTEN flag (0x8000 | block_count).
+        #[allow(clippy::cast_possible_truncation)]
+        let block_count_u16 = blocks_to_alloc as u16;
+        self.driver
+            .set_single_extent_unwritten(&mut new_inode, 0, first_block, block_count_u16);
+
+        // Update block count (in 512-byte sectors) but NOT file size.
+        // File size stays 0 — reads past logical EOF return zeros.
+        let sectors = u64::from(blocks_u32)
+            .saturating_mul(u64::from(self.driver.superblock().block_size / 512));
+        set_inode_blocks_48(&mut new_inode, sectors);
+
+        stamp_inode_mtime(&mut new_inode);
+        self.driver.write_inode(ino, &new_inode)?;
+        self.driver.invalidate_extent_cache(ino);
+
+        self.driver.write_superblock()?;
+        self.driver.write_group_descs()?;
+        self.driver.flush()?;
+        Ok(())
+    }
+
     /// Inode `ino`'s last name has gone (its link count is now 0): free it,
     /// or -- while a handle holds it -- keep it, unnamed, on the orphan list
     /// until the last close. The caller writes the superblock.
@@ -1533,6 +1645,15 @@ impl Ext4Fs {
         self.driver.superblock_mut().raw.s_last_orphan = ino;
         self.orphans.insert(ino);
         Ok(())
+    }
+
+    /// A file just made with no name (`create_unnamed`): link count 0, at the
+    /// head of the orphan list, written out.
+    fn list_unnamed(&mut self, ino: u32, inode: super::ondisk::Ext4Inode) -> KernelResult<()> {
+        self.orphan_inode(ino, inode)?;
+        self.driver.write_superblock()?;
+        self.driver.write_group_descs()?;
+        self.driver.flush()
     }
 
     /// An orphan's last hold has gone: take it off the orphan list and free
@@ -1762,9 +1883,12 @@ impl Ext4Fs {
         }
         if modified_ns != 0 {
             inode.i_mtime = ns_to_sec(modified_ns);
-            // Also update ctime (metadata change time) when mtime changes.
-            inode.i_ctime = ns_to_sec(modified_ns);
         }
+        // The change time is now, whichever times were set, as POSIX has it
+        // for `utimensat`. It was set to the new modification time until
+        // 2026-10-01, so `touch -d 2001-01-01` back-dated the change time
+        // too, and an access-time-only change left it alone.
+        stamp_inode_ctime(&mut inode);
 
         self.driver.write_inode(ino, &inode)?;
         self.driver.flush()?;

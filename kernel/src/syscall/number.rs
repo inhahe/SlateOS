@@ -3251,19 +3251,26 @@ pub const SYS_FS_HANDLE_PATH: u64 = 646;
 /// If the buffer is too small, entries are truncated (not an error).
 pub const SYS_FS_READDIR_AT: u64 = 647;
 
-/// Create a temporary file with no directory entry -- **refused with
-/// `NotSupported`** until an open file can outlive its name.
+/// Open a regular file with no name in a directory, as Linux's `O_TMPFILE`
+/// does: it exists only through the handle returned, and goes at its last
+/// close unless [`SYS_FS_LINK_HANDLE`] names it first.
 ///
-/// `arg0`: pointer to directory path string (where to create).
+/// `arg0`: pointer to the directory's path.
 /// `arg1`: path length (bytes).
-/// `arg2`: open flags bitfield.
+/// `arg2`: open flags: the access mode, which must allow writing; `APPEND`;
+/// `EXCL`, which forbids naming it (Linux's `O_TMPFILE | O_EXCL`). The file's
+/// mode is 0600.
+///
+/// Errors: `InvalidArgument` for flags that do not allow writing;
+/// `NotADirectory`; `NotSupported` on a filesystem that cannot keep a file
+/// with no name (FAT, the pseudo filesystems), as Linux answers
+/// `EOPNOTSUPP`.
 ///
 /// Until 2026-10-01 it created a *named* file that nothing deleted and
-/// returned a handle its caller could not use (see `handlers::sys_fs_tmpfile`).
-/// The promised file -- unnamed, gone at its last close -- needs handles that
-/// hold files rather than paths.
+/// returned a handle its caller could not use, then refused until handles
+/// held files rather than names (design-decisions §1508).
 ///
-/// Returns: `NotSupported`.
+/// Returns: the file handle.
 pub const SYS_FS_TMPFILE: u64 = 648;
 
 /// Pre-allocate disk space for a file.
@@ -6010,6 +6017,100 @@ pub const FLOCK_EX: u64 = 2;
 pub const FLOCK_NB: u64 = 4;
 /// [`SYS_FS_FLOCK_HANDLE`] op: release (Linux `LOCK_UN`).
 pub const FLOCK_UN: u64 = 8;
+
+// ---------------------------------------------------------------------------
+// An open description's status flags (1095)
+// ---------------------------------------------------------------------------
+
+/// Set an open description's status flags, as Linux's `fcntl(F_SETFL)` does:
+/// `fs_set_status_flags(handle, flags) -> 0`.
+///
+/// - `handle`: a file handle the caller holds.
+/// - `flags`: the native open flags. `APPEND` is taken from them; the access
+///   mode and the creation bits (`CREATE`, `EXCL`, `TRUNCATE`, `DIRECTORY`,
+///   `NOFOLLOW`, `NO_SYMLINKS`) are ignored, as `F_SETFL` ignores them. A bit
+///   above bit 8 is `InvalidArgument`.
+///
+/// It acts on the description: every descriptor sharing the handle sees it.
+/// With `APPEND` set, each write lands at the file's end as it is when the
+/// write lands. libc's `F_SETFL` emulated it with a seek to the end before
+/// each write, two calls another appender could get between (lane D's
+/// request, 2026-10-01).
+///
+/// Errors: `InvalidHandle` for a handle the caller does not hold;
+/// `IsADirectory` for a directory handle.
+///
+/// Chosen number 1095, the next free slot after 1094.
+pub const SYS_FS_SET_STATUS_FLAGS: u64 = 1095;
+
+// ---------------------------------------------------------------------------
+// Naming the file a handle holds (1096)
+// ---------------------------------------------------------------------------
+
+/// Give the file a handle holds a name, as Linux's
+/// `linkat(fd, "", newdirfd, newpath, AT_EMPTY_PATH)` does:
+/// `fs_link_handle(handle, path, path_len) -> 0`.
+///
+/// - A file made by [`SYS_FS_TMPFILE`] without `EXCL` gets its first name,
+///   and no longer goes at its last close: the way to write a file fully
+///   and then publish it in one step.
+/// - A file with a name gets another, as `SYS_FS_LINK` gives one.
+/// - A file deleted while open, or made with `EXCL`, is `NotFound`, as
+///   Linux answers `ENOENT`.
+///
+/// The new name is asked as `SYS_FS_LINK` asks it: File WRITE, write access
+/// to its directory, the same filesystem (`CrossDevice`), not taken
+/// (`AlreadyExists`).
+///
+/// Errors: `InvalidHandle` for a handle the caller does not hold;
+/// `IsADirectory`; `NotSupported` for a file on a filesystem without
+/// hard links.
+///
+/// Chosen number 1096, the next free slot after 1095.
+pub const SYS_FS_LINK_HANDLE: u64 = 1096;
+
+// ---------------------------------------------------------------------------
+// A name's addresses, as a DNS answer gives them (1097)
+// ---------------------------------------------------------------------------
+
+/// Every address of a name, its canonical name, and why there is none:
+/// `dns_resolve2(name, name_len, family, out, out_len) -> count`.
+///
+/// What `getaddrinfo` needs from a resolver, which [`SYS_DNS_RESOLVE`]'s one
+/// IPv4 address is not (lane D's request
+/// `d-a-sys-dns-resolve-answers-one-ipv4-address`).
+///
+/// - `name`, `name_len`: the name, at most 253 bytes.
+/// - `family`: `AF_UNSPEC` (0) for AAAA and A records, `AF_INET` (2) for A,
+///   `AF_INET6` (10) for AAAA -- Linux's values.
+/// - `out`, `out_len`: the answer, little-endian:
+///   - `u16` the record count, `u16` the canonical name's length;
+///   - the canonical name (the end of the CNAME chain, `AI_CANONNAME`) and a
+///     NUL;
+///   - per record, 18 bytes: `u16` family (2 or 10), then 16 address bytes,
+///     an IPv4 address in the first 4 and zeros after.
+///
+/// The records are in the order the answer gave them, IPv6 first for
+/// `AF_UNSPEC`; sorting them for a connection (RFC 6724) is the caller's.
+/// At most 64. The kernel's hosts table (`localhost`) and a container's
+/// peers answer before the network, and answers are cached by their TTL.
+///
+/// Returns the record count, at least 1.
+///
+/// Errors:
+/// - `NotFound`: the name does not exist (NXDOMAIN; `EAI_NONAME`).
+/// - `NoAddress` (-707): it exists with no address of the family asked
+///   (NODATA; `EAI_NODATA`).
+/// - `TimedOut`: no answer; `WouldBlock`: the server failed for now
+///   (SERVFAIL); `ConnectionRefused`: it refused -- all `EAI_AGAIN`.
+/// - `TooManyLinks`: a CNAME chain too long; `IoError`: an answer that
+///   could not be read -- `EAI_FAIL`.
+/// - `BufferTooSmall`: `out_len` cannot hold the answer; nothing is written.
+/// - `InvalidArgument`: a family other than the three, or a name that is
+///   not UTF-8; `PermissionDenied` without the Socket capability.
+///
+/// Chosen number 1097, the next free slot after 1096.
+pub const SYS_DNS_RESOLVE2: u64 = 1097;
 
 // ---------------------------------------------------------------------------
 // Version info

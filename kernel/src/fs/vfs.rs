@@ -704,6 +704,60 @@ pub trait FileSystem: Send {
         Err(KernelError::NotSupported)
     }
 
+    /// [`set_permissions`](Self::set_permissions) for a held inode:
+    /// `fchmod`, whatever the file's name now.
+    fn chmod_ino(&mut self, ino: u64, permissions: u16) -> KernelResult<()> {
+        let _ = (ino, permissions);
+        Err(KernelError::NotSupported)
+    }
+
+    /// [`set_owner`](Self::set_owner) for a held inode: `fchown`. The ids are
+    /// concrete; the VFS resolves "leave unchanged" first.
+    fn chown_ino(&mut self, ino: u64, uid: u32, gid: u32) -> KernelResult<()> {
+        let _ = (ino, uid, gid);
+        Err(KernelError::NotSupported)
+    }
+
+    /// [`set_times`](Self::set_times) for a held inode: `futimens`. A time of
+    /// 0 is left as it is.
+    fn utimes_ino(
+        &mut self,
+        ino: u64,
+        accessed_ns: Timestamp,
+        modified_ns: Timestamp,
+    ) -> KernelResult<()> {
+        let _ = (ino, accessed_ns, modified_ns);
+        Err(KernelError::NotSupported)
+    }
+
+    /// [`fallocate`](Self::fallocate) for a held inode. The default, as
+    /// `fallocate`'s, reserves nothing and reports success: the writes that
+    /// come allocate.
+    fn fallocate_ino(&mut self, ino: u64, size: u64) -> KernelResult<()> {
+        let _ = (ino, size);
+        Ok(())
+    }
+
+    /// Make a regular file with no name in directory `dir`, held once as
+    /// [`pin_ino`](Self::pin_ino) holds one, and return its inode: Linux's
+    /// `->tmpfile`, behind `O_TMPFILE`. It goes at the matching
+    /// [`unpin_ino`](Self::unpin_ino) unless
+    /// [`link_held_ino`](Self::link_held_ino) names it first. `mode` is its
+    /// permission bits. `NotSupported` where a file cannot be held unnamed.
+    fn create_unnamed(&mut self, dir: &Path, mode: u16) -> KernelResult<u64> {
+        let _ = (dir, mode);
+        Err(KernelError::NotSupported)
+    }
+
+    /// Give held inode `ino` the name `new_path`, as [`link`](Self::link)
+    /// gives an existing file another: a file
+    /// [`create_unnamed`](Self::create_unnamed) made is named by it, and no
+    /// longer goes at its last unpin. `AlreadyExists` if the name is taken.
+    fn link_held_ino(&mut self, ino: u64, new_path: &Path) -> KernelResult<()> {
+        let _ = (ino, new_path);
+        Err(KernelError::NotSupported)
+    }
+
     /// Rename or move a file or directory.
     ///
     /// Both `from` and `to` are paths relative to the filesystem root.
@@ -1193,14 +1247,11 @@ struct MountPoint {
 ///
 /// While one exists its inode is pinned (`FileSystem::pin_ino`): a rename
 /// leaves the holder on the file, and unlinking its last name removes the
-/// name while the file lives on until the last release
-/// ([`Vfs::release_object`]). It also holds its mount, which cannot be
-/// unmounted while it does.
+/// name while the file lives on until the hold goes. It also holds its
+/// mount, which cannot be unmounted while it does.
 ///
-/// A clone is a second reference for one call's use, not a second hold:
-/// each hold comes from [`Vfs::open_object`] or [`Vfs::reopen_object`] and
-/// goes back through one [`Vfs::release_object`].
-#[derive(Clone)]
+/// Only ever inside a [`FileHold`], which gives the hold back when it is
+/// dropped. Not `Clone`, so no copy can give it back a second time.
 pub struct FileObject {
     fs: MountedFs,
     fs_id: u64,
@@ -1226,6 +1277,59 @@ impl core::fmt::Debug for FileObject {
             .field("ino", &self.ino)
             .finish_non_exhaustive()
     }
+}
+
+/// One hold on an open regular file ([`FileObject`]): the file stays, and
+/// its mount cannot be unmounted, until the hold is dropped.
+///
+/// `fs::handle` keeps each in an `Arc`, shared by the open file descriptions
+/// of the file it opened and by every call in progress through one of them.
+/// So a close on one thread, racing a read or a write on another, cannot
+/// give the file back under the call: the last reference to go gives it
+/// back, as Linux's `fdget` keeps a `struct file` alive across a syscall.
+/// Until 2026-10-01 the final close gave it back at once, and a call already
+/// in the filesystem went on with an inode that might be freed: an unlinked
+/// file's blocks back in the free pool, still being written.
+///
+/// Never to be dropped with `fs::handle`'s table lock held: giving the hold
+/// back takes the filesystem's lock and the mount table's.
+#[derive(Debug)]
+pub struct FileHold(FileObject);
+
+impl core::ops::Deref for FileHold {
+    type Target = FileObject;
+
+    fn deref(&self) -> &FileObject {
+        &self.0
+    }
+}
+
+impl Drop for FileHold {
+    fn drop(&mut self) {
+        release_hold(&self.0);
+    }
+}
+
+/// Give back one hold ([`FileHold`]'s drop). A file whose last name went
+/// while it was held goes with its last hold; the mount may be unmounted
+/// once none is left.
+fn release_hold(obj: &FileObject) {
+    obj.fs.lock().unpin_ino(obj.ino);
+    if let Some(name) = note_release(obj.id()) {
+        // The last hold on a file whose last name went while it was held:
+        // the file is gone now. Its cached pages go, since its inode number
+        // may be given to another file, and so does the state kept about it,
+        // deferred at the unlink (`defer_forget_if_held`).
+        crate::mm::page_cache::invalidate_identity(obj.fs_id, obj.ino);
+        super::perfile::object_unlinked(
+            super::perfile::Unlinked {
+                id: Some(obj.id()),
+                last_name: true,
+            },
+            &name,
+        );
+    }
+    release_mount_hold(obj.fs_id);
 }
 
 /// Give back one hold on mount `fs_id` (`MountPoint::objects`).
@@ -1260,11 +1364,14 @@ fn check_writable_fs(fs_id: u64) -> KernelResult<()> {
 /// for a held file is its last release, not the unlink: a write-sealed file
 /// unlinked while open must stay sealed to the handle still writing it.
 /// `perfile::object_unlinked` asks [`defer_forget_if_held`]; the last
-/// [`Vfs::release_object`] then ends it, and drops the file's cached pages,
-/// since its inode number may be given to another file. A leaf lock.
+/// [`FileHold`] to go then ends it, and drops the file's cached pages, since
+/// its inode number may be given to another file. A leaf lock.
 struct Held {
     holds: usize,
     unlinked_as: Option<PathBuf>,
+    /// Made with no name to be given one (`O_TMPFILE` without `O_EXCL`):
+    /// Linux's `I_LINKABLE`. Cleared when it is named.
+    linkable: bool,
 }
 
 static HELD: Mutex<alloc::collections::BTreeMap<FileId, Held>> =
@@ -1276,6 +1383,7 @@ fn note_hold(id: FileId) {
     let entry = held.entry(id).or_insert(Held {
         holds: 0,
         unlinked_as: None,
+        linkable: false,
     });
     entry.holds = entry.holds.saturating_add(1);
 }
@@ -1292,6 +1400,37 @@ fn note_release(id: FileId) -> Option<PathBuf> {
     } else {
         None
     }
+}
+
+/// A file made with no name (`Vfs::create_unnamed_object`): its one hold,
+/// the name it is shown under, and whether it may be given a real one.
+fn note_unnamed(id: FileId, shown_as: PathBuf, linkable: bool) {
+    HELD.lock().insert(
+        id,
+        Held {
+            holds: 1,
+            unlinked_as: Some(shown_as),
+            linkable,
+        },
+    );
+}
+
+/// Held file `id` has been given a name (`Vfs::link_object`): it no longer
+/// goes with its last hold.
+fn note_named(id: FileId) {
+    if let Some(entry) = HELD.lock().get_mut(&id) {
+        entry.unlinked_as = None;
+        entry.linkable = false;
+    }
+}
+
+/// Whether held file `id` may be given a name: it has one already (and gets
+/// another, as `link` gives one), or it was made with none to be given one.
+/// A file deleted while open may not, as on Linux.
+fn may_link(id: FileId) -> bool {
+    HELD.lock()
+        .get(&id)
+        .is_some_and(|h| h.unlinked_as.is_none() || h.linkable)
 }
 
 /// `id`'s last name, `path`, has gone. If the file is held open it lives
@@ -3199,7 +3338,9 @@ impl Vfs {
         // requested mode differs.
         let perm = mode & 0o1777;
         if perm != Self::DEFAULT_DIR_MODE {
-            match Self::set_permissions(&path, perm) {
+            // `_resolved`: `path` is resolved, and `set_permissions` would
+            // apply a jailed caller's jail to it a second time.
+            match Self::set_permissions_resolved(&path, perm) {
                 Ok(()) => {}
                 // `NotSupported` only, and for the same reason the open
                 // path tolerates it (see `handle.rs`, `open_resolved`): a
@@ -3645,7 +3786,7 @@ impl Vfs {
     /// # Errors
     ///
     /// The filesystem's own, from looking the file up or pinning it.
-    pub fn open_object(path: impl AsRef<Path>) -> KernelResult<Option<FileObject>> {
+    pub fn open_object(path: impl AsRef<Path>) -> KernelResult<Option<FileHold>> {
         let path = path.as_ref();
         let (fs, fs_id, relative) = {
             let mut vfs = VFS.lock();
@@ -3666,7 +3807,7 @@ impl Vfs {
         match pinned {
             Ok(Some(ino)) => {
                 note_hold(FileId { fs_id, ino });
-                Ok(Some(FileObject { fs, fs_id, ino }))
+                Ok(Some(FileHold(FileObject { fs, fs_id, ino })))
             }
             Ok(None) | Err(KernelError::NotSupported) => {
                 release_mount_hold(fs_id);
@@ -3679,51 +3820,96 @@ impl Vfs {
         }
     }
 
-    /// A second hold on `obj`'s file, for a second open file description of
-    /// it (`fs::handle::dup`). Given back by its own [`release_object`].
+    /// Make a regular file with no name in already-resolved directory `dir`,
+    /// held: Linux's `O_TMPFILE` (`fs::handle::open_tmpfile`).
     ///
-    /// [`release_object`]: Self::release_object
+    /// The file exists only through the hold: no one can open it by a name,
+    /// and it goes when the last reference to the hold does -- unless
+    /// [`link_object`](Self::link_object) names it first, which `linkable`
+    /// allows (`O_TMPFILE` without `O_EXCL`). It is shown under `dir/#ino`,
+    /// as Linux shows one.
+    ///
+    /// Asked as a create in `dir` is: write access to it, a writable mount,
+    /// an interceptor, quota. No event and no journal entry: there is no name
+    /// to report, as Linux reports none.
     ///
     /// # Errors
     ///
-    /// `NotFound` if the mount has gone; the filesystem's own from pinning.
-    pub fn reopen_object(obj: &FileObject) -> KernelResult<FileObject> {
-        {
+    /// `NotSupported` on a filesystem that cannot hold a file with no name
+    /// (FAT, the pseudo filesystems); `NotADirectory`; the checks' and the
+    /// filesystem's own.
+    pub fn create_unnamed_object(dir: &Path, mode: u16, linkable: bool) -> KernelResult<FileHold> {
+        check_path_access(dir, PathAccess::Write)?;
+        check_writable(dir)?;
+        super::intercept::pre_check(super::intercept::FsOp::Write, dir, None)?;
+        enforce_quota_create(dir)?;
+        // The hold is counted on the mount first, as `open_object` counts
+        // one, so an unmount racing this create cannot take the filesystem
+        // away under it.
+        let (fs, fs_id, relative) = {
             let mut vfs = VFS.lock();
-            let mp = vfs
-                .mounts
-                .iter_mut()
-                .find(|m| m.fs_id == obj.fs_id)
-                .ok_or(KernelError::NotFound)?;
+            let (mp, relative) = find_mount(&mut vfs, dir)?;
             mp.objects = mp.objects.saturating_add(1);
-        }
-        if let Err(e) = obj.fs.lock().pin_ino(obj.ino) {
-            release_mount_hold(obj.fs_id);
-            return Err(e);
-        }
-        note_hold(obj.id());
-        Ok(obj.clone())
+            (Arc::clone(&mp.fs), mp.fs_id, relative.to_path_buf())
+        };
+        let made = fs.lock().create_unnamed(&relative, mode);
+        let ino = match made {
+            Ok(ino) => ino,
+            Err(e) => {
+                release_mount_hold(fs_id);
+                return Err(e);
+            }
+        };
+        note_unnamed(
+            FileId { fs_id, ino },
+            dir.join(alloc::format!("#{ino}")),
+            linkable,
+        );
+        Ok(FileHold(FileObject { fs, fs_id, ino }))
     }
 
-    /// Give back one hold. A file whose last name went while it was held goes
-    /// with its last hold; the mount may be unmounted once none is left.
-    pub fn release_object(obj: FileObject) {
-        obj.fs.lock().unpin_ino(obj.ino);
-        if let Some(name) = note_release(obj.id()) {
-            // The last hold on a file whose last name went while it was held:
-            // the file is gone now. Its cached pages go, since its inode
-            // number may be given to another file, and so does the state kept
-            // about it, deferred at the unlink (`defer_forget_if_held`).
-            crate::mm::page_cache::invalidate_identity(obj.fs_id, obj.ino);
-            super::perfile::object_unlinked(
-                super::perfile::Unlinked {
-                    id: Some(obj.id()),
-                    last_name: true,
-                },
-                &name,
-            );
+    /// Give held file `obj` the name `new_path` (not yet resolved): `linkat`
+    /// of a descriptor, by `AT_EMPTY_PATH` or a followed `/proc/self/fd/N`,
+    /// and the native `SYS_FS_LINK_HANDLE`.
+    ///
+    /// A file made with no name is named if it was made to be (`O_TMPFILE`
+    /// without `O_EXCL`), as Linux's `I_LINKABLE` allows, and then no longer
+    /// goes with its last hold. A file with a name gets another, as `link`
+    /// gives one. A file deleted while open, or made with `O_EXCL`, is
+    /// `NotFound`, as Linux answers `ENOENT`. Asked as `link` asks the new
+    /// name: write access, a writable mount, an interceptor, quota, the same
+    /// mount (`CrossDevice`).
+    ///
+    /// # Errors
+    ///
+    /// As above; `AlreadyExists` for a name taken; the filesystem's own.
+    pub fn link_object(obj: &FileObject, new_path: impl AsRef<Path>) -> KernelResult<()> {
+        let new_path = new_path.as_ref();
+        crate::ipc::namespace::check_writable(new_path)?;
+        let new_path = Self::resolve_no_follow(new_path)?;
+        check_path_access(&new_path, PathAccess::Write)?;
+        check_writable(&new_path)?;
+        super::intercept::pre_check(super::intercept::FsOp::Link, &new_path, None)?;
+        enforce_quota_create(&new_path)?;
+        if !may_link(obj.id()) {
+            return Err(KernelError::NotFound);
         }
-        release_mount_hold(obj.fs_id);
+        {
+            let (_fs, fs_id, _opts, rel_new) = resolve_mount(&new_path)?;
+            if fs_id != obj.fs_id {
+                return Err(KernelError::CrossDevice);
+            }
+            obj.fs.lock().link_held_ino(obj.ino, &rel_new)?;
+        }
+        note_named(obj.id());
+        // A name is counted as `link_inner` counts one.
+        super::quota::charge_inode(0, 0);
+        VFS_DCACHE.lock().invalidate_negative_prefix(&new_path);
+        super::notify::emit_created(&new_path);
+        super::index::on_file_changed(&new_path);
+        super::journal::record(super::journal::JournalEventType::Created, &new_path);
+        super::audit::log_ok(super::audit::AuditOp::Link, 0, &new_path);
+        Ok(())
     }
 
     /// The file's metadata now, its device included. `nlinks` is 0 once its
@@ -3849,6 +4035,100 @@ impl Vfs {
         Ok(())
     }
 
+    /// `fchmod` through a held file, whatever its name now. The open was the
+    /// access check, as for every call through a handle; what can refuse it
+    /// now is the mount turned read-only. `path` names it for events.
+    ///
+    /// # Errors
+    ///
+    /// `ReadOnlyFilesystem`; the filesystem's own.
+    pub fn object_set_permissions(
+        obj: &FileObject,
+        path: &Path,
+        permissions: u16,
+    ) -> KernelResult<()> {
+        check_writable_fs(obj.fs_id)?;
+        obj.fs.lock().chmod_ino(obj.ino, permissions)?;
+        super::notify::emit_metadata(path);
+        super::journal::record(super::journal::JournalEventType::Modified, path);
+        Ok(())
+    }
+
+    /// `fchown` through a held file, as
+    /// [`object_set_permissions`](Self::object_set_permissions). `u32::MAX`
+    /// leaves an id as it is, as for [`set_owner`](Self::set_owner).
+    ///
+    /// # Errors
+    ///
+    /// `ReadOnlyFilesystem`; the filesystem's own.
+    pub fn object_set_owner(obj: &FileObject, path: &Path, uid: u32, gid: u32) -> KernelResult<()> {
+        check_writable_fs(obj.fs_id)?;
+        {
+            let mut fs = obj.fs.lock();
+            let (uid, gid) = if uid == u32::MAX || gid == u32::MAX {
+                let meta = fs.metadata_ino(obj.ino)?;
+                (
+                    if uid == u32::MAX { meta.uid } else { uid },
+                    if gid == u32::MAX { meta.gid } else { gid },
+                )
+            } else {
+                (uid, gid)
+            };
+            fs.chown_ino(obj.ino, uid, gid)?;
+        }
+        super::notify::emit_metadata(path);
+        super::journal::record(super::journal::JournalEventType::Modified, path);
+        Ok(())
+    }
+
+    /// `futimens` through a held file, as
+    /// [`object_set_permissions`](Self::object_set_permissions). A time of 0
+    /// is left as it is.
+    ///
+    /// # Errors
+    ///
+    /// `ReadOnlyFilesystem`; the filesystem's own.
+    pub fn object_set_times(
+        obj: &FileObject,
+        accessed_ns: Timestamp,
+        modified_ns: Timestamp,
+    ) -> KernelResult<()> {
+        check_writable_fs(obj.fs_id)?;
+        obj.fs.lock().utimes_ino(obj.ino, accessed_ns, modified_ns)
+        // No notify/journal — timestamp changes are metadata-only.
+    }
+
+    /// `fallocate(KEEP_SIZE)` through a held file: reserve space for its
+    /// first `size` bytes without changing its size.
+    ///
+    /// # Errors
+    ///
+    /// `ReadOnlyFilesystem`; the filesystem's own.
+    pub fn object_fallocate(obj: &FileObject, size: u64) -> KernelResult<()> {
+        check_writable_fs(obj.fs_id)?;
+        obj.fs.lock().fallocate_ino(obj.ino, size)
+    }
+
+    /// `fstatfs` through a held file: the filesystem it is on, read-only if
+    /// the mount is, as [`statvfs_resolved`](Self::statvfs_resolved) reports.
+    ///
+    /// # Errors
+    ///
+    /// `NotFound` if the mount has gone; the filesystem's own.
+    pub fn object_statvfs(obj: &FileObject) -> KernelResult<FsInfo> {
+        let read_only = {
+            let vfs = VFS.lock();
+            vfs.mounts
+                .iter()
+                .find(|m| m.fs_id == obj.fs_id)
+                .map(|m| m.options.read_only)
+                .ok_or(KernelError::NotFound)?
+        };
+        let mut info = obj.fs.lock().statvfs()?;
+        info.read_only |= read_only;
+        Ok(info)
+    }
+
     /// What may refuse a write to a held file: the mount turned read-only,
     /// an interceptor, quota.
     fn object_write_checks(obj: &FileObject, path: &Path, len: usize) -> KernelResult<()> {
@@ -3877,9 +4157,19 @@ impl Vfs {
     pub fn fallocate(path: impl AsRef<Path>, size: u64) -> KernelResult<()> {
         let path = path.as_ref();
         let path = Self::resolve_follow(path)?;
-        check_writable(&path)?;
-        check_path_access(&path, PathAccess::Write)?;
-        let (fs, _id, _opts, relative) = resolve_mount(&path)?;
+        Self::fallocate_resolved(&path, size)
+    }
+
+    /// [`fallocate`](Self::fallocate) on an already-resolved host path: an
+    /// open handle's (`fs::handle::HandleFile`).
+    ///
+    /// # Errors
+    ///
+    /// As [`fallocate`](Self::fallocate).
+    pub fn fallocate_resolved(path: &Path, size: u64) -> KernelResult<()> {
+        check_writable(path)?;
+        check_path_access(path, PathAccess::Write)?;
+        let (fs, _id, _opts, relative) = resolve_mount(path)?;
         fs.lock().fallocate(&relative, size)
     }
 
@@ -5217,12 +5507,23 @@ impl Vfs {
     pub fn set_owner(path: impl AsRef<Path>, uid: u32, gid: u32) -> KernelResult<()> {
         let path = path.as_ref();
         let path = Self::resolve_follow(path)?;
-        check_writable(&path)?;
-        check_path_access(&path, PathAccess::Metadata)?;
+        Self::set_owner_resolved(&path, uid, gid)
+    }
+
+    /// [`set_owner`](Self::set_owner) on an already-resolved host path: an
+    /// open handle's, whose namespace was applied at its open
+    /// (`fs::handle::HandleFile`).
+    ///
+    /// # Errors
+    ///
+    /// As [`set_owner`](Self::set_owner).
+    pub fn set_owner_resolved(path: &Path, uid: u32, gid: u32) -> KernelResult<()> {
+        check_writable(path)?;
+        check_path_access(path, PathAccess::Metadata)?;
         // Resolve "leave unchanged" sentinels before taking the VFS lock
-        // (metadata() takes the lock itself).
+        // (metadata_resolved() takes the lock itself).
         let (uid, gid) = if uid == u32::MAX || gid == u32::MAX {
-            let meta = Self::metadata(&path)?;
+            let meta = Self::metadata_resolved(path)?;
             (
                 if uid == u32::MAX { meta.uid } else { uid },
                 if gid == u32::MAX { meta.gid } else { gid },
@@ -5231,11 +5532,11 @@ impl Vfs {
             (uid, gid)
         };
         {
-            let (fs, _id, _opts, relative) = resolve_mount(&path)?;
+            let (fs, _id, _opts, relative) = resolve_mount(path)?;
             fs.lock().set_owner(&relative, uid, gid)?;
         }
-        super::notify::emit_metadata(&path);
-        super::journal::record(super::journal::JournalEventType::Modified, &path);
+        super::notify::emit_metadata(path);
+        super::journal::record(super::journal::JournalEventType::Modified, path);
         Ok(())
     }
 
@@ -5275,14 +5576,30 @@ impl Vfs {
         let path = path.as_ref();
         crate::ipc::namespace::check_writable(path)?;
         let path = Self::resolve_follow(path)?;
-        check_writable(&path)?;
-        check_path_access(&path, PathAccess::Metadata)?;
+        Self::set_permissions_resolved(&path, permissions)
+    }
+
+    /// [`set_permissions`](Self::set_permissions) on an already-resolved
+    /// host path: a create stamping the mode it was asked for, or an open
+    /// handle's path (`fs::handle::HandleFile`).
+    ///
+    /// The creates called `set_permissions` with the path they had resolved
+    /// until 2026-10-01, so a jailed process's jail was applied to it a
+    /// second time: `open(O_CREAT)` and `mkdir` with any mode but the
+    /// default made the file and then failed, `NotFound`, leaving it.
+    ///
+    /// # Errors
+    ///
+    /// As [`set_permissions`](Self::set_permissions).
+    pub fn set_permissions_resolved(path: &Path, permissions: u16) -> KernelResult<()> {
+        check_writable(path)?;
+        check_path_access(path, PathAccess::Metadata)?;
         {
-            let (fs, _id, _opts, relative) = resolve_mount(&path)?;
+            let (fs, _id, _opts, relative) = resolve_mount(path)?;
             fs.lock().set_permissions(&relative, permissions)?;
         }
-        super::notify::emit_metadata(&path);
-        super::journal::record(super::journal::JournalEventType::Modified, &path);
+        super::notify::emit_metadata(path);
+        super::journal::record(super::journal::JournalEventType::Modified, path);
         Ok(())
     }
 
@@ -5317,9 +5634,23 @@ impl Vfs {
         let path = path.as_ref();
         crate::ipc::namespace::check_writable(path)?;
         let path = Self::resolve_follow(path)?;
-        check_writable(&path)?;
-        check_path_access(&path, PathAccess::Metadata)?;
-        let (fs, _id, _opts, relative) = resolve_mount(&path)?;
+        Self::set_times_resolved(&path, accessed_ns, modified_ns)
+    }
+
+    /// [`set_times`](Self::set_times) on an already-resolved host path: an
+    /// open handle's (`fs::handle::HandleFile`).
+    ///
+    /// # Errors
+    ///
+    /// As [`set_times`](Self::set_times).
+    pub fn set_times_resolved(
+        path: &Path,
+        accessed_ns: Timestamp,
+        modified_ns: Timestamp,
+    ) -> KernelResult<()> {
+        check_writable(path)?;
+        check_path_access(path, PathAccess::Metadata)?;
+        let (fs, _id, _opts, relative) = resolve_mount(path)?;
         fs.lock().set_times(&relative, accessed_ns, modified_ns)
         // No notify/journal — timestamp changes are metadata-only.
     }
@@ -5729,8 +6060,25 @@ impl Vfs {
     pub fn statvfs(path: impl AsRef<Path>) -> KernelResult<FsInfo> {
         let path = path.as_ref();
         let path = Self::resolve_follow(path)?;
-        let (fs, _id, _opts, _relative) = resolve_mount(&path)?;
-        fs.lock().statvfs()
+        Self::statvfs_resolved(&path)
+    }
+
+    /// [`statvfs`](Self::statvfs) on an already-resolved host path: an open
+    /// handle's (`fs::handle::HandleFile`).
+    ///
+    /// `read_only` is the mount's as well as the filesystem's: a writable
+    /// filesystem mounted read-only is read-only to its callers, and
+    /// `statvfs`'s `ST_RDONLY` says so, as Linux's does. It reported only the
+    /// filesystem's until 2026-10-01.
+    ///
+    /// # Errors
+    ///
+    /// `NotFound` for a path under no mount; the filesystem's own.
+    pub fn statvfs_resolved(path: &Path) -> KernelResult<FsInfo> {
+        let (fs, _id, opts, _relative) = resolve_mount(path)?;
+        let mut info = fs.lock().statvfs()?;
+        info.read_only |= opts.read_only;
+        Ok(info)
     }
 
     /// Discard (TRIM) the free space of the filesystem containing `path`.
@@ -6257,6 +6605,25 @@ impl Vfs {
         flock_attempt(path, id, owner, lock_type)
     }
 
+    /// The `flock` calls for an open file, keyed on the file it holds --
+    /// `fs::handle::lock_key` -- rather than on what its name names now. A
+    /// file renamed while open keeps its locks, and a new file under its old
+    /// name is not locked by them; they keyed on the open-time name until
+    /// 2026-10-01. `path` is the name a lock is shown under (`/proc/locks`),
+    /// and the key for a file with no identity.
+    ///
+    /// # Errors
+    ///
+    /// As [`flock_resolved`](Self::flock_resolved).
+    pub fn flock_key(
+        path: &Path,
+        id: Option<FileId>,
+        owner: u64,
+        lock_type: LockType,
+    ) -> KernelResult<()> {
+        flock_attempt(path, id, owner, lock_type)
+    }
+
     /// [`flock_resolved`](Self::flock_resolved), waiting while another
     /// owner's lock is in the way: `flock` without `LOCK_NB`.
     ///
@@ -6276,11 +6643,27 @@ impl Vfs {
         owner: u64,
         lock_type: LockType,
     ) -> KernelResult<()> {
-        use crate::ipc::waiters;
-
         let path = path.as_ref();
         // Resolved once, before any lock, as in `flock_resolved`.
         let id = Self::file_identity_resolved(path).unwrap_or(None);
+        Self::flock_wait_key(path, id, owner, lock_type)
+    }
+
+    /// [`flock_key`](Self::flock_key), waiting while another owner's lock is
+    /// in the way, as [`flock_wait_resolved`](Self::flock_wait_resolved)
+    /// waits.
+    ///
+    /// # Errors
+    ///
+    /// As [`flock_wait_resolved`](Self::flock_wait_resolved).
+    pub fn flock_wait_key(
+        path: &Path,
+        id: Option<FileId>,
+        owner: u64,
+        lock_type: LockType,
+    ) -> KernelResult<()> {
+        use crate::ipc::waiters;
+
         // The uncontended case takes no lock on the waiter list at all.
         match flock_attempt(path, id, owner, lock_type) {
             Err(KernelError::WouldBlock) => {}
@@ -6337,6 +6720,13 @@ impl Vfs {
         // Resolved before `LOCK_TABLE` is taken, never under it: see
         // `flock_resolved`.
         let id = Self::file_identity_resolved(path).unwrap_or(None);
+        Self::funlock_key(path, id, owner);
+        Ok(())
+    }
+
+    /// [`flock_key`](Self::flock_key)'s release, waking whoever was waiting.
+    /// Nothing for an owner holding no lock on the file.
+    pub fn funlock_key(path: &Path, id: Option<FileId>, owner: u64) {
         let released = {
             let mut table = LOCK_TABLE.lock();
             let mut released = false;
@@ -6356,7 +6746,6 @@ impl Vfs {
         if released {
             wake_flock_waiters(path, id);
         }
-        Ok(())
     }
 
     /// Release every advisory lock one owner holds: a process's at its

@@ -38,6 +38,11 @@ be hard about letting users replace the library.
 > connection shuffling so that the ones that need the speed of B the most get
 > B, unless this possibility just isn't a good option.
 
+**Recorded by lane A (2026-09-27):** `design-decisions.md` §971 (A-Q14,
+option A: a kept version is the file as it stands after the save) and §972
+(A-Q15: settled by measurement; A built now, B revisited by the
+measurements the operator asked for), each quoting this answer.
+
 ## Lane B
 
 > B-Q8: I want a way to ask the terminal how wide it will draw something as

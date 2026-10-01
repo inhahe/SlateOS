@@ -3037,7 +3037,7 @@ fn render_maps(vmas: &[crate::mm::vma::Vma]) -> Vec<u8> {
                 *file_offset,
                 file_id.map_or(0, |f| crate::fs::vfs::dev_of(f.fs_id)),
                 file_id.map_or(0, |f| f.ino),
-                crate::fs::handle::handle_path(*handle).ok(),
+                crate::fs::handle::handle_name(*handle).ok(),
             ),
             _ => (0, 0, 0, None),
         };
@@ -3567,7 +3567,7 @@ fn fd_link_target(entry: &crate::proc::linux_fd::FdEntry) -> PathBuf {
     use crate::proc::linux_fd::HandleKind;
     match entry.kind {
         HandleKind::Console => PathBuf::from("/dev/console"),
-        HandleKind::File => crate::fs::handle::handle_path(entry.raw_handle)
+        HandleKind::File => crate::fs::handle::handle_name(entry.raw_handle)
             .unwrap_or_else(|_| PathBuf::from("anon_inode:[file]")),
         HandleKind::Pipe => PathBuf::from(format!("pipe:[{}]", entry.raw_handle)),
         HandleKind::EventFd => PathBuf::from("anon_inode:[eventfd]"),
@@ -15582,6 +15582,79 @@ impl FileSystem for ProcFs {
 pub fn mount(mount_path: impl AsRef<Path>) -> KernelResult<()> {
     let fs = ProcFs::new();
     crate::fs::Vfs::mount(mount_path, alloc::boxed::Box::new(fs))?;
+    Ok(())
+}
+
+/// Make `/etc/mtab` the mount table, as Linux has it: a symlink to
+/// `/proc/self/mounts`, for the programs that read the table at glibc's
+/// `MOUNTED` path (`setmntent("/etc/mtab")`, older programs, gnulib).
+///
+/// Nothing on the system made it until 2026-10-01, and they got `ENOENT`
+/// (lane D's request `d-a-make-etc-mtab-at-boot`). It is made at boot,
+/// not in the rootfs image: the image is mounted at `/mnt`, and programs
+/// look at `/etc`.
+///
+/// An `/etc/mtab` already there is left as it is: the link an earlier call
+/// made, or a file someone put there on purpose.
+///
+/// # Errors
+///
+/// The VFS's own, from looking or from making the link.
+pub fn make_etc_mtab() -> KernelResult<()> {
+    match crate::fs::Vfs::lstat("/etc/mtab") {
+        Ok(_) => Ok(()),
+        Err(KernelError::NotFound) => crate::fs::Vfs::symlink("/etc/mtab", "/proc/self/mounts"),
+        Err(e) => Err(e),
+    }
+}
+
+/// `/etc/mtab` is the mount table: [`make_etc_mtab`] makes it a link to
+/// `/proc/self/mounts`, and a process reading it gets a line for the root
+/// mount. Read as a process, which `/proc/self` needs: a kernel task has no
+/// process directory.
+///
+/// # Errors
+///
+/// `InternalError` when the link or its contents are wrong; the VFS's own.
+pub fn self_test_etc_mtab() -> KernelResult<()> {
+    use crate::serial_println;
+
+    fn fail(what: &str) -> KernelResult<()> {
+        serial_println!("[procfs]   FAIL: /etc/mtab: {}", what);
+        Err(KernelError::InternalError)
+    }
+
+    if crate::fs::Vfs::stat("/etc").is_err() {
+        // Boot makes `/etc` later; made here first, it is the same directory.
+        crate::fs::Vfs::mkdir("/etc")?;
+    }
+    make_etc_mtab()?;
+    match crate::fs::Vfs::readlink("/etc/mtab") {
+        Ok(target) if target.as_path() == Path::new("/proc/self/mounts") => {}
+        other => {
+            serial_println!("[procfs]   /etc/mtab reads as a link to {:?}", other);
+            return fail("it is not a link to /proc/self/mounts");
+        }
+    }
+    let pid = crate::proc::pcb::create("etc-mtab-selftest", 0);
+    let table =
+        crate::proc::thread::self_test_as_process(pid, || crate::fs::Vfs::read_file("/etc/mtab"));
+    crate::proc::pcb::destroy(pid);
+    // A line whose second field, the mount point, is "/".
+    let has_root = table.as_ref().is_ok_and(|t| {
+        t.split(|&b| b == b'\n')
+            .any(|line| line.split(|&b| b == b' ').nth(1) == Some(b"/".as_slice()))
+    });
+    if !has_root {
+        serial_println!(
+            "[procfs]   /etc/mtab read: {:?}",
+            table.as_ref().map(alloc::vec::Vec::len)
+        );
+        return fail("reading it gave no line for the root mount");
+    }
+    serial_println!(
+        "[procfs]   /etc/mtab: a link to /proc/self/mounts, read as the mount table: OK"
+    );
     Ok(())
 }
 

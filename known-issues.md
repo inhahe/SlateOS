@@ -180483,7 +180483,7 @@ user path, beside the gates it calls. `syscall::dispatch`'s
 `test_dispatch_fs_gates` checks each, as a scratch process with no
 capability.
 
-### A-AN-OPEN-FILE-FOLLOWS-ITS-NAME -- 2026-10-01 -- FIXED the same day for memfs and ext4 (steps 1-4 of the plan below; design-decisions §1508); step 5, `O_TMPFILE`, open (lane A)
+### A-AN-OPEN-FILE-FOLLOWS-ITS-NAME -- 2026-10-01 -- FIXED the same day for memfs and ext4 (steps 1-5 of the plan below; design-decisions §1508, §1509) (lane A)
 
 **In short:** opening a file here gives a program a handle to the file's
 *name*, not to the file. Every read and write looks the name up again. So a
@@ -180571,11 +180571,65 @@ data stays readable through the handle, and nowhere else, until the close.
   - Test: `ext4::self_test`'s held-file rung, on the boot test's `/mnt`.
     The free-inode count shows the inode kept while held and freed at the
     last close.
-- **Still open:**
-  - Step 5, `O_TMPFILE` and `SYS_FS_TMPFILE`. They are now buildable as
-    create, hold, unlink, but still refuse.
-  - On FAT and the pseudo filesystems a handle still goes by name, so
-    everything above applies to them as before.
+- **Step 5, `O_TMPFILE` and `SYS_FS_TMPFILE`** (design-decisions §1509):
+  - A file is made with no name at the filesystem: on ext4, an inode on
+    the orphan list from birth.
+  - It goes at its last close, or is named first: `linkat` of a descriptor
+    by `AT_EMPTY_PATH` or `/proc/self/fd/N`, and the native
+    `SYS_FS_LINK_HANDLE` (1096).
+  - Tests: `test_held_files` rung 14; `ext4::self_test`'s unnamed-file
+    rung on `/mnt`; `dispatch`'s `test_dispatch_tmpfile`; the Linux flags
+    in `test_linux_create_modes`.
+- **Still open:** on FAT and the pseudo filesystems a handle still goes by
+  name, so everything above applies to them as before, and `O_TMPFILE`
+  there is `EOPNOTSUPP`.
+
+**Second pass, 2026-10-01** -- what steps 1-4 left, found while building
+step 5:
+- **A close racing a call could free the file under it.** A call took a
+  copy of the handle's `FileObject` and let go of the table; a close on
+  another thread then gave the hold back at once. For a file deleted while
+  open that freed the inode -- on ext4, its blocks back in the free pool --
+  while the call was still reading or writing it. Now the hold is a
+  `FileHold` behind an `Arc`, shared by the descriptions and by each call
+  in progress, and given back by the last of them, as Linux's `fdget`
+  keeps a `struct file` alive across a syscall. Test: `test_held_files`
+  rung 7 (the file and its mount outlive the close while a call has it).
+- **`handle_path` handed out a name the file no longer had.** Every caller
+  acting by a handle's name -- the Linux `fchmod`, `fchown`, `ftruncate`,
+  `fallocate`, `futimens`, `fexecve`, `fstatfs` -- acted on whatever had
+  the name now. `handle_path` now checks that the name still names the held
+  file (`NotFound` if not). `handle_name` is the unchecked name, for
+  display: `/proc/<pid>/fd`, `/proc/<pid>/maps`, `SYS_FS_HANDLE_PATH`. Test:
+  rung 8.
+- **`flock` keyed on the open-time name.** A file renamed while open kept
+  no lock against a handle opened under its new name, and a new file under
+  its old name inherited them. The handle calls (native
+  `SYS_FS_FLOCK_HANDLE`, Linux `flock`, the release at close) now key on
+  `fs::handle::lock_key`: the identity of the file held. Test: rung 9.
+- **Linux `fchdir` and a file descriptor as a directory.** A descriptor of
+  a file is `ENOTDIR` before its name is looked at, and `fchdir`'s
+  directory check no longer applies a jailed caller's jail twice
+  (`stat_resolved`).
+- **The Linux fd calls went by the descriptor's name.** `fchmod`,
+  `fchown`, `fchownat`/`fchmodat2` with `AT_EMPTY_PATH`, `futimens`,
+  `ftruncate`, `fallocate` and `fstatfs` looked the name up again, through
+  the path calls. So a file deleted while open could not be truncated or
+  grown through its own descriptor (SQLite's temporary files), a renamed
+  one was missed, and a jailed caller's jail was applied to the name twice.
+  They now act through `fs::handle::HandleFile`: the file the handle
+  holds, or for a file held by name the host path captured at open. New
+  inode-addressed calls back it: `FileSystem::chmod_ino`, `chown_ino`,
+  `utimes_ino`, `fallocate_ino` (memfs and ext4), `Vfs::object_set_*`,
+  `object_fallocate` and `object_statvfs`, and the `*_resolved` path calls.
+  A change through a handle opened in a read-only volume is refused
+  (`OpenFile::ro_volume`, taken at open, as Linux checks the mount a file
+  was opened on). Tests: `test_held_files` rungs 10-13; `linux`'s fallocate
+  range test now goes through a handle.
+- **Still open:** `fexecve` of a file renamed or deleted since it was
+  opened is `ENOENT`. Exec loads by name, and the name is now checked; Linux
+  execs the open file. The fix is an exec that reads its image through the
+  handle.
 
 ### A-LINUX-FSTAT-OF-A-FILE-WAS-MADE-UP -- 2026-10-01 -- FIXED the same day (lane A)
 
@@ -180604,6 +180658,130 @@ moved onto `FileMeta` then; these were not.
 metadata (`fs::handle::fstat`), through the same fill the path-based calls
 use. The made-up answer stays for descriptors with no file behind them:
 pipes, sockets, anonymous inodes.
+
+### A-LINUX-CREATE-DROPPED-MODE-AND-UMASK -- 2026-10-01 -- FIXED the same day (lane A)
+
+**In short:** a Linux program creating a file or directory got 0644 or 0755
+whatever it asked for. The `mode` argument of `open`, `openat`, `openat2`,
+`creat`, `mkdir` and `mkdirat` was dropped, and so was the process's
+umask. A key file a program made 0600 was readable by every user, and a
+`umask 077` shell made world-readable files.
+
+**Two more faults on the same path, found with it:**
+- **`open` read at most 255 bytes of a path.** Anything longer was
+  `ENAMETOOLONG`, where Linux allows 4095. A deep build tree's paths are
+  longer than that.
+- **`openat` relative to a directory descriptor, and `openat2`'s
+  `RESOLVE_BENEATH`, refused a name that is not UTF-8** with `EINVAL`. A
+  name may hold any byte but `/` and NUL, and plain `open` already took
+  such names.
+
+**Where:** `syscall/linux.rs`: `open_common`, `open_kernel_path_install`,
+`sys_openat_ex`, `sys_openat_beneath`, `sys_creat`, `mkdir_common`.
+
+**Fixed:**
+- `linux_create_mode` takes the twelve permission bits of `mode` and
+  clears the caller's umask (`pcb::get_umask`; 022 for a kernel caller).
+- Every create in the list passes it: the open family through
+  `fs::handle::open_with_mode` and `open_beneath_with_mode`, the mkdir pair
+  through `Vfs::mkdir_mode`.
+- `open_common` reads its path with `read_user_cstr` up to `PATH_MAX`.
+- The installer takes `&Path`, so it takes bytes.
+
+**Test:** `linux::self_test_fs`'s `test_linux_create_modes`:
+- `open`, `creat` and `mkdir` with several modes, read back with `stat`;
+- the umask of a lent process;
+- a 270-byte path, and a 4099-byte one;
+- a name holding bytes 0xff and 0xfe.
+
+### A-JAILED-CREATE-WITH-A-MODE-FAILED-AFTER-CREATING -- 2026-10-01 -- FIXED the same day (lane A)
+
+**In short:** a process in a chroot jail (a container) that created a file
+with any mode but 0644, or a directory with any but 0755, got an error,
+and the file or directory was left there anyway. `mkstemp` asks for 0600,
+so every temporary file a container made failed this way. A Linux create
+used 0644 whatever it asked for until the same day
+(A-LINUX-CREATE-DROPPED-MODE-AND-UMASK), which hid the fault for Linux
+programs; native ones met it whenever they gave a mode.
+
+**Where:** `fs::handle::open_resolved` and `Vfs::mkdir_mode` stamped the
+mode with `Vfs::set_permissions` on the path they had already resolved.
+`set_permissions` resolves again, and resolving applies the caller's jail,
+so the jail was applied twice: `/jail/made` became `/jail/jail/made`, and
+`NotFound`.
+
+**Fixed:** `Vfs::set_permissions_resolved`, with `set_owner_resolved`,
+`set_times_resolved`, `statvfs_resolved` and `fallocate_resolved` beside
+it, for a caller holding a resolved path. Test: `test_held_files` rung 13,
+in a jail of its own: a file made with mode 0600, a directory with 0700,
+and a read-only volume refusing a change through a handle opened in it.
+
+**Not fixed, the same mistake:** `Vfs::atomic_write` and
+`atomic_write_preserve` resolve the path, then call path calls with the
+result. Their callers are kernel tasks, which have no jail, so nothing goes
+wrong today. The fix, when a jailed caller appears, is the `*_resolved`
+calls.
+
+### A-LINUX-OPEN-OF-A-DIRECTORY-FOR-READING-WAS-EISDIR -- 2026-10-01 -- FIXED the same day (lane A)
+
+**In short:** a Linux program opening a directory with `open(dir, O_RDONLY)`
+and no `O_DIRECTORY` got `EISDIR`. Linux opens it. Programs do this to
+`fchdir` back later (`open(".", O_RDONLY)`), and SQLite does it to `fsync`
+the directory a journal is in. `opendir` passes `O_DIRECTORY` and was not
+affected.
+
+**Fixed:** `OpenFlags::DIRECTORY_ALLOWED` opens a directory or a regular
+file, whichever the path names. The Linux layer sets it for a read-only
+open without `O_CREAT` or `O_TRUNC`. A directory is still refused anything
+that would write it. Tests: `test_held_files` rung 12, and
+`test_linux_create_modes`.
+
+### A-UTIMES-SET-THE-CHANGE-TIME-WRONG -- 2026-10-01 -- FIXED the same day (lane A); its nanoseconds OPEN
+
+**In short:** changing a file's times (`touch`, `utimensat`) must set its
+change time (`ctime`) to now. ext4 set it to the new modification time, so
+`touch -d 2001-01-01 f` back-dated the change time as well. An access-time
+change left it alone. memfs never set it.
+
+**Fixed:** ext4's `set_times_ino` stamps the change time now; memfs's
+`node_set_times` does too.
+
+**Still open:** ext4's `set_times_ino` writes whole seconds into the inode
+core and leaves the extra fields (`i_mtime_extra`, `i_atime_extra`)
+alone. A time's nanoseconds and its epoch bits past 2038 are lost, and
+the old ones are left in place: a file stamped with a whole second reads
+back with the nanoseconds of its previous time. The fix is to write the
+extra fields as `write_crtime` writes the creation time.
+
+### A-DNS-ANSWERED-ONE-ADDRESS-AND-ONE-ERROR -- 2026-10-01 -- FIXED the same day (lane A); TCP for a truncated answer OPEN
+
+**In short:** asking for a name's address got one IPv4 address. The rest
+of the answer was thrown away: a name's other addresses, its IPv6
+addresses, and the name at the end of its aliases (CNAMEs). "No such name"
+and "no address of that kind" were one error. So `getaddrinfo` could not
+answer as glibc does (lane D's request), and `hostname -f` could not learn
+a machine's full name (lane B's).
+
+**Where:** `kernel/src/net/dns.rs`, `resolve` and `resolve6`; each had a
+one-address cache. `SYS_DNS_RESOLVE` (820) wrote four bytes.
+
+**Fixed** (design-decisions §1510):
+- `net::dns::lookup` gives every address and the canonical name.
+- NXDOMAIN is `NotFound`; NODATA is the new `NoAddress` (-707);
+  SERVFAIL is `WouldBlock`; REFUSED is `ConnectionRefused`.
+- One cache keeps whole answers, negative ones as themselves.
+- The kernel's hosts table is asked first, by every caller.
+- `SYS_DNS_RESOLVE2` (1097) carries it to userspace.
+- Tests:
+  - `net::dns::self_test`: parsing, the CNAME chain, each refusal, the
+    cache, the `AF_UNSPEC` merge, the hosts table;
+  - `dispatch`'s `test_dispatch_dns_resolve2`: the layout, through
+    `localhost`.
+
+**Still open:** a UDP answer longer than 512 bytes comes truncated (the
+TC bit), and the resolver uses what it holds. A name with many records
+loses the ones past the cut. glibc retries over TCP; the resolver has no
+TCP client. The fix is that retry, or EDNS0 to raise the UDP size.
 
 ## Lane B: new entries
 

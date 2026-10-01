@@ -180036,7 +180036,7 @@ native parents and leave `SA_NOCLDSTOP` to libc.
 child that runs `raise(SIGSTOP)`. On Linux the handler runs once, with
 `CLD_STOPPED`; here it does not run.
 
-### A-PROC-DIRECTORIES-ARE-TASK-IDS-AND-EVERYTHING-ELSE-IS-PIDS -- 2026-10-01 -- OPEN (lane A, next)
+### A-PROC-DIRECTORIES-ARE-TASK-IDS-AND-EVERYTHING-ELSE-IS-PIDS -- 2026-10-01 -- FIXED the same day by option A (design-decisions §1504); two gaps left, at the end
 
 **In short:** the numbers `/proc` shows as process ids are not process ids.
 `/proc/<n>` is keyed by scheduler *task* id, while `getpid()`, `kill`,
@@ -180082,6 +180082,25 @@ but leaves two id spaces that collide numerically.
 **Reproduce.** In a native process, compare `getpid()` with
 `readlink("/proc/self")`. They differ whenever the process's first thread
 was not given the same number.
+
+**Fixed (§1504):**
+- One counter now numbers tasks and processes.
+- A process's first thread takes the process's id
+  (`pcb::claim_leader_id`).
+- `/proc/self` is the calling process.
+- The root lists processes and kernel tasks.
+- A stat line's process-wide fields are the owner's.
+
+**Still open:**
+- **A process whose main thread exited while other threads run** has no
+  `/proc/<pid>` and is not listed. Linux keeps the leader as a zombie
+  thread so the directory stays; here the leader task is gone. Fix:
+  resolve `/proc/<pid>` to the process's first live thread when no task
+  has the pid's number.
+- **A non-leader thread's `/proc/<tid>`** (not listed, but it resolves):
+  every file but `stat` looks its process up by the thread's id and finds
+  nothing. Fix: one `owner_process` resolution in the generators' common
+  path.
 
 ## Lane B: new entries
 

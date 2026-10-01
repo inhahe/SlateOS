@@ -39,10 +39,6 @@ use core::sync::atomic::{AtomicU64, Ordering};
 /// session.  PID 0 is the kernel, PID 1 is init.
 pub type ProcessId = u64;
 
-/// Counter for generating unique process IDs.
-/// Starts at 1 (PID 0 = kernel).
-static NEXT_PID: AtomicU64 = AtomicU64::new(1);
-
 /// Cumulative count of processes created since boot.
 ///
 /// Incremented once per successful process creation — both fresh
@@ -50,13 +46,17 @@ static NEXT_PID: AtomicU64 = AtomicU64::new(1);
 /// counter (it never decrements when a process exits), which is exactly
 /// the semantics Linux's `/proc/stat` `processes` field reports.  It is
 /// distinct from the live process count (the size of `PROCESS_TABLE`):
-/// `NEXT_PID` also advances but is an implementation detail of PID
-/// allocation, so we keep a dedicated counter rather than deriving the
-/// value from it.
+/// the id counter also advances, for tasks as well as processes, so we keep
+/// a dedicated counter rather than deriving the value from it.
 static PROCESSES_CREATED: AtomicU64 = AtomicU64::new(0);
 
+/// A new process id, from the counter task ids come from
+/// ([`crate::sched::task::alloc_id`]): one id space, as Linux's. The
+/// process's first thread is then given this same number as its task id
+/// ([`claim_leader_id`]), so a process's id is its main thread's, and no
+/// task id is ever another process's id. Starts at 1: 0 is the kernel.
 fn alloc_pid() -> ProcessId {
-    NEXT_PID.fetch_add(1, Ordering::Relaxed)
+    crate::sched::task::alloc_id()
 }
 
 /// The PID [`alloc_pid`] would hand out next, without consuming it.
@@ -69,7 +69,7 @@ fn alloc_pid() -> ProcessId {
 /// side effect on the very sequence it is checking.
 #[must_use]
 pub fn peek_next_pid() -> ProcessId {
-    NEXT_PID.load(Ordering::Relaxed)
+    crate::sched::task::peek_next_id()
 }
 
 /// Cumulative number of processes created since boot.
@@ -398,6 +398,9 @@ pub struct Process {
     pub sid: ProcessId,
     /// Thread IDs belonging to this process.
     pub threads: Vec<TaskId>,
+    /// The process's own id has been given to a thread, its first
+    /// ([`claim_leader_id`]). Never cleared: the id stays the leader's.
+    pub leader_id_claimed: bool,
     /// Per-process capability table.
     pub cap_table: CapTable,
     /// Exit code (set when all threads have exited).
@@ -1341,6 +1344,7 @@ impl Process {
             pgid: pid,
             sid: pid,
             threads: Vec::new(),
+            leader_id_claimed: false,
             cap_table: CapTable::new(),
             exit_code: None,
             credentials: ProcessCredentials::root(),
@@ -1799,6 +1803,7 @@ pub fn fork_create(
         pgid: parent_pgid,
         sid: parent_sid,
         threads: Vec::new(),
+        leader_id_claimed: false,
         cap_table,
         exit_code: None,
         credentials,
@@ -2030,6 +2035,27 @@ pub fn set_running(pid: ProcessId) -> KernelResult<()> {
 
     proc.state = ProcessState::Running;
     Ok(())
+}
+
+/// Claim process `pid`'s own id for the thread about to be created: `true`
+/// the first time it is asked for a live process, `false` ever after (and
+/// for a process that is gone).
+///
+/// `proc::thread` asks before creating each thread and gives the claimed
+/// id to the first, so a process's id is its main thread's task id, as on
+/// Linux: `gettid() == getpid()` in the main thread, and `/proc/<pid>` --
+/// keyed by task id -- is the process. The id comes from the counter task
+/// ids come from ([`alloc_pid`]), so no other task can hold it.
+#[must_use]
+pub fn claim_leader_id(pid: ProcessId) -> bool {
+    let mut table = PROCESS_TABLE.lock();
+    match table.get_mut(&pid) {
+        Some(proc) if !proc.leader_id_claimed => {
+            proc.leader_id_claimed = true;
+            true
+        }
+        _ => false,
+    }
 }
 
 /// Add a thread to a process.

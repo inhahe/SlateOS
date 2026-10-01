@@ -2649,7 +2649,12 @@ fn gen_pid_stat(task_id: u64) -> KernelResult<Vec<u8>> {
         .iter()
         .find(|t| t.id == task_id)
         .ok_or(KernelError::NotFound)?;
-    Ok(build_pid_stat(task, task_id))
+    // The process-wide fields are the owning process's. For a process's own
+    // directory that is the same number (its id is its main thread's); for a
+    // thread's `/proc/<tid>` it is the thread's process; a kernel task has
+    // none, and reports zeros.
+    let proc_id = crate::proc::thread::owner_process(task_id).unwrap_or(0);
+    Ok(build_pid_stat(task, proc_id))
 }
 
 /// `/proc/<pid>/task/<tid>/stat` — per-thread task statistics.
@@ -14047,6 +14052,23 @@ fn task_exists(task_id: u64) -> bool {
     crate::sched::task_exists(task_id)
 }
 
+/// The directory `/proc/self` names: the calling process's id -- its main
+/// thread's task id, so the directory that is the process -- or, for a
+/// kernel task with no process, its own id. Until 2026-10-01 this was the
+/// calling *task's* id, which for any thread but the first is not the
+/// process, and before task and process ids shared one counter was not the
+/// process for the first thread either.
+fn self_dir_id() -> u64 {
+    let task = crate::sched::current_task_id();
+    crate::proc::thread::owner_process(task).unwrap_or(task)
+}
+
+/// Whether task `task_id` has a directory in the `/proc` listing: a process's
+/// main thread (whose id is the process's) and a kernel task (no process).
+fn is_listed_at_root(task_id: u64) -> bool {
+    crate::proc::thread::owner_process(task_id).is_none_or(|pid| pid == task_id)
+}
+
 // ---------------------------------------------------------------------------
 // Path resolution helpers
 // ---------------------------------------------------------------------------
@@ -14804,11 +14826,11 @@ fn classify_path(rel: &str) -> ProcPath<'_> {
         return ProcPath::NotFound;
     }
 
-    // "self" is a magic alias for the current task's PID.
+    // "self" is a magic alias for the calling process's directory.
     // Linux provides /proc/self as a symlink → /proc/<current_pid>.
     // We resolve it inline since procfs is a virtual filesystem.
     let pid = if first == "self" {
-        crate::sched::current_task_id()
+        self_dir_id()
     } else if let Ok(p) = first.parse::<u64>() {
         p
     } else {
@@ -14931,8 +14953,15 @@ impl FileSystem for ProcFs {
                     size: 0,
                 });
 
-                // Add per-PID directories for all live tasks.
+                // One directory per process -- its main thread's task id, which is
+                // its pid (`pcb::claim_leader_id`) -- and one per kernel task,
+                // which has no process. A process's other threads are under its
+                // `task/` directory and not listed here, as on Linux; their own
+                // `/proc/<tid>` still resolves.
                 for task in &crate::sched::task_list() {
+                    if !is_listed_at_root(task.id) {
+                        continue;
+                    }
                     entries.push(DirEntry {
                         ino: 0,
                         name: PathBuf::from(format!("{}", task.id)),
@@ -15350,10 +15379,7 @@ impl FileSystem for ProcFs {
             }
             // `/proc/self` → the caller's pid, as a relative target (Linux
             // returns the bare pid number, e.g. "7", resolved against /proc).
-            ProcPath::SelfLink => Ok(PathBuf::from(format!(
-                "{}",
-                crate::sched::current_task_id()
-            ))),
+            ProcPath::SelfLink => Ok(PathBuf::from(format!("{}", self_dir_id()))),
             _ => Err(KernelError::InvalidArgument),
         }
     }
@@ -17673,12 +17699,13 @@ pub fn self_test() -> KernelResult<()> {
     // the third a literal 0.)
     let field = |i: usize| rest_fields.get(i).and_then(|f| f.parse::<i64>().ok());
     let as_field = |v: u64| i64::try_from(v).ok();
+    // The process the line describes: the task's owner (none, so 0, for this
+    // kernel task).
+    let owner = crate::proc::thread::owner_process(current_tid).unwrap_or(0);
     let expected = (
-        as_field(crate::proc::pcb::get_pgid(current_tid).unwrap_or(0)),
-        as_field(crate::proc::pcb::get_sid(current_tid).unwrap_or(0)),
-        Some(i64::from(
-            crate::proc::pcb::get_nice(current_tid).unwrap_or(0),
-        )),
+        as_field(crate::proc::pcb::get_pgid(owner).unwrap_or(0)),
+        as_field(crate::proc::pcb::get_sid(owner).unwrap_or(0)),
+        Some(i64::from(crate::proc::pcb::get_nice(owner).unwrap_or(0))),
     );
     if (field(2), field(3), field(16)) != expected {
         serial_println!(

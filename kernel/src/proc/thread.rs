@@ -257,7 +257,12 @@ pub fn spawn_suspended_with_tls(
     // container self-test's yield budget and firing its fatal assert.  We
     // now register all process/thread ownership *before* admitting the task,
     // which is also SMP-correct (another CPU cannot pick it up early).
-    let task_id = sched::spawn_suspended(name, priority, entry, arg, pml4)?;
+    //
+    // The process's first thread is given the process's own id, so that a
+    // process's id is its main thread's task id, as on Linux
+    // (`pcb::claim_leader_id`); every later thread takes a fresh one.
+    let requested_id = pcb::claim_leader_id(pid).then_some(pid);
+    let task_id = sched::spawn_suspended_with_id(name, priority, entry, arg, pml4, requested_id)?;
 
     // Register the thread with the process.
     if let Err(e) = pcb::add_thread(pid, task_id) {
@@ -1265,6 +1270,7 @@ extern "C" fn test_thread_entry(arg: u64) {
 /// Run thread management self-tests.
 pub fn self_test() -> KernelResult<()> {
     test_spawn_thread()?;
+    test_leader_takes_the_process_id()?;
     test_thread_exit_zombies_process()?;
     test_spawn_into_zombie_fails()?;
     test_thread_exit_with_value()?;
@@ -1642,6 +1648,66 @@ fn test_spawn_thread() -> KernelResult<()> {
     // Clean up.
     pcb::destroy(pid);
     serial_println!("[thread]   Spawn thread: OK");
+    Ok(())
+}
+
+/// A process's first thread is given the process's own id, and every later
+/// thread a fresh one from the same counter (`pcb::claim_leader_id`), so
+/// `/proc/<pid>` -- keyed by task id -- is the process, `gettid() ==
+/// getpid()` in its main thread, and no thread's id is some other process's
+/// id (known-issues A-PROC-DIRECTORIES-ARE-TASK-IDS-AND-EVERYTHING-ELSE-IS-PIDS).
+fn test_leader_takes_the_process_id() -> KernelResult<()> {
+    use core::sync::atomic::AtomicU64;
+
+    // Static, not on this stack: the threads may still be running when this
+    // function returns.
+    static RAN: AtomicU64 = AtomicU64::new(0);
+    let pid = pcb::create("thread-leader-id", 0);
+    let arg = &RAN as *const AtomicU64 as u64;
+    let prio = sched::task::DEFAULT_PRIORITY;
+    let first = spawn(pid, b"leader", prio, test_thread_entry, arg);
+    let second = spawn(pid, b"second", prio, test_thread_entry, arg);
+    let verdict = match (first, second) {
+        (Ok(first), Ok(second)) => {
+            let fresh_id_names_no_process = pcb::state(second).is_none();
+            let ok = first == pid
+                && second != pid
+                && fresh_id_names_no_process
+                && !pcb::claim_leader_id(pid)
+                && pcb::peek_next_pid() == sched::task::peek_next_id();
+            if !ok {
+                serial_println!(
+                    "[thread]   FAIL: process {} got threads {} and {} (want {} then a fresh id                      naming no process; one counter)",
+                    pid,
+                    first,
+                    second,
+                    pid
+                );
+            }
+            // Let both run, then retire them as the other tests do.
+            sched::yield_now();
+            sched::yield_now();
+            on_thread_exit(first);
+            on_thread_exit(second);
+            ok
+        }
+        (first, second) => {
+            serial_println!(
+                "[thread]   FAIL: could not spawn the leader-id threads: {:?} / {:?}",
+                first,
+                second
+            );
+            for t in [first, second].into_iter().flatten() {
+                on_thread_exit(t);
+            }
+            false
+        }
+    };
+    pcb::destroy(pid);
+    if !verdict {
+        return Err(KernelError::InternalError);
+    }
+    serial_println!("[thread]   a process's first thread takes its id: OK");
     Ok(())
 }
 

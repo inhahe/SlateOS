@@ -52,14 +52,35 @@ pub type TaskId = u64;
 /// without the address space it was taken in.
 pub type PiWaitKey = (u64, u64);
 
-/// Counter for generating unique task IDs.
+/// Counter for task ids **and process ids**: one id space, as Linux's.
+///
+/// A process's id is drawn from here too (`proc::pcb`), and its first thread
+/// is given that same number as its task id (`proc::thread`), so a process's
+/// id is its main thread's id and `gettid() == getpid()` there. Every other
+/// task, kernel tasks included, takes a fresh number, so no task id is ever
+/// some *other* process's id. Until 2026-10-01 the two came from separate
+/// counters that both started at 1: `/proc/<n>`, keyed by task id, then
+/// showed whichever process happened to have the number `n`, and `ps`
+/// listed numbers `kill` could not use
+/// (known-issues A-PROC-DIRECTORIES-ARE-TASK-IDS-AND-EVERYTHING-ELSE-IS-PIDS).
 static NEXT_TASK_ID: AtomicU64 = AtomicU64::new(1);
 
-/// Allocate a fresh, unique task ID.
-fn alloc_task_id() -> TaskId {
+/// Allocate a fresh, unique id from the space task ids and process ids share.
+pub fn alloc_id() -> TaskId {
     // Relaxed is fine: we only need uniqueness, not ordering relative
     // to other memory operations.
     NEXT_TASK_ID.fetch_add(1, Ordering::Relaxed)
+}
+
+/// The id [`alloc_id`] would hand out next, without consuming it.
+#[must_use]
+pub fn peek_next_id() -> TaskId {
+    NEXT_TASK_ID.load(Ordering::Relaxed)
+}
+
+/// Allocate a fresh, unique task ID.
+fn alloc_task_id() -> TaskId {
+    alloc_id()
 }
 
 // ---------------------------------------------------------------------------
@@ -1167,6 +1188,10 @@ impl Task {
     /// when first scheduled.  When `entry` returns, the task is
     /// automatically marked [`TaskState::Dead`].
     ///
+    /// `requested_id` is the id to give the task -- a process's first thread
+    /// is given its process's id ([`alloc_id`]) -- or `None` for a fresh one.
+    /// The scheduler checks it is free when it inserts the task.
+    ///
     /// # Errors
     ///
     /// - [`KernelError::OutOfMemory`] if stack allocation fails.
@@ -1178,12 +1203,13 @@ impl Task {
         entry: extern "C" fn(u64),
         arg: u64,
         pml4_phys: u64,
+        requested_id: Option<TaskId>,
     ) -> KernelResult<Self> {
         if task_name.is_empty() {
             return Err(KernelError::InvalidArgument);
         }
 
-        let id = alloc_task_id();
+        let id = requested_id.unwrap_or_else(alloc_task_id);
 
         // Copy name (truncate if too long).
         let mut name = [0u8; 32];

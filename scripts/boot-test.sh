@@ -6520,6 +6520,24 @@ check_variant_lists() {
         return 1
     fi
 
+    # programs.md: every program the workspace builds, recorded (design-
+    # decisions §1053; requests/b-a-a-gate-for-the-program-catalogue.md).
+    echo "=== Checking that programs.md lists every program the workspace builds ==="
+    if ! run_checker program-catalogue-selftest "$py" "$PROJECT_ROOT/scripts/program-catalogue.py" --self-test; then
+        echo "" >&2
+        echo "ERROR: refusing to build.  program-catalogue.py no longer agrees" >&2
+        echo "with its own cases." >&2
+        return 1
+    fi
+    if ! run_checker program-catalogue "$py" "$PROJECT_ROOT/scripts/program-catalogue.py" --check; then
+        echo "" >&2
+        echo "ERROR: refusing to build.  programs.md does not list what the" >&2
+        echo "workspace builds: a program was added, removed or re-described" >&2
+        echo "without the list.  Regenerate it, and commit it with the program:" >&2
+        echo "    python scripts/program-catalogue.py" >&2
+        return 1
+    fi
+
     echo "=== Checking for a hardcoded lane-worktree path in a script ==="
     if ! run_checker foreign-worktree-selftest "$py" "$PROJECT_ROOT/scripts/check-foreign-worktree-paths.py" --self-test; then
         echo "" >&2

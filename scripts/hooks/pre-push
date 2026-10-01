@@ -208,6 +208,9 @@
 #      in the ownership table naming nothing tracked, or a script owned by
 #      two lanes (design-decisions §973, the operator's answer to A-Q11). A
 #      new file gets its owner in the commit that creates it.
+#  76. Refuse a push after which programs.md no longer lists every program
+#      the workspace builds, as the workspace describes it (design-decisions
+#      §1053, the operator's answer to B-Q21).
 #
 # (This count was wrong before gate 9 was added: it read "Seven" while eight
 # were implemented; wrong again the moment gate 13 was written, when the
@@ -6432,13 +6435,13 @@ EOF
 mfprod="${repo_root:-.}/scripts/check-manifest-producers.py"
 skip_mfprod=$skip
 if [ "${ALLOW_MANIFEST_PRODUCERS:-0}" = "1" ]; then
-    echo "pre-push: ALLOW_MANIFEST_PRODUCERS=1 set - skipping gate 52 (manifest producers)." >&2
+    echo "pre-push: ALLOW_MANIFEST_PRODUCERS=1 set - skipping gate 53 (manifest producers)." >&2
     skip_mfprod=1
 fi
 [ -f "$mfprod" ] || skip_mfprod=1
 touches scripts/rootfs-bin-manifest.txt userspace/ scripts/check-manifest-producers.py || skip_mfprod=1
 if [ "$skip_mfprod" != "1" ]; then
-    tree_is_push "gate 52 (manifest producers)" scripts/rootfs-bin-manifest.txt userspace/ scripts/check-manifest-producers.py || skip_mfprod=1
+    tree_is_push "gate 53 (manifest producers)" scripts/rootfs-bin-manifest.txt userspace/ scripts/check-manifest-producers.py || skip_mfprod=1
 fi
 note_gate check-manifest-producers "$skip_mfprod"
 if [ "$skip_mfprod" != "1" ]; then
@@ -6463,13 +6466,13 @@ fi
 cpnul="${repo_root:-.}/scripts/check-cp-diff-sees-nul.py"
 skip_cpnul=$skip
 if [ "${ALLOW_CP_DIFF_NUL:-0}" = "1" ]; then
-    echo "pre-push: ALLOW_CP_DIFF_NUL=1 set - skipping gate 53 (cp-diff sees NUL)." >&2
+    echo "pre-push: ALLOW_CP_DIFF_NUL=1 set - skipping gate 54 (cp-diff sees NUL)." >&2
     skip_cpnul=1
 fi
 [ -f "$cpnul" ] || skip_cpnul=1
 touches scripts/cp-diff.sh scripts/check-cp-diff-sees-nul.py || skip_cpnul=1
 if [ "$skip_cpnul" != "1" ]; then
-    tree_is_push "gate 53 (cp-diff sees NUL)" scripts/cp-diff.sh scripts/check-cp-diff-sees-nul.py || skip_cpnul=1
+    tree_is_push "gate 54 (cp-diff sees NUL)" scripts/cp-diff.sh scripts/check-cp-diff-sees-nul.py || skip_cpnul=1
 fi
 note_gate check-cp-diff-sees-nul "$skip_cpnul"
 if [ "$skip_cpnul" != "1" ]; then
@@ -6493,13 +6496,13 @@ fi
 canref="${repo_root:-.}/scripts/check-gates-can-refuse.py"
 skip_canref=$skip
 if [ "${ALLOW_GATES_CAN_REFUSE:-0}" = "1" ]; then
-    echo "pre-push: ALLOW_GATES_CAN_REFUSE=1 set - skipping gate 54 (gates can refuse)." >&2
+    echo "pre-push: ALLOW_GATES_CAN_REFUSE=1 set - skipping gate 55 (gates can refuse)." >&2
     skip_canref=1
 fi
 [ -f "$canref" ] || skip_canref=1
 touches scripts/ || skip_canref=1
 if [ "$skip_canref" != "1" ]; then
-    tree_is_push "gate 54 (gates can refuse)" scripts/ || skip_canref=1
+    tree_is_push "gate 55 (gates can refuse)" scripts/ || skip_canref=1
 fi
 note_gate check-gates-can-refuse "$skip_canref"
 if [ "$skip_canref" != "1" ]; then
@@ -6524,13 +6527,13 @@ fi
 wired="${repo_root:-.}/scripts/check-gates-are-wired.py"
 skip_wired=$skip
 if [ "${ALLOW_GATES_ARE_WIRED:-0}" = "1" ]; then
-    echo "pre-push: ALLOW_GATES_ARE_WIRED=1 set - skipping gate 55 (gates are wired)." >&2
+    echo "pre-push: ALLOW_GATES_ARE_WIRED=1 set - skipping gate 56 (gates are wired)." >&2
     skip_wired=1
 fi
 [ -f "$wired" ] || skip_wired=1
 touches scripts/ || skip_wired=1
 if [ "$skip_wired" != "1" ]; then
-    tree_is_push "gate 55 (gates are wired)" scripts/ || skip_wired=1
+    tree_is_push "gate 56 (gates are wired)" scripts/ || skip_wired=1
 fi
 note_gate check-gates-are-wired "$skip_wired"
 if [ "$skip_wired" != "1" ]; then
@@ -6556,13 +6559,13 @@ fi
 needles="${repo_root:-.}/scripts/check-mutation-needles.py"
 skip_needles=$skip
 if [ "${ALLOW_MUTATION_NEEDLES:-0}" = "1" ]; then
-    echo "pre-push: ALLOW_MUTATION_NEEDLES=1 set - skipping gate 56 (mutation needles)." >&2
+    echo "pre-push: ALLOW_MUTATION_NEEDLES=1 set - skipping gate 57 (mutation needles)." >&2
     skip_needles=1
 fi
 [ -f "$needles" ] || skip_needles=1
 touches scripts/ || skip_needles=1
 if [ "$skip_needles" != "1" ]; then
-    tree_is_push "gate 56 (mutation needles)" scripts/ || skip_needles=1
+    tree_is_push "gate 57 (mutation needles)" scripts/ || skip_needles=1
 fi
 note_gate check-mutation-needles "$skip_needles"
 if [ "$skip_needles" != "1" ]; then
@@ -6587,13 +6590,13 @@ fi
 uaccess="${repo_root:-.}/scripts/check-user-access-sites.py"
 skip_uaccess=$skip
 if [ "${ALLOW_USER_ACCESS_SITES:-0}" = "1" ]; then
-    echo "pre-push: ALLOW_USER_ACCESS_SITES=1 set - skipping gate 57 (user-access sites)." >&2
+    echo "pre-push: ALLOW_USER_ACCESS_SITES=1 set - skipping gate 58 (user-access sites)." >&2
     skip_uaccess=1
 fi
 [ -f "$uaccess" ] || skip_uaccess=1
 touches kernel/ scripts/check-user-access-sites.py || skip_uaccess=1
 if [ "$skip_uaccess" != "1" ]; then
-    tree_is_push "gate 57 (user-access sites)" kernel/ scripts/check-user-access-sites.py || skip_uaccess=1
+    tree_is_push "gate 58 (user-access sites)" kernel/ scripts/check-user-access-sites.py || skip_uaccess=1
 fi
 note_gate check-user-access-sites "$skip_uaccess"
 if [ "$skip_uaccess" != "1" ]; then
@@ -6617,13 +6620,13 @@ fi
 linuxonly="${repo_root:-.}/scripts/check-linux-only-capabilities.py"
 skip_linuxonly=$skip
 if [ "${ALLOW_LINUX_ONLY_CAPS:-0}" = "1" ]; then
-    echo "pre-push: ALLOW_LINUX_ONLY_CAPS=1 set - skipping gate 58 (Linux-only capabilities)." >&2
+    echo "pre-push: ALLOW_LINUX_ONLY_CAPS=1 set - skipping gate 59 (Linux-only capabilities)." >&2
     skip_linuxonly=1
 fi
 [ -f "$linuxonly" ] || skip_linuxonly=1
 touches kernel/ scripts/check-linux-only-capabilities.py || skip_linuxonly=1
 if [ "$skip_linuxonly" != "1" ]; then
-    tree_is_push "gate 58 (Linux-only capabilities)" kernel/ scripts/check-linux-only-capabilities.py || skip_linuxonly=1
+    tree_is_push "gate 59 (Linux-only capabilities)" kernel/ scripts/check-linux-only-capabilities.py || skip_linuxonly=1
 fi
 note_gate check-linux-only-capabilities "$skip_linuxonly"
 if [ "$skip_linuxonly" != "1" ]; then
@@ -6646,13 +6649,13 @@ fi
 usagenames="${repo_root:-.}/scripts/check-usage-names-reach-the-command.py"
 skip_usagenames=$skip
 if [ "${ALLOW_USAGE_NAMES:-0}" = "1" ]; then
-    echo "pre-push: ALLOW_USAGE_NAMES=1 set - skipping gate 59 (usage names reach the command)." >&2
+    echo "pre-push: ALLOW_USAGE_NAMES=1 set - skipping gate 60 (usage names reach the command)." >&2
     skip_usagenames=1
 fi
 [ -f "$usagenames" ] || skip_usagenames=1
 touches kernel/ scripts/check-usage-names-reach-the-command.py || skip_usagenames=1
 if [ "$skip_usagenames" != "1" ]; then
-    tree_is_push "gate 59 (usage names reach the command)" kernel/ scripts/check-usage-names-reach-the-command.py || skip_usagenames=1
+    tree_is_push "gate 60 (usage names reach the command)" kernel/ scripts/check-usage-names-reach-the-command.py || skip_usagenames=1
 fi
 note_gate check-usage-names "$skip_usagenames"
 if [ "$skip_usagenames" != "1" ]; then
@@ -6675,13 +6678,13 @@ fi
 refrefuse="${repo_root:-.}/scripts/check-refusals-refuse.py"
 skip_refrefuse=$skip
 if [ "${ALLOW_REFUSALS_REFUSE:-0}" = "1" ]; then
-    echo "pre-push: ALLOW_REFUSALS_REFUSE=1 set - skipping gate 60 (refusals refuse)." >&2
+    echo "pre-push: ALLOW_REFUSALS_REFUSE=1 set - skipping gate 61 (refusals refuse)." >&2
     skip_refrefuse=1
 fi
 [ -f "$refrefuse" ] || skip_refrefuse=1
 touches scripts/ || skip_refrefuse=1
 if [ "$skip_refrefuse" != "1" ]; then
-    tree_is_push "gate 60 (refusals refuse)" scripts/ || skip_refrefuse=1
+    tree_is_push "gate 61 (refusals refuse)" scripts/ || skip_refrefuse=1
 fi
 note_gate check-refusals-refuse "$skip_refrefuse"
 if [ "$skip_refrefuse" != "1" ]; then
@@ -6705,7 +6708,7 @@ fi
 usagestat="${repo_root:-.}/scripts/check-usage-status.py"
 skip_usagestat=$skip
 if [ "${ALLOW_USAGE_STATUS:-0}" = "1" ]; then
-    echo "pre-push: ALLOW_USAGE_STATUS=1 set - skipping gate 61 (usage messages report failure)." >&2
+    echo "pre-push: ALLOW_USAGE_STATUS=1 set - skipping gate 62 (usage messages report failure)." >&2
     skip_usagestat=1
 fi
 [ -f "$usagestat" ] || skip_usagestat=1
@@ -6713,7 +6716,7 @@ fi
 # so a change to either can change this gate's verdict.
 touches kernel/ scripts/check-usage-status.py scripts/check-recursive-locks.py scripts/srcload.py || skip_usagestat=1
 if [ "$skip_usagestat" != "1" ]; then
-    tree_is_push "gate 61 (usage messages report failure)" kernel/ scripts/check-usage-status.py scripts/check-recursive-locks.py scripts/srcload.py || skip_usagestat=1
+    tree_is_push "gate 62 (usage messages report failure)" kernel/ scripts/check-usage-status.py scripts/check-recursive-locks.py scripts/srcload.py || skip_usagestat=1
 fi
 note_gate check-usage-status "$skip_usagestat"
 if [ "$skip_usagestat" != "1" ]; then
@@ -6735,7 +6738,7 @@ fi
 querystat="${repo_root:-.}/scripts/check-query-status.py"
 skip_querystat=$skip
 if [ "${ALLOW_QUERY_STATUS:-0}" = "1" ]; then
-    echo "pre-push: ALLOW_QUERY_STATUS=1 set - skipping gate 62 (queries report success)." >&2
+    echo "pre-push: ALLOW_QUERY_STATUS=1 set - skipping gate 63 (queries report success)." >&2
     skip_querystat=1
 fi
 [ -f "$querystat" ] || skip_querystat=1
@@ -6743,7 +6746,7 @@ fi
 # so a change to either can change this gate's verdict.
 touches kernel/ scripts/check-query-status.py scripts/check-recursive-locks.py scripts/srcload.py || skip_querystat=1
 if [ "$skip_querystat" != "1" ]; then
-    tree_is_push "gate 62 (queries report success)" kernel/ scripts/check-query-status.py scripts/check-recursive-locks.py scripts/srcload.py || skip_querystat=1
+    tree_is_push "gate 63 (queries report success)" kernel/ scripts/check-query-status.py scripts/check-recursive-locks.py scripts/srcload.py || skip_querystat=1
 fi
 note_gate check-query-status "$skip_querystat"
 if [ "$skip_querystat" != "1" ]; then
@@ -6765,13 +6768,13 @@ fi
 rungnums="${repo_root:-.}/scripts/check-selftest-rung-numbers.py"
 skip_rungnums=$skip
 if [ "${ALLOW_SELFTEST_RUNG_NUMBERS:-0}" = "1" ]; then
-    echo "pre-push: ALLOW_SELFTEST_RUNG_NUMBERS=1 set - skipping gate 63 (self-test rung numbers)." >&2
+    echo "pre-push: ALLOW_SELFTEST_RUNG_NUMBERS=1 set - skipping gate 64 (self-test rung numbers)." >&2
     skip_rungnums=1
 fi
 [ -f "$rungnums" ] || skip_rungnums=1
 touches kernel/ scripts/check-selftest-rung-numbers.py || skip_rungnums=1
 if [ "$skip_rungnums" != "1" ]; then
-    tree_is_push "gate 63 (self-test rung numbers)" kernel/ scripts/check-selftest-rung-numbers.py || skip_rungnums=1
+    tree_is_push "gate 64 (self-test rung numbers)" kernel/ scripts/check-selftest-rung-numbers.py || skip_rungnums=1
 fi
 note_gate check-selftest-rung-numbers "$skip_rungnums"
 if [ "$skip_rungnums" != "1" ]; then
@@ -6794,13 +6797,13 @@ fi
 msgnames="${repo_root:-.}/scripts/check-shell-message-names.py"
 skip_msgnames=$skip
 if [ "${ALLOW_SHELL_MESSAGE_NAMES:-0}" = "1" ]; then
-    echo "pre-push: ALLOW_SHELL_MESSAGE_NAMES=1 set - skipping gate 64 (shell message names)." >&2
+    echo "pre-push: ALLOW_SHELL_MESSAGE_NAMES=1 set - skipping gate 65 (shell message names)." >&2
     skip_msgnames=1
 fi
 [ -f "$msgnames" ] || skip_msgnames=1
 touches kernel/ scripts/check-shell-message-names.py || skip_msgnames=1
 if [ "$skip_msgnames" != "1" ]; then
-    tree_is_push "gate 64 (shell message names)" kernel/ scripts/check-shell-message-names.py || skip_msgnames=1
+    tree_is_push "gate 65 (shell message names)" kernel/ scripts/check-shell-message-names.py || skip_msgnames=1
 fi
 note_gate check-shell-message-names "$skip_msgnames"
 if [ "$skip_msgnames" != "1" ]; then
@@ -6823,13 +6826,13 @@ fi
 nounart="${repo_root:-.}/scripts/check-shell-noun-article.py"
 skip_nounart=$skip
 if [ "${ALLOW_SHELL_NOUN_ARTICLE:-0}" = "1" ]; then
-    echo "pre-push: ALLOW_SHELL_NOUN_ARTICLE=1 set - skipping gate 65 (shell noun articles)." >&2
+    echo "pre-push: ALLOW_SHELL_NOUN_ARTICLE=1 set - skipping gate 66 (shell noun articles)." >&2
     skip_nounart=1
 fi
 [ -f "$nounart" ] || skip_nounart=1
 touches kernel/ scripts/check-shell-noun-article.py || skip_nounart=1
 if [ "$skip_nounart" != "1" ]; then
-    tree_is_push "gate 65 (shell noun articles)" kernel/ scripts/check-shell-noun-article.py || skip_nounart=1
+    tree_is_push "gate 66 (shell noun articles)" kernel/ scripts/check-shell-noun-article.py || skip_nounart=1
 fi
 note_gate check-shell-noun-article "$skip_nounart"
 if [ "$skip_nounart" != "1" ]; then
@@ -6852,13 +6855,13 @@ fi
 idrung="${repo_root:-.}/scripts/selftest-boot-gate-identity.py"
 skip_idrung=$skip
 if [ "${ALLOW_IDENTITY_RUNG_GATE:-0}" = "1" ]; then
-    echo "pre-push: ALLOW_IDENTITY_RUNG_GATE=1 set - skipping gate 66 (identity-rung gate)." >&2
+    echo "pre-push: ALLOW_IDENTITY_RUNG_GATE=1 set - skipping gate 67 (identity-rung gate)." >&2
     skip_idrung=1
 fi
 [ -f "$idrung" ] || skip_idrung=1
 touches scripts/boot-test.sh scripts/selftest-boot-gate-identity.py || skip_idrung=1
 if [ "$skip_idrung" != "1" ]; then
-    tree_is_push "gate 66 (identity-rung gate)" scripts/boot-test.sh scripts/selftest-boot-gate-identity.py || skip_idrung=1
+    tree_is_push "gate 67 (identity-rung gate)" scripts/boot-test.sh scripts/selftest-boot-gate-identity.py || skip_idrung=1
 fi
 note_gate identity-rung-gate-selftest "$skip_idrung"
 if [ "$skip_idrung" != "1" ]; then
@@ -6877,13 +6880,13 @@ fi
 r3regs="${repo_root:-.}/scripts/check-ring3-entry-regs.py"
 skip_r3regs=$skip
 if [ "${ALLOW_RING3_ENTRY_REGS:-0}" = "1" ]; then
-    echo "pre-push: ALLOW_RING3_ENTRY_REGS=1 set - skipping gate 67 (ring-3 entry registers)." >&2
+    echo "pre-push: ALLOW_RING3_ENTRY_REGS=1 set - skipping gate 68 (ring-3 entry registers)." >&2
     skip_r3regs=1
 fi
 [ -f "$r3regs" ] || skip_r3regs=1
 touches kernel/ scripts/check-ring3-entry-regs.py || skip_r3regs=1
 if [ "$skip_r3regs" != "1" ]; then
-    tree_is_push "gate 67 (ring-3 entry registers)" kernel/ scripts/check-ring3-entry-regs.py || skip_r3regs=1
+    tree_is_push "gate 68 (ring-3 entry registers)" kernel/ scripts/check-ring3-entry-regs.py || skip_r3regs=1
 fi
 note_gate ring3-entry-regs "$skip_r3regs"
 if [ "$skip_r3regs" != "1" ]; then
@@ -6909,13 +6912,13 @@ fi
 scindex="${repo_root:-.}/scripts/gen-script-index.py"
 skip_scindex=$skip
 if [ "${ALLOW_SCRIPT_INDEX:-0}" = "1" ]; then
-    echo "pre-push: ALLOW_SCRIPT_INDEX=1 set - skipping gate 68 (script index)." >&2
+    echo "pre-push: ALLOW_SCRIPT_INDEX=1 set - skipping gate 69 (script index)." >&2
     skip_scindex=1
 fi
 [ -f "$scindex" ] || skip_scindex=1
 touches scripts/ || skip_scindex=1
 if [ "$skip_scindex" != "1" ]; then
-    tree_is_push "gate 68 (script index)" scripts/ || skip_scindex=1
+    tree_is_push "gate 69 (script index)" scripts/ || skip_scindex=1
 fi
 note_gate script-index "$skip_scindex"
 if [ "$skip_scindex" != "1" ]; then
@@ -6941,13 +6944,13 @@ fi
 foreignwt="${repo_root:-.}/scripts/check-foreign-worktree-paths.py"
 skip_foreignwt=$skip
 if [ "${ALLOW_FOREIGN_WORKTREE_PATHS:-0}" = "1" ]; then
-    echo "pre-push: ALLOW_FOREIGN_WORKTREE_PATHS=1 set - skipping gate 69 (foreign worktree paths)." >&2
+    echo "pre-push: ALLOW_FOREIGN_WORKTREE_PATHS=1 set - skipping gate 70 (foreign worktree paths)." >&2
     skip_foreignwt=1
 fi
 [ -f "$foreignwt" ] || skip_foreignwt=1
 touches scripts/ || skip_foreignwt=1
 if [ "$skip_foreignwt" != "1" ]; then
-    tree_is_push "gate 69 (foreign worktree paths)" scripts/ || skip_foreignwt=1
+    tree_is_push "gate 70 (foreign worktree paths)" scripts/ || skip_foreignwt=1
 fi
 note_gate foreign-worktree "$skip_foreignwt"
 if [ "$skip_foreignwt" != "1" ]; then
@@ -6971,13 +6974,13 @@ fi
 frneedles="${repo_root:-.}/scripts/check-frame-needles.py"
 skip_frneedles=$skip
 if [ "${ALLOW_FRAME_NEEDLES:-0}" = "1" ]; then
-    echo "pre-push: ALLOW_FRAME_NEEDLES=1 set - skipping gate 70 (frame needles)." >&2
+    echo "pre-push: ALLOW_FRAME_NEEDLES=1 set - skipping gate 71 (frame needles)." >&2
     skip_frneedles=1
 fi
 [ -f "$frneedles" ] || skip_frneedles=1
 touches apps/ scripts/check-frame-needles.py || skip_frneedles=1
 if [ "$skip_frneedles" != "1" ]; then
-    tree_is_push "gate 70 (frame needles)" apps/ scripts/check-frame-needles.py || skip_frneedles=1
+    tree_is_push "gate 71 (frame needles)" apps/ scripts/check-frame-needles.py || skip_frneedles=1
 fi
 note_gate check-frame-needles "$skip_frneedles"
 if [ "$skip_frneedles" != "1" ]; then
@@ -6997,13 +7000,13 @@ fi
 gentables="${repo_root:-.}/scripts/check-generated-tables.py"
 skip_gentables=$skip
 if [ "${ALLOW_GENERATED_TABLES:-0}" = "1" ]; then
-    echo "pre-push: ALLOW_GENERATED_TABLES=1 set - skipping gate 71 (generated tables)." >&2
+    echo "pre-push: ALLOW_GENERATED_TABLES=1 set - skipping gate 72 (generated tables)." >&2
     skip_gentables=1
 fi
 [ -f "$gentables" ] || skip_gentables=1
 touches gui/font/ scripts/check-generated-tables.py || skip_gentables=1
 if [ "$skip_gentables" != "1" ]; then
-    tree_is_push "gate 71 (generated tables)" gui/font/ scripts/check-generated-tables.py || skip_gentables=1
+    tree_is_push "gate 72 (generated tables)" gui/font/ scripts/check-generated-tables.py || skip_gentables=1
 fi
 note_gate check-generated-tables "$skip_gentables"
 if [ "$skip_gentables" != "1" ]; then
@@ -7023,13 +7026,13 @@ fi
 dcroots="${repo_root:-.}/scripts/check-diskcleanup-test-roots.py"
 skip_dcroots=$skip
 if [ "${ALLOW_DISKCLEANUP_TEST_ROOTS:-0}" = "1" ]; then
-    echo "pre-push: ALLOW_DISKCLEANUP_TEST_ROOTS=1 set - skipping gate 72 (diskcleanup test roots)." >&2
+    echo "pre-push: ALLOW_DISKCLEANUP_TEST_ROOTS=1 set - skipping gate 73 (diskcleanup test roots)." >&2
     skip_dcroots=1
 fi
 [ -f "$dcroots" ] || skip_dcroots=1
 touches apps/diskcleanup/ scripts/check-diskcleanup-test-roots.py || skip_dcroots=1
 if [ "$skip_dcroots" != "1" ]; then
-    tree_is_push "gate 72 (diskcleanup test roots)" apps/diskcleanup/ scripts/check-diskcleanup-test-roots.py || skip_dcroots=1
+    tree_is_push "gate 73 (diskcleanup test roots)" apps/diskcleanup/ scripts/check-diskcleanup-test-roots.py || skip_dcroots=1
 fi
 note_gate check-diskcleanup-test-roots "$skip_dcroots"
 if [ "$skip_dcroots" != "1" ]; then
@@ -7053,13 +7056,13 @@ fi
 reinit="${repo_root:-.}/scripts/check-selftest-reinit.py"
 skip_reinit=$skip
 if [ "${ALLOW_SELFTEST_REINIT:-0}" = "1" ]; then
-    echo "pre-push: ALLOW_SELFTEST_REINIT=1 set - skipping gate 73 (self-test tables re-opened)." >&2
+    echo "pre-push: ALLOW_SELFTEST_REINIT=1 set - skipping gate 74 (self-test tables re-opened)." >&2
     skip_reinit=1
 fi
 [ -f "$reinit" ] || skip_reinit=1
 touches kernel/ scripts/check-selftest-reinit.py || skip_reinit=1
 if [ "$skip_reinit" != "1" ]; then
-    tree_is_push "gate 73 (self-test tables re-opened)" kernel/ scripts/check-selftest-reinit.py || skip_reinit=1
+    tree_is_push "gate 74 (self-test tables re-opened)" kernel/ scripts/check-selftest-reinit.py || skip_reinit=1
 fi
 note_gate check-selftest-reinit "$skip_reinit"
 if [ "$skip_reinit" != "1" ]; then
@@ -7070,6 +7073,47 @@ if [ "$skip_reinit" != "1" ]; then
     if ! run_checker check-selftest-reinit "$py" -u "$reinit"; then
         moved_gate_refuses 74 "self-test tables re-opened" ALLOW_SELFTEST_REINIT "A kernel self-test that clears a /proc table must re-open it before it
 returns, or every later reader sees the table empty."
+    fi
+fi
+
+# ---------------------------------------------------------------------------
+# Gate 76 -- program catalogue.
+# programs.md lists every program the workspace builds, each with the first
+# sentence of its own module doc, generated by scripts/program-catalogue.py.
+# The operator asked for the list and for "a rule somewhere that if you make a
+# program, record it somewhere so everybody knows it exists" (design-decisions
+# §1053, B-Q21); this is the rule's enforcement
+# (requests/b-a-a-gate-for-the-program-catalogue.md). A push that adds,
+# removes or re-describes a program regenerates the list in the same commit:
+#     python scripts/program-catalogue.py
+# It reads `cargo metadata --no-deps` and the programs' sources, so it is
+# scoped to manifests and Rust sources, and the boot test runs it too.
+#
+# Bypass: ALLOW_PROGRAM_CATALOGUE=1 git push origin <branch>
+# ---------------------------------------------------------------------------
+progcat="${repo_root:-.}/scripts/program-catalogue.py"
+skip_progcat=$skip
+if [ "${ALLOW_PROGRAM_CATALOGUE:-0}" = "1" ]; then
+    echo "pre-push: ALLOW_PROGRAM_CATALOGUE=1 set - skipping gate 76 (program catalogue)." >&2
+    skip_progcat=1
+fi
+[ -f "$progcat" ] || skip_progcat=1
+touches '*Cargo.toml' '*.rs' programs.md scripts/program-catalogue.py || skip_progcat=1
+if [ "$skip_progcat" != "1" ]; then
+    tree_is_push "gate 76 (program catalogue)" '*Cargo.toml' '*.rs' programs.md \
+        scripts/program-catalogue.py || skip_progcat=1
+fi
+note_gate program-catalogue "$skip_progcat"
+if [ "$skip_progcat" != "1" ]; then
+    if ! run_checker program-catalogue-selftest "$py" "$progcat" --self-test; then
+        moved_gate_refuses 76 "program catalogue" ALLOW_PROGRAM_CATALOGUE \
+            "program-catalogue.py failed its own self-test, so its verdict on this push would not be trustworthy."
+    fi
+    if ! run_checker program-catalogue "$py" "$progcat" --check; then
+        moved_gate_refuses 76 "program catalogue" ALLOW_PROGRAM_CATALOGUE "programs.md must list every program the workspace builds, described as
+its own module doc describes it. Regenerate it, and commit it with the
+program:
+    python scripts/program-catalogue.py"
     fi
 fi
 

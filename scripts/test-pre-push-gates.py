@@ -158,6 +158,29 @@ def test_the_numbered_list_matches_the_implemented_gates(text):
           sorted(sections), sorted(entries))
 
 
+def test_a_gate_names_itself_by_its_own_number(text):
+    """Every message inside gate N's section that names a gate names N.
+
+    Gates 53-74 said `skipping gate N-1` and `tree_is_push "gate N-1`, from
+    when the gate numbered 51 became 52 and those after it moved up one, while
+    their refusals said N. A pusher told "skipping gate 52 (manifest
+    producers)" looked for gate 52 and found the binary-collision gate. Found
+    on 2026-10-01 while adding gate 76; nothing checked it.
+    """
+    sections = sorted((m.start(), int(m.group(1)))
+                      for m in re.finditer(r"^# Gate (\d+)\b", text, re.M))
+    wrong = []
+    for i, (start, n) in enumerate(sections):
+        end = sections[i + 1][0] if i + 1 < len(sections) else len(text)
+        body = text[start:end]
+        for m in re.finditer(
+                r'(skipping gate|tree_is_push "gate|moved_gate_refuses) (\d+)\b',
+                body):
+            if int(m.group(2)) != n:
+                wrong.append(f"gate {n}: {m.group(1)} {m.group(2)}")
+    check("each gate's messages name its own number", wrong, [])
+
+
 def test_every_gate_has_its_own_bypass(text):
     """One per gate, all distinct.
 

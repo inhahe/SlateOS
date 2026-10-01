@@ -2394,7 +2394,19 @@ with no sandbox tool of this kind on the roadmap), **`userspace/mkinitramfs`**
 (`lsinitramfs`, `update-initramfs` -- SlateOS boots no initramfs: Limine loads
 the kernel, which carries its services) and **`userspace/plymouth`**
 (`plymouthd` -- no splash daemon exists or is planned, and the client printed
-what it "would" show). **The ledger stands at 106.**
+what it "would" show). **The ledger stood at 106.**
+
+Reading each remaining name's code turned up two that *fabricate*, which
+§1006 deletes whatever the name: **`userspace/xattr`** (`getfattr`,
+`setfattr`, `attr`) invented its answers -- `getfattr` listed a
+`user.mime_type` guessed from the file's extension and an SELinux label for
+anything under `/bin/`, `setfattr` printed "setting ... on ..." and wrote
+nothing, and `attr` was mapped onto `getfattr`'s parser although it is a
+different command -- so the crate is deleted (a port of the `attr`
+package's tools replaces it when they are wanted); and `chattr`'s **`lsattr`**
+reported the extents flag for every file whose flags it could not read.
+`lsattr` is kept -- it waits on the FS_IOC_GETFLAGS lane A scheduled -- and
+now refuses instead (b3367ac33). **The ledger stands at 104.**
 
 **The 9 new shadowed pairs were the urgent half**, because a shadowed name is
 two implementations that can disagree with the winner picked by packaging:

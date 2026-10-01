@@ -111,8 +111,6 @@ useradd:groupmod
 useradd:userdel
 useradd:usermod
 who:w
-xattr:attr
-xattr:setfattr
 xdg:mimeopen
 xdg:xdg-mime
 zip:unzip

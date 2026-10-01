@@ -4641,13 +4641,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "xattr"
-version = "0.1.0"
-dependencies = [
- "quoting",
-]
-
-[[package]]
 name = "xdg"
 version = "0.1.0"
 dependencies = [

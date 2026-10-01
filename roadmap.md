@@ -5648,7 +5648,7 @@ _Port ext4 first. Don't write a custom filesystem._
   - [x] iptables/ip6tables/iptables-save/iptables-restore: packet filtering (4 tables, CIDR matching, NAT, 4747 lines)
   - [ ] parted/partprobe/partx: disk partition editor (GPT + MBR parsing, CRC32, type GUIDs, 4802 lines)
   - [x] getfacl/setfacl/chacl: POSIX ACL management (user/group/mask/other/default entries, recursive, tabular/compact/long output)
-  - [x] getfattr/setfattr/attr: extended attribute operations (user/system/security/trusted namespaces, hex/text value format)
+  - [ ] getfattr/setfattr/attr: extended attribute operations (user/system/security/trusted namespaces, hex/text value format) -- **deleted 2026-10-01** (design-decisions §1006): it fabricated -- `getfattr` invented attributes from the file name (`user.mime_type` from the extension, an SELinux label for anything under `/bin/`) and `setfattr` reported setting what it never wrote; a port of the `attr` package's tools replaces it when they are wanted
   - [-] newgrp/sg: group DB parsing, membership check, real `/etc/gshadow`
     password auth (2026-09-07). **Does not actually switch groups**: there is no
     `SYS_SETGROUPS`, so `exec_with_group` prints what it would do and exits 0 —

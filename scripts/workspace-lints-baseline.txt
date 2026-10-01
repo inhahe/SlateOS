@@ -166,6 +166,5 @@ userspace/wall
 userspace/watch
 userspace/who
 userspace/wpa  # bare deny(clippy::all)
-userspace/xattr  # bare deny(clippy::all)
 userspace/xdg
 userspace/yacc

@@ -11,9 +11,9 @@ A new program is recorded here in the commit that creates it (§1053): run
 the script, commit `programs.md` with the program. `--check` fails when the
 two disagree.
 
-**462 programs; 88 on the image, 6 carried inside the kernel.**
+**461 programs; 88 on the image, 6 carried inside the kernel.**
 
-## Userland utilities and services (`userspace/`, lane B) -- 307
+## Userland utilities and services (`userspace/`, lane B) -- 306
 
 | Program | What it does | On image | Crate | Other names |
 |---|---|---|---|---|
@@ -319,7 +319,6 @@ two disagree.
 | `wipefs` | Wipe signatures from a device. |  |  |  |
 | `wpa` | WiFi Protected Access multi-personality binary. |  |  |  |
 | `xargs` | Build command lines from standard input and run them. | yes | `coreutils` |  |
-| `xattr` | Extended attributes utility. |  |  | `attr` *(not installed)*, `setfattr` *(not installed)* |
 | `xdg` | XDG File Association Tools |  |  | `mimeopen` *(not installed)*, `xdg-mime` *(not installed)* |
 | `yacc` | LALR(1) parser generator |  |  |  |
 | `yes` | Output a string repeatedly until killed. | yes | `coreutils` |  |

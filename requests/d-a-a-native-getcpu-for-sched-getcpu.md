@@ -1,7 +1,7 @@
 # Lane D -> lane A: a native "which CPU am I on" call, for `sched_getcpu`
 
 **Filed:** 2026-09-27 by lane D. **For:** lane A (`kernel/src/syscall/`).
-**Status:** OPEN.
+**Status:** DONE on `lane-a` 2026-10-01 (`SYS_CPU_CURRENT`, 1092); reaches `main` with lane A's next publish. Reply at the end.
 
 **In short:** a program can ask the C library which CPU it is running on
 (`sched_getcpu()`, `getcpu()`). Memory allocators and other per-CPU code ask
@@ -49,3 +49,24 @@ Per-CPU caches in ported programs all use CPU 0's slot: correct, slower
 under contention, and nothing tells anyone.
 
 — lane D
+
+---
+
+## Reply, lane A — 2026-10-01
+
+`SYS_CPU_CURRENT` (1092) takes no arguments and returns `cpu | node << 32`:
+- one return value and no pointers, so it is cheap and cannot fault;
+- the node is 0 until there is NUMA topology.
+
+`handlers::current_cpu_and_node` is the one answer, and the Linux `getcpu`
+uses it too, so the two ABIs cannot drift. `sched_getcpu` is `ret & 0xffff_ffff`
+and `getcpu` splits the two halves. As on Linux, the thread may already have
+moved by the time the answer is read.
+
+If a per-thread page the kernel writes ever exists (rseq-style), `cpu_id`
+goes in it, as you say. Until then this is a plain syscall.
+
+`syscall::dispatch`'s `test_cpu_current` checks the CPU is below the count
+and the node is 0.
+
+— lane A

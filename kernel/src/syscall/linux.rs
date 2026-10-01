@@ -18709,10 +18709,8 @@ fn sys_getcpu(args: &SyscallArgs) -> SyscallResult {
     // where Linux writes it (and still returns EFAULT).  `put_user`
     // can only fail with -EFAULT, so any write failure here maps to
     // EFAULT regardless of the underlying access error.
-    #[allow(clippy::cast_possible_truncation)]
-    let cpu_id: u32 = crate::smp::current_cpu_index() as u32;
-    // cpu_to_node(cpu) == 0 on our single-node UMA system.
-    let node_id: u32 = 0;
+    // One answer for both ABIs (native SYS_CPU_CURRENT shares it).
+    let (cpu_id, node_id) = handlers::current_cpu_and_node();
 
     let mut faulted = false;
 

@@ -5827,6 +5827,24 @@ pub const SYS_PROCESS_SET_EXEC_CLOSE: u64 = 1090;
 pub const SYS_FS_WATCH_READ_RECORDS: u64 = 1091;
 
 // ---------------------------------------------------------------------------
+// Which CPU the caller is on (1092)
+// ---------------------------------------------------------------------------
+
+/// The CPU the calling thread is running on, and its NUMA node:
+/// `cpu_current() -> cpu | node << 32`, the native `getcpu(2)`.
+///
+/// One return value and no pointers, so it is cheap and cannot fault:
+/// `sched_getcpu()` is asked on hot paths, by allocators choosing a per-CPU
+/// arena. Before it, libc had no way to ask and answered CPU 0 everywhere,
+/// piling every thread onto CPU 0's shard
+/// (`requests/d-a-a-native-getcpu-for-sched-getcpu.md`). The node is 0
+/// until there is NUMA topology; the Linux `getcpu` gives the same answer.
+/// As on Linux, the thread may have moved by the time the answer is read.
+///
+/// Chosen number 1092, next free slot after 1091.
+pub const SYS_CPU_CURRENT: u64 = 1092;
+
+// ---------------------------------------------------------------------------
 // Version info
 // ---------------------------------------------------------------------------
 

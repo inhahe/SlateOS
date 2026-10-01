@@ -15937,6 +15937,29 @@ pub fn sys_sched_get_profile(args: &SyscallArgs) -> SyscallResult {
 /// Always returns at least 1 (the BSP).
 ///
 /// Returns: number of online CPUs.
+/// The CPU the caller is running on and its NUMA node, as `getcpu(2)`
+/// reports them; one answer for both ABIs. The node is 0: there is no NUMA
+/// topology yet (Linux's `cpu_to_node` on a single-node machine), and this
+/// is the one place to change when there is.
+#[must_use]
+pub(crate) fn current_cpu_and_node() -> (u32, u32) {
+    let cpu = u32::try_from(crate::smp::current_cpu_index()).unwrap_or(u32::MAX);
+    (cpu, 0)
+}
+
+/// `SYS_CPU_CURRENT` (1092) -- the CPU the calling thread is running on, and
+/// its node: `cpu | node << 32`. No pointers, so it cannot fault, and it is
+/// one call for `sched_getcpu()`/`getcpu()`, which per-CPU code makes on hot
+/// paths (`requests/d-a-a-native-getcpu-for-sched-getcpu.md`). The answer
+/// can be stale the moment it is returned -- the thread may migrate -- as on
+/// Linux.
+pub fn sys_cpu_current(args: &SyscallArgs) -> SyscallResult {
+    let _ = args;
+    let (cpu, node) = current_cpu_and_node();
+    let packed = u64::from(cpu) | (u64::from(node) << 32);
+    SyscallResult::ok(i64::try_from(packed).unwrap_or(i64::MAX))
+}
+
 pub fn sys_cpu_count(args: &SyscallArgs) -> SyscallResult {
     let _ = args;
 

@@ -110,6 +110,7 @@ are in `glibc_2.39-0ubuntu8.9.debian.tar.xz`, Launchpad's source package.
 | `hosts_harness.py` (`hosts_oracle.c`) | a table, pasted | `hosts.rs` |
 | `netdb_harness.py` (`netdb_oracle.c`) | a table, pasted | `netdb.rs` |
 | `ifaddrs_run.sh` (`ifaddrs_oracle.c`) | its output, pasted by hand as `GLIBC_UP` ... | `socket.rs` |
+| `ftw_mount_probe.c` (by hand, under WSL in `unshare -rm`: its header says how) | nothing: its answers are in its header -- five `nftw` walks over a tree with a tmpfs mounted inside it | `ftw.rs`, replayed by hand |
 
 The four `*_modes_harness.py` share `_modes.py`, which runs a harness's own
 program once per rounding mode and checks its to-nearest pass against the

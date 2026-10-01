@@ -2426,6 +2426,17 @@ queried; **`userspace/tuned`** (`tuned-adm`, `tuned-gui`) answered every
 never ran CMD, `memhog` reported "Allocation complete." having allocated
 nothing, `numademo` printed invented bandwidths. **The ledger stands at 92.**
 
+**Kept, second batch** (sent to lane D the same way): `xxd`, `atd`, `atq`,
+`atrm`, `batch`, `anacron`, `lastb`, `lastlog`, `sg`, `mingetty` -- working
+programs -- and `lsattr`, the seven cgroup tools and the five `lp` names,
+which refuse honestly while what they wait for (FS_IOC_GETFLAGS, the
+kernel's cgroupfs at `/sys/fs/cgroup`, its print queue) is scheduled or
+built. **Still to judge:** `capsh`'s four, `systemctl`'s fourteen, `sudo`'s
+three (separate permissions may earn them crates), `sysstat`, `perf`,
+`cpupower`, `thermald`, `resolvectl`, `hostnamectl`'s domain names, `ntpd`,
+`xdg`, and the single names of `coredumpctl`, `dmidecode`, `efibootmgr`,
+`eject`, `fio`, `hwinfo`, `inotify`, `loginctl`, `losetup`, `rfkill`, `ss`.
+
 **The 9 new shadowed pairs were the urgent half**, because a shadowed name is
 two implementations that can disagree with the winner picked by packaging:
 

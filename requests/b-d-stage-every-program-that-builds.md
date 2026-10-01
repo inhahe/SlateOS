@@ -83,3 +83,44 @@ installing that producer's personality (it reports `ranlib`, `strip` and
 after merging. More batches follow as the triage reaches the remaining
 names (`known-issues.md` ->
 `TD-B-ONE-HUNDRED-AND-SEVENTY-TWO-COMMAND-NAMES-NOBODY-CAN-RUN`).
+
+## The names lane B keeps -- second batch (2026-10-01)
+
+```
+xxd = hexdump
+atd = at
+atq = at
+atrm = at
+batch = at
+anacron = crond
+lastb = last
+lastlog = last
+sg = newgrp
+mingetty = getty
+lsattr = chattr
+cgclassify = cgroup
+cgcreate = cgroup
+cgdelete = cgroup
+cgexec = cgroup
+cgget = cgroup
+cgset = cgroup
+lssubsys = cgroup
+cancel = lp
+lpq = lp
+lpr = lp
+lprm = lp
+lpstat = lp
+```
+
+Two kinds, both kept under the operator's rule (§1049: a command stays
+while what it waits for is planned). Most are working programs: `xxd`,
+the `at` family (whose `atd` runs the queue), `anacron`, `lastb` and
+`lastlog` (readers of the `btmp` and `lastlog` records `login` now
+writes), `sg`, `mingetty`. The rest refuse honestly, each waiting on a
+kernel facility that exists or is scheduled: `lsattr` on FS_IOC_GETFLAGS
+(lane A's answer to the chattr request), the cgroup tools on the kernel's
+cgroupfs being reachable at `/sys/fs/cgroup`, and the `lp` family on the
+kernel's print queue (`fs::printqueue`) -- `lp` refuses to queue, `lpstat`
+and `lprm` report what is really in the spool. If you would rather not
+stage refusing programs until their facility lands, leave those three
+groups out; the ledger keeps them either way.

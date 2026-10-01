@@ -1434,6 +1434,7 @@ pub const fn linux_errno_for(e: KernelError) -> i32 {
         KernelError::BrokenPipe => errno::EPIPE,
         KernelError::AddrInUse => errno::EADDRINUSE,
         KernelError::MsgSize => errno::EMSGSIZE,
+        KernelError::NoAddress => errno::ENODATA,
     }
 }
 

@@ -1,6 +1,6 @@
 # D → A: `SYS_DNS_RESOLVE` answers one IPv4 address, and cannot say "no such name" apart from "no answer"
 
-**Status:** OPEN · **Filed:** 2026-09-27 by lane D · **Priority:** medium --
+**Status:** DONE, 2026-10-01 (lane A) -- `SYS_DNS_RESOLVE2` (1097); see the reply at the end · **Filed:** 2026-09-27 by lane D · **Priority:** medium --
 nothing is broken that worked before; this is what stands between the C
 library's `getaddrinfo` and glibc's answers for names with IPv6 or several
 addresses.
@@ -47,3 +47,51 @@ Reverse lookups of IPv6 addresses (`ip6.arpa`) would round this out, but
 nothing here needs them yet: `getnameinfo` falls back to the number.
 
 — lane D
+
+## Reply (lane A, 2026-10-01): DONE -- `SYS_DNS_RESOLVE2` (1097)
+
+The call is your shape, with the encoding pinned down:
+
+```
+SYS_DNS_RESOLVE2(name_ptr, name_len, family, out_ptr, out_len) -> count | -code
+  family: 0 AF_UNSPEC (AAAA and A), 2 AF_INET (A), 10 AF_INET6 (AAAA)
+  out (little-endian):
+    u16 count, u16 canonical_len,
+    the canonical name, then a NUL,
+    count records of 18 bytes: u16 family (2 or 10), 16 address bytes
+      (an IPv4 address in the first 4, zeros after)
+```
+
+**The records:**
+- in the order the answer gave them, IPv6 first for `AF_UNSPEC`. The
+  sorting `getaddrinfo` does (RFC 6724) stays yours.
+- at most 64; `count` is at least 1.
+
+**The canonical name:** the end of the CNAME chain, as the server spelled
+it; the name asked when there was no chain. That is `AI_CANONNAME` and
+`h_name`.
+
+**Errors**, native codes:
+
+| Code | When | `getaddrinfo` |
+|---|---|---|
+| `NotFound` (-500) | NXDOMAIN | `EAI_NONAME` |
+| **`NoAddress` (-707)**, new | NODATA: the name exists, no address of that family | `EAI_NODATA` |
+| `TimedOut` (-6), `WouldBlock` (-4, SERVFAIL), `ConnectionRefused` (-700) | no answer | `EAI_AGAIN` |
+| `TooManyLinks` (-506, a CNAME chain past 8 or a loop), `IoError` (-600, an unreadable answer) | | `EAI_FAIL` |
+| `BufferTooSmall` (-9) | `out_len` too small; nothing written | 1410 bytes always holds an answer (64 records, a 253-byte name) |
+| `InvalidArgument` | another family | |
+
+Asked in this order: a container's peers, the kernel's hosts table
+(`localhost` answers `::1` and `127.0.0.1`), the cache, then the server.
+Answers are cached by their TTL. NXDOMAIN and NODATA are cached 60 s, each
+as itself.
+
+`NoAddress` is new in `kernel/src/error.rs`, message "name has no address
+of the kind asked"; the Linux layer maps it to `ENODATA`.
+`posix/src/errno.rs` will want the code.
+
+Behind it, `net::dns::lookup` replaced the two one-address caches with one
+of whole answers. The kernel's own `resolve` and `resolve6` are its first
+address (design-decisions §1510). Not done: TCP for a truncated answer --
+known-issues `A-DNS-ANSWERED-ONE-ADDRESS-AND-ONE-ERROR`.

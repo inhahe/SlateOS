@@ -33,16 +33,16 @@ use super::number::{
     SYS_CP_UNREGISTER, SYS_CP_WAIT, SYS_CPU_COUNT, SYS_CPU_CURRENT, SYS_CPU_TIMES, SYS_DEBUG_PRINT,
     SYS_DMA_ALLOC, SYS_DMA_ATTACH, SYS_DMA_DETACH, SYS_DMA_DOMAIN_CREATE, SYS_DMA_DOMAIN_DESTROY,
     SYS_DMA_FREE, SYS_DMA_MAP, SYS_DMA_UNMAP, SYS_DNS_CACHE_STATS, SYS_DNS_RESOLVE,
-    SYS_DNS_REVERSE_RESOLVE, SYS_DOMAINNAME_SET, SYS_DRM_ATOMIC_COMMIT, SYS_DRM_CLOSE,
-    SYS_DRM_CONNECTOR_STATUS, SYS_DRM_CRTC_INFO, SYS_DRM_CURSOR_MOVE, SYS_DRM_CURSOR_SET,
-    SYS_DRM_DISPLAY_SIZE, SYS_DRM_FB_CREATE, SYS_DRM_FB_DESTROY, SYS_DRM_FLUSH_REGION,
-    SYS_DRM_GEM_CREATE, SYS_DRM_GEM_DESTROY, SYS_DRM_GEM_MMAP, SYS_DRM_MODE_GET, SYS_DRM_OPEN,
-    SYS_DRM_PAGE_FLIP, SYS_EVENTFD_CLOSE, SYS_EVENTFD_CREATE, SYS_EVENTFD_HAS_VALUE,
-    SYS_EVENTFD_READ, SYS_EVENTFD_READ_TIMEOUT, SYS_EVENTFD_TRY_READ, SYS_EVENTFD_WRITE,
-    SYS_EVENTFD_WRITE_TIMEOUT, SYS_EXIT, SYS_FS_APPEND, SYS_FS_CHECK, SYS_FS_CLOSE, SYS_FS_COPY,
-    SYS_FS_DELETE, SYS_FS_DUP, SYS_FS_FALLOCATE, SYS_FS_FCHMODAT_PINNED, SYS_FS_FLOCK,
-    SYS_FS_FLOCK_HANDLE, SYS_FS_FORMAT, SYS_FS_FSTAT, SYS_FS_FSTATAT_PINNED, SYS_FS_FTRUNCATE,
-    SYS_FS_FUNLOCK, SYS_FS_GET_XATTR, SYS_FS_GETDENTS_PINNED, SYS_FS_HANDLE_PATH,
+    SYS_DNS_RESOLVE2, SYS_DNS_REVERSE_RESOLVE, SYS_DOMAINNAME_SET, SYS_DRM_ATOMIC_COMMIT,
+    SYS_DRM_CLOSE, SYS_DRM_CONNECTOR_STATUS, SYS_DRM_CRTC_INFO, SYS_DRM_CURSOR_MOVE,
+    SYS_DRM_CURSOR_SET, SYS_DRM_DISPLAY_SIZE, SYS_DRM_FB_CREATE, SYS_DRM_FB_DESTROY,
+    SYS_DRM_FLUSH_REGION, SYS_DRM_GEM_CREATE, SYS_DRM_GEM_DESTROY, SYS_DRM_GEM_MMAP,
+    SYS_DRM_MODE_GET, SYS_DRM_OPEN, SYS_DRM_PAGE_FLIP, SYS_EVENTFD_CLOSE, SYS_EVENTFD_CREATE,
+    SYS_EVENTFD_HAS_VALUE, SYS_EVENTFD_READ, SYS_EVENTFD_READ_TIMEOUT, SYS_EVENTFD_TRY_READ,
+    SYS_EVENTFD_WRITE, SYS_EVENTFD_WRITE_TIMEOUT, SYS_EXIT, SYS_FS_APPEND, SYS_FS_CHECK,
+    SYS_FS_CLOSE, SYS_FS_COPY, SYS_FS_DELETE, SYS_FS_DUP, SYS_FS_FALLOCATE, SYS_FS_FCHMODAT_PINNED,
+    SYS_FS_FLOCK, SYS_FS_FLOCK_HANDLE, SYS_FS_FORMAT, SYS_FS_FSTAT, SYS_FS_FSTATAT_PINNED,
+    SYS_FS_FTRUNCATE, SYS_FS_FUNLOCK, SYS_FS_GET_XATTR, SYS_FS_GETDENTS_PINNED, SYS_FS_HANDLE_PATH,
     SYS_FS_JOURNAL_CURSOR, SYS_FS_JOURNAL_FLUSH, SYS_FS_JOURNAL_READ, SYS_FS_LINK,
     SYS_FS_LINK_HANDLE, SYS_FS_LINKAT_PINNED, SYS_FS_LIST_DIR, SYS_FS_LIST_XATTRS, SYS_FS_LSTAT,
     SYS_FS_METADATA, SYS_FS_MKDIR, SYS_FS_MKDIR_MODE, SYS_FS_MKDIRAT_PINNED, SYS_FS_MOUNT,
@@ -564,6 +564,7 @@ const fn build_v1_table() -> SyscallTable {
     handlers[SYS_FS_FLOCK_HANDLE as usize] = Some(handlers::sys_fs_flock_handle);
     handlers[SYS_FS_SET_STATUS_FLAGS as usize] = Some(handlers::sys_fs_set_status_flags);
     handlers[SYS_FS_LINK_HANDLE as usize] = Some(handlers::sys_fs_link_handle);
+    handlers[SYS_DNS_RESOLVE2 as usize] = Some(handlers::sys_dns_resolve2);
     handlers[SYS_SIGNAL_MASK as usize] = Some(handlers::sys_signal_mask);
     handlers[SYS_SIGNAL_PENDING as usize] = Some(handlers::sys_signal_pending);
     handlers[SYS_SIGNAL_STOP_SELF as usize] = Some(handlers::sys_signal_stop_self);
@@ -1235,8 +1236,77 @@ pub fn self_test_fs() -> KernelResult<()> {
     test_dispatch_fs_gates()?;
     test_dispatch_status_flags()?;
     test_dispatch_tmpfile()?;
+    test_dispatch_dns_resolve2()?;
 
     serial_println!("[syscall] Post-mount dispatch self-test PASSED");
+    Ok(())
+}
+
+/// `SYS_DNS_RESOLVE2` (1097), answered from the kernel's hosts table so no
+/// query leaves the machine:
+/// - `localhost` as `AF_UNSPEC`: `::1` then `127.0.0.1`, canonical
+///   `localhost`, in the layout the number's doc gives;
+/// - as `AF_INET`, the one IPv4 record;
+/// - a buffer that cannot hold the answer is `BufferTooSmall`, with nothing
+///   written; a family that is not one of the three, `InvalidArgument`.
+fn test_dispatch_dns_resolve2() -> KernelResult<()> {
+    const AF_UNSPEC: u64 = 0;
+    const AF_INET: u64 = 2;
+    let name = b"localhost";
+    let resolve = |family: u64, out: &mut [u8]| {
+        dispatch(
+            SYS_DNS_RESOLVE2,
+            &SyscallArgs {
+                arg0: name.as_ptr() as u64,
+                arg1: name.len() as u64,
+                arg2: family,
+                arg3: out.as_mut_ptr() as u64,
+                arg4: out.len() as u64,
+                arg5: 0,
+            },
+        )
+        .value
+    };
+    let fail = |what: &str| {
+        serial_println!("[syscall]   FAIL: SYS_DNS_RESOLVE2: {}", what);
+        Err(KernelError::InternalError)
+    };
+
+    let mut out = [0xEEu8; 128];
+    let n = resolve(AF_UNSPEC, &mut out);
+    let mut want = alloc::vec::Vec::new();
+    want.extend_from_slice(&2u16.to_le_bytes());
+    want.extend_from_slice(&9u16.to_le_bytes());
+    want.extend_from_slice(b"localhost\0");
+    want.extend_from_slice(&10u16.to_le_bytes());
+    want.extend_from_slice(&[0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1]);
+    want.extend_from_slice(&2u16.to_le_bytes());
+    want.extend_from_slice(&[127, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
+    if n != 2 || out.get(..want.len()) != Some(want.as_slice()) {
+        serial_println!(
+            "[syscall]   AF_UNSPEC localhost -> {}, {:02x?}",
+            n,
+            out.get(..want.len())
+        );
+        return fail("localhost as AF_UNSPEC was not ::1 then 127.0.0.1, canonical localhost");
+    }
+    let mut out = [0u8; 64];
+    let n = resolve(AF_INET, &mut out);
+    if n != 1 || out.get(14..20) != Some([2u8, 0, 127, 0, 0, 1].as_slice()) {
+        return fail("localhost as AF_INET was not 127.0.0.1 alone");
+    }
+    let mut small = [0xEEu8; 8];
+    let too_small = resolve(AF_UNSPEC, &mut small);
+    if too_small != i64::from(KernelError::BufferTooSmall.code()) || small != [0xEE; 8] {
+        return fail("a buffer too small for the answer was written, or not refused");
+    }
+    let mut out = [0u8; 64];
+    if resolve(99, &mut out) != i64::from(KernelError::InvalidArgument.code()) {
+        return fail("an unknown family was accepted");
+    }
+    serial_println!(
+        "[syscall]   SYS_DNS_RESOLVE2 (1097): every address, the canonical name, the layout: OK"
+    );
     Ok(())
 }
 

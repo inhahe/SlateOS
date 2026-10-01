@@ -15708,6 +15708,105 @@ pub fn sys_ns_query(args: &SyscallArgs) -> SyscallResult {
     SyscallResult::ok(ns_id as i64)
 }
 
+/// `SYS_DNS_RESOLVE2` — every address of a name, its canonical name, and why
+/// there is none. See the number's doc.
+pub fn sys_dns_resolve2(args: &SyscallArgs) -> SyscallResult {
+    use crate::net::dns::{Address, Family};
+    /// `AF_UNSPEC`, `AF_INET`, `AF_INET6`, Linux's values, as the C library
+    /// passes them.
+    const AF_UNSPEC: u64 = 0;
+    const AF_INET: u64 = 2;
+    const AF_INET6: u64 = 10;
+    /// The same two families, as a record's `u16`.
+    const RECORD_V4: u16 = 2;
+    const RECORD_V6: u16 = 10;
+    /// The header: the record count and the canonical name's length.
+    const HEADER: usize = 4;
+    /// A record: its family (a `u16`) and 16 address bytes.
+    const RECORD: usize = 18;
+    /// At most this many records are given.
+    const MAX_RECORDS: usize = 64;
+
+    // DNS is a network operation, as for SYS_DNS_RESOLVE.
+    if let Err(e) = require_cap_type(crate::cap::ResourceType::Socket, crate::cap::Rights::READ) {
+        return SyscallResult::err(e);
+    }
+    let name_len = args.arg1 as usize;
+    let out_len = args.arg4 as usize;
+    if args.arg0 == 0 || name_len == 0 || args.arg3 == 0 {
+        return SyscallResult::err(KernelError::InvalidArgument);
+    }
+    let family = match args.arg2 {
+        AF_UNSPEC => Family::Any,
+        AF_INET => Family::V4,
+        AF_INET6 => Family::V6,
+        _ => return SyscallResult::err(KernelError::InvalidArgument),
+    };
+    // Checked before any query is sent, as SYS_DNS_RESOLVE checks its output.
+    if let Err(e) = crate::mm::user::validate_user_write(args.arg3, out_len) {
+        return SyscallResult::err(e);
+    }
+    // 253: the longest DNS name in presentation form (RFC 1035 §2.3.4); a
+    // longer one is refused, not cut, which would resolve another host.
+    let name_bytes = match crate::mm::user::read_user_vec(args.arg0, name_len, 253) {
+        Ok(b) => b,
+        Err(e) => return SyscallResult::err(e),
+    };
+    let Ok(name) = core::str::from_utf8(&name_bytes) else {
+        return SyscallResult::err(KernelError::InvalidArgument);
+    };
+    let found = match crate::net::dns::lookup(name, family) {
+        Ok(found) => found,
+        Err(e) => return SyscallResult::err(e),
+    };
+
+    let records = found
+        .addrs
+        .get(..found.addrs.len().min(MAX_RECORDS))
+        .unwrap_or(&[]);
+    let canonical = found.canonical.as_bytes();
+    let (Ok(count), Ok(canonical_len)) =
+        (u16::try_from(records.len()), u16::try_from(canonical.len()))
+    else {
+        return SyscallResult::err(KernelError::InternalError);
+    };
+    let needed = records
+        .len()
+        .checked_mul(RECORD)
+        .and_then(|r| r.checked_add(HEADER))
+        .and_then(|n| n.checked_add(canonical.len()))
+        .and_then(|n| n.checked_add(1));
+    let Some(needed) = needed.filter(|&n| n <= out_len) else {
+        return SyscallResult::err(KernelError::BufferTooSmall);
+    };
+    let mut out = alloc::vec::Vec::with_capacity(needed);
+    out.extend_from_slice(&count.to_le_bytes());
+    out.extend_from_slice(&canonical_len.to_le_bytes());
+    out.extend_from_slice(canonical);
+    out.push(0);
+    for addr in records {
+        match addr {
+            Address::V4(ip) => {
+                out.extend_from_slice(&RECORD_V4.to_le_bytes());
+                out.extend_from_slice(&ip.0);
+                out.extend_from_slice(&[0u8; 12]);
+            }
+            Address::V6(ip) => {
+                out.extend_from_slice(&RECORD_V6.to_le_bytes());
+                out.extend_from_slice(&ip.0);
+            }
+        }
+    }
+    // SAFETY: `validate_user_write(args.arg3, out_len)` passed above and
+    // `out.len() == needed <= out_len`; `copy_to_user` checks the range
+    // again, with SMAP, so a mapping changed while the query slept fails
+    // instead of faulting.
+    if let Err(e) = unsafe { crate::mm::user::copy_to_user(out.as_ptr(), args.arg3, out.len()) } {
+        return SyscallResult::err(e);
+    }
+    SyscallResult::ok(i64::from(count))
+}
+
 /// `SYS_DNS_RESOLVE` — resolve a hostname to an IPv4 address.
 ///
 /// `arg0`: pointer to hostname string.

@@ -6070,6 +6070,49 @@ pub const SYS_FS_SET_STATUS_FLAGS: u64 = 1095;
 pub const SYS_FS_LINK_HANDLE: u64 = 1096;
 
 // ---------------------------------------------------------------------------
+// A name's addresses, as a DNS answer gives them (1097)
+// ---------------------------------------------------------------------------
+
+/// Every address of a name, its canonical name, and why there is none:
+/// `dns_resolve2(name, name_len, family, out, out_len) -> count`.
+///
+/// What `getaddrinfo` needs from a resolver, which [`SYS_DNS_RESOLVE`]'s one
+/// IPv4 address is not (lane D's request
+/// `d-a-sys-dns-resolve-answers-one-ipv4-address`).
+///
+/// - `name`, `name_len`: the name, at most 253 bytes.
+/// - `family`: `AF_UNSPEC` (0) for AAAA and A records, `AF_INET` (2) for A,
+///   `AF_INET6` (10) for AAAA -- Linux's values.
+/// - `out`, `out_len`: the answer, little-endian:
+///   - `u16` the record count, `u16` the canonical name's length;
+///   - the canonical name (the end of the CNAME chain, `AI_CANONNAME`) and a
+///     NUL;
+///   - per record, 18 bytes: `u16` family (2 or 10), then 16 address bytes,
+///     an IPv4 address in the first 4 and zeros after.
+///
+/// The records are in the order the answer gave them, IPv6 first for
+/// `AF_UNSPEC`; sorting them for a connection (RFC 6724) is the caller's.
+/// At most 64. The kernel's hosts table (`localhost`) and a container's
+/// peers answer before the network, and answers are cached by their TTL.
+///
+/// Returns the record count, at least 1.
+///
+/// Errors:
+/// - `NotFound`: the name does not exist (NXDOMAIN; `EAI_NONAME`).
+/// - `NoAddress` (-707): it exists with no address of the family asked
+///   (NODATA; `EAI_NODATA`).
+/// - `TimedOut`: no answer; `WouldBlock`: the server failed for now
+///   (SERVFAIL); `ConnectionRefused`: it refused -- all `EAI_AGAIN`.
+/// - `TooManyLinks`: a CNAME chain too long; `IoError`: an answer that
+///   could not be read -- `EAI_FAIL`.
+/// - `BufferTooSmall`: `out_len` cannot hold the answer; nothing is written.
+/// - `InvalidArgument`: a family other than the three, or a name that is
+///   not UTF-8; `PermissionDenied` without the Socket capability.
+///
+/// Chosen number 1097, the next free slot after 1096.
+pub const SYS_DNS_RESOLVE2: u64 = 1097;
+
+// ---------------------------------------------------------------------------
 // Version info
 // ---------------------------------------------------------------------------
 

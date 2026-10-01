@@ -218,6 +218,11 @@ pub enum KernelError {
     /// A datagram was larger than the maximum a single `send`/`sendto` can carry
     /// (exceeds the socket's per-datagram limit).  Maps to `EMSGSIZE`.
     MsgSize = -706,
+    /// A name exists but has no address of the kind asked: a DNS answer with
+    /// no record of the type (NODATA), as against `NotFound` for a name that
+    /// does not exist (NXDOMAIN). Maps to `ENODATA`; `getaddrinfo` answers
+    /// `EAI_NODATA`.
+    NoAddress = -707,
 }
 
 impl KernelError {
@@ -278,6 +283,7 @@ impl KernelError {
             Self::BrokenPipe => "broken pipe (write side shut down)",
             Self::AddrInUse => "address already in use",
             Self::MsgSize => "message too long for datagram",
+            Self::NoAddress => "name has no address of the kind asked",
         }
     }
 

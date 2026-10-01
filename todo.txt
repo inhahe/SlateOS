@@ -4539,6 +4539,25 @@
 
 ## Judgment Calls
 
+### 2026-10-01 (lane B) — a refused power change is not forced, and the
+### service manager's method names were chosen by its clients
+
+`powerctl` used to read the service manager's answer as text and treat
+anything starting `ERR` as "not accepted" -- the same `false` as nobody
+answering -- so a refused shutdown fell through to the direct fallback and
+happened anyway. On the service bus a refusal is its own kind of reply, and
+`powerctl` now reports it and exits 1 without forcing (as `systemctl`
+does when logind refuses). Reverse in `userspace/powerctl/src/main.rs`,
+`ask_or_fall_back`, if forcing on refusal is wanted -- better as an
+explicit `--force` than as the default.
+
+The method names (`PowerOff`, `Reboot`, `Suspend`, `Hibernate`,
+`SchedulePower`, `CancelScheduledPower`; `StartService` ... `ReloadService`)
+are the interface a provider of `org.slateos.ServiceManager` must
+implement. Nothing provides it yet (known-issues.md), so they were chosen on
+the clients' side, after systemd's where one exists; whoever writes the
+provider may rename them in both clients.
+
 ### 2026-09-16 — pushed with ALLOW_STALE_RELEASE=1, and did NOT update
 ### bench/last-release-boot.json
 
@@ -54873,6 +54892,19 @@ FAILs).  Reversible (pure translator change; no PCB/state).
 ##   "revisit if/when" clauses, and the "### How to reverse" heading form
 ##   (about 30 entries) which the bolded-label grep does not match.
 ##
+##   TRACKED FROM BIRTH (lane B, 2026-10-01): S1054 -- logind serves a thread
+##   per client because a completion port is neither woken by channel sends
+##   nor able to wait on a listener. Its reversing condition is BOTH of:
+##   lane F's requests/f-a-a-channel-handle-...md point 4 (channel::send
+##   notifies the ports that registered the channel) AND
+##   requests/b-a-a-server-cannot-wait-for-a-new-client-and-its-clients-at-once.md
+##   (a listener wait source). Falsifier: a `completion::notify` call in
+##   kernel/src/ipc/channel.rs's send path, and a `Listener` arm in
+##   handlers.rs's `encode_event`. When both exist: libservicebus gets
+##   SourceType::Listener + EventLoop::register_listener, logind's serve goes
+##   back to one event loop, known-issues B-LOGIND-SERVES-A-THREAD-PER-CLIENT-...
+##   closes.
+##
 ##   AUDIT PASS 2026-08-18 (lane A) -- IN PROGRESS, resumable. Findings so far:
 ##   * S59 (GPU accel scope, Q18): PREMISE HAS FIRED. It defers the Mesa port
 ##     "until a virgl test environment exists"; one exists and always did. The
@@ -59068,6 +59100,24 @@ is already waiting, not whether the setter exists.
   design-decisions §1302). A fixed vblank-aligned grid would not drift, but the
   kernel sends no flip event to align to; revisit when it does.
 
+## Lane B — Judgment Calls (lsblk port, 2026-09-27)
+
+### lsblk asks udev only where udev runs (lane B, 2026-09-27)
+- **What:** `userspace/lsblk/src/props.rs` (`udev_is_running`) reads a
+  device's FSTYPE/LABEL/UUID/... from udev's database only when
+  `/run/udev/data` is a directory; otherwise it goes straight to libblkid
+  (`ulblkid`, root only).
+- **Why:** upstream is built with libudev, whose device lookup succeeds from
+  sysfs alone -- so on a system without udev every device gets properties,
+  all empty, and libblkid is never asked: `lsblk -f` is blank. util-linux
+  built without libudev asks libblkid instead. SlateOS has no udev; the WSL
+  reference runs one. Keying on udev's database gives upstream-with-libudev
+  wherever udev runs (what `scripts/lsblk-diff.sh` measures) and
+  upstream-without-libudev where it does not (SlateOS).
+- **Where it differs from upstream:** only on a Linux system with libudev but
+  no udevd (a container), where upstream shows empty properties and this
+  probes. To reverse: drop the `udev_is_running()` test in
+  `get_properties_by_udev`.
 ## Lane D — POSIX, libc & toolchain
 
 - **crypt: libxcrypt's other methods** (posix/src/crypt.rs).  Only $1$, $5$
@@ -59116,6 +59166,32 @@ is already waiting, not whether the setter exists.
   lane B) converts with tables of its own; the libc now has every set it
   knows, so it can be glibc's iconv_prog over the libc's iconv -- asked in
   requests/d-b-the-iconv-program-can-run-on-the-libc.md.
+
+- **tmpfile: unlink at once, as glibc does, when the kernel allows it**
+  (posix/src/stdlib.rs `tmpfile`, posix/src/stdio.rs `hold_temporary`).
+  tmpfile keeps `/tmp/tmpfXXXXXX` until the stream lets go of the file
+  (fclose, freopen onto another, exit) because this kernel's descriptors
+  re-resolve their file's name on every read and write
+  (kernel/src/fs/handle.rs), so unlinking an open file loses it, and
+  O_TMPFILE is refused (posix/src/file.rs) -- design-decisions.md §1151,
+  known-issues.md D-POSIX-TMPFILE-WAS-NEVER-REMOVED-AND-MKSTEMP-WAS-NOT-GLIBCS.
+  Asked of lane A: requests/d-a-an-unlinked-open-file-is-lost-to-its-own-descriptor.md.
+  Trigger and fix: descriptors that outlive their names -> unlink right
+  after gen_tempname in tmpfile and drop hold_temporary; or a nameless
+  SYS_FS_TMPFILE -> lift open()'s EOPNOTSUPP guard for O_TMPFILE, and
+  tmpfile uses it unchanged (it is tried first).
+
+- **The C fixtures onto the generic rung, one at a time, once lane A's rung
+  is in** (services/ctest-generic.list).  Asked in
+  requests/d-a-one-rung-for-every-c-fixture.md, whose table gives each
+  fixture's grant and time limit.  When the rung is on main: merge it, then
+  for each of ctest-obstack, ctest-aio, ctest-cxx-throw, ctest-eintr,
+  ctest-fortify-abort, ctest-printf-streams, ctest-pthread, ctest-stdio,
+  ctest-sysvipc and ctest-ucontext -- and ctest-cwd-umask once the kernel
+  half of design-decisions.md §960 is in -- add its line, boot, fix what
+  fails, publish, and close the fixture's own requests/d-a-run-*.md.  A
+  fixture goes on only after a lane D boot has seen it pass, so that no
+  other lane's boot meets it failing first.
 
 ## Lane C — the start menu's Shut down button waits for programs to be asked to save (2026-09-26)
 

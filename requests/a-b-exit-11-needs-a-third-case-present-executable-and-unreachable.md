@@ -1,6 +1,7 @@
 # a -> b: exit 11's wording needs a third case — "present, executable, and unreachable by this caller"
 
 **Status:** ✅ resolved 2026-09-24 by lane D — the fixture's child now prints `execl`'s own errno, so exit 11 names its cause instead of listing guesses; the underlying failure (a `METADATA`-gated `stat`) is fixed in `posix/`. Reply at the end.
+**Forwarded to:** lane D — exit 11 is `services/ctest-coreutils-runs`'s; `services/**` moved from lane B to lane D at the six-lane split of 2026-09-22, and lane B may no longer write it (lane B, 2026-09-24).
 
 **Filed:** 2026-09-16 · **From:** lane A · **To:** lane B
 · **Severity:** low — the code is right, the sentence is one case short

@@ -656,166 +656,161 @@ unsafe fn is_delim(c: u8, delim: *const u8) -> bool {
     }
 }
 
-/// Return a string describing an error number.
-///
-/// Returns a pointer to a static string.  The returned string must
-/// not be modified by the caller.
+/// Each error number's text in the C locale, which is glibc's to the letter
+/// (`posix/tools/oracle/strname_harness.py`); None for a number that is no
+/// error's -- 41 and 58, which Linux left unused, and past 133. The one table
+/// [`strerror`], [`strerrordesc_np`] and [`sys_errlist`] all read.
+const fn error_text(errnum: i32) -> Option<&'static core::ffi::CStr> {
+    Some(match errnum {
+        0 => c"Success",
+        1 => c"Operation not permitted",
+        2 => c"No such file or directory",
+        3 => c"No such process",
+        4 => c"Interrupted system call",
+        5 => c"Input/output error",
+        6 => c"No such device or address",
+        7 => c"Argument list too long",
+        8 => c"Exec format error",
+        9 => c"Bad file descriptor",
+        10 => c"No child processes",
+        11 => c"Resource temporarily unavailable",
+        12 => c"Cannot allocate memory",
+        13 => c"Permission denied",
+        14 => c"Bad address",
+        15 => c"Block device required",
+        16 => c"Device or resource busy",
+        17 => c"File exists",
+        18 => c"Invalid cross-device link",
+        19 => c"No such device",
+        20 => c"Not a directory",
+        21 => c"Is a directory",
+        22 => c"Invalid argument",
+        23 => c"Too many open files in system",
+        24 => c"Too many open files",
+        25 => c"Inappropriate ioctl for device",
+        26 => c"Text file busy",
+        27 => c"File too large",
+        28 => c"No space left on device",
+        29 => c"Illegal seek",
+        30 => c"Read-only file system",
+        31 => c"Too many links",
+        32 => c"Broken pipe",
+        33 => c"Numerical argument out of domain",
+        34 => c"Numerical result out of range",
+        35 => c"Resource deadlock avoided",
+        36 => c"File name too long",
+        37 => c"No locks available",
+        38 => c"Function not implemented",
+        39 => c"Directory not empty",
+        40 => c"Too many levels of symbolic links",
+        42 => c"No message of desired type",
+        43 => c"Identifier removed",
+        44 => c"Channel number out of range",
+        45 => c"Level 2 not synchronized",
+        46 => c"Level 3 halted",
+        47 => c"Level 3 reset",
+        48 => c"Link number out of range",
+        49 => c"Protocol driver not attached",
+        50 => c"No CSI structure available",
+        51 => c"Level 2 halted",
+        52 => c"Invalid exchange",
+        53 => c"Invalid request descriptor",
+        54 => c"Exchange full",
+        55 => c"No anode",
+        56 => c"Invalid request code",
+        57 => c"Invalid slot",
+        59 => c"Bad font file format",
+        60 => c"Device not a stream",
+        61 => c"No data available",
+        62 => c"Timer expired",
+        63 => c"Out of streams resources",
+        64 => c"Machine is not on the network",
+        65 => c"Package not installed",
+        66 => c"Object is remote",
+        67 => c"Link has been severed",
+        68 => c"Advertise error",
+        69 => c"Srmount error",
+        70 => c"Communication error on send",
+        71 => c"Protocol error",
+        72 => c"Multihop attempted",
+        73 => c"RFS specific error",
+        74 => c"Bad message",
+        75 => c"Value too large for defined data type",
+        76 => c"Name not unique on network",
+        77 => c"File descriptor in bad state",
+        78 => c"Remote address changed",
+        79 => c"Can not access a needed shared library",
+        80 => c"Accessing a corrupted shared library",
+        81 => c".lib section in a.out corrupted",
+        82 => c"Attempting to link in too many shared libraries",
+        83 => c"Cannot exec a shared library directly",
+        84 => c"Invalid or incomplete multibyte or wide character",
+        85 => c"Interrupted system call should be restarted",
+        86 => c"Streams pipe error",
+        87 => c"Too many users",
+        88 => c"Socket operation on non-socket",
+        89 => c"Destination address required",
+        90 => c"Message too long",
+        91 => c"Protocol wrong type for socket",
+        92 => c"Protocol not available",
+        93 => c"Protocol not supported",
+        94 => c"Socket type not supported",
+        95 => c"Operation not supported",
+        96 => c"Protocol family not supported",
+        97 => c"Address family not supported by protocol",
+        98 => c"Address already in use",
+        99 => c"Cannot assign requested address",
+        100 => c"Network is down",
+        101 => c"Network is unreachable",
+        102 => c"Network dropped connection on reset",
+        103 => c"Software caused connection abort",
+        104 => c"Connection reset by peer",
+        105 => c"No buffer space available",
+        106 => c"Transport endpoint is already connected",
+        107 => c"Transport endpoint is not connected",
+        108 => c"Cannot send after transport endpoint shutdown",
+        109 => c"Too many references: cannot splice",
+        110 => c"Connection timed out",
+        111 => c"Connection refused",
+        112 => c"Host is down",
+        113 => c"No route to host",
+        114 => c"Operation already in progress",
+        115 => c"Operation now in progress",
+        116 => c"Stale file handle",
+        117 => c"Structure needs cleaning",
+        118 => c"Not a XENIX named type file",
+        119 => c"No XENIX semaphores available",
+        120 => c"Is a named type file",
+        121 => c"Remote I/O error",
+        122 => c"Disk quota exceeded",
+        123 => c"No medium found",
+        124 => c"Wrong medium type",
+        125 => c"Operation canceled",
+        126 => c"Required key not available",
+        127 => c"Key has expired",
+        128 => c"Key has been revoked",
+        129 => c"Key was rejected by service",
+        130 => c"Owner died",
+        131 => c"State not recoverable",
+        132 => c"Operation not possible due to RF-kill",
+        133 => c"Memory page has hardware error",
+        _ => return None,
+    })
+}
+
+/// Return a string describing an error number: [`error_text`]'s, or for a
+/// number that is no error's glibc's "Unknown error N", in the calling
+/// thread's own buffer (valid until its next call). Never NULL.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn strerror(errnum: i32) -> *const u8 {
-    // Return a pointer to a static null-terminated C string.
-    // These match the Linux error descriptions for the codes we support.
-    match errnum {
-        0 => c"Success".as_ptr().cast::<u8>(),
-        1 => c"Operation not permitted".as_ptr().cast::<u8>(),
-        2 => c"No such file or directory".as_ptr().cast::<u8>(),
-        3 => c"No such process".as_ptr().cast::<u8>(),
-        4 => c"Interrupted system call".as_ptr().cast::<u8>(),
-        5 => c"Input/output error".as_ptr().cast::<u8>(),
-        6 => c"No such device or address".as_ptr().cast::<u8>(),
-        7 => c"Argument list too long".as_ptr().cast::<u8>(),
-        8 => c"Exec format error".as_ptr().cast::<u8>(),
-        9 => c"Bad file descriptor".as_ptr().cast::<u8>(),
-        10 => c"No child processes".as_ptr().cast::<u8>(),
-        11 => c"Resource temporarily unavailable".as_ptr().cast::<u8>(),
-        12 => c"Cannot allocate memory".as_ptr().cast::<u8>(),
-        13 => c"Permission denied".as_ptr().cast::<u8>(),
-        14 => c"Bad address".as_ptr().cast::<u8>(),
-        15 => c"Block device required".as_ptr().cast::<u8>(),
-        16 => c"Device or resource busy".as_ptr().cast::<u8>(),
-        17 => c"File exists".as_ptr().cast::<u8>(),
-        18 => c"Invalid cross-device link".as_ptr().cast::<u8>(),
-        19 => c"No such device".as_ptr().cast::<u8>(),
-        20 => c"Not a directory".as_ptr().cast::<u8>(),
-        21 => c"Is a directory".as_ptr().cast::<u8>(),
-        22 => c"Invalid argument".as_ptr().cast::<u8>(),
-        23 => c"Too many open files in system".as_ptr().cast::<u8>(),
-        24 => c"Too many open files".as_ptr().cast::<u8>(),
-        25 => c"Inappropriate ioctl for device".as_ptr().cast::<u8>(),
-        27 => c"File too large".as_ptr().cast::<u8>(),
-        28 => c"No space left on device".as_ptr().cast::<u8>(),
-        29 => c"Illegal seek".as_ptr().cast::<u8>(),
-        30 => c"Read-only file system".as_ptr().cast::<u8>(),
-        26 => c"Text file busy".as_ptr().cast::<u8>(),
-        31 => c"Too many links".as_ptr().cast::<u8>(),
-        32 => c"Broken pipe".as_ptr().cast::<u8>(),
-        33 => c"Numerical argument out of domain".as_ptr().cast::<u8>(),
-        34 => c"Numerical result out of range".as_ptr().cast::<u8>(),
-        35 => c"Resource deadlock avoided".as_ptr().cast::<u8>(),
-        36 => c"File name too long".as_ptr().cast::<u8>(),
-        37 => c"No locks available".as_ptr().cast::<u8>(),
-        38 => c"Function not implemented".as_ptr().cast::<u8>(),
-        39 => c"Directory not empty".as_ptr().cast::<u8>(),
-        40 => c"Too many levels of symbolic links".as_ptr().cast::<u8>(),
-        42 => c"No message of desired type".as_ptr().cast::<u8>(),
-        43 => c"Identifier removed".as_ptr().cast::<u8>(),
-        44 => c"Channel number out of range".as_ptr().cast::<u8>(),
-        45 => c"Level 2 not synchronized".as_ptr().cast::<u8>(),
-        46 => c"Level 3 halted".as_ptr().cast::<u8>(),
-        47 => c"Level 3 reset".as_ptr().cast::<u8>(),
-        48 => c"Link number out of range".as_ptr().cast::<u8>(),
-        49 => c"Protocol driver not attached".as_ptr().cast::<u8>(),
-        50 => c"No CSI structure available".as_ptr().cast::<u8>(),
-        51 => c"Level 2 halted".as_ptr().cast::<u8>(),
-        52 => c"Invalid exchange".as_ptr().cast::<u8>(),
-        53 => c"Invalid request descriptor".as_ptr().cast::<u8>(),
-        54 => c"Exchange full".as_ptr().cast::<u8>(),
-        55 => c"No anode".as_ptr().cast::<u8>(),
-        56 => c"Invalid request code".as_ptr().cast::<u8>(),
-        57 => c"Invalid slot".as_ptr().cast::<u8>(),
-        59 => c"Bad font file format".as_ptr().cast::<u8>(),
-        60 => c"Device not a stream".as_ptr().cast::<u8>(),
-        61 => c"No data available".as_ptr().cast::<u8>(),
-        62 => c"Timer expired".as_ptr().cast::<u8>(),
-        63 => c"Out of streams resources".as_ptr().cast::<u8>(),
-        64 => c"Machine is not on the network".as_ptr().cast::<u8>(),
-        65 => c"Package not installed".as_ptr().cast::<u8>(),
-        66 => c"Object is remote".as_ptr().cast::<u8>(),
-        67 => c"Link has been severed".as_ptr().cast::<u8>(),
-        68 => c"Advertise error".as_ptr().cast::<u8>(),
-        69 => c"Srmount error".as_ptr().cast::<u8>(),
-        70 => c"Communication error on send".as_ptr().cast::<u8>(),
-        71 => c"Protocol error".as_ptr().cast::<u8>(),
-        72 => c"Multihop attempted".as_ptr().cast::<u8>(),
-        73 => c"RFS specific error".as_ptr().cast::<u8>(),
-        74 => c"Bad message".as_ptr().cast::<u8>(),
-        75 => c"Value too large for defined data type"
-            .as_ptr()
-            .cast::<u8>(),
-        76 => c"Name not unique on network".as_ptr().cast::<u8>(),
-        77 => c"File descriptor in bad state".as_ptr().cast::<u8>(),
-        78 => c"Remote address changed".as_ptr().cast::<u8>(),
-        79 => c"Can not access a needed shared library"
-            .as_ptr()
-            .cast::<u8>(),
-        80 => c"Accessing a corrupted shared library"
-            .as_ptr()
-            .cast::<u8>(),
-        81 => c".lib section in a.out corrupted".as_ptr().cast::<u8>(),
-        82 => c"Attempting to link in too many shared libraries"
-            .as_ptr()
-            .cast::<u8>(),
-        83 => c"Cannot exec a shared library directly"
-            .as_ptr()
-            .cast::<u8>(),
-        84 => c"Invalid or incomplete multibyte or wide character"
-            .as_ptr()
-            .cast::<u8>(),
-        85 => c"Interrupted system call should be restarted"
-            .as_ptr()
-            .cast::<u8>(),
-        86 => c"Streams pipe error".as_ptr().cast::<u8>(),
-        87 => c"Too many users".as_ptr().cast::<u8>(),
-        88 => c"Socket operation on non-socket".as_ptr().cast::<u8>(),
-        89 => c"Destination address required".as_ptr().cast::<u8>(),
-        90 => c"Message too long".as_ptr().cast::<u8>(),
-        91 => c"Protocol wrong type for socket".as_ptr().cast::<u8>(),
-        92 => c"Protocol not available".as_ptr().cast::<u8>(),
-        93 => c"Protocol not supported".as_ptr().cast::<u8>(),
-        94 => c"Socket type not supported".as_ptr().cast::<u8>(),
-        95 => c"Operation not supported".as_ptr().cast::<u8>(),
-        96 => c"Protocol family not supported".as_ptr().cast::<u8>(),
-        97 => c"Address family not supported by protocol"
-            .as_ptr()
-            .cast::<u8>(),
-        98 => c"Address already in use".as_ptr().cast::<u8>(),
-        99 => c"Cannot assign requested address".as_ptr().cast::<u8>(),
-        100 => c"Network is down".as_ptr().cast::<u8>(),
-        101 => c"Network is unreachable".as_ptr().cast::<u8>(),
-        102 => c"Network dropped connection on reset".as_ptr().cast::<u8>(),
-        103 => c"Software caused connection abort".as_ptr().cast::<u8>(),
-        104 => c"Connection reset by peer".as_ptr().cast::<u8>(),
-        105 => c"No buffer space available".as_ptr().cast::<u8>(),
-        106 => c"Transport endpoint is already connected"
-            .as_ptr()
-            .cast::<u8>(),
-        107 => c"Transport endpoint is not connected".as_ptr().cast::<u8>(),
-        108 => c"Cannot send after transport endpoint shutdown"
-            .as_ptr()
-            .cast::<u8>(),
-        109 => c"Too many references: cannot splice".as_ptr().cast::<u8>(),
-        110 => c"Connection timed out".as_ptr().cast::<u8>(),
-        111 => c"Connection refused".as_ptr().cast::<u8>(),
-        112 => c"Host is down".as_ptr().cast::<u8>(),
-        113 => c"No route to host".as_ptr().cast::<u8>(),
-        114 => c"Operation already in progress".as_ptr().cast::<u8>(),
-        115 => c"Operation now in progress".as_ptr().cast::<u8>(),
-        116 => c"Stale file handle".as_ptr().cast::<u8>(),
-        117 => c"Structure needs cleaning".as_ptr().cast::<u8>(),
-        118 => c"Not a XENIX named type file".as_ptr().cast::<u8>(),
-        119 => c"No XENIX semaphores available".as_ptr().cast::<u8>(),
-        120 => c"Is a named type file".as_ptr().cast::<u8>(),
-        121 => c"Remote I/O error".as_ptr().cast::<u8>(),
-        122 => c"Disk quota exceeded".as_ptr().cast::<u8>(),
-        123 => c"No medium found".as_ptr().cast::<u8>(),
-        124 => c"Wrong medium type".as_ptr().cast::<u8>(),
-        125 => c"Operation canceled".as_ptr().cast::<u8>(),
-        126 => c"Required key not available".as_ptr().cast::<u8>(), // ENOKEY
-        127 => c"Key has expired".as_ptr().cast::<u8>(),            // EKEYEXPIRED
-        128 => c"Key has been revoked".as_ptr().cast::<u8>(),       // EKEYREVOKED
-        129 => c"Key was rejected by service".as_ptr().cast::<u8>(), // EKEYREJECTED
-        130 => c"Owner died".as_ptr().cast::<u8>(),
-        131 => c"State not recoverable".as_ptr().cast::<u8>(),
-        _ => c"Unknown error".as_ptr().cast::<u8>(),
+    match error_text(errnum) {
+        Some(text) => text.as_ptr().cast::<u8>(),
+        // SAFETY: the calling thread's block, touched by no other thread.
+        None => crate::perthread::numbered(
+            unsafe { &mut (*crate::perthread::current()).strerror },
+            "Unknown error ",
+            errnum,
+        ),
     }
 }
 
@@ -1522,6 +1517,207 @@ pub extern "C" fn strerror_l(errnum: i32, _locale: usize) -> *const u8 {
     strerror(errnum)
 }
 
+/// Each error number's name, glibc's (`strerrorname_np`): the `E*` constant's.
+/// Where two share a number -- `EWOULDBLOCK` and `EAGAIN`, `EDEADLOCK` and
+/// `EDEADLK`, `ENOTSUP` and `EOPNOTSUPP` -- it is the name glibc answers
+/// with; 41 and 58 are numbers Linux left unused, and 0 is glibc's "0".
+static ERRNO_NAMES: [Option<&core::ffi::CStr>; 134] = [
+    Some(c"0"),
+    Some(c"EPERM"),
+    Some(c"ENOENT"),
+    Some(c"ESRCH"),
+    Some(c"EINTR"),
+    Some(c"EIO"),
+    Some(c"ENXIO"),
+    Some(c"E2BIG"),
+    Some(c"ENOEXEC"),
+    Some(c"EBADF"),
+    Some(c"ECHILD"),
+    Some(c"EAGAIN"),
+    Some(c"ENOMEM"),
+    Some(c"EACCES"),
+    Some(c"EFAULT"),
+    Some(c"ENOTBLK"),
+    Some(c"EBUSY"),
+    Some(c"EEXIST"),
+    Some(c"EXDEV"),
+    Some(c"ENODEV"),
+    Some(c"ENOTDIR"),
+    Some(c"EISDIR"),
+    Some(c"EINVAL"),
+    Some(c"ENFILE"),
+    Some(c"EMFILE"),
+    Some(c"ENOTTY"),
+    Some(c"ETXTBSY"),
+    Some(c"EFBIG"),
+    Some(c"ENOSPC"),
+    Some(c"ESPIPE"),
+    Some(c"EROFS"),
+    Some(c"EMLINK"),
+    Some(c"EPIPE"),
+    Some(c"EDOM"),
+    Some(c"ERANGE"),
+    Some(c"EDEADLK"),
+    Some(c"ENAMETOOLONG"),
+    Some(c"ENOLCK"),
+    Some(c"ENOSYS"),
+    Some(c"ENOTEMPTY"),
+    Some(c"ELOOP"),
+    None,
+    Some(c"ENOMSG"),
+    Some(c"EIDRM"),
+    Some(c"ECHRNG"),
+    Some(c"EL2NSYNC"),
+    Some(c"EL3HLT"),
+    Some(c"EL3RST"),
+    Some(c"ELNRNG"),
+    Some(c"EUNATCH"),
+    Some(c"ENOCSI"),
+    Some(c"EL2HLT"),
+    Some(c"EBADE"),
+    Some(c"EBADR"),
+    Some(c"EXFULL"),
+    Some(c"ENOANO"),
+    Some(c"EBADRQC"),
+    Some(c"EBADSLT"),
+    None,
+    Some(c"EBFONT"),
+    Some(c"ENOSTR"),
+    Some(c"ENODATA"),
+    Some(c"ETIME"),
+    Some(c"ENOSR"),
+    Some(c"ENONET"),
+    Some(c"ENOPKG"),
+    Some(c"EREMOTE"),
+    Some(c"ENOLINK"),
+    Some(c"EADV"),
+    Some(c"ESRMNT"),
+    Some(c"ECOMM"),
+    Some(c"EPROTO"),
+    Some(c"EMULTIHOP"),
+    Some(c"EDOTDOT"),
+    Some(c"EBADMSG"),
+    Some(c"EOVERFLOW"),
+    Some(c"ENOTUNIQ"),
+    Some(c"EBADFD"),
+    Some(c"EREMCHG"),
+    Some(c"ELIBACC"),
+    Some(c"ELIBBAD"),
+    Some(c"ELIBSCN"),
+    Some(c"ELIBMAX"),
+    Some(c"ELIBEXEC"),
+    Some(c"EILSEQ"),
+    Some(c"ERESTART"),
+    Some(c"ESTRPIPE"),
+    Some(c"EUSERS"),
+    Some(c"ENOTSOCK"),
+    Some(c"EDESTADDRREQ"),
+    Some(c"EMSGSIZE"),
+    Some(c"EPROTOTYPE"),
+    Some(c"ENOPROTOOPT"),
+    Some(c"EPROTONOSUPPORT"),
+    Some(c"ESOCKTNOSUPPORT"),
+    Some(c"EOPNOTSUPP"),
+    Some(c"EPFNOSUPPORT"),
+    Some(c"EAFNOSUPPORT"),
+    Some(c"EADDRINUSE"),
+    Some(c"EADDRNOTAVAIL"),
+    Some(c"ENETDOWN"),
+    Some(c"ENETUNREACH"),
+    Some(c"ENETRESET"),
+    Some(c"ECONNABORTED"),
+    Some(c"ECONNRESET"),
+    Some(c"ENOBUFS"),
+    Some(c"EISCONN"),
+    Some(c"ENOTCONN"),
+    Some(c"ESHUTDOWN"),
+    Some(c"ETOOMANYREFS"),
+    Some(c"ETIMEDOUT"),
+    Some(c"ECONNREFUSED"),
+    Some(c"EHOSTDOWN"),
+    Some(c"EHOSTUNREACH"),
+    Some(c"EALREADY"),
+    Some(c"EINPROGRESS"),
+    Some(c"ESTALE"),
+    Some(c"EUCLEAN"),
+    Some(c"ENOTNAM"),
+    Some(c"ENAVAIL"),
+    Some(c"EISNAM"),
+    Some(c"EREMOTEIO"),
+    Some(c"EDQUOT"),
+    Some(c"ENOMEDIUM"),
+    Some(c"EMEDIUMTYPE"),
+    Some(c"ECANCELED"),
+    Some(c"ENOKEY"),
+    Some(c"EKEYEXPIRED"),
+    Some(c"EKEYREVOKED"),
+    Some(c"EKEYREJECTED"),
+    Some(c"EOWNERDEAD"),
+    Some(c"ENOTRECOVERABLE"),
+    Some(c"ERFKILL"),
+    Some(c"EHWPOISON"),
+];
+
+/// `strerrorname_np(errnum)` -- the name of the constant an error number is,
+/// `"EINVAL"` for 22; NULL for a number that is no error's (glibc 2.32's).
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub extern "C" fn strerrorname_np(errnum: i32) -> *const u8 {
+    usize::try_from(errnum)
+        .ok()
+        .and_then(|i| ERRNO_NAMES.get(i).copied().flatten())
+        .map_or(core::ptr::null(), |s| s.as_ptr().cast())
+}
+
+/// `strerrordesc_np(errnum)` -- [`strerror`]'s text for an error number, or
+/// NULL, not "Unknown error", for a number that is no error's (glibc 2.32's).
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub extern "C" fn strerrordesc_np(errnum: i32) -> *const u8 {
+    error_text(errnum).map_or(core::ptr::null(), |t| t.as_ptr().cast())
+}
+
+/// `memfrob(s, n)` -- each of the `n` bytes at `s` exclusive-ored with 42, in
+/// place: glibc's joke of an encryption, its own inverse. Returns `s`.
+///
+/// # Safety
+///
+/// `s` must be valid for reading and writing `n` bytes.
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub unsafe extern "C" fn memfrob(s: *mut core::ffi::c_void, n: SizeT) -> *mut core::ffi::c_void {
+    let p = s.cast::<u8>();
+    for i in 0..n {
+        // SAFETY: `i < n`, within the caller's `n` bytes.
+        unsafe { *p.add(i) ^= 42 };
+    }
+    s
+}
+
+/// `strfry(string)` -- the bytes of a string shuffled in place, each order
+/// equally likely (Fisher and Yates, over [`crate::random::arc4random_uniform`]).
+/// Returns `string`; NULL is left alone.
+///
+/// # Safety
+///
+/// `string` must be NULL or a writable NUL-terminated string.
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub unsafe extern "C" fn strfry(string: *mut u8) -> *mut u8 {
+    if string.is_null() {
+        return string;
+    }
+    // SAFETY: the caller's NUL-terminated string.
+    let len = unsafe { strlen(string) };
+    let mut i = len;
+    while i > 1 {
+        // A string of more than 4 GiB is shuffled with its first 4 Gi
+        // choices a little less even; there is no such string to fry.
+        let bound = u32::try_from(i).unwrap_or(u32::MAX);
+        let j = crate::random::arc4random_uniform(bound) as usize;
+        i = i.wrapping_sub(1);
+        // SAFETY: `i` and `j` are both below `len`.
+        unsafe { core::ptr::swap(string.add(i), string.add(j)) };
+    }
+    string
+}
+
 /// XPG variant of `strerror_r`.
 ///
 /// Some glibc-compiled programs reference `__xpg_strerror_r` instead
@@ -1855,9 +2051,9 @@ pub use gnu_rawmemchr::rawmemchr;
 ///
 /// Deprecated since POSIX.1-2001, removed in POSIX.1-2008, but many
 /// programs and libraries still reference it for link compatibility.
-/// Our highest errno is 131 (ENOTRECOVERABLE), so sys_nerr = 132.
+/// The highest error number is 133 (`EHWPOISON`), so `sys_nerr` is 134.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
-pub static sys_nerr: i32 = 132;
+pub static sys_nerr: i32 = 134;
 
 /// Wrapper to make `*const u8` usable in a static array.
 ///
@@ -1873,141 +2069,31 @@ unsafe impl Sync for SyncPtr {}
 /// Array of error message strings indexed by errno value.
 ///
 /// `sys_errlist[n]` points to the same static string that `strerror(n)`
-/// returns.  Entries for undefined errno values point to "Unknown error".
+/// returns: [`error_text`]'s, built from it when this is compiled. An index
+/// that is no error's -- 41 and 58 -- points to "Unknown error".
 ///
-/// Deprecated since POSIX.1-2001 — use `strerror()` instead.  Provided
-/// for link compatibility with programs that reference the symbol.
+/// Deprecated since POSIX.1-2001 -- use `strerror()` instead -- and declared
+/// by no header since glibc 2.32. Provided for link compatibility with
+/// programs that reference the symbol. It was a second copy of the texts
+/// until 2026-09-29, and had drifted: 15 said "Unknown error", and 132 and
+/// 133 were past its end.
 ///
-/// SAFETY: All pointers are to static `c"..."` literals with `'static`
-/// lifetime.  The array itself is a static, so the pointer is stable.
-/// The `SyncPtr` wrapper is `repr(transparent)` so the array layout
-/// matches `[*const u8; 132]` exactly — C code sees a plain pointer
-/// array.
+/// The `SyncPtr` wrapper is `repr(transparent)`, so the array's layout is
+/// `[*const u8; 134]` exactly -- C code sees a plain pointer array.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
-pub static sys_errlist: [SyncPtr; 132] = {
-    // Inline const: build the table.  Every index maps to a c-string.
-    // Indices with no defined errno get "Unknown error".
-    const UNK: SyncPtr = SyncPtr(c"Unknown error".as_ptr().cast::<u8>());
-
-    let mut table: [SyncPtr; 132] = [UNK; 132];
-
-    table[0] = SyncPtr(c"Success".as_ptr().cast::<u8>());
-    table[1] = SyncPtr(c"Operation not permitted".as_ptr().cast::<u8>());
-    table[2] = SyncPtr(c"No such file or directory".as_ptr().cast::<u8>());
-    table[3] = SyncPtr(c"No such process".as_ptr().cast::<u8>());
-    table[4] = SyncPtr(c"Interrupted system call".as_ptr().cast::<u8>());
-    table[5] = SyncPtr(c"Input/output error".as_ptr().cast::<u8>());
-    table[6] = SyncPtr(c"No such device or address".as_ptr().cast::<u8>());
-    table[7] = SyncPtr(c"Argument list too long".as_ptr().cast::<u8>());
-    table[8] = SyncPtr(c"Exec format error".as_ptr().cast::<u8>());
-    table[9] = SyncPtr(c"Bad file descriptor".as_ptr().cast::<u8>());
-    table[10] = SyncPtr(c"No child processes".as_ptr().cast::<u8>());
-    table[11] = SyncPtr(c"Resource temporarily unavailable".as_ptr().cast::<u8>());
-    table[12] = SyncPtr(c"Cannot allocate memory".as_ptr().cast::<u8>());
-    table[13] = SyncPtr(c"Permission denied".as_ptr().cast::<u8>());
-    table[14] = SyncPtr(c"Bad address".as_ptr().cast::<u8>());
-    // 15: ENOTBLK — not defined in our errno.rs
-    table[16] = SyncPtr(c"Device or resource busy".as_ptr().cast::<u8>());
-    table[17] = SyncPtr(c"File exists".as_ptr().cast::<u8>());
-    table[18] = SyncPtr(c"Invalid cross-device link".as_ptr().cast::<u8>());
-    table[19] = SyncPtr(c"No such device".as_ptr().cast::<u8>());
-    table[20] = SyncPtr(c"Not a directory".as_ptr().cast::<u8>());
-    table[21] = SyncPtr(c"Is a directory".as_ptr().cast::<u8>());
-    table[22] = SyncPtr(c"Invalid argument".as_ptr().cast::<u8>());
-    table[23] = SyncPtr(c"Too many open files in system".as_ptr().cast::<u8>());
-    table[24] = SyncPtr(c"Too many open files".as_ptr().cast::<u8>());
-    table[25] = SyncPtr(c"Inappropriate ioctl for device".as_ptr().cast::<u8>());
-    table[26] = SyncPtr(c"Text file busy".as_ptr().cast::<u8>());
-    table[27] = SyncPtr(c"File too large".as_ptr().cast::<u8>());
-    table[28] = SyncPtr(c"No space left on device".as_ptr().cast::<u8>());
-    table[29] = SyncPtr(c"Illegal seek".as_ptr().cast::<u8>());
-    table[30] = SyncPtr(c"Read-only file system".as_ptr().cast::<u8>());
-    table[31] = SyncPtr(c"Too many links".as_ptr().cast::<u8>());
-    table[32] = SyncPtr(c"Broken pipe".as_ptr().cast::<u8>());
-    table[33] = SyncPtr(c"Numerical argument out of domain".as_ptr().cast::<u8>());
-    table[34] = SyncPtr(c"Numerical result out of range".as_ptr().cast::<u8>());
-    table[35] = SyncPtr(c"Resource deadlock avoided".as_ptr().cast::<u8>());
-    table[36] = SyncPtr(c"File name too long".as_ptr().cast::<u8>());
-    table[37] = SyncPtr(c"No locks available".as_ptr().cast::<u8>());
-    table[38] = SyncPtr(c"Function not implemented".as_ptr().cast::<u8>());
-    table[39] = SyncPtr(c"Directory not empty".as_ptr().cast::<u8>());
-    table[40] = SyncPtr(c"Too many levels of symbolic links".as_ptr().cast::<u8>());
-    // 41: unused on Linux
-    table[42] = SyncPtr(c"No message of desired type".as_ptr().cast::<u8>());
-    table[43] = SyncPtr(c"Identifier removed".as_ptr().cast::<u8>());
-    // 44-59: various Linux errnos not in our set
-    table[60] = SyncPtr(c"Device not a stream".as_ptr().cast::<u8>());
-    table[61] = SyncPtr(c"No data available".as_ptr().cast::<u8>());
-    table[62] = SyncPtr(c"Timer expired".as_ptr().cast::<u8>());
-    table[63] = SyncPtr(c"Out of streams resources".as_ptr().cast::<u8>());
-    // 64-66: unused in our set
-    table[67] = SyncPtr(c"Link has been severed".as_ptr().cast::<u8>());
-    // 68-70: unused in our set
-    table[71] = SyncPtr(c"Protocol error".as_ptr().cast::<u8>());
-    table[72] = SyncPtr(c"Multihop attempted".as_ptr().cast::<u8>());
-    // 73: unused
-    table[74] = SyncPtr(c"Bad message".as_ptr().cast::<u8>());
-    table[75] = SyncPtr(
-        c"Value too large for defined data type"
-            .as_ptr()
-            .cast::<u8>(),
-    );
-    // 76-83: unused in our set
-    table[84] = SyncPtr(
-        c"Invalid or incomplete multibyte or wide character"
-            .as_ptr()
-            .cast::<u8>(),
-    );
-    // 85-87: unused
-    table[88] = SyncPtr(c"Socket operation on non-socket".as_ptr().cast::<u8>());
-    table[89] = SyncPtr(c"Destination address required".as_ptr().cast::<u8>());
-    table[90] = SyncPtr(c"Message too long".as_ptr().cast::<u8>());
-    table[91] = SyncPtr(c"Protocol wrong type for socket".as_ptr().cast::<u8>());
-    table[92] = SyncPtr(c"Protocol not available".as_ptr().cast::<u8>());
-    table[93] = SyncPtr(c"Protocol not supported".as_ptr().cast::<u8>());
-    // 94: ESOCKTNOSUPPORT
-    table[95] = SyncPtr(c"Operation not supported".as_ptr().cast::<u8>());
-    // 96: EPFNOSUPPORT
-    table[97] = SyncPtr(
-        c"Address family not supported by protocol"
-            .as_ptr()
-            .cast::<u8>(),
-    );
-    table[98] = SyncPtr(c"Address already in use".as_ptr().cast::<u8>());
-    table[99] = SyncPtr(c"Cannot assign requested address".as_ptr().cast::<u8>());
-    table[100] = SyncPtr(c"Network is down".as_ptr().cast::<u8>());
-    table[101] = SyncPtr(c"Network is unreachable".as_ptr().cast::<u8>());
-    table[102] = SyncPtr(c"Network dropped connection on reset".as_ptr().cast::<u8>());
-    table[103] = SyncPtr(c"Software caused connection abort".as_ptr().cast::<u8>());
-    table[104] = SyncPtr(c"Connection reset by peer".as_ptr().cast::<u8>());
-    table[105] = SyncPtr(c"No buffer space available".as_ptr().cast::<u8>());
-    table[106] = SyncPtr(
-        c"Transport endpoint is already connected"
-            .as_ptr()
-            .cast::<u8>(),
-    );
-    table[107] = SyncPtr(c"Transport endpoint is not connected".as_ptr().cast::<u8>());
-    table[108] = SyncPtr(
-        c"Cannot send after transport endpoint shutdown"
-            .as_ptr()
-            .cast::<u8>(),
-    );
-    // 109: ETOOMANYREFS
-    table[110] = SyncPtr(c"Connection timed out".as_ptr().cast::<u8>());
-    table[111] = SyncPtr(c"Connection refused".as_ptr().cast::<u8>());
-    table[112] = SyncPtr(c"Host is down".as_ptr().cast::<u8>());
-    table[113] = SyncPtr(c"No route to host".as_ptr().cast::<u8>());
-    table[114] = SyncPtr(c"Operation already in progress".as_ptr().cast::<u8>());
-    table[115] = SyncPtr(c"Operation now in progress".as_ptr().cast::<u8>());
-    table[116] = SyncPtr(c"Stale file handle".as_ptr().cast::<u8>());
-    // 117-122: unused in our set
-    table[123] = SyncPtr(c"No medium found".as_ptr().cast::<u8>());
-    // 124: EMEDIUMTYPE
-    table[125] = SyncPtr(c"Operation canceled".as_ptr().cast::<u8>());
-    // 126-129: unused in our set
-    table[130] = SyncPtr(c"Owner died".as_ptr().cast::<u8>());
-    table[131] = SyncPtr(c"State not recoverable".as_ptr().cast::<u8>());
-
+// The index is evaluated when this is compiled, where one out of bounds
+// fails the build rather than panicking; `n < 134` besides.
+#[allow(clippy::indexing_slicing)]
+pub static sys_errlist: [SyncPtr; 134] = {
+    const UNKNOWN: SyncPtr = SyncPtr(c"Unknown error".as_ptr().cast::<u8>());
+    let mut table = [UNKNOWN; 134];
+    let mut n = 0;
+    while n < 134 {
+        if let Some(text) = error_text(n as i32) {
+            table[n] = SyncPtr(text.as_ptr().cast::<u8>());
+        }
+        n += 1;
+    }
     table
 };
 
@@ -3213,16 +3299,16 @@ mod tests {
         let p = strerror(9999);
         let len = unsafe { strlen(p) };
         let msg = unsafe { core::slice::from_raw_parts(p, len) };
-        assert_eq!(msg, b"Unknown error");
+        assert_eq!(msg, b"Unknown error 9999", "glibc's text");
     }
 
     #[test]
     fn test_strerror_negative() {
-        // Negative codes should also return "Unknown error".
+        // Negative codes are unknown ones too, and glibc says which.
         let p = strerror(-1);
         let len = unsafe { strlen(p) };
         let msg = unsafe { core::slice::from_raw_parts(p, len) };
-        assert_eq!(msg, b"Unknown error");
+        assert_eq!(msg, b"Unknown error -1");
     }
 
     // -----------------------------------------------------------------------
@@ -3471,7 +3557,7 @@ mod tests {
     #[test]
     fn test_sys_nerr_value() {
         // Should be one past the highest defined errno (131 → 132).
-        assert_eq!(sys_nerr, 132);
+        assert_eq!(sys_nerr, 134);
     }
 
     // -----------------------------------------------------------------------
@@ -4422,6 +4508,106 @@ mod tests {
             __strncat_chk(buf.as_mut_ptr(), b"!!!\0".as_ptr(), 1, UNKNOWN);
         }
         assert_eq!(&buf[..11], b"hello you!\0");
+    }
+
+    /// glibc 2.39's texts and names for every number from -2 to 139
+    /// (`strname_oracle.txt`), to the letter: `strerror`'s -- "Unknown error
+    /// N" for a number no error has -- and `strerrorname_np`'s and
+    /// `strerrordesc_np`'s, NULL included.
+    #[test]
+    fn error_names_and_texts_are_glibcs() {
+        use core::ffi::CStr;
+        const ORACLE: &str = include_str!("strname_oracle.txt");
+        let text = |p: *const u8| -> Option<String> {
+            // SAFETY: each returns NULL or a static NUL-terminated string.
+            (!p.is_null()).then(|| {
+                unsafe { CStr::from_ptr(p.cast()) }
+                    .to_str()
+                    .unwrap()
+                    .to_string()
+            })
+        };
+        let mut seen = 0;
+        for line in ORACLE.lines().filter(|l| !l.starts_with('#')) {
+            let (lhs, want) = line.split_once(" = ").unwrap();
+            let (func, n) = lhs.split_once(' ').unwrap();
+            let n: i32 = n.parse().unwrap();
+            let want = (want != "NULL").then(|| want.trim_matches('"').to_string());
+            let got = match func {
+                "strerror" => text(strerror(n)),
+                "strerrorname_np" => text(strerrorname_np(n)),
+                "strerrordesc_np" => text(strerrordesc_np(n)),
+                _ => continue,
+            };
+            assert_eq!(got, want, "{func}({n})");
+            seen += 1;
+        }
+        assert_eq!(seen, 3 * 142, "the oracle's error lines");
+    }
+
+    /// `memfrob` exclusive-ors with 42 and so undoes itself; zero bytes do
+    /// nothing.
+    #[test]
+    fn memfrob_is_its_own_inverse() {
+        let mut buf = *b"Hello, world\0";
+        let p = buf.as_mut_ptr().cast::<core::ffi::c_void>();
+        // SAFETY: 12 of the buffer's 13 bytes.
+        assert_eq!(unsafe { memfrob(p, 12) }, p);
+        assert_eq!(buf[0], b'H' ^ 42);
+        assert_eq!(buf[12], 0, "past n: untouched");
+        // SAFETY: as above.
+        unsafe { memfrob(p, 12) };
+        assert_eq!(&buf, b"Hello, world\0");
+        // SAFETY: no bytes.
+        assert!(unsafe { memfrob(core::ptr::null_mut(), 0) }.is_null());
+    }
+
+    /// `strfry` keeps the bytes and the length, moves them, and leaves NULL,
+    /// the empty string and a single byte alone.
+    #[test]
+    fn strfry_permutes() {
+        let mut s = *b"abcdefghijklmnopqrstuvwxyz\0";
+        let mut moved = false;
+        for _ in 0..8 {
+            // SAFETY: a writable NUL-terminated string.
+            assert_eq!(unsafe { strfry(s.as_mut_ptr()) }, s.as_mut_ptr());
+            let mut sorted = s[..26].to_vec();
+            sorted.sort_unstable();
+            assert_eq!(&sorted, b"abcdefghijklmnopqrstuvwxyz", "the same bytes");
+            assert_eq!(s[26], 0);
+            moved |= &s[..26] != b"abcdefghijklmnopqrstuvwxyz";
+        }
+        assert!(moved, "eight shuffles of 26 letters all left them in order");
+        let mut one = *b"x\0";
+        // SAFETY: as above.
+        unsafe { strfry(one.as_mut_ptr()) };
+        assert_eq!(&one, b"x\0");
+        // SAFETY: NULL is allowed.
+        assert!(unsafe { strfry(core::ptr::null_mut()) }.is_null());
+    }
+
+    /// `sys_errlist` is `strerror`'s table: the same pointer for every
+    /// error, "Unknown error" in the two gaps, and `sys_nerr` its length.
+    #[test]
+    fn sys_errlist_is_strerrors_table() {
+        assert_eq!(sys_errlist.len(), usize::try_from(sys_nerr).unwrap());
+        for (n, entry) in sys_errlist.iter().enumerate() {
+            let n = i32::try_from(n).unwrap();
+            if error_text(n).is_some() {
+                assert_eq!(entry.0, strerror(n), "sys_errlist[{n}]");
+            } else {
+                // SAFETY: a static NUL-terminated string.
+                let t = unsafe { core::ffi::CStr::from_ptr(entry.0.cast()) };
+                assert_eq!(t.to_bytes(), b"Unknown error", "sys_errlist[{n}]");
+            }
+        }
+        // SAFETY: as above.
+        let fifteen = unsafe { core::ffi::CStr::from_ptr(sys_errlist[15].0.cast()) };
+        assert_eq!(
+            fifteen.to_bytes(),
+            b"Block device required",
+            "it said Unknown error"
+        );
     }
 }
 

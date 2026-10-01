@@ -17,7 +17,7 @@
 # scanned roots. If a number rises in a commit that also edits code,
 # the code is what raised it.
 #
-# It has happened three times.
+# It has happened four times.
 #
 #   2026-08-23  Calls rustfmt had wrapped onto two lines were invisible.
 #               71 sites.
@@ -31,11 +31,20 @@
 #               because efibootmgr was given three diagnostics of one
 #               shape in one commit and this gate refused one of them.
 #               507 sites, and the ledger had been at ZERO.
+#   2026-09-25  ... and it still only half did. The joiner that
+#               reassembles a wrapped call kept its own list of
+#               macros, `eprintln!` and `println!`, so the widening
+#               above reached only the `format!` calls short enough
+#               to stay on one line. Found because numfmt had four
+#               messages of one shape and the gate refused the one
+#               that fitted. 94 sites, and the ledger had been at
+#               ZERO again.
 #
-# That last line is the one to read twice. This file said the tree was
-# clean the day before, and the tree was not clean; it was unexamined in
-# a macro nobody had thought to look in. An empty ratchet is a claim
-# about the detector as much as about the code.
+# Those two ZEROs are the lines to read twice. Both times this file said
+# the tree was clean the day before, and the tree was not clean; it was
+# unexamined -- first in a macro nobody had thought to look in, then in
+# the half of that macro rustfmt had wrapped. An empty ratchet is a
+# claim about the detector as much as about the code.
 #
 # 0 sites across 0 files.
 

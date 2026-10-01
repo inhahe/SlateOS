@@ -1,30 +1,24 @@
-//! Slate OS Pipe/File Management Tools
+//! Slate OS pv -- monitor data flowing through a pipe (pipe viewer).
 //!
-//! Multi-personality binary combining four file/pipe utilities, selected via
-//! argv\[0\]:
+//! This was a multi-personality binary chosen by argv\[0\], and is `pv` alone
+//! now. `truncate` and `shred` were personalities here too, which no link
+//! ever reached; each is `userspace/coreutils`'s own bin since 2026-09-25, a
+//! port of GNU's checked against it -- `shred`'s writing the very bytes GNU's
+//! does from the same `--random-source`, where this one wrote xorshift output
+//! under a help text that promised `/dev/urandom` -- and `coreutils` is the
+//! one home for such a name, the duplicate going (design-decisions.md §1005).
+//! With one mode left, the dispatch went too.
 //!
-//! - **pv** (default) -- monitor data flowing through a pipe (pipe viewer)
-//! - **truncate** -- shrink or extend file size
-//! - **shred** -- overwrite files to hinder recovery
-//!
-//! # Examples
+//! # Example
 //!
 //! ```text
-//! # Pipe viewer
 //! pv -s 100M bigfile.iso | gzip > bigfile.iso.gz
-//!
-//! # Truncate
-//! truncate -s 10M sparse.img
-//!
-//! # Shred
-//! shred -vuz secret.key
 //! ```
 
-use quoting::{quoteaf_os, quotef_os};
+use quoting::quoteaf_os;
 use std::env;
-use std::fs::{self, File, OpenOptions};
-use std::io::{self, Read, Seek, SeekFrom, Write};
-use std::path::Path;
+use std::fs::File;
+use std::io::{self, Read, Write};
 use std::process;
 use std::time::Instant;
 
@@ -35,40 +29,11 @@ use std::time::Instant;
 /// Default read buffer size for pv (128 KiB).
 const DEFAULT_BUFFER_SIZE: usize = 128 * 1024;
 
-/// Default number of shred passes.
-const DEFAULT_SHRED_PASSES: u32 = 3;
-
 /// Progress update interval in milliseconds.
 const PROGRESS_INTERVAL_MS: u128 = 100;
 
 /// Width allocated for the progress bar (excluding brackets).
 const DEFAULT_BAR_WIDTH: usize = 25;
-
-// ============================================================================
-// Personality detection
-// ============================================================================
-
-/// Which tool personality we are running as.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Personality {
-    Pv,
-    Truncate,
-    Shred,
-}
-
-/// Detect personality from the basename of argv\[0\].
-fn detect_personality(argv0: &str) -> Personality {
-    let basename = Path::new(argv0)
-        .file_stem()
-        .and_then(|s| s.to_str())
-        .unwrap_or(argv0);
-
-    match basename {
-        "truncate" => Personality::Truncate,
-        "shred" => Personality::Shred,
-        _ => Personality::Pv,
-    }
-}
 
 // ============================================================================
 // Size parsing and formatting helpers
@@ -98,24 +63,6 @@ fn parse_size(s: &str) -> Result<u64, String> {
 
     base.checked_mul(multiplier)
         .ok_or_else(|| format!("size overflow: {s}"))
-}
-
-/// Parse a truncate-style size with optional prefix (+, -, <, >, /, %).
-///
-/// Returns `(prefix_char_or_None, byte_value)`.
-fn parse_truncate_size(s: &str) -> Result<(Option<char>, u64), String> {
-    if s.is_empty() {
-        return Err("empty size specification".into());
-    }
-
-    let first = s.as_bytes()[0];
-    let (prefix, rest) = match first {
-        b'+' | b'-' | b'<' | b'>' | b'/' | b'%' => (Some(first as char), &s[1..]),
-        _ => (None, s),
-    };
-
-    let size = parse_size(rest)?;
-    Ok((prefix, size))
 }
 
 /// Split a string like "100M" into ("100", "M").
@@ -537,449 +484,13 @@ fn run_pv(args: &[String]) -> Result<(), String> {
 }
 
 // ============================================================================
-// truncate mode
-// ============================================================================
-
-/// Configuration for truncate mode.
-struct TruncateConfig {
-    size_spec: Option<String>,
-    no_create: bool,
-    reference: Option<String>,
-    files: Vec<String>,
-}
-
-fn parse_truncate_args(args: &[String]) -> Result<TruncateConfig, String> {
-    let mut cfg = TruncateConfig {
-        size_spec: None,
-        no_create: false,
-        reference: None,
-        files: Vec::new(),
-    };
-    let mut i = 0;
-
-    while i < args.len() {
-        let arg = &args[i];
-        if arg == "--help" || arg == "-h" {
-            print_truncate_usage();
-            process::exit(0);
-        } else if arg == "-c" || arg == "--no-create" {
-            cfg.no_create = true;
-        } else if arg == "-s" || arg == "--size" {
-            i += 1;
-            cfg.size_spec = Some(args.get(i).ok_or("-s requires a SIZE argument")?.clone());
-        } else if let Some(rest) = arg.strip_prefix("--size=") {
-            cfg.size_spec = Some(rest.to_string());
-        } else if arg == "-r" || arg == "--reference" {
-            i += 1;
-            cfg.reference = Some(args.get(i).ok_or("-r requires a FILE argument")?.clone());
-        } else if let Some(rest) = arg.strip_prefix("--reference=") {
-            cfg.reference = Some(rest.to_string());
-        } else if arg.starts_with('-') {
-            return Err(format!("unknown option: {arg}"));
-        } else {
-            cfg.files.push(arg.clone());
-        }
-        i += 1;
-    }
-
-    if cfg.files.is_empty() {
-        return Err("no files specified".into());
-    }
-    if cfg.size_spec.is_none() && cfg.reference.is_none() {
-        return Err("must specify either -s SIZE or -r REFERENCE".into());
-    }
-
-    Ok(cfg)
-}
-
-fn print_truncate_usage() {
-    eprintln!("Usage: truncate -s SIZE FILE...");
-    eprintln!("       truncate -r REFERENCE FILE...");
-    eprintln!("Shrink or extend the size of each FILE.");
-    eprintln!();
-    eprintln!("Options:");
-    eprintln!("  -s SIZE, --size=SIZE     Set or adjust file size");
-    eprintln!("    Prefix: + extend, - shrink, < at most, > at least,");
-    eprintln!("            / round down, % round up (to multiple of SIZE)");
-    eprintln!("    Suffix: K (1024), M, G, T, P, E");
-    eprintln!("  -c, --no-create          Don't create files that don't exist");
-    eprintln!("  -r FILE, --reference=FILE  Use reference file's size");
-    eprintln!("  -h, --help               Show this help");
-}
-
-/// Compute the new file size given the current size and the size spec.
-fn compute_truncate_size(current: u64, prefix: Option<char>, value: u64) -> Result<u64, String> {
-    match prefix {
-        None => Ok(value),
-        Some('+') => current
-            .checked_add(value)
-            .ok_or_else(|| "size overflow".to_string()),
-        Some('-') => Ok(current.saturating_sub(value)),
-        Some('<') => Ok(current.min(value)),
-        Some('>') => Ok(current.max(value)),
-        Some('/') => {
-            // Round down to nearest multiple of value
-            if value == 0 {
-                return Err("cannot round to multiple of zero".into());
-            }
-            Ok((current / value) * value)
-        }
-        Some('%') => {
-            // Round up to nearest multiple of value
-            if value == 0 {
-                return Err("cannot round to multiple of zero".into());
-            }
-            let rem = current % value;
-            if rem == 0 {
-                Ok(current)
-            } else {
-                current
-                    .checked_add(value - rem)
-                    .ok_or_else(|| "size overflow".to_string())
-            }
-        }
-        Some(c) => Err(format!("unknown size prefix {}", quoteaf_os(c.to_string()))),
-    }
-}
-
-fn run_truncate(args: &[String]) -> Result<(), String> {
-    let cfg = parse_truncate_args(args)?;
-
-    // Determine the base size value from -r or -s.
-    let (prefix, base_size) = if let Some(ref refpath) = cfg.reference {
-        let meta = fs::metadata(refpath)
-            .map_err(|e| format!("cannot stat reference {}: {}", quoteaf_os(refpath), e))?;
-        (None, meta.len())
-    } else {
-        let spec = cfg.size_spec.as_ref().expect("validated above");
-        parse_truncate_size(spec)?
-    };
-
-    for path in &cfg.files {
-        let exists = Path::new(path).exists();
-
-        if !exists && cfg.no_create {
-            continue;
-        }
-
-        // Open or create the file.
-        let file = OpenOptions::new()
-            .write(true)
-            .create(!cfg.no_create)
-            .open(path)
-            .map_err(|e| format!("cannot open {}: {e}", quoteaf_os(path)))?;
-
-        let current_len = file
-            .metadata()
-            .map_err(|e| format!("cannot stat {}: {e}", quoteaf_os(path)))?
-            .len();
-
-        let new_size = compute_truncate_size(current_len, prefix, base_size)?;
-
-        file.set_len(new_size)
-            .map_err(|e| format!("cannot truncate {} to {new_size}: {e}", quoteaf_os(path)))?;
-    }
-
-    Ok(())
-}
-
-// ============================================================================
-// shred mode
-// ============================================================================
-
-/// Configuration for shred mode.
-struct ShredConfig {
-    iterations: u32,
-    add_zero_pass: bool,
-    remove_after: bool,
-    overwrite_size: Option<u64>,
-    verbose: bool,
-    force: bool,
-    files: Vec<String>,
-}
-
-impl Default for ShredConfig {
-    fn default() -> Self {
-        Self {
-            iterations: DEFAULT_SHRED_PASSES,
-            add_zero_pass: false,
-            remove_after: false,
-            overwrite_size: None,
-            verbose: false,
-            force: false,
-            files: Vec::new(),
-        }
-    }
-}
-
-fn parse_shred_args(args: &[String]) -> Result<ShredConfig, String> {
-    let mut cfg = ShredConfig::default();
-    let mut i = 0;
-
-    while i < args.len() {
-        let arg = &args[i];
-        if arg == "--help" || arg == "-h" {
-            print_shred_usage();
-            process::exit(0);
-        } else if arg == "-z" || arg == "--zero" {
-            cfg.add_zero_pass = true;
-        } else if arg == "-u" || arg == "--remove" {
-            cfg.remove_after = true;
-        } else if arg == "-v" || arg == "--verbose" {
-            cfg.verbose = true;
-        } else if arg == "-f" || arg == "--force" {
-            cfg.force = true;
-        } else if arg == "-n" || arg == "--iterations" {
-            i += 1;
-            let val = args.get(i).ok_or("-n requires a COUNT argument")?;
-            cfg.iterations = val
-                .parse()
-                .map_err(|e| format!("invalid iteration count {}: {e}", quoteaf_os(val)))?;
-        } else if let Some(rest) = arg.strip_prefix("--iterations=") {
-            cfg.iterations = rest
-                .parse()
-                .map_err(|e| format!("invalid iteration count {}: {e}", quoteaf_os(rest)))?;
-        } else if arg == "-s" || arg == "--size" {
-            i += 1;
-            let val = args.get(i).ok_or("-s requires a SIZE argument")?;
-            cfg.overwrite_size = Some(parse_size(val)?);
-        } else if let Some(rest) = arg.strip_prefix("--size=") {
-            cfg.overwrite_size = Some(parse_size(rest)?);
-        } else if let Some(rest) = arg.strip_prefix("--random-source=") {
-            // REFUSED, not ignored, and the difference matters more here than
-            // anywhere else this flag shape has come up: shred destroys the
-            // file. A user who asked for a specific source of random bytes and
-            // silently got a different one has already lost the data by the
-            // time they can notice. Failing before the first pass is the only
-            // answer that leaves them a choice.
-            //
-            // It was accepted and dropped: the field was parsed, stored, and
-            // read by nothing, while the passes came from the internal
-            // xorshift64 below.
-            return Err(format!(
-                "--random-source={rest} is not implemented: this build \
-generates pass content from an internal deterministic PRNG, not from a file. \
-See known-issues.md TD-B-SHRED-RANDOM-SOURCE-IS-REFUSED-NOT-HONOURED."
-            ));
-        } else if arg.starts_with('-') {
-            return Err(format!("unknown option: {arg}"));
-        } else {
-            cfg.files.push(arg.clone());
-        }
-        i += 1;
-    }
-
-    if cfg.files.is_empty() {
-        return Err("no files specified".into());
-    }
-
-    Ok(cfg)
-}
-
-fn print_shred_usage() {
-    eprintln!("Usage: shred [OPTIONS] FILE...");
-    eprintln!("Overwrite files to make recovery difficult.");
-    eprintln!();
-    eprintln!("Options:");
-    eprintln!("  -n N, --iterations=N      Overwrite N times (default 3)");
-    eprintln!("  -z, --zero                Add final zero-fill pass");
-    eprintln!("  -u, --remove              Truncate and remove after overwriting");
-    eprintln!("  -s SIZE, --size=SIZE      Overwrite only first SIZE bytes");
-    eprintln!("  -v, --verbose             Show progress");
-    eprintln!("  -f, --force               Change permissions to allow writing");
-    // The old line advertised "(default /dev/urandom)". Nothing in this
-    // program opens /dev/urandom; `generate_shred_pattern` uses xorshift64,
-    // deliberately, so that a shred pass does not depend on a device node
-    // existing. The default was as false as the option was inert.
-    eprintln!("  --random-source=FILE      Not implemented; passes use an internal PRNG");
-    eprintln!("  -h, --help                Show this help");
-}
-
-/// Simple deterministic PRNG for generating shred patterns.
-///
-/// We use xorshift64 so we do not depend on /dev/urandom being available during
-/// tests, and so the shred pass content is reproducible per-seed.
-struct XorShift64 {
-    state: u64,
-}
-
-impl XorShift64 {
-    fn new(seed: u64) -> Self {
-        Self {
-            state: if seed == 0 {
-                0xDEAD_BEEF_CAFE_BABE
-            } else {
-                seed
-            },
-        }
-    }
-
-    fn next_u64(&mut self) -> u64 {
-        let mut x = self.state;
-        x ^= x << 13;
-        x ^= x >> 7;
-        x ^= x << 17;
-        self.state = x;
-        x
-    }
-
-    fn fill_bytes(&mut self, buf: &mut [u8]) {
-        let mut pos = 0;
-        while pos < buf.len() {
-            let val = self.next_u64();
-            let bytes = val.to_le_bytes();
-            let remaining = buf.len() - pos;
-            let copy_len = remaining.min(8);
-            buf[pos..pos + copy_len].copy_from_slice(&bytes[..copy_len]);
-            pos += copy_len;
-        }
-    }
-}
-
-/// Generate a shred pattern buffer for the given pass number.
-///
-/// - Even passes: random data
-/// - Odd passes: bitwise complement of the previous pass
-///
-/// The `seed` should incorporate pass number and file identity.
-fn generate_shred_pattern(buf: &mut [u8], pass: u32, seed: u64) {
-    if pass.is_multiple_of(2) {
-        // Random pass
-        let mut rng = XorShift64::new(seed.wrapping_add(pass as u64));
-        rng.fill_bytes(buf);
-    } else {
-        // Complement of a random pass
-        let mut rng = XorShift64::new(seed.wrapping_add(pass.wrapping_sub(1) as u64));
-        rng.fill_bytes(buf);
-        for b in buf.iter_mut() {
-            *b = !*b;
-        }
-    }
-}
-
-fn run_shred(args: &[String]) -> Result<(), String> {
-    let cfg = parse_shred_args(args)?;
-
-    for path in &cfg.files {
-        // If force, try to make the file writable.
-        if cfg.force
-            && let Ok(meta) = fs::metadata(path)
-        {
-            let mut perms = meta.permissions();
-            #[allow(clippy::permissions_set_readonly_false)]
-            perms.set_readonly(false);
-            // Discarded deliberately: this is --force's best effort to clear a
-            // read-only bit, and it is not the operation the caller asked for.
-            // If it fails, the open-for-write below fails and IS reported,
-            // naming the file. Reporting here as well would turn one failure
-            // into two messages about the same file.
-            let _ = fs::set_permissions(path, perms);
-        }
-
-        let file_size = fs::metadata(path)
-            .map_err(|e| format!("cannot stat {}: {e}", quoteaf_os(path)))?
-            .len();
-
-        let shred_size = cfg.overwrite_size.unwrap_or(file_size);
-
-        // Open file for writing.
-        let mut file = OpenOptions::new()
-            .write(true)
-            .open(path)
-            .map_err(|e| format!("cannot open {} for writing: {e}", quoteaf_os(path)))?;
-
-        // Use the file path hash as a seed component for reproducibility in tests.
-        let path_hash = path
-            .bytes()
-            .fold(0u64, |acc, b| acc.wrapping_mul(31).wrapping_add(b as u64));
-
-        let total_passes = if cfg.add_zero_pass {
-            cfg.iterations + 1
-        } else {
-            cfg.iterations
-        };
-
-        let mut buf = vec![0u8; 65536.min(shred_size as usize)];
-
-        for pass in 0..total_passes {
-            if cfg.verbose {
-                let pass_label = if cfg.add_zero_pass && pass == total_passes - 1 {
-                    "zero".to_string()
-                } else {
-                    format!("{}/{}", pass + 1, cfg.iterations)
-                };
-                eprintln!("shred: {}: pass {pass_label}", quotef_os(path));
-            }
-
-            file.seek(SeekFrom::Start(0))
-                .map_err(|e| format!("seek error on {}: {e}", quoteaf_os(path)))?;
-
-            let mut remaining = shred_size;
-            while remaining > 0 {
-                let chunk = (remaining as usize).min(buf.len());
-                let write_buf = &mut buf[..chunk];
-
-                if cfg.add_zero_pass && pass == total_passes - 1 {
-                    // Zero fill pass
-                    write_buf.fill(0);
-                } else {
-                    generate_shred_pattern(write_buf, pass, path_hash);
-                }
-
-                file.write_all(write_buf)
-                    .map_err(|e| format!("write error on {}: {e}", quoteaf_os(path)))?;
-                remaining -= chunk as u64;
-            }
-
-            file.flush()
-                .map_err(|e| format!("flush error on {}: {e}", quoteaf_os(path)))?;
-
-            // Sync to disk
-            file.sync_all()
-                .map_err(|e| format!("sync error on {}: {e}", quoteaf_os(path)))?;
-        }
-
-        // Remove if requested.
-        if cfg.remove_after {
-            // Truncate to zero first.
-            file.set_len(0)
-                .map_err(|e| format!("truncate error on {}: {e}", quoteaf_os(path)))?;
-            drop(file);
-            fs::remove_file(path)
-                .map_err(|e| format!("cannot remove {}: {e}", quoteaf_os(path)))?;
-            if cfg.verbose {
-                eprintln!("shred: {}: removed", quotef_os(path));
-            }
-        }
-    }
-
-    Ok(())
-}
-
-// ============================================================================
 // Main entry point
 // ============================================================================
 
 fn main() {
-    let args: Vec<String> = env::args().collect();
-    let argv0 = args.first().map(String::as_str).unwrap_or("pv");
-    let personality = detect_personality(argv0);
-    let tool_args: Vec<String> = args.into_iter().skip(1).collect();
-
-    let tool_name = match personality {
-        Personality::Pv => "pv",
-        Personality::Truncate => "truncate",
-        Personality::Shred => "shred",
-    };
-
-    let result = match personality {
-        Personality::Pv => run_pv(&tool_args),
-        Personality::Truncate => run_truncate(&tool_args),
-        Personality::Shred => run_shred(&tool_args),
-    };
-
-    if let Err(e) = result {
-        eprintln!("{tool_name}: {e}");
+    let tool_args: Vec<String> = env::args().skip(1).collect();
+    if let Err(e) = run_pv(&tool_args) {
+        eprintln!("pv: {e}");
         process::exit(1);
     }
 }
@@ -991,51 +502,6 @@ fn main() {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    // -- Personality detection ------------------------------------------------
-
-    #[test]
-    fn test_personality_pv_default() {
-        assert_eq!(detect_personality("pv"), Personality::Pv);
-    }
-
-    #[test]
-    fn test_personality_pv_with_path() {
-        assert_eq!(detect_personality("/usr/bin/pv"), Personality::Pv);
-    }
-
-    #[test]
-    fn test_personality_pv_relative_path() {
-        assert_eq!(detect_personality("./pv"), Personality::Pv);
-    }
-
-    #[test]
-    fn test_personality_unknown_defaults_pv() {
-        assert_eq!(detect_personality("something_else"), Personality::Pv);
-    }
-
-    #[test]
-    fn test_personality_truncate() {
-        assert_eq!(detect_personality("truncate"), Personality::Truncate);
-    }
-
-    #[test]
-    fn test_personality_truncate_with_path() {
-        assert_eq!(
-            detect_personality("/usr/bin/truncate"),
-            Personality::Truncate
-        );
-    }
-
-    #[test]
-    fn test_personality_shred() {
-        assert_eq!(detect_personality("shred"), Personality::Shred);
-    }
-
-    #[test]
-    fn test_personality_shred_with_path() {
-        assert_eq!(detect_personality("/sbin/shred"), Personality::Shred);
-    }
 
     #[test]
     fn test_parse_size_bare_number() {
@@ -1095,128 +561,6 @@ mod tests {
     #[test]
     fn test_parse_size_unknown_suffix() {
         assert!(parse_size("10X").is_err());
-    }
-
-    // -- Truncate size parsing ------------------------------------------------
-
-    #[test]
-    fn test_truncate_size_no_prefix() {
-        let (prefix, size) = parse_truncate_size("100K").unwrap();
-        assert_eq!(prefix, None);
-        assert_eq!(size, 102400);
-    }
-
-    #[test]
-    fn test_truncate_size_extend() {
-        let (prefix, size) = parse_truncate_size("+50M").unwrap();
-        assert_eq!(prefix, Some('+'));
-        assert_eq!(size, 50 * 1024 * 1024);
-    }
-
-    #[test]
-    fn test_truncate_size_shrink() {
-        let (prefix, size) = parse_truncate_size("-1K").unwrap();
-        assert_eq!(prefix, Some('-'));
-        assert_eq!(size, 1024);
-    }
-
-    #[test]
-    fn test_truncate_size_at_most() {
-        let (prefix, size) = parse_truncate_size("<1G").unwrap();
-        assert_eq!(prefix, Some('<'));
-        assert_eq!(size, 1024 * 1024 * 1024);
-    }
-
-    #[test]
-    fn test_truncate_size_at_least() {
-        let (prefix, size) = parse_truncate_size(">500").unwrap();
-        assert_eq!(prefix, Some('>'));
-        assert_eq!(size, 500);
-    }
-
-    #[test]
-    fn test_truncate_size_round_down() {
-        let (prefix, size) = parse_truncate_size("/4K").unwrap();
-        assert_eq!(prefix, Some('/'));
-        assert_eq!(size, 4096);
-    }
-
-    #[test]
-    fn test_truncate_size_round_up() {
-        let (prefix, size) = parse_truncate_size("%4K").unwrap();
-        assert_eq!(prefix, Some('%'));
-        assert_eq!(size, 4096);
-    }
-
-    // -- Truncate size computation --------------------------------------------
-
-    #[test]
-    fn test_compute_truncate_absolute() {
-        assert_eq!(compute_truncate_size(500, None, 1000).unwrap(), 1000);
-    }
-
-    #[test]
-    fn test_compute_truncate_extend() {
-        assert_eq!(compute_truncate_size(500, Some('+'), 200).unwrap(), 700);
-    }
-
-    #[test]
-    fn test_compute_truncate_shrink() {
-        assert_eq!(compute_truncate_size(500, Some('-'), 200).unwrap(), 300);
-    }
-
-    #[test]
-    fn test_compute_truncate_shrink_underflow() {
-        // Saturating subtraction: 100 - 500 => 0
-        assert_eq!(compute_truncate_size(100, Some('-'), 500).unwrap(), 0);
-    }
-
-    #[test]
-    fn test_compute_truncate_at_most_smaller() {
-        assert_eq!(compute_truncate_size(300, Some('<'), 500).unwrap(), 300);
-    }
-
-    #[test]
-    fn test_compute_truncate_at_most_larger() {
-        assert_eq!(compute_truncate_size(800, Some('<'), 500).unwrap(), 500);
-    }
-
-    #[test]
-    fn test_compute_truncate_at_least_smaller() {
-        assert_eq!(compute_truncate_size(300, Some('>'), 500).unwrap(), 500);
-    }
-
-    #[test]
-    fn test_compute_truncate_at_least_larger() {
-        assert_eq!(compute_truncate_size(800, Some('>'), 500).unwrap(), 800);
-    }
-
-    #[test]
-    fn test_compute_truncate_round_down() {
-        // 1000 rounded down to nearest multiple of 300 => 900
-        assert_eq!(compute_truncate_size(1000, Some('/'), 300).unwrap(), 900);
-    }
-
-    #[test]
-    fn test_compute_truncate_round_down_exact() {
-        assert_eq!(compute_truncate_size(900, Some('/'), 300).unwrap(), 900);
-    }
-
-    #[test]
-    fn test_compute_truncate_round_up() {
-        // 1000 rounded up to nearest multiple of 300 => 1200
-        assert_eq!(compute_truncate_size(1000, Some('%'), 300).unwrap(), 1200);
-    }
-
-    #[test]
-    fn test_compute_truncate_round_up_exact() {
-        assert_eq!(compute_truncate_size(900, Some('%'), 300).unwrap(), 900);
-    }
-
-    #[test]
-    fn test_compute_truncate_round_zero_error() {
-        assert!(compute_truncate_size(100, Some('/'), 0).is_err());
-        assert!(compute_truncate_size(100, Some('%'), 0).is_err());
     }
 
     // -- Human-readable size formatting ---------------------------------------
@@ -1366,70 +710,6 @@ mod tests {
         assert!(bar.contains("100%"));
     }
 
-    // -- Signal name/number mapping -------------------------------------------
-
-    #[test]
-    fn test_shred_pattern_random_not_zero() {
-        let mut buf = vec![0u8; 256];
-        generate_shred_pattern(&mut buf, 0, 42);
-        // Should not be all zeros (extremely unlikely with a proper RNG)
-        assert!(buf.iter().any(|&b| b != 0));
-    }
-
-    #[test]
-    fn test_shred_pattern_complement() {
-        let mut buf_even = vec![0u8; 256];
-        let mut buf_odd = vec![0u8; 256];
-        generate_shred_pattern(&mut buf_even, 0, 42);
-        generate_shred_pattern(&mut buf_odd, 1, 42);
-        // Odd pass should be complement of even pass
-        for (a, b) in buf_even.iter().zip(buf_odd.iter()) {
-            assert_eq!(*a, !*b);
-        }
-    }
-
-    #[test]
-    fn test_shred_pattern_deterministic() {
-        let mut buf1 = vec![0u8; 128];
-        let mut buf2 = vec![0u8; 128];
-        generate_shred_pattern(&mut buf1, 0, 99);
-        generate_shred_pattern(&mut buf2, 0, 99);
-        assert_eq!(buf1, buf2);
-    }
-
-    #[test]
-    fn test_shred_pattern_different_seeds() {
-        let mut buf1 = vec![0u8; 128];
-        let mut buf2 = vec![0u8; 128];
-        generate_shred_pattern(&mut buf1, 0, 1);
-        generate_shred_pattern(&mut buf2, 0, 2);
-        assert_ne!(buf1, buf2);
-    }
-
-    // -- XorShift64 PRNG -----------------------------------------------------
-
-    #[test]
-    fn test_xorshift_not_zero() {
-        let mut rng = XorShift64::new(12345);
-        let val = rng.next_u64();
-        assert_ne!(val, 0);
-    }
-
-    #[test]
-    fn test_xorshift_zero_seed_replaced() {
-        let mut rng = XorShift64::new(0);
-        let val = rng.next_u64();
-        assert_ne!(val, 0);
-    }
-
-    #[test]
-    fn test_xorshift_fill_bytes() {
-        let mut rng = XorShift64::new(777);
-        let mut buf = vec![0u8; 100];
-        rng.fill_bytes(&mut buf);
-        assert!(buf.iter().any(|&b| b != 0));
-    }
-
     // -- Proc fd path parsing -------------------------------------------------
 
     #[test]
@@ -1479,11 +759,6 @@ mod tests {
     #[test]
     fn test_format_size_just_under_kb() {
         assert_eq!(format_size(1023), "1023B");
-    }
-
-    #[test]
-    fn test_compute_truncate_extend_overflow() {
-        assert!(compute_truncate_size(u64::MAX, Some('+'), 1).is_err());
     }
 
     #[test]

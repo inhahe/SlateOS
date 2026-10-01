@@ -2125,13 +2125,13 @@ pub extern "C" fn ualarm(usecs: u32, interval: u32) -> u32 {
 /// caller looping `while (!flag) pause();` merely spun at 1 Hz, but one that
 /// treats the return as proof of a signal acted on a signal that never came.
 ///
-/// The wait is [`crate::signal::wait_for_delivery`], which polls a counter
-/// bumped whenever a handler runs. See it for why a delivered signal
-/// otherwise leaves no trace, and for what `pause` deliberately does *not*
-/// wake for: an ignored signal runs no handler and must not end the wait.
+/// The wait is [`crate::signal::wait_for_handler`]: a futex wait the kernel
+/// ends for every signal, which goes on unless a handler ran on this thread.
+/// See it for what `pause` deliberately does *not* wake for: an ignored
+/// signal runs no handler and must not end the wait.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn pause() -> i32 {
-    crate::signal::wait_for_delivery();
+    crate::signal::wait_for_handler(crate::interrupt::Mark::now());
     errno::set_errno(errno::EINTR);
     -1
 }
@@ -2198,8 +2198,11 @@ pub extern "C" fn sysconf(name: i32) -> i64 {
         _SC_SYMLOOP_MAX => 40,        // Max symlink resolution depth (Linux default).
         _SC_STREAM_MAX => 16,         // Max stdio streams (our FILE_POOL size).
         _SC_TTY_NAME_MAX => i64::from(crate::limits::TTY_NAME_MAX),
-        _SC_RE_DUP_MAX => 255, // Max RE_DUP count (POSIX minimum 255).
-        _SC_TZNAME_MAX => 6,   // Timezone name max (POSIX minimum 6).
+        // The largest interval count regcomp takes: glibc's 32767, where
+        // <limits.h> (musl's) gives POSIX's floor, 255 -- RE_DUP_MAX is one
+        // of the limits a system may raise past its header's value.
+        _SC_RE_DUP_MAX => i64::from(crate::regex::RE_DUP_MAX),
+        _SC_TZNAME_MAX => 6, // Timezone name max (POSIX minimum 6).
         _SC_MQ_OPEN_MAX => i64::from(crate::limits::MQ_OPEN_MAX),
         _SC_MQ_PRIO_MAX => i64::from(crate::limits::MQ_PRIO_MAX),
         _SC_SEM_VALUE_MAX => i64::from(crate::limits::SEM_VALUE_MAX),
@@ -5106,6 +5109,8 @@ mod tests {
             val >= 255,
             "RE_DUP_MAX should be at least POSIX minimum 255"
         );
+        // What regcomp takes, and glibc's `getconf RE_DUP_MAX`.
+        assert_eq!(val, 32767);
     }
 
     #[test]
@@ -5277,7 +5282,7 @@ mod tests {
         // the two that can drift silently: nothing else forces the log and the
         // mask to track a change to the size.
         assert_eq!(1usize << crate::sys_param::PAGE_SHIFT, PAGE_SIZE);
-        assert_eq!(crate::sys_param::PAGE_MASK, PAGE_SIZE - 1);
+        assert_eq!(crate::sys_param::PAGE_MASK, !(PAGE_SIZE - 1));
     }
 
     #[test]

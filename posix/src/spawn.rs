@@ -2266,6 +2266,42 @@ unsafe fn spawn_loaded(
 /// program that was found (see [`spawn_loaded`] for why that matters).
 ///
 /// Returns 0 on success, or an error number on failure.
+/// `posix_spawn`, answering a pidfd for the child in `*pidfd` rather than
+/// its pid (glibc 2.39).
+///
+/// `ENOSYS`, and no child: a native program has no pidfds -- the native
+/// system call table has no number for one (known-issues
+/// `B-THE-NATIVE-LIBC-AND-THE-LINUX-ABI-DISAGREE-ABOUT-WHAT-EXISTS`) -- and a
+/// child started without one could not be handed back. glibc's answers the
+/// same where the kernel lacks `clone3`'s `CLONE_PIDFD`, which is how it
+/// makes one. Like `posix_spawn` it answers an error number and leaves
+/// `errno` alone.
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub extern "C" fn pidfd_spawn(
+    _pidfd: *mut i32,
+    _path: *const u8,
+    _file_actions: *const PosixSpawnFileActionsT,
+    _attrp: *const PosixSpawnattrT,
+    _argv: *const *const u8,
+    _envp: *const *const u8,
+) -> i32 {
+    errno::ENOSYS
+}
+
+/// [`pidfd_spawn`], with `file` looked for in `PATH` as `posix_spawnp` looks:
+/// `ENOSYS`, and no child, for the same reason.
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub extern "C" fn pidfd_spawnp(
+    _pidfd: *mut i32,
+    _file: *const u8,
+    _file_actions: *const PosixSpawnFileActionsT,
+    _attrp: *const PosixSpawnattrT,
+    _argv: *const *const u8,
+    _envp: *const *const u8,
+) -> i32 {
+    errno::ENOSYS
+}
+
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn posix_spawnp(
     pid: *mut PidT,
@@ -2726,14 +2762,18 @@ unsafe fn execl_body(path: *const u8, ap: *mut VaList, mode: ExecLMode) -> i32 {
     ret
 }
 
-/// `execl(path, arg0, ..., NULL)` — `execv` with a literal argument list.
+/// `execl(path, arg0, ..., NULL)` — `execv` with a literal argument list:
+/// the `va_list` target `execl`'s trampoline jumps to. The three are named in
+/// the implementation's namespace, not the program's: exported as `vexecl`
+/// and the rest until 2026-09-29, names no header declares
+/// (known-issues.md -> D-POSIX-LIBC-EXPORTED-NAMES-NO-HEADER-DECLARES).
 ///
 /// # Safety
 /// `ap` must be a conformant `va_list` of NUL-terminated `char *` values
 /// terminated by a NULL pointer.
 #[cfg(target_os = "none")]
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn vexecl(path: *const u8, ap: *mut VaList) -> i32 {
+pub unsafe extern "C" fn __slate_vexecl(path: *const u8, ap: *mut VaList) -> i32 {
     // SAFETY: forwarded from the caller's contract.
     unsafe { execl_body(path, ap, ExecLMode::Direct) }
 }
@@ -2741,10 +2781,10 @@ pub unsafe extern "C" fn vexecl(path: *const u8, ap: *mut VaList) -> i32 {
 /// `execlp(file, arg0, ..., NULL)` — `execvp` with a literal argument list.
 ///
 /// # Safety
-/// As [`vexecl`].
+/// As [`__slate_vexecl`].
 #[cfg(target_os = "none")]
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn vexeclp(file: *const u8, ap: *mut VaList) -> i32 {
+pub unsafe extern "C" fn __slate_vexeclp(file: *const u8, ap: *mut VaList) -> i32 {
     // SAFETY: forwarded from the caller's contract.
     unsafe { execl_body(file, ap, ExecLMode::SearchPath) }
 }
@@ -2752,20 +2792,20 @@ pub unsafe extern "C" fn vexeclp(file: *const u8, ap: *mut VaList) -> i32 {
 /// `execle(path, arg0, ..., NULL, envp)` — `execve` with a literal argument list.
 ///
 /// # Safety
-/// As [`vexecl`], plus: one `char *const *` must follow the terminating NULL.
+/// As [`__slate_vexecl`], plus: one `char *const *` must follow the terminating NULL.
 #[cfg(target_os = "none")]
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn vexecle(path: *const u8, ap: *mut VaList) -> i32 {
+pub unsafe extern "C" fn __slate_vexecle(path: *const u8, ap: *mut VaList) -> i32 {
     // SAFETY: forwarded from the caller's contract.
     unsafe { execl_body(path, ap, ExecLMode::WithEnv) }
 }
 
 #[cfg(target_os = "none")]
-va_trampoline!("execl", "vexecl", "8", "rsi");
+va_trampoline!("execl", "__slate_vexecl", "8", "rsi");
 #[cfg(target_os = "none")]
-va_trampoline!("execlp", "vexeclp", "8", "rsi");
+va_trampoline!("execlp", "__slate_vexeclp", "8", "rsi");
 #[cfg(target_os = "none")]
-va_trampoline!("execle", "vexecle", "8", "rsi");
+va_trampoline!("execle", "__slate_vexecle", "8", "rsi");
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -3293,6 +3333,27 @@ mod exec_probe {
 
 #[cfg(test)]
 mod tests {
+    /// No pidfds, so no pidfd spawn: `ENOSYS`, the child not started and
+    /// `*pidfd` not written.
+    #[test]
+    fn pidfd_spawn_answers_enosys_and_starts_nothing() {
+        let mut pidfd = -7;
+        let argv: [*const u8; 2] = [c"true".as_ptr().cast(), core::ptr::null()];
+        let envp: [*const u8; 1] = [core::ptr::null()];
+        for f in [pidfd_spawn, pidfd_spawnp] {
+            let rc = f(
+                &raw mut pidfd,
+                c"true".as_ptr().cast(),
+                core::ptr::null(),
+                core::ptr::null(),
+                argv.as_ptr(),
+                envp.as_ptr(),
+            );
+            assert_eq!(rc, crate::errno::ENOSYS);
+            assert_eq!(pidfd, -7);
+        }
+    }
+
     use super::*;
     // `super::*` re-exports `CapEntryInfo` but not the modules of discriminants
     // beside it, and the ex2 tests build entries out of real `ResourceType` and

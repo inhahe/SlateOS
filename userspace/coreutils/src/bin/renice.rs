@@ -113,7 +113,7 @@ use std::io::Write;
 use std::process::ExitCode;
 
 use coreutils::errmsg::strerror;
-use coreutils::getopt::{Error, Program};
+use coreutils::getopt::{Error, Program, Report};
 use coreutils::quote::{escape_unprintable, os_bytes, quoteaf_os};
 use coreutils::stdfd::{self, Stream};
 

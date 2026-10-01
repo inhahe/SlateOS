@@ -1,5 +1,9 @@
 #!/usr/bin/env bash
-# Differential test: our md5sum/sha256sum against GNU coreutils'.
+# Differential test: the digest.c family (md5sum ... sha512sum, b2sum) against GNU 9.4.
+#
+# That is md5sum, sha1sum, sha224sum, sha256sum, sha384sum, sha512sum and
+# b2sum. (`cksum`, the same file built a ninth way, has what only it has
+# tested by `scripts/cksum-diff.sh`.)
 #
 # ## One harness, two programs
 #
@@ -8,13 +12,14 @@
 # `Algorithm` constant. So there is one harness, and it runs the whole case list
 # once per program:
 #
-#     ./scripts/digest-diff.sh                 # md5sum, then sha256sum
+#     ./scripts/digest-diff.sh                 # all seven, in turn
 #     PROG=sha256sum ./scripts/digest-diff.sh  # just that one
 #
 # Nothing here hard-codes a digest width. The two places that would have —
 # a deliberately-wrong checksum, and a digest of the wrong length — derive
 # theirs from the reference binary's own output at startup, so adding
-# `sha1sum` later is one word in `PROGS` rather than a rewrite.
+# `sha1sum` was one word in `PROGS` rather than a rewrite -- and on 2026-09-24
+# it was.
 #
 # ## Why the checksum files are built per side
 #
@@ -65,7 +70,7 @@ export MSYS2_ARG_CONV_EXCL='*'
 # With `PROG` unset, both programs run — `scripts/all-diff.sh` reaches this
 # harness through a glob and cannot pass one, and a harness that silently
 # covered half of what it names is worse than no harness.
-PROGS=${PROG:-md5sum sha256sum}
+PROGS=${PROG:-md5sum sha1sum sha224sum sha256sum sha384sum sha512sum b2sum}
 
 # Into WSL and build the family for Linux. See `scripts/diff-wsl.sh`.
 #
@@ -97,7 +102,7 @@ DIFF_PROG='digest'
 # with Debian rather than with GNU. See `diff-wsl.sh`'s "Why a built reference"
 # and `design-decisions.md` 726.
 DIFF_GNU_SOURCE=9.4
-DIFF_BINS="md5sum sha256sum"
+DIFF_BINS="md5sum sha1sum sha224sum sha256sum sha384sum sha512sum b2sum"
 DIFF_FORWARD=PROG
 DIFF_NO_REF=1
 # shellcheck source=diff-wsl.sh
@@ -222,6 +227,28 @@ report() {
 }
 
 run_case() { compare "$@"; report "$PROG $*"; }
+
+# A write error: the status and the message, with standard output on a full
+# device. See section 10 for why the message is what it is.
+full_case() {
+  local o_err g_err o_rc g_rc
+  o_err=$(mktemp); g_err=$(mktemp)
+  ( cd "$scratch" && printf 'hello\n' \
+      | timeout -k 2 60 env PATH="$bindir/ours" "$PROG" "$@" >/dev/full 2>"$o_err" )
+  o_rc=$?
+  ( cd "$scratch" && printf 'hello\n' \
+      | timeout -k 2 60 env PATH="$bindir/gnu" "$PROG" "$@" >/dev/full 2>"$g_err" )
+  g_rc=$?
+  if [ "$o_rc" = "$g_rc" ] && cmp -s "$o_err" "$g_err"; then
+    AGREED=yes
+  else
+    AGREED=no
+    REPORT=$(printf '  ours (rc=%s): err{%s}\n  gnu  (rc=%s): err{%s}' \
+      "$o_rc" "$(tr '\n' '|' <"$o_err")" "$g_rc" "$(tr '\n' '|' <"$g_err")")
+  fi
+  rm -f "$o_err" "$g_err"
+  report "$PROG $* [>/dev/full]"
+}
 
 # A case expected to differ, with the reason. Counted apart so that one which
 # starts agreeing is reported too: a stale xfail is a claim nobody rechecked.
@@ -522,6 +549,18 @@ SETUP='printf "one\n" > a; printf "two\n" > b;
        printf "%s b\n" "$($PROG b | cut -d" " -f1)" >> MIX'
 run_case -c -w MIX
 
+# The latch is upstream's file-scope `bsd_reversed`, which nothing resets: a
+# reversed line in the FIRST check file refuses a standard line in the second.
+# (Ours reset it per file until 2026-09-25.)
+SETUP='printf "one\n" > a; printf "two\n" > b;
+       printf "%s a\n" "$($PROG a | cut -d" " -f1)" > REV;
+       $PROG b > STD'
+run_case -c REV STD
+SETUP='printf "one\n" > a; printf "two\n" > b;
+       printf "%s a\n" "$($PROG a | cut -d" " -f1)" > REV;
+       $PROG b > STD'
+run_case -c -w STD REV
+
 # Leading blanks before the digest are skipped; trailing blanks belong to the
 # name, so `a  ` names a file that is not `a`.
 SETUP='printf "one\n" > a; { printf "   "; $PROG a; } > LEAD'
@@ -542,6 +581,60 @@ run_case -c TP
 
 SETUP="$sums"; run_case -c SUMS SUMS      # the same file twice
 SETUP='printf "one\n" > a'; run_case -c a  # a data file read as a check file
+
+# =============================================================================
+# 9b. b2sum: the width -l picks, and the width a check line states
+# =============================================================================
+
+if [ "$PROG" = b2sum ]; then
+  for l in 8 16 160 256 504 512 0; do
+    SETUP='printf "hello\n" > a'; run_case -l "$l" a
+    SETUP='printf "hello\n" > a'; run_case -l "$l" --tag a
+  done
+  SETUP='printf "hello\n" > a'; run_case --length=256 a
+  SETUP='printf "hello\n" > a'; run_case --l=256 a
+  run_case -l 7 a
+  run_case -l 520 a
+  run_case -l 1024 a
+  run_case -l x a
+  run_case -l '' a
+  run_case -l -8 a
+  run_case -l 0x10 a
+  run_case -l 99999999999999999999 a
+  run_case -l 7 --nope             # -l is refused where it is met
+  run_case --nope -l 7
+  run_case -l
+
+  # --check reads each line's width: from the tag, or from the digest itself.
+  b2mixed='printf "one\n" > a; printf "two\n" > b;
+           $PROG -l 128 --tag a > MIX; $PROG --tag b >> MIX;
+           $PROG -l 8 a >> MIX; $PROG -l 256 b >> MIX'
+  SETUP="$b2mixed"; run_case -c MIX
+  SETUP="$b2mixed"; run_case -l 256 -c MIX   # -l does not bind --check
+  SETUP='printf "one\n" > a; printf "BLAKE2bX (a) = %s\n" "$($PROG a | cut -d" " -f1)" > X'
+  run_case -c X                    # the byte after the tag is skipped unread
+  SETUP='printf "one\n" > a; printf "BLAKE2b(a) = %s\n" "$($PROG a | cut -d" " -f1)" > X'
+  run_case -c X
+  SETUP='printf "one\n" > a; printf "BLAKE2b-0x100 (a) = %s\n" "$($PROG -l 256 a | cut -d" " -f1)" > X'
+  run_case -c X                    # C prefix rules for the width
+  SETUP='printf "one\n" > a; printf "BLAKE2b-7 (a) = aa\nBLAKE2b-520 (a) = aa\n" > X'
+  run_case -c -w X
+  SETUP='printf "one\n" > a; printf "abc  a\naa  a\n" > X'
+  run_case -c -w X                 # an odd-length digest is refused
+fi
+
+# =============================================================================
+# 10. A write error
+# =============================================================================
+# digest.c line-buffers stdout (`setvbuf (stdout, nullptr, _IOLBF, 0)`) before
+# it parses a single option, so every line -- the --help text's too -- fails
+# and is discarded as it is finished. The close then has nothing left to fail
+# with, gnulib's `close_stream` zeroes errno, and the message is a bare
+# `write error`: a block-buffered program's close fails and gives a reason.
+
+full_case
+full_case -
+full_case --help
 
   printf '  %s: %d passed, %d differed, %d differ on purpose\n' \
     "$PROG" "$pass" "$fail" "$xfail"

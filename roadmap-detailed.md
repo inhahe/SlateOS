@@ -605,6 +605,15 @@ _Four workload profiles: Desktop (default, interactive/responsive), Database (hi
 - [x] Process/thread pause while running
 - [x] Process/thread resume while running
 - [x] Process/thread priority change while running
+- [ ] **A default priority per program, remembered.** _Proposed by the operator, 2026-09-26; `design.txt` already asks for per-application I/O priorities kept "in the registry" and overridable by the user._ The user can attach a default priority — CPU, and the I/O priority `resource.io_priority` governs — to:
+  - an **executable** (by path, and also by package identity, so the rule survives an update that moves the file);
+  - an **application** as a whole (every executable a package installs);
+  - a **launcher entry** — a desktop icon, pinned taskbar app or Start menu item (§3.4; whatever form those entries take, they are where a "link file" setting belongs);
+  - a **launch parameter** — a `--priority` on the shell's launch command and a field in the program-launch API, for one launch only.
+  - [ ] **One precedence order**, most specific first: launch parameter > launcher entry > the user's rule for the executable > the user's rule for the application > a system-wide rule > the application's own declared default > inherited from the parent.
+  - [ ] **Applied where every launch passes**, at process creation, so it holds however the program is started — shell, desktop, or another program — and not only from the launchers that know about it.
+  - [ ] **Lowering is always allowed; raising is not free.** A rule that sets a priority above normal, or into the realtime band, is accepted only if the user setting it holds the grant that level needs (`proc.priority_other`, and the elevated grant for realtime) — a rule file must not become a way to launder priority.
+  - [ ] **Set it where the priority is seen:** Settings → per-app priority, and in the task manager next to the running process ("Always use this priority for this program"). Precedents: Windows' per-executable `PerfOptions` (`CpuPriorityClass`, `IoPriority`) and Process Lasso's remembered priorities; on Linux, `ananicy`, and systemd units' `Nice=`/`CPUWeight=`.
 - [x] Workload profile presets for scheduler parameters
 - [x] Benchmark: pick_next_task must be O(1) or O(log n), never O(n)
 - [x] Benchmark: context switch target < 5us (Linux: 1-3us) — measured 67ns WHPX, 398ns TCG
@@ -881,6 +890,8 @@ _Scoping mechanics: the grant carries a list of extension strings (or `*` if the
 - [ ] `access.automate` — emulate mouse/keyboard input to other programs
 - [ ] `access.read_screen` — read screen content of other windows
 - [ ] `access.window_control` — move/resize/close other windows
+- [ ] `automation.headless` — create private headless sessions and launch programs into them; `automation.headless_frames` / `automation.headless_input` — read the rendered frames of, and inject input into, a headless session the grantee controls (§4.13 → Headless Sessions)
+- [ ] `automation.background` — drive a program in the user's visible session through its widget tree without taking the user's focus or pointer; the target always shows a "being automated" indicator (§4.13 → Headless Sessions)
 - [ ] Dedicated accessibility capability class — ensure capability model doesn't block accessibility tools
 
 #### Capability Types — Resource Limits
@@ -1489,9 +1500,14 @@ a direct user gesture and needs none of them._
   osh as the exact-bash escape hatch and the intended on-device differential
   oracle (§305).
 - [ ] Port Nushell as default interactive shell (Rust, structured data piping)
+- [ ] **xonsh as an optional shell** (<https://xon.sh> — a Python-powered shell: Python and shell syntax in one language). _Proposed by the operator, 2026-09-26._ An installable package, not a default — Nushell stays the default and Oils the POSIX shell. xonsh is pure Python (plus `prompt_toolkit`, also pure Python), so once its prerequisites exist the port is mostly packaging, and it is a useful stress test of them:
+  - **Something to run the Python typed at the prompt.** xonsh turns each input into a Python AST and runs it with `compile()` and `exec()`, in one long-lived process whose state carries over from line to line. Two routes:
+    - **Interactive CPython** — the direct one. CPython 3.12.3 already runs on SlateOS, but interactive use has not yet been verified (`roadmap.md`).
+    - **fastpy's planned in-process JIT REPL** (fastpy `roadmap.md` item 19, planned 2026-09-26): each input compiled to native code in memory and run once, with the session's state kept between inputs — exactly the shape xonsh needs, and it would run the typed Python at native speed. fastpy's *existing* REPL (`python -m compiler --repl`, built 2026-04-28) cannot serve: it re-runs the whole session for every input, and in a shell that would re-run every earlier command. The JIT route adds to CPython rather than replacing it — its host embeds CPython to run the fastpy compiler, so on SlateOS it needs that compiler self-hosted (with llvmlite, and so LLVM) — and the `exec()` JIT it builds on crashes today (fastpy `known-issues.md`, BUG-JIT-SYMBOL-TABLE-ALWAYS-EMPTY-ON-WIN64 and the entry after it). fastpy's pure ahead-of-time mode, the one SlateOS targets first (Q29, §80), cannot run code it did not compile ahead of time, so it cannot host xonsh on its own.
+  - **Job control and terminal handling** in the POSIX layer — process groups, `tcsetpgrp`, stop/continue, `termios`, a pty — which Oils needs as well.
 - [ ] **Windows-shell familiarity layer: a `cmd.exe` emulator (and, stretch, a PowerShell emulator).** For users migrating from Windows, provide a shell that accepts classic `cmd.exe` syntax — the builtin commands (`dir`, `copy`, `move`, `del`, `ren`, `type`, `cd`/`chdir`, `md`/`mkdir`, `rd`/`rmdir`, `cls`, `echo`, `set`, `path`, `where`, `for`, `if`, `goto`, `call`, `start`, `title`, `%VAR%`/`%ERRORLEVEL%` expansion, `&`/`&&`/`||`/`|` operators, `.bat`/`.cmd` batch-file execution) — mapping them onto native filesystem/process/env syscalls so muscle-memory and existing `.bat` scripts work. It is an *emulation/compat layer*, not the default shell (Nushell stays default); it lives alongside Oils the same way. **Stretch goal: a PowerShell emulator** — much larger scope (a real object pipeline, cmdlets, .NET-esque type system). Two realistic paths, to be decided when tackled: (a) port PowerShell Core (open-source, MIT) via the .NET/CoreCLR runtime once that's available on the OS — the faithful option; or (b) a *subset* emulator covering the most common cmdlets (`Get-ChildItem`/`gci`, `Get-Content`, `Set-Location`, `Copy-Item`, `Where-Object`, `ForEach-Object`, `Select-Object`, `$_`, object pipeline basics) mapped onto Nushell's already-structured pipeline where semantics align. Record as an open question which path to take before starting PowerShell specifically; the `cmd.exe` emulator is the committed near-term deliverable and does not depend on it.
 
-_Nushell as default interactive shell (structured data, Rust-native). Oils for POSIX/bash compatibility (replaces bash). A `cmd.exe` emulator (and stretch PowerShell emulator) ships as a Windows-familiarity compat layer, not as a default shell._
+_Nushell as default interactive shell (structured data, Rust-native). Oils for POSIX/bash compatibility (replaces bash). A `cmd.exe` emulator (and stretch PowerShell emulator) ships as a Windows-familiarity compat layer, not as a default shell. xonsh is an optional installable shell for Python users._
 
 #### Core Utilities
 - [ ] Port coreutils (ls, cp, mv, rm, mkdir, cat, etc.)
@@ -1772,8 +1788,8 @@ _A theme is a declarative YAML file plus optional bundled assets. Themes are pur
 ##### Theme Format
 - [x] YAML theme file following the OS config convention (comment-preserving parser) — 2026-09-25, `appearance::themes` (§874): `<name>/theme.yaml` under `/usr/share/slateos/themes` or the user's `~/.local/share/slateos/themes`, read with `yamldoc`. What a file gets wrong costs that line, not the theme, and is listed for its author.
 - [x] `meta` block: name, author, version, license, tags, screenshots, `supports` list — 2026-09-25. Lists may be written as a block or `[a, b]`; a screenshot that would resolve outside the theme's folder is dropped.
-- [-] `supports` field declares which axes this theme covers (e.g., `[colors, window-decorations, icons, cursors, widget-style, sounds, terminal]`) — *read and kept for a theme list to show (2026-09-25); not trusted over what the file actually sets, and only `colors` exists as an axis so far.* *2026-09-28: three axes exist -- colours, icons (§880) and the widget style (§1435, a `widget-style` section) -- and a theme's listing says which it can give (`ThemeInfo::provides_colors`, `provides_icons`, `provides_widget_style`).*
-- [-] Mix-and-match: each axis is independently overridable — user can apply one theme's colors with a different theme's icons. A "full theme" sets everything, but no axis is mandatory. — *The choice is per axis (`theme.colors` in `appearance.yaml`), so the next axis is a key beside it; colours is the only axis yet.* *2026-09-28: `theme.colors`, `theme.icons` and `theme.widget_style` each name a theme of their own.*
+- [-] `supports` field declares which axes this theme covers (e.g., `[colors, window-decorations, icons, cursors, widget-style, sounds, terminal]`) — *read and kept for a theme list to show (2026-09-25); not trusted over what the file actually sets, and only `colors` exists as an axis so far.* *2026-09-28: three axes exist -- colours, icons (§880) and the widget style (§1435, a `widget-style` section) -- and a theme's listing says which it can give (`ThemeInfo::provides_colors`, `provides_icons`, `provides_widget_style`).* *2026-09-29: a fourth, the animation (§1446, an `animation` section; `ThemeInfo::provides_animation`).*
+- [-] Mix-and-match: each axis is independently overridable — user can apply one theme's colors with a different theme's icons. A "full theme" sets everything, but no axis is mandatory. — *The choice is per axis (`theme.colors` in `appearance.yaml`), so the next axis is a key beside it; colours is the only axis yet.* *2026-09-28: `theme.colors`, `theme.icons` and `theme.widget_style` each name a theme of their own.* *2026-09-29: and `theme.animation` (§1446).*
 
 ##### Tier 1 — Colors (baseline, include from the start)
 - [x] Semantic color tokens (~30-40 defined by OS): `background`, `surface`, `primary`, `secondary`, `accent`, `error`, `warning`, `text`, `text-dim`, `text-on-primary`, `border`, etc. — the palette's 27 roles (`guitk::palette::Palette`); a theme sets 26 of them by the palette's own names (`THEME_ROLES`), the accent being the user's. Why those names and not the example ones here: §874.
@@ -1839,10 +1855,10 @@ _2026-09-28 (`design-decisions.md` §1435): the axis exists -- a theme's `widget
 - [ ] Optional — many users run silent, but themes that pair colors with sounds are more cohesive
 
 ##### Tier 3 — Animation Tuning
-- [ ] `animation-duration-ms` (global default for window open/close, menu transitions) — unblocked 2026-08-22, not yet started
-- [ ] `animation-easing` (ease-out, spring, linear) — unblocked 2026-08-22, not yet started
-- [ ] `enable-animations` (bool — global kill switch) — unblocked 2026-08-22; the mechanism exists (`AnimationManager::reduced_motion`, `ShellSession::set_reduced_motion`), the *theme key* does not
-- [ ] Not full custom animations (that would be a compositor plugin). Just tuning built-in animation parameters.
+- [x] `animation-duration-ms` (global default for window open/close, menu transitions) — unblocked 2026-08-22, not yet started *2026-09-29 (§1446): an `animation` section in `theme.yaml`, chosen as `theme.animation` -- `enabled`, `duration-ms` (the standard transition every one of the desktop's is stated against, 50-1000 ms) and `easing` (`ease-out`, `linear`, `spring`); the user's speed scales it, and `Palette::motion` carries the result to the overview's fade, the notification pane, the on-screen display, auto-hide, the animation manager and the toast daemon.*
+- [x] `animation-easing` (ease-out, spring, linear) — unblocked 2026-08-22, not yet started *2026-09-29 (§1446): `easing: ease-out | linear | spring`, arriving and leaving read differently (`guitk::motion`).*
+- [x] `enable-animations` (bool — global kill switch) — unblocked 2026-08-22; the mechanism exists (`AnimationManager::reduced_motion`, `ShellSession::set_reduced_motion`), the *theme key* does not *2026-09-29 (§1446): the key is `animation.enabled`; `false` is the still motion, as the user's speed of Off is.*
+- [x] Not full custom animations (that would be a compositor plugin). Just tuning built-in animation parameters. *Held to: a theme sets a standard length, a curve and a switch (§1446).*
 - **Blocked as a group, 2026-08-22:** there is nothing to tune. `oswindow::EventLoop::run` blocks in `Connection::wait()`, which takes no timeout, and there is no timer or frame callback anywhere in the stack — so no shell animation can advance, and `gui/desktop/src/animations.rs` (1036 lines, six `tick()` methods) has no caller anywhere in the tree. Discovered while wiring the desktop overview, whose own open fade was deleted for this reason (design-decisions.md §520). The prerequisite is a deadline-aware wait in `EventLoop`; see `known-issues.md` → `TD-C-THE-SHELL-HAS-NO-FRAME-CLOCK` for the proposed fix. Lane C owns it.
 - **Half-unblocked, 2026-08-22 (same day):** `TD-C-THE-SHELL-HAS-NO-FRAME-CLOCK` is **RESOLVED** — `EventLoop` now has `wake_at`/`wake_after`/`cancel_wake`, bounds its park by the nearest deadline, and delivers a measured `Event::Tick { elapsed_ms }`; `ShellSession` parks through it. See `design-decisions.md` §521. The three items above stay `[~]` because the *second* half is still open: `animations.rs` still has no caller and `paint_chrome` is still driven from input rather than from the loop, so there remain no live animations whose duration or easing a setting could change. The blocker is now "wire `animations.rs` to the frame clock", which is a lane-C task with no external dependency — not a missing mechanism.
 - **Fully unblocked, 2026-08-22 (same day):** the second half landed too. `ShellSession::step_frame` steps `AnimationManager` and the overview's backdrop fade from `Event::Tick`, arms the next one-shot wake-up only while something is moving, and repaints from the tick — so `paint_chrome` is no longer input-driven. Crucially for *this* section, `animations.rs` now counts **milliseconds, not frames**: it was written with `duration_ticks`/`current_tick` and a module doc reading "one tick = one frame", under which `animation-duration-ms` had no honest conversion at all, because the frame rate is by construction not a constant. It is now `duration_ms`/`elapsed_ms` with `tick(dt_ms)`, so a duration *setting* is directly expressible. See `design-decisions.md` §522. What is left for these three items is settings work, not mechanism: a theme/appearance key that reaches the per-component durations (today `OverviewConfig::fade_ms` and `animations::DEFAULT_DURATION_MS`), an easing name parsed into `animations::Easing`, and a kill switch bound to the existing `reduced_motion` flag. Note also that only the overview's fade is wired so far — the start menu, calendar, Alt-Tab, notification pane and login screen are drawn by the shell and are not yet animated, so a global duration key would currently affect one transition.
@@ -1973,16 +1989,16 @@ _Click selected radio button to deselect (returns group to no-selection state)._
 #### Code-Aware TextEdit Widget
 *Audited 2026-09-17: none of this exists as a widget, and most of it exists twice as an application. `apps/editor` and `apps/markdowneditor` each implement undo/redo, find/replace, syntax highlighting and a line-number gutter separately — by mention count they are comparable in size, and `apps/notes` has a third, smaller find. So these bullets are not stale: the capabilities are real and the shared widget is the gap, which is the same shape as `SimpleTextView` against `apps/logviewer` above. Extracting one from two working editors is the work, and the two would have to agree on a buffer first — which is what the bullet below is about.*
 - [x] Rope or gap buffer backing (efficient for large files) — *2026-09-28: `guitk::textbuffer::TextBuffer`, the text in chunks of at most 4 KiB with the byte offset and newline count before each: an edit rewrites the chunks it touches, a line lookup is a binary search and a scan of one chunk. On a 10 MB file, loading takes 20 ms, a keystroke with its line lookups about 12 µs. Batches of edits (several carets) in the offsets before the batch; offsets inside a character are refused, not rounded. The editors in `apps/` still keep `Vec<String>`; the widget below is what moves them.*
-- [-] Syntax highlighting via tree-sitter integration — *2026-09-28: `gui/syntax` (`design-decisions.md` §1437): tree-sitter's runtime as Rust (`tree-sitter-c2rust`), each grammar's generated `parser.c` converted to Rust at build time by `gui/tsgrammar` and its external scanner ported by hand, so nothing needs a C compiler; each grammar's own test corpus passes against the conversion. `guitk::codeview::CodeView::set_highlighter` takes it (or any `guitk::highlight::Highlighter`): edits re-parse incrementally within the keystroke, a large file's first parse arrives a slice at a time (`CodeView::work`), and the colours are the theme's `syntax` section. Grammars so far: C, CSS, JSON, Markdown (block and inline), Python, Rust, TOML, YAML; injections (Markdown's code fences, front matter and inline text, Rust macro bodies) and the grammars' own highlight tests pass (§1438). Open: more grammars (shell, JavaScript, HTML).*
+- [-] Syntax highlighting via tree-sitter integration — *2026-09-28: `gui/syntax` (`design-decisions.md` §1437): tree-sitter's runtime as Rust (`tree-sitter-c2rust`), each grammar's generated `parser.c` converted to Rust at build time by `gui/tsgrammar` and its external scanner ported by hand, so nothing needs a C compiler; each grammar's own test corpus passes against the conversion. `guitk::codeview::CodeView::set_highlighter` takes it (or any `guitk::highlight::Highlighter`): edits re-parse incrementally within the keystroke, a large file's first parse arrives a slice at a time (`CodeView::work`), and the colours are the theme's `syntax` section. Grammars so far: Ada, Bash, C, C++, CSS, diffs, Dockerfiles, DTD, Go, HTML, INI, Java, JavaScript (with JSX), JSON, linker scripts, Lua, Makefiles, Markdown (block and inline), PowerShell, Python, Rust, SQL, TOML, TypeScript and TSX, XML, YAML; injections (Markdown's code fences, front matter and inline text, Rust macro bodies, JavaScript's tagged templates, HTML's scripts and styles, C++'s raw strings, JavaScript's regular expressions and JSDoc comments) and the grammars' own highlight tests pass (§1438); a name is coloured as its declaration is where the grammar has a locals query (§1440). A diff's hunks in their files' languages (§1444). XML (and SVG, XSLT, plists) and DTDs; Dockerfiles, their RUN commands and `RUN <<EOF` scripts in Bash. SQL -- PostgreSQL's, MySQL's and SQLite's dialects in one grammar, PostgreSQL's dollar-quoted strings and function bodies read by its ported scanner.*
 - [x] Line numbers (toggleable) — *2026-09-28: `guitk::codeview::CodeView`'s gutter (`ViewOptions::line_numbers`), the caret's line in the text's ink; a press in it selects the line.*
 - [x] Undo/redo stack — *[-] 2026-09-27: the history exists and is a tree, not a stack (`guitk::undo`, `design-decisions.md` §1420), and the multi-line text area uses it; this widget, which would use it too, does not exist yet.* *2026-09-28: `guitk::codeedit::CodeEditor` records every batch -- one edit at every caret -- as one step of that tree, typing gathered a word at a time; undo puts back exactly what a batch changed however its carets shifted each other.*
-- [-] Multi-cursor support — *2026-09-28, the model (`guitk::codeedit`): any number of selections, sorted and merged where they meet; typing, deleting, newline, tab, paste and cut at every caret as one batch; a caret added above or below, the next occurrence (Ctrl+D), a block; copying from several carets and pasting at as many puts each piece back at its own. Drawing them and the keys are the view's, not yet built.* *Later the same day: drawn and driven by `guitk::codeview` -- Ctrl+click adds a caret, Alt+drag makes a block, Ctrl+Alt+Up/Down add one above or below, Ctrl+D the next occurrence, Escape keeps only the primary.*
+- [x] Multi-cursor support — *2026-09-28, the model (`guitk::codeedit`): any number of selections, sorted and merged where they meet; typing, deleting, newline, tab, paste and cut at every caret as one batch; a caret added above or below, the next occurrence (Ctrl+D), a block; copying from several carets and pasting at as many puts each piece back at its own. Drawing them and the keys are the view's, not yet built.* *Later the same day: drawn and driven by `guitk::codeview` -- Ctrl+click adds a caret, Alt+drag makes a block, Ctrl+Alt+Up/Down add one above or below, Ctrl+D the next occurrence, Escape keeps only the primary.*
 - [x] Selection modes: line, word, block/column — *2026-09-28: `CodeEditor::select_word`, `select_line` (again takes in the next line), `select_block` (a column range on every line between two points, held to short lines).*
 - [x] Find/replace (regex-capable) — *2026-09-28, the model: `codeedit::FindQuery` compiles to a `Finder` -- plain text through `textfind`, or a regular expression through the `regex` crate (§1436), case-folded or not, whole words or not; the editor steps through matches round the end both ways, selects them all as carets, replaces the selected one and moves on, or replaces every one as one undo step, a regex replacement taking the match's groups (`$1`, `${name}`). The view's find bar is next.* *Later the same day, done: `CodeView`'s find bar (Ctrl+F, Ctrl+H) -- searching as it is typed from where the caret was, Enter and Shift+Enter through the matches, Alt+Enter every match as a caret, Alt+C/W/R and clickable switches for case, whole words and regular expressions, replace and replace-all (one undo step), every match on screen outlined, "3 of 12" or why a pattern is not one; F3 from the text.*
 - [x] Soft wrap or horizontal scroll (user choice) — *2026-09-28: `ViewOptions::wrap`. Wrapped, a line breaks after a blank near the edge and Up/Down move by row keeping the caret's distance from the left; unwrapped, the view scrolls sideways to keep the caret in sight. Rows are laid out only for the lines on screen, so any file costs a screenful.*
 - [x] Indent/dedent selection — *2026-09-28: Tab on a selection spanning lines indents every line it touches and keeps it selected; Shift+Tab takes off a tab or up to a tab width of spaces; empty lines are left empty.*
 - [x] Auto-indent — *2026-09-28: a new line keeps its line's indentation, one level more after an opening bracket, and a closer right after the caret goes to a line of its own at the outer level.*
-- [-] Bracket matching — *2026-09-28: `CodeEditor::matching_bracket` finds the partner of the bracket at or before the caret through nesting (brackets in strings count; a language-aware matcher can take over). Highlighting the pair is the view's.* *Later the same day: the view outlines the pair at the primary caret.*
+- [x] Bracket matching — *2026-09-28: `CodeEditor::matching_bracket` finds the partner of the bracket at or before the caret through nesting (brackets in strings count; a language-aware matcher can take over). Highlighting the pair is the view's.* *Later the same day: the view outlines the pair at the primary caret.* *2026-09-29: language-aware -- `Highlighter::brackets`: the syntax highlighter pairs a bracket by the tree (and a language inside another by its own), so a bracket in a string or a comment is none; the view counts only where it cannot say.*
 - [x] Configurable tab width, tabs vs spaces — *2026-09-28: `codeedit::Options` -- tab width 1-16, spaces or tabs; Tab runs to the next stop, Backspace in leading spaces back to the previous one.*
 
 #### Ribbon Widget
@@ -2692,6 +2708,58 @@ authors never wrote a single automation handler.
 - [ ] `automate` CLI and the `on`/`invoke` shell builtins gain widget-tree
   subcommands (e.g. `automate ui <program> tree|find|invoke`) so widget
   automation is scriptable exactly like declared actions.
+
+#### Headless Sessions — Control Without Interfering With the User
+
+_Proposed by the operator, 2026-09-26._ A program holding the right capabilities
+can run another application **headless** — launched into a private session whose
+windows never appear on the user's displays — and drive it through the widget
+tree above, and through its rendered pixels where a tree is not enough. The
+clients this is for are automation agents — test runners, RPA-style scripts, and
+AI agents the user chooses to install — that must work inside an app *while the
+user keeps using the machine*: no stolen focus, no windows appearing, no pointer
+moving under the user's hand. (The OS supplies the mechanism, not an agent, so
+this is consistent with "no AI features in the OS": an agent is an ordinary
+third-party program with ordinary grants.) Precedents, each covering part of it:
+Windows UI Automation (the structured tree, which the widget tree above already
+matches), separate Windows desktops/sessions (`CreateDesktop`, RDP) for invisible
+execution, headless Wayland/Xvfb on Linux, and Android's per-app
+`VirtualDisplay`.
+
+- [ ] **A headless session is a compositor session with no display.** Its windows
+  get real surfaces, rendered but never composited onto a user display. It has
+  its own focus and input queue, its own clipboard, and its own notification and
+  audio sinks (delivered to the controller, muted by default), so nothing in it
+  can reach the user's screen, steal focus, or make a sound. Frames are rendered
+  on demand — when the controller asks for one — so an idle headless app costs
+  close to nothing.
+- [ ] **Launching into one.** `automation.headless` — create a headless session
+  and launch programs into it. A program launched headless keeps exactly its
+  own capabilities: running headless grants it nothing and costs it nothing. The
+  session, and every process in it, ends when the controller releases it or
+  exits.
+- [ ] **Driving it semantically first.** The widget tree above — `ui.tree`,
+  `ui.find`, `ui.get`, and invoking a widget's own action — works identically
+  against a headless instance, and is the preferred way to control one: no
+  pixels, no coordinates, and the app's own validation and enabled-state rules
+  apply to every action.
+- [ ] **...and graphically where needed.** For canvas-drawn apps, games, and
+  checking what the user *would* see: read the session's rendered frames
+  (`automation.headless_frames`) and inject pointer and keyboard input into that
+  session only (`automation.headless_input`) — never into the user's session,
+  which is what `access.automate` covers and which stays a separate grant.
+- [ ] **Working in an app the user already has open, without disturbing them.**
+  Driving a visible instance through the widget tree without moving the user's
+  pointer or focus is a distinct and more sensitive grant than driving a headless
+  instance the controller launched itself: it needs the widget tree's own
+  interaction grants on that app (`automation.invoke` + `automation.ui_control`)
+  *and* `automation.background`, and the compositor marks the target
+  window with a persistent "being automated" indicator (the same posture as a
+  screen-recording indicator). "Invisible" means *not interfering*, never
+  *undetectable*.
+- [ ] Secure-entry fields stay unreadable in a headless session exactly as they
+  do elsewhere (see the password-field rule above), and every headless grant is
+  per controller and audit-logged like the rest of the automation grants.
 
 #### Shell Integration
 

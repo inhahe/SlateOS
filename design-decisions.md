@@ -41769,8 +41769,8 @@ eleven are this table, and are not to be "fixed":
 | Name | Here | musl | Why it stays |
 |---|---|---|---|
 | `FD_SETSIZE` | 256 | 1024 | a policy limit, the fd table's size; the `fd_set` layout is musl's 1024 bits (`FD_SET_BITS`, §1011) |
-| `PAGE_SIZE`, `SHMLBA` | 16384 | 4096 | this kernel's pages are 16 KiB; a port that uses the macro instead of `sysconf(_SC_PAGESIZE)` is wrong here whatever the library says |
-| `ARG_MAX`, `HOST_NAME_MAX`, `NGROUPS_MAX` | 2 MiB, 64, 65536 | 128 KiB, 255, 32 | the kernel's real limits (Linux's); musl's header states its own |
+| `PAGE_SIZE`, `SHMLBA`, `NBPG`; `PAGE_MASK` | 16384; ~16383 | 4096; ~4095 | this kernel's pages are 16 KiB; a port that uses the macro instead of `sysconf(_SC_PAGESIZE)` is wrong here whatever the library says (`NBPG` and `PAGE_MASK` added 2026-09-30) |
+| `ARG_MAX`, `HOST_NAME_MAX`, `NGROUPS_MAX`, `NGROUPS` | 2 MiB, 64, 65536, 65536 | 128 KiB, 255, 32, 32 | the kernel's real limits (Linux's); musl's header states its own (`NGROUPS`, glibc's `<sys/param.h>`'s name for `NGROUPS_MAX`, added 2026-09-30) |
 | `MAXQUOTAS` | 3 | 2 | the kernel has project quotas; musl's header predates them |
 | `O_ACCMODE` | 3 | `3 \| O_PATH` | musl folds `O_SEARCH` into the access mode; the library's own masking is glibc's |
 | `SIGRTMIN`, `MB_CUR_MAX` | 32, 4 | calls | musl's macros call `__libc_current_sigrtmin` and `__ctype_get_mb_cur_max`, which are this library's and answer 32 and 4 |
@@ -41784,7 +41784,14 @@ eleven are this table, and are not to be "fixed":
 **What keeps it true.** The constants half of `scripts/check-libc-abi.py`,
 since 2026-09-27 (§1130): every public constant whose name a musl header
 defines, compared with that header's value on each push that touches
-`posix/src`.  The table above is its `KNOWN_DIFFERENT`, less `__WCLONE` and
+`posix/src` -- since 2026-09-30 every header musl has and every header the
+overlay adds, where it was a list of 105 of musl's 183 (known-issues.md,
+`D-POSIX-THE-CONSTANTS-OF-78-HEADERS-WERE-NEVER-COMPARED`); and enum
+constants besides macros, and, for a name musl's headers do not define,
+glibc's and then the kernel's headers through `glibc_constants.txt`
+(`D-POSIX-CONSTANTS-NO-MUSL-HEADER-NAMES-HAD-NO-ORACLE`), whose deliberate
+differences are `KNOWN_DIFFERENT_GLIBC` -- `PAGE_SHIFT` alone, 16 KiB
+pages.  The table above is its `KNOWN_DIFFERENT`, less `__WCLONE` and
 `WEOF` -- compared in the bits both sides have, they agree, as the table says
 -- and less `SIGRTMIN` and `MB_CUR_MAX`, which with `SIGRTMAX` are its
 `NOT_CONSTANT_IN_MUSL`: musl's are calls, which no compile-time check can
@@ -42689,6 +42696,1238 @@ musl for those functions), not part of this fix.
 x87 unit's rounding direction: `ranged` is generic over the type, and its
 second evaluation switches both units to nearest
 (`fenv::in_nearest_x87`).
+
+## 1140. The `long double` Bessel functions are computed in pairs of long doubles and rounded once: correctly rounded, at many times glibc's cost
+
+**Date:** 2026-09-29
+**Decided by:** Claude (autonomous)
+**Lane:** D
+
+**In short:** `j0l`, `j1l`, `jnl`, `y0l`, `y1l` and `ynl` -- the Bessel
+functions for C's `long double`, which physics and engineering programs
+call -- had to be written here: no library whose licence the C library can
+take has them for the 80-bit type (musl and FreeBSD have none; glibc's are
+LGPL, open-questions D-Q6). They are written to give the correctly rounded
+answer -- the long double nearest the exact value, or the next one up or
+down when the program has asked for rounding up or down -- and give it for
+13,338 of the 13,339 values they are tested at, including long doubles
+right next to the functions' zeros, where glibc's answers have no correct
+bits at all (at 3,034 such points every one of glibc's is wrong, by a median
+of 3 x 10^13 units in the last place; away from the zeros two in three of
+glibc's are off, by up to 6). The one miss is a value 3.7 x 10^-7 of a unit
+from a rounding boundary, and is one unit off. The price is time:
+every step is done in double-long-double arithmetic (a pair of long doubles,
+about 128 bits), and a call takes 3 to 31 microseconds in a release build
+where glibc's takes a fraction of one. (Written first with `ld80.rs`'s
+operators, each its own assembly block through memory, it took 20 to 240:
+the pair's sum and products are now each one block on the x87 register
+stack, bit for bit the same operations.)
+
+**How** (`posix/src/besl.rs` has the detail): Miller's backward recurrence
+and the Neumann series to `x = 48`; within 2^-32 of each zero below 48,
+the Taylor series about it, the zero held to 192 bits
+(`posix/tools/oracle/besl_tables.py`); past 48, Hankel's expansion written
+as phase and amplitude, `J = M cos(theta)`, the phase reduced by pi/4 in an
+exact sum so that the cancellation next to a zero happens without error;
+below 2^-33 or 2^-70, the leading terms. The pieces check each other in the
+tests where their ranges overlap, besides the oracle.
+
+**Alternatives:**
+
+- **glibc's kind: rational approximations in plain long double.** Fast --
+  a few dozen operations -- and a few units in the last place out in
+  general, but with no bound on the *relative* error next to a zero, which
+  is where a program looking for one evaluates the function. Rejected: a
+  program asks for `long double` to have the digits.
+- **Cephes' `j0l` family**, the permissive source known-issues first
+  named: the same kind of approximation as glibc's, with the same accuracy.
+  Rejected for the same reason.
+- **Correct rounding everywhere**, by redoing the one-in-thousands hard
+  case in more precision (Ziv's strategy). It needs a third long double
+  throughout, or a multiprecision fallback, for cases that are one unit off
+  when they occur. Not done; it can be added over this without changing
+  anything else if it is ever wanted.
+
+**Where the answers part from glibc's**, each on purpose and each in the
+tests: the values, which are the correctly rounded ones; the directed
+rounding modes, which these honour and glibc's answer as to nearest; at an
+encoding the x87 refuses (an unnormal, a pseudo-infinity), the unit's NaN
+with invalid, as `mathl.rs` answers everywhere, where glibc's `jnl` and
+`ynl` return 0 or set `ERANGE`; `errno` in the directed modes, §1139's one
+rule; and `jnl`'s underflow at a huge order, +0 where glibc answers -0.
+
+**Huge orders.** From order 512 `jnl` and `ynl` use Debye's
+expansions, whose terms fall as powers of `1/n`: the sech(alpha) form
+before the turning point `x = n`, the sec(beta) form -- in phase and
+amplitude, reduced as Hankel's is -- past it; and from order 2048, within
+`32 n^(1/3)` of the turning point, where neither holds, a recurrence from
+where they do (upward for Y, Miller's downward for J, scaled to Debye's
+values by least squares over two orders). A recurrence all the way from
+order 0, as glibc's does and this did at first, costs time in proportion
+to the order: minutes at 2^31, where this takes at most 6 ms. The phase at such an order is of the order of `n`, held to 2^-128
+of itself, so the answer there is good to about 2^-97 of the amplitude --
+correctly rounded but next to a zero or in the rare hard case.
+
+
+## 1141. C reaches this library's extensions through a header overlay in front of musl's: `-I posix/include`, each header `#include_next`ing musl's and declaring the rest as glibc 2.39 does
+
+**Date:** 2026-09-29
+**Decided by:** Claude (autonomous)
+**Lane:** D
+
+**In short:** a C program here is compiled against musl's headers, and those
+declare only what musl has. This library has more -- glibc's extensions
+(`error`, `fts_open`, `backtrace`, `close_range`, `arc4random` ...) and
+C23's additions (`nextup`, `fadd`, `fegetmode` ...), 195 functions and
+variables in all -- and C could call none of them, because clang refuses a
+call to a function no header declares. They are declared now by the headers
+in `posix/include/`, which a build puts in front of musl's with `-I`: each
+includes musl's header of the same name and adds what is missing, under the
+feature macros glibc uses (`rawmemchr` only with `_GNU_SOURCE`, `j0l` by
+default, `fadd` for C23). Five headers musl has no version of at all --
+`<fts.h>`, `<error.h>`, `<execinfo.h>`, `<gnu/libc-version.h>`,
+`<sys/pidfd.h>` -- are whole files there. A program written for glibc then
+compiles as it does against glibc, and a gate holds every declaration to
+glibc's: the same header, the same type, visible under exactly the same
+feature macros.
+
+**Alternatives:**
+
+- **Patched copies of musl's headers** in the sysroot. One place per
+  declaration and no `#include_next`; but every musl update becomes a merge,
+  and the change is a diff against a vendored tree instead of a file that
+  says what it adds and why.
+- **One SlateOS header** declaring everything. Simple -- but a glibc
+  program includes `<stdio.h>` for `renameat2`, not a header of ours, and
+  would not compile unchanged, which is the point of having the functions.
+- **glibc's headers themselves.** They declare exactly glibc's set; but
+  they are LGPL (open-questions D-Q6), declare hundreds of functions this
+  library does not have, and lay out types (`struct stat`, `sigset_t`,
+  `pthread_mutex_t`) as glibc does, where this library's ABI is musl's.
+- **Declarations generated from the Rust definitions.** They could not
+  drift from the definitions; but a Rust signature carries neither C's
+  `const`, nor the feature macros, nor which header a function belongs in.
+
+**`-I`, not `-isystem`:** zig's driver searches its own libc headers before
+any `-isystem` directory, so `-isystem posix/include` would put the overlay
+behind the headers it extends -- silently: `#include <stdio.h>` finds
+musl's, and nothing fails until a program calls an overlay function. Each
+overlay header marks itself a system header (`#pragma GCC system_header`),
+as musl's are by where they live, so that a program's `-Werror` is not
+about them; the gate turns that off to hold them to `-Wall -Wextra` itself.
+
+**What holds it:** `scripts/check-libc-overlay.py` -- every header compiles,
+alone and with the others, in eleven feature-macro settings, C99, gnu89 and
+two C++ ones; the names the overlay adds to musl's are exactly the
+reference's, which `posix/tools/oracle/glibc_declarations.py` reads out of
+glibc 2.39's headers with libclang; and each appears, after its header, in
+exactly the settings glibc's does, with a type `__builtin_types_compatible_p`
+finds compatible with glibc's; and each type the overlay defines itself
+(`femode_t`, `FTS`, `struct mallinfo` ...) has glibc's size and field
+offsets. `scripts/check-libc-prototypes.py` checks each declaration against
+its Rust definition by the x86-64 calling convention, and
+`scripts/check-libc-abi.py`, which compiles against musl's headers with the
+overlay in front, the library's Rust types against the overlay's.
+
+**Where it parts from glibc, on purpose:** the LFS64 names (`open64`,
+`stat64` ...) stay as musl has them, macros under `_LARGEFILE64_SOURCE`
+only -- musl 1.2.4 stopped giving them to `_GNU_SOURCE`, deliberately, and
+this does not undo that -- but `fcntl64`, which musl has no macro for, is
+declared under both; `pidfd_send_signal` is absent from a strict ISO C
+build, where musl has no `siginfo_t` for it to take; and of glibc's
+non-portable mutex names only the aliases of musl's own types are there
+(`PTHREAD_MUTEX_RECURSIVE_NP` ...), since this library has no adaptive
+mutex and its initialisers are musl's.
+
+**Widened too (2026-09-29, the same day):** where musl's own headers declare
+a name `libc.a` defines under narrower feature macros than glibc's --
+`fgetpwent` and `mempcpy` only for `_GNU_SOURCE` where glibc gives them by
+default, `strdup` and `gmtime_r` not for C23, which made them ISO C -- the
+overlay declares it again under glibc's (31 names; a redundant declaration
+of the same type is legal C), and the gate holds those to glibc's headers as
+it does the rest. `posix/tools/oracle/header_audit.py` finds them
+(known-issues.md -> D-POSIX-MUSL-HEADERS-DECLARE-NARROWER-THAN-GLIBCS).
+
+## 1142. `random` and `rand` give glibc's sequences; the `rand48` family is race-free where POSIX requires it, and its draws stay unlocked where POSIX exempts them
+
+**Date:** 2026-09-29
+**Decided by:** Claude (autonomous)
+**Lane:** D
+
+**In short:** a program that seeds the C library's random-number generator
+with a fixed number -- a test suite comparing its output with a recorded
+file, a simulation replaying a run -- gets a particular sequence, and which
+one is the library's choice. This library now gives glibc's, number for
+number, for `rand`, `random` and `rand_r` (the `rand48` family's POSIX
+fixes outright). Before, `random` was the wrong kind of generator and
+`rand`'s sequence was nobody's (known-issues
+D-POSIX-RANDOM-WAS-AN-LCG-AND-INITSTATE-A-STUB). And POSIX requires more of
+the `rand48` family than glibc gives -- the functions that set its state
+must be safe to call from several threads at once -- which this library now
+meets without slowing the functions that draw numbers, which POSIX exempts.
+
+**The sequences.** POSIX fixes `random`'s kind of generator -- additive
+feedback, 31 numbers of state by default, `initstate`'s five sizes -- but
+not how a seed fills its table, and `rand`'s not at all:
+
+| Option | *What changes:* |
+|---|---|
+| **glibc's** (taken) | A seed gives what it gives on Linux. `rand` is `random` there, so the two share one generator: one seed gives both one sequence, and a program calling both sees it split between them. |
+| musl's | `rand` a 64-bit linear congruential generator, `random`'s table seeded musl's own way: what Alpine and zig's default target give, and not what programs are likely to have recorded output against. |
+| our own | What no other system gives; no reason to. |
+
+glibc's is what programs have been run against and their outputs recorded
+on, and the library follows glibc wherever POSIX leaves the choice (§1141).
+
+**Thread safety.** POSIX.1-2024 (XSH 2.9.1) exempts `rand`, `srand`,
+`drand48`, `lrand48` and `mrand48` from thread safety, and not `random`,
+`srandom`, `initstate`, `setstate`, `srand48`, `seed48`, `lcong48`,
+`erand48`, `nrand48` or `jrand48`; and `rand` "shall avoid data races with
+all functions other than non-thread-safe pseudo-random sequence generation
+functions". So:
+
+- `random` and its three take one lock, as glibc's and musl's do; `rand`,
+  being `random`, takes it too.
+- The `rand48` family's state and parameters are atomics -- the multiplier
+  and addend in one word, so nothing reads one from one `lcong48` and the
+  other from another -- and the three initializers take a lock among
+  themselves. glibc's lock none of this family.
+- `drand48`, `lrand48` and `mrand48` stay unlocked, as glibc's are. A lock
+  would make every draw contend in the programs -- OpenMP ones above all --
+  that share one generator among threads, in breach of POSIX, and get away
+  with it on glibc. Unlocked, two threads drawing at once can draw one
+  number twice, which POSIX allows; the state being atomic, it is never
+  undefined behaviour.
+- `seed48` returns the state it replaced in three words of the calling
+  thread's own, where glibc's are one static every thread shares, so that
+  another thread's `seed48` cannot overwrite them while they are read.
+- `fork` holds both locks across the system call, so a child of a threaded
+  parent never finds one held by a thread it does not have.
+
+**Where it parts from glibc's**, on purpose: `setstate` refuses an array
+whose recorded position is past its generator's end, where glibc's would
+read and write past the array; `initstate`, `setstate` and the `_r` forms
+refuse a NULL pointer, and `random_r` and `srandom_r` a `struct
+random_data` never set up, with `EINVAL`, where glibc's follow the pointer;
+`rand_r(NULL)` gives 0.
+
+**Where:** `posix/src/prng.rs`; `posix/src/process.rs` (`fork`).
+
+## 1143. The multibyte conversions keep a NULL `ps`'s state per function and per thread, refuse a sequence at the first byte that makes it impossible, and read a NULL `s` as C words it
+
+**Date:** 2026-09-29
+**Decided by:** Claude (autonomous)
+**Lane:** D
+
+**In short:** a program converting text a byte at a time may leave it to
+the C library to remember a character half-read, by passing no state of its
+own. This library keeps a separate memory for each function and for each
+thread, where glibc keeps one per function for the whole program -- so two
+threads doing this at once cannot mix up each other's characters. And it
+refuses a malformed byte sequence as soon as no further byte could make it a
+character, where glibc's `mbrtowc` waits for the sequence's end.
+
+| Choice | Taken | glibc 2.39 | Why |
+|---|---|---|---|
+| a NULL `ps`'s state | per function, per thread: 13 states, 104 bytes of each thread's block (`posix/src/perthread.rs`) | per function, per process | POSIX lets these functions be unsafe for threads when `ps` is NULL, so both conform; per thread there is no race to be unsafe with -- and in Rust a process-wide static written from two threads is undefined behaviour, not merely a wrong answer. Only a program that begins a character in one thread and finishes it in another would see a difference. |
+| when an invalid sequence is refused | at its first impossible byte, by Unicode's table 3-7 | `mbrtowc`: at the sequence's end; `c8rtomb`: at the first impossible byte | C's `(size_t)-2` means "incomplete (but potentially valid)", and `E0 80` is not potentially valid. A caller feeding one byte at a time sees -1 a call or two sooner; valid text is unaffected. |
+| code points past U+10FFFF | refused, both ways | `mbrtowc` reads `F4 90 80 80`; `c32rtomb` writes the old five- and six-byte forms | RFC 3629; nothing here would read them back |
+| a NULL `s` | exactly C's equivalence: `c16rtomb(NULL, ...)` after a lone high surrogate is `c16rtomb(buf, u'\0', ps)`, an encoding error; `mbrtoc16(NULL, NULL, 0, ps)` hands a low surrogate still to come to no one | `c16rtomb` answers 1 and forgets the surrogate; `mbrtoc16` writes through the NULL pointer and crashes | C's words, which glibc's own `c8rtomb` follows |
+
+**Where:** `posix/src/wchar.rs` (`state_for`, `internal`, `decode`),
+`posix/src/uchar.rs`; known-issues
+D-POSIX-UCHAR-WAS-ASCII-AND-THE-STRING-CONVERSIONS-MISCOUNTED.
+
+## 1144. Of the old calls glibc keeps, the ones that cannot work safely here are refused rather than pretended: `sigstack` and a starting `profil` are `ENOSYS`
+
+**Date:** 2026-09-29
+**Decided by:** Claude (autonomous)
+**Lane:** D
+
+**In short:** glibc still carries calls from 1980s Unix. Most can be given
+their old meaning over the modern calls (`posix/src/legacy.rs`); two cannot,
+and for those this library says "not supported" where glibc says "done".
+`sigstack` sets a stack for signal handlers but gives no size; glibc guesses
+one and places it past the end of the caller's memory. `profil` starts
+profiling that needs a timer this system does not have; answering "done"
+would leave a program waiting for data that never comes.
+
+| Call | Here | glibc 2.39 | Why |
+|---|---|---|---|
+| `sigstack(ss, oss)` | -1, `ENOSYS` | 0: `sigaltstack` with `ss_sp` as the base and `MINSIGSTKSZ` bytes up from it | By the old convention `ss_sp` is the stack's *top*, so the kernel is handed memory above the caller's buffer, and a signal frame written there corrupts whatever follows it. `sigaltstack` is the call that works. |
+| `profil(buf, ...)` starting | -1, `ENOSYS` | profiling by `SIGPROF` | There is no `ITIMER_PROF` to drive it; `setitimer` refuses it the same way (§1004). Stopping (a NULL buffer or a scale of 0) is 0, as there. |
+| `isfdtype` on a bad descriptor | -1, `errno` `EBADF` | -1, `errno` put back as it was | The manual says `errno` is set; a -1 with `errno` unchanged cannot be told from a stale one. |
+| `sigblock`, `sigsetmask`, `siggetmask` | signal 32 is bit 31 | bit 31 always clear | Signal 32 is `SIGRTMIN` here; glibc keeps 32 and 33 for its threads. The same difference as `strsignal`'s real-time numbers (commit f7a524b0d). |
+
+Refusing leaves a program a fallback it can act on, which "done" does not
+-- §1004's argument, applied again.
+
+**Where:** `posix/src/legacy.rs`.
+
+## 1145. `argz_replace` counts what glibc's manual says it counts, not what glibc's code counts
+
+**Date:** 2026-09-29
+**Decided by:** Claude (autonomous)
+**Lane:** D
+
+**In short:** `argz_replace` replaces a piece of text in a list of strings
+and can report how many replacements it made. glibc's manual says it adds
+"the number of replacements performed"; glibc's code adds one for each
+string it changed, however many replacements that string had. This library
+does what the manual says.
+
+| Option | *What changes:* |
+|---|---|
+| **The manual's** (taken) | Replacing `ab` in `ababab` adds 3. |
+| glibc's code | It adds 1. |
+
+A program that reads the count only as "did anything change" -- the usual
+use -- sees no difference; one that reads the number was told by the manual
+it is replacements.
+
+**Where:** `posix/src/argz.rs` (`argz_replace`), its test.
+
+## 1146. RFC 2292's option builders follow the RFC where glibc's part from it, and the multicast source filters are refused
+
+**Date:** 2026-09-29
+**Decided by:** Claude (autonomous)
+**Lane:** D
+
+**In short:** two groups of `<netinet/in.h>` calls needed a choice. The
+older IPv6 option builders (RFC 2292, 1998) build a header of options for
+a packet; glibc's builds a valid header but pads it more than the RFC's
+own examples do, reserves too little room for one call's option, and
+reports the end of a header as an error. This library does what the RFC
+says. The multicast source filters ("only accept this group's packets from
+these senders") have nothing under them here; this library says so rather
+than accept the filter and apply nothing.
+
+| Call | Here | glibc 2.39 | Why |
+|---|---|---|---|
+| `inet6_option_append`, `inet6_option_alloc` | the least padding that puts an option on `xn + y`; the header's tail padding moved to the new end | rounds up to a multiple of `x`, then adds `y`; keeps each tail padding | RFC 2292 section 6.3.7's example puts an `8n + 2` option straight after the two header bytes, which glibc's would pad 8 more; both are valid headers |
+| `inet6_option_alloc(cmsg, datalen, ...)` | room for `datalen` data bytes and the type and length bytes | `datalen` bytes | the RFC: `datalen` "is the value of the option data length byte"; a caller following it overruns glibc's reservation |
+| `inet6_option_next` at the end | -1, `*tptrp` NULL | -1, `*tptrp` past the last option | the RFC: NULL means no more; not NULL means an error |
+| `getsourcefilter` and its three kin | -1, `ENOPROTOOPT`, after the descriptor and address checks | the kernel's answer | the sockets keep no source filters, and `setsockopt` accepts options it does not know without acting on them; §1144's rule |
+
+RFC 3542's builders (`inet6_opt_*`, `inet6_rth_*`) are glibc's exactly;
+there the two agree.
+
+**Where:** `posix/src/inet6.rs`.
+
+## 1147. `<dlfcn.h>` answers as glibc's does in a static program, but for `dladdr`, which names the program, and `RTLD_NOLOAD`, which is not an error
+
+**Date:** 2026-09-29
+**Decided by:** Claude (autonomous)
+**Lane:** D
+
+**In short:** every program here is linked statically -- nothing is ever
+loaded into it -- so the dynamic linker's calls (`dlopen`, `dladdr` and the
+rest) describe one object, the program, and this library answers them as
+glibc does in a statically linked program, with two exceptions. For an
+address inside the program, `dladdr` names the program instead of saying "no
+object here": that is what glibc says for a dynamically linked program and
+what POSIX describes, static glibc saying nothing only because it keeps no
+address range for its program. And `dlopen` of a file with `RTLD_NOLOAD`
+("only if it is already loaded") returns NULL with no error message, where
+static glibc goes looking for the file and complains when it is missing:
+nothing here looks for files.
+
+| Call | Here | glibc 2.39, statically linked | Why |
+|---|---|---|---|
+| `dladdr(addr)`, `addr` in the program | 1: argv[0], the ELF header, no symbol | 0 | POSIX: the executable is an object `dladdr` describes; glibc's dynamic answer is this one; `backtrace_symbols` and error reporters can then name the program |
+| `dlopen(file, RTLD_NOLOAD)` | NULL, no message | NULL, with `file: cannot open shared object file: No such file or directory` for a missing file and no message for one found and not loaded | nothing is searched here; "not loaded" is the answer asked for, and glibc's own for a file it finds |
+| `dlopen(file)` | NULL, `file: cannot open shared object file: dynamic loading is not supported` | loads it, or says why not | there is no dynamic loader |
+| `dlinfo(RTLD_DI_SERINFOSIZE)` | an empty search path: 16 bytes, no directories | glibc's four default directories | nothing is searched |
+| `dl_iterate_phdr` | one call; `dlpi_adds` 1 | two, the vDSO's too; `dlpi_adds` 2 | there is no vDSO |
+
+Everything else -- `dlopen`'s handles and mode checks, the messages,
+`RTLD_NEXT`, `dlclose`, `dlinfo`'s requests, `dlmopen`'s one namespace,
+`_dl_find_object`'s segment -- is glibc's static answer exactly, replayed by
+`posix/src/dlfcn.rs`'s tests from `posix/tools/oracle/dlfcn_harness.py`'s
+record of it.
+
+**Where:** `posix/src/dlfcn.rs`.
+
+## 1148. `fnmatch` follows POSIX and glibc's manual in the three places glibc's does not
+
+**Date:** 2026-09-29
+**Decided by:** Claude (autonomous)
+**Lane:** D
+
+**In short:** `fnmatch` (does a name fit a wildcard pattern?) is written
+from POSIX and, for glibc's extra flags, from glibc's manual, and checked
+against glibc 2.39's answers -- two million of them agree. In three narrow
+places glibc's answer contradicts the text it implements, and this library
+follows the text: a pattern like `*\/` finds the slash it names, a wildcard
+before a ksh-style group finds the matches glibc misses at the end of a
+string, and "match a leading directory" applies to the whole pattern. Each
+is a case where glibc says "no match" (or, for the last, a mix) for a string
+the definition says matches; no program relies on those answers, and a
+program written from the documentation gets what it expects.
+
+| Pattern, flags | Here | glibc 2.39 | The text |
+|---|---|---|---|
+| `*\/`, `FNM_PATHNAME` | matches `a/` and `/` | matches nothing | POSIX: "a <backslash> ... followed by any other character shall match that second character", and a slash is to be "explicitly matched by a <slash> in pattern" -- which an escaped one is |
+| `*@(a\|)`, `*!(a)`, `**(a/b)`, `FNM_EXTMATCH` | match what the groups allow | a `*` before a group tries every split of the string but the last, and `**(x)` is read as `*` | glibc's manual: the group "matches if ... any of the patterns in the pattern-list allow matching the input string" |
+| `!(a)`, `*(a)b`, `FNM_EXTMATCH\|FNM_LEADING_DIR` | whether the string starts with a directory name the whole pattern matches | the flag applied inside the alternatives of `*`, `+` and `!` groups, and not of `@` and `?` ones | glibc's manual: "test whether string starts with a directory name that pattern matches" |
+
+The alternative -- replaying glibc's answers exactly -- would mean
+reproducing an off-by-one in its search loop and an inconsistency between
+two of its group functions, neither documented nor intended. The cost is a
+difference a program could only observe by depending on glibc failing to
+match. `posix/src/fnmatch_deviations.txt` lists all 1,443 affected cases of
+the oracle's, generated by `posix/tools/oracle/fnmatch_model.py`, which
+states these rules executably.
+
+**Where:** `posix/src/fnmatch.rs`.
+
+## 1149. `glob` answers `*/` as glibc answers `**/`, and `GLOB_NOCHECK` returns the whole pattern
+
+**Date:** 2026-09-29
+**Decided by:** Claude (autonomous)
+**Lane:** D
+
+**In short:** `glob` (expand a wildcard pattern into the file names it
+matches) is written from POSIX and glibc's manual and checked against
+glibc 2.39's answers over a test directory tree -- 1,545 of 1,568 agree. The
+23 that do not come from two places where glibc contradicts itself or POSIX.
+First, glibc handles a pattern that is one character followed by a slash
+(`*/`, `?/`) by a different route from every longer one: `*/` with
+`GLOB_MARK` gives `dir1//` where `**/` -- which matches exactly the same
+names -- gives `dir1/`. This library answers `*/` as glibc answers `**/`.
+Second, when nothing matches and `GLOB_NOCHECK` asks for the pattern back,
+glibc returns `??/` as `??`, dropping the slash; POSIX says the pattern
+itself, which this returns.
+
+| Pattern, flags | Here | glibc 2.39 | glibc for the same names spelled longer |
+|---|---|---|---|
+| `*/`, `GLOB_MARK` | `dir1/ dir2/ ...` | `dir1// dir2// ...` | `**/`: `dir1/ dir2/ ...` |
+| `*/`, `GLOB_PERIOD` | `../ ./ dir1/ ...` | `dir1/ ...` | `**/`: `../ ./ dir1/ ...` |
+| `?/`, `GLOB_PERIOD` | `./` | no match | `[!x]/`: `./` |
+| `*/`, any flags: `GLOB_MAGCHAR` | set | not set | `**/`: set |
+| `??/`, `GLOB_NOCHECK`, nothing matching | `??/` | `??` | `a/`, `?/`: the pattern, slash and all |
+
+**Why the first is glibc's accident.** The answers show two routes. `X/`
+with two or more characters in `X` is answered as `X` would be, directories
+only, each with its slash: the caller's flags apply to `X`. With one
+character, glibc treats the `*` as a directory part -- scanned with the
+restricted flags it gives directory parts, so no `GLOB_PERIOD` -- and the
+empty name after the slash as a name to look up, so no scan of a last
+component, so no `GLOB_MAGCHAR`; `GLOB_MARK` then marks `dir1/` again. (Its
+`glob.c` sends a trailing-slash pattern down the first route only past a
+length test on the part before the slash, which a single character fails.)
+Nothing in glibc's manual or header says a one-character pattern means
+something different; `**/`, `[!x]/` and the `*/` inside `*/*/` are all
+answered the first way. A program cannot want `dir1//`.
+
+**Why the second follows POSIX.** XSH `glob`, on `GLOB_NOCHECK`: "If pattern
+does not match any pathname, then glob() shall return a list consisting of
+only pattern". glibc keeps the slash for `a/` and `?/` and drops it only
+when two or more characters precede it -- the same route as above, from the
+other side.
+
+**Kept as glibc has it**, though a reading of the flags could argue
+otherwise: `GLOB_PERIOD` applies to the last component only -- a wildcard
+in a directory part never matches a leading `.`, so `*/*` does not walk
+through `..` -- because glibc does it consistently, programs written for
+glibc expect it, and the alternative makes `*/*/*` climb the tree.
+`GLOB_MAGCHAR` is glibc's rule, which its header's "set if any metachars
+seen" does not describe: set when the last component was matched against a
+directory's entries and something was found or `GLOB_NOCHECK` answered for
+it -- so not for `*/f1`, whose last component is looked up.
+
+**Cost:** a program that tests glibc's `dir1//` or its missing
+`GLOB_MAGCHAR` would see a difference; none is known to, and the doubled
+slash is a defect to any program that prints the names. The 23 probes are
+listed in `posix/src/glob_deviations.txt`, written by
+`posix/tools/oracle/glob_model.py`, which states these rules executably, and
+the tests check the two equivalences above for every flag set.
+
+**Where:** `posix/src/glob.rs`.
+
+## 1150. `fmtmsg` reads `SEV_LEVEL` at the first call of `fmtmsg` or `addseverity`, not only of `fmtmsg`
+
+**Date:** 2026-09-30
+**Decided by:** Claude (autonomous)
+**Lane:** D
+
+**In short:** `fmtmsg` prints diagnostics with a severity like `ERROR`, and
+extra severities can come from two places: the user's `SEV_LEVEL`
+environment variable and the program's own `addseverity` calls. glibc reads
+the environment variable lazily, at the first `fmtmsg`. So if a program
+calls `addseverity(5, "OVER")` before its first message and the user's
+`SEV_LEVEL` also defines level 5, the user's definition silently replaces
+the program's -- but if the program had printed one message first, the
+program's would win. This library reads the environment at the first call
+of either function, so the program's `addseverity` always wins, whatever
+order the calls come in.
+
+| A program, with `SEV_LEVEL=five,5,FIVE` in its environment | glibc 2.39 | here |
+|---|---|---|
+| `addseverity(5, "OVER")`, then `fmtmsg(..., 5, ...)` | prints `FIVE` | prints `OVER` |
+| `fmtmsg(...)`, `addseverity(5, "OVER")`, `fmtmsg(..., 5, ...)` | prints `OVER` | prints `OVER` |
+| `addseverity(5, NULL)` before the first `fmtmsg` | `MM_NOTOK` (5 is not yet defined), and 5 then prints `FIVE` | `MM_OK`, and 5 is no longer a level |
+
+Neither POSIX (which has no `SEV_LEVEL` or `addseverity`) nor glibc's manual
+says which of the two should win; glibc's answer depends on whether any
+message has been printed yet, which no program means to depend on. The other
+reading -- the environment always wins -- was the alternative: it would let
+a user override a program's level, but a program defines its levels to say
+what its messages mean, and the user's variable has its own levels to
+define. `posix/src/fmtmsg_deviations.txt` lists the three affected cases of
+the oracle's 804, generated by `posix/tools/oracle/fmtmsg_model.py`, which
+states the rule executably and agrees with glibc everywhere else.
+
+**Where:** `posix/src/fmtmsg.rs` (`Table::ensure_ready`).
+
+## 1151. `tmpfile`'s file keeps its name until the stream lets go of it, and a temporary name's directory test leaves `errno` alone
+
+**Date:** 2026-09-30
+**Decided by:** Claude (autonomous)
+**Lane:** D
+
+**In short:** a file from `tmpfile` must vanish when it is closed or the
+program exits. glibc makes that happen by deleting the file's name the
+moment it is created -- the open file carries on without one, and the
+system reclaims it at the last close. That trick does not work on this
+kernel: a descriptor reaches its file by name, so deleting the name cuts the
+program off from its own file. So `tmpfile` here keeps the name and deletes
+it when the stream is done with the file: `fclose`, `freopen` onto another
+file, or `exit`. The one thing a user could notice is that the file is
+visible in `/tmp` while the program has it open -- and that a program
+killed before it exits leaves the file behind, which the C standard allows.
+
+| | glibc 2.39 | here |
+|---|---|---|
+| the file while open | no name (`O_TMPFILE`, or unlinked at once); `fstat` says 0 links | `/tmp/tmpfXXXXXX`; 1 link |
+| removed | at the last close, by the kernel | at `fclose`, at `freopen` onto another file, at `exit` -- by the process that made it |
+| a program killed, or ending by `_exit` | removed | left in `/tmp` ("implementation-defined", ISO C 7.21.4.3) |
+| a child that inherited the stream closes it | nothing happens to the parent's | nothing happens to the parent's (the child does not remove it) |
+
+**The alternatives:** unlink at once as glibc does, which here loses the
+file's contents to the program itself -- every read and write after it
+fails; keep the old behaviour, never removing the file, which filled `/tmp`;
+or refuse `tmpfile` (`EOPNOTSUPP`) until the kernel can do it, which breaks
+every program that uses it for a file that works in every other way. The
+name-while-open difference is the least of these, and it is temporary:
+`O_TMPFILE` is tried first, so the day the kernel supports it `tmpfile` is
+glibc's with no change here; if instead descriptors come to outlive their
+names, one line makes `tmpfile` unlink at once
+(`known-issues.md` → `D-POSIX-TMPFILE-WAS-NEVER-REMOVED-AND-MKSTEMP-WAS-NOT-GLIBCS`).
+
+**Second, smaller:** glibc's test of whether a directory exists (for
+`tempnam`, `tmpnam` and `tmpfile`) is a `stat` whose failure it leaves in
+`errno`, so a `tempnam` that succeeds after passing over a missing
+`$TMPDIR` answers `errno` `ENOENT` -- undoing the care glibc's own
+`__gen_tempname` takes to leave `errno` as it was on success. POSIX leaves
+`errno` after a success unspecified, so neither is wrong; this library
+leaves it alone in both places, as it did before. The oracle's `tempnam`
+lines that say `ENOENT` after a name are the cases (`tempname.rs`'s
+`tempnam_is_glibcs` states the difference).
+
+**Where:** `posix/src/stdlib.rs` (`tmpfile`); `posix/src/stdio.rs`
+(`hold_temporary`, `release_temporary`, and `fclose`, `freopen` and
+`exit_cleanup` calling it); `posix/src/tempname.rs` (`dir_exists`).
+
+## 1152. `<sys/timex.h>`'s `struct ntptimeval` is glibc's, and musl's is renamed out of the way while its header is read
+
+**Date:** 2026-09-30
+**Decided by:** Claude (autonomous)
+**Lane:** D
+
+**In short:** a program that asks the clock for its time and error bounds
+with `ntp_gettimex` gets them in a `struct ntptimeval`, and on glibc that
+struct also carries the TAI offset (how many leap seconds atomic time is
+ahead of UTC) and four reserved words. musl's header defines the struct as
+it was before the TAI offset -- three fields -- so a glibc program that
+reads `tai` did not compile here, and a 72-byte answer written into musl's
+32-byte struct would run 40 bytes past it. The overlay's `<sys/timex.h>`
+now gives C glibc's struct. C lets a struct be defined only once, so while
+musl's header is read, its struct is given another name, which nothing
+refers to.
+
+| | before | now |
+|---|---|---|
+| `struct ntptimeval` | musl's: `time`, `maxerror`, `esterror` (32 bytes) | glibc's: those, `tai`, and four reserved words (72 bytes) |
+| `ntp_gettimex` | missing | fills all of it, the reserved words 0 |
+| `ntp_gettime` | missing | in C, `ntp_gettimex` under that name, as glibc's header makes it; the library's own `ntp_gettime` fills the older three fields, for what calls it by name, as glibc's does |
+
+**The alternatives:** replace musl's `<sys/timex.h>` outright, as the
+overlay's `<glob.h>` replaces musl's -- the overlay would then carry musl's
+`struct timex` and its hundred-odd `ADJ_`, `STA_` and `TIME_` constants
+itself, and have to keep them in step with musl's; or keep musl's struct and
+declare `ntp_gettimex` over it, which leaves glibc programs that read `tai`
+uncompilable and every call writing past the caller's struct. The rename is
+sound here because musl declares nothing that takes its struct: the name
+`__slateos_musl_ntptimeval` is never used again, and `check-libc-overlay.py`
+holds the struct that is used to glibc's layout. `<glob.h>` could not be
+done this way -- musl's own `glob` and `globfree` are declared with its
+`glob_t`.
+
+**Where:** `posix/include/sys/timex.h`; `posix/src/sys_timex.rs`
+(`NtpTimeval`, `ntp_gettime`, `ntp_gettimex`).
+
+## 1153. `/etc/aliases` is read as glibc reads it but in four places, where glibc's reader of it does what its readers of every other database do not
+
+**Date:** 2026-09-30
+**Decided by:** Claude (autonomous)
+**Lane:** D
+
+**In short:** the mail aliases file says what an address such as
+`postmaster` stands for. glibc's reader of it has four faults its readers of
+the other databases do not share: a stray comma (`a: x,,y`) makes it loop
+for good, so the program hangs; an entry too big for the caller's buffer is
+lost instead of coming again with a bigger one; an indented entry after an
+empty line can be listed but not looked up; and an `:include:` file that is
+missing leaves an error code behind after a call that succeeded. This
+library reads the file as glibc does in every other respect, and in these
+four does what glibc does everywhere else.
+
+| | glibc 2.39 | here |
+|---|---|---|
+| an empty member: `a: x,,y`, `a: ,x`, a carried-on line that starts with `,` | loops for good | passed over (`a` has `x` and `y`), as glibc's own `:include:` reading passes over one |
+| `getaliasent_r` given a buffer too small for the next entry | `ERANGE`, and the entry is lost: the next call starts partway into it | `ERANGE`, and the same entry comes next time -- what glibc does for every other database |
+| `getaliasent`, which retries with a bigger buffer, on an entry over 1 KiB | passes over it | gives it |
+| `getaliasbyname` for an entry that begins with white space after an empty line | NULL, though `getaliasent` lists it | the entry |
+| `errno` after enumerating past an `:include:` that cannot be opened | `open`'s error, the call having succeeded | as it was, as after any other enumeration |
+
+**The alternatives:** reproduce all four, so that a typo in `/etc/aliases`
+hangs whatever reads it and a mail system enumerating its aliases loses the
+long ones without a word; or leave `<aliases.h>` out. POSIX does not
+specify these functions and glibc's manual describes none of the four;
+glibc's other readers show what its interface means. Everywhere else the
+tests replay glibc's answers (`aliases_oracle.txt`), and in these four they
+state the difference -- glibc's loops are in the oracle as `loops`, from a
+five-second timeout.
+
+**Not a difference:** with no `/etc/aliases`, a lookup fails with `ENOENT`,
+as glibc's -- there is no built-in copy, as there is for `/etc/services`
+(section 1113's reasoning is about registries, and aliases are a site's own).
+
+**Where:** `posix/src/aliases.rs`.
+
+## 1154. A netgroup triple over 1 KiB is read: `getnetgrent`'s block grows and `innetgr` has no buffer
+
+**Date:** 2026-09-30
+**Decided by:** Claude (autonomous)
+**Lane:** D
+
+**In short:** netgroups are named sets of (host, user, domain) triples in
+`/etc/netgroup`. glibc reads a triple into a fixed 1 KiB buffer in two
+places -- `getnetgrent`, which returns them one by one, and `innetgr`,
+which asks whether a group has one -- and a longer triple is treated as the
+end: `getnetgrent`'s enumeration stops there, and `innetgr` looks no further
+in that group. Here both read a triple of any length: `getnetgrent`'s block
+grows, as every other non-reentrant lookup's does in glibc and here, and
+`innetgr` compares the triple where it lies. Every other answer is glibc's
+(`netgroup_oracle.txt`).
+
+| | glibc 2.39 | here |
+|---|---|---|
+| `getnetgrent` at a triple over 1 KiB | 0, as at the end; the triples after it are never given | the triple, and the ones after it |
+| `innetgr` for a triple after one over 1 KiB in the same group | 0, the group's scan abandoned | 1 |
+| `getnetgrent_r` with a buffer too small | 0, `errno` `ERANGE`, the same triple next time | the same |
+
+**The alternatives:** reproduce the limit, which loses the end of a group
+without a word -- no error tells the caller the enumeration was cut short;
+or make it an error, which no caller of a function that returns 0 at the
+end could see either. glibc's `getpwnam`, `getgrnam` and the rest grow
+their buffers; its netgroup functions are the ones that do not.
+
+**Where:** `posix/src/netgroup.rs` (`getnetgrent`, `innetgr`).
+
+## 1155. A cancelled asynchronous lookup says so, and counts as answered for its batch
+
+**Date:** 2026-09-30
+**Decided by:** Claude (autonomous)
+**Lane:** D
+
+**In short:** `getaddrinfo_a` looks names up in the background, and
+`gai_cancel` takes a request out of the queue before it runs. On glibc the
+cancelled request is then left saying "still being looked up" for ever: its
+`gai_error` answers `EAI_INPROGRESS` -- while a second `gai_cancel` calls it
+finished -- and the batch it came in never counts it, so a caller waiting
+for the batch waits for ever and a batch to be announced is never announced.
+Here a cancelled request's `gai_error` is `EAI_CANCELED`, as the
+getaddrinfo_a(3) manual page says it is, and cancelling it counts as its
+answer: the waiting caller returns, the announcement comes.
+
+| | glibc 2.39 | here |
+|---|---|---|
+| `gai_error` of a cancelled request | `EAI_INPROGRESS`, for ever | `EAI_CANCELED` |
+| `gai_suspend` on it | not woken by the cancellation | woken; then `EAI_ALLDONE`, nothing listed being looked up |
+| `getaddrinfo_a(GAI_WAIT, ...)` whose request another thread cancels | waits for ever | returns 0 |
+| a `GAI_NOWAIT` batch with a cancelled request | never announced | announced once the rest have answers |
+
+**The alternatives:** reproduce it, so that a program which cancels a request
+and polls `gai_error` until it stops saying `EAI_INPROGRESS` -- the loop the
+interface invites -- spins for ever, and a waiting batch hangs; or refuse to
+cancel (`EAI_NOTCANCELED` always), which glibc does not do either. glibc's
+own answers disagree with each other here (in progress to `gai_error`,
+finished to `gai_cancel`); the manual page gives the answer taken.
+
+**Not a difference:** `gai_suspend` answers `EAI_ALLDONE`, not 0, when every
+request it is given already has its answer. glibc's code meant 0 there -- the
+test it has for it can never succeed -- but "all done" is the error's own
+name for that case, and programs written against glibc have met only this.
+
+**Where:** `posix/src/gai_a.rs`.
+
+## 1156. A call that waits in the C library ends for a signal as glibc's does on Linux: only for a handler that ran on its own thread, and despite `SA_RESTART` wherever Linux's kernel would not restart it
+
+**Date:** 2026-09-30
+**Decided by:** Claude (autonomous)
+**Lane:** D
+
+**In short:** some calls wait inside this library rather than in the
+kernel -- `sem_wait`, the message queues, System V's `msgrcv` and `semop`,
+`io_getevents`, `aio_suspend`, `gai_suspend`, Linux's `futex()`. When a
+signal comes, each must decide whether to fail with "interrupted" (`EINTR`)
+or keep waiting. They now decide as glibc's do on Linux, which is not what
+POSIX's text alone gives: POSIX has a handler installed with `SA_RESTART`
+restart every such call, and Linux ends some of them anyway -- the timed
+waits, System V's calls, `io_getevents`. This follows Linux, because the
+programs written for it count on those interruptions.
+
+### The decision
+
+Three rules, from glibc 2.39's answers on Linux -- 115 cases in
+`posix/src/interrupt_oracle.txt` (`posix/tools/oracle/interrupt_harness.py`),
+replayed by `interrupt::tests::every_interruption_is_glibcs`:
+
+1. **A signal that runs no handler on the waiting thread never ends the
+   call**: one set to `SIG_IGN`, one ignored by default (`SIGCHLD`,
+   `SIGURG`), a stop and continue, one another thread handles.  POSIX says
+   so too (XSH 2.4.4: "Signals that are ignored shall not affect the
+   behavior of any function").
+2. **A handler installed without `SA_RESTART` ends every one of them**, with
+   `EINTR` (`gai_suspend`: `EAI_INTR`).
+3. **A handler installed with `SA_RESTART` ends only the calls Linux's kernel
+   never restarts**: the timed semaphore waits, `msgsnd`, `msgrcv`, `semop`,
+   `semtimedop`, `io_getevents`, and `aio_suspend`, `gai_suspend` and
+   `futex(FUTEX_WAIT)` when given a timeout.  `sem_wait`, the message-queue
+   calls (timed or not), and the untimed `aio_suspend`, `gai_suspend` and
+   `futex` wait on.
+
+The thread functions POSIX forbids to answer `EINTR` (`pthread_mutex_lock`,
+`pthread_cond_wait` and the rest) and `getaddrinfo_a(GAI_WAIT)` end for no
+signal, here as in glibc.
+
+### The alternative: POSIX's `SA_RESTART` alone
+
+XSH `sigaction`: "If set, and a function specified as interruptible is
+interrupted by this signal, the function shall restart and shall not fail
+with [EINTR] unless otherwise specified."  Read strictly, that restarts
+`semop`, `msgrcv` and `sem_timedwait` too; glibc's manual says as much in
+general ("return from that handler will resume a primitive"), and
+signal(7) as Ubuntu 24.04 ships it lists `sem_timedwait`, with `sem_wait`,
+among the calls `SA_RESTART` restarts -- which the oracle shows Linux does
+not do for `sem_timedwait`.
+
+- **For:** the letter of both texts, and one rule where this has two.
+- **Against:** a program written for Linux that installs its shutdown
+  handler with `signal()` -- which sets `SA_RESTART` -- and waits in
+  `msgrcv` or `semop` for work gets `EINTR` there on Linux, checks its flag
+  and exits.  Restarting would leave it waiting for work that never comes.
+  Linux's behaviour is not an accident to be corrected: signal(7) lists the
+  System V calls and `io_getevents` as "never restarted", and the kernel's
+  restart machinery is built to end timed waits (`ERESTART_RESTARTBLOCK`,
+  which any handler turns into `EINTR`).  And no ported program can depend
+  on `SA_RESTART` keeping one of these calls going, since on Linux it does
+  not.
+
+This is D-Q6's rule applied with its purpose rather than its letter: it
+departs from glibc where glibc contradicts its standards; here glibc
+contradicts POSIX's and its own manual's general statement, and is followed,
+because what it does is the kernel's documented, deliberate behaviour and
+the one the programs are written against.
+
+### How a wait tells, which is not a choice but is not obvious
+
+The native kernel cannot see a disposition or `SA_RESTART` -- they are this
+library's table -- so it ends a futex wait for every signal it hands the
+trampoline.  The trampoline's dispatch, which runs on the thread whose wait
+was ended, counts in that thread's block each handler it runs and those
+installed without `SA_RESTART`; a wait compares the counts with a mark taken
+before it slept (`posix/src/interrupt.rs`).  The calls that are system calls
+on Linux (the message queues, System V's, `io_getevents`, `futex`) take the
+mark as the call begins, since a signal arriving anywhere in a Linux system
+call is still pending when it next sleeps; the calls glibc builds from futex
+waits in user space (`sem_wait`, `aio_suspend`, `gai_suspend`) take one per
+sleep, since a handler that runs between two of glibc's sleeps is over by
+the second.  `io_pgetevents` takes its mark before it sets its signal mask,
+so that a signal the mask lets through as it is set ends the call, as the
+atomic mask-and-sleep of Linux's makes it.
+
+**Where:** `posix/src/interrupt.rs`, `posix/src/lowlevellock.rs`
+(`futex_wait_interruptible`), and the calls: `semaphore.rs`, `mqueue.rs`,
+`sysv_msg.rs`, `sysv_sem.rs`, `linux_aio_abi.rs`, `aio.rs`, `gai_a.rs`,
+`linux_futex.rs`.
+
+## 1157. A sleep, and each slice of the library's polling loops, is a timed futex wait on a word of its own, which the kernel ends for a signal -- not `SYS_SLEEP`, which sleeps its full time
+
+**Date:** 2026-09-30
+**Decided by:** Claude (autonomous)
+**Lane:** D
+
+**In short:** `sleep`, `nanosleep`, `usleep` and `clock_nanosleep` slept in
+the kernel's `SYS_SLEEP`, which no signal ends: a program that caught
+`SIGINT` during `sleep(10)` ran its handler ten seconds later, and
+`nanosleep` never answered `EINTR`. The loops the library builds from the
+kernel's non-blocking calls -- `poll`, `select`, `epoll_wait`, the socket
+waits, `flock`, the timerfd and inotify reads -- slept their 10 ms slices the
+same way. All of them now sleep in a timed futex wait on a word nothing ever
+wakes: the kernel ends that wait for a signal, and the counts
+`posix/src/interrupt.rs` keeps say whether a handler ran here.
+
+### The alternative: an interruptible `SYS_SLEEP`
+
+Ask lane A for a `SYS_SLEEP` that the kernel ends for a signal and that
+answers the time left, as Linux's `hrtimer_nanosleep` does.
+
+- **For:** the kernel's own sleep, which picks a tick-based path for sleeps
+  over 100 ms to spare its high-resolution timers; and the remaining time
+  from the kernel rather than from a second clock read.
+- **Against:** a kernel change for a fault that is entirely this library's
+  to fix, with the lane waiting on it; and a second mechanism beside the futex
+  wait every other interruptible wait here already uses, with its own
+  restart rules to keep in step. The timer cost is the one every timed wait
+  already pays -- the hrtimer queue is sized for one timer per task in a
+  timed wait (`kernel/src/hrtimer.rs`, 256 a CPU before it even warns, 4096
+  before it refuses) -- and a sleep is one such task. The remaining time is
+  the deadline less the clock, read once as the sleep ends.
+
+### Consequences
+
+- A signal handler ends a sleep at once, `SA_RESTART` or not (Linux never
+  restarts one), with the time left in `nanosleep`'s `rem` and
+  `clock_nanosleep`'s `remain`, and `sleep` answering the whole seconds
+  left, truncated, as glibc's does.
+- The polling loops stay polling loops -- 10 ms slices, and 2 ms for
+  `flock`, which had spun on `yield` -- but a signal ends a slice at once, and
+  a handler ends the call by its rule: `Never` for `poll`, `select` and
+  `epoll_wait` (signal(7)), `IfAsked` for the reads, `accept` and `flock`,
+  `Never` for a socket with a timeout.
+- `pause` and `sigsuspend` wait the same way rather than polling a count
+  every 2 ms, which also closed a lost wake-up in `sigsuspend`.
+
+**Where:** `posix/src/lowlevellock.rs` (`sleep_until`, `nap`),
+`posix/src/time.rs`, `posix/src/poll.rs`, `posix/src/epoll.rs`,
+`posix/src/socket.rs`, `posix/src/file.rs`, `posix/src/signal.rs`.
+
+## 1158. `sigwait` takes its signal from the trampoline's dispatch, with the set let through by the kernel's mask alone -- not from the kernel's pending set, and not by unblocking it in the program's mask
+
+**Date:** 2026-09-30
+**Decided by:** Claude (autonomous)
+**Lane:** D
+
+**In short:** `sigwait`, `sigtimedwait` and `sigwaitinfo` were stubs that
+took no signal. They now take one the way the rest of this library handles
+signals: the kernel delivers it to the trampoline, and the dispatch, instead
+of running a handler, hands it to the thread waiting for it. While a thread
+waits, only the kernel's copy of the signal mask lets its set through; the
+program's own mask -- what `sigprocmask` reports, and what a handler sets
+and restores -- still blocks it.
+
+### Alternative 1: take the signal from the kernel's pending set
+
+Ask lane A for a native call that takes a pending signal of a set without
+delivering it, as `rt_sigtimedwait` already does for Linux programs here
+(`kernel/src/syscall/linux.rs`, over `take_pending_in_mask`).
+
+- **For:** the set stays blocked throughout and no mask changes at all; the
+  kernel's record of the signal -- its sender, its code, its value -- could
+  come with it, where the native frame brings the number alone; and the
+  kernel arbitrates between several waiters.
+- **Against:** a kernel change with the lane waiting on it, for a call the
+  library can serve today from what it has. The call would also have to end
+  for a handler that runs on the waiting thread, as glibc's does, which is
+  more than taking a signal.
+
+### Alternative 2: unblock the set in the program's mask while waiting
+
+What this change's first draft did: note the mask, clear the set from it,
+wait, put the noted mask back.
+
+- **For:** no second idea of the mask to keep in step.
+- **Against:** the mask is one word for the whole process, and every other
+  writer of it notes and restores it too. A handler that ends on another
+  thread while the wait is under way puts back the mask it found -- the set
+  blocked -- and the waiter sleeps through its own signal. One that began
+  during the wait and ends after it reopens the set, and the next signal of
+  it runs its disposition -- the default one, fatal for most -- instead of
+  waiting, pending, for the next `sigwait`. And `sigprocmask` would report
+  the set unblocked, which on Linux a waiting thread's mask never is.
+
+### What was done
+
+The kernel's mask is the program's less the union of the sets the waiters
+have published (`kernel_mask_now`), written again whenever either changes --
+and once more if another change raced the write, which a generation count
+detects, since two writers' masks can land in either order. The table of
+waiters is lock-free, the dispatch running in signal context on any thread:
+it hands a signal to a waiter free to take it before keeping it for one that
+has taken another, and a waiter that has stopped takes nothing.
+
+### Consequences
+
+- A signal of a set waited for is taken, with no handler run, by the thread
+  waiting for it, whichever thread the kernel delivers it to.
+- The dispatch no longer leaves a blocked signal pending while the kernel's
+  mask may still let it through (`keep_pending`): the kernel would have
+  delivered it straight back into the same dispatch, and again from there.
+- A child of `fork` forgets its parent's waiters, whose threads it lacks.
+- `sigwaitinfo`'s siginfo carries the number only, as long as the native
+  frame carries nothing more.
+- At most 32 threads wait at once (`ACCEPTORS`); a 33rd is told `EAGAIN`.
+
+**Where:** `posix/src/signal.rs` (`Acceptor`, `hand_to_a_waiter`, `accept`,
+`kernel_mask_now`, `sync_kernel_blocked_mask`, `keep_pending`,
+`forget_waiters_after_fork`); `posix/src/process.rs` (`fork_raw`).
+
+## 1159. The C library's own code is held free of warnings, as it ships, by a push gate on the library's trees -- not by making warnings errors in the crate, and not in gate 40
+
+**Date:** 2026-09-30
+**Decided by:** Claude (autonomous)
+**Lane:** D
+
+**In short:** A compiler warning that appears only when the C library is
+built for the real machine -- not for the development machine its tests run
+on -- went unnoticed for six commits, because every build that prints it
+passes anyway. A push that changes the library now has it compiled exactly
+as it ships, and is refused if the library's own code draws a warning. The
+refusal stops only the push that changes the library; it never fails the
+shared build that all six lanes' boot tests depend on.
+
+### Alternative 1: `#![cfg_attr(target_os = "none", deny(warnings))]` in posix
+
+- **For:** nothing to run or wire: every build for the target -- the
+  sysroot's, gate 40's, a scratch check -- fails at the source, at once.
+- **Against:** the toolchain is an unpinned nightly (`cargo +nightly`), and
+  a toolchain update that brings a new warning -- rustc gains lints most
+  releases -- would fail `toolchain/build-sysroot.ps1`, and every lane's
+  boot test with it, until lane D fixed posix, which only lane D may. A
+  warning is a defect to fix, not a reason to stop five other lanes.
+
+### Alternative 2: refuse warnings in gate 40 (`check-pinned-target-build.py`)
+
+- **For:** it already compiles posix for bare metal on every push that
+  touches it.
+- **Against:** it compiles for posix's pinned `x86_64-unknown-none`, not the
+  spec libc.a is built for (`posix/x86_64-slateos-libc.json`: hard-float,
+  among the rest); and it judges eight crates in one verdict, lane A's
+  `services/netstack` among them, over a `touches` that includes
+  `netproto/` -- so a warning in posix would refuse lane A's push.
+
+### Chosen: gate 51, `scripts/check-libc-target-warnings.py`
+
+- It reads `build-sysroot.ps1` for the crates it builds and the settings it
+  builds them with (`$sysrootFlags` as RUSTFLAGS, `$buildStd`, `--release`,
+  `$spec`, its `$env:` settings), and has no verdict if that script's cargo
+  line stops being the one it mirrors -- so the check cannot drift from what
+  ships.
+- `cargo check --message-format=json`: a warning or error in a crate whose
+  manifest is in the tree and not under `vendor/` -- posix, toolchain/stubs,
+  tzrules -- is refused; the vendored libm's 32 are counted and printed, not
+  refused (upstream's code, kept as upstream wrote it). An error in any
+  crate is refused, since the library then does not build.
+- Scoped to `posix/`, `tzrules/`, `toolchain/stubs/`,
+  `toolchain/build-sysroot.ps1` and itself; ~11 s when posix has changed,
+  ~2 s when not. Without a nightly toolchain with rust-src it exits 3 and
+  the hook reports it skipped.
+- **Against:** a check, not a build, so a lint that fires only at code
+  generation is not seen (`large_assignments` and its kind) -- a build of
+  posix is minutes where the check is seconds. And a toolchain update that
+  adds a warning still refuses lane D's pushes until it is fixed, which is
+  the point: the lane that owns the code is the one held to it.
+
+**Where:** `scripts/check-libc-target-warnings.py`; `scripts/hooks/pre-push`
+(gate 51).
+
+## 1160. `regexec` reports submatches by the standard's rule, not by the first path glibc's automaton finds -- and follows the standard in the places glibc contradicts itself
+
+**Date:** 2026-09-30
+**Decided by:** Claude (autonomous)
+**Lane:** D
+
+**In short:** a regular expression can often match the same text in more
+than one way -- `(a|ab)(c|bcd)(d*)` matches "abcd" as "a", "bcd" and "", or
+as "ab", "c" and "d" -- and a program asking `regexec` for the parts in
+parentheses gets one of those ways. POSIX says which: after the whole match is the
+leftmost and longest, "each subpattern, from left to right, shall match the
+longest possible string". glibc does not follow that rule; it takes the
+first way its internal automaton happens to find, which favours the first
+alternative and the greediest loop. This library's new `regcomp`/`regexec`
+follows the standard, so for a pattern where the two differ, `\1`, `\2`...
+come out as POSIX says rather than as glibc returns them. The whole match
+(where it starts and ends) is the same in both, except in a handful of
+places where glibc is simply wrong by its own answers elsewhere, and there
+this library gives the answer glibc gives everywhere else.
+
+**The rule, exactly.** "Longest subpattern first, left to right" is read as
+Okui and Suzuki formalise it (CIAA 2010, and Borsotti and Trofimovich after
+them): of all the ways -- parse trees -- the leftmost-longest match can be
+made, the one greatest when the trees are compared position by position in
+pre-order, each position by the length it matched (-1 for a subpattern that
+took no part). So a concatenation's elements are made as long as they can
+be in turn, the first first; of an alternation's branches that match the
+same text, the first; a repetition's iterations are made as long as they can
+be in turn, each past the minimum count non-empty, and one that matched
+nothing reports one empty iteration rather than none ("a null string shall
+be considered to be longer than no match at all", XBD 9.1, whose own
+example is `\(a*\)*` against "bc"). Then, as XSH regexec says, a group
+reports its last match, and a group inside another reports only within what
+that one reports.
+
+| Pattern | Subject | Here (POSIX) | glibc 2.39 | Why glibc's is wrong |
+|---|---|---|---|---|
+| `(a\|ab)(c\|bcd)(d*)` | abcd | (0,2) (2,3) (3,4) | (0,1) (1,4) (4,4) | the first subpattern is not the longest it can be |
+| `(a\|ab)b*` | ab | `\1`=(0,2) | (0,1) | same |
+| `((a)\|b)*` | ab | `\2`=-1 | `\2`=(0,1) | `\2` is inside `\1`, whose report is the last iteration, "b" -- `\2` took no part in it |
+| `(a?){2,3}` | a | `\1`=(1,1) | (0,1) | the first iteration is the longest, "a"; the second, required, is empty |
+| `(a*)+\1` | aaa | (0,3) | (0,2) | glibc misses the longer match altogether |
+| `(a*)*\1` | aaa | `\1`=(1,2) | `\1`=(0,-1) | a half-set pair is no submatch at all |
+| `$.` (no REG_NEWLINE) | "\n" | no match | (0,1) | glibc's `a$` does not match "a\nb" -- without REG_NEWLINE a newline is no line end, as POSIX says |
+| `(\Ba){0,2}` | a | (0,0) | (0,1) | glibc's own `\Ba` and `(\Ba)?` find no `\B` there |
+| `(^[a-c]{0,2}){0,2}.{2,}\|[^a]{0,1}` | aaa | (0,3) | no match | the second branch matches the empty string anywhere |
+| `\a`, REG_ICASE | a | (0,1) | no match | glibc upper-cases the pattern but not the escaped letter |
+| `[Z-a]`, REG_ICASE | | accepted | REG_ERANGE | the range is valid as written; glibc reads it as `[Z-A]` |
+| `(){32767}` and four more | | an answer | crash | |
+
+In the oracle (`posix/tools/oracle/regex_harness.py`, `regex_oracle.txt`,
+some 544,000 answers) the 16,444 lines of `posix/src/regex_deviations.txt`
+record, with both answers, each place the standard's is given instead of
+glibc's. By the harness's count of subjects: 8,259 differ in the submatches
+alone (the rule above); 1,662 have back-references (where glibc also misses
+matches); 5,599 are under REG_ICASE (the case of escapes and range ends),
+where 277 patterns also compile differently; 408 are where glibc's `\B`, `^`
+or `$` contradict its own answers; and 5 patterns crash glibc. `posix/tools/oracle/regex_model.py` computes the standard's answer
+by enumerating every parse -- independently of this library's engine, which
+dissects the match with automata -- and the harness refuses to write the
+files if the model and glibc disagree anywhere but in the submatches or one
+of those listed reasons.
+
+**Alternatives.**
+
+- *glibc's answers exactly.* That would mean reproducing its engine's
+  search order, which is nowhere documented, and its outright bugs (the
+  crashes, the missed matches, the half-set pairs, the `\B` and `^`
+  failures) -- the D-Q6 rule is glibc where POSIX leaves it open, and the
+  submatch rule is not left open.
+- *Fowler's "left-associative" reading of the rule*, under which
+  `(a|ab)(c|bcd)(d*)` makes the first two groups together as long as they
+  can be (glibc's answer happens to agree there). The text says "each
+  subpattern, from left to right", which is the reading above; it is also
+  Okui and Suzuki's, Kuklewicz's (regex-tdfa) and RE2C's.
+- *Empty iterations allowed anywhere* (dispreferred rather than excluded).
+  It only matters with back-references -- `(a*)*\1` against "a" could then
+  match (0,1) through an empty second iteration -- and glibc's answer there,
+  (0,1) with `\1`=(0,0), fits neither reading.
+
+**The cost.** A program ported from Linux that relies on glibc's particular
+choice of submatch -- a `sed` script using `\(a\|ab\)\(c\|bcd\)`, say -- sees
+the standard's instead. Such patterns are ambiguous by construction, and a
+program written from the standard, or tested against musl, BSD or AT&T's
+library, expects this.
+
+**Where:** `posix/src/regex.rs` and `posix/src/regex/`; the oracle and its
+model in `posix/tools/oracle/`.
+
+## 1161. `regex_t` is glibc's `struct re_pattern_buffer`, with offsets as wide as POSIX requires, and the GNU regex interface is the library's own
+
+**Date:** 2026-09-30
+**Decided by:** Claude (autonomous)
+**Lane:** D
+
+**In short:** glibc has two ways in to its regular expressions: POSIX's
+`regcomp` and `regexec`, and an older GNU one -- `re_compile_pattern`,
+`re_search` and the rest -- which reads a pattern in a syntax given as a set
+of bits (grep's, awk's, Emacs's ...) and works on the same structure, whose
+fields a program fills in and reads. This library had only the POSIX calls,
+on musl's version of the structure, which hides those fields. It now has
+the GNU calls too, on glibc's structure field for field, so that a program
+written for either interface compiles and runs here as on glibc. One thing
+differs on purpose: a position in the string (`regoff_t`) is a `long`, as
+POSIX requires and musl's is, where glibc's is an `int`.
+
+| | before | now |
+|---|---|---|
+| `regex_t` | musl's: `re_nsub`, then opaque bytes (64 in all) | glibc's `struct re_pattern_buffer`: `buffer`, `allocated`, `used`, `syntax`, `fastmap`, `translate`, `re_nsub` and seven bit-fields (64 bytes) |
+| `<regex.h>` | musl's, with glibc's extra flags and codes after it | `posix/include`'s own: glibc's, in its `_REGEX_LARGE_OFFSETS` form |
+| `regoff_t`, `regmatch_t` | `long`; 16 bytes | the same (glibc's: `int`; 8 bytes) |
+| the GNU calls | none | `re_set_syntax`, `re_compile_pattern`, `re_compile_fastmap`, `re_search`, `re_search_2`, `re_match`, `re_match_2`, `re_set_registers`, `re_syntax_options`, the `RE_*` syntax bits; BSD's `re_comp` and `re_exec` for `_REGEX_RE_COMP` |
+
+**Why glibc's structure.** The GNU interface is defined by its structure: a
+program sets `translate` and `fastmap` before compiling, may give
+`re_compile_pattern` a block of its own in `buffer` and `allocated`, sets
+`not_bol`, `not_eol` and `newline_anchor` before searching, and reads
+`re_nsub` and `can_be_null` after. glibc's `regex_t` is that structure, and
+a program may compile with one interface and use the other: `regexec` of a
+pattern `re_compile_pattern` compiled, `regfree` of either. musl's
+`regex_t` names none of those fields, and musl's header declares `regcomp`
+with it, so `<regex.h>` is replaced rather than extended -- as `<glob.h>`
+is, for the same reason.
+
+**Why not glibc's `regoff_t`.** POSIX: `regoff_t` is a signed integer type
+"that can hold the largest value that can be stored in either a ptrdiff_t
+type or a ssize_t type". glibc's is an `int`, and its header says why --
+"The traditional GNU regex implementation mishandles strings longer than
+INT_MAX" -- and keeps, under `_REGEX_LARGE_OFFSETS`, the form that does what
+POSIX asks ("POSIX 1003.1-2008 requires that regoff_t be at least as wide as
+ptrdiff_t and ssize_t"). This library's matcher has no such limit, musl's
+`regoff_t` was a `long` already, and every C program here is compiled
+against this header: so the header is glibc's in that form. A program that
+keeps a position in an `int` works as before; one that gives
+`re_set_registers` arrays of `int` must use `regoff_t`, as the interface
+says. `scripts/check-libc-overlay.py` holds `regmatch_t` and the five calls
+that take or return a `regoff_t` to this (`LAYOUT_OVERRIDES`,
+`TYPE_OVERRIDES`), and each entry to glibc's own type as well, so that a
+change in glibc's is seen.
+
+**As glibc does.** Each of the twenty-six syntax bits as glibc's parser reads
+it, and glibc's named syntaxes (`posix/tools/oracle/regex_gnu_harness.py`:
+every token and pair of tokens in each named syntax, and in context in each
+of POSIX's two with each bit turned over); a translate table applied to the
+pattern as glibc applies it, and to the string; `re_search` forwards,
+backwards, and over two strings, with glibc's handling of its arguments; the
+registers allocated, grown or used as they are, with the extra -1 element
+glibc's code adds; the fastmap -- the bytes a match can begin with -- as
+glibc's automaton gives it, down to the lower-case letters a negated bracket
+expression puts in under RE_ICASE, none of which can begin a match;
+`re_comp` and `re_exec` with their one pattern. The submatches are the
+standard's, as `regexec`'s are (§1160).
+
+**Where not.**
+
+- With a translate table, an escaped letter stands for its translation, as
+  glibc's header says the table is applied "to a pattern when it is
+  compiled"; glibc's stands for itself, which a translated string never
+  holds, so `\A` under a case-folding table matches nothing there -- the
+  same fault as REG_ICASE's `\a` (§1160), and the same answer.
+- No match begins or ends past `re_search_2`'s `stop`. glibc's search goes
+  on past it and finds an empty match there -- `$` at the end of the second
+  string, with `stop` at 2 -- though its header says the search stops at
+  `stop`.
+- `re_comp` and `re_exec` take turns at their one pattern under a lock,
+  where two threads would race on glibc's; and `re_exec` before any pattern
+  answers 0, where glibc's reads through a NULL pointer and crashes.
+
+The oracle's cases where glibc answers otherwise -- 100 of some 44,900 --
+are in `posix/src/regex_gnu_deviations.txt`, each with this library's
+answer.
+
+**The alternatives.**
+
+- *musl's `regex_t`, and a separate `struct re_pattern_buffer` for the GNU
+  calls*: nothing changes for a program that uses POSIX's calls alone, but
+  one that mixes the two, as glibc allows, fails to compile.
+- *glibc's header exactly, its `int` `regoff_t` and all*: the layouts
+  glibc's own binaries have -- but no binary built against glibc runs here,
+  so all that would be gained is the limit POSIX forbids.
+- *No GNU interface*: programs that bring their own copy of the engine
+  (gnulib's) still build; those that call glibc's do not.
+
+**Where:** `posix/include/regex.h`; `posix/src/regex.rs`,
+`posix/src/regex/parse.rs`, `posix/src/regex/fastmap.rs`;
+`scripts/check-libc-overlay.py`.
+
+## 1162. GNU obstacks are glibc's: its older interface, its chunk sizes, and an `obstack_printf` that reaches the chunks only by name
+
+**Date:** 2026-09-30
+**Decided by:** Claude (autonomous)
+**Lane:** D
+
+**In short:** an obstack (GNU's "object stack") is a heap a program keeps
+for itself. Objects go one after another into large blocks ("chunks") that
+the program's own allocation function supplies; one object at a time can
+grow at the end until it is finished; and freeing one object frees
+everything made after it. elfutils, among others, uses the C library's.
+Almost all of it is macros in `<obstack.h>`, which the program compiles
+into itself; the library has only the functions those macros call when a
+chunk runs out. This library had none of it. It now has glibc 2.39's: the
+same structure field for field, the macros doing what glibc's do, and the
+functions asking the program's allocation function for exactly the sizes
+glibc's ask for -- which the program can see.
+
+| | glibc 2.39 | gnulib's own | here |
+|---|---|---|---|
+| lengths, `_obstack_memory_used` | `int` | `size_t` | `int` |
+| the chunk size, the allocation function's argument | `long` | `size_t` | `long` |
+| `alignment_mask` | `int` | `size_t` | `int` |
+| `struct obstack` on x86-64 | 88 bytes | 88 bytes, each field at glibc's offset | glibc's |
+
+**Why glibc's older interface.** glibc has kept the interface obstacks had
+in the 1990s, `int` lengths and all, for its binaries' sake. gnulib's
+obstack module has a newer one, with `size_t`, and compiles it into the
+program whenever the C library's `_obstack_memory_used` returns an `int` --
+on glibc, that is, and so here. Programs are therefore of two kinds: those
+written against glibc's header, which want glibc's interface, and those
+that bring gnulib's and never call the library's functions at all, which
+want only that the library's stay out of their way (below). So the
+interface is glibc's (D-Q6's rule: glibc 2.39 is the oracle). Its limit is
+glibc's too: an object of 2 GiB or more cannot be made.
+
+**As glibc does** (`posix/tools/oracle/obstack_harness.py`: twenty-five
+scenarios, each operation's resulting state replayed against the library
+by `posix/src/obstack.rs`'s tests). A first chunk of 4064 bytes and an
+alignment of 16 when the program asks for neither; each new chunk asked
+for at the object's size plus the length wanted, plus an eighth of the
+object, plus the alignment mask, plus 100 bytes -- never less than the
+chunk size; the chunk an object leaves freed when the object was all it
+held, unless it may hold an empty object as well; an object's start
+aligned as an address, not as an offset in its chunk; `obstack_free` back
+to an object in any chunk, and an abort for an address in none; the
+default failure handler printing "memory exhausted" and exiting with
+`obstack_exit_failure`, which is 1. `obstack_printf` and `obstack_vprintf`
+add their output to the growing object with no NUL after it, as glibc's
+do, and so do their fortified `__obstack_printf_chk` and
+`__obstack_vprintf_chk`.
+
+**The header's macros.** `posix/include/obstack.h` follows glibc's
+installed header macro for macro (D-Q6 lists it): the GNU C forms, which
+evaluate each argument once, and the portable forms, which go through the
+obstack's `temp` field. Both are held to glibc: the harness builds its own
+program against this header and glibc's functions, in each form, and must
+print glibc's answers line for line (`obstack_harness.py --header`); and
+`services/ctest-obstack` is the same program built for SlateOS, against
+this header and this library.
+
+**`obstack_printf` reaches the chunks only by name.** Each new chunk
+`obstack_printf` needs is had through `_obstack_newchunk`, called by its C
+name, as glibc's is. A program with gnulib's obstacks has its own
+`_obstack_newchunk`, and the call is to that; were it to the library's own,
+linking would bring the library's obstack functions in beside the
+program's, and two definitions of each would refuse to link. For the same
+reason printf's core holds no reference to obstacks at all -- its
+destination is a function and a context, which `obstack_vprintf` passes --
+and `scripts/check-libc-shape.py` makes obstack a strict family: its
+functions in one archive member with nothing else, and nothing outside it
+referring to anything in it but their names.
+
+**Where not.** A failure handler that returns -- glibc's manual says it
+must exit or longjmp -- leaves glibc's `_obstack_newchunk` going on through
+the null chunk it could not have, and it faults. This library aborts at
+that point instead: the result is the same, the process ends, but it ends
+before the macro that asked for room can write past the chunk there is.
+`services/ctest-obstack` checks it (its exit 2).
+
+**The alternatives.**
+
+- *gnulib's newer interface, `size_t` throughout*: objects past 2 GiB, but
+  not glibc's interface -- a program written for glibc's, printing
+  `obstack_object_size` with `%u` as its `unsigned` asks, or declaring
+  `_obstack_memory_used` itself, is wrong against it; and gnulib's programs
+  gain nothing, since they bring their own.
+- *No obstacks*: gnulib's programs still build, with their own copies;
+  those that call the C library's, elfutils among them, do not.
+- *A returning handler answered by returning*: the obstack left as it was,
+  as a longjmp leaves it -- but the macro that called would then write past
+  its chunk, silently, where glibc's faults.
+
+**Where:** `posix/src/obstack.rs`; `posix/include/obstack.h`;
+`posix/src/printf.rs` (`obstack_printf`, `obstack_vprintf`, printf's
+destinations), `posix/src/fortify_printf.rs` (their `__*_chk` forms);
+`scripts/check-libc-shape.py`; `services/ctest-obstack/`.
 
 ## 523. Settings tells the compositor the *file changed*, not that an *event was consumed* — and the change is in force before anyone is told
 
@@ -79054,6 +80293,12 @@ are easy to lose:
 and simply lacks the additions. The cost is only that the operator keeps two
 greps.
 
+**Superseded in part, 2026-09-27:** the proximity rule above -- the operator's
+program read as the rule, windows used up once satisfied -- is replaced by
+§1044. Answering B-Q10, the operator ruled their README right and the
+program wrong; both of their builds and ours now let a match belong to any
+number of windows. The flag spellings and the porting constraints stand.
+
 ## 1009. `SA_ONSTACK` is honoured in libc, and storing the stack without using it would have been worse than the stub
 
 **Date:** 2026-09-09
@@ -81321,6 +82566,1280 @@ marked `differs_by_design`, because a deviation nothing exercises is one nobody
 will notice losing.
 
 ---
+
+## 1028. `libcall::pty` starts a program with `forkpty` + `execve`, and reports a failure to start on the terminal
+
+**Date:** 2026-09-24
+**Lane:** B
+**Decided by:** Claude (autonomous)
+**Status:** superseded 2026-09-26, never shipped. Lane E answered the same
+request 22 minutes later with its own `libcall::pty` (§1200), which reached
+`main` first and is what `apps/terminal`, `apps/termchild` and `apps/tmux`
+use; this implementation met it only as a merge conflict and was dropped in
+that merge. §1200 made the same central choice -- fork and exec in one call,
+everything built before the fork -- but reports a program that cannot start
+to the caller rather than on the terminal. Kept as the record of the
+alternative.
+
+**In short:** the terminal emulator needed a way to start a shell on a
+pseudo-terminal. The usual Rust way (std's `Command` with a hook that runs in
+the child) would, on SlateOS today, freeze the emulator until the shell exits,
+because of a defect in how a native `exec` handles close-on-exec descriptors.
+So `libcall::pty::spawn` forks and execs by hand through the C library. The
+price: a program that cannot be started is not reported to the caller as an
+error; the child prints why on the terminal and exits with 127.
+
+**The alternatives:**
+
+| | `Command` + `pre_exec(login_tty)` (what `sshd` does) | `forkpty` + `execve` (chosen) |
+|---|---|---|
+| `exec` failure | returned from `spawn()` as an `Err` | a line on the terminal, exit status 127 |
+| on SlateOS today | `spawn()` returns only when the program exits (`requests/b-ad-close-on-exec-does-not-close-on-a-native-exec.md`) | returns at once |
+| descriptors the child inherits | whatever is not close-on-exec -- and on SlateOS the close-on-exec ones' handles too | none but the terminal (`closefrom(3)`) |
+| identity change (uid/gid/groups) | std does it | not supported |
+| fork-safety | std's | ours: everything built before the fork, bare libc calls after |
+
+**Why the failure goes to the terminal rather than an `Err`.** Knowing that an
+`exec` succeeded needs a close-on-exec pipe whose end-of-file arrives at the
+`exec` -- exactly the mechanism that is broken. The terminal is where the
+emulator's user is already looking, and every terminal emulator reports a shell
+it could not start that way. Every failure *before* the fork (bad arguments,
+no terminal available, fork failure) is still an `Err`.
+
+**Revisit when** the platform fix lands: `pre_exec` then works, and the choice
+becomes "exec failure as an `Err`" against "no descriptor leaks even when a
+caller forgot close-on-exec". The second is worth keeping regardless, so the
+likely revision is to keep `closefrom(3)` and add an exec-status pipe beside it,
+not to switch to `Command`. `sshd` cannot use this path until it grows an
+identity switch, which is why its session deadlock is tracked separately
+(`known-issues.md` -> `TD-B-SSHD-PTY-SESSIONS-DEADLOCK-BECAUSE-CLOSE-ON-EXEC-DOES-NOT-CLOSE`).
+
+**Where:** `libcall/src/pty.rs`.
+
+---
+
+## 1029. `chown` and `chgrp` follow GNU's two symlink settings, including where GNU changes a link's target
+
+**Date:** 2026-09-25
+**Lane:** B
+**Decided by:** Claude (autonomous)
+
+**In short:** when `chown -R` or `chgrp -R` meets a symbolic link, there are
+two separate questions: does the walk go *through* the link, into the
+directory it points at; and is the link changed, or the thing it points at?
+GNU answers them separately. Our `chown` had merged them into one answer,
+which made it differ from GNU in four corners -- one of them stricter than
+GNU, the others not. Both programs now answer them GNU's way, measured
+against GNU 9.4. The everyday invocation, `chown -R USER dir` with no `-H` or
+`-L`, still never walks through a link and still changes every link as a
+link, so nothing outside the tree is touched.
+
+### What changed
+
+| Command, on a tree containing a symlink | Before | Now (= GNU 9.4, measured) |
+|---|---|---|
+| `chown -R -H USER dir` | the link itself changed | **the link's target changed** |
+| `chown -R -L -h USER dir` | targets changed | links changed, while walked through |
+| `chown -R --dereference USER dir` | ran as plain `-R` | refused: `-R --dereference requires either -H or -L` |
+| `chown -R -L USER dir` with a link back to an ancestor | `directory loop detected`, status 1 | not entered again, silently, status 0 |
+
+`chgrp` did not exist before; it is built on the same code, so it has had
+these answers from its first commit.
+
+### The two alternatives
+
+**Follow GNU (chosen).** For: `-H` and `-L` are the caller explicitly asking
+for links to be followed, and GNU's reading of that is what every script
+written on Linux assumes. The merged model was not uniformly the safer one
+either: under `-L -h` it changed link *targets*, which is the one combination
+where the caller said in so many words not to. And the setting that matters
+for safety -- what `-R` does by default -- is untouched: nothing walked
+through, every link changed as a link, and a request to do otherwise without
+`-H`/`-L` refused.
+
+**Keep the merged model** (a link met inside the tree is always changed as a
+link unless `-L`). For: under `-R -H`, a user who can write inside the tree
+can plant `x -> /etc/shadow` and have root's `chown -R -H alice tree` hand
+`/etc/shadow` to alice. Against: that is equally true under `-L` in both
+models and in GNU, the user asked for dereferencing by giving `-H`, and a
+`chown` that differs from GNU only in the corner nobody tests is a `chown`
+whose behaviour nobody knows.
+
+### What this does not change
+
+The `--from` race protection (`restricted_chown`, changing through a
+descriptor) and the `lchown` default under `-R` are exactly as before. The
+one place the port does not reproduce GNU is recorded in
+`userspace/coreutils/src/chowncore.rs`: when a link's target cannot be looked
+up, GNU's `-v` line reports a `from` half read from a `struct stat` the
+failed call never filled (different on every run, measured); ours omits it.
+
+**Where:** `userspace/coreutils/src/chowncore.rs` (the walk, `walk_policy`),
+`userspace/coreutils/src/bin/chown.rs`, `userspace/coreutils/src/bin/chgrp.rs`;
+checked by `scripts/chown-diff.sh` and `scripts/chgrp-diff.sh`.
+
+---
+
+## 1030. The digest family's missing hashes are ported into root crates, each from the implementation nearest its program
+
+**Date:** 2026-09-25
+**Lane:** B
+**Decided by:** Claude (autonomous, within the operator's §539)
+
+**In short:** `sha224sum`, `sha384sum`, `sha512sum`, `b2sum` and `cksum -a`
+needed four hash functions the tree had no shared copy of: SHA-224, SHA-384,
+SHA-512 and BLAKE2b, plus SM3 for `cksum -a sm3`. §539 already settles
+*whether* to write them (no: cryptographic primitives are ported from
+implementations others have attacked for years). What was left to decide is
+*where* the ports live and *which* implementation each is ported from. They
+live in root crates, beside `sha1`, `md5` and `sha2`, so the next program that
+needs one links it instead of writing a sixth copy; and each is ported from the
+implementation closest to the program that needs it.
+
+### Where they live
+
+| Option | *What changes:* | For | Against |
+|---|---|---|---|
+| **Root crates (chosen)**: SHA-224/384/512 added to `sha2/`, new `blake2/` and `sm3/` | three crates any lane can link; `coreutils` depends on them | one copy per primitive, the pattern `sha1`/`md5`/`sha2`/`crc32` already follow; BLAKE2b is also Argon2's inner hash, which the password-hash half of C-Q5 will want | root crates are no lane's (A-Q11), so the change must stay additive -- which it does: new types in `sha2`, a new method in `blockbuf`, two new crates, and SHA-256's code untouched |
+| Private modules inside `coreutils` | nothing outside `coreutils` can reach them | no shared crate edited | the next consumer writes its own copy, which is how the tree came to have 26 SHA-256s (see `sha2`'s crate docs) |
+
+### Which implementation each is ported from
+
+| Primitive | Ported from | Why that one |
+|---|---|---|
+| SHA-512, SHA-384 | RustCrypto `sha2` 0.11.0, the portable backend (`soft/compact.rs`) | MIT/Apache, the most-reviewed Rust implementation, and the loop form rather than the unrolled one, so a reader can check it against FIPS 180-4 line by line |
+| SHA-224 | none needed: SHA-256 from other initial values, truncated (FIPS 180-4 §6.3) | the existing `Sha256` gained a private constructor taking the initial value; no second compression function |
+| BLAKE2b | the BLAKE2 reference implementation, `blake2b-ref.c` | it is the very file GNU `b2sum` is built from, so for the program this was brought in for, the arithmetic is upstream's rather than merely equivalent to it; CC0/OpenSSL/Apache |
+| SM3 | RustCrypto `sm3` 0.5.0 | MIT/Apache; gnulib's `sm3.c` is the other candidate, but it is LGPL, and a root crate any lane may link should not carry that choice for them |
+
+Each crate records the upstream version, the git revision and the SHA-256 of
+the archive it was read from, which is what §539 asks for so that "keep it
+current" has something to compare against. Where the port changes the code's
+*shape* -- `last_chunk` windows instead of `w[i - 15]` indexing, SM3's
+sixty-four unrolled macro calls written as the standard's loop -- the crate
+docs say so, and the arithmetic is unchanged: every crate passes its
+standard's vectors and a cross-check against Python's `hashlib`, which is an
+independent implementation.
+
+### Two smaller calls inside it
+
+**SHA-512's 128-bit length field went into `blockbuf`, not around it.**
+`blockbuf`'s `finalize` writes a 64-bit length; used for SHA-512 it would
+write eight zero bytes where the high half goes, which is right for every
+message under 2^61 bytes and silently wrong above. `finalize_wide` widens the
+count before multiplying, so it is exact for every length the counter can
+hold. Additive: the old method is unchanged.
+
+**`cksum --debug` prints nothing.** GNU's x86 build reports whether its PCLMUL
+CRC is in use. Ours has only the table CRC, so it answers as GNU built without
+`USE_PCLMUL_CRC32` does -- silence -- rather than printing GNU's "not
+detected", which would describe hardware it never looked at. Recorded as the
+one `xfail` in `scripts/cksum-diff.sh` that is not `--help`/`--version`.
+
+**Revisit when** C-Q5's vendoring decision is made for the vault: if it picks
+a crate to vendor wholesale (RustCrypto's, most likely), these three should be
+re-pointed at the same vendored copy rather than stay as a second port of the
+same code.
+
+**Where:** `sha2/src/sha512.rs`, `sha2/src/lib.rs` (`Sha224`), `blockbuf`
+(`finalize_wide`), `blake2/`, `sm3/`; used by `userspace/coreutils/src/digest.rs`.
+
+---
+
+## 1031. `parse_datetime` runs GNU's Bison tables, and `mktime` is glibc's own algorithm
+
+**Date:** 2026-09-25
+**Lane:** B
+**Decided by:** Claude (autonomous)
+
+**In short:** `date -d`, `touch -d` and `find -newermt` all read GNU's date
+language (`next Tuesday`, `3 days ago`, `2021-06-15 12:00 -0500`), which has
+no specification except the program that parses it: gnulib's
+`parse-datetime.y`, a Bison grammar with 31 deliberate ambiguities that the
+generated tables settle. `date` had a hand-written subset that was measured
+form by form and still could not say `12:30 -5` (half past twelve at UTC-5).
+The port copies the LALR tables out of the `parse-datetime.c` that coreutils
+9.4 ships instead of re-deriving them, and ports glibc's `mktime` beside it,
+because which strings are refused -- and what a skipped or repeated
+daylight-saving hour means -- is decided there.
+
+### How the grammar is carried
+
+| Option | *What changes:* | For | Against |
+|---|---|---|---|
+| **GNU's generated tables, copied by a script (chosen)** | `tables.rs` is `gen_tables.py`'s transcription of the release tarball's `lib/parse-datetime.c`; `grammar.rs` is `yacc.c`'s driver and the 92 rule actions | the parser *is* GNU's: the same shift/reduce resolutions, the same default reductions, so the same `--debug` output in the same order and the same place to stop on an error; the script refuses a table it does not recognise, and records the source's sha256 | the tables are opaque numbers; a reader checks them by regenerating, not by reading |
+| A hand-written recursive-descent parser | readable rules in Rust | no generated data in the tree | an LALR parser never backtracks and reduces before reading in some states; a greedy hand parser accepts more, rejects differently, and prints `--debug` lines in a different order -- the first test written by hand got that order wrong, and the tables got it right |
+| Our own `userspace/yacc` generating the tables | a checked-in `.y`, built at compile time | the grammar stays source | our yacc is a separate, unverified implementation; any difference in its conflict resolution is a different parser |
+
+### `mktime`
+
+`localtime::Zone::epoch` already inverted a local time, but by its own rules:
+it resolved the skipped hour to one side and the repeated hour to one of the
+two, and it could not honour an explicit `tm_isdst`. `parse_datetime` needs
+glibc's answers for all three -- it refuses a date by comparing the fields it
+asked for with the fields `mktime` normalised them to, and it hands `mktime`
+`tm_isdst = 0` for `EST` in July -- so `localtime/src/mktime.rs` is a port of
+gnulib's `mktime.c`, which is the file glibc builds its own from. That
+includes the **process-wide offset guess**: glibc starts each search from the
+offset the previous call found, which decides which of a repeated hour's two
+instants comes back, so `date -f` answers line 7 as GNU does only if lines 1-6
+moved the guess as GNU's did. `Zone::mktime` keeps the same static;
+`mktime_internal` takes the guess as a parameter for callers (and tests) that
+must not share it.
+
+`Zone::epoch` stayed, for callers that wanted an instant that always
+exists, while `posixtm` (and so `touch -t`) and `cal` still called it.
+**Update 2026-09-26:** both moved to `mktime` -- called when and as upstream
+calls it, with `tm_isdst` -1 -- and with no callers left `Zone::epoch` was
+removed, a second inverse with its own answers for the skipped and repeated
+hours being an invitation to pick the one GNU's never give.
+
+### Where C's integers show through
+
+Upstream assigns `intmax_t` values into `int` fields in three places
+(`tm.tm_min = pc.minutes`); gcc keeps the low 32 bits, so `10:4294967326` is
+10:30 to GNU. The port does the same (`as i32`), and a test pins it. Every
+`ckd_*` upstream is a `checked_*` here, failing the same way.
+
+**Revisit when** coreutils is upgraded past 9.4: regenerate `tables.rs` from
+the new release's `lib/parse-datetime.c` with `gen_tables.py`, and diff the
+actions in `grammar.rs` against the new grammar's.
+
+**Where:** `userspace/coreutils/src/parse_datetime/` (`gen_tables.py`,
+`tables.rs`, `grammar.rs`, `lex.rs`, `mod.rs`); `userspace/localtime/src/mktime.rs`;
+used by `date.rs`, `touch.rs`, `find.rs`. Checked by
+`scripts/parse-datetime-diff.sh`.
+
+---
+
+## 1032. `TZ` is read as glibc reads it, process-wide state included -- except through `..`
+
+**Date:** 2026-09-26
+**Lane:** B
+**Decided by:** Claude (autonomous)
+
+**In short:** what a program's clock says depends on how it reads the `TZ`
+variable, and glibc's reading has details no standard mentions: an empty `TZ`
+is a zone called `Universal`, `TZ=Foo/Bar` is UTC called `Foo`, and a value like
+`AAA3BBB` (a daylight-saving name but no dates) borrows New York's history from
+a file called `posixrules` -- shifted by an amount that depends on what the
+program has already converted. Every time-printing program here now reads `TZ`
+with a line-by-line port of glibc 2.39's code, including that history, because
+the alternative is printing a different hour from the GNU program being
+replaced. The one place it deliberately differs is a `TZ` that reaches a file
+through `..`, which is refused, as the C library here refuses it.
+
+### How faithful
+
+| Option | *What changes:* | For | Against |
+|---|---|---|---|
+| **glibc's `tzset.c`/`tzfile.c`, state and all (chosen)** | the same hour as GNU for every `TZ` value `tz-diff.sh` tries, in every order of conversions | the programs being replaced are the reference, and their answers depend on the state: `TZ=AAA3BBB date -d @1604203200` and `date -d '2020-11-01 02:30'` disagree in glibc because `mktime` re-reads the zone | reproduces glibc behaviour that is arguably a bug (`rule_dstoff` is never computed for a file with transitions), and `Zone` needed interior mutability and lazy reading to do it |
+| glibc's order and partial parse, stateless zones | the same for every value except `posixrules` ones, whose fall transitions land where the rules say | simpler; `Zone` stays immutable | differs from GNU by up to two hours near every fall transition under such a `TZ`, and silently |
+| Keep `tzrules`' engine (each year's own transitions; refuse a partial rule) | UTC for anything it cannot fully parse, and real summer time before 1970 | the "more correct" answers | not what any GNU program prints; this entry's predecessor, `TD-B-LOCALTIME-RESOLVES-TZ-DIFFERENTLY-FROM-GLIBC`, was filed because the harness found exactly these differences |
+
+`tzrules` stays the TZif decoder (and the libc's engine, which is lane D's to
+change); the four raw accessors this needed were added to it, additively.
+
+### `..`
+
+glibc reads `TZ=../zoneinfo/UTC` as a file unless the program is setuid. Here
+it never is: `zoneinfo_path` refuses a `..` component, as `posix/src/tz.rs`
+does, and the value falls through to the POSIX rule, as a missing file does.
+The refusal is not strong on its own -- an absolute path is accepted -- but the
+two readers of one `TZ` in this tree must agree about what it means, and
+changing the libc's is lane D's decision. `tz-diff.sh` keeps the case as an
+xfail. **Revisit** if the libc drops its refusal, or gains a secure-mode test
+this crate could share.
+
+**Where:** `userspace/localtime/src/tzset.rs` (the port), `lib.rs` (`Zone`:
+lazy, `tzset`, `reread`, `switched`, `localtime`), `mktime.rs`;
+`tzrules/src/tzif.rs` (accessors); `userspace/coreutils/src/parse_datetime/mod.rs`
+(`mktime_z`, `localtime_rz`). Checked by `scripts/tz-diff.sh`.
+
+---
+
+## 1033. `logger` is util-linux's, and where `/dev/log` cannot exist it writes the journal
+
+**Date:** 2026-09-26
+**Lane:** B
+**Decided by:** Claude (autonomous)
+
+**In short:** `logger` -- the command scripts use to put a line into the
+system log -- is now a function-by-function port of util-linux 2.39.3's,
+checked against the real one by `scripts/logger-diff.sh` (138 cases).
+Upstream hands each message to a log daemon through a special socket file,
+`/dev/log`, and silently drops it when that cannot be reached. SlateOS cannot
+have that socket yet, so copying upstream exactly would make every script's
+logging vanish without a word; in exactly that situation, and no other, the
+port writes the message into the log `journalctl` reads instead. Two smaller
+differences: a name in an error message has its control characters escaped
+rather than printed raw, and `-S 0` on piped input no longer sends empty
+messages forever.
+
+### Where a message goes when `/dev/log` cannot exist
+
+Why it cannot: the platform has no Unix-domain sockets bound to a path
+(`socket(AF_UNIX, ...)` fails with `EAFNOSUPPORT`, "address family not
+supported"); known-issues TD-B-NOTHING-RECEIVES-SYSLOG-MESSAGES and its
+request to lanes A and D.
+
+| Option | *What changes:* | For | Against |
+|---|---|---|---|
+| **A journal record, only when every attempt on `/dev/log` fails with `EAFNOSUPPORT` (chosen)** | `logger hi` on SlateOS shows up in `journalctl`; on Linux nothing changes | messages reach the log today; the branch stops running by itself once the sockets exist, with no change to `logger`; the harness still measures pure upstream behaviour, since Linux never takes it | a second writer of `/var/log/syslog.jsonl` beside the future daemon, whose record (level, facility, tag, PID) the port has to shape as a daemon would |
+| Upstream exactly: drop the message | `logger hi` succeeds and nothing is recorded | byte for byte upstream | every script's logging is silently lost until the sockets land -- the defect this port was written to fix |
+| Keep the old program's own file, `/var/log/syslog` as RFC 3164 text | text lines `journalctl` reports as "not a journal record" | no new format | neither upstream nor readable by `journalctl` |
+| Fall back on any failure, "no daemon listening" included | on Linux, `logger` with no syslog daemon writes a SlateOS log file | never loses a message | changes upstream's behaviour where upstream's is well defined, on the host the harness runs on |
+
+The branch is narrow on purpose. `-u PATH` names a socket the caller chose,
+so only `/dev/log` is ever redirected. And `EAFNOSUPPORT` means the platform
+has no such sockets at all, which is not "no daemon" (`ENOENT`,
+`ECONNREFUSED`): upstream handles that its own way, and the port still does.
+`--journald` exists, as it does in every distribution's build (util-linux
+built with libsystemd), and writes the same journal, there being no journald;
+its `MESSAGE`, `PRIORITY` and `SYSLOG_IDENTIFIER` become the record's own
+fields and every other field is kept beside them (`journalrec::Record::extra`).
+
+### Names in diagnostics
+
+Upstream pastes arguments into its messages -- `unknown facility name: %s` --
+or wraps them in its own `'%s'`. A name holding a newline can then print a
+line `logger` never wrote (§370). The tree's usual remedy, `quotef`/`quoteaf`,
+renders the name the way a shell would read it back, which changes ordinary
+text too: the first harness run caught `x="y"` printed as `'x="y"'` and the
+empty name as `''`. The port instead prints printable text exactly as
+upstream does and octal-escapes only what is not printable -- `\012` for a
+newline, `\033` for the escape that starts a terminal control sequence.
+Forging a line needs a control byte; nothing else changes.
+
+| Option | *What changes:* (`-p $'a\nb.info'`, `--sd-id "a'b"` twice) |
+|---|---|
+| **Upstream's text, unprintables escaped (chosen)** | `unknown facility name: a\012b`; `structured data ID 'a'b' is not unique`, as upstream |
+| `quotef`/`quoteaf`, the tree's GNU convention | `'a'$'\n''b'`; `"a'b"` -- and every name with a space, a quote or nothing in it changes too |
+| Upstream exactly | a second line, `b`, that `logger` did not mean to print |
+
+Upstream's own `'%s'` is rendered by `quoting::escaped_in_quotes`, added for
+this: upstream's quote marks around escaped contents. It is not `quoteaf`,
+which would print `it's` as `"it's"`; the marks are decoration here, not a
+delimiter, and upstream does not escape an `'` inside them either. The
+harness pins three escapes as expected differences. B-Q12 asks the same
+question of `osh` and now lists this as an option.
+
+### `-S 0`
+
+With `-S 0` and input on stdin, 2.39.3's read loop can store nothing, so it
+never consumes the byte it stopped on and sends empty messages forever (still
+so on util-linux master). The port sends one empty message per line, which
+is what `-S 0` makes of a word given as an argument. The harness does not
+compare it: upstream would never finish.
+
+### Kept as upstream, and how it was checked
+
+`SCM_CREDENTIALS` -- root's `--id=PID` naming another live process as a local
+message's sender -- is sent as upstream sends it, a `sendmsg` carrying the
+credentials. The harness runs it as root in a user namespace (`unshare -r`):
+the kernel refuses the claim in the host's PID namespace, which that root does
+not own ("send message failed: Operation not permitted" from both sides), and
+accepts it in a PID namespace of its own, where a listener with `SO_PASSCRED`
+sees the claimed PID from both sides.
+
+**Where:** `userspace/logger/src/deliver.rs` (the journal branch), `main.rs`
+("What is not upstream's", `shown`), `input.rs` (`-S 0`), `sys.rs`
+(`send_as`, `may_claim`); `userspace/quoting/src/lib.rs`
+(`escaped_in_quotes`). Checked by `scripts/logger-diff.sh`.
+
+**Revisit** when path-bound Unix-domain sockets land: the journal branch
+should then never run on SlateOS either -- confirm `logger` reaches `syslogd`
+through `/dev/log`, then consider deleting the branch. And if B-Q12's answer
+sets a tree-wide policy for upstream message text.
+
+---
+
+## 1034. Rust programs log through the C library's `syslog()`, not a client of their own
+
+**Date:** 2026-09-26
+**Lane:** B
+**Decided by:** Claude (autonomous)
+
+**In short:** a program that "logs to syslog" needs something to hand its
+messages to. `ntpdate -s`, `crond` and `anacron` now hand them to the C
+library's `syslog()` -- through `userspace/libcsyslog`, a thin wrapper --
+exactly as their C counterparts do, instead of each carrying its own copy of
+the socket-and-fallback logic `logger` has. The cost shows today: on SlateOS
+the library still prints these messages on stderr, so they do not yet reach
+`journalctl`. Lane D has been asked to change that, in the one place it
+needs changing.
+
+| Option | *What changes:* | For | Against |
+|---|---|---|---|
+| **The libc's `syslog()`, via `libcsyslog` (chosen)** | on SlateOS today the messages print on stderr; when the libc sends them to the journal or `/dev/log`, every caller follows at once | one syslog client on the system, shared with every ported C program, so the frame, the socket and the fallback are decided in one place; faithful to ntpdate and cron, which call syslog(3) | reaching `journalctl` waits on lane D (`requests/b-d-libc-syslog-could-reach-journalctl-today.md`) |
+| A Rust client of our own, with `logger`'s journal fallback | the messages reach `journalctl` today | no wait on another lane | a second syslog client beside the libc's, which C programs would never use: two places to change when `/dev/log` arrives, and a Rust daemon and a C daemon on one system logging differently |
+| Each program's own stopgap, as before | `ntpdate -s` loses its messages; `crond` prints its own lines on stderr | nothing to do | the defect |
+
+`logger` stays the exception: util-linux's `logger` speaks the protocol
+itself, and a faithful port does too (§1033).
+
+Two details of the wrapper are load-bearing. `openlog` keeps the pointer it
+is given, not a copy, so `libcsyslog` keeps the identity alive in a
+process-wide slot until the libc has been handed a replacement; and a message
+is always passed as the argument to `"%s"`, never as the format, so a `%` in
+it is printed rather than interpreted -- `syslog-client-check.sh` sends
+`100% %s %n` to prove it.
+
+**Where:** `userspace/libcsyslog`, `userspace/ntpd` (`open_syslog`, `-s`),
+`userspace/crond` (`log_msg`, `open_syslog`). Checked by
+`scripts/syslog-client-check.sh`.
+
+**Revisit** if lane D declines the request: the journal fallback then belongs
+in `libcsyslog`, the next-best single place.
+
+---
+
+## 1035. `flock -w` waits by trying again, not by being interrupted
+
+**Date:** 2026-09-26
+**Lane:** B
+**Decided by:** Claude (autonomous)
+
+**In short:** `flock -w 5 FILE CMD` means "wait up to five seconds for the
+lock". util-linux implements the limit by sleeping in the lock call and
+setting an alarm that interrupts the sleep. On SlateOS the lock call cannot be
+interrupted -- the C library implements the wait as a loop that retries until
+the lock is free -- so the alarm would go off and `flock` would keep waiting
+forever. Our `flock` instead asks for the lock without waiting, sleeps a
+moment, and asks again until the time is up. The answers a script sees are
+the same; a lock that comes free is noticed up to 25 ms later.
+
+| Option | *What changes:* | For | Against |
+|---|---|---|---|
+| **Try `LOCK_NB` until the deadline, 1 ms doubling to 25 ms between tries (chosen)** | `-w` works on SlateOS today; everywhere, a released lock is taken up to 25 ms late | one mechanism on every platform; no signal handler, timer or async-signal-safety to get right | not upstream's mechanism; a busy file sees one `flock` call per interval from each waiter |
+| Upstream's timer and signal | on SlateOS `flock -w` never times out | upstream's code, and no latency | needs the libc's blocking `flock()` to return `EINTR` (lane D) -- until then it hangs, which is worse than the old program |
+| Upstream's where it works, polling on SlateOS | the same results by two mechanisms | exact on Linux | two code paths, one of them untested by the harness, which runs on Linux |
+
+Without `-w`, `flock` blocks in `flock()` exactly as upstream does: nothing
+there needs interrupting. `-w 0` is `-n`, and a negative or unrepresentable
+time is refused with upstream's timer error, so the difference is confined to
+how the wait is spent. `scripts/flock-diff.sh` checks the outcomes against
+util-linux with a lock held by a third party.
+
+**Where:** `userspace/flock/src/main.rs` (the lock loop, `POLL_MAX`).
+
+**Revisit** when lane D's `flock()` returns `EINTR` on a delivered signal
+(known-issues TD-B-FLOCK-WAIT-POLLS): the timer is then upstream's and exact,
+and this entry can close.
+
+---
+
+## 1036. Tables are laid out by a port of libsmartcols, not by each program
+
+**Date:** 2026-09-26
+**Lane:** B
+**Decided by:** Claude (autonomous)
+
+**In short:** about twenty util-linux programs print tables -- `lsblk`,
+`findmnt`, `lsmem`, `lscpu`, `lslocks`, `swapon --show` among them -- and none
+of them decides its own column widths. They hand rows to a library,
+libsmartcols, which works out how wide each column is, what gets cut or
+wrapped on a narrow terminal, how a tree is drawn, and what `--raw`,
+`--pairs` and `--json` look like. Our versions of these programs each laid
+out their tables themselves, so each got the widths, the cutting and the
+JSON a little differently from upstream and from one another. The library is
+now ported once, as the crate `userspace/smartcols`, and `lsmem` is the first
+program printed through it: on WSL's own memory, at nineteen terminal widths
+from 1 to 250 columns, its output matches util-linux 2.39.3 byte for byte.
+
+| Option | *What changes:* | For | Against |
+|---|---|---|---|
+| **Port libsmartcols as a crate, function by function (chosen)** | every table program prints what util-linux prints, at every terminal width | one copy of the width arithmetic (averages, deviations, the seven reduction stages), which is what makes widths match and is easy to get subtly wrong; each program port shrinks to its own logic | ~2,800 lines before its first user; the parts no program needs yet (groups, sorting, colours, custom wrapping) are left out and must be added when one does |
+| Lay out each table in the program, as before | nothing, until a table is wide or a terminal narrow | no new crate | twenty private layouts; a narrow terminal cut each differently, and `--json` was each program's own dialect |
+| A Rust table crate (`comfy-table`, `tabled`) | tables look like that crate's | small and maintained | its layout rules are its own, so no output could match upstream at all |
+
+How it is shaped: upstream links lines, columns and cells through
+reference-counted pointers and intrusive lists; here a `Table` owns vectors
+of them in upstream's list order. A `LineId` is a line's place, which stays
+valid because nothing is removed; a `ColumnId` is a column's identity, which
+`move_column` (added for `column --table-order`) does not change, and each
+line's cells are indexed by the column's `seqnum`, as upstream's are. Output goes into a byte buffer
+the program writes itself, so a failed write is the program's to report, as
+util-linux's `close_stdout` reports it. Text is measured with glibc's rules
+for the locale in force -- `mbrtowc`, `iswprint` and `wcwidth` through
+`quoting` and `charwidth` -- so a C locale sees `\xNN` escapes where a
+UTF-8 one sees characters, as upstream does.
+
+**Where:** `userspace/smartcols` (the port); `userspace/lsmem` (its first
+user); `scripts/lsmem-diff.sh` (346 cases against util-linux 2.39.3).
+
+**Revisit** if a program needs what was left out; its module docs list it.
+The rest of the table printers -- `lscpu`, `lsblk`, `findmnt` among them --
+should move onto it as each is ported (known-issues
+TD-B-TABLE-PROGRAMS-LAY-OUT-THEIR-OWN-TABLES).
+
+---
+
+## 1037. The journal is appended and rewritten under one lock, and a rewrite renames a new file over the old
+
+**Date:** 2026-09-26
+**Lane:** B
+**Decided by:** Claude (autonomous)
+
+**In short:** three programs add records to the system log file,
+`/var/log/syslog.jsonl` -- `syslogd`, `logger` and `systemd-cat` -- and
+three things shrink or move it: `journalctl --vacuum-time`/`--vacuum-size`,
+`syslogd clean`, and `syslogd`'s own rotation when the file passes 5 MiB. A
+vacuum used to read the file, drop the old records, and write the rest back
+over the same file; a record another program added between that read and
+that write was simply gone. Now every one of them takes a lock on the file
+first. A program adding a record waits while a vacuum or rotation holds it,
+then adds its record to whichever file is there afterwards; a vacuum writes
+its result as a new file and renames it into place while it still holds the
+lock. No record is lost, and a vacuum that dies half way leaves the old file
+whole.
+
+| Option | *What changes:* | For | Against |
+|---|---|---|---|
+| **Advisory `flock` on the file; rewrites rename a new file over it (chosen)** | nothing a user sees, except that records are no longer lost | every writer is ours and already opens, writes one record and closes, so taking a lock is three lines in each; readers are untouched; the rename makes the rewrite crash-safe; it also closes the same race in `syslogd`'s rotation, which moved a waiting writer's record into `.1` | only programs following the protocol are held to it; needs `flock`, which SlateOS's C library has |
+| Rotate instead of rewriting (the entry's first sketch): rename the live file aside, filter it at leisure | the vacuum leaves renamed files behind | no locking | a writer that opened the file just before the rename still writes to the renamed one after it was read -- the same loss, in a smaller window; every reader must learn the new files |
+| Route every write through `syslogd` | one writer, so no race | the textbook shape | SlateOS has no Unix-domain sockets yet (`logger` writes the file itself for that reason), so the daemon cannot be reached |
+
+How it works (`userspace/journalio`): a writer opens the file for
+appending, takes `flock(LOCK_EX)`, and -- holding it -- checks that the path
+still names the file it opened (device and inode), since a rewrite or a
+rotation may have replaced it while it waited; if not, it opens the path
+again. A rewriter takes the lock with the same check, reads, writes the new
+contents to `.NAME.PID.tmp` beside the log with the old file's mode and
+owner, syncs it, and renames it over the log before releasing the lock. A
+rotation renames the locked file away. `flock` locks belong to an open file,
+so two threads of one program exclude each other as two programs do. Where a
+file system has no locks (`ENOLCK`, `ENOSYS`, `EOPNOTSUPP`), a writer appends
+without one, as before -- a record written beats one refused -- and a rewrite
+refuses, since rewriting unlocked is the loss this exists to prevent.
+
+`syslogd`'s rotation takes the lock for every step, the older copies' shifts
+included: a vacuum rewriting `syslog.jsonl.1` would otherwise rename its
+result over whatever the rotation had just moved there. And `journalctl` now
+reads the rotated copies (`syslog.jsonl.N`, oldest first), whose records it
+had never shown, and vacuums them too, removing one it empties.
+
+**Where:** `userspace/journalio` (the protocol, with tests that fail when the
+lock is taken out); `userspace/syslogd` (entries, `clean`, rotation),
+`userspace/logger` (`deliver::append_record`), `userspace/systemctl`
+(`systemd-cat`, one append per record), `userspace/journalctl` (both vacuums,
+and the rotated copies). Known-issues
+B-JOURNALCTL-VACUUM-LOSES-RECORDS-APPENDED-DURING-ITS-REWRITE.
+
+**Revisit** when SlateOS has Unix-domain sockets and `syslogd` receives on
+`/dev/log`: with one writer, the lock would only be between it and the
+rewriters.
+
+---
+
+## 1038. A util-linux port matches the program Ubuntu 24.04 ships, the upstream fixes it backports included
+
+**Date:** 2026-09-26
+**Lane:** B
+**Decided by:** Claude (autonomous)
+
+**In short:** each util-linux program in this tree is a port of util-linux
+version 2.39.3, checked by running it side by side with the same program as
+installed in the test machine (Ubuntu 24.04 under WSL). Ubuntu does not ship
+2.39.3 exactly: to `lscpu` it adds five later changes taken from util-linux
+itself -- new ARM processor names, and a rework of how `lscpu` sorts CPUs into
+kinds, which decides among other things whose feature flags the summary shows
+when the CPUs' flags differ. The port includes those five changes, so it
+matches the program it is tested against, and util-linux's own later
+behaviour.
+
+| Option | *What changes:* | For | Against |
+|---|---|---|---|
+| **Port what Ubuntu ships: 2.39.3 plus the upstream commits Ubuntu backports (chosen)** | `lscpu` on a machine whose CPUs differ only in their flags shows the first CPU's, not the last's; it names Cortex-X925, A725, Neoverse-V3/N3 and NVIDIA Olympus cores | the reference then agrees byte for byte, so every difference the harness finds is a bug in the port; the backports are util-linux's own later fixes (the regrouping fixes CPU types left without a vendor on hybrid ARM machines, util-linux issue #3062) | "2.39.3" is no longer the whole description; each new port has to look through Ubuntu's patch list for its program |
+| Port the 2.39.3 tarball exactly | the last CPU's flags; those five cores unnamed | one well-defined source | the harness can no longer tell a bug in the port from an Ubuntu patch; carries a bug upstream has fixed |
+
+How to find them: `/usr/share/doc/util-linux/changelog.Debian.gz` lists
+Ubuntu's patches, and Launchpad serves them
+(`git.launchpad.net/ubuntu/+source/util-linux`, `debian/patches/`). For
+`lscpu`: LP #2111723 (upstream 7a136d59, new Arm Cortex part numbers;
+eb6514b4, CPU-type de-duplication; and two test-data commits) and LP #2123886
+(upstream 90877747, NVIDIA Olympus). The earlier ports -- `lsmem`, `prlimit`,
+`column`, `lsirq`, `getopt`, `flock` -- are untouched by Ubuntu's list, whose
+other patches are to `cfdisk`, `fincore`, `fadvise`, `setarch`, `wall`, `su`,
+`sulogin`, libuuid, libblkid and libmount.
+
+The two test-data patches carry a nineteenth `lscpu` snapshot, a hybrid ARM
+machine with four kinds of core, which is exactly what exercises the
+regrouping; `scripts/util-linux-source.sh` fetches them with checksums and
+applies them.
+
+**Where:** `userspace/lscpu/src/cputype.rs` (`deduplicate_cputypes`),
+`userspace/lscpu/src/arm.rs` (the part tables), `scripts/util-linux-source.sh`.
+
+**Revisit** when these ports move to a later util-linux release, whose base
+then already holds the backports.
+
+---
+
+## 1039. DEFLATE is decoded with lookup tables, and the bit-at-a-time decoder it replaced is kept as the tests' oracle
+
+**Date:** 2026-09-27
+**Lane:** B
+**Decided by:** Claude (autonomous)
+
+**In short:** opening a compressed file -- a PNG picture above all -- spends
+most of its time undoing the compression, and our decoder did that one bit at
+a time, about seven times slower than the library Python uses (zlib-ng). It now
+decodes the way zlib, zlib-ng and libdeflate do, by looking several bits up in
+a table at once: on a photograph's 9 MB of pixels, 280 ms became 49 ms, against
+zlib-ng's 36 ms, and reading the picture a row at a time, 334 ms became 57 ms.
+Nothing a program sees changes -- the same bytes, and when a file is damaged,
+the same error after the same bytes -- and the old decoder stays, only in the
+tests, as the judge of that.
+
+| Option | *What changes:* | For | Against |
+|---|---|---|---|
+| **Tables, a fast loop and a careful one, the walk kept as the tests' oracle (chosen)** | the same results, five to six times faster | the oracle is the code being replaced, so "nothing changes" is tested, not argued: every valid stream, 450 mutations and 120 truncations of each of 28 streams, 20 000 noise streams, and 50 000 single-symbol decodes over random codes, one-shot and streamed at many read sizes | two decoders to keep in the crate, one only for tests |
+| Tables, with only round-trip and fixture tests | the same speed | less code | a table decoder can tell an error sooner than the walk did -- an unassigned code, a code cut short by the end of the input -- and would move where a damaged file stops; nothing but the old decoder can say where it stopped |
+| Keep the walk, tune it | a smaller win | one decoder | the walk's cost is the loop per bit itself |
+
+**The three rules that make a table stop where the walk stopped**, each held
+by the oracle tests and stated in `inflate.rs`: an unassigned code is an error
+only once 15 bits have been read (the walk read to the longest length first),
+so with fewer left it is `UnexpectedEnd`; a code longer than the bits left is
+`UnexpectedEnd`; and checks the walk made per byte (the output limit, a stored
+block's input, the caller's buffer) are made per run, the run cut where the
+first would have failed.
+
+**Choices inside it, and why.** First-level tables of 11, 8 and 7 bits
+(literal/length, distance, code-length code) with second-level tables under
+them, as libdeflate sizes them; the first level a fixed-size array, which
+took the raw decode from 52 to 44 ms on the benchmark, because a masked index
+then needs no bounds check. A 64-bit bit buffer refilled eight bytes at a time, spent on one
+length/distance pair or up to three literals per refill. The stream decodes
+into the caller's buffer and copies a back-reference from that buffer where it
+can, folding the finished run into its 32 KiB window once (zlib's
+arrangement), instead of writing every byte twice. Adler-32 stays a plain byte
+loop: a sixteen-bytes-at-a-time version measured slower (9 ms against 5) on
+baseline x86-64, which has no 32-bit vector multiply.
+
+**Not changed:** `fixed_buffer.rs`'s two decoders, which reproduce where zlib
+and libdeflate stop in a fixed-size buffer, keep their own walks; they are
+held to those libraries' answers, not to speed.
+
+**Where:** `deflate/src/inflate.rs` (the decoder), `deflate/src/puff.rs` (the
+oracle, test-only), `deflate/tests/bench.rs` (the timing, run on demand).
+Asked for by lane F in
+`requests/f-ab-inflate-decodes-a-bit-at-a-time-five-times-slower-than-zlib-ng.md`.
+
+**Revisit** if a caller needs the last third: the remaining gap to zlib-ng is
+mostly bounds-checked stores and `Vec::push`, which an `unsafe` output cursor
+would remove -- a trade this crate, which runs in the kernel on untrusted
+input, has so far declined.
+
+---
+
+
+---
+
+## 1040. sharutils' option library is ported as a library, its oddities with it
+
+**Date:** 2026-09-27
+**Lane:** B
+**Decided by:** Claude (autonomous)
+
+**In short:** `uuencode` and `uudecode` do not read their own command lines.
+GNU AutoGen writes a table for each, and a library bundled with them
+(libopts 41.1) does everything else: the flags, a settings file in the home
+directory (`~/.sharrc`), `--help` through a pager, three kinds of `--version`,
+and options to save the current settings to a file and load them back. That
+library is ported as a crate of its own, `autoopts`, rather than each program
+getting a small hand-written parser -- and it keeps the library's mistakes
+where they change what a user sees, because a user of the real programs sees
+them too.
+
+| Option | *What changes:* | For | Against |
+|---|---|---|---|
+| **Port libopts as a crate, quirks kept (chosen)** | every flag, message, exit status and settings-file effect is upstream's; 433 cases compared | a user moving a script or a `~/.sharrc` from Linux gets the same behaviour; the next sharutils program (`shar`, `unshar`) gets the machinery for free | about 2 500 lines for two small programs, and several behaviours kept that are plainly bugs upstream |
+| Hand-write each program's options | `-m`, `-e`, `-o`, `-c` and `--help` work; the rest either missing or approximate | small | `~/.sharrc` silently ignored -- a user whose file says `base64` gets the other encoding with no message; every error message's wording and exit status different; nothing to check it against but prose |
+| Port libopts, fixing its bugs | as the chosen one, except where upstream is wrong | nicer | "wrong" is then this tree's judgement, invisible to a user who only knows that the same command did something different on the two systems -- and the harness can no longer tell a fix from a regression |
+
+**The oddities kept**, each measured against the real program and listed in
+`autoopts`' crate docs: a `~/.sharrc` line needs its newline and a trailing
+`\` does not continue it; `<name>value</name>` loses the value's first byte;
+only the first `<?program>` directive is ever compared; a `load-opts` line in
+`~/.sharrc` counts the options it loads as typed, so `-m` on the command line
+becomes a second `base64`; an optional argument takes the next word, so
+`uuencode -v file` is a bad version mode. In uudecode: a short line decodes
+what a longer earlier line left in the buffer; a blank base64 line is a write
+error; `~user` with no slash scans the whole line buffer for one.
+
+**Where upstream is undefined, the port chose, and says so:** `--save-opts`'
+warnings pass one argument to a two-`%s` format (upstream prints a register's
+leftovers; this prints nothing, and the harness normalises exactly those three
+messages), and uudecode reads bytes no line wrote as zero where upstream reads
+its stack. Neither can be matched, and neither is worth a crash to imitate.
+
+**Two consolidations came with it.** gnulib's base64 is bundled by coreutils and
+by sharutils, eight years apart but the same decoder; it is one crate,
+`gnubase64`, not the second transcription this port first wrote. And libopts'
+pager runs through `shellcmd`, which is what `coreutils::shell` was, moved out
+so the two do not each decide how a command reaches `sh -c`.
+
+**Where:** `userspace/autoopts`, `userspace/uuencode`, `userspace/uudecode`,
+`userspace/gnubase64`, `userspace/shellcmd`; `scripts/uu-diff.sh` and
+`scripts/sharutils-ref.sh`. Closes
+`known-issues.md` -> `TD-B-BASE64-IS-STILL-THE-OLD-CRATE-UNTIL-UUENCODE-MOVES`.
+
+**Revisit** if a sharutils release fixes any of the kept bugs: the port follows
+the version the harness compares against, so the fix comes with moving the
+reference.
+
+## 1041. lsblk asks udev for a device's contents only where udev runs
+
+**Date:** 2026-09-27
+**Lane:** B
+**Decided by:** Claude (autonomous)
+
+**In short:** `lsblk -f` shows each device's filesystem type, label and
+UUID. util-linux's lsblk gets them from udev's database -- which any user may
+read -- and, when udev knows nothing of the device, by reading the device
+itself (root only). Upstream built with libudev treats every device sysfs
+lists as known to udev, even on a machine not running udev, and so shows
+nothing there. SlateOS runs no udev. The port asks udev only when its
+database directory exists, and otherwise reads the device -- which is
+upstream's behaviour where udev runs and util-linux-without-libudev's where
+it does not.
+
+**The alternatives:**
+
+| Option | What a user sees on SlateOS | Against upstream |
+|---|---|---|
+| Emulate libudev exactly | `lsblk -f` blank for everyone | identical everywhere |
+| Never ask udev (build as without libudev) | root sees filesystems; others nothing | differs wherever udev runs, including the WSL reference |
+| **Ask udev where `/run/udev/data` exists** | root sees filesystems; others nothing | identical where udev runs; differs only on a Linux host with libudev and no udevd (a container) |
+
+Exact emulation is faithful to a configuration SlateOS does not have: it
+would port the half of upstream's behaviour that only makes sense when udev
+is present, onto a system where it never is. Never asking udev would make
+the port untestable against the reference, whose udev answers first.
+
+**Where:** `userspace/lsblk/src/props.rs` (`udev_is_running`,
+`get_properties_by_udev`); todo.txt, lane B Judgment Calls, 2026-09-27.
+
+**Revisit** if SlateOS grows a udev-like device database: lsblk should then
+ask it first, as upstream asks udev.
+
+---
+
+## 1042. The character-width table is GNU's; SlateOS programs will also be able to ask the terminal
+
+**Date:** 2026-09-27
+**Lane:** B
+**Decided by:** Claude (operator-approved scope). Answering B-Q8, the
+operator left the choice of table to Claude ("just do whichever looks the
+best, or whichever you want") and asked for a width query in the terminal
+protocol; Claude took its own recommendation, (a). Answer relayed verbatim
+through lane F's session.
+
+**In short:** a terminal draws text in fixed cells, and every program that
+lines text up needs to know how many cells each character takes. Our one
+shared table matched bash's; the GNU tools ship a newer table that differs
+on 626 characters, almost all invisible marks and unassigned code points.
+We now use GNU's. Separately, the operator wants SlateOS's terminal to be
+able to *answer* "how wide will you draw this?", so programs written for
+SlateOS can ask instead of trusting a table; that is lane C's terminal, and
+has been requested from them.
+
+**The operator's answer, verbatim:**
+
+> I want a way to ask the terminal how wide it will draw something as part
+> of the protocol. It will be an addition purely for programs made for Slate
+> OS, so it won't interfere with POSIX or whatever, is that fine? Regarding
+> which table to keep, you say that bash and GNU tools will not be running
+> on Slate OS, only reimplementations, so does that not mean that,
+> regardlress of which we keep, nothing will show up improperly (because our
+> own implementations will naturally know the correct table to use)? If
+> that's the case, just do whichever looks the best, or whichever you want.
+> Though one thing that concerns me is the decision to make the renderer
+> obey the table rather than vice versa--what if the glyph it's trying to
+> render doesn't agree with the table in the current font? Wouldn't you
+> either get a glyph printed too wide or too narrow?
+
+**Why GNU's table (a).** It is a pinned upstream -- gnulib's, Unicode
+15.1.0 -- that can be re-derived mechanically, where ours came from whichever
+Python the build machine had. Six utilities consult a width against one
+shell, so matching GNU byte-for-byte in `ls`, `wc -L` and `column` is worth
+more than matching bash's line editor on characters nobody types. The
+operator's premise is right: nothing shows up improperly either way, because
+every program on SlateOS reads the one table.
+
+**"Is a private query fine?" -- yes, with one limit.** An escape sequence
+only SlateOS programs send, which other terminals simply do not answer, is
+exactly how terminals have always been extended (xterm's own queries began
+that way). The limit is that a query needs a terminal on the other end: `ls`
+choosing columns for a pipe or a file, or a program running over ssh from a
+machine with an older table, still has only its table. So the query
+supplements the table rather than replacing it.
+
+**The renderer and the font (the operator's concern).** In a terminal the
+cell grid is authoritative, not the font: every program on the screen, and
+the cursor, computes positions from the table, so the renderer has to fit
+each glyph into the cells the table gives it. A glyph narrower than its cells
+is placed inside them; a wider one is scaled or clipped to them, and never
+pushes the following characters out of place. The concern is real in one
+form: a font whose glyph for a one-cell character is drawn wide looks
+cramped. The remedy for that belongs to the font side -- a fallback font, or
+scaling -- and not to a table that varies by font, because then the layout
+of text would depend on which font is installed, which a program writing to
+a pipe or over ssh cannot know. Lane C has been asked to confirm the renderer
+fits glyphs to cells this way.
+
+**What follows:** `userspace/charwidth` takes gnulib's table; the `ls`
+harness's two permanently-deferred cases become agreeing ones; `osh`'s line
+editor stops matching bash on those 626 (recorded where it is measured).
+Request to lane C: the width query, and the fitting rule above.
+
+**Where:** `userspace/charwidth/src/lib.rs`; `known-issues.md` ->
+`TD-B-OUR-WIDTH-TABLE-IS-BASHS-AND-COREUTILS-9.5S-IS-NOT`.
+
+---
+
+## 1043. Genuine Oils becomes the default shell; our Rust OSH stays as a fallback
+
+**Date:** 2026-09-27
+**Lane:** B
+**Decided by:** Operator (answering B-Q9; Claude set out (a) keep ours, (b)
+replace ours with genuine Oils, (c) not yet, without recommending one. The
+operator chose (b) for the default and rejected (b)'s deletion: the Rust
+shell stays). Relayed verbatim through lane F's session.
+
+**In short:** the shell a user gets will be the real Oils -- both of its
+languages, OSH (bash-compatible) and YSH (its newer one) -- built from
+upstream's C++ for SlateOS, instead of our Rust re-creation of OSH. Ours is
+kept as a discoverable alternative, because a small shell with no C++ runtime
+under it is what still works when little else does.
+
+**The operator's answer, verbatim:**
+
+> The OS has to eventually be able to run Python and C++ correctly anyway,
+> and Claude never did finish fully debugging the Rust implementation of
+> Oils after 27 days. And as for "our Rust shell is small, boots early, and
+> has no C++ runtime under it — which matters for a shell that has to work
+> when little else does," the Rust implementation can always be kept as a
+> discoverable option that can also be run when little else is working. And
+> as for "our copy will always chase upstream, and any behaviour we have not
+> re-created is a difference someone eventually trips over," I don't see how
+> simply not worrying about chasing upstream changes in Oils could possibly
+> be any worse than staying with our own Rust implementation which would
+> effectively be a stale snapshot of the Oils version it was reimplemented
+> aganist, only buggier. So, make the real Oils the default.
+
+**What follows:** a roadmap item in lane B's backlog -- cross-compile genuine
+Oils (its generated C++, `oils-for-unix`) with `zig c++` against SlateOS's C
+library, run its spec tests on SlateOS, then make it the default `sh` and
+login shell (which touches `init/` and lane D's rootfs recipe). This closes
+the fork §73 left open. It is also the first C++ program SlateOS will run,
+so it proves the C++ runtime that Mesa, Chromium and WINE need anyway.
+
+---
+
+## 1044. grep's proximity window: a match can belong to more than one group -- the manual is right
+
+**Date:** 2026-09-27
+**Lane:** B
+**Decided by:** Operator (answering B-Q10 with option (b); Claude set out
+(a), (b) and (c) and said it would implement (a), the program's behaviour, if
+the question went unanswered). Relayed verbatim through lane F's session.
+
+**In short:** the operator's own `grep` has a proximity mode: print the lines
+where every pattern occurs within N lines of the others. Its manual says a
+window at least as large as the file is the same as the ordinary whole-file
+mode; the program disagreed, because a match used in one group could not be
+used again in the next. The operator ruled the manual right and the program
+wrong, and asked for both of their builds to be fixed as well as ours.
+
+**The operator's answer, verbatim:**
+
+> I think this is probably a bug in our grep. Please fix it, and make sure
+> you fix both the Python version and the C++ version.
+
+**The rule now, in all three places.** A window is any run of NUM consecutive
+lines; it is satisfied when every pattern matches somewhere in it; a matching
+line is shown when it lies in at least one satisfied window. Two faults broke
+the README's equivalence, not one: the record of live matches was *cleared*
+whenever a window was satisfied (so a match completed one window only), and a
+satisfied window's lines were taken from the earliest *live* match onward (so
+in `ALPHA`, `ALPHA`, `BETA` the first `ALPHA` was dropped). `-m` counts the
+matching lines shown, as the whole-file gate counts them, so the equivalence
+holds with `-m` as well.
+
+**Done the same day:**
+
+* The operator's project (`D:/visual studio projects/grep`, which stays on
+  D:): `grep.py` and `grep.cpp` fixed identically; the README's window example
+  moved its unpaired match from line 7 to line 9 (at line 7 it was two lines
+  from the `BETA`, so the old example depended on the bug); `test_grep.py`
+  gained fixtures for both failing shapes and runs the `-P 99 == no -P`
+  invariant on five files with eight option sets -- 85 passed, Python and C++
+  in parity. Committed locally there (a64f6c0), not pushed; `build.bat`
+  redeployed `d:\utils\grep.exe`.
+* Ours: `userspace/coreutils/src/bin/grep.rs`'s `near_eligible_lines`.
+
+§1008's reading of the operator's program as the rule is superseded by this
+entry for `--near`; the rest of §1008 stands.
+
+---
+
+## 1045. Names that live inside another program: case by case, and a kept name is installed as that program
+
+**Date:** 2026-09-27
+**Lane:** B
+**Decided by:** Operator (answering B-Q11 with "Claude's recommendation":
+option D, with a default of B for any name kept). Relayed verbatim through
+lane F's session.
+
+**In short:** some programs answer to several names -- one file installed as
+both `useradd` and `userdel` does two jobs. 169 such extra names existed when
+this was asked (148 today) and nothing installed any of them, so their code
+was finished, tested and unrunnable. Each name is now decided on its own: a
+name for a subsystem SlateOS does not have is deleted (§1006); a name that is
+kept is installed as the same file under the extra name, as busybox does, and
+gets a program of its own only where separate permissions for it matter.
+
+**Why B is the default and A the exception.** SlateOS grants permissions per
+binary, so one file under six names holds the union of six jobs' permissions.
+For most sibling sets -- the `useradd` family all edit the same two files --
+that union is what each would be granted anyway. Where the jobs genuinely
+differ (`systemctl`'s fourteen), a name earns its own crate.
+
+**What follows:** the triage, name by name, in `known-issues.md` ->
+`TD-B-ONE-HUNDRED-AND-SEVENTY-TWO-COMMAND-NAMES-NOBODY-CAN-RUN`; the ledger
+`scripts/multicall-aliases-baseline.txt` shrinks as each is settled.
+Installing a file under extra names is the rootfs recipe's job (lane D), and
+is requested from them.
+
+---
+
+## 1046. Our Rust osh keeps bash's error text; no toggle
+
+**Date:** 2026-09-27
+**Lane:** B
+**Decided by:** Operator (answering B-Q12; Claude recommended D. The operator
+leaned toward C, then judged it overkill once genuine Oils is the default
+(§1043), so osh is left as it is). Relayed verbatim through lane F's session.
+*Claude's reading of an answer that weighs C and then sets it aside; if C was
+meant, say so and it is a small change.*
+
+**In short:** our Rust shell prints error messages exactly as bash does,
+including names a user typed, unquoted -- so a name holding a newline can
+make one error look like two. The rest of the tree quotes such names. The
+operator decided the Rust shell need not grow a safer mode: genuine Oils
+becomes the default (§1043), and a user who switched to ours and hit this
+can switch back.
+
+**The operator's answer, verbatim:**
+
+> This reminds me, the proposed format for exporting passwords from the
+> password manager in plaintext was to do it in csv, but passwords can have
+> any characters, including any combination of characters used to delimit a
+> string or escape a character in csv, so make sure you don't mess that up.
+> Anyway, to answer the question, maybe C, but it seems like it may be
+> overkill since we're making the real Oils the default, and if the user has
+> switched theirs to our Rust Oils and runs into a problem, they can simply
+> temporarily use the real Oils instead.
+
+**What follows:** the 16 exemptions in `scripts/quote-names.py`'s IGNORE
+table now point here instead of at an open question. The password-manager
+remark is for the lane that owns the exporter, and has been passed to it:
+a CSV writer must quote every field that holds a comma, a quote, a CR or an
+LF, double every quote inside a quoted field, and be tested with passwords
+built from exactly those characters.
+
+---
+
+## 1047. Shaped random numbers belong in a userspace library, never beside cryptographic randomness; the effort rule stays in one file
+
+**Date:** 2026-09-27
+**Lane:** B
+**Decided by:** Operator (answering B-Q13 with "Claude's recommendation" on
+both of its parts). Relayed verbatim through lane F's session.
+
+**In short:** two questions the operator had asked back. (1) Bell curves and
+other shaped random numbers: yes, as an ordinary library any program can
+use, seeded and reproducible -- and deliberately not reachable through the
+call that supplies keys and nonces, whose numbers must never be reproducible.
+(2) The rule "the best result, regardless of effort" is already in force for
+SlateOS through `E:\visual studio projects\CLAUDE.md`, which every lane
+reads; it is not copied into `os/CLAUDE.md`, because two statements of one
+rule drift.
+
+**What follows:** a roadmap item in lane B's backlog for the distributions
+library (normal, exponential, Poisson, weighted choice, over a caller-given
+uniform source). No `CLAUDE.md` changes.
+
+---
+
+## 1048. logger: util-linux's logger is the one that survives
+
+**Date:** 2026-09-27
+**Lane:** B
+**Decided by:** Operator (answering B-Q14 with "Claude's recommendation",
+which was (c): keep the reviewed implementation, with `userspace/logger`'s
+destination). Relayed verbatim through lane F's session.
+
+**In short:** the question asked which of two `logger`s survives -- one that
+printed messages on the terminal, one that sent them to the system log. By
+the time it was answered, the tree had already arrived where the
+recommendation pointed: coreutils' printing applet was deleted (f98b0f95f,
+2026-09-16), and `userspace/logger` became a function-by-function port of
+util-linux 2.39.3's (413e56f1d, 2026-09-26), measured against the real one.
+So the survivor is both the reviewed implementation and the one with the
+right destination. Nothing remains to do; this records the decision behind
+it.
+
+---
+
+## 1049. sbctl keeps what can work or is one planned change away; the four signing commands are deleted
+
+**Date:** 2026-09-27
+**Lane:** B
+**Decided by:** Operator (answering B-Q17 with option 2, which Claude
+recommended) for `sbctl`. Applying the same rule to the other commands the
+question listed is Claude's (operator-approved scope). Relayed verbatim
+through lane F's session.
+
+**In short:** `sbctl` manages Secure Boot keys. It used to report creating
+keys and signing kernels while writing nothing; since 2026-09-15 those
+commands refuse instead. Now the four that need cryptography this project
+does not have and has not planned -- `create-keys`, `sign`, `rotate-keys`,
+`bundle` -- are deleted, per §1006. `enroll-keys` and `reset` stay, refusing,
+because they wait only on a door into the kernel's key store that lane A has
+been asked for and has scheduled (A-Q21, §978 on lane A's branch).
+
+**The rule, as it applies beyond sbctl.** A command that does not work stays
+only while what it waits for is planned; otherwise it is deleted and added
+back when it is implemented (§1006). The other refusing commands the question
+named (`unshare`, `nsenter`, `dbus-daemon`, `dbus-send`, `dbus-monitor`, `lp`,
+`lprm`, `eject`) are judged by that rule one at a time, each against the
+roadmap, in the commit that settles it.
+
+---
+
+## 1050. Lane B's next large port is the fastpy compiler on SlateOS; the operator's further ports are recorded
+
+**Date:** 2026-09-27
+**Lane:** B
+**Decided by:** Operator (answering B-Q18 with "Claude's recommendation":
+option B, the fastpy compiler, then the bug list as the standing default --
+and adding a list of ports). Relayed verbatim through lane F's session.
+
+**In short:** of the three large ports left in lane B's list, the fastpy
+compiler comes first: half of it already works, and it is what lets OS
+components be written in Python on SlateOS itself. The Rust toolchain and
+WINE wait. The operator also named programs they want ported that the
+roadmap did not carry; they are now recorded.
+
+**The operator's answer, verbatim:**
+
+> Claude's recommendation, though I noticed that Chromium is missing from
+> the list of large things to port. Have you ported that already? Oh, and
+> one thing I forgot to mention, I want Mono (dotnet support for Linux)
+> ported too, so record that. And record Chromium if it's somehow not
+> recorded anymore. Another thing I want ported is Xonsh, and another is
+> YSH, and another is Nushell. And QDirStat, or better, port my own fork of
+> WinDirStat that can be found at d:\visual studio projects\dirsize\windirstat.
+> Also, do we have a capable debugger, like cdb? We should port one or more
+> of those, too. And I want a reimplementation of `d:\visual studio
+> projects\backup` in a language we support, or if we get Mono ported, we
+> can just run it on that. Record all of these that aren't recorded.
+
+**Each item, checked against the roadmap:**
+
+| Port | Recorded before? | Now |
+|---|---|---|
+| Chromium | yes -- a joint task driven by lane E, blocked on POSIX, GPU and networking; it was absent from B-Q18 only because it is not lane B's | unchanged |
+| Mono (.NET on Linux) | no | added |
+| Xonsh | no | added |
+| YSH | yes, as the half of genuine Oils §73 deferred | it arrives with §1043 |
+| Nushell | marked `[x]`, but what was verified is a *Windows* build (`nu.exe` under msvc, 2026-06-03), not SlateOS | added as a SlateOS port, and the `[x]` annotated |
+| WinDirStat (the operator's fork), or QDirStat | a WinDirStat-*style* app exists (`apps/diskanalyzer`), written here, not a port | added |
+| A capable debugger | a hand-written `gdb` crate exists; no port of GDB or LLDB | added |
+| `d:\visual studio projects\backup` (LithicBackup) | no | added: reimplement, or run it on Mono once Mono runs |
+
+---
+
+## 1051. Two editing habits become a standing rule, in the CLAUDE.md of all three accounts -- pending the operator's word in this session
+
+**Date:** 2026-09-27
+**Lane:** B
+**Decided by:** Operator (answering B-Q19: "Add it to claude.md of all three
+Claude accounts under c:\users\inhah" -- option A, both habits, which Claude
+recommended). Relayed verbatim through lane F's session.
+
+**In short:** six times in one day an edit script matched different text than
+intended, or more places than one, and the wrong edit landed silently. Two
+habits catch it: assert how many places matched before replacing, and never
+write the explanation of a trap and the code it describes in the same pass.
+The operator wants both in the user-level `CLAUDE.md` of each account.
+
+**Not yet applied, and why.** Lane B edits a `CLAUDE.md` only on the
+operator's own instruction in the session that makes the edit; this answer
+reached it through another session's relay, which is not that. The operator
+has been asked to confirm in lane B's session. The text to add, so it can be
+pasted as it stands once confirmed:
+
+> **Edits by search-and-replace.** Before replacing, check that the anchor
+> matched exactly as many places as you meant -- usually one -- and stop if
+> it did not. And do not write a comment explaining a trap in the same pass
+> as the code it describes: write it, run something (a test, a gate, a
+> build), then read it back as a reader rather than as its author.
+
+**Where:** `C:\Users\inhah\.claude\CLAUDE.md`,
+`C:\Users\inhah\.claude-account-b\CLAUDE.md`,
+`C:\Users\inhah\.claude-account-c\CLAUDE.md`.
+
+---
+
+## 1052. shred --random-source reads its source as GNU's does; the question's premise had gone
+
+**Date:** 2026-09-27
+**Lane:** B
+**Decided by:** Operator (answering B-Q20), with Claude keeping GNU's
+behaviour for a source that is a regular file -- a divergence from the
+operator's proposal, made for the reason below and put back to the operator.
+Relayed verbatim through lane F's session.
+
+**In short:** `shred` overwrites a file several times to destroy it, and
+`--random-source` names where its random bytes come from. When this was
+asked, our `shred` refused the option, and supporting it seemed to mean
+changing the order of the overwrite. Since then `shred` was replaced by a
+port of GNU coreutils 9.4's, in which `--random-source` works exactly as
+GNU's does, byte for byte, checked by `scripts/shred-diff.sh`. That port
+already does what the operator asked for, in all but one detail.
+
+**The operator's answer, verbatim:**
+
+> I don't understand why the behavior of the random-and-complement passes
+> has to change just to support reading from a file or /dev/urandom, which
+> should be a completely separate path. And I think the failure mode in
+> which one full pass was done but not later passes is many times better
+> than the failure mode in which half a file was overwritten and the other
+> half not. But I'm having a lot of trouble understanding this particular
+> open question in general. But I'd say if the user specifies /dev/urandom,
+> just read from that as you pass over the file, as many times as they want.
+> If the user specifies a file to read from for the data to overwrite with,
+> read that file in chunks as it overwrites the deleted file, then on the
+> next pass, start reading the random-data file from the beginning again.
+> Fair?
+
+**Against the port:**
+
+| The operator asked for | The port |
+|---|---|
+| The random source as a separate path from the generator's passes | yes: with `--random-source`, every random byte comes from the source |
+| Whole passes, so an interruption leaves full passes done | yes: each pass sweeps the whole file, as GNU's does |
+| `/dev/urandom` read continuously, as many passes as asked | yes |
+| A file source re-read from its beginning at each pass | **no -- kept as GNU's**: the file is read on from where the last pass stopped, and a file that runs out ends the run with `shred: FILE: end of file` before the next write |
+
+**Why that one detail stays GNU's.** Restarting the file at every pass makes
+every random pass write the same bytes; the passes after the first then add
+no randomness, which is what multiple passes exist to add. It would also
+make `shred --random-source=F` write different bytes from GNU's on the same
+input, which is what the port's harness checks. If the operator wants the
+restart anyway -- to make a short source last -- it can be an explicit
+option rather than a change to GNU's; that is put back to them.
+
+---
+
+## 1053. Everything that builds goes on the image for now; a catalogue of every program, and the question of what the OS is for, follow
+
+**Date:** 2026-09-27
+**Lane:** B
+**Decided by:** Operator (answering B-Q21: option A for now, and asking for a
+catalogue of the programs, options for "what this OS is for", and a rule
+that every program is recorded where everyone can find it). Relayed
+verbatim through lane F's session.
+
+**In short:** most programs we have written were built and tested but never
+put on the disk image that boots, because together they did not fit. The
+image is to grow and carry everything that builds. Then the operator wants a
+list of every program with a line on what it does, followed by options for
+what SlateOS is for -- each option with the programs it would drop -- so the
+choice of what ships can be made deliberately. And programs must stop being
+undiscoverable: a new program is recorded where every lane looks.
+
+**The operator's answer, verbatim:**
+
+> Go with A for now, but create a list of all the 276 programs along with a
+> short description for each, and at the end, give me options for your
+> question of "what this OS is for" and maybe with some implications as to
+> which option implies which programs would be removed. Also, were you
+> saying that these 276 programs are not even easily discoverable? We
+> should have a rule somewhere that if you make a program, record it
+> somewhere so everybody knows it exists.
+> As for the second question, I guess there's no point in having both a
+> fastpy and a Rust implementation of anything. Wait, yes there is. We may
+> determine that the Rust implementation is better and make that the stock
+> install, but the user may find Python much easier to edit. And vice
+> versa, they may prefer Rust for some reason even if we think the Python
+> version is better. Though another option is to keep the alternative
+> versions in the repo but not included in the OS distribution.
+
+**What follows:**
+1. The image: raising `IMG_SIZE` and staging every binary that builds is the
+   rootfs recipe's (lane D's), and is requested from them.
+2. The catalogue: a generated list of every program the workspace builds,
+   with a one-line description each, and at its end the options for what
+   SlateOS is for, each with what it would drop. The options go into
+   `open-questions.md` as a new question.
+3. The rule: the catalogue is the place a program is recorded, and a gate
+   checks every binary the workspace builds appears in it, so the rule
+   cannot be forgotten.
+4. On keeping both implementations: the operator's second paragraph is the
+   answer `deferred-questions.md` DQ1 was waiting for in part -- both may be
+   kept, the alternative possibly in the repository only -- and is copied
+   there.
+
+---
+
+## 1054. logind gives each client a thread of its own, because the kernel cannot wake one waiter for many channels
+
+**Date:** 2026-10-01
+**Lane:** B
+**Decided by:** Claude (autonomous)
+
+**In short:** `logind` (the session manager) was written to watch all of its
+clients from one place: a *completion port* (a kernel object a program waits
+on to hear about many things at once). It could never have answered anyone.
+The kernel does not tell a completion port when a message arrives on a
+channel, and has no way at all for one to wait for a new client to connect.
+`logind` now gives every connected client a thread that waits on that one
+client, and accepts new clients on its main thread -- blocking waits on one
+thing each, which is the part of the kernel's channel interface that works.
+The cost is one thread per connected client, bounded at 64 with 512 KiB
+stacks. The single event loop comes back when the kernel can wake a port for
+both.
+
+**What was there.** `serve` registered the service listener with the port as
+a *channel* (`register_listener`, "listeners are channels internally"). They
+are not: listener ids and channel ids come from separate counters, so the
+port watched whichever unrelated channel shared the number, and never saw a
+connection. And `completion::wait` polls its sources once, then sleeps until
+something calls `completion::notify` -- which a channel send never does
+(`channel::send` wakes only a task blocked in a receive). So a request that
+arrived after the loop began waiting was never noticed either. Lane F found
+the first (`requests/f-b-logind-refuses-every-caller-because-libservicebus-never-asks-who-it-is.md`,
+point 2) and the second (`requests/f-a-a-channel-handle-can-be-guessed-and-any-process-can-use-it.md`,
+point 4).
+
+| Option | For | Against |
+|---|---|---|
+| **A. A thread per client, accept on the main thread** (chosen) | Works on today's kernel: a blocked receive *is* woken by a send, and a blocked accept by a connect. Simple. Calls are still handled one at a time behind one lock, as the loop handled them. | A thread per idle client. Bounded (64 clients; a 65th is closed at once), and the stacks are small because memory is committed, not overcommitted. |
+| B. Keep the loop, add a periodic timer and re-poll | One thread | Wakes up when idle, delays every answer by up to the period, and still has no way to learn of a new client except by trying to accept on every tick. Polling dressed as an event loop. |
+| C. Keep the loop and wait for lane A | No change here | `logind` answers nobody until then -- the state lane F reported. |
+
+**Revisit when** lane A wakes a completion port on channel sends (lane F's
+request above, point 4) and adds a wait source for a pending connection
+(`requests/b-a-a-server-cannot-wait-for-a-new-client-and-its-clients-at-once.md`).
+Then the event loop is the better shape again -- no thread per idle client --
+and `libservicebus` regains `register_listener`, this time registering a real
+listener source.
 
 ## 834. Selection is a change of colour, not of weight
 
@@ -85827,6 +88346,362 @@ finished.
 **Revisit if** a grammar is found whose ordinary files need more than two
 hundred units a byte (raise the rate, with the file as a test), or the
 runtime starts reporting more of its work (then count that too).
+
+## 1440. A name's declaration colours its uses: each version of the file is indexed once, in the background
+
+**Date:** 2026-09-28 &middot; **Decided by:** Claude (autonomous) &middot; **Lane:** C
+
+**In short:** JavaScript's colouring rules -- and TypeScript's, which build
+on them -- colour a function's parameters wherever they are used, not only
+where they are declared, and stop colouring `module` or `console` as
+Node's own where the code declares a variable of that name. They do it
+through a third query besides colours and injections, `locals.scm`, which
+says where the scopes are, which names each declares, and which names may
+use one; tree-sitter's own highlighter reads it, and the code editor's now
+does too, the same way. A use can be thousands of lines below its
+declaration, where the editor -- which colours a screen at a time --
+never looks, so each version of the file is indexed once, in the
+background, a few milliseconds per frame. Until the index for the edited
+file is ready, the previous one is used, moved along with the edits.
+
+**What it costs** (1.1 MB of real JavaScript -- npm's own modules, end to
+end -- in a release build, with a workspace test running alongside): the
+pass takes 0.3 s, all of it tree-sitter's query cursor, which takes as long
+with this crate's bookkeeping taken out; parsing the file from scratch takes
+0.7 s. After a keystroke the reparse and the pass together take 0.33 s of
+background work, spread a few milliseconds over each frame; a file of
+typical size, 20 KB, a few milliseconds in all. Drawing a screen takes 4.5
+ms with the index and 4.4 ms without; moving the index with a keystroke,
+0.17 ms. A declaration's colour is found once, the first time a use of it is
+drawn, by a query started just above the declaration -- as many levels up
+as the query's patterns nest (`pattern_depth`) -- rather than at the root,
+from which it steps past everything before the declaration: the first
+screen at the end of the large file draws in 6.9 ms that way, against 17.8
+ms from the root and 3.7 ms for each draw after, once the colours are
+known.
+
+**The alternatives:**
+
+| Option | For | Against |
+|---|---|---|
+| **Index each tree once, in `work()`'s slices; move it with the edits until the next is done** (chosen) | exact -- as tree-sitter's highlighter reads the query -- once the pass is done; never on the drawing path; nothing flickers while it runs | a pass for every edit: background work in proportion to the file (0.3 s for 1.1 MB); until the pass after an edit is done, a use the edit touched is shown as a plain name |
+| Ignore `locals.scm` (Neovim's choice) | costs nothing | parameters coloured only where declared; a declared `module` still coloured as Node's; JavaScript's own highlight test `variables.js` fails |
+| Run the locals query from the top of the file on every draw | exact, and no index to keep | every frame pays for a pass over everything above the screen: 0.3 s on the large file |
+| Run it over the screen alone (Helix, until its rewrite) | cheap | a parameter's uses change colour as its declaration scrolls off the top |
+| An incremental index, redoing only what follows an edit | less background work | what follows an edit must be redone anyway -- a declaration changes how everything after it resolves -- so it saves half a pass on average, for the machinery of saving the pass's state as it goes |
+
+**Where it follows tree-sitter's highlighter to the letter**, since the
+queries are written and tested against it: a scope is closed only by a node
+starting *past* its end, so two blocks back to back (`{ ... }{ ... }`) nest;
+a use is of the last declaration of its name, before it, in the innermost
+scope that has one, looking outward only through scopes that inherit
+(`local.scope-inherits`), and not of a declaration whose value it is inside
+(`local.definition-value`); of a local's captures, the first paints even if
+its pattern is marked `(#is-not? local)`, and the later ones so marked do
+not; a use of a declaration that paints nothing is no local. Captures whose
+names have no colour here take no part, as §1438 has it for every node.
+
+**How it is known to be right.** JavaScript's highlight tests run here:
+55 assertions, 26 of them `variables.js`'s, seven of which -- a
+parameter's uses, `module` declared in a block -- fail without this. Tests
+of this crate's own pin the rest: the pass in slices finds what one pass
+does, with scopes that inherit and scopes that do not; a colour found near
+its declaration is the one found from the root, for every declaration of a
+file of them; the rules above, one by one, with queries that use what
+JavaScript's does not; an edit moving the index, and forgetting what it
+touched -- a name an edit runs into the next is not its declaration's
+meanwhile; an injected stretch indexed as it is parsed, and carried on by
+`work` when it does not fit a draw. Twenty-two mutations of it each fail
+one of these; one more is no change at all (a use looked up on a node that
+also declares a name, where the declaration always wins).
+
+**Revisit if** the pass after each keystroke shows up as a problem on large
+files (keeping the pass's state at points along the file would let it
+resume from before the edit), or tree-sitter's query cursor gains a way to
+skip to a position rather than step through every sibling before it, which
+would cut both the pass and the drawing of a screen on large files.
+
+## 1441. TypeScript's highlight query goes after JavaScript's, not before it as its package lists them
+
+**Date:** 2026-09-28 &middot; **Decided by:** Claude (autonomous) &middot; **Lane:** C
+
+**In short:** TypeScript's colouring rules are JavaScript's plus TypeScript's
+own -- types, parameters, TypeScript's keywords. Its package says to read
+TypeScript's rules first and JavaScript's after them; but where two rules
+colour the same piece of code the later one wins -- in tree-sitter's own
+highlighter as in the editor's (§1438) -- so JavaScript's general rules
+("every name is a variable", "`<` is an operator") would override
+TypeScript's specific ones ("this name is a parameter", "this `<` opens a
+type's arguments"). Every parameter would look like any other variable.
+The editor reads JavaScript's rules first and TypeScript's after them, so
+the specific wins -- the order JavaScript's own package gives its own
+parameter rules.
+
+**The alternatives:**
+
+| Option | For | Against |
+|---|---|---|
+| **JavaScript's query first, TypeScript's after** (chosen; TSX: JavaScript's, its JSX query, then TypeScript's) | each specific rule wins over the general one, as its author meant: parameters are parameters, a type's `<...>` brackets, and in TSX a tag a tag | departs from the list in the package's `tree-sitter.json`; a capitalised name such as `Foo` in `new Foo()` takes TypeScript's colour, a type, where JavaScript's rule makes it a constructor |
+| The package's order, TypeScript's first | exactly as published | parameters coloured as plain variables, the `<` of `Map<K, V>` as an operator; in TSX, JSX's rules before JavaScript's, so every tag a variable |
+| Edit the queries so no two rules overlap | either order would do | our own copies of upstream's queries, to be redone by hand at every update |
+
+**Why the package lists them the other way.** When tree-sitter's
+highlighter let the *first* rule win (§1438), TypeScript's first was the
+specific-over-general order. The highlighter changed; the list did not; and
+the package ships no highlight tests of its own that would have shown it.
+JavaScript's package, which does, lists its general query before its
+specific ones (`highlights.scm`, then `highlights-jsx.scm` and
+`highlights-params.scm`).
+
+**How it is known to be right.** `typescripts_query_goes_after_javascripts`
+(`gui/syntax/src/highlighter.rs`) colours a TypeScript function in both
+orders: this one paints its parameter -- at its declaration and at its use
+-- as a parameter and a type argument's `<` as a bracket; the package's
+order paints them a variable and an operator. `tsx_is_coloured_with_jsx_and_types`
+checks TSX's tags, attributes, parameters and types.
+
+**Revisit if** tree-sitter-typescript reorders its list, or ships highlight
+tests: then its own tests say what it means, and the order follows them.
+
+## 1442. Go's highlight query is read with its general patterns first
+
+**Date:** 2026-09-29 &middot; **Decided by:** Claude (autonomous) &middot; **Lane:** C
+
+**In short:** Go's colouring rules say "a function's name is a function"
+and, further down, "every name is a variable". Tree-sitter's highlighter --
+and the editor's (§1438) -- lets the later rule win where two colour the
+same piece of code, so read as published every Go function's name came out
+a plain variable and every method a property. The rules were written when
+the first rule won, and the grammar ships no tests of its colours that would
+have shown the change. The editor reads the same rules with the general ones
+moved to the top, so the specific ones win, as their author meant.
+
+**The alternatives:**
+
+| Option | For | Against |
+|---|---|---|
+| **The published patterns, the general block (`type_identifier`, `field_identifier`, `identifier`) moved to the top** (chosen) | functions and methods coloured as functions; every pattern upstream's, no more and no fewer | a file of our own beside the published one (`highlights.general-first.scm`), which a test holds to the published one reordered, so an update shows at once |
+| The published order | exactly as published | function and method names coloured as variables and properties |
+| Neovim's Go query instead | written for the last-wins rule | another project's query, with predicates this runtime does not evaluate (`#lua-match?`), and captures named for another editor |
+
+**How it was found, and that it is the only one.** A test of the editor's
+own colouring of Go failed on a function's name. A scan of every vendored
+query for a bare `(node) @capture` coming after a more specific pattern on
+the same node found two: Go's, and CSS's `--custom` properties -- whose
+`@variable` pattern CSS's own highlight tests show is meant to lose (they
+expect `--color1` to be a property). TypeScript's order was already the
+subject of §1441.
+
+**Revisit if** tree-sitter-go reorders its query or ships highlight tests;
+then the published query is read as it is, and this file goes.
+
+## 1443. Injected colours win over their host's in the text they were given, and a pattern's priority is read
+
+**Date:** 2026-09-29 &middot; **Decided by:** Claude (autonomous) &middot; **Lane:** C
+
+**In short:** when one language sits inside another -- a Rust file's lines
+inside a diff, a code block inside Markdown, HTML inside a JavaScript
+template -- both colour the same text, and something has to decide which
+colour shows. Until now whichever started later won. That showed a diff's
+added line inside a Rust comment in the "added" colour instead of the
+comment's. Now a query's own word on importance (Neovim's `priority`)
+decides first; then the inner language wins over the outer, but only on
+the text the inner language was given to read; only then does the start
+order decide, as before.
+
+**The alternatives:**
+
+| Option | For | Against |
+|---|---|---|
+| **Priority, then the inner language over the outer within the inner's own text, then start order** (chosen) | a diff's code coloured as code wherever it is, its `+` and `-` in their line's colour as the query asks; the holes in an injected language -- a template's `${...}`, a diff's markers, Markdown's `>` inside a quoted paragraph -- keep the outer language's colours | departs from tree-sitter's own highlighter, whose single stack the old rule copied event for event |
+| Start order only -- tree-sitter's highlighter, the old rule | exactly tree-sitter's behaviour | an outer colour starting inside an inner one hides it: a diff line's colour over the second line of a comment; and `priority` unread, so a diff's markers are drawn as punctuation, and once the code is coloured the change shows only on plain names |
+| Neovim's rule exactly: priority, then the inner language, nothing cut | the rule the diff's queries were written for | an inner node spanning a hole paints the hole: a comment the new file opens before a deleted line and closes after it paints the deleted line as a comment; an HTML attribute's string paints the JavaScript `${...}` inside it |
+
+**What `priority` is.** Neovim's directive `(#set! priority 95)` -- or
+`(#set! @capture priority 95)` for one capture: 100 where none is set;
+higher shows over lower wherever both are, however their nodes nest; among
+one node's captures, the higher beats a later pattern. Of the queries
+vendored, only the diff's sets one: on the `+` and `-` markers, to put them
+under their line's colour.
+
+**Revisit if** a query turns up that needs an outer language's colour over
+an inner one's inside the text the inner language was given.
+
+## 1444. A diff's hunks are read in their files' languages, flat diffs included
+
+**Date:** 2026-09-29 &middot; **Decided by:** Claude (autonomous) &middot; **Lane:** C
+
+**In short:** a diff of a Rust file now shows its code in Rust's colours:
+the lines the new file has (kept and added) read together as one piece of
+code, the old file's as another. The grammar's own rule for this finds
+hunks only under a `diff --git`-style line; a plain `diff -u` of two files
+has none, nor has `svn diff`, so a second rule of our own reads those. And
+a file named with a timestamp after it, as `diff -u` and `diff -r` name
+one, is known by its name alone.
+
+**The alternatives:**
+
+| Option | For | Against |
+|---|---|---|
+| **The published query, plus `injections.flat.scm` of our own for diffs with no `diff` line; a header's name cut at a tab** (chosen) | git's diffs, `diff -u`'s, `diff -r`'s and `svn diff`'s all coloured | a query of our own to keep in step with the grammar's -- its patterns mirror the published ones, and tests hold both shapes |
+| The published query alone | nothing of our own | `diff -u` of two files -- the commonest diff outside git -- uncoloured; and a timestamped header names no language, so `diff -r`'s blocks lost their colours too |
+| No injection: the diff's own colours only | a change's colour on every character | the code unreadable as code |
+
+**Two readings of Neovim's directive `#offset!`.** It moves a range's ends
+by rows and columns. A column past a line's end goes on into the next line,
+the end of the line counting one column whether it is `\n` or `\r\n` -- so
+the query's `0 1 0 1`, meant to take in each line's newline, takes in all of
+a Windows file's `\r\n`; counted in bytes it would stop between the two, and
+a `//` comment would run on into the next line. And where Neovim keeps a
+capture whole when its offset would turn it inside out, it is dropped here:
+a text too short to trim has nothing in it to colour.
+
+**Revisit if** tree-sitter-diff gives a flat diff's hunks a block of their
+own -- the flat query then goes -- or publishes a reading of either.
+
+## 1445. An installed program replaces SlateOS's own by desktop file ID, not by the program it starts
+
+**Date:** 2026-09-29 &middot; **Decided by:** Claude (autonomous) &middot; **Lane:** C &middot; asked by lane E (`e-c-the-installed-and-built-in-programs-belong-in-gui-programs`)
+
+**In short:** the start menu, Settings' Default Apps page and the file
+manager each list "the programs this machine has": the installed ones, with
+SlateOS's own behind them. They disagreed about when an installed program
+*replaces* one of SlateOS's. The start menu matched by the program an entry
+starts (an entry running `calculator` replaced SlateOS's Calculator); the
+others by the entry's name on disk, its desktop file ID
+(`org.slateos.Calculator.desktop`). Now there is one rule, in
+`gui/programs` (`known`, `known_in`, `with_built_in`), and it is the ID: an
+entry replaces SlateOS's only when it is the same entry.
+
+**The alternatives:**
+
+| Option | For | Against |
+|---|---|---|
+| **By desktop file ID** (chosen) | the freedesktop rule for "the same entry" -- a user's copy of a system entry replaces it by its ID, and so do SlateOS's own entries once the image installs them as files; a launcher someone makes for a program, `Exec=calculator --scientific` under an ID of its own, is a second entry beside the first, as it is on every other desktop | an entry that starts one of SlateOS's programs under another ID is listed beside SlateOS's, not instead of it |
+| By the program's file name -- the start menu's rule until now | a third-party entry for SlateOS's calculator hides SlateOS's | another program that happens to share a name -- `/opt/foo/bin/editor` -- takes SlateOS's editor off the menu; a launcher a person made for SlateOS's calculator hides the stock one; and `defaults.list`, which names defaults by ID, cannot say which of the two it meant |
+| Either | catches both | the false matches of the second, and two rules to explain |
+
+**What counts as the same ID.** Any file the scan finds for it, used or not
+(`Scan::claims`): a `Hidden=true` copy -- the freedesktop way to remove an
+entry -- takes SlateOS's off the list too, and a copy that does not parse is
+reported rather than quietly passed over for the compiled-in one. The start
+menu holds installed entries to their `TryExec` and `NoDisplay` as before;
+SlateOS's own are not held to `TryExec`, because the image does not install
+their entries yet and a menu without them would be empty.
+
+**Order:** the installed first, SlateOS's behind -- `Role::filled_by` breaks
+ties by order, and a program the machine has installed is asked first.
+
+**Revisit if** SlateOS's own entries ship installed as files (their
+`TryExec` then applies like anyone's), or a real case turns up of a package
+shipping one of SlateOS's programs under an ID of its own.
+
+## 1446. How the desktop moves is one value: a theme's animation at the user's speed, carried on the palette
+
+**Date:** 2026-09-29 &middot; **Decided by:** Claude (operator-approved scope:
+`roadmap-detailed.md` → *Tier 3 — Animation Tuning* asks for the three
+settings; their spellings, bounds and curves, and how they meet the user's
+speed, are Claude's call) &middot; **Lane:** C
+
+**In short:** A theme can now say how the desktop moves -- how long a panel
+takes to open, whether things glide in and settle, go at a constant speed,
+or spring a little past their place -- or that nothing moves at all. The
+user picks which theme's motion to use separately from its colours, as with
+icons and control shapes, and their own animation speed (Off, Fast, Normal,
+Slow) then speeds it up or slows it down. Before this, the speed setting
+reached only a part of the shell that draws nothing: the overview still
+faded in and the notification pane still slid at their own fixed lengths,
+even with animation set to Off. Now everything that moves on the desktop
+follows the one setting.
+
+**The file.** An `animation` section in `theme.yaml`, named as the axis is
+in `meta.supports`; `theme.animation: <name>` in `appearance.yaml` chooses it,
+next to `theme.colors`, `theme.icons` and `theme.widget_style`. The shipped
+`aero/theme.yaml` writes every setting out as the template:
+
+| Setting | Values | The built-in theme's |
+|---|---|---|
+| `enabled` | `true`, or `false`: nothing moves | true |
+| `duration-ms` | the standard transition, 50-1000 ms | 200 |
+| `easing` | `ease-out`, `linear` or `spring` | ease-out |
+
+As with every section, what it leaves out is the built-in theme's, and a
+value that cannot be read costs that value and is listed for the theme's
+author. A duration outside 50-1000 is taken as the nearer end, with a note;
+a zero is told to write `enabled: false`, which is what it meant.
+
+**The model: every transition is stated against a standard.** Each moving
+thing keeps the length it was designed at -- the overview's 200 ms fade,
+the taskbar's 200 ms slide, the on-screen display's 150 ms in and 300 ms
+out, a toast's 250 ms -- and `Motion::duration_ms` scales each by the theme's
+standard over the built-in 200 ms, and by the user's speed. So one setting
+moves the whole desktop together.
+
+| Option | For | Against |
+|---|---|---|
+| **One standard that scales every transition** (chosen) | the roadmap's `animation-duration-ms` is "the global default"; the transitions keep their proportions (a fade out stays twice its fade in); one number a theme author can reason about | a theme cannot lengthen one transition alone |
+| One duration for everything | simplest | the overview's fade and the display's 300 ms fade out would become the same length, which they were designed not to be |
+| A duration per transition in the theme | finest control | a theme would have to know the desktop's inventory of animations, and every new one would be a new key |
+
+**The curves, and why arriving and leaving differ.** Under `ease-out`
+something arriving decelerates into place (cubic) and something leaving
+accelerates away (quadratic -- a cubic start is so slow that a closing panel
+seems to hesitate). `spring` arrives past its place by 8.7% and settles --
+`1 - e^(-7t) cos(2.5 pi t)`, exactly 1 at the end so nothing jumps -- and
+leaves as ease-out does, since overshooting "gone" shows nothing. `linear` is
+a constant speed both ways. A panel anchored to the screen's edge (the
+notification pane, the auto-hidden taskbar) and an opacity clamp the
+overshoot; a toast floating on the desktop keeps it.
+
+**A transition turned round starts where it is drawn.** With different
+curves out and in, where a slide's clock stands is not where the thing is
+drawn -- half-way through leaving is a quarter gone, half-way through
+arriving is seven-eighths there -- so the notification pane and the taskbar,
+reversed mid-slide, start the new slide at the moment its own curve has them
+where they are (`Motion::when_arriving_at` / `when_leaving_at`). The taskbar
+used to jump to fully hidden when the pointer came back mid-slide; it no
+longer does, under any curve.
+
+**How it meets the user's speed.** `Motion::at_speed` multiplies the theme's
+standard by the speed's multiplier -- Fast 0.75, Slow 1.5 -- and Off is the
+still motion, as is a theme's `enabled: false`. Applied once, where the
+palette is resolved (`AppearanceSettings`' `PaletteSource::motion`), so
+nothing downstream has a second definition of "slow".
+`AppearanceSettings::animations_enabled` stays the user's switch alone: a
+theme without transitions is a look, not the user asking for less motion,
+and the picture viewer, which asks it before playing an animated picture,
+should not stop because of a theme's taste in panel slides.
+
+**How it reaches what moves.** On the palette (`Palette::motion`), as the
+widget style is (§1435): a palette already reaches every application through
+`oswindow`, so an animator needs no new argument, and the notification
+daemon takes it from `theme_changed` like any application. The shell pushes
+it from its one door for appearance (`DesktopShell::set_appearance`) to the
+notification pane and the on-screen display, and the session to the
+animation manager and auto-hide (`ShellSession::sync_motion`); the overview's
+fade takes it when it begins. High contrast keeps the motion whole: it is
+about telling things apart.
+
+**What a motion does not choose:** whether a busy indicator turns (that is
+state, and someone who turned animation off has not asked to stop being told
+the machine is working); where anything ends up; and how long anything stays
+-- a toast's time on screen, a tooltip's delay, the taskbar's hide delay are
+waits, and settings of their own.
+
+**Found on the way:** a scale of zero (Off) left the animation manager's
+animations frozen part-way and asking for a frame every frame; setting it now
+ends them where they were going. And two doc comments had drifted onto the
+wrong functions in `session.rs` and one in `taskbar_autohide.rs`.
+
+**Not yet following it:** the compositor animates no windows yet; when it
+does, it reads the motion from its palette (lane F). `window_peek.rs` is
+dormant -- nothing in the shell drives it -- and takes the motion when it is
+wired. The notification daemon follows the motion but not yet the colours
+(`TD-C-THE-TOAST-DAEMON-DRAWS-IN-ITS-OWN-COLOURS`). Lane E's Settings page
+offers the choice (`requests/c-e-a-theme-can-set-the-motion.md`).
+
+**Revisit if** a theme author needs one transition longer than the others,
+or a curve the three do not cover.
 
 ## 952. A measurement the host can distort needs a repeat, not a wider bound
 

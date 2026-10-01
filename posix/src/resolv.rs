@@ -37,9 +37,27 @@
 //!   and **`res_search`** is glibc's search: `ndots`, the search list, the
 //!   trailing dot, `RES_DEFNAMES`/`RES_DNSRCH`/`RES_NOTLDQUERY`.
 //!
+//! - **The reentrant forms** -- `res_ninit`, `res_nquery`, `res_nsearch`,
+//!   `res_nquerydomain`, `res_nmkquery`, `res_nsend`, `res_nclose` -- do the
+//!   same on a state of the caller's own, used as glibc uses it: as it is.
+//!   A failure sets `h_errno` and the state's `res_h_errno` together, as
+//!   glibc's `RES_SET_H_ERRNO` does, for these and `_res`'s alike.
+//!
+//! - **`HOSTALIASES`** names a file of `name alias` lines: `res_search` asks
+//!   for a name with no dot as its alias, when the file has one, and
+//!   `hostalias` and `res_hostalias` look one up (unless `RES_NOALIASES`).
+//!   The environment is read as `secure_getenv` reads it -- this variable,
+//!   `LOCALDOMAIN` and `RES_OPTIONS` are among those glibc's loader strikes
+//!   from a program run with privileges it was not started with.
+//! - **libresolv's helpers** -- `res_nameinquery`, `res_queriesmatch`,
+//!   `res_isourserver`, `dn_count_labels`, `putlong`, `putshort`,
+//!   `res_randomid`, `res_close` -- are glibc's, each under the `__` name
+//!   its header renames it to.
+//!
 //! Not done: IPv6 nameservers (read, and skipped), `sortlist`, EDNS0,
-//! `HOSTALIASES`, DNSSEC.  `_res` is one per process, as in musl; glibc's is
-//! one per thread.
+//! DNSSEC.  `_res` is one per process, as in musl; glibc's is
+//! one per thread -- a threaded program wanting its own has the reentrant
+//! forms.
 
 use crate::errno;
 
@@ -144,12 +162,28 @@ pub const RES_DEFNAMES: u64 = 0x0000_0080;
 pub const RES_DNSRCH: u64 = 0x0000_0200;
 /// Rotate among the nameservers.
 pub const RES_ROTATE: u64 = 0x0000_4000;
-/// Never query a dot-free name as it stands.
-pub const RES_NOTLDQUERY: u64 = 0x0010_0000;
+/// `RES_NOALIASES`: the `HOSTALIASES` file is not read ([`__res_hostalias`]).
+pub const RES_NOALIASES: u64 = 0x0000_1000;
+/// Do not look names up under `ip6.int` (accepted; this resolver never
+/// does). musl's header puts it in [`RES_DEFAULT`]; glibc 2.39's retired it.
+pub const RES_NOIP6DOTINT: u64 = 0x0008_0000;
+/// Never query a dot-free name as it stands: glibc's bit. (0x0010_0000
+/// until 2026-09-30, which is `RES_USE_EDNS0` in both headers, so a program
+/// asking for EDNS0 got this instead.)
+pub const RES_NOTLDQUERY: u64 = 0x0100_0000;
 /// Set the AD bit in queries.
 pub const RES_TRUSTAD: u64 = 0x0400_0000;
-/// The options a fresh state starts with.
-pub const RES_DEFAULT: u64 = RES_RECURSE | RES_DEFNAMES | RES_DNSRCH;
+/// musl's header's `RES_DEFAULT`, which a program here is compiled against:
+/// glibc 2.39's with `RES_NOIP6DOTINT` besides. A fresh state starts with
+/// glibc's ([`FRESH_OPTIONS`]).
+pub const RES_DEFAULT: u64 = RES_RECURSE | RES_DEFNAMES | RES_DNSRCH | RES_NOIP6DOTINT;
+
+/// The options a fresh state starts with: glibc 2.39's `RES_DEFAULT`, as
+/// its `res_ninit` leaves them (`resolvn_oracle.txt`: `2c1` with
+/// `RES_INIT`). Until 2026-09-30 a state started with musl's header's
+/// [`RES_DEFAULT`] instead, whose `RES_NOIP6DOTINT` does nothing here or in
+/// glibc but showed in `_res.options` as a number glibc's never is.
+const FRESH_OPTIONS: u64 = RES_RECURSE | RES_DEFNAMES | RES_DNSRCH;
 
 /// `h_errno` for an error that is not the resolver's (see `errno`).
 pub const NETDB_INTERNAL: i32 = -1;
@@ -296,7 +330,7 @@ impl Conf {
         ndots: 1,
         timeout: RES_TIMEOUT,
         attempts: RES_DFLRETRY,
-        options: RES_DEFAULT,
+        options: FRESH_OPTIONS,
     };
 
     /// Replace the search list with the blank-separated domains in `list`
@@ -461,12 +495,15 @@ fn read_file(path: &[u8], buf: &mut [u8]) -> Option<usize> {
     Some(n)
 }
 
-/// An environment variable's bytes.
+/// An environment variable's bytes, as `secure_getenv` reads them:
+/// `LOCALDOMAIN`, `RES_OPTIONS` and `HOSTALIASES` are among the variables
+/// glibc's loader strikes from a program run with privileges it was not
+/// started with (`unsecvars.h`).
 fn env(name: &[u8]) -> Option<&'static [u8]> {
     // SAFETY: `name` is NUL-terminated; the value is a NUL-terminated
     // string that lives as long as the environment.
     unsafe {
-        let v = crate::environ::getenv(name.as_ptr());
+        let v = crate::environ::secure_getenv(name.as_ptr());
         if v.is_null() {
             return None;
         }
@@ -582,26 +619,60 @@ pub extern "C" fn __res_init() -> i32 {
     res_init()
 }
 
+/// `res_ninit` -- read `resolv.conf` and the environment into the caller's
+/// own resolver state `statp`, as [`res_init`] reads them into `_res`: 0.
+/// Exported as `__res_ninit`, the name glibc's `<resolv.h>` (and
+/// `posix/include/resolv.h`) turns `res_ninit` into. glibc asks for a
+/// zeroed state and follows the pointers in one of garbage; this one is
+/// overwritten whole.
+///
+/// # Safety
+///
+/// `statp` points to a writable `ResState`.
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub unsafe extern "C" fn __res_ninit(statp: *mut ResState) -> i32 {
+    if statp.is_null() {
+        errno::set_errno(errno::EFAULT);
+        return -1;
+    }
+    // SAFETY: the caller's contract.
+    unsafe {
+        statp.write(ResState::ZERO);
+        load_state(&mut *statp);
+    }
+    0
+}
+
+/// `res_nclose` (exported as `__res_nclose`, as glibc's is) -- release what
+/// `res_ninit` took for `statp`. This resolver keeps neither socket nor
+/// memory in a state -- a query opens and closes its own -- so there is
+/// nothing to release, and the state, `RES_INIT` still set as glibc leaves
+/// it (`resolvn_oracle.txt`), stays usable. glibc's does not: a query on it
+/// before `res_ninit` again crashes.
+///
+/// # Safety
+///
+/// `statp` is NULL or a `ResState`; it is not touched.
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub unsafe extern "C" fn __res_nclose(_statp: *mut ResState) {}
+
 // ---------------------------------------------------------------------------
 // Names: glibc's ns_name_* functions
 // ---------------------------------------------------------------------------
 
-/// glibc's `res_hnok`: whether `dn` is a host name -- printable ASCII, a
-/// name `ns_name_pton` accepts, and every label only letters, digits, `-`
-/// and `_`, the first not starting with `-`.  The DNS module asks about
-/// nothing else.
-pub(crate) fn res_hnok(dn: &[u8]) -> bool {
+/// `dn` as a wire name, if it is printable ASCII and a name `ns_name_pton`
+/// accepts: what all four of glibc's name checks ask first.  The wire
+/// name's length.
+fn printable_wire(dn: &[u8], wire: &mut [u8; MAXCDNAME]) -> Option<usize> {
     if !dn.iter().all(|&c| c > b' ' && c <= b'~') {
-        return false;
+        return None;
     }
-    let mut wire = [0u8; 255];
-    let Ok((n, _)) = name_pton(dn, &mut wire) else {
-        return false;
-    };
-    let wire = wire.get(..n).unwrap_or(&[]);
-    if wire.first().is_some_and(|&l| l > 0) && wire.get(1) == Some(&b'-') {
-        return false;
-    }
+    name_pton(dn, wire).ok().map(|(n, _)| n)
+}
+
+/// Whether every label of the wire name `wire` is only letters, digits, `-`
+/// and `_`: a host name's labels.
+fn host_labels(wire: &[u8]) -> bool {
     let mut i = 0usize;
     while let Some(&len) = wire.get(i) {
         if len == 0 {
@@ -617,6 +688,98 @@ pub(crate) fn res_hnok(dn: &[u8]) -> bool {
         i += 1 + usize::from(len);
     }
     true
+}
+
+/// Whether the wire name's first label starts with `-`.
+fn starts_with_hyphen(wire: &[u8]) -> bool {
+    wire.first().is_some_and(|&l| l > 0) && wire.get(1) == Some(&b'-')
+}
+
+/// glibc's `res_hnok`: whether `dn` is a host name -- printable ASCII, a
+/// name `ns_name_pton` accepts, and every label only letters, digits, `-`
+/// and `_`, the first not starting with `-`.  What the DNS module asks of a
+/// name an answer gives.
+pub(crate) fn hnok(dn: &[u8]) -> bool {
+    let mut wire = [0u8; MAXCDNAME];
+    let Some(n) = printable_wire(dn, &mut wire) else {
+        return false;
+    };
+    let wire = wire.get(..n).unwrap_or(&[]);
+    !starts_with_hyphen(wire) && host_labels(wire)
+}
+
+/// glibc's `res_ownok`: [`hnok`], but a first label of `*` alone is let
+/// through -- a wildcard record's owner.
+fn ownok(dn: &[u8]) -> bool {
+    let mut wire = [0u8; MAXCDNAME];
+    let Some(n) = printable_wire(dn, &mut wire) else {
+        return false;
+    };
+    let wire = wire.get(..n).unwrap_or(&[]);
+    if starts_with_hyphen(wire) {
+        return false;
+    }
+    if wire.starts_with(&[1, b'*']) {
+        host_labels(wire.get(2..).unwrap_or(&[]))
+    } else {
+        host_labels(wire)
+    }
+}
+
+/// glibc's `res_mailok`: a mailbox as DNS writes one -- the first label
+/// anything printable, and at least one more after it, which are a host
+/// name's; `.` alone passes.
+fn mailok(dn: &[u8]) -> bool {
+    let mut wire = [0u8; MAXCDNAME];
+    let Some(n) = printable_wire(dn, &mut wire) else {
+        return false;
+    };
+    let wire = wire.get(..n).unwrap_or(&[]);
+    let Some(&first) = wire.first() else {
+        return false;
+    };
+    if first == 0 {
+        return true;
+    }
+    let tail = wire.get(1 + usize::from(first)..).unwrap_or(&[]);
+    tail.first().is_some_and(|&l| l != 0) && host_labels(tail)
+}
+
+/// The C string at `dn`, or `None` for NULL.
+fn c_name<'a>(dn: *const u8) -> Option<&'a [u8]> {
+    if dn.is_null() {
+        return None;
+    }
+    // SAFETY: a non-NULL `dn` is a NUL-terminated string, per the contract.
+    Some(unsafe { core::slice::from_raw_parts(dn, crate::string::strlen(dn)) })
+}
+
+/// Whether `dn` is a host name: 1 or 0.  See [`hnok`].
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub extern "C" fn res_hnok(dn: *const u8) -> i32 {
+    i32::from(c_name(dn).is_some_and(hnok))
+}
+
+/// Whether `dn` may own a host's records: a host name, or one whose first
+/// label is `*`.  1 or 0.
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub extern "C" fn res_ownok(dn: *const u8) -> i32 {
+    i32::from(c_name(dn).is_some_and(ownok))
+}
+
+/// Whether `dn` is a mailbox as DNS writes one (`SOA` and `RP` records):
+/// a first label of anything printable, then a host name.  1 or 0.
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub extern "C" fn res_mailok(dn: *const u8) -> i32 {
+    i32::from(c_name(dn).is_some_and(mailok))
+}
+
+/// Whether `dn` is a domain name at all: printable ASCII that
+/// `ns_name_pton` accepts.  1 or 0.
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub extern "C" fn res_dnok(dn: *const u8) -> i32 {
+    let mut wire = [0u8; MAXCDNAME];
+    i32::from(c_name(dn).is_some_and(|d| printable_wire(d, &mut wire).is_some()))
 }
 
 /// `ns_name_pton`: text to an uncompressed wire name in `dst`; the bytes
@@ -704,12 +867,23 @@ fn special(c: u8) -> bool {
 
 /// `ns_name_ntop`: an uncompressed wire name to NUL-terminated text in
 /// `dst`; the bytes written with the NUL.  The root is `"."`.
+///
+/// Where the text stops fitting is glibc's to the byte, as is what a
+/// failed call leaves written: an escape goes in whole or not at all, and
+/// a plain byte only with a byte to spare after it (glibc's
+/// `eom - dn < 2`), a dot or the NUL with room for itself.
 fn name_ntop(src: &[u8], dst: &mut [u8]) -> Result<usize, ()> {
     let mut dn = 0usize;
     let mut cp = 0usize;
-    let mut put = |dn: &mut usize, b: u8| -> Result<(), ()> {
-        *dst.get_mut(*dn).ok_or(())? = b;
-        *dn += 1;
+    // `bytes` at `dst[dn..]` if `room` bytes remain there, else nothing.
+    let mut put = |dn: &mut usize, room: usize, bytes: &[u8]| -> Result<(), ()> {
+        if dst.len().saturating_sub(*dn) < room {
+            return Err(());
+        }
+        dst.get_mut(*dn..*dn + bytes.len())
+            .ok_or(())?
+            .copy_from_slice(bytes);
+        *dn += bytes.len();
         Ok(())
     };
     loop {
@@ -722,28 +896,28 @@ fn name_ntop(src: &[u8], dst: &mut [u8]) -> Result<usize, ()> {
             return Err(());
         }
         if dn != 0 {
-            put(&mut dn, b'.')?;
+            put(&mut dn, 1, b".")?;
         }
         for _ in 0..l {
             let c = *src.get(cp).ok_or(())?;
             cp += 1;
             if special(c) {
-                put(&mut dn, b'\\')?;
-                put(&mut dn, c)?;
+                put(&mut dn, 2, &[b'\\', c])?;
             } else if !(0x21..0x7f).contains(&c) {
-                put(&mut dn, b'\\')?;
-                put(&mut dn, b'0' + c / 100)?;
-                put(&mut dn, b'0' + (c % 100) / 10)?;
-                put(&mut dn, b'0' + c % 10)?;
+                put(
+                    &mut dn,
+                    4,
+                    &[b'\\', b'0' + c / 100, b'0' + (c % 100) / 10, b'0' + c % 10],
+                )?;
             } else {
-                put(&mut dn, c)?;
+                put(&mut dn, 2, &[c])?;
             }
         }
     }
     if dn == 0 {
-        put(&mut dn, b'.')?;
+        put(&mut dn, 1, b".")?;
     }
-    put(&mut dn, 0)?;
+    put(&mut dn, 1, &[0])?;
     Ok(dn)
 }
 
@@ -1053,30 +1227,10 @@ pub extern "C" fn dn_skipname(comp_dn: *const u8, eom: *const u8) -> i32 {
     }
     // SAFETY: the caller's contract: `[comp_dn, eom)` is readable.
     let s = unsafe { core::slice::from_raw_parts(comp_dn, avail) };
-    let mut cp = 0usize;
-    while let Some(&n) = s.get(cp) {
-        cp += 1;
-        if n == 0 {
-            return i32::try_from(cp).unwrap_or(-1);
-        }
-        match n & 0xc0 {
-            0 => {
-                if s.len() - cp < usize::from(n) {
-                    break;
-                }
-                cp += usize::from(n);
-            }
-            0xc0 => {
-                if cp == s.len() {
-                    break;
-                }
-                return i32::try_from(cp + 1).unwrap_or(-1);
-            }
-            _ => break,
-        }
+    match skip_len(s).map(i32::try_from) {
+        Ok(Ok(n)) => n,
+        _ => name_fail(),
     }
-    errno::set_errno(errno::EMSGSIZE);
-    -1
 }
 
 /// `dn_comp` -- the text name `exp_dn` into `comp_dn` (`length` bytes),
@@ -1108,6 +1262,352 @@ pub extern "C" fn dn_comp(
         errno::set_errno(errno::EMSGSIZE);
         -1
     })
+}
+
+// ---------------------------------------------------------------------------
+// ns_name_ntop / ns_name_pton / ns_name_unpack / ns_name_pack /
+// ns_name_compress / ns_name_skip
+// ---------------------------------------------------------------------------
+
+/// The length of the uncompressed wire name at `src`, found by walking its
+/// labels -- as glibc's functions read it, never past the name -- or `Err`
+/// at a label no uncompressed name can hold (a compression pointer, an
+/// extended label type).
+///
+/// # Safety
+///
+/// `src` points to a wire name, readable up to its terminating zero label.
+unsafe fn wire_len(src: *const u8) -> Result<usize, ()> {
+    let mut at = 0usize;
+    loop {
+        // SAFETY: the caller's contract: every byte up to the root label.
+        let n = usize::from(unsafe { *src.add(at) });
+        at += 1;
+        if n == 0 {
+            return Ok(at);
+        }
+        if n >= 64 {
+            // The label byte is part of the name: ntop refuses it itself.
+            return Ok(at);
+        }
+        at += n;
+    }
+}
+
+/// The value glibc's `ns_name_*` functions answer for `Err`: -1, with
+/// `EMSGSIZE`.
+fn name_fail() -> i32 {
+    errno::set_errno(errno::EMSGSIZE);
+    -1
+}
+
+/// `ns_name_ntop` -- the uncompressed wire name at `src` as NUL-terminated
+/// text in `dst` (`dstsiz` bytes): labels joined by `.`, `"`, `.`, `;`,
+/// `\`, `(`, `)`, `@` and `$` escaped with a backslash, bytes outside
+/// `!`..`~` as `\DDD`, the root as `.`.  The bytes written with the NUL, or
+/// -1 with `EMSGSIZE` for too small a `dst` or a label no uncompressed name
+/// holds (`nsname_oracle.txt`).
+///
+/// # Safety
+///
+/// `src` is a wire name readable to its end; `dst` holds `dstsiz` bytes.
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub unsafe extern "C" fn ns_name_ntop(src: *const u8, dst: *mut u8, dstsiz: usize) -> i32 {
+    if src.is_null() || dst.is_null() {
+        return name_fail();
+    }
+    // SAFETY: the caller's contract.
+    let result = unsafe { wire_len(src) }.and_then(|len| {
+        // SAFETY: as above: `len` bytes of `src`, `dstsiz` of `dst`.
+        let (from, to) = unsafe {
+            (
+                core::slice::from_raw_parts(src, len),
+                core::slice::from_raw_parts_mut(dst, dstsiz),
+            )
+        };
+        name_ntop(from, to)
+    });
+    match result.map(i32::try_from) {
+        Ok(Ok(n)) => n,
+        _ => name_fail(),
+    }
+}
+
+/// `ns_name_pton` -- the text name `src` as an uncompressed wire name in
+/// `dst` (`dstsiz` bytes), `\.` and `\DDD` unescaped.  1 when the text
+/// was fully qualified (ended in `.`), 0 when not -- the empty text is the
+/// root, unqualified -- or -1 with `EMSGSIZE`: an empty label, one over 63
+/// bytes, a name over 255, a bad escape, too small a `dst`.
+///
+/// # Safety
+///
+/// `src` is a NUL-terminated string; `dst` holds `dstsiz` bytes.
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub unsafe extern "C" fn ns_name_pton(src: *const u8, dst: *mut u8, dstsiz: usize) -> i32 {
+    let Some(text) = c_name(src) else {
+        return name_fail();
+    };
+    if dst.is_null() {
+        return name_fail();
+    }
+    // SAFETY: the caller's contract: `dst` holds `dstsiz` bytes.
+    let to = unsafe { core::slice::from_raw_parts_mut(dst, dstsiz) };
+    match name_pton(text, to) {
+        Ok((_, qualified)) => i32::from(qualified),
+        Err(()) => name_fail(),
+    }
+}
+
+/// `ns_name_unpack` -- the compressed name at `src` in the message `[msg,
+/// eom)`, compression pointers followed (a forward one too; a loop is
+/// refused), into `dst` (`dstsiz` bytes) uncompressed.  The bytes the name
+/// occupies at `src`, or -1 with `EMSGSIZE`.
+///
+/// # Safety
+///
+/// `[msg, eom)` is a readable message and `src` inside it; `dst` holds
+/// `dstsiz` bytes.
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub unsafe extern "C" fn ns_name_unpack(
+    msg: *const u8,
+    eom: *const u8,
+    src: *const u8,
+    dst: *mut u8,
+    dstsiz: usize,
+) -> i32 {
+    let result = (|| {
+        if msg.is_null() || dst.is_null() {
+            return Err(());
+        }
+        let len = (eom as usize).checked_sub(msg as usize).ok_or(())?;
+        let at = (src as usize).checked_sub(msg as usize).ok_or(())?;
+        // SAFETY: the caller's contract.
+        let (whole, to) = unsafe {
+            (
+                core::slice::from_raw_parts(msg, len),
+                core::slice::from_raw_parts_mut(dst, dstsiz),
+            )
+        };
+        name_unpack(whole, at, to)
+    })();
+    match result.map(i32::try_from) {
+        Ok(Ok(n)) => n,
+        _ => name_fail(),
+    }
+}
+
+/// `ns_name_pack` -- the uncompressed wire name at `src` into `dst`
+/// (`dstsiz` bytes), compressed against the names `dnptrs` lists, and added
+/// to the list when `lastdnptr` leaves it room -- glibc's pointer table: the
+/// message first, then the names in it, NULL-terminated.  The bytes
+/// written, or -1 with `EMSGSIZE`.
+///
+/// # Safety
+///
+/// `src` is a wire name readable to its end; `dst` holds `dstsiz` bytes;
+/// `dnptrs` is NULL or a table as above, whose array ends at `lastdnptr`.
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub unsafe extern "C" fn ns_name_pack(
+    src: *const u8,
+    dst: *mut u8,
+    dstsiz: i32,
+    dnptrs: *mut *const u8,
+    lastdnptr: *mut *const u8,
+) -> i32 {
+    let result = (|| {
+        if src.is_null() || dst.is_null() {
+            return Err(());
+        }
+        let cap = usize::try_from(dstsiz).map_err(|_| ())?;
+        // SAFETY: the caller's contract.
+        let len = unsafe { wire_len(src) }?;
+        // SAFETY: as above: `len` bytes of `src`.
+        let from = unsafe { core::slice::from_raw_parts(src, len) };
+        // SAFETY: the caller's contract for `dst`, `dnptrs` and `lastdnptr`.
+        unsafe { name_pack(from, dst, cap, dnptrs.cast(), lastdnptr.cast()) }
+    })();
+    match result.map(i32::try_from) {
+        Ok(Ok(n)) => n,
+        _ => name_fail(),
+    }
+}
+
+/// `ns_name_compress` -- the text name `src` into `dst` (`dstsiz` bytes),
+/// through `ns_name_pton` and `ns_name_pack`: [`dn_comp`], with a `size_t`
+/// size.
+///
+/// # Safety
+///
+/// As [`ns_name_pack`], with `src` a NUL-terminated string.
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub unsafe extern "C" fn ns_name_compress(
+    src: *const u8,
+    dst: *mut u8,
+    dstsiz: usize,
+    dnptrs: *mut *const u8,
+    lastdnptr: *mut *const u8,
+) -> i32 {
+    let result = (|| {
+        let text = c_name(src).ok_or(())?;
+        if dst.is_null() {
+            return Err(());
+        }
+        let mut tmp = [0u8; MAXCDNAME];
+        name_pton(text, &mut tmp)?;
+        // SAFETY: the caller's contract for `dst`, `dnptrs` and `lastdnptr`.
+        unsafe { name_pack(&tmp, dst, dstsiz, dnptrs.cast(), lastdnptr.cast()) }
+    })();
+    match result.map(i32::try_from) {
+        Ok(Ok(n)) => n,
+        _ => name_fail(),
+    }
+}
+
+/// How many bytes the compressed name at the start of `s` occupies -- a
+/// pointer ends it, as two bytes, without being followed -- or `Err` if it
+/// runs past `s` or holds a label that is neither length nor pointer.
+fn skip_len(s: &[u8]) -> Result<usize, ()> {
+    let mut cp = 0usize;
+    while let Some(&n) = s.get(cp) {
+        cp += 1;
+        if n == 0 {
+            return Ok(cp);
+        }
+        match n & 0xc0 {
+            0 => {
+                if s.len() - cp < usize::from(n) {
+                    break;
+                }
+                cp += usize::from(n);
+            }
+            0xc0 => {
+                if cp == s.len() {
+                    break;
+                }
+                return Ok(cp + 1);
+            }
+            _ => break,
+        }
+    }
+    Err(())
+}
+
+/// `ns_name_skip` -- move `*ptrptr` past the compressed name it points at,
+/// which must end before `eom`: 0, or -1 with `EMSGSIZE` and `*ptrptr` where
+/// it was.
+///
+/// # Safety
+///
+/// `*ptrptr` and `eom` bound a readable range.
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub unsafe extern "C" fn ns_name_skip(ptrptr: *mut *const u8, eom: *const u8) -> i32 {
+    if ptrptr.is_null() {
+        return name_fail();
+    }
+    // SAFETY: the caller's contract.
+    let start = unsafe { *ptrptr };
+    if start.is_null() {
+        return name_fail();
+    }
+    let avail = (eom as usize).saturating_sub(start as usize);
+    // SAFETY: the caller's contract: `[start, eom)` is readable.
+    let s = unsafe { core::slice::from_raw_parts(start, avail) };
+    match skip_len(s) {
+        Ok(n) => {
+            // SAFETY: `n <= avail`: the pointer stays in the range.
+            unsafe { *ptrptr = start.add(n) };
+            0
+        }
+        Err(()) => name_fail(),
+    }
+}
+
+/// `ns_name_ntol` -- the uncompressed wire name at `src`, its labels in
+/// ASCII lower case, into `dst` (`dstsiz` bytes): the bytes written, the
+/// root label counted, or -1 with `EMSGSIZE` for a compression pointer, a
+/// label over 63 bytes, or too small a `dst` -- glibc's order kept, each
+/// label's length byte written before its size is judged, so a failure
+/// leaves the labels before it (`nsutil_oracle.txt`).
+///
+/// # Safety
+///
+/// `src` is a wire name readable to its root label or to the byte that
+/// stops it; `dst` holds `dstsiz` bytes.
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub unsafe extern "C" fn ns_name_ntol(src: *const u8, dst: *mut u8, dstsiz: usize) -> i32 {
+    if src.is_null() || dst.is_null() || dstsiz == 0 {
+        return name_fail();
+    }
+    // SAFETY: the caller's contract: `dst` holds `dstsiz` bytes.
+    let out = unsafe { core::slice::from_raw_parts_mut(dst, dstsiz) };
+    let mut cp = 0usize;
+    let mut dn = 0usize;
+    loop {
+        // SAFETY: the caller's contract: `src` is readable to the byte that
+        // ends the name, and each byte read is before that one.
+        let n = unsafe { *src.add(cp) };
+        cp += 1;
+        if n == 0 {
+            break;
+        }
+        if n & 0xc0 == 0xc0 {
+            return name_fail();
+        }
+        // The previous label's check left room for this length byte.
+        out[dn] = n;
+        dn += 1;
+        if n > 63 {
+            return name_fail();
+        }
+        let l = usize::from(n);
+        if dn + l >= dstsiz {
+            return name_fail();
+        }
+        for _ in 0..l {
+            // SAFETY: as above, a label byte before the end of the name.
+            out[dn] = unsafe { *src.add(cp) }.to_ascii_lowercase();
+            cp += 1;
+            dn += 1;
+        }
+    }
+    out[dn] = 0;
+    i32::try_from(dn + 1).unwrap_or(i32::MAX)
+}
+
+/// `ns_name_rollback` -- forget the names `dn_comp` (or `ns_name_pack`)
+/// recorded at or past `src`: the first entry of `dnptrs`, before
+/// `lastdnptr` and before a NULL one, that points at or past `src` becomes
+/// NULL, ending the table there -- a message cut back to `src` then leaves
+/// no pointer into what it lost. A NULL table is nothing to do.
+///
+/// # Safety
+///
+/// `dnptrs` is NULL or points into a table of `const u_char *` that
+/// `lastdnptr` bounds.
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub unsafe extern "C" fn ns_name_rollback(
+    src: *const u8,
+    dnptrs: *mut *const u8,
+    lastdnptr: *mut *const u8,
+) {
+    if dnptrs.is_null() {
+        return;
+    }
+    let mut p = dnptrs;
+    while (p as usize) < (lastdnptr as usize) {
+        // SAFETY: `p` is before `lastdnptr`, in the caller's table.
+        let entry = unsafe { *p };
+        if entry.is_null() {
+            return;
+        }
+        if entry as usize >= src as usize {
+            // SAFETY: as above.
+            unsafe { *p = core::ptr::null() };
+            return;
+        }
+        // SAFETY: as above: the next entry, or `lastdnptr` itself.
+        p = unsafe { p.add(1) };
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1641,6 +2141,45 @@ pub extern "C" fn res_mkquery(
     class: i32,
     type_: i32,
     data: *const u8,
+    datalen: i32,
+    newrr: *const u8,
+    buf: *mut u8,
+    buflen: i32,
+) -> i32 {
+    // SAFETY: `_res`, initialised.
+    unsafe {
+        res_nmkquery(
+            global(),
+            op,
+            dname,
+            class,
+            type_,
+            data,
+            datalen,
+            newrr,
+            buf,
+            buflen,
+        )
+    }
+}
+
+/// `res_nmkquery` -- [`res_mkquery`] with the caller's own resolver state
+/// `statp`: its options decide the RD and AD bits. Used as it is, one
+/// `res_ninit` has not seen builds a query too, as glibc's does
+/// (`resolvn_oracle.txt`).
+///
+/// # Safety
+///
+/// `statp` is a `ResState` the caller owns; the rest is as for
+/// [`res_mkquery`].
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub unsafe extern "C" fn res_nmkquery(
+    statp: *mut ResState,
+    op: i32,
+    dname: *const u8,
+    class: i32,
+    type_: i32,
+    data: *const u8,
     _datalen: i32,
     _newrr: *const u8,
     buf: *mut u8,
@@ -1649,7 +2188,7 @@ pub extern "C" fn res_mkquery(
     let Ok(len) = usize::try_from(buflen) else {
         return -1;
     };
-    if buf.is_null() || len < HFIXEDSZ || dname.is_null() {
+    if statp.is_null() || buf.is_null() || len < HFIXEDSZ || dname.is_null() {
         return -1;
     }
     // SAFETY: the caller's contract: NUL-terminated strings, and `buf`
@@ -1662,7 +2201,8 @@ pub extern "C" fn res_mkquery(
             core::slice::from_raw_parts_mut(buf, len),
         )
     };
-    match mkquery(state(), op, name, class, type_, data, out) {
+    // SAFETY: the caller's state, only read.
+    match mkquery(unsafe { &*statp }, op, name, class, type_, data, out) {
         Ok(n) => i32::try_from(n).unwrap_or(-1),
         Err(()) => -1,
     }
@@ -1936,6 +2476,11 @@ impl Transport for Net {
 /// Send a query and receive its answer into `answer`: the answer's full
 /// length (which may exceed `answer`), or the errno.
 fn send_query(st: &ResState, q: &[u8], answer: &mut [u8]) -> Result<usize, i32> {
+    // glibc's `__res_context_send`: no nameserver is ESRCH, before any
+    // socket -- a state `res_ninit` has not seen has none.
+    if st.nscount <= 0 {
+        return Err(errno::ESRCH);
+    }
     let sv = servers(st);
     if answer.len() < PACKETSZ {
         // Receive into a whole datagram's room, keep what fits (musl).
@@ -1946,6 +2491,10 @@ fn send_query(st: &ResState, q: &[u8], answer: &mut [u8]) -> Result<usize, i32> 
             dst.copy_from_slice(src);
         }
         return Ok(n);
+    }
+    #[cfg(test)]
+    if let Some(r) = tests::scripted_exchange(&sv, q, answer) {
+        return r;
     }
     let mut net = Net::open(&sv)?;
     exchange(&mut net, &sv, q, answer)
@@ -1959,7 +2508,33 @@ fn send_query(st: &ResState, q: &[u8], answer: &mut [u8]) -> Result<usize, i32> 
 /// none answered usably in time.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn res_send(msg: *const u8, msglen: i32, answer: *mut u8, anslen: i32) -> i32 {
-    let st = state();
+    // SAFETY: `_res`, initialised.
+    unsafe { res_nsend(global(), msg, msglen, answer, anslen) }
+}
+
+/// `res_nsend` -- [`res_send`] with the caller's own resolver state
+/// `statp`, used as it is: one `res_ninit` has not seen has no nameserver,
+/// and the send is `ESRCH` (`resolvn_oracle.txt`). `h_errno` is left alone,
+/// as glibc leaves it.
+///
+/// # Safety
+///
+/// `statp` is a `ResState` the caller owns, zeroed or from `res_ninit`; the
+/// buffers are as for [`res_send`].
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub unsafe extern "C" fn res_nsend(
+    statp: *mut ResState,
+    msg: *const u8,
+    msglen: i32,
+    answer: *mut u8,
+    anslen: i32,
+) -> i32 {
+    if statp.is_null() {
+        errno::set_errno(errno::EFAULT);
+        return -1;
+    }
+    // SAFETY: the caller's state, only read while the send runs.
+    let st = unsafe { &*statp };
     if st.nscount <= 0 {
         errno::set_errno(errno::ESRCH);
         return -1;
@@ -2015,19 +2590,56 @@ fn judge(answer: &[u8]) -> Result<(), i32> {
     })
 }
 
-/// A query for `name`: the answer's length, or `Err` with `h_errno` (and
-/// `errno` for a send failure) set.
+/// Set `h_errno` and the state's own `res_h_errno` together, as glibc's
+/// `RES_SET_H_ERRNO` does: a caller of the reentrant functions reads the
+/// second, and everyone the first.
+///
+/// # Safety
+///
+/// `statp` points to a live `ResState` that nothing is borrowing.
+unsafe fn set_herr(statp: *mut ResState, h: i32) {
+    // SAFETY: the caller's contract; the one field is written.
+    unsafe { core::ptr::addr_of_mut!((*statp).res_h_errno).write(h) };
+    crate::socket::set_h_errno(h);
+}
+
+/// `_res`, initialised if nothing has initialised it yet, as the pointer the
+/// functions that take a state are given.
+fn global() -> *mut ResState {
+    let st: *mut ResState = state();
+    st
+}
+
+/// A query's answer as the C functions give it: its length, or -1 with the
+/// `h_errno` in both places.
+///
+/// # Safety
+///
+/// As [`set_herr`].
+unsafe fn finish(statp: *mut ResState, r: Result<usize, i32>) -> i32 {
+    match r {
+        Ok(n) => i32::try_from(n).unwrap_or(i32::MAX),
+        Err(h) => {
+            // SAFETY: the caller's contract.
+            unsafe { set_herr(statp, h) };
+            -1
+        }
+    }
+}
+
+/// A query for `name`: `Ok` with the answer's length, else `Err` with the
+/// `h_errno` it comes to (see [`judge`]) -- the send's own failure left in
+/// `errno`.
 fn query(
     st: &ResState,
     name: &[u8],
     class: i32,
     type_: i32,
     answer: &mut [u8],
-) -> Result<usize, ()> {
+) -> Result<usize, i32> {
     let mut q = [0u8; HFIXEDSZ + QFIXEDSZ + MAXCDNAME + 1];
     let Ok(ql) = mkquery(st, QUERY, name, class, type_, None, &mut q) else {
-        crate::socket::set_h_errno(crate::socket::NO_RECOVERY);
-        return Err(());
+        return Err(crate::socket::NO_RECOVERY);
     };
     let q = q.get(..ql).unwrap_or(&[]);
     // A buffer too short for the header is answered through a whole one,
@@ -2049,26 +2661,18 @@ fn query(
     match sent {
         Err(e) => {
             errno::set_errno(e);
-            crate::socket::set_h_errno(crate::socket::TRY_AGAIN);
-            Err(())
+            Err(crate::socket::TRY_AGAIN)
         }
-        Ok(n) => match verdict {
-            Ok(()) => Ok(n),
-            Err(h) => {
-                crate::socket::set_h_errno(h);
-                Err(())
-            }
-        },
+        Ok(n) => verdict.map(|()| n),
     }
 }
 
-/// The caller's name and answer buffer, or -1 (the `EFAULT` glibc would
-/// fault into).
+/// The caller's name and answer buffer, or `None` for a NULL where glibc
+/// would fault -- `EFAULT`, and the caller sets `h_errno` `NETDB_INTERNAL`.
 fn args<'a>(name: *const u8, answer: *mut u8, anslen: i32) -> Option<(&'a [u8], &'a mut [u8])> {
     let len = usize::try_from(anslen).unwrap_or(0);
     if name.is_null() || (answer.is_null() && len > 0) {
         errno::set_errno(errno::EFAULT);
-        crate::socket::set_h_errno(NETDB_INTERNAL);
         return None;
     }
     // SAFETY: the caller's contract.
@@ -2096,10 +2700,8 @@ pub extern "C" fn res_query(
     answer: *mut u8,
     anslen: i32,
 ) -> i32 {
-    let Some((name, buf)) = args(dname, answer, anslen) else {
-        return -1;
-    };
-    query(state(), name, class, type_, buf).map_or(-1, |n| i32::try_from(n).unwrap_or(i32::MAX))
+    // SAFETY: `_res`, initialised.
+    unsafe { res_nquery(global(), dname, class, type_, answer, anslen) }
 }
 
 /// `__res_query` — glibc alias for `res_query`.
@@ -2112,6 +2714,41 @@ pub extern "C" fn __res_query(
     anslen: i32,
 ) -> i32 {
     res_query(dname, class, type_, answer, anslen)
+}
+
+/// `res_nquery` -- [`res_query`] with the caller's own resolver state
+/// `statp`, glibc's reentrant form. The state is used as it is: one
+/// `res_ninit` has not seen has no nameserver, and the query fails
+/// `TRY_AGAIN` at once (`resolvn_oracle.txt`). A failure sets `h_errno` and
+/// `statp->res_h_errno`; an answer leaves both alone.
+///
+/// # Safety
+///
+/// `statp` is a `ResState` the caller owns, zeroed or from `res_ninit`; the
+/// rest is as for [`res_query`].
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub unsafe extern "C" fn res_nquery(
+    statp: *mut ResState,
+    dname: *const u8,
+    class: i32,
+    type_: i32,
+    answer: *mut u8,
+    anslen: i32,
+) -> i32 {
+    if statp.is_null() {
+        errno::set_errno(errno::EFAULT);
+        crate::socket::set_h_errno(NETDB_INTERNAL);
+        return -1;
+    }
+    let Some((name, buf)) = args(dname, answer, anslen) else {
+        // SAFETY: the caller's state.
+        unsafe { set_herr(statp, NETDB_INTERNAL) };
+        return -1;
+    };
+    // SAFETY: the caller's state, only read while the query runs.
+    let r = query(unsafe { &*statp }, name, class, type_, buf);
+    // SAFETY: as above; the query's borrow has ended.
+    unsafe { finish(statp, r) }
 }
 
 /// `name.domain` (or `name` without a trailing dot, for no domain), glibc's
@@ -2146,11 +2783,10 @@ fn querydomain(
     class: i32,
     type_: i32,
     answer: &mut [u8],
-) -> Result<usize, ()> {
+) -> Result<usize, i32> {
     let mut full = [0u8; MAXDNAME];
     let Some(n) = join(name, domain, &mut full) else {
-        crate::socket::set_h_errno(crate::socket::NO_RECOVERY);
-        return Err(());
+        return Err(crate::socket::NO_RECOVERY);
     };
     query(st, full.get(..n).unwrap_or(&[]), class, type_, answer)
 }
@@ -2165,14 +2801,43 @@ pub extern "C" fn res_querydomain(
     answer: *mut u8,
     anslen: i32,
 ) -> i32 {
+    // SAFETY: `_res`, initialised.
+    unsafe { res_nquerydomain(global(), name, domain, class, type_, answer, anslen) }
+}
+
+/// `res_nquerydomain` -- [`res_querydomain`] with the caller's own resolver
+/// state `statp`, used as it is (see [`res_nquery`]).
+///
+/// # Safety
+///
+/// As [`res_nquery`], with `domain` NULL or a NUL-terminated string.
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub unsafe extern "C" fn res_nquerydomain(
+    statp: *mut ResState,
+    name: *const u8,
+    domain: *const u8,
+    class: i32,
+    type_: i32,
+    answer: *mut u8,
+    anslen: i32,
+) -> i32 {
+    if statp.is_null() {
+        errno::set_errno(errno::EFAULT);
+        crate::socket::set_h_errno(NETDB_INTERNAL);
+        return -1;
+    }
     let Some((name, buf)) = args(name, answer, anslen) else {
+        // SAFETY: the caller's state.
+        unsafe { set_herr(statp, NETDB_INTERNAL) };
         return -1;
     };
     // SAFETY: the caller's contract: NULL or a NUL-terminated string.
     let domain = (!domain.is_null())
         .then(|| unsafe { core::slice::from_raw_parts(domain, crate::string::strlen(domain)) });
-    querydomain(state(), name, domain, class, type_, buf)
-        .map_or(-1, |n| i32::try_from(n).unwrap_or(i32::MAX))
+    // SAFETY: the caller's state, only read while the query runs.
+    let r = querydomain(unsafe { &*statp }, name, domain, class, type_, buf);
+    // SAFETY: as above; the query's borrow has ended.
+    unsafe { finish(statp, r) }
 }
 
 /// What one query of a search came to: the answer's length, or its
@@ -2274,7 +2939,7 @@ fn search(
     class: i32,
     type_: i32,
     answer: &mut [u8],
-) -> Result<usize, ()> {
+) -> Result<usize, i32> {
     let mut domains: [&[u8]; MAXDNSRCH] = [&[]; MAXDNSRCH];
     let mut nd = 0usize;
     for p in st.dnsrch.iter().take(MAXDNSRCH) {
@@ -2290,24 +2955,29 @@ fn search(
             nd += 1;
         }
     }
-    let result = search_with(
+    // glibc's "if there aren't any dots, it could be a user-level alias":
+    // a dot-free name the HOSTALIASES file names is queried as its alias,
+    // as it stands, and nothing else is tried.
+    if !name.contains(&b'.') {
+        let mut alias = [0u8; NS_MAXDNAME];
+        if alias_for(st.options, name, &mut alias) {
+            let n = alias.iter().position(|&c| c == 0).unwrap_or(alias.len());
+            return query(st, &alias[..n], class, type_, answer);
+        }
+    }
+    search_with(
         name,
         st.ndots(),
         st.options,
         domains.get(..nd).unwrap_or(&[]),
         |domain| {
             errno::set_errno(0);
-            querydomain(st, name, domain, class, type_, answer).map_err(|()| {
+            querydomain(st, name, domain, class, type_, answer).map_err(|h| {
                 let servfail = answer.get(3).is_some_and(|b| b & 0xf == SERVFAIL);
-                (
-                    crate::socket::get_h_errno(),
-                    errno::get_errno() == errno::ECONNREFUSED,
-                    servfail,
-                )
+                (h, errno::get_errno() == errno::ECONNREFUSED, servfail)
             })
         },
-    );
-    result.map_err(crate::socket::set_h_errno)
+    )
 }
 
 /// `res_search` -- query for `name` through the search list, glibc's way:
@@ -2316,7 +2986,9 @@ fn search(
 /// `RES_DEFNAMES`), then as it stands if not yet tried (unless
 /// `RES_NOTLDQUERY` and it has no dots).  The first answer wins; otherwise
 /// `h_errno` is the as-is query's, else `NO_DATA` if any domain had the
-/// name, else `TRY_AGAIN` for a server failure.
+/// name, else `TRY_AGAIN` for a server failure.  `h_errno` is
+/// `HOST_NOT_FOUND` from the start, as glibc's is, so an answer leaves it
+/// so.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn res_search(
     dname: *const u8,
@@ -2325,10 +2997,8 @@ pub extern "C" fn res_search(
     answer: *mut u8,
     anslen: i32,
 ) -> i32 {
-    let Some((name, buf)) = args(dname, answer, anslen) else {
-        return -1;
-    };
-    search(state(), name, class, type_, buf).map_or(-1, |n| i32::try_from(n).unwrap_or(i32::MAX))
+    // SAFETY: `_res`, initialised.
+    unsafe { res_nsearch(global(), dname, class, type_, answer, anslen) }
 }
 
 /// `__res_search` — glibc alias for `res_search`.
@@ -2343,12 +3013,1322 @@ pub extern "C" fn __res_search(
     res_search(dname, class, type_, answer, anslen)
 }
 
+/// `res_nsearch` -- [`res_search`] with the caller's own resolver state
+/// `statp`, used as it is (see [`res_nquery`]).
+///
+/// # Safety
+///
+/// As [`res_nquery`].
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub unsafe extern "C" fn res_nsearch(
+    statp: *mut ResState,
+    dname: *const u8,
+    class: i32,
+    type_: i32,
+    answer: *mut u8,
+    anslen: i32,
+) -> i32 {
+    if statp.is_null() {
+        errno::set_errno(errno::EFAULT);
+        crate::socket::set_h_errno(NETDB_INTERNAL);
+        return -1;
+    }
+    let Some((name, buf)) = args(dname, answer, anslen) else {
+        // SAFETY: the caller's state.
+        unsafe { set_herr(statp, NETDB_INTERNAL) };
+        return -1;
+    };
+    // glibc's "true if we never query": HOST_NOT_FOUND before the first,
+    // which a search that is answered leaves in place (`resolvn_oracle.txt`).
+    // SAFETY: the caller's state.
+    unsafe { set_herr(statp, crate::socket::HOST_NOT_FOUND) };
+    // SAFETY: the caller's state, only read while the search runs.
+    let r = search(unsafe { &*statp }, name, class, type_, buf);
+    // SAFETY: as above; the search's borrow has ended.
+    unsafe { finish(statp, r) }
+}
+
+// ---------------------------------------------------------------------------
+// libresolv's smaller helpers: glibc 2.39's res_isourserver.c,
+// res_nameinquery.c, res_queriesmatch.c, res_context_hostalias.c,
+// res_data.c, res_randomid.c, res-putget.c, and res_debug.c's
+// dn_count_labels -- each under the `__` name glibc's <resolv.h> #defines
+// its public one to, as posix/include's does (`resutil_oracle.txt`)
+// ---------------------------------------------------------------------------
+
+/// `dn_count_labels` -- the labels in the text name `name`, BIND's count:
+/// its dots, one fewer after a leading `*` (a wildcard's), one more for a
+/// last label no dot ends. An escaped dot counts, as BIND's code (and its
+/// "XXX") has it, and the root, `.`, is 1. NULL is 0. Deprecated by glibc.
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub extern "C" fn __dn_count_labels(name: *const u8) -> i32 {
+    let Some(s) = c_name(name) else {
+        return 0;
+    };
+    // A name of a few dozen bytes, counted once.
+    #[allow(clippy::naive_bytecount)]
+    let mut count = s.iter().filter(|&&c| c == b'.').count();
+    if s.first() == Some(&b'*') && count > 0 {
+        count -= 1;
+    }
+    if s.last().is_some_and(|&c| c != b'.') {
+        count += 1;
+    }
+    i32::try_from(count).unwrap_or(i32::MAX)
+}
+
+/// `putlong` -- [`ns_put32`], as glibc's is. Deprecated by glibc, whose
+/// text says "use NS_PUT16 instead" (sic: `putshort`'s says NS_PUT32).
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub extern "C" fn __putlong(src: u32, dst: *mut u8) {
+    ns_put32(u64::from(src), dst);
+}
+
+/// `putshort` -- [`ns_put16`], as glibc's is. Deprecated by glibc.
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub extern "C" fn __putshort(src: u16, dst: *mut u8) {
+    ns_put16(u32::from(src), dst);
+}
+
+/// Whether `inp` is one of `st`'s nameservers: glibc's `res_ourserver_p`.
+/// A server's `0.0.0.0` is any address at its port. The state here has no
+/// IPv6 servers ("read, and skipped"), so an IPv6 address is none of them.
+fn is_our_server(st: &ResState, inp: &crate::socket::SockaddrIn) -> bool {
+    if i32::from(inp.sin_family) != crate::socket::AF_INET {
+        return false;
+    }
+    let n = usize::try_from(st.nscount).unwrap_or(0).min(MAXNS);
+    st.nsaddr_list.get(..n).unwrap_or(&[]).iter().any(|srv| {
+        i32::from(srv.sin_family) == crate::socket::AF_INET
+            && srv.sin_port == inp.sin_port
+            && (srv.sin_addr.s_addr == 0 || srv.sin_addr.s_addr == inp.sin_addr.s_addr)
+    })
+}
+
+/// `res_isourserver` -- whether the address and port `inp` is one of
+/// `_res`'s nameservers: 1 or 0 (see [`is_our_server`]). NULL is 0.
+/// Deprecated by glibc.
+///
+/// # Safety
+///
+/// `inp` is NULL or a readable `struct sockaddr_in` (or `sockaddr_in6`).
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub unsafe extern "C" fn __res_isourserver(inp: *const crate::socket::SockaddrIn) -> i32 {
+    if inp.is_null() {
+        return 0;
+    }
+    // SAFETY: `_res`, only read; `inp` readable, the caller's contract.
+    i32::from(is_our_server(unsafe { &*global() }, unsafe { &*inp }))
+}
+
+/// The message `[buf, eom)` as a slice, if it is one and holds a header.
+///
+/// # Safety
+///
+/// A non-NULL `buf` and `eom` bound a readable message.
+unsafe fn message<'a>(buf: *const u8, eom: *const u8) -> Option<&'a [u8]> {
+    if buf.is_null() {
+        return None;
+    }
+    let len = (eom as usize).checked_sub(buf as usize)?;
+    if len < HFIXEDSZ {
+        return None;
+    }
+    // SAFETY: the caller's contract.
+    Some(unsafe { core::slice::from_raw_parts(buf, len) })
+}
+
+/// The question at byte `cp` of `msg`: its name as text into `tname`, its
+/// type, class, and where the next begins -- or `None` (-1 for the
+/// callers) for a name that will not expand or a question cut short.
+fn question(msg: &[u8], cp: usize, tname: &mut [u8]) -> Option<(usize, i32, i32, usize)> {
+    let base = msg.as_ptr();
+    // SAFETY: `cp <= msg.len()`: the callers only move it past what was read.
+    let at = unsafe { base.add(cp) };
+    let size = i32::try_from(tname.len()).unwrap_or(i32::MAX);
+    // SAFETY: as above, and `msg.len()` bytes from `base` are its end.
+    let n = dn_expand(
+        base,
+        unsafe { base.add(msg.len()) },
+        at,
+        tname.as_mut_ptr(),
+        size,
+    );
+    let cp = cp + usize::try_from(n).ok()?;
+    let f = msg.get(cp..cp + 4)?;
+    let tlen = tname.iter().position(|&c| c == 0).unwrap_or(tname.len());
+    let ttype = i32::from(u16::from_be_bytes([f[0], f[1]]));
+    let tclass = i32::from(u16::from_be_bytes([f[2], f[3]]));
+    Some((tlen, ttype, tclass, cp + 4))
+}
+
+/// glibc's `__libc_res_nameinquery` on a message: 1, 0, or -1.
+fn name_in_query(name: &[u8], type_: i32, class: i32, msg: &[u8]) -> i32 {
+    let qdcount = u16::from_be_bytes([msg[4], msg[5]]);
+    let mut cp = HFIXEDSZ;
+    for _ in 0..qdcount {
+        let mut tname = [0u8; NS_MAXDNAME + 1];
+        let Some((tlen, ttype, tclass, next)) = question(msg, cp, &mut tname) else {
+            return -1;
+        };
+        cp = next;
+        if ttype == type_
+            && tclass == class
+            && crate::nameser::samename(&tname[..tlen], name) == Some(true)
+        {
+            return 1;
+        }
+    }
+    0
+}
+
+/// `res_nameinquery` -- whether the message `[buf, eom)` asks about `name`,
+/// of type `type_` and class `class`: 1 or 0, the name compared as
+/// `ns_samename` compares; -1 for a question that will not read. A NULL
+/// name, or a message too short for a header -- whose count glibc reads
+/// regardless -- is -1. Deprecated by glibc.
+///
+/// # Safety
+///
+/// `name` is NULL or a NUL-terminated string; a non-NULL `buf` and `eom`
+/// bound a readable message.
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub unsafe extern "C" fn __res_nameinquery(
+    name: *const u8,
+    type_: i32,
+    class: i32,
+    buf: *const u8,
+    eom: *const u8,
+) -> i32 {
+    let Some(name) = c_name(name) else {
+        return -1;
+    };
+    // SAFETY: the caller's contract.
+    match unsafe { message(buf, eom) } {
+        Some(msg) => name_in_query(name, type_, class, msg),
+        None => -1,
+    }
+}
+
+/// `res_queriesmatch` -- whether two messages ask the same questions, in
+/// any order: 1 or 0, or -1 when either is shorter than a header or the
+/// first's questions will not read. Two dynamic updates match whatever
+/// they hold. As glibc's, a question of the first that the second will not
+/// read counts as found in it -- `__libc_res_nameinquery`'s -1 is not the
+/// 0 that refuses. Deprecated by glibc.
+///
+/// # Safety
+///
+/// Each non-NULL message and its end bound a readable message.
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub unsafe extern "C" fn __res_queriesmatch(
+    buf1: *const u8,
+    eom1: *const u8,
+    buf2: *const u8,
+    eom2: *const u8,
+) -> i32 {
+    // SAFETY: the caller's contract.
+    let (Some(m1), Some(m2)) = (unsafe { message(buf1, eom1) }, unsafe {
+        message(buf2, eom2)
+    }) else {
+        return -1;
+    };
+    // The opcode, bits 3-6 of the third byte.
+    let opcode = |m: &[u8]| (m[2] >> 3) & 0x0f;
+    if opcode(m1) == NS_O_UPDATE && opcode(m2) == NS_O_UPDATE {
+        return 1;
+    }
+    if m1[4..6] != m2[4..6] {
+        return 0;
+    }
+    let qdcount = u16::from_be_bytes([m1[4], m1[5]]);
+    let mut cp = HFIXEDSZ;
+    for _ in 0..qdcount {
+        let mut tname = [0u8; NS_MAXDNAME + 1];
+        let Some((tlen, ttype, tclass, next)) = question(m1, cp, &mut tname) else {
+            return -1;
+        };
+        cp = next;
+        if name_in_query(&tname[..tlen], ttype, tclass, m2) == 0 {
+            return 0;
+        }
+    }
+    1
+}
+
+/// A dynamic update's opcode (`ns_o_update`).
+const NS_O_UPDATE: u8 = 5;
+
+/// glibc's `BUFSIZ`, the most one of its `fgets` reads of the aliases file
+/// takes -- which decides how a longer line is judged, so it is glibc's
+/// and not this library's own `BUFSIZ`.
+const GLIBC_BUFSIZ: usize = 8192;
+
+/// What one `fgets` of the aliases file says of a name.
+enum AliasLine {
+    /// Not this line's: read the next.
+    Next,
+    /// The search ends here, with no alias.
+    Stop,
+    /// The alias, now in `dst`.
+    Found,
+}
+
+/// One `fgets` of glibc's `__res_context_hostalias` loop: a line is
+/// `name alias ...`; the first whose name is `name` as `ns_samename` has it
+/// answers, strncpy'd into `dst` (`dst.len() - 1` bytes at most, and
+/// NUL-terminated) -- and a chunk with no white space in it (a line with
+/// none, or the first `BUFSIZ - 1` bytes of a longer one), or a matching
+/// line with no alias, ends the search. `dst` is not empty.
+fn alias_line(line: &[u8], name: &[u8], dst: &mut [u8]) -> AliasLine {
+    let Some(end) = line.iter().position(|&c| is_space(c)) else {
+        return AliasLine::Stop;
+    };
+    if crate::nameser::samename(&line[..end], name) != Some(true) {
+        return AliasLine::Next;
+    }
+    let rest = &line[end + 1..];
+    let Some(start) = rest.iter().position(|&c| !is_space(c)) else {
+        return AliasLine::Stop;
+    };
+    let alias = &rest[start..];
+    let alias = &alias[..alias
+        .iter()
+        .position(|&c| is_space(c))
+        .unwrap_or(alias.len())];
+    let k = alias.len().min(dst.len() - 1);
+    dst[..k].copy_from_slice(&alias[..k]);
+    // strncpy pads with NULs to `dst.len() - 1` bytes; the last is a NUL.
+    dst[k..].fill(0);
+    AliasLine::Found
+}
+
+/// glibc's `__res_context_hostalias`: the alias the file `file` gives
+/// `name`, into `dst`, or `false` -- read with `fgets` into glibc's
+/// `BUFSIZ` as glibc's is, each chunk judged by [`alias_line`].
+fn alias_in(file: *const u8, name: &[u8], dst: &mut [u8]) -> bool {
+    if dst.is_empty() || file.is_null() {
+        return false;
+    }
+    // SAFETY: `file` is a NUL-terminated path; the mode is a literal.
+    let fp = unsafe { crate::stdio::fopen(file, b"rce\0".as_ptr()) };
+    if fp.is_null() {
+        return false;
+    }
+    let mut buf = [0u8; GLIBC_BUFSIZ];
+    let mut found = false;
+    while !crate::stdio::fgets(buf.as_mut_ptr(), GLIBC_BUFSIZ as i32, fp).is_null() {
+        let n = buf.iter().position(|&c| c == 0).unwrap_or(buf.len());
+        match alias_line(&buf[..n], name, dst) {
+            AliasLine::Next => {}
+            AliasLine::Stop => break,
+            AliasLine::Found => {
+                found = true;
+                break;
+            }
+        }
+    }
+    // A read-only stream's close cannot lose anything.
+    let _ = crate::stdio::fclose(fp);
+    found
+}
+
+/// C's `isspace` in the C locale.
+fn is_space(c: u8) -> bool {
+    matches!(c, b' ' | b'\t' | b'\n' | 0x0b | 0x0c | b'\r')
+}
+
+/// The file `HOSTALIASES` names, NUL-terminated, or NULL -- read as
+/// `secure_getenv` reads, glibc's loader striking the variable from a
+/// program run with privileges it was not started with.
+fn aliases_file() -> *const u8 {
+    // SAFETY: a NUL-terminated name.
+    unsafe { crate::environ::secure_getenv(b"HOSTALIASES\0".as_ptr()) }
+}
+
+/// The alias for `name` in the `HOSTALIASES` file, unless `options` has
+/// `RES_NOALIASES`: [`alias_in`].
+fn alias_for(options: u64, name: &[u8], dst: &mut [u8]) -> bool {
+    if options & RES_NOALIASES != 0 {
+        return false;
+    }
+    // A host test has no file layer to read through, nor an environment of
+    // its own: its file's bytes, read as `fgets` reads them.
+    #[cfg(test)]
+    match tests::aliases_for_test() {
+        tests::AliasesFile::Environment => {}
+        tests::AliasesFile::Missing => return false,
+        tests::AliasesFile::Bytes(b) => return tests::alias_in_bytes(&b, name, dst),
+    }
+    alias_in(aliases_file(), name, dst)
+}
+
+/// `res_hostalias` -- the alias `HOSTALIASES`'s file gives `name`, into
+/// `dst` (`siz` bytes, the alias cut to `siz - 1`): `dst`, or NULL for
+/// none, for `RES_NOALIASES` in the caller's state, or for no file. See
+/// [`alias_in`] for the file. A NULL state is NULL with `h_errno`
+/// `NETDB_INTERNAL`, as glibc answers one it cannot use; a NULL `name`,
+/// a NULL `dst` or a `siz` of 0 -- which glibc overruns -- is NULL.
+/// Deprecated by glibc ("use getaddrinfo instead").
+///
+/// # Safety
+///
+/// `statp` is NULL or a resolver state; `name` is NULL or a NUL-terminated
+/// string; `dst` is NULL or holds `siz` bytes.
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub unsafe extern "C" fn __res_hostalias(
+    statp: *const ResState,
+    name: *const u8,
+    dst: *mut u8,
+    siz: usize,
+) -> *const u8 {
+    if statp.is_null() {
+        crate::socket::set_h_errno(NETDB_INTERNAL);
+        return core::ptr::null();
+    }
+    let Some(name) = c_name(name) else {
+        return core::ptr::null();
+    };
+    if dst.is_null() || siz == 0 {
+        return core::ptr::null();
+    }
+    // SAFETY: `statp` is the caller's state; `dst` holds `siz` bytes.
+    let (options, out) = unsafe { ((*statp).options, core::slice::from_raw_parts_mut(dst, siz)) };
+    if alias_for(options, name, out) {
+        dst.cast_const()
+    } else {
+        core::ptr::null()
+    }
+}
+
+/// `hostalias` -- [`__res_hostalias`] on `_res`, into the calling thread's
+/// buffer, which its next call overwrites (glibc shares one static between
+/// threads): the alias, or NULL. Deprecated by glibc ("use getaddrinfo
+/// instead").
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub extern "C" fn __hostalias(name: *const u8) -> *const u8 {
+    let Some(name) = c_name(name) else {
+        return core::ptr::null();
+    };
+    let buf = crate::netdb::hostalias_buffer();
+    if buf.is_null() {
+        return core::ptr::null();
+    }
+    // SAFETY: the thread's buffer holds `NS_MAXDNAME` bytes; `_res`,
+    // initialised, only read.
+    let (options, out) = unsafe {
+        (
+            (*global()).options,
+            core::slice::from_raw_parts_mut(buf, NS_MAXDNAME),
+        )
+    };
+    if alias_for(options, name, out) {
+        buf.cast_const()
+    } else {
+        core::ptr::null()
+    }
+}
+
+/// `res_close` -- close `_res`'s connections: a no-op, as `res_nclose` is,
+/// this resolver keeping no socket between queries; `_res` stays usable
+/// and `RES_INIT` set, as glibc's `__res_iclose` leaves it.
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub extern "C" fn __res_close() {}
+
+/// `res_randomid` -- a random query id, 16 bits of `arc4random`'s: glibc's
+/// `0xffff & random_bits ()`. Deprecated by glibc ("use getentropy
+/// instead").
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub extern "C" fn __res_randomid() -> u32 {
+    crate::random::arc4random() & 0xffff
+}
+
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
 
 #[cfg(test)]
 mod tests {
+    std::thread_local! {
+        /// Whether `send_query` asks [`Responder`] instead of the network.
+        static RESPONDER_ON: core::cell::Cell<bool> = const { core::cell::Cell::new(false) };
+        /// The `HOSTALIASES` file this thread's calls read, in place of the
+        /// environment's and the file layer, neither of which a host test
+        /// has.
+        static ALIASES_FILE: core::cell::RefCell<AliasesFile> =
+            const { core::cell::RefCell::new(AliasesFile::Environment) };
+    }
+
+    /// Where a test's `HOSTALIASES` file is.
+    #[derive(Clone)]
+    pub(super) enum AliasesFile {
+        /// The environment's, read through the file layer: no test's.
+        Environment,
+        /// No file: no variable, or one naming nothing.
+        Missing,
+        /// A file of these bytes.
+        Bytes(Vec<u8>),
+    }
+
+    /// `alias_for`'s hook: this thread's file.
+    pub(super) fn aliases_for_test() -> AliasesFile {
+        ALIASES_FILE.with(|f| f.borrow().clone())
+    }
+
+    /// Set this thread's `HOSTALIASES` file (see [`ALIASES_FILE`]).
+    fn set_aliases_file(file: AliasesFile) {
+        ALIASES_FILE.with(|f| *f.borrow_mut() = file);
+    }
+
+    /// [`alias_in`] on a file of `bytes`: each chunk `fgets (buf, BUFSIZ,
+    /// fp)` would read -- to a newline, inclusive, or `BUFSIZ - 1` bytes --
+    /// judged by [`alias_line`].
+    pub(super) fn alias_in_bytes(bytes: &[u8], name: &[u8], dst: &mut [u8]) -> bool {
+        if dst.is_empty() {
+            return false;
+        }
+        let mut rest = bytes;
+        while !rest.is_empty() {
+            let upto = rest
+                .iter()
+                .position(|&c| c == b'\n')
+                .map_or(rest.len(), |i| i + 1);
+            let n = upto.min(GLIBC_BUFSIZ - 1);
+            let (chunk, after) = rest.split_at(n);
+            rest = after;
+            match alias_line(chunk, name, dst) {
+                AliasLine::Next => {}
+                AliasLine::Stop => return false,
+                AliasLine::Found => return true,
+            }
+        }
+        false
+    }
+
+    /// glibc 2.39's `dn_count_labels`, `putlong`, `putshort`,
+    /// `res_isourserver`, `res_nameinquery`, `res_queriesmatch`, `hostalias`,
+    /// `res_hostalias`, `res_close` and `res_randomid`
+    /// (`resutil_harness.py`), replayed: `_res`'s nameservers and the
+    /// aliases file from the oracle's own lines, and each on a state of this
+    /// test's own where glibc's used `_res`.
+    #[test]
+    fn the_small_helpers_answer_as_glibcs() {
+        const ORACLE: &str = include_str!("resutil_oracle.txt");
+        let unhex = |h: &str| -> Vec<u8> {
+            (0..h.len() / 2)
+                .map(|i| u8::from_str_radix(&h[i * 2..i * 2 + 2], 16).unwrap())
+                .collect()
+        };
+        let hexs = |b: &[u8]| {
+            b.iter()
+                .map(|x| format!("{x:02x}"))
+                .collect::<Vec<_>>()
+                .concat()
+        };
+        let file = ORACLE.lines().find_map(|l| l.strip_prefix("F ")).unwrap();
+        let aliases = unhex(file);
+        let mut servers = ResState::ZERO;
+        let mut n = 0;
+        let mut wrong = Vec::new();
+        for line in ORACLE
+            .lines()
+            .filter(|l| !l.starts_with('#') && !l.starts_with("F "))
+        {
+            if let Some(ns) = line.strip_prefix("N ") {
+                let (a, port) = ns.split_once(' ').unwrap();
+                let i = usize::try_from(servers.nscount).unwrap();
+                let a: std::net::Ipv4Addr = a.parse().unwrap();
+                servers.nsaddr_list[i] = crate::socket::SockaddrIn {
+                    sin_family: crate::socket::AF_INET as u16,
+                    sin_port: port.parse::<u16>().unwrap().to_be(),
+                    sin_addr: crate::socket::InAddr {
+                        s_addr: u32::from_ne_bytes(a.octets()),
+                    },
+                    sin_zero: [0; 8],
+                };
+                servers.nscount += 1;
+                continue;
+            }
+            let (call, want) = line.split_once(" = ").unwrap();
+            let f: Vec<&str> = call.split(' ').collect();
+            n += 1;
+            let got = match f[0] {
+                "C" => {
+                    let mut s = untoken(f[1]);
+                    s.push(0);
+                    format!("{}", __dn_count_labels(s.as_ptr()))
+                }
+                "L" => {
+                    let mut o = [0u8; 4];
+                    __putlong(u32::from_str_radix(f[1], 16).unwrap(), o.as_mut_ptr());
+                    hexs(&o)
+                }
+                "H" => {
+                    let mut o = [0u8; 2];
+                    __putshort(u16::from_str_radix(f[1], 16).unwrap(), o.as_mut_ptr());
+                    hexs(&o)
+                }
+                "I" => {
+                    let a: std::net::Ipv4Addr = f[2].parse().unwrap();
+                    let inp = crate::socket::SockaddrIn {
+                        sin_family: f[1].parse().unwrap(),
+                        sin_port: f[3].parse::<u16>().unwrap().to_be(),
+                        sin_addr: crate::socket::InAddr {
+                            s_addr: u32::from_ne_bytes(a.octets()),
+                        },
+                        sin_zero: [0; 8],
+                    };
+                    format!("{}", i32::from(is_our_server(&servers, &inp)))
+                }
+                "Q" => {
+                    let m = unhex(f[1]);
+                    let len: usize = f[2].parse().unwrap();
+                    let mut name = untoken(f[3]);
+                    name.push(0);
+                    // SAFETY: `m` holds `len` bytes and more; `name` is
+                    // NUL-terminated.
+                    let r = unsafe {
+                        __res_nameinquery(
+                            name.as_ptr(),
+                            f[4].parse().unwrap(),
+                            f[5].parse().unwrap(),
+                            m.as_ptr(),
+                            m.as_ptr().add(len),
+                        )
+                    };
+                    format!("{r}")
+                }
+                "M" => {
+                    let (a, b) = (unhex(f[1]), unhex(f[3]));
+                    let (la, lb): (usize, usize) = (f[2].parse().unwrap(), f[4].parse().unwrap());
+                    // SAFETY: each message holds its length and more.
+                    let r = unsafe {
+                        __res_queriesmatch(
+                            a.as_ptr(),
+                            a.as_ptr().add(la),
+                            b.as_ptr(),
+                            b.as_ptr().add(lb),
+                        )
+                    };
+                    format!("{r}")
+                }
+                "A" => {
+                    let mut name = untoken(f[2]);
+                    name.push(0);
+                    let size: usize = f[3].parse().unwrap();
+                    let text = |r: *const u8| -> String {
+                        if r.is_null() {
+                            return "NULL".into();
+                        }
+                        // SAFETY: the answer is a NUL-terminated string.
+                        let s = unsafe { core::slice::from_raw_parts(r, crate::string::strlen(r)) };
+                        String::from_utf8(s.to_vec()).unwrap()
+                    };
+                    let got = match f[1] {
+                        "h" | "u" | "m" => {
+                            // No variable and a variable naming no file are
+                            // both no file.
+                            set_aliases_file(if f[1] == "h" {
+                                AliasesFile::Bytes(aliases.clone())
+                            } else {
+                                AliasesFile::Missing
+                            });
+                            text(__hostalias(name.as_ptr()))
+                        }
+                        mode => {
+                            set_aliases_file(AliasesFile::Bytes(aliases.clone()));
+                            let mut st = ResState::ZERO;
+                            st.options = FRESH_OPTIONS | RES_INIT;
+                            if mode == "n" {
+                                st.options |= RES_NOALIASES;
+                            }
+                            let mut dst = [0xaau8; 64];
+                            // SAFETY: a live state; `dst` holds `size` bytes.
+                            text(unsafe {
+                                __res_hostalias(&st, name.as_ptr(), dst.as_mut_ptr(), size)
+                            })
+                        }
+                    };
+                    set_aliases_file(AliasesFile::Environment);
+                    got
+                }
+                "X" => match f[1] {
+                    // `res_close` touches no state here: what glibc's leaves
+                    // -- RES_INIT as it was, the servers -- a no-op leaves.
+                    "init-before" | "init-after-close-uninit" => "0".into(),
+                    "init-after-close" => {
+                        __res_close();
+                        "1".into()
+                    }
+                    "nscount-after-close" => format!("{}", servers.nscount),
+                    "randomid" => {
+                        let a = __res_randomid();
+                        let ids: Vec<u32> = (0..1000).map(|_| __res_randomid()).collect();
+                        if ids.iter().all(|&b| b <= 0xffff) && ids.iter().any(|&b| b != a) {
+                            "ok".into()
+                        } else {
+                            "bad".into()
+                        }
+                    }
+                    other => panic!("unknown X line {other}"),
+                },
+                other => panic!("unknown line kind {other}"),
+            };
+            if got != want {
+                wrong.push(format!("{call}\n  glibc: {want}\n  ours:  {got}"));
+            }
+        }
+        assert!(n > 90, "the oracle has {n} lines");
+        assert!(
+            wrong.is_empty(),
+            "{} of {n}:\n{}",
+            wrong.len(),
+            wrong.join("\n")
+        );
+    }
+
+    /// A dot-free name the `HOSTALIASES` file names is searched as its
+    /// alias, as it stands and nothing else, as glibc's
+    /// `__res_context_search` has it; `RES_NOALIASES` turns the file off.
+    #[test]
+    fn a_dot_free_name_is_searched_as_its_alias() {
+        let mut st = ResState::ZERO;
+        store_conf(
+            &mut st,
+            &parse_conf(b"nameserver 127.0.0.1\nsearch nowhere.test\n", b""),
+        );
+        RESPONDER_ON.with(|r| r.set(true));
+        set_aliases_file(AliasesFile::Bytes(b"ftp a.example.test\n".to_vec()));
+        let mut answer = [0u8; 512];
+        // SAFETY: a live state; a NUL-terminated name; `answer` holds 512.
+        let n = unsafe {
+            res_nsearch(
+                &mut st,
+                c"ftp".as_ptr().cast(),
+                1,
+                1,
+                answer.as_mut_ptr(),
+                512,
+            )
+        };
+        assert!(n > 0, "the alias is answered: {n}");
+        let mut name = [0u8; 256];
+        let end = answer.as_ptr().wrapping_add(usize::try_from(n).unwrap());
+        let q = dn_expand(
+            answer.as_ptr(),
+            end,
+            answer.as_ptr().wrapping_add(HFIXEDSZ),
+            name.as_mut_ptr(),
+            256,
+        );
+        assert!(q > 0);
+        let len = name.iter().position(|&c| c == 0).unwrap();
+        assert_eq!(
+            &name[..len],
+            b"a.example.test",
+            "the question asked is the alias"
+        );
+
+        st.options |= RES_NOALIASES;
+        // SAFETY: as above.
+        let n = unsafe {
+            res_nsearch(
+                &mut st,
+                c"ftp".as_ptr().cast(),
+                1,
+                1,
+                answer.as_mut_ptr(),
+                512,
+            )
+        };
+        assert_eq!(
+            n, -1,
+            "without the file, ftp and ftp.nowhere.test are asked, and refused"
+        );
+        assert_eq!(crate::socket::get_h_errno(), crate::socket::HOST_NOT_FOUND);
+        set_aliases_file(AliasesFile::Environment);
+        RESPONDER_ON.with(|r| r.set(false));
+    }
+
+    /// `send_query`'s hook: the exchange with [`Responder`] when a test has
+    /// turned it on, else `None`, for the network.
+    pub(super) fn scripted_exchange(
+        sv: &Servers,
+        q: &[u8],
+        answer: &mut [u8],
+    ) -> Option<Result<usize, i32>> {
+        if !RESPONDER_ON.with(core::cell::Cell::get) {
+            return None;
+        }
+        Some(exchange(&mut Responder::default(), sv, q, answer))
+    }
+
+    /// `resolvn_harness.py`'s responder, in-process: `a.example.test` has
+    /// the A record 10.0.0.1, `srv.example.test` answers SERVFAIL, every
+    /// other name NXDOMAIN.
+    #[derive(Default)]
+    struct Responder {
+        pending: std::collections::VecDeque<Vec<u8>>,
+        now: u64,
+    }
+
+    impl Transport for Responder {
+        fn send_udp(&mut self, _i: usize, q: &[u8]) {
+            self.pending.push_back(respond(q));
+        }
+        fn recv_udp(&mut self, buf: &mut [u8], ms: u64) -> Option<(usize, Option<usize>, bool)> {
+            let Some(r) = self.pending.pop_front() else {
+                self.now += ms;
+                return None;
+            };
+            let keep = r.len().min(buf.len());
+            buf[..keep].copy_from_slice(&r[..keep]);
+            Some((r.len(), Some(0), false))
+        }
+        fn tcp(&mut self, _i: usize, _q: &[u8], _buf: &mut [u8], _ms: u64) -> Option<usize> {
+            None
+        }
+        fn now_ms(&mut self) -> u64 {
+            self.now
+        }
+    }
+
+    fn respond(q: &[u8]) -> Vec<u8> {
+        let mut at = 12;
+        let mut name = Vec::new();
+        while at < q.len() && q[at] != 0 {
+            let l = usize::from(q[at]);
+            at += 1;
+            if !name.is_empty() {
+                name.push(b'.');
+            }
+            name.extend_from_slice(&q[at..at + l]);
+            at += l;
+        }
+        let qend = at + 1 + 4;
+        let mut r = q[..qend].to_vec();
+        r[2] = 0x80 | (q[2] & 1);
+        r[3] = 0x80;
+        r[4..12].copy_from_slice(&[0, 1, 0, 0, 0, 0, 0, 0]);
+        let qtype = u16::from_be_bytes([q[at + 1], q[at + 2]]);
+        if name.eq_ignore_ascii_case(b"a.example.test") && qtype == 1 {
+            r.extend_from_slice(&[0xc0, 12, 0, 1, 0, 1, 0, 0, 1, 0x2c, 0, 4, 10, 0, 0, 1]);
+            r[7] = 1;
+        } else if name.eq_ignore_ascii_case(b"srv.example.test") {
+            r[3] |= 2;
+        } else {
+            r[3] |= 3;
+        }
+        r
+    }
+
+    /// An answer as the harness sums it up: `rcode ancount A`.
+    fn summary(a: &[u8], rc: i32) -> String {
+        if rc < 12 {
+            return "- - -".into();
+        }
+        let rcode = a[3] & 0xf;
+        let an = u16::from_be_bytes([a[6], a[7]]);
+        let mut addr = "-".to_string();
+        let mut h = core::mem::MaybeUninit::<NsMsg>::zeroed();
+        // SAFETY: `a` holds `rc` bytes; the handle is written by the call.
+        if an > 0 && unsafe { ns_initparse(a.as_ptr(), rc, h.as_mut_ptr()) } == 0 {
+            // SAFETY: filled by ns_initparse.
+            let mut h = unsafe { h.assume_init() };
+            for k in 0..i32::from(an) {
+                let mut rr = core::mem::MaybeUninit::<NsRr>::zeroed();
+                // SAFETY: a live handle and a record to fill.
+                if unsafe { ns_parserr(&raw mut h, 1, k, rr.as_mut_ptr()) } == 0 {
+                    // SAFETY: filled by ns_parserr.
+                    let rr = unsafe { rr.assume_init() };
+                    if rr.type_ == 1 && rr.rdlength == 4 {
+                        // SAFETY: four bytes of rdata inside the answer.
+                        let d = unsafe { core::slice::from_raw_parts(rr.rdata, 4) };
+                        addr = format!("{}.{}.{}.{}", d[0], d[1], d[2], d[3]);
+                        break;
+                    }
+                }
+            }
+        }
+        format!("{rcode} {an} {addr}")
+    }
+
+    /// glibc 2.39's reentrant resolver (`resolvn_harness.py`), replayed: the
+    /// state from the harness's `resolv.conf`, the responder in place of the
+    /// network, `h_errno` and `res_h_errno` set to 12345 before each call.
+    #[test]
+    fn the_reentrant_resolver_answers_as_glibcs() {
+        const ORACLE: &str = include_str!("resolvn_oracle.txt");
+        let conf: Vec<u8> = ORACLE
+            .lines()
+            .filter_map(|l| l.strip_prefix("#   "))
+            .flat_map(|l| l.bytes().chain(Some(b'\n')))
+            .collect();
+        // What res_ninit makes of that file, built where it stays: the state
+        // points into itself (`dnsrch` into `defdname`), as glibc's does, so
+        // a moved copy's search list would point at the old one.
+        let mut st = ResState::ZERO;
+        store_conf(&mut st, &parse_conf(&conf, b""));
+        RESPONDER_ON.with(|r| r.set(true));
+        let mut qb = [0u8; 512];
+        let mut qlen = 0;
+        let mut zero = ResState::ZERO;
+        for line in ORACLE.lines().filter(|l| !l.starts_with('#')) {
+            let (case, glibc) = line.split_once(" = ").expect("<case> = <answer>");
+            let ask = |f: &mut dyn FnMut(*mut ResState, &mut [u8]) -> i32, sp: *mut ResState| {
+                let mut buf = [0u8; 1024];
+                crate::socket::set_h_errno(12345);
+                // SAFETY: a live state.
+                unsafe { (*sp).res_h_errno = 12345 };
+                let rc = f(sp, &mut buf);
+                // SAFETY: as above.
+                let res_h = unsafe { (*sp).res_h_errno };
+                let sum = if rc < 0 {
+                    "- - -".to_string()
+                } else {
+                    summary(&buf, rc)
+                };
+                format!(
+                    "{} {} {res_h} {sum}",
+                    if rc < 0 { -1 } else { 1 },
+                    crate::socket::get_h_errno()
+                )
+            };
+            let q = |name: &str| {
+                let mut n = name.as_bytes().to_vec();
+                n.push(0);
+                n
+            };
+            let ours = match case {
+                "I zeroed" => {
+                    let s0 = &st.nsaddr_list[0];
+                    let a = s0.sin_addr.s_addr.to_ne_bytes();
+                    let mut line = format!(
+                        "0 {} {} {:x} {} {}.{}.{}.{}:{} {}",
+                        st.retrans,
+                        st.retry,
+                        st.options,
+                        st.nscount,
+                        a[0],
+                        a[1],
+                        a[2],
+                        a[3],
+                        u16::from_be(s0.sin_port),
+                        st.ndots()
+                    );
+                    for p in st.dnsrch.iter().take_while(|p| !p.is_null()) {
+                        // SAFETY: into `defdname`, NUL-terminated.
+                        let d =
+                            unsafe { core::slice::from_raw_parts(*p, crate::string::strlen(*p)) };
+                        line.push(' ');
+                        line.push_str(core::str::from_utf8(d).unwrap());
+                    }
+                    line.push_str(" ;");
+                    line
+                }
+                "R again" => {
+                    // A state of its own: `st` must keep the harness's file.
+                    let mut again = ResState::ZERO;
+                    // SAFETY: a live state, initialised and then again.
+                    unsafe { __res_ninit(&raw mut again) };
+                    // SAFETY: as above.
+                    unsafe { __res_ninit(&raw mut again) }.to_string()
+                }
+                c if c.starts_with("Q ") => {
+                    let (name, t) = match &c[2..] {
+                        "a.example.test/AAAA" => ("a.example.test", T_AAAA),
+                        n => (n, T_A),
+                    };
+                    let n = q(name);
+                    ask(
+                        &mut |sp, b: &mut [u8]| unsafe {
+                            res_nquery(sp, n.as_ptr(), C_IN, t, b.as_mut_ptr(), 1024)
+                        },
+                        &raw mut st,
+                    )
+                }
+                c if c.starts_with("S ") => {
+                    let n = q(&c[2..]);
+                    ask(
+                        &mut |sp, b: &mut [u8]| unsafe {
+                            res_nsearch(sp, n.as_ptr(), C_IN, T_A, b.as_mut_ptr(), 1024)
+                        },
+                        &raw mut st,
+                    )
+                }
+                c if c.starts_with("D ") => {
+                    let (name, dom) = c[2..].split_once(' ').unwrap();
+                    let (n, d) = (q(name), q(dom));
+                    ask(
+                        &mut |sp, b: &mut [u8]| unsafe {
+                            res_nquerydomain(
+                                sp,
+                                n.as_ptr(),
+                                d.as_ptr(),
+                                C_IN,
+                                T_A,
+                                b.as_mut_ptr(),
+                                1024,
+                            )
+                        },
+                        &raw mut st,
+                    )
+                }
+                "M a.example.test" => {
+                    let n = q("a.example.test");
+                    // SAFETY: a live state and buffer.
+                    let rc = unsafe {
+                        res_nmkquery(
+                            &raw mut st,
+                            QUERY,
+                            n.as_ptr(),
+                            C_IN,
+                            T_A,
+                            core::ptr::null(),
+                            0,
+                            core::ptr::null(),
+                            qb.as_mut_ptr(),
+                            512,
+                        )
+                    };
+                    qlen = rc;
+                    let bytes: String = qb[..usize::try_from(rc).unwrap()]
+                        .iter()
+                        .enumerate()
+                        .map(|(k, b)| {
+                            if k < 2 {
+                                "00".to_string()
+                            } else {
+                                format!("{b:02x}")
+                            }
+                        })
+                        .collect();
+                    format!("{rc} {bytes}")
+                }
+                "N" => {
+                    let mut ab = [0u8; 1024];
+                    // SAFETY: a live state and buffers.
+                    let n =
+                        unsafe { res_nsend(&raw mut st, qb.as_ptr(), qlen, ab.as_mut_ptr(), 1024) };
+                    format!(
+                        "{} {}",
+                        if n < 0 { -1 } else { 1 },
+                        if n < 0 {
+                            "- - -".into()
+                        } else {
+                            summary(&ab, n)
+                        }
+                    )
+                }
+                c if c.starts_with("U ") => {
+                    let n = q("a.example.test");
+                    let one = q("a");
+                    let dom = q("example.test");
+                    let mut buf = [0u8; 1024];
+                    crate::socket::set_h_errno(12345);
+                    zero.res_h_errno = 12345;
+                    // SAFETY: a live (zeroed) state and buffers.
+                    let rc = unsafe {
+                        match &c[2..] {
+                            "query" => res_nquery(
+                                &raw mut zero,
+                                n.as_ptr(),
+                                C_IN,
+                                T_A,
+                                buf.as_mut_ptr(),
+                                1024,
+                            ),
+                            "search" => res_nsearch(
+                                &raw mut zero,
+                                one.as_ptr(),
+                                C_IN,
+                                T_A,
+                                buf.as_mut_ptr(),
+                                1024,
+                            ),
+                            "querydomain" => res_nquerydomain(
+                                &raw mut zero,
+                                one.as_ptr(),
+                                dom.as_ptr(),
+                                C_IN,
+                                T_A,
+                                buf.as_mut_ptr(),
+                                1024,
+                            ),
+                            "mkquery" => res_nmkquery(
+                                &raw mut zero,
+                                QUERY,
+                                n.as_ptr(),
+                                C_IN,
+                                T_A,
+                                core::ptr::null(),
+                                0,
+                                core::ptr::null(),
+                                buf.as_mut_ptr(),
+                                1024,
+                            ),
+                            "send" => {
+                                res_nsend(&raw mut zero, qb.as_ptr(), 32, buf.as_mut_ptr(), 1024)
+                            }
+                            other => {
+                                panic!("an uninitialised call this test does not know: {other}")
+                            }
+                        }
+                    };
+                    format!("{rc} {} {}", crate::socket::get_h_errno(), zero.res_h_errno)
+                }
+                "C init-bit" => {
+                    // SAFETY: a live state.
+                    unsafe { __res_nclose(&raw mut st) };
+                    i32::from(st.options & RES_INIT != 0).to_string()
+                }
+                other => panic!("a case this test does not know: {other}"),
+            };
+            assert_eq!(ours, glibc, "{case}");
+        }
+        RESPONDER_ON.with(|r| r.set(false));
+    }
+
+    /// A line's text token back into bytes: `\xHH` for a byte, `\x` alone
+    /// for the empty string (`nsname_harness.py`'s `token`).
+    fn untoken(t: &str) -> Vec<u8> {
+        if t == "\\x" {
+            return Vec::new();
+        }
+        let b = t.as_bytes();
+        let mut out = Vec::new();
+        let mut i = 0;
+        while i < b.len() {
+            if b[i] == b'\\' && b.get(i + 1) == Some(&b'x') {
+                out.push(u8::from_str_radix(&t[i + 2..i + 4], 16).expect("hex"));
+                i += 4;
+            } else {
+                out.push(b[i]);
+                i += 1;
+            }
+        }
+        out
+    }
+
+    fn unhex(h: &str) -> Vec<u8> {
+        if h == "-" {
+            return Vec::new();
+        }
+        (0..h.len())
+            .step_by(2)
+            .map(|k| u8::from_str_radix(&h[k..k + 2], 16).expect("hex"))
+            .collect()
+    }
+
+    fn hex(b: &[u8]) -> String {
+        use core::fmt::Write;
+        if b.is_empty() {
+            return "-".into();
+        }
+        b.iter().fold(String::new(), |mut s, x| {
+            // Writing into a String cannot fail.
+            let _ = write!(s, "{x:02x}");
+            s
+        })
+    }
+
+    /// Text as the harness writes it.
+    fn token(b: &[u8]) -> String {
+        use core::fmt::Write;
+        if b.is_empty() {
+            return "\\x".into();
+        }
+        b.iter().fold(String::new(), |mut s, &c| {
+            if (0x21..=0x7e).contains(&c) && c != b'\\' {
+                s.push(c as char);
+            } else {
+                // Writing into a String cannot fail.
+                let _ = write!(s, "\\x{c:02x}");
+            }
+            s
+        })
+    }
+
+    /// The uncompressed wire name at the start of `b`: its bytes, up to the
+    /// root label or the end.
+    fn wire_prefix(b: &[u8]) -> &[u8] {
+        let mut i = 0;
+        while let Some(&n) = b.get(i) {
+            if n == 0 {
+                return &b[..=i];
+            }
+            i += 1 + usize::from(n);
+        }
+        &b[..b.len().min(i)]
+    }
+
+    /// glibc 2.39's `ns_name_*` and `res_*ok` (`nsname_harness.py`),
+    /// replayed line by line; `errno` compared where the call failed.
+    #[test]
+    fn ns_name_and_the_name_checks_answer_as_glibcs() {
+        use std::collections::HashMap;
+        const ORACLE: &str = include_str!("nsname_oracle.txt");
+        let mut msgs: HashMap<String, Vec<u8>> = HashMap::new();
+        for line in include_str!("ns_oracle.txt").lines() {
+            if let Some(rest) = line.strip_prefix("M ") {
+                let (n, h) = rest.split_once(' ').expect("M <name> <hex>");
+                msgs.insert(n.to_string(), unhex(h));
+            }
+        }
+        let err = |rc: i32| -> i32 {
+            if rc < 0 {
+                crate::errno::get_errno()
+            } else {
+                1234
+            }
+        };
+        // One pack sequence at a time: its message and table.
+        let mut seq_name = String::new();
+        let mut msg = vec![0u8; 1024];
+        let mut table: Vec<*const u8> = Vec::new();
+        let mut at = 12usize;
+        let mut counted = HashMap::<char, usize>::new();
+        for line in ORACLE.lines().filter(|l| !l.starts_with('#')) {
+            let (call, glibc) = line.split_once(" = ").expect("<call> = <answer>");
+            let mut f = call.split(' ');
+            let kind = f.next().expect("a kind").chars().next().expect("a letter");
+            *counted.entry(kind).or_default() += 1;
+            crate::errno::set_errno(1234);
+            let ours = match kind {
+                'T' => {
+                    let text = untoken(f.next().unwrap());
+                    let n: usize = f.next().unwrap().parse().unwrap();
+                    let mut src = text.clone();
+                    src.push(0);
+                    let mut dst = vec![0xeeu8; 2048];
+                    // SAFETY: a NUL-terminated text; `dst` holds `n` bytes.
+                    let rc = unsafe { ns_name_pton(src.as_ptr(), dst.as_mut_ptr(), n) };
+                    let wire = if rc < 0 {
+                        &[][..]
+                    } else {
+                        wire_prefix(&dst[..n])
+                    };
+                    format!("{rc} {} {}", err(rc), hex(wire))
+                }
+                'N' => {
+                    let src = unhex(f.next().unwrap());
+                    let n: usize = f.next().unwrap().parse().unwrap();
+                    let mut dst = vec![0u8; 2048];
+                    // SAFETY: the wire name ends in the vector; `dst` holds `n`.
+                    let rc = unsafe { ns_name_ntop(src.as_ptr(), dst.as_mut_ptr(), n) };
+                    // What the call wrote, a failed call's too.
+                    let end = dst.iter().position(|&c| c == 0).unwrap();
+                    format!("{rc} {} {}", err(rc), token(&dst[..end]))
+                }
+                'U' => {
+                    let m = &msgs[f.next().unwrap()];
+                    let o: usize = f.next().unwrap().parse().unwrap();
+                    let n: usize = f.next().unwrap().parse().unwrap();
+                    let mut dst = vec![0xeeu8; 2048];
+                    // SAFETY: the message and `dst`, as the contract asks.
+                    let rc = unsafe {
+                        ns_name_unpack(
+                            m.as_ptr(),
+                            m.as_ptr().add(m.len()),
+                            m.as_ptr().add(o),
+                            dst.as_mut_ptr(),
+                            n,
+                        )
+                    };
+                    let wire = if rc < 0 {
+                        &[][..]
+                    } else {
+                        wire_prefix(&dst[..n])
+                    };
+                    format!("{rc} {} {}", err(rc), hex(wire))
+                }
+                'S' => {
+                    let m = &msgs[f.next().unwrap()];
+                    let o: usize = f.next().unwrap().parse().unwrap();
+                    let e: usize = f.next().unwrap().parse().unwrap();
+                    let mut p = m.as_ptr().wrapping_add(o);
+                    // SAFETY: `[p, m + e)` is inside the message.
+                    let rc = unsafe { ns_name_skip(&raw mut p, m.as_ptr().add(e)) };
+                    format!("{rc} {} {}", err(rc), p as usize - m.as_ptr() as usize)
+                }
+                'P' => {
+                    let seq = f.next().unwrap();
+                    let _i = f.next().unwrap();
+                    let how = f.next().unwrap();
+                    let name = f.next().unwrap();
+                    let n: usize = f.next().unwrap().parse().unwrap();
+                    if seq != seq_name {
+                        seq_name = seq.to_string();
+                        msg = vec![0u8; 1024];
+                        at = 12;
+                        let room = if seq == "full" { 2 } else { 8 };
+                        table = vec![core::ptr::null(); room + 2];
+                        table[0] = msg.as_ptr();
+                    }
+                    let nocomp = seq == "nocomp";
+                    let (dnptrs, last) = if nocomp {
+                        (core::ptr::null_mut(), core::ptr::null_mut())
+                    } else {
+                        let len = table.len();
+                        (table.as_mut_ptr(), table.as_mut_ptr().wrapping_add(len - 1))
+                    };
+                    let dst = msg.as_mut_ptr().wrapping_add(at);
+                    // SAFETY: `dst` is inside `msg`, which the table's names are in.
+                    let rc = unsafe {
+                        if how == "wire" {
+                            let src = unhex(name);
+                            ns_name_pack(src.as_ptr(), dst, i32::try_from(n).unwrap(), dnptrs, last)
+                        } else {
+                            let mut src = untoken(name);
+                            src.push(0);
+                            ns_name_compress(src.as_ptr(), dst, n, dnptrs, last)
+                        }
+                    };
+                    let written = if rc > 0 {
+                        hex(&msg[at..at + rc as usize])
+                    } else {
+                        "-".into()
+                    };
+                    let mut tab = String::new();
+                    if nocomp {
+                        tab.push_str(" -");
+                    } else {
+                        for &q in table.iter().take_while(|q| !q.is_null()) {
+                            tab.push_str(&format!(" {}", q as usize - msg.as_ptr() as usize));
+                        }
+                        tab.push_str(" -");
+                    }
+                    if rc > 0 {
+                        at += rc as usize;
+                    }
+                    // glibc leaves `errno` at dn_find's ENOENT after a
+                    // successful pack; only a failure's is compared.
+                    let e = if rc < 0 {
+                        err(rc).to_string()
+                    } else {
+                        glibc.split(' ').nth(1).unwrap().to_string()
+                    };
+                    format!("{rc} {e} {written} ;{tab}")
+                }
+                'O' => {
+                    let mut dn = untoken(f.next().unwrap());
+                    dn.push(0);
+                    let p = dn.as_ptr();
+                    format!(
+                        "{} {} {} {}",
+                        res_hnok(p),
+                        res_ownok(p),
+                        res_mailok(p),
+                        res_dnok(p)
+                    )
+                }
+                other => panic!("a kind this test does not know: {other}"),
+            };
+            assert_eq!(ours, glibc, "{call}");
+        }
+        assert!(counted.values().sum::<usize>() > 300, "{counted:?}");
+    }
+
     use super::*;
 
     fn pton(s: &[u8]) -> Result<(Vec<u8>, bool), ()> {
@@ -2670,7 +4650,7 @@ search a.example b.example\noptions ndots:3 timeout:99 attempts:0 rotate use-vc 
         c.timeout = 3;
         store_conf(&mut st, &c);
         assert_eq!((st.nscount, st.retrans, st.retry, st.ndots()), (1, 3, 2, 2));
-        assert_eq!(st.options, RES_DEFAULT | RES_INIT);
+        assert_eq!(st.options, FRESH_OPTIONS | RES_INIT);
         assert_eq!(st.nsaddr_list[0].sin_port, 53u16.to_be());
         assert_eq!(
             st.nsaddr_list[0].sin_addr.s_addr.to_ne_bytes(),
@@ -2962,7 +4942,7 @@ search a.example b.example\noptions ndots:3 timeout:99 attempts:0 rotate use-vc 
             (st.retrans, st.retry, st.ndots()),
             (RES_TIMEOUT, RES_DFLRETRY, 1)
         );
-        assert_eq!(st.options & RES_DEFAULT, RES_DEFAULT);
+        assert_eq!(st.options & FRESH_OPTIONS, FRESH_OPTIONS);
         assert!(st.options & RES_INIT != 0);
     }
 

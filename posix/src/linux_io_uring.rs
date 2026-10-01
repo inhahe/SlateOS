@@ -106,85 +106,125 @@ const IORING_SETUP_FLAGS_VALID: u32 = IORING_SETUP_IOPOLL
     | IORING_SETUP_NO_SQARRAY;
 
 // ---------------------------------------------------------------------------
-// io_uring opcodes (SQE operations)
+// io_uring opcodes (SQE operations): Linux 6.8's <linux/io_uring.h>, which
+// posix/tools/oracle/glibc_constants.txt holds them to. (Until 2026-09-30
+// eighteen were missing, IORING_OP_CANCEL was a name Linux has not got with
+// the number of IORING_OP_SENDMSG_ZC, and IORING_OP_LAST was "a generous
+// 64". Nothing here reads them: there is no ring to take an SQE from.)
 // ---------------------------------------------------------------------------
 
 /// No-op.
 pub const IORING_OP_NOP: u8 = 0;
-/// Read (vectored).
+/// `readv`.
 pub const IORING_OP_READV: u8 = 1;
-/// Write (vectored).
+/// `writev`.
 pub const IORING_OP_WRITEV: u8 = 2;
-/// fsync.
+/// `fsync`.
 pub const IORING_OP_FSYNC: u8 = 3;
-/// Read (fixed buffer).
+/// Read into a registered buffer.
 pub const IORING_OP_READ_FIXED: u8 = 4;
-/// Write (fixed buffer).
+/// Write from a registered buffer.
 pub const IORING_OP_WRITE_FIXED: u8 = 5;
-/// Add poll.
+/// Add a poll.
 pub const IORING_OP_POLL_ADD: u8 = 6;
-/// Remove poll.
+/// Remove a poll.
 pub const IORING_OP_POLL_REMOVE: u8 = 7;
-/// Sync file range.
+/// `sync_file_range`.
 pub const IORING_OP_SYNC_FILE_RANGE: u8 = 8;
-/// Send message.
+/// `sendmsg`.
 pub const IORING_OP_SENDMSG: u8 = 9;
-/// Receive message.
+/// `recvmsg`.
 pub const IORING_OP_RECVMSG: u8 = 10;
-/// Timeout.
+/// A timeout.
 pub const IORING_OP_TIMEOUT: u8 = 11;
-/// Remove timeout.
+/// Remove a timeout.
 pub const IORING_OP_TIMEOUT_REMOVE: u8 = 12;
-/// Accept connection.
+/// `accept`.
 pub const IORING_OP_ACCEPT: u8 = 13;
-/// Cancel async operation.
+/// Cancel a request.
 pub const IORING_OP_ASYNC_CANCEL: u8 = 14;
-/// Link timeout.
+/// A timeout for the linked request.
 pub const IORING_OP_LINK_TIMEOUT: u8 = 15;
-/// Connect.
+/// `connect`.
 pub const IORING_OP_CONNECT: u8 = 16;
-/// fallocate.
+/// `fallocate`.
 pub const IORING_OP_FALLOCATE: u8 = 17;
-/// Open file.
+/// `openat`.
 pub const IORING_OP_OPENAT: u8 = 18;
-/// Close file.
+/// `close`.
 pub const IORING_OP_CLOSE: u8 = 19;
-/// statx.
+/// Update registered files.
+pub const IORING_OP_FILES_UPDATE: u8 = 20;
+/// `statx`.
 pub const IORING_OP_STATX: u8 = 21;
-/// Read.
+/// `read`.
 pub const IORING_OP_READ: u8 = 22;
-/// Write.
+/// `write`.
 pub const IORING_OP_WRITE: u8 = 23;
-/// fadvise.
+/// `posix_fadvise`.
 pub const IORING_OP_FADVISE: u8 = 24;
-/// madvise.
+/// `madvise`.
 pub const IORING_OP_MADVISE: u8 = 25;
-/// Send.
+/// `send`.
 pub const IORING_OP_SEND: u8 = 26;
-/// Receive.
+/// `recv`.
 pub const IORING_OP_RECV: u8 = 27;
-/// Open file (openat2).
+/// `openat2`.
 pub const IORING_OP_OPENAT2: u8 = 28;
+/// `epoll_ctl`.
+pub const IORING_OP_EPOLL_CTL: u8 = 29;
+/// `splice`.
+pub const IORING_OP_SPLICE: u8 = 30;
 /// Provide buffers.
 pub const IORING_OP_PROVIDE_BUFFERS: u8 = 31;
 /// Remove buffers.
 pub const IORING_OP_REMOVE_BUFFERS: u8 = 32;
-/// Rename.
+/// `tee`.
+pub const IORING_OP_TEE: u8 = 33;
+/// `shutdown`.
+pub const IORING_OP_SHUTDOWN: u8 = 34;
+/// `renameat`.
 pub const IORING_OP_RENAMEAT: u8 = 35;
-/// Unlink.
+/// `unlinkat`.
 pub const IORING_OP_UNLINKAT: u8 = 36;
-/// mkdir.
+/// `mkdirat`.
 pub const IORING_OP_MKDIRAT: u8 = 37;
-/// symlink.
+/// `symlinkat`.
 pub const IORING_OP_SYMLINKAT: u8 = 38;
-/// link.
+/// `linkat`.
 pub const IORING_OP_LINKAT: u8 = 39;
-/// Cancel (extended).
-pub const IORING_OP_CANCEL: u8 = 48;
-/// First unknown opcode — anything ≥ this is rejected by SQE
-/// validation in real implementations. We use a generous 64 to allow
-/// for Linux 6.x opcodes we haven't enumerated above.
-pub const IORING_OP_LAST: u8 = 64;
+/// Post to another ring.
+pub const IORING_OP_MSG_RING: u8 = 40;
+/// `fsetxattr`.
+pub const IORING_OP_FSETXATTR: u8 = 41;
+/// `setxattr`.
+pub const IORING_OP_SETXATTR: u8 = 42;
+/// `fgetxattr`.
+pub const IORING_OP_FGETXATTR: u8 = 43;
+/// `getxattr`.
+pub const IORING_OP_GETXATTR: u8 = 44;
+/// `socket`.
+pub const IORING_OP_SOCKET: u8 = 45;
+/// A command for the file's driver.
+pub const IORING_OP_URING_CMD: u8 = 46;
+/// Zero-copy `send`.
+pub const IORING_OP_SEND_ZC: u8 = 47;
+/// Zero-copy `sendmsg`.
+pub const IORING_OP_SENDMSG_ZC: u8 = 48;
+/// Multishot `read`.
+pub const IORING_OP_READ_MULTISHOT: u8 = 49;
+/// `waitid`.
+pub const IORING_OP_WAITID: u8 = 50;
+/// Futex wait.
+pub const IORING_OP_FUTEX_WAIT: u8 = 51;
+/// Futex wake.
+pub const IORING_OP_FUTEX_WAKE: u8 = 52;
+/// Futex wait on several.
+pub const IORING_OP_FUTEX_WAITV: u8 = 53;
+/// Install a direct descriptor as a regular one.
+pub const IORING_OP_FIXED_FD_INSTALL: u8 = 54;
+/// The number of opcodes Linux 6.8 has: every one is below it.
+pub const IORING_OP_LAST: u8 = 55;
 
 // ---------------------------------------------------------------------------
 // SQE flags
@@ -611,8 +651,10 @@ mod tests {
         assert!(mem::size_of::<IoUringParams>() >= 100);
     }
 
+    /// Linux's opcodes are its enum's positions: every one from 0 to
+    /// `IORING_OP_LAST - 1`, once each.
     #[test]
-    fn test_opcodes_distinct() {
+    fn test_opcodes_are_linuxs_enum() {
         let ops = [
             IORING_OP_NOP,
             IORING_OP_READV,
@@ -622,20 +664,58 @@ mod tests {
             IORING_OP_WRITE_FIXED,
             IORING_OP_POLL_ADD,
             IORING_OP_POLL_REMOVE,
+            IORING_OP_SYNC_FILE_RANGE,
             IORING_OP_SENDMSG,
             IORING_OP_RECVMSG,
             IORING_OP_TIMEOUT,
+            IORING_OP_TIMEOUT_REMOVE,
             IORING_OP_ACCEPT,
+            IORING_OP_ASYNC_CANCEL,
+            IORING_OP_LINK_TIMEOUT,
+            IORING_OP_CONNECT,
+            IORING_OP_FALLOCATE,
+            IORING_OP_OPENAT,
+            IORING_OP_CLOSE,
+            IORING_OP_FILES_UPDATE,
+            IORING_OP_STATX,
             IORING_OP_READ,
             IORING_OP_WRITE,
-            IORING_OP_CLOSE,
-            IORING_OP_OPENAT,
+            IORING_OP_FADVISE,
+            IORING_OP_MADVISE,
+            IORING_OP_SEND,
+            IORING_OP_RECV,
+            IORING_OP_OPENAT2,
+            IORING_OP_EPOLL_CTL,
+            IORING_OP_SPLICE,
+            IORING_OP_PROVIDE_BUFFERS,
+            IORING_OP_REMOVE_BUFFERS,
+            IORING_OP_TEE,
+            IORING_OP_SHUTDOWN,
+            IORING_OP_RENAMEAT,
+            IORING_OP_UNLINKAT,
+            IORING_OP_MKDIRAT,
+            IORING_OP_SYMLINKAT,
+            IORING_OP_LINKAT,
+            IORING_OP_MSG_RING,
+            IORING_OP_FSETXATTR,
+            IORING_OP_SETXATTR,
+            IORING_OP_FGETXATTR,
+            IORING_OP_GETXATTR,
+            IORING_OP_SOCKET,
+            IORING_OP_URING_CMD,
+            IORING_OP_SEND_ZC,
+            IORING_OP_SENDMSG_ZC,
+            IORING_OP_READ_MULTISHOT,
+            IORING_OP_WAITID,
+            IORING_OP_FUTEX_WAIT,
+            IORING_OP_FUTEX_WAKE,
+            IORING_OP_FUTEX_WAITV,
+            IORING_OP_FIXED_FD_INSTALL,
         ];
-        for i in 0..ops.len() {
-            for j in (i + 1)..ops.len() {
-                assert_ne!(ops[i], ops[j]);
-            }
+        for (i, op) in ops.iter().enumerate() {
+            assert_eq!(usize::from(*op), i);
         }
+        assert_eq!(usize::from(IORING_OP_LAST), ops.len());
     }
 
     #[test]

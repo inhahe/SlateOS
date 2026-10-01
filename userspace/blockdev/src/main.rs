@@ -1,645 +1,771 @@
-//! Slate OS block device control utility.
+//! blockdev -- call block device ioctls from the command line.
 //!
-//! Multi-personality binary providing:
-//! - **blockdev** — call block device ioctls
+//! A port of util-linux 2.39.3's `disk-utils/blockdev.c`. Each of a list of
+//! commands -- `--getro`, `--setra 256`, `--getsz`, ... -- is made as an
+//! `ioctl` on each of a list of devices in turn; or `--report` prints a line
+//! per device (the read-only flag, read-ahead, logical sector and block
+//! sizes, where a partition starts, the size), for the devices named or for
+//! every one `/proc/partitions` lists. Measured against `blockdev from
+//! util-linux 2.39.3` by `scripts/blockdev-diff.sh`, which runs both under an
+//! `ioctl` shim that answers for fixture files as a block device would and
+//! logs every request each side makes -- so the requests, their arguments
+//! and their order are compared too, not only what is printed.
 //!
-//! Provides low-level block device operations: get/set read-ahead,
-//! sector size, block size, device size, read-only flag, etc.
+//! This replaces a hand-written `blockdev` that read its answers from sysfs
+//! rather than asking the device, printed no partition start in `--report`,
+//! and accepted options upstream refuses.
+//!
+//! # What is not upstream's
+//!
+//! * **A name in a diagnostic** has its unprintable bytes escaped
+//!   (design-decisions §370).
 
-#![deny(clippy::all)]
-
-use std::env;
+use quoting::{escape_unprintable, os_bytes, os_from_bytes};
 use std::ffi::{OsStr, OsString};
-use std::fs;
-use std::io::{self, Write};
-use std::path::{Path, PathBuf};
+use std::fs::File;
+use std::io::{self, Read};
+use std::process::ExitCode;
+use ulblkid::blkdev::{
+    BLKALIGNOFF, BLKBSZGET, BLKBSZSET, BLKDISCARDZEROES, BLKFLSBUF, BLKFRAGET, BLKFRASET,
+    BLKGETDISKSEQ, BLKGETSIZE, BLKGETSIZE64, BLKIOMIN, BLKIOOPT, BLKPBSZGET, BLKRAGET, BLKRASET,
+    BLKROGET, BLKROSET, BLKRRPART, BLKSECTGET, BLKSSZGET, get_sectors, get_size, ioctl_ptr,
+    ioctl_val, rdev,
+};
+use ulclosestream::{Stdout, stderr_write, warn, warnx};
 
-use quoting::quoteaf_os;
-use std::process;
+#[cfg(test)]
+mod tests;
 
-const VERSION: &str = "0.1.0";
+/// `_PATH_PROC_PARTITIONS`.
+const PATH_PROC_PARTITIONS: &str = "/proc/partitions";
 
-// ============================================================================
-// Block device information
-// ============================================================================
+/// `O_NONBLOCK`: Linux's value, which SlateOS's C library shares -- so a
+/// FIFO named to `--report` does not hang the open.
+#[cfg(unix)]
+const O_NONBLOCK: i32 = 0o4000;
 
-#[derive(Clone, Debug)]
-struct BlockDevInfo {
-    _path: OsString,
-    size_bytes: u64,
-    _size_sectors: u64,
-    sector_size: u32,
-    block_size: u32,
-    read_ahead: u32,
-    read_only: bool,
-    _removable: bool,
-    _rotational: bool,
-    _model: String,
+/// `ARG_*`: what a request's third argument is. Upstream's `ARG_LLONG`
+/// names no command, so it has no counterpart here.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Arg {
+    /// `ARG_NONE`: a literal 0.
+    None,
+    /// `ARG_USHRT`: a pointer to an `unsigned short`.
+    Ushrt,
+    /// `ARG_INT`: a pointer to an `int` -- or, with `FL_NOPTR`, the `int`.
+    Int,
+    /// `ARG_UINT`: a pointer to an `unsigned int`.
+    Uint,
+    /// `ARG_LONG`: a pointer to a `long`.
+    Long,
+    /// `ARG_ULONG`: a pointer to an `unsigned long`.
+    Ulong,
+    /// `ARG_ULLONG`: a pointer to an `unsigned long long`.
+    Ullong,
 }
 
-/// Write a diagnostic whose pieces include raw bytes.
-///
-/// A device name comes from the command line and may hold any byte but `/`
-/// and NUL, so it cannot go through `eprintln!` -- `OsString` has no `Display`
-/// for exactly that reason, and the `to_string_lossy` that would make it
-/// compile replaces the offending bytes with U+FFFD and reports a name the
-/// user never typed.
-///
-/// util-linux prints these names UNQUOTED, so this writes the bytes through
-/// rather than quoting them: the wording is not ours to change.
-fn ediag(parts: &[&[u8]]) {
-    let mut line: Vec<u8> = Vec::new();
-    for p in parts {
-        line.extend_from_slice(p);
+/// One of upstream's `bdcms[]`: a command and the request it makes.
+#[derive(Debug)]
+struct Bdc {
+    /// `ioc`: the request.
+    ioc: u64,
+    /// `iocname`: its name, for "ioctl error on".
+    iocname: &'static str,
+    /// `argval`: the argument's value before the call -- what a request
+    /// that sets is given, and what one that fails to get leaves.
+    argval: i64,
+    /// `name`: the command, `--setro`.
+    name: &'static str,
+    /// `argname`: the command's own argument, as the help shows it.
+    argname: Option<&'static str>,
+    /// `help`.
+    help: &'static str,
+    /// `argtype`.
+    argtype: Arg,
+    /// `FL_NOPTR`: an `ARG_INT` passed by value, not by pointer.
+    noptr: bool,
+    /// `FL_NORESULT`: nothing comes back to print.
+    noresult: bool,
+}
+
+impl Bdc {
+    /// An entry with the fields upstream's initializers leave out zero:
+    /// `ARG_NONE`, argument 0, no flags.
+    const fn new(ioc: u64, iocname: &'static str, name: &'static str, help: &'static str) -> Self {
+        Bdc {
+            ioc,
+            iocname,
+            argval: 0,
+            name,
+            argname: None,
+            help,
+            argtype: Arg::None,
+            noptr: false,
+            noresult: false,
+        }
     }
-    line.push(b'\n');
-    // A closed or full stderr is not worth a panic in a diagnostic path.
-    let _ = io::stderr().write_all(&line);
-}
 
-/// Read one sysfs attribute of `device`.
-///
-/// `device` is an `OsStr` because it came from the command line and names a
-/// file: on this OS that is any byte but `/` and NUL. `attr` stays `&str`
-/// because every caller passes an ASCII literal.
-///
-/// The basename is taken by splitting the BYTES on `/` rather than by
-/// `str::rsplit`, and the path is built with `Path::join` rather than
-/// `format!`, so a device name that is not valid Unicode reaches sysfs as the
-/// bytes it was given instead of failing to be typed at all.
-fn read_sysfs_value(device: &OsStr, attr: &str) -> Option<String> {
-    let path = sysfs_path(device, attr);
-    fs::read_to_string(&path).ok().map(|s| s.trim().to_string())
-}
+    /// `.argtype` and `.argval`.
+    const fn arg(mut self, argtype: Arg, argval: i64) -> Self {
+        self.argtype = argtype;
+        self.argval = argval;
+        self
+    }
 
-/// Where `attr` lives in sysfs for `device`.
-///
-/// Split out from [`read_sysfs_value`] so the part that can be wrong is
-/// testable without a filesystem: everything here is name handling, and the
-/// only thing the caller adds is a read.
-///
-/// The basename is found by splitting the BYTES on `/` rather than with
-/// `str::rsplit`, and the result is assembled with `Path::join` rather than
-/// `format!`, so a device name that is not valid Unicode reaches sysfs as the
-/// bytes it was given instead of being untypeable.
-fn sysfs_path(device: &OsStr, attr: &str) -> PathBuf {
-    let bytes = quoting::os_bytes(device);
-    let dev_name = match bytes.iter().rposition(|&b| b == b'/') {
-        // `get` rather than indexing: a name ending in `/` puts the separator
-        // last, and the slice after it is empty rather than out of range.
-        Some(i) => bytes.get(i.saturating_add(1)..).unwrap_or(&[]),
-        None => bytes.as_ref(),
-    };
-    Path::new("/sys/block")
-        .join(quoting::os_from_bytes(dev_name))
-        .join(attr)
-}
+    /// `.argname`.
+    const fn argname(mut self, argname: &'static str) -> Self {
+        self.argname = Some(argname);
+        self
+    }
 
-fn read_block_dev_info(device: &OsStr) -> BlockDevInfo {
-    let size_bytes = read_sysfs_value(device, "size")
-        .and_then(|s| s.parse::<u64>().ok())
-        .map(|sectors| sectors * 512)
-        .unwrap_or(0);
-    let sector_size = read_sysfs_value(device, "queue/hw_sector_size")
-        .and_then(|s| s.parse::<u32>().ok())
-        .unwrap_or(512);
-    let block_size = read_sysfs_value(device, "queue/physical_block_size")
-        .and_then(|s| s.parse::<u32>().ok())
-        .unwrap_or(4096);
-    let read_ahead = read_sysfs_value(device, "queue/read_ahead_kb")
-        .and_then(|s| s.parse::<u32>().ok())
-        .unwrap_or(128);
-    let read_only = read_sysfs_value(device, "ro")
-        .map(|s| s == "1")
-        .unwrap_or(false);
-    let removable = read_sysfs_value(device, "removable")
-        .map(|s| s == "1")
-        .unwrap_or(false);
-    let rotational = read_sysfs_value(device, "queue/rotational")
-        .map(|s| s == "1")
-        .unwrap_or(true);
-    let _model = read_sysfs_value(device, "device/model").unwrap_or_else(|| "Unknown".to_string());
+    /// `FL_NOPTR`.
+    const fn noptr(mut self) -> Self {
+        self.noptr = true;
+        self
+    }
 
-    BlockDevInfo {
-        _path: device.to_os_string(),
-        size_bytes,
-        _size_sectors: size_bytes / (sector_size as u64),
-        sector_size,
-        block_size,
-        read_ahead,
-        read_only,
-        _removable: removable,
-        _rotational: rotational,
-        _model,
+    /// `FL_NORESULT`.
+    const fn noresult(mut self) -> Self {
+        self.noresult = true;
+        self
     }
 }
 
-fn _format_bytes(bytes: u64) -> String {
-    if bytes >= 1024 * 1024 * 1024 * 1024 {
-        format!(
-            "{:.2} TiB",
-            bytes as f64 / (1024.0 * 1024.0 * 1024.0 * 1024.0)
-        )
-    } else if bytes >= 1024 * 1024 * 1024 {
-        format!("{:.2} GiB", bytes as f64 / (1024.0 * 1024.0 * 1024.0))
-    } else if bytes >= 1024 * 1024 {
-        format!("{:.2} MiB", bytes as f64 / (1024.0 * 1024.0))
-    } else if bytes >= 1024 {
-        format!("{:.2} KiB", bytes as f64 / 1024.0)
-    } else {
-        format!("{bytes} B")
-    }
-}
-
-// ============================================================================
-// blockdev command
-// ============================================================================
-
-/// Refuse an option this program does not have.
-///
-/// The wording is getopt's, shared through `usageerror` so every program
-/// here renders it identically. The status is **1**, measured rather than
-/// assumed: `lscpu`, `lsmem` and `prlimit` all exit 1 for this,
-/// where util-linux's own `flock` exits 64 -- so it is per-tool, which is
-/// why `usageerror` does not choose it.
-/// Every long operation this build performs.
-///
-/// This is the set the executor matches on, written down so the *parser* can
-/// reject a word outside it. It used to accept any `--word` as an operation,
-/// push it, read the device, and then print `unknown operation` on **stdout**
-/// and exit 0 -- so `blockdev --zzq /dev/sda` reported success.
-///
-/// `--setfra` and `--getfra` are real util-linux options this build does not
-/// implement, so they are deliberately absent: refusing them says what is
-/// true of this binary, which is better than accepting one and doing nothing.
-const OPERATIONS: [&str; 15] = [
-    "--flushbufs",
-    "--getbsz",
-    "--getpbsz",
-    "--getra",
-    "--getro",
-    "--getsize",
-    "--getsize64",
-    "--getss",
-    "--getsz",
-    "--report",
-    "--rereadpt",
-    "--setbsz",
-    "--setra",
-    "--setro",
-    "--setrw",
+/// Upstream's `bdcms[]`, in its order -- which is the help's.
+const BDCMS: [Bdc; 21] = [
+    Bdc::new(BLKROSET, "BLKROSET", "--setro", "set read-only")
+        .arg(Arg::Int, 1)
+        .noresult(),
+    Bdc::new(BLKROSET, "BLKROSET", "--setrw", "set read-write")
+        .arg(Arg::Int, 0)
+        .noresult(),
+    Bdc::new(BLKROGET, "BLKROGET", "--getro", "get read-only").arg(Arg::Int, -1),
+    Bdc::new(
+        BLKDISCARDZEROES,
+        "BLKDISCARDZEROES",
+        "--getdiscardzeroes",
+        "get discard zeroes support status",
+    )
+    .arg(Arg::Uint, -1),
+    Bdc::new(
+        BLKSSZGET,
+        "BLKSSZGET",
+        "--getss",
+        "get logical block (sector) size",
+    )
+    .arg(Arg::Int, -1),
+    Bdc::new(
+        BLKPBSZGET,
+        "BLKPBSZGET",
+        "--getpbsz",
+        "get physical block (sector) size",
+    )
+    .arg(Arg::Uint, -1),
+    Bdc::new(BLKIOMIN, "BLKIOMIN", "--getiomin", "get minimum I/O size").arg(Arg::Uint, -1),
+    Bdc::new(BLKIOOPT, "BLKIOOPT", "--getioopt", "get optimal I/O size").arg(Arg::Uint, -1),
+    Bdc::new(
+        BLKALIGNOFF,
+        "BLKALIGNOFF",
+        "--getalignoff",
+        "get alignment offset in bytes",
+    )
+    .arg(Arg::Int, -1),
+    Bdc::new(
+        BLKSECTGET,
+        "BLKSECTGET",
+        "--getmaxsect",
+        "get max sectors per request",
+    )
+    .arg(Arg::Ushrt, -1),
+    Bdc::new(BLKBSZGET, "BLKBSZGET", "--getbsz", "get blocksize").arg(Arg::Int, -1),
+    Bdc::new(
+        BLKBSZSET,
+        "BLKBSZSET",
+        "--setbsz",
+        "set blocksize on file descriptor opening the block device",
+    )
+    .argname("<bytes>")
+    .arg(Arg::Int, 0)
+    .noresult(),
+    Bdc::new(
+        BLKGETSIZE,
+        "BLKGETSIZE",
+        "--getsize",
+        "get 32-bit sector count (deprecated, use --getsz)",
+    )
+    .arg(Arg::Ulong, -1),
+    Bdc::new(
+        BLKGETSIZE64,
+        "BLKGETSIZE64",
+        "--getsize64",
+        "get size in bytes",
+    )
+    .arg(Arg::Ullong, -1),
+    Bdc::new(BLKRASET, "BLKRASET", "--setra", "set readahead")
+        .argname("<sectors>")
+        .arg(Arg::Int, 0)
+        .noptr()
+        .noresult(),
+    Bdc::new(BLKRAGET, "BLKRAGET", "--getra", "get readahead").arg(Arg::Long, -1),
+    Bdc::new(
+        BLKFRASET,
+        "BLKFRASET",
+        "--setfra",
+        "set filesystem readahead",
+    )
+    .argname("<sectors>")
+    .arg(Arg::Int, 0)
+    .noptr()
+    .noresult(),
+    Bdc::new(
+        BLKFRAGET,
+        "BLKFRAGET",
+        "--getfra",
+        "get filesystem readahead",
+    )
+    .arg(Arg::Long, -1),
+    Bdc::new(
+        BLKGETDISKSEQ,
+        "BLKGETDISKSEQ",
+        "--getdiskseq",
+        "get disk sequence number",
+    )
+    .arg(Arg::Ullong, -1),
+    Bdc::new(BLKFLSBUF, "BLKFLSBUF", "--flushbufs", "flush buffers"),
+    Bdc::new(
+        BLKRRPART,
+        "BLKRRPART",
+        "--rereadpt",
+        "reread partition table",
+    ),
 ];
 
-/// True if `arg` names an operation this build performs.
-fn is_operation(arg: &str) -> bool {
-    OPERATIONS.contains(&arg)
+/// A fatal error, already printed: the status to exit with.
+struct Fatal(u8);
+
+/// `program_invocation_short_name`: argv[0] past its last `/`.
+fn short_name(arg0: &OsStr) -> Vec<u8> {
+    let bytes = os_bytes(arg0);
+    let start = bytes
+        .iter()
+        .rposition(|&b| b == b'/')
+        .map_or(0, |i| i.saturating_add(1));
+    bytes.get(start..).unwrap_or_default().to_vec()
 }
 
-fn refuse_unknown_option(prog: &str, arg: &str) -> ! {
-    eprintln!(
-        "{prog}: {}",
-        usageerror::with_help_pointer(prog, &usageerror::unknown_option(arg.as_bytes()))
-    );
-    process::exit(1);
+/// Bytes shown in a diagnostic: upstream's text, unprintable bytes escaped.
+fn shown(text: &[u8]) -> String {
+    escape_unprintable(text)
 }
 
-fn cmd_blockdev(args: &[OsString]) {
-    if args.is_empty() {
-        print_blockdev_help();
-        process::exit(0);
-    }
+/// `argv[i]` as bytes; past the end, nothing (never reached: every caller
+/// indexes below `argc`).
+fn arg_at(argv: &[OsString], i: usize) -> Vec<u8> {
+    argv.get(i)
+        .map(|a| os_bytes(a).into_owned())
+        .unwrap_or_default()
+}
 
-    let mut operations: Vec<String> = Vec::new();
-    let mut devices: Vec<OsString> = Vec::new();
-    let mut set_value: Option<String> = None;
+/// `errtryhelp(EXIT_FAILURE)`.
+fn errtryhelp(short: &[u8]) -> u8 {
+    stderr_write(format!("Try '{} --help' for more information.\n", shown(short)).as_bytes());
+    1
+}
 
-    let mut i = 0;
-    while i < args.len() {
-        let arg = &args[i];
-        // `""` for a word that is not Unicode: it matches no option name and
-        // falls through to the operand arm, which keeps `arg` itself. Every
-        // option here is ASCII, and the only option VALUE is a number, so
-        // decoding for the match cannot lose a path.
-        let s_decoded: &str = arg.to_str().unwrap_or("");
-        match s_decoded {
-            "-h" | "--help" => {
-                print_blockdev_help();
-                process::exit(0);
+/// `usage()`.
+fn usage(short: &[u8]) -> Vec<u8> {
+    let name = shown(short);
+    let mut t = String::from("\nUsage:\n");
+    t.push_str(&format!(
+        " {name} [-v|-q] commands devices\n {name} --report [devices]\n {name} -h|-V\n"
+    ));
+    t.push('\n');
+    t.push_str("Call block device ioctls from the command line.\n");
+    t.push_str("\nOptions:\n");
+    t.push_str(" -q             quiet mode\n");
+    t.push_str(" -v             verbose mode\n");
+    t.push_str("     --report   print report for specified (or all) devices\n");
+    t.push('\n');
+    t.push_str(&format!(
+        "{:<16}{}\n{:<16}{}\n",
+        " -h, --help", "display this help", " -V, --version", "display version"
+    ));
+    t.push('\n');
+    t.push_str("Available commands:\n");
+    t.push_str(&format!(
+        " {:<25} get size in 512-byte sectors\n",
+        "--getsz"
+    ));
+    for c in &BDCMS {
+        match c.argname {
+            // `" %s %-*s %s\n"` with the width `24 - strlen(name)`: the
+            // name and its argument together fill the column.
+            Some(argname) => {
+                let width = 24usize.saturating_sub(c.name.len());
+                t.push_str(&format!(" {} {:<width$} {}\n", c.name, argname, c.help));
             }
-            "-V" | "--version" => {
-                println!("blockdev {VERSION}");
-                process::exit(0);
-            }
-            // Refused before any device is touched, which is where
-            // util-linux refuses it too.
-            s if s.starts_with("--") && !is_operation(s) => {
-                refuse_unknown_option("blockdev", s);
-            }
-            s if s.starts_with("--") => {
-                operations.push(s.to_string());
-                // Some operations take a value argument.
-                if matches!(
-                    s,
-                    "--setro"
-                        | "--setrw"
-                        | "--setbsz"
-                        | "--setra"
-                        | "--setfra"
-                        | "--flushbufs"
-                        | "--rereadpt"
-                ) {
-                    // No value needed.
-                } else if s.starts_with("--set") {
-                    i += 1;
-                    if i < args.len() {
-                        // Decoded: this value is a NUMBER (a block size or a
-                        // read-ahead), so a word that is not Unicode is simply
-                        // not one, and the parse below rejects it.
-                        set_value = Some(args[i].to_str().unwrap_or("").to_string());
-                    }
-                }
-            }
-            s if !s.starts_with('-') => {
-                // `arg`, not `s`: `s` is the decoded view used for matching,
-                // and a device path is exactly the thing that may not decode.
-                devices.push(arg.clone());
-            }
-            // Everything reaching here begins with a dash and matched no
-            // option above, so it is one this build does not have. A lone
-            // `-` is left alone.
-            other if other.len() > 1 => {
-                refuse_unknown_option("blockdev", other);
-            }
-            _ => {}
+            None => t.push_str(&format!(" {:<25} {}\n", c.name, c.help)),
         }
-        i += 1;
+    }
+    t.push_str("\nFor more details see blockdev(8).\n");
+    t.into_bytes()
+}
+
+/// `find_cmd(s)`: the command's index in [`BDCMS`].
+fn find_cmd(s: &[u8]) -> Option<usize> {
+    BDCMS.iter().position(|c| c.name.as_bytes() == s)
+}
+
+stdfdguard::guard_std_fds!();
+
+fn main() -> ExitCode {
+    stdfdguard::restore();
+    let argv: Vec<OsString> = std::env::args_os().collect();
+    let short = short_name(
+        argv.first()
+            .map_or(OsStr::new("blockdev"), OsString::as_os_str),
+    );
+    let mut out = Stdout::new(1);
+    let status = match run(&argv, &short, &mut out) {
+        Ok(s) | Err(Fatal(s)) => s,
+    };
+    ExitCode::from(out.close(status, &short))
+}
+
+/// `main()`.
+fn run(argv: &[OsString], short: &[u8], out: &mut Stdout) -> Result<u8, Fatal> {
+    let argc = argv.len();
+    if argc < 2 {
+        warnx(short, "not enough arguments");
+        return Err(Fatal(errtryhelp(short)));
     }
 
-    if devices.is_empty() {
-        devices.push(OsString::from("/dev/sda"));
+    // -V not together with commands
+    let first = arg_at(argv, 1);
+    if first == b"-V" || first == b"--version" {
+        out.write(format!("{} from util-linux 2.39.3\n", shown(short)).as_bytes());
+        return Ok(0);
+    }
+    if first == b"-h" || first == b"--help" {
+        out.write(&usage(short));
+        return Ok(0);
     }
 
-    let stdout = io::stdout();
-    let mut out = stdout.lock();
-    let mut failed = false;
+    // --report not together with other commands
+    if first == b"--report" {
+        report_header(out);
+        if argc > 2 {
+            for device in argv.iter().skip(2) {
+                report_device(out, short, &os_bytes(device), false);
+            }
+        } else {
+            report_all_devices(out, short)?;
+        }
+        return Ok(0);
+    }
 
-    for device in &devices {
-        let mut info = read_block_dev_info(device);
+    // The devices start after the last command: a command's own argument
+    // is skipped, "--" ends the commands, and so does the first word that
+    // does not start with '-'.
+    let mut d = 1usize;
+    while d < argc {
+        let a = arg_at(argv, d);
+        if let Some(j) = find_cmd(&a) {
+            if BDCMS.get(j).is_some_and(|c| c.argname.is_some()) {
+                d = d.saturating_add(1);
+            }
+            d = d.saturating_add(1);
+            continue;
+        }
+        if a == b"--getsz" {
+            d = d.saturating_add(1);
+            continue;
+        }
+        if a == b"--" {
+            d = d.saturating_add(1);
+            break;
+        }
+        if a.first() != Some(&b'-') {
+            break;
+        }
+        d = d.saturating_add(1);
+    }
 
-        // A DEVICE WHOSE SIZE COULD NOT BE READ IS SKIPPED, not invented.
-        //
-        // This substituted `generate_default_info`: a 256 GiB disk with 512
-        // byte sectors, a 4096 block size and the model "QEMU HARDDISK". So
-        // `blockdev --getsize64 /dev/whatever` printed 274877906944 for a
-        // device that may not exist -- and that number is what scripts feed to
-        // `dd count=` and to partition-offset arithmetic. A fabricated size
-        // larger than the real device is a write past the end of it.
-        if info.size_bytes == 0 {
-            eprintln!(
-                "blockdev: {}: cannot read the device size from sysfs",
-                quoteaf_os(device)
-            );
-            failed = true;
+    if d >= argc {
+        warnx(short, "no device specified");
+        return Err(Fatal(errtryhelp(short)));
+    }
+
+    // Upstream hands `do_commands` all of argv[1..d] -- a "--" that ended
+    // the commands included, which it then refuses as an unknown command.
+    let commands = argv.get(1..d).unwrap_or_default();
+    for device in argv.iter().skip(d) {
+        let f = match File::open(device) {
+            Ok(f) => f,
+            Err(e) => {
+                warn(
+                    short,
+                    &format!("cannot open {}", shown(&os_bytes(device))),
+                    &e,
+                );
+                return Err(Fatal(1));
+            }
+        };
+        do_commands(out, short, &f, commands)?;
+    }
+    Ok(0)
+}
+
+/// C's conversion of a `long` to an `unsigned short`: modulo 2^16.
+#[allow(
+    clippy::cast_possible_truncation,
+    clippy::cast_sign_loss,
+    reason = "upstream assigns the long argval to an unsigned short"
+)]
+fn to_ushort(v: i64) -> u16 {
+    v as u16
+}
+
+/// C's conversion of a `long` to an `int`: modulo 2^32.
+#[allow(
+    clippy::cast_possible_truncation,
+    reason = "upstream assigns the long argval to an int"
+)]
+fn to_int(v: i64) -> i32 {
+    v as i32
+}
+
+/// C's conversion of a `long` to an `unsigned int`: modulo 2^32.
+#[allow(
+    clippy::cast_possible_truncation,
+    clippy::cast_sign_loss,
+    reason = "upstream assigns the long argval to an unsigned int"
+)]
+fn to_uint(v: i64) -> u32 {
+    v as u32
+}
+
+/// C's conversion of a `long` to an unsigned 64-bit type: modulo 2^64.
+fn to_ulong(v: i64) -> u64 {
+    u64::from_ne_bytes(v.to_ne_bytes())
+}
+
+/// An `int` passed by value through `ioctl`'s `...`: what the register
+/// holds, which is what the kernel reads as its `unsigned long` argument.
+/// Measured, not assumed: util-linux's blockdev, as Ubuntu's GCC built it,
+/// sign-extends it -- `--setra -1` reaches `ioctl` as
+/// `0xffff_ffff_ffff_ffff` and `-2147483648` as `0xffff_ffff_8000_0000`
+/// (`scripts/blockdev-diff.sh`'s shim logs the argument). A zero-extending
+/// guess here was the only thing that harness found.
+fn int_by_value(v: i32) -> i64 {
+    i64::from(v)
+}
+
+/// `do_commands(fd, argv, d)`: `commands` (argv[1..d]) made on one device.
+/// Verbosity starts off for every device.
+#[allow(
+    clippy::too_many_lines,
+    reason = "upstream's do_commands, kept in one piece so it can be read against it"
+)]
+fn do_commands(
+    out: &mut Stdout,
+    short: &[u8],
+    f: &File,
+    commands: &[OsString],
+) -> Result<(), Fatal> {
+    let mut verbose = false;
+    let mut it = commands.iter();
+    while let Some(word) = it.next() {
+        let word = os_bytes(word);
+        if *word == *b"-v" {
+            verbose = true;
+            continue;
+        }
+        if *word == *b"-q" {
+            verbose = false;
             continue;
         }
 
-        for op in &operations {
-            match op.as_str() {
-                "--getsize" => {
-                    let _ = writeln!(out, "{}", info.size_bytes / 512);
-                }
-                "--getsize64" => {
-                    let _ = writeln!(out, "{}", info.size_bytes);
-                }
-                "--getsz" => {
-                    let _ = writeln!(out, "{}", info.size_bytes / 512);
-                }
-                "--getss" => {
-                    let _ = writeln!(out, "{}", info.sector_size);
-                }
-                "--getpbsz" => {
-                    let _ = writeln!(out, "{}", info.block_size);
-                }
-                "--getbsz" => {
-                    let _ = writeln!(out, "{}", info.block_size);
-                }
-                "--getra" => {
-                    let _ = writeln!(out, "{}", info.read_ahead);
-                }
-                "--getro" => {
-                    let _ = writeln!(out, "{}", if info.read_only { 1 } else { 0 });
-                }
-                "--setro" => {
-                    info.read_only = true;
-                    ediag(&[b"blockdev: set ", &quoting::os_bytes(device), b" read-only"]);
-                }
-                "--setrw" => {
-                    info.read_only = false;
-                    ediag(&[
-                        b"blockdev: set ",
-                        &quoting::os_bytes(device),
-                        b" read-write",
-                    ]);
-                }
-                "--setra" => {
-                    if let Some(ref val) = set_value
-                        && let Ok(ra) = val.parse::<u32>()
-                    {
-                        info.read_ahead = ra;
-                        ediag(&[
-                            b"blockdev: set ",
-                            &quoting::os_bytes(device),
-                            format!(" read-ahead to {ra}").as_bytes(),
-                        ]);
-                    }
-                }
-                "--setbsz" => {
-                    if let Some(ref val) = set_value
-                        && let Ok(bs) = val.parse::<u32>()
-                    {
-                        info.block_size = bs;
-                        ediag(&[
-                            b"blockdev: set ",
-                            &quoting::os_bytes(device),
-                            format!(" block size to {bs}").as_bytes(),
-                        ]);
-                    }
-                }
-                "--flushbufs" => {
-                    ediag(&[
-                        b"blockdev: flushed buffers for ",
-                        &quoting::os_bytes(device),
-                    ]);
-                }
-                "--rereadpt" => {
-                    ediag(&[
-                        b"blockdev: re-read partition table for ",
-                        &quoting::os_bytes(device),
-                    ]);
-                }
-                "--report" => {
-                    let _ = writeln!(out, "RO    RA   SSZ   BSZ        SIZE   DEVICE");
-                    // The device is the LAST column, so the row is written
-                    // as text up to it and the name appended as bytes. It is
-                    // a path and may hold any byte; `{}` on an `OsString`
-                    // does not compile, and the `to_string_lossy` that would
-                    // make it compile prints a name the user never typed.
-                    let _ = write!(
-                        out,
-                        "{:>2} {:>5} {:>5} {:>5} {:>11}   ",
-                        if info.read_only { "ro" } else { "rw" },
-                        info.read_ahead,
-                        info.sector_size,
-                        info.block_size,
-                        info.size_bytes,
-                    );
-                    let _ = out.write_all(&quoting::os_bytes(device));
-                    let _ = out.write_all(b"\n");
-                }
-                _ => {
-                    let _ = writeln!(out, "blockdev: unknown operation: {op}");
+        if *word == *b"--getsz" {
+            match get_sectors(f) {
+                Ok(sectors) => out.write(format!("{sectors}\n").as_bytes()),
+                Err(_) => {
+                    warnx(short, "could not get device size");
+                    return Err(Fatal(1));
                 }
             }
+            continue;
         }
 
-        if operations.is_empty() {
-            // Default: show report.
-            let _ = writeln!(out, "RO    RA   SSZ   BSZ        SIZE   DEVICE");
-            let _ = write!(
-                out,
-                "{:>2} {:>5} {:>5} {:>5} {:>11}   ",
-                if info.read_only { "ro" } else { "rw" },
-                info.read_ahead,
-                info.sector_size,
-                info.block_size,
-                info.size_bytes,
+        let Some(c) = find_cmd(&word).and_then(|j| BDCMS.get(j)) else {
+            warnx(short, &format!("Unknown command: {}", shown(&word)));
+            return Err(Fatal(errtryhelp(short)));
+        };
+
+        // The request, and what it left in its argument, printed as
+        // upstream's printf prints that type.
+        let (res, value) = match c.argtype {
+            Arg::None => (ioctl_val(f, c.ioc, 0), String::new()),
+            Arg::Ushrt => {
+                let mut v = to_ushort(c.argval);
+                // SAFETY: the one ARG_USHRT request, BLKSECTGET, writes one
+                // unsigned short, which `v` is.
+                let r = unsafe { ioctl_ptr(f, c.ioc, &mut v) };
+                (r, v.to_string())
+            }
+            Arg::Int => {
+                let mut v = if c.argname.is_some() {
+                    let Some(given) = it.next() else {
+                        warnx(short, &format!("{} requires an argument", c.name));
+                        return Err(Fatal(errtryhelp(short)));
+                    };
+                    strtos32_or_err(short, given, "failed to parse command argument")?
+                } else {
+                    to_int(c.argval)
+                };
+                let r = if c.noptr {
+                    ioctl_val(f, c.ioc, int_by_value(v))
+                } else {
+                    // SAFETY: the ARG_INT requests passed a pointer
+                    // (BLKROSET, BLKROGET, BLKSSZGET, BLKALIGNOFF,
+                    // BLKBSZGET, BLKBSZSET) read or write one int, which
+                    // `v` is.
+                    unsafe { ioctl_ptr(f, c.ioc, &mut v) }
+                };
+                (r, v.to_string())
+            }
+            Arg::Uint => {
+                let mut v = to_uint(c.argval);
+                // SAFETY: the ARG_UINT requests (BLKDISCARDZEROES,
+                // BLKPBSZGET, BLKIOMIN, BLKIOOPT) write one unsigned int.
+                let r = unsafe { ioctl_ptr(f, c.ioc, &mut v) };
+                (r, v.to_string())
+            }
+            Arg::Long => {
+                let mut v = c.argval;
+                // SAFETY: the ARG_LONG requests (BLKRAGET, BLKFRAGET) write
+                // one long, eight bytes as `v` is.
+                let r = unsafe { ioctl_ptr(f, c.ioc, &mut v) };
+                (r, v.to_string())
+            }
+            Arg::Ulong | Arg::Ullong => {
+                let mut v = to_ulong(c.argval);
+                // SAFETY: BLKGETSIZE writes one unsigned long, BLKGETSIZE64
+                // and BLKGETDISKSEQ one 64-bit number: eight bytes each.
+                let r = unsafe { ioctl_ptr(f, c.ioc, &mut v) };
+                (r, v.to_string())
+            }
+        };
+
+        if let Err(errno) = res {
+            warn(
+                short,
+                &format!("ioctl error on {}", c.iocname),
+                &io::Error::from_raw_os_error(errno),
             );
-            // Same reason as the --report row above: the name is bytes.
-            let _ = out.write_all(&quoting::os_bytes(device));
-            let _ = out.write_all(b"\n");
+            if verbose {
+                out.write(format!("{} failed.\n", c.help).as_bytes());
+            }
+            return Err(Fatal(1));
         }
-    }
 
-    // The flag is READ. A device that could not be measured is a
-    // failure of the whole run, and the exit status is the only part of
-    // it a script sees -- which is the same reason the message above is
-    // a refusal rather than a substituted size.
-    if failed {
-        process::exit(1);
+        if c.argtype == Arg::None || c.noresult {
+            if verbose {
+                out.write(format!("{} succeeded.\n", c.help).as_bytes());
+            }
+            continue;
+        }
+
+        if verbose {
+            out.write(format!("{}: ", c.help).as_bytes());
+        }
+        out.write(format!("{value}\n").as_bytes());
     }
+    Ok(())
 }
 
-fn print_blockdev_help() {
-    println!("Usage: blockdev <operation> <device> [device ...]");
-    println!();
-    println!("Call block device ioctls.");
-    println!();
-    println!("Operations:");
-    println!("  --getro            Get read-only flag (0/1)");
-    println!("  --setro            Set read-only");
-    println!("  --setrw            Set read-write");
-    println!("  --getss            Get logical sector size");
-    println!("  --getpbsz          Get physical block size");
-    println!("  --getbsz           Get block size");
-    println!("  --setbsz SIZE      Set block size");
-    println!("  --getsize          Get size in 512-byte sectors");
-    println!("  --getsize64        Get size in bytes");
-    println!("  --getsz            Get size in 512-byte sectors");
-    println!("  --getra            Get read-ahead");
-    println!("  --setra RA         Set read-ahead");
-    println!("  --flushbufs        Flush buffers");
-    println!("  --rereadpt         Re-read partition table");
-    println!("  --report           Show report for all devices");
-    println!();
-    println!("  -h, --help         Show help");
-    println!("  -V, --version      Show version");
+/// `strtos32_or_err(str, errmesg)`, base 10.
+fn strtos32_or_err(short: &[u8], s: &OsStr, errmesg: &str) -> Result<i32, Fatal> {
+    ulstrutils::ul_strtos32(&os_bytes(s), 10).map_err(|e| {
+        warnx(short, &ulstrutils::num_error_message(errmesg, s, e));
+        Fatal(1)
+    })
 }
 
-// ============================================================================
-// CLI
-// ============================================================================
-
-fn main() {
-    // One personality, so no argv[0] dispatch: the `blkzone` arm and the
-    // program-name derivation that existed only to select it are both gone.
-    // `args_os`, not `args`: the latter's iterator unwraps, so a device path
-    // holding a byte that is not valid Unicode killed the process here.
-    let args: Vec<OsString> = env::args_os().collect();
-    let rest: Vec<OsString> = args.into_iter().skip(1).collect();
-    cmd_blockdev(&rest);
+/// `report_header()`.
+fn report_header(out: &mut Stdout) {
+    out.write(b"RO    RA   SSZ   BSZ        StartSec            Size   Device\n");
 }
 
-// ============================================================================
-// Tests
-// ============================================================================
-
-#[cfg(test)]
-mod tests {
-    /// The sysfs path is built from the device's BYTES.
-    ///
-    /// `blockdev` used to read argv as `Vec<String>`, so `env::args()` --
-    /// whose iterator is a literal `unwrap` -- killed the process before the
-    /// program ran, for a device path holding a byte that is not valid
-    /// Unicode. On this OS a filename may hold every byte but `/` and NUL, so
-    /// that is a legal name, not a malformed one.
-    #[test]
-    fn sysfs_path_takes_the_basename_by_bytes() {
-        use std::ffi::OsStr;
-
-        assert_eq!(
-            super::sysfs_path(OsStr::new("/dev/sda"), "size"),
-            std::path::Path::new("/sys/block/sda/size")
-        );
-        // No slash at all: the whole word is the name.
-        assert_eq!(
-            super::sysfs_path(OsStr::new("sda"), "ro"),
-            std::path::Path::new("/sys/block/sda/ro")
-        );
-        // A nested attribute keeps its own separator.
-        assert_eq!(
-            super::sysfs_path(OsStr::new("/dev/sdb"), "queue/read_ahead_kb"),
-            std::path::Path::new("/sys/block/sdb/queue/read_ahead_kb")
-        );
-        // A trailing slash leaves an empty basename rather than panicking,
-        // which is why the slice is taken with `get`.
-        let _ = super::sysfs_path(OsStr::new("/dev/"), "size");
-    }
-
-    /// The same, for a name that is not valid UTF-8 -- the case the whole
-    /// conversion exists for.
-    ///
-    /// `#[cfg(unix)]` because only there can an `OsStr` hold arbitrary bytes;
-    /// the development host is Windows, where `OsString` is WTF-16 and this
-    /// name cannot be built. The target is the one that matters, and this is
-    /// the assertion that would catch a regression on it.
+/// `open(device, O_RDONLY | O_NONBLOCK)`.
+fn open_nonblock(device: &[u8]) -> io::Result<File> {
+    let mut opts = std::fs::OpenOptions::new();
+    opts.read(true);
     #[cfg(unix)]
-    #[test]
-    fn sysfs_path_keeps_a_non_utf8_device_name() {
-        use std::ffi::OsStr;
-        use std::os::unix::ffi::OsStrExt;
-
-        let name = OsStr::from_bytes(b"/dev/sd\xe9a");
-        let got = super::sysfs_path(name, "size");
-        assert_eq!(
-            got.as_os_str().as_bytes(),
-            b"/sys/block/sd\xe9a/size",
-            "the byte must survive, not become U+FFFD"
-        );
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        opts.custom_flags(O_NONBLOCK);
     }
+    opts.open(os_from_bytes(device))
+}
 
-    use super::*;
+/// `snprintf(buf, 16, ...)`: at most 15 bytes of `s`.
+fn cut15(s: &str) -> String {
+    s.chars().take(15).collect()
+}
 
-    /// The parser and the executor must agree on the operation set, since
-    /// the parser now refuses anything outside it before a device is read.
-    #[test]
-    fn every_listed_operation_is_recognised() {
-        for op in OPERATIONS {
-            assert!(is_operation(op), "{op} is in the list but not recognised");
+/// `report_device(device, quiet)`: one line of `--report`. Nothing is
+/// fatal: a device that will not open or answer is warned about (unless
+/// `quiet`) and passed over.
+fn report_device(out: &mut Stdout, short: &[u8], device: &[u8], quiet: bool) {
+    let f = match open_nonblock(device) {
+        Ok(f) => f,
+        Err(e) => {
+            if !quiet {
+                warn(short, &format!("cannot open {}", shown(device)), &e);
+            }
+            return;
         }
-        assert_eq!(OPERATIONS.len(), 15);
-    }
+    };
 
-    #[test]
-    fn a_word_outside_the_list_is_not_an_operation() {
-        assert!(!is_operation("--zzq-not-an-option"));
-        assert!(!is_operation("--getsz-typo"));
-        // Real util-linux options this build does not implement. Refusing
-        // them states what is true of this binary; accepting one and doing
-        // nothing would not.
-        assert!(!is_operation("--setfra"));
-        assert!(!is_operation("--getfra"));
-    }
-
-    /// A device to format and convert, for the tests that need one.
-    ///
-    /// THIS WAS `generate_default_info` AND IT WAS IN THE PROGRAM. `blockdev`
-    /// returned it for any device whose size sysfs would not give up, so
-    /// `--getsize64` answered 274877906944 -- 256 GiB -- for a device that may
-    /// not exist. Five tests below only ever needed a struct to format, which
-    /// is the one honest use it had, so it lives here.
-    fn fixture_info(device: &str) -> BlockDevInfo {
-        BlockDevInfo {
-            _path: OsString::from(device),
-            size_bytes: 256 * 1024 * 1024 * 1024,
-            _size_sectors: 256 * 1024 * 1024 * 1024 / 512,
-            sector_size: 512,
-            block_size: 4096,
-            read_ahead: 128,
-            read_only: false,
-            _removable: false,
-            _rotational: false,
-            _model: "TEST DISK".to_string(),
+    // Where a partition starts, from sysfs: "N/A" for a partition whose
+    // `start` cannot be read, 0 for a whole disk (or no block device).
+    let mut start = 0u64;
+    let mut start_str = None;
+    if let Ok(meta) = f.metadata() {
+        let st_rdev = rdev(&meta);
+        if let Some(pc) = ulsysfs::new_sysfs_path(st_rdev, None, None)
+            && let Some((_, disk)) = pc.blkdev_wholedisk(0)
+            && disk != st_rdev
+        {
+            match pc.read_u64(b"start") {
+                Some(s) => start = s,
+                None => start_str = Some(format!("{:>15}", "N/A")),
+            }
         }
     }
+    let start_str = start_str.unwrap_or_else(|| cut15(&format!("{start:>15}")));
 
-    #[test]
-    fn test_default_info_size() {
-        let info = fixture_info("/dev/sda");
-        assert_eq!(info.size_bytes, 256 * 1024 * 1024 * 1024);
+    let mut ro: i32 = 0;
+    let mut ra: i64 = 0;
+    let mut ssz: i32 = 0;
+    let mut bsz: i32 = 0;
+    // SAFETY (all four): BLKROGET, BLKSSZGET and BLKBSZGET write one int,
+    // BLKRAGET one long -- the types of `ro`, `ssz`, `bsz` and `ra`.
+    let answered = unsafe { ioctl_ptr(&f, BLKROGET, &mut ro) }.is_ok()
+        && unsafe { ioctl_ptr(&f, BLKRAGET, &mut ra) }.is_ok()
+        && unsafe { ioctl_ptr(&f, BLKSSZGET, &mut ssz) }.is_ok()
+        && unsafe { ioctl_ptr(&f, BLKBSZGET, &mut bsz) }.is_ok();
+    let bytes = if answered { get_size(&f).ok() } else { None };
+    match bytes {
+        Some(bytes) => {
+            // `%15lld` of an unsigned long long: a size past 2^63 prints
+            // negative, as upstream's does.
+            let signed = i64::from_ne_bytes(bytes.to_ne_bytes());
+            let mut line = format!(
+                "{} {ra:>5} {ssz:>5} {bsz:>5} {start_str} {signed:>15}   ",
+                if ro != 0 { "ro" } else { "rw" }
+            )
+            .into_bytes();
+            line.extend_from_slice(device);
+            line.push(b'\n');
+            out.write(&line);
+        }
+        None => {
+            if !quiet {
+                warnx(short, &format!("ioctl error on {}", shown(device)));
+            }
+        }
     }
+}
 
-    #[test]
-    fn test_format_bytes_small() {
-        assert_eq!(_format_bytes(512), "512 B");
-    }
+/// `fgets(line, size, f)` over text already read: each piece ends after a
+/// newline or after `size - 1` bytes, whichever comes first.
+fn fgets_pieces(text: &[u8], size: usize) -> impl Iterator<Item = &[u8]> {
+    let max = size.saturating_sub(1).max(1);
+    let mut rest = text;
+    std::iter::from_fn(move || {
+        if rest.is_empty() {
+            return None;
+        }
+        let limit = rest.len().min(max);
+        let end = rest
+            .get(..limit)
+            .and_then(|head| head.iter().position(|&b| b == b'\n'))
+            .map_or(limit, |nl| nl.saturating_add(1));
+        let (piece, tail) = rest.split_at(end);
+        rest = tail;
+        Some(piece)
+    })
+}
 
-    #[test]
-    fn test_format_bytes_kib() {
-        assert_eq!(_format_bytes(2048), "2.00 KiB");
-    }
+/// C's `isspace` in the C locale.
+fn c_isspace(b: u8) -> bool {
+    matches!(b, b' ' | b'\t' | b'\n' | 0x0b | 0x0c | b'\r')
+}
 
-    #[test]
-    fn test_format_bytes_mib() {
-        assert_eq!(_format_bytes(1024 * 1024), "1.00 MiB");
+/// `sscanf(line, " %d %d %d %200[^\n ]", ...) == 4`: the name the line
+/// ends with, or `None` when any of the four conversions fails.
+fn scan_partition_line(line: &[u8]) -> Option<&[u8]> {
+    // sscanf reads a C string.
+    let line = line.split(|&b| b == 0).next().unwrap_or_default();
+    let mut pos = 0usize;
+    let skip_space = |pos: &mut usize| {
+        while line.get(*pos).is_some_and(|&b| c_isspace(b)) {
+            *pos = pos.saturating_add(1);
+        }
+    };
+    for _ in 0..3 {
+        // `%d`: blanks, a sign, then at least one digit.
+        skip_space(&mut pos);
+        if matches!(line.get(pos), Some(b'+' | b'-')) {
+            pos = pos.saturating_add(1);
+        }
+        let digits = line
+            .get(pos..)
+            .unwrap_or_default()
+            .iter()
+            .take_while(|b| b.is_ascii_digit())
+            .count();
+        if digits == 0 {
+            return None;
+        }
+        pos = pos.saturating_add(digits);
     }
+    skip_space(&mut pos);
+    let tail = line.get(pos..).unwrap_or_default();
+    let len = tail
+        .iter()
+        .take(200)
+        .take_while(|&&b| b != b'\n' && b != b' ')
+        .count();
+    if len == 0 {
+        return None;
+    }
+    tail.get(..len)
+}
 
-    #[test]
-    fn test_format_bytes_gib() {
-        assert_eq!(_format_bytes(1024 * 1024 * 1024), "1.00 GiB");
+/// `report_all_devices()`: every device `/proc/partitions` lists, quietly.
+fn report_all_devices(out: &mut Stdout, short: &[u8]) -> Result<(), Fatal> {
+    let mut f = match File::open(PATH_PROC_PARTITIONS) {
+        Ok(f) => f,
+        Err(e) => {
+            warn(short, &format!("cannot open {PATH_PROC_PARTITIONS}"), &e);
+            return Err(Fatal(1));
+        }
+    };
+    let mut text = Vec::new();
+    // fgets stops at a read error as at the end of the file, and what was
+    // read before the error is still reported: `read_to_end` keeps those
+    // bytes in `text` whether or not it fails, so its result has nothing
+    // left to say.
+    let _ = f.read_to_end(&mut text);
+    for line in fgets_pieces(&text, 200) {
+        if let Some(name) = scan_partition_line(line) {
+            let mut device = b"/dev/".to_vec();
+            device.extend_from_slice(name);
+            report_device(out, short, &device, true);
+        }
     }
-
-    #[test]
-    fn test_format_bytes_tib() {
-        assert_eq!(_format_bytes(1024 * 1024 * 1024 * 1024), "1.00 TiB");
-    }
-
-    #[test]
-    fn test_block_dev_info_clone() {
-        let info = fixture_info("/dev/sda");
-        let c = info.clone();
-        assert_eq!(c._path, "/dev/sda");
-        assert_eq!(c.size_bytes, info.size_bytes);
-    }
-
-    #[test]
-    fn test_read_sysfs_value_missing() {
-        assert!(read_sysfs_value(OsStr::new("/dev/nonexistent"), "size").is_none());
-    }
-
-    #[test]
-    fn test_read_block_dev_info_missing() {
-        let info = read_block_dev_info(OsStr::new("/dev/nonexistent"));
-        assert_eq!(info.size_bytes, 0);
-    }
-
-    #[test]
-    fn test_default_sector_count() {
-        let info = fixture_info("/dev/sda");
-        assert_eq!(
-            info._size_sectors,
-            info.size_bytes / info.sector_size as u64
-        );
-    }
-
-    #[test]
-    fn test_default_not_removable() {
-        let info = fixture_info("/dev/sda");
-        assert!(!info._removable);
-    }
-
-    #[test]
-    fn test_default_not_rotational() {
-        let info = fixture_info("/dev/sda");
-        assert!(!info._rotational);
-    }
+    Ok(())
 }

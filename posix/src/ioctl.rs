@@ -666,8 +666,13 @@ fn terminal_arg(kind: HandleKind, handle: u64) -> Option<u64> {
 /// The third argument is a pointer whose type depends on `request`.
 ///
 /// Returns 0 on success, -1 on error.
+///
+/// `request` is 32 bits, whoever declared it: glibc's `<sys/ioctl.h>` makes
+/// it an `unsigned long`, musl's an `int` -- whose register's upper half
+/// the caller leaves undefined -- so only the low 32 bits are read.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn ioctl(fd: i32, request: u64, arg: *mut u8) -> i32 {
+    let request = request & 0xFFFF_FFFF;
     let Some(entry) = fdtable::get_fd(fd) else {
         errno::set_errno(errno::EBADF);
         return -1;
@@ -4024,6 +4029,14 @@ mod tests {
         assert_eq!(crate::errno::get_errno(), crate::errno::EIO);
     }
 
+    /// `getpt` is `posix_openpt(O_RDWR)`: here, the same failure.
+    #[test]
+    fn test_getpt_is_posix_openpt_rdwr() {
+        crate::errno::set_errno(0);
+        assert_eq!(getpt(), -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EIO);
+    }
+
     #[test]
     fn test_posix_openpt_fails_for_o_rdwr_noctty() {
         // The canonical posix_openpt(O_RDWR | O_NOCTTY) form.
@@ -4319,6 +4332,13 @@ pub extern "C" fn posix_openpt(oflag: i32) -> i32 {
         return -1;
     };
     fd
+}
+
+/// `getpt` (glibc): a pseudo-terminal master, `posix_openpt(O_RDWR)` --
+/// glibc's opens `/dev/ptmx` so, without `O_NOCTTY`.
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub extern "C" fn getpt() -> i32 {
+    posix_openpt(crate::fcntl::O_RDWR)
 }
 
 /// Grant access to the slave pseudo-terminal device.

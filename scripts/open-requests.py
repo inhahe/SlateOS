@@ -45,6 +45,19 @@ excludes the essay between header and reply, because in this dropbox that essay
 is often prose *about* status markers and would classify a request on a sentence
 describing a different one.
 
+Forwarding
+----------
+A request filed on a lane that no longer owns the path it is about -- paths
+change owner, as they did at the six-lane split -- is re-routed by a line
+among the first 25 of its header, not by renaming the file (requests are cited
+by path, and a rename kills every citation):
+
+    **Forwarded to:** lane D -- `services/**` moved to lane D at the split.
+
+It is then listed for the new lane only, as ``[a->b=>d]``. See
+`forwarded_to` for the grammar; a marker it cannot read keeps the filename's
+routing and says so in the report, rather than being ignored.
+
 Usage
 -----
     python scripts/open-requests.py            # your lane, as which-lane.py decides it
@@ -492,11 +505,66 @@ def classify(path: Path) -> tuple[bool, str, str]:
     return (True, "no status marker", title)
 
 
+# A request is routed by its filename's `<to>` letters -- unless its header says
+# the work has moved. Paths change owner: the six-lane split of 2026-09-22 moved
+# `posix/**`, `services/**` and the toolchain from lane B to the new lane D,
+# `apps/**` from C to E, and six `gui/` crates from C to F. A request filed on
+# the old owner then sits in the queue of a lane that may not write the file it
+# asks about, and is invisible to the lane that may.
+#
+# Renaming the file would re-route it and is the wrong fix: a request is cited
+# BY PATH -- from source comments, from `known-issues.md`, from other requests
+# (`kernel/src/proc/spawn.rs` cites one of lane B's) -- and roadmap rule 2 is
+# explicit that a dead citation is the cost it exists to avoid. So the header
+# carries the new routing instead, one line, among the first `HEAD_LINES`:
+#
+#     **Forwarded to:** lane D -- `services/**` moved to lane D at the split.
+#     **Forwarded to:** lanes D and F -- ...
+#
+# The report then lists it for the new lanes only, shown as `[a->b=>d]`: sent
+# by A, addressed to B, now D's. Only upper-case lane letters are read, so the
+# prose after the letters ("lane D and a note on ...") cannot add a lane.
+FORWARD_LINE_RE = re.compile(r"^\*\*Forwarded to(?::\*\*|\*\*:)(.*)$", re.MULTILINE)
+FORWARD_LANES_RE = re.compile(r"^\s*lanes?\s+([A-Z](?:\s*(?:,|and|&)\s*[A-Z])*)(?![A-Za-z0-9])")
+
+
+def forwarded_to(head: str) -> str | None:
+    """Lane letters a request's header forwards it to, or None if it was not.
+
+    `head` is the header region `head_and_tail` returns, with fenced blocks
+    already blanked -- so a marker quoted inside an example block, as the
+    comment above does, is not read as this request's routing.
+
+    Raises `ValueError` for a marker it cannot read: one that names no lane in
+    the `lane X` form, or names a letter that is not a lane. Deliberately not
+    `None` -- a forwarding line the report silently ignored would leave the
+    request with the lane its author just said cannot act on it, which is the
+    expensive direction this report is built to avoid. The caller keeps the
+    filename's routing and says why.
+    """
+    m = FORWARD_LINE_RE.search(head)
+    if m is None:
+        return None
+    lanes = FORWARD_LANES_RE.match(m.group(1))
+    if lanes is None:
+        raise ValueError(f"no `lane X` after the marker: {m.group(0).strip()!r}")
+    # Upper case only: the separators include the word `and`, whose letters
+    # are not lanes (`d` would be).
+    letters = "".join(dict.fromkeys(c.lower() for c in re.findall(r"[A-Z]", lanes.group(1))))
+    stray = [c for c in letters if c not in LANE_LETTERS]
+    if stray:
+        raise ValueError(f"not a lane: {', '.join(c.upper() for c in stray)}")
+    return letters
+
+
 def collect() -> list[tuple[str, str, Path, bool, str, str]]:
     """Every well-named request as ``(from, to, path, is_open, reason, title)``.
 
     `to` is the recipients string -- one letter, or several (`"bc"`) for a
-    request addressed to more than one lane; test membership with `in`.
+    request addressed to more than one lane; test membership with `in`. It is
+    the lanes the request is routed to NOW: the filename's, unless the header
+    forwards it (see `forwarded_to`). `parse_name(path.name)` still gives the
+    lanes it was originally addressed to.
     """
     out: list[tuple[str, str, Path, bool, str, str]] = []
     for path in sorted(REQUESTS_DIR.glob("*.md")):
@@ -505,6 +573,11 @@ def collect() -> list[tuple[str, str, Path, bool, str, str]]:
             continue
         frm, to = parsed
         is_open, reason, title = classify(path)
+        head, _tail = head_and_tail(path)
+        try:
+            to = forwarded_to(head) or to
+        except ValueError as exc:
+            reason = f"{reason}; unreadable forwarding marker, routed by name: {exc}"
         out.append((frm, to, path, is_open, reason, title))
     return out
 
@@ -582,6 +655,20 @@ UNRECOGNISED_HINT = tuple(
 )
 
 
+def is_forwarded(entry) -> bool:
+    """Whether `entry` is routed somewhere other than its filename says."""
+    named = parse_name(entry[2].name)
+    return named is not None and named[1] != entry[1]
+
+
+def route_label(frm: str, to: str, path: Path) -> str:
+    """`a->b`, or `a->b=>d` for a request forwarded from lane b to lane d."""
+    named = parse_name(path.name)
+    if named is not None and named[1] != to:
+        return f"{frm}->{named[1]}=>{to}"
+    return f"{frm}->{to}"
+
+
 def report(entries, *, lane: str, outgoing: bool, show_all: bool) -> None:
     if show_all:
         groups = sorted({lane for e in entries for lane in e[1]})
@@ -594,13 +681,17 @@ def report(entries, *, lane: str, outgoing: bool, show_all: bool) -> None:
             selected = [e for e in entries if e[0] == to]
             title = f"filed BY lane {to.upper()} on other lanes"
         else:
-            selected = [e for e in entries if to in e[1] and e[0] != to]
+            # A lane's own requests are not its work -- unless one was forwarded
+            # back to it, which makes it exactly that.
+            selected = [
+                e for e in entries if to in e[1] and (e[0] != to or is_forwarded(e))
+            ]
             title = f"addressed TO lane {to.upper()}"
         open_ones = [e for e in selected if e[3]]
         print(f"=== requests {title}: {len(open_ones)} unresolved of {len(selected)} ===")
         for frm, _to, path, _is_open, reason, h1 in open_ones:
             saw_unrecognised = saw_unrecognised or reason.startswith("unrecognised")
-            print(f"  [{frm}->{_to}] {path.name}  ({elide(reason, 40)})")
+            print(f"  [{route_label(frm, _to, path)}] {path.name}  ({elide(reason, 40)})")
             print(f"           {elide(h1)}")
         if not open_ones and selected:
             print("  (none open)")

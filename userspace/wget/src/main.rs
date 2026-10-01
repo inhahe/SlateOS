@@ -825,7 +825,8 @@ fn parse_args() -> Result<Options, WgetError> {
                     custom_headers.push((name.trim().to_string(), value.trim().to_string()));
                 } else {
                     return Err(WgetError::InvalidUrl(format!(
-                        "invalid header format '{val}' (expected Name: Value)"
+                        "invalid header format {} (expected Name: Value)",
+                        quoteaf_os(val)
                     )));
                 }
             }

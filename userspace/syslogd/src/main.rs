@@ -28,7 +28,7 @@
 use quoting::{quoteaf_os, quotef_os};
 use std::env;
 use std::fs;
-use std::io::{self, Write};
+use std::io;
 use std::path::{Path, PathBuf};
 use std::process;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -303,13 +303,12 @@ fn write_log_entry(entry: &LogEntry) -> io::Result<()> {
     let _ = fs::create_dir_all(LOG_DIR);
 
     let path = log_file_path();
-    let mut file = fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(&path)?;
-
-    let json = entry.to_json();
-    writeln!(file, "{json}")?;
+    let mut line = entry.to_json().into_bytes();
+    line.push(b'\n');
+    // Under the journal's lock (design-decisions §1037): a vacuum or a
+    // rotation holding the file finishes first, and the entry lands in
+    // whichever file the path names then.
+    journalio::append(&path, &line)?;
 
     // Check if rotation is needed.
     let meta = fs::metadata(&path)?;
@@ -320,25 +319,31 @@ fn write_log_entry(entry: &LogEntry) -> io::Result<()> {
     Ok(())
 }
 
+/// Shift the rotated logs up one and the live log to `.1`, each step under
+/// the journal's lock (design-decisions §1037): a `journalctl --vacuum-*`
+/// rewriting one of these files would otherwise rename its result over
+/// whatever this had just moved there, and a writer waiting on the live
+/// log lands in the next one rather than in `.1`.
+///
+/// A step that fails is left undone -- the files keep their names and the
+/// log keeps growing until the next rotation tries again -- which is why
+/// each result is not looked at.
 fn rotate_logs() {
     // Delete the oldest file.
-    let oldest = rotated_path(MAX_ROTATED_FILES);
-    let _ = fs::remove_file(&oldest);
+    if let Ok(Some(oldest)) = journalio::Locked::open(&rotated_path(MAX_ROTATED_FILES)) {
+        let _ = oldest.remove();
+    }
 
     // Shift N-1 → N, N-2 → N-1, etc.
     for i in (1..MAX_ROTATED_FILES).rev() {
-        let from = rotated_path(i);
-        let to = rotated_path(i + 1);
-        if from.exists() {
-            let _ = fs::rename(&from, &to);
+        if let Ok(Some(held)) = journalio::Locked::open(&rotated_path(i)) {
+            let _ = held.rename_to(&rotated_path(i + 1));
         }
     }
 
     // Move current → .1
-    let current = log_file_path();
-    let first_rotated = rotated_path(1);
-    if current.exists() {
-        let _ = fs::rename(&current, &first_rotated);
+    if let Ok(Some(held)) = journalio::Locked::open(&log_file_path()) {
+        let _ = held.rename_to(&rotated_path(1));
     }
 }
 
@@ -589,43 +594,53 @@ enum Cleaned {
 ///
 /// # Errors
 ///
-/// The log exists and could not be read or written. **That is not "no log
-/// file", which is what this used to print for every failure** -- including a
-/// log holding a byte that is not valid UTF-8, which `read_to_string` refuses
-/// wholesale. The operator would then believe there was nothing to clean while
-/// the file went on growing. Only `NotFound` is an absence.
+/// The log exists and could not be locked, read or written. **That is not
+/// "no log file", which is what this used to print for every failure.** The
+/// operator would then believe there was nothing to clean while the file went
+/// on growing. Only `NotFound` is an absence.
+///
+/// The file is held under the journal's lock from the read to the rewrite
+/// (design-decisions §1037), and the rewrite is a whole new file renamed over
+/// it: an entry another program appends meanwhile waits, then lands in the
+/// cleaned file, where the old in-place rewrite lost it. Lines are bytes,
+/// kept exactly as they were -- a line that is not UTF-8 is a line this
+/// daemon cannot parse, and kept like any other, where the whole file used
+/// to be refused for it.
 fn clean_file(path: &Path, cutoff: u64) -> Result<Cleaned, String> {
-    let content = match fs::read_to_string(path) {
-        Ok(c) => c,
-        Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(Cleaned::NoFile),
-        Err(e) => return Err(format!("{}: {e}", quotef_os(path))),
+    let failed = |e: io::Error| format!("{}: {e}", quotef_os(path));
+    let Some(mut held) = journalio::Locked::open(path).map_err(failed)? else {
+        return Ok(Cleaned::NoFile);
     };
+    let content = held.read_all().map_err(failed)?;
 
-    let mut kept = Vec::new();
+    let mut kept: Vec<&[u8]> = Vec::new();
     let mut removed = 0usize;
-    for line in content.lines() {
+    // Split on newlines, a final newline ending the last line rather than
+    // starting an empty one.
+    let body = content.strip_suffix(b"\n").unwrap_or(&content);
+    for line in body.split(|&b| b == b'\n').filter(|_| !content.is_empty()) {
         // A line this daemon cannot parse is KEPT, not dropped: it is somebody
         // else's record, and a cleaner that deletes what it does not recognise
         // is a cleaner that loses data on a format change.
-        if let Some(entry) = LogEntry::from_json(line)
-            && entry.timestamp < cutoff
-        {
+        let old = std::str::from_utf8(line)
+            .ok()
+            .and_then(LogEntry::from_json)
+            .is_some_and(|entry| entry.timestamp < cutoff);
+        if old {
             removed += 1;
         } else {
-            kept.push(line.to_string());
+            kept.push(line);
         }
     }
 
-    let new_content = kept.join(
-        "
-",
-    ) + if kept.is_empty() {
-        ""
-    } else {
-        "
-"
-    };
-    fs::write(path, new_content).map_err(|e| format!("{}: {e}", quotef_os(path)))?;
+    if removed > 0 {
+        let mut new_content = Vec::with_capacity(content.len());
+        for line in &kept {
+            new_content.extend_from_slice(line);
+            new_content.push(b'\n');
+        }
+        held.replace(&new_content).map_err(failed)?;
+    }
     Ok(Cleaned::Trimmed {
         removed,
         kept: kept.len(),
@@ -905,15 +920,45 @@ mod tests {
     }
 
     #[test]
-    fn a_log_holding_bytes_that_are_not_utf8_is_an_error_not_an_absence() {
+    fn a_line_that_is_not_utf8_is_kept_and_the_rest_cleaned() {
+        // It used to cost the whole file: `read_to_string` refused it, and the
+        // log went uncleaned. Now it is a line this daemon cannot parse, kept
+        // byte for byte like any other.
         let dir = ScratchDir::new("syslogd_clean");
         let path = dir.path("messages.json");
-        fs::write(&path, [0x7B, 0xFF, 0x7D, 0x0A]).expect("write");
+        let mut bytes = vec![0x7B, 0xFF, 0x7D, 0x0A];
+        bytes.extend_from_slice(format!("{}\n{}\n", entry(50), entry(250)).as_bytes());
+        fs::write(&path, &bytes).expect("write");
         assert!(
-            core::str::from_utf8(&fs::read(&path).unwrap()).is_err(),
+            core::str::from_utf8(&bytes).is_err(),
             "fixture must not be utf-8, or this test proves nothing"
         );
-        assert!(clean_file(&path, 100).is_err());
+        assert_eq!(
+            clean_file(&path, 100),
+            Ok(Cleaned::Trimmed {
+                removed: 1,
+                kept: 2
+            })
+        );
+        let mut want = vec![0x7B, 0xFF, 0x7D, 0x0A];
+        want.extend_from_slice(format!("{}\n", entry(250)).as_bytes());
+        assert_eq!(fs::read(&path).unwrap(), want);
+    }
+
+    #[test]
+    fn cleaning_keeps_carriage_returns_and_blank_lines_and_skips_a_useless_rewrite() {
+        let dir = ScratchDir::new("syslogd_clean");
+        let path = dir.path("messages.json");
+        let text = format!("x\r\n\n{}\n", entry(250));
+        fs::write(&path, &text).expect("write");
+        assert_eq!(
+            clean_file(&path, 100),
+            Ok(Cleaned::Trimmed {
+                removed: 0,
+                kept: 3
+            })
+        );
+        assert_eq!(fs::read_to_string(&path).unwrap(), text);
     }
 
     #[test]

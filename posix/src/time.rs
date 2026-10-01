@@ -33,6 +33,7 @@
 //! in `known-issues.md`.
 
 use crate::errno;
+use crate::interrupt::Mark;
 use crate::stat::Timespec;
 use crate::syscall::*;
 use crate::types::*;
@@ -106,32 +107,49 @@ pub(crate) fn valid_nanoseconds(ns: i64) -> bool {
     (0..1_000_000_000).contains(&ns)
 }
 
+/// Sleep `ns` nanoseconds on the monotonic clock, handlers counted from
+/// `mark`: `Err(left)` when a signal handler ended it
+/// ([`crate::lowlevellock::sleep_until`]).
+fn sleep_ns(ns: u64, mark: Mark) -> Result<(), Timespec> {
+    let now = crate::lowlevellock::now_on(CLOCK_MONOTONIC);
+    let deadline = crate::lowlevellock::after(&now, ns);
+    crate::lowlevellock::sleep_until(CLOCK_MONOTONIC, &deadline, mark)
+}
+
 /// Sleep for a specified number of seconds.
 ///
-/// Returns 0 on success, or the remaining seconds if interrupted.
+/// Returns 0 once they have passed, or -- when a signal handler ends the
+/// sleep, which any does (signal(7) never restarts one) -- the whole seconds
+/// that were still to go, as glibc's `seconds + ts.tv_sec` counts them:
+/// truncated, so a sleep cut short in its last second answers 0.  `errno` is
+/// then `nanosleep`'s `EINTR`, and otherwise left as it was, as glibc's is.
+///
+/// Until 2026-09-30 no signal ended a sleep here: `SYS_SLEEP` sleeps its full
+/// time, and this answered 0 whatever happened.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn sleep(seconds: u32) -> u32 {
-    // Convert seconds to nanoseconds for our native SYS_SLEEP.
-    let ns: u64 = u64::from(seconds).saturating_mul(1_000_000_000);
-    let ret = syscall1(SYS_SLEEP, ns);
-
-    if ret < 0 {
-        // Sleep was interrupted — return remaining seconds.
-        // Our kernel doesn't report remaining time, so return 0.
-        0
-    } else {
-        0
+    let mark = Mark::now();
+    match sleep_ns(u64::from(seconds).saturating_mul(1_000_000_000), mark) {
+        Ok(()) => 0,
+        Err(left) => {
+            errno::set_errno(errno::EINTR);
+            u32::try_from(left.tv_sec).unwrap_or(u32::MAX)
+        }
     }
 }
 
 /// High-resolution sleep.
 ///
-/// Sleeps for the time specified in `req`.  If interrupted, the
-/// remaining time is stored in `rem` (if non-null).
+/// Sleeps for the time specified in `req` -- or until a signal handler runs
+/// on the thread, `SA_RESTART` or not: -1 with `EINTR`, and the time that
+/// was still to go in `rem` (if non-null).  A signal that runs no handler
+/// here does not end it ([`crate::interrupt`]).  Until 2026-09-30 nothing
+/// did: `SYS_SLEEP` sleeps its full time.
 ///
 /// Returns 0 on success, -1 if interrupted (errno = EINTR).
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn nanosleep(req: *const Timespec, rem: *mut Timespec) -> i32 {
+    let mark = Mark::now();
     if req.is_null() {
         errno::set_errno(errno::EFAULT);
         return -1;
@@ -146,40 +164,42 @@ pub extern "C" fn nanosleep(req: *const Timespec, rem: *mut Timespec) -> i32 {
         return -1;
     }
 
-    // Convert to nanoseconds (both values are now non-negative, cast is safe).
-    let ns: u64 = (ts.tv_sec as u64)
+    // Both fields are non-negative now.
+    let ns = u64::try_from(ts.tv_sec)
+        .unwrap_or(0)
         .saturating_mul(1_000_000_000)
-        .saturating_add(ts.tv_nsec as u64);
+        .saturating_add(u64::try_from(ts.tv_nsec).unwrap_or(0));
 
-    let ret = syscall1(SYS_SLEEP, ns);
-
-    if ret < 0 {
-        // Interrupted.  Our kernel doesn't report remaining time,
-        // so set rem to zero.
-        if !rem.is_null() {
-            unsafe {
-                (*rem).tv_sec = 0;
-                (*rem).tv_nsec = 0;
+    match sleep_ns(ns, mark) {
+        Ok(()) => 0,
+        Err(left) => {
+            if !rem.is_null() {
+                // SAFETY: a non-null `rem` is writable, per the contract.
+                unsafe { core::ptr::write_unaligned(rem, left) };
             }
+            errno::set_errno(errno::EINTR);
+            -1
         }
-        errno::set_errno(errno::EINTR);
-        return -1;
     }
-
-    0
 }
 
 /// Sleep for a specified number of microseconds.
 ///
 /// This is obsolete in POSIX.1-2008 (use `nanosleep` instead) but
-/// many programs still use it.
+/// many programs still use it, and it is glibc's: `nanosleep` of the time,
+/// any number of microseconds, -1 with `EINTR` when a signal handler ends it.
 ///
 /// Returns 0 on success, -1 on error.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn usleep(usec: u32) -> i32 {
-    let ns: u64 = u64::from(usec).saturating_mul(1_000);
-    let ret = syscall1(SYS_SLEEP, ns);
-    if ret < 0 { -1 } else { 0 }
+    let mark = Mark::now();
+    match sleep_ns(u64::from(usec).saturating_mul(1_000), mark) {
+        Ok(()) => 0,
+        Err(_) => {
+            errno::set_errno(errno::EINTR);
+            -1
+        }
+    }
 }
 
 /// Get time from a specific clock.
@@ -309,6 +329,28 @@ pub unsafe extern "C" fn timespec_get(ts: *mut Timespec, base: i32) -> i32 {
         return 0;
     }
     if clock_gettime(CLOCK_REALTIME, ts) != 0 {
+        return 0;
+    }
+    base
+}
+
+/// `timespec_getres(ts, base)` (C23 7.29.2.7): the resolution of the time
+/// base `base` into `*ts`, unless `ts` is NULL, and `base` back; 0, and
+/// `*ts` untouched, for a number that is no time base. `TIME_UTC` is the only
+/// one, as in glibc 2.39, and its resolution is `CLOCK_REALTIME`'s.
+///
+/// Not in `gnu_timespec_get`'s archive member, which must define
+/// `timespec_get` alone (`scripts/check-libc-shape.py`).
+///
+/// # Safety
+///
+/// `ts` must be NULL or point to a writable `struct timespec`.
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub unsafe extern "C" fn timespec_getres(ts: *mut Timespec, base: i32) -> i32 {
+    if base != TIME_UTC {
+        return 0;
+    }
+    if !ts.is_null() && clock_getres(CLOCK_REALTIME, ts) != 0 {
         return 0;
     }
     base
@@ -559,6 +601,9 @@ pub extern "C" fn clock_nanosleep(
     request: *const Timespec,
     remain: *mut Timespec,
 ) -> i32 {
+    // Handlers are counted from here: in Linux the call is one system call,
+    // and a signal that comes at any point in it ends the sleep.
+    let mark = Mark::now();
     // glibc 2.39 (sysdeps/unix/sysv/linux/clock_nanosleep.c) answers the
     // calling thread's CPU clock itself, before any other check.
     if clk_id == CLOCK_THREAD_CPUTIME_ID {
@@ -593,55 +638,29 @@ pub extern "C" fn clock_nanosleep(
         return errno::EINVAL;
     }
 
+    // The deadline, on the sleep's own clock: the request itself when
+    // absolute, else the request from now.  A deadline already passed, or a
+    // relative sleep of nothing, returns at once, as `hrtimer_nanosleep` does.
     let absolute = flags & TIMER_ABSTIME != 0;
-    let sleep_ns = if absolute {
-        let mut now = Timespec {
-            tv_sec: 0,
-            tv_nsec: 0,
-        };
-        if clock_gettime(clk_id, &raw mut now) < 0 {
-            return errno::get_errno();
-        }
-        let target = timespec_to_ns_saturating(&req);
-        let current = timespec_to_ns_saturating(&now);
-        if target <= current {
-            return 0;
-        }
-        target.saturating_sub(current)
+    let deadline = if absolute {
+        req
     } else {
-        timespec_to_ns_saturating(&req)
+        let now = crate::lowlevellock::now_on(clk_id);
+        crate::lowlevellock::after(&now, timespec_to_ns_saturating(&req))
     };
-
-    if sleep_ns == 0 {
-        // `hrtimer_nanosleep` of nothing returns at once; so does this, with no
-        // syscall to be interrupted.
-        return 0;
-    }
-    let ret = syscall1(SYS_SLEEP, sleep_ns);
-    if ret < 0 {
-        // The kernel's own answer, which is EINTR when a signal cut the sleep
-        // short -- not EINTR for every failure, as the relative form reported
-        // until 2026-09-26.  Only the relative form reports what is left
-        // (Linux drops `rmtp` for TIMER_ABSTIME), and the kernel does not say,
-        // so it is reported as nothing: the approximation `nanosleep` makes.
-        let e = errno::errno_for(ret);
-        if e == errno::EINTR && !absolute && !remain.is_null() {
-            // SAFETY: a non-null `remain` is writable, per the contract.
-            unsafe {
-                core::ptr::write_unaligned(
-                    remain,
-                    Timespec {
-                        tv_sec: 0,
-                        tv_nsec: 0,
-                    },
-                );
+    match crate::lowlevellock::sleep_until(clk_id, &deadline, mark) {
+        Ok(()) => 0,
+        Err(left) => {
+            // A signal handler ended it, `SA_RESTART` or not.  Only the
+            // relative form reports what is left: Linux drops `rmtp` for
+            // TIMER_ABSTIME.
+            if !absolute && !remain.is_null() {
+                // SAFETY: a non-null `remain` is writable, per the contract.
+                unsafe { core::ptr::write_unaligned(remain, left) };
             }
+            errno::EINTR
         }
-        // The absolute form was never told about an interruption until
-        // 2026-09-26: it slept and answered 0.
-        return e;
     }
-    0
 }
 
 /// A non-negative `timespec` as nanoseconds, saturating at `u64::MAX`: an
@@ -2153,25 +2172,58 @@ mod gnu_strptime {
     /// `tm` must point to a valid `Tm`.
     #[cfg_attr(target_os = "none", unsafe(no_mangle))]
     pub unsafe extern "C" fn strptime(buf: *const u8, format: *const u8, tm: *mut Tm) -> *const u8 {
-        if buf.is_null() || format.is_null() || tm.is_null() {
-            return core::ptr::null();
-        }
-        // SAFETY: the caller's NUL-terminated format.
-        let fmt = unsafe { core::ffi::CStr::from_ptr(format.cast()) }.to_bytes();
-        // SAFETY: the caller's `struct tm`, checked non-null.
-        let t = unsafe { &mut *tm };
-        let input = Input(buf);
-        let mut state = Parse::default();
-        let Some(end) = parse(&input, 0, fmt, t, &mut state) else {
-            return core::ptr::null();
-        };
-        state.finish(t);
-        // SAFETY: `end` is within the input: the parse only moves past bytes
-        // it has read, and never past the terminator.
-        unsafe { buf.add(end) }
+        // SAFETY: this function's contract, which is the parse's.
+        unsafe { strptime_in_c_locale(buf, format, tm) }
     }
 }
 pub use gnu_strptime::strptime;
+
+/// What [`strptime`] and [`strptime_l`] do: parse `buf` by `format` into
+/// `*tm`, in the C locale, returning the end of what matched or NULL.
+///
+/// Out here rather than in `gnu_strptime` so that that archive member
+/// defines `strptime` alone: a program that brings its own `strptime`, as
+/// gnulib's do, then declines it and still has [`strptime_l`]
+/// (`scripts/check-libc-shape.py`, which found `strptime_l` beside it).
+///
+/// # Safety
+///
+/// As [`strptime`].
+unsafe fn strptime_in_c_locale(buf: *const u8, format: *const u8, tm: *mut Tm) -> *const u8 {
+    if buf.is_null() || format.is_null() || tm.is_null() {
+        return core::ptr::null();
+    }
+    // SAFETY: the caller's NUL-terminated format.
+    let fmt = unsafe { core::ffi::CStr::from_ptr(format.cast()) }.to_bytes();
+    // SAFETY: the caller's `struct tm`, checked non-null.
+    let t = unsafe { &mut *tm };
+    let input = Input(buf);
+    let mut state = Parse::default();
+    let Some(end) = parse(&input, 0, fmt, t, &mut state) else {
+        return core::ptr::null();
+    };
+    state.finish(t);
+    // SAFETY: `end` is within the input: the parse only moves past bytes it
+    // has read, and never past the terminator.
+    unsafe { buf.add(end) }
+}
+
+/// `strptime_l` -- [`strptime`] in a locale, which is always C's here
+/// (`locale.rs`).
+///
+/// # Safety
+///
+/// As [`strptime`].
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub unsafe extern "C" fn strptime_l(
+    buf: *const u8,
+    format: *const u8,
+    tm: *mut Tm,
+    _loc: crate::locale::LocaleT,
+) -> *const u8 {
+    // SAFETY: this function's contract.
+    unsafe { strptime_in_c_locale(buf, format, tm) }
+}
 
 /// The input of a `strptime` parse: a NUL-terminated string, read a byte
 /// at a time and never past its terminator -- every step forward is over a
@@ -2995,8 +3047,12 @@ fn first_weekday(tm_year: i32, mon: i32, wday: i32) -> i32 {
 // `signal.rs`'s trampoline.  It is that nothing here asks the kernel for
 // a timer.  See the module doc and `known-issues.md`.
 
-/// Timer ID type.
-pub type TimerT = i32;
+/// Timer ID type: pointer-wide, as musl's `<time.h>` makes `timer_t` a
+/// `void *`. It was an `i32` until 2026-09-29, and `timer_create` stored
+/// four bytes into the caller's eight, leaving the other four whatever they
+/// were -- so a `timer_t` compared with another, or with `NULL`, compared
+/// garbage.
+pub type TimerT = usize;
 
 /// Timer specification (interval + initial expiration).
 #[repr(C)]
@@ -3228,9 +3284,10 @@ pub extern "C" fn timer_create(
                     tv_nsec: 0,
                 },
             });
-            // SAFETY: timerid verified non-null above; idx fits in i32.
+            // SAFETY: timerid verified non-null above; a table index is a
+            // `timer_t`, all eight bytes of it.
             unsafe {
-                *timerid = idx as TimerT;
+                *timerid = idx;
             }
             return 0;
         }
@@ -3320,7 +3377,7 @@ pub extern "C" fn timer_settime(
         return -1;
     };
 
-    let Some(slot) = table.get_mut(timerid as usize) else {
+    let Some(slot) = table.get_mut(timerid) else {
         errno::set_errno(errno::EINVAL);
         return -1;
     };
@@ -3393,7 +3450,7 @@ pub extern "C" fn timer_gettime(timerid: TimerT, curr_value: *mut Itimerspec) ->
         return -1;
     };
 
-    let Some(slot) = table.get(timerid as usize) else {
+    let Some(slot) = table.get(timerid) else {
         errno::set_errno(errno::EINVAL);
         return -1;
     };
@@ -3427,7 +3484,7 @@ pub extern "C" fn timer_delete(timerid: TimerT) -> i32 {
         return -1;
     };
 
-    let Some(slot) = table.get_mut(timerid as usize) else {
+    let Some(slot) = table.get_mut(timerid) else {
         errno::set_errno(errno::EINVAL);
         return -1;
     };
@@ -3481,7 +3538,7 @@ pub extern "C" fn timer_getoverrun(timerid: TimerT) -> i32 {
         return -1;
     };
 
-    let Some(slot) = table.get(timerid as usize) else {
+    let Some(slot) = table.get(timerid) else {
         errno::set_errno(errno::EINVAL);
         return -1;
     };
@@ -6720,7 +6777,7 @@ mod tests {
     fn test_timer_getoverrun_negative_timer_id_einval_phase149() {
         reset_timers();
         crate::errno::set_errno(0);
-        let ret = timer_getoverrun(-1);
+        let ret = timer_getoverrun(usize::MAX);
         assert_eq!(ret, -1);
         assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
     }
@@ -6840,7 +6897,7 @@ mod tests {
         assert_eq!(timer_getoverrun(id), 0);
 
         crate::errno::set_errno(0);
-        assert_eq!(timer_getoverrun(-2), -1);
+        assert_eq!(timer_getoverrun(usize::MAX - 1), -1);
         assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
 
         timer_delete(id);
@@ -7029,7 +7086,7 @@ mod tests {
     fn test_timer_gettime_negative_timer_id_beats_null_curr_value_phase148() {
         reset_timers();
         crate::errno::set_errno(0);
-        let ret = timer_gettime(-1, core::ptr::null_mut());
+        let ret = timer_gettime(usize::MAX, core::ptr::null_mut());
         assert_eq!(ret, -1);
         assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
     }
@@ -7317,10 +7374,13 @@ mod tests {
             CLOCK_BOOTTIME,
         ] {
             reset_timers();
-            let mut id: TimerT = -1;
+            let mut id: TimerT = TimerT::MAX;
             let ret = timer_create(clk, core::ptr::null(), &raw mut id);
             assert_eq!(ret, 0, "clock {clk} should be accepted");
-            assert!(id >= 0, "clock {clk}: a valid slot must be returned");
+            assert!(
+                id < MAX_TIMERS,
+                "clock {clk}: a valid slot must be returned"
+            );
             timer_delete(id);
         }
     }
@@ -7355,7 +7415,7 @@ mod tests {
                 sigev_notify: notify,
                 _pad: [0u8; 48],
             };
-            let mut id: TimerT = -1;
+            let mut id: TimerT = TimerT::MAX;
             let ret = timer_create(CLOCK_REALTIME, &raw const sev, &raw mut id);
             assert_eq!(ret, 0, "sigev_notify {notify} should be accepted");
             timer_delete(id);
@@ -7531,7 +7591,7 @@ mod tests {
         );
         assert_eq!(crate::errno::get_errno(), crate::errno::EFAULT);
 
-        let mut id: TimerT = -1;
+        let mut id: TimerT = TimerT::MAX;
         crate::errno::set_errno(0);
         let ret = timer_create(CLOCK_REALTIME, core::ptr::null(), &raw mut id);
         assert_eq!(ret, 0);
@@ -7577,7 +7637,7 @@ mod tests {
         reset_timers();
 
         // Burn one slot first to establish baseline.
-        let mut id0: TimerT = -1;
+        let mut id0: TimerT = TimerT::MAX;
         assert_eq!(
             timer_create(CLOCK_REALTIME, core::ptr::null(), &raw mut id0),
             0
@@ -7593,7 +7653,7 @@ mod tests {
         assert_eq!(crate::errno::get_errno(), crate::errno::EFAULT);
 
         // Next valid call must land in slot 1 (slot 0 still held).
-        let mut id1: TimerT = -1;
+        let mut id1: TimerT = TimerT::MAX;
         assert_eq!(
             timer_create(CLOCK_REALTIME, core::ptr::null(), &raw mut id1),
             0
@@ -7625,7 +7685,7 @@ mod tests {
             sigev_notify: 55,
             _pad: [0u8; 48],
         };
-        let mut id_tmp: TimerT = -1;
+        let mut id_tmp: TimerT = TimerT::MAX;
         crate::errno::set_errno(0);
         assert_eq!(
             timer_create(CLOCK_REALTIME, &raw const bad_sev, &raw mut id_tmp),
@@ -7642,7 +7702,7 @@ mod tests {
         assert_eq!(crate::errno::get_errno(), crate::errno::EFAULT);
 
         // Now valid: must land in slot 0.
-        let mut id: TimerT = -1;
+        let mut id: TimerT = TimerT::MAX;
         let ret = timer_create(CLOCK_REALTIME, core::ptr::null(), &raw mut id);
         assert_eq!(ret, 0);
         assert_eq!(id, 0, "no slot should have been consumed by the bad calls");
@@ -7663,7 +7723,7 @@ mod tests {
             assert_eq!(crate::errno::get_errno(), crate::errno::EFAULT);
         }
         // Table still empty: first allocation goes to slot 0.
-        let mut id: TimerT = -1;
+        let mut id: TimerT = TimerT::MAX;
         assert_eq!(
             timer_create(CLOCK_REALTIME, core::ptr::null(), &raw mut id),
             0
@@ -7677,7 +7737,7 @@ mod tests {
     fn test_timer_create_success_doesnt_touch_errno_phase147() {
         reset_timers();
         crate::errno::set_errno(54321);
-        let mut id: TimerT = -1;
+        let mut id: TimerT = TimerT::MAX;
         let ret = timer_create(CLOCK_REALTIME, core::ptr::null(), &raw mut id);
         assert_eq!(ret, 0);
         assert_eq!(
@@ -9192,6 +9252,118 @@ mod tests {
                 "flags {flags}"
             );
         }
+    }
+
+    fn handle_usr1(handler: crate::signal::SighandlerT, flags: u32) {
+        let act = crate::signal::Sigaction {
+            sa_handler: handler,
+            sa_mask: crate::signal::SigsetT::EMPTY,
+            sa_flags: flags,
+            sa_restorer: 0,
+        };
+        // SAFETY: a valid action; the old one is not wanted.
+        let rc = unsafe {
+            crate::signal::sigaction(
+                crate::signal::SIGUSR1,
+                &raw const act,
+                core::ptr::null_mut(),
+            )
+        };
+        assert_eq!(rc, 0);
+    }
+
+    extern "C" fn nothing(_: i32) {}
+
+    /// A signal handler ends a sleep whatever its `SA_RESTART`, and the sleep
+    /// answers the time that was still to go.  The kernel ending the sleep
+    /// is played by `interrupt::script`.
+    #[test]
+    fn a_signal_handler_ends_a_sleep_with_the_time_still_to_go() {
+        use crate::interrupt::script::{self, Step};
+        use crate::signal::{SA_RESTART, SIG_DFL, SIGUSR1};
+        let handler = nothing as *const () as crate::signal::SighandlerT;
+        let five = Timespec {
+            tv_sec: 5,
+            tv_nsec: 0,
+        };
+        for flags in [0, SA_RESTART] {
+            handle_usr1(handler, flags);
+            script::set([Step::Signal(SIGUSR1)]);
+            let mut rem = Timespec {
+                tv_sec: -1,
+                tv_nsec: -1,
+            };
+            errno::set_errno(0);
+            assert_eq!(nanosleep(&five, &mut rem), -1, "flags {flags:#x}");
+            assert_eq!(errno::get_errno(), errno::EINTR);
+            assert_eq!(rem.tv_sec, 4, "nearly all of it was still to go");
+            assert!((0..1_000_000_000).contains(&rem.tv_nsec));
+            assert_eq!(script::clear(), 0);
+
+            script::set([Step::Signal(SIGUSR1)]);
+            assert_eq!(sleep(5), 4, "the whole seconds still to go, truncated");
+            script::set([Step::Signal(SIGUSR1)]);
+            assert_eq!(usleep(5_000_000), -1);
+            assert_eq!(errno::get_errno(), errno::EINTR);
+
+            // clock_nanosleep answers the error, and says what is left only
+            // for a relative sleep.
+            script::set([Step::Signal(SIGUSR1)]);
+            let mut left = Timespec {
+                tv_sec: -1,
+                tv_nsec: -1,
+            };
+            assert_eq!(
+                clock_nanosleep(CLOCK_MONOTONIC, 0, &five, &mut left),
+                errno::EINTR
+            );
+            assert_eq!(left.tv_sec, 4);
+            let mut at = crate::lowlevellock::now_on(CLOCK_MONOTONIC);
+            at.tv_sec += 5;
+            script::set([Step::Signal(SIGUSR1)]);
+            let mut untouched = Timespec {
+                tv_sec: -1,
+                tv_nsec: -1,
+            };
+            assert_eq!(
+                clock_nanosleep(CLOCK_MONOTONIC, TIMER_ABSTIME, &at, &mut untouched),
+                errno::EINTR
+            );
+            assert_eq!((untouched.tv_sec, untouched.tv_nsec), (-1, -1));
+        }
+        handle_usr1(SIG_DFL, 0);
+    }
+
+    /// A signal that runs no handler here -- ignored, or handled on another
+    /// thread -- does not end a sleep: it runs its course.
+    #[test]
+    fn a_signal_that_runs_no_handler_here_does_not_end_a_sleep() {
+        use crate::interrupt::script::{self, Step};
+        use crate::signal::{SIG_DFL, SIG_IGN, SIGUSR1};
+        let short = Timespec {
+            tv_sec: 0,
+            tv_nsec: 20_000_000,
+        };
+        handle_usr1(SIG_IGN, 0);
+        for step in [
+            Step::Signal(SIGUSR1),
+            Step::SignalElsewhere(std::boxed::Box::new(|| {})),
+        ] {
+            script::set([step]);
+            let start = crate::lowlevellock::now_on(CLOCK_MONOTONIC);
+            assert_eq!(nanosleep(&short, core::ptr::null_mut()), 0);
+            let end = crate::lowlevellock::now_on(CLOCK_MONOTONIC);
+            assert!(
+                crate::lowlevellock::ns_until(&start, &end).unwrap_or(0) >= 20_000_000,
+                "it slept all of it"
+            );
+            assert_eq!(script::clear(), 0);
+        }
+        // errno is left alone by a sleep that runs its course.
+        errno::set_errno(12345);
+        assert_eq!(sleep(0), 0);
+        assert_eq!(errno::get_errno(), 12345);
+        handle_usr1(SIG_DFL, 0);
     }
 
     /// An absolute deadline far in the future does not overflow: the sum
@@ -11581,5 +11753,68 @@ mod tests {
             unsafe { crate::environ::unsetenv(c"DATEMSK".as_ptr().cast()) },
             0
         );
+    }
+
+    /// `strptime_l` parses as `strptime` does.
+    #[test]
+    fn strptime_l_is_strptime() {
+        let mut a = zero_tm();
+        let mut b = zero_tm();
+        let input = b"2026-09-29 17:05:03\0".as_ptr();
+        let format = b"%Y-%m-%d %H:%M:%S\0".as_ptr();
+        // SAFETY: NUL-terminated strings; `Tm`s on the stack.
+        let (ra, rb) = unsafe {
+            (
+                strptime_l(input, format, &raw mut a, 0),
+                strptime(input, format, &raw mut b),
+            )
+        };
+        assert_eq!(ra, rb);
+        assert!(!ra.is_null());
+        assert_eq!(
+            (a.tm_year, a.tm_mon, a.tm_mday, a.tm_hour),
+            (126, 8, 29, 17)
+        );
+        assert_eq!(
+            (a.tm_min, a.tm_sec, a.tm_wday, a.tm_yday),
+            (b.tm_min, b.tm_sec, b.tm_wday, b.tm_yday)
+        );
+    }
+
+    /// `timespec_getres` against glibc 2.39's answers
+    /// (`posix/tools/oracle/strfrom_harness.py`): `TIME_UTC` and no other
+    /// base, with or without a `timespec` to fill -- and what it fills is
+    /// `CLOCK_REALTIME`'s resolution.
+    #[test]
+    fn timespec_getres_is_glibcs() {
+        let line = include_str!("strfrom_oracle.txt")
+            .lines()
+            .find_map(|l| l.strip_prefix("timespec_getres "))
+            .expect("the oracle's timespec_getres line");
+        let marker = Timespec {
+            tv_sec: -7,
+            tv_nsec: -7,
+        };
+        let mut got = String::new();
+        for base in 0..=5 {
+            let mut ts = marker;
+            let r = unsafe { timespec_getres(&raw mut ts, base) };
+            got.push_str(&format!("{r} "));
+            if r == 0 {
+                assert_eq!(
+                    (ts.tv_sec, ts.tv_nsec),
+                    (-7, -7),
+                    "untouched for base {base}"
+                );
+            } else {
+                let mut want = marker;
+                assert_eq!(clock_getres(CLOCK_REALTIME, &raw mut want), 0);
+                assert_eq!((ts.tv_sec, ts.tv_nsec), (want.tv_sec, want.tv_nsec));
+            }
+        }
+        got.push_str(&format!("/ {}", unsafe {
+            timespec_getres(core::ptr::null_mut(), TIME_UTC)
+        }));
+        assert_eq!(got, line);
     }
 }

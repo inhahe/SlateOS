@@ -75,11 +75,17 @@ pub enum Highlight {
     Heading,
     /// A link or URL in a markup language.
     Link,
+    /// Text a change adds: a diff's `+` line.
+    Inserted,
+    /// Text a change takes away: a diff's `-` line.
+    Deleted,
+    /// Text a change alters: a context diff's `!` line.
+    Changed,
 }
 
 impl Highlight {
     /// How many kinds there are.
-    pub const COUNT: usize = 22;
+    pub const COUNT: usize = 25;
 
     /// Every kind, in declaration order -- which is [`index`](Self::index)'s.
     pub const ALL: [Self; Self::COUNT] = [
@@ -105,6 +111,9 @@ impl Highlight {
         Self::Tag,
         Self::Heading,
         Self::Link,
+        Self::Inserted,
+        Self::Deleted,
+        Self::Changed,
     ];
 
     /// Where this kind is in [`ALL`](Self::ALL).
@@ -139,6 +148,9 @@ impl Highlight {
             Self::Tag => "tag",
             Self::Heading => "heading",
             Self::Link => "link",
+            Self::Inserted => "inserted",
+            Self::Deleted => "deleted",
+            Self::Changed => "changed",
         }
     }
 
@@ -228,6 +240,18 @@ impl Highlight {
             ("text.reference", Some(Highlight::Link)),
             ("text.literal", Some(Highlight::String)),
             ("text.quote", Some(Highlight::Comment)),
+            // A change's lines, as diff grammars and editors name them.
+            ("diff.plus", Some(Highlight::Inserted)),
+            ("diff.add", Some(Highlight::Inserted)),
+            ("markup.inserted", Some(Highlight::Inserted)),
+            ("text.diff.add", Some(Highlight::Inserted)),
+            ("diff.minus", Some(Highlight::Deleted)),
+            ("diff.delete", Some(Highlight::Deleted)),
+            ("markup.deleted", Some(Highlight::Deleted)),
+            ("text.diff.delete", Some(Highlight::Deleted)),
+            ("diff.delta", Some(Highlight::Changed)),
+            ("diff.change", Some(Highlight::Changed)),
+            ("markup.changed", Some(Highlight::Changed)),
         ];
         let name = name.strip_prefix('@').unwrap_or(name);
         if name.starts_with('_') {
@@ -301,6 +325,31 @@ pub trait Highlighter: fmt::Debug {
     /// text changed since may be uncoloured or coloured as it was before, but
     /// never coloured at the wrong offsets.
     fn highlights(&self, text: &TextBuffer, range: Range<usize>) -> Vec<HighlightSpan>;
+
+    /// The bracket by `offset` in `text` -- the character at it, else the one
+    /// before it -- and its partner, as the language reads them. A
+    /// highlighter that knows the text's structure pairs brackets by it, so
+    /// a bracket in a string or a comment is none, and one in code skips
+    /// over those. The default knows nothing: the view counts brackets
+    /// itself.
+    fn brackets(&self, _text: &TextBuffer, _offset: usize) -> Brackets {
+        Brackets::Unknown
+    }
+}
+
+/// What a highlighter says of the bracket by a caret
+/// ([`Highlighter::brackets`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Brackets {
+    /// The bracket at the first offset pairs with the one at the second.
+    Pair(usize, usize),
+    /// No pair: what is by the caret is no bracket in the language -- it is
+    /// in a string, a comment -- or not a bracket at all.
+    Unpaired,
+    /// The highlighter cannot say -- its parse is behind the text, or the
+    /// language's structure does not show the pair -- and brackets are
+    /// counted instead.
+    Unknown,
 }
 
 #[cfg(test)]
@@ -349,6 +398,12 @@ mod tests {
             ("punctuation.bracket", Some(Highlight::Punctuation)),
             ("comment.documentation", Some(Highlight::Comment)),
             ("text.title", Some(Highlight::Heading)),
+            ("diff.plus", Some(Highlight::Inserted)),
+            ("markup.inserted", Some(Highlight::Inserted)),
+            ("diff.minus", Some(Highlight::Deleted)),
+            ("diff.delete", Some(Highlight::Deleted)),
+            ("diff.delta", Some(Highlight::Changed)),
+            ("diffs", None),
             ("embedded", None),
             ("_name", None),
             ("", None),

@@ -16,6 +16,9 @@
 
 use core::sync::atomic::{AtomicI32, Ordering};
 
+use crate::interrupt::{Mark, Restart};
+use crate::lowlevellock::Waited;
+
 // ---------------------------------------------------------------------------
 // The table of slots
 // ---------------------------------------------------------------------------
@@ -154,6 +157,8 @@ impl Waits {
     }
 
     /// Sleep until the count moves from `seen`, or for at most `timeout_ns`.
+    /// A signal does not end it: `io_destroy` waits so, for the requests
+    /// still running.
     pub(crate) fn wait(&self, seen: i32, timeout_ns: Option<u64>) {
         self.sleepers.fetch_add(1, Ordering::SeqCst);
         match timeout_ns {
@@ -161,6 +166,28 @@ impl Waits {
             Some(ns) => crate::lowlevellock::futex_wait_timeout(&self.changes, seen, ns),
         }
         self.sleepers.fetch_sub(1, Ordering::SeqCst);
+    }
+
+    /// As [`Self::wait`], but any signal handler that runs on this thread
+    /// since `mark` ends it, `SA_RESTART` or not: the calls that sleep here
+    /// -- System V's and `io_getevents` -- are ones Linux never restarts
+    /// ([`crate::interrupt`]).
+    pub(crate) fn wait_interruptible(
+        &self,
+        seen: i32,
+        timeout_ns: Option<u64>,
+        mark: Mark,
+    ) -> Waited {
+        self.sleepers.fetch_add(1, Ordering::SeqCst);
+        let waited = crate::lowlevellock::futex_wait_interruptible_since(
+            &self.changes,
+            seen,
+            timeout_ns,
+            Restart::Never,
+            mark,
+        );
+        self.sleepers.fetch_sub(1, Ordering::SeqCst);
+        waited
     }
 }
 

@@ -378,8 +378,9 @@ fn parse_header(buf: &[u8]) -> Result<CpioHeader, String> {
     let magic = std::str::from_utf8(&buf[0..6]).map_err(|_| "invalid magic bytes")?;
     if magic != NEWC_MAGIC {
         return Err(format!(
-            "bad magic: expected '{}', got '{}'",
-            NEWC_MAGIC, magic
+            "bad magic: expected {}, got {}",
+            quoteaf_os(NEWC_MAGIC),
+            quoteaf_os(magic)
         ));
     }
 
@@ -1143,8 +1144,8 @@ fn pass_through(opts: &Options) -> Result<(), String> {
                 .map_err(|e| format!("mkdir {}: {}", quoteaf_os(&dest_base), e))?;
         } else {
             return Err(format!(
-                "destination '{}' does not exist (use -d to create)",
-                dest_dir
+                "destination {} does not exist (use -d to create)",
+                quoteaf_os(dest_dir)
             ));
         }
     }

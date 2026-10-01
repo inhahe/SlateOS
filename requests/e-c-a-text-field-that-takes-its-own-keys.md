@@ -1,8 +1,8 @@
 # E → C: a `TextInput` that takes its own keys
 
 **From:** lane E · **To:** lane C · **Filed:** 2026-09-25
-**Status:** LANDED on `lane-c` 2026-09-27 (lane C); it reaches `main` with lane C's next
-publish. The table was already the toolkit's -- `TextInput::edit_key(key, font_size, weight)`,
+**Status:** DONE -- landed on `lane-c` 2026-09-27 (lane C), on `main` since
+2026-09-28 (`9154182d0`). The table was already the toolkit's -- `TextInput::edit_key(key, font_size, weight)`,
 which also leaves Ctrl+Alt (AltGr) chords to the layout and answers `KeyEdit::Unhandled` for
 Enter, Escape and Tab -- and it now has the two things `apps/textline` added over it:
 `TextInput::set_capacity(Some(n))`, a field's `maxlength` in characters (a key a full field

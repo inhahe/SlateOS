@@ -178,18 +178,18 @@ the system's `/usr/share/applications/mimeapps.list`.
 ## 5. File types
 
 **Extensions:** U4 (the toolkit's table, `guitk::filetypes`) is where file types
-belong, and it lacked 33 that K4 and K5 knew. **Twenty-three are carried**,
+belong, and it lacked 33 that K4 and K5 knew. **Twenty-four are carried**,
 each with K4's type:
 
 `a`, `bat`, `cc`, `cmd`, `cpio`, `cxx`, `diff`, `epub`, `gzip`, `htm`, `hxx`,
-`jar`, `lib`, `markdown`, `mjs`, `o`, `patch`, `psm1`, `pyw`, `text`, `xsd`,
-`xsl`, `zstd`.
+`jar`, `lib`, `markdown`, `mjs`, `o`, `oga`, `patch`, `psm1`, `pyw`, `text`,
+`xsd`, `xsl`, `zstd`.
 
-**One, `oga` (Ogg audio), is held back** only because `apps/fileassoc`'s test of
-applying a program to the Music group counts the toolkit's audio types by hand
-("5 of 10"), and an eleventh would fail it; lane E is asked to derive the count
-from the table (`requests/c-e-a-test-that-counts-the-toolkits-audio-types.md`),
-and `oga` goes in when that lands.
+`oga` (Ogg audio) came last: `apps/fileassoc`'s test of applying a program to
+the Music group counted the toolkit's audio types by hand ("5 of 10"), and an
+eleventh would have failed it; lane E derived the count from the table
+(`3275adc99`, `requests/c-e-a-test-that-counts-the-toolkits-audio-types.md`)
+before it went in.
 
 **Nine wait on a decision the toolkit had already recorded** (`known-issues.md`,
 the `filesearch` entry), and stay out, pinned by the toolkit's

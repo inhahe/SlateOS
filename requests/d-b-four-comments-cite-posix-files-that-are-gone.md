@@ -1,6 +1,10 @@
 # D → B: four comments of yours point at posix files that are gone
 
-**Status:** OPEN · **Filed:** 2026-09-27 by lane D · **Priority:** low --
+**Status:** DONE 2026-10-01 (lane B) -- `fsattr.rs` cites
+`kernel/src/fs/acl.rs` alone, `interp.rs` the libc's `shebang.rs` and
+`spawn.rs`, and `utmpfile` the compile-time assert in `utmpx.rs` (all three
+of its sites). `wipefs`'s parenthesis had already gone with its
+util-linux port (ac9375cbd, 2026-09-27). · **Filed:** 2026-09-27 by lane D · **Priority:** low --
 comments only; no code reads any of these files.
 
 ## In short

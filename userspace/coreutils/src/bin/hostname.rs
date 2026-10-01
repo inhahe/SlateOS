@@ -40,13 +40,14 @@
 use coreutils::diag;
 use coreutils::stdfd;
 use std::env;
-use std::ffi::{OsStr, OsString};
+use std::ffi::OsString;
 use std::fs;
 use std::io::{self, ErrorKind, Write};
 use std::path::Path;
 use std::process::ExitCode;
 
 use coreutils::errmsg::strerror;
+use coreutils::getopt::{Opt, Program, Takes};
 use coreutils::quote::{os_bytes, quote, quote_os};
 
 /// Live kernel host name. Written by `sysctl kernel.hostname` and by us.
@@ -71,11 +72,23 @@ const PROC_DOMAINNAME: &str = "/proc/sys/kernel/domainname";
 /// Resolver configuration, the source of the domain part for `-f` and `-d`.
 const RESOLV_CONF: &str = "/etc/resolv.conf";
 
-/// Interface address table, the source for `-i` and `-I`.
-const PROC_IF_INET: &str = "/proc/net/if_inet";
+/// The kernel's network block, and the ONLY address source that exists on
+/// SlateOS.
+///
+/// `/proc/net` is a file here, not a directory -- see `procfs.rs`'s
+/// `ROOT_FILES` and `gen_net()` -- so nothing can live beneath it.
+const PROC_NET: &str = "/proc/net";
 
-/// Per-interface network directory, the fallback source for `-i` and `-I`.
-const SYS_NET_DIR: &str = "/sys/class/net";
+/// Interface address table, the source for `-i` and `-I` on systems that have
+/// one.
+///
+/// NOTHING IN THIS TREE PRODUCES IT. Two programs read it -- this one and
+/// `userspace/ifconfig` -- and no kernel code writes it, which is why both
+/// fell through to a fallback. Kept as a second choice rather than deleted
+/// because it costs one `read` that fails, and removing it would leave
+/// `ifconfig` the only reader of a path with no producer. Tracked in
+/// `known-issues.md`.
+const PROC_IF_INET: &str = "/proc/net/if_inet";
 
 /// Maximum total host name length, RFC 1123 §2.1.
 const MAX_HOSTNAME_LEN: usize = 253;
@@ -123,190 +136,98 @@ enum Action {
     Version,
 }
 
-/// Bytes back to an `OsString` without going through UTF-8.
-///
-/// Exact on `cfg(unix)`, which includes our own target — `x86_64-slateos.json`
-/// declares `"target-family": ["unix"]`. On the Windows development host the
-/// round trip is lossy, because `OsString` there is UTF-16 and there is no
-/// byte constructor. That only affects host test runs, and no test relies on a
-/// non-UTF-8 byte surviving the trip.
-#[cfg(unix)]
-fn os_from_bytes(b: &[u8]) -> OsString {
-    use std::os::unix::ffi::OsStrExt;
-    OsStr::from_bytes(b).to_os_string()
-}
-
-#[cfg(not(unix))]
-fn os_from_bytes(b: &[u8]) -> OsString {
-    OsString::from(String::from_utf8_lossy(b).into_owned())
-}
-
 // ============================================================================
 // Command line
 // ============================================================================
 
-/// Parse the arguments after `argv[0]`.
+/// `hostname`'s name, and the status of a command line it will not run.
+const HOSTNAME: Program = Program::new("hostname", 1);
+
+/// net-tools `hostname` 3.23's option string, verbatim. The `?` is a real
+/// option there -- help, as `-h` is -- which is how `hostname -?` prints the
+/// usage.
+const SHORT_OPTIONS: &str = "aAdfbF:h?iIsVy";
+
+/// net-tools `hostname` 3.23's `long_options`, **in declaration order**, which
+/// the ambiguity message makes observable.
+const LONG_OPTIONS: &[(&str, Takes)] = &[
+    ("domain", Takes::Nothing),
+    ("boot", Takes::Nothing),
+    ("file", Takes::Required),
+    ("fqdn", Takes::Nothing),
+    ("all-fqdns", Takes::Nothing),
+    ("help", Takes::Nothing),
+    ("long", Takes::Nothing),
+    ("short", Takes::Nothing),
+    ("version", Takes::Nothing),
+    ("alias", Takes::Nothing),
+    ("ip-address", Takes::Nothing),
+    ("all-ip-addresses", Takes::Nothing),
+    ("nis", Takes::Nothing),
+    ("yp", Takes::Nothing),
+];
+
+/// Spellings upstream gives one option: `--long` is `-f`, `--yp` is `-y`.
+const LONG_ALIASES: &[(&str, &str)] = &[("long", "fqdn"), ("yp", "nis")];
+
+/// An option net-tools has and this `hostname` does not: `-a` and `-A`, which
+/// read the aliases and every FQDN out of name resolution this system cannot
+/// yet answer (`known-issues.md` has the resolver's side of that).
+fn unimplemented(item: &Opt<'_>) -> String {
+    let named = match item {
+        Opt::Short(flag, _) => format!("-{}", char::from(*flag)),
+        Opt::Long(name, _) => format!("'--{name}'"),
+        Opt::Operand(_) => "an operand".to_string(),
+    };
+    format!(
+        "option {named} is not implemented by this hostname\nTry 'hostname --help' for more information."
+    )
+}
+
+/// Parse the arguments after `argv[0]`: upstream's `getopt_long` loop, on the
+/// shared parser.
 ///
-/// Short options bundle (`-sf` is `-s -f`), and for the display options the
-/// last one wins — GNU's `hostname` assigns to one variable in its `getopt`
-/// loop and acts on it afterwards, so that is the behaviour scripts see.
-/// `-h` and `-V` are answered where they appear, as they are in GNU.
-///
-/// `--` ends the options, which the standalone `userspace/hostname` cannot do:
-/// without it there is no way to set a name beginning with a hyphen, and more
-/// importantly no way to be *sure* an argument from a variable is treated as a
-/// name rather than as an option.
+/// So long options abbreviate to a unique prefix (`--sh`, `--dom`), short
+/// ones bundle (`-sf` is `-s -f`), `--` ends the options -- the only way to be
+/// sure a name taken from a variable is not read as one -- and
+/// `POSIXLY_CORRECT` stops them at the first operand. For the display options
+/// the last one wins, as upstream assigns them to one variable and acts on it
+/// afterwards. `-h`, `-?` and `-V` are answered where they appear.
 fn parse_args(args: &[OsString]) -> Result<Action, String> {
     let mut query: Option<Query> = None;
     let mut boot = false;
     let mut file: Option<OsString> = None;
-    let mut name: Option<OsString> = None;
-    let mut end_of_options = false;
+    let mut operands: Vec<OsString> = Vec::new();
 
-    let mut i = 0;
-    while i < args.len() {
-        let Some(arg) = args.get(i) else { break };
-        let bytes = os_bytes(arg);
-
-        // An operand: the name to set. `-` alone is an operand too, matching
-        // every other utility; only a hyphen with something after it is an
-        // option.
-        if end_of_options || bytes.first() != Some(&b'-') || bytes.len() == 1 {
-            if let Some(first) = &name {
-                return Err(format!(
-                    "too many arguments: already given {}, then {}",
-                    quote_os(first),
-                    quote_os(arg)
-                ));
-            }
-            name = Some(arg.clone());
-            i = i.saturating_add(1);
-            continue;
-        }
-
-        if bytes.starts_with(b"--") {
-            if bytes.len() == 2 {
-                end_of_options = true;
-                i = i.saturating_add(1);
-                continue;
-            }
-            let long = bytes.get(2..).unwrap_or_default();
-            match parse_long(long, args, i, &mut query, &mut boot, &mut file)? {
-                Long::Answered(action) => return Ok(action),
-                Long::Consumed(next) => i = next,
-            }
-            continue;
-        }
-
-        let body = bytes.get(1..).unwrap_or_default();
-        match parse_shorts(body, args, i, &mut query, &mut boot, &mut file)? {
-            Long::Answered(action) => return Ok(action),
-            Long::Consumed(next) => i = next,
+    for item in HOSTNAME.parse_aliased(args, SHORT_OPTIONS, LONG_OPTIONS, LONG_ALIASES) {
+        let item = item.map_err(|e| e.message())?;
+        match item {
+            // An operand: the name to set. `-` alone is one, as everywhere.
+            Opt::Operand(word) => operands.push(word.clone()),
+            Opt::Short(b'h' | b'?', _) | Opt::Long("help", _) => return Ok(Action::Help),
+            Opt::Short(b'V', _) | Opt::Long("version", _) => return Ok(Action::Version),
+            Opt::Short(b's', _) | Opt::Long("short", _) => query = Some(Query::Short),
+            Opt::Short(b'f', _) | Opt::Long("fqdn" | "long", _) => query = Some(Query::Fqdn),
+            Opt::Short(b'd', _) | Opt::Long("domain", _) => query = Some(Query::Domain),
+            Opt::Short(b'y', _) | Opt::Long("nis" | "yp", _) => query = Some(Query::NisDomain),
+            Opt::Short(b'i', _) | Opt::Long("ip-address", _) => query = Some(Query::Ip),
+            Opt::Short(b'I', _) | Opt::Long("all-ip-addresses", _) => query = Some(Query::AllIp),
+            Opt::Short(b'b', _) | Opt::Long("boot", _) => boot = true,
+            Opt::Short(b'F', value) | Opt::Long("file", value) => file = value,
+            other => return Err(unimplemented(&other)),
         }
     }
 
+    let mut rest = operands.into_iter();
+    let name = rest.next();
+    if let (Some(first), Some(extra)) = (&name, rest.next()) {
+        return Err(format!(
+            "too many arguments: already given {}, then {}",
+            quote_os(first),
+            quote_os(&extra)
+        ));
+    }
     resolve(query, boot, file, name)
-}
-
-/// The outcome of reading one option: either the whole command line is already
-/// answered, or parsing continues at the returned index.
-enum Long {
-    Answered(Action),
-    Consumed(usize),
-}
-
-/// Read one `--long` option.
-fn parse_long(
-    long: &[u8],
-    args: &[OsString],
-    i: usize,
-    query: &mut Option<Query>,
-    boot: &mut bool,
-    file: &mut Option<OsString>,
-) -> Result<Long, String> {
-    // `--file=PATH` carries its argument; every other long option does not.
-    if let Some(path) = long.strip_prefix(b"file=") {
-        *file = Some(os_from_bytes(path));
-        return Ok(Long::Consumed(i.saturating_add(1)));
-    }
-
-    match long {
-        b"help" => return Ok(Long::Answered(Action::Help)),
-        b"version" => return Ok(Long::Answered(Action::Version)),
-        b"short" => *query = Some(Query::Short),
-        b"fqdn" | b"long" => *query = Some(Query::Fqdn),
-        b"domain" => *query = Some(Query::Domain),
-        b"yp" | b"nis" => *query = Some(Query::NisDomain),
-        b"ip-address" => *query = Some(Query::Ip),
-        b"all-ip-addresses" => *query = Some(Query::AllIp),
-        b"boot" => *boot = true,
-        b"file" => {
-            let next = i.saturating_add(1);
-            let Some(path) = args.get(next) else {
-                return Err("option '--file' requires an argument".to_string());
-            };
-            *file = Some(path.clone());
-            return Ok(Long::Consumed(next.saturating_add(1)));
-        }
-        _ => {
-            let mut whole = b"--".to_vec();
-            whole.extend_from_slice(long);
-            return Err(format!(
-                "unrecognized option {}\nTry 'hostname --help' for more information.",
-                quote(&whole)
-            ));
-        }
-    }
-    Ok(Long::Consumed(i.saturating_add(1)))
-}
-
-/// Read a bundle of short options, e.g. the `sf` of `-sf`.
-fn parse_shorts(
-    body: &[u8],
-    args: &[OsString],
-    i: usize,
-    query: &mut Option<Query>,
-    boot: &mut bool,
-    file: &mut Option<OsString>,
-) -> Result<Long, String> {
-    let mut j = 0;
-    while j < body.len() {
-        let Some(&c) = body.get(j) else { break };
-        match c {
-            b'h' => return Ok(Long::Answered(Action::Help)),
-            b'V' => return Ok(Long::Answered(Action::Version)),
-            b's' => *query = Some(Query::Short),
-            b'f' => *query = Some(Query::Fqdn),
-            b'd' => *query = Some(Query::Domain),
-            b'y' => *query = Some(Query::NisDomain),
-            b'i' => *query = Some(Query::Ip),
-            b'I' => *query = Some(Query::AllIp),
-            b'b' => *boot = true,
-            b'F' => {
-                // `-Fpath` carries the rest of the bundle; a bare `-F` takes
-                // the next argument.
-                let rest = body.get(j.saturating_add(1)..).unwrap_or_default();
-                if rest.is_empty() {
-                    let next = i.saturating_add(1);
-                    let Some(path) = args.get(next) else {
-                        return Err("option requires an argument -- 'F'".to_string());
-                    };
-                    *file = Some(path.clone());
-                    return Ok(Long::Consumed(next.saturating_add(1)));
-                }
-                *file = Some(os_from_bytes(rest));
-                return Ok(Long::Consumed(i.saturating_add(1)));
-            }
-            _ => {
-                return Err(format!(
-                    "invalid option -- {}\nTry 'hostname --help' for more information.",
-                    quote(&[c])
-                ));
-            }
-        }
-        j = j.saturating_add(1);
-    }
-    Ok(Long::Consumed(i.saturating_add(1)))
 }
 
 /// Turn the accumulated flags into one action, rejecting the combinations that
@@ -619,34 +540,64 @@ fn canonical_in_hosts(content: &[u8], name: &[u8]) -> Option<Vec<u8>> {
 /// Addresses on every interface: the address table if it has any, otherwise a
 /// scan of the per-interface directories.
 fn read_addresses() -> Vec<Vec<u8>> {
+    // `/proc/net` FIRST, because on SlateOS it is the only one of these that
+    // exists. It is a FILE, not a directory -- `procfs.rs`'s `ROOT_FILES`
+    // lists `net` and `gen_net()` writes a readable block -- so
+    // `/proc/net/if_inet` cannot exist here at all, whatever it may be on
+    // another system.
+    if let Ok(content) = fs::read(PROC_NET) {
+        let ips = parse_proc_net(&content);
+        if !ips.is_empty() {
+            return ips;
+        }
+    }
     if let Ok(content) = fs::read(PROC_IF_INET) {
         let ips = parse_proc_if_inet(&content);
         if !ips.is_empty() {
             return ips;
         }
     }
-    scan_interface_dir()
+    // NO FALLBACK TO THE INTERFACE DIRECTORY.
+    //
+    // `/sys/class/net/<if>/address` is the LINK-LAYER address, and returning
+    // it here made `hostname -I` answer `bc:a8:a6:f8:91:20` -- a MAC, exit 0,
+    // to a caller asking for an IP address. The old code even filtered
+    // `00:00:00:00:00:00`, which is a MAC-shaped sentinel, so what it was
+    // reading was never in doubt.
+    //
+    // Printing nothing is the right answer when no address source is
+    // readable: `hostname -I` on a host with no addresses prints an empty
+    // line, and a script that gets nothing can tell. A script that gets a MAC
+    // cannot, and will put it in a URL.
+    Vec::new()
 }
 
-/// Read `<SYS_NET_DIR>/*/address`, skipping loopback and all-zero addresses.
-fn scan_interface_dir() -> Vec<Vec<u8>> {
-    let mut addrs = Vec::new();
-    let Ok(entries) = fs::read_dir(Path::new(SYS_NET_DIR)) else {
-        return addrs;
-    };
-    for entry in entries.flatten() {
-        if entry.file_name() == OsStr::new("lo") {
-            continue;
-        }
-        let Ok(content) = fs::read(entry.path().join("address")) else {
+/// IPv4 address from `/proc/net`, which on SlateOS is a readable block:
+///
+/// ```text
+/// Interface: eth0  (UP)
+///   MAC:     52:54:00:12:34:56
+///   IPv4:    10.0.2.15
+///   Netmask: 255.255.255.0
+/// ```
+///
+/// Only the `IPv4:` line is taken. The `MAC:` line sits two lines above it and
+/// is exactly what the old fallback was reporting as an address, so a parser
+/// here that matched on "the value after a colon" would reintroduce the bug it
+/// replaces -- the key is checked, not just the shape.
+fn parse_proc_net(content: &[u8]) -> Vec<Vec<u8>> {
+    let mut ips = Vec::new();
+    for line in content.split(|&b| b == b'\n') {
+        let line = trim(line);
+        let Some(rest) = line.strip_prefix(b"IPv4:") else {
             continue;
         };
-        let addr = trim(&content);
-        if !addr.is_empty() && addr != b"00:00:00:00:00:00" && !is_loopback(addr) {
-            addrs.push(addr.to_vec());
+        let addr = trim(rest);
+        if !addr.is_empty() && !is_loopback(addr) && addr != b"0.0.0.0" {
+            ips.push(addr.to_vec());
         }
     }
-    addrs
+    ips
 }
 
 /// Write the name to the live parameter and to the persistent file.
@@ -881,6 +832,41 @@ mod tests {
     const HOSTS: &[u8] = b"127.0.0.1\tlocalhost\n\
 127.0.1.1\tLogoplex3.localdomain\tLogoplex3\n\
 ::1     ip6-localhost ip6-loopback\n";
+
+    /// `/proc/net` as `gen_net()` writes it.
+    const PROC_NET_BLOCK: &[u8] = b"Interface: eth0  (UP)\n\
+  MAC:     52:54:00:12:34:56\n\
+  IPv4:    10.0.2.15\n\
+  Netmask: 255.255.255.0\n\
+  Gateway: 10.0.2.2\n\
+  DNS:     10.0.2.3\n";
+
+    #[test]
+    fn an_address_query_never_answers_with_a_mac() {
+        // The bug this replaces: with no readable address source, `-I` fell
+        // back to `/sys/class/net/<if>/address` -- the LINK-LAYER address --
+        // and answered `bc:a8:a6:f8:91:20`, exit 0, to a caller asking for an
+        // IP. A script cannot tell that from an address and will put it in a
+        // URL.
+        assert_eq!(parse_proc_net(PROC_NET_BLOCK), vec![b"10.0.2.15".to_vec()]);
+
+        // The MAC sits TWO LINES ABOVE the address in the same block, so a
+        // parser matching "the value after a colon" would take it. The key is
+        // checked, and this is the case that says so.
+        let ips = parse_proc_net(PROC_NET_BLOCK);
+        assert!(
+            !ips.iter().any(|a| a.contains(&b':')),
+            "an IPv4 answer must not contain a colon: {ips:?}"
+        );
+
+        // Nothing to report is an empty list, not a guess. `-I` then prints an
+        // empty line, which a caller can act on.
+        assert!(parse_proc_net(b"Interface: eth0  (DOWN)\n  MAC: 52:54:00:12:34:56\n").is_empty());
+        assert!(parse_proc_net(b"").is_empty());
+        // Loopback and the unconfigured address are not answers either.
+        assert!(parse_proc_net(b"  IPv4:    127.0.0.1\n").is_empty());
+        assert!(parse_proc_net(b"  IPv4:    0.0.0.0\n").is_empty());
+    }
 
     #[test]
     fn the_fqdn_comes_from_the_hosts_table_not_the_search_domain() {

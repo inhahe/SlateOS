@@ -240,6 +240,44 @@ pub(crate) fn abi_asserts() -> String {
          rdlength as "rdlength", rdata as "rdata");
     abi!(out, hdrs, crate::resolv::NsFlagData, "struct _ns_flagdata", "arpa/nameser.h",
          mask as "mask", shift as "shift");
+    // The resolver's state, which res_ninit and the other reentrant calls
+    // take of the caller's own. `ndots`, `nsort` and `ipv6_unavail` are
+    // bit-fields, which `offsetof` cannot name -- ours hold them as `bits`;
+    // the size and every field around them pin it.
+    abi!(
+        out,
+        hdrs,
+        crate::resolv::ResState,
+        "struct __res_state",
+        "resolv.h",
+        retrans,
+        retry,
+        options,
+        nscount,
+        nsaddr_list,
+        id,
+        dnsrch,
+        defdname,
+        pfcode,
+        sort_list,
+        qhook,
+        rhook,
+        res_h_errno,
+        _vcsock,
+        _flags,
+        _u
+    );
+    // A symbol table's entry, which sym_ntos and its kin take tables of.
+    abi!(
+        out,
+        hdrs,
+        crate::res_debug::ResSym,
+        "struct res_sym",
+        "resolv.h",
+        number,
+        name,
+        humanname
+    );
 
     // --- time: ftime's result -------------------------------------------------
     abi!(
@@ -496,8 +534,193 @@ pub(crate) fn abi_asserts() -> String {
         mxcsr as "__mxcsr",
     );
 
+    // --- what only posix/include defines: types musl's headers lack, which
+    // the overlay C is compiled with here lays out as glibc does
+    // (design-decisions §1141) -- and `check-libc-overlay.py` holds the
+    // overlay's to glibc's own ---------------------------------------------
+    abi!(
+        out,
+        hdrs,
+        crate::fenv::FemodeT,
+        "femode_t",
+        "fenv.h",
+        control_word as "__control_word",
+        mxcsr as "__mxcsr",
+    );
+    abi!(
+        out,
+        hdrs,
+        crate::fts::Fts,
+        "FTS",
+        "fts.h",
+        fts_cur,
+        fts_child,
+        fts_array,
+        fts_dev,
+        fts_path,
+        fts_rfd,
+        fts_pathlen,
+        fts_nitems,
+        fts_compar,
+        fts_options
+    );
+    abi!(
+        out,
+        hdrs,
+        crate::fts::FtsEnt,
+        "FTSENT",
+        "fts.h",
+        fts_cycle,
+        fts_parent,
+        fts_link,
+        fts_number,
+        fts_pointer,
+        fts_accpath,
+        fts_path,
+        fts_errno,
+        fts_symfd,
+        fts_pathlen,
+        fts_namelen,
+        fts_ino,
+        fts_dev,
+        fts_nlink,
+        fts_level,
+        fts_info,
+        fts_flags,
+        fts_instr,
+        fts_statp,
+        fts_name
+    );
+    abi!(
+        out,
+        hdrs,
+        crate::malloc::Mallinfo,
+        "struct mallinfo",
+        "malloc.h",
+        arena,
+        ordblks,
+        smblks,
+        hblks,
+        hblkhd,
+        usmblks,
+        fsmblks,
+        uordblks,
+        fordblks,
+        keepcost
+    );
+    abi!(
+        out,
+        hdrs,
+        crate::malloc::Mallinfo2,
+        "struct mallinfo2",
+        "malloc.h",
+        arena,
+        ordblks,
+        smblks,
+        hblks,
+        hblkhd,
+        usmblks,
+        fsmblks,
+        uordblks,
+        fordblks,
+        keepcost
+    );
+    abi!(
+        out,
+        hdrs,
+        crate::legacy::Sigstack,
+        "struct sigstack",
+        "signal.h",
+        ss_sp,
+        ss_onstack
+    );
+    abi!(
+        out,
+        hdrs,
+        crate::prng::RandomData,
+        "struct random_data",
+        "stdlib.h",
+        fptr,
+        rptr,
+        state,
+        rand_type,
+        rand_deg,
+        rand_sep,
+        end_ptr
+    );
+    abi!(
+        out,
+        hdrs,
+        crate::prng::Drand48Data,
+        "struct drand48_data",
+        "stdlib.h",
+        x as "__x",
+        old_x as "__old_x",
+        c as "__c",
+        init as "__init",
+        a as "__a",
+    );
+    abi!(
+        out,
+        hdrs,
+        crate::dlfcn::DlSerpath,
+        "Dl_serpath",
+        "dlfcn.h",
+        dls_name,
+        dls_flags
+    );
+    abi!(
+        out,
+        hdrs,
+        crate::dlfcn::DlSerinfo,
+        "Dl_serinfo",
+        "dlfcn.h",
+        dls_size,
+        dls_cnt,
+        dls_serpath
+    );
+    abi!(
+        out,
+        hdrs,
+        crate::dlfcn::DlFindObject,
+        "struct dl_find_object",
+        "dlfcn.h",
+        dlfo_flags,
+        dlfo_map_start,
+        dlfo_map_end,
+        dlfo_link_map,
+        dlfo_eh_frame,
+        reserved as "__dflo_reserved",
+    );
+
     // --- regex: `regex_t` is declared by value too ---------------------------
-    abi!(out, hdrs, crate::regex::RegexT, "regex_t", "regex.h");
+    // glibc's `struct re_pattern_buffer`, posix/include's; its seven
+    // bit-fields, which `offsetof` cannot name, are the `unsigned int` at 56
+    // that the size covers.
+    abi!(
+        out,
+        hdrs,
+        crate::regex::RegexT,
+        "regex_t",
+        "regex.h",
+        buffer,
+        allocated,
+        used,
+        syntax,
+        fastmap,
+        translate,
+        re_nsub,
+    );
+    abi!(
+        out,
+        hdrs,
+        crate::regex::ReRegisters,
+        "struct re_registers",
+        "regex.h",
+        num_regs,
+        start,
+        end
+    );
     abi!(
         out,
         hdrs,
@@ -506,6 +729,38 @@ pub(crate) fn abi_asserts() -> String {
         "regex.h",
         rm_so,
         rm_eo
+    );
+
+    // --- obstack: the program's own, which <obstack.h>'s macros open --------
+    // glibc's `struct obstack`, posix/include's; its three bit-fields, which
+    // `offsetof` cannot name, are the `unsigned int` at 80 that the size
+    // covers.
+    abi!(
+        out,
+        hdrs,
+        crate::obstack::Obstack,
+        "struct obstack",
+        "obstack.h",
+        chunk_size,
+        chunk,
+        object_base,
+        next_free,
+        chunk_limit,
+        temp,
+        alignment_mask,
+        chunkfun,
+        freefun,
+        extra_arg,
+    );
+    abi!(
+        out,
+        hdrs,
+        crate::obstack::ObstackChunk,
+        "struct _obstack_chunk",
+        "obstack.h",
+        limit,
+        prev,
+        contents
     );
 
     // --- small odds and ends -------------------------------------------------
@@ -620,6 +875,55 @@ pub(crate) fn abi_asserts() -> String {
         sp_inact,
         sp_expire,
         sp_flag
+    );
+    abi!(
+        out,
+        hdrs,
+        crate::gshadow::Sgrp,
+        "struct sgrp",
+        "gshadow.h",
+        sg_namp,
+        sg_passwd,
+        sg_adm,
+        sg_mem
+    );
+    abi!(
+        out,
+        hdrs,
+        crate::aliases::Aliasent,
+        "struct aliasent",
+        "aliases.h",
+        alias_name,
+        alias_members_len,
+        alias_members,
+        alias_local
+    );
+    abi!(
+        out,
+        hdrs,
+        crate::fstab::Fstab,
+        "struct fstab",
+        "fstab.h",
+        fs_spec,
+        fs_file,
+        fs_vfstype,
+        fs_mntops,
+        fs_type,
+        fs_freq,
+        fs_passno
+    );
+    abi!(
+        out,
+        hdrs,
+        crate::ttyent::Ttyent,
+        "struct ttyent",
+        "ttyent.h",
+        ty_name,
+        ty_getty,
+        ty_type,
+        ty_status,
+        ty_window,
+        ty_comment
     );
     abi!(
         out,
@@ -789,7 +1093,25 @@ pub(crate) fn abi_asserts() -> String {
     // promise.
     abi!(out, hdrs, crate::poll::FdSet, "fd_set", "sys/select.h");
     abi!(out, hdrs, crate::signal::SiginfoT, "siginfo_t", "signal.h");
-    abi!(out, hdrs, crate::glob::GlobT, "glob_t", "glob.h");
+    // Not opaque: posix/include's <glob.h> names glibc's fields, which musl's
+    // calls __dummy1 and __dummy2 -- GLOB_ALTDIRFUNC's functions among them,
+    // which a program sets.
+    abi!(
+        out,
+        hdrs,
+        crate::glob::GlobT,
+        "glob_t",
+        "glob.h",
+        gl_pathc,
+        gl_pathv,
+        gl_offs,
+        gl_flags,
+        gl_closedir,
+        gl_readdir,
+        gl_opendir,
+        gl_lstat,
+        gl_stat
+    );
     abi!(
         out,
         hdrs,
@@ -797,7 +1119,7 @@ pub(crate) fn abi_asserts() -> String {
         "wordexp_t",
         "wordexp.h"
     );
-    abi!(out, hdrs, crate::uchar::MbstateT, "mbstate_t", "wchar.h");
+    abi!(out, hdrs, crate::wchar::MbstateT, "mbstate_t", "wchar.h");
     abi!(
         out,
         hdrs,
@@ -830,6 +1152,21 @@ pub(crate) fn abi_asserts() -> String {
     abi!(
         out,
         hdrs,
+        crate::aio::AioInit,
+        "struct aioinit",
+        "aio.h",
+        aio_threads,
+        aio_num,
+        aio_locks,
+        aio_usedba,
+        aio_debug,
+        aio_numusers,
+        aio_idle_time,
+        aio_reserved
+    );
+    abi!(
+        out,
+        hdrs,
         crate::dlfcn::DlInfo,
         "Dl_info",
         "dlfcn.h",
@@ -837,6 +1174,33 @@ pub(crate) fn abi_asserts() -> String {
         dli_fbase,
         dli_sname,
         dli_saddr
+    );
+    abi!(
+        out,
+        hdrs,
+        crate::dlfcn::LinkMap,
+        "struct link_map",
+        "link.h",
+        l_addr,
+        l_name,
+        l_ld,
+        l_next,
+        l_prev
+    );
+    abi!(
+        out,
+        hdrs,
+        crate::dlfcn::DlPhdrInfo,
+        "struct dl_phdr_info",
+        "link.h",
+        dlpi_addr,
+        dlpi_name,
+        dlpi_phdr,
+        dlpi_phnum,
+        dlpi_adds,
+        dlpi_subs,
+        dlpi_tls_modid,
+        dlpi_tls_data
     );
     abi!(
         out,
@@ -899,6 +1263,29 @@ pub(crate) fn abi_asserts() -> String {
         n_aliases,
         n_addrtype,
         n_net
+    );
+    abi!(
+        out,
+        hdrs,
+        crate::gai_a::Gaicb,
+        "struct gaicb",
+        "netdb.h",
+        ar_name,
+        ar_service,
+        ar_request,
+        ar_result,
+        ret as "__return",
+        reserved as "__glibc_reserved"
+    );
+    abi!(
+        out,
+        hdrs,
+        crate::netdb::Rpcent,
+        "struct rpcent",
+        "rpc/netdb.h",
+        r_name,
+        r_aliases,
+        r_number
     );
     abi!(
         out,
@@ -1110,6 +1497,19 @@ pub(crate) fn abi_asserts() -> String {
         crate::sys_timex::Timex,
         "struct timex",
         "sys/timex.h"
+    );
+    // glibc's, which the overlay defines in place of musl's shorter one.
+    abi!(
+        out,
+        hdrs,
+        crate::sys_timex::NtpTimeval,
+        "struct ntptimeval",
+        "sys/timex.h",
+        time,
+        maxerror,
+        esterror,
+        tai,
+        reserved as "__glibc_reserved1"
     );
 
     // --- the kernel-ABI structs, checked against the kernel's own uapi -------

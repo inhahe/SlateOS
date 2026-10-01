@@ -1242,8 +1242,9 @@ fn parse_ar_args(args: &[OsString]) -> Result<(ArOptions, OsString, Vec<OsString
             'r' | 'd' | 't' | 'x' | 'q' | 'p' => {
                 if opts.operation != '\0' {
                     return Err(format!(
-                        "multiple operations: '{}' and '{}'",
-                        opts.operation, ch
+                        "multiple operations: {} and {}",
+                        quoteaf_os(opts.operation.to_string()),
+                        quoteaf_os(ch.to_string())
                     ));
                 }
                 opts.operation = ch;

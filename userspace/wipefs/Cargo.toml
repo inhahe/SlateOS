@@ -2,9 +2,28 @@
 name = "wipefs"
 version = "0.1.0"
 edition = "2024"
-description = "SlateOS wipefs utility"
+description = "util-linux 2.39.3's wipefs, ported: find and erase filesystem, RAID and partition-table signatures, through the libblkid port"
+
+[lints]
+workspace = true
+
 [dependencies]
-# For quoting device names in diagnostics: a path may contain spaces and
-# newlines, and an unquoted one makes the message ambiguous about where the
-# name ends. Enforced by scripts/quote-names.py.
+# glibc's getopt_long, with util-linux's mutually exclusive options.
+getoptlong = { path = "../getoptlong" }
+# argv and paths are bytes; a name in a diagnostic is escaped.
 quoting = { path = "../quoting" }
+# libblkid: every signature, found with do_probe and erased with do_wipe.
+ulblkid = { path = "../ulblkid" }
+# strtosize_or_err for -o; match_fstype for -t; string_add_to_idarray for -O.
+ulstrutils = { path = "../ulstrutils" }
+# libsmartcols: the table of signatures.
+smartcols = { path = "../smartcols" }
+# util-linux's close_stdout, and stdout buffered as glibc buffers it.
+ulclosestream = { path = "../ulclosestream" }
+# strerror, for %m.
+errmsg = { path = "../errmsg" }
+# A standard descriptor wipefs was started without stays closed.
+stdfdguard = { path = "../stdfdguard" }
+
+[dev-dependencies]
+scratchdir = { path = "../scratchdir" }

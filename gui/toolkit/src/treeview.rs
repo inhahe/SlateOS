@@ -89,7 +89,7 @@ use crate::event::{Key, KeyEvent, MouseButton, MouseEvent, MouseEventKind};
 use crate::frame::{Frame, Rect};
 use crate::grab;
 use crate::layout::Axis;
-use crate::palette::Palette;
+use crate::palette::{Palette, Tone};
 use crate::render::{FontWeightHint, RenderCommand, TextOverflow};
 use crate::scroll_window;
 use crate::scrollbar;
@@ -121,6 +121,13 @@ pub struct TreeItem<K> {
     pub detail: Option<String>,
     /// An image drawn before the label, by the id it was uploaded under.
     pub icon: Option<u64>,
+    /// A short mark drawn before the label, after the icon if there is one.
+    pub badge: Option<TreeBadge>,
+    /// The colour the label is drawn in, where it is not the usual text ink.
+    pub label_tone: Option<Tone>,
+    /// The colour the detail is drawn in, where it is not the usual
+    /// secondary ink.
+    pub detail_tone: Option<Tone>,
     /// Whether the node can be acted on.
     ///
     /// A disabled node is drawn greyed and can still be selected and opened —
@@ -139,6 +146,9 @@ impl<K> TreeItem<K> {
             expandable: false,
             detail: None,
             icon: None,
+            badge: None,
+            label_tone: None,
+            detail_tone: None,
             state: DisabledState::Enabled,
         }
     }
@@ -165,6 +175,34 @@ impl<K> TreeItem<K> {
         self
     }
 
+    /// The same node with a short mark before its label -- a letter, a
+    /// glyph -- in `tone`: how a row says what kind of thing it is, as a
+    /// database's tree marks its tables T and its views V.
+    #[must_use]
+    pub fn with_badge(mut self, text: impl Into<String>, tone: Tone) -> Self {
+        self.badge = Some(TreeBadge {
+            text: text.into(),
+            tone,
+        });
+        self
+    }
+
+    /// The same node with its label in `tone`: a JSON key, say, in one
+    /// colour for a container and another for a value.
+    #[must_use]
+    pub fn with_label_tone(mut self, tone: Tone) -> Self {
+        self.label_tone = Some(tone);
+        self
+    }
+
+    /// The same node with its detail in `tone`: a JSON value in its kind's
+    /// colour, a device's status in its severity's.
+    #[must_use]
+    pub fn with_detail_tone(mut self, tone: Tone) -> Self {
+        self.detail_tone = Some(tone);
+        self
+    }
+
     /// The same node, disabled, with the reason a user is shown.
     ///
     /// Takes a reason rather than offering a bare "disabled", because a
@@ -177,6 +215,21 @@ impl<K> TreeItem<K> {
         };
         self
     }
+}
+
+/// A short mark before a row's label, in a tone of its own. See
+/// [`TreeItem::with_badge`].
+///
+/// A tone rather than a colour, so the theme decides what the mark's colour
+/// is and the text floor holds it legible ([`Palette::tone`]). Drawn in the
+/// row's font, bold, in a cell as wide as an icon -- so single-letter
+/// badges line up in a column -- or as the mark, up to [`BADGE_MAX`].
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct TreeBadge {
+    /// The mark: a character or two.
+    pub text: String,
+    /// Its colour.
+    pub tone: Tone,
 }
 
 /// The data behind a tree: what the children of a node are.
@@ -497,6 +550,12 @@ pub struct TreeRow<K> {
     pub detail: Option<String>,
     /// See [`TreeItem::icon`].
     pub icon: Option<u64>,
+    /// See [`TreeItem::badge`].
+    pub badge: Option<TreeBadge>,
+    /// See [`TreeItem::label_tone`].
+    pub label_tone: Option<Tone>,
+    /// See [`TreeItem::detail_tone`].
+    pub detail_tone: Option<Tone>,
     /// See [`TreeItem::state`].
     pub state: DisabledState,
     /// Whether the row shows a disclosure arrow: the node can have children,
@@ -612,6 +671,10 @@ const ARROW: f32 = 3.5;
 const CHECK_SIZE: f32 = 14.0;
 /// Side of an icon.
 const ICON_SIZE: f32 = 16.0;
+/// The widest a badge's cell grows, however long its mark: a badge is a
+/// character or two, and a longer one is cut rather than let push the label
+/// off the row.
+pub const BADGE_MAX: f32 = 40.0;
 /// Gap between a row's parts.
 const GAP: f32 = 6.0;
 /// The most of a row's width its detail text may take. The label is what
@@ -1373,7 +1436,33 @@ impl<K: Clone + Ord> TreeView<K> {
                 x += ICON_SIZE + GAP;
             }
 
+            // A disabled row is faint all through, whatever its tones say:
+            // its colours would otherwise claim it can be acted on.
+            let toned = |tone: Option<Tone>, usual: Color| {
+                if row_disabled {
+                    palette.overlay0
+                } else {
+                    tone.map_or(usual, |t| palette.tone(t))
+                }
+            };
             let text_y = row_rect.y + (row_rect.h - line_h) / 2.0;
+            if let Some(badge) = &row.badge {
+                let wanted = text::measure(&badge.text, m.font_size, FontWeightHint::Bold);
+                let cell = wanted.clamp(ICON_SIZE, BADGE_MAX);
+                ink.push(RenderCommand::Text {
+                    // Centred in its cell, so marks of one width line up.
+                    x: x + ((cell - wanted) / 2.0).max(0.0),
+                    y: text_y,
+                    text: badge.text.clone(),
+                    color: toned(Some(badge.tone), palette.text),
+                    font_size: m.font_size,
+                    font_weight: FontWeightHint::Bold,
+                    max_width: Some(cell),
+                    overflow: TextOverflow::Ellipsis,
+                });
+                x += cell + GAP;
+            }
+
             let right = content.x + content.w - PAD_RIGHT;
             let mut label_end = right;
             if let Some(detail) = &row.detail {
@@ -1387,11 +1476,7 @@ impl<K: Clone + Ord> TreeView<K> {
                         x: detail_x,
                         y: text_y,
                         text: detail.clone(),
-                        color: if row_disabled {
-                            palette.overlay0
-                        } else {
-                            palette.subtext0
-                        },
+                        color: toned(row.detail_tone, palette.subtext0),
                         font_size: m.font_size,
                         font_weight: FontWeightHint::Regular,
                         max_width: Some(width),
@@ -1404,11 +1489,7 @@ impl<K: Clone + Ord> TreeView<K> {
                 x,
                 y: text_y,
                 text: row.label.clone(),
-                color: if row_disabled {
-                    palette.overlay0
-                } else {
-                    palette.text
-                },
+                color: toned(row.label_tone, palette.text),
                 font_size: m.font_size,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some((label_end - x).max(0.0)),
@@ -1695,6 +1776,9 @@ fn flatten<S: TreeSource>(source: &S, expanded: &BTreeSet<Vec<S::Key>>) -> Vec<T
             label: item.label,
             detail: item.detail,
             icon: item.icon,
+            badge: item.badge,
+            label_tone: item.label_tone,
+            detail_tone: item.detail_tone,
             state: item.state,
             expandable,
             expanded: expanded_here,
@@ -3233,6 +3317,161 @@ mod tests {
                     }
                 }
             }
+        }
+    }
+
+    // ------------------------------------------------------------------
+    // Tones and badges
+    // ------------------------------------------------------------------
+
+    /// A source of top-level rows only, as given.
+    struct Rows(Vec<TreeItem<&'static str>>);
+
+    impl TreeSource for Rows {
+        type Key = &'static str;
+        fn children(&self, parent: &[&'static str]) -> Option<Vec<TreeItem<&'static str>>> {
+            Some(if parent.is_empty() {
+                self.0.clone()
+            } else {
+                Vec::new()
+            })
+        }
+    }
+
+    /// Each text drawn: what, where, in what colour and weight.
+    fn inked(cmds: &[RenderCommand]) -> Vec<(String, f32, Color, FontWeightHint)> {
+        cmds.iter()
+            .filter_map(|c| match c {
+                RenderCommand::Text {
+                    text,
+                    x,
+                    color,
+                    font_weight,
+                    ..
+                } => Some((text.clone(), *x, *color, *font_weight)),
+                _ => None,
+            })
+            .collect()
+    }
+
+    fn drawn(
+        rows: Vec<TreeItem<&'static str>>,
+        palette: &Palette,
+    ) -> Vec<(String, f32, Color, FontWeightHint)> {
+        let source = Rows(rows);
+        let mut view = TreeView::new();
+        view.set_bounds(Rect::new(0.0, 0.0, 300.0, 24.0 * 4.0));
+        view.refresh(&source);
+        inked(&view.render(palette))
+    }
+
+    fn find<'a>(
+        texts: &'a [(String, f32, Color, FontWeightHint)],
+        what: &str,
+    ) -> &'a (String, f32, Color, FontWeightHint) {
+        texts.iter().find(|(t, ..)| t == what).unwrap()
+    }
+
+    /// **A row's label and detail are drawn in their tones**, held legible
+    /// as the palette holds them; a row without tones keeps the usual inks.
+    #[test]
+    fn a_rows_label_and_detail_are_drawn_in_their_tones() {
+        for palette in [Palette::for_mode(false), Palette::for_mode(true)] {
+            let texts = drawn(
+                vec![
+                    TreeItem::leaf("k", "name")
+                        .with_detail("\"text\"")
+                        .with_label_tone(Tone::Mauve)
+                        .with_detail_tone(Tone::Green),
+                    TreeItem::leaf("p", "plain").with_detail("4 KiB"),
+                ],
+                &palette,
+            );
+            assert_eq!(find(&texts, "name").2, palette.tone(Tone::Mauve));
+            assert_eq!(find(&texts, "\"text\"").2, palette.tone(Tone::Green));
+            assert_eq!(find(&texts, "plain").2, palette.text);
+            assert_eq!(find(&texts, "4 KiB").2, palette.subtext0);
+        }
+    }
+
+    /// **A badge goes before the label, in its tone, bold, in a cell as
+    /// wide as an icon**: marks of one width line up, the label moves over
+    /// by the cell, and after an icon the badge comes after it.
+    #[test]
+    fn a_badge_goes_before_the_label_in_its_tone() {
+        let palette = Palette::for_mode(false);
+        let texts = drawn(
+            vec![
+                TreeItem::leaf("t", "Tables").with_badge("T", Tone::Blue),
+                TreeItem::leaf("v", "Views").with_badge("V", Tone::Green),
+                TreeItem::leaf("n", "None"),
+                TreeItem::leaf("i", "Iconic")
+                    .with_icon(7)
+                    .with_badge("I", Tone::Peach),
+            ],
+            &palette,
+        );
+        let (_, tx, tcolour, tweight) = find(&texts, "T");
+        assert_eq!(*tcolour, palette.tone(Tone::Blue));
+        assert_eq!(*tweight, FontWeightHint::Bold);
+        let (_, label_x, label_colour, _) = find(&texts, "Tables");
+        assert_eq!(*label_colour, palette.text, "the badge's tone is its own");
+        let plain_x = find(&texts, "None").1;
+        assert!(*tx >= plain_x && *tx < *label_x, "{tx} before {label_x}");
+        // Centred in its cell.
+        let wide = text::measure("T", TreeMetrics::default().font_size, FontWeightHint::Bold);
+        assert!(
+            (tx + wide / 2.0 - (plain_x + ICON_SIZE / 2.0)).abs() < 0.01,
+            "{tx} + {wide} / 2 is the cell's middle"
+        );
+        assert!(
+            (label_x - plain_x - (ICON_SIZE + GAP)).abs() < 0.01,
+            "the label moves over by one icon-wide cell: {plain_x} -> {label_x}"
+        );
+        assert!(
+            (find(&texts, "Views").1 - label_x).abs() < 0.01,
+            "labels line up"
+        );
+        // After an icon: the icon's cell, then the badge's.
+        let iconic_x = find(&texts, "Iconic").1;
+        assert!((iconic_x - plain_x - 2.0 * (ICON_SIZE + GAP)).abs() < 0.01);
+        assert!(find(&texts, "I").1 >= plain_x + ICON_SIZE + GAP);
+    }
+
+    /// **A long badge is held to its cell's widest**, rather than pushing
+    /// the label off the row.
+    #[test]
+    fn a_long_badge_is_held_to_its_widest() {
+        let palette = Palette::for_mode(false);
+        let texts = drawn(
+            vec![
+                TreeItem::leaf("l", "label").with_badge("a very long mark indeed", Tone::Red),
+                TreeItem::leaf("n", "None"),
+            ],
+            &palette,
+        );
+        let shift = find(&texts, "label").1 - find(&texts, "None").1;
+        assert!((shift - (BADGE_MAX + GAP)).abs() < 0.01, "{shift}");
+    }
+
+    /// **A disabled row is faint all through**, whatever its tones and its
+    /// badge's say.
+    #[test]
+    fn a_disabled_row_is_faint_whatever_its_tones() {
+        let palette = Palette::for_mode(false);
+        let texts = drawn(
+            vec![
+                TreeItem::leaf("d", "off")
+                    .with_detail("detail")
+                    .with_label_tone(Tone::Red)
+                    .with_detail_tone(Tone::Green)
+                    .with_badge("!", Tone::Red)
+                    .disabled("not now"),
+            ],
+            &palette,
+        );
+        for what in ["off", "detail", "!"] {
+            assert_eq!(find(&texts, what).2, palette.overlay0, "{what}");
         }
     }
 }

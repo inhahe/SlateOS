@@ -230,19 +230,33 @@ pub extern "C" fn munmap(addr: *mut core::ffi::c_void, length: SizeT) -> i32 {
 /// alignment, and a wrapping range was `EINVAL` where Linux says `ENOMEM`.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn mprotect(addr: *mut core::ffi::c_void, len: SizeT, prot: i32) -> i32 {
+    match mprotect_prechecks(addr, len, prot) {
+        Err(e) => {
+            errno::set_errno(e);
+            -1
+        }
+        Ok(false) => 0,
+        Ok(true) => {
+            let ret = syscall3(SYS_MPROTECT, addr as u64, len as u64, prot as u64);
+            errno::translate(ret) as i32
+        }
+    }
+}
+
+/// `mprotect`'s own checks, before the kernel looks at the range -- in
+/// `do_mprotect_pkey`'s order, which also runs `pkey_mprotect`'s key check
+/// after them: `Err(errno)`, `Ok(false)` for a zero length (nothing to do,
+/// and success), `Ok(true)` to go on.
+fn mprotect_prechecks(addr: *mut core::ffi::c_void, len: SizeT, prot: i32) -> Result<bool, i32> {
     const GROWS: i32 = PROT_GROWSDOWN | PROT_GROWSUP;
-    let fail = |e: i32| -> i32 {
-        errno::set_errno(e);
-        -1
-    };
     if prot & GROWS == GROWS {
-        return fail(errno::EINVAL);
+        return Err(errno::EINVAL);
     }
     if !is_page_aligned(addr.cast_const()) {
-        return fail(errno::EINVAL);
+        return Err(errno::EINVAL);
     }
     if len == 0 {
-        return 0;
+        return Ok(false);
     }
     // `len = PAGE_ALIGN(len); end = start + len; if (end <= start) -ENOMEM`,
     // and a range past user space has no VMA, which is ENOMEM too.
@@ -251,13 +265,106 @@ pub extern "C" fn mprotect(addr: *mut core::ffi::c_void, len: SizeT, prot: i32) 
         .checked_next_multiple_of(page)
         .and_then(|l| addr.addr().checked_add(l));
     if end.is_none_or(|e| e > TASK_SIZE) {
-        return fail(errno::ENOMEM);
+        return Err(errno::ENOMEM);
     }
     if prot & !GROWS & !(PROT_READ | PROT_WRITE | PROT_EXEC | PROT_SEM) != 0 {
-        return fail(errno::EINVAL);
+        return Err(errno::EINVAL);
     }
-    let ret = syscall3(SYS_MPROTECT, addr as u64, len as u64, prot as u64);
-    errno::translate(ret) as i32
+    Ok(true)
+}
+
+// ---------------------------------------------------------------------------
+// Memory protection keys (Linux; glibc 2.27)
+//
+// SlateOS has none: the kernel keeps no PKRU for a thread, so no key is ever
+// allocated. The answers are Linux's on a processor without protection keys
+// (glibc 2.39's, `pkey_oracle.txt`), save where glibc's own dies of SIGILL.
+// ---------------------------------------------------------------------------
+
+/// `pkey_alloc`'s restriction: no access at all to pages with the key.
+pub const PKEY_DISABLE_ACCESS: u32 = 0x1;
+/// `pkey_alloc`'s restriction: no writes to pages with the key.
+pub const PKEY_DISABLE_WRITE: u32 = 0x2;
+
+/// Allocate a memory protection key. There are none to allocate here, so
+/// valid arguments answer `ENOSPC`, as Linux does on a processor without
+/// them and as pkey_alloc(2) documents for that case; `flags` other than 0,
+/// or restrictions other than `PKEY_DISABLE_ACCESS` and
+/// `PKEY_DISABLE_WRITE`, are `EINVAL` first, as Linux checks them first.
+///
+/// (Linux 6.6 answers a process's *first* `pkey_alloc` `EINVAL` whatever it
+/// asks; `pkey_harness.py` measured that, and records the steady answer.)
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub extern "C" fn pkey_alloc(flags: u32, access_rights: u32) -> i32 {
+    errno::set_errno(
+        if flags != 0 || access_rights & !(PKEY_DISABLE_ACCESS | PKEY_DISABLE_WRITE) != 0 {
+            errno::EINVAL
+        } else {
+            errno::ENOSPC
+        },
+    );
+    -1
+}
+
+/// Free a memory protection key: `EINVAL`, since no key is ever allocated.
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub extern "C" fn pkey_free(_pkey: i32) -> i32 {
+    errno::set_errno(errno::EINVAL);
+    -1
+}
+
+/// `mprotect`, with the region's protection key set to `pkey`. `-1` is no
+/// key, and so `mprotect` itself. Any other key is `EINVAL` -- none is
+/// allocated here -- after `mprotect`'s own checks and before the range is
+/// looked at, as Linux's `do_mprotect_pkey` orders them: a zero length is
+/// still success, and a hole in the range is still `EINVAL`, not `ENOMEM`.
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub extern "C" fn pkey_mprotect(
+    addr: *mut core::ffi::c_void,
+    len: SizeT,
+    prot: i32,
+    pkey: i32,
+) -> i32 {
+    if pkey == -1 {
+        return mprotect(addr, len, prot);
+    }
+    match mprotect_prechecks(addr, len, prot) {
+        Ok(false) => 0,
+        Err(e) => {
+            errno::set_errno(e);
+            -1
+        }
+        Ok(true) => {
+            errno::set_errno(errno::EINVAL);
+            -1
+        }
+    }
+}
+
+/// The calling thread's access restrictions for pages with key `key`.
+///
+/// `-1` with `EINVAL` for every key. glibc's checks the range -- `EINVAL`
+/// outside 0 to 15 -- and then reads the PKRU register, an instruction a
+/// processor without protection keys does not have: the process dies of
+/// `SIGILL` (`pkey_oracle.txt`). Its manual calls this call on such a system
+/// undefined; here no key is valid, and the answer says so.
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub extern "C" fn pkey_get(_key: i32) -> i32 {
+    errno::set_errno(errno::EINVAL);
+    -1
+}
+
+/// Set the calling thread's access restrictions for pages with key `key`.
+///
+/// `-1` with `EINVAL` for every call: glibc's answers so for a key out of
+/// range or restrictions it does not know, and otherwise writes the PKRU
+/// register -- `SIGILL` on a processor without protection keys. Its manual's
+/// only error is `EINVAL`, "the system does not support the access
+/// restrictions", and this one supports none.
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub extern "C" fn pkey_set(_key: i32, _access_rights: u32) -> i32 {
+    errno::set_errno(errno::EINVAL);
+    -1
 }
 
 // ---------------------------------------------------------------------------
@@ -584,6 +691,100 @@ pub extern "C" fn madvise(addr: *mut core::ffi::c_void, length: SizeT, advice: i
 
 #[cfg(test)]
 mod tests {
+    /// glibc 2.39's `pkey_*` on Linux, a processor without protection keys
+    /// (`posix/tools/oracle/pkey_harness.py`), replayed: every call but the
+    /// three `pkey_mprotect`s with no key that `mprotect` passes on to the
+    /// kernel; and `pkey_get` and `pkey_set` in range, whose glibc dies of
+    /// `SIGILL`, answered `EINVAL` here instead.
+    #[test]
+    fn pkey_calls_answer_as_glibcs() {
+        use std::format;
+        use std::string::String;
+        const ORACLE: &str = include_str!("pkey_oracle.txt");
+        const RW: i32 = PROT_READ | PROT_WRITE;
+        let page = crate::unistd::PAGE_SIZE;
+        // An address this test never touches: nothing below reaches the
+        // kernel with it.
+        let p = (0x4000_0000usize).next_multiple_of(page) as *mut core::ffi::c_void;
+        let p1 = p.wrapping_byte_add(1);
+        let answer = |r: i32| -> String {
+            if r == 0 {
+                return "0 0".into();
+            }
+            let e = match crate::errno::get_errno() {
+                crate::errno::EINVAL => "EINVAL",
+                crate::errno::ENOSPC => "ENOSPC",
+                crate::errno::ENOMEM => "ENOMEM",
+                crate::errno::ENOSYS => "ENOSYS",
+                _ => "other",
+            };
+            format!("{r} {e}")
+        };
+        let mut replayed = 0;
+        for line in ORACLE.lines().filter(|l| !l.starts_with('#')) {
+            let (call, glibc) = line.split_once(" = ").expect("<call> = <answer>");
+            crate::errno::set_errno(0);
+            let ours = match call {
+                "pkey_alloc(0, 0)" => pkey_alloc(0, 0),
+                "pkey_alloc(0, PKEY_DISABLE_ACCESS)" => pkey_alloc(0, PKEY_DISABLE_ACCESS),
+                "pkey_alloc(0, PKEY_DISABLE_WRITE)" => pkey_alloc(0, PKEY_DISABLE_WRITE),
+                "pkey_alloc(0, 3)" => pkey_alloc(0, 3),
+                "pkey_alloc(0, 4)" => pkey_alloc(0, 4),
+                "pkey_alloc(0, 8)" => pkey_alloc(0, 8),
+                "pkey_alloc(1, 0)" => pkey_alloc(1, 0),
+                "pkey_alloc(0x80000000, 0)" => pkey_alloc(0x8000_0000, 0),
+                "pkey_free(0)" => pkey_free(0),
+                "pkey_free(1)" => pkey_free(1),
+                "pkey_free(15)" => pkey_free(15),
+                "pkey_free(16)" => pkey_free(16),
+                "pkey_free(-1)" => pkey_free(-1),
+                "pkey_mprotect(p, page, RW, 0)" => pkey_mprotect(p, page, RW, 0),
+                "pkey_mprotect(p, page, RW, 1)" => pkey_mprotect(p, page, RW, 1),
+                "pkey_mprotect(p, page, RW, 15)" => pkey_mprotect(p, page, RW, 15),
+                "pkey_mprotect(p, page, RW, 16)" => pkey_mprotect(p, page, RW, 16),
+                "pkey_mprotect(p, page, RW, -2)" => pkey_mprotect(p, page, RW, -2),
+                "pkey_mprotect(p + 1, page, RW, -1)" => pkey_mprotect(p1, page, RW, -1),
+                "pkey_mprotect(p + 1, page, RW, 5)" => pkey_mprotect(p1, page, RW, 5),
+                "pkey_mprotect(p, 0, RW, 5)" => pkey_mprotect(p, 0, RW, 5),
+                "pkey_mprotect(p, page, RW|GROWSDOWN|GROWSUP, 5)" => {
+                    pkey_mprotect(p, page, RW | PROT_GROWSDOWN | PROT_GROWSUP, 5)
+                }
+                "pkey_mprotect(p, page, 0x1000, 5)" => pkey_mprotect(p, page, 0x1000, 5),
+                "pkey_mprotect(p, 2*page, RW, 5)" => pkey_mprotect(p, 2 * page, RW, 5),
+                "pkey_mprotect(NULL, page, RW, 5)" => {
+                    pkey_mprotect(core::ptr::null_mut(), page, RW, 5)
+                }
+                "pkey_get(-1)" => pkey_get(-1),
+                "pkey_get(16)" => pkey_get(16),
+                "pkey_set(-1, 0)" => pkey_set(-1, 0),
+                "pkey_set(16, 0)" => pkey_set(16, 0),
+                "pkey_set(1, 4)" => pkey_set(1, 4),
+                // No key: mprotect, which needs the kernel.
+                c if c.starts_with("pkey_mprotect(") && c.ends_with(", -1)") => continue,
+                // glibc's dies of SIGILL; here, EINVAL.
+                c if glibc == "killed by SIGILL" => {
+                    let args = c.split_once('(').expect("a call").1.trim_end_matches(')');
+                    let r = if c.starts_with("pkey_get(") {
+                        pkey_get(args.parse().expect("a key"))
+                    } else {
+                        let (key, rights) = args.split_once(", ").expect("two arguments");
+                        pkey_set(key.parse().expect("a key"), rights.parse().expect("rights"))
+                    };
+                    assert_eq!(answer(r), "-1 EINVAL", "{c}: glibc dies; here, EINVAL");
+                    replayed += 1;
+                    continue;
+                }
+                other => panic!("a call this test does not know: {other}"),
+            };
+            assert_eq!(answer(ours), glibc, "{call}");
+            replayed += 1;
+        }
+        assert_eq!(
+            replayed, 36,
+            "every call but the three with no key that reach the kernel"
+        );
+    }
+
     use super::*;
 
     // -- Protection flags match Linux x86_64 --

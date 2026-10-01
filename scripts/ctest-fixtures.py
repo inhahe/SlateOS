@@ -317,6 +317,11 @@ STAGED_GLOBS = (
     "services/fastpy-*/*.elf",
     "build/spike/*.elf",
     "build/spike/*.zip",
+    # Not built but tracked, and staged all the same: the list of fixtures
+    # the kernel's generic rung runs. An edit to it after the image was
+    # packed is the same false green as a fixture rebuilt after -- the boot
+    # would run the old list.
+    "services/ctest-generic.list",
 )
 
 # There used to be a third stamp here: a per-fixture record of the inputs that
@@ -423,9 +428,9 @@ def _inputs(fixture: Path) -> list[tuple[str, Path, bool]]:
     """The files whose content determines the ELF.
 
     `build.py` stands in for the compile/link flags, which live nowhere else.
-    `main.c` exists only for the C fixtures — a fastpy fixture's source is
-    embedded in its `build.py` — so it is included only when present rather
-    than reported as a missing input. Headers beside it are *globbed* rather
+    `main.c` exists only for the C fixtures (`main.cpp` for the C++ one) — a
+    fastpy fixture's source is embedded in its `build.py` — so each is
+    included only when present rather than reported as a missing input. Headers beside it are *globbed* rather
     than named: no fixture has one today, but `create-ext4-rootfs.sh` already
     counts `*.h` as an input, and a builder blind to something its own gate
     rejects would leave the first fixture to grow a header permanently red —
@@ -455,6 +460,10 @@ def _inputs(fixture: Path) -> list[tuple[str, Path, bool]]:
     a staleness gate can, and a fixture that cannot be rebuilt is not made more
     truthful by being called stale.
 
+    **So are the overlay headers, for the C fixtures** -- `posix/include`,
+    which every `ctest-*` recipe compiles against; see
+    `_newest_overlay_header`.
+
     The third element is "this is text": true for tracked sources, whose line
     endings differ between worktrees without differing between commits, and
     false for `libc.a`, which is a build product where every byte counts.
@@ -464,9 +473,11 @@ def _inputs(fixture: Path) -> list[tuple[str, Path, bool]]:
     in a binary — see `sha256_text`.
     """
     got: list[tuple[str, Path, bool]] = [("build.py", fixture / "build.py", True)]
-    main_c = fixture / "main.c"
-    if main_c.is_file():
-        got.append(("main.c", main_c, True))
+    # `main.cpp` for the C++ fixture (`ctest-cxx-throw`), whose source it is
+    # as `main.c` is a C fixture's.
+    for source in ("main.c", "main.cpp"):
+        if (fixture / source).is_file():
+            got.append((source, fixture / source, True))
     for header in sorted(fixture.glob("*.h")):
         got.append((header.name, header, True))
     got.append(("toolchain/sysroot/lib/libc.a", LIBC, False))
@@ -474,7 +485,50 @@ def _inputs(fixture: Path) -> list[tuple[str, Path, bool]]:
         newest = _newest_compiler_source()
         if newest is not None:
             got.append((f"fastpy {newest.name}", newest, True))
+    if fixture.name.startswith("ctest-"):
+        newest = _newest_overlay_header()
+        if newest is not None:
+            got.append((newest.relative_to(REPO).as_posix(), newest, True))
     return got
+
+
+def _newest_overlay_header() -> Path | None:
+    """The most recently modified file under `posix/include`.
+
+    **The header overlay is an input of every C fixture, and used not to
+    be.** Each `ctest-*` recipe compiles `main.c` with `-I posix/include`, so
+    what its macros expand to and what its declarations say is in the ELF --
+    and none of `build.py`, `main.c` or `libc.a` moves when only a header
+    does. `ctest-obstack` is the sharpest case: it exists to run
+    `<obstack.h>`'s macros, which are the header's and never the library's,
+    so a fixed macro left the fixture testing the broken one while this gate
+    called it current. Every C fixture had the same exposure through any
+    header it includes.
+
+    The newest file stands in for the directory, as the newest `.py` does for
+    the fastpy compiler: an ordering test needs only the latest. It is read
+    under `REPO` at call time, so a test that rebinds `REPO` gets its own
+    tree's, and cached per directory for the same reason. `None` when the
+    directory has no files (or is absent), which leaves the input out rather
+    than inventing one.
+    """
+    root = REPO / "posix" / "include"
+    if root not in _NEWEST_OVERLAY_HEADER:
+        newest = None
+        try:
+            files = [p for p in root.rglob("*") if p.is_file()]
+            if files:
+                newest = max(files, key=lambda p: p.stat().st_mtime)
+        except OSError:
+            # A file that vanished between glob and stat: unknown, as for the
+            # compiler, rather than a crash in an advisory gate.
+            newest = None
+        _NEWEST_OVERLAY_HEADER[root] = newest
+    return _NEWEST_OVERLAY_HEADER[root]
+
+
+# The newest overlay file, per `posix/include` directory looked at.
+_NEWEST_OVERLAY_HEADER: dict[Path, Path | None] = {}
 
 
 def _newest_compiler_source() -> Path | None:
@@ -1179,7 +1233,8 @@ def _staged_artifacts() -> list[Path]:
 _IMAGE_HEADER = (
     "# rootfs.ext4 content manifest - generated by scripts/ctest-fixtures.py\n"
     "# The sha256 of every locally built artifact that was staged into the image\n"
-    "# (the ctest/fastpy ELFs, the ported binaries, and CPython's stdlib zip).\n"
+    "# (the ctest/fastpy ELFs, the ported binaries, CPython's stdlib zip, and the\n"
+    "# list of fixtures the kernel's generic rung runs).\n"
     "# `image-check` compares this against the tree, so a fixture rebuilt after\n"
     "# the image was packed is caught BEFORE a boot test reports PASS about the\n"
     "# previous binary. Regenerate by rebuilding the image:\n"

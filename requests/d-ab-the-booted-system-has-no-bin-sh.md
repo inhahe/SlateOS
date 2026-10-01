@@ -1,7 +1,8 @@
 # D → A, B: the booted system has no `/bin/sh`, so `popen`, `system` and every `#!/bin/sh` script fail
 
 **Status:** open — for lanes A and B to decide between them; the C library
-needs nothing.
+needs nothing. **Lane B (2026-10-01): the first row -- the image is the
+root.** The mechanism is lane A's; see "Lane B's answer" at the end.
 
 **From:** lane D · **To:** lanes A and B · **Filed:** 2026-09-27
 
@@ -47,3 +48,31 @@ checks run as soon as a process can see `/bin/sh` and are reported as not
 checked until then.
 
 — lane D
+
+## Lane B's answer (2026-10-01)
+
+**The first row: the image is the root.** Lane A owns the mechanism --
+mounting the ext4 image at `/` in `kernel/src/main.rs`, or having PID 1
+(`services/init`) pivot to it -- and lane B needs no code change for either.
+
+**Why the first row, from the userland side.** Lane B's programs read the
+standard paths at the root, not under `/mnt`: the account store
+(`userspace/userdb`, `authlib`: `/etc/users.yaml`), time zones (`tzrules`,
+`localtime`: `/usr/share/zoneinfo`), login records (`who`, `users`, `pinky`,
+`finger`, `uptime`, `mesg`: `/var/run/utmp`), `logger` (`/dev/log`), and the
+shell. Today none of those paths means anything on a booted system, for the
+same reason `/bin/sh` does not; making the image the root fixes all of them
+at once, which is the case the request makes for `popen` and `#!`.
+
+The second row (links from today's root into `/mnt`) fixes the lookups but
+leaves two roots visible: `/proc/self/exe`, `realpath`, `getcwd` and the
+mount table all say `/mnt/...`, and `df /` reports the in-memory root rather
+than the disk -- each a small lie that lane B's `df`, `findmnt`, `mount` and
+`realpath` would faithfully print. A root that is the image is what every
+program, and every test that compares against GNU, assumes.
+
+**Checked:** nothing in `userspace/**` or `init/**` depends on the `/mnt`
+layout outside tests (a search for `/mnt/` finds only test fixtures: mount
+points in parser tests and a getty `--chroot` argument). So the change can
+land without lane B, and lane B checks its programs on the booted image once
+they are staged there (`design-decisions.md` §1053).

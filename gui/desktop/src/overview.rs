@@ -68,6 +68,7 @@ use crate::{Layer, ShellControlAction, ShellRequest, WindowId};
 use appearance::{Palette, readable_on};
 use guiremote::window_list::WindowList;
 use guitk::color::Color;
+use guitk::motion::Motion;
 use guitk::render::{FontWeightHint, RenderCommand, TextOverflow};
 use guitk::step;
 use guitk::style::CornerRadii;
@@ -187,7 +188,10 @@ pub struct OverviewState {
     /// [`OverviewState::fade_opacity`], start it with
     /// [`OverviewState::begin_fade`], advance it with
     /// [`OverviewState::tick_fade`].
-    fade: Option<Animation>,
+    ///
+    /// The clock runs straight (`Easing::Linear`); the motion the fade was
+    /// begun under gives it its curve when it is read.
+    fade: Option<(Animation, Motion)>,
     /// The order to draw the cards in, by window id, while a window switch is
     /// shown here -- most recently used first, so that each Tab moves the
     /// highlight one card on, left to right, as the switcher's strip does.
@@ -260,7 +264,9 @@ impl OverviewState {
         }
     }
 
-    /// Start the backdrop fading in over `duration_ms`.
+    /// Start the backdrop fading in: `stated_ms` as designed, against the
+    /// standard transition, and so as long as `motion` makes that -- along
+    /// its arriving curve.
     ///
     /// **Only call this if you are going to call [`tick_fade`](Self::tick_fade)
     /// until it returns `false`.** A fade begun and never advanced holds the
@@ -269,17 +275,19 @@ impl OverviewState {
     /// clock, which is why this is separate from [`show`](Self::show) rather
     /// than part of it.
     ///
-    /// A zero `duration_ms` is treated as "no fade" rather than as a division
-    /// by zero — [`Animation::new`] floors the duration at 1 ms, but a caller
-    /// asking for zero is asking for the overview to be open now, and giving it
-    /// a one-millisecond fade would make that depend on when the next frame
+    /// A fade of no length -- a zero `stated_ms`, or a still motion -- is
+    /// treated as "no fade" rather than as a division by zero:
+    /// [`Animation::new`] floors the duration at 1 ms, but a caller asking for
+    /// zero is asking for the overview to be open now, and giving it a
+    /// one-millisecond fade would make that depend on when the next frame
     /// happens to land.
-    pub fn begin_fade(&mut self, duration_ms: u32) {
+    pub fn begin_fade(&mut self, motion: Motion, stated_ms: u32) {
+        let duration_ms = motion.duration_ms(stated_ms);
         self.fade = (duration_ms > 0).then(|| {
-            // Ease-out: the backdrop arrives quickly and settles, so the
-            // overlay reads as already there for most of the fade rather than
-            // as still on its way.
-            Animation::new(0.0, 1.0, duration_ms, Easing::EaseOut)
+            (
+                Animation::new(0.0, 1.0, duration_ms, Easing::Linear),
+                motion,
+            )
         });
     }
 
@@ -297,7 +305,7 @@ impl OverviewState {
     ///
     /// Cheap and safe to call when nothing is fading; it answers `false`.
     pub fn tick_fade(&mut self, dt_ms: u32) -> bool {
-        let Some(anim) = self.fade.as_mut() else {
+        let Some((anim, _)) = self.fade.as_mut() else {
             return false;
         };
         anim.tick(dt_ms);
@@ -321,9 +329,16 @@ impl OverviewState {
     /// `1.0` whenever no fade is running, which includes both "never started
     /// one" and "finished". Only the backdrop's alpha is scaled by this; see
     /// the module header for why nothing else is.
+    ///
+    /// Along the motion's arriving curve -- under the built-in ease-out the
+    /// backdrop arrives quickly and settles, so the overlay reads as already
+    /// there for most of the fade -- and never past opaque, where a spring
+    /// would carry it.
     #[must_use]
     pub fn fade_opacity(&self) -> f32 {
-        self.fade.as_ref().map_or(1.0, Animation::value)
+        self.fade
+            .as_ref()
+            .map_or(1.0, |(anim, motion)| motion.arriving(anim.value()).min(1.0))
     }
 
     /// Rebuild the lanes from a window list.
@@ -2405,7 +2420,7 @@ mod tests {
         let mut s = OverviewState::new();
         s.show(OverviewMode::AllWindows);
         s.lanes = sample_lanes();
-        s.begin_fade(200);
+        s.begin_fade(Motion::STANDARD, 200);
         let cfg = default_config();
 
         let cards = render_overview(&s, &cfg, &Palette::for_mode(false), 1920.0, 1080.0)
@@ -2425,7 +2440,7 @@ mod tests {
         let cfg = default_config();
         let full = backdrop_alpha(&s, &cfg);
 
-        s.begin_fade(200);
+        s.begin_fade(Motion::STANDARD, 200);
         assert!(
             backdrop_alpha(&s, &cfg) < full,
             "the fade was begun and the backdrop was drawn at full strength — \
@@ -2443,7 +2458,7 @@ mod tests {
         // versus "was never faded" — the two must be the same overlay.
         let mut faded = OverviewState::new();
         faded.show(OverviewMode::AllWindows);
-        faded.begin_fade(200);
+        faded.begin_fade(Motion::STANDARD, 200);
         while faded.tick_fade(16) {}
 
         let mut fresh = OverviewState::new();
@@ -2464,7 +2479,7 @@ mod tests {
              desktop that never parks"
         );
 
-        s.begin_fade(100);
+        s.begin_fade(Motion::STANDARD, 100);
         assert!(s.tick_fade(50), "the fade gave up half way through");
         assert!(!s.tick_fade(50), "the fade asked for a frame past its end");
         assert!(!s.is_fading());
@@ -2477,16 +2492,44 @@ mod tests {
         // depended on when the next frame happened to land.
         let mut s = OverviewState::new();
         s.show(OverviewMode::AllWindows);
-        s.begin_fade(0);
+        s.begin_fade(Motion::STANDARD, 0);
         assert!(!s.is_fading());
         assert!((s.fade_opacity() - 1.0).abs() < f32::EPSILON);
+        // A still motion is the same: no fade, open now.
+        s.begin_fade(Motion::STILL, 200);
+        assert!(!s.is_fading());
+        assert!((s.fade_opacity() - 1.0).abs() < f32::EPSILON);
+    }
+
+    /// **The fade follows the desktop's motion**: its length scales with the
+    /// standard transition, its opacity is the arriving curve -- ease-out
+    /// half-way is seven-eighths there -- and a spring never draws the
+    /// backdrop past opaque.
+    #[test]
+    fn the_fade_follows_the_desktops_motion() {
+        use guitk::motion::Curve;
+        let mut s = OverviewState::new();
+        s.show(OverviewMode::AllWindows);
+        s.begin_fade(Motion::STANDARD, 200);
+        s.tick_fade(100);
+        assert!((s.fade_opacity() - 0.875).abs() < 1e-5);
+
+        s.begin_fade(Motion::new(400, Curve::Linear), 200);
+        assert!(s.tick_fade(200), "twice the standard is twice as long");
+        assert!((s.fade_opacity() - 0.5).abs() < 1e-5);
+        assert!(!s.tick_fade(200));
+
+        s.begin_fade(Motion::new(200, Curve::Spring), 200);
+        while s.tick_fade(5) {
+            assert!(s.fade_opacity() <= 1.0);
+        }
     }
 
     #[test]
     fn hiding_drops_the_fade_so_the_next_opening_does_not_inherit_it() {
         let mut s = OverviewState::new();
         s.show(OverviewMode::AllWindows);
-        s.begin_fade(200);
+        s.begin_fade(Motion::STANDARD, 200);
         s.tick_fade(100);
         s.hide();
         assert!(

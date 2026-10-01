@@ -180,6 +180,39 @@ if ($pyShape) {
     }
 }
 
+# And every one of them must take and return what its declaration says. The
+# linker joins a C caller to the Rust definition by name alone, so a `timer_t`
+# eight bytes wide in the header and four in the definition links, runs, and
+# reads a register nobody set: the first comparison, on 2026-09-29, found
+# eleven such (known-issues.md ->
+# D-POSIX-PROTOTYPES-DISAGREED-WITH-THEIR-DEFINITIONS). It reads the sources,
+# not the archive, and caches the parsed headers in target/. Exit 3 is "no
+# zig": loud, not fatal; 1 and 2 are fatal.
+Write-Host "=== Checking libc.a's functions take what musl's headers declare ===" -ForegroundColor Cyan
+if ($pyShape) {
+    & $pyShape.Source (Join-Path $root "scripts\check-libc-prototypes.py")
+    if ($LASTEXITCODE -eq 3) {
+        Write-Host "  WARNING: no zig (FASTPY_ZIG or PATH) - prototypes NOT checked." -ForegroundColor Yellow
+    } elseif ($LASTEXITCODE -ne 0) {
+        throw "a function's definition disagrees with its declaration (see above) - a C program calling it would misread its arguments or result"
+    }
+}
+
+# What libc.a has beyond musl, C reaches through posix/include: a header in
+# front of each musl header, declaring the rest as glibc 2.39 does
+# (design-decisions §1141). Every one must compile under every feature-macro
+# setting, and each declaration appear where glibc's does, with glibc's type.
+# About a minute. Exit 3 is "no zig": loud, not fatal; 1 and 2 are fatal.
+Write-Host "=== Checking the C header overlay against glibc's headers ===" -ForegroundColor Cyan
+if ($pyShape) {
+    & $pyShape.Source (Join-Path $root "scripts\check-libc-overlay.py")
+    if ($LASTEXITCODE -eq 3) {
+        Write-Host "  WARNING: no zig (FASTPY_ZIG or PATH) - the overlay NOT checked." -ForegroundColor Yellow
+    } elseif ($LASTEXITCODE -ne 0) {
+        throw "posix/include disagrees with glibc's headers (see above) - a C program written for glibc would not compile, or would see what glibc hides"
+    }
+}
+
 Write-Host ""
 # Record what this sysroot was built from, by content.
 #

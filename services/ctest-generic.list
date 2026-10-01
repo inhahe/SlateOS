@@ -1,0 +1,17 @@
+# The C fixtures the kernel's generic rung runs: each /mnt/tests/<name>.elf,
+# expected to exit 42 (requests/d-a-one-rung-for-every-c-fixture.md).
+# scripts/create-ext4-rootfs.sh stages this file at /tests/ctest-generic.list
+# and refuses it if a line is malformed or names a fixture with no
+# services/<name>/build.py.
+#
+# One fixture a line, three fields separated by blanks:
+#
+#   name      the fixture, services/<name>/: its ELF, and its argv[0]
+#   grants    "-" for none, or "file" for one wildcard File capability
+#             (READ | WRITE | EXECUTE | METADATA)
+#   seconds   how long it may take, from spawn to exit: 1 to 600
+#
+# A fixture goes on only after it has passed in a lane D boot: none of
+# another lane's boots should meet one of these failing for the first time.
+#
+# name           grants   seconds

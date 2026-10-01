@@ -77,7 +77,9 @@
 //! queued; with `MSG_NOERROR` it is cut to the buffer and taken.
 
 use crate::errno;
+use crate::interrupt::Mark;
 use crate::linux_ipc::{IPC_INFO, IpcPerm};
+use crate::lowlevellock::Waited;
 use crate::objtable::{Slots, Waits};
 use crate::perprocess::process_global;
 use crate::sysv_ipc::{
@@ -450,10 +452,13 @@ fn changed() {
     unsafe { &*waits() }.changed();
 }
 
-/// Sleep until the queues change from `seen`.
-fn wait_for_change(seen: i32) {
+/// Sleep until the queues change from `seen` -- or until a signal handler
+/// has run on this thread since `mark`, the call's start, `SA_RESTART` or
+/// not: Linux never restarts `msgsnd` or `msgrcv`, and a signal that comes
+/// at any point in them ends their next sleep ([`crate::interrupt`]).
+fn wait_for_change(seen: i32, mark: Mark) -> Waited {
     // SAFETY: this process's counter.
-    unsafe { &*waits() }.wait(seen, None);
+    unsafe { &*waits() }.wait_interruptible(seen, None, mark)
 }
 
 /// The count a waiter compares against, read -- with the lock held --
@@ -520,7 +525,10 @@ pub extern "C" fn msgget(key: i32, msgflg: i32) -> i32 {
 /// removed while the call waits.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn msgsnd(msqid: i32, msgp: *const u8, msgsz: usize, msgflg: i32) -> i32 {
-    match send(msqid, msgp, msgsz, msgflg, wait_for_change) {
+    let mark = Mark::now();
+    match send(msqid, msgp, msgsz, msgflg, |seen| {
+        wait_for_change(seen, mark)
+    }) {
         Ok(()) => 0,
         Err(e) => {
             errno::set_errno(e);
@@ -535,7 +543,7 @@ fn send(
     msgp: *const u8,
     msgsz: usize,
     msgflg: i32,
-    wait: impl FnMut(i32),
+    wait: impl FnMut(i32) -> Waited,
 ) -> Result<(), i32> {
     if msgp.is_null() {
         // `get_user(mtype, &msgp->mtype)`, before anything is judged.
@@ -570,7 +578,7 @@ fn enqueue(
     msg: *mut Msg,
     len: usize,
     msgflg: i32,
-    mut wait: impl FnMut(i32),
+    mut wait: impl FnMut(i32) -> Waited,
 ) -> Result<(), i32> {
     let who = caller();
     let mut t = lock();
@@ -588,10 +596,13 @@ fn enqueue(
             return Err(errno::EAGAIN);
         }
         drop(t);
-        wait(seen);
+        let waited = wait(seen);
         t = lock();
         // It was there before the wait: if it is not now, it was removed.
         slot = t.resolve(msqid).ok_or(errno::EIDRM)?;
+        if waited == Waited::Interrupted {
+            return Err(errno::EINTR);
+        }
     }
     let (now, pid) = (now_secs(), crate::process::getpid());
     let q = t.queue(slot).ok_or(errno::EIDRM)?;
@@ -707,7 +718,10 @@ pub extern "C" fn msgrcv(
     msgtyp: i64,
     msgflg: i32,
 ) -> isize {
-    match receive(msqid, msgp, msgsz, msgtyp, msgflg, wait_for_change) {
+    let mark = Mark::now();
+    match receive(msqid, msgp, msgsz, msgtyp, msgflg, |seen| {
+        wait_for_change(seen, mark)
+    }) {
         Ok(n) => isize::try_from(n).unwrap_or(isize::MAX),
         Err(e) => {
             errno::set_errno(e);
@@ -738,7 +752,7 @@ fn receive(
     msgsz: usize,
     msgtyp: i64,
     msgflg: i32,
-    mut wait: impl FnMut(i32),
+    mut wait: impl FnMut(i32) -> Waited,
 ) -> Result<usize, i32> {
     if msqid < 0 || isize::try_from(msgsz).is_err() {
         return Err(errno::EINVAL);
@@ -807,10 +821,13 @@ fn receive(
             return Err(errno::ENOMSG);
         }
         drop(t);
-        wait(seen);
+        let waited = wait(seen);
         t = lock();
         // It was there before the wait: if it is not now, it was removed.
         slot = t.resolve(msqid).ok_or(errno::EIDRM)?;
+        if waited == Waited::Interrupted {
+            return Err(errno::EINTR);
+        }
     };
     let (m, len) = taken;
     let tables = t.tables();
@@ -1878,6 +1895,7 @@ mod tests {
         let r = receive(q, buf.as_mut_ptr(), 56, 0, 0, |_| {
             waits += 1;
             send_ok(q, 7, b"hello");
+            Waited::Woken
         });
         assert_eq!(r, Ok(5));
         assert_eq!(waits, 1);
@@ -1894,6 +1912,7 @@ mod tests {
         let r = receive(q, buf.as_mut_ptr(), 56, 1, 0, |_| {
             waits += 1;
             send_ok(q, if waits == 1 { 2 } else { 1 }, b"x");
+            Waited::Woken
         });
         assert_eq!((r, waits), (Ok(1), 2));
         assert_eq!(
@@ -1913,6 +1932,7 @@ mod tests {
         let m = make_msg(2, &big);
         let r = send(q, m.as_ptr(), MSGMAX, 0, |_| {
             recv(q, MSGMAX, 0, IPC_NOWAIT).unwrap();
+            Waited::Woken
         });
         assert_eq!(r, Ok(()));
         assert_eq!(stat_of(q).msg_qnum, 2);
@@ -1928,6 +1948,7 @@ mod tests {
         let m = make_msg(2, b"more");
         let r = send(q, m.as_ptr(), 4, 0, |_| {
             assert_eq!(set_ds(q, |ds| ds.msg_qbytes = 3 * MSGMAX), 0);
+            Waited::Woken
         });
         assert_eq!(r, Ok(()));
         assert_eq!(stat_of(q).msg_qnum, 3);
@@ -1939,7 +1960,10 @@ mod tests {
         let q = new_queue();
         let mut buf = [0u8; 16];
         assert_eq!(
-            receive(q, buf.as_mut_ptr(), 8, 0, 0, |_| rmid(q)),
+            receive(q, buf.as_mut_ptr(), 8, 0, 0, |_| {
+                rmid(q);
+                Waited::Woken
+            }),
             Err(errno::EIDRM)
         );
 
@@ -1948,7 +1972,11 @@ mod tests {
         send_ok(q, 1, &big);
         send_ok(q, 1, &big);
         let m = make_msg(1, b"x");
-        assert_eq!(send(q, m.as_ptr(), 1, 0, |_| rmid(q)), Err(errno::EIDRM));
+        let r = send(q, m.as_ptr(), 1, 0, |_| {
+            rmid(q);
+            Waited::Woken
+        });
+        assert_eq!(r, Err(errno::EIDRM));
         let (_, mi) = info(MSG_INFO);
         assert_eq!(
             (mi.msgpool, mi.msgmap, mi.msgtql),
@@ -1966,6 +1994,7 @@ mod tests {
             rmid(q);
             replacement = new_queue();
             send_ok(replacement, 1, b"not yours");
+            Waited::Woken
         });
         assert_eq!(r, Err(errno::EIDRM));
         assert_eq!(slot_of(replacement), slot_of(q), "the slot was reused");
@@ -1984,10 +2013,39 @@ mod tests {
         let mut buf = [0u8; 16];
         let r = receive(q, buf.as_mut_ptr(), 8, 0, 0, |_| {
             assert_eq!(set_ds(q, |ds| ds.msg_perm.mode = 0o200), 0);
+            Waited::Woken
         });
         assert_eq!(r, Err(errno::EACCES));
         drop(caps);
         rmid(q);
+    }
+
+    #[test]
+    fn a_wait_a_signal_handler_ends_is_eintr_and_changes_nothing() {
+        let q = new_queue();
+        let mut buf = [0u8; 16];
+        let r = receive(q, buf.as_mut_ptr(), 8, 0, 0, |_| Waited::Interrupted);
+        assert_eq!(r, Err(errno::EINTR));
+
+        let big = std::vec![1u8; MSGMAX];
+        send_ok(q, 1, &big);
+        send_ok(q, 1, &big);
+        let m = make_msg(2, b"x");
+        let r = send(q, m.as_ptr(), 1, 0, |_| Waited::Interrupted);
+        assert_eq!(r, Err(errno::EINTR));
+        assert_eq!(stat_of(q).msg_qnum, 2, "the message was not sent");
+        rmid(q);
+    }
+
+    #[test]
+    fn a_queue_removed_while_a_handler_ran_is_eidrm_not_eintr() {
+        let q = new_queue();
+        let mut buf = [0u8; 16];
+        let r = receive(q, buf.as_mut_ptr(), 8, 0, 0, |_| {
+            rmid(q);
+            Waited::Interrupted
+        });
+        assert_eq!(r, Err(errno::EIDRM));
     }
 
     #[test]

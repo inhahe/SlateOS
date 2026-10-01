@@ -45,6 +45,12 @@ DIFF_GNU_SOURCE=9.4
 # shellcheck source=diff-wsl.sh
 . "$(dirname "$0")/diff-wsl.sh"
 
+# Variables the program under test runs with, on both sides, and nothing else
+# does. `POSIXLY_CORRECT` changes where option parsing stops, and exported it
+# would reach this harness's own `od`, `sort` and `diff` as well. Empty unless
+# a case block sets it.
+ENVV=()
+
 pass=0; fail=0; xfail=0; xpass=0
 
 fixtures=$DIFF_TMP/fixtures
@@ -64,9 +70,9 @@ printf 'a\n \n \nb\n'                           > spaces.txt
 run_side() {
   local side=$1 stdin=$2 out=$3 err=$4; shift 4
   if [ "$stdin" = "-" ]; then
-    env PATH="$bindir/$side" cat "$@" </dev/null >"$out" 2>"$err"
+    env ${ENVV[@]+"${ENVV[@]}"} PATH="$bindir/$side" cat "$@" </dev/null >"$out" 2>"$err"
   else
-    printf '%b' "$stdin" | env PATH="$bindir/$side" cat "$@" >"$out" 2>"$err"
+    printf '%b' "$stdin" | env ${ENVV[@]+"${ENVV[@]}"} PATH="$bindir/$side" cat "$@" >"$out" 2>"$err"
   fi
 }
 
@@ -113,7 +119,7 @@ report() {
   return 0
 }
 
-run_case() { compare - "$@"; report "cat $*"; }
+run_case() { compare - "$@"; report "${ENVV[*]:+${ENVV[*]} }cat $*"; }
 run_stdin() { local input="$1"; shift; compare "$input" "$@"; report "printf '$input' | cat $*"; }
 
 xfail_case() {
@@ -308,9 +314,9 @@ writefail() {
   for side in ours gnu; do
     if [ "$side" = ours ]; then err=$o_err; else err=$g_err; fi
     if [ "$mode" = closed ]; then
-      env PATH="$bindir/$side" cat "$@" </dev/null >&- 2>"$err"
+      env ${ENVV[@]+"${ENVV[@]}"} PATH="$bindir/$side" cat "$@" </dev/null >&- 2>"$err"
     else
-      env PATH="$bindir/$side" cat "$@" </dev/null >/dev/full 2>"$err"
+      env ${ENVV[@]+"${ENVV[@]}"} PATH="$bindir/$side" cat "$@" </dev/null >/dev/full 2>"$err"
     fi
     rc=$?
     if [ "$side" = ours ]; then o_rc=$rc; else g_rc=$rc; fi
@@ -363,6 +369,22 @@ if [ -w /dev/full ]; then
 else
   echo "note: no writable /dev/full; the write-error cases did not run" >&2
 fi
+
+# --- POSIXLY_CORRECT -----------------------------------------------------------
+# glibc's getopt ends option parsing at the first operand while it is set -- to
+# anything, the empty string included -- so an option after an operand is an
+# operand, and so is a `--` after one, there being no options left for it to
+# end. Measured against GNU on 2026-09-25; `coreutils::getopt`'s module docs,
+# "Where option parsing stops".
+printf 'b\na\n' > posix.txt
+ENVV=(POSIXLY_CORRECT=1)
+run_case posix.txt -n
+run_case -n posix.txt
+run_case posix.txt -- -n
+ENVV=(POSIXLY_CORRECT=)
+run_case posix.txt -n
+ENVV=()
+run_case posix.txt -n
 
 printf '\ncat: %d passed, %d differed, %d differ on purpose' "$pass" "$fail" "$xfail"
 if [ "$xpass" -gt 0 ]; then

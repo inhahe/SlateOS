@@ -1,0 +1,3 @@
+tree-sitter-ada, from https://github.com/briot/tree-sitter-ada at commit
+dd5fa4cdb3aba91abc687aa68fb1431396fce6a6 (2026-07-31): the grammar has no
+release tags; its tree-sitter.json calls it 0.1.0.

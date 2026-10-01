@@ -16,10 +16,20 @@ guitk = { path = "../toolkit" }
 tree-sitter = { package = "tree-sitter-c2rust", version = "0.25.2", default-features = false, features = ["std"] }
 # Where the runtime's `LanguageFn` lives: the handle a grammar is passed by.
 tree-sitter-language = "0.1.8"
+# Inflates a grammar's tables the first time it is used: they are carried
+# deflated, a tenth of their size (`ffi::Deflated`).
+deflate = { path = "../../deflate" }
 
 [build-dependencies]
 # Reads each grammar's generated parser.c and writes it as Rust (build.rs).
 tsgrammar = { path = "../tsgrammar" }
+# Deflates each grammar's tables as the build writes them.
+deflate = { path = "../../deflate" }
+
+[dev-dependencies]
+# The tests of `luapat` run its translations as the runtime runs a
+# `#match?`: through the regular-expression crate tree-sitter uses.
+regex = "1.13.1"
 
 [lints]
 workspace = true

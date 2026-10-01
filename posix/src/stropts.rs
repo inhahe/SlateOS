@@ -29,123 +29,163 @@
 use crate::errno;
 
 // ---------------------------------------------------------------------------
-// ioctl commands for STREAMS
+// ioctl commands for STREAMS: musl's numbers, `('S' << 8) | n`, which are
+// glibc's -- what a program compiled against <stropts.h> passes. (Until
+// 2026-09-30 seven of these and RMSGD/RMSGN were other numbers, so that
+// I_NREAD here was I_SRDOPT there; nothing in the library used them, and
+// scripts/check-libc-abi.py did not read this header.)
 // ---------------------------------------------------------------------------
 
-/// Push a module onto the stream.
-pub const I_PUSH: i32 = 0x5302;
+const SID: i32 = (b'S' as i32) << 8;
 
-/// Pop the topmost module from the stream.
-pub const I_POP: i32 = 0x5303;
+/// Size the top message.
+pub const I_NREAD: i32 = SID | 1;
+/// Push a STREAMS module.
+pub const I_PUSH: i32 = SID | 2;
+/// Pop a STREAMS module.
+pub const I_POP: i32 = SID | 3;
+/// Get the top module's name.
+pub const I_LOOK: i32 = SID | 4;
+/// Flush a STREAM.
+pub const I_FLUSH: i32 = SID | 5;
+/// Set the read mode.
+pub const I_SRDOPT: i32 = SID | 6;
+/// Get the read mode.
+pub const I_GRDOPT: i32 = SID | 7;
+/// Send a STREAMS `ioctl`.
+pub const I_STR: i32 = SID | 8;
+/// Ask for notification signals.
+pub const I_SETSIG: i32 = SID | 9;
+/// Retrieve the current notification signals.
+pub const I_GETSIG: i32 = SID | 10;
+/// Look for a STREAMS module.
+pub const I_FIND: i32 = SID | 11;
+/// Connect two STREAMs.
+pub const I_LINK: i32 = SID | 12;
+/// Disconnect two STREAMs.
+pub const I_UNLINK: i32 = SID | 13;
+/// Get a file descriptor sent with `I_SENDFD`.
+pub const I_RECVFD: i32 = SID | 14;
+/// Peek at the top message on a STREAM.
+pub const I_PEEK: i32 = SID | 15;
+/// Send implementation-defined information about another STREAM.
+pub const I_FDINSERT: i32 = SID | 16;
+/// Pass a file descriptor through a STREAMS pipe.
+pub const I_SENDFD: i32 = SID | 17;
+/// Set the write mode.
+pub const I_SWROPT: i32 = SID | 19;
+/// Get the write mode.
+pub const I_GWROPT: i32 = SID | 20;
+/// Get all the module names on a STREAM.
+pub const I_LIST: i32 = SID | 21;
+/// Persistently connect two STREAMs.
+pub const I_PLINK: i32 = SID | 22;
+/// Dismantle a persistent STREAMS link.
+pub const I_PUNLINK: i32 = SID | 23;
+/// Flush one band of a STREAM.
+pub const I_FLUSHBAND: i32 = SID | 28;
+/// See whether any message exists in a band.
+pub const I_CKBAND: i32 = SID | 29;
+/// Get the band of the top message on a STREAM.
+pub const I_GETBAND: i32 = SID | 30;
+/// Is the top message "marked"?
+pub const I_ATMARK: i32 = SID | 31;
+/// Set the close time delay.
+pub const I_SETCLTIME: i32 = SID | 32;
+/// Get the close time delay.
+pub const I_GETCLTIME: i32 = SID | 33;
+/// Is a band writable?
+pub const I_CANPUT: i32 = SID | 34;
 
-/// Look at the topmost module.
-pub const I_LOOK: i32 = 0x5304;
-
-/// Flush read/write queues.
-pub const I_FLUSH: i32 = 0x5305;
-
-/// Send an ioctl downstream.
-pub const I_STR: i32 = 0x5308;
-
-/// Set read options.
-pub const I_SRDOPT: i32 = 0x5301;
-
-/// Get read options.
-pub const I_GRDOPT: i32 = 0x5309;
-
-/// Send a priority-band message.
-pub const I_SENDFD: i32 = 0x5311;
-
-/// Receive a file descriptor.
-pub const I_RECVFD: i32 = 0x5312;
-
-/// Find a module on the stream.
-pub const I_FIND: i32 = 0x530B;
-
-/// Link a stream underneath a multiplexor.
-pub const I_LINK: i32 = 0x530C;
-
-/// Unlink a stream from a multiplexor.
-pub const I_UNLINK: i32 = 0x530D;
-
-/// Check for pending input on the stream head.
-pub const I_NREAD: i32 = 0x5318;
-
-/// Peek at a message on the stream head.
-pub const I_PEEK: i32 = 0x530F;
-
-/// Create a file descriptor for a STREAMS-based pipe.
-pub const I_FDINSERT: i32 = 0x5310;
-
-/// Set event notifications.
-pub const I_SETSIG: i32 = 0x5306;
-
-/// Get current event notifications.
-pub const I_GETSIG: i32 = 0x5307;
-
-/// Check if a stream is associated with a terminal.
-pub const I_CANPUT: i32 = 0x5313;
-
-/// Persistent link.
-pub const I_PLINK: i32 = 0x5316;
-
-/// Persistent unlink.
-pub const I_PUNLINK: i32 = 0x5317;
+/// The size of the buffer `I_LOOK`'s argument points to, at least.
+pub const FMNAMESZ: i32 = 8;
 
 // ---------------------------------------------------------------------------
-// Flush flags (for I_FLUSH)
+// I_FLUSH's argument
 // ---------------------------------------------------------------------------
 
-/// Flush read queue.
+/// Flush the read queues.
 pub const FLUSHR: i32 = 0x01;
-
-/// Flush write queue.
+/// Flush the write queues.
 pub const FLUSHW: i32 = 0x02;
-
-/// Flush read and write queues.
+/// Flush the read and write queues.
 pub const FLUSHRW: i32 = 0x03;
+/// Flush one band only (`I_FLUSHBAND`).
+pub const FLUSHBAND: i32 = 0x04;
 
 // ---------------------------------------------------------------------------
-// Read options (for I_SRDOPT / I_GRDOPT)
+// I_SETSIG's events
 // ---------------------------------------------------------------------------
 
-/// Normal read mode (byte-stream).
-pub const RNORM: i32 = 0x0000;
-
-/// Message non-discard mode.
-pub const RMSGN: i32 = 0x0001;
-
-/// Message discard mode.
-pub const RMSGD: i32 = 0x0002;
+/// A message other than a high-priority one has arrived at the read queue.
+pub const S_INPUT: i32 = 0x0001;
+/// A high-priority message is on the read queue.
+pub const S_HIPRI: i32 = 0x0002;
+/// The write queue for normal data is no longer full.
+pub const S_OUTPUT: i32 = 0x0004;
+/// A STREAMS signal message holding SIGPOLL has reached the read queue.
+pub const S_MSG: i32 = 0x0008;
+/// An error has reached the STREAM head.
+pub const S_ERROR: i32 = 0x0010;
+/// A hangup has reached the STREAM head.
+pub const S_HANGUP: i32 = 0x0020;
+/// A normal (band 0) message has arrived at the read queue.
+pub const S_RDNORM: i32 = 0x0040;
+/// `S_OUTPUT`.
+pub const S_WRNORM: i32 = S_OUTPUT;
+/// A message of a band other than 0 has arrived at the read queue.
+pub const S_RDBAND: i32 = 0x0080;
+/// The write queue for a band other than 0 is no longer full.
+pub const S_WRBAND: i32 = 0x0100;
+/// With `S_RDBAND`: SIGURG rather than SIGPOLL.
+pub const S_BANDURG: i32 = 0x0200;
 
 // ---------------------------------------------------------------------------
-// Priority band flags
+// putmsg's flags, the read and write modes, I_ATMARK's, getmsg's
 // ---------------------------------------------------------------------------
 
-/// Normal (non-priority) message.
+/// Send a high-priority message.
 pub const RS_HIPRI: i32 = 0x01;
 
-/// Any message (normal or priority).
+/// Byte-STREAM mode, the default.
+pub const RNORM: i32 = 0x0000;
+/// Message-discard mode.
+pub const RMSGD: i32 = 0x0001;
+/// Message-non-discard mode.
+pub const RMSGN: i32 = 0x0002;
+/// Deliver a message's control part as data.
+pub const RPROTDAT: i32 = 0x0004;
+/// Discard a message's control part, delivering its data.
+pub const RPROTDIS: i32 = 0x0008;
+/// Fail `read` with EBADMSG at a message with a control part.
+pub const RPROTNORM: i32 = 0x0010;
+/// The three `RPROT` modes' bits.
+pub const RPROTMASK: i32 = 0x001C;
+
+/// Send a zero-length message downstream for a `write` of 0 bytes.
+pub const SNDZERO: i32 = 0x001;
+/// SIGPIPE for a `write` to a STREAM with no reader.
+pub const SNDPIPE: i32 = 0x002;
+
+/// Is the message marked?
+pub const ANYMARK: i32 = 0x01;
+/// Is it the last one marked on the queue?
+pub const LASTMARK: i32 = 0x02;
+
+/// Unlink every STREAM linked to this one.
+pub const MUXID_ALL: i32 = -1;
+
+/// Receive a high-priority message.
 pub const MSG_HIPRI: i32 = 0x01;
-
-/// Any-band message.
+/// Receive any message.
 pub const MSG_ANY: i32 = 0x02;
-
-/// Band message.
+/// Receive a message from the given band.
 pub const MSG_BAND: i32 = 0x04;
 
-// ---------------------------------------------------------------------------
-// Error codes specific to STREAMS
-// ---------------------------------------------------------------------------
-
-/// No message at stream head.
+/// `getmsg`: more control information is left in the message.
 pub const MORECTL: i32 = 1;
-
-/// More data expected.
+/// `getmsg`: more data is left in the message.
 pub const MOREDATA: i32 = 2;
-
-/// More control and data expected.
-pub const MORECTL_MOREDATA: i32 = 3;
 
 // ---------------------------------------------------------------------------
 // Functions
@@ -245,29 +285,48 @@ mod tests {
     // ioctl command constants
     // -----------------------------------------------------------------------
 
+    /// musl's numbers, `('S' << 8) | n` -- glibc's too -- for all 29, and
+    /// so distinct. (scripts/check-libc-abi.py holds each to the header as
+    /// well.)
     #[test]
-    fn test_ioctl_commands_distinct() {
-        let cmds = [
-            I_PUSH, I_POP, I_LOOK, I_FLUSH, I_STR, I_SRDOPT, I_GRDOPT, I_SENDFD, I_RECVFD, I_FIND,
-            I_LINK, I_UNLINK, I_NREAD, I_PEEK, I_FDINSERT, I_SETSIG, I_GETSIG, I_CANPUT, I_PLINK,
-            I_PUNLINK,
+    fn test_ioctl_commands_are_musls() {
+        let table = [
+            (I_NREAD, 1),
+            (I_PUSH, 2),
+            (I_POP, 3),
+            (I_LOOK, 4),
+            (I_FLUSH, 5),
+            (I_SRDOPT, 6),
+            (I_GRDOPT, 7),
+            (I_STR, 8),
+            (I_SETSIG, 9),
+            (I_GETSIG, 10),
+            (I_FIND, 11),
+            (I_LINK, 12),
+            (I_UNLINK, 13),
+            (I_RECVFD, 14),
+            (I_PEEK, 15),
+            (I_FDINSERT, 16),
+            (I_SENDFD, 17),
+            (I_SWROPT, 19),
+            (I_GWROPT, 20),
+            (I_LIST, 21),
+            (I_PLINK, 22),
+            (I_PUNLINK, 23),
+            (I_FLUSHBAND, 28),
+            (I_CKBAND, 29),
+            (I_GETBAND, 30),
+            (I_ATMARK, 31),
+            (I_SETCLTIME, 32),
+            (I_GETCLTIME, 33),
+            (I_CANPUT, 34),
         ];
-        for i in 0..cmds.len() {
-            for j in (i + 1)..cmds.len() {
-                assert_ne!(cmds[i], cmds[j], "STREAMS ioctl commands must be distinct");
-            }
+        for (cmd, n) in table {
+            assert_eq!(cmd, 0x5300 | n);
         }
-    }
-
-    #[test]
-    fn test_push_pop() {
-        assert_ne!(I_PUSH, I_POP);
-    }
-
-    #[test]
-    fn test_link_unlink() {
-        assert_ne!(I_LINK, I_UNLINK);
-        assert_ne!(I_PLINK, I_PUNLINK);
+        // The one a program most often asks, which was this library's
+        // I_SRDOPT until 2026-09-30.
+        assert_eq!(I_NREAD, 21249);
     }
 
     #[test]
@@ -275,12 +334,23 @@ mod tests {
         assert_eq!(FLUSHR, 0x01);
         assert_eq!(FLUSHW, 0x02);
         assert_eq!(FLUSHRW, FLUSHR | FLUSHW);
+        assert_eq!(FLUSHBAND, 0x04);
     }
 
     #[test]
     fn test_read_options() {
-        assert_eq!(RNORM, 0);
-        assert_ne!(RMSGN, RMSGD);
+        assert_eq!((RNORM, RMSGD, RMSGN), (0, 1, 2));
+        assert_eq!(RPROTMASK, RPROTDAT | RPROTDIS | RPROTNORM);
+    }
+
+    #[test]
+    fn test_events() {
+        assert_eq!(S_WRNORM, S_OUTPUT);
+        let all = [
+            S_INPUT, S_HIPRI, S_OUTPUT, S_MSG, S_ERROR, S_HANGUP, S_RDNORM, S_RDBAND, S_WRBAND,
+            S_BANDURG,
+        ];
+        assert_eq!(all.iter().fold(0, |a, b| a | b), 0x3FF, "one bit each");
     }
 
     // -----------------------------------------------------------------------

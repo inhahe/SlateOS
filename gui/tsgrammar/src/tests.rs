@@ -297,6 +297,22 @@ fn blob<'g>(g: &'g Grammar, field: &str) -> &'g [u8] {
         .bytes
 }
 
+/// **A name is read as C reads a string, up to its first NUL**: Go's
+/// grammar names a token `"\0"`, which C -- and the runtime, which reads the
+/// names as C strings -- sees as the empty name.
+#[test]
+fn a_name_is_read_up_to_its_first_nul() {
+    for (name, read) in [(r#""\0""#, &b""[..]), (r#""a\0b""#, &b"a"[..])] {
+        let source = MINI.replace(
+            r#"[anon_sym_SEMI] = ";","#,
+            &format!("[anon_sym_SEMI] = {name},"),
+        );
+        assert_ne!(source, MINI);
+        let g = parse(&source).unwrap();
+        assert_eq!(g.symbol_names[1].as_deref(), Some(read), "{name}");
+    }
+}
+
 /// **Every table is read, and laid out as C lays out the generator's
 /// structs**, byte for byte.
 #[test]
@@ -378,13 +394,90 @@ fn every_table_is_laid_out_as_c_lays_it_out() {
 
 /// **The Rust names every table, the lexers and the language**, in the terms
 /// `gui/syntax`'s `ffi` module provides.
+/// **An older generator's reductions read as a newer one's**: `.name =`
+/// arguments in place of the last two, each defaulting to 0 -- the same
+/// action table either way.
+#[test]
+fn an_older_generators_reductions_read_as_a_newer_ones() {
+    let newer = parse(MINI).unwrap();
+    let older = MINI.replace(
+        "REDUCE(sym_document, 1, -1, 1)",
+        "REDUCE(sym_document, 1, .dynamic_precedence = -1, .production_id = 1)",
+    );
+    assert_ne!(older, MINI, "the premise: the sample has the reduction");
+    let older = parse(&older).unwrap();
+    assert_eq!(blob(&older, "parse_actions"), blob(&newer, "parse_actions"));
+    let bare =
+        parse(&MINI.replace("REDUCE(sym_document, 1, -1, 1)", "REDUCE(sym_document, 1)")).unwrap();
+    let actions = blob(&bare, "parse_actions");
+    assert_eq!(
+        &actions[6 * 8..7 * 8],
+        [1, 1, 3, 0, 0, 0, 0, 0],
+        "reduce, zeros"
+    );
+    let only_production = parse(&MINI.replace(
+        "REDUCE(sym_document, 1, -1, 1)",
+        "REDUCE(sym_document, 1, .production_id = 1)",
+    ))
+    .unwrap();
+    let actions = blob(&only_production, "parse_actions");
+    assert_eq!(&actions[6 * 8..7 * 8], [1, 1, 3, 0, 0, 0, 1, 0]);
+    // A field this does not know, or names where none belong, is refused.
+    for bad in [
+        "REDUCE(sym_document, 1, .precedence = 1)",
+        "REDUCE(sym_document, 1, -1, 1, .production_id = 1)",
+    ] {
+        assert!(
+            parse(&MINI.replace("REDUCE(sym_document, 1, -1, 1)", bad)).is_err(),
+            "{bad}"
+        );
+    }
+}
+
+/// **An older generator's lexers read the end of the text**: its
+/// `START_LEXER` reads `eof` itself, so a main lexer with no `eof =` line
+/// is an older generator's, and all its lexers are made to read it -- where
+/// a newer one's keyword lexer without the line does not.
+#[test]
+fn an_older_generators_lexers_read_the_end() {
+    let reads =
+        |rust: &str, name: &str| -> bool { rust.contains(&format!("{name}_default, true)")) };
+    let newer = parse(MINI).unwrap().render("mini").rust;
+    assert!(reads(&newer, "lex_main") && reads(&newer, "lex_keywords"));
+    // An older file: neither lexer has the line.
+    let older_text = MINI.replace("eof = lexer->eof(lexer);", "");
+    assert_eq!(
+        MINI.matches("eof = lexer->eof(lexer);").count(),
+        2,
+        "the premise"
+    );
+    let older = parse(&older_text).unwrap().render("mini").rust;
+    assert!(reads(&older, "lex_main"), "{older}");
+    assert!(reads(&older, "lex_keywords"), "{older}");
+    // A newer file whose keyword lexer does without it: that one does not.
+    let second = MINI.rfind("eof = lexer->eof(lexer);").unwrap();
+    let keywords_without = format!(
+        "{}{}",
+        &MINI[..second],
+        &MINI[second..].replacen("eof = lexer->eof(lexer);", "", 1)
+    );
+    let rust = parse(&keywords_without).unwrap().render("mini").rust;
+    assert!(
+        reads(&rust, "lex_main") && !reads(&rust, "lex_keywords"),
+        "{rust}"
+    );
+}
+
 #[test]
 fn the_rust_names_every_table_the_lexers_and_the_language() {
     let out = parse(MINI).unwrap().render("mini");
     let rust = &out.rust;
     for needle in [
-        "static PARSE_TABLE: crate::ffi::Aligned<[u8; 20]> = crate::ffi::Aligned(*include_bytes!(concat!(env!(\"OUT_DIR\"), \"/mini/parse_table.bin\")));",
-        "static EXTERNAL_SCANNER_STATES: crate::ffi::Aligned<[u8; 2]>",
+        "static PARSE_TABLE: crate::ffi::Deflated = crate::ffi::Deflated { bytes: include_bytes!(concat!(env!(\"OUT_DIR\"), \"/mini/parse_table.bin.z\")), len: 20 };",
+        "static EXTERNAL_SCANNER_STATES: crate::ffi::Deflated = crate::ffi::Deflated {",
+        "pub(crate) static TABLES: [&crate::ffi::Deflated; ",
+        "pub(crate) fn language() -> &'static crate::ffi::TSLanguage {",
+        "parse_table: PARSE_TABLE.inflate().cast::<u16>(),",
         "c\"na\\\"me\".as_ptr()",
         "field_names: FIELD_NAMES.0.as_ptr(),",
         "const SYM_WORD_CHARACTER_SET_1: &[(i32, i32)] = &[(65, 90), (97, 122), (192, 591), ];",
@@ -392,8 +485,8 @@ fn the_rust_names_every_table_the_lexers_and_the_language() {
         "crate::ffi::lexer_entry!(ts_lex_keywords, lex_keywords);",
         "keyword_lex_fn: Some(ts_lex_keywords),",
         "keyword_capture_token: 2,",
-        "external_scanner: crate::ffi::scanner_table::<Scanner>(EXTERNAL_SCANNER_STATES.0.as_ptr().cast::<bool>(), EXTERNAL_SCANNER_SYMBOL_MAP.0.as_ptr().cast::<u16>()),",
-        "lex_modes: LEX_MODES.0.as_ptr().cast::<crate::ffi::LexerMode>(),",
+        "external_scanner: crate::ffi::scanner_table::<Scanner>(EXTERNAL_SCANNER_STATES.inflate().cast::<bool>(), EXTERNAL_SCANNER_SYMBOL_MAP.inflate().cast::<u16>()),",
+        "lex_modes: LEX_MODES.inflate().cast::<crate::ffi::LexerMode>(),",
         "name: c\"mini\".as_ptr(),",
         "max_reserved_word_set_size: 1,",
         "supertype_count: 1,",
@@ -404,7 +497,7 @@ fn the_rust_names_every_table_the_lexers_and_the_language() {
     }
     let files: Vec<&str> = out.blobs.iter().map(|(f, _)| f.as_str()).collect();
     assert!(
-        files.contains(&"parse_table.bin") && files.contains(&"external_scanner_states.bin"),
+        files.contains(&"parse_table.bin.z") && files.contains(&"external_scanner_states.bin.z"),
         "{files:?}"
     );
 }

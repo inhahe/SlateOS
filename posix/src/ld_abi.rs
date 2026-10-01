@@ -53,6 +53,10 @@
 /// | `f_fl` | `F f(F, L)` | `(*const L, F) -> F` |
 /// | `n_lii` | `N f(L, I, I)` | `(*const L, I, I) -> N` |
 /// | `i_pl` | `I f(P, L)` | `(P, *const L) -> I` |
+/// | `i_pnpl` | `I f(P, N, P, L)` | `(P, N, P, *const L) -> I` |
+/// | `p_lipp` | `P f(L, I, P, P)` | `(*const L, I, P, P) -> P` |
+/// | `p_lip` | `P f(L, I, P)` | `(*const L, I, P) -> P` |
+/// | `i_lipppn` | `I f(L, I, P, P, P, N)` | `(*const L, I, P, P, P, N) -> I` |
 /// | `x_ll` | `F f(L, L)` or `D f(L, L)` | `(*const L, *const L) -> F` (or `D`) |
 /// | `x_lll` | `F f(L, L, L)` or `D f(L, L, L)` | `(*const L, *const L, *const L) -> F` (or `D`) |
 /// | `cl_cl` | `C f(C)` | `(*const C, *mut C)` |
@@ -244,6 +248,49 @@ macro_rules! ld_c {
     (i_pl $c:literal => $rust:ident) => {
         $crate::ld_c!(@thunk $c,
             "lea rsi, [rsp + 8]",
+            concat!("jmp ", stringify!($rust)),
+        );
+    };
+    // strfroml(s, n, format, x): the three integer arguments stay in rdi,
+    // rsi and rdx, x's address goes in rcx; the int comes back in eax.
+    (i_pnpl $c:literal => $rust:ident) => {
+        $crate::ld_c!(@thunk $c,
+            "lea rcx, [rsp + 8]",
+            concat!("jmp ", stringify!($rust)),
+        );
+    };
+    // qecvt(x, ndigit, decpt, sign) and qfcvt: ndigit, decpt and sign move
+    // one register on, the last first, to make room for x's address; the
+    // pointer comes back in rax, so a tail jump.
+    (p_lipp $c:literal => $rust:ident) => {
+        $crate::ld_c!(@thunk $c,
+            "mov rcx, rdx",
+            "mov rdx, rsi",
+            "mov esi, edi",
+            "lea rdi, [rsp + 8]",
+            concat!("jmp ", stringify!($rust)),
+        );
+    };
+    // qgcvt(x, ndigit, buf).
+    (p_lip $c:literal => $rust:ident) => {
+        $crate::ld_c!(@thunk $c,
+            "mov rdx, rsi",
+            "mov esi, edi",
+            "lea rdi, [rsp + 8]",
+            concat!("jmp ", stringify!($rust)),
+        );
+    };
+    // qecvt_r(x, ndigit, decpt, sign, buf, len) and qfcvt_r: five integer
+    // arguments move one register on, filling all six; the int comes back
+    // in eax.
+    (i_lipppn $c:literal => $rust:ident) => {
+        $crate::ld_c!(@thunk $c,
+            "mov r9, r8",
+            "mov r8, rcx",
+            "mov rcx, rdx",
+            "mov rdx, rsi",
+            "mov esi, edi",
+            "lea rdi, [rsp + 8]",
             concat!("jmp ", stringify!($rust)),
         );
     };

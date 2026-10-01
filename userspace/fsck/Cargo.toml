@@ -5,6 +5,9 @@ edition = "2024"
 description = "SlateOS filesystem check and repair utility"
 [dependencies]
 procinfo = { path = "../../procinfo" }
+# Its one diagnostic that names an argument quotes it, so a hostile
+# argument cannot forge a line of its stderr.
+quoting = { path = "../quoting" }
 
 [dev-dependencies]
 scratchdir = { path = "../scratchdir" }

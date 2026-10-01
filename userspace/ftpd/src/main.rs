@@ -479,8 +479,9 @@ fn parse_config_file(path: &str) -> Result<Config, FtpdError> {
         }
         let Some((key, value)) = line.split_once('=') else {
             return Err(FtpdError::Config(format!(
-                "{path}:{}: missing '=' in '{line}'",
-                line_num.saturating_add(1)
+                "{path}:{}: missing '=' in {}",
+                line_num.saturating_add(1),
+                quoteaf_os(line)
             )));
         };
         let key = key.trim();
@@ -560,8 +561,9 @@ fn parse_config_file(path: &str) -> Result<Config, FtpdError> {
             }
             _ => {
                 return Err(FtpdError::Config(format!(
-                    "{path}:{}: unknown key '{key}'",
-                    line_num.saturating_add(1)
+                    "{path}:{}: unknown key {}",
+                    line_num.saturating_add(1),
+                    quoteaf_os(key)
                 )));
             }
         }
@@ -1489,17 +1491,19 @@ impl<'a> FtpSession<'a> {
                 authlib::Outcome::RateLimited { retry_after_secs } => log_info(
                     &self.config,
                     &format!(
-                        "user '{username}' rate limited for another {retry_after_secs}s \
+                        "user {} rate limited for another {retry_after_secs}s \
                          after repeated failures (from {})",
+                        quoteaf_os(&username),
                         format_ip(self.stats.peer_ip)
                     ),
                 ),
                 authlib::Outcome::Unusable => log_info(
                     &self.config,
                     &format!(
-                        "user '{username}' has a stored password entry this system \
+                        "user {} has a stored password entry this system \
                          cannot recompute; no password can ever match it and an \
-                         administrator must set a new one"
+                         administrator must set a new one",
+                        quoteaf_os(&username)
                     ),
                 ),
                 _ => log_debug(
@@ -1538,8 +1542,8 @@ impl<'a> FtpSession<'a> {
         log_info(
             &self.config,
             &format!(
-                "user '{}' logged in from {}",
-                username,
+                "user {} logged in from {}",
+                quoteaf_os(&username),
                 format_ip(self.stats.peer_ip)
             ),
         );
@@ -2342,8 +2346,8 @@ impl<'a> FtpSession<'a> {
         log_info(
             &self.config,
             &format!(
-                "user '{}' disconnecting (down={}, up={}, cmds={})",
-                self.username,
+                "user {} disconnecting (down={}, up={}, cmds={})",
+                quoteaf_os(&self.username),
                 self.stats.bytes_downloaded,
                 self.stats.bytes_uploaded,
                 self.stats.commands_processed,

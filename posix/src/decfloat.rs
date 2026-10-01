@@ -192,6 +192,7 @@ const POW10_CHUNK_EXP: usize = 19;
 pub(crate) trait Zeroable: Copy {}
 impl Zeroable for u8 {}
 impl Zeroable for u64 {}
+impl Zeroable for usize {}
 
 /// A `malloc` block of zeroed `T`s, freed when this goes: the storage for the
 /// `long double` conversions, whose worst cases -- a thousand limbs, eleven

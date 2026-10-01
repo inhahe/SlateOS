@@ -30,6 +30,8 @@ pub(crate) enum Which {
     Passwd,
     Group,
     Shadow,
+    /// `/etc/gshadow` -- the groups' shadow file.
+    Gshadow,
     Services,
     Protocols,
     Networks,
@@ -41,12 +43,18 @@ pub(crate) enum Which {
     GaiConf,
     /// `/etc/shells` -- the login shells `getusershell` lists.
     Shells,
+    /// `/etc/rpc` -- the ONC RPC programs `<rpc/netdb.h>` looks up.
+    Rpc,
+    /// `/etc/aliases` -- the mail aliases `<aliases.h>` reads.
+    Aliases,
+    /// `/etc/netgroup` -- the netgroups `setnetgrent` and `innetgr` read.
+    Netgroup,
 }
 
 impl Which {
     /// How many there are: the host tests keep a slot for each.
     #[cfg(test)]
-    const COUNT: usize = 11;
+    const COUNT: usize = 15;
 }
 
 impl Which {
@@ -56,6 +64,7 @@ impl Which {
             Which::Passwd => b"/etc/passwd\0",
             Which::Group => b"/etc/group\0",
             Which::Shadow => b"/etc/shadow\0",
+            Which::Gshadow => b"/etc/gshadow\0",
             Which::Services => b"/etc/services\0",
             Which::Protocols => b"/etc/protocols\0",
             Which::Networks => b"/etc/networks\0",
@@ -64,6 +73,9 @@ impl Which {
             Which::HostConf => b"/etc/host.conf\0",
             Which::GaiConf => b"/etc/gai.conf\0",
             Which::Shells => b"/etc/shells\0",
+            Which::Rpc => b"/etc/rpc\0",
+            Which::Aliases => b"/etc/aliases\0",
+            Which::Netgroup => b"/etc/netgroup\0",
         }
     }
 }
@@ -147,10 +159,24 @@ pub(crate) fn read(which: Which) -> Result<Db, i32> {
 }
 
 /// Read the file at `path` (NUL-terminated) whole, as [`read`] reads a
-/// database: for a configuration file named at run time.
-#[cfg(not(test))]
+/// database: for a file named at run time -- a configuration file, an
+/// `/etc/aliases` `:include:`.  (Host tests read it from what
+/// [`set_test_file`] gave the path; a path it gave nothing is missing.)
 pub(crate) fn read_path(path: &[u8]) -> Result<Db, i32> {
-    read_file(path)
+    #[cfg(test)]
+    {
+        let name = path.strip_suffix(b"\0").unwrap_or(path);
+        // SAFETY: this thread's table, not borrowed elsewhere.
+        let files = unsafe { &*test_files() };
+        match files.iter().flatten().find(|(p, _)| *p == name) {
+            Some((_, text)) => Text::copy_of(text).map(Db::Text).ok_or(errno::ENOMEM),
+            None => Ok(Db::Missing),
+        }
+    }
+    #[cfg(not(test))]
+    {
+        read_file(path)
+    }
 }
 
 /// Read a whole file into a growing block.
@@ -456,6 +482,16 @@ impl Room {
         self.len
     }
 
+    /// How much of the buffer is taken: a mark to [`Room::rewind`] to.
+    pub(crate) fn used(&self) -> usize {
+        self.used
+    }
+
+    /// Give back everything taken since `mark`, an earlier [`Room::used`].
+    pub(crate) fn rewind(&mut self, mark: usize) {
+        self.used = self.used.min(mark);
+    }
+
     /// Room for `n` pointers, aligned for them by address (`parse_list`
     /// aligns the same way), zeroed.
     pub(crate) fn pointers(&mut self, n: usize) -> Result<*mut *const u8, i32> {
@@ -693,7 +729,9 @@ impl Cursor {
 
 /// The next entry of an enumeration, which `take` parses and fills -- `None`
 /// for a line that is no entry: 0, `ENOENT` at the end, or the fill's
-/// `ERANGE`, after which the same entry comes again.
+/// `ERANGE`, after which the same entry comes again.  `errno` is glibc's:
+/// the fill's error, and otherwise as it was -- at the end, and when the
+/// file cannot be read.
 ///
 /// # Safety
 ///
@@ -703,6 +741,42 @@ pub(crate) unsafe fn next_entry<T>(
     cursor: *mut Cursor,
     which: Which,
     builtin: &'static [u8],
+    take: impl Fn(&[u8], &mut Room) -> Option<Result<T, i32>>,
+    out: *mut T,
+    buf: *mut u8,
+    buflen: usize,
+    result: *mut *const T,
+) -> i32 {
+    // SAFETY: the caller's contract, passed on.
+    unsafe {
+        next_record(
+            cursor,
+            which,
+            builtin,
+            |text, at| lines(text, at).next(),
+            take,
+            out,
+            buf,
+            buflen,
+            result,
+        )
+    }
+}
+
+/// [`next_entry`] for a database whose entries are not a line each:
+/// `record(text, at)` is the next entry's text at or after offset `at`, and
+/// the offset just past it -- `None` at the end -- and `take` parses and
+/// fills it, `None` for one that is no entry.
+///
+/// # Safety
+///
+/// As [`next_entry`].
+#[allow(clippy::too_many_arguments)] // as `next_entry`'s, and how records are found
+pub(crate) unsafe fn next_record<T>(
+    cursor: *mut Cursor,
+    which: Which,
+    builtin: &'static [u8],
+    record: impl Fn(&[u8], usize) -> Option<(&[u8], usize)>,
     take: impl Fn(&[u8], &mut Room) -> Option<Result<T, i32>>,
     out: *mut T,
     buf: *mut u8,
@@ -727,10 +801,10 @@ pub(crate) unsafe fn next_entry<T>(
             return errno::ENOENT;
         }
     };
-    for (line, next) in lines(text, c.at) {
+    while let Some((entry, next)) = record(text, c.at) {
         // SAFETY: the caller gives `buflen` writable bytes at `buf`.
         let mut room = unsafe { Room::new(buf, buflen) };
-        let Some(filled) = take(line, &mut room) else {
+        let Some(filled) = take(entry, &mut room) else {
             c.at = next;
             continue;
         };
@@ -741,7 +815,13 @@ pub(crate) unsafe fn next_entry<T>(
                 unsafe { deliver(value, out, result) };
                 0
             }
-            Err(err) => err,
+            // In `errno` too, as glibc's backend reports it
+            // (`*errnop = ERANGE`) -- where success and the end leave
+            // `errno` as it was.
+            Err(err) => {
+                errno::set_errno(err);
+                err
+            }
         };
     }
     c.at = text.len();
@@ -1177,6 +1257,57 @@ pub(crate) fn set_test_text(which: Which, text: Option<&'static [u8]>) {
 #[cfg(test)]
 pub(crate) fn set_test_error(which: Which, errno: i32) {
     set_test_db(which, TestDb::Error(errno));
+}
+
+#[cfg(test)]
+process_global! {
+    /// The files [`read_path`] reads on this host thread, by path.
+    fn test_files() -> [Option<(&'static [u8], &'static [u8])>; 4] = [None; 4];
+}
+
+/// A host test thread's databases and files, as [`set_test_text`],
+/// [`set_test_error`] and [`set_test_file`] left them: for a thread the
+/// library starts on a test's behalf -- an asynchronous lookup's -- to read
+/// what the test set ([`test_adopt`]).
+#[cfg(test)]
+#[derive(Clone, Copy)]
+pub(crate) struct TestDbs(
+    [TestDb; Which::COUNT],
+    [Option<(&'static [u8], &'static [u8])>; 4],
+);
+
+/// This host test thread's databases and files.
+#[cfg(test)]
+pub(crate) fn test_snapshot() -> TestDbs {
+    // SAFETY: this thread's slots and table, only read.
+    unsafe { TestDbs(*test_dbs(), *test_files()) }
+}
+
+/// Make this host thread read `dbs`.
+#[cfg(test)]
+pub(crate) fn test_adopt(dbs: &TestDbs) {
+    // SAFETY: this thread's slots and table, not borrowed elsewhere.
+    unsafe {
+        *test_dbs() = dbs.0;
+        *test_files() = dbs.1;
+    }
+}
+
+/// Make the file at `path` (no NUL) read as `text` through [`read_path`] on
+/// this host test thread; `None`, as missing.
+#[cfg(test)]
+pub(crate) fn set_test_file(path: &'static [u8], text: Option<&'static [u8]>) {
+    // SAFETY: this thread's table, not borrowed elsewhere.
+    let files = unsafe { &mut *test_files() };
+    for slot in files.iter_mut() {
+        if slot.is_some_and(|(p, _)| p == path) {
+            *slot = None;
+        }
+    }
+    if let Some(text) = text {
+        let free = files.iter_mut().find(|s| s.is_none());
+        *free.expect("set_test_file: four files at most") = Some((path, text));
+    }
 }
 
 #[cfg(test)]

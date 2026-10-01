@@ -180,6 +180,73 @@ pub struct PerThread {
     /// declares on the pushing function's own stack
     /// ([`crate::pthread::Ptcb`]). `pthread_exit` runs what is left of it.
     pub cleanup: *mut crate::pthread::Ptcb,
+
+    /// The text [`crate::string::strerror`] gives a number that is no
+    /// error's: glibc's "Unknown error N", right only for the thread that
+    /// asked. "Unknown error -2147483648" and its NUL are 26 bytes.
+    pub strerror: [u8; 32],
+
+    /// The same for [`crate::signal::strsignal`]: "Unknown signal N" and
+    /// "Real-time signal N".
+    pub strsignal: [u8; 32],
+
+    /// The `X` [`crate::prng::seed48`] replaced, which it returns a pointer
+    /// to: the calling thread's own, so that another thread's `seed48` cannot
+    /// overwrite it while it is read.
+    pub seed48: [u16; 3],
+
+    /// The restartable multibyte conversions' internal states, for a NULL
+    /// `ps`: one a function, as C requires, and the thread's own
+    /// ([`crate::wchar::internal`]).
+    pub mbstate: [crate::wchar::MbstateT; crate::wchar::internal::COUNT],
+
+    /// The thread's `dlerror` state ([`crate::dlfcn`]): the message the last
+    /// failing `dl*` call left, and the one the last `dlerror` returned,
+    /// which the caller may read until the next. Freed as the thread exits.
+    pub dlerror: crate::dlfcn::DlErrorSlot,
+
+    /// Signal handlers this thread has run, counted by the signal dispatch
+    /// just before it calls each one ([`crate::interrupt::note_handler`]).  A
+    /// wait the kernel ends for a signal compares it with what it was when
+    /// the wait began, to learn whether a handler ran here at all.  Only
+    /// this thread and its handlers touch it, and only atomically.
+    pub handlers_run: u32,
+
+    /// Of [`Self::handlers_run`], those installed without `SA_RESTART` --
+    /// the ones that interrupt even the calls such a flag restarts.
+    pub handlers_run_without_restart: u32,
+}
+
+/// `prefix` and then `n` in decimal, NUL-terminated, into one of the
+/// block's message buffers ([`PerThread::strerror`], [`PerThread::strsignal`]);
+/// the start of it. Every prefix used is short enough for any `i32` to fit
+/// after it; a longer one would be cut short, never let overrun.
+pub(crate) fn numbered(buf: &mut [u8; 32], prefix: &str, n: i32) -> *const u8 {
+    struct Cursor<'a> {
+        buf: &'a mut [u8; 32],
+        len: usize,
+    }
+    impl core::fmt::Write for Cursor<'_> {
+        fn write_str(&mut self, s: &str) -> core::fmt::Result {
+            let end = self.len.checked_add(s.len()).ok_or(core::fmt::Error)?;
+            // The last byte is the NUL's.
+            if end >= self.buf.len() {
+                return Err(core::fmt::Error);
+            }
+            let dst = self.buf.get_mut(self.len..end).ok_or(core::fmt::Error)?;
+            dst.copy_from_slice(s.as_bytes());
+            self.len = end;
+            Ok(())
+        }
+    }
+    let mut c = Cursor { buf, len: 0 };
+    // Cut short, as above, is the only way this fails.
+    let _ = core::fmt::write(&mut c, format_args!("{prefix}{n}"));
+    let len = c.len;
+    if let Some(b) = c.buf.get_mut(len) {
+        *b = 0;
+    }
+    c.buf.as_ptr()
 }
 
 /// Blocks of thread-specific data a thread can have: with `pthread`'s 32
@@ -210,6 +277,13 @@ impl PerThread {
         tsd_used: false,
         tls_dtors: core::ptr::null_mut(),
         cleanup: core::ptr::null_mut(),
+        strerror: [0; 32],
+        strsignal: [0; 32],
+        seed48: [0; 3],
+        mbstate: [crate::wchar::MbstateT::new(); crate::wchar::internal::COUNT],
+        dlerror: crate::dlfcn::DlErrorSlot::ZERO,
+        handlers_run: 0,
+        handlers_run_without_restart: 0,
     };
 }
 

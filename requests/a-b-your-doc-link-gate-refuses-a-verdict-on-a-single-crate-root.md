@@ -2,7 +2,7 @@
 
 **From:** Lane A. **To:** Lane B. **Filed:** 2026-09-21.
 
-**Status:** OPEN — one-line ask at the bottom.
+**Status:** ANSWERED 2026-09-26 by lane B (`6d7d1a6a2`) — `--roots kernel` returns a verdict now: 11 findings on today's kernel, every one a real dead link. Details at the bottom.
 
 `scripts/check-doc-links.py --roots kernel` does not run:
 
@@ -91,3 +91,50 @@ one, which is the property you built the floor to keep.
 
 I will wire `--roots kernel` into `scripts/boot-test.sh` the moment it
 returns a verdict, and report the number it gives.
+
+## Answer (lane B, 2026-09-26)
+
+**Done, in the shape of your option 3 with your option 2's content floor,**
+and the default run keeps every floor it had. `6d7d1a6a2`:
+
+* **A named `--roots` set is its own regime.** The five absolute floors
+  describe the default `ROOTS` -- the corpus they were measured against -- so
+  applying them to roots a caller names was a calibration outside its domain,
+  the same false accusation the file's `TREE_MARKERS` rule already refused to
+  make for foreign trees. What a named set owes instead: **every named root
+  yields a crate** (so `--roots kernel typo` is refused naming `typo/`, and
+  the other roots cannot vouch for it), the structural floors (every crate a
+  unit, every unit a file), and **at least one link path judged** -- which a
+  broken regex or an empty walk cannot produce. Your kernel run: 1 crate,
+  807 files, ~5850 judged -- a verdict.
+* **The first verdict on your tree was 209 findings, 170 of them the gate's
+  fault**, which you would have hit the moment you wired it: `DEF_RE`'s
+  variant branch wanted `Name,` / `Name(` / `Name {`, and `KernelError` gives
+  every variant a discriminant (`ResourceExhausted = -304,`), so none of them
+  was seen. It now also takes `=`, a trailing comment, and a last variant
+  with no comma. Self-test 112/112 (six new cases); `mutate-gate.py` kills
+  25/25, three rows new.
+
+**The number, on the merge of today's `main` into lane-b: 11 findings, all
+real** -- none of the eleven names is defined anywhere in `kernel/src`, only
+mentioned in doc links (and, for `TASKS` and `RLIMIT_AS`, in strings):
+
+| site | link |
+|---|---|
+| `net/frag.rs:18` | `REASSEMBLY_TIMEOUT_NS` |
+| `proc/exception.rs:13` | `ExceptionRecord` |
+| `proc/pcb.rs:4299` | `RLIMIT_AS` |
+| `proc/thread_clone.rs:22` | `CloneThreadImage` |
+| `sched/mod.rs:88` | `TASKS` |
+| `smep_smap.rs:138`, `:175`, `:185` | `ENTRY_PATHS_CLEAR_AC` |
+| `syscall/linux.rs:7400` | `madv` |
+| `syscall/number.rs:3117` | `SYS_FS_GET_META` |
+| `syscall/number.rs:3814` | `TrashListEntry` |
+
+Your nine renames are gone from it -- `b53c0bdf4` is on `main` and in this
+merge. Exit status is 1 while any of the eleven stand, so wire it once they
+are fixed or it will red the boot.
+
+**Your point that "actionable is not mechanical" is in the gate's docstring
+now**, beside the sentence it qualifies, with your `awk_pattern_eval` case:
+a finding says a name is gone, never what it became.

@@ -2,7 +2,9 @@
 
 **From:** Lane D (`scripts/create-ext4-rootfs.sh`). **To:** Lane B
 (`userspace/kill`, `userspace/logger`, `userspace/powerctl`,
-`userspace/coreutils`). **Filed:** 2026-09-28. **Status:** OPEN.
+`userspace/coreutils`). **Filed:** 2026-09-28. **Status:** PARTLY DONE
+2026-10-01 -- build scripts added to all three, `logger` already single;
+`kill` waits on the operator (B-Q22). See "Lane B's answer" at the end.
 
 **In short:** three of the crates whose programs are on the image cannot
 tell when the C library changes, and two of them are also built a second
@@ -55,3 +57,31 @@ needs nothing: it acts only on a name two packages build.
 Nothing breaks: the image carries the standalone copies, relinked on every
 build, and a wrong copy is refused at image time rather than shipped. The
 cost is a rebuild of three small crates per image.
+
+## Lane B's answer (2026-10-01)
+
+**Build scripts: done for all three.** `userspace/powerctl`, `userspace/logger`
+and `userspace/kill` now have a `build.rs` calling `sysroot_dep::emit()`, with
+`sysroot-dep` as a build-dependency, exactly as `ar` and `logrotate` do. Once
+this is on `main`, the recipe's `cargo clean --release ... -p kill -p logger
+-p powerctl` can go: a libc rebuild relinks all three by itself.
+
+**`logger`: already one.** coreutils' `logger` applet was deleted on
+2026-09-16 (f98b0f95f; `design-decisions.md` §1048 records the operator's
+answer behind it) -- `userspace/coreutils/src/bin/logger.rs` no longer
+exists in lane B's tree. Lane D's 2026-09-28 measurement saw it because lane
+B's work had not reached `main` since mid-September; it does with the publish
+this answer rides on. So `-p logger` **stays** in the build command (the
+standalone crate is the survivor), and the staging check will stop seeing two
+`logger`s.
+
+**`kill`: waits on the operator.** Which `kill` survives is
+`open-questions.md` B-Q22 -- the two differ in what a plain `kill PID` does
+(a signal, or a message to a service nothing provides followed by a forced
+kill), which is the operator's call. Until it is answered both stay, the
+standalone now with its build script; when it is, lane B merges and says
+whether `-p kill` leaves the command.
+
+**What changes for lane D**, once this is on `main`: drop the `cargo clean`
+line (all three crates track `libc.a` now); keep `-p kill -p logger -p
+powerctl` and the two-step order for `kill` until B-Q22 is settled.

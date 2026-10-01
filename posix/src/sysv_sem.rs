@@ -47,6 +47,7 @@
 
 use crate::errno;
 use crate::linux_ipc::{IPC_INFO, IpcPerm};
+use crate::lowlevellock::Waited;
 use crate::objtable::{Slots, Waits};
 use crate::perprocess::process_global;
 use crate::stat::Timespec;
@@ -537,7 +538,13 @@ pub extern "C" fn semtimedop(
 ) -> i32 {
     // SAFETY: the counter is this process's.
     let waits = unsafe { &*waits() };
-    match timed_op(semid, sops, nsops, timeout, |seen, ns| waits.wait(seen, ns)) {
+    // Any signal handler that runs on this thread from the call's start ends
+    // the wait, `SA_RESTART` or not: Linux never restarts `semop` or
+    // `semtimedop`, and a signal that comes at any point in them ends their
+    // next sleep ([`crate::interrupt`]).
+    let mark = crate::interrupt::Mark::now();
+    let wait = |seen, ns| waits.wait_interruptible(seen, ns, mark);
+    match timed_op(semid, sops, nsops, timeout, wait) {
         Ok(()) => 0,
         Err(e) => {
             errno::set_errno(e);
@@ -547,13 +554,15 @@ pub extern "C" fn semtimedop(
 }
 
 /// `semtimedop`, sleeping through `wait` (a test stands in another thread
-/// there).
+/// there), which says whether a signal handler ended the sleep: `EINTR`,
+/// once the operation is no longer counted as waiting -- unless the set was
+/// removed meanwhile, which is `EIDRM`, as `freeary`'s status is on Linux.
 fn timed_op(
     semid: i32,
     sops: *const Sembuf,
     nsops: usize,
     timeout: *const Timespec,
-    mut wait: impl FnMut(i32, Option<u64>),
+    mut wait: impl FnMut(i32, Option<u64>) -> Waited,
 ) -> Result<(), i32> {
     // `ksys_semtimedop` reads the timeout before anything else.
     let timeout = if timeout.is_null() {
@@ -657,7 +666,7 @@ fn timed_op(
                     }
                 }
                 drop(t);
-                wait(seen, left);
+                let waited = wait(seen, left);
                 t = lock();
                 // It was there before the wait: if it is not now, it was
                 // removed, and its counts with it.
@@ -668,6 +677,9 @@ fn timed_op(
                     } else {
                         s.ncnt -= 1;
                     }
+                }
+                if waited == Waited::Interrupted {
+                    return Err(errno::EINTR);
                 }
             }
         }
@@ -1432,6 +1444,7 @@ mod tests {
         let r = timed_op(id, ops.as_ptr(), 2, core::ptr::null(), |_, _| {
             waits += 1;
             assert_eq!(ctl(id, 1, SETVAL, val(1)), 0);
+            Waited::Woken
         });
         assert_eq!((r, waits), (Ok(()), 1), "it blocked, then went");
         assert_eq!((getval(id, 0), getval(id, 1)), (1, 0));
@@ -1515,6 +1528,7 @@ mod tests {
             assert_eq!(ctl(id, 0, GETNCNT, NOARG), 1);
             assert_eq!(ctl(id, 0, GETZCNT, NOARG), 0);
             assert_eq!(sem_ops(id, &[op(0, 1, 0)]), 0);
+            Waited::Woken
         });
         assert_eq!((r, waits), (Ok(()), 1));
         assert_eq!(getval(id, 0), 0);
@@ -1530,6 +1544,7 @@ mod tests {
         let r = timed_op(id, ops.as_ptr(), 1, core::ptr::null(), |_, _| {
             assert_eq!(ctl(id, 0, GETZCNT, NOARG), 1);
             assert_eq!(ctl(id, 0, SETVAL, val(0)), 0);
+            Waited::Woken
         });
         assert_eq!(r, Ok(()));
         rmid(id);
@@ -1549,6 +1564,7 @@ mod tests {
         let r = timed_op(id, ops.as_ptr(), 1, &five, |_, timeout| {
             asked = timeout;
             assert_eq!(ctl(id, 0, SETVAL, val(1)), 0);
+            Waited::Woken
         });
         assert_eq!(r, Ok(()));
         let ns = asked.expect("it waited, with a timeout");
@@ -1587,11 +1603,43 @@ mod tests {
     }
 
     #[test]
+    fn a_wait_a_signal_handler_ends_is_eintr_and_no_longer_counted() {
+        let id = new_set(1);
+        for ops in [[op(0, -1, 0)], [op(0, 0, 0)]] {
+            if ops[0].sem_op == 0 {
+                assert_eq!(ctl(id, 0, SETVAL, val(1)), 0);
+            }
+            let r = timed_op(id, ops.as_ptr(), 1, core::ptr::null(), |_, _| {
+                Waited::Interrupted
+            });
+            assert_eq!(r, Err(errno::EINTR));
+            assert_eq!(ctl(id, 0, GETNCNT, NOARG), 0);
+            assert_eq!(ctl(id, 0, GETZCNT, NOARG), 0);
+        }
+        assert_eq!(getval(id, 0), 1, "nothing was performed");
+        rmid(id);
+    }
+
+    #[test]
+    fn a_set_removed_while_a_handler_ran_is_eidrm_not_eintr() {
+        let id = new_set(1);
+        let ops = [op(0, -1, 0)];
+        let r = timed_op(id, ops.as_ptr(), 1, core::ptr::null(), |_, _| {
+            rmid(id);
+            Waited::Interrupted
+        });
+        assert_eq!(r, Err(errno::EIDRM));
+    }
+
+    #[test]
     fn a_set_removed_under_a_blocked_call_is_eidrm() {
         let id = new_set(1);
         let ops = [op(0, -1, 0)];
         assert_eq!(
-            timed_op(id, ops.as_ptr(), 1, core::ptr::null(), |_, _| rmid(id)),
+            timed_op(id, ops.as_ptr(), 1, core::ptr::null(), |_, _| {
+                rmid(id);
+                Waited::Woken
+            }),
             Err(errno::EIDRM)
         );
         // Removed and replaced in the same slot: still EIDRM, and the new
@@ -1601,6 +1649,7 @@ mod tests {
         let r = timed_op(id, ops.as_ptr(), 1, core::ptr::null(), |_, _| {
             rmid(id);
             replacement = new_set(1);
+            Waited::Woken
         });
         assert_eq!(r, Err(errno::EIDRM));
         assert_eq!(slot_of(replacement), slot_of(id));

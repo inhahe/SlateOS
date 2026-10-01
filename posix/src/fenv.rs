@@ -16,8 +16,15 @@
 //! Each unit's state is per thread (the kernel saves and restores it with the
 //! rest of a thread's registers), so none of this needs a lock.
 //!
-//! Not here yet: C23's `fegetmode`/`fesetmode`, whose `femode_t` musl's
-//! headers -- which this library's ABI is checked against -- do not have.
+//! C23's control modes, [`FemodeT`] with [`fegetmode`] and [`fesetmode`],
+//! have glibc's x86-64 layout: the x87 control word, two reserved bytes,
+//! `MXCSR`. musl's headers have no `femode_t`; `posix/include/fenv.h`, the
+//! header overlay C is compiled with, declares it and them (2026-09-29).
+//!
+//! A caller's `fenv_t` or `femode_t` is untrusted as to `MXCSR`: `ldmxcsr`
+//! faults on any bit the processor does not implement, so what is loaded
+//! from one is held to [`mxcsr_writable`]'s bits, and the rest kept as the
+//! processor has them.
 
 use core::arch::asm;
 
@@ -92,6 +99,26 @@ pub struct FenvT {
     pub mxcsr: u32,
 }
 
+/// The control modes -- the rounding direction, the exception masks, the x87
+/// unit's precision -- without the exception flags: C23's `femode_t`, as
+/// glibc's x86-64 `<bits/fenv.h>` lays it out.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct FemodeT {
+    /// The x87 control word.
+    pub control_word: u16,
+    reserved: u16,
+    /// `MXCSR`, whose flags [`fesetmode`] does not take.
+    pub mxcsr: u32,
+}
+
+/// `FE_DFL_MODE`: `(const femode_t *) -1`, the modes a program starts with.
+pub const FE_DFL_MODE: *const FemodeT = usize::MAX as *const FemodeT;
+
+/// The x87 control word a program starts with: every exception masked,
+/// 64-bit precision, to nearest (glibc's `_FPU_DEFAULT`).
+const FPU_DEFAULT: u16 = 0x037f;
+
 /// `FE_DFL_ENV`: `(const fenv_t *) -1`, the environment a program starts in.
 pub const FE_DFL_ENV: *const FenvT = usize::MAX as *const FenvT;
 /// `FE_NOMASK_ENV` (a GNU extension): `(const fenv_t *) -2`, the default
@@ -112,10 +139,32 @@ fn stmxcsr() -> u32 {
 
 fn ldmxcsr(v: u32) {
     // SAFETY: `ldmxcsr` loads MXCSR from the four bytes at the operand, a
-    // local. Every value this module writes keeps MXCSR's reserved bits
-    // (16..31) as the processor left them -- it only ever ORs and masks the
-    // defined low bits -- so the load cannot fault.
+    // local. Every value this module writes keeps MXCSR's reserved bits as
+    // the processor left them -- it only ever ORs and masks the defined low
+    // bits, and holds what it takes from a caller's `fenv_t` or `femode_t`
+    // to `mxcsr_writable()` -- so the load cannot fault.
     unsafe { asm!("ldmxcsr [{}]", in(reg) &raw const v, options(nostack, preserves_flags)) };
+}
+
+/// The `MXCSR` bits this processor lets `ldmxcsr` set: `MXCSR_MASK`, from
+/// the image `fxsave` stores -- or, where that field is 0, 0xffbf, the
+/// processors from before it, which have no denormals-are-zero (Intel SDM
+/// vol. 1, 11.6.6). Loading a bit outside it faults.
+fn mxcsr_writable() -> u32 {
+    #[repr(C, align(16))]
+    struct FxsaveArea([u8; 512]);
+    let mut area = FxsaveArea([0; 512]);
+    // SAFETY: `fxsave` stores 512 bytes at a 16-byte-aligned operand, which
+    // `area` is and has; it reads no memory and changes no register.
+    unsafe {
+        asm!("fxsave [{}]", in(reg) area.0.as_mut_ptr(), options(nostack, preserves_flags));
+    }
+    let mask = area
+        .0
+        .get(28..32)
+        .and_then(|b| <[u8; 4]>::try_from(b).ok())
+        .map_or(0, u32::from_le_bytes);
+    if mask == 0 { 0xffbf } else { mask }
 }
 
 fn fnstcw() -> u16 {
@@ -240,6 +289,34 @@ pub(crate) fn toward_zero_x87<A, T>(args: A, f: impl FnOnce(A) -> T) -> (T, bool
     // The return value only reports an argument outside FE_ALL_EXCEPT.
     let _ = feraiseexcept(raised);
     (r, raised & FE_INEXACT != 0)
+}
+
+/// `f(args)` with both units' environments held -- every flag cleared,
+/// every exception masked, rounding to nearest, the x87 unit at its full
+/// 64-bit precision -- and then both put back exactly as they were, so the
+/// flags `f` raised are dropped: glibc's `libc_feholdexcept_setround_387
+/// (FE_TONEAREST)` and its SSE twin, without the update. For the `long
+/// double` Bessel functions ([`crate::besl`]), which compute in
+/// double-long-double arithmetic -- whose error-free sums and products are
+/// error-free only to nearest and at 64 bits, whose every operation is
+/// inexact and whose negligible terms may underflow -- and which raise their
+/// result's own flags by rounding it once, in the caller's environment,
+/// afterwards. `f` is pinned between the switches as in [`in_nearest`].
+pub(crate) fn quietly_in_nearest_x87<A, T>(args: A, f: impl FnOnce(A) -> T) -> T {
+    let mut env = FenvT::default();
+    fnstenv(&mut env);
+    let mut held = env;
+    // The flags, the error summary and busy: what `fnclex` clears.
+    held.status_word &= !0x80ff;
+    // Every exception masked (0x3f), 64-bit precision (0x300), to nearest.
+    held.control_word = (held.control_word | 0x33f) & !0xc00;
+    fldenv(&held);
+    let csr = stmxcsr();
+    ldmxcsr((csr | 0x1f80) & !(0x3f | MXCSR_ROUNDING));
+    let r = core::hint::black_box(f(core::hint::black_box(args)));
+    ldmxcsr(csr);
+    fldenv(&env);
+    r
 }
 
 /// Whether the SSE unit -- every `double` and `float` operation -- rounds to
@@ -565,10 +642,61 @@ pub extern "C" fn fesetenv(envp: *const FenvT) -> i32 {
         temp.opcode = e.opcode;
         temp.data_offset = e.data_offset;
         temp.data_selector = e.data_selector;
-        temp.mxcsr = e.mxcsr;
+        // The saved MXCSR, but for bits this processor would fault on: glibc
+        // loads it whole, and faults on an environment no `fegetenv` made.
+        let writable = mxcsr_writable();
+        temp.mxcsr = (temp.mxcsr & !writable) | (e.mxcsr & writable);
     }
     fldenv(&temp);
     ldmxcsr(temp.mxcsr);
+    0
+}
+
+// ---------------------------------------------------------------------------
+// The control modes
+// ---------------------------------------------------------------------------
+
+/// Save both units' control modes into `*modep` (C23; glibc's
+/// `fegetmode.c`): the x87 control word, and `MXCSR` -- with its flags,
+/// which [`fesetmode`] does not take back. A NULL `modep` is not written.
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub extern "C" fn fegetmode(modep: *mut FemodeT) -> i32 {
+    if !modep.is_null() {
+        let mode = FemodeT {
+            control_word: fnstcw(),
+            reserved: 0,
+            mxcsr: stmxcsr(),
+        };
+        // SAFETY: non-null, and the caller's `femode_t *`.
+        unsafe { modep.write(mode) };
+    }
+    0
+}
+
+/// Install the control modes saved at `modep` -- or, for [`FE_DFL_MODE`],
+/// the ones a program starts with -- in both units, leaving every exception
+/// flag as it is (C23; glibc's `fesetmode.c`). A NULL `modep` changes
+/// nothing.
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub extern "C" fn fesetmode(modep: *const FemodeT) -> i32 {
+    // The six flags, the denormal operand's among them.
+    let flags = u32::try_from(FE_ALL_EXCEPT_X86).unwrap_or(0);
+    let writable = mxcsr_writable();
+    let (control_word, modes) = if modep == FE_DFL_MODE {
+        // Every exception masked, to nearest, neither flush-to-zero nor
+        // denormals-are-zero: MXCSR's value at reset, flags aside.
+        (FPU_DEFAULT, flags << 7)
+    } else if modep.is_null() {
+        return 0;
+    } else {
+        // SAFETY: neither the sentinel nor NULL: the caller's `const
+        // femode_t *`.
+        let m = unsafe { modep.read() };
+        (m.control_word, m.mxcsr & writable & !flags)
+    };
+    fldcw(control_word);
+    // The flags as they are, and the bits the processor keeps to itself.
+    ldmxcsr((stmxcsr() & (flags | !writable)) | modes);
     0
 }
 
@@ -604,6 +732,113 @@ mod tests {
         fn drop(&mut self) {
             fesetenv(&raw const self.0);
         }
+    }
+
+    /// `femode_t` is the x87 control word, two reserved bytes and MXCSR:
+    /// glibc's layout, which `posix/include/fenv.h` declares.
+    #[test]
+    fn femode_t_is_the_control_word_then_mxcsr() {
+        assert_eq!(core::mem::size_of::<FemodeT>(), 8);
+        assert_eq!(core::mem::offset_of!(FemodeT, control_word), 0);
+        assert_eq!(core::mem::offset_of!(FemodeT, mxcsr), 4);
+    }
+
+    /// The modes saved come back -- both units' rounding, and the x87
+    /// unit's precision and MXCSR's flush-to-zero with them -- and the flags
+    /// are whatever they are when the modes are set, not what they were when
+    /// they were saved.
+    #[test]
+    fn fesetmode_puts_the_modes_back_and_leaves_the_flags() {
+        let _r = Restore::take();
+        fesetround(FE_DOWNWARD);
+        // Double precision in the x87 unit, flush-to-zero in the SSE one.
+        fldcw((fnstcw() & !0x300) | 0x200);
+        ldmxcsr(stmxcsr() | 0x8000);
+        feclearexcept(FE_ALL_EXCEPT);
+        feraiseexcept(FE_INEXACT);
+        let mut saved = FemodeT::default();
+        assert_eq!(fegetmode(&raw mut saved), 0);
+        assert_eq!(saved.control_word, fnstcw());
+        assert_eq!(saved.mxcsr, stmxcsr());
+
+        assert_eq!(fesetmode(FE_DFL_MODE), 0);
+        fesetround(FE_UPWARD);
+        feclearexcept(FE_ALL_EXCEPT);
+        feraiseexcept(FE_OVERFLOW);
+        assert_eq!(fesetmode(&raw const saved), 0);
+        assert_eq!(fegetround(), FE_DOWNWARD);
+        assert_eq!(
+            stmxcsr() & MXCSR_ROUNDING,
+            0x2000,
+            "the SSE unit rounds down too"
+        );
+        assert_eq!(fnstcw() & 0x300, 0x200, "the x87 precision came back");
+        assert_eq!(stmxcsr() & 0x8000, 0x8000, "and flush-to-zero");
+        assert_eq!(
+            fetestexcept(FE_ALL_EXCEPT),
+            FE_OVERFLOW,
+            "the flags are the ones now, not the saved ones"
+        );
+    }
+
+    /// `FE_DFL_MODE` is the modes a program starts with: glibc's
+    /// `_FPU_DEFAULT` control word and MXCSR's reset value, flags kept.
+    #[test]
+    fn fe_dfl_mode_is_the_modes_a_program_starts_with() {
+        let _r = Restore::take();
+        fesetround(FE_TOWARDZERO);
+        fldcw((fnstcw() & !0x300) | 0x200);
+        ldmxcsr(stmxcsr() | 0x8040);
+        feclearexcept(FE_ALL_EXCEPT);
+        feraiseexcept(FE_UNDERFLOW);
+        assert_eq!(fesetmode(FE_DFL_MODE), 0);
+        assert_eq!(fnstcw(), 0x037f);
+        assert_eq!(stmxcsr() & !0x3f, 0x1f80);
+        assert_eq!(fegetround(), FE_TONEAREST);
+        assert_eq!(
+            fetestexcept(FE_ALL_EXCEPT),
+            FE_UNDERFLOW,
+            "the flag is kept"
+        );
+    }
+
+    /// A mode or an environment no `fegetmode` or `fegetenv` made may have
+    /// MXCSR bits set that `ldmxcsr` faults on; they are not loaded, and
+    /// neither are a mode's flags.
+    #[test]
+    fn a_callers_mxcsr_is_held_to_the_bits_the_processor_has() {
+        let _r = Restore::take();
+        let writable = mxcsr_writable();
+        assert_eq!(
+            writable & 0xffbf,
+            0xffbf,
+            "every x86-64 processor has these"
+        );
+        assert_eq!(writable >> 16, 0, "and none above the sixteenth");
+        feclearexcept(FE_ALL_EXCEPT);
+        let bogus = FemodeT {
+            control_word: FPU_DEFAULT,
+            reserved: 0,
+            mxcsr: 0xffff_0000 | 0x1f80 | 0x3f,
+        };
+        assert_eq!(fesetmode(&raw const bogus), 0);
+        assert_eq!(stmxcsr() >> 16, 0);
+        assert_eq!(fetestexcept(FE_ALL_EXCEPT), 0, "a mode's flags are not set");
+        let mut env = FenvT::default();
+        fegetenv(&raw mut env);
+        env.mxcsr |= 0xffff_0000;
+        assert_eq!(fesetenv(&raw const env), 0);
+        assert_eq!(stmxcsr() >> 16, 0);
+    }
+
+    /// NULL is written to by neither, and changes nothing.
+    #[test]
+    fn a_null_mode_is_neither_written_nor_read() {
+        let _r = Restore::take();
+        fesetround(FE_UPWARD);
+        assert_eq!(fegetmode(core::ptr::null_mut()), 0);
+        assert_eq!(fesetmode(core::ptr::null()), 0);
+        assert_eq!(fegetround(), FE_UPWARD);
     }
 
     /// `fenv_t` is the x87 image and MXCSR: 32 bytes, MXCSR at 28.

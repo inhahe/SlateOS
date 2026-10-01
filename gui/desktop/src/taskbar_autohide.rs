@@ -9,6 +9,7 @@
 //! - Per-edge detection (supports taskbar on any screen edge)
 
 use guitk::color::Color;
+use guitk::motion::Motion;
 use guitk::render::RenderCommand;
 use guitk::style::CornerRadii;
 
@@ -51,7 +52,8 @@ pub struct AutoHideConfig {
     pub hide_delay_ms: u64,
     /// How far (in pixels) the taskbar slides out of view.
     pub slide_distance: f32,
-    /// Animation duration in ms.
+    /// Animation duration in ms. As designed: against the standard
+    /// transition, so the desktop's motion scales it.
     pub slide_duration_ms: u64,
     /// Width of the trigger zone at the screen edge (pixels).
     pub trigger_zone_width: f32,
@@ -180,12 +182,18 @@ pub struct AutoHideManager {
     pub mouse_left_at: Option<u64>,
     /// Timestamp when current animation started.
     pub anim_start_ms: u64,
+    /// How far through its slide the bar was at `anim_start_ms`: 0.0 for a
+    /// slide from rest, part of the way for one turned round mid-slide.
+    anim_from: f32,
     /// Timestamp when peek started.
     pub peek_start_ms: u64,
     /// Whether auto-hide is locked (e.g., during drag, menu open).
     pub locked: bool,
     /// Number of active locks (for nested locking).
     lock_count: u32,
+    /// How the slides move: their length and their curve -- the desktop's
+    /// ([`set_motion`](Self::set_motion)).
+    motion: Motion,
 }
 
 impl AutoHideManager {
@@ -199,10 +207,70 @@ impl AutoHideManager {
             mouse_in_trigger: false,
             mouse_left_at: None,
             anim_start_ms: 0,
+            anim_from: 0.0,
             peek_start_ms: 0,
             locked: false,
             lock_count: 0,
+            motion: Motion::STANDARD,
         }
+    }
+
+    /// Slide as `motion` says from now on: the slides' length and their
+    /// curve (design-decisions §1446). A slide in progress carries on under
+    /// it -- a still motion finishes it at the next tick.
+    pub fn set_motion(&mut self, motion: Motion) {
+        self.motion = motion;
+    }
+
+    /// How the slides move now.
+    #[must_use]
+    pub const fn motion(&self) -> Motion {
+        self.motion
+    }
+
+    /// How long a slide takes: the configured length, as designed against
+    /// the standard transition, under the motion. Zero when still.
+    fn slide_ms(&self) -> u64 {
+        let stated = u32::try_from(self.config.slide_duration_ms).unwrap_or(u32::MAX);
+        u64::from(self.motion.duration_ms(stated))
+    }
+
+    /// How far through its slide the bar is at `now_ms`, 0.0 to 1.0: where it
+    /// was at `anim_start_ms`, and the time since -- and 1.0, done, for a
+    /// slide of no length.
+    fn slide_progress(&self, now_ms: u64) -> f32 {
+        let duration = self.slide_ms();
+        if duration == 0 {
+            return 1.0;
+        }
+        let elapsed = now_ms.saturating_sub(self.anim_start_ms);
+        #[expect(
+            clippy::cast_precision_loss,
+            reason = "a slide's milliseconds are far inside f32's exact range"
+        )]
+        let progress = self.anim_from + elapsed as f32 / duration as f32;
+        progress.min(1.0)
+    }
+
+    /// Start sliding out, from rest.
+    fn begin_slide_out(&mut self, now_ms: u64) {
+        self.state = AutoHideState::SlidingOut;
+        self.anim_start_ms = now_ms;
+        self.anim_from = 0.0;
+    }
+
+    /// Start sliding in from where the bar is drawn now -- all the way out
+    /// when hidden, part of the way when caught sliding out -- so that a
+    /// slide turned round carries on from the place on screen rather than
+    /// jumping to hidden and starting over.
+    ///
+    /// Under a curve that leaves and arrives at different paces, the place is
+    /// not where the slide out's clock stood: the slide in is started at the
+    /// moment its own curve has the bar there ([`Motion::when_arriving_at`]).
+    fn begin_slide_in(&mut self, now_ms: u64) {
+        self.state = AutoHideState::SlidingIn;
+        self.anim_start_ms = now_ms;
+        self.anim_from = self.motion.when_arriving_at(1.0 - self.hide_progress);
     }
 
     /// Compute the taskbar's offset from its normal position.
@@ -253,8 +321,7 @@ impl AutoHideManager {
 
         match self.state {
             AutoHideState::Hidden | AutoHideState::SlidingOut => {
-                self.state = AutoHideState::SlidingIn;
-                self.anim_start_ms = now_ms;
+                self.begin_slide_in(now_ms);
             }
             AutoHideState::Peeking => {
                 // Mouse entered during peek — stay visible
@@ -275,8 +342,7 @@ impl AutoHideManager {
     pub fn on_mouse_enter_trigger(&mut self, now_ms: u64) {
         self.mouse_in_trigger = true;
         if self.state == AutoHideState::Hidden {
-            self.state = AutoHideState::SlidingIn;
-            self.anim_start_ms = now_ms;
+            self.begin_slide_in(now_ms);
         }
     }
 
@@ -307,8 +373,7 @@ impl AutoHideManager {
         }
         match self.state {
             AutoHideState::Hidden | AutoHideState::SlidingOut => {
-                self.state = AutoHideState::SlidingIn;
-                self.anim_start_ms = now_ms;
+                self.begin_slide_in(now_ms);
                 self.peek_start_ms = now_ms;
             }
             AutoHideState::SlidingIn | AutoHideState::Visible => {
@@ -321,8 +386,6 @@ impl AutoHideManager {
         }
     }
 
-    /// Advance the state machine. Call each frame with the current timestamp.
-    /// Returns true if a repaint is needed.
     /// Replace the configuration, keeping the current visual state.
     ///
     /// The state is deliberately *not* reset. A user changing their taskbar
@@ -367,6 +430,13 @@ impl AutoHideManager {
         }
     }
 
+    /// Advance the state machine. Call each frame with the current timestamp.
+    /// Returns true if a repaint is needed.
+    ///
+    /// A slide's place is its progress through the motion's curve: leaving
+    /// for the slide out, arriving for the slide in -- never past the bar's
+    /// place, where a spring would carry it: the bar is anchored to the
+    /// screen's edge, and passing its place would open a gap there.
     pub fn tick(&mut self, now_ms: u64) -> bool {
         if !self.config.enabled {
             if self.state != AutoHideState::Visible {
@@ -387,31 +457,26 @@ impl AutoHideManager {
                 {
                     let elapsed = now_ms.saturating_sub(left_at);
                     if elapsed >= self.config.hide_delay_ms {
-                        self.state = AutoHideState::SlidingOut;
-                        self.anim_start_ms = now_ms;
+                        self.begin_slide_out(now_ms);
                         return true;
                     }
                 }
                 false
             }
             AutoHideState::SlidingOut => {
-                let elapsed = now_ms.saturating_sub(self.anim_start_ms);
-                let duration = self.config.slide_duration_ms.max(1);
-                let progress = (elapsed as f32) / (duration as f32);
+                let progress = self.slide_progress(now_ms);
 
                 if progress >= 1.0 {
                     self.hide_progress = 1.0;
                     self.state = AutoHideState::Hidden;
                 } else {
-                    self.hide_progress = progress;
+                    self.hide_progress = self.motion.leaving(progress);
                 }
                 true
             }
             AutoHideState::Hidden => false,
             AutoHideState::SlidingIn => {
-                let elapsed = now_ms.saturating_sub(self.anim_start_ms);
-                let duration = self.config.slide_duration_ms.max(1);
-                let progress = (elapsed as f32) / (duration as f32);
+                let progress = self.slide_progress(now_ms);
 
                 if progress >= 1.0 {
                     self.hide_progress = 0.0;
@@ -424,7 +489,7 @@ impl AutoHideManager {
                         self.state = AutoHideState::Visible;
                     }
                 } else {
-                    self.hide_progress = 1.0 - progress;
+                    self.hide_progress = (1.0 - self.motion.arriving(progress)).max(0.0);
                 }
                 true
             }
@@ -437,8 +502,7 @@ impl AutoHideManager {
 
                 let elapsed = now_ms.saturating_sub(self.peek_start_ms);
                 if elapsed >= self.config.peek_duration_ms {
-                    self.state = AutoHideState::SlidingOut;
-                    self.anim_start_ms = now_ms;
+                    self.begin_slide_out(now_ms);
                     self.peek_start_ms = 0;
                     return true;
                 }
@@ -814,6 +878,92 @@ mod tests {
         assert_eq!(m.state, AutoHideState::SlidingIn);
 
         m.tick(2060); // Animation done
+        assert_eq!(m.state, AutoHideState::Visible);
+        assert_eq!(m.hide_progress, 0.0);
+    }
+
+    /// **A slide turned round does not jump**: caught sliding out, the bar
+    /// slides back in from where it is drawn -- under every curve, though an
+    /// arrival and a departure are different shapes.
+    #[test]
+    fn a_slide_turned_round_does_not_jump() {
+        use guitk::motion::Curve;
+        for curve in Curve::ALL {
+            let mut m = AutoHideManager::new(make_config());
+            m.set_motion(Motion::new(200, curve));
+            m.on_mouse_leave_taskbar(1000);
+            m.tick(1101); // → SlidingOut
+            m.tick(1101 + 20); // 40% of the 50 ms slide
+            let drawn = m.hide_progress;
+            assert!(drawn > 0.0 && drawn < 1.0, "{curve:?}: {drawn}");
+
+            m.on_mouse_enter_taskbar(1121);
+            assert_eq!(m.state, AutoHideState::SlidingIn);
+            m.tick(1121);
+            assert!(
+                (m.hide_progress - drawn).abs() < 1e-3,
+                "{curve:?}: {drawn} then {}",
+                m.hide_progress
+            );
+            m.tick(1121 + 50);
+            assert_eq!(m.state, AutoHideState::Visible, "{curve:?}");
+            assert_eq!(m.hide_progress, 0.0);
+        }
+    }
+
+    /// **The slides follow the desktop's motion**: their length scales with
+    /// the standard transition, and the bar is drawn along the curve --
+    /// under the built-in ease-out, a quarter gone half-way out.
+    #[test]
+    fn the_slides_follow_the_desktops_motion() {
+        use guitk::motion::Curve;
+        let mut m = AutoHideManager::new(make_config());
+        m.on_mouse_leave_taskbar(1000);
+        m.tick(1101);
+        m.tick(1101 + 25);
+        assert!((m.hide_progress - 0.25).abs() < 1e-5, "{}", m.hide_progress);
+
+        let mut slow = AutoHideManager::new(make_config());
+        slow.set_motion(Motion::new(400, Curve::Linear));
+        slow.on_mouse_leave_taskbar(1000);
+        slow.tick(1101);
+        slow.tick(1101 + 50); // half of a 100 ms slide
+        assert_eq!(slow.state, AutoHideState::SlidingOut);
+        assert!((slow.hide_progress - 0.5).abs() < 1e-5);
+        slow.tick(1101 + 100);
+        assert_eq!(slow.state, AutoHideState::Hidden);
+    }
+
+    /// **A spring never draws the bar past its place**: it is anchored to
+    /// the screen's edge.
+    #[test]
+    fn a_spring_never_draws_the_bar_past_its_place() {
+        let mut m = AutoHideManager::new(make_config());
+        m.set_motion(Motion::new(200, guitk::motion::Curve::Spring));
+        m.state = AutoHideState::Hidden;
+        m.hide_progress = 1.0;
+        m.on_mouse_enter_taskbar(2000);
+        for now in 2000..2060 {
+            m.tick(now);
+            assert!(m.hide_progress >= 0.0, "{now}: {}", m.hide_progress);
+        }
+        assert_eq!(m.state, AutoHideState::Visible);
+    }
+
+    /// **Under a still motion the bar goes, and comes, at once**: the tick
+    /// after a slide begins finishes it.
+    #[test]
+    fn under_a_still_motion_the_bar_goes_at_once() {
+        let mut m = AutoHideManager::new(make_config());
+        m.set_motion(Motion::STILL);
+        m.on_mouse_leave_taskbar(1000);
+        m.tick(1101);
+        assert_eq!(m.state, AutoHideState::SlidingOut);
+        m.tick(1101);
+        assert_eq!(m.state, AutoHideState::Hidden);
+        assert!(m.is_fully_hidden());
+        m.on_mouse_enter_trigger(2000);
+        m.tick(2000);
         assert_eq!(m.state, AutoHideState::Visible);
         assert_eq!(m.hide_progress, 0.0);
     }

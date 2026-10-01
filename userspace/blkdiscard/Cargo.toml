@@ -1,0 +1,22 @@
+[package]
+name = "blkdiscard"
+version = "0.1.0"
+edition = "2024"
+description = "util-linux 2.39.3's blkdiscard, ported: discard, securely discard or zero-fill the sectors of a block device"
+
+[lints]
+workspace = true
+
+[dependencies]
+# glibc's getopt_long.
+getoptlong = { path = "../getoptlong" }
+# argv and paths are bytes; a name in a diagnostic is escaped.
+quoting = { path = "../quoting" }
+# libblkid: the signature check before anything is discarded.
+ulblkid = { path = "../ulblkid" }
+# strtosize_or_err for -o, -l and -p.
+ulstrutils = { path = "../ulstrutils" }
+# util-linux's close_stdout, and stdout buffered as glibc buffers it.
+ulclosestream = { path = "../ulclosestream" }
+# A standard descriptor blkdiscard was started without stays closed.
+stdfdguard = { path = "../stdfdguard" }

@@ -13,14 +13,35 @@ use std::path::PathBuf;
 
 /// Every grammar in `grammars/`, by directory.
 const GRAMMARS: &[&str] = &[
+    "ada",
+    "bash",
     "c",
+    "cpp",
     "css",
+    "diff",
+    "dockerfile",
+    "dtd",
+    "go",
+    "html",
+    "ini",
+    "java",
+    "javascript",
+    "jsdoc",
     "json",
+    "linkerscript",
+    "lua",
+    "make",
     "markdown",
     "markdown_inline",
+    "powershell",
     "python",
+    "regex",
     "rust",
+    "sql",
     "toml",
+    "tsx",
+    "typescript",
+    "xml",
     "yaml",
 ];
 
@@ -35,8 +56,11 @@ fn main() -> Result<(), Box<dyn Error>> {
         let dir = out.join(name);
         fs::create_dir_all(&dir)?;
         fs::write(dir.join("language.rs"), output.rust)?;
+        // Deflated: the generated Rust inflates what it includes. Level 6:
+        // measured on C++'s and Bash's tables, 1.4% larger than level 9 in
+        // a build script's unoptimised code at two-fifths of the time.
         for (file, bytes) in output.blobs {
-            fs::write(dir.join(file), bytes)?;
+            fs::write(dir.join(file), deflate::deflate_level(&bytes, 6))?;
         }
     }
     println!("cargo::rerun-if-changed=build.rs");

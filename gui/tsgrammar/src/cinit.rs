@@ -44,6 +44,10 @@ pub(crate) enum Expr {
     Str(Vec<u8>),
     /// `NAME(args)`: one of the table macros.
     Call(String, Vec<Expr>),
+    /// `.name = value` as a macro's argument: an older generator's
+    /// `REDUCE(sym, 2, .production_id = 3)`, whose macro pastes it into a
+    /// designated initializer.
+    Named(String, Box<Expr>),
     Neg(Box<Expr>),
     /// `(type)expr`: the type, as its words joined by blanks.
     Cast(String, Box<Expr>),
@@ -272,7 +276,17 @@ impl<'t, 'a> Parser<'t, 'a> {
                     let mut args = Vec::new();
                     if !self.eat(")") {
                         loop {
-                            args.push(self.expr()?);
+                            if matches!(self.peek(), Some(Tok::Punct(".")))
+                                && matches!(self.peek_at(1), Some(Tok::Ident(_)))
+                                && matches!(self.peek_at(2), Some(Tok::Punct("=")))
+                            {
+                                self.at += 1;
+                                let field = self.ident()?.to_owned();
+                                self.expect("=")?;
+                                args.push(Expr::Named(field, Box::new(self.expr()?)));
+                            } else {
+                                args.push(self.expr()?);
+                            }
                             if self.eat(")") {
                                 break;
                             }
@@ -356,7 +370,7 @@ impl Constants {
                 }
                 _ => Err(Error::at(line, format!("not a number: {name}(...)"))),
             },
-            Expr::Str(_) | Expr::Addr(_) | Expr::Index(..) => {
+            Expr::Str(_) | Expr::Addr(_) | Expr::Index(..) | Expr::Named(..) => {
                 Err(Error::at(line, format!("not a number: {e:?}")))
             }
         }

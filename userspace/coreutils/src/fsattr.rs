@@ -160,6 +160,18 @@ pub enum When {
     Omit,
     /// Overwrite it with this instant.
     Set(SystemTime),
+    /// Set it to the current time, as the kernel reads its own clock:
+    /// `UTIME_NOW`.
+    ///
+    /// Not `Set(SystemTime::now())`, and the difference is permission, not
+    /// precision. Writing an explicit instant is the file owner's right alone;
+    /// asking for *now* on both times is allowed to anyone who may write the
+    /// file (`utimensat(2)`). That is why GNU `touch` with no `-r`, `-t` or `-d`
+    /// passes a null times pointer: measured, it succeeds on `/dev/null`, a
+    /// file owned by root and writable by all, where an explicit stamp fails
+    /// with `Operation not permitted`. Mixed with [`When::Omit`], as `-a` and
+    /// `-m` ask, the kernel wants ownership again, and GNU fails there too.
+    Now,
 }
 
 /// What to write to a file's two timestamps.
@@ -188,15 +200,33 @@ impl Times {
         }
     }
 
-    /// The `std` spelling, for the paths that go through a handle: every stamp
-    /// on Windows, and `touch -` on both.
+    /// Both timestamps set to *now* by the kernel, with a writer's permission
+    /// rather than an owner's -- see [`When::Now`].
+    #[must_use]
+    pub fn now() -> Self {
+        Times {
+            accessed: When::Now,
+            modified: When::Now,
+        }
+    }
+
+    /// The `std` spelling, for the paths that go through a handle on a host
+    /// without `futimens`: every stamp on Windows.
+    ///
+    /// `std` has no "now" to ask for, so [`When::Now`] is read off the clock
+    /// here. That keeps the time right and loses only the permission rule,
+    /// which a host without `utimensat` does not have either.
     pub fn to_file_times(self) -> std::fs::FileTimes {
         let mut times = std::fs::FileTimes::new();
-        if let When::Set(t) = self.accessed {
-            times = times.set_accessed(t);
+        match self.accessed {
+            When::Set(t) => times = times.set_accessed(t),
+            When::Now => times = times.set_accessed(SystemTime::now()),
+            When::Omit => {}
         }
-        if let When::Set(t) = self.modified {
-            times = times.set_modified(t);
+        match self.modified {
+            When::Set(t) => times = times.set_modified(t),
+            When::Now => times = times.set_modified(SystemTime::now()),
+            When::Omit => {}
         }
         times
     }
@@ -234,13 +264,39 @@ pub fn times_of(meta: &std::fs::Metadata) -> io::Result<Times> {
 /// `/` and NUL (`design.txt`), so such a path names nothing anyway.
 pub fn set_times(on: On<'_>, times: Times) -> io::Result<()> {
     match on {
-        // `File::set_times` is `futimens`, which is what a descriptor wants and
-        // what `std` already spells portably. [`Times::to_file_times`] loses
-        // nothing on the way: an omitted half becomes a `FileTimes` field that
-        // was never set, which `std` turns back into `UTIME_OMIT`.
-        On::File(f) => f.set_times(times.to_file_times()),
+        On::File(f) => set_times_fd(f, times),
         On::Path(path, link) => set_times_at(path, times, link),
     }
+}
+
+/// [`set_times`]'s descriptor arm: `futimens`, called directly rather than
+/// through `File::set_times`, because `std`'s spelling has no `UTIME_NOW` and
+/// [`When::Now`] needs it -- `touch -` on a standard output someone else owns
+/// is the way in.
+#[cfg(unix)]
+fn set_times_fd(file: &std::fs::File, times: Times) -> io::Result<()> {
+    use std::os::fd::AsRawFd;
+
+    unsafe extern "C" {
+        fn futimens(fd: i32, times: *const CTimespec) -> i32;
+    }
+
+    let spec = to_timespecs(times);
+    // SAFETY: `file` keeps the descriptor open for the call, and `spec` is
+    // exactly the two-element array `futimens` reads; the call retains
+    // neither.
+    let rc = unsafe { futimens(file.as_raw_fd(), spec.as_ptr()) };
+    if rc == 0 {
+        Ok(())
+    } else {
+        Err(io::Error::last_os_error())
+    }
+}
+
+/// [`set_times`]'s descriptor arm on a host without `futimens`.
+#[cfg(not(unix))]
+fn set_times_fd(file: &std::fs::File, times: Times) -> io::Result<()> {
+    file.set_times(times.to_file_times())
 }
 
 /// [`set_times`]'s path arm.
@@ -808,8 +864,8 @@ fn clear_acl(on: On<'_>, name: &[u8]) -> io::Result<()> {
 ///
 /// The split has to exist because `system.posix_acl_access` is *both* an
 /// extended attribute and the file's permissions — this kernel stores POSIX
-/// ACLs in exactly the ext4 form Linux does (`kernel/src/fs/acl.rs`,
-/// `posix/src/linux_acl.rs`). Copying it under `--preserve=xattr` would make
+/// ACLs in exactly the ext4 form Linux does (`kernel/src/fs/acl.rs`). Copying
+/// it under `--preserve=xattr` would make
 /// that option change who may read the file, which is `--preserve=mode`'s job
 /// and which a user asking only for extended attributes did not ask for.
 ///
@@ -1537,6 +1593,12 @@ struct CTimespec {
 /// is the mechanism behind [`When::Omit`].
 const UTIME_OMIT: i64 = (1 << 30) - 2;
 
+/// `UTIME_NOW` — the `tv_nsec` sentinel meaning "the kernel's current time".
+///
+/// POSIX's `(1 << 30) - 1`, beside its sibling above. This is the mechanism
+/// behind [`When::Now`].
+const UTIME_NOW: i64 = (1 << 30) - 1;
+
 /// Translate a [`Times`] into the pair `utimensat` reads.
 ///
 /// Kept separate from [`set_times`], and free of any `cfg`, because it is the
@@ -1559,13 +1621,22 @@ fn to_timespecs(times: Times) -> [CTimespec; 2] {
 /// one, are the ways in.
 #[cfg_attr(not(unix), allow(dead_code))]
 fn to_timespec(when: When) -> CTimespec {
-    let When::Set(at) = when else {
-        // `tv_sec` is ignored when `tv_nsec` is a sentinel, but zero is what
-        // gnulib passes and it keeps the value reproducible for the tests.
-        return CTimespec {
-            tv_sec: 0,
-            tv_nsec: UTIME_OMIT,
-        };
+    // `tv_sec` is ignored when `tv_nsec` is a sentinel, but zero is what
+    // gnulib passes and it keeps the value reproducible for the tests.
+    let at = match when {
+        When::Set(at) => at,
+        When::Omit => {
+            return CTimespec {
+                tv_sec: 0,
+                tv_nsec: UTIME_OMIT,
+            };
+        }
+        When::Now => {
+            return CTimespec {
+                tv_sec: 0,
+                tv_nsec: UTIME_NOW,
+            };
+        }
     };
     match at.duration_since(SystemTime::UNIX_EPOCH) {
         Ok(since) => CTimespec {
@@ -1574,19 +1645,24 @@ fn to_timespec(when: When) -> CTimespec {
         },
         Err(before) => {
             let back = before.duration();
-            let secs = i64::try_from(back.as_secs()).unwrap_or(i64::MAX);
+            // `0 - secs` exactly: 2^63 seconds back is `i64::MIN`, which
+            // negating an `i64` cannot produce.
+            let whole = 0i64
+                .checked_sub_unsigned(back.as_secs())
+                .unwrap_or(i64::MIN);
             let nanos = i64::from(back.subsec_nanos());
             if nanos == 0 {
                 CTimespec {
-                    tv_sec: secs.checked_neg().unwrap_or(i64::MIN),
+                    tv_sec: whole,
                     tv_nsec: 0,
                 }
             } else {
                 // Borrow a second so `tv_nsec` stays non-negative: 0.5 s before
                 // the epoch is (-1 s, +500_000_000 ns), not (0 s, -500_000_000).
                 CTimespec {
-                    tv_sec: secs.saturating_add(1).checked_neg().unwrap_or(i64::MIN),
-                    tv_nsec: 1_000_000_000 - nanos,
+                    tv_sec: whole.saturating_sub(1),
+                    // `nanos` is 1..1e9 here, so this is too.
+                    tv_nsec: 1_000_000_000_i64.saturating_sub(nanos),
                 }
             }
         }
@@ -1601,7 +1677,7 @@ fn to_timespec(when: When) -> CTimespec {
     clippy::arithmetic_side_effects
 )]
 mod tests {
-    use super::{CTimespec, Owner, Times, UTIME_OMIT, When, to_timespec, to_timespecs};
+    use super::{CTimespec, Owner, Times, UTIME_NOW, UTIME_OMIT, When, to_timespec, to_timespecs};
     use std::time::{Duration, SystemTime};
 
     /// The `(uid_t)-1` sentinel is what an absent half becomes, and it must be
@@ -1674,6 +1750,49 @@ mod tests {
 
     fn before_epoch(secs: u64, nanos: u32) -> SystemTime {
         SystemTime::UNIX_EPOCH - Duration::new(secs, nanos)
+    }
+
+    /// *Now* is the other sentinel, `UTIME_NOW`, which is what lets `touch`
+    /// stamp a file its user may write but does not own.
+    #[test]
+    fn now_is_the_other_sentinel() {
+        assert_eq!(
+            to_timespec(When::Now),
+            CTimespec {
+                tv_sec: 0,
+                tv_nsec: UTIME_NOW,
+            }
+        );
+        assert_eq!(UTIME_NOW, 1_073_741_823);
+        let pair = to_timespecs(Times::now());
+        assert_eq!(pair[0].tv_nsec, UTIME_NOW);
+        assert_eq!(pair[1].tv_nsec, UTIME_NOW);
+    }
+
+    /// The most negative instant is `i64::MIN` seconds, one past what negating
+    /// an `i64` reaches -- `touch -d @-9223372036854775808` asks for it, and
+    /// the kernel, not this conversion, is what clamps it to the filesystem's
+    /// range. Only a 64-bit `timespec` `SystemTime` can hold it.
+    #[cfg(unix)]
+    #[test]
+    fn the_most_negative_instant_converts_exactly() {
+        let back = Duration::from_secs(i64::MIN.unsigned_abs());
+        let at = SystemTime::UNIX_EPOCH.checked_sub(back).unwrap();
+        assert_eq!(
+            to_timespec(When::Set(at)),
+            CTimespec {
+                tv_sec: i64::MIN,
+                tv_nsec: 0,
+            }
+        );
+        let later = at.checked_add(Duration::new(0, 250_000_000)).unwrap();
+        assert_eq!(
+            to_timespec(When::Set(later)),
+            CTimespec {
+                tv_sec: i64::MIN,
+                tv_nsec: 250_000_000,
+            }
+        );
     }
 
     /// An omitted time is the `UTIME_OMIT` sentinel, which is what makes

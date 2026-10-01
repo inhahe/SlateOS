@@ -306,6 +306,15 @@ def push(work: str, stub_log: str, *, rc: str = "0", refspec: str = "main",
     if os.path.exists(stub_log):
         os.remove(stub_log)
     env = gitenv.clean_env()
+    # The hook's bypasses are `ALLOW_*` variables, and the push that runs
+    # this suite is often made with one set -- `ALLOW_UNCHECKED_UNIX_HALF=1`
+    # in particular, the very bypass of the gate under test. Inherited, it
+    # turns every fixture push into a bypassed one: on 2026-10-01 two real
+    # pushes were refused because this suite "never reached a verdict",
+    # though it passed alone. A scenario that wants a bypass names it in
+    # `extra`, which is applied after this.
+    for name in [n for n in env if n.startswith("ALLOW_")]:
+        del env[name]
     env["UNIXHALF_STUB_RC"] = rc
     env["UNIXHALF_STUB_LOG"] = stub_log
     env.update(extra or {})

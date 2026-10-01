@@ -451,6 +451,17 @@ find t -newermt '2000-01-01'
 find t ! -newermt '2021-01-01'
 find t -newerat '2021-01-01'
 find t -newerct '2021-01-01'
+# The whole of gnulib's date language, since `coreutils::parse_datetime` is its
+# port: relative to the moment `find` started, in a zone of its own, and the
+# refusal's wording.
+find t -newermt '@1609459200'
+find t -newermt '2021-01-01 00:00:00 UTC'
+find t -newermt 'TZ="Asia/Tokyo" 2021-01-01 09:00'
+find t -newermt 'Jan 1, 2021'
+find t -newermt '50 years ago'
+find t -newermt 'tomorrow'
+find t -newermt 'junk'
+find t -newermt ''
 find t -newermm t/g
 find t -mtime +1000
 find t -mtime -1000

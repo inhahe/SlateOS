@@ -14,8 +14,11 @@
 //!
 //! - the **tables** -- parse tables, lexer modes, symbol metadata, field maps,
 //!   alias sequences -- as little-endian bytes laid out exactly as the C
-//!   compiler would lay out the generator's structs, which the Rust side
-//!   includes (`include_bytes!`) and hands the runtime pointers into; and
+//!   compiler would lay out the generator's structs, which the build writes
+//!   deflated and the Rust side includes (`include_bytes!`), inflates the
+//!   first time the grammar is asked for, and hands the runtime pointers
+//!   into -- a table of zeros and small numbers is a tenth of its size
+//!   deflated, and a program carries every grammar while using a few; and
 //! - the **lexers** -- `ts_lex` and `ts_lex_keywords`, state machines of
 //!   `if`s and jumps -- as Rust functions ([`clex`]).
 //!
@@ -26,7 +29,7 @@
 //! # What the output assumes
 //!
 //! The Rust written here names the pieces `gui/syntax`'s `ffi` module
-//! provides -- `Lexer`, `set_contains`, the `TSLanguage` mirror, `Aligned`,
+//! provides -- `Lexer`, `set_contains`, the `TSLanguage` mirror, `Deflated`,
 //! `SyncLanguage`, `SyncPtrs`, `lexer_entry!`, `scanner_table` -- and, when the
 //! grammar has an external scanner, a type called `Scanner` in scope where it
 //! is included: the hand-ported scanner (`gui/syntax/src/grammars/*`).
@@ -48,6 +51,7 @@
 
 mod cinit;
 mod clex;
+mod cset;
 mod ctoken;
 
 use core::fmt;
@@ -150,7 +154,8 @@ pub struct Output {
     /// The Rust source, to be `include!`d into the grammar's module.
     pub rust: String,
     /// Each table, as `(file name, bytes)`, to be written into the directory
-    /// the Rust names.
+    /// the Rust names -- deflated (RFC 1951, raw): the Rust inflates what it
+    /// includes.
     pub blobs: Vec<(String, Vec<u8>)>,
 }
 
@@ -648,6 +653,16 @@ fn build(
             ));
         }
     }
+    // An older generator's sets are predicates, `static inline bool
+    // NAME(int32_t c) { return ...; }`: read as the ranges they hold for.
+    for (name, body) in lexers {
+        if name == "ts_lex" || name == "ts_lex_keywords" {
+            continue;
+        }
+        if let Some(ranges) = cset::ranges(toks.get(body.clone()).unwrap_or_default())? {
+            char_sets.push((name.clone(), ranges));
+        }
+    }
     let set_sizes: Vec<(String, usize)> = char_sets
         .iter()
         .map(|(n, r)| (n.clone(), r.len()))
@@ -659,12 +674,12 @@ fn build(
             .map(|(_, r)| r.clone())
     };
     let lex_range = body("ts_lex").ok_or_else(|| Error::whole("`ts_lex` is missing"))?;
-    let lex = clex::read(
+    let mut lex = clex::read(
         toks.get(lex_range).unwrap_or_default(),
         constants,
         &set_sizes,
     )?;
-    let keyword_lex = match (body("ts_lex_keywords"), has_keyword_lexer) {
+    let mut keyword_lex = match (body("ts_lex_keywords"), has_keyword_lexer) {
         (Some(r), true) => Some(clex::read(
             toks.get(r).unwrap_or_default(),
             constants,
@@ -673,6 +688,17 @@ fn build(
         (None, true) => return Err(Error::whole("`ts_lex_keywords` is named but missing")),
         (_, false) => None,
     };
+    // A newer generator reads `eof` in `ts_lex` itself, after its
+    // `START_LEXER()`, whose macro leaves it false; an older one's macro
+    // reads it at every character (tree-sitter-linkerscript's `parser.h`).
+    // A main lexer that does not read it is an older generator's, and so
+    // are all of its lexers: without it, none would ever see the end.
+    if !lex.reads_eof() {
+        lex.read_eof();
+        if let Some(k) = keyword_lex.as_mut() {
+            k.read_eof();
+        }
+    }
 
     Ok(Grammar {
         name,
@@ -788,16 +814,16 @@ fn structs(
     Ok(out)
 }
 
-/// An array of strings (or `NULL`s), `len` long.
+/// An array of strings (or `NULL`s), `len` long -- each read as C reads a
+/// string, up to its first NUL: Go's grammar names a token `"\0"`, which C,
+/// and the runtime reading the names as C strings, sees as the empty name.
 fn strings(d: &Declared, len: usize, constants: &Constants) -> Result<Vec<Option<Vec<u8>>>, Error> {
     let mut out = vec![None; len];
     for (index, value) in cinit::elements(&d.init, constants, d.line)? {
         let text = match value {
             Init::Expr(Expr::Str(bytes)) => {
-                if bytes.contains(&0) {
-                    return Err(Error::at(d.line, "a name with a NUL in it"));
-                }
-                Some(bytes.clone())
+                let end = bytes.iter().position(|&b| b == 0).unwrap_or(bytes.len());
+                Some(bytes.get(..end).unwrap_or_default().to_vec())
             }
             Init::Expr(Expr::Ident(n)) if n == "NULL" => None,
             _ => return Err(Error::at(d.line, "a name that is not a string")),
@@ -840,10 +866,39 @@ fn parse_actions(d: &Declared, constants: &Constants) -> Result<Vec<u8>, Error> 
                 e[1] = u8::from(v.get(1).copied().unwrap_or(0) != 0);
             }
             Init::Expr(Expr::Call(name, args)) => {
-                let nums: Vec<i64> = args
-                    .iter()
-                    .map(|a| constants.eval(a, d.line))
-                    .collect::<Result<_, _>>()?;
+                // An older generator names a reduction's last two values
+                // (`REDUCE(sym, 2, .production_id = 3)`), each defaulting
+                // to 0; a newer one gives all four in order.
+                let mut named = [None::<i64>; 2];
+                let mut nums: Vec<i64> = Vec::with_capacity(args.len());
+                for a in args {
+                    match a {
+                        Expr::Named(field, v) => {
+                            let slot = match field.as_str() {
+                                "dynamic_precedence" => 0,
+                                "production_id" => 1,
+                                _ => {
+                                    return Err(Error::at(
+                                        d.line,
+                                        format!("an action's field this does not know: .{field}"),
+                                    ));
+                                }
+                            };
+                            if let Some(s) = named.get_mut(slot) {
+                                *s = Some(constants.eval(v, d.line)?);
+                            }
+                        }
+                        _ => nums.push(constants.eval(a, d.line)?),
+                    }
+                }
+                if name == "REDUCE" && nums.len() == 2 {
+                    nums.extend(named.iter().map(|v| v.unwrap_or(0)));
+                } else if named.iter().any(Option::is_some) {
+                    return Err(Error::at(
+                        d.line,
+                        format!("named values where {name} takes none"),
+                    ));
+                }
                 match (name.as_str(), nums.as_slice()) {
                     ("SHIFT", [state]) => {
                         e[0] = SHIFT;
@@ -1003,17 +1058,29 @@ impl Grammar {
         }
         rust.push_str("];\n\n");
 
-        // The tables.
+        // The tables, deflated, and how long each is inflated.
+        let mut idents = Vec::new();
         for blob in &self.blobs {
             let ident = blob.field.replace('.', "_").to_ascii_uppercase();
-            let file = format!("{}.bin", blob.field.replace('.', "_"));
+            let file = format!("{}.bin.z", blob.field.replace('.', "_"));
             let _ = writeln!(
                 rust,
-                "static {ident}: crate::ffi::Aligned<[u8; {}]> = crate::ffi::Aligned(*include_bytes!(concat!(env!(\"OUT_DIR\"), \"/{module}/{file}\")));",
+                "static {ident}: crate::ffi::Deflated = crate::ffi::Deflated {{ bytes: include_bytes!(concat!(env!(\"OUT_DIR\"), \"/{module}/{file}\")), len: {} }};",
                 blob.bytes.len()
             );
             blobs.push((file, blob.bytes.clone()));
+            idents.push(ident);
         }
+        let _ = writeln!(
+            rust,
+            "/// Every table, for the test that inflates them all.\n#[cfg(test)]\npub(crate) static TABLES: [&crate::ffi::Deflated; {}] = [{}];",
+            idents.len(),
+            idents
+                .iter()
+                .map(|i| format!("&{i}"))
+                .collect::<Vec<_>>()
+                .join(", ")
+        );
         let names = |list: &[Option<Vec<u8>>]| -> String {
             list.iter()
                 .map(|n| {
@@ -1061,14 +1128,21 @@ impl Grammar {
                 || "core::ptr::null()".to_owned(),
                 |b| {
                     format!(
-                        "{}.0.as_ptr().cast::<{ty}>()",
+                        "{}.inflate().cast::<{ty}>()",
                         b.field.replace('.', "_").to_ascii_uppercase()
                     )
                 },
             )
         };
-        let _ = writeln!(rust, "/// The grammar, as the runtime reads it.");
-        rust.push_str("pub(crate) static LANGUAGE: crate::ffi::SyncLanguage = crate::ffi::SyncLanguage(crate::ffi::TSLanguage {\n");
+        let _ = writeln!(
+            rust,
+            "/// The grammar, as the runtime reads it: built, its tables inflated, the\n/// first time it is asked for."
+        );
+        rust.push_str("pub(crate) fn language() -> &'static crate::ffi::TSLanguage {\n");
+        rust.push_str("    static LANGUAGE: std::sync::OnceLock<crate::ffi::SyncLanguage> = std::sync::OnceLock::new();\n");
+        rust.push_str(
+            "    &LANGUAGE.get_or_init(|| crate::ffi::SyncLanguage(crate::ffi::TSLanguage {\n",
+        );
         let _ = writeln!(rust, "    abi_version: {},", self.abi);
         let _ = writeln!(rust, "    symbol_count: {},", c.symbol);
         let _ = writeln!(rust, "    alias_count: {},", c.alias);
@@ -1210,7 +1284,7 @@ impl Grammar {
             rust,
             "    metadata: crate::ffi::LanguageMetadata {{ major_version: {major}, minor_version: {minor}, patch_version: {patch} }},"
         );
-        rust.push_str("});\n");
+        rust.push_str("    })).0\n}\n");
         Output { rust, blobs }
     }
 }

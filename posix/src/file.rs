@@ -16,6 +16,7 @@
 use crate::errno;
 use crate::fcntl;
 use crate::fdtable::{self, HandleKind};
+use crate::interrupt::{Mark, Restart};
 use crate::stat::Stat;
 use crate::syscall::*;
 use crate::types::*;
@@ -333,6 +334,9 @@ pub extern "C" fn close(fd: Fd) -> i32 {
 /// Returns number of bytes read, 0 at EOF, -1 on error.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn read(fd: Fd, buf: *mut u8, count: SizeT) -> SsizeT {
+    // Handlers counted from here, for the reads whose waiting is this
+    // library's (`crate::interrupt`).
+    let mark = Mark::now();
     // The descriptor first, whatever `count` is.  `ksys_read`
     // (fs/read_write.c:604) opens with `fdget_pos(fd)` and returns `-EBADF`
     // when it comes back empty; only inside `vfs_read` (:458) does
@@ -367,7 +371,9 @@ pub extern "C" fn read(fd: Fd, buf: *mut u8, count: SizeT) -> SsizeT {
             if is_nb {
                 syscall3(SYS_PIPE_TRY_READ, entry.handle, buf as u64, count as u64)
             } else {
-                syscall3(SYS_PIPE_READ, entry.handle, buf as u64, count as u64)
+                crate::interrupt::restarting(Restart::IfAsked, || {
+                    syscall3(SYS_PIPE_READ, entry.handle, buf as u64, count as u64)
+                })
             }
         }
         HandleKind::UnixStream => {
@@ -383,7 +389,9 @@ pub extern "C" fn read(fd: Fd, buf: *mut u8, count: SizeT) -> SsizeT {
                     count as u64,
                 )
             } else {
-                syscall3(SYS_SOCKETPAIR_RECV, entry.handle, buf as u64, count as u64)
+                crate::interrupt::restarting(crate::socket::wait_rule(fd, true), || {
+                    syscall3(SYS_SOCKETPAIR_RECV, entry.handle, buf as u64, count as u64)
+                })
             }
         }
         HandleKind::Console => {
@@ -400,7 +408,9 @@ pub extern "C" fn read(fd: Fd, buf: *mut u8, count: SizeT) -> SsizeT {
             // effect from tcsetattr, and — worst — no terminal signals at
             // all, while a Linux-ABI program on the same console got all
             // four.  See design-decisions §114.
-            syscall2(SYS_TTY_READ, buf as u64, count as u64)
+            crate::interrupt::restarting(Restart::IfAsked, || {
+                syscall2(SYS_TTY_READ, buf as u64, count as u64)
+            })
         }
         HandleKind::TcpStream => {
             if entry.handle == 0 {
@@ -426,7 +436,7 @@ pub extern "C" fn read(fd: Fd, buf: *mut u8, count: SizeT) -> SsizeT {
             if (posix_err == errno::EAGAIN || posix_err == errno::EWOULDBLOCK) && !is_nb {
                 // Blocking socket — poll-wait with SO_RCVTIMEO.
                 // timeout_ms == 0 means wait indefinitely.
-                return crate::socket::tcp_recv_wait(entry.handle, buf, count, 0, timeout_ms);
+                return crate::socket::tcp_recv_wait(entry.handle, buf, count, 0, timeout_ms, mark);
             }
             errno::set_errno(posix_err);
             return -1;
@@ -472,7 +482,11 @@ pub extern "C" fn read(fd: Fd, buf: *mut u8, count: SizeT) -> SsizeT {
                         }
                         // Block: sleep 10ms and retry.  Matches the rest
                         // of our readiness polling.
-                        let _ = syscall1(SYS_SLEEP, 10_000_000);
+                        if mark.interrupted(Restart::IfAsked) {
+                            errno::set_errno(errno::EINTR);
+                            return -1;
+                        }
+                        crate::lowlevellock::nap(10_000_000, Restart::IfAsked, mark);
                     }
                     Ok(n) => return n as SsizeT,
                     Err(e) => {
@@ -523,7 +537,11 @@ pub extern "C" fn read(fd: Fd, buf: *mut u8, count: SizeT) -> SsizeT {
                             errno::set_errno(errno::EAGAIN);
                             return -1;
                         }
-                        let _ = syscall1(SYS_SLEEP, 10_000_000);
+                        if mark.interrupted(Restart::IfAsked) {
+                            errno::set_errno(errno::EINTR);
+                            return -1;
+                        }
+                        crate::lowlevellock::nap(10_000_000, Restart::IfAsked, mark);
                     }
                     Ok(n) => return n as SsizeT,
                     Err(e) => {
@@ -556,7 +574,9 @@ pub extern "C" fn read(fd: Fd, buf: *mut u8, count: SizeT) -> SsizeT {
                     count as u64,
                 )
             } else {
-                syscall3(SYS_PTY_MASTER_READ, entry.handle, buf as u64, count as u64)
+                crate::interrupt::restarting(Restart::IfAsked, || {
+                    syscall3(SYS_PTY_MASTER_READ, entry.handle, buf as u64, count as u64)
+                })
             }
         }
         HandleKind::PtySlave => {
@@ -589,7 +609,9 @@ pub extern "C" fn read(fd: Fd, buf: *mut u8, count: SizeT) -> SsizeT {
                     count as u64,
                 )
             } else {
-                syscall3(SYS_PTY_SLAVE_READ, entry.handle, buf as u64, count as u64)
+                crate::interrupt::restarting(Restart::IfAsked, || {
+                    syscall3(SYS_PTY_SLAVE_READ, entry.handle, buf as u64, count as u64)
+                })
             }
         }
     };
@@ -607,6 +629,8 @@ pub extern "C" fn read(fd: Fd, buf: *mut u8, count: SizeT) -> SsizeT {
 /// Returns number of bytes written, -1 on error.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn write(fd: Fd, buf: *const u8, count: SizeT) -> SsizeT {
+    // As in `read`.
+    let mark = Mark::now();
     // The descriptor first — `ksys_write` (fs/read_write.c:628) is `fdget_pos`
     // then `vfs_write`, whose `access_ok` (:458, via the same path as
     // `vfs_read`) is what yields `EFAULT`.  See `read` above.
@@ -652,7 +676,9 @@ pub extern "C" fn write(fd: Fd, buf: *const u8, count: SizeT) -> SsizeT {
             let ret = if is_nb {
                 syscall3(SYS_PIPE_TRY_WRITE, entry.handle, buf as u64, count as u64)
             } else {
-                syscall3(SYS_PIPE_WRITE, entry.handle, buf as u64, count as u64)
+                crate::interrupt::restarting(Restart::IfAsked, || {
+                    syscall3(SYS_PIPE_WRITE, entry.handle, buf as u64, count as u64)
+                })
             };
             if ret == errno::native::CHANNEL_CLOSED {
                 // Reader has closed — POSIX mandates EPIPE (not ECONNRESET).
@@ -672,7 +698,9 @@ pub extern "C" fn write(fd: Fd, buf: *const u8, count: SizeT) -> SsizeT {
                     count as u64,
                 )
             } else {
-                syscall3(SYS_SOCKETPAIR_SEND, entry.handle, buf as u64, count as u64)
+                crate::interrupt::restarting(crate::socket::wait_rule(fd, false), || {
+                    syscall3(SYS_SOCKETPAIR_SEND, entry.handle, buf as u64, count as u64)
+                })
             };
             if ret == errno::native::CHANNEL_CLOSED {
                 // Peer's read side is gone — POSIX mandates EPIPE.  The
@@ -696,7 +724,7 @@ pub extern "C" fn write(fd: Fd, buf: *const u8, count: SizeT) -> SsizeT {
                 // bytes are accepted; programs depend on this (same
                 // behavior as send() on a blocking socket).
                 let timeout_ms = crate::socket::get_meta(fd).map_or(0u64, |m| m.sndtimeo_ms);
-                return crate::socket::tcp_send_wait(entry.handle, buf, count, timeout_ms);
+                return crate::socket::tcp_send_wait(entry.handle, buf, count, timeout_ms, mark);
             }
             // Non-blocking: try once.
             let ret = syscall3(SYS_TCP_SEND, entry.handle, buf as u64, count as u64);
@@ -804,7 +832,9 @@ pub extern "C" fn write(fd: Fd, buf: *const u8, count: SizeT) -> SsizeT {
                     count as u64,
                 )
             } else {
-                syscall3(SYS_PTY_MASTER_WRITE, entry.handle, buf as u64, count as u64)
+                crate::interrupt::restarting(Restart::IfAsked, || {
+                    syscall3(SYS_PTY_MASTER_WRITE, entry.handle, buf as u64, count as u64)
+                })
             };
             if ret == errno::native::CHANNEL_CLOSED {
                 // Every slave is gone: nothing can ever read these bytes.
@@ -831,7 +861,9 @@ pub extern "C" fn write(fd: Fd, buf: *const u8, count: SizeT) -> SsizeT {
             // the `TOSTOP` job-control gate.  The return is counted in the
             // bytes we handed over, not in the CRLF-expanded ones, so a
             // caller looping on a short write makes progress.
-            let ret = syscall3(SYS_PTY_SLAVE_WRITE, entry.handle, buf as u64, count as u64);
+            let ret = crate::interrupt::restarting(Restart::IfAsked, || {
+                syscall3(SYS_PTY_SLAVE_WRITE, entry.handle, buf as u64, count as u64)
+            });
             if ret == errno::native::CHANNEL_CLOSED {
                 errno::set_errno(errno::EPIPE);
                 return -1;
@@ -5839,6 +5871,7 @@ fn do_flock(fd: Fd, operation: i32) -> i32 {
 
     let lock_type: u64 = u64::from(mode == LOCK_EX);
     let nonblock = operation & LOCK_NB != 0;
+    let mark = Mark::now();
     loop {
         let ret = syscall4(
             SYS_FS_FLOCK,
@@ -5853,8 +5886,17 @@ fn do_flock(fd: Fd, operation: i32) -> i32 {
         // Negative return: map to errno (sets errno, yields -1).
         let mapped = errno::translate(ret) as i32;
         if !nonblock && errno::get_errno() == errno::EAGAIN {
-            // Contended blocking request: yield the CPU and retry.
-            let _ = syscall1(SYS_SLEEP, 0);
+            // Contended blocking request: a handler ends the wait unless it
+            // was installed with `SA_RESTART`, as Linux's `flock` is
+            // restarted (`crate::interrupt`); otherwise sleep a little, in a
+            // wait a signal ends at once, and try again.  It yielded and
+            // tried again at once until 2026-09-30, which kept a CPU busy
+            // for as long as the lock was held, and no signal ended it.
+            if mark.interrupted(Restart::IfAsked) {
+                errno::set_errno(errno::EINTR);
+                return -1;
+            }
+            crate::lowlevellock::nap(2_000_000, Restart::IfAsked, mark);
             continue;
         }
         return mapped;
@@ -6832,6 +6874,103 @@ pub extern "C" fn lstat64(path: *const u8, statbuf: *mut crate::stat::Stat) -> i
 }
 
 // ---------------------------------------------------------------------------
+// The rest of glibc's large-file names
+// ---------------------------------------------------------------------------
+//
+// glibc exports a `*64` twin of every call that takes or returns a file
+// offset, for 32-bit programs built with `_FILE_OFFSET_BITS=64`; on x86_64
+// each is the same function under a second name (glibc's are aliases). A C
+// program compiled against this library's headers never names one: musl's
+// headers define them as macros for the standard names, and only under
+// `_LARGEFILE64_SOURCE`. They are here for code that declares them itself --
+// a Rust crate written for linux-gnu, a configure probe, an object built
+// against glibc's headers -- which would otherwise fail to link.
+
+/// `pread64` -- [`pread`] by glibc's large-file name.
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub extern "C" fn pread64(fd: Fd, buf: *mut u8, count: SizeT, offset: OffT) -> SsizeT {
+    pread(fd, buf, count, offset)
+}
+
+/// `pwrite64` -- [`pwrite`] by glibc's large-file name.
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub extern "C" fn pwrite64(fd: Fd, buf: *const u8, count: SizeT, offset: OffT) -> SsizeT {
+    pwrite(fd, buf, count, offset)
+}
+
+/// `preadv64` -- [`preadv`] by glibc's large-file name.
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub extern "C" fn preadv64(fd: Fd, iov: *const Iovec, iovcnt: i32, offset: OffT) -> SsizeT {
+    preadv(fd, iov, iovcnt, offset)
+}
+
+/// `pwritev64` -- [`pwritev`] by glibc's large-file name.
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub extern "C" fn pwritev64(fd: Fd, iov: *const Iovec, iovcnt: i32, offset: OffT) -> SsizeT {
+    pwritev(fd, iov, iovcnt, offset)
+}
+
+/// `preadv64v2` -- [`preadv2`] by glibc's large-file name.
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub extern "C" fn preadv64v2(
+    fd: Fd,
+    iov: *const Iovec,
+    iovcnt: i32,
+    offset: OffT,
+    flags: i32,
+) -> SsizeT {
+    preadv2(fd, iov, iovcnt, offset, flags)
+}
+
+/// `pwritev64v2` -- [`pwritev2`] by glibc's large-file name.
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub extern "C" fn pwritev64v2(
+    fd: Fd,
+    iov: *const Iovec,
+    iovcnt: i32,
+    offset: OffT,
+    flags: i32,
+) -> SsizeT {
+    pwritev2(fd, iov, iovcnt, offset, flags)
+}
+
+/// `truncate64` -- [`truncate`] by glibc's large-file name.
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub extern "C" fn truncate64(path: *const u8, length: OffT) -> i32 {
+    truncate(path, length)
+}
+
+/// `ftruncate64` -- [`ftruncate`] by glibc's large-file name.
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub extern "C" fn ftruncate64(fd: Fd, length: OffT) -> i32 {
+    ftruncate(fd, length)
+}
+
+/// `creat64` -- [`creat`] by glibc's large-file name.
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub extern "C" fn creat64(path: *const u8, mode: ModeT) -> Fd {
+    creat(path, mode)
+}
+
+/// `openat64` -- [`openat`] by glibc's large-file name.
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub extern "C" fn openat64(dirfd: i32, path: *const u8, flags: i32, mode: ModeT) -> Fd {
+    openat(dirfd, path, flags, mode)
+}
+
+/// `posix_fadvise64` -- [`posix_fadvise`] by glibc's large-file name.
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub extern "C" fn posix_fadvise64(fd: Fd, offset: OffT, len: OffT, advice: i32) -> i32 {
+    posix_fadvise(fd, offset, len, advice)
+}
+
+/// `fallocate64` -- [`fallocate`] by glibc's large-file name.
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub extern "C" fn fallocate64(fd: Fd, mode: i32, offset: OffT, len: OffT) -> i32 {
+    fallocate(fd, mode, offset, len)
+}
+
+// ---------------------------------------------------------------------------
 // glibc __xstat family — internal stat wrappers
 // ---------------------------------------------------------------------------
 //
@@ -6994,7 +7133,7 @@ pub extern "C" fn __readlinkat_chk(
 /// until 2026-09-13, which would send the next reader to build a cache that
 /// already exists instead of adding the one call that is needed.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
-pub extern "C" fn readahead(fd: Fd, offset: i64, count: usize) -> i32 {
+pub extern "C" fn readahead(fd: Fd, offset: i64, count: usize) -> isize {
     if fd < 0 {
         errno::set_errno(errno::EBADF);
         return -1;
@@ -10611,6 +10750,133 @@ mod tests {
         assert_eq!(crate::errno::get_errno(), crate::errno::EBADF);
     }
 
+    // -- the rest of glibc's large-file names: each its base, to the errno --
+
+    /// What `f` returned and the errno it left, errno cleared first.
+    fn outcome<T>(f: impl FnOnce() -> T) -> (T, i32) {
+        errno::set_errno(0);
+        let r = f();
+        (r, errno::get_errno())
+    }
+
+    #[test]
+    fn test_large_file_io_names_are_their_bases() {
+        let console = fdtable::alloc_fd(HandleKind::Console, 0).expect("fd available");
+        let mut byte = [0u8; 1];
+        let buf = byte.as_mut_ptr();
+        let iov = Iovec {
+            iov_base: buf,
+            iov_len: 1,
+        };
+        // Every case fails, or does nothing, before any byte moves: a
+        // descriptor that is not open, a console (not seekable), a negative
+        // offset, a NULL buffer, a count of 0, a bad iovcnt, unknown flags.
+        // (preadv2 and pwritev2 at offset -1 are readv and writev, which on
+        // the console would read or write it: only a bad count is tried
+        // there.)
+        for fd in [-1, 900, console] {
+            for offset in [0, -1, -2, 1 << 40] {
+                for (p, n) in [(buf, 0), (buf, 1), (core::ptr::null_mut(), 1)] {
+                    assert_eq!(
+                        outcome(|| pread64(fd, p, n, offset)),
+                        outcome(|| pread(fd, p, n, offset)),
+                        "pread64({fd}, {n}, {offset})"
+                    );
+                    assert_eq!(
+                        outcome(|| pwrite64(fd, p.cast_const(), n, offset)),
+                        outcome(|| pwrite(fd, p.cast_const(), n, offset)),
+                        "pwrite64({fd}, {n}, {offset})"
+                    );
+                }
+                for cnt in [-1, 0, 1, 1025] {
+                    assert_eq!(
+                        outcome(|| preadv64(fd, &raw const iov, cnt, offset)),
+                        outcome(|| preadv(fd, &raw const iov, cnt, offset)),
+                        "preadv64({fd}, {cnt}, {offset})"
+                    );
+                    assert_eq!(
+                        outcome(|| pwritev64(fd, &raw const iov, cnt, offset)),
+                        outcome(|| pwritev(fd, &raw const iov, cnt, offset)),
+                        "pwritev64({fd}, {cnt}, {offset})"
+                    );
+                    if fd == console && offset == -1 && (cnt == 0 || cnt == 1) {
+                        continue;
+                    }
+                    for flags in [0, -1, 0x40] {
+                        assert_eq!(
+                            outcome(|| preadv64v2(fd, &raw const iov, cnt, offset, flags)),
+                            outcome(|| preadv2(fd, &raw const iov, cnt, offset, flags)),
+                            "preadv64v2({fd}, {cnt}, {offset}, {flags})"
+                        );
+                        assert_eq!(
+                            outcome(|| pwritev64v2(fd, &raw const iov, cnt, offset, flags)),
+                            outcome(|| pwritev2(fd, &raw const iov, cnt, offset, flags)),
+                            "pwritev64v2({fd}, {cnt}, {offset}, {flags})"
+                        );
+                    }
+                }
+            }
+        }
+        let _ = close(console);
+    }
+
+    #[test]
+    fn test_large_file_path_and_size_names_are_their_bases() {
+        let console = fdtable::alloc_fd(HandleKind::Console, 0).expect("fd available");
+        for length in [-1, 0, 1 << 40] {
+            assert_eq!(
+                outcome(|| truncate64(core::ptr::null(), length)),
+                outcome(|| truncate(core::ptr::null(), length))
+            );
+            assert_eq!(
+                outcome(|| truncate64(b"\0".as_ptr(), length)),
+                outcome(|| truncate(b"\0".as_ptr(), length))
+            );
+            for fd in [-1, 900, console] {
+                assert_eq!(
+                    outcome(|| ftruncate64(fd, length)),
+                    outcome(|| ftruncate(fd, length)),
+                    "ftruncate64({fd}, {length})"
+                );
+            }
+        }
+        assert_eq!(
+            outcome(|| creat64(core::ptr::null(), 0o600)),
+            outcome(|| creat(core::ptr::null(), 0o600))
+        );
+        assert_eq!(
+            outcome(|| creat64(b"\0".as_ptr(), 0o600)),
+            outcome(|| creat(b"\0".as_ptr(), 0o600))
+        );
+        for dirfd in [-1, 900, console] {
+            for path in [core::ptr::null(), b"\0".as_ptr(), b"relative\0".as_ptr()] {
+                assert_eq!(
+                    outcome(|| openat64(dirfd, path, fcntl::O_RDONLY, 0)),
+                    outcome(|| openat(dirfd, path, fcntl::O_RDONLY, 0)),
+                    "openat64({dirfd})"
+                );
+            }
+        }
+        for fd in [-1, 900, console] {
+            for (offset, len) in [(0, 0), (-1, 0), (0, -1), (1 << 40, 1)] {
+                for advice in [POSIX_FADV_NORMAL, POSIX_FADV_DONTNEED, 99] {
+                    assert_eq!(
+                        outcome(|| posix_fadvise64(fd, offset, len, advice)),
+                        outcome(|| posix_fadvise(fd, offset, len, advice)),
+                        "posix_fadvise64({fd}, {offset}, {len}, {advice})"
+                    );
+                }
+                for mode in [0, FALLOC_FL_KEEP_SIZE, FALLOC_FL_PUNCH_HOLE, -1] {
+                    assert_eq!(
+                        outcome(|| fallocate64(fd, mode, offset, len)),
+                        outcome(|| fallocate(fd, mode, offset, len)),
+                        "fallocate64({fd}, {mode}, {offset}, {len})"
+                    );
+                }
+            }
+        }
+        let _ = close(console);
+    }
     // -- LP64 aliases (64-bit variants) delegate to base functions --
 
     #[test]

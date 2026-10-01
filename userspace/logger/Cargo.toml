@@ -2,12 +2,53 @@
 name = "logger"
 version = "0.1.0"
 edition = "2024"
-description = "SlateOS syslog message logger"
-[dependencies]
-userdb = { path = "../userdb" }
-authlib = { path = "../authlib" }
+description = "Enter messages into the system log: util-linux 2.39.3's logger, ported"
 
-# A message or a `-f` path that is not valid Unicode still has to appear in
-# the diagnostic that refuses it, as the bytes the caller passed. Pure
-# formatting, no I/O, so 768-exempt.
+[build-dependencies]
+# Tells cargo that the hand-built sysroot libc.a is an input, so a
+# libc rebuild relinks these binaries instead of silently leaving them
+# stale. See userspace/sysroot-dep.
+sysroot-dep = { path = "../sysroot-dep" }
+
+[lints]
+workspace = true
+
+[dependencies]
+# glibc's getopt_long: upstream parses with it, so `--pri` is ambiguous
+# between `--priority` and `--prio-prefix` exactly as it is there.
+getoptlong = { path = "../getoptlong" }
+
+# util-linux's lib/strutils.c: `-S` is `strtosize_or_err` (`1.5K` is 1536)
+# and `--id=` is `strtoul_or_err`, each refusing in upstream's words.
+ulstrutils = { path = "../ulstrutils" }
+
+# strerror(3)'s wording, for `file X: No such file or directory` and the
+# socket failures, on every host.
+errmsg = { path = "../errmsg" }
+
+# util-linux's close_stdout: -V and -h judged as upstream judges them, and a
+# diagnostic that could not be written counted against the exit status.
+ulclosestream = { path = "../ulclosestream" }
+
+# A standard descriptor the process was started without stays closed, rather
+# than the runtime's /dev/null.
+stdfdguard = { path = "../stdfdguard" }
+
+# A socket path, file name or argv word in a diagnostic is escaped, not
+# pasted, so it cannot forge a line (design-decisions §370). Pure
+# formatting, no I/O, so §768-exempt.
 quoting = { path = "../quoting" }
+
+# The zone this process runs in -- `TZ`, `TZDIR`, `/etc/localtime`, read as
+# glibc reads them -- for the RFC 3164 TIMESTAMP, which is local time, and
+# the RFC 5424 one, which carries its offset. Shared with `date`, `ls` and
+# the shell, so all of them agree on what "local" is.
+localtime = { path = "../localtime" }
+
+# The record a syslog daemon would file, for the journal `journalctl`
+# reads: where `/dev/log` cannot exist (no Unix-domain sockets on SlateOS
+# yet), and for `--journald`, which has no journald to send to.
+journalrec = { path = "../journalrec" }
+# Appended under the journal's lock (design-decisions §1037), so a vacuum or
+# rotation at that moment does not lose the record.
+journalio = { path = "../journalio" }

@@ -5,11 +5,9 @@
 //! synchronization primitives (mutexes, condition variables, etc.).
 
 use crate::errno;
+use crate::interrupt::{Mark, Restart};
 use crate::stat::Timespec;
-use crate::syscall::{
-    SYS_FUTEX_LOCK_PI, SYS_FUTEX_UNLOCK_PI, SYS_FUTEX_WAIT, SYS_FUTEX_WAIT_TIMEOUT, SYS_FUTEX_WAKE,
-    syscall1, syscall2, syscall3,
-};
+use crate::syscall::{SYS_FUTEX_LOCK_PI, SYS_FUTEX_UNLOCK_PI, SYS_FUTEX_WAKE, syscall1, syscall2};
 
 // ---------------------------------------------------------------------------
 // Futex operations
@@ -111,41 +109,33 @@ const fn cmd_has_timeout(cmd: i32) -> bool {
     )
 }
 
-/// How long a wait may last, from its timeout argument.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum WaitFor {
-    /// No timeout.
-    Ever,
-    /// This many nanoseconds.
-    Ns(u64),
-    /// An absolute deadline that has already passed.
-    Expired,
-}
-
-/// The wait a timeout argument asks for: `FUTEX_WAIT`'s is relative;
-/// `FUTEX_WAIT_BITSET`'s is absolute, on `CLOCK_MONOTONIC`, or on
-/// `CLOCK_REALTIME` with `FUTEX_CLOCK_REALTIME` (`futex_init_timeout`).
-fn wait_for(
+/// When a wait's time runs out: never (`None`), or at an instant on a clock.
+///
+/// `FUTEX_WAIT`'s timeout is relative, and becomes the instant it comes to
+/// on `CLOCK_MONOTONIC`; `FUTEX_WAIT_BITSET`'s is absolute, on
+/// `CLOCK_MONOTONIC`, or on `CLOCK_REALTIME` with `FUTEX_CLOCK_REALTIME`
+/// (`futex_init_timeout`).  An instant either way, as Linux keeps it for a
+/// restart (`restart->futex.time`): a wait restarted after a signal ends when
+/// the first would have.
+fn deadline(
     cmd: i32,
     realtime: bool,
     ts: Option<&Timespec>,
     now: impl Fn(i32) -> Timespec,
-) -> WaitFor {
-    let Some(ts) = ts else {
-        return WaitFor::Ever;
-    };
+) -> Option<(i32, Timespec)> {
+    let ts = ts?;
     if cmd == FUTEX_WAIT {
-        return timespec_to_ns(ts).map_or(WaitFor::Ever, WaitFor::Ns);
+        // Judged already (`futex_init_timeout`), so it converts.
+        let ns = timespec_to_ns(ts)?;
+        let clock = crate::time::CLOCK_MONOTONIC;
+        return Some((clock, crate::lowlevellock::after(&now(clock), ns)));
     }
     let clock = if realtime {
         crate::time::CLOCK_REALTIME
     } else {
         crate::time::CLOCK_MONOTONIC
     };
-    match crate::lowlevellock::ns_until(&now(clock), ts) {
-        Some(ns) => WaitFor::Ns(ns),
-        None => WaitFor::Expired,
-    }
+    Some((clock, *ts))
 }
 
 /// `get_futex_key`'s checks on `uaddr`: a misaligned address is `EINVAL`,
@@ -244,27 +234,51 @@ fn futex_inner(
                 return Err(errno::EINVAL);
             }
             check_uaddr(uaddr)?;
-            // The kernel compares again, atomically with going to sleep;
-            // looking first answers EAGAIN without a syscall, and decides an
-            // expired deadline the way `futex_wait` does (the value first).
-            // SAFETY: non-null and aligned; the caller's contract makes it a
-            // futex word.
-            let current = unsafe { core::sync::atomic::AtomicU32::from_ptr(uaddr) }
-                .load(core::sync::atomic::Ordering::SeqCst);
-            if current != val {
-                return Err(errno::EAGAIN);
-            }
-            let ret = match wait_for(cmd, realtime, ts.as_ref(), crate::lowlevellock::now_on) {
-                WaitFor::Expired => return Err(errno::ETIMEDOUT),
-                WaitFor::Ever => syscall2(SYS_FUTEX_WAIT, uaddr as u64, u64::from(val)),
-                WaitFor::Ns(ns) => {
-                    syscall3(SYS_FUTEX_WAIT_TIMEOUT, uaddr as u64, u64::from(val), ns)
-                }
+            let until = deadline(cmd, realtime, ts.as_ref(), crate::lowlevellock::now_on);
+            // An untimed wait is restarted for a handler installed with
+            // `SA_RESTART`, as Linux's `ERESTARTSYS` is; a timed one ends in
+            // `ERESTART_RESTARTBLOCK`, which any handler makes `EINTR`
+            // ([`crate::interrupt`]).
+            let restart = if until.is_some() {
+                Restart::Never
+            } else {
+                Restart::IfAsked
             };
-            match ret {
-                1 => Ok(0),
-                0 => Err(errno::EAGAIN),
-                neg => Err(errno::errno_for(neg)),
+            loop {
+                // The kernel compares again, atomically with going to sleep;
+                // looking first answers EAGAIN without a syscall, and decides
+                // an expired deadline the way `futex_wait` does (the value
+                // first) -- on a restart too.
+                // SAFETY: non-null and aligned; the caller's contract makes it
+                // a futex word.
+                let current = unsafe { core::sync::atomic::AtomicU32::from_ptr(uaddr) }
+                    .load(core::sync::atomic::Ordering::SeqCst);
+                if current != val {
+                    return Err(errno::EAGAIN);
+                }
+                let timeout = match until {
+                    None => None,
+                    Some((clock, at)) => {
+                        let now = crate::lowlevellock::now_on(clock);
+                        match crate::lowlevellock::ns_until(&now, &at) {
+                            Some(ns) => Some(ns),
+                            None => return Err(errno::ETIMEDOUT),
+                        }
+                    }
+                };
+                let mark = Mark::now();
+                let ret = crate::lowlevellock::futex_wait_raw(uaddr as u64, val, timeout);
+                if ret == errno::native::INTERRUPTED && !mark.interrupted(restart) {
+                    // No handler ran here that ends the wait -- the signal was
+                    // ignored, stopped the process, or went to another thread
+                    // -- so Linux would restart it: compare, and sleep again.
+                    continue;
+                }
+                return match ret {
+                    1 => Ok(0),
+                    0 => Err(errno::EAGAIN),
+                    neg => Err(errno::errno_for(neg)),
+                };
             }
         }
         FUTEX_WAKE | FUTEX_WAKE_BITSET => {
@@ -497,41 +511,127 @@ mod tests {
     }
 
     #[test]
-    fn test_wait_for() {
+    fn test_deadline() {
         let now = |_: i32| ts(100, 500);
-        assert_eq!(wait_for(FUTEX_WAIT, false, None, now), WaitFor::Ever);
+        let at = |cmd, realtime, t: Option<&Timespec>| {
+            deadline(cmd, realtime, t, now).map(|(clock, d)| (clock, d.tv_sec, d.tv_nsec))
+        };
+        let mono = crate::time::CLOCK_MONOTONIC;
+        assert_eq!(at(FUTEX_WAIT, false, None), None);
         assert_eq!(
-            wait_for(FUTEX_WAIT, false, Some(&ts(2, 5)), now),
-            WaitFor::Ns(2_000_000_005)
+            at(FUTEX_WAIT, false, Some(&ts(2, 5))),
+            Some((mono, 102, 505)),
+            "relative, from now"
         );
         assert_eq!(
-            wait_for(FUTEX_WAIT_BITSET, false, Some(&ts(101, 500)), now),
-            WaitFor::Ns(1_000_000_000)
-        );
-        assert_eq!(
-            wait_for(FUTEX_WAIT_BITSET, false, Some(&ts(100, 500)), now),
-            WaitFor::Expired
-        );
-        assert_eq!(
-            wait_for(FUTEX_WAIT_BITSET, true, Some(&ts(50, 0)), now),
-            WaitFor::Expired
+            at(FUTEX_WAIT_BITSET, false, Some(&ts(101, 500))),
+            Some((mono, 101, 500)),
+            "absolute, as given"
         );
         // The realtime flag picks the clock.
-        let clocks = |c: i32| {
-            if c == crate::time::CLOCK_REALTIME {
-                ts(10, 0)
-            } else {
-                ts(1000, 0)
-            }
+        assert_eq!(
+            at(FUTEX_WAIT_BITSET, true, Some(&ts(11, 0))),
+            Some((crate::time::CLOCK_REALTIME, 11, 0))
+        );
+    }
+
+    fn handle_usr1(handler: crate::signal::SighandlerT, flags: u32) {
+        let act = crate::signal::Sigaction {
+            sa_handler: handler,
+            sa_mask: crate::signal::SigsetT::EMPTY,
+            sa_flags: flags,
+            sa_restorer: 0,
         };
+        // SAFETY: a valid action; the old one is not wanted.
+        let rc = unsafe {
+            crate::signal::sigaction(
+                crate::signal::SIGUSR1,
+                &raw const act,
+                core::ptr::null_mut(),
+            )
+        };
+        assert_eq!(rc, 0);
+    }
+
+    extern "C" fn nothing(_: i32) {}
+
+    /// A handler that ends the wait is EINTR; any other interruption is
+    /// restarted -- the word compared again -- as Linux's kernel restarts it.
+    #[test]
+    fn test_a_signal_ends_a_wait_as_linuxs_does() {
+        use crate::interrupt::script::{self, Step};
+        use crate::signal::{SA_RESTART, SIG_DFL, SIG_IGN, SIGUSR1};
+        let handler = nothing as *const () as crate::signal::SighandlerT;
+        let mut word = 3u32;
+        let ten = ts(10, 0);
+        let timed = Some(&ten);
+        // (timeout, handler, flags, whether the call is EINTR)
+        let cases = [
+            (None, handler, 0, true),
+            (None, handler, SA_RESTART, false),
+            (None, SIG_IGN, 0, false),
+            (timed, handler, 0, true),
+            (timed, handler, SA_RESTART, true),
+            (timed, SIG_IGN, 0, false),
+        ];
+        for (timeout, h, flags, eintr) in cases {
+            handle_usr1(h, flags);
+            script::set([
+                Step::Signal(SIGUSR1),
+                Step::Wake(std::boxed::Box::new(|| {})),
+            ]);
+            let got = call(&raw mut word, FUTEX_WAIT_PRIVATE, 3, timeout, u32::MAX);
+            let unmet = script::clear();
+            if eintr {
+                assert_eq!(
+                    (got, unmet),
+                    ((-1, errno::EINTR), 1),
+                    "{timeout:?} {flags:#x}"
+                );
+            } else {
+                assert_eq!(
+                    (got, unmet),
+                    ((0, 0), 0),
+                    "restarted, then woken: {timeout:?}"
+                );
+            }
+        }
+        // One another thread took: restarted.
+        script::set([
+            Step::SignalElsewhere(std::boxed::Box::new(|| {})),
+            Step::Wake(std::boxed::Box::new(|| {})),
+        ]);
         assert_eq!(
-            wait_for(FUTEX_WAIT_BITSET, true, Some(&ts(11, 0)), clocks),
-            WaitFor::Ns(1_000_000_000)
+            call(&raw mut word, FUTEX_WAIT_PRIVATE, 3, None, u32::MAX),
+            (0, 0)
         );
+        assert_eq!(script::clear(), 0);
+        handle_usr1(SIG_DFL, 0);
+    }
+
+    /// A restarted wait compares the word first: EAGAIN when it moved while
+    /// the signal was handled.
+    #[test]
+    fn test_a_restart_compares_the_word_again() {
+        use crate::interrupt::script::{self, Step};
+        use crate::signal::{SIG_DFL, SIG_IGN};
+        handle_usr1(SIG_IGN, 0);
+        let word = std::boxed::Box::into_raw(std::boxed::Box::new(3u32));
+        script::set([
+            Step::SignalElsewhere(std::boxed::Box::new(move || {
+                // SAFETY: the word outlives the call.
+                unsafe { *word = 4 };
+            })),
+            Step::Wake(std::boxed::Box::new(|| panic!("it slept again"))),
+        ]);
         assert_eq!(
-            wait_for(FUTEX_WAIT_BITSET, false, Some(&ts(11, 0)), clocks),
-            WaitFor::Expired
+            call(word, FUTEX_WAIT_PRIVATE, 3, None, u32::MAX),
+            (-1, errno::EAGAIN)
         );
+        assert_eq!(script::clear(), 1);
+        // SAFETY: made above; nothing refers to it now.
+        drop(unsafe { std::boxed::Box::from_raw(word) });
+        handle_usr1(SIG_DFL, 0);
     }
 
     /// Unknown and unwired commands are ENOSYS without looking at the word

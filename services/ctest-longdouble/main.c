@@ -541,5 +541,37 @@ int main(void)
         }
     }
 
+    /* ------------------------------------------------------------------
+     * 100-104: long double functions musl's headers do not declare -- the
+     * Bessel functions, C23's nextupl and narrowing, clog10l -- which
+     * posix/include does (design-decisions §1141): each call compiles only
+     * through it. Values within a few units of the 64-bit significand,
+     * which a double's result misses by thousands.
+     * ------------------------------------------------------------------ */
+    if (!exact_ld(j0l(opaque_ld(0.0L)), 1.0L) || !exact_ld(j1l(opaque_ld(0.0L)), 0.0L)) {
+        return 100;
+    }
+    if (!near_ld(y0l(opaque_ld(1.0L)), 0.08825696421567695798292676602351516L, 0x1p-64L) ||
+        !near_ld(j1l(opaque_ld(1.0L)), 0.44005058574493351595968220371891491L, 0x1p-62L) ||
+        !near_ld(jnl(opaque_i(2), opaque_ld(1.0L)), 0.11490348493190048046964688133516661L,
+                 0x1p-63L)) {
+        return 101;
+    }
+    if (!exact_ld(nextupl(opaque_ld(1.0L)), 1.0L + 0x1p-63L) ||
+        !exact_ld(nextdownl(opaque_ld(1.0L)), 1.0L - 0x1p-64L)) {
+        return 102;
+    }
+    if (faddl(opaque_ld(1.0L), opaque_ld(0x1p-30L)) != 1.0f ||
+        daddl(opaque_ld(1.0L), opaque_ld(0x1p-60L)) != 1.0 ||
+        dsqrtl(opaque_ld(2.0L)) != 1.4142135623730951) {
+        return 103;
+    }
+    {
+        long double complex l = clog10l(opaque_ld(100.0L) + opaque_ld(0.0L) * I);
+        if (!near_ld(creall(l), 2.0L, 0x1p-62L) || !exact_ld(cimagl(l), 0.0L)) {
+            return 104;
+        }
+    }
+
     return 42;
 }

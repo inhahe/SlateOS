@@ -10973,6 +10973,382 @@ pub fn self_test_cscanf() -> KernelResult<()> {
     Ok(())
 }
 
+/// Take down a fixture process a rung spawned, whatever state it is in.
+///
+/// A fixture that reached `Zombie` has no thread left, and is reaped as the
+/// rungs always reaped one. A fixture that did not -- its rung's deadline
+/// passed -- still has scheduler tasks, and `pcb::destroy` frees the address
+/// space they would run on next. So its threads are killed first, which is
+/// also what makes it a zombie, and only then is it destroyed: the order the
+/// `fastpy-nice` rung has always used for the tool it stops on purpose.
+///
+/// A fixture's own children are its to reap: one that forks waits for them
+/// before it exits, or leaves orphans no rung can see.
+fn teardown_fixture(pid: ProcessId, task_id: TaskId) {
+    if pcb::state(pid) != Some(pcb::ProcessState::Zombie) {
+        thread::kill_process_threads(pid);
+        for _ in 0..2000 {
+            if pcb::state(pid) == Some(pcb::ProcessState::Zombie) {
+                break;
+            }
+            crate::sched::yield_now();
+        }
+    }
+    thread::on_thread_exit(task_id);
+    pcb::destroy(pid);
+}
+
+/// Where lane D lists the C fixtures [`self_test_ctest_generic`] runs:
+/// `services/ctest-generic.list`, staged by `scripts/create-ext4-rootfs.sh`.
+const CTEST_GENERIC_LIST: &str = "/mnt/tests/ctest-generic.list";
+
+/// The longest a listed fixture may ask for, in seconds: a bound, so that a
+/// typo (`300000`) is a line the rung cannot read rather than a boot held for
+/// days. Five times the longest any fixture has asked for so far.
+const CTEST_GENERIC_MAX_SECONDS: u64 = 600;
+
+/// One line of the list.
+struct GenericFixture<'a> {
+    /// `/mnt/tests/<name>.elf`, and its `argv[0]`.
+    name: &'a str,
+    /// The capabilities it is spawned holding.
+    grants: alloc::vec::Vec<(ResourceType, u64, Rights)>,
+    /// How long it may take, from spawn to `Zombie`.
+    seconds: u64,
+}
+
+/// What a listed fixture came to, when it did not fail.
+enum GenericOutcome {
+    Passed,
+    /// Its ELF is not staged: counted into the end-of-boot verdict by
+    /// [`pathz_test_elf`], as any absent fixture is.
+    Skipped,
+}
+
+/// The capability a grant word in the list stands for.
+///
+/// A closed vocabulary rather than capabilities spelled out in the list: the
+/// list is lane D's and grants are the kernel's decision, so a fixture that
+/// needs a new one asks for a new word, and this table says what it means.
+fn ctest_generic_grant(word: &str) -> Option<(ResourceType, u64, Rights)> {
+    match word {
+        // One wildcard File capability, which every file-touching fixture so
+        // far has needed (`requests/d-a-one-rung-for-every-c-fixture.md`).
+        "file" => Some((
+            ResourceType::File,
+            0,
+            Rights::READ | Rights::WRITE | Rights::EXECUTE | Rights::METADATA,
+        )),
+        // The right to change Secure Boot's lists: the granted arm of
+        // SYS_SECUREBOOT_ENROLL and _REMOVE (design-decisions §1401).
+        "secureboot" => Some((ResourceType::Process, 0, Rights::ENROLL_SECUREBOOT)),
+        _ => None,
+    }
+}
+
+/// A name the rung may turn into a path: letters, digits, `-`, `_` and `.`,
+/// not starting with `.`, at most 64 bytes. Anything else -- a `/` above all
+/// -- would load a file other than `/mnt/tests/<name>.elf`.
+fn ctest_generic_name_ok(name: &str) -> bool {
+    !name.is_empty()
+        && name.len() <= 64
+        && !name.starts_with('.')
+        && name
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b'.'))
+}
+
+/// Parse the list: one fixture a line, `name grants seconds` separated by
+/// blanks; `#` to the end of a line is a comment; blank lines are ignored.
+/// `grants` is `-` for none, or grant words joined by `,`.
+///
+/// # Errors
+///
+/// The 1-based number of the first line it cannot read, and why. A line is
+/// refused rather than skipped: the rootfs script refuses such a list, so one
+/// reaching the image is a fault in that script or in this parser, and a
+/// fixture silently not run is the thing this rung exists to prevent.
+fn parse_ctest_generic_list(
+    text: &str,
+) -> Result<alloc::vec::Vec<GenericFixture<'_>>, (usize, &'static str)> {
+    let mut fixtures: alloc::vec::Vec<GenericFixture<'_>> = alloc::vec::Vec::new();
+    for (index, raw) in text.lines().enumerate() {
+        let number = index.saturating_add(1);
+        let line = raw.split('#').next().unwrap_or_default();
+        let mut fields = line.split_ascii_whitespace();
+        let Some(name) = fields.next() else {
+            continue;
+        };
+        let (Some(grants), Some(seconds), None) = (fields.next(), fields.next(), fields.next())
+        else {
+            return Err((number, "not three fields (name, grants, seconds)"));
+        };
+        if !ctest_generic_name_ok(name) {
+            return Err((
+                number,
+                "the name is not a fixture name (letters, digits, '-', '_', '.')",
+            ));
+        }
+        if fixtures.iter().any(|f| f.name == name) {
+            return Err((number, "the fixture is listed twice"));
+        }
+        let mut caps = alloc::vec::Vec::new();
+        if grants != "-" {
+            for word in grants.split(',') {
+                let Some(cap) = ctest_generic_grant(word) else {
+                    return Err((number, "a grant word this kernel does not know"));
+                };
+                caps.push(cap);
+            }
+        }
+        let Ok(seconds) = seconds.parse::<u64>() else {
+            return Err((number, "seconds is not a whole number"));
+        };
+        if seconds == 0 || seconds > CTEST_GENERIC_MAX_SECONDS {
+            return Err((number, "seconds is 0 or more than 600"));
+        }
+        fixtures.push(GenericFixture {
+            name,
+            grants: caps,
+            seconds,
+        });
+    }
+    Ok(fixtures)
+}
+
+/// Run one listed fixture: spawn it with its grants, wait for it until its
+/// deadline, take it down whatever happened, and judge its exit code.
+fn run_ctest_generic(fixture: &GenericFixture<'_>) -> KernelResult<GenericOutcome> {
+    /// Every C fixture's "every check passed".
+    const EXPECTED: i32 = 42;
+
+    let name = fixture.name;
+    let Some(elf) = pathz_test_elf(name, name)? else {
+        return Ok(GenericOutcome::Skipped);
+    };
+    serial_println!(
+        "[spawn] Running {} (ring 3, C fixture, generic rung, {} s allowed, {} bytes ELF)...",
+        name,
+        fixture.seconds,
+        elf.len()
+    );
+
+    let argv: &[&[u8]] = &[name.as_bytes()];
+    let options = SpawnOptions {
+        name,
+        parent: 0,
+        priority: DEFAULT_PRIORITY,
+        capabilities: &fixture.grants,
+        fd_map: &[],
+        argv,
+        envp: &[],
+        exe_path: None,
+        cwd: None,
+        uid_gid: None,
+    };
+    let result = match spawn_process(&elf, &options) {
+        Ok(r) => r,
+        Err(e) => {
+            serial_println!(
+                "[spawn]   FAIL: {} (ring 3, C fixture, generic rung): spawn returned {:?}",
+                name,
+                e
+            );
+            return Err(e);
+        }
+    };
+
+    // A time, not a count of yields: a fixture that sleeps is judged by the
+    // clock it reads, however busy the machine is.
+    let deadline = crate::hrtimer::now_ns()
+        .saturating_add(fixture.seconds.saturating_mul(1_000_000_000));
+    let finished = loop {
+        if pcb::state(result.pid) == Some(pcb::ProcessState::Zombie) {
+            break true;
+        }
+        if crate::hrtimer::now_ns() >= deadline {
+            break false;
+        }
+        crate::sched::yield_now();
+    };
+    let exit_code = pcb::exit_code(result.pid);
+    teardown_fixture(result.pid, result.task_id);
+
+    if !finished {
+        serial_println!(
+            "[spawn]   FAIL: {} (ring 3, C fixture, generic rung): still running at its \
+             deadline, {} s after spawn, and taken down. Codes in services/{}/main.c",
+            name,
+            fixture.seconds,
+            name
+        );
+        return Err(KernelError::TimedOut);
+    }
+    if exit_code != Some(EXPECTED) {
+        serial_println!(
+            "[spawn]   FAIL: {} (ring 3, C fixture, generic rung): ended with exit code {:?}, \
+             expected {}. Codes in services/{}/main.c",
+            name,
+            exit_code,
+            EXPECTED,
+            name
+        );
+        return Err(KernelError::InternalError);
+    }
+    serial_println!("[spawn]   {} (ring 3, C fixture, generic rung): OK", name);
+    Ok(GenericOutcome::Passed)
+}
+
+/// One rung for every C fixture lane D lists in `/mnt/tests/ctest-generic.list`
+/// (`requests/d-a-one-rung-for-every-c-fixture.md`).
+///
+/// A rung per fixture was the same thirty lines each time, and a new fixture
+/// -- or a change to one's grants or time -- needed a kernel change. Lane D
+/// keeps the list, so neither does now. Each fixture is spawned with
+/// `argv = [<name>]`, no environment and the capabilities its grant words
+/// stand for ([`ctest_generic_grant`]), and given until a deadline in seconds.
+/// 42 is a pass, as for every C fixture; anything else names the fixture and
+/// points at the code legend at the top of its `main.c`, so the rung does not
+/// keep copies of legends that would drift.
+///
+/// Every listed fixture runs even after one fails, and the rung fails if any
+/// did. No list in the image is a counted skip, not a failure; a line that
+/// cannot be read is a failure.
+pub fn self_test_ctest_generic() -> KernelResult<()> {
+    const RUNG: &str = "ctest-generic";
+
+    if !crate::fs::selftest::is_mounted(FIXTURE_MOUNT) {
+        pathz_skip(
+            format_args!("{RUNG}"),
+            &alloc::format!("{CTEST_GENERIC_LIST} (nothing is mounted at {FIXTURE_MOUNT})"),
+        );
+        return Ok(());
+    }
+    let bytes = match crate::fs::Vfs::read_file(CTEST_GENERIC_LIST) {
+        Ok(b) => b,
+        Err(e) => return pathz_fixture_absent(RUNG, CTEST_GENERIC_LIST, &e),
+    };
+    let Ok(text) = core::str::from_utf8(&bytes) else {
+        serial_println!(
+            "[spawn]   FAIL: {}: {} is not UTF-8 text",
+            RUNG,
+            CTEST_GENERIC_LIST
+        );
+        return Err(KernelError::InternalError);
+    };
+    let fixtures = match parse_ctest_generic_list(text) {
+        Ok(f) => f,
+        Err((line, why)) => {
+            serial_println!(
+                "[spawn]   FAIL: {}: {} line {}: {} -- scripts/create-ext4-rootfs.sh should \
+                 have refused it",
+                RUNG,
+                CTEST_GENERIC_LIST,
+                line,
+                why
+            );
+            return Err(KernelError::InternalError);
+        }
+    };
+    if fixtures.is_empty() {
+        serial_println!(
+            "[spawn]   {}: the list names no fixtures, so there is nothing to run: OK",
+            RUNG
+        );
+        return Ok(());
+    }
+
+    let (mut passed, mut skipped, mut failed) = (0usize, 0usize, 0usize);
+    for fixture in &fixtures {
+        match run_ctest_generic(fixture) {
+            Ok(GenericOutcome::Passed) => passed = passed.saturating_add(1),
+            Ok(GenericOutcome::Skipped) => skipped = skipped.saturating_add(1),
+            // Its FAIL line, naming it and why, is already printed; what is
+            // left to do is count it, so the rung fails once every fixture
+            // has had its turn.
+            Err(_) => failed = failed.saturating_add(1),
+        }
+    }
+    serial_println!(
+        "[spawn]   {}: {} listed -- {} passed, {} failed, {} skipped",
+        RUNG,
+        fixtures.len(),
+        passed,
+        failed,
+        skipped
+    );
+    if failed > 0 {
+        return Err(KernelError::InternalError);
+    }
+    Ok(())
+}
+
+/// The list parser's cases, run at boot because the kernel crate has no host
+/// tests: a list that parses, and each way a line is refused.
+pub fn self_test_ctest_generic_list() -> KernelResult<()> {
+    fn fail(msg: &str) -> KernelResult<()> {
+        serial_println!("[spawn]   FAIL: ctest-generic list parser: {}", msg);
+        Err(KernelError::InternalError)
+    }
+
+    let good = "# name grants seconds\n\
+                \n\
+                ctest-obstack  -            30\n\
+                ctest-stdio    file         60   # a comment after a line\r\n\
+                ctest-sb       file,secureboot 5\n";
+    let Ok(list) = parse_ctest_generic_list(good) else {
+        return fail("a well-formed list was refused");
+    };
+    let shape: alloc::vec::Vec<(&str, usize, u64)> = list
+        .iter()
+        .map(|f| (f.name, f.grants.len(), f.seconds))
+        .collect();
+    if shape != [("ctest-obstack", 0, 30), ("ctest-stdio", 1, 60), ("ctest-sb", 2, 5)] {
+        return fail("a well-formed list parsed to the wrong fixtures");
+    }
+    if list.get(2).and_then(|f| f.grants.get(1)).map(|g| g.0) != Some(ResourceType::Process) {
+        return fail("'secureboot' did not grant a Process capability");
+    }
+    if !matches!(parse_ctest_generic_list("# only a comment\n\n"), Ok(v) if v.is_empty()) {
+        return fail("a list of comments is not an empty list");
+    }
+
+    for (case, text, line) in [
+        ("two fields", "ok - 5\nctest-x -\n", 2),
+        ("four fields", "ctest-x - 5 extra\n", 1),
+        ("a path for a name", "../etc/x - 5\n", 1),
+        ("a dot name", ".hidden - 5\n", 1),
+        ("listed twice", "ctest-x - 5\nctest-x file 5\n", 2),
+        ("an unknown grant", "ctest-x root 5\n", 1),
+        ("an empty grant word", "ctest-x file, 5\n", 1),
+        ("seconds not a number", "ctest-x - 5s\n", 1),
+        ("zero seconds", "ctest-x - 0\n", 1),
+        ("seconds over the bound", "ctest-x - 601\n", 1),
+    ] {
+        match parse_ctest_generic_list(text) {
+            Err((n, _)) if n == line => {}
+            Err((n, why)) => {
+                serial_println!(
+                    "[spawn]   ctest-generic list parser: '{}' refused at line {} ({}), expected line {}",
+                    case,
+                    n,
+                    why,
+                    line
+                );
+                return fail("a bad line was refused at the wrong line");
+            }
+            Ok(_) => {
+                serial_println!("[spawn]   ctest-generic list parser: '{}' was accepted", case);
+                return fail("a bad line was accepted");
+            }
+        }
+    }
+    serial_println!(
+        "[spawn]   ctest-generic list parser: a good list parses, ten bad lines are refused at their line: OK"
+    );
+    Ok(())
+}
+
 /// Ring-3 end-to-end test that fastpy **pure-mode file I/O** works on-target.
 ///
 /// This is the first proof that the whole pure-mode file path runs natively on

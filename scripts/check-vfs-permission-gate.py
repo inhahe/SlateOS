@@ -113,6 +113,11 @@ UNGATED: dict[str, str] = {
         "reports filesystem-wide capacity; the path only selects which mount, "
         "and nothing about the path itself is read or written"
     ),
+    "statvfs_resolved": (
+        "`statvfs` for `fstatfs` through a handle (fs::handle::HandleFile), on "
+        "the host path the open resolved and checked: filesystem-wide capacity, "
+        "the path only selecting which mount"
+    ),
     "trim": (
         "discards the filesystem's free blocks (the kernel side of fstrim(8)); "
         "the path only selects which mount, and free space belongs to no file"

@@ -1654,6 +1654,66 @@ and its fallback to `SYS_PROCESS_KILL`); `userspace/coreutils/src/bin/kill.rs`;
 `scripts/check-bin-collisions.py`'s one remaining baseline entry;
 `known-issues.md` → `TD-B-TWO-PACKAGES-BUILD-A-BINARY-CALLED-KILL`.
 
+## B-Q23 — [B] What is SlateOS for? The answer decides which of its 469 programs ship. — Status: OPEN (raised 2026-10-01, as the operator asked in B-Q21)
+
+**In short:** we have written 469 programs. You asked (answering B-Q21) for a
+list of all of them with a line each -- that is now `programs.md`, generated
+from the code so it cannot go stale -- and for options on what SlateOS is for,
+each with what it would drop. For now everything that builds goes on the disk
+image (your answer A); this question is about the image a user eventually
+installs. Nothing here deletes code: a program left off the image stays in the
+repository, and can be installed later by the package manager (`pkg`).
+
+**The 469, grouped** (the full list with descriptions is `programs.md`):
+
+| Group | Count | Examples |
+|---|---|---|
+| Everyday command-line tools | 139 | `ls`, `cp`, `grep`, `sed`, `awk`, `tar`, `less`, `nano`, the shell |
+| Running the system | 99 | services, users and passwords, logs, disks and partitions, boot |
+| Hardware and performance | 27 | `lscpu`, `lspci`, `top`, `htop`, `free`, power and thermal tools |
+| Networking tools | 29 | `ping`, `ip`, `curl`, `wget`, `ssh`, `rsync`, `dig`, `tcpdump`, firewalls |
+| Network servers | 6 | `sshd`, `ftpd`, `telnet`, `inetd`, `ntpd`, `finger` -- programs other machines connect *to* |
+| Linux security frameworks | 6 | `apparmor`, `selinux`, `audit`, `firejail`, `polkit`, `sanitize` |
+| Developer tools | 17 | `make`, `gdb`, `strace`, `perf`, `objdump`, `readelf`, `yacc` |
+| Desktop applications | 94 | editor, email, calendar, file explorer, spreadsheet, music and video players |
+| Games | 45 | chess, solitaire, minesweeper, tetris, sudoku |
+| The desktop itself | 7 | compositor (draws the screen), desktop shell, notifications |
+
+**One group is odd out whatever you pick.** The six Linux security frameworks
+configure mechanisms SlateOS does not have -- its security is capabilities
+(tokens a program must hold to touch anything), not Linux's labels and profiles
+-- so they are candidates for deletion under your rule that a command which
+does not work should not exist (§1006), not merely for leaving off an image.
+That is checked one program at a time, separately from this question.
+
+### The options
+
+| Option | *What changes* | Drops from the image |
+|---|---|---|
+| **A. Everything, for everyone** -- a desktop that is also a developer's machine and a small server | Every program is installed; nothing to choose. The image is the largest. | nothing |
+| **B. A desktop for people who also program** | The servers are not running on a desktop by default. | the 6 network servers |
+| **C. A desktop for people** | As B, and the programming tools move to an optional "developer" package. | 6 servers + 17 developer tools |
+| **D. A lean desktop** | As C, and games become an optional package. | 6 servers + 17 developer tools + 45 games |
+| **E. Let the installer's question decide** -- `design.txt` already has the installer ask what the machine is for (it lists desktop, gaming, development, server and others, to tune memory and scheduling) | Each answer installs its own set: *desktop* is B, *development* adds nothing to B (it already has the tools), *gaming* is B, *server* drops the applications and games and keeps the servers. A user who picks wrongly adds a package later. | depends on the answer |
+
+**My recommendation: E, with B as what "desktop" means.** The installer
+already asks the question this entry is asking, per machine rather than once
+for everybody -- so the image can hold everything (your "A for now") while
+each installation takes the part it was chosen for. Within a desktop, `make`
+and `gdb` cost little and "install the developer package first" is friction
+exactly when someone is trying something; network servers are the opposite --
+a server a desktop does not need is attack surface (a door into the machine)
+even when idle, so installing one should be a choice.
+
+**If this is never answered:** nothing breaks. Your B-Q21 answer (A, "for now")
+stays in force: everything that builds goes on the image. The cost is only that
+the image stays at its largest and every program on it is something that must
+keep working.
+
+**Where it bites:** `scripts/rootfs-bin-manifest.txt` and
+`scripts/create-ext4-rootfs.sh` (lane D's), and the package definitions in
+`pkg/`.
+
 # Resolved
 
 **The body above holds OPEN questions only.** When the operator answers one,

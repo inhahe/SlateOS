@@ -1181,6 +1181,7 @@ fi
 #     A skip reports nothing and says so; a stale binary reports OK and is
 #     wrong.  ALLOW_STALE_FIXTURES=1 downgrades this too, since a host that
 #     cannot rebuild the fixtures certainly cannot relink bash.
+# PROGRAM: /bin/bash -- GNU bash 5.2, the shell. (scripts/bash-spike/)
 BASH_SLATE="$ROOT_DIR/build/spike/bash-slateos.elf"
 BASH_STALE=0
 if [ -e "$BASH_SLATE" ]; then
@@ -1225,6 +1226,7 @@ fi
 # Staleness: identical rule to bash — absent is honest (best-effort, warn),
 # present-but-older-than-libc.a is a lie (fatal), because a stale binary links a
 # libc that is no longer in the build.  See the long comment above bash.
+# PROGRAM: /bin/pkgconf, /bin/pkg-config -- pkgconf 2.3.0: the compiler and linker flags an installed library needs. (scripts/pkgconf-spike/)
 PKGCONF_SLATE="$ROOT_DIR/build/spike/pkgconf-slateos.elf"
 PKGCONF_STALE=0
 if [ -e "$PKGCONF_SLATE" ]; then
@@ -1263,6 +1265,7 @@ fi
 #
 # Staleness: identical rule to bash and pkgconf — absent is honest (warn),
 # present-but-older-than-libc.a is a lie (fatal).
+# PROGRAM: /bin/make -- GNU make 4.4.1, the build tool. (scripts/make-spike/)
 MAKE_SLATE="$ROOT_DIR/build/spike/make-slateos.elf"
 MAKE_STALE=0
 if [ -e "$MAKE_SLATE" ]; then
@@ -1312,6 +1315,7 @@ fi
 # added back when it is implemented, per §1006 — the same ruling that deleted
 # our own fabricating `cmake/ctest/cpack` reimplementation, which is why
 # /bin/cmake is free for the real one.
+# PROGRAM: /bin/cmake -- CMake 4.4.3, the build-system generator. (scripts/cmake-spike/)
 CMAKE_SLATE="$ROOT_DIR/build/spike/cmake-slateos.elf"
 CMAKE_DATA="$ROOT_DIR/build/spike/cmake-data"
 CMAKE_STALE=0
@@ -1365,6 +1369,7 @@ fi
 # Staleness: identical rule to bash, pkgconf, make and cmake -- absent is
 # honest (NOTE), older than libc.a is a lie (fatal).  The relink above is
 # normally what keeps it fresh.
+# PROGRAM: /bin/espeak-ng -- eSpeak NG 1.52.0, the speech synthesizer. (scripts/espeak-spike/)
 ESPEAK_SLATE="$ROOT_DIR/build/spike/espeak-ng-slateos.elf"
 ESPEAK_DATA="$ROOT_DIR/build/spike/espeak-ng-data"
 ESPEAK_STALE=0
@@ -1458,6 +1463,7 @@ fi
 #     produces "No module named 'zlib'" from inside <frozen zipimport>.  That is
 #     measured, not assumed (see scripts/cpython-spike/stdlib.sh), and a build
 #     host whose zipfile defaults changed would reintroduce it invisibly.
+# PROGRAM: /bin/python3 -- CPython 3.12.3, the Python interpreter. (scripts/cpython-spike/)
 PY_SLATE="$ROOT_DIR/build/spike/python-slateos.elf"
 PY_ZIP="$ROOT_DIR/build/spike/python312.zip"
 PY_STALE=0

@@ -2232,7 +2232,9 @@ pub const SYS_SIGNAL_PENDING: u64 = 526;
 ///
 /// A native process keeps its `sigaction` dispositions in **userspace**
 /// (the posix crate's table); the kernel only knows whether a signal
-/// *trampoline* is registered.  So `SYS_SIGNAL_SEND(self, SIGTSTP)` cannot
+/// *trampoline* is registered, and which signals are ignored
+/// ([`SYS_SIGNAL_SET_IGNORED`]) -- not, of the rest, which have a handler
+/// and which the default action.  So `SYS_SIGNAL_SEND(self, SIGTSTP)` cannot
 /// express "the default action applies": `classify_post_info` sees a
 /// registered trampoline, marks the signal pending for handler delivery,
 /// and control lands back in the very userspace dispatcher that just
@@ -6111,6 +6113,61 @@ pub const SYS_FS_LINK_HANDLE: u64 = 1096;
 ///
 /// Chosen number 1097, the next free slot after 1096.
 pub const SYS_DNS_RESOLVE2: u64 = 1097;
+
+/// Report which signals the calling process ignores (`SIG_IGN`).
+///
+/// - `arg0`: the ignored set, bit `n - 1` for signal `n`, as
+///   [`SYS_SIGNAL_MASK`] numbers them. The *whole* set: send it whenever a
+///   disposition moves to or from `SIG_IGN` (`signal`, `sigaction`, `sigset`,
+///   `bsd_signal`).
+/// - `arg1`: a `u64` out-pointer for the previous set, or 0.
+/// - `arg2`: flags. `SIGNAL_IGNORED_NOCLDWAIT` (1): `SIGCHLD` has
+///   `SA_NOCLDWAIT`. Others must be 0.
+///
+/// The one part of a native process's dispositions the kernel keeps, and why
+/// it must: an `exec` keeps ignored signals ignored and a `fork` or spawn
+/// passes them on, where the new image's libc table starts empty -- it reads
+/// this back with [`SYS_SIGNAL_GET_IGNORED`] at start-up -- and the kernel
+/// acts on it:
+/// - an ignored signal is discarded when sent, before anything in the target
+///   runs; one that is blocked stays pending, and is discarded when unblocked
+///   if it is still ignored then;
+/// - a pending signal *newly* ignored is discarded, blocked or not (POSIX);
+/// - `SIGCHLD` ignored: an exiting child is reaped at once, not left a
+///   zombie, and sends no `SIGCHLD`; a `wait` with none left is `ECHILD`.
+///   `SA_NOCLDWAIT`: the same, but `SIGCHLD` is still sent;
+/// - `SIGTTIN`/`SIGTTOU` ignored let a background job's terminal access
+///   through as POSIX says (a read fails `EIO`, a write proceeds).
+///
+/// `SA_NOCLDWAIT` is cleared by an `exec`, like the rest of a handler's
+/// flags; the ignored set is kept.
+///
+/// Returns 0. Errors: `InvalidArgument` if the set names `SIGKILL` (9) or
+/// `SIGSTOP` (19), which cannot be ignored, or for an unknown flag;
+/// `InvalidAddress` for an unwritable out-pointer -- checked first, so a
+/// failed call changes nothing.
+///
+/// Chosen number 1098, the next free slot after 1097.
+pub const SYS_SIGNAL_SET_IGNORED: u64 = 1098;
+
+/// [`SYS_SIGNAL_SET_IGNORED`]'s flag: `SIGCHLD` carries `SA_NOCLDWAIT`.
+pub const SIGNAL_IGNORED_NOCLDWAIT: u64 = 1;
+
+/// Read the calling process's ignored set: the signals that came to it
+/// ignored -- kept across `exec`, passed on by `fork` and spawn -- and any it
+/// has reported since through [`SYS_SIGNAL_SET_IGNORED`].
+///
+/// - `arg0`: a `u64` out-pointer for the set, bit `n - 1` for signal `n`.
+///
+/// For libc's start-up, to seed its handler table: a program `nohup`
+/// started finds `SIGHUP` (bit 0) set here. Through a pointer rather than
+/// the return value because signal 64's bit is the sign bit.
+///
+/// Returns 0. Errors: `InvalidArgument` for a null pointer, `InvalidAddress`
+/// for an unwritable one.
+///
+/// Chosen number 1099, the next free slot after 1098.
+pub const SYS_SIGNAL_GET_IGNORED: u64 = 1099;
 
 // ---------------------------------------------------------------------------
 // Version info

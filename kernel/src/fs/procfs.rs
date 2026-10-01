@@ -2462,6 +2462,28 @@ fn format_bitmap_list(mask: u64, nbits_in: usize) -> String {
 /// Tgid and the two id sources coincide; for a thread's `task/<tid>/status`
 /// they differ (`task.id == tid`, `proc_id == owning pid`), so Pid is the
 /// thread id while Tgid is the process id — exactly as Linux reports.
+/// `RLIMIT_SIGPENDING`'s index in a process's resource limits: the cap on
+/// signals queued for its real user, which `SigQ` reports against.
+const RLIMIT_SIGPENDING: u32 = 11;
+
+/// A process's signal sets as `/proc` reports them -- pending, blocked and
+/// ignored ([`crate::proc::signal::sets`]) -- and the signals it catches.
+///
+/// "Caught" is known only for a Linux-ABI process, whose handlers the kernel
+/// stores; a native process's handler table is its libc's (design-decisions
+/// §1512), so it reports none, which `SigCgt` then says. All empty for a
+/// kernel thread.
+fn proc_signal_sets(proc_id: u64) -> (crate::proc::signal::SignalSets, u64) {
+    let sets = crate::proc::signal::sets(proc_id);
+    let caught =
+        if crate::proc::pcb::get_abi_mode(proc_id) == Some(crate::proc::pcb::AbiMode::Linux) {
+            crate::syscall::linux::linux_sigaction_caught(proc_id)
+        } else {
+            0
+        };
+    (sets, caught)
+}
+
 fn build_pid_status(task: &crate::sched::TaskInfo, proc_id: u64) -> Vec<u8> {
     use crate::sched::task::TaskState;
     use core::fmt::Write as _;
@@ -2551,6 +2573,30 @@ fn build_pid_status(task: &crate::sched::TaskInfo, proc_id: u64) -> Vec<u8> {
         }
     }
     let _ = writeln!(s, "Threads:\t{num_threads}");
+    // Signals, in Linux's order and format (fs/proc/array.c task_sig()):
+    // SigQ is the signals queued for the process's real user against its
+    // RLIMIT_SIGPENDING; SigPnd is the thread's own pending set and ShdPnd
+    // the process's -- every signal here is sent to a process, so the
+    // thread's is empty -- then the blocked, ignored and caught sets, each as
+    // 16 hex digits. All were missing until 2026-10-01, when the kernel began
+    // keeping the ignored set (design-decisions §1512).
+    let (sig, caught) = proc_signal_sets(proc_id);
+    let queued: u32 = crate::proc::pcb::pids_of_user(uid)
+        .into_iter()
+        .map(|pid| crate::proc::signal::sets(pid).pending.count_ones())
+        .fold(0, u32::saturating_add);
+    let queue_limit = crate::proc::pcb::get_rlimit(proc_id, RLIMIT_SIGPENDING).map_or(
+        crate::proc::pcb::DEFAULT_RLIMITS
+            .get(RLIMIT_SIGPENDING as usize)
+            .map_or(0, |&(soft, _)| soft),
+        |(soft, _)| soft,
+    );
+    let _ = writeln!(s, "SigQ:\t{queued}/{queue_limit}");
+    let _ = writeln!(s, "SigPnd:\t{:016x}", 0u64);
+    let _ = writeln!(s, "ShdPnd:\t{:016x}", sig.pending);
+    let _ = writeln!(s, "SigBlk:\t{:016x}", sig.blocked);
+    let _ = writeln!(s, "SigIgn:\t{:016x}", sig.ignored);
+    let _ = writeln!(s, "SigCgt:\t{caught:016x}");
     // NoNewPrivs (PR_SET_NO_NEW_PRIVS): 1 once a task has irreversibly opted
     // out of privilege-gaining execs, else 0.  systemd, WINE, and container
     // runtimes read this to confirm a sandbox took effect.  Real per-process
@@ -2903,6 +2949,20 @@ fn build_pid_stat(task: &crate::sched::TaskInfo, proc_id: u64) -> Vec<u8> {
     // value rather than a 0 stub.  Thread/task property → from `task`.
     let processor = task.last_cpu;
 
+    // signal, blocked, sigignore, sigcatch (fields 31-34): decimal, and only
+    // the low 31 signals, as Linux prints them (`& 0x7fffffff`; proc(5) calls
+    // them obsolete in favour of `status`'s Sig* lines). `signal` is the
+    // thread's own pending set, and every signal here is sent to a process,
+    // so it is 0 -- the process's is `status`'s ShdPnd. Zeros until
+    // 2026-10-01.
+    const OLD_SIGNALS: u64 = 0x7fff_ffff;
+    let (sig, caught) = proc_signal_sets(proc_id);
+    let (blocked, sigignore, sigcatch) = (
+        sig.blocked & OLD_SIGNALS,
+        sig.ignored & OLD_SIGNALS,
+        caught & OLD_SIGNALS,
+    );
+
     // Field order matches proc(5) / Linux fs/proc/array.c do_task_stat().
     // 1:pid 2:comm 3:state 4:ppid 5:pgrp 6:session 7:tty_nr 8:tpgid 9:flags
     // 10:minflt 11:cminflt 12:majflt 13:cmajflt 14:utime 15:stime 16:cutime
@@ -2917,8 +2977,9 @@ fn build_pid_stat(task: &crate::sched::TaskInfo, proc_id: u64) -> Vec<u8> {
     // Placeholders left-to-right: pid comm state ppid pgrp session
     // <tty_nr/tpgid/flags=0/-1/0> <minflt..cmajflt=0> utime stime
     // cutime cstime priority nice num_threads itrealvalue=0
-    // starttime vsize rss rsslim <startcode..wchan=0> <nswap/cnswap=0>
-    // exit_signal=17 processor <rt_priority..env_end=0> exit_code.
+    // starttime vsize rss rsslim <startcode..kstkeip=0> signal=0 blocked
+    // sigignore sigcatch wchan=0 <nswap/cnswap=0> exit_signal=17 processor
+    // <rt_priority..env_end=0> exit_code.
     // Split around the comm so the name can be raw bytes. Field 2 is
     // parenthesised precisely because it may contain anything, and Linux
     // stores it as bytes; decoding it here rendered every undecodable name as
@@ -2929,7 +2990,7 @@ fn build_pid_stat(task: &crate::sched::TaskInfo, proc_id: u64) -> Vec<u8> {
     out.extend_from_slice(name);
     let text = format!(
         ") {} {} {} {} 0 -1 0 {} {} {} {} {} {} {} {} {} {} {} 0 {} {} {} {} \
-         0 0 0 0 0 0 0 0 0 0 0 0 17 {} 0 0 0 0 0 0 0 0 0 0 0 0 {}\n",
+         0 0 0 0 0 0 {} {} {} 0 0 0 17 {} 0 0 0 0 0 0 0 0 0 0 0 0 {}\n",
         state_char,
         ppid,
         pgrp,
@@ -2949,6 +3010,9 @@ fn build_pid_stat(task: &crate::sched::TaskInfo, proc_id: u64) -> Vec<u8> {
         vsize,
         rss_pages,
         rsslim,
+        blocked,
+        sigignore,
+        sigcatch,
         processor,
         exit_code,
     );
@@ -18507,7 +18571,111 @@ pub fn self_test() -> KernelResult<()> {
         serial_println!("[procfs]   through-the-mount: /proc not mounted, skipped");
     }
 
+    test_pid_signal_sets()?;
+
     skips.report("[procfs]");
     serial_println!("[procfs] Self-test PASSED{}", skips.suffix());
     Ok(())
+}
+
+/// `/proc/<pid>/status`'s Sig* lines and `stat`'s fields 31-34 report the
+/// kernel's record of the process's signals: the pending set as ShdPnd (and
+/// the thread's own, SigPnd, empty), the blocked and ignored sets, nothing
+/// caught for a process the kernel holds no handlers for -- and in `stat`,
+/// the low 31 bits of each, in decimal, as Linux prints them.
+fn test_pid_signal_sets() -> KernelResult<()> {
+    use crate::proc::signal;
+    use crate::serial_println;
+    // No process record: signal state alone, which is all these read.
+    const PID: u64 = 0xFFFF_5160_0300;
+    let mut name = [0u8; 32];
+    name[..3].copy_from_slice(b"sig");
+    let synth = crate::sched::TaskInfo {
+        id: 4243,
+        name,
+        name_len: 3,
+        state: crate::sched::task::TaskState::Ready,
+        priority: 20,
+        total_ticks: 0,
+        user_ticks: 0,
+        sys_ticks: 0,
+        min_flt: 0,
+        maj_flt: 0,
+        nvcsw: 0,
+        nivcsw: 0,
+        total_cycles: 0,
+        schedule_count: 0,
+        start_tick: 0,
+        last_cpu: 0,
+        cpu_quota_pct: 0,
+        throttled: false,
+        total_wait_ticks: 0,
+        max_wait_ticks: 0,
+        stack_used: None,
+        stack_pct: None,
+    };
+    // SIGHUP and SIGRTMAX (64) ignored, SIGINT blocked, SIGTERM pending.
+    let ignored = 1u64 | (1u64 << 63);
+    let result = (|| -> Result<(), &'static str> {
+        signal::set_ignored(PID, ignored, false).map_err(|_| "set_ignored refused")?;
+        let _ = signal::set_blocked(PID, 1 << 1);
+        signal::set_pending(PID, 15);
+
+        let status = build_pid_status(&synth, PID);
+        let text = core::str::from_utf8(&status).unwrap_or("");
+        for line in [
+            "SigPnd:\t0000000000000000",
+            "ShdPnd:\t0000000000004000",
+            "SigBlk:\t0000000000000002",
+            "SigIgn:\t8000000000000001",
+            "SigCgt:\t0000000000000000",
+        ] {
+            if !text.lines().any(|l| l == line) {
+                serial_println!("[procfs]   status lacks {:?}", line);
+                return Err("a Sig* line of /proc/<pid>/status");
+            }
+        }
+        let sigq = text
+            .lines()
+            .find_map(|l| l.strip_prefix("SigQ:\t"))
+            .and_then(|q| q.split_once('/'));
+        if !sigq.is_some_and(|(n, max)| n.parse::<u32>().is_ok() && max.parse::<u64>().is_ok()) {
+            return Err("SigQ is not queued/limit");
+        }
+
+        let stat = build_pid_stat(&synth, PID);
+        let text = core::str::from_utf8(&stat).unwrap_or("");
+        let close = text.rfind(')').unwrap_or(0);
+        let fields: Vec<&str> = text
+            .get(close.saturating_add(1)..)
+            .unwrap_or("")
+            .split_whitespace()
+            .collect();
+        // Field n sits at index n - 3 of the fields after the comm.
+        let field = |n: usize| fields.get(n.saturating_sub(3)).copied();
+        if field(31) != Some("0")
+            || field(32) != Some("2")
+            || field(33) != Some("1")
+            || field(34) != Some("0")
+            || field(38) != Some("17")
+        {
+            serial_println!(
+                "[procfs]   stat fields 31-34, 38: {:?}",
+                (31..=38).map(field).collect::<Vec<_>>()
+            );
+            return Err("stat's signal fields");
+        }
+        Ok(())
+    })();
+    signal::remove(PID);
+    match result {
+        Ok(()) => {
+            serial_println!("[procfs]   /proc/<pid>/status Sig* lines and stat fields 31-34: OK");
+            Ok(())
+        }
+        Err(what) => {
+            serial_println!("[procfs]   FAIL: {}", what);
+            Err(KernelError::InternalError)
+        }
+    }
 }

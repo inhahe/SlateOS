@@ -6311,7 +6311,9 @@ with no `sleep` on purpose — a sleep would hide the very adjacency being
 tested) and `test_filesync_settled_mtime_is_trusted` for the other half of the
 trade.
 
-### TD-KERNEL-NATIVE-ABI-SIG_IGN-IS-INVISIBLE-TO-THE-KERNEL. Terminal-access job control cannot honour a native-ABI process's `SIG_IGN`, so a native shell must *block* `SIGTTOU` where bash *ignores* it — 2026-08-12
+### [FIXED 2026-10-01 -- the kernel keeps the ignored set for both ABIs; see A-IGNORED-SIGNALS-DID-NOT-SURVIVE-EXEC-OR-SPAWN and design-decisions §1512] TD-KERNEL-NATIVE-ABI-SIG_IGN-IS-INVISIBLE-TO-THE-KERNEL. Terminal-access job control cannot honour a native-ABI process's `SIG_IGN`, so a native shell must *block* `SIGTTOU` where bash *ignores* it — 2026-08-12
+
+**Fixed 2026-10-01.** The native libc now reports its ignored signals (`SYS_SIGNAL_SET_IGNORED`), and `signal_ignored_or_blocked` asks the kernel's set for both ABIs: a native shell may ignore `SIGTTOU` as bash does. The "narrow report this signal as ignored call" below is what was built. The entry is kept as written for its history.
 
 **Where:** `kernel/src/syscall/handlers.rs::signal_ignored_or_blocked`, used by
 `tty_job_control_decide` (the `SIGTTIN`/`SIGTTOU` policy added in
@@ -180906,6 +180908,130 @@ function. A new variant cannot be missed. The enum's text keeps its shape
 for lane B's and lane D's parsers. The Linux layer's self-test (12)
 round-trips every variant and checks that a native `NoAttribute` is
 `ENODATA`.
+
+### A-IGNORED-SIGNALS-DID-NOT-SURVIVE-EXEC-OR-SPAWN -- 2026-10-01 -- FIXED the same day (lane A)
+
+**In short:** "ignore this signal" was known only to the C library, so a
+program started by another forgot it: `nohup cmd` ignores the hang-up signal
+and becomes `cmd`, and `cmd` died when its terminal closed. A parent that
+ignored `SIGCHLD` still collected zombies, and a process with no signal
+handler yet (before its libc started, or one with no libc) was killed by an
+ignored `SIGHUP` -- the kernel took the default action. Lane D's
+`requests/d-a-ignored-signals-and-spawn-attributes-need-a-kernel-record.md`.
+
+**Fixed:** the kernel keeps the ignored set (`proc::signal`), for both ABIs,
+across `exec`, `fork` and spawn, and discards an ignored signal when it is
+sent; a parent ignoring `SIGCHLD` (or with `SA_NOCLDWAIT`) leaves no zombies
+(`pcb::ExitNotice`). New native calls `SYS_SIGNAL_SET_IGNORED` (1098) and
+`SYS_SIGNAL_GET_IGNORED` (1099). Design-decisions §1512. Lane D's half --
+reporting each change to or from `SIG_IGN`, seeding the table at start-up --
+is theirs to do.
+
+`/proc/<pid>/status` now prints Linux's `SigQ`/`SigPnd`/`ShdPnd`/`SigBlk`/`SigIgn`/`SigCgt` lines and `/proc/<pid>/stat` fields 31-34 are real. **Still short of Linux:** `SigCgt` (and field 34) is known only for a Linux-ABI process -- a native process's handlers are its libc's, so it reports none caught.
+
+Tests: `proc::signal`'s `test_ignored_set` and `test_ignored_across_images`;
+`pcb`'s `test_exit_notice`; `spawn`'s
+`test_spawn_child_of_sigchld_ignorer_is_reaped`, through a real exit;
+`dispatch`'s `test_dispatch_signal_ignored` (the two calls, and an ignored
+`SIGHUP` that no longer kills) and the ignored case of
+`test_dispatch_tty_job_control`; the Linux table's
+`self_test_sigaction_table`.
+
+### A-BLOCKED-FATAL-SIGNAL-KILLED-AT-ONCE -- 2026-10-01 -- FIXED the same day (lane A)
+
+**In short:** a signal whose default action ends the process (`SIGTERM`,
+`SIGHUP`), sent to a process with no handler trampoline while it had the
+signal *blocked*, ended it on the spot. A blocked signal must wait, pending,
+until it is unblocked. The blocked check was there for the stop signals and
+missing for the fatal ones.
+
+**Where:** `kernel/src/proc/signal.rs`, `classify_post_info`.
+
+**Fixed:** a blocked fatal signal is kept pending; the syscall-return
+checkpoint takes the default action once it is unblocked. Tested in
+`test_ignored_set`.
+
+### A-SPAWNED-CHILD-LED-ITS-OWN-SESSION -- 2026-10-01 -- FIXED the same day (lane A)
+
+**In short:** a program started with `posix_spawn` (or any spawn call) led a
+process group and a session of its own, where POSIX puts it in its parent's.
+So it had no controlling terminal, a `^C` typed at the terminal -- sent to
+the foreground group -- did not reach it, and it started with nothing
+blocked, not its parent's mask. `fork` was right; only spawn was wrong.
+
+**Where:** `kernel/src/proc/spawn.rs` (`start_job_and_signals`), and
+`pcb::create`, which makes every process a leader -- right only for one the
+kernel starts.
+
+**Fixed:** a spawned child with a parent starts in the parent's group and
+session with its blocked mask and ignored set (`pcb::inherit_job`,
+`signal::start_spawned`), and the `posix_spawn` attributes
+(`SpawnEx2Args`' six new fields) change them before it runs. Nothing in the
+tree relied on the old behaviour: `login_tty` calls `setsid` itself. Tests:
+`spawn`'s `test_spawn_job_and_signals` and `test_ex2_attrs`, `pcb`'s
+`test_inherit_job`, the ring-3 probes `0x26`-`0x30` of
+`build_spawn_ex2_abi_test_elf`.
+
+### A-REAPED-PROCESS-KEPT-ITS-FILE-MAPPINGS-AND-TERMINAL -- 2026-10-01 -- FIXED the same day (lane A)
+
+**In short:** a file mapped into a process (`mmap` of a file -- a
+dynamically linked program maps every library it loads) holds a reference on
+the open file. When the process's parent collected it with `wait`, those
+references were never dropped, so the file's last close never came: an
+unlinked file's space was not freed, and a `flock` held through such a file
+was never released. The session's claim on its terminal was likewise kept
+when the session ended by `wait`. Only the other way a process ends,
+`pcb::destroy`, released either.
+
+**Where:** `kernel/src/proc/pcb.rs`, `try_reap`.
+
+**Fixed:** `destroy`, `try_reap` and the new `release_autoreaped` end a
+process through one function, `finish_process`.
+
+**Still different from Linux:** Linux drops a process's mappings when it
+exits (`exit_mm`), not when it is reaped; here a zombie keeps its file
+references until its parent waits.
+
+### A-KILLED-THREAD-ON-ANOTHER-CPU-OUTLIVED-ITS-PAGE-TABLES -- 2026-10-01 -- FIXED the same day (lane A)
+
+**In short:** on a machine with more than one CPU, a thread killed while
+another CPU was running it (a signal that ends its process, a crash in a
+sibling) is only *marked* dead: that CPU runs it on until its next switch.
+The process could be reaped -- its page tables freed -- in that window. And
+the switch itself did not leave those tables: it compared the two tasks'
+recorded address spaces, the dead thread's record had been cleared to
+"kernel", and a switch to a kernel task looked like no change. The CPU then
+ran kernel tasks on freed page tables until it next ran a user program. The
+boot test runs one CPU, so it could not see this.
+
+**Where:** `kernel/src/sched/mod.rs` (both switch paths), `kernel/src/proc/pcb.rs`
+(the address-space teardown), `kernel/src/proc/thread.rs` (`on_thread_exit`).
+
+**Fixed:** a switch compares against the live CR3 (`load_address_space`); a
+thread killed while on a CPU is recorded (`Process::killed_on_cpu`), and its
+process's address space is freed only once `sched::task_is_on_cpu` says it is
+off -- deferred if need be, and drained by the boot thread's idle loop. Tests:
+`sched`'s `test_task_is_on_cpu` and `test_load_address_space_uses_live_cr3`,
+`pcb`'s `test_deferred_address_space`.
+
+### A-KILLED-THREAD-RUNS-ON-UNTIL-ITS-CPU-SWITCHES -- 2026-10-01 -- OPEN (lane A)
+
+**In short:** the safe half of the entry above is done; the semantic half is
+not. A thread killed while another CPU runs it goes on running its program,
+in user mode, for up to one timer tick after its process has been declared
+dead -- its handles closed, its parent told. It can still write to memory it
+shares with other processes in that tick. Linux has each killed thread end
+itself (it sees `SIGKILL` at its next return to the kernel, or an IPI makes
+it look), so nothing of a dead process runs.
+
+**Where:** `kernel/src/sched/mod.rs::kill_task` (marks a running task `Dead`
+and leaves it running), `kernel/src/proc/thread.rs::kill_process_threads`
+(runs each victim's exit path from the killer's context).
+
+**The fix:** interrupt the CPU running a killed thread (a reschedule IPI,
+which does not exist yet) and run its exit path on that CPU, in that thread,
+before the process is published as dead -- after which the address-space
+deferral above is no longer needed.
 
 ## Lane B: new entries
 

@@ -89,23 +89,23 @@ use super::number::{
     SYS_SERVICE_ACCEPT_TIMEOUT, SYS_SERVICE_CONNECT, SYS_SERVICE_REGISTER, SYS_SERVICE_TRY_ACCEPT,
     SYS_SERVICE_UNREGISTER, SYS_SET_EXCEPTION_HANDLER, SYS_SET_FS_BASE, SYS_SHM_CLOSE,
     SYS_SHM_CREATE, SYS_SHM_MAP, SYS_SHM_MAP_AT, SYS_SHM_SIZE, SYS_SHM_UNMAP, SYS_SIGNAL_ALTSTACK,
-    SYS_SIGNAL_MASK, SYS_SIGNAL_PENDING, SYS_SIGNAL_QUEUE, SYS_SIGNAL_REGISTER, SYS_SIGNAL_SEND,
-    SYS_SIGNAL_STOP_SELF, SYS_SIGNAL_TGKILL, SYS_SLEEP, SYS_SOCKETPAIR_CLOSE,
-    SYS_SOCKETPAIR_CREATE, SYS_SOCKETPAIR_POLL, SYS_SOCKETPAIR_READABLE_BYTES, SYS_SOCKETPAIR_RECV,
-    SYS_SOCKETPAIR_RECV_TIMEOUT, SYS_SOCKETPAIR_SEND, SYS_SOCKETPAIR_SEND_TIMEOUT,
-    SYS_SOCKETPAIR_SHUTDOWN, SYS_SOCKETPAIR_TRY_RECV, SYS_SOCKETPAIR_TRY_SEND, SYS_SYSCTL_GET,
-    SYS_SYSCTL_SET, SYS_SYSTEM_SET_PROFILE, SYS_TASK_ID, SYS_TCP_ABORT, SYS_TCP_ACCEPT,
-    SYS_TCP_BIND, SYS_TCP_CLOSE, SYS_TCP_CLOSE_LISTENER, SYS_TCP_CONNECT, SYS_TCP_INFO,
-    SYS_TCP_LAST_ERROR, SYS_TCP_LIST, SYS_TCP_LISTENER_LIST, SYS_TCP_LISTENER_READY,
-    SYS_TCP_LOCAL_PORT, SYS_TCP_PEER_ADDR, SYS_TCP_POLL_STATUS, SYS_TCP_RECV, SYS_TCP_SEND,
-    SYS_TCP_SET_KEEPALIVE, SYS_TCP_SET_KEEPALIVE_PARAMS, SYS_TCP_SET_NODELAY, SYS_TCP_SHUTDOWN,
-    SYS_THREAD_CREATE, SYS_THREAD_EXIT, SYS_THREAD_JOIN, SYS_THREAD_JOIN_TIMEOUT,
-    SYS_THREAD_RESUME, SYS_THREAD_SET_PRIORITY, SYS_THREAD_SUSPEND, SYS_TIMER_CANCEL,
-    SYS_TIMER_CREATE, SYS_TTY_ACQUIRE_CTTY, SYS_TTY_FLUSH, SYS_TTY_GET_PGRP, SYS_TTY_GET_TERMIOS,
-    SYS_TTY_READ, SYS_TTY_RELEASE_CTTY, SYS_TTY_SET_PGRP, SYS_TTY_SET_TERMIOS, SYS_UDP_BIND,
-    SYS_UDP_CLOSE, SYS_UDP_CONNECT, SYS_UDP_LOCAL_PORT, SYS_UDP_MCAST_JOIN, SYS_UDP_MCAST_LEAVE,
-    SYS_UDP_RECV, SYS_UDP_RX_FRONT_BYTES, SYS_UDP_RX_READY, SYS_UDP_SEND, SYS_WAIT_MULTIPLE,
-    SYS_YIELD,
+    SYS_SIGNAL_GET_IGNORED, SYS_SIGNAL_MASK, SYS_SIGNAL_PENDING, SYS_SIGNAL_QUEUE,
+    SYS_SIGNAL_REGISTER, SYS_SIGNAL_SEND, SYS_SIGNAL_SET_IGNORED, SYS_SIGNAL_STOP_SELF,
+    SYS_SIGNAL_TGKILL, SYS_SLEEP, SYS_SOCKETPAIR_CLOSE, SYS_SOCKETPAIR_CREATE, SYS_SOCKETPAIR_POLL,
+    SYS_SOCKETPAIR_READABLE_BYTES, SYS_SOCKETPAIR_RECV, SYS_SOCKETPAIR_RECV_TIMEOUT,
+    SYS_SOCKETPAIR_SEND, SYS_SOCKETPAIR_SEND_TIMEOUT, SYS_SOCKETPAIR_SHUTDOWN,
+    SYS_SOCKETPAIR_TRY_RECV, SYS_SOCKETPAIR_TRY_SEND, SYS_SYSCTL_GET, SYS_SYSCTL_SET,
+    SYS_SYSTEM_SET_PROFILE, SYS_TASK_ID, SYS_TCP_ABORT, SYS_TCP_ACCEPT, SYS_TCP_BIND,
+    SYS_TCP_CLOSE, SYS_TCP_CLOSE_LISTENER, SYS_TCP_CONNECT, SYS_TCP_INFO, SYS_TCP_LAST_ERROR,
+    SYS_TCP_LIST, SYS_TCP_LISTENER_LIST, SYS_TCP_LISTENER_READY, SYS_TCP_LOCAL_PORT,
+    SYS_TCP_PEER_ADDR, SYS_TCP_POLL_STATUS, SYS_TCP_RECV, SYS_TCP_SEND, SYS_TCP_SET_KEEPALIVE,
+    SYS_TCP_SET_KEEPALIVE_PARAMS, SYS_TCP_SET_NODELAY, SYS_TCP_SHUTDOWN, SYS_THREAD_CREATE,
+    SYS_THREAD_EXIT, SYS_THREAD_JOIN, SYS_THREAD_JOIN_TIMEOUT, SYS_THREAD_RESUME,
+    SYS_THREAD_SET_PRIORITY, SYS_THREAD_SUSPEND, SYS_TIMER_CANCEL, SYS_TIMER_CREATE,
+    SYS_TTY_ACQUIRE_CTTY, SYS_TTY_FLUSH, SYS_TTY_GET_PGRP, SYS_TTY_GET_TERMIOS, SYS_TTY_READ,
+    SYS_TTY_RELEASE_CTTY, SYS_TTY_SET_PGRP, SYS_TTY_SET_TERMIOS, SYS_UDP_BIND, SYS_UDP_CLOSE,
+    SYS_UDP_CONNECT, SYS_UDP_LOCAL_PORT, SYS_UDP_MCAST_JOIN, SYS_UDP_MCAST_LEAVE, SYS_UDP_RECV,
+    SYS_UDP_RX_FRONT_BYTES, SYS_UDP_RX_READY, SYS_UDP_SEND, SYS_WAIT_MULTIPLE, SYS_YIELD,
 };
 use crate::drm::syscall as drm_handlers;
 
@@ -568,6 +568,8 @@ const fn build_v1_table() -> SyscallTable {
     handlers[SYS_SIGNAL_MASK as usize] = Some(handlers::sys_signal_mask);
     handlers[SYS_SIGNAL_PENDING as usize] = Some(handlers::sys_signal_pending);
     handlers[SYS_SIGNAL_STOP_SELF as usize] = Some(handlers::sys_signal_stop_self);
+    handlers[SYS_SIGNAL_SET_IGNORED as usize] = Some(handlers::sys_signal_set_ignored);
+    handlers[SYS_SIGNAL_GET_IGNORED as usize] = Some(handlers::sys_signal_get_ignored);
 
     // Thread management (510–519).
     handlers[SYS_THREAD_CREATE as usize] = Some(handlers::sys_thread_create);
@@ -1027,6 +1029,7 @@ pub fn self_test() -> KernelResult<()> {
     test_process_cwd_umask_registered()?;
     test_thread_join_timeout_registered()?;
     test_dispatch_signal_siginfo_frame()?;
+    test_dispatch_signal_ignored()?;
     test_dispatch_priority_doors()?;
     test_dispatch_exec_close()?;
     test_dispatch_tioc_and_watch_records()?;
@@ -2589,6 +2592,102 @@ fn test_thread_join_timeout_registered() -> KernelResult<()> {
     }
     serial_println!("[syscall]   SYS_THREAD_JOIN_TIMEOUT (1085) is wired: OK");
     Ok(())
+}
+
+/// `SYS_SIGNAL_SET_IGNORED` (1098) and `SYS_SIGNAL_GET_IGNORED` (1099), made
+/// as a process makes them (`thread::self_test_as_process`), and what the
+/// set they keep does to a send (`SYS_SIGNAL_SEND`):
+///
+/// - the set is recorded, with `SA_NOCLDWAIT` from the flag;
+/// - `SIGKILL` or `SIGSTOP` in it, an unknown flag, or an out-pointer it
+///   cannot write is refused, and leaves the set as it was;
+/// - `GET` needs a pointer, and an unwritable one is `InvalidAddress` (from a
+///   self-test every pointer is one: the task keeps the kernel's address
+///   space);
+/// - an ignored `SIGHUP` sent to a process with no handler trampoline -- a
+///   program `nohup` started, before its libc runs -- is discarded, where it
+///   used to end the process.
+fn test_dispatch_signal_ignored() -> KernelResult<()> {
+    use super::number::SIGNAL_IGNORED_NOCLDWAIT;
+    use crate::proc::pcb;
+    use crate::proc::signal;
+    use crate::proc::thread::self_test_as_process;
+
+    let pid = pcb::create("ignored-door", 0);
+    let args = |arg0: u64, arg1: u64, arg2: u64| SyscallArgs {
+        arg0,
+        arg1,
+        arg2,
+        arg3: 0,
+        arg4: 0,
+        arg5: 0,
+    };
+    let code = |e: KernelError| i64::from(e.code());
+    let as_pid = |nr: u64, a: SyscallArgs| self_test_as_process(pid, || dispatch(nr, &a).value);
+    let sighup: u64 = 1;
+    let sigchld: u64 = 1 << 16;
+    let mut out = 0u64;
+    let out_ptr = core::ptr::from_mut(&mut out) as u64;
+
+    let result = (|| -> Result<(), &'static str> {
+        if as_pid(
+            SYS_SIGNAL_SET_IGNORED,
+            args(sighup | sigchld, 0, SIGNAL_IGNORED_NOCLDWAIT),
+        ) != 0
+            || signal::ignored(pid) != sighup | sigchld
+            || !signal::nocldwait(pid)
+        {
+            return Err("the set and SA_NOCLDWAIT were not recorded");
+        }
+        for (a, why) in [
+            (args(1 << 8, 0, 0), "SIGKILL in the set"),
+            (args(1 << 18, 0, 0), "SIGSTOP in the set"),
+            (args(0, 0, 2), "an unknown flag"),
+        ] {
+            if as_pid(SYS_SIGNAL_SET_IGNORED, a) != code(KernelError::InvalidArgument) {
+                serial_println!("[syscall]   FAIL: SYS_SIGNAL_SET_IGNORED accepted {}", why);
+                return Err("a refusal");
+            }
+        }
+        if as_pid(SYS_SIGNAL_SET_IGNORED, args(0, out_ptr, 0)) != code(KernelError::InvalidAddress)
+        {
+            return Err("an unwritable out-pointer was not InvalidAddress");
+        }
+        if signal::ignored(pid) != sighup | sigchld || !signal::nocldwait(pid) {
+            return Err("a refused call changed the set");
+        }
+        if as_pid(SYS_SIGNAL_GET_IGNORED, args(0, 0, 0)) != code(KernelError::InvalidArgument)
+            || as_pid(SYS_SIGNAL_GET_IGNORED, args(out_ptr, 0, 0))
+                != code(KernelError::InvalidAddress)
+        {
+            return Err("SYS_SIGNAL_GET_IGNORED's pointer checks");
+        }
+
+        // The nohup case, sent as another process sends it: a kernel task
+        // may signal anyone.
+        let send = dispatch(SYS_SIGNAL_SEND, &args(pid, 1, 0)).value;
+        if send != 0 || pcb::state(pid).is_none() || pcb::exit_code(pid).is_some() {
+            return Err("an ignored SIGHUP to a process with no trampoline ended it");
+        }
+        if as_pid(SYS_SIGNAL_SET_IGNORED, args(0, 0, 0)) != 0 || signal::ignored(pid) != 0 {
+            return Err("clearing the set");
+        }
+        Ok(())
+    })();
+    signal::remove(pid);
+    pcb::destroy(pid);
+    match result {
+        Ok(()) => {
+            serial_println!(
+                "[syscall]   SYS_SIGNAL_SET_IGNORED / GET_IGNORED (1098/1099), and an ignored send: OK"
+            );
+            Ok(())
+        }
+        Err(what) => {
+            serial_println!("[syscall]   FAIL: ignored set: {}", what);
+            Err(KernelError::InternalError)
+        }
+    }
 }
 
 /// The native siginfo frame and the sends that fill it
@@ -4777,6 +4876,28 @@ fn test_dispatch_tty_job_control() -> KernelResult<()> {
     if blocked_write != TtyAccessDecision::Allow {
         return fail(
             "a background write with SIGTTOU blocked should be allowed",
+            &cleanup,
+        );
+    }
+
+    // (3b) Ignore them instead, as bash ignores SIGTTOU, through the kernel's
+    //      record a native libc reports (`SYS_SIGNAL_SET_IGNORED`) -- given a
+    //      trampoline, so the job is a native process with its own handler
+    //      table, the case the kernel could not see until 2026-10-01. Same
+    //      answers as blocked: POSIX treats an ignored signal as discarded.
+    signal::register_trampoline(job, 0x4000);
+    let ignored = signal::set_ignored(job, ttin_bit | ttou_bit, false);
+    let ignored_read = tty_job_control_decide(job, SIGTTIN);
+    let ignored_write = tty_job_control_decide(job, SIGTTOU);
+    // An empty set names neither SIGKILL nor SIGSTOP, the only refusal.
+    let _ = signal::set_ignored(job, 0, false);
+    signal::register_trampoline(job, 0);
+    if ignored.is_err()
+        || ignored_read != TtyAccessDecision::Fail(KernelError::IoError)
+        || ignored_write != TtyAccessDecision::Allow
+    {
+        return fail(
+            "with SIGTTIN/SIGTTOU ignored, a background read should be EIO and a write allowed",
             &cleanup,
         );
     }

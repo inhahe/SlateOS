@@ -10378,7 +10378,8 @@ fn print_security_posture() {
 ///
 /// 1. **Reap dead tasks** — free kernel stacks for tasks that have
 ///    exited.  Without this, each dead task leaks 32 KiB of stack
-///    memory permanently.
+///    memory permanently.  With it, free any process address space
+///    whose teardown waited for a killed thread to leave its CPU.
 /// 2. **Refill the pre-zeroed frame pool** — zero a small batch of
 ///    frames in the background so page faults can grab them instantly.
 ///    This moves the 16 KiB memset cost from the page fault hot path
@@ -10429,6 +10430,10 @@ fn idle_loop() -> ! {
         // even when nothing is dead, so throttling reduces contention.
         if tick_counter.is_multiple_of(100) {
             sched::reap_dead_tasks();
+            // And the address spaces of processes whose teardown waited for a
+            // killed thread to leave its CPU (`pcb::free_deferred_address_spaces`):
+            // here, so the wait is bounded even when nothing else exits.
+            proc::pcb::free_deferred_address_spaces();
         }
 
         // Refill the pre-zeroed frame pool.  Each call zeros up to

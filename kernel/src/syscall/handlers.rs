@@ -3767,7 +3767,12 @@ pub fn sys_process_spawn_ex(args: &SyscallArgs) -> SyscallResult {
         Err(e) => return SyscallResult::err(e),
     };
 
-    spawn_ex_common(&spawn_args, CapInherit::All, None)
+    spawn_ex_common(
+        &spawn_args,
+        CapInherit::All,
+        None,
+        crate::proc::spawn::SpawnAttrs::default(),
+    )
 }
 
 /// The body shared by `SYS_PROCESS_SPAWN_EX` and `SYS_PROCESS_SPAWN_EX2`.
@@ -3789,8 +3794,9 @@ fn spawn_ex_common(
     spawn_args: &crate::proc::spawn::SpawnExArgs,
     cap_inherit: crate::proc::spawn::CapInherit<'_>,
     cwd: Option<&[u8]>,
+    attrs: crate::proc::spawn::SpawnAttrs,
 ) -> SyscallResult {
-    use crate::proc::spawn::{FdMapEntry, SpawnOptions, spawn_process_with_caps};
+    use crate::proc::spawn::{FdMapEntry, SpawnOptions, spawn_process_with_attrs};
 
     let elf_len = spawn_args.elf_len as usize;
     let name_len = if spawn_args.name_ptr == 0 {
@@ -3903,7 +3909,7 @@ fn spawn_ex_common(
         options = options.cwd(dir);
     }
 
-    match spawn_process_with_caps(&elf_data, &options, cap_inherit) {
+    match spawn_process_with_attrs(&elf_data, &options, cap_inherit, attrs) {
         Ok(result) =>
         {
             #[allow(clippy::cast_possible_wrap)]
@@ -4056,8 +4062,18 @@ pub fn sys_process_spawn_ex2(args: &SyscallArgs) -> SyscallResult {
         }
     };
 
+    // The child's process group, session and signals (`posix_spawnattr_t`),
+    // judged here with the rest of the struct, before any image is read: a
+    // field this kernel cannot honour is refused, never ignored.
+    let attrs = match crate::proc::spawn::ex2_attrs(&ex2) {
+        Ok(a) => a,
+        Err(e) => return SyscallResult::err(e),
+    };
+
     match ex2.cap_mode {
-        SPAWN_CAP_MODE_INHERIT_ALL => spawn_ex_common(&spawn_args, CapInherit::All, cwd.as_deref()),
+        SPAWN_CAP_MODE_INHERIT_ALL => {
+            spawn_ex_common(&spawn_args, CapInherit::All, cwd.as_deref(), attrs)
+        }
         SPAWN_CAP_MODE_SUBSET => {
             // A null pointer with a non-zero count is a caller bug, and is
             // refused rather than read as "no capabilities".
@@ -4112,7 +4128,12 @@ pub fn sys_process_spawn_ex2(args: &SyscallArgs) -> SyscallResult {
                 ));
             }
 
-            spawn_ex_common(&spawn_args, CapInherit::Subset(&requested), cwd.as_deref())
+            spawn_ex_common(
+                &spawn_args,
+                CapInherit::Subset(&requested),
+                cwd.as_deref(),
+                attrs,
+            )
         }
         // Not clamped and not defaulted — see the struct's `cap_mode` doc.
         _ => SyscallResult::err(KernelError::InvalidArgument),
@@ -6004,47 +6025,36 @@ pub enum TtyCtlOutcome {
 /// see the signal, stopping it is not an option and POSIX substitutes an
 /// error (for reads) or lets the access through (for writes).
 ///
-/// Three sources are consulted, in order of how well the kernel can see them:
+/// Three sources are consulted, all of them the kernel's own:
 ///
-/// 1. **Blocked mask** — always authoritative; the kernel owns it for both
-///    ABIs.  This case is not merely a nicety: a blocked `SIGTTIN` stays
-///    pending and undeliverable, so posting it and returning `ERESTARTSYS`
-///    would restart the read, re-run this check, post again, and spin
-///    forever inside the kernel.
-/// 2. **No signal trampoline** — the process has no userspace dispatcher, so
+/// 1. **Blocked mask** — the kernel owns it for both ABIs.  This case is not
+///    merely a nicety: a blocked `SIGTTIN` stays pending and undeliverable,
+///    so posting it and returning `ERESTARTSYS` would restart the read,
+///    re-run this check, post again, and spin forever inside the kernel.
+/// 2. **Ignored set** — `SIG_IGN`, which both ABIs record in the kernel
+///    (`proc::signal::set_ignored`, the Linux `rt_sigaction`).  Until
+///    2026-10-01 only a Linux-ABI process's `SIG_IGN` was visible here, so a
+///    native shell that ignored `SIGTTOU` (as bash does) was signalled where
+///    POSIX lets it through, and a native read with `SIGTTIN` ignored ended
+///    in `EINTR` instead of `EIO` (`TD-KERNEL-NATIVE-ABI-SIG_IGN-IS-INVISIBLE-
+///    TO-THE-KERNEL`).
+/// 3. **No signal trampoline** — the process has no userspace dispatcher, so
 ///    the kernel's own [`default_action`] table *is* its disposition.  For
 ///    `SIGTTIN`/`SIGTTOU` that is `Stop`, so this reports "not ignored"; the
 ///    branch exists so the rule is stated rather than assumed.
-/// 3. **Linux `SIG_IGN`** — only visible for a Linux-ABI process, whose
-///    `sigaction` table the kernel stores.
-///
-/// **A native-ABI process that sets `SIGTTIN` to `SIG_IGN` is not detected**,
-/// because a native process's dispositions live in userspace (see
-/// `SYS_SIGNAL_STOP_SELF`'s doc for why that is deliberate).  Such a caller
-/// gets `EINTR` from the interrupted read where POSIX specifies `EIO`: the
-/// kernel posts `SIGTTIN`, the userspace dispatcher resolves it to `SIG_IGN`
-/// and does nothing, and the restart sentinel becomes `EINTR` because a
-/// handler frame was built.  It does not hang, and it does not mis-stop —
-/// the failure is confined to the errno.  Fixing it properly means giving
-/// the kernel a view of native dispositions, which is a larger ABI decision;
-/// tracked in `todo.txt`.
 ///
 /// [`default_action`]: crate::proc::signal::default_action
 #[must_use]
 pub fn signal_ignored_or_blocked(pid: crate::proc::pcb::ProcessId, sig: u32) -> bool {
     use crate::proc::signal;
 
-    // 1. Blocked.
-    if signal::is_blocked(pid, sig) {
+    // 1. Blocked; 2. ignored.
+    if signal::is_blocked(pid, sig) || signal::is_ignored(pid, sig) {
         return true;
     }
-    // 2. No trampoline: the kernel's default-action table is the disposition.
-    if signal::trampoline(pid).is_none() {
-        return matches!(signal::default_action(sig), signal::DefaultAction::Ignore);
-    }
-    // 3. Explicit SIG_IGN, visible only for the Linux ABI.
-    crate::proc::pcb::get_abi_mode(pid) == Some(crate::proc::pcb::AbiMode::Linux)
-        && crate::syscall::linux::linux_sigaction_is_ignore(pid, sig)
+    // 3. No trampoline: the kernel's default-action table is the disposition.
+    signal::trampoline(pid).is_none()
+        && matches!(signal::default_action(sig), signal::DefaultAction::Ignore)
 }
 
 /// What POSIX job control says should happen to a terminal access by `pid`.
@@ -8521,6 +8531,66 @@ pub fn sys_signal_mask(args: &super::dispatch::SyscallArgs) -> super::dispatch::
         }
     }
     SyscallResult::ok(0)
+}
+
+/// `SYS_SIGNAL_SET_IGNORED` (1098) — report the calling process's ignored set
+/// and `SIGCHLD`'s `SA_NOCLDWAIT` ([`crate::proc::signal::set_ignored`]). See
+/// [`SYS_SIGNAL_SET_IGNORED`](super::number::SYS_SIGNAL_SET_IGNORED).
+///
+/// Everything that can refuse is checked before anything changes: a call
+/// that fails leaves the set as it was, so libc can report the failure
+/// without a disposition it no longer knows the kernel's view of.
+pub fn sys_signal_set_ignored(
+    args: &super::dispatch::SyscallArgs,
+) -> super::dispatch::SyscallResult {
+    use super::dispatch::SyscallResult;
+    use super::number::SIGNAL_IGNORED_NOCLDWAIT;
+    let pid = match caller_process_or_err() {
+        Ok(p) => p,
+        Err(e) => return SyscallResult::err(e),
+    };
+    if args.arg2 & !SIGNAL_IGNORED_NOCLDWAIT != 0 {
+        return SyscallResult::err(KernelError::InvalidArgument);
+    }
+    if args.arg1 != 0 {
+        if let Err(e) = crate::mm::user::validate_user_write(args.arg1, core::mem::size_of::<u64>())
+        {
+            return SyscallResult::err(e);
+        }
+    }
+    let nocldwait = args.arg2 & SIGNAL_IGNORED_NOCLDWAIT != 0;
+    let old = match crate::proc::signal::set_ignored(pid, args.arg0, nocldwait) {
+        Ok(old) => old,
+        Err(e) => return SyscallResult::err(e),
+    };
+    if args.arg1 != 0 {
+        // Validated above; this store re-checks at the moment it happens,
+        // which is the check that guards it.
+        if let Err(e) = crate::mm::user::write_user_value::<u64>(args.arg1, old) {
+            return SyscallResult::err(e);
+        }
+    }
+    SyscallResult::ok(0)
+}
+
+/// `SYS_SIGNAL_GET_IGNORED` (1099) — read the calling process's ignored set.
+/// See [`SYS_SIGNAL_GET_IGNORED`](super::number::SYS_SIGNAL_GET_IGNORED).
+pub fn sys_signal_get_ignored(
+    args: &super::dispatch::SyscallArgs,
+) -> super::dispatch::SyscallResult {
+    use super::dispatch::SyscallResult;
+    let pid = match caller_process_or_err() {
+        Ok(p) => p,
+        Err(e) => return SyscallResult::err(e),
+    };
+    if args.arg0 == 0 {
+        return SyscallResult::err(KernelError::InvalidArgument);
+    }
+    let ignored = crate::proc::signal::ignored(pid);
+    match crate::mm::user::write_user_value::<u64>(args.arg0, ignored) {
+        Ok(()) => SyscallResult::ok(0),
+        Err(e) => SyscallResult::err(e),
+    }
 }
 
 /// `SYS_SIGNAL_PENDING` — query the calling process's pending set.

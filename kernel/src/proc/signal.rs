@@ -27,14 +27,23 @@
 //!
 //! ## What the kernel does and does not know
 //!
-//! The kernel tracks only three things per process: the pending set, the
-//! blocked mask, and the trampoline address. It does **not** track
-//! per-signal dispositions — userspace owns that table and decides
-//! whether to terminate, ignore, or invoke a handler. The one exception
-//! is the kernel-side *default-action* table, used solely to decide what
-//! happens when a signal is posted to a process that has **no trampoline
-//! registered** (a non-POSIX process, or one that has not yet run its
-//! libc init): terminating signals kill it, everything else is dropped.
+//! The kernel tracks the pending set, the blocked mask, the trampoline
+//! address -- and, of the per-signal dispositions, only which signals are
+//! **ignored** (and `SIGCHLD`'s `SA_NOCLDWAIT`). The rest of the handler
+//! table is userspace's: the native libc keeps it and decides there whether
+//! to run a handler or take the default action. The ignored set is the
+//! exception because it is the part of a disposition that must outlive the
+//! program that set it -- `exec` keeps it, `fork` and spawn pass it on, and a
+//! new image's libc table starts empty -- and because the kernel has to act
+//! on it: an ignored signal is discarded when sent, and a parent ignoring
+//! `SIGCHLD` leaves no zombies (`pcb::ExitNotice`). Userspace reports it
+//! (`SYS_SIGNAL_SET_IGNORED`, the Linux shim's `rt_sigaction`); see
+//! `SignalState::ignored`.
+//!
+//! The kernel-side *default-action* table decides what happens when a
+//! signal is posted to a process that has **no trampoline registered** (a
+//! non-POSIX process, or one that has not yet run its libc init):
+//! terminating signals kill it, everything else is dropped.
 //! `SIGKILL` is always fatal and can never be delivered to a handler.
 //!
 //! ## Concurrency
@@ -69,6 +78,11 @@ pub const SIGHUP: u32 = 1;
 
 /// `SIGKILL` — always fatal, never catchable. Standard Linux number.
 pub const SIGKILL: u32 = 9;
+
+/// `SIGCHLD` — a child stopped, continued or exited. Default action ignore;
+/// a parent that sets it to `SIG_IGN` (or gives it `SA_NOCLDWAIT`) leaves no
+/// zombies (`pcb::ExitNotice`). Standard Linux number.
+pub const SIGCHLD: u32 = 17;
 
 /// `SIGCONT` — continue (resume) a stopped process. Never catchable as a
 /// stop-override (always resumes), but a handler may also run. Standard
@@ -465,6 +479,25 @@ struct SignalState {
     /// handlers that never asked, never using it leaves the feature
     /// unimplemented.
     onstack_mask: u64,
+    /// Ignored set: bit `n-1` set means the process's disposition for signal
+    /// `n` is `SIG_IGN`. Never holds `SIGKILL` or `SIGSTOP`.
+    ///
+    /// The one part of a disposition the kernel keeps, for both ABIs: the
+    /// native libc reports it (`SYS_SIGNAL_SET_IGNORED`), the Linux shim
+    /// records it at each `rt_sigaction` ([`record_disposition`]). It has to
+    /// be the kernel's, because it is the part that outlives the program that
+    /// set it -- `exec` keeps it and `fork` and spawn pass it on, where a
+    /// libc's table starts empty -- and because the kernel acts on it: an
+    /// ignored signal is discarded when sent ([`classify_post_info`]),
+    /// whether or not anything in the target could have dropped it, and a
+    /// parent that ignores `SIGCHLD` leaves no zombies (`pcb::ExitNotice`).
+    ignored: u64,
+    /// `SA_NOCLDWAIT` on `SIGCHLD`: children are reaped at exit, though
+    /// `SIGCHLD` is still sent. Recorded for the same two reasons as
+    /// [`Self::ignored`] (`SYS_SIGNAL_SET_IGNORED`'s flag, the Linux
+    /// `rt_sigaction`), but unlike it cleared at `exec`, with the rest of a
+    /// handler's flags.
+    nocldwait: bool,
 }
 
 impl Default for SignalState {
@@ -479,6 +512,8 @@ impl Default for SignalState {
             altstack_sp: 0,
             altstack_size: 0,
             onstack_mask: 0,
+            ignored: 0,
+            nocldwait: false,
         }
     }
 }
@@ -814,9 +849,19 @@ pub fn remove(pid: ProcessId) {
 /// for that (`requests/d-a-exec-must-keep-the-signal-mask.md`). Pending
 /// signals are delivered once the new image registers its trampoline and
 /// unblocks them.
+///
+/// **Kept, too:** the ignored set. POSIX: "Signals set to the default action
+/// (SIG_DFL) in the calling process image shall be set to the default action
+/// in the new process image ... Signals set to be ignored (SIG_IGN) by the
+/// calling process image shall be set to be ignored by the new process
+/// image." It is how `nohup cmd` keeps `cmd` alive when its terminal closes,
+/// and it is why the set is the kernel's (see [`SignalState::ignored`]).
+/// **Cleared:** `SA_NOCLDWAIT`, which is a handler's flag, and goes where the
+/// new image's handler table does.
 pub fn on_exec(pid: ProcessId) {
     with_states(|states| {
         if let Some(state) = states.get_mut(&pid) {
+            state.nocldwait = false;
             state.trampoline = 0;
             // The new image registers its own trampoline, and says then which
             // frame it reads.
@@ -851,17 +896,7 @@ pub fn on_exec(pid: ProcessId) {
 /// there should be none, but this is idempotent).
 pub fn inherit_for_fork(parent: ProcessId, child: ProcessId) {
     with_states(|states| {
-        let (blocked, trampoline, extended_frame, alt_sp, alt_size, onstack) =
-            states.get(&parent).map_or((0, 0, false, 0, 0, 0), |s| {
-                (
-                    s.blocked,
-                    s.trampoline,
-                    s.extended_frame,
-                    s.altstack_sp,
-                    s.altstack_size,
-                    s.onstack_mask,
-                )
-            });
+        let inherited = states.get(&parent).copied().unwrap_or_default();
         // If the child somehow already had pending signals recorded, drop
         // them from the global counter before overwriting.
         if let Some(existing) = states.get(&child) {
@@ -874,10 +909,10 @@ pub fn inherit_for_fork(parent: ProcessId, child: ProcessId) {
             child,
             SignalState {
                 pending: 0,
-                blocked,
-                trampoline,
+                blocked: inherited.blocked,
+                trampoline: inherited.trampoline,
                 // The trampoline's frame goes with it.
-                extended_frame,
+                extended_frame: inherited.extended_frame,
                 // POSIX: the child starts with no pending signals, so no
                 // per-signal siginfo records carry over.
                 infos: [None; NSIG as usize],
@@ -889,12 +924,208 @@ pub fn inherit_for_fork(parent: ProcessId, child: ProcessId) {
                 // user address, exactly as the trampoline does above. (Not
                 // preserved across execve -- see the exec path, which clears
                 // them.)
-                altstack_sp: alt_sp,
-                altstack_size: alt_size,
-                onstack_mask: onstack,
+                altstack_sp: inherited.altstack_sp,
+                altstack_size: inherited.altstack_size,
+                onstack_mask: inherited.onstack_mask,
+                // A forked child has its parent's dispositions -- its libc's
+                // table is a copy of the parent's memory -- so the kernel's
+                // part of them is copied too.
+                ignored: inherited.ignored,
+                nocldwait: inherited.nocldwait,
             },
         );
     });
+}
+
+/// Set up the signal state of a process `spawn` has just created, before its
+/// first instruction: what `posix_spawn` promises, which is what a fork and
+/// an exec would have left.
+///
+/// - **Blocked:** `sigmask` if the spawn asked for one
+///   (`POSIX_SPAWN_SETSIGMASK`), else the parent's -- POSIX: "If the
+///   POSIX_SPAWN_SETSIGMASK flag is not set ... the child process shall
+///   inherit the parent's signal mask." `SIGKILL` and `SIGSTOP` are taken out,
+///   as [`set_blocked`] does.
+/// - **Ignored:** the parent's, less `sigdefault` (`POSIX_SPAWN_SETSIGDEF`):
+///   an exec keeps ignored signals ignored, and the child is a new image.
+/// - **Everything else** starts empty, as after an exec: nothing pending, no
+///   trampoline, no alternate stack, no `SA_NOCLDWAIT`.
+///
+/// `parent` 0 is the kernel, which has nothing to inherit. Any state already
+/// recorded for `child` is replaced.
+pub fn start_spawned(parent: ProcessId, child: ProcessId, sigmask: Option<u64>, sigdefault: u64) {
+    with_states(|states| {
+        let (parent_blocked, parent_ignored) = if parent == 0 {
+            (0, 0)
+        } else {
+            states
+                .get(&parent)
+                .map_or((0, 0), |s| (s.blocked, s.ignored))
+        };
+        if let Some(existing) = states.get(&child) {
+            let n = existing.pending.count_ones() as usize;
+            if n != 0 {
+                PENDING_COUNT.fetch_sub(n, Ordering::Relaxed);
+            }
+        }
+        states.insert(
+            child,
+            SignalState {
+                blocked: sigmask.unwrap_or(parent_blocked) & !uncatchable_mask(),
+                ignored: parent_ignored & !sigdefault,
+                ..SignalState::default()
+            },
+        );
+    });
+}
+
+/// `SIGKILL` and `SIGSTOP`: never blocked, never ignored, never caught.
+#[inline]
+#[must_use]
+fn uncatchable_mask() -> u64 {
+    signal_bit(SIGKILL).unwrap_or(0) | signal_bit(SIGSTOP).unwrap_or(0)
+}
+
+// ---------------------------------------------------------------------------
+// Ignored set
+// ---------------------------------------------------------------------------
+
+/// Replace `pid`'s ignored set with `mask` -- signal `n` is bit `n - 1` -- and
+/// `SA_NOCLDWAIT` with `nocldwait`, returning the previous set.
+/// `SYS_SIGNAL_SET_IGNORED`'s core: the native libc's report of every signal
+/// whose disposition is `SIG_IGN`, whenever one moves to or from it.
+///
+/// A signal newly ignored that is pending is discarded, blocked or not --
+/// POSIX: "Setting a signal action to SIG_IGN for a signal that is pending
+/// shall cause the pending signal to be discarded, whether or not it is
+/// blocked." Only *newly* ignored ones: the call carries the whole set, so a
+/// signal already ignored before it is one whose action did not change, and a
+/// pending instance of it (it was blocked when sent) stays for whoever
+/// unblocks or changes it.
+///
+/// # Errors
+///
+/// `InvalidArgument` if `mask` names `SIGKILL` or `SIGSTOP`, which cannot be
+/// ignored; nothing is changed.
+pub fn set_ignored(pid: ProcessId, mask: u64, nocldwait: bool) -> KernelResult<u64> {
+    if mask & uncatchable_mask() != 0 {
+        return Err(KernelError::InvalidArgument);
+    }
+    let old = with_states(|states| {
+        let state = states.entry(pid).or_default();
+        let old = state.ignored;
+        state.ignored = mask;
+        state.nocldwait = nocldwait;
+        old
+    });
+    clear_pending(pid, mask & !old);
+    Ok(old)
+}
+
+/// `pid`'s ignored set: bit `n - 1` for each signal `n` whose disposition is
+/// `SIG_IGN`. 0 for a process with no signal state.
+#[must_use]
+pub fn ignored(pid: ProcessId) -> u64 {
+    with_states(|states| states.get(&pid).map_or(0, |s| s.ignored))
+}
+
+/// Whether `pid`'s disposition for `sig` is `SIG_IGN`. `false` for a number
+/// that is not a signal.
+#[must_use]
+pub fn is_ignored(pid: ProcessId, sig: u32) -> bool {
+    signal_bit(sig).is_some_and(|bit| ignored(pid) & bit != 0)
+}
+
+/// A process's pending, blocked and ignored sets, read together (bit `n - 1`
+/// for signal `n` in each).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct SignalSets {
+    /// Signals sent and not yet delivered.
+    pub pending: u64,
+    /// Signals the process blocks.
+    pub blocked: u64,
+    /// Signals whose disposition is `SIG_IGN`.
+    pub ignored: u64,
+}
+
+/// `pid`'s [`SignalSets`], under one hold of the lock so the three agree --
+/// what `/proc/<pid>/status` and `/proc/<pid>/stat` report. All empty for a
+/// process with no signal state.
+#[must_use]
+pub fn sets(pid: ProcessId) -> SignalSets {
+    with_states(|states| {
+        states
+            .get(&pid)
+            .map_or_else(SignalSets::default, |s| SignalSets {
+                pending: s.pending,
+                blocked: s.blocked,
+                ignored: s.ignored,
+            })
+    })
+}
+
+/// Whether `pid`'s `SIGCHLD` carries `SA_NOCLDWAIT`.
+#[must_use]
+pub fn nocldwait(pid: ProcessId) -> bool {
+    with_states(|states| states.get(&pid).is_some_and(|s| s.nocldwait))
+}
+
+/// Drop `pid`'s `SA_NOCLDWAIT`, as a reset of its handlers does: an exec
+/// ([`on_exec`] does this itself) or a Linux `clone(CLONE_CLEAR_SIGHAND)`.
+pub fn clear_nocldwait(pid: ProcessId) {
+    with_states(|states| {
+        if let Some(state) = states.get_mut(&pid) {
+            state.nocldwait = false;
+        }
+    });
+}
+
+/// What one signal's new disposition is, for [`record_disposition`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Disposition {
+    /// `SIG_DFL`.
+    Default,
+    /// `SIG_IGN`.
+    Ignore,
+    /// A handler.
+    Handler,
+}
+
+/// Record the kernel's part of one signal's new disposition, for a caller
+/// that changes them one at a time -- the Linux shim's `rt_sigaction`, whose
+/// table holds the rest. Linux's `do_sigaction`, in what the kernel keeps:
+///
+/// - the signal is in the ignored set exactly when the action is `SIG_IGN`;
+/// - a pending instance is discarded, blocked or not, whenever the new action
+///   ignores it -- `SIG_IGN`, or `SIG_DFL` for a signal whose default is to be
+///   ignored (`sig_handler_ignored`);
+/// - for `SIGCHLD`, `nocldwait` is the action's `SA_NOCLDWAIT`.
+///
+/// No effect for `SIGKILL`, `SIGSTOP` or a number that is not a signal: their
+/// actions cannot be changed, and the caller has refused the request.
+pub fn record_disposition(pid: ProcessId, sig: u32, action: Disposition, nocldwait: bool) {
+    let Some(bit) = signal_bit(sig) else {
+        return;
+    };
+    if bit & uncatchable_mask() != 0 {
+        return;
+    }
+    with_states(|states| {
+        let state = states.entry(pid).or_default();
+        if action == Disposition::Ignore {
+            state.ignored |= bit;
+        } else {
+            state.ignored &= !bit;
+        }
+        if sig == SIGCHLD {
+            state.nocldwait = nocldwait;
+        }
+    });
+    let discards = action == Disposition::Ignore
+        || (action == Disposition::Default && default_action(sig) == DefaultAction::Ignore);
+    if discards {
+        clear_pending(pid, bit);
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1117,10 +1348,16 @@ pub enum PostDecision {
 /// state if delivery is chosen.
 ///
 /// * `SIGKILL` is always `Terminate` (never catchable).
+/// * `SIGCONT` always continues; `SIGSTOP` always stops.
+/// * An **ignored** signal ([`set_ignored`]) is discarded -- unless it is
+///   blocked, when it stays pending as Linux keeps it (`sig_ignored`: the
+///   action may have changed by the time it is unblocked), to be discarded at
+///   delivery if it is still ignored then ([`take_deliverable_info`]).
 /// * If the process has a trampoline registered, the signal is marked
 ///   pending (`Deliver`).
 /// * Otherwise the default action decides: terminating signals →
-///   `Terminate(128 + sig)`, everything else → `Drop`.
+///   `Terminate(128 + sig)`, or kept pending if blocked; everything else →
+///   `Drop`.
 ///
 /// The caller is responsible for the actual termination (the kernel's
 /// process-kill path) when `Terminate` is returned.
@@ -1142,13 +1379,17 @@ pub fn classify_post_info(pid: ProcessId, sig: u32, info: SigInfo) -> PostDecisi
         return PostDecision::Terminate(term_code);
     }
 
+    let blocked_now = blocked(pid) & signal_bit(sig).unwrap_or(0) != 0;
+
     // SIGCONT always resumes a stopped process, regardless of whether a
-    // handler is registered, and discards any pending stop signal (mutual
+    // handler is registered -- or of whether it is ignored: POSIX continues
+    // the process either way -- and discards any pending stop signal (mutual
     // cancellation). If a handler is registered it is *also* marked pending
-    // so the handler runs once the process resumes.
+    // so the handler runs once the process resumes; an ignored SIGCONT has
+    // nothing to run.
     if sig == SIGCONT {
         clear_pending(pid, stop_signals_mask());
-        if has_trampoline(pid) {
+        if has_trampoline(pid) && !is_ignored(pid, SIGCONT) {
             set_pending_info(pid, sig, info);
         }
         return PostDecision::Continue;
@@ -1159,6 +1400,18 @@ pub fn classify_post_info(pid: ProcessId, sig: u32, info: SigInfo) -> PostDecisi
     if sig == SIGSTOP {
         clear_pending(pid, sigcont_bit());
         return PostDecision::Stop(sig);
+    }
+
+    // An ignored signal does nothing -- including the catchable stop
+    // signals, which a shell ignores so that ^Z cannot stop it -- whether the
+    // target has a handler trampoline or not. Before the kernel knew the
+    // ignored set, a target with no trampoline took the default action here:
+    // SIGHUP killed a program `nohup` had started.
+    if is_ignored(pid, sig) {
+        if blocked_now {
+            set_pending_info(pid, sig, info);
+        }
+        return PostDecision::Drop;
     }
 
     // A registered handler takes precedence for every other catchable
@@ -1172,13 +1425,25 @@ pub fn classify_post_info(pid: ProcessId, sig: u32, info: SigInfo) -> PostDecisi
 
     // No trampoline: the kernel default action decides.
     match default_action(sig) {
-        DefaultAction::Terminate => PostDecision::Terminate(term_code),
+        DefaultAction::Terminate => {
+            // A blocked signal is not acted on until it is unblocked, fatal
+            // or not: it waits, pending, and the syscall-return checkpoint
+            // takes the default action once it is deliverable
+            // (`deliver_pending_signal`). Until 2026-10-01 a blocked fatal
+            // signal killed a process with no trampoline on the spot.
+            if blocked_now {
+                set_pending_info(pid, sig, info);
+                PostDecision::Drop
+            } else {
+                PostDecision::Terminate(term_code)
+            }
+        }
         DefaultAction::Stop => {
             // Catchable stop signal with no handler. If currently blocked,
             // keep it pending: it stops the process at the syscall-return
             // checkpoint once unblocked (deliver_pending_signal). Otherwise
             // stop now, discarding any pending SIGCONT.
-            if blocked(pid) & signal_bit(sig).unwrap_or(0) != 0 {
+            if blocked_now {
                 set_pending_info(pid, sig, info);
                 PostDecision::Drop
             } else {
@@ -1202,6 +1467,11 @@ pub fn classify_post_info(pid: ProcessId, sig: u32, info: SigInfo) -> PostDecisi
 /// A signal is deliverable if it is pending and not blocked. The chosen
 /// signal's pending bit is cleared. Returns the signal number, or `None`
 /// if nothing is deliverable.
+///
+/// A pending signal that is unblocked but **ignored** is discarded here
+/// rather than delivered: it was blocked when it was sent, so it was kept
+/// ([`classify_post_info`]), and it is still ignored now that it could be
+/// delivered -- Linux's `get_signal`, which drops a dequeued `SIG_IGN` signal.
 #[must_use]
 pub fn take_deliverable(pid: ProcessId) -> Option<u32> {
     take_deliverable_info(pid).map(|(sig, _)| sig)
@@ -1216,6 +1486,21 @@ pub fn take_deliverable(pid: ProcessId) -> Option<u32> {
 pub fn take_deliverable_info(pid: ProcessId) -> Option<(u32, SigInfo)> {
     with_states(|states| {
         let state = states.get_mut(&pid)?;
+        // Ignored and deliverable: discarded, with their records (see
+        // `take_deliverable`).
+        let discard = state.pending & !state.blocked & state.ignored;
+        if discard != 0 {
+            state.pending &= !discard;
+            let mut rem = discard;
+            while rem != 0 {
+                if let Some(slot) = state.infos.get_mut(rem.trailing_zeros() as usize) {
+                    *slot = None;
+                }
+                rem &= rem.wrapping_sub(1); // clear lowest set bit
+            }
+            // `count_ones()` is 0..=64 — fits usize without arithmetic.
+            PENDING_COUNT.fetch_sub(discard.count_ones() as usize, Ordering::Relaxed);
+        }
         let deliverable = state.pending & !state.blocked;
         if deliverable == 0 {
             return None;
@@ -1320,9 +1605,227 @@ pub fn self_test() -> KernelResult<()> {
     test_siginfo_record()?;
     test_altstack_placement()?;
     test_extended_frame()?;
+    test_ignored_set()?;
+    test_ignored_across_images()?;
 
-    serial_println!("[signal] Signal-shim self-test PASSED (15 tests)");
+    serial_println!("[signal] Signal-shim self-test PASSED (17 tests)");
     Ok(())
+}
+
+/// The ignored set at the moment a signal is sent and delivered: discarded
+/// when sent unblocked -- with or without a trampoline, which is the `nohup`
+/// case -- kept when blocked and discarded once unblocked if still ignored,
+/// delivered if the action changed meanwhile; `SIGCONT` continues even
+/// ignored; what may be ignored and what a change discards.
+fn test_ignored_set() -> KernelResult<()> {
+    const SIGHUP_BIT: u64 = 1 << (SIGHUP - 1);
+    const SIGUSR1: u32 = 10;
+    const SIGUSR1_BIT: u64 = 1 << (SIGUSR1 - 1);
+    const SIGTERM: u32 = 15;
+    const SIGTERM_BIT: u64 = 1 << (SIGTERM - 1);
+    let p = TEST_PID_BASE + 50;
+    let q = TEST_PID_BASE + 51;
+    let cleanup = || {
+        remove(p);
+        remove(q);
+    };
+    let result = (|| -> KernelResult<()> {
+        // What may be ignored.
+        for bad in [1u64 << (SIGKILL - 1), 1u64 << (SIGSTOP - 1)] {
+            check(
+                set_ignored(p, SIGHUP_BIT | bad, false) == Err(KernelError::InvalidArgument),
+                "SIGKILL/SIGSTOP in the ignored set is refused",
+            )?;
+            check(ignored(p) == 0, "a refused set changes nothing")?;
+        }
+        check(
+            set_ignored(p, SIGHUP_BIT, false) == Ok(0),
+            "first set answers 0",
+        )?;
+        check(
+            is_ignored(p, SIGHUP) && !is_ignored(p, SIGTERM) && !is_ignored(p, 0),
+            "is_ignored reads the set",
+        )?;
+
+        // Sent unblocked to a process with no trampoline: dropped, where the
+        // default action would have killed it.
+        check(
+            classify_post(p, SIGHUP) == PostDecision::Drop && pending(p) == 0,
+            "an ignored SIGHUP with no trampoline is dropped, not fatal",
+        )?;
+        // ...and with a trampoline: not even pended for it.
+        register_trampoline(p, 0x4000);
+        check(
+            classify_post(p, SIGHUP) == PostDecision::Drop && pending(p) == 0,
+            "an ignored signal is not pended for the trampoline",
+        )?;
+        check(
+            classify_post(p, SIGUSR1) == PostDecision::Deliver,
+            "a signal not ignored is still delivered",
+        )?;
+        check(take_deliverable(p) == Some(SIGUSR1), "and taken")?;
+
+        // Blocked when sent: kept pending...
+        set_blocked(p, SIGHUP_BIT);
+        check(
+            classify_post(p, SIGHUP) == PostDecision::Drop && pending(p) == SIGHUP_BIT,
+            "an ignored but blocked signal stays pending",
+        )?;
+        // ...and discarded, not delivered, once unblocked while still ignored.
+        set_blocked(p, 0);
+        check(
+            take_deliverable(p).is_none() && pending(p) == 0,
+            "unblocked and still ignored: discarded at delivery",
+        )?;
+        // A change of action while it waits is honoured.
+        set_blocked(p, SIGHUP_BIT);
+        let _ = classify_post(p, SIGHUP);
+        check(
+            set_ignored(p, 0, false) == Ok(SIGHUP_BIT),
+            "previous set returned",
+        )?;
+        check(
+            pending(p) == SIGHUP_BIT,
+            "un-ignoring keeps the pending one",
+        )?;
+        set_blocked(p, 0);
+        check(
+            take_deliverable(p) == Some(SIGHUP),
+            "un-ignored before unblocking: delivered",
+        )?;
+
+        // Newly ignored pending signals go, blocked or not; one already
+        // ignored stays.
+        set_blocked(p, SIGUSR1_BIT | SIGTERM_BIT);
+        set_ignored(p, SIGUSR1_BIT, false)?;
+        let _ = classify_post(p, SIGUSR1); // ignored + blocked: kept
+        set_pending(p, SIGTERM);
+        set_ignored(p, SIGUSR1_BIT | SIGTERM_BIT, false)?;
+        check(
+            pending(p) == SIGUSR1_BIT,
+            "newly ignored SIGTERM discarded, already-ignored SIGUSR1 kept",
+        )?;
+        set_ignored(p, 0, false)?;
+        set_blocked(p, 0);
+        let _ = take_deliverable(p);
+
+        // SIGCONT continues even ignored, and runs no handler.
+        set_ignored(p, 1 << (SIGCONT - 1), false)?;
+        check(
+            classify_post(p, SIGCONT) == PostDecision::Continue && pending(p) == 0,
+            "an ignored SIGCONT continues without pending a handler",
+        )?;
+        set_ignored(p, 0, false)?;
+
+        // A blocked fatal signal on a process with no trampoline waits.
+        check(
+            classify_post(q, SIGTERM) == PostDecision::Terminate(128 + 15),
+            "unblocked SIGTERM with no trampoline is fatal",
+        )?;
+        set_blocked(q, SIGTERM_BIT);
+        check(
+            classify_post(q, SIGTERM) == PostDecision::Drop && pending(q) == SIGTERM_BIT,
+            "blocked SIGTERM with no trampoline is kept pending, not fatal yet",
+        )?;
+
+        // The Linux shim's one-at-a-time record.
+        set_pending(q, SIGCHLD);
+        record_disposition(q, SIGCHLD, Disposition::Default, true);
+        check(
+            pending(q) & (1 << (SIGCHLD - 1)) == 0 && nocldwait(q) && !is_ignored(q, SIGCHLD),
+            "SIG_DFL for a default-ignored signal discards it; SA_NOCLDWAIT kept",
+        )?;
+        set_pending(q, SIGUSR1);
+        record_disposition(q, SIGUSR1, Disposition::Default, false);
+        check(
+            pending(q) & SIGUSR1_BIT != 0,
+            "SIG_DFL for a default-fatal signal discards nothing",
+        )?;
+        record_disposition(q, SIGUSR1, Disposition::Ignore, false);
+        check(
+            is_ignored(q, SIGUSR1) && pending(q) & SIGUSR1_BIT == 0,
+            "SIG_IGN records it and discards the pending one",
+        )?;
+        record_disposition(q, SIGUSR1, Disposition::Handler, false);
+        check(!is_ignored(q, SIGUSR1), "a handler takes it out")?;
+        record_disposition(q, SIGKILL, Disposition::Ignore, false);
+        check(
+            !is_ignored(q, SIGKILL),
+            "SIGKILL can never be recorded ignored",
+        )?;
+        record_disposition(q, SIGCHLD, Disposition::Handler, false);
+        record_disposition(q, SIGUSR1, Disposition::Ignore, true);
+        check(!nocldwait(q), "SA_NOCLDWAIT is SIGCHLD's alone")?;
+        Ok(())
+    })();
+    cleanup();
+    if result.is_ok() {
+        serial_println!("[signal]   ignored set at send and delivery: OK");
+    }
+    result
+}
+
+/// The ignored set across images: `exec` keeps it and drops `SA_NOCLDWAIT`,
+/// `fork` copies both, a spawned child gets its parent's blocked mask and
+/// ignored set less `sigdefault` (or the mask it was given), and a kernel
+/// parent passes nothing on.
+fn test_ignored_across_images() -> KernelResult<()> {
+    const SIGHUP_BIT: u64 = 1 << (SIGHUP - 1);
+    const SIGINT_BIT: u64 = 1 << 1;
+    const SIGQUIT_BIT: u64 = 1 << 2;
+    let parent = TEST_PID_BASE + 60;
+    let forked = TEST_PID_BASE + 61;
+    let spawned = TEST_PID_BASE + 62;
+    let given = TEST_PID_BASE + 63;
+    let orphan = TEST_PID_BASE + 64;
+    let all = [parent, forked, spawned, given, orphan];
+    let result = (|| -> KernelResult<()> {
+        set_ignored(parent, SIGHUP_BIT | SIGQUIT_BIT, true)?;
+        set_blocked(parent, SIGINT_BIT);
+
+        inherit_for_fork(parent, forked);
+        check(
+            ignored(forked) == SIGHUP_BIT | SIGQUIT_BIT && nocldwait(forked),
+            "fork copies the ignored set and SA_NOCLDWAIT",
+        )?;
+
+        start_spawned(parent, spawned, None, SIGQUIT_BIT);
+        check(
+            ignored(spawned) == SIGHUP_BIT && blocked(spawned) == SIGINT_BIT,
+            "spawn: the parent's ignored set less sigdefault, the parent's mask",
+        )?;
+        check(
+            !nocldwait(spawned),
+            "a spawned image starts without SA_NOCLDWAIT",
+        )?;
+
+        let unblockable = (1u64 << (SIGKILL - 1)) | (1u64 << (SIGSTOP - 1));
+        start_spawned(parent, given, Some(SIGQUIT_BIT | unblockable), 0);
+        check(
+            blocked(given) == SIGQUIT_BIT && ignored(given) == SIGHUP_BIT | SIGQUIT_BIT,
+            "spawn with a mask: that mask, less SIGKILL/SIGSTOP",
+        )?;
+
+        start_spawned(0, orphan, None, 0);
+        check(
+            ignored(orphan) == 0 && blocked(orphan) == 0,
+            "a kernel parent passes nothing on",
+        )?;
+
+        on_exec(parent);
+        check(
+            ignored(parent) == SIGHUP_BIT | SIGQUIT_BIT && !nocldwait(parent),
+            "exec keeps the ignored set and drops SA_NOCLDWAIT",
+        )?;
+        Ok(())
+    })();
+    for pid in all {
+        remove(pid);
+    }
+    if result.is_ok() {
+        serial_println!("[signal]   ignored set across exec, fork and spawn: OK");
+    }
+    result
 }
 
 /// Verify the `SA_ONSTACK` frame placement decision: every branch of

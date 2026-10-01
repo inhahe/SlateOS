@@ -47,48 +47,49 @@ use super::number::{
     SYS_FS_LIST_XATTRS, SYS_FS_LSTAT, SYS_FS_METADATA, SYS_FS_MKDIR, SYS_FS_MKDIR_MODE,
     SYS_FS_MKDIRAT_PINNED, SYS_FS_MOUNT, SYS_FS_OPEN, SYS_FS_OPEN_MODE, SYS_FS_OPENAT2,
     SYS_FS_PREAD, SYS_FS_PWRITE, SYS_FS_READ, SYS_FS_READ_FILE, SYS_FS_READDIR_AT, SYS_FS_READLINK,
-    SYS_FS_REMOVE_XATTR, SYS_FS_RENAME, SYS_FS_RENAMEAT_PINNED, SYS_FS_RMDIR, SYS_FS_SEEK,
-    SYS_FS_SEEK_DATA, SYS_FS_SEEK_HOLE, SYS_FS_SET_ATTR, SYS_FS_SET_OWNER, SYS_FS_SET_PERMS,
-    SYS_FS_SET_TIMES, SYS_FS_SET_XATTR, SYS_FS_STAT, SYS_FS_STATVFS, SYS_FS_SYMLINK,
-    SYS_FS_SYMLINKAT_PINNED, SYS_FS_SYNC, SYS_FS_TMPFILE, SYS_FS_TRASH, SYS_FS_TRASH_EMPTY,
-    SYS_FS_TRASH_LIST, SYS_FS_TRASH_RESTORE, SYS_FS_TRIM, SYS_FS_TRUNCATE, SYS_FS_UMOUNT,
-    SYS_FS_UNLINKAT_PINNED, SYS_FS_UTIMENSAT_PINNED, SYS_FS_WATCH_CLOSE, SYS_FS_WATCH_CREATE,
-    SYS_FS_WATCH_READ, SYS_FS_WATCH_READ_RECORDS, SYS_FS_WRITE, SYS_FS_WRITE_FILE,
-    SYS_FUTEX_CMP_REQUEUE_PI, SYS_FUTEX_LOCK_PI, SYS_FUTEX_LOCK_PI_TIMEOUT, SYS_FUTEX_REQUEUE,
-    SYS_FUTEX_TRYLOCK_PI, SYS_FUTEX_UNLOCK_PI, SYS_FUTEX_WAIT, SYS_FUTEX_WAIT_REQUEUE_PI,
-    SYS_FUTEX_WAIT_TIMEOUT, SYS_FUTEX_WAKE, SYS_GETRANDOM, SYS_HOSTNAME_SET, SYS_ICMP_PING,
-    SYS_ICMP_PING_WAIT, SYS_IO_RING_DESTROY, SYS_IO_RING_ENTER, SYS_IO_RING_SETUP,
-    SYS_IRQ_REGISTER, SYS_IRQ_RELEASE, SYS_IRQ_WAIT, SYS_ITIMER_GET, SYS_ITIMER_SET,
-    SYS_KEYLAYOUT_SET, SYS_LOADAVG, SYS_LOG_READ, SYS_MM_GET_PROFILE, SYS_MM_SET_PROFILE, SYS_MMAP,
-    SYS_MPROTECT, SYS_MUNMAP, SYS_NET_FW_ADD_RULE, SYS_NET_FW_DEL_RULE, SYS_NET_FW_ENABLE,
-    SYS_NET_FW_FLUSH, SYS_NET_FW_SET_POLICY, SYS_NET_IF_CONFIG, SYS_NET_IF_INFO, SYS_NET_RAW_CLOSE,
-    SYS_NET_RAW_OPEN, SYS_NET_RAW_RX, SYS_NET_RAW_TX, SYS_NET_ROUTE_ADD, SYS_NET_ROUTE_DEL,
-    SYS_NET_ROUTE_LIST, SYS_NET_STAT, SYS_NOTIFY_READY, SYS_NS_ATTACH, SYS_NS_BIND, SYS_NS_CREATE,
-    SYS_NS_HIDE, SYS_NS_QUERY, SYS_NS_UNBIND, SYS_PHYS_PAGES_AVAIL, SYS_PHYS_PAGES_TOTAL,
-    SYS_PIPE_CLOSE, SYS_PIPE_CREATE, SYS_PIPE_PEEK, SYS_PIPE_POLL, SYS_PIPE_READ,
-    SYS_PIPE_READ_TIMEOUT, SYS_PIPE_READABLE_BYTES, SYS_PIPE_TRY_READ, SYS_PIPE_TRY_WRITE,
-    SYS_PIPE_WAIT_READABLE, SYS_PIPE_WRITE, SYS_PIPE_WRITE_TIMEOUT, SYS_PORT_READ, SYS_PORT_WRITE,
-    SYS_PROCESS_CHROOT, SYS_PROCESS_COUNT, SYS_PROCESS_CRASH_INFO, SYS_PROCESS_GET_ARGS,
-    SYS_PROCESS_GET_CREDENTIALS, SYS_PROCESS_GET_CWD, SYS_PROCESS_GET_INITIAL_FDS,
-    SYS_PROCESS_GET_NICE, SYS_PROCESS_GET_PGID, SYS_PROCESS_GET_PRIORITY, SYS_PROCESS_GET_RUSAGE,
-    SYS_PROCESS_GET_SID, SYS_PROCESS_ID, SYS_PROCESS_IS_READY, SYS_PROCESS_KILL,
-    SYS_PROCESS_PARENT_ID, SYS_PROCESS_SET_CREDENTIALS, SYS_PROCESS_SET_CWD,
-    SYS_PROCESS_SET_EXEC_CLOSE, SYS_PROCESS_SET_EXEC_FDS, SYS_PROCESS_SET_NICE,
-    SYS_PROCESS_SET_PGID, SYS_PROCESS_SET_PRIORITY, SYS_PROCESS_SET_SID, SYS_PROCESS_SETGROUPS,
-    SYS_PROCESS_SPAWN, SYS_PROCESS_SPAWN_EX, SYS_PROCESS_SPAWN_EX2, SYS_PROCESS_TRY_WAIT,
-    SYS_PROCESS_UMASK, SYS_PROCESS_WAIT, SYS_PROCESS_WAIT_STATUS, SYS_PTY_CLOSE, SYS_PTY_CREATE,
-    SYS_PTY_DUP, SYS_PTY_GET_PGRP, SYS_PTY_GET_TERMIOS, SYS_PTY_GET_WINSIZE, SYS_PTY_MASTER_READ,
-    SYS_PTY_MASTER_TRY_READ, SYS_PTY_MASTER_TRY_WRITE, SYS_PTY_MASTER_WRITE, SYS_PTY_POLL,
-    SYS_PTY_READABLE_BYTES, SYS_PTY_SET_PGRP, SYS_PTY_SET_TERMIOS, SYS_PTY_SET_WINSIZE,
-    SYS_PTY_SLAVE_ID, SYS_PTY_SLAVE_READ, SYS_PTY_SLAVE_TRY_READ, SYS_PTY_SLAVE_WRITE,
-    SYS_RLIMIT_GET, SYS_RLIMIT_SET, SYS_SCHED_GET_PROFILE, SYS_SCHED_GET_TIMESLICE,
-    SYS_SCHED_RECONFIGURE, SYS_SCHED_SET_PROFILE, SYS_SCHED_SET_TIMESLICE, SYS_SECUREBOOT_ENROLL,
-    SYS_SECUREBOOT_REMOVE, SYS_SECUREBOOT_VERIFY, SYS_SEM_CLOSE, SYS_SEM_CREATE, SYS_SEM_SIGNAL,
-    SYS_SEM_TRY_WAIT, SYS_SEM_WAIT, SYS_SEM_WAIT_TIMEOUT, SYS_SERVICE_ACCEPT,
-    SYS_SERVICE_ACCEPT_TIMEOUT, SYS_SERVICE_CONNECT, SYS_SERVICE_REGISTER, SYS_SERVICE_TRY_ACCEPT,
-    SYS_SERVICE_UNREGISTER, SYS_SET_EXCEPTION_HANDLER, SYS_SET_FS_BASE, SYS_SHM_CLOSE,
-    SYS_SHM_CREATE, SYS_SHM_MAP, SYS_SHM_MAP_AT, SYS_SHM_SIZE, SYS_SHM_UNMAP, SYS_SIGNAL_ALTSTACK,
-    SYS_SIGNAL_MASK, SYS_SIGNAL_PENDING, SYS_SIGNAL_QUEUE, SYS_SIGNAL_REGISTER, SYS_SIGNAL_SEND,
+    SYS_FS_RECORD_LOCK, SYS_FS_REMOVE_XATTR, SYS_FS_RENAME, SYS_FS_RENAMEAT_PINNED, SYS_FS_RMDIR,
+    SYS_FS_SEEK, SYS_FS_SEEK_DATA, SYS_FS_SEEK_HOLE, SYS_FS_SET_ATTR, SYS_FS_SET_OWNER,
+    SYS_FS_SET_PERMS, SYS_FS_SET_TIMES, SYS_FS_SET_XATTR, SYS_FS_STAT, SYS_FS_STATVFS,
+    SYS_FS_SYMLINK, SYS_FS_SYMLINKAT_PINNED, SYS_FS_SYNC, SYS_FS_TMPFILE, SYS_FS_TRASH,
+    SYS_FS_TRASH_EMPTY, SYS_FS_TRASH_LIST, SYS_FS_TRASH_RESTORE, SYS_FS_TRIM, SYS_FS_TRUNCATE,
+    SYS_FS_UMOUNT, SYS_FS_UNLINKAT_PINNED, SYS_FS_UTIMENSAT_PINNED, SYS_FS_WATCH_CLOSE,
+    SYS_FS_WATCH_CREATE, SYS_FS_WATCH_READ, SYS_FS_WATCH_READ_RECORDS, SYS_FS_WRITE,
+    SYS_FS_WRITE_FILE, SYS_FUTEX_CMP_REQUEUE_PI, SYS_FUTEX_LOCK_PI, SYS_FUTEX_LOCK_PI_TIMEOUT,
+    SYS_FUTEX_REQUEUE, SYS_FUTEX_TRYLOCK_PI, SYS_FUTEX_UNLOCK_PI, SYS_FUTEX_WAIT,
+    SYS_FUTEX_WAIT_REQUEUE_PI, SYS_FUTEX_WAIT_TIMEOUT, SYS_FUTEX_WAKE, SYS_GETRANDOM,
+    SYS_HOSTNAME_SET, SYS_ICMP_PING, SYS_ICMP_PING_WAIT, SYS_IO_RING_DESTROY, SYS_IO_RING_ENTER,
+    SYS_IO_RING_SETUP, SYS_IRQ_REGISTER, SYS_IRQ_RELEASE, SYS_IRQ_WAIT, SYS_ITIMER_GET,
+    SYS_ITIMER_SET, SYS_KEYLAYOUT_SET, SYS_LOADAVG, SYS_LOG_READ, SYS_MM_GET_PROFILE,
+    SYS_MM_SET_PROFILE, SYS_MMAP, SYS_MPROTECT, SYS_MUNMAP, SYS_NET_FW_ADD_RULE,
+    SYS_NET_FW_DEL_RULE, SYS_NET_FW_ENABLE, SYS_NET_FW_FLUSH, SYS_NET_FW_SET_POLICY,
+    SYS_NET_IF_CONFIG, SYS_NET_IF_INFO, SYS_NET_RAW_CLOSE, SYS_NET_RAW_OPEN, SYS_NET_RAW_RX,
+    SYS_NET_RAW_TX, SYS_NET_ROUTE_ADD, SYS_NET_ROUTE_DEL, SYS_NET_ROUTE_LIST, SYS_NET_STAT,
+    SYS_NOTIFY_READY, SYS_NS_ATTACH, SYS_NS_BIND, SYS_NS_CREATE, SYS_NS_HIDE, SYS_NS_QUERY,
+    SYS_NS_UNBIND, SYS_PHYS_PAGES_AVAIL, SYS_PHYS_PAGES_TOTAL, SYS_PIPE_CLOSE, SYS_PIPE_CREATE,
+    SYS_PIPE_PEEK, SYS_PIPE_POLL, SYS_PIPE_READ, SYS_PIPE_READ_TIMEOUT, SYS_PIPE_READABLE_BYTES,
+    SYS_PIPE_TRY_READ, SYS_PIPE_TRY_WRITE, SYS_PIPE_WAIT_READABLE, SYS_PIPE_WRITE,
+    SYS_PIPE_WRITE_TIMEOUT, SYS_PORT_READ, SYS_PORT_WRITE, SYS_PROCESS_CHROOT, SYS_PROCESS_COUNT,
+    SYS_PROCESS_CRASH_INFO, SYS_PROCESS_GET_ARGS, SYS_PROCESS_GET_CREDENTIALS, SYS_PROCESS_GET_CWD,
+    SYS_PROCESS_GET_INITIAL_FDS, SYS_PROCESS_GET_NICE, SYS_PROCESS_GET_PGID,
+    SYS_PROCESS_GET_PRIORITY, SYS_PROCESS_GET_RUSAGE, SYS_PROCESS_GET_SID, SYS_PROCESS_ID,
+    SYS_PROCESS_IS_READY, SYS_PROCESS_KILL, SYS_PROCESS_PARENT_ID, SYS_PROCESS_SET_CREDENTIALS,
+    SYS_PROCESS_SET_CWD, SYS_PROCESS_SET_EXEC_CLOSE, SYS_PROCESS_SET_EXEC_FDS,
+    SYS_PROCESS_SET_NICE, SYS_PROCESS_SET_PGID, SYS_PROCESS_SET_PRIORITY, SYS_PROCESS_SET_SID,
+    SYS_PROCESS_SETGROUPS, SYS_PROCESS_SPAWN, SYS_PROCESS_SPAWN_EX, SYS_PROCESS_SPAWN_EX2,
+    SYS_PROCESS_TRY_WAIT, SYS_PROCESS_UMASK, SYS_PROCESS_WAIT, SYS_PROCESS_WAIT_STATUS,
+    SYS_PTY_CLOSE, SYS_PTY_CREATE, SYS_PTY_DUP, SYS_PTY_GET_PGRP, SYS_PTY_GET_TERMIOS,
+    SYS_PTY_GET_WINSIZE, SYS_PTY_MASTER_READ, SYS_PTY_MASTER_TRY_READ, SYS_PTY_MASTER_TRY_WRITE,
+    SYS_PTY_MASTER_WRITE, SYS_PTY_POLL, SYS_PTY_READABLE_BYTES, SYS_PTY_SET_PGRP,
+    SYS_PTY_SET_TERMIOS, SYS_PTY_SET_WINSIZE, SYS_PTY_SLAVE_ID, SYS_PTY_SLAVE_READ,
+    SYS_PTY_SLAVE_TRY_READ, SYS_PTY_SLAVE_WRITE, SYS_RLIMIT_GET, SYS_RLIMIT_SET,
+    SYS_SCHED_GET_PROFILE, SYS_SCHED_GET_TIMESLICE, SYS_SCHED_RECONFIGURE, SYS_SCHED_SET_PROFILE,
+    SYS_SCHED_SET_TIMESLICE, SYS_SECUREBOOT_ENROLL, SYS_SECUREBOOT_REMOVE, SYS_SECUREBOOT_VERIFY,
+    SYS_SEM_CLOSE, SYS_SEM_CREATE, SYS_SEM_SIGNAL, SYS_SEM_TRY_WAIT, SYS_SEM_WAIT,
+    SYS_SEM_WAIT_TIMEOUT, SYS_SERVICE_ACCEPT, SYS_SERVICE_ACCEPT_TIMEOUT, SYS_SERVICE_CONNECT,
+    SYS_SERVICE_REGISTER, SYS_SERVICE_TRY_ACCEPT, SYS_SERVICE_UNREGISTER,
+    SYS_SET_EXCEPTION_HANDLER, SYS_SET_FS_BASE, SYS_SHM_CLOSE, SYS_SHM_CREATE, SYS_SHM_MAP,
+    SYS_SHM_MAP_AT, SYS_SHM_SIZE, SYS_SHM_UNMAP, SYS_SIGNAL_ALTSTACK, SYS_SIGNAL_MASK,
+    SYS_SIGNAL_PENDING, SYS_SIGNAL_QUEUE, SYS_SIGNAL_REGISTER, SYS_SIGNAL_SEND,
     SYS_SIGNAL_STOP_SELF, SYS_SIGNAL_TGKILL, SYS_SLEEP, SYS_SOCKETPAIR_CLOSE,
     SYS_SOCKETPAIR_CREATE, SYS_SOCKETPAIR_POLL, SYS_SOCKETPAIR_READABLE_BYTES, SYS_SOCKETPAIR_RECV,
     SYS_SOCKETPAIR_RECV_TIMEOUT, SYS_SOCKETPAIR_SEND, SYS_SOCKETPAIR_SEND_TIMEOUT,
@@ -559,6 +560,7 @@ const fn build_v1_table() -> SyscallTable {
     handlers[SYS_PROCESS_SET_EXEC_CLOSE as usize] = Some(handlers::sys_process_set_exec_close);
     handlers[SYS_FS_WATCH_READ_RECORDS as usize] = Some(handlers::sys_fs_watch_read_records);
     handlers[SYS_CPU_CURRENT as usize] = Some(handlers::sys_cpu_current);
+    handlers[SYS_FS_RECORD_LOCK as usize] = Some(handlers::sys_fs_record_lock);
     handlers[SYS_SIGNAL_MASK as usize] = Some(handlers::sys_signal_mask);
     handlers[SYS_SIGNAL_PENDING as usize] = Some(handlers::sys_signal_pending);
     handlers[SYS_SIGNAL_STOP_SELF as usize] = Some(handlers::sys_signal_stop_self);
@@ -1026,6 +1028,7 @@ pub fn self_test() -> KernelResult<()> {
     test_dispatch_tioc_and_watch_records()?;
     test_cpu_current()?;
     test_dispatch_shared_anonymous_memory()?;
+    test_dispatch_record_lock()?;
     test_dispatch_secureboot_doors()?;
     test_dispatch_ipc_possession()?;
     test_dispatch_dropping_root_is_one_way()?;
@@ -2894,6 +2897,167 @@ fn test_dispatch_shared_anonymous_memory() -> KernelResult<()> {
     pcb::destroy(pid);
     serial_println!(
         "[syscall]   shared anonymous memory (native MAP_SHARED, Linux MAP_SHARED|MAP_ANONYMOUS): OK"
+    );
+    Ok(())
+}
+
+/// `SYS_FS_RECORD_LOCK` (1093) as two scratch processes call it, with each
+/// one's `struct flock` in its own user memory
+/// (`requests/d-a-native-programs-cannot-reach-the-record-lock-table.md`):
+///
+/// - an unknown op is `InvalidArgument`, a handle the caller does not hold
+///   `InvalidHandle`, and a `struct flock` in kernel memory `InvalidAddress`;
+/// - one process's write lock refuses the other's (`WouldBlock`), and the
+///   other's `F_GETLK` names the holder's pid and range, from byte 0;
+/// - the holder's `SYS_FS_CLOSE` releases its locks, POSIX's close rule, so
+///   the other can then take the range.
+///
+/// Waiting (`RECORD_LOCK_SET_WAIT`) and the rest of the rules are
+/// `fs::reclock::self_test` and `syscall::record_lock::self_test`; this is
+/// the door.
+fn test_dispatch_record_lock() -> KernelResult<()> {
+    use super::number::{MAP_READ, MAP_WRITE, RECORD_LOCK_GET, RECORD_LOCK_SET};
+    use super::record_lock::{F_WRLCK, Flock, SEEK_SET};
+    use crate::cap::ResourceType;
+    use crate::fs::handle::{self, OpenFlags};
+    use crate::mm::user::{copy_from_user_as, copy_to_user_as};
+    use crate::proc::pcb::{self, ProcessId};
+    use crate::proc::thread::self_test_as_process;
+
+    const PATH: &str = "/tmp/record-lock-dispatch";
+
+    fn fail(msg: &str, pids: &[ProcessId]) -> KernelResult<()> {
+        serial_println!("[syscall]   FAIL: record lock: {}", msg);
+        for &p in pids {
+            pcb::destroy(p);
+        }
+        // Best effort: the file is this test's own scratch.
+        let _ = crate::fs::Vfs::remove(PATH);
+        Err(KernelError::InternalError)
+    }
+    let args = |arg0: u64, arg1: u64, arg2: u64| SyscallArgs {
+        arg0,
+        arg1,
+        arg2,
+        arg3: 0,
+        arg4: 0,
+        arg5: 0,
+    };
+    let code = |e: KernelError| i64::from(e.code());
+
+    let holder = pcb::create("reclock-holder", 0);
+    let other = pcb::create("reclock-other", 0);
+    let pids = [holder, other];
+    // Best effort: a leftover from an earlier boot's failure.
+    let _ = crate::fs::Vfs::remove(PATH);
+    if crate::fs::Vfs::write_file(PATH, b"0123456789abcdef").is_err() {
+        return fail("could not create the scratch file", &pids);
+    }
+    let rw = OpenFlags::READ.union(OpenFlags::WRITE);
+    let (Ok(h1), Ok(h2)) = (handle::open(PATH, rw), handle::open(PATH, rw)) else {
+        return fail("could not open the scratch file twice", &pids);
+    };
+    // Given to the processes as an open would give them; their teardown
+    // closes them.
+    pcb::register_ipc_handle(holder, ResourceType::File, h1);
+    pcb::register_ipc_handle(other, ResourceType::File, h2);
+
+    // A page of user memory in each process for its struct flock.
+    let map = |pid: ProcessId| {
+        self_test_as_process(pid, || {
+            dispatch(SYS_MMAP, &args(0, 0x4000, MAP_READ | MAP_WRITE)).value
+        })
+    };
+    let (Ok(buf1), Ok(buf2)) = (u64::try_from(map(holder)), u64::try_from(map(other))) else {
+        return fail("could not map the scratch processes' memory", &pids);
+    };
+    let (Some(pml1), Some(pml2)) = (
+        pcb::get_pml4(holder).filter(|&p| p != 0),
+        pcb::get_pml4(other).filter(|&p| p != 0),
+    ) else {
+        return fail("a scratch process has no address space", &pids);
+    };
+    // One call: the flock written to the caller's memory, the syscall made
+    // as the caller, and the flock read back.
+    let call = |pid: ProcessId, pml4: u64, buf: u64, h: u64, op: u64, f: Flock| {
+        if copy_to_user_as(pml4, buf, &f.to_bytes()).is_err() {
+            return (i64::MIN, None);
+        }
+        let r = self_test_as_process(pid, || {
+            dispatch(SYS_FS_RECORD_LOCK, &args(h, op, buf)).value
+        });
+        let mut back = [0u8; Flock::SIZE];
+        let f = copy_from_user_as(pml4, buf, &mut back)
+            .ok()
+            .map(|()| Flock::from_bytes(back));
+        (r, f)
+    };
+    let write_0_10 = Flock::new(F_WRLCK, SEEK_SET, 0, 10);
+    let write_5_6 = Flock::new(F_WRLCK, SEEK_SET, 5, 1);
+
+    // The door's own refusals.
+    let unknown_op = call(holder, pml1, buf1, h1, 3, write_0_10).0;
+    let not_held = call(holder, pml1, buf1, h2, RECORD_LOCK_SET, write_0_10).0;
+    let kernel_flock = write_0_10.to_bytes();
+    let from_kernel = self_test_as_process(holder, || {
+        dispatch(
+            SYS_FS_RECORD_LOCK,
+            &args(h1, RECORD_LOCK_SET, kernel_flock.as_ptr() as u64),
+        )
+        .value
+    });
+    if unknown_op != code(KernelError::InvalidArgument)
+        || not_held != code(KernelError::InvalidHandle)
+        || from_kernel != code(KernelError::InvalidAddress)
+    {
+        serial_println!(
+            "[syscall]     op 3 {}, another's handle {}, kernel memory {}",
+            unknown_op,
+            not_held,
+            from_kernel
+        );
+        return fail("a refusal answered wrongly", &pids);
+    }
+
+    // The holder locks [0,10); the other is refused, and asks who holds it.
+    let taken = call(holder, pml1, buf1, h1, RECORD_LOCK_SET, write_0_10).0;
+    let refused = call(other, pml2, buf2, h2, RECORD_LOCK_SET, write_5_6).0;
+    let (asked, report) = call(other, pml2, buf2, h2, RECORD_LOCK_GET, write_5_6);
+    let want = write_0_10.with_pid(i32::try_from(holder).unwrap_or(-1));
+    if taken != 0 || refused != code(KernelError::WouldBlock) || asked != 0 || report != Some(want)
+    {
+        serial_println!(
+            "[syscall]     take {}, the other's {}, its F_GETLK {} -> {:?}",
+            taken,
+            refused,
+            asked,
+            report
+        );
+        return fail(
+            "a lock did not refuse another process, or was misreported",
+            &pids,
+        );
+    }
+
+    // The holder closes its handle; the close takes its locks with it.
+    let closed = self_test_as_process(holder, || dispatch(SYS_FS_CLOSE, &args(h1, 0, 0)).value);
+    let after = call(other, pml2, buf2, h2, RECORD_LOCK_SET, write_5_6).0;
+    if closed != 0 || after != 0 {
+        serial_println!(
+            "[syscall]     close {}, then the other's lock {}",
+            closed,
+            after
+        );
+        return fail("closing the handle did not release its locks", &pids);
+    }
+
+    for &p in &pids {
+        pcb::destroy(p);
+    }
+    // Best effort: the file is this test's own scratch.
+    let _ = crate::fs::Vfs::remove(PATH);
+    serial_println!(
+        "[syscall]   SYS_FS_RECORD_LOCK (1093): refusals, conflicts, F_GETLK, close: OK"
     );
     Ok(())
 }

@@ -2445,9 +2445,16 @@ pub fn exec_process(
             // Re-use the existing table: close cloexec entries (and
             // ensure stdio remains populated) via the kernel helper,
             // then close each returned handle.
-            if let Some(to_close) = pcb::linux_fd_exec_cloexec(pid) {
-                let count = to_close.len();
-                for entry in to_close {
+            if let Some(cloexec) = pcb::linux_fd_exec_cloexec(pid) {
+                // Each close-on-exec descriptor is closed, so the process's
+                // record locks on its file go -- even where another fd keeps
+                // the handle open. Before the closes: the key is the handle's
+                // file. The locks themselves otherwise survive the exec.
+                for entry in &cloexec.removed {
+                    crate::syscall::linux::release_record_locks_on_close(pid, entry);
+                }
+                let count = cloexec.to_close.len();
+                for entry in cloexec.to_close {
                     let res = crate::syscall::linux::close_handle(entry);
                     if res.value < 0 {
                         serial_println!(

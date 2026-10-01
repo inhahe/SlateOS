@@ -169863,8 +169863,10 @@ once, on one target, is a gate I have not shown to be stable, and dd-956 says
 measure the population before building the gate.
 
 ### [A] `F_SETLK` grants every exclusive record lock, and the reason it gives for that has expired -- 2026-09-21
-**Status:** PARTLY FIXED 2026-09-21 -- POSIX locks now real and released on exit;
-**OFD locks have no release path** (see the addendum at the end of this entry)
+**Status:** FIXED 2026-10-01. POSIX locks real and released on exit
+(2026-09-21); OFD locks released at a description's final close; `F_SETLKW`
+waits, refusing a deadlock; native programs reach the table
+(`SYS_FS_RECORD_LOCK`). See the 2026-10-01 addendum at the end of this entry.
 
 **In short:** a program can ask the kernel for exclusive use of part of a file
 -- the mechanism databases use to stop two copies of themselves writing the
@@ -169969,6 +169971,29 @@ hand, and an owner space belongs to the module that owns it.
 **F_GETLK** needs the same treatment: it currently reports `F_UNLCK`
 unconditionally, which is a *claim about the world* rather than a lookup, and
 `reclock::query` is the lookup it should do.
+
+**Addendum, 2026-10-01 -- every part of this entry is done (design-decisions §1505).**
+- **OFD release:** `reclock::release_ofd` on a description's final close, as
+  proposed above. A memfd's OFD locks now have their own owner tag and are
+  released by `memfd::close`. They had shared a number space with file
+  handles, so memfd 5's locks and file handle 5's were one owner.
+- **`F_SETLKW` waits** (`reclock::set_wait`), and is woken by whatever frees
+  its range. A wait that could never end is `EDEADLK`. A signal ends it with
+  a restart, so `SA_RESTART` restarts it, as on Linux.
+- **Native programs** reach the table through `SYS_FS_RECORD_LOCK` (1093).
+  The work for both ABIs is one module, `syscall::record_lock`
+  (`requests/d-a-native-programs-cannot-reach-the-record-lock-table.md`).
+- **Found and fixed in the same change:**
+  - Locks were keyed by re-resolving the handle's path through the caller's
+    namespace, applying a jailed process's jail twice.
+  - A lock on a stale handle went to the empty path.
+  - A memfd's locks were looked up in the file-handle table under its id.
+  - `F_GETLK` zeroed `l_pid` where Linux leaves the fields alone, and kept
+    the caller's `l_whence` beside an absolute range.
+  - The access mode (`EBADF`) and a full table (`ENOLCK`) went unchecked or
+    unmapped.
+  - POSIX's close rule (closing any descriptor drops the process's locks on
+    the file) was not applied on any close path.
 
 ### [A] Five boots in one day, each killed by one of my own defects -- three a local check would have caught in under five minutes, and one caused BY running those checks during the boot -- 2026-09-21
 **Status:** OPEN as a workflow note. No code fix; the remedy is an order of operations.

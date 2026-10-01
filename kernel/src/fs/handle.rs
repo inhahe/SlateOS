@@ -1135,6 +1135,22 @@ pub fn fstat(handle: u64) -> KernelResult<crate::fs::FileMeta> {
     crate::fs::Vfs::metadata_resolved(&path)
 }
 
+/// The flags an open handle was opened with: whether it may read and write,
+/// for a caller that must refuse an operation the handle's access mode does
+/// not allow (a write lock through a read-only handle is `EBADF`, POSIX
+/// `fcntl`).
+///
+/// # Errors
+///
+/// `InvalidHandle` for a handle that is not open.
+pub fn open_flags(handle: u64) -> KernelResult<OpenFlags> {
+    let table = OPEN_FILES.lock();
+    table
+        .get(&handle)
+        .map(|file| file.flags)
+        .ok_or(KernelError::InvalidHandle)
+}
+
 /// Returns whether an open handle refers to a directory.
 ///
 /// Cheap table lookup of the cached `is_directory` flag (no VFS round-trip).

@@ -765,9 +765,22 @@ pub fn self_test() -> KernelResult<()> {
     test_notify_wakes_waiter()?;
     test_unregister()?;
     test_io_completion()?;
-    test_sources_wake_the_waiter()?;
 
     serial_println!("[completion] Completion port self-test PASSED");
+    Ok(())
+}
+
+/// Sources wake a parked port by themselves (test 6).
+///
+/// Separate from [`self_test`], and run once interrupts are on (`main.rs`,
+/// beside the multiwait test), because it is only a test when the waiter
+/// really parks. `self_test` runs in early init with interrupts off, where a
+/// sleep spins on the HPET without yielding. There the waiter would first run
+/// after the message was already queued, its first scan would find it, and
+/// the rung would pass without any wake being needed.
+pub fn self_test_sources_wake() -> KernelResult<()> {
+    test_sources_wake_the_waiter()?;
+    serial_println!("[completion] Sources wake a parked port: PASSED");
     Ok(())
 }
 
@@ -897,14 +910,18 @@ fn test_sources_wake_the_waiter() -> KernelResult<()> {
     register(cp, WaitSource::Channel(theirs.raw()), 61)?;
     sched::spawn(b"cp-chan", 16, cp_source_waiter_task, cp.raw(), 0)?;
     sched::sleep_ns_interruptible(20_000_000);
+    // Still waiting, so its first scan found nothing and the send below is
+    // what has to wake it.
+    let parked = CP_TEST_RESULT.load(core::sync::atomic::Ordering::SeqCst) == 0;
     let sent = channel::send(ours, channel::Message::from_bytes(b"wake")?);
     let got = await_cp_result();
     close(cp);
     channel::close(ours);
     channel::close(theirs);
-    if sent.is_err() || got != 61 {
+    if !parked || sent.is_err() || got != 61 {
         serial_println!(
-            "[completion]   FAIL: a channel message did not wake the port (send {:?}, got {})",
+            "[completion]   FAIL: a channel message did not wake the port (parked {}, send {:?}, got {})",
+            parked,
             sent,
             got
         );
@@ -918,6 +935,7 @@ fn test_sources_wake_the_waiter() -> KernelResult<()> {
     register(cp, WaitSource::Listener(listener.raw()), 62)?;
     sched::spawn(b"cp-listen", 16, cp_source_waiter_task, cp.raw(), 0)?;
     sched::sleep_ns_interruptible(20_000_000);
+    let parked = CP_TEST_RESULT.load(core::sync::atomic::Ordering::SeqCst) == 0;
     let client = service::connect(b"cp-listener-probe");
     let got = await_cp_result();
     close(cp);
@@ -929,9 +947,10 @@ fn test_sources_wake_the_waiter() -> KernelResult<()> {
         channel::close(server);
     }
     let unregistered = service::unregister(listener);
-    if client.is_err() || got != 62 || unregistered.is_err() {
+    if !parked || client.is_err() || got != 62 || unregistered.is_err() {
         serial_println!(
-            "[completion]   FAIL: a connection did not wake the port (connect {:?}, got {})",
+            "[completion]   FAIL: a connection did not wake the port (parked {}, connect {:?}, got {})",
+            parked,
             client.map(|_| ()),
             got
         );

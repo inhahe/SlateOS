@@ -5887,6 +5887,69 @@ pub const SYS_FS_WATCH_READ_RECORDS: u64 = 1091;
 pub const SYS_CPU_CURRENT: u64 = 1092;
 
 // ---------------------------------------------------------------------------
+// POSIX record locks for native programs (1093)
+// ---------------------------------------------------------------------------
+
+/// A POSIX byte-range record lock on an open file -- `fcntl`'s `F_GETLK`,
+/// `F_SETLK` and `F_SETLKW` for a native program:
+/// `fs_record_lock(handle, op, flock_ptr) -> 0`.
+///
+/// The table is the one the Linux `fcntl` uses (`fs::reclock`), through the
+/// same code (`syscall::record_lock`), so a native and a Linux program see
+/// each other's locks. Before it, a native program could not reach the
+/// table at all, and its libc granted every lock: two holders of one
+/// exclusive range, SQLite's whole defence against two writers included
+/// (`requests/d-a-native-programs-cannot-reach-the-record-lock-table.md`).
+///
+/// - `handle`: a file handle the caller holds.
+/// - `op`: [`RECORD_LOCK_GET`], [`RECORD_LOCK_SET`] or
+///   [`RECORD_LOCK_SET_WAIT`]. Anything else is `InvalidArgument`.
+/// - `flock_ptr`: the caller's `struct flock`, in the x86-64 Linux layout:
+///   `l_type` i16 at 0, `l_whence` i16 at 2, `l_start` i64 at 8, `l_len`
+///   i64 at 16, `l_pid` i32 at 24, 32 bytes in all. Read for every op, and
+///   rewritten for `RECORD_LOCK_GET`.
+///
+/// The lock belongs to the calling **process**. It ends when the process
+/// exits, when it releases it, or when it closes the handle: closing *any*
+/// descriptor for the file releases all the process's locks on it (POSIX).
+/// So libc must tell the kernel when it closes a descriptor that shares its
+/// handle with one still open. A release over the whole file does that:
+/// `RECORD_LOCK_SET` with `F_UNLCK`, `SEEK_SET`, start 0, length 0.
+///
+/// Errors (libc's errno in brackets):
+/// - `InvalidHandle` (`EBADF`): a handle the caller does not hold, or a lock
+///   its open mode does not allow. `F_RDLCK` needs it open for reading,
+///   `F_WRLCK` for writing.
+/// - `InvalidArgument` (`EINVAL`): an unknown op, `l_type` or `l_whence`; a
+///   range before byte 0 or past a signed 64-bit offset; `F_UNLCK` with
+///   `RECORD_LOCK_GET`.
+/// - `InvalidAddress` (`EFAULT`): `flock_ptr`.
+/// - `WouldBlock` (`EAGAIN`): `RECORD_LOCK_SET`, and another process's lock
+///   is in the way.
+/// - `Deadlock` (`EDEADLK`): `RECORD_LOCK_SET_WAIT`, and waiting would never
+///   end: a process in the way is itself waiting on the caller.
+/// - `Interrupted` (`EINTR`): a signal arrived during the wait. The call is
+///   restarted instead when the handler has `SA_RESTART`.
+/// - `ResourceExhausted`: the lock table is full. libc maps this code to
+///   `ENOMEM` generally; POSIX's errno for it here is `ENOLCK`.
+///
+/// Chosen number 1093, next free slot after 1092.
+pub const SYS_FS_RECORD_LOCK: u64 = 1093;
+
+/// [`SYS_FS_RECORD_LOCK`] op: `F_GETLK`. Would the lock be granted? If not,
+/// `struct flock` is rewritten to describe the first lock in the way: its
+/// type, its range from byte 0 (`l_whence` becomes `SEEK_SET`), and its
+/// holder's pid (-1 for an OFD lock taken through the Linux ABI). If so,
+/// `l_type` becomes `F_UNLCK` and nothing else changes.
+pub const RECORD_LOCK_GET: u64 = 0;
+/// [`SYS_FS_RECORD_LOCK`] op: `F_SETLK`. Take the lock now, or `WouldBlock`;
+/// with `F_UNLCK`, release the range.
+pub const RECORD_LOCK_SET: u64 = 1;
+/// [`SYS_FS_RECORD_LOCK`] op: `F_SETLKW`. Take the lock, waiting while
+/// another process's lock is in the way.
+pub const RECORD_LOCK_SET_WAIT: u64 = 2;
+
+// ---------------------------------------------------------------------------
 // Version info
 // ---------------------------------------------------------------------------
 

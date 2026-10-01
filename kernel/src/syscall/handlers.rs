@@ -4387,6 +4387,9 @@ pub(crate) fn close_handle_at_exec(
     }
     match handle_type {
         fd_handle_type::FILE => {
+            // As `sys_fs_close`: the process's record locks on the file go
+            // with any descriptor for it. Locks themselves survive an exec.
+            super::record_lock::release_on_close(pid, super::record_lock::Target::File(handle));
             crate::fs::handle::close(handle)?;
         }
         fd_handle_type::PIPE => pipe::close(PipeHandle::from_raw(handle)),
@@ -11479,6 +11482,12 @@ pub fn sys_fs_close(args: &SyscallArgs) -> SyscallResult {
     if let Err(e) = require_file_handle_owner(handle) {
         return SyscallResult::err(e);
     }
+    // POSIX: closing a descriptor releases the process's record locks on the
+    // file, whichever descriptor took them. Before the close, while the
+    // handle still names its file.
+    if let Some(pid) = caller_pid() {
+        super::record_lock::release_on_close(pid, super::record_lock::Target::File(handle));
+    }
     match crate::fs::handle::close(handle) {
         Ok(()) => {
             // Drop the per-process ownership record so the handle is not
@@ -13369,6 +13378,54 @@ pub fn sys_fs_funlock(args: &SyscallArgs) -> SyscallResult {
         Ok(()) => SyscallResult::ok(0),
         Err(e) => SyscallResult::err(e),
     }
+}
+
+/// `SYS_FS_RECORD_LOCK` -- a POSIX record lock on an open file: `fcntl`'s
+/// `F_GETLK`, `F_SETLK` and `F_SETLKW` for a native program. See the
+/// number's doc. The work is [`super::record_lock::apply`], which the Linux
+/// `fcntl` shares, so the two ABIs cannot describe one lock differently.
+pub fn sys_fs_record_lock(args: &SyscallArgs) -> SyscallResult {
+    use super::number::{RECORD_LOCK_GET, RECORD_LOCK_SET, RECORD_LOCK_SET_WAIT};
+    use super::record_lock::{self, Flock, Op, Owner, Target};
+
+    let handle = args.arg0;
+    let op = match args.arg1 {
+        RECORD_LOCK_GET => Op::Get,
+        RECORD_LOCK_SET => Op::Set,
+        RECORD_LOCK_SET_WAIT => Op::SetWait,
+        _ => return SyscallResult::err(KernelError::InvalidArgument),
+    };
+    if let Err(e) = require_file_handle_owner(handle) {
+        return SyscallResult::err(e);
+    }
+    let mut flock = match Flock::read_user(args.arg2) {
+        Ok(f) => f,
+        Err(e) => return SyscallResult::err(e),
+    };
+    let pid = caller_pid();
+    // Still the caller's once the lock is taken? A lock taken while another
+    // thread closed the handle is dropped again: the close's release has
+    // already run (`record_lock::apply`).
+    let still_held = || pid.is_none_or(|p| pcb::owns_ipc_handle(p, ResourceType::File, handle));
+    let owner = Owner::Process(pid.unwrap_or(0));
+    match record_lock::apply(Target::File(handle), owner, op, &mut flock, still_held) {
+        Ok(()) => {}
+        // A wait a signal ended is restartable, as Linux's `F_SETLKW` is: the
+        // signal-delivery checkpoint restarts it under `SA_RESTART` and
+        // otherwise answers `Interrupted`.
+        Err(KernelError::Interrupted) => {
+            return crate::syscall::linux::restart::restart_result(
+                crate::syscall::linux::restart::ERESTARTSYS,
+            );
+        }
+        Err(e) => return SyscallResult::err(e),
+    }
+    if op == Op::Get {
+        if let Err(e) = flock.write_user(args.arg2) {
+            return SyscallResult::err(e);
+        }
+    }
+    SyscallResult::ok(0)
 }
 
 /// `SYS_FS_SYNC` — flush all filesystems to stable storage.

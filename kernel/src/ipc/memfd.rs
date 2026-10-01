@@ -209,12 +209,21 @@ pub fn dup(handle: MemFdHandle) -> KernelResult<MemFdHandle> {
 /// Drop one reference to a memfd handle.  Removes the entry when the
 /// refcount reaches 0.
 pub fn close(handle: MemFdHandle) {
-    let mut table = MEMFD_TABLE.lock();
-    if let Some(mf) = table.get_mut(&handle.id()) {
-        mf.refcount = mf.refcount.saturating_sub(1);
-        if mf.refcount == 0 {
-            table.remove(&handle.id());
+    let destroyed = {
+        let mut table = MEMFD_TABLE.lock();
+        match table.get_mut(&handle.id()) {
+            Some(mf) => {
+                mf.refcount = mf.refcount.saturating_sub(1);
+                mf.refcount == 0 && table.remove(&handle.id()).is_some()
+            }
+            None => false,
         }
+    };
+    // A memfd is one open file description, so its final close ends its
+    // OFD record locks (`F_OFD_SETLK`), as `fs::handle::close` ends a
+    // file's. After the table lock: nothing is taken under it.
+    if destroyed {
+        crate::fs::reclock::release_memfd_ofd(handle.id());
     }
 }
 

@@ -2067,6 +2067,15 @@ extern "C" fn kernel_main() -> ! {
                 selftest::Severity::Integrity,
                 ipc::multiwait::self_test(),
             );
+            // A completion port's sources wake its parked waiter by themselves.
+            // Here and not in `ipc::completion::self_test()` (Step 16) for the
+            // same reason: before `sti()` a sleep spins without yielding, so
+            // the waiter would not park until its source was already ready.
+            selftest::dispatch(
+                "Completion port sources wake",
+                selftest::Severity::Integrity,
+                ipc::completion::self_test_sources_wake(),
+            );
         }
         case();
     }
@@ -2132,7 +2141,7 @@ extern "C" fn kernel_main() -> ! {
     selftest::dispatch_debug(
         "fcntl flock range",
         selftest::Severity::Diagnostic,
-        syscall::linux::self_test_flock_range(),
+        syscall::record_lock::self_test_flock_range(),
     );
 
     selftest::dispatch_debug(
@@ -5861,6 +5870,14 @@ extern "C" fn kernel_main() -> ! {
                 "Record locks",
                 selftest::Severity::Diagnostic,
                 fs::reclock::self_test(),
+            );
+            // The syscall half both ABIs share: the access-mode rule,
+            // F_GETLK's answer in full, SEEK_CUR/SEEK_END against a real
+            // handle, an OFD's own query, and the close/fcntl race.
+            selftest::dispatch_debug(
+                "Record-lock syscalls",
+                selftest::Severity::Diagnostic,
+                syscall::record_lock::self_test(),
             );
             // netmon backs /proc/netmon and the `netmon` kshell command.  Its
             // init_defaults() previously seeded three FABRICATED connections (sshd

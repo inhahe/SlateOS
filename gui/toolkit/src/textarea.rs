@@ -184,6 +184,7 @@ enum Run {
 }
 
 /// A laid-out text, and what it was laid out for.
+#[derive(Clone)]
 struct Layout {
     revision: u64,
     width: u32,
@@ -194,6 +195,10 @@ struct Layout {
 }
 
 /// A multi-line text field's state. See the module documentation.
+///
+/// Cloned with its undo history and its laid-out lines, which stay right for
+/// the copy: they are kept against a revision the copy carries too.
+#[derive(Clone)]
 pub struct TextArea {
     text: String,
     cursor: TextCursor,

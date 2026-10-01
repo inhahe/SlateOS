@@ -177043,7 +177043,25 @@ anything in it went wrong; `--log FILE` journals somewhere other than
 
 ## TD-C-THE-RETAINED-WIDGET-TREE-HAS-NO-USER-AND-FIVE-OF-ITS-WIDGETS-DRAW-NOTHING (lane C, 2026-09-27)
 
-**Status:** OPEN
+**Status:** FIXED 2026-10-01, all three points -- the tree still has no
+program using it, which is now a choice for programs rather than a defect.
+The layout half was §1455's (flexbox and grid, and clicks routed through
+it). Then: the tree draws in the palette its program gives it
+(`WidgetTree::set_palette`), every kind through its component module
+(`gui/toolkit/src/widget/draw.rs`: `button`, `checkbox`, `radio`, `slider`,
+`field`/`textedit`, `textarea`, `scrollbar`), so one control cannot be drawn
+two ways -- the tests compare the tree's commands with the module's for the
+same box. `Style`'s text and selection colours are optional, unset meaning
+the palette's (they defaulted to black and Windows' blue). The five silent
+kinds draw and answer: `TextArea` holds the toolkit's `TextArea` (press,
+drag, keys, wheel); `RadioButton` is chosen by a click or Space and clears
+its sibling radio buttons; `Slider` holds the toolkit's `Slider` (press,
+drag, keys, the wheel while focused); `ScrollView` lays its content out at
+its width and unbounded height, scrolls under the wheel within it, cuts it
+to its box and draws a bar; `Image` draws its picture. Buttons and boxes
+light under the pointer. **What remains:** a horizontal scrollbar -- the
+toolkit's scrollbar is drawn down a column, so a scroll view's sideways
+scroll has no bar.
 
 **What.** `gui/toolkit/src/widget.rs` -- `Widget`, `WidgetKind` and
 `WidgetTree`, the toolkit's retained widget tree with its flexbox layout

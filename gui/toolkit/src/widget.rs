@@ -10,16 +10,49 @@
 //! The widget tree is rebuilt each frame (immediate-mode-inspired),
 //! but widget state (focus, text cursor, scroll position) persists
 //! via the WidgetId.
+//!
+//! # Drawing
+//!
+//! A [`WidgetTree`] draws in the palette its program gives it
+//! ([`WidgetTree::set_palette`]), and every control in it through the
+//! toolkit's own component module for that control -- `button`, `checkbox`,
+//! `radio`, `slider`, `field` and `textedit`, `textarea`, `scrollbar` (the
+//! `draw` submodule) -- so a control looks the same in a tree as anywhere
+//! else, and follows the user's theme. A colour a widget's [`Style`] sets is
+//! its program's choice; one it leaves unset is the palette's. The theme's
+//! widget style sizes the controls too: a button is as wide as
+//! [`crate::button::width`] makes it.
+//!
+//! A [`WidgetKind::ScrollView`] lays what it holds out at its own width and as
+//! tall as it needs, scrolls it under the wheel, cuts it to its box, and
+//! draws a bar down its right edge -- down only: the toolkit's scrollbar is a
+//! column, so content wider than the view scrolls sideways with no bar.
+
+mod draw;
+#[cfg(test)]
+mod tree_tests;
 
 use crate::color::Color;
-use crate::event::{Event, EventResult, KeyEvent, MouseEvent, MouseEventKind};
+use crate::event::{Event, EventResult, KeyEvent, MouseButton, MouseEvent, MouseEventKind};
 use crate::layout::{
     FlexAlign, FlexDirection, FlexItem, FlexJustify, FlexLayout, LayoutBox, Size, SizeConstraint,
     flex_layout,
 };
-use crate::render::{FontWeightHint, RenderCommand, RenderTree, TextOverflow};
-use crate::style::{Borders, CornerRadii, Edges, FontWeight, Style};
+use crate::palette::Palette;
+use crate::render::{FontWeightHint, RenderCommand, RenderTree};
+use crate::style::{CornerRadii, Edges, FontWeight, Style};
 use crate::text::TextCursor;
+
+/// How tall a progress bar is by default.
+const PROGRESS_HEIGHT: f32 = 12.0;
+
+/// A slider's thumb, across, and its track's thickness: the sizes the shell's
+/// own sliders are drawn at.
+const SLIDER_THUMB: f32 = 14.0;
+const SLIDER_TRACK: f32 = 4.0;
+
+/// How tall a slider's row is: its thumb with room for the light round it.
+const SLIDER_HEIGHT: f32 = 20.0;
 
 /// Unique widget identifier. Used to track persistent state across frames.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -68,6 +101,10 @@ pub struct Widget {
     /// focused?" from its own state could not decide whether to draw a caret
     /// without threading the focused id through every render call.
     focused: bool,
+    /// Whether the pointer is over it: what lights a button or a box. Kept
+    /// by [`WidgetTree::handle_event`] from the pointer's moves, as `focused`
+    /// is from its presses.
+    hovered: bool,
     /// Tooltip text.
     pub tooltip: Option<String>,
 }
@@ -104,21 +141,27 @@ pub enum WidgetKind {
         /// an anchor cannot.
         selection_anchor: Option<usize>,
     },
-    /// Multi-line text area.
+    /// Multi-line text: the toolkit's text area ([`crate::textarea`]) holds the
+    /// text, the caret, the selection, the undo history and the scroll.
     TextArea {
-        value: String,
+        area: crate::textarea::TextArea,
+        /// Shown while it is empty: what it is for.
         placeholder: String,
-        cursor_pos: usize,
-        scroll_offset: f32,
+        /// Whether a press in it is held: the pointer's moves select text
+        /// until it is let go.
+        selecting: bool,
     },
     /// Checkbox.
     Checkbox { checked: CheckState, label: String },
-    /// Radio button.
+    /// One of a group of choices. Its group is its siblings that are radio
+    /// buttons: choosing it clears theirs.
     RadioButton { selected: bool, label: String },
-    /// Scroll view wrapper.
+    /// What it holds, scrolled: laid out as wide as this widget's content and
+    /// as tall as it needs, and shown through this widget's box.
     ScrollView {
         scroll_x: f32,
         scroll_y: f32,
+        /// How wide and tall what it holds is, from the last layout.
         content_width: f32,
         content_height: f32,
     },
@@ -126,9 +169,11 @@ pub enum WidgetKind {
     Separator { vertical: bool },
     /// Progress bar.
     ProgressBar { value: f32, max: f32 },
-    /// Slider.
-    Slider { value: f32, min: f32, max: f32 },
-    /// Image display.
+    /// A value between two bounds: the toolkit's slider ([`crate::slider`])
+    /// holds it and any drag changing it.
+    Slider { slider: crate::slider::Slider },
+    /// A picture the host has uploaded under `image_id`, shown at `width` by
+    /// `height`.
     Image {
         image_id: u64,
         width: f32,
@@ -188,6 +233,7 @@ impl Widget {
             enabled: true,
             visible: true,
             focused: false,
+            hovered: false,
             tooltip: None,
         }
     }
@@ -205,29 +251,20 @@ impl Widget {
         })
     }
 
+    /// A button, drawn by the toolkit's buttons ([`crate::button`]) in the
+    /// theme's shape and the palette's colours, and as wide as they make it.
     pub fn button(text: &str) -> Self {
-        Self {
-            style: Style {
-                background: Color::from_hex(0xE0E0E0),
-                padding: Edges::symmetric(6.0, 16.0),
-                border: Borders::all(1.0, Color::from_hex(0xA0A0A0)),
-                border_radius: CornerRadii::all(4.0),
-                ..Style::default()
-            },
-            ..Self::bare(WidgetKind::Button {
-                text: text.to_string(),
-                pressed: false,
-            })
-        }
+        Self::bare(WidgetKind::Button {
+            text: text.to_string(),
+            pressed: false,
+        })
     }
 
+    /// A one-line text field, drawn in the theme's field ([`crate::field`]).
     pub fn text_input(value: &str, placeholder: &str) -> Self {
         Self {
             style: Style {
-                background: Color::WHITE,
                 padding: Edges::symmetric(4.0, 8.0),
-                border: Borders::all(1.0, Color::from_hex(0xC0C0C0)),
-                border_radius: CornerRadii::all(3.0),
                 min_width: Some(120.0),
                 min_height: Some(28.0),
                 ..Style::default()
@@ -245,30 +282,99 @@ impl Widget {
         }
     }
 
+    /// A check box with its label, drawn by the toolkit's check boxes
+    /// ([`crate::checkbox`]).
     pub fn checkbox(label: &str, checked: bool) -> Self {
+        Self::bare(WidgetKind::Checkbox {
+            checked: if checked {
+                CheckState::Checked
+            } else {
+                CheckState::Unchecked
+            },
+            label: label.to_string(),
+        })
+    }
+
+    /// A choice among its sibling radio buttons, drawn by the toolkit's
+    /// ([`crate::radio`]).
+    pub fn radio(label: &str, selected: bool) -> Self {
+        Self::bare(WidgetKind::RadioButton {
+            selected,
+            label: label.to_string(),
+        })
+    }
+
+    /// A multi-line text field holding `text`, with `placeholder` shown while
+    /// it is empty.
+    pub fn text_area(text: &str, placeholder: &str) -> Self {
         Self {
             style: Style {
-                padding: Edges::symmetric(4.0, 4.0),
+                padding: Edges::symmetric(4.0, 8.0),
+                min_width: Some(200.0),
+                min_height: Some(80.0),
                 ..Style::default()
             },
-            ..Self::bare(WidgetKind::Checkbox {
-                checked: if checked {
-                    CheckState::Checked
-                } else {
-                    CheckState::Unchecked
-                },
-                label: label.to_string(),
+            flex_item: FlexItem {
+                grow: 1.0,
+                ..FlexItem::default()
+            },
+            ..Self::bare(WidgetKind::TextArea {
+                area: crate::textarea::TextArea::with_text(text),
+                placeholder: placeholder.to_string(),
+                selecting: false,
             })
         }
     }
 
+    /// A box that scrolls what it holds, laid out in a column: add the
+    /// content with [`with_child`](Self::with_child).
+    pub fn scroll_view() -> Self {
+        Self {
+            flex_layout: Some(FlexLayout {
+                direction: FlexDirection::Column,
+                ..FlexLayout::default()
+            }),
+            flex_item: FlexItem {
+                grow: 1.0,
+                ..FlexItem::default()
+            },
+            ..Self::bare(WidgetKind::ScrollView {
+                scroll_x: 0.0,
+                scroll_y: 0.0,
+                content_width: 0.0,
+                content_height: 0.0,
+            })
+        }
+    }
+
+    /// A slider from `min` to `max` at `value`, drawn and moved by the
+    /// toolkit's sliders ([`crate::slider`]).
+    pub fn slider(min: f64, max: f64, value: f64) -> Self {
+        Self {
+            style: Style {
+                min_width: Some(120.0),
+                ..Style::default()
+            },
+            ..Self::bare(WidgetKind::Slider {
+                slider: crate::slider::Slider::new(min, max, value),
+            })
+        }
+    }
+
+    /// The picture the host uploaded under `image_id`, `width` by `height`.
+    pub fn image(image_id: u64, width: f32, height: f32) -> Self {
+        Self::bare(WidgetKind::Image {
+            image_id,
+            width,
+            height,
+        })
+    }
+
+    /// A bar `value` of `max` full, in the palette's accent.
     pub fn progress_bar(value: f32, max: f32) -> Self {
         Self {
             style: Style {
-                background: Color::from_hex(0xE8E8E8),
-                border: Borders::all(1.0, Color::from_hex(0xC0C0C0)),
-                border_radius: CornerRadii::all(3.0),
-                min_height: Some(20.0),
+                min_height: Some(PROGRESS_HEIGHT),
                 ..Style::default()
             },
             flex_item: FlexItem {
@@ -279,10 +385,10 @@ impl Widget {
         }
     }
 
+    /// A line across its container, in the palette's line colour.
     pub fn separator() -> Self {
         Self {
             style: Style {
-                background: Color::from_hex(0xD0D0D0),
                 margin: Edges::symmetric(8.0, 0.0),
                 min_height: Some(1.0),
                 ..Style::default()
@@ -420,8 +526,11 @@ impl Widget {
             && matches!(
                 self.kind,
                 WidgetKind::TextInput { .. }
+                    | WidgetKind::TextArea { .. }
                     | WidgetKind::Button { .. }
                     | WidgetKind::Checkbox { .. }
+                    | WidgetKind::RadioButton { .. }
+                    | WidgetKind::Slider { .. }
             )
     }
 
@@ -498,14 +607,46 @@ impl Widget {
         if !self.enabled || !self.visible || !self.contains(px, py) {
             return None;
         }
-        // The children were laid out in this widget's content space.
-        let (ox, oy) = self.content_origin();
-        for child in self.children.iter().rev() {
-            if let Some(hit) = child.focus_target_at(px - ox, py - oy) {
-                return Some(hit);
+        // The children were laid out in this widget's content space -- a
+        // scroll view's scrolled, and shown only inside its box.
+        if !self.scrolls() || self.shows_children_at(px, py) {
+            let (ox, oy) = self.children_origin();
+            for child in self.children.iter().rev() {
+                if let Some(hit) = child.focus_target_at(px - ox, py - oy) {
+                    return Some(hit);
+                }
             }
         }
         self.accepts_focus().then_some(self.id)
+    }
+
+    /// Whether the pointer is over this widget, as its last move left it.
+    #[must_use]
+    pub const fn is_hovered(&self) -> bool {
+        self.hovered
+    }
+
+    /// Note where the pointer is, in this widget's parent's content space:
+    /// over this widget or not, and over which of its children.
+    fn set_hover(&mut self, px: f32, py: f32) {
+        self.hovered = self.visible && self.contains(px, py);
+        let reaches = self.hovered && (!self.scrolls() || self.shows_children_at(px, py));
+        let (ox, oy) = self.children_origin();
+        for child in &mut self.children {
+            if reaches {
+                child.set_hover(px - ox, py - oy);
+            } else {
+                child.clear_hover();
+            }
+        }
+    }
+
+    /// The pointer is over nothing in this subtree.
+    fn clear_hover(&mut self) {
+        self.hovered = false;
+        for child in &mut self.children {
+            child.clear_hover();
+        }
     }
 
     /// Whether the point is inside this widget's outer box.
@@ -539,42 +680,49 @@ impl Widget {
         )
     }
 
-    /// Compute intrinsic content size for this widget.
-    pub fn intrinsic_size(&self) -> Size {
+    /// Compute intrinsic content size for this widget, under the palette `p`
+    /// -- whose theme says how much room a button's padding takes.
+    ///
+    /// A control the toolkit's component modules draw is as big as they make
+    /// it ([`crate::button::width`], [`crate::checkbox::width`], ...), so
+    /// what is laid out and what is drawn agree.
+    pub fn intrinsic_size(&self, p: &Palette) -> Size {
+        let padded = |w: f32, h: f32| {
+            Size::new(
+                w + self.style.padding.horizontal(),
+                h + self.style.padding.vertical(),
+            )
+        };
+        let line = self.style.font_size * self.style.line_height;
+        let least = |w: f32, h: f32| {
+            Size::new(
+                self.style.min_width.unwrap_or(w),
+                self.style.min_height.unwrap_or(h),
+            )
+        };
         match &self.kind {
-            WidgetKind::Label { text } => {
-                let width = self.measure(text);
-                let height = self.style.font_size * self.style.line_height;
-                Size::new(
-                    width + self.style.padding.horizontal(),
-                    height + self.style.padding.vertical(),
-                )
-            }
-            WidgetKind::Button { text, .. } => {
-                let width = self.measure(text);
-                let height = self.style.font_size * self.style.line_height;
-                Size::new(
-                    width + self.style.padding.horizontal(),
-                    height + self.style.padding.vertical(),
-                )
-            }
-            WidgetKind::TextInput { .. } => Size::new(
-                self.style.min_width.unwrap_or(120.0),
-                self.style.min_height.unwrap_or(28.0),
+            WidgetKind::Label { text } => padded(self.measure(text), line),
+            WidgetKind::Button { text, .. } => padded(
+                crate::button::width(&p.widget_style.button, text),
+                crate::button::HEIGHT,
             ),
+            WidgetKind::TextInput { .. } => least(120.0, 28.0),
+            WidgetKind::TextArea { .. } => least(200.0, 80.0),
             WidgetKind::Checkbox { label, .. } => {
-                let checkbox_size = self.style.font_size;
-                let width = checkbox_size + 8.0 + self.measure(label);
-                let height = self.style.font_size * self.style.line_height;
-                Size::new(
-                    width + self.style.padding.horizontal(),
-                    height + self.style.padding.vertical(),
-                )
+                padded(crate::checkbox::width(label), crate::checkbox::HEIGHT)
             }
-            WidgetKind::ProgressBar { .. } => Size::new(
-                self.style.min_width.unwrap_or(200.0),
-                self.style.min_height.unwrap_or(20.0),
+            WidgetKind::RadioButton { label, .. } => {
+                padded(crate::radio::width(label), crate::checkbox::HEIGHT)
+            }
+            WidgetKind::ProgressBar { .. } => least(200.0, PROGRESS_HEIGHT),
+            WidgetKind::Slider { .. } => Size::new(
+                self.style.min_width.unwrap_or(120.0),
+                SLIDER_HEIGHT.max(self.style.min_height.unwrap_or(0.0)),
             ),
+            WidgetKind::Image { width, height, .. } => {
+                let side = |v: f32| if v.is_finite() { v.max(0.0) } else { 0.0 };
+                Size::new(side(*width), side(*height))
+            }
             WidgetKind::Separator { vertical } => {
                 if *vertical {
                     Size::new(1.0, 0.0)
@@ -582,11 +730,10 @@ impl Widget {
                     Size::new(0.0, 1.0)
                 }
             }
+            // A scroll view is as big as its style asks: what it holds is
+            // what it scrolls, and is not what sizes it.
+            WidgetKind::ScrollView { .. } => least(0.0, 0.0),
             WidgetKind::Container => Size::ZERO,
-            _ => Size::new(
-                self.style.min_width.unwrap_or(0.0),
-                self.style.min_height.unwrap_or(0.0),
-            ),
         }
     }
 
@@ -627,31 +774,33 @@ impl Widget {
 
     /// The visible children as a flex container lays them out: each one's
     /// border box with room to spare, and its item.
-    fn flex_children(&self) -> Vec<(Size, FlexItem)> {
+    fn flex_children(&self, p: &Palette) -> Vec<(Size, FlexItem)> {
         self.children
             .iter()
             .filter(|c| c.visible)
-            .map(|c| (c.border_box_size(), c.flex_item_in_layout()))
+            .map(|c| (c.border_box_size(p), c.flex_item_in_layout()))
             .collect()
     }
 
     /// How big this widget's border box is with room to spare: its content,
     /// padding and border. A flex container's content is what its children
     /// take laid out unbounded -- a column of labels is as wide as its widest
-    /// -- and no less than its own size from its style.
-    fn border_box_size(&self) -> Size {
+    /// -- and no less than its own size from its style. A scroll view's is
+    /// its own: what it holds is what it scrolls.
+    fn border_box_size(&self, p: &Palette) -> Size {
         let (frame_h, frame_v) = self.frame();
-        let own = self.intrinsic_size();
+        let own = self.intrinsic_size(p);
         let border = self.border_edges();
         let mut size = Size::new(
             own.width + border.horizontal(),
             own.height + border.vertical(),
         );
         if let Some(ref flex) = self.flex_layout
+            && !self.scrolls()
             && self.children.iter().any(|c| c.visible)
         {
             let unbounded = Size::new(f32::INFINITY, f32::INFINITY);
-            let boxes = flex_layout(unbounded, flex, &self.flex_children(), &Edges::ZERO);
+            let boxes = flex_layout(unbounded, flex, &self.flex_children(p), &Edges::ZERO);
             let wide = boxes
                 .iter()
                 .map(|b| b.x + b.outer_width())
@@ -705,12 +854,12 @@ impl Widget {
     /// padding counted twice), a child's width was its border box though
     /// `width` is a content size (its padding twice again), and margins moved
     /// a widget's drawing without the layout leaving room for them.
-    pub fn do_layout(&mut self, constraint: SizeConstraint) {
+    pub fn do_layout(&mut self, constraint: SizeConstraint, p: &Palette) {
         if !self.visible {
             return;
         }
         let (frame_h, frame_v) = self.frame();
-        let outer = constraint.constrain(self.border_box_size());
+        let outer = constraint.constrain(self.border_box_size(p));
         self.layout.width = (outer.width - frame_h).max(0.0);
         self.layout.height = (outer.height - frame_v).max(0.0);
         self.layout.padding = self.style.padding;
@@ -720,37 +869,88 @@ impl Widget {
         if let Some(ref flex) = self.flex_layout
             && self.children.iter().any(|c| c.visible)
         {
+            let scrolls = self.scrolls();
             // The room inside: what the constraint allows less the frame,
-            // unbounded where the constraint is.
-            let room = Size::new(
-                (constraint.max_width - frame_h).max(0.0),
-                (constraint.max_height - frame_v).max(0.0),
-            );
-            let boxes = flex_layout(room, flex, &self.flex_children(), &Edges::ZERO);
+            // unbounded where the constraint is -- and for a scroll view, its
+            // own width and as tall as what it holds needs.
+            let room = if scrolls {
+                Size::new(self.layout.width, f32::INFINITY)
+            } else {
+                Size::new(
+                    (constraint.max_width - frame_h).max(0.0),
+                    (constraint.max_height - frame_v).max(0.0),
+                )
+            };
+            let boxes = flex_layout(room, flex, &self.flex_children(p), &Edges::ZERO);
 
             // `flex_children` takes the visible children in order and
             // `flex_layout` answers one box each, so the visible children
             // and the boxes pair off one to one -- which is what `zip` says.
             for (child, lb) in self.children.iter_mut().filter(|c| c.visible).zip(&boxes) {
                 // Its border box is exactly what the flex layout gave it.
-                child.do_layout(SizeConstraint::tight(Size::new(lb.width, lb.height)));
+                child.do_layout(SizeConstraint::tight(Size::new(lb.width, lb.height)), p);
                 child.layout.x = lb.x;
                 child.layout.y = lb.y;
             }
 
+            let wide = boxes
+                .iter()
+                .map(|b| b.x + b.outer_width())
+                .fold(0.0_f32, f32::max);
+            let tall = boxes
+                .iter()
+                .map(|b| b.y + b.outer_height())
+                .fold(0.0_f32, f32::max);
+            let (view_w, view_h) = (self.layout.width, self.layout.height);
+            if let WidgetKind::ScrollView {
+                scroll_x,
+                scroll_y,
+                content_width,
+                content_height,
+            } = &mut self.kind
+            {
+                // What it holds may have shrunk under the scroll: keep the
+                // scroll within it.
+                *content_width = wide;
+                *content_height = tall;
+                *scroll_x = scroll_x.clamp(0.0, (wide - view_w).max(0.0));
+                *scroll_y = scroll_y.clamp(0.0, (tall - view_h).max(0.0));
+                return;
+            }
+
             if !constraint.max_width.is_finite() {
-                self.layout.width = boxes
-                    .iter()
-                    .map(|b| b.x + b.outer_width())
-                    .fold(0.0_f32, f32::max);
+                self.layout.width = wide;
             }
             if !constraint.max_height.is_finite() {
-                self.layout.height = boxes
-                    .iter()
-                    .map(|b| b.y + b.outer_height())
-                    .fold(0.0_f32, f32::max);
+                self.layout.height = tall;
             }
         }
+    }
+
+    /// Whether this widget scrolls what it holds.
+    const fn scrolls(&self) -> bool {
+        matches!(self.kind, WidgetKind::ScrollView { .. })
+    }
+
+    /// Where this widget's children are, in its parent's content space: its
+    /// content origin, less how far a scroll view has scrolled. The one
+    /// statement of it, for drawing, the pointer and focus alike.
+    fn children_origin(&self) -> (f32, f32) {
+        let (ox, oy) = self.content_origin();
+        match self.kind {
+            WidgetKind::ScrollView {
+                scroll_x, scroll_y, ..
+            } => (ox - scroll_x, oy - scroll_y),
+            _ => (ox, oy),
+        }
+    }
+
+    /// Whether the point, in this widget's parent's content space, is where
+    /// its children show: inside its content box. A scroll view's children
+    /// scrolled out of it are neither seen nor hit.
+    fn shows_children_at(&self, px: f32, py: f32) -> bool {
+        let (ox, oy) = self.content_origin();
+        px >= ox && py >= oy && px <= ox + self.layout.width && py <= oy + self.layout.height
     }
 
     // ======================================================================
@@ -766,7 +966,14 @@ impl Widget {
     /// The fade is each colour's: overlapping parts of one widget show
     /// through each other where a compositor's group opacity would not, and
     /// pictures are drawn unfaded (see [`RenderCommand::faded`]).
-    pub fn render(&self, tree: &mut RenderTree) {
+    ///
+    /// Every control is drawn by the toolkit's own component module for it
+    /// -- [`crate::button`], [`crate::checkbox`], [`crate::radio`],
+    /// [`crate::slider`], [`crate::field`], [`crate::textarea`] -- in the
+    /// palette `p`, so a control in a widget tree looks as it does anywhere
+    /// else and follows the user's theme. A colour the widget's style sets is
+    /// the program's choice and wins; one it leaves unset is the palette's.
+    pub fn render(&self, p: &Palette, tree: &mut RenderTree) {
         if !self.visible {
             return;
         }
@@ -774,17 +981,17 @@ impl Widget {
         // default, opaque, rather than vanishing.
         let opacity = self.style.opacity;
         if opacity.is_nan() || opacity >= 1.0 {
-            self.render_opaque(tree);
+            self.render_opaque(p, tree);
         } else if opacity > 0.0 {
             let mut own = RenderTree::new();
-            self.render_opaque(&mut own);
+            self.render_opaque(p, &mut own);
             tree.commands
                 .extend(own.commands.into_iter().map(|c| c.faded(opacity)));
         }
     }
 
     /// [`render`](Self::render), at full opacity.
-    fn render_opaque(&self, tree: &mut RenderTree) {
+    fn render_opaque(&self, p: &Palette, tree: &mut RenderTree) {
         let x = self.layout.x + self.layout.margin.left;
         let y = self.layout.y + self.layout.margin.top;
         let w = self.layout.border_box_width();
@@ -842,226 +1049,31 @@ impl Widget {
             }
         }
 
-        // Content
-        let cx = x + self.layout.border_widths.left + self.layout.padding.left;
-        let cy = y + self.layout.border_widths.top + self.layout.padding.top;
+        // What the widget is, drawn by the component module for it.
+        self.draw_kind(p, tree, (x, y, w, h));
 
-        match &self.kind {
-            WidgetKind::Label { text } => {
-                tree.push(RenderCommand::Text {
-                    x: cx,
-                    y: cy,
-                    text: text.clone(),
-                    color: self.style.foreground,
-                    font_size: self.style.font_size,
-                    font_weight: weight_to_hint(self.style.font_weight),
-                    max_width: Some(self.layout.width),
-                    overflow: TextOverflow::Ellipsis,
-                });
-            }
-            WidgetKind::Button { text, pressed } => {
-                let bg = if *pressed {
-                    Color::from_hex(0xC0C0C0)
-                } else {
-                    self.style.background
-                };
-                // Re-render background if pressed changes it
-                if *pressed {
-                    tree.push(RenderCommand::FillRect {
-                        x,
-                        y,
-                        width: w,
-                        height: h,
-                        color: bg,
-                        corner_radii: self.style.border_radius,
-                    });
-                }
-                tree.push(RenderCommand::Text {
-                    x: cx,
-                    y: cy,
-                    text: text.clone(),
-                    color: self.style.foreground,
-                    font_size: self.style.font_size,
-                    font_weight: FontWeightHint::Regular,
-                    max_width: Some(self.layout.width),
-                    overflow: TextOverflow::Ellipsis,
-                });
-            }
-            WidgetKind::TextInput {
-                value,
-                placeholder,
-                cursor,
-                selection_anchor,
-            } => {
-                let size = self.style.font_size;
-                let avail = self.layout.width;
-                let line_h = size * self.style.line_height;
-
-                // An empty field shows its placeholder, which is not the user's
-                // text: it never scrolls, it is never selected, and it gets an
-                // ellipsis if it does not fit, because a truncated hint read as
-                // a whole hint is the usual reason to want one.
-                if value.is_empty() {
-                    tree.push(RenderCommand::Text {
-                        x: cx,
-                        y: cy,
-                        text: placeholder.clone(),
-                        color: Color::GRAY,
-                        font_size: size,
-                        font_weight: FontWeightHint::Regular,
-                        max_width: Some(avail),
-                        overflow: TextOverflow::Ellipsis,
-                    });
-                    if self.focused {
-                        crate::textedit::push_caret(
-                            tree,
-                            cx,
-                            cy,
-                            line_h,
-                            self.style.foreground,
-                            crate::textedit::CARET_WIDTH,
-                        );
-                    }
-                } else {
-                    self.render_text_input_value(
-                        tree,
-                        value,
-                        *cursor,
-                        *selection_anchor,
-                        cx,
-                        cy,
-                        avail,
-                        line_h,
-                    );
-                }
-            }
-            WidgetKind::Checkbox { checked, label } => {
-                // Draw checkbox box
-                let box_size = self.style.font_size;
-                tree.push(RenderCommand::StrokeRect {
-                    x: cx,
-                    y: cy + 2.0,
-                    width: box_size,
-                    height: box_size,
-                    color: Color::from_hex(0x606060),
-                    line_width: 1.0,
-                    corner_radii: CornerRadii::all(2.0),
-                });
-                if *checked == CheckState::Checked {
-                    tree.push(RenderCommand::FillRect {
-                        x: cx + 3.0,
-                        y: cy + 5.0,
-                        width: box_size - 6.0,
-                        height: box_size - 6.0,
-                        color: Color::from_hex(0x0078D7),
-                        corner_radii: CornerRadii::ZERO,
-                    });
-                }
-                // Draw label
-                tree.push(RenderCommand::Text {
-                    x: cx + box_size + 8.0,
-                    y: cy,
-                    text: label.clone(),
-                    color: self.style.foreground,
-                    font_size: self.style.font_size,
-                    font_weight: FontWeightHint::Regular,
-                    max_width: None,
-                    overflow: TextOverflow::Clip,
-                });
-            }
-            WidgetKind::ProgressBar { value, max } => {
-                let fraction = if *max > 0.0 { value / max } else { 0.0 };
-                let fill_width = self.layout.width * fraction.clamp(0.0, 1.0);
-                tree.push(RenderCommand::FillRect {
-                    x: cx,
-                    y: cy,
-                    width: fill_width,
-                    height: self.layout.height,
-                    color: Color::from_hex(0x0078D7),
-                    corner_radii: CornerRadii::all(2.0),
-                });
-            }
-            WidgetKind::Separator { vertical } => {
-                if *vertical {
-                    tree.push(RenderCommand::Line {
-                        x1: cx + w / 2.0,
-                        y1: cy,
-                        x2: cx + w / 2.0,
-                        y2: cy + h,
-                        color: self.style.background,
-                        width: 1.0,
-                    });
-                } else {
-                    tree.push(RenderCommand::Line {
-                        x1: cx,
-                        y1: cy + h / 2.0,
-                        x2: cx + self.layout.width,
-                        y2: cy + h / 2.0,
-                        color: self.style.background,
-                        width: 1.0,
-                    });
-                }
-            }
-            WidgetKind::Container => {} // Container renders through children
-            _ => {}
-        }
-
-        // Render children with translation
+        // Its children, from where they are -- a scroll view's scrolled -- and
+        // cut to its content box.
         if !self.children.is_empty() {
-            tree.push(RenderCommand::PushTranslate { dx: cx, dy: cy });
+            let (ox, oy) = self.children_origin();
+            let (cx, cy) = self.content_origin();
+            tree.push(RenderCommand::PushTranslate { dx: ox, dy: oy });
             tree.push(RenderCommand::PushClip {
-                x: 0.0,
-                y: 0.0,
+                x: cx - ox,
+                y: cy - oy,
                 width: self.layout.width,
                 height: self.layout.height,
             });
 
             for child in &self.children {
-                child.render(tree);
+                child.render(p, tree);
             }
 
             tree.push(RenderCommand::PopClip);
             tree.push(RenderCommand::PopTranslate);
         }
-    }
-
-    /// Draw a non-empty text field's contents: selection, text, caret.
-    ///
-    /// Split out of the render arm because the arm has to keep rendering
-    /// children after it — an early `return` there would silently drop them.
-    /// The drawing itself belongs to `crate::textedit`, which is shared with the
-    /// toolkit's other single-line fields so that a selection looks the same in
-    /// all of them.
-    fn render_text_input_value(
-        &self,
-        tree: &mut RenderTree,
-        value: &str,
-        cursor: TextCursor,
-        selection_anchor: Option<usize>,
-        cx: f32,
-        cy: f32,
-        avail: f32,
-        line_h: f32,
-    ) {
-        crate::textedit::draw(
-            tree,
-            &crate::textedit::SingleLine {
-                text: value,
-                cursor,
-                selection_anchor,
-                focused: self.focused,
-                x: cx,
-                y: cy,
-                width: avail,
-                line_height: line_h,
-                font_size: self.style.font_size,
-                weight: FontWeightHint::Regular,
-                color: self.style.foreground,
-                selection_bg: self.style.selection_bg,
-                selection_fg: self.style.selection_fg,
-                caret_width: self.style.caret_width,
-            },
-        );
+        // A scroll view's bars, over what it holds.
+        self.draw_scrollbars(p, tree);
     }
 
     // ======================================================================
@@ -1076,10 +1088,13 @@ impl Widget {
 
         // Try children first (front-to-back, last child is "on top") -- the
         // pointer in this widget's content space, where they were laid out
-        // and are drawn.
+        // and are drawn, a scroll view's scrolled; and only where they show,
+        // for a scroll view, which cuts them to its box.
         let translated;
+        let mut offer = true;
         let inner = if let Event::Mouse(mouse) = event {
-            let (ox, oy) = self.content_origin();
+            offer = !self.scrolls() || self.shows_children_at(mouse.x, mouse.y);
+            let (ox, oy) = self.children_origin();
             translated = Event::Mouse(MouseEvent {
                 x: mouse.x - ox,
                 y: mouse.y - oy,
@@ -1089,9 +1104,15 @@ impl Widget {
         } else {
             event
         };
-        for child in self.children.iter_mut().rev() {
-            if child.handle_event(inner) == EventResult::Consumed {
-                return EventResult::Consumed;
+        if offer {
+            for index in (0..self.children.len()).rev() {
+                let Some(child) = self.children.get_mut(index) else {
+                    continue;
+                };
+                if child.handle_event(inner) == EventResult::Consumed {
+                    self.choose_radio(index);
+                    return EventResult::Consumed;
+                }
             }
         }
 
@@ -1113,19 +1134,110 @@ impl Widget {
         }
     }
 
-    fn handle_mouse(&mut self, mouse: &MouseEvent) -> EventResult {
-        if !self.contains(mouse.x, mouse.y) {
-            return EventResult::Ignored;
+    /// After the child at `index` took an event: if it is a radio button and
+    /// is now chosen, its sibling radio buttons -- its group -- are not.
+    fn choose_radio(&mut self, index: usize) {
+        let chosen = matches!(
+            self.children.get(index).map(|child| &child.kind),
+            Some(WidgetKind::RadioButton { selected: true, .. })
+        );
+        if !chosen {
+            return;
         }
+        for (at, sibling) in self.children.iter_mut().enumerate() {
+            if at != index
+                && let WidgetKind::RadioButton { selected, .. } = &mut sibling.kind
+            {
+                *selected = false;
+            }
+        }
+    }
 
+    fn handle_mouse(&mut self, mouse: &MouseEvent) -> EventResult {
+        let inside = self.contains(mouse.x, mouse.y);
         let font_size = self.style.font_size;
-        let content_x = self.layout.x
-            + self.layout.margin.left
-            + self.layout.border_widths.left
-            + self.layout.padding.left;
-        let content_w = self.layout.width;
+        let row = font_size * self.style.line_height;
+        let (content_x, content_y) = self.content_origin();
+        let (content_w, content_h) = (self.layout.width, self.layout.height);
+        let focused = self.focused;
+        let metrics = self.text_metrics();
+        let placement = self.slider_placement();
+        let taken = |yes: bool| {
+            if yes {
+                EventResult::Consumed
+            } else {
+                EventResult::Ignored
+            }
+        };
 
         match &mut self.kind {
+            // A slider follows its drag wherever the pointer goes, and decides
+            // itself what of the pointer is its; the wheel moves it only while
+            // it has the keyboard, as its module asks.
+            WidgetKind::Slider { slider } => match mouse.kind {
+                MouseEventKind::Scroll { dy, .. } if focused && inside => {
+                    taken(slider.wheel(dy).is_taken())
+                }
+                _ => taken(slider.handle_mouse(&placement, mouse).is_taken()),
+            },
+            // A text area selects while a press in it is held, wherever the
+            // pointer goes; and scrolls under the wheel.
+            WidgetKind::TextArea {
+                area, selecting, ..
+            } => match mouse.kind {
+                MouseEventKind::Press(MouseButton::Left) if inside => {
+                    area.press(mouse.x - content_x, mouse.y - content_y, 1, false, &metrics);
+                    *selecting = true;
+                    EventResult::Consumed
+                }
+                MouseEventKind::DoubleClick(MouseButton::Left) if inside => {
+                    area.press(mouse.x - content_x, mouse.y - content_y, 2, false, &metrics);
+                    *selecting = true;
+                    EventResult::Consumed
+                }
+                MouseEventKind::Move if *selecting => {
+                    area.drag_to(mouse.x - content_x, mouse.y - content_y, &metrics);
+                    EventResult::Consumed
+                }
+                MouseEventKind::Release(_) if *selecting => {
+                    *selecting = false;
+                    EventResult::Consumed
+                }
+                MouseEventKind::Scroll { dy, .. } if inside => {
+                    area.scroll_by(crate::wheel::pixels(dy, metrics.line_height()), &metrics);
+                    EventResult::Consumed
+                }
+                _ => EventResult::Ignored,
+            },
+            _ if !inside => EventResult::Ignored,
+            // The wheel scrolls a scroll view, as far as it goes; a turn
+            // that moves nothing is left for a scroll view round it.
+            WidgetKind::ScrollView {
+                scroll_x,
+                scroll_y,
+                content_width,
+                content_height,
+            } => match mouse.kind {
+                MouseEventKind::Scroll { dx, dy } => {
+                    let before = (*scroll_x, *scroll_y);
+                    *scroll_y = (*scroll_y + crate::wheel::pixels(dy, row))
+                        .clamp(0.0, (*content_height - content_h).max(0.0));
+                    *scroll_x = (*scroll_x + crate::wheel::pixels_x(dx, row))
+                        .clamp(0.0, (*content_width - content_w).max(0.0));
+                    taken((*scroll_x, *scroll_y) != before)
+                }
+                _ => EventResult::Ignored,
+            },
+            // A click chooses a radio button; its parent clears the rest of
+            // its group (`choose_radio`).
+            WidgetKind::RadioButton { selected, .. } => {
+                if matches!(mouse.kind, MouseEventKind::Release(_)) {
+                    *selected = true;
+                    EventResult::Consumed
+                } else {
+                    EventResult::Ignored
+                }
+            }
             // A click in a text field puts the caret where it landed. The
             // offset is resolved by the shaper (`cursor_at`), not by dividing
             // by an average character width, so it lands on the boundary the
@@ -1187,8 +1299,10 @@ impl Widget {
         // Read before `kind` is borrowed mutably below. The arrows measure the
         // text to find where the caret sits on screen, and they have to measure
         // it at the size it is *drawn* at (see the `Left` arm), which lives in
-        // `style` — a different field of the same `self`.
+        // `style` — a different field of the same `self`. A text area's box is
+        // read for the same reason.
         let font_size = self.style.font_size;
+        let metrics = self.text_metrics();
 
         let shift = key.modifiers.shift;
 
@@ -1360,6 +1474,31 @@ impl Widget {
                     EventResult::Ignored
                 }
             }
+            // Space chooses a radio button, as a click does.
+            WidgetKind::RadioButton { selected, .. } => {
+                if key.key == crate::event::Key::Space {
+                    *selected = true;
+                    EventResult::Consumed
+                } else {
+                    EventResult::Ignored
+                }
+            }
+            WidgetKind::Slider { slider } => {
+                if slider.handle_key(key).is_taken() {
+                    EventResult::Consumed
+                } else {
+                    EventResult::Ignored
+                }
+            }
+            // A text area's editing keys are its module's: typing, deleting,
+            // the arrows and their selections, undo, the clipboard. What it
+            // leaves -- Escape, Tab -- is the window's.
+            WidgetKind::TextArea { area, .. } => match area.edit_key(key, &metrics) {
+                crate::textinput::KeyEdit::Unhandled => EventResult::Ignored,
+                crate::textinput::KeyEdit::Handled | crate::textinput::KeyEdit::Changed => {
+                    EventResult::Consumed
+                }
+            },
             _ => EventResult::Ignored,
         }
     }
@@ -1378,15 +1517,37 @@ pub struct WidgetTree {
     pub root: Widget,
     pub window_width: f32,
     pub window_height: f32,
+    /// What the tree draws in: the user's palette, from its program
+    /// ([`set_palette`](Self::set_palette)). Its theme's widget style also
+    /// sizes the controls.
+    palette: Palette,
 }
 
 impl WidgetTree {
+    /// A tree for a window `width` by `height`, drawn in the light palette
+    /// until its program gives it the user's: this crate cannot read the
+    /// user's settings, its programs can.
     pub fn new(root: Widget, width: f32, height: f32) -> Self {
         Self {
             root,
             window_width: width,
             window_height: height,
+            palette: Palette::for_mode(true),
         }
+    }
+
+    /// Draw in `palette` from now on -- the user's, and again when the user
+    /// changes theme -- and lay the tree out again: a theme's buttons are as
+    /// wide as its padding makes them.
+    pub fn set_palette(&mut self, palette: Palette) {
+        self.palette = palette;
+        self.layout();
+    }
+
+    /// The palette the tree draws in.
+    #[must_use]
+    pub const fn palette(&self) -> &Palette {
+        &self.palette
     }
 
     /// Perform layout on the entire tree.
@@ -1394,18 +1555,21 @@ impl WidgetTree {
         // The root's border box is the window less the root's own margins:
         // the window is its margin box, at the window's corner.
         let margin = self.root.style.margin;
-        self.root.do_layout(SizeConstraint::tight(Size::new(
-            (self.window_width - margin.horizontal()).max(0.0),
-            (self.window_height - margin.vertical()).max(0.0),
-        )));
+        self.root.do_layout(
+            SizeConstraint::tight(Size::new(
+                (self.window_width - margin.horizontal()).max(0.0),
+                (self.window_height - margin.vertical()).max(0.0),
+            )),
+            &self.palette,
+        );
         self.root.layout.x = 0.0;
         self.root.layout.y = 0.0;
     }
 
-    /// Render the entire tree into a render command list.
+    /// Render the entire tree into a render command list, in its palette.
     pub fn render(&self) -> RenderTree {
         let mut tree = RenderTree::new();
-        self.root.render(&mut tree);
+        self.root.render(&self.palette, &mut tree);
         tree
     }
 
@@ -1497,6 +1661,16 @@ impl WidgetTree {
                 // still blinking in a field the user has clicked away from is
                 // a caret that lies about where the next keystroke goes.
                 self.focus(self.root.focus_target_at(mouse.x, mouse.y));
+            }
+            // The pointer's moves say what it is over, which lights a button
+            // or a box as the pointer crosses it.
+            Event::Mouse(mouse)
+                if matches!(mouse.kind, MouseEventKind::Move | MouseEventKind::Enter) =>
+            {
+                self.root.set_hover(mouse.x, mouse.y);
+            }
+            Event::Mouse(mouse) if matches!(mouse.kind, MouseEventKind::Leave) => {
+                self.root.clear_hover();
             }
             _ => {}
         }
@@ -1651,7 +1825,7 @@ mod tests {
         let widest = column
             .children
             .iter()
-            .map(|c| c.border_box_size().width)
+            .map(|c| c.border_box_size(tree.palette()).width)
             .fold(0.0_f32, f32::max);
         assert!(widest > 0.0);
         assert_eq!(column.layout.border_box_width(), widest);
@@ -2235,19 +2409,27 @@ mod tests {
     // The caret, the selection and the scroll offset
     // ======================================================================
 
+    /// The palette the tests draw and lay out in: a tree's own default.
+    fn test_palette() -> Palette {
+        Palette::for_mode(true)
+    }
+
     fn laid_out(mut w: Widget, width: f32) -> Widget {
-        w.do_layout(SizeConstraint {
-            min_width: width,
-            max_width: width,
-            min_height: 28.0,
-            max_height: 28.0,
-        });
+        w.do_layout(
+            SizeConstraint {
+                min_width: width,
+                max_width: width,
+                min_height: 28.0,
+                max_height: 28.0,
+            },
+            &test_palette(),
+        );
         w
     }
 
     fn drawn(w: &Widget) -> RenderTree {
         let mut tree = RenderTree::new();
-        w.render(&mut tree);
+        w.render(&test_palette(), &mut tree);
         tree
     }
 
@@ -2460,14 +2642,19 @@ mod tests {
         }
 
         let tree = drawn(&w);
-        let highlighted = tree.commands.iter().any(|c| {
-            matches!(c, RenderCommand::FillRect { color, .. } if *color == crate::style::Style::default().selection_bg)
-        });
+        // A style that says no selection colours takes the palette's: the
+        // user's accent, and the ink that reads on it.
+        let accent = test_palette().accent;
+        let highlighted = tree
+            .commands
+            .iter()
+            .any(|c| matches!(c, RenderCommand::FillRect { color, .. } if *color == accent));
         assert!(highlighted, "the selected range must be painted");
 
+        let on_accent = crate::palette::readable_on(accent);
         let recoloured = tree.commands.iter().any(|c| {
             matches!(c, RenderCommand::RichText { spans, .. }
-                if spans.iter().any(|s| s.color == crate::style::Style::default().selection_fg))
+                if spans.iter().any(|s| s.color == on_accent))
         });
         assert!(
             recoloured,

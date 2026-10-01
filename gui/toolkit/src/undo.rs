@@ -64,7 +64,7 @@ struct NodeId(usize);
 const ROOT: NodeId = NodeId(0);
 
 /// One step, where it hangs, and where redo goes from it.
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 struct Node<E> {
     /// The step. `None` only for the root, which is the state before every
     /// step the history still holds.
@@ -92,7 +92,10 @@ struct Node<E> {
 /// parent's redo branch, and pruning keeps the redo index on the same child.
 /// Undo and a journey *up* to a fork then need to set nothing: the branch
 /// redo takes from there is already the one just left.
-#[derive(Debug)]
+///
+/// Cloned whole, branches and all: a copied field undoes as its original
+/// would.
+#[derive(Clone, Debug)]
 pub struct UndoHistory<E> {
     /// Every node, by id; `None` for a freed slot.
     nodes: Vec<Option<Node<E>>>,

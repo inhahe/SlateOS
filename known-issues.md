@@ -2444,9 +2444,13 @@ nothing for these to set. `sudo`'s three were read too: all work (the
 command really runs as the target user; a comment saying it was simulated
 was false and is fixed); `sudoedit` stays the same file, while `visudo`
 and `sudoreplay` need less than `sudo` holds and so, per §1045, earn crates
-of their own -- a split still to do. The ledger stands at **82**.
+of their own -- a split still to do. The ledger stood at **82**.
+**`userspace/perf`** (`perf-stat`, `perf-record`, `perf-report`, `perf-top`) is
+deleted for fabricating: its counters came from "simulated"
+`/proc/<pid>/perf_events` files, and without them `perf stat` printed
+`0 cycles` as a measurement (its tests asserted the zero). **78.**
 **Still to judge:** `systemctl`'s
-eight, `sysstat`, `perf`,
+eight, `sysstat`,
 `cpupower`, `thermald`, `resolvectl`, `hostnamectl`'s domain names, `ntpd`,
 `xdg`, and the single names of `coredumpctl`, `dmidecode`, `efibootmgr`,
 `eject`, `fio`, `hwinfo`, `inotify`, `loginctl`, `losetup`, `rfkill`, `ss`.

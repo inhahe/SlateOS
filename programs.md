@@ -11,9 +11,9 @@ A new program is recorded here in the commit that creates it (§1053): run
 the script, commit `programs.md` with the program. `--check` fails when the
 two disagree.
 
-**454 programs; 88 on the image, 6 carried inside the kernel.**
+**453 programs; 88 on the image, 6 carried inside the kernel.**
 
-## Userland utilities and services (`userspace/`, lane B) -- 299
+## Userland utilities and services (`userspace/`, lane B) -- 298
 
 | Program | What it does | On image | Crate | Other names |
 |---|---|---|---|---|
@@ -200,7 +200,6 @@ two disagree.
 | `paste` | Write corresponding lines of several files side by side. | yes | `coreutils` |  |
 | `patch` | Apply a diff file to originals. | yes | `coreutils` |  |
 | `pathchk` | Check whether file names are valid or portable. |  | `coreutils` |  |
-| `perf` | Performance Monitoring and Analysis Tool |  |  | `perf-record` *(not installed)*, `perf-report` *(not installed)*, `perf-stat` *(not installed)*, `perf-top` *(not installed)* |
 | `pgrep` | Process Grep / Kill Utility |  |  |  |
 | `ping` | ICMP Ping Utility |  |  |  |
 | `pinky` | A lightweight `finger`: who is logged in, or what is known about named users. |  | `coreutils` |  |

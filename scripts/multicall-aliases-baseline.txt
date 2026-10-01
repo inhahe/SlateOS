@@ -54,10 +54,6 @@ lp:lpstat
 newgrp:sg
 ntpd:ntpdate
 ntpd:sntp
-perf:perf-record
-perf:perf-report
-perf:perf-stat
-perf:perf-top
 resolvectl:host
 resolvectl:resolvconf
 resolvectl:systemd-resolve

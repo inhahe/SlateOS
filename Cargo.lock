@@ -3047,6 +3047,7 @@ name = "powerctl"
 version = "0.1.0"
 dependencies = [
  "libcall",
+ "libservicebus",
  "quoting",
 ]
 
@@ -3497,6 +3498,7 @@ dependencies = [
 name = "service"
 version = "0.1.0"
 dependencies = [
+ "libservicebus",
  "quoting",
 ]
 

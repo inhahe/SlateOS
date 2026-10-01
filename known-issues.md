@@ -140457,6 +140457,24 @@ or so guards that gate a privilege, which is a reviewable number.
 
 ## B: `org.slateos.ServiceManager` has two clients and no provider
 
+**2026-10-01: the clients now really ask; there is still nobody to answer.**
+Both used to "open" the name with syscall 200, which is `SYS_CHANNEL_CREATE`:
+it took the name's address as its flags and returned a fresh channel
+connected to nothing, so neither ever reached any service even in principle
+(lane F's
+`requests/f-b-logind-refuses-every-caller-because-libservicebus-never-asks-who-it-is.md`,
+point 3). Both now go through `libservicebus` (`Connection::connect`, then
+method calls with `fields` arguments: `PowerOff`, `Reboot`, `Suspend`,
+`Hibernate`, `SchedulePower`, `CancelScheduledPower`; `StartService`,
+`StopService`, `RestartService`, `EnableService`, `DisableService`,
+`ReloadService`), so today they fail with "no such service" -- the true
+reason -- and fall back as described below. Those method names are the
+interface a provider must implement; they were chosen on the clients' side
+because there was no provider to follow. One behaviour changed: `powerctl`
+no longer treats a *refusal* as "nobody answered" and forces the direct
+fallback; it reports the refusal and exits 1. The rest of this entry -- no
+provider, and the open design question of who should be one -- stands.
+
 `userspace/powerctl` (`SERVICE_MANAGER_NAME`, main.rs:98) and
 `userspace/service` (main.rs:79) both open a channel to the well-known name
 `org.slateos.ServiceManager`. **Nothing anywhere registers that name.** A

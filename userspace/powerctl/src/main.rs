@@ -23,19 +23,6 @@ use std::env;
 use std::fs;
 use std::process;
 
-// ============================================================================
-// Syscall numbers
-// ============================================================================
-
-/// Open a named IPC channel to a well-known service.
-const SYS_CHANNEL_OPEN: u64 = 200;
-/// Send a message on an open IPC channel.
-const SYS_CHANNEL_SEND: u64 = 201;
-/// Receive a message from an open IPC channel.
-const SYS_CHANNEL_RECV: u64 = 202;
-/// Close an IPC channel handle.
-const SYS_CHANNEL_CLOSE: u64 = 204;
-
 // NOTE: Slate OS exposes NO userspace power-management syscall (there is no
 // SYS_SHUTDOWN / SYS_REBOOT / suspend syscall in kernel/src/syscall/number.rs).
 // System power state changes go through the service manager over IPC (the
@@ -45,122 +32,82 @@ const SYS_CHANNEL_CLOSE: u64 = 204;
 // power-management DESIGN GAP note in todo.txt.
 
 // ============================================================================
-// Low-level syscall interface
+// The service manager, over the service bus
 // ============================================================================
 
-/// Issue a three-argument syscall using the x86-64 `syscall` instruction.
+/// The service manager's name on the service bus.
 ///
-/// Register mapping follows the Slate OS syscall ABI:
-///   rax = syscall number, rdi = arg1, rsi = arg2, rdx = arg3
-///   Return value in rax. rcx and r11 are clobbered by the CPU.
-#[cfg(target_vendor = "slateos")]
-unsafe fn syscall3(nr: u64, a1: u64, a2: u64, a3: u64) -> i64 {
-    let ret: i64;
-    // SAFETY: Caller ensures arguments are valid for the given syscall number.
-    // The `syscall` instruction is the defined kernel entry point on x86-64.
-    // rcx and r11 are marked as clobbered per the hardware specification.
-    unsafe {
-        core::arch::asm!(
-            "syscall",
-            inlateout("rax") nr as i64 => ret,
-            in("rdi") a1,
-            in("rsi") a2,
-            in("rdx") a3,
-            lateout("rcx") _,
-            lateout("r11") _,
-            options(nostack),
-        );
-    }
-    ret
+/// Nothing registers it yet (known-issues.md, "`org.slateos.ServiceManager`
+/// has two clients and no provider"), so every request below ends at "no such
+/// service" and the direct fallbacks run.
+const SERVICE_MANAGER: &str = "org.slateos.ServiceManager";
+
+/// How long to wait for the service manager's answer: 25 seconds, D-Bus's
+/// default method-call timeout. It answers once it has *accepted* a request,
+/// not when the machine has finished stopping.
+const SERVICE_MANAGER_TIMEOUT_NS: u64 = libservicebus::secs_to_ns(25);
+
+/// What the service manager said to a request.
+#[derive(Debug, PartialEq, Eq)]
+enum Answer {
+    /// It accepted.
+    Accepted,
+    /// It refused: its error's name, and the explanation it sent, if any.
+    Refused(String, Vec<u8>),
 }
 
-/// Host stub for `syscall3` — see the gated definition above.
+/// Ask the service manager to run `method` with `args`.
 ///
-/// On a development host there is no SlateOS kernel to talk to, and a raw
-/// `syscall` instruction does not fail cleanly: it enters whatever kernel is
-/// actually running, with this crate's SlateOS call number in RAX. Those
-/// numbers mean unrelated things elsewhere, so the call is not a no-op — it
-/// is someone else's syscall. Returning `ENOSYS` keeps `cargo test`, `cargo
-/// run` and `clippy` on the host honest instead of dangerous.
+/// A service-bus method call with `libservicebus::fields` arguments: a return
+/// means accepted, an error means refused, and an error's first field, if it
+/// sent one, is its explanation. `Err` means the question could not be asked
+/// at all -- no service manager, or no answer in time.
 ///
-/// See known-issues.md
-/// `B-FORTY-SIX-USERSPACE-CRATES-CAN-ISSUE-A-RAW-SYSCALL-ON-THE-DEV-HOST`.
-#[cfg(not(target_vendor = "slateos"))]
-unsafe fn syscall3(_nr: u64, _a1: u64, _a2: u64, _a3: u64) -> i64 {
-    -38 // ENOSYS
+/// This replaced a hand-rolled channel client that called syscall 200 as
+/// "open a channel to a service". 200 is `SYS_CHANNEL_CREATE`: it took the
+/// name's *address* as its flags and returned a fresh channel connected to
+/// nothing, so no request ever reached any service (lane F's
+/// `requests/f-b-logind-refuses-every-caller-because-libservicebus-never-asks-who-it-is.md`,
+/// point 3). Connecting by name is `SYS_SERVICE_CONNECT`, which
+/// `libservicebus` wraps.
+fn ask_service_manager(method: &str, args: &[&[u8]]) -> Result<Answer, String> {
+    let mut conn = libservicebus::Connection::connect(SERVICE_MANAGER)
+        .map_err(|e| format!("cannot reach {SERVICE_MANAGER}: {e}"))?;
+    match conn.call_fields(method, args, SERVICE_MANAGER_TIMEOUT_NS) {
+        Ok(libservicebus::Outcome::Done(_)) => Ok(Answer::Accepted),
+        // A refusal that sent no explanation has an empty one; that is an
+        // absence, not a failure to discard.
+        Ok(libservicebus::Outcome::Refused { error, fields }) => Ok(Answer::Refused(
+            error,
+            fields.into_iter().next().unwrap_or_default(),
+        )),
+        Err(e) => Err(format!("{SERVICE_MANAGER} did not answer {method}: {e}")),
+    }
 }
 
-// ============================================================================
-// IPC helpers — talk to the service manager
-// ============================================================================
+/// Say on stderr that the service manager refused `what`, in its own words.
+fn report_refusal(what: &str, error: &str, explanation: &[u8]) {
+    // Nothing useful can be done if stderr itself is gone; the exit status
+    // still says the request was refused.
+    let _ = write_refusal(&mut std::io::stderr().lock(), what, error, explanation);
+}
 
-/// The service manager's well-known IPC endpoint name.
-const SERVICE_MANAGER_NAME: &[u8] = b"org.slateos.ServiceManager\0";
-
-/// Send a command string to the service manager and return its text response.
+/// The refusal message, written to `out`.
 ///
-/// The protocol is line-oriented: we send `"COMMAND\0"` and receive a
-/// NUL-terminated response string.
-fn send_ipc_command(command: &str) -> Result<String, String> {
-    let msg = format!("{command}\0");
-
-    // SAFETY: SYS_CHANNEL_OPEN takes a pointer to a NUL-terminated service
-    // name, its length, and flags (0). The pointer is valid for the duration
-    // of the syscall because `SERVICE_MANAGER_NAME` is a static byte string.
-    let channel = unsafe {
-        syscall3(
-            SYS_CHANNEL_OPEN,
-            SERVICE_MANAGER_NAME.as_ptr() as u64,
-            SERVICE_MANAGER_NAME.len() as u64,
-            0,
-        )
-    };
-
-    if channel < 0 {
-        return Err(format!(
-            "cannot connect to service manager (error {channel})"
-        ));
+/// The explanation goes out as the bytes it came in: it is another program's
+/// text, and decoding it lossily would print something it did not say.
+fn write_refusal(
+    out: &mut impl std::io::Write,
+    what: &str,
+    error: &str,
+    explanation: &[u8],
+) -> std::io::Result<()> {
+    write!(out, "error: the service manager refused {what}: {error}")?;
+    if !explanation.is_empty() {
+        out.write_all(b": ")?;
+        out.write_all(explanation)?;
     }
-
-    let ch = channel as u64;
-
-    // SAFETY: SYS_CHANNEL_SEND takes the channel handle, a pointer to the
-    // message buffer, and its length. `msg` lives on the stack and outlives
-    // the syscall.
-    let send_ret = unsafe { syscall3(SYS_CHANNEL_SEND, ch, msg.as_ptr() as u64, msg.len() as u64) };
-
-    if send_ret < 0 {
-        // SAFETY: SYS_CHANNEL_CLOSE takes the handle and two unused args.
-        let _ = unsafe { syscall3(SYS_CHANNEL_CLOSE, ch, 0, 0) };
-        return Err(format!("send failed (error {send_ret})"));
-    }
-
-    // Receive the response into a stack buffer.
-    let mut buf = [0u8; 4096];
-
-    // SAFETY: SYS_CHANNEL_RECV takes the channel handle, a pointer to a
-    // writable buffer, and the buffer length. `buf` is valid for 4096 bytes
-    // and outlives the syscall.
-    let recv_ret = unsafe {
-        syscall3(
-            SYS_CHANNEL_RECV,
-            ch,
-            buf.as_mut_ptr() as u64,
-            buf.len() as u64,
-        )
-    };
-
-    // Always close the channel, even if recv failed.
-    // SAFETY: ch is a valid channel handle obtained from a successful open.
-    let _ = unsafe { syscall3(SYS_CHANNEL_CLOSE, ch, 0, 0) };
-
-    if recv_ret < 0 {
-        return Err(format!("recv failed (error {recv_ret})"));
-    }
-
-    let len = (recv_ret as usize).min(buf.len());
-    let response = String::from_utf8_lossy(&buf[..len]).to_string();
-    Ok(response)
+    out.write_all(b"\n")
 }
 
 // ============================================================================
@@ -316,18 +263,6 @@ fn schedule_state(target: u64, now: Option<u64>) -> ScheduleState {
     }
 }
 
-/// Whether a service-manager response counts as acceptance.
-///
-/// Extracted from `orderly_shutdown`, where the rule was written as "starts
-/// with OK or ACK, otherwise accept unless it starts with ERR" -- three
-/// branches whose first two are wholly subsumed by the third. The rule is, and
-/// always was, exactly this one line. It is deliberately generous: an
-/// unrecognised reply from a manager that is *there* still means the command
-/// was received, which is a different thing from no manager at all.
-fn response_accepted(resp: &str) -> bool {
-    !resp.trim().trim_end_matches('\0').starts_with("ERR")
-}
-
 fn write_schedule(minutes: u64, action: &str) -> Result<(), String> {
     // A deadline measured from an unknown origin is not a deadline. Refusing
     // here is what stops `powerctl schedule` reporting success on a target
@@ -369,36 +304,42 @@ fn cancel_schedule() -> Result<(), String> {
 // Orderly shutdown sequence via IPC
 // ============================================================================
 
-/// Ask the service manager to perform an orderly shutdown.
+/// What came of asking the service manager for a power change.
+///
+/// Three outcomes where there used to be a `bool`. The manager's answer was a
+/// string then, accepted unless it began `ERR`, and a refusal came back as
+/// `false` -- the same as nobody answering -- so it fell through to the
+/// direct fallback, which forced the very change the system had declined. On
+/// the bus a refusal is its own kind of message, and it stops here.
+#[derive(Debug, PartialEq, Eq)]
+enum Orderly {
+    /// It accepted, and drives the rest of the sequence.
+    Accepted,
+    /// It refused, and that has been said on stderr. Not overridden: the
+    /// direct fallback would do exactly what the system just declined to do.
+    Refused,
+    /// There was nobody to ask, which has been said; the direct fallback is
+    /// the only way left.
+    Unavailable,
+}
+
+/// Ask the service manager for an orderly power change, `method` on the bus
+/// (`what` names it in messages).
 ///
 /// The sequence is: stop all services in dependency order, sync filesystems,
-/// then trigger the final power state change.  The service manager handles
-/// the ordering; we just send the top-level command and wait for confirmation.
-fn orderly_shutdown(action: &str) -> bool {
-    let command = match action {
-        "shutdown" | "halt" => "SYSTEM_SHUTDOWN",
-        "reboot" => "SYSTEM_REBOOT",
-        "suspend" => "SYSTEM_SUSPEND",
-        "hibernate" => "SYSTEM_HIBERNATE",
-        _ => return false,
-    };
-
-    match send_ipc_command(command) {
-        Ok(resp) => {
-            let trimmed = resp.trim().trim_end_matches('\0');
-            if !trimmed.starts_with("OK") && !trimmed.starts_with("ACK") {
-                // Worth showing, whether or not it counts as acceptance.
-                eprintln!("service manager responded: {trimmed}");
-            }
-            // The rule itself lives in one place now. It used to be written
-            // out here as three branches -- OK, ACK, otherwise-not-ERR -- of
-            // which the first two are entirely subsumed by the third, so the
-            // same rule stated twice could not have disagreed with itself
-            // *yet*. `cmd_schedule` needed it too, and two copies of a rule
-            // that currently agree is how they stop agreeing.
-            response_accepted(&resp)
+/// then trigger the final power state change. The service manager handles
+/// the ordering; this sends the request and waits for it to be accepted.
+fn orderly(method: &str, what: &str) -> Orderly {
+    match ask_service_manager(method, &[]) {
+        Ok(Answer::Accepted) => Orderly::Accepted,
+        Ok(Answer::Refused(error, why)) => {
+            report_refusal(what, &error, &why);
+            Orderly::Refused
         }
-        Err(_) => false,
+        Err(e) => {
+            eprintln!("powerctl: {e}");
+            Orderly::Unavailable
+        }
     }
 }
 
@@ -539,17 +480,26 @@ fn direct_hibernate() {
 // Commands
 // ============================================================================
 
+/// Ask for `method`; on acceptance say so and return `true`, on refusal exit
+/// non-zero, and on no answer return `false` so the caller falls back.
+fn ask_or_fall_back(method: &str, what: &str) -> bool {
+    match orderly(method, what) {
+        Orderly::Accepted => {
+            // The service manager drives the rest of the sequence; it stops
+            // services and syncs filesystems before the final transition.
+            println!("Service manager acknowledged {what}.");
+            true
+        }
+        Orderly::Refused => process::exit(1),
+        Orderly::Unavailable => false,
+    }
+}
+
 fn cmd_shutdown() {
     println!("Initiating system shutdown...");
-
-    if orderly_shutdown("shutdown") {
-        println!("Service manager acknowledged shutdown.");
-        // The service manager drives the rest of the sequence; it will call
-        // SYS_SHUTDOWN itself after all services are stopped and filesystems
-        // synced.  We wait briefly so the user can see our message.
+    if ask_or_fall_back("PowerOff", "shutdown") {
         return;
     }
-
     eprintln!("Service manager unavailable -- falling back to direct shutdown.");
     eprintln!("Warning: services may not be stopped cleanly.");
     direct_shutdown();
@@ -557,12 +507,9 @@ fn cmd_shutdown() {
 
 fn cmd_reboot() {
     println!("Initiating system reboot...");
-
-    if orderly_shutdown("reboot") {
-        println!("Service manager acknowledged reboot.");
+    if ask_or_fall_back("Reboot", "reboot") {
         return;
     }
-
     eprintln!("Service manager unavailable -- falling back to direct reboot.");
     eprintln!("Warning: services may not be stopped cleanly.");
     direct_reboot();
@@ -570,12 +517,9 @@ fn cmd_reboot() {
 
 fn cmd_suspend() {
     println!("Suspending system (ACPI S3)...");
-
-    if orderly_shutdown("suspend") {
-        println!("Service manager acknowledged suspend.");
+    if ask_or_fall_back("Suspend", "suspend") {
         return;
     }
-
     eprintln!("Service manager unavailable -- falling back to direct suspend.");
     direct_suspend();
     println!("Resumed from suspend.");
@@ -583,12 +527,9 @@ fn cmd_suspend() {
 
 fn cmd_hibernate() {
     println!("Hibernating system (ACPI S4)...");
-
-    if orderly_shutdown("hibernate") {
-        println!("Service manager acknowledged hibernate.");
+    if ask_or_fall_back("Hibernate", "hibernate") {
         return;
     }
-
     eprintln!("Service manager unavailable -- falling back to direct hibernate.");
     direct_hibernate();
     println!("Resumed from hibernate.");
@@ -715,16 +656,24 @@ fn cmd_schedule(args: &[String]) {
             // first, and demote a total failure to a trailing "note:" -- so
             // the one case where the machine will certainly not shut down
             // read as the success case with a footnote.
-            let ipc_cmd = format!("SCHEDULE_POWER {minutes} {action}");
+            let minutes_arg = minutes.to_string();
             let plural = if minutes == 1 { "" } else { "s" };
-            match send_ipc_command(&ipc_cmd) {
-                Ok(resp) if response_accepted(&resp) => {
+            match ask_service_manager(
+                "SchedulePower",
+                &[minutes_arg.as_bytes(), action.as_bytes()],
+            ) {
+                Ok(Answer::Accepted) => {
                     println!("Scheduled {action} in {minutes} minute{plural}.");
                     println!("Run 'powerctl cancel' to abort.");
                 }
-                Ok(resp) => {
-                    let trimmed = resp.trim().trim_end_matches('\0');
-                    eprintln!("error: the service manager refused: {trimmed}");
+                Ok(Answer::Refused(error, why)) => {
+                    report_refusal("the schedule", &error, &why);
+                    // The record was written before asking; a refused
+                    // schedule must not linger in `powerctl status` as one
+                    // that is merely waiting.
+                    if let Err(e) = cancel_schedule() {
+                        eprintln!("error: {SCHEDULE_FILE} could not be removed: {e}");
+                    }
                     eprintln!("Nothing is scheduled; the machine will not {action} on its own.");
                     process::exit(1);
                 }
@@ -747,13 +696,18 @@ fn cmd_schedule(args: &[String]) {
 }
 
 fn cmd_cancel() {
-    match cancel_schedule() {
-        Ok(()) => {
-            println!("Scheduled operation cancelled.");
+    // The service manager first: if it armed a timer and will not disarm it,
+    // the machine will still act, and "cancelled" would be false. No service
+    // manager at all is not a failure here -- then there is no timer, and the
+    // record below is all there is to cancel.
+    if let Ok(Answer::Refused(error, why)) = ask_service_manager("CancelScheduledPower", &[]) {
+        report_refusal("the cancellation", &error, &why);
+        eprintln!("The scheduled operation is still pending.");
+        process::exit(1);
+    }
 
-            // Tell the service manager to cancel its timer too.
-            let _ = send_ipc_command("CANCEL_SCHEDULED_POWER");
-        }
+    match cancel_schedule() {
+        Ok(()) => println!("Scheduled operation cancelled."),
         Err(e) => {
             eprintln!("error: {e}");
             process::exit(1);
@@ -898,23 +852,42 @@ mod tests {
         assert_ne!(schedule_state(600, None), schedule_state(600, Some(0)));
     }
 
-    /// The acceptance rule, including the part that surprised me.
+    /// No service manager is "unavailable", which falls back -- never
+    /// "refused", which would stop a shutdown nobody declined.
+    ///
+    /// On a development host the bus answers "not supported" to everything,
+    /// which is the same outcome as no service manager registered on SlateOS:
+    /// the question could not be asked.
     #[test]
-    fn only_an_err_prefix_counts_as_refusal() {
-        assert!(response_accepted("OK"));
-        assert!(response_accepted("ACK scheduled"));
-        assert!(!response_accepted("ERR unknown command"));
-        // Trailing NULs and whitespace are stripped before the test.
-        assert!(!response_accepted("ERR busy\0"));
-        assert!(!response_accepted("  ERR busy  "));
-        // An unrecognised reply from a manager that is *there* is acceptance:
-        // the command was received. That is the documented rule, and it is
-        // what `orderly_shutdown`'s three branches already amounted to.
-        assert!(response_accepted("WAT"));
-        assert!(response_accepted(""));
-        // Case matters, and "ERROR" still starts with "ERR".
-        assert!(!response_accepted("ERROR: nope"));
-        assert!(response_accepted("err lowercase is not the protocol"));
+    fn no_service_manager_is_unavailable_not_refused() {
+        let err = ask_service_manager("PowerOff", &[]).unwrap_err();
+        assert!(err.contains(SERVICE_MANAGER), "{err}");
+        assert_eq!(orderly("PowerOff", "shutdown"), Orderly::Unavailable);
+    }
+
+    /// A refusal is reported in the service manager's own bytes.
+    #[test]
+    fn a_refusal_is_reported_as_it_was_sent() {
+        let mut out = Vec::new();
+        write_refusal(
+            &mut out,
+            "shutdown",
+            "org.slateos.Error.Inhibited",
+            b"held by \xffupdate",
+        )
+        .unwrap();
+        assert_eq!(
+            out,
+            b"error: the service manager refused shutdown: org.slateos.Error.Inhibited: \
+              held by \xffupdate\n"
+        );
+
+        let mut out = Vec::new();
+        write_refusal(&mut out, "reboot", "org.slateos.Error.Denied", b"").unwrap();
+        assert_eq!(
+            out,
+            b"error: the service manager refused reboot: org.slateos.Error.Denied\n"
+        );
     }
 
     #[test]

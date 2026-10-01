@@ -4539,6 +4539,25 @@
 
 ## Judgment Calls
 
+### 2026-10-01 (lane B) — a refused power change is not forced, and the
+### service manager's method names were chosen by its clients
+
+`powerctl` used to read the service manager's answer as text and treat
+anything starting `ERR` as "not accepted" -- the same `false` as nobody
+answering -- so a refused shutdown fell through to the direct fallback and
+happened anyway. On the service bus a refusal is its own kind of reply, and
+`powerctl` now reports it and exits 1 without forcing (as `systemctl`
+does when logind refuses). Reverse in `userspace/powerctl/src/main.rs`,
+`ask_or_fall_back`, if forcing on refusal is wanted -- better as an
+explicit `--force` than as the default.
+
+The method names (`PowerOff`, `Reboot`, `Suspend`, `Hibernate`,
+`SchedulePower`, `CancelScheduledPower`; `StartService` ... `ReloadService`)
+are the interface a provider of `org.slateos.ServiceManager` must
+implement. Nothing provides it yet (known-issues.md), so they were chosen on
+the clients' side, after systemd's where one exists; whoever writes the
+provider may rename them in both clients.
+
 ### 2026-09-16 — pushed with ALLOW_STALE_RELEASE=1, and did NOT update
 ### bench/last-release-boot.json
 

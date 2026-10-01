@@ -5,6 +5,8 @@ edition = "2024"
 description = "SlateOS power management — shutdown, reboot, suspend, hibernate"
 [dependencies]
 libcall = { path = "../../libcall" }
+# The service manager is reached over the service bus.
+libservicebus = { path = "../libservicebus" }
 # It interpolates `other` into "error: unknown action {} (expected shutdown
 # or reboot)". That value is an argv word, so it is whatever the user typed
 # and not text this program chose.

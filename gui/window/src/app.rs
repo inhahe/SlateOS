@@ -1233,7 +1233,13 @@ struct ThemeWatch {
 impl ThemeWatch {
     fn new() -> Self {
         Self {
-            watcher: appearance::config::Watcher::new(appearance::CONFIG_NAME),
+            // `appearance::watcher()`, not a plain watcher of
+            // `appearance.yaml`: the colours also come from the chosen theme's
+            // own file, and from the hour when the theme follows the time of
+            // day. Neither changes a byte of `appearance.yaml`, so a watcher of
+            // that file alone would leave every application in the old colours
+            // after the shell had changed (design-decisions.md §874).
+            watcher: appearance::watcher(),
             settings: AppearanceSettings::default(),
         }
     }
@@ -2990,6 +2996,41 @@ mod tests {
                 themes[0], themes[1],
                 "the application was handed the same colours twice"
             );
+        });
+    }
+
+    /// An edit to the chosen colour theme's own file reaches the application,
+    /// though `appearance.yaml` -- which only names the theme -- is untouched.
+    #[test]
+    fn an_edited_theme_file_reaches_the_application() {
+        appearance::config::testing::with_scratch_config("oswindow-theme-edit", |root| {
+            let theme = appearance::config::testing::scratch_data_dir(root)
+                .join("slateos")
+                .join("themes")
+                .join("nord");
+            std::fs::create_dir_all(&theme).unwrap();
+            let theme = theme.join(appearance::themes::FILE_NAME);
+            std::fs::write(&theme, "colors:\n  base: \"#2e3440\"\n").unwrap();
+            let mut file = appearance::AppearanceFile::load();
+            file.settings.color_theme =
+                appearance::themes::ColorTheme::load(std::ffi::OsStr::new("nord"));
+            file.save().unwrap();
+
+            let mut watch = ThemeWatch::new();
+            let mut app = Recorder::new(Response::Idle);
+            watch.deliver(&mut app);
+            assert!(!watch.poll(&mut app), "nothing has changed yet");
+
+            // A person editing the theme in a text editor: every colour it
+            // sets changes, and appearance.yaml does not.
+            std::fs::write(&theme, "colors:\n  base: \"#000000\"\n").unwrap();
+            assert!(
+                watch.poll(&mut app),
+                "the edited theme did not reach the application"
+            );
+            let themes = app.themes.borrow();
+            assert_eq!(themes.len(), 2);
+            assert_ne!(themes[0], themes[1], "the old colours were handed over again");
         });
     }
 

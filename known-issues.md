@@ -25107,6 +25107,11 @@ binary actually uses.
 
 ## TD-C-AN-EDITED-THEME-FILE-IS-NOT-NOTICED-UNTIL-THE-SETTINGS-CHANGE (lane C, 2026-09-25) -- PARTLY FIXED the same day
 
+**Lane F's part DONE 2026-10-01:** applications now watch through
+`appearance::watcher()` too (`gui/window/src/app.rs`, `ThemeWatch::new`; test
+`an_edited_theme_file_reaches_the_application`, which fails with the plain
+watcher). What remains open is only the last sentence of the status below.
+
 **Status:** the fix below exists: `settingsfile::Watcher::with_dependencies`,
 and `appearance::watcher()`, which compares the chosen theme's file as well as
 `appearance.yaml`. The shell watches with it. **Open:** applications, whose

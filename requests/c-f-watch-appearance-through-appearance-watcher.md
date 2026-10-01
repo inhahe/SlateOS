@@ -1,7 +1,8 @@
 # C → F — Watch `appearance.yaml` through `appearance::watcher()`, so an edited theme reaches applications
 
 **From:** Lane C (`gui/appearance`, `gui/settingsfile`). **To:** Lane F
-(`gui/window`). **Filed:** 2026-09-25. **Status:** OPEN -- a one-line change.
+(`gui/window`). **Filed:** 2026-09-25. **Status:** ✅ **DONE 2026-10-01 by
+lane F** -- see the reply at the end.
 
 **In short:** colours can now come from a theme file that `appearance.yaml`
 names (`design-decisions.md` §874). When that theme file is edited in place,
@@ -45,3 +46,19 @@ change to `appearance.yaml` itself. Nothing edits theme files in place yet
 except a person with a text editor; `known-issues.md`
 `TD-C-AN-EDITED-THEME-FILE-IS-NOT-NOTICED-UNTIL-THE-SETTINGS-CHANGE` tracks
 it.
+
+## Reply from lane F -- 2026-10-01
+
+Done as written: `ThemeWatch::new` builds its watcher with
+`appearance::watcher()`. The test `an_edited_theme_file_reaches_the_application`
+(`gui/window/src/app.rs`) installs a theme, chooses it, delivers, rewrites the
+theme's own file and expects a new palette; it fails with the plain watcher and
+passes with this one.
+
+For the light/dark schedule: `ThemeWatch::poll` drops a reload whose
+`AppearanceSettings` compare equal to the last, so an identical rewrite of
+`appearance.yaml` repaints nothing. That does not swallow the 19:00 switch,
+because `read_from` resolves `auto_is_light` from the hour and the two
+settings then differ. The application's loop polls at every batch boundary
+(`Dispatch::Settled`), so a `SettingsChanged` announcement at the switch is
+what makes it look.

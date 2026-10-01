@@ -469,4 +469,5 @@ pub mod zstd;
 
 pub use vfs::{
     DirEntry, EntryType, FileAttr, FileId, FileMeta, LockType, PinnedDir, Vfs, XattrSetMode,
+    XattrTarget,
 };

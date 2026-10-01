@@ -2100,6 +2100,14 @@ extern "C" fn kernel_main() -> ! {
         syscall::linux::self_test_rename_noreplace(),
     );
 
+    // The twelve xattr calls on files (needs the writable /tmp, so it runs
+    // here; `syscall::linux::self_test()` has their argument checks).
+    selftest::dispatch_debug(
+        "Linux xattr calls",
+        selftest::Severity::Diagnostic,
+        syscall::linux::self_test_xattr_calls(),
+    );
+
     // statfs(2) against the real mounted root (the in-self_test() version can
     // only check error paths since it runs before any filesystem is mounted).
     selftest::dispatch_debug(

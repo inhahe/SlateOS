@@ -1527,6 +1527,23 @@ impl FileSystem for MemFs {
         Ok(node_list_xattrs(self.resolve_no_follow(path)?))
     }
 
+    fn get_xattr_ino(&mut self, ino: u64, key: &[u8]) -> KernelResult<Vec<u8>> {
+        node_get_xattr(self.node(ino)?, key)
+    }
+
+    fn set_xattr_ino(&mut self, ino: u64, key: &[u8], value: &[u8]) -> KernelResult<()> {
+        node_validate_xattr(key, value)?;
+        node_set_xattr(self.node_mut(ino)?, key, value)
+    }
+
+    fn remove_xattr_ino(&mut self, ino: u64, key: &[u8]) -> KernelResult<()> {
+        node_remove_xattr(self.node_mut(ino)?, key)
+    }
+
+    fn list_xattrs_ino(&mut self, ino: u64) -> KernelResult<Vec<Vec<u8>>> {
+        Ok(node_list_xattrs(self.node(ino)?))
+    }
+
     // --- Symlink operations ---
 
     fn symlink(&mut self, path: &Path, target: &Path) -> KernelResult<()> {

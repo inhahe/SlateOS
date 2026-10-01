@@ -91468,6 +91468,9 @@ comes first. Lane D asked for it
 | When an ACL exists, the rules are decided twice, before the ACL and again under the lock | once, under the lock, with the ACL first | Linux checks the file's permission between the rules and the name. The ACL cannot be read under the filesystem's lock (it finds the file through the VFS) |
 | A filesystem says whether it keeps attributes at all (`FileSystem::xattrs_supported`) | let each refuse when asked | Linux refuses on such a filesystem before it looks at the name, so a bare prefix there is `EOPNOTSUPP`, not `EINVAL` |
 | `security.capability` is any `security.` name | Linux's `CAP_SETFCAP` and its header check | user id 0 has both here, and the kernel has no file capabilities to check a header for |
+| A call is two steps, `Vfs::xattr_target` then `xattr_get` and the rest | one call taking the path and the name | Linux reads the name after the path for get, list and remove, and before it for set; the Linux layer reads it between the steps, so each refusal comes in Linux's order |
+| A descriptor's calls act on the file it holds, by identity, and its ACL is asked by identity (`check_object_access`) | act by the name the descriptor was opened under | Linux acts on the open file; a name can be another file's by now. The ACL check stays, as Linux's `fsetxattr` still asks the file's permission |
+| A pipe, socket, event descriptor or device has the rules applied, then `EOPNOTSUPP` | `EOPNOTSUPP` at once | Linux's `xattr_permission` comes before its `IOP_XATTR` refusal, so `user.` on a pipe is `ENODATA` or `EPERM` |
 
 **Revisit** when ACLs become reachable as attributes, or when the kernel
 gains a capability for administrative authority over files.

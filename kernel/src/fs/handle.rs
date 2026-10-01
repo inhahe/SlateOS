@@ -1666,12 +1666,119 @@ impl HandleFile {
         if self.ro_volume {
             return Err(KernelError::ReadOnlyFilesystem);
         }
+        self.check_pin()
+    }
+
+    /// A directory, reached by its name: `NotFound` when the name names
+    /// something else now, rather than act on that.
+    fn check_pin(&self) -> KernelResult<()> {
         if let Some(id) = self.pin
             && crate::fs::Vfs::file_identity_resolved(&self.path)? != Some(id)
         {
             return Err(KernelError::NotFound);
         }
         Ok(())
+    }
+
+    /// `fgetxattr`: the attribute `name` of the file, for the calling task
+    /// (`fs::xattr_policy`).
+    ///
+    /// # Errors
+    ///
+    /// As `check_pin`; the policy's; the filesystem's (`NoAttribute`).
+    pub fn get_xattr(&self, name: &[u8]) -> KernelResult<alloc::vec::Vec<u8>> {
+        match &self.object {
+            Some(held) => crate::fs::Vfs::object_get_xattr(held, name),
+            None => {
+                self.check_pin()?;
+                let target = crate::fs::Vfs::xattr_target_resolved(
+                    &self.path,
+                    crate::fs::xattr_policy::Access::Read,
+                )?;
+                crate::fs::Vfs::xattr_get(&target, name)
+            }
+        }
+    }
+
+    /// Whether the file takes a change through this handle now: Linux's
+    /// `mnt_want_write_file`, which `fremovexattr` meets before it reads the
+    /// attribute's name.
+    ///
+    /// # Errors
+    ///
+    /// As `check_change`; `ReadOnlyFilesystem` for a mount that is.
+    pub fn may_change(&self) -> KernelResult<()> {
+        self.check_change()?;
+        match &self.object {
+            Some(held) => crate::fs::Vfs::object_check_writable(held),
+            None => crate::fs::Vfs::xattr_target_resolved(
+                &self.path,
+                crate::fs::xattr_policy::Access::Write,
+            )
+            .map(|_| ()),
+        }
+    }
+
+    /// `fsetxattr`.
+    ///
+    /// # Errors
+    ///
+    /// As `may_change`; the policy's; the mode's; the filesystem's.
+    pub fn set_xattr(
+        &self,
+        name: &[u8],
+        value: &[u8],
+        mode: crate::fs::XattrSetMode,
+    ) -> KernelResult<()> {
+        self.check_change()?;
+        match &self.object {
+            Some(held) => crate::fs::Vfs::object_set_xattr(held, &self.path, name, value, mode),
+            None => {
+                let target = crate::fs::Vfs::xattr_target_resolved(
+                    &self.path,
+                    crate::fs::xattr_policy::Access::Write,
+                )?;
+                crate::fs::Vfs::xattr_set(&target, name, value, mode)
+            }
+        }
+    }
+
+    /// `fremovexattr`.
+    ///
+    /// # Errors
+    ///
+    /// As `may_change`; the policy's; `NoAttribute`.
+    pub fn remove_xattr(&self, name: &[u8]) -> KernelResult<()> {
+        self.check_change()?;
+        match &self.object {
+            Some(held) => crate::fs::Vfs::object_remove_xattr(held, &self.path, name),
+            None => {
+                let target = crate::fs::Vfs::xattr_target_resolved(
+                    &self.path,
+                    crate::fs::xattr_policy::Access::Write,
+                )?;
+                crate::fs::Vfs::xattr_remove(&target, name)
+            }
+        }
+    }
+
+    /// `flistxattr`: the names the calling task may see.
+    ///
+    /// # Errors
+    ///
+    /// As `check_pin`; the filesystem's.
+    pub fn list_xattrs(&self) -> KernelResult<alloc::vec::Vec<alloc::vec::Vec<u8>>> {
+        match &self.object {
+            Some(held) => crate::fs::Vfs::object_list_xattrs(held),
+            None => {
+                self.check_pin()?;
+                let target = crate::fs::Vfs::xattr_target_resolved(
+                    &self.path,
+                    crate::fs::xattr_policy::Access::Read,
+                )?;
+                crate::fs::Vfs::xattr_list(&target)
+            }
+        }
     }
 
     /// A change of contents needs a handle taken by

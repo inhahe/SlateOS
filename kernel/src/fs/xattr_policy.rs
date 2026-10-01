@@ -220,6 +220,18 @@ pub fn after_permission(
     resolve(name)
 }
 
+/// The answer for an object on no filesystem -- a pipe, a socket, an event
+/// descriptor -- which keeps no attributes: the rules' refusal if they
+/// refuse, Linux's `xattr_permission` coming first, and otherwise
+/// `NotSupported`. `meta` gives the object's type.
+#[must_use]
+pub fn unkept(name: &[u8], access: Access, meta: &FileMeta, caller: Caller) -> KernelError {
+    namespace_rules(Namespace::of(name), access, meta, caller)
+        .and_then(|()| after_permission(name, access, caller, false))
+        .err()
+        .unwrap_or(KernelError::NotSupported)
+}
+
 /// Linux's `xattr_resolve_name` on a filesystem with handlers for `user.`,
 /// `trusted.` and `security.`: whether one of them takes `name`.
 ///

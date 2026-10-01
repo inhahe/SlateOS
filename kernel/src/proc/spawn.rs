@@ -1717,6 +1717,15 @@ fn spawn_process_inner(
     if !options.fd_map.is_empty() {
         let mut initial_fds = alloc::vec::Vec::with_capacity(options.fd_map.len());
         for &(fd_num, handle_type, parent_handle) in options.fd_map {
+            // A parent can pass on only what it holds. The file and pty arms
+            // check it their own way; the pipe, socket-pair and eventfd arms
+            // did not, so a spawn could hand a child another process's pipe,
+            // and the child would then hold it properly
+            // (A-CHANNEL-HANDLES-WERE-USABLE-BY-ANY-PROCESS). A kernel-spawned
+            // child (parent 0) is handed what the kernel chose.
+            let parent_lacks = |rt: crate::cap::ResourceType| {
+                options.parent != 0 && !pcb::owns_ipc_handle(options.parent, rt, parent_handle)
+            };
             let dup_result = match handle_type {
                 fd_handle_type::FILE => {
                     // A file handle is `NEXT_HANDLE.fetch_add(1)` from 1, so
@@ -1751,8 +1760,14 @@ fn spawn_process_inner(
                     // write) and returns the same handle.  The child
                     // closes its reference independently when it dies
                     // or when its fd-table layer claims the handle.
-                    crate::ipc::pipe::dup(crate::ipc::pipe::PipeHandle::from_raw(parent_handle))
+                    if parent_lacks(crate::cap::ResourceType::Pipe) {
+                        Err(KernelError::InvalidHandle)
+                    } else {
+                        crate::ipc::pipe::dup(crate::ipc::pipe::PipeHandle::from_raw(
+                            parent_handle,
+                        ))
                         .map(|h| h.raw())
+                    }
                 }
                 fd_handle_type::STREAM_SOCKET => {
                     // Stream socket endpoints are ref-counted per
@@ -1760,10 +1775,14 @@ fn spawn_process_inner(
                     // returns the same handle.  The child closes its
                     // reference independently when it dies or hands the
                     // handle to its fd-table.
-                    crate::ipc::stream_socket::dup(
-                        crate::ipc::stream_socket::StreamSocketHandle::from_raw(parent_handle),
-                    )
-                    .map(|h| h.raw())
+                    if parent_lacks(crate::cap::ResourceType::StreamSocket) {
+                        Err(KernelError::InvalidHandle)
+                    } else {
+                        crate::ipc::stream_socket::dup(
+                            crate::ipc::stream_socket::StreamSocketHandle::from_raw(parent_handle),
+                        )
+                        .map(|h| h.raw())
+                    }
                 }
                 fd_handle_type::CONSOLE => {
                     // Console is a virtual handle — just pass the value.
@@ -1776,10 +1795,14 @@ fn spawn_process_inner(
                     // (or when SYS_PROCESS_GET_INITIAL_FDS hands the
                     // handle off to the child's fd-table, which then
                     // owns the close).
-                    crate::ipc::eventfd::dup(crate::ipc::eventfd::EventFdHandle::from_raw(
-                        parent_handle,
-                    ))
-                    .map(|h| h.raw())
+                    if parent_lacks(crate::cap::ResourceType::EventFd) {
+                        Err(KernelError::InvalidHandle)
+                    } else {
+                        crate::ipc::eventfd::dup(crate::ipc::eventfd::EventFdHandle::from_raw(
+                            parent_handle,
+                        ))
+                        .map(|h| h.raw())
+                    }
                 }
                 fd_handle_type::PTY => {
                     // A pty end's raw value is *guessable*: it is

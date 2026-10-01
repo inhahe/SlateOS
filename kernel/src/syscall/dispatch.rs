@@ -2312,6 +2312,10 @@ fn test_dispatch_secureboot_doors() -> KernelResult<()> {
 /// - another process naming them is refused `InvalidHandle` by every channel
 ///   call, and its close closes nothing;
 /// - the owner's own calls pass, and its close deregisters;
+/// - the same refusal for every call on a pipe, socket pair, eventfd,
+///   completion port and timer the owner made;
+/// - a completion port cannot watch another process's pipe, and can its own
+///   process's;
 /// - a service listener is refused to another process and passes for its
 ///   owner;
 /// - the owner's death releases the service name.
@@ -2397,6 +2401,100 @@ fn test_dispatch_ipc_possession() -> KernelResult<()> {
         return fail("a closed channel end is still registered to its owner", &live);
     }
 
+    // The other handle types, the same way: what the owner made, another
+    // process naming it is refused by every call that takes it.
+    let pair = |r: SyscallResult| (u64::try_from(r.value).ok(), u64::try_from(r.value2).ok());
+    let one = |r: SyscallResult| u64::try_from(r.value).ok();
+    let (Some(pipe_r), Some(pipe_w)) =
+        pair(self_test_as_process(owner, || dispatch(SYS_PIPE_CREATE, &a0(0))))
+    else {
+        return fail("SYS_PIPE_CREATE failed for the owner", &live);
+    };
+    let (Some(sock), Some(_)) =
+        pair(self_test_as_process(owner, || dispatch(SYS_SOCKETPAIR_CREATE, &a0(0))))
+    else {
+        return fail("SYS_SOCKETPAIR_CREATE failed for the owner", &live);
+    };
+    let Some(efd) = one(self_test_as_process(owner, || dispatch(SYS_EVENTFD_CREATE, &a0(0)))) else {
+        return fail("SYS_EVENTFD_CREATE failed for the owner", &live);
+    };
+    let Some(cp) = one(self_test_as_process(owner, || dispatch(SYS_CP_CREATE, &a0(0)))) else {
+        return fail("SYS_CP_CREATE failed for the owner", &live);
+    };
+    // A minute: the process is destroyed, and the timer with it, long before.
+    let timer_args = SyscallArgs {
+        arg0: 60_000_000_000,
+        ..a0(0)
+    };
+    let Some(timer) = one(self_test_as_process(owner, || dispatch(SYS_TIMER_CREATE, &timer_args)))
+    else {
+        return fail("SYS_TIMER_CREATE failed for the owner", &live);
+    };
+    for (name, nr, handle) in [
+        ("SYS_PIPE_WRITE", SYS_PIPE_WRITE, pipe_w),
+        ("SYS_PIPE_READ", SYS_PIPE_READ, pipe_r),
+        ("SYS_PIPE_TRY_WRITE", SYS_PIPE_TRY_WRITE, pipe_w),
+        ("SYS_PIPE_TRY_READ", SYS_PIPE_TRY_READ, pipe_r),
+        ("SYS_PIPE_POLL", SYS_PIPE_POLL, pipe_r),
+        ("SYS_PIPE_READABLE_BYTES", SYS_PIPE_READABLE_BYTES, pipe_r),
+        ("SYS_PIPE_READ_TIMEOUT", SYS_PIPE_READ_TIMEOUT, pipe_r),
+        ("SYS_PIPE_WRITE_TIMEOUT", SYS_PIPE_WRITE_TIMEOUT, pipe_w),
+        ("SYS_PIPE_PEEK", SYS_PIPE_PEEK, pipe_r),
+        ("SYS_PIPE_WAIT_READABLE", SYS_PIPE_WAIT_READABLE, pipe_r),
+        ("SYS_PIPE_CLOSE", SYS_PIPE_CLOSE, pipe_w),
+        ("SYS_SOCKETPAIR_SEND", SYS_SOCKETPAIR_SEND, sock),
+        ("SYS_SOCKETPAIR_RECV", SYS_SOCKETPAIR_RECV, sock),
+        ("SYS_SOCKETPAIR_TRY_SEND", SYS_SOCKETPAIR_TRY_SEND, sock),
+        ("SYS_SOCKETPAIR_TRY_RECV", SYS_SOCKETPAIR_TRY_RECV, sock),
+        ("SYS_SOCKETPAIR_SEND_TIMEOUT", SYS_SOCKETPAIR_SEND_TIMEOUT, sock),
+        ("SYS_SOCKETPAIR_RECV_TIMEOUT", SYS_SOCKETPAIR_RECV_TIMEOUT, sock),
+        ("SYS_SOCKETPAIR_POLL", SYS_SOCKETPAIR_POLL, sock),
+        ("SYS_SOCKETPAIR_READABLE_BYTES", SYS_SOCKETPAIR_READABLE_BYTES, sock),
+        ("SYS_SOCKETPAIR_SHUTDOWN", SYS_SOCKETPAIR_SHUTDOWN, sock),
+        ("SYS_SOCKETPAIR_CLOSE", SYS_SOCKETPAIR_CLOSE, sock),
+        ("SYS_EVENTFD_WRITE", SYS_EVENTFD_WRITE, efd),
+        ("SYS_EVENTFD_READ", SYS_EVENTFD_READ, efd),
+        ("SYS_EVENTFD_TRY_READ", SYS_EVENTFD_TRY_READ, efd),
+        ("SYS_EVENTFD_READ_TIMEOUT", SYS_EVENTFD_READ_TIMEOUT, efd),
+        ("SYS_EVENTFD_WRITE_TIMEOUT", SYS_EVENTFD_WRITE_TIMEOUT, efd),
+        ("SYS_EVENTFD_HAS_VALUE", SYS_EVENTFD_HAS_VALUE, efd),
+        ("SYS_EVENTFD_CLOSE", SYS_EVENTFD_CLOSE, efd),
+        ("SYS_CP_REGISTER", SYS_CP_REGISTER, cp),
+        ("SYS_CP_UNREGISTER", SYS_CP_UNREGISTER, cp),
+        ("SYS_CP_WAIT", SYS_CP_WAIT, cp),
+        ("SYS_CP_TRY_WAIT", SYS_CP_TRY_WAIT, cp),
+        ("SYS_CP_NOTIFY", SYS_CP_NOTIFY, cp),
+        ("SYS_CP_CLOSE", SYS_CP_CLOSE, cp),
+        ("SYS_TIMER_CANCEL", SYS_TIMER_CANCEL, timer),
+    ] {
+        let got = self_test_as_process(other, || dispatch(nr, &a0(handle))).value;
+        if got != invalid {
+            serial_println!(
+                "[syscall]   {} on another process's handle answered {}, not InvalidHandle",
+                name,
+                got
+            );
+            return fail("an IPC handle was usable by a process that does not hold it", &live);
+        }
+    }
+    // A completion port of the other process's own cannot watch the owner's
+    // pipe; the owner's port can.
+    let Some(other_cp) = one(self_test_as_process(other, || dispatch(SYS_CP_CREATE, &a0(0)))) else {
+        return fail("SYS_CP_CREATE failed for the other process", &live);
+    };
+    let watch = |port: u64| SyscallArgs {
+        arg0: port,
+        arg1: 1, // source type: pipe, read end
+        arg2: pipe_r,
+        ..a0(0)
+    };
+    if self_test_as_process(other, || dispatch(SYS_CP_REGISTER, &watch(other_cp))).value != invalid {
+        return fail("a completion port could watch another process's pipe", &live);
+    }
+    if self_test_as_process(owner, || dispatch(SYS_CP_REGISTER, &watch(cp))).value != 0 {
+        return fail("the owner could not watch its own pipe from its own port", &live);
+    }
+
     // A service listener: the owner's alone, and its name freed by its death.
     const NAME: &[u8] = b"ipc-possession-selftest";
     let Ok(listener) = crate::ipc::service::register(NAME) else {
@@ -2441,7 +2539,7 @@ fn test_dispatch_ipc_possession() -> KernelResult<()> {
     pcb::destroy(other);
 
     serial_println!(
-        "[syscall]   IPC possession: channel and listener handles refused to a process that does not hold them; a dead service's name released: OK"
+        "[syscall]   IPC possession: channel, listener, pipe, socket-pair, eventfd, completion-port and timer handles refused to a process that does not hold them; a dead service's name released: OK"
     );
     Ok(())
 }

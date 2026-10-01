@@ -1368,12 +1368,20 @@ list moved to lane D on 2026-09-22):
     (fractional weights, rounded, as Python's `random.choices`).
   - `[B]` **The fastpy compiler on SlateOS -- lane B's next large port**
     (§1050, B-Q18). The Rust toolchain and WINE wait behind it.
-  - `[B]` **Genuine Oils, the default shell** (§1043): upstream's
+  - `[-]` `[B]` **Genuine Oils, the default shell** (§1043): upstream's
     `oils-for-unix` C++ cross-compiled with `zig c++` against SlateOS's C
     library, its spec tests run on SlateOS, then made the default `sh` and login
     shell (`init/`, and lane D's recipe by request). Our Rust OSH stays, as a
     discoverable fallback. YSH arrives with it. §305 still caps parity work on
     the Rust OSH.
+    - `[x]` Builds and links (2026-10-01): `scripts/oils-spike/run.sh` --
+      Oils 0.38.0, 0 undefined and 0 duplicate symbols against `libc.a`,
+      staged as `build/spike/oils-for-unix-slateos.elf`; `--without-readline`
+      for now (no GNU readline on SlateOS yet).
+    - `[ ]` On the image and run at boot -- asked of lanes D and A in
+      `requests/b-ad-genuine-oils-staged-and-run-at-boot.md`.
+    - `[ ]` Spec tests on SlateOS; then the switch (the Rust OSH renamed,
+      genuine Oils as `/bin/osh`, `sh` and the login shell); readline.
   - **Ports the operator asked to have recorded** (§1050), with the lane each
     most likely belongs to -- a suggestion for the owning lane to adopt or
     reassign, not an assignment: Mono, .NET on Linux (D, as a language

@@ -1241,6 +1241,7 @@ dependencies = [
  "pathtext",
  "safeio",
  "scratchdir",
+ "textline",
 ]
 
 [[package]]

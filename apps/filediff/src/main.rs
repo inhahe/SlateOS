@@ -1565,14 +1565,21 @@ impl FileDiffApp {
 
     /// Handle keyboard input.
     fn handle_key(&mut self, key: &KeyEvent) -> EventResult {
+        // Three kinds of key, each asked for as itself. The Ctrl chords are
+        // Ctrl chords, not Ctrl held; the merge's and the ignore toggles' are
+        // Alt alone, not Alt held: AltGr arrives as Ctrl+Alt and types, and
+        // AltGr+C -- a Polish `ć` -- toggled ignoring case. Every other key
+        // is taken plain: a chord with the Windows key is the desktop's and
+        // arrives carrying its key, and Windows+J scrolled.
+        let plain = textline::is_plain(key.modifiers);
         // The shortcut list, before the search box below can turn the
         // keystroke into text. `F1` rather than `?`, because the search box
         // takes `key.typed()` and a `?` belongs in somebody's query.
-        if key.key == Key::F1 {
+        if key.key == Key::F1 && plain {
             self.show_help = !self.show_help;
             return EventResult::Consumed;
         }
-        if key.key == Key::Escape && self.show_help {
+        if key.key == Key::Escape && plain && self.show_help {
             self.show_help = false;
             return EventResult::Consumed;
         }
@@ -1580,25 +1587,28 @@ impl FileDiffApp {
             return self.handle_search_key(key);
         }
         if self.dir_mode
+            && plain
             && let Some(answered) = self.handle_folder_key(key)
         {
             return answered;
         }
         // From a pair opened out of the folder comparison, Escape goes back.
-        if key.key == Key::Escape && self.from_folders && self.dir_compare.is_some() {
+        if key.key == Key::Escape && plain && self.from_folders && self.dir_compare.is_some() {
             self.dir_mode = true;
             self.from_folders = false;
             return EventResult::Consumed;
         }
+        if textline::is_ctrl_chord(key.modifiers) {
+            return self.handle_ctrl_chord(key);
+        }
+        if key.modifiers.alt && !key.modifiers.ctrl && !key.modifiers.super_key {
+            return self.handle_alt_chord(key);
+        }
+        if !plain {
+            return EventResult::Ignored;
+        }
 
         match key.key {
-            // Ctrl+D: compare two folders. The folder view was drawn from a
-            // result nothing could make: no key entered it, and its
-            // comparison was over names and texts held in memory.
-            Key::D if key.modifiers.ctrl => {
-                self.choose_folders();
-                EventResult::Consumed
-            }
             // Navigation
             Key::Down | Key::J => {
                 self.scroll_left = (self.scroll_left + 1.0).min(self.max_scroll());
@@ -1630,21 +1640,6 @@ impl FileDiffApp {
                 }
                 EventResult::Consumed
             }
-            Key::Home if key.modifiers.ctrl => {
-                self.scroll_left = 0.0;
-                if self.sync_scroll {
-                    self.scroll_right = 0.0;
-                }
-                EventResult::Consumed
-            }
-            Key::End if key.modifiers.ctrl => {
-                self.scroll_left = self.max_scroll();
-                if self.sync_scroll {
-                    self.scroll_right = self.scroll_left;
-                }
-                EventResult::Consumed
-            }
-
             // Change navigation (F7/F8 or Ctrl+N/P)
             Key::F7 => {
                 self.prev_change();
@@ -1652,68 +1647,6 @@ impl FileDiffApp {
             }
             Key::F8 => {
                 self.next_change();
-                EventResult::Consumed
-            }
-            // Ctrl+O fills the left pane, Ctrl+Shift+O the right. Two keys
-            // rather than one dialog asking twice: a user comparing a file
-            // against a new version replaces one side and keeps the other,
-            // and being made to re-choose both is the commonest thing a diff
-            // tool gets wrong.
-            Key::O if key.modifiers.ctrl => {
-                let side = if key.modifiers.shift {
-                    Side::Right
-                } else {
-                    Side::Left
-                };
-                self.open_into(side);
-                EventResult::Consumed
-            }
-            Key::N if key.modifiers.ctrl => {
-                self.next_change();
-                EventResult::Consumed
-            }
-            Key::P if key.modifiers.ctrl => {
-                self.prev_change();
-                EventResult::Consumed
-            }
-
-            // View mode toggle
-            Key::Num1 if key.modifiers.ctrl => {
-                self.view_mode = ViewMode::SideBySide;
-                EventResult::Consumed
-            }
-            Key::Num2 if key.modifiers.ctrl => {
-                self.view_mode = ViewMode::Unified;
-                EventResult::Consumed
-            }
-            Key::Num3 if key.modifiers.ctrl => {
-                self.view_mode = ViewMode::Inline;
-                EventResult::Consumed
-            }
-
-            // Sync scroll toggle
-            Key::S if key.modifiers.ctrl && key.modifiers.shift => {
-                self.sync_scroll = !self.sync_scroll;
-                EventResult::Consumed
-            }
-
-            // Search
-            Key::F if key.modifiers.ctrl => {
-                self.search.visible = true;
-                EventResult::Consumed
-            }
-
-            // Merge actions
-            Key::Left if key.modifiers.alt => {
-                self.accept_left();
-                EventResult::Consumed
-            }
-            Key::Right if key.modifiers.alt => {
-                self.accept_right();
-                EventResult::Consumed
-            }
-            Key::B if key.modifiers.alt => {
-                self.accept_both();
                 EventResult::Consumed
             }
 
@@ -1727,16 +1660,112 @@ impl FileDiffApp {
                 EventResult::Consumed
             }
 
-            // Ignore toggles
-            Key::W if key.modifiers.alt => {
-                self.toggle_ignore_whitespace();
+            _ => EventResult::Ignored,
+        }
+    }
+
+    /// A Ctrl chord: Ctrl without Alt or the Windows key, Shift as it is.
+    fn handle_ctrl_chord(&mut self, key: &KeyEvent) -> EventResult {
+        match key.key {
+            // Ctrl+D: compare two folders. The folder view was drawn from a
+            // result nothing could make: no key entered it, and its
+            // comparison was over names and texts held in memory.
+            Key::D => {
+                self.choose_folders();
                 EventResult::Consumed
             }
-            Key::C if key.modifiers.alt => {
-                self.toggle_ignore_case();
+            Key::Home => {
+                self.scroll_left = 0.0;
+                if self.sync_scroll {
+                    self.scroll_right = 0.0;
+                }
+                EventResult::Consumed
+            }
+            Key::End => {
+                self.scroll_left = self.max_scroll();
+                if self.sync_scroll {
+                    self.scroll_right = self.scroll_left;
+                }
+                EventResult::Consumed
+            }
+            // Ctrl+O fills the left pane, Ctrl+Shift+O the right. Two keys
+            // rather than one dialog asking twice: a user comparing a file
+            // against a new version replaces one side and keeps the other,
+            // and being made to re-choose both is the commonest thing a diff
+            // tool gets wrong.
+            Key::O => {
+                let side = if key.modifiers.shift {
+                    Side::Right
+                } else {
+                    Side::Left
+                };
+                self.open_into(side);
+                EventResult::Consumed
+            }
+            Key::N => {
+                self.next_change();
+                EventResult::Consumed
+            }
+            Key::P => {
+                self.prev_change();
                 EventResult::Consumed
             }
 
+            // View mode toggle
+            Key::Num1 => {
+                self.view_mode = ViewMode::SideBySide;
+                EventResult::Consumed
+            }
+            Key::Num2 => {
+                self.view_mode = ViewMode::Unified;
+                EventResult::Consumed
+            }
+            Key::Num3 => {
+                self.view_mode = ViewMode::Inline;
+                EventResult::Consumed
+            }
+
+            // Sync scroll toggle
+            Key::S if key.modifiers.shift => {
+                self.sync_scroll = !self.sync_scroll;
+                EventResult::Consumed
+            }
+
+            // Search
+            Key::F => {
+                self.search.visible = true;
+                EventResult::Consumed
+            }
+            _ => EventResult::Ignored,
+        }
+    }
+
+    /// A chord with Alt alone: the merge's and the ignore toggles'.
+    fn handle_alt_chord(&mut self, key: &KeyEvent) -> EventResult {
+        match key.key {
+            // Merge actions
+            Key::Left => {
+                self.accept_left();
+                EventResult::Consumed
+            }
+            Key::Right => {
+                self.accept_right();
+                EventResult::Consumed
+            }
+            Key::B => {
+                self.accept_both();
+                EventResult::Consumed
+            }
+
+            // Ignore toggles
+            Key::W => {
+                self.toggle_ignore_whitespace();
+                EventResult::Consumed
+            }
+            Key::C => {
+                self.toggle_ignore_case();
+                EventResult::Consumed
+            }
             _ => EventResult::Ignored,
         }
     }
@@ -1767,6 +1796,24 @@ impl FileDiffApp {
 
     /// Handle keyboard input when search bar is active.
     fn handle_search_key(&mut self, key: &KeyEvent) -> EventResult {
+        // Whether the search matches case: Ctrl+I, a Ctrl chord. See the
+        // arm below for why it exists.
+        if key.key == Key::I && textline::is_ctrl_chord(key.modifiers) {
+            self.search.case_sensitive = !self.search.case_sensitive;
+            self.rerun_search();
+            return EventResult::Consumed;
+        }
+        // What a key typed, AltGr's among it, and not a command's letter,
+        // which a chord carries: Alt+X typed an `x` into the query.
+        if textline::types_into_field(key) {
+            self.search.query.extend(key.typed());
+            self.rerun_search();
+            return EventResult::Consumed;
+        }
+        // The box's own keys are plain.
+        if !textline::is_plain(key.modifiers) {
+            return EventResult::Ignored;
+        }
         match key.key {
             Key::Escape => {
                 self.search.visible = false;
@@ -1791,30 +1838,15 @@ impl FileDiffApp {
                 self.scroll_to_current_match();
                 EventResult::Consumed
             }
-            // Whether the search matches case. `SearchState::case_sensitive`
-            // is handed to `textfind::Case::sensitive` on every search and
-            // was `false` with no writer, so finding `Config` also found
-            // `config` and there was no way to ask for only one of them --
-            // in a tool people open to find out which of two files says
-            // `MAX_SIZE` and which says `max_size`.
-            //
-            // Ahead of the text branch, which would otherwise type an `i`
-            // into the query. Alt+C beside it is a different question: that
-            // one is whether the *comparison* ignores case.
-            Key::I if key.modifiers.ctrl => {
-                self.search.case_sensitive = !self.search.case_sensitive;
-                self.rerun_search();
-                EventResult::Consumed
-            }
-            _ => {
-                if key.types_text() {
-                    self.search.query.extend(key.typed());
-                    self.rerun_search();
-                    EventResult::Consumed
-                } else {
-                    EventResult::Ignored
-                }
-            }
+            // Ctrl+I, answered above, is whether the search matches case.
+            // `SearchState::case_sensitive` is handed to
+            // `textfind::Case::sensitive` on every search and was `false`
+            // with no writer, so finding `Config` also found `config` and
+            // there was no way to ask for only one of them -- in a tool
+            // people open to find out which of two files says `MAX_SIZE` and
+            // which says `max_size`. Alt+C is a different question: that one
+            // is whether the *comparison* ignores case.
+            _ => EventResult::Ignored,
         }
     }
 
@@ -5527,6 +5559,103 @@ mod tests {
         }
     }
 
+    /// **Each kind of key is asked for as itself**: AltGr+C -- Ctrl+Alt, which
+    /// types a Polish `ć` -- toggled ignoring case as Alt+C does, and AltGr+2
+    /// changed the view as Ctrl+2 does; Windows+J scrolled and Alt+Tab
+    /// moved to the next change, each chord arriving carrying its key; and
+    /// Alt+X typed an `x` into the search. Alt+C and Ctrl+2 still do theirs.
+    #[test]
+    fn each_kind_of_key_is_asked_for_as_itself() {
+        let altgr = Modifiers {
+            alt: true,
+            ..Modifiers::ctrl()
+        };
+        let held = |k: Key, text: &str, modifiers: Modifiers| {
+            Event::Key(KeyEvent {
+                key: k,
+                pressed: true,
+                modifiers,
+                text: text.to_owned(),
+            })
+        };
+        let mut app = loaded();
+        let opts = |app: &FileDiffApp| {
+            (
+                app.ignore_opts.ignore_case,
+                app.ignore_opts.ignore_whitespace,
+            )
+        };
+        let (ignore, view, hunk) = (opts(&app), app.view_mode, app.selected_hunk);
+        let scroll = app.scroll_left;
+        for (k, m) in [
+            (Key::C, altgr),
+            (Key::W, altgr),
+            (Key::Num2, altgr),
+            (Key::Left, altgr),
+            (Key::J, Modifiers::super_key()),
+            (Key::Down, Modifiers::alt()),
+            (Key::Tab, Modifiers::alt()),
+            (Key::C, Modifiers::super_key()),
+            (Key::F1, Modifiers::alt()),
+        ] {
+            assert_eq!(
+                app.handle_event(&held(k, "", m)),
+                EventResult::Ignored,
+                "{m:?} {k:?} was taken"
+            );
+        }
+        assert_eq!(opts(&app), ignore, "a chord toggled an ignore option");
+        assert_eq!(app.view_mode, view, "a chord changed the view");
+        assert_eq!(app.selected_hunk, hunk, "a chord moved to another change");
+        assert!(
+            (app.scroll_left - scroll).abs() < f32::EPSILON,
+            "a chord scrolled"
+        );
+        assert!(!app.show_help, "a chord raised the keys");
+
+        app.handle_event(&held(Key::C, "", Modifiers::alt()));
+        assert_ne!(
+            opts(&app).0,
+            ignore.0,
+            "Alt+C no longer toggles ignoring case"
+        );
+        app.handle_event(&held(Key::Num2, "", Modifiers::ctrl()));
+        assert_eq!(
+            app.view_mode,
+            ViewMode::Unified,
+            "Ctrl+2 no longer changes the view"
+        );
+
+        // The list of keys is put away by a plain Escape.
+        app.handle_event(&held(Key::F1, "", Modifiers::NONE));
+        app.handle_event(&held(Key::Escape, "", Modifiers::alt()));
+        assert!(app.show_help, "Alt+Escape put the list of keys away");
+        app.handle_event(&held(Key::Escape, "", Modifiers::NONE));
+        assert!(!app.show_help, "control: Escape puts the list away");
+
+        // The folder view's keys are plain: Alt+Escape does not leave it.
+        app.dir_mode = true;
+        app.handle_event(&held(Key::Escape, "", Modifiers::alt()));
+        assert!(app.dir_mode, "Alt+Escape left the folder view");
+        app.dir_mode = false;
+
+        // The search types what a key typed -- AltGr+I a Polish-keyboard `í`,
+        // not Ctrl+I's case toggle -- and its own keys are plain.
+        app.handle_event(&held(Key::F, "", Modifiers::ctrl()));
+        assert!(app.search.visible, "control: Ctrl+F searches");
+        let case = app.search.case_sensitive;
+        app.handle_event(&held(Key::X, "x", Modifiers::alt()));
+        app.handle_event(&held(Key::C, "ć", altgr));
+        app.handle_event(&held(Key::I, "í", altgr));
+        assert_eq!(
+            app.search.query, "ćí",
+            "the search typed a command or lost AltGr's characters"
+        );
+        assert_eq!(app.search.case_sensitive, case, "AltGr+I toggled the case");
+        app.handle_event(&held(Key::Escape, "", Modifiers::alt()));
+        assert!(app.search.visible, "Alt+Escape closed the search");
+    }
+
     // -- Following the user's theme -------------------------------------------
 
     /// The window draws in the user's colours rather than in constants of its
@@ -5748,6 +5877,11 @@ mod tests {
         assert!(!app.dir_mode, "the pair did not open");
         assert_eq!(app.left_content, "left\n");
         assert_eq!(app.right_content, "right\n");
+        // A plain Escape: Windows+Escape is the desktop's.
+        let mut win_escape = key(Key::Escape);
+        win_escape.modifiers = Modifiers::super_key();
+        assert_eq!(app.handle_key(&win_escape), EventResult::Ignored);
+        assert!(!app.dir_mode, "Windows+Escape went back to the folder list");
         app.handle_key(&key(Key::Escape));
         assert!(app.dir_mode, "Escape did not go back to the folder list");
     }

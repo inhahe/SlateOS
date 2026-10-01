@@ -17,6 +17,8 @@ oswindow = { path = "../../gui/window" }
 # window down -- and says so when it cuts one.
 safeio = { path = "../safeio" }
 diffcore = { path = "../diffcore" }
+# `is_plain`, `is_ctrl_chord`, `types_into_field`: Ctrl chords, Alt alone and plain keys, each as itself.
+textline = { path = "../textline" }
 
 [dev-dependencies]
 # A private folder per test, for comparing two real folders.

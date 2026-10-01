@@ -6823,9 +6823,9 @@ pub fn build_exec_test_elf(elf_addr: u64, elf_len: u32) -> alloc::vec::Vec<u8> {
 /// | `0x13` | `struct_size = 108` | `-3` | not a multiple of 8 |
 /// | `0x14` | `struct_size = 4104` | `-3` | above `SPAWN_EX2_MAX_SIZE` |
 /// | `0x15` | `struct_size = 104` | `-101` | a short struct is legal, and the missing tail is zero-filled — an unzeroed `cap_mode` would have been rejected |
-/// | `0x16` | `struct_size = 144` | `-101` | the exact current size is accepted |
-/// | `0x17` | `struct_size = 152`, tail `= 0` | `-101` | a *newer* caller with an all-zero tail is accepted |
-/// | `0x18` | `struct_size = 152`, tail `= 1` | `-3` | a non-zero unknown field is refused, never ignored |
+/// | `0x16` | `struct_size = 192` | `-101` | the exact current size is accepted |
+/// | `0x17` | `struct_size = 200`, tail `= 0` | `-101` | a *newer* caller with an all-zero tail is accepted |
+/// | `0x18` | `struct_size = 200`, tail `= 1` | `-3` | a non-zero unknown field is refused, never ignored |
 /// | `0x19` | `cap_mode = 2` | `-3` | an unknown mode is not clamped to a known one |
 /// | `0x1A` | `cap_mode = 1`, `cap_ptr = 0`, `cap_count = 3` | `-3` | a null array with a count is a caller bug, not "no capabilities" |
 /// | `0x1B` | `cap_mode = 1`, `cap_ptr = 0`, `cap_count = 0` | `-101` | …but the two spellings of "nothing" agree |
@@ -6839,10 +6839,25 @@ pub fn build_exec_test_elf(elf_addr: u64, elf_len: u32) -> alloc::vec::Vec<u8> {
 /// | `0x23` | `cwd_ptr` unmapped, `cwd_len = 4096` | `-3` | over `CWD_MAX_LEN` is refused *before* the pointer is read (a read first would say -101) |
 /// | `0x24` | `cwd` = `"a"` | `-3` | a relative directory is refused, not resolved or ignored |
 /// | `0x25` | `cwd` = `"/"` | `-101` | …and a canonical one passes the gate |
+/// | `0x26` | `pgid_mode = 2` | `-3` | an unknown group mode is refused |
+/// | `0x27` | `pgid = 5`, `pgid_mode = 0` | `-3` | a group without its mode is refused, not ignored |
+/// | `0x28` | `pgid_mode = 1`, `pgid = 2^31` | `-3` | a group that is not a `pid_t` is refused |
+/// | `0x29` | `pgid_mode = 1`, `pgid = 0` | `-101` | …and "a new group" passes the gate |
+/// | `0x2A` | `sigmask_set = 2` | `-3` | an unknown mask flag is refused |
+/// | `0x2B` | `sigmask = 1`, `sigmask_set = 0` | `-3` | a mask without its flag is refused |
+/// | `0x2C` | `sigmask_set = 1`, `sigmask = !0` | `-101` | any mask passes (`SIGKILL`/`SIGSTOP` are dropped later, not refused) |
+/// | `0x2D` | `setsid = 2` | `-3` | an unknown session flag is refused |
+/// | `0x2E` | `setsid = 1` | `-101` | …and a new session passes the gate |
+/// | `0x2F` | `sigdefault = !0` | `-101` | `sigdefault` takes any bits |
+/// | `0x30` | `struct_size = 144`, `pgid_mode = 2` beyond it | `-101` | a caller older than the six fields has them read as zero, not from its memory |
 ///
 /// The size probes (`0x16`-`0x18`) moved when `cwd_ptr`/`cwd_len` made the
 /// struct 144 bytes (§960, 2026-09-25): aimed at the old 128, "the unknown
 /// tail" was `cwd_ptr`, a known field that is accepted, and `0x18` failed.
+/// They moved again when the six `posix_spawnattr_t` fields made it 192
+/// (2026-10-01), and the scratch entry and path moved past the struct with
+/// them -- left at 160 and 200, the entry would have been read as
+/// `sigmask_set`.
 ///
 /// # Deliberately out of scope
 ///
@@ -6886,16 +6901,27 @@ pub fn build_spawn_ex2_abi_test_elf() -> alloc::vec::Vec<u8> {
     /// (design-decisions.md §960) added -- which made the struct 144 bytes.
     const F_CWD_PTR: u32 = 128;
     const F_CWD_LEN: u32 = 136;
+    /// The six `posix_spawnattr_t` fields, which made the struct 192 bytes.
+    const F_PGID_MODE: u32 = 144;
+    const F_PGID: u32 = 152;
+    const F_SIGMASK_SET: u32 = 160;
+    const F_SIGMASK: u32 = 168;
+    const F_SIGDEFAULT: u32 = 176;
+    const F_SETSID: u32 = 184;
+    /// This kernel's `size_of::<SpawnEx2Args>()`.
+    const CURRENT: u64 = 192;
     /// The first byte past the struct — the "unknown tail" a newer caller
     /// would have written a new field into.  It was 128 until `cwd_ptr` took
-    /// that slot; a probe left aimed there then wrote a *known* field, which
-    /// is accepted, and 0x18 failed on every boot until this moved.
-    const F_TAIL: u32 = 144;
-    /// A scratch `CapEntryInfo`: `resource_type` and `_reserved[3]` share this
-    /// qword, then `rights`, then `resource_id` (both left zero).
-    const F_ENTRY: u32 = 160;
+    /// that slot, and 144 until the six attribute fields took theirs; a probe
+    /// left aimed at a known field writes something that is accepted, and
+    /// 0x18 fails on every boot until it moves.
+    const F_TAIL: u32 = 192;
+    /// A scratch `CapEntryInfo`, past the struct: `resource_type` and
+    /// `_reserved[3]` share this qword, then `rights`, then `resource_id`
+    /// (both left zero).
+    const F_ENTRY: u32 = 208;
     /// A scratch path for the `cwd` probes: one byte, then zeroes.
-    const F_PATH: u32 = 200;
+    const F_PATH: u32 = 240;
 
     let mut code: alloc::vec::Vec<u8> = alloc::vec::Vec::new();
 
@@ -6980,17 +7006,17 @@ pub fn build_spawn_ex2_abi_test_elf() -> alloc::vec::Vec<u8> {
     // zero there is rejected.
     set(&mut code, F_SIZE, 104);
     probe(&mut code, EFAULT, 0x15);
-    set(&mut code, F_SIZE, 144);
+    set(&mut code, F_SIZE, CURRENT);
     probe(&mut code, EFAULT, 0x16);
 
     // --- the unknown tail ---------------------------------------------------
-    set(&mut code, F_SIZE, 152);
+    set(&mut code, F_SIZE, CURRENT + 8);
     set(&mut code, F_TAIL, 0);
     probe(&mut code, EFAULT, 0x17);
     set(&mut code, F_TAIL, 1);
     probe(&mut code, EINVAL, 0x18);
     set(&mut code, F_TAIL, 0);
-    set(&mut code, F_SIZE, 144);
+    set(&mut code, F_SIZE, CURRENT);
 
     // --- cap_mode dispatch --------------------------------------------------
     set(&mut code, F_CAP_MODE, 2);
@@ -7046,6 +7072,47 @@ pub fn build_spawn_ex2_abi_test_elf() -> alloc::vec::Vec<u8> {
     set(&mut code, F_PATH, u64::from(b'/'));
     probe(&mut code, EFAULT, 0x25);
     set(&mut code, F_CWD_LEN, 0);
+
+    // --- the process group, session and signal fields ----------------------
+    // Judged at the gate with the rest, before the ELF read: a refused value
+    // ends in -3 and an accepted one in -101. Each field goes back to zero
+    // after its probes, so each probe changes only what it names.
+    set(&mut code, F_PGID_MODE, 2);
+    probe(&mut code, EINVAL, 0x26);
+    set(&mut code, F_PGID_MODE, 0);
+    set(&mut code, F_PGID, 5);
+    probe(&mut code, EINVAL, 0x27);
+    set(&mut code, F_PGID_MODE, 1);
+    set(&mut code, F_PGID, 0x8000_0000);
+    probe(&mut code, EINVAL, 0x28);
+    set(&mut code, F_PGID, 0);
+    probe(&mut code, EFAULT, 0x29);
+    set(&mut code, F_PGID_MODE, 0);
+    set(&mut code, F_SIGMASK_SET, 2);
+    probe(&mut code, EINVAL, 0x2A);
+    set(&mut code, F_SIGMASK_SET, 0);
+    set(&mut code, F_SIGMASK, 1);
+    probe(&mut code, EINVAL, 0x2B);
+    set(&mut code, F_SIGMASK_SET, 1);
+    set(&mut code, F_SIGMASK, u64::MAX);
+    probe(&mut code, EFAULT, 0x2C);
+    set(&mut code, F_SIGMASK_SET, 0);
+    set(&mut code, F_SIGMASK, 0);
+    set(&mut code, F_SETSID, 2);
+    probe(&mut code, EINVAL, 0x2D);
+    set(&mut code, F_SETSID, 1);
+    probe(&mut code, EFAULT, 0x2E);
+    set(&mut code, F_SETSID, 0);
+    set(&mut code, F_SIGDEFAULT, u64::MAX);
+    probe(&mut code, EFAULT, 0x2F);
+    set(&mut code, F_SIGDEFAULT, 0);
+    // An older caller's struct stops before the six: whatever lies past its
+    // end in its memory is not read as them.
+    set(&mut code, F_SIZE, 144);
+    set(&mut code, F_PGID_MODE, 2);
+    probe(&mut code, EFAULT, 0x30);
+    set(&mut code, F_PGID_MODE, 0);
+    set(&mut code, F_SIZE, CURRENT);
 
     // --- every probe agreed -------------------------------------------------
     code.extend_from_slice(&[0x31, 0xFF]); // xor edi, edi

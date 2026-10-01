@@ -474,6 +474,7 @@ pub fn init(hhdm_offset: u64) -> KernelResult<()> {
     INITIALIZED.store(true, Ordering::Release);
 
     serial_println!("[virtio-snd] Initialization complete");
+    pci::bind_driver(dev.address, "virtio-snd");
     Ok(())
 }
 

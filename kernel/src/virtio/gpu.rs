@@ -576,6 +576,7 @@ pub fn init(hhdm_offset: u64) -> KernelResult<()> {
         width,
         height
     );
+    pci::bind_driver(dev.address, "virtio-gpu");
     Ok(())
 }
 

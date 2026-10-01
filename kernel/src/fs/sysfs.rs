@@ -591,6 +591,39 @@ fn gen_param_file(name: &str) -> KernelResult<Vec<u8>> {
     }
 }
 
+/// The lines of `/sys/devices/pci/<BB:DD.F>` past its identity: which driver
+/// has taken the function, its interrupt line and its BARs, in the file's
+/// `key: value` form (`requests/e-a-publish-each-pci-functions-irq-bars-and-driver.md`).
+///
+/// - `driver: <name>` only when an in-kernel driver has taken the function
+///   (`pci::bound_driver`). No line means no driver -- not `driver: none`, so
+///   a reader can tell "unclaimed" from a kernel that does not say.
+/// - `irq_line: <n>`: the firmware-assigned legacy line, which is not
+///   necessarily the vector in use under MSI -- hence the key's name. Absent
+///   for 255, "routed nowhere".
+/// - `bar<N>: <base-hex> <mem|io>[ 64][ prefetch]` for each implemented BAR
+///   (`pci::decode_bars`), with no size: the kernel does not size BARs.
+fn pci_resource_lines(dev: &crate::pci::PciDevice) -> String {
+    let mut s = String::new();
+    if let Some(name) = crate::pci::bound_driver(dev.address) {
+        s.push_str(&format!("driver: {name}\n"));
+    }
+    if dev.irq_line != 0xFF {
+        s.push_str(&format!("irq_line: {}\n", dev.irq_line));
+    }
+    for bar in crate::pci::decode_bars(dev) {
+        s.push_str(&format!(
+            "bar{}: {:#x} {}{}{}\n",
+            bar.index,
+            bar.base,
+            if bar.io { "io" } else { "mem" },
+            if bar.is_64 { " 64" } else { "" },
+            if bar.prefetch { " prefetch" } else { "" },
+        ));
+    }
+    s
+}
+
 fn gen_pci_device(bdf: &str) -> KernelResult<Vec<u8>> {
     // bdf is something like "00:01.0" — parse it.
     let devices = crate::pci::scan_bus0();
@@ -600,12 +633,13 @@ fn gen_pci_device(bdf: &str) -> KernelResult<Vec<u8>> {
             dev.address.bus, dev.address.device, dev.address.function
         );
         if addr == bdf {
-            let mut s = String::with_capacity(128);
+            let mut s = String::with_capacity(256);
             s.push_str(&format!("address: {}\n", addr));
             s.push_str(&format!("vendor: {:04x}\n", dev.vendor_id));
             s.push_str(&format!("device: {:04x}\n", dev.device_id));
             s.push_str(&format!("class: {:02x}\n", dev.class));
             s.push_str(&format!("subclass: {:02x}\n", dev.subclass));
+            s.push_str(&pci_resource_lines(dev));
             return Ok(s.into_bytes());
         }
     }
@@ -2783,6 +2817,67 @@ pub fn self_test() -> KernelResult<()> {
         }
     }
 
+    self_test_pci_resource_lines()?;
+
     serial_println!("[sysfs] Self-test passed{}.", skips.suffix());
+    Ok(())
+}
+
+/// `/sys/devices/pci/<BB:DD.F>`'s lines past its identity
+/// ([`pci_resource_lines`]): exactly, for a made-up function no driver took;
+/// and for every function the scan finds, a `driver:` line exactly when a
+/// driver has taken it, an `irq_line:` line exactly when it has one, and one
+/// `bar` line per implemented BAR.
+fn self_test_pci_resource_lines() -> KernelResult<()> {
+    use crate::serial_println;
+    let fail = |what: &str| {
+        serial_println!("[sysfs]   FAIL: /sys/devices/pci: {}", what);
+        Err(KernelError::InternalError)
+    };
+    let made_up = crate::pci::PciDevice {
+        // Bus 0xFE is never scanned, so no driver is bound there.
+        address: crate::pci::PciAddress {
+            bus: 0xFE,
+            device: 30,
+            function: 1,
+        },
+        vendor_id: 0,
+        device_id: 0,
+        class: 0,
+        subclass: 0,
+        irq_line: 11,
+        bars: [0xc041, 0, 0x8000_000c, 0x1, 0xfeb0_0000, 0],
+    };
+    let want = "irq_line: 11\nbar0: 0xc040 io\nbar2: 0x180000000 mem 64 prefetch\n\
+                bar4: 0xfeb00000 mem\n";
+    if pci_resource_lines(&made_up) != want {
+        serial_println!("[sysfs]   got {:?}", pci_resource_lines(&made_up));
+        return fail("a made-up function's resource lines");
+    }
+    let mut bound = 0usize;
+    for dev in crate::pci::scan_bus0() {
+        let bdf = format!(
+            "{:02x}:{:02x}.{}",
+            dev.address.bus, dev.address.device, dev.address.function
+        );
+        let text = String::from_utf8(gen_pci_device(&bdf)?).unwrap_or_default();
+        let driver_line = text.lines().find_map(|l| l.strip_prefix("driver: "));
+        let has_irq = text.lines().any(|l| l.starts_with("irq_line: "));
+        let bars = text.lines().filter(|l| l.starts_with("bar")).count();
+        if driver_line != crate::pci::bound_driver(dev.address)
+            || has_irq != (dev.irq_line != 0xFF)
+            || bars != crate::pci::decode_bars(&dev).len()
+        {
+            serial_println!("[sysfs]   {}: {:?}", bdf, text);
+            return fail("a scanned function's file disagrees with the PCI record");
+        }
+        if driver_line.is_some() {
+            bound = bound.saturating_add(1);
+        }
+    }
+    serial_println!(
+        "[sysfs]   /sys/devices/pci driver, irq_line and bar lines: OK ({} function(s) driven)",
+        bound
+    );
     Ok(())
 }

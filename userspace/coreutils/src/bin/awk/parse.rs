@@ -31,18 +31,21 @@ use crate::ast::{
     Redirect, Rule, SPECIALS, Stmt, VarRef,
 };
 use crate::lex::{BUILTINS, Kw, Lexer, Tok, Token};
-use ere::Regex;
+use ere::awk::{self as escape, CompileError, Warnings};
+use ere::{Regex, Syntax};
 use std::collections::HashMap;
 use std::rc::Rc;
 
-/// Parse a whole program.
+/// Parse a whole program, its escape warnings going to `warnings`.
 ///
 /// # Errors
 /// Returns a one-line diagnostic. awk parses the entire program before running
 /// any of it, so a syntax error in a rule that would never have matched is
-/// still fatal — better than dying halfway through a report.
-pub fn parse(src: &[u8]) -> Result<Program, String> {
-    let tokens = Lexer::new(src).tokens()?;
+/// still fatal — better than dying halfway through a report. A diagnostic that
+/// begins `fatal: ` is one gawk reports as a fatal error rather than a syntax
+/// error, which is exit status 2 rather than 1.
+pub fn parse(src: &[u8], warnings: &mut Warnings) -> Result<Program, String> {
+    let tokens = Lexer::tokenize(src, warnings)?;
     let mut p = Parser {
         toks: tokens,
         i: 0,
@@ -772,7 +775,7 @@ impl Parser {
         match self.peek() {
             Tok::Number(_)
             | Tok::Str(_)
-            | Tok::Ere(_)
+            | Tok::Ere { .. }
             | Tok::Name(_)
             | Tok::FuncName(_)
             | Tok::Builtin(_)
@@ -865,7 +868,9 @@ impl Parser {
         match self.bump() {
             Tok::Number(n) => Ok(Expr::Num(n)),
             Tok::Str(s) => Ok(Expr::Str(Rc::new(s))),
-            Tok::Ere(s) => Ok(Expr::Regex(Rc::new(compile_regex(&s)?))),
+            Tok::Ere { source, pattern } => {
+                Ok(Expr::Regex(Rc::new(compile_literal(&source, &pattern)?)))
+            }
             Tok::Dollar => {
                 // `$` binds tighter than everything but `()` and `++`, so
                 // `$NF-1` is `($NF)-1` and `$i++` increments `$i`.
@@ -1072,22 +1077,45 @@ fn builtin_of(name: &str) -> Builtin {
     }
 }
 
-/// Compile a `/re/` literal, wording the failure the way awk does.
+/// Compile a `/re/` literal the lexer has already put through awk's escape
+/// layer, in the syntax gawk compiles with under `--posix`.
 ///
-/// `//` is legal awk and matches every record — `awk '//'` is `cat`. The engine
-/// refuses an empty pattern outright, because its first caller was the shell's
-/// `[[ =~ ]]`, where bash makes `[[ x =~ "" ]]` an error rather than a match; an
-/// empty *group* is fine there, so that is what the empty pattern becomes.
-pub fn compile_regex(pat: &[u8]) -> Result<Regex, String> {
-    let source = if pat.is_empty() {
-        b"()".as_slice()
-    } else {
-        pat
-    };
-    Regex::new(source).map_err(|e| {
-        let shown = String::from_utf8_lossy(pat).into_owned();
-        let why = String::from_utf8_lossy(&e.detail).into_owned();
-        format!("/{shown}/: {why}")
+/// `source` is the text as the program had it -- what the diagnostic quotes,
+/// as gawk's does -- and `pattern` what [`escape::regexp`] made of it. A
+/// literal that will not compile is gawk's `error:`, a syntax error found
+/// while parsing (exit 1), and the sentence after it is glibc's, which
+/// [`ere::EreError::message`] carries: gawk prints whatever `regcomp` said.
+///
+/// `//` is legal awk and matches every record — `awk '//'` is `cat` — and the
+/// engine compiles an empty pattern to exactly that.
+///
+/// # Errors
+/// The diagnostic, worded as above.
+pub fn compile_literal(source: &[u8], pattern: &[u8]) -> Result<Regex, String> {
+    Regex::new_syntax(pattern, false, Syntax::POSIX_AWK).map_err(|e| {
+        format!(
+            "error: {}: /{}/",
+            e.message(),
+            String::from_utf8_lossy(source)
+        )
+    })
+}
+
+/// Compile a regex whose text was computed at run time -- the right side of
+/// `~`, a `match`, `split`, `sub` or `gsub` pattern, a multi-character `FS` or
+/// `RS`: gawk's `make_regexp`, escape layer and compiler both.
+///
+/// # Errors
+/// gawk's fatal diagnostic: `fatal: invalid regexp: <glibc's sentence>:
+/// /<text>/`, or the escape layer's own.
+pub fn compile_dynamic(text: &[u8], warnings: &mut Warnings) -> Result<Regex, String> {
+    escape::compile(text, false, warnings).map_err(|e| match e {
+        CompileError::Nul(n) => format!("fatal: {}", n.message()),
+        CompileError::Regex(e) => format!(
+            "fatal: invalid regexp: {}: /{}/",
+            e.message(),
+            String::from_utf8_lossy(text)
+        ),
     })
 }
 
@@ -1097,7 +1125,7 @@ fn describe(t: &Tok) -> String {
         Tok::Newline => "a newline".to_string(),
         Tok::Number(n) => format!("`{n}'"),
         Tok::Str(s) => format!("the string \"{}\"", String::from_utf8_lossy(s)),
-        Tok::Ere(s) => format!("the regex /{}/", String::from_utf8_lossy(s)),
+        Tok::Ere { source, .. } => format!("the regex /{}/", String::from_utf8_lossy(source)),
         Tok::Name(n) | Tok::FuncName(n) => format!("`{n}'"),
         Tok::Builtin(n) => format!("`{n}'"),
         Tok::Keyword(k) => format!("`{}'", keyword_text(*k)),
@@ -1186,10 +1214,11 @@ mod tests {
     use super::*;
 
     fn ok(src: &str) -> Program {
-        parse(src.as_bytes()).unwrap_or_else(|e| panic!("parsing {src:?}: {e}"))
+        parse(src.as_bytes(), &mut Warnings::default())
+            .unwrap_or_else(|e| panic!("parsing {src:?}: {e}"))
     }
     fn err(src: &str) -> String {
-        parse(src.as_bytes()).unwrap_err()
+        parse(src.as_bytes(), &mut Warnings::default()).unwrap_err()
     }
 
     #[test]

@@ -54729,7 +54729,9 @@ FAILs).  Reversible (pure translator change; no PCB/state).
 ##    failing, and the restart makes the call succeed once it is continued.
 ##
 ## 1a. REMAINING GAP from item 1: the kernel cannot see a NATIVE-ABI
-##    process's SIG_IGN.
+##    process's SIG_IGN. [DONE 2026-10-01 -- design-decisions.md §1512:
+##    the kernel keeps the ignored set for both ABIs; the native libc
+##    reports it with SYS_SIGNAL_SET_IGNORED (1098). Kept for history.]
 ##    POSIX says a background access whose signal is *ignored* is treated as
 ##    if the signal had been sent and discarded — a read fails EIO, a write
 ##    proceeds. handlers::signal_ignored_or_blocked can answer that from

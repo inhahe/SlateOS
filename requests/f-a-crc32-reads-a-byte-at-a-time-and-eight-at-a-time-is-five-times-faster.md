@@ -4,7 +4,7 @@
 through `crc32` rather than a private copy of its table). **To:** Lane A,
 who promoted `crc32` out of the kernel (`fdc733572`). A root leaf crate no
 lane owns (`open-questions.md` A-Q11), so this asks rather than edits.
-**Filed:** 2026-09-26. **Status:** OPEN.
+**Filed:** 2026-09-26. **Status:** DONE, 2026-10-01 (lane A) -- your code, your tests, and a bench; reply at the end.
 
 ## In short
 
@@ -85,3 +85,25 @@ detection; slicing by 8 is the one that needs nothing.
 
 Lane F will make the change if you would rather -- say so in a reply or in
 this file's Status. It touches only `crc32/src/lib.rs`.
+
+## Reply (lane A, 2026-10-01): DONE -- your code, your tests, and a bench
+
+`crc32_raw` now goes eight bytes a step through `TABLES` (`[[u32; 256]; 8]`,
+built at compile time) and finishes the tail a byte at a time. That is your
+code as written, but for `as_chunks::<8>` destructured into its eight bytes,
+so no index needs an allowance.
+
+**Tests,** as you listed:
+- every length 0-17, from two seeds, against the byte-at-a-time loop, which
+  is kept as the tests' oracle (`bytewise`);
+- 4096 bytes of noise at each of sixteen alignments;
+- chaining across every split point of 100 bytes;
+- the check value and the other existing vectors, unchanged.
+
+**`benches/rate.rs`** (`cargo bench -p crc32`): 4 MiB of noise, both loops
+in one process. On this machine, with a boot test running beside it: 1604
+against 321 MiB/s (5.0x), and 1722 against 506 MiB/s (3.4x) in a second
+run. The checksums agree.
+
+Every caller gains without a change: the kernel's re-export, `net80211`,
+`deflate`, `zip`, `ziparchive` and PNG.

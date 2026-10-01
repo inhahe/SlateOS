@@ -140,6 +140,8 @@ cd "$fixtures" || exit 1
 #                what `-i`, `.` and `[[:alpha:]]` do to a character that is not
 #                one byte. Only meaningful now that the locale is `C.UTF-8` on
 #                both sides rather than whatever the Windows host had.
+#   bslash       a line for each thing a backslash could be taken to mean, so
+#                that `[\.]`, `[\t]` and `a\tb` show which reading ran
 #   ctx          eight numbered lines with two well-separated hits, so -A, -B
 #                and -C have room to overlap or not
 #   ctxtop       a hit on the *first* line, which is the only way to ask
@@ -162,6 +164,9 @@ printf 'bin\0ary\nplain\n'                      > binfile
 printf 'foo\0bar\0foo bar\0'                    > zsep
 printf 'foo\n\nqux\n'                           > pats
 printf 'caf\303\251\nCAF\303\211\ncafe\n'       > accent
+# What a backslash can be taken to mean: a dot or a backslash, a `t` or a tab,
+# `]` or `\]`, `ax` or `\x`, `w\-` and `ab_`, and the letters `n` and `0`.
+printf '.\n\\\nt\n\tx\na\tb\natb\n]\n\\]\nax\n\\x\nw\\-\nab_\nn\n0\n' > bslash
 printf '1\n2\nHIT\n4\n5\n6\nHIT\n8\n'           > ctx
 printf 'HIT\n2\n3\n'                            > ctxtop
 printf 'HIT\nHIT\nHIT\n'                        > run3
@@ -452,6 +457,27 @@ grep -E '\<foo' words
 grep -E 'foo\>' words
 grep -E '\bfoo' words
 grep -E '\Bo' words
+
+# --- a backslash: no C escapes, and inside a bracket a member ---
+# glibc reads `\t` as a `t` and gives a backslash no special meaning inside
+# `[...]`, in both dialects. `ere` read C escapes in both places until
+# 2026-10-01 (known-issues.md, TD-B-ERE-BRACKET-BACKSLASH): `[\.]` missed the
+# backslash, `[\t]` was a tab, `a\tb` matched a tab.
+grep '^[\.]$' bslash
+grep -E '^[\.]$' bslash
+grep '^[\t]$' bslash
+grep -E '^[\t]$' bslash
+grep -E '^[^\t]$' bslash
+grep 'a\tb' bslash
+grep -E 'a\tb' bslash
+grep '^[\]]$' bslash
+grep -E '^[\]]$' bslash
+grep -E '^[a\]x$' bslash
+grep -E '^[\w-]+$' bslash
+grep -E '^\n$' bslash
+grep '^\0$' bslash
+grep '[\]' bslash
+grep -c '[\\]' bslash
 
 # --- -E, the egrep dialect: the two syntax bits, measured ---
 grep -E 'a+' braces

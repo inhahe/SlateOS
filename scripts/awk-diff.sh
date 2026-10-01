@@ -109,6 +109,11 @@ printf '0\n00\n0.0\n1e3\n abc\n+7\n'                        > strnum.txt
 printf 'one\ntwo\n\n\nthree\nfour\n'                        > para.txt
 printf 'x\ny\nz\n'                                          > xyz.txt
 printf 'h\xc3\xa9llo\n\x80\xff raw\n'                       > bytes.txt
+# One line per thing a backslash can be made to mean: a dot, a backslash, a
+# `t`, a tab, `a<TAB>b` and `atb`, `A` and `x41`, `]` and `\]`, a literal brace,
+# a slash, `y`, `w`, `aa`, `a` followed by byte 1, and a bar-separated line.
+printf '.\n\\\nt\n\tx\na\tb\natb\nA\nx41\n]\n\\]\na{b}c\n/\ny\nw\naa\na\001\nb|c|d\n' > esc.txt
+printf 'a:b;c\n'                                            > semi.txt
 
 # Program files, for -f.
 printf '{ print "P1:" $0 }\n'                               > p1.awk
@@ -293,10 +298,65 @@ run_case nums 'NR == 2, NR == 4'
 run_case table '$3 == "red"'
 run_case table '$2 ~ /^2/'
 run_case table '$2 !~ /^2/'
-xfail_case '\1 is a backreference, as in GNU grep -E; gawk reads it as the octal escape \001' mixed '/(.)\1/'
+# `\1` is the octal escape \001 in an awk regex, as POSIX's awk table says and
+# gawk does. It was an xfail until 2026-10-01, when this awk read it as a
+# backreference; see the escape section below.
+run_case mixed '/(.)\1/'
 run_case abc 'END {print NR}'
 run_case abc 'BEGIN {print "start"} {print} END {print "stop"}'
 run_case empty 'BEGIN {print "b"} END {print NR}'
+
+# --- backslashes: awk's two escape layers ------------------------------------
+# POSIX gives awk's regexes C's escapes and octal, "recognized both inside and
+# outside bracket expressions"; gawk resolves them before regcomp (re.c
+# make_regexp) and compiles under RE_SYNTAX_POSIX_AWK, where a backslash in a
+# bracket quotes the next character and the GNU operators are plain letters.
+# A string resolves its escapes by node.c parse_escape, and an escape it does
+# not know is the character itself, with a warning. `ere::awk` is both layers.
+# Warnings are compared by presence: gawk prefixes `cmd. line:1:` and ours has
+# no source locations (the known gap, below) -- except for `-v`, `-F` and
+# `var=value`, where gawk names no location either and the text is compared.
+run_case esc '/^[\.]$/'
+run_case esc '/^[\t]/'
+run_case esc '/^a\tb$/'
+run_case esc '/^\101$/'
+run_case esc '/^\x41$/'
+run_case esc '/^[\]]$/'
+run_case esc '/^[\\]$/'
+run_case esc '/^[\/]$/'
+run_case esc '/^[^\]]$/'
+run_case esc '/a{b}c/'
+run_case esc '/a{1/'
+run_case esc '/^\y$/'
+run_case esc '/^\w$/ {print "w:" $0} /^\w$/ {print "again"}'
+run_case esc '/^\8$/'
+run_case esc '/(.)\1/'
+run_case esc '/[[:alpha:]/]/'
+run_case esc '/[]/]/'
+run_case esc '/a\
+x/'
+run_case esc '/{2}a/'
+run_case esc '/^{b}/'
+run_case esc '{ if ($0 ~ "^\\.$") print "dot:" $0 }'
+run_case esc '{ if ($0 ~ "^a\.b$") print "any:" $0 }'
+run_case esc '{ if ($0 ~ "^\\t") print "tab:" $0 }'
+run_case esc '{ if ($0 ~ "^[\\.]$") print "bracket:" $0 }'
+run_case esc 'BEGIN { s = "\q\/\8"; print s, length(s) }'
+# No `length` here: `\777` is byte 0xFF, and gawk's warning about measuring
+# an undecodable byte is a divergence recorded below, not this section's.
+run_case esc 'BEGIN { s = "\101\x41\777"; print s }'
+run_case esc '{ n = split($0, p, "\\|"); print n }'
+run_case esc 'BEGIN { FS = "\\|" } { print NF }'
+run_case esc 'BEGIN { FS = "a(" } { print $1 }'
+run_case esc '{ if ($0 ~ "a(") print }'
+run_case esc 'BEGIN { s = "a\
+b" }'
+msg_case esc -v 'v=a\qb' 'BEGIN { print v }'
+msg_case esc -F '\|' 'NR == 17 { print NF }'
+msg_case esc 'NR == 1 { print v }' 'v=x\qy'
+# -F and -v are one list of assignments, applied in the order given.
+run_case semi -F: -v 'FS=;' '{ print $1 }'
+run_case semi -v 'FS=;' -F: '{ print $1 }'
 
 # --- fields -----------------------------------------------------------------
 run_case table '{print $1, $3}'

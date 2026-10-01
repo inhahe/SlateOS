@@ -15,3 +15,8 @@
 # a name, `ttyname(0)` for the terminal, `/proc/sys/kernel/hostname` for the
 # host. All four already exist in this tree and all four were sitting beside
 # the code that did not use them.
+#
+# Every entry carries its reason as a trailing `  # note`: why this read
+# decides nothing, in terms someone can check against the code.
+# `--update-baseline` carries the notes forward; see `read_notes`.
+lockfile: std::env::var_os("LOGNAME")  # procmail 3.24 lockfile.c -ml/-mu, "take $LOGNAME as a hint, check if valid": believed only when its passwd entry has the caller's real uid (getuid), else getpwuid(uid) -- so it picks among that uid's own names and cannot change who the caller is

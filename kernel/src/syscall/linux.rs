@@ -229,42 +229,98 @@ mod linux_sigaction_table {
     //! the table is purely a query/store of state — its lifecycle
     //! hooks (`on_fork`, `on_exec`, `on_exit`) keep it in sync with
     //! the rest of the proc state.
-    use super::{LinuxSigaction, SIG_DFL};
+    use super::{LinuxSigaction, SIG_DFL, SIG_IGN, sa_flags};
     use crate::proc::pcb::ProcessId;
+    use crate::proc::signal::{self, Disposition};
     use crate::sync::PreemptSpinMutex as Mutex;
     use alloc::collections::BTreeMap;
 
     /// Global table: pid -> (signum -> entry).
     ///
-    /// A missing (pid, sig) pair means "default disposition" — the
-    /// callee returns a zero-filled `LinuxSigaction` (which decodes
-    /// as `sa_handler = SIG_DFL`).
+    /// A missing (pid, sig) pair means the action this image has not set:
+    /// `SIG_IGN` if the kernel's ignored set has the signal (inherited
+    /// across an exec, a fork or a spawn), else `SIG_DFL` -- see [`get`].
     static TABLE: Mutex<BTreeMap<ProcessId, BTreeMap<u32, LinuxSigaction>>> =
         Mutex::new(BTreeMap::new());
 
     /// Read the current entry for `(pid, sig)`.
     ///
-    /// Returns the stored entry if any, else a default-filled struct
-    /// (sa_handler = SIG_DFL, all other fields zero).  Linux behaves
-    /// the same way for an unmodified signal disposition.
+    /// The stored entry if this image set one; otherwise the action the
+    /// process came by -- `SIG_IGN`, with no flags, if the signal is in the
+    /// kernel's ignored set (`proc::signal`), which an exec keeps and a fork
+    /// or spawn passes on whichever ABI set it, else `SIG_DFL`.  So a program
+    /// `nohup` started reads `SIGHUP` back as ignored, as on Linux.
     pub fn get(pid: ProcessId, sig: u32) -> LinuxSigaction {
-        let table = TABLE.lock();
-        table
+        let stored = TABLE
+            .lock()
             .get(&pid)
-            .and_then(|inner| inner.get(&sig).copied())
-            .unwrap_or(LinuxSigaction {
-                sa_handler: SIG_DFL,
-                sa_flags: 0,
-                sa_restorer: 0,
-                sa_mask: 0,
-            })
+            .and_then(|inner| inner.get(&sig).copied());
+        stored.unwrap_or(LinuxSigaction {
+            sa_handler: if signal::is_ignored(pid, sig) {
+                SIG_IGN
+            } else {
+                SIG_DFL
+            },
+            sa_flags: 0,
+            sa_restorer: 0,
+            sa_mask: 0,
+        })
     }
 
-    /// Install `act` as the new entry for `(pid, sig)`.
+    /// Install `act` as the new entry for `(pid, sig)`, and record the
+    /// kernel's part of it -- whether the signal is now ignored, and
+    /// `SIGCHLD`'s `SA_NOCLDWAIT` (`signal::record_disposition`).
+    ///
+    /// The two writes together, here, are what keep the entry and the
+    /// ignored set in step within an image; an exec clears the entries
+    /// ([`on_exec`]), leaving the set to speak for the new one.
     pub fn set(pid: ProcessId, sig: u32, act: LinuxSigaction) {
-        let mut table = TABLE.lock();
-        let inner = table.entry(pid).or_default();
-        let _ = inner.insert(sig, act);
+        {
+            let mut table = TABLE.lock();
+            let inner = table.entry(pid).or_default();
+            let _ = inner.insert(sig, act);
+        }
+        // Outside the table lock: the signal registry's is never taken
+        // under it.
+        let action = match act.sa_handler {
+            SIG_DFL => Disposition::Default,
+            SIG_IGN => Disposition::Ignore,
+            _ => Disposition::Handler,
+        };
+        signal::record_disposition(pid, sig, action, act.sa_flags & sa_flags::SA_NOCLDWAIT != 0);
+    }
+
+    /// The signals `pid`'s Linux image has a handler for, bit `n - 1` for
+    /// signal `n` -- `/proc/<pid>/status`'s `SigCgt`, which Linux computes
+    /// the same way (`collect_sigign_sigcatch`).
+    pub fn caught(pid: ProcessId) -> u64 {
+        TABLE.lock().get(&pid).map_or(0, |inner| {
+            inner
+                .iter()
+                .filter(|(_, act)| act.sa_handler != SIG_DFL && act.sa_handler != SIG_IGN)
+                .fold(0, |mask, (&sig, _)| {
+                    mask | signal::signal_bit(sig).unwrap_or(0)
+                })
+        })
+    }
+
+    /// `SA_RESETHAND`'s one-shot reset, at delivery: the handler becomes
+    /// `SIG_DFL` and nothing else changes. Linux's `get_signal` sets
+    /// `sa_handler` alone -- the flags, the mask and the restorer stay, and no
+    /// pending signal is discarded, which only `sigaction` does. Going through
+    /// [`set`] with a default action did both, and would also have dropped
+    /// `SIGCHLD`'s `SA_NOCLDWAIT` from the kernel's record.
+    ///
+    /// The ignored set needs no change: a signal with a handler to reset is
+    /// not in it.
+    pub fn reset_handler(pid: ProcessId, sig: u32) {
+        if let Some(act) = TABLE
+            .lock()
+            .get_mut(&pid)
+            .and_then(|inner| inner.get_mut(&sig))
+        {
+            act.sa_handler = SIG_DFL;
+        }
     }
 
     /// `fork` hook: child inherits the parent's full sigaction table.
@@ -286,20 +342,19 @@ mod linux_sigaction_table {
     /// This matches POSIX `execve(2)` semantics: "Signals set to be
     /// caught by the calling process image shall be set to the
     /// default action in the new process image."
+    ///
+    /// Done by dropping every entry: what is left of them after an exec --
+    /// `SIG_IGN`, no flags, no restorer, no mask -- is exactly what [`get`]
+    /// reads off the kernel's ignored set, which the exec keeps. Keeping
+    /// the entries as well kept a second copy that could go stale: an image
+    /// on the native ABI in between cannot touch this table, so a signal it
+    /// stopped ignoring came back ignored in the next Linux image.
+    /// `SA_NOCLDWAIT` is a flag, so it goes too (`signal::clear_nocldwait`)
+    /// -- which matters for `CLONE_CLEAR_SIGHAND`, the one caller that is not
+    /// an exec.
     pub fn on_exec(pid: ProcessId) {
-        use super::SIG_IGN;
-        let mut table = TABLE.lock();
-        if let Some(inner) = table.get_mut(&pid) {
-            inner.retain(|_sig, act| act.sa_handler == SIG_IGN);
-            // Within retained entries, also clear sa_flags / sa_mask /
-            // sa_restorer: an SA_RESTORER pointer from the old image
-            // is now garbage in the new address space.
-            for act in inner.values_mut() {
-                act.sa_flags = 0;
-                act.sa_restorer = 0;
-                act.sa_mask = 0;
-            }
-        }
+        let _ = TABLE.lock().remove(&pid);
+        signal::clear_nocldwait(pid);
     }
 
     /// `exit` hook: drop all per-signal state for a defunct process.
@@ -317,29 +372,11 @@ mod linux_sigaction_table {
 }
 
 pub use linux_sigaction_table::{
-    get as linux_sigaction_get, on_exec as linux_sigaction_on_exec,
-    on_exit as linux_sigaction_on_exit, on_fork as linux_sigaction_on_fork,
+    caught as linux_sigaction_caught, get as linux_sigaction_get,
+    on_exec as linux_sigaction_on_exec, on_exit as linux_sigaction_on_exit,
+    on_fork as linux_sigaction_on_fork, reset_handler as linux_sigaction_reset_handler,
     set as linux_sigaction_set,
 };
-
-/// Whether `pid` has explicitly set `sig` to `SIG_IGN`.
-///
-/// Only meaningful for a **Linux-ABI** process: that is the only kind whose
-/// per-signal dispositions the kernel stores (in the table above).  A native
-/// process keeps its `sigaction` table in userspace — see
-/// `SYS_SIGNAL_STOP_SELF`'s doc for why — so the kernel cannot answer this
-/// question about one, and `handlers::signal_ignored_or_blocked` says so
-/// explicitly rather than guessing.
-///
-/// Returns `false` for `SIG_DFL`: a *default* disposition that happens to
-/// ignore the signal is a different question, answered ABI-neutrally by
-/// [`crate::proc::signal::default_action`].  This function reports only the
-/// explicit userspace choice, which is the half the kernel would otherwise
-/// have no way to see.
-#[must_use]
-pub fn linux_sigaction_is_ignore(pid: crate::proc::pcb::ProcessId, sig: u32) -> bool {
-    linux_sigaction_get(pid, sig).sa_handler == SIG_IGN
-}
 
 // ---------------------------------------------------------------------------
 // Linux x86_64 syscall numbers (subset).
@@ -1099,12 +1136,24 @@ mod msgflags {
 ///
 /// Mirrors Linux `include/linux/errno.h` (values 512–516).  An interruptible
 /// blocking syscall that is woken by a pending signal returns one of these
-/// (in negated `-VALUE` form, like any `-errno`) **instead of** `-EINTR`.
+/// **instead of** `-EINTR`, encoded by [`restart::restart_result`].
 /// The signal-delivery checkpoint then decides — based on whether a handler
 /// runs and that handler's `SA_RESTART` flag — whether to transparently
 /// restart the syscall (rewind `%rip` to the `syscall` instruction and reload
 /// `%rax` with the original syscall number) or to convert the sentinel to the
 /// user-visible `-EINTR`.
+///
+/// **The encoding is not `-512`.** Linux can return a sentinel as `-512`
+/// because no Linux errno comes near it; here every syscall return of both
+/// ABIs passes through the restart check (`entry.rs`), and native error codes
+/// do reach 512 -- `CrossDevice` is -512, `StaleHandle` -513 and `NoAttribute`
+/// -514 -- while the check also accepted *either sign*, so a successful return
+/// of 512, 513, 514 or 516 matched too. Each was restarted: a 512-byte read
+/// lost its data to the next one, a 512-byte write was written again and
+/// again, and a native `rename` across devices or `getxattr` of a missing
+/// attribute ran forever. A sentinel is now `-(SENTINEL_BIAS + n)`
+/// ([`restart::encode`]): a value no syscall returns and no errno or native
+/// error code reaches, so only a sentinel matches (until 2026-10-01).
 ///
 /// These values MUST NEVER reach userspace: every path that returns a value to
 /// ring 3 ([`crate::syscall::entry`]) runs them through [`restart_action`] and
@@ -1133,23 +1182,42 @@ pub mod restart {
     /// re-execute the instruction.
     pub const SYSCALL_INSN_LEN: u64 = 2;
 
-    /// Is `ret` (a raw syscall return value, normally negative `-errno`) one of
-    /// the restart sentinels?  Accepts either sign so callers don't have to
-    /// normalise first.
+    /// Added to a sentinel before it is negated into a syscall return value
+    /// ([`encode`]): 2^40, far past every errno (under 4096), every native
+    /// error code (under 1000) and every value a syscall returns as a
+    /// negative number. See the module doc for what the bare `-512` collided
+    /// with.
+    pub const SENTINEL_BIAS: i64 = 1 << 40;
+
+    /// The syscall return value that carries sentinel `n` (one of the
+    /// `ERESTART*` constants): `-(SENTINEL_BIAS + n)`.
     #[must_use]
-    pub fn is_sentinel(ret: i64) -> bool {
-        matches!(
-            ret.unsigned_abs() as i64,
-            ERESTARTSYS | ERESTARTNOINTR | ERESTARTNOHAND | ERESTART_RESTARTBLOCK
-        )
+    // `n` is one of the `ERESTART*` constants, all under 1024, so neither the
+    // sum nor its negation can overflow; `checked_*` is not usable in a
+    // `const fn` that must return a plain value.
+    #[allow(clippy::arithmetic_side_effects)]
+    pub const fn encode(n: i64) -> i64 {
+        -(SENTINEL_BIAS + n)
     }
 
-    /// The positive sentinel magnitude of `ret`, or `None` if `ret` is not a
-    /// restart sentinel.
+    /// Is `ret`, a raw syscall return value, a restart sentinel ([`encode`])?
+    /// Nothing else is: not a success of any size, not an errno, not a native
+    /// error code.
+    #[must_use]
+    pub fn is_sentinel(ret: i64) -> bool {
+        sentinel_magnitude(ret).is_some()
+    }
+
+    /// The sentinel `ret` carries -- one of the `ERESTART*` constants -- or
+    /// `None` if `ret` is not a restart sentinel.
     #[must_use]
     pub fn sentinel_magnitude(ret: i64) -> Option<i64> {
-        let m = ret.unsigned_abs() as i64;
-        if is_sentinel(m) { Some(m) } else { None }
+        let n = ret.checked_neg()?.checked_sub(SENTINEL_BIAS)?;
+        matches!(
+            n,
+            ERESTARTSYS | ERESTARTNOINTR | ERESTARTNOHAND | ERESTART_RESTARTBLOCK
+        )
+        .then_some(n)
     }
 
     /// What the delivery checkpoint should do with a restart sentinel.
@@ -1233,15 +1301,15 @@ pub mod restart {
 
     /// Build the in-kernel return value for an interrupted blocking syscall that
     /// should participate in `SA_RESTART` semantics.  `sentinel` is one of the
-    /// `ERESTART*` constants in this module; the result carries it in negated
-    /// `-VALUE` form, exactly like any `-errno`, so the signal-delivery
-    /// checkpoint ([`build_linux_rt_frame`] for the handler case,
-    /// [`super::resolve_syscall_restart`] for the no-handler case) can resolve
-    /// it into either a restart or a user-visible `-EINTR`.  It is never
-    /// returned directly to ring 3 — the backstops above guarantee that.
+    /// `ERESTART*` constants in this module; the result carries it encoded
+    /// ([`encode`]), so the signal-delivery checkpoint ([`build_linux_rt_frame`]
+    /// for the handler case, [`super::resolve_syscall_restart`] for the
+    /// no-handler case) can resolve it into either a restart or a user-visible
+    /// `-EINTR`.  It is never returned directly to ring 3 — the backstops above
+    /// guarantee that.
     #[must_use]
     pub const fn restart_result(sentinel: i64) -> super::SyscallResult {
-        super::SyscallResult::ok(-sentinel)
+        super::SyscallResult::ok(encode(sentinel))
     }
 }
 
@@ -1525,10 +1593,11 @@ pub fn linux_from_slow_io(res: SyscallResult) -> SyscallResult {
 /// route through here so the convention lives in one place.
 fn linux_from_futex_wait(res: SyscallResult) -> SyscallResult {
     // An interrupted indefinite FUTEX_WAIT is reported by the handler as an
-    // `ERESTART*` restart sentinel (negated, e.g. `-512`).  That value must
-    // reach the signal-delivery checkpoint untouched — it must NOT be fed to
-    // `linux_from_native`, where `-512` collides with `KernelError::CrossDevice`
-    // and would be mis-mapped to `EXDEV`.  Pass any restart sentinel through.
+    // `ERESTART*` restart sentinel (`restart::encode`).  That value must reach
+    // the signal-delivery checkpoint untouched, not be translated as an error.
+    // (Until 2026-10-01 a sentinel was the bare `-512`, which is also
+    // `KernelError::CrossDevice` -- see the restart module.)  Pass any restart
+    // sentinel through.
     if restart::is_sentinel(res.value) {
         return res;
     }
@@ -2289,7 +2358,7 @@ pub fn emit_linux_rt_frame(
 
     // ---- SA_RESETHAND: one-shot handler resets to SIG_DFL ----
     if (act.sa_flags & sa_flags::SA_RESETHAND) != 0 {
-        linux_sigaction_set(pid, sig, LinuxSigaction::default());
+        linux_sigaction_reset_handler(pid, sig);
     }
 
     Some(RtFrameEntry {
@@ -56319,11 +56388,31 @@ fn self_test_rt_sigreturn() -> crate::error::KernelResult<()> {
 /// flags/restorer/mask cleared), on_fork inheritance, and on_exit
 /// teardown. Uses synthetic pids that can't collide with real ones.
 /// Self-contained. See [`self_test_errno_mapping`] for the TD4 rationale.
+///
+/// Since 2026-10-01 a `SIG_IGN` lives in the kernel's ignored set
+/// (`proc::signal`) as well as in this table, and outlives it: an exec drops
+/// the table's entries and the set speaks for the new image, so the exec
+/// and fork legs below run the signal module's hooks beside the table's, as
+/// the real exec and fork do -- and a set this table never saw (a native
+/// image's) reads back as `SIG_IGN`, while a stale entry it did see does not
+/// survive the exec.
 #[inline(never)]
 fn self_test_sigaction_table() -> crate::error::KernelResult<()> {
-    use crate::serial_println;
-    // Use a synthetic pid that won't collide with any real one.
     let test_pid: u64 = 0xFFFF_FFFF_DEAD_0001;
+    let child_pid: u64 = 0xFFFF_FFFF_DEAD_0002;
+    let result = sigaction_table_checks(test_pid, child_pid);
+    for pid in [test_pid, child_pid] {
+        linux_sigaction_on_exit(pid);
+        crate::proc::signal::remove(pid);
+    }
+    result
+}
+
+/// [`self_test_sigaction_table`]'s body, for pids it cleans up after.
+#[inline(never)]
+fn sigaction_table_checks(test_pid: u64, child_pid: u64) -> crate::error::KernelResult<()> {
+    use crate::proc::signal;
+    use crate::serial_println;
 
     // Initially: get() returns SIG_DFL defaults.
     let initial = linux_sigaction_get(test_pid, 10);
@@ -56366,6 +56455,11 @@ fn self_test_sigaction_table() -> crate::error::KernelResult<()> {
         sa_mask: 0x5678,
     };
     linux_sigaction_set(test_pid, 11, ign);
+    if !signal::is_ignored(test_pid, 11) {
+        serial_println!("[syscall/linux]   FAIL: SIG_IGN was not recorded in the ignored set");
+        return Err(KernelError::InternalError);
+    }
+    signal::on_exec(test_pid);
     linux_sigaction_on_exec(test_pid);
     let after_exec_10 = linux_sigaction_get(test_pid, 10);
     let after_exec_11 = linux_sigaction_get(test_pid, 11);
@@ -56384,8 +56478,8 @@ fn self_test_sigaction_table() -> crate::error::KernelResult<()> {
         return Err(KernelError::InternalError);
     }
 
-    // on_fork: child inherits parent's entries.
-    let child_pid: u64 = 0xFFFF_FFFF_DEAD_0002;
+    // on_fork: child inherits parent's entries -- and its ignored set.
+    signal::inherit_for_fork(test_pid, child_pid);
     linux_sigaction_on_fork(test_pid, child_pid);
     let child_11 = linux_sigaction_get(child_pid, 11);
     if child_11.sa_handler != SIG_IGN {
@@ -56393,9 +56487,67 @@ fn self_test_sigaction_table() -> crate::error::KernelResult<()> {
         return Err(KernelError::InternalError);
     }
 
+    // An ignored set this table never saw -- a native image's, carried
+    // across an exec into this one -- reads back as SIG_IGN...
+    signal::set_ignored(test_pid, 1 << 0, false)?; // SIGHUP, as `nohup` sets it
+    if linux_sigaction_get(test_pid, 1).sa_handler != SIG_IGN {
+        serial_println!("[syscall/linux]   FAIL: an inherited SIG_IGN did not read back");
+        return Err(KernelError::InternalError);
+    }
+    // ...and an entry this table did see does not outlive a set that has
+    // since dropped it: un-ignored (as a native image would), then exec'd.
+    linux_sigaction_set(test_pid, 12, ign);
+    signal::set_ignored(test_pid, 0, false)?;
+    signal::on_exec(test_pid);
+    linux_sigaction_on_exec(test_pid);
+    if linux_sigaction_get(test_pid, 12).sa_handler != SIG_DFL {
+        serial_println!("[syscall/linux]   FAIL: a stale SIG_IGN entry survived an exec");
+        return Err(KernelError::InternalError);
+    }
+    // SA_NOCLDWAIT on SIGCHLD is recorded, and cleared by the exec reset.
+    linux_sigaction_set(
+        test_pid,
+        17,
+        LinuxSigaction {
+            sa_flags: sa_flags::SA_NOCLDWAIT,
+            ..LinuxSigaction::default()
+        },
+    );
+    let recorded = signal::nocldwait(test_pid);
+    linux_sigaction_on_exec(test_pid);
+    if !recorded || signal::nocldwait(test_pid) {
+        serial_println!("[syscall/linux]   FAIL: SA_NOCLDWAIT not recorded, or survived the reset");
+        return Err(KernelError::InternalError);
+    }
+
+    // SA_RESETHAND's reset at delivery changes the handler alone: the flags
+    // stay (SA_NOCLDWAIT among them), and a pending SIGCHLD is not discarded,
+    // as a sigaction(SIG_DFL) would discard it.
+    let one_shot = LinuxSigaction {
+        sa_handler: 0x4000,
+        sa_flags: sa_flags::SA_RESETHAND | sa_flags::SA_NOCLDWAIT,
+        sa_restorer: 0x5000,
+        sa_mask: 0,
+    };
+    linux_sigaction_set(test_pid, 17, one_shot);
+    signal::set_pending(test_pid, 17);
+    linux_sigaction_reset_handler(test_pid, 17);
+    let after = linux_sigaction_get(test_pid, 17);
+    if after.sa_handler != SIG_DFL
+        || after.sa_flags != one_shot.sa_flags
+        || after.sa_restorer != one_shot.sa_restorer
+        || !signal::nocldwait(test_pid)
+        || signal::pending(test_pid) & (1 << 16) == 0
+    {
+        serial_println!(
+            "[syscall/linux]   FAIL: SA_RESETHAND's reset changed more than the handler"
+        );
+        return Err(KernelError::InternalError);
+    }
+
     // on_exit: all entries gone.
     linux_sigaction_on_exit(test_pid);
-    linux_sigaction_on_exit(child_pid);
+    signal::remove(test_pid);
     let post_exit = linux_sigaction_get(test_pid, 11);
     if post_exit != LinuxSigaction::default() {
         serial_println!("[syscall/linux]   FAIL: sigaction on_exit didn't clear");
@@ -56471,25 +56623,46 @@ fn self_test_restart_action() -> crate::error::KernelResult<()> {
         restart_action,
     };
 
-    // is_sentinel / sentinel_magnitude accept either sign; -EINTR and ordinary
-    // returns are not sentinels.
+    // Only an encoded sentinel is one, and it decodes to itself.
     for &s in &[
         ERESTARTSYS,
         ERESTARTNOINTR,
         ERESTARTNOHAND,
         ERESTART_RESTARTBLOCK,
     ] {
-        if !restart::is_sentinel(s) || !restart::is_sentinel(-s) {
-            serial_println!("[syscall/linux]   FAIL: restart is_sentinel({s})");
-            return Err(KernelError::InternalError);
-        }
-        if restart::sentinel_magnitude(-s) != Some(s) {
-            serial_println!("[syscall/linux]   FAIL: restart sentinel_magnitude({s})");
+        if !restart::is_sentinel(restart::encode(s))
+            || restart::sentinel_magnitude(restart::encode(s)) != Some(s)
+        {
+            serial_println!("[syscall/linux]   FAIL: restart sentinel {s} does not decode");
             return Err(KernelError::InternalError);
         }
     }
-    // Non-sentinels: -EINTR(4), 0, a normal positive return, a real -errno.
-    for &n in &[-i64::from(errno::EINTR), 0, 42, -i64::from(errno::EAGAIN)] {
+    // Not sentinels: -EINTR, 0, a normal positive return, a real -errno -- and,
+    // what the bare `-512` encoding matched until 2026-10-01, a successful
+    // return of 512, 513, 514 or 516 (a 512-byte read was restarted and its
+    // data lost; a 512-byte write was written again, forever) and the native
+    // error codes in that range, CrossDevice (-512), StaleHandle (-513) and
+    // NoAttribute (-514), which restarted their syscalls forever.
+    let native_collisions = [
+        i64::from(KernelError::CrossDevice.code()),
+        i64::from(KernelError::StaleHandle.code()),
+        i64::from(KernelError::NoAttribute.code()),
+    ];
+    let plain = [
+        i64::from(errno::EINTR).wrapping_neg(),
+        0,
+        42,
+        i64::from(errno::EAGAIN).wrapping_neg(),
+        512,
+        513,
+        514,
+        516,
+        -512,
+        -513,
+        -514,
+        -516,
+    ];
+    for &n in plain.iter().chain(native_collisions.iter()) {
         if restart::is_sentinel(n) || restart::sentinel_magnitude(n).is_some() {
             serial_println!("[syscall/linux]   FAIL: restart false-positive on {n}");
             return Err(KernelError::InternalError);
@@ -56500,17 +56673,19 @@ fn self_test_restart_action() -> crate::error::KernelResult<()> {
         }
     }
     // Backstop turns a stray sentinel into -EINTR.
-    if restart::leaked_sentinel_to_linux_eintr(-ERESTARTSYS) != -i64::from(errno::EINTR) {
+    if restart::leaked_sentinel_to_linux_eintr(restart::encode(ERESTARTSYS))
+        != i64::from(errno::EINTR).wrapping_neg()
+    {
         serial_println!("[syscall/linux]   FAIL: leaked backstop didn't convert");
         return Err(KernelError::InternalError);
     }
 
-    // restart_result carries the sentinel as a negated -VALUE (like any
-    // -errno) so the delivery checkpoint can resolve it.  pause() emits
-    // ERESTARTNOHAND, so spot-check that the round-trip recovers the sentinel.
+    // restart_result carries the sentinel encoded, so the delivery checkpoint
+    // can resolve it.  pause() emits ERESTARTNOHAND, so spot-check that the
+    // round-trip recovers the sentinel.
     for &s in &[ERESTARTSYS, ERESTARTNOHAND, ERESTART_RESTARTBLOCK] {
         let r = restart::restart_result(s);
-        if r.value != -s {
+        if r.value != restart::encode(s) {
             serial_println!(
                 "[syscall/linux]   FAIL: restart_result({s}).value = {}",
                 r.value
@@ -56612,7 +56787,7 @@ fn self_test_restart_action() -> crate::error::KernelResult<()> {
         // Indefinite-wait interruption: sentinel passes through unchanged.
         let sentinel = restart::restart_result(ERESTARTSYS);
         let passed = linux_from_futex_wait(sentinel);
-        if passed.value != -ERESTARTSYS {
+        if passed.value != restart::encode(ERESTARTSYS) {
             serial_println!(
                 "[syscall/linux]   FAIL: linux_from_futex_wait mangled sentinel -> {}",
                 passed.value
@@ -56631,7 +56806,7 @@ fn self_test_restart_action() -> crate::error::KernelResult<()> {
         // Slow-object I/O (pipe read/write): an interrupted blocking
         // transfer maps Interrupted -> ERESTARTSYS sentinel for SA_RESTART.
         let slow = linux_from_slow_io(SyscallResult::err(KernelError::Interrupted));
-        if slow.value != -ERESTARTSYS {
+        if slow.value != restart::encode(ERESTARTSYS) {
             serial_println!(
                 "[syscall/linux]   FAIL: linux_from_slow_io(Interrupted) -> {}",
                 slow.value

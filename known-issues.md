@@ -6373,7 +6373,9 @@ with no `sleep` on purpose — a sleep would hide the very adjacency being
 tested) and `test_filesync_settled_mtime_is_trusted` for the other half of the
 trade.
 
-### TD-KERNEL-NATIVE-ABI-SIG_IGN-IS-INVISIBLE-TO-THE-KERNEL. Terminal-access job control cannot honour a native-ABI process's `SIG_IGN`, so a native shell must *block* `SIGTTOU` where bash *ignores* it — 2026-08-12
+### [FIXED 2026-10-01 -- the kernel keeps the ignored set for both ABIs; see A-IGNORED-SIGNALS-DID-NOT-SURVIVE-EXEC-OR-SPAWN and design-decisions §1512] TD-KERNEL-NATIVE-ABI-SIG_IGN-IS-INVISIBLE-TO-THE-KERNEL. Terminal-access job control cannot honour a native-ABI process's `SIG_IGN`, so a native shell must *block* `SIGTTOU` where bash *ignores* it — 2026-08-12
+
+**Fixed 2026-10-01.** The native libc now reports its ignored signals (`SYS_SIGNAL_SET_IGNORED`), and `signal_ignored_or_blocked` asks the kernel's set for both ABIs: a native shell may ignore `SIGTTOU` as bash does. The "narrow report this signal as ignored call" below is what was built. The entry is kept as written for its history.
 
 **Where:** `kernel/src/syscall/handlers.rs::signal_ignored_or_blocked`, used by
 `tty_job_control_decide` (the `SIGTTIN`/`SIGTTOU` policy added in
@@ -82090,7 +82092,16 @@ indistinguishable. The stale `/etc/users.yaml` (§353) comment is gone rather
 than edited, as this entry prescribed. Eleven further defects came out of that
 file with it — see `B-stat-HAS-NO-OPTIONS-AND-CANNOT-READ-A-CLOCK` above.
 
-### B-WHOAMI-AND-LOGNAME-TRUST-THE-ENVIRONMENT -- OPEN, security-relevant (lane B, 2026-08-23)
+### B-WHOAMI-AND-LOGNAME-TRUST-THE-ENVIRONMENT -- FIXED 2026-08-24 (`f3ba2a369` whoami, `9e2e77b69` logname), security-relevant (lane B, 2026-08-23)
+
+**Resolution (recorded 2026-10-01; the heading said OPEN for five weeks after
+the fix).** Both were rewritten the day after this entry, as it proposes.
+`whoami` is `geteuid()` then the password database, fails with `cannot find
+name for user ID N` rather than printing a number, and never reads the
+environment; `logname` is `getlogin()`. Both now take `--help`/`--version`,
+refuse an extra operand, write the name as bytes and report a failed write.
+Each file's module docs list the defects it replaced. The entry is kept below
+as it was filed.
 
 **What.** `whoami` and `logname` both answer from environment variables:
 
@@ -87763,7 +87774,28 @@ Scoped as sed tranche 2d.
 
 ---
 
-## TD-B-ERE-BRACKET-BACKSLASH — a backslash inside `[...]` is unescaped, where POSIX and GNU make it a member (lane B, 2026-08-24) — **open**
+## TD-B-ERE-BRACKET-BACKSLASH — a backslash inside `[...]` is unescaped, where POSIX and GNU make it a member (lane B, 2026-08-24) — **FIXED** 2026-10-01
+
+**Resolution (2026-10-01).** Fixed more widely than the plan below, because
+measuring it showed the plan was half the problem. The engine read C escapes
+*outside* brackets too: `grep 'a\tb'` and `grep -E 'a\tb'` matched a tab where
+glibc reads `\t` as a `t`. So the engine now has no C escapes at all, exactly
+as glibc's `regcomp` has none, and a backslash in a bracket is a member. The
+two languages that do have C escapes resolve them before the pattern reaches
+the engine, which is where their GNU originals do it: GNU sed already did
+(`sed.rs` `normalize_regex`), and awk now does through `ere::awk`, a
+transcription of gawk 5.2.1's `make_regexp` and `parse_escape`, compiled under
+the new `Syntax::POSIX_AWK` (glibc's `RE_SYNTAX_POSIX_AWK`: a backslash in a
+bracket quotes, the GNU operators are letters, a malformed interval after an
+atom is a literal brace). `bre::to_ere` no longer doubles backslashes in
+brackets, and `emacs` compiles its rebuilt brackets with the new
+`backslash_escape_in_lists` bit. Measured matrix (grep 3.11, sed 4.9, gawk
+5.2.1 `--posix`, bash 5.2 `=~`) is in `engine.rs`'s tests; harness cases in
+`grep-diff.sh`, `sed-diff.sh` and a new escape section of `awk-diff.sh`. awk's
+`/(.)\1/` divergence (design-decisions §333) went with it: POSIX's awk table
+makes `\1` the octal escape, as gawk reads it. Behaviour changed for the other
+lanes' callers: `kshell`'s sed and awk (lane A) and `logviewer`/`renamer`
+(lane E) now read `\t` as `t` -- see the requests filed the same day.
 
 **What it is.** In `ere`, `class_char` (`userspace/ere/src/engine.rs`) reads a
 backslash inside a bracket expression as starting an escape. POSIX gives a
@@ -102975,7 +103007,13 @@ forked by the announcing shell as it goes, which is a different division of
 labour between the parent and the `&` job's clone than osh currently has. Worth
 doing only if a real observable is found that depends on it.
 
-### BUG-OILS-REOPEN-TEST-IS-UNIX-ONLY. `a_reopened_descriptor_starts_at_zero_and_does_not_move_the_shells_cursor` fails on the Windows dev host — 2026-08-26 — LANE B, REPORTED
+### BUG-OILS-REOPEN-TEST-IS-UNIX-ONLY. `a_reopened_descriptor_starts_at_zero_and_does_not_move_the_shells_cursor` fails on the Windows dev host — 2026-08-26 — LANE B — FIXED 2026-08-26 (`ae285d901`)
+
+**Resolution (recorded 2026-10-01).** Fixed the day it was reported, the way
+the request suggests: the test now asserts the documented dup fallback on the
+dev host and the re-open where procfs exists, so the fallback is covered rather
+than excused (`userspace/oils/src/interp.rs`, the test's doc comment names the
+request). The heading went on saying REPORTED; the entry is kept below as filed.
 
 **In short:** `cargo test --workspace` has exactly one failing test, and it is a
 test rather than a bug. The shell (`osh`) can be told to read a file "through a
@@ -154951,7 +154989,7 @@ not to look again.
 
 | crate | outcome |
 |---|---|
-| `dbus` | **FIXED.** All three personalities fabricated. The daemon announced a bus it never listened on and wrote a pid file naming PID 1; `dbus-send` printed a method call "on wire" that went nowhere; `dbus-monitor` claimed to be monitoring and exited 0. All ungated and refusing. |
+| `dbus` | **FIXED.** All three personalities fabricated. The daemon announced a bus it never listened on and wrote a pid file naming PID 1; `dbus-send` printed a method call "on wire" that went nowhere; `dbus-monitor` claimed to be monitoring and exited 0. All ungated and refusing. **Deleted 2026-10-01** under design-decisions §1049: what the refusals waited for, a path-bound `AF_UNIX` socket, is scheduled by no lane, and D-Bus compatibility is on no roadmap (restore point `707be9dc9`). |
 | `lp` | **FIXED.** Reported queued print jobs and never captured the document -- for `-` it drained stdin, measured it, and dropped it. Predicted from this list plus a written-never-read field, which is how it was found. |
 | `ctags` | **CLEAN.** A real tool: `File::create`, writes ctags/etags format, reports write errors. Probed end to end -- three source items in, three correct tag lines out, sorted. The gated functions are a testability gap, not a lie. |
 | `lex` | **CLEAN.** Two write sites, six refusal messages. Does real work and says so when it cannot. |
@@ -174542,7 +174580,33 @@ program that relies on a signal interrupting a blocking call benefits. Worth a r
 signal delivery is known to reach that loop; until then the polling is
 correct, only less exact.
 
-## TD-B-LOCKFILE-IS-NOT-PROCMAILS (lane B, 2026-09-26) — **open**
+**Progress, 2026-10-01 -- the kernel half exists.** Lane A added
+`SYS_FS_FLOCK_HANDLE` (1094, commit `b108865ea`, on main with lane A's next
+publish): BSD `flock(2)` on a handle that waits *in the kernel* when
+`LOCK_NB` is absent, ends the wait with `EINTR` when a caught signal arrives,
+and restarts it under `SA_RESTART`, as Linux does. The Linux-ABI `flock(2)`
+waits for real too (it had answered `EWOULDBLOCK` even without `LOCK_NB`).
+Lane A has told lane D, whose `do_flock` can move onto 1094 and drop the nap
+loop. **Lane B's step, once that libc change is on main:** put `-w` back to
+util-linux's `setup_timer` + blocking `flock()` + `EINTR` check, delete the
+`LOCK_NB` polling, and re-run `scripts/flock-diff.sh` -- including a case that
+holds the lock past the deadline, which is the one the timer exists for.
+
+## TD-B-LOCKFILE-IS-NOT-PROCMAILS (lane B, 2026-09-26) — **FIXED** 2026-10-01
+
+**Resolution.** `userspace/lockfile` is now procmail 3.24's `lockfile.c` as
+Ubuntu builds it (3.24-1ubuntu2), with what it calls from `exopen.c`,
+`acommon.c`, `authenticate.c` and `mcommon.c`, function by function: the
+unique temporary (`_` pid separator time `.` host, procmail's base 64), the
+`fstat`/`lstat` check, the hard link with NFS's false failure caught, the
+`EXDEV` fallback, `-l` as the age of a stale lock, the second pass that
+releases what was taken, and procmail's messages, version text and sysexits.
+`scripts/lockfile-diff.sh` runs it against Ubuntu's (fetched with
+`apt-get download`, no root needed) over 46 cases, comparing output, status
+and the files left behind -- mode, link count, contents: 46 agree. 33 unit
+tests drive the control flow over a fake system (a lying `link`, `EXDEV`, a
+name length limit, a signal). Licence: GPL-2.0-or-later OR Artistic-1.0,
+`userspace/lockfile/licenses/`. The entry below is as it was filed.
 
 **In short:** `lockfile` -- the command scripts use to create a lock file
 the way procmail does -- is a SlateOS approximation, not a port. It became
@@ -180988,6 +181052,189 @@ for lane B's and lane D's parsers. The Linux layer's self-test (12)
 round-trips every variant and checks that a native `NoAttribute` is
 `ENODATA`.
 
+### A-IGNORED-SIGNALS-DID-NOT-SURVIVE-EXEC-OR-SPAWN -- 2026-10-01 -- FIXED the same day (lane A)
+
+**In short:** "ignore this signal" was known only to the C library, so a
+program started by another forgot it: `nohup cmd` ignores the hang-up signal
+and becomes `cmd`, and `cmd` died when its terminal closed. A parent that
+ignored `SIGCHLD` still collected zombies, and a process with no signal
+handler yet (before its libc started, or one with no libc) was killed by an
+ignored `SIGHUP` -- the kernel took the default action. Lane D's
+`requests/d-a-ignored-signals-and-spawn-attributes-need-a-kernel-record.md`.
+
+**Fixed:** the kernel keeps the ignored set (`proc::signal`), for both ABIs,
+across `exec`, `fork` and spawn, and discards an ignored signal when it is
+sent; a parent ignoring `SIGCHLD` (or with `SA_NOCLDWAIT`) leaves no zombies
+(`pcb::ExitNotice`). New native calls `SYS_SIGNAL_SET_IGNORED` (1098) and
+`SYS_SIGNAL_GET_IGNORED` (1099). Design-decisions §1512. Lane D's half --
+reporting each change to or from `SIG_IGN`, seeding the table at start-up --
+is theirs to do.
+
+`/proc/<pid>/status` now prints Linux's `SigQ`/`SigPnd`/`ShdPnd`/`SigBlk`/`SigIgn`/`SigCgt` lines and `/proc/<pid>/stat` fields 31-34 are real. **Still short of Linux:** `SigCgt` (and field 34) is known only for a Linux-ABI process -- a native process's handlers are its libc's, so it reports none caught.
+
+Tests: `proc::signal`'s `test_ignored_set` and `test_ignored_across_images`;
+`pcb`'s `test_exit_notice`; `spawn`'s
+`test_spawn_child_of_sigchld_ignorer_is_reaped`, through a real exit;
+`dispatch`'s `test_dispatch_signal_ignored` (the two calls, and an ignored
+`SIGHUP` that no longer kills) and the ignored case of
+`test_dispatch_tty_job_control`; the Linux table's
+`self_test_sigaction_table`.
+
+### A-BLOCKED-FATAL-SIGNAL-KILLED-AT-ONCE -- 2026-10-01 -- FIXED the same day (lane A)
+
+**In short:** a signal whose default action ends the process (`SIGTERM`,
+`SIGHUP`), sent to a process with no handler trampoline while it had the
+signal *blocked*, ended it on the spot. A blocked signal must wait, pending,
+until it is unblocked. The blocked check was there for the stop signals and
+missing for the fatal ones.
+
+**Where:** `kernel/src/proc/signal.rs`, `classify_post_info`.
+
+**Fixed:** a blocked fatal signal is kept pending; the syscall-return
+checkpoint takes the default action once it is unblocked. Tested in
+`test_ignored_set`.
+
+### A-SPAWNED-CHILD-LED-ITS-OWN-SESSION -- 2026-10-01 -- FIXED the same day (lane A)
+
+**In short:** a program started with `posix_spawn` (or any spawn call) led a
+process group and a session of its own, where POSIX puts it in its parent's.
+So it had no controlling terminal, a `^C` typed at the terminal -- sent to
+the foreground group -- did not reach it, and it started with nothing
+blocked, not its parent's mask. `fork` was right; only spawn was wrong.
+
+**Where:** `kernel/src/proc/spawn.rs` (`start_job_and_signals`), and
+`pcb::create`, which makes every process a leader -- right only for one the
+kernel starts.
+
+**Fixed:** a spawned child with a parent starts in the parent's group and
+session with its blocked mask and ignored set (`pcb::inherit_job`,
+`signal::start_spawned`), and the `posix_spawn` attributes
+(`SpawnEx2Args`' six new fields) change them before it runs. Nothing in the
+tree relied on the old behaviour: `login_tty` calls `setsid` itself. Tests:
+`spawn`'s `test_spawn_job_and_signals` and `test_ex2_attrs`, `pcb`'s
+`test_inherit_job`, the ring-3 probes `0x26`-`0x30` of
+`build_spawn_ex2_abi_test_elf`.
+
+### A-REAPED-PROCESS-KEPT-ITS-FILE-MAPPINGS-AND-TERMINAL -- 2026-10-01 -- FIXED the same day (lane A)
+
+**In short:** a file mapped into a process (`mmap` of a file -- a
+dynamically linked program maps every library it loads) holds a reference on
+the open file. When the process's parent collected it with `wait`, those
+references were never dropped, so the file's last close never came: an
+unlinked file's space was not freed, and a `flock` held through such a file
+was never released. The session's claim on its terminal was likewise kept
+when the session ended by `wait`. Only the other way a process ends,
+`pcb::destroy`, released either.
+
+**Where:** `kernel/src/proc/pcb.rs`, `try_reap`.
+
+**Fixed:** `destroy`, `try_reap` and the new `release_autoreaped` end a
+process through one function, `finish_process`.
+
+**Still different from Linux:** Linux drops a process's mappings when it
+exits (`exit_mm`), not when it is reaped; here a zombie keeps its file
+references until its parent waits.
+
+### A-KILLED-THREAD-ON-ANOTHER-CPU-OUTLIVED-ITS-PAGE-TABLES -- 2026-10-01 -- FIXED the same day (lane A)
+
+**In short:** on a machine with more than one CPU, a thread killed while
+another CPU was running it (a signal that ends its process, a crash in a
+sibling) is only *marked* dead: that CPU runs it on until its next switch.
+The process could be reaped -- its page tables freed -- in that window. And
+the switch itself did not leave those tables: it compared the two tasks'
+recorded address spaces, the dead thread's record had been cleared to
+"kernel", and a switch to a kernel task looked like no change. The CPU then
+ran kernel tasks on freed page tables until it next ran a user program. The
+boot test runs one CPU, so it could not see this.
+
+**Where:** `kernel/src/sched/mod.rs` (both switch paths), `kernel/src/proc/pcb.rs`
+(the address-space teardown), `kernel/src/proc/thread.rs` (`on_thread_exit`).
+
+**Fixed:** a switch compares against the live CR3 (`load_address_space`); a
+thread killed while on a CPU is recorded (`Process::killed_on_cpu`), and its
+process's address space is freed only once `sched::task_is_on_cpu` says it is
+off -- deferred if need be, and drained by the boot thread's idle loop. Tests:
+`sched`'s `test_task_is_on_cpu` and `test_load_address_space_uses_live_cr3`,
+`pcb`'s `test_deferred_address_space`.
+
+### A-KILLED-THREAD-RUNS-ON-UNTIL-ITS-CPU-SWITCHES -- 2026-10-01 -- OPEN (lane A)
+
+**In short:** the safe half of the entry above is done; the semantic half is
+not. A thread killed while another CPU runs it goes on running its program,
+in user mode, for up to one timer tick after its process has been declared
+dead -- its handles closed, its parent told. It can still write to memory it
+shares with other processes in that tick. Linux has each killed thread end
+itself (it sees `SIGKILL` at its next return to the kernel, or an IPI makes
+it look), so nothing of a dead process runs.
+
+**Where:** `kernel/src/sched/mod.rs::kill_task` (marks a running task `Dead`
+and leaves it running), `kernel/src/proc/thread.rs::kill_process_threads`
+(runs each victim's exit path from the killer's context).
+
+**The fix:** interrupt the CPU running a killed thread (a reschedule IPI,
+which does not exist yet) and run its exit path on that CPU, in that thread,
+before the process is published as dead -- after which the address-space
+deferral above is no longer needed.
+
+### A-THE-SYSTEM-IMAGE-WAS-NOT-THE-ROOT -- 2026-10-01 -- FIXED the same day (lane A)
+
+**In short:** the disk image holding the installed system was mounted at
+`/mnt`, and `/` was a filesystem the kernel built in memory, so every program
+looked for `/bin/sh`, `/etc`, `/usr/share/zoneinfo` and `/home` and found
+nothing: `popen`, `system` and `#!/bin/sh` scripts failed with `ENOENT`, a
+service found one built-in account, and nothing installed on the image could
+be started at boot. Lanes B and D (`d-ab-the-booted-system-has-no-bin-sh`,
+`d-a-nothing-on-the-system-image-can-be-started-at-boot`).
+
+**Fixed:** just before init, the boot makes the image `/` with
+`Vfs::pivot_root` (`kernel/src/main.rs`, `switch_root_to_image`); `/tmp`,
+`/proc`, `/dev` and `/sys` stay over it, and the in-memory root goes to
+`/.bootfs` and away. The kernel's default service list and programs go onto
+the image only where it has none. Design-decisions §1513. Test:
+`fs::vfs::self_test_pivot_mounts`, on a tree under `/tmp`.
+
+### A-THE-BOOT-TEST-BATTERY-STILL-SEES-THE-IMAGE-AT-MNT -- 2026-10-01 -- OPEN (lane A)
+
+**In short:** the pivot above happens after the boot's self-tests, so the
+battery -- every ring-3 fixture the boot test runs -- still sees the image at
+`/mnt` and an in-memory `/` with no `/bin/sh`. A fixture that needs the
+standard paths cannot check them at boot-test time: lane D's
+`services/ctest-stdio` reports its `popen` checks as not run.
+
+**Where:** `kernel/src/main.rs` (the pivot's place in the boot), 190 `/mnt`
+paths in the kernel's self-tests, and every lane-D fixture's `BIN "/mnt/bin/"`.
+
+**The fix:** keep `/mnt` as a second name for the image (a bind mount: one
+filesystem at two paths, which the VFS cannot do yet), move the pivot to the
+start of the boot, then let the fixtures move to the standard paths at their
+owners' pace.
+
+### A-RESTART-SENTINELS-MATCHED-512-BYTE-RETURNS-AND-THREE-NATIVE-ERRORS -- 2026-10-01 -- FIXED the same day (lane A)
+
+**In short:** when a signal interrupts a blocking system call, the kernel
+marks the call's return value as "restart me" with a special number, as
+Linux does (`ERESTARTSYS` and three others, 512-516). Every system call's
+return passes a check for those numbers on its way back to the program, and
+the check had two flaws. It accepted the number with either sign, so a call
+that *succeeded* with a result of 512, 513, 514 or 516 -- a 512-byte read, a
+512-byte write -- was taken for "restart me" and run again: the read's data
+was lost to the next read, and the write was written again, forever. And
+three native error codes are those very numbers -- `CrossDevice` (-512),
+`StaleHandle` (-513), `NoAttribute` (-514) -- so a native `rename` across
+devices, a stale handle, or a `getxattr` of a missing attribute restarted
+forever instead of failing; and a Linux program asking for a missing
+attribute got neither `ENODATA` nor an error, the case boot rq23 caught.
+
+**Where:** `kernel/src/syscall/linux.rs`, `restart::is_sentinel` /
+`sentinel_magnitude` / `restart_result`, called for every return from
+`kernel/src/syscall/entry.rs`.
+
+**Fixed:** a sentinel is now carried as `-(2^40 + n)` (`restart::encode`), a
+value no syscall returns and no errno or native error code reaches, and only
+a negative value can be one. Every producer already went through
+`restart_result`, so nothing else changed. The restart self-test now checks
+that 512-516 of either sign and the three native codes are not sentinels.
+
 ## Lane B: new entries
 
 Lane B (userland) appends new entries at the end of this section, above the
@@ -181210,6 +181457,44 @@ on the same file); no `-o`/`-p` owner and mode checks, no `@include`d files, no
 
 **Where:** `userspace/sudo/src/main.rs` (`edit_sudoers`, `ask_what_now`,
 `sudoers_temp_path`); the `.lck` lock and `SudoError::LockError` are gone.
+
+## TD-B-ERE-QUANTIFIED-ANCHOR -- a `*` after `$` or a word assertion compiles here and is refused by glibc (lane B, 2026-10-01)
+
+**Status:** open
+
+**In short:** in a regular expression, `$` means "end of line" and `\b` means
+"word edge" -- they match a position, not a character, so there is nothing for
+`*` ("repeat") to repeat. glibc refuses `a$*` and `a\b*` outright ("Invalid
+preceding regular expression"); ours accepts them and quietly repeats the
+position. So `find -regex 'a$*'`, `[[ $x =~ a$* ]]`, `sed -E` and awk run a
+pattern GNU's tools reject. Only `^` and `` \` `` are refused today.
+
+**Measured** (bash 5.2 `=~` and find 4.9 `-regextype posix-extended`, both
+glibc 2.39; gawk 5.2.1 `--posix` for awk): every one of `a$*`, `$*`, `a$+`,
+`a$*b`, `a\b*`, `a\<*`, `a\>*`, `a\B*`, ``a\`*``, `a\'*`, `\b*` is a compile
+error. glibc's `parse_expression` returns from *every* anchor token before its
+repetition loop, so the quantifier meets the start of a fresh expression and
+`RE_CONTEXT_INVALID_OPS` refuses it. GNU grep is two engines and differs again,
+so the egrep and basic dialects need their own rows: `grep -E 'a\b*'` prints
+`a` and `a*` but not `ab` (the quantifier is dropped, not applied), while
+``grep -E 'a\`*'`` and `grep -E 'a$*'` print every line with an `a` (zero
+repetitions of a line anchor); `grep 'a\b*'` (basic) reads the `*` as a
+literal after a word assertion and as a repetition after `` \` `` and `\'`.
+
+**Where:** `userspace/ere/src/engine.rs`, `EParser::stack_quantifiers` (the
+check covers `Node::Start | Node::BufStart` only), and `rejects_what_glibc_rejects`
+(which no longer asserts the wrong answer for `a$*`, but does not yet pin the
+right one). `bre::to_ere` passes `\b*` etc. through as a quantified assertion,
+which is wrong for basic grep in the other direction.
+
+**The proper fix:** per dialect, from the measurements above. POSIX-extended
+and awk: a quantifier after any assertion is `REG_BADRPT`. Egrep: after `^ $
+\` \'` it repeats the anchor (zero repetitions allowed, as today); after a word
+assertion it is dropped. Basic: `to_ere` emits a literal `*` after a word
+assertion and keeps the repetition after the line and buffer anchors -- which
+the extended engine must then accept, so `to_ere` should rewrite it (zero or
+more of a zero-width assertion is the empty string; one or more is the
+assertion). Harness rows in `grep-diff.sh`, `find-diff.sh` and `awk-diff.sh`.
 
 ## Lane C: new entries
 

@@ -1,7 +1,8 @@
 # D → A — nothing on the system image can be started at boot
 
 **Filed:** 2026-09-28 by lane D.
-**Status:** OPEN.
+**Status:** DONE, 2026-10-01 (lane A, on lane-a-wip) -- row A, the image is
+`/`; see "Lane A's answer" at the end.
 
 **In short:** A program that should run from the moment the machine starts --
 the backup service lane D is writing, or any other service installed on the
@@ -46,3 +47,36 @@ the operator's C-Q21 answer (§1426) says run on time do not run unless someone
 runs `backup run-due` by hand.
 
 — lane D
+
+## Lane A's answer (2026-10-01): the image is the root, from just before init
+
+The first row, as lanes B and D both recommended -- design-decisions §1513,
+on lane-a-wip, reaching `main` with lane A's next green boot.
+
+**What a booted system now has.** Just before init starts, the kernel makes
+the system image `/` (`Vfs::pivot_root`, Linux's `pivot_root(2)`):
+
+- `/bin/sh`, `/etc`, `/usr/share/zoneinfo`, `/home` and every other path are
+  the image's, so `popen`, `system`, `#!/bin/sh`, the account store and a
+  service's settings mean what every program expects;
+- `/tmp`, `/proc`, `/dev` and `/sys` are mounted over it, as before;
+- `/etc/startup.conf` is the image's when the image has one, and init starts
+  what it lists. The kernel writes its own default (`/bin/ticker`), and the
+  two programs it embeds (`/bin/ticker`, `/bin/hello`), only where the image
+  has none -- so the recipe decides, and a recipe that says nothing gets
+  today's behaviour;
+- the in-memory root the boot ran on is unmounted (it stays at `/.bootfs`
+  only if a file on it is still held);
+- a boot with no image (`--no-rootfs`, a diskless machine) keeps the
+  in-memory root, as before.
+
+**What does not change yet.** The boot test's own self-tests and ring-3
+fixtures run *before* the pivot, so they still see the image at `/mnt` and
+an in-memory `/` -- nothing of yours that runs in the battery needs to change,
+and nothing can rely on the new layout there yet. `services/ctest-stdio`'s
+`popen` checks stay "not run" at boot-test time for that reason. Moving the
+pivot to the start of the boot needs `/mnt` kept as a second name for the
+image first (known-issues `A-THE-BOOT-TEST-BATTERY-STILL-SEES-THE-IMAGE-AT-MNT`).
+
+**What is yours, lane D:** the recipe now decides what starts at boot -- see
+`requests/a-d-the-image-is-the-root-its-recipe-decides-what-starts-at-boot.md`.

@@ -848,6 +848,124 @@ pub fn bar_mmio_addr64(dev: &PciDevice, bar_index: usize) -> Option<u64> {
 }
 
 // ---------------------------------------------------------------------------
+// Which driver took which function
+// ---------------------------------------------------------------------------
+
+/// The in-kernel driver that has taken each PCI function, by packed address
+/// ([`pack_addr`]).
+///
+/// The question a device manager exists to answer -- which device has no
+/// driver? -- needs this, and nothing recorded it: each driver found its
+/// function and initialised it, and only the driver knew
+/// (`requests/e-a-publish-each-pci-functions-irq-bars-and-driver.md`).
+/// `/sys/devices/pci/<BB:DD.F>` reads it as its `driver:` line. Leaf lock.
+static DRIVER_BINDINGS: crate::sync::PreemptSpinMutex<Vec<(u32, &'static str)>> =
+    crate::sync::PreemptSpinMutex::new(Vec::new());
+
+/// Record that the in-kernel driver `name` has taken function `addr` -- call
+/// it once the driver has initialised the function, not when it merely finds
+/// it, so that a function whose initialisation failed reads as unclaimed.
+///
+/// A later binding of the same function replaces the earlier one (a driver
+/// re-probing after a reset). Also reported as a hot-plug event
+/// ([`crate::devhotplug::driver_bound`]), as a binding is.
+pub fn bind_driver(addr: PciAddress, name: &'static str) {
+    record_binding(addr, name);
+    crate::serial_println!(
+        "[pci] {:02x}:{:02x}.{} is driven by {}",
+        addr.bus,
+        addr.device,
+        addr.function,
+        name
+    );
+    crate::devhotplug::driver_bound(
+        crate::udriver::DeviceAddr::new(addr.bus, addr.device, addr.function),
+        name,
+    );
+}
+
+/// [`bind_driver`]'s record alone, without its log line and hot-plug event:
+/// what the self-test can make and unmake without leaving an event behind.
+fn record_binding(addr: PciAddress, name: &'static str) {
+    let key = pack_addr(addr);
+    let mut bindings = DRIVER_BINDINGS.lock();
+    match bindings.iter_mut().find(|(k, _)| *k == key) {
+        Some(entry) => entry.1 = name,
+        None => bindings.push((key, name)),
+    }
+}
+
+/// The in-kernel driver that has taken function `addr`, or `None` if none
+/// has ([`bind_driver`]).
+#[must_use]
+pub fn bound_driver(addr: PciAddress) -> Option<&'static str> {
+    let key = pack_addr(addr);
+    DRIVER_BINDINGS
+        .lock()
+        .iter()
+        .find(|(k, _)| *k == key)
+        .map(|&(_, name)| name)
+}
+
+/// One implemented BAR, as `/sys/devices/pci` reports it: its index, base,
+/// whether it is I/O-port space, and for memory whether it is 64-bit and
+/// prefetchable. A 64-bit BAR spans two registers and is reported once, at
+/// the first.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct BarInfo {
+    /// The BAR's register index, 0-5.
+    pub index: usize,
+    /// Its base address (I/O port or physical memory).
+    pub base: u64,
+    /// I/O-port space rather than memory.
+    pub io: bool,
+    /// A 64-bit memory BAR.
+    pub is_64: bool,
+    /// Prefetchable memory.
+    pub prefetch: bool,
+}
+
+/// The implemented BARs of `dev`, decoded from the raw values the scan read:
+/// a register reading 0 has nothing assigned and is left out. No size: the
+/// kernel does not size BARs (that writes all-ones to a register a running
+/// driver uses).
+#[must_use]
+pub fn decode_bars(dev: &PciDevice) -> Vec<BarInfo> {
+    let mut out = Vec::new();
+    let mut index = 0usize;
+    while let Some(&raw) = dev.bars.get(index) {
+        let next = index.saturating_add(1);
+        if raw == 0 {
+            index = next;
+            continue;
+        }
+        if raw & 1 != 0 {
+            out.push(BarInfo {
+                index,
+                base: u64::from(raw & 0xFFFF_FFFC),
+                io: true,
+                is_64: false,
+                prefetch: false,
+            });
+            index = next;
+            continue;
+        }
+        let is_64 = (raw >> 1) & 0x3 == 0x2;
+        let base = bar_mmio_addr64(dev, index).unwrap_or(u64::from(raw & 0xFFFF_FFF0));
+        out.push(BarInfo {
+            index,
+            base,
+            io: false,
+            is_64,
+            prefetch: raw & 0x8 != 0,
+        });
+        // A 64-bit BAR's upper half is the next register, not a BAR of its own.
+        index = if is_64 { next.saturating_add(1) } else { next };
+    }
+    out
+}
+
+// ---------------------------------------------------------------------------
 // Self-test
 // ---------------------------------------------------------------------------
 
@@ -878,8 +996,76 @@ pub fn self_test() -> Result<(), &'static str> {
     crate::serial_println!("[pci]   {} device(s) found", devices.len());
 
     self_test_intx(&devices)?;
+    self_test_bindings_and_bars()?;
 
     crate::serial_println!("[pci] Self-test PASSED");
+    Ok(())
+}
+
+/// [`bind_driver`] / [`bound_driver`] on an address no function has, and
+/// [`decode_bars`] on register values made up for each case: an I/O BAR, a
+/// 32-bit memory BAR, a 64-bit prefetchable one spanning two registers (and
+/// reported once), and an unassigned register left out.
+fn self_test_bindings_and_bars() -> Result<(), &'static str> {
+    // Bus 0xFE is never scanned (`scan_bus0`), so nothing real is bound there.
+    let nowhere = PciAddress {
+        bus: 0xFE,
+        device: 31,
+        function: 7,
+    };
+    if bound_driver(nowhere).is_some() {
+        return Err("an address no driver took reads as bound");
+    }
+    record_binding(nowhere, "selftest-a");
+    record_binding(nowhere, "selftest-b");
+    let bound = bound_driver(nowhere);
+    // Leave the table as the boot's drivers made it.
+    DRIVER_BINDINGS
+        .lock()
+        .retain(|&(k, _)| k != pack_addr(nowhere));
+    if bound != Some("selftest-b") {
+        return Err("a second binding of a function did not replace the first");
+    }
+
+    let dev = PciDevice {
+        address: nowhere,
+        vendor_id: 0,
+        device_id: 0,
+        class: 0,
+        subclass: 0,
+        irq_line: 0xFF,
+        // BAR0: I/O at 0xc040. BAR1: unassigned. BAR2+3: 64-bit prefetchable
+        // memory at 0x1_8000_0000. BAR4: 32-bit memory at 0xfeb0_0000.
+        bars: [0xc041, 0, 0x8000_000c, 0x1, 0xfeb0_0000, 0],
+    };
+    let want = [
+        BarInfo {
+            index: 0,
+            base: 0xc040,
+            io: true,
+            is_64: false,
+            prefetch: false,
+        },
+        BarInfo {
+            index: 2,
+            base: 0x1_8000_0000,
+            io: false,
+            is_64: true,
+            prefetch: true,
+        },
+        BarInfo {
+            index: 4,
+            base: 0xfeb0_0000,
+            io: false,
+            is_64: false,
+            prefetch: false,
+        },
+    ];
+    if decode_bars(&dev) != want {
+        crate::serial_println!("[pci]   decode_bars: {:?}", decode_bars(&dev));
+        return Err("decode_bars misread a BAR");
+    }
+    crate::serial_println!("[pci]   driver bindings and BAR decoding: OK");
     Ok(())
 }
 

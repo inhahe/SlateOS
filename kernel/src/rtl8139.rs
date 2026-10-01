@@ -418,6 +418,7 @@ pub fn init(hhdm_offset: u64) {
         io_base,
         pci_dev.irq_line
     );
+    pci::bind_driver(pci_dev.address, "rtl8139");
 }
 
 /// Access the device through a closure (same pattern as e1000/virtio-net).

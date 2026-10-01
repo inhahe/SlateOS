@@ -724,6 +724,7 @@ pub fn init(hhdm_offset: u64) {
     *DEVICE.lock() = Some(dev);
 
     serial_println!("[hda] Initialization complete");
+    pci::bind_driver(pci_dev.address, "hda");
 }
 
 /// Find an Intel HDA PCI device.

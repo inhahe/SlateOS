@@ -25184,6 +25184,11 @@ selects a line with a doubled character here and a line containing byte 0x01
 there. It is recorded in `awk`'s module docs and pinned by an `xfail_case` in
 `scripts/awk-diff.sh`, so if `gawk` ever changes, the harness says so.
 
+**Revisited 2026-10-01, for awk only (§1055).** The premise was wrong for awk:
+POSIX's awk table defines `\ddd` octal in awk EREs, so `\1` is byte 0x01 there,
+as gawk reads it. awk now resolves its escapes before the engine, as gawk does,
+and the engine's backreference reading is unchanged for every other program.
+
 ---
 
 ## §334 — When the kernel answers "no" to `getrandom`, that is the answer; the hardware RNG is only for when there is no kernel
@@ -83861,6 +83866,53 @@ Then the event loop is the better shape again -- no thread per idle client --
 and `libservicebus` regains `register_listener`, this time registering a real
 listener source.
 
+---
+
+## 1055. The regex engine has no C escapes; awk and sed resolve their own, in front of it, as gawk and GNU sed do
+
+**Date:** 2026-10-01
+**Lane:** B
+**Decided by:** Claude (autonomous)
+
+**In short:** In a regular expression, does `\t` mean a tab? It depends on the
+program. In `grep`, `find`, `ed`, `expr` and the shell's `[[ =~ ]]` it means
+the letter `t`, because their regex library (glibc's) has no such escape. In
+`awk` it means a tab, because POSIX gives awk's language C's escapes, and in
+GNU `sed` it means a tab because sed converts it before compiling. Our shared
+regex engine read `\t` as a tab for everyone, so `grep 'a\tb'` matched a tab
+and `grep '[\.]'` missed a backslash. Now the engine reads backslashes exactly
+as glibc does, and awk and sed each convert their own escapes first -- the same
+split GNU's programs have. This also reverses §333's choice for awk: `\1` in
+an awk regex is now the byte 0x01, as POSIX and gawk say, not a backreference.
+
+**The layering.** glibc's `regcomp` has no C escapes and, in every POSIX
+syntax but awk's, no escapes inside a bracket at all. gawk puts `make_regexp`
+in front of it (C escapes and octal, anywhere in the pattern) and compiles with
+`RE_SYNTAX_POSIX_AWK`, whose `RE_BACKSLASH_ESCAPE_IN_LISTS` makes `[\.]` a
+dot. GNU sed puts `normalize_text` in front (C escapes, `\dNNN`, `\oNNN`,
+`\xHH`, `\cX`, inside brackets too) and compiles with a syntax that has no
+escapes in lists, so `[\.]` stays a backslash or a dot. The engine now matches
+glibc, `Syntax` grows the two bits awk needs (`backslash_escape_in_lists`,
+`no_gnu_ops`) and a `POSIX_AWK` constant, and gawk's layer is `ere::awk`.
+
+| Option | For | Against |
+|---|---|---|
+| **A. Engine = glibc; each language resolves its own escapes first** (chosen) | Every caller gets its original's answer: measured against grep 3.11, sed 4.9, gawk 5.2.1 `--posix`, findutils 4.9, bash 5.2. The engine has one meaning for a backslash, the one `regcomp` has, so a pattern means the same in `grep`, `find`, `ed`, `expr` and `[[ =~ ]]`. | Programs whose language has escapes must call their layer; the kernel shell's sed and awk (lane A) and two lane-E apps changed behaviour and were told. |
+| B. Keep C escapes in the engine, add a "no escapes in brackets" flag (the plan in `known-issues.md`) | Smaller change | Leaves `grep 'a\tb'` matching a tab -- the engine would still be wrong outside brackets for every glibc caller, which the measurement showed the plan had missed. |
+| C. A dialect flag per caller for C escapes | No layer in awk | The engine would carry awk's lexical rules (octal, `\/`, the warnings) as syntax bits glibc does not have; awk's escapes would then differ between a literal and a dynamic regex unless both went through the flag anyway. |
+
+**Revisiting §333.** §333 kept `\1` a backreference in awk on the premise that
+POSIX leaves `\1` in an ERE undefined, so the choice was between two
+extensions. That premise holds for ERE but not for *awk*: POSIX's awk table
+defines `\ddd` octal in awk EREs, "recognized both inside and outside bracket
+expressions", so `\1` is byte 0x01 -- gawk's reading. With awk's layer in front
+of the engine, honouring it costs the other programs nothing: the engine still
+reads `\1` as a backreference for `grep -E`, `sed -E` and the rest. The xfail
+it was pinned by in `awk-diff.sh` is an ordinary case now.
+
+**Revisit when** a caller needs C escapes without being awk or sed -- it should
+then get a layer of its own, not a flag in the engine.
+
 ## 834. Selection is a change of colour, not of weight
 
 **Date:** 2026-09-12
@@ -91474,3 +91526,160 @@ comes first. Lane D asked for it
 
 **Revisit** when ACLs become reachable as attributes, or when the kernel
 gains a capability for administrative authority over files.
+
+## 1512. The kernel keeps which signals are ignored, a parent that ignores SIGCHLD leaves no zombies, and a spawned child starts in its parent's job
+
+**Date:** 2026-10-01 · **Decided by:** Claude (autonomous) · **Lane:** A
+
+**In short:** a program can say "ignore this signal" (`SIG_IGN`). Until now
+only the C library knew, so the setting was lost the moment the program
+started another one: `nohup cmd` ignores the hang-up signal and becomes
+`cmd`, and `cmd` died when its terminal closed anyway. A parent that ignores
+`SIGCHLD` should also never be left holding dead children ("zombies"), and
+only the kernel can arrange that. The kernel now keeps the ignored set for
+every process, passes it on across `exec`, `fork` and spawn, drops ignored
+signals when they are sent, and reaps a child at exit when its parent will
+never wait for it. Separately, a program started with `posix_spawn` now
+starts where POSIX puts it -- in its parent's process group and session,
+with its parent's blocked signals -- and the four `posix_spawn` attributes
+for those (group, session, signal mask, default signals) are honoured
+before the child runs. Lane D asked for both
+(`requests/d-a-ignored-signals-and-spawn-attributes-need-a-kernel-record.md`).
+
+This revisits §115's Decision 3 ("the kernel deliberately cannot see a
+native-ABI `SIG_IGN`"), which was mine: it named this as the proper fix and
+gave its trigger -- a native program needing POSIX-exact ignore semantics.
+`nohup` is one, and a set the kernel must carry across `exec` is something
+no libc table can be.
+
+**What changed:**
+- **`proc::signal`** keeps an ignored set and `SIGCHLD`'s `SA_NOCLDWAIT`
+  beside the pending set and the blocked mask. It is the one record of
+  "ignored" for both ABIs: the native libc reports it
+  (`SYS_SIGNAL_SET_IGNORED`, 1098; read back with `SYS_SIGNAL_GET_IGNORED`,
+  1099), the Linux shim's `rt_sigaction` records it. `exec` keeps the set and
+  clears `SA_NOCLDWAIT`; `fork` copies both; a spawned child gets its parent's
+  set less `POSIX_SPAWN_SETSIGDEF`'s signals.
+- **At send** (`classify_post_info`) an ignored signal is discarded, before
+  any trampoline or default action is considered -- unless it is blocked, when
+  it stays pending (Linux's `sig_ignored`) and is discarded at delivery if it
+  is still ignored then (`take_deliverable_info`). `SIGCONT` still continues
+  a stopped process. A *blocked* fatal signal to a process with no trampoline
+  now waits for its unblocking, as a blocked signal must; it used to kill at
+  once.
+- **SIGCHLD:** when a process's last thread leaves, `pcb::remove_thread`
+  decides from the parent's record, under the process table's lock, whether
+  the parent will collect it (`pcb::ExitNotice`). If not, every `wait` treats
+  the zombie as gone -- the parent's last wait ends in `ECHILD` -- and the
+  exiting thread releases it once the exit's other work is done
+  (`pcb::release_autoreaped`). `SIG_IGN` sends no `SIGCHLD`; `SA_NOCLDWAIT`
+  still does, as on Linux.
+- **The Linux sigaction table** reads an action it has no entry for off the
+  set (`SIG_IGN` or `SIG_DFL`), and an exec drops its entries rather than
+  keeping the `SIG_IGN` ones -- a second copy that went stale when a native
+  image in between stopped ignoring a signal.
+- **Terminal job control** asks the set, so a native shell that ignores
+  `SIGTTOU` (as bash does) is let through, and the limitation
+  `TD-KERNEL-NATIVE-ABI-SIG_IGN-IS-INVISIBLE-TO-THE-KERNEL` recorded is gone.
+- **`/proc/<pid>/status`** prints Linux's `Sig*` lines and `stat`'s fields
+  31-34 are real. "Caught" stays the libc's for a native process, so its
+  `SigCgt` is empty -- the one disposition the kernel still cannot see.
+- **Spawn:** a child with a parent starts in the parent's process group and
+  session (it led its own until now, so it had no controlling terminal and a
+  `^C` to the foreground group missed it), with the parent's blocked mask and
+  ignored set. `SpawnEx2Args` gains six fields -- `pgid_mode`, `pgid`,
+  `sigmask_set`, `sigmask`, `sigdefault`, `setsid` -- applied before the
+  child's first instruction, in glibc's order: a new session, then the group.
+  What cannot be had is `NotPermitted` (`EPERM`) and leaves no process.
+- **Two faults found on the way, both in the teardown autoreaping would
+  share:** `pcb::try_reap` -- the path every waited-for process takes --
+  never released the references its file mappings held, nor its session's
+  claim on a terminal; only `pcb::destroy` did. And on a multi-CPU machine a
+  thread killed while another CPU ran it left that CPU on the process's page
+  tables after they were freed: the switch away compared the *records* of the
+  two tasks' address spaces, and the dead thread's had been cleared. Both
+  switch paths now compare the live CR3, and a process's address space is
+  freed only once every such thread is off its CPU (deferred, and drained by
+  the boot thread's idle loop).
+
+**Alternatives:**
+
+| | What changes | For | Against |
+|---|---|---|---|
+| **A. One kernel record of "ignored" for both ABIs (chosen)** | a signal ignored under one ABI stays ignored after an exec into the other | one answer to "is it ignored?" for every consumer: send, delivery, job control, SIGCHLD | the native libc must report every change to or from `SIG_IGN` |
+| B. A native per-signal sigaction table in the kernel, beside the Linux one | the kernel would hold handlers too | `sigaction` could be one syscall | duplicates the libc's handler table, the bug shape §113 and §114 removed; handlers mean nothing across `exec` |
+| C. Keep `SIG_IGN` in each ABI's own place and translate at exec | nothing new for Linux programs | smaller change | two records of one fact, and every consumer must ask both, by ABI |
+
+**Smaller decisions:**
+
+| decision | alternative | why this one |
+|---|---|---|
+| The native call carries the whole set | one signal per call | the libc's table is the authority for its own changes; one call per change is what it has to make anyway, and it is idempotent |
+| A pending signal is discarded only when *newly* ignored by the whole-set call | discard every pending signal in the set | an unchanged action is not "set to SIG_IGN"; a blocked signal kept because it was ignored stays for whoever unblocks it. The Linux shim, which changes one at a time, discards as Linux does |
+| `SIGKILL`/`SIGSTOP` in the set is `InvalidArgument` | clear them silently, as `SYS_SIGNAL_MASK` does | asking to ignore them is a caller bug; `sigaction` itself refuses it with `EINVAL` |
+| The autoreap decision is taken under the process table's lock | read the parent's disposition before taking it | no wait can see the zombie between publication and decision, as Linux's `tasklist_lock` guarantees |
+| The exiting thread releases its own process | a reaper task; or the parent | nothing else is sure to run: the parent asked never to wait, and the kernel has no reaper task. The thread is already off the process's page tables (`sched::detach_address_space`) |
+| An autoreaped child's CPU time is not added to the parent's children's time | add it | POSIX counts waited-for children in `RUSAGE_CHILDREN`; Linux adds none it reaps this way |
+| A spawned child inherits its parent's group and session by default | keep it leading its own | POSIX `posix_spawn`; no caller in the tree relied on the old behaviour (`login_tty` calls `setsid` itself) |
+| A value with no meaning in the six fields is refused (`pgid` without its mode, a mode of 2) | ignore it | `struct_size`'s rule: a field the kernel will not read must be zero, or a request it cannot honour passes silently |
+| Address spaces whose killed threads may still run wait in a queue drained by the idle loop | wait in the reaper | `on_thread_exit` can run in an exception handler, where nothing may wait |
+
+**Revisit** if a native program needs `SA_NOCLDSTOP` or another flag only
+the kernel can act on, or if killed threads are ever made to exit
+themselves (as Linux's do), which would make the address-space deferral
+unnecessary.
+
+## 1513. The system image becomes the root before init: a pivot at the end of the boot
+
+**Date:** 2026-10-01 · **Decided by:** Claude (autonomous) · **Lane:** A
+
+**In short:** the disk image that holds the installed system -- its programs,
+its accounts, its settings -- was mounted at `/mnt`, while `/` was a
+filesystem the kernel built in memory. So no program found anything where it
+looks: `/bin/sh` (which `popen`, `system` and every `#!/bin/sh` script need),
+`/etc` (accounts, the list of services to start), `/usr/share/zoneinfo`,
+`/home`. Nothing installed on the image could be started at boot. Now, at the
+end of the boot and just before the first user program (init) starts, the
+kernel makes the image the root, as Linux does when it switches from its boot
+filesystem to the real one. Lanes B and D asked for this
+(`requests/d-a-nothing-on-the-system-image-can-be-started-at-boot.md`,
+`requests/d-ab-the-booted-system-has-no-bin-sh.md`), both recommending "the
+image is the root".
+
+**What changed:**
+- **`Vfs::pivot_root(new_root, put_old)`**, Linux's `pivot_root(2)`: the
+  mount at `new_root` becomes `/` with every mount beneath it, the old root
+  moves to `put_old`, and every other mount -- `/tmp`, `/proc`, `/dev`,
+  `/sys` -- keeps its path over the new root. Mounts keep their identity, so
+  a file held open stays open; advisory locks taken by path move with their
+  files. Everything is planned and checked before anything changes.
+- **The boot, step 24:** if an ext4 image is mounted at `/mnt`, it becomes
+  `/`; the in-memory root goes to `/.bootfs` and is unmounted unless a file
+  on it is still held. A boot with no image keeps the in-memory root, as
+  before.
+- **The kernel's boot files** -- `/bin/hello`, `/bin/ticker` and the default
+  `/etc/startup.conf` -- go onto the image only where it has none, so an
+  image that provides its own service list and programs is used as it
+  stands. The image recipe (lane D's) is asked to provide them.
+
+**Alternatives:**
+
+| | What changes | For | Against |
+|---|---|---|---|
+| **A. Pivot at the end of the boot, before init (chosen)** | init and everything it starts see the image at `/`; the boot's self-tests run as before | no self-test or fixture changes; the end state both lanes asked for | the boot test's own fixtures still see the image at `/mnt`, so a fixture that needs `/bin/sh` while the battery runs still has none |
+| B. Mount the image at `/` from the start of the boot | everything, the battery included, sees the final layout | one layout from power-on | 190 paths in the kernel and every lane-D fixture name `/mnt`; self-tests that write at `/` would write onto the image; needs `/mnt` kept as a second name for the image first |
+| C. Links from today's root into `/mnt` (`/bin`, `/etc`, `/usr`) | standard paths resolve | small | two roots stay visible: `realpath`, `/proc/self/exe` and the mount table say `/mnt/...`, and `df /` reports the in-memory root (lane B's objection) |
+| D. Init runs the image's services `chroot`ed to `/mnt` | services see the image as `/` | no kernel change | they lose `/dev`, `/proc` and `/tmp`, which belong to the in-memory root (lane D's objection) |
+
+**Smaller decisions:**
+
+| decision | alternative | why this one |
+|---|---|---|
+| The old root goes to `/.bootfs`, then is unmounted | free it in place, as Linux's `switch_root` deletes the initramfs | an unmount refuses while a file on it is held, so a held file keeps working rather than losing its filesystem; a directory name with nothing in it is the whole cost when nothing is held |
+| `put_old` must be a direct child of `/` | anywhere | after the pivot only `/`'s own children are sure to resolve, whatever the new root contains |
+| The pivot rewrites the mount table and advisory locks, not other path-keyed records (working directories, watches) | rewrite them all | it runs before init, when no process keeps any; a pivot of a running system would need them |
+| The kernel's default service list and programs are written onto the image only where it has none | write them always, as onto the in-memory root | an installed system's image is its own; the boot test's image is attached with `snapshot=on`, so the writes it does make there never reach the file |
+
+**Revisit** when the boot test's fixtures and self-tests use the standard
+paths: then the pivot can move to the start of the boot (B), with `/mnt` kept
+as a second name for the image for whatever still uses it.

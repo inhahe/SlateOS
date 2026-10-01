@@ -60,6 +60,31 @@ const CRC32_TABLE: [u32; 256] = {
     table
 };
 
+/// `TABLES[k][b]`: the CRC of byte `b` followed by `k` zero bytes, so that
+/// eight input bytes are folded in by eight independent lookups rather than
+/// eight that each wait for the last ("slicing by 8"). `TABLES[0]` is
+/// [`CRC32_TABLE`]. 8 KiB, built at compile time.
+const TABLES: [[u32; 256]; 8] = {
+    let mut t = [[0u32; 256]; 8];
+    t[0] = CRC32_TABLE;
+    let mut k = 1;
+    while k < 8 {
+        let mut i = 0;
+        while i < 256 {
+            // `k` and `i` are bounded by the `while`s, so every index is in
+            // range; a `const` block cannot use `get`.
+            #[allow(clippy::indexing_slicing)]
+            {
+                let prev = t[k - 1][i];
+                t[k][i] = (prev >> 8) ^ CRC32_TABLE[(prev & 0xFF) as usize];
+            }
+            i += 1;
+        }
+        k += 1;
+    }
+    t
+};
+
 /// Compute CRC-32 (ISO 3309 / IEEE 802.3) over a byte slice.
 ///
 /// Initial value `!0`, final value inverted — the conventional framing, so this
@@ -99,8 +124,42 @@ pub fn crc32_seed(seed: u32, data: &[u8]) -> u32 {
 /// checksums are Linux's `crc32_le()` seeded with the F2FS magic and with
 /// *neither* inversion applied, so the conventional framing would produce a
 /// value that is wrong by exactly `!0` on both ends.
+///
+/// Eight bytes a step through [`TABLES`], then the rest a byte at a time:
+/// about five times faster than a byte at a time over a long input (lane F's
+/// measurement over a PNG's pixel data, 7.2 cycles a byte before;
+/// `benches/rate.rs` has this machine's figure), with the same result for
+/// every input and every split -- the tests hold it to the byte-at-a-time
+/// loop.
 #[must_use]
 pub fn crc32_raw(seed: u32, data: &[u8]) -> u32 {
+    let mut crc = seed;
+    let (words, rest) = data.as_chunks::<8>();
+    for word in words {
+        let [b0, b1, b2, b3, b4, b5, b6, b7] = *word;
+        let lo = u32::from_le_bytes([b0, b1, b2, b3]) ^ crc;
+        let hi = u32::from_le_bytes([b4, b5, b6, b7]);
+        // Every index is masked to 8 bits (or is a top byte, `>> 24`), so it
+        // is always in range; `get` would force a `Result` on a function that
+        // cannot fail.
+        #[allow(clippy::indexing_slicing)]
+        {
+            crc = TABLES[7][(lo & 0xFF) as usize]
+                ^ TABLES[6][((lo >> 8) & 0xFF) as usize]
+                ^ TABLES[5][((lo >> 16) & 0xFF) as usize]
+                ^ TABLES[4][(lo >> 24) as usize]
+                ^ TABLES[3][(hi & 0xFF) as usize]
+                ^ TABLES[2][((hi >> 8) & 0xFF) as usize]
+                ^ TABLES[1][((hi >> 16) & 0xFF) as usize]
+                ^ TABLES[0][(hi >> 24) as usize];
+        }
+    }
+    bytewise(crc, rest)
+}
+
+/// The byte-at-a-time loop: [`crc32_raw`]'s tail, and the tests' oracle for
+/// its eight-byte steps.
+fn bytewise(seed: u32, data: &[u8]) -> u32 {
     let mut crc = seed;
     for &byte in data {
         let idx = ((crc ^ u32::from(byte)) & 0xFF) as usize;
@@ -117,7 +176,66 @@ pub fn crc32_raw(seed: u32, data: &[u8]) -> u32 {
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::panic, clippy::indexing_slicing)]
 mod tests {
-    use super::{crc32, crc32_raw, crc32_seed};
+    use super::{bytewise, crc32, crc32_raw, crc32_seed};
+
+    /// A deterministic, non-repeating test buffer (xorshift), so a table entry
+    /// wrong for one byte value cannot hide behind a buffer that never holds
+    /// it.
+    fn noise(len: usize) -> [u8; 4096] {
+        assert!(len <= 4096);
+        let mut out = [0u8; 4096];
+        let mut x = 0x9E37_79B9_u32;
+        for b in out.iter_mut().take(len) {
+            x ^= x << 13;
+            x ^= x >> 17;
+            x ^= x << 5;
+            *b = x.to_le_bytes()[0];
+        }
+        out
+    }
+
+    /// Eight bytes a step and one a step agree for every length that takes
+    /// the tail alone (0-7), a whole word (8), and a word and a tail (9-17),
+    /// from two seeds.
+    #[test]
+    fn eight_at_a_time_matches_one_at_a_time_for_short_lengths() {
+        let buf = noise(17);
+        for len in 0..=17 {
+            for seed in [!0u32, 0x1234_5678] {
+                assert_eq!(
+                    crc32_raw(seed, &buf[..len]),
+                    bytewise(seed, &buf[..len]),
+                    "length {len}, seed {seed:#x}"
+                );
+            }
+        }
+    }
+
+    /// And over every byte value, at every alignment of the eight-byte steps:
+    /// 4096 bytes of noise, each of its first sixteen offsets.
+    #[test]
+    fn eight_at_a_time_matches_one_at_a_time_over_noise() {
+        let buf = noise(4096);
+        for start in 0..16 {
+            assert_eq!(
+                crc32_raw(!0, &buf[start..]),
+                bytewise(!0, &buf[start..]),
+                "offset {start}"
+            );
+        }
+    }
+
+    /// Chaining across every split point of a buffer longer than a few words
+    /// equals one call over the whole: the steps carry no state but `crc`.
+    #[test]
+    fn chaining_matches_one_shot_at_every_split() {
+        let buf = noise(100);
+        let whole = crc32(&buf[..100]);
+        for split in 0..=100 {
+            let (a, b) = buf[..100].split_at(split);
+            assert_eq!(crc32_seed(crc32_raw(!0, a), b), whole, "split {split}");
+        }
+    }
 
     /// The standard check value. Every reflected-IEEE implementation agrees on
     /// it, which is what makes it the right vector to guard the table against a

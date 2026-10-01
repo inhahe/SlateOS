@@ -937,6 +937,7 @@ pub fn probe(hhdm_offset: u64) -> Option<E1000Device> {
         Ok(dev) => {
             E1000_IRQ_LINE.store(pci_dev.irq_line, Ordering::Release);
             serial_println!("[e1000] Device initialized successfully");
+            pci::bind_driver(pci_dev.address, "e1000");
             Some(dev)
         }
         Err(e) => {

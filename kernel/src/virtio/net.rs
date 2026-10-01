@@ -292,6 +292,8 @@ impl VirtioNetDevice {
         // 10. Pre-populate the RX queue with empty buffers.
         dev.refill_rx();
 
+        // Running, with buffers posted: the function is this driver's.
+        pci::bind_driver(pci_dev.address, "virtio-net");
         Ok(dev)
     }
 

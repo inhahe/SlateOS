@@ -2,7 +2,7 @@
 name = "randdist"
 version = "0.1.0"
 edition = "2024"
-description = "Non-uniform distributions — normal, exponential, Poisson — drawn from any randrange source."
+description = "Non-uniform distributions — normal, exponential, Poisson, weighted choice — drawn from any randrange source."
 
 [lib]
 path = "src/lib.rs"

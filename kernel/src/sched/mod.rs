@@ -1581,6 +1581,41 @@ pub(crate) fn finish_task_switch() {
     PREV_TASK_IDS[cpu].store(0, Ordering::Release);
 }
 
+/// Whether some CPU may still be executing as `task_id`: it is the task a CPU
+/// is running ([`CURRENT_TASK_IDS`]), or the one a CPU is switching away from
+/// and still standing on ([`PREV_TASK_IDS`]).
+///
+/// The question a teardown asks about a thread killed from elsewhere.
+/// `kill_task` only *marks* a task running on another CPU `Dead`; that CPU goes
+/// on executing it -- in user mode, on the process's page tables -- until its
+/// next switch. Once this answers `false` the CPU has made that switch, and
+/// with it the CR3 write `schedule_inner` makes whenever the live address space
+/// is not the incoming task's: nothing it does from then on reads the dead
+/// process's page tables, so they may be freed. A task marked `Dead` is never
+/// picked again, so a `false` stays `false`.
+///
+/// Lock-free, from the same atomics [`reap_dead_tasks`] reads. A slot read a
+/// moment stale can only say `true` for a switch that has just finished --
+/// delaying a teardown, never hastening one -- for the reason given at
+/// [`set_prev_task`].
+#[must_use]
+pub fn task_is_on_cpu(task_id: TaskId) -> bool {
+    let num_cpus = crate::smp::cpu_count().max(1);
+    (0..num_cpus).any(|i| {
+        let current = CURRENT_TASK_IDS
+            .get(i)
+            .is_some_and(|a| a.load(Ordering::Acquire) == task_id);
+        // 0 in a PREV slot means "no task": the slot is cleared to it by
+        // `finish_task_switch`, so it names nothing -- though task 0, the
+        // BSP's idle task, is real and may be *current* above.
+        let previous = task_id != 0
+            && PREV_TASK_IDS
+                .get(i)
+                .is_some_and(|a| a.load(Ordering::Acquire) == task_id);
+        current || previous
+    })
+}
+
 /// Re-initialize the per-CPU scheduler with the actual CPU count.
 ///
 /// Called by SMP bootstrap after all APs are online.  This replaces
@@ -1598,6 +1633,37 @@ pub(crate) fn update_cpu_count(num_cpus: usize) {
 /// Saved during `init()` so we can restore it when switching back to
 /// tasks that run in the kernel address space (pml4_phys == 0).
 static KERNEL_PML4: AtomicU64 = AtomicU64::new(0);
+
+/// Make the address space a task records (`pml4`; 0 for a kernel task, which
+/// runs in [`KERNEL_PML4`]) the live one, unless it already is.
+///
+/// Judged against the **live** CR3, not the outgoing task's record. The two
+/// differ for a thread killed while it ran on another CPU: `kill_task` only
+/// marks it `Dead`, and [`detach_address_space`] then clears its record while
+/// its CPU still has the process's page tables loaded. Both switch paths
+/// compared records until 2026-10-01, so that CPU's next switch, to a kernel
+/// task (record 0, like the cleared one), looked like no change at all -- and
+/// it went on running kernel tasks on page tables the process's reaper was
+/// about to free. Whatever reused those frames then decided its page walks.
+#[inline]
+fn load_address_space(pml4: u64) {
+    let target = if pml4 == 0 {
+        KERNEL_PML4.load(Ordering::Acquire)
+    } else {
+        pml4
+    };
+    // 0 would mean `init` never saved the kernel's PML4, which cannot be so
+    // once a task is being switched to; loading it would triple-fault.
+    if target != 0 && crate::mm::page_table::active_pml4_phys() != target {
+        // SAFETY: `target` is the kernel PML4 `init` saved or a process PML4
+        // whose kernel half (entries 256-511) is cloned from it, so the code
+        // and the kernel stack running this are mapped at the same addresses
+        // after the write as before. Only this CPU's CR3 is written.
+        unsafe {
+            crate::mm::page_table::write_cr3(target);
+        }
+    }
+}
 
 // ---------------------------------------------------------------------------
 // Public API
@@ -2116,16 +2182,17 @@ pub fn task_pml4(task_id: TaskId) -> Option<u64> {
 ///   a freed frame into CR3;
 /// * writing CR3 now stops the *current* execution from depending on it.
 ///
-/// Clearing the field also keeps `schedule_inner`'s `old_pml4 != new_pml4`
-/// short-circuit honest: the recorded value and the live CR3 agree.
-///
 /// Only the *current* task's CR3 can be rewritten (CR3 is per-CPU and we
 /// can only write our own), so for a task that is not the caller this
-/// clears the recorded PML4 only.  That is still correct and still
-/// valuable: such a task has already been marked `Dead` by `kill_task`
-/// before `on_thread_exit` runs, so it will never be switched in again —
-/// and if the scheduler is ever changed such that it could be, it will
-/// come back on the kernel address space rather than a freed one.
+/// clears the recorded PML4 only.  Such a task has already been marked
+/// `Dead` by `kill_task` before `on_thread_exit` runs, so it is never
+/// switched in again -- but it may be *running*, on another CPU, which goes
+/// on executing it on the process's page tables until that CPU's next
+/// switch. Two things make that safe, neither of them here: the switch
+/// judges against the live CR3 rather than this record
+/// (`load_address_space`), so it does move off the dead tables; and the
+/// process's teardown frees them only once [`task_is_on_cpu`] says the
+/// switch has happened (`pcb::free_address_space_when_unused`).
 ///
 /// Returns `true` if the task was found and had a process address space
 /// to detach from.  Idempotent: a second call is a no-op.
@@ -7409,7 +7476,6 @@ fn schedule_inner(requeue: bool, kind: SwitchKind) {
     let new_ctx_ptr: *const Context;
     let old_fpu_ptr: *mut fpu::FpuState;
     let new_fpu_ptr: *const fpu::FpuState;
-    let old_pml4: u64;
     let new_pml4: u64;
     let new_stack_top: u64;
     let new_fs_base: u64;
@@ -7661,7 +7727,7 @@ fn schedule_inner(requeue: bool, kind: SwitchKind) {
                             }
                             SwitchKind::Uncounted => {}
                         }
-                        (&raw mut t.context, &raw mut *t.fpu_state, t.pml4_phys)
+                        (&raw mut t.context, &raw mut *t.fpu_state)
                     });
                     let new_data = s.tasks.get(&ready_id).map(|t| {
                         (
@@ -7719,7 +7785,7 @@ fn schedule_inner(requeue: bool, kind: SwitchKind) {
                     }
 
                     if let (
-                        Some((old_p, old_fpu, o_pml4)),
+                        Some((old_p, old_fpu)),
                         Some((new_p, new_fpu, n_pml4, n_sb, n_fs_base, n_gs_base)),
                     ) = (old_data, new_data)
                     {
@@ -7751,18 +7817,7 @@ fn schedule_inner(requeue: bool, kind: SwitchKind) {
                         set_prev_task(cpu, current_id);
 
                         // Switch address space if needed.
-                        if o_pml4 != n_pml4 {
-                            let target = if n_pml4 == 0 {
-                                KERNEL_PML4.load(Ordering::Acquire)
-                            } else {
-                                n_pml4
-                            };
-                            // SAFETY: target is a valid PML4 with kernel
-                            // entries mapped.
-                            unsafe {
-                                crate::mm::page_table::write_cr3(target);
-                            }
-                        }
+                        load_address_space(n_pml4);
 
                         // Restore this user thread's %fs (TLS) base.
                         // IA32_FS_BASE is a global CPU register not saved in
@@ -7956,7 +8011,7 @@ fn schedule_inner(requeue: bool, kind: SwitchKind) {
                 }
                 SwitchKind::Uncounted => {}
             }
-            (&raw mut t.context, &raw mut *t.fpu_state, t.pml4_phys)
+            (&raw mut t.context, &raw mut *t.fpu_state)
         });
         let new_data = state.tasks.get(&next_id).map(|t| {
             (
@@ -7970,7 +8025,7 @@ fn schedule_inner(requeue: bool, kind: SwitchKind) {
         });
 
         if let (
-            Some((old, old_fpu, o_pml4)),
+            Some((old, old_fpu)),
             Some((new, new_fpu, n_pml4, n_stack_bottom, n_fs_base, n_gs_base)),
         ) = (old_data, new_data)
         {
@@ -7986,7 +8041,6 @@ fn schedule_inner(requeue: bool, kind: SwitchKind) {
             new_ctx_ptr = new;
             old_fpu_ptr = old_fpu;
             new_fpu_ptr = new_fpu;
-            old_pml4 = o_pml4;
             new_pml4 = n_pml4;
             new_fs_base = n_fs_base;
             new_gs_base = n_gs_base;
@@ -8043,22 +8097,9 @@ fn schedule_inner(requeue: bool, kind: SwitchKind) {
     // another CPU could free that stack mid-flight.  See `PREV_TASK_IDS`.
     set_prev_task(cpu, current_id);
 
-    // Switch CR3 if the new task uses a different address space.
-    // pml4_phys == 0 means "kernel address space" → use KERNEL_PML4.
-    if old_pml4 != new_pml4 {
-        let target_pml4 = if new_pml4 == 0 {
-            KERNEL_PML4.load(Ordering::Acquire)
-        } else {
-            new_pml4
-        };
-        // SAFETY: target_pml4 is a valid PML4 with kernel entries
-        // (256-511) cloned from the boot PML4.  Our currently
-        // executing kernel code and stack are mapped through those
-        // kernel entries, so the switch is safe.
-        unsafe {
-            crate::mm::page_table::write_cr3(target_pml4);
-        }
-    }
+    // Switch to the incoming task's address space (the kernel's for a kernel
+    // task) unless it is already the live one.
+    load_address_space(new_pml4);
 
     // Restore this user thread's %fs (TLS) base.  IA32_FS_BASE is a global
     // CPU register not saved in the GP Context, so without this two
@@ -8275,8 +8316,91 @@ pub fn self_test() -> KernelResult<()> {
     test_try_wake_contract()?;
     test_deferred_wake_signal_mask()?;
     test_prev_task_pins_outgoing_stack()?;
+    test_task_is_on_cpu()?;
+    test_load_address_space_uses_live_cr3()?;
 
     serial_println!("[sched] Scheduler self-test PASSED");
+    Ok(())
+}
+
+/// [`task_is_on_cpu`]: the running task is, a task a CPU is switching away
+/// from is until the switch finishes, and nothing else is.
+fn test_task_is_on_cpu() -> KernelResult<()> {
+    // An id no task has: the scheduler hands ids out upward from 0.
+    const NOBODY: TaskId = u64::MAX - 11;
+    let cpu = current_cpu_id();
+    let fail = |what: &str| {
+        serial_println!("[sched]   FAIL: task_is_on_cpu: {}", what);
+        Err(KernelError::InternalError)
+    };
+    if !task_is_on_cpu(load_current_task()) {
+        return fail("the running task is not on a CPU");
+    }
+    if task_is_on_cpu(NOBODY) {
+        return fail("a task nobody runs is on a CPU");
+    }
+    // Stand in for a CPU mid-switch, as `test_prev_task_pins_outgoing_stack`
+    // does: the outgoing task is still on the CPU until the switch finishes.
+    set_prev_task(cpu, NOBODY);
+    let pinned = task_is_on_cpu(NOBODY);
+    finish_task_switch();
+    if !pinned {
+        return fail("a task a CPU is switching away from is not on it");
+    }
+    if task_is_on_cpu(NOBODY) {
+        return fail("a finished switch still names the outgoing task");
+    }
+    serial_println!("[sched]   task_is_on_cpu: running, mid-switch, and gone: OK");
+    Ok(())
+}
+
+/// [`load_address_space`] judges against the live CR3, not a task's record:
+/// with a process's page tables still loaded -- as on a CPU whose thread was
+/// killed from elsewhere, its record cleared -- loading a kernel task's
+/// address space (record 0) must switch to the kernel's. Judged by records,
+/// 0 against 0 was no change, and the CPU stayed on tables about to be freed.
+fn test_load_address_space_uses_live_cr3() -> KernelResult<()> {
+    let kernel = KERNEL_PML4.load(Ordering::Acquire);
+    let Ok(stale) = crate::mm::page_table::alloc_pml4() else {
+        serial_println!("[sched]   load_address_space: SKIP (no PML4 to spare)");
+        return Ok(());
+    };
+    let (switched_back, unchanged) = crate::cpu::without_interrupts(|| {
+        // SAFETY: `alloc_pml4` clones the kernel half (entries 256-511) from
+        // the kernel PML4, so this code and its stack are mapped identically
+        // through it; interrupts are off, so nothing runs on it but this.
+        unsafe {
+            crate::mm::page_table::write_cr3(stale);
+        }
+        load_address_space(0);
+        let switched_back = crate::mm::page_table::active_pml4_phys() == kernel;
+        // And a second load of the same space writes nothing that changes it.
+        load_address_space(0);
+        (
+            switched_back,
+            crate::mm::page_table::active_pml4_phys() == kernel,
+        )
+    });
+    if !switched_back {
+        // SAFETY: `kernel` is the PML4 `init` saved, which maps the code and
+        // the stack running this.
+        unsafe {
+            crate::mm::page_table::write_cr3(kernel);
+        }
+    }
+    // SAFETY: `stale` was allocated above and never given to a task, so no
+    // other CPU has loaded it, and this CPU's CR3 is the kernel's again on
+    // either path above.
+    unsafe {
+        crate::mm::page_table::destroy_user_address_space(stale);
+    }
+    if !(switched_back && unchanged) {
+        serial_println!(
+            "[sched]   FAIL: load_address_space(0) with a process PML4 live left CR3 on it"
+        );
+        return Err(KernelError::InternalError);
+    }
+    serial_println!("[sched]   load_address_space judges by the live CR3: OK");
     Ok(())
 }
 

@@ -267,6 +267,9 @@ pub struct AtiDevice {
     /// retained because it is what decides whether this card is the one already
     /// showing the console; see [`AtiDevice::owns_console`].
     pub vram_phys: u64,
+    /// The card's PCI function, recorded as this driver's once the driver
+    /// has taken it (`pci::bind_driver`).
+    pub pci_address: pci::PciAddress,
 }
 
 impl AtiDevice {
@@ -369,6 +372,7 @@ pub fn probe() -> KernelResult<Option<AtiDevice>> {
         mmio,
         vram_bytes,
         vram_phys,
+        pci_address: dev.address,
     }))
 }
 

@@ -994,6 +994,8 @@ What lane A actually has left:
 | A-Q18: a section per lane in `known-issues.md` (§977) | **done 2026-09-27.** Six `## Lane X: new entries` sections at the end, existing entries unmoved. The file's header, roadmap.md's shared-document row and every lane were told. Reaches `main` with lane A's next publish |
 | replace the running kernel without a reboot (lane D's request, operator's decision §1126) | **open, taken 2026-09-27.** The kernel half: freeze every thread, rewinding blocked calls through `ERESTART*` so they re-run after the swap. Write versioned hand-over records that describe each process's objects in the ABI's terms (mappings, capabilities, channels, registers, timers), not kernel structs. Load the new image beforehand and jump to it; it rebuilds its objects and thaws, falling back to the old kernel if the rebuild fails. It shares its freeze-and-save core with hibernation. The netstack opts in to a state hand-over rather than resetting its connections: TCP-repair-style export of each connection's sequence and window state, buffered bytes and timers, plus listeners and datagram bindings, keyed as `Net` keys them. The design is recorded as a lane A decision when built. Request: `requests/d-a-replace-the-running-kernel-without-a-reboot.md` (on lane-d until lane D publishes) |
 | A-Q21: wire in the security modules (§978) | **answered 2026-09-27 (B), in progress.** Fix each one first, then connect it. **`secureboot` done on lane-a 2026-10-01** (§1501): hash-entry `db`/`dbx`/`MOK` verdicts, syscalls 1082-1084, right `ENROLL_SECUREBOOT` granted to init; the granted arm awaits a lane D C fixture. Left: `diskencrypt` (real key derivation), `sealing`/`capsettings`/`secpolicy` (re-key by file identity), `authbroker`. Then syscall doors for `acl`/`fcomment`/`queryable`/`tags` |
+| ignored signals and `posix_spawn` attributes (lane D's request, §1512) | **done on lane-a-wip 2026-10-01, awaiting a boot.** The kernel keeps each process's ignored set for both ABIs (native `SYS_SIGNAL_SET_IGNORED`/`GET_IGNORED`, 1098/1099; the Linux `rt_sigaction`), keeps it across `exec`, passes it on at `fork` and spawn, and discards an ignored signal when sent; a parent ignoring `SIGCHLD` (or with `SA_NOCLDWAIT`) leaves no zombies. A spawned child now starts in its parent's group and session with its mask and ignored set, and `SpawnEx2Args` carries the four `posix_spawn` attributes. Found on the way and fixed: `try_reap` leaked file-mapping references and terminal claims; a thread killed on another CPU left that CPU on freed page tables (SMP). **Open:** such a thread still runs up to a tick after its process is dead (`A-KILLED-THREAD-RUNS-ON-UNTIL-ITS-CPU-SWITCHES`); lane D's libc half |
+| the system image is the root (lanes B and D, §1513) | **done on lane-a-wip 2026-10-01, awaiting a boot.** Just before init the boot pivots the image from `/mnt` to `/` (`Vfs::pivot_root`); `/tmp`, `/proc`, `/dev`, `/sys` stay over it and the in-memory root is unmounted. `/bin/sh`, `/etc` and the image's own `/etc/startup.conf` are what init and its services see; the kernel's default service list and programs go onto the image only where it has none (`requests/a-d-the-image-is-the-root-its-recipe-decides-what-starts-at-boot.md`). **Open:** the boot test's battery still runs before the pivot, with the image at `/mnt` (`A-THE-BOOT-TEST-BATTERY-STILL-SEES-THE-IMAGE-AT-MNT`) |
 | the `fs/` wiring backlog: 340 of 430 modules have no consumer but `/proc` | **not operator-gated, but not a bug either.** dd-950: the unread fields are the shape of a missing userspace consumer. One worked example exists (`gui/desktop/src/power_settings.rs` reads `/proc/brightness`); the other ~339 are a documentation pattern (`provides` where `records` is true) plus real wiring. Sweeping 337 docs on one lane's reading of the architecture is what dd-951 warns against |
 | ~100 remaining unread kernel fields | triage framework recorded (dd-950); the two big clusters are done (power family 12, DRM plane 6). Remaining value is low per-field and the rule matters more than the count |
 
@@ -1346,11 +1348,20 @@ list moved to lane D on 2026-09-22):
 
 - **The operator's answers of 2026-09-27 (B-Q8 through B-Q21), as work.**
   Each is a `design-decisions.md` entry; this is the order lane B takes them.
-  - `[B]` **sbctl: delete `create-keys`, `sign`, `rotate-keys`, `bundle`** (§1049);
+  - `[x]` `[B]` **sbctl: delete `create-keys`, `sign`, `rotate-keys`, `bundle`** (§1049);
     `enroll-keys` and `reset` keep refusing until lane A's key-store door. Then
     each other refusing command -- `unshare`, `nsenter`, `dbus-daemon`,
     `dbus-send`, `dbus-monitor`, `lp`, `lprm`, `eject` -- judged by the same
     rule: kept while what it waits for is planned, else deleted (§1006).
+    Done 2026-10-01. The sbctl half landed with §1049. The other eight, each
+    against the roadmap:
+
+    | command | waits for | planned? | verdict |
+    |---|---|---|---|
+    | `unshare`, `nsenter` | `unshare(2)`/`setns(2)` over real namespaces | yes -- lane A owns namespaces and carries "Container runtime / Docker equivalent"; design.txt: Docker "needs container primitives (namespaces ...). Plan for these" | **kept**, refusing (`requests/b-ad-unshare-and-nsenter-wait-on-unshare-and-setns.md`) |
+    | `lp`, `lprm` | a print system | yes -- roadmap-detailed "Printing": spooler, CUPS or an equivalent, IPP, drivers; printing is lane C's | **kept**: `lp` refuses, `lprm` answers from the spool |
+    | `eject` | removable-media drivers (ATAPI, USB storage) | yes -- design.txt calls FAT for flash drives "a must"; roadmap-detailed lists ISO 9660 optical media; AHCI already recognises ATAPI drives | **kept**, refusing |
+    | `dbus-daemon`, `dbus-send`, `dbus-monitor` | path-bound `AF_UNIX` sockets, then the bus's socket loop | **no** -- D-Bus compatibility is on no roadmap (SlateOS's own named service registry replaces it, design.txt "Service Discovery"), and the socket is requested (`requests/b-ad-a-unix-socket-cannot-be-bound-to-a-path-so-nothing-can-receive-syslog.md`) but scheduled by no lane | **deleted** (`userspace/dbus`; restore with `git checkout 707be9dc9 -- userspace/dbus` the day both exist) |
   - `[x]` `[B]` **The width table** (§1042 and its correction), in
     `userspace/charwidth` -- done 2026-10-01: not gnulib's as first planned
     but generated by `scripts/charwidth-gen.py` from the Unicode 18.0.0 data
@@ -1359,25 +1370,55 @@ list moved to lane D on 2026-09-22):
     (`userspace/charwidth/licenses/`). Lane C is asked for the terminal's
     width query and the drawing rule, lane D for libc's `wcwidth` from the
     same data.
-  - `[B]` **Command names inside other programs, triaged** (§1045): the 148 in
+  - `[x]` `[B]` **Command names inside other programs, triaged** (§1045): the 148 in
     `scripts/multicall-aliases-baseline.txt`, each deleted (a subsystem SlateOS
     lacks) or kept; lane D is asked to install a kept name as the same file.
-  - `[B]` **A catalogue of every program** (§1053): generated from the
+    Lane B's half done 2026-10-01 (five passes): every name is decided, and
+    the 55 still in the ledger are all kept names waiting for lane D's
+    `name = producer` manifest lines
+    (`requests/b-d-stage-every-program-that-builds.md`, batches 1-6).
+  - `[x]` `[B]` **A catalogue of every program** (§1053): generated from the
     workspace, a line each on what it does, a gate that every binary is listed,
     and a new open question -- what SlateOS is for, each answer with what it
     would drop. Lane D is asked to raise `IMG_SIZE` and stage everything that
-    builds.
-  - `[B]` **Shaped random numbers** (§1047): a userspace library (normal,
+    builds. Done 2026-10-01: `programs.md` from `scripts/program-catalogue.py`;
+    the gate is `scripts/test-program-catalogue.py`, which every boot test
+    runs (it names a program that was added without a row, and says to
+    regenerate); the question is `open-questions.md` B-Q23. The image half is
+    lane D's request.
+  - `[x]` `[B]` **Shaped random numbers** (§1047): a userspace library (normal,
     exponential, Poisson, weighted choice) over a caller-given uniform source,
-    and deliberately not reachable from the cryptographic one.
+    and deliberately not reachable from the cryptographic one. Done
+    2026-10-01: `userspace/randdist` -- normal, exponential and Poisson since
+    `26148aa43`; weighted choice added 2026-10-01 as `WeightedIndex` (integer
+    weights, *exact*: a uniform draw below the total by `randrange`'s
+    `below_u64`, proved by enumerating every draw) and `WeightedIndexF64`
+    (fractional weights, rounded, as Python's `random.choices`).
   - `[B]` **The fastpy compiler on SlateOS -- lane B's next large port**
     (§1050, B-Q18). The Rust toolchain and WINE wait behind it.
-  - `[B]` **Genuine Oils, the default shell** (§1043): upstream's
+  - `[-]` `[B]` **Genuine Oils, the default shell** (§1043): upstream's
     `oils-for-unix` C++ cross-compiled with `zig c++` against SlateOS's C
     library, its spec tests run on SlateOS, then made the default `sh` and login
     shell (`init/`, and lane D's recipe by request). Our Rust OSH stays, as a
     discoverable fallback. YSH arrives with it. §305 still caps parity work on
     the Rust OSH.
+    - `[x]` Builds and links (2026-10-01): `scripts/oils-spike/run.sh` --
+      Oils 0.38.0, 0 undefined and 0 duplicate symbols against `libc.a`,
+      staged as `build/spike/oils-for-unix-slateos.elf`; `--without-readline`
+      for now (no GNU readline on SlateOS yet).
+    - `[ ]` On the image and run at boot -- asked of lanes D and A in
+      `requests/b-ad-genuine-oils-staged-and-run-at-boot.md`.
+    - `[x]` A spec-test harness that runs on SlateOS (2026-10-01):
+      `scripts/oils-spec/` -- upstream's Python 2 harness and helpers ported
+      to Python 3, proved identical to the originals over all 223 spec files
+      (3,956 cases) by `validate.sh`; `run_all.py` runs them on the machine
+      and reports only the cells that differ from the same run recorded on
+      Linux (three runs; unstable cells set aside).
+    - `[ ]` Spec tests run on SlateOS -- the tree is
+      `bash scripts/oils-spec/bundle.sh`; staging and a run are asked of lanes
+      D and A in `requests/b-ad-oils-spec-tests-on-the-image.md`.
+    - `[ ]` The switch (the Rust OSH renamed, genuine Oils as `/bin/osh`, `sh`
+      and the login shell); readline.
   - **Ports the operator asked to have recorded** (§1050), with the lane each
     most likely belongs to -- a suggestion for the owning lane to adopt or
     reassign, not an assignment: Mono, .NET on Linux (D, as a language
@@ -5611,7 +5652,7 @@ _Port ext4 first. Don't write a custom filesystem._
   - [x] ctags/etags: code tag generator (8 languages, ctags/etags output, recursive scan, glob exclude, sort modes, 110 tests)
   - [x] journalctl: journal log viewer (JSON-lines, unit/priority/time filters, follow mode, 6 output formats, vacuum, 101 tests)
   - [x] udevd/udevadm: device manager daemon (rule engine, sysfs, persistent naming, control socket, trigger/settle/monitor, 96 tests)
-  - [x] dbus: D-Bus message bus (wire protocol, type system, name ownership, introspection, daemon/send/monitor, 129 tests)
+  - [ ] dbus: D-Bus message bus (wire protocol, type system, name ownership, introspection, daemon/send/monitor, 129 tests) -- **deleted 2026-10-01** (design-decisions §1006, §1049): since 2026-09-15 all three commands refused, because nothing could accept a connection (no path-bound `AF_UNIX` socket), and D-Bus compatibility is on no roadmap -- SlateOS's own named service registry takes its place. The bus logic was real and tested; restore it with `git checkout 707be9dc9 -- userspace/dbus` if both become planned
   - [x] taskset/chrt/ionice/renice: CPU affinity and scheduling tools (CPU mask, RT policies, I/O scheduling, nice values)
   - [x] quota/edquota/repquota/quotaon/quotaoff: disk quota management (user/group quotas, grace periods, filesystem reporting)
   - [x] lvm (pvcreate/vgcreate/lvcreate/pvs/vgs/lvs/+9 more): logical volume management (PV/VG/LV lifecycle, 15 personalities)
@@ -5644,7 +5685,7 @@ _Port ext4 first. Don't write a custom filesystem._
   - [x] systemctl + 8 personalities: service control (unit file parsing, systemd-analyze/cat/cgls/cgtop/escape/path/notify/tmpfiles, 137 tests)
   - [x] getent: NSS database lookup (passwd/group/hosts/services/protocols/networks/shadow)
   - [x] nologin/false/true: login refusal and exit-code shells
-  - [x] flock/lockfile: advisory file locking from shell scripts — flock is now a port of util-linux 2.39.3's (real `flock(2)`, where the old one created `FILE.lock` files; `-w` polls `LOCK_NB` because SlateOS's blocking `flock()` cannot be interrupted, TD-B-FLOCK-WAIT-POLLS; checked by `scripts/flock-diff.sh`); lockfile is its own crate, not yet procmail's (TD-B-LOCKFILE-IS-NOT-PROCMAILS)
+  - [x] flock/lockfile: advisory file locking from shell scripts — flock is now a port of util-linux 2.39.3's (real `flock(2)`, where the old one created `FILE.lock` files; `-w` polls `LOCK_NB` because SlateOS's blocking `flock()` cannot be interrupted, TD-B-FLOCK-WAIT-POLLS; checked by `scripts/flock-diff.sh`); lockfile is procmail 3.24's, ported function by function (2026-10-01; `scripts/lockfile-diff.sh`, 46 cases against Ubuntu's agree, files left behind included)
   - [x] bridge/tc/ebtables: L2 bridge management, traffic control (7 qdisc types, filter matching, ethernet bridge filtering, 170 tests)
   - [x] nsenter: enter namespaces of other processes (8 namespace types, per-ns file overrides)
   - [x] unshare: create new namespaces (CLONE_NEW* flags, user mapping, mount propagation)

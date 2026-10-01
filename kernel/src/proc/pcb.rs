@@ -150,6 +150,28 @@ pub enum ProcessState {
     Zombie,
 }
 
+/// What becomes of a process when it exits, decided at that moment from its
+/// parent's `SIGCHLD` disposition -- Linux's `do_notify_parent`.
+///
+/// A parent that sets `SIGCHLD` to `SIG_IGN`, or gives it `SA_NOCLDWAIT`, has
+/// said it will never `wait` for its children, and POSIX has the kernel reap
+/// them for it rather than leave zombies nobody will collect. Such a child is
+/// still published as a zombie for the instant its exit path takes to release
+/// it, so everything that runs at the zombie transition runs as before; every
+/// `wait` treats it as already gone, so the parent's last wait ends in
+/// `ECHILD` (see [`release_autoreaped`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ExitNotice {
+    /// The default: a zombie for the parent's `wait`, and `SIGCHLD` sent.
+    Zombie,
+    /// The parent ignores `SIGCHLD`: reaped at once, and no signal sent.
+    ReapSilently,
+    /// The parent's `SIGCHLD` has `SA_NOCLDWAIT`: reaped at once, with the
+    /// signal still sent, as Linux does (it is the documented way to be told
+    /// of exits without collecting them).
+    ReapAndSignal,
+}
+
 /// A job-control state change that a parent's `wait()` has not yet consumed.
 ///
 /// Orthogonal to [`ProcessState`], which tracks liveness
@@ -428,6 +450,20 @@ pub struct Process {
     /// the common case; concurrent waiters would race, which POSIX
     /// permits — one wins the reap, the other sees ECHILD/retries).
     pub wait_any_task: Option<TaskId>,
+    /// What becomes of this process at its exit ([`ExitNotice`]): decided
+    /// from the parent's `SIGCHLD` disposition when the last thread leaves,
+    /// and [`ExitNotice::Zombie`] until then.
+    pub exit_notice: ExitNotice,
+    /// Threads of this process killed from elsewhere while some CPU was
+    /// still executing them ([`crate::sched::task_is_on_cpu`]).
+    ///
+    /// `kill_task` only marks such a thread `Dead`; its CPU runs it on, on
+    /// this process's page tables, until its next switch. Recorded by
+    /// `thread::on_thread_exit` before the zombie is published, and handed to
+    /// the teardown, which frees the address space only once every one of
+    /// them is off its CPU ([`free_address_space_when_unused`]). Empty for a
+    /// process whose threads all exited themselves, which is nearly all.
+    pub killed_on_cpu: Vec<TaskId>,
     /// Whether the process has signaled it is fully initialized.
     ///
     /// Set via `SYS_NOTIFY_READY` (508).  The init service manager
@@ -1365,6 +1401,8 @@ impl Process {
             pml4_phys: 0, // Kernel address space for now.
             wait_task: None,
             wait_any_task: None,
+            exit_notice: ExitNotice::Zombie,
+            killed_on_cpu: Vec::new(),
             ready: false,
             vmas: Vec::new(),
             ipc_handles: Vec::new(),
@@ -1825,6 +1863,9 @@ pub fn fork_create(
         pml4_phys: child_pml4,
         wait_task: None,
         wait_any_task: None,
+        // Decided afresh at this child's own exit, from its own parent.
+        exit_notice: ExitNotice::Zombie,
+        killed_on_cpu: Vec::new(),
         ready: false,
         vmas,
         ipc_handles,
@@ -2108,6 +2149,52 @@ pub struct ThreadExitAccounting {
     pub nivcsw: u64,
 }
 
+/// What a parent's `SIGCHLD` disposition makes of a child that exits now --
+/// [`ExitNotice`].
+///
+/// Read from the kernel's record of the parent's signals, which both ABIs
+/// keep current: the native libc through `SYS_SIGNAL_SET_IGNORED`, the Linux
+/// shim at each `rt_sigaction`. A kernel parent (pid 0) is never told and
+/// never asks.
+///
+/// Called with `PROCESS_TABLE` held: it takes only the signal registry's
+/// lock, which never takes this one.
+fn exit_notice_for(parent: ProcessId) -> ExitNotice {
+    use crate::proc::signal;
+    if parent == 0 {
+        ExitNotice::Zombie
+    } else if signal::is_ignored(parent, signal::SIGCHLD) {
+        ExitNotice::ReapSilently
+    } else if signal::nocldwait(parent) {
+        ExitNotice::ReapAndSignal
+    } else {
+        ExitNotice::Zombie
+    }
+}
+
+/// The [`ExitNotice`] decided for `pid` when it became a zombie, or `None`
+/// if there is no such process.
+///
+/// For `thread::on_thread_exit`, which decides from it whether to send the
+/// parent `SIGCHLD` and whether to release the process itself. Nothing else
+/// can release a process whose notice is not [`ExitNotice::Zombie`] -- every
+/// `wait` treats it as gone -- so the answer stays good until that release.
+#[must_use]
+pub fn exit_notice(pid: ProcessId) -> Option<ExitNotice> {
+    PROCESS_TABLE.lock().get(&pid).map(|p| p.exit_notice)
+}
+
+/// Record that `task`, a thread of `pid`, was killed from elsewhere while a
+/// CPU was still executing it -- see [`Process::killed_on_cpu`]. A no-op if
+/// `pid` is gone.
+pub fn note_killed_on_cpu(pid: ProcessId, task: TaskId) {
+    if let Some(proc) = PROCESS_TABLE.lock().get_mut(&pid) {
+        if !proc.killed_on_cpu.contains(&task) {
+            proc.killed_on_cpu.push(task);
+        }
+    }
+}
+
 /// Remove a thread from a process.
 ///
 /// If this was the last thread, the process enters Zombie state.
@@ -2156,6 +2243,14 @@ pub fn remove_thread(
         // Capture the parent before re-borrowing the table so we can
         // wake any `waitpid(-1)` waiter blocked in the parent.
         let parent_of_zombie = proc.parent;
+        // Whether the parent will ever collect this zombie, decided now and
+        // under this lock, so that no `wait` can see the process as a zombie
+        // its parent asked never to be left (`ExitNotice`). The parent's
+        // waiters are still woken below: one whose last child this was must
+        // learn there is nothing left (ECHILD).
+        if parent_of_zombie != pid {
+            proc.exit_notice = exit_notice_for(parent_of_zombie);
+        }
 
         // Reparent living children to init (PID 1).
         //
@@ -3498,6 +3593,27 @@ pub fn set_pgid(caller: ProcessId, target: ProcessId, pgid: ProcessId) -> Kernel
     Ok(())
 }
 
+/// Put `child` in `parent`'s process group and session, as a spawned child
+/// with a parent starts (POSIX `posix_spawn`: the child is in its parent's
+/// group unless `POSIX_SPAWN_SETPGROUP` says otherwise, and its session
+/// unless `POSIX_SPAWN_SETSID` does) -- what [`fork_create`] gives a forked
+/// child. [`create`] makes every process lead a group and session of its
+/// own, which is right only for one the kernel starts.
+///
+/// # Errors
+/// [`KernelError::NoSuchProcess`] if either process is gone.
+pub fn inherit_job(child: ProcessId, parent: ProcessId) -> KernelResult<()> {
+    let mut table = PROCESS_TABLE.lock();
+    let (pgid, sid) = table
+        .get(&parent)
+        .map(|p| (p.pgid, p.sid))
+        .ok_or(KernelError::NoSuchProcess)?;
+    let proc = table.get_mut(&child).ok_or(KernelError::NoSuchProcess)?;
+    proc.pgid = pgid;
+    proc.sid = sid;
+    Ok(())
+}
+
 /// `setsid()` core: make `pid` a new session and process-group leader.
 ///
 /// On success sets `sid = pgid = pid` and returns the new session ID
@@ -4670,6 +4786,7 @@ pub fn jc_report_for_child(
     let mut table = PROCESS_TABLE.lock();
     let proc = table
         .get_mut(&child_pid)
+        .filter(|p| is_collectable(p))
         .ok_or(KernelError::NoSuchProcess)?;
     if proc.parent != parent_pid {
         return Err(KernelError::PermissionDenied);
@@ -4740,6 +4857,7 @@ fn jc_report_matching(
         if proc.parent == parent_pid
             && proc.pid != parent_pid
             && pgid_filter.is_none_or(|g| proc.pgid == g)
+            && is_collectable(proc)
         {
             has_child = true;
             if jc_event_matches(proc.jc_report, want_stopped, want_continued) {
@@ -4871,15 +4989,6 @@ impl ExitInfo {
     }
 }
 
-/// What [`try_reap`] carries out of the `PROCESS_TABLE` lock: the exit status
-/// to hand back, the address-space root to tear down, and the capabilities to
-/// release.
-///
-/// Named rather than written inline because the teardown must happen *outside*
-/// the lock — the tuple exists only to cross that boundary, and a three-element
-/// nested tuple written at the `let` gives no hint which element is which.
-type ReapedProcess = (ExitInfo, u64, Vec<(crate::cap::ResourceType, u64)>);
-
 /// Try to reap (wait for) a zombie child process.
 ///
 /// If the child process `child_pid` is a zombie:
@@ -4894,15 +5003,18 @@ type ReapedProcess = (ExitInfo, u64, Vec<(crate::cap::ResourceType, u64)>);
 ///
 /// The caller must be the parent of the child process (or PID 0 for
 /// kernel-spawned processes).
+///
+/// A zombie its parent asked never to be left ([`ExitNotice`]) is answered as
+/// `NoSuchProcess`: it is its own exit path's to release, not a waiter's.
 pub fn try_reap(parent_pid: ProcessId, child_pid: ProcessId) -> KernelResult<Option<ExitInfo>> {
-    // Phase 1: Under PROCESS_TABLE lock — verify state, extract
-    // process info, and remove from table.  We must extract all
-    // fields needed for cleanup before dropping the lock.
-    let reaped: Option<ReapedProcess>;
-
-    {
+    // Phase 1: Under PROCESS_TABLE lock — verify state, credit the parent,
+    // and take the record out of the table.
+    let (info, removed) = {
         let mut table = PROCESS_TABLE.lock();
         let proc = table.get(&child_pid).ok_or(KernelError::NoSuchProcess)?;
+        if proc.exit_notice != ExitNotice::Zombie {
+            return Err(KernelError::NoSuchProcess);
+        }
 
         // Verify parent relationship.
         if proc.parent != parent_pid {
@@ -4915,7 +5027,6 @@ pub fn try_reap(parent_pid: ProcessId, child_pid: ProcessId) -> KernelResult<Opt
 
         let exit_code = proc.exit_code.unwrap_or(0);
         let crash = proc.crash_info;
-        let pml4_phys = proc.pml4_phys;
 
         // Capture the child's CPU time to credit the parent's children-time
         // accumulator (POSIX cutime/cstime).  The child is a zombie, so all
@@ -4931,14 +5042,7 @@ pub fn try_reap(parent_pid: ProcessId, child_pid: ProcessId) -> KernelResult<Opt
         let child_nv = proc.acct_nvcsw.saturating_add(proc.child_nvcsw);
         let child_niv = proc.acct_nivcsw.saturating_add(proc.child_nivcsw);
 
-        // Extract the IPC handle list before removing.  `initial_fds` needs no
-        // extraction: its entries alias handles already accounted for here, and
-        // it dies with the table entry.
-        let mut removed = table.remove(&child_pid);
-        let ipc_handles = removed
-            .as_mut()
-            .map(|p| core::mem::take(&mut p.ipc_handles))
-            .unwrap_or_default();
+        let removed = table.remove(&child_pid);
 
         // Credit the parent's children-time accumulator now that the child
         // is removed (parent is a distinct table entry).  Absent for a
@@ -4952,19 +5056,73 @@ pub fn try_reap(parent_pid: ProcessId, child_pid: ProcessId) -> KernelResult<Opt
             parent.child_nivcsw = parent.child_nivcsw.saturating_add(child_niv);
         }
 
-        let info = ExitInfo { exit_code, crash };
-        reaped = Some((info, pml4_phys, ipc_handles));
-    }
+        (ExitInfo { exit_code, crash }, removed)
+    };
     // PROCESS_TABLE lock dropped here.
 
-    if let Some((info, pml4_phys, ipc_handles)) = reaped {
-        // Phase 2: Cleanup without holding PROCESS_TABLE lock.
-        // This avoids ABBA deadlocks with exception handler / DMA / IPC locks.
-        destroy_process_resources(child_pid, pml4_phys, &ipc_handles);
-        Ok(Some(info))
-    } else {
-        Ok(None)
+    // Phase 2: Cleanup without holding PROCESS_TABLE lock.
+    // This avoids ABBA deadlocks with exception handler / DMA / IPC locks.
+    if let Some(proc) = removed {
+        finish_process(child_pid, proc);
     }
+    Ok(Some(info))
+}
+
+/// Release a zombie whose parent asked never to collect it -- one whose
+/// [`ExitNotice`] is not [`ExitNotice::Zombie`]. What [`try_reap`] does for a
+/// waiting parent, less the report and less the children-time credit: POSIX
+/// counts only waited-for children in `RUSAGE_CHILDREN`, and Linux credits
+/// none it reaps this way.
+///
+/// Called by `thread::on_thread_exit` once it has done everything the zombie
+/// transition does. Returns `false`, releasing nothing, for a process that is
+/// gone, not a zombie, or a zombie its parent will collect.
+pub fn release_autoreaped(pid: ProcessId) -> bool {
+    let removed = {
+        let mut table = PROCESS_TABLE.lock();
+        match table.get(&pid) {
+            Some(p) if p.state == ProcessState::Zombie && p.exit_notice != ExitNotice::Zombie => {}
+            _ => return false,
+        }
+        table.remove(&pid)
+    };
+    match removed {
+        Some(proc) => {
+            finish_process(pid, proc);
+            true
+        }
+        None => false,
+    }
+}
+
+/// End a process whose record has just left `PROCESS_TABLE`: everything
+/// [`destroy`], [`try_reap`] and [`release_autoreaped`] must each release.
+///
+/// One function because until 2026-10-01 there were two halves of it: `destroy`
+/// released the references the process's file mappings held and its session's
+/// claim on a terminal, and `try_reap` -- the path every process a parent waits
+/// for takes -- did neither. Each such process leaked one reference on every
+/// file it had mapped (a dynamically linked program, one per library), so the
+/// file's last close never came, and a session ended by `wait` kept its
+/// terminal until a recycled pid inherited it.
+///
+/// Must be called with no `PROCESS_TABLE` lock held: every step takes it or a
+/// lock ordered after it.
+fn finish_process(pid: ProcessId, mut proc: Process) {
+    // The open-file lock is ordered after the process table, which is why
+    // this waits until the record is out of it.
+    for vma in &proc.vmas {
+        vma_release_backing(vma);
+    }
+    // A zombie still counted as a member of its session; only now can the
+    // session be empty.
+    ctty_release_if_session_empty(proc.sid);
+    let ipc_handles = core::mem::take(&mut proc.ipc_handles);
+    let killed_on_cpu = core::mem::take(&mut proc.killed_on_cpu);
+    let pml4_phys = proc.pml4_phys;
+    // The rest of the record holds nothing that needs a lock to release.
+    drop(proc);
+    destroy_process_resources(pid, pml4_phys, &ipc_handles, killed_on_cpu);
 }
 
 // NOTE: `try_reap_any` / `try_reap_group` / `reap_any_matching` used to live
@@ -4992,7 +5150,10 @@ pub fn peek_exit(
     child_pid: ProcessId,
 ) -> KernelResult<Option<(ExitInfo, u32)>> {
     let table = PROCESS_TABLE.lock();
-    let proc = table.get(&child_pid).ok_or(KernelError::NoSuchProcess)?;
+    let proc = table
+        .get(&child_pid)
+        .filter(|p| is_collectable(p))
+        .ok_or(KernelError::NoSuchProcess)?;
     if proc.parent != parent_pid {
         return Err(KernelError::PermissionDenied);
     }
@@ -5004,6 +5165,16 @@ pub fn peek_exit(
         crash: proc.crash_info,
     };
     Ok(Some((info, proc.credentials.uid)))
+}
+
+/// Whether a `wait` may see `proc` at all: anything but a zombie its parent
+/// asked never to be left ([`ExitNotice`]), which is already as good as gone.
+///
+/// Every scan of a parent's children consults this, so that the last child
+/// of a parent that ignores `SIGCHLD` ends its `wait` in `ECHILD` rather than
+/// a report -- or, worse, a reap racing the child's own release.
+fn is_collectable(proc: &Process) -> bool {
+    proc.exit_notice == ExitNotice::Zombie
 }
 
 /// Non-destructively inspect *any* zombie child's exit status.
@@ -5042,6 +5213,7 @@ fn peek_exit_matching(
         if proc.parent == parent_pid
             && proc.pid != parent_pid
             && pgid_filter.is_none_or(|g| proc.pgid == g)
+            && is_collectable(proc)
         {
             has_child = true;
             if proc.state == ProcessState::Zombie {
@@ -6518,6 +6690,7 @@ fn destroy_process_resources(
     pid: ProcessId,
     pml4_phys: u64,
     ipc_handles: &[(crate::cap::ResourceType, u64)],
+    killed_on_cpu: Vec<TaskId>,
 ) {
     // Remove exception handler registration (if any).
     crate::proc::exception::remove_handler(pid);
@@ -6557,22 +6730,99 @@ fn destroy_process_resources(
     // during zombie transition, but safe to call again).
     crate::ipc::namespace::detach(pid);
 
-    // Free address space resources.
+    // Free address space resources -- now, or once a thread killed while it
+    // ran has left its CPU.
     if pml4_phys != 0 {
-        // Free DMA buffers allocated for this process before
-        // destroying the address space (DMA buffers are tracked
-        // separately from normal page table entries).
-        crate::mm::dma::free_all_for_process(pml4_phys);
+        free_address_space_when_unused(pml4_phys, killed_on_cpu);
+    }
+}
 
-        // Free the entire user address space (mapped frames,
-        // intermediate page tables, and the PML4 page).
-        // SAFETY: The process is being destroyed — no threads
-        // are running in this address space, and no CPU has
-        // this PML4 loaded in CR3.  All user-half pages were
-        // allocated specifically for this process.
-        unsafe {
-            crate::mm::page_table::destroy_user_address_space(pml4_phys);
+/// Address spaces whose teardown waits on threads killed while they ran:
+/// each PML4 with the threads that may still be executing on it.
+///
+/// Leaf lock: nothing is taken while it is held ([`crate::sched::task_is_on_cpu`]
+/// reads atomics only).
+static DEFERRED_ADDRESS_SPACES: Mutex<Vec<(u64, Vec<TaskId>)>> = Mutex::new(Vec::new());
+
+/// Free process address space `pml4_phys` -- its DMA buffers, mapped frames,
+/// page tables and the PML4 itself -- as soon as no CPU can still be running on
+/// it: now, unless one of `killed_on_cpu` ([`Process::killed_on_cpu`]) is still
+/// on a CPU, in which case it waits in [`DEFERRED_ADDRESS_SPACES`] for
+/// [`free_deferred_address_spaces`].
+///
+/// The wait is for that CPU's next switch, which reloads CR3 because the live
+/// one is no longer the incoming task's (`sched::load_address_space`). Until
+/// then the CPU is still executing the dead thread on these page tables, in
+/// user mode, and freeing them there is the `B-FORKEXEC-BOOT-HANG` failure
+/// from another CPU: the machine's next walk through the freed table decides
+/// what it runs. Freeing nothing until then costs at most one timer tick of
+/// memory. Each call first retries what earlier ones deferred.
+fn free_address_space_when_unused(pml4_phys: u64, killed_on_cpu: Vec<TaskId>) {
+    free_deferred_address_spaces();
+    if killed_on_cpu
+        .iter()
+        .any(|&task| crate::sched::task_is_on_cpu(task))
+    {
+        crate::serial_println!(
+            "[proc] address space {:#x} waits for killed thread(s) {:?} to leave their CPU",
+            pml4_phys,
+            killed_on_cpu
+        );
+        DEFERRED_ADDRESS_SPACES
+            .lock()
+            .push((pml4_phys, killed_on_cpu));
+        return;
+    }
+    free_address_space(pml4_phys);
+}
+
+/// Free every deferred address space ([`DEFERRED_ADDRESS_SPACES`]) whose
+/// killed threads have all left their CPUs. Returns how many it freed.
+///
+/// Called before each new teardown, and by the boot thread's idle loop at the
+/// cadence it reaps dead tasks, so a deferral is bounded by that loop even on a
+/// machine where nothing else exits.
+pub fn free_deferred_address_spaces() -> usize {
+    let ready: Vec<u64> = {
+        let mut deferred = DEFERRED_ADDRESS_SPACES.lock();
+        if deferred.is_empty() {
+            return 0;
         }
+        let mut ready = Vec::new();
+        deferred.retain(|(pml4, threads)| {
+            let still_running = threads
+                .iter()
+                .any(|&task| crate::sched::task_is_on_cpu(task));
+            if !still_running {
+                ready.push(*pml4);
+            }
+            still_running
+        });
+        ready
+    };
+    for &pml4 in &ready {
+        free_address_space(pml4);
+    }
+    ready.len()
+}
+
+/// Free a process address space no CPU can be running on.
+fn free_address_space(pml4_phys: u64) {
+    // Free DMA buffers allocated for this process before destroying the
+    // address space (DMA buffers are tracked separately from normal page
+    // table entries).
+    crate::mm::dma::free_all_for_process(pml4_phys);
+
+    // Free the entire user address space (mapped frames, intermediate page
+    // tables, and the PML4 page).
+    // SAFETY: The process is gone from the process table, every thread of it
+    // has exited, and none can still be executing on these tables: a thread
+    // that exited itself moved onto the kernel PML4 before its process could
+    // be reaped (`sched::detach_address_space`), and one killed while a CPU
+    // ran it was waited for above until that CPU switched away, which
+    // reloads CR3. All user-half pages were allocated for this process.
+    unsafe {
+        crate::mm::page_table::destroy_user_address_space(pml4_phys);
     }
 }
 
@@ -6583,29 +6833,11 @@ fn destroy_process_resources(
 /// process's address space (mapped frames, intermediate page tables,
 /// and the PML4 itself), plus IPC handles and exception registrations.
 pub fn destroy(pid: ProcessId) {
-    // Extract the process from the table.
-    let removed;
-    {
-        let mut table = PROCESS_TABLE.lock();
-        removed = table.remove(&pid);
-    }
-    // PROCESS_TABLE lock dropped — safe to acquire other locks.
-
+    // Extract the process from the table, then release it with the lock
+    // dropped, as every end of a process does (`finish_process`).
+    let removed = PROCESS_TABLE.lock().remove(&pid);
     if let Some(proc) = removed {
-        // Release the backing-file reference each file-backed VMA owned.
-        // The process-table lock is already dropped, so taking the
-        // open-file lock here respects the lock ordering.
-        for vma in &proc.vmas {
-            vma_release_backing(vma);
-        }
-        // A controlling terminal belongs to a session, so it outlives the
-        // session *leader* but not the session itself. Once this process is
-        // gone, if nobody is left in its session the association would leak —
-        // and worse, a later process whose pid recycled into that sid would
-        // inherit a terminal it never acquired. Checked here rather than in
-        // the zombie transition because a zombie is still a session member.
-        ctty_release_if_session_empty(proc.sid);
-        destroy_process_resources(pid, proc.pml4_phys, &proc.ipc_handles);
+        finish_process(pid, proc);
     }
 }
 
@@ -7676,6 +7908,9 @@ pub fn self_test() -> KernelResult<()> {
     test_destroy()?;
     test_reap_zombie()?;
     test_reap_any()?;
+    test_exit_notice()?;
+    test_inherit_job()?;
+    test_deferred_address_space()?;
     test_cpu_time_accounting()?;
     test_io_accounting()?;
     test_job_control_state()?;
@@ -9379,6 +9614,197 @@ fn test_cpu_time_accounting() -> KernelResult<()> {
     destroy(parent);
     serial_println!(
         "[proc]   CPU-time + fault + ctxsw accounting (exited-thread fold + children carry-up): OK"
+    );
+    Ok(())
+}
+
+/// Test: what a parent's `SIGCHLD` disposition makes of a child that exits
+/// ([`ExitNotice`]), and that a zombie its parent will not collect is
+/// invisible to every `wait`: peeked, reaped or scanned for, it is gone, and a
+/// parent with no other child is told `NoChildProcess` (ECHILD).
+/// [`release_autoreaped`] releases only such a zombie.
+fn test_exit_notice() -> KernelResult<()> {
+    use crate::proc::signal;
+    let sigchld_bit = 1u64 << (signal::SIGCHLD - 1);
+    let parent = create("notice-parent", 0);
+    let mut made = alloc::vec![parent];
+    let result = (|| -> KernelResult<()> {
+        let fail = |what: &str| {
+            serial_println!("[proc]   FAIL: {}", what);
+            Err(KernelError::InternalError)
+        };
+        // A child that runs, then exits under the parent's current
+        // disposition. Thread ids from 970 up, clear of the other tests'.
+        let mut next_task = 970u64;
+        let mut exit_child = |made: &mut alloc::vec::Vec<ProcessId>| -> KernelResult<ProcessId> {
+            let child = create("notice-child", parent);
+            made.push(child);
+            set_running(child)?;
+            add_thread(child, next_task)?;
+            let (zombie, _, _) = remove_thread(child, next_task, ThreadExitAccounting::default())?;
+            next_task = next_task.saturating_add(1);
+            if zombie {
+                Ok(child)
+            } else {
+                serial_println!("[proc]   FAIL: the child's last thread did not make it a zombie");
+                Err(KernelError::InternalError)
+            }
+        };
+
+        // SIGCHLD ignored: released at once, sent nothing.
+        signal::set_ignored(parent, sigchld_bit, false)?;
+        let ignored = exit_child(&mut made)?;
+        if exit_notice(ignored) != Some(ExitNotice::ReapSilently) {
+            return fail("SIGCHLD ignored: the notice is not ReapSilently");
+        }
+        if peek_exit(parent, ignored).err() != Some(KernelError::NoSuchProcess)
+            || try_reap(parent, ignored).err() != Some(KernelError::NoSuchProcess)
+            || jc_report_for_child(parent, ignored, true, true, false).err()
+                != Some(KernelError::NoSuchProcess)
+        {
+            return fail("a zombie its parent will not collect was visible to a wait");
+        }
+        if peek_exit_any(parent).err() != Some(KernelError::NoChildProcess)
+            || jc_report_any_child(parent, true, true, false).err()
+                != Some(KernelError::NoChildProcess)
+        {
+            return fail("its parent, with no other child, was not told ECHILD");
+        }
+        if !release_autoreaped(ignored) || state(ignored).is_some() {
+            return fail("release_autoreaped did not release it");
+        }
+
+        // SA_NOCLDWAIT: released too, though the signal is still sent.
+        signal::set_ignored(parent, 0, true)?;
+        let nocldwait = exit_child(&mut made)?;
+        if exit_notice(nocldwait) != Some(ExitNotice::ReapAndSignal) {
+            return fail("SA_NOCLDWAIT: the notice is not ReapAndSignal");
+        }
+        if !release_autoreaped(nocldwait) {
+            return fail("an SA_NOCLDWAIT child was not released");
+        }
+
+        // The default: a zombie for the parent, which release_autoreaped
+        // leaves alone and try_reap collects.
+        signal::set_ignored(parent, 0, false)?;
+        let collected = exit_child(&mut made)?;
+        if exit_notice(collected) != Some(ExitNotice::Zombie) {
+            return fail("the default notice is not Zombie");
+        }
+        if release_autoreaped(collected) || state(collected) != Some(ProcessState::Zombie) {
+            return fail("release_autoreaped released a zombie its parent will collect");
+        }
+        if !matches!(try_reap(parent, collected), Ok(Some(_))) {
+            return fail("an ordinary zombie could not be reaped");
+        }
+
+        // A kernel parent is never told and never asks.
+        if exit_notice_for(0) != ExitNotice::Zombie {
+            return fail("a kernel parent's child is not an ordinary zombie");
+        }
+        Ok(())
+    })();
+    signal::remove(parent);
+    for &pid in made.iter().rev() {
+        destroy(pid);
+    }
+    if result.is_ok() {
+        serial_println!(
+            "[proc]   exit notice: SIGCHLD ignored / SA_NOCLDWAIT reaped at exit, invisible to wait: OK"
+        );
+    }
+    result
+}
+
+/// Test: [`inherit_job`] puts a child in its parent's group and session, and
+/// fails cleanly for a missing parent.
+fn test_inherit_job() -> KernelResult<()> {
+    let leader = create("job-leader", 0);
+    let member = create("job-member", leader);
+    let child = create("job-child", member);
+    let result = (|| -> KernelResult<()> {
+        // `member` is in `leader`'s group and session, as a forked child is.
+        inherit_job(member, leader)?;
+        inherit_job(child, member)?;
+        let (pgid, sid) = (get_pgid(child), get_sid(child));
+        if pgid != Some(leader) || sid != Some(leader) {
+            serial_println!(
+                "[proc]   FAIL: inherit_job: child pgid {:?} sid {:?}, expected {}",
+                pgid,
+                sid,
+                leader
+            );
+            return Err(KernelError::InternalError);
+        }
+        if inherit_job(child, 0xFFFF_FFF0) != Err(KernelError::NoSuchProcess) {
+            serial_println!("[proc]   FAIL: inherit_job from a missing parent did not fail");
+            return Err(KernelError::InternalError);
+        }
+        Ok(())
+    })();
+    destroy(child);
+    destroy(member);
+    destroy(leader);
+    if result.is_ok() {
+        serial_println!("[proc]   inherit_job: a child takes its parent's group and session: OK");
+    }
+    result
+}
+
+/// Test: an address space whose process had a thread killed while a CPU ran
+/// it is freed only once that thread is off every CPU.
+///
+/// Stands the self-test's own task in for the killed thread -- it is, by
+/// definition, on a CPU -- with a throwaway PML4, so the deferral is observed
+/// rather than inferred.
+fn test_deferred_address_space() -> KernelResult<()> {
+    let Ok(pml4) = crate::mm::page_table::alloc_pml4() else {
+        serial_println!("[proc]   deferred address space: SKIP (no PML4 to spare)");
+        return Ok(());
+    };
+    let me = crate::sched::current_task_id();
+    let before = DEFERRED_ADDRESS_SPACES.lock().len();
+    free_address_space_when_unused(pml4, alloc::vec![me]);
+    let deferred = DEFERRED_ADDRESS_SPACES
+        .lock()
+        .iter()
+        .any(|(p, _)| *p == pml4);
+    // Freed only once the stand-in is off its CPU -- which, while this runs,
+    // it never is, so a drain now must keep it.
+    let kept_by_drain = {
+        free_deferred_address_spaces();
+        DEFERRED_ADDRESS_SPACES
+            .lock()
+            .iter()
+            .any(|(p, _)| *p == pml4)
+    };
+    // Now let it go as the killed thread's switch would: name a task no CPU
+    // is running in its place.
+    {
+        let mut queue = DEFERRED_ADDRESS_SPACES.lock();
+        for entry in queue.iter_mut().filter(|(p, _)| *p == pml4) {
+            entry.1 = alloc::vec![u64::MAX - 7];
+        }
+    }
+    let freed = free_deferred_address_spaces();
+    let gone = !DEFERRED_ADDRESS_SPACES
+        .lock()
+        .iter()
+        .any(|(p, _)| *p == pml4);
+    if !(deferred && kept_by_drain && freed >= 1 && gone)
+        || DEFERRED_ADDRESS_SPACES.lock().len() > before
+    {
+        serial_println!(
+            "[proc]   FAIL: deferred address space: deferred {} kept {} freed {} gone {}",
+            deferred,
+            kept_by_drain,
+            freed,
+            gone
+        );
+        return Err(KernelError::InternalError);
+    }
+    serial_println!(
+        "[proc]   address space of a thread killed on a CPU: freed only after it leaves: OK"
     );
     Ok(())
 }

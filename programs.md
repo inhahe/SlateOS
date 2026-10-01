@@ -11,9 +11,9 @@ A new program is recorded here in the commit that creates it (§1053): run
 the script, commit `programs.md` with the program. `--check` fails when the
 two disagree.
 
-**451 programs; 88 on the image, 6 carried inside the kernel.**
+**450 programs; 88 on the image, 6 carried inside the kernel.**
 
-## Userland utilities and services (`userspace/`, lane B) -- 296
+## Userland utilities and services (`userspace/`, lane B) -- 295
 
 | Program | What it does | On image | Crate | Other names |
 |---|---|---|---|---|
@@ -58,7 +58,6 @@ two disagree.
 | `curl` | HTTP/HTTPS Client Utility |  |  |  |
 | `cut` | Print selected parts of lines. | yes | `coreutils` |  |
 | `date` | Print or set the system date and time. | yes | `coreutils` |  |
-| `dbus` | D-Bus Message Bus Daemon |  |  |  |
 | `dc` | Desk calculator (reverse Polish notation) |  |  |  |
 | `dd` | Convert and copy a file, with the operand syntax POSIX gave it in 1970 and the conversions GNU has accumulated since. | yes | `coreutils` |  |
 | `df` | Report file system disk space usage. | yes | `coreutils` |  |
@@ -142,7 +141,7 @@ two disagree.
 | `link` | Call the link function to create a link named FILE2 to FILE1. |  | `coreutils` |  |
 | `ln` | Create links between files. | yes | `coreutils` |  |
 | `localectl` | Locale and keyboard configuration. |  |  |  |
-| `lockfile` | Create semaphore files, as procmail's `lockfile(1)` does. |  |  |  |
+| `lockfile` | Procmail 3.24's `lockfile(1)`, ported. |  |  |  |
 | `logger` | Enter messages into the system log. | yes |  |  |
 | `login` | User login program |  |  |  |
 | `loginctl` | Slate OS session and user management |  |  |  |

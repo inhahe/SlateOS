@@ -731,6 +731,72 @@ pub struct SpawnEx2Args {
     pub cwd_ptr: u64,
     /// Length of the path at `cwd_ptr`, at most `pcb::CWD_MAX_LEN`.
     pub cwd_len: u64,
+    /// `POSIX_SPAWN_SETPGROUP`: 0 leaves the child in its parent's process
+    /// group; 1 puts it in `pgid`. Any other value is `InvalidArgument`.
+    ///
+    /// These six fields are `posix_spawnattr_t`'s flags
+    /// (`requests/d-a-ignored-signals-and-spawn-attributes-need-a-kernel-record.md`),
+    /// applied before the child's first instruction ([`SpawnAttrs`]). Zero in
+    /// all six -- an older caller's missing tail -- asks for nothing, and the
+    /// child starts with its parent's group, session, blocked mask and ignored
+    /// signals. A value with no meaning is refused, never ignored: the kernel
+    /// cannot tell an unset field from one a newer caller set.
+    pub pgid_mode: u64,
+    /// With `pgid_mode` 1, the group: one in the child's session, or 0 for a
+    /// new group the child leads. Must be 0 with `pgid_mode` 0, and a `pid_t`
+    /// (at most `i32::MAX`).
+    pub pgid: u64,
+    /// `POSIX_SPAWN_SETSIGMASK`: 0 gives the child its parent's blocked mask;
+    /// 1 gives it `sigmask`. Any other value is `InvalidArgument`.
+    pub sigmask_set: u64,
+    /// With `sigmask_set` 1, the child's blocked set, bit `n - 1` for signal
+    /// `n`; `SIGKILL` and `SIGSTOP` are dropped from it, as `SYS_SIGNAL_MASK`
+    /// drops them. Must be 0 with `sigmask_set` 0.
+    pub sigmask: u64,
+    /// `POSIX_SPAWN_SETSIGDEF`: signals the child does not inherit as ignored
+    /// (`SYS_SIGNAL_SET_IGNORED`). Any bits.
+    pub sigdefault: u64,
+    /// `POSIX_SPAWN_SETSID`: 1 starts the child in a new session it leads;
+    /// 0 leaves it in its parent's. Any other value is `InvalidArgument`.
+    pub setsid: u64,
+}
+
+/// Read [`SpawnEx2Args`]'s six `posix_spawnattr_t` fields into the
+/// [`SpawnAttrs`] they ask for.
+///
+/// Pure, so the rules can be tested without a ring-3 caller; the syscall
+/// applies it to its kernel copy of the struct, before the image is read.
+///
+/// # Errors
+///
+/// `InvalidArgument` for a mode other than 0 or 1 (`pgid_mode`,
+/// `sigmask_set`, `setsid`), a value set beside a mode of 0 that does not use
+/// it (`pgid`, `sigmask`), or a group that is not a `pid_t`.
+pub fn ex2_attrs(ex2: &SpawnEx2Args) -> KernelResult<SpawnAttrs> {
+    // A `pid_t` group, as glibc's `posix_spawnattr_setpgroup` takes one; a
+    // negative one sign-extended into the field is not a group.
+    const PID_MAX: u64 = 0x7FFF_FFFF;
+    let pgroup = match (ex2.pgid_mode, ex2.pgid) {
+        (0, 0) => None,
+        (1, g) if g <= PID_MAX => Some(g),
+        _ => return Err(KernelError::InvalidArgument),
+    };
+    let sigmask = match (ex2.sigmask_set, ex2.sigmask) {
+        (0, 0) => None,
+        (1, mask) => Some(mask),
+        _ => return Err(KernelError::InvalidArgument),
+    };
+    let setsid = match ex2.setsid {
+        0 => false,
+        1 => true,
+        _ => return Err(KernelError::InvalidArgument),
+    };
+    Ok(SpawnAttrs {
+        pgroup,
+        sigmask,
+        sigdefault: ex2.sigdefault,
+        setsid,
+    })
 }
 
 /// `cap_mode`: the child inherits the parent's entire capability table.
@@ -934,6 +1000,35 @@ pub struct SpawnOptions<'a> {
     pub uid_gid: Option<(u32, u32)>,
 }
 
+/// What a spawn asks of the child's process group, session and signals --
+/// `posix_spawnattr_t`'s `POSIX_SPAWN_SETPGROUP`, `SETSIGMASK`, `SETSIGDEF`
+/// and `SETSID` -- in force before the child's first instruction, which is
+/// the point: done by the parent after the spawn, each would race the child.
+///
+/// Applied over what a spawned child starts with when it has a parent: the
+/// parent's process group and session, the parent's blocked mask, and the
+/// parent's ignored signals ([`start_job_and_signals`]). The default
+/// ([`SpawnAttrs::default`]) asks for nothing and leaves exactly that.
+///
+/// A parameter of [`spawn_process_with_attrs`] rather than a field of
+/// [`SpawnOptions`], for [`CapInherit`]'s reason: the struct literal at ~170
+/// sites, none of which asks for any of this.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct SpawnAttrs {
+    /// `POSIX_SPAWN_SETPGROUP`: the child joins group `g`, which must exist
+    /// in its session, or with `Some(0)` leads a new group of its own.
+    pub pgroup: Option<ProcessId>,
+    /// `POSIX_SPAWN_SETSIGMASK`: the child's blocked set (bit `n - 1` for
+    /// signal `n`), in place of the parent's.
+    pub sigmask: Option<u64>,
+    /// `POSIX_SPAWN_SETSIGDEF`: signals the child does not inherit as
+    /// ignored. (A caught signal needs no reset: a new image has no handlers.)
+    pub sigdefault: u64,
+    /// `POSIX_SPAWN_SETSID`: the child starts a new session, with no
+    /// controlling terminal, and leads it.
+    pub setsid: bool,
+}
+
 impl<'a> SpawnOptions<'a> {
     /// Create default spawn options with the given name.
     #[must_use]
@@ -1116,7 +1211,14 @@ pub(crate) struct UserEntryInfo {
 ///
 /// [`BUDDY_MAX_ORDER`]: crate::mm::frame::BUDDY_MAX_ORDER
 pub fn spawn_process(elf_data: &[u8], options: &SpawnOptions<'_>) -> KernelResult<SpawnResult> {
-    spawn_process_inner(elf_data, options, None, &[], CapInherit::All)
+    spawn_process_inner(
+        elf_data,
+        options,
+        None,
+        &[],
+        CapInherit::All,
+        SpawnAttrs::default(),
+    )
 }
 
 /// Spawn a process, redirecting entries in its kernel-side Linux `fd` table
@@ -1146,7 +1248,14 @@ pub fn spawn_process_with_redirects(
     options: &SpawnOptions<'_>,
     linux_fd_redirects: &[(i32, u64, u32)],
 ) -> KernelResult<SpawnResult> {
-    spawn_process_inner(elf_data, options, None, linux_fd_redirects, CapInherit::All)
+    spawn_process_inner(
+        elf_data,
+        options,
+        None,
+        linux_fd_redirects,
+        CapInherit::All,
+        SpawnAttrs::default(),
+    )
 }
 
 /// Spawn a process, forcing it to run under an explicit syscall ABI
@@ -1173,7 +1282,14 @@ pub fn spawn_process_with_abi(
     options: &SpawnOptions<'_>,
     abi: pcb::AbiMode,
 ) -> KernelResult<SpawnResult> {
-    spawn_process_inner(elf_data, options, Some(abi), &[], CapInherit::All)
+    spawn_process_inner(
+        elf_data,
+        options,
+        Some(abi),
+        &[],
+        CapInherit::All,
+        SpawnAttrs::default(),
+    )
 }
 
 /// Spawn a process under an explicit ABI *and* with `linux_fd` redirects applied
@@ -1198,6 +1314,7 @@ pub fn spawn_process_with_abi_and_redirects(
         Some(abi),
         linux_fd_redirects,
         CapInherit::All,
+        SpawnAttrs::default(),
     )
 }
 
@@ -1225,7 +1342,71 @@ pub fn spawn_process_with_caps(
     options: &SpawnOptions<'_>,
     cap_inherit: CapInherit<'_>,
 ) -> KernelResult<SpawnResult> {
-    spawn_process_inner(elf_data, options, None, &[], cap_inherit)
+    spawn_process_with_attrs(elf_data, options, cap_inherit, SpawnAttrs::default())
+}
+
+/// [`spawn_process_with_caps`], with the child's process group, session and
+/// signal state as `attrs` asks ([`SpawnAttrs`]) -- the whole of what
+/// `SYS_PROCESS_SPAWN_EX2` can say.
+///
+/// # Errors
+///
+/// Those of [`spawn_process_with_caps`], plus those of the attributes, in
+/// the order `posix_spawn` applies them (glibc's `__spawni_child`): a new
+/// session first, then the group. `NotPermitted` (`EPERM`) if the child
+/// cannot start a session (it already leads a group: a kernel-spawned child
+/// does) or cannot take the group -- a session leader's is fixed, and one
+/// joined must already exist in the child's session. The child is destroyed
+/// and no process is left behind.
+pub fn spawn_process_with_attrs(
+    elf_data: &[u8],
+    options: &SpawnOptions<'_>,
+    cap_inherit: CapInherit<'_>,
+    attrs: SpawnAttrs,
+) -> KernelResult<SpawnResult> {
+    spawn_process_inner(elf_data, options, None, &[], cap_inherit, attrs)
+}
+
+/// Give a just-created child its process group, session and signal state,
+/// as `posix_spawn` promises them before its first instruction: its parent's
+/// group, session, blocked mask and ignored signals -- what a fork and an
+/// exec would have left -- then whatever `attrs` changes.
+///
+/// A kernel-spawned child (`parent` 0) has no parent to inherit from: it
+/// leads its own group and session, as `pcb::create` made it, and starts
+/// with no signal state but what `attrs` sets.
+///
+/// Until 2026-10-01 a spawned child inherited none of this. It led a session
+/// of its own -- so it had no controlling terminal, and a `^C` sent to its
+/// parent's foreground group missed it -- and started with nothing blocked or
+/// ignored, so `nohup` protected nothing it started.
+fn start_job_and_signals(pid: ProcessId, parent: ProcessId, attrs: SpawnAttrs) -> KernelResult<()> {
+    if parent != 0 {
+        pcb::inherit_job(pid, parent)?;
+    }
+    crate::proc::signal::start_spawned(parent, pid, attrs.sigmask, attrs.sigdefault);
+    // The order `posix_spawn` applies them in (glibc's and musl's child):
+    // a new session, then the group -- so asking for both fails, a session
+    // leader's group being fixed, as it does there.
+    //
+    // `NotPermitted`, not the `PermissionDenied` the two cores answer: that
+    // means EACCES to a caller, and posix_spawn's answer for both is EPERM.
+    let eperm = |e: KernelError| {
+        if e == KernelError::PermissionDenied {
+            KernelError::NotPermitted
+        } else {
+            e
+        }
+    };
+    if attrs.setsid {
+        pcb::setsid(pid).map_err(eperm)?;
+    }
+    if let Some(group) = attrs.pgroup {
+        // 0 is the child's own pid: a new group, led by the child.
+        let group = if group == 0 { pid } else { group };
+        pcb::set_pgid(pid, pid, group).map_err(eperm)?;
+    }
+    Ok(())
 }
 
 fn spawn_process_inner(
@@ -1238,6 +1419,9 @@ fn spawn_process_inner(
     // How much of `options.parent`'s capability table the child receives.  An
     // argument rather than a `SpawnOptions` field: see [`CapInherit`].
     cap_inherit: CapInherit<'_>,
+    // The child's process group, session and signals, where not its parent's.
+    // An argument for the same reason: see [`SpawnAttrs`].
+    attrs: SpawnAttrs,
 ) -> KernelResult<SpawnResult> {
     // Start of the span recorded into binfmt on success below.
     let elf_load_start_ns = crate::hrtimer::now_ns();
@@ -1987,6 +2171,21 @@ fn spawn_process_inner(
                 e,
             );
         }
+    }
+
+    // Step 5f: the child's process group, session and signal state -- its
+    // parent's, then whatever the spawn's attributes change. Before the
+    // thread exists, so that all of it holds from the child's first
+    // instruction; an attribute that cannot be had fails the spawn rather
+    // than starting a child that is not what was asked for.
+    if let Err(e) = start_job_and_signals(pid, options.parent, attrs) {
+        serial_println!(
+            "[spawn] Process {}: process group/session/signals refused: {:?}",
+            pid,
+            e,
+        );
+        pcb::destroy(pid);
+        return Err(e);
     }
 
     // Step 6: Create the entry info struct (heap-allocated, freed by
@@ -3178,6 +3377,9 @@ pub fn self_test() -> KernelResult<()> {
     test_spawn_with_argv_envp()?;
     test_spawn_with_cwd()?;
     test_spawn_inherits_cwd_and_umask()?;
+    test_ex2_attrs()?;
+    test_spawn_job_and_signals()?;
+    test_spawn_child_of_sigchld_ignorer_is_reaped()?;
     test_spawn_with_uid_gid()?;
     test_spawn_args_one_shot()?;
     test_spawn_ex_args_layout()?;
@@ -34433,13 +34635,14 @@ fn test_ex2_copy_plan() -> KernelResult<()> {
     // The constants must describe the struct they gate, or every case below is
     // testing the wrong boundary.  `SPAWN_EX2_MIN_SIZE` is "version 1 plus the
     // size field"; the struct adds exactly `cap_mode`, `cap_ptr`, `cap_count`,
-    // `cwd_ptr` and `cwd_len`.
-    if known != SPAWN_EX2_MIN_SIZE + 5 * 8 {
+    // `cwd_ptr`, `cwd_len`, and the six `posix_spawnattr_t` fields
+    // (`pgid_mode`, `pgid`, `sigmask_set`, `sigmask`, `sigdefault`, `setsid`).
+    if known != SPAWN_EX2_MIN_SIZE + 11 * 8 {
         serial_println!(
             "[spawn]   FAIL: SpawnEx2Args is {} bytes but SPAWN_EX2_MIN_SIZE implies {} \
              — a field was added without revisiting the minimum",
             known,
-            SPAWN_EX2_MIN_SIZE + 5 * 8
+            SPAWN_EX2_MIN_SIZE + 11 * 8
         );
         return Err(KernelError::InternalError);
     }
@@ -35760,6 +35963,333 @@ fn test_spawn_inherits_cwd_and_umask() -> KernelResult<()> {
     if result.is_ok() {
         serial_println!(
             "[spawn]   Spawned child inherits cwd and umask; an explicit cwd wins; no parent keeps defaults: OK"
+        );
+    }
+    result
+}
+
+/// Test: [`ex2_attrs`] -- `SpawnEx2Args`'s six `posix_spawnattr_t` fields
+/// read into [`SpawnAttrs`], every value with no meaning refused.
+fn test_ex2_attrs() -> KernelResult<()> {
+    // SAFETY: `SpawnEx2Args` is `#[repr(C)]` and every field is a `u64`, so
+    // all-zero is a valid value -- the one the ABI defines as "ask for
+    // nothing".
+    let zero: SpawnEx2Args = unsafe { core::mem::zeroed() };
+    let with = |f: &dyn Fn(&mut SpawnEx2Args)| {
+        let mut a = zero;
+        f(&mut a);
+        ex2_attrs(&a)
+    };
+    let cases: [(&str, KernelResult<SpawnAttrs>, KernelResult<SpawnAttrs>); 12] = [
+        (
+            "all zero asks for nothing",
+            ex2_attrs(&zero),
+            Ok(SpawnAttrs::default()),
+        ),
+        (
+            "pgid_mode 1, pgid 0: a new group",
+            with(&|a| a.pgid_mode = 1),
+            Ok(SpawnAttrs {
+                pgroup: Some(0),
+                ..SpawnAttrs::default()
+            }),
+        ),
+        (
+            "pgid_mode 1, pgid 7: group 7",
+            with(&|a| {
+                a.pgid_mode = 1;
+                a.pgid = 7;
+            }),
+            Ok(SpawnAttrs {
+                pgroup: Some(7),
+                ..SpawnAttrs::default()
+            }),
+        ),
+        (
+            "a pgid without its mode is refused",
+            with(&|a| a.pgid = 7),
+            Err(KernelError::InvalidArgument),
+        ),
+        (
+            "a pgid that is not a pid_t is refused",
+            with(&|a| {
+                a.pgid_mode = 1;
+                a.pgid = 0x8000_0000;
+            }),
+            Err(KernelError::InvalidArgument),
+        ),
+        (
+            "pgid_mode 2 is refused",
+            with(&|a| a.pgid_mode = 2),
+            Err(KernelError::InvalidArgument),
+        ),
+        (
+            "sigmask_set 1: that mask, 0 included",
+            with(&|a| a.sigmask_set = 1),
+            Ok(SpawnAttrs {
+                sigmask: Some(0),
+                ..SpawnAttrs::default()
+            }),
+        ),
+        (
+            "a sigmask without its flag is refused",
+            with(&|a| a.sigmask = 1),
+            Err(KernelError::InvalidArgument),
+        ),
+        (
+            "sigmask_set 2 is refused",
+            with(&|a| a.sigmask_set = 2),
+            Err(KernelError::InvalidArgument),
+        ),
+        (
+            "sigdefault takes any bits",
+            with(&|a| a.sigdefault = u64::MAX),
+            Ok(SpawnAttrs {
+                sigdefault: u64::MAX,
+                ..SpawnAttrs::default()
+            }),
+        ),
+        (
+            "setsid 1",
+            with(&|a| a.setsid = 1),
+            Ok(SpawnAttrs {
+                setsid: true,
+                ..SpawnAttrs::default()
+            }),
+        ),
+        (
+            "setsid 2 is refused",
+            with(&|a| a.setsid = 2),
+            Err(KernelError::InvalidArgument),
+        ),
+    ];
+    for (what, got, want) in cases {
+        if got != want {
+            serial_println!(
+                "[spawn]   FAIL: ex2_attrs: {}: got {:?}, want {:?}",
+                what,
+                got,
+                want
+            );
+            return Err(KernelError::InternalError);
+        }
+    }
+    serial_println!("[spawn]   SpawnEx2Args process group / session / signal fields: OK");
+    Ok(())
+}
+
+/// Test: a spawned child with a parent starts in its parent's process group
+/// and session, with its parent's blocked mask and ignored signals, and
+/// [`SpawnAttrs`] changes each before the child runs; an attribute that
+/// cannot be had fails the spawn with `NotPermitted` and leaves no process.
+///
+/// The parent is a process record with no thread (`pcb::create`): a spawn
+/// needs nothing more of its parent, and a parent that never runs cannot
+/// change anything under the test.
+fn test_spawn_job_and_signals() -> KernelResult<()> {
+    use crate::proc::signal;
+    let elf_data = elf::build_test_elf_public();
+    let parent = pcb::create("spawn-job-parent", 0);
+    let bit = |sig: u32| signal::signal_bit(sig).unwrap_or(0);
+    let (sighup, sigint, sigquit, sigusr1) = (bit(1), bit(2), bit(3), bit(10));
+    let mut spawned: alloc::vec::Vec<(ProcessId, TaskId)> = alloc::vec::Vec::new();
+
+    let result = (|| -> KernelResult<()> {
+        let fail = |what: &str| {
+            serial_println!("[spawn]   FAIL: {}", what);
+            Err(KernelError::InternalError)
+        };
+        signal::set_ignored(parent, sighup | sigquit, false)?;
+        let _ = signal::set_blocked(parent, sigint);
+        let mut spawn_with = |name: &'static str, attrs: SpawnAttrs| {
+            let r = spawn_process_with_attrs(
+                &elf_data,
+                &SpawnOptions::new(name).parent(parent),
+                CapInherit::All,
+                attrs,
+            );
+            if let Ok(ok) = &r {
+                spawned.push((ok.pid, ok.task_id));
+            }
+            r
+        };
+
+        // Nothing asked: the parent's group, session, mask and ignored set.
+        let plain = spawn_with("spawn-job-plain", SpawnAttrs::default())?.pid;
+        if pcb::get_pgid(plain) != Some(parent) || pcb::get_sid(plain) != Some(parent) {
+            return fail("a spawned child is not in its parent's group and session");
+        }
+        if signal::blocked(plain) != sigint || signal::ignored(plain) != sighup | sigquit {
+            return fail("a spawned child does not have its parent's mask and ignored set");
+        }
+
+        // Each attribute.
+        let attrs = SpawnAttrs {
+            pgroup: Some(0),
+            sigmask: Some(sigusr1),
+            sigdefault: sigquit,
+            setsid: false,
+        };
+        let grouped = spawn_with("spawn-job-grouped", attrs)?.pid;
+        if pcb::get_pgid(grouped) != Some(grouped) || pcb::get_sid(grouped) != Some(parent) {
+            return fail("POSIX_SPAWN_SETPGROUP 0 did not give the child a new group");
+        }
+        if signal::blocked(grouped) != sigusr1 || signal::ignored(grouped) != sighup {
+            return fail("SETSIGMASK / SETSIGDEF were not applied");
+        }
+        let joined = spawn_with(
+            "spawn-job-joined",
+            SpawnAttrs {
+                pgroup: Some(grouped),
+                ..SpawnAttrs::default()
+            },
+        )?
+        .pid;
+        if pcb::get_pgid(joined) != Some(grouped) {
+            return fail("POSIX_SPAWN_SETPGROUP did not join an existing group");
+        }
+        let leader = spawn_with(
+            "spawn-job-session",
+            SpawnAttrs {
+                setsid: true,
+                ..SpawnAttrs::default()
+            },
+        )?
+        .pid;
+        if pcb::get_sid(leader) != Some(leader) || pcb::get_pgid(leader) != Some(leader) {
+            return fail("POSIX_SPAWN_SETSID did not make the child a session leader");
+        }
+
+        // What cannot be had fails the spawn, and leaves nothing behind.
+        let before = pcb::count();
+        let refused = [
+            (
+                "a new session and a group",
+                SpawnAttrs {
+                    setsid: true,
+                    pgroup: Some(0),
+                    ..SpawnAttrs::default()
+                },
+            ),
+            (
+                "a group that does not exist",
+                SpawnAttrs {
+                    pgroup: Some(0x7FFF_FFF0),
+                    ..SpawnAttrs::default()
+                },
+            ),
+        ];
+        for (what, attrs) in refused {
+            if spawn_with("spawn-job-refused", attrs).err() != Some(KernelError::NotPermitted) {
+                serial_println!("[spawn]   FAIL: {} was not refused with NotPermitted", what);
+                return Err(KernelError::InternalError);
+            }
+        }
+        if pcb::count() != before {
+            return fail("a refused spawn left a process behind");
+        }
+        Ok(())
+    })();
+
+    crate::sched::yield_now();
+    crate::sched::yield_now();
+    crate::sched::reap_dead_tasks();
+    for &(pid, task) in spawned.iter().rev() {
+        teardown_fixture(pid, task);
+    }
+    crate::proc::signal::remove(parent);
+    pcb::destroy(parent);
+    if result.is_ok() {
+        serial_println!(
+            "[spawn]   Spawned child: parent's group, session, mask, ignored set; attributes applied: OK"
+        );
+    }
+    result
+}
+
+/// Test: the child of a parent that ignores `SIGCHLD` is reaped by its own
+/// exit -- it never waits as a zombie, and the parent is sent nothing; with
+/// `SA_NOCLDWAIT` it is reaped and the parent still told; with neither it
+/// waits as a zombie for the parent.
+///
+/// End to end through a real exit: the child runs a program that exits at
+/// once, so the release under test is the one `thread::on_thread_exit`
+/// performs in the exiting thread's own context.
+fn test_spawn_child_of_sigchld_ignorer_is_reaped() -> KernelResult<()> {
+    use crate::proc::signal;
+    let elf_data = elf::build_test_elf_public();
+    let parent = pcb::create("autoreap-parent", 0);
+    let sigchld = signal::signal_bit(signal::SIGCHLD).unwrap_or(0);
+    // A trampoline, so that a SIGCHLD the parent is sent is kept pending
+    // where the test can see it, rather than dropped as SIGCHLD's default.
+    signal::register_trampoline(parent, 0x4000);
+    let mut spawned: alloc::vec::Vec<(ProcessId, TaskId)> = alloc::vec::Vec::new();
+
+    // Spawn a child of `parent` and wait for its exit to settle: gone, or a
+    // zombie.
+    let mut run_child =
+        |name: &'static str| -> KernelResult<(ProcessId, Option<pcb::ProcessState>)> {
+            let child = spawn_process(&elf_data, &SpawnOptions::new(name).parent(parent))?;
+            spawned.push((child.pid, child.task_id));
+            for _ in 0..2000 {
+                match pcb::state(child.pid) {
+                    None | Some(pcb::ProcessState::Zombie) => break,
+                    _ => crate::sched::yield_now(),
+                }
+            }
+            Ok((child.pid, pcb::state(child.pid)))
+        };
+
+    let result = (|| -> KernelResult<()> {
+        let fail = |what: &str| {
+            serial_println!("[spawn]   FAIL: {}", what);
+            Err(KernelError::InternalError)
+        };
+
+        signal::set_ignored(parent, sigchld, false)?;
+        let (_, ignored) = run_child("autoreap-ignored")?;
+        if ignored.is_some() {
+            return fail("the child of a parent ignoring SIGCHLD was left behind");
+        }
+        if signal::pending(parent) & sigchld != 0 {
+            return fail("a parent ignoring SIGCHLD was sent it");
+        }
+
+        signal::set_ignored(parent, 0, true)?;
+        let (_, nocldwait) = run_child("autoreap-nocldwait")?;
+        if nocldwait.is_some() {
+            return fail("the child of a parent with SA_NOCLDWAIT was left behind");
+        }
+        if signal::pending(parent) & sigchld == 0 {
+            return fail("a parent with SA_NOCLDWAIT was not sent SIGCHLD");
+        }
+        signal::clear_pending(parent, sigchld);
+
+        signal::set_ignored(parent, 0, false)?;
+        let (collected, zombie) = run_child("autoreap-default")?;
+        if zombie != Some(pcb::ProcessState::Zombie) {
+            return fail("an ordinary child did not wait for its parent as a zombie");
+        }
+        if !matches!(pcb::try_reap(parent, collected), Ok(Some(_))) {
+            return fail("the ordinary child could not be reaped by its parent");
+        }
+        Ok(())
+    })();
+
+    crate::sched::yield_now();
+    crate::sched::reap_dead_tasks();
+    for &(pid, task) in spawned.iter().rev() {
+        // Already gone for all three when the test passed; this is for a
+        // failure part-way.
+        if pcb::state(pid).is_some() {
+            teardown_fixture(pid, task);
+        }
+    }
+    signal::remove(parent);
+    pcb::destroy(parent);
+    if result.is_ok() {
+        serial_println!(
+            "[spawn]   SIGCHLD ignored / SA_NOCLDWAIT: the child is reaped at exit; otherwise a zombie: OK"
         );
     }
     result

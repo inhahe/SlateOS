@@ -759,6 +759,16 @@ fn outcome_to_result(task_id: TaskId, outcome: ThreadOutcome) -> KernelResult<i6
 /// thread was not registered (e.g., a bare kernel task not owned by any
 /// process).
 pub fn on_thread_exit(task_id: TaskId) -> Option<ProcessId> {
+    // A thread killed from elsewhere (`kill_process_threads`, `kill_thread`)
+    // has only been *marked* dead: a CPU that was running it runs it on, on
+    // its process's page tables, until that CPU next switches. Asked now,
+    // before anything below can publish the process as reapable, so that its
+    // teardown knows to wait for that switch before freeing those tables
+    // (`pcb::free_address_space_when_unused`). The current task is the one
+    // case that needs no wait: it moves itself off them just below.
+    let killed_while_running =
+        task_id != sched::current_task_id() && sched::task_is_on_cpu(task_id);
+
     // Linux CLONE_CHILD_CLEARTID hook: if this task was created via
     // clone(CLONE_CHILD_CLEARTID, ...) and registered a `ctid`
     // address, zero it in user space and wake one futex waiter so
@@ -816,6 +826,11 @@ pub fn on_thread_exit(task_id: TaskId) -> Option<ProcessId> {
     // This prevents dangling registrations when a driver process crashes.
     crate::ioapic::release_irqs_for_task(task_id);
 
+    // Before `remove_thread` can make the process reapable (see the top).
+    if killed_while_running {
+        pcb::note_killed_on_cpu(pid, task_id);
+    }
+
     // Capture the exiting thread's accumulated counters while its Task is
     // still alive in the scheduler — `remove_thread` folds them into the
     // owning process's accumulators so they survive the Task's destruction.
@@ -871,6 +886,12 @@ pub fn on_thread_exit(task_id: TaskId) -> Option<ProcessId> {
                     crate::sched::wake(waiter);
                 }
 
+                // Whether the parent will collect this zombie, decided by
+                // `remove_thread` from its `SIGCHLD` disposition: a parent that
+                // ignores `SIGCHLD` is sent nothing and the process is
+                // released below; one with `SA_NOCLDWAIT` is still sent it.
+                let notice = pcb::exit_notice(pid).unwrap_or(pcb::ExitNotice::Zombie);
+
                 // Post SIGCHLD to the parent. This is distinct from the
                 // wait4() wakeups above (which target a thread parked in
                 // wait4()): SIGCHLD drives the *signal* path, used by a
@@ -880,7 +901,7 @@ pub fn on_thread_exit(task_id: TaskId) -> Option<ProcessId> {
                 // reaping with waitpid(WNOHANG) only after the signal wakes
                 // it.  Without this the parent livelocks in sigsuspend.
                 if let Some(parent) = pcb::parent(pid) {
-                    if parent != 0 {
+                    if parent != 0 && notice != pcb::ExitNotice::ReapSilently {
                         // How the child ended, and who it was: `si_status`
                         // and `si_uid` were 0 until 2026-10-01, so a handler
                         // could not tell an exit from a kill
@@ -921,6 +942,20 @@ pub fn on_thread_exit(task_id: TaskId) -> Option<ProcessId> {
                 // and holds stopped jobs (POSIX "Orphaned Process Group").
                 for pgrp in &guarded_pgrps {
                     crate::syscall::handlers::kill_orphaned_pgrp(*pgrp);
+                }
+
+                // A zombie its parent asked never to be left is released now,
+                // last, once everything above that reads its record is done.
+                // No `wait` could have taken it first: every one treats it as
+                // already gone. Its address space is freed now too, or -- if a
+                // thread of it was killed while a CPU still ran it -- as soon
+                // as that CPU has switched away.
+                if notice != pcb::ExitNotice::Zombie && pcb::release_autoreaped(pid) {
+                    serial_println!(
+                        "[thread] Process {} released at exit: its parent does not wait \
+                         for its children",
+                        pid
+                    );
                 }
             }
         }

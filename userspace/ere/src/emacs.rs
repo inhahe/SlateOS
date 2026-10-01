@@ -38,8 +38,11 @@
 //! character. A backslash is a member like any other. A `-` that is neither
 //! the first member nor the last is an error, as it is in glibc, where POSIX
 //! leaves it undefined. The bracket is rebuilt for the ERE parser rather than
-//! copied, since that parser does read `[:` as a class and a backslash as an
-//! escape.
+//! copied, since that parser reads `[:` as a class. The rebuilt bracket quotes
+//! `[`, `]`, `\`, `-` and `^` with a backslash, and is compiled with
+//! [`Syntax::backslash_escape_in_lists`] so that the parser reads a quote
+//! there -- the one bracket syntax in which every member can be written in
+//! any position, which is what a rebuild needs.
 //!
 //! A range written backwards, `[z-a]`, is **empty** rather than an error:
 //! `RE_SYNTAX_EMACS` lacks the `RE_NO_EMPTY_RANGES` bit that every POSIX syntax
@@ -61,9 +64,12 @@ use crate::ch::{BStr, Ch, Str, chars};
 use crate::engine::{EreError, RegCode, Regex, Syntax};
 
 /// The ERE dialect a translation is compiled in: POSIX's, except that a
-/// backwards range is empty. See the module docs.
+/// backwards range is empty, and that a backslash in a bracket quotes the
+/// character after it -- which is how [`member`] writes the four characters
+/// that are special there. See the module docs.
 const SYNTAX: Syntax = Syntax {
     empty_ranges: true,
+    backslash_escape_in_lists: true,
     ..Syntax::POSIX_EXTENDED
 };
 
@@ -213,8 +219,9 @@ pub fn to_ere(pattern: BStr<'_>) -> Result<Str, EreError> {
 }
 
 /// Emit `c` as a literal for the ERE parser: escaped if ERE would read it as an
-/// operator, bare otherwise. Bare matters for letters, which the ERE parser
-/// would read as `\n`, `\t` and so on if they were escaped.
+/// operator, bare otherwise. Bare matters for letters and digits, which the
+/// ERE parser would read as the GNU operators (`\w`, `\b`, ...) and as
+/// backreferences if they were escaped.
 fn literal(c: Ch, out: &mut Str) {
     match c.as_ascii() {
         Some(
@@ -228,8 +235,9 @@ fn literal(c: Ch, out: &mut Str) {
     }
 }
 
-/// Emit `c` as a member of an ERE bracket: the four characters that parser
-/// treats specially there are escaped, as its bracket reader allows.
+/// Emit `c` as a member of an ERE bracket: the characters that parser treats
+/// specially there are quoted with a backslash, which [`SYNTAX`]'s
+/// [`Syntax::backslash_escape_in_lists`] makes it read as quoting.
 fn member(c: Ch, out: &mut Str) {
     match c.as_ascii() {
         Some(m @ ('[' | ']' | '\\' | '-' | '^')) => {

@@ -371,6 +371,8 @@ impl VirtioBlkDevice {
             core::ptr::write_bytes(dma_virt, 0, frame::FRAME_SIZE);
         }
 
+        // DRIVER_OK and its queue set up: the function is this driver's.
+        pci::bind_driver(pci_dev.address, "virtio-blk");
         Ok(Self {
             transport,
             queue,

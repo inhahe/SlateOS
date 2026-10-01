@@ -28,8 +28,11 @@
 //!   inside of a `\(…\)` / either side of a `\|`). `a^b` and `a$b` match those
 //!   characters literally, and famously match nothing else.
 //! * **Backslash is *not* special inside `[...]`.** `[\]` is a bracket holding
-//!   a backslash. The ERE engine this hands off to does honour escapes there,
-//!   so a backslash copied out of a bracket expression is doubled on the way.
+//!   a backslash, and the ERE engine this hands off to reads it the same way,
+//!   so a bracket expression is copied as written. (Until 2026-10-01 the engine
+//!   read escapes there and the copy doubled every backslash to cancel them;
+//!   the engine was wrong for ERE too, which is why it is the engine that
+//!   changed.)
 //! * **Backreferences (`\1`–`\9`) pass through unchanged.** [`crate::engine`]
 //!   reads them the same way, so the translation is the identity and the two
 //!   dialects cannot come to differ about what one means. A pattern holding one
@@ -285,18 +288,15 @@ fn copy_interval(cs: &[Ch], i: usize, out: &mut Str) -> Result<usize, EreError> 
     }
 }
 
-/// Copy a bracket expression starting at the `[` at `i`, verbatim except that a
-/// backslash inside it is doubled. Returns the index just past the closing `]`.
+/// Copy a bracket expression starting at the `[` at `i`, verbatim. Returns the
+/// index just past the closing `]`.
 ///
-/// The doubling is the whole reason this is not a plain copy. POSIX says
-/// backslash is an ordinary character inside a bracket expression — `[\]` holds
-/// one — but [`crate::engine`] reads escapes there, so an undoubled backslash
-/// would make `[\]]` a bracket holding `]` instead of a bracket holding `\`
-/// followed by a literal `]`.
-///
-/// `]` as the first member (`[]abc]`, `[^]abc]`) is a literal, and `[:alpha:]`,
-/// `[.coll.]` and `[=equiv=]` may contain a `]` of their own — all three are
-/// why the end of a bracket expression cannot be found by scanning for `]`.
+/// It is a scan rather than a search for the next `]` because finding that end
+/// is not trivial: `]` as the first member (`[]abc]`, `[^]abc]`) is a literal,
+/// and `[:alpha:]`, `[.coll.]` and `[=equiv=]` may contain a `]` of their own.
+/// A backslash is an ordinary member here, as POSIX says — `[\]]` is a bracket
+/// holding `\` followed by a literal `]` — and [`crate::engine`] reads it the
+/// same way, so it is copied like any other character.
 fn copy_bracket(cs: &[Ch], i: usize, out: &mut Str) -> Result<usize, EreError> {
     let unmatched = || EreError::new(RegCode::UnmatchedBracket, b"unmatched [ in regex".to_vec());
     let mut j = i.saturating_add(1);
@@ -341,10 +341,6 @@ fn copy_bracket(cs: &[Ch], i: usize, out: &mut Str) -> Result<usize, EreError> {
                     out.push(b'[');
                     j = j.saturating_add(1);
                 }
-            }
-            Some('\\') => {
-                out.extend_from_slice(br"\\");
-                j = j.saturating_add(1);
             }
             _ => {
                 c.push_to(out);
@@ -465,12 +461,27 @@ mod tests {
 
     #[test]
     fn a_backslash_inside_a_bracket_is_a_member() {
-        // POSIX: no escapes inside `[...]`. The engine has them, so the
-        // translation doubles it — `[\]` is a bracket holding a backslash and
-        // `[\]]` is that followed by a literal `]`.
-        assert_eq!(t(r"[\]"), r"[\\]");
+        // POSIX: no escapes inside `[...]`, in either dialect -- so the
+        // translation copies the bracket as written, and the engine reads it
+        // the same way. `[\]` is a bracket holding a backslash and `[\]]` is
+        // that followed by a literal `]`. Measured against grep 3.11.
+        assert_eq!(t(r"[\]"), r"[\]");
+        assert_eq!(t(r"[\.]"), r"[\.]");
         assert!(m(r"[\]", r"a\b"));
         assert!(!m(r"[\]", "ab"));
+        assert!(m(r"^[\]]$", r"\]"));
+        assert!(!m(r"^[\]]$", "]"));
+        assert!(m(r"^[\.]$", r"\"));
+        assert!(m(r"^[\t]$", "t"));
+        assert!(!m(r"^[\t]$", "\t"));
+    }
+
+    #[test]
+    fn an_escaped_letter_outside_a_bracket_is_the_letter() {
+        // No C escapes in BRE either: GNU `grep 'a\tb'` matches `atb`.
+        assert!(m(r"^a\tb$", "atb"));
+        assert!(!m(r"^a\tb$", "a\tb"));
+        assert!(m(r"^\n$", "n"));
     }
 
     #[test]
@@ -552,9 +563,13 @@ mod tests {
         assert_eq!(t(r"\(a\)\1*"), "(a)\\1*");
         assert!(m(r"^\(a\)\1*$", "aaaa"));
         // The classic one-liner behind this feature: `sed '$!N;/^\(.*\)\n\1$/!P;D'`
-        // drops adjacent duplicate lines.
-        assert!(m(r"^\(.*\)\n\1$", "x\nx"));
-        assert!(!m(r"^\(.*\)\n\1$", "x\ny"));
+        // drops adjacent duplicate lines. The `\n` there is sed's: GNU sed
+        // turns it into a newline before the pattern reaches the compiler
+        // (`normalize_text`, which `sed.rs` transcribes), so what arrives here
+        // holds the newline itself. Handed `\n`, the compiler reads an `n`.
+        assert!(m("^\\(.*\\)\n\\1$", "x\nx"));
+        assert!(!m("^\\(.*\\)\n\\1$", "x\ny"));
+        assert!(m(r"^\(.*\)\n\1$", "xnx"));
         // A reference to a group the pattern does not have is a compile error,
         // not a literal digit. The translator does not check it itself: the
         // ERE parser counts groups the same way, so checking here would be a

@@ -191,6 +191,7 @@ promises about its own output, which a one-line summary cannot carry.
 | `scripts/extfloat-diff.sh` | Differential test: our `coreutils::extfloat` against glibc's `strtold` and |
 | `scripts/extract-tcc-strace.sh` | Extract tcc + crt + libtcc1.a from rootfs.ext4 and strace a hosted compile. |
 | `scripts/factor-diff.sh` | factor-diff.sh — compare our `factor` against GNU's, inside WSL. |
+| `scripts/fastpy-slateos-bundle.py` | Build the tree that puts the fastpy compiler on a SlateOS image. |
 | `scripts/file-isomedia-diff.sh` | Differential test: our `file` against file 5.45's on ISO base media files. |
 | `scripts/file-isomedia-gen.py` | Generate `userspace/file/src/isomedia_table.rs` from file 5.45's magic. |
 | `scripts/find-claimed-acts.py` | Which programs tell the user they DID something they cannot do? |
@@ -251,6 +252,7 @@ promises about its own output, which a one-line summary cannot carry.
 | `scripts/lanec_scan.py` | Lane C's per-line scanner for the write-only-field and uncalled-function gates. |
 | `scripts/layout-sweep.py` | Measure how much of a benchmark's movement is caused by code *placement*. |
 | `scripts/lib/worktree.sh` | The directive above is load-bearing rather than decorative. This file has no |
+| `scripts/lockfile-diff.sh` | Differential test: our `lockfile` against procmail 3.24's, as Ubuntu builds it. |
 | `scripts/logger-diff.sh` | Differential test: our `logger` against util-linux 2.39.3's. |
 | `scripts/logname-diff.sh` | logname-diff.sh — compare our `logname` against the real GNU one, inside WSL. |
 | `scripts/lossy-decode.py` | Find lossy byte->text conversions that reach a VALUE, not a message. |
@@ -279,6 +281,16 @@ promises about its own output, which a one-line summary cannot carry.
 | `scripts/nproc-diff.sh` | nproc-diff.sh — compare our `nproc` against GNU's, inside WSL. |
 | `scripts/numfmt-diff.sh` | numfmt-diff.sh — compare our `numfmt` against GNU's, inside WSL. |
 | `scripts/od-diff.sh` | Differential test: our od against GNU od. |
+| `scripts/oils-spec/bin/argv.py` | Print the arguments the way Oils' Python 2 `spec/bin/argv.py` did. |
+| `scripts/oils-spec/bin/printenv.py` | Print each named environment variable, or `None` -- the spec helper, ported. |
+| `scripts/oils-spec/bin/read_from_fd.py` | Print up to 1024 bytes from each descriptor named -- the spec helper, ported. |
+| `scripts/oils-spec/bin/show_fd_table.py` | List this process's open descriptors -- the spec helper, ported. |
+| `scripts/oils-spec/bin/stdout_stderr.py` | Write to stdout and stderr and exit as told -- the spec helper, ported. |
+| `scripts/oils-spec/bundle.sh` | Build the tree that puts Oils' spec tests on a SlateOS image. |
+| `scripts/oils-spec/run_all.py` | Run every Oils spec file on this machine and compare with Linux. |
+| `scripts/oils-spec/sh_spec.py` | Oils' spec-test harness, ported from Python 2 to Python 3 to run on SlateOS. |
+| `scripts/oils-spec/validate.sh` | Prove the Python 3 spec harness judges every case as upstream's does. |
+| `scripts/oils-spike/run.sh` | Cross-compile genuine Oils (oils-for-unix) and link it against SlateOS's libc.a. |
 | `scripts/open-requests.py` | List the `requests/` entries addressed to a lane that are still open. |
 | `scripts/option-gap-ref.sh` | The reference half of `scripts/option-gap.sh`, run where the reference lives |
 | `scripts/option-gap.sh` | Options the reference implementation has that OURS REJECTS AS UNKNOWN. |
@@ -423,6 +435,7 @@ promises about its own output, which a one-line summary cannot carry.
 | `scripts/test-diff-bound.sh` | Two-probe test for the bound that `diff-wsl.sh` puts around every harness. |
 | `scripts/test-diff-forward.sh` | Does a `DIFF_*` knob set on the command line reach the far side of the WSL |
 | `scripts/test-diff.sh` | Differential test: our `test` against GNU `test`. |
+| `scripts/test-fastpy-slateos-bundle.py` | Regression tests for `scripts/fastpy-slateos-bundle.py`. |
 | `scripts/test-gate-cache.py` | Tests for the gate cache: `gate-cache.py`, `gatecache_trace.py`, `gatecache_tee.py`. |
 | `scripts/test-gate-cost-report.py` | Run `gate-cost-report.py`'s self-test under the boot test's tooling gate. |
 | `scripts/test-gather-notices.py` | The gate that keeps the image's third-party notices complete (design-decisions §1433). |
@@ -446,6 +459,7 @@ promises about its own output, which a one-line summary cannot carry.
 | `scripts/test-pre-push-tree-is-push.py` | Tests for `tree_is_push`, the precondition of pre-push gates 53-74. |
 | `scripts/test-pre-push-unixhalf-gate.py` | Behavioural tests for pre-push gate 12 (coreutils' unix half). |
 | `scripts/test-proctree.py` | test-proctree.py — tests for `proctree.resolve_command` and friends. |
+| `scripts/test-program-catalogue.py` | The rule that every program is recorded: `programs.md` lists every binary. |
 | `scripts/test-prune-build-cache.py` | Run `prune-build-cache.py`'s self-test under the boot test's tooling gate. |
 | `scripts/test-prune-build-trees.py` | Tests for `scripts/prune-build-trees.py`. |
 | `scripts/test-reclaim-space.py` | Tests for `scripts/reclaim-space.py`. |
@@ -489,4 +503,4 @@ promises about its own output, which a one-line summary cannot carry.
 | `scripts/xargs-diff.sh` | Differential test: our xargs against GNU xargs (findutils 4.9.0). |
 | `scripts/yes-diff.sh` | Differential test: our `yes` against GNU coreutils'. |
 
-_479 scripts._
+_493 scripts._

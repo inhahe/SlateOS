@@ -15896,7 +15896,7 @@ fn sys_setuid(args: &SyscallArgs) -> SyscallResult {
         return SyscallResult::ok(0);
     }
     creds.uid = requested;
-    match pcb::set_credentials(pid, creds) {
+    match pcb::change_credentials(pid, creds).map(|_| ()) {
         Ok(()) => SyscallResult::ok(0),
         // The only failure pcb::set_credentials reports today is
         // NoSuchProcess, which means the PCB vanished between the
@@ -15936,7 +15936,7 @@ fn sys_setgid(args: &SyscallArgs) -> SyscallResult {
         return SyscallResult::ok(0);
     }
     creds.gid = requested;
-    match pcb::set_credentials(pid, creds) {
+    match pcb::change_credentials(pid, creds).map(|_| ()) {
         Ok(()) => SyscallResult::ok(0),
         Err(_) => SyscallResult::ok(0),
     }
@@ -16051,7 +16051,7 @@ fn apply_uid_change(ruid: u32, euid: u32, suid: u32) -> SyscallResult {
         return SyscallResult::ok(0);
     }
     creds.uid = new_uid;
-    match pcb::set_credentials(pid, creds) {
+    match pcb::change_credentials(pid, creds).map(|_| ()) {
         Ok(()) => SyscallResult::ok(0),
         // PCB vanished mid-call (tear-down race); no errno for that
         // in Linux's setresuid contract.
@@ -16091,7 +16091,7 @@ fn apply_gid_change(rgid: u32, egid: u32, sgid: u32) -> SyscallResult {
         return SyscallResult::ok(0);
     }
     creds.gid = new_gid;
-    match pcb::set_credentials(pid, creds) {
+    match pcb::change_credentials(pid, creds).map(|_| ()) {
         Ok(()) => SyscallResult::ok(0),
         Err(_) => SyscallResult::ok(0),
     }
@@ -16319,7 +16319,7 @@ fn sys_setgroups(args: &SyscallArgs) -> SyscallResult {
         // Drop all supp groups.  No user pointer to validate.
         let mut new_creds = creds_now.clone();
         new_creds.groups.clear();
-        match pcb::set_credentials(pid, new_creds) {
+        match pcb::change_credentials(pid, new_creds).map(|_| ()) {
             Ok(()) => return SyscallResult::ok(0),
             Err(_) => return SyscallResult::ok(0),
         }
@@ -16351,7 +16351,7 @@ fn sys_setgroups(args: &SyscallArgs) -> SyscallResult {
     }
     let mut new_creds = creds_now.clone();
     new_creds.groups = new_groups;
-    match pcb::set_credentials(pid, new_creds) {
+    match pcb::change_credentials(pid, new_creds).map(|_| ()) {
         Ok(()) => SyscallResult::ok(0),
         Err(_) => SyscallResult::ok(0),
     }

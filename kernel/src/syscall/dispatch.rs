@@ -1011,6 +1011,7 @@ pub fn self_test() -> KernelResult<()> {
     test_process_cwd_umask_registered()?;
     test_dispatch_secureboot_doors()?;
     test_dispatch_ipc_possession()?;
+    test_dispatch_dropping_root_is_one_way()?;
     test_dispatch_pty_syscalls()?;
     test_dispatch_rlimit_syscalls()?;
     test_dispatch_spawn_ex2_registered()?;
@@ -2315,6 +2316,133 @@ fn test_dispatch_secureboot_doors() -> KernelResult<()> {
 
     serial_println!(
         "[syscall]   Secure Boot doors (1082-1084): enrol/remove gated first, verify answers and records bytes: OK"
+    );
+    Ok(())
+}
+
+/// A process that gives up root loses root's authority, keeps the rest, and
+/// cannot take root back
+/// (`requests/d-a-a-process-that-gives-up-root-keeps-roots-authority.md`).
+///
+/// A scratch process with root's identity and a spread of capabilities makes
+/// the native `SYS_PROCESS_SET_CREDENTIALS` call itself, through
+/// `thread::self_test_as_process`, to become uid 1000. The Linux `setuid`
+/// family reaches the same `pcb::change_credentials`.
+fn test_dispatch_dropping_root_is_one_way() -> KernelResult<()> {
+    use crate::cap::{ResourceType, Rights};
+    use crate::proc::pcb::{self, ProcessCredentials, ProcessId};
+    use crate::proc::thread::self_test_as_process;
+
+    fn fail(msg: &str, pid: ProcessId) -> KernelResult<()> {
+        serial_println!("[syscall]   FAIL: dropping root: {}", msg);
+        pcb::destroy(pid);
+        Err(KernelError::InternalError)
+    }
+    let pid = pcb::create("drop-root", 0);
+    if pcb::set_credentials(pid, ProcessCredentials::root()).is_err() {
+        return fail("could not make the scratch process root", pid);
+    }
+    for (rt, id, rights) in [
+        (
+            ResourceType::Process,
+            0,
+            Rights::SET_CREDENTIALS | Rights::SET_HOSTNAME | Rights::WAIT | Rights::DEBUG,
+        ),
+        (ResourceType::Process, 5, Rights::DEBUG),
+        (ResourceType::SystemClock, 0, Rights::WRITE),
+        (
+            ResourceType::PrivilegedPort,
+            0,
+            Rights::READ | Rights::WRITE,
+        ),
+        (ResourceType::File, 0, Rights::READ | Rights::WRITE),
+        (
+            ResourceType::IoScheduler,
+            0,
+            Rights::READ | Rights::IO_REALTIME,
+        ),
+    ] {
+        if pcb::grant_capability(pid, rt, id, rights).is_err() {
+            return fail("could not grant the scratch process its capabilities", pid);
+        }
+    }
+    let set_uid = |uid: u64| SyscallArgs {
+        arg0: uid,
+        arg1: handlers::CREDENTIALS_KEEP,
+        arg2: 0,
+        arg3: 0,
+        arg4: 0,
+        arg5: 0,
+    };
+
+    let became = self_test_as_process(pid, || {
+        dispatch(SYS_PROCESS_SET_CREDENTIALS, &set_uid(1000))
+    });
+    if became.value != 0 {
+        serial_println!("[syscall]   setuid(1000) as root answered {}", became.value);
+        return fail("root could not set its uid to 1000", pid);
+    }
+    let has = |rt, rights| pcb::has_capability_type(pid, rt, rights);
+    for (what, gone) in [
+        (
+            "SET_CREDENTIALS",
+            !has(ResourceType::Process, Rights::SET_CREDENTIALS),
+        ),
+        (
+            "SET_HOSTNAME",
+            !has(ResourceType::Process, Rights::SET_HOSTNAME),
+        ),
+        (
+            "class-wide DEBUG",
+            !pcb::has_capability_for(pid, ResourceType::Process, 0, Rights::DEBUG),
+        ),
+        ("the clock", !has(ResourceType::SystemClock, Rights::WRITE)),
+        (
+            "privileged ports",
+            !has(ResourceType::PrivilegedPort, Rights::READ),
+        ),
+        (
+            "realtime I/O",
+            !has(ResourceType::IoScheduler, Rights::IO_REALTIME),
+        ),
+    ] {
+        if !gone {
+            serial_println!("[syscall]   after setuid(1000), {} survived", what);
+            return fail("root's authority outlived the uid", pid);
+        }
+    }
+    for (what, kept) in [
+        (
+            "WAIT on processes",
+            has(ResourceType::Process, Rights::WAIT),
+        ),
+        (
+            "DEBUG over the one process granted",
+            pcb::has_capability_for(pid, ResourceType::Process, 5, Rights::DEBUG),
+        ),
+        (
+            "file access",
+            has(ResourceType::File, Rights::READ | Rights::WRITE),
+        ),
+        (
+            "ordinary I/O scheduling",
+            has(ResourceType::IoScheduler, Rights::READ),
+        ),
+    ] {
+        if !kept {
+            serial_println!("[syscall]   after setuid(1000), {} was lost", what);
+            return fail("dropping root took more than root's authority", pid);
+        }
+    }
+    let back =
+        self_test_as_process(pid, || dispatch(SYS_PROCESS_SET_CREDENTIALS, &set_uid(0))).value;
+    if back != i64::from(KernelError::PermissionDenied.code()) {
+        serial_println!("[syscall]   setuid(0) after leaving root answered {}", back);
+        return fail("a process that left root could take it back", pid);
+    }
+    pcb::destroy(pid);
+    serial_println!(
+        "[syscall]   dropping root: setuid(1000) takes root's authority and leaves the rest; setuid(0) is refused after: OK"
     );
     Ok(())
 }

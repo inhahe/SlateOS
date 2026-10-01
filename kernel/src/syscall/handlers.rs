@@ -7113,7 +7113,7 @@ pub fn sys_process_set_credentials(args: &SyscallArgs) -> SyscallResult {
     creds.uid = want_uid;
     creds.gid = want_gid;
 
-    match pcb::set_credentials(pid, creds) {
+    match pcb::change_credentials(pid, creds).map(|_| ()) {
         Ok(()) => SyscallResult::ok(0),
         Err(e) => SyscallResult::err(e),
     }
@@ -17075,7 +17075,7 @@ pub fn sys_process_setgroups(args: &SyscallArgs) -> SyscallResult {
         return SyscallResult::err(KernelError::NoSuchProcess);
     };
     creds.groups = new_groups;
-    match pcb::set_credentials(pid, creds) {
+    match pcb::change_credentials(pid, creds).map(|_| ()) {
         Ok(()) => SyscallResult::ok(0),
         Err(e) => SyscallResult::err(e),
     }

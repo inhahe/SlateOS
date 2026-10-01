@@ -7351,13 +7351,46 @@ pub fn get_credentials(pid: ProcessId) -> Option<ProcessCredentials> {
 /// Only processes running as root (uid=0) or the kernel (PID 0
 /// caller) should call this.  The authorization check is the
 /// caller's responsibility.
-#[allow(dead_code)] // Public API — called when login/user management lands.
+///
+/// Sets the identity and nothing else: for spawn, whose capability list for the
+/// child is a deliberate choice of its own. A process changing its *own*
+/// identity goes through [`change_credentials`].
 pub fn set_credentials(pid: ProcessId, credentials: ProcessCredentials) -> KernelResult<()> {
     let mut table = PROCESS_TABLE.lock();
     let proc = table.get_mut(&pid).ok_or(KernelError::NoSuchProcess)?;
 
     proc.credentials = credentials;
     Ok(())
+}
+
+/// A process changes its own identity: as [`set_credentials`], and when the
+/// uid leaves 0 the process also loses root's authority, in the same step
+/// (`cap::rights_without_root`).
+///
+/// Every credential-changing syscall comes here -- the native
+/// `SYS_PROCESS_SET_CREDENTIALS` and the Linux `setuid` family alike -- so a
+/// drop of root is one-way whichever ABI asked for it. The identity and the
+/// capability table change under one lock: nothing can observe the new uid
+/// with the old authority.
+///
+/// Returns how many capabilities were narrowed or revoked (0 when the uid did
+/// not leave 0).
+///
+/// # Errors
+///
+/// [`KernelError::NoSuchProcess`] if `pid` is not in the table.
+pub fn change_credentials(pid: ProcessId, credentials: ProcessCredentials) -> KernelResult<usize> {
+    let mut table = PROCESS_TABLE.lock();
+    let proc = table.get_mut(&pid).ok_or(KernelError::NoSuchProcess)?;
+
+    let leaves_root = proc.credentials.uid == 0 && credentials.uid != 0;
+    proc.credentials = credentials;
+    if !leaves_root {
+        return Ok(0);
+    }
+    Ok(proc.cap_table.narrow_all(|entry| {
+        cap::rights_without_root(entry.resource_type, entry.resource_id, entry.rights)
+    }))
 }
 
 /// Get the list of thread task IDs for a process.

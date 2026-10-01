@@ -335,6 +335,32 @@ impl CapTable {
         result
     }
 
+    /// Narrow every valid entry to the rights `keep` returns for it; an entry
+    /// left with no rights is revoked. Returns how many entries changed.
+    ///
+    /// For a process losing a class of authority in one step -- its uid
+    /// leaving 0 (`pcb::change_credentials`) -- where entry-by-entry handle
+    /// calls would let a concurrent reader see it half-narrowed.
+    pub fn narrow_all(&mut self, keep: impl Fn(&CapEntry) -> Rights) -> usize {
+        let mut changed = 0usize;
+        for entry in self.entries.values_mut() {
+            if !entry.valid {
+                continue;
+            }
+            let kept = keep(entry);
+            if kept == entry.rights {
+                continue;
+            }
+            changed = changed.saturating_add(1);
+            if kept.is_empty() {
+                entry.valid = false;
+            } else {
+                entry.rights = kept;
+            }
+        }
+        changed
+    }
+
     /// Revoke all entries referencing a specific resource.
     ///
     /// Called when a kernel object is destroyed (e.g., channel closed).

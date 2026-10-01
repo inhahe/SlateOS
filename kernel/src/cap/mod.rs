@@ -566,6 +566,71 @@ impl ResourceType {
 }
 
 // ---------------------------------------------------------------------------
+// What being root gives, and what is taken back when a process stops being it
+// ---------------------------------------------------------------------------
+
+/// The rights on a `Process` capability that are root's: changing identity
+/// and the system-wide settings. Linux's `CAP_SETUID`/`CAP_SETGID` and the
+/// `CAP_SYS_ADMIN`/`CAP_SYS_TTY_CONFIG` corners these stand for.
+const ROOT_PROCESS_RIGHTS: Rights = Rights::SET_CREDENTIALS
+    .union(Rights::SET_HOSTNAME)
+    .union(Rights::SET_KEYLAYOUT)
+    .union(Rights::SET_BRIGHTNESS)
+    .union(Rights::ENROLL_SECUREBOOT);
+
+/// The rights a capability keeps when its process's uid leaves 0.
+///
+/// On every Unix that switch is one-way: a program started as root that sets
+/// its uid to 1000 has none of root's powers afterwards, and cannot take them
+/// back. Here it kept its whole capability table, `SET_CREDENTIALS` included,
+/// so its next `setuid(0)` succeeded and every drop of privilege -- sign-in,
+/// `su`, a daemon becoming its service user -- was decoration
+/// (`requests/d-a-a-process-that-gives-up-root-keeps-roots-authority.md`).
+///
+/// What goes is what maps onto Linux's root-only capabilities:
+/// - **the system-authority types, whole:** the clock (`CAP_SYS_TIME`),
+///   privileged ports (`CAP_NET_BIND_SERVICE`), resource limits beyond one's
+///   own (`CAP_SYS_RESOURCE`, and `MEMORY_LOCK` = `CAP_IPC_LOCK`), raw block
+///   devices and port I/O (`CAP_SYS_RAWIO`), the raw NIC (`CAP_NET_RAW`),
+///   device IRQs;
+/// - **on `Process` capabilities:** [`ROOT_PROCESS_RIGHTS`], and `DEBUG` on a
+///   class-wide one (resource id 0, any process -- `CAP_SYS_PTRACE`). A
+///   `DEBUG` granted over one process is an explicit grant and stays;
+/// - **on `IoScheduler`:** `IO_REALTIME` (`CAP_SYS_NICE`), the rest kept,
+///   since ordinary I/O may need the capability.
+///
+/// What stays is everything else, file access included: here it is a
+/// capability rather than root's bypass of permission bits, so taking it would
+/// leave the program unable to read its own files, which no Unix does to a
+/// process that drops root.
+#[must_use]
+pub fn rights_without_root(
+    resource_type: ResourceType,
+    resource_id: u64,
+    rights: Rights,
+) -> Rights {
+    match resource_type {
+        ResourceType::SystemClock
+        | ResourceType::PrivilegedPort
+        | ResourceType::ResourceLimit
+        | ResourceType::BlockDevice
+        | ResourceType::NetRaw
+        | ResourceType::PortIo
+        | ResourceType::DeviceIrq => Rights::NONE,
+        ResourceType::Process => {
+            let kept = rights.remove(ROOT_PROCESS_RIGHTS);
+            if resource_id == 0 {
+                kept.remove(Rights::DEBUG)
+            } else {
+                kept
+            }
+        }
+        ResourceType::IoScheduler => rights.remove(Rights::IO_REALTIME),
+        _ => rights,
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Enumeration ABI
 // ---------------------------------------------------------------------------
 

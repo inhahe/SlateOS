@@ -243,26 +243,25 @@ fn parse_attr_spec(spec: &str) -> Result<(u32, u32, u32), String> {
     Ok((add, remove, set))
 }
 
-/// Simulated attribute storage path.
-fn attr_file_path(file: &str) -> String {
-    // In a real implementation, this would use ioctl FS_IOC_GETFLAGS/FS_IOC_SETFLAGS.
-    // We simulate by storing in an xattr-like sidecar file.
-    format!("{file}.attrs")
-}
+/// Why an inode's flags cannot be read on this build.
+const CANNOT_READ_FLAGS: &str =
+    "this build cannot read file attributes: the kernel exposes no interface for them";
 
-fn read_attrs(file: &str) -> u32 {
-    let attr_path = attr_file_path(file);
-    if let Ok(content) = fs::read_to_string(&attr_path)
-        && let Ok(val) = u32::from_str_radix(content.trim(), 16)
-    {
-        return val;
-    }
-    // Default: extents flag is commonly set on ext4.
-    if fs::metadata(file).map(|m| m.is_file()).unwrap_or(false) {
-        EXT4_EXTENTS_FL
-    } else {
-        0
-    }
+/// An inode's flags, as `FS_IOC_GETFLAGS` would give them.
+///
+/// Always an error on this build. The kernel's ext4 driver holds each inode's
+/// `i_flags`, but no call reads them out; lane A's answer to
+/// `requests/b-a-chattr-needs-fs-ioc-getflags-or-it-should-be-deleted.md` is
+/// enforcement first and the ioctl second, which is why both commands stay.
+///
+/// Until 2026-10-01 this read a `<file>.attrs` sidecar and, finding none,
+/// answered `EXT4_EXTENTS_FL` for every regular file -- so `lsattr` printed
+/// `--------------e-------` for files it knew nothing about, and `chattr +e`
+/// on one compared the new flags with that guess, found nothing to change and
+/// exited 0. A command waiting for an interface says it cannot; it does not
+/// describe the file it cannot see.
+fn read_attrs(_file: &str) -> io::Result<u32> {
+    Err(io::Error::other(CANNOT_READ_FLAGS))
 }
 
 /// Setting a file attribute is not something this build can do.
@@ -380,19 +379,29 @@ fn cmd_lsattr(args: &[String]) {
     let stdout = io::stdout();
     let mut out = stdout.lock();
 
+    // e2fsprogs' lsattr goes on to the next file after a failure and exits 1
+    // at the end if any failed.
+    let mut all_ok = true;
     for file in &opts.files {
-        list_attrs(&mut out, file, &opts, 0);
+        all_ok &= list_attrs(&mut out, file, &opts, 0);
+    }
+    if !all_ok {
+        drop(out);
+        process::exit(1);
     }
 }
 
-fn list_attrs(out: &mut io::StdoutLock<'_>, path: &str, opts: &LsattrOpts, depth: u32) {
+/// List `path`'s flags, or each entry's for a directory; `false` if any
+/// could not be read.
+fn list_attrs(out: &mut io::StdoutLock<'_>, path: &str, opts: &LsattrOpts, depth: u32) -> bool {
     let metadata = match fs::symlink_metadata(path) {
         Ok(m) => m,
         Err(e) => {
             eprintln!("lsattr: cannot read {path}: {e}");
-            return;
+            return false;
         }
     };
+    let mut all_ok = true;
 
     if metadata.is_dir() && !opts.dirs_as_files && depth == 0 {
         // List directory contents.
@@ -411,23 +420,39 @@ fn list_attrs(out: &mut io::StdoutLock<'_>, path: &str, opts: &LsattrOpts, depth
             names.sort();
 
             for entry_path in &names {
-                print_file_attrs(out, entry_path, opts);
+                all_ok &= print_file_attrs(out, entry_path, opts);
                 if opts.recursive
                     && let Ok(m) = fs::symlink_metadata(entry_path)
                     && m.is_dir()
                 {
                     let _ = writeln!(out);
-                    list_attrs(out, entry_path, opts, depth + 1);
+                    all_ok &= list_attrs(out, entry_path, opts, depth + 1);
                 }
             }
         }
     } else {
-        print_file_attrs(out, path, opts);
+        all_ok &= print_file_attrs(out, path, opts);
     }
+    all_ok
 }
 
-fn print_file_attrs(out: &mut io::StdoutLock<'_>, path: &str, opts: &LsattrOpts) {
-    let flags = read_attrs(path);
+/// e2fsprogs' words for a file whose flags could not be read: its
+/// `com_err(program_name, errno, "While reading flags on %s", name)`.
+fn reading_flags_failed(program: &str, err: &io::Error, path: &str) -> String {
+    format!("{program}: {err} While reading flags on {path}")
+}
+
+/// Print `path`'s flags; `false`, with e2fsprogs' diagnostic, if they could
+/// not be read -- which on this build is always (see [`read_attrs`]).
+fn print_file_attrs(out: &mut io::StdoutLock<'_>, path: &str, opts: &LsattrOpts) -> bool {
+    let flags = match read_attrs(path) {
+        Ok(flags) => flags,
+        Err(e) => {
+            let _ = out.flush();
+            eprintln!("{}", reading_flags_failed("lsattr", &e, path));
+            return false;
+        }
+    };
 
     if opts.long_format {
         // Long format: list attribute names.
@@ -449,6 +474,7 @@ fn print_file_attrs(out: &mut io::StdoutLock<'_>, path: &str, opts: &LsattrOpts)
             let _ = writeln!(out, "{attr_str} {path}");
         }
     }
+    true
 }
 
 // ============================================================================
@@ -572,28 +598,33 @@ fn apply_attrs(path: &str, add: u32, remove: u32, set: Option<u32>, opts: &Chatt
         }
     };
 
-    let current = read_attrs(path);
+    // `=` replaces the flags outright, so e2fsprogs does not read them first;
+    // `+` and `-` change the ones there, so it must -- and on this build
+    // cannot, which is a refusal, not a guess (see `read_attrs`).
     let new_flags = if let Some(set_flags) = set {
         set_flags
     } else {
-        (current | add) & !remove
+        match read_attrs(path) {
+            Ok(current) => (current | add) & !remove,
+            Err(e) => {
+                // e2fsprogs: "while reading flags on %s", lower-case here.
+                eprintln!("chattr: {e} while reading flags on {path}");
+                process::exit(1);
+            }
+        }
     };
 
-    if new_flags != current {
-        if let Err(e) = write_attrs(path, new_flags) {
-            eprintln!("chattr: cannot set attributes on {path}: {e}");
-            // Exit 1, not 0. This printed the failure and returned
-            // successfully, so `chattr +i f || bail` never fired -- the
-            // same "reports success for something it refused" shape found
-            // in `lockfile`, `getopt`, `resolvconf` and `systemd-notify`
-            // today.
-            process::exit(1);
-        }
-        if opts.verbose {
-            let old_str = flags_to_string(current);
-            let new_str = flags_to_string(new_flags);
-            eprintln!("Flags of {path} set as {new_str} (was {old_str})");
-        }
+    if let Err(e) = write_attrs(path, new_flags) {
+        eprintln!("chattr: cannot set attributes on {path}: {e}");
+        // Exit 1, not 0. This printed the failure and returned
+        // successfully, so `chattr +i f || bail` never fired -- the
+        // same "reports success for something it refused" shape found
+        // in `lockfile`, `getopt`, `resolvconf` and `systemd-notify`
+        // today.
+        process::exit(1);
+    }
+    if opts.verbose {
+        eprintln!("Flags of {path} set as {}", flags_to_string(new_flags));
     }
 
     // Recurse into directories.
@@ -771,6 +802,26 @@ mod tests {
         assert_eq!(EXT4_APPEND_FL, 0x20);
         assert_eq!(EXT4_NODUMP_FL, 0x40);
         assert_eq!(EXT4_NOATIME_FL, 0x80);
+    }
+
+    #[test]
+    fn flags_that_cannot_be_read_are_an_error_not_a_guess() {
+        // Not EXT4_EXTENTS_FL, which this used to report for any regular
+        // file -- and not for a file that exists either: the kernel gives no
+        // way to read an inode's flags, so there is nothing to describe.
+        let here = std::env::current_exe().expect("test binary path");
+        let err = read_attrs(&here.to_string_lossy()).expect_err("no interface to read flags");
+        assert_eq!(err.to_string(), CANNOT_READ_FLAGS);
+        assert!(read_attrs("/no/such/file").is_err());
+    }
+
+    #[test]
+    fn a_failed_read_is_reported_in_e2fsprogs_words() {
+        let err = io::Error::other("Operation not supported");
+        assert_eq!(
+            reading_flags_failed("lsattr", &err, "f"),
+            "lsattr: Operation not supported While reading flags on f"
+        );
     }
 
     #[test]

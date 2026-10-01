@@ -2421,7 +2421,10 @@ block device; **`userspace/upower`** (`upowerd`) reported "daemon
 initialized (simulated mode)"; **`userspace/fwupd`** (`fwupdtool`) offered
 firmware 1.1.0, "Bug fixes and security updates", for a device it never
 queried; **`userspace/tuned`** (`tuned-adm`, `tuned-gui`) answered every
-`verify` setting `OK (simulated)`. **The ledger stands at 95.**
+`verify` setting `OK (simulated)`. Then **`userspace/numactl`** (`numastat`,
+`numademo`, `memhog`): `numactl -m 0 CMD` printed the policy it would set and
+never ran CMD, `memhog` reported "Allocation complete." having allocated
+nothing, `numademo` printed invented bandwidths. **The ledger stands at 92.**
 
 **The 9 new shadowed pairs were the urgent half**, because a shadowed name is
 two implementations that can disagree with the winner picked by packaging:

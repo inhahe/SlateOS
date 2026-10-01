@@ -58,9 +58,6 @@ lp:lpstat
 newgrp:sg
 ntpd:ntpdate
 ntpd:sntp
-numactl:memhog
-numactl:numademo
-numactl:numastat
 perf:perf-record
 perf:perf-report
 perf:perf-stat

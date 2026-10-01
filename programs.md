@@ -11,9 +11,9 @@ A new program is recorded here in the commit that creates it (§1053): run
 the script, commit `programs.md` with the program. `--check` fails when the
 two disagree.
 
-**456 programs; 88 on the image, 6 carried inside the kernel.**
+**455 programs; 88 on the image, 6 carried inside the kernel.**
 
-## Userland utilities and services (`userspace/`, lane B) -- 301
+## Userland utilities and services (`userspace/`, lane B) -- 300
 
 | Program | What it does | On image | Crate | Other names |
 |---|---|---|---|---|
@@ -193,7 +193,6 @@ two disagree.
 | `nsenter` | Namespace manipulation utilities. |  |  |  |
 | `nslookup` | DNS Lookup Utility |  |  |  |
 | `ntpd` | Ntpd / ntpdate / sntp -- NTP time synchronization for SlateOS. |  |  | `ntpdate` *(not installed)*, `sntp` *(not installed)* |
-| `numactl` | Slate OS NUMA memory policy control |  |  | `memhog` *(not installed)*, `numademo` *(not installed)*, `numastat` *(not installed)* |
 | `numfmt` | Convert numbers from or to human-readable strings. |  | `coreutils` |  |
 | `objdump` | ELF Object File Analysis Tools |  |  |  |
 | `od` | Dump files in octal and other formats. | yes | `coreutils` |  |

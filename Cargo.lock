@@ -2652,13 +2652,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "numactl"
-version = "0.1.0"
-dependencies = [
- "procinfo",
-]
-
-[[package]]
 name = "objdump"
 version = "0.1.0"
 dependencies = [

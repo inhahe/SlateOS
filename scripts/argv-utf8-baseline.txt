@@ -103,7 +103,6 @@ userspace/nmap/src/main.rs:argv-as-string
 userspace/nsenter/src/main.rs:argv-as-string
 userspace/nslookup/src/main.rs:argv-as-string
 userspace/ntpd/src/main.rs:argv-as-string
-userspace/numactl/src/main.rs:argv-as-string
 userspace/objdump/src/main.rs:argv-as-string
 userspace/perf/src/main.rs:argv-as-string
 userspace/pgrep/src/main.rs:argv-as-string

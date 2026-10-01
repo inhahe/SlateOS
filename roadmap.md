@@ -5676,7 +5676,7 @@ _Port ext4 first. Don't write a custom filesystem._
   - [x] localectl: locale/keyboard config (set-locale/set-keymap/set-x11-keymap/list-locales/list-keymaps, 592 lines)
   - [x] loginctl/userdbctl: session/user/seat management (list/show/lock/kill sessions, user linger, seat attach, power commands, passwd/group query, 1085 lines)
   - [x] coredumpctl/coredump-extract: core dump management (list/info/dump/debug, config parsing, signal names, JSON output, 740 lines)
-  - [x] numactl/numastat/numademo/memhog: NUMA policy control (topology discovery, memory binding, interleave, per-node stats, 805 lines)
+  - [ ] numactl/numastat/numademo/memhog: NUMA policy control (topology discovery, memory binding, interleave, per-node stats, 805 lines) -- **deleted 2026-10-01** (design-decisions §1006): it fabricated -- `numactl -m 0 CMD` printed the policy and never ran CMD, `memhog` printed "Allocation complete." having allocated nothing, `numademo` printed made-up MB/s
   - [ ] btrfs/mkfs.btrfs/btrfs-convert: btrfs filesystem tools (14 subcommands, RAID profiles, scrub/balance/quota/qgroup, 4517 lines, 248 tests)
   - [ ] flatpak: application manager (22 subcommands, remote management, build pipeline, permissions, 3046 lines, 214 tests)
   - [ ] firejail/firemon/firecfg: security sandbox (profile system, namespace isolation, network filtering, 15 app profiles, 3487 lines, 168 tests) -- **deleted 2026-10-01** (design-decisions §1045, §1006): a Linux namespace-and-seccomp sandbox with nothing planned to drive (SlateOS confines programs by capabilities); it parsed profiles and refused to run anything

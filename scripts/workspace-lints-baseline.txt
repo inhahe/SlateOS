@@ -118,7 +118,6 @@ userspace/nologin  # bare deny(clippy::all)
 userspace/notimpl  # bare deny(clippy::all)
 userspace/nsenter  # bare deny(clippy::all)
 userspace/nslookup
-userspace/numactl  # bare deny(clippy::all)
 userspace/oils  # bare deny(clippy::all)
 userspace/passwd
 userspace/perf  # bare deny(clippy::all)

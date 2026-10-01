@@ -4791,8 +4791,9 @@ pub unsafe extern "C" fn tmpnam_r(s: *mut u8) -> *mut u8 {
 /// reasons: this libc's working directory is already the path as the caller
 /// gave it (`chdir` normalises it lexically and never resolves symlinks), so
 /// the spelling is kept anyway; and the identity test glibc relies on cannot
-/// be made sound here, because `st_dev` is never filled and `st_ino` is 0 on
-/// filesystems without stable inode numbers — every stale `$PWD` would match.
+/// be made sound here, because `st_ino` is 0 on filesystems without stable
+/// inode numbers (and `st_dev` was 0 for every file until 2026-10-01) —
+/// every stale `$PWD` would match.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn get_current_dir_name() -> *mut u8 {
     getcwd(core::ptr::null_mut(), 0)

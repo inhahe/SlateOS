@@ -761,6 +761,27 @@ fn capacity_bar(pct: u32) -> String {
 // CLI entry point
 // ============================================================================
 
+/// `powerctl reload`: restart SlateOS without restarting the computer -- the
+/// start menu's "Restart OS, keep the computer on" (`design.txt`; lane C's
+/// `requests/c-ab-a-restart-that-keeps-the-computer-on.md`).
+///
+/// It needs a kernel call that loads the installed kernel and starts it
+/// without going back through the firmware (Linux's `kexec`), and this kernel
+/// has none yet -- asked of lane A in the same request. So it refuses, and
+/// refuses *first*: asking the service manager to stop everything and only
+/// then finding nothing to restart into would leave the machine running with
+/// its services stopped. When the call exists this takes `cmd_reboot`'s
+/// shape: the orderly stop (a `Reload` request on the service bus), then that
+/// call where `direct_reboot` asks the firmware.
+fn cmd_reload() {
+    eprintln!(
+        "powerctl: this kernel cannot restart without the firmware, so SlateOS \
+         cannot be restarted with the computer kept on"
+    );
+    eprintln!("Nothing was stopped. Run 'powerctl reboot' to restart the computer.");
+    process::exit(1);
+}
+
 fn print_usage() {
     println!("Slate OS Power Control v0.1.0");
     println!();
@@ -773,6 +794,8 @@ fn print_usage() {
     println!("  shutdown            Orderly shutdown and power off");
     println!("  halt                Alias for shutdown");
     println!("  reboot              Orderly reboot");
+    println!("  reload              Restart SlateOS, keeping the computer on (not yet:");
+    println!("                      this kernel cannot restart without the firmware)");
     println!("  suspend             ACPI S3 suspend to RAM");
     println!("  hibernate           ACPI S4 suspend to disk");
     println!("  status              Show power source, battery, ACPI info");
@@ -802,6 +825,7 @@ fn main() {
         "status" | "info" => cmd_status(),
         "schedule" | "sched" => cmd_schedule(&args[2..]),
         "cancel" | "abort" => cmd_cancel(),
+        "reload" => cmd_reload(),
         "help" | "--help" | "-h" => print_usage(),
         other => {
             eprintln!("unknown command: {other}");

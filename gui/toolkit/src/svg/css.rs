@@ -7,8 +7,10 @@
 //! winning -- and from a presentation attribute only when `style` says
 //! nothing, so the cascade comes out as CSS has it: an element's own `style`
 //! over the sheet, the sheet over presentation attributes (which weigh nothing
-//! against any rule), among rules the more specific and then the later, and a
-//! rule's `!important` declarations over the element's own `style`.
+//! against any rule), among rules the more specific and then the later, a
+//! rule's `!important` declarations over the element's own `style`, and the
+//! element's own `!important` ones over everything. (What reads `style` takes
+//! an important declaration over any that is not, wherever the two stand.)
 //!
 //! Illustrator writes its colours this way -- `.st0{fill:#3a6ea5}` and
 //! `class="st0"` -- and so does most of what is exported for the web; a
@@ -19,7 +21,11 @@
 //! - **Selectors**: `*`, a type (`rect`), a class (`.st0`), an id (`#logo`),
 //!   any compound of them (`path.st0.lit`), comma lists, and the descendant
 //!   and child combinators (`g .a`, `g > .a`).
-//! - **Declarations**, `!important` ones included; comments anywhere.
+//! - **Declarations**, `!important` ones included, in any spelling CSS
+//!   allows -- `! IMPORTANT` is one.
+//! - **Comments** anywhere, in a sheet or an element's own `style`, as CSS
+//!   reads them: a comment is no space, so `rect/**/.a` is `rect.a`, but it
+//!   ends a word, so `g/**/rect` is not `grect` (and is no selector).
 //!
 //! A selector with anything else -- an attribute (`[x]`), a pseudo-class
 //! (`:hover`), a sibling combinator -- selects nothing, and its rule is kept
@@ -37,7 +43,7 @@
 
 use std::collections::HashMap;
 
-use super::{XmlElement, local_tag};
+use super::{XmlElement, local_tag, without_important};
 
 /// The most rules a document's sheets are read for.
 const MAX_RULES: usize = 4096;
@@ -47,6 +53,15 @@ const MAX_COMPOUNDS: usize = 8;
 
 /// The most steps all of a document's matching may take.
 const MAX_STEPS: usize = 20_000_000;
+
+/// What a comment leaves in a sheet until the sheet is read: a character
+/// that is no part of CSS. Not nothing, since CSS reads `a/**/b` as two words
+/// side by side and not as `ab`; and not a space, since a space between the
+/// parts of a selector means something -- `rect/**/.a` is `rect.a`, a rect
+/// of class `a`, where `rect .a` is anything of class `a` inside a rect.
+/// Declarations read it as a space ([`declarations`]), selectors as CSS
+/// does ([`joined`]).
+const COMMENT: char = '\u{1}';
 
 /// One element's part of a selector: `path.st0#logo`, or `*`.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -142,7 +157,7 @@ impl Sheet {
         let mut rest = text.as_str();
         let mut order = 0usize;
         loop {
-            rest = rest.trim_start();
+            rest = rest.trim_start_matches(|c: char| c.is_whitespace() || c == COMMENT);
             if rest.is_empty() || sheet.rules.len() >= MAX_RULES {
                 break;
             }
@@ -163,7 +178,7 @@ impl Sheet {
                 if sheet.rules.len() >= MAX_RULES {
                     break;
                 }
-                if let Some(selector) = Selector::parse(written.trim()) {
+                if let Some(selector) = Selector::parse(written) {
                     let specificity = selector.specificity();
                     sheet.add(Rule {
                         selector,
@@ -197,9 +212,12 @@ impl Sheet {
     }
 
     /// Merge the declarations of the rules each element under `root`
-    /// matches into its `style`, in the order the cascade weighs them.
+    /// matches into its `style`, in the order the cascade weighs them -- and
+    /// take the comments out of every element's own `style`, which is CSS
+    /// too.
     pub(super) fn apply(&self, root: &mut XmlElement) {
         if self.rules.is_empty() {
+            uncomment_styles(root);
             return;
         }
         let mut steps = MAX_STEPS;
@@ -207,6 +225,7 @@ impl Sheet {
     }
 
     fn apply_to(&self, elem: &mut XmlElement, ancestors: &mut Vec<Facts>, steps: &mut usize) {
+        uncomment_style(elem);
         let facts = Facts::of(elem);
         let mut matched: Vec<&Rule> = self
             .candidates(&facts)
@@ -215,17 +234,20 @@ impl Sheet {
             .collect();
         if !matched.is_empty() {
             matched.sort_by_key(|rule| (rule.specificity, rule.order));
+            // Weakest first, since what reads a property takes the last of
+            // it (but an important one over any that is not): the rules,
+            // the element's own declarations, the rules' important ones, and
+            // its own important ones -- which CSS weighs above any rule's.
+            let (own, own_important) = elem.attr("style").map(declarations).unwrap_or_default();
             let mut style = String::new();
             for rule in &matched {
                 style.push_str(&rule.normal);
             }
-            if let Some(own) = elem.attr("style") {
-                style.push_str(own);
-                style.push(';');
-            }
+            style.push_str(&own);
             for rule in &matched {
                 style.push_str(&rule.important);
             }
+            style.push_str(&own_important);
             set_style(elem, style);
         }
         ancestors.push(facts);
@@ -279,7 +301,8 @@ fn set_style(elem: &mut XmlElement, style: String) {
     }
 }
 
-/// `text` without its `/* ... */` comments; one left open runs to the end.
+/// `text` with each of its `/* ... */` comments left as one [`COMMENT`]; one
+/// left open runs to the end.
 fn without_comments(text: &str) -> String {
     let mut out = String::with_capacity(text.len());
     let mut rest = text;
@@ -290,11 +313,48 @@ fn without_comments(text: &str) -> String {
             .find("*/")
             .and_then(|close| after.get(close.saturating_add(2)..))
             .unwrap_or("");
-        // A comment separates what is either side of it.
-        out.push(' ');
+        out.push(COMMENT);
     }
     out.push_str(rest);
     out
+}
+
+/// `elem`'s own `style` without its comments, each read as a space -- as
+/// the declarations of a sheet are.
+fn uncomment_style(elem: &mut XmlElement) {
+    if let Some(own) = elem.attr("style").filter(|style| style.contains("/*")) {
+        let plain = without_comments(own).replace(COMMENT, " ");
+        set_style(elem, plain);
+    }
+}
+
+/// [`uncomment_style`] for `elem` and everything under it.
+fn uncomment_styles(elem: &mut XmlElement) {
+    uncomment_style(elem);
+    for child in &mut elem.children {
+        uncomment_styles(child);
+    }
+}
+
+/// A selector as written, its comments taken out as CSS takes them: one
+/// between two words leaves two words side by side, which no selector is
+/// (`g/**/rect`, `.a/**/b`), and is `None`; one anywhere else joins what is
+/// either side of it (`rect/**/.a` is `rect.a`).
+fn joined(written: &str) -> Option<String> {
+    let in_word = |c: Option<char>| c.is_some_and(|c| c.is_alphanumeric() || c == '-' || c == '_');
+    let mut out = String::with_capacity(written.len());
+    let mut chars = written.chars().peekable();
+    while let Some(c) = chars.next() {
+        if c != COMMENT {
+            out.push(c);
+            continue;
+        }
+        while chars.next_if_eq(&COMMENT).is_some() {}
+        if in_word(out.chars().next_back()) && in_word(chars.peek().copied()) {
+            return None;
+        }
+    }
+    Some(out)
 }
 
 /// What follows the at-rule `text` starts with: past its `;`, or past its
@@ -325,10 +385,11 @@ fn past_at_rule(text: &str) -> &str {
     }
 }
 
-/// A block's declarations, each ended with `;`: those that are not
-/// `!important`, and those that are.
+/// A block's declarations, each ended with `;`, a comment in them read as a
+/// space: those that are not `!important`, and those that are.
 fn declarations(block: &str) -> (String, String) {
     let (mut normal, mut important) = (String::new(), String::new());
+    let block = block.replace(COMMENT, " ");
     for declaration in block.split(';') {
         let declaration = declaration.trim();
         let Some((property, value)) = declaration.split_once(':') else {
@@ -338,7 +399,7 @@ fn declarations(block: &str) -> (String, String) {
         if property.is_empty() || value.is_empty() {
             continue;
         }
-        let out = if value.ends_with("!important") {
+        let out = if without_important(value).1 {
             &mut important
         } else {
             &mut normal
@@ -417,6 +478,8 @@ impl Compound {
 impl Selector {
     /// A selector as written, or `None` if it is not one this reads.
     fn parse(written: &str) -> Option<Self> {
+        let written = joined(written)?;
+        let written = written.trim();
         if written.is_empty() || written.contains(['[', ':', '+', '~', '\\', '|']) {
             return None;
         }

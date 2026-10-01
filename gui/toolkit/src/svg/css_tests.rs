@@ -207,3 +207,89 @@ fn a_sheet_keeps_at_most_so_many_rules() {
     let deep = ".a ".repeat(super::MAX_COMPOUNDS + 1);
     assert!(Selector::parse(deep.trim()).is_none());
 }
+
+/// **Comments are read as CSS reads them**: no space, so one inside a
+/// compound joins it, but the end of a word, so one between two words leaves
+/// no selector; and an element's own `style` may hold them too.
+#[test]
+fn comments_are_read_as_css_reads_them() {
+    let shape = r#"<g><rect class="a" width="4" height="4"/></g>"#;
+    // `rect.a`, not `rect .a` -- which nothing here would match.
+    assert_eq!(colour(&styled("rect/**/.a{fill:lime}", shape)), LIME);
+    // Two words side by side: not `g rect`, and not `grect`.
+    assert_eq!(
+        colour(&styled("g/**/rect{fill:lime}", shape)),
+        [0, 0, 0, 255]
+    );
+    // Beside a space, a comment is nothing.
+    assert_eq!(colour(&styled("g /**/.a{fill:lime}", shape)), LIME);
+    assert_eq!(colour(&styled(".b/**/, .a{fill:lime}", shape)), LIME);
+    // Before an at-rule, which is still skipped whole.
+    assert_eq!(
+        colour(&styled(
+            "/**/@media print { .a{fill:red} } .a{fill:lime}",
+            shape
+        )),
+        LIME
+    );
+    // In an element's own style: a comment in a value is a space; one
+    // inside a property's name leaves no property, and the attribute holds.
+    let own = |style: &str| {
+        format!(
+            r#"<svg viewBox="0 0 4 4"><rect width="4" height="4" fill="lime" style="{style}"/></svg>"#
+        )
+    };
+    assert_eq!(colour(&own("fill:/* not red */#0000ff")), BLUE);
+    assert_eq!(colour(&own("fi/**/ll:red")), LIME);
+    // And so with a sheet in the document as well.
+    let both = r#"<svg viewBox="0 0 4 4"><style>rect{stroke:none}</style>
+<rect width="4" height="4" style="fill:/**/#0000ff"/></svg>"#;
+    assert_eq!(colour(both), BLUE);
+}
+
+/// **Importance is weighed as CSS weighs it**: in any spelling CSS allows;
+/// an element's own important declaration over a rule's; and within one
+/// `style`, an important declaration over a later one that is not.
+#[test]
+fn importance_is_weighed_as_css_weighs_it() {
+    let rect = |style: &str| format!(r#"<rect class="a" width="4" height="4" style="{style}"/>"#);
+    let spelt = styled(".a{fill:red ! IMPORTANT}", &rect("fill:lime"));
+    assert_eq!(colour(&spelt), RED);
+    let own_wins = styled(".a{fill:red !important}", &rect("fill:lime !important"));
+    assert_eq!(colour(&own_wins), LIME);
+    let own_first = styled(".a{stroke:none}", &rect("fill:lime !important; fill:red"));
+    assert_eq!(colour(&own_first), LIME);
+    // With no sheet at all.
+    let alone = r#"<svg viewBox="0 0 4 4"><rect width="4" height="4" style="fill:lime!important;fill:red"/></svg>"#;
+    assert_eq!(colour(alone), LIME);
+}
+
+/// **A declaration's `!important` is CSS's**: a `!`, then the word in any
+/// case, ending the value, with space between or none -- and nothing else.
+#[test]
+fn a_declarations_importance_is_csss() {
+    use super::super::{declared, without_important};
+    for (value, plain, important) in [
+        ("red !important", "red", true),
+        ("red!important", "red", true),
+        (" red ! Important ", "red", true),
+        ("red", "red", false),
+        ("important", "important", false),
+        ("red important", "red important", false),
+        ("red !importantly", "red !importantly", false),
+        ("\u{e9}!important", "\u{e9}", true),
+        ("\u{e9}\u{e9}", "\u{e9}\u{e9}", false),
+    ] {
+        assert_eq!(without_important(value), (plain, important), "{value:?}");
+    }
+    assert_eq!(declared("fill:red; fill:blue", "fill"), Some("blue"));
+    assert_eq!(
+        declared("fill:red !important; fill:blue", "fill"),
+        Some("red")
+    );
+    assert_eq!(
+        declared("fill:red !important; fill:blue !important", "fill"),
+        Some("blue")
+    );
+    assert_eq!(declared("fill: !important; fill:", "fill"), None);
+}

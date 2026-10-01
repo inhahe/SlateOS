@@ -2728,19 +2728,45 @@ fn property<'e>(elem: &'e XmlElement, name: &str) -> Option<&'e str> {
         .or_else(|| elem.attr(name).map(str::trim))
 }
 
-/// The value the CSS declarations in `style` give `name` -- the last one, as a
-/// later declaration overrides an earlier -- without its `!important`.
+/// The value the CSS declarations in `style` give `name`, without its
+/// `!important`: the last one, as a later declaration overrides an earlier
+/// -- but an important one over any that is not, wherever it stands.
 fn declared<'s>(style: &'s str, name: &str) -> Option<&'s str> {
-    style
-        .split(';')
-        .filter_map(|declaration| {
-            let (property, value) = declaration.split_once(':')?;
-            (property.trim() == name).then(|| {
-                let value = value.trim();
-                value.strip_suffix("!important").unwrap_or(value).trim()
-            })
-        })
-        .rfind(|value| !value.is_empty())
+    let mut found: Option<(&str, bool)> = None;
+    for declaration in style.split(';') {
+        let Some((property, value)) = declaration.split_once(':') else {
+            continue;
+        };
+        if property.trim() != name {
+            continue;
+        }
+        let (value, important) = without_important(value);
+        if value.is_empty() || found.is_some_and(|(_, was)| was && !important) {
+            continue;
+        }
+        found = Some((value, important));
+    }
+    found.map(|(value, _)| value)
+}
+
+/// A declaration's value without its `!important`, and whether it had one:
+/// as CSS reads it, a `!` and then `important` in any case, ending the
+/// value, with or without space between.
+fn without_important(value: &str) -> (&str, bool) {
+    let value = value.trim();
+    let word = value
+        .len()
+        .checked_sub("important".len())
+        .and_then(|cut| Some((value.get(..cut)?, value.get(cut..)?)));
+    match word {
+        Some((rest, word)) if word.eq_ignore_ascii_case("important") => {
+            match rest.trim_end().strip_suffix('!') {
+                Some(rest) => (rest.trim_end(), true),
+                None => (value, false),
+            }
+        }
+        _ => (value, false),
+    }
 }
 
 /// A length in user units: a number, in `px` or with no unit. Other units say

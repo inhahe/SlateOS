@@ -17,7 +17,7 @@
 //!   unless the device draws it: virtio-gpu shows a cursor that fits its
 //!   64x64 one on its own cursor queue, and moving it redraws nothing
 //!   (`DrmDevice::cursor_in_hardware`, `sync_hw_cursor`; design-decisions
-//!   §1400).
+//!   §1500).
 //!
 //! The arithmetic is in the `planecompose` crate, where every pixel of it is
 //! tested on the host; what is here is the kernel's side: turning GEM frame

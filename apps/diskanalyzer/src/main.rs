@@ -2813,16 +2813,53 @@ impl Probe for DiskAnalyzerUI {
 // Entry point
 // ============================================================================
 
-fn main() -> ExitCode {
-    let mut ui = DiskAnalyzerUI::new();
+/// The folder `diskanalyzer <folder>` names, from the words `ArgsOs` leaves
+/// after taking `--display`; `None` for no words.
+///
+/// The root is an argument so the file manager can hand this program a
+/// directory ("Analyze disk usage...") rather than always opening on `/` and
+/// making the user retype where they already were. Kept as an `OsString`: a
+/// path is bytes, and a lossy conversion would send the scan to a directory
+/// that is not the one named.
+///
+/// # Errors
+///
+/// A second word, named: one folder is scanned at a time.
+fn scan_root_from(rest: &[std::ffi::OsString]) -> Result<Option<PathBuf>, String> {
+    let mut words = rest.iter();
+    let root = words.next().map(PathBuf::from);
+    if let Some(extra) = words.next() {
+        return Err(format!(
+            "one folder is scanned at a time, and {} is a second",
+            std::path::Path::new(extra).shown()
+        ));
+    }
+    Ok(root)
+}
 
-    // The scan root is the first argument, so the file manager can hand this
-    // program a directory ("Analyze disk usage…") rather than always opening on
-    // `/` and making the user retype where they already were. Taken as an
-    // `OsString`: a path is bytes, and a lossy conversion here would send the
-    // scan to a directory that is not the one named on the command line.
-    if let Some(root) = std::env::args_os().nth(1) {
-        ui.config.scan_path = PathBuf::from(root);
+fn main() -> ExitCode {
+    // Parsed here and handed on to `launch_with`, not `launch`: `launch`
+    // refuses every argument it does not take itself, so `diskanalyzer
+    // /home` printed an error and never opened a window -- and a
+    // `--display` given first was taken for the folder.
+    let args = match oswindow::app::ArgsOs::from_env() {
+        Ok(args) => args,
+        Err(e) => {
+            eprintln!("diskanalyzer: {e}");
+            return ExitCode::from(2);
+        }
+    };
+    let root = match scan_root_from(&args.rest) {
+        Ok(root) => root,
+        Err(complaint) => {
+            eprintln!("diskanalyzer: {complaint}");
+            return ExitCode::from(2);
+        }
+    };
+
+    let mut ui = DiskAnalyzerUI::new();
+    if let Some(root) = root {
+        ui.config.scan_path = root;
         ui.path_input = ui.config.scan_path.shown().to_string();
     }
 
@@ -2834,7 +2871,7 @@ fn main() -> ExitCode {
     let root = ui.config.scan_path.clone();
     ui.start_scan(root);
 
-    app::launch("diskanalyzer", &mut ui)
+    app::launch_with("diskanalyzer", args.display.as_deref(), &mut ui)
 }
 
 // ============================================================================
@@ -2855,6 +2892,24 @@ mod tests {
     )]
 
     use super::*;
+
+    /// **The folder on the command line is the one scanned**, one at most:
+    /// `diskanalyzer /home` handed its folder to `app::launch`, which refused
+    /// it and never opened a window.
+    #[test]
+    fn the_folder_named_on_the_command_line_is_the_root() {
+        use std::ffi::OsString;
+        assert_eq!(scan_root_from(&[]), Ok(None));
+        assert_eq!(
+            scan_root_from(&[OsString::from("/home")]),
+            Ok(Some(PathBuf::from("/home")))
+        );
+        let refused = scan_root_from(&[OsString::from("/home"), OsString::from("/tmp")]);
+        assert!(
+            refused.as_ref().is_err_and(|e| e.contains("/tmp")),
+            "{refused:?}"
+        );
+    }
 
     // -- helpers ---------------------------------------------------------------
 

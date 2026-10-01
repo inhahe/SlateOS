@@ -34,6 +34,11 @@
 //! read through it; a size in a header is checked against [`Limits`] before any
 //! pixel buffer exists; and the decoders bound everything they allocate the
 //! same way (see their modules).
+//!
+//! Portions of this file are translated into Rust from libwebp 1.6.0's
+//! `anim_decode.c`, `demux.c`, `webp_dec.c` (copyright 2010-2025 Google
+//! Inc.), and changed for this project; used under libwebp's BSD licence and
+//! patent grant (`licenses/libwebp-COPYING`, `licenses/libwebp-PATENTS`).
 
 use alloc::vec;
 use alloc::vec::Vec;

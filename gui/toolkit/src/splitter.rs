@@ -26,7 +26,10 @@
 //! *"the drag hit-region extends a few pixels past the visible margin on both
 //! sides ... users should never have to pixel-hunt to start a resize"*. So
 //! [`divider_at`] takes the drawn thickness and adds [`GRAB_MARGIN`] either
-//! side, and a two-pixel line is an eight-pixel target.
+//! side, and a two-pixel line is an eight-pixel target. The rule and the number
+//! are [`crate::grab`]'s -- the one statement of how much larger than what is
+//! drawn a draggable thing is to the pointer -- so a divider here and any other
+//! edge in the toolkit are taken hold of alike.
 
 use crate::frame::Rect;
 use crate::layout::Axis;
@@ -35,8 +38,10 @@ use crate::layout::Axis;
 ///
 /// Three pixels either side of a two-pixel line gives an eight-pixel target,
 /// which is comfortable with a mouse and still narrow enough that a click
-/// meant for a pane's first row does not start a drag instead.
-pub const GRAB_MARGIN: f32 = 3.0;
+/// meant for a pane's first row does not start a drag instead. A divider is an
+/// edge between two areas, so this is [`grab::EDGE_MARGIN`](crate::grab::EDGE_MARGIN);
+/// the name stays because callers outside the toolkit read it.
+pub const GRAB_MARGIN: f32 = crate::grab::EDGE_MARGIN;
 
 /// The thickness a divider is normally drawn at.
 pub const DIVIDER: f32 = 2.0;

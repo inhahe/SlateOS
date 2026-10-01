@@ -10999,7 +10999,7 @@ fn ctest_generic_grant(word: &str) -> Option<(ResourceType, u64, Rights)> {
             Rights::READ | Rights::WRITE | Rights::EXECUTE | Rights::METADATA,
         )),
         // The right to change Secure Boot's lists: the granted arm of
-        // SYS_SECUREBOOT_ENROLL and _REMOVE (design-decisions §1401).
+        // SYS_SECUREBOOT_ENROLL and _REMOVE (design-decisions §1501).
         "secureboot" => Some((ResourceType::Process, 0, Rights::ENROLL_SECUREBOOT)),
         _ => None,
     }

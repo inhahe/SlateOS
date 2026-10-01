@@ -389,6 +389,48 @@ MUTATIONS = [
         "        (640, 480)",
         ["the_window_opens_at_the_size_the_layout_is_written_for"],
     ),
+    (
+        "the theme is never taken up",
+        "    fn theme_changed(&mut self, palette: &Palette) {\n        self.palette = *palette;",
+        "    fn theme_changed(&mut self, palette: &Palette) {\n        let _ = palette;",
+        ["the_window_is_drawn_in_the_users_colours"],
+    ),
+    (
+        "a piece the shade of its square is not ringed",
+        "        color: gamechrome::edge_on(outer, outer, ground),",
+        "        color: outer,",
+        ["every_piece_is_seen_on_its_square_in_either_theme"],
+    ),
+    (
+        "the legal moves are marked in a shade the squares hide",
+        "            legal: p.text,",
+        "            legal: p.surface1,",
+        ["the_marks_on_the_board_read_in_either_theme"],
+    ),
+    (
+        "the selection is drawn in the cursor's colour",
+        "            selected: p.text,",
+        "            selected: p.accent,",
+        ["the_selection_ring_is_drawn_on_the_selected_square"],
+    ),
+    (
+        "red's name is the pale red on any page",
+        "            Side::Red => gamechrome::legible_on(RED_TEXT, ground),",
+        "            Side::Red => RED_TEXT.0,",
+        ["the_marks_on_the_board_read_in_either_theme"],
+    ),
+    (
+        "the page is Mocha's surface whatever the theme",
+        "            height: l.window.h,\n            color: c.chrome.page,",
+        "            height: l.window.h,\n            color: Color::from_hex(0x313244),",
+        ["the_window_is_drawn_in_the_users_colours"],
+    ),
+    (
+        "the crown is its own gold unmoved, 2.9:1 on a red piece",
+        "        let gold = gamechrome::Ink::on(KING_CROWN, &[inner]).at(size, true);",
+        "        let gold = KING_CROWN;",
+        ["every_text_reads_on_what_is_under_it_in_either_theme"],
+    ),
 ]
 
 if __name__ == "__main__":

@@ -116,6 +116,19 @@ impl FocusMode {
         }
     }
 
+    /// The icon this mode is drawn as on the taskbar, by its name in the icon
+    /// theme: the same four pictures as [`icon`](Self::icon)'s emoji, which
+    /// no font the desktop has can draw (design-decisions.md §881).
+    #[must_use]
+    pub const fn icon_name(&self) -> &'static str {
+        match self {
+            Self::Off => "notifications",
+            Self::PriorityOnly => "notifications-disabled",
+            Self::AlarmsOnly => "alarm",
+            Self::TotalSilence => "action-unavailable",
+        }
+    }
+
     pub fn description(&self) -> &str {
         match self {
             Self::Off => "All notifications are shown",
@@ -1263,14 +1276,20 @@ mod tests {
     fn every_colour_the_module_draws_comes_from_its_palette() {
         for light in [false, true] {
             let p = accented(light);
+            // A mode's pill is lettered for its own hue.
+            let inks: Vec<Color> = FocusMode::ALL
+                .iter()
+                .filter_map(|m| m.hue(&p))
+                .map(readable_on)
+                .collect();
             for m in FocusMode::ALL {
                 let mut mgr = busy();
                 mgr.set_mode(m);
-                assert_drawn_from(&p, &mgr.render_tray_indicator(&p, 0.0, 0.0), &[], "tray");
+                assert_drawn_from(&p, &mgr.render_tray_indicator(&p, 0.0, 0.0), &inks, "tray");
                 assert_drawn_from(
                     &p,
                     &mgr.render_settings(&p, 0.0, 0.0, 400.0),
-                    &[],
+                    &inks,
                     "focus assist settings",
                 );
             }
@@ -1279,7 +1298,7 @@ mod tests {
             assert_drawn_from(
                 &p,
                 &make_mgr().render_settings(&p, 0.0, 0.0, 400.0),
-                &[],
+                &inks,
                 "focus assist settings, no rules",
             );
         }
@@ -1415,7 +1434,7 @@ mod tests {
                 };
                 let got = colors(&cmds);
                 assert_eq!(got, vec![fill, readable_on(fill)], "{m:?} tray ink");
-                if got[1] == Color::from_hex(0x0011_111B) {
+                if got[1] == appearance::DARK_EXTREME {
                     saw_dark_ink = true;
                 } else {
                     saw_light_ink = true;

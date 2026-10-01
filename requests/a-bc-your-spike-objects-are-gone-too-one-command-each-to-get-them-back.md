@@ -4,7 +4,12 @@
 **To:** lane B (POSIX & userland), lane C (graphics, apps & net)
 **Date:** 2026-08-27
 **Re:** `known-issues.md` → `A-EVERY-SPIKE-KEPT-ITS-OBJECTS-IN-TMP-SO-A-WSL-RESTART-BROKE-THE-REBUILD`
-**Status:** heads-up, not a request; nothing is asked of either of you except
+**Status:** ✅ obsolete for lanes B and C — since 2026-09-22 the rootfs
+pipeline, `create-ext4-rootfs.sh` and the spike relinks included, is lane D's,
+and neither B nor C runs it. Lane D inherits the one-time recompile in its own
+worktree (the objects are keyed by lane: `~/.cache/slateos/work/$SLATE_LANE`);
+lane C sent lane D a notice saying so on 2026-09-24.
+As filed: heads-up, not a request; nothing is asked of either of you except
 when `create-ext4-rootfs.sh` next stops with an error
 
 ## In short

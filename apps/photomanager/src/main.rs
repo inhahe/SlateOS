@@ -4717,9 +4717,14 @@ impl App for PhotoApp {
         if !changes.is_empty() {
             let dropped: Vec<u64> = changes
                 .iter()
-                .filter_map(|c| match c {
-                    app::ImageChange::Drop(id) => Some(*id),
-                    app::ImageChange::Upload { .. } => None,
+                .filter_map(|c| {
+                    // `if let`, not a match naming each variant: another kind
+                    // of change (a patch, lane F's next) drops nothing.
+                    if let app::ImageChange::Drop(id) = c {
+                        Some(*id)
+                    } else {
+                        None
+                    }
                 })
                 .collect();
             self.thumb_ready.retain(|_, (_, id)| !dropped.contains(id));
@@ -7729,21 +7734,18 @@ mod tests {
 
         let queued = app.take_images();
         assert_eq!(queued.len(), 1, "one photograph, one upload");
-        match queued.first().expect("the upload") {
-            oswindow::app::ImageChange::Upload {
-                id, width, height, ..
-            } => {
-                assert_eq!(*id, PHOTO_IMAGE_ID);
-                assert_eq!(
-                    (*width, *height),
-                    (6, 4),
-                    "the picture's own size, read from the file"
-                );
-            }
-            oswindow::app::ImageChange::Drop(id) => {
-                panic!("expected an upload, got a drop of {id}")
-            }
-        }
+        let Some(oswindow::app::ImageChange::Upload {
+            id, width, height, ..
+        }) = queued.first()
+        else {
+            panic!("expected an upload, got {:?}", queued.first());
+        };
+        assert_eq!(*id, PHOTO_IMAGE_ID);
+        assert_eq!(
+            (*width, *height),
+            (6, 4),
+            "the picture's own size, read from the file"
+        );
     }
 
     /// The single-photo view draws the photograph instead of a card.

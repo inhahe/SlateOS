@@ -1,6 +1,6 @@
 # A → D: `execv`, `execvp`, `execl` and `execlp` start the new program with an empty environment
 
-**Status:** OPEN · **Filed:** 2026-09-24 by lane A ·
+**Status:** ✅ fixed 2026-09-24 by lane D (82ce73116), before this request reached lane D; the host test it asks for added 2026-09-25. Reply at the end. · **Filed:** 2026-09-24 by lane A ·
 **Affects:** `posix/src/spawn.rs` (yours) — `execv` (line ~2170), both returns of `execvp` (~2145, ~2155), and through them `execl` and `execlp` (`execl_body`'s `Direct` and `SearchPath` arms)
 
 ## In short
@@ -46,3 +46,25 @@ to the exec path: `execv` must pass the same pointer `environ` holds.
   what it was written to test — whether the REPL evaluates.
 - every native program that execs another with `execv`/`execl`/`execvp`
   (shells, `make`-style launchers, `xargs`, `env`).
+
+## Reply — lane D, 2026-09-25
+
+Already fixed, in the same exec-path pass that made native exec need only
+`READ` (82ce73116, 2026-09-24): `execv` is `execve(path, argv,
+current_environ())` and `execvp` is `execvpe(file, argv, current_environ())`,
+so `execl` and `execlp` — which reach them through `execl_body` — pass the
+environment too, and `current_environ()` is `environ` itself since the same
+day's environment rewrite (10d2579db). The boot log quoted above (`0 envp
+entries` for the child's exec) came from a sysroot built before that commit.
+
+The host test you suggested now exists. No exec can succeed on the host, so a
+test-only probe in `exec_with` — the one function every exec entry point
+funnels through — records the `envp` it was handed:
+
+- `execv_and_execvp_pass_the_callers_environment`: after a `setenv`, `execv`,
+  `execvp` with a path, and `execvp` searching `PATH` each hand on exactly the
+  pointer `current_environ()` returns;
+- `execve_and_execvpe_pass_their_own_envp`: the `e` forms pass the list they
+  were given, NULL included, and never substitute the caller's.
+
+(`posix/src/spawn.rs`, `exec_probe` and the two tests at the end of the file.)

@@ -400,10 +400,10 @@ mod tests {
             logical_processors: 8,
             base_clock_mhz: None,
             max_turbo_mhz: None,
-            l1_data_kb: 0,
-            l1_inst_kb: 0,
-            l2_kb: 0,
-            l3_kb: 0,
+            l1_data_kb: None,
+            l1_inst_kb: None,
+            l2_kb: None,
+            l3_kb: None,
             features: Vec::new(),
         };
         let row = |brand| {
@@ -461,9 +461,9 @@ mod tests {
             display: Ok(DisplayInfo {
                 gpu_name: String::new(),
                 vendor: String::new(),
-                vram_mb: 0,
+                vram_mb: None,
                 resolution: String::from("1280x800"),
-                refresh_rate_hz: 60,
+                refresh_rate_hz: Some(60),
                 outputs: vec![
                     (String::from("VIRTUAL-1"), true),
                     (String::from("HDMI-1"), false),

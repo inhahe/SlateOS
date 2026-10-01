@@ -1,7 +1,16 @@
 # E → C: a `TextInput` that takes its own keys
 
 **From:** lane E · **To:** lane C · **Filed:** 2026-09-25
-**Status:** open — nothing in lane E is blocked. The copies are gone: since
+**Status:** DONE -- landed on `lane-c` 2026-09-27 (lane C), on `main` since
+2026-09-28 (`9154182d0`). The table was already the toolkit's -- `TextInput::edit_key(key, font_size, weight)`,
+which also leaves Ctrl+Alt (AltGr) chords to the layout and answers `KeyEdit::Unhandled` for
+Enter, Escape and Tab -- and it now has the two things `apps/textline` added over it:
+`TextInput::set_capacity(Some(n))`, a field's `maxlength` in characters (a key a full field
+cannot take answers `Handled`, not `Changed`); and a paste that leaves control characters
+out, as `insert_text` types (a paste of nothing else keeps the selection). A copy or cut is
+on `clipboard()` afterwards, for a window that shares one clipboard between fields.
+`textline::LineEdit::handled` is `edit_key(..) != KeyEdit::Unhandled`.
+Previously: open — nothing in lane E is blocked. The copies are gone: since
 2026-09-26 the seven applications share one, the lane E crate `apps/textline`
 (below), which goes when this lands.
 

@@ -8,6 +8,9 @@ description = "Where SlateOS settings files live, and how they are replaced with
 # Format-preserving YAML. A settings file a user has commented has to come back
 # with the comments intact. See yamldoc/src/lib.rs.
 yamldoc = { path = "../../yamldoc" }
+# The one rule for what a settings file may be called, shared with the display
+# protocol and the watcher that announces a file by name.
+settingsname = { path = "../settingsname" }
 
 # A private on-disk directory per test, for the `testing` module below.
 # Optional, and off by default: `scratchdir` exists to be a dev-dependency that

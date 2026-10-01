@@ -54,7 +54,16 @@ OUT_IMG="${1:-$ROOT_DIR/rootfs.ext4}"
 # Not larger: block groups are 32768 blocks at 4 KiB, so 384M is 3 of them —
 # enough that the driver's multi-group descriptor walk is exercised, without
 # adding image to hold nothing.
-IMG_SIZE="${IMG_SIZE:-384M}"
+#
+# SIZED FROM WHAT IS STAGED since 2026-09-30, when the 384M image had filled
+# again -- 362.6 MiB of files staged, the fonts, eSpeak NG and 73 native
+# utilities having come after CPython -- and `mke2fs -d` gave up partway, as
+# the paragraph above says it does. Each size here was right when it was chosen
+# and wrong a few ports later, so the rule it kept to is now what decides: the
+# image is the staged tree at most 60% full (~40% free), in whole block groups,
+# never under the 3 groups above (see "the image's size", just before mke2fs).
+# IMG_SIZE, given, still wins -- with a warning when it holds less headroom.
+IMG_SIZE="${IMG_SIZE:-}"
 
 # --- standard Ubuntu/Debian glibc locations ----------------------------------
 LD_SO="/lib64/ld-linux-x86-64.so.2"          # PT_INTERP of every x86-64 glibc exe
@@ -62,7 +71,7 @@ LIBC="/lib/x86_64-linux-gnu/libc.so.6"        # the C library itself
 LIBC_DIR="/lib/x86_64-linux-gnu"
 
 echo "[rootfs] repo root : $ROOT_DIR"
-echo "[rootfs] output    : $OUT_IMG ($IMG_SIZE)"
+echo "[rootfs] output    : $OUT_IMG (${IMG_SIZE:-sized from what is staged})"
 
 # --- sanity: required tools + glibc artifacts present ------------------------
 for tool in mke2fs gcc cp; do
@@ -1104,6 +1113,10 @@ else
         scripts/pkgconf-spike/run.sh
     spike_rebuild_if_behind "$ROOT_DIR/build/spike/make-slateos.elf" \
         scripts/make-spike/run.sh
+    # eSpeak NG's relink is seconds: the objects and the phoneme data stay,
+    # only the last link against the new libc.a is redone.
+    spike_rebuild_if_behind "$ROOT_DIR/build/spike/espeak-ng-slateos.elf" \
+        scripts/espeak-spike/slatelink.sh
     # CMake is deliberately NOT in this list, and the reason is its cost rather
     # than any difference in principle. The other four relink objects that are
     # already built; cmake's spike re-runs a full cross configure and build of
@@ -1314,6 +1327,62 @@ elif [ -e "$CMAKE_SLATE" ]; then
 else
     echo "[rootfs] NOTE: $CMAKE_SLATE not found — /bin/cmake will be absent"
     echo "[rootfs]       (build it with: wsl -d Ubuntu -- bash scripts/cmake-spike/run.sh)"
+fi
+
+# --- eSpeak NG 1.52, likewise linked against OUR OWN libc --------------------
+# The speech synthesizer (design.txt: speech output is one of the two things
+# exempt from "no AI"), built by scripts/espeak-spike/run.sh (lane E's; see its
+# README) and relinked against libc.a -- with zero missing and zero duplicate
+# symbols on its first attempt.  Asked for in
+# requests/e-d-stage-espeak-ng-on-the-image.md.
+#
+# TWO artifacts from one build, staged together or not at all, as CMake's
+# pair above: /bin/espeak-ng, and /usr/share/espeak-ng-data/, the data path
+# compiled into it.  The data is compiled by the same build, and a data file
+# from another eSpeak version need not load.
+#
+# ENGLISH ONLY, for now: the phoneme tables (phondata, phonindex, phontab,
+# intonations), en_dict, and lang/ and voices/ -- every language's and voice's
+# definition, 66 KB, so `espeak-ng --voices` stays honest about what the program
+# knows.  0.9 MB in all.  The other ~109 languages' dictionaries are 17.5 MB,
+# and how large this image should be is the operator's open question
+# (open-questions.md, B-Q21); they come when that is answered, or as packages.
+#
+# `--strip-debug`, as CPython's slatelink does: the symbol table stays for
+# backtraces, the DWARF (most of the 2.8 MB) does not.
+#
+# Staleness: identical rule to bash, pkgconf, make and cmake -- absent is
+# honest (NOTE), older than libc.a is a lie (fatal).  The relink above is
+# normally what keeps it fresh.
+ESPEAK_SLATE="$ROOT_DIR/build/spike/espeak-ng-slateos.elf"
+ESPEAK_DATA="$ROOT_DIR/build/spike/espeak-ng-data"
+ESPEAK_STALE=0
+if [ -e "$ESPEAK_SLATE" ] && [ -f "$ESPEAK_DATA/phondata" ] && [ -f "$ESPEAK_DATA/en_dict" ]; then
+    strip --strip-debug -o "$STAGE/bin/espeak-ng" "$ESPEAK_SLATE"
+    chmod 0755 "$STAGE/bin/espeak-ng"
+    ESPEAK_DST="$STAGE/usr/share/espeak-ng-data"
+    mkdir -p "$ESPEAK_DST"
+    for espeak_f in phondata phonindex phontab intonations en_dict; do
+        cp "$ESPEAK_DATA/$espeak_f" "$ESPEAK_DST/$espeak_f"
+    done
+    cp -r "$ESPEAK_DATA/lang" "$ESPEAK_DATA/voices" "$ESPEAK_DST/"
+    echo "[rootfs] staged eSpeak NG (linked against our libc.a): /bin/espeak-ng" \
+         "($(stat -c %s "$STAGE/bin/espeak-ng") bytes) + English data" \
+         "($(du -sb "$ESPEAK_DST" | cut -f1) bytes)"
+    if [ -e "$ROOT_DIR/toolchain/sysroot/lib/libc.a" ] \
+       && [ "$ROOT_DIR/toolchain/sysroot/lib/libc.a" -nt "$ESPEAK_SLATE" ]; then
+        echo "[rootfs] WARNING: espeak-ng-slateos.elf is OLDER than the sysroot libc.a — it links a"
+        echo "[rootfs]          stale libc and proves nothing about the current one. Relink it:"
+        echo "[rootfs]            wsl -d Ubuntu --exec bash scripts/espeak-spike/slatelink.sh"
+        ESPEAK_STALE=1
+    fi
+elif [ -e "$ESPEAK_SLATE" ]; then
+    echo "[rootfs] NOTE: $ESPEAK_SLATE exists but its data ($ESPEAK_DATA) does not --"
+    echo "[rootfs]       staging NEITHER: the program cannot speak without it."
+    echo "[rootfs]       (rebuild both with: wsl -d Ubuntu --exec bash scripts/espeak-spike/run.sh)"
+else
+    echo "[rootfs] NOTE: $ESPEAK_SLATE not found — /bin/espeak-ng will be absent"
+    echo "[rootfs]       (build it with: wsl -d Ubuntu --exec bash scripts/espeak-spike/run.sh)"
 fi
 
 # --- CPython 3.12.3, likewise linked against OUR OWN libc ---------------------
@@ -1848,6 +1917,58 @@ else
     echo "[rootfs] WARNING: no services/ctest-*/*.elf found — C self-tests will self-skip"
 fi
 
+# The kernel's generic rung runs each C fixture services/ctest-generic.list
+# names, from /tests/ctest-generic.list (requests/d-a-one-rung-for-every-c-
+# fixture.md). A line the rung cannot read, or a fixture with no recipe, is
+# refused here rather than found at boot: three blank-separated fields, a
+# fixture with a services/<name>/build.py, a grant of `-` or `file`, and
+# 1 to 600 seconds.
+GENERIC_LIST="$ROOT_DIR/services/ctest-generic.list"
+if [ -f "$GENERIC_LIST" ]; then
+    _bad=0
+    _listed=0
+    while IFS= read -r _line || [ -n "$_line" ]; do
+        _line="${_line%%#*}"
+        # Fields by `read`, not `set --`, which would take the script's own
+        # arguments; and no glob is expanded.
+        _name="" _grant="" _secs="" _more=""
+        read -r _name _grant _secs _more <<<"$_line" || true
+        if [ -z "$_name" ]; then
+            continue
+        fi
+        if [ -z "$_secs" ] || [ -n "$_more" ]; then
+            echo "[rootfs] ERROR: ctest-generic.list: '$_line' is not <name> <grants> <seconds>"
+            _bad=1
+            continue
+        fi
+        if [ ! -f "$ROOT_DIR/services/$_name/build.py" ]; then
+            echo "[rootfs] ERROR: ctest-generic.list names $_name, which has no services/$_name/build.py"
+            _bad=1
+        fi
+        case "$_grant" in
+            -|file) ;;
+            *) echo "[rootfs] ERROR: ctest-generic.list: $_name's grant '$_grant' is neither - nor file"
+               _bad=1 ;;
+        esac
+        _secs_ok=0
+        case "$_secs" in
+            *[!0-9]*) ;;
+            *) if [ "$_secs" -ge 1 ] && [ "$_secs" -le 600 ]; then _secs_ok=1; fi ;;
+        esac
+        if [ "$_secs_ok" -ne 1 ]; then
+            echo "[rootfs] ERROR: ctest-generic.list: $_name's '$_secs' seconds is not 1 to 600"
+            _bad=1
+        fi
+        _listed=$((_listed + 1))
+    done < "$GENERIC_LIST"
+    if [ "$_bad" -ne 0 ]; then
+        echo "[rootfs] ERROR: services/ctest-generic.list is malformed; the image is not written"
+        exit 1
+    fi
+    cp "$GENERIC_LIST" "$STAGE/tests/ctest-generic.list"
+    echo "[rootfs] staged ctest-generic.list: $_listed fixture(s) for the kernel's generic rung"
+fi
+
 # Same rule for bash (flagged further up, enforced here so that both artifact
 # families answer to one gate and neither can be stale in a shipped image).
 #
@@ -1965,6 +2086,22 @@ if [ "$PY_STALE" -gt 0 ]; then
     fi
 fi
 
+if [ "$ESPEAK_STALE" -gt 0 ]; then
+    if [ "${ALLOW_STALE_FIXTURES:-0}" = "1" ]; then
+        echo "[rootfs] WARNING: espeak-ng-slateos.elf is stale (see above);" \
+             "continuing because ALLOW_STALE_FIXTURES=1"
+    else
+        echo "[rootfs] ERROR: build/spike/espeak-ng-slateos.elf is STALE."
+        echo "[rootfs]        It links an older libc.a than the one in the sysroot, so"
+        echo "[rootfs]        /bin/espeak-ng on the image would be built against a libc"
+        echo "[rootfs]        that is no longer in the build. Relink it:"
+        echo "[rootfs]          wsl -d Ubuntu --exec bash scripts/espeak-spike/slatelink.sh"
+        echo "[rootfs]        (normally run for you -- this means that relink failed.)"
+        echo "[rootfs]        Or set ALLOW_STALE_FIXTURES=1 to build the image anyway."
+        exit 1
+    fi
+fi
+
 # --- our own userspace: the Rust utilities this tree writes -------------------
 #
 # WHAT WAS MISSING HERE UNTIL 2026-09-13.  Nothing in this script, in
@@ -1988,19 +2125,53 @@ fi
 # A-THE-AUDIO-DRIVERS-HAD-NEVER-RUN-ON-ANY-BOOT-TEST in known-issues.md.
 # Compiling is not running.
 #
-# Build them with:
+# Build them with three commands, in this order:
 #   cd userspace/coreutils
+#   CARGO_UNSTABLE_JSON_TARGET_SPEC=true cargo +nightly build --release -p coreutils
+#   CARGO_UNSTABLE_JSON_TARGET_SPEC=true cargo +nightly clean --release \
+#     --target ../../toolchain/x86_64-slateos.json -p kill -p logger -p powerctl
 #   CARGO_UNSTABLE_JSON_TARGET_SPEC=true cargo +nightly build --release \
-#     -p coreutils -p ar -p kill -p logger -p logrotate
+#     -p ar -p kill -p logger -p logrotate -p powerctl
+# (`slate_build_commands` below prints them, wherever this block says to run
+# them.)
 #
-# The `-p` list is NOT decoration. The manifest's names come from FIVE
-# crates, not one: coreutils produces 70 of them and `ar`, `kill`, `logger`
-# and `logrotate` produce one each. A plain `cargo build` in
+# The `-p` list is NOT decoration. The manifest's names come from six
+# crates, not one: coreutils produces 70 of them, and `ar`, `kill`, `logger`,
+# `logrotate` and `powerctl` their own. A plain `cargo build` in
 # `userspace/coreutils` builds only that crate, so following the old form of
 # this instruction left four binaries -- and the `ranlib`, `strip` and
 # `killall` aliases that need two of them -- off the image, reported as a
 # NOTE nobody reads. Measured with `scripts/check-manifest-producers.py`,
 # not guessed, and the command above was run before being printed here.
+#
+# Nor is the split into two builds. `kill` and `logger` are built TWICE:
+# coreutils has a `src/bin/kill.rs` and a `src/bin/logger.rs` of its own
+# beside the `userspace/kill` and `userspace/logger` crates -- the last two of
+# the pairs in known-issues.md B-FORTY-TWO-BINARY-NAMES-ARE-BUILT-BY-TWO-
+# PACKAGES, which design-decisions.md §1005 has merged into coreutils, lane
+# B's to do. The two of a pair write one file, `release/kill`, and cargo
+# asked for both in one invocation warns "output filename collision" and
+# keeps whichever it linked last: scheduling, not a decision. The command
+# here was one invocation until 2026-09-28, and the image's /bin/kill was
+# coreutils', which has no `killall` -- so the `killall = kill` alias below
+# made a /bin/killall that was plain `kill`. Cargo links a requested
+# package's outputs into `release/` whether it rebuilt them or found them
+# fresh, so the last command's copies are the ones left there: the standalone
+# crates', which are the copies this manifest means, `killall` being theirs.
+# The staging loop below checks it, since a wrong copy is otherwise silent.
+#
+# And the `clean` is for those three crates' other defect. Unlike coreutils,
+# `ar` and `logrotate`, they have no build script naming `libc.a` as an input
+# (`userspace/sysroot-dep` says why one is needed), so after a libc rebuild
+# cargo reports `Finished` and relinks nothing, and the staleness check below
+# refuses them -- rightly: they carry the old library. Cleaning them makes the
+# build link them again, against the current one. (`--target` because
+# `cargo clean`, unlike `cargo build`, does not take the target from
+# userspace/.cargo/config.toml: without it, it cleans the host's directory
+# and reports 0 files -- measured.) The build scripts, and
+# the two pairs, are asked of lane B in requests/d-b-kill-and-logger-are-
+# built-twice-and-three-image-crates-miss-sysroot-dep.md; when both are done,
+# the clean goes.
 #
 # ABSENCE IS AN ERROR AS OF 2026-09-16, which is what the paragraph that used
 # to sit here asked for:
@@ -2036,6 +2207,46 @@ SLATE_MISSING_NAMES=""
 SLATE_ALIASES=0
 SLATE_ALIAS_LINES=""
 SLATE_ALIAS_ORPHANS=""
+SLATE_WRONG_COPY=""
+
+# The commands that build what the manifest names, in the order that matters
+# ("Nor is the split into two builds", above), printed wherever this block
+# tells somebody to run them -- one copy, so they cannot drift apart. $1 is
+# the indent after "[rootfs]".
+slate_build_commands() {
+    echo "[rootfs]$1cd userspace/coreutils"
+    echo "[rootfs]$1CARGO_UNSTABLE_JSON_TARGET_SPEC=true cargo +nightly build --release -p coreutils"
+    echo "[rootfs]$1CARGO_UNSTABLE_JSON_TARGET_SPEC=true cargo +nightly clean --release \\"
+    echo "[rootfs]$1  --target ../../toolchain/x86_64-slateos.json -p kill -p logger -p powerctl"
+    echo "[rootfs]$1CARGO_UNSTABLE_JSON_TARGET_SPEC=true cargo +nightly build --release \\"
+    echo "[rootfs]$1  -p ar -p kill -p logger -p logrotate -p powerctl"
+}
+
+# Whether the name $1 is built by two packages: a coreutils bin, and a crate
+# of its own under userspace/.
+slate_two_producers() {
+    { [ -f "$ROOT_DIR/userspace/coreutils/src/bin/$1.rs" ] \
+        || [ -d "$ROOT_DIR/userspace/coreutils/src/bin/$1" ]; } \
+        && [ -f "$ROOT_DIR/userspace/$1/Cargo.toml" ]
+}
+
+# Whether $2, the built $1, is the userspace/$1 crate's build. That cannot be
+# read off $2, nor off the `release/$1.d` cargo writes beside it, which is
+# uplifted separately: on 2026-09-28 it named userspace/kill's sources while
+# the binary beside it was coreutils'. What can say is the file in deps/ that
+# $2 is a copy of -- cargo hard-links the one to the other -- and that file's
+# own dep-info.
+slate_standalone_build() {
+    local dep
+    for dep in "$SLATE_BIN_DIR/deps/$1"-*; do
+        case "${dep##*/}" in *.*) continue ;; esac
+        if [ -f "$dep" ] && cmp -s "$dep" "$2" \
+            && grep -q "userspace[/\\\\]$1[/\\\\]src[/\\\\]" "$dep.d" 2>/dev/null; then
+            return 0
+        fi
+    done
+    return 1
+}
 if [ ! -f "$SLATE_MANIFEST" ]; then
     echo "[rootfs] ERROR: $SLATE_MANIFEST does not exist, so NO SlateOS-native utility"
     echo "[rootfs]        can be staged. This is an error and not a NOTE because the"
@@ -2096,6 +2307,12 @@ while IFS= read -r name; do
         SLATE_SKIPPED=$((SLATE_SKIPPED + 1))
         continue
     fi
+    # A NAME TWO PACKAGES BUILD ships as the userspace/<name> crate's build
+    # or not at all ("Nor is the split into two builds", above).
+    if slate_two_producers "$name" && ! slate_standalone_build "$name" "$f"; then
+        SLATE_WRONG_COPY="$SLATE_WRONG_COPY $name"
+        continue
+    fi
     cp -L "$f" "$STAGE/bin/$name"
     SLATE_COUNT=$((SLATE_COUNT + 1))
     SLATE_BYTES=$((SLATE_BYTES + $(wc -c < "$f")))
@@ -2103,6 +2320,14 @@ while IFS= read -r name; do
         SLATE_STALE=$((SLATE_STALE + 1))
     fi
 done < "$SLATE_MANIFEST"
+if [ -n "$SLATE_WRONG_COPY" ]; then
+    echo "[rootfs] ERROR: two packages build each of these, and what $SLATE_BIN_DIR"
+    echo "[rootfs]        holds is not the userspace/<name> crate's build:$SLATE_WRONG_COPY"
+    echo "[rootfs]        cargo keeps whichever copy it linked last. Build with these"
+    echo "[rootfs]        commands, in this order, which link the standalone crates last:"
+    slate_build_commands "          "
+    exit 1
+fi
 if [ "$SLATE_COUNT" -gt 0 ]; then
     SLATE_MIB=$((SLATE_BYTES / 1048576))
     # `/bin` IN THE IMAGE, which is `/mnt/bin` once the kernel has mounted it.
@@ -2135,10 +2360,8 @@ if [ "$SLATE_COUNT" -gt 0 ]; then
     if [ "$SLATE_STALE" -gt 0 ]; then
         echo "[rootfs] $SLATE_STALE of $SLATE_COUNT staged binaries are OLDER than the sysroot libc.a."
         echo "[rootfs] They link a stale libc and prove nothing about the current one."
-        echo "[rootfs] Rebuild them:"
-        echo "[rootfs]   cd userspace/coreutils"
-        echo "[rootfs]   CARGO_UNSTABLE_JSON_TARGET_SPEC=true cargo +nightly build --release \\"
-        echo "[rootfs]     -p coreutils -p ar -p kill -p logger -p logrotate"
+        echo "[rootfs] Rebuild them, with these commands in this order:"
+        slate_build_commands "  "
         if [ "${ALLOW_STALE_FIXTURES:-0}" = "1" ]; then
             echo "[rootfs] NOTE: ALLOW_STALE_FIXTURES=1 — packing them anyway."
         else
@@ -2161,14 +2384,20 @@ if [ "$SLATE_COUNT" -gt 0 ]; then
     # `$(( 1G / 4 ))` is "value too great for base". A size this cannot parse
     # skips the check rather than failing, because the budget is advice and
     # advice must never be what breaks a build.
+    #
+    # Only for a given IMG_SIZE, since 2026-09-30: otherwise the image is sized
+    # from the whole staged tree just before mke2fs, which is the free-space
+    # accounting this comment says nothing did.
     SLATE_BUDGET=""
-    case "$IMG_SIZE" in
-        *[0-9][Mm]) SLATE_BUDGET=$(( ${IMG_SIZE%?} / 4 )) ;;
-        *[0-9][Gg]) SLATE_BUDGET=$(( ${IMG_SIZE%?} * 1024 / 4 )) ;;
-        *) echo "[rootfs] NOTE: IMG_SIZE=$IMG_SIZE has no M or G suffix this can read, so the"
-           echo "[rootfs]       staged-size budget was NOT checked. The $SLATE_MIB MiB above is"
-           echo "[rootfs]       still accurate; only the comparison was skipped." ;;
-    esac
+    if [ -n "$IMG_SIZE" ]; then
+        case "$IMG_SIZE" in
+            *[0-9][Mm]) SLATE_BUDGET=$(( ${IMG_SIZE%?} / 4 )) ;;
+            *[0-9][Gg]) SLATE_BUDGET=$(( ${IMG_SIZE%?} * 1024 / 4 )) ;;
+            *) echo "[rootfs] NOTE: IMG_SIZE=$IMG_SIZE has no M or G suffix this can read, so the"
+               echo "[rootfs]       staged-size budget was NOT checked. The $SLATE_MIB MiB above is"
+               echo "[rootfs]       still accurate; only the comparison was skipped." ;;
+        esac
+    fi
     if [ -n "$SLATE_BUDGET" ] && [ "$SLATE_MIB" -gt "$SLATE_BUDGET" ]; then
         echo "[rootfs] WARNING: that is more than a quarter of the $IMG_SIZE image ($SLATE_BUDGET MiB)."
         echo "[rootfs]          Nothing here checks total free space, and mke2fs -d fails PARTWAY"
@@ -2182,10 +2411,9 @@ elif [ -n "${ALLOW_EMPTY_SLATE_BIN:-}" ]; then
 else
     echo "[rootfs] ERROR: none of the binaries named in $SLATE_MANIFEST have been"
     echo "[rootfs]        built, so /bin would get none of this project's own utilities."
-    echo "[rootfs]        They build for the HOST by default; the slateos target is separate:"
-    echo "[rootfs]          cd userspace/coreutils"
-    echo "[rootfs]          CARGO_UNSTABLE_JSON_TARGET_SPEC=true cargo +nightly build --release \\"
-    echo "[rootfs]            -p coreutils -p ar -p kill -p logger -p logrotate"
+    echo "[rootfs]        They build for the HOST by default; the slateos target is separate,"
+    echo "[rootfs]        with these commands, in this order:"
+    slate_build_commands "          "
     echo "[rootfs]        then re-run this script."
     echo "[rootfs]"
     echo "[rootfs]        This was a NOTE until 2026-09-16, with the condition for"
@@ -2257,6 +2485,161 @@ if [ "$SLATE_MISSING" -gt 0 ]; then
     echo "[rootfs]       typo, and the two look identical from this side."
 fi
 
+# --- fonts: the faces the desktop draws its text in ---------------------------
+#
+# Without these the toolkit and the compositor find no /usr/share/fonts
+# (`guitk::fontdb::system_font_dirs`, which walks it recursively), fall back to
+# the built-in 8x16 bitmap face, and draw every word on the OS in it: none of
+# the font engine's work -- scalable anti-aliased text, kerning, ligatures,
+# every script's shaping -- reaches the system it was built for. Lane F's
+# request, which chose the faces:
+# requests/f-cd-the-os-image-ships-no-fonts-so-slateos-draws-every-word-in-the-8x16-bitmap-face.md
+#
+#   Open Sans         the default theme's UI face (C-Q6, design-decisions §815)
+#   JetBrains Mono    its monospace, first in the toolkit's DEFAULT_MONO_FAMILIES
+#   Noto Sans         the first fallback: 3,094 characters to Open Sans's 1,010
+#   Noto Color Emoji  the COLRv1 build: vector, any size, 5 MB
+#
+# All four are under the SIL Open Font License 1.1, which permits
+# redistribution provided the licence goes with the font -- hence each
+# directory's licence file, which is staged as part of the set, not beside it.
+#
+# FETCHED, NOT COMMITTED (design-decisions §1112). 11.5 MB of binaries in git
+# would stay in its history for good. Instead each file is named by a URL at a
+# fixed commit or tag and by its SHA-256, and is kept in $FONT_CACHE under that
+# hash once fetched: the network is needed once per machine, and a file that is
+# not the one pinned is refused however it arrived -- a mismatch is fatal, and a
+# cached copy that has rotted is fetched again rather than trusted.
+#
+# A file that cannot be fetched is fatal too. SLATEOS_ROOTFS_NO_FONTS=1 builds
+# the image without any fonts instead -- for a machine that is offline and has
+# never fetched them. It is an explicit request and not a fallback because
+# nothing at boot notices a fontless image: the desktop still comes up, in the
+# bitmap face, and a boot test still passes.
+FONT_CACHE="${FONT_CACHE:-$HOME/.cache/slateos/fonts}"
+
+# Put the file whose SHA-256 is <sum> in $FONT_CACHE, fetching it from <url> if
+# it is not already there -- unless a third argument, `cached-only`, says the
+# network has already failed once. 0: it is there; 1: it could not be fetched;
+# 2: what arrived is not that file.
+font_fetch() {
+    local url=$1 sum=$2 mode=${3:-}
+    local dest="$FONT_CACHE/$sum"
+    local got
+    if [ -f "$dest" ]; then
+        got=$(sha256sum < "$dest" | cut -d' ' -f1)
+        [ "$got" = "$sum" ] && return 0
+        echo "[rootfs] cached $dest is $got: fetching it again"
+    fi
+    [ "$mode" = cached-only ] && return 1
+    mkdir -p "$FONT_CACHE" || return 1
+    # `.part` and a rename (as diff-wsl.sh fetches), so an interrupted fetch is
+    # never mistaken for a whole file on the next run. The timeouts bound a
+    # network that drops packets rather than refusing them: curl's own connect
+    # timeout is five minutes, per attempt.
+    rm -f "$dest.part"
+    if command -v curl >/dev/null 2>&1; then
+        curl -fsSL --connect-timeout 20 --max-time 600 --retry 3 -o "$dest.part" "$url"             || { rm -f "$dest.part"; return 1; }
+    elif command -v wget >/dev/null 2>&1; then
+        wget -q --timeout=20 --tries=4 -O "$dest.part" "$url" || { rm -f "$dest.part"; return 1; }
+    else
+        echo "[rootfs] neither curl nor wget is installed"
+        return 1
+    fi
+    got=$(sha256sum < "$dest.part" | cut -d' ' -f1)
+    if [ "$got" != "$sum" ]; then
+        echo "[rootfs] ERROR: $url"
+        echo "[rootfs]        has SHA-256 $got,"
+        echo "[rootfs]        not the pinned $sum. Refusing it."
+        rm -f "$dest.part"
+        return 2
+    fi
+    mv "$dest.part" "$dest"
+}
+
+_gf="https://raw.githubusercontent.com/google/fonts/23e54b51ddffbc7713c583748e3bd86f62b1fa4a/ofl"
+_ne="https://raw.githubusercontent.com/googlefonts/noto-emoji/v2026-09-24-unicode18_0/2D/fonts"
+# <path under /usr/share/fonts>  <url>  <sha256>
+FONT_LIST="
+opensans/OpenSans[wdth,wght].ttf $_gf/opensans/OpenSans%5Bwdth%2Cwght%5D.ttf 36643644f318a812aab2d2ed3bb98f8cf0872527f835fe9398d95fe6b9adb878
+opensans/OpenSans-Italic[wdth,wght].ttf $_gf/opensans/OpenSans-Italic%5Bwdth%2Cwght%5D.ttf fe269381e992f32e135801740998544d6235061e37c93ec067ad2be3edd5b17b
+opensans/OFL.txt $_gf/opensans/OFL.txt fbbbcfef55318de350562559b671360de6d597112ecc5c73881b05092db89602
+notosans/NotoSans[wdth,wght].ttf $_gf/notosans/NotoSans%5Bwdth%2Cwght%5D.ttf bfb7bb691513f12e734dc346c03a03f784912432d7e3fa8e56efcf906fe86b3d
+notosans/NotoSans-Italic[wdth,wght].ttf $_gf/notosans/NotoSans-Italic%5Bwdth%2Cwght%5D.ttf 58e6e0ebd1931b29a365aa2d3e2ee9a9e831a3af7cf3ad1462d4e72154f0b291
+notosans/OFL.txt $_gf/notosans/OFL.txt cee9892f9f0cc8fe882c9e9537ee6a89621d86ee7ceaf70b02e2b2b1c25c061a
+jetbrainsmono/JetBrainsMono[wght].ttf $_gf/jetbrainsmono/JetBrainsMono%5Bwght%5D.ttf 48715a42ec242c21e9f02692891e147d022299a52e48d5e413e1a942193ffeda
+jetbrainsmono/JetBrainsMono-Italic[wght].ttf $_gf/jetbrainsmono/JetBrainsMono-Italic%5Bwght%5D.ttf 85ae2a5cd3f56baf1ce1c21a851322c58e3d8fbe8e8ad4a4d090a820dd7fe558
+jetbrainsmono/OFL.txt $_gf/jetbrainsmono/OFL.txt b2fe5e8987594e9ffd1d2ca52a2f5d73eb8335243893c5d6254b5ad69269591d
+notoemoji/Noto-COLRv1.ttf $_ne/Noto-COLRv1.ttf b8e25ea68db82f9e4d0aee921f4420be2be39887bd5c893a2ad98710531f9d0c
+notoemoji/LICENSE $_ne/LICENSE 6a73f9541c2de74158c0e7cf6b0a58ef774f5a780bf191f2d7ec9cc53efe2bf2
+"
+
+if [ "${SLATEOS_ROOTFS_NO_FONTS:-0}" = "1" ]; then
+    echo "[rootfs] WARNING: SLATEOS_ROOTFS_NO_FONTS=1 -- the image carries NO fonts;"
+    echo "[rootfs]          the OS will draw all text in the 8x16 bitmap face."
+else
+    FONTS_STAGED=0
+    FONTS_UNFETCHED=()
+    # After one fetch fails, the rest are looked for in the cache only: a
+    # network that is down is not asked eleven times.
+    font_mode=""
+    while read -r font_rel font_url font_sum; do
+        [ -n "$font_rel" ] || continue
+        font_rc=0
+        font_fetch "$font_url" "$font_sum" ${font_mode:+"$font_mode"} || font_rc=$?
+        if [ "$font_rc" -eq 2 ]; then
+            exit 1
+        elif [ "$font_rc" -ne 0 ]; then
+            FONTS_UNFETCHED+=("$font_rel")
+            font_mode=cached-only
+            continue
+        fi
+        install -D -m 0644 "$FONT_CACHE/$font_sum" "$STAGE/usr/share/fonts/$font_rel"
+        FONTS_STAGED=$((FONTS_STAGED + 1))
+    done <<< "$FONT_LIST"
+    if [ "${#FONTS_UNFETCHED[@]}" -ne 0 ]; then
+        echo "[rootfs] ERROR: could not fetch these fonts, and none is cached:"
+        for font_rel in "${FONTS_UNFETCHED[@]}"; do echo "[rootfs]          $font_rel"; done
+        echo "[rootfs]        Fix the network, or set SLATEOS_ROOTFS_NO_FONTS=1 to build"
+        echo "[rootfs]        an image without fonts, knowingly."
+        exit 1
+    fi
+    echo "[rootfs] staged $FONTS_STAGED font files under /usr/share/fonts (cache: $FONT_CACHE)"
+fi
+
+# --- themes: the desktop's colour themes --------------------------------------
+#
+# requests/c-d-install-the-built-in-colour-theme.md (lane C; design-decisions
+# §874, §880). A theme is a folder holding `theme.yaml` -- and, since §880, an
+# `icons/` directory of SVGs -- and the desktop reads the system's themes from
+# /usr/share/slateos/themes/<name>/theme.yaml. The built-in theme's colours are
+# compiled into the desktop, so this copy is not what it loads: it is the
+# template a user copies to make a theme of their own, and what the theme list
+# describes the built-in theme by (without it: "Aero", no author, no
+# screenshots). The whole directory rather than a list of files, so a theme
+# lane C adds later reaches the image with nothing done here.
+#
+# A missing tree is fatal: `gui/appearance/themes` is tracked, so its absence
+# is a broken checkout, not a step somebody has not run yet.
+THEMES_SRC="$ROOT_DIR/gui/appearance/themes"
+THEMES_DST="$STAGE/usr/share/slateos/themes"
+if [ ! -f "$THEMES_SRC/aero/theme.yaml" ]; then
+    echo "[rootfs] ERROR: $THEMES_SRC/aero/theme.yaml does not exist -- the built-in"
+    echo "[rootfs]        theme is tracked in git, so this checkout is broken."
+    exit 1
+fi
+mkdir -p "$THEMES_DST"
+cp -R "$THEMES_SRC/." "$THEMES_DST/"
+# The tree is read through WSL's view of NTFS, where a file's mode is whatever
+# the mount makes up -- 0777 for every file and directory, measured on the
+# machine this was written on. A theme is data: say so, rather than ship
+# executable YAML.
+find "$THEMES_DST" -type d -exec chmod 0755 {} +
+find "$THEMES_DST" -type f -exec chmod 0644 {} +
+THEMES_STAGED="$(find "$THEMES_DST" -name theme.yaml | wc -l)"
+THEMES_FILES="$(find "$THEMES_DST" -type f | wc -l)"
+echo "[rootfs] staged $THEMES_STAGED colour theme(s) under /usr/share/slateos/themes ($THEMES_FILES files)"
+
 # --- Completeness: the check that replaces the retired content stamps ---------
 #
 # There used to be a second gate here, hashing build.py + main.c + libc.a into a
@@ -2308,7 +2691,8 @@ done
 #
 # The same loop answers the staleness question, for both families, because they
 # are two readings of one file: "is the ELF there, and is it behind its inputs".
-# A fixture's inputs are its own directory — main.c, any headers beside it, and
+# A fixture's inputs are its own directory — main.c (main.cpp for the C++ one),
+# any headers beside it, and
 # build.py, which carries the compile and link flags and *is* the whole source
 # for a fastpy fixture — plus the libc.a it statically links. A change anywhere
 # in there means rebuild, so it is enough to find any one of them newer than the
@@ -2363,6 +2747,15 @@ elif [ -f "$(dirname "$ROOT_DIR")/fastpy/compiler/__init__.py" ]; then
 # therefore been false ever since, and this gate has been printing "no fastpy
 # checkout found" on every run: it could not tell a fixture built by a stale
 # compiler from a current one, which is the entire thing it exists to check.
+#
+# Spelled twice, because D: has two names. This script runs under WSL, which
+# mounts it at /mnt/d; /d is Git Bash's name for it. The first fix of the
+# paragraph above tried only /d, so under WSL -- every real run -- the NOTE
+# went on printing, and the gate went on passing fixtures it could not judge,
+# until 2026-09-28.
+elif [ -f "/mnt/d/visual studio projects/fastpy/compiler/__init__.py" ]; then
+    _fastpy_root="/mnt/d/visual studio projects/fastpy"
+    echo "[rootfs] fastpy: using $_fastpy_root (no sibling of $ROOT_DIR)"
 elif [ -f "/d/visual studio projects/fastpy/compiler/__init__.py" ]; then
     _fastpy_root="/d/visual studio projects/fastpy"
     echo "[rootfs] fastpy: using $_fastpy_root (no sibling of $ROOT_DIR)"
@@ -2375,6 +2768,15 @@ if [ -z "$FASTPY_NEWEST" ]; then
     echo "[rootfs] NOTE: no fastpy checkout found — a fastpy fixture built by an"
     echo "[rootfs]       older compiler cannot be detected as stale by this gate."
 fi
+# The header overlay is the C fixtures' as the compiler is the fastpy ones':
+# every ctest-* recipe compiles main.c with -I posix/include, so its macros
+# and declarations are in the ELF, and an edit to a header alone moves none
+# of the files above -- ctest-obstack, which exists to run <obstack.h>'s
+# macros, would go on testing the old ones. The newest file stands for the
+# directory, as in scripts/ctest-fixtures.py::_newest_overlay_header, which
+# must agree with this.
+OVERLAY_NEWEST="$(find "$ROOT_DIR/posix/include" -type f -printf '%T@ %p\n' 2>/dev/null \
+    | sort -rn | head -1 | cut -d' ' -f2- || true)"
 
 for _recipe in "$ROOT_DIR"/services/ctest-*/build.py "$ROOT_DIR"/services/fastpy-*/build.py; do
     [ -e "$_recipe" ] || continue
@@ -2391,17 +2793,23 @@ for _recipe in "$ROOT_DIR"/services/ctest-*/build.py "$ROOT_DIR"/services/fastpy
     if [ -e "$LIBC_A" ] && [ "$LIBC_A" -nt "$_elf" ]; then
         _behind="libc.a"                # links a libc that is no longer in the tree
     fi
-    for _src in "$_dir"/*.c "$_dir"/*.h "$_dir"/build.py; do
+    # *.cpp: the C++ fixture's source (ctest-cxx-throw), as *.c is the C ones'.
+    for _src in "$_dir"/*.c "$_dir"/*.cpp "$_dir"/*.h "$_dir"/build.py; do
         [ -e "$_src" ] || continue      # unmatched glob expands to itself
         [ "$_src" -nt "$_elf" ] || continue
         _behind="${_behind:+$_behind, }$(basename "$_src")"
     done
-    # The compiler that generated it — fastpy fixtures only; a ctest fixture is
-    # C compiled by zig and has no such input.
+    # The compiler that generated a fastpy fixture; the headers a C fixture is
+    # compiled against (OVERLAY_NEWEST, above).
     case "$_name" in
         fastpy-*)
             if [ -n "$FASTPY_NEWEST" ] && [ "$FASTPY_NEWEST" -nt "$_elf" ]; then
                 _behind="${_behind:+$_behind, }fastpy $(basename "$FASTPY_NEWEST")"
+            fi
+            ;;
+        ctest-*)
+            if [ -n "$OVERLAY_NEWEST" ] && [ "$OVERLAY_NEWEST" -nt "$_elf" ]; then
+                _behind="${_behind:+$_behind, }${OVERLAY_NEWEST#"$ROOT_DIR"/}"
             fi
             ;;
     esac
@@ -2523,6 +2931,40 @@ fi
 
 echo "[rootfs] staged tree:"
 ( cd "$STAGE" && find . -type f -printf '  %-52p %10s bytes\n' )
+
+# --- the image's size ----------------------------------------------------------
+# What the staged tree takes on disk -- `du`'s blocks, each file rounded up to
+# the 4 KiB block the image allocates it in -- at most 60% of the image, which
+# is whole 128 MiB block groups (32768 blocks of 4 KiB) and never fewer than
+# three. ext4's own tables come out of the other 40%: the inode tables, the
+# largest, are 1/64 of the image at mke2fs's default of one 256-byte inode per
+# 16 KiB. A given IMG_SIZE is used as it is; a warning says when it leaves less
+# than that headroom, since mke2fs -d fails partway through on a full image and
+# leaves none (see the header).
+STAGED_KIB=$(du -s -k "$STAGE" | cut -f1)
+STAGED_MIB=$(( (STAGED_KIB + 1023) / 1024 ))
+GROUP_MIB=128
+NEED_MIB=$(( (STAGED_KIB * 10 / 6 + 1023) / 1024 ))
+if [ -z "$IMG_SIZE" ]; then
+    # Not GROUPS: bash's own, the user's group list, ignores being assigned.
+    IMG_GROUPS=$(( (NEED_MIB + GROUP_MIB - 1) / GROUP_MIB ))
+    if [ "$IMG_GROUPS" -lt 3 ]; then
+        IMG_GROUPS=3
+    fi
+    IMG_SIZE="$(( IMG_GROUPS * GROUP_MIB ))M"
+    echo "[rootfs] image size: $IMG_SIZE -- $STAGED_MIB MiB staged, at most 60% of the image, in whole $GROUP_MIB MiB block groups"
+else
+    echo "[rootfs] image size: $IMG_SIZE, as IMG_SIZE gives it -- $STAGED_MIB MiB staged"
+    GIVEN_MIB=""
+    case "$IMG_SIZE" in
+        *[0-9][Mm]) GIVEN_MIB=${IMG_SIZE%?} ;;
+        *[0-9][Gg]) GIVEN_MIB=$(( ${IMG_SIZE%?} * 1024 )) ;;
+    esac
+    if [ -n "$GIVEN_MIB" ] && [ "$GIVEN_MIB" -lt "$NEED_MIB" ]; then
+        echo "[rootfs] WARNING: that leaves less than 40% free: $NEED_MIB MiB would. If mke2fs"
+        echo "[rootfs]          stops with \"Could not allocate block\", it is this; unset IMG_SIZE."
+    fi
+fi
 
 # --- pack into a driver-compatible ext4 image --------------------------------
 # -b 4096 : the driver reads/writes at 4 KiB ext4-block granularity.

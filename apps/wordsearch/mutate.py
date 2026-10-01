@@ -143,12 +143,6 @@ MUTATIONS = [
         ["cycling_categories_visits_every_one_and_returns"],
     ),
     (
-        "two categories share an accent",
-        "            Self::Science => TEAL,",
-        "            Self::Science => GREEN,",
-        ["every_category_has_its_own_name_and_its_own_accent"],
-    ),
-    (
         "two categories draw from the same word list",
         "            Self::Colors => &[\n                \"AZURE\",",
         "            Self::Colors => &[\n                \"TIGER\", \"EAGLE\", \"SHARK\", \"HORSE\", \"WHALE\", \"SNAKE\", \"PANDA\",\n                \"ZEBRA\", \"CAMEL\", \"OTTER\", \"FALCON\", \"PARROT\", \"RABBIT\", \"TURTLE\",\n                \"MONKEY\", \"AZURE\",",
@@ -177,12 +171,6 @@ MUTATIONS = [
         "the difficulty cycle does not come round",
         "            Self::Hard => Self::Easy,",
         "            Self::Hard => Self::Hard,",
-        ["cycling_difficulty_visits_every_one_and_returns"],
-    ),
-    (
-        "two difficulties are drawn in the same colour",
-        "            Self::Medium => YELLOW,",
-        "            Self::Medium => GREEN,",
         ["cycling_difficulty_visits_every_one_and_returns"],
     ),
     # ── Reading the board ─────────────────────────────────────────────────
@@ -716,6 +704,48 @@ MUTATIONS += [
         "            app.resize(*width as f32, *height as f32);\n            EventResult::Consumed",
         "            let _ = (width, height);\n            EventResult::Consumed",
         ["a_click_is_read_against_the_window_the_player_is_looking_at"],
+    ),
+    (
+        "the theme is never taken up",
+        "        self.palette = *palette;\n        self.colours = Colours::of(palette);",
+        "        let _ = palette;",
+        ["the_window_is_drawn_in_the_users_colours"],
+    ),
+    (
+        "the colours are not rebuilt with the palette",
+        "        self.colours = Colours::of(palette);",
+        "        let _ = Colours::of(palette);",
+        ["the_window_is_drawn_in_the_users_colours"],
+    ),
+    (
+        "the hint chip is live with nothing to give",
+        "            self.hints_remaining > 0 && self.status == GameStatus::Playing,",
+        "            true,",
+        ["the_hint_chip_is_switched_off_with_nothing_to_give"],
+    ),
+    (
+        "the hint chip is live on a won board",
+        "            self.hints_remaining > 0 && self.status == GameStatus::Playing,",
+        "            self.hints_remaining > 0,",
+        ["the_hint_chip_is_switched_off_with_nothing_to_give"],
+    ),
+    (
+        "the anchor's letter is the marking blue on the anchor's mauve",
+        "                    self.colours.on_anchor\n",
+        "                    self.colours.marking\n",
+        ["every_text_reads_on_what_is_under_it_in_either_theme"],
+    ),
+    (
+        "a found word in the list is the faintest grey",
+        "                (self.colours.done, FontWeightHint::Light)",
+        "                (self.palette.overlay0, FontWeightHint::Light)",
+        ["a_found_word_is_greyed_and_its_letters_go_green", "every_text_reads_on_what_is_under_it_in_either_theme"],
+    ),
+    (
+        "the footer's keys are the faintest grey",
+        "            // grey is 2.3:1 on a light band.\n            self.colours.subtext0,",
+        "            // grey is 2.3:1 on a light band.\n            self.palette.overlay0,",
+        ["every_text_reads_on_what_is_under_it_in_either_theme"],
     ),
 ]
 

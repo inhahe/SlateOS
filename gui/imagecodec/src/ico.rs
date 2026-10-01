@@ -43,6 +43,11 @@
 //! the bytes present, and the picture -- at most 256 by 256, since it must
 //! match its directory entry -- is checked against [`Limits`] before its
 //! buffer exists.
+//!
+//! Portions of this file are translated into Rust from Chromium's
+//! `ico_image_decoder.cc` and `bmp_image_reader.cc` (copyright 2008 The
+//! Chromium Authors), and changed for this project; used under Chromium's BSD
+//! licence, `licenses/chromium-LICENSE`.
 
 use alloc::vec;
 use alloc::vec::Vec;

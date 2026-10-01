@@ -156,10 +156,28 @@ mod tests {
     }
 
     #[test]
-    fn test_memfd_create_slash_in_name_einval() {
-        let ret = memfd_create(b"a/b\0".as_ptr(), 0);
-        assert_eq!(ret, -1);
-        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+    fn test_memfd_create_slash_in_name_is_no_different() {
+        // Linux's memfd name is a label -- `/proc/<pid>/fd` shows it as
+        // `/memfd:<name>` -- and mm/memfd.c checks only its length, so a '/'
+        // changes nothing.  This refused it with EINVAL, having built the
+        // file's path from the name (B-D-MEMFD-NAME-WAS-A-PATH).  Whatever
+        // creating the file does on this host, it does the same for both.
+        crate::errno::set_errno(0);
+        let plain = memfd_create(b"ab\0".as_ptr(), 0);
+        let plain_errno = crate::errno::get_errno();
+        crate::errno::set_errno(0);
+        let slash = memfd_create(b"a/b\0".as_ptr(), 0);
+        let slash_errno = crate::errno::get_errno();
+        assert_eq!(slash < 0, plain < 0, "a '/' decided the outcome");
+        if slash < 0 {
+            assert_eq!(slash_errno, plain_errno);
+            assert_ne!(slash_errno, crate::errno::EINVAL);
+        }
+        for fd in [plain, slash] {
+            if fd >= 0 {
+                let _ = crate::file::close(fd);
+            }
+        }
     }
 
     #[test]

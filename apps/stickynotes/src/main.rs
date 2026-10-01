@@ -34,7 +34,9 @@ use guitk::frame::Rect;
 use guitk::probe::Probe;
 use guitk::render::{FontWeightHint, RenderCommand, RenderTree, TextOverflow};
 use guitk::style::CornerRadii;
-use guitk::text;
+use guitk::text::{self, TextCursor};
+use guitk::textarea::{self, TextArea};
+use guitk::textinput::KeyEdit;
 use guitk::wheel;
 use oswindow::app::{self, App, Response};
 
@@ -543,22 +545,20 @@ impl Note {
     pub fn body_text(&self) -> String {
         self.body
             .iter()
-            .map(|line| {
-                let prefix = match &line.kind {
-                    LineKind::Plain => String::new(),
-                    LineKind::Bullet => "* ".to_string(),
-                    LineKind::Checkbox { checked } => {
-                        if *checked {
-                            "[x] ".to_string()
-                        } else {
-                            "[ ] ".to_string()
-                        }
-                    }
-                };
-                format!("{}{}", prefix, line.plain_text())
-            })
+            .map(|line| format!("{}{}", marker_text(&line.kind), line.plain_text()))
             .collect::<Vec<_>>()
             .join("\n")
+    }
+
+    /// Record the body's change since `old` as one undoable action: a whole
+    /// writing of the body, as [`commit_title`](Self::commit_title) records a
+    /// whole edit of the title.
+    pub fn commit_body(&mut self, old: Vec<RichLine>) {
+        if old == self.body {
+            return;
+        }
+        let new = self.body.clone();
+        self.undo_history.push(EditAction::ReplaceBody { old, new });
     }
 
     /// Set the body from plain text, parsing bullet/checkbox markers.
@@ -785,29 +785,84 @@ impl Note {
 /// Parse plain text into rich lines, recognizing bullet (`* `) and
 /// checkbox (`[ ] ` / `[x] `) markers.
 pub fn parse_rich_text(text: &str) -> Vec<RichLine> {
-    let mut lines = Vec::new();
-    for raw in text.split('\n') {
-        let trimmed = raw.trim_start();
-        if let Some(rest) = trimmed
-            .strip_prefix("[x] ")
-            .or_else(|| trimmed.strip_prefix("[X] "))
-        {
-            lines.push(RichLine::checkbox(rest, true));
-        } else if let Some(rest) = trimmed.strip_prefix("[ ] ") {
-            lines.push(RichLine::checkbox(rest, false));
-        } else if let Some(rest) = trimmed
-            .strip_prefix("* ")
-            .or_else(|| trimmed.strip_prefix("- "))
-        {
-            lines.push(RichLine::bullet(rest));
-        } else {
-            lines.push(RichLine::plain(raw));
-        }
-    }
+    let mut lines: Vec<RichLine> = text
+        .split('\n')
+        .map(|raw| match line_marker(raw) {
+            Some((lead, len, kind)) => RichLine {
+                kind,
+                spans: vec![TextSpan::plain(
+                    raw.get(lead.saturating_add(len)..).unwrap_or(""),
+                )],
+            },
+            None => RichLine::plain(raw),
+        })
+        .collect();
     if lines.is_empty() {
         lines.push(RichLine::plain(""));
     }
     lines
+}
+
+/// The marker a line of a note's text starts with, if it has one: how many
+/// bytes of indentation come before it, how long it is, and the kind of line
+/// it makes. The one reading of the markers -- the file's, the field's and
+/// the line-kind key's.
+fn line_marker(raw: &str) -> Option<(usize, usize, LineKind)> {
+    let trimmed = raw.trim_start();
+    let lead = raw.len().saturating_sub(trimmed.len());
+    let (len, kind) = if trimmed.starts_with("[x] ") || trimmed.starts_with("[X] ") {
+        (4, LineKind::Checkbox { checked: true })
+    } else if trimmed.starts_with("[ ] ") {
+        (4, LineKind::Checkbox { checked: false })
+    } else if trimmed.starts_with("* ") || trimmed.starts_with("- ") {
+        (2, LineKind::Bullet)
+    } else {
+        return None;
+    };
+    Some((lead, len, kind))
+}
+
+/// What a line of `kind` starts with in a note's text.
+fn marker_text(kind: &LineKind) -> &'static str {
+    match kind {
+        LineKind::Plain => "",
+        LineKind::Bullet => "* ",
+        LineKind::Checkbox { checked: true } => "[x] ",
+        LineKind::Checkbox { checked: false } => "[ ] ",
+    }
+}
+
+/// The byte range of the line of `text` that holds byte `at`, without its
+/// newline.
+fn line_around(text: &str, at: usize) -> (usize, usize) {
+    let start = text
+        .get(..at)
+        .and_then(|before| before.rfind('\n'))
+        .map_or(0, |i| i.saturating_add(1));
+    let end = text
+        .get(at..)
+        .and_then(|after| after.find('\n'))
+        .map_or(text.len(), |i| at.saturating_add(i));
+    (start, end)
+}
+
+/// The byte offset in a note's text of line `line`'s words at byte `col`:
+/// past the line's marker, since that is where a click on the drawn line
+/// measured from. Snapped back to a character boundary, and to the end of
+/// the text for a line it does not have.
+fn offset_of_line(text: &str, line: usize, col: usize) -> usize {
+    let mut start = 0_usize;
+    for (index, raw) in text.split('\n').enumerate() {
+        if index == line {
+            let skip = line_marker(raw).map_or(0, |(lead, len, _)| lead.saturating_add(len));
+            let words = raw.get(skip..).unwrap_or("");
+            return start
+                .saturating_add(skip)
+                .saturating_add(Note::snap_col(words, col));
+        }
+        start = start.saturating_add(raw.len()).saturating_add(1);
+    }
+    text.len()
 }
 
 // ============================================================================
@@ -1571,6 +1626,9 @@ pub enum Target {
     NoteCheck(NoteId, usize),
     /// The grip in the bottom-right corner.
     NoteGrip(NoteId),
+    /// The text of the note being written -- one field, in place of its
+    /// lines. A press puts the caret there, and a drag selects.
+    NoteText(NoteId),
     /// The search box in the sidebar header.
     SearchBox,
     /// A tag chip under the search box; clicking it filters by that tag.
@@ -1616,12 +1674,35 @@ pub enum Action {
 pub type Frame = guitk::frame::Frame<Target>;
 
 /// Where the caret sits inside the note currently being drawn.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum Caret {
+#[derive(Clone, Copy, Debug)]
+enum Caret<'a> {
     /// A byte offset into the title.
     Title(usize),
-    /// A line index and a byte offset into that line.
-    Body(usize, usize),
+    /// The text being written, in the field that holds it.
+    Body(&'a TextArea),
+}
+
+/// The note the text field holds, and the text it was filled from.
+#[derive(Debug)]
+struct HeldBody {
+    /// Which note.
+    id: NoteId,
+    /// The note's text when the field was filled from it, or last wrote to
+    /// it. While the note still reads this, the field is its text -- which
+    /// may differ from it by more than the caret: a "- " typed stays as it
+    /// was typed in the field, while the note, reading it as a bullet, writes
+    /// "* ".
+    source: String,
+}
+
+/// Where the caret goes when a note's text is opened for writing.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum TextPlace {
+    /// Before the first character: coming down from the title.
+    Start,
+    /// A line, and a byte offset into its words after the marker: where a
+    /// click on the drawn line landed.
+    Line(usize, usize),
 }
 
 // ============================================================================
@@ -1670,6 +1751,28 @@ fn body_visible_lines(note: &Note) -> usize {
     (room / lh).floor().max(0.0) as usize
 }
 
+/// Where a note's text is written: under the title bar, inside the padding
+/// and above the resize grip -- the room `body_visible_lines` counts lines in.
+fn text_box(note: &Note) -> Rect {
+    Rect::new(
+        note.x + NOTE_PAD,
+        body_top(note),
+        (note.width - 2.0 * NOTE_PAD).max(0.0),
+        (note.height - TITLE_BAR_HEIGHT - RESIZE_HANDLE - 6.0).max(0.0),
+    )
+}
+
+/// What the field lays a note's text out in: its box and its font size.
+fn text_metrics(note: &Note) -> textarea::Metrics {
+    let r = text_box(note);
+    textarea::Metrics {
+        width: r.w,
+        height: r.h,
+        font_size: note.font_size.size(),
+        weight: FontWeightHint::Regular,
+    }
+}
+
 /// The x at which a body line's own text begins, after its marker.
 fn body_text_x(note: &Note, kind: &LineKind) -> f32 {
     let prefix = line_prefix(kind);
@@ -1690,10 +1793,16 @@ fn column_at(text_str: &str, origin: f32, x: f32, size: f32, weight: FontWeightH
 // ============================================================================
 
 /// Draw one sticky note, recording every part of it a click can land on.
-fn draw_note(frame: &mut Frame, pal: &Palette, note: &Note, is_active: bool, caret: Option<Caret>) {
+fn draw_note(
+    frame: &mut Frame,
+    pal: &Palette,
+    note: &Note,
+    is_active: bool,
+    caret: Option<Caret<'_>>,
+    caret_width: f32,
+) {
     let palette = note.palette();
     let corner = CornerRadii::all(8.0);
-    let font = note.font_size.size();
     let title_font = note.font_size.title_size();
 
     if is_active {
@@ -1799,7 +1908,56 @@ fn draw_note(frame: &mut Frame, pal: &Palette, note: &Note, is_active: bool, car
     });
     frame.hit(Target::NoteArchive(note.id), btn);
 
-    // Body.
+    // Body. While it is being written, the field: the text with its markers
+    // as they are typed, wrapped to the note, scrolled to the caret. It was
+    // each line drawn on its own, cut short with an ellipsis at the note's
+    // edge -- while the caret went on past it into text nobody could see.
+    if let Some(Caret::Body(area)) = caret {
+        let r = text_box(note);
+        let mut tree = RenderTree {
+            commands: Vec::new(),
+        };
+        textarea::draw(
+            &mut tree,
+            &textarea::MultiLine {
+                area,
+                x: r.x,
+                y: r.y,
+                metrics: text_metrics(note),
+                color: pal.text,
+                selection_bg: pal.accent,
+                selection_fg: pal.on_accent(),
+                focused: true,
+                caret_width,
+                placeholder: None,
+            },
+        );
+        frame.extend(tree.commands);
+        frame.hit(Target::NoteText(note.id), r);
+    } else {
+        draw_lines(frame, pal, note);
+    }
+
+    // Resize grip, recorded last so it wins over the body line behind it.
+    draw_grip(frame, note);
+
+    if is_active {
+        frame.push(RenderCommand::StrokeRect {
+            x: note.x,
+            y: note.y,
+            width: note.width,
+            height: note.height,
+            color: pal.blue,
+            line_width: 2.0,
+            corner_radii: corner,
+        });
+    }
+}
+
+/// A note's lines as they read: each with its marker drawn -- a bullet, a
+/// box that a click ticks -- and each a target a click writes in.
+fn draw_lines(frame: &mut Frame, pal: &Palette, note: &Note) {
+    let font = note.font_size.size();
     let lh = body_line_height(font);
     let top = body_top(note);
     let max_lines = body_visible_lines(note);
@@ -1836,7 +1994,6 @@ fn draw_note(frame: &mut Frame, pal: &Palette, note: &Note, is_active: bool, car
             }
         }
 
-        let content = line.plain_text();
         let weight = if line.spans.first().is_some_and(|s| s.bold) {
             FontWeightHint::Bold
         } else {
@@ -1845,31 +2002,19 @@ fn draw_note(frame: &mut Frame, pal: &Palette, note: &Note, is_active: bool, car
         frame.push(RenderCommand::Text {
             x: text_x,
             y: ly,
-            text: content.clone(),
+            text: line.plain_text(),
             color: pal.text,
             font_size: font,
             font_weight: weight,
             max_width: Some((note.x + note.width - NOTE_PAD - text_x).max(0.0)),
             overflow: TextOverflow::Ellipsis,
         });
-
-        if let Some(Caret::Body(cl, cc)) = caret
-            && cl == i
-        {
-            let cut = Note::snap_col(&content, cc);
-            let cx = text_x + text::measure(content.get(..cut).unwrap_or(""), font, weight);
-            frame.push(RenderCommand::Line {
-                x1: cx,
-                y1: ly,
-                x2: cx,
-                y2: ly + font * 1.2,
-                color: pal.text,
-                width: 1.0,
-            });
-        }
     }
+}
 
-    // Resize grip, recorded last so it wins over the body line behind it.
+/// The resize grip in a note's bottom-right corner.
+fn draw_grip(frame: &mut Frame, note: &Note) {
+    let palette = note.palette();
     frame.push(RenderCommand::Line {
         x1: note.x + note.width - 4.0,
         y1: note.y + note.height - RESIZE_HANDLE,
@@ -1887,18 +2032,6 @@ fn draw_note(frame: &mut Frame, pal: &Palette, note: &Note, is_active: bool, car
             RESIZE_HANDLE,
         ),
     );
-
-    if is_active {
-        frame.push(RenderCommand::StrokeRect {
-            x: note.x,
-            y: note.y,
-            width: note.width,
-            height: note.height,
-            color: pal.blue,
-            line_width: 2.0,
-            corner_radii: corner,
-        });
-    }
 }
 
 /// Draw one chip, and record it if it is something to click.
@@ -1956,6 +2089,12 @@ const SHORTCUTS: &[(&str, &str)] = &[
     ("Ctrl+S", "Save"),
     ("Ctrl+E", "Export"),
     ("Ctrl+Z / Ctrl+Y", "Undo / redo"),
+    // The text field's own keys. The toolkit's text area answers them and
+    // draws nothing, so the application whose field it is names them
+    // (scripts/key-survey-answered.txt, `textarea`); this one checks a paste
+    // against the line cap before letting it in.
+    ("Ctrl+A", "Select all of a note"),
+    ("Ctrl+C / Ctrl+X / Ctrl+V", "Copy, cut or paste, in a note"),
     ("Ctrl+F", "Find, in the sidebar"),
     ("Ctrl+B", "Show or hide the sidebar"),
     ("Ctrl+G", "Snap notes to the grid"),
@@ -1978,6 +2117,23 @@ pub struct StickyNotesApp {
     /// The title as it read when the caret entered it, so that leaving the
     /// title records **one** undoable change rather than one per keystroke.
     title_before: String,
+    /// The text of the note being written: the toolkit's multi-line field,
+    /// holding the note's lines with their markers (`* `, `[ ] `, `[x] `) as
+    /// they are typed. It was a caret of this program's own that moved a line
+    /// and a byte at a time, with no selection, no clipboard, and an undo
+    /// step for every character.
+    body: TextArea,
+    /// Which note the field holds, and what from.
+    body_of: Option<HeldBody>,
+    /// The note's lines as they were when the writing began, or last folded
+    /// into one undo step -- the `title_before` of the body.
+    body_before: Vec<RichLine>,
+    /// Whether the left button went down on the text being written and has
+    /// not come up: moving the pointer meanwhile extends the selection.
+    body_drag: bool,
+    /// How wide the field's caret is drawn: the user's `caret_width_scale`
+    /// applied.
+    caret_width: f32,
     sidebar_scroll: f32,
     /// While set, the sidebar lists archived notes and clicking one restores
     /// it. This is the only route back from the title bar's X.
@@ -2023,6 +2179,11 @@ impl StickyNotesApp {
             focus: None,
             caret: (0, 0),
             title_before: String::new(),
+            body: TextArea::new(),
+            body_of: None,
+            body_before: Vec::new(),
+            body_drag: false,
+            caret_width: guitk::textedit::CARET_WIDTH,
             sidebar_scroll: 0.0,
             archive_view: false,
             storage: None,
@@ -2242,15 +2403,30 @@ impl StickyNotesApp {
                 if note.pinned != pinned {
                     continue;
                 }
-                draw_note(&mut frame, &self.palette, note, active == Some(note.id), {
-                    match self.focus {
-                        Some(Focus::Title(id)) if id == note.id => Some(Caret::Title(self.caret.1)),
-                        Some(Focus::Body(id)) if id == note.id => {
-                            Some(Caret::Body(self.caret.0, self.caret.1))
-                        }
-                        _ => None,
+                // The field when it holds this note's text; a field filled
+                // afresh when it does not -- an undo can change the note under
+                // it, and the next key refills it the same way.
+                let fresh;
+                let caret = match self.focus {
+                    Some(Focus::Title(id)) if id == note.id => Some(Caret::Title(self.caret.1)),
+                    Some(Focus::Body(id)) if id == note.id => {
+                        Some(Caret::Body(if self.holds(note) {
+                            &self.body
+                        } else {
+                            fresh = TextArea::with_text(&note.body_text());
+                            &fresh
+                        }))
                     }
-                });
+                    _ => None,
+                };
+                draw_note(
+                    &mut frame,
+                    &self.palette,
+                    note,
+                    active == Some(note.id),
+                    caret,
+                    self.caret_width,
+                );
             }
         }
         frame.untranslate();
@@ -2733,6 +2909,16 @@ impl StickyNotesApp {
     /// Escape, by Enter, or by a save — rather than on every keystroke, so that
     /// one undo restores the name the user started from.
     fn commit_focus(&mut self) {
+        if let Some(Focus::Body(id)) = self.focus {
+            // What was written since the writing began, or since the last
+            // commit, becomes one step for Undo. The writing itself stays
+            // open: this is also the save and the toolbar's call.
+            if let Some(note) = self.store.get_note_mut(id) {
+                let before = std::mem::replace(&mut self.body_before, note.body.clone());
+                note.commit_body(before);
+            }
+            return;
+        }
         let Some(Focus::Title(id)) = self.focus else {
             return;
         };
@@ -2763,6 +2949,92 @@ impl StickyNotesApp {
             note.add_tag(&tag);
         }
         self.store.mark_dirty();
+    }
+
+    /// Whether the field holds `note`'s text as the note has it now.
+    fn holds(&self, note: &Note) -> bool {
+        self.body_of
+            .as_ref()
+            .is_some_and(|held| held.id == note.id && held.source == note.body_text())
+    }
+
+    /// Fill the field from note `id`, unless it already holds the note's
+    /// text -- so the field keeps its caret, its scroll and its undo steps
+    /// for as long as the note has not changed under it.
+    fn hold_in_body(&mut self, id: NoteId) {
+        let source = match self.store.get_note(id) {
+            Some(note) if !self.holds(note) => note.body_text(),
+            _ => return,
+        };
+        self.body = TextArea::with_text(&source);
+        self.body_of = Some(HeldBody { id, source });
+    }
+
+    /// Open note `id`'s text for writing, with the caret at `place`.
+    ///
+    /// What had the caret before -- a title -- is the caller's to commit.
+    fn write_in(&mut self, id: NoteId, place: TextPlace) {
+        let Some(note) = self.store.get_note(id) else {
+            return;
+        };
+        self.body_before = note.body.clone();
+        let m = text_metrics(note);
+        self.hold_in_body(id);
+        let at = match place {
+            TextPlace::Start => 0,
+            TextPlace::Line(line, col) => offset_of_line(self.body.text(), line, col),
+        };
+        self.body.set_cursor(TextCursor::from(at));
+        self.body.reveal_caret(&m);
+        self.body_drag = false;
+        self.focus = Some(Focus::Body(id));
+    }
+
+    /// What the field says, written into note `id`: read into lines as the
+    /// file is, so the note, its row in the sidebar and the next autosave all
+    /// have it as it is typed. No undo step here -- the whole writing is one,
+    /// in `commit_focus`.
+    fn write_back(&mut self, id: NoteId) {
+        let lines = parse_rich_text(self.body.text());
+        let Some(note) = self.store.get_note_mut(id) else {
+            return;
+        };
+        note.body = lines;
+        let source = note.body_text();
+        self.body_of = Some(HeldBody { id, source });
+        self.store.mark_dirty();
+    }
+
+    /// After an undo or a redo changed the note being written, the field
+    /// starts again from what the note says now.
+    fn refill_body(&mut self) {
+        if let Some(Focus::Body(id)) = self.focus {
+            self.hold_in_body(id);
+            if let Some(note) = self.store.get_note(id) {
+                self.body_before = note.body.clone();
+            }
+        }
+    }
+
+    /// A press at canvas `(cx, cy)` on the text of note `id`, being written:
+    /// the caret goes there, or `clicks` of two select the word.
+    fn press_text(&mut self, id: NoteId, cx: f32, cy: f32, clicks: u8) {
+        let Some(note) = self.store.get_note(id) else {
+            return;
+        };
+        let (r, m) = (text_box(note), text_metrics(note));
+        self.hold_in_body(id);
+        self.body.press(cx - r.x, cy - r.y, clicks, false, &m);
+    }
+
+    /// The pointer at canvas `(cx, cy)` with the button held after a press on
+    /// the text: the selection follows it.
+    fn drag_text(&mut self, id: NoteId, cx: f32, cy: f32) {
+        let Some(note) = self.store.get_note(id) else {
+            return;
+        };
+        let (r, m) = (text_box(note), text_metrics(note));
+        self.body.drag_to(cx - r.x, cy - r.y, &m);
     }
 
     /// Put the caret in a body line at the column nearest `x`, in canvas
@@ -2827,6 +3099,7 @@ impl StickyNotesApp {
         };
         let undone = self.store.get_note_mut(id).is_some_and(Note::undo);
         if undone {
+            self.refill_body();
             self.clamp_caret();
             self.store.mark_dirty();
             Action::Redraw
@@ -2841,6 +3114,7 @@ impl StickyNotesApp {
         };
         let redone = self.store.get_note_mut(id).is_some_and(Note::redo);
         if redone {
+            self.refill_body();
             self.clamp_caret();
             self.store.mark_dirty();
             Action::Redraw
@@ -2855,18 +3129,12 @@ impl StickyNotesApp {
     /// renderer would then measure a prefix that no longer exists.
     fn clamp_caret(&mut self) {
         let Some(focus) = self.focus else { return };
-        let (line, col) = self.caret;
+        let col = self.caret.1;
         let bound = match focus {
             Focus::Search => self.store.search_query().len(),
             Focus::Title(id) => self.store.get_note(id).map_or(0, |n| n.title.len()),
-            Focus::Body(id) => match self.store.get_note(id) {
-                Some(note) => {
-                    let line = line.min(note.body.len().saturating_sub(1));
-                    self.caret.0 = line;
-                    note.body.get(line).map_or(0, RichLine::char_count)
-                }
-                None => 0,
-            },
+            // The field keeps its own caret inside its own text.
+            Focus::Body(_) => return,
         };
         self.caret.1 = col.min(bound);
     }
@@ -2932,8 +3200,16 @@ impl StickyNotesApp {
             Target::NoteLine(id, line) => {
                 self.select(id);
                 self.store.bring_to_front(id);
-                self.focus = Some(Focus::Body(id));
-                self.caret = (line, self.column_in_line(id, line, cx));
+                let col = self.column_in_line(id, line, cx);
+                // A title being edited is finished first.
+                self.commit_focus();
+                self.write_in(id, TextPlace::Line(line, col));
+                self.body_drag = button == MouseButton::Left;
+                Action::Redraw
+            }
+            Target::NoteText(id) => {
+                self.press_text(id, cx, cy, 1);
+                self.body_drag = button == MouseButton::Left;
                 Action::Redraw
             }
             Target::NoteCheck(id, line) => {
@@ -3064,12 +3340,49 @@ impl StickyNotesApp {
 
     /// Turn the caret's line into the next kind — plain, bullet, checkbox.
     fn cycle_line_kind(&mut self) -> Action {
+        if let Some(Focus::Body(id)) = self.focus {
+            return self.cycle_line_kind_in_text(id);
+        }
         let line = self.caret.0;
         self.with_active(|note| {
             if let Some(row) = note.body.get_mut(line) {
                 row.kind = next_line_kind(&row.kind);
             }
         })
+    }
+
+    /// The line kind changed while writing: the caret's line takes the next
+    /// kind's marker in place of its own, and the caret stays by the same
+    /// letter.
+    fn cycle_line_kind_in_text(&mut self, id: NoteId) -> Action {
+        let Some(m) = self.store.get_note(id).map(text_metrics) else {
+            return Action::None;
+        };
+        self.hold_in_body(id);
+        let text = self.body.text().to_owned();
+        let caret = self.body.cursor().byte;
+        let (start, end) = line_around(&text, caret);
+        let line = text.get(start..end).unwrap_or("");
+        let (lead, len, kind) = line_marker(line).unwrap_or((0, 0, LineKind::Plain));
+        let new = marker_text(&next_line_kind(&kind));
+        let at = start.saturating_add(lead);
+        let old_end = at.saturating_add(len);
+        self.body.set_cursor(TextCursor::from(old_end));
+        for _ in text.get(at..old_end).unwrap_or("").chars() {
+            self.body.backspace();
+        }
+        if !new.is_empty() {
+            self.body.insert_str(new);
+        }
+        let after = if caret >= old_end {
+            caret.saturating_sub(len).saturating_add(new.len())
+        } else {
+            at.saturating_add(new.len())
+        };
+        self.body.set_cursor(TextCursor::from(after));
+        self.body.reveal_caret(&m);
+        self.write_back(id);
+        Action::Redraw
     }
 
     /// Scroll the sidebar so the row for `id` is inside the pane.
@@ -3094,6 +3407,7 @@ impl StickyNotesApp {
 
     /// End whatever the mouse was dragging.
     fn release(&mut self, size: (f32, f32)) -> Action {
+        self.body_drag = false;
         if matches!(self.store.drag_state(), DragState::None) {
             return Action::None;
         }
@@ -3112,7 +3426,16 @@ impl StickyNotesApp {
     }
 
     /// Scroll the sidebar, if the pointer is over it.
-    fn scroll(&mut self, x: f32, dy: f32, size: (f32, f32)) -> Action {
+    fn scroll(&mut self, x: f32, y: f32, dy: f32, size: (f32, f32)) -> Action {
+        // Over the text being written: the field scrolls.
+        let clamped = Self::clamped(size);
+        if let Some(Target::NoteText(id)) = self.frame(clamped.0, clamped.1).hit_test(x, y)
+            && let Some(m) = self.store.get_note(id).map(text_metrics)
+        {
+            self.hold_in_body(id);
+            self.body.scroll_by(wheel::pixels(dy, m.line_height()), &m);
+            return Action::Redraw;
+        }
         if !self.store.sidebar_visible() || x > SIDEBAR_WIDTH {
             return Action::None;
         }
@@ -3145,6 +3468,15 @@ impl StickyNotesApp {
                 self.show_help = false;
             }
             return Action::Redraw;
+        }
+
+        // The text being written has the keys first -- typing, the caret,
+        // the clipboard, Ctrl+Z. The program's own chords (Ctrl+S, Ctrl+L and
+        // the rest) are none of the field's, and it passes them on.
+        if let Some(Focus::Body(id)) = self.focus
+            && let Some(action) = self.type_into_body(id, event)
+        {
+            return action;
         }
 
         if m.ctrl && !m.alt {
@@ -3227,7 +3559,8 @@ impl StickyNotesApp {
         match focus {
             Focus::Search => self.type_into_search(event),
             Focus::Title(id) => self.type_into_title(id, event, size),
-            Focus::Body(id) => self.type_into_body(id, event),
+            // The field has had the key already (`handle_key`), and passed.
+            Focus::Body(_) => Action::None,
         }
     }
 
@@ -3296,17 +3629,10 @@ impl StickyNotesApp {
         };
         let mut col = Note::snap_col(&note.title, self.caret.1);
         match event.key {
-            Key::Enter | Key::Tab => {
+            Key::Enter | Key::Tab | Key::Down => {
                 // Enter moves on to the body, which is what a note is for.
                 self.commit_focus();
-                self.focus = Some(Focus::Body(id));
-                self.caret = (0, 0);
-                return Action::Redraw;
-            }
-            Key::Down => {
-                self.commit_focus();
-                self.focus = Some(Focus::Body(id));
-                self.caret = (0, 0);
+                self.write_in(id, TextPlace::Start);
                 return Action::Redraw;
             }
             Key::Backspace if col > 0 => {
@@ -3363,144 +3689,117 @@ impl StickyNotesApp {
         Action::Redraw
     }
 
-    fn type_into_body(&mut self, id: NoteId, event: &KeyEvent) -> Action {
-        let Some(note) = self.store.get_note_mut(id) else {
+    /// A key while note `id`'s text is being written: the field's, apart
+    /// from the few that mean something else in a sticky note. `None` when
+    /// the field passes -- Escape, a function key -- so `handle_key` goes on.
+    fn type_into_body(&mut self, id: NoteId, event: &KeyEvent) -> Option<Action> {
+        let Some(m) = self.store.get_note(id).map(text_metrics) else {
             self.focus = None;
-            return Action::Redraw;
+            return Some(Action::Redraw);
         };
-        let mut line = self.caret.0.min(note.body.len().saturating_sub(1));
-        let current = note
-            .body
-            .get(line)
-            .map_or_else(String::new, RichLine::plain_text);
-        let mut col = Note::snap_col(&current, self.caret.1);
-
+        self.hold_in_body(id);
+        let mods = event.modifiers;
+        let bare = !mods.ctrl && !mods.alt && !mods.shift && !mods.super_key;
         match event.key {
-            Key::Enter => {
-                // The tail of the line moves down with the caret, and the new
-                // line inherits the kind: a list of checkboxes stays a list.
-                let kind = note
-                    .body
-                    .get(line)
-                    .map_or(LineKind::Plain, |l| match &l.kind {
-                        LineKind::Checkbox { .. } => LineKind::Checkbox { checked: false },
-                        other => other.clone(),
-                    });
-                let tail = current.get(col..).unwrap_or("").to_string();
-                for _ in 0..tail.chars().count() {
-                    note.delete_char(line, col);
-                }
-                let mut row = RichLine::plain(&tail);
-                row.kind = kind;
-                line = line.saturating_add(1);
-                note.insert_line(line, row);
-                col = 0;
-            }
-            Key::Backspace => {
-                if col > 0 {
-                    let prev = current
-                        .get(..col)
-                        .and_then(|s| s.chars().next_back())
-                        .map_or(0, char::len_utf8);
-                    col = col.saturating_sub(prev);
-                    note.delete_char(line, col);
-                } else if line > 0 {
-                    // Joining onto the line above, one character at a time so
-                    // that each step is an action the undo stack can reverse.
-                    let above = line.saturating_sub(1);
-                    let mut at = note.body.get(above).map_or(0, |l| l.plain_text().len());
-                    col = at;
-                    for ch in current.chars() {
-                        note.insert_char(above, at, ch);
-                        at = at.saturating_add(ch.len_utf8());
-                    }
-                    if note.delete_line(line).is_none() {
-                        return Action::None;
-                    }
-                    line = above;
-                } else {
-                    return Action::None;
-                }
-            }
-            Key::Delete => {
-                if col < current.len() {
-                    note.delete_char(line, col);
-                } else {
-                    return Action::None;
-                }
-            }
-            Key::Left => {
-                if col > 0 {
-                    col = col.saturating_sub(
-                        current
-                            .get(..col)
-                            .and_then(|s| s.chars().next_back())
-                            .map_or(0, char::len_utf8),
-                    );
-                } else if line > 0 {
-                    line = line.saturating_sub(1);
-                    col = note.body.get(line).map_or(0, |l| l.plain_text().len());
-                } else {
-                    return Action::None;
-                }
-            }
-            Key::Right => {
-                if col < current.len() {
-                    col = col.saturating_add(
-                        current
-                            .get(col..)
-                            .and_then(|s| s.chars().next())
-                            .map_or(0, char::len_utf8),
-                    );
-                } else if line.saturating_add(1) < note.body.len() {
-                    line = line.saturating_add(1);
-                    col = 0;
-                } else {
-                    return Action::None;
-                }
-            }
-            Key::Up => {
-                if line == 0 {
-                    self.focus = Some(Focus::Title(id));
+            // Up from the first line goes to the title, as Down from the
+            // title comes here.
+            Key::Up if bare && self.body.caret_position(&m).0 == 0 => {
+                self.commit_focus();
+                if let Some(note) = self.store.get_note(id) {
                     self.title_before = note.title.clone();
                     self.caret = (0, note.title.len());
-                    return Action::Redraw;
                 }
-                line = line.saturating_sub(1);
-                col = col.min(note.body.get(line).map_or(0, |l| l.plain_text().len()));
+                self.focus = Some(Focus::Title(id));
+                return Some(Action::Redraw);
             }
-            Key::Down => {
-                if line.saturating_add(1) >= note.body.len() {
-                    return Action::None;
-                }
-                line = line.saturating_add(1);
-                col = col.min(note.body.get(line).map_or(0, |l| l.plain_text().len()));
-            }
-            Key::Home => col = 0,
-            Key::End => col = current.len(),
-            Key::Tab => {
+            // Tab leaves the note, as it leaves the title.
+            Key::Tab if bare => {
+                self.commit_focus();
                 self.focus = None;
-                return Action::Redraw;
+                return Some(Action::Redraw);
             }
-            _ => {
-                let mut typed = false;
-                for ch in event.typed() {
-                    if current.len() >= MAX_LINE_LEN {
-                        break;
-                    }
-                    note.insert_char(line, col, ch);
-                    col = col.saturating_add(ch.len_utf8());
-                    typed = true;
-                }
-                if !typed {
-                    return Action::None;
-                }
+            Key::Enter if bare && !self.body.has_selection() => {
+                self.enter_in_body(&m);
+                self.write_back(id);
+                return Some(Action::Redraw);
+            }
+            _ => {}
+        }
+        // A note is a note, not a document: no line grows past MAX_LINE_LEN.
+        if let Some(inserted) = self.would_insert(event)
+            && !self.fits(&inserted)
+        {
+            return Some(Action::None);
+        }
+        match self.body.edit_key(event, &m) {
+            KeyEdit::Unhandled => None,
+            KeyEdit::Handled => Some(Action::Redraw),
+            KeyEdit::Changed => {
+                self.write_back(id);
+                Some(Action::Redraw)
             }
         }
+    }
 
-        self.caret = (line, col);
-        self.store.mark_dirty();
-        Action::Redraw
+    /// Enter in the text: a new line that carries a list on. After a checkbox
+    /// the new line is an empty checkbox, after a bullet a bullet -- a list of
+    /// boxes stays a list, as it did when each line was a kind of its own. On
+    /// an item with nothing after its marker, Enter ends the list instead:
+    /// the marker goes and the line stays, as a word processor does it.
+    fn enter_in_body(&mut self, m: &textarea::Metrics) {
+        let text = self.body.text().to_owned();
+        let caret = self.body.cursor().byte;
+        let (start, end) = line_around(&text, caret);
+        let line = text.get(start..end).unwrap_or("");
+        match line_marker(line) {
+            Some((lead, len, kind)) if caret >= start.saturating_add(lead).saturating_add(len) => {
+                let words = start.saturating_add(lead).saturating_add(len);
+                if text.get(words..end).is_some_and(|w| w.trim().is_empty()) {
+                    let marker = text.get(start.saturating_add(lead)..end).unwrap_or("");
+                    self.body.set_cursor(TextCursor::from(end));
+                    for _ in marker.chars() {
+                        self.body.backspace();
+                    }
+                } else {
+                    let next = match kind {
+                        LineKind::Checkbox { .. } => LineKind::Checkbox { checked: false },
+                        other => other,
+                    };
+                    self.body.insert_str(&format!("\n{}", marker_text(&next)));
+                }
+            }
+            _ => self.body.insert_str("\n"),
+        }
+        self.body.reveal_caret(m);
+    }
+
+    /// What a key would put into the text, for the length cap: the typed
+    /// characters, or the clipboard for a paste.
+    fn would_insert(&self, event: &KeyEvent) -> Option<String> {
+        let mods = event.modifiers;
+        if mods.ctrl && !mods.alt {
+            return (event.key == Key::V).then(|| self.body.clipboard().to_owned());
+        }
+        event.types_text().then(|| event.typed().collect())
+    }
+
+    /// Whether `inserted`, put in place of the selection or at the caret,
+    /// leaves every line it lands in within [`MAX_LINE_LEN`].
+    fn fits(&self, inserted: &str) -> bool {
+        let text = self.body.text();
+        let caret = self.body.cursor().byte;
+        let (from, to) = self.body.selection_range().unwrap_or((caret, caret));
+        let head = text
+            .get(..from)
+            .and_then(|before| before.rsplit('\n').next())
+            .unwrap_or("");
+        let tail = text
+            .get(to..)
+            .and_then(|after| after.split('\n').next())
+            .unwrap_or("");
+        format!("{head}{inserted}{tail}")
+            .split('\n')
+            .all(|line| line.len() <= MAX_LINE_LEN)
     }
 
     // -- Events ------------------------------------------------------------
@@ -3511,6 +3810,13 @@ impl StickyNotesApp {
             Event::Mouse(mouse) => match mouse.kind {
                 MouseEventKind::Press(button) => self.handle_click(mouse.x, mouse.y, button, size),
                 MouseEventKind::Move => {
+                    if self.body_drag
+                        && let Some(Focus::Body(id)) = self.focus
+                    {
+                        let canvas = self.canvas_rect(size.0, size.1);
+                        self.drag_text(id, mouse.x - canvas.x, mouse.y - canvas.y);
+                        return Action::Redraw;
+                    }
                     if matches!(self.store.drag_state(), DragState::None) {
                         return Action::None;
                     }
@@ -3520,7 +3826,7 @@ impl StickyNotesApp {
                     Action::Redraw
                 }
                 MouseEventKind::Release(_) | MouseEventKind::Leave => self.release(size),
-                MouseEventKind::Scroll { dy, .. } => self.scroll(mouse.x, dy, size),
+                MouseEventKind::Scroll { dy, .. } => self.scroll(mouse.x, mouse.y, dy, size),
                 MouseEventKind::DoubleClick(_) => {
                     // The title bar's first job is dragging, so the caret goes
                     // into a title on the second click rather than the first.
@@ -3537,6 +3843,12 @@ impl StickyNotesApp {
                                 .map_or_else(String::new, |n| n.title.clone());
                             let title_x = self.canvas_rect(clamped.0, clamped.1).x;
                             self.caret = (0, self.column_in_title(id, mouse.x - title_x));
+                            Action::Redraw
+                        }
+                        // A double click on the text selects the word.
+                        Some(Target::NoteText(id)) => {
+                            let canvas = self.canvas_rect(clamped.0, clamped.1);
+                            self.press_text(id, mouse.x - canvas.x, mouse.y - canvas.y, 2);
                             Action::Redraw
                         }
                         _ => Action::None,
@@ -3633,6 +3945,12 @@ impl StickyNotesApp {
 // ============================================================================
 
 impl App for StickyNotesApp {
+    /// The caret's width, the one appearance setting this window reads that
+    /// is not a colour.
+    fn appearance_changed(&mut self, settings: &appearance::AppearanceSettings) {
+        self.caret_width = settings.caret_width();
+    }
+
     fn theme_changed(&mut self, palette: &Palette) {
         self.palette = *palette;
     }
@@ -5231,7 +5549,7 @@ mod tests {
         app.handle_click(line.x + 60.0, line.centre().1, MouseButton::Left, SIZE);
         assert_eq!(app.focus, Some(Focus::Body(id)));
         assert!(
-            app.caret.1 > 0,
+            app.body.cursor().byte > 0,
             "clicking into the middle of a line should not send the caret to column 0"
         );
         probe::type_str(&mut app, "X");
@@ -5262,13 +5580,13 @@ mod tests {
         let (mut app, id) = app_with_note();
         probe::click(&mut app, Target::NoteLine(id, 0));
         probe::type_str(&mut app, "milkbread");
-        app.caret = (0, 4);
+        app.body.set_cursor(TextCursor::from(4));
         probe::key(&mut app, &probe::press(Key::Enter));
         assert_eq!(
             app.store.get_note(id).map(Note::body_text).as_deref(),
             Some("milk\nbread")
         );
-        assert_eq!(app.caret, (1, 0));
+        assert_eq!(app.body.cursor().byte, "milk\n".len());
     }
 
     #[test]
@@ -5278,13 +5596,13 @@ mod tests {
             note.set_body_from_text("milk\nbread");
         }
         probe::click(&mut app, Target::NoteLine(id, 1));
-        app.caret = (1, 0);
+        app.body.set_cursor(TextCursor::from("milk\n".len()));
         probe::key(&mut app, &probe::press(Key::Backspace));
         assert_eq!(
             app.store.get_note(id).map(Note::body_text).as_deref(),
             Some("milkbread")
         );
-        assert_eq!(app.caret, (0, 4), "the caret sits at the join");
+        assert_eq!(app.body.cursor().byte, 4, "the caret sits at the join");
     }
 
     #[test]
@@ -5585,25 +5903,323 @@ mod tests {
         assert!(!app.store.sidebar_visible());
     }
 
+    /// While writing, Ctrl+Z and Ctrl+Y walk the text a word at a time --
+    /// an undo per letter is one nobody presses twice -- and the note has
+    /// each step as it happens. Once the writing ends, it is one step.
     #[test]
     fn ctrl_z_and_ctrl_y_walk_the_undo_stack() {
         let (mut app, id) = app_with_note();
+        app.store.set_active(Some(id));
         probe::click(&mut app, Target::NoteLine(id, 0));
-        probe::type_str(&mut app, "ab");
-        assert_eq!(
-            app.store.get_note(id).map(Note::body_text).as_deref(),
-            Some("ab")
-        );
+        probe::type_str(&mut app, "one two");
+        assert_eq!(text_of(&app, id), "one two");
         probe::key(&mut app, &probe::ctrl(Key::Z));
         assert_eq!(
-            app.store.get_note(id).map(Note::body_text).as_deref(),
-            Some("a"),
-            "undo has to actually apply the recorded action, not just pop it"
+            text_of(&app, id),
+            "one ",
+            "undo has to take back the last word, and the note has to have it"
         );
         probe::key(&mut app, &probe::ctrl(Key::Y));
+        assert_eq!(text_of(&app, id), "one two");
+
+        // Finished, the writing is one step of the note's own.
+        probe::key(&mut app, &probe::press(Key::Escape));
+        probe::key(&mut app, &probe::ctrl(Key::Z));
+        assert_eq!(text_of(&app, id), "", "the writing is not one undo");
+        probe::key(&mut app, &probe::ctrl(Key::Y));
+        assert_eq!(text_of(&app, id), "one two");
+    }
+
+    fn text_of(app: &StickyNotesApp, id: NoteId) -> String {
+        app.store
+            .get_note(id)
+            .map(Note::body_text)
+            .expect("the note")
+    }
+
+    /// Give note `id` the text `text`, and click its first line to write in
+    /// it -- after leaving it, if it is being written already: while it is,
+    /// its text is one target and its lines are none.
+    fn write_in_note(app: &mut StickyNotesApp, id: NoteId, text: &str) {
+        if app.focus.is_some() {
+            probe::key(app, &probe::press(Key::Escape));
+        }
+        if let Some(note) = app.store.get_note_mut(id) {
+            note.set_body_from_text(text);
+        }
+        probe::click(app, Target::NoteLine(id, 0));
+        assert_eq!(app.focus, Some(Focus::Body(id)), "not writing");
+    }
+
+    /// The toolbar's Undo in the middle of writing takes the writing back,
+    /// and what is written after it is a step of its own.
+    #[test]
+    fn the_toolbar_undo_while_writing_takes_the_writing_back() {
+        let (mut app, id) = app_with_note();
+        write_in_note(&mut app, id, "");
+        probe::type_str(&mut app, "abc");
+        probe::click(&mut app, Target::Undo);
+        assert_eq!(text_of(&app, id), "");
         assert_eq!(
-            app.store.get_note(id).map(Note::body_text).as_deref(),
-            Some("ab")
+            app.focus,
+            Some(Focus::Body(id)),
+            "the undo ended the writing"
+        );
+        probe::type_str(&mut app, "x");
+        assert_eq!(text_of(&app, id), "x");
+        probe::key(&mut app, &probe::press(Key::Escape));
+        probe::key(&mut app, &probe::ctrl(Key::Z));
+        assert_eq!(
+            text_of(&app, id),
+            "",
+            "undoing the second writing brought back the first"
+        );
+    }
+
+    /// **A selection is cut and pasted.** The note had its own caret, which
+    /// could only move and type: no selection, no clipboard.
+    #[test]
+    fn a_selection_is_cut_and_pasted_while_writing() {
+        let (mut app, id) = app_with_note();
+        write_in_note(&mut app, id, "");
+        probe::type_str(&mut app, "one two");
+        probe::key(&mut app, &probe::ctrl(Key::A));
+        probe::key(&mut app, &probe::ctrl(Key::X));
+        assert_eq!(text_of(&app, id), "");
+        probe::key(&mut app, &probe::ctrl(Key::V));
+        probe::key(&mut app, &probe::ctrl(Key::V));
+        assert_eq!(text_of(&app, id), "one twoone two");
+    }
+
+    /// **Enter carries a list on**, a checkbox after a checkbox and a bullet
+    /// after a bullet, and on an empty item ends it.
+    #[test]
+    fn enter_carries_a_list_on_and_ends_it_on_an_empty_item() {
+        let (mut app, id) = app_with_note();
+        write_in_note(&mut app, id, "[x] milk");
+        probe::key(&mut app, &probe::ctrl(Key::End));
+        probe::key(&mut app, &probe::press(Key::Enter));
+        probe::type_str(&mut app, "eggs");
+        assert_eq!(text_of(&app, id), "[x] milk\n[ ] eggs");
+        probe::key(&mut app, &probe::press(Key::Enter));
+        assert_eq!(text_of(&app, id), "[x] milk\n[ ] eggs\n[ ] ");
+        probe::key(&mut app, &probe::press(Key::Enter));
+        assert_eq!(text_of(&app, id), "[x] milk\n[ ] eggs\n");
+        let kinds: Vec<LineKind> = app
+            .store
+            .get_note(id)
+            .map(|n| n.body.iter().map(|l| l.kind.clone()).collect())
+            .expect("the note");
+        assert_eq!(
+            kinds,
+            [
+                LineKind::Checkbox { checked: true },
+                LineKind::Checkbox { checked: false },
+                LineKind::Plain
+            ]
+        );
+
+        write_in_note(&mut app, id, "* bread");
+        probe::key(&mut app, &probe::ctrl(Key::End));
+        probe::key(&mut app, &probe::press(Key::Enter));
+        probe::type_str(&mut app, "jam");
+        assert_eq!(text_of(&app, id), "* bread\n* jam");
+    }
+
+    /// Ctrl+L while writing turns the caret's line into the next kind, and
+    /// the caret stays by the same letter.
+    #[test]
+    fn the_line_kind_key_cycles_the_line_being_written() {
+        let (mut app, id) = app_with_note();
+        write_in_note(&mut app, id, "tea\nmilk");
+        probe::key(&mut app, &probe::ctrl(Key::End));
+        for expected in ["tea\n* milk", "tea\n[ ] milk", "tea\nmilk"] {
+            probe::key(&mut app, &probe::ctrl(Key::L));
+            assert_eq!(text_of(&app, id), expected);
+            assert_eq!(
+                app.body.cursor().byte,
+                expected.len(),
+                "the caret left the end of the line"
+            );
+        }
+        probe::type_str(&mut app, "!");
+        assert_eq!(text_of(&app, id), "tea\nmilk!");
+    }
+
+    /// **A long line wraps while it is written.** It was cut off at the
+    /// note's edge with an ellipsis, and the caret went on past it into text
+    /// nobody could see.
+    #[test]
+    fn a_long_line_wraps_while_it_is_written() {
+        let (mut app, id) = app_with_note();
+        write_in_note(&mut app, id, "");
+        probe::type_str(&mut app, &"word ".repeat(20));
+        let rows: Vec<f32> = app
+            .draw(SIZE)
+            .commands()
+            .iter()
+            .filter_map(|c| match c {
+                RenderCommand::RichText { text, y, .. } if text.contains("word") => Some(*y),
+                _ => None,
+            })
+            .collect();
+        let mut lines = rows.clone();
+        lines.dedup();
+        assert!(lines.len() > 1, "one line, cut off: {rows:?}");
+    }
+
+    /// A drag across the text being written selects what it passes over.
+    #[test]
+    fn a_drag_across_the_text_selects_it() {
+        let (mut app, id) = app_with_note();
+        write_in_note(&mut app, id, "abcdef");
+        let r = probe::rect_of(&app, Target::NoteText(id)).expect("the text");
+        let font = app.store.get_note(id).expect("the note").font_size.size();
+        let x_of = |s: &str| r.x + text::measure(s, font, FontWeightHint::Regular);
+        let y = r.y + 3.0;
+        app.handle_event(
+            &mouse(x_of("a"), y, MouseEventKind::Press(MouseButton::Left)),
+            SIZE,
+        );
+        app.handle_event(&mouse(x_of("abcd"), y, MouseEventKind::Move), SIZE);
+        app.handle_event(
+            &mouse(x_of("abcd"), y, MouseEventKind::Release(MouseButton::Left)),
+            SIZE,
+        );
+        assert_eq!(app.body.selected_text(), "bcd");
+        app.handle_event(&mouse(x_of("abcdef"), y, MouseEventKind::Move), SIZE);
+        assert_eq!(
+            app.body.selected_text(),
+            "bcd",
+            "a move with the button up selected"
+        );
+        probe::type_str(&mut app, "-");
+        assert_eq!(text_of(&app, id), "a-ef");
+    }
+
+    /// A double click on the text being written selects the word under it.
+    #[test]
+    fn a_double_click_selects_a_word() {
+        let (mut app, id) = app_with_note();
+        write_in_note(&mut app, id, "one two three");
+        let r = probe::rect_of(&app, Target::NoteText(id)).expect("the text");
+        let font = app.store.get_note(id).expect("the note").font_size.size();
+        let x = r.x + text::measure("one t", font, FontWeightHint::Regular);
+        app.handle_event(
+            &mouse(x, r.y + 3.0, MouseEventKind::DoubleClick(MouseButton::Left)),
+            SIZE,
+        );
+        probe::type_str(&mut app, "2");
+        assert_eq!(text_of(&app, id), "one 2 three");
+    }
+
+    /// The wheel over the text being written scrolls it.
+    #[test]
+    fn the_wheel_scrolls_the_text_being_written() {
+        let (mut app, id) = app_with_note();
+        let long: Vec<String> = (0..40).map(|n| format!("line {n}")).collect();
+        write_in_note(&mut app, id, &long.join("\n"));
+        probe::key(&mut app, &probe::ctrl(Key::Home));
+        let first = |app: &StickyNotesApp| {
+            app.draw(SIZE).commands().iter().find_map(|c| match c {
+                RenderCommand::RichText { text, .. } if text.starts_with("line") => {
+                    Some(text.clone())
+                }
+                _ => None,
+            })
+        };
+        assert_eq!(first(&app).as_deref(), Some("line 0"));
+        let r = probe::rect_of(&app, Target::NoteText(id)).expect("the text");
+        let (cx, cy) = r.centre();
+        app.handle_event(
+            &mouse(cx, cy, MouseEventKind::Scroll { dx: 0.0, dy: -3.0 }),
+            SIZE,
+        );
+        assert_ne!(
+            first(&app).as_deref(),
+            Some("line 0"),
+            "the wheel moved nothing"
+        );
+    }
+
+    /// No line grows past the cap by typing or by a paste.
+    #[test]
+    fn a_line_stops_at_the_cap() {
+        let (mut app, id) = app_with_note();
+        write_in_note(&mut app, id, &"x".repeat(MAX_LINE_LEN));
+        probe::key(&mut app, &probe::ctrl(Key::End));
+        probe::type_str(&mut app, "y");
+        assert_eq!(
+            text_of(&app, id).len(),
+            MAX_LINE_LEN,
+            "a letter went past the cap"
+        );
+        probe::key(&mut app, &probe::press(Key::Enter));
+        probe::type_str(&mut app, "short");
+        assert!(
+            text_of(&app, id).ends_with("\nshort"),
+            "a new line is not capped"
+        );
+        app.body.set_clipboard("z".repeat(MAX_LINE_LEN));
+        probe::key(&mut app, &probe::ctrl(Key::V));
+        assert!(
+            text_of(&app, id).ends_with("\nshort"),
+            "a paste went past the cap"
+        );
+    }
+
+    /// Up from the first line goes to the title, and Tab leaves the note.
+    #[test]
+    fn up_from_the_first_line_goes_to_the_title_and_tab_leaves() {
+        let (mut app, id) = app_with_note();
+        write_in_note(&mut app, id, "a\nb");
+        probe::key(&mut app, &probe::ctrl(Key::End));
+        probe::key(&mut app, &probe::press(Key::Up));
+        assert_eq!(
+            app.focus,
+            Some(Focus::Body(id)),
+            "Up left from the second line"
+        );
+        probe::key(&mut app, &probe::press(Key::Up));
+        assert_eq!(app.focus, Some(Focus::Title(id)));
+        probe::key(&mut app, &probe::press(Key::Down));
+        assert_eq!(app.focus, Some(Focus::Body(id)));
+        probe::key(&mut app, &probe::press(Key::Tab));
+        assert_eq!(app.focus, None);
+    }
+
+    /// A note that was only opened is left as it was -- its Undo too.
+    #[test]
+    fn opening_a_note_and_leaving_it_changes_nothing() {
+        let (mut app, id) = app_with_note();
+        write_in_note(&mut app, id, "- dash");
+        let steps = app.store.get_note(id).map(|n| n.undo_history.undo_count());
+        probe::key(&mut app, &probe::press(Key::Right));
+        probe::key(&mut app, &probe::press(Key::Escape));
+        assert_eq!(text_of(&app, id), "* dash");
+        assert_eq!(
+            app.store.get_note(id).map(|n| n.undo_history.undo_count()),
+            steps,
+            "an untouched note gained an undo step"
+        );
+    }
+
+    /// The caret is as wide as the user asked for.
+    #[test]
+    fn the_caret_is_as_wide_as_the_setting_says() {
+        let (mut app, id) = app_with_note();
+        app.appearance_changed(&appearance::AppearanceSettings {
+            caret_width_scale: 3.0,
+            ..appearance::AppearanceSettings::default()
+        });
+        write_in_note(&mut app, id, "x");
+        let wide = guitk::textedit::CARET_WIDTH * 3.0;
+        assert!(
+            app.draw(SIZE).commands().iter().any(|c| matches!(
+                c,
+                RenderCommand::Line { width, .. } if (*width - wide).abs() < 1e-3
+            )),
+            "no caret {wide} wide"
         );
     }
 

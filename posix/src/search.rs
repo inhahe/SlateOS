@@ -13,6 +13,11 @@
 //!
 //! ## BST Design
 //!
+//! - A red-black tree, glibc 2.39's (misc/tsearch.c): insertion splits and
+//!   rotates on the way down, deletion repairs on the way up, so every
+//!   operation is O(log n) whatever order the keys come in.  It was a plain
+//!   binary search tree until 2026-09-26, which keys inserted in order —
+//!   the usual case — turned into a linked list.
 //! - Nodes are allocated via `malloc` and freed via `free`.
 //! - The comparison function has the standard C prototype:
 //!   `int compar(const void *a, const void *b)`.
@@ -40,10 +45,14 @@ use crate::errno;
 // Node layout
 // ---------------------------------------------------------------------------
 
-/// A BST node.  Stored as a contiguous allocation:
-///   [key: *const u8][left: *mut Node][right: *mut Node]
+/// A node of the `tsearch` tree: a red-black tree, as glibc's is
+/// (misc/tsearch.c), so that insertion, lookup and deletion cost O(log n)
+/// whatever order the keys arrive in.
 ///
-/// We use repr(C) so the layout is predictable.
+/// `key` must stay the first field: `tsearch` and `tfind` return a pointer to
+/// the node, which the caller reads as a pointer to a pointer to its key.
+/// glibc keeps the colour in the low bit of `left`; a separate field costs a
+/// word per node and no pointer arithmetic.
 #[repr(C)]
 struct Node {
     /// Pointer to user data.
@@ -52,6 +61,8 @@ struct Node {
     left: *mut Node,
     /// Right child (keys greater than this node).
     right: *mut Node,
+    /// Red, or black.  A null child counts as black.
+    red: bool,
 }
 
 /// Comparison function type.
@@ -71,32 +82,112 @@ pub const LEAF: i32 = 3;
 /// Arguments: `(node_ptr, visit_order, depth)`.
 pub type TwalkFn = extern "C" fn(*const u8, i32, i32);
 
+/// Action callback type for `twalk_r`.
+///
+/// Arguments: `(node_ptr, visit_order, closure)`.
+pub type TwalkRFn = extern "C" fn(*const u8, i32, *mut u8);
+
 /// Free callback type for `tdestroy`.
 pub type TdestroyFn = extern "C" fn(*mut u8);
 
-// ---------------------------------------------------------------------------
-// Allocate / free a node
-// ---------------------------------------------------------------------------
+/// The most nodes `tdelete` can have above the one it removes.  A red-black
+/// tree of n nodes is at most `2 * log2(n + 1)` high, so 128 covers any tree
+/// an address space can hold; glibc grows its stack instead, which a valid
+/// tree never needs.
+const MAX_TREE_HEIGHT: usize = 128;
 
-fn alloc_node(key: *const u8) -> *mut Node {
-    let ptr = crate::malloc::malloc(core::mem::size_of::<Node>());
-    if ptr.is_null() {
-        return core::ptr::null_mut();
-    }
-    let node = ptr.cast::<Node>();
-    // SAFETY: we just allocated enough memory for a Node.
-    unsafe {
-        (*node).key = key;
-        (*node).left = core::ptr::null_mut();
-        (*node).right = core::ptr::null_mut();
-    }
-    node
+/// Red, for a node that may be null (a null child is black).
+///
+/// # Safety
+///
+/// `n` must be null or a live node.
+unsafe fn is_red(n: *mut Node) -> bool {
+    // SAFETY: the caller's contract.
+    !n.is_null() && unsafe { (*n).red }
 }
 
-fn free_node(node: *mut Node) {
-    if !node.is_null() {
-        unsafe {
-            crate::malloc::free(node.cast::<u8>());
+/// glibc's `maybe_split_for_insert`: on the way down, split a node with two
+/// red children (it turns red, they turn black), and repair two red edges in
+/// a row with one or two rotations.  `rootp` points at the lowest node
+/// visited, `parentp` and `gparentp` at its parent and grandparent (either
+/// may be null); `p_r` and `gp_r` are the comparisons that chose the way to
+/// `rootp`.  `force` skips the two-red-children test: the node just inserted
+/// is to be treated as split.
+///
+/// # Safety
+///
+/// Every non-null pointer must point at a live link of the tree, `*rootp`
+/// must be a live node, and `gparentp` must be non-null whenever `parentp`
+/// is and `*parentp` is red — which a valid tree guarantees, a red node never
+/// being the root.
+unsafe fn maybe_split_for_insert(
+    rootp: *mut *mut Node,
+    parentp: *mut *mut Node,
+    gparentp: *mut *mut Node,
+    p_r: i32,
+    gp_r: i32,
+    force: bool,
+) {
+    // SAFETY: the caller's contract covers every dereference below; the
+    // rotations only relink nodes that are already in the tree.
+    unsafe {
+        let root = *rootp;
+        let rp: *mut *mut Node = &raw mut (*root).right;
+        let rpn = (*root).right;
+        let lp: *mut *mut Node = &raw mut (*root).left;
+        let lpn = (*root).left;
+
+        if !(force || (is_red(rpn) && is_red(lpn))) {
+            return;
+        }
+        // This node becomes red, its children black.
+        (*root).red = true;
+        if !rpn.is_null() {
+            (*rpn).red = false;
+        }
+        if !lpn.is_null() {
+            (*lpn).red = false;
+        }
+
+        // If the parent is red too, rotate.
+        if parentp.is_null() || !is_red(*parentp) || gparentp.is_null() {
+            return;
+        }
+        let gp = *gparentp;
+        let p = *parentp;
+        if (p_r > 0) != (gp_r > 0) {
+            // The two red edges bend: the child goes to the top, with its
+            // parent and grandparent as its children.
+            (*p).red = true;
+            (*gp).red = true;
+            (*root).red = false;
+            if p_r < 0 {
+                // Child is left of parent.
+                (*p).left = rpn;
+                *rp = p;
+                (*gp).right = lpn;
+                *lp = gp;
+            } else {
+                // Child is right of parent.
+                (*p).right = lpn;
+                *lp = p;
+                (*gp).left = rpn;
+                *rp = gp;
+            }
+            *gparentp = root;
+        } else {
+            // Both edges go the same way: the parent goes to the top, with
+            // the grandparent and the child as its children.
+            *gparentp = p;
+            (*p).red = false;
+            (*gp).red = true;
+            if p_r < 0 {
+                (*gp).left = (*p).right;
+                (*p).right = gp;
+            } else {
+                (*gp).right = (*p).left;
+                (*p).left = gp;
+            }
         }
     }
 }
@@ -105,169 +196,342 @@ fn free_node(node: *mut Node) {
 // tsearch — insert or find a node
 // ---------------------------------------------------------------------------
 
-/// `tsearch` — search for or insert a node in the binary search tree.
+/// `tsearch` — find `key` in the tree at `*rootp`, inserting it if absent.
 ///
-/// If a matching node is found, returns a pointer to it.
-/// If not found, allocates a new node and inserts it.
-/// Returns null if allocation fails.
+/// Returns the node holding the key (read it as a pointer to a pointer to
+/// the key), or null if `rootp` is null or a new node cannot be allocated.
+/// glibc 2.39's top-down red-black insertion (misc/tsearch.c), so a tree
+/// built from keys in order stays O(log n) high; until 2026-09-26 this was an
+/// unbalanced tree, which sorted input made a linked list.
 ///
-/// `rootp` is a pointer to the root pointer (i.e., `void **rootp`).
+/// `compar` is called only when there is a node to compare with, so an empty
+/// tree takes a NULL one, as glibc's does; with nodes, a NULL `compar` is
+/// null with `EFAULT`, where glibc faults calling it (design-decisions.md
+/// §1115).
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
-pub extern "C" fn tsearch(key: *const u8, rootp: *mut *mut u8, compar: ComparFn) -> *mut u8 {
+pub extern "C" fn tsearch(
+    key: *const u8,
+    rootp: *mut *mut u8,
+    compar: Option<ComparFn>,
+) -> *mut u8 {
     if rootp.is_null() {
         return core::ptr::null_mut();
     }
+    let mut rootp: *mut *mut Node = rootp.cast();
+    let mut parentp: *mut *mut Node = core::ptr::null_mut();
+    let mut gparentp: *mut *mut Node = core::ptr::null_mut();
+    let (mut r, mut p_r, mut gp_r) = (0i32, 0i32, 0i32);
 
-    // Walk down the tree.
-    let mut slot: *mut *mut Node = rootp.cast::<*mut Node>();
-    loop {
-        let current = unsafe { *slot };
-        if current.is_null() {
-            // Insert here.
-            let new_node = alloc_node(key);
-            if new_node.is_null() {
-                errno::set_errno(errno::ENOMEM);
+    // SAFETY: `rootp` is the caller's root link, and every link followed
+    // below is a child field of a live node of the tree it roots.
+    unsafe {
+        // The root is always black; this saves tests below.
+        let root = *rootp;
+        if !root.is_null() {
+            (*root).red = false;
+        }
+
+        let mut nextp = rootp;
+        while !(*nextp).is_null() {
+            let root = *rootp;
+            let Some(compar) = compar else {
+                errno::set_errno(errno::EFAULT);
                 return core::ptr::null_mut();
+            };
+            r = compar(key, (*root).key);
+            if r == 0 {
+                return root.cast();
             }
-            unsafe {
-                *slot = new_node;
+            maybe_split_for_insert(rootp, parentp, gparentp, p_r, gp_r, false);
+            // If that rotated, `parentp` and `gparentp` are stale; glibc's
+            // comment: they are never used again in that case.
+            nextp = if r < 0 {
+                &raw mut (*root).left
+            } else {
+                &raw mut (*root).right
+            };
+            if (*nextp).is_null() {
+                break;
             }
-            return new_node.cast::<u8>();
+            gparentp = parentp;
+            parentp = rootp;
+            rootp = nextp;
+            gp_r = p_r;
+            p_r = r;
         }
 
-        let cmp = compar(key, unsafe { (*current).key });
-        match cmp.cmp(&0) {
-            core::cmp::Ordering::Less => {
-                slot = unsafe { &raw mut (*current).left };
-            }
-            core::cmp::Ordering::Greater => {
-                slot = unsafe { &raw mut (*current).right };
-            }
-            core::cmp::Ordering::Equal => {
-                // Found — return existing node.
-                return current.cast::<u8>();
-            }
+        let q = crate::malloc::malloc(core::mem::size_of::<Node>()).cast::<Node>();
+        if q.is_null() {
+            errno::set_errno(errno::ENOMEM);
+            return core::ptr::null_mut();
         }
+        q.write(Node {
+            key,
+            left: core::ptr::null_mut(),
+            right: core::ptr::null_mut(),
+            red: true,
+        });
+        *nextp = q;
+        if nextp != rootp {
+            // Two red edges in a row are possible now; rotate them away.
+            maybe_split_for_insert(nextp, rootp, parentp, r, p_r, true);
+        }
+        q.cast()
     }
 }
 
-// ---------------------------------------------------------------------------
-// tfind — search without inserting
-// ---------------------------------------------------------------------------
-
-/// `tfind` — search for a node in the binary search tree.
+/// `tfind` — find `key` in the tree at `*rootp`, without inserting.
 ///
-/// Returns a pointer to the matching node, or null if not found.
-/// Does not modify the tree.
+/// Returns the node holding it, or null if it is absent or `rootp` is null.
+/// An empty tree needs no `compar`; otherwise a NULL one ends the process --
+/// see [`no_comparator`].
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
-pub extern "C" fn tfind(key: *const u8, rootp: *const *mut u8, compar: ComparFn) -> *const u8 {
+pub extern "C" fn tfind(
+    key: *const u8,
+    rootp: *const *mut u8,
+    compar: Option<ComparFn>,
+) -> *const u8 {
     if rootp.is_null() {
         return core::ptr::null();
     }
-
-    let mut current: *mut Node = unsafe { *rootp }.cast::<Node>();
-    while !current.is_null() {
-        let cmp = compar(key, unsafe { (*current).key });
-        match cmp.cmp(&0) {
-            core::cmp::Ordering::Less => current = unsafe { (*current).left },
-            core::cmp::Ordering::Greater => current = unsafe { (*current).right },
-            core::cmp::Ordering::Equal => return current.cast::<u8>(),
+    // SAFETY: `rootp` is the caller's root link; each node reached is live.
+    unsafe {
+        let mut node = (*rootp).cast::<Node>();
+        while !node.is_null() {
+            let Some(compar) = compar else {
+                no_comparator(b"Fatal libc error: tfind: the comparison function is NULL\n");
+            };
+            let r = compar(key, (*node).key);
+            if r == 0 {
+                return node.cast_const().cast();
+            }
+            node = if r < 0 { (*node).left } else { (*node).right };
         }
     }
-
     core::ptr::null()
 }
 
 // ---------------------------------------------------------------------------
-// tdelete — delete a node
+// tdelete — remove a node
 // ---------------------------------------------------------------------------
 
-/// `tdelete` — delete a node from the binary search tree.
+/// `tdelete` — remove `key` from the tree at `*rootp`.
 ///
-/// Removes the node matching `key` and returns a pointer to the
-/// parent of the deleted node (or the new root).  Returns null if
-/// the key was not found.
+/// Returns the parent of the node that held the key, or null if the key is
+/// absent or `rootp` is null.  When the key was at the root, POSIX leaves the
+/// result unspecified but non-null; glibc and musl return the root node —
+/// freed, if it was the one unchained — and this returns `rootp` itself,
+/// which is non-null and not freed memory.  (Until 2026-09-26 it returned the
+/// new root, which is null once the last node goes: success that read as
+/// "not found".)
+///
+/// glibc 2.39's deletion: the node's key is overwritten with its in-order
+/// successor's, the successor is unchained, and a black node lost is repaired
+/// on the way back up.  An empty tree needs no `compar`; otherwise a NULL one
+/// ends the process -- see [`no_comparator`].
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
-pub extern "C" fn tdelete(key: *const u8, rootp: *mut *mut u8, compar: ComparFn) -> *mut u8 {
+pub extern "C" fn tdelete(
+    key: *const u8,
+    rootp: *mut *mut u8,
+    compar: Option<ComparFn>,
+) -> *mut u8 {
     if rootp.is_null() {
         return core::ptr::null_mut();
     }
+    let vrootp = rootp;
+    let mut rootp: *mut *mut Node = rootp.cast();
+    // The links above the node being removed, root first.
+    let mut stack: [*mut *mut Node; MAX_TREE_HEIGHT] = [core::ptr::null_mut(); MAX_TREE_HEIGHT];
+    let mut sp: usize = 0;
 
-    let mut parent: *mut Node = core::ptr::null_mut();
-    let mut slot: *mut *mut Node = rootp.cast::<*mut Node>();
-
-    loop {
-        let current = unsafe { *slot };
-        if current.is_null() {
-            return core::ptr::null_mut(); // Not found.
+    // SAFETY: `rootp` is the caller's root link; every link on `stack` is a
+    // child field of a live node of the tree, and every node dereferenced is
+    // live.  Rotations and relinks only move nodes that are in the tree.
+    unsafe {
+        let mut root = *rootp;
+        if root.is_null() {
+            return core::ptr::null_mut();
         }
-
-        let cmp = compar(key, unsafe { (*current).key });
-        match cmp.cmp(&0) {
-            core::cmp::Ordering::Less => {
-                parent = current;
-                slot = unsafe { &raw mut (*current).left };
-                continue;
+        let Some(compar) = compar else {
+            no_comparator(b"Fatal libc error: tdelete: the comparison function is NULL\n");
+        };
+        let mut p = root;
+        loop {
+            let cmp = compar(key, (*root).key);
+            if cmp == 0 {
+                break;
             }
-            core::cmp::Ordering::Greater => {
-                parent = current;
-                slot = unsafe { &raw mut (*current).right };
-                continue;
-            }
-            core::cmp::Ordering::Equal => {}
-        }
-        {
-            // Found the node to delete.
-            let left = unsafe { (*current).left };
-            let right = unsafe { (*current).right };
-
-            if left.is_null() {
-                // Replace with right child.
-                unsafe {
-                    *slot = right;
-                }
-            } else if right.is_null() {
-                // Replace with left child.
-                unsafe {
-                    *slot = left;
-                }
+            let Some(slot) = stack.get_mut(sp) else {
+                // Deeper than any valid tree can be.
+                return core::ptr::null_mut();
+            };
+            *slot = rootp;
+            sp = sp.wrapping_add(1);
+            p = *rootp;
+            if cmp < 0 {
+                rootp = &raw mut (*p).left;
+                root = (*p).left;
             } else {
-                // Two children: find in-order successor (leftmost in right subtree).
-                let mut succ_parent = current;
-                let mut succ = right;
-                while !unsafe { (*succ).left }.is_null() {
-                    succ_parent = succ;
-                    succ = unsafe { (*succ).left };
+                rootp = &raw mut (*p).right;
+                root = (*p).right;
+            }
+            if root.is_null() {
+                return core::ptr::null_mut();
+            }
+        }
+        // `p` is the parent of the node holding the key -- or that node
+        // itself, when it is the root.
+        let retval: *mut u8 = if sp == 0 { vrootp.cast() } else { p.cast() };
+
+        // The node that holds the key is not unchained unless it has at most
+        // one child; otherwise its successor's key replaces its own, and the
+        // successor -- which has no left child -- is unchained instead.
+        let root = *rootp;
+        let unchained = if (*root).left.is_null() || (*root).right.is_null() {
+            root
+        } else {
+            let mut parentp = rootp;
+            let mut up: *mut *mut Node = &raw mut (*root).right;
+            loop {
+                let Some(slot) = stack.get_mut(sp) else {
+                    return core::ptr::null_mut();
+                };
+                *slot = parentp;
+                sp = sp.wrapping_add(1);
+                parentp = up;
+                let upn = *up;
+                if (*upn).left.is_null() {
+                    break;
                 }
-                // Replace current's key with successor's key.
-                unsafe {
-                    (*current).key = (*succ).key;
-                }
-                // Remove successor.
-                if succ_parent == current {
-                    unsafe {
-                        (*succ_parent).right = (*succ).right;
+                up = &raw mut (*upn).left;
+            }
+            *up
+        };
+
+        // One child of `unchained` is null; the other, `r`, takes its place.
+        let mut r = (*unchained).left;
+        if r.is_null() {
+            r = (*unchained).right;
+        }
+        if sp == 0 {
+            *rootp = r;
+        } else if let Some(&link) = stack.get(sp.wrapping_sub(1)) {
+            let q = *link;
+            if unchained == (*q).right {
+                (*q).right = r;
+            } else {
+                (*q).left = r;
+            }
+        }
+        if unchained != root {
+            (*root).key = (*unchained).key;
+        }
+
+        if !(*unchained).red {
+            // A black edge is gone, so paths through `r` are one black node
+            // short.  Repair upwards; null counts as black throughout.
+            while sp > 0 && !is_red(r) {
+                let Some(&pp) = stack.get(sp.wrapping_sub(1)) else {
+                    break;
+                };
+                let mut pp = pp;
+                let p = *pp;
+                if r == (*p).left {
+                    // Q is R's sibling, P their parent.
+                    let mut q = (*p).right;
+                    if is_red(q) {
+                        // Rotate P left, so that Q is black below.
+                        (*q).red = false;
+                        (*p).red = true;
+                        (*p).right = (*q).left;
+                        (*q).left = p;
+                        *pp = q;
+                        pp = &raw mut (*q).left;
+                        if let Some(slot) = stack.get_mut(sp) {
+                            *slot = pp;
+                        }
+                        sp = sp.wrapping_add(1);
+                        q = (*p).right;
+                    }
+                    // Q is black, and not null.
+                    if !is_red((*q).left) && !is_red((*q).right) {
+                        // Q's children are black: colour Q red and move up.
+                        (*q).red = true;
+                        r = p;
+                    } else {
+                        if !is_red((*q).right) {
+                            // Q's left child Q2 is red: it goes to the top.
+                            let q2 = (*q).left;
+                            (*q2).red = (*p).red;
+                            (*p).right = (*q2).left;
+                            (*q).left = (*q2).right;
+                            (*q2).right = q;
+                            (*q2).left = p;
+                            *pp = q2;
+                            (*p).red = false;
+                        } else {
+                            // Q's right child is red: rotate P left.
+                            (*q).red = (*p).red;
+                            (*p).red = false;
+                            (*(*q).right).red = false;
+                            (*p).right = (*q).left;
+                            (*q).left = p;
+                            *pp = q;
+                        }
+                        // Repaired.
+                        sp = 1;
+                        r = core::ptr::null_mut();
                     }
                 } else {
-                    unsafe {
-                        (*succ_parent).left = (*succ).right;
+                    // The mirror image.
+                    let mut q = (*p).left;
+                    if is_red(q) {
+                        (*q).red = false;
+                        (*p).red = true;
+                        (*p).left = (*q).right;
+                        (*q).right = p;
+                        *pp = q;
+                        pp = &raw mut (*q).right;
+                        if let Some(slot) = stack.get_mut(sp) {
+                            *slot = pp;
+                        }
+                        sp = sp.wrapping_add(1);
+                        q = (*p).left;
+                    }
+                    if !is_red((*q).right) && !is_red((*q).left) {
+                        (*q).red = true;
+                        r = p;
+                    } else {
+                        if !is_red((*q).left) {
+                            let q2 = (*q).right;
+                            (*q2).red = (*p).red;
+                            (*p).left = (*q2).right;
+                            (*q).right = (*q2).left;
+                            (*q2).left = q;
+                            (*q2).right = p;
+                            *pp = q2;
+                            (*p).red = false;
+                        } else {
+                            (*q).red = (*p).red;
+                            (*p).red = false;
+                            (*(*q).left).red = false;
+                            (*p).left = (*q).right;
+                            (*q).right = p;
+                            *pp = q;
+                        }
+                        sp = 1;
+                        r = core::ptr::null_mut();
                     }
                 }
-                free_node(succ);
-                // Return parent of the deleted node.
-                if parent.is_null() {
-                    return unsafe { *rootp };
-                }
-                return parent.cast::<u8>();
+                sp = sp.wrapping_sub(1);
             }
-
-            free_node(current);
-            // Return parent (or new root if parent is null).
-            if parent.is_null() {
-                return unsafe { *rootp };
+            if !r.is_null() {
+                (*r).red = false;
             }
-            return parent.cast::<u8>();
         }
+
+        crate::malloc::free(unchained.cast::<u8>());
+        retval
     }
 }
 
@@ -275,64 +539,107 @@ pub extern "C" fn tdelete(key: *const u8, rootp: *mut *mut u8, compar: ComparFn)
 // twalk — walk the tree
 // ---------------------------------------------------------------------------
 
-/// Recursive tree walk helper.
-fn twalk_recursive(node: *mut Node, action: TwalkFn, depth: i32) {
-    if node.is_null() {
-        return;
-    }
-
-    let left = unsafe { (*node).left };
-    let right = unsafe { (*node).right };
-
-    if left.is_null() && right.is_null() {
-        // Leaf node — visit once with LEAF.
-        action(node.cast::<u8>(), LEAF, depth);
-    } else {
-        // Internal node — visit three times.
-        action(node.cast::<u8>(), PREORDER, depth);
-        twalk_recursive(left, action, depth.wrapping_add(1));
-        action(node.cast::<u8>(), POSTORDER, depth);
-        twalk_recursive(right, action, depth.wrapping_add(1));
-        action(node.cast::<u8>(), ENDORDER, depth);
+/// Visit `node` and its subtree in `twalk`'s order: a leaf once, as
+/// [`LEAF`]; any other node three times — [`PREORDER`] before its left
+/// subtree, [`POSTORDER`] between, [`ENDORDER`] after its right.
+///
+/// # Safety
+///
+/// `node` must be a live node of a valid tree.
+unsafe fn walk_subtree(node: *mut Node, visit: &mut dyn FnMut(*const u8, i32, i32), depth: i32) {
+    // SAFETY: the caller's contract; the children of a live node are null or
+    // live.  The recursion is as deep as the tree is high: O(log n).
+    unsafe {
+        let (left, right) = ((*node).left, (*node).right);
+        let n = node.cast_const().cast::<u8>();
+        if left.is_null() && right.is_null() {
+            visit(n, LEAF, depth);
+            return;
+        }
+        visit(n, PREORDER, depth);
+        if !left.is_null() {
+            walk_subtree(left, visit, depth.saturating_add(1));
+        }
+        visit(n, POSTORDER, depth);
+        if !right.is_null() {
+            walk_subtree(right, visit, depth.saturating_add(1));
+        }
+        visit(n, ENDORDER, depth);
     }
 }
 
-/// `twalk` — walk the binary search tree.
-///
-/// Calls `action` for each node with the visit order (preorder,
-/// postorder, endorder for internal nodes; leaf for leaves) and
-/// the node depth.
+/// `twalk` — walk the tree rooted at `root`, calling `action` with each node,
+/// its visit ([`PREORDER`], [`POSTORDER`], [`ENDORDER`], [`LEAF`]) and its
+/// depth.  A null root or a null `action` walks nothing, as in glibc.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
-pub extern "C" fn twalk(root: *const u8, action: TwalkFn) {
+pub extern "C" fn twalk(root: *const u8, action: Option<TwalkFn>) {
+    let Some(action) = action else {
+        return;
+    };
     if root.is_null() {
         return;
     }
-    twalk_recursive(root as *mut Node, action, 0);
+    // SAFETY: a non-null `root` is the root of a tree built by `tsearch`.
+    unsafe {
+        walk_subtree(root.cast_mut().cast(), &mut |n, v, d| action(n, v, d), 0);
+    }
+}
+
+/// `twalk_r` — as [`twalk`], passing `closure` to `action` where `twalk`
+/// passes the depth (glibc 2.30).
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub extern "C" fn twalk_r(root: *const u8, action: Option<TwalkRFn>, closure: *mut u8) {
+    let Some(action) = action else {
+        return;
+    };
+    if root.is_null() {
+        return;
+    }
+    // SAFETY: as for `twalk`.
+    unsafe {
+        walk_subtree(
+            root.cast_mut().cast(),
+            &mut |n, v, _| action(n, v, closure),
+            0,
+        );
+    }
 }
 
 // ---------------------------------------------------------------------------
 // tdestroy — destroy the entire tree
 // ---------------------------------------------------------------------------
 
-/// Recursive tree destruction helper.
-fn tdestroy_recursive(node: *mut Node, free_fn: TdestroyFn) {
+/// Free `node`'s subtree, children first, calling `free_fn` on each key.
+///
+/// # Safety
+///
+/// `node` must be null or a live node of a valid tree, which this frees.
+unsafe fn destroy_subtree(node: *mut Node, free_fn: Option<TdestroyFn>) {
     if node.is_null() {
         return;
     }
-    tdestroy_recursive(unsafe { (*node).left }, free_fn);
-    tdestroy_recursive(unsafe { (*node).right }, free_fn);
-    // Call the user's free function on the key.
-    free_fn(unsafe { (*node).key }.cast_mut());
-    free_node(node);
+    // SAFETY: the caller's contract; recursion is O(log n) deep.
+    unsafe {
+        destroy_subtree((*node).left, free_fn);
+        destroy_subtree((*node).right, free_fn);
+        if let Some(f) = free_fn {
+            f((*node).key.cast_mut());
+        }
+        crate::malloc::free(node.cast::<u8>());
+    }
 }
 
-/// `tdestroy` — destroy the entire binary search tree.
+/// `tdestroy` — free every node of the tree rooted at `root`, calling
+/// `free_fn` on each key first (glibc extension).
 ///
-/// glibc extension.  Calls `free_fn` on each node's key, then
-/// frees all nodes.
+/// glibc calls `free_fn` unconditionally, so a null one crashes there; here
+/// it frees the nodes and no keys, a null `extern "C" fn` being undefined
+/// behaviour in Rust before it is ever called.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
-pub extern "C" fn tdestroy(root: *mut u8, free_fn: TdestroyFn) {
-    tdestroy_recursive(root.cast::<Node>(), free_fn);
+pub extern "C" fn tdestroy(root: *mut u8, free_fn: Option<TdestroyFn>) {
+    // SAFETY: `root` is null or the root of a tree built by `tsearch`, which
+    // the caller hands over.
+    unsafe { destroy_subtree(root.cast(), free_fn) };
 }
 
 // ===========================================================================
@@ -360,17 +667,115 @@ struct HashNode {
     next: *mut HashNode,
 }
 
-/// Global hash table state.
-struct HashTable {
+/// A hash table: an array of bucket chains. The global one `hcreate` makes,
+/// and each `struct hsearch_data`'s, are this.
+pub(crate) struct HashTable {
     buckets: *mut *mut HashNode,
     size: usize,
 }
 
-/// Global hash table (POSIX only defines one table at a time).
-static mut HTAB: HashTable = HashTable {
-    buckets: core::ptr::null_mut(),
-    size: 0,
-};
+impl HashTable {
+    /// No table.
+    const EMPTY: Self = Self {
+        buckets: core::ptr::null_mut(),
+        size: 0,
+    };
+
+    /// Give the table at least `nel` buckets (a power of two, 16 or more),
+    /// freeing any it had. `false` with `ENOMEM` when they cannot be had.
+    fn create(&mut self, nel: usize) -> bool {
+        self.destroy();
+        let mut size = 16_usize;
+        while size < nel {
+            let Some(s) = size.checked_mul(2) else {
+                errno::set_errno(errno::ENOMEM);
+                return false;
+            };
+            size = s;
+        }
+        let Some(bytes) = size.checked_mul(core::mem::size_of::<*mut HashNode>()) else {
+            errno::set_errno(errno::ENOMEM);
+            return false;
+        };
+        let ptr = crate::malloc::calloc(1, bytes);
+        if ptr.is_null() {
+            errno::set_errno(errno::ENOMEM);
+            return false;
+        }
+        self.buckets = ptr.cast::<*mut HashNode>();
+        self.size = size;
+        true
+    }
+
+    /// Free every chain and the bucket array. The keys and data are the
+    /// caller's, and are not freed (POSIX does not ask it).
+    fn destroy(&mut self) {
+        if self.buckets.is_null() {
+            return;
+        }
+        for i in 0..self.size {
+            // SAFETY: `i < size`, the bucket array's length; each chain's
+            // nodes came from `malloc` in `search` and are freed once.
+            unsafe {
+                let mut node = *self.buckets.add(i);
+                while !node.is_null() {
+                    let next = (*node).next;
+                    crate::malloc::free(node.cast::<u8>());
+                    node = next;
+                }
+            }
+        }
+        // SAFETY: the array came from `calloc` in `create`.
+        unsafe { crate::malloc::free(self.buckets.cast::<u8>()) };
+        *self = Self::EMPTY;
+    }
+
+    /// Find `item.key`, or with `ENTER` add `item` if it is absent: the
+    /// entry, or NULL -- `ESRCH` for a key `FIND` did not find (or no
+    /// table), `ENOMEM` for an entry that could not be added.
+    ///
+    /// # Safety
+    ///
+    /// `item.key` is a NUL-terminated string, as is every key in the table.
+    unsafe fn search(&mut self, item: Entry, action: i32) -> *mut Entry {
+        if self.buckets.is_null() || self.size == 0 {
+            errno::set_errno(errno::ESRCH);
+            return core::ptr::null_mut();
+        }
+        #[allow(clippy::cast_possible_truncation)] // the low bits select a bucket
+        let idx = (fnv1a_hash(item.key) as usize) & (self.size.wrapping_sub(1));
+        // SAFETY: `idx < size`; the chain's nodes are this table's.
+        unsafe {
+            let bucket = self.buckets.add(idx);
+            let mut node = *bucket;
+            while !node.is_null() {
+                if c_str_eq((*node).entry.key, item.key) {
+                    return &raw mut (*node).entry;
+                }
+                node = (*node).next;
+            }
+            if action == FIND {
+                errno::set_errno(errno::ESRCH);
+                return core::ptr::null_mut();
+            }
+            let new_node =
+                crate::malloc::malloc(core::mem::size_of::<HashNode>()).cast::<HashNode>();
+            if new_node.is_null() {
+                errno::set_errno(errno::ENOMEM);
+                return core::ptr::null_mut();
+            }
+            new_node.write(HashNode {
+                entry: item,
+                next: *bucket,
+            });
+            *bucket = new_node;
+            &raw mut (*new_node).entry
+        }
+    }
+}
+
+/// The table `hcreate` makes (POSIX has one at a time).
+static mut HTAB: HashTable = HashTable::EMPTY;
 
 /// FNV-1a hash for NUL-terminated strings.
 fn fnv1a_hash(key: *const u8) -> u64 {
@@ -436,44 +841,7 @@ pub extern "C" fn hcreate(nel: usize) -> i32 {
     // the sole accessor here is the calling thread.  This crate's own
     // tests are such a caller: see `HTAB_TEST_LOCK` in the test module,
     // added after unsynchronised tests segfaulted the test binary.
-    // NOTE: this used to read "single-threaded access", which asserted a
-    // fact rather than naming an obligation, and was false in the tests.
-    unsafe {
-        // Destroy any existing table.
-        if !HTAB.buckets.is_null() {
-            hdestroy();
-        }
-
-        // Allocate at least `nel` buckets (use next power of two for
-        // good distribution, minimum 16).
-        let mut size = 16_usize;
-        while size < nel {
-            size = if let Some(s) = size.checked_mul(2) {
-                s
-            } else {
-                errno::set_errno(errno::ENOMEM);
-                return 0;
-            };
-        }
-
-        let Some(alloc_bytes) = size.checked_mul(core::mem::size_of::<*mut HashNode>()) else {
-            errno::set_errno(errno::ENOMEM);
-            return 0;
-        };
-
-        let ptr = crate::malloc::malloc(alloc_bytes);
-        if ptr.is_null() {
-            errno::set_errno(errno::ENOMEM);
-            return 0;
-        }
-
-        // Zero all bucket pointers.
-        core::ptr::write_bytes(ptr, 0, alloc_bytes);
-
-        HTAB.buckets = ptr.cast::<*mut HashNode>();
-        HTAB.size = size;
-    }
-    1 // success
+    i32::from(unsafe { (*core::ptr::addr_of_mut!(HTAB)).create(nel) })
 }
 
 /// `hdestroy` — destroy the global hash table.
@@ -482,36 +850,8 @@ pub extern "C" fn hcreate(nel: usize) -> i32 {
 /// the key or data pointers in each entry (POSIX does not require it).
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn hdestroy() {
-    // SAFETY: `HTAB` is the single process-global table the POSIX
-    // `hsearch` family is defined around, and that family is explicitly
-    // not thread-safe -- serialising calls is the caller's obligation
-    // (`hsearch_r` is the reentrant form for callers who need one).  So
-    // the sole accessor here is the calling thread.  This crate's own
-    // tests are such a caller: see `HTAB_TEST_LOCK` in the test module,
-    // added after unsynchronised tests segfaulted the test binary.
-    // NOTE: this used to read "single-threaded access", which asserted a
-    // fact rather than naming an obligation, and was false in the tests.
-    unsafe {
-        if HTAB.buckets.is_null() {
-            return;
-        }
-
-        // Free all chains.
-        let mut i: usize = 0;
-        while i < HTAB.size {
-            let mut node = *HTAB.buckets.add(i);
-            while !node.is_null() {
-                let next = (*node).next;
-                crate::malloc::free(node.cast::<u8>());
-                node = next;
-            }
-            i = i.wrapping_add(1);
-        }
-
-        crate::malloc::free(HTAB.buckets.cast::<u8>());
-        HTAB.buckets = core::ptr::null_mut();
-        HTAB.size = 0;
-    }
+    // SAFETY: as in `hcreate`.
+    unsafe { (*core::ptr::addr_of_mut!(HTAB)).destroy() };
 }
 
 /// `hsearch` — search or enter an item in the hash table.
@@ -524,54 +864,111 @@ pub extern "C" fn hdestroy() {
 /// not-found, ENOMEM on allocation failure.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn hsearch(item: Entry, action: i32) -> *mut Entry {
-    // SAFETY: `HTAB` is the single process-global table the POSIX
-    // `hsearch` family is defined around, and that family is explicitly
-    // not thread-safe -- serialising calls is the caller's obligation
-    // (`hsearch_r` is the reentrant form for callers who need one).  So
-    // the sole accessor here is the calling thread.  This crate's own
-    // tests are such a caller: see `HTAB_TEST_LOCK` in the test module,
-    // added after unsynchronised tests segfaulted the test binary.
-    // NOTE: this used to read "single-threaded access", which asserted a
-    // fact rather than naming an obligation, and was false in the tests.
-    unsafe {
-        if HTAB.buckets.is_null() || HTAB.size == 0 {
-            errno::set_errno(errno::ESRCH);
-            return core::ptr::null_mut();
-        }
+    // SAFETY: as in `hcreate`; the keys are C strings, POSIX's contract.
+    unsafe { (*core::ptr::addr_of_mut!(HTAB)).search(item, action) }
+}
 
-        let hash = fnv1a_hash(item.key);
-        let idx = (hash as usize) & (HTAB.size.wrapping_sub(1));
-        let bucket = HTAB.buckets.add(idx);
+/// musl's `struct hsearch_data`: a table of the caller's own, for the `_r`
+/// functions (GNU). Its first word is ours to point at the table; the caller
+/// zeroes the whole of it before `hcreate_r`, as glibc requires.
+#[repr(C)]
+pub struct HsearchData {
+    /// The table, or NULL before `hcreate_r` and after `hdestroy_r`.
+    pub(crate) tab: *mut HashTable,
+    /// Unused (musl's `__unused1`).
+    pub(crate) unused1: u32,
+    /// Unused (musl's `__unused2`).
+    pub(crate) unused2: u32,
+}
 
-        // Search the chain.
-        let mut node = *bucket;
-        while !node.is_null() {
-            if c_str_eq((*node).entry.key, item.key) {
-                return &raw mut (*node).entry;
-            }
-            node = (*node).next;
-        }
-
-        // Not found.
-        if action == FIND {
-            errno::set_errno(errno::ESRCH);
-            return core::ptr::null_mut();
-        }
-
-        // ENTER: allocate a new node and prepend to bucket.
-        let new_node = crate::malloc::malloc(core::mem::size_of::<HashNode>());
-        if new_node.is_null() {
-            errno::set_errno(errno::ENOMEM);
-            return core::ptr::null_mut();
-        }
-        let new_node = new_node.cast::<HashNode>();
-        (*new_node).entry.key = item.key;
-        (*new_node).entry.data = item.data;
-        (*new_node).next = *bucket;
-        *bucket = new_node;
-
-        &raw mut (*new_node).entry
+/// [`hcreate`] for the caller's `*htab`: nonzero on success. 0 with `EINVAL`
+/// for a NULL `htab`, 0 with nothing set if `*htab` already has a table
+/// (glibc's answers), 0 with `ENOMEM` if the table cannot be had.
+///
+/// # Safety
+///
+/// `htab` is NULL or a `struct hsearch_data` the caller zeroed or destroyed.
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub unsafe extern "C" fn hcreate_r(nel: usize, htab: *mut HsearchData) -> i32 {
+    // SAFETY: NULL or the caller's object.
+    let Some(h) = (unsafe { htab.as_mut() }) else {
+        errno::set_errno(errno::EINVAL);
+        return 0;
+    };
+    if !h.tab.is_null() {
+        return 0;
     }
+    let t = crate::malloc::malloc(core::mem::size_of::<HashTable>()).cast::<HashTable>();
+    if t.is_null() {
+        errno::set_errno(errno::ENOMEM);
+        return 0;
+    }
+    // SAFETY: a fresh block of the right size, malloc-aligned.
+    unsafe {
+        t.write(HashTable::EMPTY);
+        if !(*t).create(nel) {
+            crate::malloc::free(t.cast());
+            return 0;
+        }
+    }
+    h.tab = t;
+    1
+}
+
+/// [`hdestroy`] for the caller's `*htab`, which may then be created again.
+/// `EINVAL` for a NULL `htab`.
+///
+/// # Safety
+///
+/// As for [`hcreate_r`].
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub unsafe extern "C" fn hdestroy_r(htab: *mut HsearchData) {
+    // SAFETY: NULL or the caller's object.
+    let Some(h) = (unsafe { htab.as_mut() }) else {
+        errno::set_errno(errno::EINVAL);
+        return;
+    };
+    if h.tab.is_null() {
+        return;
+    }
+    // SAFETY: the table `hcreate_r` made, freed once.
+    unsafe {
+        (*h.tab).destroy();
+        crate::malloc::free(h.tab.cast());
+    }
+    h.tab = core::ptr::null_mut();
+}
+
+/// [`hsearch`] in the caller's `*htab`: 1 with the entry in `*retval`, or 0
+/// with `*retval` NULL and `errno` -- `ESRCH` not found (or no table),
+/// `ENOMEM` not added, `EINVAL` for a NULL `htab`.
+///
+/// # Safety
+///
+/// As for [`hcreate_r`]; `retval` is a valid `ENTRY **`; the keys are C
+/// strings.
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub unsafe extern "C" fn hsearch_r(
+    item: Entry,
+    action: i32,
+    retval: *mut *mut Entry,
+    htab: *mut HsearchData,
+) -> i32 {
+    // SAFETY: NULL or the caller's objects.
+    let (Some(h), Some(out)) = (unsafe { htab.as_mut() }, unsafe { retval.as_mut() }) else {
+        errno::set_errno(errno::EINVAL);
+        return 0;
+    };
+    // SAFETY: the table `hcreate_r` made, if any; the keys are C strings.
+    let e = match unsafe { h.tab.as_mut() } {
+        Some(t) => unsafe { t.search(item, action) },
+        None => {
+            errno::set_errno(errno::ESRCH);
+            core::ptr::null_mut()
+        }
+    };
+    *out = e;
+    i32::from(!e.is_null())
 }
 
 // ===========================================================================
@@ -581,30 +978,48 @@ pub extern "C" fn hsearch(item: Entry, action: i32) -> *mut Entry {
 /// Linear search comparison function type.
 pub type LsearchComparFn = extern "C" fn(*const u8, *const u8) -> i32;
 
+/// A NULL comparison function where glibc would call it, in a call with no
+/// way to fail: `tfind` and `tdelete` answer only "here" or "absent", and
+/// `lfind` and `lsearch` only "here".  glibc faults calling it, and its
+/// process ends; so does this one, with `message` on standard error, rather
+/// than answer "absent" as if nothing were wrong (design-decisions.md §1115).
+fn no_comparator(message: &[u8]) -> ! {
+    crate::unistd::libc_fatal(message)
+}
+
 /// `lfind` — linear search without insertion.
 ///
 /// Searches the array `base` of `*nelp` elements, each of `width`
 /// bytes, for a member matching `key` using `compar`.
 ///
 /// Returns a pointer to the matching element, or null if not found.
+///
+/// glibc's, which checks nothing: `key` and every element go to `compar`
+/// whatever they are, and a `width` of 0 makes every element `base`.  Until
+/// 2026-09-26 a NULL `key` or `base`, or a `width` of 0, was "not found"
+/// without a comparison.  An empty array needs no `compar`; a NULL `nelp`,
+/// which glibc reads, or a NULL `compar` it would call, ends the process --
+/// see [`no_comparator`].
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn lfind(
     key: *const u8,
     base: *const u8,
     nelp: *const usize,
     width: usize,
-    compar: LsearchComparFn,
+    compar: Option<LsearchComparFn>,
 ) -> *const u8 {
-    if key.is_null() || base.is_null() || nelp.is_null() || width == 0 {
-        return core::ptr::null();
+    if nelp.is_null() {
+        no_comparator(b"Fatal libc error: lfind: the element count is NULL\n");
     }
-
-    // SAFETY: nelp is valid per caller's contract.
+    // SAFETY: non-null, and by the caller's contract the array's length.
     let n = unsafe { *nelp };
     let mut i: usize = 0;
     while i < n {
-        // SAFETY: base + i*width is within the array.
-        let elem = unsafe { base.add(i.wrapping_mul(width)) };
+        let Some(compar) = compar else {
+            no_comparator(b"Fatal libc error: lfind: the comparison function is NULL\n");
+        };
+        // Computed, not dereferenced: the element is `compar`'s to read.
+        let elem = base.wrapping_add(i.wrapping_mul(width));
         if compar(key, elem) == 0 {
             return elem;
         }
@@ -619,30 +1034,38 @@ pub extern "C" fn lfind(
 /// (copies `width` bytes from `key` to the end) and increments `*nelp`.
 ///
 /// Returns a pointer to the matching or newly-inserted element.
+///
+/// glibc's, as [`lfind`] is: an empty array is appended to without a
+/// comparison, so it needs no `compar`.  The copy reads `key` and writes the
+/// array, so when there is something to copy a NULL one of either ends the
+/// process, as glibc's `memcpy` ends it.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn lsearch(
     key: *const u8,
     base: *mut u8,
     nelp: *mut usize,
     width: usize,
-    compar: LsearchComparFn,
+    compar: Option<LsearchComparFn>,
 ) -> *mut u8 {
-    if key.is_null() || base.is_null() || nelp.is_null() || width == 0 {
-        return core::ptr::null_mut();
-    }
-
     // Search first.
     let found = lfind(key, base, nelp, width, compar);
     if !found.is_null() {
         return found.cast_mut();
     }
 
-    // Not found — append.
-    // SAFETY: nelp is valid, and caller guarantees the array has room.
+    // Not found — append.  `lfind` returned, so `nelp` is not NULL.
+    // SAFETY: `nelp` is valid, and the caller guarantees the array has room
+    // for one more element; the copy is made only with a non-NULL `key` and
+    // `base` and a non-zero `width`.
     unsafe {
         let n = *nelp;
-        let dest = base.add(n.wrapping_mul(width));
-        core::ptr::copy_nonoverlapping(key, dest, width);
+        let dest = base.wrapping_add(n.wrapping_mul(width));
+        if width != 0 {
+            if key.is_null() || base.is_null() {
+                no_comparator(b"Fatal libc error: lsearch: the key or the array is NULL\n");
+            }
+            core::ptr::copy_nonoverlapping(key, dest, width);
+        }
         *nelp = n.wrapping_add(1);
         dest
     }
@@ -751,6 +1174,73 @@ mod tests {
     /// `hdestroy`, so no test can observe a half-built or half-freed table.
     static HTAB_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
+    #[test]
+    fn the_r_tables_are_the_callers_own() {
+        let mut a = HsearchData {
+            tab: core::ptr::null_mut(),
+            unused1: 0,
+            unused2: 0,
+        };
+        let mut b = HsearchData {
+            tab: core::ptr::null_mut(),
+            unused1: 0,
+            unused2: 0,
+        };
+        let mut out: *mut Entry = core::ptr::null_mut();
+        let (k1, k2) = (
+            c"one".as_ptr().cast_mut().cast::<u8>(),
+            c"two".as_ptr().cast_mut().cast::<u8>(),
+        );
+        // SAFETY: local tables and C-string keys.
+        unsafe {
+            assert_eq!(hcreate_r(10, &raw mut a), 1);
+            assert_eq!(
+                hcreate_r(10, &raw mut a),
+                0,
+                "a second create of a live table"
+            );
+            assert_eq!(hcreate_r(10, &raw mut b), 1);
+            let e = Entry {
+                key: k1,
+                data: 7 as *mut u8,
+            };
+            assert_eq!(hsearch_r(e, ENTER, &raw mut out, &raw mut a), 1);
+            assert_eq!((*out).data as usize, 7);
+            // `b` does not have it.
+            errno::set_errno(0);
+            let f = Entry {
+                key: k1,
+                data: core::ptr::null_mut(),
+            };
+            assert_eq!(hsearch_r(f, FIND, &raw mut out, &raw mut b), 0);
+            assert!(out.is_null());
+            assert_eq!(errno::get_errno(), errno::ESRCH);
+            let g = Entry {
+                key: k1,
+                data: core::ptr::null_mut(),
+            };
+            assert_eq!(hsearch_r(g, FIND, &raw mut out, &raw mut a), 1);
+            assert_eq!((*out).data as usize, 7);
+            let h = Entry {
+                key: k2,
+                data: core::ptr::null_mut(),
+            };
+            assert_eq!(hsearch_r(h, FIND, &raw mut out, &raw mut a), 0);
+            hdestroy_r(&raw mut a);
+            hdestroy_r(&raw mut b);
+            assert!(a.tab.is_null() && b.tab.is_null());
+            assert_eq!(
+                hcreate_r(4, &raw mut a),
+                1,
+                "a destroyed table can be made again"
+            );
+            hdestroy_r(&raw mut a);
+            errno::set_errno(0);
+            assert_eq!(hcreate_r(4, core::ptr::null_mut()), 0);
+            assert_eq!(errno::get_errno(), errno::EINVAL);
+        }
+    }
+
     /// Acquire the `HTAB` lock, recovering from poison.
     ///
     /// Poison recovery matters here: without it, the first test to fail an
@@ -790,20 +1280,20 @@ mod tests {
 
     #[test]
     fn test_tsearch_null_rootp() {
-        let ret = tsearch(1 as *const u8, core::ptr::null_mut(), int_compar);
+        let ret = tsearch(1 as *const u8, core::ptr::null_mut(), Some(int_compar));
         assert!(ret.is_null());
     }
 
     #[test]
     fn test_tfind_null_rootp() {
-        let ret = tfind(1 as *const u8, core::ptr::null(), int_compar);
+        let ret = tfind(1 as *const u8, core::ptr::null(), Some(int_compar));
         assert!(ret.is_null());
     }
 
     #[test]
     fn test_tsearch_insert_one() {
         let mut root: *mut u8 = core::ptr::null_mut();
-        let ret = tsearch(42 as *const u8, &raw mut root, int_compar);
+        let ret = tsearch(42 as *const u8, &raw mut root, Some(int_compar));
         // malloc may fail on test host — skip if so.
         if ret.is_null() {
             return;
@@ -811,109 +1301,284 @@ mod tests {
         assert!(!root.is_null(), "root should be set after insert");
 
         // Find it.
-        let found = tfind(42 as *const u8, &raw const root, int_compar);
+        let found = tfind(42 as *const u8, &raw const root, Some(int_compar));
         assert!(!found.is_null(), "should find inserted key");
 
         // Don't find a different key.
-        let not_found = tfind(99 as *const u8, &raw const root, int_compar);
+        let not_found = tfind(99 as *const u8, &raw const root, Some(int_compar));
         assert!(not_found.is_null(), "should not find non-existent key");
 
-        tdestroy(root, dummy_free);
+        tdestroy(root, Some(dummy_free));
     }
 
     #[test]
     fn test_tsearch_insert_duplicate() {
         let mut root: *mut u8 = core::ptr::null_mut();
-        let ret1 = tsearch(10 as *const u8, &raw mut root, int_compar);
+        let ret1 = tsearch(10 as *const u8, &raw mut root, Some(int_compar));
         if ret1.is_null() {
             return;
         }
-        let ret2 = tsearch(10 as *const u8, &raw mut root, int_compar);
+        let ret2 = tsearch(10 as *const u8, &raw mut root, Some(int_compar));
         assert_eq!(ret1, ret2, "duplicate insert should return same node");
 
-        tdestroy(root, dummy_free);
+        tdestroy(root, Some(dummy_free));
     }
 
     #[test]
     fn test_tsearch_insert_multiple() {
         let mut root: *mut u8 = core::ptr::null_mut();
         for v in [50, 25, 75, 10, 30, 60, 90] {
-            let ret = tsearch(v as *const u8, &raw mut root, int_compar);
+            let ret = tsearch(v as *const u8, &raw mut root, Some(int_compar));
             if ret.is_null() {
                 // malloc failed — clean up and skip.
-                tdestroy(root, dummy_free);
+                tdestroy(root, Some(dummy_free));
                 return;
             }
         }
 
         // All should be findable.
         for v in [50, 25, 75, 10, 30, 60, 90] {
-            let found = tfind(v as *const u8, &raw const root, int_compar);
+            let found = tfind(v as *const u8, &raw const root, Some(int_compar));
             assert!(!found.is_null(), "should find key {v}");
         }
 
-        let nf = tfind(42 as *const u8, &raw const root, int_compar);
+        let nf = tfind(42 as *const u8, &raw const root, Some(int_compar));
         assert!(nf.is_null());
 
-        tdestroy(root, dummy_free);
+        tdestroy(root, Some(dummy_free));
     }
 
     // -- tdelete --
 
     #[test]
     fn test_tdelete_null_rootp() {
-        let ret = tdelete(1 as *const u8, core::ptr::null_mut(), int_compar);
+        let ret = tdelete(1 as *const u8, core::ptr::null_mut(), Some(int_compar));
         assert!(ret.is_null());
     }
 
     #[test]
     fn test_tdelete_not_found() {
         let mut root: *mut u8 = core::ptr::null_mut();
-        let ret = tsearch(10 as *const u8, &raw mut root, int_compar);
+        let ret = tsearch(10 as *const u8, &raw mut root, Some(int_compar));
         if ret.is_null() {
             return;
         }
-        let ret = tdelete(99 as *const u8, &raw mut root, int_compar);
+        let ret = tdelete(99 as *const u8, &raw mut root, Some(int_compar));
         assert!(
             ret.is_null(),
             "deleting non-existent key should return null"
         );
 
-        tdestroy(root, dummy_free);
+        tdestroy(root, Some(dummy_free));
     }
 
     #[test]
     fn test_tdelete_leaf() {
         let mut root: *mut u8 = core::ptr::null_mut();
         for v in [50, 25, 75] {
-            if tsearch(v as *const u8, &raw mut root, int_compar).is_null() {
-                tdestroy(root, dummy_free);
+            if tsearch(v as *const u8, &raw mut root, Some(int_compar)).is_null() {
+                tdestroy(root, Some(dummy_free));
                 return;
             }
         }
 
-        let ret = tdelete(25 as *const u8, &raw mut root, int_compar);
+        let ret = tdelete(25 as *const u8, &raw mut root, Some(int_compar));
         assert!(!ret.is_null());
-        assert!(tfind(25 as *const u8, &raw const root, int_compar).is_null());
-        assert!(!tfind(50 as *const u8, &raw const root, int_compar).is_null());
-        assert!(!tfind(75 as *const u8, &raw const root, int_compar).is_null());
+        assert!(tfind(25 as *const u8, &raw const root, Some(int_compar)).is_null());
+        assert!(!tfind(50 as *const u8, &raw const root, Some(int_compar)).is_null());
+        assert!(!tfind(75 as *const u8, &raw const root, Some(int_compar)).is_null());
 
-        tdestroy(root, dummy_free);
+        tdestroy(root, Some(dummy_free));
     }
 
     #[test]
     fn test_tdelete_root() {
         let mut root: *mut u8 = core::ptr::null_mut();
-        if tsearch(50 as *const u8, &raw mut root, int_compar).is_null() {
+        if tsearch(50 as *const u8, &raw mut root, Some(int_compar)).is_null() {
             return;
         }
 
-        let ret = tdelete(50 as *const u8, &raw mut root, int_compar);
+        let ret = tdelete(50 as *const u8, &raw mut root, Some(int_compar));
         assert!(
             root.is_null(),
             "root should be null after deleting only node"
         );
-        let _ = ret;
+        // POSIX: an unspecified *non-null* pointer when the root goes.  It
+        // was the new root -- null here -- until 2026-09-26, which a caller
+        // testing for "not found" could not tell from failure.
+        assert_eq!(ret, (&raw mut root).cast::<u8>());
+    }
+
+    // -- the red-black tree --
+
+    /// Check the red-black invariants below `n` and return its black
+    /// height: no red node has a red child, every path has the same number
+    /// of black nodes, and the keys are in order.
+    fn check_rb(n: *mut Node, lo: i64, hi: i64) -> usize {
+        if n.is_null() {
+            return 1;
+        }
+        let (key, left, right, red) = unsafe { ((*n).key as i64, (*n).left, (*n).right, (*n).red) };
+        assert!(lo < key && key < hi, "key {key} out of order ({lo}, {hi})");
+        if red {
+            assert!(
+                !unsafe { is_red(left) } && !unsafe { is_red(right) },
+                "red {key} has a red child"
+            );
+        }
+        let bl = check_rb(left, lo, key);
+        let br = check_rb(right, key, hi);
+        assert_eq!(bl, br, "black heights differ below {key}");
+        bl + usize::from(!red)
+    }
+
+    fn height(n: *mut Node) -> usize {
+        if n.is_null() {
+            0
+        } else {
+            1 + height(unsafe { (*n).left }).max(height(unsafe { (*n).right }))
+        }
+    }
+
+    fn check_tree(root: *mut u8) {
+        let n = root.cast::<Node>();
+        assert!(!unsafe { is_red(n) }, "the root is black");
+        check_rb(n, i64::MIN, i64::MAX);
+    }
+
+    /// Keys in order made the old tree a list, n deep.  A red-black tree of
+    /// n nodes is at most 2 * log2(n + 1) deep.
+    #[test]
+    fn test_tsearch_sorted_input_stays_balanced() {
+        let mut root: *mut u8 = core::ptr::null_mut();
+        let n = 20_000usize;
+        for v in 1..=n {
+            assert!(!tsearch(v as *const u8, &raw mut root, Some(int_compar)).is_null());
+        }
+        check_tree(root);
+        let h = height(root.cast());
+        assert!(
+            h <= 2 * (usize::BITS - (n + 1).leading_zeros()) as usize,
+            "height {h}"
+        );
+        for v in (1..=n).rev().step_by(7) {
+            assert!(
+                !tfind(v as *const u8, &raw const root, Some(int_compar)).is_null(),
+                "{v}"
+            );
+        }
+        tdestroy(root, None);
+    }
+
+    /// Inserts and deletes in a scrambled order, the invariants checked
+    /// after every deletion, against a set that knows the answer.
+    #[test]
+    fn test_tdelete_keeps_the_tree_valid() {
+        let mut root: *mut u8 = core::ptr::null_mut();
+        let mut present = std::collections::BTreeSet::new();
+        let mut x: u64 = 0x2545_F491_4F6C_DD1D;
+        let mut next = move || {
+            x ^= x << 13;
+            x ^= x >> 7;
+            x ^= x << 17;
+            (x % 1000) as i64 + 1
+        };
+        for _ in 0..3000 {
+            let k = next();
+            assert!(!tsearch(k as *const u8, &raw mut root, Some(int_compar)).is_null());
+            present.insert(k);
+        }
+        check_tree(root);
+        for _ in 0..3000 {
+            let k = next();
+            let ret = tdelete(k as *const u8, &raw mut root, Some(int_compar));
+            assert_eq!(!ret.is_null(), present.remove(&k), "delete {k}");
+            if !root.is_null() {
+                check_tree(root);
+            }
+        }
+        for k in 1..=1000i64 {
+            let found = !tfind(k as *const u8, &raw const root, Some(int_compar)).is_null();
+            assert_eq!(found, present.contains(&k), "find {k}");
+        }
+        // Down to nothing, in order, and each root deletion still non-null.
+        for k in present.clone() {
+            assert!(!tdelete(k as *const u8, &raw mut root, Some(int_compar)).is_null());
+            if !root.is_null() {
+                check_tree(root);
+            }
+        }
+        assert!(root.is_null());
+    }
+
+    /// `tdelete` answers with the deleted node's parent.
+    #[test]
+    fn test_tdelete_returns_the_parent() {
+        let mut root: *mut u8 = core::ptr::null_mut();
+        for v in [2, 1, 3] {
+            assert!(!tsearch(v as *const u8, &raw mut root, Some(int_compar)).is_null());
+        }
+        // 2 is the root, 1 and 3 its children.
+        let parent = tdelete(3 as *const u8, &raw mut root, Some(int_compar));
+        assert_eq!(parent, root, "3's parent is the root");
+        assert_eq!(unsafe { (*parent.cast::<Node>()).key } as i64, 2);
+        tdestroy(root, None);
+    }
+
+    std::thread_local! {
+        /// `(key, visit, depth)` for each `twalk` callback on this thread.
+        static VISITS: core::cell::RefCell<std::vec::Vec<(i64, i32, i32)>> =
+            const { core::cell::RefCell::new(std::vec::Vec::new()) };
+    }
+
+    extern "C" fn record_visit(node: *const u8, visit: i32, depth: i32) {
+        let key = unsafe { *node.cast::<*const u8>() } as i64;
+        VISITS.with(|v| v.borrow_mut().push((key, visit, depth)));
+    }
+
+    extern "C" fn record_visit_r(node: *const u8, visit: i32, closure: *mut u8) {
+        let key = unsafe { *node.cast::<*const u8>() } as i64;
+        VISITS.with(|v| v.borrow_mut().push((key, visit, closure as i32)));
+    }
+
+    /// 1, 2, 3 in order: the root is 2, with 1 and 3 below it as leaves.
+    #[test]
+    fn test_twalk_visits_in_posix_order() {
+        let mut root: *mut u8 = core::ptr::null_mut();
+        for v in [1, 2, 3] {
+            assert!(!tsearch(v as *const u8, &raw mut root, Some(int_compar)).is_null());
+        }
+        VISITS.with(|v| v.borrow_mut().clear());
+        twalk(root, Some(record_visit));
+        let want = [
+            (2, PREORDER, 0),
+            (1, LEAF, 1),
+            (2, POSTORDER, 0),
+            (3, LEAF, 1),
+            (2, ENDORDER, 0),
+        ];
+        VISITS.with(|v| assert_eq!(v.borrow().as_slice(), want));
+        // twalk_r passes its closure where twalk passes the depth.
+        VISITS.with(|v| v.borrow_mut().clear());
+        twalk_r(root, Some(record_visit_r), 77 as *mut u8);
+        VISITS.with(|v| assert!(v.borrow().iter().all(|&(_, _, c)| c == 77)));
+        VISITS.with(|v| assert_eq!(v.borrow().len(), 5));
+        // A null action walks nothing, as in glibc.
+        twalk(root, None);
+        twalk_r(root, None, core::ptr::null_mut());
+        tdestroy(root, None);
+    }
+
+    /// A null free function frees the nodes and no keys.
+    #[test]
+    fn test_tdestroy_with_no_free_function() {
+        let mut root: *mut u8 = core::ptr::null_mut();
+        for v in 1..=100usize {
+            assert!(!tsearch(v as *const u8, &raw mut root, Some(int_compar)).is_null());
+        }
+        reset_destroy_count();
+        tdestroy(root, None);
+        assert_eq!(destroy_count(), 0);
     }
 
     // -- twalk --
@@ -930,7 +1595,7 @@ mod tests {
         ///
         /// Per-thread, the counter is perturbed only by this test, so it needs
         /// no lock and the tests keep running concurrently. (Same reasoning,
-        /// and the same shape, as `malloc::live_regions`.)
+        /// and the same shape, as `malloc::live_allocations`.)
         static WALK_COUNT: Cell<i32> = const { Cell::new(0) };
     }
 
@@ -956,39 +1621,39 @@ mod tests {
     #[test]
     fn test_twalk_empty() {
         reset_walk_count();
-        twalk(core::ptr::null(), count_walker);
+        twalk(core::ptr::null(), Some(count_walker));
         assert_eq!(walk_count(), 0);
     }
 
     #[test]
     fn test_twalk_single() {
         let mut root: *mut u8 = core::ptr::null_mut();
-        if tsearch(42 as *const u8, &raw mut root, int_compar).is_null() {
+        if tsearch(42 as *const u8, &raw mut root, Some(int_compar)).is_null() {
             return;
         }
 
         reset_walk_count();
-        twalk(root, count_walker);
+        twalk(root, Some(count_walker));
         assert_eq!(walk_count(), 1, "single node = 1 leaf");
 
-        tdestroy(root, dummy_free);
+        tdestroy(root, Some(dummy_free));
     }
 
     #[test]
     fn test_twalk_multiple() {
         let mut root: *mut u8 = core::ptr::null_mut();
         for v in [50, 25, 75] {
-            if tsearch(v as *const u8, &raw mut root, int_compar).is_null() {
-                tdestroy(root, dummy_free);
+            if tsearch(v as *const u8, &raw mut root, Some(int_compar)).is_null() {
+                tdestroy(root, Some(dummy_free));
                 return;
             }
         }
 
         reset_walk_count();
-        twalk(root, count_walker);
+        twalk(root, Some(count_walker));
         assert_eq!(walk_count(), 3);
 
-        tdestroy(root, dummy_free);
+        tdestroy(root, Some(dummy_free));
     }
 
     // -- tdestroy --
@@ -1018,7 +1683,7 @@ mod tests {
     #[test]
     fn test_tdestroy_empty() {
         reset_destroy_count();
-        tdestroy(core::ptr::null_mut(), count_destroyer);
+        tdestroy(core::ptr::null_mut(), Some(count_destroyer));
         assert_eq!(destroy_count(), 0);
     }
 
@@ -1026,14 +1691,14 @@ mod tests {
     fn test_tdestroy_calls_free_fn() {
         let mut root: *mut u8 = core::ptr::null_mut();
         for v in [50, 25, 75, 10, 90] {
-            if tsearch(v as *const u8, &raw mut root, int_compar).is_null() {
-                tdestroy(root, dummy_free);
+            if tsearch(v as *const u8, &raw mut root, Some(int_compar)).is_null() {
+                tdestroy(root, Some(dummy_free));
                 return;
             }
         }
 
         reset_destroy_count();
-        tdestroy(root, count_destroyer);
+        tdestroy(root, Some(count_destroyer));
         assert_eq!(
             destroy_count(),
             5,
@@ -1045,9 +1710,10 @@ mod tests {
 
     #[test]
     fn test_node_layout() {
-        // Node: key(*const u8) + left(*mut Node) + right(*mut Node)
-        // = 3 pointers = 24 bytes on 64-bit.
-        assert_eq!(core::mem::size_of::<Node>(), 24);
+        // `key` first: `tsearch`'s result is read as a pointer to the key.
+        assert_eq!(core::mem::offset_of!(Node, key), 0);
+        // Three pointers and the colour, padded: 32 bytes on 64-bit.
+        assert_eq!(core::mem::size_of::<Node>(), 32);
     }
 
     // ===================================================================
@@ -1308,7 +1974,7 @@ mod tests {
             arr.as_ptr().cast::<u8>(),
             &raw const nel,
             width,
-            i32_compar,
+            Some(i32_compar),
         );
         assert!(!result.is_null());
         assert_eq!(unsafe { *(result.cast::<i32>()) }, 30);
@@ -1326,7 +1992,7 @@ mod tests {
             arr.as_ptr().cast::<u8>(),
             &raw const nel,
             width,
-            i32_compar,
+            Some(i32_compar),
         );
         assert!(result.is_null());
     }
@@ -1342,13 +2008,23 @@ mod tests {
             core::ptr::null(),
             &raw const nel,
             width,
-            i32_compar,
+            Some(i32_compar),
         );
         assert!(result.is_null());
     }
 
+    /// glibc hands the key to `compar` whatever it is -- a NULL one too.  It
+    /// was "not found" without a comparison until 2026-09-26.
     #[test]
     fn test_lfind_null_key() {
+        extern "C" fn null_matches_two(a: *const u8, b: *const u8) -> i32 {
+            // SAFETY: `b` is an element of the array below.
+            if a.is_null() && unsafe { *b.cast::<i32>() } == 2 {
+                0
+            } else {
+                1
+            }
+        }
         let arr: [i32; 3] = [1, 2, 3];
         let nel: usize = 3;
         let result = lfind(
@@ -1356,9 +2032,9 @@ mod tests {
             arr.as_ptr().cast::<u8>(),
             &raw const nel,
             4,
-            i32_compar,
+            Some(null_matches_two),
         );
-        assert!(result.is_null());
+        assert_eq!(result, (&raw const arr[1]).cast::<u8>());
     }
 
     #[test]
@@ -1373,7 +2049,7 @@ mod tests {
             arr.as_ptr().cast::<u8>(),
             &raw const nel,
             width,
-            i32_compar,
+            Some(i32_compar),
         );
         assert!(!result.is_null());
         // Should point to the first element.
@@ -1392,7 +2068,7 @@ mod tests {
             arr.as_ptr().cast::<u8>(),
             &raw const nel,
             width,
-            i32_compar,
+            Some(i32_compar),
         );
         assert!(!result.is_null());
         assert_eq!(unsafe { *(result.cast::<i32>()) }, 300);
@@ -1410,7 +2086,7 @@ mod tests {
             arr.as_mut_ptr().cast::<u8>(),
             &raw mut nel,
             width,
-            i32_compar,
+            Some(i32_compar),
         );
         assert!(!result.is_null());
         assert_eq!(nel, 3, "nel should not change when found");
@@ -1429,25 +2105,17 @@ mod tests {
             arr.as_mut_ptr().cast::<u8>(),
             &raw mut nel,
             width,
-            i32_compar,
+            Some(i32_compar),
         );
         assert!(!result.is_null());
         assert_eq!(nel, 4, "nel should increment on insert");
         assert_eq!(arr[3], 99, "inserted value should be at end");
     }
 
-    #[test]
-    fn test_lsearch_null_params() {
-        let result = lsearch(
-            core::ptr::null(),
-            core::ptr::null_mut(),
-            core::ptr::null_mut(),
-            4,
-            i32_compar,
-        );
-        assert!(result.is_null());
-    }
-
+    /// A width of 0 makes every element `base`, as glibc computes them: a key
+    /// equal to the first element is found there.  It was refused without a
+    /// comparison until 2026-09-26.  (A NULL `nelp`, which glibc reads, ends
+    /// the process now; it was "not found".)
     #[test]
     fn test_lsearch_zero_width() {
         let mut arr: [i32; 4] = [1, 2, 3, 0];
@@ -1458,9 +2126,10 @@ mod tests {
             arr.as_mut_ptr().cast::<u8>(),
             &raw mut nel,
             0,
-            i32_compar,
+            Some(i32_compar),
         );
-        assert!(result.is_null());
+        assert_eq!(result, arr.as_mut_ptr().cast::<u8>());
+        assert_eq!(nel, 3, "found, so nothing appended");
     }
 
     // ===================================================================
@@ -1588,5 +2257,63 @@ mod tests {
     fn test_queue_entry_layout() {
         // QueueEntry: next + prev = 2 pointers = 16 bytes.
         assert_eq!(core::mem::size_of::<QueueEntry>(), 16);
+    }
+
+    // -- A NULL comparison function (design-decisions.md §1115) --
+
+    /// glibc calls `compar` only when there is something to compare with: an
+    /// empty tree takes a NULL one, and `tsearch` inserts into it.  With a
+    /// node to compare, `tsearch` fails with EFAULT.  (`tfind`'s and
+    /// `tdelete`'s NULL with a node to compare ends the process, which is not
+    /// a test's to take.)
+    #[test]
+    fn a_null_compar_is_harmless_while_the_tree_is_empty() {
+        let mut root: *mut u8 = core::ptr::null_mut();
+        assert!(tfind(7 as *const u8, &raw const root, None).is_null());
+        assert!(tdelete(7 as *const u8, &raw mut root, None).is_null());
+        let node = tsearch(7 as *const u8, &raw mut root, None);
+        assert!(!node.is_null(), "an empty tree is inserted into");
+        assert_eq!(
+            tfind(7 as *const u8, &raw const root, Some(int_compar)),
+            node
+        );
+        errno::set_errno(0);
+        assert!(tsearch(8 as *const u8, &raw mut root, None).is_null());
+        assert_eq!(errno::get_errno(), errno::EFAULT);
+        assert!(tfind(8 as *const u8, &raw const root, Some(int_compar)).is_null());
+        assert!(!tdelete(7 as *const u8, &raw mut root, Some(int_compar)).is_null());
+        assert!(root.is_null());
+    }
+
+    /// glibc's `lfind` checks nothing: a NULL key and a NULL array go to
+    /// `compar`, a zero width compares `base` every time, and an empty array
+    /// needs no `compar`.  Each was "not found" without a comparison until
+    /// 2026-09-26.
+    #[test]
+    fn lfind_hands_compar_whatever_it_is_given() {
+        extern "C" fn null_is_seven(a: *const u8, b: *const u8) -> i32 {
+            // The key is NULL; the element is the address it was given.
+            if a.is_null() && b as usize == 7 { 0 } else { 1 }
+        }
+        let one = 1usize;
+        let base = 7 as *const u8;
+        assert_eq!(
+            lfind(core::ptr::null(), base, &one, 0, Some(null_is_seven)),
+            base
+        );
+        let zero = 0usize;
+        assert!(lfind(core::ptr::null(), core::ptr::null(), &zero, 4, None).is_null());
+        // lsearch appends to an empty array without a comparison.
+        let mut arr = [0i32; 2];
+        let mut n = 0usize;
+        let key = 5i32;
+        let got = lsearch(
+            (&raw const key).cast(),
+            arr.as_mut_ptr().cast(),
+            &raw mut n,
+            4,
+            None,
+        );
+        assert_eq!((got, n, arr[0]), (arr.as_mut_ptr().cast(), 1, 5));
     }
 }

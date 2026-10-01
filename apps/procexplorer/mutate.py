@@ -11,6 +11,10 @@ takes a command line, splits it as a shell would -- quotes and escapes, no
 expansion -- and starts it; Open file location follows `/proc/<pid>/exe` and
 hands the program's path to the file manager.
 
+And, from 2026-09-27, the machine's totals: `read_system`'s doc said a figure
+`/proc/meminfo` does not carry keeps the value last read, and the code zeroed
+it.
+
 What is deliberately not here: where the box and its buttons are drawn.  The
 pointer tests click the middle of the rectangles `run_box_layout` returns, so
 moving a rectangle moves the click with it; only swapping or overlapping the
@@ -39,6 +43,8 @@ OPEN_QUOTE = "a_line_with_an_open_quote_is_not_run"
 LOCATION = "open_file_location_opens_the_programs_folder"
 MENU = "the_context_menus_open_file_location_looks_for_the_program"
 HAND_OFF = "show_in_folder_hands_the_path_to_the_file_manager"
+READ_SYSTEM = "the_system_figures_are_read_and_not_invented"
+KEEP = "a_figure_the_file_stops_carrying_keeps_its_last_value"
 
 MUTATIONS = [
     # --- Splitting a command line ---
@@ -260,6 +266,31 @@ MUTATIONS = [
         "            Err(e) => format!(\"Cannot open the file manager: {e}\"),",
         "            Err(_) => format!(\"Opened the folder of {shown}\"),",
         [HAND_OFF],
+    ),
+    # --- The machine's totals (2026-09-27) ---
+    (
+        "a figure the file does not carry is zeroed",
+        "    if let Some(kib) = kib {\n        *field = kib.saturating_mul(1024);\n    }",
+        "    *field = kib.unwrap_or(0).saturating_mul(1024);",
+        [KEEP],
+    ),
+    (
+        "a figure in KiB is taken for bytes",
+        "        *field = kib.saturating_mul(1024);",
+        "        *field = kib;",
+        [READ_SYSTEM, KEEP],
+    ),
+    (
+        "the cache is read from the free figure",
+        "            set_kib(&mut info.cached_memory, mem.cached_kib);",
+        "            set_kib(&mut info.cached_memory, mem.free_kib);",
+        [READ_SYSTEM, KEEP],
+    ),
+    (
+        "swap in use is not read",
+        "            set_kib(&mut info.swap_used, mem.swap_used_kib());\n",
+        "",
+        [READ_SYSTEM, KEEP],
     ),
 ]
 

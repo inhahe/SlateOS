@@ -107,6 +107,47 @@ def _throwaway_config_dir():
 REPO = Path(__file__).resolve().parent.parent
 
 
+def package_dir(crate):
+    """The directory holding `crate`'s `Cargo.toml`, or None if cargo cannot say.
+
+    Asked of cargo rather than guessed from the name, because the name is not
+    the path: `apps/calendar` is `calendar`, but the vendored ciphers under
+    `rustcrypto/` and the root crates are not laid out by any one rule.
+
+    None -- a manifest cargo cannot load -- costs only precision: the table
+    check then searches beside the mutated file alone, which can refuse a good
+    row but never accepts a bad one, and the warm-up build that follows fails
+    on the same manifest and says why.
+    """
+    if crate in _PACKAGE_DIRS:
+        return _PACKAGE_DIRS[crate]
+    import json
+
+    found = None
+    try:
+        out = subprocess.run(
+            ["cargo", "metadata", "--no-deps", "--format-version", "1"],
+            cwd=REPO,
+            env=cargo_env(),
+            capture_output=True,
+            timeout=300,
+        )
+        if out.returncode == 0:
+            for pkg in json.loads(out.stdout).get("packages", []):
+                if pkg.get("name") == crate:
+                    found = Path(pkg["manifest_path"]).parent
+                    break
+    except (OSError, subprocess.TimeoutExpired, ValueError):
+        # ValueError covers a JSON document cargo did not finish writing.
+        # Each of these leaves `found` None, whose cost is described above.
+        pass
+    _PACKAGE_DIRS[crate] = found
+    return found
+
+
+_PACKAGE_DIRS = {}
+
+
 def build_tests(crate, timeout=1800):
     """Compile the crate's test binaries without running them.
 
@@ -148,6 +189,32 @@ def build_tests(crate, timeout=1800):
     )
 
 
+def failed_tests(stdout):
+    """The names of the tests a `cargo test` run reports as failed.
+
+    A failing unit test is listed under its whole path: `tests::name` for
+    tests in the crate root, `input::tests::name` for tests in a module the
+    root declares.  This read only the first once, so a crate whose tests live
+    in a submodule -- `apps/editor`'s close question is tested in `input.rs` --
+    had every failure it reported go unread, and each mutant was scored
+    "caught by a crash": `[ok]`, whatever the tests had actually said.  The
+    name after `tests::` is what a table's `expect` names.
+
+    An integration test -- a file in the crate's `tests/` -- is a binary of
+    its own, and lists its failures bare: `    name`, no path.  Those went
+    unread the same way until 2026-09-27, when `apps/snapstore`'s store tests
+    were the first a table named; they are read from the summary block that
+    follows `failures:`, where every line is a test's name.
+    """
+    failed = set(re.findall(r"^    (?:[A-Za-z0-9_]+::)*tests::(\S+)$", stdout, re.M))
+    for block in re.findall(r"^failures:\n((?:    \S+\n)+)", stdout, re.M):
+        for line in block.splitlines():
+            name = line.strip()
+            if "::" not in name:
+                failed.add(name)
+    return failed
+
+
 def run_tests(crate, timeout):
     """Run one crate's suite and classify what happened to it.
 
@@ -166,6 +233,13 @@ def run_tests(crate, timeout):
             crate,
             "--target",
             "x86_64-pc-windows-gnu",
+            # Every test binary runs even when one fails. Cargo stops at the
+            # first failing binary otherwise, so a crate with integration
+            # tests had a mutant caught by `tests/audit.rs` never reach the
+            # test the table named in `tests/store.rs` -- scored WRONG TESTS
+            # for a row whose named test was never run. A crate with one test
+            # binary is unaffected.
+            "--no-fail-fast",
         ],
         capture_output=True,
         text=True,
@@ -181,14 +255,7 @@ def run_tests(crate, timeout):
         cwd=REPO,
         env=cargo_env(),
     )
-    # A failing test is listed under its whole path: `tests::name` for tests
-    # in the crate root, `input::tests::name` for tests in a module the root
-    # declares.  This read only the first, so a crate whose tests live in a
-    # submodule -- `apps/editor`'s close question is tested in `input.rs` --
-    # had every failure it reported go unread, and each mutant was scored
-    # "caught by a crash": `[ok]`, whatever the tests had actually said.  The
-    # name after `tests::` is what a table's `expect` names.
-    failed = set(re.findall(r"^    (?:[A-Za-z0-9_]+::)*tests::(\S+)$", out.stdout, re.M))
+    failed = failed_tests(out.stdout)
     compiled = "could not compile" not in out.stdout + out.stderr
     timed_out = out.returncode == 124
     # Did a test binary actually start?  Without this the harness cannot tell a
@@ -246,7 +313,7 @@ def refuse_a_dirty_start(src, bak):
     sys.exit(2)
 
 
-def check_the_table(original, mutations, src_dir=None):
+def check_the_table(original, mutations, src_dir=None, test_dirs=()):
     """Report every unusable row in the table at once, before any build time.
 
     Four ways a row says nothing, all of them silent at run time:
@@ -258,6 +325,15 @@ def check_the_table(original, mutations, src_dir=None):
       row is scored `SURVIVED` -- a coverage hole reported where there is none.
     * **`expect` names a test that does not exist.**  The expectation can never
       be met, so the row reports `WRONG TESTS` for as long as it survives.
+
+    Tests are looked for beside the mutated file (`src_dir`, and the `tests/`
+    of the crate it is in) and, recursively, in each of `test_dirs` -- which
+    `sweep` fills with the `src/` and `tests/` of the crate whose suite it
+    runs.  The two differ when a library is swept by the tests of a program
+    that uses it: `apps/calendarstore` holds the calendar's file format, and
+    most of what pins that format is the calendar's own tests, in
+    `apps/calendar`.  Searching only beside the mutated file refused all 29 of
+    those rows as naming "no such test".
 
     An **empty** `expect` is not a problem: it is the table's way of saying "no
     named test can report this, because the program dies first" -- maze's
@@ -284,7 +360,23 @@ def check_the_table(original, mutations, src_dir=None):
     # is in `main.rs` and its tests drive it through `input.rs` -- and a table
     # naming such a test was refused as naming "no such test".
     if src_dir is not None:
-        for other in sorted(src_dir.glob("*.rs")):
+        others = sorted(src_dir.glob("*.rs"))
+        # ...and in the crate's integration tests, which drive the public API
+        # as a caller would and are where a library's promises are pinned:
+        # `apps/snapstore`'s store tests live in `tests/`, beside `src/`.
+        if src_dir.name == "src":
+            others += sorted((src_dir.parent / "tests").glob("*.rs"))
+        for other in others:
+            defined |= set(
+                re.findall(
+                    r"fn\s+([a-z0-9_]+)\s*\(\s*\)",
+                    other.read_text(encoding="utf-8", errors="replace"),
+                )
+            )
+    # ...and anywhere in the crate the sweep runs, nested modules included:
+    # its test binary is built from all of them.
+    for test_dir in test_dirs:
+        for other in sorted(Path(test_dir).rglob("*.rs")):
             defined |= set(
                 re.findall(
                     r"fn\s+([a-z0-9_]+)\s*\(\s*\)",
@@ -367,7 +459,11 @@ def sweep(src, mutations, crate, timeout=240, only=None):
         return 2
 
     # Cheapest check first: one pass over a string, before a compiler is started.
-    problems = check_the_table(original, selected, src.parent)
+    # The tests named are the ones `cargo test -p crate` runs, so they are
+    # looked for in that crate as well as beside the mutated file.
+    pkg = package_dir(crate)
+    test_dirs = [pkg / "src", pkg / "tests"] if pkg is not None else []
+    problems = check_the_table(original, selected, src.parent, test_dirs)
     if problems:
         bak.unlink(missing_ok=True)
         print(f"\n{problems} unusable row(s) in the table.  Fix them first: a row")

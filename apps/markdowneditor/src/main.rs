@@ -5115,6 +5115,11 @@ pub struct App {
     pub autosave_enabled: bool,
     /// Auto-save interval in seconds.
     pub autosave_interval: u64,
+    /// Whether this window keeps its settings -- auto-save on or off -- in
+    /// `markdowneditor.yaml` (C-Q26, option A). Set by [`App::with_settings`],
+    /// which the program's `main` calls; a window a test builds keeps nothing,
+    /// so no test writes the developer's own settings.
+    keeps_settings: bool,
     /// Whether the template chooser dialog is open.
     pub template_chooser_open: bool,
     /// The template the chooser's keyboard highlight is on.
@@ -5322,6 +5327,7 @@ impl App {
             show_help: false,
             autosave_enabled: true,
             autosave_interval: DEFAULT_AUTOSAVE_INTERVAL,
+            keeps_settings: false,
             template_chooser_open: false,
             template_focus: 0,
             toc_scroll: 0,
@@ -6785,7 +6791,7 @@ impl App {
             }
             Target::FindClose => self.find_state.visible = false,
             Target::ViewMode => self.view_mode = self.view_mode.next(),
-            Target::Autosave => self.autosave_enabled = !self.autosave_enabled,
+            Target::Autosave => self.set_autosave(!self.autosave_enabled),
             Target::TemplateBackdrop | Target::TemplateCancel => {
                 self.template_chooser_open = false;
             }
@@ -7985,8 +7991,51 @@ impl oswindow::app::App for App {
     }
 }
 
+/// The settings file this program keeps its preferences in:
+/// `<config>/markdowneditor.yaml`, one file per program (C-Q26, option A --
+/// `design-decisions.md` §1418).
+const CONFIG_NAME: &str = "markdowneditor";
+
+/// Whether auto-save is on.
+const AUTOSAVE_KEY: [&str; 1] = ["autosave"];
+
+impl App {
+    /// This window, with the preferences the user chose last time -- and
+    /// keeping any they change from now on.
+    #[must_use]
+    pub fn with_settings(mut self) -> Self {
+        self.keeps_settings = true;
+        if let Some(on) = settingsfile::load(CONFIG_NAME).get_bool(&AUTOSAVE_KEY) {
+            self.autosave_enabled = on;
+        }
+        self
+    }
+
+    /// Turn auto-save on or off, and keep the choice for next time.
+    ///
+    /// Until 2026-09-27 the switch lasted as long as the window: every new
+    /// one started with auto-save on, whatever had been chosen before.
+    pub fn set_autosave(&mut self, on: bool) {
+        self.autosave_enabled = on;
+        if !self.keeps_settings {
+            return;
+        }
+        let mut doc = settingsfile::load(CONFIG_NAME);
+        doc.set_bool(&AUTOSAVE_KEY, on);
+        if let Err(e) = settingsfile::store(CONFIG_NAME, &doc) {
+            self.file_status = Some(FileNote::Failed(format!(
+                "Auto-save is {} for this window only: the setting could not be kept ({e})",
+                if on { "on" } else { "off" }
+            )));
+        }
+    }
+}
+
 fn main() -> std::process::ExitCode {
-    oswindow::app::launch("markdowneditor", &mut App::new(1280.0, 800.0))
+    oswindow::app::launch(
+        "markdowneditor",
+        &mut App::new(1280.0, 800.0).with_settings(),
+    )
 }
 
 // ============================================================================
@@ -12311,5 +12360,37 @@ mod tests {
         }
         assert_eq!(col_at(line, 0.0, text_x), 0, "left of the text is column 0");
         assert_eq!(col_at(line, 1.0e6, text_x), line.len());
+    }
+
+    // == Auto-save is kept (2026-09-27, C-Q26) =================================
+
+    #[test]
+    fn auto_save_turned_off_stays_off_in_the_next_window() {
+        settingsfile::testing::with_scratch_config("md_autosave", |dir| {
+            let mut app = App::new(1280.0, 800.0).with_settings();
+            assert!(app.autosave_enabled, "on until somebody says otherwise");
+            app.set_autosave(false);
+            let next = App::new(1280.0, 800.0).with_settings();
+            assert!(
+                !next.autosave_enabled,
+                "the choice did not outlive the window"
+            );
+            let text = std::fs::read_to_string(dir.join("slateos").join("markdowneditor.yaml"))
+                .unwrap_or_default();
+            assert!(text.contains("autosave"), "{text:?}");
+        });
+    }
+
+    #[test]
+    fn a_window_a_test_builds_keeps_nothing() {
+        settingsfile::testing::with_scratch_config("md_autosave_quiet", |dir| {
+            let mut app = App::new(1280.0, 800.0);
+            app.set_autosave(false);
+            assert!(!app.autosave_enabled);
+            assert!(
+                !dir.join("slateos").join("markdowneditor.yaml").exists(),
+                "a window that does not keep settings wrote them"
+            );
+        });
     }
 }

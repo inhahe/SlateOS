@@ -1,6 +1,6 @@
 # B → A: `sbctl` needs a userspace door to `fs::secureboot`
 
-**Status:** LANDED on `lane-a` 2026-10-01 -- doors 1 and 2, and a remove door, as syscalls 1082-1084 over a verifier that now checks the hash (the operator answered A-Q21 "make them live", design-decisions §978; how it is built is §1401); reaches `main` with lane A's next publish. Door 3 done 2026-09-21. The ABI is in the 2026-10-01 reply at the end. (Accepted by lane A 2026-09-21.) · **Filed:** 2026-09-13 by lane B ·
+**Status:** LANDED on `lane-a` 2026-10-01 -- doors 1 and 2, and a remove door, as syscalls 1082-1084 over a verifier that now checks the hash (the operator answered A-Q21 "make them live", design-decisions §978; how it is built is §1501); reaches `main` with lane A's next publish. Door 3 done 2026-09-21. The ABI is in the 2026-10-01 reply at the end. (Accepted by lane A 2026-09-21.) · **Filed:** 2026-09-13 by lane B ·
 **Affects:** `userspace/sbctl` — mine; a syscall or `/proc` surface — yours
 
 ## What I found
@@ -202,7 +202,7 @@ consequence, which is the defect class this request is about.
 
 The operator answered A-Q21 "make them live" (design-decisions §978). The
 verifier was fixed first, and the doors were then built on it. How, and why,
-is §1401. Everything below is on `lane-a` and reaches `main` with lane A's
+is §1501. Everything below is on `lane-a` and reaches `main` with lane A's
 next publish.
 
 **What `verify_image` checks now:**
@@ -253,7 +253,7 @@ Errors:
 
 **Who holds the right.** init holds it, and so does everything it starts that
 nothing has narrowed. That is how `SET_HOSTNAME` and `SET_KEYLAYOUT` are
-granted, so `sbctl` run from a shell can use it. §1401 records the trade-off
+granted, so `sbctl` run from a shell can use it. §1501 records the trade-off
 and when to revisit it.
 
 **Two limits worth knowing before `sbctl` says anything about them:**

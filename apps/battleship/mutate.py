@@ -143,13 +143,13 @@ MUTATIONS = [
     # -- Clicks --------------------------------------------------------
     (
         "a cell records no box for a click to find",
-        "                f.hit(Target::Own(byte(r), byte(c)), rect);",
+        "                f.hit(Target::Own(byte(row), byte(col)), rect);",
         "                let _ = rect;",
         ["every_cell_of_both_grids_records_a_box_a_click_can_find"],
     ),
     (
         "the ocean records no box for a click to find",
-        "                f.hit(Target::Ocean(byte(r), byte(c)), rect);",
+        "                f.hit(Target::Ocean(byte(row), byte(col)), rect);",
         "                let _ = rect;",
         ["every_cell_of_both_grids_records_a_box_a_click_can_find"],
     ),
@@ -284,8 +284,8 @@ MUTATIONS = [
     # -- What is drawn -------------------------------------------------
     (
         "the phase is named but not coloured by how it is going",
-        "            GamePhase::GameOver if self.player_won => (\"Victory!\", GREEN),",
-        "            GamePhase::GameOver if self.player_won => (\"Victory!\", RED),",
+        "            GamePhase::GameOver if self.player_won => (\"Victory!\", c.chrome.good),",
+        "            GamePhase::GameOver if self.player_won => (\"Victory!\", c.chrome.bad),",
         ["the_phase_is_named_in_the_header_and_coloured_by_how_it_is_going"],
     ),
     (
@@ -314,10 +314,8 @@ MUTATIONS = [
     ),
     (
         "the ship being placed is previewed on one cell, not the cells it takes",
-        "            for (r, c) in ship.cells() {\n"
-        "                if r < GRID_SIZE && c < GRID_SIZE {",
-        "            for (r, c) in ship.cells().into_iter().take(1) {\n"
-        "                if r < GRID_SIZE && c < GRID_SIZE {",
+        "            for (row, col) in ship.cells() {\n                if row < GRID_SIZE && col < GRID_SIZE {",
+        "            for (row, col) in ship.cells().into_iter().take(1) {\n                if row < GRID_SIZE && col < GRID_SIZE {",
         ["the_ship_being_placed_is_previewed_over_the_cells_it_would_take"],
     ),
     (
@@ -334,8 +332,8 @@ MUTATIONS = [
     ),
     (
         "a miss is marked in the colour of a hit",
-        "                    color: BLUE,",
-        "                    color: RED,",
+        "                let blue = gamechrome::legible_on(MISS, ground);",
+        "                let blue = gamechrome::legible_on(HIT, ground);",
         ["a_hit_is_a_cross_and_a_miss_is_a_dot"],
     ),
     (
@@ -346,8 +344,8 @@ MUTATIONS = [
     ),
     (
         "a sunk enemy ship is left looking like open water",
-        "                let colour = if self.opponent_fleet.is_cell_sunk(r, c) {\n                    OVERLAY0",
-        "                let colour = if false {\n                    OVERLAY0",
+        "                let colour = if self.opponent_fleet.is_cell_sunk(row, col) {\n                    c.wreck",
+        "                let colour = if false {\n                    c.wreck",
         ["a_sunk_enemy_ship_is_shown_while_the_battle_is_still_on"],
     ),
     (
@@ -370,8 +368,8 @@ MUTATIONS = [
     ),
     (
         "a fleet down to its last ship is not called out",
-        "        let fleet_colour = |left: usize| if left <= 1 { RED } else { GREEN };",
-        "        let fleet_colour = |left: usize| if false { RED } else { GREEN };",
+        "        let fleet_colour = |left: usize| {\n            if left <= 1 {",
+        "        let fleet_colour = |left: usize| {\n            if false {",
         ["a_fleet_down_to_its_last_ship_is_said_in_the_colour_of_alarm"],
     ),
     (
@@ -422,6 +420,36 @@ MUTATIONS = [
         "            EventResult::Ignored => Response::Idle,",
         "            EventResult::Ignored => Response::Redraw,",
         ["the_window_asks_for_a_redraw_only_when_something_changed"],
+    ),
+    (
+        "the theme is never taken up",
+        "    fn theme_changed(&mut self, palette: &Palette) {\n        self.palette = *palette;",
+        "    fn theme_changed(&mut self, palette: &Palette) {\n        let _ = palette;",
+        ["the_window_is_drawn_in_the_users_colours"],
+    ),
+    (
+        "a mark is drawn with no halo",
+        "        let half = rect.w * 0.26;\n        let halo = gamechrome::legible_on(HALOS, ground);",
+        "        let half = rect.w * 0.26;\n        let halo = ground;",
+        ["a_hit_is_a_cross_and_a_miss_is_a_dot"],
+    ),
+    (
+        "the halo is a grey, which the wreck swallows",
+        "const HALOS: (Color, Color) = (Color::from_hex(0xFFFFFF), Color::from_hex(0x000000));",
+        "const HALOS: (Color, Color) = (Color::from_hex(0xBBBBBB), Color::from_hex(0x333333));",
+        ["a_mark_is_seen_on_every_cell_in_either_theme"],
+    ),
+    (
+        "the two three-cell ships share a hull colour",
+        "            hulls: [p.blue, p.mauve, p.green, p.peach, p.yellow],",
+        "            hulls: [p.blue, p.mauve, p.green, p.green, p.yellow],",
+        ["every_hull_is_seen_and_the_two_three_cell_ships_told_apart"],
+    ),
+    (
+        "a grid's caption is the faintest grey",
+        "        let ink = Ink::new(l.small, FontWeightHint::Bold, c.chrome.dim);\n        let caption = side.caption();",
+        "        let ink = Ink::new(l.small, FontWeightHint::Bold, c.chrome.off);\n        let caption = side.caption();",
+        ["every_text_reads_on_what_is_under_it_in_either_theme"],
     ),
 ]
 

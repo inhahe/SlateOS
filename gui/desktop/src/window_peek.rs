@@ -1939,7 +1939,7 @@ mod tests {
                         "the close X is not inked for its own button \
                          (light = {light}, hovered = {close})"
                     );
-                    if got == Color::from_hex(0x0011_111B) {
+                    if got == appearance::DARK_EXTREME {
                         saw_dark_ink = true;
                     } else {
                         saw_light_ink = true;

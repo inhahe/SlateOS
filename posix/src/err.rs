@@ -5,12 +5,26 @@
 //! strictly POSIX but are very widely used by Unix utilities (BSD,
 //! macOS, and glibc all provide them).
 //!
-//! ## Behavior
+//! ## What they print: glibc's, byte for byte
 //!
-//! - `warn`/`vwarn`: prints `progname: fmt-args: strerror(errno)\n`
-//! - `warnx`/`vwarnx`: prints `progname: fmt-args\n` (no errno)
-//! - `err`/`verr`: like `warn` + `exit(eval)`
-//! - `errx`/`verrx`: like `warnx` + `exit(eval)`
+//! - `warn`/`vwarn`: `progname: fmt-args: strerror(errno)\n`, and with a NULL
+//!   format `progname: strerror(errno)\n`
+//! - `warnx`/`vwarnx`: `progname: fmt-args\n`, and with a NULL format
+//!   `progname: \n`
+//! - `err`/`verr`: `warn`, then `exit(eval)`
+//! - `errx`/`verrx`: `warnx`, then `exit(eval)`
+//!
+//! `progname` is `__progname`, the last component of argv[0] -- unlike
+//! `error`'s, which is argv[0] whole. `errno` is the caller's, read before
+//! anything is written. `stdout` is not flushed first, as glibc's are not
+//! (`error` is the family that does). As `posix/tools/oracle/errfns_harness.py`
+//! recorded glibc 2.39's answers (`errfns_oracle.txt`), replayed by the
+//! tests.
+//!
+//! The message goes through the `stderr` stream, under its lock, whole: it
+//! was formatted into a 1024-byte buffer and cut there until 2026-09-29, and
+//! written around the stream to file descriptor 2 (known-issues.md ->
+//! D-POSIX-ERROR-PRINTED-THE-SHORT-NAME-AND-CUT-LONG-MESSAGES).
 //!
 //! ## Implementation
 //!
@@ -20,29 +34,10 @@
 //! System V register save area and building a `va_list` over it — and then
 //! call the matching `v*` variant.  Those variants are plain Rust and take
 //! the `va_list` directly, so they are host-testable and there is exactly one
-//! argument-delivery path.  Both funnel through [`emit`], which expands the
-//! format string with the tested `snprintf` engine before adding the
-//! `progname:` prefix and optional `: strerror(errno)` suffix.
-//!
-//! Streaming the arguments straight out of the `va_list` rather than
-//! flattening them into fixed arrays is what lifts the old eight-integer /
-//! eight-float ceiling and makes `%Lf` reachable here: a `long double` is
-//! X87/X87UP and therefore MEMORY-class, so it is passed only in the overflow
-//! area and no register-array representation can carry it.  See
-//! BUG-POSIX-PRINTF-ARG-ARRAY-OOB and BUG-POSIX-LONG-DOUBLE-ABI in
-//! `known-issues.md`.
-//!
-//! Earlier this layer printed the format string *literally* (it declared the
-//! functions as non-variadic and dropped the arguments), so `err(1, "open
-//! %s", path)` produced `open %s: ...` instead of expanding `%s`.  That is
-//! now fixed.
-
-// Calls `printf::_snprintf_impl` (an underscore-prefixed ABI trampoline
-// target).  The underscore is part of the printf-impl naming convention,
-// not a "private" marker — see `crate::printf` for details.
-#![allow(clippy::used_underscore_items)]
+//! argument-delivery path.  Both funnel through [`emit`].
 
 use crate::errno;
+use crate::error::{put, put_cstr};
 use crate::printf::{self, VaList};
 
 #[cfg(target_os = "none")]
@@ -66,77 +61,30 @@ va_trampoline!("err", "verr", "16", "rdx");
 #[cfg(target_os = "none")]
 va_trampoline!("errx", "verrx", "16", "rdx");
 
-// ---------------------------------------------------------------------------
-// Helpers
-// ---------------------------------------------------------------------------
-
-/// Stack buffer for the expanded format-string body.
-const MSG_BUF_SIZE: usize = 1024;
-
-/// Write a byte slice to stderr.
-fn write_stderr(buf: &[u8]) {
-    let _ = crate::file::write(2, buf.as_ptr(), buf.len());
-}
-
-/// Write a C string (null-terminated) to stderr.
-fn write_cstr(s: *const u8) {
-    if s.is_null() {
-        return;
-    }
-    // SAFETY: `s` is a non-null C string per the caller.
-    let len = unsafe { crate::string::strlen(s) };
-    let _ = crate::file::write(2, s, len);
-}
-
-/// Common emitter for the whole family.
-///
-/// Prints `progname: <expanded fmt>` then, when `with_errno` is set,
-/// `: strerror(errno)`, and finally a newline — matching glibc's `warn`
-/// (errno) and `warnx` (no errno) output exactly.
-///
-/// `args` is the argument source the formatting engine pulls from; it is left
-/// untouched when `fmt` is null, since nothing is expanded in that case.
-fn emit(fmt: *const u8, args: &mut printf::Args, with_errno: bool) {
-    // Capture errno up front: the message we report is the error that was
-    // current at the call site, not whatever the writes below might set.
+/// The whole family, into `out`: `progname: `, the expanded format, and with
+/// `with_errno` `: strerror(errno)` (without the `: ` for a NULL format),
+/// then a newline.
+fn emit(out: *mut u8, fmt: *const u8, args: &mut printf::Args, with_errno: bool) {
+    // The caller's error, before the writes below can change it.
     let saved_errno = errno::get_errno();
-
-    // Program-name prefix.
-    // SAFETY: __progname is set by __libc_start_main; before that it points
-    // at the static "unknown\0" string, so the read is always valid.
-    let prog = unsafe { core::ptr::addr_of!(crate::crt::__progname).read() };
-    if !prog.is_null() {
-        write_cstr(prog);
-        write_stderr(b": ");
-    }
-
-    // Expanded format body.
+    crate::stdio::flockfile(out.cast());
+    // SAFETY: a plain read of the pointer `__libc_start_main` set.
+    put_cstr(out, unsafe {
+        core::ptr::addr_of!(crate::crt::__progname).read()
+    });
+    put(out, b": ");
     if !fmt.is_null() {
-        let mut body = [0u8; MSG_BUF_SIZE];
-        let n = printf::_snprintf_impl(body.as_mut_ptr(), MSG_BUF_SIZE, fmt, args);
-        let len = if n >= 0 && (n as usize) < MSG_BUF_SIZE {
-            n as usize
-        } else if n >= 0 {
-            // Truncated: the buffer holds MSG_BUF_SIZE-1 chars + NUL.
-            MSG_BUF_SIZE.wrapping_sub(1)
-        } else {
-            0
-        };
-        if let Some(slice) = body.get(..len) {
-            write_stderr(slice);
-        }
+        // What a failed write loses is the message itself, as in `put`.
+        let _ = printf::_fprintf_impl(out, fmt, args);
         if with_errno {
-            write_stderr(b": ");
+            put(out, b": ");
         }
     }
-
-    // Errno description.
     if with_errno {
-        let msg = crate::string::strerror(saved_errno);
-        write_cstr(msg);
+        put_cstr(out, crate::string::strerror(saved_errno));
     }
-
-    write_stderr(b"\n");
+    put(out, b"\n");
+    crate::stdio::funlockfile(out.cast());
 }
 
 // ---------------------------------------------------------------------------
@@ -154,7 +102,7 @@ pub unsafe extern "C" fn vwarn(fmt: *const u8, ap: *mut VaList) {
     // SAFETY: the caller guarantees `ap` is a valid va_list matching `fmt`;
     // a null one is rendered as zero arguments rather than a fault.
     let mut args = unsafe { printf::Args::from_raw(ap) };
-    emit(fmt, &mut args, true);
+    emit(crate::stdio::stderr_stream(), fmt, &mut args, true);
 }
 
 /// `vwarnx(fmt, ap)` — `warnx` with a `va_list`.
@@ -165,7 +113,7 @@ pub unsafe extern "C" fn vwarn(fmt: *const u8, ap: *mut VaList) {
 pub unsafe extern "C" fn vwarnx(fmt: *const u8, ap: *mut VaList) {
     // SAFETY: as `vwarn`.
     let mut args = unsafe { printf::Args::from_raw(ap) };
-    emit(fmt, &mut args, false);
+    emit(crate::stdio::stderr_stream(), fmt, &mut args, false);
 }
 
 /// `verr(eval, fmt, ap)` — `err` with a `va_list`.
@@ -176,7 +124,7 @@ pub unsafe extern "C" fn vwarnx(fmt: *const u8, ap: *mut VaList) {
 pub unsafe extern "C" fn verr(eval: i32, fmt: *const u8, ap: *mut VaList) -> ! {
     // SAFETY: as `vwarn`.
     let mut args = unsafe { printf::Args::from_raw(ap) };
-    emit(fmt, &mut args, true);
+    emit(crate::stdio::stderr_stream(), fmt, &mut args, true);
     crate::crt::exit(eval);
 }
 
@@ -188,7 +136,7 @@ pub unsafe extern "C" fn verr(eval: i32, fmt: *const u8, ap: *mut VaList) -> ! {
 pub unsafe extern "C" fn verrx(eval: i32, fmt: *const u8, ap: *mut VaList) -> ! {
     // SAFETY: as `vwarn`.
     let mut args = unsafe { printf::Args::from_raw(ap) };
-    emit(fmt, &mut args, false);
+    emit(crate::stdio::stderr_stream(), fmt, &mut args, false);
     crate::crt::exit(eval);
 }
 
@@ -199,18 +147,10 @@ pub unsafe extern "C" fn verrx(eval: i32, fmt: *const u8, ap: *mut VaList) -> ! 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::error::capture::Pair;
+    use std::string::String;
 
-    // The emitter and the v* entry points write to fd 2; we can't capture that
-    // output here, so most tests verify "doesn't crash" with a variety of
-    // inputs.  The format *expansion* itself is exhaustively tested in
-    // `printf.rs`; here we exercise the wiring from a `va_list` through
-    // `vwarn`/`vwarnx` into the shared emitter.
-    //
-    // `err`/`errx`/`verr`/`verrx` are not called directly because they call
-    // `exit()` and would terminate the test process.
-
-    /// Build a synthetic SysV `va_list` with up to 6 integer args in the GP
-    /// register save area (sufficient for these tests).
+    /// A synthetic SysV `va_list` over up to six integer arguments.
     fn with_valist<R>(ints: &[u64], f: impl FnOnce(*mut VaList) -> R) -> R {
         let mut reg = [0u8; 176];
         for (i, &v) in ints.iter().enumerate().take(6) {
@@ -227,115 +167,105 @@ mod tests {
         f(&mut va)
     }
 
-    #[test]
-    fn vwarn_null_fmt_no_crash() {
-        crate::errno::set_errno(crate::errno::EINVAL);
-        // SAFETY: a null format string is handled by `emit` as "no body".
-        unsafe { vwarn(core::ptr::null(), core::ptr::null_mut()) };
-    }
-
-    #[test]
-    fn vwarn_plain_message_no_crash() {
-        crate::errno::set_errno(crate::errno::ENOENT);
-        // SAFETY: the format string has no conversions, so no args are read.
-        unsafe { vwarn(b"test warning\0".as_ptr(), core::ptr::null_mut()) };
-    }
-
-    #[test]
-    fn vwarn_with_format_args_no_crash() {
-        // Exercises the format-expansion path: "%s" + a string arg.
-        crate::errno::set_errno(crate::errno::ENOENT);
-        let path = b"/etc/passwd\0";
-        with_valist(&[path.as_ptr() as u64], |va| {
-            // SAFETY: va is a valid synthetic va_list with one pointer arg.
-            unsafe { vwarn(b"cannot open %s\0".as_ptr(), va) };
+    /// `warn` (`with_errno`) or `warnx` into `pair`'s `stderr`.
+    fn call(pair: &Pair, fmt: Option<&core::ffi::CStr>, ints: &[u64], with_errno: bool) {
+        with_valist(ints, |va| {
+            // SAFETY: `va` holds `ints`, which the format's conversions read.
+            let mut args = unsafe { printf::Args::from_raw(va) };
+            let f = fmt.map_or(core::ptr::null(), |f| f.as_ptr().cast());
+            emit(pair.stderr, f, &mut args, with_errno);
         });
     }
 
-    #[test]
-    fn vwarnx_null_fmt_no_crash() {
-        // SAFETY: a null format string is handled by `emit` as "no body".
-        unsafe { vwarnx(core::ptr::null(), core::ptr::null_mut()) };
+    /// The short name in the host's messages: `crt`'s default.
+    fn short() -> String {
+        // SAFETY: a plain read of a static C string's pointer.
+        let p = unsafe { core::ptr::addr_of!(crate::crt::__progname).read() };
+        // SAFETY: a C string.
+        unsafe { core::ffi::CStr::from_ptr(p.cast()) }
+            .to_string_lossy()
+            .into_owned()
     }
 
+    /// Every probe `errfns_harness.py` ran for this module's functions,
+    /// against glibc 2.39, the program's short name standing for glibc's.
+    /// `err` and `errx` are `warn` and `warnx` followed by `exit(eval)`,
+    /// which the test process cannot take: their output is replayed, and
+    /// their exit status is `eval`, as the oracle shows.
     #[test]
-    fn vwarnx_with_int_arg_no_crash() {
-        with_valist(&[42], |va| {
-            // SAFETY: va is a valid synthetic va_list with one int arg.
-            unsafe { vwarnx(b"code %d\0".as_ptr(), va) };
-        });
-    }
-
-    /// More conversions than the retired flat `[u64; 8]` arrays could hold.
-    /// Before BUG-POSIX-PRINTF-ARG-ARRAY-OOB was fixed this read past the end
-    /// of those arrays; now every argument comes from the `va_list` itself.
-    #[test]
-    fn vwarnx_more_than_eight_int_args_no_crash() {
-        with_valist(&[1, 2, 3, 4, 5, 6, 7, 8, 9, 10], |va| {
-            // SAFETY: va is a valid synthetic va_list with ten int args.
-            unsafe { vwarnx(b"%d%d%d%d%d%d%d%d%d%d\0".as_ptr(), va) };
-        });
-    }
-
-    #[test]
-    fn vwarn_null_va_no_crash() {
-        crate::errno::set_errno(crate::errno::EIO);
-        // SAFETY: vwarn handles a null va_list by formatting with no args.
-        unsafe { vwarn(b"plain\0".as_ptr(), core::ptr::null_mut()) };
-    }
-
-    #[test]
-    fn vwarn_with_valist_expands_args_no_crash() {
-        crate::errno::set_errno(crate::errno::EPERM);
-        let msg = b"denied\0";
-        with_valist(&[msg.as_ptr() as u64], |va| {
-            // SAFETY: va is a valid synthetic va_list with one pointer arg.
-            unsafe { vwarn(b"access: %s\0".as_ptr(), va) };
-        });
-    }
-
-    #[test]
-    fn vwarnx_with_valist_int_arg_no_crash() {
-        with_valist(&[7], |va| {
-            // SAFETY: va is a valid synthetic va_list with one int arg.
-            unsafe { vwarnx(b"step %d\0".as_ptr(), va) };
-        });
-    }
-
-    #[test]
-    fn vwarnx_null_va_no_crash() {
-        // SAFETY: vwarnx handles a null va_list by formatting with no args.
-        unsafe { vwarnx(b"%d (literal, no arg)\0".as_ptr(), core::ptr::null_mut()) };
-    }
-
-    // -- Helper behavior --
-
-    #[test]
-    fn write_cstr_null_no_crash() {
-        write_cstr(core::ptr::null());
-    }
-
-    #[test]
-    fn write_cstr_empty_string_no_crash() {
-        write_cstr(b"\0".as_ptr());
-    }
-
-    #[test]
-    fn write_stderr_empty_no_crash() {
-        write_stderr(b"");
-    }
-
-    #[test]
-    fn emit_various_errno_no_crash() {
-        for e in [
-            0,
-            crate::errno::EACCES,
-            crate::errno::EIO,
-            crate::errno::ENOMEM,
-        ] {
-            crate::errno::set_errno(e);
-            emit(b"testing\0".as_ptr(), &mut printf::Args::empty(), true);
-            emit(b"testing\0".as_ptr(), &mut printf::Args::empty(), false);
+    fn err_and_warn_are_glibcs() {
+        let oracle = include_str!("errfns_oracle.txt");
+        let mut n = 0;
+        for line in oracle
+            .lines()
+            .filter(|l| !l.starts_with('#') && !l.is_empty())
+        {
+            let (probe, rest) = line.split_once(" = ").unwrap();
+            let (want, how) = rest.rsplit_once(" | ").unwrap();
+            if (!probe.starts_with("warn") && !probe.starts_with("err"))
+                || probe.starts_with("error")
+            {
+                continue;
+            }
+            let want = want.replace("\\n", "\n").replace("<short>", &short());
+            let pair = Pair::new();
+            let mut eval = 0;
+            match probe {
+                "warn" => {
+                    errno::set_errno(errno::EPERM);
+                    call(&pair, Some(c"w %d"), &[1], true);
+                }
+                "warn(NULL)" => {
+                    errno::set_errno(errno::EPERM);
+                    call(&pair, None, &[], true);
+                }
+                "warnx" => call(&pair, Some(c"x %d"), &[2], false),
+                "warnx(NULL)" => call(&pair, None, &[], false),
+                "err" => {
+                    eval = 4;
+                    errno::set_errno(errno::ENOENT);
+                    call(&pair, Some(c"e"), &[], true);
+                }
+                "errx" => {
+                    eval = 5;
+                    call(&pair, Some(c"e"), &[], false);
+                }
+                "warnx does not flush stdout" => {
+                    crate::error::put(pair.stdout, b"partial");
+                    call(&pair, Some(c"w"), &[], false);
+                    crate::error::put(pair.stdout, b"rest\n");
+                }
+                other => panic!("the oracle has a probe the test does not know: {other}"),
+            }
+            assert_eq!(pair.text(), want, "{probe}");
+            assert_eq!(how, std::format!("exit {eval}"), "{probe}");
+            n += 1;
         }
+        assert!(n >= 7, "the oracle has {n} err and warn probes");
+    }
+
+    /// Longer than the 1024 bytes the message was cut at.
+    #[test]
+    fn a_long_message_is_whole() {
+        let pair = Pair::new();
+        let big = std::ffi::CString::new("z".repeat(3000)).unwrap();
+        call(&pair, Some(c"%s"), &[big.as_ptr() as u64], false);
+        assert_eq!(
+            pair.text(),
+            std::format!("{}: {}\n", short(), "z".repeat(3000))
+        );
+    }
+
+    /// The error reported is the caller's, whatever writing the message did
+    /// to `errno`.
+    #[test]
+    fn the_callers_errno_is_the_one_reported() {
+        let pair = Pair::new();
+        errno::set_errno(errno::EACCES);
+        call(&pair, Some(c"x"), &[], true);
+        assert_eq!(
+            pair.text(),
+            std::format!("{}: x: Permission denied\n", short())
+        );
     }
 }

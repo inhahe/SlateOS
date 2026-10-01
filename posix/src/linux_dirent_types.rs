@@ -59,15 +59,6 @@ pub const DIRENT_NAME_LEN: u32 = 256;
 pub const DT_TO_MODE_SHIFT: u32 = 12;
 
 // ---------------------------------------------------------------------------
-// getdents64 buffer size recommendations
-// ---------------------------------------------------------------------------
-
-/// Recommended buffer size for getdents64 (bytes).
-pub const GETDENTS_BUF_SIZE: u32 = 32768;
-/// Minimum buffer size for getdents64 (bytes).
-pub const GETDENTS_BUF_MIN: u32 = 264;
-
-// ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
 
@@ -129,10 +120,5 @@ mod tests {
     #[test]
     fn test_dt_to_mode_shift() {
         assert_eq!(DT_TO_MODE_SHIFT, 12);
-    }
-
-    #[test]
-    fn test_getdents_buf_size() {
-        assert!(GETDENTS_BUF_SIZE > GETDENTS_BUF_MIN);
     }
 }

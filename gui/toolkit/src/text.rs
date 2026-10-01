@@ -31,6 +31,8 @@
 
 use std::sync::{Arc, Mutex, OnceLock, PoisonError};
 
+pub use osfont::colr::ColourPalette;
+pub use osfont::raster::{Rendering, Subpixel};
 use osfont::select::Query;
 pub use osfont::shape::Affinity;
 use osfont::shape::Hit;
@@ -43,14 +45,19 @@ use crate::render::{FontFamily, FontWeightHint, RenderCommand, TextOverflow};
 
 /// The families tried, in order, when nothing has chosen one.
 ///
-/// The first is the design's intended UI font; the rest are the default sans
-/// of each platform this is developed or run on, ending with the two that are
-/// installed almost everywhere. The list exists because the alternative to
+/// The first is the default theme's typeface: Open Sans, the `font-family` of
+/// the Aero reference the operator made the default look (design-decisions
+/// §815), and the face the OS image carries for UI text (`requests/`
+/// `f-cd-the-os-image-ships-no-fonts-so-slateos-draws-every-word-in-the-8x16-bitmap-face.md`).
+/// Inter, which §400 chose before there was a default theme, is second. The
+/// rest are the default sans of each platform this is developed or run on,
+/// ending with the two that are installed almost everywhere. The list exists because the alternative to
 /// finding *a* face is the built-in 8x16 bitmap font, which is legible but
 /// looks nothing like the system it is standing in for — so a host missing
-/// Inter should fall to Segoe UI or DejaVu Sans, not all the way back to
+/// Open Sans should fall to Segoe UI or DejaVu Sans, not all the way back to
 /// bitmaps.
 pub const DEFAULT_UI_FAMILIES: &[&str] = &[
+    "Open Sans",
     "Inter",
     "Segoe UI",
     "Cantarell",
@@ -81,6 +88,130 @@ pub const DEFAULT_MONO_FAMILIES: &[&str] = &[
     "Courier New",
 ];
 
+/// Where a character is drawn from when the UI or fixed-pitch face has no
+/// glyph for it: groups of families, tried in order, each group the first of
+/// its members that is installed.
+///
+/// Face fallback itself is `osfont`'s, cluster by cluster (design-decisions
+/// §1320): a character the chosen face lacks is drawn from the first fallback
+/// face that has it, rather than as a box. Which faces those are is decided
+/// here, once, for every process -- see [`install_fallback_faces`].
+///
+/// A *group* is one job with interchangeable answers: the emoji face is Noto
+/// Color Emoji on SlateOS and Segoe UI Emoji on a Windows host, and loading
+/// both would spend a second face on characters the first already draws. The
+/// groups, in the order they are reached:
+///
+/// - **Broad text coverage.** Noto Sans has three times Open Sans's
+///   repertoire -- the rest of extended Latin (Vietnamese, African and
+///   phonetic letters), more Greek and Cyrillic, and most of the punctuation
+///   and symbols a UI meets.
+/// - **Emoji.** `osfont` tries a colour face *first* for a cluster that asks
+///   for emoji presentation and last otherwise, so this group's place matters
+///   only for the few characters with both a text and an emoji form.
+/// - **Symbols and mathematics** Noto Sans leaves out.
+/// - **Scripts** Noto Sans leaves out -- right-to-left, Indic, South-East
+///   Asian, Caucasian, Ethiopic, CJK -- when installed. One CJK face serves
+///   all four regional forms: they share most of their characters, and each
+///   is tens of megabytes.
+///
+/// Only what is installed is used, and every face used is parsed in every
+/// process that draws text, which is why this is a list someone chose and not
+/// every face on the machine.
+pub const DEFAULT_FALLBACK_FAMILIES: &[&[&str]] = &[
+    &["Noto Sans", "DejaVu Sans", "Segoe UI"],
+    &[
+        "Noto Color Emoji",
+        "Segoe UI Emoji",
+        "Apple Color Emoji",
+        "Twemoji",
+    ],
+    &["Noto Sans Symbols 2", "Segoe UI Symbol", "Symbola"],
+    &["Noto Sans Symbols"],
+    &["Noto Sans Math", "Cambria Math", "STIX Two Math"],
+    &["Noto Sans Arabic", "Noto Naskh Arabic"],
+    &["Noto Sans Hebrew"],
+    &["Noto Sans Devanagari"],
+    &["Noto Sans Bengali"],
+    &["Noto Sans Tamil"],
+    &["Noto Sans Thai"],
+    &["Noto Sans Georgian"],
+    &["Noto Sans Armenian"],
+    &["Noto Sans Ethiopic"],
+    &[
+        "Noto Sans CJK SC",
+        "Noto Sans CJK JP",
+        "Noto Sans CJK TC",
+        "Noto Sans CJK KR",
+        "Noto Sans SC",
+        "Noto Sans JP",
+        "Microsoft YaHei",
+    ],
+];
+
+/// The fallback families installed in `db`, in the order they are tried: the
+/// first installed member of each of [`DEFAULT_FALLBACK_FAMILIES`]'s groups.
+///
+/// A function of the font directories alone -- not of the UI font a process
+/// has chosen, nor of anything else about the process -- because the
+/// toolkit's cache, which measures, and the compositor's, which draws, must
+/// arrive at the same list in the same order. Two lists that differed would
+/// measure a line in one face and draw it in another.
+#[must_use]
+pub fn resolve_fallback_families(db: &FontDb) -> Vec<&'static str> {
+    DEFAULT_FALLBACK_FAMILIES
+        .iter()
+        .filter_map(|group| {
+            group
+                .iter()
+                .copied()
+                .find(|family| db.find(family, Query::regular()).is_some())
+        })
+        .collect()
+}
+
+/// Draw whatever the installed faces have no glyph for from the fallback
+/// families ([`resolve_fallback_families`]), returning the families that loaded.
+///
+/// Public for the same reason [`install_ui_faces`] is: the compositor keeps a
+/// [`FontCache`] of its own, and it must fall back to the same faces in the
+/// same order as the toolkit measured with. Calling this is how the second
+/// cache agrees with the first by construction.
+///
+/// A family whose file cannot be read or parsed is left out and the rest are
+/// still installed -- one broken emoji font must not cost the Greek. Its
+/// place goes to nothing rather than to the next member of its group, so
+/// that a file that fails to load in one process and not in another (a
+/// descriptor limit, a file replaced between the two scans) changes one face
+/// and not the order of the rest. Regular weight only: `osfont` takes a
+/// variable fallback face to weight 700 for bold text itself.
+pub fn install_fallback_faces(cache: &mut FontCache) -> Vec<&'static str> {
+    let db = font_db();
+    let mut installed = Vec::new();
+    let mut faces = Vec::new();
+    for family in resolve_fallback_families(db) {
+        // A face that will not load is one fewer fallback, not a failure of
+        // the rest: see the doc above.
+        if let Ok(face) = db.load(family, Query::regular()) {
+            faces.push(Arc::new(face));
+            installed.push(family);
+        }
+    }
+    cache.set_fallbacks(faces);
+    installed
+}
+
+/// The families characters are drawn from when the UI or fixed-pitch face
+/// lacks them, in the order they are tried.
+#[must_use]
+pub fn fallback_families() -> Vec<&'static str> {
+    cache()
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .fallbacks
+        .clone()
+}
+
 /// The index of installed fonts, built once per process.
 ///
 /// Separate from the cache so that changing the UI font later does not
@@ -101,6 +232,9 @@ struct Fonts {
     family: Option<String>,
     /// The fixed-pitch family currently installed, likewise.
     mono_family: Option<String>,
+    /// The fallback families installed, in order -- see
+    /// [`install_fallback_faces`].
+    fallbacks: Vec<&'static str>,
 }
 
 /// The process-wide font cache.
@@ -133,10 +267,12 @@ fn cache() -> &'static Mutex<Fonts> {
         let mut cache = FontCache::new();
         let family = install_ui_faces(&mut cache).map(str::to_string);
         let mono_family = install_mono_faces(&mut cache).map(str::to_string);
+        let fallbacks = install_fallback_faces(&mut cache);
         Mutex::new(Fonts {
             cache,
             family,
             mono_family,
+            fallbacks,
         })
     })
 }
@@ -237,6 +373,36 @@ pub fn set_mono_family(family: &str) -> bool {
     }
     fonts.mono_family = Some(family.to_string());
     true
+}
+
+/// Rasterize this process's text the way `rendering` says from now on:
+/// hinting, smoothing, the subpixel order, and which of a colour font's
+/// palettes its emoji are painted with.
+///
+/// The compositor draws most text, with its own cache set from the same
+/// settings; this is for the text the toolkit rasterizes itself, into an
+/// application's own buffers. Without it that text was drawn unhinted while
+/// the compositor's was hinted, so the same label looked different at small
+/// sizes depending on who drew it. Returns whether anything changed: a
+/// change drops every rasterized glyph, so an unchanged setting is left
+/// alone.
+pub fn set_rendering(rendering: Rendering) -> bool {
+    let mut fonts = cache().lock().unwrap_or_else(PoisonError::into_inner);
+    if fonts.cache.rendering() == rendering {
+        return false;
+    }
+    fonts.cache.set_rendering(rendering);
+    true
+}
+
+/// How this process rasterizes text now.
+#[must_use]
+pub fn rendering() -> Rendering {
+    cache()
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .cache
+        .rendering()
 }
 
 /// The family UI text is currently drawn in, or `None` if no installed font
@@ -847,6 +1013,140 @@ pub fn wrap_hard(text: &str, max_width: f32, size: f32, weight: FontWeightHint) 
     with_font(size, weight, FontFamily::Ui, |font| {
         font.wrap_hard(text, max_width)
     })
+}
+
+/// [`wrap_hard`]'s lines as byte ranges into `text`, for a caller that has to
+/// go between the text and its lines -- an editor placing its caret on the
+/// third line of a paragraph, or turning a click there back into an offset.
+///
+/// The breaks are [`wrap_hard`]'s: greedily at spaces, a word wider than
+/// `max_width` cut where it stops fitting, and every newline a break. Two
+/// things differ, because a range has to account for every byte:
+///
+/// - **The spaces at a break stay on the line before it**, hanging past its
+///   end instead of being dropped. A caret after a space needs a line to be
+///   drawn on, and the spaces are not measured against `max_width`: they are
+///   invisible, and a line is judged by what can be seen of it.
+/// - **A newline belongs to no line.** A range stops before the `\n` that ends
+///   its paragraph and the next begins after it, so the ranges and the
+///   newlines between them tile `text` exactly, in order.
+///
+/// An empty paragraph -- empty `text`, or two newlines in a row -- is an empty
+/// range at its offset. An empty line is still a line, and a caret has to be
+/// able to stand on it.
+///
+/// With a `max_width` of zero or less nothing fits, and the paragraphs come
+/// back unwrapped, as [`wrap`] returns them.
+#[must_use]
+pub fn wrap_ranges(
+    text: &str,
+    max_width: f32,
+    size: f32,
+    weight: FontWeightHint,
+) -> Vec<core::ops::Range<usize>> {
+    let mut lines = Vec::new();
+    let mut start = 0_usize;
+    for para in text.split('\n') {
+        let end = start.saturating_add(para.len());
+        if max_width > 0.0 && !para.is_empty() {
+            wrap_paragraph(text, start..end, max_width, size, weight, &mut lines);
+        } else {
+            lines.push(start..end);
+        }
+        // Past the newline that ended it. One byte past the end of the text
+        // after the last paragraph, which nothing reads.
+        start = end.saturating_add(1);
+    }
+    lines
+}
+
+/// Break the paragraph `para` of `text` into lines, appending their ranges.
+fn wrap_paragraph(
+    text: &str,
+    para: core::ops::Range<usize>,
+    max_width: f32,
+    size: f32,
+    weight: FontWeightHint,
+    out: &mut Vec<core::ops::Range<usize>>,
+) {
+    let mut pos = para.start;
+    while pos < para.end {
+        let Some(rest) = text.get(pos..para.end) else {
+            // Only a caller's range off a character boundary could get here,
+            // and this function's only caller splits at newlines, which are
+            // one byte wide. Stopping keeps every range pushed a valid one.
+            return;
+        };
+        let fits = fit_prefix(rest, max_width, size, weight);
+        if fits >= rest.len() {
+            out.push(pos..para.end);
+            return;
+        }
+        let end = pos.saturating_add(line_break(rest, fits));
+        out.push(pos..end);
+        pos = end;
+    }
+}
+
+/// How many bytes of `rest` fit in `max_width`, as [`fit`] answers it --
+/// without shaping all of `rest` to find out.
+///
+/// A paragraph is broken one line at a time, and shaping the whole remainder
+/// for each line is quadratic in the paragraph's length: ten thousand bytes
+/// broken into a hundred lines would shape half a megabyte. So this shapes a
+/// window at the front, and a larger one only when everything in the window
+/// fitted, which is the one case where the window could have cut the answer
+/// short. A line is rarely longer than the first window, so the doubling
+/// almost never runs.
+fn fit_prefix(rest: &str, max_width: f32, size: f32, weight: FontWeightHint) -> usize {
+    let mut window = 256_usize;
+    loop {
+        let mut end = window.min(rest.len());
+        while !rest.is_char_boundary(end) {
+            end = end.saturating_sub(1);
+        }
+        let slice = rest.get(..end).unwrap_or(rest);
+        let fits = fit(slice, max_width, size, weight);
+        if fits < slice.len() || end >= rest.len() {
+            return fits;
+        }
+        window = window.saturating_mul(2);
+    }
+}
+
+/// Where a line ends that cannot hold all of `rest`, of which the first `fits`
+/// bytes fit: after the last run of spaces that is not the line's own
+/// indentation, with the spaces from there on hanging; or, when the first word
+/// alone is wider than the line, where it stops fitting -- but always after at
+/// least one character, so that a box narrower than a single glyph still
+/// advances.
+fn line_break(rest: &str, fits: usize) -> usize {
+    // Leading spaces are the line's indentation. Breaking after them would put
+    // a line of nothing but spaces above the word they indent.
+    let indent = rest
+        .len()
+        .saturating_sub(rest.trim_start_matches(' ').len());
+    if fits > indent && rest.as_bytes().get(fits) == Some(&b' ') {
+        // The first byte that did not fit is a space: the break is right there.
+        return hang(rest, fits);
+    }
+    let head = rest.get(indent..fits).unwrap_or("");
+    if let Some(space) = head.rfind(' ') {
+        return hang(rest, indent.saturating_add(space));
+    }
+    if fits > 0 {
+        return fits;
+    }
+    rest.chars().next().map_or(rest.len(), char::len_utf8)
+}
+
+/// `from`, moved past the run of spaces that starts there.
+fn hang(rest: &str, from: usize) -> usize {
+    let tail = rest.get(from..).unwrap_or("");
+    from.saturating_add(
+        tail.len()
+            .saturating_sub(tail.trim_start_matches(' ').len()),
+    )
 }
 
 /// A block of prose, drawn as one [`RenderCommand::Text`] per wrapped line.
@@ -1882,6 +2182,26 @@ mod tests {
 
     use super::*;
 
+    /// **The process's fallbacks are what its font directories resolve to**,
+    /// in that order -- the property that makes the compositor's cache,
+    /// which calls the same resolution, agree with this one. Whatever the
+    /// host has installed; on a host with none of them the list is empty.
+    #[test]
+    fn this_processs_fallbacks_are_the_ones_its_fonts_resolve_to() {
+        let resolved = resolve_fallback_families(font_db());
+        let installed = fallback_families();
+        // Installed is resolved with any face that failed to load left out,
+        // so it is an ordered subsequence -- on a healthy host, all of it.
+        let mut rest = resolved.iter();
+        for family in &installed {
+            assert!(
+                rest.any(|r| r == family),
+                "{family} is a fallback here but not where the directories put it: \
+                 {installed:?} against {resolved:?}"
+            );
+        }
+    }
+
     /// The three `TextCursor` motions are the answer every text field in the
     /// system now defers to, so their edges are worth stating outright: a
     /// drifted offset is repaired rather than propagated, and neither end of
@@ -2733,6 +3053,186 @@ mod tests {
         let lines = wrap_hard("mmmm", 1.0, 11.0, FontWeightHint::Regular);
         assert_eq!(lines.len(), 4, "{lines:?}");
         assert_eq!(lines.concat(), "mmmm");
+    }
+
+    // ---- wrap_ranges ------------------------------------------------------
+
+    const RANGE_SIZE: f32 = 11.0;
+
+    fn ranges(text: &str, width: f32) -> Vec<core::ops::Range<usize>> {
+        wrap_ranges(text, width, RANGE_SIZE, FontWeightHint::Regular)
+    }
+
+    /// The ranges and the newlines between them are the text, in order: each
+    /// line starts where the last one ended (a wrap), or one byte later with a
+    /// newline in that byte (a paragraph's end). This is what lets an editor
+    /// move between an offset and a line without losing a byte either way.
+    fn assert_tiles(text: &str, lines: &[core::ops::Range<usize>]) {
+        assert_eq!(lines.first().map(|l| l.start), Some(0), "{lines:?}");
+        assert_eq!(lines.last().map(|l| l.end), Some(text.len()), "{lines:?}");
+        for pair in lines.windows(2) {
+            let (a, b) = (&pair[0], &pair[1]);
+            assert!(a.start <= a.end && a.end <= b.start, "{lines:?}");
+            if b.start != a.end {
+                assert_eq!(b.start, a.end + 1, "a gap other than a newline: {lines:?}");
+                assert_eq!(&text[a.end..b.start], "\n", "{lines:?}");
+            }
+        }
+        assert_eq!(
+            lines.len(),
+            text.matches('\n').count()
+                + lines.windows(2).filter(|p| p[0].end == p[1].start).count()
+                + 1,
+            "every newline is a boundary, and nothing else is but a wrap"
+        );
+    }
+
+    /// Every line's visible part -- the spaces hanging off its end are not
+    /// drawn -- fits the box.
+    fn assert_fits(text: &str, lines: &[core::ops::Range<usize>], width: f32) {
+        for line in lines {
+            let seen = text[line.clone()].trim_end_matches(' ');
+            let w = measure(seen, RANGE_SIZE, FontWeightHint::Regular);
+            assert!(w <= width, "{seen:?} measures {w} in a {width} px box");
+        }
+    }
+
+    /// Single-spaced prose breaks where `wrap_hard` breaks it: the same lines,
+    /// with the breaking space kept at the end of the line above.
+    ///
+    /// Only at widths every word fits in. Where a word must be cut the two
+    /// part company on purpose: `wrap_hard` gives the cut word's last piece a
+    /// line to itself, and this lets the words after it share that line, as an
+    /// editor does -- the piece is not a word the reader would keep apart.
+    #[test]
+    fn ranges_break_prose_where_wrap_hard_does() {
+        let text = "the quick brown fox jumps over the lazy dog and keeps on running";
+        let widest = text
+            .split(' ')
+            .map(|word| measure(word, RANGE_SIZE, FontWeightHint::Regular))
+            .fold(0.0_f32, f32::max);
+        for width in [
+            widest + 1.0,
+            widest * 1.5,
+            90.0_f32.max(widest + 1.0),
+            150.0,
+            400.0,
+        ] {
+            let lines = ranges(text, width);
+            assert_tiles(text, &lines);
+            assert_fits(text, &lines, width);
+            let seen: Vec<&str> = lines
+                .iter()
+                .map(|l| text[l.clone()].trim_end_matches(' '))
+                .collect();
+            assert_eq!(
+                seen,
+                wrap_hard(text, width, RANGE_SIZE, FontWeightHint::Regular),
+                "at {width} px"
+            );
+        }
+    }
+
+    /// The space a line breaks at hangs off the end of that line, and the next
+    /// line starts at the next word.
+    #[test]
+    fn the_spaces_at_a_break_hang_off_the_line_before_it() {
+        let text = "alpha   beta";
+        let width = measure("alpha", RANGE_SIZE, FontWeightHint::Regular) + 1.0;
+        let lines = ranges(text, width);
+        assert_eq!(lines, vec![0..8, 8..12], "{lines:?}");
+        assert_tiles(text, &lines);
+    }
+
+    /// Newlines always break, belong to no line, and two in a row make an
+    /// empty line a caret can stand on.
+    #[test]
+    fn newlines_break_and_an_empty_paragraph_is_an_empty_line() {
+        assert_eq!(ranges("", 100.0), vec![0..0]);
+        assert_eq!(ranges("a\n\nb", 100.0), vec![0..1, 2..2, 3..4]);
+        assert_eq!(ranges("a\n", 100.0), vec![0..1, 2..2]);
+        assert_eq!(ranges("\n", 100.0), vec![0..0, 1..1]);
+        for text in [
+            "",
+            "a\n\nb",
+            "a\n",
+            "\n",
+            "one\ntwo three four five six\n\nseven",
+        ] {
+            assert_tiles(text, &ranges(text, 50.0));
+        }
+    }
+
+    /// A line's indentation stays with the word it indents: breaking after the
+    /// leading spaces would leave a line of nothing but spaces above it.
+    #[test]
+    fn indentation_is_not_a_place_to_break() {
+        let text = "    indented";
+        let width = measure("indented", RANGE_SIZE, FontWeightHint::Regular) + 1.0;
+        let lines = ranges(text, width);
+        assert_tiles(text, &lines);
+        assert!(
+            !text[lines[0].clone()].trim().is_empty(),
+            "the first line is only indentation: {lines:?}"
+        );
+    }
+
+    /// A word wider than the box is cut where it stops fitting, every piece
+    /// fits, and the pieces are the word.
+    #[test]
+    fn a_word_wider_than_the_box_is_cut_into_pieces_that_fit() {
+        let text = "antidisestablishmentarianism";
+        let lines = ranges(text, 40.0);
+        assert!(lines.len() > 2, "{lines:?}");
+        assert_tiles(text, &lines);
+        assert_fits(text, &lines, 40.0);
+
+        let cjk = "日本語のファイル名がとても長い場合の折り返しです";
+        let lines = ranges(cjk, 72.0);
+        assert!(lines.len() > 1, "{lines:?}");
+        assert_tiles(cjk, &lines);
+        assert_fits(cjk, &lines, 72.0);
+    }
+
+    /// A box narrower than one glyph still advances a character at a time,
+    /// rather than looping on a line that holds nothing.
+    #[test]
+    fn a_box_narrower_than_a_glyph_advances_a_character_at_a_time() {
+        assert_eq!(ranges("mmm", 1.0), vec![0..1, 1..2, 2..3]);
+        assert_eq!(ranges("ééé", 1.0), vec![0..2, 2..4, 4..6]);
+    }
+
+    /// No room at all is no wrapping, as `wrap` answers it -- not one word per
+    /// line.
+    #[test]
+    fn no_width_means_the_paragraphs_unwrapped() {
+        assert_eq!(ranges("a b c\nd e", 0.0), vec![0..5, 6..9]);
+    }
+
+    /// A line longer than the first window the fit is measured in -- a wide
+    /// box, a long line -- is found whole: the window grows until something
+    /// does not fit or the paragraph ends.
+    #[test]
+    fn a_line_longer_than_the_first_measuring_window_is_found_whole() {
+        let text = "word ".repeat(200);
+        let text = text.trim_end();
+        let wide = measure(text, RANGE_SIZE, FontWeightHint::Regular) + 10.0;
+        assert_eq!(ranges(text, wide), vec![0..text.len()]);
+        let half = wide / 2.0;
+        let lines = ranges(text, half);
+        assert_eq!(lines.len(), 2, "{lines:?}");
+        assert_tiles(text, &lines);
+        assert_fits(text, &lines, half);
+    }
+
+    /// The pathological input `wrap_hard` is held to, broken in time linear
+    /// in its length rather than shaping the remainder once per line.
+    #[test]
+    fn ranges_over_a_pathological_word_are_linear() {
+        let word = "λ".repeat(50_000);
+        let lines = ranges(&word, 200.0);
+        assert!(lines.len() > 100, "{} lines", lines.len());
+        assert_tiles(&word, &lines);
     }
 
     /// Counts pixels the canvas actually changed.

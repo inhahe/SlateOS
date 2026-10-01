@@ -128,6 +128,13 @@ read by ``scripts/run-checker.sh`` as "the checker found something", and the
 gate prints its refusal text over it.  A revision that will not open is not a
 finding against anyone's table, and must not be dressed as one.
 
+The revision is opened before WSL is asked for, so a revision that will not
+open is exit 2 whatever state WSL is in.  It was asked for first until
+2026-09-26, and during an outage a bad revision came back as 3 -- "skipped,
+WSL is down" -- which hides a mistake in the caller behind the weather: it
+failed ``test-checkers-honour-head.py``'s "an unopenable revision exits 2",
+and with it a lane C boot test, while WSL was refusing sessions.
+
 Exit 3 is ``run-checker.sh``'s "I could not run, and here is why": the gate is
 tallied as *skipped*, loudly, with this checker's first line as the reason.  It
 covers every way the GNU side can be missing: no WSL and not Linux; WSL
@@ -1047,13 +1054,9 @@ def main() -> int:
         # reading any revision of the repository.
         return selftest()
     wanted = set(args.bins)
-    runner, why = find_runner()
-    if runner is None:
-        # Exit 3, first line the reason: see the module docstring. ASCII only:
-        # this console's code page is not UTF-8 and mangles the rest.
-        print(f"getopt-ambiguity-check: could not run -- {why}. Nothing was checked.")
-        return 3
-
+    # The revision before the GNU side: a revision that will not open is the
+    # caller's mistake whatever WSL is doing, and asking WSL first reported it
+    # as a skip during an outage (the docstring's exit-code note).
     try:
         tree = gittree.open_tree(str(ROOT), args.head)
     except gittree.GitTreeError as exc:
@@ -1064,6 +1067,12 @@ def main() -> int:
               file=sys.stderr)
         return 2
     with tree:
+        runner, why = find_runner()
+        if runner is None:
+            # Exit 3, first line the reason: see the module docstring. ASCII
+            # only: this console's code page is not UTF-8 and mangles the rest.
+            print(f"getopt-ambiguity-check: could not run -- {why}. Nothing was checked.")
+            return 3
         try:
             return sweep(tree, wanted, runner)
         except GnuUnreachable as exc:

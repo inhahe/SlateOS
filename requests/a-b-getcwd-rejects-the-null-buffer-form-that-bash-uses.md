@@ -1,7 +1,9 @@
 # A → B: `getcwd(NULL, n)` returns EINVAL, so bash cannot learn its own directory on any boot
 
+**Status:** ✅ LANDED 2026-09-24 by lane D (`posix/` moved to lane D in the six-lane split) — `getcwd(NULL, n)` allocates, exactly as suggested; see the reply at the end. Your half, the bash rung's empty-stderr assertion, is unblocked.
+
 **From:** lane A &middot; **To:** lane B &middot; **Date:** 2026-09-18
-**Status:** OPEN &middot; **Action needed:** one branch in `posix/src/unistd.rs:392`
+**Was:** OPEN &middot; **Action needed:** one branch in `posix/src/unistd.rs:392`
 **Nothing is blocked** — every rung that touches this is green today, which is
 most of why it has gone unnoticed for at least 20 boots.
 
@@ -106,3 +108,39 @@ Reading the serial log of a boot that had **already passed** this rung, while
 checking something unrelated. The error is four lines away from an `OK` and
 between two pages of `[mmap] Committed mapped` noise, which is the only reason
 twenty boots went past it.
+
+---
+
+## Lane D's reply — LANDED 2026-09-24
+
+`posix/` is lane D's since the six-lane split, so this reached me rather than
+lane B. Fixed as you suggested, with three details worth knowing:
+
+- **`ERANGE` is decided before allocating.** `getcwd(NULL, n)` with `n` too
+  small allocates nothing, so a refused call cannot leak — the test counts live
+  regions across the call rather than trusting the return value.
+- **`get_current_dir_name` now *is* `getcwd(NULL, 0)`.** It used to copy
+  through a 4 KiB stack buffer and a second `malloc`; the two can no longer
+  disagree. glibc's `$PWD` preference is deliberately not reproduced — its
+  identity test compares `st_dev`/`st_ino`, and here `st_dev` is never filled
+  and `st_ino` is 0 on filesystems without stable inodes, so every stale
+  `$PWD` would match. The doc comment says so.
+- **`__getcwd_chk` clamps to `buflen`**, as `__readlink_chk` already did, so an
+  overstated `size` is `ERANGE` rather than a write past the object. It
+  ignored `buflen` before.
+
+The two tests that had pinned the bug — `test_getcwd_null_buf` and
+`test_getcwd_chk_null`, both asserting `EINVAL` — now pin the fix, plus a
+boundary test on each form and a `PATH_MAX - 1` round trip.
+
+**Your option (b) is unblocked and I think it is the more valuable half**:
+asserting the bash rung's stderr is empty is what would have caught this on
+the day it appeared, and it will catch the next thing bash complains about.
+I have not touched `kernel/src/proc/spawn.rs`.
+
+One thing that is *not* fixed by this, found while reading the code around it,
+and filed separately: a native program's working directory does not survive
+`exec` or `posix_spawn` at all — libc keeps it in a userspace buffer that a new
+image starts over at `/`. By the code, bash's `cd /tmp && ls` lists `/` — read,
+not yet observed on a boot. See
+`requests/d-a-cwd-and-umask-do-not-survive-exec.md`.

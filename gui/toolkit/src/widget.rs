@@ -144,6 +144,23 @@ pub enum CheckState {
     Indeterminate,
 }
 
+impl CheckState {
+    /// The state a click leaves the box in: ticked becomes unticked, and
+    /// anything else — unticked, or partly ticked — becomes ticked.
+    ///
+    /// The one statement of the rule. The checkbox widget's mouse and keyboard
+    /// handlers each spelled it out, and a tree's boxes (`treeview`) need it
+    /// too; three copies of a rule is three chances for one of them to decide
+    /// that a click on a partial box clears it.
+    #[must_use]
+    pub const fn toggled(self) -> Self {
+        match self {
+            Self::Checked => Self::Unchecked,
+            Self::Unchecked | Self::Indeterminate => Self::Checked,
+        }
+    }
+}
+
 impl Widget {
     // ======================================================================
     // Constructors
@@ -1001,11 +1018,7 @@ impl Widget {
             },
             WidgetKind::Checkbox { checked, .. } => {
                 if matches!(&mouse.kind, MouseEventKind::Release(_)) {
-                    *checked = match *checked {
-                        CheckState::Unchecked => CheckState::Checked,
-                        CheckState::Checked => CheckState::Unchecked,
-                        CheckState::Indeterminate => CheckState::Checked,
-                    };
+                    *checked = checked.toggled();
                     EventResult::Consumed
                 } else {
                     EventResult::Ignored
@@ -1190,10 +1203,7 @@ impl Widget {
             },
             WidgetKind::Checkbox { checked, .. } => {
                 if key.key == crate::event::Key::Space {
-                    *checked = match *checked {
-                        CheckState::Unchecked | CheckState::Indeterminate => CheckState::Checked,
-                        CheckState::Checked => CheckState::Unchecked,
-                    };
+                    *checked = checked.toggled();
                     EventResult::Consumed
                 } else {
                     EventResult::Ignored

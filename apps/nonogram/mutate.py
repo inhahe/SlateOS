@@ -193,7 +193,7 @@ MUTATIONS = [
     ),
     (
         "the window is never asked for the ticks the clock runs on",
-        "        Some(TICK)",
+        "        (self.screen == Screen::Playing).then_some(TICK)",
         "        None",
         ["the_window_is_asked_for_the_ticks_the_clock_runs_on"],
     ),
@@ -687,6 +687,54 @@ MUTATIONS = [
         "        (WINDOW_WIDTH as u32, WINDOW_HEIGHT as u32)",
         "        (800, 600)",
         ["the_window_names_itself_and_says_the_same_thing_twice"],
+    ),
+    (
+        "the theme is never taken up",
+        "        self.palette = *palette;\n        self.colours = Colours::of(palette);",
+        "        let _ = palette;",
+        ["the_window_is_drawn_in_the_users_colours"],
+    ),
+    (
+        "the colours are not rebuilt with the palette",
+        "        self.colours = Colours::of(palette);",
+        "        let _ = Colours::of(palette);",
+        ["the_window_is_drawn_in_the_users_colours"],
+    ),
+    (
+        "the chosen puzzle looks like any other",
+        "                if selected {\n                    Surface::Selected\n                } else {\n                    Surface::Card\n                },",
+        "                Surface::Card,",
+        ["the_chosen_puzzle_looks_chosen"],
+    ),
+    (
+        "the list's instruction is the faintest grey",
+        "                // faintest grey is 2.3:1 on a light page.\n                color: self.colours.subtext0,",
+        "                // faintest grey is 2.3:1 on a light page.\n                color: self.colours.overlay0,",
+        ["every_text_reads_on_what_is_under_it_in_either_theme"],
+    ),
+    (
+        "the game's instruction is the faintest grey",
+        "                color: self.colours.subtext0,\n            },\n            rest,\n        );",
+        "                color: self.colours.overlay0,\n            },\n            rest,\n        );",
+        ["every_text_reads_on_what_is_under_it_in_either_theme"],
+    ),
+    (
+        "a marked square's cross is the faintest grey",
+        "                        } else {\n                            self.colours.subtext0\n                        },\n                        g.cell,",
+        "                        } else {\n                            self.colours.overlay0\n                        },\n                        g.cell,",
+        ["a_marked_squares_cross_stands_off_it_in_either_theme"],
+    ),
+    (
+        "Check looks off when it is on",
+        "                if on { Kind::Primary } else { Kind::Plain },",
+        "                Kind::Plain,",
+        ["the_check_switch_shows_when_it_is_on"],
+    ),
+    (
+        "a switch is as wide as its label and no wider than its padding",
+        "            let w = gamechrome::button_width(text, l.small, button_h);",
+        "            let w = text::measure(text, l.small, FontWeightHint::Bold);",
+        ["the_check_switch_shows_when_it_is_on"],
     ),
 ]
 

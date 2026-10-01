@@ -14,6 +14,10 @@ guitk = { path = "../../gui/toolkit" }
 oswindow = { path = "../../gui/window" }
 # The export writes a file of passwords; a half-written one looks complete.
 safeio = { path = "../safeio" }
+# The checking rules the user sets on the Rules tab are kept in
+# `passwordgen.yaml`, one settings file per program (C-Q26).
+settingsfile = { path = "../../gui/settingsfile" }
+yamldoc = { path = "../../yamldoc" }
 
 [lints]
 workspace = true
@@ -21,3 +25,4 @@ workspace = true
 [dev-dependencies]
 # A directory to export into and read back.
 scratchdir = { path = "../../userspace/scratchdir" }
+settingsfile = { path = "../../gui/settingsfile", features = ["testing"] }

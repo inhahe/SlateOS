@@ -9,6 +9,17 @@
 //! Every failure is final. The reference -- libtiff's RGBA reader, as image
 //! viewers call it -- stops at the first strip that will not read and shows
 //! nothing, so a strip here either decodes completely or refuses the file.
+//!
+//! Portions of this file are translated into Rust from libtiff 4.7.1's
+//! `tif_read.c` (copyright (c) 1988-1997 Sam Leffler; (c) 1991-1997 Silicon
+//! Graphics, Inc.), `tif_packbits.c` (copyright (c) 1988-1997 Sam Leffler;
+//! (c) 1991-1997 Silicon Graphics, Inc.), `tif_predict.c` (copyright (c)
+//! 1988-1997 Sam Leffler; (c) 1991-1997 Silicon Graphics, Inc.), `tif_zip.c`
+//! (copyright (c) 1995-1997 Sam Leffler; (c) 1995-1997 Silicon Graphics,
+//! Inc.), `tif_jpeg.c` (copyright (c) 1994-1997 Sam Leffler; (c) 1994-1997
+//! Silicon Graphics, Inc.) and `tif_swab.c` (copyright (c) 1988-1997 Sam
+//! Leffler; (c) 1991-1997 Silicon Graphics, Inc.), and changed for this
+//! project; used under libtiff's licence, `licenses/libtiff-LICENSE.md`.
 
 use alloc::vec::Vec;
 

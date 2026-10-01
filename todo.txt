@@ -7864,15 +7864,18 @@ Remaining net improvements (diminishing returns):
   always-ready per POSIX.  Polling loop uses 10ms sleep — a true epoll/
   kqueue would still be a nice optimization but not a correctness issue.
 
-- getaddrinfo() uses static storage (no heap) and returns at most one
-  result.  Not re-entrant — same as POSIX gethostbyname().
+- (DONE 2026-09-27, lane D) getaddrinfo() used static storage and returned
+  one result: it is glibc's now (known-issues.md,
+  D-POSIX-GETADDRINFO-WAS-IPV4-ONLY-AND-UNSORTED).
 
 - ioctl TCSETS/TCGETS are accepted but don't actually change terminal
   behavior (no line discipline).  Programs that set raw mode work via
   VT100 escape sequences.  Will need real terminal mode support when
   porting interactive programs (vim, less, etc.).
 
-- (DONE) stdio buffering: Replaced unbuffered FILE* sentinels with real
+- (DONE, SUPERSEDED 2026-09-27 by the rewrite in design-decisions.md §1121 --
+  the pool, the 1 KiB buffers and the stdout rule below are gone) stdio
+  buffering: Replaced unbuffered FILE* sentinels with real
   FILE structs backed by 1 KiB internal buffers.  stdout is line-buffered
   (flushes on '\n'), stderr is unbuffered, fopen'd files fully-buffered.
   Static pool of 16 FILE slots for fopen'd files.  Read-ahead buffering
@@ -7884,26 +7887,6 @@ Remaining net improvements (diminishing returns):
   because the crate targets x86_64-unknown-none.  Need a QEMU-based
   test runner or a separate host-testable crate that extracts pure
   logic functions.
-
-- (DONE 2026-05-29) crypt() real SHA-256/SHA-512 hashing: replaced the
-  insecure "$0$<key>" stub (which stored passwords in cleartext with a
-  marker prefix — any program hashing a password was effectively storing
-  the plaintext) with proper SHA-crypt ($5$ / $6$) per Ulrich Drepper's
-  spec.  New self-contained SHA-2 cores in posix/src/sha2.rs (no heap, no
-  external crate; works on target_os="none"), verified against NIST FIPS
-  180-4 vectors.  crypt.rs now parses "rounds=N$", clamps to [1000,
-  999999999], truncates salt to 16 bytes, and emits the crypt-base64
-  encoding.  Verified against the canonical Drepper $5$/$6$ test vectors.
-  Sequences P and S are fed incrementally (add_repeated) so no unbounded
-  stack/heap buffer is needed regardless of password length.
-  FOLLOW-UP (DONE 2026-05-29): MD5 crypt ($1$) now implemented too —
-  Poul-Henning Kamp's md5crypt, new MD5 core in posix/src/md5.rs (RFC
-  1321 vectors), verified against OpenSSL 3.5 `passwd -1`.  crypt() now
-  dispatches $1$/$5$/$6$.  Only legacy DES (2-char salt) remains
-  unimplemented; it returns NULL + EINVAL rather than a fake result.
-  Implement DES crypt only if a ported program must verify ancient
-  DES-format /etc/shadow entries (low priority; DES crypt is obsolete
-  and insecure).
 
 - (DONE 2026-05-30) CRITICAL stat() ABI translation bug fixed.  The kernel's
   SYS_FS_STAT/SYS_FS_LSTAT/SYS_FS_FSTAT write a compact 16-byte FsStatResult
@@ -8891,6 +8874,9 @@ Remaining net improvements (diminishing returns):
       THREAD_TABLE and report their mmap'd stack region (guard = 0, since
       pthread_create installs no guard page).  Any other thread (i.e. the
       main thread) reports the kernel main-stack geometry.
+      [2026-09-26: pthread_create now maps a guard -- one page by default --
+      and pthread_getattr_np reports it; known-issues.md
+      B-D-PTHREAD-CREATE-IGNORED-ITS-ATTRIBUTE.]
     * pthread_attr_getstack / pthread_attr_setstack: read/write the stack
       address ([16..24)) and size ([0..8)) in the opaque attr buffer.
     * pthread_attr_getguardsize / pthread_attr_setguardsize: read/write the
@@ -55030,14 +55016,9 @@ cleared -- so the risk is a future edit, not the present state.
     touches, and `procexplorer` sending a signal is filed under network. The
     label is not part of the finding and should not be read as one.
 
-- Autologin is read but not acted on. `LoginUser::autologin` comes from the
-  account database and `LoginScreen::autologin_user` finds it, but an account
-  marked for autologin still gets a password prompt. Skipping the prompt needs
-  two things this change deliberately did not decide: how a user *escapes* an
-  autologin to reach a different account (holding a key at boot? a "switch
-  user" affordance on the way past?), and how the machine holds the autologin
-  when it is being recovered. Both are user-visible policy. See
-  `design-decisions.md` §824, "What this does not decide".
+- Autologin: done 2026-09-27, as the operator decided it (§1427). What is
+  left waits on lanes F and A -- see "Lane C — automatic sign-in: the chooser
+  key and the start for repair" at the end of this file.
 
 ## ############################################################################
 (no lane-C-specific entries yet; see the pre-split entries above)
@@ -56565,6 +56546,103 @@ failed; no session started" instead of being let in with a warning. That is the
 correct behaviour for an expired password and the wrong reason for it, so if it
 shows up, check setuid before changing this code.
 
+## Games: read every word under themes that leave no room (lane E, 2026-09-28) -- NEXT
+
+The games' legibility tests read the four stock looks (light and dark, bordered
+and card). Those palettes' text and hues read on every ground a game fills
+itself -- a raised panel, a well, a board, a score track -- with room to
+spare, so a word a game forgot to move for such a ground passes. A user's
+theme need not leave that room: `Palette::ink` holds a theme's text colours to
+4.5:1 on the palette's own text grounds (the page, and under the card look the
+card grounds) and no further. Found by the sweep: reversi's score counts are
+moved for their track (`Chrome::on(lit)`) and no stock look can tell -- the
+row "the score bar's counts are the page's text on its track" was dropped
+from `apps/reversi/mutate.py` for now, to come back with this.
+
+What it wants: a list of such themes in `gamechrome::legibility` (soft text,
+light and dark -- a mid grey the palette moves only as far as the page needs,
+as Solarized's `#657b83`; pale hues on light; deep hues on dark; each in both
+surface looks), read by every game's legibility test beside the stock looks,
+and every word it finds moved for the ground it is on (`Chrome::on`,
+`gamechrome::Ink::on`). Not needed for the toolkit's own panel, where the
+palette's inks read as they are (known-issues, "[E] Text on a panel an
+application fills itself").
+
+## C-Q17: what is left of "wire the five up" (lane E, 2026-09-27)
+
+The operator answered C-Q17 (lane C's design-decisions §1423): the five
+finished-but-unreachable features are wired up, and where a live twin exists
+the survivor takes everything both could do. State, measured 2026-09-27:
+
+* installer bootloader setup -- **wired 2026-09-28.** (The line here said
+  "wired" on 09-25, when two dead fields had been deleted from `grub.rs`
+  (known-issues `TD-C-THE-INSTALLER-RECORDS-A-GRUB-PATH-NOTHING-EVER-READS`);
+  nothing reached the module until 09-28.) A configuration's `bootloader:`
+  section chooses Limine or a GRUB entry, which the plan adds after Limine;
+  `installer --grub-detect`, `--grub-add`, `--grub-update` and
+  `--grub-remove` find a GRUB and write, rewrite or remove its
+  `/etc/grub.d/40_slateos`, rebuilding the running system's menu and reading
+  it back (another system's root is left for that system to rebuild). The
+  entry chainloads Limine: GRUB loading the kernel itself waits on a
+  multiboot2 header (known-issues `[E] GRUB cannot load the kernel itself`).
+  What is still missing is the installer's executor -- every step of an
+  install, this one included, is a dry run that prints what it would do.
+* system information's hardware queries -- wired (fixed 09-15).
+* image viewer's video -- the code is gone; `apps/videoplayer` is the live
+  twin and had everything it did.
+* process explorer's six tools -- two wired (Environment, Memory); window
+  picker, wait analyzer and affinity wait on lanes F, A and A/D
+  (`requests/e-adf-what-the-process-explorer-still-cannot-ask.md`), priority
+  on `requests/e-ad-renicing-another-process-renices-the-caller.md`.
+* **settings' remote page (`apps/settings/src/remote.rs`, still under
+  `#![allow(dead_code)]`)** -- the one lane E can move now, in two halves:
+  - *Dynamic DNS.* The live page reads `/proc/dyndns` and cannot change
+    anything (`TD-C-DYNDNS-PAGE-IS-READ-ONLY`). The kernel's
+    `kernel/src/fs/dyndns.rs` only keeps state -- `update_now(id, ip)` records
+    "success" with an address it is handed; nothing in the kernel can make
+    the HTTP call a provider needs, and by the microkernel rule it should
+    not. So the fix is not the syscalls that entry proposed: a userspace
+    service (lane D) that reads a YAML config, asks the providers, and
+    publishes its status; Settings edits that config, with `remote.rs`'s
+    `ProviderSettings` (per-provider credential shapes) as the editor's model,
+    and the kernel module goes (lane A). Filed 2026-09-27 as
+    `requests/e-ad-dynamic-dns-is-a-userspace-service-not-a-kernel-table.md`;
+    the editor follows once the shape is agreed.
+  - *Remote desktop access* (let others connect to this machine: port,
+    authentication, encryption, firewall/UPnP). No server exists to
+    configure: `apps/remotedesktop` is a VNC *client*, and the kernel's
+    `kernel/src/fs/remotedesktop.rs` is a settings-and-sessions model under
+    `#![allow(dead_code)]` with no encoder behind it. Wiring the page now
+    would be a panel of settings nothing reads. Needs: the server (whose?
+    the compositor's frames are lane F's), or an operator follow-up on
+    whether "wire it up" meant building one.
+
+## ~~explorer: Ask when a pasted name is taken (lane E, 2026-09-27)~~ -- DONE 2026-09-27
+
+**Done:** the executor waits at a taken name and the window asks; "Ask each
+time" is the menu's first choice and the default (design-decisions §1221).
+The original entry, for the record:
+
+The folder menu offers keep both / skip / replace if newer / replace for a
+paste or a drop onto a name the folder already has (C-Q26), and not "Ask",
+because nothing can ask yet:
+
+* `apps/explorer/src/fileops.rs`, copy: `ConflictPolicy::Ask` pushes
+  `FileOpEvent::Conflict` and returns `ActionOutcome::Skipped` -- "In a real
+  async implementation the caller would respond. For now, skip." A move
+  with `Ask` skips without the event.
+* The window has no conflict dialog.
+
+What it wants: the executor stops at the conflicting action in a state that
+says so (`src`, `dest`, and whether it is a copy or a move), `step()` does
+nothing further until the caller answers with keep both / skip / replace
+(and "the same for the rest"), and the answer is applied to that action
+before the loop moves on. The window draws the question when the
+operation it is stepping stops there -- names, sizes and dates of both --
+and "Ask" joins the menu's choices. The comment on
+`columnprefs::CONFLICT_CHOICES` says the executor can pause; it cannot, and
+the comment goes when this is done.
+
 ## credmanager: what a credential manager still cannot do
 
 Adding a credential and copying a field are wired up as of this change. The
@@ -56575,14 +56653,15 @@ what hid the Add button doing nothing.
 
 In rough order of how much a user would miss it:
 
-* **Edit** — `Vault::update_entry` and `get_entry_mut`. The detail view shows a
-  credential and cannot change one, so a password that has been rotated cannot
-  be recorded.
-* **Delete** — `Vault::remove_entry`.
-* **Export and backup** — `export_csv`, `escape_csv`, `serialize_backup`, all
-  advertised in the module doc. There is no filesystem to write to; the
-  clipboard is the sink these can have today, which is what `/copy` already
-  uses.
+* ~~**Edit**~~ — DONE 2026-09-27 (lane E): the entry's Edit button (Ctrl+E)
+  opens the form filled in; saving changes what the form shows and keeps what
+  it does not (a login's one-time-code secret, a card number left alone, its
+  tags, folder, star and creation time).
+* ~~**Delete**~~ — DONE 2026-09-27 (lane E): the entry's Delete button and the
+  Delete key ask first.
+* ~~**Export and backup**~~ — DONE 2026-09-27 (lane E): Settings has Back
+  up, Restore and Export (C-Q25, §1417); `serialize_backup`, which left every
+  password out, is deleted.
 * **Favourites** — `Vault::toggle_star`. The sidebar filters by favourites and
   nothing can set one, so that filter is always empty. Same shape for
   **tags** (`add_tag`/`remove_tag`, and the sidebar's tag list) and
@@ -56594,8 +56673,8 @@ In rough order of how much a user would miss it:
   and never read.
 * **Breach flagging** — `Vault::set_compromised`, which needs a feed to learn
   from as well as a control.
-* **Persistence** — `Vault::from_stored` is the door a loader would come in
-  through. Every launch opens an empty vault, as the module doc says.
+* ~~**Persistence**~~ — DONE 2026-09-27 (lane E): the vault is kept sealed
+  on disk (`src/vaultfile.rs`), and Edit and Delete came with it.
 
 One duplicate to resolve rather than build: `Vault::search_entries` is a second
 full-text search beside the toolbar's, which filters through
@@ -58742,6 +58821,19 @@ test of the fixture, not of the bound.
   wants reformatting, it belongs in an explicit "Format document" command;
   reversing this is the one `as_bytes()` in each save function.
 
+- **Minesweeper's level chip is the toolkit's button, and loses the level's
+  colour.** (2026-09-28, `apps/minesweeper/src/main.rs` -> `chip`, and
+  `every_difficulty_has_its_own_name`.) The chip was a raised slab with the
+  level's name in its colour (Beginner green, Intermediate yellow, Expert
+  red), which read at 3.6:1 in the light theme. The operator's polish ask
+  for C-Q16 names the toolkit's buttons for a game's chrome, and a toolkit
+  button writes its label in the toolkit's ink, so the colour went with the
+  slab; the level is still named on its button and in the header's line.
+  The alternative -- keep the slab and ink its word for it
+  (`gamechrome::Ink`) -- keeps the colour at the cost of the one chrome
+  control in the games that is not the toolkit's. Reversing it is the
+  `chip` function and a `Difficulty::color` again.
+
 ### Deferred, each with the condition that un-defers it
 
 - **`apps/textline` can go.** Lane C extended `guitk::textinput::TextInput`
@@ -58771,6 +58863,12 @@ test of the fixture, not of the bound.
   `origin/main` (`git show origin/main:gui/toolkit/src/color.rs | grep
   hex_text`). Then each copy goes; files written afterwards carry lowercase
   hex, which the old readers already accept, so old and new files both load.
+
+- ~~**A file named on the command line may be any bytes.**~~ DONE 2026-09-27
+  (`b0471617a`): `ArgsOs` reached `origin/main`, and the eight programs that
+  open files named on the command line -- plus match3 and pinball -- read
+  their arguments through it; the request is closed and `known-issues.md` ->
+  `[E] "Open with" opened nothing...` is FIXED.
 
 - **The terminal has never run on SlateOS.** Its real child -- `forkpty` plus
   `execve` through `libcall::pty` -- is tested only on a Linux host against
@@ -58960,3 +59058,122 @@ is already waiting, not whether the setter exists.
   refresh, measured from the last frame shown (`Server::next_wake`,
   design-decisions §1302). A fixed vblank-aligned grid would not drift, but the
   kernel sends no flip event to align to; revisit when it does.
+
+## Lane D — POSIX, libc & toolchain
+
+- **crypt: libxcrypt's other methods** (posix/src/crypt.rs).  Only $1$, $5$
+  and $6$ hash; every other setting gets the failure token "*0" with EINVAL,
+  as libxcrypt answers for a method it lacks.  Ubuntu 24.04's libxcrypt has,
+  probed 2026-09-26: traditional DES (two-character salt), BSDi DES ("_"),
+  bcrypt ($2b$), scrypt ($7$), yescrypt ($y$), gost-yescrypt ($gy$),
+  sha1crypt ($sha1$), SunMD5 ($md5$) and NT ($3$), and real DES behind
+  encrypt/setkey (compat symbols there; ours answer ENOSYS).  yescrypt comes
+  first: it is Ubuntu's default for new passwords, so an /etc/shadow brought
+  from Ubuntu does not verify here.  Port from libxcrypt 4.4.36 (source in
+  D:\refsrc\libxcrypt-4.4.36), per design-decisions.md §539: primitives
+  ported, not written.  (Replaces the DES follow-up of the 2026-05-29
+  crypt entry, deleted as done.)
+
+- **iconv: glibc's other character sets** (posix/src/iconv.rs).  UTF-8,
+  ASCII, ISO-8859-1, UTF-16, UTF-32, UCS-2, UCS-4, UNICODE, WCHAR_T, UTF-7
+  and UTF-7-IMAP, glibc's 141 table-driven 8-bit sets
+  (posix/src/iconv_8bit.rs, generated from glibc's charmaps by
+  posix/tools/gen_iconv_8bit.py), and CP1255, CP1258 and TCVN5712-1
+  (posix/src/iconv_combining.rs, read out of glibc's cp1255.c, cp1258.c
+  and tcvn5712-1.c by posix/tools/gen_iconv_combining.py) convert as glibc
+  2.39's (B-D-ICONV-HAD-THREE-CHARSETS), and since 2026-09-28 the 25
+  single-byte sets glibc writes by hand whose converters are their
+  charmaps -- iso646.c's 23 national variants, ISO_11548-1 and ARMSCII-8
+  (iconv_8bit.rs, checked against glibc's own converters by
+  posix/tools/oracle/iconv_hand_harness.py), the two-byte-diacritic sets
+  T.61, ISO_6937, ISO_6937-2 and ANSI_X3.110 (iconv_prefix.rs, read out of
+  glibc's running converters by posix/tools/gen_iconv_prefix.py), and
+  TSCII (iconv.rs: glibc's tscii.c, but for three bugs it has where the
+  output runs out, which that section lists), and the 55 single-byte sets
+  glibc builds from table headers of its own -- IBM's EBCDIC and PC code
+  pages past the generated ones, CP737, CP775, ISIRI-3342 (iconv_8bit.rs,
+  read from iconvdata's headers by gen_iconv_8bit.py and checked against
+  glibc's converters by iconv_hand_harness.py); every other name is
+  refused with EINVAL.  That is every single-byte set glibc has.  Next:
+  the multibyte sets -- IBM's double-byte EBCDIC ones (IBM930 ...) and
+  the East Asian ones (EUC-JP,
+  SHIFT_JIS, EUC-KR, GBK/GB18030, BIG5, ISO-2022-JP), whose tables run to
+  megabytes -- and whose size in every program that links iconv is its own
+  question (design-decisions.md §1117).  A new set is a Charset variant, a
+  decoder and an encoder in its glibc module's check order (glibc 2.39's
+  source is in D:\refsrc\glibc-2.39), and its names from
+  iconvdata/gconv-modules* -- each probed against Ubuntu before it is
+  trusted, as the module docs say.  The `iconv` program (userspace/iconv,
+  lane B) converts with tables of its own; the libc now has every set it
+  knows, so it can be glibc's iconv_prog over the libc's iconv -- asked in
+  requests/d-b-the-iconv-program-can-run-on-the-libc.md.
+
+- **tmpfile: unlink at once, as glibc does, when the kernel allows it**
+  (posix/src/stdlib.rs `tmpfile`, posix/src/stdio.rs `hold_temporary`).
+  tmpfile keeps `/tmp/tmpfXXXXXX` until the stream lets go of the file
+  (fclose, freopen onto another, exit) because this kernel's descriptors
+  re-resolve their file's name on every read and write
+  (kernel/src/fs/handle.rs), so unlinking an open file loses it, and
+  O_TMPFILE is refused (posix/src/file.rs) -- design-decisions.md §1151,
+  known-issues.md D-POSIX-TMPFILE-WAS-NEVER-REMOVED-AND-MKSTEMP-WAS-NOT-GLIBCS.
+  Asked of lane A: requests/d-a-an-unlinked-open-file-is-lost-to-its-own-descriptor.md.
+  Trigger and fix: descriptors that outlive their names -> unlink right
+  after gen_tempname in tmpfile and drop hold_temporary; or a nameless
+  SYS_FS_TMPFILE -> lift open()'s EOPNOTSUPP guard for O_TMPFILE, and
+  tmpfile uses it unchanged (it is tried first).
+
+- **The C fixtures onto the generic rung, one at a time, once lane A's rung
+  is in** (services/ctest-generic.list).  Asked in
+  requests/d-a-one-rung-for-every-c-fixture.md, whose table gives each
+  fixture's grant and time limit.  When the rung is on main: merge it, then
+  for each of ctest-obstack, ctest-aio, ctest-cxx-throw, ctest-eintr,
+  ctest-fortify-abort, ctest-printf-streams, ctest-pthread, ctest-stdio,
+  ctest-sysvipc and ctest-ucontext -- and ctest-cwd-umask once the kernel
+  half of design-decisions.md §960 is in -- add its line, boot, fix what
+  fails, publish, and close the fixture's own requests/d-a-run-*.md.  A
+  fixture goes on only after a lane D boot has seen it pass, so that no
+  other lane's boot meets it failing first.
+
+## Lane C — the start menu's Shut down button waits for programs to be asked to save (2026-09-26)
+
+- **Done 2026-09-26.** The power button reads "Shut down" and shuts down in
+  one click, asking every window to close first; the caret at its right end
+  (`DesktopShell::power_caret_rect`) opens the other choices. Nothing below is
+  outstanding; kept for the reasoning.
+
+- **The trigger below was met the same day** (design-decisions §1405): shut
+  down, restart and log out ask every window to close first, and list the
+  ones that do not. The button is next.
+
+- **Deferred: a one-click "Shut down" with the other power actions behind a
+  caret**, as the Aero reference draws it (`.aero-sm-power-main` beside
+  `.aero-sm-power-caret` in `Aero Desktop (offline).html`) and
+  `roadmap-detailed.md`'s start menu line lists. Today the start menu's
+  "Power" button opens the power menu, and shutting down is a second,
+  deliberate choice. Nothing yet asks a running program to save before the
+  machine goes down (`known-issues.md`
+  `TD-C-LOGGING-OUT-LEAVES-THE-USERS-PROGRAMS-RUNNING` -- there is no session
+  manager), so a one-click shutdown would make losing unsaved work one slip
+  of the pointer away. **Trigger:** programs are asked to close, and can
+  object, before a shutdown or log out. Then: split `power_button_rect` into
+  the main part (runs `PowerChoice::ShutDown`) and a caret (opens the power
+  menu), with the menu's own list unchanged.
+
+## Lane C — automatic sign-in: the chooser key and the start for repair (2026-09-27)
+
+- **Open, waiting on lane F.** Automatic sign-in (§1427) cannot read the
+  chooser key: `StartConditions::of_this_start` (`gui/desktop/src/autologin.rs`)
+  is handed `Modifiers::NONE`, because the compositor neither knows about a key
+  held before it opened the keyboard nor answers "what is held?".
+  **Trigger:** lane F lands `requests/c-f-which-keys-are-held-when-the-desktop-starts.md`
+  (a held-modifiers query on `EventLoop`). **Then:** in `ShellSession::start`,
+  ask it before building the session and hand the answer to
+  `StartConditions::new`; delete the comment in `of_this_start`; boot with an
+  account marked `auto_login: true` and confirm Shift held from power-on shows
+  the login screen.
+- **Open, waiting on lane A.** A start for repair is read from `/proc/cmdline`,
+  which the kernel makes up today, and no boot entry starts for repair.
+  **Trigger:** lane A's answer to
+  `requests/c-a-the-kernels-app-registry-and-the-first-screen-hint.md` item 3.
+  **Then:** nothing to change here -- boot the repair entry with an account
+  marked to sign in by itself and confirm the login screen shows.

@@ -88,6 +88,9 @@ import sys
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 
+sys.path.insert(0, str(ROOT / "scripts"))
+from mutation_harness import refuse_a_dirty_start  # noqa: E402
+
 # Where a crate's directory name is not its package name.
 PACKAGE = {"sysinfo": "sysinfo-app"}
 
@@ -155,10 +158,25 @@ def main():
     print(f"{len(apps)} app(s) route events to a picker\n")
     unpinned, pinned, skipped = [], [], []
 
+    # A run that was killed -- not asked to stop, which the `finally` below
+    # covers, but killed: a timeout's process-tree kill, a restart -- leaves
+    # the cut in the source. It did on 2026-09-28: a scanner batch run under
+    # a 600-second limit was killed while `apps/torrent` read
+    # `match Picked::Ignored {`, and the next sign of it was a `git status`.
+    # So the source is backed up beside itself first, under the name the
+    # mutation harness uses, and every run begins by refusing to start past a
+    # backup a killed run left -- the harness's own check, which says which
+    # file differs and how to settle it rather than guessing.
     for app in apps:
         f = ROOT / "apps" / app / "src" / "main.rs"
+        refuse_a_dirty_start(f, f.with_suffix(f.suffix + ".bak"))
+
+    for app in apps:
+        f = ROOT / "apps" / app / "src" / "main.rs"
+        bak = f.with_suffix(f.suffix + ".bak")
         original = f.read_bytes()
         before = hashlib.sha256(original).hexdigest()
+        bak.write_bytes(original)
         try:
             cut, n = ROUTING.subn("Picked::Ignored {", f.read_text(encoding="utf-8"), count=1)
             if n == 0:
@@ -193,6 +211,7 @@ def main():
             assert hashlib.sha256(f.read_bytes()).hexdigest() == before, (
                 f"RESTORE FAILED for {app}"
             )
+            bak.unlink()
 
     print()
     print(f"pinned:   {len(pinned):>2}  {' '.join(pinned)}")

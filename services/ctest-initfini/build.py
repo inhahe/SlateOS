@@ -172,6 +172,7 @@ def compile_obj(zig: str, obj: Path, defines: list[str]) -> None:
         "-c", "-O2",
         "-mcmodel=large",         # match codegen code-model=large
         "-fno-pic", "-fno-pie",   # match relocation-model=static
+        "-I", str(OS_ROOT / "posix" / "include"),  # the overlay: what musl's headers lack
         "-Wall", "-Wextra", "-Werror",
         *defines,
         str(HERE / "main.c"),

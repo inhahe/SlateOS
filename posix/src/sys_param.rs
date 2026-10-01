@@ -13,8 +13,10 @@
 /// This matches `PATH_MAX` from `<limits.h>`.
 pub const MAXPATHLEN: usize = 4096;
 
-/// Maximum length of a hostname.
-pub const MAXHOSTNAMELEN: usize = 256;
+/// The longest hostname: `HOST_NAME_MAX`, the kernel's limit, as glibc's
+/// and musl's `<sys/param.h>` both have it. (256 until 2026-09-30, which no
+/// header said.)
+pub const MAXHOSTNAMELEN: usize = crate::linux_limits::HOST_NAME_MAX;
 
 /// Maximum length of a symbolic link.
 pub const MAXSYMLINKS: usize = 20;
@@ -32,8 +34,10 @@ pub const MAXDOMNAMELEN: usize = 256;
 /// Default number of open files per process.
 pub const NOFILE: usize = 256;
 
-/// Maximum number of supplementary group IDs.
-pub const NGROUPS: usize = 65536;
+/// The most supplementary group IDs: `NGROUPS_MAX`, the kernel's limit, as
+/// glibc's `<sys/param.h>` has it (musl's says 32 -- design-decisions
+/// §1119's table, `scripts/check-libc-abi.py`'s KNOWN_DIFFERENT).
+pub const NGROUPS: usize = crate::linux_limits::NGROUPS_MAX;
 
 // ---------------------------------------------------------------------------
 // System constants
@@ -44,11 +48,8 @@ pub const NGROUPS: usize = 65536;
 /// Matches `sysconf(_SC_CLK_TCK)` = 100.
 pub const HZ: u32 = 100;
 
-/// Pages per kilobyte.
-///
-/// With our 16 KiB page size, there's less than one page per KB.
-/// This constant is 1 for compatibility; page-based calculations
-/// should use `getpagesize()` or `sysconf(_SC_PAGESIZE)`.
+/// Bytes per page (BSD's name): this kernel's 16 KiB, where musl's
+/// `<sys/user.h>` says 4096 -- a program should ask `sysconf(_SC_PAGESIZE)`.
 pub const NBPG: usize = crate::unistd::PAGE_SIZE;
 
 /// Page size (same as `getpagesize()`).
@@ -64,8 +65,11 @@ pub const PAGE_SIZE: usize = crate::unistd::PAGE_SIZE;
 /// away from the size it is supposed to be the log of.
 pub const PAGE_SHIFT: u32 = 14;
 
-/// Page mask for rounding (PAGE_SIZE - 1).
-pub const PAGE_MASK: usize = PAGE_SIZE - 1;
+/// The page-number bits, `~(PAGE_SIZE - 1)`, as Linux's and musl's
+/// `<sys/user.h>` define it: an address `& PAGE_MASK` is the start of its
+/// page. (Until 2026-09-30 this was `PAGE_SIZE - 1`, the offset bits -- the
+/// complement of the header's.)
+pub const PAGE_MASK: usize = !(PAGE_SIZE - 1);
 
 // ---------------------------------------------------------------------------
 // Block sizes
@@ -175,7 +179,7 @@ mod tests {
 
     #[test]
     fn test_maxhostnamelen() {
-        assert_eq!(MAXHOSTNAMELEN, 256);
+        assert_eq!(MAXHOSTNAMELEN, 64);
     }
 
     #[test]
@@ -206,8 +210,9 @@ mod tests {
 
     #[test]
     fn test_page_mask() {
-        assert_eq!(PAGE_MASK, PAGE_SIZE - 1);
-        assert_eq!(PAGE_MASK, 0x3FFF);
+        assert_eq!(PAGE_MASK, !(PAGE_SIZE - 1));
+        assert_eq!(PAGE_MASK, 0xFFFF_FFFF_FFFF_C000);
+        assert_eq!(0x1_2345 & PAGE_MASK, 0x1_0000, "an address's page");
     }
 
     #[test]

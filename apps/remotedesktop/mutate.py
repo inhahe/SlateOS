@@ -47,6 +47,17 @@ RFB_KEYS = "keys_and_the_pointer_are_sent_as_rfb_says"
 HEXTILE_TEST = "hextile_tiles_are_drawn"
 ZRLE_TEST = "zrle_rectangles_are_drawn_through_one_stream"
 ZRLE_REFUSED = "a_zrle_run_past_its_tile_is_refused"
+FEWER_BITS = "fewer_bits_a_pixel_are_asked_for_and_read_as_full_colour"
+COMPACT = "a_zrle_compact_pixel_is_a_whole_pixel_below_32_bits"
+WIDENS = "every_channel_widens_to_its_full_range"
+PACED = "a_frame_rate_spaces_the_requests"
+PROFILE_DEPTH = "a_vnc_session_asks_for_the_profiles_colour_depth"
+PRESET_SAYS = "a_quality_preset_changed_under_a_live_session_says_when_it_applies"
+SCALE = "a_profiles_scale_is_how_the_screen_is_shown"
+BARS = "the_bars_pan_the_screen_and_the_pointer_follows"
+Z_SCALE = "z_chooses_the_scale_and_q_leaves_it_alone"
+WHEEL = "the_wheel_over_the_screen_scrolls_the_remote_machine"
+WHEEL_CARRY = "the_wheel_keeps_what_is_not_yet_a_notch"
 
 MAIN = [
     (
@@ -99,8 +110,8 @@ MAIN = [
     ),
     (
         "the escape hotkey goes to the remote machine",
-        "        if key.key == self.escape_hotkey || self.screen_rect().is_none() {",
-        "        if self.screen_rect().is_none() {",
+        "        if key.key == self.escape_hotkey || self.screen_view().is_none() {",
+        "        if self.screen_view().is_none() {",
         [INPUT],
     ),
     (
@@ -147,6 +158,105 @@ MAIN = [
         "            (true, Some(since)) => now.saturating_sub(since),",
         "            (true, Some(_)) => 0,",
         [DURATION],
+    ),
+    # The profile's picture (2026-09-27).
+    (
+        "a session asks for full colour whatever the profile says",
+        "            bits: profile.display.color_depth.pixel_bits(),",
+        "            bits: rfb::PixelBits::ThirtyTwo,",
+        [PROFILE_DEPTH],
+    ),
+    (
+        "a preset changed under a live session does not say when it applies",
+        "                if self.selected_profile_is_live() {",
+        "                if false {",
+        [PRESET_SAYS],
+    ),
+    # The profile's scale (2026-09-27).
+    (
+        "the profile's scale is not read",
+        "        let scale = self.shown_scaling().factor((room_w / w).min(room_h / h));",
+        "        let scale = ScalingMode::AutoFit.factor((room_w / w).min(room_h / h));",
+        [SCALE],
+    ),
+    (
+        "full size is fitted",
+        "            Self::Fixed100 => 1.0,",
+        "            Self::Fixed100 => fit,",
+        [SCALE],
+    ),
+    (
+        "a screen wider than the room gets no bar",
+        "            across = whole_w > room_w - if down { SCREEN_BAR } else { 0.0 } + 0.5;",
+        "            across = false;",
+        [SCALE, BARS],
+    ),
+    (
+        "the screen is not clipped to its view",
+        "        let (x, y, width, height) = v.view;\n        cmds.push(RenderCommand::PushClip {\n            x,\n            y,\n            width,\n            height,\n        });\n",
+        "",
+        [SCALE],
+    ),
+    (
+        "the pointer ignores the pan",
+        "            to_remote(mouse.x, v.placed.0, live.width),",
+        "            to_remote(mouse.x, v.view.0, live.width),",
+        [BARS],
+    ),
+    (
+        "a dragged thumb does not pan",
+        "            self.screen_pan.1 = pan;",
+        "",
+        [BARS],
+    ),
+    (
+        "a click on the track does not page",
+        "                        self.pan_by(across, view_len);",
+        "                        self.pan_by(across, 0.0);",
+        [BARS],
+    ),
+    (
+        "the wheel over a bar does not pan",
+        "                    self.pan_by(across, wheel::rows_f(turned) * PAN_PER_ROW);",
+        "",
+        [BARS],
+    ),
+    (
+        "Z chooses nothing",
+        "                    profile.display.scaling = next;",
+        "",
+        [Z_SCALE],
+    ),
+    # The wheel (2026-09-27).
+    (
+        "the wheel over the screen is not forwarded",
+        "            // on this view, and the remote machine never saw a wheel at all.\n            MouseEventKind::Scroll { dx, dy } => {",
+        "            // on this view, and the remote machine never saw a wheel at all.\n            MouseEventKind::Scroll { dx, dy } if dx.is_nan() => {",
+        [WHEEL],
+    ),
+    (
+        "a wheel click is a press without its release",
+        "                    for mask in [live.buttons | button, live.buttons] {",
+        "                    for mask in [live.buttons | button] {",
+        [WHEEL],
+    ),
+    (
+        "up is sent as down",
+        "        out.push(8);",
+        "        out.push(16);",
+        [WHEEL, WHEEL_CARRY],
+    ),
+    (
+        "half a notch is thrown away",
+        "    carry.1 = (carry.1 + dy).clamp(-MOST, MOST);",
+        "    carry.1 = dy.clamp(-MOST, MOST);",
+        [WHEEL, WHEEL_CARRY],
+    ),
+    (
+        "a quality preset puts the scale back to fitted",
+        "            profile.display.refresh_rate = rate;",
+        "            profile.display.refresh_rate = rate;\n            profile.display.scaling = ScalingMode::AutoFit;",
+        [Z_SCALE],
     ),
 ]
 
@@ -221,9 +331,52 @@ RFB = [
     ),
     (
         "the pixels' red and blue are swapped",
-        "                            [b, g, r, _] => u32::from_le_bytes([*b, *g, *r, 0]),",
-        "                            [b, g, r, _] => u32::from_le_bytes([*r, *g, *b, 0]),",
-        [HANDSHAKE, SHOWS],
+        "            Self::ThirtyTwo => return raw & 0x00FF_FFFF,",
+        "            Self::ThirtyTwo => return ((raw & 0xFF) << 16) | (raw & 0xFF00) | ((raw >> 16) & 0xFF),",
+        [HANDSHAKE, SHOWS, WIDENS],
+    ),
+    # The profile's picture (2026-09-27): colour depth and frame rate.
+    (
+        "the pixel format asked for is always 32 bits",
+        "        self.write(&self.bits.set_pixel_format())?;",
+        "        self.write(&PixelBits::ThirtyTwo.set_pixel_format())?;",
+        [FEWER_BITS],
+    ),
+    (
+        "a 16-bit pixel's red is read from the wrong bits",
+        "                widen((raw >> 11) & 31, 31),",
+        "                widen((raw >> 10) & 31, 31),",
+        [FEWER_BITS, WIDENS],
+    ),
+    (
+        "a channel is not widened to its full range",
+        "                .saturating_mul(255)",
+        "                .saturating_mul(248)",
+        [WIDENS],
+    ),
+    (
+        "a Raw rectangle is read at four bytes a pixel",
+        "                    let size = bits.bytes() as u64;",
+        "                    let size = 4_u64;",
+        [FEWER_BITS],
+    ),
+    (
+        "a ZRLE compact pixel is always three bytes",
+        "        for b in p.iter_mut().take(bits.compact_bytes()) {",
+        "        for b in p.iter_mut().take(3) {",
+        [COMPACT],
+    ),
+    (
+        "no frame rate is kept",
+        "        if let (Some(gap), Some(asked)) = (self.gap, self.asked)",
+        "        if let (Some(gap), Some(asked)) = (None::<Duration>, self.asked)",
+        [PACED],
+    ),
+    (
+        "the frame gap is not a second divided by the rate",
+        "        Duration::from_secs(1).checked_div(u32::from(self.frames_per_second))",
+        "        Duration::from_millis(1).checked_div(u32::from(self.frames_per_second))",
+        [PACED],
     ),
 ]
 

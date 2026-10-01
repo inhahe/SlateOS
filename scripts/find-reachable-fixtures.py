@@ -35,9 +35,13 @@ reader to silence it rather than read it.
 Usage:  python scripts/find-reachable-fixtures.py [--roots=apps,gui]
 """
 
+import os
 import pathlib
 import re
 import sys
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import rustlex  # noqa: E402
 
 WORDS = (
     "simulate", "simulated", "fake", "dummy", "mock", "demo", "placeholder",
@@ -68,6 +72,25 @@ EXEMPT = {
     "add_sample": "appends a real measurement",
     "active_graph_samples": "accessor for recorded measurements",
     "sample_ts": "formats a timestamp",
+    # Read 2026-09-28, each one.
+    "sample_world_capitals": "flashcards' included deck: true statements bundled "
+    "as content, and the window says three decks came with the app",
+    "sample_programming": "as sample_world_capitals",
+    "sample_science": "as sample_world_capitals",
+    "decode_sample": "one audio sample's bytes, read (wavpcm)",
+    "encode_sample": "one audio sample's bytes, written (wavpcm)",
+    "placeholder": "an empty text field's hint -- HH, YYYY-MM-DD, Optional -- in "
+    "alarmclock, calendar, compass, finance, qrcode, reminders and snippets",
+    "placeholders": "the {name} slots in a clipboard template (clipmanager)",
+    "populate_grid": "fills charmap's grid from the selected Unicode block",
+    "render_placeholder": "draws diskanalyzer's empty-state message",
+    "read_sample_description": "parses an MP4 stsd box (mediaprobe)",
+    "build_placeholder_page": "settings' page for a section not built, which "
+    "says it is under construction; the set is pinned by a test",
+    "add_image_placeholder": "puts an empty image frame on a slide, as "
+    "presentation programs do",
+    "with_seed_and_difficulty": "a sudoku from a seed; the shipping one is "
+    "seeded from the system, and a test asks for the same board twice",
 }
 
 FN_DEF = re.compile(r"^(\s*)(?:pub(?:\([^)]*\))?\s+)?(?:const\s+|async\s+|unsafe\s+)*fn\s+([a-z_0-9]+)")
@@ -85,13 +108,8 @@ def gated_lines(lines):
     i = 0
     while i < len(lines):
         if lines[i].strip() == "#[cfg(test)]":
-            indent = len(lines[i]) - len(lines[i].lstrip())
             # Find the item this attribute belongs to, then take its block.
-            j = i + 1
-            while j < len(lines) and (
-                lines[j].strip().startswith("#[") or lines[j].strip().startswith("//")
-            ):
-                j += 1
+            j = skip_attributes(lines, i + 1)
             if j >= len(lines):
                 break
             # A braced item runs to the matching close at the same indent; a
@@ -117,7 +135,103 @@ def gated_lines(lines):
     return gated
 
 
+def skip_attributes(lines, j):
+    """The first line at or after `j` that is not an attribute, a comment or
+    blank -- the item the attributes belong to.
+
+    An attribute is skipped to the line that closes its brackets. This took a
+    line starting with `#[` as the whole attribute, so the usual test module
+    of this tree --
+
+        #[cfg(test)]
+        #[allow(
+            clippy::unwrap_used,
+            ...
+        )]
+        mod tests {
+
+    -- stopped at `clippy::unwrap_used,`, read that as a one-line item, and
+    gated only as far as the first `;` inside the module. Everything after
+    `use super::*;` counted as production, and eighteen of the twenty-eight
+    fixtures this reported on 2026-09-28 were test helpers called by tests.
+    """
+    while j < len(lines):
+        stripped = lines[j].strip()
+        if not stripped or stripped.startswith("//"):
+            j += 1
+            continue
+        if not stripped.startswith("#["):
+            return j
+        depth = 0
+        while j < len(lines):
+            depth += lines[j].count("[") - lines[j].count("]")
+            j += 1
+            if depth <= 0:
+                break
+    return j
+
+
+def _self_test():
+    failures = 0
+
+    def expect(label, got, want):
+        nonlocal failures
+        if got != want:
+            failures += 1
+            print(f"FAIL  {label}\n  got  {got!r}\n  want {want!r}")
+        else:
+            print(f"  ok    {label}")
+
+    def gated_names(src):
+        lines = src.splitlines()
+        gated = gated_lines(lines)
+        return [
+            m.group(2)
+            for n, line in enumerate(lines)
+            if (m := FN_DEF.match(line)) and n in gated
+        ]
+
+    expect(
+        "a test module under a multi-line attribute is gated whole",
+        gated_names(
+            "fn real() {}\n#[cfg(test)]\n#[allow(\n    clippy::unwrap_used,\n"
+            "    clippy::panic\n)]\nmod tests {\n    use super::*;\n"
+            "    fn sample() {}\n    #[test]\n    fn t() { sample(); }\n}\nfn after() {}\n"
+        ),
+        ["sample", "t"],
+    )
+    expect(
+        "a single-line attribute, as before",
+        gated_names("#[cfg(test)]\n#[allow(clippy::unwrap_used)]\nmod tests {\n    fn demo() {}\n}\n"),
+        ["demo"],
+    )
+    expect(
+        "a gated function by itself, as before",
+        gated_names("#[cfg(test)]\nfn sample_app() -> u8 {\n    1\n}\nfn real() {}\n"),
+        ["sample_app"],
+    )
+    expect(
+        "a brace in a string does not end a test module early, once blanked",
+        gated_names(
+            rustlex.strip_noise(
+                '#[cfg(test)]\nmod tests {\n    const J: &str = "}";\n'
+                "    fn app_with_sample() {}\n}\n"
+            )
+        ),
+        ["app_with_sample"],
+    )
+    expect(
+        "a blank line and a comment between attribute and item",
+        gated_names("#[cfg(test)]\n\n// fixtures\nmod tests {\n    fn seed_x() {}\n}\n"),
+        ["seed_x"],
+    )
+    print(f"\n{failures} failure(s)")
+    return 1 if failures else 0
+
+
 def main():
+    if any(a in ("--self-test", "--selftest", "--self_test") for a in sys.argv[1:]):
+        return _self_test()
     roots = ["apps"]
     for arg in sys.argv[1:]:
         if arg.startswith("--roots="):
@@ -137,7 +251,15 @@ def main():
             return 2
         for path in sorted(base.glob("**/*.rs")):
             files += 1
-            lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
+            # With strings, characters and comments blanked, line for line.
+            # Read raw, a brace in a string literal unbalanced the count that
+            # finds where a test module ends -- `apps/jsonviewer`'s tests are
+            # full of JSON, and its module was taken to end 1,450 lines early
+            # -- and a name in a comment was counted as a call (`sudoku`'s
+            # "Was `with_seed_and_difficulty(42, ...)`").
+            lines = rustlex.strip_noise(
+                path.read_text(encoding="utf-8", errors="replace")
+            ).splitlines()
             gated = gated_lines(lines)
 
             names = {}

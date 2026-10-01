@@ -5,16 +5,39 @@
 //! front end for the three syscalls (`io_uring_setup`,
 //! `io_uring_enter`, `io_uring_register`).
 //!
-//! Validation matches Linux's `io_uring_setup(2)` /
-//! `io_uring_enter(2)` / `io_uring_register(2)` contracts; every code
-//! path that passes the checks then returns `-1` / `errno = ENOSYS`
-//! because we don't yet have a real io_uring subsystem (the kernel
-//! ring-mmap'd SQ/CQ pages, the kthread-based SQPOLL worker, the
-//! per-op verbs that actually do I/O). Programs that probe for
-//! io_uring at startup (liburing's `io_uring_queue_init`, tokio-uring,
-//! the Rust `rio` crate, glommio, the `compio` async runtime) see
-//! ENOSYS and either fall back to epoll/IOCP-style polling or fail
-//! gracefully.
+//! There is no io_uring on SlateOS -- no ring pages, no SQPOLL thread, no
+//! per-operation verbs -- so the three calls refuse what Linux 6.6 refuses,
+//! in its order (io_uring/io_uring.c, io_uring/sqpoll.c), and then say so:
+//!
+//! * `io_uring_setup` checks what Linux checks before it allocates the rings
+//!   -- the parameter block (`EFAULT`), its reserved words, its flags, the
+//!   sizes, the flag combinations (`EINVAL`) -- and then answers `ENOSYS`,
+//!   which is what programs that probe for io_uring (liburing's
+//!   `io_uring_queue_init`, tokio-uring, glommio, PostgreSQL's
+//!   `io_method`) test for before falling back to `epoll` or threads.  The
+//!   checks Linux makes after allocating the rings (the `ATTACH_WQ`
+//!   descriptor, `SQ_AFF`'s CPU) are not made: there is nothing they could
+//!   be about.
+//! * `io_uring_enter` and `io_uring_register` check their flags or opcode,
+//!   then look for the ring -- and there is none: a descriptor that is not
+//!   open is `EBADF`, an open one is not a ring (`EOPNOTSUPP`), and a
+//!   registered-ring index has no table to be in (`EINVAL`).  Linux's later
+//!   checks are about a ring, and never reached.
+//!
+//! Until 2026-09-26 these validated in an order of their own, with checks
+//! Linux 6.6 does not have -- `min_complete` and signal-set sizes before the
+//! descriptor, per-operation argument shapes before the ring, `SQPOLL` with
+//! `IOPOLL` refused, `SQPOLL` gated on `CAP_SYS_NICE` -- and flag sets from
+//! later kernels (`B-D-IO-URING-WAS-NOT-LINUXS`).
+//!
+//! ## Reached through `syscall()`
+//!
+//! glibc wraps none of these calls: programs -- liburing above all -- make them with
+//! `syscall(SYS_io_uring_setup, …)`, which answers with the checks below and then
+//! `ENOSYS`, as the kernel's own Linux table does.  Until 2026-09-26 the C
+//! library also exported `io_uring_setup`, `io_uring_enter` and `io_uring_register` under their own names -- liburing's, which it defines itself since 2.2, which glibc does not, and
+//! `syscall()` answered `ENOSYS` without a look; the names went as libaio's
+//! did (design-decisions.md §1114).
 
 use crate::errno;
 
@@ -38,23 +61,32 @@ pub const IORING_SETUP_ATTACH_WQ: u32 = 32;
 pub const IORING_SETUP_R_DISABLED: u32 = 64;
 /// Submit-all on enter (rather than draining the SQ).
 pub const IORING_SETUP_SUBMIT_ALL: u32 = 128;
-/// Use a single issuer.
-pub const IORING_SETUP_SINGLE_ISSUER: u32 = 256;
-/// Defer task work.
-pub const IORING_SETUP_DEFER_TASKRUN: u32 = 1 << 13;
-/// Disable file-table updates on COOP_TASKRUN.
+/// Tasks run their completion work when they next enter the kernel, not
+/// at an interrupt.
 pub const IORING_SETUP_COOP_TASKRUN: u32 = 1 << 8;
-/// Use 32-byte SQEs (extended).
-pub const IORING_SETUP_SQE128: u32 = 1 << 10;
-/// Use 32-byte CQEs (extended).
-pub const IORING_SETUP_CQE32: u32 = 1 << 11;
-/// Hybrid IOPOLL mode (Linux 6.7+).
+/// With `COOP_TASKRUN`: set `IORING_SQ_TASKRUN` in the SQ ring when there
+/// is task work to run.
 pub const IORING_SETUP_TASKRUN_FLAG: u32 = 1 << 9;
-/// No SQARRAY indirection (Linux 6.6+).
+/// 128-byte SQEs.
+pub const IORING_SETUP_SQE128: u32 = 1 << 10;
+/// 32-byte CQEs.
+pub const IORING_SETUP_CQE32: u32 = 1 << 11;
+/// Only one task submits.  This was `1 << 8` until 2026-09-26 -- Linux's
+/// `COOP_TASKRUN` -- so a program asking for one got the other.
+pub const IORING_SETUP_SINGLE_ISSUER: u32 = 1 << 12;
+/// Run task work only when the task waits for completions.
+pub const IORING_SETUP_DEFER_TASKRUN: u32 = 1 << 13;
+/// The application provides the rings' memory (Linux 6.5+).
+pub const IORING_SETUP_NO_MMAP: u32 = 1 << 14;
+/// Register the ring in itself and return its index, not a descriptor;
+/// needs `NO_MMAP` (Linux 6.5+).
+pub const IORING_SETUP_REGISTERED_FD_ONLY: u32 = 1 << 15;
+/// No SQ index array (Linux 6.6+).
 pub const IORING_SETUP_NO_SQARRAY: u32 = 1 << 16;
-/// Hybrid IOPOLL.
+/// Hybrid I/O polling (Linux 6.13+; refused, as 6.6 refuses it).
 pub const IORING_SETUP_HYBRID_IOPOLL: u32 = 1 << 17;
-/// Valid bit mask for io_uring_setup flags.
+/// The flags Linux 6.6's `io_uring_setup` accepts (io_uring.c:4074): bits
+/// 0 to 16.  `IORING_SETUP_HYBRID_IOPOLL` is 6.13's, and refused.
 const IORING_SETUP_FLAGS_VALID: u32 = IORING_SETUP_IOPOLL
     | IORING_SETUP_SQPOLL
     | IORING_SETUP_SQ_AFF
@@ -63,95 +95,136 @@ const IORING_SETUP_FLAGS_VALID: u32 = IORING_SETUP_IOPOLL
     | IORING_SETUP_ATTACH_WQ
     | IORING_SETUP_R_DISABLED
     | IORING_SETUP_SUBMIT_ALL
-    | IORING_SETUP_SINGLE_ISSUER
-    | IORING_SETUP_DEFER_TASKRUN
     | IORING_SETUP_COOP_TASKRUN
+    | IORING_SETUP_TASKRUN_FLAG
     | IORING_SETUP_SQE128
     | IORING_SETUP_CQE32
-    | IORING_SETUP_TASKRUN_FLAG
-    | IORING_SETUP_NO_SQARRAY
-    | IORING_SETUP_HYBRID_IOPOLL;
+    | IORING_SETUP_SINGLE_ISSUER
+    | IORING_SETUP_DEFER_TASKRUN
+    | IORING_SETUP_NO_MMAP
+    | IORING_SETUP_REGISTERED_FD_ONLY
+    | IORING_SETUP_NO_SQARRAY;
 
 // ---------------------------------------------------------------------------
-// io_uring opcodes (SQE operations)
+// io_uring opcodes (SQE operations): Linux 6.8's <linux/io_uring.h>, which
+// posix/tools/oracle/glibc_constants.txt holds them to. (Until 2026-09-30
+// eighteen were missing, IORING_OP_CANCEL was a name Linux has not got with
+// the number of IORING_OP_SENDMSG_ZC, and IORING_OP_LAST was "a generous
+// 64". Nothing here reads them: there is no ring to take an SQE from.)
 // ---------------------------------------------------------------------------
 
 /// No-op.
 pub const IORING_OP_NOP: u8 = 0;
-/// Read (vectored).
+/// `readv`.
 pub const IORING_OP_READV: u8 = 1;
-/// Write (vectored).
+/// `writev`.
 pub const IORING_OP_WRITEV: u8 = 2;
-/// fsync.
+/// `fsync`.
 pub const IORING_OP_FSYNC: u8 = 3;
-/// Read (fixed buffer).
+/// Read into a registered buffer.
 pub const IORING_OP_READ_FIXED: u8 = 4;
-/// Write (fixed buffer).
+/// Write from a registered buffer.
 pub const IORING_OP_WRITE_FIXED: u8 = 5;
-/// Add poll.
+/// Add a poll.
 pub const IORING_OP_POLL_ADD: u8 = 6;
-/// Remove poll.
+/// Remove a poll.
 pub const IORING_OP_POLL_REMOVE: u8 = 7;
-/// Sync file range.
+/// `sync_file_range`.
 pub const IORING_OP_SYNC_FILE_RANGE: u8 = 8;
-/// Send message.
+/// `sendmsg`.
 pub const IORING_OP_SENDMSG: u8 = 9;
-/// Receive message.
+/// `recvmsg`.
 pub const IORING_OP_RECVMSG: u8 = 10;
-/// Timeout.
+/// A timeout.
 pub const IORING_OP_TIMEOUT: u8 = 11;
-/// Remove timeout.
+/// Remove a timeout.
 pub const IORING_OP_TIMEOUT_REMOVE: u8 = 12;
-/// Accept connection.
+/// `accept`.
 pub const IORING_OP_ACCEPT: u8 = 13;
-/// Cancel async operation.
+/// Cancel a request.
 pub const IORING_OP_ASYNC_CANCEL: u8 = 14;
-/// Link timeout.
+/// A timeout for the linked request.
 pub const IORING_OP_LINK_TIMEOUT: u8 = 15;
-/// Connect.
+/// `connect`.
 pub const IORING_OP_CONNECT: u8 = 16;
-/// fallocate.
+/// `fallocate`.
 pub const IORING_OP_FALLOCATE: u8 = 17;
-/// Open file.
+/// `openat`.
 pub const IORING_OP_OPENAT: u8 = 18;
-/// Close file.
+/// `close`.
 pub const IORING_OP_CLOSE: u8 = 19;
-/// statx.
+/// Update registered files.
+pub const IORING_OP_FILES_UPDATE: u8 = 20;
+/// `statx`.
 pub const IORING_OP_STATX: u8 = 21;
-/// Read.
+/// `read`.
 pub const IORING_OP_READ: u8 = 22;
-/// Write.
+/// `write`.
 pub const IORING_OP_WRITE: u8 = 23;
-/// fadvise.
+/// `posix_fadvise`.
 pub const IORING_OP_FADVISE: u8 = 24;
-/// madvise.
+/// `madvise`.
 pub const IORING_OP_MADVISE: u8 = 25;
-/// Send.
+/// `send`.
 pub const IORING_OP_SEND: u8 = 26;
-/// Receive.
+/// `recv`.
 pub const IORING_OP_RECV: u8 = 27;
-/// Open file (openat2).
+/// `openat2`.
 pub const IORING_OP_OPENAT2: u8 = 28;
+/// `epoll_ctl`.
+pub const IORING_OP_EPOLL_CTL: u8 = 29;
+/// `splice`.
+pub const IORING_OP_SPLICE: u8 = 30;
 /// Provide buffers.
 pub const IORING_OP_PROVIDE_BUFFERS: u8 = 31;
 /// Remove buffers.
 pub const IORING_OP_REMOVE_BUFFERS: u8 = 32;
-/// Rename.
+/// `tee`.
+pub const IORING_OP_TEE: u8 = 33;
+/// `shutdown`.
+pub const IORING_OP_SHUTDOWN: u8 = 34;
+/// `renameat`.
 pub const IORING_OP_RENAMEAT: u8 = 35;
-/// Unlink.
+/// `unlinkat`.
 pub const IORING_OP_UNLINKAT: u8 = 36;
-/// mkdir.
+/// `mkdirat`.
 pub const IORING_OP_MKDIRAT: u8 = 37;
-/// symlink.
+/// `symlinkat`.
 pub const IORING_OP_SYMLINKAT: u8 = 38;
-/// link.
+/// `linkat`.
 pub const IORING_OP_LINKAT: u8 = 39;
-/// Cancel (extended).
-pub const IORING_OP_CANCEL: u8 = 48;
-/// First unknown opcode — anything ≥ this is rejected by SQE
-/// validation in real implementations. We use a generous 64 to allow
-/// for Linux 6.x opcodes we haven't enumerated above.
-pub const IORING_OP_LAST: u8 = 64;
+/// Post to another ring.
+pub const IORING_OP_MSG_RING: u8 = 40;
+/// `fsetxattr`.
+pub const IORING_OP_FSETXATTR: u8 = 41;
+/// `setxattr`.
+pub const IORING_OP_SETXATTR: u8 = 42;
+/// `fgetxattr`.
+pub const IORING_OP_FGETXATTR: u8 = 43;
+/// `getxattr`.
+pub const IORING_OP_GETXATTR: u8 = 44;
+/// `socket`.
+pub const IORING_OP_SOCKET: u8 = 45;
+/// A command for the file's driver.
+pub const IORING_OP_URING_CMD: u8 = 46;
+/// Zero-copy `send`.
+pub const IORING_OP_SEND_ZC: u8 = 47;
+/// Zero-copy `sendmsg`.
+pub const IORING_OP_SENDMSG_ZC: u8 = 48;
+/// Multishot `read`.
+pub const IORING_OP_READ_MULTISHOT: u8 = 49;
+/// `waitid`.
+pub const IORING_OP_WAITID: u8 = 50;
+/// Futex wait.
+pub const IORING_OP_FUTEX_WAIT: u8 = 51;
+/// Futex wake.
+pub const IORING_OP_FUTEX_WAKE: u8 = 52;
+/// Futex wait on several.
+pub const IORING_OP_FUTEX_WAITV: u8 = 53;
+/// Install a direct descriptor as a regular one.
+pub const IORING_OP_FIXED_FD_INSTALL: u8 = 54;
+/// The number of opcodes Linux 6.8 has: every one is below it.
+pub const IORING_OP_LAST: u8 = 55;
 
 // ---------------------------------------------------------------------------
 // SQE flags
@@ -201,14 +274,13 @@ pub const IORING_ENTER_REGISTERED_RING: u32 = 16;
 pub const IORING_ENTER_ABS_TIMER: u32 = 32;
 /// Extended argument is io_uring_getevents_arg (Linux 6.13+).
 pub const IORING_ENTER_EXT_ARG_REG: u32 = 64;
-/// Valid bit mask for io_uring_enter flags.
+/// The flags Linux 6.6's `io_uring_enter` accepts (io_uring.c:3609).
+/// `ABS_TIMER` and `EXT_ARG_REG` are later kernels', and refused.
 const IORING_ENTER_FLAGS_VALID: u32 = IORING_ENTER_GETEVENTS
     | IORING_ENTER_SQ_WAKEUP
     | IORING_ENTER_SQ_WAIT
     | IORING_ENTER_EXT_ARG
-    | IORING_ENTER_REGISTERED_RING
-    | IORING_ENTER_ABS_TIMER
-    | IORING_ENTER_EXT_ARG_REG;
+    | IORING_ENTER_REGISTERED_RING;
 
 // ---------------------------------------------------------------------------
 // io_uring_register operations
@@ -266,8 +338,12 @@ pub const IORING_REGISTER_SYNC_CANCEL: u32 = 24;
 pub const IORING_REGISTER_FILE_ALLOC_RANGE: u32 = 25;
 /// PBUF status.
 pub const IORING_REGISTER_PBUF_STATUS: u32 = 26;
-/// First unknown register op — anything ≥ this is rejected.
-const IORING_REGISTER_LAST: u32 = 32;
+/// Linux 6.6's `IORING_REGISTER_LAST`: its operations stop at
+/// `IORING_REGISTER_FILE_ALLOC_RANGE`, so `PBUF_STATUS` and later are
+/// refused.
+const IORING_REGISTER_LAST: u32 = 26;
+/// Or'd into `io_uring_register`'s opcode: `fd` is a registered ring index.
+pub const IORING_REGISTER_USE_REGISTERED_RING: u32 = 1 << 31;
 
 // ---------------------------------------------------------------------------
 // Submission Queue Entry (SQE)
@@ -397,338 +473,150 @@ pub struct IoCqringOffsets {
 // Bounds
 // ---------------------------------------------------------------------------
 
-/// Maximum SQ ring size accepted without `IORING_SETUP_CLAMP` (Linux
-/// `IORING_MAX_ENTRIES`).
+/// Linux 6.6's `IORING_MAX_ENTRIES`: the most SQ entries without
+/// `IORING_SETUP_CLAMP`.
 const IORING_MAX_ENTRIES: u32 = 32_768;
-/// Maximum CQ ring size when `IORING_SETUP_CQSIZE` is set (Linux
-/// `IORING_MAX_CQ_ENTRIES = 2 * IORING_MAX_ENTRIES`).
-const IORING_MAX_CQ_ENTRIES: u32 = 65_536;
-/// Cap on `min_complete` for `io_uring_enter` — guards against
-/// callers asking us to wait for more events than the ring can hold.
-const IORING_MAX_MIN_COMPLETE: u32 = IORING_MAX_CQ_ENTRIES;
-/// Cap on `nr_args` for `io_uring_register` (per-op limits are
-/// stricter, but this is the outer ceiling for any caller-supplied
-/// array — keeps us from copying multi-megabyte buffers from a bad
-/// caller).
-const IORING_MAX_REGISTER_NR_ARGS: u32 = 1 << 20; // 1M entries
+/// Linux 6.6's `IORING_MAX_CQ_ENTRIES`.
+const IORING_MAX_CQ_ENTRIES: u32 = 2 * IORING_MAX_ENTRIES;
 
 // ---------------------------------------------------------------------------
-// Validation helpers
+// The three calls
 // ---------------------------------------------------------------------------
 
-/// Validates a caller-supplied `IoUringParams` for `io_uring_setup`.
-///
-/// Validation order matches Linux's `io_uring/io_uring.c::io_uring_setup`
-/// prologue followed by `io_uring_create`:
-///
-///   1. reserved fields nonzero       → EINVAL  (prologue, right after
-///                                                copy_from_user)
-///   2. unknown flag bits             → EINVAL  (prologue)
-///   3. entries == 0                  → EINVAL  (io_uring_create)
-///   4. entries > MAX without CLAMP   → EINVAL  (io_uring_create)
-///   5. SQ_AFF without SQPOLL         → EINVAL  (ring-specific)
-///   6. CQSIZE bounds                 → EINVAL  (ring-specific)
-///   7. ATTACH_WQ wq_fd < 0           → EBADF   (ring-specific)
-///   8. DEFER_TASKRUN w/o SINGLE_ISSUER → EINVAL
-///   9. SQPOLL + IOPOLL conflict      → EINVAL
-///
-/// Phase 117: the previous order checked entries before resv/flag-mask,
-/// which surfaced an "entries=0" verdict for a caller passing both
-/// entries=0 AND a nonzero resv field — Linux would surface the resv
-/// failure first.  Both return EINVAL, but the precedence matters for
-/// callers bisecting which argument is wrong.
-fn validate_setup_params(entries: u32, p: &IoUringParams) -> Result<(), i32> {
-    // (1) Reserved fields must be zero — Linux uses these for future
-    // expansion and rejects any nonzero value to prevent silently
-    // accepting attr structs from a newer caller.  Linux checks these
-    // immediately after copy_from_user, before any flag/entries logic.
+/// What Linux 6.6's `io_uring_setup` and `io_uring_create` refuse before
+/// they allocate the rings, in their order.
+fn check_setup(entries: u32, p: &IoUringParams) -> Result<(), i32> {
     if p.resv != [0; 3] {
         return Err(errno::EINVAL);
     }
-    // (2) Unknown flag bits — Linux's prologue check, before any
-    // ring-creation logic.
-    if (p.flags & !IORING_SETUP_FLAGS_VALID) != 0 {
+    if p.flags & !IORING_SETUP_FLAGS_VALID != 0 {
         return Err(errno::EINVAL);
     }
-    // (3) entries == 0 (io_uring_create).
     if entries == 0 {
         return Err(errno::EINVAL);
     }
-    // (4) Without CLAMP, Linux returns EINVAL; with CLAMP it silently
-    // clamps to the max.
-    if entries > IORING_MAX_ENTRIES && (p.flags & IORING_SETUP_CLAMP) == 0 {
+    let clamp = p.flags & IORING_SETUP_CLAMP != 0;
+    let entries = if entries <= IORING_MAX_ENTRIES {
+        entries
+    } else if clamp {
+        IORING_MAX_ENTRIES
+    } else {
+        return Err(errno::EINVAL);
+    };
+    if p.flags & IORING_SETUP_REGISTERED_FD_ONLY != 0 && p.flags & IORING_SETUP_NO_MMAP == 0 {
         return Err(errno::EINVAL);
     }
-    // (5) SQ_AFF requires SQPOLL — the affinity setting is meaningless
-    // without a SQ poll thread to bind.
-    if (p.flags & IORING_SETUP_SQ_AFF) != 0 && (p.flags & IORING_SETUP_SQPOLL) == 0 {
-        return Err(errno::EINVAL);
-    }
-    // (6) CQSIZE must come with a sane cq_entries field.
-    if (p.flags & IORING_SETUP_CQSIZE) != 0 {
-        if p.cq_entries == 0 {
+    if p.flags & IORING_SETUP_CQSIZE != 0 {
+        // Compared after both round up to a power of two, as Linux rounds
+        // them; neither can overflow, both being clamped first.
+        let cq = match p.cq_entries {
+            0 => return Err(errno::EINVAL),
+            n if n <= IORING_MAX_CQ_ENTRIES => n,
+            _ if clamp => IORING_MAX_CQ_ENTRIES,
+            _ => return Err(errno::EINVAL),
+        };
+        if cq.next_power_of_two() < entries.next_power_of_two() {
             return Err(errno::EINVAL);
         }
-        if p.cq_entries < entries {
-            // CQ must be at least as large as SQ — Linux requires this
-            // because every SQE eventually produces ≥1 CQE.
-            return Err(errno::EINVAL);
-        }
-        if p.cq_entries > IORING_MAX_CQ_ENTRIES && (p.flags & IORING_SETUP_CLAMP) == 0 {
-            return Err(errno::EINVAL);
-        }
     }
-    // (7) ATTACH_WQ requires a sane wq_fd. We accept any non-zero value
-    // because we'll EBADF below — the validation here is just to
-    // catch "ATTACH_WQ with wq_fd=0" which is almost always a bug.
-    if (p.flags & IORING_SETUP_ATTACH_WQ) != 0 {
-        let wq = p.wq_fd as i32;
-        if wq < 0 {
-            return Err(errno::EBADF);
-        }
-    }
-    // (8) DEFER_TASKRUN requires SINGLE_ISSUER (Linux strictly enforces
-    // this — task-run deferral only makes sense if there's one issuer
-    // to defer to).
-    if (p.flags & IORING_SETUP_DEFER_TASKRUN) != 0 && (p.flags & IORING_SETUP_SINGLE_ISSUER) == 0 {
-        return Err(errno::EINVAL);
-    }
-    // (9) SQPOLL + IOPOLL: incompatible (SQPOLL needs the kernel to wake
-    // and process; IOPOLL needs the caller to busy-poll — Linux 5.x+
-    // rejects the combination on most filesystems).
-    // (Linux actually accepts it on blkio devices, but we conservatively
-    // reject because we don't have either path.)
-    if (p.flags & IORING_SETUP_SQPOLL) != 0 && (p.flags & IORING_SETUP_IOPOLL) != 0 {
-        return Err(errno::EINVAL);
-    }
-    Ok(())
-}
-
-/// Validates `io_uring_register` arguments.
-fn validate_register(opcode: u32, arg: *mut u8, nr_args: u32) -> Result<(), i32> {
-    if opcode >= IORING_REGISTER_LAST {
-        return Err(errno::EINVAL);
-    }
-    if nr_args > IORING_MAX_REGISTER_NR_ARGS {
-        return Err(errno::E2BIG);
-    }
-    // Per-op argument-shape validation. Operations that take a single
-    // value (eventfd register, file alloc range) accept nr_args==1;
-    // operations that take a count (buffers/files register) need a
-    // non-NULL arg if nr_args > 0; operations that take no argument
-    // (unregister) require nr_args==0 and arg==NULL.
-    match opcode {
-        IORING_UNREGISTER_BUFFERS
-        | IORING_UNREGISTER_FILES
-        | IORING_UNREGISTER_EVENTFD
-        | IORING_UNREGISTER_PERSONALITY
-        | IORING_UNREGISTER_IOWQ_AFF
-        | IORING_REGISTER_ENABLE_RINGS => {
-            if !arg.is_null() {
-                return Err(errno::EINVAL);
-            }
-            if nr_args != 0 {
-                return Err(errno::EINVAL);
-            }
-        }
-        IORING_REGISTER_BUFFERS
-        | IORING_REGISTER_FILES
-        | IORING_REGISTER_FILES_UPDATE
-        | IORING_REGISTER_BUFFERS2
-        | IORING_REGISTER_BUFFERS_UPDATE
-        | IORING_REGISTER_FILES2
-        | IORING_REGISTER_RING_FDS
-        | IORING_UNREGISTER_RING_FDS => {
-            if nr_args == 0 {
-                return Err(errno::EINVAL);
-            }
-            if arg.is_null() {
-                return Err(errno::EFAULT);
-            }
-        }
-        IORING_REGISTER_EVENTFD
-        | IORING_REGISTER_EVENTFD_ASYNC
-        | IORING_REGISTER_PERSONALITY
-        | IORING_REGISTER_PROBE
-        | IORING_REGISTER_RESTRICTIONS
-        | IORING_REGISTER_IOWQ_AFF
-        | IORING_REGISTER_IOWQ_MAX_WORKERS
-        | IORING_REGISTER_PBUF_RING
-        | IORING_UNREGISTER_PBUF_RING
-        | IORING_REGISTER_SYNC_CANCEL
-        | IORING_REGISTER_FILE_ALLOC_RANGE
-        | IORING_REGISTER_PBUF_STATUS
-            if arg.is_null() =>
+    let f = p.flags;
+    if f & IORING_SETUP_SQPOLL != 0 {
+        // IPI-related flags make no sense with SQPOLL.
+        if f & (IORING_SETUP_COOP_TASKRUN | IORING_SETUP_TASKRUN_FLAG | IORING_SETUP_DEFER_TASKRUN)
+            != 0
         {
-            return Err(errno::EFAULT);
+            return Err(errno::EINVAL);
         }
-        _ => {} // remaining valid ops: pass through.
+    } else if f & IORING_SETUP_COOP_TASKRUN == 0
+        && f & IORING_SETUP_TASKRUN_FLAG != 0
+        && f & IORING_SETUP_DEFER_TASKRUN == 0
+    {
+        return Err(errno::EINVAL);
+    }
+    if f & IORING_SETUP_DEFER_TASKRUN != 0 && f & IORING_SETUP_SINGLE_ISSUER == 0 {
+        return Err(errno::EINVAL);
     }
     Ok(())
 }
 
-// ---------------------------------------------------------------------------
-// Syscall wrappers
-// ---------------------------------------------------------------------------
-
-/// Set up an io_uring instance.
+/// Set up an io_uring instance -- which SlateOS does not have.
 ///
-/// Validates `entries` and the caller-supplied `params` struct
-/// (flags, mutual-exclusion rules, reserved-field nonzero check)
-/// before returning `-1` / `errno = ENOSYS`. Real ring setup requires
-/// SQ/CQ page mmap support and the per-op infrastructure.
-///
-/// # Errors
-///
-/// - `EFAULT`: NULL `params`.
-/// - `EINVAL`: `entries == 0`, `entries > IORING_MAX_ENTRIES` without
-///   `IORING_SETUP_CLAMP`, unknown flag bits, `SQ_AFF` without
-///   `SQPOLL`, `CQSIZE` with bad `cq_entries`, `SQPOLL + IOPOLL`,
-///   `DEFER_TASKRUN` without `SINGLE_ISSUER`, nonzero reserved field.
-/// - `EBADF`: `ATTACH_WQ` with negative `wq_fd`.
-/// - `ENOSYS`: all checks pass — no in-kernel io_uring subsystem yet.
-#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+/// Refuses what Linux 6.6 refuses before it allocates the rings, in its
+/// order: `EFAULT` for a parameter block it cannot read, then `EINVAL` for
+/// a reserved word, an unknown flag, no entries or too many without
+/// `IORING_SETUP_CLAMP`, `REGISTERED_FD_ONLY` without `NO_MMAP`, a bad
+/// `CQSIZE`, a flag combination it refuses.  Everything else is `ENOSYS`.
 pub extern "C" fn io_uring_setup(entries: u32, params: *mut IoUringParams) -> i32 {
-    if params.is_null() {
+    // `copy_from_user(&p, params, sizeof(p))`, first.
+    if params.is_null() || !crate::uio::access_ok(params.addr(), size_of::<IoUringParams>()) {
         errno::set_errno(errno::EFAULT);
         return -1;
     }
-    // SAFETY: caller-supplied pointer is non-NULL; we use
-    // read_unaligned so an alignment-1 pointer doesn't UB.
-    let p: IoUringParams = unsafe { core::ptr::read_unaligned(params) };
-    if let Err(e) = validate_setup_params(entries, &p) {
+    // SAFETY: non-NULL and in user memory (checked); `read_unaligned`
+    // because the caller's block need not be aligned for the Rust type.
+    let p = unsafe { core::ptr::read_unaligned(params) };
+    if let Err(e) = check_setup(entries, &p) {
         errno::set_errno(e);
         return -1;
     }
-    // Phase 208: CAP_SYS_NICE gate for IORING_SETUP_SQPOLL.
-    // Linux's `io_sq_offload_create` (called by `io_uring_create`)
-    // creates a kernel-poll thread that needs scheduling privileges.
-    // The cap check runs AFTER all parameter validation but BEFORE
-    // ring allocation, so an unprivileged caller with valid params
-    // sees EPERM, not ENOSYS.
-    if (p.flags & IORING_SETUP_SQPOLL) != 0
-        && !crate::sys_capability::has_capability(crate::sys_capability::CAP_SYS_NICE)
-    {
-        errno::set_errno(errno::EPERM);
-        return -1;
-    }
+    // Linux would allocate the rings here.
     errno::set_errno(errno::ENOSYS);
+    -1
+}
+
+/// Where Linux 6.6 looks for the ring `io_uring_enter` and
+/// `io_uring_register` act on, and why it finds none: SlateOS has no rings.
+///
+/// A registered-ring index needs the task's io_uring context, which exists
+/// only once the task has used a ring: `EINVAL`, as for an index past
+/// `IO_RINGFD_REG_MAX`.  Otherwise a descriptor that is not open is
+/// `EBADF`, and an open one is not a ring: `EOPNOTSUPP`.
+fn no_ring(fd: i32, registered: bool) -> i32 {
+    let e = if registered {
+        errno::EINVAL
+    } else if crate::fdtable::get_fd(fd).is_none() {
+        errno::EBADF
+    } else {
+        errno::EOPNOTSUPP
+    };
+    errno::set_errno(e);
     -1
 }
 
 /// Submit and/or wait for io_uring operations.
 ///
-/// Validates `fd`, `flags`, `min_complete` bounds, and the
-/// `sig`/`sigsz` consistency (sig==NULL ⇒ sigsz==0). Anything that
-/// passes the checks returns `-1` / `errno = ENOSYS` (or `EBADF` for
-/// any positive fd since no rings exist).
-///
-/// # Errors
-///
-/// - `EBADF`: `fd < 0`, or non-negative fd that isn't a ring (every
-///   case while no rings exist).
-/// - `EINVAL`: unknown flag bits, or `sig != NULL && sigsz == 0`, or
-///   `sigsz > sizeof(sigset_t) * 2`, or `min_complete >
-///   IORING_MAX_CQ_ENTRIES`.
-/// - `EFAULT`: would apply once sig dereferencing is wired up — kept
-///   reserved for that path.
-/// - `ENOSYS`: all checks pass.
-///
-/// # Validation order (Linux parity, Phase 110)
-///
-/// Mirrors Linux's `io_uring/io_uring.c::SYSCALL_DEFINE6(io_uring_enter)`:
-/// the flag-mask check runs *before* `fget(fd)`, so an unknown flag bit
-/// wins over a bad fd.  The previous ordering returned `EBADF` first,
-/// which fooled callers (notably tokio-uring's syscall-availability
-/// probe) into thinking the kernel didn't recognise io_uring at all,
-/// when in fact they had passed a flag bit Linux had also rejected.
-#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+/// Linux 6.6's order: unknown flag bits are `EINVAL`, then the ring is looked
+/// for -- see [`no_ring`].  Its later checks (`EXT_ARG`'s argument, the
+/// signal set, the counts) are about a ring, so on SlateOS they are never
+/// reached, as they are not on Linux for a descriptor that is not one.
 pub extern "C" fn io_uring_enter(
     fd: i32,
     _to_submit: u32,
-    min_complete: u32,
+    _min_complete: u32,
     flags: u32,
-    sig: *const u8,
-    sigsz: usize,
+    _arg: *const u8,
+    _argsz: usize,
 ) -> i32 {
-    // (1) Linux's io_uring_enter checks `flags` at the very top of
-    // the syscall handler — before the file-table lookup.
-    if (flags & !IORING_ENTER_FLAGS_VALID) != 0 {
+    if flags & !IORING_ENTER_FLAGS_VALID != 0 {
         errno::set_errno(errno::EINVAL);
         return -1;
     }
-    // (2) sig/sigsz consistency.  Linux performs this check while
-    // copying the `io_uring_getevents_arg` from userspace, also
-    // before the ring is touched.
-    //
-    // sig pointer must be consistent with sigsz: either both zero or
-    // both nonzero. If sig is non-NULL, sigsz must equal
-    // sizeof(sigset_t) for the kernel (Linux uses 8 on most arches).
-    // We accept any small nonzero size up to 128 (the libc kernel
-    // sigset is 8 bytes; some libcs send the userspace 128-byte view).
-    if !sig.is_null() && (sigsz == 0 || sigsz > 128) {
-        errno::set_errno(errno::EINVAL);
-        return -1;
-    }
-    if sig.is_null() && sigsz != 0 {
-        errno::set_errno(errno::EINVAL);
-        return -1;
-    }
-    // (3) min_complete bound.  Linux doesn't pre-validate this — it
-    // bails out later when the CQ ring is too small.  We pre-validate
-    // because we have no ring at all; treating an impossibly large
-    // request as EINVAL is friendlier than EBADF.
-    if min_complete > IORING_MAX_MIN_COMPLETE {
-        errno::set_errno(errno::EINVAL);
-        return -1;
-    }
-    // (4) fd lookup, last — matches `fget(fd)` placement in Linux.
-    if fd < 0 {
-        errno::set_errno(errno::EBADF);
-        return -1;
-    }
-    // No real rings exist yet — any positive fd is dangling.
-    // EBADF matches Linux's behavior when the fd isn't a ring.
-    errno::set_errno(errno::EBADF);
-    -1
+    no_ring(fd, flags & IORING_ENTER_REGISTERED_RING != 0)
 }
 
 /// Register resources with an io_uring instance.
 ///
-/// Validates `fd`, `opcode`, and per-opcode argument shape.
-///
-/// # Errors
-///
-/// - `EBADF`: `fd < 0`, or non-negative fd that isn't a ring (every
-///   case while no rings exist).
-/// - `EINVAL`: unknown `opcode`, unregister op with non-NULL arg or
-///   non-zero nr_args, register op with nr_args==0 when a count is
-///   required.
-/// - `EFAULT`: register op that requires a buffer but `arg == NULL`.
-/// - `E2BIG`: `nr_args` above the safety cap.
-/// - `ENOSYS`: all checks pass (no real ring to register against).
-///
-/// # Validation order (Linux parity, Phase 110)
-///
-/// Linux's `io_uring/register.c::__do_sys_io_uring_register` validates
-/// `opcode >= IORING_REGISTER_LAST -> EINVAL` *before* fetching the
-/// ring file (`fget(fd)`), so an unknown opcode wins over a bad fd.
-/// We mirror that ordering: opcode/arg shape first, fd last.
-#[cfg_attr(target_os = "none", unsafe(no_mangle))]
-pub extern "C" fn io_uring_register(fd: i32, opcode: u32, arg: *mut u8, nr_args: u32) -> i32 {
-    // Opcode and per-opcode argument shape are validated before the
-    // fd lookup, per Linux's __do_sys_io_uring_register.
-    if let Err(e) = validate_register(opcode, arg, nr_args) {
-        errno::set_errno(e);
+/// Linux 6.6's order: an opcode past `IORING_REGISTER_LAST` (once
+/// `IORING_REGISTER_USE_REGISTERED_RING` is taken off it) is `EINVAL`, then
+/// the ring is looked for -- see [`no_ring`].  The per-operation checks
+/// come after, and are never reached.
+pub extern "C" fn io_uring_register(fd: i32, opcode: u32, _arg: *mut u8, _nr_args: u32) -> i32 {
+    let registered = opcode & IORING_REGISTER_USE_REGISTERED_RING != 0;
+    if opcode & !IORING_REGISTER_USE_REGISTERED_RING >= IORING_REGISTER_LAST {
+        errno::set_errno(errno::EINVAL);
         return -1;
     }
-    if fd < 0 {
-        errno::set_errno(errno::EBADF);
-        return -1;
-    }
-    // No real ring exists — match Linux's "fd is not a ring" error.
-    errno::set_errno(errno::EBADF);
-    -1
+    no_ring(fd, registered)
 }
 
 // ---------------------------------------------------------------------------
@@ -763,8 +651,10 @@ mod tests {
         assert!(mem::size_of::<IoUringParams>() >= 100);
     }
 
+    /// Linux's opcodes are its enum's positions: every one from 0 to
+    /// `IORING_OP_LAST - 1`, once each.
     #[test]
-    fn test_opcodes_distinct() {
+    fn test_opcodes_are_linuxs_enum() {
         let ops = [
             IORING_OP_NOP,
             IORING_OP_READV,
@@ -774,20 +664,58 @@ mod tests {
             IORING_OP_WRITE_FIXED,
             IORING_OP_POLL_ADD,
             IORING_OP_POLL_REMOVE,
+            IORING_OP_SYNC_FILE_RANGE,
             IORING_OP_SENDMSG,
             IORING_OP_RECVMSG,
             IORING_OP_TIMEOUT,
+            IORING_OP_TIMEOUT_REMOVE,
             IORING_OP_ACCEPT,
+            IORING_OP_ASYNC_CANCEL,
+            IORING_OP_LINK_TIMEOUT,
+            IORING_OP_CONNECT,
+            IORING_OP_FALLOCATE,
+            IORING_OP_OPENAT,
+            IORING_OP_CLOSE,
+            IORING_OP_FILES_UPDATE,
+            IORING_OP_STATX,
             IORING_OP_READ,
             IORING_OP_WRITE,
-            IORING_OP_CLOSE,
-            IORING_OP_OPENAT,
+            IORING_OP_FADVISE,
+            IORING_OP_MADVISE,
+            IORING_OP_SEND,
+            IORING_OP_RECV,
+            IORING_OP_OPENAT2,
+            IORING_OP_EPOLL_CTL,
+            IORING_OP_SPLICE,
+            IORING_OP_PROVIDE_BUFFERS,
+            IORING_OP_REMOVE_BUFFERS,
+            IORING_OP_TEE,
+            IORING_OP_SHUTDOWN,
+            IORING_OP_RENAMEAT,
+            IORING_OP_UNLINKAT,
+            IORING_OP_MKDIRAT,
+            IORING_OP_SYMLINKAT,
+            IORING_OP_LINKAT,
+            IORING_OP_MSG_RING,
+            IORING_OP_FSETXATTR,
+            IORING_OP_SETXATTR,
+            IORING_OP_FGETXATTR,
+            IORING_OP_GETXATTR,
+            IORING_OP_SOCKET,
+            IORING_OP_URING_CMD,
+            IORING_OP_SEND_ZC,
+            IORING_OP_SENDMSG_ZC,
+            IORING_OP_READ_MULTISHOT,
+            IORING_OP_WAITID,
+            IORING_OP_FUTEX_WAIT,
+            IORING_OP_FUTEX_WAKE,
+            IORING_OP_FUTEX_WAITV,
+            IORING_OP_FIXED_FD_INSTALL,
         ];
-        for i in 0..ops.len() {
-            for j in (i + 1)..ops.len() {
-                assert_ne!(ops[i], ops[j]);
-            }
+        for (i, op) in ops.iter().enumerate() {
+            assert_eq!(usize::from(*op), i);
         }
+        assert_eq!(usize::from(IORING_OP_LAST), ops.len());
     }
 
     #[test]
@@ -858,859 +786,313 @@ mod tests {
     }
 
     // -----------------------------------------------------------------
-    // io_uring_setup tests
+    // Linux 6.6's constants
     // -----------------------------------------------------------------
 
     #[test]
-    fn test_setup_null_params_efault() {
-        let r = io_uring_setup(32, ptr::null_mut());
-        assert_eq!(r, -1);
+    fn each_setup_flag_is_linuxs_bit() {
+        // SINGLE_ISSUER was 1 << 8 -- COOP_TASKRUN's bit.
+        let flags = [
+            IORING_SETUP_IOPOLL,
+            IORING_SETUP_SQPOLL,
+            IORING_SETUP_SQ_AFF,
+            IORING_SETUP_CQSIZE,
+            IORING_SETUP_CLAMP,
+            IORING_SETUP_ATTACH_WQ,
+            IORING_SETUP_R_DISABLED,
+            IORING_SETUP_SUBMIT_ALL,
+            IORING_SETUP_COOP_TASKRUN,
+            IORING_SETUP_TASKRUN_FLAG,
+            IORING_SETUP_SQE128,
+            IORING_SETUP_CQE32,
+            IORING_SETUP_SINGLE_ISSUER,
+            IORING_SETUP_DEFER_TASKRUN,
+            IORING_SETUP_NO_MMAP,
+            IORING_SETUP_REGISTERED_FD_ONLY,
+            IORING_SETUP_NO_SQARRAY,
+        ];
+        for (bit, flag) in flags.iter().enumerate() {
+            assert_eq!(*flag, 1 << bit, "bit {bit}");
+        }
+        assert_eq!(
+            IORING_SETUP_SINGLE_ISSUER,
+            crate::linux_io_uring_setup_types::IORING_SETUP_SINGLE_ISSUER,
+            "the types module had it right"
+        );
+    }
+
+    #[test]
+    fn the_flag_sets_are_linux_6_6s() {
+        assert_eq!(IORING_SETUP_FLAGS_VALID, 0x1_FFFF, "bits 0 to 16");
+        assert_eq!(IORING_ENTER_FLAGS_VALID, 0x1F, "bits 0 to 4");
+        assert_eq!(IORING_REGISTER_LAST, 26);
+        assert_eq!(mem::size_of::<IoUringParams>(), 120);
+    }
+
+    // -----------------------------------------------------------------
+    // io_uring_setup
+    // -----------------------------------------------------------------
+
+    fn setup(entries: u32, p: &IoUringParams) -> i32 {
+        let mut p = *p;
+        errno::set_errno(0);
+        assert_eq!(io_uring_setup(entries, &raw mut p), -1);
+        errno::get_errno()
+    }
+
+    fn with_flags(flags: u32) -> IoUringParams {
+        let mut p = good_params();
+        p.flags = flags;
+        p
+    }
+
+    #[test]
+    fn setup_reads_the_block_first() {
+        errno::set_errno(0);
+        assert_eq!(io_uring_setup(0, ptr::null_mut()), -1);
+        assert_eq!(
+            errno::get_errno(),
+            errno::EFAULT,
+            "NULL, even with no entries"
+        );
+        let kernel_half = 0xFFFF_8000_0000_0000_usize as *mut IoUringParams;
+        assert_eq!(io_uring_setup(8, kernel_half), -1);
         assert_eq!(errno::get_errno(), errno::EFAULT);
     }
 
     #[test]
-    fn test_setup_zero_entries_einval() {
-        let mut p = good_params();
-        let r = io_uring_setup(0, &mut p);
-        assert_eq!(r, -1);
-        assert_eq!(errno::get_errno(), errno::EINVAL);
+    fn setup_checks_in_linuxs_order() {
+        let mut p = with_flags(1 << 20);
+        p.resv[1] = 1;
+        assert_eq!(
+            setup(0, &p),
+            errno::EINVAL,
+            "resv, before the flags and entries"
+        );
+        p.resv[1] = 0;
+        assert_eq!(
+            setup(0, &p),
+            errno::EINVAL,
+            "an unknown flag, before the entries"
+        );
+        assert_eq!(
+            setup(8, &with_flags(IORING_SETUP_HYBRID_IOPOLL)),
+            errno::EINVAL,
+            "6.13's"
+        );
+        assert_eq!(setup(0, &good_params()), errno::EINVAL, "no entries");
+        assert_eq!(setup(32_769, &good_params()), errno::EINVAL, "too many");
+        assert_eq!(
+            setup(32_769, &with_flags(IORING_SETUP_CLAMP)),
+            errno::ENOSYS,
+            "clamped"
+        );
+        assert_eq!(setup(32_768, &good_params()), errno::ENOSYS);
     }
 
     #[test]
-    fn test_setup_too_many_entries_einval_without_clamp() {
-        let mut p = good_params();
-        let r = io_uring_setup(IORING_MAX_ENTRIES + 1, &mut p);
-        assert_eq!(r, -1);
-        assert_eq!(errno::get_errno(), errno::EINVAL);
+    fn setup_takes_6_6s_newest_flags() {
+        assert_eq!(
+            setup(8, &with_flags(IORING_SETUP_NO_SQARRAY)),
+            errno::ENOSYS
+        );
+        assert_eq!(setup(8, &with_flags(IORING_SETUP_NO_MMAP)), errno::ENOSYS);
+        assert_eq!(
+            setup(8, &with_flags(IORING_SETUP_REGISTERED_FD_ONLY)),
+            errno::EINVAL,
+            "only with NO_MMAP"
+        );
+        assert_eq!(
+            setup(
+                8,
+                &with_flags(IORING_SETUP_REGISTERED_FD_ONLY | IORING_SETUP_NO_MMAP)
+            ),
+            errno::ENOSYS
+        );
     }
 
     #[test]
-    fn test_setup_too_many_entries_ok_with_clamp() {
-        let mut p = good_params();
-        p.flags = IORING_SETUP_CLAMP;
-        let r = io_uring_setup(IORING_MAX_ENTRIES + 1, &mut p);
-        assert_eq!(r, -1);
-        assert_eq!(errno::get_errno(), errno::ENOSYS);
+    fn setup_sizes_the_cq_as_linux_rounds_it() {
+        let cq = |n: u32, extra: u32| {
+            let mut p = with_flags(IORING_SETUP_CQSIZE | extra);
+            p.cq_entries = n;
+            p
+        };
+        assert_eq!(setup(8, &cq(0, 0)), errno::EINVAL);
+        assert_eq!(setup(8, &cq(65_537, 0)), errno::EINVAL);
+        assert_eq!(setup(8, &cq(65_537, IORING_SETUP_CLAMP)), errno::ENOSYS);
+        assert_eq!(
+            setup(8, &cq(5, 0)),
+            errno::ENOSYS,
+            "5 rounds up to 8, the SQ's 8"
+        );
+        assert_eq!(
+            setup(8, &cq(3, 0)),
+            errno::EINVAL,
+            "3 rounds up to 4, below 8"
+        );
+        assert_eq!(setup(7, &cq(8, 0)), errno::ENOSYS, "7 rounds up to 8");
     }
 
     #[test]
-    fn test_setup_unknown_flag_einval() {
-        let mut p = good_params();
-        p.flags = 1u32 << 31; // top bit reserved
-        let r = io_uring_setup(32, &mut p);
-        assert_eq!(r, -1);
-        assert_eq!(errno::get_errno(), errno::EINVAL);
-    }
-
-    #[test]
-    fn test_setup_sq_aff_without_sqpoll_einval() {
-        let mut p = good_params();
-        p.flags = IORING_SETUP_SQ_AFF;
-        let r = io_uring_setup(32, &mut p);
-        assert_eq!(r, -1);
-        assert_eq!(errno::get_errno(), errno::EINVAL);
-    }
-
-    #[test]
-    fn test_setup_sq_aff_with_sqpoll_ok() {
-        let mut p = good_params();
-        p.flags = IORING_SETUP_SQPOLL | IORING_SETUP_SQ_AFF;
-        p.sq_thread_cpu = 0;
-        p.sq_thread_idle = 1000;
-        let r = io_uring_setup(32, &mut p);
-        assert_eq!(r, -1);
-        assert_eq!(errno::get_errno(), errno::ENOSYS);
-    }
-
-    #[test]
-    fn test_setup_cqsize_zero_cq_entries_einval() {
-        let mut p = good_params();
-        p.flags = IORING_SETUP_CQSIZE;
-        p.cq_entries = 0;
-        let r = io_uring_setup(32, &mut p);
-        assert_eq!(r, -1);
-        assert_eq!(errno::get_errno(), errno::EINVAL);
-    }
-
-    #[test]
-    fn test_setup_cqsize_smaller_than_entries_einval() {
-        let mut p = good_params();
-        p.flags = IORING_SETUP_CQSIZE;
-        p.cq_entries = 16;
-        let r = io_uring_setup(32, &mut p);
-        assert_eq!(r, -1);
-        assert_eq!(errno::get_errno(), errno::EINVAL);
-    }
-
-    #[test]
-    fn test_setup_cqsize_too_big_einval() {
-        let mut p = good_params();
-        p.flags = IORING_SETUP_CQSIZE;
-        p.cq_entries = IORING_MAX_CQ_ENTRIES + 1;
-        let r = io_uring_setup(32, &mut p);
-        assert_eq!(r, -1);
-        assert_eq!(errno::get_errno(), errno::EINVAL);
-    }
-
-    #[test]
-    fn test_setup_cqsize_too_big_ok_with_clamp() {
-        let mut p = good_params();
-        p.flags = IORING_SETUP_CQSIZE | IORING_SETUP_CLAMP;
-        p.cq_entries = IORING_MAX_CQ_ENTRIES + 1;
-        let r = io_uring_setup(32, &mut p);
-        assert_eq!(r, -1);
-        assert_eq!(errno::get_errno(), errno::ENOSYS);
-    }
-
-    #[test]
-    fn test_setup_attach_wq_negative_ebadf() {
-        let mut p = good_params();
-        p.flags = IORING_SETUP_ATTACH_WQ;
-        p.wq_fd = u32::MAX; // -1 as i32
-        let r = io_uring_setup(32, &mut p);
-        assert_eq!(r, -1);
-        assert_eq!(errno::get_errno(), errno::EBADF);
-    }
-
-    #[test]
-    fn test_setup_attach_wq_zero_ok() {
-        let mut p = good_params();
-        p.flags = IORING_SETUP_ATTACH_WQ;
-        p.wq_fd = 0;
-        let r = io_uring_setup(32, &mut p);
-        assert_eq!(r, -1);
-        assert_eq!(errno::get_errno(), errno::ENOSYS);
-    }
-
-    #[test]
-    fn test_setup_nonzero_resv_einval() {
-        let mut p = good_params();
-        p.resv[0] = 1;
-        let r = io_uring_setup(32, &mut p);
-        assert_eq!(r, -1);
-        assert_eq!(errno::get_errno(), errno::EINVAL);
-    }
-
-    #[test]
-    fn test_setup_defer_taskrun_without_single_issuer_einval() {
-        let mut p = good_params();
-        p.flags = IORING_SETUP_DEFER_TASKRUN;
-        let r = io_uring_setup(32, &mut p);
-        assert_eq!(r, -1);
-        assert_eq!(errno::get_errno(), errno::EINVAL);
-    }
-
-    #[test]
-    fn test_setup_defer_taskrun_with_single_issuer_ok() {
-        let mut p = good_params();
-        p.flags = IORING_SETUP_DEFER_TASKRUN | IORING_SETUP_SINGLE_ISSUER;
-        let r = io_uring_setup(32, &mut p);
-        assert_eq!(r, -1);
-        assert_eq!(errno::get_errno(), errno::ENOSYS);
-    }
-
-    #[test]
-    fn test_setup_sqpoll_iopoll_conflict_einval() {
-        let mut p = good_params();
-        p.flags = IORING_SETUP_SQPOLL | IORING_SETUP_IOPOLL;
-        let r = io_uring_setup(32, &mut p);
-        assert_eq!(r, -1);
-        assert_eq!(errno::get_errno(), errno::EINVAL);
-    }
-
-    #[test]
-    fn test_setup_valid_basic_reaches_enosys() {
-        let mut p = good_params();
-        // Plain SQ-only setup, no flags.
-        let r = io_uring_setup(32, &mut p);
-        assert_eq!(r, -1);
-        assert_eq!(errno::get_errno(), errno::ENOSYS);
-    }
-
-    #[test]
-    fn test_setup_misaligned_params_pointer() {
-        let mut buf = [0u8; mem::size_of::<IoUringParams>() + 1];
-        let p_aligned = good_params();
-        unsafe {
-            ptr::copy_nonoverlapping(
-                (&p_aligned as *const IoUringParams).cast::<u8>(),
-                buf.as_mut_ptr().add(1),
-                mem::size_of::<IoUringParams>(),
+    fn setup_refuses_linuxs_flag_combinations_and_no_others() {
+        use crate::linux_io_uring as u;
+        let sqpoll = u::IORING_SETUP_SQPOLL;
+        for extra in [
+            u::IORING_SETUP_COOP_TASKRUN,
+            u::IORING_SETUP_TASKRUN_FLAG,
+            u::IORING_SETUP_DEFER_TASKRUN | u::IORING_SETUP_SINGLE_ISSUER,
+        ] {
+            assert_eq!(
+                setup(8, &with_flags(sqpoll | extra)),
+                errno::EINVAL,
+                "{extra:#x}"
             );
         }
-        let p = unsafe { buf.as_mut_ptr().add(1) } as *mut IoUringParams;
-        let r = io_uring_setup(32, p);
-        assert_eq!(r, -1);
-        assert_eq!(errno::get_errno(), errno::ENOSYS);
-    }
-
-    // -----------------------------------------------------------------
-    // io_uring_enter tests
-    // -----------------------------------------------------------------
-
-    #[test]
-    fn test_enter_negative_fd_ebadf() {
-        let r = io_uring_enter(-1, 0, 0, 0, ptr::null(), 0);
-        assert_eq!(r, -1);
-        assert_eq!(errno::get_errno(), errno::EBADF);
-    }
-
-    #[test]
-    fn test_enter_unknown_flag_einval() {
-        let r = io_uring_enter(3, 0, 0, 1u32 << 31, ptr::null(), 0);
-        assert_eq!(r, -1);
-        assert_eq!(errno::get_errno(), errno::EINVAL);
-    }
-
-    #[test]
-    fn test_enter_huge_min_complete_einval() {
-        let r = io_uring_enter(3, 0, IORING_MAX_MIN_COMPLETE + 1, 0, ptr::null(), 0);
-        assert_eq!(r, -1);
-        assert_eq!(errno::get_errno(), errno::EINVAL);
-    }
-
-    #[test]
-    fn test_enter_sig_inconsistent_null_with_size_einval() {
-        let r = io_uring_enter(3, 0, 0, 0, ptr::null(), 8);
-        assert_eq!(r, -1);
-        assert_eq!(errno::get_errno(), errno::EINVAL);
-    }
-
-    #[test]
-    fn test_enter_sig_inconsistent_nonnull_zero_size_einval() {
-        let mut buf = [0u8; 8];
-        let r = io_uring_enter(3, 0, 0, 0, buf.as_mut_ptr() as *const u8, 0);
-        assert_eq!(r, -1);
-        assert_eq!(errno::get_errno(), errno::EINVAL);
-    }
-
-    #[test]
-    fn test_enter_sig_too_large_einval() {
-        let mut buf = [0u8; 256];
-        let r = io_uring_enter(3, 0, 0, 0, buf.as_mut_ptr() as *const u8, 256);
-        assert_eq!(r, -1);
-        assert_eq!(errno::get_errno(), errno::EINVAL);
-    }
-
-    #[test]
-    fn test_enter_positive_fd_ebadf() {
-        let r = io_uring_enter(3, 0, 0, 0, ptr::null(), 0);
-        assert_eq!(r, -1);
-        // Validation passes, but no ring exists -> EBADF.
-        assert_eq!(errno::get_errno(), errno::EBADF);
-    }
-
-    #[test]
-    fn test_enter_valid_with_sig_reaches_ebadf() {
-        let mut buf = [0u8; 8];
-        let r = io_uring_enter(
-            3,
-            0,
-            0,
-            IORING_ENTER_GETEVENTS,
-            buf.as_mut_ptr() as *const u8,
-            8,
+        assert_eq!(
+            setup(8, &with_flags(u::IORING_SETUP_TASKRUN_FLAG)),
+            errno::EINVAL
         );
-        assert_eq!(r, -1);
-        assert_eq!(errno::get_errno(), errno::EBADF);
+        assert_eq!(
+            setup(
+                8,
+                &with_flags(u::IORING_SETUP_TASKRUN_FLAG | u::IORING_SETUP_COOP_TASKRUN)
+            ),
+            errno::ENOSYS
+        );
+        assert_eq!(
+            setup(8, &with_flags(u::IORING_SETUP_DEFER_TASKRUN)),
+            errno::EINVAL,
+            "DEFER_TASKRUN needs SINGLE_ISSUER"
+        );
+        assert_eq!(
+            setup(
+                8,
+                &with_flags(
+                    u::IORING_SETUP_TASKRUN_FLAG
+                        | u::IORING_SETUP_DEFER_TASKRUN
+                        | u::IORING_SETUP_SINGLE_ISSUER
+                )
+            ),
+            errno::ENOSYS
+        );
+        // Refused here until 2026-09-26, accepted by Linux 6.6.
+        assert_eq!(
+            setup(8, &with_flags(sqpoll | u::IORING_SETUP_IOPOLL)),
+            errno::ENOSYS
+        );
+    }
+
+    #[test]
+    fn sqpoll_needs_no_capability() {
+        // Linux 6.6's io_sq_offload_create asks only the LSM hook; this
+        // answered EPERM without CAP_SYS_NICE.  (This test does not drop the
+        // capability: with the check gone there is nothing to exercise.)
+        assert_eq!(setup(8, &with_flags(IORING_SETUP_SQPOLL)), errno::ENOSYS);
+    }
+
+    #[test]
+    fn checks_after_the_rings_are_not_made() {
+        // Linux refuses these only after it has allocated the rings; there
+        // are none to allocate, and ENOSYS says so.
+        let mut p = with_flags(IORING_SETUP_ATTACH_WQ);
+        p.wq_fd = u32::MAX;
+        assert_eq!(setup(8, &p), errno::ENOSYS);
+        assert_eq!(setup(8, &with_flags(IORING_SETUP_SQ_AFF)), errno::ENOSYS);
     }
 
     // -----------------------------------------------------------------
-    // io_uring_register tests
+    // io_uring_enter and io_uring_register: there is no ring
     // -----------------------------------------------------------------
 
+    fn enter(fd: i32, flags: u32) -> i32 {
+        errno::set_errno(0);
+        assert_eq!(io_uring_enter(fd, 1, 1, flags, ptr::null(), 0), -1);
+        errno::get_errno()
+    }
+
+    fn register(fd: i32, opcode: u32) -> i32 {
+        errno::set_errno(0);
+        assert_eq!(io_uring_register(fd, opcode, ptr::null_mut(), 0), -1);
+        errno::get_errno()
+    }
+
+    /// An open descriptor that is not a ring, closed on drop.
+    struct OpenFd(i32);
+    impl OpenFd {
+        fn new() -> Self {
+            Self(crate::fdtable::alloc_fd(crate::fdtable::HandleKind::File, 0x1_0C1).unwrap())
+        }
+    }
+    impl Drop for OpenFd {
+        fn drop(&mut self) {
+            // A test descriptor with no kernel object behind it; closing the
+            // slot is all there is.
+            let _ = crate::fdtable::close_fd(self.0);
+        }
+    }
+
     #[test]
-    fn test_register_negative_fd_ebadf() {
-        // Use an opcode whose argument shape is satisfied by
-        // (arg=NULL, nr_args=0) so the post-Phase-110 reorder still
-        // reaches the fd check.  IORING_REGISTER_ENABLE_RINGS is the
-        // canonical "no argument" register op.
-        let r = io_uring_register(-1, IORING_REGISTER_ENABLE_RINGS, ptr::null_mut(), 0);
-        assert_eq!(r, -1);
+    fn enter_checks_its_flags_then_finds_no_ring() {
+        assert_eq!(
+            enter(-1, 1 << 5),
+            errno::EINVAL,
+            "ABS_TIMER is 6.12's, and before the fd"
+        );
+        assert_eq!(enter(-1, 0), errno::EBADF);
+        assert_eq!(
+            enter(4_000, IORING_ENTER_GETEVENTS),
+            errno::EBADF,
+            "not open"
+        );
+        let open = OpenFd::new();
+        assert_eq!(
+            enter(open.0, IORING_ENTER_GETEVENTS),
+            errno::EOPNOTSUPP,
+            "not a ring"
+        );
+        assert_eq!(
+            enter(0, IORING_ENTER_REGISTERED_RING),
+            errno::EINVAL,
+            "no ring was registered"
+        );
+        assert_eq!(enter(16, IORING_ENTER_REGISTERED_RING), errno::EINVAL);
+    }
+
+    #[test]
+    fn enter_asks_nothing_about_a_ring_it_did_not_find() {
+        // min_complete and the signal set were checked before the fd here;
+        // Linux checks them only once it has a ring.
+        errno::set_errno(0);
+        assert_eq!(io_uring_enter(-1, 0, u32::MAX, 0, 1 as *const u8, 0), -1);
         assert_eq!(errno::get_errno(), errno::EBADF);
     }
 
     #[test]
-    fn test_register_unknown_opcode_einval() {
-        let r = io_uring_register(3, IORING_REGISTER_LAST, ptr::null_mut(), 0);
-        assert_eq!(r, -1);
-        assert_eq!(errno::get_errno(), errno::EINVAL);
-    }
-
-    #[test]
-    fn test_register_unregister_with_arg_einval() {
-        let mut x = 0u8;
-        let r = io_uring_register(3, IORING_UNREGISTER_BUFFERS, &mut x, 0);
-        assert_eq!(r, -1);
-        assert_eq!(errno::get_errno(), errno::EINVAL);
-    }
-
-    #[test]
-    fn test_register_unregister_with_nr_args_einval() {
-        let r = io_uring_register(3, IORING_UNREGISTER_BUFFERS, ptr::null_mut(), 1);
-        assert_eq!(r, -1);
-        assert_eq!(errno::get_errno(), errno::EINVAL);
-    }
-
-    #[test]
-    fn test_register_buffers_zero_nr_args_einval() {
-        let mut x = 0u8;
-        let r = io_uring_register(3, IORING_REGISTER_BUFFERS, &mut x, 0);
-        assert_eq!(r, -1);
-        assert_eq!(errno::get_errno(), errno::EINVAL);
-    }
-
-    #[test]
-    fn test_register_buffers_null_arg_efault() {
-        let r = io_uring_register(3, IORING_REGISTER_BUFFERS, ptr::null_mut(), 4);
-        assert_eq!(r, -1);
-        assert_eq!(errno::get_errno(), errno::EFAULT);
-    }
-
-    #[test]
-    fn test_register_huge_nr_args_e2big() {
-        let mut x = 0u8;
-        let r = io_uring_register(3, IORING_REGISTER_BUFFERS, &mut x, u32::MAX);
-        assert_eq!(r, -1);
-        assert_eq!(errno::get_errno(), errno::E2BIG);
-    }
-
-    #[test]
-    fn test_register_eventfd_null_arg_efault() {
-        let r = io_uring_register(3, IORING_REGISTER_EVENTFD, ptr::null_mut(), 1);
-        assert_eq!(r, -1);
-        assert_eq!(errno::get_errno(), errno::EFAULT);
-    }
-
-    #[test]
-    fn test_register_enable_rings_with_arg_einval() {
-        let mut x = 0u8;
-        let r = io_uring_register(3, IORING_REGISTER_ENABLE_RINGS, &mut x, 0);
-        assert_eq!(r, -1);
-        assert_eq!(errno::get_errno(), errno::EINVAL);
-    }
-
-    #[test]
-    fn test_register_enable_rings_valid_reaches_ebadf() {
-        let r = io_uring_register(3, IORING_REGISTER_ENABLE_RINGS, ptr::null_mut(), 0);
-        assert_eq!(r, -1);
-        // Validation passes, no ring exists.
-        assert_eq!(errno::get_errno(), errno::EBADF);
-    }
-
-    #[test]
-    fn test_register_buffers_valid_reaches_ebadf() {
-        let mut buf = [0u8; 64];
-        let r = io_uring_register(3, IORING_REGISTER_BUFFERS, buf.as_mut_ptr(), 4);
-        assert_eq!(r, -1);
-        assert_eq!(errno::get_errno(), errno::EBADF);
-    }
-
-    // -----------------------------------------------------------------
-    // Phase 110: Linux-parity validation order
-    //
-    // Linux validates `flags` (enter) / `opcode` (register) before the
-    // fd lookup, so a malformed flag bit or unknown opcode wins over
-    // a bad fd.  These tests pin that ordering.
-    // -----------------------------------------------------------------
-
-    #[test]
-    fn test_enter_phase110_einval_flags_wins_over_ebadf_negative_fd() {
-        // fd=-1 + unknown flag bit: Linux returns EINVAL because the
-        // flag mask is checked before fget(fd).
-        let r = io_uring_enter(-1, 0, 0, 1u32 << 31, ptr::null(), 0);
-        assert_eq!(r, -1);
-        assert_eq!(errno::get_errno(), errno::EINVAL);
-    }
-
-    #[test]
-    fn test_enter_phase110_einval_sig_inconsistent_wins_over_ebadf() {
-        // fd=-1 + sig=null + sigsz=8: Linux validates the sig/sigsz
-        // tuple while copying the getevents arg, before any fd work.
-        let r = io_uring_enter(-1, 0, 0, 0, ptr::null(), 8);
-        assert_eq!(r, -1);
-        assert_eq!(errno::get_errno(), errno::EINVAL);
-    }
-
-    #[test]
-    fn test_enter_phase110_einval_sig_nonnull_zero_size_wins_over_ebadf() {
-        // fd=-1 + sig=non-null + sigsz=0: same as above, the sig/sigsz
-        // mismatch is caught before the fd lookup.
-        let mut buf = [0u8; 8];
-        let r = io_uring_enter(-1, 0, 0, 0, buf.as_mut_ptr() as *const u8, 0);
-        assert_eq!(r, -1);
-        assert_eq!(errno::get_errno(), errno::EINVAL);
-    }
-
-    #[test]
-    fn test_enter_phase110_einval_min_complete_wins_over_ebadf() {
-        // fd=-1 + huge min_complete: our extra pre-validation runs
-        // before the fd lookup.  (Linux itself doesn't pre-validate
-        // min_complete, but our cap is reached before the fd path —
-        // EINVAL is still the right answer for "impossibly large".)
-        let r = io_uring_enter(-1, 0, IORING_MAX_MIN_COMPLETE + 1, 0, ptr::null(), 0);
-        assert_eq!(r, -1);
-        assert_eq!(errno::get_errno(), errno::EINVAL);
-    }
-
-    #[test]
-    fn test_enter_phase110_valid_flags_then_bad_fd_ebadf() {
-        // Valid flag + valid sig tuple + good min_complete + fd=-1:
-        // EBADF is correct because all the prologue checks pass.
-        let r = io_uring_enter(-1, 0, 0, IORING_ENTER_GETEVENTS, ptr::null(), 0);
-        assert_eq!(r, -1);
-        assert_eq!(errno::get_errno(), errno::EBADF);
-    }
-
-    #[test]
-    fn test_enter_phase110_recovery_after_einval() {
-        // After an EINVAL-rejected call, a well-formed call still
-        // produces the expected EBADF — the validator is stateless.
-        let r1 = io_uring_enter(-1, 0, 0, 1u32 << 31, ptr::null(), 0);
-        assert_eq!(r1, -1);
-        assert_eq!(errno::get_errno(), errno::EINVAL);
-        let r2 = io_uring_enter(3, 0, 0, 0, ptr::null(), 0);
-        assert_eq!(r2, -1);
-        assert_eq!(errno::get_errno(), errno::EBADF);
-    }
-
-    #[test]
-    fn test_register_phase110_einval_opcode_wins_over_ebadf_negative_fd() {
-        // fd=-1 + unknown opcode: Linux's __do_sys_io_uring_register
-        // checks the opcode bound before fget(fd), so EINVAL beats
-        // EBADF.
-        let r = io_uring_register(-1, u32::MAX, ptr::null_mut(), 0);
-        assert_eq!(r, -1);
-        assert_eq!(errno::get_errno(), errno::EINVAL);
-    }
-
-    #[test]
-    fn test_register_phase110_einval_arg_shape_wins_over_ebadf() {
-        // fd=-1 + unregister opcode with non-NULL arg: arg-shape
-        // validation runs before the fd lookup -> EINVAL.
-        let mut x = 0u8;
-        let r = io_uring_register(-1, IORING_UNREGISTER_BUFFERS, &mut x, 0);
-        assert_eq!(r, -1);
-        assert_eq!(errno::get_errno(), errno::EINVAL);
-    }
-
-    #[test]
-    fn test_register_phase110_efault_arg_wins_over_ebadf_negative_fd() {
-        // fd=-1 + register-with-required-arg opcode + arg=NULL:
-        // validate_register reports EFAULT before the fd lookup.
-        let r = io_uring_register(-1, IORING_REGISTER_EVENTFD, ptr::null_mut(), 1);
-        assert_eq!(r, -1);
-        assert_eq!(errno::get_errno(), errno::EFAULT);
-    }
-
-    #[test]
-    fn test_register_phase110_e2big_nr_args_wins_over_ebadf() {
-        // fd=-1 + huge nr_args: E2BIG from validate_register beats
-        // EBADF from the fd lookup.
-        let mut x = 0u8;
-        let r = io_uring_register(-1, IORING_REGISTER_BUFFERS, &mut x, u32::MAX);
-        assert_eq!(r, -1);
-        assert_eq!(errno::get_errno(), errno::E2BIG);
-    }
-
-    #[test]
-    fn test_register_phase110_valid_opcode_then_bad_fd_ebadf() {
-        // All shape checks pass + fd=-1: EBADF is the right answer.
-        let r = io_uring_register(-1, IORING_REGISTER_ENABLE_RINGS, ptr::null_mut(), 0);
-        assert_eq!(r, -1);
-        assert_eq!(errno::get_errno(), errno::EBADF);
-    }
-
-    #[test]
-    fn test_register_phase110_recovery_after_einval() {
-        // After a bad-opcode rejection, a well-formed register still
-        // produces the expected EBADF.
-        let r1 = io_uring_register(-1, u32::MAX, ptr::null_mut(), 0);
-        assert_eq!(r1, -1);
-        assert_eq!(errno::get_errno(), errno::EINVAL);
-        let r2 = io_uring_register(3, IORING_REGISTER_ENABLE_RINGS, ptr::null_mut(), 0);
-        assert_eq!(r2, -1);
-        assert_eq!(errno::get_errno(), errno::EBADF);
-    }
-
-    // -----------------------------------------------------------------
-    // Workflow tests
-    // -----------------------------------------------------------------
-
-    #[test]
-    fn test_liburing_init_workflow() {
-        // liburing's io_uring_queue_init:
-        //   io_uring_setup(entries, &params)
-        //   on failure, queue_init returns -errno; on success it
-        //   mmaps SQ/CQ pages.
-        // We expect ENOSYS so callers can detect "no io_uring" cleanly.
-        let mut p = good_params();
-        let r = io_uring_setup(128, &mut p);
-        assert_eq!(r, -1);
-        assert_eq!(errno::get_errno(), errno::ENOSYS);
-    }
-
-    #[test]
-    fn test_tokio_uring_probe_workflow() {
-        // tokio-uring probes with a small 8-entry ring at startup.
-        let mut p = good_params();
-        let r = io_uring_setup(8, &mut p);
-        assert_eq!(r, -1);
-        assert_eq!(errno::get_errno(), errno::ENOSYS);
-    }
-
-    #[test]
-    fn test_postgres17_io_method_workflow() {
-        // PostgreSQL 17's `io_method = io_uring` runs:
-        //   io_uring_setup(SHARED_BUFFERS / 16, &params)
-        // with SINGLE_ISSUER+DEFER_TASKRUN to avoid per-backend wakeups.
-        let mut p = good_params();
-        p.flags = IORING_SETUP_SINGLE_ISSUER | IORING_SETUP_DEFER_TASKRUN;
-        let r = io_uring_setup(1024, &mut p);
-        assert_eq!(r, -1);
-        assert_eq!(errno::get_errno(), errno::ENOSYS);
-        // Postgres sees ENOSYS, logs "io_uring not available", and
-        // falls back to io_method = sync.
-    }
-
-    #[test]
-    fn test_errno_preserved_on_successful_path() {
-        // Plant a sentinel and verify the ENOSYS path doesn't leak
-        // an intermediate errno.
-        errno::set_errno(errno::EBADF);
-        let mut p = good_params();
-        let r = io_uring_setup(32, &mut p);
-        assert_eq!(r, -1);
-        assert_eq!(errno::get_errno(), errno::ENOSYS);
-    }
-
-    // ---- Phase 117: io_uring_setup prologue order parity with Linux ----
-    //
-    // Linux checks reserved fields and the flag mask in the prologue
-    // (right after copy_from_user), BEFORE the entries==0 / entries>MAX
-    // checks (which live in io_uring_create).  These tests pin the new
-    // ordering in.  All previously-failing single-condition tests still
-    // pass because each only ever trips one check.
-
-    #[test]
-    fn test_setup_phase117_resv_wins_over_zero_entries() {
-        // entries==0 AND resv[0]!=0 → Linux returns EINVAL from the
-        // resv check (position 1 in the prologue); we now match.
-        let mut p = good_params();
-        p.resv[0] = 1;
-        errno::set_errno(0);
-        let r = io_uring_setup(0, &mut p);
-        assert_eq!(r, -1);
-        assert_eq!(errno::get_errno(), errno::EINVAL);
-    }
-
-    #[test]
-    fn test_setup_phase117_resv_wins_over_too_many_entries() {
-        // entries > MAX AND resv[0]!=0 → resv first.
-        let mut p = good_params();
-        p.resv[1] = 0xDEAD_BEEFu32;
-        errno::set_errno(0);
-        let r = io_uring_setup(IORING_MAX_ENTRIES + 1, &mut p);
-        assert_eq!(r, -1);
-        assert_eq!(errno::get_errno(), errno::EINVAL);
-    }
-
-    #[test]
-    fn test_setup_phase117_resv_wins_over_unknown_flag() {
-        // resv[2]!=0 AND flags has unknown bit → resv first.
-        let mut p = good_params();
-        p.resv[2] = 7;
-        p.flags = 1u32 << 31;
-        errno::set_errno(0);
-        let r = io_uring_setup(32, &mut p);
-        assert_eq!(r, -1);
-        assert_eq!(errno::get_errno(), errno::EINVAL);
-    }
-
-    #[test]
-    fn test_setup_phase117_flag_mask_wins_over_zero_entries() {
-        // entries==0 AND unknown flag bit → Linux returns EINVAL via
-        // the flag-mask check (position 2), before reaching
-        // io_uring_create's entries check (position 3).
-        let mut p = good_params();
-        p.flags = 1u32 << 31;
-        errno::set_errno(0);
-        let r = io_uring_setup(0, &mut p);
-        assert_eq!(r, -1);
-        assert_eq!(errno::get_errno(), errno::EINVAL);
-    }
-
-    #[test]
-    fn test_setup_phase117_flag_mask_wins_over_too_many_entries() {
-        let mut p = good_params();
-        p.flags = 1u32 << 30;
-        errno::set_errno(0);
-        let r = io_uring_setup(IORING_MAX_ENTRIES + 1, &mut p);
-        assert_eq!(r, -1);
-        assert_eq!(errno::get_errno(), errno::EINVAL);
-    }
-
-    #[test]
-    fn test_setup_phase117_resv_high_64bit_value_einval() {
-        // A caller writing through an old header who happens to leave
-        // garbage in resv[1] (a u32 in our header) should be caught.
-        let mut p = good_params();
-        p.resv[1] = u32::MAX;
-        errno::set_errno(0);
-        let r = io_uring_setup(32, &mut p);
-        assert_eq!(r, -1);
-        assert_eq!(errno::get_errno(), errno::EINVAL);
-    }
-
-    #[test]
-    fn test_setup_phase117_zero_entries_with_valid_resv_and_flags_still_einval() {
-        // Pure entries==0 path: resv all zero, flags=0.  Must still
-        // return EINVAL via the entries check (now at position 3).
-        let mut p = good_params();
-        errno::set_errno(0);
-        let r = io_uring_setup(0, &mut p);
-        assert_eq!(r, -1);
-        assert_eq!(errno::get_errno(), errno::EINVAL);
-    }
-
-    #[test]
-    fn test_setup_phase117_unknown_flag_with_clean_resv_and_entries_einval() {
-        // Pure unknown-flag path.
-        let mut p = good_params();
-        p.flags = 0x4000_0000;
-        errno::set_errno(0);
-        let r = io_uring_setup(32, &mut p);
-        assert_eq!(r, -1);
-        assert_eq!(errno::get_errno(), errno::EINVAL);
-    }
-
-    #[test]
-    fn test_setup_phase117_resv_check_runs_before_efault_already_handled() {
-        // The EFAULT (NULL params) path runs in io_uring_setup itself,
-        // BEFORE entering validate_setup_params.  This test just
-        // confirms NULL still wins.
-        errno::set_errno(0);
-        let r = io_uring_setup(0, ptr::null_mut());
-        assert_eq!(r, -1);
-        assert_eq!(errno::get_errno(), errno::EFAULT);
-    }
-
-    #[test]
-    fn test_setup_phase117_recovery_after_resv_einval() {
-        // Reject one call with bad resv, then submit a clean one.
-        let mut bad = good_params();
-        bad.resv[0] = 1;
-        let _ = io_uring_setup(32, &mut bad);
-        let mut ok = good_params();
-        errno::set_errno(0);
-        let r = io_uring_setup(32, &mut ok);
-        assert_eq!(r, -1);
-        assert_eq!(errno::get_errno(), errno::ENOSYS);
-    }
-
-    #[test]
-    fn test_setup_phase117_resv_wins_over_sq_aff_without_sqpoll() {
-        // SQ_AFF without SQPOLL is a flag-combo failure (position 5);
-        // resv check is position 1.  Both bad → resv wins.
-        let mut p = good_params();
-        p.flags = IORING_SETUP_SQ_AFF;
-        p.resv[0] = 1;
-        errno::set_errno(0);
-        let r = io_uring_setup(32, &mut p);
-        assert_eq!(r, -1);
-        assert_eq!(errno::get_errno(), errno::EINVAL);
-    }
-
-    #[test]
-    fn test_setup_phase117_flag_mask_wins_over_attach_wq_negative() {
-        // ATTACH_WQ with wq_fd<0 returns EBADF (position 7); an
-        // unknown flag bit returns EINVAL (position 2).  When both
-        // are set the flag-mask check fires first → EINVAL, not
-        // EBADF.  This pins in that an unknown flag bit cannot be
-        // masked by a later EBADF verdict.
-        let mut p = good_params();
-        p.flags = IORING_SETUP_ATTACH_WQ | 0x8000_0000;
-        p.wq_fd = u32::MAX; // -1 as i32
-        errno::set_errno(0);
-        let r = io_uring_setup(32, &mut p);
-        assert_eq!(r, -1);
-        assert_eq!(errno::get_errno(), errno::EINVAL);
-    }
-
-    #[test]
-    fn test_setup_phase117_clean_args_still_reach_enosys() {
-        // No regression: valid args → ENOSYS terminal (no real ring).
-        let mut p = good_params();
-        errno::set_errno(0);
-        let r = io_uring_setup(64, &mut p);
-        assert_eq!(r, -1);
-        assert_eq!(errno::get_errno(), errno::ENOSYS);
-    }
-
-    // ===================================================================
-    // Phase 208 — CAP_SYS_NICE gate on io_uring_setup(IORING_SETUP_SQPOLL)
-    // ===================================================================
-    //
-    // Linux's `io_sq_offload_create` checks `capable(CAP_SYS_NICE)` (or
-    // `CAP_SYS_ADMIN` in older kernels) before creating the kernel poll
-    // thread.  Error priority:
-    //   EFAULT > EINVAL/EBADF (param validation) > EPERM (no cap) > ENOSYS
-    mod phase208_cap_sqpoll {
-        use super::*;
-
-        const CAP_SYS_NICE: u32 = crate::sys_capability::CAP_SYS_NICE;
-
-        struct CapGuard {
-            lo: u32,
-
-            hi: u32,
-        }
-        impl CapGuard {
-            fn snapshot() -> Self {
-                let (lo, hi) = crate::sys_capability::current_caps_effective();
-                Self { lo, hi }
-            }
-        }
-        impl Drop for CapGuard {
-            fn drop(&mut self) {
-                let mut hdr = crate::sys_capability::CapUserHeader {
-                    version: crate::sys_capability::_LINUX_CAPABILITY_VERSION_3,
-                    pid: 0,
-                };
-                let data = [
-                    crate::sys_capability::CapUserData {
-                        effective: self.lo,
-                        permitted: u32::MAX,
-                        inheritable: 0,
-                    },
-                    crate::sys_capability::CapUserData {
-                        effective: self.hi,
-                        permitted: u32::MAX,
-                        inheritable: 0,
-                    },
-                ];
-                let _ = crate::sys_capability::capset(&mut hdr, data.as_ptr());
-            }
-        }
-
-        fn drop_cap_sys_nice() {
-            let (lo, hi) = crate::sys_capability::current_caps_effective();
-            let new_lo = lo & !(1u32 << CAP_SYS_NICE);
-            let mut hdr = crate::sys_capability::CapUserHeader {
-                version: crate::sys_capability::_LINUX_CAPABILITY_VERSION_3,
-                pid: 0,
-            };
-            let data = [
-                crate::sys_capability::CapUserData {
-                    effective: new_lo,
-                    permitted: new_lo,
-                    inheritable: 0,
-                },
-                crate::sys_capability::CapUserData {
-                    effective: hi,
-                    permitted: hi,
-                    inheritable: 0,
-                },
-            ];
-            let rc = crate::sys_capability::capset(&mut hdr as *mut _, data.as_ptr());
-            assert_eq!(rc, 0);
-            assert!(!crate::sys_capability::has_capability(CAP_SYS_NICE));
-        }
-
-        /// SQPOLL with cap held reaches ENOSYS (not blocked by cap gate).
-        #[test]
-        fn test_sqpoll_cap_held_enosys() {
-            assert!(crate::sys_capability::has_capability(CAP_SYS_NICE));
-            let mut p = good_params();
-            p.flags = IORING_SETUP_SQPOLL;
-            errno::set_errno(0);
-            assert_eq!(io_uring_setup(32, &mut p), -1);
-            assert_eq!(errno::get_errno(), errno::ENOSYS);
-        }
-
-        /// SQPOLL without CAP_SYS_NICE → EPERM.
-        #[test]
-        fn test_sqpoll_no_cap_eperm() {
-            let _g = CapGuard::snapshot();
-            drop_cap_sys_nice();
-            let mut p = good_params();
-            p.flags = IORING_SETUP_SQPOLL;
-            errno::set_errno(0);
-            assert_eq!(io_uring_setup(32, &mut p), -1);
-            assert_eq!(errno::get_errno(), errno::EPERM);
-        }
-
-        /// SQPOLL + SQ_AFF (valid combo) without cap → EPERM.
-        #[test]
-        fn test_sqpoll_sq_aff_no_cap_eperm() {
-            let _g = CapGuard::snapshot();
-            drop_cap_sys_nice();
-            let mut p = good_params();
-            p.flags = IORING_SETUP_SQPOLL | IORING_SETUP_SQ_AFF;
-            p.sq_thread_cpu = 0;
-            errno::set_errno(0);
-            assert_eq!(io_uring_setup(32, &mut p), -1);
-            assert_eq!(errno::get_errno(), errno::EPERM);
-        }
-
-        /// Non-SQPOLL setup without cap still reaches ENOSYS — gate is
-        /// SQPOLL-specific.
-        #[test]
-        fn test_non_sqpoll_no_cap_enosys() {
-            let _g = CapGuard::snapshot();
-            drop_cap_sys_nice();
-            let mut p = good_params();
-            // No SQPOLL flag.
-            errno::set_errno(0);
-            assert_eq!(io_uring_setup(32, &mut p), -1);
-            assert_eq!(errno::get_errno(), errno::ENOSYS);
-        }
-
-        /// EINVAL (bad param) takes priority over EPERM.
-        #[test]
-        fn test_einval_before_eperm() {
-            let _g = CapGuard::snapshot();
-            drop_cap_sys_nice();
-            let mut p = good_params();
-            p.flags = IORING_SETUP_SQPOLL;
-            // entries == 0 → EINVAL from validate_setup_params.
-            errno::set_errno(0);
-            assert_eq!(io_uring_setup(0, &mut p), -1);
-            assert_eq!(errno::get_errno(), errno::EINVAL);
-        }
-
-        /// EFAULT (null params) takes priority over EPERM.
-        #[test]
-        fn test_efault_before_eperm() {
-            let _g = CapGuard::snapshot();
-            drop_cap_sys_nice();
-            errno::set_errno(0);
-            assert_eq!(io_uring_setup(32, core::ptr::null_mut()), -1);
-            assert_eq!(errno::get_errno(), errno::EFAULT);
-        }
-
-        /// SQPOLL + IOPOLL (incompatible combo) → EINVAL from param
-        /// validation, even without cap. Param errors beat cap errors.
-        #[test]
-        fn test_sqpoll_iopoll_einval_before_eperm() {
-            let _g = CapGuard::snapshot();
-            drop_cap_sys_nice();
-            let mut p = good_params();
-            p.flags = IORING_SETUP_SQPOLL | IORING_SETUP_IOPOLL;
-            errno::set_errno(0);
-            assert_eq!(io_uring_setup(32, &mut p), -1);
-            assert_eq!(errno::get_errno(), errno::EINVAL);
-        }
-
-        /// Cap restore after CapGuard drop.
-        #[test]
-        fn test_sqpoll_cap_restore() {
-            {
-                let _g = CapGuard::snapshot();
-                drop_cap_sys_nice();
-                assert!(!crate::sys_capability::has_capability(CAP_SYS_NICE),);
-            }
-            assert!(crate::sys_capability::has_capability(CAP_SYS_NICE));
-        }
+    fn register_checks_its_opcode_then_finds_no_ring() {
+        assert_eq!(
+            register(-1, 26),
+            errno::EINVAL,
+            "PBUF_STATUS is 6.8's, and before the fd"
+        );
+        assert_eq!(register(-1, IORING_REGISTER_FILE_ALLOC_RANGE), errno::EBADF);
+        let open = OpenFd::new();
+        assert_eq!(register(open.0, IORING_REGISTER_PROBE), errno::EOPNOTSUPP);
+        assert_eq!(
+            register(
+                0,
+                IORING_REGISTER_USE_REGISTERED_RING | IORING_REGISTER_PROBE
+            ),
+            errno::EINVAL,
+            "no ring was registered"
+        );
+        assert_eq!(
+            register(0, IORING_REGISTER_USE_REGISTERED_RING | 26),
+            errno::EINVAL
+        );
+        // Argument shapes were checked before the fd here; Linux checks them
+        // only once it has a ring.
+        assert_eq!(register(-1, IORING_REGISTER_BUFFERS), errno::EBADF);
+        assert_eq!(register(-1, IORING_UNREGISTER_BUFFERS), errno::EBADF);
     }
 }

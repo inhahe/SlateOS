@@ -3,7 +3,9 @@
 //! Renders a full-screen login UI before the desktop session starts.
 //! Features: user avatar list, password entry, login background image (can
 //! match desktop wallpaper), keyboard layout indicator, accessibility options,
-//! power options (shutdown/reboot/sleep), and on-screen keyboard toggle.
+//! power options (shutdown/reboot/sleep), and on-screen keyboard toggle. An
+//! account can instead be set to sign in by itself, in which case this screen
+//! is not shown at start at all (below).
 //!
 //! # Face unlock authenticates anybody, and is not wired here
 //!
@@ -27,29 +29,31 @@
 //! Found and reported by lane A, who rewrote that module's doc to lead with
 //! the fact rather than describing the comparison it does not do.
 //!
-//! # Autologin is modelled here but does *not* happen
+//! # Signing in by itself
 //!
-//! This list said "autologin" until 2026-09-16, and it was not true. The field
-//! exists on [`LoginUser`], [`LoginScreen::autologin_user`] finds the account
-//! marked for it, and nothing acts on either: an account set to log in
-//! automatically still gets a password prompt. The finder is called by this
-//! file's own tests and by nothing else in the tree.
+//! An account set to sign in by itself does, as the desktop starts, and this
+//! screen is never drawn -- unless the key that asks for it (Shift) was held,
+//! or the machine was started for repair. The decision is
+//! [`crate::autologin`]'s, over [`LoginUser::autologin`], which marks *the*
+//! account: [`loginusers::automatic_account`]'s answer, marked in the database,
+//! not locked, and the only one so marked. The session carries it out before
+//! its first frame. This screen never signs anybody in itself; it is what is
+//! shown when nobody was, and what logging out returns to.
 //!
-//! It is left modelled rather than deleted because the missing part is a
-//! decision, not code. Skipping the prompt needs two answers that are
-//! user-visible policy: how someone *escapes* an autologin to reach a
-//! different account, and how the machine behaves when it is being recovered.
-//! See design-decisions 824 and open-questions C-Q22.
-//!
-//! A feature list is a claim like any other. Naming autologin here made the
-//! shell appear to support something a reader could not get, and a doc comment
-//! is the one place such a claim is never caught by a test.
+//! Until 2026-09-27 this section said the opposite: the flag was read and
+//! nothing acted on it, because how someone reaches a different account and
+//! what a start for repair does were the operator's to decide. They were
+//! decided as `design-decisions.md` §1427 (C-Q22). The section before it
+//! said "autologin" in the feature list above while none happened, which is
+//! the lesson worth keeping: a feature list is a claim like any other, and a
+//! doc comment is the one place such a claim is never caught by a test.
 
 use appearance::ImageFit;
 use appearance::Palette;
 use appearance::Surface;
 use guitk::color::Color;
 use guitk::event::{Key, KeyEvent, MouseButton, MouseEvent, MouseEventKind};
+use guitk::listview::ListKey;
 use guitk::render::{FontWeightHint, RenderCommand, TextOverflow};
 use guitk::style::CornerRadii;
 
@@ -152,9 +156,18 @@ pub struct LoginUser {
     pub display_name: String,
     /// Username (for authentication).
     pub username: String,
-    /// Avatar icon character (placeholder for real avatar images).
+    /// A character the account chose to be shown as, or empty for none: an
+    /// account with no avatar of its own is drawn with the icon theme's
+    /// `avatar-default`. It was a person emoji for everyone, which no font the
+    /// desktop has can draw (design-decisions.md §881).
     pub avatar: String,
-    /// Whether autologin is enabled for this user.
+    /// Whether this is the account that signs in by itself as the machine
+    /// starts ([`crate::autologin`]).
+    ///
+    /// [`loginusers::automatic_account`]'s answer rather than the database's
+    /// flag alone: a locked account, or one of two marked, has the flag and is
+    /// not the account. So at most one user a screen is built from the
+    /// database with carries it.
     pub autologin: bool,
     /// Whether this user has a password set.
     pub has_password: bool,
@@ -175,7 +188,7 @@ impl LoginUser {
             uid,
             display_name: display_name.to_string(),
             username: username.to_string(),
-            avatar: "\u{1F464}".to_string(),
+            avatar: String::new(),
             autologin: false,
             has_password: true,
             last_login: false,
@@ -207,6 +220,17 @@ impl LoginUser {
         self.has_password = false;
         self
     }
+
+    /// The name the desktop shows for this account: the name it gives itself,
+    /// or its login name when it gives none.
+    #[must_use]
+    pub fn shown_name(&self) -> &str {
+        if self.display_name.is_empty() {
+            &self.username
+        } else {
+            &self.display_name
+        }
+    }
 }
 
 // The greeter's background style is a *setting*, so it lives in the settings
@@ -224,6 +248,22 @@ pub enum LoginPowerAction {
     Reboot,
     Sleep,
     Hibernate,
+}
+
+impl LoginPowerAction {
+    /// The command that carries it out: `powerctl`, exactly as the start
+    /// menu's row of the same name runs it, so the same button does the same
+    /// thing on either side of a login (held so by a test in
+    /// `pointer_tests.rs`).
+    #[must_use]
+    pub fn command(self) -> crate::hotkeys::Launch {
+        crate::power::powerctl(match self {
+            Self::Shutdown => "shutdown",
+            Self::Reboot => "reboot",
+            Self::Sleep => "suspend",
+            Self::Hibernate => "hibernate",
+        })
+    }
 }
 
 /// Login configuration.
@@ -378,6 +418,7 @@ pub fn users_from_db(users_yaml: &std::path::Path) -> Vec<LoginUser> {
 
 fn users_from(accounts: &[loginusers::Account]) -> Vec<LoginUser> {
     let recent = loginusers::most_recent(accounts);
+    let automatic = loginusers::automatic_account(accounts);
     accounts
         .iter()
         .enumerate()
@@ -401,7 +442,9 @@ fn users_from(accounts: &[loginusers::Account]) -> Vec<LoginUser> {
             if account.is_admin {
                 user = user.with_admin();
             }
-            if account.auto_login {
+            // The shared rule, not `account.auto_login`: the screens before
+            // this one say "hold Shift" exactly when this marks somebody.
+            if automatic == Some(i) {
                 user = user.with_autologin();
             }
             if !account.has_password {
@@ -438,11 +481,14 @@ const USER_ROW_PITCH: f32 = 80.0;
 /// labels inline in `render_power_menu` and no actions at all, which is how a
 /// menu with four visible rows had nothing behind any of them.
 const POWER_MENU_LABELS: [(&str, &str); 4] = [
-    ("\u{23FB}", "Shut Down"),
-    ("\u{1F504}", "Restart"),
-    ("\u{1F4A4}", "Sleep"),
-    ("\u{1F4BE}", "Hibernate"),
+    ("system-shutdown", "Shut Down"),
+    ("system-reboot", "Restart"),
+    ("system-suspend", "Sleep"),
+    ("system-suspend-hibernate", "Hibernate"),
 ];
+
+/// The icon an account with no avatar of its own is drawn with.
+const AVATAR_ICON: &str = "avatar-default";
 
 /// What each row of `POWER_MENU_LABELS` does, in the same order.
 pub const POWER_MENU_ACTIONS: [LoginPowerAction; POWER_MENU_LABELS.len()] = [
@@ -579,13 +625,53 @@ pub struct LoginScreen {
     /// rectangle. The desktop's wallpaper did precisely that for three days.
     background_image_w: f32,
     background_image_h: f32,
+    /// The icons this screen drew, by image id, for the session to upload.
+    icon_registry: crate::IconRegistry,
+    /// How wide the password field's focus mark is drawn: the user's focus
+    /// width (`AppearanceSettings::focus_ring_width`), pushed in by the
+    /// session -- this screen is drawn from a palette, which is colours.
+    focus_ring: f32,
 }
 
 impl LoginScreen {
+    /// What the icon this screen drew under `id` is, if it drew one.
+    #[must_use]
+    pub fn icon_request(&self, id: u64) -> Option<crate::IconRequest> {
+        self.icon_registry.request(id)
+    }
+
+    /// Forget the icons drawn: the appearance changed, and they are drawn
+    /// again in new colours under new ids.
+    pub fn clear_icon_requests(&self) {
+        self.icon_registry.clear();
+    }
+
+    /// The icon `name`, `side` pixels square at `(x, y)`, in `color`.
+    fn icon(
+        &self,
+        commands: &mut Vec<RenderCommand>,
+        x: f32,
+        y: f32,
+        side: f32,
+        name: &'static str,
+        color: Color,
+    ) {
+        // A few dozen pixels; `as` saturates rather than wrapping.
+        #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+        let px = side.round().max(1.0) as u32;
+        commands.push(RenderCommand::Image {
+            x,
+            y,
+            width: side,
+            height: side,
+            image_id: self.icon_registry.icon(name, px, color),
+        });
+    }
+
     /// Adopt the picture uploaded to this screen's own surface under `id`.
     ///
     /// Takes the picture's size and fit alongside it because the three are one
-    /// decision: see [`LoginScreen::background_fit`]. Pass `0` to go back to the plain
+    /// decision: see `background_fit`. Pass `0` to go back to the plain
     /// colour, which is what the session does when the background names no
     /// picture, when the file cannot be read, and when the compositor refuses
     /// it -- in all three cases the underlay is the background, and the
@@ -654,6 +740,8 @@ impl LoginScreen {
             background_fit: ImageFit::Fill,
             background_image_w: 0.0,
             background_image_h: 0.0,
+            icon_registry: crate::IconRegistry::default(),
+            focus_ring: guitk::style::FOCUS_RING_WIDTH,
         }
     }
 
@@ -813,11 +901,6 @@ impl LoginScreen {
         self.users.get(self.selected_user)
     }
 
-    /// Check if any user has autologin enabled.
-    pub fn autologin_user(&self) -> Option<&LoginUser> {
-        self.users.iter().find(|u| u.autologin)
-    }
-
     // ------------------------------------------------------------------
     // Geometry — one definition per rectangle, read by both the renderer
     // and the hit test
@@ -957,6 +1040,20 @@ impl LoginScreen {
                 self.selected_user = self.selected_user.saturating_add(1).min(last);
                 LoginAction::Redraw
             }
+            // The page keys and the ends (`design-decisions.md` §1416). Every
+            // user is on the screen at once, so a page is the whole list.
+            Key::PageUp | Key::PageDown | Key::Home | Key::End => {
+                let len = self.users.len();
+                match ListKey::of(event)
+                    .and_then(|nav| nav.target(Some(self.selected_user), len, len))
+                {
+                    Some(row) => {
+                        self.selected_user = row;
+                        LoginAction::Redraw
+                    }
+                    None => LoginAction::Ignored,
+                }
+            }
             Key::Enter | Key::Space => {
                 self.select_user(self.selected_user);
                 LoginAction::Redraw
@@ -1064,6 +1161,12 @@ impl LoginScreen {
             }
         }
         LoginAction::Ignored
+    }
+
+    /// Draw the password field's focus mark `width` pixels wide: the user's
+    /// focus width. Until told, the toolkit's standard width.
+    pub fn set_focus_ring_width(&mut self, width: f32) {
+        self.focus_ring = width;
     }
 
     /// Tick animation (shake effect).
@@ -1255,20 +1358,32 @@ impl LoginScreen {
             });
 
             // Avatar. The accent marks which row you are on — judgement 2.
-            commands.push(RenderCommand::Text {
-                x: row_x + 12.0,
-                y: uy + 14.0,
-                text: user.avatar.clone(),
-                font_size: 28.0,
-                color: if selected {
-                    p.ink(p.accent)
-                } else {
-                    p.subtext0
-                },
-                font_weight: FontWeightHint::Regular,
-                max_width: None,
-                overflow: TextOverflow::Clip,
-            });
+            let avatar_ink = if selected {
+                p.ink(p.accent)
+            } else {
+                p.subtext0
+            };
+            if user.avatar.is_empty() {
+                self.icon(
+                    commands,
+                    row_x + 12.0,
+                    uy + 18.0,
+                    28.0,
+                    AVATAR_ICON,
+                    avatar_ink,
+                );
+            } else {
+                commands.push(RenderCommand::Text {
+                    x: row_x + 12.0,
+                    y: uy + 14.0,
+                    text: user.avatar.clone(),
+                    font_size: 28.0,
+                    color: avatar_ink,
+                    font_weight: FontWeightHint::Regular,
+                    max_width: None,
+                    overflow: TextOverflow::Clip,
+                });
+            }
 
             // Name.
             commands.push(RenderCommand::Text {
@@ -1305,20 +1420,41 @@ impl LoginScreen {
             // selection carried forward from the row list — so it keeps the
             // accent it had there. It floats on the background, so it also
             // gets the shadow pass.
-            push_on_background(
-                commands,
-                p,
-                RenderCommand::Text {
-                    x: cx - 24.0,
-                    y: cy - 80.0,
-                    text: user.avatar.clone(),
-                    font_size: 48.0,
-                    color: p.ink(p.accent),
-                    font_weight: FontWeightHint::Regular,
-                    max_width: None,
-                    overflow: TextOverflow::Clip,
-                },
-            );
+            if user.avatar.is_empty() {
+                // On the background as the text is: a shadow one pixel
+                // down-right of the ink, so it reads on any wallpaper.
+                self.icon(
+                    commands,
+                    cx - 24.0 + 1.0,
+                    cy - 80.0 + 1.0,
+                    48.0,
+                    AVATAR_ICON,
+                    p.text_shadow(),
+                );
+                self.icon(
+                    commands,
+                    cx - 24.0,
+                    cy - 80.0,
+                    48.0,
+                    AVATAR_ICON,
+                    p.ink(p.accent),
+                );
+            } else {
+                push_on_background(
+                    commands,
+                    p,
+                    RenderCommand::Text {
+                        x: cx - 24.0,
+                        y: cy - 80.0,
+                        text: user.avatar.clone(),
+                        font_size: 48.0,
+                        color: p.ink(p.accent),
+                        font_weight: FontWeightHint::Regular,
+                        max_width: None,
+                        overflow: TextOverflow::Clip,
+                    },
+                );
+            }
 
             // Name.
             push_on_background(
@@ -1350,20 +1486,20 @@ impl LoginScreen {
             // with the theme's black one under the bordered theme -- and a
             // text field needs an edge under the card theme, which fills
             // without outlining, so the neutral case supplies one.
-            let mut paint = p.surface_paint(Surface::Card);
-            paint.border = Some(if self.error_message.is_some() {
-                p.red
-            } else {
-                paint.border.unwrap_or(p.surface1)
-            });
-            p.push_paint_radii(
+            // The toolkit's field (`guitk::field`), in the theme's shape. It
+            // has the keyboard whenever it is shown, and a refused password
+            // marks it wrong -- the edge and the focus mark both red, one
+            // signal rather than a red ring inside the accent's.
+            guitk::field::draw(
                 commands,
-                field_x,
-                field_y,
-                field_w,
-                field_h,
-                CornerRadii::all(8.0),
-                paint,
+                p,
+                guitk::frame::Rect::new(field_x, field_y, field_w, field_h),
+                guitk::field::State {
+                    focused: true,
+                    invalid: self.error_message.is_some(),
+                    ..guitk::field::State::default()
+                },
+                self.focus_ring,
             );
 
             // Password text or placeholder.
@@ -1387,22 +1523,20 @@ impl LoginScreen {
                 overflow: TextOverflow::Ellipsis,
             });
 
-            // Show/hide toggle.
-            commands.push(RenderCommand::Text {
-                x: field_x + field_w - 28.0,
-                y: field_y + 8.0,
-                text: if self.show_password {
-                    "\u{1F441}"
+            // Show/hide toggle: an open eye while the password shows, a
+            // struck one while it is hidden.
+            self.icon(
+                commands,
+                field_x + field_w - 28.0,
+                field_y + (field_h - 14.0) / 2.0,
+                14.0,
+                if self.show_password {
+                    "view-reveal"
                 } else {
-                    "\u{1F576}"
-                }
-                .to_string(),
-                font_size: 14.0,
-                color: p.subtext0,
-                font_weight: FontWeightHint::Regular,
-                max_width: None,
-                overflow: TextOverflow::Clip,
-            });
+                    "view-conceal"
+                },
+                p.subtext0,
+            );
 
             // Submit button — the screen's default action, so it takes the
             // accent, and its label is derived from that accent rather than
@@ -1558,46 +1692,38 @@ impl LoginScreen {
             });
         }
 
-        // Power button (right).
+        // Power button (right), accessibility before it, the on-screen
+        // keyboard before that: icons centred in the bar.
+        let icon_y = bar_y + (40.0 - 16.0) / 2.0;
         if self.config.show_power {
-            commands.push(RenderCommand::Text {
-                x: self.screen_width - 40.0,
-                y: bar_y + 10.0,
-                text: "\u{23FB}".to_string(),
-                font_size: 16.0,
-                color: p.subtext0,
-                font_weight: FontWeightHint::Regular,
-                max_width: None,
-                overflow: TextOverflow::Clip,
-            });
+            self.icon(
+                commands,
+                self.screen_width - 40.0,
+                icon_y,
+                16.0,
+                "system-shutdown",
+                p.subtext0,
+            );
         }
-
-        // Accessibility (before power).
         if self.config.show_accessibility {
-            commands.push(RenderCommand::Text {
-                x: self.screen_width - 80.0,
-                y: bar_y + 10.0,
-                text: "\u{267F}".to_string(),
-                font_size: 16.0,
-                color: p.subtext0,
-                font_weight: FontWeightHint::Regular,
-                max_width: None,
-                overflow: TextOverflow::Clip,
-            });
+            self.icon(
+                commands,
+                self.screen_width - 80.0,
+                icon_y,
+                16.0,
+                "preferences-desktop-accessibility",
+                p.subtext0,
+            );
         }
-
-        // On-screen keyboard.
         if self.config.show_osk_button {
-            commands.push(RenderCommand::Text {
-                x: self.screen_width - 120.0,
-                y: bar_y + 10.0,
-                text: "\u{2328}".to_string(),
-                font_size: 16.0,
-                color: p.subtext0,
-                font_weight: FontWeightHint::Regular,
-                max_width: None,
-                overflow: TextOverflow::Clip,
-            });
+            self.icon(
+                commands,
+                self.screen_width - 120.0,
+                icon_y,
+                16.0,
+                "input-keyboard",
+                p.subtext0,
+            );
         }
     }
 
@@ -1615,16 +1741,7 @@ impl LoginScreen {
 
         for (i, (icon, label)) in POWER_MENU_LABELS.iter().enumerate() {
             let iy = self.power_menu_row_rect(i).y;
-            commands.push(RenderCommand::Text {
-                x: mx + 12.0,
-                y: iy + 6.0,
-                text: icon.to_string(),
-                font_size: 14.0,
-                color: p.subtext0,
-                font_weight: FontWeightHint::Regular,
-                max_width: None,
-                overflow: TextOverflow::Clip,
-            });
+            self.icon(commands, mx + 12.0, iy + 8.0, 14.0, icon, p.subtext0);
             commands.push(RenderCommand::Text {
                 x: mx + 36.0,
                 y: iy + 7.0,
@@ -1902,21 +2019,50 @@ mod tests {
         assert_eq!(u.username, "alice");
     }
 
+    /// The rule is `loginusers`', so the list a screen is built from marks
+    /// what it marks: the one account, and not a locked one or one of two.
     #[test]
-    fn autologin_user() {
-        let users = vec![
-            LoginUser::new(Some(1), "a", "A"),
-            LoginUser::new(Some(2), "b", "B").with_autologin(),
-        ];
-        let s = LoginScreen::new(1920.0, 1080.0, users);
-        let auto = s.autologin_user().unwrap();
-        assert_eq!(auto.username, "b");
+    fn the_database_marks_only_the_account_that_signs_in_by_itself() {
+        let dir = scratchdir::ScratchDir::new("login-automatic");
+        let path = dir.path("users.yaml");
+        let marked = |body: &str| {
+            std::fs::write(&path, body).unwrap();
+            users_from_db(&path)
+                .into_iter()
+                .filter(|user| user.autologin)
+                .map(|user| user.username)
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(
+            marked(
+                "users:\n\
+                 - username: alice\n   uid: 1000\n\
+                 - username: bob\n   uid: 1001\n   auto_login: true\n"
+            ),
+            ["bob"]
+        );
+        assert!(
+            marked(
+                "users:\n\
+                 - username: alice\n   uid: 1000\n   auto_login: true\n\
+                 - username: bob\n   uid: 1001\n   auto_login: true\n"
+            )
+            .is_empty(),
+            "two marked accounts marked one"
+        );
+        assert!(
+            marked(
+                "users:\n- username: alice\n   uid: 1000\n   auto_login: true\n   locked: true\n"
+            )
+            .is_empty(),
+            "a locked account was marked"
+        );
     }
 
     #[test]
-    fn no_autologin() {
-        let s = make_screen();
-        assert!(s.autologin_user().is_none());
+    fn the_shown_name_is_the_display_name_or_else_the_login_name() {
+        assert_eq!(LoginUser::new(None, "alice", "Alice").shown_name(), "Alice");
+        assert_eq!(LoginUser::new(None, "alice", "").shown_name(), "alice");
     }
 
     #[test]
@@ -2099,8 +2245,62 @@ mod tests {
     /// converted one.
     const OFF_PALETTE: Color = Color::from_hex(0x00FF_8C1A);
 
-    /// The avatar glyph `LoginUser::new` gives everyone.
-    const AVATAR: &str = "\u{1F464}";
+    /// Every icon `screen` drew in `cmds` named `name` at `size` pixels, as
+    /// `(x, y, colour)`.
+    fn icons(
+        screen: &LoginScreen,
+        cmds: &[RenderCommand],
+        name: &str,
+        size: f32,
+    ) -> Vec<(f32, f32, Color)> {
+        cmds.iter()
+            .filter_map(|c| match c {
+                RenderCommand::Image {
+                    x,
+                    y,
+                    width,
+                    image_id,
+                    ..
+                } if *width == size => screen
+                    .icon_request(*image_id)
+                    .filter(|r| r.name == name)
+                    .map(|r| (*x, *y, r.color)),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// The colour of the one icon `name` at `size` -- mounted on a panel, so
+    /// drawn once.
+    fn panel_icon(screen: &LoginScreen, cmds: &[RenderCommand], name: &str, size: f32) -> Color {
+        let hits = icons(screen, cmds, name, size);
+        assert_eq!(
+            hits.len(),
+            1,
+            "{name} at {size}px: one icon, found {}",
+            hits.len()
+        );
+        hits[0].2
+    }
+
+    /// The `(shadow, ink)` pair of an icon on the login background, as
+    /// [`floating_text`] is for text.
+    fn floating_icon(
+        screen: &LoginScreen,
+        cmds: &[RenderCommand],
+        name: &str,
+        size: f32,
+    ) -> (Color, Color) {
+        let hits = icons(screen, cmds, name, size);
+        assert_eq!(hits.len(), 2, "{name} at {size}px: a shadow and an ink");
+        let (sx, sy, shadow) = hits[0];
+        let (ix, iy, ink) = hits[1];
+        assert!(
+            (sx - ix - 1.0).abs() < 0.001 && (sy - iy - 1.0).abs() < 0.001,
+            "{name}: the shadow must sit one pixel down-right of the ink"
+        );
+        (shadow, ink)
+    }
 
     /// Both modes, each with an accent no palette contains.
     fn table_palettes() -> Vec<(String, Palette)> {
@@ -2389,6 +2589,40 @@ mod tests {
     /// pixel values: the raw one on fills and the inked one on text. A count
     /// of "how many things carry the accent" means both, and counting only one
     /// would report half the answer while looking exactly as authoritative.
+    /// `screen`'s render in `p`, each icon it drew stood in for by a text of
+    /// the icon's name at the icon's size and in its colour -- so a sweep or a
+    /// count over the colours drawn sees the icons' colours too.
+    fn rendered(screen: &LoginScreen, p: &Palette) -> Vec<RenderCommand> {
+        screen
+            .render(p)
+            .into_iter()
+            .map(|command| {
+                if let RenderCommand::Image {
+                    x,
+                    y,
+                    width,
+                    image_id,
+                    ..
+                } = command
+                {
+                    if let Some(icon) = screen.icon_request(image_id) {
+                        return RenderCommand::Text {
+                            x,
+                            y,
+                            text: icon.name.to_string(),
+                            color: icon.color,
+                            font_size: width,
+                            font_weight: FontWeightHint::Regular,
+                            max_width: None,
+                            overflow: TextOverflow::Clip,
+                        };
+                    }
+                }
+                command
+            })
+            .collect()
+    }
+
     fn count_of(p: &Palette, cmds: &[RenderCommand], c: Color) -> usize {
         // Against the palette in use, not a fixed one: the inked form of a
         // colour depends on the theme's grounds, so asking a dark palette
@@ -2406,7 +2640,7 @@ mod tests {
     fn every_colour_the_login_screen_draws_comes_from_its_palette() {
         for (mode, p) in table_palettes() {
             for (what, s) in screens(&p) {
-                let cmds = s.render(&p);
+                let cmds = rendered(&s, &p);
                 // The three computed inks: the pale extreme the wallpaper
                 // labels take in both modes (see note 8), and the lettering
                 // on the accent-filled sign-in button.
@@ -2491,7 +2725,8 @@ mod tests {
     #[test]
     fn every_colour_in_the_user_list_is_in_the_role_it_claims() {
         for (mode, p) in table_palettes() {
-            let cmds = base().render(&p);
+            let screen = base();
+            let cmds = screen.render(&p);
 
             // Two rows, in index order: alice is selected, bob is not.
             let rows = fills_of_size(&cmds, 280.0, 64.0);
@@ -2503,8 +2738,8 @@ mod tests {
                 "{mode}: an unselected row is `base` at the module's panel alpha"
             );
 
-            // The avatars, same glyph and size, distinguished by row order.
-            let avatars = texts(&cmds, AVATAR, 28.0);
+            // The avatars, the same icon and size, distinguished by row order.
+            let avatars = icons(&screen, &cmds, super::AVATAR_ICON, 28.0);
             assert_eq!(avatars.len(), 2, "{mode}: two avatars");
             assert_eq!(
                 avatars[0].2,
@@ -2528,16 +2763,45 @@ mod tests {
         }
     }
 
+    /// **The password field's focus mark is as wide as the user's focus
+    /// width**, which the session pushes in (`set_focus_ring_width`); until
+    /// then the toolkit's standard width.
+    #[test]
+    fn the_password_fields_focus_mark_is_the_users_width() {
+        let p = Palette::for_mode(false);
+        let halo = |s: &LoginScreen| -> Vec<f32> {
+            s.render(&p)
+                .iter()
+                .filter_map(|c| match c {
+                    RenderCommand::StrokeRect {
+                        color, line_width, ..
+                    } if (color.r, color.g, color.b) == (p.accent.r, p.accent.g, p.accent.b)
+                        && color.a < 255 =>
+                    {
+                        Some(*line_width)
+                    }
+                    _ => None,
+                })
+                .collect()
+        };
+        let mut s = base();
+        s.select_user(0);
+        assert_eq!(halo(&s), [guitk::style::FOCUS_RING_WIDTH]);
+        s.set_focus_ring_width(5.0);
+        assert_eq!(halo(&s), [5.0]);
+    }
+
     /// The thirteen sites in the password panel, one assertion each.
     #[test]
     fn every_colour_in_the_password_entry_is_in_the_role_it_claims() {
         for (mode, p) in table_palettes() {
             // The failed render: error border, error message, lockout notice,
             // a typed password, and two users so the back arrow is drawn.
-            let cmds = everything().render(&p);
+            let screen = everything();
+            let cmds = screen.render(&p);
 
             assert_eq!(
-                floating_text(&cmds, AVATAR, 48.0).1,
+                floating_icon(&screen, &cmds, super::AVATAR_ICON, 48.0).1,
                 p.ink(p.accent),
                 "{mode}: the avatar of the user you are signing in as"
             );
@@ -2546,21 +2810,31 @@ mod tests {
                 p.on_wallpaper(),
                 "{mode}: the name sits on the background, not on a panel"
             );
-            // Whatever the theme fills a card with, and nothing at all if it
-            // fills nothing -- written as a vector rather than an `if let` so
-            // that the bordered theme is asserted about too, instead of
-            // quietly skipping the check.
+            // The toolkit's field (`guitk::field`): an input's well, `crust`,
+            // in every theme -- one fill, the size of the field.
             assert_eq!(
                 fills_of_size(&cmds, 260.0, 36.0),
-                p.surface_paint(appearance::Surface::Card)
-                    .fill
-                    .into_iter()
-                    .collect::<Vec<_>>(),
+                vec![p.crust],
                 "{mode}: the password field's ground"
             );
+            // The field's edge, stroked on its rectangle as every toolkit
+            // control's is (`guitk::field`) -- not inset, as the theme's
+            // panels are, so it is found by the path it was given.
+            let edges: Vec<Color> = cmds
+                .iter()
+                .filter_map(|c| match c {
+                    RenderCommand::StrokeRect {
+                        width,
+                        height,
+                        color,
+                        ..
+                    } if (*width, *height) == (260.0, 36.0) => Some(*color),
+                    _ => None,
+                })
+                .collect();
             assert_eq!(
-                stroke_of_size(&cmds, 260.0, 36.0),
-                p.red,
+                edges,
+                vec![p.red],
                 "{mode}: a rejected password borders red, never the accent"
             );
             assert_eq!(
@@ -2569,7 +2843,7 @@ mod tests {
                 "{mode}: a typed password"
             );
             assert_eq!(
-                panel_text(&cmds, "\u{1F576}", 14.0),
+                panel_icon(&screen, &cmds, "view-conceal", 14.0),
                 p.subtext0,
                 "{mode}: the reveal toggle"
             );
@@ -2604,12 +2878,34 @@ mod tests {
             let mut s = base();
             s.select_user(0);
             let cmds = s.render(&p);
+            // The field has the keyboard whenever it is shown, so its edge is
+            // the one the toolkit's field gives a focused field -- the accent,
+            // under the built-in theme's glow.
+            let edges: Vec<Color> = cmds
+                .iter()
+                .filter_map(|c| match c {
+                    RenderCommand::StrokeRect {
+                        width,
+                        height,
+                        color,
+                        ..
+                    } if (*width, *height) == (260.0, 36.0) => Some(*color),
+                    _ => None,
+                })
+                .collect();
             assert_eq!(
-                stroke_of_size(&cmds, 260.0, 36.0),
-                p.surface_paint(appearance::Surface::Card)
-                    .border
-                    .unwrap_or(p.surface1),
-                "{mode}: a field at rest"
+                edges,
+                vec![
+                    guitk::field::paint(
+                        &p,
+                        guitk::field::State {
+                            focused: true,
+                            ..guitk::field::State::default()
+                        }
+                    )
+                    .edge
+                ],
+                "{mode}: a field with the keyboard"
             );
             assert_eq!(
                 panel_text(&cmds, "Password", 14.0),
@@ -2623,7 +2919,7 @@ mod tests {
             s.show_password = true;
             let cmds = s.render(&p);
             assert_eq!(
-                panel_text(&cmds, "\u{1F441}", 14.0),
+                panel_icon(&s, &cmds, "view-reveal", 14.0),
                 p.subtext0,
                 "{mode}: the reveal toggle, showing"
             );
@@ -2645,17 +2941,17 @@ mod tests {
             );
             assert_eq!(panel_text(&cmds, "US", 12.0), p.subtext0, "{mode}: layout");
             assert_eq!(
-                panel_text(&cmds, "\u{23FB}", 16.0),
+                panel_icon(&s, &cmds, "system-shutdown", 16.0),
                 p.subtext0,
                 "{mode}: the bar's power button"
             );
             assert_eq!(
-                panel_text(&cmds, "\u{267F}", 16.0),
+                panel_icon(&s, &cmds, "preferences-desktop-accessibility", 16.0),
                 p.subtext0,
                 "{mode}: accessibility"
             );
             assert_eq!(
-                panel_text(&cmds, "\u{2328}", 16.0),
+                panel_icon(&s, &cmds, "input-keyboard", 16.0),
                 p.subtext0,
                 "{mode}: the on-screen keyboard button"
             );
@@ -2675,7 +2971,7 @@ mod tests {
                 "{mode}: its border"
             );
             assert_eq!(
-                panel_text(&cmds, "\u{23FB}", 14.0),
+                panel_icon(&s, &cmds, "system-shutdown", 14.0),
                 p.subtext0,
                 "{mode}: a menu icon"
             );
@@ -2842,7 +3138,7 @@ mod tests {
     #[test]
     fn exactly_two_things_in_the_password_panel_carry_the_accent() {
         for (mode, p) in table_palettes() {
-            let cmds = everything().render(&p);
+            let cmds = rendered(&everything(), &p);
             assert_eq!(
                 count_of(&p, &cmds, OFF_PALETTE),
                 2,
@@ -2855,7 +3151,7 @@ mod tests {
             let mut s = base();
             s.power_menu_open = true;
             assert_eq!(
-                count_of(&p, &s.render(&p), OFF_PALETTE),
+                count_of(&p, &rendered(&s, &p), OFF_PALETTE),
                 1,
                 "{mode}: in the user list only the selected avatar is accented"
             );
@@ -2875,7 +3171,7 @@ mod tests {
         const SHADOW: Color = Color::rgba(0, 0, 0, 180);
 
         for (mode, p) in table_palettes() {
-            let cmds = everything().render(&p);
+            let cmds = rendered(&everything(), &p);
             assert_eq!(
                 count_of(&p, &cmds, SHADOW),
                 7,
@@ -2918,10 +3214,10 @@ mod tests {
                     "light={light} accent={v:#04X}: the label must be readable \
                      on the fill it is drawn on"
                 );
-                if ink == Color::from_hex(0x0011_111B) {
+                if ink == appearance::DARK_EXTREME {
                     seen_dark_ink = true;
                 }
-                if ink == Color::from_hex(0x00EF_F1F5) {
+                if ink == appearance::LIGHT_EXTREME {
                     seen_light_ink = true;
                 }
             }
@@ -3106,6 +3402,23 @@ mod tests {
         assert_eq!(screen.selected_user, 1);
         screen.handle_key(&press(Key::Down));
         assert_eq!(screen.selected_user, 1, "down from the last row stays put");
+    }
+
+    /// Home and End, and the page keys, reach the first and last users.
+    #[test]
+    fn home_end_and_the_page_keys_reach_the_ends_of_the_user_list() {
+        let mut users = make_users();
+        users.push(LoginUser::new(Some(1002), "carol", "Carol"));
+        users.push(LoginUser::new(Some(1003), "dave", "Dave"));
+        let mut screen = LoginScreen::new(1920.0, 1080.0, users);
+        assert_eq!(screen.handle_key(&press(Key::End)), LoginAction::Redraw);
+        assert_eq!(screen.selected_user, 3);
+        screen.handle_key(&press(Key::Home));
+        assert_eq!(screen.selected_user, 0);
+        screen.handle_key(&press(Key::PageDown));
+        assert_eq!(screen.selected_user, 3, "the whole list is one page");
+        screen.handle_key(&press(Key::PageUp));
+        assert_eq!(screen.selected_user, 0);
     }
 
     #[test]

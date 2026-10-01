@@ -1,0 +1,17 @@
+[package]
+name = "notices"
+version = "0.1.0"
+edition = "2024"
+description = "The third-party notices a SlateOS image carries, as scripts/gather-notices.py wrote them"
+
+[dependencies]
+# The index is YAML, as the design asks of files a person may read, and
+# `yamldoc` reads it without a serializer. See yamldoc/src/lib.rs.
+yamldoc = { path = "../../yamldoc" }
+
+[dev-dependencies]
+# A private directory per test, for the bundles the error cases build.
+scratchdir = { path = "../../userspace/scratchdir" }
+
+[lints]
+workspace = true

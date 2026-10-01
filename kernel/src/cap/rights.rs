@@ -325,7 +325,7 @@ impl Rights {
             // operator's A-Q21 answer, "make them live") rules out. There is
             // no narrower grant to give yet: the machinery for handing one
             // administrative tool a right its parent lacks (`authbroker`) is
-            // the next module on the same list. See §1401.
+            // the next module on the same list. See §1501.
             | Self::ENROLL_SECUREBOOT.0,
     );
 
@@ -519,7 +519,7 @@ const _: () = {
 const _: () = {
     assert!(
         // 18 as of 2026-09-27: ENROLL_SECUREBOOT was added for
-        // SYS_SECUREBOOT_ENROLL / _REMOVE (design-decisions §978, §1401).
+        // SYS_SECUREBOOT_ENROLL / _REMOVE (design-decisions §978, §1501).
         // The decision this pin demands:
         //
         //   INIT_PROCESS  yes
@@ -531,7 +531,7 @@ const _: () = {
         // A-Q21 answer ("make them live") rules out, and there is no
         // narrower grant to give until `authbroker` -- the next module on the
         // same list -- can hand one tool a right its parent lacks. Claude's
-        // call within the operator's scope, recorded in §1401, to revisit
+        // call within the operator's scope, recorded in §1501, to revisit
         // when that lands.
         //
         // 17 (2026-09-21) was SET_BRIGHTNESS, decided the other way: in no

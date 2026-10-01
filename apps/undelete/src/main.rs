@@ -253,6 +253,17 @@ pub enum FileSignatureKind {
     Ogg,
     Wav,
     Mp4,
+    /// A HEIC photograph: an ISO media file of brand `heic` and its kin, what
+    /// a phone takes pictures in.
+    Heic,
+    /// A HEIF picture of the general brands (`mif1`, `msf1`).
+    Heif,
+    /// An AVIF picture (`avif`, `avis`).
+    Avif,
+    /// A QuickTime movie (`qt  `).
+    Mov,
+    /// MPEG-4 audio (`M4A `, `M4B `).
+    M4a,
     Avi,
     Mkv,
     Doc,
@@ -284,6 +295,11 @@ impl FileSignatureKind {
         Self::Ogg,
         Self::Wav,
         Self::Mp4,
+        Self::Heic,
+        Self::Heif,
+        Self::Avif,
+        Self::Mov,
+        Self::M4a,
         Self::Avi,
         Self::Mkv,
         Self::Doc,
@@ -314,6 +330,11 @@ impl FileSignatureKind {
             Self::Ogg => "OGG Audio",
             Self::Wav => "WAV Audio",
             Self::Mp4 => "MP4 Video",
+            Self::Heic => "HEIC Image",
+            Self::Heif => "HEIF Image",
+            Self::Avif => "AVIF Image",
+            Self::Mov => "QuickTime Video",
+            Self::M4a => "M4A Audio",
             Self::Avi => "AVI Video",
             Self::Mkv => "MKV Video",
             Self::Doc => "Word Document (legacy)",
@@ -346,6 +367,11 @@ impl FileSignatureKind {
             Self::Ogg => "ogg",
             Self::Wav => "wav",
             Self::Mp4 => "mp4",
+            Self::Heic => "heic",
+            Self::Heif => "heif",
+            Self::Avif => "avif",
+            Self::Mov => "mov",
+            Self::M4a => "m4a",
             Self::Avi => "avi",
             Self::Mkv => "mkv",
             Self::Doc => "doc",
@@ -364,15 +390,22 @@ impl FileSignatureKind {
     /// Category grouping for filtering.
     pub fn category(self) -> FileCategory {
         match self {
-            Self::Jpeg | Self::Png | Self::Gif | Self::Bmp | Self::Webp => FileCategory::Image,
+            Self::Jpeg
+            | Self::Png
+            | Self::Gif
+            | Self::Bmp
+            | Self::Webp
+            | Self::Heic
+            | Self::Heif
+            | Self::Avif => FileCategory::Image,
             Self::Pdf | Self::Doc | Self::Docx | Self::Xls | Self::Ppt | Self::Xml | Self::Html => {
                 FileCategory::Document
             }
             Self::Zip | Self::Gzip | Self::SevenZip | Self::Rar | Self::Tar => {
                 FileCategory::Archive
             }
-            Self::Mp3 | Self::Flac | Self::Ogg | Self::Wav => FileCategory::Audio,
-            Self::Mp4 | Self::Avi | Self::Mkv => FileCategory::Video,
+            Self::Mp3 | Self::Flac | Self::Ogg | Self::Wav | Self::M4a => FileCategory::Audio,
+            Self::Mp4 | Self::Mov | Self::Avi | Self::Mkv => FileCategory::Video,
             Self::Elf | Self::Sqlite => FileCategory::Application,
             Self::Unknown => FileCategory::Other,
         }
@@ -487,7 +520,25 @@ pub fn build_signature_database() -> Vec<FileSignature> {
         FileSignature::new(FileSignatureKind::Ogg, 0, b"OggS"),
         // WAV: RIFF....WAVE
         FileSignature::new(FileSignatureKind::Wav, 0, b"RIFF").with_secondary(8, b"WAVE"),
-        // MP4: various boxes (ftyp at offset 4)
+        // The ISO base media family: an `ftyp` box first, and its major
+        // brand, at 8, saying which member the file is -- a photograph as
+        // often as a video. The bare `ftyp` below, alone, recovered a phone's
+        // HEIC photographs and every AVIF as `.mp4`. These have a secondary
+        // pattern, so `detect_best` tries them before it.
+        FileSignature::new(FileSignatureKind::Heic, 4, b"ftyp").with_secondary(8, b"heic"),
+        FileSignature::new(FileSignatureKind::Heic, 4, b"ftyp").with_secondary(8, b"heix"),
+        FileSignature::new(FileSignatureKind::Heic, 4, b"ftyp").with_secondary(8, b"heim"),
+        FileSignature::new(FileSignatureKind::Heic, 4, b"ftyp").with_secondary(8, b"heis"),
+        FileSignature::new(FileSignatureKind::Heic, 4, b"ftyp").with_secondary(8, b"hevc"),
+        FileSignature::new(FileSignatureKind::Heic, 4, b"ftyp").with_secondary(8, b"hevx"),
+        FileSignature::new(FileSignatureKind::Heif, 4, b"ftyp").with_secondary(8, b"mif1"),
+        FileSignature::new(FileSignatureKind::Heif, 4, b"ftyp").with_secondary(8, b"msf1"),
+        FileSignature::new(FileSignatureKind::Avif, 4, b"ftyp").with_secondary(8, b"avif"),
+        FileSignature::new(FileSignatureKind::Avif, 4, b"ftyp").with_secondary(8, b"avis"),
+        FileSignature::new(FileSignatureKind::Mov, 4, b"ftyp").with_secondary(8, b"qt  "),
+        FileSignature::new(FileSignatureKind::M4a, 4, b"ftyp").with_secondary(8, b"M4A "),
+        FileSignature::new(FileSignatureKind::M4a, 4, b"ftyp").with_secondary(8, b"M4B "),
+        // Any other brand -- isom, mp41, mp42, avc1 and the rest: an MP4.
         FileSignature::new(FileSignatureKind::Mp4, 4, b"ftyp"),
         // AVI: RIFF....AVI
         FileSignature::new(FileSignatureKind::Avi, 0, b"RIFF").with_secondary(8, b"AVI "),
@@ -5311,6 +5362,38 @@ mod tests {
         data[8..12].copy_from_slice(b"WAVE");
         let best = detector.detect_best(&data);
         assert_eq!(best, Some(FileSignatureKind::Wav));
+    }
+
+    /// **An ISO media file is named by its brand.** A phone's HEIC
+    /// photograph and an AVIF were recovered as `.mp4` videos, because the
+    /// bare `ftyp` said MP4 whatever brand followed it.
+    #[test]
+    fn an_iso_media_file_is_named_by_its_brand() {
+        let detector = SignatureDetector::new();
+        let header = |brand: &[u8; 4]| {
+            let mut data = vec![0u8; 32];
+            data[..4].copy_from_slice(&[0, 0, 0, 0x18]);
+            data[4..8].copy_from_slice(b"ftyp");
+            data[8..12].copy_from_slice(brand);
+            data
+        };
+        for (brand, kind, extension) in [
+            (b"heic", FileSignatureKind::Heic, "heic"),
+            (b"heix", FileSignatureKind::Heic, "heic"),
+            (b"mif1", FileSignatureKind::Heif, "heif"),
+            (b"avif", FileSignatureKind::Avif, "avif"),
+            (b"avis", FileSignatureKind::Avif, "avif"),
+            (b"qt  ", FileSignatureKind::Mov, "mov"),
+            (b"M4A ", FileSignatureKind::M4a, "m4a"),
+            (b"isom", FileSignatureKind::Mp4, "mp4"),
+            (b"mp42", FileSignatureKind::Mp4, "mp4"),
+        ] {
+            let found = detector.detect_best(&header(brand));
+            assert_eq!(found, Some(kind), "{:?}", std::str::from_utf8(brand));
+            assert_eq!(kind.extension(), extension);
+        }
+        assert_eq!(FileSignatureKind::Heic.category(), FileCategory::Image);
+        assert_eq!(FileSignatureKind::M4a.category(), FileCategory::Audio);
     }
 
     #[test]

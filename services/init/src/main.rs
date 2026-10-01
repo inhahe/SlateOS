@@ -36,24 +36,38 @@
 #![no_std]
 #![no_main]
 
-/// Declares this binary SlateOS-native: the ELF note the kernel trusts over
-/// every Linux signal when it decides which system-call table a program gets
-/// (design-decisions.md §33). posix's crt0 carries the same note for every
-/// program linked against the libc; this service links no libc, so it carries
-/// its own, and `linker.ld` keeps the section and gives it a `PT_NOTE`.
-///
-/// Layout: `n_namesz` 8, `n_descsz` 4, `n_type` 1 (`NT_SLATEOS_ABI`), the name
-/// "SlateOS" with its NUL, then the ABI revision, 1.
-#[used]
-#[unsafe(link_section = ".note.slateos")]
-static SLATEOS_ABI_NOTE: [u32; 6] = [
-    8,
-    4,
-    1,
-    u32::from_le_bytes(*b"Slat"),
-    u32::from_le_bytes(*b"eOS\0"),
-    1,
-];
+// Declares this binary SlateOS-native: the ELF note the kernel trusts over
+// every Linux signal when it decides which system-call table a program gets
+// (design-decisions.md §33). posix's crt0 carries the same note for every
+// program linked against the libc; this service links no libc, so it carries
+// its own, and `linker.ld` keeps the section and gives it a `PT_NOTE`.
+//
+// Layout (ELF note, 4-byte aligned): n_namesz 8, n_descsz 4, n_type 1
+// (NT_SLATEOS_ABI), the name "SlateOS" with its NUL (8 bytes, already
+// aligned), then the descriptor: ABI revision 1, little-endian.
+//
+// Assembled, as crt0's is, and NOT a `#[used]` static, which is how it was
+// first written. On ELF, `#[used]` gives its section SHF_GNU_RETAIN, and LLVM
+// tags any object that uses that GNU extension ELFOSABI_GNU. The service then
+// reached the kernel labelled a *Linux* program, and a kernel that did not yet
+// rank the note above that label ran it on the Linux system-call table, where
+// this program's numbers name other calls (its SYS_EXIT, 1, is Linux's
+// `write`). On the boot of 2026-09-25 the kernel's container self-test, which
+// execs `hello`, sat behind a task that never ended (known-issues.md ->
+// B-D-USED-STATIC-TAGGED-THE-SERVICES-GNU). A plain `.pushsection` sets no
+// GNU flag, so the header says System V, as the program's system calls do.
+// `KEEP` in linker.ld is what keeps the section in the image; nothing here
+// needs a retain flag.
+core::arch::global_asm!(
+    ".pushsection .note.slateos, \"a\", @note",
+    ".balign 4",
+    ".long 8",
+    ".long 4",
+    ".long 1",
+    ".asciz \"SlateOS\"",
+    ".long 1",
+    ".popsection",
+);
 
 // ---------------------------------------------------------------------------
 // Syscall numbers (must match kernel/src/syscall/number.rs)
@@ -1840,10 +1854,10 @@ fn cmd_logs() {
 
     // Find the actual data length (scan for last non-zero byte).
     let data_len = buf.iter().rposition(|&b| b != 0).map_or(0, |p| p + 1);
-    if data_len > 0 {
-        if let Some(data) = buf.get(..data_len) {
-            console_write(data);
-        }
+    if data_len > 0
+        && let Some(data) = buf.get(..data_len)
+    {
+        console_write(data);
     }
 }
 
@@ -2399,45 +2413,37 @@ pub extern "C" fn _start() -> ! {
         //    Drain all available characters in a burst to avoid
         //    missing fast typists.
         let mut got_input = false;
-        loop {
-            match try_read_char() {
-                Some(ch) => {
-                    got_input = true;
-                    match ch {
-                        // Enter — execute the command line.
-                        b'\r' | b'\n' => {
-                            print("\n");
-                            if line_pos > 0 {
-                                execute(&line_buf[..line_pos], &mut registry);
-                            }
-                            line_pos = 0;
-                            prompt_shown = false;
-                            // Break out of input drain to re-show prompt.
-                            break;
-                        }
-
-                        // Backspace / DEL.
-                        0x08 | 0x7F => {
-                            if line_pos > 0 {
-                                line_pos -= 1;
-                                console_write(b"\x08 \x08");
-                            }
-                        }
-
-                        // Printable ASCII.
-                        0x20..=0x7E => {
-                            if line_pos < MAX_LINE {
-                                line_buf[line_pos] = ch;
-                                line_pos += 1;
-                                console_write(&[ch]);
-                            }
-                        }
-
-                        // Non-printable: ignore.
-                        _ => {}
+        // Until the buffer is empty, or a line is complete.
+        while let Some(ch) = try_read_char() {
+            got_input = true;
+            match ch {
+                // Enter — execute the command line.
+                b'\r' | b'\n' => {
+                    print("\n");
+                    if line_pos > 0 {
+                        execute(&line_buf[..line_pos], &mut registry);
                     }
+                    line_pos = 0;
+                    prompt_shown = false;
+                    // Break out of input drain to re-show prompt.
+                    break;
                 }
-                None => break, // No more characters in buffer.
+
+                // Backspace / DEL, when there is something to erase.
+                0x08 | 0x7F if line_pos > 0 => {
+                    line_pos -= 1;
+                    console_write(b"\x08 \x08");
+                }
+
+                // Printable ASCII, while the line has room.
+                0x20..=0x7E if line_pos < MAX_LINE => {
+                    line_buf[line_pos] = ch;
+                    line_pos += 1;
+                    console_write(&[ch]);
+                }
+
+                // Non-printable, or a key the line cannot take: ignore.
+                _ => {}
             }
         }
 

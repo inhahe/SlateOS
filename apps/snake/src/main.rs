@@ -47,34 +47,79 @@
 //! them — which is what let a program whose `main` discarded its own app
 //! compile without a word of complaint.
 
+use guitk::button::{Kind, State};
 use guitk::color::Color;
 use guitk::event::{Event, Key, KeyEvent, MouseButton, MouseEvent, MouseEventKind};
 use guitk::frame::{Frame, Rect};
+use guitk::palette::Palette;
 use guitk::probe::Probe;
 use guitk::render::{FontWeightHint, RenderCommand, RenderTree, TextOverflow};
 use guitk::style::CornerRadii;
+use guitk::surface::Surface;
 use guitk::text;
 use oswindow::app::{self, App, Response};
 use randrange::{RandomSource, SeededRng, seeded_from_system};
 use std::process::ExitCode;
 use std::time::Duration;
 
-// ── Catppuccin Mocha palette ────────────────────────────────────────
-const BASE: Color = Color::from_hex(0x1E1E2E);
-const MANTLE: Color = Color::from_hex(0x181825);
-const CRUST: Color = Color::from_hex(0x11111B);
-const SURFACE0: Color = Color::from_hex(0x313244);
-const TEXT_COLOR: Color = Color::from_hex(0xCDD6F4);
-const SUBTEXT0: Color = Color::from_hex(0xA6ADC8);
-const BLUE: Color = Color::from_hex(0x89B4FA);
-const GREEN: Color = Color::from_hex(0xA6E3A1);
-const RED: Color = Color::from_hex(0xF38BA8);
-const YELLOW: Color = Color::from_hex(0xF9E2AF);
-const PEACH: Color = Color::from_hex(0xFAB387);
-const LAVENDER: Color = Color::from_hex(0xB4BEFE);
-const OVERLAY0: Color = Color::from_hex(0x6C7086);
-const TEAL: Color = Color::from_hex(0x94E2D5);
-const MAUVE: Color = Color::from_hex(0xCBA6F7);
+// ── Colours ─────────────────────────────────────────────────────────
+//
+// Everything in this game follows the user's palette (the operator's answer
+// to C-Q16, §1422, and lane C's call for this game): its surfaces and text
+// from the palette's roles, each hue in the palette's ink for it, which reads
+// on the page in a light theme as in a dark one. It was all a copy of
+// Catppuccin Mocha, dark on a light desktop.
+
+/// The colours the window draws in, from the user's palette.
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct Colours {
+    /// The page.
+    base: Color,
+    /// A band.
+    mantle: Color,
+    /// A well.
+    crust: Color,
+    /// Raised.
+    surface0: Color,
+    /// Text.
+    text: Color,
+    /// Secondary text.
+    subtext0: Color,
+    /// The palette's green, inked for the page.
+    green: Color,
+    /// The palette's red, inked for the page.
+    red: Color,
+    /// The palette's yellow, inked for the page.
+    yellow: Color,
+    /// The palette's peach, inked for the page.
+    peach: Color,
+    /// The palette's lavender, inked for the page.
+    lavender: Color,
+    /// The palette's teal, inked for the page.
+    teal: Color,
+    /// The palette's mauve, inked for the page.
+    mauve: Color,
+}
+
+impl Colours {
+    fn of(p: &Palette) -> Self {
+        Self {
+            base: p.base,
+            mantle: p.mantle,
+            crust: p.crust,
+            surface0: p.surface0,
+            text: p.text,
+            subtext0: p.subtext0,
+            green: p.ink(p.green),
+            red: p.ink(p.red),
+            yellow: p.ink(p.yellow),
+            peach: p.ink(p.peach),
+            lavender: p.ink(p.lavender),
+            teal: p.ink(p.teal),
+            mauve: p.ink(p.mauve),
+        }
+    }
+}
 
 // ── The board ───────────────────────────────────────────────────────
 const GRID_COLS: usize = 20;
@@ -661,6 +706,12 @@ pub struct SnakeApp {
     /// The size the last frame was drawn at, which is the size the next click
     /// is read against. Stored for that reason and no other.
     size: (f32, f32),
+    /// The user's colours, replaced whenever the theme changes. Seeded from
+    /// the defaults; the framework calls `App::theme_changed` before the
+    /// first frame.
+    palette: Palette,
+    /// `palette`'s colours as this window draws them: rebuilt with it.
+    colours: Colours,
 }
 
 impl SnakeApp {
@@ -702,6 +753,8 @@ impl SnakeApp {
             rng,
             pulse_counter: 0,
             size: (WINDOW_WIDTH, WINDOW_HEIGHT),
+            palette: Palette::for_mode(false),
+            colours: Colours::of(&Palette::for_mode(false)),
         };
         app.init_snake();
         app.spawn_food();
@@ -737,11 +790,14 @@ impl SnakeApp {
         let difficulty = self.difficulty;
         let wrap = self.wrap_mode;
         let size = self.size;
+        let palette = self.palette;
         *self = Self::with_seed(seed);
         self.high_score = high;
         self.difficulty = difficulty;
         self.wrap_mode = wrap;
         self.size = size;
+        self.palette = palette;
+        self.colours = Colours::of(&palette);
     }
 
     /// The size the next click will be read against.
@@ -1246,7 +1302,7 @@ impl SnakeApp {
     pub fn frame(&self, width: f32, height: f32) -> Frame<Target> {
         let mut f = Frame::new(width, height);
         let l = Layout::new(width, height);
-        fill(&mut f, l.window, BASE, CornerRadii::ZERO);
+        fill(&mut f, l.window, self.colours.base, CornerRadii::ZERO);
         self.draw_header(&mut f, &l);
         let (_, stats) = l.split(self.stats_width(&l));
         let board = self.board(&l);
@@ -1302,7 +1358,7 @@ impl SnakeApp {
     }
 
     fn draw_header(&self, f: &mut Frame<Target>, l: &Layout) {
-        fill(f, l.header, MANTLE, CornerRadii::ZERO);
+        fill(f, l.header, self.colours.mantle, CornerRadii::ZERO);
         let mut rest = inset_x(l.header, l.pad * 2.0);
 
         // The right-hand items take what they measure and the score gets what
@@ -1317,7 +1373,7 @@ impl SnakeApp {
                 text: &best,
                 size: l.font,
                 weight: FontWeightHint::Bold,
-                color: YELLOW,
+                color: self.colours.yellow,
             },
             best_rect,
         );
@@ -1343,7 +1399,7 @@ impl SnakeApp {
                 text: &score,
                 size: l.big,
                 weight: FontWeightHint::Bold,
-                color: TEXT_COLOR,
+                color: self.colours.text,
             },
             rest,
         );
@@ -1362,10 +1418,10 @@ impl SnakeApp {
 
     fn state_color(&self) -> Color {
         match self.state {
-            GameState::Playing => GREEN,
-            GameState::Paused => PEACH,
-            GameState::GameOver => RED,
-            GameState::Won => MAUVE,
+            GameState::Playing => self.colours.green,
+            GameState::Paused => self.colours.peach,
+            GameState::GameOver => self.colours.red,
+            GameState::Won => self.colours.mauve,
         }
     }
 
@@ -1381,7 +1437,7 @@ impl SnakeApp {
         for row in 0..b.rows {
             for col in 0..b.cols {
                 let r = b.cell_rect(row, col);
-                fill(f, r, SURFACE0, radius);
+                fill(f, r, self.colours.surface0, radius);
                 f.hit(Target::Cell(row, col), b.cell_hit(row, col));
             }
         }
@@ -1399,7 +1455,16 @@ impl SnakeApp {
                 continue;
             }
             let head = i == 0;
-            fill(f, r, if head { GREEN } else { TEAL }, radius);
+            fill(
+                f,
+                r,
+                if head {
+                    self.colours.green
+                } else {
+                    self.colours.teal
+                },
+                radius,
+            );
             if head {
                 // Two eyes, so which way the snake is pointing is visible on
                 // the board and not only in the direction it moves next.
@@ -1412,7 +1477,7 @@ impl SnakeApp {
         let normal = self.food.pos;
         if let (Ok(row), Ok(col)) = (usize::try_from(normal.row), usize::try_from(normal.col)) {
             let r = shrink(b.cell_rect(row, col), b.cell * 0.15);
-            fill(f, r, RED, CornerRadii::all(r.w / 2.0));
+            fill(f, r, self.colours.red, CornerRadii::all(r.w / 2.0));
         }
         let Some(bonus) = self.bonus_food else {
             return;
@@ -1429,11 +1494,11 @@ impl SnakeApp {
         // neighbours.
         let scale = self.pulse_scale();
         let r = shrink(cell, cell.w * (1.0 - scale) / 2.0);
-        fill(f, r, YELLOW, CornerRadii::all(r.w / 2.0));
+        fill(f, r, self.colours.yellow, CornerRadii::all(r.w / 2.0));
         stroke(
             f,
             r,
-            PEACH,
+            self.colours.peach,
             (b.cell * 0.07).max(1.0),
             CornerRadii::all(r.w / 2.0),
         );
@@ -1460,7 +1525,7 @@ impl SnakeApp {
             fill(
                 f,
                 Rect::new(ex - size / 2.0, ey - size / 2.0, size, size),
-                CRUST,
+                self.colours.crust,
                 CornerRadii::all(size / 2.0),
             );
         }
@@ -1472,7 +1537,7 @@ impl SnakeApp {
     /// label is placed in a rectangle cut from `area`, and `label_left` drops
     /// one of no size (`known-issues.md` lesson 51).
     fn draw_stats(&self, f: &mut Frame<Target>, l: &Layout, area: Rect) {
-        fill(f, area, MANTLE, CornerRadii::all(l.pad));
+        fill(f, area, self.colours.mantle, CornerRadii::all(l.pad));
         let inner = inset_x(area, l.pad);
         let line = text::line_height(l.small, FontWeightHint::Regular) + l.pad;
         let mut y = inner.y + l.pad;
@@ -1483,7 +1548,7 @@ impl SnakeApp {
                 text: STATS_HEADING,
                 size: l.small,
                 weight: FontWeightHint::Bold,
-                color: LAVENDER,
+                color: self.colours.lavender,
             },
             Rect::new(inner.x, y, inner.w, line),
         );
@@ -1503,7 +1568,7 @@ impl SnakeApp {
                     text: name,
                     size: l.small,
                     weight: FontWeightHint::Regular,
-                    color: SUBTEXT0,
+                    color: self.colours.subtext0,
                 },
                 left,
             );
@@ -1513,7 +1578,7 @@ impl SnakeApp {
                     text: &value,
                     size: l.small,
                     weight: FontWeightHint::Bold,
-                    color: TEXT_COLOR,
+                    color: self.colours.text,
                 },
                 right,
             );
@@ -1522,31 +1587,26 @@ impl SnakeApp {
     }
 
     fn draw_footer(&self, f: &mut Frame<Target>, l: &Layout) {
-        fill(f, l.footer, MANTLE, CornerRadii::ZERO);
+        fill(f, l.footer, self.colours.mantle, CornerRadii::ZERO);
         let mut rest = inset_x(l.footer, l.pad * 2.0);
 
+        let button_h = rest.h * (1.0 - 0.18 * 2.0);
         for (target, text, on) in self.switches() {
-            let w = text::measure(text, l.small, FontWeightHint::Bold) + l.pad * 2.0;
+            let w = gamechrome::button_width(text, l.small, button_h);
             let box_rect = take_left(&mut rest, w, l.pad);
             if box_rect.is_empty() {
                 continue;
             }
             let inner = inset_y(box_rect, box_rect.h * 0.18);
-            fill(
+            gamechrome::button(
                 f,
-                inner,
-                if on { BLUE } else { SURFACE0 },
-                CornerRadii::all(inner.h * 0.25),
-            );
-            label_centred(
-                f,
-                &Label {
-                    text,
-                    size: l.small,
-                    weight: FontWeightHint::Bold,
-                    color: if on { BASE } else { TEXT_COLOR },
-                },
-                inner,
+                &self.palette,
+                (inner.x, inner.y, inner.w, inner.h),
+                text,
+                l.small,
+                if on { Kind::Primary } else { Kind::Plain },
+                State::default(),
+                self.colours.mantle,
             );
             f.hit(target, box_rect);
         }
@@ -1557,7 +1617,9 @@ impl SnakeApp {
                 text: HINT_LINE,
                 size: l.small,
                 weight: FontWeightHint::Regular,
-                color: OVERLAY0,
+                // Secondary text: the keys are read, and the palette's
+                // faintest grey is 2.3:1 on a light band.
+                color: self.colours.subtext0,
             },
             rest,
         );
@@ -1603,9 +1665,21 @@ impl SnakeApp {
         let (headline, hint, color) = match self.state {
             // A game in play has nothing across it: the board is the thing.
             GameState::Playing => return,
-            GameState::Paused => ("Paused", "P or the Pause switch to carry on", PEACH),
-            GameState::GameOver => ("Game over", "Enter or Restart to play again", RED),
-            GameState::Won => ("You win", "The board is full. Enter to play again", MAUVE),
+            GameState::Paused => (
+                "Paused",
+                "P or the Pause switch to carry on",
+                self.colours.peach,
+            ),
+            GameState::GameOver => (
+                "Game over",
+                "Enter or Restart to play again",
+                self.colours.red,
+            ),
+            GameState::Won => (
+                "You win",
+                "The board is full. Enter to play again",
+                self.colours.mauve,
+            ),
         };
         let panel = Rect::new(
             b.cells.x,
@@ -1613,7 +1687,8 @@ impl SnakeApp {
             b.cells.w,
             l.big * 4.0,
         );
-        fill(f, panel, CRUST, CornerRadii::all(l.pad));
+        self.palette
+            .push_surface(f, panel.x, panel.y, panel.w, panel.h, l.pad, Surface::Panel);
         let line = text::line_height(l.big, FontWeightHint::Bold);
         label_centred(
             f,
@@ -1631,7 +1706,7 @@ impl SnakeApp {
                 text: hint,
                 size: l.small,
                 weight: FontWeightHint::Regular,
-                color: SUBTEXT0,
+                color: self.colours.subtext0,
             },
             Rect::new(
                 panel.x,
@@ -1817,6 +1892,11 @@ fn f32_from_u32(v: u32) -> f32 {
 }
 
 impl App for SnakeApp {
+    fn theme_changed(&mut self, palette: &Palette) {
+        self.palette = *palette;
+        self.colours = Colours::of(palette);
+    }
+
     fn title(&self) -> String {
         "Snake".to_string()
     }
@@ -1908,6 +1988,209 @@ mod tests {
     )]
 
     use super::*;
+
+    /// The colours a game draws in until the theme says otherwise.
+    fn colours() -> Colours {
+        Colours::of(&Palette::for_mode(false))
+    }
+
+    /// The palette for a light or a dark theme, in the bordered look (the
+    /// default) or the card look.
+    fn palette(light: bool, cards: bool) -> Palette {
+        let mut p = Palette::for_mode(light);
+        p.set_surface_style(if cards {
+            guitk::palette::SurfaceStyle::Cards
+        } else {
+            guitk::palette::SurfaceStyle::Borders
+        });
+        p
+    }
+
+    /// Every look in `p`'s colours: a game with a bonus on the board and the
+    /// wrap switch on, paused, over, won, and cramped.
+    fn every_look(p: &Palette) -> Vec<(&'static str, SnakeApp)> {
+        let busy = || {
+            let mut a = game();
+            a.bonus_food = Some(Food {
+                pos: Pos::new(0, 3),
+                kind: FoodKind::Bonus,
+                ticks_remaining: 9,
+            });
+            a.wrap_mode = true;
+            a
+        };
+        let mut paused = busy();
+        paused.state = GameState::Paused;
+        let mut over = busy();
+        over.state = GameState::GameOver;
+        let mut won = busy();
+        won.state = GameState::Won;
+        let mut cramped = busy();
+        cramped.resize(420.0, 320.0);
+        let mut looks = vec![
+            ("playing", busy()),
+            ("paused", paused),
+            ("over", over),
+            ("won", won),
+            ("cramped", cramped),
+        ];
+        for (_, a) in &mut looks {
+            a.theme_changed(p);
+        }
+        looks
+    }
+
+    /// **The window is drawn in the user's colours**, light or dark, in
+    /// either surface look -- every colour the palette's or the toolkit's
+    /// buttons' (the operator's C-Q16). It drew in its own copy of
+    /// Catppuccin Mocha, dark on a light desktop.
+    #[test]
+    fn the_window_is_drawn_in_the_users_colours() {
+        for (light, cards) in [(false, false), (true, false), (false, true), (true, true)] {
+            let p = palette(light, cards);
+            let mut derived = gamechrome::button_colours(&p, Kind::Plain, p.mantle);
+            derived.extend(gamechrome::button_colours(&p, Kind::Primary, p.mantle));
+            for (what, a) in every_look(&p) {
+                appearance::palette_check::assert_drawn_from(
+                    &p,
+                    a.frame(a.size().0, a.size().1).commands(),
+                    &derived,
+                    &format!("snake, {what}, light: {light}, cards: {cards}"),
+                );
+            }
+        }
+    }
+
+    /// **Every text reads on what is drawn under it**, in either theme and
+    /// either surface look (`gamechrome::legibility`).
+    #[test]
+    fn every_text_reads_on_what_is_under_it_in_either_theme() {
+        let mut bad = Vec::new();
+        for (light, cards) in [(false, false), (true, false), (false, true), (true, true)] {
+            let p = palette(light, cards);
+            for (what, a) in every_look(&p) {
+                let f = a.frame(a.size().0, a.size().1);
+                for r in gamechrome::legibility::illegible(f.commands(), p.base, |_| false) {
+                    bad.push(format!(
+                        "{what}, light: {light}, cards: {cards}: {:?} {:.2}:1 on {:?}",
+                        r.text,
+                        r.ratio(),
+                        r.ground
+                    ));
+                }
+            }
+        }
+        assert!(bad.is_empty(), "snake: {bad:#?}");
+    }
+
+    /// **The snake and the food stand off the board in either theme** (WCAG
+    /// 1.4.11's 3:1 for what a player must see), and the head off the body.
+    #[test]
+    fn the_snake_and_the_food_stand_off_the_board() {
+        for light in [false, true] {
+            let c = Colours::of(&Palette::for_mode(light));
+            for (what, colour) in [
+                ("the head", c.green),
+                ("the body", c.teal),
+                ("the food", c.red),
+                ("a bonus", c.yellow),
+            ] {
+                let ratio = guitk::theme::contrast_ratio(colour, c.surface0);
+                assert!(
+                    ratio >= 3.0,
+                    "{what} is {ratio:.2}:1 on a square (light: {light})"
+                );
+            }
+        }
+    }
+
+    /// **A switch shows when it is on**, as the toolkit's primary button:
+    /// the Wrap switch, off and on.
+    #[test]
+    fn a_switch_shows_when_it_is_on() {
+        let face = |wrap: bool| {
+            let mut a = game();
+            a.wrap_mode = wrap;
+            let f = a.frame(SIZE.0, SIZE.1);
+            let (tx, ty) = f
+                .commands()
+                .iter()
+                .find_map(|c| match c {
+                    RenderCommand::Text { text, x, y, .. } if text == "Wrap" => Some((*x, *y)),
+                    _ => None,
+                })
+                .expect("Wrap is not drawn");
+            f.commands()
+                .iter()
+                .find_map(|c| match c {
+                    RenderCommand::FillRect {
+                        x,
+                        y,
+                        width,
+                        height,
+                        color,
+                        ..
+                    } if Rect::new(*x, *y, *width, *height).contains(tx + 1.0, ty + 1.0)
+                        && *width < SIZE.0 / 4.0 =>
+                    {
+                        Some(*color)
+                    }
+                    _ => None,
+                })
+                .expect("Wrap has no face")
+        };
+        let a = game();
+        let paint =
+            |kind| guitk::button::paint(&a.palette, kind, State::default(), a.colours.mantle).lower;
+        assert_eq!(face(false), paint(Kind::Plain), "Wrap off looks on");
+        assert_eq!(face(true), paint(Kind::Primary), "Wrap on looks off");
+    }
+
+    /// **The message sits on a panel of its own**: the toolkit's panel,
+    /// which has a ground in either surface look, so the words across the
+    /// board do not land on the squares and the snake under them.
+    #[test]
+    fn the_message_sits_on_a_panel_of_its_own() {
+        for cards in [false, true] {
+            let mut a = game();
+            a.state = GameState::Paused;
+            a.theme_changed(&palette(false, cards));
+            let l = Layout::new(SIZE.0, SIZE.1);
+            let b = a.board(&l);
+            let panel = Rect::new(
+                b.cells.x,
+                b.cells.y + (b.cells.h - l.big * 4.0) / 2.0,
+                b.cells.w,
+                l.big * 4.0,
+            );
+            let grounded = a.frame(SIZE.0, SIZE.1).commands().iter().any(|c| {
+                matches!(c, RenderCommand::FillRect { x, y, width, height, color, .. }
+                    if (*x - panel.x).abs() < 0.01
+                        && (*y - panel.y).abs() < 0.01
+                        && (*width - panel.w).abs() < 0.01
+                        && (*height - panel.h).abs() < 0.01
+                        && color.a == u8::MAX)
+            });
+            assert!(
+                grounded,
+                "the message has no ground of its own (cards: {cards})"
+            );
+        }
+    }
+
+    /// **A restart keeps the user's colours**, as it keeps the window's size.
+    #[test]
+    fn a_restart_keeps_the_users_colours() {
+        let light = Palette::for_mode(true);
+        let mut a = game();
+        a.theme_changed(&light);
+        a.restart();
+        assert_eq!(
+            a.palette, light,
+            "a restart went back to the default colours"
+        );
+        assert_eq!(a.colours, Colours::of(&light));
+    }
     use guitk::probe;
 
     /// The size the probe reads a click against, spelled once.
@@ -3538,7 +3821,7 @@ mod tests {
         for (row, col) in [(0, 0), (7, 12), (19, 19)] {
             let (x, y) = b.cell_rect(row, col).centre();
             assert!(
-                fill_covering(&f, x, y, SURFACE0).is_some(),
+                fill_covering(&f, x, y, colours().surface0).is_some(),
                 "square {row},{col} was not drawn"
             );
         }
@@ -3549,7 +3832,7 @@ mod tests {
             .iter()
             .filter(|c| {
                 matches!(c, RenderCommand::FillRect { color, x, y, .. }
-                    if *color == SURFACE0 && b.cells.contains(*x, *y))
+                    if *color == colours().surface0 && b.cells.contains(*x, *y))
             })
             .count();
         assert_eq!(
@@ -3568,17 +3851,18 @@ mod tests {
 
         let (hx, hy) = b.cell_rect(10, 10).centre();
         assert!(
-            fill_covering(&f, hx, hy, GREEN).is_some(),
+            fill_covering(&f, hx, hy, colours().green).is_some(),
             "there is no head where the head is"
         );
         let (bx, by) = b.cell_rect(10, 9).centre();
         assert!(
-            fill_covering(&f, bx, by, TEAL).is_some(),
+            fill_covering(&f, bx, by, colours().teal).is_some(),
             "there is no body where the body is"
         );
         let (ex, ey) = b.cell_rect(3, 3).centre();
         assert!(
-            fill_covering(&f, ex, ey, GREEN).is_none() && fill_covering(&f, ex, ey, TEAL).is_none(),
+            fill_covering(&f, ex, ey, colours().green).is_none()
+                && fill_covering(&f, ex, ey, colours().teal).is_none(),
             "there is snake on a square the snake is not on"
         );
     }
@@ -3591,12 +3875,12 @@ mod tests {
         let f = app.draw(SIZE);
         let (x, y) = b.cell_rect(4, 15).centre();
         assert!(
-            fill_covering(&f, x, y, RED).is_some(),
+            fill_covering(&f, x, y, colours().red).is_some(),
             "there is no food where the food is"
         );
         let (ox, oy) = b.cell_rect(4, 14).centre();
         assert!(
-            fill_covering(&f, ox, oy, RED).is_none(),
+            fill_covering(&f, ox, oy, colours().red).is_none(),
             "there is food on the square beside it too"
         );
     }
@@ -3613,10 +3897,10 @@ mod tests {
         let (x, y) = b.cell_rect(4, 15).centre();
 
         app.pulse_counter = 0;
-        let small = fill_covering(&app.draw(SIZE), x, y, YELLOW)
+        let small = fill_covering(&app.draw(SIZE), x, y, colours().yellow)
             .expect("there is no bonus where the bonus is");
         app.pulse_counter = 4;
-        let large = fill_covering(&app.draw(SIZE), x, y, YELLOW)
+        let large = fill_covering(&app.draw(SIZE), x, y, colours().yellow)
             .expect("the bonus stopped being drawn part way through its pulse");
         assert!(
             large.w > small.w,

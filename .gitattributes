@@ -128,3 +128,11 @@
 # must yield the same answers as a sorted one.
 bench/boot-history.jsonl merge=union
 bench/history.jsonl merge=union
+
+# A grammar's corpus example of CRLF input (lane C, `gui/syntax`, design-decisions
+# 1437). Its carriage returns ARE the test -- tree-sitter's grammars ship a
+# `crlf.txt` corpus to check that Windows line endings parse -- so the file is
+# stored and checked out byte for byte, as its authors wrote it. Normalised to
+# LF, the example would pass while testing nothing. At any depth: C++'s corpus
+# holds C's in `corpus/c/`, its `crlf.txt` among them.
+gui/syntax/grammars/**/crlf.txt -text

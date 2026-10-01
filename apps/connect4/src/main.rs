@@ -121,32 +121,55 @@
 //!     failed. The test now asks `ai_best_move` what it would choose, on a
 //!     clone of the board, before letting `ai_turn` play at all.
 
+use gamechrome::{Chrome, Ink};
 use guitk::color::Color;
 use guitk::event::{Event, EventResult, Key, KeyEvent, MouseButton, MouseEvent, MouseEventKind};
 use guitk::frame::Rect;
+use guitk::palette::Palette;
 use guitk::probe::Probe;
 use guitk::render::{FontWeightHint, RenderCommand, RenderTree, TextOverflow};
 use guitk::style::CornerRadii;
+use guitk::surface::Surface;
 use guitk::text;
 use oswindow::app::{self, App, Response};
 use std::process::ExitCode;
 use std::time::Duration;
 
 // ── Catppuccin Mocha, only the entries this program actually paints with ──
-const COL_BASE: Color = Color::from_hex(0x1E1E2E);
-const COL_MANTLE: Color = Color::from_hex(0x181825);
-const COL_CRUST: Color = Color::from_hex(0x11111B);
-const COL_SURFACE0: Color = Color::from_hex(0x313244);
-const COL_SURFACE1: Color = Color::from_hex(0x45475A);
-const COL_TEXT: Color = Color::from_hex(0xCDD6F4);
-const COL_SUBTEXT0: Color = Color::from_hex(0xA6ADC8);
-const COL_OVERLAY0: Color = Color::from_hex(0x6C7086);
-const COL_BLUE: Color = Color::from_hex(0x89B4FA);
-const COL_GREEN: Color = Color::from_hex(0xA6E3A1);
-const COL_RED: Color = Color::from_hex(0xF38BA8);
-const COL_YELLOW: Color = Color::from_hex(0xF9E2AF);
-const COL_PEACH: Color = Color::from_hex(0xFAB387);
-const COL_LAVENDER: Color = Color::from_hex(0xB4BEFE);
+/// The two sides' discs: a player tells the sides apart by them, so they keep
+/// their colours in every theme (the operator's answer to C-Q16, §1422). As
+/// `(disc, deep)`: the disc's own face, and a deeper shade of the same hue for
+/// the side's colour written as text on a light ground, where the pale disc
+/// colour would not read (`gamechrome::legible_on`, §1225).
+const RED_DISC: (Color, Color) = (Color::from_hex(0xF38BA8), Color::from_hex(0xB0103A));
+const YELLOW_DISC: (Color, Color) = (Color::from_hex(0xF9E2AF), Color::from_hex(0x8A5A00));
+
+/// The ink of a number written on a disc: both discs are pale.
+///
+/// The near-black is a neutral one, not Mocha's crust (`11111B`): the palette
+/// test matches the game's own colours on RGB, and Mocha's crust among them
+/// would pass a leftover Mocha crust anywhere in a light window.
+const DISC_INK: Color = Color::from_hex(0x161616);
+
+/// The colours this window draws in: the chrome and the frame from the
+/// user's palette, the discs from [`RED_DISC`] and [`YELLOW_DISC`]. It drew
+/// everything from its own copy of Catppuccin Mocha -- dark on a light
+/// desktop, the frame included.
+#[derive(Clone, Copy, Debug)]
+struct Colours {
+    chrome: Chrome,
+    /// The board the holes are cut in.
+    frame: Color,
+}
+
+impl Colours {
+    fn of(p: &Palette) -> Self {
+        Self {
+            chrome: Chrome::of(p),
+            frame: p.surface1,
+        }
+    }
+}
 
 // ── The board ───────────────────────────────────────────────────────────────
 
@@ -231,20 +254,30 @@ impl Cell {
 
     /// The face a piece of this colour is painted with. An empty cell is a
     /// hole in the board, and is painted the colour of what is behind it.
-    fn face(self) -> Color {
+    fn face(self, c: &Colours) -> Color {
         match self {
-            Self::Red => COL_RED,
-            Self::Yellow => COL_YELLOW,
-            Self::Empty => COL_CRUST,
+            Self::Red => RED_DISC.0,
+            Self::Yellow => YELLOW_DISC.0,
+            Self::Empty => c.chrome.well,
         }
     }
 
     /// The ink a caption written over this piece is drawn in. Both pieces are
-    /// pale, so both take dark ink; a hole takes light, because it is dark.
-    fn ink(self) -> Color {
+    /// pale, so both take dark ink; a hole takes the chrome's.
+    fn ink(self, c: &Colours) -> Color {
         match self {
-            Self::Red | Self::Yellow => COL_CRUST,
-            Self::Empty => COL_SUBTEXT0,
+            Self::Red | Self::Yellow => DISC_INK,
+            Self::Empty => c.chrome.dim,
+        }
+    }
+
+    /// This side's colour as text on `ground`: its disc's hue, in the shade
+    /// that reads there.
+    fn text_on(self, ground: Color, c: &Colours) -> Color {
+        match self {
+            Self::Red => gamechrome::legible_on(RED_DISC, ground),
+            Self::Yellow => gamechrome::legible_on(YELLOW_DISC, ground),
+            Self::Empty => c.chrome.text,
         }
     }
 
@@ -998,18 +1031,36 @@ fn centred(f: &mut Frame, r: Rect, body: &str, size: f32, color: Color, weight: 
     );
 }
 
-/// A button: a filled box with a hit box on it and a centred label.
-fn button(f: &mut Frame, r: Rect, target: Target, body: &str, size: f32, face: Color, ink: Color) {
-    // No `r.is_empty()` guard, and none is needed: `fill` and `centred` return
-    // on an empty box, and `Frame::hit` refuses to record one — so a button
-    // with no box paints nothing and takes no clicks whichever way round it is
-    // written. It had one, and mutation testing could not tell it from its own
-    // absence, which is lesson 51's signature.
-    fill(f, r, face, (r.h * 0.22).min(8.0));
-    // Recorded by the pass that paints it, so a button that moved took its hit
-    // box with it and there is no second copy of the geometry to disagree.
+/// A button: the toolkit's push button, in the palette, with its label at
+/// the window's size, and a hit box on it.
+#[allow(clippy::too_many_arguments)]
+fn button(
+    f: &mut Frame,
+    palette: &Palette,
+    r: Rect,
+    target: Target,
+    body: &str,
+    size: f32,
+    live: bool,
+    ground: Color,
+) {
+    if r.w <= 0.0 || r.h <= 0.0 {
+        return;
+    }
+    gamechrome::button(
+        f,
+        palette,
+        (r.x, r.y, r.w, r.h),
+        body,
+        size,
+        guitk::button::Kind::Plain,
+        guitk::button::State {
+            disabled: !live,
+            ..guitk::button::State::default()
+        },
+        ground,
+    );
     f.hit(target, r);
-    centred(f, r, body, size, ink, FontWeightHint::Bold);
 }
 
 // ── The help sheet's contents ───────────────────────────────────────────────
@@ -1084,6 +1135,10 @@ pub struct Connect4 {
     /// is read against.
     width: f32,
     height: f32,
+    /// The user's colours, replaced whenever the theme changes. Seeded from
+    /// the defaults; the framework calls `App::theme_changed` before the
+    /// first frame.
+    palette: Palette,
 }
 
 impl Connect4 {
@@ -1105,6 +1160,7 @@ impl Connect4 {
             show_help: false,
             width: WINDOW_WIDTH,
             height: WINDOW_HEIGHT,
+            palette: Palette::for_mode(false),
         }
     }
 
@@ -1404,12 +1460,12 @@ impl Connect4 {
         }
     }
 
-    fn status_colour(&self) -> Color {
+    fn status_colour(&self, c: &Colours) -> Color {
         match self.status {
-            GameStatus::Playing => COL_BLUE,
-            GameStatus::Won(winner) if winner == self.human_player => COL_GREEN,
-            GameStatus::Won(_) => COL_RED,
-            GameStatus::Draw => COL_PEACH,
+            GameStatus::Playing => c.chrome.key,
+            GameStatus::Won(winner) if winner == self.human_player => c.chrome.good,
+            GameStatus::Won(_) => c.chrome.bad,
+            GameStatus::Draw => c.chrome.even,
         }
     }
 
@@ -1417,19 +1473,20 @@ impl Connect4 {
     pub fn frame(&self, width: f32, height: f32) -> Frame {
         let l = Layout::new(width, height);
         let mut f = Frame::new(l.window.w, l.window.h);
-        fill(&mut f, l.window, COL_BASE, 0.0);
-        self.draw_header(&mut f, &l);
-        self.draw_info(&mut f, &l);
-        self.draw_chute(&mut f, &l);
-        self.draw_board(&mut f, &l);
-        self.draw_footer(&mut f, &l);
+        let c = Colours::of(&self.palette);
+        fill(&mut f, l.window, c.chrome.page, 0.0);
+        self.draw_header(&mut f, &l, &c);
+        self.draw_info(&mut f, &l, &c);
+        self.draw_chute(&mut f, &l, &c);
+        self.draw_board(&mut f, &l, &c);
+        self.draw_footer(&mut f, &l, &c);
         if self.show_help {
-            self.draw_help(&mut f, &l);
+            self.draw_help(&mut f, &l, &c);
         }
         f
     }
 
-    fn draw_header(&self, f: &mut Frame, l: &Layout) {
+    fn draw_header(&self, f: &mut Frame, l: &Layout, c: &Colours) {
         // No "did the header fit?" guard. A band that did not fit is
         // `Rect::EMPTY`, and every call below already refuses one: `fill` and
         // `centred` return on an empty box, `score_box` returns empty boxes of
@@ -1438,12 +1495,22 @@ impl Connect4 {
         // four places — `nth_of` refuses the same guard for the same reason,
         // and `known-issues.md` lesson 51 is what happens when one is written
         // anyway: a line no test can own, because deleting it changes nothing.
-        fill(f, l.header, COL_MANTLE, 0.0);
+        fill(f, l.header, c.chrome.band, 0.0);
 
+        // Each side's count in its own disc's colour -- the side it actually
+        // is, which was red for "You" whichever colour the player had taken.
         let boxes = [
-            ("You", self.human_wins, COL_RED),
-            ("AI", self.ai_wins, COL_YELLOW),
-            ("Draw", self.draws, COL_OVERLAY0),
+            (
+                "You",
+                self.human_wins,
+                self.human_player.text_on(c.chrome.raised, c),
+            ),
+            (
+                "AI",
+                self.ai_wins,
+                self.ai_player.text_on(c.chrome.raised, c),
+            ),
+            ("Draw", self.draws, c.chrome.dim),
         ];
         // Index 0 is the box nearest the right edge, so the readouts are drawn
         // right to left and read left to right.
@@ -1454,22 +1521,26 @@ impl Connect4 {
                 continue;
             }
             leftmost = leftmost.min(r.x);
-            fill(f, r, COL_SURFACE0, (r.h * 0.2).min(8.0));
+            fill(f, r, c.chrome.raised, (r.h * 0.2).min(8.0));
             let size = (r.h * 0.3).min(l.small);
+            // Both moved only as far as they must be to read on the raised
+            // box: the palette's grey is made for the page, and was 4.1:1
+            // here in a light theme, and a disc's shade 3.8:1.
             centred(
                 f,
                 Rect::new(r.x, r.y, r.w, r.h * 0.5),
                 name,
                 size,
-                COL_SUBTEXT0,
+                Ink::on(c.chrome.dim, &[c.chrome.raised]).at(size, false),
                 FontWeightHint::Regular,
             );
+            let count_size = (r.h * 0.4).min(l.font);
             centred(
                 f,
                 Rect::new(r.x, r.y + r.h * 0.42, r.w, r.h * 0.58),
                 &count.to_string(),
-                (r.h * 0.4).min(l.font),
-                ink,
+                count_size,
+                Ink::on(ink, &[c.chrome.raised]).at(count_size, true),
                 FontWeightHint::Bold,
             );
         }
@@ -1483,13 +1554,13 @@ impl Connect4 {
             l.header.y + (l.header.h - text::line_height(l.font, FontWeightHint::Bold)) / 2.0,
             "Connect Four",
             l.font,
-            COL_LAVENDER,
+            c.chrome.title,
             FontWeightHint::Bold,
             Some(title_w),
         );
     }
 
-    fn draw_info(&self, f: &mut Frame, l: &Layout) {
+    fn draw_info(&self, f: &mut Frame, l: &Layout, c: &Colours) {
         // No band guard, for the reason given in `draw_header`: `centred`
         // refuses an empty box, and there is nothing else here to refuse.
         centred(
@@ -1497,14 +1568,14 @@ impl Connect4 {
             l.info,
             &self.status_line(),
             (l.info.h * 0.7).min(l.font),
-            self.status_colour(),
+            self.status_colour(c),
             FontWeightHint::Bold,
         );
     }
 
     /// The strip above the board: each column's number, and under the cursor's
     /// number the piece that is about to fall.
-    fn draw_chute(&self, f: &mut Frame, l: &Layout) {
+    fn draw_chute(&self, f: &mut Frame, l: &Layout, c: &Colours) {
         // No band guard: `chute_slot` asks `shows` itself and hands back
         // `Rect::EMPTY` for every column when the chute did not fit, which the
         // skip below already handles. See `draw_header`.
@@ -1527,11 +1598,13 @@ impl Connect4 {
                 disc(
                     f,
                     Rect::new(cx - d / 2.0, cy - d / 2.0, d, d),
-                    self.human_player.face(),
+                    self.human_player.face(c),
                 );
-                self.human_player.ink()
+                self.human_player.ink(c)
             } else {
-                COL_OVERLAY0
+                // Live labels -- the columns' numbers -- not the disabled grey
+                // they were drawn in.
+                c.chrome.dim
             };
             centred(
                 f,
@@ -1544,7 +1617,7 @@ impl Connect4 {
         }
     }
 
-    fn draw_board(&self, f: &mut Frame, l: &Layout) {
+    fn draw_board(&self, f: &mut Frame, l: &Layout, c: &Colours) {
         // No band guard here either, and this one took two tries to see. The
         // guard was kept on the reasoning that the line joining the winning
         // four is pushed unconditionally below, so a board with no room would
@@ -1556,10 +1629,10 @@ impl Connect4 {
         // it would touch the board's `BOARD_SHARE`, so the height does too.
         // A guard against a case the layout cannot produce is lesson 51 again,
         // and the comment defending it was doing the same work as the guard.
-        fill(f, l.board, COL_BLUE, (l.step * 0.2).min(10.0));
+        fill(f, l.board, c.frame, (l.step * 0.2).min(10.0));
         for row in 0..ROWS {
             for col in 0..COLS {
-                disc(f, l.cell(row, col), self.board.get(row, col).face());
+                disc(f, l.cell(row, col), self.board.get(row, col).face(c));
             }
         }
 
@@ -1576,7 +1649,7 @@ impl Connect4 {
                     y: r.y,
                     width: r.w,
                     height: r.h,
-                    color: COL_GREEN,
+                    color: c.chrome.good,
                     line_width: (l.step * 0.06).clamp(1.0, 5.0),
                     corner_radii: CornerRadii::all(r.w.min(r.h) / 2.0),
                 });
@@ -1593,7 +1666,7 @@ impl Connect4 {
                 y1,
                 x2,
                 y2,
-                color: COL_GREEN,
+                color: c.chrome.good,
                 width: (l.step * 0.06).clamp(1.0, 5.0),
             });
         }
@@ -1610,55 +1683,68 @@ impl Connect4 {
         }
     }
 
-    fn draw_footer(&self, f: &mut Frame, l: &Layout) {
+    fn draw_footer(&self, f: &mut Frame, l: &Layout, c: &Colours) {
         // As in `draw_header`: no guard on the band. `footer_button` turns an
         // empty footer into empty buttons unaided, and an empty button paints
         // nothing and records no hit — so a window with no footer has no
         // footer controls without anything here saying so.
         let size = (l.footer.h * 0.34).min(l.small);
+        let ground = c.chrome.page;
         button(
             f,
+            &self.palette,
             l.footer_button(0),
             Target::NewGame,
             "New game",
             size,
-            COL_SURFACE1,
-            COL_TEXT,
+            true,
+            ground,
         );
         // Greyed rather than gone. The button keeps its hit box with nothing
         // to undo, so the answer to pressing it is a refusal the player can
         // see rather than a control that moved.
-        let (undo_face, undo_ink) = if self.can_undo() {
-            (COL_SURFACE1, COL_TEXT)
-        } else {
-            (COL_SURFACE0, COL_OVERLAY0)
-        };
         button(
             f,
+            &self.palette,
             l.footer_button(1),
             Target::Undo,
             "Undo",
             size,
-            undo_face,
-            undo_ink,
+            self.can_undo(),
+            ground,
         );
         button(
             f,
+            &self.palette,
             l.footer_button(2),
             Target::Help,
             "Help",
             size,
-            COL_SURFACE1,
-            COL_TEXT,
+            true,
+            ground,
         );
     }
 
-    fn draw_help(&self, f: &mut Frame, l: &Layout) {
+    fn draw_help(&self, f: &mut Frame, l: &Layout, c: &Colours) {
         let h = l.help;
         if h.is_empty() {
             return;
         }
-        fill(f, h, COL_SURFACE0, (h.h * 0.04).min(10.0));
+        // The toolkit's panel, in the theme's look.
+        if h.w >= 1.0 && h.h >= 1.0 {
+            self.palette.push_surface(
+                f,
+                h.x,
+                h.y,
+                h.w,
+                h.h,
+                (h.h * 0.04).min(10.0),
+                Surface::Panel,
+            );
+        }
+        // On the toolkit's panel the chrome's roles read as they are: the
+        // palette inks its text colours for its own panel (`Palette::ink`).
+
         // The hit box is the whole *window*, not the sheet's own rectangle,
         // and the sheet's last line is the reason: it says "click anywhere to
         // close", and anywhere means anywhere. Claiming only its own rectangle
@@ -1677,7 +1763,7 @@ impl Connect4 {
             Rect::new(h.x, h.y, h.w, head_h),
             HELP_TITLE,
             (head_h * 0.6).min(l.font * 1.2),
-            COL_LAVENDER,
+            c.chrome.title,
             FontWeightHint::Bold,
         );
 
@@ -1700,7 +1786,7 @@ impl Connect4 {
                 y,
                 key,
                 size,
-                COL_TEXT,
+                c.chrome.text,
                 FontWeightHint::Bold,
                 Some(key_w),
             );
@@ -1710,7 +1796,7 @@ impl Connect4 {
                 y,
                 meaning,
                 size,
-                COL_SUBTEXT0,
+                c.chrome.dim,
                 FontWeightHint::Regular,
                 Some((h.w - key_w - l.pad * 2.0).max(0.0)),
             );
@@ -1721,7 +1807,7 @@ impl Connect4 {
             Rect::new(h.x, h.y + head_h + l.pad + rows * step, h.w, step),
             "Click anywhere to close",
             size * 0.9,
-            COL_OVERLAY0,
+            c.chrome.dim,
             FontWeightHint::Regular,
         );
     }
@@ -1817,6 +1903,10 @@ pub fn handle_event(app: &mut Connect4, event: &Event) -> EventResult {
 }
 
 impl App for Connect4 {
+    fn theme_changed(&mut self, palette: &Palette) {
+        self.palette = *palette;
+    }
+
     fn title(&self) -> String {
         "Connect Four".to_string()
     }
@@ -1907,6 +1997,173 @@ mod tests {
     use super::*;
     use guitk::event::Modifiers;
     use guitk::probe;
+
+    /// The palette for a light or a dark theme, in the bordered look (the
+    /// default) or the card look.
+    fn palette(light: bool, cards: bool) -> Palette {
+        let mut p = Palette::for_mode(light);
+        p.set_surface_style(if cards {
+            guitk::palette::SurfaceStyle::Cards
+        } else {
+            guitk::palette::SurfaceStyle::Borders
+        });
+        p
+    }
+
+    /// `(light, cards)`: both themes, in both surface looks.
+    const LOOKS: [(bool, bool); 4] = [(false, false), (true, false), (false, true), (true, true)];
+
+    /// Every state the window shows, drawn in `p`'s colours: a game in
+    /// play, won by either side, drawn, the help sheet up, and cramped.
+    fn every_look(p: &Palette) -> Vec<(&'static str, Frame)> {
+        let mut app = game();
+        app.theme_changed(p);
+        app.drop_at(2);
+        app.drop_at(3);
+        let playing = app.frame(WINDOW_WIDTH, WINDOW_HEIGHT);
+        let cramped = app.frame(320.0, 300.0);
+        app.status = GameStatus::Won(Cell::Red);
+        let red = app.frame(WINDOW_WIDTH, WINDOW_HEIGHT);
+        app.status = GameStatus::Won(Cell::Yellow);
+        let yellow = app.frame(WINDOW_WIDTH, WINDOW_HEIGHT);
+        app.status = GameStatus::Draw;
+        let drawn = app.frame(WINDOW_WIDTH, WINDOW_HEIGHT);
+        app.show_help = true;
+        let help = app.frame(WINDOW_WIDTH, WINDOW_HEIGHT);
+        vec![
+            ("playing", playing),
+            ("red won", red),
+            ("yellow won", yellow),
+            ("drawn", drawn),
+            ("help", help),
+            ("cramped", cramped),
+        ]
+    }
+
+    /// **The window is drawn in the user's colours**, light or dark, in
+    /// either surface look and every state it shows, with only the discs'
+    /// colours not the palette's (the operator's C-Q16).
+    #[test]
+    fn the_window_is_drawn_in_the_users_colours() {
+        for (light, cards) in LOOKS {
+            let p = palette(light, cards);
+            let c = Colours::of(&p);
+            let mut derived = vec![
+                RED_DISC.0,
+                RED_DISC.1,
+                YELLOW_DISC.0,
+                YELLOW_DISC.1,
+                DISC_INK,
+            ];
+            derived.extend(gamechrome::button_colours(
+                &p,
+                guitk::button::Kind::Plain,
+                c.chrome.page,
+            ));
+            // Words moved to read on the ground they sit on.
+            for (ink, ground) in [
+                (c.chrome.dim, c.chrome.raised),
+                (
+                    gamechrome::legible_on(RED_DISC, c.chrome.raised),
+                    c.chrome.raised,
+                ),
+                (
+                    gamechrome::legible_on(YELLOW_DISC, c.chrome.raised),
+                    c.chrome.raised,
+                ),
+            ] {
+                let moved = Ink::on(ink, &[ground]);
+                derived.extend([moved.large, moved.small]);
+            }
+            for (what, f) in every_look(&p) {
+                appearance::palette_check::assert_drawn_from(
+                    &p,
+                    f.commands(),
+                    &derived,
+                    &format!("connect4, {what}, light: {light}, cards: {cards}"),
+                );
+            }
+        }
+    }
+
+    /// **Every text reads on what is drawn under it**, in either theme and
+    /// either surface look (`gamechrome::legibility`: each run held to
+    /// WCAG's floor for its size against the fills under it). A
+    /// switched-off button's label is exempt, as WCAG exempts an inactive
+    /// control.
+    #[test]
+    fn every_text_reads_on_what_is_under_it_in_either_theme() {
+        let mut bad = Vec::new();
+        for (light, cards) in LOOKS {
+            let p = palette(light, cards);
+            let off = guitk::button::paint(
+                &p,
+                guitk::button::Kind::Plain,
+                guitk::button::State {
+                    disabled: true,
+                    ..guitk::button::State::default()
+                },
+                Colours::of(&p).chrome.page,
+            );
+            let exempt = |r: &gamechrome::legibility::Read| {
+                r.ink == off.ink && (r.ground == off.lower || r.ground == off.upper)
+            };
+            for (what, f) in every_look(&p) {
+                for r in gamechrome::legibility::illegible(f.commands(), p.base, exempt) {
+                    bad.push(format!(
+                        "{what}, light: {light}, cards: {cards}: {:?} {:.2}:1 on {:?}",
+                        r.text,
+                        r.ratio(),
+                        r.ground
+                    ));
+                }
+            }
+        }
+        assert!(bad.is_empty(), "connect4: {bad:#?}");
+    }
+
+    /// **"You" is counted in the colour the player plays**, and follows a
+    /// swap of sides: it was red whichever side the player had taken.
+    #[test]
+    fn the_players_count_is_in_the_colour_they_play() {
+        let mut app = game();
+        // Two digits each, so no column number in the chute can be taken for
+        // either count.
+        app.human_wins = 12;
+        app.ai_wins = 34;
+        for _ in 0..2 {
+            let c = Colours::of(&app.palette);
+            let f = app.frame(WINDOW_WIDTH, WINDOW_HEIGHT);
+            let ink = |count: &str| {
+                f.commands()
+                    .iter()
+                    .find_map(|cmd| match cmd {
+                        RenderCommand::Text { text, color, .. } if text == count => Some(*color),
+                        _ => None,
+                    })
+                    .unwrap_or_else(|| panic!("{count} is not drawn"))
+            };
+            let side = app.human_player;
+            assert_eq!(ink("12"), side.text_on(c.chrome.raised, &c), "{side:?}");
+            assert_eq!(ink("34"), app.ai_player.text_on(c.chrome.raised, &c));
+            app.apply(Intent::SwapSides);
+        }
+        assert_eq!(app.human_player, Cell::Red, "the sides did not swap back");
+    }
+
+    /// A side's count is written in its disc's hue, and reads in either
+    /// theme -- the pale yellow did not on a light panel.
+    #[test]
+    fn each_sides_count_reads_in_its_own_colour() {
+        for light in [false, true] {
+            let c = Colours::of(&Palette::for_mode(light));
+            for side in [Cell::Red, Cell::Yellow] {
+                let ink = side.text_on(c.chrome.raised, &c);
+                let ratio = guitk::theme::contrast_ratio(ink, c.chrome.raised);
+                assert!(ratio >= 3.0, "{side:?} is {ratio:.2}:1 (light: {light})");
+            }
+        }
+    }
 
     /// Windows to check the layout against, from a desktop down to something
     /// no sane person would resize to.
@@ -4705,7 +4962,7 @@ mod tests {
             10.0,
             "",
             12.0,
-            COL_TEXT,
+            Color::from_hex(0xCDD6F4),
             FontWeightHint::Regular,
             Some(80.0),
         );
@@ -4724,7 +4981,7 @@ mod tests {
             0.0,
             "hello",
             12.0,
-            COL_TEXT,
+            Color::from_hex(0xCDD6F4),
             FontWeightHint::Regular,
             Some(0.0),
         );
@@ -4734,22 +4991,29 @@ mod tests {
     #[test]
     fn a_box_with_no_area_is_not_painted() {
         let mut f = Frame::new(100.0, 100.0);
-        fill(&mut f, Rect::EMPTY, COL_RED, 0.0);
-        fill(&mut f, Rect::new(10.0, 10.0, 0.0, 20.0), COL_RED, 0.0);
+        fill(&mut f, Rect::EMPTY, Color::from_hex(0xF38BA8), 0.0);
+        fill(
+            &mut f,
+            Rect::new(10.0, 10.0, 0.0, 20.0),
+            Color::from_hex(0xF38BA8),
+            0.0,
+        );
         assert!(f.commands().is_empty(), "an empty box was painted");
     }
 
     #[test]
     fn a_button_with_no_box_is_neither_painted_nor_clickable() {
         let mut f = Frame::new(100.0, 100.0);
+        let p = Palette::for_mode(false);
         button(
             &mut f,
+            &p,
             Rect::EMPTY,
             Target::Help,
             "Help",
             10.0,
-            COL_SURFACE1,
-            COL_TEXT,
+            true,
+            p.base,
         );
         assert!(f.commands().is_empty());
         assert!(f.hits().is_empty(), "a control nobody can see took clicks");
@@ -4759,7 +5023,14 @@ mod tests {
     fn a_line_is_centred_in_its_box_both_ways() {
         let mut f = Frame::new(200.0, 100.0);
         let r = Rect::new(20.0, 30.0, 160.0, 40.0);
-        centred(&mut f, r, "hi", 12.0, COL_TEXT, FontWeightHint::Regular);
+        centred(
+            &mut f,
+            r,
+            "hi",
+            12.0,
+            Color::from_hex(0xCDD6F4),
+            FontWeightHint::Regular,
+        );
         let boxes = text_boxes(&f);
         assert_eq!(boxes.len(), 1);
         let drawn = boxes[0].1;
@@ -4782,7 +5053,7 @@ mod tests {
             r,
             "a very long line indeed",
             12.0,
-            COL_TEXT,
+            Color::from_hex(0xCDD6F4),
             FontWeightHint::Regular,
         );
         let drawn = text_boxes(&f)[0].1;
@@ -4961,13 +5232,14 @@ mod tests {
     #[test]
     fn the_status_line_is_coloured_by_what_it_says() {
         let mut app = game();
-        assert_eq!(app.status_colour(), COL_BLUE, "a game in play");
+        let c = Colours::of(&app.palette);
+        assert_eq!(app.status_colour(&c), c.chrome.key, "a game in play");
         app.status = GameStatus::Won(Cell::Red);
-        assert_eq!(app.status_colour(), COL_GREEN, "a win");
+        assert_eq!(app.status_colour(&c), c.chrome.good, "a win");
         app.status = GameStatus::Won(Cell::Yellow);
-        assert_eq!(app.status_colour(), COL_RED, "a loss");
+        assert_eq!(app.status_colour(&c), c.chrome.bad, "a loss");
         app.status = GameStatus::Draw;
-        assert_eq!(app.status_colour(), COL_PEACH, "a draw");
+        assert_eq!(app.status_colour(&c), c.chrome.even, "a draw");
     }
 
     #[test]
@@ -4983,7 +5255,7 @@ mod tests {
                 _ => None,
             })
             .expect("the winning line was not drawn");
-        assert_eq!(drawn, COL_GREEN);
+        assert_eq!(drawn, Colours::of(&app.palette).chrome.good);
     }
 
     // ── The chute ──
@@ -5034,7 +5306,7 @@ mod tests {
             f.commands().iter().any(|c| match c {
                 RenderCommand::FillRect {
                     x, y, color, width, ..
-                } => *color == Cell::Red.face() && slot.contains(x + width / 2.0, *y + 1.0),
+                } => *color == RED_DISC.0 && slot.contains(x + width / 2.0, *y + 1.0),
                 _ => false,
             })
         };
@@ -5059,7 +5331,7 @@ mod tests {
                 .any(|c| match c {
                     RenderCommand::FillRect {
                         x, y, color, width, ..
-                    } => *color == Cell::Red.face() && slot.contains(x + width / 2.0, *y + 1.0),
+                    } => *color == RED_DISC.0 && slot.contains(x + width / 2.0, *y + 1.0),
                     _ => false,
                 })
         };
@@ -5091,7 +5363,7 @@ mod tests {
             .any(|c| match c {
                 RenderCommand::FillRect {
                     x, y, color, width, ..
-                } => *color == Cell::Red.face() && slot.contains(x + width / 2.0, *y + 1.0),
+                } => *color == RED_DISC.0 && slot.contains(x + width / 2.0, *y + 1.0),
                 _ => false,
             });
         assert!(!waiting, "a piece waits over a column that is full");
@@ -5109,7 +5381,7 @@ mod tests {
             let waiting = f.commands().iter().any(|c| match c {
                 RenderCommand::FillRect {
                     x, y, color, width, ..
-                } => *color == Cell::Red.face() && slot.contains(x + width / 2.0, *y + 1.0),
+                } => *color == RED_DISC.0 && slot.contains(x + width / 2.0, *y + 1.0),
                 _ => false,
             });
             assert!(!waiting, "a piece waits over column {col} after the game");
@@ -5120,13 +5392,15 @@ mod tests {
 
     #[test]
     fn every_hole_of_the_board_is_painted() {
-        let f = game().frame(WINDOW_WIDTH, WINDOW_HEIGHT);
+        let app = game();
+        let f = app.frame(WINDOW_WIDTH, WINDOW_HEIGHT);
         let l = Layout::new(WINDOW_WIDTH, WINDOW_HEIGHT);
+        let hole = Cell::Empty.face(&Colours::of(&app.palette));
         for row in 0..ROWS {
             for col in 0..COLS {
                 assert_eq!(
                     fill_at(&f, l.cell(row, col)),
-                    Some(Cell::Empty.face()),
+                    Some(hole),
                     "({row}, {col}) is not a hole"
                 );
             }
@@ -5140,9 +5414,18 @@ mod tests {
         app.drop_at(2);
         let f = app.frame(WINDOW_WIDTH, WINDOW_HEIGHT);
         let l = Layout::new(WINDOW_WIDTH, WINDOW_HEIGHT);
-        assert_eq!(fill_at(&f, l.cell(0, 2)), Some(COL_RED), "the first piece");
-        assert_eq!(fill_at(&f, l.cell(1, 2)), Some(COL_YELLOW), "the second");
-        assert_eq!(fill_at(&f, l.cell(2, 2)), Some(Cell::Empty.face()), "above");
+        let c = Colours::of(&app.palette);
+        assert_eq!(
+            fill_at(&f, l.cell(0, 2)),
+            Some(RED_DISC.0),
+            "the first piece"
+        );
+        assert_eq!(fill_at(&f, l.cell(1, 2)), Some(YELLOW_DISC.0), "the second");
+        assert_eq!(
+            fill_at(&f, l.cell(2, 2)),
+            Some(Cell::Empty.face(&c)),
+            "above"
+        );
     }
 
     #[test]
@@ -5154,7 +5437,7 @@ mod tests {
         let f = app.frame(WINDOW_WIDTH, WINDOW_HEIGHT);
         let l = Layout::new(WINDOW_WIDTH, WINDOW_HEIGHT);
         let piece = f.commands().iter().find_map(|c| match c {
-            RenderCommand::FillRect { x, y, color, .. } if *color == COL_RED => Some((*x, *y)),
+            RenderCommand::FillRect { x, y, color, .. } if *color == RED_DISC.0 => Some((*x, *y)),
             _ => None,
         });
         let (_, y) = piece.expect("the piece was not drawn");
@@ -5173,16 +5456,17 @@ mod tests {
         }
         app.drop_at(3);
         let f = app.frame(WINDOW_WIDTH, WINDOW_HEIGHT);
+        let good = Colours::of(&app.palette).chrome.good;
         let rings = f
             .commands()
             .iter()
-            .filter(|c| matches!(c, RenderCommand::StrokeRect { color, .. } if *color == COL_GREEN))
+            .filter(|c| matches!(c, RenderCommand::StrokeRect { color, .. } if *color == good))
             .count();
         assert_eq!(rings, RUN, "the ring is not around all four");
         assert!(
             f.commands()
                 .iter()
-                .any(|c| matches!(c, RenderCommand::Line { color, .. } if *color == COL_GREEN)),
+                .any(|c| matches!(c, RenderCommand::Line { color, .. } if *color == good)),
             "the run's direction is not drawn"
         );
     }
@@ -5222,10 +5506,13 @@ mod tests {
         let mut app = game();
         app.drop_at(0);
         let f = app.frame(WINDOW_WIDTH, WINDOW_HEIGHT);
+        // Rings in the win's colour: the footer's buttons are outlined too,
+        // in the toolkit's edge colour.
+        let good = Colours::of(&app.palette).chrome.good;
         assert!(
             !f.commands()
                 .iter()
-                .any(|c| matches!(c, RenderCommand::StrokeRect { .. })),
+                .any(|c| matches!(c, RenderCommand::StrokeRect { color, .. } if *color == good)),
             "four cells are ringed on a board with no win on it"
         );
     }
@@ -5321,8 +5608,22 @@ mod tests {
         let cold = fill_at(&app.frame(WINDOW_WIDTH, WINDOW_HEIGHT), l.footer_button(1));
         app.drop_at(3);
         let warm = fill_at(&app.frame(WINDOW_WIDTH, WINDOW_HEIGHT), l.footer_button(1));
-        assert_eq!(cold, Some(COL_SURFACE0), "the dead button is not greyed");
-        assert_eq!(warm, Some(COL_SURFACE1), "the live button is greyed");
+        // The toolkit's faces for a switched-off and a live button, on the
+        // page the footer is drawn on.
+        let face = |disabled| {
+            guitk::button::paint(
+                &app.palette,
+                guitk::button::Kind::Plain,
+                guitk::button::State {
+                    disabled,
+                    ..guitk::button::State::default()
+                },
+                Colours::of(&app.palette).chrome.page,
+            )
+            .lower
+        };
+        assert_eq!(cold, Some(face(true)), "the dead button is not greyed");
+        assert_eq!(warm, Some(face(false)), "the live button is greyed");
         assert_ne!(cold, warm);
     }
 

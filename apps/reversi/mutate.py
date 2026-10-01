@@ -362,8 +362,8 @@ MUTATIONS = [
     ),
     (
         "a new game forgets how big the window is",
-        "        let size = self.size;\n        *self = Self::new();\n        self.size = size;",
-        "        *self = Self::new();",
+        "        let (size, palette) = (self.size, self.palette);\n        *self = Self::new();\n        self.size = size;",
+        "        let (size, palette) = (self.size, self.palette);\n        *self = Self::new();\n        let _ = size;",
         ["a_new_game_forgets_the_position_and_keeps_the_window"],
     ),
     (
@@ -401,14 +401,14 @@ MUTATIONS = [
     # -- Drawing -------------------------------------------------------
     (
         "the window is not painted before anything is drawn on it",
-        "        f.push(RenderCommand::FillRect {\n            x: 0.0,\n            y: 0.0,\n            width: l.window.w,\n            height: l.window.h,\n            color: BASE,\n            corner_radii: CornerRadii::ZERO,\n        });",
+        "        f.push(RenderCommand::FillRect {\n            x: 0.0,\n            y: 0.0,\n            width: l.window.w,\n            height: l.window.h,\n            color: c.chrome.page,\n            corner_radii: CornerRadii::ZERO,\n        });",
         "",
         ["the_frame_paints_the_whole_window_and_closes_every_clip"],
     ),
     (
         "the clip is pushed and never popped",
-        "        self.draw_status(&l, &mut f);\n        f.unclip();",
-        "        self.draw_status(&l, &mut f);",
+        "        self.draw_status(&l, &mut f, &c);\n        f.unclip();",
+        "        self.draw_status(&l, &mut f, &c);",
         ["the_frame_paints_the_whole_window_and_closes_every_clip"],
     ),
     (
@@ -468,8 +468,8 @@ MUTATIONS = [
     ),
     (
         "the piece is drawn bigger than the square it sits on",
-        "                draw_piece(f, cx, cy, g.step * 0.37, cell);",
-        "                draw_piece(f, cx, cy, g.step * 0.9, cell);",
+        "                draw_piece(f, cx, cy, g.step * 0.37, cell, shade);",
+        "                draw_piece(f, cx, cy, g.step * 0.9, cell, shade);",
         ["a_piece_fits_inside_the_square_it_sits_on"],
     ),
     (
@@ -504,16 +504,14 @@ MUTATIONS = [
     ),
     (
         "the panel says the game is over while it is being played",
-        '            (Phase::Playing, Cell::White) => ("White to move", PEACH),\n            (Phase::Playing, _) => ("Your turn (Black)", BLUE),',
-        '            (Phase::Playing, Cell::White) => ("Game Over", PEACH),\n            (Phase::Playing, _) => ("Game Over", BLUE),',
-        # Nothing asserted the line while the game was being played: the
-        # finished-game tests only ever read the arm that was not changed.
+        "            (Phase::Playing, Cell::White) => (\"White to move\", read(c.white_side)),\n            (Phase::Playing, _) => (\"Your turn (Black)\", read(c.black_side)),",
+        "            (Phase::Playing, Cell::White) => (\"Game Over\", read(c.white_side)),\n            (Phase::Playing, _) => (\"Game Over\", read(c.black_side)),",
         ["the_panel_names_whose_turn_it_is_and_only_says_so_while_there_is_one"],
     ),
     (
         "the score bar is split by the count of moves, not of pieces",
-        "        let black_w = f32_from_i32(black) / total * bar.w;",
-        "        let black_w = f32_from_i32(black) / total * bar.w * 0.5;",
+        "            black_w = f32_from_i32(black) / total * bar.w;",
+        "            black_w = f32_from_i32(black) / total * bar.w * 0.5;",
         ["the_score_bar_is_split_in_proportion_to_the_two_counts"],
     ),
     (
@@ -669,6 +667,66 @@ MUTATIONS = [
         '        "Reversi".to_string()',
         '        "Othello".to_string()',
         ["the_window_names_itself"],
+    ),
+    (
+        "the theme is never taken up",
+        "    fn theme_changed(&mut self, palette: &Palette) {\n        self.palette = *palette;",
+        "    fn theme_changed(&mut self, palette: &Palette) {\n        let _ = palette;",
+        ["the_window_is_drawn_in_the_users_colours"],
+    ),
+    (
+        "a new game drops the user's colours",
+        "        let (size, palette) = (self.size, self.palette);",
+        "        let (size, palette) = (self.size, Palette::for_mode(false));",
+        ["a_new_game_keeps_the_users_colours"],
+    ),
+    (
+        "black's count is written in the track's ink over black's share",
+        "                Ink::new(l.small, FontWeightHint::Bold, ON_BLACK_PIECE),",
+        "                Ink::new(l.small, FontWeightHint::Bold, c.chrome.text),",
+        ["both_counts_read_on_the_score_bar_in_either_theme"],
+    ),
+    (
+        "the score bar's counts are not clipped to their side",
+        "            f.clip(ground);\n",
+        "",
+        ["both_counts_read_on_the_score_bar_in_either_theme"],
+    ),
+    (
+        "a disc the shade of its square is not ringed",
+        "    let border = gamechrome::edge_on(own_edge, fill, ground);",
+        "    let border = own_edge;",
+        ["both_discs_are_seen_on_both_squares_in_either_theme"],
+    ),
+    (
+        "the cursor is drawn in the lines' colour",
+        "                    color: c.cursor,",
+        "                    color: c.lines,",
+        ["the_cursor_is_ringed_where_it_stands_and_nowhere_else"],
+    ),
+    (
+        "the legal squares' dots are the square's colour",
+        "                    color: c.legal,",
+        "                    color: c.square,",
+        ["the_legal_squares_are_dotted_and_only_they_are"],
+    ),
+    (
+        "the last move leaves no mark",
+        "                    color: c.last,",
+        "                    color: c.square,",
+        ["the_last_move_is_highlighted_on_the_square_it_was_played"],
+    ),
+    (
+        "the side panel's words are the page's inks, 4.1:1 on it",
+        "        let on = c.chrome.on(c.chrome.raised);",
+        "        let on = c.chrome;",
+        ["every_text_reads_on_what_is_under_it_in_either_theme"],
+    ),
+    (
+        "a side's colour on the panel is the page's, 3.6:1 on it",
+        "        let read = |ink: Color| gamechrome::Ink::on(ink, &[c.chrome.raised]).small;",
+        "        let read = |ink: Color| ink;",
+        ["every_text_reads_on_what_is_under_it_in_either_theme"],
     ),
 ]
 

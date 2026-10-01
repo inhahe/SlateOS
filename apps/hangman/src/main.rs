@@ -16,33 +16,86 @@
 //! keyboard is measured from the room left rather than squeezed -- a key too
 //! small to hit is worse than no column.
 
-use appearance::AppearanceSettings;
+use guitk::button::{Kind, State};
 use guitk::color::Color;
 use guitk::event::{Event, EventResult, Key, KeyEvent, MouseButton, MouseEvent, MouseEventKind};
 use guitk::frame::{Frame, Rect};
+use guitk::palette::{Palette, SurfaceStyle};
 use guitk::probe::Probe;
 use guitk::render::{FontWeightHint, RenderCommand, RenderTree, TextOverflow};
 use guitk::rng::{RandomSource, SeededRng, seed_from_system};
 use guitk::style::CornerRadii;
+use guitk::surface::Surface;
 use guitk::text;
+use guitk::theme::with_alpha;
 use oswindow::app::{self, App, Response};
 use std::process::ExitCode;
 
-// -- Catppuccin Mocha palette -------------------------------------------
-const BASE: Color = Color::from_hex(0x1E1E2E);
-const MANTLE: Color = Color::from_hex(0x181825);
-const SURFACE0: Color = Color::from_hex(0x313244);
-const TEXT_COLOR: Color = Color::from_hex(0xCDD6F4);
-const BLUE: Color = Color::from_hex(0x89B4FA);
-const GREEN: Color = Color::from_hex(0xA6E3A1);
-const RED: Color = Color::from_hex(0xF38BA8);
-const YELLOW: Color = Color::from_hex(0xF9E2AF);
-const PEACH: Color = Color::from_hex(0xFAB387);
-const OVERLAY0: Color = Color::from_hex(0x6C7086);
-const TEAL: Color = Color::from_hex(0x94E2D5);
-const MAUVE: Color = Color::from_hex(0xCBA6F7);
-const SUBTEXT0: Color = Color::from_hex(0xA6ADC8);
-const LAVENDER: Color = Color::from_hex(0xB4BEFE);
+// ── Colours ─────────────────────────────────────────────────────────
+//
+// Everything in this game follows the user's palette (the operator's answer
+// to C-Q16, §1422, and lane C's call for this game): its surfaces and text
+// from the palette's roles, each hue in the palette's ink for it, which reads
+// on the page in a light theme as in a dark one. It was all a copy of
+// Catppuccin Mocha, dark on a light desktop.
+
+/// The colours the window draws in, from the user's palette.
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct Colours {
+    /// The page.
+    base: Color,
+    /// A band.
+    mantle: Color,
+    /// Raised.
+    surface0: Color,
+    /// Text.
+    text: Color,
+    /// The palette's blue, inked for the page.
+    blue: Color,
+    /// The palette's green, inked for the page.
+    green: Color,
+    /// The palette's red, inked for the page.
+    red: Color,
+    /// The palette's yellow, inked for the page.
+    yellow: Color,
+    /// The palette's peach, inked for the page.
+    peach: Color,
+    /// The palette's teal, inked for the page.
+    teal: Color,
+    /// The palette's mauve, inked for the page.
+    mauve: Color,
+    /// Secondary text.
+    subtext0: Color,
+    /// The palette's lavender, inked for the page.
+    lavender: Color,
+
+    /// A guessed key's letter, on the key's green (right) or red (wrong):
+    /// whichever of the text and the page stands off it.
+    on_right: Color,
+    on_wrong: Color,
+}
+
+impl Colours {
+    fn of(p: &Palette) -> Self {
+        Self {
+            base: p.base,
+            mantle: p.mantle,
+            surface0: p.surface0,
+            text: p.text,
+            blue: p.ink(p.blue),
+            green: p.ink(p.green),
+            red: p.ink(p.red),
+            yellow: p.ink(p.yellow),
+            peach: p.ink(p.peach),
+            teal: p.ink(p.teal),
+            mauve: p.ink(p.mauve),
+            subtext0: p.subtext0,
+            lavender: p.ink(p.lavender),
+            on_right: gamechrome::legible_on((p.text, p.base), p.ink(p.green)),
+            on_wrong: gamechrome::legible_on((p.text, p.base), p.ink(p.red)),
+        }
+    }
+}
 
 /// The window the program asks for, and the size its tests draw at.
 const WINDOW_WIDTH: f32 = 740.0;
@@ -617,13 +670,13 @@ impl Category {
         }
     }
 
-    fn color(self) -> Color {
+    fn color(self, c: &Colours) -> Color {
         match self {
-            Self::Animals => PEACH,
-            Self::Fruits => GREEN,
-            Self::Countries => BLUE,
-            Self::Sports => YELLOW,
-            Self::Technology => MAUVE,
+            Self::Animals => c.peach,
+            Self::Fruits => c.green,
+            Self::Countries => c.blue,
+            Self::Sports => c.yellow,
+            Self::Technology => c.mauve,
         }
     }
 
@@ -914,6 +967,12 @@ struct HangmanApp {
     size: (f32, f32),
     /// Whether the shortcut card is up.
     show_help: bool,
+    /// The user's colours, replaced whenever the theme changes. Seeded from
+    /// the defaults; the framework calls `App::theme_changed` before the
+    /// first frame.
+    palette: Palette,
+    /// `palette`'s colours as this window draws them: rebuilt with it.
+    colours: Colours,
 }
 
 impl HangmanApp {
@@ -942,6 +1001,8 @@ impl HangmanApp {
             category_cursor: 0,
             size: (WINDOW_WIDTH, WINDOW_HEIGHT),
             show_help: false,
+            palette: Palette::for_mode(false),
+            colours: Colours::of(&Palette::for_mode(false)),
         };
         app.pick_word();
         app
@@ -1145,7 +1206,7 @@ impl HangmanApp {
     fn frame(&self, w: f32, h: f32) -> Frame<Target> {
         let l = Layout::solve(w, h);
         let mut f = Frame::new(w, h);
-        fill(&mut f, l.window, BASE, CornerRadii::ZERO);
+        fill(&mut f, l.window, self.colours.base, CornerRadii::ZERO);
 
         match self.phase {
             GamePhase::CategorySelect => self.draw_menu(&mut f, &l),
@@ -1166,7 +1227,7 @@ impl HangmanApp {
         if self.show_help {
             guitk::shortcut::render_card(
                 &mut f,
-                &guitk::palette::Palette::from_settings(&AppearanceSettings::default()),
+                &self.palette,
                 (w, h),
                 0.0,
                 SHORTCUTS,
@@ -1179,6 +1240,39 @@ impl HangmanApp {
     /// The category menu: a column of rows and a row of difficulty chips,
     /// both of which are now clickable. They were keyboard-only, which is the
     /// first screen a player sees.
+    /// A control: the toolkit's push button at this window's size, on
+    /// `ground`. `on` draws the choice made -- the level in play, the answer
+    /// the result card offers first -- as the toolkit's primary button, and
+    /// `live` false the switched-off look.
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "a button's place, label, size, two states and ground; a struct would be built at each call and read once"
+    )]
+    fn button(
+        &self,
+        f: &mut Frame<Target>,
+        r: Rect,
+        label: &str,
+        size: f32,
+        on: bool,
+        live: bool,
+        ground: Color,
+    ) {
+        gamechrome::button(
+            f,
+            &self.palette,
+            (r.x, r.y, r.w, r.h),
+            label,
+            size,
+            if on { Kind::Primary } else { Kind::Plain },
+            State {
+                disabled: !live,
+                ..State::default()
+            },
+            ground,
+        );
+    }
+
     fn draw_menu(&self, f: &mut Frame<Target>, l: &Layout) {
         let title = "HANGMAN";
         let subtitle = "Choose a Category";
@@ -1198,7 +1292,7 @@ impl HangmanApp {
             title,
             title_size,
             FontWeightHint::Bold,
-            LAVENDER,
+            self.colours.lavender,
             None,
         );
         y += title_size * 1.5;
@@ -1209,7 +1303,7 @@ impl HangmanApp {
             subtitle,
             l.font,
             FontWeightHint::Regular,
-            SUBTEXT0,
+            self.colours.subtext0,
             None,
         );
         y += l.font * 2.0;
@@ -1227,21 +1321,19 @@ impl HangmanApp {
                 break;
             }
             let selected = i == self.category_cursor;
-            fill(
+            self.palette.push_surface(
                 f,
-                r,
-                if selected { SURFACE0 } else { MANTLE },
-                CornerRadii::all(6.0),
+                r.x,
+                r.y,
+                r.w,
+                r.h,
+                6.0,
+                if selected {
+                    Surface::Selected
+                } else {
+                    Surface::Card
+                },
             );
-            f.push(RenderCommand::StrokeRect {
-                x: r.x,
-                y: r.y,
-                width: r.w,
-                height: r.h,
-                color: if selected { cat.color() } else { OVERLAY0 },
-                line_width: if selected { 2.0 } else { 1.0 },
-                corner_radii: CornerRadii::all(6.0),
-            });
             run_in(
                 f,
                 r,
@@ -1252,7 +1344,11 @@ impl HangmanApp {
                 } else {
                     FontWeightHint::Regular
                 },
-                if selected { cat.color() } else { TEXT_COLOR },
+                if selected {
+                    cat.color(&self.colours)
+                } else {
+                    self.colours.text
+                },
                 Some(l.pad),
             );
             f.hit(Target::Category(i), r);
@@ -1288,7 +1384,9 @@ impl HangmanApp {
                 line,
                 l.small,
                 FontWeightHint::Light,
-                OVERLAY0,
+                // Secondary text: an instruction is read, and the palette's
+                // faintest grey is 2.3:1 on a light page.
+                self.colours.subtext0,
                 Some(0.0),
             ) {
                 break;
@@ -1331,21 +1429,7 @@ impl HangmanApp {
                 continue;
             };
             let on = *diff == self.difficulty;
-            fill(
-                f,
-                r,
-                if on { SURFACE0 } else { MANTLE },
-                CornerRadii::all(4.0),
-            );
-            run_in(
-                f,
-                r,
-                diff.label(),
-                l.small,
-                FontWeightHint::Regular,
-                if on { TEAL } else { OVERLAY0 },
-                None,
-            );
+            self.button(f, r, diff.label(), l.small, on, true, self.colours.base);
             f.hit(Target::Difficulty(*diff), r);
         }
     }
@@ -1361,7 +1445,7 @@ impl HangmanApp {
         if l.header.is_empty() {
             return;
         }
-        fill(f, l.header, MANTLE, CornerRadii::all(4.0));
+        fill(f, l.header, self.colours.mantle, CornerRadii::all(4.0));
         let mut x = l.header.x + l.pad;
 
         // Each item takes the room it measures and the next starts past it,
@@ -1376,18 +1460,23 @@ impl HangmanApp {
         // any window short enough to squeeze it, and drew all four items into
         // the gallows.
         for (s, size, weight, color) in [
-            ("Hangman", l.font, FontWeightHint::Bold, LAVENDER),
+            (
+                "Hangman",
+                l.font,
+                FontWeightHint::Bold,
+                self.colours.lavender,
+            ),
             (
                 self.category.label(),
                 l.small,
                 FontWeightHint::Regular,
-                self.category.color(),
+                self.category.color(&self.colours),
             ),
             (
                 self.difficulty.label(),
                 l.small,
                 FontWeightHint::Regular,
-                SUBTEXT0,
+                self.colours.subtext0,
             ),
         ] {
             let tw = text::measure(s, size, weight);
@@ -1424,7 +1513,7 @@ impl HangmanApp {
                 &rate,
                 l.small,
                 FontWeightHint::Regular,
-                OVERLAY0,
+                self.colours.subtext0,
                 Some(0.0),
             );
             right -= rate_w + l.pad;
@@ -1436,7 +1525,11 @@ impl HangmanApp {
                 &rem,
                 l.small,
                 FontWeightHint::Regular,
-                if remaining <= 2 { RED } else { TEAL },
+                if remaining <= 2 {
+                    self.colours.red
+                } else {
+                    self.colours.teal
+                },
                 Some(0.0),
             );
             right -= rem_w + l.pad;
@@ -1450,30 +1543,19 @@ impl HangmanApp {
         } else {
             HINT_LABEL
         };
-        let bw = text::measure(HINT_SPENT_LABEL, l.small, FontWeightHint::Bold) + l.pad * 2.0;
         // A *fill* shrinks to the band rather than being refused by it -- a
         // button an inch shorter than nominal is still a button, whereas a
         // line of text drawn at half its height is a smear. So `.min` here and
         // `centre_line` for the label inside it, which are the two halves of
         // lesson 109 that are easy to mistake for one.
         let bh = (l.font * 1.8).min(l.header.h);
+        // As wide as the longer of its two labels needs, so it does not jump
+        // when the hint is spent.
+        let bw = gamechrome::button_width(HINT_SPENT_LABEL, l.small, bh)
+            .max(gamechrome::button_width(HINT_LABEL, l.small, bh));
         let br = Rect::new(right - bw, l.header.y + (l.header.h - bh) / 2.0, bw, bh);
         if br.x > x {
-            fill(
-                f,
-                br,
-                if live { SURFACE0 } else { MANTLE },
-                CornerRadii::all(4.0),
-            );
-            run_in(
-                f,
-                br,
-                label,
-                l.small,
-                FontWeightHint::Bold,
-                if live { YELLOW } else { OVERLAY0 },
-                None,
-            );
+            self.button(f, br, label, l.small, false, live, self.colours.mantle);
             if live {
                 f.hit(Target::Hint, br);
             }
@@ -1516,15 +1598,15 @@ impl HangmanApp {
                 y1: ay,
                 x2: bx,
                 y2: by,
-                color: SUBTEXT0,
+                color: self.colours.subtext0,
                 width: (s * 3.0).max(1.0),
             });
         }
 
         let body = if self.phase == GamePhase::Lost {
-            RED
+            self.colours.red
         } else {
-            TEXT_COLOR
+            self.colours.text
         };
         let width = (s * 2.0).max(1.0);
         // Six wrong guesses, six parts, one list: `MAX_WRONG` is the length of
@@ -1619,11 +1701,13 @@ impl HangmanApp {
             )]
             let x = (i as f32).mul_add(step, x0);
             let (ch, color) = match letter_index(b) {
-                _ if self.is_guessed(b) => (b.to_ascii_uppercase() as char, GREEN),
+                _ if self.is_guessed(b) => (b.to_ascii_uppercase() as char, self.colours.green),
                 // A lost game shows the word it was hiding, in red.
-                Some(_) if self.phase == GamePhase::Lost => (b.to_ascii_uppercase() as char, RED),
-                Some(_) => ('_', OVERLAY0),
-                None => (b as char, TEXT_COLOR),
+                Some(_) if self.phase == GamePhase::Lost => {
+                    (b.to_ascii_uppercase() as char, self.colours.red)
+                }
+                Some(_) => ('_', self.colours.subtext0),
+                None => (b as char, self.colours.text),
             };
             // Each letter is bounded by its own cell, not by the row: a glyph
             // wider than the step -- which happens as soon as the step is
@@ -1650,7 +1734,7 @@ impl HangmanApp {
                     y1: rule_y,
                     x2: step.mul_add(0.9, x),
                     y2: rule_y,
-                    color: SURFACE0,
+                    color: self.colours.surface0,
                     width: RULE_WIDTH,
                 });
             }
@@ -1672,12 +1756,12 @@ impl HangmanApp {
                 let Some(r) = l.key_rect(lower) else { continue };
                 let (bg, fg) = if self.is_guessed(lower) {
                     if self.word.contains(&lower) {
-                        (GREEN, BASE)
+                        (self.colours.green, self.colours.on_right)
                     } else {
-                        (RED, BASE)
+                        (self.colours.red, self.colours.on_wrong)
                     }
                 } else {
-                    (SURFACE0, TEXT_COLOR)
+                    (self.colours.surface0, self.colours.text)
                 };
                 fill(f, r, bg, CornerRadii::all(4.0));
                 run_in(
@@ -1704,7 +1788,7 @@ impl HangmanApp {
         if l.stats.is_empty() {
             return;
         }
-        fill(f, l.stats, MANTLE, CornerRadii::all(6.0));
+        fill(f, l.stats, self.colours.mantle, CornerRadii::all(6.0));
         let x = l.stats.x + l.pad;
         let w = (l.stats.w - l.pad * 2.0).max(0.0);
         let step = l.small * 1.6;
@@ -1717,7 +1801,7 @@ impl HangmanApp {
             STATS_HEADING,
             l.font,
             FontWeightHint::Bold,
-            LAVENDER,
+            self.colours.lavender,
             Some(l.pad),
         ) {
             return;
@@ -1725,15 +1809,24 @@ impl HangmanApp {
         y += l.font * 1.8;
 
         for (line, color) in [
-            (format!("Wins: {}", self.stats.wins), GREEN),
-            (format!("Losses: {}", self.stats.losses), RED),
-            (format!("Streak: {}", self.stats.current_streak), YELLOW),
-            (format!("Best: {}", self.stats.best_streak), PEACH),
+            (format!("Wins: {}", self.stats.wins), self.colours.green),
+            (format!("Losses: {}", self.stats.losses), self.colours.red),
+            (
+                format!("Streak: {}", self.stats.current_streak),
+                self.colours.yellow,
+            ),
+            (
+                format!("Best: {}", self.stats.best_streak),
+                self.colours.peach,
+            ),
             (
                 format!("Win Rate: {}%", self.stats.win_rate_percent()),
-                TEAL,
+                self.colours.teal,
             ),
-            (format!("Games: {}", self.stats.total_games()), SUBTEXT0),
+            (
+                format!("Games: {}", self.stats.total_games()),
+                self.colours.subtext0,
+            ),
         ] {
             if !column_line(
                 f,
@@ -1765,7 +1858,7 @@ impl HangmanApp {
                 y1: y,
                 x2: x + w,
                 y2: y,
-                color: SURFACE0,
+                color: self.colours.surface0,
                 width: 1.0,
             });
         }
@@ -1778,7 +1871,7 @@ impl HangmanApp {
             "Wrong:",
             l.small,
             FontWeightHint::Regular,
-            OVERLAY0,
+            self.colours.subtext0,
             Some(l.pad),
         ) {
             return;
@@ -1786,7 +1879,11 @@ impl HangmanApp {
         y += step;
         let wrong = self.incorrect_letters();
         let (line, weight, color) = if wrong.is_empty() {
-            (String::from("None yet"), FontWeightHint::Light, OVERLAY0)
+            (
+                String::from("None yet"),
+                FontWeightHint::Light,
+                self.colours.subtext0,
+            )
         } else {
             (
                 wrong
@@ -1795,7 +1892,7 @@ impl HangmanApp {
                     .collect::<Vec<_>>()
                     .join(" "),
                 FontWeightHint::Bold,
-                RED,
+                self.colours.red,
             )
         };
         column_line(f, l.stats, y, &line, l.small, weight, color, Some(l.pad));
@@ -1808,12 +1905,17 @@ impl HangmanApp {
         if over.is_empty() {
             return;
         }
-        fill(f, over, Color::rgba(17, 17, 27, 200), CornerRadii::ZERO);
+        fill(
+            f,
+            over,
+            with_alpha(self.palette.crust, 200),
+            CornerRadii::ZERO,
+        );
 
         let accent = if self.phase == GamePhase::Won {
-            GREEN
+            self.colours.green
         } else {
-            RED
+            self.colours.red
         };
         let title = if self.phase == GamePhase::Won {
             "YOU WIN!"
@@ -1844,7 +1946,8 @@ impl HangmanApp {
             box_w,
             box_h,
         );
-        fill(f, card, SURFACE0, CornerRadii::all(8.0));
+        self.palette
+            .push_surface(f, card.x, card.y, card.w, card.h, 8.0, Surface::Panel);
         f.push(RenderCommand::StrokeRect {
             x: card.x,
             y: card.y,
@@ -1867,14 +1970,14 @@ impl HangmanApp {
                 word_line.as_str(),
                 l.font,
                 FontWeightHint::Regular,
-                TEXT_COLOR,
+                self.colours.text,
                 l.font * 1.8,
             ),
             (
                 streak_line.as_str(),
                 l.font,
                 FontWeightHint::Regular,
-                YELLOW,
+                self.colours.yellow,
                 l.font * 1.8,
             ),
         ] {
@@ -1886,9 +1989,9 @@ impl HangmanApp {
 
         let gap = l.pad;
         let bw = ((card.w - l.pad * 2.0 - gap) / 2.0).max(0.0);
-        for (i, (label, target, color)) in [
-            (PLAY_AGAIN_LABEL, Target::PlayAgain, GREEN),
-            (MENU_LABEL, Target::Menu, SUBTEXT0),
+        for (i, (label, target, primary)) in [
+            (PLAY_AGAIN_LABEL, Target::PlayAgain, true),
+            (MENU_LABEL, Target::Menu, false),
         ]
         .into_iter()
         .enumerate()
@@ -1899,8 +2002,12 @@ impl HangmanApp {
             if r.bottom() > card.bottom() || r.is_empty() {
                 break;
             }
-            fill(f, r, MANTLE, CornerRadii::all(4.0));
-            run_in(f, r, label, l.small, FontWeightHint::Bold, color, None);
+            let ground = if self.palette.surface_style() == SurfaceStyle::Cards {
+                self.colours.mantle
+            } else {
+                self.colours.base
+            };
+            self.button(f, r, label, l.small, primary, true, ground);
             f.hit(target, r);
         }
     }
@@ -2131,6 +2238,11 @@ fn difficulty_from_key(key: Key) -> Option<Difficulty> {
 // -- Window integration -------------------------------------------------
 
 impl App for HangmanApp {
+    fn theme_changed(&mut self, palette: &Palette) {
+        self.palette = *palette;
+        self.colours = Colours::of(palette);
+    }
+
     fn title(&self) -> String {
         String::from("Hangman")
     }
@@ -2217,6 +2329,234 @@ fn main() -> ExitCode {
 )]
 mod tests {
     use super::*;
+
+    /// The colours a game draws in until the theme says otherwise.
+    fn colours() -> Colours {
+        Colours::of(&Palette::for_mode(false))
+    }
+
+    /// The palette for a light or a dark theme, in the bordered look (the
+    /// default) or the card look.
+    fn palette(light: bool, cards: bool) -> Palette {
+        let mut p = Palette::for_mode(light);
+        p.set_surface_style(if cards {
+            guitk::palette::SurfaceStyle::Cards
+        } else {
+            guitk::palette::SurfaceStyle::Borders
+        });
+        p
+    }
+
+    /// Every look in `p`'s colours: the menu, a game with right and wrong
+    /// guesses and the hint spent, the result of a win and of a loss, and a
+    /// cramped game.
+    fn every_look(p: &Palette) -> Vec<(&'static str, HangmanApp)> {
+        let menu = test_app();
+        let busy = || {
+            let mut a = test_app();
+            a.start_from_category();
+            let right = a.word.first().copied().unwrap_or(b'a');
+            let wrong = (b'a'..=b'z').find(|b| !a.word.contains(b)).unwrap_or(b'z');
+            a.guess_letter(right);
+            a.guess_letter(wrong);
+            a.use_hint();
+            a
+        };
+        let mut won = busy();
+        won.phase = GamePhase::Won;
+        let mut lost = busy();
+        lost.phase = GamePhase::Lost;
+        let mut cramped = busy();
+        cramped.resize(420.0, 380.0);
+        let mut looks = vec![
+            ("menu", menu),
+            ("playing", busy()),
+            ("won", won),
+            ("lost", lost),
+            ("cramped", cramped),
+        ];
+        for (_, a) in &mut looks {
+            a.theme_changed(p);
+        }
+        looks
+    }
+
+    /// **The window is drawn in the user's colours**, light or dark, in
+    /// either surface look -- every colour the palette's or the toolkit's
+    /// buttons' (the operator's C-Q16). It drew in its own copy of
+    /// Catppuccin Mocha, dark on a light desktop, and its F1 card in the
+    /// default palette whatever the user's.
+    #[test]
+    fn the_window_is_drawn_in_the_users_colours() {
+        for (light, cards) in [(false, false), (true, false), (false, true), (true, true)] {
+            let p = palette(light, cards);
+            let mut derived = Vec::new();
+            for ground in [p.base, p.mantle] {
+                derived.extend(gamechrome::button_colours(&p, Kind::Plain, ground));
+                derived.extend(gamechrome::button_colours(&p, Kind::Primary, ground));
+            }
+            let mut looks = every_look(&p);
+            let mut help = test_app();
+            help.show_help = true;
+            help.theme_changed(&p);
+            looks.push(("help", help));
+            for (what, a) in looks {
+                appearance::palette_check::assert_drawn_from(
+                    &p,
+                    a.frame(a.size.0, a.size.1).commands(),
+                    &derived,
+                    &format!("hangman, {what}, light: {light}, cards: {cards}"),
+                );
+            }
+        }
+    }
+
+    /// The face of the button whose label is `label`, in `a`'s window: the
+    /// lower of the toolkit button's two fills -- the one with its gloss, a
+    /// fill the same width over its top half, drawn straight after it -- under
+    /// the label. A card or a band under the button is not a button.
+    fn face_of(a: &HangmanApp, label: &str) -> Color {
+        let f = a.frame(a.size.0, a.size.1);
+        let (tx, ty) = f
+            .commands()
+            .iter()
+            .find_map(|c| match c {
+                RenderCommand::Text { text, x, y, .. } if text == label => Some((*x, *y)),
+                _ => None,
+            })
+            .unwrap_or_else(|| panic!("{label} is not drawn"));
+        let fills: Vec<(Rect, Color)> = f
+            .commands()
+            .iter()
+            .filter_map(|c| match c {
+                RenderCommand::FillRect {
+                    x,
+                    y,
+                    width,
+                    height,
+                    color,
+                    ..
+                } => Some((Rect::new(*x, *y, *width, *height), *color)),
+                _ => None,
+            })
+            .collect();
+        fills
+            .windows(2)
+            .find_map(|pair| {
+                let [(face, colour), (gloss, _)] = pair else {
+                    return None;
+                };
+                let is_button = (gloss.x - face.x).abs() < 0.01
+                    && (gloss.y - face.y).abs() < 0.01
+                    && (gloss.w - face.w).abs() < 0.01
+                    && (gloss.h * 2.0 - face.h).abs() < 0.01;
+                (is_button && face.contains(tx + 1.0, ty + 1.0)).then_some(*colour)
+            })
+            .unwrap_or_else(|| panic!("{label} is on no button"))
+    }
+
+    /// The toolkit's lower face for a button of `kind`, live or not, on
+    /// `ground`.
+    fn paint(a: &HangmanApp, kind: Kind, live: bool, ground: Color) -> Color {
+        guitk::button::paint(
+            &a.palette,
+            kind,
+            State {
+                disabled: !live,
+                ..State::default()
+            },
+            ground,
+        )
+        .lower
+    }
+
+    /// **The buttons say what they do and whether they would**: the level
+    /// chosen is the toolkit's primary button among the three, the hint is
+    /// switched off once spent, and a finished game offers "play again"
+    /// first.
+    #[test]
+    fn the_buttons_say_what_they_do_and_whether_they_would() {
+        let menu = test_app();
+        for diff in Difficulty::ALL {
+            let want = if diff == menu.difficulty {
+                Kind::Primary
+            } else {
+                Kind::Plain
+            };
+            assert_eq!(
+                face_of(&menu, diff.label()),
+                paint(&menu, want, true, menu.colours.base),
+                "{} looks wrong",
+                diff.label()
+            );
+        }
+        let mut game = test_app();
+        game.start_from_category();
+        let bh_live = face_of(&game, HINT_LABEL);
+        assert_eq!(
+            bh_live,
+            paint(&game, Kind::Plain, true, game.colours.mantle)
+        );
+        game.use_hint();
+        assert_eq!(
+            face_of(&game, HINT_SPENT_LABEL),
+            paint(&game, Kind::Plain, false, game.colours.mantle),
+            "a spent hint looks live"
+        );
+        game.phase = GamePhase::Won;
+        assert_eq!(
+            face_of(&game, PLAY_AGAIN_LABEL),
+            paint(&game, Kind::Primary, true, game.colours.base),
+            "play again is not offered first"
+        );
+        assert_eq!(
+            face_of(&game, MENU_LABEL),
+            paint(&game, Kind::Plain, true, game.colours.base)
+        );
+    }
+
+    /// **Every text reads on what is drawn under it**, in either theme and
+    /// either surface look (`gamechrome::legibility`). A switched-off
+    /// button's label is exempt, as WCAG exempts an inactive control. Not the
+    /// F1 card: the toolkit's, and see-through under the bordered look --
+    /// requests/e-c-the-shortcut-card-is-see-through-under-the-default-theme.md.
+    #[test]
+    fn every_text_reads_on_what_is_under_it_in_either_theme() {
+        let mut bad = Vec::new();
+        for (light, cards) in [(false, false), (true, false), (false, true), (true, true)] {
+            let p = palette(light, cards);
+            let offs: Vec<_> = [p.base, p.mantle]
+                .into_iter()
+                .map(|ground| {
+                    guitk::button::paint(
+                        &p,
+                        Kind::Plain,
+                        State {
+                            disabled: true,
+                            ..State::default()
+                        },
+                        ground,
+                    )
+                })
+                .collect();
+            for (what, a) in every_look(&p) {
+                let f = a.frame(a.size.0, a.size.1);
+                let exempt = |r: &gamechrome::legibility::Read| {
+                    offs.iter()
+                        .any(|o| r.ink == o.ink && (r.ground == o.lower || r.ground == o.upper))
+                };
+                for r in gamechrome::legibility::illegible(f.commands(), p.base, exempt) {
+                    bad.push(format!(
+                        "{what}, light: {light}, cards: {cards}: {:?} {:.2}:1 on {:?}",
+                        r.text,
+                        r.ratio(),
+                        r.ground
+                    ));
+                }
+            }
+        }
+        assert!(bad.is_empty(), "hangman: {bad:#?}");
+    }
     use guitk::probe::{click_sized, is_visible_sized, key, press, rect_of_sized};
 
     /// Helper to create a game with a fixed seed for deterministic tests.
@@ -3287,7 +3627,7 @@ mod tests {
 
     #[test]
     fn test_category_color_unique() {
-        let colors: Vec<Color> = Category::ALL.iter().map(|c| c.color()).collect();
+        let colors: Vec<Color> = Category::ALL.iter().map(|c| c.color(&colours())).collect();
         for i in 0..colors.len() {
             for j in (i + 1)..colors.len() {
                 assert_ne!(
@@ -4726,7 +5066,7 @@ mod tests {
                             s,
                             size,
                             FontWeightHint::Regular,
-                            TEXT_COLOR,
+                            colours().text,
                             inset,
                         );
                         check_containment(&format!("{s:?}/{size}/{inset:?}"), "run_in", b, &f);
@@ -4746,7 +5086,7 @@ mod tests {
                                 s,
                                 size,
                                 FontWeightHint::Regular,
-                                TEXT_COLOR,
+                                colours().text,
                                 inset,
                             );
                         }

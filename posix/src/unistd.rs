@@ -165,10 +165,13 @@ pub const _SC_2_VERSION: i32 = 46;
 pub const _SC_2_C_BIND: i32 = 47;
 /// Maximum number of thread destructor iterations.
 pub const _SC_THREAD_DESTRUCTOR_ITERATIONS: i32 = 73;
-/// Maximum concurrent threads per process.
-pub const _SC_THREAD_THREADS_MAX: i32 = 74;
+// musl's (and glibc's) numbers: 74 is the keys' limit and 76 the threads'.
+// They were the other way round until 2026-09-27, so sysconf answered a
+// C caller's `_SC_THREAD_KEYS_MAX` with the thread limit and back.
 /// Maximum number of thread-specific data keys.
-pub const _SC_THREAD_KEYS_MAX: i32 = 76;
+pub const _SC_THREAD_KEYS_MAX: i32 = 74;
+/// Maximum concurrent threads per process.
+pub const _SC_THREAD_THREADS_MAX: i32 = 76;
 
 // ---------------------------------------------------------------------------
 // Current working directory tracking
@@ -311,67 +314,418 @@ pub unsafe fn resolve_path(path: *const u8, out: &mut [u8; PATH_MAX]) -> Option<
 
     // SAFETY: Caller guarantees `path` is a valid C string.
     let path_len = unsafe { crate::string::strlen(path) };
-    if path_len == 0 {
+    // SAFETY: `strlen` guarantees `path` is readable for `path_len` bytes.
+    let path = unsafe { core::slice::from_raw_parts(path, path_len) };
+
+    // SAFETY: the CWD invariant -- the first `*cwd_len_ptr()` bytes of
+    // `cwd_buf_ptr()` are the path -- and `min` keeps the slice inside the
+    // buffer even if the invariant were broken.
+    let cwd = unsafe {
+        let cwd_len = (*cwd_len_ptr()).min(PATH_MAX);
+        core::slice::from_raw_parts(cwd_buf_ptr().cast::<u8>(), cwd_len)
+    };
+    resolve_path_against(cwd, path, out)
+}
+
+/// Resolve `path` against the directory `base`, as [`resolve_path`] resolves
+/// it against the working directory: an absolute `path` is normalized as it
+/// stands, a relative one is appended to `base` first.
+///
+/// `base` must be absolute -- a normalized directory such as the working
+/// directory. `posix_spawn`'s `chdir` actions resolve through this against the
+/// directory the child is going to be in, which is not the parent's.
+///
+/// Returns `None` when `path` is empty, `base` is not absolute, or the result
+/// exceeds [`PATH_MAX`].
+pub(crate) fn resolve_path_against(
+    base: &[u8],
+    path: &[u8],
+    out: &mut [u8; PATH_MAX],
+) -> Option<usize> {
+    if path.is_empty() {
         return None;
     }
+    if path.first() == Some(&b'/') {
+        return normalize_path(path, out);
+    }
 
-    // SAFETY: `strlen` guarantees `path` is readable for `path_len` bytes.
-    let first = unsafe { *path };
-
-    if first == b'/' {
-        // Absolute path — normalize directly.
-        let slice = unsafe { core::slice::from_raw_parts(path, path_len) };
-        normalize_path(slice, out)
+    // Relative: `base`, then a separator unless `base` already ends in one,
+    // then `path`, all within PATH_MAX.
+    let sep: &[u8] = if base.last() == Some(&b'/') {
+        b""
     } else {
-        // Relative path — prepend CWD, then normalize.
-        let mut combined = [0u8; PATH_MAX];
+        b"/"
+    };
+    let total = base.len().checked_add(sep.len())?.checked_add(path.len())?;
+    let mut combined = [0u8; PATH_MAX];
+    let joined = combined.get_mut(..total)?;
+    let (head, rest) = joined.split_at_mut_checked(base.len())?;
+    head.copy_from_slice(base);
+    let (mid, tail) = rest.split_at_mut_checked(sep.len())?;
+    mid.copy_from_slice(sep);
+    tail.copy_from_slice(path);
+    normalize_path(combined.get(..total)?, out)
+}
 
-        // SAFETY: Single-threaded per-process access to CWD state.
-        let cwd_len = unsafe { *cwd_len_ptr() };
-        if cwd_len >= PATH_MAX {
-            return None;
+/// Is `path` a directory name in the form the working directory is kept in --
+/// absolute, with no `.`, `..` or empty component, no trailing `/` but the
+/// root's, and no NUL?
+///
+/// That is exactly what [`normalize_path`] produces, so the test is that
+/// normalizing changes nothing. It is also the kernel's `pcb::is_canonical_path`
+/// (bar the length bound, [`CWD_RECORD_MAX`], which callers check), and it is
+/// how a record read back from the kernel is checked before it is trusted.
+fn is_canonical_dir_path(path: &[u8]) -> bool {
+    if path.contains(&0) {
+        return false;
+    }
+    let mut normalized = [0u8; PATH_MAX];
+    normalize_path(path, &mut normalized).and_then(|n| normalized.get(..n)) == Some(path)
+}
+
+/// The longest working directory this libc keeps: the kernel record's bound,
+/// which is `PATH_MAX` less the terminator `getcwd` must also fit.
+pub(crate) const CWD_RECORD_MAX: usize = crate::syscall::CWD_RECORD_MAX;
+
+/// The kernel's record of this process's working directory
+/// (`SYS_PROCESS_SET_CWD` / `SYS_PROCESS_GET_CWD`, design-decisions.md §960).
+///
+/// This libc's own copy (`cwd_buf_ptr`) is still what every relative path is
+/// resolved against. The record exists so the directory outlives that copy:
+/// across `exec`, which replaces the memory it is in, and into a spawned child,
+/// which the kernel starts from its parent's record. [`adopt_cwd`] writes the
+/// record *before* this libc's copy, so a refusal leaves both where they were;
+/// [`init_cwd_from_record`] reads it at start-up.
+///
+/// A kernel older than the record answers "no such syscall". That is not an
+/// error here: it is the kernel this libc ran on until 2026-09-25, and the
+/// directory then lives only in this libc, as it always had.
+mod cwd_record {
+    #[cfg(not(target_os = "none"))]
+    pub(super) use host::{get, set};
+
+    /// Record `path`, which the caller has already made canonical.
+    #[cfg(target_os = "none")]
+    pub(super) fn set(path: &[u8]) -> Result<(), i32> {
+        let ret = crate::syscall::syscall2(
+            crate::syscall::SYS_PROCESS_SET_CWD,
+            path.as_ptr() as u64,
+            path.len() as u64,
+        );
+        if ret >= 0 {
+            return Ok(());
         }
-        // SAFETY: cwd_buf_ptr() is valid for PATH_MAX bytes; cwd_len <= PATH_MAX.
-        let cwd = unsafe { core::slice::from_raw_parts(cwd_buf_ptr().cast::<u8>(), cwd_len) };
-
-        // Copy CWD into the combined buffer.
-        let mut pos: usize = 0;
-        for idx in 0..cwd_len {
-            if let (Some(&b), Some(slot)) = (cwd.get(idx), combined.get_mut(pos)) {
-                *slot = b;
-                pos = pos.wrapping_add(1);
-            }
-        }
-
-        // Append separator unless CWD already ends with '/'.
-        let last_is_slash = pos > 0 && combined.get(pos.wrapping_sub(1)) == Some(&b'/');
-        if !last_is_slash {
-            if pos >= PATH_MAX {
-                return None;
-            }
-            if let Some(slot) = combined.get_mut(pos) {
-                *slot = b'/';
-            }
-            pos = pos.wrapping_add(1);
-        }
-
-        // Append the relative path.
-        let rel = unsafe { core::slice::from_raw_parts(path, path_len) };
-        for idx in 0..path_len {
-            if pos >= PATH_MAX {
-                return None;
-            }
-            if let (Some(&b), Some(slot)) = (rel.get(idx), combined.get_mut(pos)) {
-                *slot = b;
-                pos = pos.wrapping_add(1);
-            }
-        }
-
-        match combined.get(..pos) {
-            Some(slice) => normalize_path(slice, out),
-            None => None,
+        match crate::errno::errno_for(ret) {
+            crate::errno::ENOSYS => Ok(()),
+            e => Err(e),
         }
     }
+
+    /// Copy the record into `out`, returning its length. `ENOSYS` from a
+    /// kernel without it.
+    #[cfg(target_os = "none")]
+    pub(super) fn get(out: &mut [u8]) -> Result<usize, i32> {
+        let ret = crate::syscall::syscall2(
+            crate::syscall::SYS_PROCESS_GET_CWD,
+            out.as_mut_ptr() as u64,
+            out.len() as u64,
+        );
+        if ret < 0 {
+            return Err(crate::errno::errno_for(ret));
+        }
+        // The kernel wrote `ret` bytes into a buffer of `out.len()`; a larger
+        // count would be a kernel bug, and is not taken on trust.
+        match usize::try_from(ret) {
+            Ok(n) if n <= out.len() => Ok(n),
+            _ => Err(crate::errno::EIO),
+        }
+    }
+
+    /// Host builds have no kernel, so the record is modelled per thread -- the
+    /// working directory it shadows is per-thread there too
+    /// (`process_global!`) -- with the kernel's rules: canonical paths only,
+    /// `/` until something is recorded, and a switch for a kernel that has no
+    /// record at all.
+    #[cfg(not(target_os = "none"))]
+    pub(crate) mod host {
+        extern crate std;
+        use core::cell::{Cell, RefCell};
+        use std::vec::Vec;
+
+        std::thread_local! {
+            /// What was last recorded on this thread; `None` is the kernel's
+            /// default, `/`.
+            static RECORD: RefCell<Option<Vec<u8>>> = const { RefCell::new(None) };
+            /// Models a kernel older than the record.
+            static ABSENT: Cell<bool> = const { Cell::new(false) };
+            /// Non-zero: the errno the next `set` is refused with.
+            static REFUSE: Cell<i32> = const { Cell::new(0) };
+        }
+
+        pub(in crate::unistd) fn set(path: &[u8]) -> Result<(), i32> {
+            if ABSENT.get() {
+                return Ok(());
+            }
+            let refusal = REFUSE.replace(0);
+            if refusal != 0 {
+                return Err(refusal);
+            }
+            if path.len() > super::super::CWD_RECORD_MAX
+                || !super::super::is_canonical_dir_path(path)
+            {
+                return Err(crate::errno::EINVAL);
+            }
+            RECORD.with(|r| *r.borrow_mut() = Some(path.to_vec()));
+            Ok(())
+        }
+
+        pub(in crate::unistd) fn get(out: &mut [u8]) -> Result<usize, i32> {
+            if ABSENT.get() {
+                return Err(crate::errno::ENOSYS);
+            }
+            RECORD.with(|r| {
+                let r = r.borrow();
+                let path: &[u8] = r.as_deref().unwrap_or(b"/");
+                let dst = out.get_mut(..path.len()).ok_or(crate::errno::ERANGE)?;
+                dst.copy_from_slice(path);
+                Ok(path.len())
+            })
+        }
+
+        /// This thread's record as the kernel would report it.
+        #[cfg(test)]
+        pub(crate) fn recorded() -> Vec<u8> {
+            RECORD.with(|r| r.borrow().clone().unwrap_or_else(|| b"/".to_vec()))
+        }
+
+        /// Put `path` in the record without a `chdir`, as a parent's would be.
+        /// Not validated: a test may plant what a broken kernel might report.
+        #[cfg(test)]
+        pub(crate) fn preset(path: &[u8]) {
+            RECORD.with(|r| *r.borrow_mut() = Some(path.to_vec()));
+        }
+
+        /// Model a kernel without the record (`true`) or with it (`false`).
+        #[cfg(test)]
+        pub(crate) fn set_absent(absent: bool) {
+            ABSENT.set(absent);
+        }
+
+        /// Refuse the next `set` with `errno`, as a kernel might.
+        #[cfg(test)]
+        pub(crate) fn refuse_next(errno: i32) {
+            REFUSE.set(errno);
+        }
+
+        /// Back to a kernel with the record, holding `/` and refusing nothing.
+        #[cfg(test)]
+        pub(crate) fn reset() {
+            RECORD.with(|r| *r.borrow_mut() = None);
+            ABSENT.set(false);
+            REFUSE.set(0);
+        }
+    }
+}
+
+/// Is `path` (already resolved and normalized) an existing directory?
+///
+/// `SYS_FS_STAT` on the target, which writes the kernel's `FsStatResult`
+/// rather than a `struct stat`. Host builds have no kernel to ask and answer
+/// from [`host_dirs`], a per-thread list of directories a test declares.
+pub(crate) fn check_directory(path: &[u8]) -> Result<(), i32> {
+    #[cfg(target_os = "none")]
+    {
+        let mut raw = [0u8; crate::stat::KERNEL_STAT_LEN];
+        let ret = syscall3(
+            SYS_FS_STAT,
+            path.as_ptr() as u64,
+            path.len() as u64,
+            raw.as_mut_ptr() as u64,
+        );
+        if ret < 0 {
+            return Err(errno::errno_for(ret));
+        }
+        let mut sb = crate::stat::Stat::zeroed();
+        crate::stat::fill_from_fsstat(&mut sb, &raw);
+        if sb.is_dir() {
+            Ok(())
+        } else {
+            Err(errno::ENOTDIR)
+        }
+    }
+    #[cfg(not(target_os = "none"))]
+    {
+        host_dirs::check(path)
+    }
+}
+
+/// Host-build model of which directories exist, for [`check_directory`]: `/`,
+/// plus whatever a test declares on its own thread. Anything else is `ENOENT`.
+#[cfg(not(target_os = "none"))]
+pub(crate) mod host_dirs {
+    extern crate std;
+    use core::cell::RefCell;
+    use std::vec::Vec;
+
+    std::thread_local! {
+        static DIRS: RefCell<Vec<Vec<u8>>> = const { RefCell::new(Vec::new()) };
+    }
+
+    pub(super) fn check(path: &[u8]) -> Result<(), i32> {
+        let known = path == b"/" || DIRS.with(|d| d.borrow().iter().any(|p| p == path));
+        if known {
+            Ok(())
+        } else {
+            Err(crate::errno::ENOENT)
+        }
+    }
+
+    /// Declare `path` an existing directory on this thread.
+    #[cfg(test)]
+    pub(crate) fn add(path: &[u8]) {
+        DIRS.with(|d| d.borrow_mut().push(path.to_vec()));
+    }
+
+    /// Forget every declared directory on this thread.
+    #[cfg(test)]
+    pub(crate) fn clear() {
+        DIRS.with(|d| d.borrow_mut().clear());
+    }
+}
+
+/// Make `path` the working directory: the kernel's record first, then this
+/// libc's copy, so a refusal leaves the two agreeing on the old one.
+///
+/// `path` is [`normalize_path`] output for a directory the caller has already
+/// checked. `ENAMETOOLONG` if it is longer than [`CWD_RECORD_MAX`] -- which is
+/// also the most `getcwd` can return with its terminator in a `PATH_MAX`
+/// buffer -- and otherwise whatever the kernel refuses it with.
+fn adopt_cwd(path: &[u8]) -> Result<(), i32> {
+    if path.len() > CWD_RECORD_MAX {
+        return Err(errno::ENAMETOOLONG);
+    }
+    cwd_record::set(path)?;
+    store_cwd(path);
+    Ok(())
+}
+
+/// Overwrite this libc's copy of the working directory with `path`.
+///
+/// `path` must be canonical and at most [`CWD_RECORD_MAX`] bytes; both callers
+/// have checked.
+fn store_cwd(path: &[u8]) {
+    // SAFETY: the accessors return this process's own storage (this thread's,
+    // on the host). `path` fits the PATH_MAX buffer, which is what the `get_mut`
+    // re-checks rather than assumes, and the length is written after the bytes
+    // so the invariant on `cwd_buf_ptr` holds whenever the two agree.
+    unsafe {
+        let buf = &mut *cwd_buf_ptr();
+        if let Some(dst) = buf.get_mut(..path.len()) {
+            dst.copy_from_slice(path);
+            *cwd_len_ptr() = path.len();
+        }
+    }
+}
+
+/// Start in the directory this process was given.
+///
+/// Called once from `__libc_start_main`, before constructors and `main`. The
+/// kernel keeps each process's working directory (design-decisions.md §960)
+/// and starts a spawned child in its parent's, and an `exec`'d image in the one
+/// its predecessor was in; this is where that reaches this libc's copy. A
+/// kernel without the record, or a record that is not a canonical directory
+/// name, leaves the process at `/`, which is where every process started
+/// before the record existed.
+pub(crate) fn init_cwd_from_record() {
+    let mut buf = [0u8; PATH_MAX];
+    let Ok(len) = cwd_record::get(&mut buf) else {
+        return;
+    };
+    let Some(path) = buf.get(..len) else {
+        return;
+    };
+    // The kernel records only canonical paths, so this is a consistency check,
+    // not a parser: this libc's copy must never hold a name `resolve_path` would
+    // mis-join, whatever a kernel reports.
+    if path.len() <= CWD_RECORD_MAX && is_canonical_dir_path(path) {
+        store_cwd(path);
+    }
+}
+
+/// Does the kernel keep a working-directory record (design-decisions.md §960)?
+///
+/// Asked once and remembered on the target, where the answer is the kernel's
+/// and cannot change while a process runs: a one-byte `SYS_PROCESS_GET_CWD`,
+/// which a kernel with the record answers with the path or `ERANGE`, and a
+/// kernel from before it with "no such syscall".
+///
+/// Only `posix_spawn` needs to know. It hands a `chdir` action's directory to
+/// the kernel in fields an older kernel does not have, and that kernel refuses
+/// the whole spawn rather than ignore them -- which would stop every program
+/// that sets a child's directory, Rust's `Command::current_dir` among them,
+/// from starting anything at all (known-issues.md
+/// `TD-D-CWD-AND-UMASK-DO-NOT-SURVIVE-EXEC-OR-SPAWN`). On such a kernel the
+/// child starts in its parent's directory instead, as every child did before
+/// the record existed.
+pub(crate) fn kernel_keeps_cwd() -> bool {
+    #[cfg(target_os = "none")]
+    {
+        use core::sync::atomic::{AtomicU8, Ordering};
+        /// 0 = not yet asked, 1 = yes, 2 = no.
+        static ANSWER: AtomicU8 = AtomicU8::new(0);
+        match ANSWER.load(Ordering::Relaxed) {
+            1 => true,
+            2 => false,
+            _ => {
+                let yes = !matches!(cwd_record::get(&mut [0u8; 1]), Err(errno::ENOSYS));
+                ANSWER.store(if yes { 1 } else { 2 }, Ordering::Relaxed);
+                yes
+            }
+        }
+    }
+    #[cfg(not(target_os = "none"))]
+    {
+        // Not cached: the host's modelled kernel is per thread, and a test may
+        // model either kind.
+        !matches!(cwd_record::get(&mut [0u8; 1]), Err(errno::ENOSYS))
+    }
+}
+
+/// Model, on this test thread, a kernel without the working-directory record
+/// (`true`) or with it (`false`). For other modules' tests.
+#[cfg(test)]
+pub(crate) fn model_kernel_without_cwd_record(absent: bool) {
+    cwd_record::host::set_absent(absent);
+}
+
+/// Copy this libc's working directory into `out`, returning its length (no
+/// terminator is written).
+pub(crate) fn current_cwd(out: &mut [u8; PATH_MAX]) -> usize {
+    // SAFETY: the CWD invariant, as in `resolve_path`; `min` keeps the slice
+    // inside the buffer even if it were broken.
+    let cwd = unsafe {
+        let cwd_len = (*cwd_len_ptr()).min(PATH_MAX);
+        core::slice::from_raw_parts(cwd_buf_ptr().cast::<u8>(), cwd_len)
+    };
+    match out.get_mut(..cwd.len()) {
+        Some(dst) => {
+            dst.copy_from_slice(cwd);
+            cwd.len()
+        }
+        None => 0,
+    }
+}
+
+/// Point this test thread's working directory at `path`, with no `chdir` and
+/// no record: the state a process is in when its libc's copy is all there is.
+/// For other modules' tests; this module's own use `set_test_cwd`.
+#[cfg(test)]
+pub(crate) fn set_cwd_for_test(path: &[u8]) {
+    assert!(
+        path.len() <= CWD_RECORD_MAX && is_canonical_dir_path(path),
+        "{path:?}"
+    );
+    store_cwd(path);
 }
 
 // ---------------------------------------------------------------------------
@@ -383,48 +737,89 @@ pub unsafe fn resolve_path(path: *const u8, out: &mut [u8; PATH_MAX]) -> Option<
 /// Copies the absolute pathname of the CWD into `buf` (null-terminated).
 /// Returns `buf` on success, null on error with errno set.
 ///
+/// # A null `buf` allocates
+///
+/// `getcwd(NULL, size)` is the GNU "allocate for me" form, which glibc, musl
+/// and the BSDs all support, and which bash depends on: `builtins/common.c`
+/// asks for `getcwd (0, PATH_MAX)` and falls back to `getcwd (0, 0)`.  The
+/// result is a fresh `malloc` block that the caller must `free` — `size` bytes
+/// when `size > 0`, otherwise exactly the path's length plus its terminator.
+///
+/// This used to be refused with `EINVAL`, and bash said so on every boot
+/// (`shell-init: error retrieving current directory: getcwd: cannot access
+/// parent directories: Invalid argument`) while the rung that ran it stayed
+/// green, because it asserted bash's output and never its stderr
+/// (`requests/a-b-getcwd-rejects-the-null-buffer-form-that-bash-uses.md`).
+/// The one-branch cause was that a null `buf` and a zero `size` were rejected
+/// together, when only the pair "non-null `buf`, zero `size`" is an error.
+///
 /// # Errors
 ///
-/// - `EINVAL` — `buf` is null or `size` is 0.
-/// - `ERANGE` — `size` is too small for the CWD path plus its null
-///   terminator.
+/// - `EINVAL` — `buf` is non-null and `size` is 0 (POSIX).
+/// - `ERANGE` — `size` is non-zero and too small for the CWD path plus its
+///   null terminator, in either form.  With a null `buf` this is checked
+///   before allocating, so a refused call allocates nothing.
+/// - `ENOMEM` — `buf` is null and the allocation failed.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn getcwd(buf: *mut u8, size: SizeT) -> *mut u8 {
-    if buf.is_null() || size == 0 {
-        errno::set_errno(errno::EINVAL);
-        return core::ptr::null_mut();
-    }
+    // SAFETY: Single-threaded per-process access to CWD state; the invariant on
+    // `cwd_buf_ptr` is that its first `*cwd_len_ptr()` bytes are the path.
+    let cwd = unsafe {
+        let cwd_len = (*cwd_len_ptr()).min(PATH_MAX);
+        core::slice::from_raw_parts(cwd_buf_ptr().cast::<u8>(), cwd_len)
+    };
 
-    // SAFETY: Single-threaded per-process access to CWD state.
-    let cwd_len = unsafe { *cwd_len_ptr() };
+    // Room for the path plus its terminator.  `cwd.len() <= PATH_MAX`, so this
+    // cannot overflow; `saturating_add` says so without a lint exemption.
+    let needed = cwd.len().saturating_add(1);
 
-    // Need room for the path string plus a null terminator.
-    let needed = cwd_len.wrapping_add(1);
-    if size < needed {
-        errno::set_errno(errno::ERANGE);
-        return core::ptr::null_mut();
-    }
-
-    // SAFETY: CWD buffer is valid for `cwd_len` bytes; `buf` is valid
-    // for at least `size` bytes (caller contract).
-    unsafe {
-        let cwd = core::slice::from_raw_parts(cwd_buf_ptr().cast::<u8>(), cwd_len);
-        for i in 0..cwd_len {
-            if let Some(&b) = cwd.get(i) {
-                *buf.add(i) = b;
-            }
+    let dst = if buf.is_null() {
+        let capacity = if size == 0 { needed } else { size };
+        if capacity < needed {
+            errno::set_errno(errno::ERANGE);
+            return core::ptr::null_mut();
         }
-        *buf.add(cwd_len) = 0;
+        let block = crate::malloc::malloc(capacity);
+        if block.is_null() {
+            errno::set_errno(errno::ENOMEM);
+            return core::ptr::null_mut();
+        }
+        block
+    } else {
+        if size == 0 {
+            errno::set_errno(errno::EINVAL);
+            return core::ptr::null_mut();
+        }
+        if size < needed {
+            errno::set_errno(errno::ERANGE);
+            return core::ptr::null_mut();
+        }
+        buf
+    };
+
+    // Raw writes rather than a `&mut [u8]` over `dst`: the caller's buffer may
+    // be uninitialised, and a reference to it would claim otherwise.
+    //
+    // SAFETY: `dst` is valid for at least `needed = cwd.len() + 1` bytes —
+    // either the caller's buffer (their contract: valid for `size` bytes, and
+    // `size >= needed` was checked) or the `malloc` block of
+    // `capacity >= needed` bytes just returned.  It cannot overlap `cwd`, which
+    // is this module's private storage.
+    unsafe {
+        core::ptr::copy_nonoverlapping(cwd.as_ptr(), dst, cwd.len());
+        dst.add(cwd.len()).write(0);
     }
 
-    buf
+    dst
 }
 
 /// Change the current working directory.
 ///
 /// Resolves `path` against the current CWD (if relative), verifies
-/// that the target exists and is a directory, then stores the
-/// normalized absolute path as the new CWD.
+/// that the target exists and is a directory, then makes the
+/// normalized absolute path the new CWD -- in the kernel's record of it
+/// first (design-decisions.md §960), so that the directory survives
+/// `exec` and reaches a spawned child, and then in this libc's copy.
 ///
 /// Returns 0 on success, -1 on error with errno set.
 ///
@@ -433,7 +828,10 @@ pub extern "C" fn getcwd(buf: *mut u8, size: SizeT) -> *mut u8 {
 /// - `EFAULT` — `path` is null.
 /// - `ENOENT` — `path` is empty or does not exist.
 /// - `ENOTDIR` — resolved path exists but is not a directory.
-/// - `ENAMETOOLONG` — resolved path exceeds `PATH_MAX`.
+/// - `ENAMETOOLONG` — resolved path is longer than `PATH_MAX - 1`, the most
+///   `getcwd` can hand back with its terminator.
+/// - Whatever the kernel refuses the record with; the directory is then
+///   unchanged.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn chdir(path: *const u8) -> i32 {
     if path.is_null() {
@@ -455,40 +853,25 @@ pub extern "C" fn chdir(path: *const u8) -> i32 {
         return -1;
     };
 
-    // Verify the target exists and is a directory.  SYS_FS_STAT writes a
-    // 16-byte FsStatResult, not a struct stat, so translate it.
-    let mut raw = [0u8; crate::stat::KERNEL_STAT_LEN];
-    let ret = syscall3(
-        SYS_FS_STAT,
-        resolved.as_ptr() as u64,
-        resolved_len as u64,
-        raw.as_mut_ptr() as u64,
-    );
-
-    if ret < 0 {
-        return errno::translate(ret) as i32;
-    }
-
-    let mut sb = crate::stat::Stat::zeroed();
-    crate::stat::fill_from_fsstat(&mut sb, &raw);
-    if !sb.is_dir() {
-        errno::set_errno(errno::ENOTDIR);
-        return -1;
-    }
-
-    // Store as the new CWD.
-    // SAFETY: Single-threaded per-process access.
-    unsafe {
-        let buf = &mut *cwd_buf_ptr();
-        for i in 0..resolved_len {
-            if let (Some(dst), Some(&src)) = (buf.get_mut(i), resolved.get(i)) {
-                *dst = src;
-            }
+    // Too long to keep is refused before the lookup, as a name too long to
+    // look up would be.
+    let target = match resolved.get(..resolved_len) {
+        Some(t) if t.len() <= CWD_RECORD_MAX => t,
+        _ => {
+            errno::set_errno(errno::ENAMETOOLONG);
+            return -1;
         }
-        *cwd_len_ptr() = resolved_len;
-    }
+    };
 
-    0
+    // The target must exist and be a directory, and then it becomes the
+    // working directory -- the kernel's record first, this libc's copy after.
+    match check_directory(target).and_then(|()| adopt_cwd(target)) {
+        Ok(()) => 0,
+        Err(e) => {
+            errno::set_errno(e);
+            -1
+        }
+    }
 }
 
 /// Change working directory by file descriptor.
@@ -1137,7 +1520,6 @@ fn kernel_name_len(n: isize, buf: &[u8]) -> Option<usize> {
 /// A `SYS_HOSTNAME` pair is requested in
 /// `requests/b-a-no-native-syscall-reports-the-hostname.md`; when it lands,
 /// this becomes a syscall and the file read goes away.
-
 #[cfg(target_os = "none")]
 fn read_kernel_name(path: &[u8], out: &mut [u8]) -> Option<usize> {
     let fd = crate::file::open(path.as_ptr(), crate::fcntl::O_RDONLY, 0);
@@ -1743,13 +2125,13 @@ pub extern "C" fn ualarm(usecs: u32, interval: u32) -> u32 {
 /// caller looping `while (!flag) pause();` merely spun at 1 Hz, but one that
 /// treats the return as proof of a signal acted on a signal that never came.
 ///
-/// The wait is [`crate::signal::wait_for_delivery`], which polls a counter
-/// bumped whenever a handler runs. See it for why a delivered signal
-/// otherwise leaves no trace, and for what `pause` deliberately does *not*
-/// wake for: an ignored signal runs no handler and must not end the wait.
+/// The wait is [`crate::signal::wait_for_handler`]: a futex wait the kernel
+/// ends for every signal, which goes on unless a handler ran on this thread.
+/// See it for what `pause` deliberately does *not* wake for: an ignored
+/// signal runs no handler and must not end the wait.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn pause() -> i32 {
-    crate::signal::wait_for_delivery();
+    crate::signal::wait_for_handler(crate::interrupt::Mark::now());
     errno::set_errno(errno::EINTR);
     -1
 }
@@ -1816,8 +2198,11 @@ pub extern "C" fn sysconf(name: i32) -> i64 {
         _SC_SYMLOOP_MAX => 40,        // Max symlink resolution depth (Linux default).
         _SC_STREAM_MAX => 16,         // Max stdio streams (our FILE_POOL size).
         _SC_TTY_NAME_MAX => i64::from(crate::limits::TTY_NAME_MAX),
-        _SC_RE_DUP_MAX => 255, // Max RE_DUP count (POSIX minimum 255).
-        _SC_TZNAME_MAX => 6,   // Timezone name max (POSIX minimum 6).
+        // The largest interval count regcomp takes: glibc's 32767, where
+        // <limits.h> (musl's) gives POSIX's floor, 255 -- RE_DUP_MAX is one
+        // of the limits a system may raise past its header's value.
+        _SC_RE_DUP_MAX => i64::from(crate::regex::RE_DUP_MAX),
+        _SC_TZNAME_MAX => 6, // Timezone name max (POSIX minimum 6).
         _SC_MQ_OPEN_MAX => i64::from(crate::limits::MQ_OPEN_MAX),
         _SC_MQ_PRIO_MAX => i64::from(crate::limits::MQ_PRIO_MAX),
         _SC_SEM_VALUE_MAX => i64::from(crate::limits::SEM_VALUE_MAX),
@@ -1984,6 +2369,13 @@ pub extern "C" fn fpathconf(fd: i32, name: i32) -> i64 {
 #[allow(non_upper_case_globals)]
 pub const _CS_PATH: i32 = 0;
 
+/// The value of `confstr(_CS_PATH)`: a search path that finds the standard
+/// utilities.  It is also what `execvp`, `execlp` and `posix_spawnp` search
+/// when `PATH` is unset — glibc's rule — so it is written down once, here,
+/// rather than once per caller (`spawn.rs` carried its own copy until
+/// 2026-09-24).
+pub(crate) const CS_PATH: &[u8] = b"/bin:/usr/bin";
+
 /// Get configuration-defined string values.
 ///
 /// If `buf` is non-null and `len` > 0, copies the string into `buf`
@@ -1992,7 +2384,7 @@ pub const _CS_PATH: i32 = 0;
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn confstr(name: i32, buf: *mut u8, len: usize) -> usize {
     let value: &[u8] = if name == _CS_PATH {
-        b"/bin:/usr/bin"
+        CS_PATH
     } else {
         errno::set_errno(errno::EINVAL);
         return 0;
@@ -2944,6 +3336,18 @@ pub extern "C" fn abort() -> ! {
     crate::process::_exit(134); // 128 + SIGABRT(6)
 }
 
+/// glibc's `__libc_fatal`: write `message` to standard error and abort.
+///
+/// For what a call cannot report -- it has no failure return, or its caller
+/// could not go on after one -- in the cases where glibc's process would end
+/// as well (design-decisions.md §1115). `message` is the whole line, newline
+/// included.
+pub(crate) fn libc_fatal(message: &[u8]) -> ! {
+    // The process is about to abort; a failed write changes nothing.
+    let _ = crate::file::write(2, message.as_ptr(), message.len());
+    abort()
+}
+
 // ---------------------------------------------------------------------------
 // prctl — process control (Linux)
 // ---------------------------------------------------------------------------
@@ -3154,6 +3558,29 @@ pub extern "C" fn prctl(option: i32, arg2: u64, arg3: u64, arg4: u64, arg5: u64)
             }
             // Phase 160: report the persisted bit (was always 0 pre-fix).
             i32::from(nnp::get())
+        }
+        PR_GET_SECCOMP => {
+            // `prctl_get_seccomp`: the thread's seccomp mode.  Nothing here
+            // enters strict mode or installs a filter -- seccomp() answers
+            // ENOSYS for both -- so every thread is SECCOMP_MODE_DISABLED.
+            crate::sys_prctl::SECCOMP_MODE_DISABLED
+        }
+        PR_SET_SECCOMP => {
+            // `prctl_set_seccomp`: strict mode is SECCOMP_SET_MODE_STRICT
+            // with the filter argument ignored (forced NULL, so seccomp()'s
+            // own check of it passes), filter mode is SECCOMP_SET_MODE_FILTER
+            // with no flags, and anything else is EINVAL.
+            use crate::linux_seccomp::{SECCOMP_SET_MODE_FILTER, SECCOMP_SET_MODE_STRICT, seccomp};
+            use crate::sys_prctl::{SECCOMP_MODE_FILTER, SECCOMP_MODE_STRICT};
+            let mode = i32::try_from(arg2).unwrap_or(-1);
+            if mode == SECCOMP_MODE_STRICT {
+                seccomp(SECCOMP_SET_MODE_STRICT, 0, core::ptr::null_mut())
+            } else if mode == SECCOMP_MODE_FILTER {
+                seccomp(SECCOMP_SET_MODE_FILTER, 0, arg3 as *mut u8)
+            } else {
+                crate::errno::set_errno(crate::errno::EINVAL);
+                -1
+            }
         }
         _ => {
             crate::errno::set_errno(crate::errno::EINVAL);
@@ -3489,75 +3916,6 @@ pub extern "C" fn sysinfo(info: *mut Sysinfo) -> i32 {
 }
 
 // ---------------------------------------------------------------------------
-// mntent — mount table parsing
-// ---------------------------------------------------------------------------
-
-/// Mount table entry (matches `struct mntent`).
-#[repr(C)]
-pub struct Mntent {
-    /// Name of mounted filesystem.
-    pub mnt_fsname: *mut u8,
-    /// Filesystem path prefix (mount point).
-    pub mnt_dir: *mut u8,
-    /// Mount type.
-    pub mnt_type: *mut u8,
-    /// Mount options.
-    pub mnt_opts: *mut u8,
-    /// Dump frequency.
-    pub mnt_freq: i32,
-    /// Pass number for fsck.
-    pub mnt_passno: i32,
-}
-
-/// Open a mount table file for reading.
-///
-/// Stub: returns null (our OS doesn't have /etc/mtab or /proc/mounts
-/// yet).  Programs that need mount information should query the kernel
-/// directly via our mount-list syscall (when implemented).
-#[cfg_attr(target_os = "none", unsafe(no_mangle))]
-pub extern "C" fn setmntent(_filename: *const u8, _type: *const u8) -> *mut u8 {
-    // Return null "FILE*" — signals no mount table available.
-    core::ptr::null_mut()
-}
-
-/// Read the next mount table entry.
-///
-/// Stub: returns null (no mount table).
-#[cfg_attr(target_os = "none", unsafe(no_mangle))]
-pub extern "C" fn getmntent(_stream: *mut u8) -> *mut Mntent {
-    core::ptr::null_mut()
-}
-
-/// Thread-safe version of `getmntent`.
-///
-/// Stub: returns null (no mount table).
-#[cfg_attr(target_os = "none", unsafe(no_mangle))]
-pub extern "C" fn getmntent_r(
-    _stream: *mut u8,
-    _mntbuf: *mut Mntent,
-    _buf: *mut u8,
-    _buflen: i32,
-) -> *mut Mntent {
-    core::ptr::null_mut()
-}
-
-/// Close a mount table file.
-///
-/// Stub: returns 1 (success) even though we never open anything.
-#[cfg_attr(target_os = "none", unsafe(no_mangle))]
-pub extern "C" fn endmntent(_stream: *mut u8) -> i32 {
-    1 // glibc always returns 1.
-}
-
-/// Check if a mount option is present.
-///
-/// Stub: returns null (option not found).
-#[cfg_attr(target_os = "none", unsafe(no_mangle))]
-pub extern "C" fn hasmntopt(_mnt: *const Mntent, _opt: *const u8) -> *mut u8 {
-    core::ptr::null_mut()
-}
-
-// ---------------------------------------------------------------------------
 // personality — process execution domain
 // ---------------------------------------------------------------------------
 
@@ -3576,10 +3934,10 @@ static PERSONALITY_STATE: core::sync::atomic::AtomicU32 = core::sync::atomic::At
 
 /// Cross-test serialisation lock for the process-global
 /// `PERSONALITY_STATE`.  Every test that reads *or* writes the
-/// personality — in this file and in `sys_personality` — must hold this
-/// for its whole duration.
+/// personality must hold this for its whole duration.
 ///
-/// `sys_personality`'s tests previously relied on a `reset_personality()`
+/// The personality tests that lived in `sys_personality` (in this file since
+/// 2026-09-27) once relied on a `reset_personality()`
 /// call plus an RAII `PersonalityGuard` that snapshot the value and
 /// restored it on drop.  That is not isolation: cargo runs the test
 /// binary's tests on parallel threads in one process, so a snapshot /
@@ -3612,9 +3970,9 @@ pub fn lock_personality_for_test() -> std::sync::MutexGuard<'static, ()> {
 
 /// Read the current personality without altering it.
 ///
-/// Internal helper used by `posix::sys_personality` tests and by the
-/// process subsystem when it needs to consult the personality bits
-/// (e.g. to honour `ADDR_NO_RANDOMIZE` for an `execve`).
+/// Internal helper for this module's tests and for anything that needs to
+/// consult the personality bits (e.g. to honour `ADDR_NO_RANDOMIZE` for an
+/// `execve`).
 #[must_use]
 pub fn current_personality() -> u32 {
     PERSONALITY_STATE.load(core::sync::atomic::Ordering::Relaxed)
@@ -4423,37 +4781,21 @@ pub unsafe extern "C" fn tmpnam_r(s: *mut u8) -> *mut u8 {
 
 /// `get_current_dir_name` — get the current working directory.
 ///
-/// Like `getcwd`, but allocates the buffer with `malloc`.
-/// The caller must `free` the returned pointer.
+/// Like `getcwd`, but allocates the buffer with `malloc`; the caller must
+/// `free` the returned pointer.  It is exactly [`getcwd`]'s allocating form,
+/// `getcwd(NULL, 0)`, and delegates to it so the two cannot disagree.
 ///
-/// glibc extension.
+/// glibc extension.  glibc additionally returns `$PWD` when `stat` says it
+/// names the same inode as `.`, so that a directory reached through a symlink
+/// keeps the spelling the user typed.  That is not reproduced, for two
+/// reasons: this libc's working directory is already the path as the caller
+/// gave it (`chdir` normalises it lexically and never resolves symlinks), so
+/// the spelling is kept anyway; and the identity test glibc relies on cannot
+/// be made sound here, because `st_dev` is never filled and `st_ino` is 0 on
+/// filesystems without stable inode numbers — every stale `$PWD` would match.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn get_current_dir_name() -> *mut u8 {
-    let mut buf = [0u8; PATH_MAX];
-    let ret = getcwd(buf.as_mut_ptr(), PATH_MAX);
-    if ret.is_null() {
-        return core::ptr::null_mut();
-    }
-
-    // Find length.
-    let mut len: usize = 0;
-    // Loop guard `len < PATH_MAX == buf.len()` keeps `buf[len]` in bounds.
-    #[allow(clippy::indexing_slicing)]
-    while len < PATH_MAX && buf[len] != 0 {
-        len = len.wrapping_add(1);
-    }
-
-    // Allocate and copy.
-    let alloc_size = len.wrapping_add(1); // Include null terminator.
-    let ptr = crate::malloc::malloc(alloc_size);
-    if ptr.is_null() {
-        return core::ptr::null_mut();
-    }
-    // SAFETY: ptr is valid for alloc_size bytes.
-    unsafe {
-        core::ptr::copy_nonoverlapping(buf.as_ptr(), ptr, alloc_size);
-    }
-    ptr
+    getcwd(core::ptr::null_mut(), 0)
 }
 
 // ---------------------------------------------------------------------------
@@ -4682,6 +5024,19 @@ mod tests {
         assert_eq!(sysconf(_SC_OPEN_MAX), crate::fdtable::MAX_FDS as i64);
     }
 
+    /// Asked by the numbers a C caller's `<unistd.h>` (musl's) passes: 74 is
+    /// the keys' limit and 76 the threads'.  The two answers were swapped
+    /// until 2026-09-27.
+    #[test]
+    fn sysconf_answers_the_thread_limits_by_musls_numbers() {
+        assert_eq!((_SC_THREAD_KEYS_MAX, _SC_THREAD_THREADS_MAX), (74, 76));
+        assert_eq!(
+            sysconf(74),
+            i64::from(crate::limits::_POSIX_THREAD_KEYS_MAX)
+        );
+        assert_eq!(sysconf(76), 1024);
+    }
+
     #[test]
     fn test_sysconf_clk_tck() {
         assert_eq!(sysconf(_SC_CLK_TCK), 100);
@@ -4754,6 +5109,8 @@ mod tests {
             val >= 255,
             "RE_DUP_MAX should be at least POSIX minimum 255"
         );
+        // What regcomp takes, and glibc's `getconf RE_DUP_MAX`.
+        assert_eq!(val, 32767);
     }
 
     #[test]
@@ -4925,7 +5282,7 @@ mod tests {
         // the two that can drift silently: nothing else forces the log and the
         // mask to track a change to the size.
         assert_eq!(1usize << crate::sys_param::PAGE_SHIFT, PAGE_SIZE);
-        assert_eq!(crate::sys_param::PAGE_MASK, PAGE_SIZE - 1);
+        assert_eq!(crate::sys_param::PAGE_MASK, !(PAGE_SIZE - 1));
     }
 
     #[test]
@@ -5192,6 +5549,36 @@ mod tests {
     #[test]
     fn test_prctl_unknown_fails() {
         assert_eq!(prctl(-999, 0, 0, 0, 0), -1);
+    }
+
+    /// `PR_GET_SECCOMP` is the mode, and nothing here leaves mode 0.  It was
+    /// EINVAL until 2026-09-26.
+    #[test]
+    fn test_prctl_get_seccomp_is_disabled() {
+        crate::errno::set_errno(0);
+        assert_eq!(prctl(PR_GET_SECCOMP, 0, 0, 0, 0), 0);
+        assert_eq!(crate::errno::get_errno(), 0);
+    }
+
+    /// `PR_SET_SECCOMP` is seccomp() by another road: strict mode with its
+    /// filter argument ignored, filter mode with no flags, anything else
+    /// EINVAL.
+    #[test]
+    fn test_prctl_set_seccomp_is_seccomp() {
+        // Strict mode: the filter argument is forced NULL, so a garbage one
+        // does not make seccomp()'s own "args must be NULL" EINVAL.
+        crate::errno::set_errno(0);
+        assert_eq!(prctl(PR_SET_SECCOMP, 1, 0xDEAD, 0, 0), -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::ENOSYS);
+        // Filter mode with no program: seccomp()'s EFAULT.
+        crate::errno::set_errno(0);
+        assert_eq!(prctl(PR_SET_SECCOMP, 2, 0, 0, 0), -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EFAULT);
+        for mode in [0, 3, u64::MAX] {
+            crate::errno::set_errno(0);
+            assert_eq!(prctl(PR_SET_SECCOMP, mode, 0, 0, 0), -1, "mode {mode}");
+            assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+        }
     }
 
     // ------------------------------------------------------------------
@@ -8892,21 +9279,222 @@ mod tests {
 
     #[test]
     fn test_grnd_constants() {
-        assert_eq!(GRND_NONBLOCK, 1);
-        assert_eq!(GRND_RANDOM, 2);
-        assert_ne!(GRND_NONBLOCK, GRND_RANDOM);
+        // musl's (and the kernel's) numbers; the mask is exactly their union.
+        assert_eq!((GRND_NONBLOCK, GRND_RANDOM, GRND_INSECURE), (1, 2, 4));
+        assert_eq!(
+            GRND_VALID_FLAGS,
+            GRND_NONBLOCK | GRND_RANDOM | GRND_INSECURE
+        );
+    }
+
+    // getrandom's flag checks, in the kernel's order (drivers/char/random.c,
+    // `SYSCALL_DEFINE3(getrandom, ...)`): an unknown flag bit, then
+    // GRND_RANDOM with GRND_INSECURE, are EINVAL before the buffer is looked
+    // at; then a NULL buffer with a length is EFAULT, before the length's
+    // range.  These lived in sys_random.rs, a facade nothing reached, until
+    // 2026-09-27.
+
+    #[test]
+    fn test_getrandom_rejects_an_unknown_flag_bit() {
+        let mut buf = [0u8; 16];
+        for flags in [0x8000_0000, GRND_NONBLOCK | 0x0008, !0u32] {
+            errno::set_errno(0);
+            assert_eq!(
+                getrandom(buf.as_mut_ptr(), buf.len(), flags),
+                -1,
+                "{flags:#x}"
+            );
+            assert_eq!(errno::get_errno(), errno::EINVAL, "{flags:#x}");
+        }
+    }
+
+    #[test]
+    fn test_getrandom_rejects_random_with_insecure() {
+        let mut buf = [0u8; 16];
+        for flags in [
+            GRND_RANDOM | GRND_INSECURE,
+            GRND_RANDOM | GRND_INSECURE | GRND_NONBLOCK,
+        ] {
+            errno::set_errno(0);
+            assert_eq!(
+                getrandom(buf.as_mut_ptr(), buf.len(), flags),
+                -1,
+                "{flags:#x}"
+            );
+            assert_eq!(errno::get_errno(), errno::EINVAL, "{flags:#x}");
+        }
+    }
+
+    #[test]
+    fn test_getrandom_checks_flags_before_the_buffer() {
+        // A bad flag outranks a NULL buffer, and so does the conflict.
+        for flags in [0xDEAD_BEEF, GRND_RANDOM | GRND_INSECURE] {
+            errno::set_errno(0);
+            assert_eq!(getrandom(core::ptr::null_mut(), 16, flags), -1);
+            assert_eq!(errno::get_errno(), errno::EINVAL, "{flags:#x}");
+        }
+        // Even a zero-length call, which reads no buffer, refuses a bad flag.
+        errno::set_errno(0);
+        assert_eq!(getrandom(core::ptr::null_mut(), 0, 0x1_0000), -1);
+        assert_eq!(errno::get_errno(), errno::EINVAL);
+    }
+
+    #[test]
+    fn test_getrandom_checks_the_buffer_before_the_length() {
+        errno::set_errno(0);
+        assert_eq!(getrandom(core::ptr::null_mut(), usize::MAX, 0), -1);
+        assert_eq!(errno::get_errno(), errno::EFAULT);
+    }
+
+    #[test]
+    fn test_getrandom_accepts_each_valid_combination() {
+        let mut buf = [0u8; 16];
+        for flags in [
+            0,
+            GRND_NONBLOCK,
+            GRND_RANDOM,
+            GRND_INSECURE,
+            GRND_NONBLOCK | GRND_RANDOM,
+            GRND_NONBLOCK | GRND_INSECURE,
+        ] {
+            errno::set_errno(0);
+            let n = getrandom(buf.as_mut_ptr(), buf.len(), flags);
+            assert_eq!(n, buf.len() as isize, "{flags:#x}");
+        }
+    }
+
+    #[test]
+    fn test_getrandom_zero_length_with_a_valid_flag_is_zero() {
+        let mut buf = [0u8; 1];
+        assert_eq!(getrandom(buf.as_mut_ptr(), 0, GRND_NONBLOCK), 0);
+        assert_eq!(getrandom(core::ptr::null_mut(), 0, GRND_NONBLOCK), 0);
+        assert_eq!(getrandom(core::ptr::null_mut(), 0, 0), 0);
+    }
+
+    #[test]
+    fn test_getrandom_success_leaves_errno_alone_and_fills_the_length() {
+        let mut buf = [0u8; 64];
+        errno::set_errno(0xBEEF);
+        assert_eq!(getrandom(buf.as_mut_ptr(), 16, GRND_NONBLOCK), 16);
+        assert_eq!(errno::get_errno(), 0xBEEF);
+        for len in [1usize, 7, 16, 33, 64] {
+            assert_eq!(getrandom(buf.as_mut_ptr(), len, 0), len as isize);
+        }
     }
 
     // ------------------------------------------------------------------
     // getcwd
     // ------------------------------------------------------------------
 
+    /// Point this test thread's working directory at `path` without a
+    /// `chdir`, which needs a kernel to `stat` the target.  The CWD state is
+    /// a `process_global!`, so it is this thread's own copy.
+    fn set_test_cwd(path: &[u8]) {
+        assert!(path.len() <= PATH_MAX && path.first() == Some(&b'/'));
+        // SAFETY: the accessors return this thread's own storage, and `path`
+        // fits the `PATH_MAX` buffer (asserted above).
+        unsafe {
+            let buf = &mut *cwd_buf_ptr();
+            buf[..path.len()].copy_from_slice(path);
+            *cwd_len_ptr() = path.len();
+        }
+    }
+
+    /// Read back a NUL-terminated result and release it with `free`.
+    fn take_allocated(ptr: *mut u8) -> std::vec::Vec<u8> {
+        assert!(!ptr.is_null());
+        // SAFETY: `ptr` is a NUL-terminated block from this crate's `malloc`.
+        unsafe {
+            let len = crate::string::strlen(ptr);
+            let bytes = core::slice::from_raw_parts(ptr, len).to_vec();
+            crate::malloc::free(ptr);
+            bytes
+        }
+    }
+
+    /// The GNU allocate form bash uses first: `getcwd(NULL, PATH_MAX)`.  This
+    /// test asserted `EINVAL` until 2026-09-24, which is the bug it now pins.
     #[test]
-    fn test_getcwd_null_buf() {
+    fn test_getcwd_null_buf_with_size_allocates() {
+        set_test_cwd(b"/usr/local/lib");
         errno::set_errno(0);
-        let ret = getcwd(core::ptr::null_mut(), 100);
+        let ret = getcwd(core::ptr::null_mut(), PATH_MAX);
+        assert_eq!(take_allocated(ret), b"/usr/local/lib");
+        assert_eq!(errno::get_errno(), 0, "success must not touch errno");
+    }
+
+    /// bash's fallback, `getcwd(NULL, 0)`: allocate exactly what the path
+    /// needs.  The block must hold the path and its terminator and nothing is
+    /// assumed about its size beyond that.
+    #[test]
+    fn test_getcwd_null_buf_zero_size_allocates_exactly() {
+        set_test_cwd(b"/home/user");
+        let ret = getcwd(core::ptr::null_mut(), 0);
+        assert!(!ret.is_null());
+        // SAFETY: `ret` came from this crate's `malloc`.
+        let usable = unsafe { crate::malloc::malloc_usable_size(ret) };
+        // The path and its terminator.
+        assert!(usable >= b"/home/user\0".len(), "usable {usable}");
+        assert_eq!(take_allocated(ret), b"/home/user");
+    }
+
+    /// `getcwd(NULL, n)` with `n` too small is `ERANGE`, as in glibc, and the
+    /// refusal must not leave a block behind — the size is checked first.
+    #[test]
+    fn test_getcwd_null_buf_too_small_is_erange_and_allocates_nothing() {
+        set_test_cwd(b"/usr/local/lib");
+        let before = crate::malloc::live_allocations::count();
+        errno::set_errno(0);
+        // 14 bytes of path need 15 with the terminator.
+        let ret = getcwd(core::ptr::null_mut(), 14);
         assert!(ret.is_null());
-        assert_eq!(errno::get_errno(), errno::EINVAL);
+        assert_eq!(errno::get_errno(), errno::ERANGE);
+        assert_eq!(
+            crate::malloc::live_allocations::count(),
+            before,
+            "leaked a block"
+        );
+
+        // One byte more is enough.
+        let ret = getcwd(core::ptr::null_mut(), 15);
+        assert_eq!(take_allocated(ret), b"/usr/local/lib");
+        assert_eq!(crate::malloc::live_allocations::count(), before);
+    }
+
+    /// The boundary on the caller-buffer form: exactly `len + 1` fits, `len`
+    /// does not, and a refusal leaves the buffer untouched.
+    #[test]
+    fn test_getcwd_caller_buffer_boundary() {
+        set_test_cwd(b"/tmp");
+        let mut buf = [0xAAu8; 5];
+        errno::set_errno(0);
+        assert!(getcwd(buf.as_mut_ptr(), 4).is_null());
+        assert_eq!(errno::get_errno(), errno::ERANGE);
+        assert_eq!(buf, [0xAA; 5], "a refused call must not write");
+
+        let ret = getcwd(buf.as_mut_ptr(), 5);
+        assert_eq!(ret, buf.as_mut_ptr());
+        assert_eq!(&buf, b"/tmp\0");
+    }
+
+    /// A path of the full `PATH_MAX - 1` bytes, the longest the buffer holds
+    /// with room for a terminator, round-trips through both forms.
+    #[test]
+    fn test_getcwd_longest_path() {
+        let mut path = std::vec![b'a'; PATH_MAX - 1];
+        path[0] = b'/';
+        set_test_cwd(&path);
+        assert_eq!(take_allocated(getcwd(core::ptr::null_mut(), 0)), path);
+        let mut buf = std::vec![0u8; PATH_MAX];
+        assert!(!getcwd(buf.as_mut_ptr(), PATH_MAX).is_null());
+        assert_eq!(&buf[..PATH_MAX - 1], &path[..]);
+        assert_eq!(buf[PATH_MAX - 1], 0);
+    }
+
+    #[test]
+    fn test_get_current_dir_name_matches_getcwd() {
+        set_test_cwd(b"/var/log");
+        assert_eq!(take_allocated(get_current_dir_name()), b"/var/log");
     }
 
     #[test]
@@ -8957,6 +9545,211 @@ mod tests {
         errno::set_errno(0);
         assert_eq!(chdir(b"\0".as_ptr()), -1);
         assert_eq!(errno::get_errno(), errno::ENOENT);
+    }
+
+    // ------------------------------------------------------------------
+    // The working-directory record (design-decisions.md §960)
+    // ------------------------------------------------------------------
+
+    /// This thread's working directory as `getcwd` reports it.
+    fn cwd_now() -> std::vec::Vec<u8> {
+        let mut buf = [0u8; PATH_MAX];
+        let got = getcwd(buf.as_mut_ptr(), PATH_MAX);
+        assert!(
+            !got.is_null(),
+            "getcwd failed: errno {}",
+            errno::get_errno()
+        );
+        // SAFETY: getcwd wrote a NUL-terminated path into `buf`.
+        let len = unsafe { crate::string::strlen(buf.as_ptr()) };
+        buf[..len].to_vec()
+    }
+
+    /// Every piece of state these tests touch, set rather than assumed: the
+    /// harness may run them on one thread in any order.
+    fn fresh_cwd_state(cwd: &[u8]) {
+        cwd_record::host::reset();
+        host_dirs::clear();
+        set_test_cwd(cwd);
+    }
+
+    fn resolved(base: &[u8], path: &[u8]) -> Option<std::vec::Vec<u8>> {
+        let mut out = [0u8; PATH_MAX];
+        resolve_path_against(base, path, &mut out).map(|n| out[..n].to_vec())
+    }
+
+    #[test]
+    fn resolve_against_joins_and_normalizes_a_relative_path() {
+        assert_eq!(resolved(b"/srv", b"data"), Some(b"/srv/data".to_vec()));
+        assert_eq!(resolved(b"/", b"data"), Some(b"/data".to_vec()));
+        assert_eq!(resolved(b"/srv/a", b"../b/./c"), Some(b"/srv/b/c".to_vec()));
+        assert_eq!(resolved(b"/srv", b".."), Some(b"/".to_vec()));
+    }
+
+    #[test]
+    fn resolve_against_ignores_the_base_for_an_absolute_path() {
+        assert_eq!(resolved(b"/srv", b"/etc//x/"), Some(b"/etc/x".to_vec()));
+    }
+
+    #[test]
+    fn resolve_against_refuses_what_resolve_path_refuses() {
+        assert_eq!(resolved(b"/srv", b""), None, "empty path");
+        assert_eq!(resolved(b"srv", b"data"), None, "relative base");
+        let long = std::vec![b'a'; PATH_MAX];
+        assert_eq!(resolved(b"/", &long), None, "longer than PATH_MAX");
+    }
+
+    /// `resolve_path` is now `resolve_path_against` the working directory; it
+    /// must answer as it did.
+    #[test]
+    fn resolve_path_still_resolves_against_the_working_directory() {
+        set_test_cwd(b"/home/user");
+        let mut out = [0u8; PATH_MAX];
+        // SAFETY: NUL-terminated literal.
+        let n = unsafe { resolve_path(b"notes/../todo.txt\0".as_ptr(), &mut out) };
+        assert_eq!(n.map(|n| &out[..n]), Some(&b"/home/user/todo.txt"[..]));
+        // SAFETY: as above.
+        assert_eq!(unsafe { resolve_path(b"\0".as_ptr(), &mut out) }, None);
+        assert_eq!(unsafe { resolve_path(core::ptr::null(), &mut out) }, None);
+    }
+
+    #[test]
+    fn canonical_dir_paths_are_exactly_what_normalize_produces() {
+        for good in [&b"/"[..], b"/a", b"/a/b", b"/a b/\xff"] {
+            assert!(is_canonical_dir_path(good), "{good:?}");
+        }
+        for bad in [
+            &b""[..],
+            b"a",
+            b"/a/",
+            b"//a",
+            b"/a//b",
+            b"/a/./b",
+            b"/a/../b",
+            b"/.",
+            b"/a\0b",
+        ] {
+            assert!(!is_canonical_dir_path(bad), "{bad:?}");
+        }
+    }
+
+    /// The point of the record: `chdir` tells the kernel, so the directory
+    /// outlives this libc's copy of it.
+    #[test]
+    fn chdir_records_the_directory_it_moves_to() {
+        fresh_cwd_state(b"/");
+        host_dirs::add(b"/tmp/work");
+        assert_eq!(chdir(b"/tmp/work\0".as_ptr()), 0);
+        assert_eq!(cwd_now(), b"/tmp/work");
+        assert_eq!(cwd_record::host::recorded(), b"/tmp/work");
+    }
+
+    /// A relative `chdir` records the resolved, absolute directory -- the
+    /// kernel refuses anything else.
+    #[test]
+    fn a_relative_chdir_records_the_absolute_directory() {
+        fresh_cwd_state(b"/tmp");
+        host_dirs::add(b"/tmp/a");
+        assert_eq!(chdir(b"./a/\0".as_ptr()), 0);
+        assert_eq!(cwd_now(), b"/tmp/a");
+        assert_eq!(cwd_record::host::recorded(), b"/tmp/a");
+    }
+
+    #[test]
+    fn chdir_to_a_missing_directory_changes_nothing() {
+        fresh_cwd_state(b"/tmp");
+        errno::set_errno(0);
+        assert_eq!(chdir(b"/no/such/dir\0".as_ptr()), -1);
+        assert_eq!(errno::get_errno(), errno::ENOENT);
+        assert_eq!(cwd_now(), b"/tmp");
+        assert_eq!(cwd_record::host::recorded(), b"/", "nothing recorded");
+    }
+
+    /// The record is written first, so a refusal leaves both the record and
+    /// this libc's copy where they were -- the two never disagree.
+    #[test]
+    fn a_refused_record_leaves_the_directory_unchanged() {
+        fresh_cwd_state(b"/tmp");
+        host_dirs::add(b"/srv");
+        cwd_record::host::refuse_next(errno::EIO);
+        errno::set_errno(0);
+        assert_eq!(chdir(b"/srv\0".as_ptr()), -1);
+        assert_eq!(errno::get_errno(), errno::EIO);
+        assert_eq!(cwd_now(), b"/tmp");
+    }
+
+    /// A kernel from before the record: `chdir` works as it always did, with
+    /// the directory kept in this libc alone.
+    #[test]
+    fn chdir_without_a_kernel_record_still_changes_directory() {
+        fresh_cwd_state(b"/");
+        cwd_record::host::set_absent(true);
+        host_dirs::add(b"/srv");
+        assert_eq!(chdir(b"/srv\0".as_ptr()), 0);
+        assert_eq!(cwd_now(), b"/srv");
+    }
+
+    /// `PATH_MAX` bytes and no room for `getcwd`'s terminator: refused before
+    /// the lookup, as the kernel would refuse to record it.
+    #[test]
+    fn chdir_refuses_a_directory_getcwd_could_not_return() {
+        fresh_cwd_state(b"/");
+        let mut long = std::vec![b'/'];
+        long.extend(std::iter::repeat_n(b'a', PATH_MAX - 1));
+        assert_eq!(long.len(), PATH_MAX);
+        host_dirs::add(&long);
+        long.push(0);
+        errno::set_errno(0);
+        assert_eq!(chdir(long.as_ptr()), -1);
+        assert_eq!(errno::get_errno(), errno::ENAMETOOLONG);
+        assert_eq!(cwd_now(), b"/");
+    }
+
+    /// Start-up: a program begins in the directory its parent recorded.
+    #[test]
+    fn start_up_takes_the_recorded_directory() {
+        fresh_cwd_state(b"/");
+        cwd_record::host::preset(b"/home/user/src");
+        init_cwd_from_record();
+        assert_eq!(cwd_now(), b"/home/user/src");
+    }
+
+    #[test]
+    fn start_up_without_a_kernel_record_stays_at_root() {
+        fresh_cwd_state(b"/");
+        cwd_record::host::set_absent(true);
+        init_cwd_from_record();
+        assert_eq!(cwd_now(), b"/");
+    }
+
+    /// A record that is not a canonical directory name is not trusted: this
+    /// libc's copy is what every relative path is joined to.
+    #[test]
+    fn start_up_ignores_a_record_that_is_not_canonical() {
+        for bad in [&b"/a/../b"[..], b"relative", b"/trailing/", b"/nul\0inside"] {
+            fresh_cwd_state(b"/");
+            cwd_record::host::preset(bad);
+            init_cwd_from_record();
+            assert_eq!(cwd_now(), b"/", "{bad:?}");
+        }
+    }
+
+    #[test]
+    fn start_up_ignores_a_record_too_long_to_return() {
+        fresh_cwd_state(b"/");
+        let mut long = std::vec![b'/'];
+        long.extend(std::iter::repeat_n(b'a', PATH_MAX - 1));
+        cwd_record::host::preset(&long);
+        init_cwd_from_record();
+        assert_eq!(cwd_now(), b"/");
+    }
+
+    #[test]
+    fn current_cwd_copies_the_working_directory() {
+        set_test_cwd(b"/var/log");
+        let mut out = [0u8; PATH_MAX];
+        let n = current_cwd(&mut out);
+        assert_eq!(&out[..n], b"/var/log");
     }
 
     // ------------------------------------------------------------------
@@ -9119,56 +9912,6 @@ mod tests {
     }
 
     // ------------------------------------------------------------------
-    // mntent stubs
-    // ------------------------------------------------------------------
-
-    #[test]
-    fn test_setmntent_returns_null() {
-        let ret = setmntent(b"/etc/mtab\0".as_ptr(), b"r\0".as_ptr());
-        assert!(
-            ret.is_null(),
-            "setmntent should return null (no mount table)"
-        );
-    }
-
-    #[test]
-    fn test_getmntent_returns_null() {
-        let ret = getmntent(core::ptr::null_mut());
-        assert!(ret.is_null(), "getmntent should return null");
-    }
-
-    #[test]
-    fn test_getmntent_r_returns_null() {
-        let mut mntbuf = core::mem::MaybeUninit::<Mntent>::zeroed();
-        let mut buf = [0u8; 256];
-        let ret = getmntent_r(
-            core::ptr::null_mut(),
-            mntbuf.as_mut_ptr(),
-            buf.as_mut_ptr(),
-            buf.len() as i32,
-        );
-        assert!(ret.is_null(), "getmntent_r should return null");
-    }
-
-    #[test]
-    fn test_endmntent_returns_one() {
-        assert_eq!(endmntent(core::ptr::null_mut()), 1);
-    }
-
-    #[test]
-    fn test_hasmntopt_returns_null() {
-        let ret = hasmntopt(core::ptr::null(), b"rw\0".as_ptr());
-        assert!(ret.is_null(), "hasmntopt should return null");
-    }
-
-    #[test]
-    fn test_mntent_size() {
-        let size = core::mem::size_of::<Mntent>();
-        // 4 pointers + 2 i32 = 4*8 + 2*4 = 40 on 64-bit.
-        assert!(size >= 40, "Mntent should be at least 40 bytes, got {size}");
-    }
-
-    // ------------------------------------------------------------------
     // personality
     // ------------------------------------------------------------------
 
@@ -9191,6 +9934,82 @@ mod tests {
         // Setting PER_LINUX over PER_LINUX returns the previous value, 0.
         let ret = personality(0);
         assert_eq!(ret, 0, "Setting PER_LINUX should succeed");
+    }
+
+    // personality(2), as Linux's `SYSCALL_DEFINE1(personality, unsigned int,
+    // ...)` has it: it keeps whatever it is given, unchecked, and answers the
+    // value it replaced; 0xffffffff asks without setting; and the argument is
+    // an `unsigned int`, so a 64-bit value's high half is dropped before
+    // either.  These came from sys_personality.rs ("Phase 78"), a facade
+    // nothing reached, on 2026-09-27.  The numbers are musl's
+    // `<sys/personality.h>`.
+    const PER_LINUX: u32 = 0;
+    const PER_BSD: u32 = 0x0006;
+    const PER_LINUX32: u32 = 0x0008;
+    const ADDR_NO_RANDOMIZE: u32 = 0x004_0000;
+    const MMAP_PAGE_ZERO: u32 = 0x010_0000;
+    const READ_IMPLIES_EXEC: u32 = 0x040_0000;
+
+    /// Take the cross-test lock, then start from PER_LINUX.
+    fn fresh_personality() -> std::sync::MutexGuard<'static, ()> {
+        let g = lock_personality_for_test();
+        personality(u64::from(PER_LINUX));
+        g
+    }
+
+    #[test]
+    fn test_personality_returns_the_value_it_replaces() {
+        let _g = fresh_personality();
+        assert_eq!(personality(u64::from(PER_LINUX32)), PER_LINUX as i32);
+        assert_eq!(personality(u64::from(PER_BSD)), PER_LINUX32 as i32);
+        assert_eq!(personality(0), PER_BSD as i32);
+        assert_eq!(current_personality(), PER_LINUX);
+    }
+
+    #[test]
+    fn test_personality_query_asks_without_setting() {
+        let _g = fresh_personality();
+        assert_eq!(PERSONALITY_QUERY, 0xFFFF_FFFF);
+        let set = PER_LINUX | ADDR_NO_RANDOMIZE;
+        personality(u64::from(set));
+        for _ in 0..2 {
+            assert_eq!(personality(u64::from(PERSONALITY_QUERY)) as u32, set);
+        }
+        assert_eq!(current_personality(), set);
+        assert_eq!(set & 0xFF, PER_LINUX, "the domain is the low byte");
+    }
+
+    #[test]
+    fn test_personality_drops_the_high_half() {
+        let _g = fresh_personality();
+        personality(u64::from(PER_LINUX32));
+        // All ones -- `(unsigned long)-1` -- is the query once truncated.
+        assert_eq!(personality(!0u64), PER_LINUX32 as i32);
+        assert_eq!(current_personality(), PER_LINUX32);
+        // And a set keeps only the low 32 bits.
+        personality(0xDEAD_BEEF_0000_0008);
+        assert_eq!(current_personality(), 0x0000_0008);
+    }
+
+    #[test]
+    fn test_personality_keeps_any_bits() {
+        let _g = fresh_personality();
+        // Nothing is validated: what goes in comes out -- 0xfffffffe is a set,
+        // not the query, and the top bit is just a bit.
+        for value in [
+            0x1234_5678,
+            0xFFFF_FFFE,
+            0x8000_0000,
+            PER_LINUX | ADDR_NO_RANDOMIZE | MMAP_PAGE_ZERO | READ_IMPLIES_EXEC,
+        ] {
+            personality(u64::from(value));
+            assert_eq!(current_personality(), value, "{value:#x}");
+            assert_eq!(
+                personality(u64::from(PERSONALITY_QUERY)) as u32,
+                value,
+                "{value:#x}"
+            );
+        }
     }
 
     // ------------------------------------------------------------------

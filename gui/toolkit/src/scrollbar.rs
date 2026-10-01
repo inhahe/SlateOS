@@ -1,13 +1,29 @@
-//! Where a scrollbar's thumb sits, and where a drag of it lands.
+//! Where a scrollbar's thumb sits, where a drag of it lands, and how the bar
+//! is drawn.
 //!
-//! # Why this is a module and not a widget
+//! # Why the drawing is here too
 //!
-//! Nothing here draws. A scrollbar's *appearance* belongs to whatever is
-//! drawing the list — the file dialog paints one colour, a menu another, an
-//! application its own — and a widget that owned the pixels would have to grow
-//! a palette argument, a corner radius, and an opinion about hover states
-//! before any of its three callers could use it. What they actually share is
-//! two pieces of arithmetic, and those are what is here.
+//! This module began as arithmetic alone: a scrollbar's look belonged to
+//! whatever drew the list, and what the callers shared was the thumb's
+//! geometry. A theme's widget style (`Palette::widget_style`'s `scrollbar`,
+//! design-decisions 1435) changed that -- a theme that asks for thin bars, or
+//! bars that stay out of the way until a hand goes to them, asks it of every
+//! scrollbar, so every scrollbar has to be drawn by the one function that
+//! keeps the promise: [`draw`].
+//!
+//! **The column never moves.** A bar is drawn *inside* its column -- the strip
+//! at the view's side that takes a press on the bar, [`WIDTH`] wide in every
+//! theme -- and never wider. The toolkit answers a click by laying a widget
+//! out again with any palette to hand, on the rule that where things land
+//! does not depend on colour, so a style that moved the column would put a
+//! click somewhere other than the bar. What the style chooses is the drawing:
+//! the full column or a thin bar at its outer edge, and a track always there
+//! or a thin line that widens into the bar when the pointer comes to it.
+//!
+//! **Not every bar is a scrollbar.** The menus and the start menu draw a
+//! four-pixel scroll *indicator* -- no track to press, no thumb to take hold
+//! of, only a mark of where the list is -- and those stay as they are: a thin
+//! mark already, with nothing for a style to widen or hide.
 //!
 //! # Why it exists at all
 //!
@@ -45,12 +61,24 @@
 //! its tests are what guard that this module says the same thing it did.
 
 use crate::frame::Rect;
+use crate::palette::{Palette, emphasized};
+use crate::render::RenderCommand;
+use crate::style::CornerRadii;
+use crate::surface::CommandSink;
+use crate::widget_style::ScrollbarVisibility;
 
-/// Width a vertical scrollbar wants, when the list is long enough to have one.
-///
-/// A suggestion rather than a rule: a caller drawing into a tight pane may use
-/// its own, and nothing here reads it.
+/// Width of a scrollbar's column: the strip at a view's side that takes a
+/// press on the bar, the same in every theme. The bar is drawn inside it, as
+/// wide as the theme's style says and never wider ([`draw`]).
 pub const WIDTH: f32 = 10.0;
+
+/// How wide an overlaid bar's thumb is drawn while the pointer is elsewhere: a
+/// line, still saying where the view is.
+pub const IDLE_WIDTH: f32 = 3.0;
+
+/// How round the thumb's ends are, at most: a hint of a corner on a bar that
+/// fills its column, a pill on a thin one.
+const THUMB_RADIUS: f32 = 3.0;
 
 /// Shortest the thumb may get.
 ///
@@ -143,6 +171,66 @@ pub fn thumb_of(track: Rect, shown: f32, position: f32, min_thumb: f32) -> Rect 
     )
 }
 
+/// What is happening to a scrollbar now, which its owner knows.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct BarState {
+    /// The pointer is over the bar's column.
+    pub hovered: bool,
+    /// The thumb is held.
+    pub dragging: bool,
+}
+
+/// Draw a scrollbar whose column is `track`, with its thumb at `thumb` (from
+/// [`thumb`] or [`thumb_of`], in the same column), in the palette's colours
+/// and its widget style's form.
+///
+/// The track is the palette's `surface0` and the thumb `surface2` -- "a
+/// scrollbar thumb" is that role's documented job -- lit a step under the
+/// pointer and while held, as every control here is. Drawn at the column's
+/// outer (right) edge, as wide as the style says:
+///
+/// - **always**: the track and the thumb;
+/// - **overlay**: no track, and the thumb [`IDLE_WIDTH`] wide until the
+///   pointer is over the column or the thumb is held, when it is drawn full.
+///
+/// The caller records its own hit regions -- the whole column for the track,
+/// the whole thumb rectangle for the thumb -- whatever is drawn: a thin bar is
+/// taken hold of over its column, which is more than it looks and never less.
+pub fn draw(sink: &mut impl CommandSink, p: &Palette, track: Rect, thumb: Rect, state: BarState) {
+    let style = p.widget_style.scrollbar;
+    let full = f32::from(style.width.pixels()).min(track.w.max(0.0));
+    let lit = state.hovered || state.dragging;
+    let (drawn, show_track) = match style.visibility {
+        ScrollbarVisibility::Always => (full, true),
+        ScrollbarVisibility::Overlay if lit => (full, false),
+        ScrollbarVisibility::Overlay => (IDLE_WIDTH.min(full), false),
+    };
+    let x = track.right() - drawn;
+    let ends = THUMB_RADIUS.min(drawn / 2.0);
+    if show_track {
+        sink.emit(RenderCommand::FillRect {
+            x,
+            y: track.y,
+            width: drawn,
+            height: track.h,
+            color: p.surface0,
+            corner_radii: CornerRadii::ZERO,
+        });
+    }
+    sink.emit(RenderCommand::FillRect {
+        x,
+        y: thumb.y,
+        width: drawn,
+        height: thumb.h,
+        color: if lit {
+            emphasized(p.surface2)
+        } else {
+            p.surface2
+        },
+        corner_radii: CornerRadii::all(ends),
+    });
+}
+
 /// The first visible row a thumb drag lands on.
 ///
 /// `grab` is how far below the thumb's own top the pointer took hold, which is
@@ -192,6 +280,7 @@ pub fn first_from_drag(
 )]
 mod tests {
     use super::*;
+    use crate::widget_style::{ScrollbarStyle, ScrollbarWidth};
 
     const TRACK: Rect = Rect {
         x: 100.0,
@@ -199,6 +288,108 @@ mod tests {
         w: WIDTH,
         h: 200.0,
     };
+
+    /// The fills `draw` makes: `(x, width, colour)` each.
+    fn fills(p: &Palette, state: BarState) -> Vec<(f32, f32, crate::color::Color)> {
+        let thumb = thumb(TRACK, 100, 10, 30);
+        let mut cmds: Vec<RenderCommand> = Vec::new();
+        draw(&mut cmds, p, TRACK, thumb, state);
+        cmds.iter()
+            .filter_map(|c| match c {
+                RenderCommand::FillRect {
+                    x, width, color, ..
+                } => Some((*x, *width, *color)),
+                _ => None,
+            })
+            .collect()
+    }
+
+    fn styled(width: ScrollbarWidth, visibility: ScrollbarVisibility) -> Palette {
+        let mut p = Palette::for_mode(false);
+        p.widget_style.scrollbar = ScrollbarStyle { width, visibility };
+        p
+    }
+
+    /// **The built-in bar is the one the toolkit always drew**: a `surface0`
+    /// track the width of the column, a `surface2` thumb in it.
+    #[test]
+    fn the_built_in_bar_fills_its_column() {
+        let p = Palette::for_mode(false);
+        assert_eq!(
+            fills(&p, BarState::default()),
+            [(TRACK.x, WIDTH, p.surface0), (TRACK.x, WIDTH, p.surface2)]
+        );
+    }
+
+    /// **A thin bar is drawn at the column's outer edge**, the column itself
+    /// unchanged -- so the press still lands over all of it.
+    #[test]
+    fn a_thin_bar_sits_at_the_outer_edge_of_its_column() {
+        let p = styled(ScrollbarWidth::Thin, ScrollbarVisibility::Always);
+        let x = TRACK.right() - 6.0;
+        assert_eq!(
+            fills(&p, BarState::default()),
+            [(x, 6.0, p.surface0), (x, 6.0, p.surface2)]
+        );
+    }
+
+    /// **An overlaid bar is a line until a hand comes to it**: no track, the
+    /// thumb [`IDLE_WIDTH`] wide at the edge, and its full width, lit, while
+    /// the pointer is over the column or the thumb is held.
+    #[test]
+    fn an_overlaid_bar_is_a_line_until_the_pointer_comes() {
+        let p = styled(ScrollbarWidth::Normal, ScrollbarVisibility::Overlay);
+        assert_eq!(
+            fills(&p, BarState::default()),
+            [(TRACK.right() - IDLE_WIDTH, IDLE_WIDTH, p.surface2)]
+        );
+        for state in [
+            BarState {
+                hovered: true,
+                dragging: false,
+            },
+            BarState {
+                hovered: false,
+                dragging: true,
+            },
+        ] {
+            assert_eq!(
+                fills(&p, state),
+                [(TRACK.x, WIDTH, emphasized(p.surface2))],
+                "{state:?}"
+            );
+        }
+    }
+
+    /// **The pointer lights the thumb** in the ordinary bar too, as it lights
+    /// every control.
+    #[test]
+    fn the_pointer_lights_the_thumb() {
+        let p = Palette::for_mode(false);
+        let lit = fills(
+            &p,
+            BarState {
+                hovered: true,
+                dragging: false,
+            },
+        );
+        assert_eq!(lit[1].2, emphasized(p.surface2));
+        assert_eq!(lit[0].2, p.surface0, "the track stays");
+    }
+
+    /// **No bar is drawn wider than its column**, whatever the column is.
+    #[test]
+    fn no_bar_is_wider_than_its_column() {
+        let p = Palette::for_mode(false);
+        let narrow = Rect::new(0.0, 0.0, 4.0, 100.0);
+        let mut cmds: Vec<RenderCommand> = Vec::new();
+        draw(&mut cmds, &p, narrow, narrow, BarState::default());
+        for c in &cmds {
+            if let RenderCommand::FillRect { x, width, .. } = c {
+                assert!(*x >= 0.0 && *width <= 4.0, "{c:?}");
+            }
+        }
+    }
 
     #[test]
     fn a_list_that_fits_needs_no_scrollbar() {

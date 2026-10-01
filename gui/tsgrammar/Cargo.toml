@@ -1,0 +1,13 @@
+[package]
+name = "tsgrammar"
+version = "0.1.0"
+edition = "2024"
+description = "Reads the parser tree-sitter generates for a grammar (parser.c) and writes it out as Rust, so a grammar needs no C compiler"
+
+# No dependencies: this runs inside a build script (`gui/syntax/build.rs`), on
+# the machine doing the build, and what it reads is one C file of a shape the
+# tree-sitter generator fixes. See src/lib.rs.
+[dependencies]
+
+[lints]
+workspace = true

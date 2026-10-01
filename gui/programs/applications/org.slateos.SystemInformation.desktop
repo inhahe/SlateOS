@@ -1,0 +1,15 @@
+# SlateOS's own System Information, as a desktop entry (gui/programs, design-decisions.md 1425).
+# Built into the programs library; the same file installs as
+# /usr/share/applications/org.slateos.SystemInformation.desktop. What each field carries,
+# and where it came from, is gui/programs/INVENTORY.md.
+
+[Desktop Entry]
+Type=Application
+Name=System Information
+GenericName=System Information
+Comment=Hardware and OS information
+Exec=/usr/bin/sysinfo-app
+TryExec=/usr/bin/sysinfo-app
+Icon=computer
+Categories=System;
+Keywords=about;hardware;specs;info;

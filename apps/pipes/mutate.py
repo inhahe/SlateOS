@@ -304,6 +304,48 @@ MUTATIONS = [
             "rendering_a_frame_is_what_sets_the_size_the_next_click_is_read_against",
         ],
     ),
+    (
+        "the theme is never taken up",
+        "        self.palette = *palette;\n        self.colours = Colours::of(palette);",
+        "        let _ = palette;",
+        ["the_window_is_drawn_in_the_users_colours"],
+    ),
+    (
+        "the colours are not rebuilt with the palette",
+        "        self.colours = Colours::of(palette);",
+        "        let _ = Colours::of(palette);",
+        ["the_window_is_drawn_in_the_users_colours"],
+    ),
+    (
+        "a dry pipe is the faintest grey",
+        "                    self.colours.subtext0\n                };",
+        "                    self.palette.overlay0\n                };",
+        ["the_board_as_drawn_reads"],
+    ),
+    (
+        "an end's ring is the plain green",
+        "                    stroke(\n                        f,\n                        inner,\n                        end.large,",
+        "                    stroke(\n                        f,\n                        inner,\n                        self.colours.green,",
+        ["the_board_as_drawn_reads"],
+    ),
+    (
+        "the help sheet has no ground of its own",
+        "            (sheet.w * 0.03).min(12.0),\n            Surface::Panel,",
+        "            (sheet.w * 0.03).min(12.0),\n            Surface::Card,",
+        ["the_help_sheet_has_a_ground_of_its_own"],
+    ),
+    (
+        "the level in play looks like the others",
+        "            self.button(f, l, r, level.name(), active);",
+        "            self.button(f, l, r, level.name(), false);",
+        ["the_controls_show_what_is_on"],
+    ),
+    (
+        "the water shown looks off",
+        "            if self.show_flow { \"Water\" } else { \"Dry\" },\n            self.show_flow,",
+        "            if self.show_flow { \"Water\" } else { \"Dry\" },\n            false,",
+        ["the_controls_show_what_is_on"],
+    ),
 ]
 
 if __name__ == "__main__":

@@ -77,37 +77,46 @@ pub const UFFDIO_CONTINUE: u64 = 0xC018AA07;
 pub const UFFDIO_POISON: u64 = 0xC018AA08;
 
 // ---------------------------------------------------------------------------
-// Feature flags (negotiated via UFFDIO_API)
+// Feature flags (negotiated via UFFDIO_API): Linux's <linux/userfaultfd.h>
+// bits, which posix/tools/oracle/glibc_constants.txt holds them to. (Until
+// 2026-09-30 EVENT_UNMAP and the two MISSING_ features were each other's
+// bits, WP_ASYNC was POISON's, and bits 13, 14 and 16 were missing.)
 // ---------------------------------------------------------------------------
 
-/// Report page faults.
+/// Write-protect faults are reported (`UFFD_PAGEFAULT_FLAG_WP`).
 pub const UFFD_FEATURE_PAGEFAULT_FLAG_WP: u64 = 1 << 0;
-/// Report fork events.
+/// `fork` events.
 pub const UFFD_FEATURE_EVENT_FORK: u64 = 1 << 1;
-/// Report remap events (mremap).
+/// `mremap` events.
 pub const UFFD_FEATURE_EVENT_REMAP: u64 = 1 << 2;
-/// Report madvise(DONTNEED) events.
+/// `madvise(MADV_DONTNEED, MADV_REMOVE)` events.
 pub const UFFD_FEATURE_EVENT_REMOVE: u64 = 1 << 3;
-/// Report unmap events.
-pub const UFFD_FEATURE_EVENT_UNMAP: u64 = 1 << 4;
-/// Missing hugetlbfs support.
-pub const UFFD_FEATURE_MISSING_HUGETLBFS: u64 = 1 << 5;
-/// Missing shmem support.
-pub const UFFD_FEATURE_MISSING_SHMEM: u64 = 1 << 6;
-/// Sigbus (non-fatal) mode.
+/// Missing-page faults on hugetlbfs mappings.
+pub const UFFD_FEATURE_MISSING_HUGETLBFS: u64 = 1 << 4;
+/// Missing-page faults on shmem mappings.
+pub const UFFD_FEATURE_MISSING_SHMEM: u64 = 1 << 5;
+/// `munmap` events.
+pub const UFFD_FEATURE_EVENT_UNMAP: u64 = 1 << 6;
+/// SIGBUS instead of a fault message.
 pub const UFFD_FEATURE_SIGBUS: u64 = 1 << 7;
-/// Thread ID in fault messages.
+/// The faulting thread's id in the message.
 pub const UFFD_FEATURE_THREAD_ID: u64 = 1 << 8;
-/// Minor page fault handling (shared memory).
+/// Minor faults on hugetlbfs mappings.
 pub const UFFD_FEATURE_MINOR_HUGETLBFS: u64 = 1 << 9;
-/// Minor page fault handling (shmem).
+/// Minor faults on shmem mappings.
 pub const UFFD_FEATURE_MINOR_SHMEM: u64 = 1 << 10;
-/// Exact address in fault report.
+/// The exact faulting address, not its page's.
 pub const UFFD_FEATURE_EXACT_ADDRESS: u64 = 1 << 11;
-/// Write-protect on userfaultfd unpopulated.
+/// Write-protection on hugetlbfs and shmem.
 pub const UFFD_FEATURE_WP_HUGETLBFS_SHMEM: u64 = 1 << 12;
-/// Write-protect async mode.
-pub const UFFD_FEATURE_WP_ASYNC: u64 = 1 << 14;
+/// Write-protection of pages not yet populated.
+pub const UFFD_FEATURE_WP_UNPOPULATED: u64 = 1 << 13;
+/// `UFFDIO_POISON`.
+pub const UFFD_FEATURE_POISON: u64 = 1 << 14;
+/// Write-protect faults resolved by the kernel, asynchronously.
+pub const UFFD_FEATURE_WP_ASYNC: u64 = 1 << 15;
+/// `UFFDIO_MOVE`.
+pub const UFFD_FEATURE_MOVE: u64 = 1 << 16;
 
 // ---------------------------------------------------------------------------
 // Register mode flags
@@ -426,26 +435,30 @@ mod tests {
         }
     }
 
+    /// Each feature is its bit of Linux's header, in the header's order.
     #[test]
-    fn test_features_are_powers_of_two() {
+    fn test_features_are_linuxs_bits() {
         let feats = [
             UFFD_FEATURE_PAGEFAULT_FLAG_WP,
             UFFD_FEATURE_EVENT_FORK,
             UFFD_FEATURE_EVENT_REMAP,
             UFFD_FEATURE_EVENT_REMOVE,
-            UFFD_FEATURE_EVENT_UNMAP,
             UFFD_FEATURE_MISSING_HUGETLBFS,
             UFFD_FEATURE_MISSING_SHMEM,
+            UFFD_FEATURE_EVENT_UNMAP,
             UFFD_FEATURE_SIGBUS,
             UFFD_FEATURE_THREAD_ID,
             UFFD_FEATURE_MINOR_HUGETLBFS,
             UFFD_FEATURE_MINOR_SHMEM,
             UFFD_FEATURE_EXACT_ADDRESS,
             UFFD_FEATURE_WP_HUGETLBFS_SHMEM,
+            UFFD_FEATURE_WP_UNPOPULATED,
+            UFFD_FEATURE_POISON,
             UFFD_FEATURE_WP_ASYNC,
+            UFFD_FEATURE_MOVE,
         ];
-        for f in &feats {
-            assert!(f.is_power_of_two(), "feature {f:#x} not a power of 2");
+        for (bit, f) in feats.iter().enumerate() {
+            assert_eq!(*f, 1 << bit);
         }
     }
 

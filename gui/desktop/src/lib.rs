@@ -41,11 +41,16 @@
 //! Stated plainly, because assuming otherwise is how wrong code gets written
 //! against this.
 //!
-//! - **A launch has nowhere to go.** [`ShellAction::Launch`] names a program and
-//!   [`session::ShellSession`] queues it, but nothing starts a process: policy
-//!   about *how* a program starts belongs to the process server, not to the
-//!   window manager. See `known-issues.md`
-//!   `TD-SHELL-HAS-NOWHERE-TO-SEND-A-LAUNCH`.
+//! - **A launch is started by this crate's binary, not by a process server.**
+//!   [`ShellAction::Launch`] names a program and its arguments,
+//!   [`session::ShellSession`] queues it, and the `desktop` binary spawns it
+//!   (`drain` in `main.rs`). That spawn inherits the shell's own environment
+//!   and privileges, which is acceptable on a development host and not on
+//!   SlateOS: policy about *how* a program starts belongs to the process
+//!   server, and nothing here has a channel to one yet. See `known-issues.md`
+//!   `TD-SHELL-HAS-NOWHERE-TO-SEND-A-LAUNCH`. (This bullet said until
+//!   2026-09-25 that nothing started a process at all, which stopped being
+//!   true on 2026-09-13.)
 //! - **Edge-drag tiling is not this crate's.** Super+Z opens the zone chooser
 //!   and a click in it tiles the focused window; the *other* way every desktop
 //!   offers the same thing — drag a window to an edge and drop — lives in the
@@ -53,12 +58,12 @@
 //!   without a round trip. The rules are `guiremote::zones::drop_at`, shared by
 //!   both. The shell used to carry its own copy of them with no drag to fire on
 //!   and no caller; it was deleted rather than kept as a second opinion.
-//! - **Theme support reaches five surfaces, not the desktop.** The appearance
-//!   settings are read and honoured by [`DesktopShell`]'s own render methods.
-//!   The 49 modules beside it — every settings page, dialog and OSD — each hold
-//!   a private hardcoded palette and ignore the user's choice entirely. See
-//!   `known-issues.md`
-//!   `TD-C-FORTY-NINE-SHELL-MODULES-CARRY-THEIR-OWN-COPY-OF-THE-PALETTE`.
+//!
+//! (A third bullet here said the 49 modules beside [`DesktopShell`] each drew
+//! from a private hardcoded palette and ignored the user's theme. That was
+//! fixed on 2026-08-24 --
+//! `TD-C-FORTY-NINE-SHELL-MODULES-CARRY-THEIR-OWN-COPY-OF-THE-PALETTE` -- and
+//! the bullet outlived it by a month.)
 
 // The desktop shell is a widget-heavy crate: render/draw functions
 // commonly take many positional parameters (font, theme, geometry,
@@ -78,6 +83,7 @@
 
 pub mod about;
 pub mod animations;
+pub mod autologin;
 pub mod bluetooth;
 pub mod calendar;
 pub mod clipboard_viewer;
@@ -86,7 +92,7 @@ pub mod datetime_settings;
 pub mod device_settings;
 /// The sweep that proves a module draws nothing that is immediately erased.
 ///
-/// Test-only, like [`palette_check`]: it exists to check the other modules'
+/// Test-only, like `appearance`'s `palette_check`: it exists to check the other modules'
 /// render output, and a release build has nothing to check.
 #[cfg(test)]
 pub mod draw_check;
@@ -105,8 +111,7 @@ pub mod network_settings;
 pub mod notif_pane;
 pub mod osd;
 pub mod overview;
-/// The sweep that proves a module was converted off its own colour constants.
-///
+mod pictures;
 pub mod power;
 pub mod power_settings;
 pub mod print_manager;
@@ -116,23 +121,11 @@ pub mod screen_capture;
 pub mod security_dialog;
 pub mod session;
 pub mod session_mgr;
-/// The horizontal value slider every settings panel draws, in one place.
-///
-/// Five panels drew it by hand and disagreed about the thumb's colour; one of
-/// them inked it the same accent as the fill underneath it. The thumb is now
-/// `text` — and deliberately *not* derived from the fill, because unlike a
-/// switch knob it overhangs its track.
-pub mod slider;
+pub mod shortcut_editor;
 pub mod snap;
 pub mod sound_settings;
 pub mod startup_settings;
 pub mod storage_settings;
-/// The on/off switch every settings panel draws, in one place.
-///
-/// Seventeen panels drew it by hand and all seventeen filled the knob with
-/// `p.text`, which on an accent track is 1.35:1 against it. The knob is now
-/// derived from the track it sits on.
-pub mod switch;
 pub mod taskbar;
 pub mod taskbar_autohide;
 pub mod touchpad;
@@ -144,6 +137,8 @@ pub mod widgets;
 pub mod window_peek;
 pub mod window_rules;
 
+#[cfg(test)]
+mod note_tests;
 #[cfg(test)]
 mod pointer_tests;
 
@@ -170,10 +165,13 @@ use guitk::color::Color;
 use guitk::event::{
     EventResult, Key, KeyEvent, Modifiers, MouseButton, MouseEvent, MouseEventKind,
 };
+use guitk::listview::ListKey;
 use guitk::render::RenderTree;
 use guitk::step;
 use guitk::style::{Border, CornerRadii, Shadow};
 use guitk::text;
+use guitk::textedit::{self, SingleLine};
+use guitk::textinput::{KeyEdit, TextInput};
 use guitk::theme::with_alpha;
 use guitk::wheel;
 use hotkeys::HotkeyAction;
@@ -193,6 +191,29 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 /// The file the pinned applications live in.
 const TASKBAR_CONFIG_NAME: &str = "taskbar";
+
+/// The file the programs pinned to the start menu live in.
+const START_MENU_CONFIG_NAME: &str = "startmenu";
+
+/// The programs on the taskbar of a desktop that has never saved its pins:
+/// the kernel's `fs::pinnedapps` defaults, carried when the program lists
+/// became one (`gui/programs/INVENTORY.md` section 7, design-decisions §1425),
+/// less the web browser this system does not have.
+pub const FIRST_START_TASKBAR_PINS: [&str; 3] = [
+    "org.slateos.Explorer.desktop",
+    "org.slateos.Terminal.desktop",
+    "org.slateos.Settings.desktop",
+];
+
+/// The programs pinned to the start menu of a desktop that has never saved
+/// them: the kernel's `fs::startmenu` favourites (inventory section 7).
+pub const FIRST_START_MENU_PINS: [&str; 5] = [
+    "org.slateos.Explorer.desktop",
+    "org.slateos.Terminal.desktop",
+    "org.slateos.Editor.desktop",
+    "org.slateos.Settings.desktop",
+    "org.slateos.Calculator.desktop",
+];
 
 /// The toolkit's rectangle, re-exported so the shell and its widgets share
 /// one. This crate declared an identical copy -- same four floats, same
@@ -236,6 +257,21 @@ fn shadow(tree: &mut RenderTree, rect: Rect, radii: CornerRadii) {
     tree.box_shadow(rect.x, rect.y, rect.w, rect.h, WINDOW_SHADOW, radii);
 }
 
+/// Why a program could not be started, in words for the person who asked --
+/// for [`DesktopShell::launch_failed`], from the error the operating system
+/// gave whoever tried.
+///
+/// The two a user can act on are said plainly; anything else is the system's
+/// own words, which are at least the truth.
+#[must_use]
+pub fn launch_failure_reason(error: &std::io::Error) -> String {
+    match error.kind() {
+        std::io::ErrorKind::NotFound => "there is no such program".to_string(),
+        std::io::ErrorKind::PermissionDenied => "it is not allowed to run".to_string(),
+        _ => error.to_string(),
+    }
+}
+
 /// How many whole rows a wheel event of `dy` **notches** moves a list of
 /// fixed-height rows, carrying the fraction in `acc`.
 ///
@@ -260,15 +296,154 @@ fn scroll_rows(acc: &mut wheel::Accumulator, dy: f32) -> i32 {
 // --- Taskbar ---------------------------------------------------------------
 
 /// Width of the start button at the left end of the taskbar.
-const START_BUTTON_WIDTH: f32 = 48.0;
-/// Gap between the start button and the first window button.
-const TASKBAR_BUTTON_START_GAP: f32 = 8.0;
-/// Gap between adjacent window buttons.
-const TASKBAR_BUTTON_GAP: f32 = 4.0;
-/// Vertical inset of a window button inside the panel.
-const TASKBAR_BUTTON_INSET: f32 = 4.0;
-/// Widest a window button gets, however few windows are open.
+const START_BUTTON_WIDTH: f32 = 64.0;
+/// A tray icon, the chevron or the bell under the pointer, in white: the
+/// reference's `aero-trayico:hover` and `aero-tray-arrow:hover`, 0.16.
+const TRAY_LIT: u8 = 41;
+/// The clock under the pointer, in white: the reference's `aero-clock:hover`,
+/// 0.13.
+const TRAY_CLOCK_LIT: u8 = 33;
+/// How tall a lit tray icon's box is: the reference's `aero-trayico`, 26.
+const TRAY_LIT_HEIGHT: f32 = 26.0;
+/// The rounding of a lit tray item: the reference's 3.
+const TRAY_LIT_RADIUS: f32 = 3.0;
+/// The line of light along the bar's top edge, in white: the reference's
+/// `border-top: 1px` at 0.45.
+const TASKBAR_EDGE_LIGHT: u8 = 115;
+/// The line just under it, in white: the reference's `inset 0 1px 0` at 0.5.
+const TASKBAR_INNER_LIGHT: u8 = 128;
+/// The soft light below those, in white: the reference's `inset 0 2px 6px`
+/// glow, taken as one band.
+const TASKBAR_TOP_GLOW: u8 = 18;
+/// How deep that band is.
+const TASKBAR_TOP_GLOW_DEPTH: f32 = 5.0;
+/// The shade over the bar's lower half, in black: the reference's
+/// `inset 0 -12px 22px` at 0.28, taken as one step.
+const TASKBAR_FOOT_SHADE: u8 = 36;
+/// The start orb's diameter: the reference's `aero-orb`, 42. The reference
+/// lets it rise 5 above its bar; this bar's surface ends at its edge, so the
+/// orb is kept inside, [`START_ORB_MARGIN`] clear of the top and bottom.
+const START_ORB: f32 = 42.0;
+/// The orb's clearance from the bar's top and bottom edges.
+const START_ORB_MARGIN: f32 = 2.0;
+/// The orb's shadow, in black: the reference's `0 3px 9px` at 0.55.
+const START_ORB_SHADOW_ALPHA: u8 = 140;
+/// How far below the orb its shadow falls: the reference's 3.
+const START_ORB_SHADOW_Y: f32 = 3.0;
+/// How soft the orb's shadow is: the reference's 9.
+const START_ORB_SHADOW_BLUR: f32 = 9.0;
+/// The ring of light round the orb, in white: the reference's
+/// `0 0 0 1.5px` at 0.6.
+const START_ORB_RING: f32 = 1.5;
+/// The ring of light's strength.
+const START_ORB_RING_ALPHA: u8 = 153;
+/// The dark ring outside the light one, in black: the reference's 3.5 at 0.4,
+/// of which the 2 beyond the light ring shows.
+const START_ORB_OUTER_RING: f32 = 2.0;
+/// The dark ring's strength.
+const START_ORB_OUTER_RING_ALPHA: u8 = 102;
+/// The gloss's bright cap, in white: the reference's radial highlight, 0.9 at
+/// the top falling to nothing by the middle -- the renderer draws no
+/// gradients, so it is taken in two steps, a cap over a wider skirt.
+const START_ORB_GLOSS_CAP_ALPHA: u8 = 115;
+/// The gloss's skirt, in white.
+const START_ORB_GLOSS_SKIRT_ALPHA: u8 = 46;
+/// The shade at the orb's foot, in black: the reference's radial 0.55 from
+/// below, taken as one step.
+const START_ORB_SHADE_ALPHA: u8 = 56;
+/// The line just inside the orb's edge, in white: the reference's
+/// `inset 0 0 0 1px` at 0.42.
+const START_ORB_INNER_ALPHA: u8 = 107;
+/// The glow round the orb under the pointer, in the accent: the reference's
+/// `0 0 18px` at 0.9.
+const START_ORB_GLOW_BLUR: f32 = 18.0;
+/// The glow's strength.
+const START_ORB_GLOW_ALPHA: u8 = 230;
+/// The start picture's share of the orb's width.
+const START_ORB_PICTURE_SHARE: f32 = 0.55;
+/// Gap between the start button and the first taskbar tile: the Aero
+/// reference's `padding: 0 6px` on its row of tiles.
+const TASKBAR_BUTTON_START_GAP: f32 = 6.0;
+/// Gap between adjacent tiles: the reference's `gap: 1px`. They nearly touch,
+/// as the reference's do; a window's tile has an edge of its own, so two never
+/// run together.
+const TASKBAR_BUTTON_GAP: f32 = 1.0;
+/// Gap between the last pinned tile and the first window's, with the divider
+/// in it: `design.txt` asks for "a small space and a divider between the two
+/// sections". The reference's: the row's gap, 7 of margin, the 1-pixel
+/// divider, 9 of margin and the row's gap again. Only while both sections
+/// have tiles.
+const TASKBAR_SECTION_GAP: f32 = 19.0;
+/// From the last pinned tile's edge to the divider: the row's gap and the 7
+/// of margin before it.
+const TASKBAR_DIVIDER_OFFSET: f32 = 8.0;
+/// How tall the divider is: the reference's 30, in its 40-pixel bar.
+const TASKBAR_DIVIDER_HEIGHT: f32 = 30.0;
+/// How strongly the divider between the sections is drawn: the bar's own
+/// text colour at this alpha -- the reference's white at 0.32 -- so it follows
+/// the theme and stays quieter than anything that can be clicked.
+const TASKBAR_DIVIDER_ALPHA: u8 = 80;
+/// The dark line one pixel right of the divider, the reference's
+/// `rgba(0, 0, 20, 0.3)`: it makes the divider a groove in the glass rather
+/// than a line drawn on it.
+const TASKBAR_DIVIDER_SHADOW: Color = Color::rgba(0, 0, 20, 77);
+/// Height of a tile -- a pinned program's square, a window's labelled one --
+/// centred in the bar: the reference's 36 in its 40-pixel bar. A taller bar
+/// keeps 36-pixel tiles, since a tile is sized for its picture; a shorter one
+/// shrinks them to fit.
+const TASKBAR_TILE: f32 = 36.0;
+/// The least room left above and below a tile in a bar too short for
+/// [`TASKBAR_TILE`].
+const TASKBAR_TILE_MARGIN: f32 = 2.0;
+/// A tile's corner radius as a share of the windows': half -- the reference's
+/// 4 at the default Rounded corners' 8. So a tile follows the corner setting at
+/// every step, square to extra-rounded, and looks as the reference draws it at
+/// the default, rather than a 36-pixel tile taking a window's 16 and becoming
+/// a pill.
+const TASKBAR_TILE_CORNER_SHARE: f32 = 0.5;
+/// The side of a pinned program's picture: the reference's 30, in a 36 tile.
+const TASKBAR_PIN_ICON: f32 = 30.0;
+/// The side of a window's picture, beside its title: the reference's 26.
+const TASKBAR_WINDOW_ICON: f32 = 26.0;
+/// A window tile's room before its picture: the reference's 8.
+const TASKBAR_TILE_PAD_START: f32 = 8.0;
+/// Between a window tile's picture and its title: the reference's 7.
+const TASKBAR_TILE_LABEL_GAP: f32 = 7.0;
+/// A window tile's room after its title: the reference's 11.
+const TASKBAR_TILE_PAD_END: f32 = 11.0;
+/// The least room worth drawing a title in. A tile squeezed below it shows its
+/// picture alone, in its middle: less would hold only the ellipsis.
+const TASKBAR_TILE_MIN_LABEL: f32 = 16.0;
+/// Widest a window's tile gets, however long its title: the reference's
+/// `max-width: 160px`.
 const TASKBAR_BUTTON_MAX_WIDTH: f32 = 160.0;
+/// How strongly a window's tile is filled, in white: the lower half of the
+/// reference's glass gradient, which runs from 0.2 at the top to 0.02.
+const TASKBAR_TILE_GLASS: u8 = 8;
+/// The brighter top half of a window's tile, over [`TASKBAR_TILE_GLASS`]: the
+/// upper half of the reference's gradient.
+const TASKBAR_TILE_SHEEN: u8 = 20;
+/// A window tile's edge, in the bar's text colour: the reference's 0.26.
+const TASKBAR_TILE_EDGE: u8 = 66;
+/// The edge of the tile of the window in front: the reference's 0.55.
+const TASKBAR_TILE_EDGE_IN_FRONT: u8 = 140;
+/// The highlight along a window tile's top edge, in white: the reference's
+/// `inset 0 1px 0` at 0.38.
+const TASKBAR_TILE_HIGHLIGHT: u8 = 97;
+/// The same highlight on the window in front's tile: the reference's 0.65.
+const TASKBAR_TILE_HIGHLIGHT_IN_FRONT: u8 = 166;
+/// A lit tile's fill, in the theme's accent: the reference's
+/// `aero-task:hover` gradient, `rgba(204, 234, 255, 0.46)` falling to 0.18.
+const TASKBAR_TILE_LIT: u8 = 80;
+/// A lit tile's edge, in white: the reference's 0.6.
+const TASKBAR_TILE_EDGE_LIT: u8 = 153;
+/// A lit tile's top highlight, in white: the reference's 0.7.
+const TASKBAR_TILE_HIGHLIGHT_LIT: u8 = 179;
+/// The glow around a lit tile, in the accent: the reference's
+/// `0 0 11px rgba(140, 206, 255, 0.5)`.
+const TASKBAR_TILE_GLOW: u8 = 128;
+/// How far a lit tile's glow reaches: the reference's 11.
+const TASKBAR_TILE_GLOW_BLUR: f32 = 11.0;
 /// Narrowest the system tray gets, however little is in it.
 ///
 /// The tray's real width is *measured* — see
@@ -278,6 +453,52 @@ const TASKBAR_BUTTON_MAX_WIDTH: f32 = 160.0;
 const TRAY_MIN_WIDTH: f32 = 120.0;
 /// Gap at the tray's outer edge and between the items inside it.
 const TRAY_PADDING: f32 = 8.0;
+/// The clock's line height, as a multiple of its text size: the reference's
+/// `line-height: 1.18`.
+const CLOCK_LINE_HEIGHT: f32 = 1.18;
+/// How strongly the clock's date line is drawn under the time: the bar's text
+/// colour at this alpha, the reference's `opacity: 0.85`.
+const CLOCK_DATE_ALPHA: u8 = 217;
+/// Width of the caret at the power button's right end, which opens the other
+/// power choices -- the reference's `aero-sm-power-caret`, 30 wide.
+const POWER_CARET_WIDTH: f32 = 30.0;
+/// The gap between the power button's two parts: the reference's `gap: 1px`.
+const POWER_CARET_GAP: f32 = 1.0;
+/// The power button's glass, in the column's text colour: the reference's
+/// `aero-sm-power-main` gradient, white from 0.14 to 0.04, taken at its middle.
+const POWER_BUTTON_GLASS_ALPHA: u8 = 23;
+/// The line round each part of the power button: the reference's 0.2.
+const POWER_BUTTON_EDGE_ALPHA: u8 = 51;
+/// A part of the power button under the pointer: the reference's
+/// `aero-sm-power-main:hover`, white at 0.2.
+const POWER_BUTTON_LIT_ALPHA: u8 = 51;
+/// The caret's chevron points up, the way the choices behind it open -- the
+/// reference's `crumb` glyph turned by `rotate(-90deg)`.
+const POWER_CARET_ICON: &str = "pan-up";
+/// How long a shut down, restart or log out waits for the programs it asked to
+/// close before listing the ones that have not: long enough for a program to
+/// close on its own, short enough that a user who has walked away is not left
+/// with a machine that stayed on for a program that never answered.
+const ENDING_GRACE_MS: u64 = 5_000;
+/// How many of the programs still open the list names before "and N more".
+const ENDING_LIST_MAX: usize = 6;
+/// The list's panel: width, padding, row height, button size.
+const ENDING_PANEL_WIDTH: f32 = 460.0;
+const ENDING_PANEL_PADDING: f32 = 20.0;
+const ENDING_ROW_HEIGHT: f32 = 28.0;
+const ENDING_BUTTON_WIDTH: f32 = 150.0;
+const ENDING_BUTTON_HEIGHT: f32 = 32.0;
+/// The dimming behind the list, as it dims behind every modal the shell has.
+const ENDING_SCRIM: Color = Color::rgba(0, 0, 0, 110);
+/// Width of the "Show desktop" strip at the taskbar's right end: the Aero
+/// reference's 14.
+const SHOW_DESKTOP_WIDTH: f32 = 14.0;
+/// The strip's left edge, in the bar's text colour: the reference's 0.28.
+const SHOW_DESKTOP_EDGE: u8 = 71;
+/// The strip's fill at rest, in the bar's text colour: the reference's 0.05.
+const SHOW_DESKTOP_FILL: u8 = 13;
+/// The strip's fill under the pointer: the reference's 0.18.
+const SHOW_DESKTOP_FILL_LIT: u8 = 46;
 /// Width of the notification bell's slot in the tray.
 ///
 /// A fixed square rather than a measured one: the bell is a glyph, not a
@@ -310,8 +531,17 @@ const TRAY_ICON_SLOT: f32 = 24.0;
 /// still crowd a 1024-wide netbook and would waste two thirds of a 4K bar.
 const TRAY_ICON_SHARE: f32 = 0.25;
 
-/// The glyph for "there are more icons than fit".
-const TRAY_OVERFLOW_GLYPH: &str = "\u{2039}";
+/// The icon for "there are more icons than fit": a chevron pointing the way
+/// the run would carry on.
+const TRAY_OVERFLOW_ICON: &str = "pan-start";
+
+/// The side of the taskbar's own icons -- the start button's and the
+/// notification bell's -- in logical pixels.
+const TASKBAR_ICON: f32 = 20.0;
+
+/// The side of the tray's chevron, in logical pixels: smaller than the icons
+/// it stands beside, as it is a way to them rather than one of them.
+const TRAY_CHEVRON_ICON: f32 = 16.0;
 
 /// A press on a tray icon, in flight.
 struct TrayDrag {
@@ -340,42 +570,170 @@ const GHOST_ALPHA: u8 = 110;
 /// lifted and cannot drift into a corner as the card resizes.
 const SHORTCUT_MESSAGE_INSET: f32 = 20.0;
 
+/// How far the shortcut card stays from the top and bottom of the screen.
+///
+/// A card that reaches the display's edges reads as a mode the desktop has
+/// entered rather than as a sheet laid over it, and the shadow it draws has
+/// nowhere to fall. One constant, because the card's layout, its placement and
+/// the editor's page size all derive from the room it leaves.
+const SHORTCUT_CARD_MARGIN: f32 = 48.0;
+
+/// What the card's bottom line says when nothing has happened yet: the keys it
+/// answers. Without it the editor's keys are discoverable only by reading the
+/// source, which is the fate of every keyboard feature nobody is told about.
+const SHORTCUT_CARD_HINT: &str = "Enter: new keys \u{b7} F2: change action \u{b7} Insert: add \u{b7} Delete: remove \u{b7} Esc: close";
+
 /// The bell the tray draws when nothing is being silenced.
 ///
-/// Not read by the renderer, which asks the focus manager for the glyph of
-/// whatever mode is in force; this is the same codepoint that
+/// Not read by the renderer, which asks the focus manager for the icon of
+/// whatever mode is in force; this is the name that
 /// [`focus_assist::FocusMode::Off`] answers, kept so a test can say *which*
-/// glyph "not silencing anything" is without asserting it against the very
-/// function under test. `focus_assist` and `widgets` use the same codepoint, so
-/// the desktop has one bell rather than three.
+/// icon "not silencing anything" is without asserting it against the very
+/// function under test.
 #[cfg(test)]
-const NOTIF_BELL_GLYPH: &str = "\u{1F514}";
+const NOTIF_BELL_ICON: &str = "notifications";
 /// Extra room the window buttons leave beyond the tray, so the last button does
 /// not end flush against the desktop indicator.
 const TRAY_RESERVE_GAP: f32 = 20.0;
 
 // --- Start menu ------------------------------------------------------------
+//
+// Two columns, as the Aero reference draws them (`Aero Desktop (offline).html`,
+// `.aero-start-menu`): the programs on the left -- the list, and the search
+// field at its foot -- and on the right the user, their places, Settings, the
+// card of keyboard shortcuts, a terminal and the power button.
+// `design-decisions.md` §879.
 
-const START_MENU_WIDTH: f32 = 300.0;
-const START_MENU_HEIGHT: f32 = 400.0;
-/// Space above the first application row, holding the "Applications" heading.
-const START_MENU_TOP_PADDING: f32 = 50.0;
+const START_MENU_WIDTH: f32 = 524.0;
+const START_MENU_HEIGHT: f32 = 566.0;
+/// The programs column's width. The places column has the rest.
+const START_MENU_LEFT_WIDTH: f32 = 312.0;
+/// Space above the first application row.
+const START_MENU_TOP_PADDING: f32 = 8.0;
 const START_MENU_ROW_HEIGHT: f32 = 36.0;
-/// Space below the last application row, holding the power options.
-const START_MENU_FOOTER: f32 = 48.0;
+/// How many recently used programs the start menu lists: the reference's
+/// eight.
+const START_RECENT_MAX: usize = 8;
+/// How strongly a section's heading is drawn: the menu's text colour at this
+/// alpha, dimmer than the rows it heads, as the reference's is.
+const START_SECTION_ALPHA: u8 = 170;
+/// A program's picture on its start menu row, in logical pixels.
+const START_ROW_ICON: f32 = 20.0;
+/// Where a row's picture starts, from the column's left edge.
+const START_ROW_ICON_X: f32 = 14.0;
+/// Between a row's picture and its name.
+const START_ROW_ICON_GAP: f32 = 10.0;
+/// How far a program in a folder is set in from the folder's own row.
+const START_FOLDER_INDENT: f32 = 18.0;
+/// The chevron that says whether a folder is open.
+const START_FOLDER_CHEVRON: f32 = 12.0;
+/// Down: open. Right: closed -- the picture of what a click does next.
+const FOLDER_OPEN_ICON: &str = "pan-down";
+const FOLDER_CLOSED_ICON: &str = "pan-end";
+/// How strongly the start menu marks the row the keyboard is on: the accent
+/// at this alpha, under the row's own text.
+const START_MENU_SELECTED_ALPHA: u8 = 70;
+/// The glow round the start menu, in the accent: the reference's
+/// `0 0 38px 4px` at 0.5.
+const START_MENU_GLOW_ALPHA: u8 = 128;
+/// How soft that glow is: the reference's 38.
+const START_MENU_GLOW_BLUR: f32 = 38.0;
+/// How far it spreads before it softens: the reference's 4.
+const START_MENU_GLOW_SPREAD: f32 = 4.0;
+/// The line of light just inside the start menu's edge, in white: the
+/// reference's `inset 0 0 0 1px` at 0.4.
+const START_MENU_INNER_LIGHT: u8 = 102;
+/// One window's place in the Alt+Tab switcher: a square cell around its
+/// program's picture.
+const SWITCHER_CELL: f32 = 72.0;
+/// A program's picture in its switcher cell.
+const SWITCHER_ICON: f32 = 40.0;
+/// Between the switcher's glass edge and what it holds.
+const SWITCHER_PADDING: f32 = 14.0;
+/// The band across the switcher's top that names the window the switch goes to.
+const SWITCHER_TITLE_BAND: f32 = 30.0;
+/// The least room the switcher leaves between itself and the screen's edge.
+const SWITCHER_SCREEN_MARGIN: f32 = 50.0;
+/// The mark round a switcher cell, inside the cell.
+const SWITCHER_MARK_INSET: f32 = 3.0;
+/// The switcher's least width, so a title has room even over one or two
+/// windows' cells.
+const SWITCHER_MIN_WIDTH: f32 = 240.0;
+/// A row under the pointer, in the accent: the reference's `aero-sm-app:hover`
+/// wash, a pale tint of its blue -- quieter than the keyboard's row, which
+/// says where Enter goes rather than where the pointer is.
+const START_MENU_LIT_ALPHA: u8 = 36;
+/// The line round a row under the pointer, in the accent: the reference's
+/// `#bcdcf5` edge, which is its blue at about a third.
+const START_MENU_LIT_EDGE_ALPHA: u8 = 90;
+/// A place under the pointer, in the column's text colour: the reference's
+/// `aero-sm-link:hover`, white at 0.16.
+const START_LINK_LIT_ALPHA: u8 = 41;
+/// The line round a place under the pointer: the reference's 0.26.
+const START_LINK_LIT_EDGE_ALPHA: u8 = 66;
+/// A power choice under the pointer, in the accent: the reference's
+/// `aero-sm-power-item:hover`, its blue at 0.3.
+const POWER_MENU_LIT_ALPHA: u8 = 77;
+/// How strongly the start menu draws a hint -- the empty search field's
+/// "Search programs", and what Enter will do when nothing is found: the
+/// menu's text colour at this alpha, quieter than anything that can be
+/// chosen.
+const START_MENU_HINT_ALPHA: u8 = 150;
+/// What the empty search field says it does.
+const START_SEARCH_HINT: &str = "Search programs";
+/// The band at the foot of the programs column that holds the search field.
+const START_MENU_SEARCH_BAND: f32 = 50.0;
+/// The search field's height inside that band.
+const START_SEARCH_HEIGHT: f32 = 30.0;
+/// The start menu search field's magnifier, in logical pixels: the
+/// reference's 16.
+const START_SEARCH_ICON: f32 = 16.0;
+/// From the search field's left edge to the magnifier: the reference's
+/// `padding: 0 9px`.
+const START_SEARCH_INSET: f32 = 9.0;
+/// From the magnifier to where typing starts: the reference's `gap: 7px`.
+const START_SEARCH_ICON_GAP: f32 = 7.0;
 /// Width of the scroll indicator drawn when the list is longer than the menu.
 const START_MENU_SCROLLBAR_WIDTH: f32 = 4.0;
+/// The block at the top of the places column: the user's picture and name.
+const START_MENU_USER_HEIGHT: f32 = 72.0;
+/// The picture's diameter.
+const START_MENU_AVATAR: f32 = 44.0;
+/// One place in the places column, when the column has the room.
+const START_LINK_HEIGHT: f32 = 32.0;
+/// The tightest a place gets before the lowest is left out instead: the
+/// 18-unit icon with four units of air above and below it. A column a little
+/// short of room -- eight places at 200% on a small display -- keeps every place
+/// a little closer together rather than losing the last one.
+const START_LINK_MIN_HEIGHT: f32 = 26.0;
+/// The band at the foot of the places column that holds the power button.
+const START_MENU_POWER_BAND: f32 = 52.0;
+/// The side of a place's icon, and of the power button's.
+const START_LINK_ICON: f32 = 18.0;
+/// The gap between an icon and the words beside it.
+const START_LINK_ICON_GAP: f32 = 10.0;
+
+// The icon naming the shell's pictures use -- shared with every program, in
+// `appearance::icons` (design-decisions.md §880, §881).
+pub use appearance::icons::{ICON_ID_TAG, IconRegistry, IconRequest};
 
 // --- Power menu ------------------------------------------------------------
 
-/// Width of the power button in the start menu's footer.
-const POWER_BUTTON_WIDTH: f32 = 110.0;
-/// Inset of the power button from the menu's left and bottom edges.
+/// Inset of the power button and the places from their column's edges.
 const POWER_BUTTON_INSET: f32 = 8.0;
-const POWER_MENU_WIDTH: f32 = 170.0;
+/// The power choices' width: the reference's `aero-sm-power-flyout`, 236.
+const POWER_MENU_WIDTH: f32 = 236.0;
 const POWER_MENU_ROW_HEIGHT: f32 = 32.0;
-/// Space above the first and below the last row of the popup.
-const POWER_MENU_PADDING: f32 = 6.0;
+/// Space between the popup's edge and its rows, all round: the reference's
+/// `padding: 4px`.
+const POWER_MENU_PADDING: f32 = 4.0;
+/// A power choice's picture, in logical pixels: the reference's 17.
+const POWER_MENU_ICON: f32 = 17.0;
+/// From a power choice's left edge to its picture: the reference's
+/// `padding: 8px 10px`.
+const POWER_MENU_ROW_INSET: f32 = 10.0;
+/// From a power choice's picture to its words: the reference's `gap: 10px`.
+const POWER_MENU_ICON_GAP: f32 = 10.0;
 /// Gap between the power button and the popup that rises from it.
 const POWER_MENU_GAP: f32 = 6.0;
 /// Distance from a popup row's left edge to the start of its label.
@@ -401,6 +759,18 @@ const RUN_BROWSER_HEIGHT: f32 = 440.0;
 /// floating the same distance above the same desktop, and shadows that
 /// disagreed about the light source would look like a rendering fault.
 const WINDOW_SHADOW: Shadow = Shadow::drop(4.0, 12.0, Color::rgba(0, 0, 0, 90));
+
+/// Where the Alt+Tab switcher's parts are, from
+/// [`DesktopShell::switcher_layout`].
+struct SwitcherLayout {
+    /// The glass.
+    panel: Rect,
+    /// The band naming the window the switch goes to.
+    title: Rect,
+    /// The cells on show, each with its window's index in
+    /// [`DesktopShell::switcher_windows`].
+    cells: Vec<(usize, Rect)>,
+}
 
 // --- Type scale ------------------------------------------------------------
 
@@ -473,6 +843,304 @@ enum PinTarget {
     StartMenuRow(usize),
     /// An application already pinned, by index into the pinned list.
     Pinned(usize),
+    /// A window's tile: the program the window says it is, when the desktop
+    /// knows it (`program_for_app_id`) -- and the window itself, which can be
+    /// asked to close.
+    Window(WindowId),
+}
+
+/// A shut down, restart or log out the user chose, in progress: every window
+/// has been asked to close -- which lets a program with unsaved work ask what
+/// to do with it -- and the choice is carried out once they have, or once the
+/// user says to go ahead without them.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct Ending {
+    /// What was chosen.
+    choice: power::PowerChoice,
+    /// When the windows were asked, on the overlay clock.
+    asked_at_ms: u64,
+    /// Whether the windows that did not close are listed, for the user to
+    /// decide: once [`ENDING_GRACE_MS`] has passed.
+    listing: bool,
+}
+
+/// What a tooltip on the taskbar names, kept beside it so that sliding along a
+/// row replaces the tooltip rather than leaving the first thing's name under
+/// the fourth thing's picture.
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum TooltipKey {
+    /// A tray icon.
+    Tray(tray_dnd::TrayIconKey),
+    /// A pinned program's tile, by the program it starts -- not by its place,
+    /// which a drag along the row changes under the pointer.
+    Pin(String),
+    /// A window's tile.
+    Window(WindowId),
+    /// The "Show desktop" strip.
+    ShowDesktop,
+    /// The caret at the start menu power button's end, which is only a
+    /// chevron -- the reference's `title="Power options"`.
+    PowerOptions,
+    /// The start orb, a picture alone -- the reference's `title="Start"`.
+    Start,
+    /// The tray's chevron: the reference's `title="Show hidden icons"`.
+    TrayOverflow,
+    /// The clock, which is named by the whole date.
+    Clock,
+}
+
+/// What in the open start menu the pointer is over, drawn lit as the
+/// reference's `:hover` rules light it: `aero-sm-app`, `aero-sm-link`,
+/// `aero-sm-power-main`, `aero-sm-power-caret` and `aero-sm-power-item`.
+///
+/// A row is its place on screen, not the program in it. The list scrolls
+/// under a resting pointer, and what is lit has to be what the pointer is
+/// over -- the row a click there would reach -- not the program that has
+/// just scrolled out from under it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum StartLit {
+    /// A row of the list, counted from the top of what is showing.
+    Row(usize),
+    /// A place in the places column.
+    Place(StartShortcut),
+    /// The power button's "Shut down".
+    PowerButton,
+    /// The caret at the power button's end.
+    PowerCaret,
+    /// A row of the power choices.
+    PowerRow(usize),
+}
+
+/// A place in the start menu's places column: the user's own folders, as the
+/// Aero reference's places column lists them, the two programs the start
+/// menu is asked to keep at hand (`design.txt` line 721: "start menu, contains
+/// applications tree, settings icon, terminal, power off, ..."), and the card
+/// of keyboard shortcuts.
+///
+/// The card is here because no chord opens it by default any more
+/// (`design-decisions.md` §1416): the operator left Super+/ unbound, and a card
+/// that only a shortcut could open would be one nobody could reach to bind the
+/// shortcut in the first place.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum StartShortcut {
+    /// The user's home folder.
+    Home,
+    /// `~/Documents`.
+    Documents,
+    /// `~/Pictures`.
+    Pictures,
+    /// `~/Music`.
+    Music,
+    /// `~/Downloads`.
+    Downloads,
+    /// The settings application.
+    Settings,
+    /// The card listing every keyboard shortcut, where one is bound, changed or
+    /// taken away. The shell's own surface, so choosing it starts no program.
+    KeyboardShortcuts,
+    /// A terminal.
+    Terminal,
+}
+
+impl StartShortcut {
+    /// Every place, top to bottom.
+    pub const ALL: &'static [Self] = &[
+        Self::Home,
+        Self::Documents,
+        Self::Pictures,
+        Self::Music,
+        Self::Downloads,
+        Self::Settings,
+        Self::KeyboardShortcuts,
+        Self::Terminal,
+    ];
+
+    /// The program choosing it starts: the file manager for a folder, and
+    /// `None` for the card of shortcuts, which is the shell's own.
+    #[must_use]
+    pub const fn program(self) -> Option<&'static str> {
+        match self {
+            Self::Settings => Some(launcher::SETTINGS),
+            Self::Terminal => Some(launcher::TERMINAL),
+            Self::Home | Self::Documents | Self::Pictures | Self::Music | Self::Downloads => {
+                Some(launcher::FILE_MANAGER)
+            }
+            Self::KeyboardShortcuts => None,
+        }
+    }
+
+    /// The folder a place opens, under the user's home -- `""` for the home
+    /// itself -- or `None` for the places that are not folders. The names the
+    /// desktop's own Documents icon uses, so the two open the same folder.
+    #[must_use]
+    pub const fn folder(self) -> Option<&'static str> {
+        match self {
+            Self::Home => Some(""),
+            Self::Documents => Some("Documents"),
+            Self::Pictures => Some("Pictures"),
+            Self::Music => Some("Music"),
+            Self::Downloads => Some("Downloads"),
+            Self::Settings | Self::KeyboardShortcuts | Self::Terminal => None,
+        }
+    }
+
+    /// What choosing it starts: the file manager on the folder, in the home
+    /// `home` names, or the program -- and `None` for the one place that starts
+    /// no program, the card of shortcuts. With no home to find the folder in,
+    /// the file manager opens where it opens by itself, which beats a place
+    /// that does nothing.
+    #[must_use]
+    pub fn launch(self, home: Option<&std::path::Path>) -> Option<hotkeys::Launch> {
+        let program = self.program()?;
+        Some(match (self.folder(), home) {
+            (Some(""), Some(home)) => hotkeys::Launch::opening(program, home),
+            (Some(sub), Some(home)) => hotkeys::Launch::opening(program, &home.join(sub)),
+            _ => hotkeys::Launch::program(program),
+        })
+    }
+
+    /// The icon beside it, by its freedesktop name.
+    #[must_use]
+    pub const fn icon_name(self) -> &'static str {
+        match self {
+            Self::Home => "user-home",
+            Self::Documents => "folder-documents",
+            Self::Pictures => "folder-pictures",
+            Self::Music => "folder-music",
+            Self::Downloads => "folder-download",
+            Self::Settings => "preferences-system",
+            Self::KeyboardShortcuts => "input-keyboard",
+            Self::Terminal => "utilities-terminal",
+        }
+    }
+
+    /// The words in the places column, beside the place's icon -- words as
+    /// well as the icon, since an icon alone is a thing to learn.
+    #[must_use]
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::Home => "Home",
+            Self::Documents => "Documents",
+            Self::Pictures => "Pictures",
+            Self::Music => "Music",
+            Self::Downloads => "Downloads",
+            Self::Settings => "Settings",
+            Self::KeyboardShortcuts => "Keyboard Shortcuts",
+            Self::Terminal => "Terminal",
+        }
+    }
+}
+
+/// How a window switch in progress is shown.
+///
+/// Chosen by the action that started it: [`HotkeyAction::CycleWindows`] shows
+/// the switcher's strip, [`HotkeyAction::CycleWindowsInOverview`] the overview.
+/// The stepping, the choosing and the ending are the same either way; only the
+/// picture differs.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SwitchView {
+    /// The strip: each window's picture in a cell, the chosen one's title
+    /// across the top.
+    Switcher,
+    /// The overview: every window on the desktop at once, to scale, most
+    /// recently used first, the chosen one lit.
+    Overview,
+}
+
+/// What ends a window switch when it is let go of.
+///
+/// Alt+Tab ends when Alt comes up. It used to be *only* Alt, which was right
+/// while Alt+Tab was the only chord that could start a switch; once a user can
+/// put window switching on Super+Tab or Ctrl+` (`design-decisions.md` §1416), a
+/// switch that waits for an Alt release that never comes stays on the screen.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SwitchAnchor {
+    /// Letting go of any of these modifiers.
+    Modifiers(Modifiers),
+    /// A chord with nothing to hold -- a bare key the user bound -- which ends
+    /// when its own key comes up: one press, one switch to the window before.
+    Key(Key),
+}
+
+impl SwitchAnchor {
+    /// Alt: what ends a switch that did not say otherwise, as it always has.
+    pub const ALT: Self = Self::Modifiers(Modifiers {
+        ctrl: false,
+        alt: true,
+        shift: false,
+        super_key: false,
+    });
+
+    /// What ends a switch started by `key` pressed with `modifiers` held.
+    ///
+    /// The chord's own modifiers, less Shift: Shift is the direction, not the
+    /// hold, so Shift+Alt+Tab with Shift then let go carries on switching while
+    /// Alt is down, as it does on every desktop. Shift counts only when it is
+    /// all there is to hold.
+    #[must_use]
+    pub const fn of(key: Key, modifiers: Modifiers) -> Self {
+        let held = Modifiers {
+            shift: false,
+            ..modifiers
+        };
+        if held.ctrl || held.alt || held.super_key {
+            Self::Modifiers(held)
+        } else if modifiers.shift {
+            Self::Modifiers(modifiers)
+        } else {
+            Self::Key(key)
+        }
+    }
+
+    /// Whether letting go of `key` ends the switch.
+    #[must_use]
+    pub fn released_by(self, key: Key) -> bool {
+        match self {
+            Self::Modifiers(held) => match key {
+                Key::LeftAlt | Key::RightAlt => held.alt,
+                Key::LeftCtrl | Key::RightCtrl => held.ctrl,
+                Key::LeftShift | Key::RightShift => held.shift,
+                Key::LeftSuper | Key::RightSuper => held.super_key,
+                _ => false,
+            },
+            Self::Key(own) => key == own,
+        }
+    }
+}
+
+/// Where a program carried from the start menu, the taskbar or the desktop
+/// would go if it were let go at a point.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum CarryTarget {
+    /// Pinned to the taskbar, at the gap nearest the pointer.
+    Taskbar,
+    /// A shortcut to it on the desktop, where it was let go.
+    Desktop,
+    /// Pinned to the start menu: among its pinned rows where it was let go
+    /// on them, after them when it was let go on the start button.
+    StartMenu,
+}
+
+/// A window's taskbar button pressed and perhaps being dragged.
+struct WindowPress {
+    /// The press and its drag threshold, keyed by the window.
+    source: tray_dnd::DragSource<WindowId>,
+    /// Whether the window was the focused one when the button was pressed --
+    /// which decides what a click does: a toggle minimises the window in
+    /// front and summons any other. Taken at the press, because pressing the
+    /// bar can itself move the focus before the release arrives, and a click
+    /// on the front window's button must not turn into "summon" on the way.
+    was_focused: bool,
+}
+
+/// A start-menu row pressed and perhaps being dragged.
+struct StartDrag {
+    /// The press and its drag threshold, keyed by the program's path -- the
+    /// same source the pinned buttons and the tray use.
+    source: tray_dnd::DragSource<String>,
+    /// The program's name, as the start menu shows it: what a pin or a
+    /// desktop shortcut made from it is called.
+    name: String,
 }
 
 /// What one taskbar button stands for.
@@ -546,6 +1214,15 @@ pub struct ManagedWindow {
     pub pid: u32,
     /// Icon ID (index into icon registry).
     pub icon_id: u32,
+    /// Where the window is, in screen pixels, decorations included, as the
+    /// compositor last reported it.
+    ///
+    /// Asked by [`window_at`](DesktopShell::window_at) alone, and for one
+    /// question: whether a program carried from the start menu was let go
+    /// over somebody's window rather than on the desktop. The compositor
+    /// routes presses by what is on top, so nothing else in the shell needs
+    /// to know where a window is -- and nothing here decides where one goes.
+    pub frame: Rect,
     /// Where in the stack the window sits: higher is nearer the front.
     ///
     /// Not a counter the shell keeps. It is the window's index in the list the
@@ -598,10 +1275,12 @@ pub enum Hit {
     StartMenuEntry(usize),
     /// The open start menu, but not one of its rows.
     StartMenuPanel,
-    /// The power button at the foot of the open start menu.
+    /// The power button at the foot of the start menu's places column.
     PowerButton,
+    /// A place in the places column -- a folder, Settings or the terminal.
+    StartMenuShortcut(StartShortcut),
     /// An entry of the open power menu, by index into
-    /// [`power_menu_entries`](DesktopShell::power_menu_entries).
+    /// [`power_menu_choices`](DesktopShell::power_menu_choices).
     PowerMenuEntry(usize),
     /// The open power menu, but not one of its rows.
     PowerMenuPanel,
@@ -630,6 +1309,18 @@ pub enum Hit {
     TaskbarPanel,
     /// The tray clock, which opens the calendar popup.
     Clock,
+    /// The "Show desktop" strip at the taskbar's right end.
+    ShowDesktop,
+    /// The caret at the start menu power button's right end, which opens the
+    /// other power choices.
+    PowerCaret,
+    /// The "... anyway" button of the list of programs a shut down, restart
+    /// or log out is waiting for.
+    EndingAnyway,
+    /// That list's "Cancel" button.
+    EndingCancel,
+    /// Anywhere else while that list is up: it covers the screen.
+    EndingPanel,
     /// The tray's notification bell, which opens the notification pane.
     NotificationBell,
     /// The chevron at the left of the icon run, which lists the icons the
@@ -690,13 +1381,134 @@ impl Hit {
     }
 }
 
+/// The widths a row of taskbar tiles gets from `available`, when tile `i`
+/// wants `wanted[i]` and may give way if `shrinks[i]`.
+///
+/// As wanted, when they fit. Otherwise the tiles that may shrink give way,
+/// the widest first, all to one width and none below `floor` -- a *water
+/// fill*: the width `cap` is the one at which those tiles, each
+/// `min(wanted, cap)`, use exactly what the others leave. So a window with a
+/// short title keeps all of it until every longer one has come down to its
+/// width, which is the order a reader would give them up in. When not even
+/// `floor` each fits, every tile shares `available` alike: past that point
+/// there is nothing left to choose between them.
+fn fit_tiles(wanted: &[f32], shrinks: &[bool], floor: f32, available: f32) -> Vec<f32> {
+    if wanted.iter().sum::<f32>() <= available {
+        return wanted.to_vec();
+    }
+    let fixed: f32 = wanted
+        .iter()
+        .zip(shrinks)
+        .filter(|&(_, &shrink)| !shrink)
+        .map(|(width, _)| *width)
+        .sum();
+    let mut flexible: Vec<f32> = wanted
+        .iter()
+        .zip(shrinks)
+        .filter(|&(_, &shrink)| shrink)
+        .map(|(width, _)| *width)
+        .collect();
+    #[allow(clippy::cast_precision_loss)]
+    let (all, some) = (wanted.len() as f32, flexible.len() as f32);
+    let budget = available - fixed;
+    if flexible.is_empty() || budget < floor * some {
+        return vec![available / all; wanted.len()];
+    }
+    flexible.sort_by(f32::total_cmp);
+    let (mut left, mut rest, mut cap) = (budget, some, f32::INFINITY);
+    for width in flexible {
+        if width * rest > left {
+            cap = left / rest;
+            break;
+        }
+        left -= width;
+        rest -= 1.0;
+    }
+    wanted
+        .iter()
+        .zip(shrinks)
+        .map(|(&width, &shrink)| {
+            if shrink {
+                width.min(cap.max(floor))
+            } else {
+                width
+            }
+        })
+        .collect()
+}
+
+/// Draw the picture `image_id`, `side` pixels square, in the middle of `rect`.
+fn image_centred(tree: &mut RenderTree, rect: Rect, side: f32, image_id: u64) {
+    tree.push(guitk::render::RenderCommand::Image {
+        x: rect.x + (rect.w - side) / 2.0,
+        y: rect.y + (rect.h - side) / 2.0,
+        width: side,
+        height: side,
+        image_id,
+    });
+}
+
+/// The file name of `path` as text, when it has one that is: how a program
+/// named by its path is matched against the name its windows declare.
+fn file_name_str(path: &str) -> Option<&str> {
+    Path::new(path)
+        .file_name()
+        .and_then(std::ffi::OsStr::to_str)
+}
+
+/// A section of the start menu's list, as the Aero reference divides it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum StartSection {
+    /// The programs the user pinned to the top.
+    Pinned,
+    /// The programs most recently started, most recent first.
+    Recent,
+    /// Every installed program, in the applications tree.
+    All,
+}
+
+impl StartSection {
+    /// The section's heading, as the reference words it.
+    #[must_use]
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Pinned => "Pinned",
+            Self::Recent => "Recently used",
+            Self::All => "All apps",
+        }
+    }
+}
+
+/// One row of the start menu's list.
+#[derive(Clone, Copy, Debug)]
+pub enum StartRow<'a> {
+    /// A program: pinned, found by a search, or in its folder.
+    Program {
+        /// The program.
+        entry: &'a AppEntry,
+        /// Whether it is listed inside a folder of the applications tree,
+        /// and so set in under the folder's row.
+        in_folder: bool,
+    },
+    /// A folder of the applications tree.
+    Folder {
+        /// Which.
+        folder: launcher::Folder,
+        /// Whether its programs are listed under it.
+        open: bool,
+    },
+    /// A section's heading: not a thing to start or open, and passed over by
+    /// the keyboard.
+    Section(StartSection),
+}
+
 /// What the shell wants its host — the compositor's event loop — to do about a
 /// pointer event.
 ///
 /// The shell cannot start a process itself: it has no connection to the process
 /// server, and inventing one here would put policy about *how* programs start
-/// inside the window manager. It reports the intent instead, exactly as
-/// [`launcher::LauncherAction`] already does for the search dialog.
+/// inside the window manager. It reports the intent instead, and the host
+/// carries it out.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ShellAction {
     /// The shell did not want this event; deliver it to the window under the
@@ -706,14 +1518,18 @@ pub enum ShellAction {
     Pass,
     /// The shell handled the event; no window should see it.
     Consumed,
-    /// Start the program at this path. Implies [`Consumed`](Self::Consumed).
+    /// Start a program, with its arguments. Implies
+    /// [`Consumed`](Self::Consumed).
     ///
-    /// A `PathBuf`, not a `String`, because it names a file: our filenames
-    /// admit every byte but `/` and NUL, so a program the user *pointed at*
-    /// in the Run box's file chooser may have no UTF-8 spelling, and a lossy
-    /// one would name a different program or none at all. Rows whose path
-    /// came from a text config are simply converted at the edge.
-    Launch(PathBuf),
+    /// A [`hotkeys::Launch`], program and arguments, rather than a bare path:
+    /// until 2026-09-25 this carried only a program, so the one thing a desktop
+    /// icon exists for -- opening a folder or a document, which means starting
+    /// a program *with that path* -- could not be said at all, and a folder
+    /// icon asked the operating system to execute the folder. The program is a
+    /// `PathBuf` and each argument an `OsString`, for the reason given on
+    /// `Launch`: a program the user *pointed at* may have no UTF-8 spelling,
+    /// and a lossy one would name a different program or none.
+    Launch(hotkeys::Launch),
     /// Ask the compositor to act on a window the shell does not own. Implies
     /// [`Consumed`](Self::Consumed).
     ///
@@ -734,6 +1550,31 @@ pub enum ShellAction {
     /// — the window closed between the list the button was drawn from and the
     /// click — needs no undo.
     Control(ShellRequest),
+    /// Several requests of the compositor, in this order -- a press that
+    /// names more than one window, as "Show desktop" does. Implies
+    /// [`Consumed`](Self::Consumed).
+    ControlAll(Vec<ShellRequest>),
+    /// End the session: return to the login screen. Implies
+    /// [`Consumed`](Self::Consumed).
+    ///
+    /// Not a launch, because the login screen is the shell's own -- there is
+    /// no program to start, only a session to leave. What becomes of the
+    /// programs the user left running is the session manager's to decide, and
+    /// there is none yet: `known-issues.md`
+    /// `TD-C-LOGGING-OUT-LEAVES-THE-USERS-PROGRAMS-RUNNING`.
+    LogOut,
+}
+
+impl ShellAction {
+    /// Whether the shell did anything with the event: everything but
+    /// [`Pass`](Self::Pass). The question a caller that only repaints on a
+    /// change asks, and the one [`DesktopShell::activate_desktop_menu_item`]
+    /// used to answer with a `bool` before one of its items could start a
+    /// program.
+    #[must_use]
+    pub const fn changed(&self) -> bool {
+        !matches!(self, Self::Pass)
+    }
 }
 
 /// Something the shell wants done to a window it does not own.
@@ -1043,24 +1884,17 @@ pub struct DesktopShell {
     /// registry says right now — a shortcut rebound while the card is up is
     /// redrawn under its new chord without anyone telling the card.
     pub shortcut_card_open: bool,
-    /// Which row of the shortcut card the keyboard is on.
+    /// The shortcut card's editor: which row the keyboard is on, what it is in
+    /// the middle of -- recording keys, choosing an action, typing a command,
+    /// confirming a move -- and what the last change did.
     ///
-    /// An index into `hotkeys.all_bindings()`, which is the order the card
-    /// draws. Kept even while the card is shut, so reopening it returns to the
-    /// row the user was looking at rather than to the top.
-    pub shortcut_selected: usize,
-    /// The row whose chord is being re-recorded, if any.
-    ///
-    /// While this is `Some`, the next chord the user presses is **data**: the
-    /// shell must not run it, and must not let it reach the global table --
-    /// including chords the shell holds globally, and including Escape, which
-    /// here means "cancel the rebind" rather than "close the card". That
-    /// inverts the shell's usual input rule, which is why the check sits at the
-    /// very top of `handle_hotkey_inner` rather than beside the other modal
-    /// surfaces.
-    shortcut_capture: Option<usize>,
-    /// What the last rebind attempt did, shown under the card.
-    shortcut_message: Option<String>,
+    /// Kept while the card is shut, so reopening it returns to the row the
+    /// user was looking at; but whatever it was *in the middle of* is dropped
+    /// on reopening (`toggle_shortcut_card`), and keys reach it only while the
+    /// card is open. A card closed some other way mid-recording -- the start
+    /// menu opening, the notification pane -- must not leave a recording
+    /// behind that swallows the next keystroke on a desktop showing no card.
+    pub(crate) shortcut_editor: shortcut_editor::ShortcutEditor,
     /// The programs this desktop can start, shared with the search launcher so
     /// that the two front ends cannot offer different applications.
     pub apps: Vec<AppEntry>,
@@ -1086,17 +1920,57 @@ pub struct DesktopShell {
     /// tray whose icons move when an unrelated program registers one is a tray
     /// where the user's muscle memory is wrong.
     tray_icons: Vec<guiremote::tray::TrayIcon>,
-    /// The tray icon the pointer is resting on, and the tooltip naming it.
+    /// What on the taskbar the pointer is resting on -- a tray icon or a tile
+    /// -- and the tooltip naming it.
     ///
     /// A tray icon is a single glyph chosen by another program, and the
     /// `tooltip` it registers alongside is the only words anywhere saying what
     /// that glyph is. Until this existed the shell received that string, held
     /// it, and never put it on screen -- so a user faced a row of symbols with
-    /// no way to learn what any of them were.
+    /// no way to learn what any of them were. A pinned tile is its program's
+    /// picture alone, so the same holds for it; a window's tile carries its
+    /// title, cut to fit.
     ///
     /// Keyed, so that sliding along the row replaces the tooltip rather than
     /// leaving the first icon's name under the fourth icon's glyph.
-    tray_tooltip: Option<(tray_dnd::TrayIconKey, guitk::menu::Tooltip)>,
+    tooltip: Option<(TooltipKey, guitk::menu::Tooltip)>,
+    /// Whether what the pointer rests on has changed since the session last
+    /// asked -- a tooltip came, went or began waiting to appear, or another
+    /// tile lit up -- see [`take_hover_changed`](Self::take_hover_changed).
+    hover_changed: bool,
+    /// The taskbar tile under the pointer, drawn lit as the reference's
+    /// `aero-task:hover` is. Found by [`hit_test`](Self::hit_test), so the tile
+    /// that lights is the tile a click would reach.
+    hover_tile: Option<TaskbarSlot>,
+    /// Whether the pointer is on the "Show desktop" strip, which then lights.
+    show_desktop_lit: bool,
+    /// Whether the pointer is on the start button, whose orb then glows.
+    start_button_lit: bool,
+    /// What in the tray the pointer is over -- a program's icon, the
+    /// chevron, the bell or the clock -- which is drawn lit.
+    tray_lit: Option<Hit>,
+    /// The launch the Run box last asked for, and the exact line it was
+    /// typed as -- so that if it cannot start, the box opens again on that
+    /// line with why ([`launch_failed`](Self::launch_failed)), instead of the
+    /// box closing on nothing having happened.
+    run_box_launch: Option<(hotkeys::Launch, std::ffi::OsString)>,
+    /// What in the open start menu the pointer is over, which is drawn lit.
+    /// Forgotten when the menu closes (`close_start_menu`), so a menu opened
+    /// again lights nothing until the pointer moves over it.
+    start_lit: Option<StartLit>,
+    /// The windows the last "Show desktop" put away, bottom of the stack
+    /// first -- so the next brings them back as they were -- or `None` when
+    /// the next should put windows away. Forgotten the moment a window is
+    /// shown again on this desktop, by any means (`apply_window_list`): the
+    /// desktop is no longer what was shown.
+    desktop_shown: Option<Vec<WindowId>>,
+    /// A shut down, restart or log out waiting for the programs to close --
+    /// see [`Ending`].
+    ending: Option<Ending>,
+    /// Whether the last window of an [`Ending`] has gone, so that it is to be
+    /// carried out -- by the session, which [`take_ending_action`](Self::take_ending_action)
+    /// hands it to.
+    ending_ready: bool,
     /// The popup listing icons the bar had no room for, and which icons
     /// those were when it opened.
     ///
@@ -1112,6 +1986,9 @@ pub struct DesktopShell {
     /// [`Hit::TaskbarPinned`] carries an index: the list is the authority, and
     /// a copy of a path here would be a second one to keep in step.
     pin_menu: Option<(guitk::menu::ContextMenu, PinTarget)>,
+    /// The taskbar's own menu -- a right-click on the bar between its tiles
+    /// and its tray -- when it is open: the bar's options.
+    taskbar_menu: Option<guitk::menu::ContextMenu>,
     /// A pinned button being dragged along the bar.
     ///
     /// Keyed on the executable path rather than the slot, for the reason the
@@ -1119,6 +1996,62 @@ pub struct DesktopShell {
     /// the pointer as the drag proceeds, so an index taken at press time
     /// stops meaning the thing that was pressed.
     pin_drag: Option<tray_dnd::DragSource<String>>,
+    /// Whether the pinned button being dragged has been carried away from
+    /// the row of pins -- up off the bar towards the desktop, where letting
+    /// go puts a shortcut to it, or onto the start button, where letting go
+    /// pins it to the start menu. While it is, the row stops rearranging
+    /// under it.
+    pin_drag_off_bar: bool,
+    /// A start-menu row pressed and not yet let go: a click that starts the
+    /// program, or the start of a drag that carries it to the taskbar, the
+    /// desktop or the menu's own pinned rows. See
+    /// [`finish_start_press`](Self::finish_start_press).
+    start_drag: Option<StartDrag>,
+    /// What has been typed into the start menu's search field. Empty is the
+    /// ordinary menu; anything else lists only the programs it finds, best
+    /// first. Emptied each time the menu opens, as a search box is.
+    start_query: TextInput,
+    /// The start-menu row the keyboard is on, as an index into
+    /// [`start_menu_entries`](Self::start_menu_entries): `None` until an arrow
+    /// key is pressed, and again whenever the search changes. Enter starts it;
+    /// with none, Enter starts the best match.
+    start_selected: Option<usize>,
+    /// The start menu's folders the user has closed. Open is the default: a
+    /// menu whose programs all sit behind closed folders asks two clicks for
+    /// everything, and with a handful of programs installed shows nothing but
+    /// folders. Closing one is kept for the rest of the session.
+    start_closed_folders: std::collections::BTreeSet<launcher::Folder>,
+    /// Programs the user pinned to the top of the start menu, in their
+    /// order: dropped there, or chosen with "Pin to Start menu". Listed
+    /// above the launcher's programs, and a pinned program is still listed
+    /// among them too, as on every start menu that has pins.
+    start_pins: Vec<AppEntry>,
+    /// Whether [`start_pins`](Self::start_pins) changed since it was last
+    /// written. The session writes it -- see
+    /// [`take_start_menu_dirty`](Self::take_start_menu_dirty) -- so that a
+    /// write that fails can be reported rather than printed and forgotten.
+    start_menu_dirty: bool,
+    /// The programs most recently started, most recent first, by executable
+    /// path: the start menu's "Recently used" section. At most
+    /// [`START_RECENT_MAX`]; saved with the pins in `startmenu.yaml`.
+    start_recent: Vec<String>,
+    /// Where the pointer is in a drag that carries a program, for the label
+    /// that follows it.
+    carry_at: (f32, f32),
+    /// The order the running programs' buttons stand in on the taskbar: the
+    /// order their windows arrived, as the user has since rearranged them by
+    /// dragging. Every window the shell holds is in it, shown or not, so a
+    /// window moved to another desktop and back returns to its place.
+    ///
+    /// The shell's own, because nothing else knows it. The compositor lists
+    /// windows in *stacking* order, which changes every time one is raised;
+    /// a bar drawn in that order moved a button to the end each time it was
+    /// clicked, so no button was ever where the user had last seen it.
+    button_order: Vec<WindowId>,
+    /// A window's taskbar button pressed and not yet let go: a click, or the
+    /// start of dragging it along the row. See
+    /// [`finish_window_press`](Self::finish_window_press).
+    window_press: Option<WindowPress>,
     /// A press that landed on a tray icon and has not been released.
     ///
     /// Held from press to release because until the release the shell does
@@ -1135,8 +2068,14 @@ pub struct DesktopShell {
     /// the user moves one.
     tray_arrangement: tray_dnd::TrayIconArrangement,
     pub alt_tab_active: bool,
-    /// Alt+Tab selection index.
+    /// The window a switch would pick, as an index into
+    /// [`switcher_windows`](Self::switcher_windows) -- most recently used
+    /// first, so 0 is the window being switched *from*.
     pub alt_tab_index: usize,
+    /// How the switch in progress is shown. Meaningless while none is.
+    pub alt_tab_view: SwitchView,
+    /// What ends the switch in progress. Meaningless while none is.
+    alt_tab_anchor: SwitchAnchor,
     /// The Exposé overlay: every window on every desktop, laid out to scale.
     ///
     /// Its lanes are refreshed from the same `WindowList` that
@@ -1163,24 +2102,37 @@ pub struct DesktopShell {
     /// Set when the shell itself has written `appearance.yaml` and the
     /// compositor has not been told.
     appearance_dirty: bool,
-    /// The menu that opens on a right-click over bare desktop.
+    /// The menu that opens on a right-click over the desktop.
     ///
-    /// Built once and reused rather than rebuilt per click: its item list is
-    /// fixed, and `ContextMenu::new` measures the panel width from the labels,
-    /// which is work with no reason to repeat.
+    /// Rebuilt at each opening by
+    /// [`open_desktop_menu`](Self::open_desktop_menu): what it lists depends
+    /// on what was clicked -- a widget or bare desktop -- and its View submenu
+    /// ticks the icon size and arrangement in force, so a menu built once
+    /// would show whatever was true when it was built.
     pub desktop_menu: ContextMenu,
-    /// Widget panels drawn on the desktop background.
-    ///
     /// The icons on the desktop, and where the user left them.
     ///
     /// `design-decisions.md` 933 (open-questions A-Q8) makes this layer the
     /// layout authority: icon positions are not a kernel concern. Lane A
     /// deleted `fs::deskicons` and `/proc/deskicons` once this read and wrote
     /// them, which it has -- checked 2026-09-16, neither exists. It is
-    /// populated and its saved positions applied in
-    /// [`new`](Self::new), so the first frame draws them where they were left
-    /// rather than where the defaults put them and then jumping.
+    /// populated and its saved layout applied by
+    /// [`populate_icons`](Self::populate_icons), which the session calls
+    /// before its first frame, so the icons are drawn where they were left
+    /// rather than where the defaults put them and then jumping. Not in
+    /// [`new`](Self::new), which must not read the user's files.
     pub icons: icons::DesktopIconLayer,
+    /// Whether the icon layout has changed since it was last written: a drop
+    /// that moved something, or a choice from the View submenu.
+    ///
+    /// A flag the session drains, like [`widgets_dirty`](Self::widgets_dirty),
+    /// rather than a write here, for the two reasons that one is: a pump that
+    /// changed the layout twice writes it once, and a failed write reaches the
+    /// session, which can say so -- the shell has nowhere to. The release used
+    /// to write the file itself and drop the error.
+    icons_dirty: bool,
+    /// Widget panels drawn on the desktop background.
+    ///
     /// Empty until the user adds one from [`desktop_menu`](Self::desktop_menu),
     /// which is what keeps an untouched desktop identical to how it was before
     /// widgets existed -- and keeps it idle, since a desktop with no widgets
@@ -1192,11 +2144,28 @@ pub struct DesktopShell {
     /// pointer is over the menu, which is drawn *on top of* the widget, so a
     /// second hit test would answer about wherever the menu happens to sit.
     menu_widget: Option<WidgetInstanceId>,
+    /// The icon the open menu is about, if it was opened over one -- held for
+    /// the reason `menu_widget` is: by the time an item is chosen the pointer
+    /// is over the menu, not the icon.
+    menu_icon: Option<icons::IconId>,
     /// The widget being dragged, and where inside it the pointer took hold.
     ///
     /// The offset is what stops a drag snapping the widget's corner to the
     /// pointer on the first pixel of movement.
     widget_drag: Option<(WidgetInstanceId, f32, f32)>,
+    /// The icons the frames drew, by the image id each was given: what the
+    /// session reads to upload an icon before submitting a tree that names it.
+    /// Filled as trees are drawn and emptied when the appearance changes, when
+    /// every icon is drawn again in the new colours under new ids.
+    icon_registry: IconRegistry,
+    /// The name of the person using the desktop, for the top of the start
+    /// menu's places column. Empty until somebody is known: a desktop
+    /// started behind a login screen does not know who will sign in.
+    user_name: String,
+    /// A selection being dragged out in the open note: the press was on its
+    /// writing area and the button is still down. It owns the pointer until
+    /// the button comes up, as a widget drag does.
+    note_selecting: bool,
     /// Whether the widget layout has changed since it was last written.
     ///
     /// Set only where a change is *committed* -- a menu action, a drag that
@@ -1255,6 +2224,14 @@ pub struct DesktopShell {
     /// the taskbar clock" — and until this field existed, none of them reached
     /// one. See `current_clock_string`.
     pub datetime: datetime_settings::DateTimeSettings,
+    /// The zone this machine is in -- what the clock shows when
+    /// [`datetime`](Self::datetime) names none.
+    ///
+    /// UTC until [`load_datetime`](Self::load_datetime) reads the real one,
+    /// and deliberately not read in [`new`](Self::new): `new` is what the unit
+    /// tests build, and a shell that read the host's `TZ` and `/etc/localtime`
+    /// there would give every clock test a different answer on every machine.
+    system_zone: Tz,
     /// The calendar popup the tray clock opens.
     ///
     /// `calendar.rs` used to be reachable only through `mod calendar;`: it had
@@ -1492,6 +2469,9 @@ pub struct DesktopTheme {
     pub accent_color: Color,
     pub start_menu_bg: Color,
     pub start_menu_fg: Color,
+    /// The start menu's places column: a shade apart from the programs
+    /// column, as the reference's darker glass is, so the two read as two.
+    pub start_menu_side_bg: Color,
     /// Floating overlays such as the Alt+Tab switcher.
     pub overlay_bg: Color,
     pub overlay_fg: Color,
@@ -1523,7 +2503,7 @@ impl DesktopTheme {
 
     /// Which role of `palette` each surface of the shell is.
     ///
-    /// Two of the twelve fields come from `frame` rather than from `palette`,
+    /// Two of the thirteen fields come from `frame` rather than from `palette`,
     /// and that is the point of taking both. Neither is the shell's to choose:
     /// the desktop background is painted by the compositor and merely
     /// *reported* here, and the border is the one drawn around every window on
@@ -1544,6 +2524,7 @@ impl DesktopTheme {
             accent_color: p.accent,
             start_menu_bg: p.base,
             start_menu_fg: p.text,
+            start_menu_side_bg: p.mantle,
             overlay_bg: p.base,
             overlay_fg: p.text,
             overlay_selected_bg: p.surface1,
@@ -1593,6 +2574,7 @@ impl DesktopTheme {
         let overlay = settings.transparency.panel_alpha();
         theme.overlay_bg = with_alpha(theme.overlay_bg, overlay);
         theme.start_menu_bg = with_alpha(theme.start_menu_bg, overlay);
+        theme.start_menu_side_bg = with_alpha(theme.start_menu_side_bg, overlay);
 
         theme
     }
@@ -1639,6 +2621,22 @@ const fn icon_button(button: MouseButton) -> icons::MouseButton {
     }
 }
 
+/// Whether a file may be run as a program: any of its execute bits set.
+#[cfg(unix)]
+fn is_executable(meta: &std::fs::Metadata) -> bool {
+    use std::os::unix::fs::PermissionsExt;
+    (meta.permissions().mode() & 0o111) != 0
+}
+
+/// The development host's answer. SlateOS is `target-family = "unix"`, so
+/// this is only ever asked on a machine none of whose programs are
+/// SlateOS's, and "no" sends such a file to the "nothing opens it" notice
+/// rather than to a program it was never built to be.
+#[cfg(not(unix))]
+fn is_executable(_meta: &std::fs::Metadata) -> bool {
+    false
+}
+
 impl DesktopShell {
     pub fn new(screen_width: u32, screen_height: u32) -> Self {
         let mut shell = Self {
@@ -1656,9 +2654,7 @@ impl DesktopShell {
             start_menu_wheel: wheel::Accumulator::default(),
             power_menu_open: false,
             shortcut_card_open: false,
-            shortcut_selected: 0,
-            shortcut_capture: None,
-            shortcut_message: None,
+            shortcut_editor: shortcut_editor::ShortcutEditor::new(),
             apps: launcher::builtin_app_database(),
             // The layouts this machine has, from `keylayout`'s built-in set.
             // Which one is *active* is corrected from `input.yaml` by
@@ -1669,29 +2665,67 @@ impl DesktopShell {
             tray_drag: None,
             tray_overflow_menu: None,
             pin_menu: None,
+            taskbar_menu: None,
             pin_drag: None,
-            tray_tooltip: None,
+            pin_drag_off_bar: false,
+            start_drag: None,
+            start_pins: Vec::new(),
+            start_menu_dirty: false,
+            start_recent: Vec::new(),
+            start_query: TextInput::new(),
+            start_selected: None,
+            start_closed_folders: std::collections::BTreeSet::new(),
+            carry_at: (0.0, 0.0),
+            button_order: Vec::new(),
+            window_press: None,
+            tooltip: None,
+            hover_changed: false,
+            hover_tile: None,
+            show_desktop_lit: false,
+            start_button_lit: false,
+            tray_lit: None,
+            run_box_launch: None,
+            start_lit: None,
+            desktop_shown: None,
+            ending: None,
+            ending_ready: false,
             alt_tab_active: false,
             alt_tab_index: 0,
+            alt_tab_view: SwitchView::Switcher,
+            alt_tab_anchor: SwitchAnchor::ALT,
             overview: overview::OverviewState::new(),
             overview_config: overview::OverviewConfig::default(),
             appearance: AppearanceSettings::default(),
             appearance_dirty: false,
-            desktop_menu: ContextMenu::new(Self::desktop_menu_items()),
+            // Closed, and rebuilt from the state in force whenever it opens;
+            // what it is built with here is never shown.
+            desktop_menu: ContextMenu::new(Self::desktop_menu_items(
+                AppearanceSettings::default().icon_size,
+                icons::ArrangementMode::default(),
+            )),
             // 40 is the `taskbar_height` two lines below; both are the
             // literal because this is the initialiser that establishes it.
             icons: icons::DesktopIconLayer::new(screen_width, screen_height, 40),
+            icons_dirty: false,
             widgets: DesktopWidgetManager::new(),
             menu_widget: None,
+            menu_icon: None,
             widget_drag: None,
+            user_name: String::new(),
+            icon_registry: IconRegistry::default(),
+            note_selecting: false,
             widgets_dirty: false,
-            appearance_watch: config::Watcher::new(appearance::CONFIG_NAME),
+            // `appearance::watcher`, not a plain one: an edit to the chosen
+            // theme's own file changes the colours without changing a byte of
+            // `appearance.yaml`.
+            appearance_watch: appearance::watcher(),
             notif_watch: config::Watcher::new(notifsettings::CONFIG_NAME),
             taskbar: taskbar::TaskbarState::new(taskbar::TaskbarConfig::default()),
             schedule_snooze: None,
             notif: notifsettings::NotifFile::new(),
             theme: DesktopTheme::default(),
             datetime: datetime_settings::DateTimeSettings::default(),
+            system_zone: Tz::utc(),
             calendar: calendar::CalendarView::new(calendar::CalendarConfig::default()),
             notifications: notif_pane::NotificationPane::new(),
             focus: focus_assist::FocusAssistManager::new(),
@@ -1718,6 +2752,12 @@ impl DesktopShell {
             hotkeys: hotkeys::HotkeyRegistry::defaults(),
         };
         shell.sync_snap_area();
+        // The icon size the settings start with, not the layer's own starting
+        // size: a shell that has not loaded the user's appearance yet should
+        // still draw what the default settings say.
+        shell
+            .icons
+            .set_icon_size(shell.appearance.icon_size.pixels());
         shell
     }
 
@@ -1768,16 +2808,58 @@ impl DesktopShell {
     /// that a later appearance change cannot forget it.
     pub fn set_appearance(&mut self, appearance: AppearanceSettings) {
         self.theme = DesktopTheme::from_settings(&appearance);
+        // How things move, to every animator the shell owns: the animation
+        // theme at the user's speed (design-decisions §1446). Pushed from here
+        // for the caret width's reason below. Under a still motion a fade or a
+        // slide in progress lands where it was going.
+        let motion = guitk::palette::PaletteSource::motion(&appearance);
+        self.notifications.set_motion(motion);
+        self.osd.set_motion(motion);
+        if motion.is_still() {
+            self.overview.end_fade();
+        }
+        // Every icon is drawn again, in the new colours and the new theme's
+        // pictures, under new ids; the old requests would only be a registry
+        // of images the session has dropped.
+        self.icon_registry.clear();
+        self.icons.clear_icon_requests();
+        self.osd.clear_icon_requests();
+        self.widgets.clear_icon_requests();
         // The caret width goes to the surface that draws one. Pushed here
         // rather than read at draw time because `render` is handed a
         // `Palette`, and a palette is colours: 839 put the caret's width in
         // the appearance settings, not in the theme's colour table. Pushing it
         // from the one place that knows the settings changed is the same shape
-        // as `sync_animation_speed`, and for the same reason -- a second door
+        // as the motion above, and for the same reason -- a second door
         // the caller has to remember is a door somebody forgets.
         self.run_dialog.set_caret_width(appearance.caret_width());
+        self.icons.set_caret_width(appearance.caret_width());
+        self.widgets.set_caret_width(appearance.caret_width());
+        // The focus width with it, to the fields that draw a focus mark
+        // (`guitk::field`), for the same reason.
+        self.run_dialog
+            .set_focus_ring_width(appearance.focus_ring_width());
+        self.icons
+            .set_focus_ring_width(appearance.focus_ring_width());
+        // The icon size goes to the layer that draws icons, for the same
+        // reason: it was a setting with a working control and no reader --
+        // `known-issues.md` TD-C-FOUR-APPEARANCE-SETTINGS-HAVE-A-WORKING-CONTROL-
+        // AND-NO-READER -- chosen, saved, restored at login, and drawn by
+        // nothing.
+        self.icons.set_icon_size(appearance.icon_size.pixels());
         guitk::scaling::set_global_scale(appearance.scale_factor());
         self.appearance = appearance;
+        // After the store: the taskbar's thickness follows the scale just
+        // set, and the icons must stay clear of the bar as it is drawn.
+        self.sync_icon_area();
+    }
+
+    /// How the desktop's transitions move now: the animation theme at the
+    /// user's speed -- what a palette resolved from these settings carries as
+    /// `Palette::motion` (design-decisions §1446).
+    #[must_use]
+    pub fn motion(&self) -> guitk::motion::Motion {
+        guitk::palette::PaletteSource::motion(&self.appearance)
     }
 
     /// Load the user's saved appearance settings from disk and apply them.
@@ -1935,6 +3017,46 @@ impl DesktopShell {
         ))
     }
 
+    /// The picture the time-of-day wallpaper schedule has up at `utc_secs`,
+    /// in this shell's zone -- `None` when there is no schedule. See
+    /// `AppearanceSettings::scheduled_wallpaper_at`.
+    #[must_use]
+    pub fn scheduled_wallpaper(&self, utc_secs: u64) -> Option<&Path> {
+        self.appearance
+            .scheduled_wallpaper_at(utc_secs, self.local_zone())
+    }
+
+    /// How long until the scheduled wallpaper next changes, in this shell's
+    /// zone. The shell sleeps exactly this long, as it does for the
+    /// automatic light/dark mode.
+    #[must_use]
+    pub fn next_wallpaper_change(&self, utc_secs: u64) -> Option<Duration> {
+        self.appearance
+            .next_wallpaper_change(utc_secs, self.local_zone())
+    }
+
+    /// How long until the automatic light/dark mode next changes, if the mode
+    /// is automatic -- in this shell's zone. The shell sleeps exactly this
+    /// long, for [`next_schedule_change`](Self::next_schedule_change)'s
+    /// reason. See `AppearanceSettings::next_auto_change`.
+    #[must_use]
+    pub fn next_theme_change(&self, utc_secs: u64) -> Option<Duration> {
+        self.appearance
+            .next_auto_change(utc_secs, self.local_zone())
+    }
+
+    /// Whether the automatic light/dark mode is on the other side of an edge
+    /// from the settings the shell holds -- the moment to read them again.
+    ///
+    /// Asked against the shell's own zone and clock, with no file read: this
+    /// runs on a tick, and the reading it prompts is what touches the disk.
+    #[must_use]
+    pub fn theme_phase_is_due(&self, utc_secs: u64) -> bool {
+        self.appearance.theme_mode == appearance::ThemeMode::System
+            && self.appearance.auto_light_at(utc_secs, self.local_zone())
+                != self.appearance.auto_is_light
+    }
+
     /// Apply one per-app change the user made in the notification pane.
     ///
     /// Writes `notifications.yaml`, which is safe here and was not safe on the
@@ -2014,7 +3136,7 @@ impl DesktopShell {
     /// Today that is one field: which shortcut cycles the keyboard layout.
     /// It lives in `input.yaml` beside the layout itself, because the two are
     /// the same subject and because
-    /// [`persist_input_layout`](Self::persist_input_layout) already writes
+    /// `persist_input_layout` already writes
     /// that file — a second configuration format for one neighbouring value
     /// would be a second thing to keep in step.
     ///
@@ -2154,7 +3276,47 @@ impl DesktopShell {
         self.scale(self.taskbar_height as f32)
     }
 
-    /// The start button at the left end of the taskbar.
+    /// Follow the display to a new size -- the shell's own idea of the
+    /// screen, and the icon layer's, which brings every icon back onto the
+    /// desktop that is now there.
+    ///
+    /// The session used to set the two fields directly, and the icon layer
+    /// kept the size it was built with for the rest of the session.
+    pub fn set_screen_size(&mut self, width: u32, height: u32) {
+        self.screen_width = width;
+        self.screen_height = height;
+        self.sync_icon_area();
+    }
+
+    /// Tell the icon layer how much of the screen is desktop: all of it but
+    /// the taskbar, at the thickness the bar is actually drawn -- which the
+    /// scale setting changes, so an appearance change calls this too.
+    fn sync_icon_area(&mut self) {
+        let bar = self.taskbar_thickness().round() as u32;
+        self.icons
+            .set_desktop_area(self.screen_width, self.screen_height, bar);
+    }
+
+    /// The start orb, centred in the start button: the reference's round
+    /// `aero-orb`, as large as the bar allows.
+    #[must_use]
+    pub fn start_orb_rect(&self) -> Rect {
+        let button = self.start_button_rect();
+        let d = self
+            .scale(START_ORB)
+            .min(button.h - 2.0 * self.scale(START_ORB_MARGIN))
+            .min(button.w)
+            .max(0.0);
+        Rect::new(
+            button.x + (button.w - d) / 2.0,
+            button.y + (button.h - d) / 2.0,
+            d,
+            d,
+        )
+    }
+
+    /// The start button at the left end of the taskbar: a press anywhere on
+    /// it opens the start menu -- a larger target than the orb drawn in it.
     #[must_use]
     pub fn start_button_rect(&self) -> Rect {
         let bar = self.taskbar_rect();
@@ -2172,55 +3334,199 @@ impl DesktopShell {
         (self.taskbar_rect().w - self.tray_width()).max(0.0)
     }
 
-    /// How wide each taskbar window button is.
-    ///
-    /// The buttons shrink as windows are opened, so this cannot be a constant
-    /// in either the renderer or the hit test.
-    fn taskbar_button_width(&self) -> f32 {
+    /// How tall a taskbar tile is, and where its top is: [`TASKBAR_TILE`]
+    /// centred in the bar, or less in a bar too short to hold it with
+    /// [`TASKBAR_TILE_MARGIN`] above and below.
+    fn taskbar_tile_band(&self) -> (f32, f32) {
         let bar = self.taskbar_rect();
-        let available = (bar.w
-            - self.scale(START_BUTTON_WIDTH)
-            - self.tray_width()
-            - self.scale(TRAY_RESERVE_GAP))
-        .max(0.0);
-        let count = self.taskbar_slots().len().max(1) as f32;
-        self.scale(TASKBAR_BUTTON_MAX_WIDTH).min(available / count)
+        let height = self
+            .scale(TASKBAR_TILE)
+            .min((bar.h - 2.0 * self.scale(TASKBAR_TILE_MARGIN)).max(0.0));
+        (bar.y + (bar.h - height) / 2.0, height)
     }
 
-    /// The taskbar button for the `index`-th visible window.
+    /// How wide a window's tile would like to be -- its picture, its title and
+    /// the room around them, up to [`TASKBAR_BUTTON_MAX_WIDTH`] -- and never
+    /// narrower than `square`, a pinned program's tile; or `square` itself,
+    /// when the user has asked for no titles (`taskbar_labels`), which then
+    /// leaves the tile too narrow for one and it draws its picture alone.
+    ///
+    /// Measured, not guessed: the title is drawn in a proportional face, and
+    /// only the text layer knows how much wider "WWW Browser" is than
+    /// "initialising".
+    fn window_tile_width(&self, title: &str, square: f32) -> f32 {
+        // Titles off: a window is its picture alone, on a pin's square.
+        if !self.appearance.taskbar_labels {
+            return square;
+        }
+        let title = text::measure(
+            title,
+            self.font_size(TextRole::Caption),
+            guitk::render::FontWeightHint::Regular,
+        );
+        let wanted = self.scale(TASKBAR_TILE_PAD_START)
+            + self.scale(TASKBAR_WINDOW_ICON)
+            + self.scale(TASKBAR_TILE_LABEL_GAP)
+            + title
+            + self.scale(TASKBAR_TILE_PAD_END);
+        wanted.min(self.scale(TASKBAR_BUTTON_MAX_WIDTH)).max(square)
+    }
+
+    /// Where every taskbar tile stands, in [`taskbar_slots`](Self::taskbar_slots)'
+    /// order -- the Aero reference's row, in which a pinned program is a
+    /// square as tall as the tiles and a window is as wide as its picture and
+    /// title need, up to `TASKBAR_BUTTON_MAX_WIDTH`.
+    ///
+    /// When they do not all fit, the widest windows give way first, each down
+    /// to a square, so a short title is the last to be cut; past that, every
+    /// tile shares what there is (`fit_tiles`). The tray is never given up:
+    /// it is measured first, and the tiles have what is left of the bar.
+    ///
+    /// All at once, because a tile's place depends on every tile before it:
+    /// anything asking about more than one tile should call this once rather
+    /// than [`taskbar_button_rect`](Self::taskbar_button_rect) for each.
+    #[must_use]
+    pub fn taskbar_layout(&self) -> Vec<Rect> {
+        let slots = self.taskbar_slots();
+        let bar = self.taskbar_rect();
+        let (top, height) = self.taskbar_tile_band();
+        let windows = self.taskbar_windows();
+        let (wanted, shrinks): (Vec<f32>, Vec<bool>) = slots
+            .iter()
+            .map(|slot| match *slot {
+                TaskbarSlot::Pinned(_) => (height, false),
+                TaskbarSlot::Window(id) => (
+                    windows
+                        .iter()
+                        .find(|w| w.id == id)
+                        .map_or(height, |w| self.window_tile_width(&w.title, height)),
+                    true,
+                ),
+            })
+            .unzip();
+        // Everything between the start button and the tray that is not a
+        // tile: the gap after the start button, the gap after every tile but
+        // the last, the wider one between the sections, and the reserve
+        // before the tray. The gaps used to be left out, so the buttons were
+        // each given their share of the space and then spaced apart as well
+        // -- fine while they were at their widest, and past the tray's edge
+        // once enough windows were open: 108 px into it with thirty-one.
+        #[allow(clippy::cast_precision_loss)]
+        let between = slots.len().saturating_sub(1) as f32;
+        let gaps = self.scale(TASKBAR_BUTTON_START_GAP)
+            + between * self.scale(TASKBAR_BUTTON_GAP)
+            + self.section_gap_extra()
+            + self.scale(TRAY_RESERVE_GAP);
+        let available =
+            (bar.w - self.scale(START_BUTTON_WIDTH) - self.tray_width() - gaps).max(0.0);
+        let pins = self.taskbar.pinned_apps().len();
+        let mut x = bar.x + self.scale(START_BUTTON_WIDTH) + self.scale(TASKBAR_BUTTON_START_GAP);
+        let mut tiles = Vec::with_capacity(slots.len());
+        for (index, width) in fit_tiles(&wanted, &shrinks, height, available)
+            .into_iter()
+            .enumerate()
+        {
+            if index == pins {
+                x += self.section_gap_extra();
+            }
+            tiles.push(Rect::new(x, top, width, height));
+            x += width + self.scale(TASKBAR_BUTTON_GAP);
+        }
+        tiles
+    }
+
+    /// How much wider than an ordinary gap the one between the pinned and
+    /// the running sections is -- nothing unless both sections have tiles,
+    /// since a divider with nothing on one side divides nothing.
+    fn section_gap_extra(&self) -> f32 {
+        let pins = self.taskbar.pinned_apps().len();
+        let running = self.taskbar_slots().len().saturating_sub(pins);
+        if pins > 0 && running > 0 {
+            self.scale(TASKBAR_SECTION_GAP - TASKBAR_BUTTON_GAP)
+        } else {
+            0.0
+        }
+    }
+
+    /// The taskbar tile in slot `index` -- pinned applications first, then the
+    /// windows, the two set apart by [`taskbar_divider_rect`](Self::taskbar_divider_rect).
+    /// An index past the last is an empty rectangle, which contains no point.
+    ///
+    /// Places the whole row to answer, as it must; see
+    /// [`taskbar_layout`](Self::taskbar_layout).
     #[must_use]
     pub fn taskbar_button_rect(&self, index: usize) -> Rect {
+        self.taskbar_layout()
+            .get(index)
+            .copied()
+            .unwrap_or_else(|| Rect::new(0.0, 0.0, 0.0, 0.0))
+    }
+
+    /// The line between the pinned tiles and the windows', where the
+    /// reference draws it -- `TASKBAR_DIVIDER_OFFSET` past the last pin, as
+    /// tall as `TASKBAR_DIVIDER_HEIGHT` and centred in the bar -- or `None`
+    /// unless both sections have tiles.
+    #[must_use]
+    pub fn taskbar_divider_rect(&self) -> Option<Rect> {
+        let pins = self.taskbar.pinned_apps().len();
+        if pins == 0 || self.section_gap_extra() <= 0.0 {
+            return None;
+        }
+        let layout = self.taskbar_layout();
+        let last_pin = layout.get(pins.checked_sub(1)?)?;
         let bar = self.taskbar_rect();
-        let w = self.taskbar_button_width();
-        let inset = self.scale(TASKBAR_BUTTON_INSET).min(bar.h / 2.0);
-        let x = bar.x
-            + self.scale(START_BUTTON_WIDTH)
-            + self.scale(TASKBAR_BUTTON_START_GAP)
-            + index as f32 * (w + self.scale(TASKBAR_BUTTON_GAP));
-        Rect::new(x, bar.y + inset, w, bar.h - inset * 2.0)
+        let thickness = self.scale(1.0).max(1.0);
+        let height = self.scale(TASKBAR_DIVIDER_HEIGHT).min(last_pin.h);
+        Some(Rect::new(
+            last_pin.x + last_pin.w + self.scale(TASKBAR_DIVIDER_OFFSET),
+            bar.y + (bar.h - height) / 2.0,
+            thickness,
+            height,
+        ))
     }
 
     /// Every button the taskbar shows, pinned applications first.
     ///
     /// Pinned first and always shown, rather than merged with a window of the
-    /// same program. Merging needs a name both ends agree on, and there is
-    /// none: a window carries the `app_id` its program declares, while a
-    /// pinned entry carries the executable path the launcher knows it by, and
-    /// nothing in the tree maps one to the other. Showing both is honest --
-    /// the pinned button is a *launcher*, and it keeps meaning that while the
-    /// program runs -- and it is what a quick-launch strip has always done.
-    /// Merging is a refinement for the day an application identity exists.
+    /// same program -- which the desktop could now do, since a window's
+    /// declared name finds its program (`program_for_app_id`), and which it
+    /// does not by design: `design.txt` puts "all launched applications ... to
+    /// the right of" the pins, and the Aero reference's pinned button starts a
+    /// new copy there (design-decisions §885). The pinned button is a
+    /// *launcher*, and it keeps meaning that while the program runs.
     #[must_use]
     pub fn taskbar_slots(&self) -> Vec<TaskbarSlot> {
         let mut slots: Vec<TaskbarSlot> = (0..self.taskbar.pinned_apps().len())
             .map(TaskbarSlot::Pinned)
             .collect();
         slots.extend(
-            self.taskbar_windows()
+            self.taskbar_button_windows()
                 .iter()
                 .map(|window| TaskbarSlot::Window(window.id)),
         );
         slots
+    }
+
+    /// The windows that have taskbar buttons, in the order the buttons stand:
+    /// [`taskbar_windows`](Self::taskbar_windows)' set, in the taskbar's own
+    /// order (see `button_order`) rather than the stacking order. Stable: the
+    /// buttons stay put when a window is raised, and move only when the user
+    /// drags one.
+    ///
+    /// A pinned program's window among them: a pinned button starts its
+    /// program and stands for none of its windows (design-decisions §885).
+    #[must_use]
+    pub fn taskbar_button_windows(&self) -> Vec<&ManagedWindow> {
+        let mut windows = self.taskbar_windows();
+        // A window the order has not seen yet -- which `apply_window_list`
+        // makes impossible -- would go last rather than first.
+        windows.sort_by_key(|w| {
+            self.button_order
+                .iter()
+                .position(|id| *id == w.id)
+                .unwrap_or(usize::MAX)
+        });
+        windows
     }
 
     /// The applications pinned to the taskbar, in the order they are shown.
@@ -2275,15 +3581,123 @@ impl DesktopShell {
     /// on it comes from the launcher's entry for that path at the moment it is
     /// drawn. Storing the name too would be a second copy of it, stale the
     /// first time an application is renamed.
+    ///
+    /// A desktop that has never saved its pins -- no `pinned` in the file, or
+    /// no file -- starts with [`FIRST_START_TASKBAR_PINS`]. Not written back:
+    /// they are defaults until the user changes them, and a pin removed is
+    /// saved as a list without it, so it does not come back.
     pub fn load_pinned(&mut self) {
         let doc = config::load(TASKBAR_CONFIG_NAME);
         let Some(execs) = doc.get_seq(&["pinned"]) else {
+            for exec in self.first_start_programs(&FIRST_START_TASKBAR_PINS) {
+                let name = self.app_name_for(&exec);
+                self.pin_app_without_saving(&exec, &name);
+            }
             return;
         };
         for exec in execs {
             let name = self.app_name_for(&exec);
             self.pin_app_without_saving(&exec, &name);
         }
+    }
+
+    /// Adopt the programs this machine has, as the start menu lists them: the
+    /// installed ones whose entries a menu shows, then SlateOS's own that no
+    /// installed entry replaces -- the session's list, made by the one rule
+    /// every list of programs uses (`programs::with_built_in`,
+    /// design-decisions §1445: an installed entry replaces SlateOS's own
+    /// when their desktop file IDs match).
+    ///
+    /// The whole list, not the installed part of it: the shell starts with
+    /// SlateOS's own alone ([`launcher::builtin_app_database`]), and this
+    /// replaces it.
+    ///
+    /// The list is kept in name order, which is the order the menu lists
+    /// programs in. Each program's launch count carries over, and the
+    /// programs pinned to the start menu are looked up again, so a pin shows
+    /// the installed entry's name and picture.
+    pub fn set_programs(&mut self, programs: Vec<AppEntry>) {
+        use std::collections::BTreeMap;
+        let counts: BTreeMap<String, u32> = self
+            .apps
+            .iter()
+            .map(|app| (app.executable_path.clone(), app.launch_count))
+            .collect();
+        let mut apps = programs;
+        for app in &mut apps {
+            if let Some(count) = counts.get(&app.executable_path) {
+                app.launch_count = *count;
+            }
+        }
+        apps.sort_by(|a, b| {
+            a.name
+                .to_lowercase()
+                .cmp(&b.name.to_lowercase())
+                .then_with(|| a.executable_path.cmp(&b.executable_path))
+        });
+        self.apps = apps;
+        let pins = std::mem::take(&mut self.start_pins);
+        self.start_pins = pins
+            .into_iter()
+            .map(|pin| self.start_entry_for(&pin.executable_path))
+            .collect();
+        self.start_menu_scroll = self.start_menu_scroll.min(self.start_menu_max_scroll());
+        self.start_selected = None;
+    }
+
+    /// The program a window belongs to, by the `app_id` it declares: the
+    /// program whose desktop entry file is named for it
+    /// (`org.example.Sketch.desktop` for `org.example.Sketch`, the Wayland
+    /// convention), whose entry gives it as `StartupWMClass`, or whose program
+    /// file is called it (SlateOS's own programs declare their crate's name,
+    /// `terminal` for `/usr/bin/terminal`). Case is not significant.
+    ///
+    /// `None` for a window that names no program, or one nothing here knows.
+    /// This is the application identity `known-issues.md`
+    /// `TD-C-NOTHING-CONNECTS-A-LAUNCHER-ENTRY-TO-THE-WINDOWS-IT-OPENS` found
+    /// missing: the freedesktop answer, which works for any program that says
+    /// what it is and for none that does not. What a window's button draws
+    /// comes from it (design-decisions §885).
+    #[must_use]
+    pub fn program_for_app_id(&self, app_id: &str) -> Option<&AppEntry> {
+        if app_id.is_empty() {
+            return None;
+        }
+        let same = |name: &str| name.eq_ignore_ascii_case(app_id);
+        self.apps
+            .iter()
+            .find(|app| {
+                app.desktop_id
+                    .as_deref()
+                    .and_then(|id| id.strip_suffix(".desktop"))
+                    .is_some_and(same)
+            })
+            .or_else(|| {
+                self.apps
+                    .iter()
+                    .find(|app| app.wm_class.as_deref().is_some_and(same))
+            })
+            .or_else(|| {
+                self.apps
+                    .iter()
+                    .find(|app| file_name_str(&app.executable_path).is_some_and(same))
+            })
+    }
+
+    /// How to start the program known by `exec` -- a pin's, a start menu
+    /// row's: its entry's command line when it has one (the arguments its
+    /// desktop entry gives, in a terminal when it asks for one), otherwise
+    /// the program with no arguments.
+    ///
+    /// Found again by `exec` rather than carried with it, because a pin
+    /// stores only the program: the entry it is started by is whichever is
+    /// installed now.
+    #[must_use]
+    pub fn launch_for(&self, exec: &str) -> hotkeys::Launch {
+        self.apps
+            .iter()
+            .find(|app| app.executable_path == exec)
+            .map_or_else(|| hotkeys::Launch::program(exec), AppEntry::launch)
     }
 
     /// The launcher's name for an executable, or its file name.
@@ -2356,7 +3770,37 @@ impl DesktopShell {
         Rect::new(0.0, bar.y - h, w, h)
     }
 
-    /// How many application rows fit between the heading and the power options.
+    /// The programs column: the list, and the search field at its foot.
+    #[must_use]
+    pub fn start_menu_left_rect(&self) -> Rect {
+        let menu = self.start_menu_rect();
+        let w = self.scale(START_MENU_LEFT_WIDTH).min(menu.w).max(0.0);
+        Rect::new(menu.x, menu.y, w, menu.h)
+    }
+
+    /// The places column, the rest of the menu to the programs' right: the
+    /// user, their folders, Settings, the card of keyboard shortcuts, a
+    /// terminal, and the power button.
+    #[must_use]
+    pub fn start_menu_right_rect(&self) -> Rect {
+        let menu = self.start_menu_rect();
+        let left = self.start_menu_left_rect();
+        Rect::new(left.x + left.w, menu.y, (menu.w - left.w).max(0.0), menu.h)
+    }
+
+    /// The top of the places column, where the user's picture and name are.
+    #[must_use]
+    pub fn start_user_rect(&self) -> Rect {
+        let right = self.start_menu_right_rect();
+        Rect::new(
+            right.x,
+            right.y,
+            right.w,
+            self.scale(START_MENU_USER_HEIGHT).min(right.h),
+        )
+    }
+
+    /// How many application rows fit above the search field.
     ///
     /// Scale-invariant: it divides one scaled length by another, so the same
     /// programs are on screen at 200% as at 100% — they are simply larger.
@@ -2364,7 +3808,7 @@ impl DesktopShell {
     pub fn start_menu_visible_rows(&self) -> usize {
         let usable = self.start_menu_rect().h
             - self.scale(START_MENU_TOP_PADDING)
-            - self.scale(START_MENU_FOOTER);
+            - self.scale(START_MENU_SEARCH_BAND);
         let row = self.scale(START_MENU_ROW_HEIGHT);
         if row <= 0.0 || usable < row {
             return 0;
@@ -2380,32 +3824,90 @@ impl DesktopShell {
     /// `start_menu_entry_at`.
     #[must_use]
     pub fn start_menu_row_rect(&self, row: usize) -> Rect {
-        let menu = self.start_menu_rect();
+        let left = self.start_menu_left_rect();
         let height = self.scale(START_MENU_ROW_HEIGHT);
         Rect::new(
-            menu.x,
-            menu.y + self.scale(START_MENU_TOP_PADDING) + row as f32 * height,
-            menu.w,
+            left.x,
+            left.y + self.scale(START_MENU_TOP_PADDING) + row as f32 * height,
+            left.w,
             height,
         )
     }
 
-    /// The power button in the start menu's footer, which opens the power menu.
+    /// The power button at the foot of the places column, which opens the
+    /// power menu.
     ///
-    /// The footer is the last `START_MENU_FOOTER` of the menu, or the whole
-    /// menu if the menu has been clamped shorter than that — a button drawn
+    /// The band is the last `START_MENU_POWER_BAND` of the column, or the whole
+    /// column if the menu has been clamped shorter than that — a button drawn
     /// above the menu's own top edge would be as unreachable as a row drawn off
     /// the screen.
     #[must_use]
     pub fn power_button_rect(&self) -> Rect {
-        let menu = self.start_menu_rect();
+        let right = self.start_menu_right_rect();
         let inset = self.scale(POWER_BUTTON_INSET);
-        let footer = self.scale(START_MENU_FOOTER).min(menu.h);
-        let h = (footer - inset * 2.0).max(0.0);
-        let w = self
-            .scale(POWER_BUTTON_WIDTH)
-            .min((menu.w - inset * 2.0).max(0.0));
-        Rect::new(menu.x + inset, menu.y + menu.h - footer + inset, w, h)
+        let band = self.scale(START_MENU_POWER_BAND).min(right.h);
+        Rect::new(
+            right.x + inset,
+            right.y + right.h - band + inset,
+            (right.w - inset * 2.0).max(0.0),
+            (band - inset * 2.0).max(0.0),
+        )
+    }
+
+    /// The caret at the power button's right end: the other power choices,
+    /// behind it as the reference keeps them. The rest of the button shuts
+    /// down.
+    #[must_use]
+    pub fn power_caret_rect(&self) -> Rect {
+        let button = self.power_button_rect();
+        let w = self.scale(POWER_CARET_WIDTH).min(button.w);
+        Rect::new(button.x + button.w - w, button.y, w, button.h)
+    }
+
+    /// The part of the power button drawn as "Shut down": all of it but the
+    /// caret and the reference's one-pixel gap before it. A press in the gap
+    /// is still the button's, as [`hit_test`](Self::hit_test) finds it.
+    fn power_main_rect(&self) -> Rect {
+        let button = self.power_button_rect();
+        let caret = self.power_caret_rect();
+        let w = (caret.x - self.scale(POWER_CARET_GAP) - button.x).max(0.0);
+        Rect::new(button.x, button.y, w, button.h)
+    }
+
+    /// A place in the places column, below the user and above the power
+    /// button, in [`StartShortcut::ALL`]'s order.
+    ///
+    /// A column short of room tightens its places first, from
+    /// `START_LINK_HEIGHT` down to `START_LINK_MIN_HEIGHT`, all by the same
+    /// amount. Past that, a place that would reach the power button's band --
+    /// a menu clamped very short at a large scale -- has no room and is an
+    /// empty rectangle, which nothing draws and no press lands in: a place
+    /// drawn over the power button would take the press meant for it.
+    #[must_use]
+    pub fn start_shortcut_rect(&self, which: StartShortcut) -> Rect {
+        let right = self.start_menu_right_rect();
+        let inset = self.scale(POWER_BUTTON_INSET);
+        let user = self.start_user_rect();
+        let top = user.y + user.h;
+        let floor = self.power_button_rect().y - inset;
+        let count = StartShortcut::ALL.len() as f32;
+        // Shared out evenly, then held between the two heights: never taller
+        // than a place is meant to be, and never so tight the icon touches the
+        // next place -- `max` before `min` so a column with no room at all (a
+        // negative share) lands on the floor rather than past it.
+        let height = ((floor - top) / count)
+            .max(self.scale(START_LINK_MIN_HEIGHT))
+            .min(self.scale(START_LINK_HEIGHT));
+        let index = StartShortcut::ALL
+            .iter()
+            .position(|w| *w == which)
+            .unwrap_or(0);
+        let y = top + index as f32 * height;
+        let w = (right.w - inset * 2.0).max(0.0);
+        if y + height > floor {
+            return Rect::new(right.x + inset, y, 0.0, 0.0);
+        }
+        Rect::new(right.x + inset, y, w, height)
     }
 
     /// The power menu popup, rising from the power button.
@@ -2420,7 +3922,7 @@ impl DesktopShell {
     #[must_use]
     pub fn power_menu_rect(&self) -> Rect {
         let button = self.power_button_rect();
-        let rows = self.power_menu_entries().len() as f32;
+        let rows = power::PowerChoice::ALL.len() as f32;
         let pad = self.scale(POWER_MENU_PADDING);
         let h =
             (rows * self.scale(POWER_MENU_ROW_HEIGHT) + pad * 2.0).min(self.screen_height as f32);
@@ -2429,7 +3931,10 @@ impl DesktopShell {
             .min(self.screen_width as f32)
             .max(0.0);
         let y = (button.y - self.scale(POWER_MENU_GAP) - h).max(0.0);
-        Rect::new(button.x, y, w, h)
+        // Its right edge on the button's, over the caret that opens it -- the
+        // reference's `right: 0` -- and on the screen however wide it is.
+        let x = (button.x + button.w - w).max(0.0);
+        Rect::new(x, y, w, h)
     }
 
     /// How many popup rows fit, which is every entry unless the popup had to be
@@ -2441,7 +3946,7 @@ impl DesktopShell {
             return 0;
         }
         let usable = self.power_menu_rect().h - self.scale(POWER_MENU_PADDING) * 2.0;
-        ((usable / row).max(0.0) as usize).min(self.power_menu_entries().len())
+        ((usable / row).max(0.0) as usize).min(power::PowerChoice::ALL.len())
     }
 
     /// The `row`-th drawn row of the power menu.
@@ -2449,25 +3954,22 @@ impl DesktopShell {
     pub fn power_menu_row_rect(&self, row: usize) -> Rect {
         let menu = self.power_menu_rect();
         let height = self.scale(POWER_MENU_ROW_HEIGHT);
+        let pad = self.scale(POWER_MENU_PADDING);
+        // Inside the popup's padding on every side, as the reference's items
+        // are: a lit row is a wash within the panel, not a band across it.
         Rect::new(
-            menu.x,
-            menu.y + self.scale(POWER_MENU_PADDING) + row as f32 * height,
-            menu.w,
+            menu.x + pad,
+            menu.y + pad + row as f32 * height,
+            (menu.w - pad * 2.0).max(0.0),
             height,
         )
     }
 
-    /// The system actions the power menu lists, in menu order.
-    ///
-    /// Exactly the entries [`start_menu_entries`](Self::start_menu_entries)
-    /// leaves out, from the same database, so a system action can never be in
-    /// both lists or in neither.
+    /// What the power menu lists, top to bottom: the shell's own list
+    /// ([`power::PowerChoice`]), not a slice of the application database.
     #[must_use]
-    pub fn power_menu_entries(&self) -> Vec<&AppEntry> {
-        self.apps
-            .iter()
-            .filter(|app| matches!(app.category, Category::System))
-            .collect()
+    pub fn power_menu_choices(&self) -> &'static [power::PowerChoice] {
+        &power::PowerChoice::ALL
     }
 
     /// Open or close the power menu.
@@ -2475,29 +3977,487 @@ impl DesktopShell {
         self.power_menu_open = !self.power_menu_open;
     }
 
-    /// The programs the start menu lists, in menu order.
-    ///
-    /// System actions — shutdown, lock, log out — are deliberately excluded:
-    /// they belong to the power options at the foot of the menu, not among the
-    /// applications, and mixing them in would make "Shutdown" one mis-click
-    /// away from "Screenshot".
+    /// The programs on the start menu's rows, top to bottom: the rows of
+    /// [`Self::start_menu_rows`] that are programs, without the folders.
     #[must_use]
     pub fn start_menu_entries(&self) -> Vec<&AppEntry> {
+        self.start_menu_rows()
+            .into_iter()
+            .filter_map(|row| match row {
+                StartRow::Program { entry, .. } => Some(entry),
+                StartRow::Folder { .. } | StartRow::Section(_) => None,
+            })
+            .collect()
+    }
+
+    /// The rows of the start menu's list, top to bottom, in the Aero
+    /// reference's sections: the pinned programs, the recently used ones,
+    /// then the applications tree -- a row per folder that has programs in
+    /// it, each followed by its programs when it is open. A section with
+    /// nothing in it has no heading, and "All apps" is headed only when
+    /// another section stands above it. While something is typed, what the
+    /// search finds instead, and no folders or headings.
+    ///
+    /// A program is in the folder its entry's first main category names
+    /// (`desktopentry::menu::Category::of`), and appears there even when it
+    /// is pinned as well, as a pin is a shortcut rather than a move.
+    #[must_use]
+    pub fn start_menu_rows(&self) -> Vec<StartRow<'_>> {
+        let found = self.start_menu_programs();
+        if !self.start_query.text().trim().is_empty() {
+            return found
+                .into_iter()
+                .map(|entry| StartRow::Program {
+                    entry,
+                    in_folder: false,
+                })
+                .collect();
+        }
+        let pins = self.start_pins.len().min(found.len());
+        let (pinned, listed) = found.split_at(pins);
+        // Recently used, as the list knows each program -- one no longer
+        // installed is not listed, though it is remembered until pushed out.
+        let recent: Vec<&AppEntry> = self
+            .start_recent
+            .iter()
+            .filter_map(|exec| {
+                listed
+                    .iter()
+                    .copied()
+                    .find(|entry| entry.executable_path == *exec)
+            })
+            .collect();
+        let mut rows: Vec<StartRow<'_>> = Vec::new();
+        for (section, entries) in [
+            (StartSection::Pinned, pinned),
+            (StartSection::Recent, recent.as_slice()),
+        ] {
+            if entries.is_empty() {
+                continue;
+            }
+            rows.push(StartRow::Section(section));
+            rows.extend(entries.iter().map(|entry| StartRow::Program {
+                entry,
+                in_folder: false,
+            }));
+        }
+        if !rows.is_empty() {
+            rows.push(StartRow::Section(StartSection::All));
+        }
+        for folder in launcher::Folder::ALL {
+            let mut members: Vec<&AppEntry> = listed
+                .iter()
+                .copied()
+                .filter(|entry| entry.folder == folder)
+                .collect();
+            if members.is_empty() {
+                continue;
+            }
+            members.sort_by_key(|entry| entry.name.to_lowercase());
+            let open = !self.start_closed_folders.contains(&folder);
+            rows.push(StartRow::Folder { folder, open });
+            if open {
+                rows.extend(members.into_iter().map(|entry| StartRow::Program {
+                    entry,
+                    in_folder: true,
+                }));
+            }
+        }
+        rows
+    }
+
+    /// The row the `n`-th program of the list is on, counting programs only
+    /// -- for tests, which name a program by its place among programs and
+    /// then need the row to press.
+    #[cfg(test)]
+    pub(crate) fn start_row_of_program(&self, n: usize) -> Option<usize> {
+        self.start_menu_rows()
+            .iter()
+            .enumerate()
+            .filter(|(_, row)| matches!(row, StartRow::Program { .. }))
+            .nth(n)
+            .map(|(at, _)| at)
+    }
+
+    /// The program on the list's `row`-th row, if that row is a program.
+    #[must_use]
+    pub fn start_program_at(&self, row: usize) -> Option<&AppEntry> {
+        match self.start_menu_rows().get(row) {
+            Some(StartRow::Program { entry, .. }) => Some(entry),
+            _ => None,
+        }
+    }
+
+    /// Open a folder of the applications tree if it is closed, close it if
+    /// it is open. The keyboard's row stays on the folder, wherever the
+    /// folder's row now is.
+    pub fn toggle_start_folder(&mut self, folder: launcher::Folder) {
+        if !self.start_closed_folders.remove(&folder) {
+            self.start_closed_folders.insert(folder);
+        }
+        // Read out of the rows before anything is assigned: they borrow the
+        // shell.
+        let (position, len) = {
+            let rows = self.start_menu_rows();
+            let position = rows
+                .iter()
+                .position(|row| matches!(row, StartRow::Folder { folder: f, .. } if *f == folder));
+            (position, rows.len())
+        };
+        if self.start_selected.is_some() {
+            self.start_selected = position;
+        }
+        let furthest = len.saturating_sub(self.start_menu_visible_rows());
+        self.start_menu_scroll = self.start_menu_scroll.min(furthest);
+    }
+
+    /// The programs the list is made of, before the tree arranges them: the
+    /// ones the user pinned first, then every program the launcher knows.
+    ///
+    /// The power actions -- shut down, lock, log out -- are not here: they are
+    /// the power menu's own list at the foot of the menu, not programs in the
+    /// database, and mixing them in would put "Shut down" one mis-click away
+    /// from "Screenshot".
+    ///
+    /// While something is typed in the search field, only the programs it
+    /// finds, best first and each once -- a pinned program is also in the
+    /// list below, and a search that found it twice would say so twice.
+    /// Ranked by the launcher's own rule (`launcher::search_score`); ties
+    /// keep menu order.
+    fn start_menu_programs(&self) -> Vec<&AppEntry> {
+        let listed = self.start_pins.iter().chain(
+            self.apps
+                .iter()
+                .filter(|app| matches!(app.category, Category::Application | Category::Setting)),
+        );
+        let query = self.start_query.text().trim();
+        if query.is_empty() {
+            return listed.collect();
+        }
+        let mut seen = std::collections::BTreeSet::new();
+        let mut found: Vec<(u32, usize, &AppEntry)> = listed
+            .filter(|entry| seen.insert(entry.executable_path.as_str()))
+            .enumerate()
+            .filter_map(|(order, entry)| {
+                launcher::search_score(query, entry).map(|score| (score, order, entry))
+            })
+            .collect();
+        found.sort_by(|a, b| b.0.cmp(&a.0).then(a.1.cmp(&b.1)));
+        found.into_iter().map(|(_, _, entry)| entry).collect()
+    }
+
+    /// How many of the rows at the top of the start menu are its pinned
+    /// programs: all of them in the ordinary menu, none while searching --
+    /// search results are in the order they were found, and not the user's to
+    /// arrange by dropping onto them.
+    fn start_pins_listed(&self) -> usize {
+        if self.start_query.text().trim().is_empty() {
+            self.start_pins.len()
+        } else {
+            0
+        }
+    }
+
+    /// Which pinned program the start menu's `row` is, if it is one: the
+    /// pins follow their "Pinned" heading, which is row 0 whenever there are
+    /// pins to list.
+    fn start_row_pin(&self, row: usize) -> Option<usize> {
+        let pins = self.start_pins_listed();
+        if pins == 0 {
+            return None;
+        }
+        row.checked_sub(1).filter(|pin| *pin < pins)
+    }
+
+    /// The start menu's search field, in the space above the rows.
+    #[must_use]
+    pub fn start_search_rect(&self) -> Rect {
+        let left = self.start_menu_left_rect();
+        let inset = self.scale(12.0);
+        let band = self.scale(START_MENU_SEARCH_BAND).min(left.h);
+        let h = self.scale(START_SEARCH_HEIGHT).min(band);
+        Rect::new(
+            left.x + inset,
+            left.y + left.h - band + (band - h) / 2.0,
+            (left.w - inset * 2.0).max(0.0),
+            h,
+        )
+    }
+
+    /// The image id of `name` drawn `px` square in `color`, remembered so
+    /// the session can upload the icon before the frame that names it.
+    fn icon(&self, name: &'static str, px: u32, color: Color) -> u64 {
+        self.icon_registry.icon(name, px, color)
+    }
+
+    /// What the icon uploaded under `id` is, if a frame has drawn one there
+    /// -- in the shell's own menus or on the desktop.
+    #[must_use]
+    pub fn icon_request(&self, id: u64) -> Option<IconRequest> {
+        self.icon_registry
+            .request(id)
+            .or_else(|| self.icons.icon_request(id))
+            .or_else(|| self.osd.icon_request(id))
+            .or_else(|| self.widgets.icon_request(id))
+    }
+
+    /// Draw the icon `name`, `logical` pixels square at this scale and in
+    /// `color`, centred in `rect`.
+    fn icon_in(
+        &self,
+        tree: &mut RenderTree,
+        rect: Rect,
+        name: &'static str,
+        logical: f32,
+        color: Color,
+    ) {
+        let px = self.icon_px(logical);
+        #[allow(clippy::cast_precision_loss)]
+        let side = px as f32;
+        image_centred(tree, rect, side, self.icon(name, px, color));
+    }
+
+    /// An icon's side, `logical` pixels at this scale, as a whole number.
+    fn icon_px(&self, logical: f32) -> u32 {
+        // A few dozen pixels, finite and positive at any scale the settings
+        // allow; `as` saturates anything past them rather than wrapping.
+        #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+        let px = self.scale(logical).round().max(1.0) as u32;
+        px
+    }
+
+    /// Say who is using the desktop, for the start menu's places column.
+    pub fn set_user_name(&mut self, name: &str) {
+        name.clone_into(&mut self.user_name);
+    }
+
+    /// Who the start menu says is using the desktop -- empty until known.
+    #[must_use]
+    pub fn user_name(&self) -> &str {
+        &self.user_name
+    }
+
+    /// The programs pinned to the top of the start menu, in order.
+    #[must_use]
+    pub fn start_pins(&self) -> &[AppEntry] {
+        &self.start_pins
+    }
+
+    /// Whether `exec` is pinned to the start menu.
+    #[must_use]
+    pub fn is_pinned_to_start(&self, exec: &str) -> bool {
+        self.start_pins
+            .iter()
+            .any(|entry| entry.executable_path == exec)
+    }
+
+    /// Pin a program to the start menu, after the ones pinned already.
+    pub fn pin_to_start(&mut self, exec: &str) {
+        let end = self.start_pins.len();
+        self.start_pin_into_gap(exec, end);
+    }
+
+    /// Take a program off the top of the start menu. It is still listed
+    /// below if the launcher knows it.
+    pub fn unpin_from_start(&mut self, exec: &str) {
+        let before = self.start_pins.len();
+        self.start_pins
+            .retain(|entry| entry.executable_path != exec);
+        if self.start_pins.len() != before {
+            // The list is a row shorter, and a menu scrolled to its end
+            // would otherwise show a blank row past it.
+            self.start_menu_scroll = self.start_menu_scroll.min(self.start_menu_max_scroll());
+            self.start_menu_dirty = true;
+        }
+    }
+
+    /// Pin `exec` into gap `gap` of the start menu's pinned rows (`0..=len`,
+    /// before the pin of that index), or move it there if it is pinned
+    /// already. Answers the gap after where it ended up, as
+    /// [`pin_into_gap`](Self::pin_into_gap) does for the taskbar, so several
+    /// programs dropped together keep their order.
+    fn start_pin_into_gap(&mut self, exec: &str, gap: usize) -> usize {
+        if exec.is_empty() {
+            return gap;
+        }
+        let from = self
+            .start_pins
+            .iter()
+            .position(|entry| entry.executable_path == exec);
+        let entry = match from {
+            Some(from) => self.start_pins.remove(from),
+            None => self.start_entry_for(exec),
+        };
+        // Taking it out closed its own gap: a gap past it is one lower now,
+        // and the gaps either side of it are both where it already was.
+        let to = match from {
+            Some(from) if gap > from => gap.saturating_sub(1),
+            _ => gap,
+        }
+        .min(self.start_pins.len());
+        self.start_pins.insert(to, entry);
+        if from != Some(to) {
+            self.start_menu_dirty = true;
+        }
+        to.saturating_add(1)
+    }
+
+    /// What a program pinned to the start menu is listed as: the launcher's
+    /// entry when it knows the program, so the name matches the row below;
+    /// otherwise one made from the path and named for its file.
+    ///
+    /// Never the name it was dropped with -- a desktop icon the user renamed,
+    /// say. Names are not stored (see [`load_pinned`](Self::load_pinned)), so
+    /// a pin named any other way would change its name at the next login.
+    fn start_entry_for(&self, exec: &str) -> AppEntry {
         self.apps
             .iter()
-            .filter(|app| matches!(app.category, Category::Application | Category::Setting))
+            .find(|app| app.executable_path == exec)
+            .cloned()
+            .unwrap_or_else(|| AppEntry {
+                name: self.app_name_for(exec),
+                description: String::new(),
+                executable_path: exec.to_string(),
+                keywords: Vec::new(),
+                category: Category::Application,
+                launch_count: 0,
+                ..Default::default()
+            })
+    }
+
+    /// Read the programs pinned to the start menu, and the ones recently
+    /// used, back from `startmenu.yaml`.
+    pub fn load_start_menu(&mut self) {
+        let doc = config::load(START_MENU_CONFIG_NAME);
+        if let Some(execs) = doc.get_seq(&["recent"]) {
+            for exec in execs {
+                if !exec.is_empty()
+                    && !self.start_recent.contains(&exec)
+                    && self.start_recent.len() < START_RECENT_MAX
+                {
+                    self.start_recent.push(exec);
+                }
+            }
+        }
+        // Never saved: the first start's pins, as for the taskbar.
+        let execs = doc
+            .get_seq(&["pinned"])
+            .unwrap_or_else(|| self.first_start_programs(&FIRST_START_MENU_PINS));
+        for exec in execs {
+            if exec.is_empty() || self.is_pinned_to_start(&exec) {
+                continue;
+            }
+            let entry = self.start_entry_for(&exec);
+            self.start_pins.push(entry);
+        }
+    }
+
+    /// The programs `ids` name -- desktop file ids of SlateOS's own
+    /// programs -- by the path each is started by, in order; an id the menu
+    /// does not list is left out rather than pinned as a button that starts
+    /// nothing.
+    ///
+    /// By id rather than by path so the defaults follow a program that moves:
+    /// the one list (`gui/programs`) says where each is.
+    fn first_start_programs(&self, ids: &[&str]) -> Vec<String> {
+        ids.iter()
+            .filter_map(|id| {
+                self.apps
+                    .iter()
+                    .find(|app| app.desktop_id.as_deref() == Some(id))
+                    .map(|app| app.executable_path.clone())
+            })
             .collect()
+    }
+
+    /// Note that `launch` is being started: the program it starts goes to the
+    /// top of the start menu's "Recently used", when it is one of the
+    /// installed programs -- a program the menu lists.
+    ///
+    /// Called by the session for every launch, whichever part of the desktop
+    /// asked for it, so a program started from its pin, its desktop shortcut,
+    /// a jump list or the Run box counts as much as one started from the
+    /// menu. A program started in a terminal is credited to itself, not to
+    /// the terminal ([`launcher::program_started`]).
+    pub fn note_started(&mut self, launch: &hotkeys::Launch) {
+        let program = launcher::program_started(launch);
+        let Some(exec) = self
+            .apps
+            .iter()
+            .find(|app| std::ffi::OsStr::new(&app.executable_path) == program)
+            .map(|app| app.executable_path.clone())
+        else {
+            return;
+        };
+        if self.start_recent.first() == Some(&exec) {
+            return;
+        }
+        self.start_recent.retain(|recent| *recent != exec);
+        self.start_recent.insert(0, exec);
+        self.start_recent.truncate(START_RECENT_MAX);
+        self.start_menu_dirty = true;
+    }
+
+    /// The programs most recently started, most recent first, by path.
+    #[must_use]
+    pub fn start_recent(&self) -> &[String] {
+        &self.start_recent
+    }
+
+    /// Whether the start menu's pins or recent programs need writing,
+    /// clearing the flag.
+    pub fn take_start_menu_dirty(&mut self) -> bool {
+        core::mem::take(&mut self.start_menu_dirty)
+    }
+
+    /// Write the programs pinned to the start menu, and the ones recently
+    /// used, to `startmenu.yaml`.
+    ///
+    /// # Errors
+    ///
+    /// The write's own error. Both still apply to this session.
+    pub fn save_start_menu(&self) -> std::io::Result<()> {
+        let mut doc = config::load(START_MENU_CONFIG_NAME);
+        let execs: Vec<&str> = self
+            .start_pins
+            .iter()
+            .map(|entry| entry.executable_path.as_str())
+            .collect();
+        doc.set_seq(&["pinned"], &execs);
+        let recent: Vec<&str> = self.start_recent.iter().map(String::as_str).collect();
+        doc.set_seq(&["recent"], &recent);
+        config::store(START_MENU_CONFIG_NAME, &doc)
+    }
+
+    /// The gap among the start menu's pinned rows a program let go at
+    /// `(x, y)` goes into: before the pinned row it was let go on when on
+    /// its upper half, after it when on its lower half, and after them all
+    /// when let go on the start button.
+    fn start_pin_insert_boundary(&self, x: f32, y: f32) -> usize {
+        let pins = self.start_pins_listed();
+        if let Hit::StartMenuEntry(index) = self.hit_test(x, y)
+            && let Some(pin) = self.start_row_pin(index)
+            && let Some(row) = index.checked_sub(self.start_menu_scroll)
+        {
+            let rect = self.start_menu_row_rect(row);
+            return if y < rect.y + rect.h / 2.0 {
+                pin
+            } else {
+                pin.saturating_add(1)
+            };
+        }
+        pins
     }
 
     /// Which entry the `row`-th drawn row shows, if any.
     fn start_menu_entry_at(&self, row: usize) -> Option<usize> {
         let index = self.start_menu_scroll.checked_add(row)?;
-        (index < self.start_menu_entries().len()).then_some(index)
+        (index < self.start_menu_rows().len()).then_some(index)
     }
 
     /// The furthest the menu can scroll and still be full.
     fn start_menu_max_scroll(&self) -> usize {
-        self.start_menu_entries()
+        self.start_menu_rows()
             .len()
             .saturating_sub(self.start_menu_visible_rows())
     }
@@ -2543,6 +4503,10 @@ impl DesktopShell {
             // must be rewound too — otherwise a menu opened just after a
             // part-notch scroll steps off row 0 on the next small delta.
             self.start_menu_wheel.reset();
+            // A search box opens empty: last time's search is not a question
+            // anyone is asking now.
+            self.start_query.clear();
+            self.start_selected = None;
         }
     }
 
@@ -2554,6 +4518,9 @@ impl DesktopShell {
     pub fn close_start_menu(&mut self) {
         self.start_menu_open = false;
         self.power_menu_open = false;
+        self.start_lit = None;
+        // A drag from it has nothing left to drop from.
+        self.start_drag = None;
     }
 
     // ======================================================================
@@ -2563,6 +4530,18 @@ impl DesktopShell {
     /// What is under a point, topmost surface first.
     #[must_use]
     pub fn hit_test(&self, x: f32, y: f32) -> Hit {
+        // The list of programs a shut down is waiting for covers the screen,
+        // and is the one thing answering while it is up.
+        if self.ending_listing() {
+            let (anyway, cancel) = self.ending_button_rects();
+            return if anyway.contains(x, y) {
+                Hit::EndingAnyway
+            } else if cancel.contains(x, y) {
+                Hit::EndingCancel
+            } else {
+                Hit::EndingPanel
+            };
+        }
         // The tiling overlay is tested before everything else because it is
         // drawn over everything else, and because opening it closes the menus
         // (`open_zone_overlay`) — so a point that matched both would be a point
@@ -2602,8 +4581,16 @@ impl DesktopShell {
 
         if self.start_menu_open {
             let menu = self.start_menu_rect();
+            if self.power_caret_rect().contains(x, y) {
+                return Hit::PowerCaret;
+            }
             if self.power_button_rect().contains(x, y) {
                 return Hit::PowerButton;
+            }
+            for which in StartShortcut::ALL {
+                if self.start_shortcut_rect(*which).contains(x, y) {
+                    return Hit::StartMenuShortcut(*which);
+                }
             }
             if menu.contains(x, y) {
                 for row in 0..self.start_menu_visible_rows() {
@@ -2639,9 +4626,12 @@ impl DesktopShell {
 
         if self.taskbar_rect().contains(x, y) {
             // Before the window buttons: the tray is at the far end and the
-            // buttons never reach it (`taskbar_button_width` subtracts the
+            // buttons never reach it (`taskbar_layout` subtracts the
             // tray), but the order is what makes that a fact rather than a
             // coincidence the two could stop sharing.
+            if self.show_desktop_rect().contains(x, y) {
+                return Hit::ShowDesktop;
+            }
             if self.clock_rect().contains(x, y) {
                 return Hit::Clock;
             }
@@ -2672,8 +4662,8 @@ impl DesktopShell {
             // The slot is resolved to a window *here*, while the list that
             // produced the rectangle is still in hand — see
             // [`Hit::TaskbarButton`].
-            for (index, slot) in self.taskbar_slots().iter().enumerate() {
-                if self.taskbar_button_rect(index).contains(x, y) {
+            for (slot, tile) in self.taskbar_slots().iter().zip(self.taskbar_layout()) {
+                if tile.contains(x, y) {
                     return match *slot {
                         TaskbarSlot::Window(id) => Hit::TaskbarButton(id),
                         TaskbarSlot::Pinned(pin) => Hit::TaskbarPinned(pin),
@@ -2706,18 +4696,59 @@ impl DesktopShell {
     /// [`Closed`]: notif_pane::NotifPaneEvent::Closed
     pub fn handle_mouse(&mut self, event: &MouseEvent) -> ShellAction {
         let action = self.handle_mouse_inner(event);
+        self.settle_switch();
         match (action, self.apply_pane_events()) {
             // A click on a notification card that names a program. The pane
             // consumed the press and marked the card read; starting the
             // program is the part only the caller can do.
             // `PathBuf::from` at the edge: a notification's path comes from
             // its sender as text, so this is where text becomes a path.
-            (ShellAction::Consumed, Some(path)) => ShellAction::Launch(PathBuf::from(path)),
+            (ShellAction::Consumed, Some(path)) => {
+                ShellAction::Launch(hotkeys::Launch::program(PathBuf::from(path)))
+            }
             (action, _) => action,
         }
     }
 
     fn handle_mouse_inner(&mut self, event: &MouseEvent) -> ShellAction {
+        // A rename under way owns the presses on its own field -- they place
+        // the caret -- and any other press keeps the new name before it does
+        // whatever it does, as a click away does on every desktop. First,
+        // before the menus: a right-click that opens a menu is a click away
+        // too, and the name must not be left half-typed under it.
+        if self.icons.renaming().is_some()
+            && let MouseEventKind::Press(_) | MouseEventKind::DoubleClick(_) = event.kind
+        {
+            if self.icons.rename_field_contains(event.x, event.y) {
+                self.icons.rename_click(event.x);
+                return ShellAction::Consumed;
+            }
+            self.icons_dirty |= self.icons.commit_rename();
+        }
+        // An open note, likewise: presses on its writing area place its caret
+        // (below, where a press on a note is handled), and a press anywhere
+        // else puts the note down before doing whatever it does. Its words are
+        // already saved -- every change was.
+        if let Some(open) = self.widgets.writing_note()
+            && let MouseEventKind::Press(_) | MouseEventKind::DoubleClick(_) = event.kind
+            && self.widgets.note_body_at(event.x, event.y) != Some(open)
+        {
+            self.widgets.end_note();
+        }
+        if self.note_selecting {
+            match event.kind {
+                MouseEventKind::Move => {
+                    self.widgets.note_drag(event.x, event.y);
+                    return ShellAction::Consumed;
+                }
+                MouseEventKind::Release(_) => {
+                    self.note_selecting = false;
+                    return ShellAction::Consumed;
+                }
+                _ => {}
+            }
+        }
+
         // The desktop menu first, for the same reason the Run box's chooser is
         // first below: it is drawn over everything, so a press either landed on
         // it or dismissed it, and either way no control underneath should see
@@ -2732,7 +4763,12 @@ impl DesktopShell {
                     match self.desktop_menu.handle_click(event.x, event.y) {
                         Some(id) => {
                             self.desktop_menu.hide();
-                            self.activate_desktop_menu_item(id);
+                            // An icon's Open starts a program; every other
+                            // item has already done its work.
+                            if let ShellAction::Launch(launch) = self.activate_desktop_menu_item(id)
+                            {
+                                return ShellAction::Launch(launch);
+                            }
                         }
                         // A press that named no item: on the panel's own
                         // padding, or outside it. `handle_click` cannot tell
@@ -2768,6 +4804,19 @@ impl DesktopShell {
                     self.widgets_dirty = true;
                     return ShellAction::Consumed;
                 }
+                _ => return ShellAction::Consumed,
+            }
+        }
+        // The taskbar's menu, on the pin menu's terms just below.
+        if self.taskbar_menu.is_some() {
+            match event.kind {
+                MouseEventKind::Move => {
+                    if let Some(menu) = self.taskbar_menu.as_mut() {
+                        menu.handle_mouse_move(event.x, event.y);
+                    }
+                    return ShellAction::Consumed;
+                }
+                MouseEventKind::Press(_) => return self.click_taskbar_menu(event.x, event.y),
                 _ => return ShellAction::Consumed,
             }
         }
@@ -2810,13 +4859,43 @@ impl DesktopShell {
         // A pinned button owns the pointer until the button comes up, the
         // way a tray icon does and for the same reason: the press does not yet
         // know whether it is a click or a drag.
+        // A start-menu row, the same way: the press does not yet know whether
+        // it is a click or a carry. While the menu is open its surface covers
+        // the screen, so the drag reaches the shell wherever the pointer goes.
+        if self.start_drag.is_some() {
+            match event.kind {
+                MouseEventKind::Move => {
+                    if let Some(drag) = self.start_drag.as_mut() {
+                        drag.source.on_move(event.x, event.y);
+                    }
+                    self.carry_at = (event.x, event.y);
+                    return ShellAction::Consumed;
+                }
+                MouseEventKind::Release(_) => {
+                    return self.finish_start_press(event.x, event.y);
+                }
+                _ => {}
+            }
+        }
+        if self.window_press.is_some() {
+            match event.kind {
+                MouseEventKind::Move => {
+                    self.drag_window_button_to(event.x, event.y);
+                    return ShellAction::Consumed;
+                }
+                MouseEventKind::Release(_) => return self.finish_window_press(),
+                _ => {}
+            }
+        }
         if self.pin_drag.is_some() {
             match event.kind {
                 MouseEventKind::Move => {
                     self.drag_pinned_to(event.x, event.y);
                     return ShellAction::Consumed;
                 }
-                MouseEventKind::Release(_) => return self.finish_pinned_press(),
+                MouseEventKind::Release(_) => {
+                    return self.finish_pinned_press(event.x, event.y);
+                }
                 _ => {}
             }
         }
@@ -2828,6 +4907,25 @@ impl DesktopShell {
                 }
                 MouseEventKind::Release(_) => return self.finish_tray_press(),
                 _ => return ShellAction::Consumed,
+            }
+        }
+        // A left press on a note's writing area opens it for writing, and a
+        // double click there selects a word. Before the widget drag below,
+        // which would otherwise take hold of the note: its title bar is still
+        // where it is moved from.
+        if let MouseEventKind::Press(MouseButton::Left)
+        | MouseEventKind::DoubleClick(MouseButton::Left) = event.kind
+            && !self.any_popup_open()
+            && !self.taskbar_rect().contains(event.x, event.y)
+        {
+            let clicks = if matches!(event.kind, MouseEventKind::DoubleClick(_)) {
+                2
+            } else {
+                1
+            };
+            if self.widgets.note_press(event.x, event.y, clicks) {
+                self.note_selecting = true;
+                return ShellAction::Consumed;
             }
         }
         // A left press on a widget takes hold of it. Before the right-click
@@ -2897,9 +4995,13 @@ impl DesktopShell {
             // press reaches at most one button, and only the OK button executes,
             // so the drained list holds at most one path. The keyboard path
             // returns the whole `Vec` because `HotkeyOutcome` can carry one;
-            // `ShellAction::Launch` names a single program and cannot.
-            if let Some(path) = self.drain_run_dialog().into_iter().next() {
-                return ShellAction::Launch(path);
+            // `ShellAction::Launch` names a single launch and cannot. A request
+            // that opened nothing -- a path whose kind nothing opens -- has
+            // already said so in a notification.
+            if let Some(request) = self.drain_run_dialog().into_iter().next() {
+                return self
+                    .run_request(request)
+                    .map_or(ShellAction::Consumed, ShellAction::Launch);
             }
             if handled == EventResult::Consumed {
                 return ShellAction::Consumed;
@@ -2958,16 +5060,56 @@ impl DesktopShell {
                 // press on an icon leaves it non-idle and *only* a release
                 // returns it, so a release routed anywhere else would strand
                 // the layer in `PendingDrag` for the rest of the session.
+                // A program icon let go over the taskbar is pinned there and
+                // stays where it was on the desktop: a drag between two
+                // places copies. Anything else let go there -- a folder, a
+                // document -- is refused by staying put, since a taskbar
+                // button can only start a program.
+                // Only a drag that got under way, and only the left button's
+                // release, which is the one that ends it: a press that never
+                // moved far enough is a click, and belongs to the icon layer
+                // wherever it is let go.
+                //
+                // On the start button, the same programs are pinned to the
+                // start menu instead, after the pins already there.
+                if button == MouseButton::Left
+                    && self.icons.drag_in_progress().is_some()
+                    && self.taskbar_rect().contains(event.x, event.y)
+                {
+                    let to_start = matches!(
+                        self.carry_target(event.x, event.y),
+                        Some(CarryTarget::StartMenu)
+                    );
+                    let mut gap = if to_start {
+                        self.start_pins.len()
+                    } else {
+                        self.pinned_insert_boundary(event.x)
+                    };
+                    for id in self.icons.cancel_drag() {
+                        if let Some(exec) = self.icon_program(id) {
+                            gap = if to_start {
+                                self.start_pin_into_gap(&exec, gap)
+                            } else {
+                                let name = self
+                                    .icons
+                                    .get_icon(id)
+                                    .map_or_else(|| exec.clone(), |icon| icon.label.clone());
+                                self.pin_into_gap(&exec, &name, gap)
+                            };
+                        }
+                    }
+                    return ShellAction::Consumed;
+                }
                 if self.icons.is_interacting() {
-                    self.icons
-                        .handle_mouse_up(event.x, event.y, icon_button(button));
                     // Where the icons ended up is what the user just chose, so
-                    // it is written now rather than at some later checkpoint
-                    // that may never come. The failure is dropped *here* and
-                    // nowhere else: this is a pointer release, and a modal
-                    // complaint about a configuration file is not an answer to
-                    // one. It is visible in the next save's success or failure.
-                    let _ = self.save_icon_positions();
+                    // it is saved at the end of this pump rather than at some
+                    // later checkpoint that may never come -- by the session,
+                    // which can report a failure; see `icons_dirty`. Only when
+                    // something moved: a click that selected an icon has
+                    // nothing to write.
+                    self.icons_dirty |=
+                        self.icons
+                            .handle_mouse_up(event.x, event.y, icon_button(button));
                     return ShellAction::Consumed;
                 }
                 if self.hit_test(event.x, event.y).is_shell_chrome() {
@@ -2996,6 +5138,7 @@ impl DesktopShell {
                 if self.overview.visible {
                     let layouts = self.overview_layout();
                     overview::on_mouse_move(&mut self.overview, event.x, event.y, &layouts);
+                    self.follow_overview_selection();
                     return ShellAction::Consumed;
                 }
                 // The tiling overlay is the shell's only hover-driven surface,
@@ -3009,43 +5152,157 @@ impl DesktopShell {
                 // bar on its way somewhere, and a client that stopped
                 // receiving motion because the shell was showing a tooltip
                 // would lose its own hover states.
-                self.hover_tray(event.x, event.y);
+                self.hover_taskbar(event.x, event.y);
                 ShellAction::Pass
             }
         }
     }
 
-    /// Note that the pointer is over a tray icon, or is no longer.
+    /// Note what the pointer is resting on -- on the taskbar a tray icon or a
+    /// tile, in the start menu a row, a place or the power button -- light
+    /// it, and put up the tooltip naming it, or take the tooltip down.
     ///
     /// Resolved through [`hit_test`](Self::hit_test) rather than by walking
-    /// `tray_icon_rects` again, so that the icon a tooltip names and the icon
-    /// a click reaches are decided by one piece of geometry. Two hit tests
-    /// over the same row would be two chances to disagree, and the disagreement
+    /// the rectangles again, so that the thing a tooltip names and the thing a
+    /// click reaches are decided by one piece of geometry. Two hit tests over
+    /// the same row would be two chances to disagree, and the disagreement
     /// would read as the wrong name on the right icon.
-    fn hover_tray(&mut self, x: f32, y: f32) {
-        let over = match self.hit_test(x, y) {
+    fn hover_taskbar(&mut self, x: f32, y: f32) {
+        let hit = self.hit_test(x, y);
+        // The tile under the pointer lights up. A pointer that leaves the bar
+        // for a program's window is told so by a `Leave` at where it went,
+        // which is off every tile, so the light goes out with it.
+        let tile = match hit {
+            Hit::TaskbarPinned(pin) => Some(TaskbarSlot::Pinned(pin)),
+            Hit::TaskbarButton(id) => Some(TaskbarSlot::Window(id)),
+            _ => None,
+        };
+        if tile != self.hover_tile {
+            self.hover_tile = tile;
+            self.hover_changed = true;
+        }
+        let lit = matches!(hit, Hit::ShowDesktop);
+        if lit != self.show_desktop_lit {
+            self.show_desktop_lit = lit;
+            self.hover_changed = true;
+        }
+        let lit = matches!(hit, Hit::StartButton);
+        if lit != self.start_button_lit {
+            self.start_button_lit = lit;
+            self.hover_changed = true;
+        }
+        let tray = match hit {
+            Hit::TrayIcon(_) | Hit::TrayOverflow | Hit::NotificationBell | Hit::Clock => Some(hit),
+            _ => None,
+        };
+        if tray != self.tray_lit {
+            self.tray_lit = tray;
+            self.hover_changed = true;
+        }
+        let start_lit = match hit {
+            // The entry's place on screen: `start_menu_entry_at` is the
+            // scroll plus the row, so this is the row it was found on.
+            Hit::StartMenuEntry(index) => {
+                index.checked_sub(self.start_menu_scroll).map(StartLit::Row)
+            }
+            Hit::StartMenuShortcut(which) => Some(StartLit::Place(which)),
+            Hit::PowerButton => Some(StartLit::PowerButton),
+            Hit::PowerCaret => Some(StartLit::PowerCaret),
+            Hit::PowerMenuEntry(row) => Some(StartLit::PowerRow(row)),
+            _ => None,
+        };
+        if start_lit != self.start_lit {
+            self.start_lit = start_lit;
+            self.hover_changed = true;
+        }
+        let over = match hit {
             Hit::TrayIcon(index) => self.ordered_tray_icons().get(index).and_then(|icon| {
                 // A program that registered no tooltip has given the shell
                 // nothing to say. An empty bubble is worse than none.
-                (!icon.tooltip.is_empty())
-                    .then(|| (tray_dnd::TrayIconKey::of(icon), icon.tooltip.clone()))
+                (!icon.tooltip.is_empty()).then(|| {
+                    (
+                        TooltipKey::Tray(tray_dnd::TrayIconKey::of(icon)),
+                        icon.tooltip.clone(),
+                    )
+                })
             }),
+            // A pin is its picture alone, so this is the only place its name
+            // is -- and, as the reference's does, it says what a click does,
+            // which is not what most taskbars' pins do: start another copy,
+            // running or not (design-decisions §885).
+            Hit::TaskbarPinned(pin) => self.taskbar.pinned_apps().get(pin).map(|app| {
+                (
+                    TooltipKey::Pin(app.exec_path.clone()),
+                    format!("{} — pinned (click to open)", app.display_name),
+                )
+            }),
+            // The strip is a blank; the reference's `title` says what it does.
+            Hit::ShowDesktop => Some((TooltipKey::ShowDesktop, "Show desktop".to_string())),
+            // The orb is a picture alone, as the reference's, and its `title`.
+            Hit::StartButton => Some((TooltipKey::Start, "Start".to_string())),
+            // A chevron alone, and its `title` in the reference.
+            Hit::TrayOverflow => Some((TooltipKey::TrayOverflow, "Show hidden icons".to_string())),
+            // The whole date, as the reference's `title` and every desktop's
+            // clock give it -- but not over the calendar the clock has opened,
+            // which says it already.
+            Hit::Clock if !self.calendar.visible => {
+                Some((TooltipKey::Clock, self.clock_tooltip_at(Self::unix_now())))
+            }
+            // The caret is a chevron alone, and says what it opens as the
+            // reference's does.
+            Hit::PowerCaret => Some((TooltipKey::PowerOptions, "Power options".to_string())),
+            // A window's title is on its tile, but cut to what fits.
+            Hit::TaskbarButton(id) => self
+                .windows
+                .get(&id)
+                .filter(|window| !window.title.is_empty())
+                .map(|window| (TooltipKey::Window(id), window.title.clone())),
             _ => None,
         };
         match over {
-            None => self.tray_tooltip = None,
+            None => {
+                if self.tooltip.take().is_some() {
+                    self.hover_changed = true;
+                }
+            }
             Some((key, text)) => {
                 // Already resting on this one: leave the hover running, or the
                 // delay would restart on every motion event and the tooltip
                 // would never appear.
-                if self.tray_tooltip.as_ref().is_some_and(|(at, _)| *at == key) {
+                if self.tooltip.as_ref().is_some_and(|(at, _)| *at == key) {
                     return;
                 }
                 let mut tip = guitk::menu::Tooltip::new(&text);
                 tip.start_hover(x, y, self.osd_clock_ms, self.viewport());
-                self.tray_tooltip = Some((key, tip));
+                self.tooltip = Some((key, tip));
+                self.hover_changed = true;
             }
         }
+    }
+
+    /// How long until the tooltip the pointer is resting on appears, in
+    /// milliseconds of the overlay clock -- `None` when none is waiting to.
+    ///
+    /// For the session, which sleeps while nothing moves: the delay is a
+    /// deadline nothing else wakes the loop for.
+    #[must_use]
+    pub fn tooltip_due_in(&self) -> Option<u64> {
+        self.tooltip
+            .as_ref()
+            .and_then(|(_, tip)| tip.due_in(self.osd_clock_ms))
+    }
+
+    /// Whether what the pointer rests on has changed since this was last
+    /// asked -- a tooltip came, went or began waiting to appear, or another
+    /// tile lit up -- clearing the answer.
+    ///
+    /// For the session, which repaints the bar and the surface the tooltip is
+    /// drawn on only when told something changed, and must wake for a waiting
+    /// tooltip's delay. Neither happened until 2026-09-26: a tray icon's name appeared
+    /// only if something else on the desktop happened to draw after the delay,
+    /// and stayed up, after the pointer left, until something did again.
+    pub fn take_hover_changed(&mut self) -> bool {
+        core::mem::take(&mut self.hover_changed)
     }
 
     /// Whether `icon` is the one currently under a drag.
@@ -3061,7 +5318,8 @@ impl DesktopShell {
         })
     }
 
-    /// The tray tooltip's draw commands, empty unless one is showing.
+    /// The tooltip's draw commands -- a tray icon's or a tile's -- empty unless
+    /// one is showing.
     ///
     /// Drawn on the overlay surface beside the on-screen display, which is
     /// full-screen, above the menus and `input_transparent`. That last is why
@@ -3070,14 +5328,123 @@ impl DesktopShell {
     /// there to be read, and a tooltip is the same kind of thing -- a press
     /// aimed at the icon under it must reach the icon.
     #[must_use]
-    pub fn render_tray_tooltip(&self) -> Option<RenderTree> {
-        let (_, tip) = self.tray_tooltip.as_ref()?;
+    pub fn render_tooltip(&self) -> Option<RenderTree> {
+        let (_, tip) = self.tooltip.as_ref()?;
         if !tip.is_visible() {
             return None;
         }
         let mut tree = RenderTree::new();
         tree.commands
             .extend(tip.render(&Palette::from_settings(&self.appearance)));
+        Some(tree)
+    }
+
+    /// What is being carried, and where it would go if let go now: a label
+    /// that follows the pointer, naming the program and what letting go will
+    /// do -- "Pin to taskbar", "Add to desktop", or nothing when it would do
+    /// nothing. Drawn on the overlay surface, which takes no input, so the
+    /// label never stands between the pointer and what it is over.
+    ///
+    /// Also for a program icon dragged over the taskbar, where the icon
+    /// layer's own ghost is hidden under the bar.
+    #[must_use]
+    pub fn render_carry(&self) -> Option<RenderTree> {
+        let (name, at) = if let Some(drag) = self.start_drag.as_ref() {
+            if !drag.source.is_dragging() {
+                return None;
+            }
+            (drag.name.clone(), self.carry_at)
+        } else if let Some(drag) = self.pin_drag.as_ref() {
+            if !drag.is_dragging() || !self.pin_drag_off_bar {
+                return None;
+            }
+            let exec = drag.pressed_key()?;
+            (self.app_name_for(&exec), self.carry_at)
+        } else {
+            let (at, ids) = self.icons.drag_in_progress()?;
+            if !self.taskbar_rect().contains(at.0, at.1) {
+                return None;
+            }
+            let program = ids
+                .into_iter()
+                .find(|id| self.icon_program(*id).is_some())?;
+            (self.icons.get_icon(program)?.label.clone(), at)
+        };
+        let hint = match self.carry_target(at.0, at.1) {
+            Some(CarryTarget::Taskbar) => Some("Pin to taskbar"),
+            Some(CarryTarget::Desktop) => Some("Add to desktop"),
+            Some(CarryTarget::StartMenu) => Some("Pin to Start menu"),
+            None => None,
+        };
+        let p = Palette::from_settings(&self.appearance);
+        let size = self.font_size(TextRole::Body);
+        let (gap, pad) = (self.scale(2.0), self.scale(8.0));
+        let weight = guitk::render::FontWeightHint::Regular;
+        let line = text::line_height(size, weight);
+        let name_w = text::measure(&name, size, weight);
+        let hint_w = hint.map_or(0.0, |h| text::measure(h, size, weight));
+        let h = match hint {
+            Some(_) => line * 2.0 + gap + pad * 2.0,
+            None => line + pad * 2.0,
+        };
+        let w = name_w.max(hint_w) + pad * 2.0;
+        // Below and right of the pointer, so the pointer itself stays on
+        // what it is over -- and flipped to the other side where that would
+        // run off the screen, which over a taskbar along the bottom edge is
+        // every time: the label is there to be read exactly when the pointer
+        // is on the bar.
+        let off = self.scale(14.0);
+        let (screen_w, screen_h) = (self.screen_width as f32, self.screen_height as f32);
+        let x = if at.0 + off + w <= screen_w {
+            at.0 + off
+        } else {
+            (at.0 - off - w).max(0.0)
+        };
+        let y = if at.1 + off + h <= screen_h {
+            at.1 + off
+        } else {
+            (at.1 - off - h).max(0.0)
+        };
+        let mut tree = RenderTree::new();
+        tree.push(guitk::render::RenderCommand::FillRect {
+            x,
+            y,
+            width: w,
+            height: h,
+            color: p.surface0,
+            corner_radii: CornerRadii::all(self.scale(6.0)),
+        });
+        tree.push(guitk::render::RenderCommand::StrokeRect {
+            x,
+            y,
+            width: w,
+            height: h,
+            color: p.accent,
+            line_width: 1.0,
+            corner_radii: CornerRadii::all(self.scale(6.0)),
+        });
+        tree.push(guitk::render::RenderCommand::Text {
+            x: x + pad,
+            y: y + pad,
+            text: name,
+            color: p.text,
+            font_size: size,
+            font_weight: weight,
+            max_width: None,
+            overflow: guitk::render::TextOverflow::Clip,
+        });
+        if let Some(hint) = hint {
+            tree.push(guitk::render::RenderCommand::Text {
+                x: x + pad,
+                y: y + pad + line + gap,
+                text: hint.to_string(),
+                color: p.subtext0,
+                font_size: size,
+                font_weight: weight,
+                max_width: None,
+                overflow: guitk::render::TextOverflow::Clip,
+            });
+        }
         Some(tree)
     }
 
@@ -3093,6 +5460,8 @@ impl DesktopShell {
                 | Hit::StartMenuEntry(_)
                 | Hit::StartMenuPanel
                 | Hit::PowerButton
+                | Hit::PowerCaret
+                | Hit::StartMenuShortcut(_)
                 | Hit::PowerMenuEntry(_)
                 | Hit::PowerMenuPanel
         )
@@ -3109,6 +5478,9 @@ impl DesktopShell {
 
         self.sync_snap_area();
         let hit = self.hit_test(x, y);
+        if self.ending_listing() {
+            return self.press_ending(hit);
+        }
 
         // The tiling overlay answers its own presses and nothing else's. It is
         // a modal choice — the user is picking where one window goes — so every
@@ -3129,7 +5501,7 @@ impl DesktopShell {
         if self.power_menu_open && !matches!(hit, Hit::PowerMenuEntry(_) | Hit::PowerMenuPanel) {
             self.power_menu_open = false;
             if !Self::keeps_start_menu_open(hit) {
-                self.start_menu_open = false;
+                self.close_start_menu();
             }
             return ShellAction::Consumed;
         }
@@ -3181,14 +5553,16 @@ impl DesktopShell {
             return ShellAction::Consumed;
         }
 
-        // A right-click on a start-menu row offers to pin it. This is the one
-        // place pinning can be offered from: pinning needs an executable path,
-        // a window carries only the `app_id` its program declares, and nothing
-        // in the tree maps one to the other -- so the taskbar itself cannot
-        // say "pin this", however much that is where the button ends up.
+        // A right-click on a program -- a start-menu row, a pin, or a window
+        // whose program the desktop knows -- offers that program's menu:
+        // its jump list, pinning it, a shortcut to it. A window's tile adds
+        // closing the window, and offers only that when its program is one
+        // the desktop cannot name (see `program_for_app_id`).
         if button == MouseButton::Right {
             match hit {
                 Hit::StartMenuEntry(index) => {
+                    // A folder's row names no program, and `open_pin_menu`
+                    // opens nothing for a target that names none.
                     self.open_pin_menu(PinTarget::StartMenuRow(index), x, y);
                     return ShellAction::Consumed;
                 }
@@ -3200,6 +5574,16 @@ impl DesktopShell {
                 // `TD-C-NOTHING-CONNECTS-A-LAUNCHER-ENTRY-TO-THE-WINDOWS-IT-OPENS`.
                 Hit::TaskbarPinned(index) => {
                     self.open_pin_menu(PinTarget::Pinned(index), x, y);
+                    return ShellAction::Consumed;
+                }
+                Hit::TaskbarButton(id) => {
+                    self.open_pin_menu(PinTarget::Window(id), x, y);
+                    return ShellAction::Consumed;
+                }
+                // The bar itself, between its tiles and its tray: the bar's
+                // own options, where every taskbar keeps them.
+                Hit::TaskbarPanel => {
+                    self.open_taskbar_menu(x, y);
                     return ShellAction::Consumed;
                 }
                 _ => {}
@@ -3238,43 +5622,83 @@ impl DesktopShell {
                 }
                 ShellAction::Consumed
             }
+            // The press only takes hold, as a pinned button's does: the
+            // release decides whether it was a click, which starts the
+            // program, or a drag, which carries it to the taskbar or the
+            // desktop (`design.txt` line 712). This used to start the program
+            // on the press, which is what made the row impossible to drag.
             Hit::StartMenuEntry(index) => {
-                let path = self
-                    .start_menu_entries()
-                    .get(index)
-                    .map(|entry| PathBuf::from(&entry.executable_path));
-                match path {
-                    Some(path) => {
-                        self.close_start_menu();
-                        ShellAction::Launch(path)
+                match self.start_menu_rows().get(index).copied() {
+                    Some(StartRow::Program { entry, .. }) => {
+                        let (exec, name) = (entry.executable_path.clone(), entry.name.clone());
+                        let mut source = tray_dnd::DragSource::default();
+                        source.on_press(exec, x, y);
+                        self.start_drag = Some(StartDrag { source, name });
+                        self.carry_at = (x, y);
                     }
-                    None => ShellAction::Consumed,
+                    // A folder is not carried anywhere: the press opens or
+                    // closes it, as a tree's node does.
+                    Some(StartRow::Folder { folder, .. }) => self.toggle_start_folder(folder),
+                    // A heading is only a heading.
+                    Some(StartRow::Section(_)) | None => {}
                 }
+                ShellAction::Consumed
             }
+            // One click, as the reference's button does: every window is asked
+            // to close first (`choose_power`), so a program with unsaved work
+            // is asked rather than switched off -- which is what made this
+            // safe to put under one click.
             Hit::PowerButton => {
+                self.close_start_menu();
+                self.choose_power(power::PowerChoice::ShutDown)
+            }
+            Hit::PowerCaret => {
                 self.toggle_power_menu();
                 ShellAction::Consumed
             }
-            // A system action starts a program like any other menu entry: the
-            // shell has no more business shutting the machine down itself than
-            // it has starting a text editor itself. `/sbin/shutdown` and its
-            // neighbours are what actually do it.
-            Hit::PowerMenuEntry(index) => {
-                let path = self
-                    .power_menu_entries()
-                    .get(index)
-                    .map(|entry| PathBuf::from(&entry.executable_path));
-                match path {
-                    Some(path) => {
-                        self.close_start_menu();
-                        ShellAction::Launch(path)
+            // Starts its program, as a row does, and the menu gets out of the
+            // way of the window it is about to open. The card of shortcuts is
+            // the shell's own and starts nothing: it opens where the menu was.
+            Hit::StartMenuShortcut(which) => {
+                self.close_start_menu();
+                let home = std::env::var_os("HOME").map(PathBuf::from);
+                match which.launch(home.as_deref()) {
+                    Some(launch) => ShellAction::Launch(launch),
+                    None => {
+                        // Opened, never toggled shut: the menu that was just
+                        // clicked closes the card as it opens, so the card is
+                        // shut here -- but a click that asks for the card must
+                        // not depend on that to avoid closing it.
+                        if !self.shortcut_card_open {
+                            self.toggle_shortcut_card();
+                        }
+                        ShellAction::Consumed
                     }
-                    None => ShellAction::Consumed,
                 }
             }
+            // A power action starts a program like a menu entry does: the shell
+            // has no more business shutting the machine down itself than it has
+            // starting a text editor itself. `powerctl` is what does it, and the
+            // lock screen what locks. Log out is the exception, because the
+            // login screen it returns to is the shell's own.
+            Hit::PowerMenuEntry(index) => match power::PowerChoice::ALL.get(index) {
+                Some(choice) => {
+                    self.close_start_menu();
+                    self.choose_power(*choice)
+                }
+                None => ShellAction::Consumed,
+            },
             Hit::Clock => {
                 self.toggle_calendar();
                 ShellAction::Consumed
+            }
+            Hit::ShowDesktop => {
+                let requests = self.show_desktop_requests();
+                if requests.is_empty() {
+                    ShellAction::Consumed
+                } else {
+                    ShellAction::ControlAll(requests)
+                }
             }
             Hit::NotificationBell => {
                 self.toggle_notifications();
@@ -3287,6 +5711,9 @@ impl DesktopShell {
             // letting the press fall through to whatever is behind it would
             // act on something they were not pointing at.
             Hit::TrayIcon(_) => ShellAction::Consumed,
+            // Answered above, before anything else looks at the press
+            // (`press_ending`); unreachable here, and consumed if it were not.
+            Hit::EndingAnyway | Hit::EndingCancel | Hit::EndingPanel => ShellAction::Consumed,
             // Likewise: opened above. Reaching here is a non-primary press on
             // the chevron, which the shell owns and so swallows.
             Hit::TrayOverflow => ShellAction::Consumed,
@@ -3295,28 +5722,27 @@ impl DesktopShell {
                 ShellAction::Consumed
             }
             Hit::StartMenuPanel | Hit::PowerMenuPanel | Hit::TaskbarPanel => ShellAction::Consumed,
-            Hit::TaskbarButton(id) => ShellAction::Control(ShellRequest::window(
-                id,
-                // The button of the window you are already looking at
-                // minimises it — the taskbar button is a toggle, not a second
-                // way to focus what is already focused.
-                if self.focused_window == Some(id) {
-                    ShellControlAction::Minimize
-                } else {
-                    // `Activate`, not `Restore`: a window minimised while
-                    // maximised has to come back maximised, and restoring
-                    // would silently drop a state the user never asked to
-                    // leave. See the compositor's `activate_window`.
-                    ShellControlAction::Activate
-                },
-            )),
+            // The press only takes hold, as a pinned button's does: the
+            // release decides whether it was a click, which summons or
+            // minimises the window, or a drag along the row, which moves the
+            // button. See `finish_window_press`.
+            Hit::TaskbarButton(id) => {
+                let mut source = tray_dnd::DragSource::default();
+                source.on_press(id, x, y);
+                self.window_press = Some(WindowPress {
+                    source,
+                    was_focused: self.focused_window == Some(id),
+                });
+                ShellAction::Consumed
+            }
             // The desktop is the icon layer's. A press here selects an icon,
             // clears the selection, or starts a rubber-band, and the layer
             // answers whether it took it.
             //
             // It used to focus the window it thought was there, which was both
-            // a guess — the shell holds no window rectangles — and a change to
-            // a list the next event from the compositor would overwrite.
+            // a guess -- the shell knew no window rectangles then -- and a
+            // change to a list the next event from the compositor would
+            // overwrite.
             Hit::Desktop => {
                 let before = self.icons.selected_ids();
                 self.icons
@@ -3514,12 +5940,17 @@ impl DesktopShell {
             let action = overview::on_mouse_scroll(&mut self.overview, dy);
             return self.act_on_overview(action);
         }
+        // The open note scrolls its own text; the wheel over a closed one is
+        // the desktop's.
+        if !self.any_popup_open() && self.widgets.note_scroll(x, y, dy) {
+            return ShellAction::Consumed;
+        }
         // Asked of the hit test rather than of `start_menu_rect` directly, so
         // that a wheel over the power menu — which covers part of the list —
         // does not scroll the rows hidden behind it.
         if matches!(
             self.hit_test(x, y),
-            Hit::StartMenuEntry(_) | Hit::StartMenuPanel | Hit::PowerButton
+            Hit::StartMenuEntry(_) | Hit::StartMenuPanel | Hit::PowerButton | Hit::PowerCaret
         ) {
             let rows = scroll_rows(&mut self.start_menu_wheel, dy);
             self.scroll_start_menu(rows);
@@ -3597,6 +6028,16 @@ impl DesktopShell {
     /// Ids are issued by a sequence and never reused, so a window cannot arrive
     /// twice under the same name.
     pub fn apply_window_list(&mut self, list: &WindowList) -> Vec<ShellRequest> {
+        // The window a switch under way is on, by id, from the list before
+        // this one -- see `keep_switch_on`, below.
+        let switching_to = self
+            .alt_tab_active
+            .then(|| {
+                self.switcher_windows()
+                    .get(self.alt_tab_index)
+                    .map(|w| w.id)
+            })
+            .flatten();
         let mut kept: BTreeMap<WindowId, ManagedWindow> = BTreeMap::new();
         let mut focused = None;
         let mut requests = Vec::new();
@@ -3684,12 +6125,46 @@ impl DesktopShell {
                     // already outside anything the system can produce.
                     pid: u32::try_from(info.pid).unwrap_or(u32::MAX),
                     icon_id,
+                    frame: Rect::new(
+                        info.x as f32,
+                        info.y as f32,
+                        info.width as f32,
+                        info.height as f32,
+                    ),
                     z_order: u32::try_from(index).unwrap_or(u32::MAX),
                 },
             );
         }
 
         self.windows = kept;
+        // Every window gone, of an ending waiting for them: it is to be
+        // carried out, by the session (`take_ending_action`).
+        if self.ending.is_some() && self.windows.is_empty() {
+            self.ending_ready = true;
+        }
+        // A window shown again on this desktop -- restored from its tile,
+        // opened, or brought back by the second "Show desktop" itself -- means
+        // the desktop is no longer what was shown, and the next press puts
+        // windows away again.
+        if self.desktop_shown.is_some()
+            && self
+                .windows
+                .values()
+                .any(|w| w.on_glass() && w.desktop == self.current_desktop)
+        {
+            self.desktop_shown = None;
+        }
+        // The taskbar's own order follows the list without taking its order:
+        // a window that went leaves it, a window that arrived joins the end
+        // -- several arriving together, in the order they were stacked,
+        // which is the order they were opened in.
+        self.button_order.retain(|id| self.windows.contains_key(id));
+        for info in &list.windows {
+            let id = WindowId(info.id);
+            if self.windows.contains_key(&id) && !self.button_order.contains(&id) {
+                self.button_order.push(id);
+            }
+        }
         // Taken from the list rather than preserved: the compositor is the
         // authority on focus too, and "no window is focused" is a state it can
         // genuinely be in — every window minimised, or the desktop empty.
@@ -3701,7 +6176,32 @@ impl DesktopShell {
         // them could have been refreshed and the other not.
         self.overview
             .apply_window_list(list, self.num_desktops.max(1));
+        if let Some(chosen) = switching_to {
+            self.keep_switch_on(chosen);
+        }
         requests
+    }
+
+    /// Keep a switch under way on the window it was on when the list changed.
+    ///
+    /// The switch counts into [`switcher_windows`](Self::switcher_windows) by
+    /// position, and a window closing -- or opening -- while Alt is held moves
+    /// every position after it: the lit cell stayed where it was and the window
+    /// under it changed, so letting go raised a window the user had not chosen.
+    /// So the choice is found again by id. If the chosen window is the one that
+    /// went, the choice moves to whichever window is now where it was (the
+    /// last, if the list got shorter than that), and is lit, as the switcher on
+    /// every desktop does.
+    fn keep_switch_on(&mut self, chosen: WindowId) {
+        let windows = self.switcher_windows();
+        let found = windows.iter().position(|w| w.id == chosen);
+        let last = windows.len().checked_sub(1);
+        match (found, last) {
+            (Some(at), _) => self.alt_tab_index = at,
+            (None, Some(last)) => self.alt_tab_index = self.alt_tab_index.min(last),
+            (None, None) => {}
+        }
+        self.light_switch_selection();
     }
 
     /// Turn the actions a rule matched into asks the compositor understands.
@@ -3842,7 +6342,7 @@ impl DesktopShell {
             #[expect(
                 clippy::cast_possible_truncation,
                 clippy::cast_sign_loss,
-                reason = "clamped to 0.0..=1.0 first, so the product is 0.0..=255.0                           and rounds into a u8 exactly"
+                reason = "clamped to 0.0..=1.0 first, so the product is 0.0..=255.0 and rounds into a u8 exactly"
             )]
             let alpha = (opacity.clamp(0.0, 1.0) * 255.0).round() as u8;
             out.push(ShellRequest::SetOpacity { window: id, alpha });
@@ -3885,7 +6385,9 @@ impl DesktopShell {
         self.listed_windows(|w| !w.skip_taskbar)
     }
 
-    /// The windows Alt+Tab cycles through, in the same order.
+    /// The windows Alt+Tab cycles through, most recently used first: the
+    /// window in front, then the one before it, down to the one used longest
+    /// ago.
     ///
     /// The same set as [`taskbar_windows`](Self::taskbar_windows) until a
     /// window rule says otherwise, and a separate method because
@@ -3898,9 +6400,17 @@ impl DesktopShell {
     /// derived from one filter with one sort rather than written twice — an
     /// index into a differently-ordered list would switch to a window the user
     /// was not looking at.
+    ///
+    /// Most recent first since 2026-09-27. It was the taskbar's bottom-to-top
+    /// order, which put the *first* Alt+Tab on the right window and every Tab
+    /// after it the wrong way: the second went back to the window being left,
+    /// and the third to the one used longest ago -- where every desktop goes
+    /// on to the window used before last.
     #[must_use]
     pub fn switcher_windows(&self) -> Vec<&ManagedWindow> {
-        self.listed_windows(|w| !w.skip_alt_tab)
+        let mut windows = self.listed_windows(|w| !w.skip_alt_tab);
+        windows.reverse();
+        windows
     }
 
     /// The windows on the current desktop that `also` admits, bottom-to-top.
@@ -3990,23 +6500,47 @@ impl DesktopShell {
     // Alt+Tab window switcher
     // ======================================================================
 
-    /// Open the window switcher, on the window below the top one.
+    /// Open the window switcher on the window used before this one, in the
+    /// switcher's strip, ended by letting go of Alt.
     ///
-    /// That is the window the user was in before this one, which is what
-    /// Alt+Tab is for. [`switcher_windows`](Self::switcher_windows) is ordered
-    /// bottom to top, so it is the second entry from the *end* — not index 1,
-    /// which is what this used to say. With exactly two windows index 1 *is*
-    /// the focused window, so press-and-release Alt+Tab — much the commonest
-    /// use there is — re-focused the window you were already in and appeared to
-    /// do nothing at all.
+    /// The window before this one is what Alt+Tab is for: press and release,
+    /// much the commonest use there is, goes back to it. It is index 1 of
+    /// [`switcher_windows`](Self::switcher_windows), which is most recent
+    /// first; index 0 is the window being left.
     pub fn start_alt_tab(&mut self) {
-        let count = self.switcher_windows().len();
-        if count > 1 {
-            self.alt_tab_active = true;
-            self.alt_tab_index = step::wrapping_before(count, count.saturating_sub(1));
-        }
+        self.begin_switch(SwitchView::Switcher, SwitchAnchor::ALT, false);
     }
 
+    /// Start a window switch, shown as `view` and ended by letting go of
+    /// `anchor`: on the window used before this one, or -- `backwards`, for
+    /// Shift+Alt+Tab -- on the one used longest ago, which is where stepping
+    /// back from the window in front wraps round to.
+    ///
+    /// Nothing starts with fewer than two windows: there is nowhere to switch
+    /// to, and a switcher showing only the window already in front would be
+    /// one more thing to dismiss.
+    fn begin_switch(&mut self, view: SwitchView, anchor: SwitchAnchor, backwards: bool) {
+        let count = self.switcher_windows().len();
+        if count < 2 {
+            return;
+        }
+        self.alt_tab_active = true;
+        self.alt_tab_view = view;
+        self.alt_tab_anchor = anchor;
+        self.alt_tab_index = if backwards {
+            step::wrapping_before(count, 0)
+        } else {
+            step::wrapping_after(count, 0)
+        };
+        if view == SwitchView::Overview {
+            self.overview.show(overview::OverviewMode::AllWindows);
+            let order = self.switcher_windows().iter().map(|w| w.id.0).collect();
+            self.overview.set_order(order);
+        }
+        self.light_switch_selection();
+    }
+
+    /// Step the switch on to the window used before the one it is on.
     pub fn next_alt_tab(&mut self) {
         let count = self.switcher_windows().len();
         if count > 0 {
@@ -4016,9 +6550,11 @@ impl DesktopShell {
             // because windows closed while the switcher was open.
             self.alt_tab_index = step::wrapping_after(count, self.alt_tab_index);
         }
+        self.light_switch_selection();
     }
 
-    /// Step the switcher to the previous window, for Shift+Alt+Tab.
+    /// Step the switch back to the window used after the one it is on, for
+    /// Shift+Alt+Tab.
     pub fn prev_alt_tab(&mut self) {
         let count = self.switcher_windows().len();
         if let Some(last) = count.checked_sub(1) {
@@ -4027,25 +6563,143 @@ impl DesktopShell {
             // index to another rather than back into the list.
             self.alt_tab_index = step::wrapping_before(count, self.alt_tab_index.min(last));
         }
+        self.light_switch_selection();
     }
 
-    /// Close the switcher and say which window it landed on.
+    /// End the switch and say which window it landed on.
     ///
-    /// Returns `None` when the switcher was not open, or was open on an index
-    /// that no longer names a window because it closed while the user was
-    /// holding Alt. Closing the switcher is the shell's own business; raising
-    /// the window it chose is the compositor's.
+    /// Returns `None` when no switch was under way, or was on an index that no
+    /// longer names a window because it closed while the user was holding
+    /// Alt. Closing the switcher -- or the overview, for a switch shown there --
+    /// is the shell's own business; raising the window it chose is the
+    /// compositor's.
     pub fn finish_alt_tab(&mut self) -> Option<ShellRequest> {
         if !self.alt_tab_active {
             return None;
         }
         self.alt_tab_active = false;
-        let id = self.switcher_windows().get(self.alt_tab_index)?.id;
-        Some(ShellRequest::window(id, ShellControlAction::Activate))
+        let chosen = self
+            .switcher_windows()
+            .get(self.alt_tab_index)
+            .map(|w| w.id);
+        if self.alt_tab_view == SwitchView::Overview {
+            self.overview.hide();
+        }
+        Some(ShellRequest::window(chosen?, ShellControlAction::Activate))
     }
 
+    /// End the switch without choosing: Escape.
     pub fn cancel_alt_tab(&mut self) {
+        if self.alt_tab_active && self.alt_tab_view == SwitchView::Overview {
+            self.overview.hide();
+        }
         self.alt_tab_active = false;
+    }
+
+    /// Light, in the overview, the window a switch shown there would pick --
+    /// so that what is lit is always what letting go picks.
+    fn light_switch_selection(&mut self) {
+        if !self.alt_tab_active || self.alt_tab_view != SwitchView::Overview {
+            return;
+        }
+        let chosen = self
+            .switcher_windows()
+            .get(self.alt_tab_index)
+            .map(|w| w.id.0);
+        if chosen.is_some() {
+            self.overview.hovered_window = chosen;
+        }
+    }
+
+    /// After the pointer or an arrow key moved the overview's highlight during
+    /// a switch shown there: the switch now picks what is lit -- or, the
+    /// highlight gone (the pointer left every card, or lit a window the switch
+    /// does not offer), lights again what it picks.
+    fn follow_overview_selection(&mut self) {
+        if !self.alt_tab_active || self.alt_tab_view != SwitchView::Overview {
+            return;
+        }
+        let lit = self
+            .overview
+            .hovered_window
+            .and_then(|id| self.switcher_windows().iter().position(|w| w.id.0 == id));
+        match lit {
+            Some(index) => self.alt_tab_index = index,
+            None => self.light_switch_selection(),
+        }
+    }
+
+    /// A switch shown in the overview ends with it, however the overview went:
+    /// a click on a card (which asks for that window itself), a click away, a
+    /// chord that toggles it. Run after every key and every pointer event, so
+    /// no way of closing the overview can leave a switch running behind it --
+    /// one whose Alt release would then pick a window out of nowhere.
+    fn settle_switch(&mut self) {
+        if self.alt_tab_active
+            && self.alt_tab_view == SwitchView::Overview
+            && !self.overview.visible
+        {
+            self.alt_tab_active = false;
+        }
+    }
+
+    /// Start a window switch, or step the one under way.
+    ///
+    /// `anchor` is what ends a switch this starts, and `key` the press that
+    /// asked, when there was one: Shift+Alt+Tab starts its switch shown the way
+    /// the same keys without Shift would show theirs.
+    fn cycle_windows(
+        &mut self,
+        action: &HotkeyAction,
+        anchor: SwitchAnchor,
+        key: Option<&KeyEvent>,
+    ) -> HotkeyOutcome {
+        let backwards = *action == HotkeyAction::CycleWindowsBackwards;
+        if self.alt_tab_active {
+            if backwards {
+                self.prev_alt_tab();
+            } else {
+                self.next_alt_tab();
+            }
+        } else {
+            let view = match action {
+                HotkeyAction::CycleWindowsInOverview => SwitchView::Overview,
+                HotkeyAction::CycleWindowsBackwards => {
+                    key.map_or(SwitchView::Switcher, |key| self.view_beside(key))
+                }
+                _ => SwitchView::Switcher,
+            };
+            self.begin_switch(view, anchor, backwards);
+        }
+        HotkeyOutcome::consumed()
+    }
+
+    /// How the forward chord beside a backward one shows its switch: the same
+    /// key, the same modifiers without Shift. Binding Alt+Tab to the overview
+    /// takes Shift+Alt+Tab with it, rather than leaving the reverse chord
+    /// opening a strip the forward one no longer shows.
+    fn view_beside(&self, key: &KeyEvent) -> SwitchView {
+        let forwards = Modifiers {
+            shift: false,
+            ..key.modifiers
+        };
+        match self.hotkeys.lookup(key.key, &forwards) {
+            Some(HotkeyAction::CycleWindowsInOverview) => SwitchView::Overview,
+            _ => SwitchView::Switcher,
+        }
+    }
+
+    /// Carry out what a pressed chord is bound to.
+    ///
+    /// The one place a press meets its action, and so the one place that knows
+    /// which keys are held: a window switch started here is ended by letting
+    /// go of them ([`SwitchAnchor::of`]), whatever the chord -- Alt+Tab, or a
+    /// Super+Tab the user bound instead.
+    fn run_bound_action(&mut self, action: &HotkeyAction, key: &KeyEvent) -> HotkeyOutcome {
+        if action.cycles_windows() {
+            return self.cycle_windows(action, SwitchAnchor::of(key.key, key.modifiers), Some(key));
+        }
+        self.run_desktop_action(action)
     }
 
     // ======================================================================
@@ -4071,7 +6725,16 @@ impl DesktopShell {
     /// Should the pane grow an "Enter opens the selected card" key, it needs a
     /// launch channel here rather than a path quietly dropped — see todo.txt.
     pub fn handle_hotkey(&mut self, key: &KeyEvent) -> HotkeyOutcome {
+        // The list of programs a shut down is waiting for is modal: Escape is
+        // Cancel, and no other key reaches anything behind it.
+        if self.ending_listing() {
+            if key.pressed && key.key == Key::Escape {
+                self.ending = None;
+            }
+            return HotkeyOutcome::consumed();
+        }
         let outcome = self.handle_hotkey_inner(key);
+        self.settle_switch();
         drop(self.apply_pane_events());
         outcome
     }
@@ -4091,8 +6754,10 @@ impl DesktopShell {
     pub fn handle_modifier_chord(&mut self, modifiers: Modifiers) -> HotkeyOutcome {
         // While the user is recording a new shortcut, every keystroke belongs
         // to the recording. Letting go of Alt+Shift mid-capture must not also
-        // change the keyboard layout out from under them.
-        if self.shortcut_capture.is_some() {
+        // change the keyboard layout out from under them. Only while
+        // *recording*: typing a search into the card is exactly when a user
+        // may need the other layout.
+        if self.shortcut_card_open && self.shortcut_editor.is_recording() {
             return HotkeyOutcome::ignored();
         }
         if self.input_methods.switch_shortcut.as_modifier_chord() != Some(modifiers) {
@@ -4105,33 +6770,51 @@ impl DesktopShell {
 
     fn handle_hotkey_inner(&mut self, key: &KeyEvent) -> HotkeyOutcome {
         if !key.pressed {
-            // Key release — check for Alt+Tab completion
-            if (key.key == Key::LeftAlt || key.key == Key::RightAlt) && self.alt_tab_active {
+            // A release ends a window switch when it is one of the keys that
+            // started it -- Alt, for Alt+Tab. See `SwitchAnchor`.
+            if self.alt_tab_active && self.alt_tab_anchor.released_by(key.key) {
                 return HotkeyOutcome::ask(self.finish_alt_tab());
             }
             return HotkeyOutcome::ignored();
         }
 
-        // Before everything, including the modal surfaces below. While a chord
-        // is being recorded the keystroke is data, and the one thing that must
+        // Before everything, including the modal surfaces below. While the card
+        // is recording keys, a keystroke is data, and the one thing that must
         // not happen is the shell running it -- a user rebinding "close window"
         // would otherwise close a window while trying to say which keys mean
-        // it.
-        if self.shortcut_capture.is_some() {
-            self.capture_chord(key);
-            // Always consumed: while recording, every keystroke belongs to the
-            // recording, including the ones that are not part of a chord yet.
-            return HotkeyOutcome::ignored();
+        // it. While it is choosing an action or taking a command, keystrokes
+        // are typing. Either way the editor owns them, and only on the plain
+        // list does it hand back what is not its own, so a shortcut still works
+        // with the card open.
+        if self.shortcut_card_open {
+            let cx = self.shortcut_context();
+            match self.shortcut_editor.handle_key(key, &mut self.hotkeys, cx) {
+                shortcut_editor::Outcome::NotMine => {}
+                shortcut_editor::Outcome::Handled => return HotkeyOutcome::ignored(),
+                shortcut_editor::Outcome::Changed => {
+                    self.save_edited_shortcuts();
+                    return HotkeyOutcome::ignored();
+                }
+                shortcut_editor::Outcome::Close => {
+                    self.shortcut_card_open = false;
+                    self.shortcut_editor.reset();
+                    return HotkeyOutcome::ignored();
+                }
+            }
         }
 
-        // The card, when it is open and not recording: arrows walk its rows,
-        // Enter starts recording, Escape shuts it.
-        if self.shortcut_card_open
-            && let Some(outcome) = self.shortcut_card_key(key)
-        {
-            return outcome;
+        // The taskbar's menu, on the pin menu's terms just below.
+        if self.taskbar_menu.is_some() {
+            match self.taskbar_menu.as_mut().map(|menu| menu.handle_key(key)) {
+                Some(Some(MenuAction::Selected(id))) => {
+                    self.taskbar_menu = None;
+                    self.activate_taskbar_menu_item(id);
+                }
+                Some(Some(MenuAction::Closed)) => self.taskbar_menu = None,
+                _ => {}
+            }
+            return HotkeyOutcome::consumed();
         }
-
         // The pin menu, on the same terms as the two below it: a popup that
         // owns the keyboard while it is up. Without this it could be opened
         // and then only used with the mouse, and Escape would do whatever the
@@ -4142,10 +6825,14 @@ impl DesktopShell {
                 Some(Some(MenuAction::Selected(id))) => {
                     let target = self.pin_menu.as_ref().map(|(_, target)| *target);
                     self.pin_menu = None;
-                    if id == Self::MENU_PIN_TOGGLE
-                        && let Some(target) = target
-                    {
-                        self.toggle_pin(target);
+                    match target.map(|target| self.activate_pin_menu_item(id, target)) {
+                        Some(ShellAction::Launch(launch)) => {
+                            return HotkeyOutcome::start(vec![launch]);
+                        }
+                        Some(ShellAction::Control(request)) => {
+                            return HotkeyOutcome::ask(Some(request));
+                        }
+                        _ => {}
                     }
                 }
                 Some(Some(MenuAction::Closed)) => self.pin_menu = None,
@@ -4188,8 +6875,10 @@ impl DesktopShell {
             return match self.desktop_menu.handle_key(key) {
                 Some(MenuAction::Selected(id)) => {
                     self.desktop_menu.hide();
-                    self.activate_desktop_menu_item(id);
-                    HotkeyOutcome::consumed()
+                    match self.activate_desktop_menu_item(id) {
+                        ShellAction::Launch(launch) => HotkeyOutcome::start(vec![launch]),
+                        _ => HotkeyOutcome::consumed(),
+                    }
                 }
                 Some(MenuAction::Closed) => {
                     self.desktop_menu.hide();
@@ -4199,6 +6888,14 @@ impl DesktopShell {
                 // it stays open and the press goes no further.
                 Some(MenuAction::None) | None => HotkeyOutcome::consumed(),
             };
+        }
+
+        // The start menu owns the keyboard while it is open, as every popup
+        // here does: typing searches it, the arrows walk its rows, Enter
+        // starts one and Escape empties the search, then closes the menu.
+        // After the pin menu, which opens over it and so owns the keys first.
+        if self.start_menu_open {
+            return self.key_on_start_menu(key);
         }
 
         // The overview gets every press before the shortcut table does, and
@@ -4259,8 +6956,198 @@ impl DesktopShell {
         }
 
         match self.bound_action(key) {
-            Some(action) => self.run_desktop_action(&action),
+            Some(action) => self.run_bound_action(&action, key),
             None => HotkeyOutcome::ignored(),
+        }
+    }
+
+    /// One press while the start menu is open.
+    ///
+    /// Typed text goes to the search field, and every key that is not the
+    /// field's goes no further than the menu -- except a chord with Super,
+    /// which is the desktop's: the Super key that opened the menu closes it
+    /// again, and Super+E closes it and opens the file manager.
+    fn key_on_start_menu(&mut self, key: &KeyEvent) -> HotkeyOutcome {
+        let is_super =
+            key.modifiers.super_key || matches!(key.key, Key::LeftSuper | Key::RightSuper);
+        if is_super {
+            return match self.bound_action(key) {
+                // The chord that opened the menu closes it.
+                Some(HotkeyAction::ToggleStartMenu) => {
+                    self.run_desktop_action(&HotkeyAction::ToggleStartMenu)
+                }
+                // Any other gets the menu out of its way first. The bare Super
+                // key opens the menu as it goes down, so Super+E arrives with
+                // the menu open; left there, it would sit over the file
+                // manager the chord just asked for.
+                Some(action) => {
+                    self.close_start_menu();
+                    self.run_bound_action(&action, key)
+                }
+                None => HotkeyOutcome::consumed(),
+            };
+        }
+        match key.key {
+            Key::Escape => {
+                if self.start_query.text().is_empty() {
+                    self.close_start_menu();
+                } else {
+                    self.start_query.clear();
+                    self.search_changed();
+                }
+                HotkeyOutcome::consumed()
+            }
+            Key::Down => {
+                self.move_start_selection(ListKey::Next);
+                HotkeyOutcome::consumed()
+            }
+            Key::Up => {
+                self.move_start_selection(ListKey::Previous);
+                HotkeyOutcome::consumed()
+            }
+            // The page keys are the list's. Home and End are the search
+            // field's while it has text to move through, and the list's when
+            // it is empty or Ctrl is held -- the rule for every field over a
+            // list in the shell (`design-decisions.md` §1416).
+            Key::PageUp | Key::PageDown => {
+                if let Some(nav) = ListKey::of(key) {
+                    self.move_start_selection(nav);
+                }
+                HotkeyOutcome::consumed()
+            }
+            Key::Home | Key::End if key.modifiers.ctrl || self.start_query.text().is_empty() => {
+                if let Some(nav) = ListKey::of(key) {
+                    self.move_start_selection(nav);
+                }
+                HotkeyOutcome::consumed()
+            }
+            Key::Enter => self.start_menu_enter(),
+            // Left and Right open and close the folder the keyboard is on, as
+            // they do in a tree; anywhere else they move through what is typed.
+            Key::Right | Key::Left if self.start_selected_folder().is_some() => {
+                if let Some((folder, open)) = self.start_selected_folder()
+                    && open == (key.key == Key::Left)
+                {
+                    self.toggle_start_folder(folder);
+                }
+                HotkeyOutcome::consumed()
+            }
+            _ => {
+                let size = self.font_size(TextRole::Body);
+                match self
+                    .start_query
+                    .edit_key(key, size, guitk::render::FontWeightHint::Regular)
+                {
+                    KeyEdit::Changed => {
+                        self.search_changed();
+                        HotkeyOutcome::consumed()
+                    }
+                    KeyEdit::Handled => HotkeyOutcome::consumed(),
+                    // Not the field's -- Tab, a function key, Alt+Tab. A
+                    // shortcut still works with the menu up; anything else
+                    // goes no further than the menu.
+                    KeyEdit::Unhandled => match self.bound_action(key) {
+                        Some(action) => self.run_bound_action(&action, key),
+                        None => HotkeyOutcome::consumed(),
+                    },
+                }
+            }
+        }
+    }
+
+    /// The search changed: the list is a different list, so the keyboard's
+    /// row and the scroll through the old one mean nothing now.
+    fn search_changed(&mut self) {
+        self.start_selected = None;
+        self.start_menu_scroll = 0;
+        self.start_menu_wheel.reset();
+    }
+
+    /// The folder the keyboard's row is on, and whether it is open.
+    fn start_selected_folder(&self) -> Option<(launcher::Folder, bool)> {
+        match self.start_menu_rows().get(self.start_selected?) {
+            Some(StartRow::Folder { folder, open }) => Some((*folder, *open)),
+            _ => None,
+        }
+    }
+
+    /// Move the keyboard's row one step, keeping it on screen. From no row,
+    /// Down goes to the first and Up to the last.
+    fn move_start_selection(&mut self, nav: ListKey) {
+        // Which rows are headings, read out of the rows -- which borrow the
+        // shell -- before the selection moves.
+        let headings: Vec<bool> = self
+            .start_menu_rows()
+            .iter()
+            .map(|row| matches!(row, StartRow::Section(_)))
+            .collect();
+        // Up from nothing picked enters the list from the bottom, as it always
+        // has; every other key from nothing starts at the top.
+        let nav = match (nav, self.start_selected) {
+            (ListKey::Previous, None) => ListKey::Last,
+            (nav, _) => nav,
+        };
+        let page = self.start_menu_visible_rows().max(1);
+        // Headings are passed over: there is nothing on one to start.
+        let Some(next) = nav.target_where(self.start_selected, headings.len(), page, |row| {
+            !headings.get(row).copied().unwrap_or(true)
+        }) else {
+            return;
+        };
+        self.start_selected = Some(next);
+        // Keep it on screen -- and, at the top of a section, its heading too,
+        // so the row is read with the name of the list it is in.
+        let top = match next.checked_sub(1) {
+            Some(above) if headings.get(above).copied().unwrap_or(false) => above,
+            _ => next,
+        };
+        let visible = self.start_menu_visible_rows().max(1);
+        if top < self.start_menu_scroll {
+            self.start_menu_scroll = top;
+        } else if next >= self.start_menu_scroll.saturating_add(visible) {
+            self.start_menu_scroll = next.saturating_add(1).saturating_sub(visible);
+        }
+    }
+
+    /// Enter in the start menu: start the row the keyboard is on, or the best
+    /// match for what was typed -- or, when nothing listed matches, run what
+    /// was typed as the Run box would, since the field is for "finding *and
+    /// running*" (`design.txt`).
+    fn start_menu_enter(&mut self) -> HotkeyOutcome {
+        let query = self.start_query.text().trim().to_string();
+        let row = self
+            .start_selected
+            .or_else(|| (!query.is_empty()).then_some(0));
+        if let Some(StartRow::Folder { folder, .. }) =
+            row.and_then(|row| self.start_menu_rows().get(row).copied())
+        {
+            self.toggle_start_folder(folder);
+            return HotkeyOutcome::consumed();
+        }
+        let chosen = row.and_then(|row| {
+            self.start_program_at(row)
+                .map(|entry| entry.executable_path.clone())
+        });
+        if let Some(exec) = chosen {
+            self.close_start_menu();
+            return HotkeyOutcome::start(vec![self.launch_for(&exec)]);
+        }
+        if query.is_empty() {
+            return HotkeyOutcome::consumed();
+        }
+        // A quote left open is not something to guess the end of; the menu
+        // stays up with the line as it was, to be finished.
+        let Ok(words) = run_dialog::split_words(&query) else {
+            return HotkeyOutcome::consumed();
+        };
+        let request = run_dialog::RunRequest {
+            whole: std::ffi::OsString::from(&query),
+            words: words.into_iter().map(std::ffi::OsString::from).collect(),
+        };
+        self.close_start_menu();
+        match self.run_request(request) {
+            Some(launch) => HotkeyOutcome::start(vec![launch]),
+            None => HotkeyOutcome::consumed(),
         }
     }
 
@@ -4275,6 +7162,9 @@ impl DesktopShell {
 
     /// One press while the overview is up.
     fn key_on_overview(&mut self, key: &KeyEvent) -> HotkeyOutcome {
+        if self.alt_tab_active && self.alt_tab_view == SwitchView::Overview {
+            return self.key_on_overview_switch(key);
+        }
         // The one shortcut that still reaches the table: the chord that opened
         // the overview closes it. Without this the binding would be one-way —
         // Super+Tab would open the overlay and then, arriving as a bare Tab,
@@ -4296,6 +7186,39 @@ impl DesktopShell {
             // call can produce them.
             _ => HotkeyOutcome::consumed(),
         }
+    }
+
+    /// One press while a window switch is shown in the overview.
+    ///
+    /// The chords that step a switch step it; the overview's own keys for
+    /// choosing choose within it -- the arrows move what is lit, Enter takes it,
+    /// Escape leaves without taking anything. Typing does nothing: a hand on a
+    /// modifier is not typing a search, and a letter pressed with Alt held is a
+    /// chord, not text.
+    fn key_on_overview_switch(&mut self, key: &KeyEvent) -> HotkeyOutcome {
+        if let Some(action) = self.bound_action(key).filter(HotkeyAction::cycles_windows) {
+            return self.run_bound_action(&action, key);
+        }
+        let arrow = match key.key {
+            Key::Escape => {
+                self.cancel_alt_tab();
+                return HotkeyOutcome::consumed();
+            }
+            Key::Enter => return HotkeyOutcome::ask(self.finish_alt_tab()),
+            Key::Up => overview::OverviewKey::ArrowUp,
+            Key::Down => overview::OverviewKey::ArrowDown,
+            Key::Left => overview::OverviewKey::ArrowLeft,
+            Key::Right => overview::OverviewKey::ArrowRight,
+            Key::Home | Key::PageUp => overview::OverviewKey::First,
+            Key::End | Key::PageDown => overview::OverviewKey::Last,
+            _ => return HotkeyOutcome::consumed(),
+        };
+        // Only ever `NavigateSelection` for an arrow -- the overview has moved
+        // its highlight, and the switch follows it below -- so there is nothing
+        // in the answer to act on.
+        let _ = overview::on_key(&mut self.overview, arrow);
+        self.follow_overview_selection();
+        HotkeyOutcome::consumed()
     }
 
     /// Translate a key press into the overview's own small vocabulary.
@@ -4320,6 +7243,8 @@ impl DesktopShell {
             Key::Right => Some(K::ArrowRight),
             Key::Backspace => Some(K::Backspace),
             Key::Tab => Some(K::Tab),
+            Key::Home | Key::PageUp => Some(K::First),
+            Key::End | Key::PageDown => Some(K::Last),
             _ => None,
         };
         if named.is_some() {
@@ -4339,41 +7264,6 @@ impl DesktopShell {
         (!typed.is_empty()).then_some(overview::OverviewKey::Text(typed))
     }
 
-    /// Carry out a shortcut that has already been recognised.
-    ///
-    /// Every binding but [`DismissPopup`](HotkeyAction::DismissPopup) consumes
-    /// the press; that one is bare Escape, and a key the shell claims
-    /// unconditionally is a key no window can ever see. Closing a dialog is what
-    /// Escape does far more often than closing the start menu.
-    ///
-    /// The arms divide into three kinds, and the division is the whole point of
-    /// the return type. The start menu, the Alt-Tab switcher's *stepping*, and
-    /// popup dismissal are the shell's own surfaces and are done here. Anything
-    /// naming a window — close, minimise, maximise, tile, raise — is a
-    /// [`WindowRequest`] handed back for the caller to send. This method used to
-    /// do the second kind itself, against the shell's private copy of the window
-    /// list, which on a live session the next
-    /// [`apply_window_list`](DesktopShell::apply_window_list) discards: Alt+F4
-    /// removed a taskbar button and left the window open. The third kind starts
-    /// a program, and is handed back for the same reason in
-    /// [`launches`](HotkeyOutcome::launches): the shell has no connection to the
-    /// process server either.
-    /// Write the newly-chosen keyboard layout to `input.yaml`.
-    ///
-    /// This is what makes the switch reach the *keys*. The shell decides which
-    /// layout is active; the compositor decides what a scancode means, and it
-    /// reads that from the settings file it already watches. Going through the
-    /// file rather than inventing a protocol message has three things to
-    /// recommend it: the mechanism exists and is tested, a layout chosen with
-    /// the keyboard and one chosen in the Settings panel cannot disagree
-    /// because they are the same value in the same place, and the choice
-    /// survives a restart, which is what a user expects of a layout.
-    ///
-    /// A failure is swallowed deliberately, and is the one place in this file
-    /// where that is right: the layout has already changed in the shell's own
-    /// model and the indicator will show it, so a read-only configuration
-    /// directory costs the user persistence, not the feature. Refusing the
-    /// keystroke because a file could not be written would be worse.
     /// Flip night light, and leave the file and the compositor agreeing.
     ///
     /// Load, modify, save -- the shape
@@ -4402,6 +7292,37 @@ impl DesktopShell {
         self.appearance_dirty = true;
     }
 
+    /// Draw the desktop icons at `size` -- the View submenu's size items.
+    /// Answers whether anything changed.
+    ///
+    /// Written to `appearance.yaml`, not kept here: the icon size is an
+    /// appearance setting the Settings application edits too, and the file
+    /// is the one place both read. Load, modify, save, for the reason
+    /// [`toggle_night_light`](Self::toggle_night_light) gives, and a failed
+    /// write is reported and the desktop still changes size, for the reason it
+    /// gives too.
+    ///
+    /// The compositor is not told: it reads nothing about desktop icons, which
+    /// this shell draws itself, so a "read the file again" would be a reload
+    /// that changes nothing. The shell's own watcher will see the write and
+    /// hand back the size it already has.
+    fn choose_icon_size(&mut self, size: appearance::IconSize) -> bool {
+        if self.appearance.icon_size == size {
+            return false;
+        }
+        let mut file = appearance::AppearanceFile::load();
+        file.settings.icon_size = size;
+        if let Err(err) = file.save() {
+            eprintln!("desktop: could not save appearance.yaml: {err}");
+        }
+        self.appearance.icon_size = size;
+        self.icons.set_icon_size(size.pixels());
+        // The icons moved with their cells, onto a grid of a different pitch;
+        // the layout file records both.
+        self.icons_dirty = true;
+        true
+    }
+
     /// Whether the shell has rewritten `appearance.yaml` since this was last
     /// asked, clearing the flag.
     ///
@@ -4412,6 +7333,22 @@ impl DesktopShell {
         core::mem::take(&mut self.appearance_dirty)
     }
 
+    /// Write the newly-chosen keyboard layout to `input.yaml`.
+    ///
+    /// This is what makes the switch reach the *keys*. The shell decides which
+    /// layout is active; the compositor decides what a scancode means, and it
+    /// reads that from the settings file it already watches. Going through the
+    /// file rather than inventing a protocol message has three things to
+    /// recommend it: the mechanism exists and is tested, a layout chosen with
+    /// the keyboard and one chosen in the Settings panel cannot disagree
+    /// because they are the same value in the same place, and the choice
+    /// survives a restart, which is what a user expects of a layout.
+    ///
+    /// A failure is swallowed deliberately, and is the one place in this file
+    /// where that is right: the layout has already changed in the shell's own
+    /// model and the indicator will show it, so a read-only configuration
+    /// directory costs the user persistence, not the feature. Refusing the
+    /// keystroke because a file could not be written would be worse.
     fn persist_input_layout(&mut self) {
         let Some(id) = self.input_methods.active_layout_id() else {
             return;
@@ -4421,10 +7358,29 @@ impl DesktopShell {
             return;
         }
         file.settings.keyboard.layout = id.to_string();
-        // See the note above on why this is not propagated.
+        // Swallowed on purpose; see this method's doc comment.
         let _ = file.save();
     }
 
+    /// Carry out a shortcut that has already been recognised.
+    ///
+    /// Every binding but [`DismissPopup`](HotkeyAction::DismissPopup) consumes
+    /// the press; that one is bare Escape, and a key the shell claims
+    /// unconditionally is a key no window can ever see. Closing a dialog is what
+    /// Escape does far more often than closing the start menu.
+    ///
+    /// The arms divide into three kinds, and the division is the whole point of
+    /// the return type. The start menu, the Alt-Tab switcher's *stepping*, and
+    /// popup dismissal are the shell's own surfaces and are done here. Anything
+    /// naming a window — close, minimise, maximise, tile, raise — is a
+    /// [`WindowRequest`] handed back for the caller to send. This method used to
+    /// do the second kind itself, against the shell's private copy of the window
+    /// list, which on a live session the next
+    /// [`apply_window_list`](DesktopShell::apply_window_list) discards: Alt+F4
+    /// removed a taskbar button and left the window open. The third kind starts
+    /// a program, and is handed back for the same reason in
+    /// [`launches`](HotkeyOutcome::launches): the shell has no connection to the
+    /// process server either.
     fn run_desktop_action(&mut self, action: &HotkeyAction) -> HotkeyOutcome {
         match action {
             HotkeyAction::SwitchInputLayout => {
@@ -4432,22 +7388,13 @@ impl DesktopShell {
                 self.persist_input_layout();
                 HotkeyOutcome::consumed()
             }
-            HotkeyAction::CycleWindows => {
-                if self.alt_tab_active {
-                    self.next_alt_tab();
-                } else {
-                    self.start_alt_tab();
-                }
-                HotkeyOutcome::consumed()
-            }
-            HotkeyAction::CycleWindowsBackwards => {
-                if !self.alt_tab_active {
-                    self.start_alt_tab();
-                }
-                if self.alt_tab_active {
-                    self.prev_alt_tab();
-                }
-                HotkeyOutcome::consumed()
+            // Reached with no press in hand -- a test, or a caller naming the
+            // action -- so ended by Alt, as it always was; a press goes
+            // through `run_bound_action`, which knows the keys held.
+            HotkeyAction::CycleWindows
+            | HotkeyAction::CycleWindowsBackwards
+            | HotkeyAction::CycleWindowsInOverview => {
+                self.cycle_windows(action, SwitchAnchor::ALT, None)
             }
             HotkeyAction::CloseWindow => {
                 HotkeyOutcome::ask(self.request_on_focused(ShellControlAction::Close))
@@ -4461,18 +7408,7 @@ impl DesktopShell {
             }
             // The one shortcut that names more than one window, and the reason
             // `handle_hotkey` cannot return a single request.
-            HotkeyAction::ShowDesktop => HotkeyOutcome::ask_all(
-                self.windows
-                    .values()
-                    // `on_glass`, not `mapped`: this is the one caller that
-                    // wants the narrower question. Asking a window that is
-                    // already minimised to minimise again is a request the
-                    // compositor would have to ignore, and one the user would
-                    // have to un-do twice.
-                    .filter(|w| w.on_glass() && w.desktop == self.current_desktop)
-                    .map(|w| ShellRequest::window(w.id, ShellControlAction::Minimize))
-                    .collect(),
-            ),
+            HotkeyAction::ShowDesktop => HotkeyOutcome::ask_all(self.show_desktop_requests()),
             HotkeyAction::SnapLeft => {
                 HotkeyOutcome::ask(self.request_on_focused(ShellControlAction::SnapLeft))
             }
@@ -4588,7 +7524,7 @@ impl DesktopShell {
                 self.toggle_run_dialog();
                 HotkeyOutcome::consumed()
             }
-            // The six that start a program instead of touching a window. The
+            // The ones that start a program instead of touching a window. The
             // command is the action's own — see [`HotkeyAction::command`] — and
             // it is reported rather than run, because the shell has no
             // connection to the process server.
@@ -4597,7 +7533,10 @@ impl DesktopShell {
             | HotkeyAction::SystemSettings
             | HotkeyAction::ScreenLock
             | HotkeyAction::Screenshot
-            | HotkeyAction::ScreenshotRegion => {
+            | HotkeyAction::ScreenshotRegion
+            | HotkeyAction::ScreenshotWindow
+            | HotkeyAction::ScreenshotToFile
+            | HotkeyAction::ScreenshotWindowToFile => {
                 HotkeyOutcome::start(action.launch().into_iter().collect())
             }
             // Nothing can carry these out: there is no backlight channel out of
@@ -4657,25 +7596,107 @@ impl DesktopShell {
         // a press the dialog had no meaning for is still not the desktop's while
         // the dialog is up.
         let _ = self.run_dialog.handle_key_event(key);
-        // Wrapped with no arguments, because that is what this box produces:
-        // what the user typed is taken as the whole name of one program.
-        // Splitting it would need a quoting rule, and inventing one silently
-        // would make `my program` two words to the shell and one to the
-        // filesystem. Whether the Run box should accept arguments at all is a
-        // real question and a separate one; it is not settled by a conversion.
+        // Each request opened or run by the one rule the OK button uses. This
+        // comment used to explain why the box took no arguments -- a quoting
+        // rule invented silently "would make `my program` two words to the
+        // shell and one to the filesystem". The rule is now stated
+        // (`run_dialog::split_words`, design-decisions.md §870), and the
+        // whole line is tried as a path before anything is split, which is
+        // what keeps `my program` one thing when it names one.
+        let requests = self.drain_run_dialog();
         HotkeyOutcome::start(
-            self.drain_run_dialog()
+            requests
                 .into_iter()
-                .map(|program| hotkeys::Launch {
-                    program,
-                    args: Vec::new(),
-                })
+                .filter_map(|request| self.run_request(request))
                 .collect(),
         )
     }
 
+    /// Carry out one thing the Run box was asked for, the way Windows' Run
+    /// box does -- which `design.txt` asks this one to be like:
+    ///
+    /// - if the **whole line is an absolute path that exists**, open it by
+    ///   the rules a double-click on the desktop uses
+    ///   ([`open_path`](Self::open_path)): a folder in the file manager, a
+    ///   document in its program, a program run. Tried first, so a path with
+    ///   a space in it needs no quotes when it is the whole line;
+    /// - otherwise **run the first word with the rest as its arguments**,
+    ///   split by [`run_dialog::split_words`].
+    ///
+    /// `None` when nothing is to start: a path whose kind nothing opens (and
+    /// which has said so in a notification), or a line with no words.
+    fn run_request(&mut self, request: run_dialog::RunRequest) -> Option<hotkeys::Launch> {
+        let line = request.whole.clone();
+        let launch = self.resolve_run_request(request)?;
+        // Remembered, so that a launch that cannot start brings the box back
+        // on this line rather than leaving the user at a desktop where nothing
+        // happened (`launch_failed`).
+        self.run_box_launch = Some((launch.clone(), line));
+        Some(launch)
+    }
+
+    /// What a Run box line starts: see [`run_request`](Self::run_request).
+    fn resolve_run_request(&mut self, request: run_dialog::RunRequest) -> Option<hotkeys::Launch> {
+        let whole = Path::new(&request.whole);
+        if whole.is_absolute() && std::fs::metadata(whole).is_ok() {
+            let label = whole.display().to_string();
+            return match self.open_path(whole, &label) {
+                ShellAction::Launch(launch) => Some(launch),
+                _ => None,
+            };
+        }
+        let mut words = request.words.into_iter();
+        let program = words.next()?;
+        Some(hotkeys::Launch {
+            program: PathBuf::from(program),
+            args: words.collect(),
+        })
+    }
+
+    /// Say that `launch` could not be started, and `why` -- the answer from
+    /// whoever starts the programs the shell names, which is the one place
+    /// that knows (`ShellSession::report_failed_launch`).
+    ///
+    /// A launch the Run box asked for brings the box back, on the line that
+    /// was typed and with why under it, so a typo is corrected rather than
+    /// typed again. Anything else -- a pin, a start menu row, an icon -- says
+    /// so in a notification, as a document that cannot be opened does
+    /// (`say_cannot_open`). Until this, both closed
+    /// on nothing having happened, and only the host's standard error said
+    /// otherwise.
+    pub fn launch_failed(&mut self, launch: &hotkeys::Launch, why: &str) {
+        if let Some((_, line)) = self.run_box_launch.take_if(|(sent, _)| sent == launch) {
+            let message = format!(
+                "\"{}\" could not be started: {why}.",
+                pathcodec::display_os(launch.program.as_os_str())
+            );
+            self.dismiss_popups();
+            self.run_dialog.show_failed(&line, message);
+            self.centre_run_dialog();
+            return;
+        }
+        let name = launch
+            .program
+            .file_name()
+            .map_or_else(|| launch.display_line(), pathcodec::display_os);
+        let title = format!("Cannot start {name}");
+        // The id is discarded: this is a message, not something to update.
+        let _ = self.notify(notif_pane::Notification {
+            id: 0,
+            app_name: "Desktop".to_string(),
+            title,
+            body: format!("{}: {why}", launch.display_line()),
+            timestamp: Self::unix_now(),
+            priority: notif_pane::NotifPriority::Normal,
+            read: false,
+            action: None,
+            silent: false,
+        });
+    }
+
     /// Answer whatever the Run box has asked for since it was last emptied, and
-    /// report the programs it wants started.
+    /// hand back what it was asked to run or open (see
+    /// [`run_request`](Self::run_request)).
     ///
     /// `Cancel` and `Closed` need no answer — the dialog has already hidden
     /// itself by the time it reports them — but they must still be drained, or
@@ -4694,11 +7715,11 @@ impl DesktopShell {
     /// opening the chooser needs `&mut self` and a closure passed to `filter_map`
     /// would be holding a borrow of it. The drained `Vec` is owned, so the loop
     /// borrows nothing.
-    fn drain_run_dialog(&mut self) -> Vec<PathBuf> {
+    fn drain_run_dialog(&mut self) -> Vec<run_dialog::RunRequest> {
         let mut launches = Vec::new();
         for event in self.run_dialog.drain_events() {
             match event {
-                run_dialog::RunDialogEvent::Execute(command) => launches.push(command),
+                run_dialog::RunDialogEvent::Execute(request) => launches.push(request),
                 run_dialog::RunDialogEvent::Browse => self.open_run_browser(),
                 // No answer needed — the dialog has already hidden itself by the
                 // time it reports these — but they must still be drained, or the
@@ -4774,6 +7795,43 @@ impl DesktopShell {
         };
         self.run_browser_listed = Some(dialog.current_path().to_path_buf());
         dialog.set_entries(entries);
+    }
+
+    /// Answer [`run_browser_wants`](Self::run_browser_wants) with "there is no
+    /// folder there".
+    ///
+    /// The chooser goes back to where it was (`FileDialog::refuse_navigation`)
+    /// -- a path typed into its address bar stays there to be corrected -- so
+    /// it stops wanting anything. The folder it opened on has nowhere to go
+    /// back to, and is shown empty, once, rather than asked about again on
+    /// every paint.
+    pub fn refuse_run_browser_path(&mut self) {
+        let Some(dialog) = self.run_browser.as_mut() else {
+            return;
+        };
+        let refused = dialog.current_path().to_path_buf();
+        dialog.refuse_navigation();
+        if dialog.current_path() == refused {
+            self.run_browser_listed = Some(refused);
+            dialog.set_entries(Vec::new());
+        }
+    }
+
+    /// The folder whose names the chooser's address bar wants, if it has
+    /// asked since the last call.
+    ///
+    /// The filesystem half is the session's, as the listing's is; answered
+    /// with [`set_run_browser_completions`](Self::set_run_browser_completions).
+    pub fn take_run_browser_completion_request(&mut self) -> Option<String> {
+        self.run_browser.as_mut()?.take_completion_request()
+    }
+
+    /// Answer [`take_run_browser_completion_request`](Self::take_run_browser_completion_request)
+    /// with the names in that folder. Ignored when no chooser is up.
+    pub fn set_run_browser_completions(&mut self, items: Vec<guitk::pathbar::CompletionItem>) {
+        if let Some(dialog) = self.run_browser.as_mut() {
+            dialog.set_completions(items);
+        }
     }
 
     /// Where the chooser is drawn, as `(x, y, width, height)`.
@@ -4934,83 +7992,122 @@ impl DesktopShell {
         let bar = self.taskbar_rect();
         let mut tree = RenderTree::new();
 
-        // Taskbar background
+        // Taskbar background, and its glass over it.
         fill(&mut tree, bar, self.theme.taskbar_bg);
+        self.draw_taskbar_glass(&mut tree, bar);
 
-        // Start button
-        let start = self.start_button_rect();
-        let start_bg = if self.start_menu_open {
-            self.theme.taskbar_active_bg
-        } else {
-            self.theme.taskbar_bg
-        };
-        fill(&mut tree, start, start_bg);
-        tree.text(
-            start.x + self.scale(12.0),
-            start.y + self.scale(12.0),
-            "\u{2261}", // hamburger menu icon
-            self.theme.taskbar_accent,
-            self.font_size(TextRole::Glyph),
+        self.draw_start_orb(&mut tree);
+
+        // The tiles: pinned programs, then windows, as the Aero reference
+        // draws them. Rounded as the windows they stand for are, at half their
+        // radius -- see `TASKBAR_TILE_CORNER_SHARE`.
+        let radii = CornerRadii::all(
+            self.scale(self.appearance.window_corners.radius() * TASKBAR_TILE_CORNER_SHARE),
         );
-
-        // Window buttons. Rounded like the windows they stand for — the corner
-        // style is a property of the desktop, not of one surface in it.
-        let radii = self.corner_radii();
-        // Over *slots*, not windows: a pinned application has a button whether
+        // Over *slots*, not windows: a pinned application has a tile whether
         // or not it is running, and it stands to the left of the windows.
         let windows = self.taskbar_windows();
-        for (index, slot) in self.taskbar_slots().iter().enumerate() {
-            let button = self.taskbar_button_rect(index);
-
-            let (label, bg) = match *slot {
+        let pin_px = self.icon_px(TASKBAR_PIN_ICON);
+        let window_px = self.icon_px(TASKBAR_WINDOW_ICON);
+        #[allow(clippy::cast_precision_loss)]
+        let (pin_side, window_side) = (pin_px as f32, window_px as f32);
+        let title_size = self.font_size(TextRole::Caption);
+        for (slot, tile) in self.taskbar_slots().iter().zip(self.taskbar_layout()) {
+            match *slot {
                 TaskbarSlot::Pinned(pin) => {
                     let Some(app) = self.taskbar.pinned_apps().get(pin) else {
                         continue;
                     };
-                    // Never the focused colour: a pinned button is a way to
-                    // *start* the program, so drawing it as though it were the
-                    // window in front would say something untrue about it.
-                    (app.display_name.as_str(), self.theme.taskbar_bg)
+                    let program = self
+                        .apps
+                        .iter()
+                        .find(|a| a.executable_path == app.exec_path);
+                    // Flat, as the reference draws a pin: its program's
+                    // picture and nothing else. A pinned tile is a way to
+                    // *start* the program -- another copy, if one is running
+                    // -- so nothing on it may look like a window's, running or
+                    // in front; its name is its tooltip.
+                    let image_id = self.picture_of(program, pin_px, self.theme.taskbar_fg);
+                    if self.hover_tile == Some(*slot) {
+                        self.draw_lit_tile(&mut tree, tile, radii);
+                    }
+                    image_centred(&mut tree, tile, pin_side, image_id);
                 }
                 TaskbarSlot::Window(id) => {
                     let Some(window) = windows.iter().find(|w| w.id == id) else {
                         continue;
                     };
-                    let bg = if Some(id) == self.focused_window {
-                        self.theme.taskbar_active_bg
+                    if self.hover_tile == Some(*slot) {
+                        self.draw_lit_tile(&mut tree, tile, radii);
                     } else {
-                        self.theme.taskbar_bg
-                    };
-                    (window.title.as_str(), bg)
+                        self.draw_window_tile(
+                            &mut tree,
+                            tile,
+                            radii,
+                            Some(id) == self.focused_window,
+                        );
+                    }
+                    let program = self.program_for_app_id(&window.app_id);
+                    let image_id = self.picture_of(program, window_px, self.theme.taskbar_fg);
+                    let picture_x = tile.x + self.scale(TASKBAR_TILE_PAD_START);
+                    let title_x = picture_x + window_side + self.scale(TASKBAR_TILE_LABEL_GAP);
+                    let room = tile.x + tile.w - self.scale(TASKBAR_TILE_PAD_END) - title_x;
+                    if room < self.scale(TASKBAR_TILE_MIN_LABEL) {
+                        // Squeezed past its title: its picture alone, in the
+                        // middle, as a pin's is.
+                        image_centred(&mut tree, tile, window_side, image_id);
+                        continue;
+                    }
+                    tree.push(guitk::render::RenderCommand::Image {
+                        x: picture_x,
+                        y: tile.y + (tile.h - window_side) / 2.0,
+                        width: window_side,
+                        height: window_side,
+                        image_id,
+                    });
+                    // Window title, fitted to what the tile can hold — by the
+                    // renderer, which is the only thing that knows how wide
+                    // the title will be drawn. This used to take
+                    // `button.w / (size * 0.62)` *characters*: a guessed
+                    // average advance applied to a proportional face, so a
+                    // title of capitals ("WWW Browser") overran the button and
+                    // one of narrow letters ("initialising…") was cut with the
+                    // space to spare. Scaling the guess with the font size
+                    // fixes only the half of the error that depends on size;
+                    // the half that depends on *which letters* cannot be fixed
+                    // by any constant.
+                    //
+                    // `text_in` also marks the cut with `…`, so a truncated
+                    // title is distinguishable from a short one — a silently
+                    // clipped one is not, and a window called "Save changes to
+                    // report.docx?" reading as "Save changes to rep" is a
+                    // different sentence. The whole of it is the tile's
+                    // tooltip.
+                    tree.text_in(
+                        title_x,
+                        tile.y + (tile.h - title_size).max(0.0) / 2.0,
+                        room,
+                        &window.title,
+                        self.theme.taskbar_fg,
+                        title_size,
+                    );
                 }
-            };
+            }
+        }
 
-            fill_round(&mut tree, button, bg, radii);
-
-            // Window title, fitted to what the button can hold — by the
-            // renderer, which is the only thing that knows how wide the title
-            // will be drawn. This used to take `button.w / (size * 0.62)`
-            // *characters*: a guessed average advance applied to a proportional
-            // face, so a title of capitals ("WWW Browser") overran the button
-            // and one of narrow letters ("initialising…") was cut with the
-            // space to spare. Scaling the guess with the font size, which the
-            // old comment was pleased about, fixes only the half of the error
-            // that depends on size; the half that depends on *which letters*
-            // cannot be fixed by any constant.
-            //
-            // `text_in` also marks the cut with `…`, so a truncated title is
-            // distinguishable from a short one — a silently clipped one is not,
-            // and a window called "Save changes to report.docx?" reading as
-            // "Save changes to rep" is a different sentence.
-            let title_size = self.font_size(TextRole::Caption);
-            let inset = self.scale(8.0);
-            tree.text_in(
-                button.x + inset,
-                button.y + inset,
-                (button.w - inset - inset).max(0.0),
-                label,
-                self.theme.taskbar_fg,
-                title_size,
+        // The divider between the pinned tiles and the windows': a line in the
+        // bar's own colour and, a pixel to its right, the dark one that makes
+        // it read as a groove in the glass, as the reference draws it.
+        if let Some(divider) = self.taskbar_divider_rect() {
+            fill(
+                &mut tree,
+                divider,
+                with_alpha(self.theme.taskbar_fg, TASKBAR_DIVIDER_ALPHA),
+            );
+            fill(
+                &mut tree,
+                Rect::new(divider.x + divider.w, divider.y, divider.w, divider.h),
+                TASKBAR_DIVIDER_SHADOW,
             );
         }
 
@@ -5027,14 +8124,60 @@ impl DesktopShell {
         // the reading keeps it still: the slot is sized for the widest reading
         // these switches can produce, so a narrower one leaves a few pixels of
         // slack at the end instead of sliding the text sideways every minute.
-        let time_str = self.current_clock_string();
-        tree.text(
-            bar.w - padding - self.clock_width(),
-            tray_text_y,
-            &time_str,
-            self.theme.taskbar_fg,
-            self.font_size(TextRole::Body),
-        );
+        let clock_x = self.tray_right() - padding - self.clock_width();
+        if self.tray_lit == Some(Hit::Clock) {
+            fill_round(
+                &mut tree,
+                self.clock_rect(),
+                with_alpha(Color::WHITE, TRAY_CLOCK_LIT),
+                CornerRadii::all(self.scale(TRAY_LIT_RADIUS)),
+            );
+        }
+        if self.clock_has_two_lines() {
+            // The reference's two lines, each centred in the slot: the time,
+            // bold, and under it the weekday and date, smaller and dimmer.
+            let secs = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs();
+            let (time, date) = self.clock_lines_at(secs);
+            let (time_size, date_size) = (
+                self.font_size(TextRole::Body),
+                self.font_size(TextRole::Caption),
+            );
+            let slot = self.clock_width();
+            let top = bar.y + (bar.h - CLOCK_LINE_HEIGHT * (time_size + date_size)).max(0.0) / 2.0;
+            let time_w = text::measure(&time, time_size, guitk::render::FontWeightHint::Bold);
+            tree.push(guitk::render::RenderCommand::Text {
+                x: clock_x + (slot - time_w).max(0.0) / 2.0,
+                y: top,
+                text: time,
+                color: self.theme.taskbar_fg,
+                font_size: time_size,
+                font_weight: guitk::render::FontWeightHint::Bold,
+                max_width: None,
+                overflow: guitk::render::TextOverflow::Clip,
+            });
+            if let Some(date) = date {
+                let date_w = text::width(&date, date_size);
+                tree.text(
+                    clock_x + (slot - date_w).max(0.0) / 2.0,
+                    top + CLOCK_LINE_HEIGHT * time_size,
+                    &date,
+                    with_alpha(self.theme.taskbar_fg, CLOCK_DATE_ALPHA),
+                    date_size,
+                );
+            }
+        } else {
+            let time_str = self.current_clock_string();
+            tree.text(
+                clock_x,
+                tray_text_y,
+                &time_str,
+                self.theme.taskbar_fg,
+                self.font_size(TextRole::Body),
+            );
+        }
 
         // The notification bell, in its own slot immediately left of the clock.
         // Without it the pane this shell owns had exactly one way in — Super+N
@@ -5057,15 +8200,26 @@ impl DesktopShell {
         // The chevron first, at the left of the run, so that a reader of this
         // function meets the strip in the order it is drawn.
         if let Some(rect) = self.tray_overflow_rect() {
-            tree.text(
-                rect.x,
-                tray_text_y,
-                TRAY_OVERFLOW_GLYPH,
+            if self.tray_lit == Some(Hit::TrayOverflow) {
+                self.light_tray_item(&mut tree, rect);
+            }
+            self.icon_in(
+                &mut tree,
+                rect,
+                TRAY_OVERFLOW_ICON,
+                TRAY_CHEVRON_ICON,
                 self.theme.taskbar_fg,
-                self.font_size(TextRole::Glyph),
             );
         }
-        for (rect, icon) in self.tray_icon_rects().iter().zip(self.ordered_tray_icons()) {
+        for (index, (rect, icon)) in self
+            .tray_icon_rects()
+            .iter()
+            .zip(self.ordered_tray_icons())
+            .enumerate()
+        {
+            if self.tray_lit == Some(Hit::TrayIcon(index)) {
+                self.light_tray_item(&mut tree, *rect);
+            }
             // The icon being dragged is drawn faint.
             //
             // `DragSource` has maintained `show_ghost` and `dragging_key`
@@ -5089,12 +8243,24 @@ impl DesktopShell {
         }
 
         let bell = self.bell_rect();
+        if self.tray_lit == Some(Hit::NotificationBell) {
+            self.light_tray_item(&mut tree, bell);
+        }
         let unread = self.notifications.attention_count();
-        tree.text(
+        // In the bell's own width at the slot's left, as the glyph was: the
+        // badge below is right-aligned in the slot.
+        let bell_icon = Rect::new(
             bell.x,
-            tray_text_y,
-            self.focus.effective_mode().icon(),
-            // Accent when something is waiting. The glyph alone would be a
+            bar.y,
+            self.scale(TRAY_BELL_WIDTH).min(bell.w),
+            bar.h,
+        );
+        self.icon_in(
+            &mut tree,
+            bell_icon,
+            self.focus.effective_mode().icon_name(),
+            TASKBAR_ICON,
+            // Accent when something is waiting. The icon alone would be a
             // silent difference: a bell that looks the same whether or not it
             // has anything behind it is a bell nobody presses.
             //
@@ -5103,13 +8269,12 @@ impl DesktopShell {
             // pill fill; on the taskbar the only pair this theme guarantees
             // legible is accent-on-background (pinned by
             // `the_taskbar_accent_contrasts_with_the_bar`), and the changed
-            // glyph already carries the mode.
+            // icon already carries the mode.
             if unread == 0 {
                 self.theme.taskbar_fg
             } else {
                 self.theme.taskbar_accent
             },
-            self.font_size(TextRole::Glyph),
         );
         if unread > 0 {
             // Two characters at most, so a hundred notifications cannot widen
@@ -5144,6 +8309,25 @@ impl DesktopShell {
             );
         }
 
+        // "Show desktop", at the very end: a strip with an edge, brighter
+        // under the pointer -- the reference's `aero-showdesktop`.
+        let strip = self.show_desktop_rect();
+        let fill_alpha = if self.show_desktop_lit {
+            SHOW_DESKTOP_FILL_LIT
+        } else {
+            SHOW_DESKTOP_FILL
+        };
+        fill(
+            &mut tree,
+            strip,
+            with_alpha(self.theme.taskbar_fg, fill_alpha),
+        );
+        fill(
+            &mut tree,
+            Rect::new(strip.x, strip.y, self.scale(1.0).max(1.0), strip.h),
+            with_alpha(self.theme.taskbar_fg, SHOW_DESKTOP_EDGE),
+        );
+
         // Desktop indicator, at the tray's left edge.
         tree.text(
             tray_x + padding,
@@ -5172,7 +8356,8 @@ impl DesktopShell {
 
     /// Render the Alt+Tab window switcher overlay.
     pub fn render_alt_tab(&self) -> Option<RenderTree> {
-        if !self.alt_tab_active {
+        // A switch shown in the overview is drawn by the overview.
+        if !self.alt_tab_active || self.alt_tab_view == SwitchView::Overview {
             return None;
         }
 
@@ -5187,62 +8372,223 @@ impl DesktopShell {
             return None;
         }
 
-        // Overlay background
-        let overlay_w = self
-            .scale(400.0)
-            .min(self.screen_width as f32 - self.scale(100.0))
-            .max(0.0);
-        let overlay_h = self.scale(80.0);
-        let overlay_x = (self.screen_width as f32 - overlay_w) / 2.0;
-        let overlay_y = (self.screen_height as f32 - overlay_h) / 2.0;
-        let overlay = Rect::new(overlay_x, overlay_y, overlay_w, overlay_h);
+        // The reference has no switcher; it is drawn in the reference's glass,
+        // as the start menu is -- a panel of the desktop's, over whatever is
+        // behind it -- with each window's program picture in a cell of its own
+        // and the chosen window's title across the top, whole or cut with a
+        // mark. It used to be the first twelve characters of every title, cut
+        // unmarked, beside one another in one row whatever their number.
+        let size = self.font_size(TextRole::Body);
+        let title_width = windows
+            .get(self.alt_tab_index)
+            .map_or(0.0, |window| text::width(&window.title, size));
+        let layout = self.switcher_layout(windows.len(), self.alt_tab_index, title_width);
         let radii = self.corner_radii();
+        self.glass_under(&mut tree, layout.panel, radii, self.theme.overlay_bg);
+        self.glass_edge(&mut tree, layout.panel, radii);
 
-        // The switcher floats over whatever is behind it, so it casts a shadow
-        // for the same reason a window does.
-        if self.appearance.drop_shadows {
-            shadow(&mut tree, overlay, radii);
-        }
-        fill_round(&mut tree, overlay, self.theme.overlay_bg, radii);
-        stroke_round(
-            &mut tree,
-            overlay,
-            self.theme.accent_color,
-            self.scale(2.0),
-            radii,
-        );
-
-        // Window entries
-        let item_w = overlay_w / windows.len().max(1) as f32;
-        let inset = self.scale(4.0);
-        for (i, window) in windows.iter().enumerate() {
-            let ix = overlay_x + i as f32 * item_w;
-
-            if i == self.alt_tab_index {
+        let fg = self.theme.overlay_fg;
+        let px = self.icon_px(SWITCHER_ICON);
+        let side = px as f32;
+        let inset = self.scale(SWITCHER_MARK_INSET);
+        let mark_radii = CornerRadii::all(self.scale(4.0));
+        for (index, cell) in &layout.cells {
+            let Some(window) = windows.get(*index) else {
+                continue;
+            };
+            // The window the switch goes to, marked as the accent marks "you
+            // are here" everywhere else in the shell -- the start menu's
+            // keyboard row -- with the line of its lit rows round it.
+            if *index == self.alt_tab_index {
+                let mark = Rect::new(
+                    cell.x + inset,
+                    cell.y + inset,
+                    (cell.w - inset * 2.0).max(0.0),
+                    (cell.h - inset * 2.0).max(0.0),
+                );
                 fill_round(
                     &mut tree,
-                    Rect::new(
-                        ix + inset,
-                        overlay_y + inset,
-                        (item_w - inset * 2.0).max(0.0),
-                        (overlay_h - inset * 2.0).max(0.0),
-                    ),
-                    self.theme.overlay_selected_bg,
-                    radii,
+                    mark,
+                    with_alpha(self.theme.accent_color, START_MENU_SELECTED_ALPHA),
+                    mark_radii,
+                );
+                stroke_round(
+                    &mut tree,
+                    mark,
+                    with_alpha(self.theme.accent_color, START_MENU_LIT_EDGE_ALPHA),
+                    self.scale(1.0),
+                    mark_radii,
                 );
             }
+            let program = self.program_for_app_id(&window.app_id);
+            tree.push(guitk::render::RenderCommand::Image {
+                x: cell.x + (cell.w - side) / 2.0,
+                y: cell.y + (cell.h - side) / 2.0,
+                width: side,
+                height: side,
+                image_id: self.picture_of(program, px, fg),
+            });
+        }
 
-            let title: String = window.title.chars().take(12).collect();
-            tree.text(
-                ix + self.scale(10.0),
-                overlay_y + overlay_h / 2.0 - self.scale(6.0),
-                &title,
-                self.theme.overlay_fg,
-                self.font_size(TextRole::Caption),
+        // The chosen window's title, centred over the cells, whole or cut
+        // with a mark -- it is the one thing that tells two windows of one
+        // program apart.
+        if let Some(window) = windows.get(self.alt_tab_index) {
+            let shown = text::elide(
+                &window.title,
+                layout.title.w,
+                "\u{2026}",
+                size,
+                guitk::render::FontWeightHint::Regular,
+            );
+            let width = text::width(&shown, size).min(layout.title.w);
+            let offset = (layout.title.w - width) / 2.0;
+            tree.text_in(
+                layout.title.x + offset,
+                layout.title.y + (layout.title.h - size) / 2.0,
+                layout.title.w - offset,
+                &window.title,
+                fg,
+                size,
             );
         }
 
         Some(tree)
+    }
+
+    /// The glass a floating panel of the shell sits in, under whatever the
+    /// panel lays over its fill: the shadow every floating panel casts and the
+    /// reference's glow in the accent (`aero-start-menu`'s `0 0 38px 4px`),
+    /// both only when the user has shadows -- a glow is a shadow in light, and
+    /// goes with them -- then `fill`.
+    ///
+    /// [`glass_edge`](Self::glass_edge) finishes it. Two halves so a panel
+    /// can lay a shade of its own between them -- the start menu's places
+    /// column -- and still be edged over it.
+    fn glass_under(&self, tree: &mut RenderTree, rect: Rect, radii: CornerRadii, fill: Color) {
+        if self.appearance.drop_shadows {
+            shadow(tree, rect, radii);
+            tree.box_shadow(
+                rect.x,
+                rect.y,
+                rect.w,
+                rect.h,
+                Shadow {
+                    offset_x: 0.0,
+                    offset_y: 0.0,
+                    blur: self.scale(START_MENU_GLOW_BLUR),
+                    spread: self.scale(START_MENU_GLOW_SPREAD),
+                    color: with_alpha(self.theme.accent_color, START_MENU_GLOW_ALPHA),
+                },
+                radii,
+            );
+        }
+        fill_round(tree, rect, fill, radii);
+    }
+
+    /// The glass's edges, over whatever the panel laid on its fill: the
+    /// window frame's outline -- so a panel and a window side by side are
+    /// edged alike -- and a line of light just inside it, as the reference's
+    /// glass has (`inset 0 0 0 1px`).
+    fn glass_edge(&self, tree: &mut RenderTree, rect: Rect, radii: CornerRadii) {
+        stroke_round(
+            tree,
+            rect,
+            self.theme.panel_border_color,
+            self.scale(1.0),
+            radii,
+        );
+        let line = self.scale(1.0);
+        stroke_round(
+            tree,
+            Rect::new(
+                rect.x + line * 1.5,
+                rect.y + line * 1.5,
+                (rect.w - line * 3.0).max(0.0),
+                (rect.h - line * 3.0).max(0.0),
+            ),
+            with_alpha(Color::WHITE, START_MENU_INNER_LIGHT),
+            line,
+            CornerRadii {
+                top_left: (radii.top_left - line * 1.5).max(0.0),
+                top_right: (radii.top_right - line * 1.5).max(0.0),
+                bottom_right: (radii.bottom_right - line * 1.5).max(0.0),
+                bottom_left: (radii.bottom_left - line * 1.5).max(0.0),
+            },
+        );
+    }
+
+    /// Where the Alt+Tab switcher's glass and cells go, for `count` windows
+    /// with the `selected` one to be shown, whose title is `title_width`
+    /// wide.
+    ///
+    /// The windows are laid out in rows of cells, as many to a row as the
+    /// screen has room for, and as many rows; past that, the switcher shows
+    /// the page of cells that holds the selected window, so a long list steps
+    /// through in pages rather than running off the screen. The glass is as
+    /// wide as the cells, or as the chosen title up to the screen's room,
+    /// whichever is wider, with the cells centred in it.
+    fn switcher_layout(&self, count: usize, selected: usize, title_width: f32) -> SwitcherLayout {
+        let cell = self.scale(SWITCHER_CELL);
+        let pad = self.scale(SWITCHER_PADDING);
+        let band = self.scale(SWITCHER_TITLE_BAND);
+        let margin = self.scale(SWITCHER_SCREEN_MARGIN);
+        let screen_w = self.screen_width as f32;
+        let screen_h = self.screen_height as f32;
+        let fit = |room: f32| {
+            if cell > 0.0 && room >= cell {
+                (room / cell) as usize
+            } else {
+                1
+            }
+        };
+        let columns = fit(screen_w - 2.0 * (margin + pad)).min(count).max(1);
+        let needed = count.div_ceil(columns).max(1);
+        let rows = fit(screen_h - 2.0 * (margin + pad) - band).min(needed);
+        let page = columns.saturating_mul(rows).max(1);
+        // `page` and `columns` are at least one, so neither division can
+        // fail; `checked_` says so to the arithmetic lint rather than hiding it.
+        let first = selected.checked_div(page).unwrap_or(0).saturating_mul(page);
+        let shown = count.saturating_sub(first).min(page);
+
+        let cells_width = columns as f32 * cell;
+        let room = (screen_w - 2.0 * margin).max(0.0);
+        let width = (cells_width + 2.0 * pad)
+            .max((title_width + 2.0 * pad).min(room))
+            .max(self.scale(SWITCHER_MIN_WIDTH).min(room));
+        let height = band + rows as f32 * cell + 2.0 * pad;
+        let cells_left = ((width - cells_width) / 2.0).max(pad);
+        let panel = Rect::new(
+            ((screen_w - width) / 2.0).max(0.0),
+            ((screen_h - height) / 2.0).max(0.0),
+            width,
+            height,
+        );
+        let cells = (0..shown)
+            .map(|offset| {
+                let column = offset.checked_rem(columns).unwrap_or(0);
+                let row = offset.checked_div(columns).unwrap_or(0);
+                (
+                    first.saturating_add(offset),
+                    Rect::new(
+                        panel.x + cells_left + column as f32 * cell,
+                        panel.y + pad + band + row as f32 * cell,
+                        cell,
+                        cell,
+                    ),
+                )
+            })
+            .collect();
+        SwitcherLayout {
+            title: Rect::new(
+                panel.x + pad,
+                panel.y + pad,
+                (width - 2.0 * pad).max(0.0),
+                band,
+            ),
+            panel,
+            cells,
+        }
     }
 
     /// Render the start menu.
@@ -5255,54 +8601,101 @@ impl DesktopShell {
         let menu = self.start_menu_rect();
         let radii = self.corner_radii();
 
-        // Background
-        if self.appearance.drop_shadows {
-            shadow(&mut tree, menu, radii);
-        }
-        fill_round(&mut tree, menu, self.theme.start_menu_bg, radii);
-        stroke_round(
+        // The glass, under what the menu lays over it.
+        self.glass_under(&mut tree, menu, radii, self.theme.start_menu_bg);
+        // The places column, in a shade of its own: rounded where it meets the
+        // menu's own corners and square where it meets the programs.
+        let right = self.start_menu_right_rect();
+        fill_round(
             &mut tree,
-            menu,
-            self.theme.panel_border_color,
-            self.scale(1.0),
-            radii,
+            right,
+            self.theme.start_menu_side_bg,
+            CornerRadii {
+                top_left: 0.0,
+                top_right: radii.top_right,
+                bottom_right: radii.bottom_right,
+                bottom_left: 0.0,
+            },
         );
+        // And the glass's edges, over the places column's shade.
+        self.glass_edge(&mut tree, menu, radii);
 
-        // Title
-        tree.text(
-            menu.x + self.scale(16.0),
-            menu.y + self.scale(16.0),
-            "Applications",
-            self.theme.accent_color,
-            self.font_size(TextRole::Heading),
-        );
+        // The search field, at the foot of the programs: the menu is a list of
+        // programs, and the field says how to find one in it.
+        self.render_start_search(&mut tree);
+        self.render_start_places(&mut tree);
 
         // Application entries. Which entry a row shows is asked of
         // `start_menu_entry_at`, the same function the hit test asks, so a
         // scrolled menu cannot launch the program on the row above the one
         // that was clicked.
-        let entries = self.start_menu_entries();
+        let list = self.start_menu_rows();
         let rows = self.start_menu_visible_rows();
         for row in 0..rows {
             let Some(index) = self.start_menu_entry_at(row) else {
                 break;
             };
-            let Some(entry) = entries.get(index) else {
+            let Some(item) = list.get(index).copied() else {
                 break;
             };
             let rect = self.start_menu_row_rect(row);
-            tree.text(
-                rect.x + self.scale(24.0),
-                rect.y + self.scale(8.0),
-                &entry.name,
-                self.theme.start_menu_fg,
-                self.font_size(TextRole::Item),
+            let mark = Rect::new(
+                rect.x + self.scale(6.0),
+                rect.y + self.scale(2.0),
+                (rect.w - self.scale(12.0)).max(0.0),
+                (rect.h - self.scale(4.0)).max(0.0),
             );
+            let mark_radii = CornerRadii::all(self.scale(4.0));
+            // The row under the pointer, lit as the reference's
+            // `aero-sm-app:hover`: a pale wash and a line round it. A heading
+            // is not something to click, and does not light.
+            if self.start_lit == Some(StartLit::Row(row)) && !matches!(item, StartRow::Section(_)) {
+                fill_round(
+                    &mut tree,
+                    mark,
+                    with_alpha(self.theme.accent_color, START_MENU_LIT_ALPHA),
+                    mark_radii,
+                );
+                stroke_round(
+                    &mut tree,
+                    mark,
+                    with_alpha(self.theme.accent_color, START_MENU_LIT_EDGE_ALPHA),
+                    self.scale(1.0),
+                    mark_radii,
+                );
+            }
+            // The keyboard's row, marked as the accent marks "you are here"
+            // everywhere else in the shell -- over the light, when the two are
+            // one row.
+            if self.start_selected == Some(index) {
+                fill_round(
+                    &mut tree,
+                    mark,
+                    with_alpha(self.theme.accent_color, START_MENU_SELECTED_ALPHA),
+                    mark_radii,
+                );
+            }
+            self.render_start_row(&mut tree, rect, item);
+            // A line along the top of every heading but the first, so the
+            // sections read as groups -- the user's own choices apart from what
+            // they used last and from the launcher's list, which may name the
+            // same programs again.
+            if matches!(item, StartRow::Section(_)) && index > 0 {
+                let inset = self.scale(16.0);
+                tree.push(guitk::render::RenderCommand::FillRect {
+                    x: rect.x + inset,
+                    y: rect.y,
+                    width: (rect.w - inset * 2.0).max(0.0),
+                    height: self.scale(1.0).max(1.0),
+                    color: self.theme.panel_border_color,
+                    corner_radii: CornerRadii::all(0.0),
+                });
+            }
         }
 
         // A scroll indicator, so a list that continues past the last row says
         // so. Sized and placed in proportion to the part of the list on screen.
-        let total = entries.len();
+        let total = list.len();
         if total > rows && rows > 0 {
             let row_h = self.scale(START_MENU_ROW_HEIGHT);
             let bar_w = self.scale(START_MENU_SCROLLBAR_WIDTH);
@@ -5313,9 +8706,10 @@ impl DesktopShell {
             // the menus and `apps/dictionary`. The floor stays half a row --
             // this bar is sized in rows of a start menu, not pixels of a
             // dialog -- which is why the module takes it as an argument.
+            let left = self.start_menu_left_rect();
             let thumb = guitk::scrollbar::thumb_of(
                 guitk::frame::Rect::new(
-                    menu.x + menu.w - bar_w - self.scale(2.0),
+                    left.x + left.w - bar_w - self.scale(2.0),
                     track_top,
                     bar_w,
                     track_h,
@@ -5332,25 +8726,79 @@ impl DesktopShell {
             );
         }
 
-        // The power button. Drawn as pressed while its menu is showing, so the
-        // popup that appears over the list has something visible that it came
-        // from.
+        // The power button, as the reference's: "Shut down" in one click, and
+        // a caret at its end for the other choices -- two parts of glass, a
+        // line round each, rounded only at the ends they do not share. The
+        // caret is drawn as pressed while its menu is showing, so the popup
+        // that appears over the list has something visible that it came from.
         let button = self.power_button_rect();
-        let button_radii = CornerRadii::all(radii.top_left.min(button.h / 2.0));
-        if self.power_menu_open {
-            fill_round(&mut tree, button, self.theme.accent_color, button_radii);
-        }
+        let main = self.power_main_rect();
+        let caret = self.power_caret_rect();
+        let round = radii.top_left.min(button.h / 2.0).min(self.scale(4.0));
+        let main_radii = CornerRadii {
+            top_left: round,
+            top_right: 0.0,
+            bottom_right: 0.0,
+            bottom_left: round,
+        };
+        let caret_radii = CornerRadii {
+            top_left: 0.0,
+            top_right: round,
+            bottom_right: round,
+            bottom_left: 0.0,
+        };
+        // Each part brighter under the pointer, as the reference's `:hover`.
+        let glass = |lit: StartLit| {
+            with_alpha(
+                self.theme.start_menu_fg,
+                if self.start_lit == Some(lit) {
+                    POWER_BUTTON_LIT_ALPHA
+                } else {
+                    POWER_BUTTON_GLASS_ALPHA
+                },
+            )
+        };
+        let edge = with_alpha(self.theme.start_menu_fg, POWER_BUTTON_EDGE_ALPHA);
+        fill_round(&mut tree, main, glass(StartLit::PowerButton), main_radii);
+        stroke_round(&mut tree, main, edge, self.scale(1.0), main_radii);
         let label_size = self.font_size(TextRole::Body);
+        let ink = self.theme.start_menu_fg;
+        let px = self.icon_px(START_LINK_ICON);
+        #[allow(clippy::cast_precision_loss)]
+        let side = px as f32;
+        let inset = self.scale(POWER_MENU_TEXT_INSET);
+        tree.push(guitk::render::RenderCommand::Image {
+            x: button.x + inset,
+            y: button.y + (button.h - side).max(0.0) / 2.0,
+            width: side,
+            height: side,
+            image_id: self.icon("system-shutdown", px, ink),
+        });
         tree.text(
-            button.x + self.scale(POWER_MENU_TEXT_INSET),
+            button.x + inset + side + self.scale(START_LINK_ICON_GAP),
             button.y + (button.h - label_size).max(0.0) / 2.0,
-            "Power",
-            if self.power_menu_open {
-                self.theme.start_menu_bg
-            } else {
-                self.theme.start_menu_fg
-            },
+            power::PowerChoice::ShutDown.label(),
+            ink,
             label_size,
+        );
+
+        // The caret after the button's own icon and label, so that a reader
+        // of the drawing -- a test, or a screen reader walking it -- meets
+        // "Shut down" first, as the eye does.
+        let caret_ink = if self.power_menu_open {
+            fill_round(&mut tree, caret, self.theme.accent_color, caret_radii);
+            self.theme.start_menu_bg
+        } else {
+            fill_round(&mut tree, caret, glass(StartLit::PowerCaret), caret_radii);
+            self.theme.start_menu_fg
+        };
+        stroke_round(&mut tree, caret, edge, self.scale(1.0), caret_radii);
+        self.icon_in(
+            &mut tree,
+            caret,
+            POWER_CARET_ICON,
+            START_FOLDER_CHEVRON,
+            caret_ink,
         );
 
         if self.power_menu_open {
@@ -5358,6 +8806,876 @@ impl DesktopShell {
         }
 
         Some(tree)
+    }
+
+    /// Draw the places column: the user's picture and name, then each place.
+    fn render_start_places(&self, tree: &mut RenderTree) {
+        let user = self.start_user_rect();
+        let d = self.scale(START_MENU_AVATAR).min(user.h);
+        let pad = self.scale(POWER_BUTTON_INSET) * 2.0;
+        if let Some(initial) = self.user_name.chars().next() {
+            // The picture is the first letter of the name on the accent, as
+            // the login screen draws a user it has no picture for.
+            let disc = Rect::new(user.x + pad, user.y + (user.h - d) / 2.0, d, d);
+            fill_round(
+                tree,
+                disc,
+                self.theme.accent_color,
+                CornerRadii::all(d / 2.0),
+            );
+            let size = self.font_size(TextRole::Body) * 1.4;
+            let letter: String = initial.to_uppercase().collect();
+            let lw = text::measure(&letter, size, guitk::render::FontWeightHint::Bold);
+            tree.push(guitk::render::RenderCommand::Text {
+                x: disc.x + (d - lw) / 2.0,
+                y: disc.y + (d - size) / 2.0,
+                text: letter,
+                color: readable_on(self.theme.accent_color),
+                font_size: size,
+                font_weight: guitk::render::FontWeightHint::Bold,
+                max_width: None,
+                overflow: guitk::render::TextOverflow::Clip,
+            });
+            let name_x = disc.x + d + pad / 2.0;
+            let name_size = self.font_size(TextRole::Body);
+            tree.text_in(
+                name_x,
+                user.y + (user.h - name_size) / 2.0,
+                (user.x + user.w - name_x - pad / 2.0).max(0.0),
+                &self.user_name,
+                self.theme.start_menu_fg,
+                name_size,
+            );
+        }
+        let size = self.font_size(TextRole::Body);
+        let inset = self.scale(10.0);
+        let px = self.icon_px(START_LINK_ICON);
+        #[allow(clippy::cast_precision_loss)]
+        let side = px as f32;
+        let text_x = inset + side + self.scale(START_LINK_ICON_GAP);
+        for which in StartShortcut::ALL {
+            let place = self.start_shortcut_rect(*which);
+            if place.w <= 0.0 || place.h <= 0.0 {
+                continue;
+            }
+            // The place under the pointer, lit as the reference's
+            // `aero-sm-link:hover`: a wash of the column's text colour and a
+            // line round it.
+            if self.start_lit == Some(StartLit::Place(*which)) {
+                let radii = CornerRadii::all(self.scale(4.0).min(place.h / 2.0));
+                fill_round(
+                    tree,
+                    place,
+                    with_alpha(self.theme.start_menu_fg, START_LINK_LIT_ALPHA),
+                    radii,
+                );
+                stroke_round(
+                    tree,
+                    place,
+                    with_alpha(self.theme.start_menu_fg, START_LINK_LIT_EDGE_ALPHA),
+                    self.scale(1.0),
+                    radii,
+                );
+            }
+            tree.push(guitk::render::RenderCommand::Image {
+                x: place.x + inset,
+                y: place.y + (place.h - side).max(0.0) / 2.0,
+                width: side,
+                height: side,
+                image_id: self.icon(which.icon_name(), px, self.theme.start_menu_fg),
+            });
+            tree.text_in(
+                place.x + text_x,
+                place.y + (place.h - size).max(0.0) / 2.0,
+                (place.w - text_x - inset).max(0.0),
+                which.label(),
+                self.theme.start_menu_fg,
+                size,
+            );
+        }
+    }
+
+    /// A section's heading, in `rect`: its name, small and dimmer than the
+    /// rows it heads, set low in its row so it reads with them -- the
+    /// reference's padding is 9 above it and 5 below.
+    fn render_start_heading(&self, tree: &mut RenderTree, rect: Rect, section: StartSection) {
+        let size = self.font_size(TextRole::Caption);
+        let x = rect.x + self.scale(16.0);
+        tree.text_in_weighted(
+            x,
+            rect.y + (rect.h - size - self.scale(5.0)).max(0.0),
+            (rect.x + rect.w - x).max(0.0),
+            section.label(),
+            with_alpha(self.theme.start_menu_fg, START_SECTION_ALPHA),
+            size,
+            guitk::render::FontWeightHint::Bold,
+        );
+    }
+
+    /// One row of the start menu's list, in `rect`: a program's picture and
+    /// name -- set in when it is inside a folder -- a folder's chevron,
+    /// picture and name, or a section's heading.
+    fn render_start_row(&self, tree: &mut RenderTree, rect: Rect, item: StartRow<'_>) {
+        let fg = self.theme.start_menu_fg;
+        let size = self.font_size(TextRole::Item);
+        let px = self.icon_px(START_ROW_ICON);
+        #[allow(clippy::cast_precision_loss)]
+        let side = px as f32;
+        let icon_y = rect.y + (rect.h - side).max(0.0) / 2.0;
+        let text_y = rect.y + (rect.h - size).max(0.0) / 2.0;
+        let (icon_x, image_id, name) = match item {
+            // No picture and no name of a thing to start: a heading of its own.
+            StartRow::Section(section) => {
+                self.render_start_heading(tree, rect, section);
+                return;
+            }
+            StartRow::Program { entry, in_folder } => {
+                let indent = if in_folder {
+                    self.scale(START_FOLDER_INDENT)
+                } else {
+                    0.0
+                };
+                let x = rect.x + self.scale(START_ROW_ICON_X) + indent;
+                (x, self.program_icon(entry, px, fg), entry.name.as_str())
+            }
+            StartRow::Folder { folder, open } => {
+                let chevron = Rect::new(
+                    rect.x + self.scale(START_ROW_ICON_X) - self.scale(START_FOLDER_CHEVRON) / 2.0,
+                    rect.y,
+                    self.scale(START_FOLDER_CHEVRON),
+                    rect.h,
+                );
+                let which = if open {
+                    FOLDER_OPEN_ICON
+                } else {
+                    FOLDER_CLOSED_ICON
+                };
+                self.icon_in(tree, chevron, which, START_FOLDER_CHEVRON, fg);
+                let x =
+                    rect.x + self.scale(START_ROW_ICON_X) + self.scale(START_FOLDER_INDENT) / 2.0;
+                let image_id = self
+                    .icon_registry
+                    .icon_or(folder.icon_name(), "folder", px, fg);
+                (x, image_id, folder.label())
+            }
+        };
+        tree.push(guitk::render::RenderCommand::Image {
+            x: icon_x,
+            y: icon_y,
+            width: side,
+            height: side,
+            image_id,
+        });
+        let text_x = icon_x + side + self.scale(START_ROW_ICON_GAP);
+        tree.text_in(
+            text_x,
+            text_y,
+            (rect.x + rect.w - text_x - self.scale(START_ROW_ICON_X)).max(0.0),
+            name,
+            fg,
+            size,
+        );
+    }
+
+    /// The image id of a program's picture, `px` square in `color`: its
+    /// entry's icon, or the generic program's when it names none or one the
+    /// theme does not draw.
+    fn program_icon(&self, entry: &AppEntry, px: u32, color: Color) -> u64 {
+        match &entry.icon {
+            Some(icon) => {
+                self.icon_registry
+                    .icon_or(icon.clone(), launcher::GENERIC_PROGRAM_ICON, px, color)
+            }
+            None => self.icon(launcher::GENERIC_PROGRAM_ICON, px, color),
+        }
+    }
+
+    /// A window's tile, behind its picture and title: the Aero reference's
+    /// running tile -- faint glass, brighter across its top half, an edge in
+    /// the bar's text colour and a highlight along its top -- or, for the
+    /// window in front, the same shape in the theme's colour for it with a
+    /// brighter edge and highlight.
+    ///
+    /// The reference fills with gradients the renderer does not draw; two
+    /// fills, one over the upper half, are the same glass in two steps.
+    fn draw_window_tile(
+        &self,
+        tree: &mut RenderTree,
+        tile: Rect,
+        radii: CornerRadii,
+        in_front: bool,
+    ) {
+        let (body, edge, highlight) = if in_front {
+            (
+                self.theme.taskbar_active_bg,
+                TASKBAR_TILE_EDGE_IN_FRONT,
+                TASKBAR_TILE_HIGHLIGHT_IN_FRONT,
+            )
+        } else {
+            (
+                with_alpha(Color::WHITE, TASKBAR_TILE_GLASS),
+                TASKBAR_TILE_EDGE,
+                TASKBAR_TILE_HIGHLIGHT,
+            )
+        };
+        self.draw_tile_glass(tree, tile, radii, body, edge, highlight);
+    }
+
+    /// A lit tile -- the one under the pointer, pinned or a window's: the
+    /// reference's `aero-task:hover`, which is drawn over every other state
+    /// the tile has, as its stylesheet orders it. The accent's glass with a
+    /// glow of it around, a bright edge and a bright highlight along the top.
+    fn draw_lit_tile(&self, tree: &mut RenderTree, tile: Rect, radii: CornerRadii) {
+        let accent = self.theme.accent_color;
+        tree.box_shadow(
+            tile.x,
+            tile.y,
+            tile.w,
+            tile.h,
+            Shadow {
+                offset_x: 0.0,
+                offset_y: 0.0,
+                blur: self.scale(TASKBAR_TILE_GLOW_BLUR),
+                spread: 0.0,
+                color: with_alpha(accent, TASKBAR_TILE_GLOW),
+            },
+            radii,
+        );
+        self.draw_tile_glass(
+            tree,
+            tile,
+            radii,
+            with_alpha(accent, TASKBAR_TILE_LIT),
+            TASKBAR_TILE_EDGE_LIT,
+            TASKBAR_TILE_HIGHLIGHT_LIT,
+        );
+    }
+
+    /// Light a tray item under the pointer, as the reference's
+    /// `aero-trayico:hover`: a rounded wash of white, as tall as the
+    /// reference's icon box and centred on the bar.
+    fn light_tray_item(&self, tree: &mut RenderTree, rect: Rect) {
+        let h = self.scale(TRAY_LIT_HEIGHT).min(rect.h);
+        fill_round(
+            tree,
+            Rect::new(rect.x, rect.y + (rect.h - h) / 2.0, rect.w, h),
+            with_alpha(Color::WHITE, TRAY_LIT),
+            CornerRadii::all(self.scale(TRAY_LIT_RADIUS)),
+        );
+    }
+
+    /// The bar's glass, as the reference's `aero-taskbar`: a line of light
+    /// along its top edge and another just under it, a soft light below them,
+    /// and a shade over its lower half -- translucent white and black over the
+    /// theme's colour, since the renderer draws no gradients. The reference's
+    /// shadow cast *above* the bar is not drawn: the bar's surface ends at its
+    /// edge.
+    fn draw_taskbar_glass(&self, tree: &mut RenderTree, bar: Rect) {
+        let line = self.scale(1.0).max(1.0);
+        fill(
+            tree,
+            Rect::new(bar.x, bar.y + bar.h / 2.0, bar.w, bar.h / 2.0),
+            with_alpha(Color::BLACK, TASKBAR_FOOT_SHADE),
+        );
+        fill(
+            tree,
+            Rect::new(
+                bar.x,
+                bar.y + 2.0 * line,
+                bar.w,
+                self.scale(TASKBAR_TOP_GLOW_DEPTH).min(bar.h / 2.0),
+            ),
+            with_alpha(Color::WHITE, TASKBAR_TOP_GLOW),
+        );
+        fill(
+            tree,
+            Rect::new(bar.x, bar.y + line, bar.w, line),
+            with_alpha(Color::WHITE, TASKBAR_INNER_LIGHT),
+        );
+        fill(
+            tree,
+            Rect::new(bar.x, bar.y, bar.w, line),
+            with_alpha(Color::WHITE, TASKBAR_EDGE_LIGHT),
+        );
+    }
+
+    /// The start button, as the reference's orb (`aero-orb`): a round button
+    /// in the accent with the start picture on it, a gloss across its top and
+    /// a shade at its foot, a ring of light round it and a shadow under it --
+    /// glowing in the accent while the pointer is on it, as the reference's
+    /// `:hover`, and while its menu is open, which the reference does not
+    /// mark but which the bar has always shown.
+    ///
+    /// The reference fills the orb with the system's logo; there is none in
+    /// the repository yet (`open-questions.md` C-Q28), so the picture is the
+    /// icon theme's `start-here`, on the accent. The renderer draws no
+    /// gradients, so the gloss and the shade are each a pill of translucent
+    /// white or black, the gloss in two steps.
+    fn draw_start_orb(&self, tree: &mut RenderTree) {
+        let orb = self.start_orb_rect();
+        let d = orb.w;
+        if d <= 0.0 {
+            return;
+        }
+        let round = CornerRadii::all(d / 2.0);
+        // Under it: the glow when lit, and the shadow.
+        if self.start_button_lit || self.start_menu_open {
+            tree.box_shadow(
+                orb.x,
+                orb.y,
+                orb.w,
+                orb.h,
+                Shadow {
+                    offset_x: 0.0,
+                    offset_y: 0.0,
+                    blur: self.scale(START_ORB_GLOW_BLUR),
+                    spread: 0.0,
+                    color: with_alpha(self.theme.accent_color, START_ORB_GLOW_ALPHA),
+                },
+                round,
+            );
+        }
+        tree.box_shadow(
+            orb.x,
+            orb.y,
+            orb.w,
+            orb.h,
+            Shadow {
+                offset_x: 0.0,
+                offset_y: self.scale(START_ORB_SHADOW_Y),
+                blur: self.scale(START_ORB_SHADOW_BLUR),
+                spread: 0.0,
+                color: with_alpha(Color::BLACK, START_ORB_SHADOW_ALPHA),
+            },
+            round,
+        );
+        // The rings, outside the orb: dark, then light just inside it.
+        let ring = self.scale(START_ORB_RING);
+        let outer = self.scale(START_ORB_OUTER_RING);
+        let dark = ring + outer / 2.0;
+        stroke_round(
+            tree,
+            Rect::new(orb.x - dark, orb.y - dark, d + 2.0 * dark, d + 2.0 * dark),
+            with_alpha(Color::BLACK, START_ORB_OUTER_RING_ALPHA),
+            outer,
+            CornerRadii::all(d / 2.0 + dark),
+        );
+        let light = ring / 2.0;
+        stroke_round(
+            tree,
+            Rect::new(
+                orb.x - light,
+                orb.y - light,
+                d + 2.0 * light,
+                d + 2.0 * light,
+            ),
+            with_alpha(Color::WHITE, START_ORB_RING_ALPHA),
+            ring,
+            CornerRadii::all(d / 2.0 + light),
+        );
+        // The orb, and the picture on it.
+        let body = self.theme.taskbar_accent;
+        fill_round(tree, orb, body, round);
+        let px = self.icon_px(d * START_ORB_PICTURE_SHARE / self.scale(1.0).max(f32::EPSILON));
+        #[allow(clippy::cast_precision_loss)]
+        let side = px as f32;
+        image_centred(
+            tree,
+            orb,
+            side,
+            self.icon("start-here", px, readable_on(body)),
+        );
+        // The shade at its foot, and the gloss across its top: pills inside
+        // the circle, so that nothing of either shows beyond its edge.
+        let pill = |x0: f32, y0: f32, w: f32, h: f32| {
+            (
+                Rect::new(orb.x + d * x0, orb.y + d * y0, d * w, d * h),
+                CornerRadii::all(d * h.min(w) / 2.0),
+            )
+        };
+        let (shade, shade_radii) = pill(0.2, 0.62, 0.6, 0.32);
+        fill_round(
+            tree,
+            shade,
+            with_alpha(Color::BLACK, START_ORB_SHADE_ALPHA),
+            shade_radii,
+        );
+        let (skirt, skirt_radii) = pill(0.12, 0.05, 0.76, 0.5);
+        fill_round(
+            tree,
+            skirt,
+            with_alpha(Color::WHITE, START_ORB_GLOSS_SKIRT_ALPHA),
+            skirt_radii,
+        );
+        let (cap, cap_radii) = pill(0.2, 0.06, 0.6, 0.3);
+        fill_round(
+            tree,
+            cap,
+            with_alpha(Color::WHITE, START_ORB_GLOSS_CAP_ALPHA),
+            cap_radii,
+        );
+        // And the line just inside its edge.
+        let inner = self.scale(1.0).max(1.0);
+        stroke_round(
+            tree,
+            Rect::new(
+                orb.x + inner / 2.0,
+                orb.y + inner / 2.0,
+                (d - inner).max(0.0),
+                (d - inner).max(0.0),
+            ),
+            with_alpha(Color::WHITE, START_ORB_INNER_ALPHA),
+            inner,
+            CornerRadii::all((d - inner).max(0.0) / 2.0),
+        );
+    }
+
+    /// The glass every drawn tile is made of: `body`, brighter across its top
+    /// half, a highlight along its top at `highlight`, and an edge at `edge`.
+    ///
+    /// The reference fills with gradients the renderer does not draw; two
+    /// fills, one over the upper half, are the same glass in two steps.
+    fn draw_tile_glass(
+        &self,
+        tree: &mut RenderTree,
+        tile: Rect,
+        radii: CornerRadii,
+        body: Color,
+        edge: u8,
+        highlight: u8,
+    ) {
+        fill_round(tree, tile, body, radii);
+        fill_round(
+            tree,
+            Rect::new(tile.x, tile.y, tile.w, tile.h / 2.0),
+            with_alpha(Color::WHITE, TASKBAR_TILE_SHEEN),
+            CornerRadii::top(radii.top_left),
+        );
+        let line = self.scale(1.0).max(1.0);
+        // Inside the edge, and clear of the rounded corners it would cut.
+        let inset = radii.top_left.max(line);
+        fill(
+            tree,
+            Rect::new(
+                tile.x + inset,
+                tile.y + line,
+                (tile.w - 2.0 * inset).max(0.0),
+                line,
+            ),
+            with_alpha(Color::WHITE, highlight),
+        );
+        stroke_round(
+            tree,
+            tile,
+            with_alpha(self.theme.taskbar_fg, edge),
+            line,
+            radii,
+        );
+    }
+
+    /// "Show desktop", from the strip at the taskbar's right end or its
+    /// shortcut: put away every window on this desktop -- or, when the last
+    /// press put them away and nothing has been shown since, bring those
+    /// back, bottom of the stack first, so the one that was in front is in
+    /// front again. As every taskbar's corner does.
+    fn show_desktop_requests(&mut self) -> Vec<ShellRequest> {
+        if let Some(hidden) = self.desktop_shown.take() {
+            // Activated, not restored: a maximised window put away comes back
+            // maximised, where `Restore` would also un-maximise it.
+            return hidden
+                .into_iter()
+                .filter(|id| self.windows.contains_key(id))
+                .map(|id| ShellRequest::window(id, ShellControlAction::Activate))
+                .collect();
+        }
+        // `on_glass`, not `mapped`: asking a window that is already minimised
+        // to minimise again is a request the compositor would have to ignore,
+        // and bringing it back after would show a window the user had put away
+        // themselves.
+        let mut shown: Vec<&ManagedWindow> = self
+            .windows
+            .values()
+            .filter(|w| w.on_glass() && w.desktop == self.current_desktop)
+            .collect();
+        shown.sort_by_key(|w| w.z_order);
+        let hidden: Vec<WindowId> = shown.iter().map(|w| w.id).collect();
+        let requests = hidden
+            .iter()
+            .map(|id| ShellRequest::window(*id, ShellControlAction::Minimize))
+            .collect();
+        if !hidden.is_empty() {
+            self.desktop_shown = Some(hidden);
+        }
+        requests
+    }
+
+    /// Carry out a power choice from the start menu. The three that end the
+    /// session ask every window to close first, and are carried out once they
+    /// have ([`Ending`]); the others -- sleep, hibernate, lock -- leave the
+    /// session as it was, and are carried out at once.
+    ///
+    /// Until this, "Shut down" ran `powerctl` straight away: a document open
+    /// in an editor with unsaved changes was gone, and the editor was never
+    /// asked.
+    fn choose_power(&mut self, choice: power::PowerChoice) -> ShellAction {
+        if !choice.ends_the_session() || self.windows.is_empty() {
+            return Self::power_action(choice);
+        }
+        // Asked, not destroyed: the request a window's own close button
+        // makes, so a program with unsaved work puts up its dialog.
+        let requests: Vec<ShellRequest> = self
+            .windows
+            .keys()
+            .map(|id| ShellRequest::window(*id, ShellControlAction::Close))
+            .collect();
+        self.ending = Some(Ending {
+            choice,
+            asked_at_ms: self.osd_clock_ms,
+            listing: false,
+        });
+        self.ending_ready = false;
+        // Said where it takes no input: a program's "save your changes?" is
+        // what the user may need to reach next, and nothing here may stand
+        // in front of it.
+        self.osd.show(
+            osd::OsdKind::Custom {
+                icon: osd::OsdIcon::Info,
+                message: format!("Closing programs to {}\u{2026}", choice.verb()),
+            },
+            self.osd_clock_ms,
+        );
+        ShellAction::ControlAll(requests)
+    }
+
+    /// What carrying out `choice` asks of the session: its program, or --
+    /// for log out, whose login screen is the shell's own -- the session end.
+    fn power_action(choice: power::PowerChoice) -> ShellAction {
+        match choice.command() {
+            Some(launch) => ShellAction::Launch(launch),
+            None => ShellAction::LogOut,
+        }
+    }
+
+    /// Whether the programs a shut down, restart or log out is waiting for
+    /// are listed for the user to decide.
+    fn ending_listing(&self) -> bool {
+        self.ending.is_some_and(|ending| ending.listing)
+    }
+
+    /// The shut down, restart or log out whose programs have all closed, as
+    /// the action that carries it out -- once, clearing it. For the session,
+    /// after each window list.
+    pub fn take_ending_action(&mut self) -> Option<ShellAction> {
+        if !core::mem::take(&mut self.ending_ready) {
+            return None;
+        }
+        let ending = self.ending.take()?;
+        Some(Self::power_action(ending.choice))
+    }
+
+    /// How long until the programs still open are listed, in milliseconds of
+    /// the overlay clock: a deadline the session wakes for.
+    #[must_use]
+    pub fn ending_due_in(&self) -> Option<u64> {
+        let ending = self.ending.filter(|ending| !ending.listing)?;
+        Some(
+            ending
+                .asked_at_ms
+                .saturating_add(ENDING_GRACE_MS)
+                .saturating_sub(self.osd_clock_ms),
+        )
+    }
+
+    /// Whether the grace has run out on this frame, so that the list of
+    /// programs still open has just gone up -- for the session, to draw it.
+    pub fn tick_ending(&mut self) -> bool {
+        match self.ending.as_mut() {
+            Some(ending)
+                if !ending.listing
+                    && self.osd_clock_ms.saturating_sub(ending.asked_at_ms) >= ENDING_GRACE_MS =>
+            {
+                ending.listing = true;
+                true
+            }
+            _ => false,
+        }
+    }
+
+    /// A press while the list of programs still open is up: its buttons, and
+    /// nothing else -- it covers the screen.
+    fn press_ending(&mut self, hit: Hit) -> ShellAction {
+        match hit {
+            Hit::EndingAnyway => match self.ending.take() {
+                Some(ending) => Self::power_action(ending.choice),
+                None => ShellAction::Consumed,
+            },
+            Hit::EndingCancel => {
+                self.ending = None;
+                ShellAction::Consumed
+            }
+            _ => ShellAction::Consumed,
+        }
+    }
+
+    /// The list's panel, in the middle of the screen, as tall as what it says.
+    fn ending_panel_rect(&self) -> Rect {
+        let (sw, sh) = self.viewport();
+        let rows = self.windows.len().min(ENDING_LIST_MAX.saturating_add(1));
+        #[allow(clippy::cast_precision_loss)]
+        let rows = rows as f32;
+        let pad = self.scale(ENDING_PANEL_PADDING);
+        let heading = self.font_size(TextRole::Heading) * 1.4;
+        let body = self.font_size(TextRole::Body) * 1.3 * 3.0;
+        let h = pad * 4.0
+            + heading
+            + body
+            + rows * self.scale(ENDING_ROW_HEIGHT)
+            + self.scale(ENDING_BUTTON_HEIGHT);
+        let w = self.scale(ENDING_PANEL_WIDTH).min(sw);
+        Rect::new((sw - w) / 2.0, ((sh - h) / 2.0).max(0.0), w, h.min(sh))
+    }
+
+    /// The list's two buttons, "... anyway" and "Cancel", right-aligned at
+    /// its foot, Cancel rightmost.
+    fn ending_button_rects(&self) -> (Rect, Rect) {
+        let panel = self.ending_panel_rect();
+        let pad = self.scale(ENDING_PANEL_PADDING);
+        let (w, h) = (
+            self.scale(ENDING_BUTTON_WIDTH),
+            self.scale(ENDING_BUTTON_HEIGHT),
+        );
+        let y = panel.y + panel.h - pad - h;
+        let cancel = Rect::new(panel.x + panel.w - pad - w, y, w, h);
+        let anyway = Rect::new(cancel.x - self.scale(10.0) - w, y, w, h);
+        (anyway, cancel)
+    }
+
+    /// The list of programs a shut down, restart or log out is still waiting
+    /// for, when it is up: over a dimmed screen, what is still open -- its
+    /// program's picture and its title -- and the choice to go ahead anyway or
+    /// not.
+    #[must_use]
+    pub fn render_ending(&self) -> Option<RenderTree> {
+        let ending = self.ending.filter(|ending| ending.listing)?;
+        let mut tree = RenderTree::new();
+        let (sw, sh) = self.viewport();
+        fill(&mut tree, Rect::new(0.0, 0.0, sw, sh), ENDING_SCRIM);
+        let panel = self.ending_panel_rect();
+        let radii = self.corner_radii();
+        shadow(&mut tree, panel, radii);
+        fill_round(&mut tree, panel, self.theme.start_menu_bg, radii);
+        stroke_round(
+            &mut tree,
+            panel,
+            self.theme.panel_border_color,
+            self.scale(1.0),
+            radii,
+        );
+        let fg = self.theme.start_menu_fg;
+        let pad = self.scale(ENDING_PANEL_PADDING);
+        let x = panel.x + pad;
+        let inner = (panel.w - pad * 2.0).max(0.0);
+        let mut y = panel.y + pad;
+        let heading = self.font_size(TextRole::Heading);
+        let open = self.windows.len();
+        let title = if open == 1 {
+            "A program is still open".to_string()
+        } else {
+            format!("{open} programs are still open")
+        };
+        tree.text_in_weighted(
+            x,
+            y,
+            inner,
+            &title,
+            fg,
+            heading,
+            guitk::render::FontWeightHint::Bold,
+        );
+        y += heading * 1.4 + pad / 2.0;
+        let body = self.font_size(TextRole::Body);
+        for line in [
+            "They were asked to close and have not. One may be asking",
+            "whether to keep your work: Cancel, and close it yourself --",
+            &format!(
+                "or {} anyway, and lose what is not saved.",
+                ending.choice.verb()
+            ),
+        ] {
+            tree.text_in(x, y, inner, line, with_alpha(fg, START_SECTION_ALPHA), body);
+            y += body * 1.3;
+        }
+        y += pad / 2.0;
+        let px = self.icon_px(START_ROW_ICON);
+        #[allow(clippy::cast_precision_loss)]
+        let side = px as f32;
+        let row_h = self.scale(ENDING_ROW_HEIGHT);
+        let mut windows: Vec<&ManagedWindow> = self.windows.values().collect();
+        windows.sort_by_key(|w| w.id.0);
+        for window in windows.iter().take(ENDING_LIST_MAX) {
+            let program = self.program_for_app_id(&window.app_id);
+            let image_id = self.picture_of(program, px, fg);
+            tree.push(guitk::render::RenderCommand::Image {
+                x,
+                y: y + (row_h - side) / 2.0,
+                width: side,
+                height: side,
+                image_id,
+            });
+            let text_x = x + side + self.scale(10.0);
+            let name = if window.title.is_empty() {
+                program.map_or("A window with no title", |p| p.name.as_str())
+            } else {
+                window.title.as_str()
+            };
+            tree.text_in(
+                text_x,
+                y + (row_h - body).max(0.0) / 2.0,
+                (x + inner - text_x).max(0.0),
+                name,
+                fg,
+                body,
+            );
+            y += row_h;
+        }
+        if open > ENDING_LIST_MAX {
+            tree.text_in(
+                x,
+                y + (row_h - body).max(0.0) / 2.0,
+                inner,
+                &format!("and {} more", open.saturating_sub(ENDING_LIST_MAX)),
+                with_alpha(fg, START_SECTION_ALPHA),
+                body,
+            );
+        }
+        let (anyway, cancel) = self.ending_button_rects();
+        let button_radii = CornerRadii::all(self.scale(4.0));
+        fill_round(&mut tree, anyway, self.theme.accent_color, button_radii);
+        fill_round(
+            &mut tree,
+            cancel,
+            self.theme.taskbar_active_bg,
+            button_radii,
+        );
+        stroke_round(
+            &mut tree,
+            cancel,
+            self.theme.panel_border_color,
+            self.scale(1.0),
+            button_radii,
+        );
+        let verb = ending.choice.label();
+        for (rect, label, color) in [
+            (
+                anyway,
+                format!("{verb} anyway"),
+                readable_on(self.theme.accent_color),
+            ),
+            (cancel, "Cancel".to_string(), fg),
+        ] {
+            let w = text::width(&label, body);
+            tree.text(
+                rect.x + (rect.w - w).max(0.0) / 2.0,
+                rect.y + (rect.h - body).max(0.0) / 2.0,
+                &label,
+                color,
+                body,
+            );
+        }
+        Some(tree)
+    }
+
+    /// The image id of `program`'s picture, `px` square in `color` -- or the
+    /// generic program's, when the desktop does not know which program it is.
+    fn picture_of(&self, program: Option<&AppEntry>, px: u32, color: Color) -> u64 {
+        match program {
+            Some(entry) => self.program_icon(entry, px, color),
+            None => self.icon(launcher::GENERIC_PROGRAM_ICON, px, color),
+        }
+    }
+
+    /// Draw the start menu's search field: what has been typed, with a caret,
+    /// or a hint saying what typing does -- and, when the search finds
+    /// nothing, what Enter will do instead.
+    ///
+    /// The reference's `aero-sm-search`: a well with a quiet line round it and
+    /// a magnifier at its start.
+    fn render_start_search(&self, tree: &mut RenderTree) {
+        let field = self.start_search_rect();
+        let size = self.font_size(TextRole::Body);
+        // The toolkit's field (`guitk::field`), in the theme's shape and at the
+        // display's scaling -- but with no focus mark. The search has the
+        // keyboard whenever the menu is open, so a mark would say nothing the
+        // open menu does not; the reference draws none (its input is
+        // `outline: none` inside a bordered box), and the caret is what says
+        // the typing goes here.
+        guitk::field::draw_at_scale(
+            tree,
+            &Palette::from_settings(&self.appearance),
+            guitk::frame::Rect::new(field.x, field.y, field.w, field.h),
+            guitk::field::State::default(),
+            0.0,
+            self.scale(1.0),
+        );
+        let hint = with_alpha(self.theme.start_menu_fg, START_MENU_HINT_ALPHA);
+        let inset = self.scale(START_SEARCH_INSET);
+        let px = self.icon_px(START_SEARCH_ICON);
+        #[allow(clippy::cast_precision_loss)]
+        let side = px as f32;
+        tree.push(guitk::render::RenderCommand::Image {
+            x: field.x + inset,
+            y: field.y + (field.h - side).max(0.0) / 2.0,
+            width: side,
+            height: side,
+            image_id: self.icon("system-search", px, hint),
+        });
+        let text_x = field.x + inset + side + self.scale(START_SEARCH_ICON_GAP);
+        let text_w = (field.x + field.w - inset - text_x).max(1.0);
+        let line = text::line_height(size, guitk::render::FontWeightHint::Regular);
+        let y = field.y + ((field.h - line) / 2.0).max(0.0);
+        let query = self.start_query.text();
+        textedit::draw(
+            tree,
+            &SingleLine {
+                text: query,
+                cursor: self.start_query.cursor(),
+                selection_anchor: self.start_query.selection_anchor(),
+                focused: true,
+                x: text_x,
+                y,
+                width: text_w,
+                line_height: line,
+                font_size: size,
+                weight: guitk::render::FontWeightHint::Regular,
+                color: self.theme.start_menu_fg,
+                selection_bg: self.theme.accent_color,
+                selection_fg: self.theme.start_menu_bg,
+                caret_width: self.appearance.caret_width(),
+            },
+        );
+        if query.is_empty() {
+            // What it searches, as the reference's placeholder says -- the
+            // programs, which is all it does search; a command it finds
+            // nothing for is run, and the list says so when that happens.
+            tree.text_in(
+                text_x + self.scale(4.0),
+                y,
+                (text_w - self.scale(4.0)).max(0.0),
+                START_SEARCH_HINT,
+                hint,
+                size,
+            );
+        } else if self.start_menu_rows().is_empty() {
+            let row = self.start_menu_row_rect(0);
+            tree.text_in(
+                row.x + self.scale(24.0),
+                row.y + self.scale(8.0),
+                (row.w - self.scale(36.0)).max(0.0),
+                "Nothing found. Press Enter to run it.",
+                with_alpha(self.theme.start_menu_fg, START_MENU_HINT_ALPHA),
+                self.font_size(TextRole::Item),
+            );
+        }
     }
 
     /// Draw the power menu into the start menu's tree.
@@ -5373,15 +9691,21 @@ impl DesktopShell {
             shadow(tree, panel, radii);
         }
 
-        let entries = self.power_menu_entries();
+        let icon_px = self.icon_px(POWER_MENU_ICON);
         let rows: Vec<power::PowerMenuRow<'_>> = (0..self.power_menu_visible_rows())
             .filter_map(|row| {
-                entries.get(row).map(|entry| power::PowerMenuRow {
-                    label: &entry.name,
-                    rect: self.power_menu_row_rect(row),
-                })
+                power::PowerChoice::ALL
+                    .get(row)
+                    .map(|choice| power::PowerMenuRow {
+                        label: choice.label(),
+                        rect: self.power_menu_row_rect(row),
+                        lit: self.start_lit == Some(StartLit::PowerRow(row)),
+                        icon: self.icon(choice.icon_name(), icon_px, self.theme.start_menu_fg),
+                    })
             })
             .collect();
+        #[allow(clippy::cast_precision_loss)]
+        let icon_size = icon_px as f32;
 
         tree.extend(power::render_power_menu(
             panel,
@@ -5395,7 +9719,11 @@ impl DesktopShell {
                 },
                 radii,
                 font_size: self.font_size(TextRole::Item),
-                text_inset: self.scale(POWER_MENU_TEXT_INSET),
+                text_inset: self.scale(POWER_MENU_ROW_INSET),
+                icon_size,
+                icon_gap: self.scale(POWER_MENU_ICON_GAP),
+                lit: with_alpha(self.theme.accent_color, POWER_MENU_LIT_ALPHA),
+                lit_radii: CornerRadii::all(self.scale(4.0)),
             },
         ));
     }
@@ -5404,17 +9732,36 @@ impl DesktopShell {
     // Utilities
     // ======================================================================
 
-    /// The zone the taskbar clock reads in.
+    /// The zone the taskbar clock reads in: the one the user chose, or the
+    /// machine's own.
     ///
-    /// UTC when the configured zone is not in the table — which is honest
-    /// rather than convenient: a zone we cannot resolve is not a licence to
-    /// invent an offset, and `datetime_settings` already refuses to read a
-    /// zoneinfo *name* for the same reason (there is no tzdata on disk yet;
-    /// `TD-NO-SYSTEM-DEFAULT-ZONE-WITHOUT-TZ`).
+    /// The machine's also when the chosen one is not in the table -- a file
+    /// edited by hand -- which is honest rather than convenient: a zone we
+    /// cannot resolve is not a licence to invent an offset, and the machine's
+    /// zone is the one `date` would show.
     fn local_zone(&self) -> Tz {
-        self.datetime
-            .current_timezone()
-            .map_or_else(Tz::utc, |tz| tz.rule)
+        self.datetime.rule(self.system_zone)
+    }
+
+    /// Read how the user wants the time told (`datetime.yaml`) and the zone
+    /// the machine is in.
+    ///
+    /// Both at once, because the second is what the first falls back to. Not
+    /// in [`new`](Self::new), for the reason on
+    /// `system_zone`; the session calls this when it
+    /// starts. See `design-decisions.md` §875.
+    pub fn load_datetime(&mut self) {
+        self.datetime = datetimesettings::DateTimeFile::load().settings;
+        self.system_zone = datetimesettings::system_zone();
+    }
+
+    /// Adopt the machine's zone as `zone` -- what [`load_datetime`] reads,
+    /// for a test that needs a zone of its own choosing rather than the
+    /// host's.
+    ///
+    /// [`load_datetime`]: Self::load_datetime
+    pub fn set_system_zone(&mut self, zone: Tz) {
+        self.system_zone = zone;
     }
 
     /// How far into the local day a UTC instant is, in seconds.
@@ -5492,6 +9839,18 @@ impl DesktopShell {
         self.clock().format_taskbar(utc_secs, &self.local_zone())
     }
 
+    /// What the clock is named when the pointer rests on it: the whole date,
+    /// "Saturday, September 26, 2026", in the clock's zone.
+    fn clock_tooltip_at(&self, utc_secs: u64) -> String {
+        self.clock().format_date(utc_secs, &self.local_zone())
+    }
+
+    /// The taskbar clock's two lines for a given UTC instant: the time, and
+    /// the weekday and date when either is switched on.
+    fn clock_lines_at(&self, utc_secs: u64) -> (String, Option<String>) {
+        self.clock().taskbar_lines(utc_secs, &self.local_zone())
+    }
+
     /// How wide the clock's slot in the tray is.
     ///
     /// The **widest** reading the current switches can produce, not the current
@@ -5499,7 +9858,26 @@ impl DesktopShell {
     /// the tray is positioned from this, so a width that followed the current
     /// second would shuffle the tray once a minute.
     fn clock_width(&self) -> f32 {
-        self.clock().reading_width(self.font_size(TextRole::Body))
+        let clock = self.clock();
+        if self.clock_has_two_lines() {
+            clock.lines_width(
+                self.font_size(TextRole::Body),
+                self.font_size(TextRole::Caption),
+            )
+        } else {
+            clock.reading_width(self.font_size(TextRole::Body))
+        }
+    }
+
+    /// Whether the clock is drawn in the Aero reference's two lines -- the
+    /// time over the weekday and date -- rather than one: when there is a
+    /// weekday or a date to show, and the bar is tall enough for two lines at
+    /// [`CLOCK_LINE_HEIGHT`] with [`TASKBAR_TILE_MARGIN`] above and below.
+    fn clock_has_two_lines(&self) -> bool {
+        (self.datetime.show_date || self.datetime.show_day_of_week)
+            && CLOCK_LINE_HEIGHT
+                * (self.font_size(TextRole::Body) + self.font_size(TextRole::Caption))
+                <= self.taskbar_rect().h - 2.0 * self.scale(TASKBAR_TILE_MARGIN)
     }
 
     /// How wide the virtual-desktop indicator's text is.
@@ -5552,8 +9930,8 @@ impl DesktopShell {
             // the rightmost button would sit under them.
             + self.app_tray_width();
         // Padding at the right edge, between each pair of items, and at the
-        // left of the tray.
-        (content + padding * 4.0).max(self.scale(TRAY_MIN_WIDTH))
+        // left of the tray -- and the "Show desktop" strip right of it all.
+        (content + padding * 4.0).max(self.scale(TRAY_MIN_WIDTH)) + self.show_desktop_rect().w
     }
 
     /// The icons other programs have put in the tray, as the compositor
@@ -5633,8 +10011,7 @@ impl DesktopShell {
     /// bar has nowhere to put one.
     fn open_tray_overflow(&mut self) {
         // Opening a popup closes the others, as every other popup here does.
-        self.start_menu_open = false;
-        self.power_menu_open = false;
+        self.close_start_menu();
         self.shortcut_card_open = false;
         self.calendar.set_visible(false);
         self.notifications.hide();
@@ -5675,34 +10052,94 @@ impl DesktopShell {
         self.tray_overflow_menu = Some((menu, keys));
     }
 
-    /// Offer to pin or unpin the start-menu row at `index`.
+    /// Open the menu of the program `target` names -- a start-menu row, a pin,
+    /// or a window's tile.
     ///
-    /// One item, and its label is the *action*, not the state: "Pin to
-    /// taskbar" when it is not pinned and "Unpin from taskbar" when it is. A
-    /// menu that said "Pinned" with a tick would be a second way of saying
-    /// what the taskbar already shows, and would leave the user to work out
-    /// that clicking it reverses the thing.
+    /// The program's jump list first, as a taskbar's is: what it can be
+    /// started to do, above what can be done with it. Then pinning it, to the
+    /// taskbar and to the start menu, and a shortcut to it on the desktop. A
+    /// pin's label is the *action*, not the state -- "Pin to taskbar" when it
+    /// is not pinned, "Unpin from taskbar" when it is -- because a tick beside
+    /// "Pinned" would be a second way of saying what the taskbar already shows,
+    /// and would leave the user to work out that clicking it reverses the
+    /// thing.
+    ///
+    /// A window's tile heads the program's rows with the program's name, which
+    /// starts another copy, and ends with closing the window -- the rows every
+    /// taskbar's window menu has. A window whose program the desktop cannot
+    /// name offers only to close it; any other target that names no program
+    /// opens nothing.
     fn open_pin_menu(&mut self, target: PinTarget, x: f32, y: f32) {
-        let Some(exec) = self.exec_of(target) else {
+        let window = match target {
+            PinTarget::Window(id) => Some(id),
+            PinTarget::StartMenuRow(_) | PinTarget::Pinned(_) => None,
+        };
+        let exec = self.exec_of(target);
+        if exec.is_none() && window.is_none() {
             return;
-        };
-        let label = if self.is_pinned(&exec) {
-            "Unpin from taskbar"
-        } else {
-            "Pin to taskbar"
-        };
-        let items = vec![guitk::menu::MenuItem::Action {
-            id: Self::MENU_PIN_TOGGLE,
-            label: label.to_string(),
+        }
+        let action = |id: u64, label: String| guitk::menu::MenuItem::Action {
+            id,
+            label,
             shortcut: None,
             icon: None,
             enabled: true,
             checked: None,
-        }];
+        };
+        // An action with no command line is started by D-Bus, which this
+        // system does not have, so it is not offered.
+        let mut items: Vec<guitk::menu::MenuItem> = self
+            .program_of(target)
+            .map(|app| {
+                app.actions
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, a)| a.exec.is_some())
+                    .map(|(index, a)| {
+                        action(
+                            Self::MENU_JUMP_LIST_BASE
+                                .saturating_add(u64::try_from(index).unwrap_or(u64::MAX)),
+                            a.name.clone(),
+                        )
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+        if !items.is_empty() {
+            items.push(guitk::menu::MenuItem::Separator);
+        }
+        if let Some(exec) = &exec {
+            if window.is_some()
+                && let Some(program) = self.program_of(target)
+            {
+                items.push(action(Self::MENU_START_ANOTHER, program.name.clone()));
+            }
+            let pin = if self.is_pinned(exec) {
+                "Unpin from taskbar"
+            } else {
+                "Pin to taskbar"
+            };
+            let start_pin = if self.is_pinned_to_start(exec) {
+                "Unpin from Start menu"
+            } else {
+                "Pin to Start menu"
+            };
+            items.extend([
+                action(Self::MENU_PIN_TOGGLE, pin.to_string()),
+                action(Self::MENU_START_PIN_TOGGLE, start_pin.to_string()),
+                action(Self::MENU_ADD_TO_DESKTOP, "Add to desktop".to_string()),
+            ]);
+        }
+        if window.is_some() {
+            if !items.is_empty() {
+                items.push(guitk::menu::MenuItem::Separator);
+            }
+            items.push(action(Self::MENU_CLOSE_WINDOW, "Close window".to_string()));
+        }
         let mut menu = guitk::menu::ContextMenu::new(items);
         // The real screen, not the toolkit's assumed one -- the same reason
         // the overflow list passes it: this opens from wherever the start menu
-        // is, which is near the bottom edge.
+        // or the taskbar is, which is near the bottom edge.
         menu.show(x, y, self.viewport());
         self.pin_menu = Some((menu, target));
     }
@@ -5720,10 +10157,106 @@ impl DesktopShell {
             return ShellAction::Consumed;
         };
         self.pin_menu = None;
-        if id == Self::MENU_PIN_TOGGLE {
-            self.toggle_pin(target);
+        self.activate_pin_menu_item(id, target)
+    }
+
+    /// One row of the pin menu, chosen by click or by key: what it asks for
+    /// -- a program to start, for the program's own row and its jump list; a
+    /// window to close; or nothing further, for the rows that pin and add.
+    fn activate_pin_menu_item(&mut self, id: MenuItemId, target: PinTarget) -> ShellAction {
+        match id {
+            Self::MENU_PIN_TOGGLE => self.toggle_pin(target),
+            Self::MENU_START_PIN_TOGGLE => {
+                if let Some(exec) = self.exec_of(target) {
+                    self.toggle_start_pin(&exec);
+                }
+            }
+            Self::MENU_ADD_TO_DESKTOP => self.add_to_desktop(target),
+            Self::MENU_START_ANOTHER => {
+                return self.exec_of(target).map_or(ShellAction::Consumed, |exec| {
+                    ShellAction::Launch(self.launch_for(&exec))
+                });
+            }
+            // Asked, not done: the window's program is told, and one with
+            // unsaved work gets to put up its dialog -- the request its own
+            // close button makes.
+            Self::MENU_CLOSE_WINDOW => {
+                if let PinTarget::Window(window) = target {
+                    return ShellAction::Control(ShellRequest::window(
+                        window,
+                        ShellControlAction::Close,
+                    ));
+                }
+            }
+            _ => {
+                let Some(launch) = id
+                    .checked_sub(Self::MENU_JUMP_LIST_BASE)
+                    .and_then(|index| usize::try_from(index).ok())
+                    .and_then(|index| {
+                        let app = self.program_of(target)?;
+                        let action = app.actions.get(index)?;
+                        app.launch_action(&action.id)
+                    })
+                else {
+                    return ShellAction::Consumed;
+                };
+                // Chosen from the start menu, it gets out of the way of the
+                // window it is about to open, as starting the program does.
+                if matches!(target, PinTarget::StartMenuRow(_)) {
+                    self.close_start_menu();
+                }
+                return ShellAction::Launch(launch);
+            }
         }
         ShellAction::Consumed
+    }
+
+    /// The program a pin menu target names, as the launcher knows it -- for
+    /// its jump list. A program the launcher does not know has none: a pin
+    /// is a copy of a listed program's entry, or one made from its path.
+    fn program_of(&self, target: PinTarget) -> Option<&AppEntry> {
+        let exec = self.exec_of(target)?;
+        self.apps.iter().find(|app| app.executable_path == exec)
+    }
+
+    /// Pin `exec` to the start menu, or unpin it if it is pinned there
+    /// already -- "Pin to Start menu" on the pin menu and on a program
+    /// icon's own menu, whose label says which it will do.
+    fn toggle_start_pin(&mut self, exec: &str) {
+        if self.is_pinned_to_start(exec) {
+            self.unpin_from_start(exec);
+        } else {
+            self.pin_to_start(exec);
+        }
+    }
+
+    /// Put a shortcut to the program `target` names on the desktop -- the pin
+    /// menu's "Add to desktop" -- or select the one already there.
+    ///
+    /// Named as the start menu or the taskbar names it, and saved with the
+    /// layout, so it is still there after a login.
+    fn add_to_desktop(&mut self, target: PinTarget) {
+        let Some(exec) = self.exec_of(target) else {
+            return;
+        };
+        let name = match target {
+            PinTarget::StartMenuRow(index) => {
+                self.start_program_at(index).map(|entry| entry.name.clone())
+            }
+            PinTarget::Pinned(index) => self
+                .taskbar
+                .pinned_apps()
+                .get(index)
+                .map(|app| app.display_name.clone()),
+            PinTarget::Window(_) => self.program_of(target).map(|app| app.name.clone()),
+        }
+        .unwrap_or_else(|| exec.clone());
+        let (_, added) = self.icons.add_shortcut(
+            &name,
+            icons::IconType::Executable,
+            icons::IconAction::OpenPath(PathBuf::from(&exec)),
+        );
+        self.icons_dirty |= added;
     }
 
     /// The executable a pin menu target names, if it still names one.
@@ -5734,14 +10267,18 @@ impl DesktopShell {
     fn exec_of(&self, target: PinTarget) -> Option<String> {
         match target {
             PinTarget::StartMenuRow(index) => self
-                .start_menu_entries()
-                .get(index)
+                .start_program_at(index)
                 .map(|entry| entry.executable_path.clone()),
             PinTarget::Pinned(index) => self
                 .taskbar
                 .pinned_apps()
                 .get(index)
                 .map(|app| app.exec_path.clone()),
+            PinTarget::Window(id) => self
+                .windows
+                .get(&id)
+                .and_then(|window| self.program_for_app_id(&window.app_id))
+                .map(|app| app.executable_path.clone()),
         }
     }
 
@@ -5760,16 +10297,90 @@ impl DesktopShell {
             return;
         }
         let name = match target {
-            PinTarget::StartMenuRow(index) => self
-                .start_menu_entries()
-                .get(index)
-                .map(|entry| entry.name.clone()),
-            // Already pinned by construction, so this arm is unreachable in
-            // practice; the name it would use is the launcher's.
-            PinTarget::Pinned(_) => None,
+            PinTarget::StartMenuRow(index) => {
+                self.start_program_at(index).map(|entry| entry.name.clone())
+            }
+            // A pin is already pinned by construction, so its arm is
+            // unreachable in practice. A window's program is one the launcher
+            // knows -- that is how its path was found -- so the launcher's
+            // name, below, is the program's.
+            PinTarget::Pinned(_) | PinTarget::Window(_) => None,
         }
         .unwrap_or_else(|| self.app_name_for(&exec));
         self.pin_app(&exec, &name);
+    }
+
+    /// The taskbar menu's "Show window titles" item.
+    const MENU_SHOW_TITLES: MenuItemId = 1;
+
+    /// Open the taskbar's own menu at `(x, y)`: the bar's options.
+    ///
+    /// One so far, a switch: whether windows' tiles show their titles
+    /// (`taskbar_labels`) -- `design.txt`'s "option to show app name along
+    /// with app icon". A switch, ticked when on, because it *is* a state of
+    /// the bar, unlike the pin menu's items, which are actions. Here as well
+    /// as in the Settings app for the reason the desktop's View menu carries
+    /// the icon size: it is a property of the thing under the pointer.
+    fn open_taskbar_menu(&mut self, x: f32, y: f32) {
+        // Opening a menu closes whatever else was open, as the desktop's does.
+        self.dismiss_popups();
+        let mut menu = guitk::menu::ContextMenu::new(vec![guitk::menu::MenuItem::Action {
+            id: Self::MENU_SHOW_TITLES,
+            label: "Show window titles".to_string(),
+            shortcut: None,
+            icon: None,
+            enabled: true,
+            checked: Some(self.appearance.taskbar_labels),
+        }]);
+        // The real screen, not the toolkit's assumed one: this opens from the
+        // bottom edge, where a wrong viewport puts the rows off the display.
+        menu.show(x, y, self.viewport());
+        self.taskbar_menu = Some(menu);
+    }
+
+    /// A press while the taskbar's menu is open: a row takes its action, and
+    /// a press anywhere else closes the menu, as the desktop menu does.
+    fn click_taskbar_menu(&mut self, x: f32, y: f32) -> ShellAction {
+        let chosen = self
+            .taskbar_menu
+            .as_mut()
+            .and_then(|menu| menu.handle_click(x, y));
+        self.taskbar_menu = None;
+        if let Some(id) = chosen {
+            self.activate_taskbar_menu_item(id);
+        }
+        ShellAction::Consumed
+    }
+
+    /// One row of the taskbar's menu, chosen by click or by key.
+    fn activate_taskbar_menu_item(&mut self, id: MenuItemId) {
+        if id == Self::MENU_SHOW_TITLES {
+            self.toggle_taskbar_labels();
+        }
+    }
+
+    /// Show windows' titles on their tiles, or stop -- written to
+    /// `appearance.yaml`, the file the Settings app edits too, so the two
+    /// agree. Load, modify, save, and a failed write reported with the bar
+    /// changed anyway, for the reasons [`toggle_night_light`](Self::toggle_night_light)
+    /// gives. The compositor is not told: it draws no taskbar.
+    fn toggle_taskbar_labels(&mut self) {
+        let mut file = appearance::AppearanceFile::load();
+        file.settings.taskbar_labels = !self.appearance.taskbar_labels;
+        self.appearance.taskbar_labels = file.settings.taskbar_labels;
+        if let Err(err) = file.save() {
+            eprintln!("desktop: could not save appearance.yaml: {err}");
+        }
+    }
+
+    /// The taskbar menu's draw commands, `None` when it is closed.
+    #[must_use]
+    pub fn render_taskbar_menu(&self) -> Option<RenderTree> {
+        let menu = self.taskbar_menu.as_ref()?;
+        let mut tree = RenderTree::new();
+        tree.commands
+            .extend(menu.render(&Palette::from_settings(&self.appearance)));
+        Some(tree)
     }
 
     /// The pin menu's draw commands, empty when it is closed.
@@ -5879,11 +10490,21 @@ impl DesktopShell {
 
     /// Move a pinned button along the bar. Answers whether anything moved.
     fn drag_pinned_to(&mut self, x: f32, y: f32) -> bool {
+        let bar_top = self.taskbar_rect().y;
+        let on_start = self.start_button_rect().contains(x, y);
         let Some(drag) = self.pin_drag.as_mut() else {
             return false;
         };
         drag.on_move(x, y);
         if !drag.is_dragging() {
+            return false;
+        }
+        self.carry_at = (x, y);
+        // Carried up off the bar, the button is on its way to the desktop;
+        // on the start button, to the start menu. Either way the row stops
+        // rearranging under a pointer that is not on it.
+        self.pin_drag_off_bar = y < bar_top || on_start;
+        if self.pin_drag_off_bar {
             return false;
         }
         let Some(exec) = drag.pressed_key() else {
@@ -5895,7 +10516,8 @@ impl DesktopShell {
             // a program back on the bar the user had just taken off.
             return false;
         };
-        let to = self.pinned_drop_boundary(x);
+        let count = self.taskbar.pinned_apps().len();
+        let to = self.row_drop_index(0, count, from, x);
         if to == from {
             return false;
         }
@@ -5904,22 +10526,108 @@ impl DesktopShell {
         true
     }
 
-    /// Where in the pinned run a drop at `x` belongs.
+    /// Move a window's button along the row of window buttons, to the place
+    /// under the pointer. Answers whether anything moved.
     ///
-    /// Measured against each button's *midpoint*, so a button dropped on the
-    /// left half of its neighbour goes before it and on the right half after
-    /// it. Clamped to the run: a drag past the last pinned button lands at the
-    /// end rather than among the window buttons, which are not the pinned
-    /// list's to rearrange.
-    fn pinned_drop_boundary(&self, x: f32) -> usize {
-        let count = self.taskbar.pinned_apps().len();
-        for index in 0..count {
-            let button = self.taskbar_button_rect(index);
-            if x < button.x + button.w / 2.0 {
-                return index;
+    /// Only along its own row: the pinned buttons are launchers, in an order
+    /// of their own, and a window's button among them would be neither.
+    /// Carried off the bar, it stays where it last was.
+    fn drag_window_button_to(&mut self, x: f32, y: f32) -> bool {
+        let Some(press) = self.window_press.as_mut() else {
+            return false;
+        };
+        press.source.on_move(x, y);
+        if !press.source.is_dragging() {
+            return false;
+        }
+        let Some(id) = press.source.pressed_key() else {
+            return false;
+        };
+        if !self.taskbar_rect().contains(x, y) {
+            return false;
+        }
+        let shown: Vec<WindowId> = self.taskbar_button_windows().iter().map(|w| w.id).collect();
+        // Gone from the bar while it was held -- closed, or moved to another
+        // desktop. Nothing left to move.
+        let Some(from) = shown.iter().position(|w| *w == id) else {
+            return false;
+        };
+        let pins = self.taskbar.pinned_apps().len();
+        let to = self.row_drop_index(pins, shown.len(), from, x);
+        if to == from {
+            return false;
+        }
+        let mut row = shown.clone();
+        let moved = row.remove(from);
+        row.insert(to, moved);
+        // Written back into the places the shown windows hold in the whole
+        // order, so a window on another desktop keeps its own place.
+        let mut next = row.into_iter();
+        for slot in &mut self.button_order {
+            if shown.contains(slot)
+                && let Some(id) = next.next()
+            {
+                *slot = id;
             }
         }
-        count.saturating_sub(1)
+        true
+    }
+
+    /// Where, in a row of `count` taskbar buttons starting at slot
+    /// `first_slot`, the button at `from` belongs when dragged to `x`: after
+    /// every *other* button in the row whose middle `x` has passed. So it
+    /// moves one place each time the pointer crosses a neighbour's middle,
+    /// in either direction, and can never leave its row -- the pins' row and
+    /// the windows' row are each asked about separately.
+    ///
+    /// Counting only the others is the point. The rule this replaced
+    /// ("before the first button whose middle is right of `x`") counted the
+    /// dragged button's own middle too, so a pin dragged *rightwards* swapped
+    /// with its neighbour as soon as the pointer crossed its own centre -- a
+    /// few pixels into the drag -- while a leftward drag behaved.
+    fn row_drop_index(&self, first_slot: usize, count: usize, from: usize, x: f32) -> usize {
+        let layout = self.taskbar_layout();
+        (0..count)
+            .filter(|&index| index != from)
+            .filter(|&index| {
+                layout
+                    .get(first_slot.saturating_add(index))
+                    .is_some_and(|tile| tile.x + tile.w / 2.0 < x)
+            })
+            .count()
+    }
+
+    /// Let go of a pressed window button: a drag along the row already moved
+    /// it on the way here; a click summons the window -- or minimises it, if
+    /// it was the one in front when the button was pressed, since the
+    /// button is a toggle and not a second way to focus what is focused.
+    fn finish_window_press(&mut self) -> ShellAction {
+        let Some(mut press) = self.window_press.take() else {
+            return ShellAction::Consumed;
+        };
+        let id = press.source.pressed_key();
+        // Read before `on_release`, which resets the source.
+        let was_drag = press.source.on_release();
+        let Some(id) = id.filter(|_| !was_drag) else {
+            return ShellAction::Consumed;
+        };
+        // Closed between the press and the release: nothing to summon, and
+        // asking would only be refused.
+        if !self.windows.contains_key(&id) {
+            return ShellAction::Consumed;
+        }
+        ShellAction::Control(ShellRequest::window(
+            id,
+            if press.was_focused {
+                ShellControlAction::Minimize
+            } else {
+                // `Activate`, not `Restore`: a window minimised while
+                // maximised has to come back maximised, and restoring would
+                // silently drop a state the user never asked to leave. See
+                // the compositor's `activate_window`.
+                ShellControlAction::Activate
+            },
+        ))
     }
 
     /// Which pinned slot holds `exec`, if any.
@@ -5932,7 +10640,8 @@ impl DesktopShell {
 
     /// Release a pressed pinned button: a reorder just ended, or the program
     /// is about to be started.
-    fn finish_pinned_press(&mut self) -> ShellAction {
+    fn finish_pinned_press(&mut self, x: f32, y: f32) -> ShellAction {
+        let off_bar = core::mem::take(&mut self.pin_drag_off_bar);
         let Some(mut drag) = self.pin_drag.take() else {
             return ShellAction::Consumed;
         };
@@ -5940,12 +10649,166 @@ impl DesktopShell {
         // Read before `on_release`, which resets the source.
         let was_drag = drag.on_release();
         if was_drag {
-            // The row already rearranged itself on the way here.
+            // Let go off the bar, on the desktop: a shortcut there, and the
+            // pin stays -- a drag between two places copies, as a drag from
+            // the start menu does. Back on the bar, the row already
+            // rearranged itself on the way here.
+            if off_bar && let Some(exec) = exec {
+                let name = self.app_name_for(&exec);
+                self.drop_program(&exec, &name, x, y);
+            }
             return ShellAction::Consumed;
         }
+        // Running or not: a pinned button starts another copy, and the
+        // running ones have their own buttons (design-decisions §885).
         exec.map_or(ShellAction::Consumed, |exec| {
-            ShellAction::Launch(PathBuf::from(exec))
+            ShellAction::Launch(self.launch_for(&exec))
         })
+    }
+
+    /// Let go of a pressed start-menu row: a click starts the program; a drag
+    /// carries it to wherever it was let go -- the taskbar pins it at the gap
+    /// nearest the pointer, the desktop gets a shortcut to it there -- and
+    /// dropping it back on the menu asks for nothing.
+    fn finish_start_press(&mut self, x: f32, y: f32) -> ShellAction {
+        let Some(mut drag) = self.start_drag.take() else {
+            return ShellAction::Consumed;
+        };
+        let exec = drag.source.pressed_key();
+        // Read before `on_release`, which resets the source.
+        let was_drag = drag.source.on_release();
+        let Some(exec) = exec else {
+            return ShellAction::Consumed;
+        };
+        if !was_drag {
+            self.close_start_menu();
+            return ShellAction::Launch(self.launch_for(&exec));
+        }
+        let on_menu = self.start_menu_rect().contains(x, y);
+        self.drop_program(&exec, &drag.name, x, y);
+        // Let go on the menu -- arranging its pinned rows, or back where it
+        // came from, which asks for nothing -- the menu stays up to be used.
+        // Anywhere else, the program has gone where it was carried.
+        if !on_menu {
+            self.close_start_menu();
+        }
+        ShellAction::Consumed
+    }
+
+    /// Put a program that was carried here where it was let go: over the
+    /// taskbar, pinned at the gap nearest the pointer -- moved there, if it
+    /// was pinned already; anywhere else, as a shortcut on the desktop,
+    /// centred where it was let go (or the one already there, selected).
+    fn drop_program(&mut self, exec: &str, name: &str, x: f32, y: f32) {
+        match self.carry_target(x, y) {
+            Some(CarryTarget::Taskbar) => {
+                let gap = self.pinned_insert_boundary(x);
+                self.pin_into_gap(exec, name, gap);
+            }
+            Some(CarryTarget::StartMenu) => {
+                let gap = self.start_pin_insert_boundary(x, y);
+                self.start_pin_into_gap(exec, gap);
+            }
+            Some(CarryTarget::Desktop) => {
+                let (_, added) = self.icons.add_shortcut_at(
+                    name,
+                    icons::IconType::Executable,
+                    icons::IconAction::OpenPath(PathBuf::from(exec)),
+                    x,
+                    y,
+                );
+                self.icons_dirty |= added;
+            }
+            // Over somebody's window, or a part of the shell that takes no
+            // programs: nothing. Nothing on this system can yet hand a
+            // program to another program by dropping it, and a shortcut
+            // made on the desktop behind the window instead would appear
+            // somewhere the user was not pointing.
+            None => {}
+        }
+    }
+
+    /// Where a program carried here would go if it were let go at `(x, y)`
+    /// -- `None` where letting go does nothing. One answer for the drop and
+    /// for the label that says beforehand what the drop will do, so the two
+    /// cannot disagree.
+    fn carry_target(&self, x: f32, y: f32) -> Option<CarryTarget> {
+        // The start button first: it is on the taskbar, and what it means
+        // there is the start menu, not a place in the row of pins.
+        if self.start_button_rect().contains(x, y) {
+            return Some(CarryTarget::StartMenu);
+        }
+        if self.taskbar_rect().contains(x, y) {
+            return Some(CarryTarget::Taskbar);
+        }
+        match self.hit_test(x, y) {
+            // Only the pinned rows take a drop: the rest of the list is the
+            // launcher's, in the launcher's order, and not the user's to
+            // arrange.
+            Hit::StartMenuEntry(index) if self.start_row_pin(index).is_some() => {
+                Some(CarryTarget::StartMenu)
+            }
+            Hit::Desktop if self.window_at(x, y).is_none() => Some(CarryTarget::Desktop),
+            _ => None,
+        }
+    }
+
+    /// The application window drawn at a point, if any: the topmost one on
+    /// the desktop being shown, not minimised, whose frame contains it.
+    #[must_use]
+    pub fn window_at(&self, x: f32, y: f32) -> Option<WindowId> {
+        self.windows
+            .values()
+            .filter(|w| w.on_glass() && w.desktop == self.current_desktop && w.frame.contains(x, y))
+            .max_by_key(|w| w.z_order)
+            .map(|w| w.id)
+    }
+
+    /// Pin `exec` into gap `gap` of the pinned run (`0..=len`, before the
+    /// button of that index), or move it there if it is pinned already.
+    /// Answers the gap just after where it ended up, which is where a second
+    /// program dropped in the same place belongs -- so several dropped
+    /// together keep their order instead of stacking up reversed.
+    fn pin_into_gap(&mut self, exec: &str, name: &str, gap: usize) -> usize {
+        let from = self.pinned_index_of(exec);
+        if from.is_none() {
+            // Written once, below, with the button already in its gap.
+            self.pin_app_without_saving(exec, name);
+        }
+        // Refused -- an empty path is not a program: nothing moved.
+        let Some(now) = self.pinned_index_of(exec) else {
+            return gap;
+        };
+        let len = self.taskbar.pinned_apps().len();
+        // Taking a button out of the run closes its own gap, so a gap past
+        // it is one lower by the time the button goes back in -- and the
+        // gaps either side of it are both where it already is.
+        let to = match from {
+            Some(from) if gap > from => gap.saturating_sub(1),
+            _ => gap,
+        }
+        .min(len.saturating_sub(1));
+        if to != now {
+            self.taskbar.reorder_pinned(now, to);
+        }
+        if from.is_none() || to != now {
+            self.save_pinned();
+        }
+        to.saturating_add(1)
+    }
+
+    /// The gap in the pinned run a new button dropped at `x` goes into,
+    /// `0..=len`: before the first button whose middle is right of `x`, or
+    /// after the last. Unlike [`row_drop_index`](Self::row_drop_index)
+    /// it can name the end, because a new button can go after the last one.
+    fn pinned_insert_boundary(&self, x: f32) -> usize {
+        let count = self.taskbar.pinned_apps().len();
+        let layout = self.taskbar_layout();
+        layout
+            .iter()
+            .take(count)
+            .position(|tile| x < tile.x + tile.w / 2.0)
+            .unwrap_or(count)
     }
 
     /// Release a pressed tray icon: either a reorder just ended, or the
@@ -6039,7 +10902,7 @@ impl DesktopShell {
         #[allow(
             clippy::cast_possible_truncation,
             clippy::cast_sign_loss,
-            reason = "guarded above: budget and slot are both positive and                       budget >= slot, and the quotient of two taskbar-sized                       lengths cannot approach usize's range"
+            reason = "guarded above: budget and slot are both positive and budget >= slot, and the quotient of two taskbar-sized lengths cannot approach usize's range"
         )]
         let slots = (budget / slot) as usize;
         slots
@@ -6097,7 +10960,7 @@ impl DesktopShell {
         // positions cannot disagree about how many slots there are.
         #[allow(
             clippy::cast_precision_loss,
-            reason = "bounded by tray_slot_budget, which is a fraction of the                       taskbar measured in 24-pixel slots"
+            reason = "bounded by tray_slot_budget, which is a fraction of the taskbar measured in 24-pixel slots"
         )]
         let count = slots as f32;
         slot.mul_add(count, padding)
@@ -6119,7 +10982,7 @@ impl DesktopShell {
             + self.desktop_indicator_width()
             + self.layout_indicator_width()
             + padding * 4.0;
-        let mut x = (bar.w - shell_items - self.app_tray_width() + padding).max(0.0);
+        let mut x = (self.tray_right() - shell_items - self.app_tray_width() + padding).max(0.0);
         // The chevron, when there is one, sits at the *left* of the run: it is
         // the edge the run grows from, so the icons that do fit keep the same
         // position as icons appear and depart behind it.
@@ -6175,7 +11038,8 @@ impl DesktopShell {
                     + self.desktop_indicator_width()
                     + self.layout_indicator_width()
                     + padding * 4.0;
-                let x = (bar.w - shell_items - self.app_tray_width() + padding).max(0.0);
+                let x =
+                    (self.tray_right() - shell_items - self.app_tray_width() + padding).max(0.0);
                 Some(Rect::new(x, bar.y, slot, bar.h))
             }
         }
@@ -6204,6 +11068,23 @@ impl DesktopShell {
     // Calendar popup
     // ========================================================================
 
+    /// The "Show desktop" strip, at the very right end of the taskbar -- right
+    /// of the clock, where the Aero reference puts it and where the pointer
+    /// goes by throwing it into the corner.
+    #[must_use]
+    pub fn show_desktop_rect(&self) -> Rect {
+        let bar = self.taskbar_rect();
+        let width = self.scale(SHOW_DESKTOP_WIDTH).min(bar.w);
+        Rect::new(bar.x + bar.w - width, bar.y, width, bar.h)
+    }
+
+    /// Where the tray's items end on the right: the left edge of the "Show
+    /// desktop" strip, which everything in the tray is laid out leftwards
+    /// from.
+    fn tray_right(&self) -> f32 {
+        self.show_desktop_rect().x
+    }
+
     /// The clock's clickable area at the right end of the taskbar.
     ///
     /// The slot plus the padding to its right, and the bar's full height: the
@@ -6216,7 +11097,8 @@ impl DesktopShell {
         let bar = self.taskbar_rect();
         let padding = self.scale(TRAY_PADDING);
         let width = self.clock_width() + padding;
-        Rect::new((bar.w - width).max(0.0), bar.y, width.min(bar.w), bar.h)
+        let right = self.tray_right();
+        Rect::new((right - width).max(0.0), bar.y, width.min(right), bar.h)
     }
 
     /// The scale the popup is laid out at.
@@ -6275,12 +11157,7 @@ impl DesktopShell {
             // A zone the table cannot resolve is dropped rather than shown at
             // UTC under its own label, which would be a wrong clock presented
             // as a right one. `local_zone` refuses the same way.
-            let Some(info) = self
-                .datetime
-                .available_timezones
-                .iter()
-                .find(|tz| tz.tz_id == extra.tz_id)
-            else {
+            let Some(info) = datetime_settings::zone(&extra.tz_id) else {
                 continue;
             };
             clock.extra_timezones.push(calendar::TimezoneEntry {
@@ -6299,8 +11176,7 @@ impl DesktopShell {
         }
         // Opening a popup closes the other one: two panels covering the same
         // taskbar at once is a state the user cannot have asked for.
-        self.start_menu_open = false;
-        self.power_menu_open = false;
+        self.close_start_menu();
         self.shortcut_card_open = false;
 
         let now = SystemTime::now()
@@ -6332,13 +11208,57 @@ impl DesktopShell {
         }
         // Same rule the calendar states: two panels over one taskbar at once is
         // a state the user cannot have asked for.
-        self.start_menu_open = false;
-        self.power_menu_open = false;
+        self.close_start_menu();
         self.calendar.set_visible(false);
         // The pane's scrim dims the whole screen behind it, so a card left open
         // under it would be a card the user cannot read.
         self.shortcut_card_open = false;
         self.notifications.show();
+    }
+
+    /// What the shortcut editor needs to know about this desktop.
+    fn shortcut_context(&self) -> shortcut_editor::Context {
+        shortcut_editor::Context {
+            // Saturated rather than truncated: a desktop count past 255 is
+            // absurd, and 255 "Switch to Desktop" entries is the honest
+            // answer to it where `as u8` would offer a handful.
+            desktops: u8::try_from(self.num_desktops).unwrap_or(u8::MAX),
+            picker_rows: shortcut_editor::picker_rows(self.shortcut_card_budget()),
+            list_rows: hotkeys::rows_per_column(&self.hotkeys, self.shortcut_card_budget()),
+        }
+    }
+
+    /// How tall the shortcut card may be: the screen less a margin top and
+    /// bottom. One function for the card's layout, its placement and the
+    /// editor's page size, since the three must agree.
+    fn shortcut_card_budget(&self) -> f32 {
+        #[allow(
+            clippy::cast_precision_loss,
+            reason = "a screen height is far inside f32's exact range"
+        )]
+        let screen_h = self.screen_height as f32;
+        (screen_h - SHORTCUT_CARD_MARGIN * 2.0).max(SHORTCUT_CARD_MARGIN)
+    }
+
+    /// Save the bindings after the editor changed them, and say so if saving
+    /// failed.
+    ///
+    /// Written now rather than on shutdown: a desktop that lost power between
+    /// the two would forget the change, and the user has no way to know saving
+    /// was still pending. A failure is appended to the editor's own message
+    /// rather than replacing it: the change *worked* -- only keeping it did not
+    /// -- and that is the difference between a shortcut that will be gone
+    /// tomorrow and one the user believes is set.
+    fn save_edited_shortcuts(&mut self) {
+        if let Err(e) = self.save_shortcuts() {
+            let done = self
+                .shortcut_editor
+                .message()
+                .unwrap_or("The change was made")
+                .to_string();
+            self.shortcut_editor
+                .set_message(Some(format!("{done}, but could not be saved: {e}")));
+        }
     }
 
     /// Open the card listing every shortcut, or close it if it is already open.
@@ -6350,187 +11270,17 @@ impl DesktopShell {
     /// are full-screen surfaces driven by their own chords, and a user who
     /// opens the card to find out what the overview's chord is should not have
     /// the overview shut in the act of looking it up.
-    /// How many rows the card has.
-    fn shortcut_row_count(&self) -> usize {
-        self.hotkeys.len()
-    }
-
-    /// Handle a key while the card is open and no chord is being recorded.
-    ///
-    /// `None` means "not one of the card's keys", which lets the global table
-    /// still run: the card is a sheet, not a mode, and a shortcut pressed with
-    /// it open should still work.
-    fn shortcut_card_key(&mut self, key: &KeyEvent) -> Option<HotkeyOutcome> {
-        let rows = self.shortcut_row_count();
-        match key.key {
-            Key::Up => {
-                self.shortcut_selected = self.shortcut_selected.saturating_sub(1);
-                self.shortcut_message = None;
-                Some(HotkeyOutcome::ignored())
-            }
-            Key::Down => {
-                // Clamped rather than wrapping, matching every other list in
-                // this shell: holding Down should stop at the last row.
-                let last = rows.saturating_sub(1);
-                self.shortcut_selected = self.shortcut_selected.saturating_add(1).min(last);
-                self.shortcut_message = None;
-                Some(HotkeyOutcome::ignored())
-            }
-            Key::Enter => {
-                if rows == 0 {
-                    return Some(HotkeyOutcome::ignored());
-                }
-                self.shortcut_capture = Some(self.shortcut_selected.min(rows.saturating_sub(1)));
-                self.shortcut_message = Some("Press the new keys, or Escape to cancel".to_string());
-                Some(HotkeyOutcome::ignored())
-            }
-            Key::Escape => {
-                self.shortcut_card_open = false;
-                self.shortcut_message = None;
-                Some(HotkeyOutcome::ignored())
-            }
-            Key::Delete => {
-                if rows == 0 {
-                    return Some(HotkeyOutcome::ignored());
-                }
-                self.delete_shortcut_row(self.shortcut_selected.min(rows.saturating_sub(1)));
-                Some(HotkeyOutcome::ignored())
-            }
-            _ => None,
-        }
-    }
-
-    /// Unbind the action on row `row`, and remember that it was unbound.
-    ///
-    /// Remembering is the whole of it. `load_shortcuts` merges the saved file
-    /// onto the shipped defaults — so that a shortcut added in a later
-    /// version reaches a user who has customised theirs — which means a
-    /// deletion that only removed a line would be undone by the very next
-    /// login, silently, with the registry looking correct in between.
-    /// `HotkeyConfig::from_registry` writes a `none=` line for every default
-    /// this registry no longer holds, and that line is what survives.
-    fn delete_shortcut_row(&mut self, row: usize) {
-        let Some((chord, action)) = self
-            .hotkeys
-            .all_bindings()
-            .nth(row)
-            .map(|(h, a)| (*h, a.clone()))
-        else {
-            self.shortcut_message = Some("That row is gone".to_string());
-            return;
-        };
-
-        self.hotkeys.unregister(&chord);
-        let label = action.display_label();
-        self.shortcut_message = Some(match self.save_shortcuts() {
-            Ok(()) => format!("{label} is no longer on any keys"),
-            // Said rather than swallowed, and said precisely: the shortcut is
-            // gone from this session either way, and the part that failed is
-            // the part that would have made it stay gone.
-            Err(e) => format!("{label} is unbound, but could not be saved: {e}"),
-        });
-    }
-
-    /// Read one keystroke as the new chord for the row being recorded.
-    ///
-    /// Returns whether the keystroke was consumed. A bare modifier is *not*:
-    /// the user is still assembling the chord, and taking `Super` alone as an
-    /// answer would bind the shortcut the instant they reached for it.
-    fn capture_chord(&mut self, key: &KeyEvent) -> bool {
-        let Some(row) = self.shortcut_capture else {
-            return false;
-        };
-
-        if matches!(
-            key.key,
-            Key::LeftCtrl
-                | Key::RightCtrl
-                | Key::LeftAlt
-                | Key::RightAlt
-                | Key::LeftShift
-                | Key::RightShift
-                | Key::LeftSuper
-                | Key::RightSuper
-        ) {
-            return true;
-        }
-
-        if key.key == Key::Escape {
-            self.shortcut_capture = None;
-            self.shortcut_message = Some("Unchanged".to_string());
-            return true;
-        }
-
-        self.shortcut_capture = None;
-        self.rebind_row(row, hotkeys::Hotkey::new(key.key, key.modifiers));
-        true
-    }
-
-    /// Move row `row`'s action onto `chord`, or refuse and say why.
-    fn rebind_row(&mut self, row: usize, chord: hotkeys::Hotkey) {
-        let Some((old, action)) = self
-            .hotkeys
-            .all_bindings()
-            .nth(row)
-            .map(|(h, a)| (*h, a.clone()))
-        else {
-            self.shortcut_message = Some("That row is gone".to_string());
-            return;
-        };
-
-        if old == chord {
-            self.shortcut_message = Some("Unchanged".to_string());
-            return;
-        }
-
-        if let Some(taken) = self.hotkeys.conflicts_with(&chord) {
-            // Named, not merely refused: "already in use" leaves the user
-            // hunting for which one.
-            self.shortcut_message = Some(format!(
-                "{} is already {}",
-                chord.display_name(),
-                taken.display_label()
-            ));
-            return;
-        }
-
-        let label = action.display_label().to_string();
-        self.hotkeys.unregister(&old);
-        match self.hotkeys.register(chord, action.clone()) {
-            Ok(()) => {
-                // Written now rather than on shutdown: a desktop that lost
-                // power between the two would forget the rebind, and the user
-                // has no way to know saving was still pending.
-                let saved = self.save_shortcuts();
-                self.shortcut_message = Some(match saved {
-                    Ok(()) => format!("{} is now {label}", chord.display_name()),
-                    // The rebind *worked*; only keeping it did not. Saying so
-                    // is the difference between a shortcut that will be gone
-                    // tomorrow and one the user believes is set.
-                    Err(e) => format!(
-                        "{} is now {label}, but could not be saved: {e}",
-                        chord.display_name()
-                    ),
-                });
-            }
-            Err(e) => {
-                // Put the old one back rather than leaving the action with no
-                // chord at all: a failed rebind must not lose the binding.
-                drop(self.hotkeys.register(old, action));
-                self.shortcut_message = Some(format!("Could not rebind: {e}"));
-            }
-        }
-    }
-
     pub fn toggle_shortcut_card(&mut self) {
         if self.shortcut_card_open {
             self.shortcut_card_open = false;
             return;
         }
-        self.start_menu_open = false;
-        self.power_menu_open = false;
+        self.close_start_menu();
         self.calendar.set_visible(false);
         self.notifications.hide();
+        // Whatever the editor was in the middle of when the card last went
+        // away is not what the user is opening it for.
+        self.shortcut_editor.reset();
         self.shortcut_card_open = true;
     }
 
@@ -6714,7 +11464,9 @@ impl DesktopShell {
 
     /// Set the focus mode *as a user action*.
     ///
-    /// Not the same as assigning [`FocusAssistManager::manual_mode`], and the
+    /// Not the same as assigning
+    /// [`FocusAssistManager::manual_mode`](focus_assist::FocusAssistManager::manual_mode),
+    /// and the
     /// difference is the whole of `snooze_schedule_if_it_would_resume` below:
     /// a person turning this off means "leave me alone about this until it
     /// would have changed anyway", which the manager cannot express because it
@@ -6765,29 +11517,151 @@ impl DesktopShell {
         self.evaluate_schedules(utc_secs);
     }
 
-    /// Seconds since the epoch, or 0 on a clock set before it.
+    /// Seconds since the epoch, or 0 on a clock set before it: the desktop's
+    /// one wall clock, which a test can fix (`datetimesettings::clock`).
     fn unix_now() -> u64 {
-        SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_secs()
+        datetimesettings::clock::now_utc_secs()
     }
 
-    /// Menu item ids. Stable numbers rather than positions, so inserting an
-    /// item cannot silently reassign what the ones below it do.
-    /// The pin menu's only row. Numbered well clear of the desktop menu's
+    /// The pin menu's first row. Numbered well clear of the desktop menu's
     /// ids, which are a different menu with a different handler.
     const MENU_PIN_TOGGLE: u64 = 900;
+    /// The pin menu's "Add to desktop".
+    const MENU_ADD_TO_DESKTOP: u64 = 901;
+    /// The pin menu's "Pin to Start menu" / "Unpin from Start menu".
+    const MENU_START_PIN_TOGGLE: u64 = 902;
+    /// A window's menu: its program's name, which starts another copy.
+    const MENU_START_ANOTHER: u64 = 903;
+    /// A window's menu: "Close window".
+    const MENU_CLOSE_WINDOW: u64 = 904;
+    /// The first of the jump list's rows: the program's `n`-th desktop action
+    /// is this plus `n`.
+    const MENU_JUMP_LIST_BASE: u64 = 1000;
 
+    // The desktop menu's item ids. Stable numbers rather than positions, so
+    // inserting an item cannot silently reassign what the ones below it do;
+    // `the_desktop_menu_ids_are_all_distinct` keeps them apart.
     const MENU_ADD_CLOCK: u64 = 1;
     const MENU_ADD_CALENDAR: u64 = 2;
     const MENU_ADD_SYSTEM_MONITOR: u64 = 3;
     const MENU_REMOVE_WIDGETS: u64 = 4;
     const MENU_REMOVE_ONE_WIDGET: u64 = 5;
+    const MENU_AUTO_ARRANGE: u64 = 6;
+    const MENU_ALIGN_TO_GRID: u64 = 7;
+    const MENU_SORT_BY_NAME: u64 = 8;
+    const MENU_ADD_NOTE: u64 = 9;
+    const MENU_ADD_WIDGET_SUBMENU: u64 = 100;
+    const MENU_VIEW_SUBMENU: u64 = 101;
+    // An icon's own menu, opened by a right-click on the icon.
+    const MENU_ICON_OPEN: u64 = 300;
+    const MENU_ICON_PIN: u64 = 301;
+    const MENU_ICON_REMOVE: u64 = 302;
+    const MENU_ICON_RENAME: u64 = 303;
+    const MENU_ICON_START_PIN: u64 = 304;
+    /// The first icon size's id; the others follow in
+    /// [`IconSize::ALL`](appearance::IconSize::ALL)'s order. A block of its
+    /// own, far from the rest, so a size added to the setting cannot land on
+    /// an id something else already has.
+    const MENU_ICON_SIZE_BASE: u64 = 200;
 
-    /// The desktop menu's fixed item list.
-    fn desktop_menu_items() -> Vec<MenuItem> {
-        let add = |id: u64, label: &str| MenuItem::Action {
+    /// The View submenu's words for an icon size.
+    ///
+    /// The desktop's own rather than [`appearance::IconSize::label`], which
+    /// is the Settings application's "Large (64px)": a menu offering "View >
+    /// Large (64px)" reads as a specification, and every desktop with this
+    /// menu says "Large icons".
+    fn icon_size_menu_label(size: appearance::IconSize) -> &'static str {
+        match size {
+            appearance::IconSize::Small => "Small icons",
+            appearance::IconSize::Medium => "Medium icons",
+            appearance::IconSize::Large => "Large icons",
+            appearance::IconSize::ExtraLarge => "Extra large icons",
+        }
+    }
+
+    /// The icon size a menu item id names, if it names one.
+    fn menu_icon_size(id: MenuItemId) -> Option<appearance::IconSize> {
+        let index = usize::try_from(id.checked_sub(Self::MENU_ICON_SIZE_BASE)?).ok()?;
+        appearance::IconSize::ALL.get(index).copied()
+    }
+
+    /// The desktop menu's items, the View submenu ticking `icon_size` and
+    /// what `arrangement` means for its two switches.
+    ///
+    /// "Auto arrange icons" and "Align icons to grid" are two switches over
+    /// three states -- see [`icons::ArrangementMode`] for why -- so both are
+    /// ticked under auto-arrange, which is aligned by construction.
+    fn desktop_menu_items(
+        icon_size: appearance::IconSize,
+        arrangement: icons::ArrangementMode,
+    ) -> Vec<MenuItem> {
+        let item = |id: u64, label: &str, checked: Option<bool>| MenuItem::Action {
+            id,
+            label: label.to_string(),
+            shortcut: None,
+            icon: None,
+            enabled: true,
+            checked,
+        };
+        let mut view: Vec<MenuItem> = appearance::IconSize::ALL
+            .iter()
+            .zip(Self::MENU_ICON_SIZE_BASE..)
+            .map(|(&size, id)| {
+                item(
+                    id,
+                    Self::icon_size_menu_label(size),
+                    Some(size == icon_size),
+                )
+            })
+            .collect();
+        view.push(MenuItem::Separator);
+        view.push(item(
+            Self::MENU_AUTO_ARRANGE,
+            "Auto arrange icons",
+            Some(arrangement == icons::ArrangementMode::AutoArrange),
+        ));
+        view.push(item(
+            Self::MENU_ALIGN_TO_GRID,
+            "Align icons to grid",
+            Some(arrangement.aligns_to_grid()),
+        ));
+        vec![
+            MenuItem::Submenu {
+                id: Self::MENU_VIEW_SUBMENU,
+                label: "View".to_string(),
+                icon: None,
+                enabled: true,
+                children: view,
+            },
+            item(Self::MENU_SORT_BY_NAME, "Sort by name", None),
+            MenuItem::Separator,
+            MenuItem::Submenu {
+                id: Self::MENU_ADD_WIDGET_SUBMENU,
+                label: "Add widget".to_string(),
+                icon: None,
+                enabled: true,
+                children: vec![
+                    item(Self::MENU_ADD_CLOCK, "Clock", None),
+                    item(Self::MENU_ADD_CALENDAR, "Calendar", None),
+                    item(Self::MENU_ADD_SYSTEM_MONITOR, "System monitor", None),
+                    item(Self::MENU_ADD_NOTE, "Note", None),
+                ],
+            },
+            MenuItem::Separator,
+            item(Self::MENU_REMOVE_WIDGETS, "Remove all widgets", None),
+        ]
+    }
+
+    /// The items for a right-click on the icon `id`.
+    ///
+    /// "Open" and "Rename" always; "Pin to taskbar" (or "Unpin") for a
+    /// program; "Remove from desktop" when the selection holds anything the
+    /// user added -- the
+    /// defaults are not the user's to remove, and offering to would be a door
+    /// that does nothing. Each label says the *action*, not the state, the
+    /// rule the pin menu set.
+    fn icon_menu_items(&self, id: icons::IconId) -> Vec<MenuItem> {
+        let item = |id: u64, label: &str| MenuItem::Action {
             id,
             label: label.to_string(),
             shortcut: None,
@@ -6795,21 +11669,56 @@ impl DesktopShell {
             enabled: true,
             checked: None,
         };
-        vec![
-            MenuItem::Submenu {
-                id: 100,
-                label: "Add widget".to_string(),
-                icon: None,
-                enabled: true,
-                children: vec![
-                    add(Self::MENU_ADD_CLOCK, "Clock"),
-                    add(Self::MENU_ADD_CALENDAR, "Calendar"),
-                    add(Self::MENU_ADD_SYSTEM_MONITOR, "System monitor"),
-                ],
-            },
-            MenuItem::Separator,
-            add(Self::MENU_REMOVE_WIDGETS, "Remove all widgets"),
-        ]
+        let mut items = vec![item(Self::MENU_ICON_OPEN, "Open")];
+        let mut more = vec![item(Self::MENU_ICON_RENAME, "Rename")];
+        if let Some(exec) = self.icon_program(id) {
+            more.push(item(
+                Self::MENU_ICON_PIN,
+                if self.is_pinned(&exec) {
+                    "Unpin from taskbar"
+                } else {
+                    "Pin to taskbar"
+                },
+            ));
+            more.push(item(
+                Self::MENU_ICON_START_PIN,
+                if self.is_pinned_to_start(&exec) {
+                    "Unpin from Start menu"
+                } else {
+                    "Pin to Start menu"
+                },
+            ));
+        }
+        let any_added = self
+            .icons
+            .selected_ids()
+            .into_iter()
+            .chain(core::iter::once(id))
+            .any(|each| self.icons.get_icon(each).is_some_and(|icon| icon.added));
+        if any_added {
+            more.push(item(Self::MENU_ICON_REMOVE, "Remove from desktop"));
+        }
+        if !more.is_empty() {
+            items.push(MenuItem::Separator);
+            items.extend(more);
+        }
+        items
+    }
+
+    /// The program an icon starts, as the taskbar spells one, if it is a
+    /// program: an executable that the icon opens by path. A folder or a
+    /// document is not something a taskbar button can start.
+    fn icon_program(&self, id: icons::IconId) -> Option<String> {
+        let icon = self.icons.get_icon(id)?;
+        match (&icon.icon_type, &icon.action) {
+            (icons::IconType::Executable, icons::IconAction::OpenPath(path)) => {
+                // The pinned list is text (`taskbar.yaml`), so a program whose
+                // path is not text cannot be pinned -- refused, not flattened
+                // into a path that names a different program.
+                path.to_str().map(str::to_string)
+            }
+            _ => None,
+        }
     }
 
     /// The items for a right-click *on a widget*.
@@ -6834,6 +11743,21 @@ impl DesktopShell {
     /// Taken rather than read so a caller cannot ask twice and save twice.
     pub fn take_widgets_dirty(&mut self) -> bool {
         core::mem::replace(&mut self.widgets_dirty, false)
+    }
+
+    /// Keep a rename under way, marking the layout for saving if the name
+    /// changed. The session calls this when the keyboard leaves the shell for
+    /// another program, which keeps a half-typed name as a click away would.
+    pub fn commit_icon_rename(&mut self) {
+        self.icons_dirty |= self.icons.commit_rename();
+    }
+
+    /// Whether the icon layout needs writing, clearing the flag -- taken
+    /// rather than read for the reason
+    /// [`take_widgets_dirty`](Self::take_widgets_dirty) is. The session writes
+    /// it with [`save_icon_layout`](Self::save_icon_layout).
+    pub fn take_icons_dirty(&mut self) -> bool {
+        core::mem::take(&mut self.icons_dirty)
     }
 
     /// Read processor and memory from `/proc`, for the next frame to report.
@@ -7024,6 +11948,23 @@ impl DesktopShell {
             for old in stale {
                 self.hotkeys.unregister(&old);
             }
+            // The file says what this chord does, and that overrules whatever a
+            // default put on it -- overruling the default is what a saved
+            // binding *is*. `register` refuses a chord another action holds,
+            // so without this a chord the user pointed at a different action
+            // (F2 on the card) was dropped in silence on the next login, and
+            // the tombstone for the action it used to start then unbound it
+            // altogether. That could not happen until the card could change
+            // what a chord does, which is why nothing noticed.
+            if self
+                .hotkeys
+                .conflicts_with(chord)
+                .is_some_and(|held| held != action)
+            {
+                self.hotkeys.unregister(chord);
+            }
+            // Cannot fail now: the chord is free, or already this action's,
+            // which `register` accepts as a no-op.
             drop(self.hotkeys.register(*chord, action.clone()));
         }
 
@@ -7091,17 +12032,35 @@ impl DesktopShell {
     /// about *that* widget, bare desktop gets the one about the desktop. Built
     /// per opening rather than kept as two menus, because `ContextMenu::new`
     /// measures its panel from the labels and the two lists are different
-    /// widths -- one menu reused would keep whichever width it was built with.
+    /// widths -- one menu reused would keep whichever width it was built with
+    /// -- and because the desktop's View submenu ticks the icon size and
+    /// arrangement in force now.
     ///
     /// Dismisses first, for the reason every other popup here does: two menus
     /// on screen at once have no rule about which the next click belongs to.
     pub fn open_desktop_menu(&mut self, x: f32, y: f32) {
         self.dismiss_popups();
         self.menu_widget = self.widgets.hit_test(x, y);
+        // Widgets are drawn over the icons, so a widget under the pointer is
+        // what was clicked even when an icon lies beneath it.
+        self.menu_icon = if self.menu_widget.is_some() {
+            None
+        } else {
+            self.icons.icon_at(x, y)
+        };
         let items = if self.menu_widget.is_some() {
             Self::widget_menu_items()
+        } else if let Some(id) = self.menu_icon {
+            // A right-click on an icon that is not selected selects it alone,
+            // as a left click would: the menu is about what is selected, and
+            // a menu about an icon the user cannot see is selected is a menu
+            // about nothing they chose.
+            if !self.icons.selected_ids().contains(&id) {
+                self.icons.select_single(id);
+            }
+            self.icon_menu_items(id)
         } else {
-            Self::desktop_menu_items()
+            Self::desktop_menu_items(self.appearance.icon_size, self.icons.arrangement())
         };
         self.desktop_menu = ContextMenu::new(items);
         self.desktop_menu.show(x, y, self.viewport());
@@ -7140,7 +12099,7 @@ impl DesktopShell {
         self.widgets.move_widget(id, pos)
     }
 
-    /// Act on a desktop-menu selection. Returns whether anything changed.
+    /// Act on a desktop-menu selection.
     ///
     /// Public because a click is not the only way to choose an item: the
     /// keyboard path below routes `MenuAction::Selected` here too, and a future
@@ -7148,10 +12107,135 @@ impl DesktopShell {
     /// the same door. It takes the id rather than a position for the reason the
     /// ids are constants — a position is only meaningful next to the item list
     /// it indexes.
-    pub fn activate_desktop_menu_item(&mut self, id: MenuItemId) -> bool {
-        let changed = self.activate_desktop_menu_item_inner(id);
-        self.widgets_dirty |= changed;
-        changed
+    ///
+    /// Answers a [`ShellAction`] rather than the `bool` it used to, because
+    /// an icon's "Open" starts a program and a `bool` has nowhere to put one:
+    /// [`Pass`](ShellAction::Pass) is "nothing changed",
+    /// [`Consumed`](ShellAction::Consumed) "something did", and a
+    /// [`Launch`](ShellAction::Launch) is what to start.
+    /// [`ShellAction::changed`] is the old `bool`.
+    pub fn activate_desktop_menu_item(&mut self, id: MenuItemId) -> ShellAction {
+        if let Some(action) = self.activate_icon_context_item(id) {
+            return action;
+        }
+        let changed = match self.activate_icon_menu_item(id) {
+            Some(changed) => changed,
+            None => {
+                let changed = self.activate_desktop_menu_item_inner(id);
+                self.widgets_dirty |= changed;
+                changed
+            }
+        };
+        if changed {
+            ShellAction::Consumed
+        } else {
+            ShellAction::Pass
+        }
+    }
+
+    /// The items of an icon's own menu. `None` for an id that is not one of
+    /// them.
+    ///
+    /// All act on `menu_icon`, the icon the menu was opened over, except
+    /// Remove, which acts on the whole selection, as Delete does.
+    fn activate_icon_context_item(&mut self, id: MenuItemId) -> Option<ShellAction> {
+        if !matches!(
+            id,
+            Self::MENU_ICON_OPEN
+                | Self::MENU_ICON_PIN
+                | Self::MENU_ICON_START_PIN
+                | Self::MENU_ICON_REMOVE
+                | Self::MENU_ICON_RENAME
+        ) {
+            return None;
+        }
+        let Some(icon) = self.menu_icon.take() else {
+            // The icon went while the menu was open -- a layout reloaded
+            // under it. There is nothing left to act on.
+            return Some(ShellAction::Pass);
+        };
+        Some(match id {
+            Self::MENU_ICON_OPEN => match self.icons.get_icon(icon).map(|i| i.action.clone()) {
+                Some(action) => self.open_icon(icon, &action),
+                None => ShellAction::Pass,
+            },
+            Self::MENU_ICON_RENAME => {
+                // A rename already under way is kept first, and its change
+                // saved -- see `begin_rename`.
+                self.icons_dirty |= self.icons.commit_rename();
+                if self.icons.begin_rename(icon) {
+                    ShellAction::Consumed
+                } else {
+                    ShellAction::Pass
+                }
+            }
+            Self::MENU_ICON_PIN => match self.icon_program(icon) {
+                Some(exec) => {
+                    if self.is_pinned(&exec) {
+                        self.unpin_app(&exec);
+                    } else {
+                        let name = self
+                            .icons
+                            .get_icon(icon)
+                            .map_or_else(|| exec.clone(), |i| i.label.clone());
+                        self.pin_app(&exec, &name);
+                    }
+                    ShellAction::Consumed
+                }
+                None => ShellAction::Pass,
+            },
+            Self::MENU_ICON_START_PIN => match self.icon_program(icon) {
+                Some(exec) => {
+                    self.toggle_start_pin(&exec);
+                    ShellAction::Consumed
+                }
+                None => ShellAction::Pass,
+            },
+            _ => {
+                let selected = self.icons.selected_ids();
+                if self.icons.remove_added(&selected) > 0 {
+                    self.icons_dirty = true;
+                    ShellAction::Consumed
+                } else {
+                    ShellAction::Pass
+                }
+            }
+        })
+    }
+
+    /// The items about the desktop's icons: the View submenu and "Sort by
+    /// name". `None` for an id that is not one of them; otherwise whether the
+    /// icon layout changed, which is when it needs saving.
+    ///
+    /// Kept apart from the widget items so that choosing one does not mark
+    /// the *widget* layout dirty and rewrite a file nothing changed in.
+    ///
+    /// The two switches map onto [`icons::ArrangementMode`]'s three states
+    /// the way every desktop with both does: auto-arrange implies alignment,
+    /// so turning it on aligns, turning it off leaves the icons aligned where
+    /// they are, and turning alignment off stops arranging too.
+    fn activate_icon_menu_item(&mut self, id: MenuItemId) -> Option<bool> {
+        use icons::ArrangementMode as Mode;
+        let current = self.icons.arrangement();
+        let changed = match id {
+            Self::MENU_AUTO_ARRANGE => {
+                self.icons.set_arrangement(if current == Mode::AutoArrange {
+                    Mode::SnapToGrid
+                } else {
+                    Mode::AutoArrange
+                })
+            }
+            Self::MENU_ALIGN_TO_GRID => self.icons.set_arrangement(if current.aligns_to_grid() {
+                Mode::Free
+            } else {
+                Mode::SnapToGrid
+            }),
+            Self::MENU_SORT_BY_NAME => self.icons.arrange_by_name(),
+            // `choose_icon_size` marks the layout itself.
+            _ => return Self::menu_icon_size(id).map(|size| self.choose_icon_size(size)),
+        };
+        self.icons_dirty |= changed;
+        Some(changed)
     }
 
     fn activate_desktop_menu_item_inner(&mut self, id: MenuItemId) -> bool {
@@ -7159,6 +12243,7 @@ impl DesktopShell {
             Self::MENU_ADD_CLOCK => Some(WidgetKind::Clock),
             Self::MENU_ADD_CALENDAR => Some(WidgetKind::Calendar),
             Self::MENU_ADD_SYSTEM_MONITOR => Some(WidgetKind::SystemMonitor),
+            Self::MENU_ADD_NOTE => Some(WidgetKind::Notes),
             Self::MENU_REMOVE_ONE_WIDGET => {
                 // `menu_widget` rather than a fresh hit test: see the field.
                 return self
@@ -7241,31 +12326,42 @@ impl DesktopShell {
     /// source of truth and a cached palette is a second one that goes stale
     /// the moment the user switches mode.
     pub fn render_icons(&self) -> Vec<guitk::render::RenderCommand> {
-        self.icons.render(&Palette::from_settings(&self.appearance))
+        let p = Palette::from_settings(&self.appearance);
+        match self.icons.drag_in_progress() {
+            // Let go over the taskbar, the icons stay where they are (and a
+            // program among them is pinned), so an outline of where they
+            // would land on the desktop would be a promise the drop breaks.
+            Some((at, _)) if self.taskbar_rect().contains(at.0, at.1) => {
+                self.icons.render_dropping_elsewhere(&p)
+            }
+            _ => self.icons.render(&p),
+        }
     }
 
-    /// Put the default icons on the desktop and move them to where they were
-    /// last left.
+    /// Put the default icons on the desktop and lay them out as they were
+    /// last left -- positions and arrangement both.
     ///
     /// The order is load-bearing: positions are filed against the icons that
     /// exist, so nothing can be restored before the icons are there to restore.
     pub fn populate_icons(&mut self) {
         self.icons.populate_defaults();
-        self.icons.load_positions();
+        self.icons.load_layout();
     }
 
-    /// Write the icon positions back.
+    /// Write the icon layout back: every icon's position, the grid they are
+    /// on and the arrangement.
     ///
-    /// To be called when a drag or an auto-arrange finishes rather than on
-    /// every frame: positions only change when the user moves something, and a
-    /// save per frame would rewrite the file sixty times a second to record
-    /// that nothing happened.
+    /// Called by the session when [`take_icons_dirty`](Self::take_icons_dirty)
+    /// says something changed rather than on every frame: the layout only
+    /// changes when the user moves something or chooses from the View menu,
+    /// and a save per frame would rewrite the file sixty times a second to
+    /// record that nothing happened.
     ///
     /// The failure is handed back rather than swallowed here, because this
     /// object has nowhere to say it -- the surface that can tell the user is
-    /// the session, which is also what owns the event that triggers a save.
-    pub fn save_icon_positions(&self) -> std::io::Result<()> {
-        self.icons.save_positions()
+    /// the session.
+    pub fn save_icon_layout(&self) -> std::io::Result<()> {
+        self.icons.save_layout()
     }
 
     /// A double-click, which only the desktop icons act on.
@@ -7279,24 +12375,218 @@ impl DesktopShell {
             return self.handle_press(x, y, button);
         }
         match self.icons.handle_double_click(x, y) {
-            icons::IconEvent::Activate(_, icons::IconAction::OpenPath(path)) => {
-                // Launched as the path the icon holds. This was
-                // `PathBuf::from(path)` over a `String`, which re-parsed text
-                // that had already lost any byte the home directory's name
-                // could not spell.
-                ShellAction::Launch(path)
-            }
-            // `LaunchSystem` and `Custom` name a thing this shell has no way to
-            // start yet: there is no registry mapping "recycle-bin" to anything
-            // runnable. Consumed rather than passed on, because the click did
-            // land on an icon and handing it to whatever is underneath would be
-            // worse than doing nothing visible.
-            icons::IconEvent::Activate(..) => ShellAction::Consumed,
+            icons::IconEvent::Activate(id, action) => self.open_icon(id, &action),
             // A double-click on empty desktop. The first click already went
             // through `handle_press`, so the layer's state is settled either
             // way and there is nothing further to do.
             _ => ShellAction::Consumed,
         }
+    }
+
+    /// A key pressed while the desktop itself has the keyboard -- the bare
+    /// desktop was the last thing clicked -- that no shortcut and no open
+    /// surface took. These are the icons' keys:
+    ///
+    /// - **Enter** opens the selected icon, when exactly one is selected;
+    /// - **Ctrl+A** selects every icon, **Escape** selects none;
+    /// - the **arrow keys** move the selection to the nearest icon that way.
+    ///
+    /// The session calls this only for a key that arrived on the desktop's own
+    /// surface, so Enter typed into the taskbar's search, say, never opens an
+    /// icon. Until 2026-09-25 nothing called the icon layer's key handler at
+    /// all, and every one of these keys did nothing on the desktop.
+    ///
+    /// - **Delete** takes the selected shortcuts the user added off the
+    ///   desktop; the defaults stay, as they would come back at the next login.
+    ///
+    /// - **F2** renames the one selected icon, in place: Enter keeps the new
+    ///   name, Escape the old one, and a click away keeps it.
+    ///
+    /// `Pass` for any key that changed nothing, so the frame is not repainted
+    /// for it.
+    pub fn handle_desktop_key(&mut self, key: &KeyEvent) -> ShellAction {
+        if !key.pressed {
+            return ShellAction::Pass;
+        }
+        // An open note takes every key, for the reason a rename does: a
+        // Delete meant for a letter must not remove an icon. Its words are
+        // saved with the layout at every change -- a keystroke is a change the
+        // user made, not a step of a gesture still under way, and a note is
+        // the thing on a desktop most worth not losing.
+        match self.widgets.note_key(key) {
+            widgets::NoteKey::NotWriting => {}
+            widgets::NoteKey::Changed => {
+                self.widgets_dirty = true;
+                return ShellAction::Consumed;
+            }
+            widgets::NoteKey::Handled | widgets::NoteKey::Closed => return ShellAction::Consumed,
+        }
+        // While a name is being edited every key is the field's, so that a
+        // Delete meant for a letter cannot remove the icon being renamed.
+        if self.icons.renaming().is_some() {
+            if let icons::RenameKey::Finished { renamed } = self.icons.rename_key(key) {
+                self.icons_dirty |= renamed;
+            }
+            return ShellAction::Consumed;
+        }
+        let ctrl = key.modifiers.ctrl;
+        let desktop_key = match key.key {
+            Key::Enter => icons::DesktopKey::Enter,
+            Key::Escape => icons::DesktopKey::Escape,
+            Key::Delete => icons::DesktopKey::Delete,
+            Key::F2 => icons::DesktopKey::F2,
+            Key::A if ctrl => icons::DesktopKey::SelectAll,
+            Key::Up => icons::DesktopKey::Arrow(icons::Direction::Up),
+            Key::Down => icons::DesktopKey::Arrow(icons::Direction::Down),
+            Key::Left => icons::DesktopKey::Arrow(icons::Direction::Left),
+            Key::Right => icons::DesktopKey::Arrow(icons::Direction::Right),
+            Key::Home | Key::End | Key::PageUp | Key::PageDown => match ListKey::of(key) {
+                Some(nav) => icons::DesktopKey::Nav(nav),
+                None => return ShellAction::Pass,
+            },
+            _ => return ShellAction::Pass,
+        };
+        let before = self.icons.selected_ids();
+        match self.icons.handle_key(desktop_key, ctrl) {
+            icons::IconEvent::Activate(id, action) => self.open_icon(id, &action),
+            icons::IconEvent::Delete(ids) if self.icons.remove_added(&ids) > 0 => {
+                self.icons_dirty = true;
+                ShellAction::Consumed
+            }
+            icons::IconEvent::BeginRename(id) if self.icons.begin_rename(id) => {
+                ShellAction::Consumed
+            }
+            _ if self.icons.selected_ids() != before => ShellAction::Consumed,
+            _ => ShellAction::Pass,
+        }
+    }
+
+    /// Open what a desktop icon names: the double-click, and Enter.
+    ///
+    /// Until 2026-09-25 this handed an icon's path to be *executed*, which is
+    /// right for a program and wrong for everything else on a desktop: the
+    /// Documents and Home icons asked the operating system to run a folder,
+    /// and "This PC" and "Recycle Bin" did nothing at all, because nothing
+    /// said what their destinations were. See [`open_path`](Self::open_path)
+    /// for the rules, which are the file manager's.
+    fn open_icon(&mut self, id: icons::IconId, action: &icons::IconAction) -> ShellAction {
+        let label = self
+            .icons
+            .get_icon(id)
+            .map_or_else(String::new, |icon| icon.label.clone());
+        match action {
+            icons::IconAction::OpenPath(path) => self.open_path(path, &label),
+            icons::IconAction::LaunchSystem(what) if what == icons::THIS_PC => {
+                // The machine's files, from the top: the nearest thing this
+                // system has to a drive list, and a destination that exists
+                // on every install.
+                self.open_path(Path::new("/"), &label)
+            }
+            icons::IconAction::LaunchSystem(what) if what == icons::RECYCLE_BIN => {
+                // The file manager's view of the bin: each item under its own
+                // name and the folder it came from, with Restore, Delete
+                // permanently and Empty -- lane E's answer to
+                // `requests/c-e-the-recycle-bin-icon-has-nowhere-to-open.md`.
+                // Until it existed this said the bin could not be shown,
+                // because pointing the file manager at the bin's storage would
+                // have listed internal folders named by ids.
+                ShellAction::Launch(hotkeys::Launch {
+                    program: PathBuf::from(launcher::FILE_MANAGER),
+                    args: vec![std::ffi::OsString::from(launcher::RECYCLE_BIN_VIEW_ARG)],
+                })
+            }
+            // A destination this build does not know -- a layout written by a
+            // newer desktop -- or an application-defined action with no
+            // handler here. Consumed rather than passed on: the click did land
+            // on an icon, and handing it to whatever is underneath would be
+            // worse than saying nothing.
+            icons::IconAction::LaunchSystem(_) | icons::IconAction::Custom(_) => {
+                self.say_cannot_open(&label, "This desktop does not know what it opens.");
+                ShellAction::Consumed
+            }
+        }
+    }
+
+    /// Open `path` the way the file manager opens what is double-clicked in
+    /// it, so that the desktop and the file manager cannot disagree about
+    /// what a file opens in:
+    ///
+    /// - a **folder** opens in the file manager ([`launcher::FILE_MANAGER`]);
+    /// - a **file** whose kind has a program chosen for it in File
+    ///   Associations opens in that program, the association read afresh
+    ///   on every open as the file manager does -- a choice made a moment ago
+    ///   in another window counts;
+    /// - a file with no such program that is itself **executable** runs --
+    ///   which is what a program shortcut on the desktop is;
+    /// - anything else says why it cannot be opened, in a notification,
+    ///   rather than doing nothing where the user cannot see why.
+    ///
+    /// The association comes first so that a document on a disk that marks
+    /// every file executable -- a USB stick, most network shares -- opens in
+    /// its program rather than being run.
+    fn open_path(&mut self, path: &Path, label: &str) -> ShellAction {
+        let meta = match std::fs::metadata(path) {
+            Ok(meta) => meta,
+            Err(err) => {
+                let why = if err.kind() == std::io::ErrorKind::NotFound {
+                    format!("{} is not there any more.", path.display())
+                } else {
+                    format!("{} cannot be read: {err}", path.display())
+                };
+                self.say_cannot_open(label, &why);
+                return ShellAction::Consumed;
+            }
+        };
+        if meta.is_dir() {
+            return ShellAction::Launch(hotkeys::Launch::opening(launcher::FILE_MANAGER, path));
+        }
+        // `to_str` rather than bytes, as the file manager does: associations
+        // are keys in a YAML document, so an extension that is not text could
+        // never match one, and answering "none" is a refusal rather than a
+        // lossy match.
+        let chosen = path
+            .extension()
+            .and_then(|ext| ext.to_str())
+            .and_then(|ext| {
+                associations::program_for(&config::load(associations::CONFIG_NAME), ext)
+            });
+        if let Some(program) = chosen {
+            return ShellAction::Launch(hotkeys::Launch::opening(program, path));
+        }
+        if is_executable(&meta) {
+            return ShellAction::Launch(hotkeys::Launch::program(path));
+        }
+        self.say_cannot_open(
+            label,
+            "Nothing is set to open files of this kind. Choose a program for it \
+             in File Associations.",
+        );
+        ShellAction::Consumed
+    }
+
+    /// Tell the user that `what` could not be opened, and why.
+    ///
+    /// A notification rather than nothing: a double-click that visibly does
+    /// nothing is the one outcome a user cannot learn anything from. The pane
+    /// is not opened -- this explains, it does not interrupt.
+    fn say_cannot_open(&mut self, what: &str, why: &str) {
+        let title = if what.is_empty() {
+            "Cannot open this".to_string()
+        } else {
+            format!("Cannot open {what}")
+        };
+        // The id is discarded: this is a message, not something to update.
+        let _ = self.notify(notif_pane::Notification {
+            id: 0,
+            app_name: "Desktop".to_string(),
+            title,
+            body: why.to_string(),
+            timestamp: Self::unix_now(),
+            priority: notif_pane::NotifPriority::Normal,
+            read: false,
+            action: None,
+            silent: false,
+        });
     }
 
     /// Whether any of the shell's own surfaces is open over the desktop.
@@ -7312,6 +12602,9 @@ impl DesktopShell {
     pub fn any_popup_open(&self) -> bool {
         self.desktop_menu.is_visible()
             || self.tray_overflow_menu.is_some()
+            || self.pin_menu.is_some()
+            || self.taskbar_menu.is_some()
+            || self.ending_listing()
             || self.start_menu_open
             || self.power_menu_open
             || self.calendar.visible
@@ -7331,8 +12624,17 @@ impl DesktopShell {
         let any = self.any_popup_open();
         self.desktop_menu.hide();
         self.tray_overflow_menu = None;
-        self.start_menu_open = false;
-        self.power_menu_open = false;
+        self.pin_menu = None;
+        self.taskbar_menu = None;
+        // The list, not the wait: dismissing the popups -- opening a menu,
+        // say -- is not the user changing their mind about shutting down.
+        if self.ending_listing() {
+            self.ending = None;
+        }
+        // Through the one exit, which also ends a drag from the menu: Escape
+        // in the middle of carrying a program used to close the menu and
+        // leave the drag to finish on the release.
+        self.close_start_menu();
         self.calendar.set_visible(false);
         // The pane's own Escape handling closes it too; this is the path for a
         // press that dismissed something else at the same time, and for a
@@ -7435,8 +12737,10 @@ impl DesktopShell {
         // The tooltip rides the same clock rather than bringing its own. Two
         // clocks advanced from two call sites is one forgotten call away from
         // a tooltip that never appears, or never leaves.
-        if let Some((_, tip)) = self.tray_tooltip.as_mut() {
+        if let Some((_, tip)) = self.tooltip.as_mut() {
+            let was = tip.is_visible();
             tip.tick(self.osd_clock_ms);
+            self.hover_changed |= tip.is_visible() != was;
         }
     }
 
@@ -7561,16 +12865,39 @@ impl DesktopShell {
         if !self.shortcut_card_open {
             return None;
         }
-        // The screen, less a margin at top and bottom: a card that reaches the
-        // display's edges reads as a mode the desktop has entered rather than as
-        // a sheet laid over it, and the shadow it draws has nowhere to fall.
-        const MARGIN: f32 = 48.0;
-        let screen_w = self.screen_width as f32;
-        let screen_h = self.screen_height as f32;
-        // Bound once and handed to both calls below, because they are only
-        // guaranteed to agree about the column count if they are given the same
-        // budget — the two functions say so in their own docs.
-        let budget = (screen_h - MARGIN * 2.0).max(MARGIN);
+        #[allow(
+            clippy::cast_precision_loss,
+            reason = "screen dimensions are far inside f32's exact-integer range"
+        )]
+        let (screen_w, screen_h) = (self.screen_width as f32, self.screen_height as f32);
+        // Bound once and handed to every call below, because the size, the
+        // drawing and the editor's paging only agree if they are given the
+        // same budget -- the functions say so in their own docs.
+        let budget = self.shortcut_card_budget();
+        let p = Palette::from_settings(&self.appearance);
+        let mut tree = RenderTree::new();
+
+        // Choosing an action, or typing a command: the card shows the action
+        // list instead of the bindings, at the same place a card is centred.
+        if self.shortcut_editor.is_picking() {
+            let (width, height) = self.shortcut_editor.picker_size(budget);
+            let x = ((screen_w - width) / 2.0).max(0.0);
+            let y = ((screen_h - height) / 2.0).max(0.0);
+            self.shortcut_editor.render_picker(
+                &mut tree,
+                &self.hotkeys,
+                &p,
+                x,
+                y,
+                budget,
+                self.shortcut_context(),
+                self.appearance.caret_width(),
+                self.appearance.focus_ring_width(),
+            );
+            self.push_shortcut_message(&mut tree, &p, x, y, width, height);
+            return Some(tree);
+        }
+
         let (width, height) = hotkeys::settings_panel_size(&self.hotkeys, budget);
         // Clamped at zero so a display narrower or shorter than the card puts
         // its top-left corner on screen rather than off it: a card that
@@ -7578,10 +12905,9 @@ impl DesktopShell {
         // centred at a negative origin is one whose header is gone.
         let x = ((screen_w - width) / 2.0).max(0.0);
         let y = ((screen_h - height) / 2.0).max(0.0);
-        let mut tree = RenderTree::new();
         tree.commands.extend(hotkeys::render_settings_panel(
             &self.hotkeys,
-            &Palette::from_settings(&self.appearance),
+            &p,
             x,
             y,
             // The row the keyboard is on. Clamped rather than trusted: the
@@ -7589,44 +12915,56 @@ impl DesktopShell {
             // unregistered while the card is shut, and a highlight drawn past
             // the last row is a highlight on nothing.
             Some(
-                self.shortcut_selected
+                self.shortcut_editor
+                    .selected()
                     .min(self.hotkeys.len().saturating_sub(1)),
             ),
             budget,
         ));
-        // What the last rebind did.
-        //
-        // `shortcut_message` has been composed on every outcome since the
-        // editor was written -- "Press the new keys, or Escape to cancel",
-        // "Unchanged", "That row is gone", "Ctrl+Alt+T is now Terminal", and
-        // the one that matters most, "...but could not be saved" -- and
-        // NOTHING DREW ANY OF IT. Rebinding a key was silent whether it
-        // worked, was refused, or worked and failed to persist.
-        //
-        // That last case is why this is not cosmetic. The handler's own
-        // comment calls it "the difference between a shortcut that will be
-        // gone tomorrow and one the user believes is set", and until now the
-        // user was always in the second state.
-        //
-        // Drawn by this function rather than passed into
-        // `hotkeys::render_settings_panel`: the message is the *shell's*
-        // record of what its editor just did, not a fact about the registry,
-        // and threading it through would make a general panel renderer carry
-        // one caller's state.
-        if let Some(message) = &self.shortcut_message {
-            let p = Palette::from_settings(&self.appearance);
-            tree.text(
-                x + SHORTCUT_MESSAGE_INSET,
-                y + height - SHORTCUT_MESSAGE_INSET,
-                message,
-                // `subtext0` and not the accent: this is an outcome, not an
-                // invitation, and the accent is what the card already uses for
-                // the row the keyboard is on.
-                p.subtext0,
-                self.font_size(TextRole::Body),
-            );
-        }
+        self.push_shortcut_message(&mut tree, &p, x, y, width, height);
         Some(tree)
+    }
+
+    /// The card's bottom line: what the last edit did, or -- on the plain list
+    /// with nothing to report -- the keys the card answers.
+    ///
+    /// The outcome has been composed on every edit since the editor was written
+    /// -- "Press the new keys", "Unchanged", "Ctrl+Alt+T is now Terminal", and
+    /// the one that matters most, "...but could not be saved" -- and until
+    /// 2026-09-14 nothing drew any of it, so a rebind was silent whether it
+    /// worked, was refused, or worked and failed to persist.
+    ///
+    /// Drawn here rather than by the card renderers: the message is the
+    /// *shell's* record of what its editor just did, not a fact about the
+    /// registry or the action list.
+    fn push_shortcut_message(
+        &self,
+        tree: &mut RenderTree,
+        p: &Palette,
+        x: f32,
+        y: f32,
+        width: f32,
+        height: f32,
+    ) {
+        let (text, color) = match self.shortcut_editor.message() {
+            // `subtext0` and not the accent: an outcome, not an invitation, and
+            // the accent is what the card already uses for where the keyboard is.
+            Some(message) => (message.to_string(), p.subtext0),
+            None if !self.shortcut_editor.owns_keyboard() => {
+                (SHORTCUT_CARD_HINT.to_string(), p.subtext0)
+            }
+            None => return,
+        };
+        tree.push(guitk::render::RenderCommand::Text {
+            x: x + SHORTCUT_MESSAGE_INSET,
+            y: y + height - SHORTCUT_MESSAGE_INSET,
+            text,
+            color,
+            font_size: self.font_size(TextRole::Body),
+            font_weight: guitk::render::FontWeightHint::Regular,
+            max_width: Some((width - SHORTCUT_MESSAGE_INSET * 2.0).max(0.0)),
+            overflow: guitk::render::TextOverflow::Ellipsis,
+        });
     }
 
     /// Render the zone-tiling overlay, if it is open.
@@ -7708,6 +13046,32 @@ impl DesktopShell {
 mod theme_tests {
     use super::*;
     use appearance::{AccentColor, ThemeMode};
+
+    /// **The icon-size setting reaches the icons.**
+    ///
+    /// It had a working control, was saved and restored at login, and nothing
+    /// drew icons at any size but 32 pixels -- `known-issues.md`
+    /// TD-C-FOUR-APPEARANCE-SETTINGS-HAVE-A-WORKING-CONTROL-AND-NO-READER.
+    #[test]
+    fn the_icon_size_setting_reaches_the_desktop_icons() {
+        let mut shell = DesktopShell::new(1920, 1080);
+        assert_eq!(
+            shell.icons.icon_px(),
+            AppearanceSettings::default().icon_size.pixels(),
+            "a new shell draws what the default settings say"
+        );
+        for size in [
+            appearance::IconSize::Small,
+            appearance::IconSize::Large,
+            appearance::IconSize::ExtraLarge,
+        ] {
+            shell.set_appearance(AppearanceSettings {
+                icon_size: size,
+                ..AppearanceSettings::default()
+            });
+            assert_eq!(shell.icons.icon_px(), size.pixels(), "{size:?}");
+        }
+    }
 
     /// Contrast ratio per WCAG 2.x, for asserting that text is readable rather
     /// than merely "a different colour".
@@ -8165,13 +13529,20 @@ mod window_manager_tests {
     )]
 
     use super::{
-        DesktopShell, HotkeyOutcome, Key, KeyEvent, ManagedWindow, Modifiers, ShellControlAction,
-        ShellRequest, TextRole, WindowId, WindowInfo, WindowList, WindowState, hotkeys, snap, text,
-        window_rules,
+        DesktopShell, HotkeyAction, HotkeyOutcome, Key, KeyEvent, ManagedWindow, Modifiers,
+        MouseEvent, MouseEventKind, Rect, START_MENU_GLOW_ALPHA, START_MENU_SELECTED_ALPHA,
+        ShellAction, ShellControlAction, ShellRequest, SwitchView, TextRole, WindowId, WindowInfo,
+        WindowList, WindowState, hotkeys, snap, text, window_rules, with_alpha,
     };
 
+    /// A shell with the chords that were on by default until §1416 bound --
+    /// Super+D, Super+Tab, Super+Left and the rest, which a user now binds on
+    /// the shortcut card -- because what these tests press is what those
+    /// chords *do* once bound. What is bound by default is `hotkeys`' to pin.
     fn shell() -> DesktopShell {
-        DesktopShell::new(1920, 1080)
+        let mut shell = DesktopShell::new(1920, 1080);
+        hotkeys::optional_chords::bind(&mut shell.hotkeys);
+        shell
     }
 
     /// One window turned back into the description it arrived as.
@@ -8431,7 +13802,9 @@ mod window_manager_tests {
         shell.shortcut_card_open = true;
         let quiet = card_text(&shell);
 
-        shell.shortcut_message = Some("Ctrl+Alt+T is now Terminal".to_string());
+        shell
+            .shortcut_editor
+            .set_message(Some("Ctrl+Alt+T is now Terminal".to_string()));
         let loud = card_text(&shell);
 
         assert!(
@@ -8455,8 +13828,9 @@ mod window_manager_tests {
     fn a_rebind_that_could_not_be_saved_says_so_on_the_card() {
         let mut shell = shell();
         shell.shortcut_card_open = true;
-        shell.shortcut_message =
-            Some("Super+K is now Search, but could not be saved: disk full".to_string());
+        shell.shortcut_editor.set_message(Some(
+            "Super+K is now Search, but could not be saved: disk full".to_string(),
+        ));
 
         let drawn = card_text(&shell);
 
@@ -8466,6 +13840,8 @@ mod window_manager_tests {
         );
     }
 
+    /// Super+/, bound by the fixture as a user would bind it (§1416 left the
+    /// card without a default chord; the start menu opens it).
     #[test]
     fn the_shortcut_card_opens_and_closes_on_its_own_chord() {
         let mut shell = shell();
@@ -8714,7 +14090,8 @@ mod window_manager_tests {
         let taskbar: Vec<WindowId> = shell.taskbar_windows().iter().map(|w| w.id).collect();
         let switcher: Vec<WindowId> = shell.switcher_windows().iter().map(|w| w.id).collect();
         assert_eq!(taskbar, vec![WindowId(2)]);
-        assert_eq!(switcher, vec![WindowId(1), WindowId(2)]);
+        // Most recent first: the editor arrived last and is in front.
+        assert_eq!(switcher, vec![WindowId(2), WindowId(1)]);
     }
 
     #[test]
@@ -9630,6 +15007,584 @@ mod window_manager_tests {
         );
     }
 
+    fn release(key: Key) -> KeyEvent {
+        KeyEvent {
+            key,
+            pressed: false,
+            modifiers: Modifiers::NONE,
+            text: String::new(),
+        }
+    }
+
+    fn shift_alt() -> Modifiers {
+        Modifiers {
+            shift: true,
+            alt: true,
+            ..Modifiers::NONE
+        }
+    }
+
+    fn activate(id: WindowId) -> Vec<ShellRequest> {
+        vec![ShellRequest::window(id, ShellControlAction::Activate)]
+    }
+
+    /// Each Tab goes one window further back in time, as on every desktop: the
+    /// window before this one, then the one before that, and round to the
+    /// window being left.
+    ///
+    /// After the first press it used to go the other way -- the second Tab
+    /// back to the window being left, the third to the one used longest ago --
+    /// because the switch counted through the taskbar's bottom-to-top order.
+    #[test]
+    fn each_tab_goes_one_window_further_back() {
+        let mut shell = shell();
+        let ids: Vec<WindowId> = (0..4).map(|i| open(&mut shell, &format!("w{i}"))).collect();
+        let alt_tab = press(Key::Tab, Modifiers::alt());
+        let mut landed = Vec::new();
+        // Nothing is raised between rounds, so each counts back from w3.
+        for presses in 1..=4 {
+            for _ in 0..presses {
+                assert!(shell.handle_hotkey(&alt_tab).consumed);
+            }
+            landed.push(shell.handle_hotkey(&release(Key::LeftAlt)).requests);
+        }
+        assert_eq!(
+            landed,
+            vec![
+                activate(ids[2]),
+                activate(ids[1]),
+                activate(ids[0]),
+                activate(ids[3]),
+            ]
+        );
+    }
+
+    /// Shift+Alt+Tab from nothing goes the other way round: to the window used
+    /// longest ago -- and, of two windows, to the other one. It used to open
+    /// the switch forwards and step back from there, which with two windows
+    /// landed on the window already in front: Shift+Alt+Tab did nothing.
+    #[test]
+    fn shift_alt_tab_from_nothing_goes_to_the_window_used_longest_ago() {
+        let mut three = shell();
+        let ids: Vec<WindowId> = (0..3).map(|i| open(&mut three, &format!("w{i}"))).collect();
+        assert!(three.handle_hotkey(&press(Key::Tab, shift_alt())).consumed);
+        assert_eq!(
+            three.handle_hotkey(&release(Key::LeftAlt)).requests,
+            activate(ids[0])
+        );
+
+        let mut two = shell();
+        let first = open(&mut two, "first");
+        open(&mut two, "second");
+        assert!(two.handle_hotkey(&press(Key::Tab, shift_alt())).consumed);
+        assert_eq!(
+            two.handle_hotkey(&release(Key::LeftAlt)).requests,
+            activate(first)
+        );
+    }
+
+    /// Shift is the direction, not the hold: letting go of it in the middle of
+    /// Shift+Alt+Tab carries on switching, and letting go of Alt ends it.
+    #[test]
+    fn letting_go_of_shift_mid_switch_keeps_switching() {
+        let mut shell = shell();
+        for i in 0..3 {
+            open(&mut shell, &format!("w{i}"));
+        }
+        assert!(shell.handle_hotkey(&press(Key::Tab, shift_alt())).consumed);
+        let shift_up = shell.handle_hotkey(&release(Key::LeftShift));
+        assert!(!shift_up.consumed);
+        assert!(shell.alt_tab_active, "letting go of Shift ended the switch");
+        assert!(shell.handle_hotkey(&release(Key::LeftAlt)).consumed);
+        assert!(!shell.alt_tab_active);
+    }
+
+    /// A switch on a chord the user bound ends when *its* modifier comes up.
+    ///
+    /// Only Alt's release ended a switch, which was right while Alt+Tab was the
+    /// only way to start one. With window switching bound to Super+Tab instead,
+    /// the switcher opened and nothing closed it.
+    #[test]
+    fn a_switch_on_a_rebound_chord_ends_when_its_own_modifier_comes_up() {
+        let mut shell = shell();
+        // The fixture puts the overview on Super+Tab; this user puts the
+        // switcher there.
+        let super_tab = hotkeys::Hotkey::new(Key::Tab, super_only());
+        assert!(shell.hotkeys.unregister(&super_tab));
+        shell
+            .hotkeys
+            .register(super_tab, HotkeyAction::CycleWindows)
+            .expect("just freed");
+        let first = open(&mut shell, "first");
+        open(&mut shell, "second");
+
+        assert!(shell.handle_hotkey(&press(Key::Tab, super_only())).consumed);
+        assert!(shell.alt_tab_active);
+        let alt_up = shell.handle_hotkey(&release(Key::LeftAlt));
+        assert!(!alt_up.consumed, "an Alt nobody pressed ended the switch");
+        assert!(shell.alt_tab_active);
+        assert_eq!(
+            shell.handle_hotkey(&release(Key::RightSuper)).requests,
+            activate(first),
+            "letting go of Super did not end it"
+        );
+        assert!(!shell.alt_tab_active);
+    }
+
+    /// A switch on a bare key -- nothing to hold -- ends when the key comes up:
+    /// one press, back to the window before.
+    #[test]
+    fn a_switch_on_a_bare_key_ends_when_the_key_comes_up() {
+        let mut shell = shell();
+        shell
+            .hotkeys
+            .register(hotkeys::Hotkey::bare(Key::F9), HotkeyAction::CycleWindows)
+            .expect("F9 is free");
+        let first = open(&mut shell, "first");
+        open(&mut shell, "second");
+        assert!(
+            shell
+                .handle_hotkey(&press(Key::F9, Modifiers::NONE))
+                .consumed
+        );
+        assert!(shell.alt_tab_active);
+        assert_eq!(
+            shell.handle_hotkey(&release(Key::F9)).requests,
+            activate(first)
+        );
+    }
+
+    // ---- a switch shown in the overview ----
+
+    /// What the user does to make Alt+Tab show the overview: on the card, F2 on
+    /// the Alt+Tab row, and "Cycle Windows in the Overview".
+    fn overview_on_alt_tab(shell: &mut DesktopShell) {
+        let alt_tab = hotkeys::Hotkey::new(Key::Tab, Modifiers::alt());
+        assert!(shell.hotkeys.unregister(&alt_tab));
+        shell
+            .hotkeys
+            .register(alt_tab, HotkeyAction::CycleWindowsInOverview)
+            .expect("just freed");
+    }
+
+    /// The card's centre, as the overview draws it.
+    fn card_centre(shell: &DesktopShell, id: WindowId) -> (f32, f32) {
+        let card = shell
+            .overview_layout()
+            .into_iter()
+            .find(|card| card.window_id == id.0)
+            .unwrap_or_else(|| panic!("{id:?} has no card"));
+        (
+            card.render_x + card.render_width / 2.0,
+            card.render_y + card.render_height / 2.0,
+        )
+    }
+
+    /// Alt+Tab bound to the overview shows the switch there: the overview
+    /// opens on the window before this one, the cards most recent first, with
+    /// no strip drawn over it; each Tab lights one further back, and letting
+    /// go of Alt takes the lit window and closes the overview.
+    #[test]
+    fn alt_tab_bound_to_the_overview_shows_the_switch_there() {
+        let mut shell = shell();
+        overview_on_alt_tab(&mut shell);
+        let ids: Vec<WindowId> = (0..3).map(|i| open(&mut shell, &format!("w{i}"))).collect();
+        let alt_tab = press(Key::Tab, Modifiers::alt());
+
+        assert!(shell.handle_hotkey(&alt_tab).consumed);
+        assert!(shell.alt_tab_active);
+        assert_eq!(shell.alt_tab_view, SwitchView::Overview);
+        assert!(shell.overview.visible);
+        assert!(
+            shell.render_alt_tab().is_none(),
+            "the strip is drawn over the overview"
+        );
+        assert_eq!(shell.overview.hovered_window, Some(ids[1].0));
+        let drawn: Vec<u64> = shell
+            .overview_layout()
+            .iter()
+            .map(|card| card.window_id)
+            .collect();
+        assert_eq!(
+            drawn,
+            vec![ids[2].0, ids[1].0, ids[0].0],
+            "most recent first"
+        );
+
+        assert!(shell.handle_hotkey(&alt_tab).consumed);
+        assert_eq!(shell.overview.hovered_window, Some(ids[0].0));
+
+        assert_eq!(
+            shell.handle_hotkey(&release(Key::LeftAlt)).requests,
+            activate(ids[0])
+        );
+        assert!(!shell.alt_tab_active);
+        assert!(!shell.overview.visible, "the overview outlived the switch");
+    }
+
+    /// Shift+Alt+Tab shows its switch where Alt+Tab shows its own, starting
+    /// on the window used longest ago.
+    #[test]
+    fn shift_alt_tab_follows_alt_tab_into_the_overview() {
+        let mut shell = shell();
+        overview_on_alt_tab(&mut shell);
+        let ids: Vec<WindowId> = (0..3).map(|i| open(&mut shell, &format!("w{i}"))).collect();
+        assert!(shell.handle_hotkey(&press(Key::Tab, shift_alt())).consumed);
+        assert_eq!(shell.alt_tab_view, SwitchView::Overview);
+        assert!(shell.overview.visible);
+        assert_eq!(shell.overview.hovered_window, Some(ids[0].0));
+    }
+
+    /// Escape leaves a switch in the overview without choosing: the overview
+    /// closes, nothing is asked for, and the Alt release after it picks nothing.
+    #[test]
+    fn escape_leaves_a_switch_in_the_overview_without_choosing() {
+        let mut shell = shell();
+        overview_on_alt_tab(&mut shell);
+        for i in 0..3 {
+            open(&mut shell, &format!("w{i}"));
+        }
+        assert!(
+            shell
+                .handle_hotkey(&press(Key::Tab, Modifiers::alt()))
+                .consumed
+        );
+        let escape = shell.handle_hotkey(&press(Key::Escape, Modifiers::alt()));
+        assert!(escape.consumed);
+        assert!(escape.requests.is_empty());
+        assert!(!shell.alt_tab_active);
+        assert!(!shell.overview.visible);
+        assert!(
+            shell
+                .handle_hotkey(&release(Key::LeftAlt))
+                .requests
+                .is_empty()
+        );
+    }
+
+    /// The pointer and the arrows move what a switch in the overview picks, and
+    /// what is lit is always what letting go picks -- including after the
+    /// pointer leaves every card.
+    #[test]
+    fn the_pointer_and_the_arrows_choose_within_a_switch_in_the_overview() {
+        let mut shell = shell();
+        overview_on_alt_tab(&mut shell);
+        let ids: Vec<WindowId> = (0..3).map(|i| open(&mut shell, &format!("w{i}"))).collect();
+        assert!(
+            shell
+                .handle_hotkey(&press(Key::Tab, Modifiers::alt()))
+                .consumed
+        );
+
+        let (x, y) = card_centre(&shell, ids[2]);
+        shell.handle_mouse(&MouseEvent {
+            x,
+            y,
+            kind: MouseEventKind::Move,
+        });
+        assert_eq!(shell.overview.hovered_window, Some(ids[2].0));
+        shell.handle_mouse(&MouseEvent {
+            x: 1.0,
+            y: 1.0,
+            kind: MouseEventKind::Move,
+        });
+        assert_eq!(
+            shell.overview.hovered_window,
+            Some(ids[2].0),
+            "the pointer leaving the cards left nothing lit"
+        );
+
+        // One card on, left to right, is one window further back.
+        assert!(
+            shell
+                .handle_hotkey(&press(Key::Right, Modifiers::alt()))
+                .consumed
+        );
+        assert_eq!(shell.overview.hovered_window, Some(ids[1].0));
+        assert_eq!(
+            shell.handle_hotkey(&release(Key::LeftAlt)).requests,
+            activate(ids[1])
+        );
+    }
+
+    /// Home and End during a switch in the overview light the first and last
+    /// cards -- the window being left and the one used longest ago -- and
+    /// letting go picks what is lit.
+    #[test]
+    fn home_and_end_choose_within_a_switch_in_the_overview() {
+        let mut shell = shell();
+        overview_on_alt_tab(&mut shell);
+        let ids: Vec<WindowId> = (0..3).map(|i| open(&mut shell, &format!("w{i}"))).collect();
+        assert!(
+            shell
+                .handle_hotkey(&press(Key::Tab, Modifiers::alt()))
+                .consumed
+        );
+        assert!(
+            shell
+                .handle_hotkey(&press(Key::End, Modifiers::alt()))
+                .consumed
+        );
+        assert_eq!(shell.overview.hovered_window, Some(ids[0].0));
+        assert!(
+            shell
+                .handle_hotkey(&press(Key::Home, Modifiers::alt()))
+                .consumed
+        );
+        assert_eq!(shell.overview.hovered_window, Some(ids[2].0));
+        assert_eq!(
+            shell.handle_hotkey(&release(Key::LeftAlt)).requests,
+            activate(ids[2])
+        );
+    }
+
+    /// A click on a card during a switch in the overview takes that window, and
+    /// the switch is over: the Alt release that follows does not pick a second
+    /// window out of an overview that has gone.
+    #[test]
+    fn a_click_on_a_card_ends_a_switch_in_the_overview() {
+        let mut shell = shell();
+        overview_on_alt_tab(&mut shell);
+        let ids: Vec<WindowId> = (0..3).map(|i| open(&mut shell, &format!("w{i}"))).collect();
+        assert!(
+            shell
+                .handle_hotkey(&press(Key::Tab, Modifiers::alt()))
+                .consumed
+        );
+
+        let (x, y) = card_centre(&shell, ids[0]);
+        assert_eq!(
+            shell.handle_mouse(&crate::click(x, y)),
+            ShellAction::Control(ShellRequest::window(ids[0], ShellControlAction::Activate))
+        );
+        assert!(!shell.alt_tab_active, "the switch outlived its overview");
+        assert!(
+            shell
+                .handle_hotkey(&release(Key::LeftAlt))
+                .requests
+                .is_empty(),
+            "a second window was picked"
+        );
+    }
+
+    // ---- the switcher's drawing ----
+
+    /// The texts a rendered switcher draws.
+    fn switcher_texts(shell: &DesktopShell) -> Vec<(String, Option<f32>)> {
+        shell
+            .render_alt_tab()
+            .expect("the switcher is up")
+            .commands
+            .into_iter()
+            .filter_map(|cmd| match cmd {
+                guitk::render::RenderCommand::Text {
+                    text, max_width, ..
+                } => Some((text, max_width)),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// The rectangles of the pictures a rendered switcher draws.
+    fn switcher_pictures(shell: &DesktopShell) -> Vec<Rect> {
+        shell
+            .render_alt_tab()
+            .expect("the switcher is up")
+            .commands
+            .into_iter()
+            .filter_map(|cmd| match cmd {
+                guitk::render::RenderCommand::Image {
+                    x,
+                    y,
+                    width,
+                    height,
+                    ..
+                } => Some(Rect::new(x, y, width, height)),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// Where the switcher marks the window the switch goes to: its fill in
+    /// the accent at the keyboard row's strength.
+    fn switcher_mark(shell: &DesktopShell) -> Vec<Rect> {
+        let mark = with_alpha(shell.theme.accent_color, START_MENU_SELECTED_ALPHA);
+        shell
+            .render_alt_tab()
+            .expect("the switcher is up")
+            .commands
+            .into_iter()
+            .filter_map(|cmd| match cmd {
+                guitk::render::RenderCommand::FillRect {
+                    x,
+                    y,
+                    width,
+                    height,
+                    color,
+                    ..
+                } if color == mark => Some(Rect::new(x, y, width, height)),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// **The switcher names the window the switch goes to, whole or cut with a
+    /// mark** -- and only that one. It drew the first twelve characters of
+    /// every title side by side, cut with no mark, so two documents of one
+    /// program read alike and a long title read as a short one.
+    #[test]
+    fn the_switcher_names_the_chosen_window_whole_or_marked() {
+        let mut shell = shell();
+        let long = "Quarterly report for the board, final draft with the appendices.odt";
+        open(&mut shell, long);
+        open(&mut shell, "notes.txt");
+        shell.start_alt_tab();
+        let chosen = shell.switcher_windows()[shell.alt_tab_index].title.clone();
+        let texts = switcher_texts(&shell);
+        assert_eq!(texts.len(), 1, "every window's title is drawn: {texts:?}");
+        let (drawn, bound) = &texts[0];
+        assert!(bound.is_some(), "the title is drawn with no bound");
+        assert!(
+            drawn == &chosen
+                || (drawn.ends_with('\u{2026}')
+                    && chosen.starts_with(drawn.trim_end_matches('\u{2026}'))),
+            "drawn {drawn:?} for {chosen:?}"
+        );
+        assert_ne!(drawn, &chosen.chars().take(12).collect::<String>());
+
+        // The long one, when it is chosen, is cut and says so.
+        while shell.switcher_windows()[shell.alt_tab_index].title != long {
+            shell.next_alt_tab();
+        }
+        // Whole, while the screen has room for it: the glass widens to the
+        // title rather than cutting it to the width of two cells.
+        let (drawn, _) = switcher_texts(&shell).remove(0);
+        assert_eq!(drawn, long, "a title the screen has room for was cut");
+        shell.screen_width = 400;
+        let (drawn, _) = switcher_texts(&shell).remove(0);
+        assert!(
+            drawn.ends_with('\u{2026}'),
+            "a cut title is not marked: {drawn:?}"
+        );
+    }
+
+    /// **Every window has a cell with its program's picture**, and the mark
+    /// is on the chosen window's cell and follows the choice.
+    #[test]
+    fn every_window_has_a_picture_and_the_mark_follows_the_choice() {
+        let mut shell = shell();
+        for i in 0..4 {
+            open(&mut shell, &format!("w{i}"));
+        }
+        shell.start_alt_tab();
+        let pictures = switcher_pictures(&shell);
+        assert_eq!(pictures.len(), 4);
+        let before = switcher_mark(&shell);
+        assert_eq!(before.len(), 1, "one window is chosen");
+        let chosen = pictures[shell.alt_tab_index];
+        assert!(
+            before[0].x <= chosen.x && before[0].x + before[0].w >= chosen.x + chosen.w,
+            "the mark {:?} is not round the chosen window's picture {chosen:?}",
+            before[0]
+        );
+        shell.next_alt_tab();
+        let after = switcher_mark(&shell);
+        assert_ne!(before, after, "the mark stayed where it was");
+        let chosen = pictures[shell.alt_tab_index];
+        assert!(after[0].x <= chosen.x && after[0].x + after[0].w >= chosen.x + chosen.w);
+    }
+
+    /// **A long list wraps into rows, and pages, and never leaves the
+    /// screen** -- and the chosen window is always among the cells shown.
+    #[test]
+    fn a_long_switcher_wraps_and_pages_on_the_screen() {
+        let mut shell = DesktopShell::new(800, 600);
+        for i in 0..60 {
+            open(&mut shell, &format!("w{i}"));
+        }
+        shell.start_alt_tab();
+        let screen = Rect::new(0.0, 0.0, 800.0, 600.0);
+        let mut pages = std::collections::BTreeSet::new();
+        let mut most_rows = 0;
+        for _ in 0..60 {
+            let pictures = switcher_pictures(&shell);
+            assert!(!pictures.is_empty());
+            let rows: std::collections::BTreeSet<i64> =
+                pictures.iter().map(|r| r.y.round() as i64).collect();
+            most_rows = most_rows.max(rows.len());
+            assert!(
+                pictures.iter().all(|r| r.x >= screen.x
+                    && r.y >= screen.y
+                    && r.x + r.w <= screen.w
+                    && r.y + r.h <= screen.h),
+                "a picture is off the screen"
+            );
+            assert!(
+                pictures.len() < 60,
+                "every window on one page of an 800x600 screen"
+            );
+            pages.insert(pictures.len());
+            assert_eq!(
+                switcher_mark(&shell).len(),
+                1,
+                "the chosen window is not shown"
+            );
+            shell.next_alt_tab();
+        }
+        assert!(pages.len() > 1, "the list never turned a page");
+        assert!(most_rows > 1, "sixty windows, and never more than one row");
+    }
+
+    /// **The switcher is the reference's glass**: under shadows, the accent
+    /// glow the start menu casts; without them, none.
+    #[test]
+    fn the_switcher_is_glass_and_glows_only_under_shadows() {
+        let glow = |shell: &DesktopShell| {
+            let accent = with_alpha(shell.theme.accent_color, START_MENU_GLOW_ALPHA);
+            shell
+                .render_alt_tab()
+                .expect("the switcher is up")
+                .commands
+                .iter()
+                .filter(|cmd| {
+                    matches!(cmd, guitk::render::RenderCommand::BoxShadow { color, .. } if *color == accent)
+                })
+                .count()
+        };
+        let mut shell = shell();
+        open(&mut shell, "a");
+        open(&mut shell, "b");
+        shell.start_alt_tab();
+        shell.appearance.drop_shadows = true;
+        assert_eq!(glow(&shell), 1);
+        shell.appearance.drop_shadows = false;
+        assert_eq!(glow(&shell), 0);
+
+        // Edged as the start menu is, shadows or not: the window frame's
+        // outline, and the line of light just inside it.
+        let edges: Vec<guitk::color::Color> = shell
+            .render_alt_tab()
+            .expect("the switcher is up")
+            .commands
+            .iter()
+            .filter_map(|cmd| match cmd {
+                guitk::render::RenderCommand::StrokeRect { color, .. } => Some(*color),
+                _ => None,
+            })
+            .collect();
+        assert!(
+            edges.contains(&shell.theme.panel_border_color),
+            "the switcher has no outline: {edges:?}"
+        );
+        assert!(
+            edges.contains(&with_alpha(
+                guitk::color::Color::WHITE,
+                super::START_MENU_INNER_LIGHT
+            )),
+            "the switcher has no light inside its edge: {edges:?}"
+        );
+    }
+
     #[test]
     fn alt_tab_visits_every_window_and_comes_back_round() {
         let mut shell = shell();
@@ -9837,6 +15792,8 @@ mod window_manager_tests {
         shell.start_alt_tab();
         shell.next_alt_tab();
         shell.next_alt_tab();
+        shell.next_alt_tab();
+        assert_eq!(shell.alt_tab_index, 0, "round to the front again");
 
         for id in &ids[1..] {
             close(&mut shell, *id);
@@ -9846,13 +15803,65 @@ mod window_manager_tests {
         assert!(shell.alt_tab_index < shell.taskbar_windows().len());
     }
 
+    /// A window closing while Alt is held does not move the switch onto a
+    /// different window: it stays on the one it was on, found again by id.
+    ///
+    /// It counted by position alone, so closing a window earlier in the list
+    /// slid the next one under the lit cell, and letting go raised a window the
+    /// user never chose.
+    #[test]
+    fn a_window_closing_mid_switch_leaves_the_switch_on_its_window() {
+        let mut shell = shell();
+        let ids: Vec<WindowId> = (0..4).map(|i| open(&mut shell, &format!("w{i}"))).collect();
+        // Most recent first: w3 w2 w1 w0. Two Tabs: on w1.
+        shell.start_alt_tab();
+        shell.next_alt_tab();
+        assert_eq!(shell.alt_tab_index, 2);
+
+        close(&mut shell, ids[2]);
+        assert_eq!(
+            shell.finish_alt_tab(),
+            Some(ShellRequest::window(ids[1], ShellControlAction::Activate)),
+            "the switch slid onto another window when w2 closed"
+        );
+    }
+
+    /// And when the window that closes is the one the switch is on, the
+    /// switch moves to the window now in its place -- the next one back -- and
+    /// the overview lights it, so what letting go picks is still what is lit.
+    #[test]
+    fn the_chosen_window_closing_moves_the_switch_to_the_next_one_back() {
+        let mut shell = shell();
+        overview_on_alt_tab(&mut shell);
+        let ids: Vec<WindowId> = (0..4).map(|i| open(&mut shell, &format!("w{i}"))).collect();
+        for _ in 0..2 {
+            assert!(
+                shell
+                    .handle_hotkey(&press(Key::Tab, Modifiers::alt()))
+                    .consumed
+            );
+        }
+        assert_eq!(shell.overview.hovered_window, Some(ids[1].0));
+
+        close(&mut shell, ids[1]);
+        assert_eq!(
+            shell.overview.hovered_window,
+            Some(ids[0].0),
+            "nothing is lit, or the wrong card"
+        );
+        assert_eq!(
+            shell.handle_hotkey(&release(Key::LeftAlt)).requests,
+            activate(ids[0])
+        );
+    }
+
     /// The same property, from the one starting index that actually exercises
     /// the clamp.
     ///
     /// `stepping_backwards_survives_the_windows_closing_underneath_it` above
-    /// steps forward *twice* from a four-window switcher, which wraps the index
-    /// round to 0 — and 0 is in range for every list, so removing the clamp
-    /// leaves that test green. Stepping forward once leaves the index at 3, and
+    /// steps forward three times from a four-window switcher, which wraps the
+    /// index round to 0 — and 0 is in range for every list, so removing the
+    /// clamp leaves that test green. Stepping forward twice leaves it at 3, and
     /// stepping back from 3 in a one-window list is the only arithmetic that
     /// tells the two versions apart: clamped it is 0, unclamped it is 2, which
     /// is another index past the end and so `finish_alt_tab` picks nothing at
@@ -9865,11 +15874,16 @@ mod window_manager_tests {
 
         shell.start_alt_tab();
         shell.next_alt_tab();
+        shell.next_alt_tab();
         assert_eq!(shell.alt_tab_index, 3, "the last row, not a wrapped one");
 
         for id in &ids[1..] {
             close(&mut shell, *id);
         }
+        // Closing windows no longer leaves the index stale -- the switch is
+        // kept on its window by id -- so the stale index the clamp is for is
+        // made here, as a caller that set the field would make it.
+        shell.alt_tab_index = 3;
 
         shell.prev_alt_tab();
         assert!(
@@ -9906,6 +15920,9 @@ mod window_manager_tests {
         for id in &ids[1..] {
             close(&mut shell, *id);
         }
+        // As above: windows closing no longer strand the index, so it is
+        // stranded by hand.
+        shell.alt_tab_index = 2;
 
         assert_eq!(
             shell.finish_alt_tab(),
@@ -10162,20 +16179,20 @@ mod window_manager_tests {
     fn the_taskbar_clock_reads_in_the_configured_zone_not_utc() {
         let mut shell = time_only_shell();
 
-        assert!(shell.datetime.set_timezone("UTC"));
+        assert!(shell.datetime.set_zone(Some("UTC")));
         assert_eq!(shell.clock_string_at(INSTANT), "16:30");
 
         // The shipped *default* is New York, which is the whole point: out of
         // the box the corner of the screen used to read 16:30 in a zone where
         // it was half past noon.
-        assert!(shell.datetime.set_timezone("America/New_York"));
+        assert!(shell.datetime.set_zone(Some("America/New_York")));
         assert_eq!(
             shell.clock_string_at(INSTANT),
             "12:30",
             "August is EDT, UTC-4 — a fixed-offset entry would have said 11:30"
         );
 
-        assert!(shell.datetime.set_timezone("Asia/Tokyo"));
+        assert!(shell.datetime.set_zone(Some("Asia/Tokyo")));
         assert_eq!(
             shell.clock_string_at(INSTANT),
             "01:30",
@@ -10183,20 +16200,25 @@ mod window_manager_tests {
         );
     }
 
+    /// With no zone chosen, the clock is in the machine's own zone -- the one
+    /// `date` shows. Until 2026-09-25 the default was New York for everyone,
+    /// and this test asserted only that it was not UTC; what it guards now is
+    /// that the zone applied is the machine's (design-decisions §875).
     #[test]
-    fn the_default_shell_does_not_show_utc() {
-        // Nothing here sets a zone: this is the desktop as it first boots.
-        let shell = shell();
-        assert!(
-            !shell.clock_string_at(INSTANT).ends_with("16:30"),
-            "a fresh desktop must apply its own default zone, not fall to UTC"
-        );
+    fn the_default_shell_shows_the_machines_zone() {
+        // Nothing here chooses a zone: this is the desktop as it first boots,
+        // on a machine whose zone is Tokyo's.
+        let mut shell = DesktopShell::new(1920, 1080);
+        assert_eq!(shell.datetime.zone, None, "nothing chose a zone");
+        shell.set_system_zone(tzrules::Tz::parse(b"JST-9").expect("a POSIX rule"));
+        let reading = shell.clock_string_at(INSTANT);
+        assert!(reading.ends_with("01:30"), "{reading}");
     }
 
     #[test]
     fn the_show_seconds_setting_reaches_the_taskbar_clock() {
         let mut shell = time_only_shell();
-        assert!(shell.datetime.set_timezone("Atlantic/Reykjavik"));
+        assert!(shell.datetime.set_zone(Some("Atlantic/Reykjavik")));
 
         assert_eq!(shell.clock_string_at(INSTANT), "16:30");
         shell.datetime.show_seconds = true;
@@ -10213,7 +16235,7 @@ mod window_manager_tests {
     #[test]
     fn the_date_and_weekday_switches_reach_the_taskbar_clock() {
         let mut shell = shell();
-        assert!(shell.datetime.set_timezone("UTC"));
+        assert!(shell.datetime.set_zone(Some("UTC")));
 
         // Shipped defaults: both on.
         assert!(shell.datetime.show_day_of_week && shell.datetime.show_date);
@@ -10241,22 +16263,119 @@ mod window_manager_tests {
     fn the_taskbar_date_crosses_midnight_with_the_zone() {
         let mut shell = shell();
 
-        assert!(shell.datetime.set_timezone("UTC"));
+        assert!(shell.datetime.set_zone(Some("UTC")));
         assert_eq!(shell.clock_string_at(INSTANT), "Tue Aug 18 16:30");
 
         // UTC+9: half past one the *next* morning.
-        assert!(shell.datetime.set_timezone("Asia/Tokyo"));
+        assert!(shell.datetime.set_zone(Some("Asia/Tokyo")));
         assert_eq!(shell.clock_string_at(INSTANT), "Wed Aug 19 01:30");
     }
 
+    /// A zone the table does not have reads as the machine's own -- the zone
+    /// `date` would show -- not as an offset invented for a name nothing here
+    /// knows.
     #[test]
-    fn an_unresolvable_zone_falls_back_to_utc_rather_than_inventing_an_offset() {
+    fn an_unresolvable_zone_falls_back_to_the_machines_rather_than_inventing_an_offset() {
         let mut shell = time_only_shell();
-        // `set_timezone` validates, so reach past it — this is the state a
+        // `set_zone` validates, so reach past it — this is the state a
         // configuration file naming a zone we do not ship would produce.
-        shell.datetime.timezone = "Mars/Olympus_Mons".to_string();
-        assert!(shell.datetime.current_timezone().is_none());
+        shell.datetime.zone = Some("Mars/Olympus_Mons".to_string());
+        assert!(shell.datetime.current_zone().is_none());
+        // The machine's zone is UTC until the session reads the real one…
         assert_eq!(shell.clock_string_at(INSTANT), "16:30");
+        // … and the clock follows it when it is something else.
+        shell.set_system_zone(tzrules::Tz::parse(b"JST-9").expect("a POSIX rule"));
+        assert_eq!(shell.clock_string_at(INSTANT), "01:30");
+    }
+
+    /// The clock's drawn lines, top to bottom: `(x, y, width, text, alpha,
+    /// bold)` for every text command that starts inside its slot.
+    fn clock_texts(shell: &DesktopShell) -> Vec<(f32, f32, f32, String, u8, bool)> {
+        let slot = shell.clock_rect();
+        let mut lines: Vec<(f32, f32, f32, String, u8, bool)> = shell
+            .render_taskbar()
+            .commands
+            .iter()
+            .filter_map(|c| match c {
+                guitk::render::RenderCommand::Text {
+                    x,
+                    y,
+                    text: line,
+                    color,
+                    font_size,
+                    font_weight,
+                    ..
+                } if *x >= slot.x - 0.5 => Some((
+                    *x,
+                    *y,
+                    text::measure(line, *font_size, *font_weight),
+                    line.clone(),
+                    color.a,
+                    *font_weight == guitk::render::FontWeightHint::Bold,
+                )),
+                _ => None,
+            })
+            .collect();
+        lines.sort_by(|a, b| a.1.total_cmp(&b.1));
+        lines
+    }
+
+    /// **The clock is the reference's two lines**: the time, bold, over the
+    /// weekday and date, dimmer -- each centred in the clock's slot. One line
+    /// when there is no date to show, or no room for two.
+    #[test]
+    fn the_clock_is_the_time_over_the_date() {
+        let mut shell = shell();
+        shell.datetime.show_day_of_week = true;
+        shell.datetime.show_date = true;
+        let lines = clock_texts(&shell);
+        assert_eq!(lines.len(), 2, "{lines:?}");
+        let (time, date) = (&lines[0], &lines[1]);
+        assert!(time.5, "the time is not bold: {time:?}");
+        assert_eq!(
+            date.4,
+            super::CLOCK_DATE_ALPHA,
+            "the date is not dimmer: {date:?}"
+        );
+        assert!(
+            !date.3.contains(':'),
+            "the date line holds the time: {date:?}"
+        );
+        // Stacked, the reading takes the room of its wider line, not of the
+        // two side by side -- which is the room the tiles get back.
+        assert!(
+            shell.clock_width()
+                < text::width(
+                    &shell.clock_string_at(INSTANT),
+                    shell.font_size(TextRole::Body)
+                ),
+            "two lines take the room of one"
+        );
+        let slot = shell.clock_rect();
+        let middle = slot.x + shell.clock_width() / 2.0;
+        for line in [time, date] {
+            assert!(
+                (line.0 + line.2 / 2.0 - middle).abs() < 0.5,
+                "{line:?} is not centred on {middle}"
+            );
+        }
+
+        shell.datetime.show_day_of_week = false;
+        shell.datetime.show_date = false;
+        assert_eq!(clock_texts(&shell).len(), 1, "a line for no date");
+
+        shell.datetime.show_date = true;
+        shell.taskbar_height = 24;
+        let one = clock_texts(&shell);
+        assert_eq!(
+            one.len(),
+            1,
+            "two lines in a bar with no room for them: {one:?}"
+        );
+        assert!(
+            one[0].3.contains(':') && one[0].3.contains(' '),
+            "the one line is not the date and the time: {one:?}"
+        );
     }
 
     /// A clock the tray has no room for is a setting that did not arrive.
@@ -10269,7 +16388,7 @@ mod window_manager_tests {
     #[test]
     fn every_reading_fits_the_slot_the_tray_reserves_for_it() {
         let mut shell = shell();
-        assert!(shell.datetime.set_timezone("UTC"));
+        assert!(shell.datetime.set_zone(Some("UTC")));
 
         for (dow, date, secs) in [
             (false, false, false),
@@ -10288,13 +16407,30 @@ mod window_manager_tests {
             // month rather than landing on the same hour each time.
             for step in 0..1100_u64 {
                 let t = INSTANT + step * 25 * 3600;
-                let reading = shell.clock_string_at(t);
-                let w = text::width(&reading, shell.font_size(TextRole::Body));
-                assert!(
-                    w <= slot,
-                    "{reading:?} is {w} wide but the tray reserves {slot} \
-                     (weekday {dow}, date {date}, seconds {secs})"
-                );
+                // Two lines when the date is shown and the bar has room: each
+                // line must fit, the time as bold as it is drawn.
+                let lines: Vec<(String, f32)> = if shell.clock_has_two_lines() {
+                    let (time, date) = shell.clock_lines_at(t);
+                    let body = shell.font_size(TextRole::Body);
+                    let caption = shell.font_size(TextRole::Caption);
+                    let mut lines = vec![(
+                        time.clone(),
+                        text::measure(&time, body, guitk::render::FontWeightHint::Bold),
+                    )];
+                    lines.extend(date.map(|d| (d.clone(), text::width(&d, caption))));
+                    lines
+                } else {
+                    let reading = shell.clock_string_at(t);
+                    let w = text::width(&reading, shell.font_size(TextRole::Body));
+                    vec![(reading, w)]
+                };
+                for (line, w) in lines {
+                    assert!(
+                        w <= slot,
+                        "{line:?} is {w} wide but the tray reserves {slot} \
+                         (weekday {dow}, date {date}, seconds {secs})"
+                    );
+                }
             }
         }
     }
@@ -10314,7 +16450,7 @@ mod window_manager_tests {
         shell.datetime.show_day_of_week = false;
         shell.datetime.show_date = false;
         let narrow_tray = shell.tray_width();
-        let wide_buttons = shell.taskbar_button_width();
+        let wide_buttons = shell.taskbar_button_rect(0).w;
 
         shell.datetime.show_day_of_week = true;
         shell.datetime.show_date = true;
@@ -10323,7 +16459,7 @@ mod window_manager_tests {
             "the tray must grow to hold the longer reading"
         );
         assert!(
-            shell.taskbar_button_width() < wide_buttons,
+            shell.taskbar_button_rect(0).w < wide_buttons,
             "and the space has to come from somewhere"
         );
         assert!(
@@ -10339,7 +16475,7 @@ mod window_manager_tests {
         // the same instant and zone, so a re-introduced private copy fails
         // here rather than in a screenshot.
         let mut shell = shell();
-        assert!(shell.datetime.set_timezone("Europe/London"));
+        assert!(shell.datetime.set_zone(Some("Europe/London")));
         let zone = shell.local_zone();
         // Built here from the settings rather than taken from `shell.clock()`,
         // so this also checks that `clock()` carries every switch across: a
@@ -10379,14 +16515,20 @@ mod window_manager_tests {
 )]
 mod overview_wiring_tests {
     use super::{
-        DesktopShell, Key, KeyEvent, Modifiers, MouseButton, MouseEvent, MouseEventKind, PathBuf,
-        RenderTree, ShellAction, ShellControlAction, ShellRequest, TRAY_OVERFLOW_GLYPH, WindowId,
+        DesktopShell, Key, KeyEvent, Modifiers, MouseButton, MouseEvent, MouseEventKind,
+        RenderTree, ShellAction, ShellControlAction, ShellRequest, TRAY_OVERFLOW_ICON, WindowId,
         WindowInfo, WindowList, focus_assist, notif_pane, overview, tray_dnd,
     };
     use guitk::render::RenderCommand;
 
+    /// A shell with the chords that were on by default until §1416 bound --
+    /// Super+D, Super+Tab, Super+Left and the rest, which a user now binds on
+    /// the shortcut card -- because what these tests press is what those
+    /// chords *do* once bound. What is bound by default is `hotkeys`' to pin.
     fn shell() -> DesktopShell {
-        DesktopShell::new(1920, 1080)
+        let mut shell = DesktopShell::new(1920, 1080);
+        crate::hotkeys::optional_chords::bind(&mut shell.hotkeys);
+        shell
     }
 
     /// One window, placed, on desktop `workspace`.
@@ -10553,15 +16695,28 @@ mod overview_wiring_tests {
         ));
         let button = s.taskbar_button_rect(0);
         let (x, y) = (button.x + button.w / 2.0, button.y + button.h / 2.0);
+        let release = |s: &mut DesktopShell| {
+            s.handle_mouse(&MouseEvent {
+                x,
+                y,
+                kind: MouseEventKind::Release(MouseButton::Left),
+            })
+        };
         // The control this is contrasted against: with the overview closed, the
-        // same press is the taskbar's and asks for something.
+        // same click is the taskbar's and asks for something -- on the
+        // release, since a press on a window's button only takes hold.
+        assert_eq!(press(&mut s, x, y), ShellAction::Consumed);
         assert!(
-            matches!(press(&mut s, x, y), ShellAction::Control(_)),
-            "the test's premise is wrong: that press is not a taskbar button"
+            matches!(release(&mut s), ShellAction::Control(_)),
+            "the test's premise is wrong: that click is not a taskbar button"
         );
 
         s.overview.show(overview::OverviewMode::AllWindows);
         assert_eq!(press(&mut s, x, y), ShellAction::Consumed);
+        assert!(
+            !matches!(release(&mut s), ShellAction::Control(_)),
+            "the click reached the taskbar through the overview"
+        );
     }
 
     #[test]
@@ -10879,6 +17034,64 @@ mod overview_wiring_tests {
             .collect()
     }
 
+    /// The icons the taskbar draws, in order, as `(name, colour)`.
+    fn taskbar_icons(s: &DesktopShell) -> Vec<(&'static str, super::Color)> {
+        s.render_taskbar()
+            .commands
+            .iter()
+            .filter_map(|cmd| match cmd {
+                RenderCommand::Image { image_id, .. } => s.icon_request(*image_id),
+                _ => None,
+            })
+            .map(|request| {
+                // The taskbar names its pictures in its own source; a name
+                // made at run time here would be a program's icon, which the
+                // taskbar does not draw.
+                let std::borrow::Cow::Borrowed(name) = request.name else {
+                    panic!("an icon named at run time: {:?}", request.name)
+                };
+                (name, request.color)
+            })
+            .collect()
+    }
+
+    /// **The start button, the bell and the chevron are icons**, each one the
+    /// built-in set draws. They were characters -- `≡`, a bell emoji, `‹` --
+    /// that no font the desktop has can draw, so each was a box.
+    #[test]
+    fn the_taskbars_own_pictures_are_icons_the_built_in_set_draws() {
+        let s = shell();
+        let icons = taskbar_icons(&s);
+        assert!(
+            icons.iter().any(|(name, color)| *name == "start-here"
+                && *color == super::readable_on(s.theme.taskbar_accent)),
+            "no start picture readable on the accent orb: {icons:?}"
+        );
+        assert!(
+            icons
+                .iter()
+                .any(|(name, _)| *name == super::NOTIF_BELL_ICON)
+        );
+        let drawn = appearance::icons::built_in_names();
+        for (name, _) in &icons {
+            assert!(drawn.contains(name), "{name} is not in the built-in set");
+        }
+        for mode in [
+            focus_assist::FocusMode::Off,
+            focus_assist::FocusMode::PriorityOnly,
+            focus_assist::FocusMode::AlarmsOnly,
+            focus_assist::FocusMode::TotalSilence,
+        ] {
+            assert!(drawn.contains(&mode.icon_name()), "{mode:?}");
+        }
+        assert!(drawn.contains(&TRAY_OVERFLOW_ICON));
+        // And none of the old characters is left as text.
+        let text = taskbar_text(&s);
+        for gone in ["\u{2261}", "\u{2039}", "\u{1F514}"] {
+            assert!(!text.iter().any(|t| t == gone), "{gone:?} is still text");
+        }
+    }
+
     /// Post `n` unread notifications from `Desktop`, carrying no action.
     fn post(s: &mut DesktopShell, n: usize) {
         for i in 0..n {
@@ -11049,15 +17262,11 @@ mod overview_wiring_tests {
         assert!(drawn > 0 && hidden > 0);
 
         // And the chevron is drawn, not merely computed.
-        let glyphs = s
-            .render_taskbar()
-            .commands
+        let chevrons = taskbar_icons(&s)
             .iter()
-            .filter(
-                |c| matches!(c, RenderCommand::Text { text, .. } if text == TRAY_OVERFLOW_GLYPH),
-            )
+            .filter(|(name, _)| *name == TRAY_OVERFLOW_ICON)
             .count();
-        assert_eq!(glyphs, 1, "the chevron was not painted");
+        assert_eq!(chevrons, 1, "the chevron was not painted");
     }
 
     /// Choosing a row from the overflow list clicks that program's icon.
@@ -11207,13 +17416,13 @@ mod overview_wiring_tests {
     fn resting_on_a_tray_icon_shows_the_name_its_program_gave_it() {
         let mut s = DesktopShell::new(1920, 1080);
         s.apply_tray_icons(vec![tray_icon(1, "B", "Battery: 84%")]);
-        assert!(s.render_tray_tooltip().is_none(), "nothing hovered yet");
+        assert!(s.render_tooltip().is_none(), "nothing hovered yet");
 
         let rect = s.tray_icon_rects()[0];
         hover(&mut s, rect.x + rect.w / 2.0, rect.y + rect.h / 2.0);
 
         let tree = s
-            .render_tray_tooltip()
+            .render_tooltip()
             .expect("resting on an icon showed no tooltip");
         assert!(
             tree.commands
@@ -11234,11 +17443,11 @@ mod overview_wiring_tests {
         let rects = s.tray_icon_rects();
 
         hover(&mut s, rects[0].x + rects[0].w / 2.0, rects[0].y + 8.0);
-        let first = format!("{:?}", s.render_tray_tooltip().expect("first icon"));
+        let first = format!("{:?}", s.render_tooltip().expect("first icon"));
         assert!(first.contains("Battery"));
 
         hover(&mut s, rects[1].x + rects[1].w / 2.0, rects[1].y + 8.0);
-        let second = format!("{:?}", s.render_tray_tooltip().expect("second icon"));
+        let second = format!("{:?}", s.render_tooltip().expect("second icon"));
 
         assert!(
             second.contains("Network") && !second.contains("Battery"),
@@ -11253,12 +17462,12 @@ mod overview_wiring_tests {
         s.apply_tray_icons(vec![tray_icon(1, "A", "Battery")]);
         let rect = s.tray_icon_rects()[0];
         hover(&mut s, rect.x + rect.w / 2.0, rect.y + rect.h / 2.0);
-        assert!(s.render_tray_tooltip().is_some());
+        assert!(s.render_tooltip().is_some());
 
         hover(&mut s, 40.0, 40.0);
 
         assert!(
-            s.render_tray_tooltip().is_none(),
+            s.render_tooltip().is_none(),
             "the tooltip outlived the hover"
         );
     }
@@ -11272,7 +17481,7 @@ mod overview_wiring_tests {
 
         hover(&mut s, rect.x + rect.w / 2.0, rect.y + rect.h / 2.0);
 
-        assert!(s.render_tray_tooltip().is_none());
+        assert!(s.render_tooltip().is_none());
     }
 
     /// The tooltip waits, rather than appearing the instant the pointer
@@ -11291,7 +17500,7 @@ mod overview_wiring_tests {
         s.advance_osd(50);
 
         assert!(
-            s.render_tray_tooltip().is_none(),
+            s.render_tooltip().is_none(),
             "the tooltip appeared after 50ms of hovering"
         );
     }
@@ -11309,7 +17518,7 @@ mod overview_wiring_tests {
         let rect = s.tray_icon_rects()[0];
         hover(&mut s, rect.x + rect.w / 2.0, rect.y + rect.h / 2.0);
 
-        let tree = s.render_tray_tooltip().expect("a tooltip");
+        let tree = s.render_tooltip().expect("a tooltip");
         let mut plates = 0;
         for c in &tree.commands {
             if let RenderCommand::FillRect {
@@ -12066,9 +18275,9 @@ mod overview_wiring_tests {
     fn the_tray_draws_a_bell() {
         let s = shell();
         assert!(
-            taskbar_text(&s)
+            taskbar_icons(&s)
                 .iter()
-                .any(|t| t == super::NOTIF_BELL_GLYPH),
+                .any(|(name, _)| *name == super::NOTIF_BELL_ICON),
             "the tray drew no bell"
         );
     }
@@ -12144,7 +18353,7 @@ mod overview_wiring_tests {
 
     #[test]
     fn the_window_buttons_stop_short_of_the_bell() {
-        // `taskbar_button_width` sizes the buttons from what is left after the
+        // `taskbar_layout` sizes the tiles from what is left after the
         // tray. A bell the tray did not account for would be drawn over by the
         // last button.
         let mut s = shell();
@@ -12208,15 +18417,9 @@ mod overview_wiring_tests {
         // A bell that looks the same whether or not it has anything behind it
         // is a bell nobody presses.
         fn bell_colour(s: &DesktopShell) -> super::Color {
-            s.render_taskbar()
-                .commands
-                .iter()
-                .find_map(|cmd| match cmd {
-                    RenderCommand::Text { text, color, .. } if text == super::NOTIF_BELL_GLYPH => {
-                        Some(*color)
-                    }
-                    _ => None,
-                })
+            taskbar_icons(s)
+                .into_iter()
+                .find_map(|(name, color)| (name == super::NOTIF_BELL_ICON).then_some(color))
                 .expect("the tray drew no bell")
         }
         let mut s = shell();
@@ -12303,9 +18506,9 @@ mod overview_wiring_tests {
         let s = shell();
         assert_eq!(s.focus.effective_mode(), focus_assist::FocusMode::Off);
         assert!(
-            taskbar_text(&s)
+            taskbar_icons(&s)
                 .iter()
-                .any(|t| t == super::NOTIF_BELL_GLYPH),
+                .any(|(name, _)| *name == super::NOTIF_BELL_ICON),
             "the tray drew something other than a plain bell with nothing silenced"
         );
     }
@@ -12386,15 +18589,15 @@ mod overview_wiring_tests {
         // been quiet". A tray that looked identical in Total Silence would
         // leave the user with no way to find out why nothing has arrived.
         let mut s = shell();
-        let quiet = taskbar_text(&s);
+        let quiet = taskbar_icons(&s);
         s.focus.set_mode(focus_assist::FocusMode::TotalSilence);
-        let silenced = taskbar_text(&s);
+        let silenced = taskbar_icons(&s);
         assert_ne!(quiet, silenced, "the tray drew the same thing either way");
         assert!(
             silenced
                 .iter()
-                .any(|t| t == focus_assist::FocusMode::TotalSilence.icon()),
-            "the tray drew no mode glyph: {silenced:?}"
+                .any(|(name, _)| *name == focus_assist::FocusMode::TotalSilence.icon_name()),
+            "the tray drew no mode icon: {silenced:?}"
         );
     }
 
@@ -12519,7 +18722,7 @@ mod overview_wiring_tests {
         let (x, y) = pane_label_at(&s, "Three new messages");
         assert_eq!(
             press(&mut s, x, y),
-            ShellAction::Launch(PathBuf::from("/apps/mail"))
+            ShellAction::Launch(crate::hotkeys::Launch::program("/apps/mail"))
         );
     }
 
@@ -12565,8 +18768,14 @@ mod run_box_wiring_tests {
     };
     use guitk::render::RenderCommand;
 
+    /// A shell with the chords that were on by default until §1416 bound --
+    /// Super+D, Super+Tab, Super+Left and the rest, which a user now binds on
+    /// the shortcut card -- because what these tests press is what those
+    /// chords *do* once bound. What is bound by default is `hotkeys`' to pin.
     fn shell() -> DesktopShell {
-        DesktopShell::new(1920, 1080)
+        let mut shell = DesktopShell::new(1920, 1080);
+        crate::hotkeys::optional_chords::bind(&mut shell.hotkeys);
+        shell
     }
 
     fn chord(k: Key, modifiers: Modifiers) -> KeyEvent {
@@ -12653,6 +18862,235 @@ mod run_box_wiring_tests {
             launches.extend(s.handle_hotkey(&typed(ch)).launches);
         }
         programs(&launches)
+    }
+
+    /// The keystroke for any character a command line holds: a real key for
+    /// what [`typed`] knows and for the space, and for everything else --
+    /// capitals, quotes, a drive letter's colon -- a key the shell binds to
+    /// nothing, carrying the character as its text, which is what the box
+    /// inserts. The keys that matter to the box's own arms (Enter, the
+    /// arrows) are never typed through here.
+    fn typed_any(ch: char) -> KeyEvent {
+        match ch {
+            'a'..='z' | '/' => typed(ch),
+            _ => KeyEvent {
+                key: if ch == ' ' {
+                    Key::Space
+                } else {
+                    Key::Unknown(0)
+                },
+                pressed: true,
+                modifiers: Modifiers::NONE,
+                text: ch.to_string(),
+            },
+        }
+    }
+
+    /// Type a line into the open box and press Enter, answering the launches
+    /// it asked for -- program and arguments both.
+    fn run_line(s: &mut DesktopShell, line: &str) -> Vec<crate::hotkeys::Launch> {
+        for ch in line.chars() {
+            drop(s.handle_hotkey(&typed_any(ch)));
+        }
+        s.handle_hotkey(&chord(Key::Enter, Modifiers::NONE))
+            .launches
+    }
+
+    /// **The Run box runs a program with its arguments.** It used to ask for
+    /// one program named by the whole line -- a file called
+    /// `terminal --title "two words"`, which cannot exist.
+    #[test]
+    fn the_run_box_runs_a_program_with_its_arguments() {
+        let mut s = shell();
+        drop(s.handle_hotkey(&super_r()));
+        assert!(s.run_dialog.is_visible());
+        let launches = run_line(&mut s, "terminal --title \"two words\"");
+        assert_eq!(
+            launches,
+            [crate::hotkeys::Launch {
+                program: PathBuf::from("terminal"),
+                args: vec!["--title".into(), "two words".into()],
+            }]
+        );
+    }
+
+    /// **A Run box line that cannot start brings the box back**, on the line
+    /// as it was typed and with why under it, so a typo is corrected rather
+    /// than typed again. It used to close on nothing having happened.
+    #[test]
+    fn a_run_box_line_that_cannot_start_brings_the_box_back() {
+        appearance::config::testing::with_scratch_config("run-box-failed", |_root| {
+            let mut s = shell();
+            drop(s.handle_hotkey(&super_r()));
+            let launches = run_line(&mut s, "/usr/bin/fierfox --new");
+            assert!(!s.run_dialog.is_visible(), "the box stayed up for a launch");
+            let [launch] = launches.as_slice() else {
+                panic!("not one launch: {launches:?}");
+            };
+            s.launch_failed(launch, "there is no such program");
+            assert!(s.run_dialog.is_visible(), "the box did not come back");
+            let drawn = format!("{:?}", s.render_run_dialog().expect("drawn"));
+            assert!(
+                drawn.contains("/usr/bin/fierfox --new"),
+                "the line is not back: {drawn}"
+            );
+            assert!(
+                drawn.contains("could not be started: there is no such program"),
+                "no word why: {drawn}"
+            );
+            assert!(
+                s.notifications.notifications().is_empty(),
+                "a notification as well as the box"
+            );
+        });
+    }
+
+    /// **Anything else that cannot start says so in a notification** -- a
+    /// pin, a start menu row, an icon -- naming the program and why. The Run
+    /// box stays shut: it asked for nothing.
+    #[test]
+    fn a_launch_that_cannot_start_says_so_in_a_notification() {
+        appearance::config::testing::with_scratch_config("launch-failed", |_root| {
+            let mut s = shell();
+            let launch = crate::hotkeys::Launch::program("/usr/bin/fierfox");
+            s.launch_failed(&launch, "there is no such program");
+            assert!(!s.run_dialog.is_visible(), "the Run box came up for a pin");
+            let said: Vec<(String, String)> = s
+                .notifications
+                .notifications()
+                .iter()
+                .map(|n| (n.title.clone(), n.body.clone()))
+                .collect();
+            assert_eq!(
+                said,
+                [(
+                    "Cannot start fierfox".to_string(),
+                    "/usr/bin/fierfox: there is no such program".to_string()
+                )]
+            );
+            assert_eq!(
+                s.notifications.attention_count(),
+                1,
+                "nothing to see on the bell"
+            );
+        });
+    }
+
+    /// **Only the box's own launch brings it back**, and only once: another
+    /// program failing is a notification even just after the box ran
+    /// something, and the box's launch failing a second time -- a report
+    /// that came twice -- does not open the box again over what the user is
+    /// now typing.
+    #[test]
+    fn only_the_run_boxs_own_launch_brings_it_back_and_only_once() {
+        appearance::config::testing::with_scratch_config("run-box-failed-once", |_root| {
+            let mut s = shell();
+            drop(s.handle_hotkey(&super_r()));
+            let launches = run_line(&mut s, "fierfox");
+            let [ran] = launches.as_slice() else {
+                panic!("not one launch: {launches:?}");
+            };
+            let other = crate::hotkeys::Launch::program("/usr/bin/calculator");
+            s.launch_failed(&other, "there is no such program");
+            assert!(
+                !s.run_dialog.is_visible(),
+                "another program's failure opened the box"
+            );
+            assert_eq!(s.notifications.notifications().len(), 1);
+
+            s.launch_failed(ran, "there is no such program");
+            assert!(
+                s.run_dialog.is_visible(),
+                "the box's own failure did not bring it back"
+            );
+            s.run_dialog.hide();
+            s.launch_failed(ran, "there is no such program");
+            assert!(
+                !s.run_dialog.is_visible(),
+                "the same failure opened the box twice"
+            );
+            assert_eq!(s.notifications.notifications().len(), 2);
+        });
+    }
+
+    /// **Why, in words for the person who asked**: the two a user can act on
+    /// said plainly, anything else in the system's own words.
+    #[test]
+    fn a_failed_launch_is_said_in_words_a_person_can_act_on() {
+        use std::io::{Error, ErrorKind};
+        assert_eq!(
+            super::launch_failure_reason(&Error::from(ErrorKind::NotFound)),
+            "there is no such program"
+        );
+        assert_eq!(
+            super::launch_failure_reason(&Error::from(ErrorKind::PermissionDenied)),
+            "it is not allowed to run"
+        );
+        assert_eq!(
+            super::launch_failure_reason(&Error::other("the table is full")),
+            "the table is full"
+        );
+    }
+
+    /// **The Run box opens a folder, in the file manager -- spaces and all,
+    /// with no quotes**, because the whole line is tried as a path before
+    /// anything is split. It used to ask for the folder to be executed.
+    #[test]
+    fn the_run_box_opens_a_folder_whose_name_has_a_space() {
+        appearance::config::testing::with_scratch_config("run-box-folder", |root| {
+            let folder = root.join("My Stuff");
+            std::fs::create_dir(&folder).expect("the scratch root is writable");
+            let line = folder.to_str().expect("a scratch path is text").to_string();
+            let mut s = shell();
+            drop(s.handle_hotkey(&super_r()));
+            let launches = run_line(&mut s, &line);
+            assert_eq!(
+                launches,
+                [crate::hotkeys::Launch::opening(
+                    crate::launcher::FILE_MANAGER,
+                    &folder
+                )]
+            );
+        });
+    }
+
+    /// **The Run box opens a document in the program chosen for it**, by the
+    /// rule a double-click uses; and a document nothing opens starts nothing
+    /// and says why.
+    #[test]
+    fn the_run_box_opens_a_document_by_the_desktops_rules() {
+        appearance::config::testing::with_scratch_config("run-box-document", |root| {
+            let mut doc = yamldoc::Document::new();
+            doc.set_str(&[associations::ASSOCIATIONS, "md"], "/usr/bin/editor");
+            appearance::config::store(associations::CONFIG_NAME, &doc)
+                .expect("the scratch config directory is writable");
+            let readme = root.join("readme.md");
+            std::fs::write(&readme, b"# hi").expect("write");
+            let odd = root.join("data.qqq");
+            std::fs::write(&odd, b"?").expect("write");
+
+            let mut s = shell();
+            drop(s.handle_hotkey(&super_r()));
+            let line = readme.to_str().expect("text").to_string();
+            assert_eq!(
+                run_line(&mut s, &line),
+                [crate::hotkeys::Launch::opening("/usr/bin/editor", &readme)]
+            );
+
+            drop(s.handle_hotkey(&super_r()));
+            let line = odd.to_str().expect("text").to_string();
+            assert!(
+                run_line(&mut s, &line).is_empty(),
+                "nothing opens it, so nothing starts"
+            );
+            assert!(
+                s.notifications
+                    .notifications()
+                    .iter()
+                    .any(|n| n.title.starts_with("Cannot open")),
+                "and it said so"
+            );
+        });
     }
 
     /// The programs a batch of launches names, without their arguments.
@@ -13006,7 +19444,7 @@ mod run_box_wiring_tests {
         let (x, y) = button_centre(&s, "OK");
         assert_eq!(
             press(&mut s, x, y),
-            ShellAction::Launch(PathBuf::from("terminal"))
+            ShellAction::Launch(crate::hotkeys::Launch::program("terminal"))
         );
     }
 
@@ -13264,6 +19702,72 @@ mod run_box_wiring_tests {
         );
     }
 
+    /// **A path typed into the chooser's address bar is answered by the
+    /// session**: the names in the folder it asks about, and "no" to a folder
+    /// that is not there -- which takes the chooser back where it was, with
+    /// the typed text still there to correct, and stops it asking.
+    #[test]
+    fn the_session_answers_the_choosers_address_bar() {
+        let mut s = shell();
+        s.toggle_run_dialog();
+        browse_showing(&mut s, std::ffi::OsString::from("hello"));
+
+        assert!(s.handle_hotkey(&chord(Key::L, Modifiers::ctrl())).consumed);
+        for ch in "no".chars() {
+            assert!(s.handle_hotkey(&typed(ch)).consumed);
+        }
+        assert_eq!(
+            s.take_run_browser_completion_request().as_deref(),
+            Some("/")
+        );
+        s.set_run_browser_completions(vec![guitk::pathbar::CompletionItem {
+            name: "notes".to_string(),
+            is_directory: true,
+        }]);
+        let dialog = s.run_browser.as_ref().expect("the chooser is up");
+        assert_eq!(
+            dialog.address().completions().len(),
+            1,
+            "the answer was not shown"
+        );
+
+        assert!(
+            s.handle_hotkey(&chord(Key::Enter, Modifiers::NONE))
+                .consumed
+        );
+        assert_eq!(s.run_browser_wants(), Some(Path::new("/no")));
+        s.refuse_run_browser_path();
+        assert_eq!(
+            s.run_browser_wants(),
+            None,
+            "a refused folder is asked about again"
+        );
+        let dialog = s.run_browser.as_ref().expect("refusing closed the chooser");
+        assert_eq!(dialog.current_path(), Path::new("/"));
+        assert_eq!(dialog.address().typed_text(), Some("/no"));
+        assert_eq!(
+            dialog.entries().len(),
+            1,
+            "the listing it went back to is gone"
+        );
+    }
+
+    /// A chooser opened on a folder that is not there has nowhere to go back
+    /// to: it shows the folder empty, once, rather than being asked about on
+    /// every paint.
+    #[test]
+    fn a_chooser_opened_on_a_missing_folder_asks_once() {
+        let mut s = shell();
+        s.toggle_run_dialog();
+        let _ = type_command(&mut s, "/nowhere/term");
+        let (x, y) = button_centre(&s, "Browse...");
+        assert_eq!(press(&mut s, x, y), ShellAction::Consumed);
+        assert_eq!(s.run_browser_wants(), Some(Path::new("/nowhere")));
+        s.refuse_run_browser_path();
+        assert_eq!(s.run_browser_wants(), None);
+        assert!(s.run_browser_open());
+    }
+
     /// Dismissing the box takes the chooser with it. A chooser standing over a
     /// box that is no longer there would own the keyboard with nothing to
     /// return its answer to.
@@ -13395,22 +19899,30 @@ mod run_box_wiring_tests {
     #[test]
     fn the_arrow_keys_walk_the_card_and_stop_at_the_ends() {
         let mut shell = card_shell();
-        assert_eq!(shell.shortcut_selected, 0);
+        assert_eq!(shell.shortcut_editor.selected(), 0);
 
         drop(shell.handle_hotkey(&tap(Key::Down)));
-        assert_eq!(shell.shortcut_selected, 1);
+        assert_eq!(shell.shortcut_editor.selected(), 1);
         drop(shell.handle_hotkey(&tap(Key::Up)));
-        assert_eq!(shell.shortcut_selected, 0);
+        assert_eq!(shell.shortcut_editor.selected(), 0);
 
         // Clamped at the top, as every other list in this shell is.
         drop(shell.handle_hotkey(&tap(Key::Up)));
-        assert_eq!(shell.shortcut_selected, 0, "no wrap to the last row");
+        assert_eq!(
+            shell.shortcut_editor.selected(),
+            0,
+            "no wrap to the last row"
+        );
 
         let last = shell.hotkeys.len().saturating_sub(1);
         for _ in 0..shell.hotkeys.len().saturating_add(5) {
             drop(shell.handle_hotkey(&tap(Key::Down)));
         }
-        assert_eq!(shell.shortcut_selected, last, "and none off the bottom");
+        assert_eq!(
+            shell.shortcut_editor.selected(),
+            last,
+            "and none off the bottom"
+        );
     }
 
     /// The whole point: while recording, the keystroke is data.
@@ -13422,22 +19934,31 @@ mod run_box_wiring_tests {
         settingsfile::testing::with_scratch_config(
             "hk-a-chord-pressed-while-recording-does-not",
             |_root| {
+                // The control, without which this proves nothing. The chord
+                // used here until 2026-09-24 was Super+D, Show Desktop -- which,
+                // in a shell with no windows, asks for nothing whether it runs
+                // or not, so "it asked for nothing" held either way. Super+R
+                // opens the Run box, and that is visible.
+                let mut control = DesktopShell::new(1920, 1080);
+                drop(control.handle_hotkey(&tap_with(Key::R, Modifiers::super_key())));
+                assert!(
+                    control.run_dialog.is_visible(),
+                    "Super+R obeyed must open the Run box, or this test cannot fail"
+                );
+
                 let mut shell = card_shell();
                 drop(shell.handle_hotkey(&tap(Key::Enter)));
-                assert!(shell.shortcut_capture.is_some(), "recording");
+                assert!(shell.shortcut_editor.is_recording(), "recording");
 
-                // Super+D is Show Desktop by default: run, it asks the compositor to
-                // minimise every window on the glass. Pressed as data it must ask for
-                // nothing at all.
-                let outcome = shell.handle_hotkey(&tap_with(Key::D, Modifiers::super_key()));
+                let outcome = shell.handle_hotkey(&tap_with(Key::R, Modifiers::super_key()));
 
                 assert!(
-                    outcome.requests.is_empty(),
-                    "the chord being recorded must not also be obeyed, got {:?}",
-                    outcome.requests
+                    !shell.run_dialog.is_visible(),
+                    "the chord being recorded must not also be obeyed"
                 );
+                assert!(outcome.requests.is_empty(), "and must ask for nothing");
                 assert!(outcome.launches.is_empty(), "and must start nothing");
-                assert!(shell.shortcut_capture.is_none(), "and recording ends");
+                assert!(!shell.shortcut_editor.is_recording(), "and recording ends");
             },
         );
     }
@@ -13486,7 +20007,7 @@ mod run_box_wiring_tests {
                     .expect("first");
                 // Skips any binding on a bare modifier. There is no such binding in
                 // the default table -- the first two rows are Escape and PrintScreen --
-                // so this currently skips nothing; it is here because `capture_chord`
+                // so this currently skips nothing; it is here because the recorder
                 // ignores bare modifiers by design, and a future default bound to one
                 // would otherwise make this test assert on a rebind that never
                 // happened, and pass for the wrong reason.
@@ -13522,7 +20043,11 @@ mod run_box_wiring_tests {
                     Some(&first_action),
                     "a refused rebind must leave the original binding alone"
                 );
-                let msg = shell.shortcut_message.clone().unwrap_or_default();
+                let msg = shell
+                    .shortcut_editor
+                    .message()
+                    .unwrap_or_default()
+                    .to_string();
                 assert!(msg.contains("already"), "and must say so, got {msg:?}");
             },
         );
@@ -13544,7 +20069,7 @@ mod run_box_wiring_tests {
                 drop(shell.handle_hotkey(&tap(Key::Enter)));
                 drop(shell.handle_hotkey(&tap(Key::Escape)));
 
-                assert!(shell.shortcut_capture.is_none(), "recording stopped");
+                assert!(!shell.shortcut_editor.is_recording(), "recording stopped");
                 assert!(shell.shortcut_card_open, "but the card stays open");
                 let after: Vec<_> = shell
                     .hotkeys
@@ -13571,7 +20096,7 @@ mod run_box_wiring_tests {
                 for key in [Key::LeftCtrl, Key::LeftAlt, Key::LeftShift, Key::LeftSuper] {
                     drop(shell.handle_hotkey(&tap(key)));
                     assert!(
-                        shell.shortcut_capture.is_some(),
+                        shell.shortcut_editor.is_recording(),
                         "{key:?} alone must not be taken as the answer"
                     );
                 }
@@ -13599,7 +20124,8 @@ mod run_box_wiring_tests {
                 .map(|(h, a)| (*h, a.clone()))
                 .expect("a binding to delete");
 
-            shell.delete_shortcut_row(0);
+            shell.shortcut_editor.set_selected(0);
+            drop(shell.handle_hotkey(&tap(Key::Delete)));
             assert_eq!(
                 shell.hotkeys.conflicts_with(&chord),
                 None,
@@ -13684,7 +20210,8 @@ mod run_box_wiring_tests {
                 .collect();
             assert!(before.len() > 2, "fixture too small to prove anything");
 
-            shell.delete_shortcut_row(0);
+            shell.shortcut_editor.set_selected(0);
+            drop(shell.handle_hotkey(&tap(Key::Delete)));
 
             let mut fresh = DesktopShell::new(1920, 1080);
             fresh.load_shortcuts();
@@ -13696,6 +20223,165 @@ mod run_box_wiring_tests {
                     action.display_label()
                 );
             }
+        });
+    }
+
+    // ------------------------------------------------------------------
+    // The card's editor, end to end through the shell
+    //
+    // `shortcut_editor`'s own tests drive the state machine against a bare
+    // registry. These go through `handle_hotkey`, the way a keystroke really
+    // arrives, and through `save_shortcuts` and a fresh shell, the way a
+    // change really survives -- the two things a state machine test cannot
+    // see.
+    // ------------------------------------------------------------------
+
+    /// Every string the card draws right now.
+    fn drawn_on_card(shell: &DesktopShell) -> Vec<String> {
+        shell
+            .render_shortcut_card()
+            .expect("the card is open")
+            .commands
+            .iter()
+            .filter_map(|cmd| match cmd {
+                guitk::render::RenderCommand::Text { text, .. } => Some(text.clone()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    fn type_into(shell: &mut DesktopShell, text: &str) {
+        for ch in text.chars() {
+            drop(shell.handle_hotkey(&typed(ch)));
+        }
+    }
+
+    /// **A card closed some other way mid-recording leaves nothing behind.**
+    ///
+    /// The editor keeps its state while the card is shut, and a recording is
+    /// the one state that swallows keystrokes. The start menu, the pane and
+    /// the tray overflow all close the card by clearing a flag, knowing
+    /// nothing about the editor; a recording that survived that would turn
+    /// the next shortcut on a desktop showing no card into a keystroke
+    /// recorded rather than obeyed.
+    #[test]
+    fn a_card_closed_mid_recording_does_not_swallow_the_next_shortcut() {
+        settingsfile::testing::with_scratch_config("hk-closed-mid-recording", |_root| {
+            let mut shell = card_shell();
+            drop(shell.handle_hotkey(&tap(Key::Enter)));
+            assert!(shell.shortcut_editor.is_recording(), "recording");
+
+            // Opening the start menu closes the card without a word to it.
+            shell.toggle_start_menu();
+            assert!(!shell.shortcut_card_open);
+            shell.toggle_start_menu();
+
+            // Super+R opens the Run box when obeyed -- visible, unlike Show
+            // Desktop, which asks for nothing in a shell with no windows.
+            drop(shell.handle_hotkey(&tap_with(Key::R, Modifiers::super_key())));
+            assert!(
+                shell.run_dialog.is_visible(),
+                "the shortcut was swallowed by a recording nobody can see"
+            );
+            shell.toggle_run_dialog();
+
+            // And the card comes back clean.
+            shell.toggle_shortcut_card();
+            assert!(!shell.shortcut_editor.owns_keyboard());
+        });
+    }
+
+    /// **F2 changes what keys do, and the change survives a login.**
+    #[test]
+    fn f2_on_the_card_changes_what_keys_do_and_it_survives_a_login() {
+        settingsfile::testing::with_scratch_config("hk-f2-retarget", |_root| {
+            let mut shell = card_shell();
+            let (row, keys) = shell
+                .hotkeys
+                .all_bindings()
+                .enumerate()
+                .find(|(_, (_, a))| **a == crate::hotkeys::HotkeyAction::Screenshot)
+                .map(|(row, (h, _))| (row, *h))
+                .expect("a Screenshot shortcut in the defaults");
+            shell.shortcut_editor.set_selected(row);
+
+            drop(shell.handle_hotkey(&tap(Key::F2)));
+            assert!(
+                drawn_on_card(&shell)
+                    .iter()
+                    .any(|t| t == "Choose an action"),
+                "the action list replaces the bindings while choosing"
+            );
+            type_into(&mut shell, "lock");
+            drop(shell.handle_hotkey(&tap(Key::Enter)));
+
+            assert_eq!(
+                shell.hotkeys.conflicts_with(&keys),
+                Some(&crate::hotkeys::HotkeyAction::ScreenLock)
+            );
+            let mut fresh = DesktopShell::new(1920, 1080);
+            fresh.load_shortcuts();
+            assert_eq!(
+                fresh.hotkeys.conflicts_with(&keys),
+                Some(&crate::hotkeys::HotkeyAction::ScreenLock),
+                "the change did not survive a login"
+            );
+        });
+    }
+
+    /// **A program added on the card is the program the keys start.**
+    ///
+    /// Through to the launch, not only to the registry: a binding stored
+    /// correctly and started wrongly is the screenshot shortcuts' old bug
+    /// (a program path with a space in it), and only the launch shows it.
+    #[test]
+    fn a_program_shortcut_added_on_the_card_starts_the_program() {
+        settingsfile::testing::with_scratch_config("hk-insert-program", |_root| {
+            let mut shell = card_shell();
+            drop(shell.handle_hotkey(&tap(Key::Insert)));
+            // "Run a program..." heads the unfiltered list.
+            drop(shell.handle_hotkey(&tap(Key::Enter)));
+            type_into(&mut shell, "/usr/bin/terminal");
+            drop(shell.handle_hotkey(&tap(Key::Enter)));
+            let chord = Modifiers {
+                ctrl: true,
+                alt: true,
+                ..Modifiers::NONE
+            };
+            drop(shell.handle_hotkey(&tap_with(Key::F9, chord)));
+
+            // Escape leaves the list and closes the card.
+            drop(shell.handle_hotkey(&tap(Key::Escape)));
+            assert!(!shell.shortcut_card_open);
+
+            let outcome = shell.handle_hotkey(&tap_with(Key::F9, chord));
+            let started: Vec<&std::path::Path> = outcome
+                .launches
+                .iter()
+                .map(|l| l.program.as_path())
+                .collect();
+            assert_eq!(started, [std::path::Path::new("/usr/bin/terminal")]);
+            assert!(outcome.launches.iter().all(|l| l.args.is_empty()));
+        });
+    }
+
+    /// **The card says which keys it answers until it has news.**
+    #[test]
+    fn the_card_lists_its_keys_until_there_is_something_to_report() {
+        settingsfile::testing::with_scratch_config("hk-card-hint", |_root| {
+            let mut shell = card_shell();
+            let hint = |shell: &DesktopShell| {
+                drawn_on_card(shell)
+                    .iter()
+                    .any(|t| t.starts_with("Enter: new keys"))
+            };
+            assert!(hint(&shell), "a fresh card names its keys");
+            drop(shell.handle_hotkey(&tap(Key::Enter)));
+            assert!(!hint(&shell), "while recording it says what to do instead");
+            drop(shell.handle_hotkey(&tap(Key::Escape)));
+            assert!(!hint(&shell), "and then what happened");
+            drop(shell.handle_hotkey(&tap(Key::Down)));
+            assert!(hint(&shell), "until the user moves on");
         });
     }
 
@@ -13765,9 +20451,10 @@ mod run_box_wiring_tests {
             let mut shell = DesktopShell::new(1920, 1080);
             let before = shell.hotkeys.len();
 
-            // A file mentioning exactly one binding.
+            // A file mentioning exactly one binding, moving a default one: the
+            // Run box, off Super+R.
             let mut doc = appearance::config::load(DesktopShell::SHORTCUTS_CONFIG_NAME);
-            doc.set_seq(&["shortcuts"], &["Ctrl+F12=show_desktop"]);
+            doc.set_seq(&["shortcuts"], &["Ctrl+F12=toggle_run_dialog"]);
             appearance::config::store(DesktopShell::SHORTCUTS_CONFIG_NAME, &doc).expect("store");
 
             shell.load_shortcuts();
@@ -13783,6 +20470,11 @@ mod run_box_wiring_tests {
                     .conflicts_with(&crate::hotkeys::Hotkey::new(Key::F12, Modifiers::ctrl()))
                     .is_some(),
                 "and the one it named must have moved"
+            );
+            assert_eq!(
+                shell.hotkeys.lookup(Key::R, &Modifiers::super_key()),
+                None,
+                "moved, not copied: Super+R still opens the box"
             );
         });
     }
@@ -14065,7 +20757,7 @@ mod quiet_hours_wiring_tests {
     fn shell() -> DesktopShell {
         let mut shell = DesktopShell::new(1920, 1080);
         assert!(
-            shell.datetime.set_timezone("UTC"),
+            shell.datetime.set_zone(Some("UTC")),
             "UTC is not in the shipped zone table"
         );
         shell
@@ -14476,12 +21168,136 @@ mod taskbar_pin_tests {
                 "the press launched it before the release could say it was a click"
             );
             match shell.handle_mouse(&at(cx, cy, MouseEventKind::Release(MouseButton::Left))) {
-                ShellAction::Launch(path) => {
-                    assert_eq!(path.to_string_lossy(), exec, "it started the wrong program");
+                ShellAction::Launch(launch) => {
+                    assert_eq!(
+                        launch.program.to_string_lossy(),
+                        exec,
+                        "it started the wrong program"
+                    );
+                    assert!(
+                        launch.args.is_empty(),
+                        "a pinned program takes no arguments"
+                    );
                 }
                 other => panic!("a pinned button did not launch anything: {other:?}"),
             }
         });
+    }
+
+    // ---- the first start's pins (gui/programs/INVENTORY.md section 7) ----
+
+    /// The execs the pins name, taskbar then start menu.
+    fn pinned_execs(shell: &DesktopShell) -> (Vec<String>, Vec<String>) {
+        (
+            shell
+                .pinned_apps()
+                .iter()
+                .map(|pin| pin.exec_path.clone())
+                .collect(),
+            shell
+                .start_pins()
+                .iter()
+                .map(|entry| entry.executable_path.clone())
+                .collect(),
+        )
+    }
+
+    /// **A desktop that has never saved its pins starts with the kernel's
+    /// defaults** -- File Explorer, Terminal and Settings on the taskbar, and
+    /// the five favourites in the start menu -- carried when the program lists
+    /// became one, less the web browser this system does not have.
+    #[test]
+    fn a_first_start_has_the_pins_the_kernel_listed() {
+        with_scratch_config("shell-first-start-pins", |_root| {
+            let mut shell = shell();
+            shell.load_pinned();
+            shell.load_start_menu();
+            let (taskbar, start) = pinned_execs(&shell);
+            assert_eq!(
+                taskbar,
+                [
+                    super::launcher::FILE_MANAGER,
+                    super::launcher::TERMINAL,
+                    super::launcher::SETTINGS
+                ]
+            );
+            assert_eq!(
+                start,
+                [
+                    super::launcher::FILE_MANAGER,
+                    super::launcher::TERMINAL,
+                    "/usr/bin/editor",
+                    super::launcher::SETTINGS,
+                    "/usr/bin/calculator"
+                ]
+            );
+        });
+    }
+
+    /// **Loading them writes nothing**: they are defaults until the user
+    /// changes something, and reading a file must not create it.
+    #[test]
+    fn the_first_starts_pins_are_not_written_down_by_loading() {
+        with_scratch_config("shell-first-start-no-write", |root| {
+            let mut shell = shell();
+            shell.load_pinned();
+            shell.load_start_menu();
+            assert!(!shell.take_start_menu_dirty(), "loading asked for a save");
+            let written: Vec<std::path::PathBuf> = walk(root);
+            assert!(written.is_empty(), "loading wrote {written:?}");
+        });
+    }
+
+    /// **Unpinning everything sticks**: a list saved empty is the user's
+    /// choice, not a first start, so the defaults do not come back.
+    #[test]
+    fn a_pin_list_saved_empty_stays_empty() {
+        with_scratch_config("shell-first-start-emptied", |_root| {
+            let mut first = shell();
+            first.load_pinned();
+            first.load_start_menu();
+            let (taskbar, start) = pinned_execs(&first);
+            for exec in &taskbar {
+                first.unpin_app(exec);
+            }
+            for exec in &start {
+                first.unpin_from_start(exec);
+            }
+            first.save_start_menu().expect("saved");
+
+            let mut restarted = shell();
+            restarted.load_pinned();
+            restarted.load_start_menu();
+            let (taskbar, start) = pinned_execs(&restarted);
+            assert!(
+                taskbar.is_empty(),
+                "the taskbar's defaults came back: {taskbar:?}"
+            );
+            assert!(
+                start.is_empty(),
+                "the start menu's defaults came back: {start:?}"
+            );
+        });
+    }
+
+    /// Every file under `root`, for the test that loading writes nothing.
+    fn walk(root: &std::path::Path) -> Vec<std::path::PathBuf> {
+        let mut out = Vec::new();
+        let mut dirs = vec![root.to_path_buf()];
+        while let Some(dir) = dirs.pop() {
+            let Ok(entries) = std::fs::read_dir(&dir) else {
+                continue;
+            };
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if path.is_dir() {
+                    dirs.push(path);
+                } else {
+                    out.push(path);
+                }
+            }
+        }
+        out
     }
 
     /// Pinning the same program twice leaves one button.
@@ -14549,9 +21365,10 @@ mod taskbar_pin_tests {
         with_scratch_config("shell-pin-menu", |_root| {
             let mut shell = shell();
             shell.toggle_start_menu();
-            let row = shell.start_menu_row_rect(0);
+            let first = shell.start_row_of_program(0).expect("a program");
+            let row = shell.start_menu_row_rect(first);
             let (cx, cy) = (row.x + row.w / 2.0, row.y + row.h / 2.0);
-            assert_eq!(shell.hit_test(cx, cy), Hit::StartMenuEntry(0));
+            assert_eq!(shell.hit_test(cx, cy), Hit::StartMenuEntry(first));
 
             shell.handle_press(cx, cy, MouseButton::Right);
             let drawn = format!("{:?}", shell.render_pin_menu().expect("no menu opened"));
@@ -14603,24 +21420,1714 @@ mod taskbar_pin_tests {
         });
     }
 
-    /// A right-click on a *window's* button offers nothing, because pinning
-    /// one is not possible: a window carries no executable path.
+    // ---- a window is known as its program's; a pin stays a launcher ----
+
+    /// A window of `app_id`, titled `title`.
+    fn window_of(id: u64, app_id: &str, title: &str) -> WindowInfo {
+        let mut window = WindowInfo::new(id, id, title.to_string());
+        window.app_id = app_id.to_string();
+        window
+    }
+
+    /// **A program's menu is a popup like the others**: open, it counts as
+    /// one -- so Escape is held for it -- and dismissing the popups closes it.
     #[test]
-    fn a_window_button_offers_no_pin_menu() {
-        with_scratch_config("shell-unpin-window", |_root| {
+    fn a_programs_menu_is_a_popup_like_the_others() {
+        with_scratch_config("shell-pin-menu-popup", |_root| {
+            let mut shell = shell();
+            shell.pin_app(super::launcher::TERMINAL, "Terminal");
+            assert!(!shell.any_popup_open());
+            let (x, y) = button_centre(&shell, 0);
+            shell.handle_press(x, y, MouseButton::Right);
+            assert!(
+                shell.render_pin_menu().is_some(),
+                "the premise: the menu opened"
+            );
+            assert!(
+                shell.any_popup_open(),
+                "an open program menu is not a popup"
+            );
+            assert!(shell.dismiss_popups(), "dismissing found nothing open");
+            assert!(
+                shell.render_pin_menu().is_none(),
+                "dismissing left the menu open"
+            );
+        });
+    }
+
+    /// **A pinned program's window has its own button, right of the pins,
+    /// and the pin still starts another copy** -- `design.txt`: "can pin apps
+    /// to taskbar on the left, all launched applications go to the right of
+    /// those"; the Aero reference: "Clicking a pinned app launches a new
+    /// running instance on the right". Every other desktop folds the window
+    /// into its pin; this one is specified not to (design-decisions §885).
+    #[test]
+    fn a_pinned_programs_window_has_its_own_button_and_the_pin_still_launches() {
+        use super::WindowId;
+        with_scratch_config("shell-pin-apart", |_root| {
+            let mut shell = shell();
+            shell.pin_app(super::launcher::TERMINAL, "Terminal");
+            shell.apply_window_list(&WindowList::new(
+                0,
+                vec![window_of(1, "terminal", "~ : bash")],
+            ));
+            assert_eq!(
+                shell
+                    .program_for_app_id("terminal")
+                    .map(|a| a.executable_path.as_str()),
+                Some(super::launcher::TERMINAL),
+                "the premise: the window is known as the pinned program's"
+            );
+            assert_eq!(
+                shell.taskbar_slots(),
+                vec![TaskbarSlot::Pinned(0), TaskbarSlot::Window(WindowId(1))]
+            );
+            let (x, y) = button_centre(&shell, 0);
+            shell.handle_mouse(&at(x, y, MouseEventKind::Press(MouseButton::Left)));
+            assert_eq!(
+                shell.handle_mouse(&at(x, y, MouseEventKind::Release(MouseButton::Left))),
+                ShellAction::Launch(shell.launch_for(super::launcher::TERMINAL))
+            );
+        });
+    }
+
+    /// **A window is known as its program's by the entry's file name or its
+    /// window class**, as well as by the program's file name.
+    #[test]
+    fn a_window_is_known_by_its_entrys_name_or_class() {
+        let mut shell = shell();
+        shell.set_programs(crate::start_search_tests::known_with(vec![
+            crate::start_search_tests::installed_as(
+                "[Desktop Entry]\nType=Application\nName=Sketchpad\nExec=/opt/sketch/run\n",
+                "org.example.Sketch.desktop",
+            ),
+            crate::start_search_tests::installed_as(
+                "[Desktop Entry]\nType=Application\nName=Paint\nExec=/opt/paint/run\nStartupWMClass=PaintStudio\n",
+                "paint.desktop",
+            ),
+        ]));
+        let named = |app_id: &str| shell.program_for_app_id(app_id).map(|a| a.name.clone());
+        assert_eq!(named("org.example.Sketch").as_deref(), Some("Sketchpad"));
+        assert_eq!(named("ORG.EXAMPLE.SKETCH").as_deref(), Some("Sketchpad"));
+        assert_eq!(named("PaintStudio").as_deref(), Some("Paint"));
+        assert_eq!(named("terminal").as_deref(), Some("Terminal"));
+        assert_eq!(named(""), None);
+        assert_eq!(named("nothing-at-all"), None);
+    }
+
+    /// **Every button draws its program's picture**: a pin its program's, a
+    /// window the picture of the program it says it is, and a window that
+    /// names no program the generic one.
+    #[test]
+    fn every_button_draws_its_programs_picture() {
+        use guitk::render::RenderCommand;
+        with_scratch_config("shell-button-pictures", |_root| {
+            let mut shell = shell();
+            shell.pin_app(super::launcher::TERMINAL, "Terminal");
+            shell.apply_window_list(&WindowList::new(
+                0,
+                vec![
+                    window_of(1, "terminal", "~ : bash"),
+                    window_of(2, "", "untitled"),
+                ],
+            ));
+            let tree = shell.render_taskbar();
+            // The picture drawn inside each button, in the buttons' order.
+            let pictures: Vec<String> = (0..shell.taskbar_slots().len())
+                .map(|index| {
+                    let button = shell.taskbar_button_rect(index);
+                    let inside = |x: f32, y: f32| {
+                        x >= button.x
+                            && x < button.x + button.w
+                            && y >= button.y
+                            && y < button.y + button.h
+                    };
+                    tree.commands
+                        .iter()
+                        .find_map(|c| match c {
+                            RenderCommand::Image { x, y, image_id, .. } if inside(*x, *y) => {
+                                shell.icon_request(*image_id)
+                            }
+                            _ => None,
+                        })
+                        .map(|r| r.name.into_owned())
+                        .unwrap_or_default()
+                })
+                .collect();
+            assert_eq!(
+                pictures,
+                vec![
+                    "utilities-terminal".to_owned(),
+                    "utilities-terminal".to_owned(),
+                    super::launcher::GENERIC_PROGRAM_ICON.to_owned(),
+                ]
+            );
+        });
+    }
+
+    // ---- the tiles, as the Aero reference draws them ----
+
+    /// Every command drawn with its top-left corner inside `rect`.
+    fn drawn_inside(
+        tree: &guitk::render::RenderTree,
+        rect: super::Rect,
+    ) -> Vec<&guitk::render::RenderCommand> {
+        use guitk::render::RenderCommand;
+        tree.commands
+            .iter()
+            .filter(|c| match c {
+                RenderCommand::FillRect { x, y, .. }
+                | RenderCommand::StrokeRect { x, y, .. }
+                | RenderCommand::Image { x, y, .. }
+                | RenderCommand::Text { x, y, .. } => rect.contains(*x, *y),
+                _ => false,
+            })
+            .collect()
+    }
+
+    /// **A pin is its program's picture alone, and a window is its picture
+    /// and its title**, on a tile with an edge -- the reference's
+    /// `aero-task` and `aero-task is-labeled`.
+    #[test]
+    fn a_pin_is_its_picture_alone_and_a_window_its_picture_and_title() {
+        use guitk::render::RenderCommand;
+        with_scratch_config("shell-tiles", |_root| {
+            let mut shell = shell();
+            shell.pin_app(super::launcher::TERMINAL, "Terminal");
+            shell.apply_window_list(&WindowList::new(
+                0,
+                vec![window_of(1, "terminal", "notes.txt")],
+            ));
+            let layout = shell.taskbar_layout();
+            let (pin, window) = (layout[0], layout[1]);
+            assert!((pin.w - pin.h).abs() < 0.01, "a pin is square: {pin:?}");
+            assert!(
+                (pin.h - shell.scale(super::TASKBAR_TILE)).abs() < 0.01,
+                "a tile is the reference's height in its 40-pixel bar: {pin:?}"
+            );
+            let bar = shell.taskbar_rect();
+            assert!(
+                (pin.y - (bar.y + (bar.h - pin.h) / 2.0)).abs() < 0.01
+                    && (window.y - pin.y).abs() < 0.01,
+                "the tiles are not centred in the bar: {pin:?} {window:?} in {bar:?}"
+            );
+            assert!(
+                window.w > pin.w,
+                "a window's tile holds its title too: {window:?}"
+            );
+            let tree = shell.render_taskbar();
+
+            let on_pin = drawn_inside(&tree, pin);
+            assert!(
+                on_pin
+                    .iter()
+                    .any(|c| matches!(c, RenderCommand::Image { .. })),
+                "the pin has no picture"
+            );
+            assert!(
+                !on_pin.iter().any(|c| matches!(
+                    c,
+                    RenderCommand::Text { .. }
+                        | RenderCommand::FillRect { .. }
+                        | RenderCommand::StrokeRect { .. }
+                )),
+                "a pin is flat, and its name is its tooltip: {on_pin:?}"
+            );
+
+            let on_window = drawn_inside(&tree, window);
+            assert!(
+                on_window
+                    .iter()
+                    .any(|c| matches!(c, RenderCommand::Text { text, .. } if text == "notes.txt")),
+                "the window's title is not on its tile: {on_window:?}"
+            );
+            assert!(
+                on_window.iter().any(|c| matches!(c,
+                    RenderCommand::StrokeRect { corner_radii, .. }
+                        if *corner_radii == super::CornerRadii::all(4.0))),
+                "a window's tile has no edge, or not the reference's 4-pixel \
+                 corners at the default corner setting: {on_window:?}"
+            );
+            let picture_x = window.x + shell.scale(super::TASKBAR_TILE_PAD_START);
+            assert!(
+                on_window.iter().any(
+                    |c| matches!(c, RenderCommand::Image { x, .. } if (*x - picture_x).abs() < 0.01)
+                ),
+                "the picture does not lead the title: {on_window:?}"
+            );
+        });
+    }
+
+    /// **The window in front has the theme's colour for it**, and only that
+    /// window's tile does -- never a pin's, whatever is running.
+    #[test]
+    fn only_the_window_in_front_takes_the_active_colour() {
+        use guitk::render::RenderCommand;
+        with_scratch_config("shell-tiles-front", |_root| {
+            let mut shell = shell();
+            shell.pin_app(super::launcher::TERMINAL, "Terminal");
+            let mut front = window_of(2, "terminal", "two");
+            front.focused = true;
+            shell.apply_window_list(&WindowList::new(
+                0,
+                vec![window_of(1, "terminal", "one"), front],
+            ));
+            let active = shell.theme.taskbar_active_bg;
+            let tree = shell.render_taskbar();
+            let filled_active = |tile: super::Rect| {
+                tree.commands.iter().any(|c| {
+                    matches!(c, RenderCommand::FillRect { x, y, width, height, color, .. }
+                        if (*x, *y, *width, *height) == (tile.x, tile.y, tile.w, tile.h)
+                            && *color == active)
+                })
+            };
+            let layout = shell.taskbar_layout();
+            assert!(
+                !filled_active(layout[0]),
+                "the pin was drawn as the window in front"
+            );
+            assert!(
+                !filled_active(layout[1]),
+                "a window behind was drawn as in front"
+            );
+            assert!(filled_active(layout[2]), "the window in front was not");
+        });
+    }
+
+    /// **A long title gives way before a short one.** On a full bar the widest
+    /// windows come down to one width between them while a short title keeps
+    /// all of its tile, and the row still ends before the tray.
+    #[test]
+    fn a_long_title_gives_way_before_a_short_one() {
+        let mut shell = shell();
+        let mut windows: Vec<WindowInfo> = (1..=14)
+            .map(|i| window_of(i, "", &format!("a rather long document title, number {i}")))
+            .collect();
+        windows.push(window_of(99, "", "a"));
+        shell.apply_window_list(&WindowList::new(0, windows));
+        let layout = shell.taskbar_layout();
+        let short = *layout.last().expect("the short window has a tile");
+        assert!(
+            (short.w - shell.window_tile_width("a", short.h)).abs() < 0.01,
+            "the short title gave way: {short:?}"
+        );
+        let long = layout[0];
+        assert!(
+            long.w < shell.scale(super::TASKBAR_BUTTON_MAX_WIDTH) && long.w > short.w,
+            "the long titles did not come down, or came down past the short one: {long:?}"
+        );
+        assert!(
+            layout[..14].iter().all(|t| (t.w - long.w).abs() < 0.01),
+            "the long titles came down to different widths"
+        );
+        assert!(
+            short.x + short.w <= shell.tray_x(),
+            "the row ran into the tray"
+        );
+    }
+
+    /// **A window's tile is no wider than the reference's 160**, however long
+    /// its title, when the bar has room for more.
+    #[test]
+    fn a_windows_tile_is_no_wider_than_160() {
+        let mut shell = shell();
+        shell.apply_window_list(&WindowList::new(
+            0,
+            vec![window_of(
+                1,
+                "",
+                "a title long enough to fill any tile the taskbar could give it",
+            )],
+        ));
+        let tile = shell.taskbar_layout()[0];
+        assert!(
+            (tile.w - shell.scale(super::TASKBAR_BUTTON_MAX_WIDTH)).abs() < 0.01,
+            "{tile:?}"
+        );
+    }
+
+    /// **A tile squeezed past its title shows its picture alone, in its
+    /// middle** -- not a picture and an ellipsis, and not a picture hanging
+    /// off its edge.
+    #[test]
+    fn a_tile_squeezed_past_its_title_shows_its_picture_alone() {
+        use guitk::render::RenderCommand;
+        let mut shell = shell();
+        shell.apply_window_list(&WindowList::new(
+            0,
+            (1..=60)
+                .map(|i| window_of(i, "", &format!("window number {i}")))
+                .collect(),
+        ));
+        let layout = shell.taskbar_layout();
+        let tile = layout[0];
+        assert!(
+            tile.w < shell.scale(super::TASKBAR_TILE),
+            "the premise: sixty windows squeeze a tile below a square: {tile:?}"
+        );
+        let tree = shell.render_taskbar();
+        let on_tile = drawn_inside(&tree, tile);
+        assert!(
+            !on_tile
+                .iter()
+                .any(|c| matches!(c, RenderCommand::Text { .. })),
+            "a squeezed tile drew its title: {on_tile:?}"
+        );
+        let side = shell.scale(super::TASKBAR_WINDOW_ICON).round();
+        assert!(
+            tree.commands.iter().any(|c| matches!(c,
+                RenderCommand::Image { x, width, .. }
+                    if (*x - (tile.x + (tile.w - side) / 2.0)).abs() < 0.01
+                        && (*width - side).abs() < 0.01)),
+            "the picture is not in the squeezed tile's middle"
+        );
+    }
+
+    /// A window with no title gets no empty bubble, as a tray icon with none
+    /// gets none.
+    #[test]
+    fn an_untitled_window_gets_no_empty_tooltip() {
+        let mut shell = shell();
+        shell.apply_window_list(&WindowList::new(0, vec![window_of(1, "", "")]));
+        let tile = shell.taskbar_layout()[0];
+        rest_on(&mut shell, tile);
+        assert!(shell.render_tooltip().is_none());
+    }
+
+    /// The row's arithmetic: tiles that fit are as wide as they want.
+    #[test]
+    fn tiles_that_fit_are_as_wide_as_they_want() {
+        assert_eq!(
+            super::fit_tiles(&[36.0, 100.0, 60.0], &[false, true, true], 36.0, 500.0),
+            vec![36.0, 100.0, 60.0]
+        );
+    }
+
+    /// The row's arithmetic: the widest give way first, to one width, and a
+    /// pin never does. 396 wanted, 300 to go round: the pin keeps its 36, the
+    /// short title its 60, and the two long ones share the 204 left.
+    #[test]
+    fn the_widest_windows_give_way_first() {
+        assert_eq!(
+            super::fit_tiles(
+                &[36.0, 150.0, 60.0, 150.0],
+                &[false, true, true, true],
+                36.0,
+                300.0
+            ),
+            vec![36.0, 102.0, 60.0, 102.0]
+        );
+    }
+
+    /// The row's arithmetic: when not even a square each fits, every tile
+    /// shares alike -- and so does a row with nothing that may give way.
+    #[test]
+    fn past_a_square_each_every_tile_shares_alike() {
+        assert_eq!(
+            super::fit_tiles(&[36.0, 150.0, 150.0], &[false, true, true], 36.0, 90.0),
+            vec![30.0, 30.0, 30.0]
+        );
+        assert_eq!(
+            super::fit_tiles(&[36.0, 36.0], &[false, false], 36.0, 50.0),
+            vec![25.0, 25.0]
+        );
+        assert_eq!(super::fit_tiles(&[], &[], 36.0, 0.0), Vec::<f32>::new());
+    }
+
+    /// **The divider stands where the reference puts it**: its gap and
+    /// margin past the last pin, the reference's height, before the first
+    /// window -- with its shadow a pixel to its right.
+    #[test]
+    fn the_divider_stands_where_the_reference_puts_it() {
+        use guitk::render::RenderCommand;
+        with_scratch_config("shell-tiles-divider", |_root| {
+            let mut shell = shell();
+            shell.pin_app(super::launcher::TERMINAL, "Terminal");
+            shell.apply_window_list(&WindowList::new(0, vec![window_of(1, "", "one")]));
+            let layout = shell.taskbar_layout();
+            let divider = shell
+                .taskbar_divider_rect()
+                .expect("two sections, one divider");
+            assert!(
+                (divider.x
+                    - (layout[0].x + layout[0].w + shell.scale(super::TASKBAR_DIVIDER_OFFSET)))
+                .abs()
+                    < 0.01,
+                "{divider:?} after {:?}",
+                layout[0]
+            );
+            assert!(
+                divider.x + 2.0 * divider.w <= layout[1].x,
+                "the divider's shadow is on the window"
+            );
+            assert!(
+                (divider.h - shell.scale(super::TASKBAR_DIVIDER_HEIGHT)).abs() < 0.01,
+                "{divider:?}"
+            );
+            let tree = shell.render_taskbar();
+            assert!(
+                tree.commands.iter().any(|c| matches!(c,
+                    RenderCommand::FillRect { x, color, .. }
+                        if (*x - (divider.x + divider.w)).abs() < 0.01
+                            && *color == super::TASKBAR_DIVIDER_SHADOW)),
+                "the divider has no shadow"
+            );
+        });
+    }
+
+    // ---- the option to show windows' titles ----
+
+    /// **With titles off, a window is its picture alone**, on a square tile
+    /// like a pin's -- `design.txt`'s option, the other way round.
+    #[test]
+    fn with_titles_off_a_window_is_its_picture_alone() {
+        use guitk::render::RenderCommand;
+        let mut shell = shell();
+        shell.appearance.taskbar_labels = false;
+        shell.apply_window_list(&WindowList::new(0, vec![window_of(1, "", "notes.txt")]));
+        let tile = shell.taskbar_layout()[0];
+        assert!((tile.w - tile.h).abs() < 0.01, "not square: {tile:?}");
+        let tree = shell.render_taskbar();
+        let on_tile = drawn_inside(&tree, tile);
+        assert!(
+            !on_tile
+                .iter()
+                .any(|c| matches!(c, RenderCommand::Text { .. })),
+            "a title was drawn with titles off: {on_tile:?}"
+        );
+        assert!(
+            on_tile
+                .iter()
+                .any(|c| matches!(c, RenderCommand::Image { .. })),
+            "the picture went with the title"
+        );
+    }
+
+    /// **The bar's menu answers the keyboard** while it is up, as every
+    /// menu here does: Enter takes the highlighted row, Escape closes it.
+    #[test]
+    fn the_bars_menu_answers_the_keyboard() {
+        with_scratch_config("shell-taskbar-menu-keys", |_root| {
+            let mut shell = shell();
+            let (x, y) = bare_bar(&shell);
+            shell.handle_press(x, y, MouseButton::Right);
+            drop(shell.handle_hotkey(&press(Key::Down)));
+            drop(shell.handle_hotkey(&press(Key::Enter)));
+            assert!(
+                shell.render_taskbar_menu().is_none(),
+                "Enter left the menu open"
+            );
+            assert!(
+                !shell.appearance.taskbar_labels,
+                "Enter did not take the row"
+            );
+
+            shell.handle_press(x, y, MouseButton::Right);
+            drop(shell.handle_hotkey(&press(Key::Escape)));
+            assert!(
+                shell.render_taskbar_menu().is_none(),
+                "Escape left the menu open"
+            );
+            assert!(
+                !shell.appearance.taskbar_labels,
+                "Escape changed the setting"
+            );
+        });
+    }
+
+    /// **Opening the bar's menu closes what else is open** -- the one popup
+    /// a press on the bar does not put away first is the shortcut card, which
+    /// is there to be read, and a user who has turned to the bar has stopped.
+    #[test]
+    fn opening_the_bars_menu_closes_the_shortcut_card() {
+        with_scratch_config("shell-taskbar-menu-card", |_root| {
+            let mut shell = shell();
+            shell.shortcut_card_open = true;
+            let (x, y) = bare_bar(&shell);
+            shell.handle_press(x, y, MouseButton::Right);
+            assert!(
+                shell.render_taskbar_menu().is_some(),
+                "the premise: it opened"
+            );
+            assert!(
+                !shell.shortcut_card_open,
+                "the card stayed up under the menu"
+            );
+        });
+    }
+
+    /// A point on the bar between the tiles and the tray.
+    fn bare_bar(shell: &DesktopShell) -> (f32, f32) {
+        let bar = shell.taskbar_rect();
+        (shell.tray_x() - 40.0, bar.y + bar.h / 2.0)
+    }
+
+    /// **A right-click on the bar offers its options**: the titles switch,
+    /// ticked while they are shown; choosing it hides them and says so in
+    /// `appearance.yaml`, where the Settings app reads it too.
+    #[test]
+    fn a_right_click_on_the_bar_offers_the_titles_switch() {
+        with_scratch_config("shell-taskbar-menu", |_root| {
+            let mut shell = shell();
+            let (x, y) = bare_bar(&shell);
+            assert_eq!(
+                shell.hit_test(x, y),
+                Hit::TaskbarPanel,
+                "the premise: bare bar"
+            );
+            shell.handle_press(x, y, MouseButton::Right);
+            let drawn = format!("{:?}", shell.render_taskbar_menu().expect("no menu opened"));
+            assert!(drawn.contains("Show window titles"), "{drawn}");
+            assert!(drawn.contains('\u{2713}'), "shown, and not ticked: {drawn}");
+            assert!(
+                shell.any_popup_open(),
+                "an open taskbar menu is not a popup"
+            );
+
+            shell.taskbar_menu = None;
+            shell.activate_taskbar_menu_item(DesktopShell::MENU_SHOW_TITLES);
+            assert!(
+                !shell.appearance.taskbar_labels,
+                "the switch did not switch"
+            );
+            shell.handle_press(x, y, MouseButton::Right);
+            let drawn = format!("{:?}", shell.render_taskbar_menu().expect("no menu opened"));
+            assert!(
+                !drawn.contains('\u{2713}'),
+                "hidden, and still ticked: {drawn}"
+            );
+            shell.taskbar_menu = None;
+            assert!(
+                !appearance::AppearanceFile::load().settings.taskbar_labels,
+                "the choice was not saved"
+            );
+            shell.activate_taskbar_menu_item(DesktopShell::MENU_SHOW_TITLES);
+            assert!(
+                shell.appearance.taskbar_labels,
+                "the switch does not switch back"
+            );
+        });
+    }
+
+    /// **Escape, or a click away, closes the bar's menu**, as it closes the
+    /// others -- and a right-click that closes another popup is spent doing
+    /// so, as every dismissing press is (`handle_press`), rather than opening
+    /// the bar's menu as well.
+    #[test]
+    fn the_bars_menu_closes_as_the_others_do() {
+        with_scratch_config("shell-taskbar-menu-close", |_root| {
+            let mut shell = shell();
+            shell.toggle_start_menu();
+            let (x, y) = bare_bar(&shell);
+            shell.handle_press(x, y, MouseButton::Right);
+            assert!(
+                !shell.start_menu_open,
+                "the right-click left the start menu open"
+            );
+            assert!(
+                shell.render_taskbar_menu().is_none(),
+                "the press that closed the start menu opened another as well"
+            );
+            shell.handle_press(x, y, MouseButton::Right);
+            assert!(
+                shell.render_taskbar_menu().is_some(),
+                "the premise: it opened"
+            );
+            assert!(shell.dismiss_popups());
+            assert!(
+                shell.render_taskbar_menu().is_none(),
+                "dismissing left it open"
+            );
+
+            shell.handle_press(x, y, MouseButton::Right);
+            shell.handle_mouse(&at(40.0, 40.0, MouseEventKind::Press(MouseButton::Left)));
+            assert!(
+                shell.render_taskbar_menu().is_none(),
+                "a click away left it open"
+            );
+            assert!(
+                shell.appearance.taskbar_labels,
+                "a click away changed the setting"
+            );
+        });
+    }
+
+    // ---- the tile under the pointer ----
+
+    /// Whether `tile` is drawn lit: the glow the reference's `:hover` casts,
+    /// which nothing else on the bar casts.
+    fn lit(shell: &DesktopShell, tile: super::Rect) -> bool {
+        shell.render_taskbar().commands.iter().any(|c| {
+            matches!(c, guitk::render::RenderCommand::BoxShadow { x, y, width, height, .. }
+                if (*x, *y, *width, *height) == (tile.x, tile.y, tile.w, tile.h))
+        })
+    }
+
+    /// **The tile under the pointer lights up** -- a pin, which is otherwise
+    /// only its picture, or a window's, over whatever state it was in -- and
+    /// goes out when the pointer moves on. Each change is reported, so the
+    /// session redraws the bar for it.
+    #[test]
+    fn the_tile_under_the_pointer_lights_up() {
+        with_scratch_config("shell-tile-hover", |_root| {
+            let mut shell = shell();
+            shell.pin_app(super::launcher::TERMINAL, "Terminal");
+            let mut front = window_of(1, "", "one");
+            front.focused = true;
+            shell.apply_window_list(&WindowList::new(0, vec![front]));
+            let layout = shell.taskbar_layout();
+            let centre = |t: super::Rect| (t.x + t.w / 2.0, t.y + t.h / 2.0);
+            assert!(
+                !lit(&shell, layout[0]) && !lit(&shell, layout[1]),
+                "lit at rest"
+            );
+            // Cleared, so the answer below is this move's and not the pin's.
+            shell.take_hover_changed();
+
+            let (x, y) = centre(layout[0]);
+            shell.handle_mouse(&at(x, y, MouseEventKind::Move));
+            assert!(
+                shell.take_hover_changed(),
+                "the pin lit and nobody was told"
+            );
+            assert!(
+                lit(&shell, layout[0]),
+                "the pin under the pointer is not lit"
+            );
+            assert!(!lit(&shell, layout[1]));
+
+            let (x, y) = centre(layout[1]);
+            shell.handle_mouse(&at(x, y, MouseEventKind::Move));
+            assert!(
+                !lit(&shell, layout[0]),
+                "the pin stayed lit behind the pointer"
+            );
+            assert!(
+                lit(&shell, layout[1]),
+                "the window in front is not lit under the pointer"
+            );
+
+            shell.handle_mouse(&at(40.0, 40.0, MouseEventKind::Move));
+            assert!(
+                shell.take_hover_changed(),
+                "the light went out and nobody was told"
+            );
+            assert!(
+                !lit(&shell, layout[0]) && !lit(&shell, layout[1]),
+                "lit after the pointer left"
+            );
+        });
+    }
+
+    // ---- shutting down asks the programs first ----
+
+    /// The power choice `choice`, as the power menu's row carries it out.
+    fn press_power(shell: &mut DesktopShell, choice: crate::power::PowerChoice) -> ShellAction {
+        shell.choose_power(choice)
+    }
+
+    /// **With nothing open, shutting down is at once.**
+    #[test]
+    fn with_nothing_open_shutting_down_is_at_once() {
+        let mut shell = shell();
+        assert_eq!(
+            press_power(&mut shell, crate::power::PowerChoice::ShutDown),
+            ShellAction::Launch(
+                crate::power::PowerChoice::ShutDown
+                    .command()
+                    .expect("a program")
+            )
+        );
+    }
+
+    /// **Shutting down asks every window to close first**, and is carried out
+    /// once they have -- so a program with unsaved work is asked, where it
+    /// used to be switched off.
+    #[test]
+    fn shutting_down_asks_every_window_to_close_first() {
+        use super::{ShellControlAction, ShellRequest, WindowId};
+        let mut shell = shell();
+        shell.apply_window_list(&WindowList::new(
+            0,
+            vec![stacked(1, true), stacked(2, false)],
+        ));
+        let action = press_power(&mut shell, crate::power::PowerChoice::ShutDown);
+        let ShellAction::ControlAll(asked) = action else {
+            panic!("shutting down with windows open did not ask them: {action:?}");
+        };
+        assert_eq!(asked.len(), 2, "{asked:?}");
+        for id in [1, 2] {
+            assert!(
+                asked.contains(&ShellRequest::window(
+                    WindowId(id),
+                    ShellControlAction::Close
+                )),
+                "window {id} was not asked to close: {asked:?}"
+            );
+        }
+        assert_eq!(
+            shell.take_ending_action(),
+            None,
+            "carried out before they closed"
+        );
+
+        // One goes: still waiting.
+        shell.apply_window_list(&WindowList::new(0, vec![stacked(2, false)]));
+        assert_eq!(shell.take_ending_action(), None);
+        // The last goes: now.
+        shell.apply_window_list(&WindowList::new(0, Vec::new()));
+        assert_eq!(
+            shell.take_ending_action(),
+            Some(ShellAction::Launch(
+                crate::power::PowerChoice::ShutDown
+                    .command()
+                    .expect("a program")
+            ))
+        );
+        assert_eq!(shell.take_ending_action(), None, "carried out twice");
+    }
+
+    /// **Log out asks too**, and ends the session once they have gone.
+    #[test]
+    fn logging_out_asks_the_windows_and_then_ends_the_session() {
+        let mut shell = shell();
+        shell.apply_window_list(&WindowList::new(0, vec![stacked(1, true)]));
+        assert!(matches!(
+            press_power(&mut shell, crate::power::PowerChoice::LogOut),
+            ShellAction::ControlAll(_)
+        ));
+        shell.apply_window_list(&WindowList::new(0, Vec::new()));
+        assert_eq!(shell.take_ending_action(), Some(ShellAction::LogOut));
+    }
+
+    /// **Sleep and lock leave the session as it was**, so nothing is asked.
+    #[test]
+    fn sleeping_and_locking_ask_nothing() {
+        let mut shell = shell();
+        shell.apply_window_list(&WindowList::new(0, vec![stacked(1, true)]));
+        for choice in [
+            crate::power::PowerChoice::Sleep,
+            crate::power::PowerChoice::Lock,
+        ] {
+            assert!(
+                matches!(press_power(&mut shell, choice), ShellAction::Launch(_)),
+                "{choice:?} asked the windows"
+            );
+        }
+    }
+
+    /// **Programs that do not close are listed, after a grace**, over the
+    /// whole screen: going ahead anyway carries it out; Cancel, or Escape,
+    /// does not, and leaves them open.
+    #[test]
+    fn programs_that_do_not_close_are_listed_to_decide() {
+        let mut shell = shell();
+        shell.apply_window_list(&WindowList::new(
+            0,
+            vec![window_of(1, "terminal", "notes.txt -- unsaved")],
+        ));
+        drop(press_power(&mut shell, crate::power::PowerChoice::Restart));
+        assert!(shell.render_ending().is_none(), "listed before the grace");
+        let due = shell.ending_due_in().expect("the grace is a deadline");
+        shell.advance_osd(due);
+        assert!(
+            shell.tick_ending(),
+            "the grace ran out and nothing was listed"
+        );
+        assert!(!shell.tick_ending(), "listed twice");
+        let drawn = format!("{:?}", shell.render_ending().expect("not listed"));
+        assert!(drawn.contains("notes.txt -- unsaved"), "{drawn}");
+        assert!(drawn.contains("Restart anyway"), "{drawn}");
+        assert!(shell.any_popup_open(), "the list does not hold Escape");
+
+        let (anyway, cancel) = shell.ending_button_rects();
+        let centre = |r: super::Rect| (r.x + r.w / 2.0, r.y + r.h / 2.0);
+        // Everything else on the screen is the list's.
+        let (x, y) = shell.show_desktop_rect().centre();
+        assert_eq!(
+            shell.handle_press(x, y, MouseButton::Left),
+            ShellAction::Consumed
+        );
+        assert!(
+            shell.render_ending().is_some(),
+            "a press behind it reached the bar"
+        );
+
+        let (x, y) = centre(anyway);
+        assert_eq!(
+            shell.handle_press(x, y, MouseButton::Left),
+            ShellAction::Launch(
+                crate::power::PowerChoice::Restart
+                    .command()
+                    .expect("a program")
+            )
+        );
+        assert!(shell.render_ending().is_none());
+
+        // Again, and Cancel.
+        drop(press_power(&mut shell, crate::power::PowerChoice::Restart));
+        shell.advance_osd(super::ENDING_GRACE_MS);
+        assert!(shell.tick_ending());
+        let (x, y) = centre(cancel);
+        assert_eq!(
+            shell.handle_press(x, y, MouseButton::Left),
+            ShellAction::Consumed
+        );
+        assert!(shell.render_ending().is_none(), "Cancel left the list up");
+        shell.apply_window_list(&WindowList::new(0, Vec::new()));
+        assert_eq!(
+            shell.take_ending_action(),
+            None,
+            "cancelled, and carried out anyway"
+        );
+
+        // And Escape.
+        shell.apply_window_list(&WindowList::new(0, vec![stacked(1, true)]));
+        drop(press_power(&mut shell, crate::power::PowerChoice::Restart));
+        shell.advance_osd(super::ENDING_GRACE_MS);
+        assert!(shell.tick_ending());
+        drop(shell.handle_hotkey(&press(Key::Escape)));
+        assert!(shell.render_ending().is_none(), "Escape left the list up");
+    }
+
+    // ---- "Show desktop" ----
+
+    /// A window of the current desktop, stacked `z`-th from the bottom.
+    fn stacked(id: u64, focused: bool) -> WindowInfo {
+        let mut window = window_of(id, "", &format!("window {id}"));
+        window.focused = focused;
+        window
+    }
+
+    /// **The strip is at the very end of the bar**, right of the clock, the
+    /// bar's height and the reference's width; the tray is laid out left of
+    /// it and the tiles stop short of the tray.
+    #[test]
+    fn the_show_desktop_strip_ends_the_bar() {
+        let mut shell = shell();
+        // A clock wide enough that the tray is sized by what is in it, not
+        // by its floor -- which would absorb a strip the width left out.
+        shell.datetime.show_day_of_week = true;
+        shell.datetime.show_date = true;
+        let bar = shell.taskbar_rect();
+        let strip = shell.show_desktop_rect();
+        assert!(
+            (strip.x + strip.w - (bar.x + bar.w)).abs() < 0.01,
+            "{strip:?}"
+        );
+        assert!((strip.w - shell.scale(super::SHOW_DESKTOP_WIDTH)).abs() < 0.01);
+        assert!((strip.h - bar.h).abs() < 0.01);
+        let clock = shell.clock_rect();
+        assert!(
+            clock.x + clock.w <= strip.x + 0.01,
+            "the clock runs under the strip"
+        );
+        assert!(
+            shell.tray_x() + shell.tray_width() <= bar.x + bar.w + 0.5,
+            "the tray runs off the bar"
+        );
+        // The tray's width counts the strip, or everything laid out from its
+        // left edge -- the desktop indicator, then the keyboard layout's --
+        // runs into the bell.
+        let pad = shell.scale(super::TRAY_PADDING);
+        assert!(
+            shell.tray_x()
+                + pad
+                + shell.desktop_indicator_width()
+                + pad
+                + shell.layout_indicator_width()
+                <= shell.bell_rect().x + 0.01,
+            "the tray's left-hand items run into the bell"
+        );
+        assert_eq!(
+            shell.hit_test(strip.x + strip.w / 2.0, strip.y + strip.h / 2.0),
+            super::Hit::ShowDesktop
+        );
+    }
+
+    /// **A press puts every window of this desktop away, and the next brings
+    /// them back** -- in the order they were stacked, so the one in front is
+    /// in front again -- as every taskbar's corner does.
+    #[test]
+    fn show_desktop_puts_the_windows_away_and_brings_them_back() {
+        use super::{ShellControlAction, ShellRequest, WindowId};
+        let mut shell = shell();
+        // Listed bottom to top: 2 below, 1 in front.
+        shell.apply_window_list(&WindowList::new(
+            0,
+            vec![stacked(2, false), stacked(1, true)],
+        ));
+        let strip = shell.show_desktop_rect();
+        let (x, y) = (strip.x + strip.w / 2.0, strip.y + strip.h / 2.0);
+        let press = |shell: &mut DesktopShell| {
+            shell.handle_mouse(&at(x, y, MouseEventKind::Press(MouseButton::Left)))
+        };
+        let each = |action: ShellControlAction, ids: &[u64]| {
+            ShellAction::ControlAll(
+                ids.iter()
+                    .map(|id| ShellRequest::window(WindowId(*id), action))
+                    .collect(),
+            )
+        };
+
+        assert_eq!(
+            press(&mut shell),
+            each(ShellControlAction::Minimize, &[2, 1])
+        );
+        // The compositor did as asked.
+        let mut down = [stacked(2, false), stacked(1, false)];
+        for window in &mut down {
+            window.minimized = true;
+        }
+        shell.apply_window_list(&WindowList::new(0, down.to_vec()));
+        assert_eq!(
+            press(&mut shell),
+            each(ShellControlAction::Activate, &[2, 1]),
+            "the second press did not bring them back, bottom first"
+        );
+    }
+
+    /// **A window shown again in between makes the next press put windows
+    /// away again**, rather than bring back ones the user has moved on from.
+    #[test]
+    fn a_window_shown_in_between_resets_show_desktop() {
+        use super::{ShellControlAction, ShellRequest, WindowId};
+        let mut shell = shell();
+        shell.apply_window_list(&WindowList::new(0, vec![stacked(1, true)]));
+        let strip = shell.show_desktop_rect();
+        let (x, y) = (strip.x + strip.w / 2.0, strip.y + strip.h / 2.0);
+        drop(shell.handle_mouse(&at(x, y, MouseEventKind::Press(MouseButton::Left))));
+        // The user opened another window meanwhile.
+        let mut first = stacked(1, false);
+        first.minimized = true;
+        shell.apply_window_list(&WindowList::new(0, vec![first, stacked(3, true)]));
+        assert_eq!(
+            shell.handle_mouse(&at(x, y, MouseEventKind::Press(MouseButton::Left))),
+            ShellAction::ControlAll(vec![ShellRequest::window(
+                WindowId(3),
+                ShellControlAction::Minimize
+            )]),
+            "brought back what was put away, over the window the user opened"
+        );
+    }
+
+    /// **The shortcut and the strip are one switch**: what the strip put away
+    /// the shortcut brings back.
+    #[test]
+    fn the_shortcut_and_the_strip_are_one_switch() {
+        use super::{ShellControlAction, ShellRequest, WindowId};
+        let mut shell = shell();
+        shell.apply_window_list(&WindowList::new(0, vec![stacked(1, true)]));
+        let strip = shell.show_desktop_rect();
+        drop(shell.handle_mouse(&at(
+            strip.x + strip.w / 2.0,
+            strip.y + strip.h / 2.0,
+            MouseEventKind::Press(MouseButton::Left),
+        )));
+        let mut first = stacked(1, false);
+        first.minimized = true;
+        shell.apply_window_list(&WindowList::new(0, vec![first]));
+        assert_eq!(
+            shell.show_desktop_requests(),
+            vec![ShellRequest::window(
+                WindowId(1),
+                ShellControlAction::Activate
+            )]
+        );
+    }
+
+    /// **The strip lights under the pointer and says what it does.**
+    #[test]
+    fn the_show_desktop_strip_lights_and_names_itself() {
+        use guitk::render::RenderCommand;
+        let mut shell = shell();
+        let strip = shell.show_desktop_rect();
+        let fill_alpha = |shell: &DesktopShell| {
+            shell
+                .render_taskbar()
+                .commands
+                .iter()
+                .find_map(|c| match c {
+                    RenderCommand::FillRect {
+                        x,
+                        y,
+                        width,
+                        height,
+                        color,
+                        ..
+                    } if (*x, *y, *width, *height) == (strip.x, strip.y, strip.w, strip.h) => {
+                        Some(color.a)
+                    }
+                    _ => None,
+                })
+                .expect("the strip is not drawn")
+        };
+        assert_eq!(fill_alpha(&shell), super::SHOW_DESKTOP_FILL);
+        rest_on(&mut shell, strip);
+        assert_eq!(
+            fill_alpha(&shell),
+            super::SHOW_DESKTOP_FILL_LIT,
+            "not lit under the pointer"
+        );
+        let tip = format!("{:?}", shell.render_tooltip().expect("no tooltip"));
+        assert!(tip.contains("Show desktop"), "{tip}");
+    }
+
+    /// Rest the pointer on `rect`'s middle, and let the tooltip's delay pass.
+    fn rest_on(shell: &mut DesktopShell, rect: super::Rect) {
+        shell.handle_mouse(&at(
+            rect.x + rect.w / 2.0,
+            rect.y + rect.h / 2.0,
+            MouseEventKind::Move,
+        ));
+        shell.advance_osd(5_000);
+    }
+
+    // ---- the bar's glass, and the tray's names ----
+
+    /// **The bar is the reference's glass**: a line of light along its top
+    /// edge and another just under it, a soft light below them and a shade
+    /// over its lower half -- all over the bar's colour and under everything
+    /// on it.
+    #[test]
+    fn the_bar_is_glass_as_the_references() {
+        use guitk::render::RenderCommand;
+        let s = shell();
+        let bar = s.taskbar_rect();
+        let tree = s.render_taskbar();
+        let at = |x: f32, y: f32, w: f32, h: f32, color: guitk::color::Color| {
+            tree.commands.iter().position(|c| {
+                matches!(c, RenderCommand::FillRect { x: cx, y: cy, width, height, color: cc, .. }
+                    if (*cx, *cy, *width, *height) == (x, y, w, h) && *cc == color)
+            })
+        };
+        let white = |a: u8| super::with_alpha(guitk::color::Color::WHITE, a);
+        let base = at(bar.x, bar.y, bar.w, bar.h, s.theme.taskbar_bg).expect("no bar");
+        let edge = at(bar.x, bar.y, bar.w, 1.0, white(super::TASKBAR_EDGE_LIGHT))
+            .expect("no line of light along the top edge");
+        let inner = at(
+            bar.x,
+            bar.y + 1.0,
+            bar.w,
+            1.0,
+            white(super::TASKBAR_INNER_LIGHT),
+        )
+        .expect("no line just under it");
+        let foot = at(
+            bar.x,
+            bar.y + bar.h / 2.0,
+            bar.w,
+            bar.h / 2.0,
+            super::with_alpha(guitk::color::Color::BLACK, super::TASKBAR_FOOT_SHADE),
+        )
+        .expect("no shade over the lower half");
+        let glow = tree
+            .commands
+            .iter()
+            .position(|c| {
+                matches!(c, RenderCommand::FillRect { y, width, color, .. }
+                    if *y > bar.y + 1.0 && *y < bar.y + bar.h / 2.0 && (*width - bar.w).abs() < 0.01
+                        && *color == white(super::TASKBAR_TOP_GLOW))
+            })
+            .expect("no soft light under the lines");
+        let orb = s.start_orb_rect();
+        let first_on_it = tree
+            .commands
+            .iter()
+            .position(|c| {
+                matches!(c, RenderCommand::FillRect { x, y, width, height, .. }
+                    if (*x, *y, *width, *height) == (orb.x, orb.y, orb.w, orb.h))
+            })
+            .expect("no orb");
+        for (what, index) in [
+            ("edge", edge),
+            ("inner line", inner),
+            ("foot", foot),
+            ("glow", glow),
+        ] {
+            assert!(
+                base < index && index < first_on_it,
+                "the {what} is not between the bar and what is on it"
+            );
+        }
+    }
+
+    /// **The tray's chevron and clock name themselves**: the chevron as the
+    /// reference's `title` does, the clock by the whole date -- and not over
+    /// the calendar the clock has opened, which says it already.
+    #[test]
+    fn the_chevron_and_the_clock_name_themselves() {
+        let mut s = DesktopShell::new(1024, 768);
+        let flood: Vec<_> = (1..=80)
+            .map(|id| guiremote::tray::TrayIcon {
+                owner: 99,
+                id,
+                glyph: "X".to_string(),
+                tooltip: "x".to_string(),
+            })
+            .collect();
+        s.apply_tray_icons(flood);
+        let chevron = s.tray_overflow_rect().expect("overflowing");
+        rest_on(&mut s, chevron);
+        let tip = format!("{:?}", s.render_tooltip().expect("the chevron has no name"));
+        assert!(tip.contains("Show hidden icons"), "{tip}");
+
+        s.set_system_zone(tzrules::Tz::parse(b"UTC0").expect("a POSIX rule"));
+        datetimesettings::clock::with_time(1_790_424_000, || {
+            let clock = s.clock_rect();
+            rest_on(&mut s, clock);
+            let tip = format!("{:?}", s.render_tooltip().expect("the clock has no name"));
+            assert!(tip.contains("Saturday, September 26, 2026"), "{tip}");
+
+            // Open the calendar from the clock: the name goes.
+            let (x, y) = (clock.x + clock.w / 2.0, clock.y + clock.h / 2.0);
+            s.handle_mouse(&at(x, y, MouseEventKind::Press(MouseButton::Left)));
+            assert!(s.calendar.visible, "the clock did not open the calendar");
+            s.handle_mouse(&at(x + 1.0, y, MouseEventKind::Move));
+            s.advance_osd(5_000);
+            assert!(
+                s.render_tooltip().is_none(),
+                "the date is named over the calendar that shows it"
+            );
+        });
+    }
+
+    /// **What in the tray the pointer is over lights**, as the reference's
+    /// `aero-trayico:hover`, `aero-tray-arrow:hover` and `aero-clock:hover`:
+    /// a program's icon, the chevron, the bell and the clock, one at a time,
+    /// each change reported so the bar is drawn again.
+    #[test]
+    fn what_in_the_tray_the_pointer_is_over_lights() {
+        use guitk::render::RenderCommand;
+        let mut s = DesktopShell::new(1024, 768);
+        let flood: Vec<_> = (1..=80)
+            .map(|id| guiremote::tray::TrayIcon {
+                owner: 99,
+                id,
+                glyph: "X".to_string(),
+                tooltip: "x".to_string(),
+            })
+            .collect();
+        s.apply_tray_icons(flood);
+        let lights = |s: &DesktopShell| -> Vec<(super::Rect, u8)> {
+            s.render_taskbar()
+                .commands
+                .iter()
+                .filter_map(|c| match c {
+                    RenderCommand::FillRect {
+                        x,
+                        y,
+                        width,
+                        height,
+                        color,
+                        ..
+                    } if (color.r, color.g, color.b) == (255, 255, 255)
+                        && (color.a == super::TRAY_LIT || color.a == super::TRAY_CLOCK_LIT) =>
+                    {
+                        Some((super::Rect::new(*x, *y, *width, *height), color.a))
+                    }
+                    _ => None,
+                })
+                .collect()
+        };
+        assert_eq!(lights(&s), Vec::new(), "lit at rest");
+        s.take_hover_changed();
+        let items = [
+            (s.tray_icon_rects()[0], super::TRAY_LIT, "an icon"),
+            (
+                s.tray_overflow_rect().expect("overflowing"),
+                super::TRAY_LIT,
+                "the chevron",
+            ),
+            (s.bell_rect(), super::TRAY_LIT, "the bell"),
+            (s.clock_rect(), super::TRAY_CLOCK_LIT, "the clock"),
+        ];
+        for (rect, alpha, what) in items {
+            s.handle_mouse(&at(
+                rect.x + rect.w / 2.0,
+                rect.y + rect.h / 2.0,
+                MouseEventKind::Move,
+            ));
+            assert!(s.take_hover_changed(), "{what} lit and nobody was told");
+            let lit = lights(&s);
+            assert_eq!(lit.len(), 1, "{what}: {lit:?}");
+            let (light, a) = lit[0];
+            assert_eq!(a, alpha, "{what} is lit in the wrong strength");
+            assert!(
+                light.x >= rect.x - 0.01 && light.x + light.w <= rect.x + rect.w + 0.01,
+                "{what}'s light {light:?} is not on it {rect:?}"
+            );
+        }
+        s.handle_mouse(&at(600.0, 300.0, MouseEventKind::Move));
+        assert!(
+            s.take_hover_changed(),
+            "the light went out and nobody was told"
+        );
+        assert_eq!(lights(&s), Vec::new(), "lit after the pointer left");
+
+        // The bell names nothing, so a move onto it from bare desktop changes
+        // only the light -- no tooltip comes or goes to report it instead.
+        let bell = s.bell_rect();
+        s.handle_mouse(&at(
+            bell.x + bell.w / 2.0,
+            bell.y + bell.h / 2.0,
+            MouseEventKind::Move,
+        ));
+        assert!(
+            s.take_hover_changed(),
+            "the bell lit and nobody was told, so the bar was not drawn again"
+        );
+    }
+
+    // ---- the start orb ----
+
+    /// The glows drawn round `orb` in the taskbar -- a `BoxShadow` on it in
+    /// the accent.
+    fn orb_glows(shell: &DesktopShell, orb: super::Rect) -> usize {
+        use guitk::render::RenderCommand;
+        let glow = super::with_alpha(shell.theme.accent_color, super::START_ORB_GLOW_ALPHA);
+        shell
+            .render_taskbar()
+            .commands
+            .iter()
+            .filter(|c| {
+                matches!(c, RenderCommand::BoxShadow { x, y, width, height, color, .. }
+                    if (*x, *y, *width, *height) == (orb.x, orb.y, orb.w, orb.h) && *color == glow)
+            })
+            .count()
+    }
+
+    /// **The start button is the reference's orb**: a circle in the accent,
+    /// centred in the button and inside the bar, the start picture on it in a
+    /// colour it can be read in, a shadow under it, and a gloss across its top
+    /// and a shade at its foot that stay inside the circle.
+    #[test]
+    fn the_start_button_is_the_references_orb() {
+        use guitk::render::RenderCommand;
+        let s = shell();
+        let button = s.start_button_rect();
+        let bar = s.taskbar_rect();
+        let orb = s.start_orb_rect();
+        let d = orb.w;
+        assert!(d > 0.0 && (orb.h - d).abs() < 0.01, "not round: {orb:?}");
+        assert!(
+            (orb.x + d / 2.0 - (button.x + button.w / 2.0)).abs() < 0.01
+                && (orb.y + d / 2.0 - (button.y + button.h / 2.0)).abs() < 0.01,
+            "not centred in the button: {orb:?} in {button:?}"
+        );
+        assert!(
+            orb.y >= bar.y && orb.y + d <= bar.y + bar.h,
+            "the orb leaves the bar, whose surface ends at its edge: {orb:?} in {bar:?}"
+        );
+        let tree = s.render_taskbar();
+        let body = tree.commands.iter().any(|c| {
+            matches!(c, RenderCommand::FillRect { x, y, width, height, color, corner_radii }
+                if (*x, *y, *width, *height) == (orb.x, orb.y, orb.w, orb.h)
+                    && *color == s.theme.taskbar_accent
+                    && *corner_radii == super::CornerRadii::all(d / 2.0))
+        });
+        assert!(body, "no round orb in the accent");
+        let shadow = tree.commands.iter().any(|c| {
+            matches!(c, RenderCommand::BoxShadow { x, y, width, height, offset_y, color, .. }
+                if (*x, *y, *width, *height) == (orb.x, orb.y, orb.w, orb.h)
+                    && *offset_y > 0.0
+                    && *color == super::with_alpha(guitk::color::Color::BLACK, super::START_ORB_SHADOW_ALPHA))
+        });
+        assert!(shadow, "no shadow under the orb");
+        assert_eq!(orb_glows(&s, orb), 0, "glowing at rest");
+
+        // The reference's three rings, each round the orb's centre: light
+        // just outside its edge, dark outside that, and a line just inside.
+        let rings: Vec<(super::Rect, u8, bool)> = tree
+            .commands
+            .iter()
+            .filter_map(|c| match c {
+                RenderCommand::StrokeRect {
+                    x,
+                    y,
+                    width,
+                    height,
+                    color,
+                    ..
+                } if matches!((color.r, color.g, color.b), (255, 255, 255) | (0, 0, 0)) => Some((
+                    super::Rect::new(*x, *y, *width, *height),
+                    color.a,
+                    color.r == 255,
+                )),
+                _ => None,
+            })
+            .filter(|(r, _, _)| {
+                (r.x + r.w / 2.0 - (orb.x + d / 2.0)).abs() < 0.01
+                    && (r.y + r.h / 2.0 - (orb.y + d / 2.0)).abs() < 0.01
+            })
+            .collect();
+        let ring = |white: bool, alpha: u8, what: &str| {
+            rings
+                .iter()
+                .find(|(_, a, w)| *w == white && *a == alpha)
+                .map(|(r, _, _)| *r)
+                .unwrap_or_else(|| panic!("no {what}: {rings:?}"))
+        };
+        let light = ring(true, super::START_ORB_RING_ALPHA, "ring of light");
+        let dark = ring(false, super::START_ORB_OUTER_RING_ALPHA, "dark ring");
+        let inner = ring(true, super::START_ORB_INNER_ALPHA, "line inside the edge");
+        assert!(
+            light.w > d && dark.w > light.w,
+            "the rings are not round the orb, dark outside light: {light:?} {dark:?}"
+        );
+        assert!(
+            inner.w < d,
+            "the inner line is not inside the edge: {inner:?}"
+        );
+
+        // The start picture, centred on the orb.
+        let pictures: Vec<(f32, f32, f32, u64)> = tree
+            .commands
+            .iter()
+            .filter_map(|c| match c {
+                RenderCommand::Image {
+                    x,
+                    y,
+                    width,
+                    image_id,
+                    ..
+                } if orb.contains(*x + 1.0, *y + 1.0) => Some((*x, *y, *width, *image_id)),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(pictures.len(), 1, "{pictures:?}");
+        let (x, y, w, id) = pictures[0];
+        assert!(
+            (x + w / 2.0 - (orb.x + d / 2.0)).abs() < 1.0
+                && (y + w / 2.0 - (orb.y + d / 2.0)).abs() < 1.0,
+            "the picture is not centred on the orb"
+        );
+        let request = s.icon_request(id).expect("an icon");
+        assert_eq!(request.name, "start-here");
+        assert_eq!(request.color, super::readable_on(s.theme.taskbar_accent));
+
+        // Every translucent white or black fill on the orb -- the gloss and
+        // the shade -- lies inside its circle: sampled round each pill's edge.
+        let centre = (orb.x + d / 2.0, orb.y + d / 2.0);
+        let inside = |px: f32, py: f32| {
+            let (dx, dy) = (px - centre.0, py - centre.1);
+            (dx * dx + dy * dy).sqrt() <= d / 2.0 + 0.5
+        };
+        let mut glosses = 0;
+        let mut shades = 0;
+        for c in &tree.commands {
+            let RenderCommand::FillRect {
+                x,
+                y,
+                width,
+                height,
+                color,
+                corner_radii,
+            } = c
+            else {
+                continue;
+            };
+            let white = (color.r, color.g, color.b) == (255, 255, 255);
+            let black = (color.r, color.g, color.b) == (0, 0, 0);
+            if !(white || black) || color.a == 255 || !orb.contains(*x + 0.5, *y + 0.5) {
+                continue;
+            }
+            if white {
+                glosses += 1;
+                assert!(
+                    y + height / 2.0 < centre.1,
+                    "a gloss below the orb's middle"
+                );
+            } else {
+                shades += 1;
+                assert!(
+                    y + height / 2.0 > centre.1,
+                    "a shade above the orb's middle"
+                );
+            }
+            let r = corner_radii.top_left;
+            for step in 0..32 {
+                #[allow(clippy::cast_precision_loss)]
+                let t = step as f32 / 32.0 * std::f32::consts::TAU;
+                // Round the pill's two end caps and along its flat sides.
+                for (cx, cy) in [
+                    (x + r, y + r),
+                    (x + width - r, y + r),
+                    (x + r, y + height - r),
+                    (x + width - r, y + height - r),
+                ] {
+                    let (px, py) = (cx + r * t.cos(), cy + r * t.sin());
+                    if px >= *x - 0.01
+                        && px <= x + width + 0.01
+                        && py >= *y - 0.01
+                        && py <= y + height + 0.01
+                    {
+                        assert!(
+                            inside(px, py),
+                            "the pill {x},{y} {width}x{height} leaves the orb at ({px}, {py})"
+                        );
+                    }
+                }
+            }
+        }
+        assert_eq!(glosses, 2, "the gloss is a cap over a skirt");
+        assert_eq!(shades, 1, "no shade at the orb's foot");
+    }
+
+    /// **The orb glows under the pointer, and while its menu is open**, and
+    /// names itself -- the reference's `:hover` and `title="Start"`. Each
+    /// change is reported, so the session redraws the bar for it.
+    #[test]
+    fn the_orb_glows_under_the_pointer_and_while_its_menu_is_open() {
+        let mut s = shell();
+        let orb = s.start_orb_rect();
+        s.take_hover_changed();
+        let button = s.start_button_rect();
+        rest_on(&mut s, button);
+        assert!(s.take_hover_changed(), "the orb lit and nobody was told");
+        assert_eq!(orb_glows(&s, orb), 1, "not glowing under the pointer");
+        let tip = format!("{:?}", s.render_tooltip().expect("the orb has no name"));
+        assert!(tip.contains("Start"), "{tip}");
+
+        s.handle_mouse(&at(600.0, 300.0, MouseEventKind::Move));
+        assert!(
+            s.take_hover_changed(),
+            "the glow went out and nobody was told"
+        );
+        assert_eq!(
+            orb_glows(&s, orb),
+            0,
+            "still glowing after the pointer left"
+        );
+
+        s.toggle_start_menu();
+        assert_eq!(orb_glows(&s, orb), 1, "not glowing with its menu open");
+    }
+
+    /// **Resting on a tile names it**: a pin -- whose name is nowhere else --
+    /// with what a click on it does, as the reference's does; a window with
+    /// the whole of its title, which its tile may have cut.
+    #[test]
+    fn resting_on_a_tile_names_it() {
+        with_scratch_config("shell-tile-tooltip", |_root| {
+            let mut shell = shell();
+            shell.pin_app(super::launcher::TERMINAL, "Terminal");
+            shell.apply_window_list(&WindowList::new(
+                0,
+                vec![window_of(1, "", "the whole title of the window")],
+            ));
+            let layout = shell.taskbar_layout();
+
+            rest_on(&mut shell, layout[0]);
+            let tip = format!(
+                "{:?}",
+                shell.render_tooltip().expect("a pin has no tooltip")
+            );
+            assert!(tip.contains("Terminal — pinned (click to open)"), "{tip}");
+
+            rest_on(&mut shell, layout[1]);
+            let tip = format!(
+                "{:?}",
+                shell.render_tooltip().expect("a window has no tooltip")
+            );
+            assert!(
+                tip.contains("the whole title of the window") && !tip.contains("pinned"),
+                "moving to the window did not rename the tooltip: {tip}"
+            );
+        });
+    }
+
+    /// **A tooltip says when it is due, and when it came or went** -- what the
+    /// session wakes and repaints for. Until it did, a tray icon's name
+    /// appeared only if something else on the desktop happened to draw.
+    #[test]
+    fn a_tooltip_says_when_it_is_due_and_when_it_changes() {
+        with_scratch_config("shell-tile-tooltip-due", |_root| {
+            let mut shell = shell();
+            shell.pin_app(super::launcher::TERMINAL, "Terminal");
+            assert!(!shell.take_hover_changed());
+            assert_eq!(shell.tooltip_due_in(), None);
+
+            let pin = shell.taskbar_layout()[0];
+            shell.handle_mouse(&at(
+                pin.x + pin.w / 2.0,
+                pin.y + pin.h / 2.0,
+                MouseEventKind::Move,
+            ));
+            assert!(
+                shell.take_hover_changed(),
+                "a tooltip began waiting and nobody was told"
+            );
+            assert!(!shell.take_hover_changed(), "asking clears the answer");
+            let due = shell
+                .tooltip_due_in()
+                .expect("a waiting tooltip has no deadline");
+            assert!(due > 0, "the tooltip was due at once");
+
+            // A motion within the same tile is not a change.
+            shell.handle_mouse(&at(pin.x + 2.0, pin.y + pin.h / 2.0, MouseEventKind::Move));
+            assert!(
+                !shell.take_hover_changed(),
+                "moving within the tile restarted it"
+            );
+
+            shell.advance_osd(due);
+            assert!(shell.render_tooltip().is_some(), "due, and not shown");
+            assert!(
+                shell.take_hover_changed(),
+                "it appeared and nobody was told to draw it"
+            );
+            assert_eq!(
+                shell.tooltip_due_in(),
+                None,
+                "a tooltip on screen is not waiting"
+            );
+
+            shell.handle_mouse(&at(40.0, 40.0, MouseEventKind::Move));
+            assert!(shell.render_tooltip().is_none());
+            assert!(
+                shell.take_hover_changed(),
+                "it went and nobody was told to take it off the screen"
+            );
+        });
+    }
+
+    /// **A window's tile offers its program's menu, and to close the
+    /// window**: the program's name, which starts another copy; pinning it,
+    /// which the taskbar could not offer until a window could be known as its
+    /// program's; and "Close window", which asks rather than destroys.
+    #[test]
+    fn a_windows_tile_offers_its_programs_menu_and_to_close_it() {
+        use super::{ShellControlAction, ShellRequest, WindowId};
+        with_scratch_config("shell-window-menu", |_root| {
+            let mut shell = shell();
+            shell.apply_window_list(&WindowList::new(
+                0,
+                vec![window_of(1, "terminal", "~ : bash")],
+            ));
+            let (x, y) = button_centre(&shell, 0);
+            shell.handle_press(x, y, MouseButton::Right);
+            let labels = format!(
+                "{:?}",
+                shell
+                    .render_pin_menu()
+                    .expect("a window's tile offered nothing")
+            );
+            for want in [
+                "Terminal",
+                "Pin to taskbar",
+                "Add to desktop",
+                "Close window",
+            ] {
+                assert!(labels.contains(want), "no {want:?} in {labels}");
+            }
+
+            let target = super::PinTarget::Window(WindowId(1));
+            assert_eq!(
+                shell.activate_pin_menu_item(DesktopShell::MENU_START_ANOTHER, target),
+                ShellAction::Launch(shell.launch_for(super::launcher::TERMINAL))
+            );
+            assert_eq!(
+                shell.activate_pin_menu_item(DesktopShell::MENU_CLOSE_WINDOW, target),
+                ShellAction::Control(ShellRequest::window(WindowId(1), ShellControlAction::Close))
+            );
+            assert_eq!(
+                shell.activate_pin_menu_item(DesktopShell::MENU_PIN_TOGGLE, target),
+                ShellAction::Consumed
+            );
+            assert!(
+                shell.is_pinned(super::launcher::TERMINAL),
+                "\"Pin to taskbar\" did not pin the window's program"
+            );
+            assert_eq!(
+                shell
+                    .pinned_apps()
+                    .first()
+                    .map(|app| app.display_name.as_str()),
+                Some("Terminal"),
+                "pinned under the wrong name"
+            );
+            drop(shell.activate_pin_menu_item(DesktopShell::MENU_ADD_TO_DESKTOP, target));
+            let shortcut = shell
+                .icons
+                .icon_ids()
+                .into_iter()
+                .filter_map(|id| shell.icons.get_icon(id))
+                .find(|icon| {
+                    icon.action
+                        == super::icons::IconAction::OpenPath(std::path::PathBuf::from(
+                            super::launcher::TERMINAL,
+                        ))
+                })
+                .map(|icon| icon.label.clone());
+            assert_eq!(
+                shortcut.as_deref(),
+                Some("Terminal"),
+                "the shortcut is not named for the program"
+            );
+        });
+    }
+
+    /// **A window of a program the desktop cannot name offers only to close
+    /// it** -- nothing to pin, and no name to start another copy by.
+    #[test]
+    fn a_window_of_an_unknown_program_offers_only_to_close_it() {
+        with_scratch_config("shell-window-menu-unknown", |_root| {
             let mut shell = shell();
             shell.apply_window_list(&WindowList::new(
                 0,
                 vec![WindowInfo::new(1, 1, "A window".to_string())],
             ));
-            let button = shell.taskbar_button_rect(0);
-            let (cx, cy) = (button.x + button.w / 2.0, button.y + button.h / 2.0);
-
-            shell.handle_press(cx, cy, MouseButton::Right);
-
+            let (x, y) = button_centre(&shell, 0);
+            shell.handle_press(x, y, MouseButton::Right);
+            let labels = format!("{:?}", shell.render_pin_menu().expect("no menu at all"));
+            assert!(labels.contains("Close window"), "{labels}");
             assert!(
-                shell.render_pin_menu().is_none(),
-                "a window's button offered to pin something"
+                !labels.contains("Pin to") && !labels.contains("Add to desktop"),
+                "offered to pin a program nobody can name: {labels}"
+            );
+            // And by key: its one row, chosen with Down and Enter, asks the
+            // window to close.
+            drop(shell.handle_hotkey(&press(Key::Down)));
+            let outcome = shell.handle_hotkey(&press(Key::Enter));
+            assert_eq!(
+                outcome.requests,
+                vec![super::ShellRequest::window(
+                    super::WindowId(1),
+                    super::ShellControlAction::Close
+                )],
+                "Enter on \"Close window\" did not ask the window to close"
+            );
+        });
+    }
+
+    /// **A window's menu starts with its program's jump list**, as a pin's
+    /// does, and Enter on a row of it starts that action.
+    #[test]
+    fn a_windows_menu_has_its_programs_jump_list() {
+        with_scratch_config("shell-window-jump-list", |_root| {
+            let mut shell = shell();
+            let entry = desktopentry::DesktopEntry::parse(
+                b"[Desktop Entry]\nType=Application\nName=Sketchpad\nExec=sketch %U\nActions=new;\n[Desktop Action new]\nName=New Drawing\nExec=sketch --new\n",
+            )
+            .expect("parses");
+            let app = desktopentry::App::from_entry(&entry, "sketch.desktop", None).expect("valid");
+            shell.set_programs(crate::start_search_tests::known_with(vec![app]));
+            shell.apply_window_list(&WindowList::new(
+                0,
+                vec![window_of(1, "sketch", "a drawing")],
+            ));
+            let (x, y) = button_centre(&shell, 0);
+            shell.handle_press(x, y, MouseButton::Right);
+            let labels = format!("{:?}", shell.render_pin_menu().expect("no menu"));
+            assert!(labels.contains("New Drawing"), "{labels}");
+
+            drop(shell.handle_hotkey(&press(Key::Down)));
+            let outcome = shell.handle_hotkey(&press(Key::Enter));
+            assert_eq!(
+                outcome.launches.first().map(|l| l.args.clone()),
+                Some(vec!["--new".into()]),
+                "Enter on the jump list's row did not start its action"
             );
         });
     }
@@ -14769,5 +23276,3562 @@ mod taskbar_pin_tests {
                 "the pinned button is not to the left of the window's"
             );
         });
+    }
+}
+
+/// The desktop menu's View submenu and "Sort by name": the user's way to
+/// choose how the desktop icons are placed and how big they are.
+#[cfg(test)]
+mod view_menu_tests {
+    #![allow(
+        clippy::unwrap_used,
+        clippy::expect_used,
+        clippy::panic,
+        clippy::indexing_slicing,
+        clippy::arithmetic_side_effects
+    )]
+
+    use super::{AppearanceSettings, DesktopShell, MenuItem, icons};
+    use appearance::IconSize;
+    use appearance::config::testing::with_scratch_config;
+    use guitk::event::{Key, KeyEvent, Modifiers};
+    use guitk::render::RenderCommand;
+    use icons::ArrangementMode as Mode;
+
+    /// The check mark the menu draws beside a ticked item.
+    const TICK: &str = "\u{2713}";
+
+    fn tap(key: Key) -> KeyEvent {
+        KeyEvent {
+            key,
+            pressed: true,
+            modifiers: Modifiers::NONE,
+            text: String::new(),
+        }
+    }
+
+    /// Every item id in a menu tree, submenus included.
+    fn ids(items: &[MenuItem], out: &mut Vec<u64>) {
+        for item in items {
+            match item {
+                MenuItem::Action { id, .. } => out.push(*id),
+                MenuItem::Submenu { id, children, .. } => {
+                    out.push(*id);
+                    ids(children, out);
+                }
+                MenuItem::Separator => {}
+            }
+        }
+    }
+
+    /// The View submenu's items, as `(label, ticked)`.
+    fn view_items(size: IconSize, mode: Mode) -> Vec<(String, bool)> {
+        let items = DesktopShell::desktop_menu_items(size, mode);
+        let Some(MenuItem::Submenu { children, .. }) = items
+            .iter()
+            .find(|i| matches!(i, MenuItem::Submenu { label, .. } if label == "View"))
+        else {
+            panic!("no View submenu in {items:?}");
+        };
+        children
+            .iter()
+            .filter_map(|c| match c {
+                MenuItem::Action { label, checked, .. } => {
+                    Some((label.clone(), *checked == Some(true)))
+                }
+                _ => None,
+            })
+            .collect()
+    }
+
+    fn ticked(size: IconSize, mode: Mode) -> Vec<String> {
+        view_items(size, mode)
+            .into_iter()
+            .filter(|(_, t)| *t)
+            .map(|(l, _)| l)
+            .collect()
+    }
+
+    /// The id of the View item for `size`.
+    fn size_item(size: IconSize) -> u64 {
+        let index = IconSize::ALL.iter().position(|s| *s == size).unwrap();
+        DesktopShell::MENU_ICON_SIZE_BASE + u64::try_from(index).unwrap()
+    }
+
+    /// Two ids the same would make one item do another's job, silently: the
+    /// dispatch matches on the number, not on the label drawn.
+    #[test]
+    fn the_desktop_menu_ids_are_all_distinct() {
+        for size in IconSize::ALL {
+            for mode in Mode::ALL {
+                let mut all = Vec::new();
+                ids(&DesktopShell::desktop_menu_items(*size, mode), &mut all);
+                ids(&DesktopShell::widget_menu_items(), &mut all);
+                // The widget menu repeats "Remove all widgets" on purpose --
+                // the same item, so the same id -- and nothing else.
+                let remove_all = all
+                    .iter()
+                    .filter(|id| **id == DesktopShell::MENU_REMOVE_WIDGETS)
+                    .count();
+                assert_eq!(remove_all, 2);
+                let mut unique = all.clone();
+                unique.sort_unstable();
+                unique.dedup();
+                assert_eq!(unique.len(), all.len() - 1, "a repeated id in {all:?}");
+                assert!(!all.contains(&DesktopShell::MENU_PIN_TOGGLE));
+            }
+        }
+    }
+
+    /// Every size the setting offers has an item, and the item names it back.
+    #[test]
+    fn every_icon_size_has_an_item_that_names_it() {
+        let items = view_items(IconSize::Medium, Mode::SnapToGrid);
+        for size in IconSize::ALL {
+            let label = DesktopShell::icon_size_menu_label(*size);
+            assert!(
+                items.iter().any(|(l, _)| l == label),
+                "no item for {size:?}"
+            );
+        }
+        let mut all = Vec::new();
+        ids(
+            &DesktopShell::desktop_menu_items(IconSize::Medium, Mode::SnapToGrid),
+            &mut all,
+        );
+        let named: Vec<IconSize> = all
+            .iter()
+            .filter_map(|id| DesktopShell::menu_icon_size(*id))
+            .collect();
+        assert_eq!(
+            named,
+            IconSize::ALL,
+            "the size items and the sizes disagree"
+        );
+        assert_eq!(
+            DesktopShell::menu_icon_size(DesktopShell::MENU_ADD_CLOCK),
+            None
+        );
+    }
+
+    /// The ticks say what is in force: one size, and the switches as the
+    /// arrangement means them -- both under auto-arrange, which is aligned by
+    /// construction.
+    #[test]
+    fn the_view_submenu_ticks_what_is_in_force() {
+        assert_eq!(
+            ticked(IconSize::Large, Mode::Free),
+            ["Large icons"],
+            "placing freely: neither switch"
+        );
+        assert_eq!(
+            ticked(IconSize::Small, Mode::SnapToGrid),
+            ["Small icons", "Align icons to grid"]
+        );
+        assert_eq!(
+            ticked(IconSize::ExtraLarge, Mode::AutoArrange),
+            [
+                "Extra large icons",
+                "Auto arrange icons",
+                "Align icons to grid"
+            ]
+        );
+    }
+
+    /// **The two switches move between the three arrangements the way a
+    /// desktop's do.** Auto-arrange on aligns; off leaves the icons aligned;
+    /// alignment off stops arranging too.
+    #[test]
+    fn the_two_switches_map_onto_the_three_arrangements() {
+        let cases = [
+            (
+                Mode::Free,
+                DesktopShell::MENU_AUTO_ARRANGE,
+                Mode::AutoArrange,
+            ),
+            (
+                Mode::SnapToGrid,
+                DesktopShell::MENU_AUTO_ARRANGE,
+                Mode::AutoArrange,
+            ),
+            (
+                Mode::AutoArrange,
+                DesktopShell::MENU_AUTO_ARRANGE,
+                Mode::SnapToGrid,
+            ),
+            (
+                Mode::Free,
+                DesktopShell::MENU_ALIGN_TO_GRID,
+                Mode::SnapToGrid,
+            ),
+            (
+                Mode::SnapToGrid,
+                DesktopShell::MENU_ALIGN_TO_GRID,
+                Mode::Free,
+            ),
+            (
+                Mode::AutoArrange,
+                DesktopShell::MENU_ALIGN_TO_GRID,
+                Mode::Free,
+            ),
+        ];
+        for (from, item, to) in cases {
+            let mut shell = DesktopShell::new(1920, 1080);
+            shell.icons.set_arrangement(from);
+            assert!(
+                shell.activate_desktop_menu_item(item).changed(),
+                "{from:?} + {item}"
+            );
+            assert_eq!(shell.icons.arrangement(), to, "{from:?} + {item}");
+            assert!(
+                shell.take_icons_dirty(),
+                "{from:?} + {item}: the new arrangement is not saved"
+            );
+            assert!(
+                !shell.take_widgets_dirty(),
+                "{from:?} + {item}: an icon item rewrote the widget layout"
+            );
+        }
+    }
+
+    /// **Choosing a size from the menu resizes the icons and writes the
+    /// setting** where the Settings application reads it.
+    #[test]
+    fn choosing_an_icon_size_resizes_the_icons_and_writes_the_setting() {
+        with_scratch_config("view-menu-icon-size", |_root| {
+            let mut shell = DesktopShell::new(1920, 1080);
+            assert_ne!(
+                shell.appearance.icon_size,
+                IconSize::Large,
+                "proves nothing"
+            );
+
+            assert!(
+                shell
+                    .activate_desktop_menu_item(size_item(IconSize::Large))
+                    .changed()
+            );
+            assert_eq!(shell.icons.icon_px(), IconSize::Large.pixels());
+            assert_eq!(shell.appearance.icon_size, IconSize::Large);
+            assert_eq!(
+                appearance::AppearanceFile::load().settings.icon_size,
+                IconSize::Large,
+                "the setting did not reach appearance.yaml"
+            );
+            assert!(
+                shell.take_icons_dirty(),
+                "the icons moved and nothing will save where"
+            );
+            assert!(!shell.take_widgets_dirty());
+            assert!(
+                !shell.take_appearance_change(),
+                "the compositor reads nothing about desktop icons"
+            );
+
+            // The same size again is no change.
+            assert!(
+                !shell
+                    .activate_desktop_menu_item(size_item(IconSize::Large))
+                    .changed()
+            );
+            assert!(!shell.take_icons_dirty());
+        });
+    }
+
+    /// Choosing a size keeps every other setting the file holds: load, modify,
+    /// save -- not a rewrite from the shell's own copy, which may be behind.
+    #[test]
+    fn choosing_an_icon_size_leaves_the_rest_of_the_file_alone() {
+        with_scratch_config("view-menu-keeps-file", |_root| {
+            let mut file = appearance::AppearanceFile::load();
+            file.settings.night_light = true;
+            file.save().expect("scratch is writable");
+            // The shell's own copy says otherwise, as it would a moment after
+            // the Settings application saved.
+            let mut shell = DesktopShell::new(1920, 1080);
+            assert!(!shell.appearance.night_light);
+
+            assert!(
+                shell
+                    .activate_desktop_menu_item(size_item(IconSize::Small))
+                    .changed()
+            );
+            let saved = appearance::AppearanceFile::load().settings;
+            assert_eq!(saved.icon_size, IconSize::Small);
+            assert!(
+                saved.night_light,
+                "a setting the menu did not touch was overwritten"
+            );
+        });
+    }
+
+    /// **The menu opened for real ticks what is in force, and a size chosen
+    /// from it with the keyboard is applied** -- the route a user takes,
+    /// through `handle_hotkey`, not the dispatch table.
+    #[test]
+    fn the_view_menu_works_from_the_keyboard() {
+        with_scratch_config("view-menu-keyboard", |_root| {
+            let mut shell = DesktopShell::new(1920, 1080);
+            shell.set_appearance(AppearanceSettings {
+                icon_size: IconSize::Small,
+                ..AppearanceSettings::default()
+            });
+            shell.open_desktop_menu(400.0, 300.0);
+            // Down onto "View", Right into it.
+            for key in [Key::Down, Key::Right] {
+                drop(shell.handle_hotkey(&tap(key)));
+            }
+            let drawn: Vec<(f32, String)> = shell
+                .render_desktop_menu()
+                .expect("the menu is open")
+                .commands
+                .iter()
+                .filter_map(|c| match c {
+                    RenderCommand::Text { y, text, .. } => Some((*y, text.clone())),
+                    _ => None,
+                })
+                .collect();
+            let ticked: Vec<&str> = drawn
+                .iter()
+                .filter(|(_, t)| t == TICK)
+                .filter_map(|(y, _)| {
+                    drawn
+                        .iter()
+                        .find(|(ly, l)| (ly - y).abs() < 0.5 && l != TICK)
+                        .map(|(_, l)| l.as_str())
+                })
+                .collect();
+            assert_eq!(ticked, ["Small icons", "Align icons to grid"]);
+
+            // Down past Small and Medium to Large, and take it.
+            for key in [Key::Down, Key::Down, Key::Down, Key::Enter] {
+                drop(shell.handle_hotkey(&tap(key)));
+            }
+            assert!(!shell.desktop_menu.is_visible(), "choosing closes the menu");
+            assert_eq!(shell.icons.icon_px(), IconSize::Large.pixels());
+        });
+    }
+
+    /// "Sort by name" sorts, and marks the layout for saving only when
+    /// something moved.
+    #[test]
+    fn sort_by_name_sorts_the_icons() {
+        let mut shell = DesktopShell::new(1920, 1080);
+        for (name, col) in [("pear", 0), ("apple", 2)] {
+            let (x, y) = shell.icons.cell_origin(col, 3);
+            shell.icons.add_icon(
+                name,
+                icons::IconType::File,
+                icons::IconAction::Custom(name.to_string()),
+                x,
+                y,
+            );
+        }
+        assert!(
+            shell
+                .activate_desktop_menu_item(DesktopShell::MENU_SORT_BY_NAME)
+                .changed()
+        );
+        let labels: Vec<String> = shell
+            .icons
+            .icon_ids()
+            .into_iter()
+            .filter_map(|id| shell.icons.get_icon(id).map(|i| i.label.clone()))
+            .collect();
+        assert_eq!(labels, ["apple", "pear"]);
+        assert!(shell.take_icons_dirty());
+        assert!(
+            !shell
+                .activate_desktop_menu_item(DesktopShell::MENU_SORT_BY_NAME)
+                .changed()
+        );
+        assert!(
+            !shell.take_icons_dirty(),
+            "nothing moved, so nothing to save"
+        );
+    }
+}
+
+/// The desktop's own keys: what a key does when the desktop has the keyboard
+/// and no shortcut or open surface took it.
+#[cfg(test)]
+mod desktop_key_tests {
+    #![allow(
+        clippy::unwrap_used,
+        clippy::expect_used,
+        clippy::panic,
+        clippy::indexing_slicing,
+        clippy::arithmetic_side_effects
+    )]
+
+    use super::{DesktopShell, ShellAction, icons};
+    use appearance::config::testing::with_scratch_config;
+    use guitk::event::{Key, KeyEvent, Modifiers};
+
+    fn press(key: Key) -> KeyEvent {
+        press_with(key, Modifiers::NONE)
+    }
+
+    fn press_with(key: Key, modifiers: Modifiers) -> KeyEvent {
+        KeyEvent {
+            key,
+            pressed: true,
+            modifiers,
+            text: String::new(),
+        }
+    }
+
+    /// A shell with three icons down the first column, named a, b and c.
+    fn shell_with_three() -> DesktopShell {
+        let mut shell = DesktopShell::new(1920, 1080);
+        for (row, name) in ["a", "b", "c"].into_iter().enumerate() {
+            let (x, y) = shell.icons.cell_origin(0, i32::try_from(row).unwrap());
+            shell.icons.add_icon(
+                name,
+                icons::IconType::File,
+                icons::IconAction::Custom(name.to_string()),
+                x,
+                y,
+            );
+        }
+        shell
+    }
+
+    fn selected(shell: &DesktopShell) -> Vec<String> {
+        shell
+            .icons
+            .selected_ids()
+            .into_iter()
+            .filter_map(|id| shell.icons.get_icon(id).map(|i| i.label.clone()))
+            .collect()
+    }
+
+    /// **Ctrl+A selects every icon and Escape none**, and each says it
+    /// changed something so the frame is redrawn.
+    #[test]
+    fn ctrl_a_selects_every_icon_and_escape_none() {
+        let mut shell = shell_with_three();
+        assert_eq!(
+            shell.handle_desktop_key(&press_with(Key::A, Modifiers::ctrl())),
+            ShellAction::Consumed
+        );
+        assert_eq!(selected(&shell), ["a", "b", "c"]);
+        assert_eq!(
+            shell.handle_desktop_key(&press(Key::Escape)),
+            ShellAction::Consumed
+        );
+        assert!(selected(&shell).is_empty());
+        // A plain A is the letter, and the desktop does nothing with it.
+        assert_eq!(shell.handle_desktop_key(&press(Key::A)), ShellAction::Pass);
+        assert!(selected(&shell).is_empty());
+    }
+
+    /// **Home and End reach the first and last icons** (§1416), and say so,
+    /// so the frame is redrawn; pressed again where they already are, they
+    /// change nothing and pass.
+    #[test]
+    fn home_and_end_reach_the_first_and_last_icons() {
+        let mut shell = shell_with_three();
+        assert_eq!(
+            shell.handle_desktop_key(&press(Key::End)),
+            ShellAction::Consumed
+        );
+        assert_eq!(selected(&shell), ["c"]);
+        assert_eq!(
+            shell.handle_desktop_key(&press_with(Key::Home, Modifiers::ctrl())),
+            ShellAction::Consumed
+        );
+        assert_eq!(selected(&shell), ["a"]);
+        assert_eq!(
+            shell.handle_desktop_key(&press(Key::Home)),
+            ShellAction::Pass,
+            "already on the first icon"
+        );
+    }
+
+    /// **The arrow keys walk the icons.**
+    #[test]
+    fn the_arrow_keys_walk_the_icons() {
+        let mut shell = shell_with_three();
+        assert_eq!(
+            shell.handle_desktop_key(&press(Key::Down)),
+            ShellAction::Consumed
+        );
+        assert_eq!(selected(&shell), ["a"], "from nothing, the top-left");
+        drop(shell.handle_desktop_key(&press(Key::Down)));
+        drop(shell.handle_desktop_key(&press(Key::Down)));
+        assert_eq!(selected(&shell), ["c"]);
+        assert_eq!(
+            shell.handle_desktop_key(&press(Key::Down)),
+            ShellAction::Pass,
+            "nowhere further down, so nothing changed and nothing is redrawn"
+        );
+        drop(shell.handle_desktop_key(&press(Key::Up)));
+        assert_eq!(selected(&shell), ["b"]);
+    }
+
+    /// **Enter opens the one selected icon**, through the same door as a
+    /// double-click.
+    #[test]
+    fn enter_opens_the_selected_icon() {
+        with_scratch_config("desktop-key-enter", |root| {
+            let mut shell = DesktopShell::new(1920, 1080);
+            let folder = root.join("Projects");
+            std::fs::create_dir(&folder).expect("the scratch root is writable");
+            let id = shell.icons.add_icon(
+                "Projects",
+                icons::IconType::Folder,
+                icons::IconAction::OpenPath(folder.clone()),
+                200,
+                200,
+            );
+            assert_eq!(
+                shell.handle_desktop_key(&press(Key::Enter)),
+                ShellAction::Pass,
+                "nothing selected, nothing to open"
+            );
+            shell.icons.select_single(id);
+            assert_eq!(
+                shell.handle_desktop_key(&press(Key::Enter)),
+                ShellAction::Launch(crate::hotkeys::Launch::opening(
+                    crate::launcher::FILE_MANAGER,
+                    &folder
+                ))
+            );
+        });
+    }
+
+    /// A release, and a key the desktop has no use for, are passed on.
+    #[test]
+    fn keys_the_desktop_has_no_use_for_are_passed_on() {
+        let mut shell = shell_with_three();
+        let mut up = press(Key::Down);
+        up.pressed = false;
+        assert_eq!(shell.handle_desktop_key(&up), ShellAction::Pass);
+        assert!(
+            selected(&shell).is_empty(),
+            "a key coming up is not a press"
+        );
+        assert_eq!(
+            shell.handle_desktop_key(&press(Key::Tab)),
+            ShellAction::Pass
+        );
+        // Delete and F2 reach the layer and are not acted on yet.
+        shell.icons.select_all();
+        assert_eq!(
+            shell.handle_desktop_key(&press(Key::Delete)),
+            ShellAction::Pass
+        );
+        assert_eq!(
+            shell.icons.icon_ids().len(),
+            3,
+            "the default icons cannot be removed"
+        );
+    }
+}
+
+/// Shortcuts the user adds to the desktop, and an icon's own menu.
+#[cfg(test)]
+mod icon_menu_tests {
+    #![allow(
+        clippy::unwrap_used,
+        clippy::expect_used,
+        clippy::panic,
+        clippy::indexing_slicing,
+        clippy::arithmetic_side_effects
+    )]
+
+    use super::{DesktopShell, PinTarget, ShellAction, icons};
+    use appearance::config::testing::with_scratch_config;
+    use guitk::event::{Key, KeyEvent, Modifiers};
+    use guitk::render::RenderCommand;
+
+    fn press(key: Key) -> KeyEvent {
+        KeyEvent {
+            key,
+            pressed: true,
+            modifiers: Modifiers::NONE,
+            text: String::new(),
+        }
+    }
+
+    /// The first start-menu entry's program and name.
+    fn first_entry(shell: &DesktopShell) -> (String, String) {
+        let entry = shell.start_menu_entries()[0];
+        (entry.executable_path.clone(), entry.name.clone())
+    }
+
+    /// "Add to desktop" on the first start-menu entry, through the pin menu
+    /// the way a right-click would reach it. Answers the new icon.
+    fn add_first_entry(shell: &mut DesktopShell) -> icons::IconId {
+        let (exec, _) = first_entry(shell);
+        drop(shell.activate_pin_menu_item(
+            DesktopShell::MENU_ADD_TO_DESKTOP,
+            PinTarget::StartMenuRow(shell.start_row_of_program(0).expect("a program")),
+        ));
+        shell
+            .icons
+            .icon_ids()
+            .into_iter()
+            .find(|id| {
+                shell.icons.get_icon(*id).is_some_and(|i| {
+                    i.action == icons::IconAction::OpenPath(std::path::PathBuf::from(&exec))
+                })
+            })
+            .expect("Add to desktop put no icon on the desktop")
+    }
+
+    /// The labels of the menu currently open.
+    fn menu_labels(shell: &DesktopShell) -> Vec<String> {
+        shell
+            .render_desktop_menu()
+            .expect("the menu is open")
+            .commands
+            .iter()
+            .filter_map(|c| match c {
+                RenderCommand::Text { text, .. } => Some(text.clone()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// Right-click the icon `id`.
+    fn right_click(shell: &mut DesktopShell, id: icons::IconId) {
+        let icon = shell.icons.get_icon(id).expect("the icon exists");
+        #[allow(clippy::cast_precision_loss)]
+        let (x, y) = (icon.x as f32 + 10.0, icon.y as f32 + 10.0);
+        shell.open_desktop_menu(x, y);
+    }
+
+    /// **"Add to desktop" puts a program shortcut on the desktop, named as
+    /// the start menu names it, marked for saving** -- and a second time
+    /// selects the one already there.
+    #[test]
+    fn add_to_desktop_puts_a_shortcut_there_once() {
+        let mut shell = DesktopShell::new(1920, 1080);
+        let (exec, name) = first_entry(&shell);
+        let id = add_first_entry(&mut shell);
+        let icon = shell.icons.get_icon(id).unwrap();
+        assert_eq!(icon.label, name);
+        assert_eq!(icon.icon_type, icons::IconType::Executable);
+        assert!(icon.added);
+        assert!(
+            shell.take_icons_dirty(),
+            "the new shortcut will not be saved"
+        );
+        assert_eq!(
+            shell.icons.selected_ids(),
+            [id],
+            "and it is selected, to be seen"
+        );
+
+        shell.icons.deselect_all();
+        let again = add_first_entry(&mut shell);
+        assert_eq!(again, id);
+        assert_eq!(
+            shell.icons.icon_ids().len(),
+            1,
+            "a second shortcut to {exec}"
+        );
+        assert!(!shell.take_icons_dirty(), "nothing new to save");
+    }
+
+    /// The pin menu offers it, beside pinning.
+    #[test]
+    fn the_pin_menu_offers_add_to_desktop() {
+        let mut shell = DesktopShell::new(1920, 1080);
+        shell.open_pin_menu(
+            PinTarget::StartMenuRow(shell.start_row_of_program(0).expect("a program")),
+            100.0,
+            100.0,
+        );
+        let labels: Vec<String> = shell
+            .pin_menu
+            .as_ref()
+            .expect("the pin menu is open")
+            .0
+            .render(&appearance::Palette::for_mode(false))
+            .into_iter()
+            .filter_map(|c| match c {
+                RenderCommand::Text { text, .. } => Some(text),
+                _ => None,
+            })
+            .collect();
+        assert!(labels.iter().any(|l| l == "Add to desktop"), "{labels:?}");
+        assert!(labels.iter().any(|l| l == "Pin to taskbar"), "{labels:?}");
+    }
+
+    /// **A right-click on an icon opens the icon's menu, not the desktop's**,
+    /// offering what that icon can do: a program can be pinned, and what the
+    /// user added can be removed; a default folder can be opened and renamed.
+    #[test]
+    fn a_right_click_on_an_icon_opens_its_own_menu() {
+        with_scratch_config("icon-menu-items", |root| {
+            let mut shell = DesktopShell::new(1920, 1080);
+            let program = add_first_entry(&mut shell);
+            right_click(&mut shell, program);
+            let labels = menu_labels(&shell);
+            for want in ["Open", "Pin to taskbar", "Remove from desktop"] {
+                assert!(labels.iter().any(|l| l == want), "no {want}: {labels:?}");
+            }
+            assert!(
+                !labels.iter().any(|l| l == "View"),
+                "the desktop's menu opened over an icon: {labels:?}"
+            );
+
+            let folder = root.join("Stuff");
+            std::fs::create_dir(&folder).unwrap();
+            let plain = shell.icons.add_icon(
+                "Stuff",
+                icons::IconType::Folder,
+                icons::IconAction::OpenPath(folder),
+                900,
+                500,
+            );
+            right_click(&mut shell, plain);
+            assert_eq!(
+                menu_labels(&shell),
+                ["Open", "Rename"],
+                "a default folder can be opened and renamed, not pinned or removed"
+            );
+            assert_eq!(
+                shell.icons.selected_ids(),
+                [plain],
+                "the icon clicked is selected"
+            );
+        });
+    }
+
+    /// **The icon's menu does what it says**: Open opens, by the rule a
+    /// double-click uses; Pin pins and unpins; Remove removes.
+    #[test]
+    fn the_icon_menu_opens_pins_and_removes() {
+        with_scratch_config("icon-menu-actions", |root| {
+            let mut shell = DesktopShell::new(1920, 1080);
+            let folder = root.join("Stuff");
+            std::fs::create_dir(&folder).unwrap();
+            let plain = shell.icons.add_icon(
+                "Stuff",
+                icons::IconType::Folder,
+                icons::IconAction::OpenPath(folder.clone()),
+                900,
+                500,
+            );
+            right_click(&mut shell, plain);
+            assert_eq!(
+                shell.activate_desktop_menu_item(DesktopShell::MENU_ICON_OPEN),
+                ShellAction::Launch(crate::hotkeys::Launch::opening(
+                    crate::launcher::FILE_MANAGER,
+                    &folder
+                ))
+            );
+
+            let program = add_first_entry(&mut shell);
+            let (exec, _) = first_entry(&shell);
+            right_click(&mut shell, program);
+            assert!(
+                shell
+                    .activate_desktop_menu_item(DesktopShell::MENU_ICON_PIN)
+                    .changed()
+            );
+            assert!(shell.is_pinned(&exec));
+            right_click(&mut shell, program);
+            assert!(
+                menu_labels(&shell)
+                    .iter()
+                    .any(|l| l == "Unpin from taskbar")
+            );
+            assert!(
+                shell
+                    .activate_desktop_menu_item(DesktopShell::MENU_ICON_PIN)
+                    .changed()
+            );
+            assert!(!shell.is_pinned(&exec));
+
+            assert!(shell.take_icons_dirty(), "adding it marked the layout");
+            right_click(&mut shell, program);
+            assert!(
+                shell
+                    .activate_desktop_menu_item(DesktopShell::MENU_ICON_REMOVE)
+                    .changed()
+            );
+            assert!(shell.icons.get_icon(program).is_none());
+            assert!(shell.take_icons_dirty(), "the removal will not be saved");
+        });
+    }
+
+    /// Open from the icon's menu with the keyboard starts what it opens --
+    /// the keyboard route can carry a launch as the pointer's can.
+    #[test]
+    fn open_from_the_icon_menu_by_keyboard_starts_it() {
+        with_scratch_config("icon-menu-keyboard", |root| {
+            let mut shell = DesktopShell::new(1920, 1080);
+            let folder = root.join("Stuff");
+            std::fs::create_dir(&folder).unwrap();
+            let plain = shell.icons.add_icon(
+                "Stuff",
+                icons::IconType::Folder,
+                icons::IconAction::OpenPath(folder.clone()),
+                900,
+                500,
+            );
+            right_click(&mut shell, plain);
+            drop(shell.handle_hotkey(&press(Key::Down)));
+            let outcome = shell.handle_hotkey(&press(Key::Enter));
+            assert_eq!(
+                outcome.launches,
+                [crate::hotkeys::Launch::opening(
+                    crate::launcher::FILE_MANAGER,
+                    &folder
+                )]
+            );
+        });
+    }
+
+    /// **Delete removes the selected shortcuts the user added, and leaves
+    /// the defaults**, which would only come back at the next login.
+    #[test]
+    fn delete_removes_added_shortcuts_and_leaves_the_defaults() {
+        let mut shell = DesktopShell::new(1920, 1080);
+        let default = shell.icons.add_icon(
+            "This PC",
+            icons::IconType::Computer,
+            icons::IconAction::LaunchSystem(icons::THIS_PC.to_string()),
+            0,
+            0,
+        );
+        let added = add_first_entry(&mut shell);
+        assert!(shell.take_icons_dirty(), "adding it marked the layout");
+        shell.icons.select_all();
+
+        assert_eq!(
+            shell.handle_desktop_key(&press(Key::Delete)),
+            ShellAction::Consumed
+        );
+        assert!(shell.icons.get_icon(added).is_none());
+        assert!(shell.icons.get_icon(default).is_some());
+        assert!(shell.take_icons_dirty());
+        assert_eq!(
+            shell.handle_desktop_key(&press(Key::Delete)),
+            ShellAction::Pass,
+            "only a default left selected: nothing to remove"
+        );
+    }
+
+    /// **A shortcut added on the desktop is there after a login**, through
+    /// the shell's own save and load.
+    #[test]
+    fn an_added_shortcut_is_there_after_a_login() {
+        with_scratch_config("icon-shortcut-login", |_root| {
+            let mut shell = DesktopShell::new(1920, 1080);
+            shell.populate_icons();
+            let (exec, name) = first_entry(&shell);
+            add_first_entry(&mut shell);
+            assert!(shell.take_icons_dirty());
+            shell
+                .save_icon_layout()
+                .expect("the scratch config directory is writable");
+
+            let mut next = DesktopShell::new(1920, 1080);
+            next.populate_icons();
+            let back = next
+                .icons
+                .icon_ids()
+                .into_iter()
+                .filter_map(|id| next.icons.get_icon(id))
+                .find(|i| i.action == icons::IconAction::OpenPath(std::path::PathBuf::from(&exec)))
+                .map(|i| (i.label.clone(), i.added));
+            assert_eq!(back, Some((name, true)));
+        });
+    }
+}
+
+/// Renaming a desktop icon in place, through the shell's own routes.
+#[cfg(test)]
+mod rename_tests {
+    #![allow(
+        clippy::unwrap_used,
+        clippy::expect_used,
+        clippy::panic,
+        clippy::indexing_slicing,
+        clippy::arithmetic_side_effects
+    )]
+
+    use super::{DesktopShell, MouseEvent, MouseEventKind, ShellAction, icons};
+    use guitk::event::{Key, KeyEvent, Modifiers, MouseButton};
+
+    fn press(key: Key) -> KeyEvent {
+        KeyEvent {
+            key,
+            pressed: true,
+            modifiers: Modifiers::NONE,
+            text: String::new(),
+        }
+    }
+
+    fn typed(ch: char) -> KeyEvent {
+        KeyEvent {
+            key: Key::Unknown(0),
+            pressed: true,
+            modifiers: Modifiers::NONE,
+            text: ch.to_string(),
+        }
+    }
+
+    /// A shell with one icon, "Old", selected.
+    fn shell_with_one() -> (DesktopShell, icons::IconId) {
+        let mut shell = DesktopShell::new(1920, 1080);
+        let id = shell.icons.add_icon(
+            "Old",
+            icons::IconType::Folder,
+            icons::IconAction::Custom("old".to_string()),
+            200,
+            200,
+        );
+        shell.icons.select_single(id);
+        (shell, id)
+    }
+
+    fn label(shell: &DesktopShell, id: icons::IconId) -> String {
+        shell.icons.get_icon(id).unwrap().label.clone()
+    }
+
+    /// **F2 renames the selected icon; Enter keeps the name and marks the
+    /// layout for saving.** Before 2026-09-25 F2 reached the icon layer and
+    /// nothing acted on it.
+    #[test]
+    fn f2_renames_and_enter_keeps_it() {
+        let (mut shell, id) = shell_with_one();
+        assert_eq!(
+            shell.handle_desktop_key(&press(Key::F2)),
+            ShellAction::Consumed
+        );
+        assert_eq!(shell.icons.renaming(), Some(id));
+        for ch in "Projects".chars() {
+            assert_eq!(shell.handle_desktop_key(&typed(ch)), ShellAction::Consumed);
+        }
+        assert_eq!(
+            shell.handle_desktop_key(&press(Key::Enter)),
+            ShellAction::Consumed
+        );
+        assert_eq!(label(&shell, id), "Projects");
+        assert!(shell.take_icons_dirty(), "the new name will not be saved");
+    }
+
+    /// **Delete while a name is being typed deletes a letter, not the icon**
+    /// -- every key belongs to the field while it is open.
+    #[test]
+    fn delete_while_renaming_edits_the_name() {
+        let mut shell = DesktopShell::new(1920, 1080);
+        drop(shell.activate_pin_menu_item(
+            DesktopShell::MENU_ADD_TO_DESKTOP,
+            super::PinTarget::StartMenuRow(shell.start_row_of_program(0).expect("a program")),
+        ));
+        let id = shell.icons.selected_ids()[0];
+        assert!(
+            shell.icons.get_icon(id).unwrap().added,
+            "the fixture must be removable"
+        );
+        drop(shell.handle_desktop_key(&press(Key::F2)));
+        drop(shell.handle_desktop_key(&press(Key::Delete)));
+        assert!(
+            shell.icons.get_icon(id).is_some(),
+            "Delete removed the icon being renamed"
+        );
+    }
+
+    /// **A click away keeps the name**, as on every desktop -- and the click
+    /// still does what it does.
+    #[test]
+    fn a_click_away_keeps_the_name() {
+        let (mut shell, id) = shell_with_one();
+        drop(shell.handle_desktop_key(&press(Key::F2)));
+        for ch in "Kept".chars() {
+            drop(shell.handle_desktop_key(&typed(ch)));
+        }
+        let away = MouseEvent {
+            x: 1000.0,
+            y: 600.0,
+            kind: MouseEventKind::Press(MouseButton::Left),
+        };
+        drop(shell.handle_mouse(&away));
+        assert_eq!(shell.icons.renaming(), None);
+        assert_eq!(label(&shell, id), "Kept");
+        assert!(shell.take_icons_dirty());
+        assert!(
+            shell.icons.selected_ids().is_empty(),
+            "and the press on empty desktop still cleared the selection"
+        );
+    }
+
+    /// A press inside the field is the field's: it places the caret and the
+    /// rename goes on.
+    #[test]
+    fn a_press_in_the_field_keeps_renaming() {
+        let (mut shell, id) = shell_with_one();
+        drop(shell.handle_desktop_key(&press(Key::F2)));
+        let icon = shell.icons.get_icon(id).unwrap();
+        // Well inside the field, which sits under the glyph in the cell.
+        #[allow(clippy::cast_precision_loss)]
+        let (x, y) = (icon.x as f32 + 20.0, icon.y as f32 + 8.0 + 48.0 + 4.0 + 6.0);
+        assert!(
+            shell.icons.rename_field_contains(x, y),
+            "the fixture missed the field"
+        );
+        let inside = MouseEvent {
+            x,
+            y,
+            kind: MouseEventKind::Press(MouseButton::Left),
+        };
+        assert_eq!(shell.handle_mouse(&inside), ShellAction::Consumed);
+        assert_eq!(shell.icons.renaming(), Some(id));
+    }
+
+    /// **"Rename" on an icon's own menu starts it too**, on the icon the menu
+    /// was opened over.
+    #[test]
+    fn rename_from_the_icon_menu() {
+        let (mut shell, id) = shell_with_one();
+        let icon = shell.icons.get_icon(id).unwrap();
+        #[allow(clippy::cast_precision_loss)]
+        let (x, y) = (icon.x as f32 + 10.0, icon.y as f32 + 10.0);
+        shell.open_desktop_menu(x, y);
+        assert_eq!(
+            shell.activate_desktop_menu_item(DesktopShell::MENU_ICON_RENAME),
+            ShellAction::Consumed
+        );
+        assert_eq!(shell.icons.renaming(), Some(id));
+    }
+
+    /// Keeping a rename from outside -- the session does this when the
+    /// keyboard leaves for another program -- keeps the name and marks it.
+    #[test]
+    fn a_rename_kept_from_outside_is_saved() {
+        let (mut shell, id) = shell_with_one();
+        drop(shell.handle_desktop_key(&press(Key::F2)));
+        drop(shell.handle_desktop_key(&typed('Z')));
+        shell.commit_icon_rename();
+        assert_eq!(label(&shell, id), "Z");
+        assert!(shell.take_icons_dirty());
+    }
+}
+
+/// Carrying a program between the start menu, the taskbar and the desktop --
+/// `design.txt` line 712, "drag and drop icons between pinned apps, desktop,
+/// and start menu".
+///
+/// Every test that can drop on the taskbar runs inside `with_scratch_config`:
+/// a pin writes `taskbar.yaml`, and a test that wrote the developer's own is
+/// what `scripts/check-scratch-config.py` exists to refuse.
+#[cfg(test)]
+mod carry_tests {
+    #![allow(
+        clippy::unwrap_used,
+        clippy::expect_used,
+        clippy::panic,
+        clippy::indexing_slicing,
+        clippy::arithmetic_side_effects,
+        clippy::cast_precision_loss
+    )]
+
+    use super::{
+        DesktopShell, MouseButton, MouseEvent, MouseEventKind, ShellAction, WindowId, WindowInfo,
+        WindowList, icons,
+    };
+    use appearance::config::testing::with_scratch_config;
+    use guitk::render::RenderCommand;
+    use std::path::PathBuf;
+
+    fn shell() -> DesktopShell {
+        DesktopShell::new(1920, 1080)
+    }
+
+    fn ev(x: f32, y: f32, kind: MouseEventKind) -> MouseEvent {
+        MouseEvent { x, y, kind }
+    }
+
+    fn press(shell: &mut DesktopShell, at: (f32, f32)) -> ShellAction {
+        shell.handle_mouse(&ev(at.0, at.1, MouseEventKind::Press(MouseButton::Left)))
+    }
+
+    fn move_to(shell: &mut DesktopShell, at: (f32, f32)) {
+        shell.handle_mouse(&ev(at.0, at.1, MouseEventKind::Move));
+    }
+
+    fn release(shell: &mut DesktopShell, at: (f32, f32)) -> ShellAction {
+        shell.handle_mouse(&ev(at.0, at.1, MouseEventKind::Release(MouseButton::Left)))
+    }
+
+    /// Press at `from`, move to `to` in four steps -- the first already past
+    /// the drag threshold, as a real pointer's would be over this distance --
+    /// and let go there. Answers what the release asked for.
+    fn carry(shell: &mut DesktopShell, from: (f32, f32), to: (f32, f32)) -> ShellAction {
+        assert_eq!(
+            press(shell, from),
+            ShellAction::Consumed,
+            "the press was not taken"
+        );
+        for step in 1..=4 {
+            let t = step as f32 / 4.0;
+            move_to(
+                shell,
+                (from.0 + (to.0 - from.0) * t, from.1 + (to.1 - from.1) * t),
+            );
+        }
+        release(shell, to)
+    }
+
+    /// The centre of the row the `program`-th program of the start menu is
+    /// on -- counting programs, as `app` does, so the two name one program
+    /// whatever folders are listed between them.
+    fn row_centre(shell: &DesktopShell, program: usize) -> (f32, f32) {
+        let row = shell
+            .start_row_of_program(program)
+            .expect("that many programs in the menu");
+        let r = shell.start_menu_row_rect(row.saturating_sub(shell.start_menu_scroll));
+        (r.x + r.w / 2.0, r.y + r.h / 2.0)
+    }
+
+    /// The program on a start-menu row, and its name.
+    fn app(shell: &DesktopShell, row: usize) -> (String, String) {
+        let entry = shell.start_menu_entries()[row];
+        (entry.executable_path.clone(), entry.name.clone())
+    }
+
+    fn pinned(shell: &DesktopShell) -> Vec<String> {
+        shell
+            .pinned_apps()
+            .iter()
+            .map(|app| app.exec_path.clone())
+            .collect()
+    }
+
+    fn button_centre(shell: &DesktopShell, index: usize) -> (f32, f32) {
+        let r = shell.taskbar_button_rect(index);
+        (r.x + r.w / 2.0, r.y + r.h / 2.0)
+    }
+
+    /// The desktop's shortcut to `exec`, if it has one.
+    fn shortcut_to(shell: &DesktopShell, exec: &str) -> Option<icons::IconId> {
+        let action = icons::IconAction::OpenPath(PathBuf::from(exec));
+        shell
+            .icons
+            .icon_ids()
+            .into_iter()
+            .find(|&id| shell.icons.get_icon(id).is_some_and(|i| i.action == action))
+    }
+
+    /// The middle of an icon's cell, where a press picks it up.
+    fn icon_centre(shell: &DesktopShell, id: icons::IconId) -> (f32, f32) {
+        let icon = shell.icons.get_icon(id).unwrap();
+        let grid = shell.icons.grid();
+        (
+            icon.x as f32 + grid.cell_width() as f32 / 2.0,
+            icon.y as f32 + grid.cell_height() as f32 / 2.0,
+        )
+    }
+
+    fn position(shell: &DesktopShell, id: icons::IconId) -> (i32, i32) {
+        let icon = shell.icons.get_icon(id).unwrap();
+        (icon.x, icon.y)
+    }
+
+    /// What the label that follows a carried program says, line by line --
+    /// `None` when there is no label.
+    fn carried(shell: &DesktopShell) -> Option<Vec<String>> {
+        let tree = shell.render_carry()?;
+        Some(
+            tree.commands
+                .iter()
+                .filter_map(|cmd| match cmd {
+                    RenderCommand::Text { text, .. } => Some(text.clone()),
+                    _ => None,
+                })
+                .collect(),
+        )
+    }
+
+    /// An application window on the desktop being shown.
+    fn window(id: u64, rect: (i32, i32, u32, u32)) -> WindowInfo {
+        WindowInfo::new(id, 1, format!("window {id}")).at(rect.0, rect.1, rect.2, rect.3)
+    }
+
+    // ---- a click is still a click -----------------------------------------------------
+
+    /// The press only takes hold: whether it was a click or the start of a
+    /// drag is not known until the release, so starting the program on the
+    /// press -- as the row used to -- made it impossible to drag.
+    #[test]
+    fn a_start_menu_row_starts_its_program_on_the_release() {
+        let mut shell = shell();
+        shell.toggle_start_menu();
+        let (exec, _) = app(&shell, 0);
+        let at = row_centre(&shell, 0);
+
+        assert_eq!(press(&mut shell, at), ShellAction::Consumed);
+        assert!(
+            shell.start_menu_open,
+            "the menu closed under a press that may yet be a drag"
+        );
+        assert_eq!(
+            release(&mut shell, at),
+            ShellAction::Launch(crate::hotkeys::Launch::program(&exec))
+        );
+        assert!(
+            !shell.start_menu_open,
+            "picking a program leaves the menu up"
+        );
+    }
+
+    /// A hand is not perfectly still: a press that moves less than the drag
+    /// threshold before it is let go is a click.
+    #[test]
+    fn a_press_that_wobbles_is_still_a_click() {
+        let mut shell = shell();
+        shell.toggle_start_menu();
+        let (exec, _) = app(&shell, 0);
+        let (x, y) = row_centre(&shell, 0);
+
+        press(&mut shell, (x, y));
+        move_to(&mut shell, (x + 2.0, y + 1.0));
+        assert!(carried(&shell).is_none(), "a wobble drew a carried label");
+        assert_eq!(
+            release(&mut shell, (x + 2.0, y + 1.0)),
+            ShellAction::Launch(crate::hotkeys::Launch::program(&exec))
+        );
+    }
+
+    // ---- from the start menu --------------------------------------------------------
+
+    /// Dropped on the taskbar, the program is pinned in the gap it was let go
+    /// in -- here between the two pins already there.
+    #[test]
+    fn a_row_dropped_on_the_taskbar_is_pinned_in_the_gap_it_was_let_go_in() {
+        with_scratch_config("carry-row-to-bar", |_root| {
+            let mut shell = shell();
+            let ((a, a_name), (b, b_name), (c, _)) =
+                (app(&shell, 0), app(&shell, 1), app(&shell, 2));
+            shell.pin_app(&a, &a_name);
+            shell.pin_app(&b, &b_name);
+            shell.toggle_start_menu();
+
+            // The left quarter of the second button: before it.
+            let second = shell.taskbar_button_rect(1);
+            let to = (second.x + second.w / 4.0, second.y + second.h / 2.0);
+            let from = row_centre(&shell, 2);
+            assert_eq!(
+                carry(&mut shell, from, to),
+                ShellAction::Consumed,
+                "a drag started the program"
+            );
+
+            assert_eq!(pinned(&shell), [a.clone(), c, b]);
+            assert!(!shell.start_menu_open, "the menu stayed up after the drop");
+            assert!(
+                shortcut_to(&shell, &a).is_none(),
+                "the taskbar drop made a shortcut"
+            );
+
+            // And written down: a new login sees the same bar.
+            let mut restarted = DesktopShell::new(1920, 1080);
+            restarted.load_pinned();
+            assert_eq!(pinned(&restarted), pinned(&shell));
+        });
+    }
+
+    /// Past the last pin, and anywhere else on the bar that is not a pin, is
+    /// the end of the run.
+    #[test]
+    fn a_row_dropped_past_the_last_pin_goes_at_the_end() {
+        with_scratch_config("carry-row-to-bar-end", |_root| {
+            let mut shell = shell();
+            let ((a, a_name), (b, _)) = (app(&shell, 0), app(&shell, 1));
+            shell.pin_app(&a, &a_name);
+            shell.toggle_start_menu();
+
+            let last = shell.taskbar_button_rect(0);
+            let to = (last.x + last.w * 3.0, last.y + last.h / 2.0);
+            let from = row_centre(&shell, 1);
+            carry(&mut shell, from, to);
+
+            assert_eq!(pinned(&shell), [a, b]);
+        });
+    }
+
+    /// A program that is pinned already moves to where it was dropped, and
+    /// is not pinned twice.
+    #[test]
+    fn a_row_already_pinned_moves_its_pin_rather_than_adding_one() {
+        with_scratch_config("carry-row-moves-pin", |_root| {
+            let mut shell = shell();
+            let ((a, a_name), (b, b_name)) = (app(&shell, 0), app(&shell, 1));
+            shell.pin_app(&a, &a_name);
+            shell.pin_app(&b, &b_name);
+            shell.toggle_start_menu();
+
+            let second = shell.taskbar_button_rect(1);
+            let to = (second.x + second.w * 0.75, second.y + second.h / 2.0);
+            let from = row_centre(&shell, 0);
+            carry(&mut shell, from, to);
+            assert_eq!(pinned(&shell), [b.clone(), a.clone()]);
+
+            // Dropped into its own gap, either side of it, nothing moves.
+            shell.toggle_start_menu();
+            let own = shell.taskbar_button_rect(1);
+            let to = (own.x + own.w * 0.25, own.y + own.h / 2.0);
+            let from = row_centre(&shell, 0);
+            carry(&mut shell, from, to);
+            assert_eq!(pinned(&shell), [b, a]);
+        });
+    }
+
+    /// A program already pinned, carried into the gap between two other pins:
+    /// the case where its own old place changes which gap is meant.
+    #[test]
+    fn a_pinned_program_carried_into_a_middle_gap_lands_there() {
+        with_scratch_config("carry-row-middle-gap", |_root| {
+            let mut shell = shell();
+            let apps: Vec<(String, String)> = (0..3).map(|row| app(&shell, row)).collect();
+            for (exec, name) in &apps {
+                shell.pin_app(exec, name);
+            }
+            shell.toggle_start_menu();
+
+            // Row 0's program is the first pin. The left quarter of the
+            // third button: after the second, before the third.
+            let third = shell.taskbar_button_rect(2);
+            let to = (third.x + third.w / 4.0, third.y + third.h / 2.0);
+            let from = row_centre(&shell, 0);
+            carry(&mut shell, from, to);
+            assert_eq!(
+                pinned(&shell),
+                [apps[1].0.clone(), apps[0].0.clone(), apps[2].0.clone()]
+            );
+        });
+    }
+
+    /// Dropped on the desktop, a shortcut to the program appears where it was
+    /// let go, and is saved.
+    #[test]
+    fn a_row_dropped_on_the_desktop_puts_a_shortcut_where_it_was_let_go() {
+        with_scratch_config("carry-row-to-desktop", |_root| {
+            let mut shell = shell();
+            shell.toggle_start_menu();
+            let (exec, name) = app(&shell, 0);
+            let to = (1200.0, 400.0);
+            let from = row_centre(&shell, 0);
+            assert_eq!(carry(&mut shell, from, to), ShellAction::Consumed);
+
+            let id = shortcut_to(&shell, &exec).expect("no shortcut appeared");
+            let icon = shell.icons.get_icon(id).unwrap();
+            assert_eq!(icon.label, name);
+            assert_eq!(icon.icon_type, icons::IconType::Executable);
+            assert!(icon.added, "a shortcut the user made must be removable");
+            // On the grid, in the cell under the pointer: that cell was free.
+            let grid = shell.icons.grid();
+            let (x, y) = (icon.x as f32, icon.y as f32);
+            assert!(
+                (x..x + grid.cell_width() as f32).contains(&to.0)
+                    && (y..y + grid.cell_height() as f32).contains(&to.1),
+                "the shortcut is at ({x}, {y}), not under where it was let go"
+            );
+            assert!(shell.take_icons_dirty(), "the new shortcut is not saved");
+            assert!(pinned(&shell).is_empty(), "a desktop drop pinned it");
+            assert!(!shell.start_menu_open);
+        });
+    }
+
+    /// Dropping it where there is a shortcut to it already selects that one
+    /// rather than making a second.
+    #[test]
+    fn a_row_dropped_on_the_desktop_twice_leaves_one_shortcut() {
+        with_scratch_config("carry-row-to-desktop-twice", |_root| {
+            let mut shell = shell();
+            let (exec, _) = app(&shell, 0);
+            for to in [(1200.0, 400.0), (600.0, 700.0)] {
+                shell.toggle_start_menu();
+                let from = row_centre(&shell, 0);
+                carry(&mut shell, from, to);
+            }
+            let action = icons::IconAction::OpenPath(PathBuf::from(&exec));
+            let count = shell
+                .icons
+                .icon_ids()
+                .into_iter()
+                .filter(|&id| shell.icons.get_icon(id).is_some_and(|i| i.action == action))
+                .count();
+            assert_eq!(count, 1);
+            assert_eq!(
+                shell.icons.selected_ids(),
+                [shortcut_to(&shell, &exec).unwrap()]
+            );
+        });
+    }
+
+    /// Carried and brought back to the menu, nothing is asked for: the menu
+    /// stays up to be used, nothing starts, and nothing is pinned or added.
+    #[test]
+    fn a_row_let_go_back_on_the_menu_does_nothing() {
+        with_scratch_config("carry-row-back", |_root| {
+            let mut shell = shell();
+            shell.toggle_start_menu();
+            let (exec, _) = app(&shell, 0);
+            let (from, to) = (row_centre(&shell, 0), row_centre(&shell, 3));
+            assert_eq!(carry(&mut shell, from, to), ShellAction::Consumed);
+
+            assert!(shell.start_menu_open);
+            assert!(pinned(&shell).is_empty());
+            assert!(shortcut_to(&shell, &exec).is_none());
+            assert!(!shell.take_icons_dirty());
+            assert!(carried(&shell).is_none(), "the label outlived the drag");
+        });
+    }
+
+    /// Let go over somebody's window, it goes nowhere: nothing here can hand a
+    /// program to another program yet, and a shortcut made behind the window
+    /// would turn up somewhere the user was not pointing.
+    #[test]
+    fn a_row_let_go_over_a_window_does_nothing() {
+        with_scratch_config("carry-row-over-window", |_root| {
+            let mut shell = shell();
+            shell.apply_window_list(&WindowList::new(0, vec![window(1, (800, 200, 600, 400))]));
+            shell.toggle_start_menu();
+            let (exec, _) = app(&shell, 0);
+            let from = row_centre(&shell, 0);
+            assert_eq!(
+                carry(&mut shell, from, (1000.0, 400.0)),
+                ShellAction::Consumed
+            );
+
+            assert!(shortcut_to(&shell, &exec).is_none());
+            assert!(pinned(&shell).is_empty());
+            // Beside the window, the same drop works.
+            shell.toggle_start_menu();
+            let from = row_centre(&shell, 0);
+            carry(&mut shell, from, (1600.0, 400.0));
+            assert!(shortcut_to(&shell, &exec).is_some());
+        });
+    }
+
+    /// Escape mid-drag -- which dismisses every popup -- ends the drag too.
+    /// It closed the menu by writing its flag directly and left the drag to
+    /// finish on the release.
+    #[test]
+    fn dismissing_the_popups_ends_a_drag_from_the_menu() {
+        with_scratch_config("carry-row-dismissed", |_root| {
+            let mut shell = shell();
+            shell.toggle_start_menu();
+            let (exec, _) = app(&shell, 0);
+            let from = row_centre(&shell, 0);
+            press(&mut shell, from);
+            move_to(&mut shell, (1200.0, 400.0));
+            assert!(shell.dismiss_popups());
+            assert!(carried(&shell).is_none(), "the label outlived the menu");
+            release(&mut shell, (1200.0, 400.0));
+            assert!(
+                shortcut_to(&shell, &exec).is_none(),
+                "the dismissed drag still dropped"
+            );
+        });
+    }
+
+    /// Closing the menu mid-drag -- a key, a hotkey, anything that closes it --
+    /// ends the drag: the release has nothing left to drop.
+    #[test]
+    fn closing_the_menu_ends_a_drag_from_it() {
+        with_scratch_config("carry-row-menu-closed", |_root| {
+            let mut shell = shell();
+            shell.toggle_start_menu();
+            let (exec, _) = app(&shell, 0);
+            let from = row_centre(&shell, 0);
+            press(&mut shell, from);
+            move_to(&mut shell, (1200.0, 400.0));
+            shell.close_start_menu();
+            assert!(carried(&shell).is_none());
+            release(&mut shell, (1200.0, 400.0));
+            assert!(shortcut_to(&shell, &exec).is_none());
+        });
+    }
+
+    // ---- what the carried label says ----------------------------------------------------
+
+    /// The label names the program and says what letting go will do, and says
+    /// nothing where letting go does nothing.
+    #[test]
+    fn the_carried_label_says_what_letting_go_will_do() {
+        with_scratch_config("carry-label", |_root| {
+            let mut shell = shell();
+            shell.apply_window_list(&WindowList::new(0, vec![window(1, (800, 200, 600, 400))]));
+            shell.toggle_start_menu();
+            let (_, name) = app(&shell, 0);
+            let from = row_centre(&shell, 0);
+            press(&mut shell, from);
+            assert!(carried(&shell).is_none(), "a label before any drag");
+
+            move_to(&mut shell, (1600.0, 400.0));
+            assert_eq!(
+                carried(&shell).unwrap(),
+                [name.clone(), "Add to desktop".into()]
+            );
+
+            let bar = shell.taskbar_rect();
+            move_to(&mut shell, (bar.x + bar.w / 2.0, bar.y + bar.h / 2.0));
+            assert_eq!(
+                carried(&shell).unwrap(),
+                [name.clone(), "Pin to taskbar".into()]
+            );
+
+            move_to(&mut shell, (1000.0, 400.0));
+            assert_eq!(
+                carried(&shell).unwrap(),
+                std::slice::from_ref(&name),
+                "over a window"
+            );
+
+            let menu = row_centre(&shell, 2);
+            move_to(&mut shell, menu);
+            assert_eq!(carried(&shell).unwrap(), [name], "back on the menu");
+
+            release(&mut shell, menu);
+            assert!(carried(&shell).is_none());
+        });
+    }
+
+    /// Over a taskbar along the bottom edge -- exactly where the label has
+    /// something to say -- it flips above the pointer instead of running off
+    /// the screen, and left of it in the corner.
+    #[test]
+    fn the_carried_label_stays_on_the_screen() {
+        let mut shell = shell();
+        shell.toggle_start_menu();
+        let from = row_centre(&shell, 0);
+        press(&mut shell, from);
+        let bar = shell.taskbar_rect();
+        for x in [bar.x + bar.w / 2.0, bar.x + bar.w - 2.0] {
+            move_to(&mut shell, (x, bar.y + bar.h - 2.0));
+            let tree = shell.render_carry().expect("no label over the taskbar");
+            for cmd in &tree.commands {
+                if let RenderCommand::FillRect {
+                    x,
+                    y,
+                    width,
+                    height,
+                    ..
+                } = cmd
+                {
+                    assert!(*x >= 0.0 && *y >= 0.0, "off the top or left");
+                    assert!(x + width <= 1920.0, "off the right edge at {x}");
+                    assert!(y + height <= 1080.0, "off the bottom edge at {y}");
+                }
+            }
+        }
+    }
+
+    // ---- from the taskbar ------------------------------------------------------------------
+
+    /// A pinned button carried up onto the desktop leaves a shortcut there,
+    /// and the pin stays: a drag between two places copies.
+    #[test]
+    fn a_pin_carried_onto_the_desktop_makes_a_shortcut_and_stays_pinned() {
+        with_scratch_config("carry-pin-to-desktop", |_root| {
+            let mut shell = shell();
+            let ((a, a_name), (b, b_name)) = (app(&shell, 0), app(&shell, 1));
+            shell.pin_app(&a, &a_name);
+            shell.pin_app(&b, &b_name);
+
+            let from = button_centre(&shell, 0);
+            press(&mut shell, from);
+            move_to(&mut shell, (1200.0, 400.0));
+            assert_eq!(
+                carried(&shell).unwrap(),
+                [a_name.clone(), "Add to desktop".into()]
+            );
+            assert_eq!(
+                release(&mut shell, (1200.0, 400.0)),
+                ShellAction::Consumed,
+                "a drag started the program"
+            );
+
+            assert_eq!(pinned(&shell), [a.clone(), b]);
+            let id = shortcut_to(&shell, &a).expect("no shortcut appeared");
+            assert_eq!(shell.icons.get_icon(id).unwrap().label, a_name);
+            assert!(shell.take_icons_dirty());
+        });
+    }
+
+    /// Up off the bar and back down onto it, the drag is a reorder again.
+    #[test]
+    fn a_pin_carried_off_the_bar_and_back_still_reorders() {
+        with_scratch_config("carry-pin-off-and-back", |_root| {
+            let mut shell = shell();
+            let ((a, a_name), (b, b_name)) = (app(&shell, 0), app(&shell, 1));
+            shell.pin_app(&a, &a_name);
+            shell.pin_app(&b, &b_name);
+
+            let from = button_centre(&shell, 0);
+            let second = shell.taskbar_button_rect(1);
+            let back = (second.x + second.w * 0.75, second.y + second.h / 2.0);
+            press(&mut shell, from);
+            move_to(&mut shell, (from.0, 500.0));
+            assert!(carried(&shell).is_some(), "no label off the bar");
+            move_to(&mut shell, back);
+            assert!(
+                carried(&shell).is_none(),
+                "a label on the bar, where it rearranges"
+            );
+            assert_eq!(release(&mut shell, back), ShellAction::Consumed);
+
+            assert_eq!(pinned(&shell), [b, a.clone()]);
+            assert!(shortcut_to(&shell, &a).is_none());
+        });
+    }
+
+    /// A pin carried off the bar and let go over a window goes nowhere, and
+    /// the pin is where it was.
+    #[test]
+    fn a_pin_let_go_over_a_window_does_nothing() {
+        with_scratch_config("carry-pin-over-window", |_root| {
+            let mut shell = shell();
+            shell.apply_window_list(&WindowList::new(0, vec![window(1, (800, 200, 600, 400))]));
+            let (a, a_name) = app(&shell, 0);
+            shell.pin_app(&a, &a_name);
+            // The window has a button of its own now, after the pin.
+            let from = button_centre(&shell, 0);
+            assert_eq!(
+                carry(&mut shell, from, (1000.0, 400.0)),
+                ShellAction::Consumed
+            );
+
+            assert_eq!(pinned(&shell), std::slice::from_ref(&a));
+            assert!(shortcut_to(&shell, &a).is_none());
+        });
+    }
+
+    // ---- from the desktop --------------------------------------------------------------------
+
+    /// A program's icon carried onto the taskbar is pinned there, and the icon
+    /// stays where it was.
+    #[test]
+    fn a_program_icon_dropped_on_the_taskbar_is_pinned_and_stays_put() {
+        with_scratch_config("carry-icon-to-bar", |_root| {
+            let mut shell = shell();
+            let ((a, a_name), (b, b_name)) = (app(&shell, 0), app(&shell, 1));
+            shell.pin_app(&a, &a_name);
+            let (id, _) = shell.icons.add_shortcut(
+                &b_name,
+                icons::IconType::Executable,
+                icons::IconAction::OpenPath(PathBuf::from(&b)),
+            );
+            let was = position(&shell, id);
+            let from = icon_centre(&shell, id);
+
+            // Before the pin already there.
+            let first = shell.taskbar_button_rect(0);
+            let to = (first.x + first.w / 4.0, first.y + first.h / 2.0);
+            press(&mut shell, from);
+            move_to(&mut shell, (from.0 + 40.0, from.1));
+            move_to(&mut shell, to);
+            assert_eq!(
+                carried(&shell).unwrap(),
+                [b_name, "Pin to taskbar".into()],
+                "the icon's own ghost is under the bar; the label is what shows"
+            );
+            assert_eq!(release(&mut shell, to), ShellAction::Consumed);
+
+            assert_eq!(pinned(&shell), [b, a]);
+            assert_eq!(position(&shell, id), was, "the icon moved");
+            assert!(!shell.take_icons_dirty(), "nothing on the desktop changed");
+            assert!(!shell.icons.is_interacting(), "the drag was left open");
+        });
+    }
+
+    /// Several program icons dropped together are pinned in their order, not
+    /// stacked up reversed in the one gap.
+    #[test]
+    fn program_icons_dropped_together_keep_their_order() {
+        with_scratch_config("carry-icons-to-bar", |_root| {
+            let mut shell = shell();
+            let ((a, a_name), (b, b_name)) = (app(&shell, 0), app(&shell, 1));
+            let (first, _) = shell.icons.add_shortcut(
+                &a_name,
+                icons::IconType::Executable,
+                icons::IconAction::OpenPath(PathBuf::from(&a)),
+            );
+            shell.icons.add_shortcut(
+                &b_name,
+                icons::IconType::Executable,
+                icons::IconAction::OpenPath(PathBuf::from(&b)),
+            );
+            shell.icons.select_all();
+            let from = icon_centre(&shell, first);
+            let bar = shell.taskbar_rect();
+            let to = (bar.x + bar.w / 2.0, bar.y + bar.h / 2.0);
+            // Not `carry`: a press on an icon that is already selected
+            // changes nothing anyone can see, so the shell answers it `Pass`
+            // -- and the drag is under way all the same.
+            press(&mut shell, from);
+            move_to(&mut shell, (from.0 + 40.0, from.1));
+            move_to(&mut shell, to);
+            assert_eq!(release(&mut shell, to), ShellAction::Consumed);
+
+            assert_eq!(pinned(&shell), [a, b]);
+        });
+    }
+
+    /// A folder is not something a taskbar button can start: dropped on the
+    /// taskbar it pins nothing and stays where it was -- and the outline of
+    /// where it would land on the desktop is not drawn while it is over the
+    /// bar, because it would not land there.
+    #[test]
+    fn a_folder_dropped_on_the_taskbar_pins_nothing_and_stays_put() {
+        with_scratch_config("carry-folder-to-bar", |_root| {
+            let mut shell = shell();
+            let (id, _) = shell.icons.add_shortcut(
+                "Projects",
+                icons::IconType::Folder,
+                icons::IconAction::OpenPath(PathBuf::from("/home/user/projects")),
+            );
+            let was = position(&shell, id);
+            let from = icon_centre(&shell, id);
+            let bar = shell.taskbar_rect();
+            let to = (bar.x + bar.w / 2.0, bar.y + bar.h / 2.0);
+
+            // Compared as text: a render command has no equality of its own.
+            let drawn = |cmds: Vec<RenderCommand>| format!("{cmds:?}");
+            press(&mut shell, from);
+            move_to(&mut shell, (from.0 + 40.0, from.1 + 40.0));
+            let palette = crate::Palette::from_settings(&shell.appearance);
+            assert_eq!(
+                drawn(shell.render_icons()),
+                drawn(shell.icons.render(&palette)),
+                "over the desktop the outline is drawn"
+            );
+            move_to(&mut shell, to);
+            assert_eq!(
+                drawn(shell.render_icons()),
+                drawn(shell.icons.render_dropping_elsewhere(&palette)),
+                "over the taskbar the outline promises a landing the drop breaks"
+            );
+            assert_ne!(
+                drawn(shell.icons.render(&palette)),
+                drawn(shell.icons.render_dropping_elsewhere(&palette))
+            );
+            assert!(carried(&shell).is_none(), "a label for a folder");
+            release(&mut shell, to);
+
+            assert!(pinned(&shell).is_empty());
+            assert_eq!(position(&shell, id), was);
+            assert!(!shell.icons.is_interacting());
+        });
+    }
+
+    /// A click on one of two selected program icons, let go a pixel over
+    /// the taskbar, is still a click: it selects just that icon, and pins
+    /// nothing -- only a drag that got under way is a drop.
+    #[test]
+    fn a_click_let_go_just_over_the_taskbar_is_still_a_click() {
+        with_scratch_config("carry-icon-click-at-bar", |_root| {
+            let mut shell = shell();
+            shell.icons.set_arrangement(icons::ArrangementMode::Free);
+            let ((a, a_name), (b, b_name)) = (app(&shell, 0), app(&shell, 1));
+            let bar_top = shell.taskbar_rect().y;
+            let cell_h = shell.icons.grid().cell_height() as f32;
+            // Flush against the bar: its lowest pixel is the one above it.
+            let (low, _) = shell.icons.add_shortcut_at(
+                &a_name,
+                icons::IconType::Executable,
+                icons::IconAction::OpenPath(PathBuf::from(&a)),
+                600.0,
+                bar_top - cell_h / 2.0,
+            );
+            shell.icons.add_shortcut(
+                &b_name,
+                icons::IconType::Executable,
+                icons::IconAction::OpenPath(PathBuf::from(&b)),
+            );
+            shell.icons.select_all();
+            let x = icon_centre(&shell, low).0;
+
+            // Three pixels, under the drag threshold, and over the bar.
+            press(&mut shell, (x, bar_top - 1.0));
+            move_to(&mut shell, (x, bar_top + 2.0));
+            release(&mut shell, (x, bar_top + 2.0));
+
+            assert!(pinned(&shell).is_empty(), "a click was taken for a drop");
+            assert_eq!(shell.icons.selected_ids(), [low]);
+            assert!(!shell.icons.is_interacting());
+        });
+    }
+
+    /// A press on an icon that never became a drag is the icon layer's,
+    /// wherever it is let go -- even a pixel over the bar.
+    #[test]
+    fn a_click_on_an_icon_is_not_a_drop() {
+        with_scratch_config("carry-icon-click", |_root| {
+            let mut shell = shell();
+            let (a, a_name) = app(&shell, 0);
+            let (id, _) = shell.icons.add_shortcut(
+                &a_name,
+                icons::IconType::Executable,
+                icons::IconAction::OpenPath(PathBuf::from(&a)),
+            );
+            let from = icon_centre(&shell, id);
+            press(&mut shell, from);
+            release(&mut shell, from);
+            assert!(pinned(&shell).is_empty());
+            assert_eq!(shell.icons.selected_ids(), [id]);
+        });
+    }
+
+    // ---- what is under a point -------------------------------------------------------------
+
+    /// The topmost window on the shown desktop that is on the glass.
+    #[test]
+    fn window_at_finds_the_topmost_window_drawn_there() {
+        let mut shell = shell();
+        let mut hidden = window(3, (0, 0, 1920, 1080));
+        hidden.minimized = true;
+        let mut elsewhere = window(4, (0, 0, 1920, 1080));
+        elsewhere.workspace = 1;
+        shell.apply_window_list(&WindowList::new(
+            0,
+            vec![
+                window(1, (100, 100, 400, 300)),
+                window(2, (300, 200, 400, 300)),
+                hidden,
+                elsewhere,
+            ],
+        ));
+
+        assert_eq!(shell.window_at(150.0, 150.0), Some(WindowId(1)));
+        // Where they overlap, the one later in the list is on top.
+        assert_eq!(shell.window_at(350.0, 250.0), Some(WindowId(2)));
+        // Minimised, or on another desktop, is not drawn.
+        assert_eq!(shell.window_at(1500.0, 900.0), None);
+    }
+}
+
+/// Programs pinned to the top of the start menu, and the drops that put them
+/// there -- the start menu's part in `design.txt` line 712.
+///
+/// Only the tests that also pin to the *taskbar* need a scratch configuration
+/// directory: the start menu's pins are written by the session
+/// (`take_start_menu_dirty`), never by the shell, and the one test that writes
+/// them itself asks for one.
+#[cfg(test)]
+mod start_pin_tests {
+    #![allow(
+        clippy::unwrap_used,
+        clippy::expect_used,
+        clippy::panic,
+        clippy::indexing_slicing,
+        clippy::arithmetic_side_effects,
+        clippy::cast_precision_loss,
+        clippy::float_cmp
+    )]
+
+    use super::{
+        DesktopShell, Key, KeyEvent, Modifiers, MouseButton, MouseEvent, MouseEventKind,
+        ShellAction, icons,
+    };
+    use appearance::config::testing::with_scratch_config;
+    use guitk::menu::MenuItem;
+    use guitk::render::RenderCommand;
+    use std::path::PathBuf;
+
+    const UNKNOWN: &str = "/opt/tools/bin/frobnicate";
+
+    fn shell() -> DesktopShell {
+        DesktopShell::new(1920, 1080)
+    }
+
+    fn key(key: Key) -> KeyEvent {
+        KeyEvent {
+            key,
+            pressed: true,
+            modifiers: Modifiers::NONE,
+            text: String::new(),
+        }
+    }
+
+    fn ev(at: (f32, f32), kind: MouseEventKind) -> MouseEvent {
+        MouseEvent {
+            x: at.0,
+            y: at.1,
+            kind,
+        }
+    }
+
+    fn press(shell: &mut DesktopShell, at: (f32, f32)) -> ShellAction {
+        shell.handle_mouse(&ev(at, MouseEventKind::Press(MouseButton::Left)))
+    }
+
+    fn move_to(shell: &mut DesktopShell, at: (f32, f32)) {
+        shell.handle_mouse(&ev(at, MouseEventKind::Move));
+    }
+
+    fn release(shell: &mut DesktopShell, at: (f32, f32)) -> ShellAction {
+        shell.handle_mouse(&ev(at, MouseEventKind::Release(MouseButton::Left)))
+    }
+
+    /// Press, move there in four steps, let go.
+    fn carry(shell: &mut DesktopShell, from: (f32, f32), to: (f32, f32)) -> ShellAction {
+        press(shell, from);
+        for step in 1..=4 {
+            let t = step as f32 / 4.0;
+            move_to(
+                shell,
+                (from.0 + (to.0 - from.0) * t, from.1 + (to.1 - from.1) * t),
+            );
+        }
+        release(shell, to)
+    }
+
+    /// The centre of the row the `program`-th program of the start menu is
+    /// on -- counting programs, as `app` does, so the two name one program
+    /// whatever folders are listed between them.
+    fn row_centre(shell: &DesktopShell, program: usize) -> (f32, f32) {
+        let row = shell
+            .start_row_of_program(program)
+            .expect("that many programs in the menu");
+        let r = shell.start_menu_row_rect(row.saturating_sub(shell.start_menu_scroll));
+        (r.x + r.w / 2.0, r.y + r.h / 2.0)
+    }
+
+    /// A point on the lower or upper half of a row: which half decides
+    /// whether a drop goes after the row or before it.
+    fn row_half(shell: &DesktopShell, program: usize, lower: bool) -> (f32, f32) {
+        let row = shell
+            .start_row_of_program(program)
+            .expect("that many programs in the menu");
+        let r = shell.start_menu_row_rect(row.saturating_sub(shell.start_menu_scroll));
+        let y = if lower {
+            r.y + r.h * 0.75
+        } else {
+            r.y + r.h * 0.25
+        };
+        (r.x + r.w / 2.0, y)
+    }
+
+    fn start_button(shell: &DesktopShell) -> (f32, f32) {
+        let r = shell.start_button_rect();
+        (r.x + r.w / 2.0, r.y + r.h / 2.0)
+    }
+
+    /// Every row's program, in menu order.
+    fn execs(shell: &DesktopShell) -> Vec<String> {
+        shell
+            .start_menu_entries()
+            .iter()
+            .map(|entry| entry.executable_path.clone())
+            .collect()
+    }
+
+    fn pins(shell: &DesktopShell) -> Vec<String> {
+        shell
+            .start_pins()
+            .iter()
+            .map(|entry| entry.executable_path.clone())
+            .collect()
+    }
+
+    fn labels(items: &[MenuItem]) -> Vec<String> {
+        items
+            .iter()
+            .filter_map(|item| match item {
+                MenuItem::Action { label, .. } => Some(label.clone()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    // ---- the list ----------------------------------------------------------------------
+
+    /// A pinned program heads the list, and the launcher's list below is
+    /// untouched -- the program is still in it, in its own place.
+    #[test]
+    fn a_pinned_program_heads_the_list_and_is_still_listed_below() {
+        let mut shell = shell();
+        let before = execs(&shell);
+        shell.pin_to_start(&before[3]);
+
+        let after = execs(&shell);
+        assert_eq!(after[0], before[3]);
+        assert_eq!(after[1..], before[..]);
+        assert!(shell.is_pinned_to_start(&before[3]));
+        assert!(shell.take_start_menu_dirty(), "a pin nobody will save");
+        assert!(!shell.take_start_menu_dirty(), "the flag outlived the save");
+    }
+
+    /// Pinning twice leaves one pin; unpinning takes it off, and unpinning
+    /// what is not pinned changes nothing.
+    #[test]
+    fn a_program_is_pinned_once_and_unpinned_once() {
+        let mut shell = shell();
+        let before = execs(&shell);
+        shell.pin_to_start(&before[1]);
+        shell.pin_to_start(&before[1]);
+        assert_eq!(pins(&shell), [before[1].clone()]);
+        let _ = shell.take_start_menu_dirty();
+
+        shell.unpin_from_start(&before[1]);
+        assert!(pins(&shell).is_empty());
+        assert_eq!(execs(&shell), before);
+        assert!(shell.take_start_menu_dirty());
+
+        shell.unpin_from_start(&before[1]);
+        assert!(!shell.take_start_menu_dirty(), "nothing changed");
+    }
+
+    /// A program the launcher has never heard of can be pinned by its path,
+    /// is named for its file, and starts when its row is clicked.
+    #[test]
+    fn a_program_the_launcher_does_not_know_is_pinned_by_path() {
+        let mut shell = shell();
+        shell.pin_to_start(UNKNOWN);
+        assert_eq!(shell.start_pins()[0].name, "frobnicate");
+
+        shell.toggle_start_menu();
+        let at = row_centre(&shell, 0);
+        press(&mut shell, at);
+        assert_eq!(
+            release(&mut shell, at),
+            ShellAction::Launch(crate::hotkeys::Launch::program(UNKNOWN))
+        );
+    }
+
+    /// Unpinning shortens the list; a menu scrolled to its end must not be
+    /// left showing a blank row past it.
+    #[test]
+    fn unpinning_while_scrolled_to_the_end_leaves_no_blank_row() {
+        let mut shell = shell();
+        // More programs than the menu shows, so that there is an end to be
+        // scrolled to.
+        for n in 0..20 {
+            shell.apps.push(super::launcher::AppEntry {
+                name: format!("Program {n:02}"),
+                description: String::new(),
+                executable_path: format!("/opt/fixture/program-{n:02}"),
+                keywords: Vec::new(),
+                category: super::launcher::Category::Application,
+                launch_count: 0,
+                ..Default::default()
+            });
+        }
+        shell.pin_to_start(UNKNOWN);
+        shell.toggle_start_menu();
+        shell.scroll_start_menu(10_000);
+        shell.unpin_from_start(UNKNOWN);
+
+        assert_eq!(shell.start_menu_scroll, shell.start_menu_max_scroll());
+        let last_row = shell.start_menu_visible_rows() - 1;
+        assert_eq!(
+            shell.start_menu_entry_at(last_row),
+            Some(shell.start_menu_rows().len() - 1)
+        );
+    }
+
+    /// A line sets the sections apart, at the top of every heading but the
+    /// first -- and with nothing pinned or used, there are no headings and no
+    /// line.
+    #[test]
+    fn a_line_sets_the_pins_apart_from_the_list() {
+        let mut shell = shell();
+        shell.toggle_start_menu();
+        let line_at = |shell: &DesktopShell| {
+            let menu = shell.render_start_menu().expect("the menu is open");
+            menu.commands
+                .iter()
+                .filter_map(|cmd| match cmd {
+                    RenderCommand::FillRect { y, height, .. } if *height <= 1.0 => Some(*y),
+                    _ => None,
+                })
+                .collect::<Vec<f32>>()
+        };
+        assert!(line_at(&shell).is_empty(), "a line with nothing pinned");
+
+        let first = execs(&shell)[0].clone();
+        shell.pin_to_start(&first);
+        shell.pin_to_start(UNKNOWN);
+        // "Pinned", the two pins, then the "All apps" heading the line is on.
+        assert_eq!(line_at(&shell), [shell.start_menu_row_rect(3).y]);
+    }
+
+    /// Written by the session and read back at the next login, names and all.
+    #[test]
+    fn start_pins_survive_a_restart() {
+        with_scratch_config("start-pins-restart", |_root| {
+            let mut shell = shell();
+            let known = execs(&shell)[2].clone();
+            shell.pin_to_start(&known);
+            shell.pin_to_start(UNKNOWN);
+            shell.save_start_menu().unwrap();
+
+            let mut restarted = DesktopShell::new(1920, 1080);
+            assert!(restarted.start_pins().is_empty(), "read before loading");
+            restarted.load_start_menu();
+            assert_eq!(pins(&restarted), [known, UNKNOWN.to_string()]);
+            assert_eq!(restarted.start_pins()[1].name, "frobnicate");
+            assert!(
+                !restarted.take_start_menu_dirty(),
+                "loading is not a change"
+            );
+        });
+    }
+
+    // ---- the menus ---------------------------------------------------------------------
+
+    /// A row's right-click menu pins it to the start menu, and the pinned
+    /// row's menu takes it off again -- the label says which it will do.
+    #[test]
+    fn a_rows_menu_pins_it_to_the_start_menu_and_back() {
+        let mut shell = shell();
+        shell.toggle_start_menu();
+        let exec = execs(&shell)[1].clone();
+
+        let at = row_centre(&shell, 1);
+        shell.handle_press(at.0, at.1, MouseButton::Right);
+        let drawn = format!("{:?}", shell.render_pin_menu().expect("no menu"));
+        assert!(drawn.contains("Pin to Start menu"), "wrong offer: {drawn}");
+        // The second row, taken with the keyboard.
+        for k in [Key::Down, Key::Down, Key::Enter] {
+            drop(shell.handle_hotkey(&key(k)));
+        }
+        assert_eq!(pins(&shell), [exec]);
+
+        // The pin is row 0 now, and its menu offers the reverse.
+        let at = row_centre(&shell, 0);
+        shell.handle_press(at.0, at.1, MouseButton::Right);
+        let drawn = format!("{:?}", shell.render_pin_menu().expect("no menu"));
+        assert!(
+            drawn.contains("Unpin from Start menu"),
+            "wrong offer: {drawn}"
+        );
+        for k in [Key::Down, Key::Down, Key::Enter] {
+            drop(shell.handle_hotkey(&key(k)));
+        }
+        assert!(pins(&shell).is_empty());
+    }
+
+    /// A program icon's own menu offers the start menu too; a folder's does
+    /// not, since a start-menu row starts a program.
+    #[test]
+    fn a_program_icons_menu_pins_it_to_the_start_menu() {
+        let mut shell = shell();
+        let entry = shell.start_menu_entries()[0];
+        let (exec, name) = (entry.executable_path.clone(), entry.name.clone());
+        let (program, _) = shell.icons.add_shortcut(
+            &name,
+            icons::IconType::Executable,
+            icons::IconAction::OpenPath(PathBuf::from(&exec)),
+        );
+        let (folder, _) = shell.icons.add_shortcut(
+            "Projects",
+            icons::IconType::Folder,
+            icons::IconAction::OpenPath(PathBuf::from("/home/user/projects")),
+        );
+        assert!(labels(&shell.icon_menu_items(program)).contains(&"Pin to Start menu".into()));
+        assert!(
+            !labels(&shell.icon_menu_items(folder))
+                .iter()
+                .any(|l| l.contains("Start menu"))
+        );
+
+        shell.menu_icon = Some(program);
+        assert_eq!(
+            shell.activate_icon_context_item(DesktopShell::MENU_ICON_START_PIN),
+            Some(ShellAction::Consumed)
+        );
+        assert_eq!(pins(&shell), [exec]);
+        assert!(labels(&shell.icon_menu_items(program)).contains(&"Unpin from Start menu".into()));
+    }
+
+    // ---- dropping on the start menu -------------------------------------------------------
+
+    /// A row from the launcher's list dropped on the pinned rows is pinned
+    /// where it was let go -- here after the first pin -- and the menu stays
+    /// up, since the user is arranging it.
+    #[test]
+    fn a_row_dropped_on_the_pinned_rows_is_pinned_where_it_was_let_go() {
+        let mut shell = shell();
+        let list = execs(&shell);
+        shell.pin_to_start(&list[5]);
+        shell.pin_to_start(&list[6]);
+        let _ = shell.take_start_menu_dirty();
+        shell.toggle_start_menu();
+
+        // Row 2 is the first of the launcher's list.
+        let (from, to) = (row_centre(&shell, 2), row_half(&shell, 0, true));
+        assert_eq!(carry(&mut shell, from, to), ShellAction::Consumed);
+
+        assert_eq!(
+            pins(&shell),
+            [list[5].clone(), list[0].clone(), list[6].clone()]
+        );
+        assert!(shell.start_menu_open, "the menu closed under the user");
+        assert!(shell.take_start_menu_dirty());
+    }
+
+    /// A pinned row dragged along the pins moves.
+    #[test]
+    fn a_pinned_row_dragged_along_the_pins_moves() {
+        let mut shell = shell();
+        let list = execs(&shell);
+        for exec in &list[5..8] {
+            shell.pin_to_start(exec);
+        }
+        shell.toggle_start_menu();
+
+        let (from, to) = (row_centre(&shell, 0), row_half(&shell, 2, true));
+        carry(&mut shell, from, to);
+        assert_eq!(
+            pins(&shell),
+            [list[6].clone(), list[7].clone(), list[5].clone()]
+        );
+
+        // Onto its own upper half, nowhere: it is where it already is.
+        let _ = shell.take_start_menu_dirty();
+        let (from, to) = (row_centre(&shell, 2), row_half(&shell, 2, false));
+        carry(&mut shell, from, (to.0 + 40.0, to.1));
+        assert_eq!(
+            pins(&shell),
+            [list[6].clone(), list[7].clone(), list[5].clone()]
+        );
+        assert!(!shell.take_start_menu_dirty(), "a no-op drop was saved");
+    }
+
+    /// Into the gap between two other pins: the one case where taking the
+    /// dragged pin out first changes which gap is meant. A move to the end
+    /// cannot show it -- clamped to the end, both readings agree.
+    #[test]
+    fn a_pin_dragged_into_a_middle_gap_lands_there() {
+        let mut shell = shell();
+        let list = execs(&shell);
+        for exec in &list[5..8] {
+            shell.pin_to_start(exec);
+        }
+        shell.toggle_start_menu();
+
+        // Row 0 onto the lower half of row 1: after the second pin, before
+        // the third.
+        let (from, to) = (row_centre(&shell, 0), row_half(&shell, 1, true));
+        carry(&mut shell, from, to);
+        assert_eq!(
+            pins(&shell),
+            [list[6].clone(), list[5].clone(), list[7].clone()]
+        );
+    }
+
+    /// The launcher's own list is not the user's to arrange: a row let go on
+    /// it does nothing.
+    #[test]
+    fn a_row_let_go_on_the_launchers_list_does_nothing() {
+        let mut shell = shell();
+        let list = execs(&shell);
+        shell.pin_to_start(&list[5]);
+        let _ = shell.take_start_menu_dirty();
+        shell.toggle_start_menu();
+
+        let (from, to) = (row_centre(&shell, 2), row_centre(&shell, 4));
+        assert_eq!(carry(&mut shell, from, to), ShellAction::Consumed);
+        assert_eq!(pins(&shell), [list[5].clone()]);
+        assert!(!shell.take_start_menu_dirty());
+        assert!(shell.start_menu_open);
+    }
+
+    /// Let go on the start button, a row is pinned after the pins already
+    /// there.
+    #[test]
+    fn a_row_dropped_on_the_start_button_is_pinned_after_the_rest() {
+        let mut shell = shell();
+        let list = execs(&shell);
+        shell.pin_to_start(&list[5]);
+        shell.toggle_start_menu();
+
+        let (from, to) = (row_centre(&shell, 3), start_button(&shell));
+        press(&mut shell, from);
+        move_to(&mut shell, (from.0, from.1 + 40.0));
+        move_to(&mut shell, to);
+        let label = format!("{:?}", shell.render_carry().expect("no label"));
+        assert!(label.contains("Pin to Start menu"), "wrong hint: {label}");
+        release(&mut shell, to);
+
+        // Row 3 was the launcher's third program, below the one pin.
+        assert_eq!(pins(&shell), [list[5].clone(), list[2].clone()]);
+        assert!(
+            shell.pinned_apps().is_empty(),
+            "the start button is not the taskbar's row"
+        );
+    }
+
+    /// A pinned taskbar button carried to the start button is pinned to the
+    /// start menu as well, and the taskbar is as it was.
+    #[test]
+    fn a_taskbar_pin_dropped_on_the_start_button_is_pinned_there_too() {
+        with_scratch_config("start-pin-from-bar", |_root| {
+            let mut shell = shell();
+            let list = execs(&shell);
+            shell.pin_app(&list[0], "a");
+            shell.pin_app(&list[1], "b");
+
+            let r = shell.taskbar_button_rect(1);
+            let from = (r.x + r.w / 2.0, r.y + r.h / 2.0);
+            press(&mut shell, from);
+            // Up off the bar first, so the row of pins is not crossed.
+            move_to(&mut shell, (from.0, 500.0));
+            let to = start_button(&shell);
+            move_to(&mut shell, to);
+            assert_eq!(release(&mut shell, to), ShellAction::Consumed);
+
+            assert_eq!(pins(&shell), [list[1].clone()]);
+            let bar: Vec<String> = shell
+                .pinned_apps()
+                .iter()
+                .map(|a| a.exec_path.clone())
+                .collect();
+            assert_eq!(bar, [list[0].clone(), list[1].clone()]);
+        });
+    }
+
+    /// A program icon let go on the start button is pinned to the start menu,
+    /// and stays on the desktop.
+    #[test]
+    fn a_program_icon_dropped_on_the_start_button_is_pinned_there() {
+        let mut shell = shell();
+        let entry = shell.start_menu_entries()[0];
+        let (exec, name) = (entry.executable_path.clone(), entry.name.clone());
+        let (id, _) = shell.icons.add_shortcut(
+            &name,
+            icons::IconType::Executable,
+            icons::IconAction::OpenPath(PathBuf::from(&exec)),
+        );
+        let was = {
+            let icon = shell.icons.get_icon(id).unwrap();
+            (icon.x, icon.y)
+        };
+        let grid = shell.icons.grid();
+        let from = (
+            was.0 as f32 + grid.cell_width() as f32 / 2.0,
+            was.1 as f32 + grid.cell_height() as f32 / 2.0,
+        );
+        let to = start_button(&shell);
+        press(&mut shell, from);
+        move_to(&mut shell, (from.0 + 40.0, from.1));
+        move_to(&mut shell, to);
+        let label = format!("{:?}", shell.render_carry().expect("no label"));
+        assert!(label.contains("Pin to Start menu"), "wrong hint: {label}");
+        assert_eq!(release(&mut shell, to), ShellAction::Consumed);
+
+        assert_eq!(pins(&shell), [exec]);
+        assert!(shell.pinned_apps().is_empty());
+        let icon = shell.icons.get_icon(id).unwrap();
+        assert_eq!((icon.x, icon.y), was, "the icon moved");
+    }
+}
+
+/// The icons keep clear of the taskbar as it is drawn, whatever the scale and
+/// whatever the display's size.
+#[cfg(test)]
+mod icon_area_tests {
+    #![allow(
+        clippy::unwrap_used,
+        clippy::expect_used,
+        clippy::indexing_slicing,
+        clippy::arithmetic_side_effects,
+        clippy::cast_precision_loss,
+        clippy::cast_possible_wrap
+    )]
+
+    use super::{AppearanceSettings, DesktopShell, icons};
+
+    /// Where an icon's far corner is, in screen pixels.
+    fn far_corner(shell: &DesktopShell, id: icons::IconId) -> (f32, f32) {
+        let icon = shell.icons.get_icon(id).unwrap();
+        let grid = shell.icons.grid();
+        (
+            (icon.x + grid.cell_width() as i32) as f32,
+            (icon.y + grid.cell_height() as i32) as f32,
+        )
+    }
+
+    /// The layer was told the taskbar was 40 pixels and was never told
+    /// otherwise: at 150% the bar is drawn 60 tall, and an icon placed
+    /// against the bottom edge sat under its top third.
+    #[test]
+    fn an_icon_stays_clear_of_the_taskbar_at_every_scale() {
+        for percent in [100u16, 125, 150, 200] {
+            let mut shell = DesktopShell::new(1920, 1080);
+            let mut appearance = AppearanceSettings::default();
+            appearance.scaling_percent = percent;
+            shell.set_appearance(appearance);
+            shell.icons.set_arrangement(icons::ArrangementMode::Free);
+            let id = shell.icons.add_icon(
+                "low",
+                icons::IconType::File,
+                icons::IconAction::Custom("low".into()),
+                600,
+                5000,
+            );
+            let bar = shell.taskbar_rect();
+            let (_, bottom) = far_corner(&shell, id);
+            assert!(
+                bottom <= bar.y,
+                "at {percent}% the icon reaches {bottom}, under a bar from {}",
+                bar.y
+            );
+            // Flush against it, not merely somewhere above.
+            assert!(
+                bar.y - bottom < 1.0,
+                "at {percent}% the icon stops short at {bottom}"
+            );
+        }
+    }
+
+    /// A display that shrinks takes the icons with it: every one ends up on
+    /// the desktop that is now there, clear of the bar.
+    #[test]
+    fn a_smaller_display_brings_the_icons_onto_it() {
+        let mut shell = DesktopShell::new(1920, 1080);
+        shell.icons.set_arrangement(icons::ArrangementMode::Free);
+        let id = shell.icons.add_icon(
+            "far",
+            icons::IconType::File,
+            icons::IconAction::Custom("far".into()),
+            1800,
+            950,
+        );
+        shell.set_screen_size(1280, 720);
+
+        let (right, bottom) = far_corner(&shell, id);
+        assert!(right <= 1280.0, "off the right edge at {right}");
+        assert!(
+            bottom <= shell.taskbar_rect().y,
+            "under the bar at {bottom}"
+        );
+    }
+}
+
+/// The start menu's search field -- `design.txt` line 721, "input field for
+/// finding and running apps".
+#[cfg(test)]
+mod start_search_tests {
+    #![allow(
+        clippy::unwrap_used,
+        clippy::expect_used,
+        clippy::panic,
+        clippy::indexing_slicing,
+        clippy::arithmetic_side_effects
+    )]
+
+    use super::{DesktopShell, Key, KeyEvent, Modifiers, StartRow};
+
+    fn shell() -> DesktopShell {
+        let mut shell = DesktopShell::new(1920, 1080);
+        shell.toggle_start_menu();
+        shell
+    }
+
+    fn press(key: Key) -> KeyEvent {
+        KeyEvent {
+            key,
+            pressed: true,
+            modifiers: Modifiers::NONE,
+            text: String::new(),
+        }
+    }
+
+    /// Type `text` into whatever has the keyboard, a character at a time.
+    fn type_text(shell: &mut DesktopShell, text: &str) {
+        for ch in text.chars() {
+            let key = KeyEvent {
+                key: Key::A,
+                pressed: true,
+                modifiers: Modifiers::NONE,
+                text: ch.to_string(),
+            };
+            drop(shell.handle_hotkey(&key));
+        }
+    }
+
+    fn names(shell: &DesktopShell) -> Vec<String> {
+        shell
+            .start_menu_entries()
+            .iter()
+            .map(|entry| entry.name.clone())
+            .collect()
+    }
+
+    /// A program's name, as the launcher knows it, to search for.
+    fn some_program(shell: &DesktopShell, row: usize) -> (String, String) {
+        let entry = shell.start_menu_entries()[row];
+        (entry.name.clone(), entry.executable_path.clone())
+    }
+
+    /// A pointer press and release at `at`, as a click on the menu is.
+    fn click_row(shell: &mut DesktopShell, at: (f32, f32)) -> [super::ShellAction; 2] {
+        use guitk::event::{MouseButton, MouseEvent, MouseEventKind};
+        let event = |kind| MouseEvent {
+            x: at.0,
+            y: at.1,
+            kind,
+        };
+        [
+            shell.handle_mouse(&event(MouseEventKind::Press(MouseButton::Left))),
+            shell.handle_mouse(&event(MouseEventKind::Release(MouseButton::Left))),
+        ]
+    }
+
+    /// The rows as `[Folder]` (`[Folder +]` when closed) for a folder,
+    /// `"  name"` for a program in one and `"name"` for one at the top level.
+    fn tree(shell: &DesktopShell) -> Vec<String> {
+        shell
+            .start_menu_rows()
+            .iter()
+            .map(|row| match row {
+                crate::StartRow::Folder { folder, open } => {
+                    format!("[{}{}]", folder.label(), if *open { "" } else { " +" })
+                }
+                crate::StartRow::Program { entry, in_folder } => {
+                    format!("{}{}", if *in_folder { "  " } else { "" }, entry.name)
+                }
+                crate::StartRow::Section(section) => format!("# {}", section.label()),
+            })
+            .collect()
+    }
+
+    /// **The programs are listed in folders by what they are** -- the
+    /// applications tree `design.txt` asks for -- each folder that has any
+    /// in the menu's order, its programs by name under it, and the pins
+    /// above them all, in their folders as well.
+    #[test]
+    fn the_programs_are_listed_in_folders_by_what_they_are() {
+        let mut shell = shell();
+        shell.pin_to_start(super::launcher::TERMINAL);
+        assert_eq!(
+            tree(&shell),
+            [
+                "# Pinned",
+                "Terminal",
+                "# All apps",
+                "[Accessories]",
+                "  Archive Manager",
+                "  Calculator",
+                "  File Explorer",
+                "  Screenshot",
+                "  Text Editor",
+                "[Development]",
+                "  Hex Editor",
+                "[Graphics]",
+                "  Image Viewer",
+                "[Multimedia]",
+                "  Music Player",
+                "  Video Player",
+                "[Office]",
+                "  Calendar",
+                "  PDF Viewer",
+                "[Settings]",
+                "  Settings",
+                "[System]",
+                "  Process Explorer",
+                "  System Information",
+                "  Terminal",
+            ]
+        );
+    }
+
+    // ---- the recently used section ----
+
+    /// **What was started heads "Recently used"**, most recent first, once
+    /// each and at most eight -- between the pins and the tree, as the Aero
+    /// reference lists it.
+    #[test]
+    fn what_was_started_heads_recently_used() {
+        let mut shell = shell();
+        shell.pin_to_start(super::launcher::TERMINAL);
+        let execs: Vec<String> = shell
+            .start_menu_entries()
+            .iter()
+            .map(|entry| entry.executable_path.clone())
+            .collect();
+        shell.note_started(&crate::hotkeys::Launch::program("/usr/bin/calculator"));
+        shell.note_started(&crate::hotkeys::Launch::program(super::launcher::TERMINAL));
+        assert_eq!(
+            shell.start_recent(),
+            [super::launcher::TERMINAL, "/usr/bin/calculator"],
+            "the newest is not first"
+        );
+        shell.note_started(&crate::hotkeys::Launch::program("/usr/bin/calculator"));
+        assert_eq!(
+            shell.start_recent(),
+            ["/usr/bin/calculator", super::launcher::TERMINAL],
+            "most recent first, and once each"
+        );
+        let rows = tree(&shell);
+        assert_eq!(
+            rows[..6],
+            [
+                "# Pinned",
+                "Terminal",
+                "# Recently used",
+                "Calculator",
+                "Terminal",
+                "# All apps"
+            ],
+            "{rows:?}"
+        );
+
+        for exec in &execs {
+            shell.note_started(&crate::hotkeys::Launch::program(exec.as_str()));
+        }
+        assert!(shell.start_recent().len() <= super::START_RECENT_MAX);
+    }
+
+    /// **Only an installed program is remembered** -- a command typed into
+    /// the Run box, a power action -- and one started in a terminal is
+    /// credited to itself, not to the terminal it runs in.
+    #[test]
+    fn only_installed_programs_are_remembered_and_in_their_own_name() {
+        let mut shell = shell();
+        shell.note_started(&crate::hotkeys::Launch::program("/usr/bin/no-such-program"));
+        assert!(
+            shell.start_recent().is_empty(),
+            "{:?}",
+            shell.start_recent()
+        );
+
+        let entry = desktopentry::DesktopEntry::parse(
+            b"[Desktop Entry]\nType=Application\nName=Top\nExec=htop\nTerminal=true\n",
+        )
+        .expect("parses");
+        let app = desktopentry::App::from_entry(&entry, "htop.desktop", None).expect("valid");
+        let top = super::launcher::AppEntry::from_desktop(app.clone()).expect("startable");
+        let launch = top.launch();
+        assert_eq!(
+            launch.program,
+            std::path::PathBuf::from(super::launcher::TERMINAL),
+            "the premise: it starts in a terminal"
+        );
+        shell.set_programs(known_with(vec![app]));
+        shell.note_started(&launch);
+        assert_eq!(shell.start_recent(), ["htop"], "credited to the terminal");
+    }
+
+    /// **The keyboard passes the headings over**, and keeps a section's
+    /// heading on screen when it reaches the section's first row.
+    #[test]
+    fn the_keyboard_passes_headings_over() {
+        // Open already: this module's `shell` opens the menu.
+        let mut shell = shell();
+        shell.pin_to_start(super::launcher::TERMINAL);
+        drop(shell.handle_hotkey(&press(Key::Down)));
+        assert_eq!(shell.start_selected, Some(1), "Down went to the heading");
+        drop(shell.handle_hotkey(&press(Key::Down)));
+        assert_eq!(
+            shell.start_selected,
+            Some(3),
+            "Down stopped on the \"All apps\" heading"
+        );
+        drop(shell.handle_hotkey(&press(Key::Up)));
+        drop(shell.handle_hotkey(&press(Key::Up)));
+        assert_eq!(
+            shell.start_selected,
+            Some(1),
+            "Up went past the first program"
+        );
+        assert_eq!(
+            shell.start_menu_scroll, 0,
+            "the first heading was scrolled away"
+        );
+    }
+
+    /// **Starting the program already at the top changes nothing**, and so
+    /// writes nothing -- the one started all day is not saved all day.
+    #[test]
+    fn starting_the_top_program_again_changes_nothing() {
+        let mut shell = shell();
+        let launch = crate::hotkeys::Launch::program(super::launcher::TERMINAL);
+        shell.note_started(&launch);
+        assert!(shell.take_start_menu_dirty());
+        shell.note_started(&launch);
+        assert!(!shell.take_start_menu_dirty(), "rewritten for no change");
+    }
+
+    /// **With nothing pinned or used there are no headings** -- "All apps"
+    /// alone would head nothing but the whole menu.
+    #[test]
+    fn with_nothing_pinned_or_used_there_are_no_headings() {
+        let shell = shell();
+        assert!(
+            !tree(&shell).iter().any(|row| row.starts_with('#')),
+            "{:?}",
+            tree(&shell)
+        );
+    }
+
+    /// **Up to a section's first row brings its heading into view**, so the
+    /// row is read with the name of the list it is in.
+    #[test]
+    fn up_to_a_sections_first_row_shows_its_heading() {
+        let mut shell = shell();
+        shell.pin_to_start(super::launcher::TERMINAL);
+        let rows = tree(&shell);
+        let heading = rows
+            .iter()
+            .position(|row| row == "# All apps")
+            .expect("the tree is headed");
+        // Scrolled so the heading is just off the top, on the row below it.
+        shell.start_menu_scroll = heading + 1;
+        shell.start_selected = Some(heading + 2);
+        drop(shell.handle_hotkey(&press(Key::Up)));
+        assert_eq!(shell.start_selected, Some(heading + 1));
+        assert_eq!(
+            shell.start_menu_scroll, heading,
+            "the heading stayed off the top of the list"
+        );
+    }
+
+    /// **"Recently used" survives a restart**, with the pins.
+    #[test]
+    fn recently_used_survives_a_restart() {
+        settingsfile::testing::with_scratch_config("start-recent-restart", |_root| {
+            let mut shell = shell();
+            shell.note_started(&crate::hotkeys::Launch::program(super::launcher::TERMINAL));
+            assert!(
+                shell.take_start_menu_dirty(),
+                "remembered and nobody told to save it"
+            );
+            shell.save_start_menu().expect("saved");
+
+            let mut restarted = DesktopShell::new(1920, 1080);
+            restarted.load_start_menu();
+            assert_eq!(restarted.start_recent(), [super::launcher::TERMINAL]);
+        });
+    }
+
+    /// **A folder's row closes it and opens it again**, by pointer: its
+    /// programs leave the list and come back, and nothing is started.
+    #[test]
+    fn a_folders_row_closes_and_opens_it() {
+        let mut shell = shell();
+        let at = |shell: &DesktopShell, label: &str| {
+            let row = tree(shell)
+                .iter()
+                .position(|r| r.starts_with(&format!("[{label}")))
+                .expect("the folder is listed");
+            let r = shell.start_menu_row_rect(row);
+            (r.x + r.w / 2.0, r.y + r.h / 2.0)
+        };
+        let point = at(&shell, "Accessories");
+        assert_eq!(
+            click_row(&mut shell, point),
+            [super::ShellAction::Consumed, super::ShellAction::Consumed]
+        );
+        assert!(tree(&shell).contains(&"[Accessories +]".to_owned()));
+        assert!(
+            !tree(&shell).contains(&"  Calculator".to_owned()),
+            "a closed folder still lists its programs"
+        );
+        assert!(shell.start_menu_open, "a folder's row closed the menu");
+
+        // Kept while the menu is closed and opened again.
+        shell.toggle_start_menu();
+        shell.toggle_start_menu();
+        assert!(tree(&shell).contains(&"[Accessories +]".to_owned()));
+
+        let point = at(&shell, "Accessories");
+        click_row(&mut shell, point);
+        assert!(tree(&shell).contains(&"  Calculator".to_owned()));
+    }
+
+    /// The keyboard opens and closes a folder: Enter toggles the one it is
+    /// on, Left closes it and Right opens it -- while elsewhere Left and
+    /// Right still move through what is typed.
+    #[test]
+    fn the_keyboard_opens_and_closes_folders() {
+        let mut shell = shell();
+        drop(shell.handle_hotkey(&press(Key::Down)));
+        assert_eq!(
+            tree(&shell)[0],
+            "[Accessories]",
+            "the premise: row 0 is a folder"
+        );
+        drop(shell.handle_hotkey(&press(Key::Left)));
+        assert_eq!(tree(&shell)[0], "[Accessories +]", "Left did not close it");
+        drop(shell.handle_hotkey(&press(Key::Left)));
+        assert_eq!(
+            tree(&shell)[0],
+            "[Accessories +]",
+            "Left opened a closed one"
+        );
+        drop(shell.handle_hotkey(&press(Key::Right)));
+        assert_eq!(tree(&shell)[0], "[Accessories]", "Right did not open it");
+        let outcome = shell.handle_hotkey(&press(Key::Enter));
+        assert!(
+            outcome.launches.is_empty(),
+            "Enter on a folder started something"
+        );
+        assert_eq!(
+            tree(&shell)[0],
+            "[Accessories +]",
+            "Enter did not toggle it"
+        );
+        assert_eq!(
+            shell.start_selected,
+            Some(0),
+            "the keyboard left the folder"
+        );
+    }
+
+    /// Not on a folder, Left and Right belong to the search field.
+    #[test]
+    fn off_a_folder_the_arrows_move_through_what_is_typed() {
+        let mut shell = shell();
+        type_text(&mut shell, "ab");
+        drop(shell.handle_hotkey(&press(Key::Left)));
+        assert_eq!(shell.start_query.text(), "ab");
+        assert!(
+            shell.start_query.cursor().byte() < 2,
+            "Left did not move the caret in the search field"
+        );
+    }
+
+    /// **A folder closed by the pointer takes the keyboard's row with it**:
+    /// the rows below it move up, and a keyboard row left where it was would
+    /// now be on some other program -- Enter would start that one.
+    #[test]
+    fn a_folder_closed_by_the_pointer_takes_the_keyboards_row_with_it() {
+        let mut shell = shell();
+        let below = shell.start_row_of_program(5).expect("a sixth program");
+        for _ in 0..=below {
+            drop(shell.handle_hotkey(&press(Key::Down)));
+        }
+        assert_eq!(shell.start_selected, Some(below), "the premise");
+        let first = shell.start_menu_row_rect(0);
+        click_row(
+            &mut shell,
+            (first.x + first.w / 2.0, first.y + first.h / 2.0),
+        );
+        assert_eq!(tree(&shell)[0], "[Accessories +]", "the premise: it closed");
+        assert_eq!(
+            shell.start_selected,
+            Some(0),
+            "the keyboard's row was left on whatever moved into it"
+        );
+    }
+
+    /// A right-click on a folder's row offers nothing: there is no program in
+    /// it to pin or put on the desktop.
+    #[test]
+    fn a_folder_has_no_pin_menu() {
+        use guitk::event::{MouseButton, MouseEvent, MouseEventKind};
+        let mut shell = shell();
+        let row = shell.start_menu_row_rect(0);
+        shell.handle_mouse(&MouseEvent {
+            x: row.x + row.w / 2.0,
+            y: row.y + row.h / 2.0,
+            kind: MouseEventKind::Press(MouseButton::Right),
+        });
+        assert!(
+            shell.render_pin_menu().is_none(),
+            "a folder opened a pin menu"
+        );
+    }
+
+    const SKETCHPAD_WITH_ACTIONS: &str = "[Desktop Entry]\nType=Application\nName=Sketchpad\nExec=sketch %U\nCategories=Graphics;\nActions=new;dbus;empty;\n[Desktop Action new]\nName=New Drawing\nExec=sketch --new\n[Desktop Action dbus]\nName=Only by D-Bus\n[Desktop Action empty]\nName=Blank Canvas\nExec=sketch --blank\n";
+
+    /// The labels of the pin menu, top to bottom.
+    fn pin_menu_labels(shell: &DesktopShell) -> Vec<String> {
+        shell
+            .render_pin_menu()
+            .expect("the pin menu is open")
+            .commands
+            .iter()
+            .filter_map(|c| match c {
+                guitk::render::RenderCommand::Text { text, .. } => Some(text.clone()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// The row the program named `name` is on.
+    fn row_named(shell: &DesktopShell, name: &str) -> usize {
+        shell
+            .start_menu_rows()
+            .iter()
+            .position(|r| matches!(r, crate::StartRow::Program { entry, .. } if entry.name == name))
+            .expect("the program is listed")
+    }
+
+    /// **A program's right-click menu starts with its jump list** -- the
+    /// actions its desktop entry offers, above what can be done with it --
+    /// leaving out an action only D-Bus could start.
+    #[test]
+    fn a_programs_menu_starts_with_its_jump_list() {
+        let mut shell = shell();
+        shell.set_programs(known_with(vec![installed(SKETCHPAD_WITH_ACTIONS)]));
+        let row = row_named(&shell, "Sketchpad");
+        shell.open_pin_menu(super::PinTarget::StartMenuRow(row), 100.0, 100.0);
+        let labels = pin_menu_labels(&shell);
+        assert_eq!(labels[..2], ["New Drawing", "Blank Canvas"], "{labels:?}");
+        assert!(!labels.contains(&"Only by D-Bus".to_owned()), "{labels:?}");
+        assert!(labels.contains(&"Pin to taskbar".to_owned()), "{labels:?}");
+        // A program with no actions has the menu it had.
+        let terminal = row_named(&shell, "Terminal");
+        shell.pin_menu = None;
+        shell.open_pin_menu(super::PinTarget::StartMenuRow(terminal), 100.0, 100.0);
+        assert_eq!(pin_menu_labels(&shell)[0], "Pin to taskbar");
+    }
+
+    /// **A row of the jump list starts the program as that action says**, and
+    /// the start menu gets out of the way -- by click and by key.
+    #[test]
+    fn a_jump_list_row_starts_its_action() {
+        let mut shell = shell();
+        shell.set_programs(known_with(vec![installed(SKETCHPAD_WITH_ACTIONS)]));
+        let row = row_named(&shell, "Sketchpad");
+        let blank = super::DesktopShell::MENU_JUMP_LIST_BASE + 2;
+        assert_eq!(
+            shell.activate_pin_menu_item(blank, super::PinTarget::StartMenuRow(row)),
+            super::ShellAction::Launch(launch("sketch", &["--blank"]))
+        );
+        assert!(
+            !shell.start_menu_open,
+            "the menu stayed over the new window"
+        );
+
+        // By key: the first row, chosen with Down and Enter.
+        let mut shell = super::DesktopShell::new(1920, 1080);
+        shell.toggle_start_menu();
+        shell.set_programs(known_with(vec![installed(SKETCHPAD_WITH_ACTIONS)]));
+        let row = row_named(&shell, "Sketchpad");
+        shell.open_pin_menu(super::PinTarget::StartMenuRow(row), 100.0, 100.0);
+        drop(shell.handle_hotkey(&press(Key::Down)));
+        let outcome = shell.handle_hotkey(&press(Key::Enter));
+        assert_eq!(outcome.launches, [launch("sketch", &["--new"])]);
+    }
+
+    /// Where the pin menu draws `label`: its text's top-left corner.
+    fn pin_menu_text_at(shell: &DesktopShell, label: &str) -> (f32, f32) {
+        shell
+            .render_pin_menu()
+            .expect("the pin menu is open")
+            .commands
+            .iter()
+            .find_map(|c| match c {
+                guitk::render::RenderCommand::Text { text, x, y, .. } if text == label => {
+                    Some((*x, *y))
+                }
+                _ => None,
+            })
+            .expect("the label is drawn")
+    }
+
+    /// **A click on a row of the jump list starts it**, the pointer's way to
+    /// the same thing the keyboard reaches -- and the jump list is set apart
+    /// from the rows below it by more than its own rows are from each other.
+    #[test]
+    fn a_click_on_the_jump_list_starts_its_action() {
+        use guitk::event::{MouseButton, MouseEvent, MouseEventKind};
+        let mut shell = shell();
+        shell.set_programs(known_with(vec![installed(SKETCHPAD_WITH_ACTIONS)]));
+        let row = row_named(&shell, "Sketchpad");
+        shell.open_pin_menu(super::PinTarget::StartMenuRow(row), 100.0, 100.0);
+
+        let first = pin_menu_text_at(&shell, "New Drawing");
+        let second = pin_menu_text_at(&shell, "Blank Canvas");
+        let pin = pin_menu_text_at(&shell, "Pin to taskbar");
+        assert!(
+            pin.1 - second.1 > (second.1 - first.1) + 1.0,
+            "no separator between the jump list and the rest: {first:?} {second:?} {pin:?}"
+        );
+
+        let at = (second.0 + 2.0, second.1 + 4.0);
+        let pressed = shell.handle_mouse(&MouseEvent {
+            x: at.0,
+            y: at.1,
+            kind: MouseEventKind::Press(MouseButton::Left),
+        });
+        assert_eq!(
+            pressed,
+            super::ShellAction::Launch(launch("sketch", &["--blank"]))
+        );
+        assert!(!shell.start_menu_open);
+    }
+
+    /// A pinned taskbar button's menu has the jump list too.
+    #[test]
+    fn a_pinned_buttons_menu_has_the_jump_list() {
+        // Pinning saves the taskbar's pins: a directory of the test's own.
+        settingsfile::testing::with_scratch_config("shell-jump-list", |_root| {
+            let mut shell = shell();
+            shell.set_programs(known_with(vec![installed(SKETCHPAD_WITH_ACTIONS)]));
+            shell.pin_app("sketch", "Sketchpad");
+            let index = shell
+                .pinned_apps()
+                .iter()
+                .position(|app| app.exec_path == "sketch")
+                .expect("pinned");
+            shell.open_pin_menu(super::PinTarget::Pinned(index), 100.0, 100.0);
+            assert_eq!(pin_menu_labels(&shell)[0], "New Drawing");
+        });
+    }
+
+    /// **A program in a folder is set in under the folder's row**, so the
+    /// tree reads as one: the pinned Calculator at the top and the Calculator
+    /// in Accessories are the same picture, the second drawn further in.
+    #[test]
+    fn a_program_in_a_folder_is_set_in_under_it() {
+        let mut shell = shell();
+        shell.pin_to_start("/usr/bin/calculator");
+        let column = shell.start_menu_left_rect();
+        let tree = shell.render_start_menu().expect("open");
+        // The programs column only: the places column draws pictures of its
+        // own, some of the same programs.
+        let xs: Vec<f32> = tree
+            .commands
+            .iter()
+            .filter_map(|cmd| match cmd {
+                guitk::render::RenderCommand::Image { image_id, x, .. }
+                    if *x < column.x + column.w =>
+                {
+                    shell
+                        .icon_request(*image_id)
+                        .filter(|r| r.name == "accessories-calculator")
+                        .map(|_| *x)
+                }
+                _ => None,
+            })
+            .collect();
+        assert_eq!(xs.len(), 2, "pinned and in its folder: {xs:?}");
+        assert!(
+            (xs[1] - xs[0] - shell.scale(super::START_FOLDER_INDENT)).abs() < 0.5,
+            "the Calculator in Accessories is not set in by the indent: {xs:?}"
+        );
+    }
+
+    /// A program's picture falls back to the generic program's, for an
+    /// entry naming an icon the theme does not draw.
+    #[test]
+    fn a_programs_picture_falls_back_to_the_generic_program() {
+        let shell = shell();
+        let tree = shell.render_start_menu().expect("open");
+        let calculator = tree
+            .commands
+            .iter()
+            .filter_map(|cmd| match cmd {
+                guitk::render::RenderCommand::Image { image_id, .. } => {
+                    shell.icon_request(*image_id)
+                }
+                _ => None,
+            })
+            .find(|r| r.name == "accessories-calculator")
+            .expect("the calculator's picture");
+        assert_eq!(
+            calculator.fallback,
+            Some(super::launcher::GENERIC_PROGRAM_ICON)
+        );
+    }
+
+    /// A search lists what it finds and no folders; clearing it brings the
+    /// tree back.
+    #[test]
+    fn a_search_lists_no_folders() {
+        let mut shell = shell();
+        type_text(&mut shell, "Calc");
+        assert!(
+            tree(&shell)
+                .iter()
+                .all(|r| !r.starts_with('[') && !r.starts_with(' ')),
+            "{:?}",
+            tree(&shell)
+        );
+        drop(shell.handle_hotkey(&press(Key::Escape)));
+        assert!(tree(&shell).iter().any(|r| r.starts_with('[')));
+    }
+
+    /// **Every row draws its picture**: a program's own (its entry's, or the
+    /// generic program when there is none), a folder's chevron and its
+    /// picture.
+    #[test]
+    fn every_row_draws_its_picture() {
+        let shell = shell();
+        let tree = shell.render_start_menu().expect("open");
+        let names: Vec<String> = tree
+            .commands
+            .iter()
+            .filter_map(|cmd| match cmd {
+                guitk::render::RenderCommand::Image { image_id, .. } => {
+                    shell.icon_request(*image_id)
+                }
+                _ => None,
+            })
+            .map(|request| request.name.into_owned())
+            .collect();
+        for wanted in [
+            "pan-down",
+            "applications-accessories",
+            "accessories-calculator",
+            "utilities-terminal",
+        ] {
+            assert!(
+                names.iter().any(|n| n == wanted),
+                "no {wanted} in {names:?}"
+            );
+        }
+        let folder = tree
+            .commands
+            .iter()
+            .filter_map(|cmd| match cmd {
+                guitk::render::RenderCommand::Image { image_id, .. } => {
+                    shell.icon_request(*image_id)
+                }
+                _ => None,
+            })
+            .find(|r| r.name == "applications-accessories")
+            .expect("the folder's picture");
+        assert_eq!(
+            folder.fallback,
+            Some("folder"),
+            "a folder falls back to a folder"
+        );
+    }
+
+    /// Typing with the menu open searches it: the list becomes what the
+    /// search finds, the best match first.
+    #[test]
+    fn typing_in_the_start_menu_searches_it() {
+        let mut shell = shell();
+        let everything = names(&shell).len();
+        let (name, _) = some_program(&shell, 3);
+
+        type_text(&mut shell, &name);
+        let found = names(&shell);
+        assert!(found.len() < everything, "the search filtered nothing");
+        assert_eq!(found[0], name, "the exact name is not the best match");
+        assert_eq!(shell.start_query.text(), name);
+    }
+
+    /// An installed program's entry, under the desktop file ID
+    /// `fixture.desktop`.
+    fn installed(text: &str) -> desktopentry::App {
+        installed_as(text, "fixture.desktop")
+    }
+
+    /// An installed program's entry, under the desktop file ID `id`.
+    pub(super) fn installed_as(text: &str, id: &str) -> desktopentry::App {
+        let entry = desktopentry::DesktopEntry::parse(text.as_bytes()).expect("parses");
+        desktopentry::App::from_entry(&entry, id, None).expect("valid")
+    }
+
+    /// The programs a machine with `installed` has, as the session lists
+    /// them: `installed`, then SlateOS's own whose IDs none of them has.
+    pub(super) fn known_with(installed: Vec<desktopentry::App>) -> Vec<super::launcher::AppEntry> {
+        let ids: Vec<String> = installed.iter().map(|app| app.id.clone()).collect();
+        programs::with_built_in(installed, |id| ids.iter().any(|i| i == id), None)
+            .into_iter()
+            .filter_map(super::launcher::AppEntry::from_desktop)
+            .collect()
+    }
+
+    fn launch(program: &str, args: &[&str]) -> crate::hotkeys::Launch {
+        crate::hotkeys::Launch {
+            program: std::path::PathBuf::from(program),
+            args: args.iter().map(std::ffi::OsString::from).collect(),
+        }
+    }
+
+    /// **An installed program is in the menu under its own name, and starts
+    /// with the arguments its entry gives** -- not as a bare program, which
+    /// is all the shell's own list could say.
+    #[test]
+    fn an_installed_program_starts_as_its_entry_says() {
+        let mut shell = shell();
+        shell.set_programs(known_with(vec![installed(
+            "[Desktop Entry]\nType=Application\nName=Sketchpad\nExec=sketch --new \"blank page\" %U\nIcon=applications-graphics\nCategories=Graphics;\n",
+        )]));
+        assert!(names(&shell).contains(&"Sketchpad".to_owned()));
+        type_text(&mut shell, "Sketchpad");
+        let outcome = shell.handle_hotkey(&press(Key::Enter));
+        assert_eq!(
+            outcome.launches,
+            [launch("sketch", &["--new", "blank page"])],
+            "not started as its entry says"
+        );
+    }
+
+    /// **An installed entry with SlateOS's entry's ID replaces it**; one
+    /// under another ID -- even one starting a program of the same name --
+    /// sits beside it; and SlateOS's own stay for the IDs nothing installed
+    /// has (design-decisions §1445).
+    #[test]
+    fn an_installed_program_replaces_the_shells_own_entry_for_it() {
+        let mut shell = shell();
+        let before = names(&shell);
+        assert!(before.contains(&"Calculator".to_owned()), "the premise");
+        shell.set_programs(known_with(vec![
+            installed_as(
+                "[Desktop Entry]\nType=Application\nName=Abacus\nExec=/opt/bin/calculator\n",
+                "org.slateos.Calculator.desktop",
+            ),
+            installed_as(
+                "[Desktop Entry]\nType=Application\nName=Other Calculator\nExec=calculator --scientific\n",
+                "org.example.Calc.desktop",
+            ),
+        ]));
+        let after = names(&shell);
+        assert!(after.contains(&"Abacus".to_owned()));
+        assert!(
+            !after.contains(&"Calculator".to_owned()),
+            "the shell's own entry stayed beside the installed one: {after:?}"
+        );
+        assert!(
+            after.contains(&"Other Calculator".to_owned()),
+            "an entry under another ID replaced nothing and is listed: {after:?}"
+        );
+        assert!(
+            after.contains(&"Terminal".to_owned()),
+            "an unnamed own entry went"
+        );
+        let listed: Vec<String> = shell.apps.iter().map(|a| a.name.clone()).collect();
+        let mut sorted = listed.clone();
+        sorted.sort_by_key(|n| n.to_lowercase());
+        assert_eq!(listed, sorted, "the list is not in name order");
+    }
+
+    /// **A program that runs in a terminal is started in one**, as the
+    /// terminal's `-e`.
+    #[test]
+    fn a_terminal_program_is_started_in_the_terminal() {
+        let mut shell = shell();
+        shell.set_programs(known_with(vec![installed(
+            "[Desktop Entry]\nType=Application\nName=Top\nExec=htop --tree\nTerminal=true\n",
+        )]));
+        assert_eq!(
+            shell.launch_for("htop"),
+            launch(super::launcher::TERMINAL, &["-e", "htop", "--tree"])
+        );
+    }
+
+    /// **A pin shows the installed entry's name**, looked up again when the
+    /// installed programs change; a program nothing knows is started bare.
+    #[test]
+    fn a_pin_follows_the_installed_entry() {
+        let mut shell = shell();
+        shell.pin_to_start("/opt/bin/paint");
+        assert_eq!(
+            shell.start_pins()[0].name,
+            "paint",
+            "named for its file, unknown"
+        );
+        shell.set_programs(known_with(vec![installed(
+            "[Desktop Entry]\nType=Application\nName=Paint Studio\nExec=/opt/bin/paint --studio\n",
+        )]));
+        assert_eq!(shell.start_pins()[0].name, "Paint Studio");
+        assert_eq!(
+            shell.launch_for("/opt/bin/paint"),
+            launch("/opt/bin/paint", &["--studio"])
+        );
+        assert_eq!(
+            shell.launch_for("/opt/bin/unknown"),
+            launch("/opt/bin/unknown", &[])
+        );
+    }
+
+    /// A program's launch count survives the list being read again.
+    #[test]
+    fn launch_counts_survive_a_new_list() {
+        let mut shell = shell();
+        let terminal = super::launcher::TERMINAL;
+        if let Some(app) = shell
+            .apps
+            .iter_mut()
+            .find(|a| a.executable_path == terminal)
+        {
+            app.launch_count = 7;
+        }
+        shell.set_programs(known_with(Vec::new()));
+        let count = shell
+            .apps
+            .iter()
+            .find(|a| a.executable_path == terminal)
+            .map(|a| a.launch_count);
+        assert_eq!(count, Some(7));
+    }
+
+    /// Enter starts the best match, and closes the menu.
+    #[test]
+    fn enter_starts_the_best_match() {
+        let mut shell = shell();
+        let (name, exec) = some_program(&shell, 3);
+        type_text(&mut shell, &name);
+
+        let outcome = shell.handle_hotkey(&press(Key::Enter));
+        assert_eq!(outcome.launches.len(), 1);
+        assert_eq!(outcome.launches[0].program.to_string_lossy(), exec);
+        assert!(!shell.start_menu_open);
+    }
+
+    /// The arrows walk the rows -- the folders' among them -- and Enter
+    /// starts the program the keyboard is on.
+    #[test]
+    fn the_arrows_choose_a_row_and_enter_starts_it() {
+        let mut shell = shell();
+        let (_, second) = some_program(&shell, 1);
+        let target = shell.start_row_of_program(1).expect("a second program");
+        for _ in 0..=target {
+            drop(shell.handle_hotkey(&press(Key::Down)));
+        }
+        assert_eq!(shell.start_selected, Some(target));
+        drop(shell.handle_hotkey(&press(Key::Up)));
+        drop(shell.handle_hotkey(&press(Key::Down)));
+
+        let outcome = shell.handle_hotkey(&press(Key::Enter));
+        assert_eq!(outcome.launches[0].program.to_string_lossy(), second);
+    }
+
+    /// Walking past the last visible row scrolls the list with it, so the
+    /// keyboard's row is never off the bottom of the menu.
+    #[test]
+    fn the_keyboards_row_stays_on_screen() {
+        let mut shell = shell();
+        // Programs of its own, so that the list is longer than the menu however
+        // many the built-in database happens to hold.
+        for n in 0..12 {
+            shell.apps.push(super::launcher::AppEntry {
+                name: format!("Program {n:02}"),
+                description: String::new(),
+                executable_path: format!("/opt/fixture/program-{n:02}"),
+                keywords: Vec::new(),
+                category: super::launcher::Category::Application,
+                launch_count: 0,
+                ..Default::default()
+            });
+        }
+        let rows = shell.start_menu_visible_rows();
+        assert!(
+            shell.start_menu_entries().len() > rows,
+            "the fixture needs a scroll"
+        );
+        for _ in 0..=rows {
+            drop(shell.handle_hotkey(&press(Key::Down)));
+        }
+        let selected = shell.start_selected.unwrap();
+        assert!(
+            selected >= shell.start_menu_scroll && selected < shell.start_menu_scroll + rows,
+            "row {selected} is off screen at scroll {}",
+            shell.start_menu_scroll
+        );
+    }
+
+    /// Escape empties the search first, and closes the menu second.
+    #[test]
+    fn escape_empties_the_search_then_closes_the_menu() {
+        let mut shell = shell();
+        let everything = names(&shell);
+        type_text(&mut shell, "zz");
+        drop(shell.handle_hotkey(&press(Key::Escape)));
+        assert!(shell.start_menu_open, "the first Escape closed the menu");
+        assert_eq!(names(&shell), everything);
+        drop(shell.handle_hotkey(&press(Key::Escape)));
+        assert!(!shell.start_menu_open);
+    }
+
+    /// Nothing listed matches: Enter runs what was typed, as the Run box
+    /// would -- the field is for finding *and running*.
+    #[test]
+    fn with_nothing_found_enter_runs_what_was_typed() {
+        let mut shell = shell();
+        type_text(&mut shell, "frobnicate --fast \"two words\"");
+        assert!(names(&shell).is_empty(), "the fixture found something");
+
+        let outcome = shell.handle_hotkey(&press(Key::Enter));
+        assert_eq!(outcome.launches.len(), 1);
+        let launch = &outcome.launches[0];
+        assert_eq!(launch.program.to_string_lossy(), "frobnicate");
+        let args: Vec<String> = launch
+            .args
+            .iter()
+            .map(|a| a.to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(args, ["--fast", "two words"]);
+        assert!(!shell.start_menu_open);
+    }
+
+    /// A quote left open is not guessed at: nothing runs, and the menu stays
+    /// up with the line as it was.
+    #[test]
+    fn an_unclosed_quote_runs_nothing() {
+        let mut shell = shell();
+        type_text(&mut shell, "frobnicate \"half");
+        let outcome = shell.handle_hotkey(&press(Key::Enter));
+        assert!(outcome.launches.is_empty());
+        assert!(shell.start_menu_open);
+    }
+
+    /// Reopened, the menu's search is empty again.
+    #[test]
+    fn the_menu_reopens_with_an_empty_search() {
+        let mut shell = shell();
+        type_text(&mut shell, "zz");
+        shell.toggle_start_menu();
+        shell.toggle_start_menu();
+        assert!(shell.start_query.text().is_empty());
+        assert_eq!(shell.start_selected, None);
+    }
+
+    /// A pinned program is found once, not once as a pin and again in the
+    /// list below -- and while searching, the rows are results, not pins: no
+    /// line is drawn and nothing can be dropped among them.
+    #[test]
+    fn a_search_lists_a_pinned_program_once() {
+        let mut shell = shell();
+        let (name, exec) = some_program(&shell, 3);
+        shell.pin_to_start(&exec);
+        type_text(&mut shell, &name);
+
+        let hits = shell
+            .start_menu_entries()
+            .iter()
+            .filter(|entry| entry.executable_path == exec)
+            .count();
+        assert_eq!(hits, 1);
+        assert_eq!(shell.start_pins_listed(), 0);
+    }
+
+    /// A chord with Super is still the desktop's with the menu up: the Super
+    /// key that opened it closes it, and types nothing into the search.
+    #[test]
+    fn the_super_key_closes_the_menu_and_types_nothing() {
+        let mut shell = shell();
+        let key = KeyEvent {
+            key: Key::LeftSuper,
+            pressed: true,
+            modifiers: Modifiers::NONE,
+            text: String::new(),
+        };
+        drop(shell.handle_hotkey(&key));
+        assert!(!shell.start_menu_open);
+        assert!(shell.start_query.text().is_empty());
+    }
+
+    /// The rows that can be chosen, in order: every row but the headings.
+    fn choosable_rows(shell: &DesktopShell) -> Vec<usize> {
+        shell
+            .start_menu_rows()
+            .iter()
+            .enumerate()
+            .filter(|(_, row)| !matches!(row, StartRow::Section(_)))
+            .map(|(i, _)| i)
+            .collect()
+    }
+
+    /// With the search empty, Home and End reach the first and last programs
+    /// -- past the headings -- and the page keys move a windowful, keeping
+    /// the row on screen (`design-decisions.md` §1416).
+    #[test]
+    fn home_end_and_the_page_keys_walk_the_programs() {
+        let mut shell = shell();
+        let rows = choosable_rows(&shell);
+        let (first, last) = (rows[0], *rows.last().unwrap());
+        drop(shell.handle_hotkey(&press(Key::End)));
+        assert_eq!(shell.start_selected, Some(last));
+        drop(shell.handle_hotkey(&press(Key::Home)));
+        assert_eq!(shell.start_selected, Some(first));
+        drop(shell.handle_hotkey(&press(Key::PageDown)));
+        let paged = shell.start_selected.expect("Page Down picked a row");
+        let visible = shell.start_menu_visible_rows();
+        // A windowful on -- or the last program, in a list shorter than
+        // that -- never just the next row.
+        assert!(
+            paged == last || paged >= first + visible,
+            "Page Down moved from row {first} to {paged}, not a page of {visible}"
+        );
+        assert!(
+            (shell.start_menu_scroll..shell.start_menu_scroll + visible).contains(&paged),
+            "the row Page Down reached is off the list"
+        );
+        drop(shell.handle_hotkey(&press(Key::PageUp)));
+        assert_eq!(shell.start_selected, Some(first));
+    }
+
+    /// With something typed, Home and End move the caret and leave the list
+    /// alone; with Ctrl they are the list's again.
+    #[test]
+    fn home_and_end_are_the_search_fields_once_it_has_text() {
+        let mut shell = shell();
+        drop(shell.handle_hotkey(&KeyEvent {
+            key: Key::E,
+            pressed: true,
+            modifiers: Modifiers::NONE,
+            text: "e".to_string(),
+        }));
+        assert!(!shell.start_query.text().is_empty(), "precondition: typed");
+        let before = shell.start_selected;
+        drop(shell.handle_hotkey(&press(Key::Home)));
+        assert_eq!(shell.start_selected, before, "Home moved the list");
+        assert_eq!(
+            shell.start_query.cursor().byte(),
+            0,
+            "Home did not move the caret"
+        );
+        let rows = choosable_rows(&shell);
+        let ctrl_end = KeyEvent {
+            key: Key::End,
+            pressed: true,
+            modifiers: Modifiers {
+                ctrl: true,
+                ..Modifiers::NONE
+            },
+            text: String::new(),
+        };
+        drop(shell.handle_hotkey(&ctrl_end));
+        assert_eq!(shell.start_selected, rows.last().copied());
+    }
+
+    /// Super+E with the menu up -- which is how it arrives, since the Super key
+    /// opens the menu as it goes down -- puts the menu away and opens the file
+    /// manager, and types no "e".
+    ///
+    /// Super+E is a chord the user binds since §1416; it is the one used here
+    /// because it *starts* something, and so does not close the menu itself
+    /// the way Super+R's run box does -- the closing has to be the menu's.
+    #[test]
+    fn a_super_chord_closes_the_menu_and_does_what_it_is_bound_to() {
+        let mut shell = shell();
+        crate::hotkeys::optional_chords::bind(&mut shell.hotkeys);
+        let key = KeyEvent {
+            key: Key::E,
+            pressed: true,
+            modifiers: Modifiers {
+                super_key: true,
+                ..Modifiers::NONE
+            },
+            text: "e".to_string(),
+        };
+        let outcome = shell.handle_hotkey(&key);
+        assert!(
+            !shell.start_menu_open,
+            "the menu stayed over the file manager"
+        );
+        assert!(
+            shell.start_query.text().is_empty(),
+            "the chord typed into the search"
+        );
+        assert_eq!(
+            outcome.launches[0].program,
+            std::path::PathBuf::from(crate::launcher::FILE_MANAGER)
+        );
+    }
+
+    /// The field is drawn where the title was, with the hint while empty.
+    #[test]
+    fn the_empty_field_says_what_typing_does() {
+        let shell = shell();
+        let drawn = format!("{:?}", shell.render_start_menu().expect("the menu is open"));
+        assert!(drawn.contains("Search programs"), "no hint: {drawn}");
+        assert!(
+            !drawn.contains("\"Applications\""),
+            "the old title is still drawn"
+        );
     }
 }

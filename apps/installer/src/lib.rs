@@ -899,6 +899,59 @@ pub struct NetworkConfig {
 }
 
 // ============================================================================
+// Bootloader configuration
+// ============================================================================
+
+/// Where Limine goes on the EFI system partition when another system's GRUB
+/// chainloads it: a directory of this system's own, beside the firmware's
+/// fallback path (`/EFI/BOOT/BOOTX64.EFI`) rather than over it -- another
+/// system on the machine may be using that one. Limine looks for its
+/// `limine.conf` beside itself first and then at the partition's usual
+/// places, `/limine.conf` among them (Limine's `CONFIG.md`), so it finds the
+/// same configuration from here as from the fallback path.
+pub const LIMINE_EFI_PATH: &str = "/EFI/slateos/limine.efi";
+
+/// The GRUB menu entry's title unless the configuration names another.
+pub const GRUB_TITLE: &str = "Slate OS";
+
+/// Which bootloader starts the installed system.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub enum BootloaderConfig {
+    /// Limine on the EFI system partition: the system's own, and the default.
+    #[default]
+    Limine,
+    /// An entry in the menu of a GRUB already on the machine -- another
+    /// system's -- that chainloads Limine from the EFI system partition.
+    ///
+    /// Chainloading is the one way GRUB can start this system: the kernel is
+    /// booted through the Limine protocol and carries no multiboot2 header
+    /// for GRUB's `multiboot2` to load it by.
+    Grub {
+        /// The menu entry's title.
+        title: String,
+    },
+}
+
+/// The GRUB entry that starts this system: chainloading Limine from the
+/// partition whose filesystem UUID is `esp_uuid`.
+///
+/// One place, read by the configuration's validation (with a stand-in UUID),
+/// the plan's description, and the command that adds the entry to a running
+/// system's GRUB.
+#[must_use]
+pub fn grub_entry(title: &str, esp_uuid: &str) -> grub::GrubEntry {
+    grub::GrubEntry {
+        title: title.to_string(),
+        kernel_path: LIMINE_EFI_PATH.to_string(),
+        root_partition: String::new(),
+        uuid: esp_uuid.to_string(),
+        initrd_path: None,
+        kernel_params: Vec::new(),
+        entry_type: grub::GrubEntryType::Chainload,
+    }
+}
+
+// ============================================================================
 // Top-level install configuration
 // ============================================================================
 
@@ -927,6 +980,8 @@ pub struct InstallConfig {
     pub post_install: Vec<String>,
     /// Whether to automatically reboot after installation.
     pub auto_reboot: bool,
+    /// Which bootloader starts the installed system.
+    pub bootloader: BootloaderConfig,
 }
 
 impl InstallConfig {
@@ -954,6 +1009,7 @@ impl InstallConfig {
         let network = Self::parse_network(root)?;
         let services = Self::parse_string_list(root, "services");
         let post_install = Self::parse_string_list(root, "post_install");
+        let bootloader = Self::parse_bootloader(root)?;
 
         Ok(Self {
             hostname,
@@ -967,12 +1023,63 @@ impl InstallConfig {
             services,
             post_install,
             auto_reboot,
+            bootloader,
         })
+    }
+
+    /// The `bootloader:` section. Absent, it is Limine.
+    fn parse_bootloader(root: &YamlValue) -> Result<BootloaderConfig, ConfigError> {
+        let Some(section) = root.get("bootloader") else {
+            return Ok(BootloaderConfig::Limine);
+        };
+        let kind = section
+            .get("type")
+            .and_then(YamlValue::as_str)
+            .unwrap_or("limine");
+        match kind.to_ascii_lowercase().as_str() {
+            "limine" => Ok(BootloaderConfig::Limine),
+            "grub" => {
+                let strategy = section
+                    .get("strategy")
+                    .and_then(YamlValue::as_str)
+                    .unwrap_or("chainload");
+                if !strategy.eq_ignore_ascii_case("chainload") {
+                    return Err(ConfigError::InvalidValue {
+                        field: "bootloader.strategy".to_string(),
+                        message: format!(
+                            "'{strategy}': GRUB can only chainload Limine -- the kernel has no \
+                             multiboot2 header for GRUB to load it by itself"
+                        ),
+                    });
+                }
+                let title = section
+                    .get("title")
+                    .and_then(YamlValue::as_str)
+                    .unwrap_or(GRUB_TITLE)
+                    .to_string();
+                Ok(BootloaderConfig::Grub { title })
+            }
+            other => Err(ConfigError::InvalidValue {
+                field: "bootloader.type".to_string(),
+                message: format!("unsupported bootloader '{other}' (limine or grub)"),
+            }),
+        }
     }
 
     /// Validate the configuration, returning a list of all errors found.
     pub fn validate(&self) -> Result<(), Vec<ConfigError>> {
         let mut errors = Vec::new();
+
+        // A GRUB entry's title goes into GRUB's script, which has no escape
+        // for a control character.
+        if let BootloaderConfig::Grub { title } = &self.bootloader
+            && let Err(e) = grub_entry(title, "0000-0000").validate()
+        {
+            errors.push(ConfigError::InvalidValue {
+                field: "bootloader.title".to_string(),
+                message: e.to_string(),
+            });
+        }
 
         // Must have at least one user.
         if self.users.is_empty() {
@@ -1001,7 +1108,9 @@ impl InstallConfig {
             ));
         }
 
-        // GPT requires an EFI partition.
+        // GPT requires an EFI partition: the one Limine is put on, and so the
+        // one a GRUB entry chainloads it from. GPT is the only scheme there
+        // is, so a GRUB entry always has one to name.
         if self.disk.scheme == PartitionScheme::Gpt {
             let has_efi = self
                 .disk
@@ -1539,6 +1648,8 @@ pub enum InstallStep {
     RunPostInstall { commands: Vec<String> },
     /// Install the bootloader.
     InstallBootloader { target: String },
+    /// Add an entry to another system's GRUB that chainloads Limine.
+    AddGrubEntry { title: String },
     /// Unmount all partitions.
     Unmount,
     /// Reboot the system.
@@ -1672,10 +1783,17 @@ impl InstallPlan {
             });
         }
 
-        // Phase 8: Bootloader.
+        // Phase 8: Bootloader. Limine on the EFI system partition starts the
+        // system -- by itself, or chainloaded by another system's GRUB, given
+        // an entry for it.
         steps.push(InstallStep::InstallBootloader {
             target: config.disk.target.clone(),
         });
+        if let BootloaderConfig::Grub { title } = &config.bootloader {
+            steps.push(InstallStep::AddGrubEntry {
+                title: title.clone(),
+            });
+        }
 
         // Phase 9: Cleanup.
         steps.push(InstallStep::Unmount);
@@ -1735,6 +1853,9 @@ impl InstallPlan {
                 }
                 InstallStep::InstallBootloader { target } => {
                     format!("Install bootloader to {target}")
+                }
+                InstallStep::AddGrubEntry { title } => {
+                    format!("Add '{title}' to GRUB's menu, chainloading {LIMINE_EFI_PATH}")
                 }
                 InstallStep::Unmount => "Unmount all partitions".to_string(),
                 InstallStep::Reboot => "Reboot system".to_string(),
@@ -1877,6 +1998,14 @@ services:
 # Post-install commands
 post_install:
   - echo "Installation complete"
+
+# Bootloader: limine (the default), or grub -- to add this system to the menu
+# of a GRUB already on the machine, which then chainloads Limine from the EFI
+# partition above.
+bootloader:
+  type: limine
+#  type: grub
+#  title: Slate OS
 
 auto_reboot: true
 "#
@@ -2357,6 +2486,7 @@ users:
             services: vec![],
             post_install: vec![],
             auto_reboot: false,
+            bootloader: BootloaderConfig::Limine,
         };
         let errors = config.validate().unwrap_err();
         assert!(
@@ -2441,6 +2571,7 @@ users:
             services: vec![],
             post_install: vec![],
             auto_reboot: false,
+            bootloader: BootloaderConfig::Limine,
         };
         let errors = config.validate().unwrap_err();
         assert!(errors.iter().any(|e| {
@@ -2494,6 +2625,7 @@ users:
             services: vec![],
             post_install: vec![],
             auto_reboot: false,
+            bootloader: BootloaderConfig::Limine,
         };
         let errors = config.validate().unwrap_err();
         assert!(errors.iter().any(|e| {
@@ -2547,6 +2679,7 @@ users:
             services: vec![],
             post_install: vec![],
             auto_reboot: false,
+            bootloader: BootloaderConfig::Limine,
         };
         let errors = config.validate().unwrap_err();
         assert!(errors.iter().any(|e| {
@@ -2679,6 +2812,7 @@ users:
             services: vec![],
             post_install: vec![],
             auto_reboot: false,
+            bootloader: BootloaderConfig::Limine,
         };
         let plan = InstallPlan::from_config(&config);
         assert!(
@@ -2718,6 +2852,7 @@ users:
             services: vec![],
             post_install: vec![],
             auto_reboot: false,
+            bootloader: BootloaderConfig::Limine,
         };
         let plan = InstallPlan::from_config(&config);
         assert!(!plan.steps.iter().any(|s| matches!(s, InstallStep::Reboot)));
@@ -2733,6 +2868,170 @@ users:
         assert!(desc.contains("Total:"));
         assert!(desc.contains("Wipe disk"));
         assert!(desc.contains("Copy base system"));
+    }
+
+    // -- Bootloader ---------------------------------------------------------
+
+    /// A valid configuration whose `bootloader:` section is `section` -- its
+    /// lines, indented -- or which has none when `section` is empty.
+    fn config_with(section: &str) -> String {
+        let mut yaml = String::from(
+            "hostname: test\ntimezone: UTC\ndisk:\n  target: /dev/sda\n  partitions:\n    \
+             - label: EFI\n      size: 512M\n      filesystem: fat32\n      mount_point: \
+             /boot/efi\n      flags:\n        - efi\n    - label: root\n      size: \
+             remaining\n      filesystem: ext4\n      mount_point: /\nusers:\n  - username: \
+             admin\n    password_hash: \"$6$hash\"\n",
+        );
+        if !section.is_empty() {
+            yaml.push_str("bootloader:\n");
+            yaml.push_str(section);
+        }
+        yaml
+    }
+
+    #[test]
+    fn without_a_bootloader_section_limine_starts_the_system() {
+        for section in ["", "  type: limine\n", "  title: ignored\n"] {
+            let config = InstallConfig::from_yaml(&config_with(section)).unwrap();
+            assert_eq!(config.bootloader, BootloaderConfig::Limine, "{section:?}");
+            assert!(config.validate().is_ok());
+        }
+    }
+
+    #[test]
+    fn a_grub_section_is_read_with_its_title() {
+        let config = InstallConfig::from_yaml(&config_with(
+            "  type: GRUB\n  strategy: Chainload\n  title: My Slate\n",
+        ))
+        .unwrap();
+        assert_eq!(
+            config.bootloader,
+            BootloaderConfig::Grub {
+                title: "My Slate".to_string()
+            }
+        );
+        assert!(config.validate().is_ok());
+        let config = InstallConfig::from_yaml(&config_with("  type: grub\n")).unwrap();
+        assert_eq!(
+            config.bootloader,
+            BootloaderConfig::Grub {
+                title: GRUB_TITLE.to_string()
+            }
+        );
+    }
+
+    #[test]
+    fn grub_loading_the_kernel_itself_is_refused_with_the_reason() {
+        let err = InstallConfig::from_yaml(&config_with("  type: grub\n  strategy: direct\n"))
+            .unwrap_err();
+        assert!(
+            matches!(&err, ConfigError::InvalidValue { field, message }
+                if field == "bootloader.strategy" && message.contains("multiboot2")),
+            "{err:?}"
+        );
+    }
+
+    #[test]
+    fn a_bootloader_the_installer_does_not_know_is_refused() {
+        let err = InstallConfig::from_yaml(&config_with("  type: syslinux\n")).unwrap_err();
+        assert!(
+            matches!(&err, ConfigError::InvalidValue { field, message }
+                if field == "bootloader.type" && message.contains("'syslinux'")),
+            "{err:?}"
+        );
+    }
+
+    #[test]
+    fn a_grub_title_grub_could_not_show_is_refused() {
+        // A control character cannot be quoted into GRUB's script.
+        let mut config = InstallConfig::from_yaml(&config_with("  type: grub\n")).unwrap();
+        config.bootloader = BootloaderConfig::Grub {
+            title: "Slate\u{7}OS".to_string(),
+        };
+        let errors = config.validate().unwrap_err();
+        assert!(
+            errors.iter().any(
+                |e| matches!(e, ConfigError::InvalidValue { field, .. } if field == "bootloader.title")
+            ),
+            "{errors:?}"
+        );
+    }
+
+    #[test]
+    fn the_plan_adds_the_grub_entry_right_after_limine() {
+        let limine = InstallConfig::from_yaml(&config_with("")).unwrap();
+        let plan = InstallPlan::from_config(&limine);
+        assert!(
+            !plan
+                .steps
+                .iter()
+                .any(|s| matches!(s, InstallStep::AddGrubEntry { .. }))
+        );
+        let grub =
+            InstallConfig::from_yaml(&config_with("  type: grub\n  title: Slate\n")).unwrap();
+        let plan = InstallPlan::from_config(&grub);
+        let boot = plan
+            .steps
+            .iter()
+            .position(|s| matches!(s, InstallStep::InstallBootloader { .. }))
+            .unwrap();
+        assert_eq!(
+            plan.steps.get(boot + 1),
+            Some(&InstallStep::AddGrubEntry {
+                title: "Slate".to_string()
+            })
+        );
+        let said = plan.describe();
+        assert!(
+            said.contains(&format!(
+                "Add 'Slate' to GRUB's menu, chainloading {LIMINE_EFI_PATH}"
+            )),
+            "{said}"
+        );
+    }
+
+    #[test]
+    fn the_grub_entry_chainloads_limine_by_the_partitions_uuid() {
+        let entry = grub_entry("Slate", "1A2B-3C4D");
+        assert_eq!(entry.entry_type, grub::GrubEntryType::Chainload);
+        assert_eq!(
+            (
+                entry.title.as_str(),
+                entry.kernel_path.as_str(),
+                entry.uuid.as_str()
+            ),
+            ("Slate", LIMINE_EFI_PATH, "1A2B-3C4D")
+        );
+        assert!(entry.root_partition.is_empty());
+        assert!(entry.initrd_path.is_none() && entry.kernel_params.is_empty());
+        let block = grub::generate_entry(&entry).unwrap();
+        assert!(
+            block.contains("search --no-floppy --fs-uuid --set=root \"1A2B-3C4D\""),
+            "{block}"
+        );
+        assert!(
+            block.contains(&format!("chainloader \"{LIMINE_EFI_PATH}\"")),
+            "{block}"
+        );
+    }
+
+    #[test]
+    fn the_sample_config_shows_how_to_choose_grub() {
+        let yaml = generate_sample_config();
+        let config = InstallConfig::from_yaml(&yaml).unwrap();
+        assert_eq!(config.bootloader, BootloaderConfig::Limine);
+        // Uncommented, the choice it shows is one the installer takes.
+        let lines = "  type: limine\n#  type: grub\n#  title: Slate OS\n";
+        assert!(yaml.contains(lines), "{yaml}");
+        let chosen = yaml.replace(lines, "  type: grub\n  title: Slate OS\n");
+        let config = InstallConfig::from_yaml(&chosen).unwrap();
+        assert_eq!(
+            config.bootloader,
+            BootloaderConfig::Grub {
+                title: "Slate OS".to_string()
+            }
+        );
+        assert!(config.validate().is_ok());
     }
 
     // -- Sample config round-trip -------------------------------------------

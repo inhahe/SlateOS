@@ -23,9 +23,21 @@ path = "src/lib.rs"
 # `crc32`, the checksum on every PNG chunk, is the same kind of leaf: `no_std`,
 # no allocator, no dependencies; this crate kept a private copy of its table
 # until 2026-09-26.
+[features]
+# AVIF decoding: the AV1 decoder and the conversion of its frames to pixels.
+# Without it the AVIF container is still read -- `dimensions` and
+# `pixel_format` work -- and `decode` reports the format unsupported. On by
+# default; `osfont`, which decodes only PNG glyphs, turns it off, so that a
+# font renderer does not build a video decoder.
+default = ["avif"]
+avif = ["dep:rav1d"]
+
 [dependencies]
 crc32 = { path = "../../crc32" }
 deflate = { path = "../../deflate" }
+# dav1d in Rust, vendored in lane F's `gui/video/` (see its VENDORED.md). The
+# one dependency here that is not `no_std`: it runs its own threads.
+rav1d = { path = "../video/rav1d", optional = true }
 
 [lints]
 workspace = true

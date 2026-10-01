@@ -1,0 +1,16 @@
+# SlateOS's own Text Editor, as a desktop entry (gui/programs, design-decisions.md 1425).
+# Built into the programs library; the same file installs as
+# /usr/share/applications/org.slateos.Editor.desktop. What each field carries,
+# and where it came from, is gui/programs/INVENTORY.md.
+
+[Desktop Entry]
+Type=Application
+Name=Text Editor
+GenericName=Text Editor
+Comment=Plain text and code editor
+Exec=/usr/bin/editor %F
+TryExec=/usr/bin/editor
+Icon=accessories-text-editor
+Categories=Utility;TextEditor;
+Keywords=notepad;edit;vim;nano;code;write;text;
+MimeType=text/plain;text/x-rust;text/x-c;text/x-c++;text/x-python;text/javascript;text/typescript;text/css;text/markdown;application/x-shellscript;text/csv;application/json;application/toml;application/x-yaml;application/xml;application/sql;text/html;application/rtf;

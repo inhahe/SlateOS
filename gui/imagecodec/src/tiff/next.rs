@@ -7,6 +7,11 @@
 //! succeeds, a run stops at the image's width, and for a tile the rows are
 //! still measured by the image's scanline -- libtiff's `tif_scanlinesize`
 //! -- though the runs stop at the tile's width.
+//!
+//! Portions of this file are translated into Rust from libtiff 4.7.1's
+//! `tif_next.c` (copyright (c) 1988-1997 Sam Leffler; (c) 1991-1997 Silicon
+//! Graphics, Inc.), and changed for this project; used under libtiff's
+//! licence, `licenses/libtiff-LICENSE.md`.
 
 use crate::{ImageError, ImageResult};
 

@@ -4,12 +4,18 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
+# The chrome and the cards every game draws in the user's theme (C-Q16, §1422).
+gamechrome = { path = "../gamechrome" }
 guitk = { path = "../../gui/toolkit" }
 randrange = { path = "../../randrange" }
 # The window. Without it `main` was `let _app = SolitaireApp::new();` -- it
 # dealt a hand into memory and dropped it, so no card ever reached a screen
 # and no click ever arrived.
 oswindow = { path = "../../gui/window" }
+
+[dev-dependencies]
+# `palette_check`: the window is drawn from the palette.
+appearance = { path = "../../gui/appearance", features = ["testing"] }
 
 [lints]
 workspace = true

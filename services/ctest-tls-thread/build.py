@@ -61,6 +61,7 @@ def main() -> None:
         "-c", "-O2",
         "-mcmodel=large",         # match codegen code-model=large
         "-fno-pic", "-fno-pie",   # match relocation-model=static
+        "-I", str(OS_ROOT / "posix" / "include"),  # the overlay: what musl's headers lack
         "-fstack-protector-all",  # force a %fs:0x28 canary read everywhere
         "-Wall", "-Wextra", "-Werror",
         str(HERE / "main.c"),

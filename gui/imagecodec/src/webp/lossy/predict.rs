@@ -11,6 +11,13 @@
 //! column. The caller lays those out around the block (see `lossy.rs`); the
 //! one exception is whole-block DC prediction, which averages only the edges
 //! that exist, and is told which do.
+//!
+//! Portions of this file are translated into Rust from libwebp 1.6.0's
+//! `dec.c` (copyright 2010-2025 Google Inc.) and from RFC 6386's reference
+//! decoder (copyright 2010, 2011 Google Inc.), and changed for this project;
+//! used under libwebp's BSD licence and patent grant
+//! (`licenses/libwebp-COPYING`, `licenses/libwebp-PATENTS`) and the RFC's
+//! (`licenses/rfc6386-LICENSE.txt`).
 
 /// The 16x16 and 8x8 modes, in the RFC's numbering (§11.2).
 pub(super) const DC_PRED: u8 = 0;

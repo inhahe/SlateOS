@@ -153,8 +153,8 @@ MUTATIONS = [
     ),
     (
         "the picture is drawn at the size it remembers, not the size it is given",
-        "        self.size = (width, height);\n        self.frame(width, height).into_tree()",
-        "        let (w, h) = self.size;\n        self.size = (width, height);\n        self.frame(w, h).into_tree()",
+        "        self.size = (width, height);\n        let mut tree = self.frame(width, height).into_tree();",
+        "        let (w, h) = self.size;\n        self.size = (width, height);\n        let mut tree = self.frame(w, h).into_tree();",
         ["the_picture_is_drawn_at_the_size_it_is_given_not_the_size_it_remembers"],
     ),
     # -- the layout ----------------------------------------------------------
@@ -281,14 +281,14 @@ MUTATIONS = [
     ),
     (
         "the read-out does not say what the selected action is",
-        '                    if prop_row(f, l, body, &mut cy, "Action", timed.action.icon()) {',
-        "                    if false {",
+        '                        "Action",\n                        timed.action.icon(),',
+        "                        \"Action\",\n                        \"\",",
         ["the_read_out_says_what_the_selected_action_is"],
     ),
     (
         "the read-out does not name the macro it is reporting on",
-        '            let mut more = prop_row(f, l, body, &mut cy, "Name", &mac.name);',
-        '            let mut more = prop_row(f, l, body, &mut cy, "Name", "");',
+        '            let mut more = prop_row(f, &self.palette, l, body, &mut cy, "Name", &mac.name);',
+        '            let mut more = prop_row(f, &self.palette, l, body, &mut cy, "Name", "");',
         ["the_read_out_says_what_the_selected_macro_is"],
     ),
     (
@@ -299,14 +299,14 @@ MUTATIONS = [
     ),
     (
         "the library does not name the macros it lists",
-        "                    &mac.name,\n                    if selected { TEXT } else { SUBTEXT1 },",
-        '                    "",\n                    if selected { TEXT } else { SUBTEXT1 },',
+        "                    &mac.name,\n                    if selected {\n                        self.palette.text",
+        '                    "",\n                    if selected {\n                        self.palette.text',
         ["the_sidebar_names_every_macro_it_has_room_for"],
     ),
     (
         "a script that does not parse says nothing about where it went wrong",
-        "                    err,\n                    RED,",
-        '                    "",\n                    RED,',
+        "                    err,\n                    self.palette.red,",
+        '                    "",\n                    self.palette.red,',
         ["a_script_that_does_not_parse_says_where_it_went_wrong"],
     ),
     (
@@ -593,6 +593,14 @@ MUTATIONS = [
         # same as a bound that is still slack, and this row is what keeps the
         # difference tested.
         ["a_sidebar_row_is_taller_than_the_marks_it_carries"],
+    ),
+    # 2026-09-28: the shipping window opened on two demo macros, one of them
+    # typing a password on Ctrl+Alt+L.
+    (
+        "the window opens on the demo library",
+        "    pub fn opened() -> Self {\n        Self::new()\n    }",
+        "    pub fn opened() -> Self {\n        Self::with_demo_library()\n    }",
+        ["the_window_opens_on_an_empty_library_and_says_so"],
     ),
 ]
 

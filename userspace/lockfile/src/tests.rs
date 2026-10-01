@@ -95,7 +95,15 @@ impl Fake {
     fn new_node(&mut self, mode: u32, mtime: i64) -> u64 {
         self.next_ino += 1;
         let ino = self.next_ino;
-        self.nodes.insert(ino, Node { nlink: 1, mtime, mode, content: Vec::new() });
+        self.nodes.insert(
+            ino,
+            Node {
+                nlink: 1,
+                mtime,
+                mode,
+                content: Vec::new(),
+            },
+        );
         ino
     }
 
@@ -131,7 +139,10 @@ impl Fake {
     }
 
     fn listing(&self) -> Vec<String> {
-        self.names.keys().map(|k| String::from_utf8_lossy(k).into_owned()).collect()
+        self.names
+            .keys()
+            .map(|k| String::from_utf8_lossy(k).into_owned())
+            .collect()
     }
 
     fn err(&self) -> String {
@@ -179,11 +190,17 @@ impl System for Fake {
         self.users.iter().find(|(_, n)| n == name).cloned()
     }
     fn user_by_uid(&mut self, uid: u32) -> Option<Vec<u8>> {
-        self.users.iter().find(|(u, _)| *u == uid).map(|(_, n)| n.clone())
+        self.users
+            .iter()
+            .find(|(u, _)| *u == uid)
+            .map(|(_, n)| n.clone())
     }
     fn lstat(&mut self, path: &[u8]) -> Result<Stat, i32> {
         self.check_path(path)?;
-        self.names.get(path).map(|&ino| self.stat_of(ino)).ok_or(ENOENT)
+        self.names
+            .get(path)
+            .map(|&ino| self.stat_of(ino))
+            .ok_or(ENOENT)
     }
     fn stat(&mut self, path: &[u8]) -> Result<Stat, i32> {
         self.lstat(path)
@@ -202,7 +219,11 @@ impl System for Fake {
         Ok(self.stat_of(file.0))
     }
     fn write(&mut self, file: &mut FakeFile, bytes: &[u8]) {
-        self.nodes.get_mut(&file.0).unwrap().content.extend_from_slice(bytes);
+        self.nodes
+            .get_mut(&file.0)
+            .unwrap()
+            .content
+            .extend_from_slice(bytes);
     }
     fn close(&mut self, _file: FakeFile) {}
     fn link(&mut self, old: &[u8], new: &[u8]) -> Result<(), i32> {
@@ -298,7 +319,11 @@ fn a_long_host_name_is_cut_to_fit_the_temporary() {
     assert_eq!(run(&mut f, &["x"]), 0);
     let name = &f.created[0];
     assert_eq!(name.len(), UNIQ_NAME_LEN - 1);
-    assert!(name.starts_with(b"_B.AB.a-very-long"), "{}", String::from_utf8_lossy(name));
+    assert!(
+        name.starts_with(b"_B.AB.a-very-long"),
+        "{}",
+        String::from_utf8_lossy(name)
+    );
 }
 
 #[test]
@@ -344,7 +369,12 @@ fn a_forced_unlock_that_is_refused_says_so_and_waits() {
     f.undeletable.insert(b"a.lock".to_vec());
     f.signal_after = Some(2);
     assert_eq!(run(&mut f, &["-l", "10", "-s", "1", "a.lock"]), EX_TEMPFAIL);
-    assert!(f.err().starts_with("lockfile: Forced unlock denied on \"a.lock\"\n"), "{}", f.err());
+    assert!(
+        f.err()
+            .starts_with("lockfile: Forced unlock denied on \"a.lock\"\n"),
+        "{}",
+        f.err()
+    );
 }
 
 #[test]
@@ -359,7 +389,10 @@ fn a_young_lock_is_not_forced() {
 fn a_missing_directory_gives_up_at_once() {
     let mut f = Fake::new();
     assert_eq!(run(&mut f, &["nodir/x.lock"]), EX_UNAVAILABLE);
-    assert_eq!(f.err(), "lockfile: Try praying, giving up on \"nodir/x.lock\"\n");
+    assert_eq!(
+        f.err(),
+        "lockfile: Try praying, giving up on \"nodir/x.lock\"\n"
+    );
     assert!(f.sleeps.is_empty());
 }
 
@@ -369,7 +402,10 @@ fn a_signal_ends_the_wait() {
     f.held("a.lock", 0);
     f.signal_after = Some(1);
     assert_eq!(run(&mut f, &["-1", "a.lock"]), EX_TEMPFAIL);
-    assert_eq!(f.err(), "lockfile: Signal received, giving up on \"a.lock\"\n");
+    assert_eq!(
+        f.err(),
+        "lockfile: Signal received, giving up on \"a.lock\"\n"
+    );
 }
 
 #[test]
@@ -379,8 +415,15 @@ fn a_name_too_long_is_shortened_one_byte_at_a_time() {
     let long = "a".repeat(23);
     assert_eq!(run(&mut f, &[long.as_str()]), 0);
     assert_eq!(f.listing(), ["a".repeat(20)]);
-    assert_eq!(f.err().matches("and retrying lock").count(), 3, "{}", f.err());
-    assert!(f.err().starts_with(&format!("lockfile: Truncating \"{long}\" and retrying lock\n")));
+    assert_eq!(
+        f.err().matches("and retrying lock").count(),
+        3,
+        "{}",
+        f.err()
+    );
+    assert!(f.err().starts_with(&format!(
+        "lockfile: Truncating \"{long}\" and retrying lock\n"
+    )));
 }
 
 /// NFS can report failure for a link it made: the inodes say it worked.
@@ -420,7 +463,10 @@ fn a_caller_who_cannot_drop_privileges_is_refused() {
 fn a_failure_releases_the_locks_taken_before_it() {
     let mut f = Fake::new();
     f.held("held.lock", 0);
-    assert_eq!(run(&mut f, &["-r0", "a.lock", "held.lock", "b.lock"]), EX_CANTCREAT);
+    assert_eq!(
+        run(&mut f, &["-r0", "a.lock", "held.lock", "b.lock"]),
+        EX_CANTCREAT
+    );
     assert_eq!(f.listing(), ["held.lock"]);
 }
 
@@ -485,7 +531,10 @@ fn a_usage_error_is_never_inverted() {
 fn help_and_version_go_to_stderr_with_status_64() {
     let mut f = Fake::new();
     assert_eq!(run(&mut f, &["-h"]), EX_USAGE);
-    assert_eq!(f.err(), format!("{}{}", usage(), String::from_utf8_lossy(HELP)));
+    assert_eq!(
+        f.err(),
+        format!("{}{}", usage(), String::from_utf8_lossy(HELP))
+    );
 
     let mut f = Fake::new();
     assert_eq!(run(&mut f, &["-v"]), EX_USAGE);
@@ -535,7 +584,10 @@ fn a_caller_with_no_passwd_entry_has_no_mailbox() {
     assert_eq!(run(&mut f, &["-ml"]), EX_USAGE);
     assert_eq!(
         f.err(),
-        format!("lockfile: Can't determine your mailbox, who are you?\n{}", usage())
+        format!(
+            "lockfile: Can't determine your mailbox, who are you?\n{}",
+            usage()
+        )
     );
 }
 
@@ -543,7 +595,10 @@ fn a_caller_with_no_passwd_entry_has_no_mailbox() {
 fn mu_that_cannot_unlock_says_so() {
     let mut f = Fake::new();
     assert_eq!(run(&mut f, &["-mu"]), EX_USAGE);
-    assert_eq!(f.err(), format!("lockfile: Can't unlock \"/var/mail/me.lock\"\n{}", usage()));
+    assert_eq!(
+        f.err(),
+        format!("lockfile: Can't unlock \"/var/mail/me.lock\"\n{}", usage())
+    );
 }
 
 /// The second pass releases the mailbox lock as it releases files.

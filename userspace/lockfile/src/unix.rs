@@ -179,7 +179,9 @@ impl System for Unix {
     }
 
     fn user_by_name(&mut self, name: &[u8]) -> Option<(u32, Vec<u8>)> {
-        self.users().user_by_name(name).map(|u| (u.uid, u.name.clone()))
+        self.users()
+            .user_by_name(name)
+            .map(|u| (u.uid, u.name.clone()))
     }
 
     fn user_by_uid(&mut self, uid: u32) -> Option<Vec<u8>> {
@@ -187,11 +189,15 @@ impl System for Unix {
     }
 
     fn lstat(&mut self, p: &[u8]) -> Result<Stat, i32> {
-        fs::symlink_metadata(path(p)).map(|m| to_stat(&m)).map_err(|e| errno(&e))
+        fs::symlink_metadata(path(p))
+            .map(|m| to_stat(&m))
+            .map_err(|e| errno(&e))
     }
 
     fn stat(&mut self, p: &[u8]) -> Result<Stat, i32> {
-        fs::metadata(path(p)).map(|m| to_stat(&m)).map_err(|e| errno(&e))
+        fs::metadata(path(p))
+            .map(|m| to_stat(&m))
+            .map_err(|e| errno(&e))
     }
 
     fn create_excl(&mut self, p: &[u8], mode: u32) -> Result<File, i32> {

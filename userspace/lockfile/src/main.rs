@@ -177,7 +177,10 @@ struct Pos {
 
 impl Pos {
     fn plus(self, n: usize) -> Self {
-        Self { arg: self.arg, off: self.off.saturating_add(n) }
+        Self {
+            arg: self.arg,
+            off: self.off.saturating_add(n),
+        }
     }
 }
 
@@ -231,7 +234,10 @@ pub(crate) struct Lockfile<'s, S: System> {
 /// the number took -- 0 when there was none, as `end == s` says in C.
 pub(crate) fn strtol(s: &[u8]) -> (i32, usize) {
     let mut i = 0usize;
-    while s.get(i).is_some_and(|&c| matches!(c, b' ' | b'\t' | b'\n' | 0x0b | 0x0c | b'\r')) {
+    while s
+        .get(i)
+        .is_some_and(|&c| matches!(c, b' ' | b'\t' | b'\n' | 0x0b | 0x0c | b'\r'))
+    {
         i = i.saturating_add(1);
     }
     let negative = match s.get(i) {
@@ -311,7 +317,9 @@ pub(crate) fn safehost(name: &[u8]) -> Vec<u8> {
 
 /// lastdirsep.c: the index just past the last `/`, 0 if there is none.
 pub(crate) fn lastdirsep(name: &[u8]) -> usize {
-    name.iter().rposition(|&c| c == b'/').map_or(0, |i| i.saturating_add(1))
+    name.iter()
+        .rposition(|&c| c == b'/')
+        .map_or(0, |i| i.saturating_add(1))
 }
 
 /// The C string in `buf`: everything before the first NUL.
@@ -369,11 +377,18 @@ impl<'s, S: System> Lockfile<'s, S> {
     }
 
     fn byte_at(&self, pos: Pos) -> u8 {
-        self.argv.get(pos.arg).and_then(|a| a.get(pos.off)).copied().unwrap_or(0)
+        self.argv
+            .get(pos.arg)
+            .and_then(|a| a.get(pos.off))
+            .copied()
+            .unwrap_or(0)
     }
 
     fn rest(&self, pos: Pos) -> &[u8] {
-        self.argv.get(pos.arg).and_then(|a| a.get(pos.off..)).unwrap_or(&[])
+        self.argv
+            .get(pos.arg)
+            .and_then(|a| a.get(pos.off..))
+            .unwrap_or(&[])
     }
 
     fn target_name(&self, target: Target) -> Vec<u8> {
@@ -583,7 +598,11 @@ impl<'s, S: System> Lockfile<'s, S> {
         self.elog(VERSION);
         self.elog(b"\nYour system mailbox's lockfile:\t");
         let uid = self.sys.getuid();
-        let mailbox = self.sys.user_by_uid(uid).map(|login| Self::mailbox_of(&login)).unwrap_or_default();
+        let mailbox = self
+            .sys
+            .user_by_uid(uid)
+            .map(|login| Self::mailbox_of(&login))
+            .unwrap_or_default();
         self.elog(&mailbox);
         self.elog(LOCKEXT);
         self.elog(b"\n");
@@ -694,10 +713,9 @@ impl<'s, S: System> Lockfile<'s, S> {
                 }
                 ENAMETOOLONG => {
                     let name = self.target_name(target);
-                    let keep = name
-                        .len()
-                        .checked_sub(1)
-                        .filter(|&n| n > 0 && name.get(n.saturating_sub(1)).is_some_and(|&c| c != b'/'));
+                    let keep = name.len().checked_sub(1).filter(|&n| {
+                        n > 0 && name.get(n.saturating_sub(1)).is_some_and(|&c| c != b'/')
+                    });
                     let Some(n) = keep else {
                         self.nlog(b"Filename too long");
                         self.retval = EX_UNAVAILABLE;
@@ -864,7 +882,12 @@ impl<'s, S: System> Lockfile<'s, S> {
         let by_name = self.sys.lstat(cstr(buf));
         let substituted = match (self.set_errno(by_name), self.set_errno(by_fd)) {
             (Ok(n), Ok(f)) => {
-                n.nlink != 1 || n.size != 0 || n.dev != f.dev || n.ino != f.ino || n.uid != f.uid || n.gid != f.gid
+                n.nlink != 1
+                    || n.size != 0
+                    || n.dev != f.dev
+                    || n.ino != f.ino
+                    || n.uid != f.uid
+                    || n.gid != f.gid
             }
             _ => true,
         };

@@ -1,7 +1,7 @@
 # E → A: four harness launches in the boot-test suites run WSL's bash, not Git's
 
 **From:** lane E · **To:** lane A · **Filed:** 2026-09-25
-**Status:** open — a test-fidelity fix in your suites; nothing in lane E is
+**Status:** FIXED 2026-09-25 by lane F (`8bcfc6f9b`), on `main`. Reply at the end.
 blocked on it
 
 ## In short
@@ -46,3 +46,18 @@ Resolve bash in those four places — `proctree.find_unix_shell()`, or
 `available_bashes()` where "the same verdict under every bash" is the stronger
 claim you want, as for the dirty check. Either retires the WSL dependency from
 suites that exist to vouch for `boot-test.sh` under the bash it runs in.
+
+---
+
+## Reply, lane A — 2026-10-01: fixed by lane F's resolver
+
+Lane F's `8bcfc6f9b` ("one verified MSYS-bash resolver") fixed all four
+launches the same day you filed this:
+- `test-boot-test.py` resolves bash through `find_unix_shell` /
+  `available_bashes`;
+- `test-boot-history-commit.py` goes through `msysbash`.
+
+No bare `["bash", ...]` launch is left in `scripts/`; the word survives only
+in comments that explain why. Stamped late; nothing more to do here.
+
+— lane A

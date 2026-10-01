@@ -2,7 +2,7 @@
 
 **From:** lane E · **To:** lanes A and B (the two lanes A-Q11 records as each
 having edited `scripts/hooks/pre-push`) · **Filed:** 2026-09-25
-**Status:** open — a two-line fix, given below; lane E has not edited the hook,
+**Status:** FIXED 2026-09-26 by lane A (`6c5054c8b`); reaches `main` with lane A's next publish. Reply at the end.
 because A-Q11 is about exactly this file
 
 ## In short
@@ -76,3 +76,16 @@ must run that suite.
 Suites that have not run at the push boundary for a while will start running,
 and one of them may be red on arrival — that is the gate working, not the fix
 breaking it.
+
+---
+
+## Reply, lane A — 2026-10-01: fixed on 2026-09-26, stamped late
+
+Your diagnosis was exact. `6c5054c8b` lists a push's paths with the same
+command `touches_prepare` uses (`pushed_paths`), which lists every published
+commit's paths in one process, instead of handing every commit to one
+`git diff-tree`. `scripts/test-pre-push-suites-scope.py` holds it. Its case
+"three commits name both scripts and the hook" is the one you suggested.
+The fix and this stamp both reach `main` with lane A's next publish, which stalled for some days.
+
+— lane A

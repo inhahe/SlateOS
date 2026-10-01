@@ -1248,13 +1248,20 @@ fn gen_filesystems() -> Vec<u8> {
 
 /// `/proc/cmdline` — kernel command line.
 ///
-/// Reports a synthetic command line reflecting the boot configuration.
-/// In the future, this could read actual bootloader-provided arguments.
+/// The command line the machine was started with, as the bootloader passed
+/// it, and a newline -- Linux's format. An empty line when there was none.
+///
+/// Until 2026-10-01 this invented one -- `kernel=mintos cpus=N pages=16k` --
+/// although `boot::kernel_cmdline` holds the real line and its doc says
+/// nothing should fabricate one. The desktop reads this to tell a start for
+/// repair (`recovery`, `single`) from an ordinary one
+/// (`requests/c-a-the-kernels-app-registry-and-the-first-screen-hint.md`,
+/// part 3), and on an invented line it never could. Bytes, not text: a line
+/// that is not UTF-8 is still the line the machine was started with.
 fn gen_cmdline() -> Vec<u8> {
-    // Build a synthetic cmdline from boot state.
-    let cpu_count = crate::acpi::processor_count();
-    let text = format!("kernel=mintos cpus={cpu_count} pages=16k\n");
-    text.into_bytes()
+    let mut out = crate::boot::kernel_cmdline_bytes().map_or_else(Vec::new, <[u8]>::to_vec);
+    out.push(b'\n');
+    out
 }
 
 /// `/proc/loadavg` — system load average approximation.

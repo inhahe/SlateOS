@@ -16,8 +16,15 @@
 //!   `paint` module for what of them is drawn); a fallback colour after the
 //!   `url()` stands in for one that is missing
 //! - Definitions (`defs`, `symbol`, gradients, clip paths, masks, `style`) are
-//!   not drawn where they stand; `use`, clip paths, masks, patterns and
-//!   filters are not applied
+//!   not drawn where they stand
+//! - `use` draws the element it names, wherever the document defines it, at
+//!   its `x` and `y`, inheriting its style; a `symbol` (or `svg`) in a
+//!   viewport its `width` and `height` size. Each element named is built
+//!   once. A `use` inside what it names draws nothing; content shown inside
+//!   itself through other `use`s is drawn once; and depth and the number of
+//!   nodes drawn through `use` are bounded, so a document cannot multiply
+//!   itself without end
+//! - Clip paths, masks, patterns and filters are not applied
 //! - Container elements: the outermost svg, its viewBox fitted to the pixels
 //!   as its `preserveAspectRatio` says; an svg inside it, placed in a
 //!   viewport of its own (what overflows that viewport is drawn, not cut);
@@ -40,8 +47,11 @@
 use crate::color::Color;
 
 use core::f32::consts::PI;
+use std::collections::HashMap;
 
 mod paint;
+#[cfg(test)]
+mod use_tests;
 #[cfg(test)]
 mod viewport_tests;
 
@@ -1210,6 +1220,17 @@ pub enum SvgNode {
         transform: Transform,
         style: SvgStyle,
     },
+    /// A `<use>`: the element it names, drawn again here. The element is
+    /// built once, however many `<use>`s name it, and kept with the
+    /// document; `content` is its place there.
+    Use {
+        /// The `<use>`'s own transform, its `x` and `y`, and for a
+        /// `<symbol>` or `<svg>` the viewport it is shown in.
+        transform: Transform,
+        /// The `<use>`'s style, which the content inherits.
+        style: SvgStyle,
+        content: usize,
+    },
 }
 
 // ─── SVG Document ────────────────────────────────────────────────────────────
@@ -1220,6 +1241,9 @@ pub struct SvgDocument {
     pub root: SvgNode,
     /// The gradients its fills and strokes name.
     defs: Defs,
+    /// What its `<use>` elements draw: each element one names, built once,
+    /// at the place [`SvgNode::Use`] gives.
+    reused: Vec<SvgNode>,
 }
 
 /// The user-space rectangle an `<svg>` element shows, `(x, y, width,
@@ -1271,13 +1295,23 @@ impl SvgDocument {
         // defined after it. Their percentages are of the viewport.
         let (_, _, view_w, view_h) = DeclaredSize::of(first).shown();
         let defs = Defs::collect(first, (view_w, view_h));
+        // Then every element a `<use>` names, so that a `<use>` met while
+        // building finds its content's place already given.
+        let reusable = Reusable::collect(first);
         let builder = Builder {
             defs: &defs,
+            reusable: &reusable,
+            ancestors: None,
             viewport: (view_w, view_h),
             outermost: true,
         };
+        let reused = reusable
+            .targets
+            .iter()
+            .map(|&(id, target)| build_reused(id, target, builder.inner()))
+            .collect();
         let root = build_node(first, builder)?;
-        Ok(Self { root, defs })
+        Ok(Self { root, defs, reused })
     }
 
     /// Get the viewBox (min_x, min_y, width, height).
@@ -1303,7 +1337,7 @@ impl SvgDocument {
     /// a drawing asked for at another shape is not stretched. A view box with
     /// no area draws nothing.
     pub fn render(&self, width: u32, height: u32) -> Vec<u8> {
-        let mut renderer = SvgRenderer::new(width, height, &self.defs);
+        let mut renderer = SvgRenderer::new(width, height, &self.defs, &self.reused);
         let aspect = match &self.root {
             SvgNode::Svg { aspect, .. } => *aspect,
             _ => AspectRatio::DEFAULT,
@@ -1738,7 +1772,8 @@ fn parse_attr_value(c: &mut XmlCursor) -> Result<String, SvgError> {
 /// Elements whose contents are definitions for something else to use, or not
 /// graphics at all: drawn directly, a `<symbol>`'s shapes or a `<defs>`' would
 /// appear where nothing placed them, and a `<style>` sheet's text is not a
-/// shape. Nothing here draws what refers to them, so they draw nothing.
+/// shape. They draw nothing where they stand; a `<use>` draws a `<symbol>`,
+/// or anything a `<defs>` holds, and a fill or stroke a gradient.
 const NOT_DRAWN: &[&str] = &[
     "defs",
     "symbol",
@@ -1762,6 +1797,12 @@ const NOT_DRAWN: &[&str] = &[
 struct Builder<'b> {
     /// The document's gradients, for a paint that names one.
     defs: &'b Defs,
+    /// The elements `<use>`s name, and each one's place among the content
+    /// the document keeps for them.
+    reusable: &'b Reusable<'b>,
+    /// The innermost element with an `id` that the element is inside: a
+    /// `<use>` naming any of these would draw itself inside itself.
+    ancestors: Option<&'b Ancestor<'b>>,
     /// The width and height, in user units, of the viewport the element is
     /// in: what its percentages are of.
     viewport: (f32, f32),
@@ -1778,6 +1819,99 @@ impl Builder<'_> {
             ..self
         }
     }
+}
+
+/// An element with an `id` that the element being built is inside, and the
+/// next such element out: a chain kept on the stack, one link per level.
+struct Ancestor<'b> {
+    id: &'b str,
+    outer: Option<&'b Ancestor<'b>>,
+}
+
+impl Ancestor<'_> {
+    /// Whether `id` is this element's or one it is inside.
+    fn includes(&self, id: &str) -> bool {
+        let mut link = Some(self);
+        while let Some(ancestor) = link {
+            if ancestor.id == id {
+                return true;
+            }
+            link = ancestor.outer;
+        }
+        false
+    }
+}
+
+/// The elements `<use>`s name, found in the whole document before anything
+/// is built, so that each is built once -- and from the top of the stack,
+/// not inside whichever `<use>` met it first, where `<use>`s naming
+/// `<use>`s would deepen the recursion without end.
+struct Reusable<'x> {
+    /// Each named element's place among the content the document keeps.
+    places: HashMap<&'x str, usize>,
+    /// In order of place: each named element and its `id`.
+    targets: Vec<(&'x str, &'x XmlElement)>,
+}
+
+impl<'x> Reusable<'x> {
+    /// Every element a `<use>` in the document under `root` names: the
+    /// first with that `id`, where two share one, as `getElementById` has
+    /// it.
+    fn collect(root: &'x XmlElement) -> Self {
+        let mut by_id = HashMap::new();
+        index_ids(root, &mut by_id);
+        let mut reusable = Self {
+            places: HashMap::new(),
+            targets: Vec::new(),
+        };
+        reusable.gather(root, &by_id);
+        reusable
+    }
+
+    fn gather(&mut self, elem: &'x XmlElement, by_id: &HashMap<&'x str, &'x XmlElement>) {
+        if elem.tag == "use"
+            && let Some((&id, &target)) = reference(elem).and_then(|id| by_id.get_key_value(id))
+            && !self.places.contains_key(id)
+        {
+            self.places.insert(id, self.targets.len());
+            self.targets.push((id, target));
+        }
+        for child in &elem.children {
+            self.gather(child, by_id);
+        }
+    }
+
+    /// The place of the content kept for `id`, and the element it is of.
+    fn find(&self, id: &str) -> Option<(usize, &'x XmlElement)> {
+        let place = *self.places.get(id)?;
+        self.targets.get(place).map(|&(_, target)| (place, target))
+    }
+}
+
+/// Every element under `elem` with an `id`, by it: the first of each.
+fn index_ids<'x>(elem: &'x XmlElement, by_id: &mut HashMap<&'x str, &'x XmlElement>) {
+    if let Some(id) = elem.attr("id").map(str::trim).filter(|id| !id.is_empty()) {
+        by_id.entry(id).or_insert(elem);
+    }
+    for child in &elem.children {
+        index_ids(child, by_id);
+    }
+}
+
+/// The `id` a `<use>` names: its `href` (SVG 2's, which wins) or
+/// `xlink:href`, a fragment of this document. A reference into another file
+/// is not followed.
+fn reference(elem: &XmlElement) -> Option<&str> {
+    elem.attr("href")
+        .or_else(|| elem.attr("xlink:href"))?
+        .trim()
+        .strip_prefix('#')
+        .filter(|id| !id.is_empty())
+}
+
+/// Whether `elem` makes a viewport of its own when a `<use>` shows it.
+fn is_viewport(elem: &XmlElement) -> bool {
+    elem.tag == "symbol" || elem.tag == "svg"
 }
 
 /// A length for an element's place in its viewport: a number of user units,
@@ -1831,8 +1965,94 @@ fn build_shape(elem: &XmlElement, b: Builder<'_>) -> Result<SvgNode, SvgError> {
         "polyline" => build_polyline(elem, b),
         "polygon" => build_polygon(elem, b),
         "path" => build_path(elem, b),
+        "use" => build_use(elem, b),
         _ => Ok(nothing()),
     }
+}
+
+/// A `<use>`: the content the document keeps for the element it names,
+/// moved to the `<use>`'s `x` and `y` -- and a `<symbol>` or `<svg>` shown
+/// in a viewport the `<use>`'s `width` and `height` size -- inheriting the
+/// `<use>`'s style.
+///
+/// Nothing for a name not in this document, or for an element this
+/// `<use>` is inside, which would draw itself inside itself; SVG has such a
+/// `<use>` in error, and browsers draw nothing for it.
+fn build_use(elem: &XmlElement, b: Builder<'_>) -> Result<SvgNode, SvgError> {
+    let Some((id, (content, target))) =
+        reference(elem).and_then(|id| Some((id, b.reusable.find(id)?)))
+    else {
+        return Ok(nothing());
+    };
+    if b.ancestors.is_some_and(|ancestor| ancestor.includes(id)) {
+        return Ok(nothing());
+    }
+    let (view_w, view_h) = b.viewport;
+    let at = |name: &str, extent: f32| {
+        elem.attr(name)
+            .and_then(|value| viewport_length(value, extent))
+    };
+    let offset = Transform::translate(
+        at("x", view_w).unwrap_or(0.0),
+        at("y", view_h).unwrap_or(0.0),
+    );
+    let placement = if is_viewport(target) {
+        let size = (at("width", view_w), at("height", view_h));
+        match viewport_placement(target, size, b.viewport) {
+            Some((placement, _)) => placement,
+            None => return Ok(nothing()),
+        }
+    } else {
+        Transform::IDENTITY
+    };
+    let own = elem
+        .attr("transform")
+        .map(parse_transform)
+        .transpose()?
+        .unwrap_or(Transform::IDENTITY);
+    Ok(SvgNode::Use {
+        transform: own.then(offset).then(placement),
+        style: parse_style_attrs(elem, b.defs)?,
+        content,
+    })
+}
+
+/// The content a `<use>` naming `target`, whose `id` is `id`, draws.
+///
+/// A `<symbol>`'s or `<svg>`'s children, in its own user space and with its
+/// style -- each `<use>` places them in its viewport -- whose percentages
+/// are of its view box, or else of the document's viewport: what is built
+/// once cannot follow the size each `<use>` gives it. Any other element is
+/// built as itself, `display: none` and all.
+///
+/// Content that cannot be built draws nothing. Nothing is lost by not
+/// failing the document: an element that is also drawn where it stands
+/// fails it there, and one inside a `<defs>` drew nothing before `<use>`
+/// was read at all.
+fn build_reused(id: &str, target: &XmlElement, b: Builder<'_>) -> SvgNode {
+    let link = Ancestor { id, outer: None };
+    let b = Builder {
+        ancestors: Some(&link),
+        ..b
+    };
+    if !is_viewport(target) {
+        return build_node(target, b).unwrap_or_else(|_| nothing());
+    }
+    if property(target, "display").is_some_and(|value| value == "none") {
+        return nothing();
+    }
+    let viewport = target
+        .attr("viewBox")
+        .and_then(|s| parse_viewbox(s).ok())
+        .map_or(b.viewport, |(_, _, w, h)| (w, h));
+    let content = build_children(target, Builder { viewport, ..b }).and_then(|children| {
+        Ok(SvgNode::Group {
+            transform: Transform::IDENTITY,
+            style: parse_style_attrs(target, b.defs)?,
+            children,
+        })
+    });
+    content.unwrap_or_else(|_| nothing())
 }
 
 fn build_node(elem: &XmlElement, b: Builder<'_>) -> Result<SvgNode, SvgError> {
@@ -1843,10 +2063,26 @@ fn build_node(elem: &XmlElement, b: Builder<'_>) -> Result<SvgNode, SvgError> {
     {
         return Ok(nothing());
     }
+    // Everything built inside an element with an `id` is inside it, for a
+    // `<use>` in there that names it.
+    let link;
+    let b = match elem.attr("id").map(str::trim).filter(|id| !id.is_empty()) {
+        Some(id) => {
+            link = Ancestor {
+                id,
+                outer: b.ancestors,
+            };
+            Builder {
+                ancestors: Some(&link),
+                ..b
+            }
+        }
+        None => b,
+    };
     match elem.tag.as_str() {
         "svg" => build_svg(elem, b),
         "g" => build_group(elem, b),
-        "rect" | "circle" | "ellipse" | "line" | "polyline" | "polygon" | "path" => {
+        "rect" | "circle" | "ellipse" | "line" | "polyline" | "polygon" | "path" | "use" => {
             build_shape(elem, b)
         }
         _ => {
@@ -1862,12 +2098,12 @@ fn build_node(elem: &XmlElement, b: Builder<'_>) -> Result<SvgNode, SvgError> {
 }
 
 fn build_svg(elem: &XmlElement, b: Builder<'_>) -> Result<SvgNode, SvgError> {
+    if !b.outermost {
+        return build_inner_svg(elem, b);
+    }
     let aspect = elem
         .attr("preserveAspectRatio")
         .map_or(AspectRatio::DEFAULT, AspectRatio::parse);
-    if !b.outermost {
-        return build_inner_svg(elem, b, aspect);
-    }
     let declared = DeclaredSize::of(elem);
     let (_, _, view_w, view_h) = declared.shown();
     let inner = Builder {
@@ -1900,37 +2136,55 @@ fn build_svg(elem: &XmlElement, b: Builder<'_>) -> Result<SvgNode, SvgError> {
     })
 }
 
-/// An `<svg>` inside another: a viewport of its own, `width` by `height` --
-/// all of its parent's by default -- at `x`, `y` in its parent's user space,
-/// with its `viewBox` fitted to it as `aspect` says. A group, so the
-/// renderer walks it as any other; what overflows it is drawn, not cut.
-fn build_inner_svg(
+/// Where an element that makes a viewport of its own -- an `<svg>` inside
+/// another, or a `<symbol>` or `<svg>` a `<use>` shows -- puts what it
+/// holds: the transform from its own user space to its parent's, and its
+/// viewport's size in its own user units, what its children's percentages
+/// are of. `None` where it draws nothing: a viewport or view box with no
+/// area.
+///
+/// It is `width` by `height` -- `size`, a `<use>`'s, where that says them;
+/// all of `parent`, the viewport it is in, by default -- at `x`, `y` in its
+/// parent's user space, with its `viewBox` fitted to that as its
+/// `preserveAspectRatio` says.
+fn viewport_placement(
     elem: &XmlElement,
-    b: Builder<'_>,
-    aspect: AspectRatio,
-) -> Result<SvgNode, SvgError> {
-    let (parent_w, parent_h) = b.viewport;
-    let at = |name: &str, extent: f32, default: f32| {
+    size: (Option<f32>, Option<f32>),
+    parent: (f32, f32),
+) -> Option<(Transform, (f32, f32))> {
+    let (parent_w, parent_h) = parent;
+    let at = |name: &str, extent: f32| {
         elem.attr(name)
             .and_then(|value| viewport_length(value, extent))
-            .unwrap_or(default)
     };
-    let (x, y) = (at("x", parent_w, 0.0), at("y", parent_h, 0.0));
-    let (width, height) = (
-        at("width", parent_w, parent_w),
-        at("height", parent_h, parent_h),
+    let (x, y) = (
+        at("x", parent_w).unwrap_or(0.0),
+        at("y", parent_h).unwrap_or(0.0),
     );
-    // SVG draws nothing for a viewport with no area.
+    let width = size.0.or_else(|| at("width", parent_w)).unwrap_or(parent_w);
+    let height = size
+        .1
+        .or_else(|| at("height", parent_h))
+        .unwrap_or(parent_h);
     if width.is_nan() || height.is_nan() || width <= 0.0 || height <= 0.0 {
-        return Ok(nothing());
+        return None;
     }
-    let view_box = elem.attr("viewBox").and_then(|s| parse_viewbox(s).ok());
-    let (placement, viewport) = match view_box {
-        Some(view_box) => match fit_view_box(view_box, aspect, (x, y, width, height)) {
-            Some(fit) => (fit, (view_box.2, view_box.3)),
-            None => return Ok(nothing()),
-        },
-        None => (Transform::translate(x, y), (width, height)),
+    let aspect = elem
+        .attr("preserveAspectRatio")
+        .map_or(AspectRatio::DEFAULT, AspectRatio::parse);
+    match elem.attr("viewBox").and_then(|s| parse_viewbox(s).ok()) {
+        Some(view_box) => fit_view_box(view_box, aspect, (x, y, width, height))
+            .map(|fit| (fit, (view_box.2, view_box.3))),
+        None => Some((Transform::translate(x, y), (width, height))),
+    }
+}
+
+/// An `<svg>` inside another: a group placed in a viewport of its own
+/// ([`viewport_placement`]), so the renderer walks it as any other; what
+/// overflows the viewport is drawn, not cut.
+fn build_inner_svg(elem: &XmlElement, b: Builder<'_>) -> Result<SvgNode, SvgError> {
+    let Some((placement, viewport)) = viewport_placement(elem, (None, None), b.viewport) else {
+        return Ok(nothing());
     };
     // SVG 2 lets an inner `<svg>` carry a `transform`, outside its placement.
     let own = elem
@@ -3117,10 +3371,33 @@ struct SvgRenderer<'d> {
     ss_factor: u32,
     /// The document's gradients, for a paint that names one.
     defs: &'d Defs,
+    /// What the document's `<use>`s draw, by [`SvgNode::Use`]'s `content`.
+    reused: &'d [SvgNode],
+    /// The content of each `<use>` being drawn now, outermost first: one
+    /// met again inside itself is a loop, drawn once and not again.
+    drawing: Vec<usize>,
+    /// How many containers deep the node being drawn is, `<use>`s counted.
+    depth: usize,
+    /// How many more nodes may be drawn inside `<use>`s.
+    reuse_budget: usize,
 }
 
+/// How many containers deep drawing goes, `<use>`s counted: twice as deep
+/// as a document may nest, for content a `<use>` shows inside content
+/// another shows. Each level is a frame of [`SvgRenderer::render_node`]; a
+/// `<use>` naming a `<use>` naming a `<use>`... would otherwise deepen it
+/// without end.
+const MAX_DRAWN_DEPTH: usize = 2 * MAX_NESTING;
+
+/// How many nodes may be drawn inside `<use>`s, in all. Ten `<use>`s of an
+/// element that holds ten `<use>`s of one that holds ten... is a thousand
+/// drawings at the third level and a billion at the ninth, from a document
+/// of a hundred elements; this many is far more than any real drawing
+/// repeats, and bounds the time one takes.
+const MAX_REUSED_NODES: usize = 100_000;
+
 impl<'d> SvgRenderer<'d> {
-    fn new(width: u32, height: u32, defs: &'d Defs) -> Self {
+    fn new(width: u32, height: u32, defs: &'d Defs, reused: &'d [SvgNode]) -> Self {
         // A size that does not fit in `usize` could not be allocated even if it
         // were computed, so an empty buffer is the honest answer rather than a
         // wrapped one. Every write goes through `pixel_mut`, which checks the
@@ -3138,6 +3415,10 @@ impl<'d> SvgRenderer<'d> {
             buffer: vec![0u8; size],
             ss_factor: 4,
             defs,
+            reused,
+            drawing: Vec::new(),
+            depth: 0,
+            reuse_budget: MAX_REUSED_NODES,
         }
     }
 
@@ -3146,10 +3427,23 @@ impl<'d> SvgRenderer<'d> {
     ///
     /// Only containers are walked here; a shape is [`Self::render_shape`]'s.
     /// This recurses once per level of the document, and a debug build gives
-    /// every temporary of every arm a stack slot of its own, so the shapes'
-    /// were in every frame -- enough, with building's, that a document nested
-    /// [`MAX_NESTING`] deep did not fit in 1 MiB of stack.
+    /// every temporary of every arm a stack slot of its own: with the shapes'
+    /// in every frame, drawing took 2.7 KiB of stack a level, where it takes
+    /// 0.7 without.
+    ///
+    /// Nothing is drawn deeper than [`MAX_DRAWN_DEPTH`], or inside `<use>`s
+    /// once [`MAX_REUSED_NODES`] have been.
     fn render_node(&mut self, node: &SvgNode, transform: Transform, parent_style: &ResolvedStyle) {
+        if self.depth >= MAX_DRAWN_DEPTH {
+            return;
+        }
+        if !self.drawing.is_empty() {
+            let Some(left) = self.reuse_budget.checked_sub(1) else {
+                return;
+            };
+            self.reuse_budget = left;
+        }
+        self.depth = self.depth.saturating_add(1);
         match node {
             SvgNode::Svg { children, .. } => {
                 for child in children {
@@ -3167,15 +3461,34 @@ impl<'d> SvgRenderer<'d> {
                     self.render_node(child, combined, &resolved);
                 }
             }
+            SvgNode::Use {
+                transform: local_xf,
+                style,
+                content,
+            } => {
+                // Content shown inside a `<use>` of itself loops: it is drawn
+                // once, and not again inside itself.
+                let reused = self.reused;
+                if !self.drawing.contains(content)
+                    && let Some(shown) = reused.get(*content)
+                {
+                    let combined = transform.then(*local_xf);
+                    let resolved = parent_style.with_overrides(style);
+                    self.drawing.push(*content);
+                    self.render_node(shown, combined, &resolved);
+                    self.drawing.pop();
+                }
+            }
             _ => self.render_shape(node, transform, parent_style),
         }
+        self.depth = self.depth.saturating_sub(1);
     }
 
     /// Draw the shape `node` -- anything but a container, which draws nothing
     /// here -- in the space `transform` carries to the pixels.
     fn render_shape(&mut self, node: &SvgNode, transform: Transform, parent_style: &ResolvedStyle) {
         match node {
-            SvgNode::Svg { .. } | SvgNode::Group { .. } => {}
+            SvgNode::Svg { .. } | SvgNode::Group { .. } | SvgNode::Use { .. } => {}
             SvgNode::Rect {
                 x,
                 y,

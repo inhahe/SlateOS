@@ -2138,8 +2138,14 @@ live.
   says, unpremultiplied. `fill-opacity` and `stroke-opacity` are inherited
   from groups, which they were not. Found on the way and fixed: `rotate()`
   turned the drawing the wrong way and `matrix()` read its numbers
-  transposed. Still not drawn: clip paths, masks, patterns, `use`/`symbol`
-  and `<style>` sheets.
+  transposed. Then `<use>` and `<symbol>` -- an element drawn again where a
+  `<use>` names it, a symbol in the viewport the `<use>` sizes -- with each
+  element built once and a document that names itself, loops or multiplies
+  itself bounded; drawings fitted to the pixels as `preserveAspectRatio`
+  says instead of stretched; inner `<svg>`s placed in their own viewports;
+  and a document nested past 128 levels refused, where one 100 000 deep
+  overflowed the stack of whatever drew it. Still not drawn: clip paths,
+  masks, patterns and `<style>` sheets.
 
 - `[C]` **The run box wears the theme's window frame** (`design-decisions.md`
   §1461) -- done 2026-10-01. `desktop::dialog_frame` draws a shell dialog's

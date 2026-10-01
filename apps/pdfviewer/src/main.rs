@@ -4488,7 +4488,7 @@ fn main() -> ExitCode {
     // but `--display`: the file manager opens a PDF by naming it, and the
     // refusal ended the program -- "exit 2, unexpected argument" on a stderr
     // nobody sees -- before its window opened.
-    let args = match app::Args::from_env() {
+    let args = match app::ArgsOs::from_env() {
         Ok(args) => args,
         Err(e) => {
             eprintln!("pdfviewer: {e}");
@@ -4509,7 +4509,7 @@ fn main() -> ExitCode {
 /// A tab is made only for a file once the one before it opened: a file that
 /// fails leaves its tab empty, and the next file takes it rather than leaving
 /// a blank tab behind.
-fn open_arguments(viewer: &mut PdfViewerApp, paths: &[String]) -> Option<String> {
+fn open_arguments(viewer: &mut PdfViewerApp, paths: &[std::ffi::OsString]) -> Option<String> {
     let mut errors = Vec::new();
     for path in paths {
         if viewer.active_tab().is_some_and(|t| t.document.is_some()) {
@@ -5091,9 +5091,9 @@ mod tests {
         std::fs::write(&one, two_page_pdf()).expect("write fixture");
         std::fs::write(&two, two_page_pdf()).expect("write fixture");
         let missing = dir.join("absent.pdf");
-        let paths: Vec<String> = [&one, &missing, &two]
+        let paths: Vec<std::ffi::OsString> = [&one, &missing, &two]
             .iter()
-            .map(|p| p.to_str().expect("a text path").to_owned())
+            .map(|p| p.as_os_str().to_owned())
             .collect();
 
         let mut app = PdfViewerApp::new(1000.0, 700.0);

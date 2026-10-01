@@ -30,17 +30,21 @@ use crate::types::*;
 /// pipe support (the bit is accepted and ignored).
 pub const PIPE2_O_DIRECT: i32 = 0o40000;
 
+/// `O_NOTIFICATION_PIPE` (`<linux/watch_queue.h>`): make the pipe a queue of
+/// kernel notifications -- keyring and mount changes.  It is `O_EXCL`'s bit.
+/// There are no watch queues here, so [`pipe2`] refuses it with `ENOPKG`, as
+/// Linux does when it is built without `CONFIG_WATCH_QUEUE`.
+pub const O_NOTIFICATION_PIPE: i32 = crate::fcntl::O_EXCL;
+
 /// Mask of `pipe2(2)` flag bits accepted by Linux.
 ///
-/// Linux's `fs/pipe.c::do_pipe2` rejects any bit outside the set
-/// `O_CLOEXEC | O_NONBLOCK | O_DIRECT | O_NOTIFICATION_PIPE` with
-/// `EINVAL` before allocating any pipe fds.  We don't model
-/// `O_NOTIFICATION_PIPE` (it's used by Linux's keyring change-notify
-/// subsystem which we don't have), so the accepted set is the three
-/// common bits — same as Linux ≤ 5.7 and as every existing pipe2
-/// caller (glibc, musl, Bionic, sandbox helpers).
+/// Linux's `fs/pipe.c::__do_pipe_flags` rejects any bit outside the set
+/// `O_CLOEXEC | O_NONBLOCK | O_DIRECT | O_NOTIFICATION_PIPE` with `EINVAL`
+/// before it allocates anything.  [`O_NOTIFICATION_PIPE`] passes this test
+/// and is refused later, by the pipe's creation (see [`pipe2`]); until
+/// 2026-09-26 it was outside the mask here, and `EINVAL`.
 pub const PIPE2_VALID_FLAGS: i32 =
-    crate::fcntl::O_CLOEXEC | crate::fcntl::O_NONBLOCK | PIPE2_O_DIRECT;
+    crate::fcntl::O_CLOEXEC | crate::fcntl::O_NONBLOCK | PIPE2_O_DIRECT | O_NOTIFICATION_PIPE;
 
 // ---------------------------------------------------------------------------
 // Kernel interface (and its host stand-in)
@@ -164,23 +168,25 @@ pub extern "C" fn pipe(pipefd: *mut Fd) -> i32 {
 /// compatibility; pipes remain stream-mode regardless).  Any other
 /// bit in `flags` yields `EINVAL`.
 ///
-/// # Validation order (Linux-matching)
+/// # Order (Linux 6.6's `do_pipe2`)
 ///
-/// 1. `flags & ~PIPE2_VALID_FLAGS != 0` → `EINVAL`.  Matches Linux's
-///    `fs/pipe.c::do_pipe2` which rejects unknown bits *before*
-///    `pipefd` is ever touched — even a NULL `pipefd` will see
-///    `EINVAL` first if the flags are also wrong.
-/// 2. `pipefd == NULL` → `EFAULT`.
+/// 1. A bit outside [`PIPE2_VALID_FLAGS`] → `EINVAL`, before anything is
+///    allocated: even a NULL `pipefd` sees `EINVAL` first.
+/// 2. The pipe is created, and its failure is the answer.  A notification
+///    pipe ([`O_NOTIFICATION_PIPE`]) is `ENOPKG` here, where Linux sets its
+///    watch queue up.
+/// 3. The two descriptors are allocated: `EMFILE` when the table is full.
+/// 4. They are copied out, last: a NULL `pipefd` is `EFAULT`, and the pipe
+///    and its descriptors are released again.
+///
+/// Until 2026-09-26 a NULL `pipefd` was `EFAULT` before the pipe existed,
+/// so a full descriptor table was `EFAULT` where Linux says `EMFILE`.
 ///
 /// Returns 0 on success, -1 on error (errno set).
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn pipe2(pipefd: *mut Fd, flags: i32) -> i32 {
     if flags & !PIPE2_VALID_FLAGS != 0 {
         errno::set_errno(errno::EINVAL);
-        return -1;
-    }
-    if pipefd.is_null() {
-        errno::set_errno(errno::EFAULT);
         return -1;
     }
 
@@ -196,6 +202,17 @@ pub extern "C" fn pipe2(pipefd: *mut Fd, flags: i32) -> i32 {
     // Non-negative, so this is the read handle rather than an error.
     #[allow(clippy::cast_sign_loss)]
     let read_handle = ret_signed as u64;
+
+    // Linux sets a notification pipe's watch queue up as it creates the
+    // pipe, and a kernel without watch queues answers ENOPKG there
+    // (`watch_queue_init`).  The handles were never handed out, so a failed
+    // close could only leave them open; there is nobody to tell.
+    if flags & O_NOTIFICATION_PIPE != 0 {
+        let _ = pipe_kernel_close(read_handle);
+        let _ = pipe_kernel_close(write_handle);
+        errno::set_errno(errno::ENOPKG);
+        return -1;
+    }
 
     // Register both handles in the fd table.
     // Pipe read end is O_RDONLY, write end is O_WRONLY, plus any
@@ -222,6 +239,18 @@ pub extern "C" fn pipe2(pipefd: *mut Fd, flags: i32) -> i32 {
         errno::set_errno(errno::EMFILE);
         return -1;
     };
+
+    // Linux copies the descriptors out last, and a NULL `pipefd` faults
+    // there; the pipe and its descriptors go again.  Nothing was handed out,
+    // so a failed close could only leave them open, with nobody to tell.
+    if pipefd.is_null() {
+        let _ = fdtable::close_fd(read_fd);
+        let _ = fdtable::close_fd(write_fd);
+        let _ = pipe_kernel_close(read_handle);
+        let _ = pipe_kernel_close(write_handle);
+        errno::set_errno(errno::EFAULT);
+        return -1;
+    }
 
     // Set FD_CLOEXEC if O_CLOEXEC was requested.
     if flags & crate::fcntl::O_CLOEXEC != 0 {
@@ -333,13 +362,63 @@ mod tests {
 
     // -- Phase 99: pipe2 flag-mask validation --
 
-    /// `PIPE2_VALID_FLAGS` is the OR of the three accepted bits.
+    /// `PIPE2_VALID_FLAGS` is the OR of Linux 6.6's four accepted bits.
     #[test]
     fn test_pipe2_valid_flags_is_or_of_known_bits() {
         assert_eq!(
             PIPE2_VALID_FLAGS,
-            crate::fcntl::O_CLOEXEC | crate::fcntl::O_NONBLOCK | PIPE2_O_DIRECT,
+            crate::fcntl::O_CLOEXEC
+                | crate::fcntl::O_NONBLOCK
+                | PIPE2_O_DIRECT
+                | O_NOTIFICATION_PIPE,
         );
+        assert_eq!(O_NOTIFICATION_PIPE, 0o200, "O_EXCL's bit on x86-64");
+    }
+
+    /// A notification pipe passes the mask and is refused as the pipe is
+    /// made -- ENOPKG, a kernel without watch queues -- before the
+    /// descriptors, and so before a NULL `pipefd` is looked at.  It was
+    /// EINVAL until 2026-09-26.
+    #[test]
+    fn test_pipe2_notification_pipe_is_enopkg() {
+        let mut fds: [Fd; 2] = [-1, -1];
+        errno::set_errno(0);
+        assert_eq!(pipe2(fds.as_mut_ptr(), O_NOTIFICATION_PIPE), -1);
+        assert_eq!(errno::get_errno(), errno::ENOPKG);
+        assert_eq!(fds, [-1, -1]);
+        errno::set_errno(0);
+        assert_eq!(
+            pipe2(
+                core::ptr::null_mut(),
+                O_NOTIFICATION_PIPE | crate::fcntl::O_CLOEXEC
+            ),
+            -1
+        );
+        assert_eq!(errno::get_errno(), errno::ENOPKG);
+    }
+
+    /// A NULL `pipefd` is found where Linux finds it, copying the
+    /// descriptors out -- so they existed, and are given back: the lowest
+    /// free descriptor is the same after the call as before it.
+    #[test]
+    fn test_pipe2_null_pipefd_is_found_last_and_leaks_nothing() {
+        let probe = || {
+            let fd = fdtable::alloc_fd(HandleKind::File, 0).expect("a free descriptor");
+            let _ = fdtable::close_fd(fd);
+            fd
+        };
+        let before = probe();
+        errno::set_errno(0);
+        assert_eq!(pipe2(core::ptr::null_mut(), crate::fcntl::O_CLOEXEC), -1);
+        assert_eq!(errno::get_errno(), errno::EFAULT);
+        assert_eq!(probe(), before, "both descriptors were given back");
+        // And a real array gets two descriptors from the same place.
+        let mut fds: [Fd; 2] = [-1, -1];
+        assert_eq!(pipe2(fds.as_mut_ptr(), 0), 0);
+        assert_eq!(fds[0], before);
+        for fd in fds {
+            assert_eq!(crate::file::close(fd), 0);
+        }
     }
 
     /// `O_DIRECT` for pipe2 matches the Linux/x86_64 numeric value.

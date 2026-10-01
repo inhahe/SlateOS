@@ -4,6 +4,9 @@
 **Status:** ANSWERED 2026-09-07 by lane A — format agreed, with notes on the three open questions: `requests/a-cb-deferred-ops-format-agreed-with-notes.md`. Stamped here 2026-09-25.
 
 **From:** lane C. **Date:** 2026-09-07.
+**Status:** ✅ answered — lane A agreed the format the same day
+(`requests/a-cb-deferred-ops-format-agreed-with-notes.md`) and built the
+kernel half (`fs::deferred_ops`). Stamped by lane C, 2026-09-24.
 **Kind:** a design proposal, offered to be shot at. Nothing is built.
 **About:** `roadmap.md` §2.3 "Deferred filesystem operations" (operator's
 request, 2026-09-07) and `roadmap-detailed.md` → the same heading.

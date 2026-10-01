@@ -46,6 +46,12 @@
 //! present, the picture is checked against [`Limits`] before its buffer
 //! exists, and nothing else is sized from the file: the palette is a fixed 256
 //! entries whatever the file claims.
+//!
+//! Portions of this file are adapted from image-rs 0.25.10's
+//! `src/codecs/bmp/decoder.rs` (copyright the image-rs contributors), with
+//! Chromium's patches to it (copyright The Chromium Authors), and changed for
+//! this project; used under the MIT licence (`licenses/image-rs-LICENSE-MIT`)
+//! and Chromium's BSD licence (`licenses/chromium-LICENSE`).
 
 use alloc::vec;
 
@@ -532,6 +538,49 @@ fn read_palette(data: &[u8], header: &Header) -> ImageResult<[[u8; 3]; PALETTE_E
 pub fn dimensions(bytes: &[u8]) -> ImageResult<(u32, u32)> {
     let header = read_header(bytes)?;
     Ok((header.width, header.height))
+}
+
+/// How the picture stores its pixels: a palette index of the header's bit
+/// count, eight bits a channel, or the widths of its bit-field masks -- with
+/// the alpha the decoder takes, from an alpha mask or a V4/V5 header's.
+///
+/// # Errors
+///
+/// As [`dimensions`].
+pub fn pixel_format(bytes: &[u8]) -> ImageResult<crate::PixelFormat> {
+    use crate::{ColourModel, PixelFormat};
+    let h = read_header(bytes)?;
+    let colour = ColourModel::Colour;
+    Ok(match h.layout {
+        Layout::Palette | Layout::Rle8 | Layout::Rle4 => PixelFormat::uniform(
+            u8::try_from(h.bit_count).unwrap_or(u8::MAX),
+            1,
+            colour,
+            true,
+            false,
+        ),
+        Layout::Rgb24 | Layout::Rle24 | Layout::Rgb32 => {
+            PixelFormat::uniform(8, 3, colour, false, false)
+        }
+        Layout::Rgba32 => PixelFormat::uniform(8, 4, colour, false, true),
+        Layout::Rgb16 => masked(Bitfields::RGB555, false),
+        Layout::Bitfields16 | Layout::Bitfields32 => masked(h.bitfields, h.alpha),
+    })
+}
+
+/// A pixel of bit-field channels: the widest channel, and all of them summed.
+fn masked(fields: Bitfields, alpha: bool) -> crate::PixelFormat {
+    let a = if alpha { fields.a.len } else { 0 };
+    let lens = [fields.r.len, fields.g.len, fields.b.len, a];
+    let widest = lens.iter().copied().max().unwrap_or(0);
+    crate::PixelFormat {
+        bits_per_channel: u8::try_from(widest).unwrap_or(u8::MAX),
+        bits_per_pixel: lens.iter().fold(0u32, |sum, &len| sum.saturating_add(len)),
+        channels: if alpha { 4 } else { 3 },
+        model: crate::ColourModel::Colour,
+        palette: false,
+        has_alpha: alpha,
+    }
 }
 
 /// Decode a BMP to `0xAARRGGBB` pixels.

@@ -32,15 +32,19 @@
 //! N threw away a game in progress without asking (`known-issues.md` ->
 //! `TD-C-TWENTY-ONE-APPLICATIONS-DRAW-A-UI-THAT-CANNOT-BE-CLICKED`).
 
-use appearance::Palette;
+use gamechrome::Chrome;
+use guitk::button::{Kind, State};
 use guitk::color::Color;
 #[cfg(test)]
 use guitk::event::Modifiers;
 use guitk::event::{Event, EventResult, Key, KeyEvent, MouseButton, MouseEvent, MouseEventKind};
 use guitk::frame::{Frame, Rect};
+use guitk::palette::{Palette, SurfaceStyle};
 use guitk::probe::Probe;
 use guitk::render::{FontWeightHint, RenderCommand, RenderTree, TextOverflow};
 use guitk::style::CornerRadii;
+use guitk::surface::{Edge, Surface};
+use guitk::theme::with_alpha;
 use oswindow::app::{self, App, Response};
 use pathtext::ShowPath;
 use randrange::{RandomSource, SeededRng, seeded_from_system};
@@ -48,21 +52,76 @@ use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-// ── Catppuccin Mocha palette ────────────────────────────────────────
-const BASE: Color = Color::from_hex(0x1E1E2E);
-const SURFACE0: Color = Color::from_hex(0x313244);
-const SURFACE1: Color = Color::from_hex(0x45475A);
-const TEXT_COLOR: Color = Color::from_hex(0xCDD6F4);
-const SUBTEXT0: Color = Color::from_hex(0xA6ADC8);
-const BLUE: Color = Color::from_hex(0x89B4FA);
-const GREEN: Color = Color::from_hex(0xA6E3A1);
-const RED: Color = Color::from_hex(0xF38BA8);
-const YELLOW: Color = Color::from_hex(0xF9E2AF);
-const PEACH: Color = Color::from_hex(0xFAB387);
-const LAVENDER: Color = Color::from_hex(0xB4BEFE);
-const TEAL: Color = Color::from_hex(0x94E2D5);
-const MAUVE: Color = Color::from_hex(0xCBA6F7);
-const OVERLAY0: Color = Color::from_hex(0x6C7086);
+// ── Colours ─────────────────────────────────────────────────────────
+//
+// Everything in this game follows the user's palette (the operator's answer
+// to C-Q16, §1422, and lane C's call for this game): its surfaces and text
+// from the palette's roles, each hue in the palette's ink for it, which reads
+// on the page in a light theme as in a dark one. It was all a copy of
+// Catppuccin Mocha, dark on a light desktop.
+
+/// The colours the window draws in, from the user's palette.
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct Colours {
+    /// The page.
+    base: Color,
+    /// Raised.
+    surface0: Color,
+    /// Raised further.
+    surface1: Color,
+    /// Text.
+    text: Color,
+    /// Secondary text.
+    subtext0: Color,
+    /// The palette's blue, inked for the page.
+    blue: Color,
+    /// The palette's green, inked for the page.
+    green: Color,
+    /// The palette's red, inked for the page.
+    red: Color,
+    /// The palette's yellow, inked for the page.
+    yellow: Color,
+    /// The palette's peach, inked for the page.
+    peach: Color,
+    /// The palette's lavender, inked for the page.
+    lavender: Color,
+    /// The palette's teal, inked for the page.
+    teal: Color,
+    /// The palette's mauve, inked for the page.
+    mauve: Color,
+    /// A switched-off control, and faint lines.
+    overlay0: Color,
+
+    /// What the buttons sit on: the page, or a card's raised grey under the
+    /// card look.
+    panel: Color,
+}
+
+impl Colours {
+    fn of(p: &Palette) -> Self {
+        Self {
+            base: p.base,
+            surface0: p.surface0,
+            surface1: p.surface1,
+            text: p.text,
+            subtext0: p.subtext0,
+            blue: p.ink(p.blue),
+            green: p.ink(p.green),
+            red: p.ink(p.red),
+            yellow: p.ink(p.yellow),
+            peach: p.ink(p.peach),
+            lavender: p.ink(p.lavender),
+            teal: p.ink(p.teal),
+            mauve: p.ink(p.mauve),
+            overlay0: p.overlay0,
+            panel: if p.surface_style() == SurfaceStyle::Cards {
+                p.surface0
+            } else {
+                p.base
+            },
+        }
+    }
+}
 
 // ── Layout constants ────────────────────────────────────────────────
 /// Playfield dimensions (the main pinball table area).
@@ -738,6 +797,8 @@ struct Pinball {
     window: (f32, f32),
     /// The user's colours, for the card; the table keeps its own.
     palette: Palette,
+    /// `palette`'s colours as this window draws them: rebuilt with it.
+    colours: Colours,
 }
 
 impl Pinball {
@@ -806,6 +867,9 @@ impl Pinball {
             held: None,
             window: (WINDOW_WIDTH, WINDOW_HEIGHT),
             palette: Palette::from_settings(&appearance::AppearanceSettings::default()),
+            colours: Colours::of(&Palette::from_settings(
+                &appearance::AppearanceSettings::default(),
+            )),
         };
         app.prepare_ball();
         app
@@ -916,6 +980,7 @@ impl Pinball {
         fresh.clock = self.clock;
         fresh.window = self.window;
         fresh.palette = self.palette;
+        fresh.colours = self.colours;
         *self = fresh;
     }
 
@@ -1617,7 +1682,7 @@ impl Pinball {
         let window = Rect::new(0.0, 0.0, width.max(0.0), height.max(0.0));
         let mut f = Frame::new(window.w, window.h);
         f.clip(window);
-        fill(&mut f, window, BASE, 0.0);
+        fill(&mut f, window, self.colours.base, 0.0);
         let dx = ((window.w - WINDOW_WIDTH) / 2.0).max(0.0).floor();
         let dy = ((window.h - WINDOW_HEIGHT) / 2.0).max(0.0).floor();
         f.translate(dx, dy);
@@ -1682,6 +1747,35 @@ impl Pinball {
         }
     }
 
+    /// A button: the toolkit's push button at this game's size, switched off
+    /// and taking no press when it would do nothing; on `ground`.
+    fn button(
+        &self,
+        f: &mut Frame<Target>,
+        r: Rect,
+        label: &str,
+        target: Target,
+        enabled: bool,
+        ground: Color,
+    ) {
+        gamechrome::button(
+            f,
+            &self.palette,
+            (r.x, r.y, r.w, r.h),
+            label,
+            LABEL_FONT_SIZE,
+            Kind::Plain,
+            State {
+                disabled: !enabled,
+                ..State::default()
+            },
+            ground,
+        );
+        if enabled {
+            f.hit(target, r);
+        }
+    }
+
     /// The sidebar's buttons, along its bottom.
     fn draw_buttons(&self, f: &mut Frame<Target>) {
         let (sx, sy) = (PADDING, PADDING);
@@ -1691,33 +1785,37 @@ impl Pinball {
         let row2 = sy + TABLE_HEIGHT - 34.0;
         let (left, right) = (sx + 10.0, sx + 10.0 + w + 4.0);
         let paused = self.phase == GamePhase::Paused;
-        button(
+        self.button(
             f,
             Rect::new(left, row1, w, 26.0),
             "New game",
             Target::NewGame,
             true,
+            self.colours.panel,
         );
-        button(
+        self.button(
             f,
             Rect::new(right, row1, w, 26.0),
             if paused { "Resume" } else { "Pause" },
             Target::Pause,
             self.phase != GamePhase::GameOver,
+            self.colours.panel,
         );
-        button(
+        self.button(
             f,
             Rect::new(left, row2, w, 26.0),
             "Nudge",
             Target::Nudge,
             self.phase == GamePhase::Playing && !self.tilt.tilted,
+            self.colours.panel,
         );
-        button(
+        self.button(
             f,
             Rect::new(right, row2, w, 26.0),
             "Keys (F1)",
             Target::Keys,
             true,
+            self.colours.panel,
         );
     }
 
@@ -1734,8 +1832,17 @@ impl Pinball {
             28.0,
         );
         match self.phase {
-            GamePhase::Paused => button(f, r, "Resume", Target::Resume, true),
-            GamePhase::GameOver => button(f, r, "Play again", Target::PlayAgain, true),
+            GamePhase::Paused => {
+                self.button(f, r, "Resume", Target::Resume, true, self.colours.panel);
+            }
+            GamePhase::GameOver => self.button(
+                f,
+                r,
+                "Play again",
+                Target::PlayAgain,
+                true,
+                self.colours.panel,
+            ),
             _ => {}
         }
     }
@@ -1746,7 +1853,7 @@ impl Pinball {
         fill(
             f,
             Rect::new(tx, ty, TABLE_WIDTH, TABLE_HEIGHT),
-            Color::rgba(0, 0, 0, 170),
+            Chrome::of(&self.palette).veil,
             8.0,
         );
         // Modal: the table and the sidebar take no press while it is asked.
@@ -1757,36 +1864,39 @@ impl Pinball {
             TABLE_WIDTH - 40.0,
             140.0,
         );
-        fill(f, card, SURFACE0, 8.0);
+        self.palette
+            .push_surface(f, card.x, card.y, card.w, card.h, 8.0, Surface::Panel);
         centred(
             f,
             Rect::new(card.x, card.y + 12.0, card.w, 24.0),
             "New game?",
             OVERLAY_FONT_SIZE,
-            TEXT_COLOR,
+            self.colours.text,
         );
         centred(
             f,
             Rect::new(card.x, card.y + 42.0, card.w, 18.0),
             &format!("This one ends, at {}.", self.score),
             LABEL_FONT_SIZE,
-            SUBTEXT0,
+            self.colours.subtext0,
         );
         let w = (card.w - 36.0) / 2.0;
         let y = card.bottom() - 42.0;
-        button(
+        self.button(
             f,
             Rect::new(card.x + 12.0, y, w, 28.0),
             "New game (N)",
             Target::ConfirmNewGame,
             true,
+            self.colours.panel,
         );
-        button(
+        self.button(
             f,
             Rect::new(card.x + 24.0 + w, y, w, 28.0),
             "Keep playing",
             Target::KeepPlaying,
             true,
+            self.colours.panel,
         );
     }
 
@@ -1803,7 +1913,7 @@ impl Pinball {
             y: 0.0,
             width: WINDOW_WIDTH,
             height: WINDOW_HEIGHT,
-            color: BASE,
+            color: self.colours.base,
             corner_radii: CornerRadii::ZERO,
         });
 
@@ -1838,22 +1948,18 @@ impl Pinball {
         let sw = SIDEBAR_WIDTH - PADDING;
         let sh = TABLE_HEIGHT;
 
-        // Sidebar background.
-        cmds.push(RenderCommand::FillRect {
-            x: sx,
-            y: sy,
-            width: sw,
-            height: sh,
-            color: SURFACE0,
-            corner_radii: CornerRadii::all(6.0),
-        });
+        // Sidebar background: the toolkit's card, so the palette's inks read
+        // on it in either surface look (on a raised grey in a light theme
+        // they were 3.6:1).
+        self.palette
+            .push_surface(cmds, sx, sy, sw, sh, 6.0, Surface::Card);
 
         // Title.
         cmds.push(RenderCommand::Text {
             x: sx + 10.0,
             y: sy + 15.0,
             text: "PINBALL".to_string(),
-            color: LAVENDER,
+            color: self.colours.lavender,
             font_size: TITLE_FONT_SIZE,
             font_weight: FontWeightHint::Bold,
             max_width: None,
@@ -1865,7 +1971,7 @@ impl Pinball {
             x: sx + 10.0,
             y: sy + 50.0,
             text: "SCORE".to_string(),
-            color: SUBTEXT0,
+            color: self.colours.subtext0,
             font_size: LABEL_FONT_SIZE,
             font_weight: FontWeightHint::Regular,
             max_width: None,
@@ -1875,7 +1981,7 @@ impl Pinball {
             x: sx + 10.0,
             y: sy + 68.0,
             text: format!("{}", self.score),
-            color: YELLOW,
+            color: self.colours.yellow,
             font_size: SCORE_FONT_SIZE,
             font_weight: FontWeightHint::Bold,
             max_width: None,
@@ -1888,7 +1994,7 @@ impl Pinball {
                 x: sx + 10.0,
                 y: sy + 90.0,
                 text: format!("COMBO x{}", self.combo),
-                color: PEACH,
+                color: self.colours.peach,
                 font_size: LABEL_FONT_SIZE,
                 font_weight: FontWeightHint::Bold,
                 max_width: None,
@@ -1901,7 +2007,7 @@ impl Pinball {
             x: sx + 10.0,
             y: sy + 115.0,
             text: "BALLS".to_string(),
-            color: SUBTEXT0,
+            color: self.colours.subtext0,
             font_size: LABEL_FONT_SIZE,
             font_weight: FontWeightHint::Regular,
             max_width: None,
@@ -1917,7 +2023,7 @@ impl Pinball {
                 y: by - r,
                 width: r * 2.0,
                 height: r * 2.0,
-                color: TEAL,
+                color: self.colours.teal,
                 corner_radii: CornerRadii::all(r),
             });
         }
@@ -1928,7 +2034,7 @@ impl Pinball {
                 x: sx + 10.0,
                 y: sy + 160.0,
                 text: "MULTI-BALL!".to_string(),
-                color: GREEN,
+                color: self.colours.green,
                 font_size: LABEL_FONT_SIZE,
                 font_weight: FontWeightHint::Bold,
                 max_width: None,
@@ -1942,7 +2048,7 @@ impl Pinball {
                 x: sx + 10.0,
                 y: sy + 180.0,
                 text: if self.tilt.tilted { "TILT!" } else { "DANGER" }.to_string(),
-                color: RED,
+                color: self.colours.red,
                 font_size: SCORE_FONT_SIZE,
                 font_weight: FontWeightHint::Bold,
                 max_width: None,
@@ -1956,7 +2062,7 @@ impl Pinball {
             x: sx + 10.0,
             y: stats_y,
             text: "STATS".to_string(),
-            color: SUBTEXT0,
+            color: self.colours.subtext0,
             font_size: LABEL_FONT_SIZE,
             font_weight: FontWeightHint::Regular,
             max_width: None,
@@ -1972,7 +2078,7 @@ impl Pinball {
                 x: sx + 10.0,
                 y: stats_y + 18.0 + i as f32 * 16.0,
                 text: item.clone(),
-                color: TEXT_COLOR,
+                color: self.colours.text,
                 font_size: LABEL_FONT_SIZE,
                 font_weight: FontWeightHint::Regular,
                 max_width: None,
@@ -1988,9 +2094,9 @@ impl Pinball {
             y: stats_y + 72.0,
             text: format!("Targets: {}/{}", targets_hit, targets_total),
             color: if targets_hit == targets_total {
-                GREEN
+                self.colours.green
             } else {
-                SUBTEXT0
+                self.colours.subtext0
             },
             font_size: LABEL_FONT_SIZE,
             font_weight: FontWeightHint::Regular,
@@ -2004,7 +2110,7 @@ impl Pinball {
             x: sx + 10.0,
             y: hs_y,
             text: "HIGH SCORES".to_string(),
-            color: SUBTEXT0,
+            color: self.colours.subtext0,
             font_size: LABEL_FONT_SIZE,
             font_weight: FontWeightHint::Regular,
             max_width: None,
@@ -2015,15 +2121,15 @@ impl Pinball {
             y1: hs_y + 14.0,
             x2: sx + sw - 10.0,
             y2: hs_y + 14.0,
-            color: OVERLAY0,
+            color: self.colours.overlay0,
             width: 1.0,
         });
         for (i, entry) in self.high_scores.iter().enumerate() {
             let rank_color = match i {
-                0 => YELLOW,
-                1 => SUBTEXT0,
-                2 => PEACH,
-                _ => OVERLAY0,
+                0 => self.colours.yellow,
+                1 => self.colours.subtext0,
+                2 => self.colours.peach,
+                _ => self.colours.overlay0,
             };
             cmds.push(RenderCommand::Text {
                 x: sx + 10.0,
@@ -2041,7 +2147,7 @@ impl Pinball {
                 x: sx + 10.0,
                 y: hs_y + 20.0,
                 text: "No scores yet".to_string(),
-                color: OVERLAY0,
+                color: self.colours.subtext0,
                 font_size: LABEL_FONT_SIZE,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(sw - 20.0),
@@ -2058,7 +2164,7 @@ impl Pinball {
                     x: sx + 10.0,
                     y: note_y + n as f32 * 13.0,
                     text: line.clone(),
-                    color: PEACH,
+                    color: self.colours.peach,
                     font_size: FOOTER_FONT_SIZE,
                     font_weight: FontWeightHint::Regular,
                     max_width: Some(sw - 20.0),
@@ -2074,7 +2180,7 @@ impl Pinball {
                 x: sx + 10.0,
                 y: bar_y,
                 text: "POWER".to_string(),
-                color: SUBTEXT0,
+                color: self.colours.subtext0,
                 font_size: LABEL_FONT_SIZE,
                 font_weight: FontWeightHint::Regular,
                 max_width: None,
@@ -2088,16 +2194,16 @@ impl Pinball {
                 y: bar_y + 16.0,
                 width: bar_w,
                 height: bar_h,
-                color: SURFACE1,
+                color: self.colours.surface1,
                 corner_radii: CornerRadii::all(3.0),
             });
             // Bar fill.
             let fill_color = if self.launch_power > 0.8 {
-                RED
+                self.colours.red
             } else if self.launch_power > 0.5 {
-                YELLOW
+                self.colours.yellow
             } else {
-                GREEN
+                self.colours.green
             };
             cmds.push(RenderCommand::FillRect {
                 x: sx + 10.0,
@@ -2120,7 +2226,7 @@ impl Pinball {
             y: ty,
             width: TABLE_WIDTH,
             height: TABLE_HEIGHT,
-            color: SURFACE0,
+            color: self.colours.surface0,
             corner_radii: CornerRadii::all(8.0),
         });
 
@@ -2130,7 +2236,7 @@ impl Pinball {
             y: ty + 3.0,
             width: TABLE_WIDTH - 6.0,
             height: TABLE_HEIGHT - 6.0,
-            color: Color::from_hex(0x252540),
+            color: self.palette.mantle,
             corner_radii: CornerRadii::all(6.0),
         });
 
@@ -2141,7 +2247,7 @@ impl Pinball {
             y: ty + 3.0,
             width: PLUNGER_LANE_WIDTH - 3.0,
             height: TABLE_HEIGHT - 6.0,
-            color: Color::from_hex(0x1A1A30),
+            color: self.palette.crust,
             corner_radii: CornerRadii::all(3.0),
         });
 
@@ -2151,7 +2257,7 @@ impl Pinball {
             y1: ty + 3.0,
             x2: lane_x,
             y2: ty + TABLE_HEIGHT - 100.0,
-            color: OVERLAY0,
+            color: self.colours.overlay0,
             width: 2.0,
         });
 
@@ -2187,7 +2293,7 @@ impl Pinball {
             y1: ty + entry.y,
             x2: tx + entry.x + self.ramp.entry_width / 2.0,
             y2: ty + entry.y,
-            color: MAUVE,
+            color: self.colours.mauve,
             width: 3.0,
         });
 
@@ -2197,7 +2303,7 @@ impl Pinball {
             y1: ty + entry.y,
             x2: tx + exit.x - 10.0,
             y2: ty + exit.y,
-            color: Color::rgba(203, 166, 247, 80),
+            color: with_alpha(self.palette.mauve, 80),
             width: 1.5,
         });
         cmds.push(RenderCommand::Line {
@@ -2205,7 +2311,7 @@ impl Pinball {
             y1: ty + entry.y,
             x2: tx + exit.x + 10.0,
             y2: ty + exit.y,
-            color: Color::rgba(203, 166, 247, 80),
+            color: with_alpha(self.palette.mauve, 80),
             width: 1.5,
         });
 
@@ -2215,7 +2321,7 @@ impl Pinball {
             y: ty + exit.y - 3.0,
             width: 16.0,
             height: 6.0,
-            color: MAUVE,
+            color: self.colours.mauve,
             corner_radii: CornerRadii::all(2.0),
         });
 
@@ -2224,7 +2330,7 @@ impl Pinball {
             x: tx + entry.x - 15.0,
             y: ty + entry.y + 8.0,
             text: "RAMP".to_string(),
-            color: MAUVE,
+            color: self.colours.mauve,
             font_size: 9.0,
             font_weight: FontWeightHint::Bold,
             max_width: None,
@@ -2247,13 +2353,17 @@ impl Pinball {
                     y: by - glow_r,
                     width: glow_r * 2.0,
                     height: glow_r * 2.0,
-                    color: Color::rgba(250, 179, 135, 100),
+                    color: with_alpha(self.palette.peach, 100),
                     corner_radii: CornerRadii::all(glow_r),
                 });
             }
 
             // Bumper body.
-            let body_color = if flashing { PEACH } else { BLUE };
+            let body_color = if flashing {
+                self.colours.peach
+            } else {
+                self.colours.blue
+            };
             cmds.push(RenderCommand::FillRect {
                 x: bx - r,
                 y: by - r,
@@ -2270,7 +2380,11 @@ impl Pinball {
                 y: by - inner_r,
                 width: inner_r * 2.0,
                 height: inner_r * 2.0,
-                color: if flashing { YELLOW } else { LAVENDER },
+                color: if flashing {
+                    self.colours.yellow
+                } else {
+                    self.colours.lavender
+                },
                 corner_radii: CornerRadii::all(inner_r),
             });
 
@@ -2279,7 +2393,7 @@ impl Pinball {
                 x: bx - 4.0,
                 y: by - 5.0,
                 text: format!("{}", bumper.hit_count),
-                color: BASE,
+                color: self.colours.base,
                 font_size: 10.0,
                 font_weight: FontWeightHint::Bold,
                 max_width: None,
@@ -2291,11 +2405,11 @@ impl Pinball {
     fn render_targets(&self, cmds: &mut Vec<RenderCommand>, tx: f32, ty: f32) {
         for target in &self.targets {
             let color = if target.active {
-                RED
+                self.colours.red
             } else if target.is_flashing(self.total_ms) {
-                YELLOW
+                self.colours.yellow
             } else {
-                OVERLAY0
+                self.colours.overlay0
             };
             cmds.push(RenderCommand::FillRect {
                 x: tx + target.pos.x,
@@ -2312,7 +2426,7 @@ impl Pinball {
             x: tx + 90.0,
             y: ty + 255.0,
             text: "TARGETS".to_string(),
-            color: SUBTEXT0,
+            color: self.colours.subtext0,
             font_size: 9.0,
             font_weight: FontWeightHint::Regular,
             max_width: None,
@@ -2342,7 +2456,7 @@ impl Pinball {
             y1: ty + pivot.y,
             x2: tx + tip.x,
             y2: ty + tip.y,
-            color: TEAL,
+            color: self.colours.teal,
             width: FLIPPER_WIDTH,
         });
 
@@ -2353,7 +2467,7 @@ impl Pinball {
             y: ty + pivot.y - pr,
             width: pr * 2.0,
             height: pr * 2.0,
-            color: GREEN,
+            color: self.colours.green,
             corner_radii: CornerRadii::all(pr),
         });
 
@@ -2364,7 +2478,7 @@ impl Pinball {
             y: ty + tip.y - tr,
             width: tr * 2.0,
             height: tr * 2.0,
-            color: GREEN,
+            color: self.colours.green,
             corner_radii: CornerRadii::all(tr),
         });
     }
@@ -2378,7 +2492,7 @@ impl Pinball {
             y1: ty + TABLE_HEIGHT - 120.0,
             x2: tx + 30.0,
             y2: drain_y,
-            color: OVERLAY0,
+            color: self.colours.overlay0,
             width: 3.0,
         });
 
@@ -2389,7 +2503,7 @@ impl Pinball {
             y1: ty + TABLE_HEIGHT - 120.0,
             x2: tx + right_edge - 30.0,
             y2: drain_y,
-            color: OVERLAY0,
+            color: self.colours.overlay0,
             width: 3.0,
         });
 
@@ -2399,7 +2513,7 @@ impl Pinball {
             y: drain_y,
             width: right_edge - 60.0,
             height: 4.0,
-            color: RED,
+            color: self.colours.red,
             corner_radii: CornerRadii::all(2.0),
         });
     }
@@ -2432,7 +2546,7 @@ impl Pinball {
                 y: by - r,
                 width: r * 2.0,
                 height: r * 2.0,
-                color: TEXT_COLOR,
+                color: self.colours.text,
                 corner_radii: CornerRadii::all(r),
             });
 
@@ -2464,7 +2578,7 @@ impl Pinball {
             y: plunger_top_y,
             width: PLUNGER_LANE_WIDTH - 12.0,
             height: plunger_base_y - plunger_top_y,
-            color: OVERLAY0,
+            color: self.colours.overlay0,
             corner_radii: CornerRadii::all(2.0),
         });
 
@@ -2474,7 +2588,7 @@ impl Pinball {
             y: plunger_top_y - 6.0,
             width: PLUNGER_LANE_WIDTH - 6.0,
             height: 10.0,
-            color: PEACH,
+            color: self.colours.peach,
             corner_radii: CornerRadii::all(3.0),
         });
 
@@ -2488,7 +2602,7 @@ impl Pinball {
                 y1: cy,
                 x2: lane_x + PLUNGER_LANE_WIDTH - 8.0,
                 y2: cy,
-                color: SUBTEXT0,
+                color: self.colours.subtext0,
                 width: 1.0,
             });
         }
@@ -2497,21 +2611,24 @@ impl Pinball {
     fn render_footer(&self, cmds: &mut Vec<RenderCommand>) {
         let fy = WINDOW_HEIGHT - FOOTER_HEIGHT;
 
-        cmds.push(RenderCommand::FillRect {
-            x: 0.0,
-            y: fy,
-            width: WINDOW_WIDTH,
-            height: FOOTER_HEIGHT,
-            color: SURFACE0,
-            corner_radii: CornerRadii::ZERO,
-        });
+        self.palette.push_surface(
+            cmds,
+            0.0,
+            fy,
+            WINDOW_WIDTH,
+            FOOTER_HEIGHT,
+            0.0,
+            Surface::Strip(Edge::Top),
+        );
 
         cmds.push(RenderCommand::Text {
             x: PADDING,
             y: fy + 12.0,
             text: "Z: Left | M: Right | Space: Launch | Up: Nudge | P: Pause | F1: Keys"
                 .to_string(),
-            color: OVERLAY0,
+            // Secondary text: the keys are read, and the palette's faintest
+            // grey is 2.3:1 on a light band.
+            color: self.colours.subtext0,
             font_size: FOOTER_FONT_SIZE,
             font_weight: FontWeightHint::Regular,
             max_width: None,
@@ -2528,6 +2645,62 @@ impl Pinball {
         }
     }
 
+    /// Lines on the toolkit's panel, centred on the table (its middle
+    /// `lift` above the table's): a ground of their own, so what the table
+    /// drew under them -- a spark, a red drain -- is not what they are read
+    /// on, and each line centred by measuring it. They were placed by
+    /// eyeballed offsets from the middle over the veil alone, where "GAME
+    /// OVER" was 3.2:1 on a light theme's red-tinted table.
+    fn overlay_card(
+        &self,
+        cmds: &mut Vec<RenderCommand>,
+        lift: f32,
+        lines: &[(&str, f32, FontWeightHint, Color)],
+    ) {
+        let tx = Self::table_origin_x();
+        let ty = Self::table_origin_y();
+        let pad = 12.0;
+        let gap = 6.0;
+        let wide = lines
+            .iter()
+            .map(|(s, size, weight, _)| guitk::text::measure(s, *size, *weight))
+            .fold(0.0_f32, f32::max);
+        #[allow(
+            clippy::cast_precision_loss,
+            reason = "three lines at most; exact in f32"
+        )]
+        let tall = lines
+            .iter()
+            .map(|(_, size, weight, _)| guitk::text::line_height(*size, *weight))
+            .sum::<f32>()
+            + gap * lines.len().saturating_sub(1) as f32;
+        let w = (wide + pad * 2.0).min(TABLE_WIDTH);
+        let h = (tall + pad * 2.0).min(TABLE_HEIGHT);
+        let card = Rect::new(
+            tx + (TABLE_WIDTH - w) / 2.0,
+            ty + TABLE_HEIGHT / 2.0 - lift - h / 2.0,
+            w,
+            h,
+        );
+        self.palette
+            .push_surface(cmds, card.x, card.y, card.w, card.h, 8.0, Surface::Panel);
+        let mut y = card.y + pad;
+        for &(line, size, weight, color) in lines {
+            let text_w = guitk::text::measure(line, size, weight).min(card.w - pad * 2.0);
+            cmds.push(RenderCommand::Text {
+                x: card.x + (card.w - text_w) / 2.0,
+                y,
+                text: line.to_string(),
+                color,
+                font_size: size,
+                font_weight: weight,
+                max_width: Some((card.w - pad * 2.0).max(0.0)),
+                overflow: TextOverflow::Ellipsis,
+            });
+            y += guitk::text::line_height(size, weight) + gap;
+        }
+    }
+
     fn render_pause_overlay(&self, cmds: &mut Vec<RenderCommand>) {
         let tx = Self::table_origin_x();
         let ty = Self::table_origin_y();
@@ -2538,32 +2711,27 @@ impl Pinball {
             y: ty,
             width: TABLE_WIDTH,
             height: TABLE_HEIGHT,
-            color: Color::rgba(0, 0, 0, 150),
+            color: Chrome::of(&self.palette).veil,
             corner_radii: CornerRadii::all(8.0),
         });
-
-        // Pause text.
-        cmds.push(RenderCommand::Text {
-            x: tx + TABLE_WIDTH / 2.0 - 40.0,
-            y: ty + TABLE_HEIGHT / 2.0 - 15.0,
-            text: "PAUSED".to_string(),
-            color: TEXT_COLOR,
-            font_size: OVERLAY_FONT_SIZE,
-            font_weight: FontWeightHint::Bold,
-            max_width: None,
-            overflow: TextOverflow::Clip,
-        });
-
-        cmds.push(RenderCommand::Text {
-            x: tx + TABLE_WIDTH / 2.0 - 60.0,
-            y: ty + TABLE_HEIGHT / 2.0 + 15.0,
-            text: "Press P to resume".to_string(),
-            color: SUBTEXT0,
-            font_size: LABEL_FONT_SIZE,
-            font_weight: FontWeightHint::Regular,
-            max_width: None,
-            overflow: TextOverflow::Clip,
-        });
+        self.overlay_card(
+            cmds,
+            0.0,
+            &[
+                (
+                    "PAUSED",
+                    OVERLAY_FONT_SIZE,
+                    FontWeightHint::Bold,
+                    self.colours.text,
+                ),
+                (
+                    "Press P to resume",
+                    LABEL_FONT_SIZE,
+                    FontWeightHint::Regular,
+                    self.colours.subtext0,
+                ),
+            ],
+        );
     }
 
     fn render_game_over_overlay(&self, cmds: &mut Vec<RenderCommand>) {
@@ -2576,67 +2744,47 @@ impl Pinball {
             y: ty,
             width: TABLE_WIDTH,
             height: TABLE_HEIGHT,
-            color: Color::rgba(0, 0, 0, 180),
+            color: Chrome::of(&self.palette).veil,
             corner_radii: CornerRadii::all(8.0),
         });
-
-        cmds.push(RenderCommand::Text {
-            x: tx + TABLE_WIDTH / 2.0 - 55.0,
-            y: ty + TABLE_HEIGHT / 2.0 - 40.0,
-            text: "GAME OVER".to_string(),
-            color: RED,
-            font_size: OVERLAY_FONT_SIZE,
-            font_weight: FontWeightHint::Bold,
-            max_width: None,
-            overflow: TextOverflow::Clip,
-        });
-
-        cmds.push(RenderCommand::Text {
-            x: tx + TABLE_WIDTH / 2.0 - 50.0,
-            y: ty + TABLE_HEIGHT / 2.0 - 10.0,
-            text: format!("Score: {}", self.score),
-            color: YELLOW,
-            font_size: SCORE_FONT_SIZE,
-            font_weight: FontWeightHint::Bold,
-            max_width: None,
-            overflow: TextOverflow::Clip,
-        });
-
-        cmds.push(RenderCommand::Text {
-            x: tx + TABLE_WIDTH / 2.0 - 70.0,
-            y: ty + TABLE_HEIGHT / 2.0 + 20.0,
-            text: "Press N for new game".to_string(),
-            color: SUBTEXT0,
-            font_size: LABEL_FONT_SIZE,
-            font_weight: FontWeightHint::Regular,
-            max_width: None,
-            overflow: TextOverflow::Clip,
-        });
+        let score = format!("Score: {}", self.score);
+        self.overlay_card(
+            cmds,
+            10.0,
+            &[
+                (
+                    "GAME OVER",
+                    OVERLAY_FONT_SIZE,
+                    FontWeightHint::Bold,
+                    self.colours.red,
+                ),
+                (
+                    &score,
+                    SCORE_FONT_SIZE,
+                    FontWeightHint::Bold,
+                    self.colours.yellow,
+                ),
+                (
+                    "Press N for new game",
+                    LABEL_FONT_SIZE,
+                    FontWeightHint::Regular,
+                    self.colours.subtext0,
+                ),
+            ],
+        );
     }
 
     fn render_ball_lost_overlay(&self, cmds: &mut Vec<RenderCommand>) {
-        let tx = Self::table_origin_x();
-        let ty = Self::table_origin_y();
-
-        cmds.push(RenderCommand::FillRect {
-            x: tx + TABLE_WIDTH / 2.0 - 60.0,
-            y: ty + TABLE_HEIGHT / 2.0 - 20.0,
-            width: 120.0,
-            height: 30.0,
-            color: Color::rgba(0, 0, 0, 180),
-            corner_radii: CornerRadii::all(6.0),
-        });
-
-        cmds.push(RenderCommand::Text {
-            x: tx + TABLE_WIDTH / 2.0 - 40.0,
-            y: ty + TABLE_HEIGHT / 2.0 - 8.0,
-            text: "BALL LOST".to_string(),
-            color: RED,
-            font_size: LABEL_FONT_SIZE,
-            font_weight: FontWeightHint::Bold,
-            max_width: None,
-            overflow: TextOverflow::Clip,
-        });
+        self.overlay_card(
+            cmds,
+            5.0,
+            &[(
+                "BALL LOST",
+                LABEL_FONT_SIZE,
+                FontWeightHint::Bold,
+                self.colours.red,
+            )],
+        );
     }
 }
 
@@ -2794,9 +2942,10 @@ impl App for Pinball {
     }
 
     fn theme_changed(&mut self, palette: &Palette) {
-        // The card and its colours follow the user's theme; the table keeps
-        // its own, which are the machine's rather than the desktop's.
+        // Everything follows the user's theme, the table included (the
+        // operator's C-Q16 answer, §1422, and lane C's call for this game).
         self.palette = *palette;
+        self.colours = Colours::of(palette);
     }
 }
 
@@ -2864,32 +3013,17 @@ fn centred(f: &mut Frame<Target>, r: Rect, s: &str, size: f32, color: Color) {
     });
 }
 
-/// A button: drawn dim and taking no press when it would do nothing.
-fn button(f: &mut Frame<Target>, r: Rect, label: &str, target: Target, enabled: bool) {
-    fill(f, r, if enabled { SURFACE1 } else { SURFACE0 }, 5.0);
-    centred(
-        f,
-        r,
-        label,
-        LABEL_FONT_SIZE,
-        if enabled { TEXT_COLOR } else { OVERLAY0 },
-    );
-    if enabled {
-        f.hit(target, r);
-    }
-}
-
 fn main() -> ExitCode {
     // Parsed rather than indexed, so `--display` reaches the connection
     // instead of being refused as an option this game does not take.
-    let args = match app::Args::from_env() {
+    let args = match app::ArgsOs::from_env() {
         Ok(args) => args,
         Err(e) => {
             eprintln!("pinball: {e}");
             return ExitCode::from(2);
         }
     };
-    refuse_arguments(args.rest.first().map(|a| std::ffi::OsStr::new(a.as_str())));
+    refuse_arguments(args.rest.first().map(std::ffi::OsString::as_os_str));
     let mut game = Pinball::from_settings();
     app::launch_with("pinball", args.display.as_deref(), &mut game)
 }
@@ -2943,6 +3077,205 @@ mod tests {
     }
 
     use super::*;
+
+    /// The colours a game draws in until the theme says otherwise.
+    fn colours() -> Colours {
+        Colours::of(&Palette::for_mode(false))
+    }
+
+    /// The palette for a light or a dark theme, in the bordered look (the
+    /// default) or the card look.
+    fn palette(light: bool, cards: bool) -> Palette {
+        let mut p = Palette::for_mode(light);
+        p.set_surface_style(if cards {
+            guitk::palette::SurfaceStyle::Cards
+        } else {
+            guitk::palette::SurfaceStyle::Borders
+        });
+        p
+    }
+
+    /// Every look in `p`'s colours: a ball in play, ready to launch, paused,
+    /// lost, over, and asked whether to throw the game away.
+    fn every_look(p: &Palette) -> Vec<(&'static str, Pinball)> {
+        let mut playing = test_app();
+        playing.phase = GamePhase::Playing;
+        let ready = test_app();
+        let mut paused = test_app();
+        paused.phase = GamePhase::Paused;
+        let mut lost = test_app();
+        lost.phase = GamePhase::BallLost;
+        let mut over = test_app();
+        over.phase = GamePhase::GameOver;
+        let mut asking = test_app();
+        asking.phase = GamePhase::Playing;
+        asking.confirm_new_game = true;
+        let mut looks = vec![
+            ("playing", playing),
+            ("ready", ready),
+            ("paused", paused),
+            ("lost", lost),
+            ("over", over),
+            ("asking", asking),
+        ];
+        for (_, a) in &mut looks {
+            a.theme_changed(p);
+        }
+        looks
+    }
+
+    /// Every colour the toolkit's buttons may be drawn in, on the grounds
+    /// this window puts them on.
+    fn button_colours(p: &Palette) -> Vec<Color> {
+        gamechrome::button_colours(p, Kind::Plain, Colours::of(p).panel)
+    }
+
+    /// **A new game keeps the user's colours**, as it keeps the window.
+    #[test]
+    fn a_new_game_keeps_the_users_colours() {
+        let light = Palette::for_mode(true);
+        let mut a = test_app();
+        a.theme_changed(&light);
+        a.new_game();
+        assert_eq!(
+            a.palette, light,
+            "a new game went back to the default palette"
+        );
+        assert_eq!(
+            a.colours,
+            Colours::of(&light),
+            "a new game went back to the default colours"
+        );
+    }
+
+    /// **A button that would do nothing is switched off**, in the toolkit's
+    /// look: Nudge before the ball is in play.
+    #[test]
+    fn a_button_that_would_do_nothing_is_switched_off() {
+        let face = |a: &Pinball| {
+            let f = a.frame_at((WINDOW_WIDTH, WINDOW_HEIGHT));
+            let (tx, ty) = f
+                .commands()
+                .iter()
+                .find_map(|c| match c {
+                    RenderCommand::Text { text, x, y, .. } if text == "Nudge" => Some((*x, *y)),
+                    _ => None,
+                })
+                .expect("Nudge is not drawn");
+            let fills: Vec<(Rect, Color)> = f
+                .commands()
+                .iter()
+                .filter_map(|c| match c {
+                    RenderCommand::FillRect {
+                        x,
+                        y,
+                        width,
+                        height,
+                        color,
+                        ..
+                    } => Some((Rect::new(*x, *y, *width, *height), *color)),
+                    _ => None,
+                })
+                .collect();
+            fills
+                .windows(2)
+                .find_map(|pair| {
+                    let [(face, colour), (gloss, _)] = pair else {
+                        return None;
+                    };
+                    let is_button = (gloss.x - face.x).abs() < 0.01
+                        && (gloss.y - face.y).abs() < 0.01
+                        && (gloss.w - face.w).abs() < 0.01
+                        && (gloss.h * 2.0 - face.h).abs() < 0.01;
+                    (is_button && face.contains(tx + 1.0, ty + 1.0)).then_some(*colour)
+                })
+                .expect("Nudge is on no button")
+        };
+        let ready = test_app();
+        let paint = |disabled| {
+            guitk::button::paint(
+                &ready.palette,
+                Kind::Plain,
+                State {
+                    disabled,
+                    ..State::default()
+                },
+                ready.colours.panel,
+            )
+            .lower
+        };
+        assert_eq!(
+            face(&ready),
+            paint(true),
+            "Nudge looks live before the ball is in play"
+        );
+        let mut playing = test_app();
+        playing.phase = GamePhase::Playing;
+        assert_eq!(face(&playing), paint(false), "Nudge looks off in play");
+    }
+
+    /// **The window is drawn in the user's colours**, light or dark, in
+    /// either surface look -- every colour the palette's, the toolkit's
+    /// buttons', or the ball's white highlight (the operator's C-Q16). The
+    /// table drew in its own copy of Catppuccin Mocha whatever the theme.
+    #[test]
+    fn the_window_is_drawn_in_the_users_colours() {
+        for (light, cards) in [(false, false), (true, false), (false, true), (true, true)] {
+            let p = palette(light, cards);
+            let mut derived = button_colours(&p);
+            derived.push(Color::rgba(255, 255, 255, 150));
+            for (what, a) in every_look(&p) {
+                appearance::palette_check::assert_drawn_from(
+                    &p,
+                    a.frame_at((WINDOW_WIDTH, WINDOW_HEIGHT)).commands(),
+                    &derived,
+                    &format!("pinball, {what}, light: {light}, cards: {cards}"),
+                );
+            }
+        }
+    }
+
+    /// **Every text reads on what is drawn under it**, in either theme and
+    /// either surface look (`gamechrome::legibility`). A switched-off
+    /// button's label is exempt, as WCAG exempts an inactive control.
+    #[test]
+    fn every_text_reads_on_what_is_under_it_in_either_theme() {
+        let mut bad = Vec::new();
+        for (light, cards) in [(false, false), (true, false), (false, true), (true, true)] {
+            let p = palette(light, cards);
+            let c = Colours::of(&p);
+            let offs: Vec<_> = [c.panel]
+                .into_iter()
+                .map(|ground| {
+                    guitk::button::paint(
+                        &p,
+                        Kind::Plain,
+                        State {
+                            disabled: true,
+                            ..State::default()
+                        },
+                        ground,
+                    )
+                })
+                .collect();
+            for (what, a) in every_look(&p) {
+                let f = a.frame_at((WINDOW_WIDTH, WINDOW_HEIGHT));
+                let exempt = |r: &gamechrome::legibility::Read| {
+                    offs.iter()
+                        .any(|o| r.ink == o.ink && (r.ground == o.lower || r.ground == o.upper))
+                };
+                for r in gamechrome::legibility::illegible(f.commands(), p.base, exempt) {
+                    bad.push(format!(
+                        "{what}, light: {light}, cards: {cards}: {:?} {:.2}:1 on {:?}",
+                        r.text,
+                        r.ratio(),
+                        r.ground
+                    ));
+                }
+            }
+        }
+        assert!(bad.is_empty(), "pinball: {bad:#?}");
+    }
 
     /// Helper to create a game with a fixed seed.
     fn test_app() -> Pinball {
@@ -4087,9 +4420,9 @@ mod tests {
         let app = test_app();
         let cmds = app.render_commands();
         // Plunger renders a FillRect with PEACH color for the head.
-        let has_plunger = cmds
-            .iter()
-            .any(|c| matches!(c, RenderCommand::FillRect { color, .. } if *color == PEACH));
+        let has_plunger = cmds.iter().any(
+            |c| matches!(c, RenderCommand::FillRect { color, .. } if *color == colours().peach),
+        );
         assert!(has_plunger);
     }
 

@@ -351,6 +351,30 @@ def analyse(source: bytes, path: str) -> tuple[list[Finding], int]:
     findings: list[Finding] = []
     seen = 0
 
+    # `safewrite.write_text(path, text)` is not a text-mode write at the call
+    # site: it passes the newline once, inside the helper, to a *temporary*
+    # file that it then renames over the target. Requiring every caller to
+    # spell the newline again would put back exactly the hand-typed escape
+    # that emptied `scripts/hooks/pre-push` -- this gate is what put one at
+    # every write site in the first place, and a mistyped one is what did the
+    # damage. See `scripts/safewrite.py` and `check-destructive-writes.py`.
+    #
+    # Only the *bare* call is exempt. `p.write_text(...)` is `pathlib`'s and is
+    # graded as before, so the exemption cannot be borrowed by writing
+    # `from safewrite import write_text` at the top of a file that does not
+    # use it.
+    #
+    # `safewrite.py` itself is exempt by name, because the file that *defines*
+    # the helper cannot import it from anywhere: its own self-test calls
+    # `write_text(target, "...")` to prove the property, and that is the one
+    # bare call in the tree with no import to point at.
+    imports_safewrite = str(path).endswith("safewrite.py") or any(
+        isinstance(n, ast.ImportFrom)
+        and n.module == "safewrite"
+        and any(a.name == "write_text" for a in n.names)
+        for n in ast.walk(tree)
+    )
+
     for node in ast.walk(tree):
         if not isinstance(node, ast.Call):
             continue
@@ -359,6 +383,8 @@ def analyse(source: bytes, path: str) -> tuple[list[Finding], int]:
             continue
 
         if name == "write_text":
+            if recv is None and imports_safewrite:
+                continue
             seen += 1
             why = newline_verdict(node)
             if why is not None:
@@ -596,6 +622,12 @@ def self_test() -> int:
 
         # -- write_text, which is always text and so is always graded
         ("a bare write_text is a finding", len(one("p.write_text(s)")), 1),
+        ("safewrite's write_text is not, when imported",
+         len(one("from safewrite import write_text\nwrite_text(p, s)")), 0),
+        ("...and a bare write_text without that import still is",
+         len(one("write_text(p, s)")), 1),
+        ("...and the import does not excuse pathlib's method",
+         len(one("from safewrite import write_text\np.write_text(s)")), 1),
         ("write_text(newline='') is not",
          len(one("p.write_text(s,newline='')")), 0),
         ("read_text is not graded", len(one("p.read_text()")), 0),

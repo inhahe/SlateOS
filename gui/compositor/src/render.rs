@@ -4,7 +4,7 @@
 //! # Why this exists
 //!
 //! Until this module the compositor drew every pixel itself. `compose_frame`
-//! called [`Framebuffer`](crate::Framebuffer) methods directly, the render
+//! called [`Framebuffer`] methods directly, the render
 //! engine walked glyph coverage masks a pixel at a time, and `blit_buffer`
 //! reached into a client's shared memory and blended it byte by byte. All of
 //! that is correct, and all of it is CPU work — there was no point in the code
@@ -38,7 +38,7 @@
 //! # What lives below it
 //!
 //! Only the act of putting colour on the surface. The software backend
-//! ([`Framebuffer`](crate::Framebuffer)'s implementation, in `lib.rs` next to
+//! ([`Framebuffer`]'s implementation, in `lib.rs` next to
 //! the buffers it owns) keeps every optimisation it had: parallel row bands,
 //! the opaque-blit memcpy path, per-row solid fills, the clipped Bresenham
 //! walk. Nothing moved *out* of the fast paths — the seam was cut above them.

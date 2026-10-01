@@ -83,6 +83,8 @@ use guitk::menu::{ContextMenu, MenuItem};
 use guitk::render::{FontWeightHint, RenderCommand, RenderTree, TextOverflow};
 use guitk::style::CornerRadii;
 use guitk::text;
+use guitk::textarea::{self, TextArea};
+use guitk::textinput::KeyEdit;
 use oswindow::app::{self, App, Response};
 use pathtext::ShowPath;
 use std::process::ExitCode;
@@ -161,11 +163,16 @@ pub enum TextEntry {
     NewNotebook(String),
     /// The body of a note, committed when the mode is left.
     ///
+    /// The text is not here but in `NotesApp::body`, the toolkit's multi-line
+    /// field: a caret that goes anywhere, a selection, the clipboard and undo.
+    /// It was a `String` here that could only grow at the end or lose its
+    /// last character, so a mistake three lines up was corrected by deleting
+    /// back to it (`requests/c-e-a-multi-line-text-field-for-the-apps-that-edit-text.md`).
+    ///
     /// `Enter` inserts a newline here rather than committing, because a note
-    /// is more than one line and `Enter` is how you get the second one. That
-    /// is why this carries the note's id: the commit has to know which note
-    /// it is writing even though the selection may have moved.
-    NoteBody(NoteId, String),
+    /// is more than one line and `Enter` is how you get the second one. The id
+    /// is the note the commit writes.
+    NoteBody(NoteId),
 }
 
 /// What an open menu is about.
@@ -229,9 +236,70 @@ const TAG_HEIGHT: f32 = 20.0;
 const TAG_PADDING: f32 = 8.0;
 const EDITOR_PADDING: f32 = 12.0;
 const LINE_HEIGHT: f32 = 20.0;
+/// How far below the top of the editor panel a note's text starts: the title
+/// and its margin, the details line, the tags, and the gap under the rule.
+/// `render_editor_area` places the text by it and `body_box` finds the text by
+/// it, so a click and the letter it lands on cannot disagree.
+const BODY_TOP: f32 = HEADER_HEIGHT + 8.0 + 20.0 + 24.0 + 2.0;
+/// The size a note's text is drawn and measured at.
+const BODY_FONT_SIZE: f32 = 14.0;
+/// What an empty note shows where its text would be.
+const NOTHING_WRITTEN: &str = "Nothing written yet -- click here, or press Enter, to write";
+/// Why a checklist is not opened for writing.
+const CHECKLIST_NOT_TEXT: &str =
+    "A checklist's items are not written as text, and this window cannot change them yet";
+/// Why a table is not opened for writing.
+const TABLE_NOT_TEXT: &str =
+    "A table's cells are not written as text, and this window cannot change them yet";
 const READING_WPM: f32 = 238.0;
 const MAX_VERSIONS: usize = 50;
 const CORNER_RADIUS: f32 = 4.0;
+
+/// The words in a note's text, as the status line counts them.
+fn words_in(text: &str) -> usize {
+    text.split_whitespace().count()
+}
+
+/// The characters in a piece of a note -- not its bytes.
+fn chars_in(text: &str) -> usize {
+    text.chars().count()
+}
+
+/// Minutes to read `words` words, at [`READING_WPM`].
+fn reading_minutes(words: usize) -> f32 {
+    words as f32 / READING_WPM
+}
+
+/// Why a note of `kind` is not opened for writing, or `None` when it is.
+///
+/// A checklist's items and a table's cells are not its text. Writing was
+/// allowed and changed a field neither of their views draws, so whatever was
+/// typed disappeared the moment the writing finished, and was still there
+/// unseen, in the library and in every search.
+fn not_written_as_text(kind: &NoteKind) -> Option<&'static str> {
+    match kind {
+        NoteKind::Checklist => Some(CHECKLIST_NOT_TEXT),
+        NoteKind::Table => Some(TABLE_NOT_TEXT),
+        NoteKind::PlainText | NoteKind::Markdown => None,
+    }
+}
+
+/// The note the text field holds, and what it was filled from.
+#[derive(Debug)]
+struct HeldNote {
+    /// Which note.
+    id: NoteId,
+    /// The note's text when the field was last filled from it, or last
+    /// written back to it. While the note still says this, the field is its
+    /// text.
+    source: String,
+    /// What the field held at that moment: `source`, with its line endings
+    /// made `\n` -- the one way the field keeps them. A field still equal to
+    /// this has had nothing written in it, and the note is left alone: a note
+    /// with Windows line endings is not rewritten, and given a version, for
+    /// having been opened.
+    seeded: String,
+}
 
 // ============================================================================
 // Unique ID generation
@@ -571,27 +639,28 @@ impl Note {
                     .sum();
                 header_words.saturating_add(cell_words)
             }),
-            _ => self.content.split_whitespace().count(),
+            _ => words_in(&self.content),
         }
     }
 
-    /// Character count.
+    /// How many characters the note holds -- characters, not bytes: "café"
+    /// is four, and was counted as five, and a line of Japanese as three
+    /// times its length.
     pub fn char_count(&self) -> usize {
         match &self.kind {
-            NoteKind::Checklist => self.checklist.iter().map(|item| item.text.len()).sum(),
+            NoteKind::Checklist => self.checklist.iter().map(|item| chars_in(&item.text)).sum(),
             NoteKind::Table => self.table.as_ref().map_or(0, |t| {
-                let h: usize = t.headers.iter().map(String::len).sum();
-                let c: usize = t.rows.iter().flat_map(|r| r.iter()).map(String::len).sum();
+                let h: usize = t.headers.iter().map(|h| chars_in(h)).sum();
+                let c: usize = t
+                    .rows
+                    .iter()
+                    .flat_map(|r| r.iter())
+                    .map(|c| chars_in(c))
+                    .sum();
                 h.saturating_add(c)
             }),
-            _ => self.content.len(),
+            _ => chars_in(&self.content),
         }
-    }
-
-    /// Estimated reading time in minutes.
-    pub fn reading_time_minutes(&self) -> f32 {
-        let words = self.word_count() as f32;
-        words / READING_WPM
     }
 
     /// Extract `[[wiki links]]` from content.
@@ -998,28 +1067,38 @@ fn export_plain_text(note: &Note) -> String {
     out
 }
 
+/// A note as Markdown: the title as its heading, the tags, and the body --
+/// a checklist as a task list and a table as a table, since neither is in
+/// `content`. Ends in one newline, as a text file does, and a note with
+/// nothing in it is its heading alone.
 fn export_markdown(note: &Note) -> String {
-    let mut out = String::new();
-    out.push_str(&format!("# {}\n\n", note.title));
+    let mut out = format!("# {}\n", note.title);
     if !note.tags.is_empty() {
-        out.push_str("**Tags:** ");
+        out.push_str("\n**Tags:** ");
         out.push_str(&note.tags.join(", "));
-        out.push_str("\n\n");
+        out.push('\n');
     }
-    match &note.kind {
+    let body = match &note.kind {
         NoteKind::Checklist => {
+            let mut items = String::new();
             for item in &note.checklist {
-                let marker = if item.checked { "[x]" } else { "[ ]" };
-                out.push_str(&format!("- {marker} {}\n", item.text));
+                items.push_str(if item.checked { "- [x] " } else { "- [ ] " });
+                items.push_str(&item.text);
+                items.push('\n');
             }
+            items
         }
-        NoteKind::Table => {
-            if let Some(table) = &note.table {
-                out.push_str(&table.to_markdown());
-            }
-        }
-        _ => {
-            out.push_str(&note.content);
+        NoteKind::Table => note
+            .table
+            .as_ref()
+            .map_or_else(String::new, TableData::to_markdown),
+        NoteKind::PlainText | NoteKind::Markdown => note.content.clone(),
+    };
+    if !body.is_empty() {
+        out.push('\n');
+        out.push_str(&body);
+        if !body.ends_with('\n') {
+            out.push('\n');
         }
     }
     out
@@ -1500,6 +1579,20 @@ pub struct NotesApp {
     /// The app had no input at all, so nothing had needed the distinction.
     /// What the keyboard is typing into, if anything.
     pub text_entry: Option<TextEntry>,
+    /// The text of the note being written, and of a plain note being read:
+    /// the toolkit's multi-line field. Drawn with a caret while the note is
+    /// being written and without one otherwise, so the text is laid out the
+    /// same way in both and a click lands on the letter it was aimed at.
+    body: TextArea,
+    /// Which note `body` holds, and what from. `hold_in_body` fills it
+    /// from the note whenever the note has changed since, so it is never
+    /// drawn out of date.
+    body_of: Option<HeldNote>,
+    /// Whether the left button went down on the text and has not come up yet:
+    /// moving the pointer meanwhile extends the selection.
+    body_drag: bool,
+    /// How wide the caret is drawn: the user's `caret_width_scale` applied.
+    caret_width: f32,
     /// The open or save picker. Holds the dialog, the saving flag and
     /// the routing eleven applications used to write out by hand.
     pub picker: FilePicker,
@@ -1567,6 +1660,10 @@ impl NotesApp {
             active_panel: ActivePanel::NoteList,
             show_favorites_only: false,
             text_entry: None,
+            body: TextArea::new(),
+            body_of: None,
+            body_drag: false,
+            caret_width: guitk::textedit::CARET_WIDTH,
             picker: FilePicker::new(),
             last_save: None,
             note_menu: None,
@@ -2443,13 +2540,30 @@ impl NotesApp {
     /// Get statistics for the selected note.
     pub fn selected_note_stats(&self) -> Option<NoteStats> {
         let note = self.find_note(self.selected_note?)?;
+        // While the note is being written, what is counted is what is on the
+        // screen: the note itself changes only when the writing finishes, so
+        // the counts sat still while the text under them grew.
+        let (word_count, char_count, link_count) = if self.writing() == Some(note.id) {
+            let text = self.body.text();
+            (
+                words_in(text),
+                chars_in(text),
+                extract_wiki_links(text).len(),
+            )
+        } else {
+            (
+                note.word_count(),
+                note.char_count(),
+                note.extract_links().len(),
+            )
+        };
         Some(NoteStats {
-            word_count: note.word_count(),
-            char_count: note.char_count(),
-            reading_time_min: note.reading_time_minutes(),
+            word_count,
+            char_count,
+            reading_time_min: reading_minutes(word_count),
             version_count: note.versions.len(),
             tag_count: note.tags.len(),
-            link_count: note.extract_links().len(),
+            link_count,
         })
     }
 
@@ -2649,10 +2763,7 @@ impl NotesApp {
     /// is not asked about, since nothing written in this window was ever
     /// going to be kept and the window has said so all along.
     pub fn request_close(&mut self) -> bool {
-        if let Some(TextEntry::NoteBody(id, body)) = self.text_entry.clone() {
-            self.text_entry = None;
-            self.update_note_content(id, &body);
-        }
+        self.finish_note_body();
         self.keep();
         if !(self.persist && self.unsaved) {
             return true;
@@ -2710,15 +2821,15 @@ impl NotesApp {
     /// because it is for other programs: the library (`library_text`) is this
     /// one's own. An export is not a save -- every change is kept as it is
     /// made -- so this was Ctrl+S until the library existed, and is Ctrl+E.
+    ///
+    /// Through [`export_markdown`], which knows a note's kinds. This wrote
+    /// the title and `content`, and a checklist's items and a table's rows
+    /// are not in `content`: either exported as its title and nothing else.
     pub fn export_selected_note(&mut self, path: &std::path::Path) -> String {
         let Some(note) = self.selected_note.and_then(|id| self.find_note(id)) else {
             return String::from("Select a note first -- nothing to write");
         };
-        let body = if note.content.is_empty() {
-            format!("# {}\n", note.title)
-        } else {
-            format!("# {}\n\n{}\n", note.title, note.content)
-        };
+        let body = export_markdown(note);
         match safeio::write_str_atomically(path, &body) {
             Ok(()) => format!("Wrote {}", path.shown()),
             // Named, not swallowed. The user needs to know which of the two
@@ -2751,6 +2862,63 @@ impl NotesApp {
                 return EventResult::Consumed;
             }
         }
+        if let Some(result) = self.body_mouse(event) {
+            return result;
+        }
+        // A press anywhere else ends the writing, keeping it -- once the
+        // press has done what it does, and not before. The list is sorted by
+        // when each note last changed, so keeping the writing can move its
+        // note to the top and every row above it down one: finished first,
+        // the press landed on whichever row had moved under the pointer. The
+        // version panel is the exception, and goes on writing: a version is
+        // put back into the field.
+        let ends_writing = self.writing().is_some()
+            && matches!(event.kind, MouseEventKind::Press(_))
+            && !self.on_version_panel(event.x, event.y);
+        let result = self.press_elsewhere(event);
+        if ends_writing {
+            self.finish_note_body();
+            return EventResult::Consumed;
+        }
+        result
+    }
+
+    /// Whether `(x, y)` is on the version panel of the note on show.
+    fn on_version_panel(&self, x: f32, y: f32) -> bool {
+        let Some(note) = self.selected_note.and_then(|id| self.find_note(id)) else {
+            return false;
+        };
+        if note.versions.is_empty() {
+            return false;
+        }
+        let (px, py, pw, ph) = self.version_panel_bounds();
+        x >= px && x < px + pw && y >= py && y < py + ph
+    }
+
+    /// Put version `index` of the note being written into the field, as one
+    /// step Ctrl+Z takes back. The note itself changes when the writing is
+    /// kept, as with everything else written: restoring past the field would
+    /// have the field write its old text back over the version.
+    fn restore_into_body(&mut self, index: usize) -> bool {
+        let Some(text) = self
+            .writing()
+            .and_then(|id| self.find_note(id))
+            .and_then(|note| note.versions.get(index))
+            .map(|version| version.content.clone())
+        else {
+            return false;
+        };
+        self.body.select_all();
+        self.body.insert_str(&text);
+        if let Some((_, _, m)) = self.writing_box() {
+            self.body.reveal_caret(&m);
+        }
+        true
+    }
+
+    /// A press, or a move, that is not the text's: the menus, the tags, the
+    /// notebooks, the list and the versions.
+    fn press_elsewhere(&mut self, event: &MouseEvent) -> EventResult {
         if matches!(event.kind, MouseEventKind::Press(MouseButton::Right)) {
             if let Some(id) = self.note_at(event.x, event.y) {
                 self.selected_note = Some(id);
@@ -2789,7 +2957,11 @@ impl NotesApp {
             return EventResult::Consumed;
         }
         if let Some(index) = self.version_at(event.x, event.y)
-            && self.restore_selected_version(index)
+            && if self.writing().is_some() {
+                self.restore_into_body(index)
+            } else {
+                self.restore_selected_version(index)
+            }
         {
             // No message: the editor's text changes under the cursor, which is
             // the feedback, and a line in the status bar saying so would be
@@ -2957,53 +3129,253 @@ impl NotesApp {
         self.selected_notebook = Some(id);
     }
 
-    /// Begin writing in the selected note, seeded with what it already says.
+    /// Begin writing in the selected note, from the keyboard.
     ///
-    /// Seeded because editing a note is usually adding to it, and a blank box
-    /// would make the existing text something the user has to retype.
+    /// The field holds what the note already says, with the caret at the end:
+    /// editing a note is usually adding to it, and a blank box would make the
+    /// existing text something to retype. A click puts the caret where it
+    /// lands instead (`body_mouse`).
     fn begin_note_body(&mut self) -> EventResult {
-        let Some(id) = self.selected_note else {
+        let Some(id) = self
+            .selected_note
+            .filter(|&id| self.find_note(id).is_some())
+        else {
             return EventResult::Ignored;
         };
-        let Some(note) = self.notes.iter().find(|n| n.id == id) else {
-            return EventResult::Ignored;
-        };
-        let body = note.content.clone();
-        self.text_entry = Some(TextEntry::NoteBody(id, body));
-        self.active_panel = ActivePanel::Editor;
+        // Refused or not, there is something new to draw: the field, or why
+        // there is none.
+        if self.start_body(id) {
+            self.body.move_text_end(false);
+            if let Some((_, _, m)) = self.writing_box() {
+                self.body.reveal_caret(&m);
+            }
+        }
         EventResult::Consumed
+    }
+
+    /// Open note `id` for writing. False for a note that is not there, and
+    /// for one whose content is not its text, with the reason on the status
+    /// line.
+    fn start_body(&mut self, id: NoteId) -> bool {
+        let Some(kind) = self.find_note(id).map(|note| note.kind.clone()) else {
+            return false;
+        };
+        if let Some(why) = not_written_as_text(&kind) {
+            self.last_save = Some(why.to_owned());
+            return false;
+        }
+        self.hold_in_body(id);
+        self.text_entry = Some(TextEntry::NoteBody(id));
+        self.active_panel = ActivePanel::Editor;
+        true
+    }
+
+    /// Whether the field holds `note`'s text as the note has it now.
+    fn holds(&self, note: &Note) -> bool {
+        self.body_of
+            .as_ref()
+            .is_some_and(|held| held.id == note.id && held.source == note.content)
+    }
+
+    /// Make the field hold note `id`'s text, unless it already does.
+    ///
+    /// Only when the note has changed since, so the field keeps its caret,
+    /// its scroll and its undo steps across a finish and a start again; and
+    /// whenever it has, so a restored version or another note is never shown
+    /// through a field still holding the old text.
+    fn hold_in_body(&mut self, id: NoteId) {
+        let source = match self.find_note(id) {
+            Some(note) if !self.holds(note) => note.content.clone(),
+            _ => return,
+        };
+        self.body = TextArea::with_text(&source);
+        let seeded = self.body.text().to_owned();
+        self.body_of = Some(HeldNote { id, source, seeded });
+    }
+
+    /// The note being written, if one is.
+    fn writing(&self) -> Option<NoteId> {
+        match self.text_entry {
+            Some(TextEntry::NoteBody(id)) => Some(id),
+            _ => None,
+        }
+    }
+
+    /// Keep what has been written, and go on writing.
+    ///
+    /// Nothing, when nothing has been: the field's line endings are all
+    /// `\n`, so writing back an untouched field could still change the note.
+    fn commit_note_body(&mut self) {
+        let Some(id) = self.writing() else {
+            return;
+        };
+        let text = self.body.text().to_owned();
+        let untouched = self
+            .body_of
+            .as_ref()
+            .is_some_and(|held| held.id == id && held.seeded == text);
+        if untouched || !self.update_note_content(id, &text) {
+            return;
+        }
+        let source = self
+            .find_note(id)
+            .map(|note| note.content.clone())
+            .unwrap_or_default();
+        self.body_of = Some(HeldNote {
+            id,
+            source,
+            seeded: text,
+        });
+    }
+
+    /// Stop writing, keeping what was written.
+    ///
+    /// Every way out keeps it -- Escape, Ctrl+Enter, a click somewhere else,
+    /// closing the window. Losing what was typed because of the way the
+    /// writing ended is the worst thing a text editor can do.
+    fn finish_note_body(&mut self) {
+        if self.writing().is_some() {
+            self.commit_note_body();
+            self.text_entry = None;
+        }
+        self.body_drag = false;
+    }
+
+    /// Where a note's text is drawn and clicked: its top-left corner, and the
+    /// box and font it is laid out in.
+    ///
+    /// Below the title, the details and the tags, inside the padding, and
+    /// clear of the version panel when the note has versions to list. From
+    /// the window's size, as the version panel's own bounds are, so the
+    /// drawing and the clicks read one answer.
+    fn body_box(&self, note: &Note) -> (f32, f32, textarea::Metrics) {
+        let left = SIDEBAR_WIDTH + NOTE_LIST_WIDTH + EDITOR_PADDING;
+        let top = TOOLBAR_HEIGHT + BODY_TOP + EDITOR_PADDING;
+        let right = if note.versions.is_empty() {
+            self.window_width
+        } else {
+            self.version_panel_bounds().0
+        } - EDITOR_PADDING;
+        let bottom = self.window_height - STATUS_BAR_HEIGHT - EDITOR_PADDING;
+        (
+            left,
+            top,
+            textarea::Metrics {
+                width: (right - left).max(0.0),
+                height: (bottom - top).max(0.0),
+                font_size: BODY_FONT_SIZE,
+                weight: FontWeightHint::Regular,
+            },
+        )
+    }
+
+    /// [`body_box`](Self::body_box) for the note being written.
+    fn writing_box(&self) -> Option<(f32, f32, textarea::Metrics)> {
+        let note = self.find_note(self.writing()?)?;
+        Some(self.body_box(note))
+    }
+
+    /// The note whose text is under `(x, y)`: the one on show, when the point
+    /// is inside its text's box.
+    fn body_at(&self, x: f32, y: f32) -> Option<NoteId> {
+        let id = self.writing().or(self.selected_note)?;
+        let note = self.find_note(id)?;
+        let (left, top, m) = self.body_box(note);
+        let inside = x >= left && x < left + m.width && y >= top && y < top + m.height;
+        inside.then_some(id)
+    }
+
+    /// The pointer and a note's text.
+    ///
+    /// A press on the text writes in it with the caret where the press
+    /// landed; a double click selects a word; a drag selects; the wheel
+    /// scrolls. `None` when the event is not the text's, so the caller carries
+    /// on with it -- and a press anywhere else is `handle_mouse`'s to finish
+    /// the writing after.
+    fn body_mouse(&mut self, event: &MouseEvent) -> Option<EventResult> {
+        match event.kind {
+            MouseEventKind::Press(MouseButton::Left)
+            | MouseEventKind::DoubleClick(MouseButton::Left) => {
+                let id = self.body_at(event.x, event.y)?;
+                let clicks = if matches!(event.kind, MouseEventKind::DoubleClick(_)) {
+                    2
+                } else {
+                    1
+                };
+                if self.writing() != Some(id) {
+                    let markdown = self
+                        .find_note(id)
+                        .is_some_and(|note| note.kind == NoteKind::Markdown);
+                    if !self.start_body(id) {
+                        // A checklist or a table: the reason is on the status
+                        // line, and the press has nothing else to do here.
+                        return Some(EventResult::Consumed);
+                    }
+                    if markdown {
+                        // What was clicked was the page the Markdown makes,
+                        // not the Markdown: no letter of the source is where
+                        // the pointer is. The caret goes where Enter puts it.
+                        self.body.move_text_end(false);
+                        if let Some((_, _, m)) = self.writing_box() {
+                            self.body.reveal_caret(&m);
+                        }
+                        return Some(EventResult::Consumed);
+                    }
+                }
+                let (left, top, m) = self.writing_box()?;
+                self.body
+                    .press(event.x - left, event.y - top, clicks, false, &m);
+                self.body_drag = true;
+                Some(EventResult::Consumed)
+            }
+            MouseEventKind::Move if self.body_drag => {
+                let (left, top, m) = self.writing_box()?;
+                self.body.drag_to(event.x - left, event.y - top, &m);
+                Some(EventResult::Consumed)
+            }
+            MouseEventKind::Release(MouseButton::Left) if self.body_drag => {
+                self.body_drag = false;
+                Some(EventResult::Consumed)
+            }
+            MouseEventKind::Scroll { dy, .. } => {
+                let id = self.body_at(event.x, event.y)?;
+                let note = self.find_note(id)?;
+                // A note shown through the field: one being written, or plain
+                // text. The others are drawn by views of their own.
+                if self.writing() != Some(id) && note.kind != NoteKind::PlainText {
+                    return None;
+                }
+                let (_, _, m) = self.body_box(note);
+                self.hold_in_body(id);
+                // Consumed even at an end, where nothing moves: the wheel over
+                // the text is the text's, and nothing else under it scrolls.
+                self.body
+                    .scroll_by(guitk::wheel::pixels(dy, m.line_height()), &m);
+                Some(EventResult::Consumed)
+            }
+            _ => None,
+        }
     }
 
     fn handle_text_entry_key(&mut self, key: &KeyEvent) -> EventResult {
         let Some(entry) = self.text_entry.clone() else {
             return EventResult::Ignored;
         };
+        // The body is the field's, and every key goes there first. The arms
+        // below that name it are only there to be exhaustive.
+        if let TextEntry::NoteBody(id) = entry {
+            return self.handle_body_key(id, key);
+        }
         match key.key {
-            // A newline in the body, before the arm that would commit on it.
-            Key::Enter if matches!(entry, TextEntry::NoteBody(..)) => {
-                if let TextEntry::NoteBody(id, mut body) = entry {
-                    body.push('\n');
-                    self.text_entry = Some(TextEntry::NoteBody(id, body));
-                }
-                EventResult::Consumed
-            }
             Key::Escape | Key::Enter => {
                 self.text_entry = None;
-                // The body commits on the way out either way: Escape is how
-                // you leave a multi-line box, and losing what was typed
-                // because the exit key was the cancelling one is the worst
-                // thing a text editor can do.
-                if let TextEntry::NoteBody(id, body) = &entry {
-                    self.update_note_content(*id, body);
-                    return EventResult::Consumed;
-                }
                 if key.key == Key::Enter {
                     match entry {
                         TextEntry::Tag(tag) => self.commit_tag(&tag),
                         TextEntry::NotebookName(name) => self.commit_notebook_name(&name),
                         TextEntry::NewNote(title) => self.commit_new_note(&title),
                         TextEntry::NewNotebook(name) => self.commit_new_notebook(&name),
-                        TextEntry::Search | TextEntry::NoteBody(..) => {}
+                        TextEntry::Search | TextEntry::NoteBody(_) => {}
                     }
                 }
                 EventResult::Consumed
@@ -3032,10 +3404,7 @@ impl NotesApp {
                         name.pop();
                         self.text_entry = Some(TextEntry::NewNotebook(name));
                     }
-                    TextEntry::NoteBody(id, mut body) => {
-                        body.pop();
-                        self.text_entry = Some(TextEntry::NoteBody(id, body));
-                    }
+                    TextEntry::NoteBody(_) => {}
                 }
                 EventResult::Consumed
             }
@@ -3064,13 +3433,65 @@ impl NotesApp {
                         name.push_str(&key.text);
                         self.text_entry = Some(TextEntry::NewNotebook(name));
                     }
-                    TextEntry::NoteBody(id, mut body) => {
-                        body.push_str(&key.text);
-                        self.text_entry = Some(TextEntry::NoteBody(id, body));
-                    }
+                    TextEntry::NoteBody(_) => {}
                 }
                 EventResult::Consumed
             }
+        }
+    }
+
+    /// A key while note `id`'s body is being written.
+    ///
+    /// The field's own -- typing, the caret and selection keys, Enter for a
+    /// new line, the clipboard, undo and redo -- apart from the ways out, Tab,
+    /// and the two chords that have to see what has been written.
+    fn handle_body_key(&mut self, id: NoteId, key: &KeyEvent) -> EventResult {
+        let Some((_, _, m)) = self.find_note(id).map(|note| self.body_box(note)) else {
+            // The note went while it was being written: there is nothing
+            // left to write in.
+            self.text_entry = None;
+            return EventResult::Consumed;
+        };
+        let ctrl = key.modifiers.ctrl && !key.modifiers.alt;
+        let bare = !key.modifiers.ctrl && !key.modifiers.alt && !key.modifiers.shift;
+        match key.key {
+            // Escape is how a box of several lines is left; Ctrl+Enter is the
+            // field's "done". Both keep what was written.
+            Key::Escape => {
+                self.finish_note_body();
+                EventResult::Consumed
+            }
+            Key::Enter if ctrl => {
+                self.finish_note_body();
+                EventResult::Consumed
+            }
+            // Saving and exporting in the middle of writing act on what has
+            // been written, not on the note as it was when the writing began.
+            Key::S if ctrl => {
+                self.commit_note_body();
+                self.keep();
+                self.last_save = Some(self.keeping_line());
+                EventResult::Consumed
+            }
+            Key::E if ctrl => {
+                self.commit_note_body();
+                self.open_export_dialog();
+                EventResult::Consumed
+            }
+            // A tab character. The field leaves Tab to its owner because in a
+            // form Tab moves to the next field, and a box that ate it would
+            // hold a keyboard user prisoner. This box is the whole editor and
+            // is left by Escape, as the line above it says, and a note is
+            // text that people indent.
+            Key::Tab if bare => {
+                self.body.insert_str("\t");
+                self.body.reveal_caret(&m);
+                EventResult::Consumed
+            }
+            _ => match self.body.edit_key(key, &m) {
+                KeyEdit::Unhandled => EventResult::Ignored,
+                KeyEdit::Handled | KeyEdit::Changed => EventResult::Consumed,
+            },
         }
     }
 
@@ -3208,7 +3629,7 @@ impl NotesApp {
             // The body has the editor panel to show its text in; this line
             // says how to leave, which is the part a multi-line box has to
             // state because Enter no longer means "done".
-            Some(TextEntry::NoteBody(..)) => {
+            Some(TextEntry::NoteBody(_)) => {
                 Some("Writing -- Enter for a new line, Esc to finish".to_owned())
             }
             // The search box has a box of its own to show its text in.
@@ -4091,24 +4512,38 @@ impl NotesApp {
             width: 1.0,
         });
 
-        // Content area
-        let editor_y = sep_y + 2.0;
+        // Content area: two below the rule, which is where `BODY_TOP` puts it.
+        let editor_y = y + BODY_TOP;
         let editor_h = y + height - editor_y;
 
-        match &note.kind {
-            NoteKind::Checklist => {
-                self.render_checklist(cmds, note, x, editor_y, width, editor_h);
-            }
-            NoteKind::Table => {
-                self.render_table_view(cmds, note, x, editor_y, width, editor_h);
-            }
-            NoteKind::Markdown => {
-                self.render_markdown_preview(cmds, note, x, editor_y, width, editor_h);
-            }
-            NoteKind::PlainText => {
-                self.render_plain_text(cmds, note, x, editor_y, width, editor_h);
+        // Everything below the rule stays between it and the status bar: a
+        // long note drew its last lines over the status bar and off the
+        // bottom of the window.
+        cmds.push(RenderCommand::PushClip {
+            x,
+            y: editor_y,
+            width: width.max(0.0),
+            height: editor_h.max(0.0),
+        });
+        if self.writing() == Some(note.id) {
+            // What is written, whatever the note makes of it when it is read:
+            // a Markdown note is written as Markdown.
+            self.render_body(cmds, note);
+        } else {
+            match &note.kind {
+                NoteKind::Checklist => {
+                    self.render_checklist(cmds, note, x, editor_y, width, editor_h);
+                }
+                NoteKind::Table => {
+                    self.render_table_view(cmds, note, x, editor_y, width, editor_h);
+                }
+                NoteKind::Markdown => {
+                    self.render_markdown_preview(cmds, note, x, editor_y, width, editor_h);
+                }
+                NoteKind::PlainText => self.render_body(cmds, note),
             }
         }
+        cmds.push(RenderCommand::PopClip);
 
         // Version history panel on the right edge
         if !note.versions.is_empty() {
@@ -4122,39 +4557,54 @@ impl NotesApp {
         }
     }
 
-    fn render_plain_text(
-        &self,
-        cmds: &mut Vec<RenderCommand>,
-        note: &Note,
-        x: f32,
-        y: f32,
-        width: f32,
-        _height: f32,
-    ) {
-        let mut ly = y + EDITOR_PADDING;
-        // While the body is being typed, show the buffer rather than the
-        // stored note. The commit happens on the way out -- `set_content`
-        // snapshots a version on every call, so committing per keystroke
-        // would file one version per character -- and until then the note
-        // still holds the old text. Drawing that would leave the user typing
-        // into a panel that never changes.
-        let live = match &self.text_entry {
-            Some(TextEntry::NoteBody(id, buf)) if *id == note.id => buf.as_str(),
-            _ => note.content.as_str(),
+    /// A note's text, through the multi-line field: with a caret while it is
+    /// being written, without one while it is read.
+    ///
+    /// The same field both ways, so a plain note is wrapped at the same
+    /// places, and scrolled the same distance, whether or not it is being
+    /// written -- and so a click on a letter puts the caret by that letter.
+    /// Lines were cut short with an ellipsis before, and a long note ran off
+    /// the bottom of the window.
+    ///
+    /// While writing, what is drawn is the field and not the note: the
+    /// commit happens on the way out -- `set_content` files a version on
+    /// every call, so committing per keystroke would file one per character --
+    /// and until then the note still holds the old text.
+    fn render_body(&self, cmds: &mut Vec<RenderCommand>, note: &Note) {
+        let (x, y, metrics) = self.body_box(note);
+        let writing = self.writing() == Some(note.id);
+        let held = if writing {
+            self.body_of.as_ref().is_some_and(|held| held.id == note.id)
+        } else {
+            self.holds(note)
         };
-        for line in live.lines() {
-            cmds.push(RenderCommand::Text {
-                x: x + EDITOR_PADDING,
-                y: ly,
-                text: line.to_owned(),
+        let fresh;
+        let area = if held {
+            &self.body
+        } else {
+            fresh = TextArea::with_text(&note.content);
+            &fresh
+        };
+        let mut tree = RenderTree {
+            commands: Vec::new(),
+        };
+        textarea::draw(
+            &mut tree,
+            &textarea::MultiLine {
+                area,
+                x,
+                y,
+                metrics,
                 color: self.palette.text,
-                font_size: 14.0,
-                font_weight: FontWeightHint::Regular,
-                max_width: Some(width - EDITOR_PADDING * 2.0),
-                overflow: TextOverflow::Ellipsis,
-            });
-            ly += LINE_HEIGHT;
-        }
+                selection_bg: self.palette.accent,
+                selection_fg: self.palette.on_accent(),
+                focused: writing,
+                caret_width: self.caret_width,
+                // Not while writing: there the caret says where the text goes.
+                placeholder: (!writing).then_some((NOTHING_WRITTEN, self.palette.subtext0)),
+            },
+        );
+        cmds.extend(tree.commands);
     }
 
     fn render_checklist(
@@ -4576,6 +5026,12 @@ pub struct NoteStats {
 // ============================================================================
 
 impl App for NotesApp {
+    /// The caret's width. The only appearance setting this window reads that
+    /// is not a colour.
+    fn appearance_changed(&mut self, settings: &appearance::AppearanceSettings) {
+        self.caret_width = settings.caret_width();
+    }
+
     fn theme_changed(&mut self, palette: &Palette) {
         self.palette = *palette;
     }
@@ -5449,6 +5905,61 @@ mod tests {
         std::fs::remove_file(&path).ok();
     }
 
+    /// **A checklist exports its items and a table its rows**, where they
+    /// exported as the title and nothing else; and a note's tags go with it.
+    #[test]
+    fn an_export_holds_a_checklists_items_a_tables_rows_and_the_tags() {
+        let dir = std::env::temp_dir().join("slateos-notes-export-kinds");
+        std::fs::create_dir_all(&dir).expect("temp dir");
+        let path = dir.join("note.md");
+        let mut app = NotesApp::new();
+        let nb = app.create_notebook("Work");
+
+        let list = app.create_note("Errands", nb);
+        if let Some(note) = app.find_note_mut(list) {
+            note.kind = NoteKind::Checklist;
+            note.add_checklist_item("post");
+            note.add_checklist_item("bank");
+            note.toggle_checklist_item(1);
+        }
+        app.add_tag_to_note(list, "home");
+        app.selected_note = Some(list);
+        assert!(app.export_selected_note(&path).starts_with("Wrote"));
+        assert_eq!(
+            std::fs::read_to_string(&path).expect("written"),
+            "# Errands\n\n**Tags:** home\n\n- [ ] post\n- [x] bank\n"
+        );
+
+        let grid = app.create_note("Sizes", nb);
+        if let Some(note) = app.find_note_mut(grid) {
+            note.kind = NoteKind::Table;
+            let mut table = TableData::new(vec!["Size".to_owned(), "Count".to_owned()]);
+            table.add_row(vec!["S".to_owned(), "3".to_owned()]);
+            note.table = Some(table);
+        }
+        app.selected_note = Some(grid);
+        assert!(app.export_selected_note(&path).starts_with("Wrote"));
+        let written = std::fs::read_to_string(&path).expect("written");
+        assert!(
+            written.starts_with("# Sizes\n\n| Size | Count |"),
+            "{written:?}"
+        );
+        assert!(written.contains("| S | 3 |"), "{written:?}");
+        assert!(
+            written.ends_with('\n') && !written.ends_with("\n\n"),
+            "{written:?}"
+        );
+
+        let empty = app.create_note("Blank", nb);
+        app.selected_note = Some(empty);
+        assert!(app.export_selected_note(&path).starts_with("Wrote"));
+        assert_eq!(
+            std::fs::read_to_string(&path).expect("written"),
+            "# Blank\n"
+        );
+        std::fs::remove_file(&path).ok();
+    }
+
     /// With nothing selected it refuses rather than opening a picker.
     ///
     /// A picker that opens with nothing to write asks the user to choose a
@@ -6230,7 +6741,9 @@ mod tests {
             .commands
             .iter()
             .filter_map(|c| match c {
-                RenderCommand::Text { text, .. } => Some(text.clone()),
+                RenderCommand::Text { text, .. } | RenderCommand::RichText { text, .. } => {
+                    Some(text.clone())
+                }
                 _ => None,
             })
             .collect();
@@ -6889,7 +7402,7 @@ mod tests {
         // 238 words should be about 1 minute
         let words: Vec<&str> = (0..238).map(|_| "word").collect();
         note.content = words.join(" ");
-        let time = note.reading_time_minutes();
+        let time = reading_minutes(note.word_count());
         assert!((time - 1.0).abs() < 0.01);
     }
 
@@ -7201,10 +7714,456 @@ mod tests {
         Event::Key(key_of(k, Modifiers::ctrl()))
     }
 
+    /// Type `text` as a keyboard would: a tab is the Tab key, which carries
+    /// no text a field would take.
     fn type_str(app: &mut NotesApp, text: &str) {
         for c in text.chars() {
-            app.handle_event(&typed(c));
+            if c == '\t' {
+                app.handle_event(&press(Key::Tab));
+            } else {
+                app.handle_event(&typed(c));
+            }
         }
+    }
+
+    /// A note's text as drawn: every line the field put on the screen.
+    fn body_lines(app: &mut NotesApp) -> Vec<String> {
+        app.render(1280.0, 800.0)
+            .commands
+            .into_iter()
+            .filter_map(|c| match c {
+                RenderCommand::RichText { text, .. } => Some(text),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// A note holding `content`, selected, in a window drawn once so that its
+    /// size is the one the clicks are aimed by.
+    fn app_with_note(content: &str) -> (NotesApp, NoteId) {
+        let mut app = NotesApp::new();
+        let nb = app.create_notebook("NB");
+        let id = app.create_note("Note", nb);
+        app.update_note_content(id, content);
+        app.selected_note = Some(id);
+        app.render(1280.0, 800.0);
+        (app, id)
+    }
+
+    fn content_of(app: &NotesApp, id: NoteId) -> String {
+        app.find_note(id).expect("the note").content.clone()
+    }
+
+    fn left_press(x: f32, y: f32) -> Event {
+        Event::Mouse(MouseEvent {
+            x,
+            y,
+            kind: MouseEventKind::Press(MouseButton::Left),
+        })
+    }
+
+    /// **A note is corrected where the mistake is.** The body only grew at
+    /// its end or lost its last character, so a typo three words back was
+    /// fixed by deleting the three words.
+    #[test]
+    fn a_note_is_corrected_in_the_middle() {
+        let (mut app, id) = app_with_note("helo world");
+        app.handle_event(&press(Key::Enter));
+        app.handle_event(&press(Key::Home));
+        for _ in 0..3 {
+            app.handle_event(&press(Key::Right));
+        }
+        type_str(&mut app, "l");
+        app.handle_event(&press(Key::Escape));
+        assert_eq!(content_of(&app, id), "hello world");
+        assert!(app.text_entry.is_none());
+    }
+
+    /// Undo takes back what was typed, and a note left as it was is not a
+    /// change: no version is filed for it.
+    #[test]
+    fn undo_takes_back_what_was_typed() {
+        let (mut app, id) = app_with_note("abc");
+        let versions = app.find_note(id).expect("the note").versions.len();
+        app.handle_event(&press(Key::Enter));
+        type_str(&mut app, "def");
+        app.handle_event(&ctrl(Key::Z));
+        app.handle_event(&press(Key::Escape));
+        assert_eq!(content_of(&app, id), "abc");
+        assert_eq!(
+            app.find_note(id).expect("the note").versions.len(),
+            versions,
+            "an undone edit filed a version"
+        );
+    }
+
+    /// **A click on the text writes there**, with the caret by the letter
+    /// clicked -- on the second line here, at its start.
+    #[test]
+    fn a_click_on_the_text_writes_where_it_lands() {
+        let (mut app, id) = app_with_note("first line\nsecond line");
+        let note = app.find_note(id).expect("the note").clone();
+        let (left, top, m) = app.body_box(&note);
+        app.handle_event(&left_press(left + 1.0, top + m.line_height() * 1.5));
+        assert_eq!(app.text_entry, Some(TextEntry::NoteBody(id)));
+        type_str(&mut app, "X");
+        app.handle_event(&press(Key::Escape));
+        assert_eq!(content_of(&app, id), "first line\nXsecond line");
+    }
+
+    /// A double click on the text selects the word under it, and typing
+    /// replaces the word.
+    #[test]
+    fn a_double_click_selects_a_word() {
+        let (mut app, id) = app_with_note("one two three");
+        let note = app.find_note(id).expect("the note").clone();
+        let (left, top, m) = app.body_box(&note);
+        let two = text::measure("one t", BODY_FONT_SIZE, FontWeightHint::Regular);
+        let at = (left + two, top + m.line_height() / 2.0);
+        app.handle_event(&left_press(at.0, at.1));
+        app.handle_event(&Event::Mouse(MouseEvent {
+            x: at.0,
+            y: at.1,
+            kind: MouseEventKind::DoubleClick(MouseButton::Left),
+        }));
+        type_str(&mut app, "2");
+        app.handle_event(&press(Key::Escape));
+        assert_eq!(content_of(&app, id), "one 2 three");
+    }
+
+    /// A drag across the text selects what it passes over.
+    #[test]
+    fn a_drag_selects_the_text_it_passes_over() {
+        let (mut app, id) = app_with_note("abcdef");
+        let note = app.find_note(id).expect("the note").clone();
+        let (left, top, m) = app.body_box(&note);
+        let y = top + m.line_height() / 2.0;
+        let x_of = |s: &str| left + text::measure(s, BODY_FONT_SIZE, FontWeightHint::Regular);
+        app.handle_event(&left_press(x_of("a"), y));
+        app.handle_event(&Event::Mouse(MouseEvent {
+            x: x_of("abcd"),
+            y,
+            kind: MouseEventKind::Move,
+        }));
+        app.handle_event(&Event::Mouse(MouseEvent {
+            x: x_of("abcd"),
+            y,
+            kind: MouseEventKind::Release(MouseButton::Left),
+        }));
+        assert_eq!(app.body.selected_text(), "bcd");
+        // A move with the button up selects nothing more.
+        app.handle_event(&Event::Mouse(MouseEvent {
+            x: x_of("abcdef"),
+            y,
+            kind: MouseEventKind::Move,
+        }));
+        assert_eq!(app.body.selected_text(), "bcd");
+        type_str(&mut app, "-");
+        app.handle_event(&press(Key::Escape));
+        assert_eq!(content_of(&app, id), "a-ef");
+    }
+
+    /// **A press anywhere else finishes the writing and keeps it**, and is
+    /// then the press it would have been -- here, a note in the list.
+    #[test]
+    fn a_click_elsewhere_keeps_the_writing_and_does_its_own_thing() {
+        let mut app = NotesApp::new();
+        let nb = app.create_notebook("NB");
+        let first = app.create_note("First", nb);
+        let second = app.create_note("Second", nb);
+        app.selected_note = Some(first);
+        app.render(1280.0, 800.0);
+        app.handle_event(&press(Key::Enter));
+        type_str(&mut app, "kept");
+        let (x, y) = (1..800)
+            .map(|y| (SIDEBAR_WIDTH + 20.0, y as f32))
+            .find(|&(x, y)| app.note_at(x, y) == Some(second))
+            .expect("the second note is in the list");
+        app.handle_event(&left_press(x, y));
+        assert!(app.text_entry.is_none(), "still writing");
+        assert_eq!(content_of(&app, first), "kept");
+        assert_eq!(app.selected_note, Some(second), "the press did not select");
+    }
+
+    /// **A note that was only opened is not rewritten.** The field keeps
+    /// every line ending as `\n`; writing it back untouched turned a note's
+    /// Windows line endings into `\n` and filed a version of the change.
+    #[test]
+    fn opening_a_note_with_other_line_endings_changes_nothing() {
+        let (mut app, id) = app_with_note("one\r\ntwo\rthree");
+        let versions = app.find_note(id).expect("the note").versions.len();
+        app.handle_event(&press(Key::Enter));
+        app.handle_event(&press(Key::Left));
+        app.handle_event(&press(Key::Escape));
+        assert_eq!(content_of(&app, id), "one\r\ntwo\rthree");
+        assert_eq!(
+            app.find_note(id).expect("the note").versions.len(),
+            versions
+        );
+
+        // Written in, it is kept as the field has it.
+        app.handle_event(&press(Key::Enter));
+        type_str(&mut app, "!");
+        app.handle_event(&press(Key::Escape));
+        assert_eq!(content_of(&app, id), "one\ntwo\nthree!");
+    }
+
+    /// A version clicked while writing goes into the field, where Ctrl+Z
+    /// takes it back out, and the writing carries on.
+    #[test]
+    fn a_version_clicked_while_writing_goes_into_the_field() {
+        let (mut app, id) = app_with_note("old");
+        app.update_note_content(id, "new");
+        app.render(1280.0, 800.0);
+        app.handle_event(&press(Key::Enter));
+        type_str(&mut app, " text");
+        let (px, py, pw, ph) = app.version_panel_bounds();
+        let (x, y) = (py as i32..(py + ph) as i32)
+            .map(|y| (px + pw / 2.0, y as f32))
+            .find(|&(x, y)| app.version_at(x, y) == Some(0))
+            .expect("the version is listed");
+        app.handle_event(&left_press(x, y));
+        assert_eq!(
+            app.text_entry,
+            Some(TextEntry::NoteBody(id)),
+            "writing ended"
+        );
+        assert_eq!(app.body.text(), "old");
+        app.handle_event(&ctrl(Key::Z));
+        assert_eq!(app.body.text(), "new text");
+        app.handle_event(&ctrl(Key::Y));
+        app.handle_event(&press(Key::Escape));
+        assert_eq!(content_of(&app, id), "old");
+        let versions = &app.find_note(id).expect("the note").versions;
+        assert_eq!(
+            versions.last().map(|v| v.content.as_str()),
+            Some("new"),
+            "what the note said before is not a version"
+        );
+    }
+
+    /// The wheel scrolls a long note, written or only read, and the text
+    /// stays inside its panel.
+    #[test]
+    fn a_long_note_scrolls_and_stays_in_its_panel() {
+        let long: Vec<String> = (0..200).map(|n| format!("line {n}")).collect();
+        let (mut app, id) = app_with_note(&long.join("\n"));
+        let lines = body_lines(&mut app);
+        assert_eq!(lines.first().map(String::as_str), Some("line 0"));
+        assert!(lines.len() < 100, "every line was drawn: {}", lines.len());
+        let commands = app.render(1280.0, 800.0).commands;
+        assert!(
+            commands
+                .iter()
+                .any(|c| matches!(c, RenderCommand::PushClip { .. })),
+            "nothing keeps the text inside the panel"
+        );
+
+        let note = app.find_note(id).expect("the note").clone();
+        let (left, top, _) = app.body_box(&note);
+        let wheel = |dy| {
+            Event::Mouse(MouseEvent {
+                x: left + 10.0,
+                y: top + 10.0,
+                kind: MouseEventKind::Scroll { dx: 0.0, dy },
+            })
+        };
+        // Towards the user is towards the end.
+        assert_eq!(app.handle_event(&wheel(-5.0)), EventResult::Consumed);
+        let scrolled = body_lines(&mut app);
+        assert_ne!(scrolled.first(), lines.first(), "the wheel moved nothing");
+
+        // Writing keeps the view where the wheel left it, clicked into.
+        let note = app.find_note(id).expect("the note").clone();
+        let (left, top, _) = app.body_box(&note);
+        app.handle_event(&left_press(left + 1.0, top + 1.0));
+        assert_eq!(body_lines(&mut app).first(), scrolled.first());
+    }
+
+    /// Tab writes a tab, and Shift+Tab and Ctrl+Tab do not.
+    #[test]
+    fn tab_writes_a_tab_in_a_note() {
+        let (mut app, id) = app_with_note("");
+        app.handle_event(&press(Key::Enter));
+        app.handle_event(&press(Key::Tab));
+        app.handle_event(&Event::Key(key_of(Key::Tab, Modifiers::shift())));
+        app.handle_event(&Event::Key(key_of(Key::Tab, Modifiers::ctrl())));
+        type_str(&mut app, "x");
+        app.handle_event(&press(Key::Escape));
+        assert_eq!(content_of(&app, id), "\tx");
+    }
+
+    /// Ctrl+Enter finishes, as Escape does, and keeps what was written.
+    #[test]
+    fn ctrl_enter_finishes_writing() {
+        let (mut app, id) = app_with_note("a");
+        app.handle_event(&press(Key::Enter));
+        type_str(&mut app, "b");
+        app.handle_event(&ctrl(Key::Enter));
+        assert!(app.text_entry.is_none());
+        assert_eq!(content_of(&app, id), "ab");
+    }
+
+    /// Ctrl+S in the middle of writing keeps what is written so far, and the
+    /// writing carries on.
+    #[test]
+    fn ctrl_s_while_writing_keeps_what_is_written() {
+        let (mut app, id) = app_with_note("a");
+        app.handle_event(&press(Key::Enter));
+        type_str(&mut app, "b");
+        app.handle_event(&ctrl(Key::S));
+        assert_eq!(content_of(&app, id), "ab");
+        assert_eq!(app.text_entry, Some(TextEntry::NoteBody(id)));
+        type_str(&mut app, "c");
+        app.handle_event(&press(Key::Escape));
+        assert_eq!(content_of(&app, id), "abc");
+    }
+
+    /// **A checklist is not opened as text.** Writing in one changed a field
+    /// its view does not draw, so what was typed vanished when the writing
+    /// finished.
+    #[test]
+    fn a_checklist_or_a_table_is_not_opened_as_text() {
+        for (kind, why) in [
+            (NoteKind::Checklist, CHECKLIST_NOT_TEXT),
+            (NoteKind::Table, TABLE_NOT_TEXT),
+        ] {
+            let (mut app, id) = app_with_note("");
+            app.find_note_mut(id).expect("the note").kind = kind;
+            assert_eq!(app.handle_event(&press(Key::Enter)), EventResult::Consumed);
+            assert!(app.text_entry.is_none(), "writing began");
+            assert_eq!(app.last_save.as_deref(), Some(why));
+            let note = app.find_note(id).expect("the note").clone();
+            let (left, top, _) = app.body_box(&note);
+            app.handle_event(&left_press(left + 5.0, top + 5.0));
+            assert!(app.text_entry.is_none(), "a click began writing");
+        }
+    }
+
+    /// A Markdown note is written as its Markdown, and read as the page it
+    /// makes.
+    #[test]
+    fn a_markdown_note_is_written_as_its_source() {
+        let (mut app, id) = app_with_note("# Head\n\nbody");
+        app.find_note_mut(id).expect("the note").kind = NoteKind::Markdown;
+        assert!(
+            !body_lines(&mut app).iter().any(|l| l == "# Head"),
+            "the page shows its source"
+        );
+        app.handle_event(&press(Key::Enter));
+        assert!(
+            body_lines(&mut app).iter().any(|l| l == "# Head"),
+            "the source is not what is written"
+        );
+    }
+
+    /// The status line counts what is being written, as it is written.
+    #[test]
+    fn the_counts_follow_the_writing() {
+        let (mut app, _) = app_with_note("one");
+        app.handle_event(&press(Key::Enter));
+        type_str(&mut app, " two caf\u{e9}");
+        let stats = app.selected_note_stats().expect("stats");
+        assert_eq!(stats.word_count, 3);
+        assert_eq!(stats.char_count, "one two caf\u{e9}".chars().count());
+    }
+
+    /// Characters are counted, not bytes.
+    #[test]
+    fn characters_are_counted_not_bytes() {
+        let mut note = Note::new(1, "t", 1);
+        note.content = "caf\u{e9} \u{65e5}\u{672c}".to_owned();
+        assert_eq!(note.char_count(), 7);
+    }
+
+    /// The caret is as wide as the user asked for, and drawn only while the
+    /// note is being written: a caret in a note that is only being read says
+    /// typing would go there, and it would not.
+    #[test]
+    fn the_caret_is_as_wide_as_the_setting_says() {
+        let (mut app, _) = app_with_note("x");
+        app.appearance_changed(&appearance::AppearanceSettings {
+            caret_width_scale: 3.0,
+            ..appearance::AppearanceSettings::default()
+        });
+        let wide = guitk::textedit::CARET_WIDTH * 3.0;
+        let line = text::line_height(BODY_FONT_SIZE, FontWeightHint::Regular);
+        let caret = |app: &mut NotesApp| {
+            app.render(1280.0, 800.0).commands.iter().any(|c| {
+                matches!(
+                    c,
+                    RenderCommand::Line { y1, y2, width, .. }
+                        if (*width - wide).abs() < 1e-3 && (*y2 - *y1 - line).abs() < 1e-3
+                )
+            })
+        };
+        assert!(!caret(&mut app), "a caret in a note nobody is writing in");
+        app.handle_event(&press(Key::Enter));
+        assert!(caret(&mut app), "no caret {wide} wide");
+    }
+
+    /// A long page stays between the rule and the status bar, whatever the
+    /// note is: the page a long Markdown note made ran over the status bar
+    /// and off the bottom of the window.
+    #[test]
+    fn a_long_markdown_page_stays_in_its_panel() {
+        let long: Vec<String> = (0..200).map(|n| format!("line {n}")).collect();
+        let (mut app, id) = app_with_note(&long.join("\n\n"));
+        app.find_note_mut(id).expect("the note").kind = NoteKind::Markdown;
+        let mut clip: Option<f32> = None;
+        let mut drawn = 0;
+        for c in app.render(1280.0, 800.0).commands {
+            match c {
+                RenderCommand::PushClip { y, height, .. } => clip = Some(y + height),
+                RenderCommand::PopClip => clip = None,
+                RenderCommand::Text { text, x, .. }
+                    if text.starts_with("line ") && x >= SIDEBAR_WIDTH + NOTE_LIST_WIDTH =>
+                {
+                    let bottom = clip.unwrap_or_else(|| panic!("{text:?} is drawn unclipped"));
+                    assert!(
+                        bottom <= 800.0 - STATUS_BAR_HEIGHT,
+                        "clipped below the panel"
+                    );
+                    drawn += 1;
+                }
+                _ => {}
+            }
+        }
+        assert!(drawn > 0, "the page drew nothing");
+    }
+
+    /// A version put back while the note is only being read shows at once,
+    /// though the field still holds the text it replaced.
+    #[test]
+    fn a_version_restored_while_reading_shows_at_once() {
+        let (mut app, id) = app_with_note("old");
+        app.update_note_content(id, "new");
+        app.handle_event(&press(Key::Enter));
+        app.handle_event(&press(Key::Escape));
+        assert!(body_lines(&mut app).iter().any(|l| l == "new"));
+        let (px, py, pw, ph) = app.version_panel_bounds();
+        let (x, y) = (py as i32..(py + ph) as i32)
+            .map(|y| (px + pw / 2.0, y as f32))
+            .find(|&(x, y)| app.version_at(x, y) == Some(0))
+            .expect("the version is listed");
+        app.handle_event(&left_press(x, y));
+        assert_eq!(content_of(&app, id), "old");
+        let lines = body_lines(&mut app);
+        assert!(lines.iter().any(|l| l == "old"), "{lines:?}");
+    }
+
+    /// A click on a Markdown page writes at the end of its Markdown: what was
+    /// clicked was the page, and no letter of the source is under the pointer.
+    #[test]
+    fn a_click_on_a_markdown_page_writes_at_its_end() {
+        let (mut app, id) = app_with_note("# Head\n\nbody");
+        app.find_note_mut(id).expect("the note").kind = NoteKind::Markdown;
+        let note = app.find_note(id).expect("the note").clone();
+        let (left, top, _) = app.body_box(&note);
+        app.handle_event(&left_press(left + 1.0, top + 1.0));
+        type_str(&mut app, "X");
+        app.handle_event(&press(Key::Escape));
+        assert_eq!(content_of(&app, id), "# Head\n\nbodyX");
     }
 
     /// Text a note is full of and a line-based file mangles.

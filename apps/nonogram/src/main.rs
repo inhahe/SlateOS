@@ -43,31 +43,75 @@
 //! and `unused_imports` among them, which is what let a program whose `main`
 //! discarded its own app compile without a word of complaint.
 
+use guitk::button::{Kind, State};
 use guitk::color::Color;
 use guitk::event::{Event, Key, KeyEvent, Modifiers, MouseButton, MouseEvent, MouseEventKind};
 use guitk::frame::{Frame, Rect};
+use guitk::palette::Palette;
 use guitk::probe::Probe;
 use guitk::render::{FontWeightHint, RenderCommand, RenderTree, TextOverflow};
 use guitk::style::CornerRadii;
+use guitk::surface::Surface;
 use guitk::text;
 use oswindow::app::{self, App, Response};
 use std::process::ExitCode;
 use std::time::Duration;
 
-// ── Catppuccin Mocha palette ────────────────────────────────────────
-const BASE: Color = Color::from_hex(0x1E1E2E);
-const MANTLE: Color = Color::from_hex(0x181825);
-const SURFACE0: Color = Color::from_hex(0x313244);
-const SURFACE1: Color = Color::from_hex(0x45475A);
-const SURFACE2: Color = Color::from_hex(0x585B70);
-const TEXT_COLOR: Color = Color::from_hex(0xCDD6F4);
-const SUBTEXT0: Color = Color::from_hex(0xA6ADC8);
-const BLUE: Color = Color::from_hex(0x89B4FA);
-const GREEN: Color = Color::from_hex(0xA6E3A1);
-const RED: Color = Color::from_hex(0xF38BA8);
-const YELLOW: Color = Color::from_hex(0xF9E2AF);
-const LAVENDER: Color = Color::from_hex(0xB4BEFE);
-const OVERLAY0: Color = Color::from_hex(0x6C7086);
+// ── Colours ─────────────────────────────────────────────────────────
+//
+// Everything in this game follows the user's palette (the operator's answer
+// to C-Q16, §1422, and lane C's call for this game): its surfaces and text
+// from the palette's roles, each hue in the palette's ink for it, which reads
+// on the page in a light theme as in a dark one. It was all a copy of
+// Catppuccin Mocha, dark on a light desktop.
+
+/// The colours the window draws in, from the user's palette.
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct Colours {
+    /// The page.
+    base: Color,
+    /// A band.
+    mantle: Color,
+    /// Raised.
+    surface0: Color,
+    /// Raised furthest.
+    surface2: Color,
+    /// Text.
+    text: Color,
+    /// Secondary text.
+    subtext0: Color,
+    /// The palette's blue, inked for the page.
+    blue: Color,
+    /// The palette's green, inked for the page.
+    green: Color,
+    /// The palette's red, inked for the page.
+    red: Color,
+    /// The palette's yellow, inked for the page.
+    yellow: Color,
+    /// The palette's lavender, inked for the page.
+    lavender: Color,
+    /// A switched-off control, and faint lines.
+    overlay0: Color,
+}
+
+impl Colours {
+    fn of(p: &Palette) -> Self {
+        Self {
+            base: p.base,
+            mantle: p.mantle,
+            surface0: p.surface0,
+            surface2: p.surface2,
+            text: p.text,
+            subtext0: p.subtext0,
+            blue: p.ink(p.blue),
+            green: p.ink(p.green),
+            red: p.ink(p.red),
+            yellow: p.ink(p.yellow),
+            lavender: p.ink(p.lavender),
+            overlay0: p.overlay0,
+        }
+    }
+}
 
 // ── Layout proportions ──────────────────────────────────────────────
 //
@@ -822,6 +866,12 @@ pub struct NonogramApp {
     /// The size the last frame was drawn at, which is the size the next click
     /// is read against.
     size_drawn: (f32, f32),
+    /// The user's colours, replaced whenever the theme changes. Seeded from
+    /// the defaults; the framework calls `App::theme_changed` before the
+    /// first frame.
+    palette: Palette,
+    /// `palette`'s colours as this window draws them: rebuilt with it.
+    colours: Colours,
 }
 
 impl NonogramApp {
@@ -843,6 +893,8 @@ impl NonogramApp {
             check_mode: false,
             select_cursor: 0,
             size_drawn: (WINDOW_WIDTH, WINDOW_HEIGHT),
+            palette: Palette::for_mode(false),
+            colours: Colours::of(&Palette::for_mode(false)),
         }
     }
 
@@ -1199,7 +1251,7 @@ impl NonogramApp {
     pub fn frame(&self, width: f32, height: f32) -> Frame<Target> {
         let l = Layout::new(width, height);
         let mut f = Frame::new(width, height);
-        fill(&mut f, l.window, BASE, CornerRadii::ZERO);
+        fill(&mut f, l.window, self.colours.base, CornerRadii::ZERO);
         match self.screen {
             Screen::Select => self.draw_select(&mut f, &l),
             Screen::Playing | Screen::Won => self.draw_playing(&mut f, &l),
@@ -1208,14 +1260,14 @@ impl NonogramApp {
     }
 
     fn draw_select(&self, f: &mut Frame<Target>, l: &Layout) {
-        fill(f, l.header, MANTLE, CornerRadii::ZERO);
+        fill(f, l.header, self.colours.mantle, CornerRadii::ZERO);
         label_left(
             f,
             &Label {
                 text: "Nonogram — Select Puzzle",
                 size: l.big,
                 weight: FontWeightHint::Bold,
-                color: TEXT_COLOR,
+                color: self.colours.text,
             },
             inset_x(l.header, l.pad * 2.0),
         );
@@ -1227,11 +1279,18 @@ impl NonogramApp {
                 continue;
             }
             let selected = i == self.select_cursor;
-            fill(
+            self.palette.push_surface(
                 f,
-                entry,
-                if selected { SURFACE1 } else { SURFACE0 },
-                CornerRadii::all(list.inset),
+                entry.x,
+                entry.y,
+                entry.w,
+                entry.h,
+                list.inset,
+                if selected {
+                    Surface::Selected
+                } else {
+                    Surface::Card
+                },
             );
             label_left(
                 f,
@@ -1239,7 +1298,11 @@ impl NonogramApp {
                     text: puzzle.name,
                     size: l.font,
                     weight: FontWeightHint::Bold,
-                    color: if selected { BLUE } else { TEXT_COLOR },
+                    color: if selected {
+                        self.colours.blue
+                    } else {
+                        self.colours.text
+                    },
                 },
                 list.name_rect(i),
             );
@@ -1249,7 +1312,7 @@ impl NonogramApp {
                     text: &size_label(puzzle.size),
                     size: l.font,
                     weight: FontWeightHint::Regular,
-                    color: SUBTEXT0,
+                    color: self.colours.subtext0,
                 },
                 list.size_rect(i),
             );
@@ -1257,19 +1320,25 @@ impl NonogramApp {
                 f,
                 puzzle,
                 list.thumb_rect(i),
-                if selected { BLUE } else { LAVENDER },
+                if selected {
+                    self.colours.blue
+                } else {
+                    self.colours.lavender
+                },
             );
             f.hit(Target::Puzzle(i), entry);
         }
 
-        fill(f, l.footer, MANTLE, CornerRadii::ZERO);
+        fill(f, l.footer, self.colours.mantle, CornerRadii::ZERO);
         label_left(
             f,
             &Label {
                 text: "Up/Down: choose    Enter: play",
                 size: l.small,
                 weight: FontWeightHint::Regular,
-                color: OVERLAY0,
+                // Secondary text: an instruction is read, and the palette's
+                // faintest grey is 2.3:1 on a light page.
+                color: self.colours.subtext0,
             },
             inset_x(l.footer, l.pad * 2.0),
         );
@@ -1284,7 +1353,7 @@ impl NonogramApp {
     }
 
     fn draw_header(&self, f: &mut Frame<Target>, l: &Layout) {
-        fill(f, l.header, MANTLE, CornerRadii::ZERO);
+        fill(f, l.header, self.colours.mantle, CornerRadii::ZERO);
         let mut rest = inset_x(l.header, l.pad * 2.0);
 
         // The timer is carved off the right and the title off the left, so the
@@ -1300,7 +1369,7 @@ impl NonogramApp {
                 text: &time,
                 size: l.font,
                 weight: FontWeightHint::Regular,
-                color: SUBTEXT0,
+                color: self.colours.subtext0,
             },
             time_rect,
         );
@@ -1314,7 +1383,7 @@ impl NonogramApp {
                 text: title,
                 size: l.big,
                 weight: FontWeightHint::Bold,
-                color: TEXT_COLOR,
+                color: self.colours.text,
             },
             title_rect,
         );
@@ -1326,7 +1395,7 @@ impl NonogramApp {
                     text: "SOLVED!",
                     size: l.font,
                     weight: FontWeightHint::Bold,
-                    color: GREEN,
+                    color: self.colours.green,
                 },
                 rest,
             );
@@ -1383,7 +1452,11 @@ impl NonogramApp {
                 } else {
                     FontWeightHint::Regular
                 },
-                color: if live { BLUE } else { SUBTEXT0 },
+                color: if live {
+                    self.colours.blue
+                } else {
+                    self.colours.subtext0
+                },
             },
             slot,
         );
@@ -1398,7 +1471,16 @@ impl NonogramApp {
                 let wrong = self.check_mode && self.is_error(row, col);
                 fill(f, r, self.cell_color(mark, wrong), radius);
                 if mark == CellMark::MarkedEmpty {
-                    draw_cross(f, r, if wrong { RED } else { OVERLAY0 }, g.cell);
+                    draw_cross(
+                        f,
+                        r,
+                        if wrong {
+                            self.colours.red
+                        } else {
+                            self.colours.subtext0
+                        },
+                        g.cell,
+                    );
                 }
                 f.hit(Target::Cell(row, col), g.cell_hit(row, col));
             }
@@ -1414,13 +1496,13 @@ impl NonogramApp {
                 fill(
                     f,
                     Rect::new(cell.x - g.gap / 2.0 - w / 2.0, g.cells.y, w, g.cells.h),
-                    OVERLAY0,
+                    self.colours.overlay0,
                     CornerRadii::ZERO,
                 );
                 fill(
                     f,
                     Rect::new(g.cells.x, cell.y - g.gap / 2.0 - w / 2.0, g.cells.w, w),
-                    OVERLAY0,
+                    self.colours.overlay0,
                     CornerRadii::ZERO,
                 );
             }
@@ -1435,7 +1517,7 @@ impl NonogramApp {
                 stroke(
                     f,
                     Rect::new(r.x - out, r.y - out, r.w + out * 2.0, r.h + out * 2.0),
-                    YELLOW,
+                    self.colours.yellow,
                     out,
                     CornerRadii::all(g.cell * 0.11 + out),
                 );
@@ -1448,49 +1530,46 @@ impl NonogramApp {
         match mark {
             CellMark::Filled => {
                 if wrong {
-                    RED
+                    self.colours.red
                 } else if self.screen == Screen::Won {
-                    BLUE
+                    self.colours.blue
                 } else {
-                    LAVENDER
+                    self.colours.lavender
                 }
             }
-            CellMark::MarkedEmpty if wrong => SURFACE2,
-            CellMark::Empty | CellMark::MarkedEmpty => SURFACE0,
+            CellMark::MarkedEmpty if wrong => self.colours.surface2,
+            CellMark::Empty | CellMark::MarkedEmpty => self.colours.surface0,
         }
     }
 
     fn draw_footer(&self, f: &mut Frame<Target>, l: &Layout) {
-        fill(f, l.footer, MANTLE, CornerRadii::ZERO);
+        fill(f, l.footer, self.colours.mantle, CornerRadii::ZERO);
         let mut rest = inset_x(l.footer, l.pad * 2.0);
 
         // Switches first, right to left, then the progress count, then the
         // hint gets whatever is left — and is told to stop there, which is
         // what `max_width` is for and what every string in this program was
         // missing.
+        // The toolkit's buttons, as wide as their labels need; Check is a
+        // switch, and on it is the toolkit's primary button.
+        let button_h = rest.h * (1.0 - 0.18 * 2.0);
         for (target, text) in [(Target::Menu, "Menu"), (Target::Check, "Check")] {
-            let w = text::measure(text, l.small, FontWeightHint::Bold) + l.pad * 2.0;
+            let w = gamechrome::button_width(text, l.small, button_h);
             let box_rect = take_right(&mut rest, w, l.pad);
             if box_rect.is_empty() {
                 continue;
             }
             let on = target == Target::Check && self.check_mode;
             let inner = inset_y(box_rect, box_rect.h * 0.18);
-            fill(
+            gamechrome::button(
                 f,
-                inner,
-                if on { BLUE } else { SURFACE0 },
-                CornerRadii::all(inner.h * 0.25),
-            );
-            label_centred(
-                f,
-                &Label {
-                    text,
-                    size: l.small,
-                    weight: FontWeightHint::Bold,
-                    color: if on { BASE } else { TEXT_COLOR },
-                },
-                inner,
+                &self.palette,
+                (inner.x, inner.y, inner.w, inner.h),
+                text,
+                l.small,
+                if on { Kind::Primary } else { Kind::Plain },
+                State::default(),
+                self.colours.mantle,
             );
             f.hit(target, box_rect);
         }
@@ -1509,9 +1588,9 @@ impl NonogramApp {
                 size: l.small,
                 weight: FontWeightHint::Regular,
                 color: if self.screen == Screen::Won {
-                    GREEN
+                    self.colours.green
                 } else {
-                    SUBTEXT0
+                    self.colours.subtext0
                 },
             },
             progress_rect,
@@ -1527,7 +1606,7 @@ impl NonogramApp {
                 },
                 size: l.small,
                 weight: FontWeightHint::Regular,
-                color: OVERLAY0,
+                color: self.colours.subtext0,
             },
             rest,
         );
@@ -1756,6 +1835,11 @@ pub fn handle_event(app: &mut NonogramApp, event: &Event) -> EventResult {
 }
 
 impl App for NonogramApp {
+    fn theme_changed(&mut self, palette: &Palette) {
+        self.palette = *palette;
+        self.colours = Colours::of(palette);
+    }
+
     fn title(&self) -> String {
         "Nonogram".to_string()
     }
@@ -1841,6 +1925,240 @@ mod tests {
     )]
 
     use super::*;
+
+    /// The palette for a light or a dark theme, in the bordered look (the
+    /// default) or the card look.
+    fn palette(light: bool, cards: bool) -> Palette {
+        let mut p = Palette::for_mode(light);
+        p.set_surface_style(if cards {
+            guitk::palette::SurfaceStyle::Cards
+        } else {
+            guitk::palette::SurfaceStyle::Borders
+        });
+        p
+    }
+
+    /// Every screen in `p`'s colours: the list with a puzzle chosen, a game
+    /// under Check with a filled square, a wrong one and marked ones, the
+    /// same cramped, and a solved picture.
+    fn every_look(p: &Palette) -> Vec<(&'static str, NonogramApp, (f32, f32))> {
+        let mut list = NonogramApp::new();
+        list.select_cursor = 1;
+        let mut game = playing("Heart");
+        let (fr, fc) = a_filled_cell(&game);
+        let (br, bc) = a_blank_cell(&game);
+        game.set_cell(fr, fc, CellMark::Filled);
+        game.set_cell(br, bc, CellMark::Filled);
+        game.set_cell(
+            fr,
+            fc.saturating_add(1) % game.grid_side,
+            CellMark::MarkedEmpty,
+        );
+        game.check_mode = true;
+        let mut cramped = playing("Heart");
+        cramped.set_cell(fr, fc, CellMark::Filled);
+        cramped.set_cell(br, bc, CellMark::MarkedEmpty);
+        cramped.check_mode = true;
+        let mut won = playing("Heart");
+        paint_solution(&mut won);
+        won.screen = Screen::Won;
+        let mut looks = vec![
+            ("list", list, (WINDOW_WIDTH, WINDOW_HEIGHT)),
+            ("playing", game, (WINDOW_WIDTH, WINDOW_HEIGHT)),
+            ("cramped", cramped, (360.0, 300.0)),
+            ("won", won, (WINDOW_WIDTH, WINDOW_HEIGHT)),
+        ];
+        for (_, app, _) in &mut looks {
+            app.theme_changed(p);
+        }
+        looks
+    }
+
+    /// **The window is drawn in the user's colours**, light or dark, in
+    /// either surface look -- every colour the palette's or the toolkit's
+    /// buttons' (the operator's C-Q16). It drew in its own copy of
+    /// Catppuccin Mocha, dark on a light desktop.
+    #[test]
+    fn the_window_is_drawn_in_the_users_colours() {
+        for (light, cards) in [(false, false), (true, false), (false, true), (true, true)] {
+            let p = palette(light, cards);
+            let mut derived = gamechrome::button_colours(&p, Kind::Plain, p.mantle);
+            derived.extend(gamechrome::button_colours(&p, Kind::Primary, p.mantle));
+            for (what, app, (w, h)) in every_look(&p) {
+                appearance::palette_check::assert_drawn_from(
+                    &p,
+                    app.frame(w, h).commands(),
+                    &derived,
+                    &format!("nonogram, {what}, light: {light}, cards: {cards}"),
+                );
+            }
+        }
+    }
+
+    /// **Every text reads on what is drawn under it**, in either theme and
+    /// either surface look, held to WCAG's floor for its size
+    /// (`gamechrome::legibility`).
+    #[test]
+    fn every_text_reads_on_what_is_under_it_in_either_theme() {
+        let mut bad = Vec::new();
+        for (light, cards) in [(false, false), (true, false), (false, true), (true, true)] {
+            let p = palette(light, cards);
+            for (what, app, (w, h)) in every_look(&p) {
+                let f = app.frame(w, h);
+                for r in gamechrome::legibility::illegible(f.commands(), p.base, |_| false) {
+                    bad.push(format!(
+                        "{what}, light: {light}, cards: {cards}: {:?} {:.2}:1 on {:?}",
+                        r.text,
+                        r.ratio(),
+                        r.ground
+                    ));
+                }
+            }
+        }
+        assert!(bad.is_empty(), "nonogram: {bad:#?}");
+    }
+
+    /// **The chosen puzzle looks chosen**, in either surface look: its row
+    /// is the toolkit's selected row and the others are its plain cards.
+    #[test]
+    fn the_chosen_puzzle_looks_chosen() {
+        for cards in [false, true] {
+            let p = palette(false, cards);
+            // A border is stroked half a pixel inside the box it outlines, so
+            // the paint is matched to the row within that.
+            let paint_of_first_row = |chosen: usize| {
+                let mut app = NonogramApp::new();
+                app.theme_changed(&p);
+                app.select_cursor = chosen;
+                let l = Layout::new(WINDOW_WIDTH, WINDOW_HEIGHT);
+                let row = app.list(&l).entry(0);
+                app.frame(WINDOW_WIDTH, WINDOW_HEIGHT)
+                    .commands()
+                    .iter()
+                    .filter_map(|c| match c {
+                        RenderCommand::FillRect {
+                            x,
+                            y,
+                            width,
+                            height,
+                            color,
+                            ..
+                        }
+                        | RenderCommand::StrokeRect {
+                            x,
+                            y,
+                            width,
+                            height,
+                            color,
+                            ..
+                        } if (*x - row.x).abs() <= 0.51
+                            && (*y - row.y).abs() <= 0.51
+                            && (*width - row.w).abs() <= 1.01
+                            && (*height - row.h).abs() <= 1.01 =>
+                        {
+                            Some(*color)
+                        }
+                        _ => None,
+                    })
+                    .collect::<Vec<_>>()
+            };
+            let selected = p.painted(Surface::Selected);
+            assert!(
+                paint_of_first_row(0).contains(&selected),
+                "the chosen puzzle's row is not the selected row (cards: {cards})"
+            );
+            assert!(
+                !paint_of_first_row(1).contains(&selected),
+                "a puzzle not chosen looks chosen (cards: {cards})"
+            );
+        }
+    }
+
+    /// **The Check switch shows when it is on**, as the toolkit's primary
+    /// button, and its label is whole: the button is as wide as the label
+    /// needs.
+    #[test]
+    fn the_check_switch_shows_when_it_is_on() {
+        let p = palette(false, false);
+        let face = |on: bool| {
+            let mut app = playing("Heart");
+            app.theme_changed(&p);
+            app.check_mode = on;
+            let f = app.frame(WINDOW_WIDTH, WINDOW_HEIGHT);
+            let (tx, ty, room) = f
+                .commands()
+                .iter()
+                .find_map(|c| match c {
+                    RenderCommand::Text {
+                        text,
+                        x,
+                        y,
+                        max_width,
+                        ..
+                    } if text == "Check" => Some((*x, *y, *max_width)),
+                    _ => None,
+                })
+                .expect("Check is not drawn");
+            let needs = text::measure(
+                "Check",
+                Layout::new(WINDOW_WIDTH, WINDOW_HEIGHT).small,
+                FontWeightHint::Bold,
+            );
+            assert!(
+                room.is_some_and(|w| w >= needs - 0.01),
+                "Check's label is cut: it needs {needs} and has {room:?}"
+            );
+            f.commands()
+                .iter()
+                .find_map(|c| match c {
+                    RenderCommand::FillRect {
+                        x,
+                        y,
+                        width,
+                        height,
+                        color,
+                        ..
+                    } if Rect::new(*x, *y, *width, *height).contains(tx + 1.0, ty + 1.0)
+                        && *width < WINDOW_WIDTH / 2.0 =>
+                    {
+                        Some(*color)
+                    }
+                    _ => None,
+                })
+                .expect("Check has no face")
+        };
+        let paint = |kind| guitk::button::paint(&p, kind, State::default(), p.mantle).lower;
+        assert_eq!(face(false), paint(Kind::Plain), "Check off looks on");
+        assert_eq!(face(true), paint(Kind::Primary), "Check on looks off");
+    }
+
+    /// **A marked square's cross stands off the square**, in either theme:
+    /// it is a mark the player reads (WCAG 1.4.11, 3:1), and in the
+    /// palette's faintest grey it was 2.3:1.
+    #[test]
+    fn a_marked_squares_cross_stands_off_it_in_either_theme() {
+        for light in [false, true] {
+            let p = palette(light, false);
+            let c = Colours::of(&p);
+            let ratio = guitk::theme::contrast_ratio(c.subtext0, c.surface0);
+            assert!(ratio >= 3.0, "the cross is {ratio:.2}:1 (light: {light})");
+            let mut app = playing("Heart");
+            app.theme_changed(&p);
+            let (br, bc) = a_blank_cell(&app);
+            app.set_cell(br, bc, CellMark::MarkedEmpty);
+            let drawn = app
+                .frame(WINDOW_WIDTH, WINDOW_HEIGHT)
+                .commands()
+                .iter()
+                .any(
+                    |cmd| matches!(cmd, RenderCommand::Line { color, .. } if *color == c.subtext0),
+                );
+            assert!(
+                drawn,
+                "the cross is not drawn in the colour measured (light: {light})"
+            );
+        }
+    }
 
     /// The timer's clock runs while a puzzle is played, and not on the
     /// selection screen or over a solved puzzle.

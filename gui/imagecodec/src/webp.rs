@@ -34,6 +34,11 @@
 //! read through it; a size in a header is checked against [`Limits`] before any
 //! pixel buffer exists; and the decoders bound everything they allocate the
 //! same way (see their modules).
+//!
+//! Portions of this file are translated into Rust from libwebp 1.6.0's
+//! `anim_decode.c`, `demux.c`, `webp_dec.c` (copyright 2010-2025 Google
+//! Inc.), and changed for this project; used under libwebp's BSD licence and
+//! patent grant (`licenses/libwebp-COPYING`, `licenses/libwebp-PATENTS`).
 
 use alloc::vec;
 use alloc::vec::Vec;
@@ -65,6 +70,25 @@ pub fn is_webp(bytes: &[u8]) -> bool {
 pub fn dimensions(bytes: &[u8]) -> ImageResult<(u32, u32)> {
     let features = riff::features(bytes)?;
     Ok((features.width, features.height))
+}
+
+/// How the picture stores its pixels: eight bits of red, green and blue,
+/// lossy or lossless, and alpha when `WebPGetFeatures` finds it -- the
+/// extended header's flag, or a lossless stream's own.
+///
+/// # Errors
+///
+/// As [`dimensions`].
+pub fn pixel_format(bytes: &[u8]) -> ImageResult<crate::PixelFormat> {
+    let features = riff::features(bytes)?;
+    let channels = if features.has_alpha { 4 } else { 3 };
+    Ok(crate::PixelFormat::uniform(
+        8,
+        channels,
+        crate::ColourModel::Colour,
+        false,
+        features.has_alpha,
+    ))
 }
 
 /// Decode a WebP: a still picture, or an animation's first frame on its

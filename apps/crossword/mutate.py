@@ -439,8 +439,8 @@ MUTATIONS = [
     ),
     (
         "a button is drawn outside the footer",
-        "            let r = Rect::new(x, y, w, h);\n            let on = button == Button::Check",
-        "            let r = Rect::new(x, y - h, w, h);\n            let on = button == Button::Check",
+        "            let r = Rect::new(x, y, w, h);\n            // Check and Help are switches",
+        "            let r = Rect::new(x, y - h, w, h);\n            // Check and Help are switches",
         ["every_button_is_drawn_where_a_click_can_reach_it"],
     ),
     (
@@ -676,13 +676,6 @@ MUTATIONS = [
         ["no_pass_paints_outside_the_region_it_owns"],
     ),
     (
-        "a footer button centres its label on the font size rather than the line",
-        "            if let Some(ty) = centre_line(r, text::line_height(size, "
-        "FontWeightHint::Bold)) {",
-        "            if let Some(ty) = centre_line(r, size) {",
-        ["no_pass_paints_outside_a_band_squeezed_below_anything_the_layout_hands_out"],
-    ),
-    (
         # The expectation here is not the containment sweep, and the reason is
         # worth keeping: `centre_line` turns this overrun into a *refusal*.  A
         # strip taller than the footer cannot be centred in it, so the pass
@@ -868,6 +861,90 @@ MUTATIONS = [
         "        self.size = (width, height);\n        self.frame(width, height).into_tree()",
         "        self.frame(width, height).into_tree()",
         ["render_records_the_window_it_was_given"],
+    ),
+    (
+        "the theme is never taken up",
+        "        self.palette = *palette;\n        self.colours = Colours::of(palette);",
+        "        let _ = palette;",
+        ["the_window_is_drawn_in_the_users_colours"],
+    ),
+    (
+        "the colours are not rebuilt with the palette",
+        "        self.colours = Colours::of(palette);",
+        "        let _ = Colours::of(palette);",
+        ["the_window_is_drawn_in_the_users_colours"],
+    ),
+    (
+        "the help's scrim is Mocha's crust whatever the theme",
+        "        fill(f, l.window, Chrome::of(&self.palette).scrim, 0.0);",
+        "        fill(f, l.window, Color::rgba(0x11, 0x11, 0x1B, 180), 0.0);",
+        ["the_window_is_drawn_in_the_users_colours"],
+    ),
+    (
+        "Check's red is lost under the cursor",
+        "                    if wrong {\n                        self.colours.red\n",
+        "                    if false {\n                        self.colours.red\n",
+        ["check_shows_a_wrong_letter_under_the_cursor"],
+    ),
+    (
+        "a revealed letter's teal is lost under the cursor",
+        "                    } else if revealed {\n                        self.colours.teal\n",
+        "                    } else if false {\n                        self.colours.teal\n",
+        ["check_shows_a_wrong_letter_under_the_cursor"],
+    ),
+    (
+        "a square's number is the palette's faintest grey",
+        "                                self.colours.number\n",
+        "                                Ink {\n                                    large: self.colours.overlay0,\n                                    small: self.colours.overlay0,\n                                }\n",
+        ["every_text_reads_on_what_is_under_it_in_either_theme"],
+    ),
+    (
+        "a letter takes the large ink whatever its size",
+        "                    }\n                    .at(size, true);",
+        "                    }\n                    .large;",
+        ["every_text_reads_on_what_is_under_it_in_either_theme"],
+    ),
+    (
+        "the banner's clue is the page's yellow on the banner's well",
+        "            banner: Ink::on(p.ink(p.yellow), &[p.crust]).small,",
+        "            banner: p.ink(p.yellow),",
+        ["every_text_reads_on_what_is_under_it_in_either_theme"],
+    ),
+    (
+        "the menu's instruction is the faintest grey",
+        "                // faintest grey is 2.3:1 on a light page.\n                self.colours.subtext0,",
+        "                // faintest grey is 2.3:1 on a light page.\n                self.colours.overlay0,",
+        ["every_text_reads_on_what_is_under_it_in_either_theme"],
+    ),
+    (
+        "the completion card has no ground of its own",
+        "            l.pad * 0.5,\n            Surface::Panel,",
+        "            l.pad * 0.5,\n            Surface::Card,",
+        ["every_text_reads_on_what_is_under_it_in_either_theme"],
+    ),
+    (
+        "the help card has no ground of its own",
+        "            l.pad * 0.6,\n            Surface::Panel,",
+        "            l.pad * 0.6,\n            Surface::Card,",
+        ["every_run_a_card_draws_stays_inside_the_card"],
+    ),
+    (
+        "the chosen puzzle looks like any other",
+        "                if on { Surface::Selected } else { Surface::Card },",
+        "                Surface::Card,",
+        ["the_chosen_puzzle_looks_chosen"],
+    ),
+    (
+        "the current clue's row is not marked",
+        "                self.palette\n                    .push_surface(f, r.x, r.y, r.w, r.h, l.small * 0.3, Surface::Selected);",
+        "                let _ = r;",
+        ["a_run_in_a_band_the_drawing_filled_is_centred_in_it_and_not_merely_inside_it"],
+    ),
+    (
+        "a footer switch that is on looks off",
+        "                if on { Kind::Primary } else { Kind::Plain },",
+        "                Kind::Plain,",
+        ["the_footer_switches_show_when_they_are_on"],
     ),
 ]
 

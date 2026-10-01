@@ -24,10 +24,12 @@
 //! that set the text without moving the caret would leave an offset pointing
 //! into the middle of a character, and the next arrow key would panic.
 
+use crate::event::{Key, KeyEvent};
 use crate::render::FontWeightHint;
 use crate::text;
 use crate::text::TextCursor;
 use crate::textedit;
+use core::num::NonZeroU32;
 
 /// Single-line text input state with cursor, selection, and clipboard.
 #[derive(Clone, Debug, Default)]
@@ -50,8 +52,24 @@ pub struct TextInput {
     /// on screen, so it has no side of a boundary to be on. Only the caret
     /// does.
     selection_anchor: Option<usize>,
-    /// Clipboard contents (internal; real clipboard would use IPC).
-    clipboard: String,
+    /// Clipboard contents (internal; real clipboard would use IPC), `None`
+    /// for nothing copied.
+    ///
+    /// A `Box<str>` in an `Option` rather than a `String`: sixteen bytes
+    /// rather than twenty-four, for the reason [`capacity`](Self::capacity)
+    /// is four -- see the size note on the struct's test,
+    /// `a_text_field_stays_eighty_bytes`.
+    clipboard: Option<Box<str>>,
+    /// The most characters typing and pasting may leave in the field, plus
+    /// one -- so a limit of nothing has a value and `None`, no limit, is the
+    /// niche -- or `None` for no limit. See [`set_capacity`](Self::set_capacity).
+    ///
+    /// Four bytes, not an `Option<usize>`'s sixteen, because a `TextInput` is
+    /// held by value in programs' form types, and adding sixteen bytes here
+    /// once took the finance program's form over clippy's
+    /// `large_enum_variant` threshold: its largest variant holds four fields
+    /// and its next two, so every byte here counts twice in the difference.
+    capacity: Option<NonZeroU32>,
 }
 
 impl TextInput {
@@ -93,7 +111,7 @@ impl TextInput {
     /// For a caller arranging a paste it did not cut -- a test, or a menu
     /// command wired to a real clipboard service when one exists.
     pub fn set_clipboard(&mut self, text: String) {
-        self.clipboard = text;
+        self.clipboard = Some(text.into_boxed_str());
     }
 
     /// What the last cut or copy put on the clipboard.
@@ -104,7 +122,7 @@ impl TextInput {
     /// discovered.
     #[must_use]
     pub fn clipboard(&self) -> &str {
-        &self.clipboard
+        self.clipboard.as_deref().unwrap_or("")
     }
 
     pub fn new() -> Self {
@@ -112,8 +130,31 @@ impl TextInput {
             text: String::new(),
             cursor: TextCursor::default(),
             selection_anchor: None,
-            clipboard: String::new(),
+            clipboard: None,
+            capacity: None,
         }
+    }
+
+    /// Hold typing and pasting to at most `capacity` characters -- a form
+    /// field's `maxlength` -- or lift the limit with `None`.
+    ///
+    /// Characters, not bytes, so a limit cannot cut a character in half.
+    /// A limit on what the *user* puts in: [`set_text`](Self::set_text) is
+    /// the program's, and is not cut. A limit of 4,294,967,295 characters or
+    /// more is no limit: no one-line field is held to one that large, and the
+    /// field keeps its limit in four bytes (see the `capacity` field).
+    pub fn set_capacity(&mut self, capacity: Option<usize>) {
+        self.capacity = capacity
+            .and_then(|n| u32::try_from(n).ok())
+            .and_then(|n| n.checked_add(1))
+            .and_then(NonZeroU32::new);
+    }
+
+    /// The field's limit, if it has one.
+    #[must_use]
+    pub fn capacity(&self) -> Option<usize> {
+        self.capacity
+            .and_then(|stored| usize::try_from(stored.get().saturating_sub(1)).ok())
     }
 
     pub fn clear(&mut self) {
@@ -281,10 +322,53 @@ impl TextInput {
         self.cursor = TextCursor::from(self.text.len());
     }
 
+    /// Put `ch` in place of the selection, or at the caret -- unless the field
+    /// is at its [capacity](Self::set_capacity) with nothing selected to make
+    /// room.
     pub fn insert_char(&mut self, ch: char) {
         let (start, end) = self.selection_range();
+        if self.room_over(start, end) == 0 {
+            return;
+        }
         let mut buf = [0u8; 4];
         self.replace_range(start, end, ch.encode_utf8(&mut buf));
+    }
+
+    /// Type `typed` over the selection, as typing or pasting does: its control
+    /// characters left out -- the field is one line, and a newline in a paste
+    /// has nowhere to go -- and no more of it than the
+    /// [capacity](Self::set_capacity) leaves room for. Text with nothing but
+    /// control characters in it types nothing, and so leaves the selection
+    /// where it was rather than deleting it for nothing.
+    pub fn insert_text(&mut self, typed: &str) {
+        if typed.chars().all(char::is_control) {
+            return;
+        }
+        let (start, end) = self.selection_range();
+        let room = self.room_over(start, end);
+        let fitting: String = typed
+            .chars()
+            .filter(|ch| !ch.is_control())
+            .take(room)
+            .collect();
+        if fitting.is_empty() && start == end {
+            return;
+        }
+        self.replace_range(start, end, &fitting);
+    }
+
+    /// How many characters may go in place of the bytes `start..end`, under
+    /// the [capacity](Self::set_capacity): everything if there is none.
+    fn room_over(&self, start: usize, end: usize) -> usize {
+        let Some(capacity) = self.capacity() else {
+            return usize::MAX;
+        };
+        let kept = self
+            .text
+            .get(..start)
+            .map_or(0, |s| s.chars().count())
+            .saturating_add(self.text.get(end..).map_or(0, |s| s.chars().count()));
+        capacity.saturating_sub(kept)
     }
 
     pub fn backspace(&mut self) {
@@ -314,25 +398,140 @@ impl TextInput {
 
     pub fn cut(&mut self) {
         if self.has_selection() {
-            self.clipboard = self.selected_text().to_string();
+            self.clipboard = Some(Box::from(self.selected_text()));
             self.delete_selection();
         }
     }
 
     pub fn copy(&mut self) {
         if self.has_selection() {
-            self.clipboard = self.selected_text().to_string();
+            self.clipboard = Some(Box::from(self.selected_text()));
         }
     }
 
+    /// Paste the clipboard over the selection, as [`insert_text`](Self::insert_text)
+    /// types: control characters left out, and cut to the capacity.
     pub fn paste(&mut self) {
-        if self.clipboard.is_empty() {
+        // Taken for the length of the insert, which borrows `self` mutably,
+        // and put back: pasting does not consume the clipboard.
+        let Some(clip) = self.clipboard.take() else {
             return;
+        };
+        if !clip.is_empty() {
+            self.insert_text(&clip);
         }
-        let (start, end) = self.selection_range();
-        let clip = core::mem::take(&mut self.clipboard);
-        self.replace_range(start, end, &clip);
-        self.clipboard = clip;
+        self.clipboard = Some(clip);
+    }
+}
+
+/// What [`TextInput::edit_key`] did with a keystroke.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum KeyEdit {
+    /// Not an editing key -- Enter, Escape, Tab, Up, Down and the like. The
+    /// field's owner decides what it means.
+    Unhandled,
+    /// An editing key that left the text as it was: the caret or selection
+    /// moved, a copy was taken, or a Backspace had nothing before it.
+    Handled,
+    /// The text changed.
+    Changed,
+}
+
+impl KeyEdit {
+    /// `Changed` if `after` differs from `before`, else `Handled`.
+    fn of(before: &str, after: &str) -> Self {
+        if before == after {
+            Self::Handled
+        } else {
+            Self::Changed
+        }
+    }
+}
+
+impl TextInput {
+    /// Apply one keystroke's editing meaning, and say what it did.
+    ///
+    /// The caret keys (Left, Right, Home, End, with Shift extending the
+    /// selection), Backspace and Delete, Ctrl+A/X/C/V, and typed text. Every
+    /// field in the tree wants exactly this set, and each spelled it out: the
+    /// desktop's Run box does it in a forty-line `match`, and the module doc
+    /// above counts twenty-two hand-rolled copies of the typing half alone.
+    ///
+    /// `font_size` and `weight` are what the field is drawn at, because moving
+    /// the caret *visually* through mixed-direction text needs the shaped
+    /// glyphs; see [`move_cursor_left`](Self::move_cursor_left).
+    ///
+    /// A release, and a keystroke that typed only control characters, is
+    /// [`KeyEdit::Unhandled`]: Enter and Escape produce text (`\r`, `\x1b`) on
+    /// most layouts, and a field that swallowed them would never let its owner
+    /// see them.
+    ///
+    /// The clipboard chords want Ctrl *without* Alt. Windows reports AltGr as
+    /// Ctrl+Alt, and AltGr on a letter is how several layouts type a character
+    /// -- Polish `ą` is AltGr+A -- so taking every Ctrl+A as "select all" would
+    /// make that character impossible to type here.
+    pub fn edit_key(&mut self, key: &KeyEvent, font_size: f32, weight: FontWeightHint) -> KeyEdit {
+        if !key.pressed {
+            return KeyEdit::Unhandled;
+        }
+        let shift = key.modifiers.shift;
+        let chord = key.modifiers.ctrl && !key.modifiers.alt;
+        match key.key {
+            Key::A if chord => {
+                self.select_all();
+                KeyEdit::Handled
+            }
+            Key::C if chord => {
+                self.copy();
+                KeyEdit::Handled
+            }
+            Key::X if chord => {
+                let before = self.text.clone();
+                self.cut();
+                KeyEdit::of(&before, &self.text)
+            }
+            Key::V if chord => {
+                let before = self.text.clone();
+                self.paste();
+                KeyEdit::of(&before, &self.text)
+            }
+            Key::Left => {
+                self.move_cursor_left(shift, font_size, weight);
+                KeyEdit::Handled
+            }
+            Key::Right => {
+                self.move_cursor_right(shift, font_size, weight);
+                KeyEdit::Handled
+            }
+            Key::Home => {
+                self.move_home(shift);
+                KeyEdit::Handled
+            }
+            Key::End => {
+                self.move_end(shift);
+                KeyEdit::Handled
+            }
+            Key::Backspace => {
+                let before = self.text.clone();
+                self.backspace();
+                KeyEdit::of(&before, &self.text)
+            }
+            Key::Delete => {
+                let before = self.text.clone();
+                self.delete();
+                KeyEdit::of(&before, &self.text)
+            }
+            _ => {
+                if !key.types_text() {
+                    return KeyEdit::Unhandled;
+                }
+                let before = self.text.clone();
+                let typed: String = key.typed().collect();
+                self.insert_text(&typed);
+                // A field at its capacity took the key and changed nothing.
+                KeyEdit::of(&before, &self.text)
+            }
+        }
     }
 }
 
@@ -540,5 +739,230 @@ mod tests {
             rightwards.push(input.cursor().byte());
         }
         assert_eq!(rightwards, vec![1, 2, 4, 2, 7, 8]);
+    }
+
+    fn key(k: crate::event::Key, ctrl: bool, text: &str) -> KeyEvent {
+        KeyEvent {
+            key: k,
+            pressed: true,
+            modifiers: crate::event::Modifiers {
+                ctrl,
+                ..crate::event::Modifiers::NONE
+            },
+            text: text.to_string(),
+        }
+    }
+
+    fn edit(input: &mut TextInput, k: crate::event::Key, ctrl: bool, text: &str) -> KeyEdit {
+        input.edit_key(&key(k, ctrl, text), FONT_SIZE, FontWeightHint::Regular)
+    }
+
+    /// A limit of nothing is a field that takes nothing -- representable, not
+    /// mistaken for no limit -- and a limit too large to keep is none.
+    #[test]
+    fn a_limit_of_nothing_holds_nothing_and_a_huge_one_holds_everything() {
+        let mut input = TextInput::new();
+        input.set_capacity(Some(0));
+        assert_eq!(input.capacity(), Some(0));
+        input.insert_char('x');
+        assert_eq!(input.text(), "");
+        input.set_capacity(Some(usize::MAX));
+        assert_eq!(input.capacity(), None);
+        input.insert_char('x');
+        assert_eq!(input.text(), "x");
+    }
+
+    /// A `TextInput` is held by value in programs' form types, and clippy's
+    /// `large_enum_variant` counts its bytes there: the finance program's form
+    /// has a variant of four fields beside one of two, so every byte here
+    /// counts twice in the difference the lint measures. Sixteen more bytes
+    /// once (the capacity, as an `Option<usize>`) took that form over the
+    /// lint's threshold on the shipping target and stopped every boot test at
+    /// the `cfg(unix)` gate. Pinned so the next growth is a decision: if this
+    /// fails, check the programs that embed several fields before raising it.
+    #[test]
+    fn a_text_field_stays_eighty_bytes() {
+        assert_eq!(core::mem::size_of::<TextInput>(), 80);
+    }
+
+    /// **A field holds at most its capacity**, counted in characters: typing
+    /// stops there, a key it cannot take changes nothing and says so, typing
+    /// over a selection makes room, and a paste is cut to fit -- never
+    /// through a character.
+    #[test]
+    fn a_field_holds_at_most_its_capacity() {
+        use crate::event::Key;
+        let mut input = TextInput::new();
+        input.set_capacity(Some(3));
+        assert_eq!(input.capacity(), Some(3));
+        for ch in ["a", "b", "c"] {
+            assert_eq!(edit(&mut input, Key::A, false, ch), KeyEdit::Changed);
+        }
+        assert_eq!(
+            edit(&mut input, Key::D, false, "d"),
+            KeyEdit::Handled,
+            "a full field reported a change"
+        );
+        assert_eq!(input.text(), "abc");
+        input.insert_char('z');
+        assert_eq!(input.text(), "abc", "insert_char went past the capacity");
+
+        // Over a selection there is room again.
+        assert_eq!(edit(&mut input, Key::A, true, ""), KeyEdit::Handled);
+        assert_eq!(edit(&mut input, Key::X, false, "x"), KeyEdit::Changed);
+        assert_eq!(input.text(), "x");
+
+        // A paste is cut to fit, by characters: each \u{e9} is two bytes.
+        input.set_clipboard("\u{e9}\u{e9}\u{e9}\u{e9}".to_string());
+        input.paste();
+        assert_eq!(input.text(), "x\u{e9}\u{e9}");
+
+        // And no limit at all without one.
+        input.set_capacity(None);
+        input.paste();
+        assert_eq!(input.text().chars().count(), 7);
+
+        // A key a full field cannot take leaves the caret exactly where it
+        // was -- on whichever side of a direction boundary it stood, which a
+        // caret rebuilt from its offset would forget.
+        let mut full = TextInput::new();
+        full.set_capacity(Some(2));
+        full.set_text("ab");
+        let caret = TextCursor {
+            byte: 1,
+            affinity: crate::text::Affinity::Upstream,
+        };
+        full.set_cursor(caret);
+        assert_eq!(edit(&mut full, Key::C, false, "c"), KeyEdit::Handled);
+        assert_eq!(
+            full.cursor(),
+            caret,
+            "a key that typed nothing moved the caret"
+        );
+    }
+
+    /// **A paste leaves control characters out**: the field is one line, so a
+    /// newline in what was copied has nowhere to go. A clipboard of nothing
+    /// else pastes nothing, and leaves the selection it would have replaced.
+    #[test]
+    fn a_paste_leaves_control_characters_out() {
+        let mut input = TextInput::new();
+        input.set_clipboard("one\ntwo\tthree".to_string());
+        input.paste();
+        assert_eq!(input.text(), "onetwothree");
+
+        input.set_text("keep");
+        input.select_all();
+        input.set_clipboard("\n\r".to_string());
+        input.paste();
+        assert_eq!(input.text(), "keep");
+        assert!(
+            input.has_selection(),
+            "a paste of nothing lost the selection"
+        );
+    }
+
+    #[test]
+    fn edit_key_types_moves_and_deletes_and_says_which() {
+        use crate::event::Key;
+        let mut input = TextInput::new();
+        assert_eq!(edit(&mut input, Key::A, false, "a"), KeyEdit::Changed);
+        assert_eq!(edit(&mut input, Key::B, false, "b"), KeyEdit::Changed);
+        assert_eq!(input.text(), "ab");
+        assert_eq!(edit(&mut input, Key::Left, false, ""), KeyEdit::Handled);
+        assert_eq!(edit(&mut input, Key::Delete, false, ""), KeyEdit::Changed);
+        assert_eq!(input.text(), "a");
+        assert_eq!(
+            edit(&mut input, Key::Delete, false, ""),
+            KeyEdit::Handled,
+            "nothing after the caret: handled, and unchanged"
+        );
+        assert_eq!(edit(&mut input, Key::Home, false, ""), KeyEdit::Handled);
+        assert_eq!(
+            edit(&mut input, Key::Backspace, false, ""),
+            KeyEdit::Handled,
+            "nothing before the caret"
+        );
+        assert_eq!(edit(&mut input, Key::End, false, ""), KeyEdit::Handled);
+        assert_eq!(
+            edit(&mut input, Key::Backspace, false, ""),
+            KeyEdit::Changed
+        );
+        assert_eq!(input.text(), "");
+    }
+
+    #[test]
+    fn edit_key_leaves_the_owners_keys_to_the_owner() {
+        use crate::event::Key;
+        let mut input = TextInput::new();
+        input.set_text("x");
+        // Enter and Escape *type* control characters on most layouts; a field
+        // that took them would never let its owner see them.
+        assert_eq!(
+            edit(&mut input, Key::Enter, false, "\r"),
+            KeyEdit::Unhandled
+        );
+        assert_eq!(
+            edit(&mut input, Key::Escape, false, "\u{1b}"),
+            KeyEdit::Unhandled
+        );
+        assert_eq!(edit(&mut input, Key::Up, false, ""), KeyEdit::Unhandled);
+        assert_eq!(edit(&mut input, Key::Tab, false, "\t"), KeyEdit::Unhandled);
+        let mut release = key(Key::A, false, "a");
+        release.pressed = false;
+        assert_eq!(
+            input.edit_key(&release, FONT_SIZE, FontWeightHint::Regular),
+            KeyEdit::Unhandled
+        );
+        assert_eq!(input.text(), "x", "none of them touched the text");
+    }
+
+    #[test]
+    fn edit_key_does_the_clipboard_chords() {
+        use crate::event::Key;
+        let mut input = TextInput::new();
+        input.set_text("hello");
+        assert_eq!(edit(&mut input, Key::A, true, "\u{1}"), KeyEdit::Handled);
+        assert_eq!(edit(&mut input, Key::C, true, "\u{3}"), KeyEdit::Handled);
+        assert_eq!(input.clipboard(), "hello");
+        assert_eq!(edit(&mut input, Key::X, true, "\u{18}"), KeyEdit::Changed);
+        assert_eq!(input.text(), "");
+        assert_eq!(edit(&mut input, Key::V, true, "\u{16}"), KeyEdit::Changed);
+        assert_eq!(edit(&mut input, Key::V, true, "\u{16}"), KeyEdit::Changed);
+        assert_eq!(input.text(), "hellohello");
+        // A cut with nothing selected changes nothing.
+        assert_eq!(edit(&mut input, Key::X, true, "\u{18}"), KeyEdit::Handled);
+    }
+
+    #[test]
+    fn edit_key_types_every_character_a_keystroke_produced() {
+        use crate::event::Key;
+        // A dead key that did not compose types both characters (§550).
+        let mut input = TextInput::new();
+        assert_eq!(edit(&mut input, Key::X, false, "\u{b4}x"), KeyEdit::Changed);
+        assert_eq!(input.text(), "\u{b4}x");
+    }
+
+    #[test]
+    fn edit_key_lets_altgr_type_where_ctrl_would_be_a_chord() {
+        use crate::event::{Key, Modifiers};
+        // Windows reports AltGr as Ctrl+Alt; AltGr+A is Polish `a-ogonek`.
+        let mut input = TextInput::new();
+        input.set_text("x");
+        let altgr_a = KeyEvent {
+            key: Key::A,
+            pressed: true,
+            modifiers: Modifiers {
+                ctrl: true,
+                alt: true,
+                ..Modifiers::NONE
+            },
+            text: "\u{105}".to_string(),
+        };
+        assert_eq!(
+            input.edit_key(&altgr_a, FONT_SIZE, FontWeightHint::Regular),
+            KeyEdit::Changed
+        );
+        assert_eq!(input.text(), "x\u{105}", "typed, not select-all");
     }
 }

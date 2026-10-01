@@ -1,6 +1,7 @@
 # A → B, C — the trees are moving from D: (spinning disk) to E: (NVMe). Commit and push before the switchover window
 
-**Status:** ✅ obsolete — the move to `E:` happened on 2026-09-06; every lane has worked from `E:` since (stamped by lane B, 2026-09-24).
+**Status:** ✅ done — the move completed on 2026-09-06, and lane C has worked
+from `E:/visual studio projects/os-lane-c` since. Stamped by lane C 2026-09-24.
 
 **Filed:** 2026-09-06 by lane A. **Action needed from B and C:** reach a
 sensible stopping point, commit and push everything, and then **stop working and

@@ -96,6 +96,7 @@ from pathlib import Path
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import gittree  # noqa: E402
 import rustlex  # noqa: E402
+from safewrite import write_text  # noqa: E402
 
 ROOT = Path(__file__).resolve().parent.parent
 # Repo-relative, `/`-separated, because that is the only spelling the `Tree`
@@ -788,7 +789,7 @@ def main() -> int:
         # newline="" stops Python translating "\n" to "\r\n" on Windows. Git
         # normalises it on commit either way, so without this the file on disk
         # differs from the file in the index and every checkout shows it dirty.
-        BASELINE.write_text("\n".join(body) + "\n", encoding="utf-8", newline="")
+        write_text(BASELINE, "\n".join(body) + "\n", newline="")
         print(f"wrote {BASELINE.relative_to(ROOT)} with {len(unreachable)} entries")
 
         shadow_body = [
@@ -832,9 +833,7 @@ def main() -> int:
             "",
         ]
         shadow_body += sorted(f"{c}:{a}" for c, a, _ in shadowed)
-        SHADOW_BASELINE.write_text(
-            "\n".join(shadow_body) + "\n", encoding="utf-8", newline=""
-        )
+        write_text(SHADOW_BASELINE, "\n".join(shadow_body) + "\n", newline="")
         print(
             f"wrote {SHADOW_BASELINE.relative_to(ROOT)} with {len(shadowed)} entries"
         )

@@ -76,8 +76,8 @@ MUTATIONS = [
     ),
     (
         "green lights up red",
-        "            SimonColor::Green => COL_GREEN,",
-        "            SimonColor::Green => COL_RED,",
+        "            SimonColor::Green => Color::from_hex(0xA6E3A1),",
+        "            SimonColor::Green => Color::from_hex(0xF38BA8),",
         ["no_two_colours_share_a_label_a_tone_or_a_shade"],
     ),
     (
@@ -844,8 +844,8 @@ MUTATIONS = [
     ),
     (
         "the lost-game panel is drawn over the sheet",
-        "        if self.game_over_shown() {\n            self.draw_game_over(&mut f, &l);\n        }\n        if self.show_help {\n            self.draw_help(&mut f, &l);\n        }",
-        "        if self.show_help {\n            self.draw_help(&mut f, &l);\n        }\n        if self.game_over_shown() {\n            self.draw_game_over(&mut f, &l);\n        }",
+        "        if self.game_over_shown() {\n            self.draw_game_over(&mut f, &l, &c);\n        }\n        if self.show_help {\n            self.draw_help(&mut f, &l, &c);\n        }",
+        "        if self.show_help {\n            self.draw_help(&mut f, &l, &c);\n        }\n        if self.game_over_shown() {\n            self.draw_game_over(&mut f, &l, &c);\n        }",
         ["a_lost_game_can_still_be_read_about"],
     ),
     (
@@ -887,8 +887,8 @@ MUTATIONS = [
     ),
     (
         "the help sheet is never drawn",
-        "        if self.show_help {\n            self.draw_help(&mut f, &l);\n        }",
-        "        if false {\n            self.draw_help(&mut f, &l);\n        }",
+        "        if self.show_help {\n            self.draw_help(&mut f, &l, &c);\n        }",
+        "        if false {\n            self.draw_help(&mut f, &l, &c);\n        }",
         ["the_sheet_lists_every_control_and_what_it_does"],
     ),
     (
@@ -899,8 +899,8 @@ MUTATIONS = [
     ),
     (
         "watching and playing are the same colour",
-        "            GameState::PlayerInput => COL_TEAL,",
-        "            GameState::PlayerInput => COL_MAUVE,",
+        "            GameState::PlayerInput => c.turn,",
+        "            GameState::PlayerInput => c.watch,",
         ["no_two_states_share_a_status_line_or_a_colour"],
     ),
     (
@@ -929,20 +929,20 @@ MUTATIONS = [
     ),
     (
         "the header shows the score where the best belongs",
-        '        self.draw_readout(f, l, 0, "BEST", self.best, COL_YELLOW);',
-        '        self.draw_readout(f, l, 0, "BEST", self.score, COL_YELLOW);',
+        "        self.draw_readout(f, l, c, 0, \"BEST\", self.best, c.chrome.even);",
+        "        self.draw_readout(f, l, c, 0, \"BEST\", self.score, c.chrome.even);",
         ["the_header_shows_the_best_the_score_and_the_round"],
     ),
     (
         "the header shows the round where the score belongs",
-        '        self.draw_readout(f, l, 1, "SCORE", self.score, COL_GREEN);',
-        '        self.draw_readout(f, l, 1, "SCORE", self.round() as u32, COL_GREEN);',
+        "        self.draw_readout(f, l, c, 1, \"SCORE\", self.score, c.chrome.good);",
+        "        self.draw_readout(f, l, c, 1, \"SCORE\", self.round() as u32, c.chrome.good);",
         ["the_header_shows_the_best_the_score_and_the_round"],
     ),
     (
         "the status dot is grey whatever is lit",
-        "        disc(f, dot, lit.map_or(COL_SURFACE1, SimonColor::lit));",
-        "        disc(f, dot, COL_SURFACE1);",
+        "        disc(f, dot, lit.map_or(c.chrome.lit, SimonColor::lit));",
+        "        disc(f, dot, c.chrome.lit);",
         ["the_status_dot_takes_the_colour_of_whatever_is_lit"],
     ),
     (
@@ -1008,14 +1008,14 @@ MUTATIONS = [
     ),
     (
         "the speed button does not say which speed it is on",
-        '            &format!("Speed: {}", self.speed.label()),',
-        '            &format!("Speed"),',
+        "            (Target::Speed, &format!(\"Speed: {}\", self.speed.label())),",
+        "            (Target::Speed, \"Speed\"),",
         ["the_speed_key_cycles_and_the_footer_says_what_it_landed_on"],
     ),
     (
         "two footer buttons are drawn in the same place",
-        "            l.footer_button(0),\n            Target::NewGame,",
-        "            l.footer_button(1),\n            Target::NewGame,",
+        "            l.footer_button(0),\n            (Target::NewGame, \"New game\"),",
+        "            l.footer_button(1),\n            (Target::NewGame, \"New game\"),",
         ["no_two_hit_boxes_overlap"],
     ),
     (
@@ -1164,8 +1164,8 @@ MUTATIONS = [
     ),
     (
         "the frame is left with a clip nobody closed",
-        "        fill(&mut f, l.window, COL_BASE, 0.0);",
-        "        fill(&mut f, l.window, COL_BASE, 0.0);\n        f.clip(l.window);",
+        "        fill(&mut f, l.window, c.chrome.page, 0.0);",
+        "        fill(&mut f, l.window, c.chrome.page, 0.0);\n        f.clip(l.window);",
         ["the_frame_is_balanced_at_every_size_and_in_every_state"],
     ),
     # ── Deliberate redundancy probes ──────────────────────────────────────
@@ -1227,6 +1227,78 @@ MUTATIONS = [
         ],
     ),
     # ── END OF LIST ───────────────────────────────────────────────────────
+    (
+        "the theme is never taken up",
+        "    fn theme_changed(&mut self, palette: &Palette) {\n        self.palette = *palette;",
+        "    fn theme_changed(&mut self, palette: &Palette) {\n        let _ = palette;",
+        ["the_window_is_drawn_in_the_users_colours"],
+    ),
+    (
+        "an unlit pad's name is written in its own face's colour",
+        "            Ink::on(self.lit(), &[self.dim()]).at(size, bold)",
+        "            self.dim()",
+        ["every_pads_name_and_outline_read_on_it"],
+    ),
+    (
+        "a lit pad's name is written in its own face's colour",
+        "            gamechrome::legible_on(PAD_INKS, self.lit())\n        } else {",
+        "            self.lit()\n        } else {",
+        ["every_pads_name_and_outline_read_on_it"],
+    ),
+    (
+        "the outline is white on every pad",
+        "        gamechrome::legible_on(PAD_INKS, self.face(lit))",
+        "        PAD_INKS.0",
+        ["every_pads_name_and_outline_read_on_it"],
+    ),
+    (
+        "the tone is written in the pale lit colour on any page",
+        "        gamechrome::legible_on((self.lit(), self.dim()), ground)",
+        "        self.lit()",
+        ["the_tone_reads_on_the_page_in_either_theme"],
+    ),
+    (
+        "the lost game's wash is Mocha's whatever the theme",
+        "        fill(f, l.grid, c.chrome.veil, 0.0);",
+        "        fill(f, l.grid, Color::rgba(30, 30, 46, 200), 0.0);",
+        ["the_window_is_drawn_in_the_users_colours"],
+    ),
+    (
+        "the help sheet's scrim is Mocha's whatever the theme",
+        "        fill(f, l.window, c.chrome.scrim, 0.0);",
+        "        fill(f, l.window, Color::rgba(30, 30, 46, 190), 0.0);",
+        ["the_window_is_drawn_in_the_users_colours"],
+    ),
+    (
+        "the page is Mocha's crust whatever the theme",
+        "        fill(&mut f, l.window, c.chrome.page, 0.0);",
+        "        fill(&mut f, l.window, Color::from_hex(0x11111B), 0.0);",
+        ["the_window_is_drawn_in_the_users_colours"],
+    ),
+    (
+        "a name on an unlit pad is its lit colour unmoved, 3.3:1 drawn small",
+        "            Ink::on(self.lit(), &[self.dim()]).at(size, bold)",
+        "            self.lit()",
+        ["every_text_reads_on_what_is_under_it_in_either_theme", "every_pads_name_and_outline_read_on_it"],
+    ),
+    (
+        "a readout's caption is the page's grey, 4.1:1 on its box",
+        "            Ink::on(c.chrome.dim, &[c.chrome.raised]).at(cap, false),",
+        "            c.chrome.dim,",
+        ["every_text_reads_on_what_is_under_it_in_either_theme"],
+    ),
+    (
+        "a readout's value is the page's ink unmoved, 3.6:1 on its box",
+        "            Ink::on(ink, &[c.chrome.raised]).at(num, true),",
+        "            ink,",
+        ["every_text_reads_on_what_is_under_it_in_either_theme"],
+    ),
+    (
+        "the game-over card has no ground of its own",
+        "                Surface::Panel,\n            );\n        }\n        stroke(f, panel, c.chrome.bad",
+        "                Surface::Card,\n            );\n        }\n        stroke(f, panel, c.chrome.bad",
+        ["every_text_reads_on_what_is_under_it_in_either_theme"],
+    ),
 ]
 
 if __name__ == "__main__":

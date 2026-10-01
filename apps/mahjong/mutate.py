@@ -595,8 +595,8 @@ MUTATIONS = [
     ),
     (
         "the selected tile is painted like every other one",
-        "            let bg_color = if is_selected {\n                TILE_SELECTED",
-        "            let bg_color = if false {\n                TILE_SELECTED",
+        "            let bg_color = if is_selected {\n                c.selected",
+        "            let bg_color = if false {\n                c.selected",
         ["a_selected_tile_is_painted_differently_from_an_unselected_one"],
     ),
     (
@@ -881,6 +881,48 @@ MUTATIONS = [
         "        (WINDOW_WIDTH as u32, WINDOW_HEIGHT as u32)",
         "        (900, 700)",
         ["the_app_names_itself_for_the_taskbar_and_asks_for_a_size_it_can_use"],
+    ),
+    (
+        "the theme is never taken up",
+        "    fn theme_changed(&mut self, palette: &Palette) {\n        self.palette = *palette;",
+        "    fn theme_changed(&mut self, palette: &Palette) {\n        let _ = palette;",
+        ["the_window_is_drawn_in_the_users_colours"],
+    ),
+    (
+        "a character's ink is the pale pink it was",
+        "const CHARACTER_COLOR: Color = Color::from_hex(0xA30D25);",
+        "const CHARACTER_COLOR: Color = Color::from_hex(0xF38BA8);",
+        ["every_tiles_label_reads_on_its_face"],
+    ),
+    (
+        "the keyboard's outline is the accent's own shade on the ivory",
+        "            cursor: p.ink_on(p.accent, TILE_BG_FREE),",
+        "            cursor: p.accent,",
+        ["the_keyboard_outline_reads_on_a_tile"],
+    ),
+    (
+        "a legend swatch is a bare square of the ink",
+        "                color: TILE_BG_FREE,\n                corner_radii: CornerRadii::all(swatch / 4.0),",
+        "                color: kind.text_color(),\n                corner_radii: CornerRadii::all(swatch / 4.0),",
+        ["the_legend_swatches_are_little_tiles"],
+    ),
+    (
+        "the page is Mocha's base whatever the theme",
+        "            height: h,\n            color: c.chrome.page,",
+        "            height: h,\n            color: Color::from_hex(0x1E1E2E),",
+        ["the_window_is_drawn_in_the_users_colours"],
+    ),
+    (
+        "the help text is the faintest grey",
+        "            text: HELP_TEXT.into(),\n            color: c.chrome.dim,",
+        "            text: HELP_TEXT.into(),\n            color: c.chrome.off,",
+        ["every_text_reads_on_what_is_under_it_in_either_theme"],
+    ),
+    (
+        "the legend's note is the faintest grey",
+        "            text: LEGEND_NOTE.into(),\n            color: c.chrome.dim,",
+        "            text: LEGEND_NOTE.into(),\n            color: c.chrome.off,",
+        ["every_text_reads_on_what_is_under_it_in_either_theme"],
     ),
 ]
 

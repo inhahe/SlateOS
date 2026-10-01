@@ -6,6 +6,10 @@
 //! the last number. Not edited by hand: a single wrong probability here does not
 //! blur a picture, it desynchronises the arithmetic decoder and garbles
 //! everything after it, which the fixture tests would show at once.
+//!
+//! Portions of this file are the tables printed in RFC 6386 and its reference
+//! decoder (copyright 2010, 2011 Google Inc.), used under the RFC's BSD
+//! licence, `licenses/rfc6386-LICENSE.txt`.
 
 /// Probabilities for a key frame's 4x4 luma prediction modes, indexed by the
 /// modes of the subblocks above and to the left (RFC 6386 §11.5), in the RFC's
@@ -134,7 +138,7 @@ pub(super) const KF_BMODE_PROBS: [[[u8; 9]; 10]; 10] = [
 ];
 
 /// The probability that each coefficient probability is replaced in the frame
-/// header (RFC 6386 §13.4), indexed [block type][band][context][tree node].
+/// header (RFC 6386 §13.4), indexed `[block type][band][context][tree node]`.
 pub(super) const COEFF_UPDATE_PROBS: [[[[u8; 11]; 3]; 8]; 4] = [
     [
         [
@@ -307,7 +311,7 @@ pub(super) const COEFF_UPDATE_PROBS: [[[[u8; 11]; 3]; 8]; 4] = [
 ];
 
 /// The coefficient probabilities every key frame starts from (RFC 6386 §13.5),
-/// indexed [block type][band][context][tree node].
+/// indexed `[block type][band][context][tree node]`.
 pub(super) const DEFAULT_COEFF_PROBS: [[[[u8; 11]; 3]; 8]; 4] = [
     [
         [

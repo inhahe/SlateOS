@@ -108,10 +108,33 @@
 //! JPEG (old style too), NeXT, ThunderScan, SGI LogLuv or PixarLog. See
 //! [`tiff`].
 //!
+//! AVIF, as libavif reads it -- the reader behind Pillow, and the one Chrome's
+//! is ported from: the container with its items, grids, alpha planes, HDR gain
+//! maps and image sequences, accepted or refused by a port of libavif's own
+//! parser; the AV1 frames decoded by rav1d (dav1d in Rust) as libavif drives
+//! dav1d; and the YUV converted to pixels by ports of libavif's and libyuv's
+//! arithmetic, so that a picture comes out as Chrome and Pillow show it, to
+//! the last bit. For a sequence [`decode`] gives the first frame, and
+//! `avif::Animation` plays every frame in turn -- in order, or from the
+//! nearest key frame to any one asked for -- as libavif decodes them. Built
+//! without the default `avif` feature, the container is still read and
+//! [`decode`] refuses the picture by name. See [`avif`].
+//!
 //! **EXIF orientation is applied**, as Chrome applies it: a JPEG's or PNG's
 //! EXIF saying the picture is on its side turns it, so [`decode`],
 //! [`decode_scaled`] and [`dimensions`] all describe the picture as it is shown.
 //! See [`orientation`].
+//!
+//! # Where the code comes from
+//!
+//! Most of the decoders are ports of the libraries the browsers and Pillow
+//! run -- libjpeg-turbo, libtiff, libwebp, libavif and libyuv, Chromium's and
+//! image-rs's BMP and icon readers, Skia's EXIF reader -- because producing exactly their
+//! pixels is the point. Their notices travel with the code: each ported file
+//! names what it was translated or adapted from, and `licenses/` holds the
+//! licences and a table of what derives from where. Their licences also ask
+//! that a *program* containing this code carry the notices, which
+//! `licenses/README.md` spells out.
 //!
 //! # Picture files for *other* crates' tests
 //!
@@ -128,7 +151,9 @@ extern crate alloc;
 use alloc::vec::Vec;
 use core::fmt;
 
+pub mod avif;
 pub mod bmp;
+mod encode;
 pub mod gif;
 pub mod ico;
 pub mod jpeg;
@@ -138,6 +163,8 @@ mod scale;
 pub mod testing;
 pub mod tiff;
 pub mod webp;
+
+pub use encode::{EncodeError, encode_png};
 
 /// A decoded picture: densely packed `0xAARRGGBB`, row-major, no padding.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -347,6 +374,9 @@ pub fn decode(bytes: &[u8], limits: Limits) -> ImageResult<Image> {
     if tiff::is_tiff(bytes) {
         return tiff::decode(bytes, limits);
     }
+    if avif::is_avif(bytes) {
+        return avif::decode(bytes, limits);
+    }
     Err(ImageError::UnknownFormat)
 }
 
@@ -393,6 +423,9 @@ pub fn decode_scaled(bytes: &[u8], limits: Limits, max_w: u32, max_h: u32) -> Im
     if tiff::is_tiff(bytes) {
         return tiff::decode_scaled(bytes, limits, max_w, max_h);
     }
+    if avif::is_avif(bytes) {
+        return avif::decode_scaled(bytes, limits, max_w, max_h);
+    }
     Err(ImageError::UnknownFormat)
 }
 
@@ -427,6 +460,105 @@ pub fn dimensions(bytes: &[u8]) -> ImageResult<(u32, u32)> {
     }
     if tiff::is_tiff(bytes) {
         return tiff::dimensions(bytes);
+    }
+    if avif::is_avif(bytes) {
+        return avif::dimensions(bytes);
+    }
+    Err(ImageError::UnknownFormat)
+}
+
+/// How a picture stores its pixels, as its headers say: what
+/// [`pixel_format`] reads, for the file manager's colour-depth column.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct PixelFormat {
+    /// Bits of each channel: 8 for most pictures, 16 for a deep PNG or TIFF,
+    /// 1 for a fax; for a palette picture, the bits of each index. Where the
+    /// channels differ -- a 16-bit BMP's five, six and five -- the widest.
+    pub bits_per_channel: u8,
+    /// Bits of all a pixel's channels together: 24 for eight-bit colour, 32
+    /// with alpha, 16 for five, six and five, 8 for a 256-colour palette.
+    /// Padding a format stores beside the channels -- the unused fourth byte
+    /// of a 32-bit BMP without alpha -- is not counted.
+    pub bits_per_pixel: u32,
+    /// Channels a pixel holds, alpha counted: 1 for grey or a palette index,
+    /// 2 for grey and alpha, 3 for colour, 4 for colour and alpha or for CMYK
+    /// (see [`model`](Self::model)). A TIFF may hold more.
+    pub channels: u16,
+    /// What the channels are.
+    pub model: ColourModel,
+    /// Each pixel is an index into a palette of at most
+    /// `1 << bits_per_channel` colours.
+    pub palette: bool,
+    /// Some of the picture may be transparent: an alpha channel, a
+    /// transparent palette entry or colour key, or an icon's mask.
+    pub has_alpha: bool,
+}
+
+/// What a picture's channels are.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ColourModel {
+    /// Shades of grey.
+    Grey,
+    /// Red, green and blue, however the file codes them (`YCbCr` and Lab
+    /// included); a palette's colours are this.
+    Colour,
+    /// Cyan, magenta, yellow and black, for print.
+    Cmyk,
+}
+
+impl PixelFormat {
+    /// `channels` channels of `bits` bits each.
+    pub(crate) fn uniform(
+        bits: u8,
+        channels: u16,
+        model: ColourModel,
+        palette: bool,
+        has_alpha: bool,
+    ) -> Self {
+        Self {
+            bits_per_channel: bits,
+            bits_per_pixel: u32::from(bits).saturating_mul(u32::from(channels)),
+            channels,
+            model,
+            palette,
+            has_alpha,
+        }
+    }
+}
+
+/// Read how a picture stores its pixels without decoding them: the
+/// companion of [`dimensions`], from the same headers and as cheap -- a PNG's
+/// chunks up to its image data, for a transparent colour; a GIF's blocks up to
+/// its first image, for its palette and transparency.
+///
+/// # Errors
+///
+/// As [`dimensions`], and [`ImageError::Unsupported`] for a JPEG whose
+/// components are neither grey, colour nor CMYK.
+pub fn pixel_format(bytes: &[u8]) -> ImageResult<PixelFormat> {
+    if png::is_png(bytes) {
+        return png::pixel_format(bytes);
+    }
+    if jpeg::is_jpeg(bytes) {
+        return jpeg::pixel_format(bytes);
+    }
+    if gif::is_gif(bytes) {
+        return gif::pixel_format(bytes);
+    }
+    if webp::is_webp(bytes) {
+        return webp::pixel_format(bytes);
+    }
+    if bmp::is_bmp(bytes) {
+        return bmp::pixel_format(bytes);
+    }
+    if ico::is_ico(bytes) {
+        return ico::pixel_format(bytes);
+    }
+    if tiff::is_tiff(bytes) {
+        return tiff::pixel_format(bytes);
+    }
+    if avif::is_avif(bytes) {
+        return avif::pixel_format(bytes);
     }
     Err(ImageError::UnknownFormat)
 }
@@ -467,10 +599,16 @@ mod tests {
             decode(&[], Limits::default()),
             Err(ImageError::UnknownFormat)
         );
-        // A format this crate does not read yet: AVIF's `ftyp` box.
+        // A format this crate does not read: HEIC's `ftyp` box.
+        assert_eq!(
+            dimensions(b"\0\0\0\x1cftypheic\0\0\0\0heicmif1miaf"),
+            Err(ImageError::UnknownFormat)
+        );
+        // AVIF it does: an `ftyp` box that promises a `meta` box and has
+        // none after it is a truncated AVIF.
         assert_eq!(
             dimensions(b"\0\0\0\x1cftypavif\0\0\0\0avifmif1miaf"),
-            Err(ImageError::UnknownFormat)
+            Err(ImageError::Truncated)
         );
         // TIFF it does: a header whose directory is past the end is a
         // truncated TIFF.

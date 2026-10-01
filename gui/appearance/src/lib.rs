@@ -42,13 +42,6 @@
 //! at the draw site; see `known-issues.md`
 //! `TD-C-FORTY-NINE-COLOUR-METHODS-ARE-INVISIBLE-TO-THE-INK-SWEEP`.
 
-/// Where settings files live and how they are replaced.
-///
-/// This was `appearance::config` before it was a crate of its own, and it is
-/// re-exported under the old name because the path is used across the shell,
-/// the compositor and the Settings application, and none of those call sites
-/// were wrong. See `settingsfile`'s own documentation for why it moved: it is
-/// not about appearance, and `inputsettings` needs it without needing colours.
 /// The sweep that proves a module draws from the palette rather than from
 /// colours of its own.
 ///
@@ -60,11 +53,26 @@
 #[cfg(feature = "testing")]
 pub mod palette_check;
 
+pub mod icons;
+// Documented inside the module only: a doc comment here as well made rustdoc
+// resolve the module's own links from this scope, where its items are not.
+pub mod themes;
+
+/// Where settings files live and how they are replaced.
+///
+/// This was `appearance::config` before it was a crate of its own, and it is
+/// re-exported under the old name because the path is used across the shell,
+/// the compositor and the Settings application, and none of those call sites
+/// were wrong. See `settingsfile`'s own documentation for why it moved: it is
+/// not about appearance, and `inputsettings` needs it without needing colours.
 pub use settingsfile as config;
 
 use core::num::NonZeroU32;
+use core::time::Duration;
+use datetimesettings::Tz;
+pub use daywindow::{DailyWindow, TimeOfDay};
 use guitk::color::Color;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use yamldoc::Document;
 
 // ============================================================================
@@ -115,6 +123,12 @@ pub fn surface_style_yaml_name(style: SurfaceStyle) -> &'static str {
         SurfaceStyle::Cards => "cards",
     }
 }
+
+/// Where `appearance.yaml` keeps the filled look's own colours: `theme.cards`,
+/// under the look's own spelling (`design-decisions.md` §1421). The outlined
+/// look's are `theme.accent` and `theme.custom_accent` themselves, where the
+/// one accent was written before each look kept its own.
+const FILLED_LOOK_KEY: &str = "cards";
 
 /// The `SurfaceStyle` a configuration file spelling names.
 ///
@@ -181,7 +195,7 @@ impl AccentColor {
 
 impl PaletteSource for AppearanceSettings {
     fn is_light(&self) -> bool {
-        self.theme_mode.is_light()
+        AppearanceSettings::is_light(self)
     }
 
     fn accent(&self) -> Color {
@@ -218,6 +232,23 @@ impl PaletteSource for AppearanceSettings {
     fn high_contrast(&self) -> Option<(Color, Color)> {
         self.high_contrast
             .map(|scheme| (scheme.background(), scheme.text()))
+    }
+
+    fn theme(&self) -> Option<&ThemeColors> {
+        self.color_theme.colors()
+    }
+
+    fn widget_style(&self) -> guitk::widget_style::WidgetStyle {
+        self.widget_theme.style()
+    }
+
+    /// The animation theme's motion at the user's speed: Slow makes the
+    /// theme's transitions half again as long, and Off -- like a theme's own
+    /// `enabled: false` -- is still.
+    fn motion(&self) -> guitk::motion::Motion {
+        self.animation_theme
+            .motion()
+            .at_speed(self.animation_speed.multiplier())
     }
 }
 
@@ -423,8 +454,10 @@ impl ThemeMode {
     /// [`AppearanceSettings`] is tuned against; answering light would flip the
     /// whole desktop for a user who asked only to be left on automatic.
     ///
-    /// When the schedule exists, this is the one place that has to change:
-    /// every colour in the shell is derived from the answer.
+    /// This is the *setting*. Whether what is drawn is light is
+    /// [`AppearanceSettings::is_light`], which also knows about a colour
+    /// theme that has only one mode's colours -- ask that for anything that
+    /// has to match the palette.
     pub fn is_light(self) -> bool {
         match self {
             Self::Light => true,
@@ -963,6 +996,35 @@ impl AccentColor {
     }
 }
 
+/// The interface colours a user sets, as one look keeps them.
+///
+/// `design-decisions.md` §1421, the operator's answer to C-Q15: each look --
+/// outlined boxes or filled ones, [`SurfaceStyle`] -- keeps its own, so an
+/// accent chosen to suit one is never carried onto the other, where it can
+/// read differently (under the filled look the accent is drawn deeper on the
+/// grey boxes to keep its text readable). Today that is the accent: which one,
+/// and the colour a custom accent names. A struct rather than two loose values
+/// so that an interface colour added later is kept per look by being added
+/// here.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct LookColours {
+    /// Which accent.
+    pub accent_color: AccentColor,
+    /// The colour an [`AccentColor::Custom`] accent names.
+    pub custom_accent: Color,
+}
+
+impl Default for LookColours {
+    /// Blue, the accent a machine with no settings file has -- under either
+    /// look, so a look nobody has chosen colours for shows the defaults.
+    fn default() -> Self {
+        Self {
+            accent_color: AccentColor::Blue,
+            custom_accent: BLUE,
+        }
+    }
+}
+
 // ============================================================================
 // Transparency / blur effects
 // ============================================================================
@@ -1071,7 +1133,11 @@ pub struct FontSettings {
 impl Default for FontSettings {
     fn default() -> Self {
         Self {
-            ui_font: "Inter".to_string(),
+            // The default theme's typeface -- the Aero reference's
+            // `font-family` (design-decisions §815) -- and the first of
+            // `guitk::text::DEFAULT_UI_FAMILIES`, so a machine that has it
+            // draws in it whether or not anything has been saved.
+            ui_font: "Open Sans".to_string(),
             mono_font: "JetBrains Mono".to_string(),
             ui_size: 13.0,
             mono_size: 12.0,
@@ -1109,6 +1175,31 @@ pub struct FontsApplied {
 }
 
 impl FontSettings {
+    /// How glyphs are rasterized under these settings: smoothing, the subpixel
+    /// order and hinting, with `palette` -- which of a colour font's palettes
+    /// its emoji are painted with -- taken from the theme in force.
+    ///
+    /// The one mapping from the settings to a rasterizer's terms, for every
+    /// process that rasterizes text: the toolkit's own cache (through
+    /// [`apply`](Self::apply)) and the compositor's, which must agree or the
+    /// same label looks different depending on who drew it.
+    #[must_use]
+    pub fn rendering(&self, palette: guitk::text::ColourPalette) -> guitk::text::Rendering {
+        use guitk::text::Subpixel;
+        guitk::text::Rendering {
+            smoothing: self.smoothing,
+            subpixel: match self.subpixel {
+                SubpixelMode::None => Subpixel::None,
+                SubpixelMode::Rgb => Subpixel::Rgb,
+                SubpixelMode::Bgr => Subpixel::Bgr,
+                SubpixelMode::VRgb => Subpixel::VRgb,
+                SubpixelMode::VBgr => Subpixel::VBgr,
+            },
+            hinting: self.hinting,
+            palette,
+        }
+    }
+
     /// Draw in these families from now on, in *this* process.
     ///
     /// `guitk`'s font selection is per-process global state, and its own
@@ -1133,6 +1224,11 @@ impl FontSettings {
     /// machine does not have.
     #[must_use]
     pub fn apply(&self) -> FontsApplied {
+        // The way glyphs are rasterized, alongside the faces: text this
+        // process's toolkit rasterizes itself was drawn unhinted while the
+        // compositor's was hinted. The colour-emoji palette is the theme's,
+        // which this section does not know, so the one in force is kept.
+        guitk::text::set_rendering(self.rendering(guitk::text::rendering().palette));
         // Asking first, because installing is not free: `set_font_family`
         // reloads the faces and drops every rasterized glyph, so calling it
         // for the family already in use would throw the cache away to arrive
@@ -1207,6 +1303,11 @@ pub enum IconSize {
 }
 
 impl IconSize {
+    /// Every size, smallest first. See [`ThemeMode::ALL`]: the desktop's View
+    /// menu and the Settings application both offer these, and each listing
+    /// them itself is how the two would come to offer different sizes.
+    pub const ALL: &'static [Self] = &[Self::Small, Self::Medium, Self::Large, Self::ExtraLarge];
+
     pub fn label(self) -> &'static str {
         match self {
             Self::Small => "Small (32px)",
@@ -1231,22 +1332,49 @@ impl IconSize {
 // Cursor settings
 // ============================================================================
 
-/// Cursor size preset.
+/// How big the mouse pointer is: one of six sizes, in logical pixels (the
+/// compositor scales them for the display the pointer is on).
+///
+/// **The one pointer-size setting on the system** (`design-decisions.md`
+/// §872). There were three -- this, `inputsettings`' `mouse.cursor_size`
+/// (16-128 px, in `input.yaml`) and the Settings application's own enum,
+/// which it never saved -- and nothing read any of them, because nothing drew
+/// a pointer. This one survived because the compositor already reads
+/// `appearance.yaml` for every other visual setting and reloads it live
+/// (`ReloadAppearance`). The two steps past 48 px are where `inputsettings`'
+/// larger range went: a pointer someone with low vision can find.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum CursorSize {
     Small,
     Normal,
     Large,
     ExtraLarge,
+    /// 64 px.
+    Huge,
+    /// 96 px -- four times the normal pointer, and the largest.
+    Giant,
 }
 
 impl CursorSize {
+    /// Every size, smallest first. See [`ThemeMode::ALL`]: a front end that
+    /// listed the sizes itself is how two lists of them come to disagree.
+    pub const ALL: &'static [Self] = &[
+        Self::Small,
+        Self::Normal,
+        Self::Large,
+        Self::ExtraLarge,
+        Self::Huge,
+        Self::Giant,
+    ];
+
     pub fn label(self) -> &'static str {
         match self {
             Self::Small => "Small (16px)",
             Self::Normal => "Normal (24px)",
             Self::Large => "Large (32px)",
             Self::ExtraLarge => "Extra Large (48px)",
+            Self::Huge => "Huge (64px)",
+            Self::Giant => "Giant (96px)",
         }
     }
 
@@ -1256,6 +1384,8 @@ impl CursorSize {
             Self::Normal => 24,
             Self::Large => 32,
             Self::ExtraLarge => 48,
+            Self::Huge => 64,
+            Self::Giant => 96,
         }
     }
 }
@@ -1272,6 +1402,9 @@ pub enum CursorScheme {
 }
 
 impl CursorScheme {
+    /// Every scheme, the default first. See [`ThemeMode::ALL`].
+    pub const ALL: &'static [Self] = &[Self::Default, Self::Inverted, Self::AccentColored];
+
     pub fn label(self) -> &'static str {
         match self {
             Self::Default => "Default",
@@ -1353,11 +1486,62 @@ impl TaskbarStyle {
 pub struct AppearanceSettings {
     /// Light/dark/system theme mode.
     pub theme_mode: ThemeMode,
+    /// The theme the colours come from, and what reading it gave: the
+    /// built-in one unless the user chose another. `theme.colors` in the file,
+    /// by the theme's folder name.
+    ///
+    /// Read when the file is read -- [`read_from`](Self::read_from) loads the
+    /// theme along with the rest -- and not when a palette is resolved, which
+    /// happens per frame and must not touch a file. One value rather than a
+    /// name and a set of colours, so the two cannot disagree; see
+    /// [`themes::ColorTheme`].
+    pub color_theme: themes::ColorTheme,
+    /// The theme the icons come from: the built-in one unless the user chose
+    /// another. `theme.icons` in the file, by the theme's folder name -- which
+    /// may name a different theme from `theme.colors`, since a theme's icons
+    /// and its colours are separate axes (`roadmap-detailed.md` §3.4:
+    /// "mix-and-match"). Nothing is read until an icon is drawn; see
+    /// [`icons::IconTheme`].
+    pub icon_theme: icons::IconTheme,
+    /// The theme the shapes of the controls come from -- a button's corners,
+    /// a field's focus mark, a scrollbar's width: the built-in one unless the
+    /// user chose another. `theme.widget_style` in the file, by the theme's
+    /// folder name, which may name a third theme again. Read with the file,
+    /// for [`color_theme`](Self::color_theme)'s reason; see
+    /// [`themes::WidgetTheme`] and `design-decisions.md` §1435.
+    pub widget_theme: themes::WidgetTheme,
+    /// The theme the desktop's transitions move by -- how long the standard
+    /// one takes, its curve, or that nothing moves: the built-in one unless
+    /// the user chose another. `theme.animation` in the file, by the theme's
+    /// folder name, which may name a fourth theme again. The user's
+    /// [`animation_speed`](Self::animation_speed) then scales it; the two
+    /// reach everything that animates together, as `Palette::motion`. See
+    /// [`themes::AnimationTheme`] and `design-decisions.md` §1446.
+    pub animation_theme: themes::AnimationTheme,
+    /// The hours `System (Auto)` is light, local time: from the window's start
+    /// until its end, and dark the rest of the day. `theme.auto.light_from`
+    /// and `theme.auto.dark_from` in the file; 07:00 until 19:00 unless the
+    /// user says otherwise.
+    pub auto_light_hours: DailyWindow,
+    /// Whether `System (Auto)` was in its light hours when these settings
+    /// were read: the schedule against the clock and the time zone, resolved
+    /// by [`read_from`](Self::read_from) -- never per frame -- and always
+    /// `false` in the other two modes, so that comparing two readings does
+    /// not change with the time of day unless the time of day is the setting.
+    ///
+    /// A process learns that it has changed from its watcher
+    /// ([`watcher`]), whose fingerprint includes it. See
+    /// [`is_light`](Self::is_light) and `design-decisions.md` §876.
+    pub auto_is_light: bool,
     /// Whether boxes are outlined or filled. See [`SurfaceStyle`]; defaults to
     /// [`SurfaceStyle::Borders`] (§829), with `Cards` the optional theme.
+    ///
+    /// Each look keeps its own colours (§1421), so change it with
+    /// [`set_surface_style`](Self::set_surface_style), which brings the new
+    /// look's back; see [`other_look_colours`](Self::other_look_colours).
     pub surface_style: SurfaceStyle,
     /// Whether a toolbar or status bar is a band or a hairline. See
-    /// [`StripStyle`]; defaults to `Filled` (§835).
+    /// [`guitk::palette::StripStyle`]; defaults to `Filled` (§835).
     pub strip_style: StripStyle,
     /// The colour-vision filter applied to the whole screen.
     ///
@@ -1438,6 +1622,24 @@ pub struct AppearanceSettings {
     /// Whether the rotation is shuffled or goes in directory order.
     pub wallpaper_shuffle: bool,
 
+    /// Pictures that take turns by the time of day: each entry is up from its
+    /// `from` time until the next entry's.
+    ///
+    /// `roadmap-detailed.md` §3.4's "dynamic wallpapers: list of images with
+    /// time-of-day triggers (e.g., day image 06:00-18:00, night image
+    /// 18:00-06:00)". Kept sorted by time. The day wraps: before the first
+    /// entry's time, the last entry is up -- a night picture from 18:00 is
+    /// still up at 03:00.
+    ///
+    /// Takes precedence over [`wallpaper_folder`](Self::wallpaper_folder) and
+    /// [`wallpaper`](Self::wallpaper), for the reason the folder takes
+    /// precedence over the picture: a schedule *is* the wallpaper, and
+    /// honouring two would leave one visible only in the file.
+    ///
+    /// Written as `wallpaper.schedule`, one `"HH:MM path"` per entry, the path
+    /// encoded as the other wallpaper paths are.
+    pub wallpaper_schedule: Vec<ScheduledWallpaper>,
+
     /// Names to leave out of a rotation, as glob patterns.
     ///
     /// `roadmap-detailed.md` §3.4 asks for "exclusion filters" alongside the
@@ -1462,10 +1664,23 @@ pub struct AppearanceSettings {
     /// it has a background colour. The mode is left untouched so that turning
     /// high contrast off returns the user to the theme they had.
     pub high_contrast: Option<HighContrastScheme>,
-    /// Accent color selection.
+    /// The accent, as the look in use keeps it (§1421).
     pub accent_color: AccentColor,
-    /// Custom accent color (used when accent_color is Custom).
+    /// The colour a [`AccentColor::Custom`] accent names, as the look in use
+    /// keeps it.
     pub custom_accent: Color,
+    /// The colours kept for the look *not* in use: what changing
+    /// [`surface_style`](Self::surface_style) brings back
+    /// (`design-decisions.md` §1421).
+    ///
+    /// The look in use keeps its own in [`accent_color`](Self::accent_color)
+    /// and [`custom_accent`](Self::custom_accent), where every reader has always
+    /// found them, so nothing that draws needs to know there are two. Change
+    /// the look with [`set_surface_style`](Self::set_surface_style), which
+    /// trades the two over. **Assigning `surface_style` directly does not**:
+    /// the accent chosen under the old look is then on the new one -- the thing
+    /// §1421 exists to prevent.
+    pub other_look_colours: LookColours,
     /// Transparency/blur effect level.
     pub transparency: TransparencyLevel,
     /// Animation speed.
@@ -1517,6 +1732,15 @@ pub struct AppearanceSettings {
     /// setting they did not knowingly change. Every desktop this imitates ships
     /// it off. See design-decisions 813.
     pub taskbar_autohide: bool,
+    /// Whether a window's taskbar tile shows its title beside its picture:
+    /// `design.txt`'s "option to show app name along with app icon in
+    /// taskbar". On by default, because the Aero reference -- which the
+    /// default theme follows (design-decisions §815) -- labels every running
+    /// window. Off, a window's tile is its picture alone, square, as a pinned
+    /// program's is; pinned programs are their picture alone either way.
+    /// `taskbar.labels` in the file, beside auto-hide: a behaviour of the bar
+    /// rather than a visual treatment.
+    pub taskbar_labels: bool,
     /// Whether to show accent color on window title bars.
     pub accent_titlebars: bool,
     /// Whether to show window drop shadows.
@@ -1542,9 +1766,16 @@ impl Default for AppearanceSettings {
             // on sees it work without waiting for the next day.
             wallpaper_interval_secs: 600,
             wallpaper_shuffle: true,
+            wallpaper_schedule: Vec::new(),
             wallpaper_exclusions: Vec::new(),
             login_background: LoginBackground::Theme,
             theme_mode: ThemeMode::Dark,
+            color_theme: themes::ColorTheme::built_in(),
+            icon_theme: icons::IconTheme::built_in(),
+            widget_theme: themes::WidgetTheme::built_in(),
+            animation_theme: themes::AnimationTheme::built_in(),
+            auto_light_hours: DEFAULT_AUTO_LIGHT_HOURS,
+            auto_is_light: false,
             // Borders, per §829. The `Default` impl is what a machine with no
             // configuration file gets, so this is where "the default theme" is
             // actually decided.
@@ -1556,8 +1787,9 @@ impl Default for AppearanceSettings {
             // somebody switches night light on. Unread while it is off.
             night_light_strength: 0.5,
             high_contrast: None,
-            accent_color: AccentColor::Blue,
-            custom_accent: BLUE,
+            accent_color: LookColours::default().accent_color,
+            custom_accent: LookColours::default().custom_accent,
+            other_look_colours: LookColours::default(),
             transparency: TransparencyLevel::Moderate,
             animation_speed: AnimationSpeed::Normal,
             fonts: FontSettings::default(),
@@ -1568,6 +1800,7 @@ impl Default for AppearanceSettings {
             taskbar_style: TaskbarStyle::Translucent,
             accent_taskbar: false,
             taskbar_autohide: false,
+            taskbar_labels: true,
             accent_titlebars: false,
             drop_shadows: true,
             scaling_percent: 100,
@@ -1578,6 +1811,54 @@ impl Default for AppearanceSettings {
 }
 
 impl AppearanceSettings {
+    /// The colours of the look in use.
+    #[must_use]
+    pub const fn colours(&self) -> LookColours {
+        LookColours {
+            accent_color: self.accent_color,
+            custom_accent: self.custom_accent,
+        }
+    }
+
+    /// The colours `look` keeps, whether or not it is the look in use.
+    #[must_use]
+    pub fn colours_for(&self, look: SurfaceStyle) -> LookColours {
+        if look == self.surface_style {
+            self.colours()
+        } else {
+            self.other_look_colours
+        }
+    }
+
+    /// Set the colours `look` keeps: for the look in use, the accent on
+    /// screen; for the other, what changing to it will bring back.
+    pub fn set_colours_for(&mut self, look: SurfaceStyle, colours: LookColours) {
+        if look == self.surface_style {
+            self.accent_color = colours.accent_color;
+            self.custom_accent = colours.custom_accent;
+        } else {
+            self.other_look_colours = colours;
+        }
+    }
+
+    /// Change the look, bringing back the colours kept for it and keeping the
+    /// ones in use for the look being left (`design-decisions.md` §1421).
+    ///
+    /// Choosing the look already in use changes nothing -- in particular it
+    /// does not trade the colours over, which would put the other look's
+    /// accent on screen for a click that changed nothing.
+    pub fn set_surface_style(&mut self, look: SurfaceStyle) {
+        if look == self.surface_style {
+            return;
+        }
+        let leaving = self.colours();
+        let arriving = self.other_look_colours;
+        self.surface_style = look;
+        self.accent_color = arriving.accent_color;
+        self.custom_accent = arriving.custom_accent;
+        self.other_look_colours = leaving;
+    }
+
     /// The caret width this user asked for, in pixels.
     ///
     /// The one step between the stored setting and something that can be
@@ -1602,6 +1883,108 @@ impl AppearanceSettings {
         guitk::style::FOCUS_RING_WIDTH * self.focus_ring_scale
     }
 
+    /// Whether what is drawn is light: the one answer the palette, the accent
+    /// and anything else with a light and a dark version should all follow.
+    ///
+    /// Not [`ThemeMode::is_light`], which is the *setting* alone. What is
+    /// drawn can differ from it: a colour theme with only one mode's colours
+    /// is shown in that mode whichever was chosen
+    /// ([`ThemeColors::variant`]), and the accent has to match the grounds it
+    /// sits on, not the switch in Settings. Asking the mode for this put the
+    /// light-background accent on a dark-only theme's dark grounds.
+    #[must_use]
+    pub fn is_light(&self) -> bool {
+        let asked = match self.theme_mode {
+            ThemeMode::Light => true,
+            ThemeMode::Dark => false,
+            ThemeMode::System => self.auto_is_light,
+        };
+        self.color_theme
+            .colors()
+            .map_or(asked, |theme| theme.variant(asked).0)
+    }
+
+    /// How long until the automatic mode next turns light or dark, reading
+    /// the time of day at `utc_secs` in `zone`; `None` unless the mode is
+    /// automatic, or when its hours start and end at the same time and so
+    /// never change.
+    ///
+    /// What a process with a clock sleeps for -- the shell -- rather than
+    /// checking every minute and finding 1 438 times a day that nothing has
+    /// changed (`design-decisions.md` 812). Never zero: a timer of no length
+    /// would fire before the edge it waits for and re-arm for zero again.
+    #[must_use]
+    pub fn next_auto_change(&self, utc_secs: u64, zone: Tz) -> Option<Duration> {
+        if self.theme_mode != ThemeMode::System {
+            return None;
+        }
+        let now = local_time_of_day(utc_secs, zone);
+        let minutes = self.auto_light_hours.minutes_to_next_edge(now)?;
+        Some(Duration::from_secs(
+            u64::from(minutes)
+                .saturating_mul(60)
+                .saturating_sub(utc_secs % 60)
+                .max(1),
+        ))
+    }
+
+    /// The scheduled picture that is up at `utc_secs` in `zone`, if there is a
+    /// schedule: the entry with the latest time not after now, or -- before
+    /// the day's first entry -- the last entry, still up from the evening
+    /// before.
+    #[must_use]
+    pub fn scheduled_wallpaper_at(&self, utc_secs: u64, zone: Tz) -> Option<&Path> {
+        let now = local_time_of_day(utc_secs, zone);
+        self.wallpaper_schedule
+            .iter()
+            .rev()
+            .find(|entry| entry.from <= now)
+            .or_else(|| self.wallpaper_schedule.last())
+            .map(|entry| entry.image.as_path())
+    }
+
+    /// How long until the scheduled picture next changes, if there is a
+    /// schedule with more than one time in it.
+    ///
+    /// For a process with a clock to sleep until -- the shell -- as
+    /// [`next_auto_change`](Self::next_auto_change) is. Never zero.
+    #[must_use]
+    pub fn next_wallpaper_change(&self, utc_secs: u64, zone: Tz) -> Option<Duration> {
+        let first = self.wallpaper_schedule.first()?;
+        if self.wallpaper_schedule.iter().all(|e| e.from == first.from) {
+            return None;
+        }
+        let now = local_time_of_day(utc_secs, zone).minutes();
+        let next = self
+            .wallpaper_schedule
+            .iter()
+            .map(|e| e.from.minutes())
+            .find(|&m| m > now)
+            .unwrap_or_else(|| {
+                first
+                    .from
+                    .minutes()
+                    .saturating_add(daywindow::MINUTES_PER_DAY)
+            });
+        let minutes = next.saturating_sub(now);
+        Some(Duration::from_secs(
+            u64::from(minutes)
+                .saturating_mul(60)
+                .saturating_sub(utc_secs % 60)
+                .max(1),
+        ))
+    }
+
+    /// Whether the automatic mode's light hours contain `utc_secs` in `zone`
+    /// -- what [`auto_is_light`](Self::auto_is_light) will say when the
+    /// settings are next read, for a caller holding a clock to compare against
+    /// what they say now.
+    #[must_use]
+    pub fn auto_light_at(&self, utc_secs: u64, zone: Tz) -> bool {
+        self.auto_light_hours
+            .contains(local_time_of_day(utc_secs, zone))
+    }
+
     /// The accent colour to actually draw with.
     ///
     /// Resolves both things a caller would otherwise have to know: that
@@ -1613,7 +1996,7 @@ impl AppearanceSettings {
     pub fn effective_accent(&self) -> Color {
         if self.accent_color == AccentColor::Custom {
             self.custom_accent
-        } else if self.theme_mode.is_light() {
+        } else if self.is_light() {
             self.accent_color.color_light()
         } else {
             self.accent_color.color()
@@ -1625,7 +2008,14 @@ impl AppearanceSettings {
         self.scaling_percent as f32 / 100.0
     }
 
-    /// Whether any animations are enabled.
+    /// Whether the user has left animation on: their speed is not Off.
+    ///
+    /// The user's own switch, and only theirs. A theme whose transitions do
+    /// not move (`animation.enabled: false`) does not make this false: that is
+    /// a look, not the user asking for less motion -- a picture viewer asks
+    /// this before playing an animated picture, and a theme's taste in panel
+    /// slides is no reason to stop one. The transitions themselves follow
+    /// `Palette::motion`, which reads both.
     pub fn animations_enabled(&self) -> bool {
         self.animation_speed != AnimationSpeed::Off
     }
@@ -1676,7 +2066,7 @@ impl AppearanceSettings {
 ///
 /// The re-export is deliberate rather than a wrapper: a wrapper would be a
 /// place where the two could drift apart.
-pub use guitk::theme::{contrast_ratio, relative_luminance};
+pub use guitk::theme::{contrast_ratio, perceptual_difference, relative_luminance};
 
 /// Every colour used to draw a window's frame, and the emptiness behind it.
 ///
@@ -1933,6 +2323,8 @@ yaml_enum!(CursorSize {
     Normal => "normal",
     Large => "large",
     ExtraLarge => "extra-large",
+    Huge => "huge",
+    Giant => "giant",
 });
 yaml_enum!(CursorScheme {
     Default => "default",
@@ -1950,36 +2342,6 @@ yaml_enum!(TaskbarStyle {
     Translucent => "translucent",
     Transparent => "transparent",
 });
-
-/// Spell a colour as CSS-style hex, the notation a user editing the file by
-/// hand will already know. The alpha byte appears only when it is not opaque,
-/// so the common case stays a familiar six digits.
-pub fn color_to_hex(color: Color) -> String {
-    if color.a == 255 {
-        format!("#{:02x}{:02x}{:02x}", color.r, color.g, color.b)
-    } else {
-        format!(
-            "#{:02x}{:02x}{:02x}{:02x}",
-            color.r, color.g, color.b, color.a
-        )
-    }
-}
-
-/// Read a `#rrggbb` or `#rrggbbaa` colour. `None` for anything else, so a
-/// mistyped colour falls back to the default rather than to black.
-pub fn color_from_hex(text: &str) -> Option<Color> {
-    let digits = text.strip_prefix('#')?;
-    if !digits.chars().all(|c| c.is_ascii_hexdigit()) {
-        return None;
-    }
-    let byte =
-        |i: usize| -> Option<u8> { u8::from_str_radix(digits.get(i..i.checked_add(2)?)?, 16).ok() };
-    match digits.len() {
-        6 => Some(Color::rgb(byte(0)?, byte(2)?, byte(4)?)),
-        8 => Some(Color::rgba(byte(0)?, byte(2)?, byte(4)?, byte(6)?)),
-        _ => None,
-    }
-}
 
 /// Read a value if the file has one, otherwise keep what is already there.
 ///
@@ -2060,6 +2422,12 @@ impl AppearanceSettings {
         if let Some(shuffle) = doc.get_i64(&["wallpaper", "shuffle"]) {
             s.wallpaper_shuffle = shuffle != 0;
         }
+        if let Some(entries) = doc.get_seq(&["wallpaper", "schedule"]) {
+            let encoded = doc
+                .get_str(&["wallpaper", "image_encoding"])
+                .is_some_and(|v| v.trim() == WALLPAPER_ENCODING);
+            s.wallpaper_schedule = read_wallpaper_schedule(&entries, encoded);
+        }
         if let Some(patterns) = doc.get_seq(&["wallpaper", "exclude"]) {
             // Empty lines dropped: a YAML list a person edited by hand grows
             // blank entries, and an empty pattern matches nothing useful but
@@ -2070,11 +2438,45 @@ impl AppearanceSettings {
                 .collect();
         }
 
+        // The colour theme, by the name of its folder, percent-encoded as a
+        // filename is (design-decisions 426): a folder's name need not be
+        // text. Loaded here, file and all -- see `color_theme` for why here.
+        // An empty value is the built-in theme, as a blanked wallpaper is no
+        // wallpaper.
+        if let Some(name) = color_theme_name(doc) {
+            s.color_theme = themes::ColorTheme::load(&name);
+        }
+        // The icon theme, spelled as the colour theme is. Nothing to load yet:
+        // an icon is looked up when it is drawn.
+        if let Some(name) = doc
+            .get_str(&["theme", "icons"])
+            .map(|name| name.trim().to_string())
+            .filter(|name| !name.is_empty())
+        {
+            s.icon_theme = icons::IconTheme::load(&pathcodec::decode_path(&name).into_os_string());
+        }
+        // The widget style, spelled and loaded as the colour theme is -- file
+        // and all, since the palette carries it and a palette is resolved per
+        // frame.
+        if let Some(name) = widget_theme_name(doc) {
+            s.widget_theme = themes::WidgetTheme::load(&name);
+        }
+        // The motion, for the same reason: the palette carries it.
+        if let Some(name) = animation_theme_name(doc) {
+            s.animation_theme = themes::AnimationTheme::load(&name);
+        }
         read_into!(
             s.theme_mode,
             doc.get_str(&["theme", "mode"])
                 .and_then(|v| ThemeMode::from_yaml_name(&v))
         );
+        if let Some(hours) = auto_light_hours_in(doc) {
+            s.auto_light_hours = hours;
+        }
+        // Resolved here, against the clock, for the reason the colour theme is
+        // loaded here: every reader of the settings gets it, and none works it
+        // out per frame.
+        s.auto_is_light = s.theme_mode == ThemeMode::System && auto_light_now(s.auto_light_hours);
         read_into!(
             s.surface_style,
             doc.get_str(&["theme", "surface_style"])
@@ -2100,16 +2502,37 @@ impl AppearanceSettings {
                 .and_then(|v| ColorFilter::from_yaml_name(&v))
         );
 
+        // The accent, kept per look (§1421). `theme.accent` and
+        // `theme.custom_accent` are the outlined look's -- where the one accent
+        // was always written -- and `theme.cards` holds the filled look's.
+        // Whatever the filled look does not say it takes from the outlined
+        // one, which is how a file written before looks kept colours of their
+        // own reads: as that one accent for both, so nobody's choice is lost.
+        // After `surface_style`, which decides which of the two is on screen.
+        let mut outlined = LookColours::default();
         read_into!(
-            s.accent_color,
+            outlined.accent_color,
             doc.get_str(&["theme", "accent"])
                 .and_then(|v| AccentColor::from_yaml_name(&v))
         );
         read_into!(
-            s.custom_accent,
+            outlined.custom_accent,
             doc.get_str(&["theme", "custom_accent"])
-                .and_then(|v| color_from_hex(&v))
+                .and_then(|v| Color::from_hex_text(&v))
         );
+        let mut filled = outlined;
+        read_into!(
+            filled.accent_color,
+            doc.get_str(&["theme", FILLED_LOOK_KEY, "accent"])
+                .and_then(|v| AccentColor::from_yaml_name(&v))
+        );
+        read_into!(
+            filled.custom_accent,
+            doc.get_str(&["theme", FILLED_LOOK_KEY, "custom_accent"])
+                .and_then(|v| Color::from_hex_text(&v))
+        );
+        s.set_colours_for(SurfaceStyle::Borders, outlined);
+        s.set_colours_for(SurfaceStyle::Cards, filled);
         read_into!(
             s.transparency,
             doc.get_str(&["theme", "transparency"])
@@ -2171,6 +2594,7 @@ impl AppearanceSettings {
             doc.get_bool(&["effects", "accent_taskbar"])
         );
         read_into!(s.taskbar_autohide, doc.get_bool(&["taskbar", "autohide"]));
+        read_into!(s.taskbar_labels, doc.get_bool(&["taskbar", "labels"]));
         read_into!(
             s.accent_titlebars,
             doc.get_bool(&["effects", "accent_titlebars"])
@@ -2202,15 +2626,15 @@ impl AppearanceSettings {
                 "desktop" => LoginBackground::SameAsDesktop,
                 "color" => doc
                     .get_str(&["login", "color"])
-                    .and_then(|v| color_from_hex(&v))
+                    .and_then(|v| Color::from_hex_text(&v))
                     .map_or(LoginBackground::Theme, LoginBackground::SolidColor),
                 "gradient" => {
                     let top = doc
                         .get_str(&["login", "gradient_top"])
-                        .and_then(|v| color_from_hex(&v));
+                        .and_then(|v| Color::from_hex_text(&v));
                     let bottom = doc
                         .get_str(&["login", "gradient_bottom"])
-                        .and_then(|v| color_from_hex(&v));
+                        .and_then(|v| Color::from_hex_text(&v));
                     match (top, bottom) {
                         (Some(top), Some(bottom)) => LoginBackground::Gradient { top, bottom },
                         // Half a gradient is not a gradient. The theme is the
@@ -2292,15 +2716,22 @@ impl AppearanceSettings {
             .map(String::as_str)
             .collect();
         doc.set_seq(&["wallpaper", "exclude"], &excludes);
+        let schedule: Vec<String> = self
+            .wallpaper_schedule
+            .iter()
+            .map(|entry| format!("{} {}", entry.from, pathcodec::encode_path(&entry.image)))
+            .collect();
+        let schedule: Vec<&str> = schedule.iter().map(String::as_str).collect();
+        doc.set_seq(&["wallpaper", "schedule"], &schedule);
         doc.set_str(&["wallpaper", "fit"], self.wallpaper_fit.yaml_name());
         doc.set_str(&["login", "background"], self.login_background.yaml_name());
         match &self.login_background {
             LoginBackground::SolidColor(color) => {
-                doc.set_str(&["login", "color"], &color_to_hex(*color));
+                doc.set_str(&["login", "color"], &Color::hex_text(*color));
             }
             LoginBackground::Gradient { top, bottom } => {
-                doc.set_str(&["login", "gradient_top"], &color_to_hex(*top));
-                doc.set_str(&["login", "gradient_bottom"], &color_to_hex(*bottom));
+                doc.set_str(&["login", "gradient_top"], &Color::hex_text(*top));
+                doc.set_str(&["login", "gradient_bottom"], &Color::hex_text(*bottom));
             }
             LoginBackground::CustomImage(path) => {
                 // Percent-encoded under the same marker as the wallpaper, and
@@ -2313,6 +2744,30 @@ impl AppearanceSettings {
             LoginBackground::Theme | LoginBackground::SameAsDesktop => {}
         }
         doc.set_str(&["theme", "mode"], self.theme_mode.yaml_name());
+        doc.set_str(
+            &["theme", "auto", "light_from"],
+            &self.auto_light_hours.start().to_string(),
+        );
+        doc.set_str(
+            &["theme", "auto", "dark_from"],
+            &self.auto_light_hours.end().to_string(),
+        );
+        doc.set_str(
+            &["theme", "colors"],
+            &pathcodec::encode_path(std::path::Path::new(self.color_theme.id())),
+        );
+        doc.set_str(
+            &["theme", "icons"],
+            &pathcodec::encode_path(std::path::Path::new(self.icon_theme.id())),
+        );
+        doc.set_str(
+            &["theme", "widget_style"],
+            &pathcodec::encode_path(std::path::Path::new(self.widget_theme.id())),
+        );
+        doc.set_str(
+            &["theme", "animation"],
+            &pathcodec::encode_path(std::path::Path::new(self.animation_theme.id())),
+        );
         doc.set_str(
             &["theme", "surface_style"],
             surface_style_yaml_name(self.surface_style),
@@ -2332,10 +2787,23 @@ impl AppearanceSettings {
             self.high_contrast
                 .map_or("off", HighContrastScheme::yaml_name),
         );
-        doc.set_str(&["theme", "accent"], self.accent_color.yaml_name());
+        // Per look (§1421), and both whichever is in use, so the file
+        // says what each look will show: the outlined look's where the one
+        // accent has always been, the filled look's under `theme.cards`.
+        let outlined = self.colours_for(SurfaceStyle::Borders);
+        let filled = self.colours_for(SurfaceStyle::Cards);
+        doc.set_str(&["theme", "accent"], outlined.accent_color.yaml_name());
         doc.set_str(
             &["theme", "custom_accent"],
-            &color_to_hex(self.custom_accent),
+            &Color::hex_text(outlined.custom_accent),
+        );
+        doc.set_str(
+            &["theme", FILLED_LOOK_KEY, "accent"],
+            filled.accent_color.yaml_name(),
+        );
+        doc.set_str(
+            &["theme", FILLED_LOOK_KEY, "custom_accent"],
+            &Color::hex_text(filled.custom_accent),
         );
         doc.set_str(&["theme", "transparency"], self.transparency.yaml_name());
 
@@ -2372,6 +2840,7 @@ impl AppearanceSettings {
         // not an appearance: the group a key sits in is the only clue a person
         // hand-editing this file gets about what else to look for nearby.
         doc.set_bool(&["taskbar", "autohide"], self.taskbar_autohide);
+        doc.set_bool(&["taskbar", "labels"], self.taskbar_labels);
         doc.set_bool(&["effects", "accent_titlebars"], self.accent_titlebars);
         doc.set_bool(&["effects", "drop_shadows"], self.drop_shadows);
 
@@ -2397,6 +2866,162 @@ impl AppearanceSettings {
 /// processes that agree on every key but disagree about which file holds them
 /// have simply written two files.
 pub const CONFIG_NAME: &str = "appearance";
+
+/// The watcher for `appearance.yaml`: one that also notices the chosen colour
+/// theme's own file changing -- which changes every colour read from the
+/// settings without changing a byte of `appearance.yaml`.
+///
+/// Use this rather than `config::Watcher::new(CONFIG_NAME)`, which reports an
+/// in-place edit of the theme as nothing at all (`known-issues.md`
+/// `TD-C-AN-EDITED-THEME-FILE-IS-NOT-NOTICED-UNTIL-THE-SETTINGS-CHANGE`). It
+/// still only looks when asked: a process learns to look from a
+/// `SettingsChanged` announcement, as for any other change.
+#[must_use]
+pub fn watcher() -> config::Watcher {
+    config::Watcher::with_dependencies(CONFIG_NAME, dependencies)
+}
+
+/// What the settings read from `doc` depend on besides the document: the
+/// chosen theme's file, and -- in the automatic mode -- whether it is light
+/// now. The file does not change at 19:00; what it means does.
+fn dependencies(doc: &Document) -> Vec<u8> {
+    let mut out = themes::fingerprint(doc);
+    let automatic = doc
+        .get_str(&["theme", "mode"])
+        .and_then(|v| ThemeMode::from_yaml_name(&v))
+        == Some(ThemeMode::System);
+    if automatic {
+        let hours = auto_light_hours_in(doc).unwrap_or(DEFAULT_AUTO_LIGHT_HOURS);
+        out.push(if auto_light_now(hours) { b'L' } else { b'D' });
+    }
+    out
+}
+
+/// 07:00 until 19:00: the hours the automatic mode is light unless the user
+/// says otherwise -- roughly the working day, and the hours a room is most
+/// likely lit by daylight across the year in the latitudes most people live
+/// in. See `design-decisions.md` §876 for why fixed hours and not sunrise.
+pub const DEFAULT_AUTO_LIGHT_HOURS: DailyWindow = match (
+    TimeOfDay::from_minutes(7 * 60),
+    TimeOfDay::from_minutes(19 * 60),
+) {
+    (Some(start), Some(end)) => DailyWindow::new(start, end),
+    // Unreachable -- both are under a day -- and a `const` cannot panic
+    // politely. An empty window (dark all day) is the harmless failure.
+    _ => DailyWindow::new(TimeOfDay::MIDNIGHT, TimeOfDay::MIDNIGHT),
+};
+
+/// The automatic mode's hours as `doc` states them: both ends or neither, as
+/// quiet hours read theirs -- a start paired with a default end is a window
+/// nobody chose.
+fn auto_light_hours_in(doc: &Document) -> Option<DailyWindow> {
+    let start = doc
+        .get_str(&["theme", "auto", "light_from"])
+        .and_then(|v| TimeOfDay::parse(&v))?;
+    let end = doc
+        .get_str(&["theme", "auto", "dark_from"])
+        .and_then(|v| TimeOfDay::parse(&v))?;
+    Some(DailyWindow::new(start, end))
+}
+
+/// Whether `hours` contain the time of day now, in the zone the clock is in
+/// -- the user's choice in `datetime.yaml`, or the machine's.
+///
+/// Reads a file and perhaps the machine's zone, so it is asked when the
+/// settings are read and when a watcher looks, never per frame.
+fn auto_light_now(hours: DailyWindow) -> bool {
+    let zone = datetimesettings::DateTimeFile::load()
+        .settings
+        .rule(datetimesettings::system_zone());
+    hours.contains(local_time_of_day(
+        datetimesettings::clock::now_utc_secs(),
+        zone,
+    ))
+}
+
+/// The local time of day at `utc_secs` in `zone`.
+#[must_use]
+pub fn local_time_of_day(utc_secs: u64, zone: Tz) -> TimeOfDay {
+    let t = i64::try_from(utc_secs).unwrap_or(i64::MAX);
+    let local = t.saturating_add(i64::from(zone.lookup(t).gmtoff));
+    // `rem_euclid` of a day, over sixty: 0..1440, so both steps are exact.
+    let minutes = u16::try_from(local.rem_euclid(86_400) / 60).unwrap_or(0);
+    TimeOfDay::from_minutes(minutes).unwrap_or(TimeOfDay::MIDNIGHT)
+}
+
+/// One picture in a time-of-day wallpaper schedule: up from `from` until the
+/// next entry's time.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ScheduledWallpaper {
+    /// When it goes up, in the local time of day.
+    pub from: TimeOfDay,
+    /// The picture.
+    pub image: PathBuf,
+}
+
+/// Read `wallpaper.schedule`'s entries: `"HH:MM path"` each, the path encoded
+/// when `encoded` says the file encodes its paths.
+///
+/// An entry that does not start with a time, or names no picture, is left
+/// out -- the file is hand-editable, and one line typed wrong should cost
+/// that line rather than the schedule. Two entries at the same time: the later
+/// line wins, as a later setting does everywhere else in the file. The result
+/// is sorted by time.
+fn read_wallpaper_schedule(entries: &[String], encoded: bool) -> Vec<ScheduledWallpaper> {
+    let mut out: Vec<ScheduledWallpaper> = Vec::new();
+    for entry in entries {
+        let entry = entry.trim();
+        let Some((time, path)) = entry.split_once(char::is_whitespace) else {
+            continue;
+        };
+        let (Some(from), path) = (TimeOfDay::parse(time), path.trim()) else {
+            continue;
+        };
+        if path.is_empty() {
+            continue;
+        }
+        let image = if encoded {
+            pathcodec::decode_path(path)
+        } else {
+            PathBuf::from(path)
+        };
+        out.retain(|e| e.from != from);
+        out.push(ScheduledWallpaper { from, image });
+    }
+    out.sort_by_key(|e| e.from);
+    out
+}
+
+/// The colour theme a settings document names, decoded; `None` when it names
+/// none -- the key is absent or blank, which is the built-in theme.
+///
+/// One decoding, shared by the reader and the watcher's fingerprint, so the
+/// two cannot disagree about which theme a file means.
+pub(crate) fn color_theme_name(doc: &Document) -> Option<std::ffi::OsString> {
+    theme_name_at(doc, "colors")
+}
+
+/// The widget-style theme a settings document names, decoded; `None` for the
+/// built-in one. Shared by the reader and the watcher, as
+/// [`color_theme_name`] is.
+pub(crate) fn widget_theme_name(doc: &Document) -> Option<std::ffi::OsString> {
+    theme_name_at(doc, "widget_style")
+}
+
+/// The animation theme a settings document names, decoded; `None` for the
+/// built-in one. Shared by the reader and the watcher, as
+/// [`color_theme_name`] is.
+pub(crate) fn animation_theme_name(doc: &Document) -> Option<std::ffi::OsString> {
+    theme_name_at(doc, "animation")
+}
+
+/// The theme `theme.<axis>` names, decoded; `None` when the key is absent or
+/// blank.
+fn theme_name_at(doc: &Document, axis: &str) -> Option<std::ffi::OsString> {
+    let name = doc.get_str(&["theme", axis])?;
+    let name = name.trim();
+    (!name.is_empty()).then(|| pathcodec::decode_path(name).into_os_string())
+}
 
 /// The user's appearance settings together with the document they came from.
 ///
@@ -2565,7 +3190,7 @@ mod tests {
     #[test]
     fn test_font_settings_default() {
         let f = FontSettings::default();
-        assert_eq!(f.ui_font, "Inter");
+        assert_eq!(f.ui_font, "Open Sans");
         assert_eq!(f.mono_font, "JetBrains Mono");
         assert!(f.hinting);
         assert!(f.smoothing);
@@ -2589,6 +3214,24 @@ mod tests {
         assert_eq!(IconSize::ExtraLarge.pixels(), 96);
     }
 
+    /// `IconSize::ALL` is every size, smallest first. The match stops
+    /// compiling when a size is added, which is the moment `ALL` needs it.
+    #[test]
+    fn every_icon_size_is_in_all_smallest_first() {
+        for size in IconSize::ALL {
+            match size {
+                IconSize::Small | IconSize::Medium | IconSize::Large | IconSize::ExtraLarge => {}
+            }
+        }
+        assert_eq!(IconSize::ALL.len(), 4);
+        assert!(
+            IconSize::ALL
+                .windows(2)
+                .all(|pair| pair[0].pixels() < pair[1].pixels()),
+            "not smallest first"
+        );
+    }
+
     // ---- CursorSize ----
 
     #[test]
@@ -2596,6 +3239,55 @@ mod tests {
         assert_eq!(CursorSize::Small.pixels(), 16);
         assert_eq!(CursorSize::Normal.pixels(), 24);
         assert_eq!(CursorSize::Large.pixels(), 32);
+        assert_eq!(CursorSize::ExtraLarge.pixels(), 48);
+        assert_eq!(CursorSize::Huge.pixels(), 64);
+        assert_eq!(CursorSize::Giant.pixels(), 96);
+    }
+
+    /// `CursorSize::ALL` is every size, smallest first -- the match fails to
+    /// compile when a size is added, which is the prompt to add it here too.
+    #[test]
+    fn every_cursor_size_is_in_all_smallest_first() {
+        for size in CursorSize::ALL {
+            match size {
+                CursorSize::Small
+                | CursorSize::Normal
+                | CursorSize::Large
+                | CursorSize::ExtraLarge
+                | CursorSize::Huge
+                | CursorSize::Giant => {}
+            }
+        }
+        assert_eq!(CursorSize::ALL.len(), 6);
+        assert!(
+            CursorSize::ALL
+                .windows(2)
+                .all(|pair| pair[0].pixels() < pair[1].pixels()),
+            "not smallest first"
+        );
+        // The largest step keeps what `inputsettings`' range was for: a
+        // pointer four times the normal one.
+        assert_eq!(CursorSize::Giant.pixels(), CursorSize::Normal.pixels() * 4);
+    }
+
+    /// Every size and every scheme survives `appearance.yaml`.
+    #[test]
+    fn every_cursor_size_and_scheme_round_trips() {
+        for size in CursorSize::ALL {
+            for scheme in CursorScheme::ALL {
+                let settings = AppearanceSettings {
+                    cursor_size: *size,
+                    cursor_scheme: *scheme,
+                    ..AppearanceSettings::default()
+                };
+                let mut doc = Document::new();
+                settings.write_into(&mut doc);
+                let reread = AppearanceSettings::read_from(&Document::parse(&doc.to_text()));
+                assert_eq!(reread.cursor_size, *size);
+                assert_eq!(reread.cursor_scheme, *scheme);
+            }
+        }
+        assert_eq!(CursorScheme::ALL.len(), 3);
     }
 
     #[test]
@@ -2740,6 +3432,54 @@ mod tests {
         );
     }
 
+    /// The settings' rasterizing choices reach the toolkit's own cache.
+    ///
+    /// Text the toolkit rasterizes itself was drawn unhinted while the
+    /// compositor's was hinted. The cache starts unhinted, and every caller of
+    /// `apply` in this binary applies the defaults, whose hinting is on --
+    /// so this holds whatever runs beside it.
+    #[test]
+    fn applying_the_fonts_sets_how_this_process_rasterizes() {
+        let _ = FontSettings::default().apply();
+        let r = guitk::text::rendering();
+        assert!(r.hinting, "hinting did not reach the toolkit's cache");
+        assert!(r.smoothing);
+        assert_eq!(r.subpixel, guitk::text::Subpixel::Rgb);
+    }
+
+    /// One mapping from the settings to a rasterizer's terms, field by field.
+    #[test]
+    fn the_rendering_is_the_settings_field_for_field() {
+        use guitk::text::{ColourPalette, Subpixel};
+        let plain = FontSettings {
+            hinting: false,
+            smoothing: false,
+            subpixel: SubpixelMode::None,
+            ..FontSettings::default()
+        };
+        let r = plain.rendering(ColourPalette::Dark);
+        assert!(!r.hinting && !r.smoothing);
+        assert_eq!(r.subpixel, Subpixel::None);
+        assert_eq!(
+            r.palette,
+            ColourPalette::Dark,
+            "the palette is the caller's"
+        );
+        for (mode, want) in [
+            (SubpixelMode::Rgb, Subpixel::Rgb),
+            (SubpixelMode::Bgr, Subpixel::Bgr),
+            (SubpixelMode::VRgb, Subpixel::VRgb),
+            (SubpixelMode::VBgr, Subpixel::VBgr),
+        ] {
+            let s = FontSettings {
+                subpixel: mode,
+                ..FontSettings::default()
+            };
+            assert_eq!(s.rendering(ColourPalette::Light).subpixel, want, "{mode:?}");
+            assert!(s.rendering(ColourPalette::Light).hinting);
+        }
+    }
+
     /// Choosing nothing is not the same as choosing something absent.
     ///
     /// The distinction is the reason this returns an enum rather than a bool:
@@ -2763,15 +3503,76 @@ mod tests {
 
     // ---- Configuration file ----
 
+    /// The colour theme [`all_non_default`] chooses: its folder's name, with a
+    /// space, a `%` and a letter outside ASCII in it for the encoding to get
+    /// wrong, and its file.
+    const ROUND_TRIP_THEME: &str = "nord 100% ça";
+    const ROUND_TRIP_THEME_FILE: &str =
+        "colors:\n  base: \"#102030\"\ncolors-light:\n  text: \"#0a0b0c\"\n";
+    /// The round trip's widget-style theme: a third theme, so a writer that
+    /// crossed one axis's name into another's key is caught.
+    const ROUND_TRIP_WIDGETS: &str = "round été";
+    const ROUND_TRIP_WIDGETS_FILE: &str =
+        "widget-style:\n  button:\n    radius: 11\n    gloss: false\n  toggle: checkbox\n";
+    /// The round trip's animation theme: a fourth, for the same reason.
+    const ROUND_TRIP_ANIMATION: &str = "ressort ü";
+    const ROUND_TRIP_ANIMATION_FILE: &str = "animation:\n  duration-ms: 320\n  easing: spring\n";
+
+    /// Install a theme in the scratch user's data directory under `root`,
+    /// where `AppearanceSettings::read_from` will look for it.
+    fn install_theme(root: &std::path::Path, name: &str, text: &str) {
+        let dir = config::testing::scratch_data_dir(root)
+            .join("slateos")
+            .join("themes")
+            .join(name);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join(themes::FILE_NAME), text).unwrap();
+    }
+
     /// Settings that differ from the defaults in every field, so a
     /// round-trip test cannot pass by accident on a field it forgot.
     fn all_non_default() -> AppearanceSettings {
         AppearanceSettings {
+            // Read back from a file the round trip installs, so the colours
+            // here are the file's.
+            color_theme: themes::ColorTheme::from_colors(
+                ROUND_TRIP_THEME,
+                themes::parse(ROUND_TRIP_THEME_FILE).colors,
+            ),
+            // A theme of its own, not the colour theme's, so a round trip that
+            // wrote one axis into the other would be caught.
+            icon_theme: icons::IconTheme::load(std::ffi::OsStr::new("line-icons")),
+            // A third, read back from the file the round trip installs.
+            widget_theme: themes::WidgetTheme::from_style(
+                ROUND_TRIP_WIDGETS,
+                themes::parse(ROUND_TRIP_WIDGETS_FILE)
+                    .widget_style
+                    .expect("the fixture sets a widget style"),
+            ),
+            // A fourth, read back from the file the round trip installs.
+            animation_theme: themes::AnimationTheme::from_motion(
+                ROUND_TRIP_ANIMATION,
+                themes::parse(ROUND_TRIP_ANIMATION_FILE)
+                    .motion
+                    .expect("the fixture sets a motion"),
+            ),
             // Every one of these differs from the default, which is what the
             // fixture is for: the defaults are `None`, 600 and `true`.
             wallpaper_folder: Some(PathBuf::from("/home/u/Pictures/rotation")),
             // Non-default, like every other field here: the default is empty.
             wallpaper_exclusions: vec!["*.gif".to_string(), "draft-*".to_string()],
+            // Two pictures, one with a space, a non-ASCII letter and a `%` in
+            // its name, so a round trip that lost the path codec shows.
+            wallpaper_schedule: vec![
+                ScheduledWallpaper {
+                    from: TimeOfDay::new(6, 0).unwrap(),
+                    image: PathBuf::from("/home/u/Pictures/d\u{ed}a 100%.png"),
+                },
+                ScheduledWallpaper {
+                    from: TimeOfDay::new(18, 30).unwrap(),
+                    image: PathBuf::from("/home/u/Pictures/night.png"),
+                },
+            ],
             // Not `SameAsDesktop`: that one carries no value, so a round trip
             // could lose the path and still compare equal. The variant with
             // something to lose is the one worth round-tripping.
@@ -2787,6 +3588,13 @@ mod tests {
             wallpaper_fit: ImageFit::Tile,
             wallpaper: Some(PathBuf::from("/home/u/Pictures/maíz del alba.png")),
             theme_mode: ThemeMode::Light,
+            // Not 07:00-19:00. Read back whatever the mode, since the hours are
+            // a setting even while the mode does not use them.
+            auto_light_hours: DailyWindow::from_hm(6, 30, 20, 15).unwrap(),
+            // Derived, and `false` outside the automatic mode -- which this
+            // fixture is not in -- so the default is the only value it can
+            // round-trip as.
+            auto_is_light: false,
             caret_width_scale: 2.5,
             focus_ring_scale: 3.0,
             night_light: true,
@@ -2802,6 +3610,14 @@ mod tests {
             high_contrast: Some(HighContrastScheme::YellowOnBlack),
             accent_color: AccentColor::Custom,
             custom_accent: Color::rgba(1, 2, 3, 4),
+            // The outlined look's, since the filled one is in use: a
+            // different accent *and* a different custom colour, so a writer
+            // that crossed the two looks over, or wrote one look twice, is
+            // caught on either value.
+            other_look_colours: LookColours {
+                accent_color: AccentColor::Mauve,
+                custom_accent: Color::rgba(5, 6, 7, 8),
+            },
             transparency: TransparencyLevel::Full,
             animation_speed: AnimationSpeed::Slow,
             fonts: FontSettings {
@@ -2820,6 +3636,7 @@ mod tests {
             taskbar_style: TaskbarStyle::Transparent,
             accent_taskbar: true,
             taskbar_autohide: true,
+            taskbar_labels: false,
             accent_titlebars: true,
             drop_shadows: false,
             scaling_percent: 150,
@@ -2832,95 +3649,887 @@ mod tests {
         assert_ne!(settings, AppearanceSettings::default());
         let mut doc = Document::new();
         settings.write_into(&mut doc);
-        let reread = AppearanceSettings::read_from(&Document::parse(&doc.to_text()));
+        // The colour theme is read from its own file, so that file has to be
+        // where the reader looks: a scratch user's data directory.
+        let reread = config::testing::with_scratch_config("round-trip", |root| {
+            install_theme(root, ROUND_TRIP_THEME, ROUND_TRIP_THEME_FILE);
+            install_theme(root, ROUND_TRIP_WIDGETS, ROUND_TRIP_WIDGETS_FILE);
+            install_theme(root, ROUND_TRIP_ANIMATION, ROUND_TRIP_ANIMATION_FILE);
+            AppearanceSettings::read_from(&Document::parse(&doc.to_text()))
+        });
         assert_eq!(reread, settings);
+    }
+
+    /// The file names the colour theme by its folder, encoded as a filename
+    /// is -- so the name survives whatever bytes are in it -- and the name is
+    /// written even for the built-in theme, so the key is there to edit.
+    #[test]
+    fn the_colour_theme_is_written_by_name() {
+        let mut doc = Document::new();
+        AppearanceSettings::default().write_into(&mut doc);
+        assert_eq!(doc.get_str(&["theme", "colors"]).as_deref(), Some("aero"));
+
+        all_non_default().write_into(&mut doc);
+        assert_eq!(
+            doc.get_str(&["theme", "colors"]).as_deref(),
+            Some("nord 100%25 %C3%A7a")
+        );
+    }
+
+    /// **Windows' titles are on the taskbar unless the file says otherwise**:
+    /// the Aero reference labels every running window, and `taskbar.labels`
+    /// is what says otherwise.
+    #[test]
+    fn the_taskbar_shows_titles_unless_the_file_says_not() {
+        assert!(AppearanceSettings::default().taskbar_labels);
+        let off = AppearanceSettings::read_from(&Document::parse("taskbar:\n  labels: false\n"));
+        assert!(!off.taskbar_labels);
+        let unrelated =
+            AppearanceSettings::read_from(&Document::parse("taskbar:\n  autohide: true\n"));
+        assert!(
+            unrelated.taskbar_labels,
+            "a file that does not say keeps the default"
+        );
+    }
+
+    /// A theme's colours reach the palette from nothing but the settings file
+    /// and the theme's own: the path every reader of the settings takes.
+    #[test]
+    fn a_chosen_themes_colours_reach_the_palette() {
+        config::testing::with_scratch_config("theme-palette", |root| {
+            install_theme(root, "nord", "colors:\n  base: \"#2e3440\"\n");
+            let s = AppearanceSettings::read_from(&Document::parse("theme:\n  colors: nord\n"));
+            assert_eq!(s.color_theme.problem(), None);
+            assert_eq!(Palette::from_settings(&s).base, Color::from_hex(0x2E3440));
+        });
+    }
+
+    /// A theme that cannot be used shows the built-in colours and says why --
+    /// and keeps its name, so that saving an unrelated setting does not
+    /// quietly put the user back on the built-in theme for good.
+    #[test]
+    fn a_theme_that_is_not_installed_keeps_its_name_through_a_save() {
+        config::testing::with_scratch_config("theme-missing", |_| {
+            let doc = Document::parse("theme:\n  colors: gone\n");
+            let s = AppearanceSettings::read_from(&doc);
+            assert_eq!(s.color_theme.id(), "gone");
+            assert_eq!(s.color_theme.colors(), None);
+            assert!(
+                s.color_theme
+                    .problem()
+                    .is_some_and(|why| why.contains("\"gone\" is not installed")),
+                "{:?}",
+                s.color_theme.problem()
+            );
+            assert_eq!(
+                Palette::from_settings(&s),
+                Palette::from_settings(&AppearanceSettings::default())
+            );
+
+            let mut saved = doc.clone();
+            s.write_into(&mut saved);
+            assert_eq!(saved.get_str(&["theme", "colors"]).as_deref(), Some("gone"));
+        });
+    }
+
+    /// The icon theme is its own setting: read from `theme.icons`, written
+    /// back there, independent of the colour theme, and the built-in one when
+    /// the file names none or a blank. A folder name that is not text comes
+    /// back byte for byte.
+    #[test]
+    fn the_icon_theme_is_its_own_setting_and_survives_a_save() {
+        config::testing::with_scratch_config("icon-theme", |_| {
+            let s = AppearanceSettings::read_from(&Document::parse(""));
+            assert_eq!(s.icon_theme, icons::IconTheme::built_in());
+
+            let doc = Document::parse("theme:\n  colors: nord\n  icons: papirus\n");
+            let s = AppearanceSettings::read_from(&doc);
+            assert_eq!(s.icon_theme.id(), "papirus");
+            assert_eq!(s.color_theme.id(), "nord");
+            let mut saved = Document::parse("");
+            s.write_into(&mut saved);
+            assert_eq!(
+                saved.get_str(&["theme", "icons"]).as_deref(),
+                Some("papirus")
+            );
+
+            let blank = AppearanceSettings::read_from(&Document::parse("theme:\n  icons: \" \"\n"));
+            assert_eq!(blank.icon_theme, icons::IconTheme::built_in());
+
+            let odd = std::path::Path::new(&pathcodec::decode_path("caf%E9"))
+                .as_os_str()
+                .to_os_string();
+            let mut settings = AppearanceSettings::default();
+            settings.icon_theme = icons::IconTheme::load(&odd);
+            let mut written = Document::parse("");
+            settings.write_into(&mut written);
+            let back = AppearanceSettings::read_from(&written);
+            assert_eq!(back.icon_theme.id(), odd.as_os_str());
+        });
+    }
+
+    /// A blank name is the built-in theme, as a blanked wallpaper is none.
+    #[test]
+    fn a_blank_colour_theme_is_the_built_in_one() {
+        let s = AppearanceSettings::read_from(&Document::parse("theme:\n  colors: \"  \"\n"));
+        assert_eq!(s.color_theme, themes::ColorTheme::built_in());
+    }
+
+    /// `watcher()` sees the chosen theme's own file edited in place -- which
+    /// changes the colours without changing a byte of `appearance.yaml`, and
+    /// which a watcher of that file alone reported as nothing.
+    #[test]
+    fn the_appearance_watcher_sees_the_chosen_theme_edited_in_place() {
+        config::testing::with_scratch_config("watch-theme", |root| {
+            install_theme(root, "nord", "colors:\n  base: \"#2e3440\"\n");
+            let mut file = AppearanceFile::load();
+            file.settings.color_theme = themes::ColorTheme::load(std::ffi::OsStr::new("nord"));
+            file.save().unwrap();
+
+            let mut plain = config::Watcher::new(CONFIG_NAME);
+            let mut w = watcher();
+            assert!(
+                plain.poll().is_some() && w.poll().is_some(),
+                "the first look"
+            );
+            assert!(w.poll().is_none(), "nothing has changed");
+
+            install_theme(root, "nord", "colors:\n  base: \"#000000\"\n");
+            assert!(
+                plain.poll().is_none(),
+                "appearance.yaml itself did not change"
+            );
+            let doc = w.poll().expect("the theme changed, so the colours did");
+            let s = AppearanceSettings::read_from(&doc);
+            assert_eq!(Palette::from_settings(&s).base, Color::from_hex(0x000000));
+            assert!(w.poll().is_none(), "reported once");
+
+            // Uninstalled is a change too: the colours fall back.
+            std::fs::remove_dir_all(
+                config::testing::scratch_data_dir(root).join("slateos/themes/nord"),
+            )
+            .unwrap();
+            let doc = w.poll().expect("the theme went away");
+            assert!(
+                AppearanceSettings::read_from(&doc)
+                    .color_theme
+                    .problem()
+                    .is_some()
+            );
+        });
+    }
+
+    // ---- the widget style ----
+
+    /// A theme's controls reach the palette from the settings file and the
+    /// theme's own, as its colours do -- and they are a separate choice: the
+    /// colours stay the built-in ones.
+    #[test]
+    fn a_chosen_widget_style_reaches_the_palette() {
+        config::testing::with_scratch_config("widget-palette", |root| {
+            install_theme(
+                root,
+                "soft",
+                "widget-style:\n  button:\n    radius: 10\n  scrollbar:\n    width: thin\n",
+            );
+            let s =
+                AppearanceSettings::read_from(&Document::parse("theme:\n  widget_style: soft\n"));
+            assert_eq!(s.widget_theme.problem(), None);
+            let p = Palette::from_settings(&s);
+            assert_eq!(p.widget_style.button.radius, 10);
+            assert_eq!(
+                p.widget_style.scrollbar.width,
+                guitk::widget_style::ScrollbarWidth::Thin
+            );
+            // What the theme left out is the built-in theme's.
+            assert_eq!(
+                p.widget_style.field,
+                guitk::widget_style::WidgetStyle::AERO.field
+            );
+            // And the colours are not the theme's business here.
+            assert_eq!(
+                p.roles(),
+                Palette::from_settings(&AppearanceSettings::default()).roles()
+            );
+        });
+    }
+
+    /// The widget style is its own setting: read from `theme.widget_style`,
+    /// written back there, the built-in one when the file names none or a
+    /// blank -- and a theme that cannot be used keeps its name through a save
+    /// and says why, while the built-in controls are drawn.
+    #[test]
+    fn the_widget_style_is_its_own_setting_and_survives_a_save() {
+        config::testing::with_scratch_config("widget-setting", |root| {
+            let none = AppearanceSettings::read_from(&Document::parse(""));
+            assert_eq!(none.widget_theme, themes::WidgetTheme::built_in());
+            let blank =
+                AppearanceSettings::read_from(&Document::parse("theme:\n  widget_style: \" \"\n"));
+            assert_eq!(blank.widget_theme, themes::WidgetTheme::built_in());
+
+            let mut written = Document::new();
+            AppearanceSettings::default().write_into(&mut written);
+            assert_eq!(
+                written.get_str(&["theme", "widget_style"]).as_deref(),
+                Some("aero"),
+                "the key is there to edit"
+            );
+
+            // A colours-only theme cannot give the controls.
+            install_theme(root, "nord", "colors:\n  base: \"#2e3440\"\n");
+            let doc = Document::parse("theme:\n  colors: nord\n  widget_style: nord\n");
+            let s = AppearanceSettings::read_from(&doc);
+            assert_eq!(s.color_theme.problem(), None, "the colours are usable");
+            assert_eq!(s.widget_theme.id(), "nord");
+            assert_eq!(
+                s.widget_theme.style(),
+                guitk::widget_style::WidgetStyle::AERO
+            );
+            assert!(
+                s.widget_theme
+                    .problem()
+                    .is_some_and(|why| why.contains("\"nord\" sets no widget style")),
+                "{:?}",
+                s.widget_theme.problem()
+            );
+            let mut saved = doc.clone();
+            s.write_into(&mut saved);
+            assert_eq!(
+                saved.get_str(&["theme", "widget_style"]).as_deref(),
+                Some("nord")
+            );
+        });
+    }
+
+    /// **High contrast keeps the chosen controls, less what hides**: the
+    /// corners and the pill stay, the gloss and the overlaid scrollbar go.
+    #[test]
+    fn high_contrast_keeps_the_widget_style_less_what_hides() {
+        use guitk::widget_style::{ScrollbarVisibility, WidgetStyle};
+        let mut chosen = WidgetStyle::AERO;
+        chosen.button.radius = 12;
+        chosen.scrollbar.visibility = ScrollbarVisibility::Overlay;
+        let s = AppearanceSettings {
+            widget_theme: themes::WidgetTheme::from_style("soft", chosen),
+            high_contrast: Some(HighContrastScheme::WhiteOnBlack),
+            ..AppearanceSettings::default()
+        };
+        let p = Palette::from_settings(&s);
+        assert_eq!(p.widget_style, chosen.for_high_contrast());
+        assert_eq!(p.widget_style.button.radius, 12);
+        assert!(!p.widget_style.button.gloss);
+        assert_eq!(
+            p.widget_style.scrollbar.visibility,
+            ScrollbarVisibility::Always
+        );
+        // A palette built for high contrast with no settings at all is the
+        // built-in shapes, adjusted the same way.
+        let bare = Palette::high_contrast(
+            Color::rgb(0, 0, 0),
+            Color::rgb(255, 255, 255),
+            Color::rgb(0, 128, 255),
+        );
+        assert_eq!(bare.widget_style, WidgetStyle::AERO.for_high_contrast());
+    }
+
+    /// `watcher()` sees the chosen widget-style theme's file edited in place,
+    /// as it sees a colour theme's -- the controls change without a byte of
+    /// `appearance.yaml` changing.
+    #[test]
+    fn the_appearance_watcher_sees_the_chosen_widget_style_edited_in_place() {
+        config::testing::with_scratch_config("watch-widgets", |root| {
+            install_theme(root, "soft", "widget-style:\n  button:\n    radius: 10\n");
+            let mut file = AppearanceFile::load();
+            file.settings.widget_theme = themes::WidgetTheme::load(std::ffi::OsStr::new("soft"));
+            file.save().unwrap();
+
+            let mut w = watcher();
+            assert!(w.poll().is_some(), "the first look");
+            assert!(w.poll().is_none(), "nothing has changed");
+
+            install_theme(root, "soft", "widget-style:\n  button:\n    radius: 2\n");
+            let doc = w.poll().expect("the theme changed, so the controls did");
+            let s = AppearanceSettings::read_from(&doc);
+            assert_eq!(Palette::from_settings(&s).widget_style.button.radius, 2);
+            assert!(w.poll().is_none(), "reported once");
+        });
+    }
+
+    /// A theme chosen for both axes is one file, and depends on it once: the
+    /// fingerprint is the colours-only one, not that file twice.
+    #[test]
+    fn a_theme_chosen_for_both_axes_is_one_dependency() {
+        config::testing::with_scratch_config("both-axes", |root| {
+            install_theme(
+                root,
+                "nord",
+                "colors:\n  base: \"#2e3440\"\nwidget-style:\n  toggle: checkbox\n",
+            );
+            install_theme(root, "soft", "widget-style:\n  button:\n    radius: 10\n");
+            let colours = Document::parse("theme:\n  colors: nord\n");
+            let both = Document::parse("theme:\n  colors: nord\n  widget_style: nord\n");
+            let two = Document::parse("theme:\n  colors: nord\n  widget_style: soft\n");
+            assert!(!themes::fingerprint(&colours).is_empty());
+            assert_eq!(themes::fingerprint(&both), themes::fingerprint(&colours));
+            assert_ne!(themes::fingerprint(&two), themes::fingerprint(&colours));
+            // The widget theme alone depends on its file too.
+            let widgets = Document::parse("theme:\n  widget_style: soft\n");
+            assert!(!themes::fingerprint(&widgets).is_empty());
+        });
+    }
+
+    // ---- the animation ----
+
+    /// A theme's motion reaches the palette from the settings file and the
+    /// theme's own, at the user's speed -- and it is a separate choice: the
+    /// colours and the controls stay the built-in ones.
+    #[test]
+    fn a_chosen_animation_reaches_the_palette_at_the_users_speed() {
+        use guitk::motion::{Curve, Motion};
+        config::testing::with_scratch_config("animation-palette", |root| {
+            install_theme(
+                root,
+                "springy",
+                "animation:\n  duration-ms: 300\n  easing: spring\n",
+            );
+            for (speed, standard_ms) in [("normal", 300), ("slow", 450), ("fast", 225)] {
+                let s = AppearanceSettings::read_from(&Document::parse(&format!(
+                    "theme:\n  animation: springy\neffects:\n  animation_speed: {speed}\n"
+                )));
+                assert_eq!(s.animation_theme.problem(), None);
+                let p = Palette::from_settings(&s);
+                assert_eq!(p.motion, Motion::new(standard_ms, Curve::Spring), "{speed}");
+                assert_eq!(
+                    p.roles(),
+                    Palette::from_settings(&AppearanceSettings::default()).roles()
+                );
+                assert_eq!(p.widget_style, guitk::widget_style::WidgetStyle::AERO);
+            }
+            let off = AppearanceSettings::read_from(&Document::parse(
+                "theme:\n  animation: springy\neffects:\n  animation_speed: off\n",
+            ));
+            assert!(Palette::from_settings(&off).motion.is_still());
+        });
+        // With nothing chosen, the built-in motion at the normal speed.
+        assert_eq!(
+            Palette::from_settings(&AppearanceSettings::default()).motion,
+            Motion::STANDARD
+        );
+    }
+
+    /// **A still theme is still at every speed** -- and it is not the user
+    /// turning animation off: `animations_enabled` is the user's switch, and
+    /// stays on.
+    #[test]
+    fn a_still_theme_is_still_at_every_speed() {
+        for speed in [
+            AnimationSpeed::Fast,
+            AnimationSpeed::Normal,
+            AnimationSpeed::Slow,
+        ] {
+            let s = AppearanceSettings {
+                animation_theme: themes::AnimationTheme::from_motion(
+                    "calm",
+                    guitk::motion::Motion::STILL,
+                ),
+                animation_speed: speed,
+                ..AppearanceSettings::default()
+            };
+            assert!(Palette::from_settings(&s).motion.is_still(), "{speed:?}");
+            assert!(s.animations_enabled(), "{speed:?}");
+        }
+    }
+
+    /// The animation is its own setting: read from `theme.animation`, written
+    /// back there, the built-in one when the file names none or a blank --
+    /// and a theme that cannot be used keeps its name through a save and says
+    /// why, while the built-in motion is used.
+    #[test]
+    fn the_animation_is_its_own_setting_and_survives_a_save() {
+        config::testing::with_scratch_config("animation-setting", |root| {
+            let none = AppearanceSettings::read_from(&Document::parse(""));
+            assert_eq!(none.animation_theme, themes::AnimationTheme::built_in());
+            let blank =
+                AppearanceSettings::read_from(&Document::parse("theme:\n  animation: \" \"\n"));
+            assert_eq!(blank.animation_theme, themes::AnimationTheme::built_in());
+
+            let mut written = Document::new();
+            AppearanceSettings::default().write_into(&mut written);
+            assert_eq!(
+                written.get_str(&["theme", "animation"]).as_deref(),
+                Some("aero"),
+                "the key is there to edit"
+            );
+
+            // A colours-only theme cannot give the motion.
+            install_theme(root, "nord", "colors:\n  base: \"#2e3440\"\n");
+            let doc = Document::parse("theme:\n  colors: nord\n  animation: nord\n");
+            let s = AppearanceSettings::read_from(&doc);
+            assert_eq!(s.color_theme.problem(), None, "the colours are usable");
+            assert_eq!(s.animation_theme.id(), "nord");
+            assert_eq!(
+                Palette::from_settings(&s).motion,
+                guitk::motion::Motion::STANDARD
+            );
+            assert!(
+                s.animation_theme
+                    .problem()
+                    .is_some_and(|why| why.contains("\"nord\" sets no animation")),
+                "{:?}",
+                s.animation_theme.problem()
+            );
+            let mut saved = doc.clone();
+            s.write_into(&mut saved);
+            assert_eq!(
+                saved.get_str(&["theme", "animation"]).as_deref(),
+                Some("nord")
+            );
+        });
+    }
+
+    /// **High contrast keeps the motion, whole**: it is about telling things
+    /// apart, and how fast they move does not change that.
+    #[test]
+    fn high_contrast_keeps_the_motion() {
+        use guitk::motion::{Curve, Motion};
+        let chosen = Motion::new(400, Curve::Linear);
+        let s = AppearanceSettings {
+            animation_theme: themes::AnimationTheme::from_motion("slowish", chosen),
+            high_contrast: Some(HighContrastScheme::WhiteOnBlack),
+            ..AppearanceSettings::default()
+        };
+        assert_eq!(Palette::from_settings(&s).motion, chosen);
+        let bare = Palette::high_contrast(
+            Color::rgb(0, 0, 0),
+            Color::rgb(255, 255, 255),
+            Color::rgb(0, 128, 255),
+        );
+        assert_eq!(bare.motion, Motion::STANDARD);
+    }
+
+    /// `watcher()` sees the chosen animation theme's file edited in place, as
+    /// it sees a colour theme's -- the motion changes without a byte of
+    /// `appearance.yaml` changing.
+    #[test]
+    fn the_appearance_watcher_sees_the_chosen_animation_edited_in_place() {
+        config::testing::with_scratch_config("watch-animation", |root| {
+            install_theme(root, "springy", "animation:\n  easing: spring\n");
+            let mut file = AppearanceFile::load();
+            file.settings.animation_theme =
+                themes::AnimationTheme::load(std::ffi::OsStr::new("springy"));
+            file.save().unwrap();
+
+            let mut w = watcher();
+            assert!(w.poll().is_some(), "the first look");
+            assert!(w.poll().is_none(), "nothing has changed");
+
+            install_theme(root, "springy", "animation:\n  enabled: false\n");
+            let doc = w.poll().expect("the theme changed, so the motion did");
+            let s = AppearanceSettings::read_from(&doc);
+            assert!(Palette::from_settings(&s).motion.is_still());
+            assert!(w.poll().is_none(), "reported once");
+        });
+    }
+
+    /// A theme chosen for every axis is one file, and depends on it once; the
+    /// animation theme alone depends on its file too.
+    #[test]
+    fn a_theme_chosen_for_every_axis_is_one_dependency() {
+        config::testing::with_scratch_config("every-axis", |root| {
+            install_theme(
+                root,
+                "nord",
+                "colors:\n  base: \"#2e3440\"\nwidget-style:\n  toggle: checkbox\n\
+                 animation:\n  easing: linear\n",
+            );
+            install_theme(root, "calm", "animation:\n  enabled: false\n");
+            let colours = Document::parse("theme:\n  colors: nord\n");
+            let all = Document::parse(
+                "theme:\n  colors: nord\n  widget_style: nord\n  animation: nord\n",
+            );
+            let other = Document::parse("theme:\n  colors: nord\n  animation: calm\n");
+            assert_eq!(themes::fingerprint(&all), themes::fingerprint(&colours));
+            assert_ne!(themes::fingerprint(&other), themes::fingerprint(&colours));
+            let alone = Document::parse("theme:\n  animation: calm\n");
+            assert!(!themes::fingerprint(&alone).is_empty());
+        });
+    }
+
+    /// The built-in theme depends on no file, so its fingerprint is empty and
+    /// nothing about a theme directory can make its watcher report.
+    #[test]
+    fn the_built_in_theme_depends_on_nothing() {
+        let mut doc = Document::new();
+        AppearanceSettings::default().write_into(&mut doc);
+        assert!(themes::fingerprint(&doc).is_empty());
+        assert!(themes::fingerprint(&Document::new()).is_empty());
+    }
+
+    // ---- the automatic mode ----
+
+    /// 2026-09-25 at 12:00 UTC, and at 23:00 UTC.
+    const NOON: u64 = 1_790_337_600;
+    const NIGHT: u64 = NOON + 11 * 3600;
+
+    /// A scratch user whose clock is in UTC, so the time of day in these
+    /// tests is the same on every machine that runs them.
+    fn in_utc<T>(tag: &str, body: impl FnOnce(&std::path::Path) -> T) -> T {
+        config::testing::with_scratch_config(tag, |root| {
+            let mut clock = datetimesettings::DateTimeFile::load();
+            assert!(clock.settings.set_zone(Some("UTC")));
+            clock.save().unwrap();
+            body(root)
+        })
+    }
+
+    fn automatic() -> Document {
+        Document::parse("theme:\n  mode: system\n")
+    }
+
+    /// `System (Auto)` is light in its hours and dark outside them -- and says
+    /// so to everything drawn from it, the palette and the accent included.
+    #[test]
+    fn the_automatic_mode_follows_its_hours() {
+        in_utc("auto-hours", |_| {
+            let day = datetimesettings::clock::with_time(NOON, || {
+                AppearanceSettings::read_from(&automatic())
+            });
+            assert!(day.auto_is_light && day.is_light());
+            assert!(Palette::from_settings(&day).light);
+            assert_eq!(day.effective_accent(), day.accent_color.color_light());
+
+            let night = datetimesettings::clock::with_time(NIGHT, || {
+                AppearanceSettings::read_from(&automatic())
+            });
+            assert!(!night.auto_is_light && !night.is_light());
+            assert!(!Palette::from_settings(&night).light);
+        });
+    }
+
+    /// Only the automatic mode reads the clock: in the other two a reading at
+    /// noon and one at midnight are the same settings.
+    #[test]
+    fn the_other_modes_do_not_change_with_the_time_of_day() {
+        in_utc("auto-fixed-modes", |_| {
+            for mode in ["light", "dark"] {
+                let doc = Document::parse(&format!("theme:\n  mode: {mode}\n"));
+                let at = |t| {
+                    datetimesettings::clock::with_time(t, || AppearanceSettings::read_from(&doc))
+                };
+                assert_eq!(at(NOON), at(NIGHT), "{mode}");
+            }
+        });
+    }
+
+    /// The hours are the user's to set, both ends or neither, and are
+    /// written back in the spelling they were read in.
+    #[test]
+    fn the_automatic_modes_hours_round_trip() {
+        let doc = Document::parse(
+            "theme:\n  mode: system\n  auto:\n    light_from: \"06:30\"\n    dark_from: \"20:15\"\n",
+        );
+        let s = AppearanceSettings::read_from(&doc);
+        assert_eq!(
+            s.auto_light_hours,
+            DailyWindow::from_hm(6, 30, 20, 15).unwrap()
+        );
+        let mut out = Document::new();
+        s.write_into(&mut out);
+        assert_eq!(
+            out.get_str(&["theme", "auto", "light_from"]).as_deref(),
+            Some("06:30")
+        );
+        assert_eq!(
+            out.get_str(&["theme", "auto", "dark_from"]).as_deref(),
+            Some("20:15")
+        );
+
+        let one_end = Document::parse("theme:\n  auto:\n    light_from: \"05:00\"\n");
+        assert_eq!(
+            AppearanceSettings::read_from(&one_end).auto_light_hours,
+            DEFAULT_AUTO_LIGHT_HOURS,
+            "a start without an end is a window nobody chose"
+        );
+    }
+
+    /// A schedule of a day picture and a night picture.
+    fn day_and_night() -> AppearanceSettings {
+        AppearanceSettings {
+            wallpaper_schedule: read_wallpaper_schedule(
+                &[
+                    "18:00 /pics/night.jpg".to_string(),
+                    "06:00 /pics/day.jpg".to_string(),
+                ],
+                false,
+            ),
+            ..AppearanceSettings::default()
+        }
+    }
+
+    /// The picture up at a time is the latest entry not after it, and before
+    /// the first entry of the day it is the last, still up from the evening.
+    #[test]
+    fn the_scheduled_picture_is_the_latest_one_started() {
+        let utc = datetimesettings::Tz::utc();
+        let s = day_and_night();
+        let at = |h: u64, m: u64| NOON - 12 * 3600 + h * 3600 + m * 60;
+        let pic = |t| s.scheduled_wallpaper_at(t, utc).map(Path::to_path_buf);
+        assert_eq!(
+            pic(at(3, 0)),
+            Some(PathBuf::from("/pics/night.jpg")),
+            "03:00 is still night"
+        );
+        assert_eq!(
+            pic(at(6, 0)),
+            Some(PathBuf::from("/pics/day.jpg")),
+            "06:00 on the dot"
+        );
+        assert_eq!(pic(at(12, 0)), Some(PathBuf::from("/pics/day.jpg")));
+        assert_eq!(pic(at(17, 59)), Some(PathBuf::from("/pics/day.jpg")));
+        assert_eq!(pic(at(18, 0)), Some(PathBuf::from("/pics/night.jpg")));
+        assert_eq!(pic(at(23, 59)), Some(PathBuf::from("/pics/night.jpg")));
+        assert_eq!(
+            AppearanceSettings::default().scheduled_wallpaper_at(NOON, utc),
+            None
+        );
+    }
+
+    /// The next change is the next entry's time, round the end of the day;
+    /// a schedule that never changes has none; the seconds already gone in
+    /// this minute come off, and it is never zero.
+    #[test]
+    fn the_schedule_says_when_it_next_changes() {
+        let utc = datetimesettings::Tz::utc();
+        let s = day_and_night();
+        assert_eq!(
+            s.next_wallpaper_change(NOON, utc),
+            Some(Duration::from_hours(6))
+        );
+        let eight_pm = NOON + 8 * 3600;
+        assert_eq!(
+            s.next_wallpaper_change(eight_pm, utc),
+            Some(Duration::from_hours(10))
+        );
+        assert_eq!(
+            s.next_wallpaper_change(NOON + 20, utc),
+            Some(Duration::from_secs(6 * 3600 - 20))
+        );
+        let one = AppearanceSettings {
+            wallpaper_schedule: read_wallpaper_schedule(&["09:00 /a.png".to_string()], false),
+            ..AppearanceSettings::default()
+        };
+        assert_eq!(
+            one.next_wallpaper_change(NOON, utc),
+            None,
+            "one picture never changes"
+        );
+        assert_eq!(
+            one.scheduled_wallpaper_at(NOON, utc),
+            Some(Path::new("/a.png")),
+            "and is up all day"
+        );
+        assert_eq!(
+            AppearanceSettings::default().next_wallpaper_change(NOON, utc),
+            None
+        );
+        // In a zone ahead of UTC the edge comes that much sooner: 12:00 UTC is
+        // 21:00 in Tokyo, night, and day again at 06:00 -- nine hours on.
+        let tokyo = datetimesettings::zone("Asia/Tokyo").unwrap().rule;
+        assert_eq!(
+            s.next_wallpaper_change(NOON, tokyo),
+            Some(Duration::from_hours(9))
+        );
+        assert_eq!(
+            s.scheduled_wallpaper_at(NOON, tokyo),
+            Some(Path::new("/pics/night.jpg"))
+        );
+    }
+
+    /// A line typed wrong costs that line; a time given twice keeps the later
+    /// line; the result is in time order.
+    #[test]
+    fn a_schedule_line_typed_wrong_costs_only_that_line() {
+        let lines: Vec<String> = [
+            "",
+            "nonsense",
+            "25:00 /late.png",
+            "07:00",
+            "07:00    ",
+            "12:00 /noon-first.png",
+            "08:15 /morning.png",
+            "12:00 /noon-second.png",
+        ]
+        .map(String::from)
+        .to_vec();
+        let read = read_wallpaper_schedule(&lines, false);
+        let got: Vec<(String, PathBuf)> = read
+            .iter()
+            .map(|e| (e.from.to_string(), e.image.clone()))
+            .collect();
+        assert_eq!(
+            got,
+            vec![
+                ("08:15".to_string(), PathBuf::from("/morning.png")),
+                ("12:00".to_string(), PathBuf::from("/noon-second.png")),
+            ]
+        );
+    }
+
+    /// The next edge, for the shell to sleep until: the evening one just
+    /// before 19:00, the morning one just after, none outside the automatic
+    /// mode, and never a timer of no length.
+    #[test]
+    fn the_next_change_is_the_next_edge_of_the_hours() {
+        let utc = datetimesettings::Tz::utc();
+        let s = AppearanceSettings {
+            theme_mode: ThemeMode::System,
+            ..AppearanceSettings::default()
+        };
+        let evening = NOON + 7 * 3600; // 19:00:00
+        assert_eq!(
+            s.next_auto_change(evening - 30, utc),
+            Some(Duration::from_secs(30))
+        );
+        assert_eq!(
+            s.next_auto_change(evening, utc),
+            Some(Duration::from_hours(12))
+        );
+        assert_eq!(
+            s.next_auto_change(evening + 59, utc),
+            Some(Duration::from_secs(12 * 3600 - 59))
+        );
+        let dark = AppearanceSettings::default();
+        assert_eq!(dark.next_auto_change(NOON, utc), None);
+        // In a zone ahead of UTC the edge comes that much sooner.
+        let tokyo = datetimesettings::zone("Asia/Tokyo").unwrap().rule;
+        // 12:00 UTC is 21:00 in Tokyo: dark, and light again at 07:00, ten
+        // hours on.
+        assert_eq!(
+            s.next_auto_change(NOON, tokyo),
+            Some(Duration::from_hours(10))
+        );
+        assert!(!s.auto_light_at(NOON, tokyo));
+    }
+
+    /// The watcher reports the edge though `appearance.yaml` did not change:
+    /// its fingerprint includes the phase.
+    #[test]
+    fn the_appearance_watcher_sees_the_automatic_modes_edge() {
+        in_utc("auto-watch", |_| {
+            let mut file = AppearanceFile::load();
+            file.settings.theme_mode = ThemeMode::System;
+            file.save().unwrap();
+            let mut w = watcher();
+            let before = NOON + 7 * 3600 - 60; // 18:59
+            datetimesettings::clock::with_time(before, || {
+                let doc = w.poll().expect("the first look");
+                assert!(AppearanceSettings::read_from(&doc).is_light());
+                assert!(w.poll().is_none(), "nothing has changed");
+            });
+            datetimesettings::clock::with_time(before + 120, || {
+                let doc = w.poll().expect("the edge passed");
+                assert!(!AppearanceSettings::read_from(&doc).is_light());
+                assert!(w.poll().is_none(), "reported once");
+            });
+        });
     }
 
     #[test]
     fn test_config_round_trips_every_enum_variant() {
         // A typo in one `yaml_name` arm would otherwise only show up as one
         // user's setting quietly resetting itself.
-        let mut settings = AppearanceSettings::default();
-        for accent in AccentColor::presets()
-            .iter()
-            .copied()
-            .chain([AccentColor::Custom])
-        {
-            settings.accent_color = accent;
-            for theme in [ThemeMode::Dark, ThemeMode::Light, ThemeMode::System] {
-                settings.theme_mode = theme;
-                let mut doc = Document::new();
-                settings.write_into(&mut doc);
-                let reread = AppearanceSettings::read_from(&Document::parse(&doc.to_text()));
-                assert_eq!(reread.accent_color, accent);
-                assert_eq!(reread.theme_mode, theme);
-            }
-        }
-        for (subpixel, corners, taskbar, cursor, icon, speed, transparency, scheme) in [
-            (
-                SubpixelMode::None,
-                WindowCorners::Square,
-                TaskbarStyle::Solid,
-                CursorSize::Small,
-                IconSize::Small,
-                AnimationSpeed::Off,
-                TransparencyLevel::Off,
-                CursorScheme::Default,
-            ),
-            (
-                SubpixelMode::Rgb,
-                WindowCorners::Subtle,
-                TaskbarStyle::Translucent,
-                CursorSize::Normal,
-                IconSize::Medium,
-                AnimationSpeed::Fast,
-                TransparencyLevel::Subtle,
-                CursorScheme::Inverted,
-            ),
-            (
-                SubpixelMode::Bgr,
-                WindowCorners::Rounded,
-                TaskbarStyle::Transparent,
-                CursorSize::Large,
-                IconSize::Large,
-                AnimationSpeed::Normal,
-                TransparencyLevel::Moderate,
-                CursorScheme::AccentColored,
-            ),
-            (
-                SubpixelMode::VRgb,
-                WindowCorners::ExtraRounded,
-                TaskbarStyle::Solid,
-                CursorSize::ExtraLarge,
-                IconSize::ExtraLarge,
-                AnimationSpeed::Slow,
-                TransparencyLevel::Full,
-                CursorScheme::Default,
-            ),
-            (
-                SubpixelMode::VBgr,
-                WindowCorners::Square,
-                TaskbarStyle::Translucent,
-                CursorSize::Small,
-                IconSize::Small,
-                AnimationSpeed::Off,
-                TransparencyLevel::Off,
-                CursorScheme::Inverted,
-            ),
-        ] {
-            settings.fonts.subpixel = subpixel;
-            settings.window_corners = corners;
-            settings.taskbar_style = taskbar;
-            settings.cursor_size = cursor;
-            settings.icon_size = icon;
-            settings.animation_speed = speed;
-            settings.transparency = transparency;
-            settings.cursor_scheme = scheme;
-            let mut doc = Document::new();
-            settings.write_into(&mut doc);
-            let reread = AppearanceSettings::read_from(&Document::parse(&doc.to_text()));
-            assert_eq!(reread, settings, "round trip of {settings:?}");
-        }
+        //
+        // In UTC at a fixed hour, because the first loop leaves the mode on
+        // `System (Auto)`, whose `auto_is_light` is not stored: it is worked
+        // out from the clock as the file is read. Unpinned, this failed every
+        // day from 07:00 to 19:00 in the host's zone -- it was written at
+        // night.
+        in_utc("round-trip-enums", |_| {
+            datetimesettings::clock::with_time(NIGHT, || {
+                let mut settings = AppearanceSettings::default();
+                for accent in AccentColor::presets()
+                    .iter()
+                    .copied()
+                    .chain([AccentColor::Custom])
+                {
+                    settings.accent_color = accent;
+                    for theme in [ThemeMode::Dark, ThemeMode::Light, ThemeMode::System] {
+                        settings.theme_mode = theme;
+                        let mut doc = Document::new();
+                        settings.write_into(&mut doc);
+                        let reread =
+                            AppearanceSettings::read_from(&Document::parse(&doc.to_text()));
+                        assert_eq!(reread.accent_color, accent);
+                        assert_eq!(reread.theme_mode, theme);
+                    }
+                }
+                for (subpixel, corners, taskbar, cursor, icon, speed, transparency, scheme) in [
+                    (
+                        SubpixelMode::None,
+                        WindowCorners::Square,
+                        TaskbarStyle::Solid,
+                        CursorSize::Small,
+                        IconSize::Small,
+                        AnimationSpeed::Off,
+                        TransparencyLevel::Off,
+                        CursorScheme::Default,
+                    ),
+                    (
+                        SubpixelMode::Rgb,
+                        WindowCorners::Subtle,
+                        TaskbarStyle::Translucent,
+                        CursorSize::Normal,
+                        IconSize::Medium,
+                        AnimationSpeed::Fast,
+                        TransparencyLevel::Subtle,
+                        CursorScheme::Inverted,
+                    ),
+                    (
+                        SubpixelMode::Bgr,
+                        WindowCorners::Rounded,
+                        TaskbarStyle::Transparent,
+                        CursorSize::Large,
+                        IconSize::Large,
+                        AnimationSpeed::Normal,
+                        TransparencyLevel::Moderate,
+                        CursorScheme::AccentColored,
+                    ),
+                    (
+                        SubpixelMode::VRgb,
+                        WindowCorners::ExtraRounded,
+                        TaskbarStyle::Solid,
+                        CursorSize::ExtraLarge,
+                        IconSize::ExtraLarge,
+                        AnimationSpeed::Slow,
+                        TransparencyLevel::Full,
+                        CursorScheme::Default,
+                    ),
+                    (
+                        SubpixelMode::VBgr,
+                        WindowCorners::Square,
+                        TaskbarStyle::Translucent,
+                        CursorSize::Small,
+                        IconSize::Small,
+                        AnimationSpeed::Off,
+                        TransparencyLevel::Off,
+                        CursorScheme::Inverted,
+                    ),
+                ] {
+                    settings.fonts.subpixel = subpixel;
+                    settings.window_corners = corners;
+                    settings.taskbar_style = taskbar;
+                    settings.cursor_size = cursor;
+                    settings.icon_size = icon;
+                    settings.animation_speed = speed;
+                    settings.transparency = transparency;
+                    settings.cursor_scheme = scheme;
+                    let mut doc = Document::new();
+                    settings.write_into(&mut doc);
+                    let reread = AppearanceSettings::read_from(&Document::parse(&doc.to_text()));
+                    assert_eq!(reread, settings, "round trip of {settings:?}");
+                }
+            });
+        });
     }
 
     #[test]
@@ -2985,19 +4594,22 @@ mod tests {
 
     #[test]
     fn test_config_colors_use_css_hex() {
-        assert_eq!(color_to_hex(Color::rgb(0x89, 0xB4, 0xFA)), "#89b4fa");
-        assert_eq!(color_to_hex(Color::rgba(1, 2, 3, 4)), "#01020304");
+        assert_eq!(Color::hex_text(Color::rgb(0x89, 0xB4, 0xFA)), "#89b4fa");
+        assert_eq!(Color::hex_text(Color::rgba(1, 2, 3, 4)), "#01020304");
         assert_eq!(
-            color_from_hex("#89b4fa"),
+            Color::from_hex_text("#89b4fa"),
             Some(Color::rgb(0x89, 0xB4, 0xFA))
         );
         assert_eq!(
-            color_from_hex("#89B4FA"),
+            Color::from_hex_text("#89B4FA"),
             Some(Color::rgb(0x89, 0xB4, 0xFA))
         );
-        assert_eq!(color_from_hex("#01020304"), Some(Color::rgba(1, 2, 3, 4)));
+        assert_eq!(
+            Color::from_hex_text("#01020304"),
+            Some(Color::rgba(1, 2, 3, 4))
+        );
         for bad in ["89b4fa", "#89b4f", "#gggggg", "#", "", "#89b4fa00ff"] {
-            assert_eq!(color_from_hex(bad), None, "{bad} should not parse");
+            assert_eq!(Color::from_hex_text(bad), None, "{bad} should not parse");
         }
     }
 
@@ -4922,6 +6534,72 @@ mod tests {
         );
     }
 
+    /// "Too close to see one on the other" (`design-decisions.md` §1424)
+    /// needs both the light and the colour between them to be too small. A
+    /// shade off the accent is; a different hue of the same lightness is not,
+    /// and neither is anything far apart in lightness.
+    #[test]
+    fn hard_to_tell_apart_needs_both_the_light_and_the_colour_to_be_close() {
+        let teal = Color::rgb(0x00, 0x68, 0x8B);
+        let near_teal = Color::rgb(0x00, 0x72, 0x96);
+        assert!(hard_to_tell_apart(teal, near_teal));
+        assert!(
+            hard_to_tell_apart(near_teal, teal),
+            "the answer depends on the order"
+        );
+        assert!(hard_to_tell_apart(teal, teal));
+
+        let red = Color::rgb(0xD2, 0x0F, 0x39);
+        let blue = Color::rgb(0x1E, 0x66, 0xF5);
+        assert!(
+            contrast_ratio(red, blue) < NON_TEXT_CONTRAST_FLOOR,
+            "fixture: the lightness alone must not separate these two"
+        );
+        assert!(
+            !hard_to_tell_apart(red, blue),
+            "a red dot on a blue disc is seen by its hue"
+        );
+
+        let dark = Color::rgb(0x00, 0x2A, 0x38);
+        let pale = Color::rgb(0x9C, 0xE4, 0xFF);
+        assert!(
+            !hard_to_tell_apart(dark, pale),
+            "one hue, far apart in light"
+        );
+        assert!(!hard_to_tell_apart(
+            Color::rgb(0, 0, 0),
+            Color::rgb(255, 255, 255)
+        ));
+
+        // The light half deciding on its own: two greys just past 3:1 are
+        // seen by their lightness, though as colours they are close.
+        let (grey, lighter) = (Color::rgb(64, 64, 64), Color::rgb(140, 140, 140));
+        assert!(contrast_ratio(grey, lighter) >= NON_TEXT_CONTRAST_FLOOR);
+        assert!(perceptual_difference(grey, lighter) < DISTINCT_COLOUR_DIFFERENCE);
+        assert!(
+            !hard_to_tell_apart(grey, lighter),
+            "3:1 apart in light is seen"
+        );
+
+        // Neighbouring hues of nearly one lightness: a lavender dot on a blue
+        // disc is the calendar's case in another colour.
+        let lavender = Color::rgb(0x72, 0x87, 0xFD);
+        assert!(hard_to_tell_apart(blue, lavender));
+    }
+
+    /// The colour difference is the CIE 1976 one: nothing between a colour and
+    /// itself, the same both ways, and black to white the whole lightness
+    /// scale, 100.
+    #[test]
+    fn the_perceptual_difference_is_the_cielab_distance() {
+        let (black, white) = (Color::rgb(0, 0, 0), Color::rgb(255, 255, 255));
+        assert!(perceptual_difference(white, white) < 1e-3);
+        let across = perceptual_difference(black, white);
+        assert!((across - 100.0).abs() < 0.5, "black to white is {across}");
+        let (x, y) = (Color::rgb(200, 30, 90), Color::rgb(20, 180, 60));
+        assert!((perceptual_difference(x, y) - perceptual_difference(y, x)).abs() < 1e-4);
+    }
+
     /// An ink that already clears the floor is returned untouched.
     ///
     /// Otherwise every palette would drift by a rounding step on every
@@ -5122,5 +6800,215 @@ mod tests {
         s.caret_width_scale = 0.01;
         s.validate();
         assert_eq!(s.caret_width_scale, 0.5);
+    }
+
+    // ---- each look keeps its own colours (§1421) ----
+
+    fn colours(accent_color: AccentColor, custom_accent: Color) -> LookColours {
+        LookColours {
+            accent_color,
+            custom_accent,
+        }
+    }
+
+    /// **Changing the look brings back the colours kept for it**, and keeps
+    /// the ones being left for when that look comes back: an accent chosen
+    /// under one look never lands on the other.
+    #[test]
+    fn each_look_keeps_its_own_accent() {
+        let mut s = AppearanceSettings::default();
+        assert_eq!(s.surface_style, SurfaceStyle::Borders);
+        s.accent_color = AccentColor::Red;
+
+        s.set_surface_style(SurfaceStyle::Cards);
+        assert_eq!(
+            s.accent_color,
+            AccentColor::Blue,
+            "the outlined look's accent was carried onto the filled one"
+        );
+        s.accent_color = AccentColor::Teal;
+
+        s.set_surface_style(SurfaceStyle::Borders);
+        assert_eq!(
+            s.accent_color,
+            AccentColor::Red,
+            "the outlined look lost its accent"
+        );
+        s.set_surface_style(SurfaceStyle::Cards);
+        assert_eq!(
+            s.accent_color,
+            AccentColor::Teal,
+            "the filled look lost its accent"
+        );
+    }
+
+    /// A custom accent travels with its look, colour and all.
+    #[test]
+    fn a_custom_accent_is_kept_with_its_look() {
+        let chosen = Color::rgb(0x12, 0x34, 0x56);
+        let mut s = AppearanceSettings::default();
+        s.set_surface_style(SurfaceStyle::Cards);
+        s.accent_color = AccentColor::Custom;
+        s.custom_accent = chosen;
+        s.set_surface_style(SurfaceStyle::Borders);
+        assert_eq!(s.colours(), LookColours::default());
+        s.set_surface_style(SurfaceStyle::Cards);
+        assert_eq!(s.colours(), colours(AccentColor::Custom, chosen));
+    }
+
+    /// Choosing the look in use again is not a change, so nothing is traded
+    /// over: a second click on the selected look must not put the other look's
+    /// accent on screen.
+    #[test]
+    fn choosing_the_look_in_use_again_changes_no_colour() {
+        let mut s = AppearanceSettings::default();
+        s.accent_color = AccentColor::Red;
+        s.other_look_colours.accent_color = AccentColor::Teal;
+        s.set_surface_style(SurfaceStyle::Borders);
+        assert_eq!(s.accent_color, AccentColor::Red);
+        assert_eq!(s.other_look_colours.accent_color, AccentColor::Teal);
+    }
+
+    /// Either look's colours can be read and set without changing the look --
+    /// what a colour page that edits the look not in use needs -- and setting
+    /// the other look's leaves the screen alone.
+    #[test]
+    fn either_looks_colours_can_be_set_without_changing_the_look() {
+        let mut s = AppearanceSettings::default();
+        s.set_colours_for(SurfaceStyle::Cards, colours(AccentColor::Green, BLUE));
+        assert_eq!(s.surface_style, SurfaceStyle::Borders);
+        assert_eq!(s.accent_color, AccentColor::Blue, "the look in use changed");
+        assert_eq!(
+            s.colours_for(SurfaceStyle::Cards).accent_color,
+            AccentColor::Green
+        );
+
+        s.set_colours_for(SurfaceStyle::Borders, colours(AccentColor::Mauve, BLUE));
+        assert_eq!(s.accent_color, AccentColor::Mauve);
+        assert_eq!(s.colours_for(SurfaceStyle::Borders), s.colours());
+        assert_eq!(
+            s.colours_for(SurfaceStyle::Cards).accent_color,
+            AccentColor::Green
+        );
+    }
+
+    /// The palette draws the accent of the look in use -- the same palette a
+    /// settings file naming that accent directly would give.
+    #[test]
+    fn the_palette_draws_the_accent_of_the_look_in_use() {
+        let mut s = AppearanceSettings::default();
+        s.accent_color = AccentColor::Red;
+        s.set_colours_for(SurfaceStyle::Cards, colours(AccentColor::Green, BLUE));
+        let outlined = Palette::from_settings(&s).accent;
+        s.set_surface_style(SurfaceStyle::Cards);
+        let filled = Palette::from_settings(&s).accent;
+
+        let direct = |surface_style, accent_color| {
+            Palette::from_settings(&AppearanceSettings {
+                surface_style,
+                accent_color,
+                ..AppearanceSettings::default()
+            })
+            .accent
+        };
+        assert_eq!(outlined, direct(SurfaceStyle::Borders, AccentColor::Red));
+        assert_eq!(filled, direct(SurfaceStyle::Cards, AccentColor::Green));
+        assert_ne!(outlined, filled);
+    }
+
+    /// **Both looks' colours survive the file, whichever look is in use.**
+    #[test]
+    fn both_looks_colours_survive_the_file_whichever_is_in_use() {
+        let custom = Color::rgb(0x12, 0x34, 0x56);
+        for look in [SurfaceStyle::Borders, SurfaceStyle::Cards] {
+            let mut s = AppearanceSettings::default();
+            s.set_colours_for(SurfaceStyle::Borders, colours(AccentColor::Custom, custom));
+            s.set_colours_for(SurfaceStyle::Cards, colours(AccentColor::Teal, BLUE));
+            s.set_surface_style(look);
+
+            let mut doc = Document::new();
+            s.write_into(&mut doc);
+            let back = AppearanceSettings::read_from(&doc);
+            assert_eq!(back.surface_style, look);
+            for each in [SurfaceStyle::Borders, SurfaceStyle::Cards] {
+                assert_eq!(
+                    back.colours_for(each),
+                    s.colours_for(each),
+                    "{each:?}'s colours did not survive with {look:?} in use"
+                );
+            }
+        }
+    }
+
+    /// The file keeps the colours by look, not by which look is in use: the
+    /// outlined look's accent is where the one accent always was, so a file
+    /// read by a desktop from before this change still shows the default
+    /// look's colours.
+    #[test]
+    fn the_outlined_looks_accent_is_where_the_one_accent_always_was() {
+        let mut s = AppearanceSettings::default();
+        s.accent_color = AccentColor::Red;
+        s.set_surface_style(SurfaceStyle::Cards);
+        s.accent_color = AccentColor::Teal;
+
+        let mut doc = Document::new();
+        s.write_into(&mut doc);
+        assert_eq!(
+            doc.get_str(&["theme", "accent"]).as_deref(),
+            Some(AccentColor::Red.yaml_name())
+        );
+        assert_eq!(
+            doc.get_str(&["theme", "cards", "accent"]).as_deref(),
+            Some(AccentColor::Teal.yaml_name())
+        );
+    }
+
+    /// **A file written before each look kept its own colours** reads as its
+    /// one accent for both looks, so nobody's choice is lost -- whichever look
+    /// the file has in use.
+    #[test]
+    fn a_file_with_one_accent_gives_it_to_both_looks() {
+        for look in ["borders", "cards"] {
+            let doc = Document::parse(&format!(
+                "theme:\n  surface_style: {look}\n  accent: custom\n  custom_accent: '#123456'\n"
+            ));
+            let s = AppearanceSettings::read_from(&doc);
+            let one = colours(AccentColor::Custom, Color::rgb(0x12, 0x34, 0x56));
+            assert_eq!(s.colours(), one, "{look}: the accent in use");
+            assert_eq!(
+                s.colours_for(SurfaceStyle::Borders),
+                one,
+                "{look}: outlined"
+            );
+            assert_eq!(s.colours_for(SurfaceStyle::Cards), one, "{look}: filled");
+        }
+    }
+
+    /// What the filled look does not say it takes from the outlined one -- the
+    /// same rule as a file with no filled section at all, applied per value.
+    #[test]
+    fn what_the_filled_look_does_not_say_it_takes_from_the_outlined_one() {
+        let doc = Document::parse(
+            "theme:\n  accent: custom\n  custom_accent: '#123456'\n  cards:\n    accent: teal\n",
+        );
+        let s = AppearanceSettings::read_from(&doc);
+        assert_eq!(
+            s.colours_for(SurfaceStyle::Cards),
+            colours(AccentColor::Teal, Color::rgb(0x12, 0x34, 0x56))
+        );
+        assert_eq!(
+            s.colours_for(SurfaceStyle::Borders).accent_color,
+            AccentColor::Custom
+        );
+    }
+
+    /// The filled look's section is named by the look's own spelling, so the
+    /// two cannot come apart.
+    #[test]
+    fn the_filled_looks_section_is_the_looks_own_spelling() {
+        assert_eq!(
+            FILLED_LOOK_KEY,
+            surface_style_yaml_name(SurfaceStyle::Cards)
+        );
     }
 }

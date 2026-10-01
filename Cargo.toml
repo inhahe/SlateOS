@@ -4,6 +4,10 @@ members = [
     "kernel",
     "apps/*",
     "gui/*",
+    # Lane F's video codecs, each its own crate under `gui/video/`, which
+    # `gui/*` cannot reach and which is itself excluded below. The first is
+    # rav1d, the AV1 decoder, vendored (`gui/video/rav1d/VENDORED.md`).
+    "gui/video/rav1d",
     "init/*",
     "net/*",
     "userspace/*",
@@ -235,6 +239,21 @@ members = [
     # hash, so the password-hash work in C-Q5 has a place to find it.
     "blake2",
     "sm3",
+    # The plain API over the vendored RustCrypto crates beside it:
+    # XChaCha20-Poly1305 and Argon2id, for everything that keeps a secret at
+    # rest (design-decisions.md §539 -- primitives are ported, not written).
+    # A member, so it takes the workspace lints and its published-vector
+    # tests run with the rest; the vendored crates themselves are excluded
+    # below. no_std + alloc, so kept out of `default-members` like `yamldoc`.
+    "rustcrypto/seal",
+    # The backup service (design-decisions.md §1426; lane E's
+    # requests/e-db-the-backup-service-runs-backup-run-due.md). A `std`
+    # daemon, so a member although `services` is excluded below: that
+    # exclusion is for the bare-metal services, each with its own target and
+    # lockfile, and a member named explicitly inside an excluded directory is
+    # a member, as `rustcrypto/seal` is. Out of `default-members` for
+    # procinfo's reason.
+    "services/backupd",
 ]
 # Default members: only the crates that build under the workspace-root
 # target (x86_64-unknown-none). A plain `cargo build` from the project
@@ -260,6 +279,11 @@ default-members = [
     "toolchain/stubs",
 ]
 exclude = [
+    # Vetted cryptography vendored from crates.io exactly as published
+    # (`rustcrypto/README.md`). Not members: they keep their own lint settings
+    # rather than taking this workspace's, and build only as path
+    # dependencies of what uses them. `rustcrypto/seal`, ours, is a member.
+    "rustcrypto",
     # Bare-metal services (target = x86_64-unknown-none). Living in
     # `services/` keeps them outside the `userspace/.cargo/config.toml`
     # build-std blast radius. Each services/* crate is built
@@ -290,6 +314,10 @@ exclude = [
     "netring",
     # Empty directory (incomplete crate); skip until populated.
     "userspace/cylance-cli",
+    # A directory of crates, not a crate: `gui/*` would otherwise take it for
+    # one and fail on its missing manifest. Its crates are listed as members
+    # above.
+    "gui/video",
     # nushell is a self-contained upstream workspace with its own member
     # list and lockfile. Keep it out of our workspace — build via
     # `cd nushell && cargo build`.
@@ -302,6 +330,9 @@ exclude = [
     "init/.cargo",
     "net/.cargo",
     "userspace/.cargo",
+    # rust-lang's libm, vendored as published (posix/vendor/README.md): a path
+    # dependency of posix, judged by its own lint settings, as rustcrypto is.
+    "posix/vendor",
 ]
 
 [workspace.lints.rust]
@@ -643,4 +674,30 @@ strip = "none"
 [profile.release.package.oils]
 opt-level = 3
 codegen-units = 1
+
+# Decoding pictures is arithmetic over every pixel, and `opt-level = "s"`
+# forgoes the loop unrolling and vectorisation that arithmetic runs on. rav1d
+# (the AV1 decoder, `gui/video/rav1d`) is pure Rust, without dav1d's assembly,
+# so its speed is the compiler's. Measured single-threaded, one run each on a
+# machine shared with five other build lanes (so treat the smaller figures as
+# noise): a 1204x800 AVIF decodes in 146 ms at `-Os` and 108 ms at `-O3`, a
+# 2048x1536 grid in 1.77 s and 1.65 s, a 2048x858 lossless picture in about
+# 0.7 s either way. `imagecodec`'s conversions to pixels are the same kind of
+# loop. A committed benchmark to replace these figures is tracked in
+# known-issues.md, "[F] AVIF decoding has no committed benchmark". Lane F,
+# 2026-09-27.
+[profile.release.package.rav1d]
+opt-level = 3
+codegen-units = 1
+
+[profile.release.package.imagecodec]
+opt-level = 3
+codegen-units = 1
+
+# And in debug builds rav1d alone is optimised, keeping its debug assertions
+# (its `DisjointMut` overlap checks among them): unoptimised it takes 11 ms to
+# decode a 37x19 picture, which makes `imagecodec`'s tests that decode
+# thousands of damaged files take minutes.
+[profile.dev.package.rav1d]
+opt-level = 3
 

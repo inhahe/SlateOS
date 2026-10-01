@@ -56,13 +56,13 @@
 //! bits, oversized counts and non-UTF-8 strings are all [`DecodeError`]s
 //! naming what was wrong.
 
-use guitk::event::{Key, Modifiers};
+use guitk::event::{Key, Modifiers, SettingsName};
 
 use crate::reserve::PanelEdge;
 use crate::zones::SnapSlot;
 use crate::{
-    DecodeError, Reader, capacity_hint, write_bytes, write_f32, write_i32, write_string, write_u32,
-    write_u64,
+    DecodeError, Reader, capacity_hint, read_settings_name, write_bytes, write_f32, write_i32,
+    write_settings_name, write_string, write_u32, write_u64,
 };
 
 /// Request-frame magic: `b"CREQ"` (client → compositor).
@@ -115,7 +115,14 @@ pub const RESPONSE_MAGIC: [u8; 4] = *b"CRSP";
 /// for the desktop's artifact recovery, and the `RPNT` frame
 /// ([`repaint`](crate::repaint)) the compositor then sends every client.
 /// Incompatible on 2's terms: an unknown tag stops the decoder.
-pub const CONTROL_VERSION: u8 = 17;
+/// **18** — [`RequestBody::PatchImage`] (tag `0x29`), by which a window
+/// replaces a rectangle of an image it uploaded instead of the whole of it.
+/// Incompatible on 2's terms: an unknown tag stops the decoder.
+/// **19** — [`RequestBody::AnnounceSettings`] (tag `0x2A`), by which a change
+/// to any program's own settings file reaches every open window, relayed as
+/// input version 8's `SettingsGroup::Program`. Incompatible on 2's terms: an
+/// unknown tag stops the decoder.
+pub const CONTROL_VERSION: u8 = 19;
 
 /// Control-frame header: magic + version + flags + message count.
 const CONTROL_HEADER_LEN: usize = 4 + 1 + 1 + 4;
@@ -1200,6 +1207,25 @@ pub enum RequestBody {
     /// The compositor keeps no copy of this setting either -- it announces,
     /// the shell reads. Answered with [`ResponseBody::Ok`].
     ReloadSession,
+    /// Tell everyone that settings file `name` (`<name>.yaml` in the settings
+    /// folder) changed, so the program it belongs to re-reads it: any
+    /// program's own file, where the four verbs above are for the four the
+    /// desktop reads (`design-decisions.md` §1418).
+    ///
+    /// Relayed to every window as
+    /// [`SettingsGroup::Program`](guitk::event::SettingsGroup::Program), on
+    /// [`ReloadNotifications`](Self::ReloadNotifications)' terms: it carries no
+    /// settings, only whose file to re-read, so the worst a sender can cause is
+    /// a redundant read. For `appearance`, `input`, `notifications` and
+    /// `session` it does exactly what that file's own verb does, adopting as
+    /// well as announcing, so a sender -- the settings watcher, which knows
+    /// only that a file changed -- need not know which files are which
+    /// ([`settings_group`](crate::input::settings_group)).
+    ///
+    /// The name is a [`SettingsName`], validated on decode like everything
+    /// else here: it cannot name a path, only a file in the settings folder.
+    /// Answered with [`ResponseBody::Ok`], whatever the file says.
+    AnnounceSettings { name: SettingsName },
     /// Recover the display from whatever has gone wrong with it: the same full
     /// redraw as the compositor's own Ctrl+Super+R.
     ///
@@ -1259,6 +1285,42 @@ pub enum RequestBody {
         /// than repacking it.
         stride: u32,
         format: BufferFormat,
+        bytes: Vec<u8>,
+    },
+    /// Replace a rectangle of an image already uploaded under `image_id`,
+    /// leaving the rest of it as it was.
+    ///
+    /// [`UploadImage`](Self::UploadImage) replacing the whole picture is the
+    /// right way to change most of one -- a video frame, the next photograph --
+    /// but a picture that changes a little at a time pays for all of it on
+    /// every change that way. A remote desktop is the case this exists for:
+    /// the far end reports what changed as rectangles, often a few dozen
+    /// pixels (a blinking caret), and re-sending a 1920x1080 screen for each is
+    /// 8 MB a change. A patch carries only the rectangle.
+    ///
+    /// `x`, `y`, `width` and `height` place the rectangle in the image, in the
+    /// image's pixels. `stride` is the bytes from the start of one row of
+    /// `bytes` to the next, as for an upload, and may likewise exceed the
+    /// rectangle's width. The pixels are in the format the image was uploaded
+    /// in, which is why the request does not name one: an image has one
+    /// format, and a patch in another would be a second image.
+    ///
+    /// All or nothing, as an upload is. Answered with [`ResponseBody::Ok`], or
+    /// an error -- the window is not yours, it holds no image under
+    /// `image_id`, the rectangle is empty or not wholly inside the image, or
+    /// the bytes do not cover it -- and a refused patch changes no pixel. It
+    /// costs the link's image budget nothing: the image holds as many pixels
+    /// after as before.
+    PatchImage {
+        window: u64,
+        image_id: u64,
+        x: u32,
+        y: u32,
+        width: u32,
+        height: u32,
+        /// Bytes from the start of one row to the start of the next, as for
+        /// [`UploadImage`](Self::UploadImage).
+        stride: u32,
         bytes: Vec<u8>,
     },
     /// Forget one of this window's uploaded images and release its memory.
@@ -1429,6 +1491,8 @@ enum RequestTag {
     WatchIdle = 0x26,
     ReloadSession = 0x27,
     RecoverDisplay = 0x28,
+    PatchImage = 0x29,
+    AnnounceSettings = 0x2A,
 }
 
 impl RequestTag {
@@ -1473,6 +1537,8 @@ impl RequestTag {
             0x26 => Self::WatchIdle,
             0x27 => Self::ReloadSession,
             0x28 => Self::RecoverDisplay,
+            0x29 => Self::PatchImage,
+            0x2A => Self::AnnounceSettings,
             0x20 => Self::UngrabModifierChord,
             _ => return None,
         })
@@ -1790,6 +1856,10 @@ fn encode_request_body(out: &mut Vec<u8>, body: &RequestBody) {
         RequestBody::ReloadSession => {
             out.push(RequestTag::ReloadSession as u8);
         }
+        RequestBody::AnnounceSettings { name } => {
+            out.push(RequestTag::AnnounceSettings as u8);
+            write_settings_name(out, *name);
+        }
         RequestBody::RecoverDisplay => out.push(RequestTag::RecoverDisplay as u8),
         RequestBody::ShellControl { window, action } => {
             out.push(RequestTag::ShellControl as u8);
@@ -1830,6 +1900,27 @@ fn encode_request_body(out: &mut Vec<u8>, body: &RequestBody) {
             // Bytes last, so that everything the receiver needs to decide
             // whether it wants them has already been read by the time the
             // length prefix arrives.
+            write_bytes(out, bytes);
+        }
+        RequestBody::PatchImage {
+            window,
+            image_id,
+            x,
+            y,
+            width,
+            height,
+            stride,
+            bytes,
+        } => {
+            out.push(RequestTag::PatchImage as u8);
+            write_u64(out, *window);
+            write_u64(out, *image_id);
+            write_u32(out, *x);
+            write_u32(out, *y);
+            write_u32(out, *width);
+            write_u32(out, *height);
+            write_u32(out, *stride);
+            // Bytes last, as for an upload, and for the same reason.
             write_bytes(out, bytes);
         }
         RequestBody::DropImage { window, image_id } => {
@@ -2184,6 +2275,9 @@ fn decode_request_body(r: &mut Reader<'_>) -> Result<RequestBody, DecodeError> {
         RequestTag::ReloadInput => RequestBody::ReloadInput,
         RequestTag::ReloadNotifications => RequestBody::ReloadNotifications,
         RequestTag::ReloadSession => RequestBody::ReloadSession,
+        RequestTag::AnnounceSettings => RequestBody::AnnounceSettings {
+            name: read_settings_name(r)?,
+        },
         RequestTag::RecoverDisplay => RequestBody::RecoverDisplay,
         RequestTag::ShellControl => {
             let window = r.read_u64()?;
@@ -2235,6 +2329,30 @@ fn decode_request_body(r: &mut Reader<'_>) -> Result<RequestBody, DecodeError> {
                 height,
                 stride,
                 format,
+                bytes,
+            }
+        }
+        RequestTag::PatchImage => {
+            let window = r.read_u64()?;
+            let image_id = r.read_u64()?;
+            let x = r.read_u32()?;
+            let y = r.read_u32()?;
+            let width = r.read_u32()?;
+            let height = r.read_u32()?;
+            let stride = r.read_u32()?;
+            // Nothing is checked against anything else here, as for an
+            // upload: whether the rectangle lies inside the image and whether
+            // the bytes cover it are questions only the compositor, which
+            // holds the image, can answer.
+            let bytes = r.read_bytes()?;
+            RequestBody::PatchImage {
+                window,
+                image_id,
+                x,
+                y,
+                width,
+                height,
+                stride,
                 bytes,
             }
         }
@@ -2502,6 +2620,35 @@ mod tests {
                     bytes: Vec::new(),
                 },
             ),
+            // A patch with every field distinct, so a codec that swapped two
+            // of them would not round-trip; and one at the far corner of the
+            // number space.
+            Request::new(
+                41,
+                RequestBody::PatchImage {
+                    window: 7,
+                    image_id: 9,
+                    x: 1,
+                    y: 2,
+                    width: 3,
+                    height: 1,
+                    stride: 16,
+                    bytes: (0..12).collect(),
+                },
+            ),
+            Request::new(
+                42,
+                RequestBody::PatchImage {
+                    window: u64::MAX,
+                    image_id: u64::MAX,
+                    x: u32::MAX,
+                    y: u32::MAX,
+                    width: 0,
+                    height: 0,
+                    stride: 0,
+                    bytes: Vec::new(),
+                },
+            ),
             Request::new(
                 21,
                 RequestBody::DropImage {
@@ -2527,8 +2674,49 @@ mod tests {
                     after_ms: 0,
                 },
             ),
+            Request::new(24, RequestBody::ReloadNotifications),
+            Request::new(25, RequestBody::ReloadSession),
+            // A program's settings file and one of the desktop's: both are
+            // announced by name, and the compositor decides which is which.
+            Request::new(
+                26,
+                RequestBody::AnnounceSettings {
+                    name: SettingsName::new(b"calendar").unwrap(),
+                },
+            ),
+            Request::new(
+                27,
+                RequestBody::AnnounceSettings {
+                    name: SettingsName::new(b"appearance").unwrap(),
+                },
+            ),
         ];
         assert_eq!(round_trip_requests(&reqs), reqs);
+    }
+
+    /// An announcement names a file in the settings folder and nothing else:
+    /// a name `SettingsName` refuses is refused off the wire, before anything
+    /// could act on it.
+    #[test]
+    fn an_announcement_names_a_settings_file_and_nothing_else() {
+        let good = encode_requests(&[Request::new(
+            1,
+            RequestBody::AnnounceSettings {
+                name: SettingsName::new(b"calendar").unwrap(),
+            },
+        )]);
+        // The name is the frame's last field.
+        let at = good.len() - "calendar".len();
+        assert_eq!(&good[at..], b"calendar");
+        for bad in [&b"../etc/p"[..], b"CALENDAR", b"cal ndar", b"notes.md"] {
+            let mut bytes = good.clone();
+            bytes[at..].copy_from_slice(bad);
+            assert_eq!(
+                decode_requests(&bytes).err(),
+                Some(DecodeError::BadSettingsName),
+                "{bad:?}"
+            );
+        }
     }
 
     #[test]
@@ -2722,9 +2910,65 @@ mod tests {
         );
         assert_eq!(
             RequestTag::from_byte(0x29),
-            None,
-            "0x29 is the next free tag"
+            Some(RequestTag::PatchImage),
+            "0x29 was taken by PatchImage in control version 18"
         );
+        assert_eq!(
+            RequestTag::from_byte(0x2A),
+            Some(RequestTag::AnnounceSettings),
+            "0x2A was taken by AnnounceSettings in control version 19"
+        );
+        assert_eq!(
+            RequestTag::from_byte(0x2B),
+            None,
+            "0x2B is the next free tag"
+        );
+    }
+
+    #[test]
+    fn a_patch_payload_over_the_cap_is_refused_before_it_is_read() {
+        // As for an upload: the length prefix is another process's number.
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(&REQUEST_MAGIC);
+        bytes.push(CONTROL_VERSION);
+        bytes.push(0);
+        write_u32(&mut bytes, 1); // one message
+        write_u32(&mut bytes, 1); // seq
+        bytes.push(RequestTag::PatchImage as u8);
+        write_u64(&mut bytes, 7); // window
+        write_u64(&mut bytes, 1); // image_id
+        for field in [0, 0, 1, 1, 4] {
+            write_u32(&mut bytes, field); // x, y, width, height, stride
+        }
+        write_u32(&mut bytes, crate::MAX_IMAGE_BYTES.saturating_add(1));
+        assert!(matches!(
+            decode_requests(&bytes),
+            Err(DecodeError::ImageTooLarge(_))
+        ));
+    }
+
+    #[test]
+    fn every_byte_of_a_patch_frame_can_be_corrupted_without_a_panic() {
+        let frame = encode_requests(&[Request::new(
+            1,
+            RequestBody::PatchImage {
+                window: 3,
+                image_id: 4,
+                x: 5,
+                y: 6,
+                width: 2,
+                height: 2,
+                stride: 8,
+                bytes: vec![0xAB; 16],
+            },
+        )]);
+        for i in 0..frame.len() {
+            for bit in 0..8u32 {
+                let mut corrupt = frame.clone();
+                corrupt[i] ^= 1u8 << bit;
+                let _ = decode_requests(&corrupt);
+            }
+        }
     }
 
     #[test]

@@ -160,7 +160,7 @@ unsafe fn resolve(
 ///
 /// # Safety
 ///
-/// As [`resolve`], for every driver instance.
+/// As `resolve`, for every driver instance.
 #[must_use]
 pub unsafe fn supported(registry: &Registry, instance: &Instance) -> bool {
     instance.drivers().iter().any(|d| {
@@ -197,7 +197,7 @@ unsafe fn destroy_one(registry: &Registry, entry: DriverMessenger, allocator: *c
 ///
 /// # Safety
 ///
-/// As [`destroy_one`], for every element.
+/// As `destroy_one`, for every element.
 pub unsafe fn destroy_across(
     registry: &Registry,
     created: &[DriverMessenger],

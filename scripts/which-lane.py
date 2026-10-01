@@ -169,9 +169,9 @@ LANES: dict[str, Lane] = {
         "Graphics Stack",
         "the compositor and its display protocol (gui/compositor, gui/remote), "
         "the window library every application links (gui/window), text "
-        "rendering (gui/font), image decoding (gui/imagecodec) and the Vulkan "
-        "loader (gui/vulkan) -- plus the GPU userspace ports (Mesa, Vulkan "
-        "drivers, Vello/HarfBuzz).",
+        "rendering (gui/font), image decoding (gui/imagecodec), the video "
+        "codecs (gui/video) and the Vulkan loader (gui/vulkan) -- plus the GPU "
+        "userspace ports (Mesa, Vulkan drivers, Vello/HarfBuzz).",
         "new lane, taken from lane C's old tree.",
     ),
 }
@@ -225,6 +225,12 @@ OWNERSHIP: tuple[tuple[str, str], ...] = (
     ("gui/font/", "F"),
     ("gui/imagecodec/", "F"),
     ("gui/vulkan/", "F"),
+    # The video codecs, one crate each: rav1d (AV1, which AVIF pictures are
+    # made of) and, per the operator's F-Q2 answer (design-decisions.md
+    # sec. 1332), VP9 for remote desktop's capture stream.  Added 2026-09-27
+    # when lane F created the directory; it never held lane C work, so the
+    # carve-out out of `gui/` took nothing lane C had.
+    ("gui/video/", "F"),
 )
 
 #: What the table deliberately leaves to nobody, for the briefing.  These are
@@ -616,7 +622,10 @@ def _self_test() -> int:
         ("gui/font/src/lib.rs", "F"),
         ("gui/imagecodec/src/png.rs", "F"),
         ("gui/vulkan/src/lib.rs", "F"),
+        ("gui/video/rav1d/src/lib.rs", "F"),
+        ("gui/video", "F"),
         ("gui/compositorx/src/lib.rs", "C"),
+        ("gui/videos/src/lib.rs", "C"),
         ("scripts/check-eol.py", None),
         ("Cargo.toml", None),
         ("roadmap.md", None),

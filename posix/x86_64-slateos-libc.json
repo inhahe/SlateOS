@@ -1,0 +1,32 @@
+{
+    "arch": "x86_64",
+    "cpu": "x86-64",
+    "data-layout": "e-m:e-p270:32:32-p271:32:32-p272:64:64-i64:64-i128:128-f80:128-n8:16:32:64-S128",
+    "llvm-target": "x86_64-unknown-none-elf",
+    "target-pointer-width": 64,
+    "max-atomic-width": 64,
+
+    "features": "+sse,+sse2",
+
+    "code-model": "large",
+    "relocation-model": "static",
+    "position-independent-executables": false,
+    "static-position-independent-executables": false,
+
+    "disable-redzone": true,
+    "panic-strategy": "abort",
+    "linker": "rust-lld",
+    "linker-flavor": "gnu-lld",
+    "crt-objects-fallback": "false",
+    "plt-by-default": false,
+    "relro-level": "full",
+    "stack-probes": {
+        "kind": "inline"
+    },
+
+    "metadata": {
+        "description": "x86_64 bare-metal, hard-float: the ABI libc.a is built for",
+        "host_tools": false,
+        "std": false
+    }
+}

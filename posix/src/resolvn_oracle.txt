@@ -1,0 +1,24 @@
+# glibc 2.39's reentrant resolver in a sandbox, a responder on 127.0.0.1:53
+# (posix/tools/oracle/resolvn_harness.py). resolv.conf:
+#   nameserver 127.0.0.1
+#   search example.test other.test
+#   options ndots:2 timeout:1 attempts:1
+I zeroed = 0 1 1 2c1 1 127.0.0.1:53 2 example.test other.test ;
+R again = 0
+Q a.example.test = 1 12345 12345 0 1 10.0.0.1
+Q nx.example.test = -1 1 1 - - -
+Q srv.example.test = -1 2 2 - - -
+Q a.example.test/AAAA = -1 1 1 - - -
+S a = 1 1 1 0 1 10.0.0.1
+S a.example.test. = 1 1 1 0 1 10.0.0.1
+S nothere = -1 1 1 - - -
+D a example.test = 1 12345 12345 0 1 10.0.0.1
+D a other.test = -1 1 1 - - -
+M a.example.test = 32 0000010000010000000000000161076578616d706c6504746573740000010001
+N = 1 0 1 10.0.0.1
+U query = -1 2 2
+U search = -1 2 2
+U querydomain = -1 2 2
+U mkquery = 32 12345 12345
+U send = -1 12345 12345
+C init-bit = 1

@@ -23,20 +23,30 @@
 //! Backend (compositor syscalls, framebuffer, etc.)
 //! ```
 
+pub mod button;
 pub mod canvas;
+pub mod checkbox;
+pub mod codeedit;
+pub mod codeview;
 pub mod color;
 pub mod colorpicker;
 pub mod context_ext;
 pub mod date;
 pub mod datetime;
 pub mod dialog;
+pub mod dirtree;
 pub mod disabled;
 pub mod dnd;
+pub mod dock;
+pub mod dropdown;
 pub mod event;
+pub mod field;
 pub mod filetypes;
 pub mod fontdb;
 pub mod frame;
+pub mod grab;
 pub mod grid;
+pub mod highlight;
 pub mod history;
 pub mod idseq;
 pub mod layout;
@@ -44,10 +54,12 @@ pub mod listview;
 pub mod menu;
 pub mod menubar;
 pub mod modal;
+pub mod motion;
 mod osbytes;
 pub mod palette;
 pub mod pathbar;
 pub mod probe;
+pub mod radio;
 pub mod ratio;
 pub mod render;
 pub mod surface;
@@ -66,19 +78,26 @@ pub mod scaling;
 pub mod scroll_window;
 pub mod scrollbar;
 pub mod shortcut;
+pub mod slider;
 pub mod splitter;
 pub mod step;
 pub mod style;
 pub mod svg;
+pub mod switch;
 pub mod table;
 pub mod tabs;
 pub mod text;
+pub mod textarea;
+pub mod textbuffer;
 pub mod textedit;
 pub mod textinput;
 pub mod textview;
 pub mod theme;
+pub mod treeview;
+pub mod undo;
 pub mod wheel;
 pub mod widget;
+pub mod widget_style;
 
 // Text-format escaping lives in `textfmt`, a dependency-free crate, because
 // the components that most need it are headless and must not link a widget

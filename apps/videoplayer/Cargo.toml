@@ -14,5 +14,14 @@ oswindow = { path = "../../gui/window" }
 # its headers. There is no decoder, so this is what opening a file can do.
 mediaprobe = { path = "../mediaprobe" }
 
+# Where the settings are kept: `<config>/videoplayer.yaml`, one file per
+# program (C-Q26, option A).
+settingsfile = { path = "../../gui/settingsfile" }
+yamldoc = { path = "../../yamldoc" }
+
+[dev-dependencies]
+# A scratch configuration directory, so no test writes the developer's own.
+settingsfile = { path = "../../gui/settingsfile", features = ["testing"] }
+
 [lints]
 workspace = true

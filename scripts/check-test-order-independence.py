@@ -114,7 +114,15 @@ CRATES = (
     ("posix", "posix", ()),
     ("authlib", "userspace/authlib", ()),
     ("coreutils", "userspace/coreutils", ("--lib",)),
-    ("vkloader", "gui/vulkan", ("--lib",)),
+    # The Vulkan loader's tests drive stub drivers that report what they were
+    # asked -- how many messengers were created, which instance handle a
+    # driver was last given. The reports were module statics behind a spin
+    # lock until lane F made them thread-locals (2026-09-26), so two tests can
+    # no longer collide; but tests that share a thread share its locals, and
+    # nothing about either stops one test reading what an earlier one left
+    # behind. Each test calls `reset()` first, so the claim being checked here
+    # is that it really does clear everything.
+    ("vkloader", "gui/vulkan", ()),
     ("imagecodec", "gui/imagecodec", ("--test", "decode_memory")),
 )
 

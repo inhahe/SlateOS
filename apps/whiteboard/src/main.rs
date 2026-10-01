@@ -702,16 +702,19 @@ impl Page {
 // ============================================================================
 
 /// Tracks what is currently selected on the canvas.
+///
+/// The box being dragged to select is `DragState::Marquee`'s, which draws
+/// it and takes what it touches. This had a `marquee` of its own too, only
+/// ever set back to `None` and read by nothing -- a second copy of the box
+/// that was never the box.
 #[derive(Clone, Debug, Default)]
 pub struct Selection {
     pub shape_ids: Vec<ShapeId>,
-    pub marquee: Option<Rect>,
 }
 
 impl Selection {
     pub fn clear(&mut self) {
         self.shape_ids.clear();
-        self.marquee = None;
     }
 
     pub fn is_empty(&self) -> bool {
@@ -2779,7 +2782,6 @@ impl WhiteboardApp {
             .iter()
             .map(|shape| shape.id)
             .collect();
-        self.selection.marquee = None;
     }
 
     /// Move the selection by a step. Returns whether anything moved.

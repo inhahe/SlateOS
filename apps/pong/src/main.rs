@@ -37,30 +37,73 @@
 #![allow(clippy::cast_possible_wrap)]
 #![allow(clippy::similar_names)]
 
+use gamechrome::Chrome;
+use guitk::button::{Kind, State};
 use guitk::color::Color;
 #[cfg(test)]
 use guitk::event::Modifiers;
 use guitk::event::{Event, EventResult, Key, KeyEvent, MouseButton, MouseEvent, MouseEventKind};
 use guitk::frame::Rect;
+use guitk::palette::Palette;
 use guitk::probe::Probe;
 use guitk::render::{FontWeightHint, RenderCommand, RenderTree, TextOverflow};
 use guitk::style::CornerRadii;
+use guitk::surface::Surface;
 use guitk::text;
 use oswindow::app::{self, App, Response};
 use std::process::ExitCode;
 use std::time::Duration;
 
-const COL_BASE: Color = Color::from_hex(0x1E1E2E);
-const COL_MANTLE: Color = Color::from_hex(0x181825);
-const COL_SURFACE0: Color = Color::from_hex(0x313244);
-const COL_SURFACE1: Color = Color::from_hex(0x45475A);
-const COL_TEXT: Color = Color::from_hex(0xCDD6F4);
-const COL_SUBTEXT0: Color = Color::from_hex(0xA6ADC8);
-const COL_BLUE: Color = Color::from_hex(0x89B4FA);
-const COL_GREEN: Color = Color::from_hex(0xA6E3A1);
-const COL_RED: Color = Color::from_hex(0xF38BA8);
-const COL_YELLOW: Color = Color::from_hex(0xF9E2AF);
-const COL_OVERLAY0: Color = Color::from_hex(0x6C7086);
+// ── Colours ─────────────────────────────────────────────────────────
+//
+// Everything in this game follows the user's palette (the operator's answer
+// to C-Q16, §1422, and lane C's call for this game): its surfaces and text
+// from the palette's roles, each hue in the palette's ink for it, which reads
+// on the page in a light theme as in a dark one. It was all a copy of
+// Catppuccin Mocha, dark on a light desktop.
+
+/// The colours the window draws in, from the user's palette.
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct Colours {
+    /// The page.
+    base: Color,
+    /// A band.
+    mantle: Color,
+    /// Raised.
+    surface0: Color,
+    /// Text.
+    text: Color,
+    /// Secondary text.
+    subtext0: Color,
+    /// The palette's green, inked for the page.
+    green: Color,
+    /// The palette's red, inked for the page.
+    red: Color,
+    /// The palette's yellow, inked for the page.
+    yellow: Color,
+
+    /// The player's side -- paddle and score -- in the user's accent, and the
+    /// machine's in a hue that cannot be mistaken for it.
+    you: Color,
+    ai: Color,
+}
+
+impl Colours {
+    fn of(p: &Palette) -> Self {
+        Self {
+            base: p.base,
+            mantle: p.mantle,
+            surface0: p.surface0,
+            text: p.text,
+            subtext0: p.subtext0,
+            green: p.ink(p.green),
+            red: p.ink(p.red),
+            yellow: p.ink(p.yellow),
+            you: p.ink(p.accent),
+            ai: gamechrome::apart_from_accent(p),
+        }
+    }
+}
 
 // ── The playfield, in field units ───────────────────────────────────
 //
@@ -322,6 +365,12 @@ struct PongApp {
     /// everything else about where things go is derived from it each frame.
     width: f32,
     height: f32,
+    /// The user's colours, replaced whenever the theme changes. Seeded from
+    /// the defaults; the framework calls `App::theme_changed` before the
+    /// first frame.
+    palette: Palette,
+    /// `palette`'s colours as this window draws them: rebuilt with it.
+    colours: Colours,
 }
 
 impl PongApp {
@@ -343,6 +392,8 @@ impl PongApp {
             rally_count: 0,
             width: 800.0,
             height: 620.0,
+            palette: Palette::for_mode(false),
+            colours: Colours::of(&Palette::for_mode(false)),
         };
         app.reset_ball(true);
         app
@@ -694,7 +745,7 @@ impl PongApp {
     pub fn frame(&self, width: f32, height: f32) -> Frame {
         let l = Layout::new(width, height);
         let mut f = Frame::new(l.window.w, l.window.h);
-        fill(&mut f, l.window, COL_BASE, 0.0);
+        fill(&mut f, l.window, self.colours.base, 0.0);
         self.draw_header(&mut f, &l);
         self.draw_field(&mut f, &l);
         self.draw_footer(&mut f, &l);
@@ -711,7 +762,7 @@ impl PongApp {
         if l.header.is_empty() {
             return;
         }
-        fill(f, l.header, COL_MANTLE, 4.0);
+        fill(f, l.header, self.colours.mantle, 4.0);
         let (cx, cy) = l.header.centre();
         let digits = (l.header.h * 0.6).clamp(8.0, 28.0);
         centred(
@@ -720,7 +771,7 @@ impl PongApp {
             cy,
             &self.left_score.to_string(),
             digits,
-            COL_BLUE,
+            self.colours.you,
             FontWeightHint::Bold,
         );
         centred(
@@ -729,7 +780,7 @@ impl PongApp {
             cy,
             &self.right_score.to_string(),
             digits,
-            COL_RED,
+            self.colours.ai,
             FontWeightHint::Bold,
         );
         centred(
@@ -738,7 +789,7 @@ impl PongApp {
             cy,
             "You",
             l.font,
-            COL_SUBTEXT0,
+            self.colours.subtext0,
             FontWeightHint::Regular,
         );
         centred(
@@ -747,7 +798,7 @@ impl PongApp {
             cy,
             "AI",
             l.font,
-            COL_SUBTEXT0,
+            self.colours.subtext0,
             FontWeightHint::Regular,
         );
     }
@@ -757,8 +808,8 @@ impl PongApp {
         if l.field.is_empty() {
             return;
         }
-        fill(f, l.field, COL_MANTLE, 4.0);
-        stroke(f, l.field, COL_SURFACE0, 1.0, 4.0);
+        fill(f, l.field, self.colours.mantle, 4.0);
+        stroke(f, l.field, self.colours.surface0, 1.0, 4.0);
         // The whole field is one target. Making the paddle the thing to grab
         // would mean catching it before you could move it, and the ball beats
         // you to the corner while you do.
@@ -773,7 +824,7 @@ impl PongApp {
             fill(
                 f,
                 l.to_screen(FIELD_W / 2.0 - 1.0, y, 2.0, h),
-                COL_SURFACE0,
+                self.colours.surface0,
                 0.0,
             );
             y += DASH_H * 2.0;
@@ -785,7 +836,7 @@ impl PongApp {
         fill(
             f,
             l.to_screen(PADDLE_INSET, self.left_y, PADDLE_W, PADDLE_H),
-            COL_BLUE,
+            self.colours.you,
             3.0 * l.scale,
         );
         fill(
@@ -796,13 +847,13 @@ impl PongApp {
                 PADDLE_W,
                 PADDLE_H,
             ),
-            COL_RED,
+            self.colours.ai,
             3.0 * l.scale,
         );
         fill(
             f,
             l.to_screen(self.ball_x, self.ball_y, BALL_SIZE, BALL_SIZE),
-            COL_TEXT,
+            self.colours.text,
             BALL_SIZE / 2.0 * l.scale,
         );
     }
@@ -818,14 +869,19 @@ impl PongApp {
             if r.is_empty() {
                 continue;
             }
-            let (bg, fg) = if self.enabled(*action) {
-                (COL_SURFACE0, COL_TEXT)
-            } else {
-                (COL_SURFACE1, COL_OVERLAY0)
-            };
-            fill(f, r, bg, 4.0);
-            let (cx, cy) = r.centre();
-            centred(f, cx, cy, text, l.font, fg, FontWeightHint::Regular);
+            gamechrome::button(
+                f,
+                &self.palette,
+                (r.x, r.y, r.w, r.h),
+                text,
+                l.font,
+                Kind::Plain,
+                State {
+                    disabled: !self.enabled(*action),
+                    ..State::default()
+                },
+                self.colours.base,
+            );
             // Recorded even while dim. The click is still this button's click;
             // `apply` is what decides it changes nothing. Declining to record
             // it would drop the press through to whatever lies behind.
@@ -841,10 +897,15 @@ impl PongApp {
             label(
                 f,
                 x,
-                l.footer.y + (l.footer.h - l.font) / 2.0,
+                // Centred on the line, not the font size, which left it a
+                // sixth of a line low.
+                l.footer.y
+                    + (l.footer.h - text::line_height(l.font, FontWeightHint::Regular)) / 2.0,
                 HELP,
                 l.font,
-                COL_OVERLAY0,
+                // Secondary text: the keys are read, and the palette's
+                // faintest grey is 2.3:1 on a light page.
+                self.colours.subtext0,
                 FontWeightHint::Regular,
                 Some(w),
             );
@@ -855,13 +916,13 @@ impl PongApp {
     /// what clicking it does, because clicking it does that.
     fn draw_overlay(&self, f: &mut Frame, l: &Layout) {
         let (title, note, color) = match self.state {
-            GameState::Menu => ("PONG", "Press Enter to start", COL_TEXT),
-            GameState::Paused => ("PAUSED", "Press P to resume", COL_YELLOW),
+            GameState::Menu => ("PONG", "Press Enter to start", self.colours.text),
+            GameState::Paused => ("PAUSED", "Press P to resume", self.colours.yellow),
             GameState::GameOver => {
                 if self.left_score >= WIN_SCORE {
-                    ("You win", "Press Enter to play again", COL_GREEN)
+                    ("You win", "Press Enter to play again", self.colours.green)
                 } else {
-                    ("AI wins", "Press Enter to play again", COL_RED)
+                    ("AI wins", "Press Enter to play again", self.colours.red)
                 }
             }
             // A game in progress has nothing to announce.
@@ -871,14 +932,14 @@ impl PongApp {
         // Dim what is behind first, so the box reads as being in front of a
         // game rather than beside one.
         if !l.field.is_empty() {
-            fill(f, l.field, Color::rgba(0, 0, 0, 150), 4.0);
+            fill(f, l.field, Chrome::of(&self.palette).scrim, 4.0);
         }
         let r = l.overlay;
         if r.is_empty() {
             return;
         }
-        fill(f, r, COL_SURFACE0, 6.0);
-        stroke(f, r, COL_SURFACE1, 1.0, 6.0);
+        self.palette
+            .push_surface(f, r.x, r.y, r.w, r.h, 6.0, Surface::Panel);
         let (cx, cy) = r.centre();
         let big = (r.h * 0.3).clamp(10.0, 30.0);
         centred(
@@ -896,7 +957,7 @@ impl PongApp {
             cy + r.h * 0.22,
             note,
             l.font,
-            COL_SUBTEXT0,
+            self.colours.subtext0,
             FontWeightHint::Regular,
         );
         f.hit(Target::Overlay, r);
@@ -1034,6 +1095,11 @@ fn handle_event(app: &mut PongApp, event: &Event) -> EventResult {
 }
 
 impl App for PongApp {
+    fn theme_changed(&mut self, palette: &Palette) {
+        self.palette = *palette;
+        self.colours = Colours::of(palette);
+    }
+
     fn on_event(&mut self, event: &Event) -> Response {
         match handle_event(self, event) {
             EventResult::Consumed => Response::Redraw,
@@ -1126,6 +1192,213 @@ mod tests {
     )]
 
     use super::*;
+
+    /// The palette for a light or a dark theme, in the bordered look (the
+    /// default) or the card look.
+    fn palette(light: bool, cards: bool) -> Palette {
+        let mut p = Palette::for_mode(light);
+        p.set_surface_style(if cards {
+            guitk::palette::SurfaceStyle::Cards
+        } else {
+            guitk::palette::SurfaceStyle::Borders
+        });
+        p
+    }
+
+    /// Every look in `p`'s colours: the menu, a game in play, paused, won,
+    /// lost, and a game in a cramped window.
+    fn every_look(p: &Palette) -> Vec<(&'static str, PongApp, (f32, f32))> {
+        let mut paused = playing();
+        paused.state = GameState::Paused;
+        let mut won = playing();
+        won.left_score = WIN_SCORE;
+        won.state = GameState::GameOver;
+        let mut lost = playing();
+        lost.right_score = WIN_SCORE;
+        lost.state = GameState::GameOver;
+        let mut looks = vec![
+            ("menu", PongApp::new(), SIZE),
+            ("playing", playing(), SIZE),
+            ("paused", paused, SIZE),
+            ("won", won, SIZE),
+            ("lost", lost, SIZE),
+            ("cramped", playing(), (380.0, 300.0)),
+        ];
+        for (_, a, _) in &mut looks {
+            a.theme_changed(p);
+        }
+        looks
+    }
+
+    /// **The window is drawn in the user's colours**, light or dark, in
+    /// either surface look -- every colour the palette's or the toolkit's
+    /// buttons' (the operator's C-Q16). It drew in its own copy of
+    /// Catppuccin Mocha, dark on a light desktop.
+    #[test]
+    fn the_window_is_drawn_in_the_users_colours() {
+        for (light, cards) in [(false, false), (true, false), (false, true), (true, true)] {
+            let p = palette(light, cards);
+            let derived = gamechrome::button_colours(&p, Kind::Plain, p.base);
+            for (what, a, (w, h)) in every_look(&p) {
+                appearance::palette_check::assert_drawn_from(
+                    &p,
+                    a.frame(w, h).commands(),
+                    &derived,
+                    &format!("pong, {what}, light: {light}, cards: {cards}"),
+                );
+            }
+        }
+    }
+
+    /// **Every text reads on what is drawn under it**, in either theme and
+    /// either surface look (`gamechrome::legibility`). A switched-off
+    /// button's label is exempt, as WCAG exempts an inactive control.
+    #[test]
+    fn every_text_reads_on_what_is_under_it_in_either_theme() {
+        let mut bad = Vec::new();
+        for (light, cards) in [(false, false), (true, false), (false, true), (true, true)] {
+            let p = palette(light, cards);
+            let off = guitk::button::paint(
+                &p,
+                Kind::Plain,
+                State {
+                    disabled: true,
+                    ..State::default()
+                },
+                p.base,
+            );
+            for (what, a, (w, h)) in every_look(&p) {
+                let f = a.frame(w, h);
+                let exempt = |r: &gamechrome::legibility::Read| {
+                    r.ink == off.ink && (r.ground == off.lower || r.ground == off.upper)
+                };
+                for r in gamechrome::legibility::illegible(f.commands(), p.base, exempt) {
+                    bad.push(format!(
+                        "{what}, light: {light}, cards: {cards}: {:?} {:.2}:1 on {:?}",
+                        r.text,
+                        r.ratio(),
+                        r.ground
+                    ));
+                }
+            }
+        }
+        assert!(bad.is_empty(), "pong: {bad:#?}");
+    }
+
+    /// **The two sides are told apart and seen on the field**, whatever the
+    /// accent: the player's paddle in the accent, the machine's in a hue that
+    /// cannot be mistaken for it, each standing off the field.
+    #[test]
+    fn the_two_sides_are_told_apart_and_seen_on_the_field() {
+        for light in [false, true] {
+            let c = Colours::of(&Palette::for_mode(light));
+            assert!(
+                !guitk::palette::hard_to_tell_apart(c.you, c.ai),
+                "the two paddles look alike (light: {light})"
+            );
+            for (who, colour) in [("yours", c.you), ("the machine's", c.ai)] {
+                let ratio = guitk::theme::contrast_ratio(colour, c.mantle);
+                assert!(
+                    ratio >= 3.0,
+                    "{who} is {ratio:.2}:1 on the field (light: {light})"
+                );
+            }
+        }
+    }
+
+    /// **The message sits on a panel of its own**: the toolkit's panel,
+    /// which has a ground in either surface look, so the words do not land on
+    /// whatever the game drew under them.
+    #[test]
+    fn the_message_sits_on_a_panel_of_its_own() {
+        for cards in [false, true] {
+            let p = palette(false, cards);
+            let mut a = playing();
+            a.state = GameState::Paused;
+            a.theme_changed(&p);
+            let r = Layout::new(SIZE.0, SIZE.1).overlay;
+            let grounded = a.frame(SIZE.0, SIZE.1).commands().iter().any(|c| {
+                matches!(c, RenderCommand::FillRect { x, y, width, height, color, .. }
+                    if (*x - r.x).abs() < 0.01
+                        && (*y - r.y).abs() < 0.01
+                        && (*width - r.w).abs() < 0.01
+                        && (*height - r.h).abs() < 0.01
+                        && color.a == u8::MAX)
+            });
+            assert!(
+                grounded,
+                "the message has no ground of its own (cards: {cards})"
+            );
+        }
+    }
+
+    /// **The footer's sentence is centred on its line**, not on its font
+    /// size, which is the smaller number and left it a sixth of a line low.
+    #[test]
+    fn the_footer_sentence_is_centred_on_its_line() {
+        let a = playing();
+        let l = Layout::new(SIZE.0, SIZE.1);
+        let y = a
+            .frame(SIZE.0, SIZE.1)
+            .commands()
+            .iter()
+            .find_map(|c| match c {
+                RenderCommand::Text { text, y, .. } if text == HELP => Some(*y),
+                _ => None,
+            })
+            .expect("the sentence is not drawn at this size");
+        let line = text::line_height(l.font, FontWeightHint::Regular);
+        assert!(
+            (y + line / 2.0 - (l.footer.y + l.footer.h / 2.0)).abs() < 0.01,
+            "the sentence is off the footer's middle"
+        );
+    }
+
+    /// **The pause button is switched off with no game to pause**, in the
+    /// toolkit's look; live in a game.
+    #[test]
+    fn the_pause_button_is_switched_off_with_no_game_to_pause() {
+        let face = |a: &PongApp| {
+            let l = Layout::new(SIZE.0, SIZE.1);
+            let r = l.button(1);
+            a.frame(SIZE.0, SIZE.1)
+                .commands()
+                .iter()
+                .find_map(|c| match c {
+                    RenderCommand::FillRect {
+                        x,
+                        y,
+                        width,
+                        height,
+                        color,
+                        ..
+                    } if (*x - r.x).abs() < 0.01
+                        && (*y - r.y).abs() < 0.01
+                        && (*width - r.w).abs() < 0.01
+                        && (*height - r.h).abs() < 0.01 =>
+                    {
+                        Some(*color)
+                    }
+                    _ => None,
+                })
+                .expect("the pause button has no face")
+        };
+        let menu = PongApp::new();
+        let paint = |disabled| {
+            guitk::button::paint(
+                &menu.palette,
+                Kind::Plain,
+                State {
+                    disabled,
+                    ..State::default()
+                },
+                menu.colours.base,
+            )
+            .lower
+        };
+        assert_eq!(face(&menu), paint(true), "pause looks live on the menu");
+        assert_eq!(face(&playing()), paint(false), "pause looks off in a game");
+    }
     use guitk::probe;
 
     const SIZE: (f32, f32) = PongApp::SIZE;

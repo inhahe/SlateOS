@@ -6,6 +6,12 @@
 //! so that the results agree to the bit. The one call libtiff makes that a
 //! `no_std` crate has no copy of, `pow` for the display's gamma, is a table
 //! here ([`GAMMA`]), generated with the C library libtiff itself runs on.
+//!
+//! Portions of this file are translated into Rust from libtiff 4.7.1's
+//! `tif_color.c` (copyright (c) 1988-1997 Sam Leffler; (c) 1991-1997 Silicon
+//! Graphics, Inc.), and changed for this project; used under libtiff's
+//! licence, `licenses/libtiff-LICENSE.md`. libtiff's CIE L*a*b* conversion is
+//! from the VIPS library, with the permission of its author, John Cupitt.
 
 /// `TIFFYCbCrToRGB`: the fixed-point tables libtiff converts through.
 pub(super) struct YCbCr {

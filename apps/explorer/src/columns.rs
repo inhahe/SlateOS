@@ -1024,7 +1024,7 @@ impl ColumnProvider for ImageColumns {
     /// nothing here reads an SVG's size.
     fn supported_extensions(&self) -> &[&str] {
         &[
-            "png", "jpg", "jpeg", "gif", "bmp", "webp", "ico", "cur", "tif", "tiff", "svg",
+            "png", "jpg", "jpeg", "gif", "bmp", "webp", "avif", "ico", "cur", "tif", "tiff", "svg",
         ]
     }
 }
@@ -2248,7 +2248,7 @@ fn format_thousandths(n: u64) -> String {
 ///
 /// UTC, explicitly, because there is no per-process zone plumbing yet
 /// (known-issues `TD-NO-SYSTEM-DEFAULT-ZONE-WITHOUT-TZ`).
-fn format_datetime(epoch_secs: u64) -> String {
+pub(crate) fn format_datetime(epoch_secs: u64) -> String {
     guitk::datetime::stamp(
         i64::try_from(epoch_secs).unwrap_or(i64::MAX),
         &guitk::tzrules::Tz::utc(),
@@ -3443,6 +3443,25 @@ mod tests {
         assert_eq!(
             mgr.get_value(&wide, ColumnId::COLOR_DEPTH),
             ColumnValue::Empty
+        );
+    }
+
+    /// **An AVIF is measured** as it is shown -- `imagecodec` reads its size
+    /// from the container, cropped and turned as the viewer shows it. The
+    /// file is lane F's fixture, 37x19 by libavif's own answer
+    /// (`gui/imagecodec/tests/data/avif_pixels.txt`).
+    #[test]
+    fn an_avif_is_measured() {
+        let dir = Scratch::new("avif");
+        let photo = dir.file(
+            "photo.avif",
+            include_bytes!("../../../gui/imagecodec/tests/data/avifpx_8_420_709.avif"),
+        );
+        assert!(ImageColumns.supported_extensions().contains(&"avif"));
+        let mgr = ColumnManager::with_defaults();
+        assert_eq!(
+            mgr.get_value(&photo, ColumnId::DIMENSIONS),
+            ColumnValue::Text(String::from("37 \u{00d7} 19"))
         );
     }
 

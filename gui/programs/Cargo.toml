@@ -1,0 +1,21 @@
+[package]
+name = "programs"
+version = "0.1.0"
+edition = "2024"
+description = "SlateOS's one list of programs (design-decisions 1425): SlateOS's own as freedesktop desktop entries, the jobs a program can be the default for, and what opens what until a person chooses."
+
+[dependencies]
+# The format every program here is in, and the reader the start menu already
+# uses for the programs installed on the machine -- one reader, so a built-in
+# program and an installed one cannot be read two ways.
+desktopentry = { path = "../desktopentry" }
+
+[dev-dependencies]
+# The inventory test checks that the file types the kernel knew reached the
+# toolkit's table (INVENTORY.md section 5).
+guitk = { path = "../toolkit" }
+# Scratch data directories for the tests of `known`.
+scratchdir = { path = "../../userspace/scratchdir" }
+
+[lints]
+workspace = true

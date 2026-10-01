@@ -1,0 +1,16 @@
+# SlateOS's own Archive Manager, as a desktop entry (gui/programs, design-decisions.md 1425).
+# Built into the programs library; the same file installs as
+# /usr/share/applications/org.slateos.ArchiveManager.desktop. What each field carries,
+# and where it came from, is gui/programs/INVENTORY.md.
+
+[Desktop Entry]
+Type=Application
+Name=Archive Manager
+GenericName=Archive Manager
+Comment=Open and create archives
+Exec=/usr/bin/archivemanager %f
+TryExec=/usr/bin/archivemanager
+Icon=package-x-generic
+Categories=Utility;Archiving;Compression;
+Keywords=zip;tar;compress;extract;archive;
+MimeType=application/zip;application/gzip;application/x-bzip2;application/x-xz;application/zstd;application/x-7z-compressed;application/vnd.rar;application/x-tar;

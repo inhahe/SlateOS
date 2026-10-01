@@ -364,6 +364,72 @@ def test_stamp_and_mtime_modes_are_distinguishable(cf, tmpdir):
     check("stamp mode speaks of content", "have since changed" in stamp_text, True)
 
 
+def test_a_cpp_fixtures_source_is_an_input(cf, tmpdir):
+    """A C++ fixture's source is `main.cpp`: an edit to it makes the ELF
+    stale, as an edit to a C fixture's `main.c` does. Before `main.cpp` was
+    an input, `ctest-cxx-throw` would have read as current after any change
+    to the program it runs."""
+    _fake_tree(cf, tmpdir)
+    fx = Path(tmpdir) / "services" / "ctest-cxx"
+    fx.mkdir(parents=True)
+    (fx / "build.py").write_bytes(b"# recipe\n")
+    (fx / "main.cpp").write_bytes(b"int main() { return 42; }\n")
+    elf = cf.elf_of(fx)
+    elf.write_bytes(b"ELF")
+    for p in (fx / "build.py", fx / "main.cpp", cf.LIBC):
+        _age(p, 100)
+    _age(elf, 50)
+    labels = [label for label, _p, _t in cf._inputs(fx)]
+    check("main.cpp is an input", "main.cpp" in labels, True)
+    check("an ELF newer than its inputs is current", cf.is_stale(fx), None)
+    now = time.time()
+    os.utime(fx / "main.cpp", (now, now))
+    check("an ELF older than main.cpp is stale", cf.is_stale(fx), "older than main.cpp")
+
+
+def test_a_c_fixtures_overlay_headers_are_an_input(cf, tmpdir):
+    """Every C fixture is compiled with `-I posix/include`: a header edited
+    there makes the ELF stale, as an edit to its own `main.c` does. Before
+    the overlay was an input, `ctest-obstack` -- whose subject is
+    `<obstack.h>`'s macros -- would have read as current after any change
+    to them. A fastpy fixture is not compiled against the overlay, and is
+    not made stale by it."""
+    repo = _fake_tree(cf, tmpdir)
+    header = repo / "posix" / "include" / "bits" / "x.h"
+    header.parent.mkdir(parents=True)
+    header.write_bytes(b"#define X 1\n")
+    c_fx = repo / "services" / "ctest-x"
+    py_fx = repo / "services" / "fastpy-x"
+    for fx in (c_fx, py_fx):
+        fx.mkdir(parents=True)
+        (fx / "build.py").write_bytes(b"# recipe\n")
+        _age(fx / "build.py", 100)
+        cf.elf_of(fx).write_bytes(b"ELF")
+        _age(cf.elf_of(fx), 50)
+    (c_fx / "main.c").write_bytes(b"int main(void) { return 42; }\n")
+    for p in (c_fx / "main.c", cf.LIBC, header):
+        _age(p, 100)
+    # The fastpy compiler's newest source is the real checkout's, whose age
+    # this tree cannot set: none, for the length of the test.
+    saved = cf._NEWEST_COMPILER_SOURCE
+    cf._NEWEST_COMPILER_SOURCE = None
+    try:
+        cf._NEWEST_OVERLAY_HEADER.clear()
+        labels = [label for label, _p, _t in cf._inputs(c_fx)]
+        check("the newest overlay header is a C fixture's input",
+              "posix/include/bits/x.h" in labels, True)
+        check("a C fixture newer than the overlay is current", cf.is_stale(c_fx), None)
+        now = time.time()
+        os.utime(header, (now, now))
+        cf._NEWEST_OVERLAY_HEADER.clear()
+        check("a C fixture older than a header is stale", cf.is_stale(c_fx),
+              "older than posix/include/bits/x.h")
+        check("a fastpy fixture does not take the overlay", cf.is_stale(py_fx), None)
+    finally:
+        cf._NEWEST_COMPILER_SOURCE = saved
+        cf._NEWEST_OVERLAY_HEADER.clear()
+
+
 def main() -> int:
     cf = load_module()
     tests = [(name, fn) for name, fn in sorted(globals().items())

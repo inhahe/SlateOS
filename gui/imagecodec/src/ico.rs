@@ -43,6 +43,11 @@
 //! the bytes present, and the picture -- at most 256 by 256, since it must
 //! match its directory entry -- is checked against [`Limits`] before its
 //! buffer exists.
+//!
+//! Portions of this file are translated into Rust from Chromium's
+//! `ico_image_decoder.cc` and `bmp_image_reader.cc` (copyright 2008 The
+//! Chromium Authors), and changed for this project; used under Chromium's BSD
+//! licence, `licenses/chromium-LICENSE`.
 
 use alloc::vec;
 use alloc::vec::Vec;
@@ -128,6 +133,60 @@ pub fn dimensions(bytes: &[u8]) -> ImageResult<(u32, u32)> {
         .copied()
         .ok_or(ImageError::Malformed("an icon directory of no icons"))?;
     Ok((best.width, best.height))
+}
+
+/// How the icon's best image stores its pixels: an embedded PNG's own
+/// format, or its bitmap's -- a palette index of its bit count, eight bits a
+/// channel, or the widths of its masks. Always with transparency: a bitmap
+/// icon has its mask, and an alpha channel from 32 bits.
+///
+/// # Errors
+///
+/// As [`dimensions`].
+pub fn pixel_format(bytes: &[u8]) -> ImageResult<crate::PixelFormat> {
+    use crate::{ColourModel, PixelFormat};
+    let best = directory(bytes)?
+        .first()
+        .copied()
+        .ok_or(ImageError::Malformed("an icon directory of no icons"))?;
+    let image = bytes.get(best.offset..).unwrap_or(&[]);
+    if image.len() < 4 {
+        return Err(ImageError::Truncated);
+    }
+    if image.starts_with(b"\x89PNG") {
+        return crate::png::pixel_format(image);
+    }
+    let header = read_header(bytes, best.offset)?;
+    let colour = ColourModel::Colour;
+    let lens = match header.bit_count {
+        24 => [8, 8, 8, 0],
+        16 | 32 => {
+            let mut after = Reader {
+                data: bytes,
+                at: best.offset.saturating_add(header.size as usize),
+            };
+            channels(&header, masks_of(&header, &mut after)?)?.map(|c| c.mask.count_ones())
+        }
+        bits => {
+            return Ok(PixelFormat::uniform(
+                u8::try_from(bits).unwrap_or(u8::MAX),
+                1,
+                colour,
+                true,
+                true,
+            ));
+        }
+    };
+    let [r, g, b, a] = lens;
+    let widest = lens.iter().copied().max().unwrap_or(0);
+    Ok(PixelFormat {
+        bits_per_channel: u8::try_from(widest).unwrap_or(u8::MAX),
+        bits_per_pixel: r.saturating_add(g).saturating_add(b).saturating_add(a),
+        channels: if a == 0 { 3 } else { 4 },
+        model: colour,
+        palette: false,
+        has_alpha: true,
+    })
 }
 
 /// Decode an icon or cursor: its best image.
@@ -354,6 +413,39 @@ impl Channel {
     }
 }
 
+/// The masks a 16- or 32-bit image's channels come from: the header's or
+/// those after it for bit fields -- read from `r`, which is left after them --
+/// and otherwise five bits a channel for 16 bits and eight for 32, where an
+/// uncompressed 32-bit image's fourth byte is alpha.
+fn masks_of(header: &Header, r: &mut Reader<'_>) -> ImageResult<[u32; 4]> {
+    let mut masks = header.masks;
+    if !matches!(
+        header.compression,
+        Compression::Bitfields | Compression::AlphaBitfields
+    ) {
+        masks = if header.bit_count == 16 {
+            [0x7C00, 0x03E0, 0x001F, masks[3]]
+        } else {
+            [0x00FF_0000, 0xFF00, 0xFF, masks[3]]
+        };
+    } else if !header.rgb_masks_in_header {
+        let alpha = header.compression == Compression::AlphaBitfields;
+        let stored = r.take(if alpha { 16 } else { 12 })?;
+        masks = [
+            le32(stored, 0),
+            le32(stored, 4),
+            le32(stored, 8),
+            if alpha { le32(stored, 12) } else { masks[3] },
+        ];
+    }
+    if !header.alpha_mask_in_header && header.compression != Compression::AlphaBitfields {
+        // In an icon, an uncompressed 32-bit image's fourth byte is alpha.
+        let alpha = header.compression != Compression::Bitfields && header.bit_count == 32;
+        masks[3] = if alpha { 0xFF00_0000 } else { 0 };
+    }
+    Ok(masks)
+}
+
 /// `ProcessBitmasks`: the four channels, from the masks. Masks are cut to the
 /// bit depth; ones that overlap, or have a gap, are refused.
 fn channels(header: &Header, mut masks: [u32; 4]) -> ImageResult<[Channel; 4]> {
@@ -491,32 +583,7 @@ fn decode_bmp(data: &[u8], entry: Entry, limits: Limits) -> ImageResult<Image> {
     let mut chans = [Channel::default(); 4];
     let mut palette = Vec::new();
     if header.bit_count >= 16 {
-        let mut masks = header.masks;
-        if !matches!(
-            header.compression,
-            Compression::Bitfields | Compression::AlphaBitfields
-        ) {
-            masks = if header.bit_count == 16 {
-                [0x7C00, 0x03E0, 0x001F, masks[3]]
-            } else {
-                [0x00FF_0000, 0xFF00, 0xFF, masks[3]]
-            };
-        } else if !header.rgb_masks_in_header {
-            let alpha = header.compression == Compression::AlphaBitfields;
-            let stored = r.take(if alpha { 16 } else { 12 })?;
-            masks = [
-                le32(stored, 0),
-                le32(stored, 4),
-                le32(stored, 8),
-                if alpha { le32(stored, 12) } else { masks[3] },
-            ];
-        }
-        if !header.alpha_mask_in_header && header.compression != Compression::AlphaBitfields {
-            // In an icon, an uncompressed 32-bit image's fourth byte is alpha.
-            let alpha = header.compression != Compression::Bitfields && header.bit_count == 32;
-            masks[3] = if alpha { 0xFF00_0000 } else { 0 };
-        }
-        chans = channels(&header, masks)?;
+        chans = channels(&header, masks_of(&header, &mut r)?)?;
     } else {
         let table = r.take((header.colors_used as usize).saturating_mul(4))?;
         palette = table

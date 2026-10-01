@@ -737,6 +737,11 @@ impl Hotkey {
         parts.join("+")
     }
 
+    /// A hotkey from its label. For the tests only: nothing in the program
+    /// sets a trigger -- the demo library that did is a test fixture now --
+    /// and nothing listens for one, which needs a desktop-wide hotkey service
+    /// this tree does not have. Every macro's Trigger row reads "(none)".
+    #[cfg(test)]
     fn from_str(s: &str) -> Option<Self> {
         let parts: Vec<&str> = s.split('+').map(str::trim).collect();
         if parts.is_empty() {
@@ -1433,13 +1438,24 @@ impl AutomatorApp {
         }
     }
 
-    /// A library with two macros in it, so the window opens with something to
-    /// look at rather than an empty list and no clue what a macro looks like.
+    /// The window the program opens: the user's library, which starts empty
+    /// -- the list says "No macros yet -- press New".
     ///
-    /// This is what `main` used to be: eighteen `add_action` calls in the
-    /// program's entry point, feeding a picture that was rendered once into a
-    /// `Vec` and dropped on the next line. Naming it makes it a fixture a test
-    /// can build.
+    /// `main` opened [`with_demo_library`](Self::with_demo_library) until
+    /// 2026-09-28, so every user began with two macros they had not made, one
+    /// of them "Login Sequence": click, type `admin`, Tab, type `password123`,
+    /// Enter, on Ctrl+Alt+L. A library is a record of what its owner built,
+    /// and a macro that types a password somebody else chose is the last
+    /// thing to find in one. `find-reachable-fixtures.py` reported it: the
+    /// fixture's own comment said it was one, and the entry point called it.
+    pub fn opened() -> Self {
+        Self::new()
+    }
+
+    /// A library with two macros in it, for the tests that need one to look
+    /// at: what `main` used to be, eighteen `add_action` calls that became a
+    /// fixture and then went on being the program's entry point.
+    #[cfg(test)]
     pub fn with_demo_library() -> Self {
         let mut app = Self::new();
         app.new_macro("Login Sequence");
@@ -4074,7 +4090,7 @@ impl Probe for AutomatorApp {
 // ============================================================================
 
 fn main() -> ExitCode {
-    let mut app = AutomatorApp::with_demo_library();
+    let mut app = AutomatorApp::opened();
     app::launch("automator", &mut app)
 }
 
@@ -5625,6 +5641,21 @@ mod tests {
         AutomatorApp::new()
     }
 
+    #[test]
+    fn the_window_opens_on_an_empty_library_and_says_so() {
+        let app = AutomatorApp::opened();
+        assert!(
+            app.library.list().is_empty(),
+            "the shipping window opens with macros nobody made"
+        );
+        let (w, h) = AutomatorApp::SIZE;
+        let text = said(&app, w, h);
+        assert!(
+            text.iter().any(|t| t.contains("No macros")),
+            "an empty library does not say so: {text:?}"
+        );
+    }
+
     /// The demo library `main` used to build and throw away.
     fn demo_app() -> AutomatorApp {
         AutomatorApp::with_demo_library()
@@ -7068,6 +7099,13 @@ mod tests {
         let l = Layout::solve(w, h);
         app.select_action(2);
         let with = said_in(&app, w, h, l.props);
+        // What the action is, first: the demo's third action is a key press.
+        // This test checked only the delay row under it, so a read-out that
+        // left the action itself blank passed.
+        assert!(
+            with.contains(&"KB".to_string()),
+            "the read-out does not say what kind of action is selected: {with:?}"
+        );
         assert!(
             with.contains(&"Delay".to_string()),
             "the read-out does not name the selected action's delay: {with:?}"

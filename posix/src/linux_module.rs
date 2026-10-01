@@ -5,10 +5,13 @@
 //! by `modprobe`, `insmod`, `rmmod`, `systemd-modules-load`,
 //! `kmod`, and `depmod`'s symbol-resolution preload.
 //!
-//! Every entry point validates its input shape against Linux's
-//! contract (fd bounds, flag-bit allowlists, non-NULL pointer
-//! requirements, name length) and then returns `-1` /
-//! `errno = ENOSYS`. Real module loading is intentionally not
+//! Every entry point makes the checks Linux makes before it starts
+//! loading or unloading -- the capability, `finit_module`'s flag bits
+//! and descriptor, `init_module`'s image length, and the pointers Linux
+//! has copied from by then -- in Linux's order, and then returns `-1` /
+//! `errno = ENOSYS`. It makes no check Linux does not make, and a pointer
+//! Linux reads only while loading (the parameter string) it does not
+//! read at all. Real module loading is intentionally not
 //! supported — this is a microkernel, drivers run in userspace,
 //! and "modules" as Linux understands them (in-kernel
 //! dynamically-loaded code) are not part of our architecture per
@@ -46,11 +49,6 @@ pub const O_TRUNC_DELETE: u32 = 1;
 /// Non-blocking: return EWOULDBLOCK if module is in use
 /// (Linux maps this to O_NONBLOCK=0x800).
 pub const O_NONBLOCK_DELETE: u32 = 2;
-/// Valid flag mask for `delete_module`. We accept either the legacy
-/// internal constants above or the Linux open(2)-style values that
-/// real `rmmod`/`libkmod` callers pass, so off-the-shelf userspace
-/// works against our shim without translation.
-const MODULE_DELETE_FLAGS_VALID: u32 = O_TRUNC_DELETE | O_NONBLOCK_DELETE | 0x200 | 0x800;
 
 // ---------------------------------------------------------------------------
 // Module state (from /sys/module/*/initstate)
@@ -69,10 +67,6 @@ pub const MODULE_STATE_UNFORMED: u32 = 3;
 // Bounds
 // ---------------------------------------------------------------------------
 
-/// Linux's `MODULE_NAME_LEN - 1` — the longest module name accepted by
-/// `delete_module`. Anything longer hits EINVAL (some kernels return
-/// ENAMETOOLONG instead; Linux's `delete_module` returns EINVAL).
-const MODULE_NAME_MAX: usize = 60;
 /// Maximum size of the module image (`len` argument to `init_module`).
 /// Real Linux caps this at the system's RLIMIT_AS / available memory;
 /// we cap at 256 MiB to reject runaway values that no legitimate
@@ -89,66 +83,15 @@ const MODULE_IMAGE_MAX: usize = 256 * 1024 * 1024;
 const ELF64_HDR_SIZE: usize = 64;
 
 // ---------------------------------------------------------------------------
-// Helpers
-// ---------------------------------------------------------------------------
-
-/// Walks a NUL-terminated C string up to `max + 1` bytes and returns
-/// the length (excluding the NUL) or `None` if no NUL is found within
-/// `max + 1` bytes (i.e. the name is too long).
-///
-/// # Safety
-///
-/// Caller must ensure `name` is non-NULL and points to at least
-/// `max + 1` accessible bytes (or to a NUL-terminated string).
-unsafe fn name_length(name: *const u8, max: usize) -> Option<usize> {
-    let mut i = 0usize;
-    while i <= max {
-        // SAFETY: caller-provided pointer; we stop at the first NUL
-        // or at `max + 1` iterations.
-        let b = unsafe { *name.add(i) };
-        if b == 0 {
-            return Some(i);
-        }
-        // `i <= max < usize::MAX` — increment cannot overflow.
-        i = i.wrapping_add(1);
-    }
-    None
-}
-
-/// Validates a module name: non-NULL, contains a NUL within
-/// `MODULE_NAME_MAX + 1` bytes, no slash, not empty.
-///
-/// # Safety
-///
-/// Caller must ensure `name` is non-NULL.
-unsafe fn validate_name(name: *const u8) -> Result<(), i32> {
-    // SAFETY: caller has confirmed `name` is non-NULL.
-    let len = match unsafe { name_length(name, MODULE_NAME_MAX) } {
-        Some(0) => return Err(errno::EINVAL), // empty name
-        Some(n) => n,
-        None => return Err(errno::EINVAL), // too long
-    };
-    // Reject any slash to forbid path traversal. Linux rejects names
-    // containing `/` because they'd alias the on-disk module path.
-    for i in 0..len {
-        // SAFETY: i < len < MODULE_NAME_MAX, all within the validated string.
-        let b = unsafe { *name.add(i) };
-        if b == b'/' {
-            return Err(errno::EINVAL);
-        }
-    }
-    Ok(())
-}
-
-// ---------------------------------------------------------------------------
 // Syscalls
 // ---------------------------------------------------------------------------
 
 /// Load a kernel module from an in-memory image (Linux `init_module(2)`).
 ///
-/// Validates the caller-supplied image, length, and params before
-/// returning `-1` / `errno = ENOSYS`. Real module loading is not
-/// supported on this microkernel by design.
+/// Validates the caller-supplied image and length before returning
+/// `-1` / `errno = ENOSYS`. Real module loading is not supported on this
+/// microkernel by design. `_params` -- Linux's `uargs` -- is never read:
+/// see step 3 below.
 ///
 /// # Linux semantics
 ///
@@ -165,8 +108,11 @@ unsafe fn validate_name(name: *const u8) -> Result<(), i32> {
 ///    - `copy_chunked_from_user(info->hdr, umod, info->len)` fails →
 ///      `-EFAULT` (this is where a NULL `umod` is observed, *after*
 ///      the length check).
-/// 3. `load_module()` eventually calls `strndup_user(uargs, ...)` which
-///    rejects NULL `uargs` with `-EFAULT`.
+/// 3. `load_module(&info, uargs, 0)`, which is where our `ENOSYS` stands.
+///    It checks the image's signature and ELF structure first, and copies
+///    `uargs` (`strndup_user`, `-EFAULT` for NULL) only once the image has
+///    proved to be a module this kernel could load -- which no image is
+///    here. So a NULL `uargs` is never reached, and is not looked at.
 ///
 /// We honour that exact ordering — length-too-small is checked before
 /// NULL `module_image`, so a caller passing both `len = 0` and
@@ -187,10 +133,10 @@ unsafe fn validate_name(name: *const u8) -> Result<(), i32> {
 ///   runaway values that on Linux would hit `-ENOMEM` from `__vmalloc`.
 ///   We pick `E2BIG` over `ENOMEM` because the cap is a hard policy
 ///   bound, not a transient out-of-memory condition.
-/// - `EFAULT`: NULL `module_image` (when `len >= 64`) or NULL `params`.
+/// - `EFAULT`: NULL `module_image` (when `len >= 64`).
 /// - `ENOSYS`: all checks pass — real module loading is not supported.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
-pub extern "C" fn init_module(module_image: *const u8, len: usize, params: *const u8) -> i32 {
+pub extern "C" fn init_module(module_image: *const u8, len: usize, _params: *const u8) -> i32 {
     // Phase 174: Linux's `may_init_module` runs at the top of
     // SYSCALL_DEFINE3(init_module) — before `copy_module_from_user`
     // touches the user pointer or even reads `len`.  Mirror that order
@@ -213,11 +159,7 @@ pub extern "C" fn init_module(module_image: *const u8, len: usize, params: *cons
         return -1;
     }
     if module_image.is_null() {
-        errno::set_errno(errno::EFAULT);
-        return -1;
-    }
-    if params.is_null() {
-        // params is "" by convention, not NULL, in real Linux callers.
+        // `copy_chunked_from_user` faults on it.
         errno::set_errno(errno::EFAULT);
         return -1;
     }
@@ -227,13 +169,15 @@ pub extern "C" fn init_module(module_image: *const u8, len: usize, params: *cons
 
 /// Load a kernel module from a file descriptor (Linux `finit_module(2)`).
 ///
-/// Validates `flags`, `fd`, and `params` (in that order, matching
-/// Linux's `SYSCALL_DEFINE3(finit_module)` prologue in
-/// `kernel/module/main.c`: the kernel rejects unknown flag bits with
-/// `EINVAL` *before* calling `fdget(fd)`, and `params` is only read
-/// via `copy_from_user` after the fd is resolved) before returning
-/// `-1` / `errno = ENOSYS`. Real module loading is not supported on
-/// this microkernel by design.
+/// Validates `flags`, then `fd` (in that order, matching Linux's
+/// `SYSCALL_DEFINE3(finit_module)` in `kernel/module/main.c`: the kernel
+/// rejects unknown flag bits with `EINVAL` *before* calling `fdget(fd)`)
+/// before returning `-1` / `errno = ENOSYS`. Real module loading is not
+/// supported on this microkernel by design.
+///
+/// `_params` -- Linux's `uargs` -- is never read: Linux copies it only in
+/// `load_module`, once the file has been read and accepted as a module,
+/// past the point our `ENOSYS` stands for (see [`init_module`]).
 ///
 /// # Errors
 ///
@@ -243,11 +187,13 @@ pub extern "C" fn init_module(module_image: *const u8, len: usize, params: *cons
 ///   sees `EPERM` regardless of `flags` / `fd` / `params`.
 /// - `EINVAL`: unknown flag bit (checked first among the argument
 ///   guards).
-/// - `EBADF`: `fd < 0` (checked second).
-/// - `EFAULT`: NULL `params` (checked last; Linux requires "" not NULL).
+/// - `EBADF`: `fd` is not an open descriptor, is an `O_PATH` one
+///   (`fdget` does not find those), or is not open for reading
+///   (`idempotent_init_module`'s `FMODE_READ` test) -- the module is read
+///   from it.
 /// - `ENOSYS`: all checks pass — no module subsystem to dispatch to.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
-pub extern "C" fn finit_module(fd: i32, params: *const u8, flags: u32) -> i32 {
+pub extern "C" fn finit_module(fd: i32, _params: *const u8, flags: u32) -> i32 {
     // Phase 174: Linux's `may_init_module` runs at the top of
     // SYSCALL_DEFINE3(finit_module), before the flag check or the
     // fdget.  Unprivileged callers see EPERM regardless of other args.
@@ -265,12 +211,18 @@ pub extern "C" fn finit_module(fd: i32, params: *const u8, flags: u32) -> i32 {
         errno::set_errno(errno::EINVAL);
         return -1;
     }
-    if fd < 0 {
+    // `!f || !(f->f_mode & FMODE_READ)`: FMODE_READ is O_RDONLY's and
+    // O_RDWR's -- not O_WRONLY's, nor access mode 3's (Linux's
+    // `(flags + 1) & O_ACCMODE` gives that one neither).
+    let readable = crate::fdtable::get_fd(fd).is_some_and(|entry| {
+        !crate::file::is_path_fd_entry(&entry)
+            && matches!(
+                entry.status_flags & crate::fcntl::O_ACCMODE,
+                crate::fcntl::O_RDONLY | crate::fcntl::O_RDWR
+            )
+    });
+    if !readable {
         errno::set_errno(errno::EBADF);
-        return -1;
-    }
-    if params.is_null() {
-        errno::set_errno(errno::EFAULT);
         return -1;
     }
     errno::set_errno(errno::ENOSYS);
@@ -279,9 +231,19 @@ pub extern "C" fn finit_module(fd: i32, params: *const u8, flags: u32) -> i32 {
 
 /// Remove a kernel module (Linux `delete_module(2)`).
 ///
-/// Validates `name` and `flags` before returning `-1` /
+/// Checks the caller's capability and `name` before returning `-1` /
 /// `errno = ENOSYS`. Real module unloading is not supported on this
 /// microkernel by design.
+///
+/// # Linux semantics
+///
+/// `SYSCALL_DEFINE2(delete_module)` makes two checks before it looks for
+/// the module: `CAP_SYS_MODULE` (`EPERM`), then the copy of the name
+/// (`strncpy_from_user` of at most `MODULE_NAME_LEN - 1` bytes, `EFAULT`).
+/// It refuses no name and no flag: a name that is empty, too long or holds
+/// a `/` is looked up like any other and not found (`ENOENT`), and `flags`
+/// (`O_NONBLOCK`, `O_TRUNC` to force) matter only to a module found in
+/// use. The lookup is where our `ENOSYS` stands, so `_flags` is not read.
 ///
 /// # Errors
 ///
@@ -289,15 +251,11 @@ pub extern "C" fn finit_module(fd: i32, params: *const u8, flags: u32) -> i32 {
 ///   `SYSCALL_DEFINE2(delete_module)` performs
 ///   `if (!capable(CAP_SYS_MODULE) || modules_disabled) return -EPERM;`
 ///   *before* `strncpy_from_user(name, name_user, ...)`, so EPERM
-///   beats EFAULT and EINVAL.
+///   beats EFAULT.
 /// - `EFAULT`: NULL `name`.
-/// - `EINVAL`: empty name, name too long (> 60 bytes), name contains
-///   `/`, or unknown flag bit (accepts both our legacy constants and
-///   the Linux O_TRUNC=0x200/O_NONBLOCK=0x800 values that real
-///   `rmmod`/`libkmod` pass).
-/// - `ENOSYS`: all checks pass.
+/// - `ENOSYS`: otherwise.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
-pub extern "C" fn delete_module(name: *const u8, flags: u32) -> i32 {
+pub extern "C" fn delete_module(name: *const u8, _flags: u32) -> i32 {
     // Phase 174: cap check is the very first thing Linux's
     // SYSCALL_DEFINE2(delete_module) does, before reading `name`.
     if !crate::sys_capability::has_capability(crate::sys_capability::CAP_SYS_MODULE) {
@@ -305,16 +263,8 @@ pub extern "C" fn delete_module(name: *const u8, flags: u32) -> i32 {
         return -1;
     }
     if name.is_null() {
+        // `strncpy_from_user` faults on it.
         errno::set_errno(errno::EFAULT);
-        return -1;
-    }
-    if (flags & !MODULE_DELETE_FLAGS_VALID) != 0 {
-        errno::set_errno(errno::EINVAL);
-        return -1;
-    }
-    // SAFETY: name is non-NULL.
-    if let Err(e) = unsafe { validate_name(name) } {
-        errno::set_errno(e);
         return -1;
     }
     errno::set_errno(errno::ENOSYS);
@@ -329,6 +279,31 @@ pub extern "C" fn delete_module(name: *const u8, flags: u32) -> i32 {
 mod tests {
     use super::*;
     use core::ptr;
+
+    /// An open descriptor with the status flags `flags`, closed on drop.
+    struct TestFd(i32);
+
+    impl TestFd {
+        fn open(flags: i32) -> Self {
+            Self(
+                crate::fdtable::alloc_fd_with_flags(crate::fdtable::HandleKind::File, 0, flags)
+                    .expect("alloc_fd_with_flags"),
+            )
+        }
+
+        /// A module file as modprobe opens one: read-only.
+        fn module() -> Self {
+            Self::open(crate::fcntl::O_RDONLY)
+        }
+    }
+
+    impl Drop for TestFd {
+        fn drop(&mut self) {
+            // This test thread's own table slot: nothing else closed it,
+            // and the entry holds no kernel handle to release.
+            let _ = crate::fdtable::close_fd(self.0);
+        }
+    }
 
     #[test]
     fn test_init_flags_powers_of_two() {
@@ -383,11 +358,13 @@ mod tests {
     }
 
     #[test]
-    fn test_init_module_null_params_efault() {
+    fn test_init_module_null_params_is_not_read() {
+        // Linux copies `uargs` only once the image has been accepted as a
+        // module, which is past where the call ends here.
         let buf = [0u8; 128];
         let r = init_module(buf.as_ptr(), 128, ptr::null());
         assert_eq!(r, -1);
-        assert_eq!(errno::get_errno(), errno::EFAULT);
+        assert_eq!(errno::get_errno(), errno::ENOSYS);
     }
 
     #[test]
@@ -412,10 +389,13 @@ mod tests {
     }
 
     #[test]
-    fn test_finit_module_null_params_efault() {
-        let r = finit_module(3, ptr::null(), 0);
+    fn test_finit_module_null_params_is_not_read() {
+        // Linux copies `uargs` only in `load_module`, after reading the
+        // file and accepting it as a module.
+        let fd = TestFd::module();
+        let r = finit_module(fd.0, ptr::null(), 0);
         assert_eq!(r, -1);
-        assert_eq!(errno::get_errno(), errno::EFAULT);
+        assert_eq!(errno::get_errno(), errno::ENOSYS);
     }
 
     #[test]
@@ -428,6 +408,7 @@ mod tests {
 
     #[test]
     fn test_finit_module_each_known_flag_reaches_enosys() {
+        let fd = TestFd::module();
         let params = b"\0";
         for &f in &[
             0,
@@ -436,7 +417,7 @@ mod tests {
             MODULE_INIT_COMPRESSED_FILE,
             MODULE_INIT_IGNORE_MODVERSIONS | MODULE_INIT_IGNORE_VERMAGIC,
         ] {
-            let r = finit_module(3, params.as_ptr(), f);
+            let r = finit_module(fd.0, params.as_ptr(), f);
             assert_eq!(r, -1, "flags={f:#x}");
             assert_eq!(errno::get_errno(), errno::ENOSYS, "flags={f:#x}");
         }
@@ -444,8 +425,9 @@ mod tests {
 
     #[test]
     fn test_finit_module_valid_reaches_enosys() {
+        let fd = TestFd::module();
         let params = b"verbose=1\0";
-        let r = finit_module(3, params.as_ptr(), 0);
+        let r = finit_module(fd.0, params.as_ptr(), 0);
         assert_eq!(r, -1);
         assert_eq!(errno::get_errno(), errno::ENOSYS);
     }
@@ -462,37 +444,42 @@ mod tests {
     }
 
     #[test]
-    fn test_delete_module_empty_name_einval() {
+    fn test_delete_module_empty_name_reaches_enosys() {
+        // Linux looks "" up like any name; nothing refuses it.
         let name = b"\0";
         let r = delete_module(name.as_ptr(), 0);
         assert_eq!(r, -1);
-        assert_eq!(errno::get_errno(), errno::EINVAL);
+        assert_eq!(errno::get_errno(), errno::ENOSYS);
     }
 
     #[test]
-    fn test_delete_module_slash_in_name_einval() {
+    fn test_delete_module_slash_in_name_reaches_enosys() {
         let name = b"e1000/foo\0";
         let r = delete_module(name.as_ptr(), 0);
         assert_eq!(r, -1);
-        assert_eq!(errno::get_errno(), errno::EINVAL);
+        // Not a name any module has, but Linux only finds that out.
+        assert_eq!(errno::get_errno(), errno::ENOSYS);
     }
 
     #[test]
-    fn test_delete_module_too_long_name_einval() {
-        // 61 'a' bytes followed by NUL: above MODULE_NAME_MAX=60.
+    fn test_delete_module_long_name_reaches_enosys() {
+        // 61 'a' bytes followed by NUL: Linux copies the first
+        // MODULE_NAME_LEN - 1 and looks those up; length refuses nothing.
         let mut buf = [b'a'; 62];
         buf[61] = 0;
         let r = delete_module(buf.as_ptr(), 0);
         assert_eq!(r, -1);
-        assert_eq!(errno::get_errno(), errno::EINVAL);
+        assert_eq!(errno::get_errno(), errno::ENOSYS);
     }
 
     #[test]
-    fn test_delete_module_unknown_flag_einval() {
+    fn test_delete_module_unknown_flag_reaches_enosys() {
         let name = b"e1000\0";
+        // Linux never judges the flags; they matter only to a module
+        // found in use.
         let r = delete_module(name.as_ptr(), 0x1000);
         assert_eq!(r, -1);
-        assert_eq!(errno::get_errno(), errno::EINVAL);
+        assert_eq!(errno::get_errno(), errno::ENOSYS);
     }
 
     #[test]
@@ -538,8 +525,8 @@ mod tests {
     }
 
     #[test]
-    fn test_delete_module_name_at_max_ok() {
-        // 60 'a' bytes followed by NUL: right at MODULE_NAME_MAX.
+    fn test_delete_module_sixty_byte_name_reaches_enosys() {
+        // 60 'a' bytes followed by NUL.
         let mut buf = [b'a'; 61];
         buf[60] = 0;
         let r = delete_module(buf.as_ptr(), 0);
@@ -553,12 +540,13 @@ mod tests {
 
     #[test]
     fn test_modprobe_dry_run_workflow() {
+        let fd = TestFd::module();
         // modprobe -n e1000:
         //   open("e1000.ko") -> fd
         //   finit_module(fd, "", 0) -> -1, ENOSYS
         //   modprobe prints "FATAL: Module e1000 not found." and exits.
         let params = b"\0";
-        let r = finit_module(3, params.as_ptr(), 0);
+        let r = finit_module(fd.0, params.as_ptr(), 0);
         assert_eq!(r, -1);
         assert_eq!(errno::get_errno(), errno::ENOSYS);
     }
@@ -574,11 +562,12 @@ mod tests {
 
     #[test]
     fn test_libkmod_probe_workflow() {
+        let fd = TestFd::module();
         // libkmod's kmod_module_get_initstate first tries finit_module
         // with IGNORE_MODVERSIONS to check if the kernel supports
         // module loading at all.
         let params = b"\0";
-        let r = finit_module(3, params.as_ptr(), MODULE_INIT_IGNORE_MODVERSIONS);
+        let r = finit_module(fd.0, params.as_ptr(), MODULE_INIT_IGNORE_MODVERSIONS);
         assert_eq!(r, -1);
         assert_eq!(errno::get_errno(), errno::ENOSYS);
         // libkmod sees ENOSYS and reports "module loading not supported".
@@ -619,24 +608,25 @@ mod tests {
     }
 
     #[test]
-    fn test_finit_module_phase111_einval_wins_over_efault() {
-        // Bad flag AND NULL params: Linux checks flags first -> EINVAL.
+    fn test_finit_module_phase111_einval_with_null_params() {
+        // Bad flag AND NULL params: the flags are judged -> EINVAL.
         let r = finit_module(3, ptr::null(), 0x8000);
         assert_eq!(r, -1);
         assert_eq!(errno::get_errno(), errno::EINVAL);
     }
 
     #[test]
-    fn test_finit_module_phase111_einval_wins_over_ebadf_and_efault() {
-        // All three malformed: Linux still returns EINVAL first.
+    fn test_finit_module_phase111_einval_wins_over_ebadf_with_null_params() {
+        // Bad flag, bad fd, NULL params: Linux still returns EINVAL first.
         let r = finit_module(-1, ptr::null(), 0x8000);
         assert_eq!(r, -1);
         assert_eq!(errno::get_errno(), errno::EINVAL);
     }
 
     #[test]
-    fn test_finit_module_phase111_ebadf_wins_over_efault() {
+    fn test_finit_module_phase111_ebadf_with_null_params() {
         // Good flags, bad fd, NULL params: flags pass, fdget fails -> EBADF.
+        // (The params would never be read in any case.)
         let r = finit_module(-1, ptr::null(), 0);
         assert_eq!(r, -1);
         assert_eq!(errno::get_errno(), errno::EBADF);
@@ -664,10 +654,11 @@ mod tests {
 
     #[test]
     fn test_finit_module_phase111_all_known_flag_bits_reach_enosys() {
+        let fd = TestFd::module();
         // 0x07 = IGNORE_MODVERSIONS | IGNORE_VERMAGIC | COMPRESSED_FILE.
         // No unknown bits -> pass the mask check -> reach ENOSYS.
         let params = b"\0";
-        let r = finit_module(3, params.as_ptr(), MODULE_INIT_FLAGS_VALID);
+        let r = finit_module(fd.0, params.as_ptr(), MODULE_INIT_FLAGS_VALID);
         assert_eq!(r, -1);
         assert_eq!(errno::get_errno(), errno::ENOSYS);
     }
@@ -683,13 +674,14 @@ mod tests {
     }
 
     #[test]
-    fn test_finit_module_phase111_i32_max_fd_reaches_enosys() {
-        // i32::MAX is >= 0, so it passes the fd bound check and the
-        // call proceeds to the ENOSYS stub (we don't open the fd).
+    fn test_finit_module_phase111_i32_max_fd_ebadf() {
+        // i32::MAX is not negative, but it is not open either: fdget
+        // finds nothing -> EBADF. (This passed through to ENOSYS while
+        // only a negative fd was refused.)
         let params = b"\0";
         let r = finit_module(i32::MAX, params.as_ptr(), 0);
         assert_eq!(r, -1);
-        assert_eq!(errno::get_errno(), errno::ENOSYS);
+        assert_eq!(errno::get_errno(), errno::EBADF);
     }
 
     #[test]
@@ -701,32 +693,35 @@ mod tests {
         assert_eq!(r1, -1);
         assert_eq!(errno::get_errno(), errno::EINVAL);
 
-        let r2 = finit_module(3, params.as_ptr(), 0);
+        let fd = TestFd::module();
+        let r2 = finit_module(fd.0, params.as_ptr(), 0);
         assert_eq!(r2, -1);
         assert_eq!(errno::get_errno(), errno::ENOSYS);
     }
 
     #[test]
     fn test_finit_module_phase111_modprobe_force_vermagic_workflow() {
+        let fd = TestFd::module();
         // `modprobe --force-vermagic e1000` opens the .ko, then calls
         //   finit_module(fd, "", MODULE_INIT_IGNORE_VERMAGIC)
         // libkmod combines IGNORE_VERMAGIC + COMPRESSED_FILE when the
         // .ko on disk is xz-compressed (which is the Debian default).
         let params = b"\0";
         let flags = MODULE_INIT_IGNORE_VERMAGIC | MODULE_INIT_COMPRESSED_FILE;
-        let r = finit_module(3, params.as_ptr(), flags);
+        let r = finit_module(fd.0, params.as_ptr(), flags);
         assert_eq!(r, -1);
         assert_eq!(errno::get_errno(), errno::ENOSYS);
     }
 
     #[test]
     fn test_finit_module_phase111_systemd_modules_load_workflow() {
+        let fd = TestFd::module();
         // systemd-modules-load reads /etc/modules-load.d/*.conf and
         // calls finit_module(fd, "", 0) for each entry. It expects
         // ENOSYS to silently disable module loading rather than
         // logging EINVAL/EBADF noise into the journal.
         let params = b"\0";
-        let r = finit_module(7, params.as_ptr(), 0);
+        let r = finit_module(fd.0, params.as_ptr(), 0);
         assert_eq!(r, -1);
         assert_eq!(errno::get_errno(), errno::ENOSYS);
     }
@@ -740,6 +735,64 @@ mod tests {
         let params = b"\0";
         let r = finit_module(3, params.as_ptr(), u32::MAX);
         assert_eq!(r, -1);
+        assert_eq!(errno::get_errno(), errno::EINVAL);
+    }
+
+    // -----------------------------------------------------------------
+    // finit_module's descriptor: `fdget`, then FMODE_READ
+    //
+    // `idempotent_init_module` refuses `!f || !(f->f_mode & FMODE_READ)`
+    // with EBADF, and `fdget` (unlike `fdget_raw`) does not find an
+    // `O_PATH` descriptor. Only a negative fd used to be refused.
+    // -----------------------------------------------------------------
+
+    #[test]
+    fn test_finit_module_unopened_fd_ebadf() {
+        let fd = TestFd::module();
+        let closed = fd.0;
+        drop(fd);
+        errno::set_errno(0);
+        assert_eq!(finit_module(closed, b"\0".as_ptr(), 0), -1);
+        assert_eq!(errno::get_errno(), errno::EBADF);
+    }
+
+    #[test]
+    fn test_finit_module_o_path_fd_ebadf() {
+        let fd = TestFd::open(crate::fcntl::O_PATH);
+        errno::set_errno(0);
+        assert_eq!(finit_module(fd.0, b"\0".as_ptr(), 0), -1);
+        assert_eq!(errno::get_errno(), errno::EBADF);
+    }
+
+    #[test]
+    fn test_finit_module_write_only_fd_ebadf() {
+        let fd = TestFd::open(crate::fcntl::O_WRONLY);
+        errno::set_errno(0);
+        assert_eq!(finit_module(fd.0, b"\0".as_ptr(), 0), -1);
+        assert_eq!(errno::get_errno(), errno::EBADF);
+    }
+
+    #[test]
+    fn test_finit_module_access_mode_three_fd_ebadf() {
+        // Linux gives access mode 3 neither FMODE_READ nor FMODE_WRITE.
+        let fd = TestFd::open(crate::fcntl::O_ACCMODE);
+        errno::set_errno(0);
+        assert_eq!(finit_module(fd.0, b"\0".as_ptr(), 0), -1);
+        assert_eq!(errno::get_errno(), errno::EBADF);
+    }
+
+    #[test]
+    fn test_finit_module_read_write_fd_reaches_enosys() {
+        let fd = TestFd::open(crate::fcntl::O_RDWR);
+        errno::set_errno(0);
+        assert_eq!(finit_module(fd.0, b"\0".as_ptr(), 0), -1);
+        assert_eq!(errno::get_errno(), errno::ENOSYS);
+    }
+
+    #[test]
+    fn test_finit_module_einval_beats_unopened_fd() {
+        errno::set_errno(0);
+        assert_eq!(finit_module(900, b"\0".as_ptr(), 0x8000), -1);
         assert_eq!(errno::get_errno(), errno::EINVAL);
     }
 
@@ -813,7 +866,7 @@ mod tests {
 
     #[test]
     fn test_init_module_phase128_len_below_hdr_with_null_params_is_enoexec() {
-        // Length check also wins over the NULL-params EFAULT.
+        // The length decides; NULL params are never looked at.
         let buf = [0u8; 64];
         let r = init_module(buf.as_ptr(), 32, ptr::null());
         assert_eq!(r, -1);
@@ -840,13 +893,15 @@ mod tests {
     }
 
     #[test]
-    fn test_init_module_phase128_null_params_with_valid_len_efault() {
-        // After length and image checks pass, NULL params triggers
-        // Linux's `strndup_user(uargs, ...)` EFAULT path.
+    fn test_init_module_phase128_null_params_with_valid_len_reaches_enosys() {
+        // After the length and image checks pass, the call ends where
+        // `load_module` would begin -- and Linux's `strndup_user(uargs)` is
+        // deep inside that, after the image is validated as a module. It
+        // used to answer EFAULT here, as if the copy came first.
         let buf = [0u8; 128];
         let r = init_module(buf.as_ptr(), 128, ptr::null());
         assert_eq!(r, -1);
-        assert_eq!(errno::get_errno(), errno::EFAULT);
+        assert_eq!(errno::get_errno(), errno::ENOSYS);
     }
 
     #[test]
@@ -1088,9 +1143,9 @@ mod tests {
             assert_eq!(errno::get_errno(), errno::EPERM);
         }
 
-        /// finit_module with NULL params → EPERM (NOT EFAULT).
+        /// finit_module with NULL params → EPERM (the params are never read).
         #[test]
-        fn test_finit_module_phase174_eperm_beats_efault() {
+        fn test_finit_module_phase174_eperm_with_null_params() {
             let _g = CapGuard::snapshot();
             drop_cap_sys_module();
             errno::set_errno(0);
@@ -1120,9 +1175,9 @@ mod tests {
             assert_eq!(errno::get_errno(), errno::EPERM);
         }
 
-        /// delete_module with bad flags → EPERM (NOT EINVAL).
+        /// delete_module with unknown flags → EPERM.
         #[test]
-        fn test_delete_module_phase174_eperm_beats_einval_flags() {
+        fn test_delete_module_phase174_eperm_whatever_the_flags() {
             let _g = CapGuard::snapshot();
             drop_cap_sys_module();
             errno::set_errno(0);
@@ -1130,9 +1185,9 @@ mod tests {
             assert_eq!(errno::get_errno(), errno::EPERM);
         }
 
-        /// delete_module with empty name → EPERM (NOT EINVAL).
+        /// delete_module with an empty name → EPERM.
         #[test]
-        fn test_delete_module_phase174_eperm_beats_einval_empty_name() {
+        fn test_delete_module_phase174_eperm_whatever_the_name() {
             let _g = CapGuard::snapshot();
             drop_cap_sys_module();
             errno::set_errno(0);
@@ -1188,6 +1243,7 @@ mod tests {
         /// reaches ENOSYS — verifies the gate doesn't fire spuriously.
         #[test]
         fn test_module_phase174_sentinel_cap_held_reaches_enosys() {
+            let fd = TestFd::module();
             let _g = CapGuard::snapshot();
             assert!(crate::sys_capability::has_capability(
                 crate::sys_capability::CAP_SYS_MODULE,
@@ -1197,7 +1253,7 @@ mod tests {
             assert_eq!(init_module(buf.as_ptr(), 128, b"\0".as_ptr()), -1);
             assert_eq!(errno::get_errno(), errno::ENOSYS);
             errno::set_errno(0);
-            assert_eq!(finit_module(3, b"\0".as_ptr(), 0), -1);
+            assert_eq!(finit_module(fd.0, b"\0".as_ptr(), 0), -1);
             assert_eq!(errno::get_errno(), errno::ENOSYS);
             errno::set_errno(0);
             assert_eq!(delete_module(b"foo\0".as_ptr(), 0), -1);

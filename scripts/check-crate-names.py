@@ -72,6 +72,9 @@ import re
 import sys
 from pathlib import Path
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import gittree  # noqa: E402
+
 REPO = Path(__file__).resolve().parent.parent
 
 NAME_RE = re.compile(r'^\s*name\s*=\s*"([^"]+)"', re.M)
@@ -100,10 +103,18 @@ def crates(root: Path) -> dict[str, str]:
     A `Cargo.toml` with no `src/` beside it is a workspace root, not a crate.
     """
     found: dict[str, str] = {}
-    for tom in root.rglob("Cargo.toml"):
-        parts = tom.parts
-        if "target" in parts or ".git" in parts:
+    # Walked through `gittree.WorkTree`, which prunes `target*/` and `.git`
+    # *while walking*. This was `root.rglob("Cargo.toml")` with the build
+    # directories filtered out of the results afterwards -- which descends
+    # into every one of them first. On a lane whose `target/` holds a
+    # `-Zbuild-std` userland that is minutes of stat() per walk, inside the
+    # push hook: measured on lane C 2026-09-25, the pruned walk takes 0.3 s
+    # and finds the same 421 manifests git tracks; the unpruned one was still
+    # going after eighteen minutes.
+    for rel in gittree.WorkTree(str(root)).files_under(""):
+        if rel != "Cargo.toml" and not rel.endswith("/Cargo.toml"):
             continue
+        tom = root / rel
         if not (tom.parent / "src").is_dir():
             continue
         m = NAME_RE.search(tom.read_text(encoding="utf-8", errors="surrogateescape"))

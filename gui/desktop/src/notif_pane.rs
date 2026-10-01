@@ -55,8 +55,11 @@
 use appearance::{Palette, Surface, readable_on};
 use guitk::color::Color;
 use guitk::event::{EventResult, Key, KeyEvent, MouseButton, MouseEvent, MouseEventKind};
+use guitk::frame::Rect;
 use guitk::idseq::IdSeq;
+use guitk::motion::Motion;
 use guitk::render::{FontWeightHint, RenderCommand, TextOverflow};
+use guitk::slider::{Look, Placement, Response, Slider};
 use guitk::style::CornerRadii;
 use guitk::text;
 use guitk::wheel;
@@ -101,6 +104,11 @@ use notifsettings::Importance;
 
 /// Width of the notification pane in pixels.
 const PANE_WIDTH: f32 = 380.0;
+
+/// How long the pane takes to slide in or out, as designed: against the
+/// standard transition ([`Motion::STANDARD_MS`]), so the desktop's motion
+/// scales it with everything else that moves.
+const SLIDE_MS: u32 = 200;
 
 /// Maximum number of stored notifications.
 const MAX_NOTIFICATIONS: usize = 50;
@@ -184,6 +192,10 @@ const TOGGLE_HEIGHT: f32 = 22.0;
 /// Slider dimensions.
 const SLIDER_WIDTH: f32 = 140.0;
 const SLIDER_HEIGHT: f32 = 6.0;
+/// How far down its row a slider's track is drawn.
+const SLIDER_TRACK_DY: f32 = 14.0;
+/// A slider's thumb.
+const SLIDER_THUMB: f32 = 12.0;
 
 /// Quick-setting row height.
 const QS_ROW_HEIGHT: f32 = 36.0;
@@ -446,7 +458,10 @@ pub enum PaneState {
 }
 
 impl PaneState {
-    /// Returns the fraction of the pane that is currently visible (0.0 = hidden, 1.0 = full).
+    /// How far through its slide the pane is, as a fraction open: 0.0 hidden,
+    /// 1.0 fully open, a slide's progress between -- in the slide's own time.
+    /// The pane is *drawn* at [`NotificationPane::shown`], which puts this
+    /// through the motion's curve.
     #[must_use]
     pub fn visibility(self) -> f32 {
         match self {
@@ -548,6 +563,14 @@ pub struct NotificationPane {
     ids: IdSeq,
     /// Quick settings state.
     quick_settings: QuickSettingsState,
+    /// The quick settings' volume and brightness sliders, in that order.
+    ///
+    /// The levels themselves stay in `quick_settings`, which the media keys
+    /// and the shell also change; a slider's value is copied in from there
+    /// before each use. What the sliders hold is the gesture -- which one is
+    /// being dragged, where it was taken hold of, where the drag began -- and
+    /// whether the pointer is where a press would take hold of a thumb.
+    qs_sliders: [Slider; 2],
     /// Per-app notification settings.
     app_settings: Vec<AppNotifSettings>,
     /// Scroll offset in the notification list (pixels).
@@ -560,9 +583,10 @@ pub struct NotificationPane {
     hovered_notif: Option<usize>,
     /// Whether the settings sub-view is showing.
     show_settings: bool,
-    /// Animation speed (fraction per second).
-    anim_speed: f32,
-    /// How far out the pane was when [`show`](Self::show) or
+    /// How the slide moves: its length and its curve -- the desktop's
+    /// ([`set_motion`](Self::set_motion)).
+    motion: Motion,
+    /// How far out the pane was *drawn* when [`show`](Self::show) or
     /// [`hide`](Self::hide) last landed it on its destination.
     ///
     /// Only [`begin_slide`](Self::begin_slide) reads it, and only to reverse a
@@ -591,13 +615,14 @@ impl NotificationPane {
             notifications: Vec::new(),
             ids: IdSeq::new(),
             quick_settings: QuickSettingsState::default(),
+            qs_sliders: [Self::level_slider(), Self::level_slider()],
             app_settings: Vec::new(),
             scroll_offset: 0.0,
             events: Vec::new(),
             current_time: 0,
             hovered_notif: None,
             show_settings: false,
-            anim_speed: 5.0, // complete slide in ~0.2s
+            motion: Motion::STANDARD,
             slide_from: 0.0,
             screen_height: DEFAULT_SCREEN_HEIGHT,
         }
@@ -626,7 +651,7 @@ impl NotificationPane {
     /// [`begin_slide`](Self::begin_slide) straight after this to play the
     /// animation, exactly as `ShellSession::begin_overview_fade` does.
     pub fn show(&mut self) {
-        self.slide_from = self.state.visibility();
+        self.slide_from = self.shown();
         self.state = PaneState::Visible;
         self.show_settings = false;
     }
@@ -640,8 +665,13 @@ impl NotificationPane {
     /// clearing an unread badge — should not be made to wait for an animation
     /// that may not be running at all.
     pub fn hide(&mut self) {
+        // A drag the pane is closed under was never let go of: the level goes
+        // back to where the drag began, as Escape would put it.
+        for slot in 0..self.qs_sliders.len() {
+            self.qs_slider_input(slot, Slider::cancel);
+        }
         if self.state != PaneState::Hidden {
-            self.slide_from = self.state.visibility();
+            self.slide_from = self.shown();
             self.state = PaneState::Hidden;
             self.events.push(NotifPaneEvent::Closed);
         }
@@ -676,19 +706,69 @@ impl NotificationPane {
     /// smooth. `slide_from` is what the preceding [`show`](Self::show) or
     /// [`hide`](Self::hide) recorded on its way past.
     ///
+    /// The slide resumes from where the pane was *drawn*, not from where the
+    /// last slide's clock stood: under a curve that arrives and leaves at
+    /// different paces those are different places, and the slide starts at
+    /// the moment its own curve has the pane where it is
+    /// ([`Motion::when_arriving_at`]).
+    ///
     /// A no-op mid-slide: a second call must not restart an animation that is
     /// already playing, or a held key would leave the pane permanently at the
-    /// first frame.
+    /// first frame. A no-op, too, under a still motion, and where there is no
+    /// way to go -- a pane shown that was already all the way open.
     pub fn begin_slide(&mut self) {
+        if self.motion.is_still() {
+            return;
+        }
         self.state = match self.state {
-            // Already `slide_from` of the way in, so that much of the slide is
-            // done.
-            PaneState::Visible => PaneState::SlideIn(self.slide_from),
+            PaneState::Visible if self.slide_from < 1.0 => {
+                PaneState::SlideIn(self.motion.when_arriving_at(self.slide_from))
+            }
             // `SlideOut`'s progress counts *down* from full visibility, so the
             // part already played is the part not yet visible.
-            PaneState::Hidden => PaneState::SlideOut(1.0 - self.slide_from),
-            already_moving => already_moving,
+            PaneState::Hidden if self.slide_from > 0.0 => {
+                PaneState::SlideOut(self.motion.when_leaving_at(1.0 - self.slide_from))
+            }
+            unmoved => unmoved,
         };
+    }
+
+    /// Move as `motion` says from now on: the slide's length and its curve.
+    ///
+    /// Under a still motion a slide in progress lands where it was going: the
+    /// user has just asked for nothing to move, and finishing this one is a
+    /// stranger answer than being there.
+    pub fn set_motion(&mut self, motion: Motion) {
+        self.motion = motion;
+        if motion.is_still() {
+            self.state = match self.state {
+                PaneState::SlideIn(_) => PaneState::Visible,
+                PaneState::SlideOut(_) => PaneState::Hidden,
+                at_rest => at_rest,
+            };
+        }
+    }
+
+    /// How the slide moves now.
+    #[must_use]
+    pub const fn motion(&self) -> Motion {
+        self.motion
+    }
+
+    /// How much of the pane is on screen, as it is drawn and hit-tested:
+    /// 0.0 hidden, 1.0 fully open.
+    ///
+    /// The slide's progress through the motion's curve, and never past fully
+    /// open: the pane is anchored to the screen's edge, and a spring that
+    /// carried it further would open a gap between the two.
+    #[must_use]
+    pub fn shown(&self) -> f32 {
+        match self.state {
+            PaneState::Hidden => 0.0,
+            PaneState::Visible => 1.0,
+            PaneState::SlideIn(p) => self.motion.arriving(p).min(1.0),
+            PaneState::SlideOut(p) => 1.0 - self.motion.leaving(p),
+        }
     }
 
     /// Whether a slide is playing, and so whether another frame is owed.
@@ -731,7 +811,17 @@ impl NotificationPane {
 
     /// Advance animation by `dt` seconds.
     pub fn tick(&mut self, dt: f32) {
-        let step = self.anim_speed * dt;
+        let duration_ms = self.motion.duration_ms(SLIDE_MS);
+        // Under a still motion whatever is sliding is where it was going.
+        #[expect(
+            clippy::cast_precision_loss,
+            reason = "a slide's milliseconds are far inside f32's exact range"
+        )]
+        let step = if duration_ms == 0 {
+            1.0
+        } else {
+            dt * 1000.0 / duration_ms as f32
+        };
         match self.state {
             PaneState::SlideIn(p) => {
                 let next = (p + step).min(1.0);
@@ -771,8 +861,22 @@ impl NotificationPane {
         // so this is where the scroll bound learns about it.
         self.note_screen_height(screen_height);
 
-        let vis = self.state.visibility();
+        let vis = self.shown();
         let pane_x = screen_width - PANE_WIDTH * vis;
+
+        // A slider being dragged has the pointer until the button comes up,
+        // wherever it goes: leaving the pane is not letting go, and a release
+        // outside it must end the drag rather than dismiss the pane.
+        if let Some(slot) = self.qs_sliders.iter().position(Slider::is_dragging) {
+            let local = MouseEvent {
+                x: event.x - pane_x,
+                y: event.y - Self::qs_start_y(),
+                kind: event.kind.clone(),
+            };
+            let placement = Self::qs_slider_placement(slot, 0.0);
+            self.qs_slider_input(slot, |s| s.handle_mouse(&placement, &local));
+            return EventResult::Consumed;
+        }
 
         // Click outside pane dismisses it.
         if event.x < pane_x {
@@ -803,6 +907,17 @@ impl NotificationPane {
             }
             MouseEventKind::Move => {
                 self.update_hover(rx, ry, screen_height);
+                // The sliders light their thumbs when the pointer is where a
+                // press would take hold of one.
+                let local = MouseEvent {
+                    x: rx,
+                    y: ry - Self::qs_start_y(),
+                    kind: MouseEventKind::Move,
+                };
+                for slot in 0..self.qs_sliders.len() {
+                    let placement = Self::qs_slider_placement(slot, 0.0);
+                    self.qs_slider_input(slot, |s| s.handle_mouse(&placement, &local));
+                }
                 EventResult::Consumed
             }
             _ => EventResult::Consumed,
@@ -816,6 +931,12 @@ impl NotificationPane {
         }
 
         if event.pressed && event.key == Key::Escape {
+            // Escape in the middle of a drag takes the drag back and leaves
+            // the pane open: the user is undoing the gesture, not leaving.
+            if let Some(slot) = self.qs_sliders.iter().position(Slider::is_dragging) {
+                self.qs_slider_input(slot, Slider::cancel);
+                return EventResult::Consumed;
+            }
             self.hide();
             return EventResult::Consumed;
         }
@@ -844,6 +965,16 @@ impl NotificationPane {
                 Key::PageUp => {
                     self.scroll_offset -= self.list_height();
                     self.clamp_scroll();
+                    return EventResult::Consumed;
+                }
+                // With or without Ctrl: the top and the bottom of the history
+                // (`design-decisions.md` §1416).
+                Key::Home => {
+                    self.scroll_offset = 0.0;
+                    return EventResult::Consumed;
+                }
+                Key::End => {
+                    self.scroll_offset = self.max_scroll();
                     return EventResult::Consumed;
                 }
                 _ => {}
@@ -1061,6 +1192,67 @@ impl NotificationPane {
         Self::qs_toggle_top(QuickSetting::COUNT) + QS_SLIDER_GAP + (slot as f32) * QS_ROW_HEIGHT
     }
 
+    /// A level slider, 0 to 100 in whole steps.
+    fn level_slider() -> Slider {
+        Slider::new(0.0, 100.0, 0.0).with_step(1.0)
+    }
+
+    /// Where the `slot`-th slider (`0` is volume, `1` brightness) is drawn,
+    /// for a quick-settings block whose top is at `top`.
+    ///
+    /// The one statement of the geometry: [`Self::render_slider_row`] draws
+    /// from it and every input routed to a slider is measured against it, with
+    /// `top` 0.0 for input, which arrives in the block's own coordinates.
+    fn qs_slider_placement(slot: usize, top: f32) -> Placement {
+        let track_x = PANE_WIDTH - PANE_PADDING - SLIDER_WIDTH - PANE_PADDING;
+        Placement::horizontal(
+            Rect::new(
+                track_x,
+                top + Self::qs_slider_top(slot) + SLIDER_TRACK_DY,
+                SLIDER_WIDTH,
+                SLIDER_HEIGHT,
+            ),
+            SLIDER_THUMB,
+        )
+    }
+
+    /// The level the `slot`-th slider shows.
+    const fn qs_level(&self, slot: usize) -> u8 {
+        if slot == 0 {
+            self.quick_settings.volume
+        } else {
+            self.quick_settings.brightness
+        }
+    }
+
+    /// Hand the `slot`-th slider an input, with its value brought up to date
+    /// first, and put whatever it did to the value into the level.
+    ///
+    /// Every kind of event sets the level: the pane *is* where the level
+    /// lives, so there is nothing to preview separately from saving -- a drag
+    /// changes the volume as it goes, and Escape puts it back.
+    fn qs_slider_input(&mut self, slot: usize, input: impl FnOnce(&mut Slider) -> Response) {
+        let level = self.qs_level(slot);
+        let Some(slider) = self.qs_sliders.get_mut(slot) else {
+            return;
+        };
+        slider.set_value(f64::from(level));
+        let Some(event) = input(slider).event() else {
+            return;
+        };
+        #[allow(
+            clippy::cast_possible_truncation,
+            clippy::cast_sign_loss,
+            reason = "rounded and clamped to 0..=100 first"
+        )]
+        let value = event.value().round().clamp(0.0, 100.0) as u8;
+        if slot == 0 {
+            self.set_volume(value);
+        } else {
+            self.quick_settings.brightness = value;
+        }
+    }
+
     /// What the quick-settings block put at `local_y`, measured from the
     /// block's own top.
     ///
@@ -1243,7 +1435,7 @@ impl NotificationPane {
             return Vec::new();
         }
 
-        let vis = self.state.visibility();
+        let vis = self.shown();
         let pane_x = screen_width - PANE_WIDTH * vis;
         let mut cmds = Vec::new();
 
@@ -1459,24 +1651,10 @@ impl NotificationPane {
         }
 
         // Volume slider.
-        self.render_slider_row(
-            p,
-            cmds,
-            PANE_PADDING,
-            start_y + Self::qs_slider_top(0),
-            "Volume",
-            self.quick_settings.volume,
-        );
+        self.render_slider_row(p, cmds, start_y, 0, "Volume");
 
         // Brightness slider.
-        self.render_slider_row(
-            p,
-            cmds,
-            PANE_PADDING,
-            start_y + Self::qs_slider_top(1),
-            "Brightness",
-            self.quick_settings.brightness,
-        );
+        self.render_slider_row(p, cmds, start_y, 1, "Brightness");
 
         Self::qs_slider_top(1) + QS_ROW_HEIGHT
     }
@@ -1502,47 +1680,38 @@ impl NotificationPane {
             overflow: TextOverflow::Ellipsis,
         });
 
-        // Toggle pill.
+        // The switch, through the toolkit's. This pane drew its own and
+        // filled the knob with `text` -- the eighteenth copy of the defect
+        // `guitk::switch` exists to end: on the accent track that is a light
+        // grey on a light blue, 1.35:1 on the stock theme, so the one part of
+        // the switch that says it is on was the part you could not see. The
+        // toolkit's knob is derived from the track. The geometry is the same:
+        // this pane's knob was already inset two pixels all round.
         let pill_x = PANE_WIDTH - PANE_PADDING - TOGGLE_WIDTH - PANE_PADDING;
         let pill_bg = if enabled { p.accent } else { p.surface2 };
-        cmds.push(RenderCommand::FillRect {
-            x: pill_x,
-            y: y + 6.0,
-            width: TOGGLE_WIDTH,
-            height: TOGGLE_HEIGHT,
-            color: pill_bg,
-            corner_radii: CornerRadii::all(TOGGLE_HEIGHT / 2.0),
-        });
-
-        // Toggle knob.
-        let knob_radius = (TOGGLE_HEIGHT - 4.0) / 2.0;
-        let knob_x = if enabled {
-            pill_x + TOGGLE_WIDTH - knob_radius * 2.0 - 2.0
-        } else {
-            pill_x + 2.0
-        };
-        cmds.push(RenderCommand::FillRect {
-            x: knob_x,
-            y: y + 8.0,
-            width: knob_radius * 2.0,
-            height: knob_radius * 2.0,
-            color: p.text,
-            corner_radii: CornerRadii::all(knob_radius),
-        });
+        cmds.extend(guitk::switch::shapes(
+            p,
+            guitk::frame::Rect::new(pill_x, y + 6.0, TOGGLE_WIDTH, TOGGLE_HEIGHT),
+            enabled,
+            pill_bg,
+        ));
     }
 
+    /// Draw the `slot`-th slider's row -- its label and level, and the
+    /// slider -- in a quick-settings block whose top is at `start_y`.
     fn render_slider_row(
         &self,
         p: &Palette,
         cmds: &mut Vec<RenderCommand>,
-        x: f32,
-        y: f32,
+        start_y: f32,
+        slot: usize,
         label: &str,
-        value: u8,
     ) {
+        let value = self.qs_level(slot);
+        let y = start_y + Self::qs_slider_top(slot);
         // Label + value.
         cmds.push(RenderCommand::Text {
-            x,
+            x: PANE_PADDING,
             y: y + 8.0,
             text: format!("{label}  {value}%"),
             color: p.text,
@@ -1552,22 +1721,22 @@ impl NotificationPane {
             overflow: TextOverflow::Ellipsis,
         });
 
-        // Slider track.
-        let track_x = PANE_WIDTH - PANE_PADDING - SLIDER_WIDTH - PANE_PADDING;
-        let track_y = y + 14.0;
-        crate::slider::Slider {
-            x: track_x,
-            y: track_y,
-            width: SLIDER_WIDTH,
-            height: SLIDER_HEIGHT,
-            frac: value as f32 / 100.0,
-            thumb: 12.0,
-            track: p.surface2,
-            fill: p.accent,
+        // The slider, showing the level as it is now: the level can change
+        // under it (a media key), and the slider's own copy is refreshed only
+        // when it is handed an input.
+        let Some(slider) = self.qs_sliders.get(slot) else {
+            return;
+        };
+        let mut shown = slider.clone();
+        shown.set_value(f64::from(value));
+        shown.draw(
+            cmds,
             p,
-            alpha: u8::MAX,
-        }
-        .draw(cmds);
+            &Self::qs_slider_placement(slot, start_y),
+            Look::accent(p, p.surface2),
+            false,
+            0.0,
+        );
     }
 
     fn render_notifications(
@@ -1842,18 +2011,22 @@ impl NotificationPane {
                 overflow: TextOverflow::Ellipsis,
             });
 
-            // Enabled toggle.
+            // Enabled toggle: the toolkit's switch, knob and all, as the quick
+            // settings above it draw theirs. It was a bare pill -- a coloured
+            // capsule with no knob -- so "on" and "off" differed only by hue,
+            // which is exactly the difference a colour-blind reader cannot
+            // see; the knob's side says it without colour. Green rather than
+            // the accent: an app allowed to notify is a state, not a choice
+            // being marked.
             let (pill_x, pill_y, pill_w, pill_h) = Self::app_toggle_rect(y);
             let enabled = app.importance != Importance::Silent;
             let pill_bg = if enabled { p.green } else { p.surface2 };
-            cmds.push(RenderCommand::FillRect {
-                x: pill_x,
-                y: pill_y,
-                width: pill_w,
-                height: pill_h,
-                color: pill_bg,
-                corner_radii: CornerRadii::all(pill_h / 2.0),
-            });
+            cmds.extend(guitk::switch::shapes(
+                p,
+                guitk::frame::Rect::new(pill_x, pill_y, pill_w, pill_h),
+                enabled,
+                pill_bg,
+            ));
 
             // Status text row.
             let mut status_parts = Vec::new();
@@ -1956,18 +2129,14 @@ impl NotificationPane {
                 }
             }
             Some(hit @ (QsHit::Volume | QsHit::Brightness)) => {
-                let track_x = PANE_WIDTH - PANE_PADDING - SLIDER_WIDTH - PANE_PADDING;
-                if rx < track_x || rx > track_x + SLIDER_WIDTH {
-                    return;
-                }
-                let frac = ((rx - track_x) / SLIDER_WIDTH).clamp(0.0, 1.0);
-                #[allow(clippy::cast_sign_loss, clippy::cast_possible_truncation)]
-                let value = (frac * 100.0) as u8;
-                if hit == QsHit::Volume {
-                    self.set_volume(value);
-                } else {
-                    self.quick_settings.brightness = value;
-                }
+                // A press on the slider's row goes to the slider, which takes
+                // hold of the thumb if it is near it and otherwise moves the
+                // thumb to the press -- and in either case holds it, so the
+                // press can become a drag. The label to its left is not the
+                // slider's, and the slider says so by ignoring it.
+                let slot = usize::from(hit == QsHit::Brightness);
+                let placement = Self::qs_slider_placement(slot, 0.0);
+                self.qs_slider_input(slot, |s| s.press(&placement, rx, local_y));
             }
             None => {}
         }
@@ -2338,6 +2507,97 @@ mod tests {
     // the arrangement that once put every notification card 76 px from where
     // it was drawn. These tests read the rows out of the commands the
     // renderer actually pushed and probe those.
+
+    /// The quick settings' switches: a knob on the accent track is legible on
+    /// it, in both modes and for every accent the palette offers.
+    ///
+    /// The pane drew its own switch with the knob in `text` -- a light grey on
+    /// a light accent, 1.35:1 on the stock theme -- after the rest of the
+    /// shell had been moved off exactly that defect. Its knob is the
+    /// toolkit's now, derived from the track.
+    #[test]
+    fn an_apps_switch_says_on_or_off_by_where_its_knob_is() {
+        // **Without colour.** The per-app toggle was a bare pill whose only
+        // difference between on and off was its hue -- green or grey -- the
+        // one difference a colour-blind reader cannot see. The toolkit's
+        // switch puts its knob at the end that says which.
+        let mut pane = settings_pane(2);
+        pane.app_settings[0].importance = Importance::Silent;
+        let knob = TOGGLE_HEIGHT - 2.0 * guitk::switch::INSET;
+        let knobs: Vec<f32> = app_settings_commands(&pane)
+            .iter()
+            .filter_map(|cmd| match cmd {
+                RenderCommand::FillRect {
+                    x, width, height, ..
+                } if (*width - knob).abs() < f32::EPSILON
+                    && (*height - knob).abs() < f32::EPSILON =>
+                {
+                    Some(*x)
+                }
+                _ => None,
+            })
+            .collect();
+        assert_eq!(knobs.len(), 2, "a knob per app: {knobs:?}");
+        let (track_x, _, track_w, _) = NotificationPane::app_toggle_rect(0.0);
+        let middle = track_x + track_w / 2.0;
+        assert!(knobs[0] < middle, "a silenced app's knob is at the off end");
+        assert!(
+            knobs[1] >= middle,
+            "an app that may notify has its knob at the on end"
+        );
+    }
+
+    #[test]
+    fn a_quick_setting_switch_that_is_on_shows_its_knob() {
+        for light in [false, true] {
+            let mut p = Palette::for_mode(light);
+            for accent in [
+                p.blue,
+                p.green,
+                p.yellow,
+                p.peach,
+                p.lavender,
+                p.rosewater,
+                p.sky,
+            ] {
+                p.accent = accent;
+                let mut pane = NotificationPane::new();
+                pane.state = PaneState::Visible;
+                for qs in QuickSetting::all() {
+                    if !pane.quick_setting_value(*qs) {
+                        pane.quick_settings.toggle(*qs);
+                    }
+                }
+                let mut cmds = Vec::new();
+                pane.render_quick_settings(&p, &mut cmds, 0.0);
+                let knob = TOGGLE_HEIGHT - 2.0 * guitk::switch::INSET;
+                let knobs: Vec<Color> = cmds
+                    .iter()
+                    .filter_map(|cmd| match cmd {
+                        RenderCommand::FillRect {
+                            width,
+                            height,
+                            color,
+                            ..
+                        } if (*width - knob).abs() < f32::EPSILON
+                            && (*height - knob).abs() < f32::EPSILON =>
+                        {
+                            Some(*color)
+                        }
+                        _ => None,
+                    })
+                    .collect();
+                assert_eq!(knobs.len(), QuickSetting::COUNT, "a knob per switch");
+                for ink in knobs {
+                    let c = appearance::contrast_ratio(accent, ink);
+                    assert!(
+                        c >= 4.5,
+                        "a knob on {accent:?} (light={light}) is {ink:?}, {c:.2}:1"
+                    );
+                }
+            }
+        }
+    }
 
     /// Top of every toggle row the renderer drew, recovered from the pill it
     /// paints six pixels down.
@@ -2943,6 +3203,17 @@ mod tests {
         assert_eq!(pane.scroll_offset, 0.0);
     }
 
+    /// Home and End reach the top and bottom of the history in one press.
+    #[test]
+    fn home_and_end_reach_the_ends_of_the_history() {
+        let mut pane = scrollable_pane(40);
+        assert!(pane.max_scroll() > 0.0, "precondition: the list scrolls");
+        press_key(&mut pane, Key::End);
+        assert_eq!(pane.scroll_offset, pane.max_scroll());
+        press_key(&mut pane, Key::Home);
+        assert_eq!(pane.scroll_offset, 0.0);
+    }
+
     /// A page is the pane's own height, not a constant that happens to be near
     /// it — otherwise the step is wrong on every screen but one.
     #[test]
@@ -3358,25 +3629,135 @@ mod tests {
     /// from the end it was heading for. Rewinding to zero instead would snap
     /// the pane fully open and then slide it out — a visible jump in exactly
     /// the case the animation exists to smooth.
+    ///
+    /// On screen, under every curve: an arrival and a departure are different
+    /// shapes, so where the slide's clock stood is not where the pane was
+    /// drawn, and the reversal starts from the drawing.
     #[test]
     fn a_slide_reversed_midway_resumes_from_the_position_on_screen() {
+        use guitk::motion::Curve;
+        for curve in Curve::ALL {
+            let mut pane = NotificationPane::new();
+            pane.set_motion(Motion::new(200, curve));
+            pane.show();
+            pane.begin_slide();
+            // A tenth of the slide: before a spring passes open, where the
+            // anchored pane would be drawn at open.
+            pane.tick(0.02);
+            let visible_before = pane.shown();
+            assert!(visible_before > 0.0 && visible_before < 1.0, "{curve:?}");
+
+            pane.hide();
+            pane.begin_slide();
+            assert!(
+                (pane.shown() - visible_before).abs() < 1e-4,
+                "{curve:?}: the pane must not jump when the slide reverses"
+            );
+            assert!(matches!(pane.pane_state(), PaneState::SlideOut(_)));
+
+            // And back again, from part-way out.
+            pane.tick(0.05);
+            let before = pane.shown();
+            pane.show();
+            pane.begin_slide();
+            assert!((pane.shown() - before).abs() < 1e-4, "{curve:?}");
+            assert!(matches!(pane.pane_state(), PaneState::SlideIn(_)));
+        }
+        // Linear, the clock and the drawing agree: half-way is half open.
         let mut pane = NotificationPane::new();
+        pane.set_motion(Motion::new(200, guitk::motion::Curve::Linear));
         pane.show();
         pane.begin_slide();
-        pane.tick(0.1); // progress = 0.5
-        let visible_before = pane.pane_state().visibility();
-        assert!((visible_before - 0.5).abs() < 0.001);
-
+        pane.tick(0.1);
+        assert!((pane.shown() - 0.5).abs() < 0.001);
         pane.hide();
         pane.begin_slide();
-        assert!(
-            (pane.pane_state().visibility() - visible_before).abs() < 0.001,
-            "the pane must not jump when the slide reverses"
-        );
         match pane.pane_state() {
             PaneState::SlideOut(p) => assert!((p - 0.5).abs() < 0.001),
             other => panic!("Expected SlideOut, got {other:?}"),
         }
+    }
+
+    /// **The slide follows the desktop's motion**: its length scales with
+    /// the standard transition, and it is drawn along the curve -- ease-out
+    /// by default, seven-eighths open half-way.
+    #[test]
+    fn the_slide_follows_the_desktops_motion() {
+        let mut pane = NotificationPane::new();
+        pane.show();
+        pane.begin_slide();
+        pane.tick(0.1);
+        assert_eq!(pane.pane_state(), PaneState::SlideIn(0.5));
+        assert!((pane.shown() - 0.875).abs() < 1e-5);
+
+        let mut slow = NotificationPane::new();
+        slow.set_motion(Motion::new(400, guitk::motion::Curve::Linear));
+        slow.show();
+        slow.begin_slide();
+        slow.tick(0.1);
+        match slow.pane_state() {
+            PaneState::SlideIn(p) => assert!((p - 0.25).abs() < 0.001),
+            other => panic!("Expected SlideIn, got {other:?}"),
+        }
+    }
+
+    /// **A spring never draws the pane past open**: it is anchored to the
+    /// screen's edge.
+    #[test]
+    fn a_spring_never_draws_the_pane_past_open() {
+        let mut pane = NotificationPane::new();
+        pane.set_motion(Motion::new(200, guitk::motion::Curve::Spring));
+        pane.show();
+        pane.begin_slide();
+        while pane.is_sliding() {
+            pane.tick(0.01);
+            assert!(pane.shown() <= 1.0, "{:?}", pane.pane_state());
+        }
+        assert_eq!(pane.pane_state(), PaneState::Visible);
+    }
+
+    /// **Under a still motion nothing slides**: a rewind does nothing, and a
+    /// slide in progress when the motion stops lands where it was going.
+    #[test]
+    fn under_a_still_motion_nothing_slides() {
+        let mut pane = NotificationPane::new();
+        pane.set_motion(Motion::STILL);
+        pane.show();
+        pane.begin_slide();
+        assert_eq!(pane.pane_state(), PaneState::Visible);
+        pane.hide();
+        pane.begin_slide();
+        assert_eq!(pane.pane_state(), PaneState::Hidden);
+
+        let mut moving = NotificationPane::new();
+        moving.show();
+        moving.begin_slide();
+        moving.tick(0.05);
+        assert!(moving.is_sliding());
+        moving.set_motion(Motion::STILL);
+        assert_eq!(moving.pane_state(), PaneState::Visible);
+        moving.hide();
+        moving.begin_slide();
+        assert_eq!(moving.pane_state(), PaneState::Hidden);
+        // A tick under a still motion finishes anything left.
+        let mut left = NotificationPane::new();
+        left.show();
+        left.begin_slide();
+        left.motion = Motion::STILL;
+        left.tick(0.001);
+        assert_eq!(left.pane_state(), PaneState::Visible);
+    }
+
+    /// **Nothing to slide, no slide**: a pane shown while already open, or
+    /// hidden while already gone, is not rewound into a slide that goes
+    /// nowhere.
+    #[test]
+    fn nothing_to_slide_is_no_slide() {
+        let mut pane = NotificationPane::new();
+        pane.show();
+        pane.show();
+        pane.begin_slide();
+        assert_eq!(pane.pane_state(), PaneState::Visible);
     }
 
     #[test]
@@ -3668,9 +4049,11 @@ mod tests {
         ];
         for light in [false, true] {
             let p = Palette::for_mode(light);
-            // The two computed inks: the lettering on the accent-filled
-            // action button, and the lettering inside a priority badge. The
-            // four badge fills are written out rather than read back from
+            // The computed inks: the lettering on the accent-filled action
+            // button (and the knob of a quick-setting switch that is on), the
+            // lettering inside a priority badge, and the knob of a switch that
+            // is off, on its `surface2` track. The four badge fills are
+            // written out rather than read back from
             // `NotifPriority::accent_color`, so this is a claim about the
             // design instead of an echo of the code under test.
             let ink = [
@@ -3679,6 +4062,7 @@ mod tests {
                 readable_on(p.blue),
                 readable_on(p.peach),
                 readable_on(p.red),
+                readable_on(p.surface2),
             ];
             for priority in priorities {
                 for show_settings in [false, true] {
@@ -3720,7 +4104,11 @@ mod tests {
                     palette_check::assert_drawn_from(
                         &p,
                         &cmds,
-                        &[readable_on(p.accent), readable_on(p.red)],
+                        &[
+                            readable_on(p.accent),
+                            readable_on(p.red),
+                            readable_on(p.surface2),
+                        ],
                         "notif_pane mid-slide",
                     );
                 }

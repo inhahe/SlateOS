@@ -60,6 +60,7 @@ promises about its own output, which a one-line summary cannot carry.
 | `scripts/check-crate-names.py` | Refuse a crate whose directory name is a *different* crate's package name. |
 | `scripts/check-dead-code-allows.py` | Refuse a NEW crate-level ``#![allow(..., dead_code, ...)]`` in lane B's tree. |
 | `scripts/check-design-decisions-bands.py` | Gate: enforce ``design-decisions.md``'s per-lane numbering bands. |
+| `scripts/check-destructive-writes.py` | Refuse a truncating write, under `scripts/`, aimed at a file in the tree. |
 | `scripts/check-diff-preamble-order.py` | Refuse a differential harness that does work before sourcing the preamble. |
 | `scripts/check-diskcleanup-test-roots.py` | Stop `apps/diskcleanup`'s own tests from pointing the deleter at the host. |
 | `scripts/check-doc-links.py` | Refuse an intra-doc link whose target does not exist anywhere in its crate. |
@@ -85,7 +86,11 @@ promises about its own output, which a one-line summary cannot carry.
 | `scripts/check-kshell-rungs-vs-bash.py` | Check rung 115's assertions against real bash, exactly as written. |
 | `scripts/check-lane-signals.py` | Cross-lane operational signalling, over the one directory all lanes share. |
 | `scripts/check-libc-abi.py` | Check our `#[repr(C)]` types against musl's headers, using musl as the oracle. |
+| `scripts/check-libc-declared.py` | Refuse a function musl's headers declare that `libc.a` does not define -- |
+| `scripts/check-libc-overlay.py` | Check posix/include -- the C header overlay -- against glibc 2.39's headers. |
+| `scripts/check-libc-prototypes.py` | Refuse a C prototype that disagrees with its Rust definition in `libc.a`. |
 | `scripts/check-libc-shape.py` | Assert that `libc.a` has the *object granularity* a libc archive must have. |
+| `scripts/check-libc-target-warnings.py` | Refuse a warning in the libc's own sources, compiled as it ships. |
 | `scripts/check-linux-only-capabilities.py` | A kernel capability reachable from the Linux ABI table and from no native one. |
 | `scripts/check-live-counter-reads.py` | Guard the rule that a self-test may not compare two readings of one counter. |
 | `scripts/check-manifest-producers.py` | Refuse a manifest entry that nothing in the tree can produce. |
@@ -177,6 +182,7 @@ promises about its own output, which a one-line summary cannot carry.
 | `scripts/ed-diff.sh` | Differential test: our ed against GNU ed. |
 | `scripts/env-diff.sh` | Differential test: our `env` against GNU env. |
 | `scripts/espeak-spike/run.sh` | Cross-compile eSpeak NG and link it against SlateOS's own libc.a. |
+| `scripts/espeak-spike/slatelink.sh` | Relink eSpeak NG's already-built objects against the CURRENT libc.a. |
 | `scripts/expand-diff.sh` | Differential test: our expand against GNU expand. |
 | `scripts/expr-diff.sh` | Differential test: our expr against GNU expr, both run inside WSL. |
 | `scripts/extfloat-cases.py` | Generate cases for `scripts/extfloat-diff.sh`. |
@@ -185,7 +191,9 @@ promises about its own output, which a one-line summary cannot carry.
 | `scripts/factor-diff.sh` | factor-diff.sh — compare our `factor` against GNU's, inside WSL. |
 | `scripts/find-claimed-acts.py` | Which programs tell the user they DID something they cannot do? |
 | `scripts/find-diff.sh` | Differential test: our find against GNU find. |
+| `scripts/find-drawn-only-settings.py` | Which settings does a window let you change, and then only draw? |
 | `scripts/find-echoed-settings.py` | Which settings does the program only ever read in order to print back? |
+| `scripts/find-options-only-emptied.py` | Which `Option` fields does a program read and only ever empty? |
 | `scripts/find-overstated-records.py` | Which of our own documents credit a program with an act it cannot perform? |
 | `scripts/find-reachable-fixtures.py` | Which invented-data builders can a *shipping* build reach? |
 | `scripts/find-silent-incapacity.py` | Which programs cannot do the thing they are for, and do not say so? |
@@ -200,6 +208,7 @@ promises about its own output, which a one-line summary cannot carry.
 | `scripts/fold-diff.sh` | Differential test: our fold against GNU fold. |
 | `scripts/free-diff.sh` | Differential test: our `free` against procps-ng `free`. |
 | `scripts/frozen-flag-survey.py` | Boolean fields an app reads and can never change. |
+| `scripts/gather-notices.py` | Gather the third-party notices a SlateOS image must carry (design-decisions §1433). |
 | `scripts/gen-chmod-fixture.sh` | Measure GNU chmod's answer for a cross product of mode strings, starting |
 | `scripts/gen-human-fixture.sh` | Regenerate userspace/coreutils/tests/data/human-gnu.txt — the table of |
 | `scripts/gen-oils-bind-tables.py` | Regenerate `userspace/oils/src/bind_tables.rs` from the reference bash. |
@@ -227,6 +236,7 @@ promises about its own output, which a one-line summary cannot carry.
 | `scripts/ki_archive.py` | Move lane B's resolved entries from `known-issues.md` into the archive. |
 | `scripts/ki_dupes.py` | Detect entries that exist in BOTH `known-issues.md` and its resolved archive. |
 | `scripts/ki_split.py` | Fence-aware structural scanner for `known-issues.md`. |
+| `scripts/lane-claims.py` | Say, where every lane can see it at once, that you have started a task. |
 | `scripts/lanec_scan.py` | Lane C's per-line scanner for the write-only-field and uncalled-function gates. |
 | `scripts/layout-sweep.py` | Measure how much of a benchmark's movement is caused by code *placement*. |
 | `scripts/lib/worktree.sh` | The directive above is load-bearing rather than decorative. This file has no |
@@ -337,6 +347,7 @@ promises about its own output, which a one-line summary cannot carry.
 | `scripts/rustrungs.py` | Read what a Rust rung asserts, so an oracle can check the assertion itself. |
 | `scripts/rustscan.py` | Read Rust source the way a *gate* has to read it: production code only. |
 | `scripts/sabotage.py` | Break the code on purpose and report which tests noticed. |
+| `scripts/safewrite.py` | Write a file without destroying it when the write goes wrong. |
 | `scripts/scan-orphan-modules.py` | Find library modules whose entire public surface is named by no other file. |
 | `scripts/scan-unwired.py` | Find work that no path from an entry point reaches, but a test does. |
 | `scripts/scan-unwrap.py` | Find `.unwrap()` / `.expect(...)` in *production* kernel code. |
@@ -366,9 +377,11 @@ promises about its own output, which a one-line summary cannot carry.
 | `scripts/stat-diff.sh` | Differential test: our `stat` against GNU `stat`. |
 | `scripts/stderr-exit-zero-sweep.py` | Find a program that reports a failure on stderr and then exits 0. |
 | `scripts/stdin-hang-sweep.sh` | Does any test binary hang when its stdin is an OPEN PIPE that never delivers? |
+| `scripts/stillreports.py` | The note a report-only scanner keeps of findings already read -- and the check that it still covers what the scan reports. |
 | `scripts/straddle-check.py` | Report which loops in a kernel binary straddle a 4 KiB guest page. |
 | `scripts/strftime-diff.sh` | strftime-diff.sh — both of GNU's time formatters, ours against theirs. |
 | `scripts/strings-diff.sh` | Differential test: our `strings` against GNU binutils `strings`. |
+| `scripts/suite_pool.py` | Run a tooling suite's independent cases a few at a time, with one-at-a-time output. |
 | `scripts/sum-diff.sh` | sum-diff.sh — compare our `sum` against GNU's, inside WSL. |
 | `scripts/swapon-diff.sh` | Differential test: our `swapon` and `swapoff` against util-linux 2.39.3's. |
 | `scripts/symbolize.py` | Turn the raw addresses in a kernel panic into `symbol+offset`. |
@@ -397,12 +410,15 @@ promises about its own output, which a one-line summary cannot carry.
 | `scripts/test-diff-bound.sh` | Two-probe test for the bound that `diff-wsl.sh` puts around every harness. |
 | `scripts/test-diff-forward.sh` | Does a `DIFF_*` knob set on the command line reach the far side of the WSL |
 | `scripts/test-diff.sh` | Differential test: our `test` against GNU `test`. |
+| `scripts/test-gather-notices.py` | The gate that keeps the image's third-party notices complete (design-decisions §1433). |
 | `scripts/test-gittree.py` | Tests for `scripts/gittree.py` — reading many blobs out of one git process. |
 | `scripts/test-grade-positional.py` | Regression tests for `scripts/grade-positional.py`. |
 | `scripts/test-hostload.py` | Tests for `hostload.py`, the harness's measurement of how much CPU a process gets. |
 | `scripts/test-ki-dupes.py` | Regression tests for `scripts/ki_dupes.py` and its entry/subsection split. |
+| `scripts/test-lane-claims.py` | Tests for `scripts/lane-claims.py` through its command line. |
 | `scripts/test-layout-sweep.py` | Regression tests for `scripts/layout-sweep.py`. |
 | `scripts/test-msysbash.py` | Tests for `msysbash.py`, the one place that decides which bash runs our scripts. |
+| `scripts/test-mutation_harness.py` | Tests for mutation_harness.check_the_table: where a table's tests are found. |
 | `scripts/test-open-requests.py` | Regression tests for `scripts/open-requests.py`. |
 | `scripts/test-pre-push-doclinks-gate.py` | Tests for pre-push gate 11 -- the dead-intra-doc-link gate. |
 | `scripts/test-pre-push-fmt-gate.py` | Behavioural tests for pre-push gate 7 (rustfmt drift), and specifically for |
@@ -415,6 +431,7 @@ promises about its own output, which a one-line summary cannot carry.
 | `scripts/test-prune-build-cache.py` | Run `prune-build-cache.py`'s self-test under the boot test's tooling gate. |
 | `scripts/test-prune-build-trees.py` | Tests for `scripts/prune-build-trees.py`. |
 | `scripts/test-reclaim-space.py` | Tests for `scripts/reclaim-space.py`. |
+| `scripts/test-reintro-palette.py` | The gate that keeps `scripts/reintro-palette.py` from rotting unseen. |
 | `scripts/test-rootfs-staging.sh` | Exercise create-ext4-rootfs.sh's staging blocks against fake artifacts, |
 | `scripts/test-rustemit.py` | Tests for `rustemit.py` and the checker built on it. |
 | `scripts/test-selftests-are-repo-safe.py` | Every self-test the push hook runs must leave the real repository alone. |
@@ -454,4 +471,4 @@ promises about its own output, which a one-line summary cannot carry.
 | `scripts/xargs-diff.sh` | Differential test: our xargs against GNU xargs (findutils 4.9.0). |
 | `scripts/yes-diff.sh` | Differential test: our `yes` against GNU coreutils'. |
 
-_444 scripts._
+_461 scripts._

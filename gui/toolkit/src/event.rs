@@ -101,14 +101,16 @@ pub enum Event {
 
 /// Which settings group a [`Event::SettingsChanged`] is about.
 ///
-/// Deliberately a short closed list rather than a string. A file name on the
-/// wire would let a sender name any file and would make the set of groups a
-/// thing every receiver has to parse rather than match; the enum makes an
-/// unknown group a decode error at the boundary, where it can be reported,
-/// instead of an unrecognised string in the middle of a `match`.
+/// The four files the desktop itself reads are named by variant rather than by
+/// string: a receiver matches them instead of parsing, and an unknown group is
+/// a decode error at the boundary, where it can be reported, rather than an
+/// unrecognised string in the middle of a `match`. Every other program's own
+/// file ([`Self::Program`]) is named -- there is no closed list of programs --
+/// but only by a [`SettingsName`], which cannot name a path, only a file in
+/// the settings folder.
 ///
 /// It lives here, in the toolkit, only because [`Event`] does. Nothing about
-/// the toolkit knows what is *in* either file.
+/// the toolkit knows what is *in* any of the files.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum SettingsGroup {
     /// `appearance.yaml` — theme, accent, wallpaper, fonts, window corners.
@@ -132,6 +134,39 @@ pub enum SettingsGroup {
     /// take effect until the next sign-in -- the claim is made once, at
     /// startup, and nothing else would tell the shell to make it again.
     Session,
+    /// Another program's own settings file: `<name>.yaml` in the settings
+    /// folder (`design-decisions.md` §1418, C-Q26: each program keeps its
+    /// settings in a file of its own, and a change reaches its open windows
+    /// at once). The program that owns the name re-reads it; every other
+    /// program ignores it.
+    ///
+    /// Never one of the four names above: the compositor announces a change to
+    /// `appearance`, `input`, `notifications` or `session` as that variant, so
+    /// a receiver has one thing to match for each file.
+    Program(SettingsName),
+}
+
+/// The name of a program's settings file: `gui/settingsname`'s, re-exported
+/// so the protocol's path to it is unchanged. It lives in its own crate
+/// because `settingsfile`, which writes the file, sits below the toolkit and
+/// must apply the same rule without depending on it.
+pub use settingsname::SettingsName;
+
+impl SettingsGroup {
+    /// The name of the file this announcement is about, without its
+    /// `.yaml`: what a program compares with the name it saves its own
+    /// settings under, to know whether an announcement is for it --
+    /// `event.group.file_name() == CONFIG_NAME`.
+    #[must_use]
+    pub fn file_name(&self) -> &str {
+        match self {
+            Self::Appearance => "appearance",
+            Self::Notifications => "notifications",
+            Self::Input => "input",
+            Self::Session => "session",
+            Self::Program(name) => name.as_str(),
+        }
+    }
 }
 
 /// Mouse button identifier.
@@ -603,5 +638,26 @@ mod tests {
     fn a_multi_byte_character_is_still_one_character() {
         assert_eq!(typing("ü").single_char(), Some('ü'));
         assert_eq!(typing("€").single_char(), Some('€'));
+    }
+
+    /// Each group names its file, so a program knows an announcement is for
+    /// it by the name it saves under.
+    #[test]
+    fn every_settings_group_names_its_file() {
+        use super::{SettingsGroup, SettingsName};
+        let notes = SettingsName::new(b"notes");
+        let groups = [
+            (Some(SettingsGroup::Appearance), "appearance"),
+            (Some(SettingsGroup::Notifications), "notifications"),
+            (Some(SettingsGroup::Input), "input"),
+            (Some(SettingsGroup::Session), "session"),
+            (notes.map(SettingsGroup::Program), "notes"),
+        ];
+        for (group, name) in groups {
+            assert_eq!(
+                group.map(|g| g.file_name().to_owned()).as_deref(),
+                Some(name)
+            );
+        }
     }
 }

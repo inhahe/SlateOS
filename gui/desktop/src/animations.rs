@@ -24,6 +24,7 @@
 //! `animation-duration-ms`, which is not expressible in frames.
 
 use guitk::color::Color;
+use guitk::motion::Motion;
 use guitk::render::RenderCommand;
 use guitk::style::CornerRadii;
 
@@ -596,6 +597,13 @@ impl AnimationManager {
     /// programming for its own sake, since the value comes from a file the user
     /// can hand-edit and a NaN here would compare false against every bound and
     /// stall the shell's animations permanently.
+    ///
+    /// A scale of zero also ends whatever is running, where it was going. A
+    /// scale of zero advances nothing, so an animation left running under it
+    /// would never finish: frozen part-way on screen, and -- since
+    /// [`has_active`](Self::has_active) would stay true -- asking the shell for
+    /// a frame every frame, for ever, on a desktop the user has just asked to
+    /// keep still.
     pub fn set_duration_scale(&mut self, scale: f32) {
         self.duration_scale = if scale.is_finite() && scale > 0.0 {
             scale
@@ -604,6 +612,24 @@ impl AnimationManager {
         };
         // A scale change invalidates the fraction owed under the old one.
         self.carry_ms = 0.0;
+        if self.duration_scale <= 0.0 {
+            self.cancel_all();
+        }
+    }
+
+    /// Move as `motion` says: every animation here takes as long, relative
+    /// to the length it asked for, as the motion's standard transition is
+    /// relative to the built-in one's -- half again as long under a theme
+    /// whose standard is 300 ms, or at Slow -- and none moves under a still
+    /// motion (design-decisions §1446).
+    ///
+    /// Applied as a [duration scale](Self::set_duration_scale), for that
+    /// method's reason. The motion's *curve* is not applied here: each
+    /// window animation's curves are chosen by whoever builds it, and whoever
+    /// draws one -- the compositor, when it animates windows -- has the
+    /// motion on its palette.
+    pub fn set_motion(&mut self, motion: Motion) {
+        self.set_duration_scale(f32::from(motion.standard_ms()) / f32::from(Motion::STANDARD_MS));
     }
 
     /// How long animations currently take relative to their stated duration.
@@ -974,6 +1000,41 @@ mod tests {
     use super::*;
 
     // -- Easing --
+
+    /// **A still motion ends what is running**, where it was going: an
+    /// animation frozen part-way would be drawn there and keep asking for a
+    /// frame every frame. The same for a scale of zero, which is Off.
+    #[test]
+    fn a_still_motion_ends_what_is_running() {
+        let mut mgr = AnimationManager::new();
+        mgr.animate_window(WindowAnimation::open(1, 0.0, 0.0, 100.0, 100.0, 200));
+        assert!(mgr.has_active());
+        mgr.set_motion(Motion::STILL);
+        assert!(!mgr.has_active());
+        assert!(mgr.animations_suppressed());
+
+        let mut off = AnimationManager::new();
+        off.animate_window(WindowAnimation::open(1, 0.0, 0.0, 100.0, 100.0, 200));
+        off.set_duration_scale(0.0);
+        assert!(!off.has_active());
+        // A scale that moves leaves what is running alone.
+        let mut slow = AnimationManager::new();
+        slow.animate_window(WindowAnimation::open(1, 0.0, 0.0, 100.0, 100.0, 200));
+        slow.set_duration_scale(1.5);
+        assert!(slow.has_active());
+    }
+
+    /// **The motion's standard sets the scale**: a 300 ms standard is half
+    /// again as long as the built-in 200.
+    #[test]
+    fn the_motion_sets_the_duration_scale() {
+        let mut mgr = AnimationManager::new();
+        mgr.set_motion(Motion::new(300, guitk::motion::Curve::Spring));
+        assert!((mgr.duration_scale() - 1.5).abs() < 1e-6);
+        mgr.set_motion(Motion::STANDARD);
+        assert!((mgr.duration_scale() - 1.0).abs() < 1e-6);
+        assert!(!mgr.animations_suppressed());
+    }
 
     #[test]
     fn test_easing_linear() {

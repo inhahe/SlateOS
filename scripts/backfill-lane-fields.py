@@ -46,6 +46,8 @@ import re
 import sys
 
 HERE = os.path.dirname(os.path.abspath(__file__))
+sys.path.insert(0, HERE)
+from safewrite import write_text  # noqa: E402
 DEFAULT_DOC = os.path.join(os.path.dirname(HERE), "design-decisions.md")
 GATE = os.path.join(HERE, "check-design-decisions-bands.py")
 
@@ -199,8 +201,7 @@ def main(argv=None):
         print("dry run; nothing written (pass --apply)")
         return 1 if skipped else 0
 
-    with open(args.file, "w", encoding="utf-8", newline="\n") as fh:
-        fh.write("\n".join(lines))
+    write_text(args.file, "\n".join(lines))
     print(f"wrote {args.file}")
     return 1 if skipped else 0
 

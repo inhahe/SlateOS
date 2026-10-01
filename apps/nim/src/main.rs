@@ -52,38 +52,78 @@
 //! as the human's move. The reply is now a state the window renders before it
 //! is answered.
 
+use gamechrome::Chrome;
+use guitk::button::{Kind, State};
 use guitk::color::Color;
 use guitk::event::{Event, EventResult, Key, KeyEvent, MouseButton, MouseEvent, MouseEventKind};
 use guitk::frame::Rect;
+use guitk::palette::Palette;
 use guitk::probe::Probe;
 use guitk::render::{FontWeightHint, RenderCommand, RenderTree, TextOverflow};
 use guitk::style::CornerRadii;
+use guitk::surface::Surface;
 use guitk::text;
 use oswindow::app::{self, App, Response};
 use std::process::ExitCode;
 use std::time::Duration;
 
-// ── Catppuccin Mocha, only the entries this program paints with ──
-const COL_BASE: Color = Color::from_hex(0x1E1E2E);
-const COL_CRUST: Color = Color::from_hex(0x11111B);
-const COL_SURFACE0: Color = Color::from_hex(0x313244);
-const COL_SURFACE1: Color = Color::from_hex(0x45475A);
-const COL_TEXT: Color = Color::from_hex(0xCDD6F4);
-const COL_SUBTEXT: Color = Color::from_hex(0xA6ADC8);
-const COL_OVERLAY: Color = Color::from_hex(0x6C7086);
-const COL_BLUE: Color = Color::from_hex(0x89B4FA);
-const COL_GREEN: Color = Color::from_hex(0xA6E3A1);
-const COL_RED: Color = Color::from_hex(0xF38BA8);
-const COL_YELLOW: Color = Color::from_hex(0xF9E2AF);
-const COL_PEACH: Color = Color::from_hex(0xFAB387);
-const COL_TEAL: Color = Color::from_hex(0x94E2D5);
-const COL_LAVENDER: Color = Color::from_hex(0xB4BEFE);
+// ── Colours ─────────────────────────────────────────────────────────
+//
+// Everything in this game follows the user's palette (the operator's answer
+// to C-Q16, §1422, and lane C's call for this game): its surfaces and text
+// from the palette's roles, each hue in the palette's ink for it, which reads
+// on the page in a light theme as in a dark one. It was all a copy of
+// Catppuccin Mocha, dark on a light desktop.
 
-const COL_SCRIM: Color = Color::rgba(0x1E, 0x1E, 0x2E, 158);
-const COL_VEIL: Color = Color::rgba(0x11, 0x11, 0x1B, 214);
+/// The colours the window draws in, from the user's palette.
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct Colours {
+    /// The page.
+    base: Color,
+    /// Raised further.
+    surface1: Color,
+    /// Text.
+    text: Color,
+    /// Secondary text.
+    subtext0: Color,
+    /// The palette's blue, inked for the page.
+    blue: Color,
+    /// The palette's green, inked for the page.
+    green: Color,
+    /// The palette's red, inked for the page.
+    red: Color,
+    /// The palette's yellow, inked for the page.
+    yellow: Color,
+    /// The palette's lavender, inked for the page.
+    lavender: Color,
 
-/// One colour per heap position, so the eye can tell the columns apart.
-const HEAP_COLORS: [Color; 5] = [COL_RED, COL_PEACH, COL_YELLOW, COL_GREEN, COL_TEAL];
+    /// The heaps, told apart by colour as well as by place: palette hues,
+    /// each inked to stand off the page.
+    heaps: [Color; 5],
+}
+
+impl Colours {
+    fn of(p: &Palette) -> Self {
+        Self {
+            base: p.base,
+            surface1: p.surface1,
+            text: p.text,
+            subtext0: p.subtext0,
+            blue: p.ink(p.blue),
+            green: p.ink(p.green),
+            red: p.ink(p.red),
+            yellow: p.ink(p.yellow),
+            lavender: p.ink(p.lavender),
+            heaps: [
+                p.ink(p.red),
+                p.ink(p.yellow),
+                p.ink(p.teal),
+                p.ink(p.peach),
+                p.ink(p.green),
+            ],
+        }
+    }
+}
 
 /// The boards on offer, as (name, heaps).
 ///
@@ -509,6 +549,12 @@ pub struct Nim {
     think_ms: u64,
     width: f32,
     height: f32,
+    /// The user's colours, replaced whenever the theme changes. Seeded from
+    /// the defaults; the framework calls `App::theme_changed` before the
+    /// first frame.
+    palette: Palette,
+    /// `palette`'s colours as this window draws them: rebuilt with it.
+    colours: Colours,
 }
 
 impl Default for Nim {
@@ -534,6 +580,8 @@ impl Nim {
             think_ms: 0,
             width: WINDOW_WIDTH,
             height: WINDOW_HEIGHT,
+            palette: Palette::for_mode(false),
+            colours: Colours::of(&Palette::for_mode(false)),
         }
     }
 
@@ -1024,7 +1072,7 @@ impl Nim {
     pub fn frame(&self, width: f32, height: f32) -> Frame {
         let l = self.layout(width, height);
         let mut f = Frame::new(l.window.w, l.window.h);
-        fill(&mut f, l.window, COL_BASE, 0.0);
+        fill(&mut f, l.window, self.colours.base, 0.0);
 
         if l.shows_header() {
             self.draw_header(&mut f, &l);
@@ -1040,9 +1088,29 @@ impl Nim {
             self.draw_footer(&mut f, &l);
         }
         if self.show_help {
-            draw_help(&mut f, &l);
+            self.draw_help(&mut f, &l);
         }
         f
+    }
+
+    /// A control: the toolkit's push button at this window's size, on the
+    /// page. `on` draws a choice that is made -- the board in play, the help
+    /// up -- as the toolkit's primary button; `live` false draws the
+    /// switched-off look.
+    fn button(&self, f: &mut Frame, r: Rect, body: &str, size: f32, on: bool, live: bool) {
+        gamechrome::button(
+            f,
+            &self.palette,
+            (r.x, r.y, r.w, r.h),
+            body,
+            size,
+            if on { Kind::Primary } else { Kind::Plain },
+            State {
+                disabled: !live,
+                ..State::default()
+            },
+            self.colours.base,
+        );
     }
 
     fn draw_header(&self, f: &mut Frame, l: &Layout) {
@@ -1055,7 +1123,7 @@ impl Nim {
             cy - text::line_height(l.font, FontWeightHint::Bold) / 2.0,
             "Nim",
             l.font,
-            COL_LAVENDER,
+            self.colours.lavender,
             FontWeightHint::Bold,
             Some(title_span),
         );
@@ -1063,31 +1131,16 @@ impl Nim {
         // Variant, New, Help — left to right, in the order a player reaches
         // for them.
         let buttons = [
-            (self.variant.label(), COL_TEAL, Target::Variant, false),
-            ("New", COL_BLUE, Target::NewGame, false),
-            ("?", COL_TEXT, Target::Help, self.show_help),
+            (self.variant.label(), Target::Variant, false),
+            ("New", Target::NewGame, false),
+            ("?", Target::Help, self.show_help),
         ];
-        for (i, (body, colour, target, lit)) in buttons.into_iter().enumerate() {
+        for (i, (body, target, lit)) in buttons.into_iter().enumerate() {
             let r = l.header_button(i);
             if r.w <= 0.0 || r.h <= 0.0 {
                 continue;
             }
-            fill(
-                f,
-                r,
-                if lit { COL_SURFACE1 } else { COL_SURFACE0 },
-                (r.h * 0.25).min(6.0),
-            );
-            centred_in(
-                f,
-                r.x,
-                r.w,
-                r.y + r.h / 2.0,
-                body,
-                l.small,
-                colour,
-                FontWeightHint::Bold,
-            );
+            self.button(f, r, body, l.small, lit, true);
             f.hit(target, r);
         }
     }
@@ -1103,10 +1156,10 @@ impl Nim {
             self.scores.get(1).copied().unwrap_or(0),
         );
         let colour = match self.state {
-            GameState::Won(Player::Human) => COL_GREEN,
-            GameState::Won(Player::Computer) => COL_RED,
-            GameState::Playing if self.thinking() => COL_YELLOW,
-            GameState::Playing => COL_SUBTEXT,
+            GameState::Won(Player::Human) => self.colours.green,
+            GameState::Won(Player::Computer) => self.colours.red,
+            GameState::Playing if self.thinking() => self.colours.yellow,
+            GameState::Playing => self.colours.subtext0,
         };
         label(
             f,
@@ -1120,23 +1173,7 @@ impl Nim {
         );
 
         if btn.w > 0.0 && btn.h > 0.0 {
-            let live = self.enabled(Action::Take);
-            fill(
-                f,
-                btn,
-                if live { COL_SURFACE1 } else { COL_SURFACE0 },
-                (btn.h * 0.25).min(6.0),
-            );
-            centred_in(
-                f,
-                btn.x,
-                btn.w,
-                btn.y + btn.h / 2.0,
-                "Take",
-                l.small,
-                if live { COL_GREEN } else { COL_OVERLAY },
-                FontWeightHint::Bold,
-            );
+            self.button(f, btn, "Take", l.small, false, self.enabled(Action::Take));
             // Recorded even when refused, so a click there stops at the button
             // rather than falling through to a heap behind it.
             f.hit(Target::Take, btn);
@@ -1150,10 +1187,12 @@ impl Nim {
         let n = self.heaps.len();
         let radius = (l.token_h * 0.28).min(8.0);
         for (i, &size) in self.heaps.iter().enumerate() {
-            let colour = HEAP_COLORS
-                .get(i.checked_rem(HEAP_COLORS.len()).unwrap_or(0))
+            let colour = self
+                .colours
+                .heaps
+                .get(i.checked_rem(self.colours.heaps.len()).unwrap_or(0))
                 .copied()
-                .unwrap_or(COL_TEXT);
+                .unwrap_or(self.colours.text);
             let aimed = i == self.selected_heap;
             // The top `take_count` tokens of the aimed-at heap are the pending
             // move: what "Take" would remove, shown before it is committed.
@@ -1168,7 +1207,13 @@ impl Nim {
                     caption.y + caption.h / 2.0,
                     &size.to_string(),
                     l.small,
-                    if aimed { COL_TEXT } else { COL_OVERLAY },
+                    // Secondary text, not the faintest grey: a count is
+                    // read, and the grey was 2.3:1 on a light page.
+                    if aimed {
+                        self.colours.text
+                    } else {
+                        self.colours.subtext0
+                    },
                     if aimed {
                         FontWeightHint::Bold
                     } else {
@@ -1182,9 +1227,18 @@ impl Nim {
                 let slot = l.token_slot(n, i, j);
                 let token = l.token(n, i, j);
                 let taking = aimed && self.human_turn() && j >= marked_from;
-                fill(f, token, if taking { colour } else { COL_SURFACE1 }, radius);
+                fill(
+                    f,
+                    token,
+                    if taking {
+                        colour
+                    } else {
+                        self.colours.surface1
+                    },
+                    radius,
+                );
                 if taking {
-                    ring(f, token, (l.token_h * 0.1).max(1.0), COL_YELLOW);
+                    ring(f, token, (l.token_h * 0.1).max(1.0), self.colours.yellow);
                 } else {
                     // A dot of the heap's colour: the columns must still be
                     // tellable apart when nothing in them is aimed at.
@@ -1220,7 +1274,8 @@ impl Nim {
             w,
             h,
         );
-        fill(f, r, COL_CRUST, (r.h * 0.2).min(10.0));
+        self.palette
+            .push_surface(f, r.x, r.y, r.w, r.h, (r.h * 0.2).min(10.0), Surface::Panel);
         let body = match winner {
             Player::Human => "You win - click for a new game",
             Player::Computer => "Computer wins - click for a new game",
@@ -1233,8 +1288,8 @@ impl Nim {
             body,
             l.small,
             match winner {
-                Player::Human => COL_GREEN,
-                Player::Computer => COL_RED,
+                Player::Human => self.colours.green,
+                Player::Computer => self.colours.red,
             },
             FontWeightHint::Bold,
         );
@@ -1247,87 +1302,74 @@ impl Nim {
         for i in 0..PRESETS.len() {
             let r = l.preset_button(i);
             let current = i == self.preset;
-            fill(
-                f,
-                r,
-                if current { COL_SURFACE1 } else { COL_SURFACE0 },
-                (r.h * 0.2).min(6.0),
-            );
-            centred_in(
-                f,
-                r.x,
-                r.w,
-                r.y + r.h / 2.0,
-                &Nim::preset_label(i),
-                l.small,
-                if current { COL_YELLOW } else { COL_TEXT },
-                FontWeightHint::Bold,
-            );
+            self.button(f, r, &Nim::preset_label(i), l.small, current, true);
             f.hit(Target::Preset(i), r);
         }
     }
-}
 
-/// The help sheet the old code toggled a flag for and drew as a fixed 200x220
-/// box at (500, 100) — on top of the fourth heap's tokens.
-fn draw_help(f: &mut Frame, l: &Layout) {
-    // Dim the whole window first, then the panel on top of it, so the sheet
-    // reads as in front of the game rather than part of it.
-    fill(f, l.window, COL_SCRIM, 0.0);
-    let p = l.help;
-    fill(f, p, COL_VEIL, 10.0);
+    /// The help sheet the old code toggled a flag for and drew as a fixed 200x220
+    /// box at (500, 100) — on top of the fourth heap's tokens.
+    fn draw_help(&self, f: &mut Frame, l: &Layout) {
+        // Dim the whole window first, then the panel on top of it, so the sheet
+        // reads as in front of the game rather than part of it.
+        fill(f, l.window, Chrome::of(&self.palette).scrim, 0.0);
+        let p = l.help;
+        self.palette
+            .push_surface(f, p.x, p.y, p.w, p.h, 10.0, Surface::Panel);
 
-    let pad = (p.w * 0.06).clamp(6.0, 18.0);
-    let inner = (p.w - pad * 2.0).max(0.0);
-    let title_h = text::line_height(l.font, FontWeightHint::Bold);
-    label(
-        f,
-        p.x + pad,
-        p.y + pad,
-        HELP_TITLE,
-        l.font,
-        COL_YELLOW,
-        FontWeightHint::Bold,
-        Some(inner),
-    );
-
-    // Rows share whatever is left below the title, so the sheet cannot write
-    // past its own foot however short the window is.
-    let top = p.y + pad + title_h + pad / 2.0;
-    let room = (p.bottom() - pad - top).max(0.0);
-    let step = room / HELP_ROWS.len() as f32;
-    let key_span = (inner * 0.38).min(120.0);
-    for (i, (k, v)) in HELP_ROWS.iter().enumerate() {
-        let y = top + i as f32 * step;
-        if y + l.small > p.bottom() - pad {
-            break;
-        }
+        let pad = (p.w * 0.06).clamp(6.0, 18.0);
+        let inner = (p.w - pad * 2.0).max(0.0);
+        let title_h = text::line_height(l.font, FontWeightHint::Bold);
         label(
             f,
             p.x + pad,
-            y,
-            k,
-            l.small,
-            COL_BLUE,
+            p.y + pad,
+            HELP_TITLE,
+            l.font,
+            self.colours.yellow,
             FontWeightHint::Bold,
-            Some(key_span),
+            Some(inner),
         );
-        label(
-            f,
-            p.x + pad + key_span,
-            y,
-            v,
-            l.small,
-            COL_TEXT,
-            FontWeightHint::Regular,
-            Some((inner - key_span).max(0.0)),
-        );
-    }
 
-    // Over the whole window, not just the panel: while the sheet is up,
-    // nothing behind it is clickable.
-    f.hit(Target::HelpSheet, l.window);
+        // Rows share whatever is left below the title, so the sheet cannot write
+        // past its own foot however short the window is.
+        let top = p.y + pad + title_h + pad / 2.0;
+        let room = (p.bottom() - pad - top).max(0.0);
+        let step = room / HELP_ROWS.len() as f32;
+        let key_span = (inner * 0.38).min(120.0);
+        for (i, (k, v)) in HELP_ROWS.iter().enumerate() {
+            let y = top + i as f32 * step;
+            if y + l.small > p.bottom() - pad {
+                break;
+            }
+            label(
+                f,
+                p.x + pad,
+                y,
+                k,
+                l.small,
+                self.colours.blue,
+                FontWeightHint::Bold,
+                Some(key_span),
+            );
+            label(
+                f,
+                p.x + pad + key_span,
+                y,
+                v,
+                l.small,
+                self.colours.text,
+                FontWeightHint::Regular,
+                Some((inner - key_span).max(0.0)),
+            );
+        }
+
+        // Over the whole window, not just the panel: while the sheet is up,
+        // nothing behind it is clickable.
+        f.hit(Target::HelpSheet, l.window);
+    }
 }
+
 // ── Input ──────────────────────────────────────────────────────────────────
 
 impl Nim {
@@ -1454,6 +1496,11 @@ pub fn handle_event(app: &mut Nim, event: &Event) -> EventResult {
 }
 
 impl App for Nim {
+    fn theme_changed(&mut self, palette: &Palette) {
+        self.palette = *palette;
+        self.colours = Colours::of(palette);
+    }
+
     fn title(&self) -> String {
         "Nim".to_string()
     }
@@ -1544,6 +1591,243 @@ mod tests {
     )]
 
     use super::*;
+
+    /// The palette for a light or a dark theme, in the bordered look (the
+    /// default) or the card look.
+    fn palette(light: bool, cards: bool) -> Palette {
+        let mut p = Palette::for_mode(light);
+        p.set_surface_style(if cards {
+            guitk::palette::SurfaceStyle::Cards
+        } else {
+            guitk::palette::SurfaceStyle::Borders
+        });
+        p
+    }
+
+    /// Every look in `p`'s colours: a game with a move aimed, the help sheet,
+    /// a game won, a game lost, and a cramped window.
+    fn every_look(p: &Palette) -> Vec<(&'static str, Nim)> {
+        let mut aimed = game();
+        aimed.take_count = 2;
+        let mut help = game();
+        help.show_help = true;
+        let mut won = game();
+        won.state = GameState::Won(Player::Human);
+        let mut lost = game();
+        lost.state = GameState::Won(Player::Computer);
+        let mut cramped = windowed(380.0, 340.0);
+        cramped.take_count = 2;
+        let mut looks = vec![
+            ("playing", aimed),
+            ("help", help),
+            ("won", won),
+            ("lost", lost),
+            ("cramped", cramped),
+        ];
+        for (_, g) in &mut looks {
+            g.theme_changed(p);
+        }
+        looks
+    }
+
+    /// **The window is drawn in the user's colours**, light or dark, in
+    /// either surface look -- every colour the palette's or the toolkit's
+    /// buttons' (the operator's C-Q16). It drew in its own copy of
+    /// Catppuccin Mocha, dark on a light desktop.
+    #[test]
+    fn the_window_is_drawn_in_the_users_colours() {
+        for (light, cards) in [(false, false), (true, false), (false, true), (true, true)] {
+            let p = palette(light, cards);
+            let mut derived = gamechrome::button_colours(&p, Kind::Plain, p.base);
+            derived.extend(gamechrome::button_colours(&p, Kind::Primary, p.base));
+            for (what, g) in every_look(&p) {
+                appearance::palette_check::assert_drawn_from(
+                    &p,
+                    g.frame(g.width, g.height).commands(),
+                    &derived,
+                    &format!("nim, {what}, light: {light}, cards: {cards}"),
+                );
+            }
+        }
+    }
+
+    /// **Every text reads on what is drawn under it**, in either theme and
+    /// either surface look (`gamechrome::legibility`). A switched-off
+    /// button's label is exempt, as WCAG exempts an inactive control.
+    #[test]
+    fn every_text_reads_on_what_is_under_it_in_either_theme() {
+        let mut bad = Vec::new();
+        for (light, cards) in [(false, false), (true, false), (false, true), (true, true)] {
+            let p = palette(light, cards);
+            let off = guitk::button::paint(
+                &p,
+                Kind::Plain,
+                State {
+                    disabled: true,
+                    ..State::default()
+                },
+                p.base,
+            );
+            for (what, g) in every_look(&p) {
+                let f = g.frame(g.width, g.height);
+                let exempt = |r: &gamechrome::legibility::Read| {
+                    r.ink == off.ink && (r.ground == off.lower || r.ground == off.upper)
+                };
+                for r in gamechrome::legibility::illegible(f.commands(), p.base, exempt) {
+                    bad.push(format!(
+                        "{what}, light: {light}, cards: {cards}: {:?} {:.2}:1 on {:?}",
+                        r.text,
+                        r.ratio(),
+                        r.ground
+                    ));
+                }
+            }
+        }
+        assert!(bad.is_empty(), "nim: {bad:#?}");
+    }
+
+    /// The face of the button whose label is `label`, in `g`'s window.
+    fn face_of(g: &Nim, label: &str) -> Color {
+        let f = g.frame(g.width, g.height);
+        let (tx, ty) = f
+            .commands()
+            .iter()
+            .find_map(|c| match c {
+                RenderCommand::Text { text, x, y, .. } if text == label => Some((*x, *y)),
+                _ => None,
+            })
+            .unwrap_or_else(|| panic!("{label} is not drawn"));
+        f.commands()
+            .iter()
+            .find_map(|c| match c {
+                RenderCommand::FillRect {
+                    x,
+                    y,
+                    width,
+                    height,
+                    color,
+                    ..
+                } if Rect::new(*x, *y, *width, *height).contains(tx + 1.0, ty + 1.0)
+                    && *width < g.width / 2.0 =>
+                {
+                    Some(*color)
+                }
+                _ => None,
+            })
+            .unwrap_or_else(|| panic!("{label} has no face"))
+    }
+
+    /// The toolkit's face for a button of `kind`, live or not, on the page.
+    fn paint(g: &Nim, kind: Kind, live: bool) -> Color {
+        guitk::button::paint(
+            &g.palette,
+            kind,
+            State {
+                disabled: !live,
+                ..State::default()
+            },
+            g.colours.base,
+        )
+        .lower
+    }
+
+    /// **Take is switched off when a take would be refused** -- the game won,
+    /// or the computer's move -- and live on the player's.
+    #[test]
+    fn take_is_switched_off_when_a_take_would_be_refused() {
+        let g = game();
+        assert_eq!(face_of(&g, "Take"), paint(&g, Kind::Plain, true));
+        let mut won = game();
+        won.state = GameState::Won(Player::Human);
+        assert_eq!(face_of(&won, "Take"), paint(&won, Kind::Plain, false));
+    }
+
+    /// **The board in play looks chosen** among the presets, as the toolkit's
+    /// primary button.
+    #[test]
+    fn the_board_in_play_looks_chosen() {
+        let g = game();
+        for i in 0..PRESETS.len() {
+            let want = if i == g.preset {
+                Kind::Primary
+            } else {
+                Kind::Plain
+            };
+            assert_eq!(
+                face_of(&g, &Nim::preset_label(i)),
+                paint(&g, want, true),
+                "preset {i} looks wrong"
+            );
+        }
+    }
+
+    /// **The help sheet and the win banner have grounds of their own** --
+    /// the toolkit's panel, filled in either surface look -- so their words do
+    /// not land on the tokens under them.
+    #[test]
+    fn the_sheet_and_the_banner_have_grounds_of_their_own() {
+        let opaque_at = |g: &Nim, r: Rect| {
+            g.frame(g.width, g.height).commands().iter().any(|c| {
+                matches!(c, RenderCommand::FillRect { x, y, width, height, color, .. }
+                    if (*x - r.x).abs() < 0.01
+                        && (*y - r.y).abs() < 0.01
+                        && (*width - r.w).abs() < 0.01
+                        && (*height - r.h).abs() < 0.01
+                        && color.a == u8::MAX)
+            })
+        };
+        for cards in [false, true] {
+            let mut help = game();
+            help.show_help = true;
+            help.theme_changed(&palette(false, cards));
+            let l = help.layout(help.width, help.height);
+            assert!(
+                opaque_at(&help, l.help),
+                "the help sheet has no ground (cards: {cards})"
+            );
+            let mut won = game();
+            won.state = GameState::Won(Player::Human);
+            won.theme_changed(&palette(false, cards));
+            let l = won.layout(won.width, won.height);
+            let h = (l.board.h * 0.22).clamp(0.0, 44.0);
+            let w = (l.board.w * 0.8).min(360.0);
+            let banner = Rect::new(
+                l.board.x + (l.board.w - w) / 2.0,
+                l.board.y + (l.board.h - h) / 2.0,
+                w,
+                h,
+            );
+            assert!(
+                opaque_at(&won, banner),
+                "the banner has no ground (cards: {cards})"
+            );
+        }
+    }
+
+    /// **Neighbouring heaps are told apart by colour, and every heap's colour
+    /// stands off a token and the page, in either theme**: the dot on a token
+    /// is how a column is told from the next when nothing in it is aimed at.
+    #[test]
+    fn neighbouring_heaps_are_told_apart_in_either_theme() {
+        for light in [false, true] {
+            let c = Colours::of(&Palette::for_mode(light));
+            for pair in c.heaps.windows(2) {
+                assert!(
+                    !guitk::palette::hard_to_tell_apart(pair[0], pair[1]),
+                    "two neighbouring heaps look alike: {pair:?} (light: {light})"
+                );
+            }
+            for (i, &heap) in c.heaps.iter().enumerate() {
+                for ground in [c.surface1, c.base] {
+                    let ratio = guitk::theme::contrast_ratio(heap, ground);
+                    assert!(
+                        ratio >= 3.0,
+                        "heap {i} is {ratio:.2}:1 on {ground:?} (light: {light})"
+                    );
+                }
+            }
+        }
+    }
     use guitk::event::Modifiers;
     use guitk::probe;
     use std::collections::HashMap;

@@ -14,16 +14,43 @@ pathcodec = { path = "../pathcodec" }
 # converted at every boundary — would put a second definition of a colour in
 # the one crate whose job is to stop there being two definitions of anything.
 guitk = { path = "../toolkit" }
+# A program's own icon may be a PNG, in `hicolor` or named by its path.
+imagecodec = { path = "../imagecodec" }
+# The XDG data directories, where `hicolor` is: one reading of them for the
+# start menu's entries and the icons those entries name.
+desktopentry = { path = "../desktopentry" }
 
 # Format-preserving YAML. A settings file a user has commented has to come back
 # with the comments intact. See yamldoc/src/lib.rs.
 yamldoc = { path = "../../yamldoc" }
+
+# A recurring window of the day, validated, with its `HH:MM` spelling: the
+# hours the automatic mode is light. The same type quiet hours use, so the two
+# schedules on this desktop cannot disagree about what 07:00 is.
+daywindow = { path = "../daywindow" }
+
+# The time zone the clock is in -- the user's choice, or the machine's --
+# which the automatic mode reads the time of day through. See
+# gui/datetimesettings/src/lib.rs.
+datetimesettings = { path = "../datetimesettings" }
 
 # Where settings files live and how they are replaced atomically. Re-exported
 # as `appearance::config`, which is what it used to be called; it moved out so
 # that `inputsettings` could use it without depending on the appearance model
 # (and through it on the toolkit). See gui/settingsfile/src/lib.rs.
 settingsfile = { path = "../settingsfile" }
+
+[dev-dependencies]
+# `datetimesettings::clock::with_time`, which fixes the time of day for a test
+# of anything scheduled by it -- the automatic light/dark mode first.
+datetimesettings = { path = "../datetimesettings", features = ["testing"] }
+# `settingsfile::testing` -- reached here as `config::testing` -- for the tests
+# that read a colour theme from a scratch user's data directory.
+settingsfile = { path = "../settingsfile", features = ["testing"] }
+# A private on-disk directory per test, for the theme-directory fixtures in
+# `themes.rs`, which pass their directories in rather than use the scratch
+# user's.
+scratchdir = { path = "../../userspace/scratchdir" }
 
 [features]
 # Compiles `appearance::palette_check`, the sweep that proves a module draws

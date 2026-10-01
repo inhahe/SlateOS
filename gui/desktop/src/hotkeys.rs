@@ -103,6 +103,30 @@ pub struct Launch {
 }
 
 impl Launch {
+    /// `program`, started with no arguments -- a start-menu row, a pinned
+    /// button, a program shortcut on the desktop.
+    #[must_use]
+    pub fn program(program: impl Into<PathBuf>) -> Self {
+        Self {
+            program: program.into(),
+            args: Vec::new(),
+        }
+    }
+
+    /// `program`, asked to open `path` -- a folder in the file manager, a
+    /// document in the program chosen for its kind.
+    ///
+    /// The path goes over as its own argument and as the bytes that name it,
+    /// never spliced into a command line: a file called `a b.txt` is one
+    /// argument, and one whose name has no UTF-8 spelling still arrives.
+    #[must_use]
+    pub fn opening(program: impl Into<PathBuf>, path: &std::path::Path) -> Self {
+        Self {
+            program: program.into(),
+            args: vec![path.as_os_str().to_os_string()],
+        }
+    }
+
     /// The whole invocation, as one line, for showing to a person.
     ///
     /// Display only. Both halves go through `Path::display`, which renders
@@ -126,16 +150,16 @@ use yamldoc::Document;
 // Rendering constants
 // ============================================================================
 
-const PANEL_WIDTH: f32 = 560.0;
+pub(crate) const PANEL_WIDTH: f32 = 560.0;
 const PANEL_RADIUS: f32 = 10.0;
-const PADDING: f32 = 16.0;
-const HEADER_HEIGHT: f32 = 44.0;
-const ROW_HEIGHT: f32 = 38.0;
+pub(crate) const PADDING: f32 = 16.0;
+pub(crate) const HEADER_HEIGHT: f32 = 44.0;
+pub(crate) const ROW_HEIGHT: f32 = 38.0;
 const KEY_BADGE_HEIGHT: f32 = 24.0;
 const KEY_BADGE_RADIUS: f32 = 4.0;
-const HEADER_FONT_SIZE: f32 = 16.0;
-const LABEL_FONT_SIZE: f32 = 13.0;
-const KEY_FONT_SIZE: f32 = 12.0;
+pub(crate) const HEADER_FONT_SIZE: f32 = 16.0;
+pub(crate) const LABEL_FONT_SIZE: f32 = 13.0;
+pub(crate) const KEY_FONT_SIZE: f32 = 12.0;
 
 // ============================================================================
 // Error type
@@ -303,7 +327,7 @@ impl Hotkey {
     ///    writing `super_key: _` in that one arm.
     ///
     /// Everything else matches exactly.
-    fn normalized(key: Key, modifiers: Modifiers) -> Self {
+    pub(crate) fn normalized(key: Key, modifiers: Modifiers) -> Self {
         if MODIFIER_AGNOSTIC_KEYS.contains(&key) {
             return Self::bare(key);
         }
@@ -470,7 +494,23 @@ pub enum HotkeyAction {
     /// Step the Alt+Tab switcher forwards, opening it if it is closed.
     CycleWindows,
     /// Step the Alt+Tab switcher backwards, opening it if it is closed.
+    ///
+    /// Opened this way, it shows itself as the forward chord beside it would --
+    /// the same keys without Shift -- so a user who binds Alt+Tab to
+    /// [`CycleWindowsInOverview`](Self::CycleWindowsInOverview) gets
+    /// Shift+Alt+Tab in the overview as well.
     CycleWindowsBackwards,
+    /// Step through the windows as [`CycleWindows`](Self::CycleWindows)
+    /// does, shown in the overview rather than the switcher's strip: every
+    /// window on the desktop at once, to scale, most recently used first, the
+    /// one letting go would pick lit.
+    ///
+    /// This is how the user chooses what Alt+Tab shows (`design-decisions.md`
+    /// §1416: Super+Tab went, and what it opened became a choice for Alt+Tab)
+    /// -- by binding Alt+Tab to it on the shortcut card, the one place
+    /// shortcuts are set, rather than through a second setting that would say
+    /// the same thing somewhere else.
+    CycleWindowsInOverview,
     /// Open (or close) the Exposé overlay — every window on every desktop.
     ///
     /// Distinct from [`CycleWindows`](Self::CycleWindows), which is the same job
@@ -558,6 +598,12 @@ pub enum HotkeyAction {
     Screenshot,
     /// Capture a region the user draws.
     ScreenshotRegion,
+    /// Capture the focused window.
+    ScreenshotWindow,
+    /// Capture the whole screen, and ask where to save it as a file.
+    ScreenshotToFile,
+    /// Capture the focused window, and ask where to save it as a file.
+    ScreenshotWindowToFile,
 }
 
 /// The command each fixed launching action starts.
@@ -568,7 +614,7 @@ pub enum HotkeyAction {
 /// shortcut that starts `/usr/bin/procexploder` is a shortcut that silently does
 /// nothing, and the typo is invisible to every other test in this file.
 const TASK_MANAGER_COMMAND: &str = "/usr/bin/procexplorer";
-const SETTINGS_COMMAND: &str = "/usr/bin/settings";
+const SETTINGS_COMMAND: &str = crate::launcher::SETTINGS;
 /// The lock screen, named here and read by `ShellSession` too.
 ///
 /// `pub(crate)` rather than private because the session has to recognise a
@@ -591,8 +637,62 @@ pub(crate) const LOCK_COMMAND: &str = "/usr/bin/lockscreen";
 const SCREENSHOT_COMMAND: &str = "/usr/bin/screenshot";
 const SCREENSHOT_FULLSCREEN_ARG: &str = "--fullscreen";
 const SCREENSHOT_REGION_ARG: &str = "--region";
+/// The tool's own flag for the focused window.
+const SCREENSHOT_WINDOW_ARG: &str = "--window";
+/// After the mode: ask where to save the capture as a file, rather than
+/// keeping it. The tool reads only its first argument today, so until it
+/// learns this one a save-to-file shortcut takes the screenshot and stops
+/// there -- lane E's (`requests/c-e-print-screen-can-save-to-a-file.md`).
+const SCREENSHOT_SAVE_ARG: &str = "--save";
 
 impl HotkeyAction {
+    /// Every action, once -- what the shortcut card's action picker offers.
+    ///
+    /// `LaunchApp` and `SwitchDesktop` carry data and stand here with
+    /// placeholder values; the picker turns the first into its "Run a
+    /// command..." field and the second into one entry per desktop. A list
+    /// claiming to be every variant is a claim the compiler cannot check, so
+    /// `scripts/check-variant-lists.py` checks it: an action added to the enum
+    /// and not here fails that gate rather than quietly being unbindable from
+    /// the card.
+    pub const ALL: [Self; 35] = [
+        Self::CloseWindow,
+        Self::MinimizeWindow,
+        Self::MaximizeWindow,
+        Self::RestoreOrMinimize,
+        Self::SnapLeft,
+        Self::SnapRight,
+        Self::ToggleZoneOverlay,
+        Self::ShowDesktop,
+        Self::SwitchInputLayout,
+        Self::CycleWindows,
+        Self::CycleWindowsBackwards,
+        Self::CycleWindowsInOverview,
+        Self::ToggleOverview,
+        Self::PreviousDesktop,
+        Self::NextDesktop,
+        Self::SwitchDesktop(0),
+        Self::ToggleStartMenu,
+        Self::ToggleRunDialog,
+        Self::ToggleNotifications,
+        Self::ToggleShortcutCard,
+        Self::DismissPopup,
+        Self::VolumeUp,
+        Self::VolumeDown,
+        Self::VolumeMute,
+        Self::BrightnessUp,
+        Self::BrightnessDown,
+        Self::LaunchApp(String::new()),
+        Self::ShowTaskManager,
+        Self::SystemSettings,
+        Self::ScreenLock,
+        Self::Screenshot,
+        Self::ScreenshotRegion,
+        Self::ScreenshotWindow,
+        Self::ScreenshotToFile,
+        Self::ScreenshotWindowToFile,
+    ];
+
     /// Whether the press is claimed only when the shell has something to do.
     ///
     /// True for [`DismissPopup`](Self::DismissPopup) and nothing else. A key the
@@ -603,6 +703,17 @@ impl HotkeyAction {
     #[must_use]
     pub const fn is_conditional(&self) -> bool {
         matches!(self, Self::DismissPopup)
+    }
+
+    /// Whether this steps a window switch -- starting one if none is under
+    /// way -- which is the one kind of action a *release* ends, and so the one
+    /// kind whose held keys the shell has to remember.
+    #[must_use]
+    pub const fn cycles_windows(&self) -> bool {
+        matches!(
+            self,
+            Self::CycleWindows | Self::CycleWindowsBackwards | Self::CycleWindowsInOverview
+        )
     }
 
     /// The program this action starts, and how to invoke it.
@@ -628,6 +739,24 @@ impl HotkeyAction {
                 program: PathBuf::from(SCREENSHOT_COMMAND),
                 args: vec![OsString::from(SCREENSHOT_REGION_ARG)],
             }),
+            Self::ScreenshotWindow => Some(Launch {
+                program: PathBuf::from(SCREENSHOT_COMMAND),
+                args: vec![OsString::from(SCREENSHOT_WINDOW_ARG)],
+            }),
+            Self::ScreenshotToFile => Some(Launch {
+                program: PathBuf::from(SCREENSHOT_COMMAND),
+                args: vec![
+                    OsString::from(SCREENSHOT_FULLSCREEN_ARG),
+                    OsString::from(SCREENSHOT_SAVE_ARG),
+                ],
+            }),
+            Self::ScreenshotWindowToFile => Some(Launch {
+                program: PathBuf::from(SCREENSHOT_COMMAND),
+                args: vec![
+                    OsString::from(SCREENSHOT_WINDOW_ARG),
+                    OsString::from(SCREENSHOT_SAVE_ARG),
+                ],
+            }),
             _ => self.command().map(plain),
         }
     }
@@ -645,9 +774,13 @@ impl HotkeyAction {
             Self::ShowTaskManager => Some(TASK_MANAGER_COMMAND),
             Self::SystemSettings => Some(SETTINGS_COMMAND),
             Self::ScreenLock => Some(LOCK_COMMAND),
-            // Both, because `command` answers *which program*; the two
+            // All five, because `command` answers *which program*; they
             // differ only in how it is invoked, which is `launch`'s answer.
-            Self::Screenshot | Self::ScreenshotRegion => Some(SCREENSHOT_COMMAND),
+            Self::Screenshot
+            | Self::ScreenshotRegion
+            | Self::ScreenshotWindow
+            | Self::ScreenshotToFile
+            | Self::ScreenshotWindowToFile => Some(SCREENSHOT_COMMAND),
             _ => None,
         }
     }
@@ -666,6 +799,7 @@ impl HotkeyAction {
             Self::ShowDesktop => "show_desktop".to_string(),
             Self::CycleWindows => "cycle_windows".to_string(),
             Self::CycleWindowsBackwards => "cycle_windows_backwards".to_string(),
+            Self::CycleWindowsInOverview => "cycle_windows_in_overview".to_string(),
             Self::ToggleOverview => "toggle_overview".to_string(),
             Self::PreviousDesktop => "previous_desktop".to_string(),
             Self::NextDesktop => "next_desktop".to_string(),
@@ -686,6 +820,9 @@ impl HotkeyAction {
             Self::ScreenLock => "screen_lock".to_string(),
             Self::Screenshot => "screenshot".to_string(),
             Self::ScreenshotRegion => "screenshot_region".to_string(),
+            Self::ScreenshotWindow => "screenshot_window".to_string(),
+            Self::ScreenshotToFile => "screenshot_to_file".to_string(),
+            Self::ScreenshotWindowToFile => "screenshot_window_to_file".to_string(),
         }
     }
 
@@ -712,6 +849,7 @@ impl HotkeyAction {
             "show_desktop" => Ok(Self::ShowDesktop),
             "cycle_windows" => Ok(Self::CycleWindows),
             "cycle_windows_backwards" => Ok(Self::CycleWindowsBackwards),
+            "cycle_windows_in_overview" => Ok(Self::CycleWindowsInOverview),
             "toggle_overview" => Ok(Self::ToggleOverview),
             "previous_desktop" => Ok(Self::PreviousDesktop),
             "next_desktop" => Ok(Self::NextDesktop),
@@ -730,6 +868,9 @@ impl HotkeyAction {
             "screen_lock" => Ok(Self::ScreenLock),
             "screenshot" => Ok(Self::Screenshot),
             "screenshot_region" => Ok(Self::ScreenshotRegion),
+            "screenshot_window" => Ok(Self::ScreenshotWindow),
+            "screenshot_to_file" => Ok(Self::ScreenshotToFile),
+            "screenshot_window_to_file" => Ok(Self::ScreenshotWindowToFile),
             _ => Err(HotkeyError::UnknownAction(value.to_string())),
         }
     }
@@ -749,6 +890,7 @@ impl HotkeyAction {
             Self::ShowDesktop => "Show Desktop",
             Self::CycleWindows => "Cycle Windows",
             Self::CycleWindowsBackwards => "Cycle Windows Backwards",
+            Self::CycleWindowsInOverview => "Cycle Windows in the Overview",
             Self::ToggleOverview => "Window Overview",
             Self::PreviousDesktop => "Previous Desktop",
             Self::NextDesktop => "Next Desktop",
@@ -774,6 +916,9 @@ impl HotkeyAction {
             Self::ScreenLock => "Lock Screen",
             Self::Screenshot => "Screenshot",
             Self::ScreenshotRegion => "Screenshot Region",
+            Self::ScreenshotWindow => "Screenshot Window",
+            Self::ScreenshotToFile => "Screenshot to File",
+            Self::ScreenshotWindowToFile => "Screenshot Window to File",
         }
     }
 }
@@ -942,10 +1087,17 @@ const fn sup() -> Modifiers {
 
 /// Populate a registry with the standard default shortcut bindings.
 ///
-/// This is the desktop's shipped keyboard, and it is the union of the two tables
-/// that used to disagree: everything the shell already ran, plus everything this
-/// module already promised. See `design-decisions.md` §571 for why the union
-/// rather than either side.
+/// The operator's set (`design-decisions.md` §1416, answering C-Q24).
+/// `design.txt` asks for very few shortcuts on by default, and this is where
+/// the operator drew the line: closing and switching windows, the Super key and
+/// Super+R, Print Screen and its variants, and the keys that are keys of their
+/// own (volume) -- the ones every desktop has and nobody presses by accident.
+/// Every other action is still there, one binding away on the shortcut card,
+/// which the start menu opens now that the card has no chord of its own.
+///
+/// It was 31 bindings until 2026-09-27: the union of two tables that had
+/// disagreed (`design-decisions.md` §571), which nothing had ever cut back to
+/// what the design asks for.
 fn register_defaults(reg: &mut HotkeyRegistry) {
     let defaults: &[(Hotkey, HotkeyAction)] = &[
         // ---- the focused window ------------------------------------------
@@ -953,27 +1105,11 @@ fn register_defaults(reg: &mut HotkeyRegistry) {
             Hotkey::new(Key::F4, Modifiers::alt()),
             HotkeyAction::CloseWindow,
         ),
-        (Hotkey::new(Key::D, sup()), HotkeyAction::ShowDesktop),
-        (
-            Hotkey::new(Key::Space, sup()),
-            HotkeyAction::SwitchInputLayout,
-        ),
-        (Hotkey::new(Key::Left, sup()), HotkeyAction::SnapLeft),
-        (Hotkey::new(Key::Right, sup()), HotkeyAction::SnapRight),
-        (Hotkey::new(Key::Up, sup()), HotkeyAction::MaximizeWindow),
-        (
-            Hotkey::new(Key::Down, sup()),
-            HotkeyAction::RestoreOrMinimize,
-        ),
-        // Super+Z, as in "zones". Super plus an arrow is already taken by the
-        // four one-press placements above, and the chooser needs a key that is
-        // not one of them.
-        (Hotkey::new(Key::Z, sup()), HotkeyAction::ToggleZoneOverlay),
-        // `HotkeyAction::MinimizeWindow` deliberately has no default chord:
-        // Super+Down already minimizes an unmaximized window, and a second key
-        // for the same job would be spent for nothing.
-
         // ---- moving between windows --------------------------------------
+        // What Alt+Tab shows is the user's to choose: bind it to "Window
+        // Overview" instead, on the shortcut card, and it opens the overview.
+        // Super+Tab, which used to open the overview beside it, is gone -- one
+        // way to switch windows, not two (§1416).
         (
             Hotkey::new(Key::Tab, Modifiers::alt()),
             HotkeyAction::CycleWindows,
@@ -982,89 +1118,52 @@ fn register_defaults(reg: &mut HotkeyRegistry) {
             Hotkey::new(Key::Tab, mods(false, true, true, false)),
             HotkeyAction::CycleWindowsBackwards,
         ),
-        // Super+Tab, which is the chord every other desktop uses for this and is
-        // not one of the four above. Alt+Tab is deliberately left alone: the two
-        // are complements, not alternatives.
-        (Hotkey::new(Key::Tab, sup()), HotkeyAction::ToggleOverview),
-        // ---- virtual desktops ---------------------------------------------
-        (
-            Hotkey::new(Key::Left, mods(true, false, false, true)),
-            HotkeyAction::PreviousDesktop,
-        ),
-        (
-            Hotkey::new(Key::Right, mods(true, false, false, true)),
-            HotkeyAction::NextDesktop,
-        ),
         // ---- the shell's own surfaces --------------------------------------
         // The Super key on its own, both of them. `Hotkey::normalized` drops the
         // Super bit from the press of the Super key itself, so one entry answers
         // a driver that sets the bit and a driver that does not.
         (Hotkey::bare(Key::LeftSuper), HotkeyAction::ToggleStartMenu),
         (Hotkey::bare(Key::RightSuper), HotkeyAction::ToggleStartMenu),
-        // Super+R, as in "run" — the chord Windows uses for the same box, and
-        // free here. The run-dialog module's own doc offers "Ctrl+R or Super+R";
-        // Ctrl+R is not taken by the desktop but *is* taken by roughly every
-        // application that has a reload command, and a global grab on it would
-        // break all of them.
+        // Super+R, as in "run" -- the chord Windows uses for the same box. Not
+        // Ctrl+R, which roughly every program with a reload command uses.
         (Hotkey::new(Key::R, sup()), HotkeyAction::ToggleRunDialog),
-        // Super+N, as in "notifications" — the chord Windows uses for the same
-        // panel, and free here.
-        (
-            Hotkey::new(Key::N, sup()),
-            HotkeyAction::ToggleNotifications,
-        ),
-        // Super+/ — what macOS and most editors use for "show me the
-        // shortcuts", and free here. Written as the `Slash` key rather than as
-        // `Shift+Slash`-for-a-question-mark on purpose: the binding is on a
-        // *key*, not on a character, so it does not move when the user is
-        // typing on a layout where `/` sits somewhere else.
-        (
-            Hotkey::new(Key::Slash, sup()),
-            HotkeyAction::ToggleShortcutCard,
-        ),
         // Bare Escape, claimed *conditionally*: with nothing open the press is
         // not consumed and reaches the focused window. See
         // `HotkeyAction::is_conditional`, which is what keeps this out of
-        // `global_chords` — a permanent Escape grab would break the key in every
+        // `global_chords` -- a permanent Escape grab would break the key in every
         // dialog on the desktop.
         (Hotkey::bare(Key::Escape), HotkeyAction::DismissPopup),
         // ---- sound -----------------------------------------------------------
-        // Bare: hardware media keys are keys of their own and no modifier is
-        // involved. These were `Key::Unknown(0xAF)` and its neighbours — Windows
-        // virtual key codes, which nothing in this system emits — so the three
-        // volume bindings could never fire. They are named variants now
-        // (`gui/compositor/src/keymap.rs` translates the scan codes that do
-        // arrive), and `Hotkey::normalized` is what makes a press with Shift
-        // held still find them.
+        // Bare: hardware media keys are keys of their own, usually in the top
+        // row or behind Fn, where nobody presses one by accident -- which is
+        // why these are on when the chords are not. They were `Key::Unknown`
+        // codes nothing emitted until `gui/compositor/src/keymap.rs` translated
+        // the scan codes that do arrive; `Hotkey::normalized` makes a press
+        // with Shift held still find them.
         (Hotkey::bare(Key::VolumeUp), HotkeyAction::VolumeUp),
         (Hotkey::bare(Key::VolumeDown), HotkeyAction::VolumeDown),
         (Hotkey::bare(Key::VolumeMute), HotkeyAction::VolumeMute),
-        // `HotkeyAction::BrightnessUp`/`BrightnessDown` deliberately have no
-        // default binding. A laptop's brightness pair sends no scancode at all
-        // — the firmware answers it over ACPI or vendor WMI — so there is no
-        // key to bind, and the two bindings that used to be here bound codes
-        // that never arrive. The actions stay so that a user can put them on a
-        // chord of their own. See known-issues.md →
-        // `TD-C-BRIGHTNESS-KEYS-ARE-NOT-KEYS`.
+        // `HotkeyAction::BrightnessUp`/`BrightnessDown` have no default binding
+        // because a laptop's brightness pair sends no scancode at all -- the
+        // firmware answers it over ACPI or vendor WMI -- so there is no key to
+        // bind. See known-issues.md -> `TD-C-BRIGHTNESS-KEYS-ARE-NOT-KEYS`.
 
-        // ---- starting a program ---------------------------------------------
-        (Hotkey::new(Key::I, sup()), HotkeyAction::SystemSettings),
-        (
-            Hotkey::new(Key::E, sup()),
-            // The path the start menu's "File Explorer" entry uses, not the bare
-            // word "explorer": `HotkeyOutcome::launches` carries command lines,
-            // and whoever executes one is not obliged to search a path.
-            HotkeyAction::LaunchApp("/usr/bin/explorer".to_string()),
-        ),
-        (Hotkey::new(Key::L, sup()), HotkeyAction::ScreenLock),
-        (
-            Hotkey::new(Key::Delete, mods(true, true, false, false)),
-            HotkeyAction::ShowTaskManager,
-        ),
+        // ---- screenshots -------------------------------------------------------
+        // As on Windows: Print Screen the whole screen, Alt+Print Screen the
+        // focused window; and, the operator's addition, Ctrl+ and Ctrl+Alt+
+        // the same two saved to a file, asking where.
         (Hotkey::bare(Key::PrintScreen), HotkeyAction::Screenshot),
         (
-            Hotkey::new(Key::S, mods(false, false, true, true)),
-            HotkeyAction::ScreenshotRegion,
+            Hotkey::new(Key::PrintScreen, Modifiers::alt()),
+            HotkeyAction::ScreenshotWindow,
+        ),
+        (
+            Hotkey::new(Key::PrintScreen, Modifiers::ctrl()),
+            HotkeyAction::ScreenshotToFile,
+        ),
+        (
+            Hotkey::new(Key::PrintScreen, mods(true, true, false, false)),
+            HotkeyAction::ScreenshotWindowToFile,
         ),
     ];
 
@@ -1075,6 +1174,88 @@ fn register_defaults(reg: &mut HotkeyRegistry) {
         // and reporting it at runtime would mean a shell that refuses to start
         // over a shortcut.
         let _ = reg.register(*hotkey, action.clone());
+    }
+}
+
+/// The chords that were on by default until §1416, for the tests that press
+/// them.
+///
+/// The operator cut the defaults back to a handful (`design-decisions.md`
+/// §1416). Every other action is still one binding away on the shortcut card,
+/// and what it does once bound is unchanged -- so a test of what Super+D or
+/// Super+Tab *does* binds them first, as a user would, rather than losing its
+/// subject. The tests of what is bound *by default* use
+/// [`HotkeyRegistry::defaults`] alone.
+#[cfg(test)]
+pub(crate) mod optional_chords {
+    use super::{Hotkey, HotkeyAction, HotkeyRegistry, Key, mods, sup};
+
+    /// Every chord the old default table had and the new one does not, with
+    /// the action it had then.
+    pub(crate) fn table() -> Vec<(Hotkey, HotkeyAction)> {
+        vec![
+            (Hotkey::new(Key::D, sup()), HotkeyAction::ShowDesktop),
+            (
+                Hotkey::new(Key::Space, sup()),
+                HotkeyAction::SwitchInputLayout,
+            ),
+            (Hotkey::new(Key::Left, sup()), HotkeyAction::SnapLeft),
+            (Hotkey::new(Key::Right, sup()), HotkeyAction::SnapRight),
+            (Hotkey::new(Key::Up, sup()), HotkeyAction::MaximizeWindow),
+            (
+                Hotkey::new(Key::Down, sup()),
+                HotkeyAction::RestoreOrMinimize,
+            ),
+            (Hotkey::new(Key::Z, sup()), HotkeyAction::ToggleZoneOverlay),
+            (Hotkey::new(Key::Tab, sup()), HotkeyAction::ToggleOverview),
+            (
+                Hotkey::new(Key::Left, mods(true, false, false, true)),
+                HotkeyAction::PreviousDesktop,
+            ),
+            (
+                Hotkey::new(Key::Right, mods(true, false, false, true)),
+                HotkeyAction::NextDesktop,
+            ),
+            (
+                Hotkey::new(Key::N, sup()),
+                HotkeyAction::ToggleNotifications,
+            ),
+            (
+                Hotkey::new(Key::Slash, sup()),
+                HotkeyAction::ToggleShortcutCard,
+            ),
+            (Hotkey::new(Key::I, sup()), HotkeyAction::SystemSettings),
+            (
+                Hotkey::new(Key::E, sup()),
+                HotkeyAction::LaunchApp(crate::launcher::FILE_MANAGER.to_string()),
+            ),
+            (Hotkey::new(Key::L, sup()), HotkeyAction::ScreenLock),
+            (
+                Hotkey::new(Key::Delete, mods(true, true, false, false)),
+                HotkeyAction::ShowTaskManager,
+            ),
+            (
+                Hotkey::new(Key::S, mods(false, false, true, true)),
+                HotkeyAction::ScreenshotRegion,
+            ),
+        ]
+    }
+
+    /// Bind every one of them onto `reg`, through [`HotkeyRegistry::register`]
+    /// -- the door a loaded shortcuts file uses.
+    ///
+    /// # Panics
+    ///
+    /// If `reg` already holds one of the chords for something else: a fixture
+    /// that binds over a binding is testing something other than what it says.
+    pub(crate) fn bind(reg: &mut HotkeyRegistry) {
+        for (hotkey, action) in table() {
+            let bound = reg.register(hotkey, action.clone());
+            assert!(
+                bound.is_ok(),
+                "{hotkey:?} for {action:?} collides with a binding: {bound:?}"
+            );
+        }
     }
 }
 
@@ -1714,6 +1895,69 @@ pub fn settings_panel_size(registry: &HotkeyRegistry, max_height: f32) -> (f32, 
     (layout.width, layout.height)
 }
 
+/// How many rows each of the card's columns holds at `max_height` -- the page
+/// its list moves by under Page Up and Page Down. Every row is on the screen,
+/// folded into columns, so a page is a column.
+#[must_use]
+pub(crate) fn rows_per_column(registry: &HotkeyRegistry, max_height: f32) -> usize {
+    panel_layout(registry, max_height).rows_per_column
+}
+
+/// The card's shadow, background and edge.
+///
+/// One function for every card the shortcut card shows -- the list of bindings
+/// and the action picker (`crate::shortcut_editor`) -- so that switching
+/// between them reads as one card changing what it shows, not as two panels
+/// that disagree about a shadow.
+pub(crate) fn push_card(
+    cmds: &mut Vec<RenderCommand>,
+    p: &Palette,
+    x: f32,
+    y: f32,
+    width: f32,
+    height: f32,
+) {
+    let radii = CornerRadii::all(PANEL_RADIUS);
+
+    // Shadow.
+    cmds.push(RenderCommand::BoxShadow {
+        x,
+        y,
+        width,
+        height,
+        offset_x: 0.0,
+        offset_y: 4.0,
+        blur: 20.0,
+        spread: 6.0,
+        // Black in both modes, which is why it does not flip with the theme:
+        // a shadow is an absence of light rather than a colour.
+        color: p.shadow(),
+        corner_radii: radii,
+    });
+
+    // Background.
+    cmds.push(RenderCommand::FillRect {
+        x,
+        y,
+        width,
+        height,
+        // Judgement 1: the transparency setting, not a baked-in alpha.
+        color: p.panel_bg(),
+        corner_radii: radii,
+    });
+
+    // Border.
+    cmds.push(RenderCommand::StrokeRect {
+        x,
+        y,
+        width,
+        height,
+        color: p.surface2,
+        line_width: 1.0,
+        corner_radii: radii,
+    });
+}
+
 /// Render a hotkey settings panel showing all bindings.
 ///
 /// Produces a self-contained list of `RenderCommand`s that can be composited
@@ -1739,48 +1983,10 @@ pub fn render_settings_panel(
     let binding_count = registry.len();
     let layout = panel_layout(registry, max_height);
     let (panel_width, panel_height) = (layout.width, layout.height);
-    let radii = CornerRadii::all(PANEL_RADIUS);
-
     let mut cmds: Vec<RenderCommand> =
         Vec::with_capacity(binding_count.saturating_mul(6).saturating_add(8));
 
-    // Shadow.
-    cmds.push(RenderCommand::BoxShadow {
-        x: panel_x,
-        y: panel_y,
-        width: panel_width,
-        height: panel_height,
-        offset_x: 0.0,
-        offset_y: 4.0,
-        blur: 20.0,
-        spread: 6.0,
-        // Black in both modes, which is why it does not flip with the theme:
-        // a shadow is an absence of light rather than a colour.
-        color: p.shadow(),
-        corner_radii: radii,
-    });
-
-    // Background.
-    cmds.push(RenderCommand::FillRect {
-        x: panel_x,
-        y: panel_y,
-        width: panel_width,
-        height: panel_height,
-        // Judgement 1: the transparency setting, not a baked-in alpha.
-        color: p.panel_bg(),
-        corner_radii: radii,
-    });
-
-    // Border.
-    cmds.push(RenderCommand::StrokeRect {
-        x: panel_x,
-        y: panel_y,
-        width: panel_width,
-        height: panel_height,
-        color: p.surface2,
-        line_width: 1.0,
-        corner_radii: radii,
-    });
+    push_card(&mut cmds, p, panel_x, panel_y, panel_width, panel_height);
 
     // Clip to panel bounds.
     cmds.push(RenderCommand::PushClip {
@@ -2274,21 +2480,29 @@ mod tests {
         );
     }
 
-    /// The card that lists the shortcuts is itself reachable by a shortcut, and
-    /// that shortcut is on the card.
+    /// The card that lists the shortcuts has no chord by default -- the
+    /// operator's call (§1416) -- and a chord a user gives it is on the card and
+    /// grabbed like any other.
     ///
-    /// Both halves matter. Without a binding the card is a surface nothing can
-    /// open — which is what `TD-C-THE-SHORTCUT-CARD-HAS-NO-DOOR` recorded — and
-    /// without the binding being *in the registry* the card would be the one
-    /// shortcut the card does not mention, which is the shortcut a user who has
-    /// closed it most needs to know.
+    /// No default chord is only safe because the start menu opens the card
+    /// (`StartShortcut::KeyboardShortcuts`, pinned in `pointer_tests`): a card
+    /// that only a shortcut could open is one nobody could reach to bind the
+    /// shortcut, which is what `TD-C-THE-SHORTCUT-CARD-HAS-NO-DOOR` recorded.
     #[test]
     fn the_card_that_lists_the_shortcuts_lists_the_shortcut_that_opens_it() {
-        let reg = HotkeyRegistry::defaults();
+        let mut reg = HotkeyRegistry::defaults();
+        assert!(
+            !reg.all_bindings()
+                .any(|(_, a)| *a == HotkeyAction::ToggleShortcutCard),
+            "the card has a chord by default, which the operator turned off"
+        );
+        assert_eq!(reg.lookup(Key::Slash, &sup()), None);
+
+        optional_chords::bind(&mut reg);
         assert_eq!(
             reg.lookup(Key::Slash, &sup()),
             Some(&HotkeyAction::ToggleShortcutCard),
-            "Super+/ does not open the shortcut card"
+            "Super+/, once bound, does not open the shortcut card"
         );
         assert!(
             reg.all_bindings()
@@ -2632,9 +2846,18 @@ mod tests {
     /// what launches these same programs when they are clicked instead of typed.
     #[test]
     fn every_command_a_shortcut_names_is_a_program_the_shell_knows_about() {
+        // The database, and the power menu's own list: the lock screen left the
+        // database with the other power actions on 2026-09-25, and the power
+        // menu's Lock row is the other thing that starts it.
         let known: Vec<String> = crate::launcher::builtin_app_database()
             .iter()
             .map(|app| app.executable_path.clone())
+            .chain(
+                crate::power::PowerChoice::ALL
+                    .iter()
+                    .filter_map(|choice| choice.command())
+                    .map(|launch| launch.program.display().to_string()),
+            )
             .collect();
         // The fixed-command actions, plus whatever the *default* table puts on
         // `LaunchApp` — the one action whose command is not a constant. A
@@ -2661,44 +2884,101 @@ mod tests {
         }
     }
 
+    /// The defaults are the operator's set (§1416) -- every one of them, and
+    /// nothing else.
+    ///
+    /// Written out whole, because both directions are the decision: a chord
+    /// missing from the defaults is a shortcut the operator asked for that does
+    /// nothing, and a chord added is one the operator turned off grabbed from
+    /// every window on the desktop.
     #[test]
-    fn test_defaults_contains_alt_f4() {
+    fn the_defaults_are_the_operators_set_and_nothing_else() {
+        let wanted: Vec<(Hotkey, HotkeyAction)> = vec![
+            (
+                Hotkey::new(Key::F4, Modifiers::alt()),
+                HotkeyAction::CloseWindow,
+            ),
+            (
+                Hotkey::new(Key::Tab, Modifiers::alt()),
+                HotkeyAction::CycleWindows,
+            ),
+            (
+                Hotkey::new(Key::Tab, mods(false, true, true, false)),
+                HotkeyAction::CycleWindowsBackwards,
+            ),
+            (Hotkey::bare(Key::LeftSuper), HotkeyAction::ToggleStartMenu),
+            (Hotkey::bare(Key::RightSuper), HotkeyAction::ToggleStartMenu),
+            (Hotkey::new(Key::R, sup()), HotkeyAction::ToggleRunDialog),
+            (Hotkey::bare(Key::Escape), HotkeyAction::DismissPopup),
+            (Hotkey::bare(Key::VolumeUp), HotkeyAction::VolumeUp),
+            (Hotkey::bare(Key::VolumeDown), HotkeyAction::VolumeDown),
+            (Hotkey::bare(Key::VolumeMute), HotkeyAction::VolumeMute),
+            (Hotkey::bare(Key::PrintScreen), HotkeyAction::Screenshot),
+            (
+                Hotkey::new(Key::PrintScreen, Modifiers::alt()),
+                HotkeyAction::ScreenshotWindow,
+            ),
+            (
+                Hotkey::new(Key::PrintScreen, Modifiers::ctrl()),
+                HotkeyAction::ScreenshotToFile,
+            ),
+            (
+                Hotkey::new(Key::PrintScreen, mods(true, true, false, false)),
+                HotkeyAction::ScreenshotWindowToFile,
+            ),
+        ];
         let reg = HotkeyRegistry::defaults();
-        let action = reg.lookup(Key::F4, &Modifiers::alt());
-        assert_eq!(action, Some(&HotkeyAction::CloseWindow));
+        for (hotkey, action) in &wanted {
+            assert_eq!(
+                reg.lookup(hotkey.key, &hotkey.modifiers()),
+                Some(action),
+                "{} is not {action:?} by default",
+                hotkey.display_name()
+            );
+        }
+        let extra: Vec<String> = reg
+            .all_bindings()
+            .filter(|(hotkey, action)| {
+                !wanted.iter().any(|(h, a)| {
+                    Hotkey::normalized(h.key, h.modifiers()) == **hotkey && a == *action
+                })
+            })
+            .map(|(hotkey, action)| format!("{}={action:?}", hotkey.display_name()))
+            .collect();
+        assert!(
+            extra.is_empty(),
+            "bound by default without the operator's say-so: {extra:?}"
+        );
     }
 
+    /// The five the operator named as *not* on by default: the zone overlay,
+    /// the shortcut card, Super+Space, Super+E and Super+Shift+S -- and
+    /// Super+Tab, so that Alt+Tab is the one way to switch windows. Each is its
+    /// own assertion so a failure names the decision it undoes; the whole-table
+    /// test above would say only "something extra".
     #[test]
-    fn test_defaults_contains_super_d() {
+    fn the_chords_the_operator_left_off_are_off() {
         let reg = HotkeyRegistry::defaults();
-        let action = reg.lookup(Key::D, &mods(false, false, false, true));
-        assert_eq!(action, Some(&HotkeyAction::ShowDesktop));
-    }
-
-    #[test]
-    fn test_defaults_contains_ctrl_alt_delete() {
-        let reg = HotkeyRegistry::defaults();
-        let action = reg.lookup(Key::Delete, &mods(true, true, false, false));
-        assert_eq!(action, Some(&HotkeyAction::ShowTaskManager));
-    }
-
-    #[test]
-    fn test_defaults_contains_printscreen() {
-        let reg = HotkeyRegistry::defaults();
-        let action = reg.lookup(Key::PrintScreen, &Modifiers::NONE);
-        assert_eq!(action, Some(&HotkeyAction::Screenshot));
-    }
-
-    #[test]
-    fn test_defaults_contains_super_left_right() {
-        let reg = HotkeyRegistry::defaults();
+        let bound_to = |action: &HotkeyAction| reg.all_bindings().any(|(_, a)| a == action);
+        assert!(
+            !bound_to(&HotkeyAction::ToggleZoneOverlay),
+            "the zone overlay"
+        );
+        assert!(
+            !bound_to(&HotkeyAction::ToggleShortcutCard),
+            "the shortcut card"
+        );
+        assert_eq!(reg.lookup(Key::Space, &sup()), None, "Super+Space");
+        assert_eq!(reg.lookup(Key::E, &sup()), None, "Super+E");
         assert_eq!(
-            reg.lookup(Key::Left, &mods(false, false, false, true)),
-            Some(&HotkeyAction::SnapLeft)
+            reg.lookup(Key::S, &mods(false, false, true, true)),
+            None,
+            "Super+Shift+S"
         );
         assert_eq!(
-            reg.lookup(Key::Right, &mods(false, false, false, true)),
-            Some(&HotkeyAction::SnapRight)
+            reg.lookup(Key::Tab, &sup()),
+            None,
+            "Super+Tab: a second way to switch windows"
         );
     }
 
@@ -2709,9 +2989,36 @@ mod tests {
     /// `Ctrl+Super+Left` press too, and the virtual-desktop shortcuts below had
     /// never once fired. Keyed on the exact modifier set, the near-miss is a
     /// different key in the map and cannot shadow anything.
+    ///
+    /// The four Print Screens are the defaults' own case of it: one key, four
+    /// modifier sets, four different captures.
     #[test]
     fn a_shortcut_does_not_answer_for_a_chord_with_one_more_modifier() {
-        let reg = HotkeyRegistry::defaults();
+        let mut reg = HotkeyRegistry::defaults();
+        let print = |m: Modifiers| reg.lookup(Key::PrintScreen, &m).cloned();
+        assert_eq!(print(Modifiers::NONE), Some(HotkeyAction::Screenshot));
+        assert_eq!(
+            print(Modifiers::alt()),
+            Some(HotkeyAction::ScreenshotWindow),
+            "Alt+Print Screen is the window, not the screen"
+        );
+        assert_eq!(
+            print(Modifiers::ctrl()),
+            Some(HotkeyAction::ScreenshotToFile),
+            "Ctrl+Print Screen saves the screen to a file"
+        );
+        assert_eq!(
+            print(mods(true, true, false, false)),
+            Some(HotkeyAction::ScreenshotWindowToFile),
+            "Ctrl+Alt+Print Screen is neither Ctrl+ nor Alt+Print Screen"
+        );
+        assert_eq!(
+            print(mods(false, false, true, false)),
+            None,
+            "Shift+Print Screen is bound to nothing, not to the bare key"
+        );
+
+        optional_chords::bind(&mut reg);
         assert_eq!(
             reg.lookup(Key::Left, &mods(true, false, false, true)),
             Some(&HotkeyAction::PreviousDesktop),
@@ -2724,58 +3031,54 @@ mod tests {
         );
     }
 
+    /// Every chord the old defaults had can still be bound to what it did, on
+    /// top of the new defaults, without colliding with one of them -- the
+    /// promise §1416 makes, that turning a shortcut off by default cost nobody
+    /// the shortcut.
     #[test]
-    fn test_defaults_contains_super_l_lock() {
-        let reg = HotkeyRegistry::defaults();
-        assert_eq!(
-            reg.lookup(Key::L, &mods(false, false, false, true)),
-            Some(&HotkeyAction::ScreenLock)
-        );
+    fn every_chord_the_defaults_dropped_can_still_be_bound() {
+        let mut reg = HotkeyRegistry::defaults();
+        let before = reg.len();
+        optional_chords::bind(&mut reg);
+        assert_eq!(reg.len(), before + optional_chords::table().len());
+        for (hotkey, action) in optional_chords::table() {
+            assert_eq!(
+                reg.lookup(hotkey.key, &hotkey.modifiers()),
+                Some(&action),
+                "{}",
+                hotkey.display_name()
+            );
+        }
     }
 
+    /// The four Print Screens start the one screenshot tool, each with its own
+    /// flags -- the mode first, then `--save` for the two that ask for a file.
     #[test]
-    fn test_defaults_contains_alt_tab() {
-        let reg = HotkeyRegistry::defaults();
+    fn each_print_screen_starts_the_tool_in_its_own_mode() {
+        // Spelled out rather than through the constants, so that renaming a
+        // constant's value is a change this test notices: these are the words
+        // the tool's `apply_command_line` matches on.
+        let args = |action: HotkeyAction| -> Vec<OsString> {
+            let launch = action.launch().expect("a screenshot starts the tool");
+            assert_eq!(
+                launch.program,
+                PathBuf::from("/usr/bin/screenshot"),
+                "{action:?}"
+            );
+            launch.args
+        };
+        let words = |w: &[&str]| -> Vec<OsString> { w.iter().map(OsString::from).collect() };
+        assert_eq!(args(HotkeyAction::Screenshot), words(&["--fullscreen"]));
+        assert_eq!(args(HotkeyAction::ScreenshotWindow), words(&["--window"]));
         assert_eq!(
-            reg.lookup(Key::Tab, &Modifiers::alt()),
-            Some(&HotkeyAction::CycleWindows)
+            args(HotkeyAction::ScreenshotToFile),
+            words(&["--fullscreen", "--save"])
         );
-    }
-
-    #[test]
-    fn test_defaults_contains_super_shift_s() {
-        let reg = HotkeyRegistry::defaults();
         assert_eq!(
-            reg.lookup(Key::S, &mods(false, false, true, true)),
-            Some(&HotkeyAction::ScreenshotRegion)
+            args(HotkeyAction::ScreenshotWindowToFile),
+            words(&["--window", "--save"])
         );
-    }
-
-    #[test]
-    fn test_defaults_contains_super_r() {
-        let reg = HotkeyRegistry::defaults();
-        assert_eq!(
-            reg.lookup(Key::R, &mods(false, false, false, true)),
-            Some(&HotkeyAction::ToggleRunDialog)
-        );
-    }
-
-    #[test]
-    fn test_defaults_contains_super_i() {
-        let reg = HotkeyRegistry::defaults();
-        assert_eq!(
-            reg.lookup(Key::I, &mods(false, false, false, true)),
-            Some(&HotkeyAction::SystemSettings)
-        );
-    }
-
-    #[test]
-    fn test_defaults_contains_super_e() {
-        let reg = HotkeyRegistry::defaults();
-        assert_eq!(
-            reg.lookup(Key::E, &mods(false, false, false, true)),
-            Some(&HotkeyAction::LaunchApp("/usr/bin/explorer".to_string()))
-        );
+        assert_eq!(args(HotkeyAction::ScreenshotRegion), words(&["--region"]));
     }
 
     // ====================================================================

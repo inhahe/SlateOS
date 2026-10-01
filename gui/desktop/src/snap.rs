@@ -1288,9 +1288,9 @@ mod tests {
         // these labels does not change with the theme and neither may the
         // ink. `p.text` would be `#4C4F69` in light mode, on black.
         //
-        // Pinned by hand rather than by calling `readable_on`: a test that
-        // called the function the renderer calls would agree with it however
-        // wrong both were (module 32's tautology lesson).
+        // Pinned to the named endpoint rather than by calling `readable_on`:
+        // a test that called the function the renderer calls would agree
+        // with it however wrong both were (module 32's tautology lesson).
         //
         // Walked over all fourteen accents, not over the magenta fixture, and
         // that is what makes this a test rather than a coincidence. The wrong
@@ -1302,7 +1302,10 @@ mod tests {
         // Yellow, Peach, Rosewater and Flamingo do not, and under those the
         // labels would go near-*black* on a black scrim. One accent is one
         // sample of a two-valued function, which is no sample at all.
-        const NEAR_WHITE: u32 = 0x00EF_F1F5;
+        let near_white = {
+            let c = appearance::LIGHT_EXTREME;
+            (u32::from(c.r) << 16) | (u32::from(c.g) << 8) | u32::from(c.b)
+        };
         let mut seen = Vec::new();
         for light in [false, true] {
             for &accent in AccentColor::presets() {
@@ -1321,7 +1324,7 @@ mod tests {
                     let rgb = (u32::from(ink.r) << 16) | (u32::from(ink.g) << 8) | u32::from(ink.b);
                     assert_eq!(
                         rgb,
-                        NEAR_WHITE,
+                        near_white,
                         "{what}'s label is #{rgb:06X} in {} mode under {accent:?}, \
                          but it sits on a black scrim in every mode and under \
                          every accent",
@@ -1338,7 +1341,7 @@ mod tests {
         }
         assert_eq!(
             seen,
-            vec![NEAR_WHITE; 2 * AccentColor::presets().len() * 2],
+            vec![near_white; 2 * AccentColor::presets().len() * 2],
             "a label changed with the mode or with the accent"
         );
     }

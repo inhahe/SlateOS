@@ -53,7 +53,7 @@ tests in this tree call the function under test directly, because that is what
 a unit test is.
 
 **Unserialised** if neither the test's body nor any same-file helper it calls
-mentions a lock. Any of `.lock()`, a `lock_*` helper, or a `*_LOCK` static
+mentions a lock. Any of `.lock()` or `Type::lock()`, a `lock_*` helper, or a `*_LOCK` static
 counts, wherever it appears. The one-hop indirection matters as much here as it
 does for reachability: `posix::getopt`'s tests serialise by calling
 `reset_getopt_state()`, which takes `GETOPT_TEST_LOCK` and hands back the guard,
@@ -146,6 +146,7 @@ from pathlib import Path
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import gittree  # noqa: E402
+from safewrite import write_text  # noqa: E402
 
 ROOT = Path(__file__).resolve().parent.parent
 # Written to the real disk; `--write-baseline` updates a file rather than
@@ -213,13 +214,14 @@ _TEST_ATTR = re.compile(r"^\s*#\[(?:\w+::)*test\]")
 # do not try to check they took the *right* lock -- that is a judgement call, and
 # a checker that second-guesses it would be wrong more often than the author.
 #
-# `::lock()` as well as `.lock()`: an RAII guard type whose constructor spins
-# on a flag is written `let _order = Order::lock();`, and it serialises exactly
-# as a `Mutex` guard does. `gui/vulkan/src/messenger.rs` took that shape on
-# 2026-09-22 and all six of its tests -- each taking the guard as its first
-# statement -- were reported as racing six globals, the guard's own flag among
-# them. The false positive was only seen when a lane-B push ran this gate over
-# a lane-F file (the `touches` scope below does not include `gui/`).
+# `Type::lock()` counts as well as `.lock()`: an RAII spin lock acquired through
+# an associated function -- `let _o = Order::lock();` in `gui/vulkan`'s messenger
+# tests -- is the same serialisation spelt as a path. Missing it reported six
+# globals that six tests all reach under that one lock, and refused every push
+# touching `posix/` or `userspace/` for a race that was not there (2026-09-24).
+# (Lane B made the same fix on its own branch the same week, with this same
+# expression; the two met in a merge on 2026-10-01, and its two extra
+# self-test controls are 2c below.)
 _LOCK_HINT = re.compile(r"(?:\.|::)lock\(\)|\block_\w+|\b\w*_LOCK\b|#\[serial\]")
 
 # False positives, each with the reason it is one. Keyed by "<relpath>:<NAME>",
@@ -945,36 +947,57 @@ fn b() { let _g = COUNT_TEST_LOCK.lock().unwrap(); bump(); }
     expect("lock/unserialised", got.get("COUNT", ([], []))[0], [])
     expect("lock/serialised", sorted(got.get("COUNT", ([], []))[1]), ["a", "b"])
 
-    # 2b. A guard TYPE's associated `lock()` serialises too -- the spin-flag
-    #     shape `gui/vulkan`'s messenger tests use. `c` is the control: it
-    #     drives the same global without the guard and must still be reported,
-    #     or the new spelling would be excusing every test in the file.
-    rule("associated-fn lock")
+    # 2b. The same, with the lock taken through an associated function and
+    #     released by `Drop` -- `gui/vulkan/src/messenger.rs`'s shape. The lock
+    #     flag itself is reset in `drop`, so it is a "mutable global reset
+    #     somewhere" too, and must also land in the serialised column.
+    rule("lock-assoc-fn")
     got = classify(
         """
 static ORDER: AtomicBool = AtomicBool::new(false);
 static CREATED: AtomicUsize = AtomicUsize::new(0);
 struct Order;
 impl Order {
-    fn lock() -> Self {
-        while ORDER.compare_exchange(false, true, Acquire, Relaxed).is_err() {}
-        Self
-    }
+    fn lock() -> Self { while ORDER.compare_exchange(false, true, Acquire, Relaxed).is_err() {} Self }
 }
 impl Drop for Order { fn drop(&mut self) { ORDER.store(false, Release); } }
 fn reset() { CREATED.store(0, SeqCst); }
 #[test]
-fn a() { let _order = Order::lock(); reset(); }
+fn a() { let _o = Order::lock(); reset(); }
 #[test]
-fn b() { let _order = Order::lock(); reset(); }
+fn b() { let _o = Order::lock(); reset(); }
+"""
+    )
+    expect("lock-assoc-fn/unserialised", got.get("CREATED", ([], []))[0], [])
+    expect("lock-assoc-fn/serialised", sorted(got.get("CREATED", ([], []))[1]), ["a", "b"])
+    expect("lock-assoc-fn/flag-unserialised", got.get("ORDER", ([], []))[0], [])
+
+    # 2c. Its two controls (lane B wrote the same fix on its own branch, and
+    #     these are the cases its self-test had that 2b does not). A test that
+    #     drives the same global WITHOUT the guard must still be reported, or
+    #     the associated-fn spelling would excuse every test in the file; and a
+    #     word that merely ends in "lock" -- `.clock()`, `::block()` -- is not
+    #     a lock.
+    rule("lock-assoc-fn controls")
+    got = classify(
+        """
+static ORDER: AtomicBool = AtomicBool::new(false);
+static CREATED: AtomicUsize = AtomicUsize::new(0);
+struct Order;
+impl Order {
+    fn lock() -> Self { while ORDER.compare_exchange(false, true, Acquire, Relaxed).is_err() {} Self }
+}
+impl Drop for Order { fn drop(&mut self) { ORDER.store(false, Release); } }
+fn reset() { CREATED.store(0, SeqCst); }
+#[test]
+fn a() { let _o = Order::lock(); reset(); }
+#[test]
+fn b() { let _o = Order::lock(); reset(); }
 #[test]
 fn c() { reset(); }
 """
     )
-    expect("associated-fn lock/serialised", sorted(got.get("CREATED", ([], []))[1]), ["a", "b"])
-    expect("associated-fn lock/control still reported", got.get("CREATED", ([], []))[0], ["c"])
-    expect("associated-fn lock/the guard's own flag", got.get("ORDER", ([], []))[0], [])
-    # Nor may a word that merely ends in "lock" count: `.clock()`, `::block()`.
+    expect("lock-assoc-fn controls/unguarded still reported", got.get("CREATED", ([], []))[0], ["c"])
     got = classify(
         """
 static mut COUNT: u32 = 0;
@@ -985,7 +1008,7 @@ fn a() { let _t = sys::block(); let _c = t.clock(); bump(); }
 fn b() { bump(); }
 """
     )
-    expect("associated-fn lock/not a suffix match",
+    expect("lock-assoc-fn controls/not a suffix match",
            sorted(got.get("COUNT", ([], []))[0]), ["a", "b"])
 
     # 3. Comments must not make a function a toucher. Without the stripper
@@ -1490,7 +1513,7 @@ def main() -> int:
             "",
         ]
         body += sorted(keys)
-        BASELINE.write_text("\n".join(body) + "\n", encoding="utf-8", newline="")
+        write_text(BASELINE, "\n".join(body) + "\n", newline="")
         print(f"wrote {_relpath(BASELINE)} with {len(keys)} entries")
         return 0
 

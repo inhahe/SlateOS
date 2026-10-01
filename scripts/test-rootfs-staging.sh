@@ -84,8 +84,13 @@ rm -rf "$T"
 # Extracted the same way, and for the same reason: this tests the shipped text
 # rather than a copy of it that can drift. The awk range cannot end at /^fi$/
 # the way the cmake one does, because this block closes several top-level ifs
-# and would be cut short; it ends at the comment that follows it instead.
-SLATE_BLOCK="$(awk '/^SLATE_BIN_DIR=/{f=1} /^# --- Completeness/{f=0} f' "$SRC")"
+# and would be cut short; it ends at the section that follows it instead --
+# the fonts, which stage real files, fetched over the network, and have no
+# place in a test of the staging logic. (Until 2026-09-28 it ended at the
+# completeness check, which the fonts had come to stand in front of, so every
+# case below that evaluated the block also fetched or copied 11.5 MB of
+# fonts.)
+SLATE_BLOCK="$(awk '/^SLATE_BIN_DIR=/{f=1} /^# --- fonts/{f=0} f' "$SRC")"
 if [ -z "$SLATE_BLOCK" ]; then
     echo "FAIL could not extract the SLATE_BIN_DIR block from $SRC"
     exit 1
@@ -236,15 +241,31 @@ esac
 rm -rf "$T"
 
 # 11. Nothing built at all -- the state every tree is in before its first
-# slateos build -- is a NOTE naming the build command, and must NOT fail.
+# slateos build -- is an ERROR naming the build commands, since 2026-09-16:
+# a boot that ran against an image with an empty /bin cost hours in the ELF
+# loader, and the NOTE this used to be was read as a pass. (This case went on
+# asserting the NOTE until 2026-09-28, failing, in a test no gate runs.)
 slate_env
 mk_manifest ls cat
 msg="$(eval "$SLATE_BLOCK" 2>&1)"
 rc=$?
-[ "$rc" -eq 0 ] && ok || bad "an empty build dir must not fail the image build"
+[ "$rc" -eq 1 ] && ok || bad "an empty build dir must fail the image build (exit $rc)"
 case "$msg" in
-    *"cargo +nightly build --release"*) ok ;;
-    *) bad "the NOTE must name the command that fixes it, got: $msg" ;;
+    *"ERROR"*"cargo +nightly build --release"*) ok ;;
+    *) bad "the ERROR must name the commands that fix it, got: $msg" ;;
+esac
+rm -rf "$T"
+
+# 11b. ...unless ALLOW_EMPTY_SLATE_BIN asks for a deliberately minimal image,
+# when it is a NOTE and the build goes on.
+slate_env
+mk_manifest ls cat
+msg="$(export ALLOW_EMPTY_SLATE_BIN=1; eval "$SLATE_BLOCK" 2>&1)"
+rc=$?
+[ "$rc" -eq 0 ] && ok || bad "ALLOW_EMPTY_SLATE_BIN must let an empty build dir through (exit $rc)"
+case "$msg" in
+    *"ALLOW_EMPTY_SLATE_BIN is set"*) ok ;;
+    *) bad "the NOTE must say why it is not an error, got: $msg" ;;
 esac
 rm -rf "$T"
 
@@ -446,6 +467,94 @@ esac
 case "$msg" in
     *"no staged producer"*) bad "no alias should be orphaned here, got: $msg" ;;
     *) ok ;;
+esac
+rm -rf "$T"
+
+
+# 24. A NAME TWO PACKAGES BUILD ships as the userspace/<name> crate's build or
+# not at all. Cargo keeps whichever of the pair it linked last, and until the
+# build was split in two the image got coreutils' `kill`, which has no
+# `killall`. Which copy `release/kill` is, is read off the deps/ file it is a
+# copy of, and that file's dep-info -- not off `release/kill.d`.
+slate_env
+D="$ROOT_DIR/target/x86_64-slateos/release/deps"
+mkdir -p "$ROOT_DIR/userspace/coreutils/src/bin" "$ROOT_DIR/userspace/kill" "$D"
+: > "$ROOT_DIR/userspace/coreutils/src/bin/kill.rs"
+: > "$ROOT_DIR/userspace/kill/Cargo.toml"
+mk_manifest kill
+printf '\177ELF coreutils' > "$D/kill-c0c0"
+printf 'x: userspace\\coreutils\\src\\bin\\kill.rs\n' > "$D/kill-c0c0.d"
+printf '\177ELF standalone' > "$D/kill-5a5a"
+printf 'x: userspace\\kill\\src\\main.rs\n' > "$D/kill-5a5a.d"
+cp "$D/kill-c0c0" "$ROOT_DIR/target/x86_64-slateos/release/kill"
+# The dep-info beside the binary says "standalone", as it did on 2026-09-28,
+# and is not believed.
+cp "$D/kill-5a5a.d" "$ROOT_DIR/target/x86_64-slateos/release/kill.d"
+msg="$(eval "$SLATE_BLOCK" 2>&1)"
+rc=$?
+[ ! -e "$STAGE/bin/kill" ] && ok || bad "coreutils' copy of a doubly-built name must not ship"
+case "$rc:$msg" in
+    1:*"crate's build: kill"*"-p ar -p kill -p logger -p logrotate -p powerctl"*) ok ;;
+    *) bad "the wrong copy must be fatal, named, with the commands, got rc=$rc: $msg" ;;
+esac
+# ...and the standalone copy, linked last, ships.
+cp "$D/kill-5a5a" "$ROOT_DIR/target/x86_64-slateos/release/kill"
+msg="$(eval "$SLATE_BLOCK" 2>&1)"
+rc=$?
+{ [ "$rc" -eq 0 ] && cmp -s "$STAGE/bin/kill" "$D/kill-5a5a"; } && ok \
+    || bad "the standalone copy should ship, got rc=$rc: $msg"
+rm -rf "$T"
+
+# 25. A name only one package builds is not checked: no deps/ file, no
+# dep-info, and it still ships.
+slate_env
+mkdir -p "$ROOT_DIR/userspace/coreutils/src/bin"
+: > "$ROOT_DIR/userspace/coreutils/src/bin/date.rs"
+mk_manifest date
+mk_elf "$ROOT_DIR/target/x86_64-slateos/release/date"
+msg="$(eval "$SLATE_BLOCK" 2>&1)"
+[ -e "$STAGE/bin/date" ] && ok || bad "a singly-built name must ship unchecked, got: $msg"
+rm -rf "$T"
+
+# 26. THE THEMES. Every folder under gui/appearance/themes lands under
+# /usr/share/slateos/themes byte for byte, and as data: 0644 files in 0755
+# directories, whatever mode the tree was read with -- WSL reads the NTFS one
+# as 0777 throughout.
+THEMES_BLOCK="$(awk '/^THEMES_SRC=/{f=1} /^# --- Completeness/{f=0} f' "$SRC")"
+if [ -n "$THEMES_BLOCK" ]; then ok; else bad "could not extract the THEMES_SRC block from $SRC"; fi
+T="$(mktemp -d)"
+export ROOT_DIR="$T/repo" STAGE="$T/stage"
+TH="$ROOT_DIR/gui/appearance/themes"
+mkdir -p "$TH/aero/icons" "$TH/night" "$STAGE"
+printf 'name: Aero\n' > "$TH/aero/theme.yaml"
+printf '<svg/>' > "$TH/aero/icons/a.svg"
+printf 'name: Night\n' > "$TH/night/theme.yaml"
+chmod -R 0777 "$ROOT_DIR/gui"
+msg="$(eval "$THEMES_BLOCK" 2>&1)"
+D="$STAGE/usr/share/slateos/themes"
+{ cmp -s "$D/aero/theme.yaml" "$TH/aero/theme.yaml" \
+    && cmp -s "$D/aero/icons/a.svg" "$TH/aero/icons/a.svg" \
+    && cmp -s "$D/night/theme.yaml" "$TH/night/theme.yaml"; } && ok \
+    || bad "every theme should be staged whole, got: $msg"
+{ [ "$(stat -c %a "$D/aero/theme.yaml")" = 644 ] && [ "$(stat -c %a "$D/aero/icons")" = 755 ] \
+    && [ "$(stat -c %a "$D/aero/icons/a.svg")" = 644 ]; } && ok \
+    || bad "themes are data: 0644 files in 0755 directories"
+case "$msg" in
+    *"staged 2 colour theme(s)"*"(3 files)"*) ok ;;
+    *) bad "the count should be reported, got: $msg" ;;
+esac
+rm -rf "$T"
+
+# 27. A tree without the built-in theme is a broken checkout, and says so
+# rather than shipping an image with no themes.
+T="$(mktemp -d)"
+export ROOT_DIR="$T/repo" STAGE="$T/stage"
+mkdir -p "$ROOT_DIR" "$STAGE"
+msg="$(eval "$THEMES_BLOCK" 2>&1)"
+rc=$?
+case "$rc:$msg" in
+    1:*"checkout is broken"*) ok ;;
+    *) bad "a missing theme tree must be fatal, got rc=$rc: $msg" ;;
 esac
 rm -rf "$T"
 

@@ -839,7 +839,10 @@ pub struct DiagramApp {
     pub show_properties: bool,
     /// Currently active template.
     pub current_template: DiagramTemplate,
-    /// Selection rectangle start (screen coords, if dragging).
+    /// Where a drag across empty canvas began, in canvas coordinates: the
+    /// box that selects every shape it touches. Set by a press on empty
+    /// canvas in Select mode; the box was drawn from this and nothing set it,
+    /// so no one could select several shapes by dragging.
     pub rect_select_start: Option<(f32, f32)>,
     /// Selection rectangle end (screen coords).
     pub rect_select_end: Option<(f32, f32)>,
@@ -1183,6 +1186,30 @@ impl DiagramApp {
             node.width = width.max(20.0);
             node.height = height.max(20.0);
         }
+    }
+
+    /// Select every visible shape the selection box touches.
+    ///
+    /// Touches, not contains: a box dragged across the middle of a row of
+    /// shapes takes the row, which is what the eye asked for, and a shape
+    /// half off screen can still be caught.
+    fn select_in_box(&mut self) {
+        let (Some(a), Some(b)) = (self.rect_select_start, self.rect_select_end) else {
+            return;
+        };
+        let (left, right) = (a.0.min(b.0), a.0.max(b.0));
+        let (top, bottom) = (a.1.min(b.1), a.1.max(b.1));
+        let caught: Vec<NodeId> = self
+            .nodes
+            .iter()
+            .filter(|n| self.is_layer_visible(n.layer_id))
+            .filter(|n| {
+                n.x <= right && n.x + n.width >= left && n.y <= bottom && n.y + n.height >= top
+            })
+            .map(|n| n.id)
+            .collect();
+        self.selection.clear();
+        self.selection.nodes = caught;
     }
 
     /// Hit-test: find the topmost node at the given canvas point.
@@ -2545,15 +2572,27 @@ impl DiagramApp {
                 }
                 InteractionMode::Select => {
                     if let Some(id) = self.node_at(cx, cy) {
-                        self.selection.select_single_node(id);
+                        // A shape already in a multiple selection keeps the
+                        // selection, so dragging it moves them all.
+                        if !self.selection.has_node(id) {
+                            self.selection.select_single_node(id);
+                        }
                         self.drag_from = Some((cx, cy));
                     } else {
+                        // Empty canvas: start a selection box.
                         self.selection.clear();
                         self.drag_from = None;
+                        self.rect_select_start = Some((cx, cy));
+                        self.rect_select_end = Some((cx, cy));
                     }
                     EventResult::Consumed
                 }
             },
+            MouseEventKind::Move if self.rect_select_start.is_some() => {
+                self.rect_select_end = Some((cx, cy));
+                self.select_in_box();
+                EventResult::Consumed
+            }
             MouseEventKind::Move => {
                 let Some((fx, fy)) = self.drag_from else {
                     // Not dragging: a bare pointer move changes nothing, and
@@ -2580,6 +2619,12 @@ impl DiagramApp {
                 EventResult::Consumed
             }
             MouseEventKind::Release(MouseButton::Left) => {
+                if self.rect_select_start.take().is_some() {
+                    self.rect_select_end = Some((cx, cy));
+                    self.select_in_box();
+                    self.rect_select_end = None;
+                    return EventResult::Consumed;
+                }
                 if self.drag_from.take().is_none() {
                     return EventResult::Ignored;
                 }
@@ -3265,12 +3310,14 @@ impl DiagramApp {
             self.render_node(cmds, node);
         }
 
-        // Selection rectangle overlay.
+        // Selection rectangle overlay, in canvas coordinates scaled like the
+        // nodes: the translate above carries the pan, not the zoom.
         if let (Some(start), Some(end)) = (self.rect_select_start, self.rect_select_end) {
-            let rx = start.0.min(end.0);
-            let ry = start.1.min(end.1);
-            let rw = (end.0 - start.0).abs();
-            let rh = (end.1 - start.1).abs();
+            let z = self.zoom;
+            let rx = start.0.min(end.0) * z;
+            let ry = start.1.min(end.1) * z;
+            let rw = (end.0 - start.0).abs() * z;
+            let rh = (end.1 - start.1).abs() * z;
             cmds.push(RenderCommand::FillRect {
                 x: rx,
                 y: ry,
@@ -6796,6 +6843,65 @@ mod tests {
             dark,
             fills(&mut app),
             "high contrast reached every other surface but not this window"
+        );
+    }
+
+    // == Dragging a box to select (2026-09-27) ===================================
+
+    #[test]
+    fn dragging_across_empty_canvas_selects_the_shapes_the_box_touches() {
+        let mut app = DiagramApp::new(1280.0, 800.0);
+        let _ = app.set_mode(InteractionMode::Select);
+        let a = app.add_node(NodeShape::Rectangle, 100.0, 100.0);
+        let b = app.add_node(NodeShape::Rectangle, 300.0, 100.0);
+        let far = app.add_node(NodeShape::Rectangle, 100.0, 600.0);
+        app.selection.clear();
+
+        // From empty canvas above-left of `a` to past `b`'s middle.
+        let (x0, y0) = app.canvas_to_screen(50.0, 50.0);
+        let (x1, y1) = app.canvas_to_screen(350.0, 150.0);
+        app.handle_event(&mouse(MouseEventKind::Press(MouseButton::Left), x0, y0));
+        assert!(app.rect_select_start.is_some(), "no box started");
+        app.handle_event(&mouse(MouseEventKind::Move, x1, y1));
+        // The box is drawn while it is dragged.
+        assert!(app.rect_select_end.is_some());
+        app.handle_event(&mouse(MouseEventKind::Release(MouseButton::Left), x1, y1));
+
+        assert!(
+            app.selection.has_node(a) && app.selection.has_node(b),
+            "{:?}",
+            app.selection.nodes
+        );
+        assert!(
+            !app.selection.has_node(far),
+            "the box took a shape it never touched"
+        );
+        assert!(
+            app.rect_select_start.is_none() && app.rect_select_end.is_none(),
+            "the box stayed up"
+        );
+
+        // Dragging one of them moves both.
+        let before = app
+            .nodes
+            .iter()
+            .find(|n| n.id == b)
+            .map(|n| (n.x, n.y))
+            .unwrap();
+        let (ax, ay) = app.canvas_to_screen(110.0, 110.0);
+        let (mx, my) = app.canvas_to_screen(130.0, 110.0);
+        app.handle_event(&mouse(MouseEventKind::Press(MouseButton::Left), ax, ay));
+        app.handle_event(&mouse(MouseEventKind::Move, mx, my));
+        app.handle_event(&mouse(MouseEventKind::Release(MouseButton::Left), mx, my));
+        let after = app
+            .nodes
+            .iter()
+            .find(|n| n.id == b)
+            .map(|n| (n.x, n.y))
+            .unwrap();
+        assert!(
+            (after.0 - before.0 - 20.0).abs() < 0.01,
+            "the other selected shape stayed: {before:?} -> {after:?}"
         );
     }
 }

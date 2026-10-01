@@ -1,0 +1,27 @@
+# Third-party notices for this system: the code it carries that others
+# wrote, and the texts their licences require to travel with it. Written by
+# scripts/gather-notices.py when the image is built (design-decisions 1433);
+# each file under `texts` is in this directory, under the entry's key.
+notices:
+  cfg-if-1.0.5:
+    component: 'cfg-if'
+    version: '1.0.5'
+    licence: 'MIT OR Apache-2.0'
+    from: 'vendor/cfg-if'
+    texts:
+      - 'cfg-if-1.0.5/LICENSE-MIT'
+  libjpeg-turbo-3.1.1:
+    component: 'libjpeg-turbo'
+    version: '3.1.1'
+    licence: 'IJG AND BSD-3-Clause AND Zlib'
+    attribution: 'This software is based in part on the work of the Independent JPEG Group.'
+    from: 'gui/codec'
+    texts:
+      - 'libjpeg-turbo-3.1.1/LICENSE.md'
+  spin-0.9.8:
+    component: 'spin'
+    version: '0.9.8'
+    licence: 'MIT'
+    from: 'crates.io'
+    texts:
+      - 'spin-0.9.8/LICENSE'

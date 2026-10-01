@@ -1,0 +1,347 @@
+# glibc 2.39's account-file functions: posix/tools/oracle/accounts_harness.py.
+# The inputs (T, C), then glibc's answers. See the harness for the format.
+T pw pw_basic =root:x:0:0:root:/root:/bin/bash\x0adaemon:x:1:1:daemon:/usr/sbin:/usr/sbin/nologin\x0abin:x:2:2:bin:/bin:/usr/sbin/nologin\x0a
+T pw pw_messy =#\x20a\x20comment\x0a\x20\x20\x20\x0a\x0a\x20\x20alice:x:1000:1000:Alice\x20A\x2c\x2c\x2c:/home/alice:/bin/sh\x0a\x09bob:*:1001:100::/home/bob:\x0abad:x:notanumber:0::/:\x0anouid:x::0::/:\x0ashort:x:5\x0a+\x0a+nis:::::\x0a-evil\x0a+@group::::::\x0acarol:x:4294967295:4294967296:C:/c:/bin/c\x0adave:x:-1:-2:D:/d:/bin/d\x0aeve:x:12abc:0:E:/e:/e\x0afrank:x:7:7:F:/f:/bin/f:extra:fields\x0agina:x:8:8:G:/g:/bin/g\x0d\x0ahank:x:\x209:\x209:H:/h:/bin/h\x0a:x:11:11:::\x0autf:x:12:12:\xc3\xa9t\xc3\xa9:/u:/bin/u\x0alast:x:10:10:L:/l:/bin/l
+T pw pw_long =first:x:1:1:gggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggg:/f:/bin/f\x0asecond:x:2:2:s:/s:/bin/s\x0a
+T pw pw_empty =
+T pw pw_comments =#\x20nothing\x0a\x0a\x20\x20\x20#\x20but\x20comments\x0a
+T gr gr_basic =root:x:0:\x0awheel:x:10:root\x2calice\x0ausers:x:100:alice\x2cbob\x2ccarol\x0a
+T gr gr_messy =#\x20groups\x0aroot:x:0:\x0aspaced:x:11:\x20a\x20\x2c\x20b\x20\x2c\x2c\x20c\x2c\x0anomem:x:12\x0abadgid:x:abc:\x0aemptygid:x::\x0a+\x0a+:::\x0a-grp\x0a+grp:x::m1\x2cm2\x0abig:x:4294967296:z\x0atrail:x:13:a\x2cb\x2c\x0a\x20\x20lead:x:14:y\x0alast:x:15:x
+T gr gr_long =many:x:1:member0000\x2cmember0001\x2cmember0002\x2cmember0003\x2cmember0004\x2cmember0005\x2cmember0006\x2cmember0007\x2cmember0008\x2cmember0009\x2cmember0010\x2cmember0011\x2cmember0012\x2cmember0013\x2cmember0014\x2cmember0015\x2cmember0016\x2cmember0017\x2cmember0018\x2cmember0019\x2cmember0020\x2cmember0021\x2cmember0022\x2cmember0023\x2cmember0024\x2cmember0025\x2cmember0026\x2cmember0027\x2cmember0028\x2cmember0029\x2cmember0030\x2cmember0031\x2cmember0032\x2cmember0033\x2cmember0034\x2cmember0035\x2cmember0036\x2cmember0037\x2cmember0038\x2cmember0039\x2cmember0040\x2cmember0041\x2cmember0042\x2cmember0043\x2cmember0044\x2cmember0045\x2cmember0046\x2cmember0047\x2cmember0048\x2cmember0049\x2cmember0050\x2cmember0051\x2cmember0052\x2cmember0053\x2cmember0054\x2cmember0055\x2cmember0056\x2cmember0057\x2cmember0058\x2cmember0059\x2cmember0060\x2cmember0061\x2cmember0062\x2cmember0063\x2cmember0064\x2cmember0065\x2cmember0066\x2cmember0067\x2cmember0068\x2cmember0069\x2cmember0070\x2cmember0071\x2cmember0072\x2cmember0073\x2cmember0074\x2cmember0075\x2cmember0076\x2cmember0077\x2cmember0078\x2cmember0079\x2cmember0080\x2cmember0081\x2cmember0082\x2cmember0083\x2cmember0084\x2cmember0085\x2cmember0086\x2cmember0087\x2cmember0088\x2cmember0089\x2cmember0090\x2cmember0091\x2cmember0092\x2cmember0093\x2cmember0094\x2cmember0095\x2cmember0096\x2cmember0097\x2cmember0098\x2cmember0099\x2cmember0100\x2cmember0101\x2cmember0102\x2cmember0103\x2cmember0104\x2cmember0105\x2cmember0106\x2cmember0107\x2cmember0108\x2cmember0109\x2cmember0110\x2cmember0111\x2cmember0112\x2cmember0113\x2cmember0114\x2cmember0115\x2cmember0116\x2cmember0117\x2cmember0118\x2cmember0119\x2cmember0120\x2cmember0121\x2cmember0122\x2cmember0123\x2cmember0124\x2cmember0125\x2cmember0126\x2cmember0127\x2cmember0128\x2cmember0129\x2cmember0130\x2cmember0131\x2cmember0132\x2cmember0133\x2cmember0134\x2cmember0135\x2cmember0136\x2cmember0137\x2cmember0138\x2cmember0139\x2cmember0140\x2cmember0141\x2cmember0142\x2cmember0143\x2cmember0144\x2cmember0145\x2cmember0146\x2cmember0147\x2cmember0148\x2cmember0149\x2cmember0150\x2cmember0151\x2cmember0152\x2cmember0153\x2cmember0154\x2cmember0155\x2cmember0156\x2cmember0157\x2cmember0158\x2cmember0159\x2cmember0160\x2cmember0161\x2cmember0162\x2cmember0163\x2cmember0164\x2cmember0165\x2cmember0166\x2cmember0167\x2cmember0168\x2cmember0169\x2cmember0170\x2cmember0171\x2cmember0172\x2cmember0173\x2cmember0174\x2cmember0175\x2cmember0176\x2cmember0177\x2cmember0178\x2cmember0179\x2cmember0180\x2cmember0181\x2cmember0182\x2cmember0183\x2cmember0184\x2cmember0185\x2cmember0186\x2cmember0187\x2cmember0188\x2cmember0189\x2cmember0190\x2cmember0191\x2cmember0192\x2cmember0193\x2cmember0194\x2cmember0195\x2cmember0196\x2cmember0197\x2cmember0198\x2cmember0199\x2cmember0200\x2cmember0201\x2cmember0202\x2cmember0203\x2cmember0204\x2cmember0205\x2cmember0206\x2cmember0207\x2cmember0208\x2cmember0209\x2cmember0210\x2cmember0211\x2cmember0212\x2cmember0213\x2cmember0214\x2cmember0215\x2cmember0216\x2cmember0217\x2cmember0218\x2cmember0219\x2cmember0220\x2cmember0221\x2cmember0222\x2cmember0223\x2cmember0224\x2cmember0225\x2cmember0226\x2cmember0227\x2cmember0228\x2cmember0229\x2cmember0230\x2cmember0231\x2cmember0232\x2cmember0233\x2cmember0234\x2cmember0235\x2cmember0236\x2cmember0237\x2cmember0238\x2cmember0239\x2cmember0240\x2cmember0241\x2cmember0242\x2cmember0243\x2cmember0244\x2cmember0245\x2cmember0246\x2cmember0247\x2cmember0248\x2cmember0249\x2cmember0250\x2cmember0251\x2cmember0252\x2cmember0253\x2cmember0254\x2cmember0255\x2cmember0256\x2cmember0257\x2cmember0258\x2cmember0259\x2cmember0260\x2cmember0261\x2cmember0262\x2cmember0263\x2cmember0264\x2cmember0265\x2cmember0266\x2cmember0267\x2cmember0268\x2cmember0269\x2cmember0270\x2cmember0271\x2cmember0272\x2cmember0273\x2cmember0274\x2cmember0275\x2cmember0276\x2cmember0277\x2cmember0278\x2cmember0279\x2cmember0280\x2cmember0281\x2cmember0282\x2cmember0283\x2cmember0284\x2cmember0285\x2cmember0286\x2cmember0287\x2cmember0288\x2cmember0289\x2cmember0290\x2cmember0291\x2cmember0292\x2cmember0293\x2cmember0294\x2cmember0295\x2cmember0296\x2cmember0297\x2cmember0298\x2cmember0299\x2cmember0300\x2cmember0301\x2cmember0302\x2cmember0303\x2cmember0304\x2cmember0305\x2cmember0306\x2cmember0307\x2cmember0308\x2cmember0309\x2cmember0310\x2cmember0311\x2cmember0312\x2cmember0313\x2cmember0314\x2cmember0315\x2cmember0316\x2cmember0317\x2cmember0318\x2cmember0319\x2cmember0320\x2cmember0321\x2cmember0322\x2cmember0323\x2cmember0324\x2cmember0325\x2cmember0326\x2cmember0327\x2cmember0328\x2cmember0329\x2cmember0330\x2cmember0331\x2cmember0332\x2cmember0333\x2cmember0334\x2cmember0335\x2cmember0336\x2cmember0337\x2cmember0338\x2cmember0339\x2cmember0340\x2cmember0341\x2cmember0342\x2cmember0343\x2cmember0344\x2cmember0345\x2cmember0346\x2cmember0347\x2cmember0348\x2cmember0349\x2cmember0350\x2cmember0351\x2cmember0352\x2cmember0353\x2cmember0354\x2cmember0355\x2cmember0356\x2cmember0357\x2cmember0358\x2cmember0359\x2cmember0360\x2cmember0361\x2cmember0362\x2cmember0363\x2cmember0364\x2cmember0365\x2cmember0366\x2cmember0367\x2cmember0368\x2cmember0369\x2cmember0370\x2cmember0371\x2cmember0372\x2cmember0373\x2cmember0374\x2cmember0375\x2cmember0376\x2cmember0377\x2cmember0378\x2cmember0379\x2cmember0380\x2cmember0381\x2cmember0382\x2cmember0383\x2cmember0384\x2cmember0385\x2cmember0386\x2cmember0387\x2cmember0388\x2cmember0389\x2cmember0390\x2cmember0391\x2cmember0392\x2cmember0393\x2cmember0394\x2cmember0395\x2cmember0396\x2cmember0397\x2cmember0398\x2cmember0399\x2cmember0400\x2cmember0401\x2cmember0402\x2cmember0403\x2cmember0404\x2cmember0405\x2cmember0406\x2cmember0407\x2cmember0408\x2cmember0409\x2cmember0410\x2cmember0411\x2cmember0412\x2cmember0413\x2cmember0414\x2cmember0415\x2cmember0416\x2cmember0417\x2cmember0418\x2cmember0419\x2cmember0420\x2cmember0421\x2cmember0422\x2cmember0423\x2cmember0424\x2cmember0425\x2cmember0426\x2cmember0427\x2cmember0428\x2cmember0429\x2cmember0430\x2cmember0431\x2cmember0432\x2cmember0433\x2cmember0434\x2cmember0435\x2cmember0436\x2cmember0437\x2cmember0438\x2cmember0439\x2cmember0440\x2cmember0441\x2cmember0442\x2cmember0443\x2cmember0444\x2cmember0445\x2cmember0446\x2cmember0447\x2cmember0448\x2cmember0449\x2cmember0450\x2cmember0451\x2cmember0452\x2cmember0453\x2cmember0454\x2cmember0455\x2cmember0456\x2cmember0457\x2cmember0458\x2cmember0459\x2cmember0460\x2cmember0461\x2cmember0462\x2cmember0463\x2cmember0464\x2cmember0465\x2cmember0466\x2cmember0467\x2cmember0468\x2cmember0469\x2cmember0470\x2cmember0471\x2cmember0472\x2cmember0473\x2cmember0474\x2cmember0475\x2cmember0476\x2cmember0477\x2cmember0478\x2cmember0479\x2cmember0480\x2cmember0481\x2cmember0482\x2cmember0483\x2cmember0484\x2cmember0485\x2cmember0486\x2cmember0487\x2cmember0488\x2cmember0489\x2cmember0490\x2cmember0491\x2cmember0492\x2cmember0493\x2cmember0494\x2cmember0495\x2cmember0496\x2cmember0497\x2cmember0498\x2cmember0499\x2cmember0500\x2cmember0501\x2cmember0502\x2cmember0503\x2cmember0504\x2cmember0505\x2cmember0506\x2cmember0507\x2cmember0508\x2cmember0509\x2cmember0510\x2cmember0511\x2cmember0512\x2cmember0513\x2cmember0514\x2cmember0515\x2cmember0516\x2cmember0517\x2cmember0518\x2cmember0519\x2cmember0520\x2cmember0521\x2cmember0522\x2cmember0523\x2cmember0524\x2cmember0525\x2cmember0526\x2cmember0527\x2cmember0528\x2cmember0529\x2cmember0530\x2cmember0531\x2cmember0532\x2cmember0533\x2cmember0534\x2cmember0535\x2cmember0536\x2cmember0537\x2cmember0538\x2cmember0539\x2cmember0540\x2cmember0541\x2cmember0542\x2cmember0543\x2cmember0544\x2cmember0545\x2cmember0546\x2cmember0547\x2cmember0548\x2cmember0549\x2cmember0550\x2cmember0551\x2cmember0552\x2cmember0553\x2cmember0554\x2cmember0555\x2cmember0556\x2cmember0557\x2cmember0558\x2cmember0559\x2cmember0560\x2cmember0561\x2cmember0562\x2cmember0563\x2cmember0564\x2cmember0565\x2cmember0566\x2cmember0567\x2cmember0568\x2cmember0569\x2cmember0570\x2cmember0571\x2cmember0572\x2cmember0573\x2cmember0574\x2cmember0575\x2cmember0576\x2cmember0577\x2cmember0578\x2cmember0579\x2cmember0580\x2cmember0581\x2cmember0582\x2cmember0583\x2cmember0584\x2cmember0585\x2cmember0586\x2cmember0587\x2cmember0588\x2cmember0589\x2cmember0590\x2cmember0591\x2cmember0592\x2cmember0593\x2cmember0594\x2cmember0595\x2cmember0596\x2cmember0597\x2cmember0598\x2cmember0599\x0anext:x:2:n\x0a
+T sp sp_basic =root:!:19000:0:99999:7:::\x0aalice:$6$salt$hash:19001:1:90:14:30:20000:\x0abob:*:19002::::::\x0a
+T sp sp_messy =#\x20shadow\x0aold:x:1:2:3\x0a+\x0a-bad\x0a+nis::::::::\x0aspaces:x:\x201:\x202:\x203:\x204:\x205:\x206:\x207\x0aneg:x:-1:-2:-3:-4:-5:-6:-7\x0abig:x:4294967296:0:0:0:0:0:18446744073709551615\x0abad:x:1:2:3:4:5:6:7:8\x0ashort:x:::\x0aokold:x::::\x0atrailing:x:1:2:3:\x0anotnum:x:a:::\x0alast:x:1:1:1:1:1:1:1
+T sh two =/bin/sh\x0a/bin/bash\x0a
+T sh messy =#\x20a\x20comment\x20line\x2c\x20long\x20enough\x20to\x20pad\x20the\x20file's\x20size\x0a/bin/sh\x0a\x0a\x20\x20/usr/bin/zsh\x20\x20#\x20trailing\x0anot/a/shell\x0a/\x0ax/bin/ksh\x0aa#/bin/no\x0a/bin/a\x20/bin/b\x0a/bin/dash
+T sh empty =
+T sh comments =#only\x20comments\x20here\x0a#\x20and\x20here\x0a
+T sh missing !
+C sget full =root:!:19000:0:99999:7:::
+C sget nl =root:!:19000:0:99999:7:::\x0a
+C sget two =root:!:19000:0:99999:7:::\x0asecond:x:1:1:1:1:1:1:1
+C sget lead =\x20lead:x:1:2:3
+C sget hash =#c:x:1:2:3
+C sget empty =
+C sget plus =+
+C sget minus =-x
+C sget plusc =+:
+C sget old =old:x:1:2:3
+C sget eight =bad:x:1:2:3:4:5:6:7:8
+C sget short =short:x
+C sget three =s:x:::
+C sget four =s:x::::
+C sget flag =f:x:1:2:3:4:5:6:18446744073709551615
+C sget neg =n:x:-5:-1:0:1:2:3:0
+C pw plain =root|=x|0|0|=root|=/root|=/bin/bash
+C pw nulls =u|!|5|6|!|!|!
+C pw gecos =g|=x|1|1|=a:b\x0ac:|=/h|=/s
+C pw namecolon =a:b|=x|1|1|=|=/h|=/s
+C pw dirnl =a|=x|1|1|=|=/h\x0a|=/s
+C pw shellcolon =a|=x|1|1|=|=/h|=/s:x
+C pw passcolon =a|=x:y|1|1|=|=/h|=/s
+C pw nullname !|=x|1|1|=|=/h|=/s
+C pw plus =+|=x|7|8|=g|=/h|=/s
+C pw minus =-bad|!|7|8|!|!|!
+C pw maxid =m|=x|4294967295|4294967294|=|=|=
+C pw emptyname =|=x|1|1|=|=/h|=/s
+C pw utf8 =u|=x|1|1|=\xc3\xa9|=/h|=/s
+C gr plain =wheel|=x|10|[=root,=alice]
+C gr nomem =g|=x|11|!
+C gr emptymem =g|=x|11|[]
+C gr nullpass =g|!|12|[=a]
+C gr comma =g|=x|13|[=a\x2cb]
+C gr memcolon =g|=x|13|[=a:b]
+C gr memnl =g|=x|13|[=a\x0a]
+C gr namenl =g\x0a|=x|13|[]
+C gr passcolon =g|=x:|13|[]
+C gr nullname !|=x|13|[]
+C gr plus =+|=x|14|[=a,=b]
+C gr minus =-g|!|14|!
+C gr maxgid =m|=|4294967295|[=x]
+C sp plain =root|=!|19000|0|99999|7|-1|-1|18446744073709551615
+C sp unset =u|=x|-1|-1|-1|-1|-1|-1|18446744073709551615
+C sp zero =z|=|0|0|0|0|0|0|0
+C sp flag =f|=x|1|2|3|4|5|6|9223372036854775808
+C sp neg =n|=x|-5|-2|-9223372036854775808|9223372036854775807|-1|-1|5
+C sp nullpass =p|!|-1|-1|-1|-1|-1|-1|18446744073709551615
+C sp namecolon =a:b|=x|-1|-1|-1|-1|-1|-1|18446744073709551615
+C sp passnl =a|=x\x0a|-1|-1|-1|-1|-1|-1|18446744073709551615
+C sp plus =+|=x|-1|-1|-1|-1|-1|-1|18446744073709551615
+R fgetpwent_r pw_basic 0 4096 = 0 1234 =root|=x|0|0|=root|=/root|=/bin/bash
+R fgetpwent_r pw_basic 1 4096 = 0 1234 =daemon|=x|1|1|=daemon|=/usr/sbin|=/usr/sbin/nologin
+R fgetpwent_r pw_basic 2 4096 = 0 1234 =bin|=x|2|2|=bin|=/bin|=/usr/sbin/nologin
+R fgetpwent_r pw_basic 3 4096 = 2 2 -
+R fgetpwent_r pw_basic 4 4096 = 2 2 -
+R fgetpwent_r pw_messy 0 4096 = 0 1234 =alice|=x|1000|1000|=Alice\x20A\x2c\x2c\x2c|=/home/alice|=/bin/sh
+R fgetpwent_r pw_messy 1 4096 = 0 1234 =bob|=*|1001|100|=|=/home/bob|=
+R fgetpwent_r pw_messy 2 4096 = 0 22 =+|!|0|0|!|!|!
+R fgetpwent_r pw_messy 3 4096 = 0 1234 =+nis|=|0|0|=|=|=
+R fgetpwent_r pw_messy 4 4096 = 0 1234 =-evil|!|0|0|!|!|!
+R fgetpwent_r pw_messy 5 4096 = 0 1234 =+@group|=|0|0|=|=|=
+R fgetpwent_r pw_messy 6 4096 = 0 22 =frank|=x|7|7|=F|=/f|=/bin/f:extra:fields
+R fgetpwent_r pw_messy 7 4096 = 0 1234 =gina|=x|8|8|=G|=/g|=/bin/g\x0d
+R fgetpwent_r pw_messy 8 4096 = 0 1234 =hank|=x|9|9|=H|=/h|=/bin/h
+R fgetpwent_r pw_messy 9 4096 = 0 1234 =|=x|11|11|=|=|=
+R fgetpwent_r pw_messy 10 4096 = 0 1234 =utf|=x|12|12|=\xc3\xa9t\xc3\xa9|=/u|=/bin/u
+R fgetpwent_r pw_messy 11 4096 = 0 1234 =last|=x|10|10|=L|=/l|=/bin/l
+R fgetpwent_r pw_messy 12 4096 = 2 2 -
+R fgetpwent_r pw_messy 13 4096 = 2 2 -
+R fgetpwent_r pw_empty 0 4096 = 2 2 -
+R fgetpwent_r pw_empty 1 4096 = 2 2 -
+R fgetpwent_r pw_comments 0 4096 = 2 2 -
+R fgetpwent_r pw_comments 1 4096 = 2 2 -
+R fgetpwent_r pw_basic 0 8 = 34 34 -
+R fgetpwent_r pw_basic 1 4096 = 0 1234 =root|=x|0|0|=root|=/root|=/bin/bash
+R fgetpwent_r pw_basic 2 8 = 34 34 -
+R fgetpwent_r pw_basic 3 4096 = 0 1234 =daemon|=x|1|1|=daemon|=/usr/sbin|=/usr/sbin/nologin
+R fgetpwent_r pw_basic 4 8 = 34 34 -
+R fgetpwent_r pw_basic 5 4096 = 0 1234 =bin|=x|2|2|=bin|=/bin|=/usr/sbin/nologin
+R fgetpwent_r pw_basic 6 8 = 2 2 -
+R fgetpwent_r pw_basic 7 4096 = 2 2 -
+R fgetpwent_r pw_long 0 4096 = 34 34 -
+R fgetpwent_r pw_long 1 16384 = 0 1234 =first|=x|1|1|=gggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggg|=/f|=/bin/f
+R fgetpwent_r pw_long 2 4096 = 0 1234 =second|=x|2|2|=s|=/s|=/bin/s
+R fgetpwent_r pw_long 3 16384 = 2 2 -
+R fgetpwent_r pw_long 4 4096 = 2 2 -
+R fgetgrent_r gr_basic 0 4096 = 0 1234 =root|=x|0|[]
+R fgetgrent_r gr_basic 1 4096 = 0 1234 =wheel|=x|10|[=root,=alice]
+R fgetgrent_r gr_basic 2 4096 = 0 1234 =users|=x|100|[=alice,=bob,=carol]
+R fgetgrent_r gr_basic 3 4096 = 2 2 -
+R fgetgrent_r gr_basic 4 4096 = 2 2 -
+R fgetgrent_r gr_messy 0 4096 = 0 1234 =root|=x|0|[]
+R fgetgrent_r gr_messy 1 4096 = 0 1234 =spaced|=x|11|[=a\x20,=b\x20,=c]
+R fgetgrent_r gr_messy 2 4096 = 0 1234 =nomem|=x|12|[]
+R fgetgrent_r gr_messy 3 4096 = 0 22 =+|!|0|[]
+R fgetgrent_r gr_messy 4 4096 = 0 1234 =+|=|0|[]
+R fgetgrent_r gr_messy 5 4096 = 0 1234 =-grp|!|0|[]
+R fgetgrent_r gr_messy 6 4096 = 0 1234 =+grp|=x|0|[=m1,=m2]
+R fgetgrent_r gr_messy 7 4096 = 0 22 =trail|=x|13|[=a,=b]
+R fgetgrent_r gr_messy 8 4096 = 0 1234 =lead|=x|14|[=y]
+R fgetgrent_r gr_messy 9 4096 = 0 1234 =last|=x|15|[=x]
+R fgetgrent_r gr_messy 10 4096 = 2 2 -
+R fgetgrent_r gr_messy 11 4096 = 2 2 -
+R fgetgrent_r gr_basic 0 8 = 34 34 -
+R fgetgrent_r gr_basic 1 4096 = 0 1234 =root|=x|0|[]
+R fgetgrent_r gr_basic 2 8 = 34 34 -
+R fgetgrent_r gr_basic 3 4096 = 0 1234 =wheel|=x|10|[=root,=alice]
+R fgetgrent_r gr_basic 4 8 = 34 34 -
+R fgetgrent_r gr_basic 5 4096 = 0 1234 =users|=x|100|[=alice,=bob,=carol]
+R fgetgrent_r gr_basic 6 8 = 2 2 -
+R fgetgrent_r gr_basic 7 4096 = 2 2 -
+R fgetgrent_r gr_long 0 4096 = 34 34 -
+R fgetgrent_r gr_long 1 16384 = 0 1234 =many|=x|1|[=member0000,=member0001,=member0002,=member0003,=member0004,=member0005,=member0006,=member0007,=member0008,=member0009,=member0010,=member0011,=member0012,=member0013,=member0014,=member0015,=member0016,=member0017,=member0018,=member0019,=member0020,=member0021,=member0022,=member0023,=member0024,=member0025,=member0026,=member0027,=member0028,=member0029,=member0030,=member0031,=member0032,=member0033,=member0034,=member0035,=member0036,=member0037,=member0038,=member0039,=member0040,=member0041,=member0042,=member0043,=member0044,=member0045,=member0046,=member0047,=member0048,=member0049,=member0050,=member0051,=member0052,=member0053,=member0054,=member0055,=member0056,=member0057,=member0058,=member0059,=member0060,=member0061,=member0062,=member0063,=member0064,=member0065,=member0066,=member0067,=member0068,=member0069,=member0070,=member0071,=member0072,=member0073,=member0074,=member0075,=member0076,=member0077,=member0078,=member0079,=member0080,=member0081,=member0082,=member0083,=member0084,=member0085,=member0086,=member0087,=member0088,=member0089,=member0090,=member0091,=member0092,=member0093,=member0094,=member0095,=member0096,=member0097,=member0098,=member0099,=member0100,=member0101,=member0102,=member0103,=member0104,=member0105,=member0106,=member0107,=member0108,=member0109,=member0110,=member0111,=member0112,=member0113,=member0114,=member0115,=member0116,=member0117,=member0118,=member0119,=member0120,=member0121,=member0122,=member0123,=member0124,=member0125,=member0126,=member0127,=member0128,=member0129,=member0130,=member0131,=member0132,=member0133,=member0134,=member0135,=member0136,=member0137,=member0138,=member0139,=member0140,=member0141,=member0142,=member0143,=member0144,=member0145,=member0146,=member0147,=member0148,=member0149,=member0150,=member0151,=member0152,=member0153,=member0154,=member0155,=member0156,=member0157,=member0158,=member0159,=member0160,=member0161,=member0162,=member0163,=member0164,=member0165,=member0166,=member0167,=member0168,=member0169,=member0170,=member0171,=member0172,=member0173,=member0174,=member0175,=member0176,=member0177,=member0178,=member0179,=member0180,=member0181,=member0182,=member0183,=member0184,=member0185,=member0186,=member0187,=member0188,=member0189,=member0190,=member0191,=member0192,=member0193,=member0194,=member0195,=member0196,=member0197,=member0198,=member0199,=member0200,=member0201,=member0202,=member0203,=member0204,=member0205,=member0206,=member0207,=member0208,=member0209,=member0210,=member0211,=member0212,=member0213,=member0214,=member0215,=member0216,=member0217,=member0218,=member0219,=member0220,=member0221,=member0222,=member0223,=member0224,=member0225,=member0226,=member0227,=member0228,=member0229,=member0230,=member0231,=member0232,=member0233,=member0234,=member0235,=member0236,=member0237,=member0238,=member0239,=member0240,=member0241,=member0242,=member0243,=member0244,=member0245,=member0246,=member0247,=member0248,=member0249,=member0250,=member0251,=member0252,=member0253,=member0254,=member0255,=member0256,=member0257,=member0258,=member0259,=member0260,=member0261,=member0262,=member0263,=member0264,=member0265,=member0266,=member0267,=member0268,=member0269,=member0270,=member0271,=member0272,=member0273,=member0274,=member0275,=member0276,=member0277,=member0278,=member0279,=member0280,=member0281,=member0282,=member0283,=member0284,=member0285,=member0286,=member0287,=member0288,=member0289,=member0290,=member0291,=member0292,=member0293,=member0294,=member0295,=member0296,=member0297,=member0298,=member0299,=member0300,=member0301,=member0302,=member0303,=member0304,=member0305,=member0306,=member0307,=member0308,=member0309,=member0310,=member0311,=member0312,=member0313,=member0314,=member0315,=member0316,=member0317,=member0318,=member0319,=member0320,=member0321,=member0322,=member0323,=member0324,=member0325,=member0326,=member0327,=member0328,=member0329,=member0330,=member0331,=member0332,=member0333,=member0334,=member0335,=member0336,=member0337,=member0338,=member0339,=member0340,=member0341,=member0342,=member0343,=member0344,=member0345,=member0346,=member0347,=member0348,=member0349,=member0350,=member0351,=member0352,=member0353,=member0354,=member0355,=member0356,=member0357,=member0358,=member0359,=member0360,=member0361,=member0362,=member0363,=member0364,=member0365,=member0366,=member0367,=member0368,=member0369,=member0370,=member0371,=member0372,=member0373,=member0374,=member0375,=member0376,=member0377,=member0378,=member0379,=member0380,=member0381,=member0382,=member0383,=member0384,=member0385,=member0386,=member0387,=member0388,=member0389,=member0390,=member0391,=member0392,=member0393,=member0394,=member0395,=member0396,=member0397,=member0398,=member0399,=member0400,=member0401,=member0402,=member0403,=member0404,=member0405,=member0406,=member0407,=member0408,=member0409,=member0410,=member0411,=member0412,=member0413,=member0414,=member0415,=member0416,=member0417,=member0418,=member0419,=member0420,=member0421,=member0422,=member0423,=member0424,=member0425,=member0426,=member0427,=member0428,=member0429,=member0430,=member0431,=member0432,=member0433,=member0434,=member0435,=member0436,=member0437,=member0438,=member0439,=member0440,=member0441,=member0442,=member0443,=member0444,=member0445,=member0446,=member0447,=member0448,=member0449,=member0450,=member0451,=member0452,=member0453,=member0454,=member0455,=member0456,=member0457,=member0458,=member0459,=member0460,=member0461,=member0462,=member0463,=member0464,=member0465,=member0466,=member0467,=member0468,=member0469,=member0470,=member0471,=member0472,=member0473,=member0474,=member0475,=member0476,=member0477,=member0478,=member0479,=member0480,=member0481,=member0482,=member0483,=member0484,=member0485,=member0486,=member0487,=member0488,=member0489,=member0490,=member0491,=member0492,=member0493,=member0494,=member0495,=member0496,=member0497,=member0498,=member0499,=member0500,=member0501,=member0502,=member0503,=member0504,=member0505,=member0506,=member0507,=member0508,=member0509,=member0510,=member0511,=member0512,=member0513,=member0514,=member0515,=member0516,=member0517,=member0518,=member0519,=member0520,=member0521,=member0522,=member0523,=member0524,=member0525,=member0526,=member0527,=member0528,=member0529,=member0530,=member0531,=member0532,=member0533,=member0534,=member0535,=member0536,=member0537,=member0538,=member0539,=member0540,=member0541,=member0542,=member0543,=member0544,=member0545,=member0546,=member0547,=member0548,=member0549,=member0550,=member0551,=member0552,=member0553,=member0554,=member0555,=member0556,=member0557,=member0558,=member0559,=member0560,=member0561,=member0562,=member0563,=member0564,=member0565,=member0566,=member0567,=member0568,=member0569,=member0570,=member0571,=member0572,=member0573,=member0574,=member0575,=member0576,=member0577,=member0578,=member0579,=member0580,=member0581,=member0582,=member0583,=member0584,=member0585,=member0586,=member0587,=member0588,=member0589,=member0590,=member0591,=member0592,=member0593,=member0594,=member0595,=member0596,=member0597,=member0598,=member0599]
+R fgetgrent_r gr_long 2 4096 = 0 1234 =next|=x|2|[=n]
+R fgetgrent_r gr_long 3 16384 = 2 2 -
+R fgetgrent_r gr_long 4 4096 = 2 2 -
+R fgetspent_r sp_basic 0 4096 = 0 1234 =root|=!|19000|0|99999|7|-1|-1|18446744073709551615
+R fgetspent_r sp_basic 1 4096 = 0 1234 =alice|=$6$salt$hash|19001|1|90|14|30|20000|18446744073709551615
+R fgetspent_r sp_basic 2 4096 = 0 1234 =bob|=*|19002|-1|-1|-1|-1|-1|18446744073709551615
+R fgetspent_r sp_basic 3 4096 = 2 2 -
+R fgetspent_r sp_basic 4 4096 = 2 2 -
+R fgetspent_r sp_messy 0 4096 = 0 1234 =old|=x|1|2|3|-1|-1|-1|18446744073709551615
+R fgetspent_r sp_messy 1 4096 = 0 1234 =+|!|0|0|0|-1|-1|-1|18446744073709551615
+R fgetspent_r sp_messy 2 4096 = 0 1234 =-bad|!|0|0|0|-1|-1|-1|18446744073709551615
+R fgetspent_r sp_messy 3 4096 = 0 1234 =+nis|=|-1|-1|-1|-1|-1|-1|18446744073709551615
+R fgetspent_r sp_messy 4 4096 = 0 1234 =spaces|=x|1|2|3|4|5|6|7
+R fgetspent_r sp_messy 5 4096 = 0 22 =okold|=x|-1|-1|-1|-1|-1|-1|18446744073709551615
+R fgetspent_r sp_messy 6 4096 = 0 1234 =trailing|=x|1|2|3|-1|-1|-1|18446744073709551615
+R fgetspent_r sp_messy 7 4096 = 0 22 =last|=x|1|1|1|1|1|1|1
+R fgetspent_r sp_messy 8 4096 = 2 2 -
+R fgetspent_r sp_messy 9 4096 = 2 2 -
+R fgetspent_r sp_basic 0 8 = 34 34 -
+R fgetspent_r sp_basic 1 4096 = 0 1234 =root|=!|19000|0|99999|7|-1|-1|18446744073709551615
+R fgetspent_r sp_basic 2 8 = 34 34 -
+R fgetspent_r sp_basic 3 4096 = 0 1234 =alice|=$6$salt$hash|19001|1|90|14|30|20000|18446744073709551615
+R fgetspent_r sp_basic 4 8 = 34 34 -
+R fgetspent_r sp_basic 5 4096 = 0 1234 =bob|=*|19002|-1|-1|-1|-1|-1|18446744073709551615
+R fgetspent_r sp_basic 6 8 = 2 2 -
+R fgetspent_r sp_basic 7 4096 = 2 2 -
+N fgetpwent pw_basic 0 = 1234 =root|=x|0|0|=root|=/root|=/bin/bash
+N fgetpwent pw_basic 1 = 1234 =daemon|=x|1|1|=daemon|=/usr/sbin|=/usr/sbin/nologin
+N fgetpwent pw_basic 2 = 1234 =bin|=x|2|2|=bin|=/bin|=/usr/sbin/nologin
+N fgetpwent pw_basic 3 = 2 -
+N fgetpwent pw_messy 0 = 1234 =alice|=x|1000|1000|=Alice\x20A\x2c\x2c\x2c|=/home/alice|=/bin/sh
+N fgetpwent pw_messy 1 = 1234 =bob|=*|1001|100|=|=/home/bob|=
+N fgetpwent pw_messy 2 = 22 =+|!|0|0|!|!|!
+N fgetpwent pw_messy 3 = 1234 =+nis|=|0|0|=|=|=
+N fgetpwent pw_messy 4 = 1234 =-evil|!|0|0|!|!|!
+N fgetpwent pw_messy 5 = 1234 =+@group|=|0|0|=|=|=
+N fgetpwent pw_messy 6 = 22 =frank|=x|7|7|=F|=/f|=/bin/f:extra:fields
+N fgetpwent pw_messy 7 = 1234 =gina|=x|8|8|=G|=/g|=/bin/g\x0d
+N fgetpwent pw_messy 8 = 1234 =hank|=x|9|9|=H|=/h|=/bin/h
+N fgetpwent pw_messy 9 = 1234 =|=x|11|11|=|=|=
+N fgetpwent pw_messy 10 = 1234 =utf|=x|12|12|=\xc3\xa9t\xc3\xa9|=/u|=/bin/u
+N fgetpwent pw_messy 11 = 1234 =last|=x|10|10|=L|=/l|=/bin/l
+N fgetpwent pw_messy 12 = 2 -
+N fgetpwent pw_long 0 = 34 =first|=x|1|1|=gggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggg|=/f|=/bin/f
+N fgetpwent pw_long 1 = 1234 =second|=x|2|2|=s|=/s|=/bin/s
+N fgetpwent pw_long 2 = 2 -
+N fgetpwent pw_empty 0 = 2 -
+N fgetpwent pw_comments 0 = 2 -
+N fgetgrent gr_basic 0 = 1234 =root|=x|0|[]
+N fgetgrent gr_basic 1 = 1234 =wheel|=x|10|[=root,=alice]
+N fgetgrent gr_basic 2 = 1234 =users|=x|100|[=alice,=bob,=carol]
+N fgetgrent gr_basic 3 = 2 -
+N fgetgrent gr_messy 0 = 1234 =root|=x|0|[]
+N fgetgrent gr_messy 1 = 1234 =spaced|=x|11|[=a\x20,=b\x20,=c]
+N fgetgrent gr_messy 2 = 1234 =nomem|=x|12|[]
+N fgetgrent gr_messy 3 = 22 =+|!|0|[]
+N fgetgrent gr_messy 4 = 1234 =+|=|0|[]
+N fgetgrent gr_messy 5 = 1234 =-grp|!|0|[]
+N fgetgrent gr_messy 6 = 1234 =+grp|=x|0|[=m1,=m2]
+N fgetgrent gr_messy 7 = 22 =trail|=x|13|[=a,=b]
+N fgetgrent gr_messy 8 = 1234 =lead|=x|14|[=y]
+N fgetgrent gr_messy 9 = 1234 =last|=x|15|[=x]
+N fgetgrent gr_messy 10 = 2 -
+N fgetgrent gr_long 0 = 34 =many|=x|1|[=member0000,=member0001,=member0002,=member0003,=member0004,=member0005,=member0006,=member0007,=member0008,=member0009,=member0010,=member0011,=member0012,=member0013,=member0014,=member0015,=member0016,=member0017,=member0018,=member0019,=member0020,=member0021,=member0022,=member0023,=member0024,=member0025,=member0026,=member0027,=member0028,=member0029,=member0030,=member0031,=member0032,=member0033,=member0034,=member0035,=member0036,=member0037,=member0038,=member0039,=member0040,=member0041,=member0042,=member0043,=member0044,=member0045,=member0046,=member0047,=member0048,=member0049,=member0050,=member0051,=member0052,=member0053,=member0054,=member0055,=member0056,=member0057,=member0058,=member0059,=member0060,=member0061,=member0062,=member0063,=member0064,=member0065,=member0066,=member0067,=member0068,=member0069,=member0070,=member0071,=member0072,=member0073,=member0074,=member0075,=member0076,=member0077,=member0078,=member0079,=member0080,=member0081,=member0082,=member0083,=member0084,=member0085,=member0086,=member0087,=member0088,=member0089,=member0090,=member0091,=member0092,=member0093,=member0094,=member0095,=member0096,=member0097,=member0098,=member0099,=member0100,=member0101,=member0102,=member0103,=member0104,=member0105,=member0106,=member0107,=member0108,=member0109,=member0110,=member0111,=member0112,=member0113,=member0114,=member0115,=member0116,=member0117,=member0118,=member0119,=member0120,=member0121,=member0122,=member0123,=member0124,=member0125,=member0126,=member0127,=member0128,=member0129,=member0130,=member0131,=member0132,=member0133,=member0134,=member0135,=member0136,=member0137,=member0138,=member0139,=member0140,=member0141,=member0142,=member0143,=member0144,=member0145,=member0146,=member0147,=member0148,=member0149,=member0150,=member0151,=member0152,=member0153,=member0154,=member0155,=member0156,=member0157,=member0158,=member0159,=member0160,=member0161,=member0162,=member0163,=member0164,=member0165,=member0166,=member0167,=member0168,=member0169,=member0170,=member0171,=member0172,=member0173,=member0174,=member0175,=member0176,=member0177,=member0178,=member0179,=member0180,=member0181,=member0182,=member0183,=member0184,=member0185,=member0186,=member0187,=member0188,=member0189,=member0190,=member0191,=member0192,=member0193,=member0194,=member0195,=member0196,=member0197,=member0198,=member0199,=member0200,=member0201,=member0202,=member0203,=member0204,=member0205,=member0206,=member0207,=member0208,=member0209,=member0210,=member0211,=member0212,=member0213,=member0214,=member0215,=member0216,=member0217,=member0218,=member0219,=member0220,=member0221,=member0222,=member0223,=member0224,=member0225,=member0226,=member0227,=member0228,=member0229,=member0230,=member0231,=member0232,=member0233,=member0234,=member0235,=member0236,=member0237,=member0238,=member0239,=member0240,=member0241,=member0242,=member0243,=member0244,=member0245,=member0246,=member0247,=member0248,=member0249,=member0250,=member0251,=member0252,=member0253,=member0254,=member0255,=member0256,=member0257,=member0258,=member0259,=member0260,=member0261,=member0262,=member0263,=member0264,=member0265,=member0266,=member0267,=member0268,=member0269,=member0270,=member0271,=member0272,=member0273,=member0274,=member0275,=member0276,=member0277,=member0278,=member0279,=member0280,=member0281,=member0282,=member0283,=member0284,=member0285,=member0286,=member0287,=member0288,=member0289,=member0290,=member0291,=member0292,=member0293,=member0294,=member0295,=member0296,=member0297,=member0298,=member0299,=member0300,=member0301,=member0302,=member0303,=member0304,=member0305,=member0306,=member0307,=member0308,=member0309,=member0310,=member0311,=member0312,=member0313,=member0314,=member0315,=member0316,=member0317,=member0318,=member0319,=member0320,=member0321,=member0322,=member0323,=member0324,=member0325,=member0326,=member0327,=member0328,=member0329,=member0330,=member0331,=member0332,=member0333,=member0334,=member0335,=member0336,=member0337,=member0338,=member0339,=member0340,=member0341,=member0342,=member0343,=member0344,=member0345,=member0346,=member0347,=member0348,=member0349,=member0350,=member0351,=member0352,=member0353,=member0354,=member0355,=member0356,=member0357,=member0358,=member0359,=member0360,=member0361,=member0362,=member0363,=member0364,=member0365,=member0366,=member0367,=member0368,=member0369,=member0370,=member0371,=member0372,=member0373,=member0374,=member0375,=member0376,=member0377,=member0378,=member0379,=member0380,=member0381,=member0382,=member0383,=member0384,=member0385,=member0386,=member0387,=member0388,=member0389,=member0390,=member0391,=member0392,=member0393,=member0394,=member0395,=member0396,=member0397,=member0398,=member0399,=member0400,=member0401,=member0402,=member0403,=member0404,=member0405,=member0406,=member0407,=member0408,=member0409,=member0410,=member0411,=member0412,=member0413,=member0414,=member0415,=member0416,=member0417,=member0418,=member0419,=member0420,=member0421,=member0422,=member0423,=member0424,=member0425,=member0426,=member0427,=member0428,=member0429,=member0430,=member0431,=member0432,=member0433,=member0434,=member0435,=member0436,=member0437,=member0438,=member0439,=member0440,=member0441,=member0442,=member0443,=member0444,=member0445,=member0446,=member0447,=member0448,=member0449,=member0450,=member0451,=member0452,=member0453,=member0454,=member0455,=member0456,=member0457,=member0458,=member0459,=member0460,=member0461,=member0462,=member0463,=member0464,=member0465,=member0466,=member0467,=member0468,=member0469,=member0470,=member0471,=member0472,=member0473,=member0474,=member0475,=member0476,=member0477,=member0478,=member0479,=member0480,=member0481,=member0482,=member0483,=member0484,=member0485,=member0486,=member0487,=member0488,=member0489,=member0490,=member0491,=member0492,=member0493,=member0494,=member0495,=member0496,=member0497,=member0498,=member0499,=member0500,=member0501,=member0502,=member0503,=member0504,=member0505,=member0506,=member0507,=member0508,=member0509,=member0510,=member0511,=member0512,=member0513,=member0514,=member0515,=member0516,=member0517,=member0518,=member0519,=member0520,=member0521,=member0522,=member0523,=member0524,=member0525,=member0526,=member0527,=member0528,=member0529,=member0530,=member0531,=member0532,=member0533,=member0534,=member0535,=member0536,=member0537,=member0538,=member0539,=member0540,=member0541,=member0542,=member0543,=member0544,=member0545,=member0546,=member0547,=member0548,=member0549,=member0550,=member0551,=member0552,=member0553,=member0554,=member0555,=member0556,=member0557,=member0558,=member0559,=member0560,=member0561,=member0562,=member0563,=member0564,=member0565,=member0566,=member0567,=member0568,=member0569,=member0570,=member0571,=member0572,=member0573,=member0574,=member0575,=member0576,=member0577,=member0578,=member0579,=member0580,=member0581,=member0582,=member0583,=member0584,=member0585,=member0586,=member0587,=member0588,=member0589,=member0590,=member0591,=member0592,=member0593,=member0594,=member0595,=member0596,=member0597,=member0598,=member0599]
+N fgetgrent gr_long 1 = 1234 =next|=x|2|[=n]
+N fgetgrent gr_long 2 = 2 -
+N fgetspent sp_basic 0 = 1234 =root|=!|19000|0|99999|7|-1|-1|18446744073709551615
+N fgetspent sp_basic 1 = 1234 =alice|=$6$salt$hash|19001|1|90|14|30|20000|18446744073709551615
+N fgetspent sp_basic 2 = 1234 =bob|=*|19002|-1|-1|-1|-1|-1|18446744073709551615
+N fgetspent sp_basic 3 = 2 -
+N fgetspent sp_messy 0 = 1234 =old|=x|1|2|3|-1|-1|-1|18446744073709551615
+N fgetspent sp_messy 1 = 1234 =+|!|0|0|0|-1|-1|-1|18446744073709551615
+N fgetspent sp_messy 2 = 1234 =-bad|!|0|0|0|-1|-1|-1|18446744073709551615
+N fgetspent sp_messy 3 = 1234 =+nis|=|-1|-1|-1|-1|-1|-1|18446744073709551615
+N fgetspent sp_messy 4 = 1234 =spaces|=x|1|2|3|4|5|6|7
+N fgetspent sp_messy 5 = 22 =okold|=x|-1|-1|-1|-1|-1|-1|18446744073709551615
+N fgetspent sp_messy 6 = 1234 =trailing|=x|1|2|3|-1|-1|-1|18446744073709551615
+N fgetspent sp_messy 7 = 22 =last|=x|1|1|1|1|1|1|1
+N fgetspent sp_messy 8 = 2 -
+S sgetspent_r full 4096 = 0 1234 =root|=!|19000|0|99999|7|-1|-1|18446744073709551615
+S sgetspent_r full 4 = 34 1234 -
+S sgetspent_r full 26 = 0 1234 =root|=!|19000|0|99999|7|-1|-1|18446744073709551615
+S sgetspent_r full 25 = 34 1234 -
+S sgetspent full 0 = 0 1234 =root|=!|19000|0|99999|7|-1|-1|18446744073709551615
+S sgetspent_r nl 4096 = 0 1234 =root|=!|19000|0|99999|7|-1|-1|18446744073709551615
+S sgetspent_r nl 4 = 34 1234 -
+S sgetspent_r nl 27 = 0 1234 =root|=!|19000|0|99999|7|-1|-1|18446744073709551615
+S sgetspent_r nl 26 = 34 1234 -
+S sgetspent nl 0 = 0 1234 =root|=!|19000|0|99999|7|-1|-1|18446744073709551615
+S sgetspent_r two 4096 = 0 1234 =root|=!|19000|0|99999|7|-1|-1|18446744073709551615
+S sgetspent_r two 4 = 34 1234 -
+S sgetspent_r two 49 = 0 1234 =root|=!|19000|0|99999|7|-1|-1|18446744073709551615
+S sgetspent_r two 48 = 34 1234 -
+S sgetspent two 0 = 0 1234 =root|=!|19000|0|99999|7|-1|-1|18446744073709551615
+S sgetspent_r lead 4096 = 0 1234 =\x20lead|=x|1|2|3|-1|-1|-1|18446744073709551615
+S sgetspent_r lead 4 = 34 1234 -
+S sgetspent_r lead 14 = 0 1234 =\x20lead|=x|1|2|3|-1|-1|-1|18446744073709551615
+S sgetspent_r lead 13 = 34 1234 -
+S sgetspent lead 0 = 0 1234 =\x20lead|=x|1|2|3|-1|-1|-1|18446744073709551615
+S sgetspent_r hash 4096 = 0 1234 =#c|=x|1|2|3|-1|-1|-1|18446744073709551615
+S sgetspent_r hash 4 = 34 1234 -
+S sgetspent_r hash 11 = 0 1234 =#c|=x|1|2|3|-1|-1|-1|18446744073709551615
+S sgetspent_r hash 10 = 34 1234 -
+S sgetspent hash 0 = 0 1234 =#c|=x|1|2|3|-1|-1|-1|18446744073709551615
+S sgetspent_r empty 4096 = 1234 1234 -
+S sgetspent_r empty 4 = 1234 1234 -
+S sgetspent_r empty 1 = 1234 1234 -
+S sgetspent empty 0 = 0 1234 -
+S sgetspent_r plus 4096 = 0 1234 =+|!|0|0|0|-1|-1|-1|18446744073709551615
+S sgetspent_r plus 4 = 0 1234 =+|!|0|0|0|-1|-1|-1|18446744073709551615
+S sgetspent_r plus 2 = 0 1234 =+|!|0|0|0|-1|-1|-1|18446744073709551615
+S sgetspent_r plus 1 = 34 1234 -
+S sgetspent plus 0 = 0 1234 =+|!|0|0|0|-1|-1|-1|18446744073709551615
+S sgetspent_r minus 4096 = 0 1234 =-x|!|0|0|0|-1|-1|-1|18446744073709551615
+S sgetspent_r minus 4 = 0 1234 =-x|!|0|0|0|-1|-1|-1|18446744073709551615
+S sgetspent_r minus 3 = 0 1234 =-x|!|0|0|0|-1|-1|-1|18446744073709551615
+S sgetspent_r minus 2 = 34 1234 -
+S sgetspent minus 0 = 0 1234 =-x|!|0|0|0|-1|-1|-1|18446744073709551615
+S sgetspent_r plusc 4096 = 0 1234 =+|!|0|0|0|-1|-1|-1|18446744073709551615
+S sgetspent_r plusc 4 = 0 1234 =+|!|0|0|0|-1|-1|-1|18446744073709551615
+S sgetspent_r plusc 3 = 0 1234 =+|!|0|0|0|-1|-1|-1|18446744073709551615
+S sgetspent_r plusc 2 = 34 1234 -
+S sgetspent plusc 0 = 0 1234 =+|!|0|0|0|-1|-1|-1|18446744073709551615
+S sgetspent_r old 4096 = 0 1234 =old|=x|1|2|3|-1|-1|-1|18446744073709551615
+S sgetspent_r old 4 = 34 1234 -
+S sgetspent_r old 12 = 0 1234 =old|=x|1|2|3|-1|-1|-1|18446744073709551615
+S sgetspent_r old 11 = 34 1234 -
+S sgetspent old 0 = 0 1234 =old|=x|1|2|3|-1|-1|-1|18446744073709551615
+S sgetspent_r eight 4096 = 1234 1234 -
+S sgetspent_r eight 4 = 34 1234 -
+S sgetspent_r eight 22 = 1234 1234 -
+S sgetspent_r eight 21 = 34 1234 -
+S sgetspent eight 0 = 0 1234 -
+S sgetspent_r short 4096 = 1234 1234 -
+S sgetspent_r short 4 = 34 1234 -
+S sgetspent_r short 8 = 1234 1234 -
+S sgetspent_r short 7 = 34 1234 -
+S sgetspent short 0 = 0 1234 -
+S sgetspent_r three 4096 = 1234 1234 -
+S sgetspent_r three 4 = 34 1234 -
+S sgetspent_r three 7 = 1234 1234 -
+S sgetspent_r three 6 = 34 1234 -
+S sgetspent three 0 = 0 1234 -
+S sgetspent_r four 4096 = 0 1234 =s|=x|-1|-1|-1|-1|-1|-1|18446744073709551615
+S sgetspent_r four 4 = 34 1234 -
+S sgetspent_r four 8 = 0 1234 =s|=x|-1|-1|-1|-1|-1|-1|18446744073709551615
+S sgetspent_r four 7 = 34 1234 -
+S sgetspent four 0 = 0 1234 =s|=x|-1|-1|-1|-1|-1|-1|18446744073709551615
+S sgetspent_r flag 4096 = 1234 1234 -
+S sgetspent_r flag 4 = 34 1234 -
+S sgetspent_r flag 37 = 1234 1234 -
+S sgetspent_r flag 36 = 34 1234 -
+S sgetspent flag 0 = 0 1234 -
+S sgetspent_r neg 4096 = 1234 1234 -
+S sgetspent_r neg 4 = 34 1234 -
+S sgetspent_r neg 20 = 1234 1234 -
+S sgetspent_r neg 19 = 34 1234 -
+S sgetspent neg 0 = 0 1234 -
+P putpwent plain = 0 1234 =root:x:0:0:root:/root:/bin/bash\x0a
+P putpwent nulls = 0 1234 =u::5:6:::\x0a
+P putpwent gecos = 0 1234 =g:x:1:1:a\x20b\x20c\x20:/h:/s\x0a
+P putpwent namecolon = -1 22 =
+P putpwent dirnl = -1 22 =
+P putpwent shellcolon = -1 22 =
+P putpwent passcolon = -1 22 =
+P putpwent nullname = -1 22 =
+P putpwent plus = 0 1234 =+:x:::g:/h:/s\x0a
+P putpwent minus = 0 1234 =-bad::::::\x0a
+P putpwent maxid = 0 1234 =m:x:4294967295:4294967294:::\x0a
+P putpwent emptyname = 0 1234 =:x:1:1::/h:/s\x0a
+P putpwent utf8 = 0 1234 =u:x:1:1:\xc3\xa9:/h:/s\x0a
+P putgrent plain = 0 1234 =wheel:x:10:root\x2calice\x0a
+P putgrent nomem = 0 1234 =g:x:11:\x0a
+P putgrent emptymem = 0 1234 =g:x:11:\x0a
+P putgrent nullpass = 0 1234 =g::12:a\x0a
+P putgrent comma = -1 22 =
+P putgrent memcolon = -1 22 =
+P putgrent memnl = -1 22 =
+P putgrent namenl = -1 22 =
+P putgrent passcolon = -1 22 =
+P putgrent nullname = -1 22 =
+P putgrent plus = 0 1234 =+:x::a\x2cb\x0a
+P putgrent minus = 0 1234 =-g:::\x0a
+P putgrent maxgid = 0 1234 =m::4294967295:x\x0a
+P putspent plain = 0 1234 =root:!:19000:0:99999:7:::\x0a
+P putspent unset = 0 1234 =u:x:::::::\x0a
+P putspent zero = 0 1234 =z::0:0:0:0:0:0:0\x0a
+P putspent flag = 0 1234 =f:x:1:2:3:4:5:6:-9223372036854775808\x0a
+P putspent neg = 0 1234 =n:x:-5:-2:-9223372036854775808:9223372036854775807:::5\x0a
+P putspent nullpass = 0 1234 =p::::::::\x0a
+P putspent namecolon = -1 22 =
+P putspent passnl = -1 22 =
+P putspent plus = 0 1234 =+:x:::::::\x0a
+U two = [=/bin/sh,=/bin/bash]
+U messy = [=/bin/sh,=/usr/bin/zsh,=/a/shell,=/,=/bin/ksh,=/bin/a,=/bin/dash]
+U empty = []
+U comments = []
+U missing = [=/bin/sh,=/bin/csh]
+U seq = [=/bin/sh,=/bin/bash]
+U seq-a = [=/bin/sh]
+U seq-b = [=/bin/bash]
+U seq-c = []
+U seq-d = []
+U seq-e = [=/bin/sh]
+U seq-f = [=/bin/sh]
+L lock1 = 0 1234
+L lock2 = -1 1234
+L child = -1 4
+L unlock1 = 0 1234
+L unlock2 = -1 1234
+L lock3 = 0 1234
+L unlock3 = 0 1234
+G 0 = =secret
+G 1 = =line2
+G 2 = =
+G prompts = =P0:P1:P2:

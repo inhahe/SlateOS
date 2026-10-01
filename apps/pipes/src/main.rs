@@ -77,38 +77,84 @@
 //! lands four turns from home is not the same puzzle as one that lands forty,
 //! so the board shows the floor it started from as well as the one it is on.
 
+use gamechrome::Ink;
+use guitk::button::{Kind, State};
 use guitk::color::Color;
 use guitk::event::{Event, EventResult, Key, KeyEvent, MouseButton, MouseEvent, MouseEventKind};
 use guitk::frame::Rect;
+use guitk::palette::Palette;
 use guitk::probe::Probe;
 use guitk::render::{FontWeightHint, RenderCommand, RenderTree, TextOverflow};
 use guitk::rng::{RandomSource, SeededRng};
 use guitk::style::CornerRadii;
+use guitk::surface::Surface;
 use guitk::text;
 use oswindow::app::{self, App, Response};
 use std::collections::VecDeque;
 use std::process::ExitCode;
 
-// ── Catppuccin Mocha palette ───────────────────────────────────────────────
-const BASE: Color = Color::from_hex(0x1E1E2E);
-const CRUST: Color = Color::from_hex(0x11111B);
-const SURFACE0: Color = Color::from_hex(0x313244);
-const SURFACE1: Color = Color::from_hex(0x45475A);
-const TEXT_COLOR: Color = Color::from_hex(0xCDD6F4);
-const SUBTEXT0: Color = Color::from_hex(0xA6ADC8);
-const BLUE: Color = Color::from_hex(0x89B4FA);
-const GREEN: Color = Color::from_hex(0xA6E3A1);
-const RED: Color = Color::from_hex(0xF38BA8);
-const YELLOW: Color = Color::from_hex(0xF9E2AF);
-const PEACH: Color = Color::from_hex(0xFAB387);
-const LAVENDER: Color = Color::from_hex(0xB4BEFE);
-const TEAL: Color = Color::from_hex(0x94E2D5);
-const OVERLAY0: Color = Color::from_hex(0x6C7086);
+// ── Colours ─────────────────────────────────────────────────────────
+//
+// Everything in this game follows the user's palette (the operator's answer
+// to C-Q16, §1422, and lane C's call for this game): its surfaces and text
+// from the palette's roles, each hue in the palette's ink for it, which reads
+// on the page in a light theme as in a dark one. It was all a copy of
+// Catppuccin Mocha, dark on a light desktop.
 
-/// The source cell's backing, and the drain's. Dark enough to read the pipe
-/// against, distinct enough to find at a glance without reading the letter.
-const SOURCE_BG: Color = Color::from_hex(0x2A4A3A);
-const DRAIN_BG: Color = Color::from_hex(0x4A2A3A);
+/// The colours the window draws in, from the user's palette.
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct Colours {
+    /// The page.
+    base: Color,
+    /// A well.
+    crust: Color,
+    /// Raised.
+    surface0: Color,
+    /// Raised further.
+    surface1: Color,
+    /// Text.
+    text: Color,
+    /// Secondary text.
+    subtext0: Color,
+    /// The palette's blue, inked for the page.
+    blue: Color,
+    /// The palette's green, inked for the page.
+    green: Color,
+    /// The palette's yellow, inked for the page.
+    yellow: Color,
+    /// The palette's lavender, inked for the page.
+    lavender: Color,
+    /// The palette's teal, inked for the page.
+    teal: Color,
+
+    /// The source and the drain: the palette's green and red, each moved to
+    /// read on a square dry or wet -- its ring at 3:1, its letter at the
+    /// strength for the size drawn. The ends were tinted squares, and a hue
+    /// on its own tint does not read: a green "S" was 2.8:1 on its green, and
+    /// the wet pipe through it too.
+    source: Ink,
+    drain: Ink,
+}
+
+impl Colours {
+    fn of(p: &Palette) -> Self {
+        Self {
+            base: p.base,
+            crust: p.crust,
+            surface0: p.surface0,
+            surface1: p.surface1,
+            text: p.text,
+            subtext0: p.subtext0,
+            blue: p.ink(p.blue),
+            green: p.ink(p.green),
+            yellow: p.ink(p.yellow),
+            lavender: p.ink(p.lavender),
+            teal: p.ink(p.teal),
+            source: Ink::on(p.ink(p.green), &[p.surface0, p.surface1]),
+            drain: Ink::on(p.ink(p.red), &[p.surface0, p.surface1]),
+        }
+    }
+}
 
 const WINDOW_WIDTH: f32 = 760.0;
 const WINDOW_HEIGHT: f32 = 720.0;
@@ -1156,6 +1202,12 @@ pub struct PipesApp {
     show_help: bool,
     status: String,
     size_drawn: (f32, f32),
+    /// The user's colours, replaced whenever the theme changes. Seeded from
+    /// the defaults; the framework calls `App::theme_changed` before the
+    /// first frame.
+    palette: Palette,
+    /// `palette`'s colours as this window draws them: rebuilt with it.
+    colours: Colours,
 }
 
 impl PipesApp {
@@ -1182,6 +1234,8 @@ impl PipesApp {
             show_help: false,
             status: String::new(),
             size_drawn: (WINDOW_WIDTH, WINDOW_HEIGHT),
+            palette: Palette::for_mode(false),
+            colours: Colours::of(&Palette::for_mode(false)),
         };
         game.new_game();
         game
@@ -1468,7 +1522,7 @@ impl PipesApp {
     pub fn frame(&self, width: f32, height: f32) -> Frame {
         let l = Layout::new(width, height);
         let mut f = Frame::new(width, height);
-        fill(&mut f, l.window, BASE, 0.0);
+        fill(&mut f, l.window, self.colours.base, 0.0);
         self.draw_header(&mut f, &l);
         self.draw_info(&mut f, &l);
         self.draw_board(&mut f, &l);
@@ -1491,7 +1545,7 @@ impl PipesApp {
             y,
             "Pipes",
             size,
-            LAVENDER,
+            self.colours.lavender,
             FontWeightHint::Bold,
             Some((l.header.w - l.pad * 2.0).max(0.0)),
         );
@@ -1505,9 +1559,9 @@ impl PipesApp {
             name,
             small,
             if self.state == GameState::Won {
-                GREEN
+                self.colours.green
             } else {
-                SUBTEXT0
+                self.colours.subtext0
             },
             FontWeightHint::Bold,
             Some((l.header.w * 0.4).max(0.0)),
@@ -1519,9 +1573,9 @@ impl PipesApp {
             return;
         }
         let colour = if self.state == GameState::Won {
-            GREEN
+            self.colours.green
         } else {
-            SUBTEXT0
+            self.colours.subtext0
         };
         let cells = self.board.rows().saturating_mul(self.board.cols());
         let line = format!(
@@ -1549,7 +1603,7 @@ impl PipesApp {
         if l.board.w <= 0.0 || l.board.h <= 0.0 {
             return;
         }
-        fill(f, l.board, CRUST, (l.board.w * 0.02).min(10.0));
+        fill(f, l.board, self.colours.crust, (l.board.w * 0.02).min(10.0));
         let rows = self.board.rows();
         let cols = self.board.cols();
         let flow = if self.show_flow {
@@ -1574,23 +1628,37 @@ impl PipesApp {
                 let wet = flow.get(index).copied().unwrap_or(false);
                 let is_source = (r, c) == self.board.source();
                 let is_drain = (r, c) == self.board.drain();
-                let back = if is_source {
-                    SOURCE_BG
-                } else if is_drain {
-                    DRAIN_BG
-                } else if wet {
-                    SURFACE1
+                let back = if wet {
+                    self.colours.surface1
                 } else {
-                    SURFACE0
+                    self.colours.surface0
                 };
                 fill(f, inner, back, (inner.w * 0.1).min(6.0));
+                // The ends are found by a ring of their own colour, which the
+                // pipe running through them does not have to read against.
+                if is_source || is_drain {
+                    let end = if is_source {
+                        self.colours.source
+                    } else {
+                        self.colours.drain
+                    };
+                    stroke(
+                        f,
+                        inner,
+                        end.large,
+                        (inner.w * 0.06).clamp(1.0, 3.0),
+                        (inner.w * 0.1).min(6.0),
+                    );
+                }
 
                 let ink = if self.state == GameState::Won && wet {
-                    GREEN
+                    self.colours.green
                 } else if wet {
-                    TEAL
+                    self.colours.teal
                 } else {
-                    OVERLAY0
+                    // Secondary text's grey: a dry pipe is read, and the
+                    // palette's faintest grey was 2.3:1 on its square.
+                    self.colours.subtext0
                 };
                 let Some(pipe) = self.board.get(r, c) else {
                     continue;
@@ -1630,7 +1698,12 @@ impl PipesApp {
                         inner.y + inset,
                         if is_source { "S" } else { "D" },
                         size,
-                        if is_source { GREEN } else { RED },
+                        if is_source {
+                            self.colours.source
+                        } else {
+                            self.colours.drain
+                        }
+                        .at(size, true),
                         FontWeightHint::Bold,
                         Some(inner.w),
                     );
@@ -1639,7 +1712,7 @@ impl PipesApp {
                     stroke(
                         f,
                         inner,
-                        YELLOW,
+                        self.colours.yellow,
                         (inner.w * 0.06).clamp(1.0, 3.0),
                         (inner.w * 0.1).min(6.0),
                     );
@@ -1647,6 +1720,25 @@ impl PipesApp {
                 f.hit(Target::Cell(index), square);
             }
         }
+    }
+
+    /// A control: the toolkit's push button, its label at this window's size;
+    /// `on` draws a choice that is made -- the level in play, the water shown,
+    /// the help up -- as the toolkit's primary button.
+    fn button(&self, f: &mut Frame, l: &Layout, r: Rect, text_str: &str, on: bool) {
+        if r.w <= 0.0 || r.h <= 0.0 {
+            return;
+        }
+        gamechrome::button(
+            f,
+            &self.palette,
+            (r.x, r.y, r.w, r.h),
+            text_str,
+            (r.h * 0.5).clamp(6.0, l.font),
+            if on { Kind::Primary } else { Kind::Plain },
+            State::default(),
+            self.colours.base,
+        );
     }
 
     fn draw_controls(&self, f: &mut Frame, l: &Layout) {
@@ -1658,33 +1750,25 @@ impl PipesApp {
         for (slot, level) in LEVELS.iter().enumerate() {
             let r = l.button(l.controls, slot, count);
             let active = slot == self.level;
-            button(
-                f,
-                l,
-                r,
-                level.name(),
-                if active { SURFACE1 } else { SURFACE0 },
-                if active { LAVENDER } else { SUBTEXT0 },
-            );
+            self.button(f, l, r, level.name(), active);
             f.hit(Target::Level(slot), r);
         }
         let new_r = l.button(l.controls, LEVELS.len(), count);
-        button(f, l, new_r, "New", SURFACE0, TEAL);
+        self.button(f, l, new_r, "New", false);
         f.hit(Target::NewGame, new_r);
 
         let flow_r = l.button(l.controls, LEVELS.len().saturating_add(1), count);
-        button(
+        self.button(
             f,
             l,
             flow_r,
             if self.show_flow { "Water" } else { "Dry" },
-            if self.show_flow { SURFACE1 } else { SURFACE0 },
-            if self.show_flow { PEACH } else { OVERLAY0 },
+            self.show_flow,
         );
         f.hit(Target::ToggleFlow, flow_r);
 
         let help_r = l.button(l.controls, LEVELS.len().saturating_add(2), count);
-        button(f, l, help_r, "?", SURFACE0, YELLOW);
+        self.button(f, l, help_r, "?", self.show_help);
         f.hit(Target::ToggleHelp, help_r);
     }
 
@@ -1700,8 +1784,15 @@ impl PipesApp {
         // frame that still answered `Cell(12)` for a point buried under the
         // help text would be describing a screen nobody is looking at.
         f.hit(Target::ToggleHelp, l.window);
-        fill(f, sheet, SURFACE0, (sheet.w * 0.03).min(12.0));
-        stroke(f, sheet, LAVENDER, 1.5, (sheet.w * 0.03).min(12.0));
+        self.palette.push_surface(
+            f,
+            sheet.x,
+            sheet.y,
+            sheet.w,
+            sheet.h,
+            (sheet.w * 0.03).min(12.0),
+            Surface::Panel,
+        );
 
         let pad = l.pad;
         let line = (sheet.h - pad * 3.0) / (HELP_ROWS.len().saturating_add(1)) as f32;
@@ -1715,7 +1806,7 @@ impl PipesApp {
             sheet.y + pad,
             HELP_TITLE,
             (line * 0.7).clamp(7.0, l.big),
-            YELLOW,
+            self.colours.yellow,
             FontWeightHint::Bold,
             Some((sheet.w - pad * 2.0).max(0.0)),
         );
@@ -1731,7 +1822,7 @@ impl PipesApp {
                 y,
                 key,
                 size,
-                BLUE,
+                self.colours.blue,
                 FontWeightHint::Bold,
                 Some(key_w),
             );
@@ -1741,7 +1832,7 @@ impl PipesApp {
                 y,
                 what,
                 size,
-                TEXT_COLOR,
+                self.colours.text,
                 FontWeightHint::Regular,
                 Some((sheet.w - pad * 2.0 - key_w).max(0.0)),
             );
@@ -1806,35 +1897,6 @@ fn label(
     });
 }
 
-/// A string centred in `r`, horizontally and vertically.
-fn centred_in(f: &mut Frame, r: Rect, s: &str, size: f32, color: Color, weight: FontWeightHint) {
-    if r.w <= 0.0 || r.h <= 0.0 || size <= 0.0 {
-        return;
-    }
-    let w = text::measure(s, size, weight);
-    let line = text::line_height(size, weight);
-    label(
-        f,
-        r.x + (r.w - w) / 2.0,
-        r.y + (r.h - line) / 2.0,
-        s,
-        size,
-        color,
-        weight,
-        Some(r.w),
-    );
-}
-
-/// A filled, labelled control.
-fn button(f: &mut Frame, l: &Layout, r: Rect, text_str: &str, back: Color, fore: Color) {
-    if r.w <= 0.0 || r.h <= 0.0 {
-        return;
-    }
-    fill(f, r, back, (r.h * 0.25).min(8.0));
-    let size = (r.h * 0.5).clamp(6.0, l.font);
-    centred_in(f, r, text_str, size, fore, FontWeightHint::Bold);
-}
-
 // ── Window ─────────────────────────────────────────────────────────────────
 
 /// The one body both the window and the test probe drive, so what a click does
@@ -1852,6 +1914,11 @@ pub fn handle_event(game: &mut PipesApp, event: &Event) -> EventResult {
 }
 
 impl App for PipesApp {
+    fn theme_changed(&mut self, palette: &Palette) {
+        self.palette = *palette;
+        self.colours = Colours::of(palette);
+    }
+
     fn title(&self) -> String {
         "Pipes".to_string()
     }
@@ -1924,6 +1991,280 @@ fn main() -> ExitCode {
 )]
 mod tests {
     use super::*;
+
+    /// The colours a game draws in until the theme says otherwise.
+    fn colours() -> Colours {
+        Colours::of(&Palette::for_mode(false))
+    }
+
+    /// The palette for a light or a dark theme, in the bordered look (the
+    /// default) or the card look.
+    fn palette(light: bool, cards: bool) -> Palette {
+        let mut p = Palette::for_mode(light);
+        p.set_surface_style(if cards {
+            guitk::palette::SurfaceStyle::Cards
+        } else {
+            guitk::palette::SurfaceStyle::Borders
+        });
+        p
+    }
+
+    /// Every look in `p`'s colours: a board with the water shown, the help
+    /// sheet, a board won, and a cramped window.
+    fn every_look(p: &Palette) -> Vec<(&'static str, PipesApp)> {
+        let mut wet = game();
+        wet.show_flow = true;
+        let mut help = game();
+        help.show_help = true;
+        let mut won = game();
+        won.state = GameState::Won;
+        won.show_flow = true;
+        let mut cramped = sized((360.0, 380.0));
+        cramped.show_flow = true;
+        let mut looks = vec![
+            ("water", wet),
+            ("help", help),
+            ("won", won),
+            ("cramped", cramped),
+        ];
+        for (_, g) in &mut looks {
+            g.theme_changed(p);
+        }
+        looks
+    }
+
+    /// **The window is drawn in the user's colours**, light or dark, in
+    /// either surface look -- every colour the palette's, the toolkit's
+    /// buttons', or the source's and the drain's tinted squares (the
+    /// operator's C-Q16). It drew in its own copy of Catppuccin Mocha, dark
+    /// on a light desktop.
+    #[test]
+    fn the_window_is_drawn_in_the_users_colours() {
+        for (light, cards) in [(false, false), (true, false), (false, true), (true, true)] {
+            let p = palette(light, cards);
+            let mut derived = gamechrome::button_colours(&p, Kind::Plain, p.base);
+            derived.extend(gamechrome::button_colours(&p, Kind::Primary, p.base));
+            let c = Colours::of(&p);
+            for ink in [c.source, c.drain] {
+                derived.extend([ink.large, ink.small]);
+            }
+            for (what, g) in every_look(&p) {
+                appearance::palette_check::assert_drawn_from(
+                    &p,
+                    g.frame(g.size_drawn.0, g.size_drawn.1).commands(),
+                    &derived,
+                    &format!("pipes, {what}, light: {light}, cards: {cards}"),
+                );
+            }
+        }
+    }
+
+    /// **Every text reads on what is drawn under it**, in either theme and
+    /// either surface look (`gamechrome::legibility`).
+    #[test]
+    fn every_text_reads_on_what_is_under_it_in_either_theme() {
+        let mut bad = Vec::new();
+        for (light, cards) in [(false, false), (true, false), (false, true), (true, true)] {
+            let p = palette(light, cards);
+            for (what, g) in every_look(&p) {
+                let f = g.frame(g.size_drawn.0, g.size_drawn.1);
+                for r in gamechrome::legibility::illegible(f.commands(), p.base, |_| false) {
+                    bad.push(format!(
+                        "{what}, light: {light}, cards: {cards}: {:?} {:.2}:1 on {:?}",
+                        r.text,
+                        r.ratio(),
+                        r.ground
+                    ));
+                }
+            }
+        }
+        assert!(bad.is_empty(), "pipes: {bad:#?}");
+    }
+
+    /// **The pipes and the ends are seen on their squares in either theme**
+    /// (WCAG 1.4.11's 3:1): a pipe dry, wet and won, and the source's and
+    /// the drain's rings, on a dry square and a wet one; and the two ends told
+    /// apart.
+    #[test]
+    fn the_pipes_and_the_ends_are_seen_in_either_theme() {
+        for light in [false, true] {
+            let c = Colours::of(&Palette::for_mode(light));
+            for ground in [c.surface0, c.surface1] {
+                for (what, ink) in [
+                    ("a dry pipe", c.subtext0),
+                    ("a wet pipe", c.teal),
+                    ("a won pipe", c.green),
+                    ("the source's ring", c.source.large),
+                    ("the drain's ring", c.drain.large),
+                ] {
+                    let ratio = guitk::theme::contrast_ratio(ink, ground);
+                    assert!(
+                        ratio >= 3.0,
+                        "{what} is {ratio:.2}:1 on {ground:?} (light: {light})"
+                    );
+                }
+            }
+            assert!(
+                !guitk::palette::hard_to_tell_apart(c.source.large, c.drain.large),
+                "the source and the drain look alike (light: {light})"
+            );
+        }
+    }
+
+    /// **The board as drawn reads**: every pipe drawn stands off both kinds
+    /// of square at 3:1, dry, wet and won, in either theme; and the source's
+    /// and the drain's rings are drawn in their own colours.
+    #[test]
+    fn the_board_as_drawn_reads() {
+        for light in [false, true] {
+            for (wet, won) in [(false, false), (true, false), (true, true)] {
+                let mut g = game();
+                g.theme_changed(&Palette::for_mode(light));
+                g.show_flow = wet;
+                if won {
+                    g.state = GameState::Won;
+                }
+                let c = g.colours;
+                let f = g.frame(g.size_drawn.0, g.size_drawn.1);
+                for cmd in f.commands() {
+                    if let RenderCommand::Line { color, .. } = cmd {
+                        for ground in [c.surface0, c.surface1] {
+                            let ratio = guitk::theme::contrast_ratio(*color, ground);
+                            assert!(
+                                ratio >= 3.0,
+                                "a pipe is {ratio:.2}:1 on {ground:?} (light: {light}, wet: {wet}, won: {won})"
+                            );
+                        }
+                    }
+                }
+                let rings: Vec<Color> = f
+                    .commands()
+                    .iter()
+                    .filter_map(|cmd| match cmd {
+                        RenderCommand::StrokeRect { color, .. } => Some(*color),
+                        _ => None,
+                    })
+                    .collect();
+                assert!(
+                    rings.contains(&c.source.large),
+                    "the source has no ring of its colour"
+                );
+                assert!(
+                    rings.contains(&c.drain.large),
+                    "the drain has no ring of its colour"
+                );
+            }
+        }
+    }
+
+    /// **The controls show what is on**: the level in play, the water shown
+    /// and the help up are each the toolkit's primary button.
+    #[test]
+    fn the_controls_show_what_is_on() {
+        // The level's name is also the header's, so the label looked for is the
+        // one that sits on a button: the lower of a toolkit button's two fills,
+        // the one with its gloss drawn straight after it.
+        let face_of = |g: &PipesApp, label: &str| {
+            let f = g.frame(g.size_drawn.0, g.size_drawn.1);
+            let fills: Vec<(Rect, Color)> = f
+                .commands()
+                .iter()
+                .filter_map(|c| match c {
+                    RenderCommand::FillRect {
+                        x,
+                        y,
+                        width,
+                        height,
+                        color,
+                        ..
+                    } => Some((Rect::new(*x, *y, *width, *height), *color)),
+                    _ => None,
+                })
+                .collect();
+            let buttons: Vec<(Rect, Color)> = fills
+                .windows(2)
+                .filter_map(|pair| {
+                    let [(face, colour), (gloss, _)] = pair else {
+                        return None;
+                    };
+                    ((gloss.x - face.x).abs() < 0.01
+                        && (gloss.y - face.y).abs() < 0.01
+                        && (gloss.w - face.w).abs() < 0.01
+                        && (gloss.h * 2.0 - face.h).abs() < 0.01)
+                        .then_some((*face, *colour))
+                })
+                .collect();
+            f.commands()
+                .iter()
+                .filter_map(|c| match c {
+                    RenderCommand::Text { text, x, y, .. } if text == label => Some((*x, *y)),
+                    _ => None,
+                })
+                .find_map(|(tx, ty)| {
+                    buttons
+                        .iter()
+                        .find(|(face, _)| face.contains(tx + 1.0, ty + 1.0))
+                        .map(|(_, colour)| *colour)
+                })
+                .unwrap_or_else(|| panic!("{label} is on no button"))
+        };
+        let g = game();
+        let paint =
+            |kind| guitk::button::paint(&g.palette, kind, State::default(), g.colours.base).lower;
+        let chosen = g.level().name();
+        for level in LEVELS {
+            let want = if level.name() == chosen {
+                Kind::Primary
+            } else {
+                Kind::Plain
+            };
+            assert_eq!(
+                face_of(&g, level.name()),
+                paint(want),
+                "{} looks wrong",
+                level.name()
+            );
+        }
+        // The water is shown from the start; hidden, the switch reads "Dry".
+        assert_eq!(
+            face_of(&g, "Water"),
+            paint(Kind::Primary),
+            "the water shown looks off"
+        );
+        let mut dry = game();
+        dry.show_flow = false;
+        assert_eq!(
+            face_of(&dry, "Dry"),
+            paint(Kind::Plain),
+            "the water hidden looks shown"
+        );
+        assert_eq!(face_of(&g, "?"), paint(Kind::Plain), "the help looks up");
+    }
+
+    /// **The help sheet has a ground of its own** -- the toolkit's panel,
+    /// filled in either surface look.
+    #[test]
+    fn the_help_sheet_has_a_ground_of_its_own() {
+        for cards in [false, true] {
+            let mut g = game();
+            g.show_help = true;
+            g.theme_changed(&palette(false, cards));
+            let sheet = Layout::new(g.size_drawn.0, g.size_drawn.1).help;
+            let grounded = g
+                .frame(g.size_drawn.0, g.size_drawn.1)
+                .commands()
+                .iter()
+                .any(|c| {
+                    matches!(c, RenderCommand::FillRect { x, y, width, height, color, .. }
+                    if (*x - sheet.x).abs() < 0.01
+                        && (*y - sheet.y).abs() < 0.01
+                        && (*width - sheet.w).abs() < 0.01
+                        && (*height - sheet.h).abs() < 0.01
+                        && color.a == u8::MAX)
+                });
+            assert!(grounded, "the help sheet has no ground (cards: {cards})");
+        }
+    }
     use guitk::event::Modifiers;
     use guitk::probe;
     use std::collections::HashSet;
@@ -2985,7 +3326,9 @@ mod tests {
             g.frame(PipesApp::SIZE.0, PipesApp::SIZE.1)
                 .commands()
                 .iter()
-                .filter(|c| matches!(c, RenderCommand::Line { color, .. } if *color == TEAL))
+                .filter(
+                    |c| matches!(c, RenderCommand::Line { color, .. } if *color == colours().teal),
+                )
                 .count()
         };
         assert_eq!(wet_ink(&g), 0, "the water is hidden but still drawn");

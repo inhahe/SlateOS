@@ -2977,7 +2977,7 @@ fn main() -> ExitCode {
     // Parsed here rather than by `oswindow::app::launch`, because the editor has
     // arguments of its own: `launch` rejects any non-option argument, which is
     // right for an application that takes none and wrong for this one.
-    let args = match oswindow::app::Args::from_env() {
+    let args = match oswindow::app::ArgsOs::from_env() {
         Ok(args) => args,
         Err(e) => {
             eprintln!("editor: {e}");
@@ -3008,7 +3008,10 @@ fn main() -> ExitCode {
 ///
 /// The messages are returned rather than printed so the caller owns the
 /// diagnostics; a test can then assert the rule without capturing stderr.
-fn open_all(editor: &mut EditorState, files: &[String]) -> Vec<(PathBuf, std::io::Error)> {
+fn open_all(
+    editor: &mut EditorState,
+    files: &[std::ffi::OsString],
+) -> Vec<(PathBuf, std::io::Error)> {
     let mut failures = Vec::new();
     for name in files {
         let path = PathBuf::from(name);
@@ -3129,7 +3132,7 @@ mod arg_tests {
         for name in ["one.txt", "two.txt", "three.txt"] {
             let path = scratch.path(name);
             fs::write(&path, "x").unwrap();
-            names.push(path.to_string_lossy().into_owned());
+            names.push(path.into_os_string());
         }
 
         let mut editor = EditorState::new();
@@ -3163,10 +3166,7 @@ mod arg_tests {
         let mut editor = EditorState::new();
         let failures = open_all(
             &mut editor,
-            &[
-                missing.to_string_lossy().into_owned(),
-                good.to_string_lossy().into_owned(),
-            ],
+            &[missing.clone().into_os_string(), good.into_os_string()],
         );
 
         assert_eq!(failures.len(), 1, "exactly the one bad name: {failures:?}");
@@ -3196,7 +3196,7 @@ mod arg_tests {
     #[test]
     fn every_argument_unreadable_still_leaves_somewhere_to_type() {
         let scratch = ScratchDir::new("slate_editor_args_allbad");
-        let missing = scratch.path("nope.txt").to_string_lossy().into_owned();
+        let missing = scratch.path("nope.txt").into_os_string();
 
         let mut editor = EditorState::new();
         let failures = open_all(&mut editor, &[missing.clone(), missing]);
@@ -3220,7 +3220,7 @@ mod arg_tests {
         fs::write(&path, "hello").unwrap();
 
         let mut editor = EditorState::new();
-        assert!(open_all(&mut editor, &[path.to_string_lossy().into_owned()]).is_empty());
+        assert!(open_all(&mut editor, &[path.into_os_string()]).is_empty());
         assert_eq!(editor.title(), "notes.txt — Editor");
     }
 
@@ -3229,11 +3229,38 @@ mod arg_tests {
         let scratch = ScratchDir::new("slate_editor_args_dup");
         let path = scratch.path("same.txt");
         fs::write(&path, "x").unwrap();
-        let name = path.to_string_lossy().into_owned();
+        let name = path.into_os_string();
 
         let mut editor = EditorState::new();
         assert!(open_all(&mut editor, &[name.clone(), name]).is_empty());
         assert_eq!(tabs(&editor), vec!["same.txt".to_string()]);
+    }
+
+    /// A file whose name is not text opens like any other.
+    ///
+    /// The name reaches the editor as the bytes it was given
+    /// (`oswindow::app::ArgsOs`); `Args` kept a `String`, and refused such a
+    /// name -- before 21c0b3614 it panicked on one -- so the file manager's
+    /// "open with" could not open it at all.
+    #[test]
+    fn a_file_whose_name_is_not_text_is_opened() {
+        let scratch = ScratchDir::new("slate_editor_args_bytes");
+        #[cfg(unix)]
+        let name = {
+            use std::os::unix::ffi::OsStringExt;
+            std::ffi::OsString::from_vec(b"odd\xFF.txt".to_vec())
+        };
+        #[cfg(windows)]
+        let name = {
+            use std::os::windows::ffi::OsStringExt;
+            std::ffi::OsString::from_wide(&[0x6F, 0x64, 0x64, 0xD800, 0x2E, 0x74, 0x78, 0x74])
+        };
+        let path = scratch.path("placeholder").with_file_name(&name);
+        fs::write(&path, "bytes").unwrap();
+
+        let mut editor = EditorState::new();
+        assert!(open_all(&mut editor, &[path.into_os_string()]).is_empty());
+        assert_eq!(tabs(&editor).len(), 1, "the file did not open");
     }
 }
 

@@ -31,11 +31,26 @@ required-features = ["testing"]
 name = "outline_dump"
 required-features = ["testing"]
 
+[[example]]
+# Times `wrap` against the word-by-word rule it replaced, reached through
+# `testing`.
+name = "wrap_time"
+required-features = ["testing"]
+
 [dependencies]
 # The PNG decoder for colour bitmap glyphs (`bitmap.rs`: `CBDT` and `sbix`
 # store each emoji as a picture). `no_std` + `alloc` like this crate means to
-# be, and lane F's like this crate, so one decoder serves both.
-imagecodec = { path = "../imagecodec" }
+# be, and lane F's like this crate, so one decoder serves both. Without its
+# default `avif` feature, which would bring an AV1 decoder (and `std`) for
+# nothing a font stores.
+imagecodec = { path = "../imagecodec", default-features = false }
+
+[dev-dependencies]
+# This crate itself with `testing`: the integration tests (`tests/`) link the
+# library as any other crate would, without `cfg(test)`, and
+# `tests/host_fonts.rs` checks the wrapping it ships against
+# `osfont::testing::wrap_by_words`, the slow rule it replaced.
+osfont = { path = ".", features = ["testing"] }
 
 [lints]
 workspace = true

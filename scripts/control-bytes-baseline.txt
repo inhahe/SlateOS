@@ -10,3 +10,6 @@
 #   on 2026-09-11; remove this entry when lane A lands the fix.
 gui/imagecodec/tests/data/ico_refused_no_entries.ico	00	binary fixture: a 6-byte ICO header declaring no images (lane F); too short for the 32-control-byte binary test
 gui/imagecodec/tests/data/ico_refused_no_entries.ico	01	binary fixture: a 6-byte ICO header declaring no images (lane F); too short for the 32-control-byte binary test
+rustcrypto/digest/tests/data/fixed_hash_serialization.bin	00	binary fixture vendored byte-for-byte from crates.io (digest 0.11.3, rustcrypto/README.md, lane E); too short for the 32-control-byte binary test
+rustcrypto/digest/tests/data/fixed_hash_serialization.bin	01	binary fixture vendored byte-for-byte from crates.io (digest 0.11.3, rustcrypto/README.md, lane E); too short for the 32-control-byte binary test
+rustcrypto/digest/tests/data/fixed_hash_serialization.bin	13	binary fixture vendored byte-for-byte from crates.io (digest 0.11.3, rustcrypto/README.md, lane E); too short for the 32-control-byte binary test

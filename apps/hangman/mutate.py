@@ -377,14 +377,14 @@ MUTATIONS = [
     ),
     (
         "the header is filled before its band is looked at",
-        "        if l.header.is_empty() {\n            return;\n        }\n        fill(f, l.header, MANTLE, CornerRadii::all(4.0));",
-        "        fill(f, l.header, MANTLE, CornerRadii::all(4.0));",
+        "        if l.header.is_empty() {\n            return;\n        }\n        fill(f, l.header, self.colours.mantle, CornerRadii::all(4.0));",
+        "        fill(f, l.header, self.colours.mantle, CornerRadii::all(4.0));",
         ["a_pass_with_room_paints_and_a_pass_with_none_paints_nothing"],
     ),
     (
         "the statistics panel is filled before its band is looked at",
-        "        if l.stats.is_empty() {\n            return;\n        }\n        fill(f, l.stats, MANTLE, CornerRadii::all(6.0));",
-        "        fill(f, l.stats, MANTLE, CornerRadii::all(6.0));",
+        "        if l.stats.is_empty() {\n            return;\n        }\n        fill(f, l.stats, self.colours.mantle, CornerRadii::all(6.0));",
+        "        fill(f, l.stats, self.colours.mantle, CornerRadii::all(6.0));",
         ["a_pass_with_room_paints_and_a_pass_with_none_paints_nothing"],
     ),
     (
@@ -411,6 +411,60 @@ MUTATIONS = [
         "            if !column_line(\n                f,\n                l.stats,\n                y,\n                &line,\n                l.small,\n                FontWeightHint::Regular,\n                color,\n                Some(l.pad),\n            ) {\n                return;\n            }",
         "            return;",
         ["a_pass_with_room_paints_and_a_pass_with_none_paints_nothing"],
+    ),
+    (
+        "the theme is never taken up",
+        "        self.palette = *palette;\n        self.colours = Colours::of(palette);",
+        "        let _ = palette;",
+        ["the_window_is_drawn_in_the_users_colours"],
+    ),
+    (
+        "the colours are not rebuilt with the palette",
+        "        self.colours = Colours::of(palette);",
+        "        let _ = Colours::of(palette);",
+        ["the_window_is_drawn_in_the_users_colours"],
+    ),
+    (
+        "the shortcut card is in the default colours",
+        "                &self.palette,\n                (w, h),",
+        "                &Palette::for_mode(false),\n                (w, h),",
+        ["the_window_is_drawn_in_the_users_colours"],
+    ),
+    (
+        "a blank in the word is the faintest grey",
+        "                Some(_) => ('_', self.colours.subtext0),",
+        "                Some(_) => ('_', self.palette.overlay0),",
+        ["every_text_reads_on_what_is_under_it_in_either_theme"],
+    ),
+    (
+        "a right guess's letter is the text colour on the key's green",
+        "            on_right: gamechrome::legible_on((p.text, p.base), p.ink(p.green)),",
+        "            on_right: p.text,",
+        ["every_text_reads_on_what_is_under_it_in_either_theme"],
+    ),
+    (
+        "the menu's instructions are the faintest grey",
+        "                // faintest grey is 2.3:1 on a light page.\n                self.colours.subtext0,",
+        "                // faintest grey is 2.3:1 on a light page.\n                self.palette.overlay0,",
+        ["every_text_reads_on_what_is_under_it_in_either_theme"],
+    ),
+    (
+        "the level chosen looks like the others",
+        "            self.button(f, r, diff.label(), l.small, on, true, self.colours.base);",
+        "            self.button(f, r, diff.label(), l.small, false, true, self.colours.base);",
+        ["the_buttons_say_what_they_do_and_whether_they_would"],
+    ),
+    (
+        "a spent hint looks live",
+        "            self.button(f, br, label, l.small, false, live, self.colours.mantle);",
+        "            self.button(f, br, label, l.small, false, true, self.colours.mantle);",
+        ["the_buttons_say_what_they_do_and_whether_they_would"],
+    ),
+    (
+        "play again is not offered first",
+        "            (PLAY_AGAIN_LABEL, Target::PlayAgain, true),",
+        "            (PLAY_AGAIN_LABEL, Target::PlayAgain, false),",
+        ["the_buttons_say_what_they_do_and_whether_they_would"],
     ),
 ]
 

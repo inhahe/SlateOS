@@ -3983,7 +3983,7 @@ fn main() -> ExitCode {
     // in this program by naming it, and the refusal ended the program -- "exit
     // 2, unexpected argument" on a stderr nobody sees -- before its window
     // opened.
-    let args = match app::Args::from_env() {
+    let args = match app::ArgsOs::from_env() {
         Ok(args) => args,
         Err(e) => {
             eprintln!("hexeditor: {e}");
@@ -4000,7 +4000,7 @@ fn main() -> ExitCode {
 ///
 /// Every message is kept: a file that could not be read is named even when
 /// one after it opened, so the window does not report only the last success.
-fn open_arguments(editor: &mut HexEditor, paths: &[String]) -> String {
+fn open_arguments(editor: &mut HexEditor, paths: &[std::ffi::OsString]) -> String {
     if paths.is_empty() {
         return String::from("Press Ctrl+O to open a file");
     }
@@ -4667,9 +4667,9 @@ mod tests {
         let two = Scratch::with("arg-two", b"second");
         let missing = one.0.with_extension("not-there");
         let mut editor = HexEditor::new(1200.0, 800.0);
-        let paths: Vec<String> = [&one.0, &missing, &two.0]
+        let paths: Vec<std::ffi::OsString> = [&one.0, &missing, &two.0]
             .iter()
-            .map(|p| p.to_str().expect("a text path").to_owned())
+            .map(|p| p.as_os_str().to_owned())
             .collect();
         let said = open_arguments(&mut editor, &paths);
         assert_eq!(editor.documents.len(), 2, "one tab per file that opened");

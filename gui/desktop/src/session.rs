@@ -68,6 +68,7 @@
 //! things a point belongs to, and that comparison is only meaningful while they
 //! are all in one space.
 
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -80,8 +81,10 @@ use oswindow::{
 };
 
 use crate::animations::{AnimationManager, WindowAnimation};
-use crate::login_screen::{LoginAction, LoginPowerAction, LoginScreen};
+use crate::autologin::StartConditions;
+use crate::login_screen::{LoginAction, LoginScreen, LoginUser};
 use crate::notif_pane;
+use crate::pictures::{Decoded, Job, PictureWorker, Slot};
 use crate::taskbar_autohide::{AutoHideConfig, AutoHideManager, ScreenEdge};
 use crate::wallpaper::WallpaperManager;
 use crate::{DesktopShell, ShellAction, ShellRequest, WindowRequest};
@@ -100,16 +103,73 @@ use crate::{DesktopShell, ShellAction, ShellRequest, WindowRequest};
 /// `design-decisions.md` §521 §1.
 const FRAME_INTERVAL: Duration = Duration::from_millis(16);
 
-/// One window the shell draws on, and where it sits on screen.
+/// Whether `held` -- what a slot last asked the decoding thread for, as an
+/// image id and a path -- is the request `job` answers.
 ///
-/// Deliberately not a `Window`: [`oswindow::Window`] is what the compositor
-/// last said about a window, and this is what the *shell* needs to know about
-/// one, which is only its id and its origin.
+/// Both halves, as when the request was made: the id alone would take a
+/// picture read before an edit in place for the one read after it, and the
+/// path alone would take the answer to an old request for a file asked for
+/// again under a new id.
+fn asked_for(held: Option<&(u64, PathBuf)>, job: &Job) -> bool {
+    held.is_some_and(|(id, path)| *id == job.id && *path == job.path)
+}
+
+/// Where installed programs' desktop entries are looked for: the
+/// environment's data directories -- and in this crate's own tests none, so
+/// that a test's menu is the shell's own list on every machine rather than
+/// whatever the machine running the tests has installed.
+fn default_app_dirs() -> desktopentry::scan::DataDirs {
+    if cfg!(test) {
+        desktopentry::scan::DataDirs::new(Vec::new())
+    } else {
+        desktopentry::scan::DataDirs::from_env(|name| std::env::var_os(name))
+    }
+}
+
+/// Every desktop entry file where installed programs are looked for, with
+/// its size and when it was last written, in order: what changes when a
+/// program is installed, removed, or has its entry edited.
+///
+/// The files themselves rather than their directories' times, which move on
+/// some filesystems when a file is added and not on others, and never when
+/// one is edited in place. A stat per entry, against a read and a parse per
+/// entry for the scan it saves.
+fn app_dir_stamps(dirs: &desktopentry::scan::DataDirs) -> Vec<AppStamp> {
+    fn walk(dir: &Path, depth: usize, out: &mut Vec<AppStamp>) {
+        let Ok(listing) = std::fs::read_dir(dir) else {
+            return;
+        };
+        for path in listing.filter_map(Result::ok).map(|item| item.path()) {
+            let Ok(meta) = std::fs::metadata(&path) else {
+                continue;
+            };
+            if meta.is_dir() {
+                // The scan's own bound, and for its reason: a link to a
+                // parent directory is not walked for ever.
+                if depth < 8 {
+                    walk(&path, depth.saturating_add(1), out);
+                }
+            } else if path.extension() == Some(std::ffi::OsStr::new("desktop")) {
+                out.push((path, meta.len(), meta.modified().ok()));
+            }
+        }
+    }
+    let mut stamps = Vec::new();
+    for dir in dirs.dirs() {
+        walk(&dir.join("applications"), 0, &mut stamps);
+    }
+    stamps.sort();
+    stamps
+}
+
+/// One desktop entry file as last seen: where, how big, when written.
+type AppStamp = (PathBuf, u64, Option<std::time::SystemTime>);
+
 /// What became of an attempt to put a picture on a surface.
 ///
 /// Distinguishes the two kinds of failure that must not be confused: one
 /// costs a picture, the other costs the connection. See
-/// [`Session::upload_picture`].
+/// [`Session::upload_decoded`].
 enum PictureUpload {
     /// The compositor holds the pixels. Carries the picture's own size, which
     /// is known nowhere else in the tree and which every fit mode needs.
@@ -119,6 +179,11 @@ enum PictureUpload {
     Failed(String),
 }
 
+/// One window the shell draws on, and where it sits on screen.
+///
+/// Deliberately not a `Window`: [`oswindow::Window`] is what the compositor
+/// last said about a window, and this is what the *shell* needs to know about
+/// one, which is only its id and its origin.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Surface {
     window: u64,
@@ -241,8 +306,20 @@ pub struct ShellSession<T: Transport> {
     /// The tray revision this session has folded in, so a frame that says
     /// nothing new does not repaint.
     tray_revision: u64,
-    /// Whether the chrome needs repainting before the next block.
+    /// Whether anything the shell draws may have changed since the last paint.
+    ///
+    /// The chrome is repainted before the next block, and the background too
+    /// when its frame is no longer the one it last sent -- see
+    /// [`refresh_background`](Self::refresh_background).
     dirty: bool,
+    /// The background frame last sent, exactly as sent (localized), or `None`
+    /// when there is none this session can vouch for: nothing painted yet, or
+    /// a paint asked for outright.
+    ///
+    /// What [`refresh_background`](Self::refresh_background) compares against,
+    /// so a repaint sends the full-screen surface only when the wallpaper, the
+    /// icons or the widgets on it changed.
+    background_drawn: Option<RenderTree>,
     running: bool,
     launches: Vec<crate::hotkeys::Launch>,
     /// Whether this session can be locked at all.
@@ -291,14 +368,16 @@ pub struct ShellSession<T: Transport> {
     /// settings change -- scanning each time would read a folder of photographs
     /// off the disk because the user adjusted the taskbar's opacity.
     rotation_loaded: Option<PathBuf>,
-    /// The picture the background surface was last *asked* to hold, as the
-    /// wallpaper's image id and the path it was read from.
+    /// The picture the background was last *asked* to hold, as the
+    /// wallpaper's image id and the path it is read from: requested of the
+    /// decoding thread, and perhaps not yet decoded.
     ///
     /// Both halves are needed. The id alone would not notice a user who edited
     /// the file in place and asked for the same wallpaper again; the path alone
     /// would not notice that [`WallpaperManager`] has issued a fresh id, which
     /// it does on every `set_image` and every slideshow step, and an upload
-    /// under the *old* id would leave the new one naming nothing.
+    /// under the *old* id would leave the new one naming nothing. It is also
+    /// how an answer from the decoding thread is known to be still wanted.
     ///
     /// "Asked to hold" rather than "holds", because a failed attempt is
     /// recorded here too — paired with a `wallpaper_error` that says so. That
@@ -306,6 +385,30 @@ pub struct ShellSession<T: Transport> {
     /// was *not* remembered on failure would re-read and re-inflate a corrupt
     /// full-screen `.png` on every mouse click.
     wallpaper_image: Option<(u64, PathBuf)>,
+    /// The picture the background surface does hold: the id it was uploaded
+    /// under, released before the next is uploaded.
+    wallpaper_uploaded: Option<u64>,
+    /// The thread that decodes pictures, so a photograph's second of decoding
+    /// is not a second the desktop stops drawing (`crate::pictures`).
+    pictures: PictureWorker,
+    /// The names the settings watcher reports, each to be announced to every
+    /// window (`watch_settings`, design-decisions 1418). `None` until the
+    /// watch is started, which only a real session does.
+    settings_watch: Option<std::sync::mpsc::Receiver<Vec<settingswatch::SettingsName>>>,
+    /// Where installed programs' desktop entries are looked for.
+    app_dirs: desktopentry::scan::DataDirs,
+    /// Every entry file as it was at the last read (`app_dir_stamps`) --
+    /// `None` before the first. Compared on the way into the start menu, so
+    /// a program installed while the desktop is up is in the menu the next
+    /// time it opens, without reading every entry on every open.
+    app_dirs_seen: Option<Vec<AppStamp>>,
+    /// Whether the start menu was open at the end of the last pump: what
+    /// tells a pump the menu has just opened.
+    start_menu_was_open: bool,
+    /// Entry files the last read could not use, and why, for the binary to
+    /// report (`take_app_problems`): the answer to "my program is not in the
+    /// menu".
+    app_problems: Vec<desktopentry::scan::Skipped>,
     /// The login screen, while the machine has not let anyone in yet.
     ///
     /// `None` is a session in use. It is *not* "login is disabled": a machine
@@ -313,6 +416,11 @@ pub struct ShellSession<T: Transport> {
     /// a screen that refuses everyone is a machine that cannot be used at all.
     /// See `design-decisions.md` §824.
     login: Option<LoginScreen>,
+    /// Where the accounts the login screen offers come from: the file given
+    /// at start, or `None` for the system's own. Kept so that logging out
+    /// returns to the screen the session started with, not to a different
+    /// list of people.
+    accounts: Option<PathBuf>,
     /// The full-screen surface the login screen is drawn on.
     ///
     /// Created last of the five, so within `Layer::Overlay` it stacks above the
@@ -323,6 +431,8 @@ pub struct ShellSession<T: Transport> {
     /// Whether that surface is currently mapped, reconciled as `popups_shown`
     /// is.
     login_shown: bool,
+    /// The icons each surface has been sent, as `(window, image id)`.
+    icons_uploaded: std::collections::BTreeSet<(u64, u64)>,
     /// The verifier, held across attempts rather than rebuilt per guess.
     ///
     /// A rate limit rebuilt for every guess is not a rate limit. Held even
@@ -330,9 +440,6 @@ pub struct ShellSession<T: Transport> {
     /// at the moment a password is submitted, which is the moment it is least
     /// affordable.
     authority: authlib::Authenticator,
-    /// What the user picked from the login screen's power menu, awaiting
-    /// somebody who can act on it. See [`take_login_power`](Self::take_login_power).
-    login_power: Option<LoginPowerAction>,
     /// Why the wallpaper file could not be shown, if it could not.
     ///
     /// Kept rather than returned, because failing to show a wallpaper is not a
@@ -341,13 +448,30 @@ pub struct ShellSession<T: Transport> {
     /// was corrupt would be a worse outcome than a plain background. See
     /// [`wallpaper_error`](Self::wallpaper_error).
     wallpaper_error: Option<String>,
-    /// The picture uploaded to the greeter's surface, and which file it is.
+    /// Whether the keyboard has left the shell's surfaces in this pump: a
+    /// `FocusOut` on one of them with no `FocusIn` on another after it. The
+    /// compositor reports a move between two of the shell's own surfaces as
+    /// both, in that order, so only a move away from the shell leaves this
+    /// set at the end of the pump -- which is when a rename under way is kept,
+    /// as clicking into another program keeps it on every desktop.
+    focus_left_shell: bool,
+    /// The "could not be saved" report last posted for each thing saved, so
+    /// a save that keeps failing the same way says so once rather than once
+    /// per change -- and two that are both failing do not take turns
+    /// reposting each other's news. See [`report_save`](Self::report_save).
+    save_errors: BTreeMap<&'static str, String>,
+    /// The picture asked for the greeter's surface, and which file it is --
+    /// requested of the decoding thread, as `wallpaper_image` is.
     ///
     /// Separate from `wallpaper_image` even when they name the same file,
     /// because an image belongs to the window that uploaded it: the greeter
     /// has its own surface, so `SameAsDesktop` is two uploads of one picture
     /// rather than one upload shown twice.
     login_image: Option<(u64, PathBuf)>,
+    /// The picture the greeter's surface does hold, with its size: kept so a
+    /// greeter built afresh -- logging out builds one -- can be shown it again
+    /// without decoding it again.
+    login_uploaded: Option<(u64, f32, f32)>,
     /// Next id to hand the greeter's surface. Never zero, which means "none".
     login_image_next: u64,
     /// Why the greeter has no picture, when it wanted one.
@@ -357,6 +481,10 @@ pub struct ShellSession<T: Transport> {
     /// it: a greeter that refused to appear because a wallpaper had been
     /// deleted would be a machine nobody could log in to.
     login_background_error: Option<String>,
+    /// Why the chosen colour theme is not in use, as last told to the user --
+    /// so a theme that stays missing is said once, not once per settings
+    /// change. See [`sync_theme_problem`](Self::sync_theme_problem).
+    theme_problem: Option<String>,
 }
 
 impl<T: Transport> ShellSession<T> {
@@ -377,10 +505,19 @@ impl<T: Transport> ShellSession<T> {
     /// [`EventLoop::watch_desktop`]. A refused surface is fatal here rather
     /// than survivable: a shell with no taskbar is not a degraded shell, it is
     /// a desktop the user cannot switch windows from.
+    ///
+    /// # Signing in by itself
+    ///
+    /// An account set to sign in by itself is signed in here, before the
+    /// first frame, unless this start says otherwise -- the chooser key held,
+    /// or a start for repair ([`crate::autologin`], `design-decisions.md`
+    /// §1427). Only here: logging out
+    /// ([`ShellAction::LogOut`]) returns to the
+    /// login screen and stays there.
     pub fn start(events: EventLoop<T>) -> Result<Self, Error<T>> {
         // The system store, and with it the system failure tally, so that a
         // refused password here counts against one refused at `su` or `login`.
-        Self::start_with(events, None)
+        Self::start_with(events, None, StartConditions::of_this_start())
     }
 
     /// The same, against the account database at a given path.
@@ -394,14 +531,64 @@ impl<T: Transport> ShellSession<T> {
     /// must come from the same file, or the screen lists names nothing can
     /// authenticate.
     ///
+    /// An ordinary start: no key held, not for repair -- so an account the
+    /// file marks to sign in by itself does. What this machine's start says is
+    /// [`start`](Self::start)'s to read; a test states its own, through
+    /// [`start_with_conditions`](Self::start_with_conditions).
+    ///
     /// # Errors
     ///
     /// As [`start`](Self::start).
     pub fn start_with_stores(events: EventLoop<T>, users_yaml: &Path) -> Result<Self, Error<T>> {
-        Self::start_with(events, Some(users_yaml))
+        Self::start_with(events, Some(users_yaml), StartConditions::default())
     }
 
-    fn start_with(mut events: EventLoop<T>, users_yaml: Option<&Path>) -> Result<Self, Error<T>> {
+    /// The same, as a start in the given conditions: a key held, a start for
+    /// repair ([`crate::autologin`]).
+    ///
+    /// # Errors
+    ///
+    /// As [`start`](Self::start).
+    pub fn start_with_conditions(
+        events: EventLoop<T>,
+        users_yaml: &Path,
+        start: StartConditions,
+    ) -> Result<Self, Error<T>> {
+        Self::start_with(events, Some(users_yaml), start)
+    }
+
+    /// Start the desktop a person signs in to: [`start`](Self::start), then
+    /// what `start` deliberately leaves alone -- the appearance settings, the
+    /// widget layout and how the time is told ([`load_appearance`]) -- and a
+    /// repaint in them.
+    ///
+    /// What the `desktop` binary calls. It exists because the binary called
+    /// `start` alone, and `start` says in so many words that it does not read
+    /// the appearance settings: so from the day the binary was written
+    /// (2026-09-13) until this, a real desktop started in the default theme,
+    /// with no wallpaper and no widgets, and took up the user's settings only
+    /// when something happened to send `ReloadAppearance`. The door existed
+    /// and nothing walked through it -- `load_appearance`'s one other caller
+    /// is the scripted demo, which is why no check for an uncalled loader
+    /// could see it.
+    ///
+    /// # Errors
+    ///
+    /// As [`start`](Self::start) and [`repaint`](Self::repaint).
+    ///
+    /// [`load_appearance`]: Self::load_appearance
+    pub fn start_for_user(events: EventLoop<T>) -> Result<Self, Error<T>> {
+        let mut session = Self::start(events)?;
+        session.load_appearance();
+        session.repaint()?;
+        Ok(session)
+    }
+
+    fn start_with(
+        mut events: EventLoop<T>,
+        users_yaml: Option<&Path>,
+        start: StartConditions,
+    ) -> Result<Self, Error<T>> {
         let display = events.display_info()?;
         let mut shell = DesktopShell::new(display.width, display.height);
         // Read back what the user left behind. This is the only place either
@@ -421,6 +608,7 @@ impl<T: Transport> ShellSession<T> {
         // a key got their binding written to `shortcuts.yaml` and thrown away
         // at the next start.
         shell.load_pinned();
+        shell.load_start_menu();
         shell.load_shortcuts();
         shell.populate_icons();
         let bar = shell.taskbar_rect();
@@ -554,6 +742,12 @@ impl<T: Transport> ShellSession<T> {
             events.watch_idle(panel.window, after)?;
         }
 
+        // Taken before `events` moves into the session. A transport that
+        // cannot make one -- out of descriptors, most likely -- costs only
+        // promptness: finished pictures are still collected on the loop's next
+        // pass, the next event or frame, so the error is dropped rather than
+        // failing the desktop over its wallpaper.
+        let picture_waker = events.waker().ok().flatten();
         let mut session = Self {
             events,
             global_held,
@@ -577,6 +771,7 @@ impl<T: Transport> ShellSession<T> {
             revision: 0,
             tray_revision: 0,
             dirty: false,
+            background_drawn: None,
             running: false,
             launches: Vec::new(),
             lockable: true,
@@ -588,44 +783,92 @@ impl<T: Transport> ShellSession<T> {
             clock_ms: 0,
             rotation_loaded: None,
             wallpaper_image: None,
+            wallpaper_uploaded: None,
+            pictures: PictureWorker::spawn(picture_waker),
+            settings_watch: None,
+            app_dirs: default_app_dirs(),
+            app_dirs_seen: None,
+            start_menu_was_open: false,
+            app_problems: Vec::new(),
             wallpaper_error: None,
+            save_errors: BTreeMap::new(),
+            focus_left_shell: false,
             login_image: None,
+            login_uploaded: None,
             login_image_next: 1,
             login_background_error: None,
-            // A login screen exactly when there is somebody to log in as. On a
-            // machine whose account database cannot be read there is nobody to
-            // authenticate — `authlib` would answer `Unusable` to every name —
-            // so a screen would be one nothing could ever unlock, which is a
-            // machine that cannot be used rather than a machine that is
-            // secure. See `design-decisions.md` §824.
-            login: {
-                let users = users_yaml.map_or_else(
-                    crate::login_screen::system_users,
-                    crate::login_screen::users_from_db,
-                );
-                if users.is_empty() {
-                    None
-                } else {
-                    Some(LoginScreen::new(
-                        f32::from(u16::try_from(display.width).unwrap_or(u16::MAX)),
-                        f32::from(u16::try_from(display.height).unwrap_or(u16::MAX)),
-                        users,
-                    ))
-                }
-            },
+            theme_problem: None,
+            // A login screen exactly when there is somebody to log in as
+            // (`design-decisions.md` §824; see `greeter`).
+            login: Self::greeter(users_yaml, display.width, display.height),
             login_surface,
             // The compositor maps a new window; the first `paint_login` unmaps
             // it if no screen is up. Recording `true` here rather than `false`
             // is what makes that first unmap actually happen — the same reason
             // `popups_shown` and `osd_shown` start `true`.
             login_shown: true,
+            icons_uploaded: std::collections::BTreeSet::new(),
+            accounts: users_yaml.map(Path::to_path_buf),
             authority: users_yaml.map_or_else(authlib::Authenticator::new, |path| {
                 authlib::Authenticator::with_stores(path)
             }),
-            login_power: None,
         };
+        // With nobody to sign in as there is no login screen, and the person
+        // using the desktop is the one it runs as. Shown through
+        // `display_os`, as every name that may not be text is.
+        if session.login.is_none()
+            && let Some(name) = ["USER", "USERNAME", "LOGNAME"]
+                .iter()
+                .find_map(|var| std::env::var_os(var).filter(|name| !name.is_empty()))
+        {
+            session.shell.set_user_name(&pathcodec::display_os(&name));
+        }
+        // Before the first frame, so a sign-in by itself never shows the login
+        // screen at all.
+        session.sign_in_automatically(start);
+        session.refresh_installed_apps();
         session.repaint()?;
         Ok(session)
+    }
+
+    /// Sign in the account set to sign in by itself, if this start lets it
+    /// ([`crate::autologin`], `design-decisions.md` §1427).
+    ///
+    /// Nothing is asked of `authlib`, because nothing was typed: that is what
+    /// signing in by itself means, and the administrator's mark in the
+    /// database is the consent. What the database also says is respected -- a
+    /// locked account is never the one ([`loginusers::automatic_account`]).
+    fn sign_in_automatically(&mut self, start: StartConditions) {
+        let Some(screen) = &self.login else {
+            return;
+        };
+        let Some(user) = crate::autologin::account_to_sign_in(&screen.users, start) else {
+            return;
+        };
+        let shown = user.shown_name().to_string();
+        // Lockable exactly when the account has a password: the lock screen
+        // asks for it, and a lock on an account with none is a lock anybody
+        // clears -- 818's reason, reached here from the database because no
+        // verdict was asked for.
+        let lockable = user.has_password;
+        self.admit(&shown, lockable);
+    }
+
+    /// Let the person in: the desktop is theirs, named `shown`, and can be
+    /// locked if `lockable`.
+    ///
+    /// One place for both ways in -- a password accepted and a sign-in by
+    /// itself -- so the two cannot come to leave the desktop in different
+    /// states.
+    fn admit(&mut self, shown: &str, lockable: bool) {
+        // 818, recorded at the one moment it is known.
+        self.lockable = lockable;
+        // The start menu says who is using the desktop.
+        self.shell.set_user_name(shown);
+        // Nothing between this and the desktop: the screen's `LoggingIn` phase
+        // is a frame of feedback, not a step that can fail, and holding the
+        // machine on it would be inventing a failure mode.
+        self.login = None;
     }
 
     /// The shell being driven.
@@ -723,16 +966,19 @@ impl<T: Transport> ShellSession<T> {
         // Before the picture, the pixels the picture refers to — exactly as
         // `paint_background` does, and for the same reason.
         self.refresh_login_image()?;
+        // The user's focus width, for the password field's mark: pushed in
+        // here, where the screen is drawn and the settings are both to hand.
+        let focus_ring = self.shell.appearance.focus_ring_width();
+        if let Some(screen) = self.login.as_mut() {
+            screen.set_focus_ring_width(focus_ring);
+        }
         let Some(screen) = &self.login else {
             return Ok(());
         };
         let palette = Palette::from_settings(&self.shell.appearance);
         let mut tree = RenderTree::new();
         tree.extend(screen.render(&palette));
-        self.events.submit(
-            self.login_surface.window,
-            &self.login_surface.localize(&tree),
-        )
+        self.send_frame(self.login_surface, &tree)
     }
 
     /// Deliver an event to the login screen and act on what it asks for.
@@ -776,14 +1022,14 @@ impl<T: Transport> ShellSession<T> {
             LoginAction::Authenticate { username, password } => {
                 self.answer_login(&username, &password);
             }
-            LoginAction::Power(choice) => {
-                // Nothing here can shut a machine down, for the same reason
-                // nothing here can start a program: that is the process
-                // server's job and inventing a path to it from the window
-                // manager would put the policy in the wrong place. Recorded
-                // for whoever drains it, exactly as a launch is.
-                self.login_power = Some(choice);
-            }
+            // A power button starts a program, as the start menu's power rows
+            // do -- the same program (`powerctl`), through the same queue, so
+            // the same button does the same thing on either side of a login.
+            // Nothing here shuts a machine down, for the reason nothing here
+            // starts a text editor: the session hands the launch to whoever
+            // drains `take_launches`. Until 2026-09-25 this had a queue of its
+            // own, which the binary answered by exiting.
+            LoginAction::Power(choice) => self.queue_launches(vec![choice.command()]),
         }
         self.paint_login()
     }
@@ -809,16 +1055,19 @@ impl<T: Transport> ShellSession<T> {
             // one on, and refusing it here would make that setting mean
             // "unusable account" rather than "no password".
             authlib::Outcome::Accepted | authlib::Outcome::NoPassword => {
-                // 818, recorded at the one moment it is known. `NoPassword` is
-                // not a failure -- the screen opens either way -- but it is the
-                // fact that decides whether this session can ever be locked.
-                self.lockable = outcome != authlib::Outcome::NoPassword;
+                // `NoPassword` is not a failure -- the screen opens either way
+                // -- but it is the fact that decides whether this session can
+                // ever be locked.
+                let lockable = outcome != authlib::Outcome::NoPassword;
+                // The name the account gives itself, or its login name if it
+                // gives none.
+                let shown = screen
+                    .current_user()
+                    .filter(|user| user.username == username)
+                    .map_or(username, LoginUser::shown_name)
+                    .to_string();
                 screen.auth_success();
-                // Nothing between this and the desktop: the screen's
-                // `LoggingIn` phase is a frame of feedback, not a step that can
-                // fail, and holding the machine on it would be inventing a
-                // failure mode.
-                self.login = None;
+                self.admit(&shown, lockable);
             }
             // Deliberately the same words for a wrong password and an unknown
             // user. Distinguishing them tells someone standing at the machine
@@ -853,15 +1102,6 @@ impl<T: Transport> ShellSession<T> {
         }
     }
 
-    /// What the user chose from the login screen's power menu, if anything.
-    ///
-    /// Drained like [`take_launches`](Self::take_launches) and for the same
-    /// reason: a shell has no channel to whatever turns the machine off, and
-    /// inventing one here would put the policy in the window manager.
-    pub fn take_login_power(&mut self) -> Option<LoginPowerAction> {
-        self.login_power.take()
-    }
-
     /// Record programs the user asked to start, minus any this session refuses.
     ///
     /// The one refusal is `design-decisions.md` 818: a session whose account
@@ -890,6 +1130,9 @@ impl<T: Transport> ShellSession<T> {
                 // this is what that means.
                 continue;
             }
+            // Whichever part of the desktop asked for it: "Recently used"
+            // lists what was started, not what was started from the menu.
+            self.shell.note_started(&launch);
             self.launches.push(launch);
         }
     }
@@ -922,22 +1165,68 @@ impl<T: Transport> ShellSession<T> {
         self.paint_login()
     }
 
-    /// Paint the wallpaper.
+    /// Paint the background -- the wallpaper, the desktop's icons and its
+    /// widgets -- whether or not it has changed.
     ///
-    /// Separate from the chrome because it is the one surface whose picture
-    /// does not depend on anything an input event changes; repainting it on
-    /// every click would re-encode a full-screen image to say nothing new.
+    /// For the paints that must happen: the first, and after the display
+    /// changes size. Everything else goes through
+    /// `refresh_background`, which sends the
+    /// surface only when something on it changed.
     ///
     /// # Errors
     ///
     /// As [`EventLoop::submit`].
     pub fn paint_background(&mut self) -> Result<(), Error<T>> {
-        // Before the picture, the pixels the picture refers to. `render_image`
-        // emits an `Image` command naming `current_image_id`, and the
-        // compositor draws *nothing, silently* for an id it has never been
-        // given bytes for — so an upload that has not happened is a wallpaper
-        // that does not appear and says nothing about why.
+        self.background_drawn = None;
+        self.refresh_background()
+    }
+
+    /// Send the background again if what it draws is not what it last sent.
+    ///
+    /// A surface of its own, apart from the chrome, because it covers the
+    /// whole screen and most of what changes the chrome -- a taskbar button
+    /// pressed, a menu opened -- leaves it alone. But plenty changes *it*: an
+    /// icon selected, dragged or renamed; a widget added or moved, or its
+    /// clock turning a minute; a wallpaper chosen in Settings, a slideshow's
+    /// next picture; a theme's colours. Until 2026-09-26 it was painted at
+    /// start and when the display changed size, and at no other time: every
+    /// one of those changed the shell's model, passed every test that read the
+    /// model, and never reached the screen.
+    ///
+    /// The frame is compared rather than each cause flagged, because the
+    /// causes are many and spread over three objects, and a flag is one more
+    /// place each new cause has to be taught about -- the first forgotten is a
+    /// change the user never sees, with every test of the model still green.
+    /// Building the frame is a few dozen commands; an unchanged one is not
+    /// sent, which is what keeps a click on the taskbar from re-compositing
+    /// the screen.
+    ///
+    /// # Errors
+    ///
+    /// As [`EventLoop::submit`].
+    fn refresh_background(&mut self) -> Result<(), Error<T>> {
+        // First, ask for the picture the wallpaper wants now if it is not the
+        // one already asked for: this is where a wallpaper chosen or a slide
+        // stepped is noticed and handed to the decoding thread. The frame
+        // below draws only a picture that is up (`WallpaperManager::
+        // shown_picture`), never one still decoding -- the compositor draws
+        // *nothing, silently* for an id it holds no pixels under.
         self.refresh_wallpaper_image()?;
+        let tree = self.background.localize(&self.background_tree());
+        if self.background_drawn.as_ref() == Some(&tree) {
+            return Ok(());
+        }
+        // The desktop's icons, before the frame that draws them.
+        self.upload_icons(self.background.window, &tree)?;
+        self.events.submit(self.background.window, &tree)?;
+        // Only once it is sent: a refused frame is one to send again.
+        self.background_drawn = Some(tree);
+        Ok(())
+    }
+
+    /// What the background draws now: the wallpaper, the desktop's icons on
+    /// it, and the widgets over those.
+    fn background_tree(&self) -> RenderTree {
         let width = self.shell.screen_width as f32;
         let height = self.shell.screen_height as f32;
         // The same zone the taskbar clock reads in — see
@@ -959,8 +1248,7 @@ impl<T: Transport> ShellSession<T> {
         // surface, so windows cover the widgets -- which is what makes them
         // desktop widgets rather than an always-on-top overlay.
         tree.commands.extend(self.shell.render_widgets());
-        self.events
-            .submit(self.background.window, &self.background.localize(&tree))
+        tree
     }
 
     /// Why the wallpaper is not on screen, if it is not.
@@ -978,19 +1266,6 @@ impl<T: Transport> ShellSession<T> {
         self.wallpaper_error.as_deref()
     }
 
-    /// Make sure the compositor holds the pixels that the background surface's
-    /// `Image` command is about to name.
-    ///
-    /// [`WallpaperManager`] performs no I/O by design — that is what keeps its
-    /// tests runnable with no filesystem — so it allocates an image id and
-    /// emits a command naming it, and something else has to put bytes under
-    /// that id. This is that something else, and it lives here rather than in
-    /// the manager because this is the layer that owns the connection.
-    ///
-    /// Called on every `paint_background` and almost always does nothing: the
-    /// `(id, path)` pair it remembers is unchanged, so there is no read, no
-    /// decode and no upload. It does work exactly when the wallpaper actually
-    /// changed, which is what the id was allocated to signal.
     /// Record why the wallpaper could not be shown — and tell the user.
     ///
     /// The single writer of `wallpaper_error`. It exists because the field had
@@ -1016,37 +1291,96 @@ impl<T: Transport> ShellSession<T> {
             return;
         }
         if let Some(message) = why.as_deref() {
-            let now = SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .unwrap_or_default()
-                .as_secs();
-            // The id is discarded: nothing here ever needs to refer back to
-            // this notification. It is a message, not a progress indicator to
-            // be updated later.
-            let _ = self.shell.notify(notif_pane::Notification {
-                id: 0,
-                app_name: "Desktop".to_owned(),
-                title: "Wallpaper could not be shown".to_owned(),
-                body: message.to_owned(),
-                timestamp: now,
-                // Not `High`: the desktop still works and still has a
-                // background. High priority is for something the user has to
-                // act on now, and reserving it for those is what stops it
-                // meaning nothing.
-                priority: notif_pane::NotifPriority::Normal,
-                read: false,
-                action: None,
-                // Left to `notify`, which is the only thing that knows whether
-                // focus assist is silencing "Desktop" right now. Setting it
-                // here would be this call answering a question it cannot see
-                // the state of.
-                silent: false,
-            });
-            self.dirty = true;
+            self.post_desktop_notice("Wallpaper could not be shown", message);
         }
         self.wallpaper_error = why;
     }
 
+    /// Post news from the desktop about itself: a wallpaper that could not be
+    /// shown, a layout that could not be saved, a colour theme that could not
+    /// be used.
+    ///
+    /// One definition for all of them, so they cannot drift apart in who they
+    /// name as the sender or how urgent they claim to be. Each caller decides
+    /// *whether* there is news -- they all post only what is new -- and this
+    /// decides how it is told.
+    ///
+    /// Not `High` priority: in every one of these cases the desktop still
+    /// works. High priority is for something the user has to act on now, and
+    /// reserving it for those is what stops it meaning nothing. And the pane
+    /// is not opened, for the same reason: a panel that shoved itself over the
+    /// screen at login because of a missing file would be worse than the
+    /// missing file.
+    fn post_desktop_notice(&mut self, title: &str, body: &str) {
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+        // The id is discarded: nothing here ever needs to refer back to a
+        // notice. It is a message, not a progress indicator to be updated.
+        let _ = self.shell.notify(notif_pane::Notification {
+            id: 0,
+            app_name: "Desktop".to_owned(),
+            title: title.to_owned(),
+            body: body.to_owned(),
+            timestamp: now,
+            priority: notif_pane::NotifPriority::Normal,
+            read: false,
+            action: None,
+            // Left to `notify`, which is the only thing that knows whether
+            // focus assist is silencing "Desktop" right now. Setting it here
+            // would be this call answering a question it cannot see the state
+            // of.
+            silent: false,
+        });
+        self.dirty = true;
+    }
+
+    /// Tell the user when the colour theme they chose cannot be used.
+    ///
+    /// By the time this runs the desktop is already drawn in the built-in
+    /// colours -- reading the settings did that, and recorded why
+    /// ([`appearance::themes::ColorTheme::problem`]). What is left is to say
+    /// so, which nothing else would: a theme uninstalled since it was chosen
+    /// otherwise looks like a setting that silently stopped working.
+    ///
+    /// Posted when the reason *changes*, not whenever there is one: the
+    /// settings are re-read on every change to them, and a theme that stays
+    /// missing should not add a notice per unrelated change. A theme that
+    /// comes back clears the record, so losing it again is news again.
+    fn sync_theme_problem(&mut self) {
+        let problem = self
+            .shell
+            .appearance
+            .color_theme
+            .problem()
+            .map(str::to_owned);
+        if problem == self.theme_problem {
+            return;
+        }
+        if let Some(message) = problem.as_deref() {
+            self.post_desktop_notice("Colour theme could not be used", message);
+        }
+        self.theme_problem = problem;
+    }
+
+    /// Ask for the picture the wallpaper wants, if it is not the one already
+    /// asked for.
+    ///
+    /// [`WallpaperManager`] performs no I/O by design — that is what keeps its
+    /// tests runnable with no filesystem — so it allocates an image id for the
+    /// picture it wants, and something else has to put bytes under that id.
+    /// This is that something else, and it lives here rather than in the
+    /// manager because this is the layer that owns the connection. The bytes
+    /// arrive later: the decoding thread reads the file, and
+    /// [`Self::adopt_picture`] uploads it and tells the manager it is up. The
+    /// manager draws the picture that is up, never one still decoding, so the
+    /// frame never names an id the compositor holds nothing under.
+    ///
+    /// Called on every `paint_background` and almost always does nothing: the
+    /// `(id, path)` pair it remembers is unchanged, so there is no request. It
+    /// does work exactly when the wallpaper actually changed, which is what
+    /// the id was allocated to signal.
     fn refresh_wallpaper_image(&mut self) -> Result<(), Error<T>> {
         let id = self.wallpaper.current_image_id();
         let want = self.wallpaper.current_image_path().map(Path::to_path_buf);
@@ -1056,6 +1390,11 @@ impl<T: Transport> ShellSession<T> {
         // the link's image budget for nothing.
         let Some(path) = want.filter(|_| id != 0) else {
             self.release_wallpaper_image()?;
+            // Nothing asked for, so an answer still on its way is dropped
+            // when it lands, and the manager stops drawing the picture that
+            // was just released.
+            self.wallpaper_image = None;
+            self.wallpaper.picture_gone();
             self.set_wallpaper_error(None);
             return Ok(());
         };
@@ -1068,32 +1407,279 @@ impl<T: Transport> ShellSession<T> {
             return Ok(());
         }
 
-        // Released before the read rather than after the upload. The old
-        // picture is already unreachable — the render tree names the new id —
-        // and holding it across a decode is what would make a slideshow of
-        // full-screen images charge the link's budget for two at once, so a
-        // budget that fits the wallpaper would still refuse the next slide.
-        self.release_wallpaper_image()?;
+        // Asked for, not decoded here: the decoding thread answers, and
+        // `adopt_picture` uploads it. Until then the picture before it stays
+        // up -- the manager draws the one that is up, not the one wanted.
         self.wallpaper_image = Some((id, path.clone()));
+        self.pictures.request(Slot::Wallpaper, id, path);
+        Ok(())
+    }
 
-        match self.upload_picture(self.background.window, id, &path)? {
-            PictureUpload::Loaded { width, height } => {
-                // The only moment in the tree at which a wallpaper's pixel size
-                // is known. The manager allocates ids and picks fits but never
-                // opens a file, so without this it has to assume the picture is
-                // exactly the size of the screen -- an assumption under which
-                // all six fit modes produce the same full-screen rectangle,
-                // which is what the setting did until this existed.
-                self.wallpaper
-                    .note_image_size(id, width as f32, height as f32);
-                self.set_wallpaper_error(None);
+    /// Read the installed programs' desktop entries into the shell's list, if
+    /// any entry file has been added, removed or rewritten since the last read
+    /// -- or always, the first time.
+    ///
+    /// What the menu shows is decided here, where the filesystem is: the
+    /// entries a menu lists (`desktopentry::menu::shows_in_menu`: not
+    /// `NoDisplay`, not for another desktop), whose `TryExec` program is
+    /// installed, and that can be started without D-Bus -- then SlateOS's own
+    /// programs that no installed file claims the ID of (`Scan::claims`,
+    /// `programs::with_built_in`: design-decisions §1445), so a `Hidden=true`
+    /// copy of one of them takes it off the menu. SlateOS's own are not held
+    /// to their `TryExec`: the image does not install their entries yet, and
+    /// a menu without them would be empty. Files that could not be used are
+    /// kept for [`Self::take_app_problems`].
+    fn refresh_installed_apps(&mut self) {
+        let stamps = app_dir_stamps(&self.app_dirs);
+        if self.app_dirs_seen.as_ref() == Some(&stamps) {
+            return;
+        }
+        self.app_dirs_seen = Some(stamps);
+        let locale = desktopentry::Locale::from_env(|name| std::env::var(name).ok());
+        let scan = desktopentry::scan::scan(&self.app_dirs);
+        let (apps, invalid) = desktopentry::scan::apps(&scan, locale.as_ref());
+        let search_path = std::env::var_os("PATH");
+        let shown: Vec<desktopentry::App> = apps
+            .into_iter()
+            .filter(|app| {
+                desktopentry::menu::shows_in_menu(app, &[desktopentry::menu::DESKTOP_NAME])
+            })
+            .filter(|app| {
+                app.try_exec.as_deref().is_none_or(|program| {
+                    desktopentry::scan::program_exists(program, search_path.as_deref())
+                })
+            })
+            .collect();
+        let listed: Vec<crate::launcher::AppEntry> =
+            programs::with_built_in(shown, |id| scan.claims(id), locale.as_ref())
+                .into_iter()
+                .filter_map(crate::launcher::AppEntry::from_desktop)
+                .collect();
+        self.app_problems = scan.skipped;
+        self.app_problems.extend(invalid);
+        // Not marked dirty: both callers paint next anyway -- `start_with`
+        // repaints, and the start menu opening is a repaint of its own -- and
+        // a flag set here would paint the whole desktop a second time.
+        self.shell.set_programs(listed);
+    }
+
+    /// The entry files the last read of installed programs could not use,
+    /// each with why, taken so each is reported once.
+    pub fn take_app_problems(&mut self) -> Vec<desktopentry::scan::Skipped> {
+        core::mem::take(&mut self.app_problems)
+    }
+
+    /// Look for installed programs in `dirs` from now on, reading them at
+    /// once -- a test's own directories, where the session's default in this
+    /// crate's tests is none.
+    #[cfg(test)]
+    pub(crate) fn set_app_dirs(&mut self, dirs: desktopentry::scan::DataDirs) {
+        self.app_dirs = dirs;
+        self.app_dirs_seen = None;
+        self.refresh_installed_apps();
+    }
+
+    /// Tell every window when a settings file changes: watch `dir`, the
+    /// settings folder, on a thread of its own for the rest of the session,
+    /// and announce each file it reports (design-decisions 1418, C-Q26).
+    ///
+    /// A program saving its settings only writes its file; this is what makes
+    /// the change show at once in its other windows, and a hand edit show at
+    /// all. It is the operator's "not as the same function that saves": a
+    /// watch that could not start, or stops, loses the announcements and
+    /// nothing else -- every setting is still saved and still read the next
+    /// time its program starts -- so a failure is said once, on the error
+    /// stream, and the desktop goes on.
+    ///
+    /// Started by the desktop's `main` and not by `start`, so that no test
+    /// watches the folder of whoever runs it.
+    pub fn watch_settings(&mut self, dir: PathBuf) {
+        let (reports, names) = std::sync::mpsc::channel::<Vec<settingswatch::SettingsName>>();
+        // The loop's waker, so a report reaches a loop parked with nothing on
+        // the wire; without one a report waits for the loop's next pass.
+        let waker = self.events.waker().ok().flatten();
+        let started = std::thread::Builder::new()
+            .name("desktop-settings-watch".into())
+            .spawn(move || {
+                let outcome = settingswatch::run(&dir, |batch| {
+                    let delivered = reports.send(batch.to_vec()).is_ok();
+                    if let Some(waker) = &waker {
+                        waker.wake_by_ref();
+                    }
+                    // A session that has gone away has no one to tell.
+                    delivered
+                });
+                if let Err(e) = outcome {
+                    eprintln!(
+                        "desktop: a changed settings file will not reach open windows until they restart: {e}"
+                    );
+                }
+            });
+        if let Err(e) = started {
+            eprintln!("desktop: the settings watch could not start: {e}");
+            return;
+        }
+        self.settings_watch = Some(names);
+    }
+
+    /// Feed the watch's reports from `names` rather than from a thread: what
+    /// `watch_settings` does, less the watching, for a test.
+    #[cfg(test)]
+    pub(crate) fn watch_settings_from(
+        &mut self,
+        names: std::sync::mpsc::Receiver<Vec<settingswatch::SettingsName>>,
+    ) {
+        self.settings_watch = Some(names);
+    }
+
+    /// Announce every settings file the watch has reported since the last
+    /// pump, each once, answering whether there were any.
+    ///
+    /// # Errors
+    ///
+    /// As [`EventLoop::settings_file_changed`].
+    fn announce_settings(&mut self) -> Result<bool, Error<T>> {
+        let Some(watch) = &self.settings_watch else {
+            return Ok(false);
+        };
+        let mut names: Vec<settingswatch::SettingsName> = Vec::new();
+        for name in watch.try_iter().flatten() {
+            if !names.contains(&name) {
+                names.push(name);
             }
-            PictureUpload::Failed(why) => self.set_wallpaper_error(Some(why)),
+        }
+        for name in &names {
+            self.events.settings_file_changed(*name)?;
+        }
+        Ok(!names.is_empty())
+    }
+
+    /// Adopt every picture the decoding thread has finished, answering whether
+    /// there were any.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::adopt_picture`].
+    fn collect_pictures(&mut self) -> Result<bool, Error<T>> {
+        let ready = self.pictures.take();
+        let any = !ready.is_empty();
+        for decoded in ready {
+            self.adopt_picture(decoded)?;
+        }
+        Ok(any)
+    }
+
+    /// Put one decoded picture up, if it is still the one wanted.
+    ///
+    /// What is wanted is asked *first*, of the wallpaper and the greeter's
+    /// style as they are now: either may have moved on since the request --
+    /// a slide stepped, a colour chosen, a style changed -- with no paint since
+    /// to notice. Asking sends the new request at once, and an answer it makes
+    /// stale is dropped with its pixels rather than uploaded, shown for a
+    /// moment, and released again.
+    ///
+    /// The one wanted goes up in the order a budget that fits one full-screen
+    /// picture needs: the old one released, then the new uploaded. The frame
+    /// that shows it is sent here, after the upload and before anything else
+    /// can be drawn, so the old picture is on screen until the new one
+    /// replaces it and no frame names a picture the compositor does not hold.
+    ///
+    /// Only the surface the picture is for is drawn again. A picture arriving
+    /// changes nothing on the taskbar, so it does not mark the shell dirty --
+    /// a failure does, through the notice that says why.
+    ///
+    /// # Errors
+    ///
+    /// A connection that failed: a refusal or an undecodable file costs the
+    /// picture, not the desktop, and comes back as the reason on screen.
+    fn adopt_picture(&mut self, decoded: Decoded) -> Result<(), Error<T>> {
+        let Decoded { job, result } = decoded;
+        match job.slot {
+            Slot::Wallpaper => {
+                self.refresh_wallpaper_image()?;
+                if !asked_for(self.wallpaper_image.as_ref(), &job) {
+                    return Ok(());
+                }
+                self.release_wallpaper_image()?;
+                let outcome = match result {
+                    Ok(image) => {
+                        self.upload_decoded(self.background.window, job.id, &job.path, &image)?
+                    }
+                    Err(why) => PictureUpload::Failed(why),
+                };
+                match outcome {
+                    PictureUpload::Loaded { width, height } => {
+                        self.wallpaper_uploaded = Some(job.id);
+                        // The only moment in the tree at which a wallpaper's
+                        // pixel size is known. The manager allocates ids and
+                        // picks fits but never opens a file.
+                        self.wallpaper
+                            .picture_ready(job.id, width as f32, height as f32);
+                        self.set_wallpaper_error(None);
+                    }
+                    PictureUpload::Failed(why) => {
+                        // The plain colour underneath, and the reason.
+                        self.wallpaper.picture_gone();
+                        self.set_wallpaper_error(Some(why));
+                    }
+                }
+                self.refresh_background()?;
+            }
+            Slot::Greeter => {
+                self.refresh_login_image()?;
+                if !asked_for(self.login_image.as_ref(), &job) {
+                    return Ok(());
+                }
+                self.release_login_image()?;
+                let fit = self.wallpaper.config.fit;
+                let outcome = match result {
+                    Ok(image) => {
+                        self.upload_decoded(self.login_surface.window, job.id, &job.path, &image)?
+                    }
+                    Err(why) => PictureUpload::Failed(why),
+                };
+                match outcome {
+                    PictureUpload::Loaded { width, height } => {
+                        // Recorded, not shown: `paint_login` below shows it,
+                        // through `refresh_login_image` -- the one place that
+                        // decides what the greeter shows, against the style it
+                        // has now.
+                        self.login_uploaded = Some((job.id, width as f32, height as f32));
+                        self.login_background_error = None;
+                    }
+                    PictureUpload::Failed(why) => {
+                        // The theme colour underneath is a perfectly usable
+                        // greeter.
+                        self.clear_login_picture(fit);
+                        self.login_background_error = Some(why);
+                    }
+                }
+                self.paint_login()?;
+            }
         }
         Ok(())
     }
 
-    /// Read `path`, decode it, and upload it to `window` under `id`.
+    /// Every picture still being decoded, waited for and adopted, and the
+    /// background drawn with it: what a test that paints a picture and then
+    /// looks at the result needs, since the decoding is on another thread.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::adopt_picture`] and [`EventLoop::submit`].
+    #[cfg(test)]
+    pub(crate) fn settle_pictures(&mut self) -> Result<(), Error<T>> {
+        for decoded in self.pictures.settle(std::time::Duration::from_mins(1)) {
+            self.adopt_picture(decoded)?;
+        }
+        if core::mem::take(&mut self.dirty) {
+            self.refresh_background()?;
+            self.paint_chrome()?;
+        }
+        Ok(())
+    }
+
+    /// Upload `image`, decoded from `path`, to `window` under `id`.
     ///
     /// The half of "put a picture on a surface" that is the same for every
     /// surface. Two of them want it -- the desktop's background and the
@@ -1101,36 +1687,23 @@ impl<T: Transport> ShellSession<T> {
     /// afterwards: where to record the size, and where to put the reason when
     /// it does not work. So that part is the caller's and this is shared,
     /// rather than the whole thing being written twice and drifting, which is
-    /// what happened to the path encoder in `apps/` and cost a day.
+    /// what happened to the path encoder in `apps/` and cost a day. Reading and
+    /// decoding are the decoding thread's (`crate::pictures`); `path` is here
+    /// only to name the file in a reason.
     ///
     /// Failures that cost a *picture* come back as [`PictureUpload::Failed`]
-    /// with a reason fit to show a user: an unreadable file, an undecodable
-    /// one, a surface the compositor has lost, and a refusal (the picture is
-    /// over the link's image budget). None of those should cost the desktop or
-    /// lock anybody out of the machine. Failures that cost the *connection*
-    /// propagate, because the `submit` that follows would fail the same way and
-    /// swallowing them here would only delay it.
-    fn upload_picture(
+    /// with a reason fit to show a user: a surface the compositor has lost,
+    /// and a refusal (the picture is over the link's image budget). Neither
+    /// should cost the desktop or lock anybody out of the machine. Failures
+    /// that cost the *connection* propagate, because the `submit` that follows
+    /// would fail the same way and swallowing them here would only delay it.
+    fn upload_decoded(
         &mut self,
         window: u64,
         id: u64,
         path: &Path,
+        image: &imagecodec::Image,
     ) -> Result<PictureUpload, Error<T>> {
-        let decoded = std::fs::read(path)
-            .map_err(|e| format!("{}: {e}", path.display()))
-            .and_then(|bytes| {
-                // The default limit is the compositor's own buffer ceiling, so
-                // a picture refused here is one the compositor would have
-                // refused anyway — and refusing it from the header costs a
-                // header rather than a decompressed framebuffer.
-                imagecodec::decode(&bytes, imagecodec::Limits::default())
-                    .map_err(|e| format!("{}: {e}", path.display()))
-            });
-        let image = match decoded {
-            Ok(image) => image,
-            Err(why) => return Ok(PictureUpload::Failed(why)),
-        };
-
         let (width, height, stride) = (image.width, image.height, image.stride());
         // Through `WireBytes` rather than `Image::to_argb_bytes`, which returns
         // a bare `Vec<u8>`: the upload takes the typed form so that the other
@@ -1190,40 +1763,35 @@ impl<T: Transport> ShellSession<T> {
 
         let Some(path) = want else {
             self.release_login_image()?;
+            self.login_image = None;
             self.clear_login_picture(fit);
             self.login_background_error = None;
             return Ok(());
         };
 
-        // Already up, and still drawing.
-        if self
-            .login_image
-            .as_ref()
-            .is_some_and(|(id, from)| *from == path && self.login_shows(*id))
-        {
+        // Asked for already -- decoding, up, or failed with its reason shown.
+        // A greeter that has let go of it since it went up (a change of style
+        // that came back to the same file does that) is shown it again, with
+        // no second decode. Only *this* request's picture: one from an older
+        // request, still up while this one decodes, belongs to a style the
+        // user has since left.
+        if let Some((asked, _)) = self.login_image.as_ref().filter(|(_, from)| *from == path) {
+            let asked = *asked;
+            if let Some((id, w, h)) = self.login_uploaded.filter(|(id, _, _)| *id == asked) {
+                if !self.login_shows(id) {
+                    if let Some(screen) = self.login.as_mut() {
+                        screen.set_background_image(id, w, h, fit);
+                    }
+                }
+            }
             return Ok(());
         }
 
-        // Released before the read, as the wallpaper's is: holding the old
-        // picture across a decode charges the link's image budget for two
-        // full-screen pictures at once.
-        self.release_login_image()?;
+        // Asked for, not decoded here; `adopt_picture` releases the old
+        // picture and uploads this one when it is ready, as the wallpaper's.
         let id = self.alloc_login_image_id();
         self.login_image = Some((id, path.clone()));
-
-        match self.upload_picture(self.login_surface.window, id, &path)? {
-            PictureUpload::Loaded { width, height } => {
-                if let Some(screen) = self.login.as_mut() {
-                    screen.set_background_image(id, width as f32, height as f32, fit);
-                }
-                self.login_background_error = None;
-            }
-            PictureUpload::Failed(why) => {
-                // The theme colour underneath is a perfectly usable greeter.
-                self.clear_login_picture(fit);
-                self.login_background_error = Some(why);
-            }
-        }
+        self.pictures.request(Slot::Greeter, id, path);
         Ok(())
     }
 
@@ -1253,7 +1821,7 @@ impl<T: Transport> ShellSession<T> {
 
     /// Give back whatever the greeter's surface is holding, if anything.
     fn release_login_image(&mut self) -> Result<(), Error<T>> {
-        let Some((id, _)) = self.login_image.take() else {
+        let Some((id, _, _)) = self.login_uploaded.take() else {
             return Ok(());
         };
         if let Some(mut handle) = self.events.window_mut(self.login_surface.window) {
@@ -1268,7 +1836,7 @@ impl<T: Transport> ShellSession<T> {
     /// see [`oswindow::WindowHandle::drop_image`] — which is what lets this be
     /// called without first asking whether the last attempt worked.
     fn release_wallpaper_image(&mut self) -> Result<(), Error<T>> {
-        let Some((id, _)) = self.wallpaper_image.take() else {
+        let Some(id) = self.wallpaper_uploaded.take() else {
             return Ok(());
         };
         if let Some(mut handle) = self.events.window_mut(self.background.window) {
@@ -1295,8 +1863,18 @@ impl<T: Transport> ShellSession<T> {
     /// An unreadable directory yields an empty listing rather than an error —
     /// see `guitk::dialog::list_directory`. A user who wandered into a folder
     /// they cannot read has not broken anything, and a modal error over a modal
-    /// chooser would be two dialogs deep for a normal thing to find.
+    /// chooser would be two dialogs deep for a normal thing to find. A path
+    /// with no folder at all -- one typed into the chooser's address bar, say
+    /// -- is refused instead, which takes the chooser back to where it was.
+    ///
+    /// The address bar's completions are answered here too, from the same
+    /// disk, for the same reason.
     fn refresh_run_browser(&mut self) {
+        if let Some(prefix) = self.shell.take_run_browser_completion_request() {
+            self.shell
+                .set_run_browser_completions(guitk::dialog::path_completions(&prefix));
+            self.dirty = true;
+        }
         let Some(path) = self
             .shell
             .run_browser_wants()
@@ -1304,8 +1882,12 @@ impl<T: Transport> ShellSession<T> {
         else {
             return;
         };
-        let entries = guitk::dialog::list_directory(&path);
-        self.shell.set_run_browser_entries(entries);
+        if path.is_dir() {
+            let entries = guitk::dialog::list_directory(&path);
+            self.shell.set_run_browser_entries(entries);
+        } else {
+            self.shell.refuse_run_browser_path();
+        }
         // The listing changed what the chooser draws, and nothing else in this
         // paint knows that: the event that caused the navigation was handled
         // before the read happened.
@@ -1325,10 +1907,91 @@ impl<T: Transport> ShellSession<T> {
         // that somebody is here.
         self.refresh_run_browser();
         let bar = self.shell.render_taskbar();
-        self.events
-            .submit(self.panel.window, &self.panel.localize(&bar))?;
+        self.send_frame(self.panel, &bar)?;
 
-        let open = self.popups_open();
+        // What the popup surface shows: every part with anything to draw,
+        // bottom to top. Alt-Tab near the top: it is modal, and while it is up
+        // it belongs over whatever was already open rather than under it.
+        //
+        // The surface is mapped exactly when a part draws -- asked of the
+        // parts themselves, not of a second list of what might be open. That
+        // list drifted from this one: it named neither the pin menu nor the
+        // tray's overflow list, so until 2026-09-26 the first was never drawn
+        // and the second was drawn on a surface nobody could see. And a
+        // surface mapped with nothing on it is a full-screen sheet that eats
+        // every click on the desktop.
+        let parts: Vec<RenderTree> = [
+            // The overview first, because it is the only part that covers
+            // the whole screen and dims what is behind it: anything drawn
+            // under it would be dimmed twice and read as a smudge. It is
+            // mutually exclusive with the rest in practice (`dismiss_popups`
+            // closes it, and opening it closes them), so like the three
+            // below this ordering states an invariant rather than resolves
+            // a case that arises.
+            self.shell.render_overview(),
+            self.shell.render_start_menu(),
+            self.shell.render_calendar(),
+            // Over the menus, under Alt-Tab: opening the tiling overlay
+            // dismisses them (`toggle_zone_overlay`), so the order between
+            // the three above is a statement of the invariant rather than a
+            // case that arises.
+            self.shell.render_zone_overlay(),
+            // Over both of the full-screen overlays above, because both dim
+            // what is behind them and a reference card read through a scrim
+            // is a reference card the user opened for nothing — and neither
+            // one closes the card, so this is a case that genuinely arises
+            // rather than an invariant. Under Alt-Tab for the same reason
+            // the menus are: Alt+Tab leaves the card open, and the switcher
+            // is modal while it is up.
+            // Over the menus and under Alt-Tab, with the rest of the
+            // popups. It cannot be on screen beside any of them --
+            // `open_desktop_menu` dismisses everything first, and any other
+            // popup opening dismisses it -- so this position states that
+            // invariant rather than resolving a case.
+            self.shell.render_desktop_menu(),
+            // Beside the desktop menu, and for the same reason: it is a
+            // popup over the bar, and opening it dismisses every other one.
+            self.shell.render_tray_overflow(),
+            // A program's menu -- its jump list, pinning, a shortcut -- from
+            // its tile or its start menu row. Beside the other menus, and
+            // for their reason: opening one dismisses the rest.
+            self.shell.render_pin_menu(),
+            // The bar's own options, on the same terms.
+            self.shell.render_taskbar_menu(),
+            self.shell.render_shortcut_card(),
+            self.shell.render_alt_tab(),
+            // Last of all, over Alt-Tab too, and for the opposite reason to
+            // the overview: the pane's scrim dims what is *behind* it, and
+            // the pane itself is a column that leaves most of the screen
+            // showing. Drawn earlier it would be the thing dimmed, by its
+            // own scrim, under a switcher it is supposed to be in front of.
+            self.shell.render_notifications(),
+            // Last of all. The Run box is the shell's only modal dialog:
+            // while it is up it owns the keyboard
+            // (`DesktopShell::handle_hotkey`) and every press
+            // (`handle_mouse`), and a surface that owns the input has to be
+            // the surface on top or the user is typing into something they
+            // cannot see. Nothing else is open underneath it in practice —
+            // opening it dismisses the popups — so this states the invariant
+            // rather than resolving a case that arises.
+            self.shell.render_run_dialog(),
+            // Over even the Run box, and this one *is* a case that arises
+            // rather than an invariant: the chooser is raised from the box
+            // and the box stays up underneath it, so that cancelling
+            // returns the user to the command line they had typed. The
+            // input routing agrees — `handle_mouse_inner` and
+            // `handle_hotkey_inner` both offer the chooser every event
+            // before the box sees one.
+            self.shell.render_run_browser(),
+            // Over everything, the Run box and its chooser included: a shut
+            // down waiting on the programs still open, which owns every key
+            // and press while it is up.
+            self.shell.render_ending(),
+        ]
+        .into_iter()
+        .flatten()
+        .collect();
+        let open = !parts.is_empty();
         if open != self.popups_shown {
             if let Some(mut handle) = self.events.window_mut(self.popups.window) {
                 handle.set_visible(open)?;
@@ -1337,90 +2000,34 @@ impl<T: Transport> ShellSession<T> {
         }
         if open {
             let mut tree = RenderTree::new();
-            // Alt-Tab last: it is modal, and while it is up it belongs over
-            // whatever was already open rather than under it.
-            for part in [
-                // The overview first, because it is the only part that covers
-                // the whole screen and dims what is behind it: anything drawn
-                // under it would be dimmed twice and read as a smudge. It is
-                // mutually exclusive with the rest in practice (`dismiss_popups`
-                // closes it, and opening it closes them), so like the three
-                // below this ordering states an invariant rather than resolves
-                // a case that arises.
-                self.shell.render_overview(),
-                self.shell.render_start_menu(),
-                self.shell.render_calendar(),
-                // Over the menus, under Alt-Tab: opening the tiling overlay
-                // dismisses them (`toggle_zone_overlay`), so the order between
-                // the three above is a statement of the invariant rather than a
-                // case that arises.
-                self.shell.render_zone_overlay(),
-                // Over both of the full-screen overlays above, because both dim
-                // what is behind them and a reference card read through a scrim
-                // is a reference card the user opened for nothing — and neither
-                // one closes the card, so this is a case that genuinely arises
-                // rather than an invariant. Under Alt-Tab for the same reason
-                // the menus are: Alt+Tab leaves the card open, and the switcher
-                // is modal while it is up.
-                // Over the menus and under Alt-Tab, with the rest of the
-                // popups. It cannot be on screen beside any of them --
-                // `open_desktop_menu` dismisses everything first, and any other
-                // popup opening dismisses it -- so this position states that
-                // invariant rather than resolving a case.
-                self.shell.render_desktop_menu(),
-                // Beside the desktop menu, and for the same reason: it is a
-                // popup over the bar, and opening it dismisses every other one.
-                self.shell.render_tray_overflow(),
-                self.shell.render_shortcut_card(),
-                self.shell.render_alt_tab(),
-                // Last of all, over Alt-Tab too, and for the opposite reason to
-                // the overview: the pane's scrim dims what is *behind* it, and
-                // the pane itself is a column that leaves most of the screen
-                // showing. Drawn earlier it would be the thing dimmed, by its
-                // own scrim, under a switcher it is supposed to be in front of.
-                self.shell.render_notifications(),
-                // Last of all. The Run box is the shell's only modal dialog:
-                // while it is up it owns the keyboard
-                // (`DesktopShell::handle_hotkey`) and every press
-                // (`handle_mouse`), and a surface that owns the input has to be
-                // the surface on top or the user is typing into something they
-                // cannot see. Nothing else is open underneath it in practice —
-                // opening it dismisses the popups — so this states the invariant
-                // rather than resolving a case that arises.
-                self.shell.render_run_dialog(),
-                // Over even the Run box, and this one *is* a case that arises
-                // rather than an invariant: the chooser is raised from the box
-                // and the box stays up underneath it, so that cancelling
-                // returns the user to the command line they had typed. The
-                // input routing agrees — `handle_mouse_inner` and
-                // `handle_hotkey_inner` both offer the chooser every event
-                // before the box sees one.
-                self.shell.render_run_browser(),
-            ]
-            .into_iter()
-            .flatten()
-            {
+            for part in parts {
                 tree.commands.extend(part.commands);
             }
-            self.events
-                .submit(self.popups.window, &self.popups.localize(&tree))?;
+            self.send_frame(self.popups, &tree)?;
         }
 
         // The overlays, on their own surface and on their own schedule: an OSD
         // is not a popup and neither one's visibility implies anything about
         // the other's.
-        // The volume overlay and a tray tooltip share this surface: both are
-        // transient, both are above the menus, and both are here to be read
-        // rather than clicked. Merged rather than given two surfaces, because
-        // a second full-screen overlay window would have to be ordered against
-        // this one and there is no case where that ordering matters.
-        let overlays = match (self.shell.render_osd(), self.shell.render_tray_tooltip()) {
-            (Some(mut osd), Some(tip)) => {
-                osd.commands.extend(tip.commands);
-                Some(osd)
-            }
-            (some, None) | (None, some) => some,
-        };
+        // The volume overlay, a tooltip and the label that follows a
+        // program being carried share this surface: all are transient, all
+        // are above the menus, and all are here to be read rather than
+        // clicked. Merged rather than given surfaces of their own, because a
+        // second full-screen overlay window would have to be ordered against
+        // this one and there is no case where that ordering matters. The
+        // carried label goes last, on top: it follows the pointer, and is the
+        // one thing here the user is steering.
+        let overlays = [
+            self.shell.render_osd(),
+            self.shell.render_tooltip(),
+            self.shell.render_carry(),
+        ]
+        .into_iter()
+        .flatten()
+        .reduce(|mut all, part| {
+            all.commands.extend(part.commands);
+            all
+        });
         let showing = overlays.is_some();
         if showing != self.osd_shown {
             if let Some(mut handle) = self.events.window_mut(self.osd.window) {
@@ -1429,28 +2036,20 @@ impl<T: Transport> ShellSession<T> {
             self.osd_shown = showing;
         }
         if let Some(tree) = overlays {
-            self.events
-                .submit(self.osd.window, &self.osd.localize(&tree))?;
+            self.send_frame(self.osd, &tree)?;
         }
         Ok(())
     }
 
-    /// Whether anything the popup surface exists to show is showing.
+    /// Send `tree` to `surface`, the icons it names uploaded first.
     ///
-    /// The power menu is not consulted: it is a submenu of the start menu and
-    /// `DesktopShell` keeps it closed whenever the start menu is
-    /// (`close_start_menu`), so a `power_menu_open` term here could only ever
-    /// be redundant — or, if that invariant broke, could hide the break.
-    fn popups_open(&self) -> bool {
-        self.shell.start_menu_open
-            || self.shell.calendar.visible
-            || self.shell.notifications.pane_state().is_visible()
-            || self.shell.alt_tab_active
-            || self.shell.snap.is_overlay_visible()
-            || self.shell.overview.visible
-            || self.shell.run_dialog.is_visible()
-            || self.shell.shortcut_card_open
-            || self.shell.desktop_menu.is_visible()
+    /// The one door every surface's frame goes through but the background's,
+    /// which compares its frame before sending and uploads in
+    /// [`refresh_background`](Self::refresh_background): an icon a frame names
+    /// on a surface that was never sent it is drawn as nothing, silently.
+    fn send_frame(&mut self, surface: Surface, tree: &RenderTree) -> Result<(), Error<T>> {
+        self.upload_icons(surface.window, tree)?;
+        self.events.submit(surface.window, &surface.localize(tree))
     }
 
     /// Handle everything waiting, without blocking. Reports whether anything
@@ -1460,11 +2059,42 @@ impl<T: Transport> ShellSession<T> {
     ///
     /// As [`EventLoop::poll`] and [`Self::paint_chrome`].
     pub fn pump(&mut self) -> Result<bool, Error<T>> {
-        let mut worked = false;
+        // Pictures the decoding thread finished while the loop was parked --
+        // it woke the loop to say so -- or while it was busy.
+        let mut worked = self.collect_pictures()?;
+        worked |= self.announce_settings()?;
         while let Some((window, event)) = self.events.poll()? {
             worked = true;
             self.dispatch(window, event)?;
         }
+        let finished = self.finish_batch()?;
+        Ok(worked || finished)
+    }
+
+    /// Everything a pump does once a batch of events has been handled: fold in
+    /// the window list and the tray, save what the batch changed, repaint, and
+    /// reconcile the keyboard grabs. Answers whether any of it had work to do.
+    ///
+    /// Its own function so that the two halves of a pump -- the events, which
+    /// come off the wire *and off the loop's clock*, and this -- can be told
+    /// apart: a test that must know exactly how much time has passed hands the
+    /// session its event directly and then calls this, and so runs every step
+    /// a pump runs except asking the loop for a wake-up that has come due.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::pump`].
+    fn finish_batch(&mut self) -> Result<bool, Error<T>> {
+        let mut worked = false;
+
+        // The start menu has just opened: a program installed since the last
+        // read belongs in it. Before the paint below, so the menu opens with
+        // it rather than a frame later.
+        let menu_open = self.shell.start_menu_open;
+        if menu_open && !self.start_menu_was_open {
+            self.refresh_installed_apps();
+        }
+        self.start_menu_was_open = menu_open;
 
         // *After* the input, deliberately. `poll` is also what reads the window
         // list off the wire, so by here the connection may already hold a newer
@@ -1495,6 +2125,11 @@ impl<T: Transport> ShellSession<T> {
             for request in requests {
                 self.request(request)?;
             }
+            // A shut down, restart or log out whose programs have all closed
+            // is carried out now.
+            if let Some(action) = self.shell.take_ending_action() {
+                self.act(action)?;
+            }
             self.dirty = true;
             worked = true;
         }
@@ -1513,11 +2148,30 @@ impl<T: Transport> ShellSession<T> {
             worked = true;
         }
 
+        // The keyboard went to another program with a name half-typed: keep
+        // it, as a click away would. Before the saves just below, which is
+        // what writes it.
+        if core::mem::take(&mut self.focus_left_shell) && self.shell.icons.renaming().is_some() {
+            self.shell.commit_icon_rename();
+            self.dirty = true;
+        }
+
         // After the events, before the paint: a drag that ended in this batch
         // has committed by now, and coalescing here means one write per pump
         // rather than one per event.
         if self.shell.take_widgets_dirty() {
             self.save_widgets();
+        }
+        // The icon layout on the same terms: a drop that moved something, or a
+        // choice from the desktop's View menu.
+        if self.shell.take_icons_dirty() {
+            self.save_icon_layout();
+        }
+        // And the start menu's pins, dropped there or chosen from a menu, and
+        // the programs recently used, which every launch above may have moved.
+        if self.shell.take_start_menu_dirty() {
+            let saved = self.shell.save_start_menu();
+            self.report_save("The start menu's pinned and recently used programs", saved);
         }
 
         // The shell writes `appearance.yaml` itself for the quick toggles --
@@ -1532,6 +2186,10 @@ impl<T: Transport> ShellSession<T> {
 
         if self.dirty {
             self.dirty = false;
+            // The background first, as `repaint` orders them -- and sent only
+            // if it changed, since most of what marks the frame dirty is the
+            // taskbar's.
+            self.refresh_background()?;
             self.paint_chrome()?;
         }
 
@@ -1612,11 +2270,6 @@ impl<T: Transport> ShellSession<T> {
         self.arm_next_frame();
     }
 
-    /// Turn animations off, or back on, for accessibility.
-    ///
-    /// Turning them off cancels what is already running rather than letting it
-    /// finish: a user who has just asked for less motion is asking about the
-    /// motion on screen now, not about the next one.
     /// Read the user's saved appearance settings and adopt them, animation
     /// speed included.
     ///
@@ -1627,9 +2280,13 @@ impl<T: Transport> ShellSession<T> {
     /// to fix, and it would be a shame to leave a second door into it.
     pub fn load_appearance(&mut self) {
         self.shell.load_appearance();
+        // And how the time is told, on the widget layout's argument below: it
+        // is the same question, and a second door is a door somebody forgets.
+        self.shell.load_datetime();
+        self.sync_theme_problem();
         self.sync_wallpaper();
         self.sync_login_background();
-        self.sync_animation_speed();
+        self.sync_motion();
         self.sync_autohide();
         // The widget layout comes in on the same call. It is not an appearance
         // setting, but it is the same question -- "what did this user leave the
@@ -1663,27 +2320,167 @@ impl<T: Transport> ShellSession<T> {
         self.arm_next_frame();
     }
 
+    /// Re-read the appearance settings and adopt them if they changed:
+    /// what a `SettingsChanged` announcement asks for, and what the automatic
+    /// light/dark mode's edge asks for, which is the same question.
+    fn adopt_appearance_change(&mut self) {
+        if self.shell.poll_appearance() {
+            // The motion reaches this session's own animators -- the
+            // manager and auto-hide -- not through the shell, so adopting
+            // the settings is two steps and the second is easy to forget.
+            // `sync_motion` is cheap and unconditional rather than guarded
+            // on the motion having changed: a guard would be a second
+            // place that has to know which fields matter.
+            self.sync_motion();
+            self.sync_autohide();
+            self.sync_theme_problem();
+            // And the wallpaper, on the same argument the comment
+            // above makes: this is the live path, and a setting
+            // adopted only at startup is one that appears to need a
+            // logout. Unlike the two above, this one *is* guarded --
+            // see `sync_wallpaper`, where the guard stops an unrelated
+            // settings change re-decoding a full-screen photograph.
+            self.sync_wallpaper();
+            // The icons, in the old colours and perhaps the old theme's
+            // pictures: dropped, to be drawn again as the next frames ask.
+            self.drop_icons();
+            self.dirty = true;
+            // The settings may have started something timed that nothing
+            // else will wake the loop for -- a rotation folder, a dynamic
+            // wallpaper, the automatic light/dark mode's next edge. Not while
+            // something is moving: the frame loop is awake and re-arms each
+            // frame, and re-arming it here would shorten the frame in flight.
+            if !self.anything_moving() {
+                self.arm_next_frame();
+            }
+        }
+    }
+
+    /// Upload every icon `tree` names that `window` does not have yet.
+    ///
+    /// Before the tree is submitted, for the reason the wallpaper's pixels go
+    /// before the background that names them: the compositor draws nothing,
+    /// silently, for an image id it holds no bytes for. An icon is drawn by
+    /// the icon theme the appearance settings name, from the request the
+    /// shell recorded under its id.
+    ///
+    /// An icon nothing draws, or one the compositor refuses (its per-link
+    /// image budget), is remembered as sent all the same: the tree still
+    /// names it and draws its label beside the gap, and asking again every
+    /// frame would only be refused again every frame.
+    fn upload_icons(&mut self, window: u64, tree: &RenderTree) -> Result<(), Error<T>> {
+        let shell = &self.shell;
+        let login = self.login.as_ref();
+        let uploaded = &mut self.icons_uploaded;
+        let events = &mut self.events;
+        appearance::icons::upload_missing(
+            &tree.commands,
+            &shell.appearance.icon_theme,
+            // The shell's parts, then the login screen, which the session
+            // holds rather than the shell.
+            |id| {
+                shell
+                    .icon_request(id)
+                    .or_else(|| login.and_then(|screen| screen.icon_request(id)))
+            },
+            |id| uploaded.insert((window, id)),
+            |id, icon| {
+                let Some(mut handle) = events.window_mut(window) else {
+                    return Ok(());
+                };
+                let stride = icon.size.saturating_mul(4);
+                let bytes = guitk::canvas::WireBytes::from_le_argb(&icon.argb);
+                match handle.upload_image(
+                    id,
+                    icon.size,
+                    icon.size,
+                    stride,
+                    PixelFormat::Argb8888,
+                    bytes,
+                ) {
+                    Ok(()) | Err(ConnectionError::Refused(_)) => Ok(()),
+                    Err(other) => Err(other),
+                }
+            },
+        )
+    }
+
+    /// Give back every icon uploaded, on every surface. A drop the compositor
+    /// cannot carry out is one it has no bytes for already.
+    ///
+    /// The background's frame is forgotten with them. It names icons that are
+    /// now gone, and the frame drawn next may name the very same ids -- a
+    /// change of icon theme, or of an accent the desktop's icons are not drawn
+    /// in, leaves every id as it was -- so a refresh that compared frames would
+    /// find nothing changed, upload nothing, and leave the desktop's icons as
+    /// gaps. With no frame to compare against, the next refresh uploads them
+    /// again and sends the frame after them.
+    fn drop_icons(&mut self) {
+        self.background_drawn = None;
+        if let Some(screen) = &self.login {
+            screen.clear_icon_requests();
+        }
+        for (window, id) in std::mem::take(&mut self.icons_uploaded) {
+            if let Some(mut handle) = self.events.window_mut(window) {
+                // Dropping an id that was never stored succeeds; a connection
+                // that failed here fails the next request too, which is where
+                // the loop reports it.
+                let _ = handle.drop_image(id);
+            }
+        }
+    }
+
     /// Persist the widget layout, reporting a failure rather than hiding it.
     ///
     /// Called after a change rather than on a timer: the layout changes when a
     /// person adds, moves or removes a widget, which is rare and always the
     /// result of an event this session already handled.
     fn save_widgets(&mut self) {
-        if let Err(err) = self.shell.save_widgets() {
-            // Not fatal: a desktop whose layout cannot be written is still a
-            // working desktop, and refusing to run would be a worse answer than
-            // forgetting where a clock was. Reported, because silently losing a
-            // user's arrangement every time is a bug they cannot see.
-            self.set_wallpaper_error(Some(format!("widget layout not saved: {err}")));
-        }
+        let saved = self.shell.save_widgets();
+        self.report_save("The widget layout", saved);
     }
 
-    /// Push the shell's animation speed into the manager that obeys it.
+    /// Write the icon layout. The shell used to write it itself, on every
+    /// release, and drop the error -- so a desktop whose layout could not be
+    /// saved lost every move at the next login without a word.
+    fn save_icon_layout(&mut self) {
+        let saved = self.shell.save_icon_layout();
+        self.report_save("The icon layout", saved);
+    }
+
+    /// Tell the user that `what` could not be written -- once per distinct
+    /// failure, and forgotten when a save of the same thing works again, so
+    /// the next failure is news.
     ///
-    /// `AnimationSpeed::multiplier()` is a *duration* multiplier -- 0.75 for
-    /// Fast, 1.5 for Slow, 0.0 for Off -- which is exactly what
-    /// [`AnimationManager::set_duration_scale`] takes, so nothing is converted
-    /// here and there is no second definition of what "slow" means.
+    /// Not fatal: a desktop whose layout cannot be written is still a working
+    /// desktop, and refusing to run would be a worse answer than forgetting
+    /// where a clock was. Reported, because silently losing a user's
+    /// arrangement every time is a bug they cannot see. The pane is not
+    /// opened, for the reason [`set_wallpaper_error`](Self::set_wallpaper_error)
+    /// gives: this is a thing to explain, not an emergency.
+    ///
+    /// Its own notification. Until 2026-09-25 a failed widget save went through
+    /// `set_wallpaper_error`, which posted it under the title "Wallpaper could
+    /// not be shown" and left [`wallpaper_error`](Self::wallpaper_error) naming
+    /// something that had nothing to do with the wallpaper -- until the next
+    /// wallpaper that loaded cleared it, after which the same failure was
+    /// news again on every change.
+    fn report_save(&mut self, what: &'static str, saved: std::io::Result<()>) {
+        let err = match saved {
+            Ok(()) => {
+                self.save_errors.remove(what);
+                return;
+            }
+            Err(err) => err,
+        };
+        let message = format!("{what} could not be written: {err}");
+        if self.save_errors.get(what) == Some(&message) {
+            return;
+        }
+        self.post_desktop_notice("Desktop layout not saved", &message);
+        self.save_errors.insert(what, message);
+    }
+
     /// Tell auto-hide where the pointer is.
     ///
     /// Tested against the *drawn* rectangle and the trigger strip, both of
@@ -1765,25 +2562,6 @@ impl<T: Transport> ShellSession<T> {
         });
     }
 
-    /// Adopt the wallpaper named in the appearance settings.
-    ///
-    /// `WallpaperManager` could already crop, tile, tint and rotate pictures
-    /// before this existed, and `set_image` was called four times in the whole
-    /// tree -- all four in this file's tests. Nothing in production had ever
-    /// set a wallpaper, because there was nowhere for a user to say which one.
-    ///
-    /// **Guarded on the path, and that is not an optimisation.** `set_image`
-    /// issues a fresh image id every time it is called, and `paint_background`
-    /// re-reads and re-inflates whatever id it has not seen before. This runs
-    /// on every `load_appearance`, which the shell calls whenever
-    /// `appearance.yaml` changes for any reason at all -- a comment edited, a
-    /// key this desktop does not read. Unguarded, changing the accent colour
-    /// would re-decode a full-screen photograph.
-    ///
-    /// `follow_desktop_base` rather than a solid colour for "no wallpaper":
-    /// the two draw the same pixels today and diverge the moment the user
-    /// switches between light and dark, and only one of them is a decision the
-    /// user made.
     /// Adopt the greeter's background from the appearance settings.
     ///
     /// Assigning the style is the whole of it: the picture itself is fetched by
@@ -1810,23 +2588,50 @@ impl<T: Transport> ShellSession<T> {
         }
     }
 
+    /// Adopt the wallpaper named in the appearance settings.
+    ///
+    /// `WallpaperManager` could already crop, tile, tint and rotate pictures
+    /// before this existed, and `set_image` was called four times in the whole
+    /// tree -- all four in this file's tests. Nothing in production had ever
+    /// set a wallpaper, because there was nowhere for a user to say which one.
+    ///
+    /// **Guarded on the path, and that is not an optimisation.** `set_image`
+    /// issues a fresh image id every time it is called, and `paint_background`
+    /// has whatever id it has not seen before read and decoded again. This runs
+    /// on every `load_appearance`, which the shell calls whenever
+    /// `appearance.yaml` changes for any reason at all -- a comment edited, a
+    /// key this desktop does not read. Unguarded, changing the accent colour
+    /// would re-decode a full-screen photograph.
+    ///
+    /// `follow_desktop_base` rather than a solid colour for "no wallpaper":
+    /// the two draw the same pixels today and diverge the moment the user
+    /// switches between light and dark, and only one of them is a decision the
+    /// user made.
     fn sync_wallpaper(&mut self) {
-        // A rotation folder wins over a fixed picture: a rotation *is* the
-        // wallpaper, and honouring both would leave the fixed picture visible
-        // in the settings file and never on the screen.
-        if let Some(folder) = self.shell.appearance.wallpaper_folder.clone() {
+        // A time-of-day schedule wins over a folder and a picture, and a
+        // rotation folder over a fixed picture: each *is* the wallpaper, and
+        // honouring two would leave one visible in the settings file and never
+        // on the screen.
+        let scheduled = self
+            .shell
+            .scheduled_wallpaper(unix_now())
+            .map(Path::to_path_buf);
+        if scheduled.is_none()
+            && let Some(folder) = self.shell.appearance.wallpaper_folder.clone()
+        {
             self.sync_rotation(&folder);
             return;
         }
         if self.rotation_loaded.take().is_some() {
-            // Rotation was switched off. Fall through to the fixed picture,
-            // which the branch below applies -- but the slideshow has to go
-            // first or `tick` would keep advancing it underneath.
+            // Rotation was switched off, or a schedule took over. Fall through
+            // to the fixed or scheduled picture, which the branch below
+            // applies -- but the slideshow has to go first or `tick` would
+            // keep advancing it underneath.
             self.wallpaper.follow_desktop_base();
             self.dirty = true;
         }
 
-        let wanted = self.shell.appearance.wallpaper.clone();
+        let wanted = scheduled.or_else(|| self.shell.appearance.wallpaper.clone());
         match wanted.as_deref() {
             Some(path) => {
                 let fit = self.shell.appearance.wallpaper_fit;
@@ -1920,11 +2725,26 @@ impl<T: Transport> ShellSession<T> {
         out
     }
 
-    fn sync_animation_speed(&mut self) {
-        self.animations
-            .set_duration_scale(self.shell.appearance.animation_speed.multiplier());
+    /// Push the desktop's motion -- the animation theme at the user's speed,
+    /// `Palette::motion` (design-decisions §1446) -- to the animators this
+    /// session owns: the animation manager and auto-hide. The shell's own --
+    /// the overview, the notification pane, the on-screen display -- take it
+    /// through `DesktopShell::set_appearance`.
+    ///
+    /// Everything here is one reading of the settings, so there is no second
+    /// definition of what "slow" means: the speed's multiplier is applied once,
+    /// by the palette source, and every animator scales by the result.
+    fn sync_motion(&mut self) {
+        let motion = self.shell.motion();
+        self.animations.set_motion(motion);
+        self.autohide.set_motion(motion);
     }
 
+    /// Turn animations off, or back on, for accessibility.
+    ///
+    /// Turning them off cancels what is already running rather than letting it
+    /// finish: a user who has just asked for less motion is asking about the
+    /// motion on screen now, not about the next one.
     pub fn set_reduced_motion(&mut self, reduced: bool) {
         self.animations.reduced_motion = reduced;
         if reduced {
@@ -2030,7 +2850,8 @@ impl<T: Transport> ShellSession<T> {
             Event::Mouse(mouse) => self.pointer(&surface.to_screen(&mouse))?,
             Event::Key(key) => {
                 let outcome = self.shell.handle_hotkey(&key);
-                if outcome.consumed {
+                let claimed = outcome.consumed;
+                if claimed {
                     self.dirty = true;
                 }
                 // Sent in the order the shortcut named them, and every one is
@@ -2049,12 +2870,27 @@ impl<T: Transport> ShellSession<T> {
                 // does not start the program either, it only records that one
                 // was asked for.
                 self.queue_launches(outcome.launches);
+                // A key on the desktop itself that no shortcut and no open
+                // surface claimed: the icons' -- Enter, Ctrl+A, the arrows.
+                // Only from the desktop's own surface, because the compositor
+                // sends keys to the focused surface and a key typed into the
+                // taskbar or a menu is not about the icons -- except while an
+                // icon is being renamed, when every key that reaches the shell
+                // is the name's. "Rename" is chosen from a menu on another of
+                // the shell's surfaces, and that surface keeps the keyboard.
+                let renaming = self.shell.icons.renaming().is_some();
+                if !claimed && (renaming || surface.window() == self.background.window()) {
+                    let action = self.shell.handle_desktop_key(&key);
+                    self.act(action)?;
+                }
             }
             // Somebody rewrote `input.yaml`. The one field the shell owns
             // there is which shortcut cycles the keyboard layout, and picking
             // a different one has to move the grab -- which the next
             // `reconcile_modifier_chords` does, because the wanted set is
             // derived from the setting rather than remembered separately.
+            Event::FocusOut => self.focus_left_shell = true,
+            Event::FocusIn => self.focus_left_shell = false,
             Event::SettingsChanged {
                 group: SettingsGroup::Input,
             } => {
@@ -2157,24 +2993,7 @@ impl<T: Transport> ShellSession<T> {
             Event::SettingsChanged {
                 group: SettingsGroup::Appearance,
             } => {
-                if self.shell.poll_appearance() {
-                    // The animation speed lives on this session's manager, not
-                    // on the shell, so adopting the settings is two steps and
-                    // the second is easy to forget. `sync_animation_speed` is
-                    // cheap and unconditional rather than guarded on the speed
-                    // having changed: a guard would be a second place that has
-                    // to know which fields matter.
-                    self.sync_animation_speed();
-                    self.sync_autohide();
-                    // And the wallpaper, on the same argument the comment
-                    // above makes: this is the live path, and a setting
-                    // adopted only at startup is one that appears to need a
-                    // logout. Unlike the two above, this one *is* guarded --
-                    // see `sync_wallpaper`, where the guard stops an unrelated
-                    // settings change re-decoding a full-screen photograph.
-                    self.sync_wallpaper();
-                    self.dirty = true;
-                }
+                self.adopt_appearance_change();
             }
             _ => {}
         }
@@ -2321,7 +3140,7 @@ impl<T: Transport> ShellSession<T> {
     /// session has a clock, so it puts the pane back where it started and lets
     /// the clock carry it. See `design-decisions.md` §520 and §562.
     fn begin_notifications_slide(&mut self) {
-        if self.animations.reduced_motion {
+        if self.animations.reduced_motion || self.shell.motion().is_still() {
             return;
         }
         self.shell.notifications.begin_slide();
@@ -2337,12 +3156,13 @@ impl<T: Transport> ShellSession<T> {
     /// by hand — gets a fully-open overview instead of one waiting for a frame
     /// that never comes. See `design-decisions.md` §520.
     fn begin_overview_fade(&mut self) {
-        if self.animations.reduced_motion {
+        let motion = self.shell.motion();
+        if self.animations.reduced_motion || motion.is_still() {
             return;
         }
         self.shell
             .overview
-            .begin_fade(self.shell.overview_config.fade_ms);
+            .begin_fade(motion, self.shell.overview_config.fade_ms);
         self.arm_next_frame();
     }
 
@@ -2369,15 +3189,6 @@ impl<T: Transport> ShellSession<T> {
         // the manager's — it lives on the overview so that the overview can be
         // drawn correctly by a caller that has no manager at all.
         self.shell.overview.tick_fade(dt);
-        // The wallpaper keeps its own clock, in whole seconds, and until now
-        // nothing turned it: a slideshow never advanced and the time-of-day
-        // gradient never changed, because `WallpaperManager::tick` had no
-        // caller outside its own tests. The session's accumulated clock is
-        // monotonic, which is what `tick` compares -- it never asks what the
-        // time is, only how much of it has passed.
-        if self.wallpaper.tick(self.clock_ms / 1000) {
-            self.dirty = true;
-        }
         // The pane keeps its own clock too, and in seconds rather than
         // milliseconds: it is a `guitk` widget, whose animation convention is a
         // float of seconds. Converted here rather than changed there, because
@@ -2394,6 +3205,16 @@ impl<T: Transport> ShellSession<T> {
         // to saturate the `u32` above must not be quietly shortened to 49 days
         // when the whole point of that frame is to retire everything on screen.
         self.shell.advance_osd(elapsed_ms);
+        // The programs a shut down is waiting for are listed once its grace
+        // has run out, and the list is drawn by the next paint.
+        if self.shell.tick_ending() {
+            self.dirty = true;
+        }
+        // A tooltip whose delay this frame ended is on the overlay surface
+        // only once that is drawn again.
+        if self.shell.take_hover_changed() {
+            self.dirty = true;
+        }
         // The stepped rectangles are deliberately not used here. A window's
         // geometry belongs to the compositor, not to the shell — the shell
         // cannot move a window by drawing it somewhere else — so a window
@@ -2406,6 +3227,20 @@ impl<T: Transport> ShellSession<T> {
         // Auto-hide is dated rather than stepped, so the session's only
         // absolute clock is advanced here and nowhere else.
         self.clock_ms = self.clock_ms.saturating_add(elapsed_ms);
+        // The wallpaper keeps its own clock, in whole seconds, and until now
+        // nothing turned it: a slideshow never advanced and the time-of-day
+        // gradient never changed, because `WallpaperManager::tick` had no
+        // caller outside its own tests. The session's accumulated clock is
+        // monotonic, which is what `tick` compares -- it never asks what the
+        // time is, only how much of it has passed.
+        //
+        // After the clock has taken this frame's time, not before: ticked
+        // with the previous frame's clock, the frame the loop was woken for
+        // -- at the moment the next picture was due -- saw the moment before
+        // it, and the picture came a wake-up late.
+        if self.wallpaper.tick(self.clock_ms / 1000) {
+            self.dirty = true;
+        }
         // Widgets are dated like auto-hide rather than stepped: a clock is due
         // at a wall-clock moment, not after so many frames.
         if self.shell.widgets.tick(self.clock_ms) {
@@ -2432,6 +3267,27 @@ impl<T: Transport> ShellSession<T> {
             // The taskbar shows whether focus assist is on, so a schedule that
             // has just started or ended is a thing on screen that changed.
             self.dirty = true;
+        }
+        // The automatic light/dark mode, dated against the wall clock for the
+        // same reason. At its edge the settings mean something else though the
+        // file has not changed: the shell reads them again -- its watcher sees
+        // the phase -- and tells the compositor, which re-reads them and tells
+        // every other program. The shell is the one to tell because it is the
+        // one process that keeps a clock for it; every reader works the phase
+        // out for itself once told to look.
+        if self.shell.theme_phase_is_due(unix_now()) {
+            self.adopt_appearance_change();
+            self.events.appearance_changed()?;
+        }
+        // A time-of-day wallpaper's edge: the picture for the new part of the
+        // day. Compared with what is up rather than remembered, so a picture
+        // changed by hand in between is put right on the next edge too.
+        let scheduled_edge = self
+            .shell
+            .scheduled_wallpaper(unix_now())
+            .is_some_and(|wanted| self.wallpaper.current_image_path() != Some(wanted));
+        if scheduled_edge {
+            self.sync_wallpaper();
         }
 
         if moved {
@@ -2468,7 +3324,44 @@ impl<T: Transport> ShellSession<T> {
             .next_due_in(self.clock_ms)
             .map(|ms| Duration::from_millis(ms.max(1)));
         let schedule = self.shell.next_schedule_change(unix_now());
-        if let Some(delay) = [widget, schedule].into_iter().flatten().min() {
+        let theme = self.shell.next_theme_change(unix_now());
+        // A time-of-day wallpaper's next picture, on the wall clock -- the
+        // user wrote "18:00", not "six hours after I signed in".
+        let scheduled_wallpaper = self.shell.next_wallpaper_change(unix_now());
+        // The wallpaper's next picture, or a dynamic one's next shade, on the
+        // clock `step_frame` ticks it with. At least a millisecond: a
+        // slideshow whose timer has not started is due *now*, and a wake-up
+        // of nothing is not one.
+        let wallpaper = self
+            .wallpaper
+            .next_change_in(self.clock_ms / 1000)
+            .map(|secs| Duration::from_secs(secs).max(Duration::from_millis(1)));
+        // A tooltip waiting out its delay: the pointer has come to rest on
+        // something with a name, and nothing else will wake the loop to show
+        // it. At least a millisecond, for the same reason as the wallpaper's.
+        let tooltip = self
+            .shell
+            .tooltip_due_in()
+            .map(|ms| Duration::from_millis(ms.max(1)));
+        // A shut down waiting for its programs: the moment it stops waiting
+        // and lists the ones still open.
+        let ending = self
+            .shell
+            .ending_due_in()
+            .map(|ms| Duration::from_millis(ms.max(1)));
+        if let Some(delay) = [
+            widget,
+            schedule,
+            theme,
+            scheduled_wallpaper,
+            wallpaper,
+            tooltip,
+            ending,
+        ]
+        .into_iter()
+        .flatten()
+        .min()
+        {
             self.events.wake_after(self.panel.window, delay);
         }
     }
@@ -2496,27 +3389,116 @@ impl<T: Transport> ShellSession<T> {
             || self.autohide.needs_tick()
     }
 
+    /// Say that `launch` -- one [`take_launches`](Self::take_launches) handed
+    /// out -- could not be started, and why: for whoever starts the programs
+    /// the shell names, which is the one place that finds out. The Run box
+    /// comes back on the line if the launch was its own, and anything else is
+    /// said in a notification ([`crate::DesktopShell::launch_failed`]); either is on
+    /// screen at the next pump.
+    pub fn report_failed_launch(
+        &mut self,
+        launch: &crate::hotkeys::Launch,
+        error: &std::io::Error,
+    ) {
+        self.shell
+            .launch_failed(launch, &crate::launch_failure_reason(error));
+        self.dirty = true;
+    }
+
     /// One pointer event, already in screen coordinates.
     fn pointer(&mut self, event: &MouseEvent) -> Result<(), Error<T>> {
         self.autohide_pointer(event);
-        match self.shell.handle_mouse(event) {
+        let action = self.shell.handle_mouse(event);
+        self.act(action)?;
+        // A tooltip came, went or began waiting to appear, or another tile lit
+        // up. What they are drawn on is repainted only when the session is
+        // dirty, and a tooltip's delay is a deadline nothing else wakes the
+        // loop for -- so, until this, a tray icon's name appeared only if
+        // something else happened to draw.
+        // Not while something is moving: the frame loop is awake and re-arms
+        // each frame, and re-arming here would shorten the frame in flight.
+        if self.shell.take_hover_changed() {
+            self.dirty = true;
+            if !self.anything_moving() {
+                self.arm_next_frame();
+            }
+        }
+        Ok(())
+    }
+
+    /// Carry out what the shell answered an event with -- a pointer event, or
+    /// a key on the desktop. One place, so a key and a click that mean the
+    /// same thing cannot be carried out differently.
+    fn act(&mut self, action: ShellAction) -> Result<(), Error<T>> {
+        match action {
             // Not the shell's, and nothing the shell drew has changed. The
             // compositor routes a press to the topmost window containing it, so
             // in a live session this is a click on bare desktop.
             ShellAction::Pass => {}
             ShellAction::Consumed => self.dirty = true,
-            ShellAction::Launch(path) => {
-                // A program named by the start menu, which names programs
-                // and not invocations of them.
-                self.queue_launches(vec![crate::hotkeys::Launch {
-                    program: path,
-                    args: Vec::new(),
-                }]);
+            // A program the start menu or the taskbar named, or a folder or
+            // document a desktop icon opens -- which is a program *given that
+            // path*, and why the action carries arguments.
+            ShellAction::Launch(launch) => {
+                self.queue_launches(vec![launch]);
                 self.dirty = true;
             }
             ShellAction::Control(request) => self.request(request)?,
+            ShellAction::ControlAll(requests) => {
+                for request in requests {
+                    self.request(request)?;
+                }
+            }
+            ShellAction::LogOut => self.log_out(),
         }
         Ok(())
+    }
+
+    /// End the session: the login screen comes back, built as it was at
+    /// start -- from the same account list -- and the desktop behind it is
+    /// covered until someone signs in.
+    ///
+    /// A machine with nobody to sign in as has no login screen to return to,
+    /// and so nowhere to log out to; the press does nothing rather than leave
+    /// a screen nothing can unlock (`design-decisions.md` §824).
+    fn log_out(&mut self) {
+        // The screen's size now, not at start: the display may have changed
+        // resolution since, and the shell follows it.
+        self.login = Self::greeter(
+            self.accounts.as_deref(),
+            self.shell.screen_width,
+            self.shell.screen_height,
+        );
+        if self.login.is_some() {
+            // Nobody is using the desktop until somebody signs in again.
+            self.shell.set_user_name("");
+        }
+        self.dirty = true;
+    }
+
+    /// A login screen `width` by `height` pixels for the accounts in
+    /// `accounts` (the system's own when `None`), or `None` when there is
+    /// nobody to sign in as.
+    ///
+    /// A login screen exactly when there is somebody to log in as. On a
+    /// machine whose account database cannot be read there is nobody to
+    /// authenticate -- `authlib` would answer `Unusable` to every name -- so a
+    /// screen would be one nothing could ever unlock, which is a machine that
+    /// cannot be used rather than a machine that is secure. See
+    /// `design-decisions.md` §824. One function for start and for logging out,
+    /// so that the rule is in one place.
+    fn greeter(accounts: Option<&Path>, width: u32, height: u32) -> Option<LoginScreen> {
+        let users = accounts.map_or_else(
+            crate::login_screen::system_users,
+            crate::login_screen::users_from_db,
+        );
+        if users.is_empty() {
+            return None;
+        }
+        // Through `u16`: a screen side is a handful of thousands, and a larger
+        // one saturates rather than rounding in `f32`.
+        let side = |px: u32| f32::from(u16::try_from(px).unwrap_or(u16::MAX));
+        Some(LoginScreen::new(side(width), side(height), users))
     }
 
     /// Send one thing the shell asked for on to the compositor.
@@ -2578,8 +3560,7 @@ impl<T: Transport> ShellSession<T> {
 
     /// Follow the display to a new size.
     fn resize_display(&mut self, width: u32, height: u32) -> Result<(), Error<T>> {
-        self.shell.screen_width = width;
-        self.shell.screen_height = height;
+        self.shell.set_screen_size(width, height);
 
         let bar = self.shell.taskbar_rect();
         if let Some(mut handle) = self.events.window_mut(self.panel.window) {
@@ -2655,12 +3636,10 @@ fn pos(v: f32) -> i32 {
     v.round() as i32
 }
 
-/// Seconds since the epoch, or 0 on a clock set before it.
+/// Seconds since the epoch, or 0 on a clock set before it: the desktop's
+/// one wall clock, which a test can fix (`datetimesettings::clock`).
 fn unix_now() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs()
+    datetimesettings::clock::now_utc_secs()
 }
 
 #[cfg(test)]

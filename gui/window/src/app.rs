@@ -89,6 +89,7 @@
 //! # }
 //! ```
 
+use std::ffi::OsString;
 use std::process::ExitCode;
 use std::task::Waker;
 use std::time::Duration;
@@ -169,7 +170,7 @@ pub struct Reloads {
 /// A picture an application wants the compositor to be holding, or to stop
 /// holding.
 ///
-/// [`RenderCommand::Image`] names an `image_id` and carries no pixels — a
+/// [`RenderCommand::Image`](crate::RenderCommand::Image) names an `image_id` and carries no pixels — a
 /// protocol that shipped the pixels with the draw would re-send a megabyte
 /// sixty times a second to keep a still picture on screen. The pixels go up
 /// once, by a different route, and an id the compositor has never been given
@@ -191,7 +192,7 @@ pub struct Reloads {
 pub enum ImageChange {
     /// Store these pixels under `id`, replacing whatever was there.
     ///
-    /// The fields are [`WindowHandle::upload_image`]'s, in its order.
+    /// The fields are [`WindowHandle::upload_image`](crate::WindowHandle::upload_image)'s, in its order.
     Upload {
         /// The application's own number for the picture, scoped to its window.
         id: u64,
@@ -208,6 +209,37 @@ pub enum ImageChange {
         /// `stride * height` bytes of picture, in the compositor's wire byte
         /// order -- which is the *reverse* of the other layout this tree calls
         /// ARGB, and why the type says so rather than the doc comment.
+        bytes: guitk::canvas::WireBytes,
+    },
+    /// Write a rectangle of pixels into the picture already stored under
+    /// `id`, leaving the rest of it as it was.
+    ///
+    /// For a picture that changes a little at a time: a remote desktop whose
+    /// screen is one picture and whose updates are a few dozen pixels each,
+    /// which would otherwise re-send the whole screen -- 8 MB at 1920x1080 --
+    /// for every blink of a cursor (`requests/e-f-update-part-of-an-uploaded-image.md`).
+    ///
+    /// The fields are [`WindowHandle::patch_image`](crate::WindowHandle::patch_image)'s,
+    /// and so is the rule: all or nothing, as an upload is -- refused, with no
+    /// pixel written, when `id` is not stored, the rectangle is empty or not
+    /// wholly inside the picture, or the bytes do not cover it. The format is
+    /// the stored picture's. It costs nothing against the image budget: the
+    /// picture holds as many pixels after it as before.
+    Patch {
+        /// The picture to write into, uploaded earlier under this id.
+        id: u64,
+        /// The rectangle's left edge, in the picture's pixels.
+        x: u32,
+        /// The rectangle's top edge.
+        y: u32,
+        /// The rectangle's width in pixels.
+        width: u32,
+        /// The rectangle's height in pixels.
+        height: u32,
+        /// Bytes per row of `bytes`, at least `width * 4`.
+        stride: u32,
+        /// `stride * height` bytes of the rectangle, in the compositor's wire
+        /// byte order, as for [`Self::Upload`].
         bytes: guitk::canvas::WireBytes,
     },
     /// Give the pixels under `id` back to the link's image budget.
@@ -819,6 +851,15 @@ fn apply_images<T: Transport>(
                 format,
                 bytes,
             } => handle.upload_image(id, width, height, stride, format, bytes)?,
+            ImageChange::Patch {
+                id,
+                x,
+                y,
+                width,
+                height,
+                stride,
+                bytes,
+            } => handle.patch_image(id, (x, y), (width, height), stride, bytes)?,
             ImageChange::Drop(id) => handle.drop_image(id)?,
         }
     }
@@ -912,14 +953,131 @@ impl Args {
         Ok(Self { display, rest })
     }
 
-    /// [`Args::parse`] over this process's own arguments, less argv[0].
+    /// [`Args::parse`] over this process's own arguments, less `argv[0]`.
+    ///
+    /// Read as bytes first ([`ArgsOs::from_env`]), so that an argument that is
+    /// not UTF-8 -- a SlateOS file name may be any bytes but `/` and NUL -- is
+    /// an error naming it rather than the panic `std::env::args` would raise
+    /// before the application's window appeared. An application given file
+    /// names should read them with [`ArgsOs`], which takes such a name as it
+    /// is.
     ///
     /// # Errors
     ///
-    /// As [`Args::parse`].
+    /// As [`ArgsOs::parse`], and for an argument that is not UTF-8.
     pub fn from_env() -> Result<Self, String> {
-        Self::parse(std::env::args().skip(1))
+        let os = ArgsOs::from_env()?;
+        let rest = os
+            .rest
+            .into_iter()
+            .map(|arg| {
+                arg.into_string().map_err(|arg| {
+                    format!(
+                        "the argument `{}` is not UTF-8 text, and this program reads its \
+                         arguments as text",
+                        std::path::Path::new(&arg).display()
+                    )
+                })
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(Self {
+            display: os.display,
+            rest,
+        })
     }
+}
+
+/// [`Args`] with everything but the display option kept as the bytes it is,
+/// as [`std::env::ArgsOs`] is to [`std::env::Args`]: for an application given
+/// file names, which on SlateOS may hold any byte but `/` and NUL. The file
+/// manager's "open with" runs `program /path/to/file`, and a name that is not
+/// UTF-8 must reach the program intact -- not panic it, and not be turned
+/// into other text on the way.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct ArgsOs {
+    /// The address given with `--display`, if any. An address is text.
+    pub display: Option<String>,
+    /// Everything that was not a display option, in order, exactly as given
+    /// -- file names, usually. An application that takes no arguments should
+    /// say so if this is not empty rather than ignoring it.
+    pub rest: Vec<OsString>,
+}
+
+/// What [`ArgsOs::parse`] makes of one argument.
+enum ArgKind {
+    /// `--`: everything after it is an argument, whatever it looks like.
+    EndOfOptions,
+    /// `--display`, whose address is the next argument.
+    Display,
+    /// `--display=ADDR`.
+    DisplayInline,
+    /// Anything else.
+    Other,
+}
+
+impl ArgsOs {
+    /// Split arguments into a display address and everything else, by the
+    /// rules of [`Args::parse`]: a lone `--` ends option parsing, so a file
+    /// genuinely named `--display` is still openable. The options are told
+    /// apart by their bytes, so an argument that is not UTF-8 is never an
+    /// option and never an error -- it is kept.
+    ///
+    /// # Errors
+    ///
+    /// Returns a message fit to print if `--display` is given without an
+    /// address, or with one that is not text.
+    pub fn parse<I: IntoIterator<Item = OsString>>(args: I) -> Result<Self, String> {
+        let mut display = None;
+        let mut rest = Vec::new();
+        let mut args = args.into_iter();
+        while let Some(arg) = args.next() {
+            let bytes = arg.as_encoded_bytes();
+            let kind = if bytes == b"--" {
+                ArgKind::EndOfOptions
+            } else if bytes == b"--display" {
+                ArgKind::Display
+            } else if bytes.starts_with(b"--display=") {
+                ArgKind::DisplayInline
+            } else {
+                ArgKind::Other
+            };
+            match kind {
+                ArgKind::EndOfOptions => {
+                    rest.extend(args);
+                    break;
+                }
+                ArgKind::Display => {
+                    let addr = args.next().ok_or_else(|| {
+                        "--display needs an address, e.g. --display 127.0.0.1:7373".to_string()
+                    })?;
+                    display = Some(address_text(addr.to_str())?);
+                }
+                ArgKind::DisplayInline => {
+                    // The prefix is ASCII, so the argument is text exactly
+                    // when its address is.
+                    let addr = arg.to_str().and_then(|a| a.strip_prefix("--display="));
+                    display = Some(address_text(addr)?);
+                }
+                ArgKind::Other => rest.push(arg),
+            }
+        }
+        Ok(Self { display, rest })
+    }
+
+    /// [`ArgsOs::parse`] over this process's own arguments, less `argv[0]`.
+    ///
+    /// # Errors
+    ///
+    /// As [`ArgsOs::parse`].
+    pub fn from_env() -> Result<Self, String> {
+        Self::parse(std::env::args_os().skip(1))
+    }
+}
+
+/// A display address, which must be text: it is dialled, not opened.
+fn address_text(addr: Option<&str>) -> Result<String, String> {
+    addr.map(str::to_string)
+        .ok_or_else(|| "--display needs an address that is text, e.g. 127.0.0.1:7373".to_string())
 }
 
 /// Connect to the compositor, reporting a failure in terms a user can act on.
@@ -967,7 +1125,7 @@ fn dial(program: &str, display: Option<&str>) -> Result<Link, ExitCode> {
 /// [`launch_with`] with the display it parsed — `launch` re-parses argv only so
 /// that an application with no arguments of its own needs no ceremony at all.
 pub fn launch<A: App + ?Sized>(program: &str, app: &mut A) -> ExitCode {
-    let args = match Args::from_env() {
+    let args = match ArgsOs::from_env() {
         Ok(args) => args,
         Err(e) => {
             eprintln!("{program}: {e}");
@@ -1147,12 +1305,16 @@ impl ThemeWatch {
 /// part of [`launch`] that can be: everything else needs a compositor on the
 /// other end of a socket, and this is the half that decides whether to dial at
 /// all.
-fn leftover_complaint(program: &str, rest: &[String]) -> Option<String> {
+fn leftover_complaint(program: &str, rest: &[OsString]) -> Option<String> {
     let unexpected = rest.first()?;
     // The first one, not all of them: a user who typed two wrong arguments has
     // one mistake to understand, and naming the first is what points at where
-    // the command line went wrong.
-    Some(format!("{program}: unexpected argument `{unexpected}`"))
+    // the command line went wrong. Shown as a path is: a message about the
+    // argument, which may be any bytes, not the argument itself.
+    Some(format!(
+        "{program}: unexpected argument `{}`",
+        std::path::Path::new(unexpected).display()
+    ))
 }
 
 /// [`launch`] with the display address supplied, for an application that has
@@ -2110,6 +2272,7 @@ mod tests {
             .iter()
             .filter_map(|r| match r.body {
                 crate::RequestBody::UploadImage { image_id, .. } => Some(("up", image_id)),
+                crate::RequestBody::PatchImage { image_id, .. } => Some(("patch", image_id)),
                 crate::RequestBody::DropImage { image_id, .. } => Some(("down", image_id)),
                 _ => None,
             })
@@ -2231,6 +2394,64 @@ mod tests {
         );
     }
 
+    /// A patch goes out where the application put it in the list -- after the
+    /// upload it writes into -- carrying its rectangle and its bytes unaltered.
+    /// A patch that went out *before* its upload would be refused (the id is
+    /// not stored yet) and the change it carried lost.
+    #[test]
+    fn a_patch_goes_out_after_its_upload_with_its_rectangle_and_bytes() {
+        let whole = guitk::canvas::Canvas::filled(4, 4, guitk::color::Color::rgba(0, 0, 0, 255));
+        let rect = guitk::canvas::Canvas::filled(2, 1, guitk::color::Color::rgba(9, 8, 7, 6));
+        let mut app = Recorder::new(Response::Exit).drawing_pictures(vec![
+            ImageChange::Upload {
+                id: 4,
+                width: 4,
+                height: 4,
+                stride: 16,
+                format: PixelFormat::Argb8888,
+                bytes: whole.to_argb8888(),
+            },
+            ImageChange::Patch {
+                id: 4,
+                x: 1,
+                y: 2,
+                width: 2,
+                height: 1,
+                stride: 8,
+                bytes: rect.to_argb8888(),
+            },
+        ]);
+        let (mut events, desktop) = desktop();
+        let window = open(&mut events, &app).expect("granted");
+
+        events.inject_event(window, Event::CloseRequested);
+        drive(&mut events, window, &mut app).expect("the loop should have run");
+
+        assert_eq!(images_seen(&desktop), [("up", 4), ("patch", 4)]);
+        let desk = desktop.borrow();
+        let patch = desk
+            .seen
+            .iter()
+            .find_map(|r| match r.body {
+                crate::RequestBody::PatchImage {
+                    window: w,
+                    image_id,
+                    x,
+                    y,
+                    width,
+                    height,
+                    stride,
+                    ref bytes,
+                } => Some((w, image_id, (x, y), (width, height), stride, bytes.clone())),
+                _ => None,
+            })
+            .expect("the patch never went out");
+        assert_eq!(
+            patch,
+            (window, 4, (1, 2), (2, 1), 8, rect.to_argb8888().into_vec())
+        );
+    }
+
     /// Drained, not peeked — the same rule as [`App::take_reloads`], and the
     /// same symptom for breaking it: an implementation that answered the same
     /// list for ever would re-send a full-screen picture before every frame.
@@ -2291,7 +2512,7 @@ mod tests {
     #[test]
     fn an_argument_the_application_cannot_use_is_refused_and_named() {
         let complaint =
-            leftover_complaint("settings", &["notes.txt".to_string()]).expect("it must complain");
+            leftover_complaint("settings", &["notes.txt".into()]).expect("it must complain");
         assert!(
             complaint.contains("notes.txt"),
             "the message names the argument: {complaint}"
@@ -2305,8 +2526,8 @@ mod tests {
     /// The first, not a list of all of them: one mistake to understand.
     #[test]
     fn the_first_unusable_argument_is_the_one_reported() {
-        let complaint = leftover_complaint("settings", &["a".to_string(), "b".to_string()])
-            .expect("it must complain");
+        let complaint =
+            leftover_complaint("settings", &["a".into(), "b".into()]).expect("it must complain");
         assert!(
             complaint.contains('a') && !complaint.contains('b'),
             "{complaint}"
@@ -2499,6 +2720,75 @@ mod tests {
     fn a_bare_dash_is_an_argument_and_not_an_option() {
         let args = Args::parse(["-".to_string()]).unwrap();
         assert_eq!(args.rest, vec!["-".to_string()]);
+    }
+
+    /// An argument that is not UTF-8: on SlateOS a byte no UTF-8 sequence
+    /// holds, on the Windows host an unpaired surrogate -- each the platform's
+    /// own way for a file name not to be text.
+    fn not_text() -> OsString {
+        #[cfg(unix)]
+        {
+            use std::os::unix::ffi::OsStringExt;
+            OsString::from_vec(b"caf\xE9.txt".to_vec())
+        }
+        #[cfg(windows)]
+        {
+            use std::os::windows::ffi::OsStringExt;
+            OsString::from_wide(&[0x61, 0xD800, 0x62])
+        }
+    }
+
+    /// A file name that is not text reaches the application exactly as given,
+    /// between two that are -- the file manager's "open with" on a name the
+    /// panic in `std::env::args` used to kill the program over.
+    #[test]
+    fn a_file_name_that_is_not_text_is_kept_as_it_is() {
+        let odd = not_text();
+        assert!(
+            odd.to_str().is_none(),
+            "the test's argument must not be text"
+        );
+        let args = ArgsOs::parse(["a.txt".into(), odd.clone(), "b.txt".into()]).unwrap();
+        assert_eq!(
+            args.rest,
+            vec![OsString::from("a.txt"), odd, "b.txt".into()]
+        );
+        assert_eq!(args.display, None);
+    }
+
+    /// The options are the same as [`Args`]'s, told apart by their bytes.
+    #[test]
+    fn the_os_arguments_take_the_same_options() {
+        let spaced = ArgsOs::parse(["--display".into(), "127.0.0.1:7373".into()]).unwrap();
+        let joined = ArgsOs::parse(["--display=127.0.0.1:7373".into()]).unwrap();
+        assert_eq!(spaced.display.as_deref(), Some("127.0.0.1:7373"));
+        assert_eq!(spaced, joined);
+        let ended = ArgsOs::parse(["--".into(), "--display".into(), not_text()]).unwrap();
+        assert_eq!(ended.rest, vec![OsString::from("--display"), not_text()]);
+        assert!(ArgsOs::parse(["--display".into()]).is_err());
+    }
+
+    /// An address is dialled, not opened, so one that is not text is an
+    /// error, spaced or joined -- not an argument, and not a panic.
+    #[test]
+    fn a_display_address_that_is_not_text_is_refused() {
+        let e = ArgsOs::parse(["--display".into(), not_text()]).unwrap_err();
+        assert!(e.contains("text"), "{e}");
+        let mut joined = OsString::from("--display=");
+        joined.push(not_text());
+        assert!(ArgsOs::parse([joined]).is_err());
+    }
+
+    /// The refusal names the argument that is not text, shown as a path is,
+    /// without the panic -- for a program that reads its arguments as text.
+    #[test]
+    fn a_leftover_that_is_not_text_is_named_in_the_complaint() {
+        let complaint = leftover_complaint("settings", &[not_text()]).unwrap();
+        assert!(
+            complaint.starts_with("settings: unexpected argument `"),
+            "{complaint}"
+        );
+        assert!(complaint.contains('\u{FFFD}'), "{complaint}");
     }
 
     /// The harness must not silently accept an event it cannot route.

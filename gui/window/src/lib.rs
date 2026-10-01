@@ -96,7 +96,10 @@ pub use guiremote::window_list::{WindowInfo, WindowList};
 // application synthetically does, which is what [`testing`] is for.
 pub use guiremote::input::InputEvent;
 pub use guiremote::{Pipe, pipe};
-pub use guitk::event::{Event, Key, KeyEvent, Modifiers, MouseButton, MouseEvent, MouseEventKind};
+pub use guitk::event::{
+    Event, Key, KeyEvent, Modifiers, MouseButton, MouseEvent, MouseEventKind, SettingsGroup,
+    SettingsName,
+};
 pub use guitk::render::{RenderCommand, RenderTree};
 
 // ---------------------------------------------------------------------------
@@ -620,6 +623,45 @@ impl<T: Transport> WindowHandle<'_, T> {
         })
     }
 
+    /// Replace a `width` by `height` rectangle of the image uploaded under
+    /// `image_id`, at `(x, y)` in it, leaving the rest of the picture as it
+    /// was.
+    ///
+    /// [`upload_image`](Self::upload_image) again would do, and re-send the
+    /// whole picture: for a picture that changes a little at a time -- a
+    /// remote screen, whose far end reports what changed as rectangles -- that
+    /// is most of a screenful of bytes for a caret's blink. `bytes` are the
+    /// rectangle's rows, `stride` bytes apart, in the format the image was
+    /// uploaded in.
+    ///
+    /// # Errors
+    ///
+    /// As [`Connection::confirm`]. A refusal means this window holds no image
+    /// under `image_id`, or the rectangle is empty, not wholly inside the
+    /// image, or not covered by the bytes -- and in every case *nothing
+    /// changed*: no pixel of the image is written.
+    pub fn patch_image(
+        &mut self,
+        image_id: u64,
+        (x, y): (u32, u32),
+        (width, height): (u32, u32),
+        stride: u32,
+        bytes: guitk::canvas::WireBytes,
+    ) -> Result<(), Error<T>> {
+        self.events.confirm(RequestBody::PatchImage {
+            window: self.id,
+            image_id,
+            x,
+            y,
+            width,
+            height,
+            stride,
+            // Unwrapped here, as `upload_image` unwraps an upload's: the last
+            // point before the bytes go on the wire.
+            bytes: bytes.into_vec(),
+        })
+    }
+
     /// Release an uploaded image, giving its bytes back to this link's budget.
     ///
     /// Dropping an id that was never uploaded succeeds: "there is no such
@@ -677,7 +719,7 @@ impl WindowBuilder {
     /// program's windows" keys on — window rules, taskbar grouping, the icon
     /// lookup. Conventionally the executable's file stem, lower-cased.
     ///
-    /// Applications built on [`app::run`](crate::app::run) do not call this:
+    /// Applications built on [`app::launch`] do not call this:
     /// [`App::app_id`](crate::app::App::app_id) supplies the executable's name
     /// for them, and overriding *that* is the place to disagree.
     ///
@@ -1444,6 +1486,28 @@ impl<T: Transport> EventLoop<T> {
     /// As [`notifications_changed`](Self::notifications_changed).
     pub fn session_changed(&mut self) -> Result<(), Error<T>> {
         self.conn.confirm(RequestBody::ReloadSession)
+    }
+
+    /// Tell everyone that settings file `name` (`<name>.yaml` in the settings
+    /// folder) changed, so that the program it belongs to re-reads it and its
+    /// open windows show the change at once (`design-decisions.md` §1418).
+    ///
+    /// For any program's own file, where the four calls above are for the four
+    /// files the desktop reads -- though naming one of those does exactly what
+    /// its own call does, so a caller that knows only a file's name need not
+    /// know which kind it is. That caller is the settings watcher, which
+    /// announces every file it sees rewritten; a program saving its own
+    /// settings does not have to call this itself.
+    ///
+    /// Each open window receives
+    /// `Event::SettingsChanged { group: SettingsGroup::Program(name) }`; the
+    /// program whose name it is re-reads its file, and every other ignores it.
+    ///
+    /// # Errors
+    ///
+    /// As [`notifications_changed`](Self::notifications_changed).
+    pub fn settings_file_changed(&mut self, name: SettingsName) -> Result<(), Error<T>> {
+        self.conn.confirm(RequestBody::AnnounceSettings { name })
     }
 
     /// Ask the compositor to recover the display: the same full redraw as its
@@ -2363,6 +2427,7 @@ pub mod testing {
                 RequestBody::CreateWindow(_) => "CreateWindow",
                 RequestBody::WatchIdle { .. } => "WatchIdle",
                 RequestBody::ReloadSession => "ReloadSession",
+                RequestBody::AnnounceSettings { .. } => "AnnounceSettings",
                 RequestBody::RecoverDisplay => "RecoverDisplay",
                 RequestBody::DestroyWindow { .. } => "DestroyWindow",
                 RequestBody::SetTitle { .. } => "SetTitle",
@@ -2395,6 +2460,7 @@ pub mod testing {
                 RequestBody::SwitchWorkspace { .. } => "SwitchWorkspace",
                 RequestBody::SetWindowWorkspace { .. } => "SetWindowWorkspace",
                 RequestBody::UploadImage { .. } => "UploadImage",
+                RequestBody::PatchImage { .. } => "PatchImage",
                 RequestBody::GrabModifierChord { .. } => "GrabModifierChord",
                 RequestBody::UngrabModifierChord { .. } => "UngrabModifierChord",
                 RequestBody::DropImage { .. } => "DropImage",
@@ -2422,7 +2488,7 @@ pub mod testing {
         /// time, so there is nothing here to time out. What it makes testable
         /// is the question that matters to anything driving the loop by hand:
         /// did the park go through [`EventLoop::wait`], which knows about
-        /// wake-ups, or through [`Connection::wait`], which does not? The
+        /// wake-ups, or through [`Connection::wait`](guiremote::client::Connection::wait), which does not? The
         /// second parks past every registered deadline, and the only visible
         /// symptom is an animation that stops.
         pub asked: Vec<Option<Duration>>,
@@ -2714,6 +2780,37 @@ mod tests {
             server.borrow().seen.last().unwrap().body,
             RequestBody::SetTitle { .. }
         ));
+    }
+
+    #[test]
+    fn a_patch_reaches_the_compositor_as_its_rectangle_and_nothing_more() {
+        let (mut events, server) = wired();
+        let id = open(&mut events, "Remote screen");
+        let pixels = [0xFF11_2233u32, 0xFF44_5566];
+        events
+            .window_mut(id)
+            .unwrap()
+            .patch_image(
+                9,
+                (3, 4),
+                (2, 1),
+                8,
+                guitk::canvas::WireBytes::from_le_argb(&pixels),
+            )
+            .unwrap();
+        assert_eq!(
+            server.borrow().seen.last().unwrap().body,
+            RequestBody::PatchImage {
+                window: id,
+                image_id: 9,
+                x: 3,
+                y: 4,
+                width: 2,
+                height: 1,
+                stride: 8,
+                bytes: guitk::canvas::WireBytes::from_le_argb(&pixels).into_vec(),
+            }
+        );
     }
 
     #[test]
@@ -3377,6 +3474,22 @@ mod tests {
         // does not, and which is not incidental: the application that has cause
         // to send it is a settings dialog, and requiring it to have opened a
         // window first would be requiring it for no reason the protocol has.
+        assert_eq!(events.window_count(), 0);
+    }
+
+    #[test]
+    fn a_settings_file_is_announced_by_its_name_from_a_loop_with_no_window() {
+        // The settings watcher owns no window; the announcement must reach the
+        // wire carrying the name it was given, not a reload of some other file.
+        let (mut events, server) = wired();
+        let calendar = SettingsName::new(b"calendar").unwrap();
+        events.settings_file_changed(calendar).unwrap();
+        assert!(
+            server.borrow().seen.iter().any(
+                |r| matches!(r.body, RequestBody::AnnounceSettings { name } if name == calendar)
+            ),
+            "settings_file_changed should have announced calendar.yaml by name"
+        );
         assert_eq!(events.window_count(), 0);
     }
 

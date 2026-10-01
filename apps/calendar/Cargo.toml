@@ -4,6 +4,8 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
+# The events, their file and iCalendar -- shared with the desktop's calendar.
+calendarstore = { path = "../calendarstore" }
 pathtext = { path = "../pathtext" }
 # The user's colours, per design-decisions 822.
 appearance = { path = "../../gui/appearance" }

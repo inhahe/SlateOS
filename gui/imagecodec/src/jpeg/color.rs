@@ -11,6 +11,13 @@
 //! CMYK, and "unknown" to itself, which is what libtiff asks for when it wants
 //! the samples as stored) or YCCK to CMYK, which is the YCbCr conversion
 //! inverted.
+//!
+//! Portions of this file are translated into Rust from libjpeg-turbo 3.1.1's
+//! `jdcolor.c` (copyright (C) 1991-1997 Thomas G. Lane; (C) 2011 Guido
+//! Vollbeding; (C) 2009 Pierre Ossman for Cendio AB; (C) 2009, 2011-2012,
+//! 2014-2015, 2022, 2024 D. R. Commander; (C) 2013 Linaro Limited), and
+//! changed for this project; used under the IJG License (`licenses/README.md`
+//! says how).
 
 #[cfg(all(target_arch = "x86_64", target_feature = "sse2"))]
 mod sse2;

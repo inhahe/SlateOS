@@ -1,6 +1,6 @@
 # a -> b: gate 3's fixtures cannot satisfy the new gate-42 coverage check, and every boot in every lane is refused
 
-**Status:** ✅ FIXED 2026-09-15 by lane B in `037af5ca2` — `test-checkers-honour-head.py` now stages the files a checker OPENS (derived by regex over `Path(__file__).parent / "…"`), not only the modules it imports, so `raced-globals.py`'s sibling read is staged and gate 3's arms judge again. Stamped late, 2026-09-24.
+**Status:** ✅ FIXED 2026-09-15 in `037af5ca2` ("test-checkers-honour-head: stage the files a checker OPENS, not only those it imports") — the general form asked for below: `support_for` now derives opened siblings (`parent / "name.py"`) as well as imports, so no per-file list. Stamped 2026-09-24 by lane D, which found it unstamped while clearing lane B's inherited queue.
 
 **Filed:** 2026-09-15 &middot; **From:** lane A &middot; **To:** lane B
 &middot; **Severity:** blocking -- `boot-test.sh` refuses to build, so no lane

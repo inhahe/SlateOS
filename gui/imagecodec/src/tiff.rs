@@ -10,26 +10,26 @@
 //! A file libtiff opens and converts decodes here to the same pixels; a file
 //! it refuses is refused. The port covers:
 //!
-//! - **The directory** ([`dir`]): classic and BigTIFF headers, and
+//! - **The directory** (`dir`): classic and BigTIFF headers, and
 //!   `TIFFReadDirectory`'s rules -- which tags must read cleanly for the
 //!   file to open at all, which are dropped when they do not, and its
 //!   repairs of what real writers get wrong (a missing or implausible
 //!   `StripByteCounts`, colour channels that should have been extra
 //!   samples, a palette image with no palette).
-//! - **Strips and tiles** ([`read`]): where the bytes are, `FillOrder`, and
+//! - **Strips and tiles** (`read`): where the bytes are, `FillOrder`, and
 //!   the codecs -- none, PackBits, LZW (both styles), Deflate, CCITT fax
-//!   ([`fax`]: Group 3 1-D and 2-D, Group 4, Modified Huffman), JPEG through
+//!   (`fax`: Group 3 1-D and 2-D, Group 4, Modified Huffman), JPEG through
 //!   this crate's libjpeg-turbo port (lossless too), old-style JPEG
-//!   ([`ojpeg`], which rebuilds one JPEG from the file's tags and strips as
-//!   `tif_ojpeg.c` does), NeXT ([`next`]), ThunderScan ([`thunder`]), SGI
-//!   LogLuv ([`luv`], high dynamic range, which the codec itself turns to
+//!   (`ojpeg`, which rebuilds one JPEG from the file's tags and strips as
+//!   `tif_ojpeg.c` does), NeXT (`next`), ThunderScan (`thunder`), SGI
+//!   LogLuv (`luv`, high dynamic range, which the codec itself turns to
 //!   8-bit grey or RGB, as libtiff's reader asks) and PixarLog
-//!   ([`pixarlog`], Pixar's log-coded film frames) -- with the horizontal
+//!   (`pixarlog`, Pixar's log-coded film frames) -- with the horizontal
 //!   predictor and big-endian 16-bit samples.
-//! - **Samples to pixels** ([`rgba`]): grey of 1 to 16 bits, palettes, RGB
+//! - **Samples to pixels** (`rgba`): grey of 1 to 16 bits, palettes, RGB
 //!   of 8 and 16 bits with or without alpha, CMYK, `YCbCr` at every
 //!   subsampling libtiff converts, and CIE L*a*b*, in contiguous or separate
-//!   planes -- the colour conversions ([`color`]) in libtiff's own single
+//!   planes -- the colour conversions (`color`) in libtiff's own single
 //!   precision, so they agree to the bit.
 //!
 //! Where libtiff's reader stops at a strip that will not read, this refuses
@@ -57,6 +57,12 @@
 //! Every compression libtiff's reader decodes is decoded here. The first
 //! page only is read, as libtiff's viewers read it; the others are not
 //! reached.
+//!
+//! Portions of this file are translated into Rust from libtiff 4.7.1's
+//! `tif_getimage.c` (copyright (c) 1991-1997 Sam Leffler; (c) 1991-1997
+//! Silicon Graphics, Inc.) and `tif_dirread.c` (copyright (c) 1988-1997 Sam
+//! Leffler; (c) 1991-1997 Silicon Graphics, Inc.), and changed for this
+//! project; used under libtiff's licence, `licenses/libtiff-LICENSE.md`.
 
 mod color;
 mod dir;
@@ -107,6 +113,41 @@ pub fn dimensions(bytes: &[u8]) -> ImageResult<(u32, u32)> {
     let d = dir::read(&file, offset)?;
     let shown = Orientation::from_value(d.orientation).unwrap_or(Orientation::TopLeft);
     Ok(shown.shown((d.width, d.length)))
+}
+
+/// How the first image stores its pixels: `BitsPerSample` and
+/// `SamplesPerPixel` as stored, the photometric interpretation -- guessed as
+/// `TIFFRGBAImageBegin` guesses it when the file has none -- and the alpha the
+/// decoder takes from `ExtraSamples`.
+///
+/// # Errors
+///
+/// As [`dimensions`], [`ImageError::Malformed`] for more than 255 bits a
+/// sample, and [`ImageError::Unsupported`] for a file without a photometric
+/// interpretation that cannot be guessed.
+pub fn pixel_format(bytes: &[u8]) -> ImageResult<crate::PixelFormat> {
+    use crate::ColourModel;
+    use dir::photometric;
+    let (file, offset) = dir::header(bytes)?;
+    let d = dir::read(&file, offset)?;
+    let p = rgba::photometric_of(&d)?;
+    let bits = u8::try_from(d.bits_per_sample)
+        .map_err(|_| ImageError::Malformed("TIFF BitsPerSample past 255"))?;
+    let model = match p {
+        photometric::MIN_IS_WHITE
+        | photometric::MIN_IS_BLACK
+        | photometric::MASK
+        | photometric::LOGL => ColourModel::Grey,
+        photometric::SEPARATED => ColourModel::Cmyk,
+        _ => ColourModel::Colour,
+    };
+    Ok(crate::PixelFormat::uniform(
+        bits,
+        d.samples_per_pixel,
+        model,
+        p == photometric::PALETTE,
+        rgba::alpha_of(&d) != 0,
+    ))
 }
 
 /// Decode the first image of a TIFF.

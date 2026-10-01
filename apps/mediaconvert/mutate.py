@@ -72,6 +72,24 @@ MUTATIONS = [
         "        EventResult::Consumed",
         ["only_one_job_runs_at_a_time"],
     ),
+    (
+        "a file converting now is queued again",
+        "                && matches!(j.status, JobStatus::Queued | JobStatus::Running)",
+        "                && matches!(j.status, JobStatus::Queued)",
+        ["a_file_already_on_its_way_is_not_queued_again"],
+    ),
+    (
+        "a file already waiting is queued again",
+        "                && matches!(j.status, JobStatus::Queued | JobStatus::Running)",
+        "                && matches!(j.status, JobStatus::Running)",
+        ["a_file_already_on_its_way_is_not_queued_again", "only_one_job_runs_at_a_time"],
+    ),
+    (
+        "a finished file cannot be converted again",
+        "                && matches!(j.status, JobStatus::Queued | JobStatus::Running)",
+        "                && true",
+        ["a_file_already_on_its_way_is_not_queued_again"],
+    ),
     # -- the sources -----------------------------------------------------------------------------------------
     (
         "a file is added without its length",
@@ -235,7 +253,22 @@ ENGINE_MUTATIONS = [
 ]
 
 if __name__ == "__main__":
-    only = sys.argv[1:] or None
-    first = sweep(SRC, MUTATIONS, "mediaconvert", timeout=900, only=only)
-    second = sweep(ENGINE_SRC, ENGINE_MUTATIONS, "mediaconvert", timeout=900, only=only)
-    raise SystemExit(max(first, second))
+    # A filter goes to the tables it names a row of, and only those: the
+    # harness refuses a filter that selects nothing, which is right for one
+    # table and made every filtered run of this two-table file fail.
+    only = sys.argv[1:]
+    tables = [(SRC, MUTATIONS), (ENGINE_SRC, ENGINE_MUTATIONS)]
+    names = [name for _, rows in tables for name, *_ in rows]
+    unmatched = [o for o in only if not any(o in n for n in names)]
+    if unmatched:
+        print(f"{len(unmatched)} filter(s) name no row in any table:")
+        for o in unmatched:
+            print(f"  {o!r}")
+        raise SystemExit(2)
+    results = [0]
+    for src, rows in tables:
+        mine = [o for o in only if any(o in name for name, *_ in rows)]
+        if only and not mine:
+            continue
+        results.append(sweep(src, rows, "mediaconvert", timeout=900, only=mine or None))
+    raise SystemExit(max(results))

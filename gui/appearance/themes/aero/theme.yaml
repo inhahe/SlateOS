@@ -1,0 +1,246 @@
+# Aero -- SlateOS's own colours: what the desktop is drawn in when no other
+# theme is chosen.
+#
+# This file is also the template for a theme of your own. Copy this folder to
+# ~/.local/share/slateos/themes/<name>/, give `meta` a new name, change the
+# colours you want to change and delete the rest -- a colour a theme leaves out
+# keeps the value below, so a theme that sets only `base` and `text` is a whole
+# theme. Then choose it in Settings, or set `theme.colors: <name>` in
+# ~/.config/slateos/appearance.yaml.
+#
+# `colors` is dark mode and `colors-light` is light mode. A theme with only one
+# of the two is shown in that mode whichever the user has chosen. `terminal` and
+# `terminal-light` are a terminal's colours for the same two modes, `syntax` and
+# `syntax-light` the colours of code in a code editor, `widget-style` is the
+# shape of the controls -- chosen separately, as `theme.widget_style: <name>`,
+# so one theme's colours can be worn with another's buttons -- and
+# `animation`, at the end, is how the desktop's panels and notifications move,
+# chosen separately again as `theme.animation: <name>`.
+#
+# Colours are opaque, written "#rrggbb" -- in quotes, because an unquoted `#`
+# after a space begins a comment. The accent is not here: it is the user's own
+# choice, made in Settings. And the four text colours (text, subtext0,
+# subtext1, link) are held to a minimum contrast against the backgrounds, so a
+# theme chooses where its text starts but cannot make it unreadable.
+#
+# The desktop does not read the colours, the controls or the animation in this
+# file: they are compiled into it, so the built-in theme cannot fail to load.
+# Tests hold them equal: the_shipped_built_in_theme_is_the_built_in_palette in
+# gui/appearance/src/themes.rs,
+# the_shipped_built_in_theme_writes_out_the_built_in_controls in
+# gui/appearance/src/themes/widgets.rs, and
+# the_shipped_built_in_theme_writes_out_the_built_in_motion in
+# gui/appearance/src/themes/animation.rs.
+# The hues are Catppuccin's (Mocha for dark, Latte for light), with the light
+# ones deepened until they read as text.
+
+meta:
+  name: Aero
+  author: SlateOS
+  version: "1.0"
+  tags: [default, dark, light]
+  supports: [colors, terminal, syntax, icons, widget-style, animation]
+
+colors:
+  # Backgrounds, darkest to lightest: the frame behind everything, the
+  # sidebars, the page, then three raised surfaces.
+  crust: "#11111b"
+  mantle: "#181825"
+  base: "#1e1e2e"
+  surface0: "#313244"
+  surface1: "#45475a"
+  surface2: "#585b70"
+  # The faintest legible mark: placeholders, disabled labels.
+  overlay0: "#6c7086"
+  # Text, faintest to strongest, and links.
+  subtext0: "#a6adc8"
+  subtext1: "#bac2de"
+  text: "#cdd6f4"
+  link: "#89b4fa"
+  # The outline that carries structure where a box is not filled.
+  border: "#cdd6f4"
+  # The hues. Red means failed or dangerous, green succeeded, yellow warning;
+  # the rest are for things told apart by colour -- labels, charts, syntax.
+  red: "#f38ba8"
+  green: "#a6e3a1"
+  yellow: "#f9e2af"
+  peach: "#fab387"
+  blue: "#89b4fa"
+  lavender: "#b4befe"
+  mauve: "#cba6f7"
+  sapphire: "#74c7ec"
+  teal: "#94e2d5"
+  sky: "#89dceb"
+  pink: "#f5c2e7"
+  rosewater: "#f5e0dc"
+  flamingo: "#f2cdcd"
+  maroon: "#eba0ac"
+
+colors-light:
+  crust: "#dce0e8"
+  mantle: "#e6e9ef"
+  base: "#eff1f5"
+  surface0: "#ccd0da"
+  surface1: "#bcc0cc"
+  surface2: "#acb0be"
+  overlay0: "#9ca0b0"
+  subtext0: "#00688b"
+  subtext1: "#00688b"
+  text: "#000000"
+  link: "#0036a3"
+  border: "#000000"
+  red: "#d20f39"
+  green: "#317b21"
+  yellow: "#976014"
+  peach: "#b94908"
+  blue: "#0036a3"
+  lavender: "#5565be"
+  mauve: "#8839ef"
+  sapphire: "#187788"
+  teal: "#13787e"
+  sky: "#0374a1"
+  pink: "#9f508a"
+  rosewater: "#965e52"
+  flamingo: "#a05757"
+  maroon: "#c33b47"
+
+# A terminal's colours: what it writes in and on, its cursor, and the sixteen
+# colours programs name by number. A theme that leaves these sections out gets
+# its own hues in the slots every terminal gives them -- red for red, green for
+# green, pink as magenta and teal as cyan -- so retinting `colors` retints the
+# terminal to match; set a slot here to choose it outright. The numbers keep
+# their meanings: colour 1 is red on every terminal, and a program that prints
+# red expects red. The foreground is held to the same contrast floor as text;
+# the sixteen are not, being the program's choice.
+terminal:
+  # What the terminal writes in and on, and its cursor.
+  foreground: "#cdd6f4"
+  background: "#1e1e2e"
+  cursor: "#f5e0dc"
+  # The sixteen colours programs name by number: 0-7, then the bright 8-15.
+  black: "#45475a"
+  red: "#f38ba8"
+  green: "#a6e3a1"
+  yellow: "#f9e2af"
+  blue: "#89b4fa"
+  magenta: "#f5c2e7"
+  cyan: "#94e2d5"
+  white: "#bac2de"
+  bright-black: "#585b70"
+  bright-red: "#f38ba8"
+  bright-green: "#a6e3a1"
+  bright-yellow: "#f9e2af"
+  bright-blue: "#89b4fa"
+  bright-magenta: "#f5c2e7"
+  bright-cyan: "#94e2d5"
+  bright-white: "#a6adc8"
+
+terminal-light:
+  # What the terminal writes in and on, and its cursor.
+  foreground: "#000000"
+  background: "#eff1f5"
+  cursor: "#965e52"
+  # The sixteen colours programs name by number: 0-7, then the bright 8-15.
+  black: "#000000"
+  red: "#d20f39"
+  green: "#317b21"
+  yellow: "#976014"
+  blue: "#0036a3"
+  magenta: "#9f508a"
+  cyan: "#13787e"
+  white: "#acb0be"
+  bright-black: "#6b6d78"
+  bright-red: "#d20f39"
+  bright-green: "#317b21"
+  bright-yellow: "#976014"
+  bright-blue: "#0036a3"
+  bright-magenta: "#9f508a"
+  bright-cyan: "#13787e"
+  bright-white: "#bcc0cc"
+
+# The colours of code, one per kind of thing a code editor's highlighter tells
+# apart. Like the terminal's, these follow `colors` when left out -- keywords
+# take the theme's mauve, strings its green -- so set a kind here to choose it
+# outright. Every kind is held to the text's contrast floor when drawn,
+# comments included: code is read.
+syntax:
+  keyword: "#cba6f7"      # fn, if, return
+  string: "#a6e3a1"       # "text", 'c'
+  escape: "#f5c2e7"       # \n in a string; a regular expression
+  comment: "#6c7086"
+  number: "#fab387"
+  constant: "#fab387"     # true, None, a named constant
+  type: "#f9e2af"
+  function: "#89b4fa"     # where it is defined or called
+  macro: "#94e2d5"        # println!
+  builtin: "#f38ba8"      # self, print
+  constructor: "#74c7ec"  # an enum's variant, a struct built by name
+  variable: "#cdd6f4"
+  parameter: "#eba0ac"
+  property: "#b4befe"     # a field, a key
+  module: "#b4befe"
+  label: "#74c7ec"        # a loop label, a lifetime
+  operator: "#89dceb"
+  punctuation: "#9ca3bd"  # brackets, commas
+  attribute: "#f9e2af"    # #[derive], @decorator
+  tag: "#89b4fa"          # <div>
+  heading: "#89b4fa"      # # A heading, in markup
+  link: "#89b4fa"         # a URL, in markup
+  inserted: "#a6e3a1"     # a diff's + line
+  deleted: "#f38ba8"      # a diff's - line
+  changed: "#f9e2af"      # a context diff's ! line
+
+syntax-light:
+  keyword: "#8839ef"
+  string: "#317b21"
+  escape: "#9f508a"
+  comment: "#9ca0b0"
+  number: "#b94908"
+  constant: "#b94908"
+  type: "#976014"
+  function: "#0036a3"
+  macro: "#13787e"
+  builtin: "#d20f39"
+  constructor: "#187788"
+  variable: "#000000"
+  parameter: "#c33b47"
+  property: "#5565be"
+  module: "#5565be"
+  label: "#187788"
+  operator: "#0374a1"
+  punctuation: "#4e5058"
+  attribute: "#976014"
+  tag: "#0036a3"
+  heading: "#0036a3"
+  link: "#0036a3"
+  inserted: "#317b21"
+  deleted: "#d20f39"
+  changed: "#976014"
+
+widget-style:
+  # The shapes of the controls. Sizes are whole pixels.
+  button:
+    radius: 4          # the corners: 0 (square) to 14 (a pill)
+    padding: 14        # room either side of the label: 4 to 24
+    gloss: true        # the upper half of the face a shade brighter
+    shadow: false      # a soft shadow under the button
+  field:
+    radius: 3          # 0 to 13
+    border: box        # box: a line all round; underline: along the bottom
+    focus: glow        # how a field shows it has the keyboard: ring, glow or underline
+  check:
+    radius: 2          # 0 (square) to 7 (a circle)
+  toggle: pill         # an on/off setting: pill, or checkbox
+  scrollbar:
+    width: normal      # thin, or normal
+    visibility: always # always, or overlay: a thin line until the pointer comes to it
+
+animation:
+  # How the desktop's transitions move: a panel opening, the taskbar sliding
+  # away, a notification arriving. Each keeps the length it was designed at
+  # against a standard one, and this sets the standard, so all of them speed
+  # up or slow down together. The user's own animation speed then scales it.
+  enabled: true        # false: nothing moves -- everything is where it goes at once
+  duration-ms: 200     # the standard transition: 50 to 1000 milliseconds
+  easing: ease-out     # ease-out: arrives gently, leaves quickly; linear; or
+                       # spring: arrives a little past its place and settles

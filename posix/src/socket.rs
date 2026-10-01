@@ -37,6 +37,7 @@
 
 use crate::errno;
 use crate::fdtable::{self, HandleKind};
+use crate::interrupt::{Mark, Restart};
 use crate::syscall::*;
 
 // ---------------------------------------------------------------------------
@@ -53,6 +54,8 @@ pub const AF_LOCAL: i32 = AF_UNIX;
 pub const AF_INET: i32 = 2;
 /// IPv6 Internet protocols.
 pub const AF_INET6: i32 = 10;
+/// Link-level addresses (`sockaddr_ll`), as `getifaddrs` gives a link's.
+pub const AF_PACKET: i32 = 17;
 /// Protocol family aliases.
 pub const PF_UNIX: i32 = AF_UNIX;
 /// IPv4 (alias).
@@ -402,8 +405,12 @@ pub(crate) struct SocketMeta {
     pub(crate) peer_addr: u32,
     /// Remote peer port (network byte order).  Set on `connect()`.
     pub(crate) peer_port: u16,
-    /// Local IP address (network byte order).  Set on `bind()`.
+    /// Local IP address (network byte order).  Set on `bind()`, or by
+    /// `connect()` and `accept()` to the address the route goes out from.
     local_addr: u32,
+    /// `local_addr` was chosen by `connect()`, not `bind()`: a datagram
+    /// disconnect forgets it.
+    local_from_connect: bool,
     /// SO_KEEPALIVE setting (stored; kernel applies when syscall exists).
     keepalive: bool,
     /// TCP_NODELAY setting (stored; kernel applies when syscall exists).
@@ -465,13 +472,11 @@ mod meta_store {
     /// The table type, named once so the two implementations agree.
     pub(super) type MetaTable = [Option<SocketMeta>; MAX_SOCKETS];
 
-    const META_INIT: MetaTable = [None; MAX_SOCKETS];
-
     #[cfg(target_os = "none")]
     mod imp {
-        use super::{META_INIT, MetaTable};
+        use super::{MAX_SOCKETS, MetaTable};
 
-        static mut SOCKET_META: MetaTable = META_INIT;
+        static mut SOCKET_META: MetaTable = [None; MAX_SOCKETS];
 
         pub(super) fn table() -> *mut MetaTable {
             &raw mut SOCKET_META
@@ -480,19 +485,19 @@ mod meta_store {
 
     #[cfg(not(target_os = "none"))]
     mod imp {
-        use super::{META_INIT, MetaTable};
+        use super::{MAX_SOCKETS, MetaTable};
         use core::cell::UnsafeCell;
 
         std::thread_local! {
             static SOCKET_META: UnsafeCell<MetaTable> =
-                const { UnsafeCell::new(META_INIT) };
+                const { UnsafeCell::new([None; MAX_SOCKETS]) };
         }
 
         /// Used only during thread-local teardown, when the real table has
         /// already been dropped — mirrors `fdtable`'s `FD_FALLBACK`, so a late
         /// `close()` from a destructor scribbles somewhere harmless rather
         /// than panicking.
-        static mut META_FALLBACK: MetaTable = META_INIT;
+        static mut META_FALLBACK: MetaTable = [None; MAX_SOCKETS];
 
         pub(super) fn table() -> *mut MetaTable {
             SOCKET_META
@@ -620,644 +625,6 @@ pub extern "C" fn ntohl(netlong: u32) -> u32 {
 }
 
 // ---------------------------------------------------------------------------
-// inet_addr / inet_ntoa
-// ---------------------------------------------------------------------------
-
-/// Convert an IPv4 dotted-decimal string to a 32-bit network-order address.
-///
-/// Returns `INADDR_NONE` (0xFFFFFFFF) on parse error.
-///
-/// # Safety
-///
-/// `cp` must be a valid null-terminated string.
-#[cfg_attr(target_os = "none", unsafe(no_mangle))]
-pub unsafe extern "C" fn inet_addr(cp: *const u8) -> u32 {
-    /// Sentinel for parse failure.
-    const INADDR_NONE: u32 = 0xFFFF_FFFF;
-
-    if cp.is_null() {
-        return INADDR_NONE;
-    }
-
-    let mut octets = [0u8; 4];
-    let mut octet_idx: usize = 0;
-    let mut cur_val: u32 = 0;
-    let mut digits: u32 = 0;
-    let mut i: usize = 0;
-
-    loop {
-        // SAFETY: cp is a valid null-terminated string.
-        let c = unsafe { *cp.add(i) };
-        if c == 0 {
-            break;
-        }
-
-        if c == b'.' {
-            if digits == 0 || cur_val > 255 || octet_idx >= 3 {
-                return INADDR_NONE;
-            }
-            if let Some(slot) = octets.get_mut(octet_idx) {
-                *slot = cur_val as u8;
-            }
-            octet_idx = octet_idx.wrapping_add(1);
-            cur_val = 0;
-            digits = 0;
-        } else if c.is_ascii_digit() {
-            // SAFETY: c is '0'..='9', so c - b'0' is 0..=9.
-            #[allow(clippy::arithmetic_side_effects)]
-            {
-                cur_val = cur_val.wrapping_mul(10).wrapping_add(u32::from(c - b'0'));
-            }
-            digits = digits.wrapping_add(1);
-            if cur_val > 255 {
-                return INADDR_NONE;
-            }
-        } else {
-            return INADDR_NONE;
-        }
-
-        i = i.wrapping_add(1);
-    }
-
-    // Final octet.
-    if digits == 0 || cur_val > 255 || octet_idx != 3 {
-        return INADDR_NONE;
-    }
-    octets[3] = cur_val as u8;
-
-    // Return in network byte order: the u32's memory layout matches
-    // the octet sequence [first, second, third, fourth].  This is the
-    // standard POSIX `in_addr_t` convention, consistent with
-    // htonl(INADDR_LOOPBACK) and kernel-sourced addresses.
-    u32::from_ne_bytes(octets)
-}
-
-/// Convert a network-order IPv4 address to a dotted-decimal string.
-///
-/// Returns a pointer to library-owned storage, overwritten by the *calling
-/// thread's* next `inet_ntoa` (see [`crate::perthread`]).  `inet_ntop` is
-/// the reentrant alternative.
-#[cfg_attr(target_os = "none", unsafe(no_mangle))]
-pub extern "C" fn inet_ntoa(addr: InAddr) -> *const u8 {
-    let octets = addr.s_addr.to_ne_bytes();
-    let mut pos: usize = 0;
-
-    // SAFETY: `perthread::current()` is valid for this thread and no other
-    // thread holds a pointer into this block.  The buffer is 16 bytes and
-    // the longest output is "255.255.255.255\0", exactly 16.
-    let buf = unsafe { &mut (*crate::perthread::current()).inet_ntoa };
-    for (idx, &octet) in octets.iter().enumerate() {
-        if idx > 0 {
-            write_byte(buf, &mut pos, b'.');
-        }
-        write_u8_decimal(buf, &mut pos, octet);
-    }
-    write_byte(buf, &mut pos, 0); // null terminate
-    buf.as_ptr()
-}
-
-/// Write a single byte to a buffer.
-fn write_byte(buf: &mut [u8; 16], pos: &mut usize, b: u8) {
-    if let Some(slot) = buf.get_mut(*pos) {
-        *slot = b;
-        *pos = pos.wrapping_add(1);
-    }
-}
-
-/// Write a u8 as decimal digits to a buffer.
-fn write_u8_decimal(buf: &mut [u8; 16], pos: &mut usize, val: u8) {
-    if val >= 100 {
-        #[allow(clippy::arithmetic_side_effects)]
-        write_byte(buf, pos, b'0' + val / 100);
-    }
-    if val >= 10 {
-        #[allow(clippy::arithmetic_side_effects)]
-        write_byte(buf, pos, b'0' + (val / 10) % 10);
-    }
-    #[allow(clippy::arithmetic_side_effects)]
-    write_byte(buf, pos, b'0' + val % 10);
-}
-
-// ---------------------------------------------------------------------------
-// inet_pton
-// ---------------------------------------------------------------------------
-
-/// Convert an address from presentation (text) to network format.
-///
-/// `af` must be `AF_INET`.  `src` is a null-terminated dotted-decimal
-/// string.  `dst` must point to a `struct in_addr` (4 bytes for IPv4).
-///
-/// Returns 1 on success, 0 if `src` is not a valid address for `af`,
-/// or -1 with errno set to `EAFNOSUPPORT` if `af` is unsupported.
-///
-/// `AF_INET6` is recognised but not supported (returns -1).
-#[cfg_attr(target_os = "none", unsafe(no_mangle))]
-pub unsafe extern "C" fn inet_pton(af: i32, src: *const u8, dst: *mut u8) -> i32 {
-    if src.is_null() || dst.is_null() {
-        return 0;
-    }
-
-    match af {
-        AF_INET => {
-            // Parse four decimal octets separated by '.'.
-            // SAFETY: src is a valid null-terminated string (caller contract).
-            let addr = unsafe { inet_addr(src) };
-
-            // inet_addr returns INADDR_NONE (0xFFFFFFFF) on failure.
-            // 255.255.255.255 is also 0xFFFFFFFF — verify by re-scanning.
-            if addr == 0xFFFF_FFFF && !unsafe { is_valid_ipv4(src) } {
-                return 0;
-            }
-
-            // Store in network byte order.  inet_addr returns the address
-            // in POSIX NBO (from_ne_bytes), so to_ne_bytes() recovers the
-            // original octet sequence [first, second, third, fourth].
-            let bytes = addr.to_ne_bytes();
-            // SAFETY: dst points to at least 4 bytes (caller contract).
-            unsafe {
-                *dst = bytes[0];
-                *dst.add(1) = bytes[1];
-                *dst.add(2) = bytes[2];
-                *dst.add(3) = bytes[3];
-            }
-            1
-        }
-        AF_INET6 => {
-            // Parse IPv6 address: up to 8 groups of hex separated by ':'.
-            // Supports :: compression (at most one per address).
-            // SAFETY: src is null-terminated (caller contract).
-            unsafe { inet_pton6(src, dst) }
-        }
-        _ => {
-            errno::set_errno(errno::EAFNOSUPPORT);
-            -1
-        }
-    }
-}
-
-/// Parse an IPv6 address string into 16 bytes in network byte order.
-///
-/// Supports:
-/// - Full form: `2001:0db8:85a3:0000:0000:8a2e:0370:7334`
-/// - Compressed: `::1`, `fe80::1`, `2001:db8::1`
-/// - IPv4-mapped: `::ffff:192.168.1.1`
-///
-/// # Safety
-///
-/// `src` must be a valid null-terminated string.
-/// `dst` must point to at least 16 writable bytes.
-#[allow(clippy::arithmetic_side_effects, clippy::indexing_slicing)] // Fixed-size arrays indexed within validated bounds (group_count < 8, g < 8, cc_pos+fill+g < 8).
-unsafe fn inet_pton6(src: *const u8, dst: *mut u8) -> i32 {
-    let mut groups = [0u16; 8]; // Parsed 16-bit groups.
-    let mut group_count: usize = 0;
-    let mut coloncolon_pos: Option<usize> = None; // Position of :: expansion.
-    let mut cur_val: u32 = 0;
-    let mut cur_digits: usize = 0;
-    let mut i: usize = 0;
-
-    // Handle leading :: .
-    // SAFETY: src is null-terminated.
-    if unsafe { *src } == b':' && unsafe { *src.add(1) } == b':' {
-        coloncolon_pos = Some(0);
-        i = 2;
-    } else if unsafe { *src } == b':' {
-        // A leading single ':' (not '::') is invalid IPv6 syntax.
-        return 0;
-    }
-
-    // Track whether the last consumed token was a single ':' separator
-    // (not part of '::').  If the string ends with a trailing single
-    // colon (e.g. "::ffff:"), the address is invalid.
-    let mut trailing_colon = false;
-
-    loop {
-        let c = unsafe { *src.add(i) };
-        if c == 0 {
-            break;
-        }
-
-        if c == b':' {
-            // End of current group.
-            if cur_digits == 0 && coloncolon_pos.is_some() {
-                return 0; // Multiple :: or empty non-:: group.
-            }
-            if group_count >= 8 {
-                return 0;
-            }
-            if cur_digits > 0 {
-                groups[group_count] = cur_val as u16;
-                group_count = group_count.wrapping_add(1);
-                cur_val = 0;
-                cur_digits = 0;
-            }
-            // Check for ::
-            if unsafe { *src.add(i.wrapping_add(1)) } == b':' {
-                if coloncolon_pos.is_some() {
-                    return 0; // Only one :: allowed.
-                }
-                coloncolon_pos = Some(group_count);
-                trailing_colon = false; // :: at end is valid (e.g. "fe80::")
-                i = i.wrapping_add(2);
-                continue;
-            }
-            trailing_colon = true;
-            i = i.wrapping_add(1);
-            continue;
-        }
-
-        trailing_colon = false;
-
-        // Parse hex digit.
-        let digit = match c {
-            b'0'..=b'9' => u32::from(c.wrapping_sub(b'0')),
-            b'a'..=b'f' => u32::from(c.wrapping_sub(b'a')).wrapping_add(10),
-            b'A'..=b'F' => u32::from(c.wrapping_sub(b'A')).wrapping_add(10),
-            _ => return 0, // Invalid character.
-        };
-
-        cur_val = cur_val.wrapping_shl(4) | digit;
-        cur_digits = cur_digits.wrapping_add(1);
-
-        if cur_digits > 4 || cur_val > 0xFFFF {
-            return 0; // Too many digits or value overflow.
-        }
-
-        i = i.wrapping_add(1);
-    }
-
-    // A trailing single ':' (e.g. "::ffff:") is invalid — it implies
-    // another group should follow.  Trailing '::' is fine (handled above).
-    if trailing_colon {
-        return 0;
-    }
-
-    // Save last group.
-    if cur_digits > 0 {
-        if group_count >= 8 {
-            return 0;
-        }
-        groups[group_count] = cur_val as u16;
-        group_count = group_count.wrapping_add(1);
-    }
-
-    // Expand :: to fill missing groups.
-    let mut result = [0u8; 16];
-    if let Some(cc_pos) = coloncolon_pos {
-        // RFC 2373: :: represents "one or more groups of 16 bits of
-        // zeros".  If group_count >= 8 there is nothing to fill, which
-        // means the :: is invalid (e.g. "1:2:3:4:5:6:7::8").
-        if group_count > 7 {
-            return 0;
-        }
-        let fill = 8usize.wrapping_sub(group_count);
-        // Groups before ::
-        for g in 0..cc_pos {
-            let be = groups[g].to_be_bytes();
-            result[g.wrapping_mul(2)] = be[0];
-            result[g.wrapping_mul(2).wrapping_add(1)] = be[1];
-        }
-        // Zeroed groups for ::
-        // (result is already zeroed)
-        // Groups after ::
-        let after_count = group_count.wrapping_sub(cc_pos);
-        for g in 0..after_count {
-            let dst_idx = cc_pos.wrapping_add(fill).wrapping_add(g);
-            let be = groups[cc_pos.wrapping_add(g)].to_be_bytes();
-            result[dst_idx.wrapping_mul(2)] = be[0];
-            result[dst_idx.wrapping_mul(2).wrapping_add(1)] = be[1];
-        }
-    } else {
-        // No :: — must have exactly 8 groups.
-        if group_count != 8 {
-            return 0;
-        }
-        for g in 0..8 {
-            let be = groups[g].to_be_bytes();
-            result[g.wrapping_mul(2)] = be[0];
-            result[g.wrapping_mul(2).wrapping_add(1)] = be[1];
-        }
-    }
-
-    // Copy to output.
-    // SAFETY: dst points to at least 16 bytes (caller contract).
-    unsafe {
-        core::ptr::copy_nonoverlapping(result.as_ptr(), dst, 16);
-    }
-    1
-}
-
-/// Check if a C string is a syntactically valid IPv4 dotted-decimal.
-///
-/// # Safety
-///
-/// `s` must be a valid null-terminated string.
-unsafe fn is_valid_ipv4(s: *const u8) -> bool {
-    let mut dots: u32 = 0;
-    let mut digits: u32 = 0;
-    let mut val: u32 = 0;
-    let mut i: usize = 0;
-
-    loop {
-        // SAFETY: s is null-terminated.
-        let c = unsafe { *s.add(i) };
-        if c == 0 {
-            break;
-        }
-        if c == b'.' {
-            if digits == 0 {
-                return false;
-            }
-            dots = dots.wrapping_add(1);
-            digits = 0;
-            val = 0;
-        } else if c.is_ascii_digit() {
-            #[allow(clippy::arithmetic_side_effects)]
-            {
-                val = val.wrapping_mul(10).wrapping_add(u32::from(c - b'0'));
-            }
-            digits = digits.wrapping_add(1);
-            if val > 255 {
-                return false;
-            }
-        } else {
-            return false;
-        }
-        i = i.wrapping_add(1);
-    }
-
-    dots == 3 && digits > 0 && val <= 255
-}
-
-// ---------------------------------------------------------------------------
-// inet_ntop
-// ---------------------------------------------------------------------------
-
-/// Convert an address from network format to presentation (text).
-///
-/// `af` must be `AF_INET`.  `src` points to a `struct in_addr` (4
-/// bytes in network byte order).  `dst` is the output buffer of at
-/// least `size` bytes.
-///
-/// Returns `dst` on success, or null with errno set.
-///
-/// # Error precedence
-///
-/// glibc's `inet_ntop` (resolv/inet_ntop.c) is a bare `switch (af)` with no
-/// pointer checks at all: an unrecognised family returns `EAFNOSUPPORT`
-/// whatever the pointers are, and a recognised one dereferences them (i.e.
-/// faults — `EFAULT` is our substitute).  Within a family, `inet_ntop4`
-/// formats into a stack buffer and compares against `size` before it copies,
-/// so `ENOSPC` also outranks a NULL `dst`.  The full order is therefore
-/// `EAFNOSUPPORT`, then `src`, then `ENOSPC`, then `dst`.
-#[cfg_attr(target_os = "none", unsafe(no_mangle))]
-pub extern "C" fn inet_ntop(af: i32, src: *const u8, dst: *mut u8, size: u32) -> *const u8 {
-    match af {
-        AF_INET | AF_INET6 => {}
-        _ => {
-            errno::set_errno(errno::EAFNOSUPPORT);
-            return core::ptr::null();
-        }
-    }
-
-    // Both formatters read `src` before they look at anything else.
-    if src.is_null() {
-        errno::set_errno(errno::EFAULT);
-        return core::ptr::null();
-    }
-
-    if af == AF_INET {
-        inet_ntop4(src, dst, size)
-    } else {
-        inet_ntop6(src, dst, size)
-    }
-}
-
-/// Format an IPv4 address (4 bytes) to dotted-decimal string.
-fn inet_ntop4(src: *const u8, dst: *mut u8, size: u32) -> *const u8 {
-    // SAFETY: src points to at least 4 bytes (caller contract).
-    let octets: [u8; 4] = unsafe { [*src, *src.add(1), *src.add(2), *src.add(3)] };
-
-    let mut tmp = [0u8; 16]; // max "255.255.255.255\0"
-    let mut pos: usize = 0;
-    for (idx, &octet) in octets.iter().enumerate() {
-        if idx > 0 {
-            write_byte_ntop(&mut tmp, &mut pos, b'.');
-        }
-        write_u8_dec_ntop(&mut tmp, &mut pos, octet);
-    }
-
-    let needed = pos.wrapping_add(1); // +null
-    if (size as usize) < needed {
-        errno::set_errno(errno::ENOSPC);
-        return core::ptr::null();
-    }
-
-    // glibc reaches `dst` only in the final `strcpy`, after the ENOSPC test.
-    if dst.is_null() {
-        errno::set_errno(errno::EFAULT);
-        return core::ptr::null();
-    }
-
-    // SAFETY: dst is valid for at least size bytes; needed <= size.
-    unsafe {
-        let mut j: usize = 0;
-        while j < pos {
-            if let Some(&b) = tmp.get(j) {
-                *dst.add(j) = b;
-            }
-            j = j.wrapping_add(1);
-        }
-        *dst.add(pos) = 0;
-    }
-
-    dst.cast_const()
-}
-
-/// Format an IPv6 address (16 bytes) to RFC 5952 canonical string.
-///
-/// Produces the shortest representation with :: compression for the
-/// longest run of consecutive zero groups (ties broken by earliest).
-#[allow(clippy::arithmetic_side_effects, clippy::indexing_slicing)] // Fixed-size [u16;8] and [u8;46] arrays indexed by loop vars bounded to 0..8 / 0..45.
-fn inet_ntop6(src: *const u8, dst: *mut u8, size: u32) -> *const u8 {
-    // SAFETY: src points to at least 16 bytes (caller contract).
-    let mut groups = [0u16; 8];
-    for (i, group) in groups.iter_mut().enumerate() {
-        *group = u16::from_be_bytes(unsafe { [*src.add(i * 2), *src.add(i * 2 + 1)] });
-    }
-
-    // Find the longest run of zero groups for :: compression.
-    let mut best_start: usize = 8;
-    let mut best_len: usize = 0;
-    let mut cur_start: usize = 0;
-    let mut cur_len: usize = 0;
-    for (i, &group_val) in groups.iter().enumerate() {
-        if group_val == 0 {
-            if cur_len == 0 {
-                cur_start = i;
-            }
-            cur_len = cur_len.wrapping_add(1);
-        } else {
-            if cur_len > best_len {
-                best_start = cur_start;
-                best_len = cur_len;
-            }
-            cur_len = 0;
-        }
-    }
-    if cur_len > best_len {
-        best_start = cur_start;
-        best_len = cur_len;
-    }
-    // Per RFC 5952 §4.2.2: :: must save at least one group (len >= 2,
-    // or a single 0 if it's alone is fine for the full zero address).
-    if best_len < 2 {
-        best_start = 8; // Disable compression.
-        best_len = 0;
-    }
-
-    // Format into stack buffer.  Max IPv6 string: 39 chars + null.
-    let mut tmp = [0u8; 46]; // INET6_ADDRSTRLEN
-    let mut pos: usize = 0;
-
-    let mut i: usize = 0;
-    while i < 8 {
-        if i == best_start {
-            // Emit :: — always exactly two colons regardless of position.
-            // This covers leading (::1), trailing (fe80::), middle (1::2),
-            // and all-zeros (::) uniformly.
-            if pos < 45 {
-                tmp[pos] = b':';
-                pos = pos.wrapping_add(1);
-            }
-            if pos < 45 {
-                tmp[pos] = b':';
-                pos = pos.wrapping_add(1);
-            }
-            i = i.wrapping_add(best_len);
-            continue;
-        }
-        if i > 0 && !(i == best_start.wrapping_add(best_len) && best_start < 8) && pos < 45 {
-            tmp[pos] = b':';
-            pos = pos.wrapping_add(1);
-        }
-        // Write hex group without leading zeros.
-        write_hex16_ntop(&mut tmp, &mut pos, groups[i]);
-        i = i.wrapping_add(1);
-    }
-
-    let needed = pos.wrapping_add(1);
-    if (size as usize) < needed {
-        errno::set_errno(errno::ENOSPC);
-        return core::ptr::null();
-    }
-
-    // glibc reaches `dst` only in the final `strcpy`, after the ENOSPC test.
-    if dst.is_null() {
-        errno::set_errno(errno::EFAULT);
-        return core::ptr::null();
-    }
-
-    // SAFETY: dst is valid for at least size bytes.
-    unsafe {
-        let mut j: usize = 0;
-        while j < pos {
-            if let Some(&b) = tmp.get(j) {
-                *dst.add(j) = b;
-            }
-            j = j.wrapping_add(1);
-        }
-        *dst.add(pos) = 0;
-    }
-
-    dst.cast_const()
-}
-
-/// Write a 16-bit value as lowercase hex without leading zeros.
-#[allow(clippy::arithmetic_side_effects, clippy::indexing_slicing)] // nibble is 0..=15, always valid index into 16-byte HEX table.
-fn write_hex16_ntop(buf: &mut [u8; 46], pos: &mut usize, val: u16) {
-    const HEX: &[u8; 16] = b"0123456789abcdef";
-    if val == 0 {
-        if let Some(slot) = buf.get_mut(*pos) {
-            *slot = b'0';
-            *pos = pos.wrapping_add(1);
-        }
-        return;
-    }
-    // Find the first non-zero nibble.
-    let mut started = false;
-    for shift in [12u32, 8, 4, 0] {
-        let nibble = (u32::from(val) >> shift) & 0xF;
-        if nibble != 0 || started {
-            if let Some(slot) = buf.get_mut(*pos) {
-                *slot = HEX[nibble as usize];
-                *pos = pos.wrapping_add(1);
-            }
-            started = true;
-        }
-    }
-}
-
-/// Write a single byte to a 16-byte buffer (inet_ntop helper).
-fn write_byte_ntop(buf: &mut [u8; 16], pos: &mut usize, b: u8) {
-    if let Some(slot) = buf.get_mut(*pos) {
-        *slot = b;
-        *pos = pos.wrapping_add(1);
-    }
-}
-
-/// Write a u8 as decimal digits (inet_ntop helper).
-fn write_u8_dec_ntop(buf: &mut [u8; 16], pos: &mut usize, val: u8) {
-    if val >= 100 {
-        #[allow(clippy::arithmetic_side_effects)]
-        write_byte_ntop(buf, pos, b'0' + val / 100);
-    }
-    if val >= 10 {
-        #[allow(clippy::arithmetic_side_effects)]
-        write_byte_ntop(buf, pos, b'0' + (val / 10) % 10);
-    }
-    #[allow(clippy::arithmetic_side_effects)]
-    write_byte_ntop(buf, pos, b'0' + val % 10);
-}
-
-// ---------------------------------------------------------------------------
-// inet_aton — BSD-style address parsing
-// ---------------------------------------------------------------------------
-
-/// Convert an IPv4 address from dotted-decimal string to binary form.
-///
-/// Like `inet_addr` but stores the result in a `struct in_addr`
-/// pointed to by `inp`.  Returns 1 on success, 0 on parse error.
-///
-/// This is a BSD extension commonly used by older programs and some
-/// configuration parsers.
-///
-/// # Safety
-///
-/// `cp` must be a valid null-terminated string.
-/// `inp` must point to at least 4 bytes (a `struct in_addr`).
-#[cfg_attr(target_os = "none", unsafe(no_mangle))]
-pub unsafe extern "C" fn inet_aton(cp: *const u8, inp: *mut u32) -> i32 {
-    if cp.is_null() || inp.is_null() {
-        return 0;
-    }
-
-    // SAFETY: inet_addr parses the same dotted-decimal format.
-    let addr = unsafe { inet_addr(cp) };
-
-    // inet_addr returns INADDR_NONE (0xFFFFFFFF) on failure.
-    // 255.255.255.255 is valid, so we double-check with the validator.
-    if addr == 0xFFFF_FFFF && !unsafe { is_valid_ipv4(cp) } {
-        return 0;
-    }
-
-    // SAFETY: inp is valid for 4 bytes (caller contract).
-    unsafe {
-        *inp = addr;
-    }
-    1
-}
-
-// ---------------------------------------------------------------------------
 // socket()
 // ---------------------------------------------------------------------------
 
@@ -1379,6 +746,7 @@ pub extern "C" fn socket(domain: i32, sock_type: i32, protocol: i32) -> i32 {
             peer_addr: 0,
             peer_port: 0,
             local_addr: 0,
+            local_from_connect: false,
             keepalive: false,
             nodelay: false,
             reuseaddr: false,
@@ -1541,7 +909,12 @@ pub unsafe extern "C" fn connect(fd: i32, addr: *const Sockaddr, addrlen: Sockle
                     bound_port: meta.bound_port,
                     peer_addr: sin.sin_addr.s_addr,
                     peer_port: sin.sin_port,
-                    local_addr: meta.local_addr,
+                    local_addr: if meta.local_addr != 0 {
+                        meta.local_addr
+                    } else {
+                        route_source(sin.sin_addr.s_addr).unwrap_or(0)
+                    },
+                    local_from_connect: meta.local_addr == 0,
                     keepalive: meta.keepalive,
                     nodelay: meta.nodelay,
                     reuseaddr: meta.reuseaddr,
@@ -1611,6 +984,12 @@ pub unsafe extern "C" fn connect(fd: i32, addr: *const Sockaddr, addrlen: Sockle
                 // AF_UNSPEC → disconnect (clear stored peer + kernel filter).
                 meta.peer_addr = 0;
                 meta.peer_port = 0;
+                // Linux's `udp_disconnect` forgets a source the connect chose,
+                // but not one `bind` set.
+                if meta.local_from_connect {
+                    meta.local_addr = 0;
+                    meta.local_from_connect = false;
+                }
                 set_meta(fd, meta);
                 if entry.handle != 0 {
                     let _ = syscall3(SYS_UDP_CONNECT, entry.handle, 0, 0);
@@ -1620,6 +999,12 @@ pub unsafe extern "C" fn connect(fd: i32, addr: *const Sockaddr, addrlen: Sockle
 
             meta.peer_addr = sin.sin_addr.s_addr;
             meta.peer_port = sin.sin_port;
+            // The source this peer is reached from, as `getsockname` will
+            // report it -- unless `bind` chose one.
+            if meta.local_addr == 0 || meta.local_from_connect {
+                meta.local_addr = route_source(sin.sin_addr.s_addr).unwrap_or(0);
+                meta.local_from_connect = true;
+            }
             set_meta(fd, meta);
 
             // Tell the kernel to filter incoming datagrams by peer.
@@ -1742,6 +1127,7 @@ pub unsafe extern "C" fn bind(fd: i32, addr: *const Sockaddr, addrlen: SocklenT)
             // Just record the port and local address.
             meta.bound_port = sin.sin_port; // store in network order
             meta.local_addr = sin.sin_addr.s_addr;
+            meta.local_from_connect = false;
             set_meta(fd, meta);
             0
         }
@@ -1766,6 +1152,7 @@ pub unsafe extern "C" fn bind(fd: i32, addr: *const Sockaddr, addrlen: SocklenT)
                 fdtable::install_fd_with_flags(fd, HandleKind::UdpSocket, ret as u64, prev_flags);
             meta.bound_port = sin.sin_port;
             meta.local_addr = sin.sin_addr.s_addr;
+            meta.local_from_connect = false;
             set_meta(fd, meta);
 
             0
@@ -1857,6 +1244,8 @@ pub extern "C" fn listen(fd: i32, _backlog: i32) -> i32 {
 /// `*addrlen` bytes, and `addrlen` must be non-null.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub unsafe extern "C" fn accept(fd: i32, addr: *mut Sockaddr, addrlen: *mut SocklenT) -> i32 {
+    // Handlers counted from here (`crate::interrupt`).
+    let mark = Mark::now();
     let Some(entry) = fdtable::get_fd(fd) else {
         errno::set_errno(errno::EBADF);
         return -1;
@@ -1897,7 +1286,7 @@ pub unsafe extern "C" fn accept(fd: i32, addr: *mut Sockaddr, addrlen: *mut Sock
         let err = translate_net_error(ret);
         if (err == errno::EAGAIN || err == errno::EWOULDBLOCK) && !is_nb {
             // Blocking mode: poll-wait for a connection.
-            let conn = accept_wait(entry.handle);
+            let conn = accept_wait(entry.handle, mark);
             if conn < 0 {
                 return conn;
             }
@@ -1914,12 +1303,35 @@ pub unsafe extern "C" fn accept(fd: i32, addr: *mut Sockaddr, addrlen: *mut Sock
     unsafe { finish_accept(fd, conn_handle, addr, addrlen) }
 }
 
+/// The rule a socket call blocked on data or room ends by
+/// ([`crate::interrupt`]): a handler installed with `SA_RESTART` lets it
+/// wait on, unless the socket has a timeout for the call -- signal(7):
+/// "unless a timeout has been set on the socket".
+fn socket_rule(timeout_ms: u64) -> Restart {
+    if timeout_ms > 0 {
+        Restart::Never
+    } else {
+        Restart::IfAsked
+    }
+}
+
+/// [`socket_rule`] for descriptor `fd`, receiving or sending.
+pub(crate) fn wait_rule(fd: i32, receiving: bool) -> Restart {
+    socket_rule(get_meta(fd).map_or(0, |m| {
+        if receiving {
+            m.rcvtimeo_ms
+        } else {
+            m.sndtimeo_ms
+        }
+    }))
+}
+
 /// Poll-wait for a connection on a blocking listener.
 ///
 /// Retries `SYS_TCP_ACCEPT` (non-blocking) in a loop with 10ms sleeps
 /// until a connection arrives.  Returns the connection handle (≥0) or
 /// -1 with errno set.
-fn accept_wait(listener_handle: u64) -> i32 {
+fn accept_wait(listener_handle: u64, mark: Mark) -> i32 {
     const POLL_NS: u64 = 10_000_000; // 10ms
 
     loop {
@@ -1934,7 +1346,13 @@ fn accept_wait(listener_handle: u64) -> i32 {
             return -1;
         }
         // Still no connection — sleep then retry.
-        let _ = syscall1(SYS_SLEEP, POLL_NS);
+        // A handler ends the wait by the call's rule, and only now,
+        // with nothing come (`crate::interrupt`).
+        if mark.interrupted(Restart::IfAsked) {
+            errno::set_errno(errno::EINTR);
+            return -1;
+        }
+        crate::lowlevellock::nap(POLL_NS, Restart::IfAsked, mark);
     }
 }
 
@@ -1980,7 +1398,11 @@ unsafe fn finish_accept(
             bound_port: listener_meta.map_or(0, |m| m.bound_port),
             peer_addr: peer_ip_nbo,
             peer_port: peer_port_nbo,
-            local_addr: listener_meta.map_or(0, |m| m.local_addr),
+            local_addr: match listener_meta.map_or(0, |m| m.local_addr) {
+                0 => route_source(peer_ip_nbo).unwrap_or(0),
+                a => a,
+            },
+            local_from_connect: false,
             keepalive: false,
             nodelay: false,
             reuseaddr: false,
@@ -2095,6 +1517,8 @@ pub unsafe extern "C" fn accept4(
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 #[allow(clippy::too_many_lines)] // Large match over socket handle kinds (TCP / UnixStream / error cases); splitting would scatter related per-kind send handling.
 pub unsafe extern "C" fn send(fd: i32, buf: *const u8, len: usize, flags: i32) -> isize {
+    // Handlers counted from here (`crate::interrupt`).
+    let mark = Mark::now();
     if buf.is_null() && len > 0 {
         errno::set_errno(errno::EFAULT);
         return -1;
@@ -2132,7 +1556,7 @@ pub unsafe extern "C" fn send(fd: i32, buf: *const u8, len: usize, flags: i32) -
                 // semantics.  Linux's blocking send() loops until ALL
                 // bytes are accepted.  Programs depend on this.
                 let timeout_ms = get_meta(fd).map_or(0u64, |m| m.sndtimeo_ms);
-                return tcp_send_wait(entry.handle, buf, len, timeout_ms);
+                return tcp_send_wait(entry.handle, buf, len, timeout_ms, mark);
             }
             // Non-blocking: try once.
             let ret = syscall3(SYS_TCP_SEND, entry.handle, buf as u64, len as u64);
@@ -2263,6 +1687,8 @@ pub unsafe extern "C" fn send(fd: i32, buf: *const u8, len: usize, flags: i32) -
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 #[allow(clippy::too_many_lines)] // Large match over socket handle kinds (TCP / UnixStream / error cases); splitting would scatter related per-kind recv handling.
 pub unsafe extern "C" fn recv(fd: i32, buf: *mut u8, len: usize, flags: i32) -> isize {
+    // Handlers counted from here (`crate::interrupt`).
+    let mark = Mark::now();
     if buf.is_null() && len > 0 {
         errno::set_errno(errno::EFAULT);
         return -1;
@@ -2326,6 +1752,7 @@ pub unsafe extern "C" fn recv(fd: i32, buf: *mut u8, len: usize, flags: i32) -> 
                         kern_flags,
                         timeout_ms,
                         ret as usize,
+                        mark,
                     );
                 }
                 return ret as isize;
@@ -2339,9 +1766,17 @@ pub unsafe extern "C" fn recv(fd: i32, buf: *mut u8, len: usize, flags: i32) -> 
                 // Blocking socket — poll-wait with SO_RCVTIMEO.
                 // timeout_ms == 0 means wait indefinitely.
                 if waitall {
-                    return tcp_recv_waitall(entry.handle, buf, len, kern_flags, timeout_ms, 0);
+                    return tcp_recv_waitall(
+                        entry.handle,
+                        buf,
+                        len,
+                        kern_flags,
+                        timeout_ms,
+                        0,
+                        mark,
+                    );
                 }
-                return tcp_recv_wait(entry.handle, buf, len, kern_flags, timeout_ms);
+                return tcp_recv_wait(entry.handle, buf, len, kern_flags, timeout_ms, mark);
             }
             errno::set_errno(err);
             -1
@@ -2384,6 +1819,7 @@ pub unsafe extern "C" fn recv(fd: i32, buf: *mut u8, len: usize, flags: i32) -> 
                     &mut src_info,
                     kern_flags,
                     timeout_ms,
+                    mark,
                 );
                 return waited;
             }
@@ -2429,6 +1865,7 @@ fn udp_recv_wait(
     src_info: &mut [u8; 6],
     kern_flags: u32,
     timeout_ms: u64,
+    mark: Mark,
 ) -> isize {
     const POLL_NS: u64 = 10_000_000; // 10ms
 
@@ -2465,7 +1902,13 @@ fn udp_recv_wait(
                 return -1;
             }
         }
-        let _ = syscall1(SYS_SLEEP, POLL_NS);
+        // A handler ends the wait by the call's rule, and only now,
+        // with nothing come (`crate::interrupt`).
+        if mark.interrupted(socket_rule(timeout_ms)) {
+            errno::set_errno(errno::EINTR);
+            return -1;
+        }
+        crate::lowlevellock::nap(POLL_NS, socket_rule(timeout_ms), mark);
     }
 }
 
@@ -2481,6 +1924,7 @@ pub(crate) fn tcp_recv_wait(
     len: usize,
     kern_flags: u32,
     timeout_ms: u64,
+    mark: Mark,
 ) -> isize {
     const POLL_NS: u64 = 10_000_000; // 10ms
 
@@ -2524,7 +1968,13 @@ pub(crate) fn tcp_recv_wait(
                 return -1;
             }
         }
-        let _ = syscall1(SYS_SLEEP, POLL_NS);
+        // A handler ends the wait by the call's rule, and only now,
+        // with nothing come (`crate::interrupt`).
+        if mark.interrupted(socket_rule(timeout_ms)) {
+            errno::set_errno(errno::EINTR);
+            return -1;
+        }
+        crate::lowlevellock::nap(POLL_NS, socket_rule(timeout_ms), mark);
     }
 }
 
@@ -2543,6 +1993,7 @@ fn tcp_recv_waitall(
     kern_flags: u32,
     timeout_ms: u64,
     already_read: usize,
+    mark: Mark,
 ) -> isize {
     const POLL_NS: u64 = 10_000_000; // 10ms
 
@@ -2598,7 +2049,16 @@ fn tcp_recv_waitall(
                 return -1;
             }
         }
-        let _ = syscall1(SYS_SLEEP, POLL_NS);
+        // A handler ends the wait by the call's rule, and only now,
+        // with nothing come (`crate::interrupt`).
+        if mark.interrupted(socket_rule(timeout_ms)) {
+            if got > 0 {
+                break;
+            }
+            errno::set_errno(errno::EINTR);
+            return -1;
+        }
+        crate::lowlevellock::nap(POLL_NS, socket_rule(timeout_ms), mark);
     }
 
     got as isize
@@ -2611,7 +2071,13 @@ fn tcp_recv_waitall(
 /// indefinitely.
 ///
 /// Returns bytes sent or -1 (with errno set).
-pub(crate) fn tcp_send_wait(handle: u64, buf: *const u8, len: usize, timeout_ms: u64) -> isize {
+pub(crate) fn tcp_send_wait(
+    handle: u64,
+    buf: *const u8,
+    len: usize,
+    timeout_ms: u64,
+    mark: Mark,
+) -> isize {
     const POLL_NS: u64 = 10_000_000; // 10ms
 
     let deadline = if timeout_ms > 0 {
@@ -2674,7 +2140,16 @@ pub(crate) fn tcp_send_wait(handle: u64, buf: *const u8, len: usize, timeout_ms:
                 return -1;
             }
         }
-        let _ = syscall1(SYS_SLEEP, POLL_NS);
+        // A handler ends the wait by the call's rule, and only now,
+        // with nothing come (`crate::interrupt`).
+        if mark.interrupted(socket_rule(timeout_ms)) {
+            if sent > 0 {
+                break;
+            }
+            errno::set_errno(errno::EINTR);
+            return -1;
+        }
+        crate::lowlevellock::nap(POLL_NS, socket_rule(timeout_ms), mark);
     }
 
     sent as isize
@@ -2704,6 +2179,8 @@ pub unsafe extern "C" fn sendto(
     dest_addr: *const Sockaddr,
     addrlen: SocklenT,
 ) -> isize {
+    // Handlers counted from here (`crate::interrupt`).
+    let mark = Mark::now();
     if buf.is_null() && len > 0 {
         errno::set_errno(errno::EFAULT);
         return -1;
@@ -2730,7 +2207,7 @@ pub unsafe extern "C" fn sendto(
             // Blocking socket: use tcp_send_wait for full-write
             // semantics (same as send()).
             let timeout_ms = get_meta(fd).map_or(0u64, |m| m.sndtimeo_ms);
-            return tcp_send_wait(entry.handle, buf, len, timeout_ms);
+            return tcp_send_wait(entry.handle, buf, len, timeout_ms, mark);
         }
         // Non-blocking: try once.
         let ret = syscall3(SYS_TCP_SEND, entry.handle, buf as u64, len as u64);
@@ -2864,6 +2341,8 @@ pub unsafe extern "C" fn recvfrom(
     src_addr: *mut Sockaddr,
     addrlen: *mut SocklenT,
 ) -> isize {
+    // Handlers counted from here (`crate::interrupt`).
+    let mark = Mark::now();
     if buf.is_null() && len > 0 {
         errno::set_errno(errno::EFAULT);
         return -1;
@@ -2931,6 +2410,7 @@ pub unsafe extern "C" fn recvfrom(
                             kern_flags,
                             timeout_ms,
                             ret as usize,
+                            mark,
                         )
                     } else {
                         ret as isize
@@ -2941,9 +2421,17 @@ pub unsafe extern "C" fn recvfrom(
                     let err = translate_net_error(ret);
                     if (err == errno::EAGAIN || err == errno::EWOULDBLOCK) && !is_nb {
                         if waitall {
-                            tcp_recv_waitall(entry.handle, buf, len, kern_flags, timeout_ms, 0)
+                            tcp_recv_waitall(
+                                entry.handle,
+                                buf,
+                                len,
+                                kern_flags,
+                                timeout_ms,
+                                0,
+                                mark,
+                            )
                         } else {
-                            tcp_recv_wait(entry.handle, buf, len, kern_flags, timeout_ms)
+                            tcp_recv_wait(entry.handle, buf, len, kern_flags, timeout_ms, mark)
                         }
                     } else {
                         errno::set_errno(err);
@@ -3020,6 +2508,7 @@ pub unsafe extern "C" fn recvfrom(
                         &mut src_info,
                         kern_flags,
                         timeout_ms,
+                        mark,
                     );
                     if waited < 0 {
                         return waited;
@@ -3759,10 +3248,10 @@ pub unsafe extern "C" fn getsockname(fd: i32, addr: *mut Sockaddr, addrlen: *mut
 }
 
 // ---------------------------------------------------------------------------
-// gethostbyname() — simplified DNS resolution
+// struct hostent
 // ---------------------------------------------------------------------------
 
-/// Host entry for DNS results.
+/// `struct hostent`: what the hosts database answers ([`crate::hosts`]).
 #[repr(C)]
 #[derive(Clone, Copy)]
 pub struct Hostent {
@@ -3770,607 +3259,12 @@ pub struct Hostent {
     pub h_name: *const u8,
     /// Alias list (NULL-terminated).
     pub h_aliases: *const *const u8,
-    /// Address type (`AF_INET`).
+    /// Address family: `AF_INET` or `AF_INET6`.
     pub h_addrtype: i32,
-    /// Address length (4 for IPv4).
+    /// Address length: 4 or 16.
     pub h_length: i32,
-    /// Address list (NULL-terminated, each points to 4-byte IPv4 addr).
+    /// Address list (NULL-terminated, each `h_length` bytes).
     pub h_addr_list: *const *const u8,
-}
-
-/// Backing storage for one `hostent` result: the `struct hostent` itself
-/// plus everything its pointers point at.
-///
-/// A `hostent` is a web of pointers into library-owned memory, so the whole
-/// web has to be kept together and have the same lifetime.  One of these
-/// lives in each thread's [`crate::perthread`] block, which is what makes
-/// `gethostbyname` safe to call from two threads at once: each gets its own
-/// web.  Within a thread the next call still overwrites the previous result
-/// — that is the POSIX contract, and why `gethostbyname_r` exists.
-#[repr(C)]
-#[derive(Clone, Copy)]
-pub struct HostentBuf {
-    /// Null-terminated hostname; 256 is `NI_MAXHOST`, and a DNS name is at
-    /// most 253 characters, so this never truncates a legal name.
-    name: [u8; 256],
-    /// The single IPv4 address, in network byte order.
-    addr: [u8; 4],
-    /// `h_addr_list`: `[&addr, NULL]`.
-    addr_list: [*const u8; 2],
-    /// `h_aliases`: always empty — our resolver returns no CNAME chain.
-    aliases: [*const u8; 1],
-    /// The `struct hostent` handed back to the caller.
-    result: Hostent,
-}
-
-impl HostentBuf {
-    /// Initial state, which must be bit-identical to all-zero — see
-    /// [`crate::perthread::PerThread::ZERO`].  Null pointers are the correct
-    /// "no result yet" value for every pointer field.
-    pub const ZERO: Self = Self {
-        name: [0; 256],
-        addr: [0; 4],
-        addr_list: [core::ptr::null(); 2],
-        aliases: [core::ptr::null()],
-        result: Hostent {
-            h_name: core::ptr::null(),
-            h_aliases: core::ptr::null(),
-            h_addrtype: 0,
-            h_length: 0,
-            h_addr_list: core::ptr::null(),
-        },
-    };
-
-    /// Store `name` (truncated to fit, always null-terminated) and `addr`,
-    /// wire up the pointer web, and return the assembled `hostent`.
-    ///
-    /// Written against a raw pointer rather than `&mut self` because the
-    /// result it builds contains pointers *into* the same object; deriving
-    /// them all from one raw pointer keeps their provenance valid for as
-    /// long as the caller holds the returned `hostent`.
-    ///
-    /// # Safety
-    ///
-    /// `this` must point at a `HostentBuf` the calling thread owns
-    /// exclusively — in practice the one inside its own `PerThread` block —
-    /// and `name` must be readable for `name_len` bytes.
-    unsafe fn fill(
-        this: *mut Self,
-        name: *const u8,
-        name_len: usize,
-        addr: [u8; 4],
-    ) -> *const Hostent {
-        // SAFETY: the caller guarantees `this` is a valid, exclusively-owned
-        // `HostentBuf` and that `name` is readable for `name_len` bytes.
-        // The two never overlap: `name` is caller memory or a stack buffer,
-        // `this` is in the thread's TLS block.
-        unsafe {
-            let name_buf = &raw mut (*this).name;
-            // Leave room for the terminator: `name` is 256 bytes, so at most
-            // 255 characters plus a NUL.
-            let copy_len = core::cmp::min(name_len, 255);
-            core::ptr::copy_nonoverlapping(name, name_buf.cast::<u8>(), copy_len);
-            name_buf.cast::<u8>().add(copy_len).write(0);
-
-            let addr_buf = &raw mut (*this).addr;
-            addr_buf.write(addr);
-
-            let addr_list = &raw mut (*this).addr_list;
-            addr_list.cast::<*const u8>().write(addr_buf.cast::<u8>());
-            addr_list
-                .cast::<*const u8>()
-                .add(1)
-                .write(core::ptr::null());
-
-            let aliases = &raw mut (*this).aliases;
-            aliases.cast::<*const u8>().write(core::ptr::null());
-
-            let result = &raw mut (*this).result;
-            (*result).h_name = name_buf.cast::<u8>();
-            (*result).h_aliases = aliases.cast::<*const u8>();
-            (*result).h_addrtype = AF_INET;
-            (*result).h_length = 4;
-            (*result).h_addr_list = addr_list.cast::<*const u8>();
-            result
-        }
-    }
-}
-
-/// Resolve a hostname to an IPv4 address.
-///
-/// Returns a pointer to library-owned storage, or NULL on failure.  The
-/// result is valid until the *calling thread's* next `gethostbyname` (see
-/// [`HostentBuf`]).
-///
-/// On failure the calling thread's `h_errno` describes why; on success it is
-/// reset to 0.  `errno` is *not* the resolver's channel.
-///
-/// # Safety
-///
-/// `name` must be a valid null-terminated hostname string.
-#[cfg_attr(target_os = "none", unsafe(no_mangle))]
-pub unsafe extern "C" fn gethostbyname(name: *const u8) -> *const Hostent {
-    if name.is_null() {
-        set_h_errno(NO_RECOVERY);
-        return core::ptr::null();
-    }
-
-    let name_len = unsafe { crate::string::strlen(name) };
-    if name_len == 0 || name_len > 253 {
-        // Not a name any resolver could ever answer for.
-        set_h_errno(HOST_NOT_FOUND);
-        return core::ptr::null();
-    }
-
-    // Output buffer for the resolved IPv4 address.
-    let mut resolved = [0u8; 4];
-
-    // SYS_DNS_RESOLVE: arg0=hostname_ptr, arg1=hostname_len, arg2=output_ptr.
-    let ret = syscall3(
-        SYS_DNS_RESOLVE,
-        name as u64,
-        name_len as u64,
-        resolved.as_mut_ptr() as u64,
-    );
-    if ret < 0 {
-        set_h_errno(resolver_error_for(ret));
-        return core::ptr::null();
-    }
-    set_h_errno(0);
-
-    // SAFETY: `perthread::current()` is valid for this thread and no other
-    // thread holds a pointer into this block; `name` is readable for
-    // `name_len` bytes (that is where `strlen` found the terminator).
-    unsafe {
-        HostentBuf::fill(
-            &raw mut (*crate::perthread::current()).hostent,
-            name,
-            name_len,
-            resolved,
-        )
-    }
-}
-
-// ---------------------------------------------------------------------------
-// gethostbyname2 — lookup with address family selection
-// ---------------------------------------------------------------------------
-
-/// Look up a host by name with a specified address family.
-///
-/// Like `gethostbyname`, but allows selecting the address family
-/// (AF_INET for IPv4, AF_INET6 for IPv6).  Since our kernel only
-/// supports IPv4 DNS resolution, AF_INET6 lookups always fail.
-///
-/// # Safety
-///
-/// `name` must be a valid null-terminated C string.
-#[cfg_attr(target_os = "none", unsafe(no_mangle))]
-pub unsafe extern "C" fn gethostbyname2(name: *const u8, af: i32) -> *const Hostent {
-    match af {
-        AF_INET => {
-            // Delegate to gethostbyname for IPv4.
-            unsafe { gethostbyname(name) }
-        }
-        AF_INET6 => {
-            // IPv6 not supported by our kernel's DNS resolver.  The name may
-            // well be valid — we just have no AAAA record for it — which is
-            // exactly what NO_DATA means.
-            set_h_errno(NO_DATA);
-            core::ptr::null()
-        }
-        _ => {
-            set_h_errno(NO_RECOVERY);
-            core::ptr::null()
-        }
-    }
-}
-
-// ---------------------------------------------------------------------------
-// gethostbyaddr — reverse DNS lookup
-// ---------------------------------------------------------------------------
-
-/// Reverse-resolve an IPv4 address to a hostname.
-///
-/// Given a network-byte-order IPv4 address (4 bytes at `*addr`),
-/// performs a DNS PTR lookup via `SYS_DNS_REVERSE_RESOLVE`.
-///
-/// Returns a pointer to library-owned storage, or NULL on failure.  This
-/// uses a *different* [`HostentBuf`] from `gethostbyname`, so interleaving
-/// forward and reverse lookups doesn't clobber either result — POSIX makes
-/// no such promise, but callers rely on it and one extra buffer is cheap.
-///
-/// On failure the calling thread's `h_errno` describes why; on success it is
-/// reset to 0.
-///
-/// # Safety
-///
-/// `addr` must point to at least `len` (4) bytes.
-#[cfg_attr(target_os = "none", unsafe(no_mangle))]
-pub unsafe extern "C" fn gethostbyaddr(
-    addr: *const u8,
-    len: i32,
-    addr_type: i32,
-) -> *const Hostent {
-    if addr.is_null() || addr_type != AF_INET || len != 4 {
-        set_h_errno(NO_RECOVERY);
-        return core::ptr::null();
-    }
-
-    // Read the address bytes.
-    let mut ip_bytes = [0u8; 4];
-    unsafe {
-        ip_bytes[0] = *addr;
-        ip_bytes[1] = *addr.add(1);
-        ip_bytes[2] = *addr.add(2);
-        ip_bytes[3] = *addr.add(3);
-    }
-
-    // Convert to the u32 representation our kernel expects
-    // (network byte order = big-endian, same as sockaddr_in).
-    let ip_u32 = u32::from_ne_bytes(ip_bytes);
-
-    // Output buffer for the reverse-resolved hostname.
-    let mut name_buf = [0u8; 256];
-
-    // SYS_DNS_REVERSE_RESOLVE: arg0=ip (network order), arg1=output_ptr, arg2=output_len.
-    let ret = syscall3(
-        SYS_DNS_REVERSE_RESOLVE,
-        u64::from(ip_u32),
-        name_buf.as_mut_ptr() as u64,
-        name_buf.len() as u64,
-    );
-    if ret < 0 {
-        set_h_errno(resolver_error_for(ret));
-        return core::ptr::null();
-    }
-    set_h_errno(0);
-
-    // The kernel reports the name length; clamp it to what it could have
-    // written rather than trusting it.
-    let name_len = core::cmp::min(ret as usize, name_buf.len());
-
-    // SAFETY: `perthread::current()` is valid for this thread and no other
-    // thread holds a pointer into this block; `name_buf` is a local array
-    // readable for `name_len <= name_buf.len()` bytes.
-    unsafe {
-        HostentBuf::fill(
-            &raw mut (*crate::perthread::current()).hostent_rev,
-            name_buf.as_ptr(),
-            name_len,
-            ip_bytes,
-        )
-    }
-}
-
-// ---------------------------------------------------------------------------
-// gethostbyname_r / gethostbyaddr_r — reentrant resolver lookups
-// ---------------------------------------------------------------------------
-//
-// These exist because the non-`_r` forms hand back a pointer into per-thread
-// storage that the *next* call overwrites.  A caller that wants two results
-// alive at once — or that wants to hold one across a call it does not control
-// — has no way to do it with `gethostbyname` alone.
-//
-// The six-argument shape below is the glibc/musl one, which is what CPython's
-// configure detected for this target (`HAVE_GETHOSTBYNAME_R_6_ARG`); the
-// three- and five-argument variants are Solaris and HP-UX history.
-//
-// Return-value convention, copied from musl deliberately rather than invented:
-// **0 on success, a positive errno on failure**, with the resolver's own
-// reason delivered separately through `*h_errnop`.  In particular "no such
-// host" is `ENOENT` *and* `*result == NULL`, not a bare 0 — a caller looping
-// over names needs to tell "not found" from "found, and here it is".
-
-/// Translate a resolver error (`h_errno` space) into the errno this family
-/// returns.
-///
-/// The mapping is musl's: the two spaces answer different questions, and
-/// collapsing them — returning 0 for a failed lookup, say — is what makes
-/// callers silently treat a miss as a hit.
-fn hostent_r_errno_for(h_err: i32) -> i32 {
-    match h_err {
-        HOST_NOT_FOUND | NO_DATA => errno::ENOENT,
-        TRY_AGAIN => errno::EAGAIN,
-        // NO_RECOVERY and anything unrecognised: the query itself failed.
-        _ => errno::EBADMSG,
-    }
-}
-
-/// Pack a resolver answer into a caller-provided buffer and point `ret` at it.
-///
-/// Returns 0, or `ERANGE` if `buflen` cannot hold the whole pointer web.
-///
-/// Layout, in one block so every pointer stays valid exactly as long as `buf`:
-/// `[pad][aliases: 1 ptr][addr_list: 2 ptrs][addr: 4 bytes][name: len+1]`.
-/// The pointer arrays come first and are preceded by however much padding it
-/// takes to 8-align them — POSIX only promises `buf` is a `char *`, so
-/// assuming it is already aligned would be a misaligned store on a caller that
-/// passed `&big_buf[1]`.
-///
-/// # Safety
-///
-/// `ret` and `result` must be valid for writes, `buf` valid for `buflen`
-/// bytes, and `name` readable for `name_len` bytes.
-unsafe fn fill_hostent_r(
-    ret: *mut Hostent,
-    buf: *mut u8,
-    buflen: usize,
-    name: *const u8,
-    name_len: usize,
-    addr: [u8; 4],
-    result: *mut *const Hostent,
-) -> i32 {
-    const PTR: usize = core::mem::size_of::<*const u8>();
-    /// Offset of the alias array from the first aligned byte.
-    const ALIASES_REL: usize = 0;
-    /// …of the address array: one pointer past the alias array.
-    const ADDR_LIST_REL: usize = PTR;
-    /// …of the four address bytes: two more pointers past that.
-    const ADDR_REL: usize = PTR * 3;
-    /// …of the name: four address bytes past that.
-    const NAME_REL: usize = PTR * 3 + 4;
-
-    // Padding needed to align `buf` to a pointer boundary.  `wrapping_sub` is
-    // exact here, not a fudge: `misalign` is a remainder mod `PTR`, so it is
-    // strictly less than `PTR` whenever it is non-zero.
-    let misalign = (buf as usize) % PTR;
-    let pad = if misalign == 0 {
-        0
-    } else {
-        PTR.wrapping_sub(misalign)
-    };
-
-    // `checked_add` rather than `+`: `name_len` comes from `strlen` on caller
-    // memory, and a corrupt string could in principle make this overflow, at
-    // which point a wrapped `need` would pass the `buflen` check and we would
-    // write outside the buffer.
-    let Some(name_off) = pad.checked_add(NAME_REL) else {
-        return errno::ERANGE;
-    };
-    let Some(need) = name_off
-        .checked_add(name_len)
-        .and_then(|n| n.checked_add(1))
-    else {
-        return errno::ERANGE;
-    };
-    if buflen < need {
-        return errno::ERANGE;
-    }
-
-    // Every one of these is smaller than `name_off`, which has already been
-    // shown not to overflow, so `wrapping_add` cannot wrap and is not hiding
-    // anything.
-    let aliases_off = pad.wrapping_add(ALIASES_REL);
-    let addr_list_off = pad.wrapping_add(ADDR_LIST_REL);
-    let addr_off = pad.wrapping_add(ADDR_REL);
-
-    // SAFETY: every offset below is < `need <= buflen`, so all writes land
-    // inside the caller's buffer.  `aliases_off` and `addr_list_off` are
-    // 8-aligned by construction of `pad`.  `name` is readable for `name_len`
-    // bytes by contract, and cannot overlap `buf`: it is either caller memory
-    // for a *different* object or one of our own stack buffers.
-    unsafe {
-        #[allow(clippy::cast_ptr_alignment)]
-        let aliases = buf.add(aliases_off).cast::<*const u8>();
-        aliases.write(core::ptr::null());
-
-        let addr_buf = buf.add(addr_off);
-        core::ptr::copy_nonoverlapping(addr.as_ptr(), addr_buf, addr.len());
-
-        #[allow(clippy::cast_ptr_alignment)]
-        let addr_list = buf.add(addr_list_off).cast::<*const u8>();
-        addr_list.write(addr_buf.cast_const());
-        addr_list.add(1).write(core::ptr::null());
-
-        let name_buf = buf.add(name_off);
-        core::ptr::copy_nonoverlapping(name, name_buf, name_len);
-        name_buf.add(name_len).write(0);
-
-        (*ret).h_name = name_buf.cast_const();
-        (*ret).h_aliases = aliases.cast_const();
-        (*ret).h_addrtype = AF_INET;
-        (*ret).h_length = 4;
-        (*ret).h_addr_list = addr_list.cast_const();
-        *result = ret;
-    }
-    0
-}
-
-/// Resolve a hostname to an IPv4 address, into caller-provided storage.
-///
-/// Returns 0 and sets `*result = ret` on success.  On failure returns a
-/// positive errno (`ENOENT` not found, `EAGAIN` try again, `EBADMSG`
-/// unrecoverable, `ERANGE` buffer too small), leaves `*result` NULL, and
-/// writes the resolver's reason to `*h_errnop`.
-///
-/// The calling thread's `h_errno` is updated as well.  Strictly the `_r` form
-/// owes nothing to that variable — the point of `h_errnop` is to avoid it —
-/// but real callers (CPython's `socketmodule` among them) read `h_errno` after
-/// these calls, and leaving it stale would hand them the *previous* lookup's
-/// reason.  Writing both costs one store and cannot mislead anyone: the
-/// per-thread copy is only ever read by this thread.
-///
-/// # Safety
-///
-/// `name` must be null-terminated, `ret`/`result` valid for writes, `buf`
-/// valid for `buflen` bytes, and `h_errnop`, if non-NULL, valid for writes.
-#[cfg_attr(target_os = "none", unsafe(no_mangle))]
-pub unsafe extern "C" fn gethostbyname_r(
-    name: *const u8,
-    ret: *mut Hostent,
-    buf: *mut u8,
-    buflen: usize,
-    result: *mut *const Hostent,
-    h_errnop: *mut i32,
-) -> i32 {
-    if result.is_null() || ret.is_null() || buf.is_null() {
-        return errno::EFAULT;
-    }
-    // SAFETY: `result` is non-null and valid for writes (checked above).
-    unsafe {
-        *result = core::ptr::null();
-    }
-
-    let fail = |h_err: i32| -> i32 {
-        set_h_errno(h_err);
-        if !h_errnop.is_null() {
-            // SAFETY: the caller guarantees a non-NULL `h_errnop` is writable.
-            unsafe {
-                *h_errnop = h_err;
-            }
-        }
-        hostent_r_errno_for(h_err)
-    };
-
-    if name.is_null() {
-        return fail(HOST_NOT_FOUND);
-    }
-    // SAFETY: the caller guarantees `name` is null-terminated.
-    let name_len = unsafe { crate::string::strlen(name) };
-    if name_len == 0 || name_len > 253 {
-        // Not a name any resolver could answer for; do not spend a syscall.
-        return fail(HOST_NOT_FOUND);
-    }
-
-    let mut resolved = [0u8; 4];
-    let rc = syscall3(
-        SYS_DNS_RESOLVE,
-        name as u64,
-        name_len as u64,
-        resolved.as_mut_ptr() as u64,
-    );
-    if rc < 0 {
-        return fail(resolver_error_for(rc));
-    }
-
-    // SAFETY: `ret`/`result`/`buf` were null-checked above and are valid for
-    // the sizes the caller declared; `name` is readable for `name_len` bytes,
-    // which is where `strlen` found its terminator.
-    let fill = unsafe { fill_hostent_r(ret, buf, buflen, name, name_len, resolved, result) };
-    if fill != 0 {
-        // ERANGE is not a resolver verdict — the lookup succeeded.  glibc
-        // reports NETDB_INTERNAL here; we have no such constant, and
-        // NO_RECOVERY would wrongly tell the caller not to retry.  Leaving
-        // h_errno at its previous value would be worse still, so say
-        // "internal, look at errno" the only way this API can: zero.
-        set_h_errno(0);
-        if !h_errnop.is_null() {
-            // SAFETY: as in `fail`.
-            unsafe {
-                *h_errnop = 0;
-            }
-        }
-        return fill;
-    }
-
-    set_h_errno(0);
-    if !h_errnop.is_null() {
-        // SAFETY: as in `fail`.
-        unsafe {
-            *h_errnop = 0;
-        }
-    }
-    0
-}
-
-/// Reverse-resolve an IPv4 address, into caller-provided storage.
-///
-/// Same conventions as [`gethostbyname_r`].  `len` must be 4 and `addr_type`
-/// `AF_INET`; anything else is `EBADMSG`/`NO_RECOVERY` rather than a silent
-/// wrong answer, because an IPv6 address squeezed through this API would
-/// otherwise be reverse-resolved as if its first four bytes were an IPv4
-/// address.
-///
-/// # Safety
-///
-/// `addr` must be readable for `len` bytes, `ret`/`result` valid for writes,
-/// `buf` valid for `buflen` bytes, and `h_errnop`, if non-NULL, writable.
-#[cfg_attr(target_os = "none", unsafe(no_mangle))]
-pub unsafe extern "C" fn gethostbyaddr_r(
-    addr: *const u8,
-    len: i32,
-    addr_type: i32,
-    ret: *mut Hostent,
-    buf: *mut u8,
-    buflen: usize,
-    result: *mut *const Hostent,
-    h_errnop: *mut i32,
-) -> i32 {
-    if result.is_null() || ret.is_null() || buf.is_null() {
-        return errno::EFAULT;
-    }
-    // SAFETY: `result` is non-null and valid for writes (checked above).
-    unsafe {
-        *result = core::ptr::null();
-    }
-
-    let fail = |h_err: i32| -> i32 {
-        set_h_errno(h_err);
-        if !h_errnop.is_null() {
-            // SAFETY: the caller guarantees a non-NULL `h_errnop` is writable.
-            unsafe {
-                *h_errnop = h_err;
-            }
-        }
-        hostent_r_errno_for(h_err)
-    };
-
-    if addr.is_null() || addr_type != AF_INET || len != 4 {
-        return fail(NO_RECOVERY);
-    }
-
-    let mut ip_bytes = [0u8; 4];
-    // SAFETY: `addr` is non-null and `len == 4` bytes readable by contract.
-    unsafe {
-        core::ptr::copy_nonoverlapping(addr, ip_bytes.as_mut_ptr(), 4);
-    }
-    let ip_u32 = u32::from_ne_bytes(ip_bytes);
-
-    let mut name_buf = [0u8; 256];
-    let rc = syscall3(
-        SYS_DNS_REVERSE_RESOLVE,
-        u64::from(ip_u32),
-        name_buf.as_mut_ptr() as u64,
-        name_buf.len() as u64,
-    );
-    if rc < 0 {
-        return fail(resolver_error_for(rc));
-    }
-    // Clamp the kernel's reported length rather than trusting it.
-    let name_len = core::cmp::min(rc as usize, name_buf.len());
-
-    // SAFETY: as in `gethostbyname_r`; `name_buf` is a local array readable
-    // for `name_len <= name_buf.len()` bytes.
-    let fill = unsafe {
-        fill_hostent_r(
-            ret,
-            buf,
-            buflen,
-            name_buf.as_ptr(),
-            name_len,
-            ip_bytes,
-            result,
-        )
-    };
-    if fill != 0 {
-        set_h_errno(0);
-        if !h_errnop.is_null() {
-            // SAFETY: as in `fail`.
-            unsafe {
-                *h_errnop = 0;
-            }
-        }
-        return fill;
-    }
-
-    set_h_errno(0);
-    if !h_errnop.is_null() {
-        // SAFETY: as in `fail`.
-        unsafe {
-            *h_errnop = 0;
-        }
-    }
-    0
 }
 
 // ---------------------------------------------------------------------------
@@ -4405,7 +3299,7 @@ pub extern "C" fn __h_errno_location() -> *mut i32 {
 }
 
 /// Set the calling thread's resolver error.
-fn set_h_errno(val: i32) {
+pub(crate) fn set_h_errno(val: i32) {
     // SAFETY: as in `__h_errno_location`.
     unsafe {
         (*crate::perthread::current()).h_errno = val;
@@ -4414,60 +3308,58 @@ fn set_h_errno(val: i32) {
 
 /// Read the calling thread's resolver error.
 #[must_use]
-fn get_h_errno() -> i32 {
+pub(crate) fn get_h_errno() -> i32 {
     // SAFETY: as in `__h_errno_location`.
     unsafe { (*crate::perthread::current()).h_errno }
 }
 
-/// Translate a negative syscall return from the DNS syscalls into the
-/// resolver error code the legacy netdb API reports.
-///
-/// The kernel's resolver reports `NotFound` both for NXDOMAIN and for a
-/// server-side error, so `HOST_NOT_FOUND` is the closest fit; anything
-/// transport-shaped (timeout, unreachable, would-block) is retryable, and
-/// everything else — bad arguments, a missing Socket capability — is not.
-fn resolver_error_for(ret: i64) -> i32 {
-    // The syscall returns a negated errno, but nothing constrains its range:
-    // `i64::MIN` has no positive counterpart and anything past `i32::MAX` is
-    // not an errno at all.  Either way it is not one of the retryable codes.
-    let Some(err) = ret.checked_neg().and_then(|e| i32::try_from(e).ok()) else {
-        return NO_RECOVERY;
-    };
-    match err {
-        errno::ENOENT => HOST_NOT_FOUND,
-        errno::EAGAIN | errno::ETIMEDOUT | errno::ENETUNREACH | errno::EHOSTUNREACH => TRY_AGAIN,
-        _ => NO_RECOVERY,
-    }
-}
-
-/// Return a string describing a resolver error code.
+/// The message for a resolver error, glibc's: `h_errlist` for 0 to 4,
+/// "Resolver internal error" for `NETDB_INTERNAL` and anything negative.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn hstrerror(err: i32) -> *const u8 {
-    match err {
-        0 => c"Resolver Error 0 (no error)".as_ptr().cast::<u8>(),
-        HOST_NOT_FOUND => c"Host not found".as_ptr().cast::<u8>(),
-        TRY_AGAIN => c"Try again".as_ptr().cast::<u8>(),
-        NO_RECOVERY => c"Non-recoverable error".as_ptr().cast::<u8>(),
-        NO_DATA => c"No address associated with name".as_ptr().cast::<u8>(),
-        _ => c"Unknown resolver error".as_ptr().cast::<u8>(),
-    }
+    let m: &core::ffi::CStr = match err {
+        e if e < 0 => c"Resolver internal error",
+        0 => c"Resolver Error 0 (no error)",
+        HOST_NOT_FOUND => c"Unknown host",
+        TRY_AGAIN => c"Host name lookup failure",
+        NO_RECOVERY => c"Unknown server error",
+        NO_DATA => c"No address associated with name",
+        _ => c"Unknown resolver error",
+    };
+    m.as_ptr().cast()
 }
 
-/// Print a resolver error message to stderr.
+/// Write `s: ` (when `s` is neither NULL nor empty), `h_errno`'s message and
+/// a newline to standard error, in one `writev` as glibc does -- straight
+/// to the descriptor, past `stderr`'s buffer.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn herror(s: *const u8) {
-    // SAFETY: s is null-terminated.
-    if !s.is_null() {
-        let slen = unsafe { crate::string::strlen(s) };
-        if slen > 0 {
-            let _ = syscall2(SYS_CONSOLE_WRITE, s as u64, slen as u64);
-            let _ = syscall2(SYS_CONSOLE_WRITE, b": ".as_ptr() as u64, 2);
-        }
-    }
     let msg = hstrerror(get_h_errno());
-    let msg_len = unsafe { crate::string::strlen(msg) };
-    let _ = syscall2(SYS_CONSOLE_WRITE, msg as u64, msg_len as u64);
-    let _ = syscall2(SYS_CONSOLE_WRITE, b"\n".as_ptr() as u64, 1);
+    // SAFETY: `hstrerror` answers with a static NUL-terminated string; `s`,
+    // when not NULL, is the caller's.
+    let (prefix, text) = unsafe {
+        let p: &[u8] = if s.is_null() {
+            &[]
+        } else {
+            core::slice::from_raw_parts(s, crate::string::strlen(s))
+        };
+        (
+            p,
+            core::slice::from_raw_parts(msg, crate::string::strlen(msg)),
+        )
+    };
+    let iov = |b: &[u8]| crate::file::Iovec {
+        iov_base: b.as_ptr().cast_mut(),
+        iov_len: b.len(),
+    };
+    let parts = [iov(prefix), iov(b": "), iov(text), iov(b"\n")];
+    let v: &[crate::file::Iovec] = if prefix.is_empty() {
+        &parts[2..]
+    } else {
+        &parts
+    };
+    // A message that cannot be written has nowhere else to go.
+    let _ = crate::file::writev(2, v.as_ptr(), v.len() as i32);
 }
 
 // ---------------------------------------------------------------------------
@@ -4512,630 +3404,36 @@ pub const AI_NUMERICHOST: i32 = 0x0004;
 /// Numeric service string.
 pub const AI_NUMERICSERV: i32 = 0x0400;
 
-// getaddrinfo error codes.
-/// Address family not supported.
-pub const EAI_ADDRFAMILY: i32 = 1;
-/// Temporary failure in name resolution.
-pub const EAI_AGAIN: i32 = 2;
-/// Invalid flags.
-pub const EAI_BADFLAGS: i32 = 3;
-/// Non-recoverable failure in name resolution.
-pub const EAI_FAIL: i32 = 4;
-/// Address family not supported.
-pub const EAI_FAMILY: i32 = 5;
-/// Memory allocation failure.
-pub const EAI_MEMORY: i32 = 6;
-/// No address associated with hostname.
-pub const EAI_NODATA: i32 = 7;
+// getaddrinfo's and getnameinfo's error codes: negative, as musl's
+// `<netdb.h>` and glibc's both number them.  They were 1 to 11 until
+// 2026-09-27, so a caller -- whose header is musl's -- testing for
+// `EAI_NONAME` (-2) or retrying on `EAI_AGAIN` (-3) never saw either; only
+// `gai_strerror`, which read the same wrong numbers, agreed with them.
+/// ai_flags has a bad value.
+pub const EAI_BADFLAGS: i32 = -1;
 /// Name or service not known.
-pub const EAI_NONAME: i32 = 8;
-/// Service not supported for socket type.
-pub const EAI_SERVICE: i32 = 9;
-/// Socket type not supported.
-pub const EAI_SOCKTYPE: i32 = 10;
-/// System error.
-pub const EAI_SYSTEM: i32 = 11;
-
-/// Byte offset of the `SockaddrIn` inside a result block from [`gai_alloc`].
-///
-/// A result is one heap block laid out as an [`Addrinfo`] immediately followed
-/// by the `SockaddrIn` that its `ai_addr` points at, so that one `free` of the
-/// node pointer releases both.  `Addrinfo` is `#[repr(C)]` and pointer-aligned,
-/// so its size is a multiple of 8 and the trailing `SockaddrIn` (alignment 4)
-/// lands aligned; the assertion below is what keeps that true if either struct
-/// gains a field.
-const GAI_ADDR_OFFSET: usize = core::mem::size_of::<Addrinfo>();
-
-const _: () = assert!(
-    GAI_ADDR_OFFSET % core::mem::align_of::<SockaddrIn>() == 0,
-    "getaddrinfo's trailing SockaddrIn would be misaligned"
-);
-
-/// Size of one result block *without* a canonical name — and therefore also
-/// the offset of the name within a block that has one, since it goes last.
-const GAI_BLOCK_SIZE: usize = GAI_ADDR_OFFSET + core::mem::size_of::<SockaddrIn>();
-
-/// Allocate and fill one `getaddrinfo` result, or NULL if out of memory.
-///
-/// `ip` is in network byte order (as [`inet_pton`] and `gethostbyname` produce
-/// it); `port` is in host byte order and is converted here.
-///
-/// `canon` is the canonical name to copy into the block, or `None` to leave
-/// `ai_canonname` NULL.  Only the *first* node of a result list carries one —
-/// that is what POSIX specifies and what glibc does.
-///
-/// The returned node has `ai_next == NULL`; the caller links the list.
-fn gai_alloc(
-    family: i32,
-    socktype: i32,
-    protocol: i32,
-    ip: u32,
-    port: u16,
-    canon: Option<&[u8]>,
-) -> *mut Addrinfo {
-    // Room for the canonical name, terminator included, inside this same
-    // block.  It has to live here: `freeaddrinfo` frees the node pointer and
-    // nothing else, so a separately allocated name would leak on every call
-    // that asked for one.  Bytes have alignment 1 and go last, so they cannot
-    // disturb the `SockaddrIn` alignment the assertion above establishes.
-    let name_room = match canon {
-        None => 0,
-        // Checked rather than `+ 1`: `canon`'s length is derived from caller
-        // data, and a value at `usize::MAX` would wrap to a zero-byte request
-        // — a block the copy below would immediately run off the end of.
-        Some(c) => match c.len().checked_add(1) {
-            Some(n) => n,
-            None => return core::ptr::null_mut(),
-        },
-    };
-    let Some(total) = GAI_BLOCK_SIZE.checked_add(name_room) else {
-        return core::ptr::null_mut();
-    };
-
-    let block = crate::malloc::malloc(total);
-    if block.is_null() {
-        return core::ptr::null_mut();
-    }
-
-    // SAFETY: `malloc` returned a live block of exactly `total` bytes, aligned
-    // to a page (so to both structs), with `GAI_ADDR_OFFSET` in bounds and a
-    // whole `SockaddrIn` behind it, followed by `name_room` bytes reserved for
-    // the name.  Nothing else holds a pointer into it yet, so these writes
-    // cannot race.
-    unsafe {
-        let addr = block.add(GAI_ADDR_OFFSET).cast::<SockaddrIn>();
-        addr.write(SockaddrIn {
-            sin_family: AF_INET as u16,
-            sin_port: htons(port),
-            sin_addr: InAddr { s_addr: ip },
-            sin_zero: [0u8; 8],
-        });
-
-        // The name goes immediately after the `SockaddrIn`, which is what
-        // `GAI_BLOCK_SIZE` measures.
-        let canonname = match canon {
-            None => core::ptr::null_mut(),
-            Some(c) => {
-                let dst = block.add(GAI_BLOCK_SIZE);
-                // `c` is the caller's buffer and `dst` is inside a block
-                // `malloc` has just handed us, so the two cannot overlap.
-                core::ptr::copy_nonoverlapping(c.as_ptr(), dst, c.len());
-                // C callers read this with `strlen`/`printf`, so it must be
-                // terminated even when the name is empty.
-                dst.add(c.len()).write(0);
-                dst
-            }
-        };
-
-        let node = block.cast::<Addrinfo>();
-        node.write(Addrinfo {
-            ai_flags: 0,
-            ai_family: family,
-            ai_socktype: socktype,
-            ai_protocol: protocol,
-            ai_addrlen: core::mem::size_of::<SockaddrIn>() as SocklenT,
-            ai_canonname: canonname,
-            ai_addr: addr.cast::<Sockaddr>(),
-            ai_next: core::ptr::null_mut(),
-        });
-        node
-    }
-}
-
-/// Resolve a hostname and/or service to a list of socket addresses.
-///
-/// This is the modern replacement for `gethostbyname()`.  We support
-/// only IPv4 (`AF_INET`) resolution.  When `ai_socktype` is 0 in
-/// hints (or no hints), returns two results: SOCK_STREAM and
-/// SOCK_DGRAM.  When a specific type is requested, returns one result.
-///
-/// Returns 0 on success, non-zero EAI_* error code on failure.
-///
-/// **The result is heap-allocated and belongs to the caller**, who must release
-/// it with [`freeaddrinfo`].  This is not a detail: unlike `gethostbyname` and
-/// `getservbyname` — which POSIX *defines* as returning a pointer to static,
-/// per-process storage — `getaddrinfo` is specified to allocate, and callers
-/// are entitled to hold two results at once.  Ours used to hand back pointers
-/// into four `static mut` slots, so a second call (on any thread) rewrote the
-/// first caller's answer under it.
-///
-/// # Safety
-///
-/// - `node` and `service` must be valid null-terminated strings (or null).
-/// - `res` must be a valid pointer to a `*mut Addrinfo`.
-#[cfg_attr(target_os = "none", unsafe(no_mangle))]
-#[allow(clippy::too_many_lines)] // DNS resolution + result assembly; splitting would scatter the getaddrinfo logic.
-pub unsafe extern "C" fn getaddrinfo(
-    node: *const u8,
-    service: *const u8,
-    hints: *const Addrinfo,
-    res: *mut *mut Addrinfo,
-) -> i32 {
-    if res.is_null() {
-        return EAI_SYSTEM;
-    }
-
-    // SAFETY: res is non-null.
-    unsafe {
-        *res = core::ptr::null_mut();
-    }
-
-    // Parse hints if provided.
-    let (want_family, want_socktype, want_passive, want_flags) = if hints.is_null() {
-        (0, 0, false, 0i32) // Accept any family/socktype.
-    } else {
-        // SAFETY: hints is non-null.
-        let h = unsafe { &*hints };
-        // We only support AF_INET (or AF_UNSPEC=0 which means "any").
-        if h.ai_family != 0 && h.ai_family != AF_INET {
-            return EAI_FAMILY;
-        }
-        (
-            h.ai_family,
-            h.ai_socktype,
-            h.ai_flags & AI_PASSIVE != 0,
-            h.ai_flags,
-        )
-    };
-
-    // We need at least a node or a service.
-    if node.is_null() && service.is_null() {
-        return EAI_NONAME;
-    }
-
-    // Resolve the IP address.
-    let ip: u32 = if node.is_null() {
-        // No node: if AI_PASSIVE, use INADDR_ANY; otherwise loopback.
-        if want_passive {
-            htonl(INADDR_ANY)
-        } else {
-            htonl(INADDR_LOOPBACK)
-        }
-    } else {
-        // Try numeric parse first using inet_pton, which correctly
-        // distinguishes "255.255.255.255" (valid) from parse failure.
-        // inet_addr cannot do this because both cases return 0xFFFFFFFF.
-        let mut addr_nbo: u32 = 0;
-        let pton_ok = unsafe { inet_pton(AF_INET, node, (&raw mut addr_nbo).cast::<u8>()) };
-        if pton_ok == 1 {
-            addr_nbo
-        } else {
-            // Not numeric — AI_NUMERICHOST prohibits DNS resolution.
-            if (want_flags & AI_NUMERICHOST) != 0 {
-                return EAI_NONAME;
-            }
-            // Do DNS resolution.
-            let he = unsafe { gethostbyname(node) };
-            if he.is_null() {
-                return EAI_NONAME;
-            }
-            // SAFETY: gethostbyname returned a valid hostent.
-            unsafe {
-                let addr_list = (*he).h_addr_list;
-                if addr_list.is_null() || (*addr_list).is_null() {
-                    return EAI_NODATA;
-                }
-                // Read the 4-byte IPv4 address.
-                core::ptr::read_unaligned((*addr_list).cast::<u32>())
-            }
-        }
-    };
-
-    // Parse the port from the service string.
-    // Try numeric first, then look up as a service name.
-    let port: u16 = if service.is_null() {
-        0
-    } else {
-        let numeric = parse_port_string(service);
-        if numeric >= 0 {
-            numeric as u16
-        } else {
-            // Not a numeric port — AI_NUMERICSERV prohibits name lookup.
-            if (want_flags & AI_NUMERICSERV) != 0 {
-                return EAI_NONAME;
-            }
-            // Try service name lookup (e.g., "http" → 80).
-            // Match protocol: use "tcp" for SOCK_STREAM, "udp" for SOCK_DGRAM.
-            let proto_filter = match want_socktype {
-                SOCK_STREAM => c"tcp".as_ptr().cast::<u8>(),
-                SOCK_DGRAM => c"udp".as_ptr().cast::<u8>(),
-                _ => core::ptr::null(), // Any protocol.
-            };
-            let serv = unsafe { getservbyname(service, proto_filter) };
-            if serv.is_null() {
-                // POSIX: service name not found → EAI_SERVICE.
-                return EAI_SERVICE;
-            }
-            // s_port is in network byte order.
-            let s = unsafe { &*serv };
-            u16::from_be(s.s_port as u16)
-        }
-    };
-
-    // Determine socket type(s) and protocol.
-    // When ai_socktype=0 in hints (or no hints), return both SOCK_STREAM
-    // and SOCK_DGRAM results so callers can pick the one they need.
-    let family = if want_family != 0 {
-        want_family
-    } else {
-        AF_INET
-    };
-
-    // POSIX: with `AI_CANONNAME` set and `nodename` non-null, the first
-    // result's `ai_canonname` refers to the canonical name of the host.  Ours
-    // is the queried name itself, because `SYS_DNS_RESOLVE` answers with four
-    // address bytes and no name — there is no CNAME chain to follow and
-    // nothing else to report.  That is exactly what glibc returns for a host
-    // with no CNAME, so it is right rather than merely convenient; what it
-    // does *not* do is turn a short name into an FQDN, which is why
-    // `hostname -f` is still short (known-issues.md,
-    // B-POSIX-GETADDRINFO-CANNOT-ANSWER-AI-CANONNAME).
-    //
-    // The flag is ignored when `nodename` is NULL: POSIX defines the
-    // canonical name in terms of `nodename`, so with no name there is nothing
-    // for it to be canonical *of*, and glibc leaves it NULL there too.
-    let canon: Option<&[u8]> = if (want_flags & AI_CANONNAME) != 0 && !node.is_null() {
-        // SAFETY: `node` is non-null and the caller guarantees a valid C
-        // string; `strlen` stops at the terminator inside it, so the slice is
-        // within the caller's allocation.  It is read before this function
-        // returns and never stored.
-        let n = unsafe { crate::string::strlen(node) };
-        Some(unsafe { core::slice::from_raw_parts(node, n) })
-    } else {
-        None
-    };
-
-    if want_socktype != 0 {
-        // Caller specified a socket type — return one result.
-        let protocol = match want_socktype {
-            SOCK_STREAM => IPPROTO_TCP,
-            SOCK_DGRAM => IPPROTO_UDP,
-            _ => 0,
-        };
-        let node = gai_alloc(family, want_socktype, protocol, ip, port, canon);
-        if node.is_null() {
-            return EAI_MEMORY;
-        }
-        // SAFETY: `res` is non-null (checked at entry) and points at a caller
-        // -owned `*mut Addrinfo`.
-        unsafe { *res = node };
-    } else {
-        // No socket type specified — return TCP first, then UDP.
-        // This lets callers iterate the list to find either type.
-        let r1 = gai_alloc(family, SOCK_STREAM, IPPROTO_TCP, ip, port, canon);
-        if r1.is_null() {
-            return EAI_MEMORY;
-        }
-        // `None`, not `canon`: only the head of the list carries the name.
-        let r2 = gai_alloc(family, SOCK_DGRAM, IPPROTO_UDP, ip, port, None);
-        if r2.is_null() {
-            // Release the head rather than leaking it: a failed `getaddrinfo`
-            // leaves `*res` untouched, so the caller has no pointer to free.
-            // SAFETY: `r1` is a live block from `gai_alloc`, i.e. from
-            // `malloc`, and nothing else refers to it.
-            unsafe { crate::malloc::free(r1.cast::<u8>()) };
-            return EAI_MEMORY;
-        }
-        // SAFETY: both nodes are live and exclusively ours until `*res` is
-        // published below.
-        unsafe {
-            (*r1).ai_next = r2;
-            *res = r1;
-        }
-    }
-
-    0 // Success.
-}
-
-/// Free an addrinfo result list returned by [`getaddrinfo`].
-///
-/// Walks `ai_next` and releases every node, so `freeaddrinfo` may also be
-/// handed a *tail* of the list — which is what makes the per-node allocation
-/// worth its extra `malloc` over one block for the whole chain.
-///
-/// A NULL argument is a no-op.
-///
-/// # Safety
-///
-/// `res` must be NULL, or a pointer that [`getaddrinfo`] stored through its
-/// `res` argument (or one of the `ai_next` links reachable from it), and the
-/// nodes it reaches must not have been freed already.
-#[cfg_attr(target_os = "none", unsafe(no_mangle))]
-pub unsafe extern "C" fn freeaddrinfo(res: *mut Addrinfo) {
-    let mut node = res;
-    while !node.is_null() {
-        // SAFETY: by the contract above `node` is a live block from
-        // `gai_alloc`.  `ai_next` is read before the free, because after it the
-        // block is unmapped and the read would fault.
-        let next = unsafe { (*node).ai_next };
-        // SAFETY: `gai_alloc` obtained this pointer from `malloc` and the
-        // caller guarantees it has not been freed.
-        unsafe { crate::malloc::free(node.cast::<u8>()) };
-        node = next;
-    }
-}
-
-/// Return a string describing a getaddrinfo error code.
-#[cfg_attr(target_os = "none", unsafe(no_mangle))]
-pub extern "C" fn gai_strerror(errcode: i32) -> *const u8 {
-    match errcode {
-        0 => c"Success".as_ptr().cast::<u8>(),
-        EAI_ADDRFAMILY | EAI_FAMILY => c"Address family not supported".as_ptr().cast::<u8>(),
-        EAI_AGAIN => c"Temporary failure in name resolution"
-            .as_ptr()
-            .cast::<u8>(),
-        EAI_BADFLAGS => c"Invalid flags".as_ptr().cast::<u8>(),
-        EAI_FAIL => c"Non-recoverable failure".as_ptr().cast::<u8>(),
-        EAI_MEMORY => c"Memory allocation failure".as_ptr().cast::<u8>(),
-        EAI_NODATA => c"No address associated with hostname".as_ptr().cast::<u8>(),
-        EAI_NONAME => c"Name or service not known".as_ptr().cast::<u8>(),
-        EAI_SERVICE => c"Service not supported".as_ptr().cast::<u8>(),
-        EAI_SOCKTYPE => c"Socket type not supported".as_ptr().cast::<u8>(),
-        EAI_SYSTEM => c"System error".as_ptr().cast::<u8>(),
-        _ => c"Unknown error".as_ptr().cast::<u8>(),
-    }
-}
-
-// ---------------------------------------------------------------------------
-// getnameinfo — reverse DNS + service lookup
-// ---------------------------------------------------------------------------
-
-/// `NI_NUMERICHOST` — return the numeric form of the host address.
-pub const NI_NUMERICHOST: i32 = 1;
-/// `NI_NUMERICSERV` — return the numeric form of the service port.
-pub const NI_NUMERICSERV: i32 = 2;
-/// `NI_NOFQDN` — return only the hostname part of the FQDN.
-pub const NI_NOFQDN: i32 = 4;
-/// `NI_NAMEREQD` — return an error if the hostname cannot be determined.
-pub const NI_NAMEREQD: i32 = 8;
-/// `NI_DGRAM` — the service is datagram (UDP) based.
-pub const NI_DGRAM: i32 = 16;
-
-/// Translate a socket address to a host name and service string.
-///
-/// This is the reverse of `getaddrinfo`.  Given a `sockaddr_in`, it
-/// produces human-readable host and service strings.
-///
-/// ## Reverse DNS
-///
-/// When `NI_NUMERICHOST` is *not* set, attempts a PTR lookup via
-/// `SYS_DNS_REVERSE_RESOLVE`.  If the lookup fails and `NI_NAMEREQD`
-/// is set, returns `EAI_NONAME`.  Otherwise falls back to the numeric
-/// IP representation.
-///
-/// ## Service Name Lookup
-///
-/// When `NI_NUMERICSERV` is *not* set, looks up the port in the
-/// well-known services table (`getservbyport`).  Uses the `NI_DGRAM`
-/// flag to select "udp" vs "tcp" protocol matching.  Falls back to
-/// numeric representation if the port isn't in the table.
-///
-/// ## Limitations
-///
-/// - Only supports `AF_INET` (IPv4).
-///
-/// Returns 0 on success, or an EAI_* error code.
-#[cfg_attr(target_os = "none", unsafe(no_mangle))]
-#[allow(clippy::too_many_arguments)] // POSIX-defined signature.
-#[allow(clippy::too_many_lines)] // Host + service formatting with reverse DNS; splitting would fragment the logic.
-pub extern "C" fn getnameinfo(
-    sa: *const SockaddrIn,
-    _salen: SocklenT,
-    host: *mut u8,
-    hostlen: SocklenT,
-    serv: *mut u8,
-    servlen: SocklenT,
-    flags: i32,
-) -> i32 {
-    if sa.is_null() {
-        return EAI_FAIL;
-    }
-
-    // SAFETY: sa is non-null (checked above); caller guarantees validity.
-    let addr = unsafe { &*sa };
-
-    if i32::from(addr.sin_family) != AF_INET {
-        return EAI_FAMILY;
-    }
-
-    // Format the host address.
-    if !host.is_null() && hostlen > 0 {
-        let ip_bytes = addr.sin_addr.s_addr.to_ne_bytes();
-        let mut used_reverse = false;
-
-        // Try reverse DNS unless NI_NUMERICHOST is set.
-        if (flags & NI_NUMERICHOST) == 0 {
-            // SYS_DNS_REVERSE_RESOLVE: arg0 = IP (network order u32),
-            // arg1 = output buffer ptr, arg2 = output buffer size.
-            // Returns hostname length on success, negative on failure.
-            let ip_u32 = u32::from_be_bytes(ip_bytes);
-            let ret = crate::syscall::syscall3(
-                crate::syscall::SYS_DNS_REVERSE_RESOLVE,
-                u64::from(ip_u32),
-                host as u64,
-                // Reserve 1 byte for null terminator.
-                (hostlen as usize).saturating_sub(1) as u64,
-            );
-            if ret > 0 {
-                let mut name_len = ret as usize;
-                // NI_NOFQDN: strip the domain part, keeping only the
-                // hostname component (everything before the first '.').
-                // e.g. "server.example.com" → "server".
-                if (flags & NI_NOFQDN) != 0 {
-                    let mut dot_pos: usize = 0;
-                    while dot_pos < name_len {
-                        // SAFETY: host[0..name_len] was just written by
-                        // the kernel and is valid.
-                        if unsafe { *host.add(dot_pos) } == b'.' {
-                            name_len = dot_pos;
-                            break;
-                        }
-                        dot_pos = dot_pos.wrapping_add(1);
-                    }
-                }
-                // Null-terminate the hostname.
-                // SAFETY: name_len <= original ret <= hostlen-1 (kernel
-                // ensures copy_len <= buffer), so host[name_len] is in
-                // bounds.
-                unsafe {
-                    *host.add(name_len) = 0;
-                }
-                used_reverse = true;
-            }
-        }
-
-        if !used_reverse {
-            // NI_NAMEREQD: error if name can't be determined.
-            if (flags & NI_NAMEREQD) != 0 {
-                return EAI_NONAME;
-            }
-
-            // Fall back to numeric representation.
-            let mut tmp = [0u8; 16]; // max "255.255.255.255\0"
-            let mut pos: usize = 0;
-
-            for (idx, &octet) in ip_bytes.iter().enumerate() {
-                if idx > 0 {
-                    write_byte_ntop(&mut tmp, &mut pos, b'.');
-                }
-                write_u8_dec_ntop(&mut tmp, &mut pos, octet);
-            }
-
-            let needed = pos.wrapping_add(1); // +null
-            if (hostlen as usize) < needed {
-                return EAI_OVERFLOW;
-            }
-
-            // SAFETY: host is valid for hostlen bytes (caller contract).
-            unsafe {
-                let mut j: usize = 0;
-                while j < pos {
-                    if let Some(&b) = tmp.get(j) {
-                        *host.add(j) = b;
-                    }
-                    j = j.wrapping_add(1);
-                }
-                *host.add(pos) = 0;
-            }
-        }
-    }
-
-    // Format the service/port.
-    if !serv.is_null() && servlen > 0 {
-        let port = u16::from_be(addr.sin_port);
-        let mut used_name = false;
-
-        // Try service name lookup unless NI_NUMERICSERV is set.
-        if (flags & NI_NUMERICSERV) == 0 && port > 0 {
-            let port_nbo = i32::from(addr.sin_port);
-            let proto = if (flags & NI_DGRAM) != 0 {
-                c"udp".as_ptr().cast::<u8>()
-            } else {
-                c"tcp".as_ptr().cast::<u8>()
-            };
-            let se = unsafe { getservbyport(port_nbo, proto) };
-            if !se.is_null() {
-                let s = unsafe { &*se };
-                if !s.s_name.is_null() {
-                    let name_len = unsafe { crate::string::strlen(s.s_name) };
-                    if name_len.wrapping_add(1) <= servlen as usize {
-                        // SAFETY: serv is valid for servlen bytes.
-                        unsafe {
-                            core::ptr::copy_nonoverlapping(s.s_name, serv, name_len);
-                            *serv.add(name_len) = 0;
-                        }
-                        used_name = true;
-                    }
-                }
-            }
-        }
-
-        if !used_name {
-            // Fall back to numeric port representation.
-            let mut tmp = [0u8; 6]; // max "65535\0"
-            let mut pos: usize = 0;
-            write_u16_decimal(&mut tmp, &mut pos, port);
-
-            let needed = pos.wrapping_add(1);
-            if (servlen as usize) < needed {
-                return EAI_OVERFLOW;
-            }
-
-            unsafe {
-                let mut j: usize = 0;
-                while j < pos {
-                    if let Some(&b) = tmp.get(j) {
-                        *serv.add(j) = b;
-                    }
-                    j = j.wrapping_add(1);
-                }
-                *serv.add(pos) = 0;
-            }
-        }
-    }
-
-    0
-}
+pub const EAI_NONAME: i32 = -2;
+/// Temporary failure in name resolution.
+pub const EAI_AGAIN: i32 = -3;
+/// Non-recoverable failure in name resolution.
+pub const EAI_FAIL: i32 = -4;
+/// No address associated with hostname.
+pub const EAI_NODATA: i32 = -5;
+/// ai_family not supported.
+pub const EAI_FAMILY: i32 = -6;
+/// ai_socktype not supported.
+pub const EAI_SOCKTYPE: i32 = -7;
+/// The service is not supported for ai_socktype.
+pub const EAI_SERVICE: i32 = -8;
+/// Address family for hostname not supported.
+pub const EAI_ADDRFAMILY: i32 = -9;
+/// Memory allocation failure.
+pub const EAI_MEMORY: i32 = -10;
+/// System error: `errno` says which.
+pub const EAI_SYSTEM: i32 = -11;
 
 /// `EAI_OVERFLOW` — buffer too small for result.
 pub const EAI_OVERFLOW: i32 = -12;
-
-/// Write a u16 as decimal digits into a small buffer.
-fn write_u16_decimal(buf: &mut [u8; 6], pos: &mut usize, val: u16) {
-    if val >= 10000 {
-        #[allow(clippy::arithmetic_side_effects)]
-        if let Some(slot) = buf.get_mut(*pos) {
-            *slot = b'0' + (val / 10000) as u8;
-            *pos = pos.wrapping_add(1);
-        }
-    }
-    if val >= 1000 {
-        #[allow(clippy::arithmetic_side_effects)]
-        if let Some(slot) = buf.get_mut(*pos) {
-            *slot = b'0' + ((val / 1000) % 10) as u8;
-            *pos = pos.wrapping_add(1);
-        }
-    }
-    if val >= 100 {
-        #[allow(clippy::arithmetic_side_effects)]
-        if let Some(slot) = buf.get_mut(*pos) {
-            *slot = b'0' + ((val / 100) % 10) as u8;
-            *pos = pos.wrapping_add(1);
-        }
-    }
-    if val >= 10 {
-        #[allow(clippy::arithmetic_side_effects)]
-        if let Some(slot) = buf.get_mut(*pos) {
-            *slot = b'0' + ((val / 10) % 10) as u8;
-            *pos = pos.wrapping_add(1);
-        }
-    }
-    #[allow(clippy::arithmetic_side_effects)]
-    if let Some(slot) = buf.get_mut(*pos) {
-        *slot = b'0' + (val % 10) as u8;
-        *pos = pos.wrapping_add(1);
-    }
-}
 
 // ---------------------------------------------------------------------------
 // socketpair
@@ -5833,102 +4131,81 @@ pub unsafe extern "C" fn recvmsg(fd: i32, msg: *mut Msghdr, flags: i32) -> isize
 // Internal helpers
 // ---------------------------------------------------------------------------
 
-/// Parse a numeric port string to u16.
-/// Parse a numeric port string to a port number.
-///
-/// Returns the port as `i32` (0..65535), or -1 if the string is not a
-/// valid numeric port (empty, non-digit characters, overflow > 65535).
-/// This allows distinguishing "0" (valid port 0) from "http" (not numeric).
-fn parse_port_string(s: *const u8) -> i32 {
-    if s.is_null() {
-        return -1;
-    }
-    let mut val: u32 = 0;
-    let mut i: usize = 0;
-    let mut has_digit = false;
-    loop {
-        // SAFETY: s is a valid null-terminated string.
-        let c = unsafe { *s.add(i) };
-        if c == 0 {
-            break;
-        }
-        if !c.is_ascii_digit() {
-            return -1; // Non-numeric service name.
-        }
-        has_digit = true;
-        #[allow(clippy::arithmetic_side_effects)]
-        {
-            val = val.wrapping_mul(10).wrapping_add(u32::from(c - b'0'));
-        }
-        if val > 65535 {
-            return -1;
-        }
-        i = i.wrapping_add(1);
-    }
-    if !has_digit {
-        return -1; // Empty string.
-    }
-    val as i32
-}
+// ---------------------------------------------------------------------------
+// Network interfaces: names, indices and addresses
+// ---------------------------------------------------------------------------
+//
+// This system has two interfaces, numbered as Linux numbers them: the loopback
+// first, then the one NIC. The kernel calls the NIC `eth0`
+// (`kernel/src/fs/netdev.rs`, `NIC_IFACE`) and describes it through
+// `SYS_NET_IF_INFO`, which always answers -- the interface exists whether or
+// not it is up. Until 2026-09-27 `lo` and `eth0` were both index 1, index 1
+// was `eth0` alone, `if_nameindex` listed only `eth0`, and `if_nameindex` and
+// `getifaddrs` handed every caller the same static storage -- rewritten under
+// a caller still reading it, and raced by two threads.
 
-// ---------------------------------------------------------------------------
-// if_nametoindex / if_indextoname — network interface stubs
-// ---------------------------------------------------------------------------
+/// The interfaces, in index order: `(index, name)`.
+const INTERFACES: [(u32, &[u8]); 2] = [(1, b"lo"), (2, b"eth0")];
+
+/// Maximum interface name length, the terminating NUL included.
+pub const IF_NAMESIZE: usize = 16;
+
+/// The index of the interface named `name`, if there is one.
+fn interface_index(name: &[u8]) -> Option<u32> {
+    INTERFACES
+        .iter()
+        .find(|&&(_, n)| n == name)
+        .map(|&(i, _)| i)
+}
 
 /// Convert a network interface name to its index.
 ///
-/// Stub: returns 0 (failure) since our OS doesn't have named network
-/// interfaces yet.  Programs that enumerate interfaces will see this
-/// as "interface not found".
-#[cfg_attr(target_os = "none", unsafe(no_mangle))]
-pub unsafe extern "C" fn if_nametoindex(ifname: *const u8) -> u32 {
-    if ifname.is_null() {
-        return 0; // 0 means "no such interface" per POSIX.
-    }
-
-    // Our kernel has a single network interface named "eth0".
-    // SAFETY: caller guarantees ifname is a valid C string.
-    let len = unsafe { crate::string::strlen(ifname) };
-    let name = unsafe { core::slice::from_raw_parts(ifname, len) };
-    // eth0 = index 1, lo = index 1 (we only have one real interface).
-    u32::from(name == b"eth0" || name == b"lo")
-}
-
-/// Convert a network interface index to its name.
-///
-/// Returns a pointer to `ifname` on success, null on error.
-/// `ifname` must point to a buffer of at least `IF_NAMESIZE` bytes.
+/// Returns 0 for a name no interface has, with `errno` `ENODEV`, as glibc
+/// does (its `SIOCGIFINDEX` answers `ENODEV`); a NULL name is 0 as well.
 ///
 /// # Safety
 ///
-/// `ifname` must point to writable memory of at least `IF_NAMESIZE` bytes.
+/// `ifname` must be NULL or a valid NUL-terminated string.
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub unsafe extern "C" fn if_nametoindex(ifname: *const u8) -> u32 {
+    if ifname.is_null() {
+        return 0;
+    }
+    // SAFETY: the caller's contract: a NUL-terminated string.
+    let name = unsafe { core::ffi::CStr::from_ptr(ifname.cast()) }.to_bytes();
+    if let Some(index) = interface_index(name) {
+        return index;
+    }
+    errno::set_errno(errno::ENODEV);
+    0
+}
+
+/// Convert a network interface index to its name, written into `ifname`.
+///
+/// Returns `ifname`, or NULL with `errno` `ENXIO` for an index no interface
+/// has -- glibc's mapping of the kernel's `ENODEV`.
+///
+/// # Safety
+///
+/// `ifname` must point to writable memory of at least [`IF_NAMESIZE`] bytes.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub unsafe extern "C" fn if_indextoname(ifindex: u32, ifname: *mut u8) -> *mut u8 {
     if ifname.is_null() {
         errno::set_errno(errno::EFAULT);
         return core::ptr::null_mut();
     }
-
-    // Index 1 = "eth0" (our only interface).
-    if ifindex == 1 {
-        // SAFETY: caller guarantees ifname has IF_NAMESIZE bytes.
-        let name = b"eth0\0";
-        unsafe {
-            core::ptr::copy_nonoverlapping(name.as_ptr(), ifname, name.len());
-        }
-        ifname
-    } else {
+    let Some(&(_, name)) = INTERFACES.iter().find(|&&(i, _)| i == ifindex) else {
         errno::set_errno(errno::ENXIO);
-        core::ptr::null_mut()
+        return core::ptr::null_mut();
+    };
+    // SAFETY: the caller's contract: `IF_NAMESIZE` writable bytes, and every
+    // name here is shorter than that with its NUL.
+    unsafe {
+        core::ptr::copy_nonoverlapping(name.as_ptr(), ifname, name.len());
+        *ifname.add(name.len()) = 0;
     }
+    ifname
 }
-
-/// Maximum interface name length.
-pub const IF_NAMESIZE: usize = 16;
-
-// ---------------------------------------------------------------------------
-// if_nameindex / if_freenameindex — interface enumeration
-// ---------------------------------------------------------------------------
 
 /// Entry returned by `if_nameindex`.
 #[repr(C)]
@@ -5939,53 +4216,52 @@ pub struct IfNameindex {
     pub if_name: *mut u8,
 }
 
-/// Static storage for the interface name returned by `if_nameindex`.
-///
-/// Our OS has a single network interface "eth0" (index 1).  We use
-/// static storage to avoid heap allocation (the crate is `no_std`).
-static mut IF_NAMEINDEX_NAMES: [u8; 5] = *b"eth0\0";
+/// `if_nameindex`'s block: the array, its terminator, and the names the
+/// entries point into -- one allocation, so that `if_freenameindex` is `free`.
+#[repr(C)]
+struct NameindexBlock {
+    entries: [IfNameindex; INTERFACES.len() + 1],
+    names: [[u8; IF_NAMESIZE]; INTERFACES.len()],
+}
 
-/// Static array of `IfNameindex` entries: one real entry + sentinel.
-static mut IF_NAMEINDEX_TABLE: [IfNameindex; 2] = [
-    IfNameindex {
-        if_index: 1,
-        if_name: core::ptr::null_mut(),
-    },
-    IfNameindex {
-        if_index: 0,
-        if_name: core::ptr::null_mut(),
-    },
-];
-
-/// Return an array of all network interface names and indices.
-///
-/// Returns a pointer to a zero-terminated array of `IfNameindex`
-/// structures.  The caller must free the result with
-/// `if_freenameindex()`.
-///
-/// Our OS has a single interface "eth0" (index 1).
+/// Return every network interface's index and name: an array ending in an
+/// entry whose index is 0, allocated for this caller.  Free it with
+/// [`if_freenameindex`].  NULL with `ENOMEM` if memory ran out.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn if_nameindex() -> *mut IfNameindex {
-    // SAFETY: Single-threaded.  We patch the if_name pointer to
-    // point into the static name buffer on each call.
+    let block = crate::malloc::calloc(1, size_of::<NameindexBlock>()).cast::<NameindexBlock>();
+    if block.is_null() {
+        errno::set_errno(errno::ENOMEM);
+        return core::ptr::null_mut();
+    }
+    // SAFETY: `block` is a fresh, zeroed allocation of one `NameindexBlock`
+    // (malloc's alignment suits it), used by nothing else; all-zero is a valid
+    // `NameindexBlock` (null names, index 0), so the terminator is already set.
     unsafe {
-        let name_ptr = core::ptr::addr_of_mut!(IF_NAMEINDEX_NAMES).cast::<u8>();
-        let table = core::ptr::addr_of_mut!(IF_NAMEINDEX_TABLE);
-        // First entry: "eth0", index 1.
-        if let Some(entry) = (*table).get_mut(0) {
-            entry.if_name = name_ptr;
+        let names = core::ptr::addr_of_mut!((*block).names).cast::<[u8; IF_NAMESIZE]>();
+        let entries = core::ptr::addr_of_mut!((*block).entries).cast::<IfNameindex>();
+        for (k, &(index, name)) in INTERFACES.iter().enumerate() {
+            let slot = names.add(k).cast::<u8>();
+            core::ptr::copy_nonoverlapping(name.as_ptr(), slot, name.len());
+            entries.add(k).write(IfNameindex {
+                if_index: index,
+                if_name: slot,
+            });
         }
-        // Second entry: sentinel (index 0, name null) — already initialized.
-        (*table).as_mut_ptr()
+        entries
     }
 }
 
-/// Free the array returned by `if_nameindex`.
+/// Free an array [`if_nameindex`] returned.  NULL is ignored.
 ///
-/// Since our implementation uses static storage, this is a no-op.
+/// # Safety
+///
+/// `ptr` is NULL, or an array from [`if_nameindex`] not freed before.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
-pub extern "C" fn if_freenameindex(_ptr: *mut IfNameindex) {
-    // No-op: we use static storage, not heap allocation.
+pub unsafe extern "C" fn if_freenameindex(ptr: *mut IfNameindex) {
+    // SAFETY: the caller's contract: the start of one `if_nameindex` block,
+    // which is one `malloc` allocation.
+    unsafe { crate::malloc::free(ptr.cast()) };
 }
 
 // ---------------------------------------------------------------------------
@@ -6005,13 +4281,15 @@ pub struct Ifaddrs {
     pub ifa_addr: *const Sockaddr,
     /// Network mask.
     pub ifa_netmask: *const Sockaddr,
-    /// Broadcast/destination address (union in BSD; we use broadcast).
+    /// Broadcast address -- or the union's other member, the far end of a
+    /// point-to-point link, which is how glibc reads the loopback's.
     pub ifa_broadaddr: *const Sockaddr,
-    /// Interface-specific data (unused).
+    /// A link entry's counters, an [`RtnlLinkStats`]; NULL for an address
+    /// entry, as in glibc.
     pub ifa_data: *const u8,
 }
 
-// Interface flags.
+// Interface flags, as Linux numbers them.
 /// Interface is up.
 pub const IFF_UP: u32 = 1;
 /// Interface is a loopback.
@@ -6022,829 +4300,569 @@ pub const IFF_MULTICAST: u32 = 0x1000;
 pub const IFF_RUNNING: u32 = 0x40;
 /// Interface supports broadcast.
 pub const IFF_BROADCAST: u32 = 2;
+/// The link has carrier.  Past the sixteen bits `SIOCGIFFLAGS` carries, but
+/// in the flags `getifaddrs` reports, which glibc takes from netlink.
+pub const IFF_LOWER_UP: u32 = 0x1_0000;
 
-/// Static storage for getifaddrs (single interface).
-///
-/// We have one physical interface ("eth0") whose address is obtained
-/// from `SYS_NET_STAT` (if configured) and a loopback ("lo").
-static mut IFADDRS_ETH0: Ifaddrs = Ifaddrs {
-    ifa_next: core::ptr::null_mut(),
-    ifa_name: core::ptr::null(),
-    ifa_flags: 0,
-    ifa_addr: core::ptr::null(),
-    ifa_netmask: core::ptr::null(),
-    ifa_broadaddr: core::ptr::null(),
-    ifa_data: core::ptr::null(),
-};
-static mut IFADDRS_LO: Ifaddrs = Ifaddrs {
-    ifa_next: core::ptr::null_mut(),
-    ifa_name: core::ptr::null(),
-    ifa_flags: 0,
-    ifa_addr: core::ptr::null(),
-    ifa_netmask: core::ptr::null(),
-    ifa_broadaddr: core::ptr::null(),
-    ifa_data: core::ptr::null(),
-};
+/// `sll_hatype` of an Ethernet link (`net/if_arp.h`).
+pub const ARPHRD_ETHER: u16 = 1;
+/// `sll_hatype` of the loopback (`net/if_arp.h`).
+pub const ARPHRD_LOOPBACK: u16 = 772;
 
-static mut IFADDRS_ETH0_NAME: [u8; 8] = *b"eth0\0\0\0\0";
-static mut IFADDRS_LO_NAME: [u8; 4] = *b"lo\0\0";
-static mut IFADDRS_ETH0_ADDR: SockaddrIn = SockaddrIn {
-    sin_family: AF_INET as u16,
-    sin_port: 0,
-    sin_addr: InAddr { s_addr: 0 },
-    sin_zero: [0; 8],
-};
-static mut IFADDRS_ETH0_MASK: SockaddrIn = SockaddrIn {
-    sin_family: AF_INET as u16,
-    sin_port: 0,
-    sin_addr: InAddr { s_addr: 0 },
-    sin_zero: [0; 8],
-};
-static mut IFADDRS_LO_ADDR: SockaddrIn = SockaddrIn {
-    sin_family: AF_INET as u16,
-    sin_port: 0,
-    sin_addr: InAddr {
-        s_addr: u32::to_be(INADDR_LOOPBACK),
-    },
-    sin_zero: [0; 8],
-};
-static mut IFADDRS_LO_MASK: SockaddrIn = SockaddrIn {
-    sin_family: AF_INET as u16,
-    sin_port: 0,
-    sin_addr: InAddr {
-        s_addr: u32::to_be(0xFF00_0000),
-    },
-    sin_zero: [0; 8],
-};
+/// `struct sockaddr_ll` (`netpacket/packet.h`): a link-level address, as a
+/// link's [`getifaddrs`] entry gives its hardware and broadcast addresses.
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct SockaddrLl {
+    /// `AF_PACKET`.
+    pub sll_family: u16,
+    /// Link-level protocol, network byte order: 0 in a `getifaddrs` entry.
+    pub sll_protocol: u16,
+    /// The interface's index.
+    pub sll_ifindex: i32,
+    /// The link's type: an `ARPHRD_*` number.
+    pub sll_hatype: u16,
+    /// Packet type: 0 in a `getifaddrs` entry.
+    pub sll_pkttype: u8,
+    /// How many bytes of `sll_addr` are the address.
+    pub sll_halen: u8,
+    /// The address, zero-padded.
+    pub sll_addr: [u8; 8],
+}
 
-/// Retrieve a linked list of network interface addresses.
-///
-/// Populates `*ifap` with a pointer to a linked list of `Ifaddrs`
-/// structures (one per interface).  Our OS exposes "eth0" (the primary
-/// NIC, configured via DHCP) and "lo" (loopback, always 127.0.0.1/8).
-///
-/// The returned data is in static storage — `freeifaddrs()` is a no-op.
+/// `struct rtnl_link_stats` (`linux/if_link.h`): a link's counters, which a
+/// link's [`getifaddrs`] entry points `ifa_data` at.  Thirty-two bits wide,
+/// as Linux's are: a count past 2^32 shows its low half.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct RtnlLinkStats {
+    /// Packets received.
+    pub rx_packets: u32,
+    /// Packets sent.
+    pub tx_packets: u32,
+    /// Bytes received.
+    pub rx_bytes: u32,
+    /// Bytes sent.
+    pub tx_bytes: u32,
+    /// Bad packets received.
+    pub rx_errors: u32,
+    /// Packets that could not be sent.
+    pub tx_errors: u32,
+    /// Packets received and dropped.
+    pub rx_dropped: u32,
+    /// Packets dropped before they were sent.
+    pub tx_dropped: u32,
+    /// Multicast packets received.
+    pub multicast: u32,
+    /// Collisions.
+    pub collisions: u32,
+    /// Receive errors: a bad length.
+    pub rx_length_errors: u32,
+    /// Receive errors: the ring overflowed.
+    pub rx_over_errors: u32,
+    /// Receive errors: a bad CRC.
+    pub rx_crc_errors: u32,
+    /// Receive errors: a misaligned frame.
+    pub rx_frame_errors: u32,
+    /// Receive errors: the FIFO overran.
+    pub rx_fifo_errors: u32,
+    /// Receive errors: missed by the receiver.
+    pub rx_missed_errors: u32,
+    /// Send errors: aborted.
+    pub tx_aborted_errors: u32,
+    /// Send errors: the carrier was lost.
+    pub tx_carrier_errors: u32,
+    /// Send errors: the FIFO underran.
+    pub tx_fifo_errors: u32,
+    /// Send errors: no heartbeat.
+    pub tx_heartbeat_errors: u32,
+    /// Send errors: a late collision.
+    pub tx_window_errors: u32,
+    /// Compressed packets received.
+    pub rx_compressed: u32,
+    /// Compressed packets sent.
+    pub tx_compressed: u32,
+    /// Packets received and dropped for want of a protocol to take them.
+    pub rx_nohandler: u32,
+}
+
+/// A link's `getifaddrs` entry: the node and everything it points at.
+#[repr(C)]
+struct LinkEntry {
+    node: Ifaddrs,
+    addr: SockaddrLl,
+    broadaddr: SockaddrLl,
+    stats: RtnlLinkStats,
+    name: [u8; IF_NAMESIZE],
+}
+
+/// An address's `getifaddrs` entry: the node and everything it points at.
+#[repr(C)]
+struct InetEntry {
+    node: Ifaddrs,
+    addr: SockaddrIn,
+    netmask: SockaddrIn,
+    broadaddr: SockaddrIn,
+    name: [u8; IF_NAMESIZE],
+}
+
+/// One `getifaddrs` list, in one allocation so that [`freeifaddrs`] is
+/// `free`: each link's entry, then each address's.  The list's head, the
+/// first link's node, is at offset 0.
+#[repr(C)]
+struct IfaddrsBlock {
+    links: [LinkEntry; INTERFACES.len()],
+    inet: [InetEntry; INTERFACES.len()],
+}
+
+/// A link's `getifaddrs` entry, before it is laid out.
+struct LinkRow {
+    name: &'static [u8],
+    index: i32,
+    flags: u32,
+    hatype: u16,
+    /// Its hardware address, and the one that reaches every station.
+    addr: [u8; 6],
+    broadcast: [u8; 6],
+    stats: RtnlLinkStats,
+}
+
+/// An address's `getifaddrs` entry, before it is laid out.
+struct InetRow {
+    name: &'static [u8],
+    flags: u32,
+    /// Address, mask and broadcast address, network byte order.
+    addr: u32,
+    mask: u32,
+    broadcast: u32,
+}
+
+/// An IPv4 address or mask, in network byte order, as a `sockaddr_in`.
+fn inet_sockaddr(s_addr: u32) -> SockaddrIn {
+    SockaddrIn {
+        sin_family: AF_INET as u16,
+        sin_port: 0,
+        sin_addr: InAddr { s_addr },
+        sin_zero: [0; 8],
+    }
+}
+
+/// One of `link`'s hardware addresses, as a `sockaddr_ll`.
+fn link_sockaddr(link: &LinkRow, hw: [u8; 6]) -> SockaddrLl {
+    let mut sll_addr = [0u8; 8];
+    for (to, from) in sll_addr.iter_mut().zip(hw) {
+        *to = from;
+    }
+    SockaddrLl {
+        sll_family: AF_PACKET as u16,
+        sll_protocol: 0,
+        sll_ifindex: link.index,
+        sll_hatype: link.hatype,
+        sll_pkttype: 0,
+        sll_halen: 6,
+        sll_addr,
+    }
+}
+
+/// The loopback's flags, as Linux reports them.
+const LO_FLAGS: u32 = IFF_UP | IFF_LOOPBACK | IFF_RUNNING | IFF_LOWER_UP;
+
+/// `eth0`'s flags: an Ethernet link's, and up, running and with carrier
+/// while the kernel has it up -- the kernel reports no carrier of its own.
+fn eth0_flags(up: bool) -> u32 {
+    let link = IFF_BROADCAST | IFF_MULTICAST;
+    if up {
+        link | IFF_UP | IFF_RUNNING | IFF_LOWER_UP
+    } else {
+        link
+    }
+}
+
+/// The broadcast address glibc reports for `eth0`'s address and mask
+/// (network byte order).  The kernel keeps none, so this is what a Linux
+/// system configured the same way reports: the subnet's all-ones address --
+/// except for a /31 or /32, which Linux gives no broadcast address (RFC
+/// 3021; `ip addr ... brd +` sets none), and then glibc, reading the netlink
+/// answer as a point-to-point link's, reports the address itself.
+fn broadcast_for(addr: u32, mask: u32) -> u32 {
+    if mask.count_ones() >= 31 {
+        addr
+    } else {
+        addr | !mask
+    }
+}
+
+/// Write a link's entry at `e`, ahead of `next`; answer its node.
 ///
 /// # Safety
 ///
-/// `ifap` must be a valid pointer to write the result.
+/// `e` is valid to write a `LinkEntry`, is zeroed, and lives as long as the
+/// list does.
+unsafe fn write_link(e: *mut LinkEntry, row: &LinkRow, next: *mut Ifaddrs) -> *mut Ifaddrs {
+    // SAFETY: the caller's contract.  Each field is written through its own
+    // place; the name fits with the NUL the zeroed entry already holds
+    // (`IF_NAMESIZE` counts it, and no name here is longer than four).
+    unsafe {
+        core::ptr::addr_of_mut!((*e).addr).write(link_sockaddr(row, row.addr));
+        core::ptr::addr_of_mut!((*e).broadaddr).write(link_sockaddr(row, row.broadcast));
+        core::ptr::addr_of_mut!((*e).stats).write(row.stats);
+        let name = core::ptr::addr_of_mut!((*e).name).cast::<u8>();
+        core::ptr::copy_nonoverlapping(row.name.as_ptr(), name, row.name.len());
+        core::ptr::addr_of_mut!((*e).node).write(Ifaddrs {
+            ifa_next: next,
+            ifa_name: name,
+            ifa_flags: row.flags,
+            ifa_addr: core::ptr::addr_of!((*e).addr).cast::<Sockaddr>(),
+            ifa_netmask: core::ptr::null(),
+            ifa_broadaddr: core::ptr::addr_of!((*e).broadaddr).cast::<Sockaddr>(),
+            ifa_data: core::ptr::addr_of!((*e).stats).cast::<u8>(),
+        });
+        core::ptr::addr_of_mut!((*e).node)
+    }
+}
+
+/// Write an address's entry at `e`, ahead of `next`; answer its node.
+///
+/// # Safety
+///
+/// As for [`write_link`], with an `InetEntry`.
+unsafe fn write_inet(e: *mut InetEntry, row: &InetRow, next: *mut Ifaddrs) -> *mut Ifaddrs {
+    // SAFETY: as in `write_link`.
+    unsafe {
+        core::ptr::addr_of_mut!((*e).addr).write(inet_sockaddr(row.addr));
+        core::ptr::addr_of_mut!((*e).netmask).write(inet_sockaddr(row.mask));
+        core::ptr::addr_of_mut!((*e).broadaddr).write(inet_sockaddr(row.broadcast));
+        let name = core::ptr::addr_of_mut!((*e).name).cast::<u8>();
+        core::ptr::copy_nonoverlapping(row.name.as_ptr(), name, row.name.len());
+        core::ptr::addr_of_mut!((*e).node).write(Ifaddrs {
+            ifa_next: next,
+            ifa_name: name,
+            ifa_flags: row.flags,
+            ifa_addr: core::ptr::addr_of!((*e).addr).cast::<Sockaddr>(),
+            ifa_netmask: core::ptr::addr_of!((*e).netmask).cast::<Sockaddr>(),
+            ifa_broadaddr: core::ptr::addr_of!((*e).broadaddr).cast::<Sockaddr>(),
+            ifa_data: core::ptr::null(),
+        });
+        core::ptr::addr_of_mut!((*e).node)
+    }
+}
+
+/// `getifaddrs`'s list for this `eth0`, whose counters are `stats`: `lo`'s
+/// link and `eth0`'s, then `lo`'s address and `eth0`'s if it has one --
+/// glibc's order, which is netlink's.  NULL if memory ran out.
+fn build_ifaddrs(nic: Nic, stats: RtnlLinkStats) -> *mut Ifaddrs {
+    let eth0 = eth0_flags(nic.up);
+    let links: [LinkRow; INTERFACES.len()] = [
+        LinkRow {
+            name: b"lo",
+            index: 1,
+            flags: LO_FLAGS,
+            hatype: ARPHRD_LOOPBACK,
+            addr: [0; 6],
+            broadcast: [0; 6],
+            // The kernel counts no loopback traffic.
+            stats: RtnlLinkStats::default(),
+        },
+        LinkRow {
+            name: b"eth0",
+            index: 2,
+            flags: eth0,
+            hatype: ARPHRD_ETHER,
+            addr: nic.mac,
+            broadcast: [0xff; 6],
+            stats,
+        },
+    ];
+    let loopback = u32::to_be(INADDR_LOOPBACK);
+    let addresses: [Option<InetRow>; INTERFACES.len()] = [
+        Some(InetRow {
+            name: b"lo",
+            flags: LO_FLAGS,
+            addr: loopback,
+            mask: u32::to_be(0xFF00_0000),
+            // Linux gives the loopback's address no broadcast address, and
+            // glibc reads the netlink answer as a point-to-point link's.
+            broadcast: loopback,
+        }),
+        // An address stays on a link that is down, and Linux lists it.
+        (nic.ip != 0).then(|| InetRow {
+            name: b"eth0",
+            flags: eth0,
+            addr: nic.ip,
+            mask: nic.mask,
+            broadcast: broadcast_for(nic.ip, nic.mask),
+        }),
+    ];
+    let block = crate::malloc::calloc(1, size_of::<IfaddrsBlock>()).cast::<IfaddrsBlock>();
+    if block.is_null() {
+        return core::ptr::null_mut();
+    }
+    // SAFETY: `block` is a fresh, zeroed allocation of one `IfaddrsBlock`
+    // (malloc's alignment suits it), used by nothing else.  `links` and
+    // `addresses` have as many rows as the block has entries of each kind,
+    // so every index is in bounds, and each entry is written once.
+    unsafe {
+        let link_at = core::ptr::addr_of_mut!((*block).links).cast::<LinkEntry>();
+        let inet_at = core::ptr::addr_of_mut!((*block).inet).cast::<InetEntry>();
+        // Last entry first, so each node's `ifa_next` is the one just written.
+        let mut next: *mut Ifaddrs = core::ptr::null_mut();
+        for (k, row) in addresses.iter().enumerate().rev() {
+            if let Some(row) = row {
+                next = write_inet(inet_at.add(k), row, next);
+            }
+        }
+        for (k, row) in links.iter().enumerate().rev() {
+            next = write_link(link_at.add(k), row, next);
+        }
+        next
+    }
+}
+
+/// `eth0` as the kernel describes it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct Nic {
+    /// The kernel found a NIC, and nothing has set it down.
+    up: bool,
+    /// Its hardware address: all zero when the kernel found no NIC.
+    mac: [u8; 6],
+    /// Address, mask and gateway, network byte order.  The address is 0
+    /// until DHCP has answered.
+    ip: u32,
+    mask: u32,
+    gateway: u32,
+}
+
+impl Nic {
+    /// What the kernel describes when it found no NIC.
+    const NONE: Self = Self {
+        up: false,
+        mac: [0; 6],
+        ip: 0,
+        mask: 0,
+        gateway: 0,
+    };
+}
+
+/// `eth0`, from the kernel's record: [0..4] address, [4..8] mask, [8..12]
+/// gateway, [12..16] DNS server -- network byte order -- [16..22] hardware
+/// address, [22] bit 0 up (`sys_net_if_info`).  A kernel that does not
+/// answer is taken for a machine with no NIC.
+fn nic() -> Nic {
+    #[cfg(test)]
+    {
+        // SAFETY: this thread's stand-in.
+        unsafe { *test_nic() }
+    }
+    #[cfg(not(test))]
+    {
+        let mut info = [0u8; 24];
+        if syscall2(SYS_NET_IF_INFO, info.as_mut_ptr() as u64, info.len() as u64) != 0 {
+            return Nic::NONE;
+        }
+        let word = |range: core::ops::Range<usize>| {
+            info.get(range)
+                .and_then(|b| <[u8; 4]>::try_from(b).ok())
+                .map_or(0, u32::from_ne_bytes)
+        };
+        Nic {
+            up: info.get(22).is_some_and(|&f| f & 1 != 0),
+            mac: info
+                .get(16..22)
+                .and_then(|b| <[u8; 6]>::try_from(b).ok())
+                .unwrap_or_default(),
+            ip: word(0..4),
+            mask: word(4..8),
+            gateway: word(8..12),
+        }
+    }
+}
+
+/// The kernel's six counters for the NIC (`SYS_NET_STAT`, source 1): bytes,
+/// packets and errors sent, bytes and packets received, and received
+/// packets dropped.  `None` if it does not answer.
+fn nic_counters() -> Option<[u64; 6]> {
+    #[cfg(test)]
+    {
+        // SAFETY: this thread's stand-in.
+        unsafe { *test_nic_counters() }
+    }
+    #[cfg(not(test))]
+    {
+        let mut raw = [0u8; 48];
+        if syscall2(SYS_NET_STAT, raw.as_mut_ptr() as u64, 1) != 0 {
+            return None;
+        }
+        let mut counters = [0u64; 6];
+        for (counter, bytes) in counters.iter_mut().zip(raw.chunks_exact(8)) {
+            *counter = <[u8; 8]>::try_from(bytes).map_or(0, u64::from_le_bytes);
+        }
+        Some(counters)
+    }
+}
+
+/// A 64-bit counter's low half, as Linux's `copy_rtnl_link_stats` keeps it
+/// when it fills the 32-bit `rtnl_link_stats`.
+#[allow(clippy::cast_possible_truncation)] // the truncation is the point
+fn low32(count: u64) -> u32 {
+    count as u32
+}
+
+/// `eth0`'s counters as `rtnl_link_stats` carries them: the kernel's own
+/// for the NIC, each cut to 32 bits; zero where the kernel keeps no count,
+/// and all zero if it does not answer.
+fn nic_stats() -> RtnlLinkStats {
+    let Some(
+        [
+            tx_bytes,
+            tx_packets,
+            tx_errors,
+            rx_bytes,
+            rx_packets,
+            rx_drops,
+        ],
+    ) = nic_counters()
+    else {
+        return RtnlLinkStats::default();
+    };
+    RtnlLinkStats {
+        rx_packets: low32(rx_packets),
+        tx_packets: low32(tx_packets),
+        rx_bytes: low32(rx_bytes),
+        tx_bytes: low32(tx_bytes),
+        tx_errors: low32(tx_errors),
+        rx_dropped: low32(rx_drops),
+        ..RtnlLinkStats::default()
+    }
+}
+
+#[cfg(test)]
+crate::perprocess::process_global! {
+    /// The host tests' NIC: none unless a test gives one.
+    fn test_nic() -> Nic = Nic::NONE;
+    /// The host tests' NIC counters: none unless a test gives them.
+    fn test_nic_counters() -> Option<[u64; 6]> = None;
+}
+
+/// Give this host test thread a NIC, and counters for it.
+#[cfg(test)]
+fn set_test_nic(nic: Nic, counters: Option<[u64; 6]>) {
+    // SAFETY: this thread's stand-ins.
+    unsafe {
+        *test_nic() = nic;
+        *test_nic_counters() = counters;
+    }
+}
+
+/// Give this host test thread an `eth0` that is up, with QEMU's MAC and
+/// this address, mask and gateway (network byte order) -- or, for `None`,
+/// no address yet.
+#[cfg(test)]
+pub(crate) fn set_test_eth0(eth0: Option<(u32, u32, u32)>) {
+    let (ip, mask, gateway) = eth0.unwrap_or((0, 0, 0));
+    set_test_nic(
+        Nic {
+            up: true,
+            mac: [0x52, 0x54, 0, 0x12, 0x34, 0x56],
+            ip,
+            mask,
+            gateway,
+        },
+        None,
+    );
+}
+
+/// `eth0`'s address, mask and gateway, network byte order, when it can
+/// carry traffic: up, and with an address.
+fn eth0_info() -> Option<(u32, u32, u32)> {
+    let nic = nic();
+    (nic.up && nic.ip != 0).then_some((nic.ip, nic.mask, nic.gateway))
+}
+
+/// The address a connection to `peer` (network byte order) goes out from,
+/// as this system routes it: the loopback's for 127/8 -- and for 0.0.0.0,
+/// which Linux takes as the loopback -- and `eth0`'s for anything its
+/// subnet, a broadcast or multicast, or its gateway reaches.  `None`: no
+/// route.
+pub(crate) fn route_source(peer: u32) -> Option<u32> {
+    let loopback = u32::to_be(INADDR_LOOPBACK);
+    let host = u32::from_be(peer);
+    if host >> 24 == 127 || host == 0 {
+        return Some(loopback);
+    }
+    let (ip, mask, gw) = eth0_info()?;
+    let multicast = host >> 28 == 0xe;
+    if peer & mask == ip & mask || host == u32::MAX || multicast || gw != 0 {
+        Some(ip)
+    } else {
+        None
+    }
+}
+
+/// Each interface's IPv4 address and mask, network byte order, as
+/// `getifaddrs` lists them: the loopback's, then `eth0`'s if it has one --
+/// up or not, as Linux keeps an address on a link that is down and lists it
+/// (glibc's `check_pf`, and `SIOCGIFCONF`, count it).
+pub(crate) fn for_each_ipv4_interface(mut f: impl FnMut(u32, u32)) {
+    f(u32::to_be(INADDR_LOOPBACK), u32::to_be(0xFF00_0000));
+    let nic = nic();
+    if nic.ip != 0 {
+        f(nic.ip, nic.mask);
+    }
+}
+
+/// Retrieve a linked list of network interface addresses.
+///
+/// Each call allocates its own list, freed with [`freeifaddrs`], in glibc's
+/// order -- which is netlink's: each link's `AF_PACKET` entry, then each
+/// address's `AF_INET` entry.
+///
+/// | Entry | `ifa_addr` | `ifa_broadaddr` | `ifa_data` |
+/// |---|---|---|---|
+/// | `lo`, `AF_PACKET` | `ARPHRD_LOOPBACK`, a zero address | the same | its [`RtnlLinkStats`]: zero, as the kernel counts no loopback traffic |
+/// | `eth0`, `AF_PACKET` | `ARPHRD_ETHER`, the NIC's MAC | `ff:ff:ff:ff:ff:ff` | the NIC's counters |
+/// | `lo`, `AF_INET` | 127.0.0.1, mask 255.0.0.0 | 127.0.0.1: glibc reads the loopback as a point-to-point link | NULL |
+/// | `eth0`, `AF_INET`, while it has an address, up or not | its address and mask | the subnet's broadcast address ([`broadcast_for`]) | NULL |
+///
+/// A link entry's `ifa_addr` and `ifa_broadaddr` are `sockaddr_ll`s
+/// ([`SockaddrLl`]) and its `ifa_netmask` is NULL.  `eth0`'s flags are an
+/// Ethernet link's, `IFF_BROADCAST | IFF_MULTICAST`, with `IFF_UP |
+/// IFF_RUNNING | IFF_LOWER_UP` while the kernel has it up; `lo`'s are
+/// `IFF_UP | IFF_LOOPBACK | IFF_RUNNING | IFF_LOWER_UP`.  `eth0` is listed
+/// even when the kernel found no NIC -- down, with a zero MAC -- as
+/// [`if_nameindex`] lists it.  No `AF_INET6` entries: this system has no
+/// IPv6.
+///
+/// Returns 0, or -1 with `EFAULT` for a NULL `ifap` or `ENOMEM`.
+///
+/// # Safety
+///
+/// `ifap` must be NULL or valid to write the result.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub unsafe extern "C" fn getifaddrs(ifap: *mut *mut Ifaddrs) -> i32 {
     if ifap.is_null() {
         errno::set_errno(errno::EFAULT);
         return -1;
     }
-
-    // Query the kernel for interface configuration (IP, mask, gateway, DNS, MAC, flags).
-    let mut if_info = [0u8; 24];
-    let net_up = syscall2(
-        SYS_NET_IF_INFO,
-        if_info.as_mut_ptr() as u64,
-        if_info.len() as u64,
-    ) == 0
-        && if_info[22] != 0; // byte 22 = flags, bit 0 = up
-
-    // SAFETY: single-threaded, static storage.
-    unsafe {
-        // Set up loopback entry.
-        let lo = core::ptr::addr_of_mut!(IFADDRS_LO);
-        let lo_addr = core::ptr::addr_of_mut!(IFADDRS_LO_ADDR);
-        let lo_mask = core::ptr::addr_of_mut!(IFADDRS_LO_MASK);
-        let lo_name = core::ptr::addr_of_mut!(IFADDRS_LO_NAME);
-        (*lo_addr).sin_addr.s_addr = u32::to_be(INADDR_LOOPBACK);
-        (*lo_mask).sin_addr.s_addr = u32::to_be(0xFF00_0000); // 255.0.0.0
-        (*lo).ifa_name = (*lo_name).as_ptr();
-        (*lo).ifa_flags = IFF_UP | IFF_LOOPBACK | IFF_RUNNING;
-        (*lo).ifa_addr = lo_addr.cast();
-        (*lo).ifa_netmask = lo_mask.cast();
-        (*lo).ifa_broadaddr = core::ptr::null();
-        (*lo).ifa_data = core::ptr::null();
-        (*lo).ifa_next = core::ptr::null_mut();
-
-        if net_up {
-            // Set up eth0 entry with real IP and mask from kernel.
-            let eth0 = core::ptr::addr_of_mut!(IFADDRS_ETH0);
-            let eth0_addr = core::ptr::addr_of_mut!(IFADDRS_ETH0_ADDR);
-            let eth0_mask = core::ptr::addr_of_mut!(IFADDRS_ETH0_MASK);
-            let eth0_name = core::ptr::addr_of_mut!(IFADDRS_ETH0_NAME);
-
-            // if_info[0..4] = IP, [4..8] = mask (already in network byte order).
-            (*eth0_addr).sin_addr.s_addr =
-                u32::from_ne_bytes([if_info[0], if_info[1], if_info[2], if_info[3]]);
-            (*eth0_mask).sin_addr.s_addr =
-                u32::from_ne_bytes([if_info[4], if_info[5], if_info[6], if_info[7]]);
-
-            (*eth0).ifa_name = (*eth0_name).as_ptr();
-            (*eth0).ifa_flags = IFF_UP | IFF_RUNNING | IFF_MULTICAST | IFF_BROADCAST;
-            (*eth0).ifa_addr = eth0_addr.cast();
-            (*eth0).ifa_netmask = eth0_mask.cast();
-            (*eth0).ifa_broadaddr = core::ptr::null();
-            (*eth0).ifa_data = core::ptr::null();
-            (*eth0).ifa_next = lo; // eth0 → lo → NULL
-            *ifap = eth0;
-        } else {
-            // No network — just loopback.
-            *ifap = lo;
-        }
+    let list = build_ifaddrs(nic(), nic_stats());
+    if list.is_null() {
+        errno::set_errno(errno::ENOMEM);
+        return -1;
     }
-
+    // SAFETY: the caller's contract: `ifap` is valid to write.
+    unsafe { *ifap = list };
     0
 }
 
-/// Free memory allocated by `getifaddrs()`.
-///
-/// No-op: our implementation uses static storage.
-#[cfg_attr(target_os = "none", unsafe(no_mangle))]
-pub extern "C" fn freeifaddrs(_ifa: *mut Ifaddrs) {
-    // Static storage — nothing to free.
-}
-
-// ---------------------------------------------------------------------------
-// getservbyname / getservbyport — service database
-// ---------------------------------------------------------------------------
-
-/// Service database entry.
-#[repr(C)]
-#[derive(Clone, Copy)]
-pub struct Servent {
-    /// Official service name.
-    pub s_name: *const u8,
-    /// Alias list (NULL-terminated).
-    pub s_aliases: *const *const u8,
-    /// Port number (network byte order).
-    pub s_port: i32,
-    /// Protocol name.
-    pub s_proto: *const u8,
-}
-
-/// Well-known services (subset of /etc/services).
-struct ServiceEntry {
-    name: &'static [u8],
-    port: u16,
-    proto: &'static [u8],
-}
-
-/// Built-in service database — covers the most commonly needed services.
-static SERVICES: &[ServiceEntry] = &[
-    ServiceEntry {
-        name: b"echo",
-        port: 7,
-        proto: b"tcp",
-    },
-    ServiceEntry {
-        name: b"echo",
-        port: 7,
-        proto: b"udp",
-    },
-    ServiceEntry {
-        name: b"ftp-data",
-        port: 20,
-        proto: b"tcp",
-    },
-    ServiceEntry {
-        name: b"ftp",
-        port: 21,
-        proto: b"tcp",
-    },
-    ServiceEntry {
-        name: b"ssh",
-        port: 22,
-        proto: b"tcp",
-    },
-    ServiceEntry {
-        name: b"telnet",
-        port: 23,
-        proto: b"tcp",
-    },
-    ServiceEntry {
-        name: b"smtp",
-        port: 25,
-        proto: b"tcp",
-    },
-    ServiceEntry {
-        name: b"dns",
-        port: 53,
-        proto: b"udp",
-    },
-    ServiceEntry {
-        name: b"domain",
-        port: 53,
-        proto: b"udp",
-    },
-    ServiceEntry {
-        name: b"domain",
-        port: 53,
-        proto: b"tcp",
-    },
-    ServiceEntry {
-        name: b"http",
-        port: 80,
-        proto: b"tcp",
-    },
-    ServiceEntry {
-        name: b"pop3",
-        port: 110,
-        proto: b"tcp",
-    },
-    ServiceEntry {
-        name: b"nntp",
-        port: 119,
-        proto: b"tcp",
-    },
-    ServiceEntry {
-        name: b"ntp",
-        port: 123,
-        proto: b"udp",
-    },
-    ServiceEntry {
-        name: b"imap",
-        port: 143,
-        proto: b"tcp",
-    },
-    ServiceEntry {
-        name: b"snmp",
-        port: 161,
-        proto: b"udp",
-    },
-    ServiceEntry {
-        name: b"https",
-        port: 443,
-        proto: b"tcp",
-    },
-    ServiceEntry {
-        name: b"smtps",
-        port: 465,
-        proto: b"tcp",
-    },
-    ServiceEntry {
-        name: b"submission",
-        port: 587,
-        proto: b"tcp",
-    },
-    ServiceEntry {
-        name: b"imaps",
-        port: 993,
-        proto: b"tcp",
-    },
-    ServiceEntry {
-        name: b"pop3s",
-        port: 995,
-        proto: b"tcp",
-    },
-    ServiceEntry {
-        name: b"socks",
-        port: 1080,
-        proto: b"tcp",
-    },
-    ServiceEntry {
-        name: b"mysql",
-        port: 3306,
-        proto: b"tcp",
-    },
-    ServiceEntry {
-        name: b"postgresql",
-        port: 5432,
-        proto: b"tcp",
-    },
-    ServiceEntry {
-        name: b"redis",
-        port: 6379,
-        proto: b"tcp",
-    },
-    ServiceEntry {
-        name: b"http-alt",
-        port: 8080,
-        proto: b"tcp",
-    },
-    ServiceEntry {
-        name: b"http-alt",
-        port: 8443,
-        proto: b"tcp",
-    },
-];
-
-/// Backing storage for one `servent` result: the struct plus the strings
-/// its pointers point at.
-///
-/// One per thread (in [`crate::perthread`]), so two threads can call
-/// `getservbyname` at once without reading each other's answer.  Within a
-/// thread the next call still overwrites it, as POSIX specifies.
-#[repr(C)]
-#[derive(Clone, Copy)]
-pub struct ServentBuf {
-    /// `s_name`; 32 bytes fits every entry in [`SERVICES`] with room to
-    /// spare (the longest is "postgresql").
-    name: [u8; 32],
-    /// `s_proto`; only "tcp" and "udp" ever appear.
-    proto: [u8; 8],
-    /// `s_aliases`: always empty — our table records no alternate names.
-    aliases: [*const u8; 1],
-    /// Index into [`SERVICES`] of the entry `getservent` will return next.
-    ///
-    /// Zero is "the start of the database", which is both the correct initial
-    /// state and what [`Self::ZERO`] requires.
-    cursor: u32,
-    /// Nonzero once `setservent(1)` has asked for the database to stay open.
-    ///
-    /// Not decorative even though there is no file to hold open: glibc without
-    /// `stayopen` implements `getservbyname`/`getservbyport` as
-    /// open-scan-close, so a lookup made mid-enumeration rewinds the cursor;
-    /// with `stayopen` set it does not.  We reproduce the observable half of
-    /// that (see [`servent_lookup_done`]) rather than let the argument be a
-    /// silent no-op that diverges from every other libc for programs that
-    /// interleave the two styles.
-    stayopen: i32,
-    /// The `struct servent` handed back to the caller.
-    result: Servent,
-}
-
-impl ServentBuf {
-    /// Initial state; must be bit-identical to all-zero, see
-    /// [`crate::perthread::PerThread::ZERO`].
-    pub const ZERO: Self = Self {
-        name: [0; 32],
-        proto: [0; 8],
-        aliases: [core::ptr::null()],
-        cursor: 0,
-        stayopen: 0,
-        result: Servent {
-            s_name: core::ptr::null(),
-            s_aliases: core::ptr::null(),
-            s_port: 0,
-            s_proto: core::ptr::null(),
-        },
-    };
-}
-
-/// Fill the calling thread's `Servent` from a `ServiceEntry`.
+/// Free a list [`getifaddrs`] returned.  NULL is ignored.
 ///
 /// # Safety
 ///
-/// Must be called on a thread whose `PerThread` block is not concurrently
-/// in use by anyone else — which is what `perthread::current()` guarantees.
-unsafe fn fill_servent(entry: &ServiceEntry) -> *const Servent {
-    // SAFETY: `perthread::current()` is valid for this thread and no other
-    // thread holds a pointer into this block.  Every write below is bounds-
-    // checked against the field it targets (name ≤ 31, proto ≤ 7, leaving
-    // room for the terminator that the preceding zero-fill provides).
-    unsafe {
-        let this = &raw mut (*crate::perthread::current()).servent;
-        let name_ptr = (&raw mut (*this).name).cast::<u8>();
-        let proto_ptr = (&raw mut (*this).proto).cast::<u8>();
-        let aliases_ptr = (&raw mut (*this).aliases).cast::<*const u8>();
-        let result_ptr = &raw mut (*this).result;
-
-        // Zero and copy name.
-        let nlen = entry.name.len().min(31);
-        core::ptr::write_bytes(name_ptr, 0, 32);
-        core::ptr::copy_nonoverlapping(entry.name.as_ptr(), name_ptr, nlen);
-
-        // Zero and copy proto.
-        let plen = entry.proto.len().min(7);
-        core::ptr::write_bytes(proto_ptr, 0, 8);
-        core::ptr::copy_nonoverlapping(entry.proto.as_ptr(), proto_ptr, plen);
-
-        // Empty alias list.
-        aliases_ptr.write(core::ptr::null());
-
-        // Assemble result.
-        (*result_ptr).s_name = name_ptr;
-        (*result_ptr).s_aliases = aliases_ptr;
-        (*result_ptr).s_port = i32::from(entry.port.to_be());
-        (*result_ptr).s_proto = proto_ptr;
-
-        result_ptr
-    }
-}
-
-/// Look up a service by name and protocol.
-///
-/// Returns a pointer to library-owned storage (valid until the calling
-/// thread's next `getservby*` call), or NULL if not found.
-///
-/// # Safety
-///
-/// `name` must be a valid null-terminated string.
-/// `proto` may be null (match any protocol) or a null-terminated protocol name.
+/// `ifa` is NULL, or the head of a list from [`getifaddrs`] not freed before.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
-pub unsafe extern "C" fn getservbyname(name: *const u8, proto: *const u8) -> *const Servent {
-    if name.is_null() {
-        return core::ptr::null();
-    }
-
-    let name_len = unsafe { crate::string::strlen(name) };
-    let name_slice = unsafe { core::slice::from_raw_parts(name, name_len) };
-
-    let proto_slice = if proto.is_null() {
-        &[]
-    } else {
-        let plen = unsafe { crate::string::strlen(proto) };
-        unsafe { core::slice::from_raw_parts(proto, plen) }
-    };
-
-    let found = SERVICES.iter().find(|entry| {
-        entry.name == name_slice && (proto_slice.is_empty() || entry.proto == proto_slice)
-    });
-    // Fill before the rewind: `fill_servent` and `servent_lookup_done` touch
-    // different fields of the same block, but doing the lookup bookkeeping last
-    // keeps the "a lookup ends the scan" rule in one place.
-    let result = found.map_or(core::ptr::null(), |entry| unsafe { fill_servent(entry) });
-    unsafe { servent_lookup_done() };
-    result
-}
-
-/// Look up a service by port number and protocol.
-///
-/// `port` is in network byte order.
-///
-/// # Safety
-///
-/// `proto` may be null (match any protocol) or a null-terminated protocol name.
-#[cfg_attr(target_os = "none", unsafe(no_mangle))]
-pub unsafe extern "C" fn getservbyport(port: i32, proto: *const u8) -> *const Servent {
-    let host_port = u16::from_be(port as u16);
-
-    let proto_slice = if proto.is_null() {
-        &[]
-    } else {
-        let plen = unsafe { crate::string::strlen(proto) };
-        unsafe { core::slice::from_raw_parts(proto, plen) }
-    };
-
-    let found = SERVICES.iter().find(|entry| {
-        entry.port == host_port && (proto_slice.is_empty() || entry.proto == proto_slice)
-    });
-    let result = found.map_or(core::ptr::null(), |entry| unsafe { fill_servent(entry) });
-    unsafe { servent_lookup_done() };
-    result
-}
-
-// ---------------------------------------------------------------------------
-// setservent / getservent / endservent — sequential access to the same table
-// ---------------------------------------------------------------------------
-//
-// bash calls these (they were two of the five symbols the cross-compile spike
-// found genuinely missing, see `open-questions.md` Q41).  They walk exactly the
-// table `getservby*` searches, so there is no second database to keep in sync.
-//
-// The cursor lives in the caller's `ServentBuf`, i.e. it is *per thread*, for
-// the same reason the result buffer is: two threads enumerating at once must
-// not consume each other's entries.  glibc's is per process and shared, which
-// is a documented footgun rather than a property worth reproducing.
-
-/// Called at the end of every `getservby*` lookup to model glibc's
-/// open-scan-close behaviour when the database was not opened with
-/// `setservent(1)`.
-///
-/// # Safety
-///
-/// Same requirement as [`fill_servent`]: the calling thread's `PerThread`
-/// block must not be concurrently in use, which `perthread::current()`
-/// guarantees.
-unsafe fn servent_lookup_done() {
-    // SAFETY: `perthread::current()` is valid for this thread and no other
-    // thread holds a pointer into this block.
-    unsafe {
-        let this = &raw mut (*crate::perthread::current()).servent;
-        if (*this).stayopen == 0 {
-            (*this).cursor = 0;
-        }
-    }
-}
-
-/// Rewind the service database to its first entry.
-///
-/// `stayopen` nonzero asks for the database to remain open across
-/// `getservbyname`/`getservbyport` calls; see [`ServentBuf::stayopen`] for what
-/// that means when the "file" is a static table.
-#[cfg_attr(target_os = "none", unsafe(no_mangle))]
-pub extern "C" fn setservent(stayopen: i32) {
-    // SAFETY: `perthread::current()` is valid for this thread and no other
-    // thread holds a pointer into this block.
-    unsafe {
-        let this = &raw mut (*crate::perthread::current()).servent;
-        (*this).cursor = 0;
-        (*this).stayopen = i32::from(stayopen != 0);
-    }
-}
-
-/// Return the next entry in the service database, or NULL at the end.
-///
-/// The returned pointer is library-owned and is invalidated by the calling
-/// thread's next `getservent`/`getservby*` call, as POSIX specifies.
-#[cfg_attr(target_os = "none", unsafe(no_mangle))]
-pub extern "C" fn getservent() -> *const Servent {
-    // SAFETY: `perthread::current()` is valid for this thread and no other
-    // thread holds a pointer into this block.  The index is bounds-checked
-    // against `SERVICES` by `get` before it is used.
-    unsafe {
-        let this = &raw mut (*crate::perthread::current()).servent;
-        let index = (*this).cursor as usize;
-        let Some(entry) = SERVICES.get(index) else {
-            // Past the end: stay there rather than wrapping, so repeated calls
-            // keep returning NULL until `setservent` rewinds.
-            return core::ptr::null();
-        };
-        // Saturating rather than `+ 1`: the cursor can only reach
-        // `SERVICES.len()`, far below `u32::MAX`, but a saturating step means
-        // even a corrupted cursor cannot wrap around to a valid index.
-        (*this).cursor = (*this).cursor.saturating_add(1);
-        fill_servent(entry)
-    }
-}
-
-/// Close the service database, rewinding the enumeration cursor.
-///
-/// Also clears the `stayopen` request, matching glibc: a subsequent
-/// `getservbyname` is back to open-scan-close until `setservent(1)` asks again.
-#[cfg_attr(target_os = "none", unsafe(no_mangle))]
-pub extern "C" fn endservent() {
-    // SAFETY: `perthread::current()` is valid for this thread and no other
-    // thread holds a pointer into this block.
-    unsafe {
-        let this = &raw mut (*crate::perthread::current()).servent;
-        (*this).cursor = 0;
-        (*this).stayopen = 0;
-    }
-}
-
-// ---------------------------------------------------------------------------
-// getprotobyname / getprotobynumber — protocol database
-// ---------------------------------------------------------------------------
-
-/// Protocol database entry.
-#[repr(C)]
-#[derive(Clone, Copy)]
-pub struct Protoent {
-    /// Official protocol name.
-    pub p_name: *const u8,
-    /// Alias list (NULL-terminated).
-    pub p_aliases: *const *const u8,
-    /// Protocol number.
-    pub p_proto: i32,
-}
-
-/// Well-known protocols (subset of /etc/protocols).
-struct ProtoEntry {
-    name: &'static [u8],
-    number: i32,
-    aliases: &'static [&'static [u8]],
-}
-
-static PROTOCOLS: &[ProtoEntry] = &[
-    ProtoEntry {
-        name: b"ip",
-        number: 0,
-        aliases: &[b"IP"],
-    },
-    ProtoEntry {
-        name: b"icmp",
-        number: 1,
-        aliases: &[b"ICMP"],
-    },
-    ProtoEntry {
-        name: b"igmp",
-        number: 2,
-        aliases: &[b"IGMP"],
-    },
-    ProtoEntry {
-        name: b"tcp",
-        number: 6,
-        aliases: &[b"TCP"],
-    },
-    ProtoEntry {
-        name: b"udp",
-        number: 17,
-        aliases: &[b"UDP"],
-    },
-    ProtoEntry {
-        name: b"ipv6",
-        number: 41,
-        aliases: &[b"IPv6"],
-    },
-    ProtoEntry {
-        name: b"gre",
-        number: 47,
-        aliases: &[b"GRE"],
-    },
-    ProtoEntry {
-        name: b"esp",
-        number: 50,
-        aliases: &[b"ESP"],
-    },
-    ProtoEntry {
-        name: b"ah",
-        number: 51,
-        aliases: &[b"AH"],
-    },
-    ProtoEntry {
-        name: b"icmpv6",
-        number: 58,
-        aliases: &[b"ICMPv6"],
-    },
-    ProtoEntry {
-        name: b"sctp",
-        number: 132,
-        aliases: &[b"SCTP"],
-    },
-];
-
-/// Backing storage for one `protoent` result: the struct plus the strings
-/// its pointers point at.
-///
-/// One per thread (in [`crate::perthread`]).  This is the buffer whose
-/// process-wide predecessor made `cargo test -p posix` flaky under the
-/// parallel harness (`known-issues.md` TD-POSIX-TEST-PARALLEL): two tests
-/// calling `getprotoby*` at once each saw the other's protocol name.
-#[repr(C)]
-#[derive(Clone, Copy)]
-pub struct ProtoentBuf {
-    /// `p_name`; 16 bytes covers every entry in [`PROTOCOLS`].
-    name: [u8; 16],
-    /// `p_aliases`: at most one alias plus the NULL terminator.
-    aliases: [*const u8; 2],
-    /// Storage for that one alias.
-    alias: [u8; 16],
-    /// Index into [`PROTOCOLS`] of the entry `getprotoent` will return next.
-    /// Zero is the start of the database, as [`Self::ZERO`] requires.
-    cursor: u32,
-    /// Nonzero once `setprotoent(1)` has asked the database to stay open; see
-    /// [`ServentBuf::stayopen`], which this mirrors exactly.
-    stayopen: i32,
-    /// The `struct protoent` handed back to the caller.
-    result: Protoent,
-}
-
-impl ProtoentBuf {
-    /// Initial state; must be bit-identical to all-zero, see
-    /// [`crate::perthread::PerThread::ZERO`].
-    pub const ZERO: Self = Self {
-        name: [0; 16],
-        aliases: [core::ptr::null(); 2],
-        alias: [0; 16],
-        cursor: 0,
-        stayopen: 0,
-        result: Protoent {
-            p_name: core::ptr::null(),
-            p_aliases: core::ptr::null(),
-            p_proto: 0,
-        },
-    };
-}
-
-/// Fill the calling thread's `Protoent` from a `ProtoEntry`.
-///
-/// # Safety
-///
-/// Must be called on a thread whose `PerThread` block is not concurrently
-/// in use by anyone else — which is what `perthread::current()` guarantees.
-unsafe fn fill_protoent(entry: &ProtoEntry) -> *const Protoent {
-    // SAFETY: `perthread::current()` is valid for this thread and no other
-    // thread holds a pointer into this block.  Both string copies are
-    // clamped to 15 bytes into 16-byte fields that were just zeroed, so the
-    // terminator is always present.
-    unsafe {
-        let this = &raw mut (*crate::perthread::current()).protoent;
-        let name_raw = (&raw mut (*this).name).cast::<u8>();
-        let aliases_ptr = (&raw mut (*this).aliases).cast::<*const u8>();
-        let alias_buf_raw = (&raw mut (*this).alias).cast::<u8>();
-        let result_ptr = &raw mut (*this).result;
-
-        // Zero and copy name.
-        let nlen = entry.name.len().min(15);
-        core::ptr::write_bytes(name_raw, 0, 16);
-        core::ptr::copy_nonoverlapping(entry.name.as_ptr(), name_raw, nlen);
-
-        // Set up alias list (first alias if available, then NULL).
-        if let Some(&alias) = entry.aliases.first() {
-            let alen = alias.len().min(15);
-            core::ptr::write_bytes(alias_buf_raw, 0, 16);
-            core::ptr::copy_nonoverlapping(alias.as_ptr(), alias_buf_raw, alen);
-            aliases_ptr.write(alias_buf_raw);
-        } else {
-            aliases_ptr.write(core::ptr::null());
-        }
-        // Terminate unconditionally: the one-alias case writes slot 0, so
-        // slot 1 must be NULL either way.
-        aliases_ptr.add(1).write(core::ptr::null());
-
-        (*result_ptr).p_name = name_raw;
-        (*result_ptr).p_aliases = aliases_ptr;
-        (*result_ptr).p_proto = entry.number;
-
-        result_ptr
-    }
-}
-
-/// Look up a protocol by name.
-///
-/// Returns a pointer to library-owned storage (valid until the calling
-/// thread's next `getprotoby*` call), or NULL if not found.
-///
-/// # Safety
-///
-/// `name` must be a valid null-terminated string.
-#[cfg_attr(target_os = "none", unsafe(no_mangle))]
-pub unsafe extern "C" fn getprotobyname(name: *const u8) -> *const Protoent {
-    if name.is_null() {
-        return core::ptr::null();
-    }
-
-    let name_len = unsafe { crate::string::strlen(name) };
-    let name_slice = unsafe { core::slice::from_raw_parts(name, name_len) };
-
-    let found = PROTOCOLS.iter().find(|entry| {
-        entry.name.eq_ignore_ascii_case(name_slice)
-            || entry
-                .aliases
-                .iter()
-                .any(|alias| alias.eq_ignore_ascii_case(name_slice))
-    });
-    let result = found.map_or(core::ptr::null(), |entry| unsafe { fill_protoent(entry) });
-    unsafe { protoent_lookup_done() };
-    result
-}
-
-/// Look up a protocol by number.
-///
-/// Returns a pointer to library-owned storage (valid until the calling
-/// thread's next `getprotoent`/`getprotoby*` call), or NULL if not found.
-#[cfg_attr(target_os = "none", unsafe(no_mangle))]
-pub extern "C" fn getprotobynumber(number: i32) -> *const Protoent {
-    let found = PROTOCOLS.iter().find(|entry| entry.number == number);
-    // SAFETY: per-thread storage; `perthread::current()` is valid for this
-    // thread and no other thread holds a pointer into this block.
-    let result = found.map_or(core::ptr::null(), |entry| unsafe { fill_protoent(entry) });
-    // SAFETY: as above.
-    unsafe { protoent_lookup_done() };
-    result
-}
-
-// ---------------------------------------------------------------------------
-// setprotoent / getprotoent / endprotoent — sequential access to the same table
-// ---------------------------------------------------------------------------
-//
-// The exact analogue of the `servent` trio above, over [`PROTOCOLS`].  Added
-// alongside it because their absence is the same gap: a program that wants to
-// list the protocol database (`/etc/protocols` readers, `netstat`-style tools)
-// has no other way to reach it.
-
-/// Called at the end of every `getprotoby*` lookup; models glibc's
-/// open-scan-close behaviour when `setprotoent(1)` was not used.
-///
-/// # Safety
-///
-/// Same requirement as [`fill_protoent`]: the calling thread's `PerThread`
-/// block must not be concurrently in use.
-unsafe fn protoent_lookup_done() {
-    // SAFETY: `perthread::current()` is valid for this thread and no other
-    // thread holds a pointer into this block.
-    unsafe {
-        let this = &raw mut (*crate::perthread::current()).protoent;
-        if (*this).stayopen == 0 {
-            (*this).cursor = 0;
-        }
-    }
-}
-
-/// Rewind the protocol database to its first entry.
-#[cfg_attr(target_os = "none", unsafe(no_mangle))]
-pub extern "C" fn setprotoent(stayopen: i32) {
-    // SAFETY: `perthread::current()` is valid for this thread and no other
-    // thread holds a pointer into this block.
-    unsafe {
-        let this = &raw mut (*crate::perthread::current()).protoent;
-        (*this).cursor = 0;
-        (*this).stayopen = i32::from(stayopen != 0);
-    }
-}
-
-/// Return the next entry in the protocol database, or NULL at the end.
-#[cfg_attr(target_os = "none", unsafe(no_mangle))]
-pub extern "C" fn getprotoent() -> *const Protoent {
-    // SAFETY: `perthread::current()` is valid for this thread and no other
-    // thread holds a pointer into this block.  `get` bounds-checks the index.
-    unsafe {
-        let this = &raw mut (*crate::perthread::current()).protoent;
-        let index = (*this).cursor as usize;
-        let Some(entry) = PROTOCOLS.get(index) else {
-            return core::ptr::null();
-        };
-        (*this).cursor = (*this).cursor.saturating_add(1);
-        fill_protoent(entry)
-    }
-}
-
-/// Close the protocol database, rewinding the cursor and clearing `stayopen`.
-#[cfg_attr(target_os = "none", unsafe(no_mangle))]
-pub extern "C" fn endprotoent() {
-    // SAFETY: `perthread::current()` is valid for this thread and no other
-    // thread holds a pointer into this block.
-    unsafe {
-        let this = &raw mut (*crate::perthread::current()).protoent;
-        (*this).cursor = 0;
-        (*this).stayopen = 0;
-    }
+pub unsafe extern "C" fn freeifaddrs(ifa: *mut Ifaddrs) {
+    // SAFETY: the caller's contract: the head of a `getifaddrs` list, which
+    // is the start of its one `malloc` allocation.
+    unsafe { crate::malloc::free(ifa.cast()) };
 }
 
 // ---------------------------------------------------------------------------
@@ -7154,135 +5172,6 @@ mod tests {
         assert_eq!(ntohl(net), val);
     }
 
-    // -- inet_addr tests --
-
-    #[test]
-    fn test_inet_addr_valid() {
-        let addr = unsafe { inet_addr(c"127.0.0.1".as_ptr().cast::<u8>()) };
-        // 127.0.0.1 in POSIX network byte order: memory layout = [127, 0, 0, 1].
-        assert_eq!(addr, u32::from_ne_bytes([127, 0, 0, 1]));
-        // Must match htonl(INADDR_LOOPBACK).
-        assert_eq!(addr, htonl(INADDR_LOOPBACK));
-    }
-
-    #[test]
-    fn test_inet_addr_zeros() {
-        let addr = unsafe { inet_addr(c"0.0.0.0".as_ptr().cast::<u8>()) };
-        assert_eq!(addr, 0);
-    }
-
-    #[test]
-    fn test_inet_addr_broadcast() {
-        let addr = unsafe { inet_addr(c"255.255.255.255".as_ptr().cast::<u8>()) };
-        assert_eq!(addr, u32::from_ne_bytes([255, 255, 255, 255]));
-    }
-
-    #[test]
-    fn test_inet_addr_typical() {
-        let addr = unsafe { inet_addr(c"192.168.1.1".as_ptr().cast::<u8>()) };
-        assert_eq!(addr, u32::from_ne_bytes([192, 168, 1, 1]));
-    }
-
-    #[test]
-    fn test_inet_addr_invalid_null() {
-        let addr = unsafe { inet_addr(core::ptr::null()) };
-        assert_eq!(addr, 0xFFFF_FFFF); // INADDR_NONE
-    }
-
-    #[test]
-    fn test_inet_addr_invalid_format() {
-        // Too few octets.
-        assert_eq!(
-            unsafe { inet_addr(c"127.0.1".as_ptr().cast::<u8>()) },
-            0xFFFF_FFFF
-        );
-        // Too many octets.
-        assert_eq!(
-            unsafe { inet_addr(c"1.2.3.4.5".as_ptr().cast::<u8>()) },
-            0xFFFF_FFFF
-        );
-        // Octet > 255.
-        assert_eq!(
-            unsafe { inet_addr(c"256.0.0.1".as_ptr().cast::<u8>()) },
-            0xFFFF_FFFF
-        );
-        // Non-numeric.
-        assert_eq!(
-            unsafe { inet_addr(c"abc.def.ghi.jkl".as_ptr().cast::<u8>()) },
-            0xFFFF_FFFF
-        );
-        // Empty.
-        assert_eq!(unsafe { inet_addr(c"".as_ptr().cast::<u8>()) }, 0xFFFF_FFFF);
-        // Leading dot.
-        assert_eq!(
-            unsafe { inet_addr(c".1.2.3".as_ptr().cast::<u8>()) },
-            0xFFFF_FFFF
-        );
-    }
-
-    // -- inet_ntoa tests --
-
-    #[test]
-    fn test_inet_ntoa_loopback() {
-        let addr = InAddr {
-            s_addr: u32::from_ne_bytes([127, 0, 0, 1]),
-        };
-        let ptr = inet_ntoa(addr);
-        let s = unsafe { c_str_to_slice(ptr) };
-        assert_eq!(s, b"127.0.0.1");
-    }
-
-    #[test]
-    fn test_inet_ntoa_zeros() {
-        let addr = InAddr { s_addr: 0 };
-        let ptr = inet_ntoa(addr);
-        let s = unsafe { c_str_to_slice(ptr) };
-        assert_eq!(s, b"0.0.0.0");
-    }
-
-    #[test]
-    fn test_inet_ntoa_broadcast() {
-        let addr = InAddr {
-            s_addr: u32::from_ne_bytes([255, 255, 255, 255]),
-        };
-        let ptr = inet_ntoa(addr);
-        let s = unsafe { c_str_to_slice(ptr) };
-        assert_eq!(s, b"255.255.255.255");
-    }
-
-    #[test]
-    fn test_inet_addr_ntoa_roundtrip() {
-        let original = c"10.20.30.40";
-        let addr_val = unsafe { inet_addr(original.as_ptr().cast::<u8>()) };
-        assert_ne!(addr_val, 0xFFFF_FFFF);
-        let ptr = inet_ntoa(InAddr { s_addr: addr_val });
-        let result = unsafe { c_str_to_slice(ptr) };
-        assert_eq!(result, b"10.20.30.40");
-    }
-
-    // -- parse_port_string tests --
-
-    #[test]
-    fn test_parse_port_valid() {
-        assert_eq!(parse_port_string(c"80".as_ptr().cast::<u8>()), 80);
-        assert_eq!(parse_port_string(c"443".as_ptr().cast::<u8>()), 443);
-        assert_eq!(parse_port_string(c"8080".as_ptr().cast::<u8>()), 8080);
-        assert_eq!(parse_port_string(c"65535".as_ptr().cast::<u8>()), 65535);
-        assert_eq!(parse_port_string(c"0".as_ptr().cast::<u8>()), 0);
-    }
-
-    #[test]
-    fn test_parse_port_invalid() {
-        // Non-numeric → -1 (distinguishes "not a number" from "port 0").
-        assert_eq!(parse_port_string(c"http".as_ptr().cast::<u8>()), -1);
-        // Too large.
-        assert_eq!(parse_port_string(c"65536".as_ptr().cast::<u8>()), -1);
-        // Null pointer.
-        assert_eq!(parse_port_string(core::ptr::null()), -1);
-        // Empty.
-        assert_eq!(parse_port_string(c"".as_ptr().cast::<u8>()), -1);
-    }
-
     // -- translate_net_error tests --
 
     #[test]
@@ -7397,496 +5286,12 @@ mod tests {
         assert_eq!(IN6ADDR_LOOPBACK_INIT.s6_addr, expected);
     }
 
-    // -- inet_pton IPv4 tests --
-
-    #[test]
-    fn test_inet_pton4_loopback() {
-        let mut dst = [0u8; 4];
-        let ret = unsafe { inet_pton(AF_INET, c"127.0.0.1".as_ptr().cast(), dst.as_mut_ptr()) };
-        assert_eq!(ret, 1);
-        assert_eq!(dst, [127, 0, 0, 1]);
-    }
-
-    #[test]
-    fn test_inet_pton4_zeros() {
-        let mut dst = [0u8; 4];
-        let ret = unsafe { inet_pton(AF_INET, c"0.0.0.0".as_ptr().cast(), dst.as_mut_ptr()) };
-        assert_eq!(ret, 1);
-        assert_eq!(dst, [0, 0, 0, 0]);
-    }
-
-    #[test]
-    fn test_inet_pton4_broadcast() {
-        let mut dst = [0u8; 4];
-        let ret = unsafe {
-            inet_pton(
-                AF_INET,
-                c"255.255.255.255".as_ptr().cast(),
-                dst.as_mut_ptr(),
-            )
-        };
-        assert_eq!(ret, 1);
-        assert_eq!(dst, [255, 255, 255, 255]);
-    }
-
-    #[test]
-    fn test_inet_pton4_invalid() {
-        let mut dst = [0u8; 4];
-        // Too few octets.
-        assert_eq!(
-            unsafe { inet_pton(AF_INET, c"127.0.1".as_ptr().cast(), dst.as_mut_ptr()) },
-            0
-        );
-        // Too many.
-        assert_eq!(
-            unsafe { inet_pton(AF_INET, c"1.2.3.4.5".as_ptr().cast(), dst.as_mut_ptr()) },
-            0
-        );
-        // Octet > 255.
-        assert_eq!(
-            unsafe { inet_pton(AF_INET, c"256.0.0.1".as_ptr().cast(), dst.as_mut_ptr()) },
-            0
-        );
-        // Empty.
-        assert_eq!(
-            unsafe { inet_pton(AF_INET, c"".as_ptr().cast(), dst.as_mut_ptr()) },
-            0
-        );
-    }
-
-    #[test]
-    fn test_inet_pton_unsupported_af() {
-        let mut dst = [0u8; 16];
-        let ret = unsafe { inet_pton(99, c"::1".as_ptr().cast(), dst.as_mut_ptr()) };
-        assert_eq!(ret, -1);
-    }
-
-    #[test]
-    fn test_inet_pton_null() {
-        let mut dst = [0u8; 4];
-        assert_eq!(
-            unsafe { inet_pton(AF_INET, core::ptr::null(), dst.as_mut_ptr()) },
-            0
-        );
-        assert_eq!(
-            unsafe { inet_pton(AF_INET, c"1.2.3.4".as_ptr().cast(), core::ptr::null_mut()) },
-            0
-        );
-    }
-
-    // -- inet_pton IPv6 tests --
-
-    #[test]
-    fn test_inet_pton6_loopback() {
-        let mut dst = [0u8; 16];
-        let ret = unsafe { inet_pton(AF_INET6, c"::1".as_ptr().cast(), dst.as_mut_ptr()) };
-        assert_eq!(ret, 1);
-        let mut expected = [0u8; 16];
-        expected[15] = 1;
-        assert_eq!(dst, expected);
-    }
-
-    #[test]
-    fn test_inet_pton6_all_zeros() {
-        let mut dst = [0u8; 16];
-        let ret = unsafe { inet_pton(AF_INET6, c"::".as_ptr().cast(), dst.as_mut_ptr()) };
-        assert_eq!(ret, 1);
-        assert_eq!(dst, [0u8; 16]);
-    }
-
-    #[test]
-    fn test_inet_pton6_full_form() {
-        let mut dst = [0u8; 16];
-        let ret = unsafe {
-            inet_pton(
-                AF_INET6,
-                c"2001:0db8:0000:0000:0000:0000:0000:0001".as_ptr().cast(),
-                dst.as_mut_ptr(),
-            )
-        };
-        assert_eq!(ret, 1);
-        assert_eq!(dst[0..2], [0x20, 0x01]); // 2001
-        assert_eq!(dst[2..4], [0x0d, 0xb8]); // 0db8
-        assert_eq!(dst[4..14], [0u8; 10]); // zeros
-        assert_eq!(dst[14..16], [0x00, 0x01]); // 0001
-    }
-
-    #[test]
-    fn test_inet_pton6_compressed() {
-        let mut dst = [0u8; 16];
-        let ret = unsafe { inet_pton(AF_INET6, c"fe80::1".as_ptr().cast(), dst.as_mut_ptr()) };
-        assert_eq!(ret, 1);
-        assert_eq!(dst[0..2], [0xfe, 0x80]); // fe80
-        assert_eq!(dst[2..14], [0u8; 12]); // zeros (6 groups)
-        assert_eq!(dst[14..16], [0x00, 0x01]); // 1
-    }
-
-    #[test]
-    fn test_inet_pton6_middle_compression() {
-        let mut dst = [0u8; 16];
-        let ret = unsafe { inet_pton(AF_INET6, c"2001:db8::1".as_ptr().cast(), dst.as_mut_ptr()) };
-        assert_eq!(ret, 1);
-        assert_eq!(dst[0..2], [0x20, 0x01]);
-        assert_eq!(dst[2..4], [0x0d, 0xb8]);
-        assert_eq!(dst[4..14], [0u8; 10]);
-        assert_eq!(dst[14..16], [0x00, 0x01]);
-    }
-
-    #[test]
-    fn test_inet_pton6_trailing_compression() {
-        let mut dst = [0u8; 16];
-        let ret = unsafe { inet_pton(AF_INET6, c"fe80::".as_ptr().cast(), dst.as_mut_ptr()) };
-        assert_eq!(ret, 1);
-        assert_eq!(dst[0..2], [0xfe, 0x80]);
-        assert_eq!(dst[2..16], [0u8; 14]);
-    }
-
-    #[test]
-    fn test_inet_pton6_invalid_trailing_single_colon() {
-        // Bug regression: "::ffff:" has a trailing single colon — invalid.
-        let mut dst = [0u8; 16];
-        assert_eq!(
-            unsafe { inet_pton(AF_INET6, c"::ffff:".as_ptr().cast(), dst.as_mut_ptr()) },
-            0
-        );
-        // Also test other trailing colon cases.
-        assert_eq!(
-            unsafe { inet_pton(AF_INET6, c"1::2:".as_ptr().cast(), dst.as_mut_ptr()) },
-            0
-        );
-        assert_eq!(
-            unsafe {
-                inet_pton(
-                    AF_INET6,
-                    c"1:2:3:4:5:6:7:8:".as_ptr().cast(),
-                    dst.as_mut_ptr(),
-                )
-            },
-            0
-        );
-    }
-
-    #[test]
-    fn test_inet_pton6_invalid_leading_single_colon() {
-        // Bug regression: ":1:2:3:4:5:6:7:8" has a leading single colon — invalid.
-        let mut dst = [0u8; 16];
-        assert_eq!(
-            unsafe {
-                inet_pton(
-                    AF_INET6,
-                    c":1:2:3:4:5:6:7:8".as_ptr().cast(),
-                    dst.as_mut_ptr(),
-                )
-            },
-            0
-        );
-        assert_eq!(
-            unsafe { inet_pton(AF_INET6, c":1".as_ptr().cast(), dst.as_mut_ptr()) },
-            0
-        );
-    }
-
-    #[test]
-    fn test_inet_pton6_invalid_multiple_coloncolon() {
-        let mut dst = [0u8; 16];
-        assert_eq!(
-            unsafe { inet_pton(AF_INET6, c"::1::2".as_ptr().cast(), dst.as_mut_ptr()) },
-            0
-        );
-    }
-
-    #[test]
-    fn test_inet_pton6_invalid_triple_colon() {
-        let mut dst = [0u8; 16];
-        assert_eq!(
-            unsafe { inet_pton(AF_INET6, c":::1".as_ptr().cast(), dst.as_mut_ptr()) },
-            0
-        );
-    }
-
-    #[test]
-    fn test_inet_pton6_too_many_groups() {
-        let mut dst = [0u8; 16];
-        assert_eq!(
-            unsafe {
-                inet_pton(
-                    AF_INET6,
-                    c"1:2:3:4:5:6:7:8:9".as_ptr().cast(),
-                    dst.as_mut_ptr(),
-                )
-            },
-            0
-        );
-    }
-
-    #[test]
-    fn test_inet_pton6_too_few_groups() {
-        let mut dst = [0u8; 16];
-        assert_eq!(
-            unsafe { inet_pton(AF_INET6, c"1:2:3".as_ptr().cast(), dst.as_mut_ptr()) },
-            0
-        );
-    }
-
-    #[test]
-    fn test_inet_pton6_group_too_long() {
-        let mut dst = [0u8; 16];
-        assert_eq!(
-            unsafe { inet_pton(AF_INET6, c"12345::1".as_ptr().cast(), dst.as_mut_ptr()) },
-            0
-        );
-    }
-
-    #[test]
-    fn test_inet_pton6_uppercase() {
-        let mut dst = [0u8; 16];
-        let ret = unsafe { inet_pton(AF_INET6, c"::FFFF".as_ptr().cast(), dst.as_mut_ptr()) };
-        assert_eq!(ret, 1);
-        assert_eq!(dst[14..16], [0xFF, 0xFF]);
-    }
-
-    // -- inet_ntop IPv4 tests --
-
-    #[test]
-    fn test_inet_ntop4_loopback() {
-        let src: [u8; 4] = [127, 0, 0, 1];
-        let mut buf = [0u8; 16];
-        let ret = inet_ntop(AF_INET, src.as_ptr(), buf.as_mut_ptr(), 16);
-        assert!(!ret.is_null());
-        let s = unsafe { c_str_to_slice(ret) };
-        assert_eq!(s, b"127.0.0.1");
-    }
-
-    #[test]
-    fn test_inet_ntop4_buf_too_small() {
-        let src: [u8; 4] = [192, 168, 1, 1];
-        let mut buf = [0u8; 4]; // too small for "192.168.1.1\0"
-        let ret = inet_ntop(AF_INET, src.as_ptr(), buf.as_mut_ptr(), 4);
-        assert!(ret.is_null());
-    }
-
-    #[test]
-    fn test_inet_ntop4_null() {
-        let mut buf = [0u8; 16];
-        assert!(inet_ntop(AF_INET, core::ptr::null(), buf.as_mut_ptr(), 16).is_null());
-        let src: [u8; 4] = [1, 2, 3, 4];
-        assert!(inet_ntop(AF_INET, src.as_ptr(), core::ptr::null_mut(), 16).is_null());
-    }
-
-    // -- inet_ntop IPv6 tests --
-
-    #[test]
-    fn test_inet_ntop6_loopback() {
-        let mut src = [0u8; 16];
-        src[15] = 1;
-        let mut buf = [0u8; 46];
-        let ret = inet_ntop(AF_INET6, src.as_ptr(), buf.as_mut_ptr(), 46);
-        assert!(!ret.is_null());
-        let s = unsafe { c_str_to_slice(ret) };
-        assert_eq!(s, b"::1");
-    }
-
-    #[test]
-    fn test_inet_ntop6_all_zeros() {
-        // Bug regression: all-zeros must produce "::" not ":::".
-        let src = [0u8; 16];
-        let mut buf = [0u8; 46];
-        let ret = inet_ntop(AF_INET6, src.as_ptr(), buf.as_mut_ptr(), 46);
-        assert!(!ret.is_null());
-        let s = unsafe { c_str_to_slice(ret) };
-        assert_eq!(s, b"::");
-    }
-
-    #[test]
-    fn test_inet_ntop6_fe80_loopback() {
-        // Bug regression: fe80::1 was formatted as "fe80:1" (missing colon).
-        let mut src = [0u8; 16];
-        src[0] = 0xfe;
-        src[1] = 0x80;
-        src[15] = 1;
-        let mut buf = [0u8; 46];
-        let ret = inet_ntop(AF_INET6, src.as_ptr(), buf.as_mut_ptr(), 46);
-        assert!(!ret.is_null());
-        let s = unsafe { c_str_to_slice(ret) };
-        assert_eq!(s, b"fe80::1");
-    }
-
-    #[test]
-    fn test_inet_ntop6_trailing_compression() {
-        // fe80:: (all trailing groups zero)
-        let mut src = [0u8; 16];
-        src[0] = 0xfe;
-        src[1] = 0x80;
-        let mut buf = [0u8; 46];
-        let ret = inet_ntop(AF_INET6, src.as_ptr(), buf.as_mut_ptr(), 46);
-        assert!(!ret.is_null());
-        let s = unsafe { c_str_to_slice(ret) };
-        assert_eq!(s, b"fe80::");
-    }
-
-    #[test]
-    fn test_inet_ntop6_middle_compression() {
-        // 2001:db8::1
-        let mut src = [0u8; 16];
-        src[0] = 0x20;
-        src[1] = 0x01;
-        src[2] = 0x0d;
-        src[3] = 0xb8;
-        src[15] = 1;
-        let mut buf = [0u8; 46];
-        let ret = inet_ntop(AF_INET6, src.as_ptr(), buf.as_mut_ptr(), 46);
-        assert!(!ret.is_null());
-        let s = unsafe { c_str_to_slice(ret) };
-        assert_eq!(s, b"2001:db8::1");
-    }
-
-    #[test]
-    fn test_inet_ntop6_full_no_compression() {
-        // 1:2:3:4:5:6:7:8 — no zero runs >= 2
-        let src: [u8; 16] = [
-            0x00, 0x01, // group 0 = 1
-            0x00, 0x02, // group 1 = 2
-            0x00, 0x03, // group 2 = 3
-            0x00, 0x04, // group 3 = 4
-            0x00, 0x05, // group 4 = 5
-            0x00, 0x06, // group 5 = 6
-            0x00, 0x07, // group 6 = 7
-            0x00, 0x08, // group 7 = 8
-        ];
-        let mut buf = [0u8; 46];
-        let ret = inet_ntop(AF_INET6, src.as_ptr(), buf.as_mut_ptr(), 46);
-        assert!(!ret.is_null());
-        let s = unsafe { c_str_to_slice(ret) };
-        assert_eq!(s, b"1:2:3:4:5:6:7:8");
-    }
-
-    #[test]
-    fn test_inet_ntop6_single_zero_no_compression() {
-        // Per RFC 5952: a single zero group must NOT use ::
-        // 1:0:3:4:5:6:7:8
-        let src: [u8; 16] = [
-            0x00, 0x01, 0x00, 0x00, // group 1 = 0
-            0x00, 0x03, 0x00, 0x04, 0x00, 0x05, 0x00, 0x06, 0x00, 0x07, 0x00, 0x08,
-        ];
-        let mut buf = [0u8; 46];
-        let ret = inet_ntop(AF_INET6, src.as_ptr(), buf.as_mut_ptr(), 46);
-        assert!(!ret.is_null());
-        let s = unsafe { c_str_to_slice(ret) };
-        assert_eq!(s, b"1:0:3:4:5:6:7:8");
-    }
-
-    #[test]
-    fn test_inet_ntop6_buf_too_small() {
-        let src = [0u8; 16];
-        let mut buf = [0u8; 2]; // way too small for "::\0"
-        let ret = inet_ntop(AF_INET6, src.as_ptr(), buf.as_mut_ptr(), 2);
-        assert!(ret.is_null());
-    }
-
-    // -- inet_pton / inet_ntop IPv6 roundtrip --
-
-    #[test]
-    fn test_inet_pton6_ntop6_roundtrip() {
-        let addrs: &[&[u8]] = &[
-            b"::1\0",
-            b"::\0",
-            b"fe80::1\0",
-            b"2001:db8::1\0",
-            b"fe80::\0",
-        ];
-        for &addr_bytes in addrs {
-            let mut bin = [0u8; 16];
-            let ret = unsafe { inet_pton(AF_INET6, addr_bytes.as_ptr(), bin.as_mut_ptr()) };
-            assert_eq!(
-                ret,
-                1,
-                "inet_pton failed for {:?}",
-                core::str::from_utf8(&addr_bytes[..addr_bytes.len() - 1])
-            );
-
-            let mut buf = [0u8; 46];
-            let ret = inet_ntop(AF_INET6, bin.as_ptr(), buf.as_mut_ptr(), 46);
-            assert!(!ret.is_null());
-            let result = unsafe { c_str_to_slice(ret) };
-            let expected = &addr_bytes[..addr_bytes.len() - 1]; // strip null
-            assert_eq!(
-                result,
-                expected,
-                "roundtrip mismatch: input={:?} output={:?}",
-                core::str::from_utf8(expected),
-                core::str::from_utf8(result)
-            );
-        }
-    }
-
-    // -- is_valid_ipv4 tests --
-
-    #[test]
-    fn test_is_valid_ipv4_basic() {
-        assert!(unsafe { is_valid_ipv4(c"0.0.0.0".as_ptr().cast()) });
-        assert!(unsafe { is_valid_ipv4(c"255.255.255.255".as_ptr().cast()) });
-        assert!(unsafe { is_valid_ipv4(c"192.168.1.1".as_ptr().cast()) });
-        assert!(!unsafe { is_valid_ipv4(c"".as_ptr().cast()) });
-        assert!(!unsafe { is_valid_ipv4(c"abc".as_ptr().cast()) });
-        assert!(!unsafe { is_valid_ipv4(c"1.2.3".as_ptr().cast()) });
-        assert!(!unsafe { is_valid_ipv4(c"256.0.0.1".as_ptr().cast()) });
-    }
-
-    // -- inet_aton tests --
-
-    #[test]
-    fn test_inet_aton_valid() {
-        let mut addr: u32 = 0;
-        assert_eq!(
-            unsafe { inet_aton(c"127.0.0.1".as_ptr().cast(), &mut addr) },
-            1
-        );
-        assert_eq!(addr, u32::from_ne_bytes([127, 0, 0, 1]));
-    }
-
-    #[test]
-    fn test_inet_aton_invalid() {
-        let mut addr: u32 = 0;
-        assert_eq!(
-            unsafe { inet_aton(c"not.an.ip".as_ptr().cast(), &mut addr) },
-            0
-        );
-    }
-
-    #[test]
-    fn test_inet_aton_null() {
-        let mut addr: u32 = 0;
-        assert_eq!(unsafe { inet_aton(core::ptr::null(), &mut addr) }, 0);
-        assert_eq!(
-            unsafe { inet_aton(c"1.2.3.4".as_ptr().cast(), core::ptr::null_mut()) },
-            0
-        );
-    }
-
     // -- hstrerror tests --
 
     #[test]
     fn test_hstrerror_no_error() {
         let msg = unsafe { c_str_to_slice(hstrerror(0)) };
         assert!(msg.starts_with(b"Resolver Error 0"));
-    }
-
-    #[test]
-    fn test_hstrerror_host_not_found() {
-        let msg = unsafe { c_str_to_slice(hstrerror(HOST_NOT_FOUND)) };
-        assert_eq!(msg, b"Host not found");
-    }
-
-    #[test]
-    fn test_hstrerror_try_again() {
-        let msg = unsafe { c_str_to_slice(hstrerror(TRY_AGAIN)) };
-        assert_eq!(msg, b"Try again");
-    }
-
-    #[test]
-    fn test_hstrerror_no_recovery() {
-        let msg = unsafe { c_str_to_slice(hstrerror(NO_RECOVERY)) };
-        assert_eq!(msg, b"Non-recoverable error");
     }
 
     #[test]
@@ -7901,110 +5306,24 @@ mod tests {
         assert_eq!(msg, b"Unknown resolver error");
     }
 
-    // -- inet_addr edge cases --
-
-    #[test]
-    fn test_inet_addr_octet_overflow() {
-        // Octets > 255 should be rejected.
-        let p = unsafe { inet_addr(c"256.1.1.1".as_ptr().cast()) };
-        assert_eq!(p, u32::MAX); // INADDR_NONE
-    }
-
-    #[test]
-    fn test_inet_addr_too_few_dots() {
-        let p = unsafe { inet_addr(c"1.2.3".as_ptr().cast()) };
-        assert_eq!(p, u32::MAX);
-    }
-
-    #[test]
-    fn test_inet_addr_trailing_chars() {
-        let p = unsafe { inet_addr(c"1.2.3.4x".as_ptr().cast()) };
-        assert_eq!(p, u32::MAX);
-    }
-
-    // -- inet_aton edge cases --
-
-    #[test]
-    fn test_inet_aton_broadcast() {
-        let mut addr: u32 = 0;
-        assert_eq!(
-            unsafe { inet_aton(c"255.255.255.255".as_ptr().cast(), &mut addr) },
-            1
-        );
-        assert_eq!(addr, u32::from_be(0xFFFFFFFF));
-    }
-
-    #[test]
-    fn test_inet_aton_empty_string() {
-        let mut addr: u32 = 0;
-        assert_eq!(unsafe { inet_aton(c"".as_ptr().cast(), &mut addr) }, 0);
-    }
-
     // -- gai_strerror tests (pure function) --
-
-    #[test]
-    fn test_gai_strerror_success() {
-        let msg = unsafe { c_str_to_slice(gai_strerror(0)) };
-        assert_eq!(msg, b"Success");
-    }
-
-    #[test]
-    fn test_gai_strerror_noname() {
-        let msg = unsafe { c_str_to_slice(gai_strerror(EAI_NONAME)) };
-        assert_eq!(msg, b"Name or service not known");
-    }
-
-    #[test]
-    fn test_gai_strerror_family() {
-        let msg = unsafe { c_str_to_slice(gai_strerror(EAI_FAMILY)) };
-        assert_eq!(msg, b"Address family not supported");
-    }
-
-    #[test]
-    fn test_gai_strerror_again() {
-        let msg = unsafe { c_str_to_slice(gai_strerror(EAI_AGAIN)) };
-        assert_eq!(msg, b"Temporary failure in name resolution");
-    }
-
-    #[test]
-    fn test_gai_strerror_memory() {
-        let msg = unsafe { c_str_to_slice(gai_strerror(EAI_MEMORY)) };
-        assert_eq!(msg, b"Memory allocation failure");
-    }
-
-    #[test]
-    fn test_gai_strerror_service() {
-        let msg = unsafe { c_str_to_slice(gai_strerror(EAI_SERVICE)) };
-        assert_eq!(msg, b"Service not supported");
-    }
-
-    #[test]
-    fn test_gai_strerror_system() {
-        let msg = unsafe { c_str_to_slice(gai_strerror(EAI_SYSTEM)) };
-        assert_eq!(msg, b"System error");
-    }
-
-    #[test]
-    fn test_gai_strerror_unknown() {
-        let msg = unsafe { c_str_to_slice(gai_strerror(9999)) };
-        assert_eq!(msg, b"Unknown error");
-    }
 
     // -- EAI_* constant values --
 
     #[test]
     fn test_eai_constants() {
-        assert_eq!(EAI_ADDRFAMILY, 1);
-        assert_eq!(EAI_AGAIN, 2);
-        assert_eq!(EAI_BADFLAGS, 3);
-        assert_eq!(EAI_FAIL, 4);
-        assert_eq!(EAI_FAMILY, 5);
-        assert_eq!(EAI_MEMORY, 6);
-        assert_eq!(EAI_NODATA, 7);
-        assert_eq!(EAI_NONAME, 8);
-        assert_eq!(EAI_SERVICE, 9);
-        assert_eq!(EAI_SOCKTYPE, 10);
-        assert_eq!(EAI_SYSTEM, 11);
+        // musl's `<netdb.h>` (and glibc's), probed 2026-09-27.
+        assert_eq!(EAI_BADFLAGS, -1);
+        assert_eq!(EAI_NONAME, -2);
+        assert_eq!(EAI_AGAIN, -3);
+        assert_eq!(EAI_FAIL, -4);
+        assert_eq!(EAI_NODATA, -5);
+        assert_eq!(EAI_FAMILY, -6);
+        assert_eq!(EAI_SOCKTYPE, -7);
+        assert_eq!(EAI_SERVICE, -8);
+        assert_eq!(EAI_ADDRFAMILY, -9);
+        assert_eq!(EAI_MEMORY, -10);
+        assert_eq!(EAI_SYSTEM, -11);
         assert_eq!(EAI_OVERFLOW, -12);
     }
 
@@ -8022,6 +5341,7 @@ mod tests {
 
     #[test]
     fn test_ni_flag_constants() {
+        use crate::gai::{NI_DGRAM, NI_NAMEREQD, NI_NOFQDN, NI_NUMERICHOST, NI_NUMERICSERV};
         assert_eq!(NI_NUMERICHOST, 1);
         assert_eq!(NI_NUMERICSERV, 2);
         assert_eq!(NI_NOFQDN, 4);
@@ -8084,444 +5404,6 @@ mod tests {
         assert_eq!(SO_DOMAIN, 39);
     }
 
-    // -- getaddrinfo with numeric host (no syscalls needed) --
-
-    #[test]
-    fn test_getaddrinfo_null_res() {
-        let ret = unsafe {
-            getaddrinfo(
-                b"127.0.0.1\0".as_ptr(),
-                core::ptr::null(),
-                core::ptr::null(),
-                core::ptr::null_mut(),
-            )
-        };
-        assert_eq!(ret, EAI_SYSTEM);
-    }
-
-    #[test]
-    fn test_getaddrinfo_both_null_node_service() {
-        let mut res: *mut Addrinfo = core::ptr::null_mut();
-        let ret = unsafe {
-            getaddrinfo(
-                core::ptr::null(),
-                core::ptr::null(),
-                core::ptr::null(),
-                &mut res,
-            )
-        };
-        assert_eq!(ret, EAI_NONAME);
-    }
-
-    #[test]
-    fn test_getaddrinfo_numeric_ipv4() {
-        let mut res: *mut Addrinfo = core::ptr::null_mut();
-        let hints = Addrinfo {
-            ai_flags: AI_NUMERICHOST | AI_NUMERICSERV,
-            ai_family: AF_INET,
-            ai_socktype: SOCK_STREAM,
-            ai_protocol: 0,
-            ai_addrlen: 0,
-            ai_canonname: core::ptr::null_mut(),
-            ai_addr: core::ptr::null_mut(),
-            ai_next: core::ptr::null_mut(),
-        };
-        let ret = unsafe {
-            getaddrinfo(
-                b"192.168.1.1\0".as_ptr(),
-                b"80\0".as_ptr(),
-                &hints,
-                &mut res,
-            )
-        };
-        assert_eq!(ret, 0);
-        assert!(!res.is_null());
-
-        let info = unsafe { &*res };
-        assert_eq!(info.ai_family, AF_INET);
-        assert_eq!(info.ai_socktype, SOCK_STREAM);
-        assert_eq!(info.ai_protocol, IPPROTO_TCP);
-        assert!(!info.ai_addr.is_null());
-
-        // Check the sockaddr.
-        let sa = unsafe { &*(info.ai_addr as *const SockaddrIn) };
-        assert_eq!(sa.sin_family, AF_INET as u16);
-        assert_eq!(ntohs(sa.sin_port), 80);
-        // Address should be 192.168.1.1 in network byte order.
-        assert_eq!(sa.sin_addr.s_addr, u32::from_ne_bytes([192, 168, 1, 1]));
-
-        unsafe { freeaddrinfo(res) };
-    }
-
-    /// Hints asking for a numeric lookup with `extra` added to `ai_flags`.
-    ///
-    /// Numeric on purpose: these tests run on the host, where `SYS_DNS_RESOLVE`
-    /// is not a real resolver, so `inet_pton` has to be the thing that
-    /// succeeds.  `AI_CANONNAME` is orthogonal to how the address was obtained.
-    fn canon_hints(extra: i32, socktype: i32) -> Addrinfo {
-        Addrinfo {
-            ai_flags: AI_NUMERICHOST | AI_NUMERICSERV | extra,
-            ai_family: AF_INET,
-            ai_socktype: socktype,
-            ai_protocol: 0,
-            ai_addrlen: 0,
-            ai_canonname: core::ptr::null_mut(),
-            ai_addr: core::ptr::null_mut(),
-            ai_next: core::ptr::null_mut(),
-        }
-    }
-
-    /// Assert `ai_canonname` reads back as exactly `want`.
-    ///
-    /// Reads it the way a C caller would — `strlen` to the terminator — rather
-    /// than comparing a known length, because the terminator is the part most
-    /// likely to be wrong and the part that decides whether `printf("%s")`
-    /// walks off the end of the block.
-    fn assert_canonname(info: &Addrinfo, want: &[u8]) {
-        assert!(!info.ai_canonname.is_null(), "expected a canonical name");
-        // SAFETY: `gai_alloc` wrote a NUL-terminated name into the block, so
-        // `strlen` stops inside it and the slice stays within the allocation.
-        let n = unsafe { crate::string::strlen(info.ai_canonname) };
-        let got = unsafe { core::slice::from_raw_parts(info.ai_canonname.cast_const(), n) };
-        assert_eq!(got, want);
-    }
-
-    #[test]
-    fn getaddrinfo_ai_canonname_answers_with_the_queried_name() {
-        let mut res: *mut Addrinfo = core::ptr::null_mut();
-        let hints = canon_hints(AI_CANONNAME, SOCK_STREAM);
-        let ret = unsafe {
-            getaddrinfo(
-                b"192.168.1.1\0".as_ptr(),
-                b"80\0".as_ptr(),
-                &hints,
-                &mut res,
-            )
-        };
-        assert_eq!(ret, 0);
-        assert!(!res.is_null());
-        let info = unsafe { &*res };
-        assert_canonname(info, b"192.168.1.1");
-
-        // The address must still be intact.  The name lives in the same block,
-        // immediately after the `SockaddrIn`, so an offset that is off by even
-        // one byte corrupts the address the caller is about to `connect()` to
-        // — and that corruption would be invisible to a test that only looked
-        // at the name it just asked for.
-        let sa = unsafe { &*(info.ai_addr as *const SockaddrIn) };
-        assert_eq!(sa.sin_family, AF_INET as u16);
-        assert_eq!(ntohs(sa.sin_port), 80);
-        assert_eq!(sa.sin_addr.s_addr, u32::from_ne_bytes([192, 168, 1, 1]));
-
-        unsafe { freeaddrinfo(res) };
-    }
-
-    #[test]
-    fn getaddrinfo_without_ai_canonname_leaves_it_null() {
-        let mut res: *mut Addrinfo = core::ptr::null_mut();
-        let hints = canon_hints(0, SOCK_STREAM);
-        let ret = unsafe {
-            getaddrinfo(
-                b"192.168.1.1\0".as_ptr(),
-                b"80\0".as_ptr(),
-                &hints,
-                &mut res,
-            )
-        };
-        assert_eq!(ret, 0);
-        // The control for the test above: without the flag the field stays
-        // NULL, so that test is measuring the flag rather than a name we now
-        // always attach.
-        assert!(unsafe { (*res).ai_canonname }.is_null());
-        unsafe { freeaddrinfo(res) };
-    }
-
-    #[test]
-    fn getaddrinfo_ai_canonname_is_attached_to_the_head_only() {
-        let mut res: *mut Addrinfo = core::ptr::null_mut();
-        // `ai_socktype: 0` is the branch that returns two nodes, TCP then UDP.
-        let hints = canon_hints(AI_CANONNAME, 0);
-        let ret = unsafe {
-            getaddrinfo(
-                b"192.168.1.1\0".as_ptr(),
-                b"80\0".as_ptr(),
-                &hints,
-                &mut res,
-            )
-        };
-        assert_eq!(ret, 0);
-        let head = unsafe { &*res };
-        assert_canonname(head, b"192.168.1.1");
-
-        let next = head.ai_next;
-        assert!(!next.is_null(), "expected a second (UDP) result");
-        // POSIX puts the canonical name on the first result only, and glibc
-        // does the same.  A name on every node would also mean paying for a
-        // copy of it per node.
-        assert!(unsafe { (*next).ai_canonname }.is_null());
-        unsafe { freeaddrinfo(res) };
-    }
-
-    #[test]
-    fn getaddrinfo_ai_canonname_with_no_node_stays_null() {
-        let mut res: *mut Addrinfo = core::ptr::null_mut();
-        let hints = canon_hints(AI_CANONNAME | AI_PASSIVE, SOCK_STREAM);
-        let ret = unsafe { getaddrinfo(core::ptr::null(), b"80\0".as_ptr(), &hints, &mut res) };
-        assert_eq!(ret, 0);
-        // POSIX defines the canonical name in terms of `nodename`; with no
-        // name there is nothing for it to be canonical of.
-        assert!(unsafe { (*res).ai_canonname }.is_null());
-        unsafe { freeaddrinfo(res) };
-    }
-
-    #[test]
-    fn test_getaddrinfo_numeric_loopback() {
-        let mut res: *mut Addrinfo = core::ptr::null_mut();
-        let hints = Addrinfo {
-            ai_flags: AI_NUMERICHOST,
-            ai_family: AF_INET,
-            ai_socktype: SOCK_DGRAM,
-            ai_protocol: 0,
-            ai_addrlen: 0,
-            ai_canonname: core::ptr::null_mut(),
-            ai_addr: core::ptr::null_mut(),
-            ai_next: core::ptr::null_mut(),
-        };
-        let ret =
-            unsafe { getaddrinfo(b"127.0.0.1\0".as_ptr(), core::ptr::null(), &hints, &mut res) };
-        assert_eq!(ret, 0);
-        assert!(!res.is_null());
-
-        let info = unsafe { &*res };
-        assert_eq!(info.ai_socktype, SOCK_DGRAM);
-        assert_eq!(info.ai_protocol, IPPROTO_UDP);
-
-        let sa = unsafe { &*(info.ai_addr as *const SockaddrIn) };
-        assert_eq!(sa.sin_addr.s_addr, htonl(INADDR_LOOPBACK));
-        assert_eq!(sa.sin_port, 0); // No service specified.
-
-        unsafe { freeaddrinfo(res) };
-    }
-
-    #[test]
-    fn test_getaddrinfo_null_node_passive() {
-        let mut res: *mut Addrinfo = core::ptr::null_mut();
-        let hints = Addrinfo {
-            ai_flags: AI_PASSIVE | AI_NUMERICSERV,
-            ai_family: AF_INET,
-            ai_socktype: SOCK_STREAM,
-            ai_protocol: 0,
-            ai_addrlen: 0,
-            ai_canonname: core::ptr::null_mut(),
-            ai_addr: core::ptr::null_mut(),
-            ai_next: core::ptr::null_mut(),
-        };
-        let ret = unsafe { getaddrinfo(core::ptr::null(), b"8080\0".as_ptr(), &hints, &mut res) };
-        assert_eq!(ret, 0);
-        assert!(!res.is_null());
-
-        let sa = unsafe { &*((*res).ai_addr as *const SockaddrIn) };
-        // AI_PASSIVE + null node → INADDR_ANY.
-        assert_eq!(sa.sin_addr.s_addr, htonl(INADDR_ANY));
-        assert_eq!(ntohs(sa.sin_port), 8080);
-
-        unsafe { freeaddrinfo(res) };
-    }
-
-    #[test]
-    fn test_getaddrinfo_null_node_no_passive() {
-        let mut res: *mut Addrinfo = core::ptr::null_mut();
-        let hints = Addrinfo {
-            ai_flags: AI_NUMERICSERV,
-            ai_family: AF_INET,
-            ai_socktype: SOCK_STREAM,
-            ai_protocol: 0,
-            ai_addrlen: 0,
-            ai_canonname: core::ptr::null_mut(),
-            ai_addr: core::ptr::null_mut(),
-            ai_next: core::ptr::null_mut(),
-        };
-        let ret = unsafe { getaddrinfo(core::ptr::null(), b"443\0".as_ptr(), &hints, &mut res) };
-        assert_eq!(ret, 0);
-        assert!(!res.is_null());
-
-        let sa = unsafe { &*((*res).ai_addr as *const SockaddrIn) };
-        // No AI_PASSIVE + null node → INADDR_LOOPBACK.
-        assert_eq!(sa.sin_addr.s_addr, htonl(INADDR_LOOPBACK));
-        assert_eq!(ntohs(sa.sin_port), 443);
-
-        unsafe { freeaddrinfo(res) };
-    }
-
-    #[test]
-    fn test_getaddrinfo_unsupported_af_inet6() {
-        let mut res: *mut Addrinfo = core::ptr::null_mut();
-        let hints = Addrinfo {
-            ai_flags: 0,
-            ai_family: AF_INET6, // We only support AF_INET.
-            ai_socktype: 0,
-            ai_protocol: 0,
-            ai_addrlen: 0,
-            ai_canonname: core::ptr::null_mut(),
-            ai_addr: core::ptr::null_mut(),
-            ai_next: core::ptr::null_mut(),
-        };
-        let ret = unsafe { getaddrinfo(b"::1\0".as_ptr(), core::ptr::null(), &hints, &mut res) };
-        assert_eq!(ret, EAI_FAMILY);
-    }
-
-    #[test]
-    fn test_getaddrinfo_no_socktype_returns_two_results() {
-        let mut res: *mut Addrinfo = core::ptr::null_mut();
-        let hints = Addrinfo {
-            ai_flags: AI_NUMERICHOST | AI_NUMERICSERV,
-            ai_family: AF_INET,
-            ai_socktype: 0, // No type → get both TCP and UDP.
-            ai_protocol: 0,
-            ai_addrlen: 0,
-            ai_canonname: core::ptr::null_mut(),
-            ai_addr: core::ptr::null_mut(),
-            ai_next: core::ptr::null_mut(),
-        };
-        let ret =
-            unsafe { getaddrinfo(b"10.0.0.1\0".as_ptr(), b"53\0".as_ptr(), &hints, &mut res) };
-        assert_eq!(ret, 0);
-        assert!(!res.is_null());
-
-        // First result should be SOCK_STREAM (TCP).
-        let r1 = unsafe { &*res };
-        assert_eq!(r1.ai_socktype, SOCK_STREAM);
-        assert_eq!(r1.ai_protocol, IPPROTO_TCP);
-        assert!(!r1.ai_next.is_null());
-
-        // Second result should be SOCK_DGRAM (UDP).
-        let r2 = unsafe { &*r1.ai_next };
-        assert_eq!(r2.ai_socktype, SOCK_DGRAM);
-        assert_eq!(r2.ai_protocol, IPPROTO_UDP);
-        assert!(r2.ai_next.is_null()); // End of list.
-
-        unsafe { freeaddrinfo(res) };
-    }
-
-    #[test]
-    fn test_getaddrinfo_numerichost_rejects_hostname() {
-        let mut res: *mut Addrinfo = core::ptr::null_mut();
-        let hints = Addrinfo {
-            ai_flags: AI_NUMERICHOST,
-            ai_family: AF_INET,
-            ai_socktype: SOCK_STREAM,
-            ai_protocol: 0,
-            ai_addrlen: 0,
-            ai_canonname: core::ptr::null_mut(),
-            ai_addr: core::ptr::null_mut(),
-            ai_next: core::ptr::null_mut(),
-        };
-        // "example.com" is not numeric → should fail with EAI_NONAME.
-        let ret = unsafe {
-            getaddrinfo(
-                b"example.com\0".as_ptr(),
-                b"80\0".as_ptr(),
-                &hints,
-                &mut res,
-            )
-        };
-        assert_eq!(ret, EAI_NONAME);
-    }
-
-    // -- getaddrinfo result ownership --
-    //
-    // These are the regression tests for the four `static mut` slots the
-    // results used to live in.  The defect showed itself as an *intermittent*
-    // failure of `test_getaddrinfo_numeric_loopback` — it asserts
-    // `ai_socktype == SOCK_DGRAM` and once read `SOCK_STREAM`, because a
-    // neighbouring test in the same process had overwritten `GAI_RESULT`
-    // between this test's call and its assertion.  A flake, in other words,
-    // whose cause was a real thread-safety bug in a public libc entry point.
-    //
-    // Neither test needs threads to show it: two *sequential* calls whose
-    // results are both still live is the same aliasing, and is deterministic.
-
-    /// Build a hints struct for the two tests below.
-    fn gai_hints(socktype: i32) -> Addrinfo {
-        Addrinfo {
-            ai_flags: AI_NUMERICHOST | AI_NUMERICSERV,
-            ai_family: AF_INET,
-            ai_socktype: socktype,
-            ai_protocol: 0,
-            ai_addrlen: 0,
-            ai_canonname: core::ptr::null_mut(),
-            ai_addr: core::ptr::null_mut(),
-            ai_next: core::ptr::null_mut(),
-        }
-    }
-
-    #[test]
-    fn two_live_results_do_not_share_storage() {
-        let h1 = gai_hints(SOCK_STREAM);
-        let mut a: *mut Addrinfo = core::ptr::null_mut();
-        assert_eq!(
-            unsafe { getaddrinfo(b"10.1.1.1\0".as_ptr(), b"80\0".as_ptr(), &h1, &mut a) },
-            0
-        );
-
-        // Second call, everything different, while the first is still held.
-        let h2 = gai_hints(SOCK_DGRAM);
-        let mut b: *mut Addrinfo = core::ptr::null_mut();
-        assert_eq!(
-            unsafe { getaddrinfo(b"10.2.2.2\0".as_ptr(), b"53\0".as_ptr(), &h2, &mut b) },
-            0
-        );
-
-        assert_ne!(a, b, "two results shared one node");
-
-        // The first answer must still be the first answer.
-        let (ai, bi) = unsafe { (&*a, &*b) };
-        assert_ne!(ai.ai_addr, bi.ai_addr, "two results shared one sockaddr");
-        assert_eq!(ai.ai_socktype, SOCK_STREAM);
-        assert_eq!(ai.ai_protocol, IPPROTO_TCP);
-        assert_eq!(bi.ai_socktype, SOCK_DGRAM);
-        assert_eq!(bi.ai_protocol, IPPROTO_UDP);
-
-        let sa = unsafe { &*(ai.ai_addr.cast::<SockaddrIn>()) };
-        let sb = unsafe { &*(bi.ai_addr.cast::<SockaddrIn>()) };
-        assert_eq!(sa.sin_addr.s_addr, u32::from_ne_bytes([10, 1, 1, 1]));
-        assert_eq!(ntohs(sa.sin_port), 80);
-        assert_eq!(sb.sin_addr.s_addr, u32::from_ne_bytes([10, 2, 2, 2]));
-        assert_eq!(ntohs(sb.sin_port), 53);
-
-        unsafe {
-            freeaddrinfo(a);
-            freeaddrinfo(b);
-        }
-    }
-
-    #[test]
-    fn freeaddrinfo_releases_every_node_and_nothing_else() {
-        use crate::malloc::live_regions;
-
-        // A NULL list is a no-op, not a fault.
-        unsafe { freeaddrinfo(core::ptr::null_mut()) };
-
-        let before = live_regions::count();
-
-        // No socktype in hints → a two-node list, so this also proves the
-        // walk reaches past the head.
-        let hints = gai_hints(0);
-        let mut res: *mut Addrinfo = core::ptr::null_mut();
-        assert_eq!(
-            unsafe { getaddrinfo(b"10.3.3.3\0".as_ptr(), b"7\0".as_ptr(), &hints, &mut res) },
-            0
-        );
-        assert_eq!(
-            live_regions::count() - before,
-            2,
-            "expected one block per result node"
-        );
-
-        unsafe { freeaddrinfo(res) };
-        assert_eq!(live_regions::count(), before, "freeaddrinfo leaked a node");
-    }
-
     // -- socketpair argument validation --
     //
     // These tests exercise only the pre-syscall validation branches.
@@ -8580,11 +5462,6 @@ mod tests {
     }
 
     // -- freeaddrinfo tolerates NULL (should not crash) --
-
-    #[test]
-    fn test_freeaddrinfo_null_no_crash() {
-        unsafe { freeaddrinfo(core::ptr::null_mut()) };
-    }
 
     // -- ntohl / ntohs --
 
@@ -8667,476 +5544,23 @@ mod tests {
         assert_eq!(get_h_errno(), NO_RECOVERY);
     }
 
+    /// A NULL (or empty) prefix prints the message alone, as glibc's `herror`
+    /// does; it is not an error.
     #[test]
-    fn gethostbyname_rejects_bad_names_with_a_resolver_error() {
-        set_h_errno(0);
-        assert!(unsafe { gethostbyname(core::ptr::null()) }.is_null());
-        assert_eq!(get_h_errno(), NO_RECOVERY);
-
-        assert!(unsafe { gethostbyname(b"\0".as_ptr()) }.is_null());
-        assert_eq!(get_h_errno(), HOST_NOT_FOUND);
-
-        // 254 label bytes — longer than a DNS name can be.
-        let too_long = [b'a'; 255];
-        let mut buf = [0u8; 256];
-        buf[..255].copy_from_slice(&too_long);
-        assert!(unsafe { gethostbyname(buf.as_ptr()) }.is_null());
-        assert_eq!(get_h_errno(), HOST_NOT_FOUND);
-    }
-
-    #[test]
-    fn gethostbyname2_reports_no_data_for_ipv6() {
-        set_h_errno(0);
-        assert!(unsafe { gethostbyname2(b"example.com\0".as_ptr(), AF_INET6) }.is_null());
-        assert_eq!(get_h_errno(), NO_DATA);
-
-        assert!(unsafe { gethostbyname2(b"example.com\0".as_ptr(), 0xbeef) }.is_null());
-        assert_eq!(get_h_errno(), NO_RECOVERY);
-    }
-
-    #[test]
-    fn gethostbyaddr_rejects_bad_arguments_with_a_resolver_error() {
-        let addr = [127u8, 0, 0, 1];
-        set_h_errno(0);
-        assert!(unsafe { gethostbyaddr(core::ptr::null(), 4, AF_INET) }.is_null());
-        assert_eq!(get_h_errno(), NO_RECOVERY);
-
-        assert!(unsafe { gethostbyaddr(addr.as_ptr(), 16, AF_INET6) }.is_null());
-        assert_eq!(get_h_errno(), NO_RECOVERY);
-
-        assert!(unsafe { gethostbyaddr(addr.as_ptr(), 3, AF_INET) }.is_null());
-        assert_eq!(get_h_errno(), NO_RECOVERY);
-    }
-
-    #[test]
-    fn resolver_error_for_maps_transport_failures_to_try_again() {
-        assert_eq!(
-            resolver_error_for(-i64::from(errno::ENOENT)),
-            HOST_NOT_FOUND
-        );
-        assert_eq!(resolver_error_for(-i64::from(errno::ETIMEDOUT)), TRY_AGAIN);
-        assert_eq!(resolver_error_for(-i64::from(errno::EAGAIN)), TRY_AGAIN);
-        assert_eq!(
-            resolver_error_for(-i64::from(errno::ENETUNREACH)),
-            TRY_AGAIN
-        );
-        assert_eq!(
-            resolver_error_for(-i64::from(errno::EHOSTUNREACH)),
-            TRY_AGAIN
-        );
-        assert_eq!(resolver_error_for(-i64::from(errno::EINVAL)), NO_RECOVERY);
-        assert_eq!(resolver_error_for(-i64::from(errno::EACCES)), NO_RECOVERY);
-        // Nonsense returns must not panic or wrap into a retryable code.
-        assert_eq!(resolver_error_for(i64::MIN), NO_RECOVERY);
-        assert_eq!(resolver_error_for(-(i64::from(i32::MAX) + 1)), NO_RECOVERY);
-        assert_eq!(resolver_error_for(0), NO_RECOVERY);
-    }
-
-    // -----------------------------------------------------------------------
-    // gethostbyname_r / gethostbyaddr_r
-    //
-    // The success path needs SYS_DNS_RESOLVE, which does not exist on the host,
-    // so these exercise the two halves that are pure: the errno mapping and the
-    // buffer packing.  The packing is where a reentrant resolver actually goes
-    // wrong — an under-sized or misaligned write here is a heap corruption in
-    // the caller, not a failed lookup.
-    // -----------------------------------------------------------------------
-
-    #[test]
-    fn hostent_r_errno_keeps_not_found_distinct_from_broken() {
-        assert_eq!(hostent_r_errno_for(HOST_NOT_FOUND), errno::ENOENT);
-        assert_eq!(hostent_r_errno_for(NO_DATA), errno::ENOENT);
-        assert_eq!(hostent_r_errno_for(TRY_AGAIN), errno::EAGAIN);
-        assert_eq!(hostent_r_errno_for(NO_RECOVERY), errno::EBADMSG);
-        // An unrecognised resolver code must not read as success.
-        assert_ne!(hostent_r_errno_for(4242), 0);
-    }
-
-    /// Pack one answer and check every pointer in the returned web.
-    fn pack(buf: &mut [u8], name: &[u8]) -> (Hostent, *const Hostent, i32) {
-        let mut ret: Hostent = unsafe { core::mem::zeroed() };
-        let mut result: *const Hostent = core::ptr::null();
-        let rc = unsafe {
-            fill_hostent_r(
-                &mut ret,
-                buf.as_mut_ptr(),
-                buf.len(),
-                name.as_ptr(),
-                name.len(),
-                [10, 0, 0, 7],
-                &mut result,
-            )
-        };
-        (ret, result, rc)
-    }
-
-    #[test]
-    fn fill_hostent_r_builds_a_complete_pointer_web() {
-        let mut buf = [0xAAu8; 256];
-        let (ret, result, rc) = pack(&mut buf, b"host.example");
-        assert_eq!(rc, 0);
-        assert!(!result.is_null());
-        assert_eq!(ret.h_addrtype, AF_INET);
-        assert_eq!(ret.h_length, 4);
-
-        let name = unsafe { core::ffi::CStr::from_ptr(ret.h_name.cast()) };
-        assert_eq!(name.to_bytes(), b"host.example");
-
-        // h_aliases must be a valid, empty, NULL-terminated array — not NULL.
-        // Callers iterate it without checking the array pointer itself.
-        assert!(!ret.h_aliases.is_null());
-        assert!(unsafe { *ret.h_aliases }.is_null());
-
-        // h_addr_list: one address, then the terminator.
-        assert!(!ret.h_addr_list.is_null());
-        let a0 = unsafe { *ret.h_addr_list };
-        assert!(!a0.is_null());
-        let octets = unsafe { core::slice::from_raw_parts(a0, 4) };
-        assert_eq!(octets, &[10, 0, 0, 7]);
-        assert!(unsafe { *ret.h_addr_list.add(1) }.is_null());
-
-        // Everything must live inside the caller's buffer.
-        let lo = buf.as_ptr() as usize;
-        let hi = lo + buf.len();
-        for p in [
-            ret.h_name as usize,
-            ret.h_aliases as usize,
-            ret.h_addr_list as usize,
-            a0 as usize,
-        ] {
-            assert!(p >= lo && p < hi, "pointer {p:#x} escaped the buffer");
-        }
-    }
-
-    #[test]
-    fn fill_hostent_r_pointer_arrays_are_aligned_even_on_an_odd_buffer() {
-        // POSIX only promises `buf` is a char*.  Hand it a deliberately
-        // misaligned start and check the pointer arrays still land on an
-        // 8-byte boundary; an unaligned store here is UB on the C side.
-        let mut backing = [0u8; 256];
-        let (ret, result, rc) = pack(&mut backing[1..], b"a.b");
-        assert_eq!(rc, 0);
-        assert!(!result.is_null());
-        assert_eq!((ret.h_aliases as usize) % 8, 0);
-        assert_eq!((ret.h_addr_list as usize) % 8, 0);
-    }
-
-    #[test]
-    fn fill_hostent_r_reports_erange_rather_than_overflowing() {
-        // 1 alias ptr + 2 addr ptrs + 4 addr bytes + "abc\0" = 32 bytes with a
-        // perfectly aligned buffer.  31 must fail, and fail without writing.
-        let mut small = [0u8; 8];
-        let (_, result, rc) = pack(&mut small, b"abc");
-        assert_eq!(rc, errno::ERANGE);
-        assert!(result.is_null());
-
-        let mut zero: [u8; 0] = [];
-        let (_, result, rc) = pack(&mut zero, b"");
-        assert_eq!(rc, errno::ERANGE);
-        assert!(result.is_null());
-    }
-
-    #[test]
-    fn gethostbyname_r_null_outputs_are_efault_not_a_crash() {
-        let mut ret: Hostent = unsafe { core::mem::zeroed() };
-        let mut buf = [0u8; 128];
-        let mut result: *const Hostent = core::ptr::null();
-        let mut herr: i32 = 0;
-        let name = b"example.com\0".as_ptr();
-
-        assert_eq!(
-            unsafe {
-                gethostbyname_r(
-                    name,
-                    &mut ret,
-                    buf.as_mut_ptr(),
-                    buf.len(),
-                    core::ptr::null_mut(),
-                    &mut herr,
-                )
-            },
-            errno::EFAULT
-        );
-        assert_eq!(
-            unsafe {
-                gethostbyname_r(
-                    name,
-                    core::ptr::null_mut(),
-                    buf.as_mut_ptr(),
-                    buf.len(),
-                    &mut result,
-                    &mut herr,
-                )
-            },
-            errno::EFAULT
-        );
-        assert_eq!(
-            unsafe {
-                gethostbyname_r(
-                    name,
-                    &mut ret,
-                    core::ptr::null_mut(),
-                    buf.len(),
-                    &mut result,
-                    &mut herr,
-                )
-            },
-            errno::EFAULT
-        );
-    }
-
-    #[test]
-    fn gethostbyname_r_rejects_impossible_names_without_a_syscall() {
-        let mut ret: Hostent = unsafe { core::mem::zeroed() };
-        let mut buf = [0u8; 512];
-        let mut result: *const Hostent = core::ptr::null();
-        let mut herr: i32 = -1;
-
-        for name in [core::ptr::null(), b"\0".as_ptr()] {
-            herr = -1;
-            let rc = unsafe {
-                gethostbyname_r(
-                    name,
-                    &mut ret,
-                    buf.as_mut_ptr(),
-                    buf.len(),
-                    &mut result,
-                    &mut herr,
-                )
-            };
-            assert_eq!(rc, errno::ENOENT);
-            assert!(result.is_null());
-            assert_eq!(herr, HOST_NOT_FOUND);
-            // The out-parameter and the per-thread copy must agree.
-            assert_eq!(get_h_errno(), HOST_NOT_FOUND);
-        }
-
-        // 255 bytes of label: longer than any DNS name.
-        let mut long = [b'a'; 256];
-        long[255] = 0;
-        let rc = unsafe {
-            gethostbyname_r(
-                long.as_ptr(),
-                &mut ret,
-                buf.as_mut_ptr(),
-                buf.len(),
-                &mut result,
-                &mut herr,
-            )
-        };
-        assert_eq!(rc, errno::ENOENT);
-        assert!(result.is_null());
-
-        // A NULL h_errnop is allowed and must not be dereferenced.
-        let rc = unsafe {
-            gethostbyname_r(
-                b"\0".as_ptr(),
-                &mut ret,
-                buf.as_mut_ptr(),
-                buf.len(),
-                &mut result,
-                core::ptr::null_mut(),
-            )
-        };
-        assert_eq!(rc, errno::ENOENT);
-    }
-
-    #[test]
-    fn gethostbyaddr_r_rejects_bad_arguments() {
-        let addr = [127u8, 0, 0, 1];
-        let mut ret: Hostent = unsafe { core::mem::zeroed() };
-        let mut buf = [0u8; 512];
-        let mut result: *const Hostent = core::ptr::null();
-        let mut herr: i32 = 0;
-
-        for (p, len, af) in [
-            (core::ptr::null(), 4, AF_INET),
-            (addr.as_ptr(), 16, AF_INET6),
-            (addr.as_ptr(), 3, AF_INET),
-        ] {
-            let rc = unsafe {
-                gethostbyaddr_r(
-                    p,
-                    len,
-                    af,
-                    &mut ret,
-                    buf.as_mut_ptr(),
-                    buf.len(),
-                    &mut result,
-                    &mut herr,
-                )
-            };
-            // A malformed request is not "host not found" — retrying it with
-            // the same arguments will fail identically.
-            assert_eq!(rc, errno::EBADMSG);
-            assert_eq!(herr, NO_RECOVERY);
-            assert!(result.is_null());
-        }
-
-        assert_eq!(
-            unsafe {
-                gethostbyaddr_r(
-                    addr.as_ptr(),
-                    4,
-                    AF_INET,
-                    &mut ret,
-                    buf.as_mut_ptr(),
-                    buf.len(),
-                    core::ptr::null_mut(),
-                    &mut herr,
-                )
-            },
-            errno::EFAULT
-        );
+    fn herror_takes_a_null_prefix() {
+        herror(core::ptr::null());
+        herror(b"\0".as_ptr());
     }
 
     #[test]
     fn herror_accepts_every_resolver_code() {
         // Exercises the `get_h_errno` read path for each code; `herror`
-        // writes to the console, which on the host is a no-op syscall stub.
+        // writes to descriptor 2.
         for code in [0, HOST_NOT_FOUND, TRY_AGAIN, NO_RECOVERY, NO_DATA, 99] {
             set_h_errno(code);
             herror(b"test\0".as_ptr());
             assert_eq!(get_h_errno(), code, "herror must not clobber h_errno");
         }
-    }
-
-    // -- getprotobyname --
-
-    #[test]
-    fn test_getprotobyname_tcp() {
-        let p = unsafe { getprotobyname(b"tcp\0".as_ptr()) };
-        assert!(!p.is_null());
-        assert_eq!(unsafe { (*p).p_proto }, 6);
-    }
-
-    #[test]
-    fn test_getprotobyname_udp() {
-        let p = unsafe { getprotobyname(b"udp\0".as_ptr()) };
-        assert!(!p.is_null());
-        assert_eq!(unsafe { (*p).p_proto }, 17);
-    }
-
-    #[test]
-    fn test_getprotobyname_icmp() {
-        let p = unsafe { getprotobyname(b"icmp\0".as_ptr()) };
-        assert!(!p.is_null());
-        assert_eq!(unsafe { (*p).p_proto }, 1);
-    }
-
-    #[test]
-    fn test_getprotobyname_case_insensitive() {
-        let p = unsafe { getprotobyname(b"TCP\0".as_ptr()) };
-        assert!(!p.is_null());
-        assert_eq!(unsafe { (*p).p_proto }, 6);
-    }
-
-    #[test]
-    fn test_getprotobyname_null() {
-        let p = unsafe { getprotobyname(core::ptr::null()) };
-        assert!(p.is_null());
-    }
-
-    #[test]
-    fn test_getprotobyname_unknown() {
-        let p = unsafe { getprotobyname(b"nonexistent\0".as_ptr()) };
-        assert!(p.is_null());
-    }
-
-    #[test]
-    fn test_getprotobyname_alias() {
-        // "TCP" is an alias for "tcp"
-        let p = unsafe { getprotobyname(b"TCP\0".as_ptr()) };
-        assert!(!p.is_null());
-        assert_eq!(unsafe { (*p).p_proto }, 6);
-    }
-
-    // -- getprotobynumber --
-
-    #[test]
-    fn test_getprotobynumber_tcp() {
-        let p = getprotobynumber(6);
-        assert!(!p.is_null());
-        let name = unsafe { c_str_to_slice((*p).p_name) };
-        assert_eq!(name, b"tcp");
-    }
-
-    #[test]
-    fn test_getprotobynumber_udp() {
-        let p = getprotobynumber(17);
-        assert!(!p.is_null());
-        let name = unsafe { c_str_to_slice((*p).p_name) };
-        assert_eq!(name, b"udp");
-    }
-
-    #[test]
-    fn test_getprotobynumber_unknown() {
-        let p = getprotobynumber(999);
-        assert!(p.is_null());
-    }
-
-    #[test]
-    fn test_getprotobynumber_zero_is_ip() {
-        let p = getprotobynumber(0);
-        assert!(!p.is_null());
-        let name = unsafe { c_str_to_slice((*p).p_name) };
-        assert_eq!(name, b"ip");
-    }
-
-    // -- getservbyname --
-
-    #[test]
-    fn test_getservbyname_http() {
-        let p = unsafe { getservbyname(b"http\0".as_ptr(), core::ptr::null()) };
-        assert!(!p.is_null());
-        // http = port 80, stored in network byte order.
-        assert_eq!(unsafe { u16::from_be((*p).s_port as u16) }, 80);
-    }
-
-    #[test]
-    fn test_getservbyname_ssh() {
-        let p = unsafe { getservbyname(b"ssh\0".as_ptr(), core::ptr::null()) };
-        assert!(!p.is_null());
-        assert_eq!(unsafe { u16::from_be((*p).s_port as u16) }, 22);
-    }
-
-    #[test]
-    fn test_getservbyname_null_name() {
-        let p = unsafe { getservbyname(core::ptr::null(), core::ptr::null()) };
-        assert!(p.is_null());
-    }
-
-    #[test]
-    fn test_getservbyname_unknown() {
-        let p = unsafe { getservbyname(b"nonexistent\0".as_ptr(), core::ptr::null()) };
-        assert!(p.is_null());
-    }
-
-    // -- getservbyport --
-
-    #[test]
-    fn test_getservbyport_80() {
-        let port_be = 80_u16.to_be() as i32;
-        let p = unsafe { getservbyport(port_be, core::ptr::null()) };
-        assert!(!p.is_null());
-        let name = unsafe { c_str_to_slice((*p).s_name) };
-        assert_eq!(name, b"http");
-    }
-
-    #[test]
-    fn test_getservbyport_22() {
-        let port_be = 22_u16.to_be() as i32;
-        let p = unsafe { getservbyport(port_be, core::ptr::null()) };
-        assert!(!p.is_null());
-        let name = unsafe { c_str_to_slice((*p).s_name) };
-        assert_eq!(name, b"ssh");
-    }
-
-    #[test]
-    fn test_getservbyport_unknown() {
-        let port_be = 65534_u16.to_be() as i32;
-        let p = unsafe { getservbyport(port_be, core::ptr::null()) };
-        assert!(p.is_null());
     }
 
     // -- setservent / getservent / endservent --
@@ -9146,200 +5570,7 @@ mod tests {
     // `endservent` where the point is what a *fresh* enumeration sees, so the
     // intent survives if the harness ever stops giving each test a thread.
 
-    #[test]
-    fn test_getservent_walks_the_table_in_order() {
-        setservent(0);
-        let first = getservent();
-        assert!(!first.is_null());
-        // The table's first entry is `echo/7/tcp`; enumeration order is table
-        // order, not sorted-by-port or sorted-by-name.
-        assert_eq!(unsafe { c_str_to_slice((*first).s_name) }, b"echo");
-        assert_eq!(unsafe { u16::from_be((*first).s_port as u16) }, 7);
-
-        let second = getservent();
-        assert!(!second.is_null());
-        assert_eq!(unsafe { c_str_to_slice((*second).s_proto) }, b"udp");
-        endservent();
-    }
-
-    #[test]
-    fn test_getservent_reaches_the_end_and_stays_there() {
-        setservent(0);
-        let mut seen = 0usize;
-        // Bounded: a cursor bug that failed to advance would otherwise spin
-        // forever rather than fail.
-        for _ in 0..SERVICES.len().saturating_add(4) {
-            if getservent().is_null() {
-                break;
-            }
-            seen = seen.saturating_add(1);
-        }
-        assert_eq!(seen, SERVICES.len());
-        // Past the end the cursor stops rather than wrapping, so every further
-        // call keeps returning NULL until something rewinds it.
-        assert!(getservent().is_null());
-        assert!(getservent().is_null());
-        endservent();
-    }
-
-    #[test]
-    fn test_setservent_rewinds() {
-        setservent(0);
-        let _ = getservent();
-        let _ = getservent();
-        setservent(0);
-        let p = getservent();
-        assert!(!p.is_null());
-        assert_eq!(unsafe { c_str_to_slice((*p).s_name) }, b"echo");
-        endservent();
-    }
-
-    #[test]
-    fn test_endservent_rewinds_and_clears_stayopen() {
-        setservent(1);
-        let _ = getservent();
-        endservent();
-        // Rewound: the next entry is the first one again.
-        let p = getservent();
-        assert!(!p.is_null());
-        assert_eq!(unsafe { c_str_to_slice((*p).s_name) }, b"echo");
-        // And `stayopen` was cleared, so a lookup is back to open-scan-close
-        // and rewinds what we just advanced.
-        let _ = unsafe { getservbyname(b"ssh\0".as_ptr(), core::ptr::null()) };
-        let after = getservent();
-        assert!(!after.is_null());
-        assert_eq!(unsafe { c_str_to_slice((*after).s_name) }, b"echo");
-        endservent();
-    }
-
-    #[test]
-    fn test_getservbyname_rewinds_cursor_without_stayopen() {
-        // glibc without `stayopen` opens, scans and closes the database for
-        // each `getservby*`, which resets an in-progress `getservent` walk.
-        setservent(0);
-        let _ = getservent();
-        let _ = getservent();
-        let _ = unsafe { getservbyname(b"ssh\0".as_ptr(), core::ptr::null()) };
-        let p = getservent();
-        assert!(!p.is_null());
-        assert_eq!(unsafe { c_str_to_slice((*p).s_name) }, b"echo");
-        endservent();
-    }
-
-    #[test]
-    fn test_getservbyname_preserves_cursor_with_stayopen() {
-        setservent(1);
-        let _ = getservent();
-        let second = getservent();
-        let second_name = unsafe { c_str_to_slice((*second).s_name) }.to_vec();
-        let second_proto = unsafe { c_str_to_slice((*second).s_proto) }.to_vec();
-        // The lookup shares `ServentBuf`, so it overwrites the strings `second`
-        // points at — hence the copies above — but with `stayopen` set it must
-        // not move the cursor.
-        let _ = unsafe { getservbyname(b"ssh\0".as_ptr(), core::ptr::null()) };
-        let third = getservent();
-        assert!(!third.is_null());
-        // Third entry of the table, i.e. the walk continued from where it was
-        // rather than restarting at `echo/tcp`.
-        assert_eq!(unsafe { c_str_to_slice((*third).s_name) }, b"ftp-data");
-        assert_eq!(second_name, b"echo");
-        assert_eq!(second_proto, b"udp");
-        endservent();
-    }
-
-    #[test]
-    fn test_getservbyport_rewinds_cursor_without_stayopen() {
-        setservent(0);
-        let _ = getservent();
-        let port_be = 22_u16.to_be() as i32;
-        let _ = unsafe { getservbyport(port_be, core::ptr::null()) };
-        let p = getservent();
-        assert!(!p.is_null());
-        assert_eq!(unsafe { c_str_to_slice((*p).s_name) }, b"echo");
-        endservent();
-    }
-
-    #[test]
-    fn test_setservent_normalises_stayopen_to_zero_or_one() {
-        // Any nonzero value means "stay open"; we store 1, not the argument.
-        setservent(42);
-        let _ = getservent();
-        let _ = unsafe { getservbyname(b"ssh\0".as_ptr(), core::ptr::null()) };
-        let p = getservent();
-        assert!(!p.is_null());
-        assert_eq!(unsafe { c_str_to_slice((*p).s_proto) }, b"udp");
-        endservent();
-    }
-
     // -- setprotoent / getprotoent / endprotoent --
-
-    #[test]
-    fn test_getprotoent_walks_the_table_in_order() {
-        setprotoent(0);
-        let first = getprotoent();
-        assert!(!first.is_null());
-        assert_eq!(unsafe { c_str_to_slice((*first).p_name) }, b"ip");
-        assert_eq!(unsafe { (*first).p_proto }, 0);
-
-        let second = getprotoent();
-        assert!(!second.is_null());
-        assert_eq!(unsafe { c_str_to_slice((*second).p_name) }, b"icmp");
-        assert_eq!(unsafe { (*second).p_proto }, 1);
-        endprotoent();
-    }
-
-    #[test]
-    fn test_getprotoent_reaches_the_end_and_stays_there() {
-        setprotoent(0);
-        let mut seen = 0usize;
-        for _ in 0..PROTOCOLS.len().saturating_add(4) {
-            if getprotoent().is_null() {
-                break;
-            }
-            seen = seen.saturating_add(1);
-        }
-        assert_eq!(seen, PROTOCOLS.len());
-        assert!(getprotoent().is_null());
-        endprotoent();
-    }
-
-    #[test]
-    fn test_getprotobyname_rewinds_cursor_without_stayopen() {
-        setprotoent(0);
-        let _ = getprotoent();
-        let _ = getprotoent();
-        let _ = unsafe { getprotobyname(b"tcp\0".as_ptr()) };
-        let p = getprotoent();
-        assert!(!p.is_null());
-        assert_eq!(unsafe { c_str_to_slice((*p).p_name) }, b"ip");
-        endprotoent();
-    }
-
-    #[test]
-    fn test_getprotobynumber_preserves_cursor_with_stayopen() {
-        setprotoent(1);
-        let _ = getprotoent();
-        let _ = getprotobynumber(6);
-        let p = getprotoent();
-        assert!(!p.is_null());
-        assert_eq!(unsafe { c_str_to_slice((*p).p_name) }, b"icmp");
-        endprotoent();
-    }
-
-    #[test]
-    fn test_endprotoent_rewinds_and_clears_stayopen() {
-        setprotoent(1);
-        let _ = getprotoent();
-        endprotoent();
-        let p = getprotoent();
-        assert!(!p.is_null());
-        assert_eq!(unsafe { c_str_to_slice((*p).p_name) }, b"ip");
-        let _ = unsafe { getprotobyname(b"udp\0".as_ptr()) };
-        let after = getprotoent();
-        assert!(!after.is_null());
-        assert_eq!(unsafe { c_str_to_slice((*after).p_name) }, b"ip");
-        endprotoent();
-    }
 
     // -- shutdown with invalid how --
 
@@ -9350,24 +5581,20 @@ mod tests {
         assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
     }
 
-    // -- if_nametoindex / if_indextoname --
+    // -- if_nametoindex / if_indextoname: lo is 1, eth0 2, as on Linux --
 
     #[test]
-    fn test_if_nametoindex_eth0() {
-        let idx = unsafe { if_nametoindex(b"eth0\0".as_ptr()) };
-        assert_eq!(idx, 1);
+    fn if_nametoindex_numbers_the_loopback_first() {
+        assert_eq!(unsafe { if_nametoindex(b"lo\0".as_ptr()) }, 1);
+        assert_eq!(unsafe { if_nametoindex(b"eth0\0".as_ptr()) }, 2);
     }
 
     #[test]
-    fn test_if_nametoindex_lo() {
-        let idx = unsafe { if_nametoindex(b"lo\0".as_ptr()) };
-        assert_eq!(idx, 1);
-    }
-
-    #[test]
-    fn test_if_nametoindex_unknown() {
-        let idx = unsafe { if_nametoindex(b"nonexist99\0".as_ptr()) };
-        assert_eq!(idx, 0);
+    fn if_nametoindex_of_no_interface_is_zero_and_enodev() {
+        errno::set_errno(0);
+        assert_eq!(unsafe { if_nametoindex(b"nonexist99\0".as_ptr()) }, 0);
+        assert_eq!(errno::get_errno(), errno::ENODEV);
+        assert_eq!(unsafe { if_nametoindex(b"\0".as_ptr()) }, 0);
     }
 
     #[test]
@@ -9377,60 +5604,364 @@ mod tests {
     }
 
     #[test]
-    fn test_if_indextoname_eth0() {
-        let mut buf = [0u8; 16];
-        let ret = unsafe { if_indextoname(1, buf.as_mut_ptr()) };
-        assert!(!ret.is_null());
-        assert_eq!(&buf[..4], b"eth0");
+    fn if_indextoname_names_each_index() {
+        let mut buf = [0xAAu8; IF_NAMESIZE];
+        assert_eq!(
+            unsafe { if_indextoname(1, buf.as_mut_ptr()) },
+            buf.as_mut_ptr()
+        );
+        assert_eq!(&buf[..3], b"lo\0");
+        let mut buf = [0xAAu8; IF_NAMESIZE];
+        assert_eq!(
+            unsafe { if_indextoname(2, buf.as_mut_ptr()) },
+            buf.as_mut_ptr()
+        );
+        assert_eq!(&buf[..5], b"eth0\0");
     }
 
     #[test]
-    fn test_if_indextoname_unknown() {
-        let mut buf = [0u8; 16];
-        let ret = unsafe { if_indextoname(999, buf.as_mut_ptr()) };
-        assert!(ret.is_null());
+    fn if_indextoname_of_no_interface_is_enxio() {
+        let mut buf = [0u8; IF_NAMESIZE];
+        for index in [0, 3, 999] {
+            errno::set_errno(0);
+            assert!(unsafe { if_indextoname(index, buf.as_mut_ptr()) }.is_null());
+            assert_eq!(errno::get_errno(), errno::ENXIO, "index {index}");
+        }
     }
 
     // -- if_nameindex / if_freenameindex --
 
+    /// Every interface, in index order, then the terminator -- and the names
+    /// agree with `if_nametoindex`.
     #[test]
-    fn test_if_nameindex_returns_non_null() {
+    fn if_nameindex_lists_every_interface() {
         let table = if_nameindex();
         assert!(!table.is_null());
+        let mut seen = Vec::new();
+        for k in 0.. {
+            // SAFETY: the array ends with an index-0 entry, not yet reached.
+            let e = unsafe { &*table.add(k) };
+            if e.if_index == 0 {
+                assert!(e.if_name.is_null());
+                break;
+            }
+            let name = unsafe { c_str_to_slice(e.if_name.cast_const()) }.to_vec();
+            let mut z = name.clone();
+            z.push(0);
+            assert_eq!(unsafe { if_nametoindex(z.as_ptr()) }, e.if_index);
+            seen.push((e.if_index, name));
+        }
+        assert_eq!(seen, vec![(1, b"lo".to_vec()), (2, b"eth0".to_vec())]);
+        unsafe { if_freenameindex(table) };
     }
 
+    /// Each call's array is its own: freeing one leaves another intact.
     #[test]
-    fn test_if_nameindex_first_entry() {
-        let table = if_nameindex();
-        assert!(!table.is_null());
-        // SAFETY: if_nameindex returns a valid static array.
-        let first = unsafe { &*table };
-        assert_eq!(first.if_index, 1, "First interface should be index 1");
-        assert!(!first.if_name.is_null(), "if_name should not be null");
-        let name = unsafe { c_str_to_slice(first.if_name.cast_const()) };
-        assert_eq!(name, b"eth0", "First interface should be eth0");
-    }
-
-    #[test]
-    fn test_if_nameindex_sentinel() {
-        let table = if_nameindex();
-        assert!(!table.is_null());
-        // Second entry should be the sentinel (index = 0).
-        let sentinel = unsafe { &*table.add(1) };
-        assert_eq!(sentinel.if_index, 0, "Sentinel should have index 0");
-    }
-
-    #[test]
-    fn test_if_freenameindex_no_crash() {
-        let table = if_nameindex();
-        if_freenameindex(table);
-        // Should not crash (it's a no-op).
+    fn if_nameindex_gives_each_caller_its_own_array() {
+        let a = if_nameindex();
+        let b = if_nameindex();
+        assert!(!a.is_null() && !b.is_null());
+        assert_ne!(a, b);
+        unsafe { if_freenameindex(a) };
+        let name = unsafe { c_str_to_slice((*b).if_name.cast_const()) };
+        assert_eq!(name, b"lo");
+        unsafe { if_freenameindex(b) };
     }
 
     #[test]
     fn test_if_freenameindex_null() {
-        if_freenameindex(core::ptr::null_mut());
-        // Should not crash.
+        unsafe { if_freenameindex(core::ptr::null_mut()) };
+    }
+
+    // -- getifaddrs / freeifaddrs, against glibc --
+
+    /// What `posix/tools/oracle/ifaddrs_oracle.c` printed for glibc 2.39's
+    /// `getifaddrs` in network sandboxes shaped like this system -- `lo`,
+    /// and a veth named `eth0` with QEMU's MAC and DHCP address
+    /// (`posix/tools/oracle/ifaddrs_run.sh`; the veth's peer left out, IPv6 off).
+    /// `eth0` up, 10.0.2.15/24 with its broadcast address:
+    const GLIBC_UP: &[&str] = &[
+        "name=lo family=17 flags=0x10049 addr=ll(proto=0,ifindex=1,hatype=772,pkttype=0,halen=6,addr=00:00:00:00:00:00:00:00) netmask=- broadaddr=ll(proto=0,ifindex=1,hatype=772,pkttype=0,halen=6,addr=00:00:00:00:00:00:00:00) data=stats",
+        "name=eth0 family=17 flags=0x11043 addr=ll(proto=0,ifindex=2,hatype=1,pkttype=0,halen=6,addr=52:54:00:12:34:56:00:00) netmask=- broadaddr=ll(proto=0,ifindex=2,hatype=1,pkttype=0,halen=6,addr=ff:ff:ff:ff:ff:ff:00:00) data=stats",
+        "name=lo family=2 flags=0x10049 addr=in(127.0.0.1,port=0,zero=0000000000000000) netmask=in(255.0.0.0,port=0,zero=0000000000000000) broadaddr=in(127.0.0.1,port=0,zero=0000000000000000) data=-",
+        "name=eth0 family=2 flags=0x11043 addr=in(10.0.2.15,port=0,zero=0000000000000000) netmask=in(255.255.255.0,port=0,zero=0000000000000000) broadaddr=in(10.0.2.255,port=0,zero=0000000000000000) data=-",
+    ];
+
+    /// The same, with `eth0` then set down: it keeps its address.
+    const GLIBC_DOWN: &[&str] = &[
+        "name=lo family=17 flags=0x10049 addr=ll(proto=0,ifindex=1,hatype=772,pkttype=0,halen=6,addr=00:00:00:00:00:00:00:00) netmask=- broadaddr=ll(proto=0,ifindex=1,hatype=772,pkttype=0,halen=6,addr=00:00:00:00:00:00:00:00) data=stats",
+        "name=eth0 family=17 flags=0x1002 addr=ll(proto=0,ifindex=2,hatype=1,pkttype=0,halen=6,addr=52:54:00:12:34:56:00:00) netmask=- broadaddr=ll(proto=0,ifindex=2,hatype=1,pkttype=0,halen=6,addr=ff:ff:ff:ff:ff:ff:00:00) data=stats",
+        "name=lo family=2 flags=0x10049 addr=in(127.0.0.1,port=0,zero=0000000000000000) netmask=in(255.0.0.0,port=0,zero=0000000000000000) broadaddr=in(127.0.0.1,port=0,zero=0000000000000000) data=-",
+        "name=eth0 family=2 flags=0x1002 addr=in(10.0.2.15,port=0,zero=0000000000000000) netmask=in(255.255.255.0,port=0,zero=0000000000000000) broadaddr=in(10.0.2.255,port=0,zero=0000000000000000) data=-",
+    ];
+
+    /// `eth0` up, before DHCP has answered.
+    const GLIBC_NO_ADDRESS: &[&str] = &[
+        "name=lo family=17 flags=0x10049 addr=ll(proto=0,ifindex=1,hatype=772,pkttype=0,halen=6,addr=00:00:00:00:00:00:00:00) netmask=- broadaddr=ll(proto=0,ifindex=1,hatype=772,pkttype=0,halen=6,addr=00:00:00:00:00:00:00:00) data=stats",
+        "name=eth0 family=17 flags=0x11043 addr=ll(proto=0,ifindex=2,hatype=1,pkttype=0,halen=6,addr=52:54:00:12:34:56:00:00) netmask=- broadaddr=ll(proto=0,ifindex=2,hatype=1,pkttype=0,halen=6,addr=ff:ff:ff:ff:ff:ff:00:00) data=stats",
+        "name=lo family=2 flags=0x10049 addr=in(127.0.0.1,port=0,zero=0000000000000000) netmask=in(255.0.0.0,port=0,zero=0000000000000000) broadaddr=in(127.0.0.1,port=0,zero=0000000000000000) data=-",
+    ];
+
+    /// `eth0` up with 10.0.2.15/31, which Linux gives no broadcast address.
+    const GLIBC_SLASH_31: &[&str] = &[
+        "name=lo family=17 flags=0x10049 addr=ll(proto=0,ifindex=1,hatype=772,pkttype=0,halen=6,addr=00:00:00:00:00:00:00:00) netmask=- broadaddr=ll(proto=0,ifindex=1,hatype=772,pkttype=0,halen=6,addr=00:00:00:00:00:00:00:00) data=stats",
+        "name=eth0 family=17 flags=0x11043 addr=ll(proto=0,ifindex=2,hatype=1,pkttype=0,halen=6,addr=52:54:00:12:34:56:00:00) netmask=- broadaddr=ll(proto=0,ifindex=2,hatype=1,pkttype=0,halen=6,addr=ff:ff:ff:ff:ff:ff:00:00) data=stats",
+        "name=lo family=2 flags=0x10049 addr=in(127.0.0.1,port=0,zero=0000000000000000) netmask=in(255.0.0.0,port=0,zero=0000000000000000) broadaddr=in(127.0.0.1,port=0,zero=0000000000000000) data=-",
+        "name=eth0 family=2 flags=0x11043 addr=in(10.0.2.15,port=0,zero=0000000000000000) netmask=in(255.255.255.254,port=0,zero=0000000000000000) broadaddr=in(10.0.2.15,port=0,zero=0000000000000000) data=-",
+    ];
+
+    /// QEMU's MAC, which the oracle's `eth0` was given.
+    const QEMU_MAC: [u8; 6] = [0x52, 0x54, 0x00, 0x12, 0x34, 0x56];
+
+    /// An `eth0` as QEMU's user network makes it: 10.0.2.15, gateway
+    /// 10.0.2.2, with this mask.
+    fn qemu_nic(up: bool, mask: [u8; 4]) -> Nic {
+        Nic {
+            up,
+            mac: QEMU_MAC,
+            ip: u32::from_ne_bytes([10, 0, 2, 15]),
+            mask: u32::from_ne_bytes(mask),
+            gateway: u32::from_ne_bytes([10, 0, 2, 2]),
+        }
+    }
+
+    /// A `sockaddr`, as the oracle prints it, onto `out`.
+    fn oracle_sockaddr(out: &mut String, tag: &str, sa: *const Sockaddr) {
+        use core::fmt::Write as _;
+        // `write!` to a `String` cannot fail.
+        if sa.is_null() {
+            let _ = write!(out, " {tag}=-");
+            return;
+        }
+        let family = i32::from(unsafe { (*sa).sa_family });
+        if family == AF_INET {
+            let sin = unsafe { &*sa.cast::<SockaddrIn>() };
+            let [a, b, c, d] = sin.sin_addr.s_addr.to_ne_bytes();
+            let port = u16::from_be(sin.sin_port);
+            let _ = write!(out, " {tag}=in({a}.{b}.{c}.{d},port={port},zero=");
+            for z in sin.sin_zero {
+                let _ = write!(out, "{z:02x}");
+            }
+        } else if family == AF_PACKET {
+            let ll = unsafe { &*sa.cast::<SockaddrLl>() };
+            let _ = write!(
+                out,
+                " {tag}=ll(proto={},ifindex={},hatype={},pkttype={},halen={},addr=",
+                u16::from_be(ll.sll_protocol),
+                ll.sll_ifindex,
+                ll.sll_hatype,
+                ll.sll_pkttype,
+                ll.sll_halen
+            );
+            for (k, x) in ll.sll_addr.iter().enumerate() {
+                let _ = write!(out, "{}{x:02x}", if k == 0 { "" } else { ":" });
+            }
+        } else {
+            let _ = write!(out, " {tag}=family{family}");
+            return;
+        }
+        out.push(')');
+    }
+
+    /// A list as the oracle prints it, one line per entry; the list freed.
+    fn oracle_lines(list: *mut Ifaddrs) -> Vec<String> {
+        let mut lines = Vec::new();
+        let mut at = list;
+        while !at.is_null() {
+            let a = unsafe { &*at };
+            let name = core::str::from_utf8(unsafe { c_str_to_slice(a.ifa_name) }).unwrap_or("?");
+            let family = if a.ifa_addr.is_null() {
+                0
+            } else {
+                unsafe { (*a.ifa_addr).sa_family }
+            };
+            let mut line = format!("name={name} family={family} flags={:#x}", a.ifa_flags);
+            oracle_sockaddr(&mut line, "addr", a.ifa_addr);
+            oracle_sockaddr(&mut line, "netmask", a.ifa_netmask);
+            oracle_sockaddr(&mut line, "broadaddr", a.ifa_broadaddr);
+            line.push_str(if a.ifa_data.is_null() {
+                " data=-"
+            } else {
+                " data=stats"
+            });
+            lines.push(line);
+            at = a.ifa_next;
+        }
+        unsafe { freeifaddrs(list) };
+        lines
+    }
+
+    /// `getifaddrs` for this NIC, as the oracle prints a list.
+    fn listed(nic: Nic) -> Vec<String> {
+        set_test_nic(nic, None);
+        let mut list: *mut Ifaddrs = core::ptr::null_mut();
+        assert_eq!(unsafe { getifaddrs(&mut list) }, 0);
+        assert!(!list.is_null());
+        oracle_lines(list)
+    }
+
+    #[test]
+    fn getifaddrs_is_glibcs_with_eth0_up() {
+        assert_eq!(listed(qemu_nic(true, [255, 255, 255, 0])), GLIBC_UP);
+    }
+
+    #[test]
+    fn getifaddrs_is_glibcs_with_eth0_down_and_keeps_its_address() {
+        assert_eq!(listed(qemu_nic(false, [255, 255, 255, 0])), GLIBC_DOWN);
+    }
+
+    #[test]
+    fn getifaddrs_is_glibcs_before_dhcp_answers() {
+        let nic = Nic {
+            ip: 0,
+            mask: 0,
+            gateway: 0,
+            ..qemu_nic(true, [0; 4])
+        };
+        assert_eq!(listed(nic), GLIBC_NO_ADDRESS);
+    }
+
+    #[test]
+    fn getifaddrs_is_glibcs_for_a_31_bit_mask() {
+        assert_eq!(listed(qemu_nic(true, [255, 255, 255, 254])), GLIBC_SLASH_31);
+    }
+
+    /// No NIC found: `eth0` is still there, as `if_nameindex` says -- down,
+    /// with a zero MAC, and no address.
+    #[test]
+    fn getifaddrs_without_a_nic_lists_eth0_down() {
+        let lines = listed(Nic::NONE);
+        let lo_link = GLIBC_UP.first().copied().unwrap_or("");
+        let lo_address = GLIBC_NO_ADDRESS.get(2).copied().unwrap_or("");
+        let eth0_link = concat!(
+            "name=eth0 family=17 flags=0x1002 ",
+            "addr=ll(proto=0,ifindex=2,hatype=1,pkttype=0,halen=6,addr=00:00:00:00:00:00:00:00) ",
+            "netmask=- ",
+            "broadaddr=ll(proto=0,ifindex=2,hatype=1,pkttype=0,halen=6,addr=ff:ff:ff:ff:ff:ff:00:00) ",
+            "data=stats"
+        );
+        assert_eq!(lines, [lo_link, eth0_link, lo_address]);
+    }
+
+    /// `eth0`'s link entry carries the kernel's counters for the NIC, each
+    /// cut to its low 32 bits as Linux cuts them; the loopback's are zero.
+    #[test]
+    fn getifaddrs_link_entries_carry_the_counters() {
+        // tx bytes, tx packets, tx errors, rx bytes, rx packets, rx drops
+        let counters = [0x1_0000_0005, 7, 1, 900, 11, 2];
+        set_test_nic(qemu_nic(true, [255, 255, 255, 0]), Some(counters));
+        let mut list: *mut Ifaddrs = core::ptr::null_mut();
+        assert_eq!(unsafe { getifaddrs(&mut list) }, 0);
+        let lo = unsafe { &*list };
+        assert!(!lo.ifa_next.is_null());
+        let eth0 = unsafe { &*lo.ifa_next };
+        let stats = |a: &Ifaddrs| unsafe { *a.ifa_data.cast::<RtnlLinkStats>() };
+        assert_eq!(stats(lo), RtnlLinkStats::default());
+        let want = RtnlLinkStats {
+            rx_packets: 11,
+            tx_packets: 7,
+            rx_bytes: 900,
+            tx_bytes: 5,
+            tx_errors: 1,
+            rx_dropped: 2,
+            ..RtnlLinkStats::default()
+        };
+        assert_eq!(stats(eth0), want);
+        unsafe { freeifaddrs(list) };
+    }
+
+    /// The two structures are the size, and `sockaddr_ll` the shape, glibc's
+    /// headers give them (the oracle's `layout` line).
+    #[test]
+    fn sockaddr_ll_and_rtnl_link_stats_have_glibcs_layout() {
+        assert_eq!(size_of::<SockaddrLl>(), 20);
+        assert_eq!(core::mem::offset_of!(SockaddrLl, sll_protocol), 2);
+        assert_eq!(core::mem::offset_of!(SockaddrLl, sll_ifindex), 4);
+        assert_eq!(core::mem::offset_of!(SockaddrLl, sll_hatype), 8);
+        assert_eq!(core::mem::offset_of!(SockaddrLl, sll_pkttype), 10);
+        assert_eq!(core::mem::offset_of!(SockaddrLl, sll_halen), 11);
+        assert_eq!(core::mem::offset_of!(SockaddrLl, sll_addr), 12);
+        assert_eq!(size_of::<RtnlLinkStats>(), 96);
+    }
+
+    /// The links' names and indices are the ones `if_nametoindex` answers.
+    #[test]
+    fn getifaddrs_links_are_the_interfaces_if_nameindex_lists() {
+        set_test_nic(Nic::NONE, None);
+        let mut list: *mut Ifaddrs = core::ptr::null_mut();
+        assert_eq!(unsafe { getifaddrs(&mut list) }, 0);
+        let mut links: Vec<(u32, Vec<u8>)> = Vec::new();
+        let mut at = list;
+        while !at.is_null() {
+            let a = unsafe { &*at };
+            if i32::from(unsafe { (*a.ifa_addr).sa_family }) == AF_PACKET {
+                let ll = unsafe { &*a.ifa_addr.cast::<SockaddrLl>() };
+                let index = u32::try_from(ll.sll_ifindex).unwrap_or(0);
+                links.push((index, unsafe { c_str_to_slice(a.ifa_name) }.to_vec()));
+            }
+            at = a.ifa_next;
+        }
+        unsafe { freeifaddrs(list) };
+        let want: Vec<(u32, Vec<u8>)> = INTERFACES.iter().map(|&(i, n)| (i, n.to_vec())).collect();
+        assert_eq!(links, want);
+    }
+
+    /// A /31 or /32 reports the address itself, as glibc does where Linux
+    /// sets no broadcast address; a wider subnet its all-ones address.
+    #[test]
+    fn broadcast_for_is_the_subnets_or_the_address_for_31_and_32() {
+        let ip = u32::from_ne_bytes([10, 0, 2, 15]);
+        let mask = |m: [u8; 4]| u32::from_ne_bytes(m);
+        assert_eq!(
+            broadcast_for(ip, mask([255, 255, 255, 0])),
+            u32::from_ne_bytes([10, 0, 2, 255])
+        );
+        assert_eq!(
+            broadcast_for(ip, mask([255, 255, 0, 0])),
+            u32::from_ne_bytes([10, 0, 255, 255])
+        );
+        assert_eq!(broadcast_for(ip, mask([255, 255, 255, 254])), ip);
+        assert_eq!(broadcast_for(ip, mask([255, 255, 255, 255])), ip);
+        assert_eq!(broadcast_for(ip, 0), u32::MAX);
+    }
+
+    /// A down `eth0` keeps its address in the interface list -- as Linux
+    /// lists it, and `AI_ADDRCONFIG` counts it -- but routes nothing.
+    #[test]
+    fn a_down_eth0_is_listed_but_routes_nothing() {
+        let peer = u32::from_ne_bytes([10, 0, 2, 2]);
+        let ip = u32::from_ne_bytes([10, 0, 2, 15]);
+        let mask = u32::from_ne_bytes([255, 255, 255, 0]);
+        let lo = (u32::to_be(INADDR_LOOPBACK), u32::to_be(0xFF00_0000));
+        set_test_nic(qemu_nic(false, [255, 255, 255, 0]), None);
+        let mut seen = Vec::new();
+        for_each_ipv4_interface(|a, m| seen.push((a, m)));
+        assert_eq!(seen, [lo, (ip, mask)]);
+        assert_eq!(route_source(peer), None);
+        set_test_nic(qemu_nic(true, [255, 255, 255, 0]), None);
+        assert_eq!(route_source(peer), Some(ip));
+    }
+
+    /// Each call's list is its own: a second call does not rewrite the first,
+    /// which it did while the list lived in static storage.
+    #[test]
+    fn getifaddrs_gives_each_caller_its_own_list() {
+        let first = build_ifaddrs(qemu_nic(true, [255, 255, 255, 0]), RtnlLinkStats::default());
+        let second = build_ifaddrs(Nic::NONE, RtnlLinkStats::default());
+        assert!(!first.is_null() && !second.is_null());
+        assert_ne!(first, second);
+        let second_lines = oracle_lines(second);
+        let first_lines = oracle_lines(first);
+        assert_eq!(first_lines, GLIBC_UP);
+        assert_eq!(second_lines.len(), 3);
+    }
+
+    #[test]
+    fn getifaddrs_null_is_efault_and_freeifaddrs_null_is_nothing() {
+        errno::set_errno(0);
+        assert_eq!(unsafe { getifaddrs(core::ptr::null_mut()) }, -1);
+        assert_eq!(errno::get_errno(), errno::EFAULT);
+        unsafe { freeifaddrs(core::ptr::null_mut()) };
     }
 
     #[test]
@@ -10582,37 +7113,6 @@ mod tests {
         crate::errno::set_errno(0);
         let ret = socketpair(0xbeef, SOCK_STREAM, 0, core::ptr::null_mut());
         assert_eq!(ret, -1);
-        assert_eq!(crate::errno::get_errno(), crate::errno::EFAULT);
-    }
-
-    /// glibc's `inet_ntop` (resolv/inet_ntop.c) is a bare `switch (af)` with no
-    /// pointer checks, so an unknown family wins over both NULL pointers.
-    #[test]
-    fn inet_ntop_bad_family_outranks_null_pointers() {
-        crate::errno::set_errno(0);
-        let ret = inet_ntop(0xbeef, core::ptr::null(), core::ptr::null_mut(), 64);
-        assert!(ret.is_null());
-        assert_eq!(crate::errno::get_errno(), crate::errno::EAFNOSUPPORT);
-    }
-
-    /// `inet_ntop4` formats into a stack buffer and compares the result against
-    /// `size` before the closing `strcpy`, so ENOSPC outranks a NULL `dst`.
-    #[test]
-    fn inet_ntop_too_small_size_outranks_a_null_destination() {
-        let src = [127u8, 0, 0, 1];
-        crate::errno::set_errno(0);
-        let ret = inet_ntop(AF_INET, src.as_ptr(), core::ptr::null_mut(), 4);
-        assert!(ret.is_null());
-        assert_eq!(crate::errno::get_errno(), crate::errno::ENOSPC);
-    }
-
-    /// A NULL `dst` at an adequate `size` reaches the `strcpy` and faults.
-    #[test]
-    fn inet_ntop_null_destination_at_an_adequate_size_faults() {
-        let src = [127u8, 0, 0, 1];
-        crate::errno::set_errno(0);
-        let ret = inet_ntop(AF_INET, src.as_ptr(), core::ptr::null_mut(), 64);
-        assert!(ret.is_null());
         assert_eq!(crate::errno::get_errno(), crate::errno::EFAULT);
     }
 

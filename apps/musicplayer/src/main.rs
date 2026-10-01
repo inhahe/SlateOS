@@ -2045,7 +2045,7 @@ pub fn add_playlist(state: &mut PlayerState, path: &std::path::Path) -> String {
 
 /// List every song and every playlist's tracks named on the command line --
 /// the file manager's "open with" names one -- and say what happened to each.
-pub fn open_arguments(state: &mut PlayerState, paths: &[String]) -> String {
+pub fn open_arguments(state: &mut PlayerState, paths: &[std::ffi::OsString]) -> String {
     paths
         .iter()
         .map(|arg| {
@@ -2698,7 +2698,7 @@ fn main() -> ExitCode {
     // but `--display`: the file manager opens a song here by naming it, and the
     // refusal ended the player -- "exit 2, unexpected argument" on a stderr
     // nobody sees -- before its window opened.
-    let args = match app::Args::from_env() {
+    let args = match app::ArgsOs::from_env() {
         Ok(args) => args,
         Err(e) => {
             eprintln!("musicplayer: {e}");
@@ -3925,7 +3925,7 @@ mod tests {
         let song = dir.join("song.mp3");
         std::fs::write(&song, audiotags::testing::mp3(40, &[(b"TIT2", "Named")])).unwrap();
         std::fs::write(dir.join("list.m3u"), "#EXTM3U\nsong.mp3\nsong.mp3\n").unwrap();
-        let arg = |p: PathBuf| p.to_str().expect("a text path").to_owned();
+        let arg = |p: PathBuf| p.into_os_string();
 
         let mut state = PlayerState::new();
         let said = open_arguments(

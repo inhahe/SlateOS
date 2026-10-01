@@ -219,6 +219,54 @@ MUTATIONS = [
         "        Some(TICK)",
         ["the_clock_is_asked_for_only_while_something_moves"],
     ),
+    (
+        "the theme is never taken up",
+        "        self.palette = *palette;\n        self.colours = Colours::of(palette);",
+        "        let _ = palette;",
+        ["the_window_is_drawn_in_the_users_colours"],
+    ),
+    (
+        "the colours are not rebuilt with the palette",
+        "        self.colours = Colours::of(palette);",
+        "        let _ = Colours::of(palette);",
+        ["the_window_is_drawn_in_the_users_colours"],
+    ),
+    (
+        "a new game drops the user's colours",
+        "        fresh.colours = self.colours;\n",
+        "",
+        ["a_new_game_keeps_the_users_colours"],
+    ),
+    (
+        "the playing surface is a fixed dark blue",
+        "            color: self.palette.mantle,",
+        "            color: Color::from_hex(0x252540),",
+        ["the_window_is_drawn_in_the_users_colours"],
+    ),
+    (
+        "the sidebar is a raised grey whatever the look",
+        "            .push_surface(cmds, sx, sy, sw, sh, 6.0, Surface::Card);",
+        "            .push_surface(cmds, sx, sy, sw, sh, 6.0, Surface::ControlTrack);",
+        ["every_text_reads_on_what_is_under_it_in_either_theme"],
+    ),
+    (
+        "the overlay's lines have no panel under them",
+        "            .push_surface(cmds, card.x, card.y, card.w, card.h, 8.0, Surface::Panel);",
+        "            .push_surface(cmds, card.x, card.y, card.w, card.h, 8.0, Surface::Card);",
+        ["every_text_reads_on_what_is_under_it_in_either_theme"],
+    ),
+    (
+        "the footer's keys are the faintest grey",
+        "            // grey is 2.3:1 on a light band.\n            color: self.colours.subtext0,",
+        "            // grey is 2.3:1 on a light band.\n            color: self.palette.overlay0,",
+        ["every_text_reads_on_what_is_under_it_in_either_theme"],
+    ),
+    (
+        "a button that would do nothing looks live",
+        "            State {\n                disabled: !enabled,",
+        "            State {\n                disabled: false,",
+        ["a_button_that_would_do_nothing_is_switched_off"],
+    ),
 ]
 
 if __name__ == "__main__":

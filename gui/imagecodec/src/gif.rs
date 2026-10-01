@@ -80,6 +80,44 @@ pub fn dimensions(bytes: &[u8]) -> ImageResult<(u32, u32)> {
     Ok((to_u32(layout.width)?, to_u32(layout.height)?))
 }
 
+/// How the picture stores its pixels: always as indices into a palette --
+/// the global table's size, or, without one, the first image's own table's,
+/// or else the first image's LZW code size -- and transparent if the control
+/// block before the first image names a transparent index.
+///
+/// # Errors
+///
+/// As [`dimensions`].
+pub fn pixel_format(bytes: &[u8]) -> ImageResult<crate::PixelFormat> {
+    let layout = Layout::read(bytes)?;
+    let packed = bytes.get(10).copied().unwrap_or(0);
+    let mut bits = (packed & 0x80 != 0).then_some((packed & 0x07).saturating_add(1));
+    let mut transparent = false;
+    let mut at = layout.start;
+    loop {
+        match next_block(bytes, &mut at) {
+            Block::Control(control) => transparent = control.transparent.is_some(),
+            Block::Image(image) => {
+                if bits.is_none() {
+                    bits = Some(image.local.map_or(image.min_code_size, |(_, entries)| {
+                        u8::try_from(entries.trailing_zeros()).unwrap_or(8)
+                    }));
+                }
+                break;
+            }
+            Block::Repeat(_) | Block::Other => {}
+            Block::End => break,
+        }
+    }
+    Ok(crate::PixelFormat::uniform(
+        bits.unwrap_or(8),
+        1,
+        crate::ColourModel::Colour,
+        true,
+        transparent,
+    ))
+}
+
 /// The first frame: the first image drawn onto the canvas.
 ///
 /// # Errors

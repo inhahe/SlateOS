@@ -65,6 +65,9 @@ printf '/usr/bin\n/tmp/x\nrelative\n'   > paths.txt
 printf 'Alpha1\nbeta22\nGAMMA333\n'     > mixed.txt
 printf 'A\x01\x7f\x80\xff\xc3\xa9Z\n'   > bytes.txt
 printf 'd\ne\nf\n'                      > def.txt
+# What a backslash can be taken to mean: a dot or a backslash, a `t` or a tab,
+# `]` or `\]`, `atb` or `a<TAB>b`, `w\-`, `ax` or `\x`, and the letter `n`.
+printf '.\n\\\nt\n\tx\n]\n\\]\natb\na\tb\nw\\-\nax\n\\x\nn\n' > bslash.txt
 # For the GNU word operators. `a_b` and `cafe' are each a single word --- `_`
 # is a word character and so is a letter outside ASCII --- and the run of two
 # spaces is where `\b` and `\B` disagree most visibly.
@@ -285,6 +288,24 @@ run_inplace() {
 echo "sed-diff:"
 echo "  ours: $OURS"
 echo "  gnu:  $gnu_real"
+
+# --- a backslash in a regex -----------------------------------------------------
+# GNU sed turns `\t`, `\n` and the other byte-naming escapes into their bytes
+# before the regex compiler sees them -- inside a bracket too -- and glibc gives
+# any other backslash in a bracket no meaning: `[\.]` is a backslash or a dot.
+# `ere` read escapes in brackets until 2026-10-01 and so missed the backslash
+# (known-issues.md, TD-B-ERE-BRACKET-BACKSLASH). Measured, sed 4.9.
+run_stdin bslash.txt 's/^[\.]$/X/'
+run_stdin bslash.txt -E 's/^[\.]$/X/'
+run_stdin bslash.txt 's/^[\t]/X/'
+run_stdin bslash.txt -E 's/^[\t]/X/'
+run_stdin bslash.txt 's/a\tb/X/'
+run_stdin bslash.txt 's/^[\]]$/X/'
+run_stdin bslash.txt -E 's/^[\]]$/X/'
+run_stdin bslash.txt -E 's/^[a\]x$/X/'
+run_stdin bslash.txt -E 's/^[\w-]+$/X/'
+run_stdin bslash.txt 'N;s/[\n]/+/'
+run_stdin bslash.txt 's/^[\x41n]$/X/'
 
 # --- substitution ------------------------------------------------------------
 run_stdin words.txt 's/foo/FOO/'

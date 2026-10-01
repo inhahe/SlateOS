@@ -87764,7 +87764,28 @@ Scoped as sed tranche 2d.
 
 ---
 
-## TD-B-ERE-BRACKET-BACKSLASH — a backslash inside `[...]` is unescaped, where POSIX and GNU make it a member (lane B, 2026-08-24) — **open**
+## TD-B-ERE-BRACKET-BACKSLASH — a backslash inside `[...]` is unescaped, where POSIX and GNU make it a member (lane B, 2026-08-24) — **FIXED** 2026-10-01
+
+**Resolution (2026-10-01).** Fixed more widely than the plan below, because
+measuring it showed the plan was half the problem. The engine read C escapes
+*outside* brackets too: `grep 'a\tb'` and `grep -E 'a\tb'` matched a tab where
+glibc reads `\t` as a `t`. So the engine now has no C escapes at all, exactly
+as glibc's `regcomp` has none, and a backslash in a bracket is a member. The
+two languages that do have C escapes resolve them before the pattern reaches
+the engine, which is where their GNU originals do it: GNU sed already did
+(`sed.rs` `normalize_regex`), and awk now does through `ere::awk`, a
+transcription of gawk 5.2.1's `make_regexp` and `parse_escape`, compiled under
+the new `Syntax::POSIX_AWK` (glibc's `RE_SYNTAX_POSIX_AWK`: a backslash in a
+bracket quotes, the GNU operators are letters, a malformed interval after an
+atom is a literal brace). `bre::to_ere` no longer doubles backslashes in
+brackets, and `emacs` compiles its rebuilt brackets with the new
+`backslash_escape_in_lists` bit. Measured matrix (grep 3.11, sed 4.9, gawk
+5.2.1 `--posix`, bash 5.2 `=~`) is in `engine.rs`'s tests; harness cases in
+`grep-diff.sh`, `sed-diff.sh` and a new escape section of `awk-diff.sh`. awk's
+`/(.)\1/` divergence (design-decisions §333) went with it: POSIX's awk table
+makes `\1` the octal escape, as gawk reads it. Behaviour changed for the other
+lanes' callers: `kshell`'s sed and awk (lane A) and `logviewer`/`renamer`
+(lane E) now read `\t` as `t` -- see the requests filed the same day.
 
 **What it is.** In `ere`, `class_char` (`userspace/ere/src/engine.rs`) reads a
 backslash inside a bracket expression as starting an escape. POSIX gives a
@@ -179550,3 +179571,41 @@ on the same file); no `-o`/`-p` owner and mode checks, no `@include`d files, no
 
 **Where:** `userspace/sudo/src/main.rs` (`edit_sudoers`, `ask_what_now`,
 `sudoers_temp_path`); the `.lck` lock and `SudoError::LockError` are gone.
+
+## TD-B-ERE-QUANTIFIED-ANCHOR -- a `*` after `$` or a word assertion compiles here and is refused by glibc (lane B, 2026-10-01)
+
+**Status:** open
+
+**In short:** in a regular expression, `$` means "end of line" and `\b` means
+"word edge" -- they match a position, not a character, so there is nothing for
+`*` ("repeat") to repeat. glibc refuses `a$*` and `a\b*` outright ("Invalid
+preceding regular expression"); ours accepts them and quietly repeats the
+position. So `find -regex 'a$*'`, `[[ $x =~ a$* ]]`, `sed -E` and awk run a
+pattern GNU's tools reject. Only `^` and `` \` `` are refused today.
+
+**Measured** (bash 5.2 `=~` and find 4.9 `-regextype posix-extended`, both
+glibc 2.39; gawk 5.2.1 `--posix` for awk): every one of `a$*`, `$*`, `a$+`,
+`a$*b`, `a\b*`, `a\<*`, `a\>*`, `a\B*`, ``a\`*``, `a\'*`, `\b*` is a compile
+error. glibc's `parse_expression` returns from *every* anchor token before its
+repetition loop, so the quantifier meets the start of a fresh expression and
+`RE_CONTEXT_INVALID_OPS` refuses it. GNU grep is two engines and differs again,
+so the egrep and basic dialects need their own rows: `grep -E 'a\b*'` prints
+`a` and `a*` but not `ab` (the quantifier is dropped, not applied), while
+``grep -E 'a\`*'`` and `grep -E 'a$*'` print every line with an `a` (zero
+repetitions of a line anchor); `grep 'a\b*'` (basic) reads the `*` as a
+literal after a word assertion and as a repetition after `` \` `` and `\'`.
+
+**Where:** `userspace/ere/src/engine.rs`, `EParser::stack_quantifiers` (the
+check covers `Node::Start | Node::BufStart` only), and `rejects_what_glibc_rejects`
+(which no longer asserts the wrong answer for `a$*`, but does not yet pin the
+right one). `bre::to_ere` passes `\b*` etc. through as a quantified assertion,
+which is wrong for basic grep in the other direction.
+
+**The proper fix:** per dialect, from the measurements above. POSIX-extended
+and awk: a quantifier after any assertion is `REG_BADRPT`. Egrep: after `^ $
+\` \'` it repeats the anchor (zero repetitions allowed, as today); after a word
+assertion it is dropped. Basic: `to_ere` emits a literal `*` after a word
+assertion and keeps the repetition after the line and buffer anchors -- which
+the extended engine must then accept, so `to_ere` should rewrite it (zero or
+more of a zero-width assertion is the empty string; one or more is the
+assertion). Harness rows in `grep-diff.sh`, `find-diff.sh` and `awk-diff.sh`.

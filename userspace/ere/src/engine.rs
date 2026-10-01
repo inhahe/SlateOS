@@ -22,13 +22,33 @@
 //! *file*, so the pattern is as much untrusted input as the subject is.
 //!
 //! ## Supported syntax
-//! `. ^ $`, literals, `\`-escapes (`\.`, `\(`, `\\`, `\n`, `\t`, `\r`, …),
-//! grouping `( … )` (capturing → `BASH_REMATCH`), alternation `a|b`, the
-//! quantifiers `* + ?` and bounded `{m}` / `{m,}` / `{m,n}` (greedy), and
-//! bracket expressions `[...]` / `[^...]` with ranges (`a-z`), literal-`]`/`-`
-//! placement, and POSIX classes (`[[:digit:]]`, `[[:alpha:]]`, …). Non-ERE
-//! Perl shorthands (`\d`, `\w`, `\s`, non-greedy `*?`, backreferences) are
-//! intentionally not provided — `bash`'s `=~` is POSIX ERE, not PCRE.
+//! `. ^ $`, literals, grouping `( … )` (capturing → `BASH_REMATCH`),
+//! alternation `a|b`, the quantifiers `* + ?` and bounded `{m}` / `{m,}` /
+//! `{m,n}` (greedy), bracket expressions `[...]` / `[^...]` with ranges
+//! (`a-z`), literal-`]`/`-` placement and POSIX classes (`[[:digit:]]`,
+//! `[[:alpha:]]`, …), the backreferences `\1`–`\9`, and the GNU operators
+//! `\w \W \s \S \b \B \< \>` and the buffer anchors `` \` `` and `\'`. Perl's
+//! `\d` and non-greedy `*?` are not provided — `bash`'s `=~` is POSIX ERE, not
+//! PCRE — and `\d` is simply a `d`, as it is in glibc.
+//!
+//! ## A backslash means what it means to glibc, and nothing more
+//! Before any other character a backslash makes that character literal: `\.`
+//! is a dot, `\(` a parenthesis, `\\` a backslash. There are **no C escapes**:
+//! `\t` is a `t` and `\n` an `n`, exactly as glibc's `regcomp` reads them, so
+//! `grep -E 'a\tb'` matches `atb`. A program whose *language* has C escapes —
+//! awk, whose regexes POSIX gives them, and sed, which GNU gives them —
+//! resolves them before the pattern reaches this engine, which is where gawk
+//! and GNU sed resolve them too.
+//!
+//! Inside a bracket expression a backslash is an ordinary member, as POSIX
+//! says: `[\.]` is a backslash or a dot, and `[\t]` a backslash or a `t`.
+//! Only a dialect with [`Syntax::backslash_escape_in_lists`] — awk's — reads
+//! it as quoting the next character there.
+//!
+//! The engine used to read C escapes in both places, which was right for awk
+//! and wrong for everyone else: `grep -E '[\.]'` missed a backslash, `grep
+//! 'a\tb'` matched a tab, and `sed 's/[\.]/X/'` left a backslash alone. See
+//! `known-issues.md`, TD-B-ERE-BRACKET-BACKSLASH.
 //!
 //! ## Characters, not bytes and not `char`s
 //! A shell value is bytes, and a SlateOS path may hold any byte but `/` and
@@ -515,11 +535,12 @@ impl PosixClass {
 
 /// Which ERE dialect a pattern is written in.
 ///
-/// The grammar is the same in both; what differs is what happens to two kinds
-/// of nonsense. That is not a distinction this crate invented — it is glibc's
-/// `reg_syntax_t` bits, and our callers genuinely want different ones:
-/// `osh`'s `[[ =~ ]]`, `find -regextype posix-extended`, `sed -E` and `awk`
-/// want [`Syntax::POSIX_EXTENDED`], while `grep -E` wants [`Syntax::EGREP`].
+/// The grammar is the same in all of them; what differs is what happens to a
+/// few kinds of nonsense, and what a backslash means in two places. That is
+/// not a distinction this crate invented — it is glibc's `reg_syntax_t` bits,
+/// and our callers genuinely want different ones: `osh`'s `[[ =~ ]]`, `find
+/// -regextype posix-extended` and `sed -E` want [`Syntax::POSIX_EXTENDED`],
+/// `grep -E` wants [`Syntax::EGREP`], and `awk` wants [`Syntax::POSIX_AWK`].
 ///
 /// The two-caller problem is real and was measured, not assumed. Against
 /// glibc 2.39 / findutils 4.9.0 / grep 3.11, in `C.UTF-8`:
@@ -562,14 +583,35 @@ pub struct Syntax {
     /// left with no members at all is legal and is what it says: `[z-a]`
     /// matches nothing and `[^z-a]` matches any character.
     pub empty_ranges: bool,
+    /// Inside a bracket expression, a backslash quotes the character after it
+    /// -- `[\]]` holds a `]` and `[\\]` one backslash -- instead of being a
+    /// member itself.
+    ///
+    /// glibc's `RE_BACKSLASH_ESCAPE_IN_LISTS`, which every awk syntax sets and
+    /// nothing else does. Without it a backslash is an ordinary member, as
+    /// POSIX requires: `[\.]` is a backslash or a dot. A backslash with nothing
+    /// after it is a member under either reading, which leaves the bracket
+    /// unclosed. Measured against grep 3.11, sed 4.9 and gawk 5.2.1
+    /// `--posix`: `^[\.]$` matches a backslash for the first two and not for
+    /// gawk, and `^[\]]$` matches `\]` for the first two and `]` for gawk.
+    pub backslash_escape_in_lists: bool,
+    /// `\w \W \s \S \b \B \< \>` and the buffer anchors `` \` `` and `\'` are
+    /// the literal characters, not operators.
+    ///
+    /// glibc's `RE_NO_GNU_OPS`, which POSIX awk's syntax sets: `gawk --posix
+    /// '/^\w$/'` matches the line `w`. Every other caller here wants the
+    /// operators, which glibc reads in both of its POSIX dialects.
+    pub no_gnu_ops: bool,
 }
 
 impl Syntax {
-    /// `RE_SYNTAX_POSIX_EXTENDED`: what `osh`, `find`, `sed -E` and `awk` use.
+    /// `RE_SYNTAX_POSIX_EXTENDED`: what `osh`, `find` and `sed -E` use.
     pub const POSIX_EXTENDED: Syntax = Syntax {
         context_indep_ops: false,
         invalid_interval_ord: false,
         empty_ranges: false,
+        backslash_escape_in_lists: false,
+        no_gnu_ops: false,
     };
 
     /// `RE_SYNTAX_EGREP` as GNU `grep -E` applies it.
@@ -577,6 +619,24 @@ impl Syntax {
         context_indep_ops: true,
         invalid_interval_ord: true,
         empty_ranges: false,
+        backslash_escape_in_lists: false,
+        no_gnu_ops: false,
+    };
+
+    /// `RE_SYNTAX_POSIX_AWK`: what `gawk --posix` compiles a regex with, and so
+    /// what `awk` uses -- after its own escape layer has turned `\t`, `\101`
+    /// and the rest into the characters they name.
+    ///
+    /// It is POSIX-extended with three differences: a backslash inside a
+    /// bracket quotes, the GNU operators are literals, and a `{` that does not
+    /// open an interval is a literal brace (`a{b}` matches those four
+    /// characters). A quantifier with nothing before it is still an error.
+    pub const POSIX_AWK: Syntax = Syntax {
+        context_indep_ops: false,
+        invalid_interval_ord: true,
+        empty_ranges: false,
+        backslash_escape_in_lists: true,
+        no_gnu_ops: true,
     };
 }
 
@@ -702,6 +762,15 @@ struct EParser {
     seen_atom: bool,
     /// Accepted-but-notable things found while parsing; see [`Warning`].
     warnings: Vec<Warning>,
+    /// Where [`Self::parse_brace`] last rolled a `{` back to a literal.
+    ///
+    /// glibc turns the rolled-back token into an ordinary character on the
+    /// spot, so the `{` never comes back to it as a quantifier. Here it is
+    /// re-read from the pattern by the next [`Self::parse_repeat`], which
+    /// would otherwise see a quantifier at the start of an atom and -- without
+    /// [`Syntax::context_indep_ops`] -- refuse it: `a{b}` was "nothing to
+    /// repeat" under awk's syntax, where gawk matches the four characters.
+    literal_brace: Option<usize>,
 }
 
 impl EParser {
@@ -811,7 +880,10 @@ impl EParser {
 
     /// Parse one atom and every quantifier stacked on it.
     fn parse_repeat(&mut self) -> Result<Node, EreError> {
-        if is_quantifier_start(self.peek_ascii()) {
+        // A `{` already rolled back to a literal is an atom, not a quantifier
+        // looking for one; see `literal_brace`.
+        let rolled_back = self.literal_brace == Some(self.pos);
+        if is_quantifier_start(self.peek_ascii()) && !rolled_back {
             // A quantifier has to have something to quantify — under
             // `RE_SYNTAX_POSIX_EXTENDED`, where `RE_CONTEXT_INVALID_OPS` makes
             // it `REG_BADRPT`. glibc rejects `*a`, `?a`, `{2}a` and — because
@@ -889,17 +961,29 @@ impl EParser {
     /// matters here is that it *compiles*, because the previous reading of
     /// "quantifier already applied" as an error made those four patterns fail.)
     fn stack_quantifiers(&mut self, mut node: Node) -> Result<Node, EreError> {
+        // `^` is an assertion, not an atom, so glibc reports `^*` and `a^*b`
+        // the way it reports a leading `*`. Under egrep syntax nothing here is
+        // an error at all, and `^*` becomes the anchor repeated zero-or-more
+        // times — which is why `grep -E 'a^*b'` matches "ab": zero repetitions
+        // of an assertion that can never hold is the empty string.
+        // `` \` `` is `^`'s twin and answers the same way.
+        //
+        // Judged on the *character*, before `parse_quantifier` reads it: glibc
+        // has returned from the anchor by then and meets the `{` at the start
+        // of a fresh expression, so `^{b}` is "Invalid preceding regular
+        // expression" even in a dialect where `a{b}` is four literals.
+        // Measured on bash 5.2's `=~` and gawk 5.2.1 `--posix`.
+        //
+        // glibc refuses a quantifier after *every* anchor here, `$`, `\'` and
+        // the word assertions included; that this accepts `a$*` is a known
+        // divergence — `known-issues.md`, TD-B-ERE-QUANTIFIED-ANCHOR.
+        if matches!(node, Node::Start | Node::BufStart)
+            && !self.syntax.context_indep_ops
+            && is_quantifier_start(self.peek_ascii())
+        {
+            return Err(nothing_to_repeat());
+        }
         while let Some(q) = self.parse_quantifier()? {
-            // `^` is an assertion, not an atom, so glibc reports `^*` and
-            // `a^*b` the way it reports a leading `*`. `$` it does accept.
-            // Under egrep syntax nothing here is an error at all, and `^*`
-            // becomes the anchor repeated zero-or-more times — which is why
-            // `grep -E 'a^*b'` matches "ab": zero repetitions of an assertion
-            // that can never hold is the empty string.
-            // `` \` `` is `^`'s twin and answers the same way; `\'` is `$`'s.
-            if matches!(node, Node::Start | Node::BufStart) && !self.syntax.context_indep_ops {
-                return Err(nothing_to_repeat());
-            }
             // Each *stacked* quantifier warns too, not just the first: `**a`
             // and `*+?a` produce two and three lines respectively, and `?*`
             // names both operators in order. `seen_atom` has already been set
@@ -981,10 +1065,12 @@ impl EParser {
             )
         };
         let open = self.pos;
-        // Rewind to the `{` and report it as no interval at all.
+        // Rewind to the `{` and report it as no interval at all -- and mark it,
+        // so that the parser reads it as the literal glibc has just made it.
         macro_rules! rollback {
             () => {{
                 self.pos = open;
+                self.literal_brace = Some(open);
                 return Ok(None);
             }};
         }
@@ -1156,13 +1242,15 @@ impl EParser {
                     }
                     return Ok(Node::Backref(n));
                 }
-                // The GNU operators. glibc honours these in both dialects —
-                // `RE_NO_GNU_OPS` is off for every syntax grep, sed and awk
-                // use — so they are handled here, once, rather than in `bre`'s
+                // The GNU operators. glibc honours these in both POSIX dialects
+                // — `RE_NO_GNU_OPS` is off for every syntax grep and sed use —
+                // so they are handled here, once, rather than in `bre`'s
                 // translation. Before this they fell through to the literal arm
                 // below, which made `grep -E '\w'` search for a `w`: a silent
                 // wrong answer, and the shape this crate exists to avoid.
-                if let Some(op) = e.as_ascii() {
+                // POSIX awk's syntax is the one that sets the bit, and there
+                // they *are* the literal characters; see `Syntax::no_gnu_ops`.
+                if let Some(op) = e.as_ascii().filter(|_| !self.syntax.no_gnu_ops) {
                     match op {
                         'w' | 'W' => return Ok(Node::Class(word_class(op == 'W'))),
                         's' | 'S' => return Ok(Node::Class(space_class(op == 'S'))),
@@ -1180,7 +1268,11 @@ impl EParser {
                         _ => {}
                     }
                 }
-                Ok(Node::Lit(unescape(e)))
+                // Anything else is itself: `\.` a dot, `\\` a backslash -- and
+                // `\t` a `t`, because glibc has no C escapes and neither does
+                // this. The programs whose languages have them convert them
+                // first; see the module docs.
+                Ok(Node::Lit(e))
             }
             // Under POSIX-extended syntax only `parse_quantifier` may consume
             // a `{`, and `parse_repeat` rejects one that reaches an atom slot,
@@ -1312,7 +1404,13 @@ impl EParser {
         }))
     }
 
-    /// Read one character inside a bracket expression, honoring `\`-escapes.
+    /// Read one character inside a bracket expression.
+    ///
+    /// A backslash is a member like any other, as POSIX has it, unless the
+    /// dialect has [`Syntax::backslash_escape_in_lists`] -- and even then only
+    /// when something follows it, which is glibc's `peek_token_bracket`: a
+    /// backslash that ends the pattern is a member either way, and the bracket
+    /// it leaves open is what gets reported.
     fn class_char(&mut self) -> Result<Ch, EreError> {
         let Some(c) = self.peek() else {
             return Err(EreError::new(
@@ -1320,16 +1418,12 @@ impl EParser {
                 b"unterminated '[' in regex".to_vec(),
             ));
         };
-        if c == '\\' {
-            self.bump(1);
-            let e = self.peek().ok_or_else(|| {
-                EreError::new(
-                    RegCode::TrailingBackslash,
-                    b"trailing backslash in class".to_vec(),
-                )
-            })?;
-            self.bump(1);
-            return Ok(unescape(e));
+        if c == '\\'
+            && self.syntax.backslash_escape_in_lists
+            && let Some(e) = self.chars.get(self.pos.saturating_add(1)).copied()
+        {
+            self.bump(2);
+            return Ok(e);
         }
         self.bump(1);
         Ok(c)
@@ -1364,23 +1458,6 @@ fn repeat(node: Node, min: usize, max: Option<usize>) -> Node {
 /// The error for a quantifier with nothing to quantify.
 fn nothing_to_repeat() -> EreError {
     EreError::new(RegCode::BadRepeat, b"nothing to repeat in regex".to_vec())
-}
-
-/// Map an escaped character to the literal it denotes (`\n` → newline, etc.).
-///
-/// Only the ASCII escape letters mean anything; every other character —
-/// including a byte that decodes to none — denotes itself, which is what makes
-/// `\` the way to write a metacharacter literally.
-fn unescape(c: Ch) -> Ch {
-    match c.as_ascii() {
-        Some('n') => Ch::U('\n'),
-        Some('t') => Ch::U('\t'),
-        Some('r') => Ch::U('\r'),
-        Some('f') => Ch::U('\u{0C}'),
-        Some('v') => Ch::U('\u{0B}'),
-        Some('0') => Ch::U('\0'),
-        _ => c,
-    }
 }
 
 // ---- Compiler ---------------------------------------------------------------
@@ -1700,9 +1777,10 @@ impl Regex {
 
     /// Compile an ERE pattern in a chosen dialect.
     ///
-    /// Only `grep -E` wants anything but [`Syntax::POSIX_EXTENDED`]; see
-    /// [`Syntax`] for the measured table of what differs and why one engine
-    /// cannot serve both callers with one answer.
+    /// `grep -E`, `awk` and `ptx` each want something other than
+    /// [`Syntax::POSIX_EXTENDED`]; see [`Syntax`] for the measured tables of
+    /// what differs and why one engine cannot serve every caller with one
+    /// answer.
     ///
     /// # Errors
     /// Returns [`EreError`] on a syntax error, as [`Regex::new`] — though
@@ -1735,6 +1813,7 @@ impl Regex {
             syntax,
             seen_atom: false,
             warnings: Vec::new(),
+            literal_brace: None,
         };
         let ast = parser.parse()?;
         let ngroups = parser.ngroups;
@@ -3214,10 +3293,20 @@ mod tests {
         bad("{2}a");
         bad("(*a)");
         bad("a|*b");
-        // `^` is an assertion, not an atom; `$` glibc does let you quantify.
+        // `^` is an assertion, not an atom, and so is `^` before a brace that
+        // would otherwise have rolled back to a literal. (glibc refuses a
+        // quantifier after `$` and the word assertions too, and this does not
+        // yet: TD-B-ERE-QUANTIFIED-ANCHOR.)
         bad("^*a");
         bad("a^*b");
-        assert!(compile("a$*").is_ok());
+        bad("^{2}");
+        assert_eq!(
+            Regex::new_syntax(b"^{b}", false, Syntax::POSIX_AWK)
+                .unwrap_err()
+                .code,
+            RegCode::BadRepeat
+        );
+        assert_eq!(compile("^{b}").unwrap_err().code, RegCode::BadRepeat);
         // A parenthesis has to be closed. An *unopened* `)` does not have to
         // be — it is an ordinary character — which is the accept side's job.
         bad("(");
@@ -3420,6 +3509,165 @@ mod tests {
         assert!(!me("^a{2,}$", "a"));
         assert!(me("^a{1}{2}$", "aa"));
         assert!(me("^a{,3}$", ""));
+    }
+
+    /// Match under `syntax`.
+    fn ms(syntax: Syntax, pat: &str, s: &str) -> bool {
+        Regex::new_syntax(pat.as_bytes(), false, syntax)
+            .unwrap()
+            .is_match(s.as_bytes())
+            .unwrap()
+    }
+
+    /// A backslash makes the next character literal and does nothing else:
+    /// glibc has no C escapes, so `\t` is a `t`. Measured against grep 3.11:
+    /// `grep -E '^a\tb$'` prints `atb` and not `a<TAB>b`, and `grep -E '^\0$'`
+    /// prints `0`. (awk and sed have C escapes in their *languages*, and
+    /// resolve them before a pattern gets here.)
+    #[test]
+    fn there_are_no_c_escapes() {
+        for syntax in [Syntax::POSIX_EXTENDED, Syntax::EGREP, Syntax::POSIX_AWK] {
+            assert!(ms(syntax, r"^a\tb$", "atb"));
+            assert!(!ms(syntax, r"^a\tb$", "a\tb"));
+            assert!(ms(syntax, r"^\n$", "n"));
+            assert!(ms(syntax, r"^\r\f\v$", "rfv"));
+            assert!(ms(syntax, r"^\0$", "0"));
+            assert!(!ms(syntax, r"^\0$", "\0"));
+            // The metacharacters are still what a backslash is for.
+            assert!(ms(syntax, r"^a\.b$", "a.b"));
+            assert!(!ms(syntax, r"^a\.b$", "axb"));
+            assert!(ms(syntax, r"^\\$", "\\"));
+            assert!(ms(syntax, r"^\%$", "%"));
+        }
+    }
+
+    /// Inside a bracket expression a backslash is a member, as POSIX says and
+    /// glibc does. Every row measured against grep 3.11 (`-E` and basic alike)
+    /// and bash 5.2's `[[ =~ ]]`:
+    ///
+    /// | pattern | matches | does not match |
+    /// |---|---|---|
+    /// | `^[\.]$` | `\` and `.` | |
+    /// | `^[\t]$` | `\` and `t` | a tab |
+    /// | `^[\]]$` | `\]` | `]` |
+    /// | `^[a\]x$` | `ax` and `\x` | |
+    /// | `^[^\t]$` | `x` and a tab | `t` and `\` |
+    /// | `^[\w-]+$` | `w\-` | `ab_` |
+    #[test]
+    fn a_backslash_in_a_bracket_is_a_member() {
+        for syntax in [Syntax::POSIX_EXTENDED, Syntax::EGREP] {
+            assert!(ms(syntax, r"^[\.]$", "\\"));
+            assert!(ms(syntax, r"^[\.]$", "."));
+            assert!(ms(syntax, r"^[\t]$", "\\"));
+            assert!(ms(syntax, r"^[\t]$", "t"));
+            assert!(!ms(syntax, r"^[\t]$", "\t"));
+            assert!(ms(syntax, r"^[\]]$", "\\]"));
+            assert!(!ms(syntax, r"^[\]]$", "]"));
+            assert!(ms(syntax, r"^[a\]x$", "ax"));
+            assert!(ms(syntax, r"^[a\]x$", "\\x"));
+            assert!(ms(syntax, r"^[^\t]$", "x"));
+            assert!(ms(syntax, r"^[^\t]$", "\t"));
+            assert!(!ms(syntax, r"^[^\t]$", "t"));
+            assert!(!ms(syntax, r"^[^\t]$", "\\"));
+            assert!(ms(syntax, r"^[\w-]+$", "w\\-"));
+            assert!(!ms(syntax, r"^[\w-]+$", "ab_"));
+            // A backslash closing nothing: `[\]` is a bracket holding one.
+            assert!(ms(syntax, r"[\]", "a\\b"));
+            assert!(!ms(syntax, r"[\]", "ab"));
+        }
+    }
+
+    /// Under awk's syntax a backslash in a bracket quotes the next character
+    /// (`RE_BACKSLASH_ESCAPE_IN_LISTS`). Measured against gawk 5.2.1
+    /// `--posix`, whose escape layer has already turned `\t` into a tab by
+    /// the time the compiler sees it -- which is why `[\t]` is not a row here:
+    /// to the compiler it is `[\t]` only if the program wrote `[\\t]`.
+    #[test]
+    fn awk_reads_a_backslash_in_a_bracket_as_quoting() {
+        let awk = Syntax::POSIX_AWK;
+        assert!(ms(awk, r"^[\.]$", "."));
+        assert!(!ms(awk, r"^[\.]$", "\\"));
+        assert!(ms(awk, r"^[\]]$", "]"));
+        assert!(ms(awk, r"^[\\]$", "\\"));
+        assert!(ms(awk, r"^[\/]$", "/"));
+        assert!(!ms(awk, r"^[\/]$", "\\"));
+        assert!(ms(awk, r"^[\q]$", "q"));
+        // `[a\]x]`: the quoted `]` is a member and the next one closes.
+        assert!(ms(awk, r"^[a\]x]$", "a"));
+        assert!(ms(awk, r"^[a\]x]$", "]"));
+        assert!(ms(awk, r"^[a\]x]$", "x"));
+        // A quoted `-` is a member, not a range: `[a\-z]` is three characters.
+        assert!(ms(awk, r"^[a\-z]$", "-"));
+        assert!(!ms(awk, r"^[a\-z]$", "m"));
+        // A quoted `^` first is a member, not negation.
+        assert!(ms(awk, r"^[\^a]$", "^"));
+        // `[^\]]` negates a `]`.
+        assert!(!ms(awk, r"^[^\]]$", "]"));
+        assert!(ms(awk, r"^[^\]]$", "x"));
+        // Unclosed: the quoted `]` closes nothing, and a final backslash is a
+        // member that leaves the bracket open (glibc's `peek_token_bracket`).
+        for pat in [r"^[a\]x$", r"[\", r"[a\"] {
+            assert_eq!(
+                Regex::new_syntax(pat.as_bytes(), false, awk)
+                    .unwrap_err()
+                    .code,
+                RegCode::UnmatchedBracket,
+                "{pat}"
+            );
+        }
+    }
+
+    /// Under awk's syntax the GNU operators are the characters themselves
+    /// (`RE_NO_GNU_OPS`). Measured against gawk 5.2.1 `--posix`, which warns
+    /// about each escape and then matches the letter.
+    #[test]
+    fn awk_has_no_gnu_operators() {
+        let awk = Syntax::POSIX_AWK;
+        for (pat, s) in [
+            (r"^\w$", "w"),
+            (r"^\W$", "W"),
+            (r"^\s$", "s"),
+            (r"^\S$", "S"),
+            (r"^\b$", "b"),
+            (r"^\B$", "B"),
+            (r"^\<$", "<"),
+            (r"^\>$", ">"),
+            (r"^\`$", "`"),
+            (r"^\'$", "'"),
+            (r"^\y$", "y"),
+        ] {
+            assert!(ms(awk, pat, s), "{pat} should match {s:?} under awk");
+        }
+        // And everywhere else they are still operators.
+        assert!(!ms(Syntax::POSIX_EXTENDED, r"^\w$", "%"));
+        assert!(ms(Syntax::POSIX_EXTENDED, r"^\w$", "q"));
+        assert!(!ms(awk, r"^\w$", "q"));
+    }
+
+    /// awk's syntax has `RE_INVALID_INTERVAL_ORD` without egrep's
+    /// `RE_CONTEXT_INDEP_OPS`: a malformed interval after an atom is a
+    /// literal brace, while a quantifier with nothing before it is still an
+    /// error. The combination needed the rolled-back `{` to stay a literal
+    /// when it is read again (`EParser::literal_brace`): before, `a{b}` was
+    /// "nothing to repeat". Measured against gawk 5.2.1 `--posix`.
+    #[test]
+    fn awk_reads_a_malformed_interval_after_an_atom_as_a_literal_brace() {
+        let awk = Syntax::POSIX_AWK;
+        let code = |pat: &str| {
+            Regex::new_syntax(pat.as_bytes(), false, awk)
+                .unwrap_err()
+                .code
+        };
+        assert!(ms(awk, "a{b}c", "a{b}c"));
+        assert!(ms(awk, "a{1,2", "a{1,2"));
+        assert!(ms(awk, "^a{1}{b}$", "a{b}"));
+        assert!(ms(awk, "^a{2}$", "aa"));
+        // Nothing before it: refused, as glibc refuses it.
+        for pat in ["{b}a", "{2}a", "*a", "a|{b}", "({b})", "^{b}", "^*"] {
+            assert_eq!(code(pat), RegCode::BadRepeat, "{pat}");
+        }
+        // A committed interval with bad content is still an error.
+        assert_eq!(code("a{1,2,3}"), RegCode::BadBraceContent);
     }
 
     /// Everything the two dialects agree about, checked in both.

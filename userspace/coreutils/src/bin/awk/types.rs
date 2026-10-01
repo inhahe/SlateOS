@@ -510,7 +510,7 @@ mod tests {
 
     /// Run the pass, and report which globals it decided are arrays, by name.
     fn arrays(src: &str) -> Result<Vec<String>, String> {
-        let mut prog = parse(src.as_bytes())?;
+        let mut prog = parse(src.as_bytes(), &mut ere::awk::Warnings::default())?;
         resolve(&mut prog)?;
         Ok(prog
             .global_names

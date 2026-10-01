@@ -181,6 +181,11 @@ fn a_clip_that_names_no_clip_path_clips_nothing() {
             r#"clip-path="url(#r)""#,
         ),
         (RIGHT_HALF, r#"clip-path="none""#),
+        // An `id` an earlier element took: the reference finds that one.
+        (
+            r#"<defs><rect id="c" width="1" height="1"/></defs><clipPath id="c"><rect x="5" width="5" height="10"/></clipPath>"#,
+            r#"clip-path="url(#c)""#,
+        ),
     ] {
         assert_eq!(painted(&clipped(defs, clip)), 100, "{clip}");
     }

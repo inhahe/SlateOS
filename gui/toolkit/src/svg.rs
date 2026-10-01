@@ -25,13 +25,12 @@
 //!   nodes drawn through `use` are bounded, so a document cannot multiply
 //!   itself without end
 //! - `clip-path`: what an element draws is cut to the `<clipPath>` it names
-//!   (the `clip` module says how); a symbol's or inner `<svg>`'s viewport
-//!   does not yet cut what overflows it
+//!   (the `clip` module says how); and a symbol's or inner `<svg>`'s
+//!   viewport cuts what overflows it, unless it says `overflow: visible`
 //! - Masks, patterns and filters are not applied
 //! - Container elements: the outermost svg, its viewBox fitted to the pixels
 //!   as its `preserveAspectRatio` says; an svg inside it, placed in a
-//!   viewport of its own (what overflows that viewport is drawn, not cut);
-//!   g (with inheritance)
+//!   viewport of its own; g (with inheritance)
 //! - Color parsing: hex, named colors, rgb(), rgba(), none, transparent, currentColor
 //!
 //! # Rasterizing
@@ -1244,6 +1243,10 @@ pub enum SvgNode {
         /// For a `<symbol>` or `<svg>`, its place in the viewport the
         /// `<use>` shows it in; otherwise nothing.
         placement: Transform,
+        /// For a `<symbol>` or `<svg>`, the viewport it is cut to, in the
+        /// space `transform` makes: `None` where it lets what it holds
+        /// overflow, and for anything else.
+        viewport: Option<Clip>,
         /// The `<use>`'s style, which the content inherits.
         style: SvgStyle,
         content: usize,
@@ -2155,14 +2158,14 @@ fn build_use(elem: &XmlElement, b: Builder<'_>) -> Result<SvgNode, SvgError> {
         at("x", view_w).unwrap_or(0.0),
         at("y", view_h).unwrap_or(0.0),
     );
-    let placement = if is_viewport(target) {
+    let (placement, viewport) = if is_viewport(target) {
         let size = (at("width", view_w), at("height", view_h));
         match viewport_placement(target, size, b.viewport) {
-            Some((placement, _)) => placement,
+            Some(placement) => (placement.transform, placement.clip),
             None => return Ok(nothing()),
         }
     } else {
-        Transform::IDENTITY
+        (Transform::IDENTITY, None)
     };
     let own = elem
         .attr("transform")
@@ -2172,6 +2175,7 @@ fn build_use(elem: &XmlElement, b: Builder<'_>) -> Result<SvgNode, SvgError> {
     Ok(SvgNode::Use {
         transform: own.then(offset),
         placement,
+        viewport,
         style: parse_style_attrs(elem, b)?,
         content,
     })
@@ -2321,11 +2325,22 @@ fn build_svg(elem: &XmlElement, b: Builder<'_>) -> Result<SvgNode, SvgError> {
 }
 
 /// Where an element that makes a viewport of its own -- an `<svg>` inside
-/// another, or a `<symbol>` or `<svg>` a `<use>` shows -- puts what it
-/// holds: the transform from its own user space to its parent's, and its
-/// viewport's size in its own user units, what its children's percentages
-/// are of. `None` where it draws nothing: a viewport or view box with no
-/// area.
+/// another, or a `<symbol>` or `<svg>` a `<use>` shows -- puts what it holds.
+struct Placement {
+    /// From its own user space to its parent's.
+    transform: Transform,
+    /// Its viewport's size in its own user units: what its children's
+    /// percentages are of.
+    inner: (f32, f32),
+    /// What it cuts what it holds to, in its parent's user space: its
+    /// viewport, as SVG's own style sheet has `overflow: hidden` for both --
+    /// `None` where it says `overflow: visible` (or `auto`, which SVG draws
+    /// as visible).
+    clip: Option<Clip>,
+}
+
+/// Where an element that makes a viewport of its own puts what it holds, or
+/// `None` where it draws nothing: a viewport or view box with no area.
 ///
 /// It is `width` by `height` -- `size`, a `<use>`'s, where that says them;
 /// all of `parent`, the viewport it is in, by default -- at `x`, `y` in its
@@ -2335,7 +2350,7 @@ fn viewport_placement(
     elem: &XmlElement,
     size: (Option<f32>, Option<f32>),
     parent: (f32, f32),
-) -> Option<(Transform, (f32, f32))> {
+) -> Option<Placement> {
     let (parent_w, parent_h) = parent;
     let at = |name: &str, extent: f32| {
         elem.attr(name)
@@ -2356,18 +2371,33 @@ fn viewport_placement(
     let aspect = elem
         .attr("preserveAspectRatio")
         .map_or(AspectRatio::DEFAULT, AspectRatio::parse);
-    match elem.attr("viewBox").and_then(|s| parse_viewbox(s).ok()) {
-        Some(view_box) => fit_view_box(view_box, aspect, (x, y, width, height))
-            .map(|fit| (fit, (view_box.2, view_box.3))),
-        None => Some((Transform::translate(x, y), (width, height))),
-    }
+    let (transform, inner) = match elem.attr("viewBox").and_then(|s| parse_viewbox(s).ok()) {
+        Some(view_box) => (
+            fit_view_box(view_box, aspect, (x, y, width, height))?,
+            (view_box.2, view_box.3),
+        ),
+        None => (Transform::translate(x, y), (width, height)),
+    };
+    let overflows = property(elem, "overflow")
+        .map(str::trim)
+        .is_some_and(|value| value == "visible" || value == "auto");
+    Some(Placement {
+        transform,
+        inner,
+        clip: (!overflows).then_some(Clip::Rect {
+            x,
+            y,
+            width,
+            height,
+        }),
+    })
 }
 
-/// An `<svg>` inside another: a group placed in a viewport of its own
-/// ([`viewport_placement`]), so the renderer walks it as any other; what
-/// overflows the viewport is drawn, not cut.
+/// An `<svg>` inside another: groups placed in a viewport of its own
+/// ([`viewport_placement`]) and cut to it, so the renderer walks it as any
+/// other container.
 fn build_inner_svg(elem: &XmlElement, b: Builder<'_>) -> Result<SvgNode, SvgError> {
-    let Some((placement, viewport)) = viewport_placement(elem, (None, None), b.viewport) else {
+    let Some(placement) = viewport_placement(elem, (None, None), b.viewport) else {
         return Ok(nothing());
     };
     // SVG 2 lets an inner `<svg>` carry a `transform`, outside its placement.
@@ -2376,11 +2406,36 @@ fn build_inner_svg(elem: &XmlElement, b: Builder<'_>) -> Result<SvgNode, SvgErro
         .map(parse_transform)
         .transpose()?
         .unwrap_or(Transform::IDENTITY);
-    let children = build_children(elem, Builder { viewport, ..b })?;
-    Ok(SvgNode::Group {
-        transform: own.then(placement),
-        style: parse_style_attrs(elem, b)?,
+    let children = build_children(
+        elem,
+        Builder {
+            viewport: placement.inner,
+            ..b
+        },
+    )?;
+    // What it holds, placed in its viewport; cut to the viewport, in its
+    // parent's user space; inside its own transform and style, so that a
+    // `clip-path` of its own is measured there too, not inside its view box.
+    let placed = SvgNode::Group {
+        transform: placement.transform,
+        style: SvgStyle::default(),
         children,
+    };
+    let cut = match placement.clip {
+        Some(clip) => SvgNode::Group {
+            transform: Transform::IDENTITY,
+            style: SvgStyle {
+                clip: Some(clip),
+                ..SvgStyle::default()
+            },
+            children: vec![placed],
+        },
+        None => placed,
+    };
+    Ok(SvgNode::Group {
+        transform: own,
+        style: parse_style_attrs(elem, b)?,
+        children: vec![cut],
     })
 }
 
@@ -3669,6 +3724,7 @@ impl<'d> SvgRenderer<'d> {
             SvgNode::Use {
                 transform: local_xf,
                 placement,
+                viewport,
                 style,
                 content,
             } => {
@@ -3678,11 +3734,16 @@ impl<'d> SvgRenderer<'d> {
                 if !self.drawing.contains(content)
                     && let Some(shown) = reused.get(*content)
                 {
-                    let combined = transform.then(*local_xf).then(*placement);
+                    let combined = transform.then(*local_xf);
                     let resolved = parent_style.with_overrides(style);
+                    // A symbol shown is cut to its viewport.
+                    let outer = (*viewport).and_then(|clip| self.push_clip(clip, node, combined));
                     self.drawing.push(*content);
-                    self.render_node(shown, combined, &resolved);
+                    self.render_node(shown, combined.then(*placement), &resolved);
                     self.drawing.pop();
+                    if let Some(OuterMask(outer)) = outer {
+                        self.mask = outer;
+                    }
                 }
             }
             _ => self.render_shape(node, transform, parent_style),
@@ -3699,7 +3760,13 @@ impl<'d> SvgRenderer<'d> {
     /// changed: no clip, or one that names no clip path.
     fn enter_clip(&mut self, node: &SvgNode, transform: Transform) -> Option<OuterMask> {
         let clip = style_of(node)?.clip?;
-        let local = transform.then(local_transform(node));
+        self.push_clip(clip, node, transform.then(local_transform(node)))
+    }
+
+    /// Lay `clip` over what is already clipped, for `node`, whose own user
+    /// space `local` carries to the pixels; answer what to put back once it
+    /// is drawn, or `None` where the clip names no clip path.
+    fn push_clip(&mut self, clip: Clip, node: &SvgNode, local: Transform) -> Option<OuterMask> {
         let mask = self.clip_mask(clip, node, local, 0)?;
         let mask = match &self.mask {
             Some(outer) => outer.intersect(&mask),
@@ -3719,7 +3786,18 @@ impl<'d> SvgRenderer<'d> {
         local: Transform,
         depth: usize,
     ) -> Option<Mask> {
-        let Clip::Path(place) = clip;
+        let place = match clip {
+            Clip::Path(place) => place,
+            Clip::Rect {
+                x,
+                y,
+                width,
+                height,
+            } => {
+                let outline = rect_subpath(x, y, width, height, 0.0, 0.0, local);
+                return Some(self.mask_of(&[(outline.into_iter().collect(), FillRule::NonZero)]));
+            }
+        };
         let path = self.clips.get(place)?;
         let to_clip = match path.units {
             paint::Units::UserSpaceOnUse => local.then(path.transform),
@@ -3761,8 +3839,22 @@ impl<'d> SvgRenderer<'d> {
                 shapes.push((shape_outline(child, to), own_rule.unwrap_or(base_rule)));
             }
         }
+        let mut mask = self.mask_of(&shapes);
+        if let Some(outer) = path.clip
+            && depth < MAX_CLIP_DEPTH
+            && let Some(clipped) = self.clip_mask(outer, node, local, depth.saturating_add(1))
+        {
+            mask = mask.intersect(&clipped);
+        }
+        Some(mask)
+    }
+
+    /// A mask leaving what `shapes` -- outlines on the surface, each with the
+    /// rule it is filled by -- cover between them, over the region they
+    /// reach.
+    fn mask_of(&self, shapes: &[(Vec<Subpath>, FillRule)]) -> Mask {
         let mut extent = Extent::default();
-        for (outline, _) in &shapes {
+        for (outline, _) in shapes {
             for subpath in outline {
                 for &(x, y) in &subpath.points {
                     extent.add(x, y);
@@ -3772,7 +3864,7 @@ impl<'d> SvgRenderer<'d> {
         let mut mask = extent
             .pixels(self.width, self.height)
             .map_or_else(Mask::nothing, |(x0, y0, x1, y1)| Mask::over(x0, y0, x1, y1));
-        for (outline, rule) in &shapes {
+        for (outline, rule) in shapes {
             let outlines: Vec<&[(f32, f32)]> = outline
                 .iter()
                 .map(|subpath| subpath.points.as_slice())
@@ -3786,13 +3878,7 @@ impl<'d> SvgRenderer<'d> {
                 |row, first_col, coverage| mask.add_row(row, first_col, coverage),
             );
         }
-        if let Some(outer) = path.clip
-            && depth < MAX_CLIP_DEPTH
-            && let Some(clipped) = self.clip_mask(outer, node, local, depth.saturating_add(1))
-        {
-            mask = mask.intersect(&clipped);
-        }
-        Some(mask)
+        mask
     }
 
     /// The box of what `node` draws, in its own user space -- inside its

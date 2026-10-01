@@ -356,6 +356,16 @@ fn a_gradient_transform_moves_it() {
 <rect width="10" height="100" fill="url(#g)"/></svg>"#;
     assert!(near(px(svg, 10, 100, 5, 0), [254, 0, 1, 255], 3));
     assert!(near(px(svg, 10, 100, 5, 99), [1, 0, 254, 255], 3));
+    // Turned, a corner-to-corner gradient runs from the top right: both of
+    // gradient space's axes count, as they do not for a level vector. Pixel
+    // (95, 5) is 0.455 right of the centre and 0.445 above it, 0.05 along
+    // the turned diagonal -- where a turn the other way, or a mirror, would
+    // be half way.
+    let diagonal = r#"<svg viewBox="0 0 100 100" width="100" height="100">
+<linearGradient id="g" x2="1" y2="1" gradientTransform="rotate(90 0.5 0.5)"><stop stop-color="red"/><stop offset="1" stop-color="blue"/></linearGradient>
+<rect width="100" height="100" fill="url(#g)"/></svg>"#;
+    let corner = px(diagonal, 100, 100, 95, 5);
+    assert!(near(corner, [242, 0, 13, 255], 2), "{corner:?}");
 }
 
 /// **`fill-opacity` and `stroke-opacity` are inherited**: a group's reaches

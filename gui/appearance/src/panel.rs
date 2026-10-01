@@ -40,6 +40,17 @@ impl Default for PanelStyle {
 
 impl PanelStyle {
     /// The built-in theme's panel: the Aero reference's.
+    ///
+    /// - The tiles are a pixel apart, the reference's `gap: 1px`: they
+    ///   nearly touch, as its tiles do, and a window's tile has an edge of
+    ///   its own, so two never run together.
+    /// - Six pixels after the start button, the reference's `padding: 0 6px`
+    ///   on its row of tiles.
+    /// - Nineteen between the sections, which `design.txt` asks to be "a
+    ///   small space and a divider between the two sections": the reference's
+    ///   row gap, 7 of margin, the one-pixel divider, 9 of margin and the row
+    ///   gap again -- hence [`divider_offset`](Self::divider_offset)'s eight
+    ///   nineteenths.
     pub const AERO: Self = Self {
         gloss: Self::MAX_GLOSS,
         tile_gap: 1,
@@ -74,15 +85,22 @@ impl PanelStyle {
         glossed
     }
 
+    /// The gap between the sections as it is drawn: the theme's, but never
+    /// narrower than the gap between two tiles, which it is there to widen.
+    #[must_use]
+    pub fn section_gap_drawn(self) -> u16 {
+        self.section_gap.max(self.tile_gap)
+    }
+
     /// Where the divider stands in the gap between the sections, from the
     /// gap's start, in pixels at scale 1: eight nineteenths of the way
     /// across, as the reference has it -- its row's gap and seven of margin
     /// before the divider, nine of margin and the gap again after -- at any
-    /// width the theme gives the gap.
+    /// width the gap is drawn at.
     #[must_use]
     pub fn divider_offset(self) -> f32 {
         // Multiplied first, so the reference's 19 gives exactly 8.
-        f32::from(self.section_gap) * 8.0 / 19.0
+        f32::from(self.section_gap_drawn()) * 8.0 / 19.0
     }
 }
 
@@ -139,5 +157,20 @@ mod tests {
         };
         assert!((gap(38).divider_offset() - 16.0).abs() < 1e-4);
         assert!((gap(3).divider_offset() - 24.0 / 19.0).abs() < 1e-4);
+    }
+
+    /// **The gap between the sections is never narrower than a tile gap**:
+    /// a theme spacing its tiles wider than its sections gets sections as
+    /// wide as the tiles' gap, and the divider stays in it.
+    #[test]
+    fn the_section_gap_is_at_least_a_tile_gap() {
+        let style = PanelStyle {
+            tile_gap: 10,
+            section_gap: 3,
+            ..PanelStyle::AERO
+        };
+        assert_eq!(style.section_gap_drawn(), 10);
+        assert!((style.divider_offset() - 80.0 / 19.0).abs() < 1e-4);
+        assert_eq!(PanelStyle::AERO.section_gap_drawn(), 19);
     }
 }

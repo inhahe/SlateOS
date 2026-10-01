@@ -3980,7 +3980,8 @@ fn one_section_alone_has_no_divider() {
             only_windows.taskbar_button_rect(0),
             only_windows.taskbar_button_rect(1),
         );
-        assert!((b.x - (a.x + a.w) - only_windows.scale(crate::TASKBAR_BUTTON_GAP)).abs() < 0.01);
+        // The built-in panel's gap between two tiles: the reference's 1.
+        assert!((b.x - (a.x + a.w) - only_windows.scale(1.0)).abs() < 0.01);
     });
 }
 

@@ -2412,7 +2412,16 @@ reason: all three of its programs fabricated, as
 `B-NO-GETCONF-OR-LOCALE-UNTIL-PORTED` records with the ports that replace them
 (`getconf` was ported the same day). Then **`userspace/mesg`** (`write`, `talk`),
 whose three programs agreed with one another through files instead of
-terminals (`B-MESG-AND-WRITE-UNTIL-PORTED`). **The ledger stands at 100.**
+terminals (`B-MESG-AND-WRITE-UNTIL-PORTED`). **The ledger stood at 100.**
+
+Four daemons followed for inventing their answers, which §1006 settles
+before any naming question: **`userspace/udisks`** (`udisksd`) listed a
+made-up `/dev/sda`, ext4, UUID `12345678-abcd-...`, whenever it found no
+block device; **`userspace/upower`** (`upowerd`) reported "daemon
+initialized (simulated mode)"; **`userspace/fwupd`** (`fwupdtool`) offered
+firmware 1.1.0, "Bug fixes and security updates", for a device it never
+queried; **`userspace/tuned`** (`tuned-adm`, `tuned-gui`) answered every
+`verify` setting `OK (simulated)`. **The ledger stands at 95.**
 
 **The 9 new shadowed pairs were the urgent half**, because a shadowed name is
 two implementations that can disagree with the winner picked by packaging:

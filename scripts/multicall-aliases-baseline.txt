@@ -35,7 +35,6 @@ dmidecode:biosdecode
 efibootmgr:efivar
 eject:volname
 fio:fio-verify
-fwupd:fwupdtool
 getty:mingetty
 gzip:gunzip
 gzip:gzcat
@@ -97,10 +96,6 @@ thermald:thermal-monitor
 tput:clear
 tput:reset
 tput:tset
-tuned:tuned-adm
-tuned:tuned-gui
-udisks:udisksd
-upower:upowerd
 useradd:groupadd
 useradd:groupdel
 useradd:groupmod

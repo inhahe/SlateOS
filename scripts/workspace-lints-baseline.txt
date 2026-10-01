@@ -68,7 +68,6 @@ userspace/fmt
 userspace/fsck
 userspace/fuser  # bare deny(clippy::all)
 userspace/fw
-userspace/fwupd  # bare deny(clippy::all)
 userspace/getent  # bare deny(clippy::all)
 userspace/getty
 userspace/gzip
@@ -151,13 +150,10 @@ userspace/timeout
 userspace/top
 userspace/tput
 userspace/traceroute
-userspace/tuned  # bare deny(clippy::all)
 userspace/udevd
-userspace/udisks  # bare deny(clippy::all)
 userspace/unshare  # bare deny(clippy::all)
 userspace/update-alternatives  # bare deny(clippy::all)
 userspace/updatedb  # bare deny(clippy::all)
-userspace/upower  # bare deny(clippy::all)
 userspace/useradd  # bare deny(clippy::all)
 userspace/vi
 userspace/vmstat

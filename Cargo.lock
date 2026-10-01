@@ -1382,13 +1382,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "fwupd"
-version = "0.1.0"
-dependencies = [
- "quoting",
-]
-
-[[package]]
 name = "game2048"
 version = "0.1.0"
 dependencies = [
@@ -4239,13 +4232,6 @@ name = "ttyidle"
 version = "0.1.0"
 
 [[package]]
-name = "tuned"
-version = "0.1.0"
-dependencies = [
- "quoting",
-]
-
-[[package]]
 name = "typenum"
 version = "1.20.1"
 
@@ -4269,14 +4255,6 @@ dependencies = [
  "optionalfile",
  "quoting",
  "scratchdir",
-]
-
-[[package]]
-name = "udisks"
-version = "0.1.0"
-dependencies = [
- "procinfo",
- "quoting",
 ]
 
 [[package]]
@@ -4387,10 +4365,6 @@ version = "0.1.0"
 dependencies = [
  "embed-manifest",
 ]
-
-[[package]]
-name = "upower"
-version = "0.1.0"
 
 [[package]]
 name = "usageerror"

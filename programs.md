@@ -11,9 +11,9 @@ A new program is recorded here in the commit that creates it (§1053): run
 the script, commit `programs.md` with the program. `--check` fails when the
 two disagree.
 
-**460 programs; 88 on the image, 6 carried inside the kernel.**
+**456 programs; 88 on the image, 6 carried inside the kernel.**
 
-## Userland utilities and services (`userspace/`, lane B) -- 305
+## Userland utilities and services (`userspace/`, lane B) -- 301
 
 | Program | What it does | On image | Crate | Other names |
 |---|---|---|---|---|
@@ -103,7 +103,6 @@ two disagree.
 | `ftpd` | FTP Server Daemon (`ftpd`) |  |  |  |
 | `fuser` | File/socket process identification utility. |  |  |  |
 | `fw` | Firewall Management CLI (`fw`) |  |  |  |
-| `fwupd` | Slate OS firmware update daemon |  |  | `fwupdtool` *(not installed)* |
 | `gdb` | GDB-like debugger and gdbserver |  |  |  |
 | `getconf` | Query system configuration variables: glibc 2.39's `posix/getconf.c`, ported. |  |  |  |
 | `getent` | Name service lookup utility. |  |  |  |
@@ -287,9 +286,7 @@ two disagree.
 | `truncate` | Shrink or extend the size of a file to the specified size. |  | `coreutils` |  |
 | `tsort` | Order a set of items so that every recorded "before" holds. | yes | `coreutils` |  |
 | `tty` | Print the file name of the terminal connected to standard input. | yes | `coreutils` |  |
-| `tuned` | Slate OS system tuning daemon |  |  | `tuned-adm` *(not installed)*, `tuned-gui` *(not installed)* |
 | `udevd` | Device Manager Daemon (udevd / udevadm) |  |  |  |
-| `udisks` | Disk management service. |  |  | `udisksd` *(not installed)* |
 | `uname` | Print system information. | yes | `coreutils` |  |
 | `unexpand` | Convert blanks in each file to tabs. | yes | `coreutils` |  |
 | `uniq` | Collapse adjacent matching lines. | yes | `coreutils` |  |
@@ -297,7 +294,6 @@ two disagree.
 | `unshare` | Namespace isolation utility. |  |  |  |
 | `update-alternatives` | Alternatives management system. |  |  |  |
 | `updatedb` | Multi-personality file database utility for SlateOS. |  |  |  |
-| `upower` | Upower utility |  |  | `upowerd` *(not installed)* |
 | `uptime` | Tell how long the system has been running. | yes | `coreutils` |  |
 | `useradd` | User and Group Management Utilities |  |  | `groupadd` *(not installed)*, `groupdel` *(not installed)*, `groupmod` *(not installed)*, `userdel` *(not installed)*, `usermod` *(not installed)* |
 | `useradm` | User Account Management |  |  |  |

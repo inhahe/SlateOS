@@ -2,6 +2,7 @@
 
 **From:** lane E, 2026-09-27
 **To:** lane D (`posix/src/math.rs`)
+**Status:** ✅ FIXED 2026-09-28 by lane D -- every row below, both signs; reply at the end.
 
 **In short:** `round(0.49999999999999994)` returns 1.0; it should return 0.0.
 `round(4503599627370497.0)` returns 4503599627370498.0; it should return the
@@ -83,3 +84,24 @@ sign of `round(-0.3)`.
 
 Lane E does not need an answer: `apps/wavpcm` no longer calls `round`
 (b3e258847 on lane-e-wip). This is for everything else that does.
+
+---
+
+## Lane D's reply — 2026-09-28: fixed, every row of the table
+
+`round` stopped being `floor(x + 0.5)` on 2026-09-27, when every `<math.h>`
+function became the vendored musl libm's under glibc's `errno` rules
+(design-decisions.md §1132): musl's `round` has neither fault. And since
+c9b99d6da (2026-09-28) `round`, `roundf` and `roundeven` truncate from the
+bits and compare the fraction that was cut off -- exact, as you propose --
+because musl's `trunc(x + copysign(0.5 - 2^-54, x))` still rounded in the
+current direction (`round(-2.5)` was -2 under `FE_UPWARD`).
+
+Every row of your table, both signs, `round(0.5)`, `round(-0.5)`, `round(2.5)`,
+`round(-2.5)` and the sign of `round(-0.3)` are among glibc 2.39's answers in
+`posix/src/math_oracle.txt`, which `math.rs`'s tests replay for `round`,
+`lround`, `llround` and the three `float` ones -- and in the three directed
+rounding modes, `math_modes_oracle.txt`. On `main` with the publish that
+carries this reply.
+
+— lane D

@@ -2,29 +2,45 @@
 //!
 //! ## Thread Creation
 //!
-//! `pthread_create` allocates a user-mode stack via `mmap`, pushes the
-//! start routine and argument onto it, then calls `SYS_THREAD_CREATE`
-//! with an assembly trampoline as the entry point.  The trampoline pops
-//! the arguments, calls the start routine, and issues `SYS_THREAD_EXIT`
-//! with the return value.
+//! `pthread_create` maps the new thread's memory -- from the bottom, an
+//! inaccessible guard, the stack its attribute asked for, then the TLS
+//! block, TCB and per-thread block; or, on a stack the caller supplied, the
+//! TLS part alone.  It claims and fills the thread's slot in the thread
+//! table, pushes the start routine and argument, then calls
+//! `SYS_THREAD_CREATE` with an assembly trampoline as the entry point.  The
+//! trampoline pops the arguments, calls the start routine, and exits
+//! through `pthread_exit`.
 //!
 //! ## Thread Lifecycle
 //!
 //! - **Joinable** (default): Another thread calls `pthread_join` which
-//!   blocks on `SYS_THREAD_JOIN`, then frees the stack.
-//! - **Detached**: `pthread_detach` marks the thread; when it exits it
-//!   frees its *own* stack (glibc `__unmapself` style) via the
-//!   `__pthread_exit_unmap` primitive, so detached stacks are reclaimed
+//!   blocks on `SYS_THREAD_JOIN`, then frees the mapping.
+//! - **Detached** (created so, or marked by `pthread_detach`): when it exits
+//!   it frees its *own* mapping (glibc `__unmapself` style) via the
+//!   `__pthread_exit_unmap` primitive, so detached threads are reclaimed
 //!   without a joiner.  The per-slot atomic `state` arbitrates the
-//!   detach-vs-exit race so exactly one party frees the stack.
+//!   detach-vs-exit race so exactly one party frees the mapping.
 //!
 //! ## Synchronization Primitives
 //!
-//! - **Mutexes**: atomic CAS with spin-yield.  Supports normal,
-//!   recursive (reentrant), and error-checking mutex types.
-//! - **Condition variables**: generation counter with spin-yield wait.
-//! - **Read-write locks**: atomic state (0=unlocked, N=readers, -1=writer).
-//! - **Barriers**: arrival counter with generation-based release.
+//! Every blocking call sleeps on a futex ([`crate::lowlevellock`]) and is
+//! woken by the thread that releases it, and every uncontended path is one
+//! atomic operation with no syscall.  Until 2026-09-26 they slept in 1 ms
+//! steps and polled (`known-issues.md` →
+//! `B-D-PTHREAD-SYNC-POLLED-IN-1MS-STEPS`).
+//!
+//! - **Mutexes**: glibc's three-state low-level lock.  Normal, recursive
+//!   and error-checking types; the owner is the calling thread's task id,
+//!   cached in its per-thread block so locking makes no syscall.
+//! - **Condition variables**: a sequence counter the waiters sleep on, with
+//!   a count of waiters so that a signal nobody is waiting for costs no
+//!   syscall.  The clock the attribute named is kept and used
+//!   (`design-decisions.md` §1110).
+//! - **Read-write locks**: a reader-preferring futex lock (0 = unlocked,
+//!   N = readers, -1 = writer); the writer's own `rdlock`/`wrlock` is
+//!   `EDEADLK`.
+//! - **Barriers**: the arrival count and round number under a low-level
+//!   lock; waiters sleep on the round.
 //! - **Spinlocks**: pure atomic CAS busy-wait.
 //!
 //! ## Why each opaque type carries a `const` size assertion
@@ -71,14 +87,19 @@
 //!   `pthread_self`, `pthread_equal`, `pthread_exit`
 //! - Attributes: `pthread_attr_init`/`destroy`/`setstacksize`/
 //!   `getstacksize`/`setdetachstate`/`getdetachstate`
-//! - Mutex: `pthread_mutex_init`/`destroy`/`lock`/`trylock`/`unlock`
+//! - Mutex: `pthread_mutex_init`/`destroy`/`lock`/`trylock`/`timedlock`/
+//!   `clocklock`/`unlock`/`consistent`/`getprioceiling`/`setprioceiling`
 //! - Mutex attributes: `pthread_mutexattr_init`/`destroy`/`settype`/
-//!   `gettype`
+//!   `gettype` and the `pshared`, `protocol`, `prioceiling` and `robust`
+//!   getter/setter pairs
 //! - Condition: `pthread_cond_init`/`destroy`/`wait`/`timedwait`/
-//!   `signal`/`broadcast`
+//!   `clockwait`/`signal`/`broadcast`; `pthread_condattr_*` including
+//!   `setclock` and `setpshared`
 //! - RW lock: `pthread_rwlock_init`/`destroy`/`rdlock`/`tryrdlock`/
-//!   `wrlock`/`trywrlock`/`unlock`
-//! - Barrier: `pthread_barrier_init`/`destroy`/`wait`
+//!   `timedrdlock`/`clockrdlock`/`wrlock`/`trywrlock`/`timedwrlock`/
+//!   `clockwrlock`/`unlock`
+//! - Barrier: `pthread_barrier_init`/`destroy`/`wait`, and
+//!   `pthread_barrierattr_*`
 //! - Spinlock: `pthread_spin_init`/`destroy`/`lock`/`trylock`/`unlock`
 //! - Cancel stubs: `pthread_setcancelstate`/`setcanceltype`/
 //!   `testcancel`/`cancel`
@@ -104,19 +125,25 @@
 //!   a thread is stopping. (This line read "accepted but never actually
 //!   cancels a thread" until 2026-09-13, which described the function before
 //!   it started refusing.)
-//! - Mutex is a spinlock (no futex-based blocking).
-//! - Condition variables use spin-yield (1ms intervals) watching a
-//!   generation counter.  Correct but not efficient.
-//! - Recursive/error-checking mutexes track owner via syscall per
-//!   lock/unlock (no futex-based blocking yet).
+//! - Process-shared objects (`PTHREAD_PROCESS_SHARED`) are refused with
+//!   `ENOTSUP`, glibc's answer where shared futexes are unsupported: the
+//!   kernel keys a futex by address space, so a waiter in one process could
+//!   never be woken from another (`known-issues.md` →
+//!   `B-D-PROCESS-SHARED-SYNC-IS-SILENTLY-PRIVATE`).
+//! - Priority-inheritance, priority-protect and robust mutexes are not
+//!   supported: their attributes can be set and read back, but
+//!   `pthread_mutex_init` refuses them with `ENOTSUP`.
 
 use crate::errno;
+use crate::sched::CpuSetT;
 // The stack floor lives with the other pthread limits; `pthread_attr_setstack`
 // and `pthread_attr_setstacksize` are the only users, and they must agree with
 // it rather than carry a second, hardcoded value of their own.
 use crate::linux_pthread_key_types::PTHREAD_STACK_MIN;
 use crate::syscall;
-use core::sync::atomic::{AtomicBool, AtomicI32, AtomicU8, AtomicU64, AtomicUsize, Ordering};
+use core::sync::atomic::{
+    AtomicBool, AtomicI32, AtomicPtr, AtomicU8, AtomicU64, AtomicUsize, Ordering,
+};
 
 /// Opaque pthread_t type — holds the kernel task ID.
 pub type PthreadT = u64;
@@ -183,10 +210,21 @@ pub type PthreadMutexattrT = [u8; 4];
 /// threads spinning on `pthread_cond_wait`.
 #[repr(C)]
 pub struct PthreadCondT {
-    /// Generation counter — incremented on each signal/broadcast.
+    /// Sequence number, and the futex waiters sleep on: every signal and
+    /// broadcast advances it, so a waiter that saw the old value wakes.
     generation: AtomicI32,
+    /// The clock `pthread_cond_timedwait` measures its deadline against,
+    /// from the attribute's `pthread_condattr_setclock`: `CLOCK_REALTIME`
+    /// (0, also `PTHREAD_COND_INITIALIZER`'s) or `CLOCK_MONOTONIC`.  Until
+    /// 2026-09-26 the attribute was ignored and every deadline was read as
+    /// real time -- so a monotonic deadline, a few seconds past boot, had
+    /// always passed.
+    clock: i32,
+    /// Threads inside a wait, so a signal with no one waiting costs no
+    /// syscall.
+    waiters: AtomicI32,
     // Padding to match typical libc struct size.
-    _pad: [u8; 44],
+    _pad: [u8; 36],
 }
 
 /// See the module note on why these are `const` and not `#[test]`.
@@ -203,7 +241,9 @@ pub type PthreadCondattrT = [u8; 4];
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub static PTHREAD_COND_INITIALIZER: PthreadCondT = PthreadCondT {
     generation: AtomicI32::new(0),
-    _pad: [0; 44],
+    clock: 0,
+    waiters: AtomicI32::new(0),
+    _pad: [0; 36],
 };
 
 /// Pthread once control type — thread-safe via atomic flag.
@@ -242,14 +282,27 @@ pub const PTHREAD_MUTEX_INITIALIZER: PthreadMutexT = PthreadMutexT {
 // The table is lock-free.  Each slot's `task_id` doubles as an occupancy
 // flag (`SLOT_EMPTY` / `SLOT_RESERVED` / real id) and each slot carries an
 // atomic `state` that arbitrates — race-free — which single party frees the
-// thread's mmap'd stack.  This replaces the former `static mut` +
+// thread's mapping.  This replaces the former `static mut` +
 // "single-creator convention" (which was a data race for the concurrent
 // detach-vs-exit window) with real atomics.
+//
+// A slot is claimed and filled *before* its thread exists, and the thread is
+// handed the slot's address in its per-thread block, so it never has to find
+// itself by task id -- which it could not do before its creator had
+// published that id.  Until 2026-09-26 the slot was filled only after
+// `SYS_THREAD_CREATE` returned, and a thread that exited first found no slot
+// at all (`known-issues.md` → `D-PTHREAD-SLOT-PUBLISH-RACE`).
+//
+// The table grows a chunk at a time and never shrinks, so a slot's address
+// is stable for the life of the process.  It was a fixed 64 slots, and a
+// 65th thread ran untracked: its mapping leaked, and `pthread_detach` told
+// the caller it did not exist.
 
-/// Maximum number of concurrently tracked threads.
-const MAX_THREADS: usize = 64;
+/// Slots per chunk of the thread table.
+const CHUNK_SLOTS: usize = 64;
 
-/// Default user-mode stack size for new threads (64 KiB = 4 pages).
+/// Usable stack for a new thread whose attribute names no size (64 KiB =
+/// 4 pages).
 const DEFAULT_THREAD_STACK_SIZE: usize = 64 * 1024;
 
 /// `task_id` sentinel for an unused slot.
@@ -259,14 +312,15 @@ const SLOT_RESERVED: u64 = u64::MAX;
 
 /// Thread is joinable and still tracked (initial state).
 const STATE_JOINABLE: u8 = 0;
-/// Thread was detached; it will free its *own* stack when it exits.
+/// Thread was detached; it will free its *own* mapping when it exits.
 const STATE_DETACHED: u8 = 1;
-/// Thread exited while joinable and left its stack for a joiner (or for a
+/// Thread exited while joinable and left its mapping for a joiner (or for a
 /// `pthread_detach` that lost the race) to reclaim.
 const STATE_EXITED: u8 = 2;
 
 /// Per-thread metadata slot.  All fields are atomic, so the table needs no
-/// external lock.
+/// external lock -- and all-zero is an empty slot, which is what lets fresh
+/// anonymous memory serve as a new chunk.
 ///
 /// Ownership protocol (all `state` transitions are `compare_exchange`):
 ///
@@ -275,25 +329,31 @@ const STATE_EXITED: u8 = 2;
 ///   JOINABLE --pthread_exit----> EXITED      (joiner/late-detach frees it)
 /// ```
 ///
-/// Exactly one party ever unmaps a given stack:
-/// - `DETACHED` → the exiting thread frees its own stack (self-unmap).
+/// A thread created detached starts in `DETACHED`.
+///
+/// Exactly one party ever unmaps a given mapping:
+/// - `DETACHED` → the exiting thread frees its own mapping (self-unmap).
 /// - `EXITED`   → whichever of `pthread_join` / a late `pthread_detach`
-///   observes it frees the stack, but only *after* `SYS_THREAD_JOIN`
-///   confirms the thread is off that stack (so there is no use-after-free).
+///   observes it frees the mapping, but only *after* `SYS_THREAD_JOIN`
+///   confirms the thread is off it (so there is no use-after-free).
 struct ThreadSlot {
     /// Kernel task id, or `SLOT_EMPTY` / `SLOT_RESERVED`.
     task_id: AtomicU64,
-    /// Base address of the thread's mmap'd stack — also the base of the
-    /// whole mapping (see `map_size`).
-    stack_base: AtomicUsize,
-    /// Size of the *usable stack* portion in bytes, as reported by
-    /// `pthread_getattr_np`.  Smaller than `map_size`: the thread's TLS
-    /// block and TCB sit above the stack in the same mapping.
-    stack_size: AtomicUsize,
-    /// Size of the whole mapping in bytes (stack + TLS block + TCB).  This
-    /// is what gets unmapped; freeing only `stack_size` would leak the TLS
-    /// tail.
+    /// Base of the mapping this library made for the thread: guard, stack,
+    /// TLS block, TCB and per-thread block -- or, for a thread on a stack the
+    /// caller supplied (`pthread_attr_setstack`), the TLS part alone.  This
+    /// is what gets unmapped.
+    map_base: AtomicUsize,
+    /// Size of that mapping in bytes.
     map_size: AtomicUsize,
+    /// Lowest address of the thread's usable stack, as `pthread_getattr_np`
+    /// reports it.
+    stack_base: AtomicUsize,
+    /// Size of the usable stack in bytes.  Smaller than the mapping: the
+    /// guard is below it and the TLS block and TCB above.
+    stack_size: AtomicUsize,
+    /// Size of the inaccessible guard below the stack (0 for none).
+    guard_size: AtomicUsize,
     /// Lifecycle state (`STATE_*`).
     state: AtomicU8,
 }
@@ -302,12 +362,198 @@ impl ThreadSlot {
     const fn new() -> Self {
         Self {
             task_id: AtomicU64::new(SLOT_EMPTY),
+            map_base: AtomicUsize::new(0),
+            map_size: AtomicUsize::new(0),
             stack_base: AtomicUsize::new(0),
             stack_size: AtomicUsize::new(0),
-            map_size: AtomicUsize::new(0),
+            guard_size: AtomicUsize::new(0),
             state: AtomicU8::new(STATE_JOINABLE),
         }
     }
+}
+
+/// One chunk of the thread table.
+#[repr(C)]
+struct ThreadChunk {
+    slots: [ThreadSlot; CHUNK_SLOTS],
+    /// The next chunk, or null.  Set once, by [`link_chunk`].
+    next: AtomicPtr<ThreadChunk>,
+}
+
+impl ThreadChunk {
+    const fn new() -> Self {
+        Self {
+            slots: [const { ThreadSlot::new() }; CHUNK_SLOTS],
+            next: AtomicPtr::new(core::ptr::null_mut()),
+        }
+    }
+}
+
+/// The table's first chunk; later ones are mapped as threads outnumber the
+/// slots.
+static THREAD_TABLE: ThreadChunk = ThreadChunk::new();
+
+/// A new thread's record, written into its reserved slot before the thread
+/// can run.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct ThreadRecord {
+    map_base: usize,
+    map_size: usize,
+    stack_base: usize,
+    stack_size: usize,
+    guard_size: usize,
+    detached: bool,
+}
+
+/// The chunks from `first` on.
+fn chunks_from(first: &'static ThreadChunk) -> impl Iterator<Item = &'static ThreadChunk> {
+    core::iter::successors(Some(first), |chunk| {
+        // SAFETY: a non-null `next` was linked by `link_chunk` (Release,
+        // paired with this Acquire) after its chunk was fully in place, and
+        // chunks are never freed.
+        unsafe { chunk.next.load(Ordering::Acquire).as_ref() }
+    })
+}
+
+/// Link `fresh` after `last`: `Ok(fresh)`, or `Err` with the chunk another
+/// thread linked there first (and `fresh` is the caller's to free).
+fn link_chunk(
+    last: &'static ThreadChunk,
+    fresh: &'static ThreadChunk,
+) -> Result<&'static ThreadChunk, &'static ThreadChunk> {
+    match last.next.compare_exchange(
+        core::ptr::null_mut(),
+        core::ptr::from_ref(fresh).cast_mut(),
+        Ordering::AcqRel,
+        Ordering::Acquire,
+    ) {
+        Ok(_) => Ok(fresh),
+        // SAFETY: as in `chunks_from`.
+        Err(theirs) => Err(unsafe { &*theirs }),
+    }
+}
+
+/// Map a new chunk and link it after `last`, or return the chunk another
+/// thread linked first.  `None` if the memory cannot be had.
+fn grow_table(last: &'static ThreadChunk) -> Option<&'static ThreadChunk> {
+    let size = size_of::<ThreadChunk>();
+    let mem = crate::mman::mmap(
+        core::ptr::null_mut(),
+        size,
+        crate::mman::PROT_READ | crate::mman::PROT_WRITE,
+        crate::mman::MAP_PRIVATE | crate::mman::MAP_ANONYMOUS,
+        -1,
+        0,
+    );
+    if mem == crate::mman::MAP_FAILED {
+        return None;
+    }
+    // SAFETY: the mapping is page-aligned, large enough, never freed once
+    // linked, and zero-filled -- and zero is an empty chunk (every slot
+    // `SLOT_EMPTY` and `STATE_JOINABLE`, `next` null).
+    let fresh = unsafe { &*mem.cast::<ThreadChunk>() };
+    match link_chunk(last, fresh) {
+        Ok(chunk) => Some(chunk),
+        Err(theirs) => {
+            // Never shared, so nothing can be using it; a failed unmap would
+            // only leave one page mapped.
+            let _ = crate::mman::munmap(mem, size);
+            Some(theirs)
+        }
+    }
+}
+
+/// Claim a free slot (`SLOT_EMPTY` → `SLOT_RESERVED`) in the table starting
+/// at `first`, calling `grow` for a new chunk when every slot is taken.
+/// `None` only when the table cannot grow.
+///
+/// A reserved slot is its claimer's alone -- [`find_slot`] never returns
+/// one -- so the claimer may fill it before publishing a task id.
+fn claim_slot_in(
+    first: &'static ThreadChunk,
+    mut grow: impl FnMut(&'static ThreadChunk) -> Option<&'static ThreadChunk>,
+) -> Option<&'static ThreadSlot> {
+    let mut chunk = first;
+    loop {
+        for slot in &chunk.slots {
+            if slot
+                .task_id
+                .compare_exchange(
+                    SLOT_EMPTY,
+                    SLOT_RESERVED,
+                    Ordering::AcqRel,
+                    Ordering::Relaxed,
+                )
+                .is_ok()
+            {
+                return Some(slot);
+            }
+        }
+        // SAFETY: as in `chunks_from`.
+        chunk = match unsafe { chunk.next.load(Ordering::Acquire).as_ref() } {
+            Some(next) => next,
+            None => grow(chunk)?,
+        };
+    }
+}
+
+/// [`claim_slot_in`] the process's table.
+fn claim_slot() -> Option<&'static ThreadSlot> {
+    claim_slot_in(&THREAD_TABLE, grow_table)
+}
+
+/// Record a new thread in its reserved slot.  Nobody else reads the slot
+/// until its id is published.
+fn fill_slot(slot: &ThreadSlot, record: &ThreadRecord) {
+    slot.map_base.store(record.map_base, Ordering::Relaxed);
+    slot.map_size.store(record.map_size, Ordering::Relaxed);
+    slot.stack_base.store(record.stack_base, Ordering::Relaxed);
+    slot.stack_size.store(record.stack_size, Ordering::Relaxed);
+    slot.guard_size.store(record.guard_size, Ordering::Relaxed);
+    slot.state.store(
+        if record.detached {
+            STATE_DETACHED
+        } else {
+            STATE_JOINABLE
+        },
+        Ordering::Relaxed,
+    );
+}
+
+/// Locate the slot tracking `task_id` in the table starting at `first`.
+///
+/// The two sentinels are never a thread's id and must not match: an id of 0
+/// found an empty slot, which `pthread_detach(0)` then marked detached and
+/// reported as a success.
+fn find_slot_in(first: &'static ThreadChunk, task_id: u64) -> Option<&'static ThreadSlot> {
+    if task_id == SLOT_EMPTY || task_id == SLOT_RESERVED {
+        return None;
+    }
+    chunks_from(first)
+        .flat_map(|chunk| chunk.slots.iter())
+        .find(|slot| slot.task_id.load(Ordering::Acquire) == task_id)
+}
+
+/// [`find_slot_in`] the process's table.
+fn find_slot(task_id: u64) -> Option<&'static ThreadSlot> {
+    find_slot_in(&THREAD_TABLE, task_id)
+}
+
+/// Release a slot back to the pool.  Must be called only by the single
+/// party that owns the mapping's free (see [`ThreadSlot`] protocol).
+fn release_slot(slot: &ThreadSlot) {
+    slot.task_id.store(SLOT_EMPTY, Ordering::Release);
+}
+
+/// The calling thread's own slot, whose address its creator left in its
+/// per-thread block before it started; `None` for the initial thread.
+fn own_slot() -> Option<&'static ThreadSlot> {
+    // SAFETY: `current()` is the calling thread's block, written by another
+    // thread only before this one started.
+    let addr = unsafe { (*crate::perthread::current()).thread_slot };
+    // SAFETY: a non-zero value is the address of a slot in the table, put
+    // there by `pthread_create`, and chunks are never freed.
+    unsafe { (addr as *const ThreadSlot).as_ref() }
 }
 
 /// Read-only snapshot of a tracked thread's metadata.
@@ -319,82 +565,38 @@ impl ThreadSlot {
 struct ThreadInfo {
     stack_base: usize,
     stack_size: usize,
+    guard_size: usize,
     detached: bool,
 }
 
-/// Thread info table — lock-free, statically allocated.
-static THREAD_TABLE: [ThreadSlot; MAX_THREADS] = [const { ThreadSlot::new() }; MAX_THREADS];
-
-/// Claim a free slot for a newly created thread and publish its metadata.
-///
-/// `stack_base`/`map_size` describe the whole mapping (the unit that gets
-/// unmapped); `stack_size` is just its usable-stack prefix.
-///
-/// Returns `true` on success, `false` if the table is full.
-fn store_thread_info(
-    task_id: u64,
-    stack_base: usize,
-    stack_size: usize,
-    map_size: usize,
-    detached: bool,
-) -> bool {
-    for slot in THREAD_TABLE.iter() {
-        // Claim an empty slot atomically (EMPTY -> RESERVED).
-        if slot
-            .task_id
-            .compare_exchange(
-                SLOT_EMPTY,
-                SLOT_RESERVED,
-                Ordering::AcqRel,
-                Ordering::Relaxed,
-            )
-            .is_ok()
-        {
-            slot.stack_base.store(stack_base, Ordering::Relaxed);
-            slot.stack_size.store(stack_size, Ordering::Relaxed);
-            slot.map_size.store(map_size, Ordering::Relaxed);
-            slot.state.store(
-                if detached {
-                    STATE_DETACHED
-                } else {
-                    STATE_JOINABLE
-                },
-                Ordering::Relaxed,
-            );
-            // Publish: this Release pairs with the Acquire loads in the
-            // lookup helpers so the field writes above are visible to any
-            // thread that observes the real `task_id`.
-            slot.task_id.store(task_id, Ordering::Release);
-            return true;
+#[cfg(target_os = "none")]
+impl ThreadInfo {
+    fn of(slot: &ThreadSlot) -> Self {
+        Self {
+            stack_base: slot.stack_base.load(Ordering::Relaxed),
+            stack_size: slot.stack_size.load(Ordering::Relaxed),
+            guard_size: slot.guard_size.load(Ordering::Relaxed),
+            detached: slot.state.load(Ordering::Acquire) == STATE_DETACHED,
         }
     }
-    false
 }
 
-/// Locate the (static) slot tracking `task_id`, if present.
-fn find_slot(task_id: u64) -> Option<&'static ThreadSlot> {
-    THREAD_TABLE
-        .iter()
-        .find(|slot| slot.task_id.load(Ordering::Acquire) == task_id)
-}
-
-/// Release a slot back to the pool.  Must be called only by the single
-/// party that owns the stack free (see [`ThreadSlot`] protocol).
-fn release_slot(slot: &ThreadSlot) {
-    slot.task_id.store(SLOT_EMPTY, Ordering::Release);
-}
-
-/// Look up thread info by kernel task ID without removing it.
+/// Look up a thread's metadata without removing it, for
+/// `pthread_getattr_np`.
 ///
-/// Used by `pthread_getattr_np` to report a live thread's stack bounds.
+/// The calling thread is answered from its own slot, which exists from
+/// before it ran: Rust's std asks for its thread's stack bounds as the
+/// thread starts, possibly before the creator has published the thread's
+/// id -- and a lookup by id then found nothing and reported the *main*
+/// thread's stack.
 #[cfg(target_os = "none")]
 fn find_thread_info(task_id: u64) -> Option<ThreadInfo> {
-    let slot = find_slot(task_id)?;
-    Some(ThreadInfo {
-        stack_base: slot.stack_base.load(Ordering::Relaxed),
-        stack_size: slot.stack_size.load(Ordering::Relaxed),
-        detached: slot.state.load(Ordering::Acquire) == STATE_DETACHED,
-    })
+    if task_id == pthread_self() {
+        if let Some(slot) = own_slot() {
+            return Some(ThreadInfo::of(slot));
+        }
+    }
+    find_slot(task_id).map(ThreadInfo::of)
 }
 
 // ---------------------------------------------------------------------------
@@ -529,88 +731,296 @@ pub extern "C" fn __pthread_thread_start(
 
 /// Create a new thread.
 ///
-/// Allocates one mapping holding the new thread's stack *and* its ELF TLS
-/// block + TCB, initialises the TLS block, sets up the trampoline arguments,
-/// and issues `SYS_THREAD_CREATE`.  On success, stores the new thread's
-/// kernel task ID in `*thread`.
+/// Honours the attribute: its stack size, its guard size, a stack of the
+/// caller's own (`pthread_attr_setstack`) and its detach state.  Until
+/// 2026-09-26 the attribute was ignored -- every thread got a 64 KiB stack
+/// with no guard, created joinable, whatever it asked for -- so a thread that
+/// asked for a megabyte and used it ran off the end of its stack into
+/// whatever was mapped below (`known-issues.md` →
+/// `B-D-PTHREAD-CREATE-IGNORED-ITS-ATTRIBUTE`).  Rust's std asks for 2 MiB.
 ///
-/// The TLS block is deliberately built here, in the creating thread, rather
-/// than by the child: it is the only place a failure can be reported
-/// (`EAGAIN`), and folding it into the stack mapping means the existing
-/// join/detach stack-reclaim protocol frees it too — one mapping, one owner
-/// (see [`crate::tls`] for the layout).
+/// The TLS block is built here, in the creating thread, rather than by the
+/// child: it is the only place a failure can be reported (`EAGAIN`), and
+/// keeping it in a mapping this library made means the join/detach reclaim
+/// protocol frees it too -- one mapping, one owner (see [`crate::tls`] for
+/// the layout).
 ///
-/// Returns 0 on success, or a POSIX error number on failure.
+/// The thread's slot is claimed and filled before the thread exists, and its
+/// address is left in the thread's per-thread block, so the thread can find
+/// its slot even if it exits before this function has published its id.
+///
+/// Returns 0 on success, or a POSIX error number on failure.  A NULL `start`
+/// is `EFAULT`, after the thread's memory could be had: glibc creates the
+/// thread, which faults calling it (design-decisions.md §1115).
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn pthread_create(
     thread: *mut PthreadT,
-    _attr: *const PthreadAttrT,
-    start: extern "C" fn(*mut u8) -> *mut u8,
+    attr: *const PthreadAttrT,
+    start: Option<extern "C" fn(*mut u8) -> *mut u8>,
     arg: *mut u8,
 ) -> i32 {
-    // Reserve the thread's stack plus room for its TLS block and TCB above
-    // it.  `usize` cannot overflow here: both terms are small constants
-    // derived from DEFAULT_THREAD_STACK_SIZE and the program's PT_TLS.
-    let tls_img = crate::tls::image();
-    let map_size = DEFAULT_THREAD_STACK_SIZE.wrapping_add(tls_img.reserve() as usize);
+    let want = CreateAttr::read(attr);
+    // Every thread here runs as `SCHED_OTHER` at priority 0 (see
+    // `pthread_getschedparam`): an explicit request for anything else is one
+    // this system cannot carry out, refused as Linux refuses an unprivileged
+    // real-time request, before anything is allocated.
+    if let Some((policy, priority)) = want.explicit_sched
+        && (policy != crate::sched::SCHED_OTHER || priority != 0)
+    {
+        return errno::EPERM;
+    }
+    let Some(slot) = claim_slot() else {
+        return errno::EAGAIN;
+    };
+    match launch(slot, &want, start, arg) {
+        Ok(task_id) => {
+            // Publish.  From here `pthread_join`/`pthread_detach` can find
+            // the thread, and the thread -- which waits for this store before
+            // it lets go of its slot -- may exit.
+            slot.task_id.store(task_id, Ordering::Release);
+            if !thread.is_null() {
+                // SAFETY: caller guarantees thread points to valid PthreadT.
+                unsafe {
+                    *thread = task_id;
+                }
+            }
+            0
+        }
+        Err(e) => {
+            release_slot(slot);
+            e
+        }
+    }
+}
 
-    let stack = crate::mman::mmap(
-        core::ptr::null_mut(),
+/// What `pthread_create` was asked for, read out of its attribute.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct CreateAttr {
+    /// Usable stack in bytes, before rounding to pages.
+    stack_size: usize,
+    /// Guard below the stack in bytes, before rounding.  Ignored for a stack
+    /// the caller supplied, as POSIX requires.
+    guard_size: usize,
+    /// Lowest address of a stack the caller supplied, if any.
+    stack_addr: Option<usize>,
+    /// Start detached.
+    detached: bool,
+    /// The policy and priority asked for with `PTHREAD_EXPLICIT_SCHED`;
+    /// `None` to inherit the creator's.
+    explicit_sched: Option<(i32, i32)>,
+}
+
+impl CreateAttr {
+    /// What `pthread_attr_init`'s values read as -- and so what a NULL
+    /// attribute stands for until `pthread_setattr_default_np` changes the
+    /// defaults. Only the tests name it: `read` takes a NULL attribute from
+    /// the current defaults.
+    #[cfg(test)]
+    const DEFAULT: Self = Self {
+        stack_size: DEFAULT_THREAD_STACK_SIZE,
+        guard_size: DEFAULT_GUARD_SIZE,
+        stack_addr: None,
+        detached: false,
+        explicit_sched: None,
+    };
+
+    /// What `attr` asks for; NULL stands for the process's default
+    /// attributes (`pthread_setattr_default_np`).
+    fn read(attr: *const PthreadAttrT) -> Self {
+        if attr.is_null() {
+            let default = default_attr_copy();
+            return Self::read(&raw const default);
+        }
+        // SAFETY: non-null, and by the caller's contract an initialised
+        // attribute object.
+        let buf = unsafe { &*attr };
+        let size = attr_read_stacksize(buf);
+        let addr = attr_read_stackaddr(buf);
+        Self {
+            stack_size: if size == 0 {
+                DEFAULT_THREAD_STACK_SIZE
+            } else {
+                size
+            },
+            guard_size: attr_read_guardsize(buf),
+            stack_addr: (addr != 0).then_some(addr),
+            detached: attr_read_detachstate(buf) == PTHREAD_CREATE_DETACHED,
+            explicit_sched: (attr_read_i32(buf, ATTR_OFF_INHERIT) == PTHREAD_EXPLICIT_SCHED).then(
+                || {
+                    (
+                        attr_read_i32(buf, ATTR_OFF_POLICY),
+                        attr_read_i32(buf, ATTR_OFF_PRIORITY),
+                    )
+                },
+            ),
+        }
+    }
+}
+
+/// The memory `pthread_create` maps for a thread, before it has an address.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct ThreadPlan {
+    /// Bytes to map, a whole number of pages.
+    map_size: usize,
+    /// Guard at the bottom of the mapping, a whole number of pages (0 for
+    /// none).
+    guard: usize,
+    /// Usable stack, a whole number of pages -- 0 when the caller supplied
+    /// the stack and the mapping holds only the TLS part.
+    stack: usize,
+    /// The caller's stack: its lowest address and its size.
+    user_stack: Option<(usize, usize)>,
+}
+
+/// Where a thread's pieces land once its mapping has an address.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct ThreadLayout {
+    /// Lowest address of the usable stack.
+    stack_base: usize,
+    /// The stack's top, 16-aligned; the trampoline's words go just below.
+    stack_top: usize,
+    /// The thread pointer.
+    tp: u64,
+}
+
+/// Size a thread's mapping; `None` when the sizes asked for overflow.
+fn plan_thread(want: &CreateAttr, img: &crate::tls::TlsImage) -> Option<ThreadPlan> {
+    let page = crate::unistd::PAGE_SIZE;
+    let tls = usize::try_from(img.reserve()).ok()?;
+    if let Some(addr) = want.stack_addr {
+        return Some(ThreadPlan {
+            map_size: tls.checked_next_multiple_of(page)?,
+            guard: 0,
+            stack: 0,
+            user_stack: Some((addr, want.stack_size)),
+        });
+    }
+    let guard = want.guard_size.checked_next_multiple_of(page)?;
+    let stack = want.stack_size.checked_next_multiple_of(page)?;
+    let map_size = guard
+        .checked_add(stack)?
+        .checked_add(tls)?
+        .checked_next_multiple_of(page)?;
+    Some(ThreadPlan {
         map_size,
+        guard,
+        stack,
+        user_stack: None,
+    })
+}
+
+impl ThreadPlan {
+    /// Lay the thread out in the mapping at `map_base`.
+    fn place(&self, map_base: usize, img: &crate::tls::TlsImage) -> ThreadLayout {
+        if let Some((addr, size)) = self.user_stack {
+            // The caller's stack as given; the TLS part fills our mapping.
+            return ThreadLayout {
+                stack_base: addr,
+                stack_top: addr.wrapping_add(size) & !0xf,
+                tp: img.thread_pointer(map_base as u64, 0),
+            };
+        }
+        let stack_base = map_base.wrapping_add(self.guard);
+        // Variant-II layout: TLS block immediately below the thread pointer,
+        // TCB at and above it, both above the stack.  The stack therefore
+        // ends where the TLS block begins — rounded *down* to 16, because the
+        // TLS block's start only inherits the segment's `p_align`, which the
+        // psABI permits to be as weak as 1.  SysV requires RSP+8 to be
+        // 16-byte aligned at a function's entry, and the trampoline pops
+        // exactly three words before its `call`, so RSP at
+        // `__pthread_thread_start` is `stack_top - 8`: an unaligned
+        // `stack_top` would misalign every SSE spill in the child.  Rounding
+        // down costs at most 15 bytes of stack and never encroaches on the
+        // TLS block above.
+        let tp = img.thread_pointer(stack_base as u64, self.stack as u64);
+        ThreadLayout {
+            stack_base,
+            stack_top: (tp.wrapping_sub(img.block_size()) as usize) & !0xf,
+            tp,
+        }
+    }
+}
+
+/// Map, prepare and start the thread whose slot is `slot`: its task id, or
+/// the error number `pthread_create` returns.  On failure nothing is left
+/// mapped; the caller releases the slot.
+fn launch(
+    slot: &'static ThreadSlot,
+    want: &CreateAttr,
+    start: Option<extern "C" fn(*mut u8) -> *mut u8>,
+    arg: *mut u8,
+) -> Result<u64, i32> {
+    let tls_img = crate::tls::image();
+    let plan = plan_thread(want, &tls_img).ok_or(errno::EAGAIN)?;
+    let mem = crate::mman::mmap(
+        core::ptr::null_mut(),
+        plan.map_size,
         crate::mman::PROT_READ | crate::mman::PROT_WRITE,
         crate::mman::MAP_PRIVATE | crate::mman::MAP_ANONYMOUS,
         -1,
         0,
     );
-
-    if stack == crate::mman::MAP_FAILED {
-        return errno::EAGAIN;
+    if mem == crate::mman::MAP_FAILED {
+        return Err(errno::EAGAIN);
     }
+    // Every failure below unmaps `mem` again.  The mapping was never shared,
+    // so an unmap that failed would only leave it mapped.
+    if plan.guard > 0 && crate::mman::mprotect(mem, plan.guard, crate::mman::PROT_NONE) != 0 {
+        let _ = crate::mman::munmap(mem, plan.map_size);
+        return Err(errno::EAGAIN);
+    }
+    // A NULL start routine: glibc creates the thread, which faults calling it.
+    // `pthread_create` can fail, so it does here, as late as it can without a
+    // thread -- after the memory the thread needed was had.
+    let Some(start) = start else {
+        let _ = crate::mman::munmap(mem, plan.map_size);
+        return Err(errno::EFAULT);
+    };
+    let map_base = mem as usize;
+    let layout = plan.place(map_base, &tls_img);
 
-    let stack_base = stack as usize;
-    // Variant-II layout: TLS block immediately below the thread pointer,
-    // TCB at and above it, both above the stack.  The stack therefore ends
-    // where the TLS block begins — rounded *down* to 16, because the TLS
-    // block's start only inherits the segment's `p_align`, which the psABI
-    // permits to be as weak as 1.  SysV requires RSP+8 to be 16-byte aligned
-    // at a function's entry, and the trampoline pops exactly three words
-    // before its `call`, so RSP at `__pthread_thread_start` is
-    // `stack_top - 8`: an unaligned `stack_top` would misalign every SSE
-    // spill in the child.  Rounding down costs at most 15 bytes of stack and
-    // never encroaches on the TLS block above.
-    let tp = tls_img.thread_pointer(stack_base as u64, DEFAULT_THREAD_STACK_SIZE as u64);
-    let stack_top = (tp.wrapping_sub(tls_img.block_size()) as usize) & !0xf;
-    let stack_size = stack_top.wrapping_sub(stack_base);
-
-    // Initialise the child's TLS block and TCB before it can run.
-    // SAFETY: mmap succeeded, so [stack_base, stack_base + map_size) is
-    // valid; `thread_pointer`'s contract puts [tp - block_size, tp +
-    // TCB_SIZE) inside that range, and no thread uses it yet.
+    // Initialise the child's TLS block, TCB and per-thread block before it
+    // can run.
+    // SAFETY: mmap succeeded, so [map_base, map_base + map_size) is valid;
+    // `plan_thread` sized it for `thread_pointer`'s contract, which puts
+    // [tp - block_size, tp + TCB_SIZE + perthread::BLOCK_SIZE) inside it,
+    // and no thread uses it yet.
     unsafe {
-        crate::tls::init_block(tp, &tls_img);
-        // The SAME value as every other thread, deliberately: glibc copies the
-        // parent's guard into the child TCB, and a thread that used a
+        crate::tls::init_block(layout.tp, &tls_img);
+        // The SAME value as every other thread, deliberately: glibc copies
+        // the parent's guard into the child TCB, and a thread that used a
         // different one would abort a process that was never smashed the
         // moment a frame outlived the change. The parent's TLS is live here,
         // so the lookup is safe.
-        // SAFETY (covered by the enclosing block): `init_block` above
-        // established `[tp, tp + TCB_SIZE)`, and the child is not running yet.
-        crate::tls::set_stack_guard(tp, crate::crt::process_stack_guard());
+        crate::tls::set_stack_guard(layout.tp, crate::crt::process_stack_guard());
+        (*crate::perthread::block_at(layout.tp)).thread_slot = core::ptr::from_ref(slot) as usize;
     }
+    fill_slot(
+        slot,
+        &ThreadRecord {
+            map_base,
+            map_size: plan.map_size,
+            stack_base: layout.stack_base,
+            stack_size: layout.stack_top.wrapping_sub(layout.stack_base),
+            guard_size: plan.guard,
+            detached: want.detached,
+        },
+    );
 
     // Push arg, start_routine and the thread pointer onto the new stack for
     // the trampoline (see its stack-layout comment).
-    // SAFETY: mmap succeeded → [stack_base, stack_top) is valid memory.
+    // SAFETY: the three words lie just below `stack_top`, inside the stack:
+    // our own mapping, or the caller's stack, which POSIX makes the caller
+    // vouch for.
     unsafe {
-        let tp_slot = stack_top.wrapping_sub(8) as *mut u64;
-        let fn_slot = stack_top.wrapping_sub(16) as *mut u64;
-        let arg_slot = stack_top.wrapping_sub(24) as *mut u64;
-        core::ptr::write(tp_slot, tp);
+        let tp_slot = layout.stack_top.wrapping_sub(8) as *mut u64;
+        let fn_slot = layout.stack_top.wrapping_sub(16) as *mut u64;
+        let arg_slot = layout.stack_top.wrapping_sub(24) as *mut u64;
+        core::ptr::write(tp_slot, layout.tp);
         core::ptr::write(fn_slot, start as usize as u64);
         core::ptr::write(arg_slot, arg as u64);
     }
-
-    let user_rsp = stack_top.wrapping_sub(24) as u64;
+    let user_rsp = layout.stack_top.wrapping_sub(24) as u64;
 
     // Get the trampoline's address.
     #[cfg(target_os = "none")]
@@ -618,33 +1028,22 @@ pub extern "C" fn pthread_create(
     #[cfg(not(target_os = "none"))]
     let entry: u64 = 0;
 
-    // Create the kernel thread.
+    // Create the kernel thread, counted first: it may end before the
+    // syscall returns (`LIVE_THREADS`).
+    live_threads_add(&LIVE_THREADS);
     let ret = syscall::syscall3(
         syscall::SYS_THREAD_CREATE,
         entry,
         user_rsp,
         u64::MAX, // default priority
     );
-
     if ret < 0 {
-        let _ = crate::mman::munmap(stack, map_size);
-        return errno::EAGAIN;
+        // It never ran, so it can never be the last; the result is moot.
+        let _ = live_threads_remove(&LIVE_THREADS);
+        let _ = crate::mman::munmap(mem, plan.map_size);
+        return Err(errno::EAGAIN);
     }
-
-    let task_id = ret as u64;
-
-    // Track the thread for later cleanup (best effort — if the table
-    // is full the thread runs but its mapping leaks on join).
-    let _ = store_thread_info(task_id, stack_base, stack_size, map_size, false);
-
-    if !thread.is_null() {
-        // SAFETY: caller guarantees thread points to valid PthreadT.
-        unsafe {
-            *thread = task_id;
-        }
-    }
-
-    0
+    Ok(ret as u64)
 }
 
 /// Wait for a thread to terminate.
@@ -655,6 +1054,10 @@ pub extern "C" fn pthread_create(
 /// Returns 0 on success, or a POSIX error number on failure.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn pthread_join(thread_id: PthreadT, retval: *mut *mut u8) -> i32 {
+    // A thread waiting for itself would wait for ever: glibc's EDEADLK.
+    if is_calling_thread(thread_id) {
+        return errno::EDEADLK;
+    }
     // A detached thread must not be joined (POSIX: EINVAL).  Reject early
     // so we never race the detached thread's self-unmap.
     if let Some(slot) = find_slot(thread_id) {
@@ -701,7 +1104,7 @@ pub extern "C" fn pthread_join(thread_id: PthreadT, retval: *mut *mut u8) -> i32
     // longer reads its TLS — so the unmap is safe.  Release the slot before
     // unmapping so it can be reused promptly.
     if let Some(slot) = find_slot(thread_id) {
-        let base = slot.stack_base.load(Ordering::Relaxed);
+        let base = slot.map_base.load(Ordering::Relaxed);
         let size = slot.map_size.load(Ordering::Relaxed);
         release_slot(slot);
         if base != 0 {
@@ -710,6 +1113,102 @@ pub extern "C" fn pthread_join(thread_id: PthreadT, retval: *mut *mut u8) -> i32
     }
 
     0
+}
+
+/// Whether `thread_id` is the calling thread's own id.
+fn is_calling_thread(thread_id: PthreadT) -> bool {
+    u64::try_from(current_tid()).is_ok_and(|me| me == thread_id)
+}
+
+/// How far a thread is on its way to being joined: whether it has exited,
+/// or why it cannot be joined at all -- itself (`EDEADLK`), detached
+/// (`EINVAL`), or not a thread this process tracks (`ESRCH`).
+///
+/// "Exited" is the thread's own word on its way out, its slot's
+/// `STATE_EXITED`. A thread killed before it could say so -- by a fault it
+/// did not handle -- is never seen to have exited here, though
+/// `pthread_join` would return `PTHREAD_CANCELED` for it: the kernel's join
+/// only waits (known-issues.md, D-POSIX-TRYJOIN-CANNOT-SEE-A-KILLED-THREAD).
+fn join_readiness(thread_id: PthreadT) -> Result<bool, i32> {
+    if is_calling_thread(thread_id) {
+        return Err(errno::EDEADLK);
+    }
+    let slot = find_slot(thread_id).ok_or(errno::ESRCH)?;
+    match slot.state.load(Ordering::Acquire) {
+        STATE_DETACHED => Err(errno::EINVAL),
+        STATE_EXITED => Ok(true),
+        _ => Ok(false),
+    }
+}
+
+/// Join a thread only if it has already exited (`pthread_tryjoin_np`, GNU):
+/// as [`pthread_join`] then, and `EBUSY` at once while it runs. `EDEADLK`
+/// for the calling thread, `EINVAL` for a detached one, `ESRCH` for one
+/// this process does not know.
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub extern "C" fn pthread_tryjoin_np(thread_id: PthreadT, retval: *mut *mut u8) -> i32 {
+    match join_readiness(thread_id) {
+        Ok(true) => pthread_join(thread_id, retval),
+        Ok(false) => errno::EBUSY,
+        Err(e) => e,
+    }
+}
+
+/// How long [`pthread_timedjoin_np`] sleeps between looks: the kernel has
+/// no timed join, so it polls.
+const TIMEDJOIN_POLL_NS: i64 = 1_000_000;
+
+/// Join a thread, waiting for it until `abstime` on `CLOCK_REALTIME`
+/// (`pthread_timedjoin_np`, GNU): as [`pthread_join`] once it exits, and
+/// `ETIMEDOUT` if the time comes first. A NULL `abstime` waits without end,
+/// as glibc's does; one whose nanoseconds are outside 0..1e9 is `EINVAL`,
+/// as it is to every other timed wait -- when there is a wait, that is: a
+/// thread already gone is joined whatever `abstime` says. Otherwise as
+/// [`pthread_tryjoin_np`].
+///
+/// # Safety
+///
+/// `abstime` is NULL or a readable `struct timespec`.
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub unsafe extern "C" fn pthread_timedjoin_np(
+    thread_id: PthreadT,
+    retval: *mut *mut u8,
+    abstime: *const crate::stat::Timespec,
+) -> i32 {
+    if abstime.is_null() {
+        return pthread_join(thread_id, retval);
+    }
+    // SAFETY: non-null, the caller's.
+    let deadline = unsafe { *abstime };
+    loop {
+        match join_readiness(thread_id) {
+            Ok(true) => return pthread_join(thread_id, retval),
+            Ok(false) => {}
+            Err(e) => return e,
+        }
+        if !(0..1_000_000_000).contains(&deadline.tv_nsec) {
+            return errno::EINVAL;
+        }
+        let mut now = crate::stat::Timespec::default();
+        if crate::time::clock_gettime(crate::time::CLOCK_REALTIME, &raw mut now) != 0 {
+            return errno::get_errno();
+        }
+        let left_ns = i128::from(deadline.tv_sec)
+            .saturating_sub(i128::from(now.tv_sec))
+            .saturating_mul(1_000_000_000)
+            .saturating_add(i128::from(deadline.tv_nsec))
+            .saturating_sub(i128::from(now.tv_nsec));
+        if left_ns <= 0 {
+            return errno::ETIMEDOUT;
+        }
+        let pause = crate::stat::Timespec {
+            tv_sec: 0,
+            tv_nsec: i64::try_from(left_ns.min(i128::from(TIMEDJOIN_POLL_NS)))
+                .unwrap_or(TIMEDJOIN_POLL_NS),
+        };
+        // A short or failed sleep only means an earlier look.
+        let _ = crate::time::nanosleep(&raw const pause, core::ptr::null_mut());
+    }
 }
 
 /// Detach a thread.
@@ -743,7 +1242,7 @@ pub extern "C" fn pthread_detach(thread_id: PthreadT) -> i32 {
             // Reaping only — the exit value is discarded, so pass a null
             // out-pointer rather than a scratch slot.
             let _ = syscall::syscall2(syscall::SYS_THREAD_JOIN, thread_id, 0);
-            let base = slot.stack_base.load(Ordering::Relaxed);
+            let base = slot.map_base.load(Ordering::Relaxed);
             let size = slot.map_size.load(Ordering::Relaxed);
             release_slot(slot);
             if base != 0 {
@@ -960,24 +1459,92 @@ pub extern "C" fn pthread_getcpuclockid(
     0
 }
 
+/// Threads of this process that have not ended: the initial thread, plus
+/// each one `pthread_create` started, less each one that reached
+/// `pthread_exit` -- glibc's `__nptl_nthreads`.
+///
+/// The thread that takes it to zero ends the process as `exit(0)` would, as
+/// POSIX requires of `pthread_exit` ("as if the implementation called
+/// exit() with a zero argument at thread termination time"): `atexit`
+/// handlers and static destructors run, and streams are flushed.  Until
+/// 2026-09-26 the kernel ended the process when its last thread ended, and
+/// none of that happened -- a program whose `main` called `pthread_exit` lost
+/// its threads' buffered output.
+///
+/// Every thread this libc starts goes through [`launch`] (`pthread_create`'s),
+/// which counts it *before* `SYS_THREAD_CREATE`, so a new thread that ends at
+/// once can never take the count below the threads still running.  `fork`'s
+/// child has one thread and says so ([`reset_live_threads_after_fork`]).
+static LIVE_THREADS: AtomicUsize = AtomicUsize::new(1);
+
+/// Count one more thread, about to be started.
+fn live_threads_add(count: &AtomicUsize) {
+    count.fetch_add(1, Ordering::AcqRel);
+}
+
+/// Count one thread fewer: `true` when it was the last.
+///
+/// Saturating, so a count that is somehow already zero stays there rather
+/// than wrapping to "many threads left"; the caller then treats the thread as
+/// the last, which is what a zero count means.
+fn live_threads_remove(count: &AtomicUsize) -> bool {
+    let before = count
+        .fetch_update(Ordering::AcqRel, Ordering::Acquire, |n| {
+            Some(n.saturating_sub(1))
+        })
+        .unwrap_or_else(|n| n);
+    before <= 1
+}
+
+/// `fork`'s child: the one thread that called `fork`.
+pub(crate) fn reset_live_threads_after_fork() {
+    LIVE_THREADS.store(1, Ordering::Release);
+}
+
 /// Terminate the calling thread.
 ///
-/// Runs any registered thread-specific-data destructors for the calling
-/// thread, then issues `SYS_THREAD_EXIT` with the specified return value.
-/// If this is the last thread in the process, the process exits.
+/// Runs the calling thread's `thread_local` destructors, then its
+/// thread-specific-data destructors -- glibc's order -- then issues
+/// `SYS_THREAD_EXIT` with the specified return value.  If this is the last
+/// thread in the process, the process ends as `exit(0)` would
+/// ([`LIVE_THREADS`]).
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn pthread_exit(retval: *mut u8) -> ! {
+    // The cleanup handlers still pushed, innermost first, before anything
+    // else: POSIX runs them, then the thread-specific-data destructors.
+    run_cleanup_handlers();
+
+    // C++ `thread_local` destructors, as glibc's `start_thread` calls
+    // `__call_tls_dtors` before it deallocates the TSD: a destructor may
+    // still use a key.
+    crate::exit_list::run_thread_dtors();
+
     // POSIX: run key destructors and release this thread's TSD storage
     // before the kernel reclaims the thread; also free its name slot.
     let self_tid = pthread_self();
-    tsd_thread_cleanup(self_tid);
+    tsd_thread_cleanup();
+    crate::netdb::thread_cleanup();
     thread_name_release(self_tid);
+
+    // The last thread ends the process, and as `exit(0)`: see
+    // `LIVE_THREADS`.  Before anything below gives this thread's stack away.
+    if live_threads_remove(&LIVE_THREADS) {
+        crate::crt::exit(0);
+    }
 
     // Decide how this thread's stack is reclaimed.  The `compare_exchange`
     // arbitrates against a concurrent `pthread_detach`: exactly one party
     // ends up owning the free.
     let mut self_unmap: Option<(usize, usize)> = None;
-    if let Some(slot) = find_slot(self_tid) {
+    if let Some(slot) = own_slot() {
+        // Our creator publishes our id just after `SYS_THREAD_CREATE`
+        // returns to it.  A thread that gets here first waits for that: it
+        // must not release a slot its creator is about to write.  The wait
+        // is a few instructions of the creator's, so it is almost never
+        // entered at all.
+        while slot.task_id.load(Ordering::Acquire) == SLOT_RESERVED {
+            sched_yield();
+        }
         match slot.state.compare_exchange(
             STATE_JOINABLE,
             STATE_EXITED,
@@ -992,7 +1559,7 @@ pub extern "C" fn pthread_exit(retval: *mut u8) -> ! {
             // Release the slot *before* unmapping (after the unmap we can
             // no longer safely touch memory).
             Err(STATE_DETACHED) => {
-                let base = slot.stack_base.load(Ordering::Relaxed);
+                let base = slot.map_base.load(Ordering::Relaxed);
                 let size = slot.map_size.load(Ordering::Relaxed);
                 release_slot(slot);
                 if base != 0 {
@@ -1037,9 +1604,6 @@ pub extern "C" fn pthread_exit(retval: *mut u8) -> ! {
 // Mutex operations — thread-safe via atomics
 // ---------------------------------------------------------------------------
 
-/// Maximum spin iterations before yielding on a contended mutex.
-const MUTEX_SPIN_LIMIT: u32 = 100;
-
 /// Initialize a mutex.
 ///
 /// Reads the mutex type from `attr` (if non-null) to determine whether
@@ -1049,17 +1613,23 @@ pub unsafe extern "C" fn pthread_mutex_init(
     mutex: *mut PthreadMutexT,
     attr: *const PthreadMutexattrT,
 ) -> i32 {
+    // glibc's order (nptl/pthread_mutex_init.c): the attribute's sanity
+    // checks, then the mutex.  A protocol other than none, and robustness,
+    // are ENOTSUP here -- no priority-inheriting futexes, no priority
+    // ceilings, no robust list -- as glibc answers where it lacks them.
+    let word: u32 = if attr.is_null() {
+        0
+    } else {
+        // SAFETY: attr verified non-null; `[u8; 4]`, so read unaligned.
+        unsafe { core::ptr::read_unaligned(attr.cast::<u32>()) }
+    };
+    if word & (MUTEXATTR_PROTOCOL_MASK | MUTEXATTR_FLAG_ROBUST) != 0 {
+        return errno::ENOTSUP;
+    }
     if mutex.is_null() {
         return errno::EFAULT;
     }
-    // Read kind from attr (default: PTHREAD_MUTEX_NORMAL = 0).
-    let kind: i32 = if attr.is_null() {
-        PTHREAD_MUTEX_NORMAL
-    } else {
-        // SAFETY: attr verified non-null.  PthreadMutexattrT is [u8; 8]
-        // with first 4 bytes holding the kind (set by mutexattr_settype).
-        unsafe { core::ptr::read_unaligned(attr.cast::<i32>()) }
-    };
+    let kind = (word & !MUTEXATTR_FLAG_BITS) as i32;
     // SAFETY: caller guarantees mutex is valid.
     unsafe {
         (*mutex).locked.store(0, Ordering::Release);
@@ -1070,16 +1640,64 @@ pub unsafe extern "C" fn pthread_mutex_init(
     0
 }
 
+/// The calling thread's kernel task id, from its per-thread block: fetched
+/// by syscall the first time, a load after.  glibc keeps it in `struct
+/// pthread` for the same reason -- every lock records its owner, and until
+/// 2026-09-26 a `SYS_TASK_ID` syscall was the uncontended lock's whole cost.
+/// `fork`'s child resets it (see `process::fork`), its id being new.
+pub(crate) fn current_tid() -> i32 {
+    let pt = crate::perthread::current();
+    // SAFETY: `current()` is the calling thread's block (or, in a program
+    // with no thread pointer, the single-threaded fallback); only this thread
+    // touches it.
+    let cached = unsafe { (*pt).tid };
+    if cached != 0 {
+        return cached;
+    }
+    let tid = raw_task_id();
+    // SAFETY: as above.
+    unsafe { (*pt).tid = tid };
+    tid
+}
+
+/// The task id from the kernel (on the host, the test thread's stand-in).
+fn raw_task_id() -> i32 {
+    #[cfg(target_os = "none")]
+    {
+        syscall::syscall0(syscall::SYS_TASK_ID) as i32
+    }
+    #[cfg(not(target_os = "none"))]
+    {
+        crate::process::gettid()
+    }
+}
+
+/// A recursive mutex's owner locking it again: one more level, or `EAGAIN`
+/// once the count would overflow, as glibc answers.
+fn recursive_relock(m: &PthreadMutexT) -> i32 {
+    let c = m.count.load(Ordering::Relaxed);
+    if c == i32::MAX {
+        return errno::EAGAIN;
+    }
+    m.count.store(c.wrapping_add(1), Ordering::Relaxed);
+    0
+}
+
+/// Whether the calling thread (`self_id`) holds `m`.
+fn held_by(m: &PthreadMutexT, self_id: i32) -> bool {
+    m.locked.load(Ordering::Relaxed) != 0 && m.owner.load(Ordering::Relaxed) == self_id
+}
+
 /// Lock a mutex.
 ///
-/// Uses atomic CAS for thread safety.  On contention, spins briefly
-/// then yields via `SYS_SLEEP(1ms)` to avoid wasting CPU time.
+/// The lock word is a futex ([`crate::lowlevellock`]): uncontended, this is
+/// one compare-and-swap and no syscall; contended, the thread sleeps in the
+/// kernel until the holder's unlock wakes it.  Until 2026-09-26 a contended
+/// lock spun, then slept in 1 ms steps and polled.
 ///
-/// Behavior depends on mutex type:
-/// - **Normal**: blocks until lock is acquired (deadlock if already
-///   held by calling thread).
+/// - **Normal**: relocking by the owner deadlocks, as POSIX specifies.
 /// - **Recursive**: if already held by calling thread, increments
-///   recursion count and returns 0.
+///   recursion count and returns 0 (`EAGAIN` at the count's limit).
 /// - **Error-checking**: if already held by calling thread, returns
 ///   EDEADLK without blocking.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
@@ -1087,60 +1705,27 @@ pub unsafe extern "C" fn pthread_mutex_lock(mutex: *mut PthreadMutexT) -> i32 {
     if mutex.is_null() {
         return errno::EFAULT;
     }
-
     // SAFETY: caller guarantees mutex is valid.
     let m = unsafe { &*mutex };
     let kind = m.kind.load(Ordering::Relaxed);
-    let self_id = syscall::syscall0(syscall::SYS_TASK_ID) as i32;
-
-    // Recursive / error-checking: check if we already own the lock.
-    if (kind == PTHREAD_MUTEX_RECURSIVE || kind == PTHREAD_MUTEX_ERRORCHECK)
-        && m.locked.load(Ordering::Acquire) != 0
-        && m.owner.load(Ordering::Relaxed) == self_id
-    {
+    let self_id = current_tid();
+    if kind != PTHREAD_MUTEX_NORMAL && held_by(m, self_id) {
         if kind == PTHREAD_MUTEX_RECURSIVE {
-            // Increment recursion count.
-            let c = m.count.load(Ordering::Relaxed);
-            m.count.store(c.wrapping_add(1), Ordering::Relaxed);
-            return 0;
+            return recursive_relock(m);
         }
-        // Error-checking: double-lock by same thread.
         return errno::EDEADLK;
     }
-
-    // Fast path: uncontended acquisition.
-    if m.locked
-        .compare_exchange_weak(0, 1, Ordering::Acquire, Ordering::Relaxed)
-        .is_ok()
-    {
-        m.owner.store(self_id, Ordering::Relaxed);
-        m.count.store(1, Ordering::Relaxed);
-        return 0;
-    }
-
-    // Slow path: spin briefly, then yield.
-    loop {
-        for _ in 0..MUTEX_SPIN_LIMIT {
-            if m.locked
-                .compare_exchange_weak(0, 1, Ordering::Acquire, Ordering::Relaxed)
-                .is_ok()
-            {
-                m.owner.store(self_id, Ordering::Relaxed);
-                m.count.store(1, Ordering::Relaxed);
-                return 0;
-            }
-            core::hint::spin_loop();
-        }
-        // Yield to other threads for ~1 ms.
-        let _ = syscall::syscall1(syscall::SYS_SLEEP, 1_000_000);
-    }
+    crate::lowlevellock::lll_lock(&m.locked);
+    m.owner.store(self_id, Ordering::Relaxed);
+    m.count.store(1, Ordering::Relaxed);
+    0
 }
 
 /// Try to lock a mutex without blocking.
 ///
-/// Returns 0 on success, `EBUSY` if the mutex is already locked
-/// (by another thread).  For recursive mutexes, succeeds if the
-/// calling thread already holds the lock.
+/// Returns 0 on success, `EBUSY` if the mutex is already locked (by
+/// another thread, or -- for an error-checking mutex -- by this one).  A
+/// recursive mutex the calling thread holds gains a level.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub unsafe extern "C" fn pthread_mutex_trylock(mutex: *mut PthreadMutexT) -> i32 {
     if mutex.is_null() {
@@ -1149,22 +1734,11 @@ pub unsafe extern "C" fn pthread_mutex_trylock(mutex: *mut PthreadMutexT) -> i32
     // SAFETY: caller guarantees mutex is valid.
     let m = unsafe { &*mutex };
     let kind = m.kind.load(Ordering::Relaxed);
-    let self_id = syscall::syscall0(syscall::SYS_TASK_ID) as i32;
-
-    // Recursive: if we already own it, increment count.
-    if kind == PTHREAD_MUTEX_RECURSIVE
-        && m.locked.load(Ordering::Acquire) != 0
-        && m.owner.load(Ordering::Relaxed) == self_id
-    {
-        let c = m.count.load(Ordering::Relaxed);
-        m.count.store(c.wrapping_add(1), Ordering::Relaxed);
-        return 0;
+    let self_id = current_tid();
+    if kind == PTHREAD_MUTEX_RECURSIVE && held_by(m, self_id) {
+        return recursive_relock(m);
     }
-
-    if m.locked
-        .compare_exchange(0, 1, Ordering::Acquire, Ordering::Relaxed)
-        .is_ok()
-    {
+    if crate::lowlevellock::lll_trylock(&m.locked) {
         m.owner.store(self_id, Ordering::Relaxed);
         m.count.store(1, Ordering::Relaxed);
         0
@@ -1178,6 +1752,7 @@ pub unsafe extern "C" fn pthread_mutex_trylock(mutex: *mut PthreadMutexT) -> i32
 /// For recursive mutexes, decrements the recursion count; the mutex
 /// is only released when the count reaches zero.  For error-checking
 /// mutexes, returns EPERM if the calling thread does not own the lock.
+/// Releasing a contended lock wakes one waiter.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub unsafe extern "C" fn pthread_mutex_unlock(mutex: *mut PthreadMutexT) -> i32 {
     if mutex.is_null() {
@@ -1188,8 +1763,7 @@ pub unsafe extern "C" fn pthread_mutex_unlock(mutex: *mut PthreadMutexT) -> i32 
     let kind = m.kind.load(Ordering::Relaxed);
 
     if kind == PTHREAD_MUTEX_RECURSIVE || kind == PTHREAD_MUTEX_ERRORCHECK {
-        let self_id = syscall::syscall0(syscall::SYS_TASK_ID) as i32;
-        if m.owner.load(Ordering::Relaxed) != self_id {
+        if !held_by(m, current_tid()) {
             // POSIX: EPERM for error-checking; UB for recursive.
             // We return EPERM for both to prevent silent corruption.
             return errno::EPERM;
@@ -1204,12 +1778,9 @@ pub unsafe extern "C" fn pthread_mutex_unlock(mutex: *mut PthreadMutexT) -> i32 
         }
     }
 
-    // Release the lock.
-    unsafe {
-        (*mutex).owner.store(0, Ordering::Relaxed);
-        (*mutex).count.store(0, Ordering::Relaxed);
-        (*mutex).locked.store(0, Ordering::Release);
-    }
+    m.owner.store(0, Ordering::Relaxed);
+    m.count.store(0, Ordering::Relaxed);
+    crate::lowlevellock::lll_unlock(&m.locked);
     0
 }
 
@@ -1238,8 +1809,17 @@ pub unsafe extern "C" fn pthread_mutex_destroy(mutex: *mut PthreadMutexT) -> i32
 /// - 1: initialization complete
 ///
 /// Threads that arrive while init is running spin-wait until complete.
+///
+/// A NULL `init` is called by glibc only when it is the one to run it, and
+/// faults there; while another thread runs its own it waits, and once that is
+/// done there is nothing to call.  So a NULL `init` returns 0 in those two
+/// cases and is `EFAULT` in the first, leaving the once as it was
+/// (design-decisions.md §1115).
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
-pub unsafe extern "C" fn pthread_once(once: *mut PthreadOnceT, init: extern "C" fn()) -> i32 {
+pub unsafe extern "C" fn pthread_once(
+    once: *mut PthreadOnceT,
+    init: Option<extern "C" fn()>,
+) -> i32 {
     if once.is_null() {
         return errno::EFAULT;
     }
@@ -1252,6 +1832,16 @@ pub unsafe extern "C" fn pthread_once(once: *mut PthreadOnceT, init: extern "C" 
         return 0;
     }
 
+    let Some(init) = init else {
+        loop {
+            match done.load(Ordering::Acquire) {
+                1 => return 0,
+                0 => return errno::EFAULT,
+                d => crate::lowlevellock::futex_wait(done, d),
+            }
+        }
+    };
+
     // Try to claim the initialization.
     if done
         .compare_exchange(0, -1, Ordering::AcqRel, Ordering::Acquire)
@@ -1259,10 +1849,16 @@ pub unsafe extern "C" fn pthread_once(once: *mut PthreadOnceT, init: extern "C" 
     {
         init();
         done.store(1, Ordering::Release);
+        crate::lowlevellock::futex_wake_all(done);
     } else {
-        // Another thread is initializing — spin until done.
-        while done.load(Ordering::Acquire) != 1 {
-            core::hint::spin_loop();
+        // Another thread is initializing: sleep until it is done.  Until
+        // 2026-09-26 this spun, for however long `init` took.
+        loop {
+            let d = done.load(Ordering::Acquire);
+            if d == 1 {
+                break;
+            }
+            crate::lowlevellock::futex_wait(done, d);
         }
     }
 
@@ -1272,167 +1868,146 @@ pub unsafe extern "C" fn pthread_once(once: *mut PthreadOnceT, init: extern "C" 
 // ---------------------------------------------------------------------------
 // Thread-specific data
 // ---------------------------------------------------------------------------
+//
+// glibc's design (nptl/pthread_key_create.c and its siblings): a process-wide
+// table of keys, each with a sequence number that is odd while the key is in
+// use, and a destructor; and each thread's values in its own storage, every
+// value stamped with its key's number when it was set.  A key deleted and
+// created again has a new number, so a value a thread set under the old key
+// reads as NULL -- nobody has to visit every thread's storage.
+// `pthread_getspecific` is a few loads and a compare, with no lock and no
+// syscall.
+//
+// Until 2026-09-26 the values lived in one table of 64 rows keyed by task
+// id, under a spin lock, with a `SYS_TASK_ID` syscall on every access; a 65th
+// thread holding values got ENOMEM, and a deleted key's index was never
+// reused (known-issues.md → TD-D-TSD-IS-A-GLOBAL-TABLE-KEYED-BY-TASK-ID).
 
 /// Key type for thread-specific data.
 pub type PthreadKeyT = u32;
 
-/// Maximum number of TSD keys.
-const MAX_KEYS: usize = 64;
+/// Values per block of a thread's storage.  A thread's blocks are allocated
+/// as it first sets a key in each.
+const TSD_BLOCK_KEYS: usize = 32;
 
-/// Maximum number of threads that can hold TSD storage simultaneously.
-/// Matches [`MAX_THREADS`] — every tracked thread can have its own row.
-const MAX_TSD_THREADS: usize = MAX_THREADS;
+/// Keys a process may hold at once: musl's `PTHREAD_KEYS_MAX`, which is what
+/// the C headers our programs compile against advertise, and what
+/// `sysconf(_SC_THREAD_KEYS_MAX)` reports.
+const KEYS_MAX: usize = crate::perthread::TSD_BLOCKS * TSD_BLOCK_KEYS;
+
+const _: () = assert!(KEYS_MAX == 128);
 
 /// POSIX `_POSIX_THREAD_DESTRUCTOR_ITERATIONS`: the number of times the
 /// destructor sweep is repeated at thread exit so that destructors which
 /// re-set a key (re-arming TSD) eventually drain.
 const PTHREAD_DESTRUCTOR_ITERATIONS: usize = 4;
 
-/// One thread's thread-specific-data values.
-///
-/// `task_id == 0` marks the slot free.  Real userspace task IDs are
-/// always non-zero (0 is the kernel/idle task), and the host-test build's
-/// `SYS_TASK_ID` stub returns a fixed non-zero sentinel, so 0 is a safe
-/// "empty" marker on both targets.
+/// A key.  `seq` is odd while the key is in use and even while it is free;
+/// every create and every delete advances it.
+struct TsdKey {
+    seq: AtomicU64,
+    /// The destructor as an address, 0 for none.
+    destructor: AtomicUsize,
+}
+
+impl TsdKey {
+    /// A free key.  A `const fn`, not an associated `const`: every use of a
+    /// `const` holding atomics is a fresh copy, which clippy rightly refuses.
+    const fn free() -> Self {
+        Self {
+            seq: AtomicU64::new(0),
+            destructor: AtomicUsize::new(0),
+        }
+    }
+}
+
+/// One thread's value for one key, stamped with the key's `seq` at the time
+/// it was set.  All-zero is "no value".
+#[repr(C)]
 #[derive(Clone, Copy)]
-struct TsdSlot {
-    task_id: u64,
-    values: [*mut u8; MAX_KEYS],
+struct TsdEntry {
+    seq: u64,
+    value: *mut u8,
 }
 
-impl TsdSlot {
-    const EMPTY: Self = Self {
-        task_id: 0,
-        values: [core::ptr::null_mut(); MAX_KEYS],
-    };
+/// The process's keys.
+static TSD_KEYS: [TsdKey; KEYS_MAX] = [const { TsdKey::free() }; KEYS_MAX];
+
+const fn key_in_use(seq: u64) -> bool {
+    seq & 1 == 1
 }
 
-/// Per-thread TSD value table, keyed by kernel task ID.
-static mut TSD_TABLE: [TsdSlot; MAX_TSD_THREADS] = [TsdSlot::EMPTY; MAX_TSD_THREADS];
-
-/// Per-key destructors (run at thread exit on non-null values).
-static mut TSD_DESTRUCTORS: [Option<extern "C" fn(*mut u8)>; MAX_KEYS] = [None; MAX_KEYS];
-
-/// Next key index to allocate.
-static mut TSD_NEXT_KEY: u32 = 0;
-
-/// Guards every TSD static (`TSD_TABLE`, `TSD_DESTRUCTORS`, `TSD_NEXT_KEY`).
-/// TSD is touched concurrently by all running threads, so a real lock is
-/// required — the "single-creator convention" used by the thread table
-/// does not hold here.
-static TSD_LOCK: AtomicBool = AtomicBool::new(false);
-
-/// Acquire [`TSD_LOCK`] (spin; the critical sections are tiny — a handful
-/// of array writes — and never span a destructor call or a syscall).
-#[inline]
-fn tsd_lock() {
-    while TSD_LOCK
-        .compare_exchange_weak(false, true, Ordering::Acquire, Ordering::Relaxed)
-        .is_err()
-    {
-        core::hint::spin_loop();
-    }
-}
-
-/// Release [`TSD_LOCK`].
-#[inline]
-fn tsd_unlock() {
-    TSD_LOCK.store(false, Ordering::Release);
-}
-
-/// Find the table index for `task_id`, optionally allocating a free slot.
-///
-/// Caller must hold [`TSD_LOCK`].  Returns `None` if `task_id` is the
-/// reserved 0 marker, if the thread has no slot and `create` is false, or
-/// if `create` is true but the table is full.
-fn tsd_slot_index(task_id: u64, create: bool) -> Option<usize> {
-    if task_id == 0 {
-        return None;
-    }
-    // SAFETY: caller holds TSD_LOCK, so no concurrent mutation.
-    let table = unsafe { &mut *core::ptr::addr_of_mut!(TSD_TABLE) };
-    for (i, slot) in table.iter().enumerate() {
-        if slot.task_id == task_id {
-            return Some(i);
+/// The calling thread's entry for `key` (which is `< KEYS_MAX`), allocating
+/// its block if `create`; `None` if there is no block and `create` is false,
+/// or the block cannot be allocated.
+fn tsd_entry(key: usize, create: bool) -> Option<*mut TsdEntry> {
+    let pt = crate::perthread::current();
+    // SAFETY: `current()` is the calling thread's block, which only this
+    // thread touches.
+    let slot = unsafe { (*pt).tsd.get_mut(key / TSD_BLOCK_KEYS)? };
+    if slot.is_null() {
+        if !create {
+            return None;
         }
-    }
-    if !create {
-        return None;
-    }
-    for (i, slot) in table.iter_mut().enumerate() {
-        if slot.task_id == 0 {
-            *slot = TsdSlot::EMPTY;
-            slot.task_id = task_id;
-            return Some(i);
+        // Zeroed: every entry "no value".
+        let block = crate::malloc::calloc(TSD_BLOCK_KEYS, size_of::<TsdEntry>());
+        if block.is_null() {
+            return None;
         }
+        *slot = block;
     }
-    None
+    // SAFETY: a block holds `TSD_BLOCK_KEYS` entries.
+    Some(unsafe { slot.cast::<TsdEntry>().add(key % TSD_BLOCK_KEYS) })
 }
 
-/// Run TSD key destructors for `task_id` and free its slot.
+/// Run the calling thread's key destructors and free its storage: glibc's
+/// `__nptl_deallocate_tsd`.
 ///
-/// Called from [`pthread_exit`] (and therefore from the trampoline's
-/// normal-return path).  Destructors are invoked **without** holding
-/// [`TSD_LOCK`] so a destructor may legally call `pthread_setspecific`
-/// again; the sweep is repeated up to [`PTHREAD_DESTRUCTOR_ITERATIONS`]
-/// times to drain values that destructors re-arm.
-fn tsd_thread_cleanup(task_id: u64) {
-    if task_id == 0 {
-        return;
-    }
+/// Called from [`pthread_exit`] (and so from a start routine's return).  A
+/// value is cleared before its destructor runs, and a sweep is repeated --
+/// up to [`PTHREAD_DESTRUCTOR_ITERATIONS`] times -- only while destructors
+/// set values again.  A value set under a key deleted since is dropped
+/// without its destructor, as in glibc.
+fn tsd_thread_cleanup() {
+    let pt = crate::perthread::current();
     for _ in 0..PTHREAD_DESTRUCTOR_ITERATIONS {
-        let mut ran_any = false;
-        for key in 0..MAX_KEYS {
-            // Read-and-clear the value and read its destructor under the
-            // lock; run the destructor outside the lock.
-            tsd_lock();
-            let pair = {
-                // SAFETY: lock held.
-                let dtor = unsafe { &*core::ptr::addr_of!(TSD_DESTRUCTORS) }
-                    .get(key)
-                    .copied()
-                    .flatten();
-                match tsd_slot_index(task_id, false) {
-                    Some(idx) => {
-                        // SAFETY: lock held; idx in range.
-                        let table = unsafe { &mut *core::ptr::addr_of_mut!(TSD_TABLE) };
-                        let val = table
-                            .get_mut(idx)
-                            .and_then(|s| s.values.get_mut(key))
-                            .map_or(core::ptr::null_mut(), |v| {
-                                let old = *v;
-                                *v = core::ptr::null_mut();
-                                old
-                            });
-                        (val, dtor)
-                    }
-                    None => (core::ptr::null_mut(), dtor),
-                }
-            };
-            tsd_unlock();
-
-            if let (false, Some(dtor)) = (pair.0.is_null(), pair.1) {
-                dtor(pair.0);
-                ran_any = true;
-            }
-        }
-        if !ran_any {
+        // SAFETY: the calling thread's block.
+        let used = unsafe { core::mem::replace(&mut (*pt).tsd_used, false) };
+        if !used {
             break;
         }
-    }
-    // Release the slot entirely.
-    tsd_lock();
-    if let Some(idx) = tsd_slot_index(task_id, false) {
-        // SAFETY: lock held; idx in range.
-        let table = unsafe { &mut *core::ptr::addr_of_mut!(TSD_TABLE) };
-        if let Some(slot) = table.get_mut(idx) {
-            *slot = TsdSlot::EMPTY;
+        for (key, k) in TSD_KEYS.iter().enumerate() {
+            let Some(e) = tsd_entry(key, false) else {
+                continue;
+            };
+            // SAFETY: `e` is this thread's entry.
+            let (value, seq) = unsafe { ((*e).value, (*e).seq) };
+            if value.is_null() {
+                continue;
+            }
+            // SAFETY: as above.
+            unsafe { (*e).value = core::ptr::null_mut() };
+            let d = k.destructor.load(Ordering::Acquire);
+            if seq == k.seq.load(Ordering::Acquire) && d != 0 {
+                // SAFETY: a non-zero `destructor` was stored from a function
+                // pointer of exactly this type by `pthread_key_create`.
+                let f = unsafe { core::mem::transmute::<usize, extern "C" fn(*mut u8)>(d) };
+                f(value);
+            }
         }
     }
-    tsd_unlock();
+    // SAFETY: the calling thread's block; each slot is null or its `calloc`.
+    unsafe {
+        for slot in &mut (*pt).tsd {
+            crate::malloc::free(*slot);
+            *slot = core::ptr::null_mut();
+        }
+        (*pt).tsd_used = false;
+    }
 }
 
-/// Create a thread-specific data key.
+/// Create a thread-specific data key: the first free key, glibc's search.
+/// `EAGAIN` when all [`KEYS_MAX`] are in use.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub unsafe extern "C" fn pthread_key_create(
     key: *mut PthreadKeyT,
@@ -1441,125 +2016,122 @@ pub unsafe extern "C" fn pthread_key_create(
     if key.is_null() {
         return errno::EFAULT;
     }
-    tsd_lock();
-    // SAFETY: TSD_LOCK held.
-    let next = unsafe { core::ptr::addr_of!(TSD_NEXT_KEY).read() };
-    if next as usize >= MAX_KEYS {
-        tsd_unlock();
-        return errno::EAGAIN;
-    }
-    // SAFETY: TSD_LOCK held; next < MAX_KEYS.
-    unsafe {
-        if let Some(slot) = (&mut *core::ptr::addr_of_mut!(TSD_DESTRUCTORS)).get_mut(next as usize)
-        {
-            *slot = destructor;
+    for (i, k) in TSD_KEYS.iter().enumerate() {
+        let seq = k.seq.load(Ordering::Relaxed);
+        // Free, and not about to wrap (glibc's `KEY_USABLE`).
+        if key_in_use(seq) || seq.checked_add(2).is_none() {
+            continue;
         }
-        core::ptr::addr_of_mut!(TSD_NEXT_KEY).write(next.wrapping_add(1));
+        if k.seq
+            .compare_exchange(seq, seq | 1, Ordering::AcqRel, Ordering::Relaxed)
+            .is_ok()
+        {
+            k.destructor
+                .store(destructor.map_or(0, |f| f as usize), Ordering::Release);
+            // SAFETY: non-null; the caller's contract.  `i < KEYS_MAX`, so it
+            // fits.
+            unsafe { *key = i as PthreadKeyT };
+            return 0;
+        }
     }
-    tsd_unlock();
-    // SAFETY: caller guarantees `key` points to a valid PthreadKeyT.
-    unsafe {
-        *key = next;
-    }
-    0
+    errno::EAGAIN
 }
 
-/// Get thread-specific data for the calling thread.
+/// Get the calling thread's value for `key`: NULL for a key out of range, a
+/// key it never set, or a value set under a key since deleted.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub unsafe extern "C" fn pthread_getspecific(key: PthreadKeyT) -> *mut u8 {
-    let task_id = pthread_self();
-    tsd_lock();
-    let val = match tsd_slot_index(task_id, false) {
-        // SAFETY: TSD_LOCK held; idx in range.
-        Some(idx) => unsafe { &*core::ptr::addr_of!(TSD_TABLE) }
-            .get(idx)
-            .and_then(|s| s.values.get(key as usize))
-            .copied()
-            .unwrap_or(core::ptr::null_mut()),
-        None => core::ptr::null_mut(),
+    let Some(k) = TSD_KEYS.get(key as usize) else {
+        return core::ptr::null_mut();
     };
-    tsd_unlock();
-    val
+    let Some(e) = tsd_entry(key as usize, false) else {
+        return core::ptr::null_mut();
+    };
+    // SAFETY: `e` is the calling thread's entry.
+    unsafe {
+        let value = (*e).value;
+        if !value.is_null() && (*e).seq != k.seq.load(Ordering::Acquire) {
+            (*e).value = core::ptr::null_mut();
+            return core::ptr::null_mut();
+        }
+        value
+    }
 }
 
-/// Set thread-specific data for the calling thread.
+/// Set the calling thread's value for `key`.  `EINVAL` for a key out of range
+/// or not in use; `ENOMEM` if the thread's storage cannot grow.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub unsafe extern "C" fn pthread_setspecific(key: PthreadKeyT, value: *mut u8) -> i32 {
-    if key as usize >= MAX_KEYS {
+    let Some(k) = TSD_KEYS.get(key as usize) else {
         return errno::EINVAL;
-    }
-    let task_id = pthread_self();
-    tsd_lock();
-    // Reject keys that were never created.
-    // SAFETY: TSD_LOCK held.
-    let next = unsafe { core::ptr::addr_of!(TSD_NEXT_KEY).read() };
-    if key >= next {
-        tsd_unlock();
-        return errno::EINVAL;
-    }
-    let rc = match tsd_slot_index(task_id, true) {
-        Some(idx) => {
-            // SAFETY: TSD_LOCK held; idx in range.
-            let table = unsafe { &mut *core::ptr::addr_of_mut!(TSD_TABLE) };
-            if let Some(slot) = table
-                .get_mut(idx)
-                .and_then(|s| s.values.get_mut(key as usize))
-            {
-                *slot = value;
-                0
-            } else {
-                errno::EINVAL
-            }
-        }
-        // Table full (more concurrent TSD-using threads than slots).
-        None => errno::ENOMEM,
     };
-    tsd_unlock();
-    rc
+    let seq = k.seq.load(Ordering::Acquire);
+    if !key_in_use(seq) {
+        return errno::EINVAL;
+    }
+    let Some(e) = tsd_entry(key as usize, true) else {
+        return errno::ENOMEM;
+    };
+    // SAFETY: `e` and the per-thread block are the calling thread's.
+    unsafe {
+        *e = TsdEntry { seq, value };
+        (*crate::perthread::current()).tsd_used = true;
+    }
+    0
 }
 
 /// Delete a thread-specific data key.
 ///
-/// Clears the key's destructor so it won't run on subsequent thread
-/// exits.  Existing per-thread values for the key are left in place
-/// (POSIX leaves their fate unspecified) but become inert without a
-/// destructor; the key index itself is not reclaimed.
+/// The key's number advances, so every thread's value for it reads as NULL
+/// from now on and its destructor never runs for them -- POSIX leaves both to
+/// the application.  A key not in use is `EINVAL`, as in glibc; until
+/// 2026-09-26 any in-range key answered 0, and the index was never reused.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn pthread_key_delete(key: PthreadKeyT) -> i32 {
-    if key as usize >= MAX_KEYS {
+    let Some(k) = TSD_KEYS.get(key as usize) else {
         return errno::EINVAL;
+    };
+    let seq = k.seq.load(Ordering::Relaxed);
+    if key_in_use(seq)
+        && k.seq
+            .compare_exchange(
+                seq,
+                seq.wrapping_add(1),
+                Ordering::AcqRel,
+                Ordering::Relaxed,
+            )
+            .is_ok()
+    {
+        0
+    } else {
+        errno::EINVAL
     }
-    tsd_lock();
-    // SAFETY: TSD_LOCK held; key < MAX_KEYS.  Clearing the destructor of a
-    // never-allocated in-range key is harmless (it was already None), so
-    // we don't gate on TSD_NEXT_KEY — that keeps the result independent of
-    // how many keys happen to have been created.
-    unsafe {
-        if let Some(slot) = (&mut *core::ptr::addr_of_mut!(TSD_DESTRUCTORS)).get_mut(key as usize) {
-            *slot = None;
-        }
-    }
-    tsd_unlock();
-    0
 }
 
 // ---------------------------------------------------------------------------
 // Condition variables
 // ---------------------------------------------------------------------------
 
-/// Initialize a condition variable.
+/// Initialize a condition variable, with the clock its attribute names
+/// (`CLOCK_REALTIME` without one).
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
-pub extern "C" fn pthread_cond_init(
-    cond: *mut PthreadCondT,
-    _attr: *const PthreadCondattrT,
-) -> i32 {
+pub extern "C" fn pthread_cond_init(cond: *mut PthreadCondT, attr: *const PthreadCondattrT) -> i32 {
     if cond.is_null() {
         return errno::EFAULT;
     }
+    let clock = if attr.is_null() {
+        crate::time::CLOCK_REALTIME
+    } else {
+        // SAFETY: non-null; `[u8; 4]`, so read unaligned.  The clock sits
+        // above the pshared bit (see `pthread_condattr_setclock`).
+        (unsafe { core::ptr::read_unaligned(attr.cast::<i32>()) } >> 1) & 1
+    };
     // SAFETY: cond is non-null.
     unsafe {
         let c = &mut *cond;
         c.generation = AtomicI32::new(0);
+        c.clock = clock;
+        c.waiters = AtomicI32::new(0);
     }
     0
 }
@@ -1572,103 +2144,128 @@ pub extern "C" fn pthread_cond_destroy(_cond: *mut PthreadCondT) -> i32 {
 
 /// Wait on a condition variable.
 ///
-/// Atomically releases `mutex`, waits for a signal/broadcast on `cond`,
-/// then re-acquires `mutex`.  Uses a spin-yield loop watching the
-/// generation counter — not ideal but correct.
+/// Atomically releases `mutex`, sleeps on the condition variable's futex
+/// until a signal or broadcast advances it, then re-acquires `mutex`.
+/// Until 2026-09-26 it slept in 1 ms steps and polled.  A `mutex` the caller
+/// cannot unlock is its unlock's error, returned before any wait, as glibc
+/// returns it.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn pthread_cond_wait(cond: *mut PthreadCondT, mutex: *mut PthreadMutexT) -> i32 {
     if cond.is_null() || mutex.is_null() {
         return errno::EFAULT;
     }
-
-    // SAFETY: Both pointers verified non-null.
-    let c = unsafe { &*cond };
-    let current_gen = c.generation.load(Ordering::Acquire);
-
-    // Release the mutex while waiting.
-    // SAFETY: mutex verified non-null above.
-    unsafe {
-        pthread_mutex_unlock(mutex);
-    }
-
-    // Spin-yield until the generation changes (signal/broadcast happened).
-    while c.generation.load(Ordering::Acquire) == current_gen {
-        core::hint::spin_loop();
-        // Yield the CPU to avoid burning cycles.
-        let _ = syscall::syscall1(syscall::SYS_SLEEP, 1_000_000); // 1ms yield.
-    }
-
-    // Re-acquire the mutex.
-    // SAFETY: mutex verified non-null above.
-    unsafe {
-        pthread_mutex_lock(mutex);
-    }
-    0
+    // SAFETY: both pointers verified non-null.
+    cond_wait_until(unsafe { &*cond }, mutex, None)
 }
 
 /// Wait on a condition variable with a timeout.
 ///
-/// Like `pthread_cond_wait` but returns `ETIMEDOUT` if the absolute
-/// time `abstime` passes before a signal.
+/// Like `pthread_cond_wait` but returns `ETIMEDOUT` if the absolute time
+/// `abstime` -- on the clock the condition variable was made with -- passes
+/// first.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn pthread_cond_timedwait(
     cond: *mut PthreadCondT,
     mutex: *mut PthreadMutexT,
     abstime: *const crate::stat::Timespec,
 ) -> i32 {
-    if cond.is_null() || mutex.is_null() || abstime.is_null() {
+    // glibc's order (nptl/pthread_cond_wait.c:635): the deadline is read
+    // first -- a NULL one is the first fault, a malformed `tv_nsec` EINVAL
+    // with the mutex still held -- and only then the condition variable.
+    // Until 2026-09-26 all three pointers were tested together, ahead of the
+    // deadline.
+    let Some(deadline) = read_deadline(abstime) else {
         return errno::EFAULT;
-    }
-
-    // Before anything else — before the mutex is released, before the
-    // generation counter is even read.  `___pthread_cond_timedwait64`
-    // (nptl/pthread_cond_wait.c:635) opens with
-    // `if (! valid_nanoseconds (abstime->tv_nsec)) return EINVAL;`, so a
-    // malformed deadline is rejected with the mutex still held and no
-    // observable side effect.  Note this is *not* the placement
-    // `pthread_mutex_timedlock` uses; see the comment there.
-    //
-    // A negative `tv_sec` is not covered: `valid_nanoseconds` looks only at
-    // `tv_nsec`, so a deadline in the past falls through to the loop below
-    // and times out immediately, which is correct.
-    // SAFETY: abstime verified non-null above; the caller's C-ABI contract
-    // is that it points to a live, properly aligned `Timespec`.
-    let abs = unsafe { &*abstime };
-    if !crate::time::valid_nanoseconds(abs.tv_nsec) {
+    };
+    if !crate::time::valid_nanoseconds(deadline.tv_nsec) {
         return errno::EINVAL;
     }
-
+    if cond.is_null() || mutex.is_null() {
+        return errno::EFAULT;
+    }
+    // SAFETY: verified non-null.
     let c = unsafe { &*cond };
-    let current_gen = c.generation.load(Ordering::Acquire);
+    cond_wait_until(c, mutex, Some((c.clock, deadline)))
+}
 
-    // SAFETY: mutex verified non-null above.
-    unsafe {
-        pthread_mutex_unlock(mutex);
-    }
-
-    // Get current time and compute deadline with full nanosecond precision.
-    let dl_secs = abs.tv_sec;
-    let dl_nanos = abs.tv_nsec;
-    let mut now_ts = crate::stat::Timespec {
-        tv_sec: 0,
-        tv_nsec: 0,
+/// `pthread_cond_clockwait` (glibc 2.30): [`pthread_cond_timedwait`] with the
+/// deadline on `clockid` rather than the condition variable's own clock.
+/// glibc reads the deadline, then judges the clock (`CLOCK_REALTIME` or
+/// `CLOCK_MONOTONIC`), then the condition variable.
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub extern "C" fn pthread_cond_clockwait(
+    cond: *mut PthreadCondT,
+    mutex: *mut PthreadMutexT,
+    clockid: i32,
+    abstime: *const crate::stat::Timespec,
+) -> i32 {
+    let Some(deadline) = read_deadline(abstime) else {
+        return errno::EFAULT;
     };
+    if !crate::time::valid_nanoseconds(deadline.tv_nsec) {
+        return errno::EINVAL;
+    }
+    if !crate::lowlevellock::supported_clock(clockid) {
+        return errno::EINVAL;
+    }
+    if cond.is_null() || mutex.is_null() {
+        return errno::EFAULT;
+    }
+    // SAFETY: verified non-null.
+    cond_wait_until(unsafe { &*cond }, mutex, Some((clockid, deadline)))
+}
 
+/// A deadline read from `abstime`, or `None` for NULL.
+fn read_deadline(abstime: *const crate::stat::Timespec) -> Option<crate::stat::Timespec> {
+    if abstime.is_null() {
+        return None;
+    }
+    // SAFETY: non-null, and the caller's contract makes it a readable
+    // `timespec`; read unaligned, as a C caller's may not be.
+    Some(unsafe { core::ptr::read_unaligned(abstime) })
+}
+
+/// The wait: note the sequence number, release the mutex, sleep until the
+/// number moves (or the deadline passes), take the mutex back.
+///
+/// The waiter count is advanced before the sequence number is read and the
+/// signaller advances the number before it reads the count, all
+/// sequentially consistent: so a signaller that sees no waiters signalled
+/// before any waiter read the number, and that waiter does not sleep on the
+/// old value.  Spurious wakes stay inside the loop.
+fn cond_wait_until(
+    c: &PthreadCondT,
+    mutex: *mut PthreadMutexT,
+    deadline: Option<(i32, crate::stat::Timespec)>,
+) -> i32 {
+    c.waiters.fetch_add(1, Ordering::SeqCst);
+    let seq = c.generation.load(Ordering::SeqCst);
+    // SAFETY: the caller checked `mutex` non-null.
+    let err = unsafe { pthread_mutex_unlock(mutex) };
+    if err != 0 {
+        c.waiters.fetch_sub(1, Ordering::SeqCst);
+        return err;
+    }
     let mut timed_out = false;
-    while c.generation.load(Ordering::Acquire) == current_gen {
-        let _ = crate::time::clock_gettime(crate::time::CLOCK_REALTIME, &raw mut now_ts);
-        if now_ts.tv_sec > dl_secs || (now_ts.tv_sec == dl_secs && now_ts.tv_nsec >= dl_nanos) {
-            timed_out = true;
-            break;
+    while c.generation.load(Ordering::Acquire) == seq {
+        match deadline {
+            None => crate::lowlevellock::futex_wait(&c.generation, seq),
+            Some((clock, ref at)) => {
+                match crate::lowlevellock::ns_until(&crate::lowlevellock::now_on(clock), at) {
+                    None => {
+                        timed_out = true;
+                        break;
+                    }
+                    Some(ns) => crate::lowlevellock::futex_wait_timeout(&c.generation, seq, ns),
+                }
+            }
         }
-        core::hint::spin_loop();
-        let _ = syscall::syscall1(syscall::SYS_SLEEP, 1_000_000); // 1ms yield.
     }
-
-    // SAFETY: mutex verified non-null above.
-    unsafe {
-        pthread_mutex_lock(mutex);
-    }
+    c.waiters.fetch_sub(1, Ordering::SeqCst);
+    // The caller held the mutex, so taking it back cannot fail but by
+    // misuse the wait cannot report beyond what it returns.
+    // SAFETY: as above.
+    let _ = unsafe { pthread_mutex_lock(mutex) };
     if timed_out { errno::ETIMEDOUT } else { 0 }
 }
 
@@ -1678,18 +2275,28 @@ pub extern "C" fn pthread_cond_signal(cond: *mut PthreadCondT) -> i32 {
     if cond.is_null() {
         return errno::EFAULT;
     }
-    // Bump generation counter — any waiter spinning on it will notice.
+    // SAFETY: non-null.
     let c = unsafe { &*cond };
-    c.generation.fetch_add(1, Ordering::Release);
+    c.generation.fetch_add(1, Ordering::SeqCst);
+    if c.waiters.load(Ordering::SeqCst) > 0 {
+        crate::lowlevellock::futex_wake(&c.generation, 1);
+    }
     0
 }
 
 /// Broadcast (wake all waiters on) a condition variable.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn pthread_cond_broadcast(cond: *mut PthreadCondT) -> i32 {
-    // Same as signal — our spin-based implementation wakes all waiters
-    // since they all see the generation change.
-    pthread_cond_signal(cond)
+    if cond.is_null() {
+        return errno::EFAULT;
+    }
+    // SAFETY: non-null.
+    let c = unsafe { &*cond };
+    c.generation.fetch_add(1, Ordering::SeqCst);
+    if c.waiters.load(Ordering::SeqCst) > 0 {
+        crate::lowlevellock::futex_wake_all(&c.generation);
+    }
+    0
 }
 
 // ---------------------------------------------------------------------------
@@ -1704,9 +2311,20 @@ pub extern "C" fn pthread_cond_broadcast(cond: *mut PthreadCondT) -> i32 {
 /// - -1: one writer holding the lock
 #[repr(C)]
 pub struct PthreadRwlockT {
+    /// 0 unlocked, N > 0 held by N readers, [`RWLOCK_WRITER`] held by a
+    /// writer; also the futex waiters sleep on.
     state: AtomicI32,
-    _pad: [u8; 52],
+    /// Threads asleep (or about to sleep) on `state`, so an unlock with no
+    /// one waiting costs no syscall.
+    waiters: AtomicI32,
+    /// The writer's task id while `state` is [`RWLOCK_WRITER`], for
+    /// `EDEADLK`.
+    writer: AtomicI32,
+    _pad: [u8; 44],
 }
+
+/// [`PthreadRwlockT::state`] while a writer holds the lock.
+const RWLOCK_WRITER: i32 = -1;
 
 /// See the module note on why these are `const` and not `#[test]`.
 const _: () = {
@@ -1725,7 +2343,9 @@ pub type PthreadRwlockattrT = [u8; 8];
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub static PTHREAD_RWLOCK_INITIALIZER: PthreadRwlockT = PthreadRwlockT {
     state: AtomicI32::new(0),
-    _pad: [0; 52],
+    waiters: AtomicI32::new(0),
+    writer: AtomicI32::new(0),
+    _pad: [0; 44],
 };
 
 /// Initialize a read-write lock.
@@ -1739,6 +2359,8 @@ pub extern "C" fn pthread_rwlock_init(
     }
     unsafe {
         (*rwlock).state = AtomicI32::new(0);
+        (*rwlock).waiters = AtomicI32::new(0);
+        (*rwlock).writer = AtomicI32::new(0);
     }
     0
 }
@@ -1751,36 +2373,17 @@ pub extern "C" fn pthread_rwlock_destroy(_rwlock: *mut PthreadRwlockT) -> i32 {
 
 /// Acquire a read lock (shared).
 ///
-/// Spins until no writer holds the lock, then increments the reader count.
+/// Taken at once unless a writer holds it; otherwise the thread sleeps on
+/// the lock's futex until the writer leaves.  Readers are preferred, as by
+/// glibc's default: a reader is not held back by a waiting writer.  A thread
+/// holding the lock for writing is `EDEADLK`.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn pthread_rwlock_rdlock(rwlock: *mut PthreadRwlockT) -> i32 {
     if rwlock.is_null() {
         return errno::EFAULT;
     }
-    let rw = unsafe { &*rwlock };
-    loop {
-        let current = rw.state.load(Ordering::Acquire);
-        // If a writer holds the lock (state == -1), spin.
-        if current < 0 {
-            core::hint::spin_loop();
-            let _ = syscall::syscall1(syscall::SYS_SLEEP, 1_000_000);
-            continue;
-        }
-        // Try to add a reader.
-        if rw
-            .state
-            .compare_exchange_weak(
-                current,
-                current.wrapping_add(1),
-                Ordering::AcqRel,
-                Ordering::Relaxed,
-            )
-            .is_ok()
-        {
-            return 0;
-        }
-        core::hint::spin_loop();
-    }
+    // SAFETY: non-null.
+    rdlock_until(unsafe { &*rwlock }, None)
 }
 
 /// Try to acquire a read lock without blocking.
@@ -1793,6 +2396,9 @@ pub extern "C" fn pthread_rwlock_tryrdlock(rwlock: *mut PthreadRwlockT) -> i32 {
     let current = rw.state.load(Ordering::Acquire);
     if current < 0 {
         return errno::EBUSY;
+    }
+    if current == i32::MAX {
+        return errno::EAGAIN;
     }
     if rw
         .state
@@ -1812,24 +2418,15 @@ pub extern "C" fn pthread_rwlock_tryrdlock(rwlock: *mut PthreadRwlockT) -> i32 {
 
 /// Acquire a write lock (exclusive).
 ///
-/// Spins until no readers or writers hold the lock.
+/// Sleeps on the lock's futex until no reader or writer holds it.  A thread
+/// already holding it for writing is `EDEADLK`.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn pthread_rwlock_wrlock(rwlock: *mut PthreadRwlockT) -> i32 {
     if rwlock.is_null() {
         return errno::EFAULT;
     }
-    let rw = unsafe { &*rwlock };
-    loop {
-        if rw
-            .state
-            .compare_exchange_weak(0, -1, Ordering::AcqRel, Ordering::Relaxed)
-            .is_ok()
-        {
-            return 0;
-        }
-        core::hint::spin_loop();
-        let _ = syscall::syscall1(syscall::SYS_SLEEP, 1_000_000);
-    }
+    // SAFETY: non-null.
+    wrlock_until(unsafe { &*rwlock }, None)
 }
 
 /// Try to acquire a write lock without blocking.
@@ -1841,9 +2438,10 @@ pub extern "C" fn pthread_rwlock_trywrlock(rwlock: *mut PthreadRwlockT) -> i32 {
     let rw = unsafe { &*rwlock };
     if rw
         .state
-        .compare_exchange(0, -1, Ordering::AcqRel, Ordering::Relaxed)
+        .compare_exchange(0, RWLOCK_WRITER, Ordering::AcqRel, Ordering::Relaxed)
         .is_ok()
     {
+        rw.writer.store(current_tid(), Ordering::Relaxed);
         0
     } else {
         errno::EBUSY
@@ -1852,8 +2450,8 @@ pub extern "C" fn pthread_rwlock_trywrlock(rwlock: *mut PthreadRwlockT) -> i32 {
 
 /// Release a read-write lock.
 ///
-/// If the calling thread holds a read lock, decrements the reader count.
-/// If the calling thread holds a write lock, releases it (sets state to 0).
+/// A writer's release, or the last reader's, wakes the threads asleep on
+/// the lock.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn pthread_rwlock_unlock(rwlock: *mut PthreadRwlockT) -> i32 {
     if rwlock.is_null() {
@@ -1861,15 +2459,182 @@ pub extern "C" fn pthread_rwlock_unlock(rwlock: *mut PthreadRwlockT) -> i32 {
     }
     let rw = unsafe { &*rwlock };
     let current = rw.state.load(Ordering::Acquire);
-    if current == -1 {
-        // Writer releasing — set to unlocked.
-        rw.state.store(0, Ordering::Release);
+    let released = if current == RWLOCK_WRITER {
+        rw.writer.store(0, Ordering::Relaxed);
+        rw.state.store(0, Ordering::SeqCst);
+        true
     } else if current > 0 {
-        // Reader releasing — decrement count.
-        rw.state.fetch_sub(1, Ordering::AcqRel);
+        rw.state.fetch_sub(1, Ordering::SeqCst) == 1
+    } else {
+        // Not held: undefined behaviour in POSIX; glibc does not check.
+        false
+    };
+    if released && rw.waiters.load(Ordering::SeqCst) > 0 {
+        crate::lowlevellock::futex_wake_all(&rw.state);
     }
-    // If current == 0, the lock wasn't held — no-op (undefined behavior in POSIX).
     0
+}
+
+/// `pthread_rwlock_timedrdlock`: [`pthread_rwlock_rdlock`] with a deadline
+/// on `CLOCK_REALTIME`.  Missing until 2026-09-26, so a program using it did
+/// not link.
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub extern "C" fn pthread_rwlock_timedrdlock(
+    rwlock: *mut PthreadRwlockT,
+    abstime: *const crate::stat::Timespec,
+) -> i32 {
+    pthread_rwlock_clockrdlock(rwlock, crate::time::CLOCK_REALTIME, abstime)
+}
+
+/// `pthread_rwlock_timedwrlock`: [`pthread_rwlock_wrlock`] with a deadline
+/// on `CLOCK_REALTIME`.  Missing until 2026-09-26.
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub extern "C" fn pthread_rwlock_timedwrlock(
+    rwlock: *mut PthreadRwlockT,
+    abstime: *const crate::stat::Timespec,
+) -> i32 {
+    pthread_rwlock_clockwrlock(rwlock, crate::time::CLOCK_REALTIME, abstime)
+}
+
+/// `pthread_rwlock_clockrdlock` (glibc 2.30).  The deadline and clock are
+/// judged first, eagerly -- glibc switched rwlocks from lazy to eager checks
+/// (nptl/pthread_rwlock_common.c:286) -- then the lock.
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub extern "C" fn pthread_rwlock_clockrdlock(
+    rwlock: *mut PthreadRwlockT,
+    clockid: i32,
+    abstime: *const crate::stat::Timespec,
+) -> i32 {
+    match rwlock_deadline(clockid, abstime) {
+        Ok(deadline) => {
+            if rwlock.is_null() {
+                return errno::EFAULT;
+            }
+            // SAFETY: non-null.
+            rdlock_until(unsafe { &*rwlock }, Some(deadline))
+        }
+        Err(e) => e,
+    }
+}
+
+/// `pthread_rwlock_clockwrlock` (glibc 2.30): as
+/// [`pthread_rwlock_clockrdlock`], for writing.
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub extern "C" fn pthread_rwlock_clockwrlock(
+    rwlock: *mut PthreadRwlockT,
+    clockid: i32,
+    abstime: *const crate::stat::Timespec,
+) -> i32 {
+    match rwlock_deadline(clockid, abstime) {
+        Ok(deadline) => {
+            if rwlock.is_null() {
+                return errno::EFAULT;
+            }
+            // SAFETY: non-null.
+            wrlock_until(unsafe { &*rwlock }, Some(deadline))
+        }
+        Err(e) => e,
+    }
+}
+
+/// A timed rwlock's deadline, judged as glibc judges it: `EFAULT` for a NULL
+/// one (the first fault), `EINVAL` for an unsupported clock or a malformed
+/// `tv_nsec`.
+fn rwlock_deadline(
+    clockid: i32,
+    abstime: *const crate::stat::Timespec,
+) -> Result<(i32, crate::stat::Timespec), i32> {
+    let Some(deadline) = read_deadline(abstime) else {
+        return Err(errno::EFAULT);
+    };
+    if !crate::lowlevellock::supported_clock(clockid)
+        || !crate::time::valid_nanoseconds(deadline.tv_nsec)
+    {
+        return Err(errno::EINVAL);
+    }
+    Ok((clockid, deadline))
+}
+
+/// Sleep on `rw.state` while it holds `seen`, or until the deadline; `false`
+/// once the deadline has passed.
+fn rwlock_sleep(
+    rw: &PthreadRwlockT,
+    seen: i32,
+    deadline: Option<&(i32, crate::stat::Timespec)>,
+) -> bool {
+    rw.waiters.fetch_add(1, Ordering::SeqCst);
+    let in_time = match deadline {
+        None => {
+            crate::lowlevellock::futex_wait(&rw.state, seen);
+            true
+        }
+        Some((clock, at)) => {
+            match crate::lowlevellock::ns_until(&crate::lowlevellock::now_on(*clock), at) {
+                None => false,
+                Some(ns) => {
+                    crate::lowlevellock::futex_wait_timeout(&rw.state, seen, ns);
+                    true
+                }
+            }
+        }
+    };
+    rw.waiters.fetch_sub(1, Ordering::SeqCst);
+    in_time
+}
+
+/// The read lock, with an optional deadline.
+fn rdlock_until(rw: &PthreadRwlockT, deadline: Option<(i32, crate::stat::Timespec)>) -> i32 {
+    if rw.state.load(Ordering::Relaxed) == RWLOCK_WRITER
+        && rw.writer.load(Ordering::Relaxed) == current_tid()
+    {
+        return errno::EDEADLK;
+    }
+    loop {
+        let s = rw.state.load(Ordering::Acquire);
+        if s >= 0 {
+            if s == i32::MAX {
+                return errno::EAGAIN;
+            }
+            if rw
+                .state
+                .compare_exchange_weak(s, s.wrapping_add(1), Ordering::Acquire, Ordering::Relaxed)
+                .is_ok()
+            {
+                return 0;
+            }
+            continue;
+        }
+        if !rwlock_sleep(rw, s, deadline.as_ref()) {
+            return errno::ETIMEDOUT;
+        }
+    }
+}
+
+/// The write lock, with an optional deadline.
+fn wrlock_until(rw: &PthreadRwlockT, deadline: Option<(i32, crate::stat::Timespec)>) -> i32 {
+    let self_id = current_tid();
+    if rw.state.load(Ordering::Relaxed) == RWLOCK_WRITER
+        && rw.writer.load(Ordering::Relaxed) == self_id
+    {
+        return errno::EDEADLK;
+    }
+    loop {
+        if rw
+            .state
+            .compare_exchange_weak(0, RWLOCK_WRITER, Ordering::Acquire, Ordering::Relaxed)
+            .is_ok()
+        {
+            rw.writer.store(self_id, Ordering::Relaxed);
+            return 0;
+        }
+        let s = rw.state.load(Ordering::Acquire);
+        if s == 0 {
+            continue;
+        }
+        if !rwlock_sleep(rw, s, deadline.as_ref()) {
+            return errno::ETIMEDOUT;
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1895,24 +2660,55 @@ pub extern "C" fn sched_yield() -> i32 {
 //   [ 8..12)  detach state (i32: 0 = joinable, 1 = detached)
 //   [16..24)  stack address — lowest address of the stack region (usize)
 //   [24..32)  guard size    (usize)
+//   [32..36)  inherit-scheduler (i32: PTHREAD_INHERIT_SCHED or _EXPLICIT_)
+//   [36..40)  scheduling policy (i32: SCHED_*)
+//   [40..44)  scheduling priority (i32)
+//   [44..48)  contention scope (i32: PTHREAD_SCOPE_SYSTEM)
 //
-// Offsets 12..16 and 32..56 are reserved/unused.  These offsets are an
-// internal contract only — C callers treat the type as opaque.
+// Offsets 12..16 and 48..56 are reserved/unused.  These offsets are an
+// internal contract only — C callers treat the type as opaque.  All-zero
+// fields 32..48 are the defaults: inherit, `SCHED_OTHER`, priority 0, system
+// scope -- so `pthread_attr_init`'s zeroing, and `encode_attr`'s, set them.
 const ATTR_OFF_STACKSIZE: usize = 0;
-// Only `encode_attr` (main/created-thread fill path) writes the detach
-// field via this constant; the get/set detachstate accessors use a
-// literal offset, so on host-without-test builds this would be unused.
-#[cfg(any(target_os = "none", test))]
 const ATTR_OFF_DETACH: usize = 8;
 const ATTR_OFF_STACKADDR: usize = 16;
 const ATTR_OFF_GUARDSIZE: usize = 24;
+const ATTR_OFF_INHERIT: usize = 32;
+const ATTR_OFF_POLICY: usize = 36;
+const ATTR_OFF_PRIORITY: usize = 40;
+const ATTR_OFF_SCOPE: usize = 44;
 
-/// Default thread guard size: one 16 KiB page.
+/// Take the scheduling attributes from the creating thread (the default).
+pub const PTHREAD_INHERIT_SCHED: i32 = 0;
+/// Take them from the attribute object.
+pub const PTHREAD_EXPLICIT_SCHED: i32 = 1;
+/// Compete for the processor with every thread on the system (the only
+/// scope Linux, and this system, has).
+pub const PTHREAD_SCOPE_SYSTEM: i32 = 0;
+/// Compete only within the process: not supported, as on Linux.
+pub const PTHREAD_SCOPE_PROCESS: i32 = 1;
+
+/// The `i32` field at `off` of an attribute object.
+fn attr_read_i32(buf: &PthreadAttrT, off: usize) -> i32 {
+    let bytes = buf
+        .get(off..off.wrapping_add(4))
+        .and_then(|b| <[u8; 4]>::try_from(b).ok());
+    bytes.map_or(0, i32::from_ne_bytes)
+}
+
+/// Store `v` in the `i32` field at `off` of an attribute object.
+fn attr_write_i32(buf: &mut PthreadAttrT, off: usize, v: i32) {
+    if let Some(slot) = buf.get_mut(off..off.wrapping_add(4)) {
+        slot.copy_from_slice(&v.to_ne_bytes());
+    }
+}
+
+/// Default thread guard size: one page, as in glibc and musl.
 ///
-/// Must match the kernel page/guard granularity (`FRAME_SIZE` in
-/// `kernel/src/mm`).  Only referenced when filling main-thread attributes.
-#[cfg(any(target_os = "none", test))]
-const DEFAULT_GUARD_SIZE: usize = 16 * 1024;
+/// `pthread_attr_init` records it and `pthread_create` maps it, inaccessible,
+/// below every stack it makes; the main thread's kernel guard is the same
+/// size.
+const DEFAULT_GUARD_SIZE: usize = crate::unistd::PAGE_SIZE;
 
 // Main-thread stack geometry.  These MUST stay in sync with the kernel's
 // user-stack layout in `kernel/src/proc/spawn.rs`:
@@ -1983,6 +2779,18 @@ fn encode_attr(buf: &mut PthreadAttrT, attr: StackAttr) {
     }
 }
 
+/// Read the stored stack size from an attribute buffer (0 = never set).
+fn attr_read_stacksize(buf: &PthreadAttrT) -> usize {
+    // SAFETY: reading 8 bytes at offset 0 ends at index 7 < 56.
+    unsafe { core::ptr::read_unaligned(buf.as_ptr().add(ATTR_OFF_STACKSIZE).cast::<usize>()) }
+}
+
+/// Read the stored detach state from an attribute buffer.
+fn attr_read_detachstate(buf: &PthreadAttrT) -> i32 {
+    // SAFETY: reading 4 bytes at offset 8 ends at index 11 < 56.
+    unsafe { core::ptr::read_unaligned(buf.as_ptr().add(ATTR_OFF_DETACH).cast::<i32>()) }
+}
+
 /// Read the stored stack address from an attribute buffer.
 fn attr_read_stackaddr(buf: &PthreadAttrT) -> usize {
     // SAFETY: reading 8 bytes at offset 16 ends at index 23 < 56.
@@ -1998,17 +2806,16 @@ fn attr_read_guardsize(buf: &PthreadAttrT) -> usize {
 /// Resolve a thread's stack attributes by kernel task ID.
 ///
 /// If the thread was created via `pthread_create` it is found in the
-/// thread table and its mmap'd stack bounds are returned (no guard page is
-/// installed for created threads, so `guard` is 0).  Otherwise the thread
-/// is assumed to be the main thread and the kernel main-stack geometry is
-/// reported.
+/// thread table and its stack bounds and guard are returned.  Otherwise the
+/// thread is assumed to be the main thread and the kernel main-stack
+/// geometry is reported.
 #[cfg(target_os = "none")]
 fn resolve_thread_stack_attr(task_id: u64) -> StackAttr {
     if let Some(info) = find_thread_info(task_id) {
         StackAttr {
             addr: info.stack_base,
             size: info.stack_size,
-            guard: 0,
+            guard: info.guard_size,
             detached: info.detached,
         }
     } else {
@@ -2018,7 +2825,9 @@ fn resolve_thread_stack_attr(task_id: u64) -> StackAttr {
 
 /// Initialize a thread attribute object to default values.
 ///
-/// Defaults: joinable (not detached), stack size = `DEFAULT_THREAD_STACK_SIZE`.
+/// Defaults: joinable (not detached), stack size =
+/// `DEFAULT_THREAD_STACK_SIZE`, guard = one page (`DEFAULT_GUARD_SIZE`, as
+/// glibc's `__pthread_attr_init` records `__getpagesize ()`).
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn pthread_attr_init(attr: *mut PthreadAttrT) -> i32 {
     if attr.is_null() {
@@ -2034,6 +2843,10 @@ pub extern "C" fn pthread_attr_init(attr: *mut PthreadAttrT) -> i32 {
     // Use write_unaligned because PthreadAttrT is a [u8; 64] with align(1).
     unsafe {
         core::ptr::write_unaligned(attr.cast::<usize>(), DEFAULT_THREAD_STACK_SIZE);
+        core::ptr::write_unaligned(
+            attr.cast::<u8>().add(ATTR_OFF_GUARDSIZE).cast::<usize>(),
+            DEFAULT_GUARD_SIZE,
+        );
     }
     0
 }
@@ -2213,7 +3026,8 @@ pub extern "C" fn pthread_attr_setstack(
 
 /// Get the guard size from a thread attribute object.
 ///
-/// Returns the recorded guard size (0 if none was set).
+/// Returns the recorded guard size: one page from `pthread_attr_init`, or
+/// whatever `pthread_attr_setguardsize` stored.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn pthread_attr_getguardsize(
     attr: *const PthreadAttrT,
@@ -2286,10 +3100,14 @@ pub struct PthreadBarrierT {
     count: u32,
     /// Current number of waiting threads.
     current: AtomicI32,
-    /// Generation counter — incremented when the barrier trips.
+    /// Generation counter — incremented when the barrier trips; also the
+    /// futex waiters sleep on.
     generation: AtomicI32,
+    /// A low-level lock over `current` and `generation`, so that an arrival
+    /// is counted in exactly one round (see [`pthread_barrier_wait`]).
+    lock: AtomicI32,
     /// Padding to reach glibc x86_64 size (32 bytes total).
-    _pad: [u8; 20],
+    _pad: [u8; 16],
 }
 
 /// See the module note on why these are `const` and not `#[test]`.
@@ -2306,6 +3124,56 @@ pub type PthreadBarrierattrT = [u8; 4];
 
 /// Return value for the one thread designated as the "serial thread".
 pub const PTHREAD_BARRIER_SERIAL_THREAD: i32 = -1;
+
+/// `pthread_barrierattr_init`: private (nptl/pthread_barrierattr_init.c).
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub extern "C" fn pthread_barrierattr_init(attr: *mut PthreadBarrierattrT) -> i32 {
+    if attr.is_null() {
+        return errno::EFAULT;
+    }
+    // SAFETY: non-null and writable, per the contract.
+    unsafe { core::ptr::write_unaligned(attr.cast::<i32>(), PTHREAD_PROCESS_PRIVATE) };
+    0
+}
+
+/// `pthread_barrierattr_destroy`: nothing to do, as in glibc.
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub extern "C" fn pthread_barrierattr_destroy(_attr: *mut PthreadBarrierattrT) -> i32 {
+    0
+}
+
+/// `pthread_barrierattr_getpshared` (nptl/pthread_barrierattr_getpshared.c).
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub extern "C" fn pthread_barrierattr_getpshared(
+    attr: *const PthreadBarrierattrT,
+    pshared: *mut i32,
+) -> i32 {
+    if attr.is_null() {
+        return errno::EFAULT;
+    }
+    // SAFETY: non-null; `[u8; 4]`, so read unaligned.
+    let word = unsafe { core::ptr::read_unaligned(attr.cast::<i32>()) };
+    put_i32(pshared, word)
+}
+
+/// `pthread_barrierattr_setpshared`: judged as the other `setpshared`s, so
+/// `PTHREAD_PROCESS_SHARED` is `ENOTSUP`.
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub extern "C" fn pthread_barrierattr_setpshared(
+    attr: *mut PthreadBarrierattrT,
+    pshared: i32,
+) -> i32 {
+    let err = futex_supports_pshared(pshared);
+    if err != 0 {
+        return err;
+    }
+    if attr.is_null() {
+        return errno::EFAULT;
+    }
+    // SAFETY: non-null and writable, per the contract.
+    unsafe { core::ptr::write_unaligned(attr.cast::<i32>(), pshared) };
+    0
+}
 
 /// Upper bound on a barrier's `count`, matching glibc's `BARRIER_IN_THRESHOLD`
 /// (`UINT_MAX / 2`, sysdeps/nptl/internaltypes.h:119).  glibc reserves the top
@@ -2326,11 +3194,20 @@ const BARRIER_IN_THRESHOLD: u32 = u32::MAX / 2;
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn pthread_barrier_init(
     barrier: *mut PthreadBarrierT,
-    _attr: *const PthreadBarrierattrT,
+    attr: *const PthreadBarrierattrT,
     count: u32,
 ) -> i32 {
     if count == 0 || count >= BARRIER_IN_THRESHOLD {
         return errno::EINVAL;
+    }
+    // glibc's next check: an attribute holding neither sharing value is
+    // EINVAL (nptl/pthread_barrier_init.c).  Shared cannot be stored here.
+    if !attr.is_null() {
+        // SAFETY: non-null; `[u8; 4]`, so read unaligned.
+        let pshared = unsafe { core::ptr::read_unaligned(attr.cast::<i32>()) };
+        if pshared != PTHREAD_PROCESS_PRIVATE && pshared != PTHREAD_PROCESS_SHARED {
+            return errno::EINVAL;
+        }
     }
     if barrier.is_null() {
         return errno::EFAULT;
@@ -2340,6 +3217,7 @@ pub extern "C" fn pthread_barrier_init(
         (*barrier).count = count;
         (*barrier).current = AtomicI32::new(0);
         (*barrier).generation = AtomicI32::new(0);
+        (*barrier).lock = AtomicI32::new(0);
     }
     0
 }
@@ -2355,29 +3233,38 @@ pub extern "C" fn pthread_barrier_destroy(_barrier: *mut PthreadBarrierT) -> i32
 /// Blocks until `count` threads have called this function on the same
 /// barrier.  Exactly one thread returns `PTHREAD_BARRIER_SERIAL_THREAD`;
 /// all others return 0.
+///
+/// Arrivals are counted under the barrier's low-level lock, so each is
+/// counted in exactly one round.  Until 2026-09-26 they were not: between
+/// the last arrival's reset of the count and its advance of the generation,
+/// a thread arriving for the next round read the old generation and was
+/// released with this one.  Waiters sleep on the generation's futex, where
+/// they polled in 1 ms steps.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn pthread_barrier_wait(barrier: *mut PthreadBarrierT) -> i32 {
     if barrier.is_null() {
         return errno::EFAULT;
     }
 
+    // SAFETY: non-null, and the caller's contract makes it an initialised
+    // barrier.
     let b = unsafe { &*barrier };
-    let my_gen = b.generation.load(Ordering::Acquire);
-
-    // Increment arrival count.
-    let arrived = b.current.fetch_add(1, Ordering::AcqRel).wrapping_add(1);
-
+    crate::lowlevellock::lll_lock(&b.lock);
+    let round = b.generation.load(Ordering::Relaxed);
+    let arrived = b.current.load(Ordering::Relaxed).wrapping_add(1);
     if arrived as u32 == b.count {
-        // Last thread to arrive — reset counter and bump generation.
-        b.current.store(0, Ordering::Release);
-        b.generation.fetch_add(1, Ordering::Release);
+        // The last arrival: reset for the next round, advance, release.
+        b.current.store(0, Ordering::Relaxed);
+        b.generation.store(round.wrapping_add(1), Ordering::Release);
+        crate::lowlevellock::lll_unlock(&b.lock);
+        crate::lowlevellock::futex_wake_all(&b.generation);
         return PTHREAD_BARRIER_SERIAL_THREAD;
     }
+    b.current.store(arrived, Ordering::Relaxed);
+    crate::lowlevellock::lll_unlock(&b.lock);
 
-    // Not the last — spin-yield until the generation changes.
-    while b.generation.load(Ordering::Acquire) == my_gen {
-        core::hint::spin_loop();
-        let _ = syscall::syscall1(syscall::SYS_SLEEP, 1_000_000);
+    while b.generation.load(Ordering::Acquire) == round {
+        crate::lowlevellock::futex_wait(&b.generation, round);
     }
     0
 }
@@ -2652,13 +3539,9 @@ pub extern "C" fn pthread_mutexattr_settype(attr: *mut PthreadMutexattrT, kind: 
     if attr.is_null() {
         return errno::EFAULT;
     }
-    // Store kind in first 4 bytes (all 4 bytes of the attr).
-    // SAFETY: attr is non-null and 4 bytes.
-    // Use write_unaligned because PthreadMutexattrT is [u8; 4] with align(1).
-    unsafe {
-        core::ptr::write_unaligned(attr.cast::<i32>(), kind);
-    }
-    0
+    // The type is the word's low bits; the flag bits are kept, as glibc's
+    // `(iattr->mutexkind & PTHREAD_MUTEXATTR_FLAG_BITS) | kind` keeps them.
+    update_mutexattr(attr, |w| (w & MUTEXATTR_FLAG_BITS) | kind as u32)
 }
 
 /// Get the mutex type attribute.
@@ -2670,9 +3553,295 @@ pub extern "C" fn pthread_mutexattr_gettype(attr: *const PthreadMutexattrT, kind
     // SAFETY: both pointers verified non-null.
     // Use read_unaligned because PthreadMutexattrT is [u8; 4] with align(1).
     unsafe {
-        *kind = core::ptr::read_unaligned(attr.cast::<i32>());
+        *kind = (core::ptr::read_unaligned(attr.cast::<u32>()) & !MUTEXATTR_FLAG_BITS) as i32;
     }
     0
+}
+
+// ---------------------------------------------------------------------------
+// Mutex attribute bits -- glibc's `struct pthread_mutexattr` layout
+// ---------------------------------------------------------------------------
+//
+// The attribute is one 32-bit word, laid out as glibc lays out `mutexkind`
+// (nptl/pthreadP.h): the type in the low bits, the priority ceiling in bits
+// 12..23, the protocol in bits 28..29, and a flag each for robustness (bit
+// 30) and process sharing (bit 31).  Until 2026-09-26 the type was the whole
+// word, and none of the other attributes existed.
+
+/// Protocol: no priority inheritance or protection.
+pub const PTHREAD_PRIO_NONE: i32 = 0;
+/// Protocol: priority inheritance.
+pub const PTHREAD_PRIO_INHERIT: i32 = 1;
+/// Protocol: priority protection (the ceiling).
+pub const PTHREAD_PRIO_PROTECT: i32 = 2;
+/// Robustness: a dead owner leaves the mutex locked.
+pub const PTHREAD_MUTEX_STALLED: i32 = 0;
+/// Robustness: a dead owner's mutex is handed on, `EOWNERDEAD`.
+pub const PTHREAD_MUTEX_ROBUST: i32 = 1;
+
+const MUTEXATTR_PROTOCOL_SHIFT: u32 = 28;
+const MUTEXATTR_PROTOCOL_MASK: u32 = 0x3000_0000;
+const MUTEXATTR_PRIO_CEILING_SHIFT: u32 = 12;
+const MUTEXATTR_PRIO_CEILING_MASK: u32 = 0x00ff_f000;
+const MUTEXATTR_FLAG_ROBUST: u32 = 0x4000_0000;
+const MUTEXATTR_FLAG_PSHARED: u32 = 0x8000_0000;
+/// Every bit that is not the type.
+const MUTEXATTR_FLAG_BITS: u32 = 0xf000_0000 | MUTEXATTR_PRIO_CEILING_MASK;
+
+/// glibc's `futex_supports_pshared` where shared futexes are unsupported
+/// (sysdeps/nptl/futex-internal.h): 0 for private, `ENOTSUP` for shared,
+/// `EINVAL` for anything else.  Ours are unsupported because the kernel keys
+/// a futex by address space and virtual address, so a waiter in one process
+/// is never woken from another (known-issues
+/// `B-D-PROCESS-SHARED-SYNC-IS-SILENTLY-PRIVATE`).
+fn futex_supports_pshared(pshared: i32) -> i32 {
+    match pshared {
+        PTHREAD_PROCESS_PRIVATE => 0,
+        PTHREAD_PROCESS_SHARED => errno::ENOTSUP,
+        _ => errno::EINVAL,
+    }
+}
+
+/// The attribute word at `attr`, or `EFAULT` for NULL -- this libc's
+/// substitute for glibc's fault on the dereference (design-decisions.md
+/// §303).
+fn mutexattr_word(attr: *const PthreadMutexattrT) -> Result<u32, i32> {
+    if attr.is_null() {
+        return Err(errno::EFAULT);
+    }
+    // SAFETY: non-null, and the caller's contract makes it a readable
+    // attribute; `PthreadMutexattrT` is `[u8; 4]`, so read unaligned.
+    Ok(unsafe { core::ptr::read_unaligned(attr.cast::<u32>()) })
+}
+
+/// Rewrite the attribute word at `attr` as `f` says; `EFAULT` for NULL.
+fn update_mutexattr(attr: *mut PthreadMutexattrT, f: impl FnOnce(u32) -> u32) -> i32 {
+    match mutexattr_word(attr) {
+        Ok(word) => {
+            // SAFETY: as `mutexattr_word`; the attribute is also writable.
+            unsafe { core::ptr::write_unaligned(attr.cast::<u32>(), f(word)) };
+            0
+        }
+        Err(e) => e,
+    }
+}
+
+/// Write `value` through `out`; `EFAULT` for NULL.
+fn put_i32(out: *mut i32, value: i32) -> i32 {
+    if out.is_null() {
+        return errno::EFAULT;
+    }
+    // SAFETY: non-null, and the caller's contract makes it writable.
+    unsafe { core::ptr::write_unaligned(out, value) };
+    0
+}
+
+/// `pthread_mutexattr_getpshared` (nptl/pthread_mutexattr_getpshared.c).
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub extern "C" fn pthread_mutexattr_getpshared(
+    attr: *const PthreadMutexattrT,
+    pshared: *mut i32,
+) -> i32 {
+    match mutexattr_word(attr) {
+        Ok(word) => put_i32(
+            pshared,
+            if word & MUTEXATTR_FLAG_PSHARED != 0 {
+                PTHREAD_PROCESS_SHARED
+            } else {
+                PTHREAD_PROCESS_PRIVATE
+            },
+        ),
+        Err(e) => e,
+    }
+}
+
+/// `pthread_mutexattr_setpshared`: the value is judged first, as glibc
+/// judges it (`futex_supports_pshared`), and `PTHREAD_PROCESS_SHARED` is
+/// `ENOTSUP` -- see [`futex_supports_pshared`].
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub extern "C" fn pthread_mutexattr_setpshared(attr: *mut PthreadMutexattrT, pshared: i32) -> i32 {
+    let err = futex_supports_pshared(pshared);
+    if err != 0 {
+        return err;
+    }
+    update_mutexattr(attr, |w| {
+        if pshared == PTHREAD_PROCESS_PRIVATE {
+            w & !MUTEXATTR_FLAG_PSHARED
+        } else {
+            w | MUTEXATTR_FLAG_PSHARED
+        }
+    })
+}
+
+/// `pthread_mutexattr_getprotocol` (nptl/pthread_mutexattr_getprotocol.c).
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub extern "C" fn pthread_mutexattr_getprotocol(
+    attr: *const PthreadMutexattrT,
+    protocol: *mut i32,
+) -> i32 {
+    match mutexattr_word(attr) {
+        Ok(word) => put_i32(
+            protocol,
+            ((word & MUTEXATTR_PROTOCOL_MASK) >> MUTEXATTR_PROTOCOL_SHIFT) as i32,
+        ),
+        Err(e) => e,
+    }
+}
+
+/// `pthread_mutexattr_setprotocol`: any of the three protocols is stored,
+/// as glibc stores it; the two this libc cannot provide are refused by
+/// [`pthread_mutex_init`], as glibc refuses what it cannot provide.
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub extern "C" fn pthread_mutexattr_setprotocol(
+    attr: *mut PthreadMutexattrT,
+    protocol: i32,
+) -> i32 {
+    if !(PTHREAD_PRIO_NONE..=PTHREAD_PRIO_PROTECT).contains(&protocol) {
+        return errno::EINVAL;
+    }
+    update_mutexattr(attr, |w| {
+        (w & !MUTEXATTR_PROTOCOL_MASK) | ((protocol as u32) << MUTEXATTR_PROTOCOL_SHIFT)
+    })
+}
+
+/// `pthread_mutexattr_getprioceiling`: a ceiling never set reads as the
+/// lowest `SCHED_FIFO` priority, as glibc's does.
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub extern "C" fn pthread_mutexattr_getprioceiling(
+    attr: *const PthreadMutexattrT,
+    prioceiling: *mut i32,
+) -> i32 {
+    match mutexattr_word(attr) {
+        Ok(word) => {
+            let mut ceiling =
+                ((word & MUTEXATTR_PRIO_CEILING_MASK) >> MUTEXATTR_PRIO_CEILING_SHIFT) as i32;
+            if ceiling == 0 {
+                ceiling = ceiling.max(crate::sched::sched_get_priority_min(
+                    crate::sched::SCHED_FIFO,
+                ));
+            }
+            put_i32(prioceiling, ceiling)
+        }
+        Err(e) => e,
+    }
+}
+
+/// `pthread_mutexattr_setprioceiling`: a ceiling outside the `SCHED_FIFO`
+/// priorities is `EINVAL` (nptl/pthread_mutexattr_setprioceiling.c).
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub extern "C" fn pthread_mutexattr_setprioceiling(
+    attr: *mut PthreadMutexattrT,
+    prioceiling: i32,
+) -> i32 {
+    let min = crate::sched::sched_get_priority_min(crate::sched::SCHED_FIFO);
+    let max = crate::sched::sched_get_priority_max(crate::sched::SCHED_FIFO);
+    let field = (MUTEXATTR_PRIO_CEILING_MASK >> MUTEXATTR_PRIO_CEILING_SHIFT) as i32;
+    if prioceiling < min || prioceiling > max || prioceiling & field != prioceiling {
+        return errno::EINVAL;
+    }
+    update_mutexattr(attr, |w| {
+        (w & !MUTEXATTR_PRIO_CEILING_MASK) | ((prioceiling as u32) << MUTEXATTR_PRIO_CEILING_SHIFT)
+    })
+}
+
+/// `pthread_mutexattr_getrobust` (nptl/pthread_mutexattr_getrobust.c).
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub extern "C" fn pthread_mutexattr_getrobust(
+    attr: *const PthreadMutexattrT,
+    robustness: *mut i32,
+) -> i32 {
+    match mutexattr_word(attr) {
+        Ok(word) => put_i32(
+            robustness,
+            if word & MUTEXATTR_FLAG_ROBUST != 0 {
+                PTHREAD_MUTEX_ROBUST
+            } else {
+                PTHREAD_MUTEX_STALLED
+            },
+        ),
+        Err(e) => e,
+    }
+}
+
+/// `pthread_mutexattr_setrobust`: stored as glibc stores it; a robust mutex
+/// is refused by [`pthread_mutex_init`], this libc having no robust list.
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub extern "C" fn pthread_mutexattr_setrobust(
+    attr: *mut PthreadMutexattrT,
+    robustness: i32,
+) -> i32 {
+    if robustness != PTHREAD_MUTEX_STALLED && robustness != PTHREAD_MUTEX_ROBUST {
+        return errno::EINVAL;
+    }
+    update_mutexattr(attr, |w| {
+        if robustness == PTHREAD_MUTEX_STALLED {
+            w & !MUTEXATTR_FLAG_ROBUST
+        } else {
+            w | MUTEXATTR_FLAG_ROBUST
+        }
+    })
+}
+
+/// `pthread_mutexattr_getrobust_np`, glibc's name before POSIX adopted it.
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub extern "C" fn pthread_mutexattr_getrobust_np(
+    attr: *const PthreadMutexattrT,
+    robustness: *mut i32,
+) -> i32 {
+    pthread_mutexattr_getrobust(attr, robustness)
+}
+
+/// `pthread_mutexattr_setrobust_np`, glibc's name before POSIX adopted it.
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub extern "C" fn pthread_mutexattr_setrobust_np(
+    attr: *mut PthreadMutexattrT,
+    robustness: i32,
+) -> i32 {
+    pthread_mutexattr_setrobust(attr, robustness)
+}
+
+/// `pthread_mutex_consistent`: `EINVAL` unless the mutex is robust and its
+/// owner died -- which no mutex here can be, [`pthread_mutex_init`] refusing
+/// robust ones (nptl/pthread_mutex_consistent.c).
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub extern "C" fn pthread_mutex_consistent(mutex: *mut PthreadMutexT) -> i32 {
+    if mutex.is_null() {
+        return errno::EFAULT;
+    }
+    errno::EINVAL
+}
+
+/// `pthread_mutex_consistent_np`, glibc's older name.
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub extern "C" fn pthread_mutex_consistent_np(mutex: *mut PthreadMutexT) -> i32 {
+    pthread_mutex_consistent(mutex)
+}
+
+/// `pthread_mutex_getprioceiling`: `EINVAL` for a mutex without priority
+/// protection (nptl/pthread_mutex_getprioceiling.c), which is every mutex
+/// here.
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub extern "C" fn pthread_mutex_getprioceiling(
+    mutex: *const PthreadMutexT,
+    _prioceiling: *mut i32,
+) -> i32 {
+    if mutex.is_null() {
+        return errno::EFAULT;
+    }
+    errno::EINVAL
+}
+
+/// `pthread_mutex_setprioceiling`: as [`pthread_mutex_getprioceiling`].
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub extern "C" fn pthread_mutex_setprioceiling(
+    mutex: *mut PthreadMutexT,
+    _prioceiling: i32,
+    _old_ceiling: *mut i32,
+) -> i32 {
+    if mutex.is_null() {
+        return errno::EFAULT;
+    }
+    errno::EINVAL
 }
 
 // ---------------------------------------------------------------------------
@@ -2681,9 +3850,9 @@ pub extern "C" fn pthread_mutexattr_gettype(attr: *const PthreadMutexattrT, kind
 
 /// Lock a mutex with a timeout.
 ///
-/// Attempts to lock the mutex.  If the mutex is already locked, blocks
+/// Attempts to lock the mutex.  If the mutex is already locked, sleeps
 /// until the mutex becomes available or the absolute timeout `abstime`
-/// expires.
+/// on `CLOCK_REALTIME` expires.
 ///
 /// Returns 0 on success, ETIMEDOUT on timeout, EINVAL on error.
 /// For recursive mutexes, succeeds immediately if already held by
@@ -2698,33 +3867,48 @@ pub extern "C" fn pthread_mutex_timedlock(
     mutex: *mut PthreadMutexT,
     abstime: *const crate::stat::Timespec,
 ) -> i32 {
-    if mutex.is_null() || abstime.is_null() {
+    mutex_lock_until(mutex, crate::time::CLOCK_REALTIME, abstime)
+}
+
+/// `pthread_mutex_clocklock` (glibc 2.30): [`pthread_mutex_timedlock`] with
+/// the deadline on `clockid`, which must be `CLOCK_REALTIME` or
+/// `CLOCK_MONOTONIC` -- judged first, before the mutex is looked at.
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub extern "C" fn pthread_mutex_clocklock(
+    mutex: *mut PthreadMutexT,
+    clockid: i32,
+    abstime: *const crate::stat::Timespec,
+) -> i32 {
+    if !crate::lowlevellock::supported_clock(clockid) {
+        return errno::EINVAL;
+    }
+    mutex_lock_until(mutex, clockid, abstime)
+}
+
+/// The timed lock, with the deadline on `clock`.
+fn mutex_lock_until(
+    mutex: *mut PthreadMutexT,
+    clock: i32,
+    abstime: *const crate::stat::Timespec,
+) -> i32 {
+    if mutex.is_null() {
         return errno::EFAULT;
     }
-
     // SAFETY: mutex verified non-null.
     let m = unsafe { &*mutex };
     let kind = m.kind.load(Ordering::Relaxed);
-    let self_id = syscall::syscall0(syscall::SYS_TASK_ID) as i32;
+    let self_id = current_tid();
 
     // Recursive / error-checking: check if we already own the lock.
-    if (kind == PTHREAD_MUTEX_RECURSIVE || kind == PTHREAD_MUTEX_ERRORCHECK)
-        && m.locked.load(Ordering::Acquire) != 0
-        && m.owner.load(Ordering::Relaxed) == self_id
-    {
+    if kind != PTHREAD_MUTEX_NORMAL && held_by(m, self_id) {
         if kind == PTHREAD_MUTEX_RECURSIVE {
-            let c = m.count.load(Ordering::Relaxed);
-            m.count.store(c.wrapping_add(1), Ordering::Relaxed);
-            return 0;
+            return recursive_relock(m);
         }
         return errno::EDEADLK;
     }
 
     // Fast path: try to acquire immediately.
-    if m.locked
-        .compare_exchange(0, 1, Ordering::Acquire, Ordering::Relaxed)
-        .is_ok()
-    {
+    if crate::lowlevellock::lll_trylock(&m.locked) {
         m.owner.store(self_id, Ordering::Relaxed);
         m.count.store(1, Ordering::Relaxed);
         return 0;
@@ -2736,45 +3920,31 @@ pub extern "C" fn pthread_mutex_timedlock(
     // inside the contended branch, so an *uncontended* `timedlock` with a
     // malformed deadline succeeds and never looks at the timespec.  POSIX
     // permits exactly this: "the validity of the abstime parameter need not
-    // be checked if the lock can be immediately acquired."
+    // be checked if the lock can be immediately acquired."  (So is a NULL
+    // one: until 2026-09-26 it was EFAULT before the fast path.)
     //
     // The placement is deliberately different from `pthread_cond_timedwait`
-    // above and from `sem_timedwait`, both of which check eagerly — glibc
+    // and from `sem_timedwait`, both of which check eagerly — glibc
     // took the lazy option here and the eager one there, and
     // `pthread_rwlock_common.c:286-291` documents having *switched* from
     // lazy to eager for rwlocks.  Do not unify them.
-    // SAFETY: abstime verified non-null above.
-    let dl_secs = unsafe { (*abstime).tv_sec };
-    let dl_nanos = unsafe { (*abstime).tv_nsec };
-    if !crate::time::valid_nanoseconds(dl_nanos) {
+    if abstime.is_null() {
+        return errno::EFAULT;
+    }
+    // SAFETY: abstime verified non-null.
+    let deadline = unsafe { core::ptr::read_unaligned(abstime) };
+    if !crate::time::valid_nanoseconds(deadline.tv_nsec) {
         return errno::EINVAL;
     }
-
-    loop {
-        // Check timeout by reading current time.
-        let mut now = crate::stat::Timespec {
-            tv_sec: 0,
-            tv_nsec: 0,
-        };
-        let _ = crate::time::clock_gettime(crate::time::CLOCK_REALTIME, &raw mut now);
-
-        if now.tv_sec > dl_secs || (now.tv_sec == dl_secs && now.tv_nsec >= dl_nanos) {
-            return errno::ETIMEDOUT;
-        }
-
-        // Try to acquire.
-        if m.locked
-            .compare_exchange_weak(0, 1, Ordering::Acquire, Ordering::Relaxed)
-            .is_ok()
-        {
-            m.owner.store(self_id, Ordering::Relaxed);
-            m.count.store(1, Ordering::Relaxed);
-            return 0;
-        }
-
-        // Yield to avoid burning CPU.
-        sched_yield();
+    let taken = crate::lowlevellock::lll_timedlock(&m.locked, || {
+        crate::lowlevellock::ns_until(&crate::lowlevellock::now_on(clock), &deadline)
+    });
+    if !taken {
+        return errno::ETIMEDOUT;
     }
+    m.owner.store(self_id, Ordering::Relaxed);
+    m.count.store(1, Ordering::Relaxed);
+    0
 }
 
 // ---------------------------------------------------------------------------
@@ -2824,9 +3994,13 @@ pub extern "C" fn pthread_condattr_setclock(attr: *mut PthreadCondattrT, clock_i
     if attr.is_null() {
         return errno::EFAULT;
     }
-    // Store in first 4 bytes.
+    // glibc's layout (nptl/pthread_condattr_setclock.c): bit 0 is the
+    // process-shared flag, the clock is above it.  Until 2026-09-26 the clock
+    // was the whole word, which left no room for the flag.
+    // SAFETY: non-null and writable, per the contract.
     unsafe {
-        core::ptr::write_unaligned(attr.cast::<i32>(), clock_id);
+        let word = core::ptr::read_unaligned(attr.cast::<i32>());
+        core::ptr::write_unaligned(attr.cast::<i32>(), (word & 1) | (clock_id << 1));
     }
     0
 }
@@ -2841,7 +4015,41 @@ pub extern "C" fn pthread_condattr_getclock(
         return errno::EFAULT;
     }
     unsafe {
-        *clock_id = core::ptr::read_unaligned(attr.cast::<i32>());
+        *clock_id = (core::ptr::read_unaligned(attr.cast::<i32>()) >> 1) & 1;
+    }
+    0
+}
+
+/// `pthread_condattr_getpshared`: bit 0 of the attribute, as glibc keeps it
+/// (nptl/pthread_condattr_getpshared.c).
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub extern "C" fn pthread_condattr_getpshared(
+    attr: *const PthreadCondattrT,
+    pshared: *mut i32,
+) -> i32 {
+    if attr.is_null() {
+        return errno::EFAULT;
+    }
+    // SAFETY: non-null; `[u8; 4]`, so read unaligned.
+    let word = unsafe { core::ptr::read_unaligned(attr.cast::<i32>()) };
+    put_i32(pshared, word & 1)
+}
+
+/// `pthread_condattr_setpshared`: judged as [`pthread_mutexattr_setpshared`]
+/// judges it, so `PTHREAD_PROCESS_SHARED` is `ENOTSUP`.
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub extern "C" fn pthread_condattr_setpshared(attr: *mut PthreadCondattrT, pshared: i32) -> i32 {
+    let err = futex_supports_pshared(pshared);
+    if err != 0 {
+        return err;
+    }
+    if attr.is_null() {
+        return errno::EFAULT;
+    }
+    // SAFETY: non-null and writable, per the contract.
+    unsafe {
+        let word = core::ptr::read_unaligned(attr.cast::<i32>());
+        core::ptr::write_unaligned(attr.cast::<i32>(), (word & !1) | pshared);
     }
     0
 }
@@ -3292,76 +4500,11 @@ pub(crate) fn atfork_run_child() {
 // pthread_setaffinity_np / pthread_getaffinity_np — CPU affinity
 // ---------------------------------------------------------------------------
 
-/// CPU set type — bitmask of CPUs.
-///
-/// Matches the Linux `cpu_set_t` layout (1024 bits = 128 bytes on
-/// x86_64).  Each bit corresponds to a CPU number.
-#[repr(C)]
-pub struct CpuSetT {
-    /// Bitmask of CPUs (1024 bits = 128 bytes).
-    pub __bits: [u64; 16],
-}
-
-impl CpuSetT {
-    /// Create an empty CPU set (no CPUs selected).
-    pub fn new() -> Self {
-        // SAFETY: zero-init is valid for CpuSetT.
-        unsafe { core::mem::zeroed() }
-    }
-}
-
-impl Default for CpuSetT {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-/// Set a CPU in the CPU set.
-pub fn cpu_set(cpu: usize, set: &mut CpuSetT) {
-    // `cpu < 1024` ⇒ `cpu / 64 < 16 == set.__bits.len()`.
-    #[allow(clippy::indexing_slicing)]
-    if cpu < 1024 {
-        set.__bits[cpu / 64] |= 1u64 << (cpu % 64);
-    }
-}
-
-/// Clear a CPU in the CPU set.
-pub fn cpu_clr(cpu: usize, set: &mut CpuSetT) {
-    // `cpu < 1024` ⇒ `cpu / 64 < 16 == set.__bits.len()`.
-    #[allow(clippy::indexing_slicing)]
-    if cpu < 1024 {
-        set.__bits[cpu / 64] &= !(1u64 << (cpu % 64));
-    }
-}
-
-/// Test whether a CPU is set in the CPU set.
-pub fn cpu_isset(cpu: usize, set: &CpuSetT) -> bool {
-    // `cpu < 1024` short-circuits before the indexing op, so
-    // `cpu / 64 < 16 == set.__bits.len()` whenever we index.
-    #[allow(clippy::indexing_slicing)]
-    {
-        cpu < 1024 && (set.__bits[cpu / 64] & (1u64 << (cpu % 64))) != 0
-    }
-}
-
-/// Zero all CPUs in the set.
-pub fn cpu_zero(set: &mut CpuSetT) {
-    set.__bits = [0; 16];
-}
-
-/// Count the number of CPUs in the set.
-pub fn cpu_count(set: &CpuSetT) -> i32 {
-    let mut count: i32 = 0;
-    for &word in &set.__bits {
-        count = count.wrapping_add(word.count_ones() as i32);
-    }
-    count
-}
-
-/// Set the CPU affinity mask for a thread.
-///
-/// Stub: returns 0 (success) — our scheduler doesn't support per-thread
-/// affinity yet.  The `cpuset` is accepted but not enforced.
+/// Set the CPU affinity mask for a thread -- which, as for a process
+/// ([`crate::sched::sched_setaffinity`]), can only be to the mask it has:
+/// every online CPU succeeds, a narrower mask is `ENOSYS`, and one with no
+/// online CPU is `EINVAL`.  Until 2026-09-27 any mask of a whole `cpu_set_t`
+/// was accepted and ignored, and a shorter one refused.
 ///
 /// Unlike the rest of this file, `EFAULT` here is the *kernel's* verdict rather
 /// than a substitute for a glibc segfault: glibc's
@@ -3377,22 +4520,20 @@ pub extern "C" fn pthread_setaffinity_np(
     cpusetsize: usize,
     cpuset: *const CpuSetT,
 ) -> i32 {
-    if cpuset.is_null() {
-        return crate::errno::EFAULT;
+    let result = crate::sched::read_affinity_mask(cpusetsize, cpuset)
+        .and_then(|mask| crate::sched::affinity_change(&mask, crate::sched::online_cpus()));
+    match result {
+        Ok(()) => 0,
+        Err(e) => e,
     }
-    // A too-small mask is `EINVAL` on Linux too, but reached the long way
-    // round: the kernel clears the mask, then `__sched_setaffinity` rejects the
-    // resulting empty CPU set.  Same answer, so we short-circuit it.
-    if cpusetsize < core::mem::size_of::<CpuSetT>() {
-        return crate::errno::EINVAL;
-    }
-    // Accept silently — no enforcement.
-    0
 }
 
-/// Get the CPU affinity mask for a thread.
-///
-/// Stub: returns a mask with all CPUs set (no affinity restrictions).
+/// Get the CPU affinity mask for a thread: every online CPU, the mask every
+/// thread has, written as [`crate::sched::sched_getaffinity`] writes it --
+/// the CPUs there are, and zeroes to the end of `cpusetsize` (glibc's
+/// `memset` after the kernel's copy).  Until 2026-09-27 it set all 1024 bits,
+/// CPUs that do not exist included, and refused any mask shorter than a whole
+/// `cpu_set_t`, though Linux takes `CPU_ALLOC_SIZE`'s 8 bytes.
 ///
 /// Both length rejections precede the null check, because glibc's
 /// `__pthread_getaffinity_np` (nptl/pthread_getaffinity.c) forwards straight to
@@ -3406,21 +4547,13 @@ pub extern "C" fn pthread_getaffinity_np(
     cpusetsize: usize,
     cpuset: *mut CpuSetT,
 ) -> i32 {
-    // The kernel spells the second test `len & (sizeof (unsigned long) - 1)`;
-    // `usize` is a power of two wide, so the mask is exactly that subtraction,
-    // and doing it in a `const` keeps `arithmetic_side_effects` quiet.
-    const WORD_MASK: usize = core::mem::size_of::<usize>().wrapping_sub(1);
-    if cpusetsize < core::mem::size_of::<CpuSetT>() || cpusetsize & WORD_MASK != 0 {
-        return crate::errno::EINVAL;
+    let ncpus = crate::sched::online_cpus();
+    let result = crate::sched::affinity_len_ok(cpusetsize, ncpus)
+        .and_then(|()| crate::sched::fill_affinity(cpusetsize, cpuset, ncpus));
+    match result {
+        Ok(()) => 0,
+        Err(e) => e,
     }
-    if cpuset.is_null() {
-        return crate::errno::EFAULT;
-    }
-    // SAFETY: caller guarantees cpuset is valid and big enough.
-    let set = unsafe { &mut *cpuset };
-    // Set all CPUs as available (single-node system).
-    set.__bits = [u64::MAX; 16];
-    0
 }
 
 // ---------------------------------------------------------------------------
@@ -3488,6 +4621,356 @@ pub extern "C" fn pthread_setschedparam(
     0
 }
 
+/// Set a thread's priority within its policy: 0, the one priority
+/// `SCHED_OTHER` has, and `EINVAL` for any other -- what glibc answers for a
+/// `SCHED_OTHER` thread, which every thread here is.
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub extern "C" fn pthread_setschedprio(_thread: PthreadT, prio: i32) -> i32 {
+    if prio == 0 { 0 } else { errno::EINVAL }
+}
+
+// ---------------------------------------------------------------------------
+// Scheduling attributes
+// ---------------------------------------------------------------------------
+//
+// Stored in the attribute object and validated as glibc validates them;
+// honoured by `pthread_create` as far as the scheduler can -- which is
+// `SCHED_OTHER` at priority 0, so an explicit request for anything else makes
+// `pthread_create` fail with `EPERM` rather than start a thread without it.
+
+/// The priority range glibc's `check_sched_priority_attr` allows `policy`:
+/// `sched_get_priority_min`'s to `_max`'s.
+fn priority_in_range(policy: i32, priority: i32) -> bool {
+    let (lo, hi) = (
+        crate::sched::sched_get_priority_min(policy),
+        crate::sched::sched_get_priority_max(policy),
+    );
+    lo >= 0 && hi >= 0 && (lo..=hi).contains(&priority)
+}
+
+/// The policies an attribute may name: glibc's `check_sched_policy_attr`.
+fn policy_allowed(policy: i32) -> bool {
+    matches!(
+        policy,
+        crate::sched::SCHED_OTHER | crate::sched::SCHED_FIFO | crate::sched::SCHED_RR
+    )
+}
+
+/// Whether `attr` takes its scheduling from itself or from the creator.
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub extern "C" fn pthread_attr_setinheritsched(attr: *mut PthreadAttrT, inherit: i32) -> i32 {
+    // SAFETY: NULL or the caller's attribute object.
+    let Some(buf) = (unsafe { attr.as_mut() }) else {
+        return errno::EFAULT;
+    };
+    if inherit != PTHREAD_INHERIT_SCHED && inherit != PTHREAD_EXPLICIT_SCHED {
+        return errno::EINVAL;
+    }
+    attr_write_i32(buf, ATTR_OFF_INHERIT, inherit);
+    0
+}
+
+/// See [`pthread_attr_setinheritsched`].
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub extern "C" fn pthread_attr_getinheritsched(
+    attr: *const PthreadAttrT,
+    inherit: *mut i32,
+) -> i32 {
+    // SAFETY: NULL or the caller's objects.
+    let (Some(buf), Some(out)) = (unsafe { attr.as_ref() }, unsafe { inherit.as_mut() }) else {
+        return errno::EFAULT;
+    };
+    *out = attr_read_i32(buf, ATTR_OFF_INHERIT);
+    0
+}
+
+/// The scheduling policy an explicit-scheduling attribute asks for:
+/// `SCHED_OTHER`, `SCHED_FIFO` or `SCHED_RR`, else `EINVAL`.
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub extern "C" fn pthread_attr_setschedpolicy(attr: *mut PthreadAttrT, policy: i32) -> i32 {
+    // SAFETY: NULL or the caller's attribute object.
+    let Some(buf) = (unsafe { attr.as_mut() }) else {
+        return errno::EFAULT;
+    };
+    if !policy_allowed(policy) {
+        return errno::EINVAL;
+    }
+    attr_write_i32(buf, ATTR_OFF_POLICY, policy);
+    0
+}
+
+/// See [`pthread_attr_setschedpolicy`].
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub extern "C" fn pthread_attr_getschedpolicy(attr: *const PthreadAttrT, policy: *mut i32) -> i32 {
+    // SAFETY: NULL or the caller's objects.
+    let (Some(buf), Some(out)) = (unsafe { attr.as_ref() }, unsafe { policy.as_mut() }) else {
+        return errno::EFAULT;
+    };
+    *out = attr_read_i32(buf, ATTR_OFF_POLICY);
+    0
+}
+
+/// The priority an explicit-scheduling attribute asks for, which must lie in
+/// the range of the attribute's policy (`EINVAL` otherwise, as glibc).
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub extern "C" fn pthread_attr_setschedparam(
+    attr: *mut PthreadAttrT,
+    param: *const crate::sched::SchedParam,
+) -> i32 {
+    // SAFETY: NULL or the caller's objects.
+    let (Some(buf), Some(p)) = (unsafe { attr.as_mut() }, unsafe { param.as_ref() }) else {
+        return errno::EFAULT;
+    };
+    if !priority_in_range(attr_read_i32(buf, ATTR_OFF_POLICY), p.sched_priority) {
+        return errno::EINVAL;
+    }
+    attr_write_i32(buf, ATTR_OFF_PRIORITY, p.sched_priority);
+    0
+}
+
+/// See [`pthread_attr_setschedparam`].
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub extern "C" fn pthread_attr_getschedparam(
+    attr: *const PthreadAttrT,
+    param: *mut crate::sched::SchedParam,
+) -> i32 {
+    // SAFETY: NULL or the caller's objects.
+    let (Some(buf), Some(out)) = (unsafe { attr.as_ref() }, unsafe { param.as_mut() }) else {
+        return errno::EFAULT;
+    };
+    *out = crate::sched::SchedParam::default();
+    out.sched_priority = attr_read_i32(buf, ATTR_OFF_PRIORITY);
+    0
+}
+
+/// The contention scope: `PTHREAD_SCOPE_SYSTEM`; `PTHREAD_SCOPE_PROCESS` is
+/// `ENOTSUP`, and anything else `EINVAL`, as on Linux.
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub extern "C" fn pthread_attr_setscope(attr: *mut PthreadAttrT, scope: i32) -> i32 {
+    // SAFETY: NULL or the caller's attribute object.
+    let Some(buf) = (unsafe { attr.as_mut() }) else {
+        return errno::EFAULT;
+    };
+    match scope {
+        PTHREAD_SCOPE_SYSTEM => {
+            attr_write_i32(buf, ATTR_OFF_SCOPE, scope);
+            0
+        }
+        PTHREAD_SCOPE_PROCESS => errno::ENOTSUP,
+        _ => errno::EINVAL,
+    }
+}
+
+/// See [`pthread_attr_setscope`].
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub extern "C" fn pthread_attr_getscope(attr: *const PthreadAttrT, scope: *mut i32) -> i32 {
+    // SAFETY: NULL or the caller's objects.
+    let (Some(buf), Some(out)) = (unsafe { attr.as_ref() }, unsafe { scope.as_mut() }) else {
+        return errno::EFAULT;
+    };
+    *out = attr_read_i32(buf, ATTR_OFF_SCOPE);
+    0
+}
+
+// ---------------------------------------------------------------------------
+// The concurrency hint and the default attributes
+// ---------------------------------------------------------------------------
+
+crate::perprocess::process_global! {
+    /// `pthread_setconcurrency`'s level: a hint no implementation with one
+    /// kernel thread per pthread uses, kept only to be read back, as glibc
+    /// and musl keep it.
+    fn concurrency_level() -> core::sync::atomic::AtomicI32 = core::sync::atomic::AtomicI32::new(0);
+
+    /// The attributes `pthread_create` uses for a NULL attribute --
+    /// `pthread_attr_init`'s until `pthread_setattr_default_np` changes
+    /// them. Guarded by [`DEFAULT_ATTR_LOCK`].
+    fn default_attr() -> PthreadAttrT = initial_default_attr();
+}
+
+/// Guards [`default_attr`], which any thread may set while another creates.
+static DEFAULT_ATTR_LOCK: AtomicBool = AtomicBool::new(false);
+
+/// What `pthread_attr_init` writes: the default stack and guard sizes, and
+/// zero -- the default -- everywhere else.
+// A `const fn`, for `process_global!`'s constant initialiser, where `get_mut`
+// and checked arithmetic are not available: the indices are the two field
+// offsets plus 0..8, all below 32 in a 56-byte array.
+#[allow(clippy::indexing_slicing, clippy::arithmetic_side_effects)]
+const fn initial_default_attr() -> PthreadAttrT {
+    let mut a = [0u8; 56];
+    let stack = DEFAULT_THREAD_STACK_SIZE.to_ne_bytes();
+    let guard = DEFAULT_GUARD_SIZE.to_ne_bytes();
+    let mut i = 0;
+    while i < 8 {
+        a[ATTR_OFF_STACKSIZE + i] = stack[i];
+        a[ATTR_OFF_GUARDSIZE + i] = guard[i];
+        i += 1;
+    }
+    a
+}
+
+/// Run `f` on the default attributes, holding [`DEFAULT_ATTR_LOCK`].
+fn with_default_attr<R>(f: impl FnOnce(&mut PthreadAttrT) -> R) -> R {
+    while DEFAULT_ATTR_LOCK
+        .compare_exchange_weak(false, true, Ordering::Acquire, Ordering::Relaxed)
+        .is_err()
+    {
+        core::hint::spin_loop();
+    }
+    // SAFETY: `default_attr()` is this process's storage, and the lock gives
+    // this thread the only reference for the duration of `f`.
+    let r = f(unsafe { &mut *default_attr() });
+    DEFAULT_ATTR_LOCK.store(false, Ordering::Release);
+    r
+}
+
+/// A copy of the default attributes.
+fn default_attr_copy() -> PthreadAttrT {
+    with_default_attr(|a| *a)
+}
+
+/// The concurrency level last set, 0 until then.
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub extern "C" fn pthread_getconcurrency() -> i32 {
+    // SAFETY: this process's storage; an atomic.
+    unsafe { (*concurrency_level()).load(Ordering::Relaxed) }
+}
+
+/// Record a concurrency level (a hint, unused); `EINVAL` if negative.
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub extern "C" fn pthread_setconcurrency(level: i32) -> i32 {
+    if level < 0 {
+        return errno::EINVAL;
+    }
+    // SAFETY: as in `pthread_getconcurrency`.
+    unsafe { (*concurrency_level()).store(level, Ordering::Relaxed) };
+    0
+}
+
+/// The attributes a NULL-attribute `pthread_create` uses, into `attr` (GNU).
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub extern "C" fn pthread_getattr_default_np(attr: *mut PthreadAttrT) -> i32 {
+    // SAFETY: NULL or the caller's attribute object.
+    let Some(out) = (unsafe { attr.as_mut() }) else {
+        return errno::EFAULT;
+    };
+    *out = default_attr_copy();
+    0
+}
+
+/// Make `attr` the attributes a NULL-attribute `pthread_create` uses (GNU),
+/// checked as glibc checks them: a policy `pthread_attr_setschedpolicy`
+/// would take, a positive priority in its range, a stack size of 0 (keep
+/// the current one) or at least `PTHREAD_STACK_MIN`, and no stack address --
+/// a default stack would be every thread's stack. `EINVAL` otherwise.
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub extern "C" fn pthread_setattr_default_np(attr: *const PthreadAttrT) -> i32 {
+    // SAFETY: NULL or the caller's attribute object.
+    let Some(new) = (unsafe { attr.as_ref() }) else {
+        return errno::EFAULT;
+    };
+    let policy = attr_read_i32(new, ATTR_OFF_POLICY);
+    let priority = attr_read_i32(new, ATTR_OFF_PRIORITY);
+    let size = attr_read_stacksize(new);
+    if !policy_allowed(policy)
+        || (priority > 0 && !priority_in_range(policy, priority))
+        || (size != 0 && size < PTHREAD_STACK_MIN as usize)
+        || attr_read_stackaddr(new) != 0
+    {
+        return errno::EINVAL;
+    }
+    with_default_attr(|d| {
+        let keep = attr_read_stacksize(d);
+        *d = *new;
+        if size == 0 {
+            if let Some(slot) = d.get_mut(ATTR_OFF_STACKSIZE..ATTR_OFF_STACKSIZE + 8) {
+                slot.copy_from_slice(&keep.to_ne_bytes());
+            }
+        }
+    });
+    0
+}
+
+// ---------------------------------------------------------------------------
+// Cleanup handlers
+// ---------------------------------------------------------------------------
+
+/// musl's `struct __ptcb`: one cleanup handler. `pthread_cleanup_push(f, x)`
+/// is a macro that declares one on the pushing function's stack and calls
+/// [`_pthread_cleanup_push`]; `pthread_cleanup_pop(run)` calls
+/// [`_pthread_cleanup_pop`] with the same record. Until 2026-09-28 neither
+/// function existed, so every C program using cleanup handlers failed to
+/// link.
+#[repr(C)]
+pub struct Ptcb {
+    /// The handler.
+    pub f: Option<unsafe extern "C" fn(*mut u8)>,
+    /// Its argument.
+    pub x: *mut u8,
+    /// The next handler out, pushed before this one.
+    pub next: *mut Ptcb,
+}
+
+/// Push `cb` -- `f(x)` -- onto the calling thread's cleanup handlers.
+///
+/// # Safety
+///
+/// `cb` is the caller's record, live until the matching
+/// [`_pthread_cleanup_pop`], which the macro pair guarantees by scope.
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub unsafe extern "C" fn _pthread_cleanup_push(
+    cb: *mut Ptcb,
+    f: Option<unsafe extern "C" fn(*mut u8)>,
+    x: *mut u8,
+) {
+    // SAFETY: `cb` is the caller's record (this function's contract);
+    // `current()` is this thread's block.
+    unsafe {
+        let head = &raw mut (*crate::perthread::current()).cleanup;
+        cb.write(Ptcb { f, x, next: *head });
+        *head = cb;
+    }
+}
+
+/// Pop `cb`, the innermost handler, and run it if `run` is nonzero.
+///
+/// # Safety
+///
+/// `cb` is the record the matching [`_pthread_cleanup_push`] pushed.
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub unsafe extern "C" fn _pthread_cleanup_pop(cb: *mut Ptcb, run: i32) {
+    // SAFETY: as in `_pthread_cleanup_push`; the handler is the caller's.
+    unsafe {
+        (*crate::perthread::current()).cleanup = (*cb).next;
+        if run != 0
+            && let Some(f) = (*cb).f
+        {
+            f((*cb).x);
+        }
+    }
+}
+
+/// Run the calling thread's remaining cleanup handlers, innermost first,
+/// each popped before it runs so a handler that exits the thread cannot run
+/// again (`pthread_exit`).
+fn run_cleanup_handlers() {
+    loop {
+        // SAFETY: this thread's block; each record is live, on the stack of
+        // a frame that has not returned (its pop has not run).
+        unsafe {
+            let head = (*crate::perthread::current()).cleanup;
+            if head.is_null() {
+                return;
+            }
+            (*crate::perthread::current()).cleanup = (*head).next;
+            if let Some(f) = (*head).f {
+                f((*head).x);
+            }
+        }
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
@@ -3520,6 +5003,238 @@ mod tests {
             .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
     use super::*;
+
+    // -- the functions musl's <pthread.h> declares (2026-09-28) --
+
+    /// What the cleanup handlers below record: the order they ran in.
+    static CLEANUP_RAN: std::sync::Mutex<Vec<usize>> = std::sync::Mutex::new(Vec::new());
+    /// Serialises the tests that use [`CLEANUP_RAN`].
+    static CLEANUP_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    unsafe extern "C" fn record(x: *mut u8) {
+        CLEANUP_RAN
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .push(x as usize);
+    }
+
+    fn ran() -> Vec<usize> {
+        core::mem::take(
+            &mut *CLEANUP_RAN
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner),
+        )
+    }
+
+    fn blank() -> Ptcb {
+        Ptcb {
+            f: None,
+            x: core::ptr::null_mut(),
+            next: core::ptr::null_mut(),
+        }
+    }
+
+    #[test]
+    #[allow(clippy::used_underscore_items)] // the C names are the API
+    fn cleanup_pop_runs_the_handler_only_when_asked_and_in_lifo_order() {
+        let _g = CLEANUP_TEST_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let _ = ran();
+        let (mut a, mut b, mut c) = (blank(), blank(), blank());
+        // SAFETY: each record outlives its pop, as the C macros guarantee.
+        unsafe {
+            _pthread_cleanup_push(&raw mut a, Some(record), 1 as *mut u8);
+            _pthread_cleanup_push(&raw mut b, Some(record), 2 as *mut u8);
+            _pthread_cleanup_push(&raw mut c, Some(record), 3 as *mut u8);
+            _pthread_cleanup_pop(&raw mut c, 1);
+            _pthread_cleanup_pop(&raw mut b, 0);
+            _pthread_cleanup_pop(&raw mut a, 7);
+            assert!((*crate::perthread::current()).cleanup.is_null());
+        }
+        assert_eq!(ran(), [3, 1]);
+    }
+
+    #[test]
+    #[allow(clippy::used_underscore_items)]
+    fn pthread_exit_runs_what_is_still_pushed_innermost_first() {
+        let _g = CLEANUP_TEST_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let _ = ran();
+        let (mut a, mut b) = (blank(), blank());
+        // SAFETY: as above; `run_cleanup_handlers` is `pthread_exit`'s first
+        // step, which a test thread cannot take whole.
+        unsafe {
+            _pthread_cleanup_push(&raw mut a, Some(record), 10 as *mut u8);
+            _pthread_cleanup_push(&raw mut b, Some(record), 20 as *mut u8);
+        }
+        run_cleanup_handlers();
+        // SAFETY: this thread's block.
+        assert!(unsafe { (*crate::perthread::current()).cleanup.is_null() });
+        assert_eq!(ran(), [20, 10]);
+    }
+
+    fn fresh_attr() -> PthreadAttrT {
+        let mut a: PthreadAttrT = [0xAA; 56];
+        assert_eq!(pthread_attr_init(&raw mut a), 0);
+        a
+    }
+
+    #[test]
+    fn scheduling_attributes_default_to_inherit_other_zero_system() {
+        let a = fresh_attr();
+        let (mut v, mut p) = (-1, crate::sched::SchedParam::default());
+        assert_eq!(pthread_attr_getinheritsched(&raw const a, &raw mut v), 0);
+        assert_eq!(v, PTHREAD_INHERIT_SCHED);
+        assert_eq!(pthread_attr_getschedpolicy(&raw const a, &raw mut v), 0);
+        assert_eq!(v, crate::sched::SCHED_OTHER);
+        p.sched_priority = 9;
+        assert_eq!(pthread_attr_getschedparam(&raw const a, &raw mut p), 0);
+        assert_eq!(p.sched_priority, 0);
+        assert_eq!(pthread_attr_getscope(&raw const a, &raw mut v), 0);
+        assert_eq!(v, PTHREAD_SCOPE_SYSTEM);
+    }
+
+    #[test]
+    fn scheduling_attributes_are_checked_as_glibc_checks_them() {
+        let mut a = fresh_attr();
+        let mut v = -1;
+        assert_eq!(
+            pthread_attr_setinheritsched(&raw mut a, PTHREAD_EXPLICIT_SCHED),
+            0
+        );
+        assert_eq!(pthread_attr_getinheritsched(&raw const a, &raw mut v), 0);
+        assert_eq!(v, PTHREAD_EXPLICIT_SCHED);
+        assert_eq!(pthread_attr_setinheritsched(&raw mut a, 2), errno::EINVAL);
+
+        assert_eq!(
+            pthread_attr_setschedpolicy(&raw mut a, crate::sched::SCHED_FIFO),
+            0
+        );
+        assert_eq!(
+            pthread_attr_setschedpolicy(&raw mut a, crate::sched::SCHED_BATCH),
+            errno::EINVAL
+        );
+        let prio = |sched_priority| crate::sched::SchedParam {
+            sched_priority,
+            ..Default::default()
+        };
+        assert_eq!(pthread_attr_setschedparam(&raw mut a, &prio(50)), 0);
+        assert_eq!(
+            pthread_attr_setschedparam(&raw mut a, &prio(100)),
+            errno::EINVAL
+        );
+        // SCHED_OTHER's range is 0..=0.
+        assert_eq!(
+            pthread_attr_setschedpolicy(&raw mut a, crate::sched::SCHED_OTHER),
+            0
+        );
+        assert_eq!(
+            pthread_attr_setschedparam(&raw mut a, &prio(1)),
+            errno::EINVAL
+        );
+
+        assert_eq!(pthread_attr_setscope(&raw mut a, PTHREAD_SCOPE_SYSTEM), 0);
+        assert_eq!(
+            pthread_attr_setscope(&raw mut a, PTHREAD_SCOPE_PROCESS),
+            errno::ENOTSUP
+        );
+        assert_eq!(pthread_attr_setscope(&raw mut a, 7), errno::EINVAL);
+        assert_eq!(
+            pthread_attr_setscope(core::ptr::null_mut(), 0),
+            errno::EFAULT
+        );
+        assert_eq!(
+            pthread_attr_getscope(&raw const a, core::ptr::null_mut()),
+            errno::EFAULT
+        );
+    }
+
+    #[test]
+    fn an_explicit_schedule_the_scheduler_cannot_give_is_eperm() {
+        let mut a = fresh_attr();
+        assert_eq!(
+            pthread_attr_setinheritsched(&raw mut a, PTHREAD_EXPLICIT_SCHED),
+            0
+        );
+        assert_eq!(
+            pthread_attr_setschedpolicy(&raw mut a, crate::sched::SCHED_RR),
+            0
+        );
+        let p = crate::sched::SchedParam {
+            sched_priority: 10,
+            ..Default::default()
+        };
+        assert_eq!(pthread_attr_setschedparam(&raw mut a, &raw const p), 0);
+        assert_eq!(
+            CreateAttr::read(&raw const a).explicit_sched,
+            Some((crate::sched::SCHED_RR, 10))
+        );
+        let mut t: PthreadT = 0;
+        // Refused before anything is allocated or any thread started.
+        assert_eq!(
+            pthread_create(&raw mut t, &raw const a, None, core::ptr::null_mut()),
+            errno::EPERM
+        );
+        // Inheriting again, the same numbers are only stored.
+        assert_eq!(
+            pthread_attr_setinheritsched(&raw mut a, PTHREAD_INHERIT_SCHED),
+            0
+        );
+        assert_eq!(CreateAttr::read(&raw const a).explicit_sched, None);
+    }
+
+    #[test]
+    fn pthread_setschedprio_takes_other_s_one_priority() {
+        assert_eq!(pthread_setschedprio(pthread_self(), 0), 0);
+        assert_eq!(pthread_setschedprio(pthread_self(), 1), errno::EINVAL);
+    }
+
+    #[test]
+    fn the_concurrency_level_is_kept_and_read_back() {
+        assert_eq!(pthread_getconcurrency(), 0);
+        assert_eq!(pthread_setconcurrency(4), 0);
+        assert_eq!(pthread_getconcurrency(), 4);
+        assert_eq!(pthread_setconcurrency(-1), errno::EINVAL);
+        assert_eq!(pthread_getconcurrency(), 4);
+    }
+
+    #[test]
+    fn default_attributes_are_what_null_attr_threads_get() {
+        let mut d: PthreadAttrT = [0; 56];
+        assert_eq!(pthread_getattr_default_np(&raw mut d), 0);
+        assert_eq!(d, fresh_attr());
+        assert_eq!(CreateAttr::read(core::ptr::null()), CreateAttr::DEFAULT);
+
+        let mut want = fresh_attr();
+        assert_eq!(pthread_attr_setstacksize(&raw mut want, 256 * 1024), 0);
+        assert_eq!(pthread_setattr_default_np(&raw const want), 0);
+        assert_eq!(CreateAttr::read(core::ptr::null()).stack_size, 256 * 1024);
+
+        // Stack size 0 keeps the current one.
+        let mut keep = fresh_attr();
+        if let Some(slot) = keep.get_mut(ATTR_OFF_STACKSIZE..ATTR_OFF_STACKSIZE + 8) {
+            slot.copy_from_slice(&0usize.to_ne_bytes());
+        }
+        assert_eq!(pthread_setattr_default_np(&raw const keep), 0);
+        assert_eq!(CreateAttr::read(core::ptr::null()).stack_size, 256 * 1024);
+
+        // A default stack address is refused, and so is a small stack.
+        let mut bad = fresh_attr();
+        let mut stack = vec![0u8; 256 * 1024];
+        assert_eq!(
+            pthread_attr_setstack(&raw mut bad, stack.as_mut_ptr().cast(), stack.len()),
+            0
+        );
+        assert_eq!(pthread_setattr_default_np(&raw const bad), errno::EINVAL);
+        let mut small = fresh_attr();
+        if let Some(slot) = small.get_mut(ATTR_OFF_STACKSIZE..ATTR_OFF_STACKSIZE + 8) {
+            slot.copy_from_slice(&16usize.to_ne_bytes());
+        }
+        assert_eq!(pthread_setattr_default_np(&raw const small), errno::EINVAL);
+        assert_eq!(pthread_setattr_default_np(core::ptr::null()), errno::EFAULT);
+    }
 
     #[test]
     fn getschedparam_reports_the_scheduler_we_have() {
@@ -3994,9 +5709,16 @@ mod tests {
         assert_eq!(stored, DEFAULT_THREAD_STACK_SIZE);
         assert_eq!(stored, 64 * 1024);
 
-        // Remaining bytes should be zero.
-        for &b in &attr[8..] {
-            assert_eq!(b, 0, "attr bytes after stack size should be zeroed");
+        // The guard -- one page, as glibc records it -- and every other byte
+        // zero.
+        let guard = unsafe {
+            core::ptr::read_unaligned(attr.as_ptr().add(ATTR_OFF_GUARDSIZE).cast::<usize>())
+        };
+        assert_eq!(guard, DEFAULT_GUARD_SIZE);
+        for (i, &b) in attr.iter().enumerate().skip(8) {
+            if !(ATTR_OFF_GUARDSIZE..ATTR_OFF_GUARDSIZE + 8).contains(&i) {
+                assert_eq!(b, 0, "attr byte {i} should be zeroed");
+            }
         }
     }
 
@@ -4023,9 +5745,10 @@ mod tests {
     }
 
     /// The floor is `PTHREAD_STACK_MIN`, which glibc's `check_stacksize_attr`
-    /// (sysdeps/nptl/pthreadP.h:704) compares against — 16 KiB on x86-64, not
-    /// a page.  This used to be a hardcoded 4096, which accepted three sizes
-    /// glibc rejects.
+    /// (sysdeps/nptl/pthreadP.h:704) compares against -- with the number from
+    /// the header a C program compiles against, musl's 2048.  (glibc's own is
+    /// 16 KiB, and was this floor until 2026-09-27, refusing a port's
+    /// `PTHREAD_STACK_MIN + margin` below it.)
     #[test]
     fn attr_setstacksize_minimum_is_pthread_stack_min() {
         let mut attr: PthreadAttrT = [0; 56];
@@ -4038,22 +5761,22 @@ mod tests {
             pthread_attr_setstacksize(&mut attr, PTHREAD_STACK_MIN as usize - 1),
             errno::EINVAL
         );
-        // A page is below the floor, so it is now rejected.
-        assert_eq!(pthread_attr_setstacksize(&mut attr, 4096), errno::EINVAL);
+        // A 4 KiB page clears musl's floor; the stack is still rounded up to
+        // one of this kernel's 16 KiB pages when the thread is made.
+        assert_eq!(pthread_attr_setstacksize(&mut attr, 4096), 0);
     }
 
     #[test]
     fn attr_setstacksize_rejects_too_small() {
         let mut attr: PthreadAttrT = [0; 56];
         pthread_attr_init(&mut attr);
-        assert_eq!(pthread_attr_setstacksize(&mut attr, 4095), errno::EINVAL);
+        assert_eq!(pthread_attr_setstacksize(&mut attr, 2047), errno::EINVAL);
         assert_eq!(pthread_attr_setstacksize(&mut attr, 0), errno::EINVAL);
         assert_eq!(pthread_attr_setstacksize(&mut attr, 1), errno::EINVAL);
     }
 
     /// `EFAULT` is reserved for the case where the *size* is acceptable and only
-    /// the pointer is bad — 8 KiB used to be the size here, but it is below
-    /// `PTHREAD_STACK_MIN` (16 KiB on x86-64) and so now loses to the size check.
+    /// the pointer is bad, so the size here is one no floor refuses.
     #[test]
     fn attr_setstacksize_null_returns_efault() {
         assert_eq!(
@@ -4069,7 +5792,7 @@ mod tests {
     #[test]
     fn attr_setstacksize_too_small_outranks_a_null_attr() {
         assert_eq!(
-            pthread_attr_setstacksize(core::ptr::null_mut(), 8192),
+            pthread_attr_setstacksize(core::ptr::null_mut(), 1024),
             errno::EINVAL
         );
     }
@@ -4319,8 +6042,7 @@ mod tests {
     }
 
     /// As with `pthread_attr_setstacksize`, `EFAULT` only applies once the size
-    /// clears `PTHREAD_STACK_MIN`; 8 KiB (the size this test used to pass) is
-    /// below the 16 KiB floor and now loses to the size check.
+    /// clears `PTHREAD_STACK_MIN`, so the size here is one no floor refuses.
     #[test]
     fn setstack_null_attr_returns_efault() {
         assert_eq!(
@@ -4336,7 +6058,7 @@ mod tests {
     #[test]
     fn setstack_too_small_outranks_a_null_attr() {
         assert_eq!(
-            pthread_attr_setstack(core::ptr::null_mut(), core::ptr::null_mut(), 8192),
+            pthread_attr_setstack(core::ptr::null_mut(), core::ptr::null_mut(), 1024),
             errno::EINVAL
         );
     }
@@ -4352,13 +6074,14 @@ mod tests {
     }
 
     #[test]
-    fn getguardsize_default_attr_is_zero() {
-        // A default-init attr records no guard; getguardsize returns 0.
+    fn getguardsize_default_attr_is_one_page() {
+        // glibc's `__pthread_attr_init` records `__getpagesize ()`; this
+        // reported 0 until 2026-09-26, when no created thread had a guard.
         let mut buf: PthreadAttrT = [0; 56];
         pthread_attr_init(&mut buf);
         let mut guard: usize = 12345;
         assert_eq!(pthread_attr_getguardsize(&buf, &mut guard), 0);
-        assert_eq!(guard, 0);
+        assert_eq!(guard, crate::unistd::PAGE_SIZE);
     }
 
     #[test]
@@ -4410,7 +6133,9 @@ mod tests {
     fn cond_init_zeroes_generation() {
         let mut cond = PthreadCondT {
             generation: AtomicI32::new(42),
-            _pad: [0xFF; 44],
+            clock: 0,
+            waiters: AtomicI32::new(0),
+            _pad: [0xFF; 36],
         };
         let ret = pthread_cond_init(&mut cond, core::ptr::null());
         assert_eq!(ret, 0);
@@ -4429,7 +6154,9 @@ mod tests {
     fn cond_destroy_returns_zero() {
         let mut cond = PthreadCondT {
             generation: AtomicI32::new(0),
-            _pad: [0; 44],
+            clock: 0,
+            waiters: AtomicI32::new(0),
+            _pad: [0; 36],
         };
         assert_eq!(pthread_cond_destroy(&mut cond), 0);
     }
@@ -4550,7 +6277,9 @@ mod tests {
     fn rwlock_init_zeroes_state() {
         let mut rwlock = PthreadRwlockT {
             state: AtomicI32::new(42),
-            _pad: [0xFF; 52],
+            waiters: AtomicI32::new(0),
+            writer: AtomicI32::new(0),
+            _pad: [0xFF; 44],
         };
         let ret = pthread_rwlock_init(&mut rwlock, core::ptr::null());
         assert_eq!(ret, 0);
@@ -4569,7 +6298,9 @@ mod tests {
     fn rwlock_destroy_returns_zero() {
         let mut rwlock = PthreadRwlockT {
             state: AtomicI32::new(0),
-            _pad: [0; 52],
+            waiters: AtomicI32::new(0),
+            writer: AtomicI32::new(0),
+            _pad: [0; 44],
         };
         assert_eq!(pthread_rwlock_destroy(&mut rwlock), 0);
     }
@@ -4696,7 +6427,8 @@ mod tests {
             count: 0,
             current: AtomicI32::new(99),
             generation: AtomicI32::new(99),
-            _pad: [0xFF; 20],
+            lock: AtomicI32::new(0),
+            _pad: [0xFF; 16],
         };
         let ret = pthread_barrier_init(&mut barrier, core::ptr::null(), 5);
         assert_eq!(ret, 0);
@@ -4711,7 +6443,8 @@ mod tests {
             count: 0,
             current: AtomicI32::new(0),
             generation: AtomicI32::new(0),
-            _pad: [0; 20],
+            lock: AtomicI32::new(0),
+            _pad: [0; 16],
         };
         let ret = pthread_barrier_init(&mut barrier, core::ptr::null(), 0);
         assert_eq!(ret, errno::EINVAL);
@@ -4729,7 +6462,8 @@ mod tests {
             count: 3,
             current: AtomicI32::new(0),
             generation: AtomicI32::new(0),
-            _pad: [0; 20],
+            lock: AtomicI32::new(0),
+            _pad: [0; 16],
         };
         assert_eq!(pthread_barrier_destroy(&mut barrier), 0);
     }
@@ -4744,7 +6478,8 @@ mod tests {
             count: 0,
             current: AtomicI32::new(0),
             generation: AtomicI32::new(0),
-            _pad: [0; 20],
+            lock: AtomicI32::new(0),
+            _pad: [0; 16],
         };
         let large = BARRIER_IN_THRESHOLD - 1;
         let ret = pthread_barrier_init(&mut barrier, core::ptr::null(), large);
@@ -4764,7 +6499,8 @@ mod tests {
             count: 0,
             current: AtomicI32::new(0),
             generation: AtomicI32::new(0),
-            _pad: [0; 20],
+            lock: AtomicI32::new(0),
+            _pad: [0; 16],
         };
         assert_eq!(
             pthread_barrier_init(&mut barrier, core::ptr::null(), u32::MAX),
@@ -5133,17 +6869,17 @@ mod tests {
         unsafe {
             *core::ptr::addr_of_mut!(ONCE_COUNTER) = 0;
         }
-        assert_eq!(unsafe { pthread_once(&mut once, once_increment) }, 0);
+        assert_eq!(unsafe { pthread_once(&mut once, Some(once_increment)) }, 0);
         assert_eq!(unsafe { *core::ptr::addr_of!(ONCE_COUNTER) }, 1);
         // Second call should not invoke init again.
-        assert_eq!(unsafe { pthread_once(&mut once, once_increment) }, 0);
+        assert_eq!(unsafe { pthread_once(&mut once, Some(once_increment)) }, 0);
         assert_eq!(unsafe { *core::ptr::addr_of!(ONCE_COUNTER) }, 1);
     }
 
     #[test]
     fn once_null_returns_efault() {
         assert_eq!(
-            unsafe { pthread_once(core::ptr::null_mut(), once_increment) },
+            unsafe { pthread_once(core::ptr::null_mut(), Some(once_increment)) },
             errno::EFAULT
         );
     }
@@ -5152,92 +6888,128 @@ mod tests {
     // Thread-specific data (TSD)
     // =======================================================================
 
-    // The host-test build's SYS_TASK_ID stub returns a single fixed value,
-    // so every cargo-test thread maps to the *same* TSD slot.  Tests that
-    // mutate that shared slot (set values, run cleanup) must not run
-    // concurrently or they clobber each other's keys.  Serialize them.
+    // The values are per thread, but the key table is the process's, and
+    // `tsd_keys_run_out_and_come_back` takes every free key: the TSD tests
+    // take this lock so none of them is starved by it.
     static TSD_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    fn tsd_guard() -> std::sync::MutexGuard<'static, ()> {
+        TSD_TEST_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    fn new_key(d: Option<extern "C" fn(*mut u8)>) -> PthreadKeyT {
+        let mut key: PthreadKeyT = PthreadKeyT::MAX;
+        assert_eq!(unsafe { pthread_key_create(&mut key, d) }, 0);
+        key
+    }
 
     #[test]
     fn tsd_create_set_get() {
-        let _g = TSD_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        let mut key: PthreadKeyT = 0;
-        assert_eq!(unsafe { pthread_key_create(&mut key, None) }, 0);
-
+        let _g = tsd_guard();
+        let key = new_key(None);
         let val = 42u8;
-        assert_eq!(
-            unsafe { pthread_setspecific(key, core::ptr::addr_of!(val) as *mut u8) },
-            0
-        );
-
-        let got = unsafe { pthread_getspecific(key) };
-        assert_eq!(got, core::ptr::addr_of!(val) as *mut u8);
+        let p = core::ptr::addr_of!(val) as *mut u8;
+        assert!(unsafe { pthread_getspecific(key) }.is_null());
+        assert_eq!(unsafe { pthread_setspecific(key, p) }, 0);
+        assert_eq!(unsafe { pthread_getspecific(key) }, p);
+        assert_eq!(pthread_key_delete(key), 0);
     }
 
-    // The four error-path tests below take `TSD_TEST_LOCK` like their
-    // happy-path siblings, even though three of them provably return before
-    // touching any shared state. `tsd_key_delete_returns_zero` is not one of
-    // the three and is why the rule is "all of them": `pthread_key_delete(0)`
-    // clears `TSD_DESTRUCTORS[0]` unconditionally, and key 0 is the *first*
-    // key `pthread_key_create` hands out — so, run unlocked, it silently wipes
-    // the destructor `tsd_create_set_get` had just registered.
-    //
-    // The other three lock for a reason worth stating: whether they touch
-    // shared state is a property of where `pthread_*`'s argument checks sit
-    // relative to `tsd_lock()`, which is an implementation detail nobody
-    // editing these functions would think to preserve. Making the test depend
-    // on it buys nothing and can go quietly wrong later.
+    /// Each thread has its own value -- and on the host too now: the old
+    /// table keyed values by a task id every test thread shared.
+    #[test]
+    fn tsd_values_are_per_thread() {
+        let _g = tsd_guard();
+        let key = new_key(None);
+        assert_eq!(unsafe { pthread_setspecific(key, 0x10 as *mut u8) }, 0);
+        let other = std::thread::spawn(move || {
+            let before = unsafe { pthread_getspecific(key) } as usize;
+            assert_eq!(unsafe { pthread_setspecific(key, 0x20 as *mut u8) }, 0);
+            (before, unsafe { pthread_getspecific(key) } as usize)
+        })
+        .join()
+        .expect("thread");
+        assert_eq!(other, (0, 0x20));
+        assert_eq!(unsafe { pthread_getspecific(key) } as usize, 0x10);
+        assert_eq!(pthread_key_delete(key), 0);
+    }
 
     #[test]
     fn tsd_key_create_null_returns_efault() {
-        let _g = TSD_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _g = tsd_guard();
         assert_eq!(
             unsafe { pthread_key_create(core::ptr::null_mut(), None) },
             errno::EFAULT
         );
     }
 
+    /// Deleting a key not in use is EINVAL, as in glibc (it answered 0).
     #[test]
-    fn tsd_key_delete_returns_zero() {
-        let _g = TSD_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        assert_eq!(pthread_key_delete(0), 0);
+    fn tsd_key_delete_needs_a_key_in_use() {
+        let _g = tsd_guard();
+        let key = new_key(None);
+        assert_eq!(pthread_key_delete(key), 0);
+        assert_eq!(pthread_key_delete(key), errno::EINVAL);
+        assert_eq!(pthread_key_delete(KEYS_MAX as PthreadKeyT), errno::EINVAL);
     }
 
     #[test]
-    fn tsd_getspecific_invalid_key() {
-        let _g = TSD_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        // Key beyond MAX_KEYS should return null.
-        let got = unsafe { pthread_getspecific(9999) };
-        assert!(got.is_null());
+    fn tsd_out_of_range_and_unused_keys() {
+        let _g = tsd_guard();
+        assert!(unsafe { pthread_getspecific(9999) }.is_null());
+        assert_eq!(
+            unsafe { pthread_setspecific(9999, core::ptr::null_mut()) },
+            errno::EINVAL
+        );
+        let key = new_key(None);
+        assert_eq!(pthread_key_delete(key), 0);
+        assert_eq!(
+            unsafe { pthread_setspecific(key, 0x1 as *mut u8) },
+            errno::EINVAL,
+            "a deleted key"
+        );
     }
 
+    /// A value set under a key that was deleted and created again is gone:
+    /// the key's number moved on.
     #[test]
-    fn tsd_setspecific_invalid_key() {
-        let _g = TSD_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        let ret = unsafe { pthread_setspecific(9999, core::ptr::null_mut()) };
-        assert_eq!(ret, errno::EINVAL);
+    fn tsd_recreated_key_hides_old_values() {
+        let _g = tsd_guard();
+        let key = new_key(None);
+        assert_eq!(unsafe { pthread_setspecific(key, 0x30 as *mut u8) }, 0);
+        assert_eq!(pthread_key_delete(key), 0);
+        let again = new_key(None);
+        assert_eq!(again, key, "the first free key is reused");
+        assert!(unsafe { pthread_getspecific(again) }.is_null());
+        assert_eq!(pthread_key_delete(again), 0);
     }
 
+    /// Every key can be had; the next is EAGAIN; one deleted can be had
+    /// again.  The old table never reused an index, so a program creating
+    /// and deleting keys ran out after 64 creations.
     #[test]
-    fn tsd_setspecific_unallocated_key_returns_einval() {
-        let _g = TSD_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        // An in-range key that was never returned by pthread_key_create.
-        // TSD_NEXT_KEY only ever grows, so picking the highest index is a
-        // safe "definitely not allocated yet" choice regardless of how many
-        // keys other tests created — unless the suite has exhausted all 64
-        // keys, in which case the call legitimately succeeds.
-        let next = {
-            tsd_lock();
-            let n = unsafe { core::ptr::addr_of!(TSD_NEXT_KEY).read() };
-            tsd_unlock();
-            n
-        };
-        if (next as usize) < MAX_KEYS {
-            let high = (MAX_KEYS as u32).wrapping_sub(1);
-            assert_eq!(
-                unsafe { pthread_setspecific(high, core::ptr::null_mut()) },
-                errno::EINVAL
-            );
+    fn tsd_keys_run_out_and_come_back() {
+        let _g = tsd_guard();
+        let mut taken = Vec::new();
+        loop {
+            let mut key: PthreadKeyT = 0;
+            match unsafe { pthread_key_create(&mut key, None) } {
+                0 => taken.push(key),
+                e => {
+                    assert_eq!(e, errno::EAGAIN);
+                    break;
+                }
+            }
+            assert!(taken.len() <= KEYS_MAX);
+        }
+        let last = taken.pop().expect("at least one key");
+        assert_eq!(pthread_key_delete(last), 0);
+        assert_eq!(new_key(None), last);
+        taken.push(last);
+        for k in taken {
+            assert_eq!(pthread_key_delete(k), 0);
         }
     }
 
@@ -5252,55 +7024,72 @@ mod tests {
 
     #[test]
     fn tsd_cleanup_runs_destructor_and_clears_value() {
-        let _g = TSD_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _g = tsd_guard();
         TSD_DTOR_CALLS.store(0, core::sync::atomic::Ordering::SeqCst);
         TSD_DTOR_LAST.store(0, core::sync::atomic::Ordering::SeqCst);
-
-        let mut key: PthreadKeyT = 0;
-        assert_eq!(
-            unsafe { pthread_key_create(&mut key, Some(tsd_record_dtor)) },
-            0
-        );
-
+        let key = new_key(Some(tsd_record_dtor));
         let val = 0xABu8;
         let val_ptr = core::ptr::addr_of!(val) as *mut u8;
         assert_eq!(unsafe { pthread_setspecific(key, val_ptr) }, 0);
-        assert_eq!(unsafe { pthread_getspecific(key) }, val_ptr);
 
         // Simulate thread exit for the calling (host) thread.
-        tsd_thread_cleanup(pthread_self());
-
-        // Destructor ran exactly once with the stored pointer, and the
-        // value is now cleared (slot freed).
+        tsd_thread_cleanup();
         assert_eq!(TSD_DTOR_CALLS.load(core::sync::atomic::Ordering::SeqCst), 1);
         assert_eq!(
             TSD_DTOR_LAST.load(core::sync::atomic::Ordering::SeqCst),
             val_ptr as usize
         );
         assert!(unsafe { pthread_getspecific(key) }.is_null());
+        let pt = crate::perthread::current();
+        assert!(
+            unsafe { (*pt).tsd.iter().all(|b| b.is_null()) },
+            "blocks freed"
+        );
 
-        // Deleting the key clears its destructor: a later cleanup must not
-        // re-invoke it even if a value is present.
-        assert_eq!(pthread_key_delete(key), 0);
+        // A value set under a key deleted since is dropped without its
+        // destructor.
         assert_eq!(unsafe { pthread_setspecific(key, val_ptr) }, 0);
-        tsd_thread_cleanup(pthread_self());
+        assert_eq!(pthread_key_delete(key), 0);
+        tsd_thread_cleanup();
         assert_eq!(TSD_DTOR_CALLS.load(core::sync::atomic::Ordering::SeqCst), 1);
     }
 
     #[test]
     fn tsd_cleanup_null_value_skips_destructor() {
-        let _g = TSD_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _g = tsd_guard();
         TSD_DTOR_CALLS.store(0, core::sync::atomic::Ordering::SeqCst);
-
-        let mut key: PthreadKeyT = 0;
-        assert_eq!(
-            unsafe { pthread_key_create(&mut key, Some(tsd_record_dtor)) },
-            0
-        );
+        let key = new_key(Some(tsd_record_dtor));
         // Never set a value (stays null) → destructor must not run.
-        tsd_thread_cleanup(pthread_self());
+        tsd_thread_cleanup();
         assert_eq!(TSD_DTOR_CALLS.load(core::sync::atomic::Ordering::SeqCst), 0);
-        let _ = pthread_key_delete(key);
+        assert_eq!(pthread_key_delete(key), 0);
+    }
+
+    static TSD_REARM_KEY: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
+    static TSD_REARM_CALLS: core::sync::atomic::AtomicUsize =
+        core::sync::atomic::AtomicUsize::new(0);
+
+    extern "C" fn tsd_rearming_dtor(_: *mut u8) {
+        TSD_REARM_CALLS.fetch_add(1, core::sync::atomic::Ordering::SeqCst);
+        let key = TSD_REARM_KEY.load(core::sync::atomic::Ordering::SeqCst);
+        // Set the key again, every time: the sweep repeats, but only
+        // PTHREAD_DESTRUCTOR_ITERATIONS times.
+        let _ = unsafe { pthread_setspecific(key, 0x40 as *mut u8) };
+    }
+
+    #[test]
+    fn tsd_cleanup_repeats_for_rearmed_keys_but_not_forever() {
+        let _g = tsd_guard();
+        TSD_REARM_CALLS.store(0, core::sync::atomic::Ordering::SeqCst);
+        let key = new_key(Some(tsd_rearming_dtor));
+        TSD_REARM_KEY.store(key, core::sync::atomic::Ordering::SeqCst);
+        assert_eq!(unsafe { pthread_setspecific(key, 0x40 as *mut u8) }, 0);
+        tsd_thread_cleanup();
+        assert_eq!(
+            TSD_REARM_CALLS.load(core::sync::atomic::Ordering::SeqCst),
+            PTHREAD_DESTRUCTOR_ITERATIONS
+        );
+        assert_eq!(pthread_key_delete(key), 0);
     }
 
     // =======================================================================
@@ -5454,7 +7243,9 @@ mod tests {
     fn rwlock_rdlock_tryrdlock() {
         let mut rw = PthreadRwlockT {
             state: AtomicI32::new(0),
-            _pad: [0; 52],
+            waiters: AtomicI32::new(0),
+            writer: AtomicI32::new(0),
+            _pad: [0; 44],
         };
         // Read-lock.
         assert_eq!(pthread_rwlock_rdlock(&mut rw), 0);
@@ -5472,7 +7263,9 @@ mod tests {
     fn rwlock_wrlock_trywrlock() {
         let mut rw = PthreadRwlockT {
             state: AtomicI32::new(0),
-            _pad: [0; 52],
+            waiters: AtomicI32::new(0),
+            writer: AtomicI32::new(0),
+            _pad: [0; 44],
         };
         // Write-lock.
         assert_eq!(pthread_rwlock_wrlock(&mut rw), 0);
@@ -5508,7 +7301,9 @@ mod tests {
     fn cond_signal_increments_generation() {
         let mut cond = PthreadCondT {
             generation: AtomicI32::new(0),
-            _pad: [0; 44],
+            clock: 0,
+            waiters: AtomicI32::new(0),
+            _pad: [0; 36],
         };
         let gen_before = cond.generation.load(core::sync::atomic::Ordering::Relaxed);
         assert_eq!(pthread_cond_signal(&mut cond), 0);
@@ -5520,7 +7315,9 @@ mod tests {
     fn cond_broadcast_increments_generation() {
         let mut cond = PthreadCondT {
             generation: AtomicI32::new(0),
-            _pad: [0; 44],
+            clock: 0,
+            waiters: AtomicI32::new(0),
+            _pad: [0; 36],
         };
         assert_eq!(pthread_cond_broadcast(&mut cond), 0);
         assert_eq!(
@@ -5549,7 +7346,9 @@ mod tests {
         );
         let mut c = PthreadCondT {
             generation: AtomicI32::new(0),
-            _pad: [0; 44],
+            clock: 0,
+            waiters: AtomicI32::new(0),
+            _pad: [0; 36],
         };
         assert_eq!(
             pthread_cond_wait(&mut c, core::ptr::null_mut()),
@@ -5563,7 +7362,9 @@ mod tests {
         let mut m = PTHREAD_MUTEX_INITIALIZER;
         let mut c = PthreadCondT {
             generation: AtomicI32::new(0),
-            _pad: [0; 44],
+            clock: 0,
+            waiters: AtomicI32::new(0),
+            _pad: [0; 36],
         };
         let ts = crate::stat::Timespec {
             tv_sec: 0,
@@ -5788,7 +7589,7 @@ mod tests {
         let _ret = pthread_create(
             &raw mut tid,
             core::ptr::null(),
-            dummy,
+            Some(dummy),
             core::ptr::null_mut(),
         );
     }
@@ -5839,18 +7640,44 @@ mod tests {
     // slots it claims.
     // -----------------------------------------------------------------------
 
+    /// Claim, fill and publish a slot for a synthetic thread, as
+    /// `pthread_create` does.  `map_base` 0 keeps the reclaim paths from
+    /// calling the host's `munmap`.
+    fn track(tid: u64, map_base: usize, map_size: usize, detached: bool) -> &'static ThreadSlot {
+        let slot = claim_slot().expect("a free slot");
+        fill_slot(
+            slot,
+            &ThreadRecord {
+                map_base,
+                map_size,
+                stack_base: map_base,
+                stack_size: DEFAULT_THREAD_STACK_SIZE,
+                guard_size: 0,
+                detached,
+            },
+        );
+        slot.task_id.store(tid, Ordering::Release);
+        slot
+    }
+
+    /// A private table for the growth tests, so they cannot starve the
+    /// process table other tests are using.
+    fn private_table() -> &'static ThreadChunk {
+        Box::leak(Box::new(ThreadChunk::new()))
+    }
+
+    /// Grow a private table from the heap, as `grow_table` does from mmap.
+    fn grow_on_heap(last: &'static ThreadChunk) -> Option<&'static ThreadChunk> {
+        Some(link_chunk(last, private_table()).unwrap_or_else(|theirs| theirs))
+    }
+
     #[test]
     fn test_thread_slot_store_find_release() {
         let tid: u64 = 0x5100_0001;
-        assert!(store_thread_info(
-            tid,
-            0x1_0000,
-            DEFAULT_THREAD_STACK_SIZE,
-            DEFAULT_THREAD_STACK_SIZE + 0x80,
-            false
-        ));
-        let slot = find_slot(tid).expect("slot should be found after store");
-        assert_eq!(slot.stack_base.load(Ordering::Relaxed), 0x1_0000);
+        let slot = track(tid, 0x1_0000, DEFAULT_THREAD_STACK_SIZE + 0x80, false);
+        let found = find_slot(tid).expect("slot should be found after store");
+        assert!(core::ptr::eq(found, slot));
+        assert_eq!(slot.map_base.load(Ordering::Relaxed), 0x1_0000);
         assert_eq!(
             slot.stack_size.load(Ordering::Relaxed),
             DEFAULT_THREAD_STACK_SIZE
@@ -5873,16 +7700,8 @@ mod tests {
     #[test]
     fn test_detach_marks_state_detached() {
         let tid: u64 = 0x5100_0002;
-        // base = 0 so the (never-reached) reclaim path won't call munmap.
-        assert!(store_thread_info(
-            tid,
-            0,
-            DEFAULT_THREAD_STACK_SIZE,
-            DEFAULT_THREAD_STACK_SIZE,
-            false
-        ));
+        let slot = track(tid, 0, DEFAULT_THREAD_STACK_SIZE, false);
         assert_eq!(pthread_detach(tid), 0);
-        let slot = find_slot(tid).expect("detached thread stays tracked");
         assert_eq!(slot.state.load(Ordering::Acquire), STATE_DETACHED);
         // The exit path's CAS(JOINABLE -> EXITED) must now lose to DETACHED,
         // steering the exiting thread onto the self-unmap branch.
@@ -5899,51 +7718,151 @@ mod tests {
     #[test]
     fn test_double_detach_is_einval() {
         let tid: u64 = 0x5100_0003;
-        assert!(store_thread_info(
-            tid,
-            0,
-            DEFAULT_THREAD_STACK_SIZE,
-            DEFAULT_THREAD_STACK_SIZE,
-            false
-        ));
+        let slot = track(tid, 0, DEFAULT_THREAD_STACK_SIZE, false);
         assert_eq!(pthread_detach(tid), 0);
         assert_eq!(pthread_detach(tid), crate::errno::EINVAL);
-        let slot = find_slot(tid).expect("still tracked");
+        release_slot(slot);
+    }
+
+    /// A thread created detached is detached from its first instant: a
+    /// `pthread_detach` of it is a double detach, and it cannot be joined.
+    #[test]
+    fn test_created_detached_thread_refuses_detach_and_join() {
+        let tid: u64 = 0x5100_0006;
+        let slot = track(tid, 0, DEFAULT_THREAD_STACK_SIZE, true);
+        assert_eq!(slot.state.load(Ordering::Acquire), STATE_DETACHED);
+        assert_eq!(pthread_detach(tid), crate::errno::EINVAL);
+        let mut rv: *mut u8 = core::ptr::null_mut();
+        assert_eq!(pthread_join(tid, &raw mut rv), crate::errno::EINVAL);
         release_slot(slot);
     }
 
     #[test]
     fn test_join_rejects_detached_thread() {
         let tid: u64 = 0x5100_0004;
-        assert!(store_thread_info(
-            tid,
-            0,
-            DEFAULT_THREAD_STACK_SIZE,
-            DEFAULT_THREAD_STACK_SIZE,
-            false
-        ));
+        let slot = track(tid, 0, DEFAULT_THREAD_STACK_SIZE, false);
         assert_eq!(pthread_detach(tid), 0);
         // Joining a detached thread must be rejected before any syscall.
         let mut rv: *mut u8 = core::ptr::null_mut();
         assert_eq!(pthread_join(tid, &raw mut rv), crate::errno::EINVAL);
-        let slot = find_slot(tid).expect("still tracked");
         release_slot(slot);
+    }
+
+    #[test]
+    fn tryjoin_answers_by_the_threads_state() {
+        let tid: u64 = 0x5100_0020;
+        let slot = track(tid, 0, DEFAULT_THREAD_STACK_SIZE, false);
+        let mut rv: *mut u8 = core::ptr::null_mut();
+        assert_eq!(
+            pthread_tryjoin_np(tid, &raw mut rv),
+            crate::errno::EBUSY,
+            "still running"
+        );
+        // Exited: the join goes ahead, and its answer is pthread_join's --
+        // on the host, whose kernel call fails, ESRCH.
+        slot.state.store(STATE_EXITED, Ordering::Release);
+        assert_eq!(
+            pthread_tryjoin_np(tid, &raw mut rv),
+            pthread_join(tid, &raw mut rv)
+        );
+        if let Some(s) = find_slot(tid) {
+            release_slot(s);
+        }
+        let detached: u64 = 0x5100_0021;
+        let slot = track(detached, 0, DEFAULT_THREAD_STACK_SIZE, true);
+        assert_eq!(
+            pthread_tryjoin_np(detached, &raw mut rv),
+            crate::errno::EINVAL
+        );
+        release_slot(slot);
+        assert_eq!(
+            pthread_tryjoin_np(0x5100_00ff, &raw mut rv),
+            crate::errno::ESRCH
+        );
+    }
+
+    #[test]
+    fn timedjoin_waits_until_its_time_and_no_longer() {
+        use crate::stat::Timespec;
+        let tid: u64 = 0x5100_0022;
+        let slot = track(tid, 0, DEFAULT_THREAD_STACK_SIZE, false);
+        let mut rv: *mut u8 = core::ptr::null_mut();
+        let at = |tv_sec, tv_nsec| Timespec { tv_sec, tv_nsec };
+        // SAFETY: each `abstime` is this frame's.
+        unsafe {
+            assert_eq!(
+                pthread_timedjoin_np(tid, &raw mut rv, &at(0, 0)),
+                crate::errno::ETIMEDOUT,
+                "1970 has passed"
+            );
+            assert_eq!(
+                pthread_timedjoin_np(tid, &raw mut rv, &at(0, 1_000_000_000)),
+                crate::errno::EINVAL
+            );
+        }
+        let mut now = Timespec::default();
+        assert_eq!(
+            crate::time::clock_gettime(crate::time::CLOCK_REALTIME, &raw mut now),
+            0
+        );
+        let soon = if now.tv_nsec < 970_000_000 {
+            at(now.tv_sec, now.tv_nsec + 30_000_000)
+        } else {
+            at(now.tv_sec + 1, now.tv_nsec - 970_000_000)
+        };
+        let started = std::time::Instant::now();
+        // SAFETY: as above.
+        assert_eq!(
+            unsafe { pthread_timedjoin_np(tid, &raw mut rv, &soon) },
+            crate::errno::ETIMEDOUT
+        );
+        assert!(started.elapsed() >= std::time::Duration::from_millis(25));
+        // Gone already: joined whatever `abstime` says.
+        slot.state.store(STATE_EXITED, Ordering::Release);
+        // SAFETY: as above.
+        let r = unsafe { pthread_timedjoin_np(tid, &raw mut rv, &at(0, -1)) };
+        assert_eq!(r, pthread_join(tid, &raw mut rv));
+        if let Some(s) = find_slot(tid) {
+            release_slot(s);
+        }
+    }
+
+    #[test]
+    fn a_thread_joining_itself_is_edeadlk() {
+        // Give this host thread a task id, as the target's first lookup would.
+        let pt = crate::perthread::current();
+        // SAFETY: this thread's own block.
+        let saved = unsafe { (*pt).tid };
+        // SAFETY: as above.
+        unsafe { (*pt).tid = 0x5100_0030 };
+        let mut rv: *mut u8 = core::ptr::null_mut();
+        assert_eq!(
+            pthread_join(0x5100_0030, &raw mut rv),
+            crate::errno::EDEADLK
+        );
+        assert_eq!(
+            pthread_tryjoin_np(0x5100_0030, &raw mut rv),
+            crate::errno::EDEADLK
+        );
+        let later = crate::stat::Timespec {
+            tv_sec: i64::MAX,
+            tv_nsec: 0,
+        };
+        // SAFETY: `later` is this frame's.
+        assert_eq!(
+            unsafe { pthread_timedjoin_np(0x5100_0030, &raw mut rv, &later) },
+            crate::errno::EDEADLK
+        );
+        // SAFETY: as above.
+        unsafe { (*pt).tid = saved };
     }
 
     #[test]
     fn test_detach_after_joinable_exit_reaps() {
         let tid: u64 = 0x5100_0005;
-        // base = 0 so detach's reclaim path skips the host munmap call.
-        assert!(store_thread_info(
-            tid,
-            0,
-            DEFAULT_THREAD_STACK_SIZE,
-            DEFAULT_THREAD_STACK_SIZE,
-            false
-        ));
+        let slot = track(tid, 0, DEFAULT_THREAD_STACK_SIZE, false);
         // Simulate the exit path winning the race: it marks the slot EXITED
-        // and leaves the stack for a reaper.
-        let slot = find_slot(tid).expect("tracked");
+        // and leaves the mapping for a reaper.
         let cas = slot.state.compare_exchange(
             STATE_JOINABLE,
             STATE_EXITED,
@@ -5957,6 +7876,232 @@ mod tests {
             find_slot(tid).is_none(),
             "detach-after-exit must release the slot"
         );
+    }
+
+    /// The sentinels are never a thread's id.  Until 2026-09-26 an id of 0
+    /// matched an empty slot, and `pthread_detach(0)` marked it detached and
+    /// answered 0.
+    #[test]
+    fn test_find_slot_never_matches_a_sentinel() {
+        let table = private_table();
+        let slot = claim_slot_in(table, |_| None).expect("an empty private table");
+        assert_eq!(slot.task_id.load(Ordering::Relaxed), SLOT_RESERVED);
+        assert!(find_slot_in(table, SLOT_RESERVED).is_none());
+        assert!(find_slot_in(table, SLOT_EMPTY).is_none());
+        assert_eq!(pthread_detach(0), crate::errno::ESRCH);
+        assert_eq!(pthread_detach(SLOT_RESERVED), crate::errno::ESRCH);
+    }
+
+    /// A zero-filled chunk -- what `grow_table` gets from mmap -- is an empty
+    /// chunk.
+    #[test]
+    fn test_a_zeroed_chunk_is_empty() {
+        // SAFETY: every field is an atomic integer or pointer, for which
+        // all-zero is a valid value.
+        let chunk: ThreadChunk = unsafe { core::mem::zeroed() };
+        for slot in &chunk.slots {
+            assert_eq!(slot.task_id.load(Ordering::Relaxed), SLOT_EMPTY);
+            assert_eq!(slot.state.load(Ordering::Relaxed), STATE_JOINABLE);
+        }
+        assert!(chunk.next.load(Ordering::Relaxed).is_null());
+    }
+
+    /// The table grows past a chunk instead of refusing the 65th thread, and
+    /// every slot keeps its address.
+    #[test]
+    fn test_the_table_grows_a_chunk_at_a_time() {
+        let table = private_table();
+        let mut claimed = Vec::new();
+        for _ in 0..CHUNK_SLOTS * 2 + 1 {
+            claimed.push(claim_slot_in(table, grow_on_heap).expect("growth"));
+        }
+        assert_eq!(chunks_from(table).count(), 3);
+        for (i, slot) in claimed.iter().enumerate() {
+            slot.task_id
+                .store(0x5200_0000 + i as u64, Ordering::Release);
+        }
+        for (i, slot) in claimed.iter().enumerate() {
+            let found = find_slot_in(table, 0x5200_0000 + i as u64).expect("tracked");
+            assert!(core::ptr::eq(found, *slot));
+        }
+        // A released slot in the first chunk is reused before the table grows
+        // again.
+        release_slot(claimed[5]);
+        let again = claim_slot_in(table, |_| None).expect("the freed slot");
+        assert!(core::ptr::eq(again, claimed[5]));
+    }
+
+    /// Two threads that both find the table full link one chunk between
+    /// them; the loser uses the winner's.
+    #[test]
+    fn test_a_lost_growth_race_uses_the_winners_chunk() {
+        let table = private_table();
+        let first = private_table();
+        assert!(link_chunk(table, first).is_ok());
+        let second = private_table();
+        let Err(lost) = link_chunk(table, second) else {
+            panic!("a second chunk linked where one already was");
+        };
+        assert!(core::ptr::eq(lost, first));
+    }
+
+    /// A NULL attribute and a freshly initialised one ask for the same
+    /// thread -- which is why `pthread_attr_init` must record the guard.
+    #[test]
+    fn test_create_attr_defaults() {
+        assert_eq!(CreateAttr::read(core::ptr::null()), CreateAttr::DEFAULT);
+        let mut buf: PthreadAttrT = [0; 56];
+        assert_eq!(pthread_attr_init(&mut buf), 0);
+        assert_eq!(CreateAttr::read(&buf), CreateAttr::DEFAULT);
+        assert_eq!(CreateAttr::DEFAULT.guard_size, crate::unistd::PAGE_SIZE);
+    }
+
+    #[test]
+    fn test_create_attr_reads_what_the_setters_stored() {
+        let mut buf: PthreadAttrT = [0; 56];
+        assert_eq!(pthread_attr_init(&mut buf), 0);
+        assert_eq!(pthread_attr_setstacksize(&mut buf, 2 << 20), 0);
+        assert_eq!(pthread_attr_setguardsize(&mut buf, 0), 0);
+        assert_eq!(
+            pthread_attr_setdetachstate(&mut buf, PTHREAD_CREATE_DETACHED),
+            0
+        );
+        assert_eq!(
+            CreateAttr::read(&buf),
+            CreateAttr {
+                stack_size: 2 << 20,
+                guard_size: 0,
+                stack_addr: None,
+                detached: true,
+                explicit_sched: None,
+            }
+        );
+        assert_eq!(
+            pthread_attr_setstack(&mut buf, 0x4000_0000 as *mut core::ffi::c_void, 1 << 20),
+            0
+        );
+        let got = CreateAttr::read(&buf);
+        assert_eq!(got.stack_addr, Some(0x4000_0000));
+        assert_eq!(got.stack_size, 1 << 20);
+    }
+
+    /// A TLS image with a block, so the layout arithmetic has something to
+    /// place.
+    const TEST_TLS: crate::tls::TlsImage = crate::tls::TlsImage {
+        init_vaddr: 0,
+        init_size: 8,
+        mem_size: 24,
+        align: 8,
+    };
+
+    /// Our own stack: guard at the bottom, then at least the stack asked for,
+    /// then the TLS part -- all inside the mapping.
+    #[test]
+    fn test_plan_places_guard_stack_and_tls_in_one_mapping() {
+        let page = crate::unistd::PAGE_SIZE;
+        let want = CreateAttr {
+            stack_size: 100_000,
+            guard_size: 1,
+            stack_addr: None,
+            detached: false,
+            explicit_sched: None,
+        };
+        let plan = plan_thread(&want, &TEST_TLS).expect("fits");
+        assert_eq!(plan.guard, page, "the guard rounds up to a page");
+        assert_eq!(plan.stack, 100_000usize.next_multiple_of(page));
+        assert_eq!(plan.map_size % page, 0);
+        let base = 0x10_0000_0000;
+        let l = plan.place(base, &TEST_TLS);
+        assert_eq!(l.stack_base, base + page);
+        assert_eq!(l.stack_top % 16, 0);
+        assert!(l.stack_top - l.stack_base >= 100_000);
+        let block = TEST_TLS.block_size() as usize;
+        assert!(l.stack_top <= l.tp as usize - block);
+        let end =
+            l.tp as usize + crate::tls::TCB_SIZE as usize + crate::perthread::BLOCK_SIZE as usize;
+        assert!(end <= base + plan.map_size);
+    }
+
+    #[test]
+    fn test_plan_without_a_guard() {
+        let want = CreateAttr {
+            guard_size: 0,
+            ..CreateAttr::DEFAULT
+        };
+        let plan = plan_thread(&want, &TEST_TLS).expect("fits");
+        assert_eq!(plan.guard, 0);
+        assert_eq!(plan.place(0x20_0000, &TEST_TLS).stack_base, 0x20_0000);
+    }
+
+    /// A caller's stack is used as given; only the TLS part is mapped, and
+    /// the guard is ignored, as POSIX requires.
+    #[test]
+    fn test_plan_on_the_callers_stack() {
+        let want = CreateAttr {
+            stack_size: 0x1_0000,
+            guard_size: 0x4000,
+            stack_addr: Some(0x7000_0008),
+            detached: false,
+            explicit_sched: None,
+        };
+        let plan = plan_thread(&want, &TEST_TLS).expect("fits");
+        assert_eq!(plan.guard, 0);
+        assert_eq!(plan.stack, 0);
+        let tls = TEST_TLS.reserve() as usize;
+        assert_eq!(
+            plan.map_size,
+            tls.next_multiple_of(crate::unistd::PAGE_SIZE)
+        );
+        let base = 0x30_0000_0000;
+        let l = plan.place(base, &TEST_TLS);
+        assert_eq!(l.stack_base, 0x7000_0008);
+        assert_eq!(l.stack_top, (0x7000_0008 + 0x1_0000) & !0xf);
+        assert!(l.tp as usize >= base && (l.tp as usize) < base + plan.map_size);
+    }
+
+    #[test]
+    fn test_plan_refuses_sizes_that_overflow() {
+        let huge = CreateAttr {
+            stack_size: usize::MAX - 10,
+            ..CreateAttr::DEFAULT
+        };
+        assert!(plan_thread(&huge, &TEST_TLS).is_none());
+        let huge_guard = CreateAttr {
+            guard_size: usize::MAX,
+            ..CreateAttr::DEFAULT
+        };
+        assert!(plan_thread(&huge_guard, &TEST_TLS).is_none());
+    }
+
+    /// On the host there is no thread to create: `pthread_create` fails
+    /// cleanly and gives its slot back.
+    #[test]
+    fn test_failed_create_leaves_no_slot_behind() {
+        extern "C" fn never(_: *mut u8) -> *mut u8 {
+            core::ptr::null_mut()
+        }
+        let mut t: PthreadT = 0;
+        let reserved_before = chunks_from(&THREAD_TABLE)
+            .flat_map(|c| c.slots.iter())
+            .filter(|s| s.task_id.load(Ordering::Relaxed) == SLOT_RESERVED)
+            .count();
+        assert_eq!(
+            pthread_create(
+                &mut t,
+                core::ptr::null(),
+                Some(never),
+                core::ptr::null_mut()
+            ),
+            crate::errno::EAGAIN
+        );
+        assert_eq!(t, 0);
+        let reserved_after = chunks_from(&THREAD_TABLE)
+            .flat_map(|c| c.slots.iter())
+            .filter(|s| s.task_id.load(Ordering::Relaxed) == SLOT_RESERVED)
+            .count();
+        // Other tests may hold reservations of their own at this moment, but
+        // never more than before plus theirs; this call's is gone.
+        assert!(reserved_after <= reserved_before + 1);
     }
 
     // -----------------------------------------------------------------------
@@ -5983,6 +8128,9 @@ mod tests {
         assert_eq!(ret, crate::errno::EFAULT);
     }
 
+    /// A NULL deadline is looked at only when the lock must be waited for:
+    /// an uncontended lock succeeds, as glibc's does, and a contended one is
+    /// EFAULT where glibc's `__lll_clocklock_wait` would fault reading it.
     #[test]
     fn test_pthread_mutex_timedlock_null_abstime() {
         // SAFETY: zero-init is valid for PthreadMutexT (all-zeros = unlocked).
@@ -5990,8 +8138,14 @@ mod tests {
         unsafe {
             pthread_mutex_init(&raw mut m, core::ptr::null());
         }
-        let ret = pthread_mutex_timedlock(&raw mut m, core::ptr::null());
-        assert_eq!(ret, crate::errno::EFAULT);
+        assert_eq!(pthread_mutex_timedlock(&raw mut m, core::ptr::null()), 0);
+        // Held now, and a normal mutex does not look for its owner: this
+        // call would have to wait.
+        assert_eq!(
+            pthread_mutex_timedlock(&raw mut m, core::ptr::null()),
+            crate::errno::EFAULT
+        );
+        assert_eq!(unsafe { pthread_mutex_unlock(&raw mut m) }, 0);
     }
 
     #[test]
@@ -6137,77 +8291,6 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
-    // CpuSetT — CPU set operations
-    // -----------------------------------------------------------------------
-
-    #[test]
-    fn test_cpu_set_layout() {
-        // 16 × u64 = 128 bytes = 1024 bits.
-        assert_eq!(core::mem::size_of::<CpuSetT>(), 128);
-    }
-
-    #[test]
-    fn test_cpu_set_and_isset() {
-        let mut set = CpuSetT::new();
-        assert!(!cpu_isset(0, &set));
-        cpu_set(0, &mut set);
-        assert!(cpu_isset(0, &set));
-        assert!(!cpu_isset(1, &set));
-    }
-
-    #[test]
-    fn test_cpu_clr() {
-        let mut set = CpuSetT::new();
-        cpu_set(5, &mut set);
-        assert!(cpu_isset(5, &set));
-        cpu_clr(5, &mut set);
-        assert!(!cpu_isset(5, &set));
-    }
-
-    #[test]
-    fn test_cpu_zero() {
-        let mut set = CpuSetT::new();
-        cpu_set(0, &mut set);
-        cpu_set(63, &mut set);
-        cpu_set(1023, &mut set);
-        cpu_zero(&mut set);
-        assert!(!cpu_isset(0, &set));
-        assert!(!cpu_isset(63, &set));
-        assert!(!cpu_isset(1023, &set));
-    }
-
-    #[test]
-    fn test_cpu_count() {
-        let mut set = CpuSetT::new();
-        assert_eq!(cpu_count(&set), 0);
-        cpu_set(0, &mut set);
-        cpu_set(7, &mut set);
-        cpu_set(100, &mut set);
-        assert_eq!(cpu_count(&set), 3);
-    }
-
-    #[test]
-    fn test_cpu_set_boundary() {
-        // Test first and last CPU in each 64-bit word boundary.
-        let mut set = CpuSetT::new();
-        cpu_set(63, &mut set);
-        assert!(cpu_isset(63, &set));
-        cpu_set(64, &mut set);
-        assert!(cpu_isset(64, &set));
-        cpu_set(1023, &mut set);
-        assert!(cpu_isset(1023, &set));
-    }
-
-    #[test]
-    fn test_cpu_set_out_of_range() {
-        // Out of range (≥ 1024) should be silently ignored.
-        let mut set = CpuSetT::new();
-        cpu_set(1024, &mut set);
-        assert!(!cpu_isset(1024, &set));
-        assert_eq!(cpu_count(&set), 0);
-    }
-
-    // -----------------------------------------------------------------------
     // pthread_setaffinity_np / pthread_getaffinity_np
     // -----------------------------------------------------------------------
 
@@ -6217,19 +8300,27 @@ mod tests {
         assert_eq!(ret, crate::errno::EFAULT);
     }
 
+    /// A short mask is zero-extended, as the kernel reads one: one byte
+    /// holding the host's one CPU is every CPU; one holding none is `EINVAL`.
     #[test]
     fn test_pthread_setaffinity_np_small_size() {
-        let set = CpuSetT::new();
-        let ret = pthread_setaffinity_np(0, 1, &set);
-        assert_eq!(ret, crate::errno::EINVAL);
+        let mut set = empty_set();
+        assert_eq!(pthread_setaffinity_np(0, 1, &set), crate::errno::EINVAL);
+        set.bits[0] = 1;
+        assert_eq!(pthread_setaffinity_np(0, 1, &set), 0);
+        assert_eq!(pthread_setaffinity_np(0, 8, &set), 0);
     }
 
     #[test]
     fn test_pthread_setaffinity_np_success() {
-        let mut set = CpuSetT::new();
-        cpu_set(0, &mut set);
+        let mut set = empty_set();
+        set.bits[0] = 1;
         let ret = pthread_setaffinity_np(0, core::mem::size_of::<CpuSetT>(), &set);
         assert_eq!(ret, 0);
+    }
+
+    fn empty_set() -> CpuSetT {
+        CpuSetT { bits: [0; 16] }
     }
 
     #[test]
@@ -6238,11 +8329,17 @@ mod tests {
         assert_eq!(ret, crate::errno::EFAULT);
     }
 
+    /// One byte is not a whole `unsigned long`: `EINVAL`.  Eight are, and
+    /// hold the host's one CPU, as `CPU_ALLOC_SIZE(1)` asks.
     #[test]
     fn test_pthread_getaffinity_np_small_size() {
-        let mut set = CpuSetT::new();
+        let mut set = empty_set();
         let ret = pthread_getaffinity_np(0, 1, &raw mut set);
         assert_eq!(ret, crate::errno::EINVAL);
+        set.bits = [u64::MAX; 16];
+        assert_eq!(pthread_getaffinity_np(0, 8, &raw mut set), 0);
+        assert_eq!(set.bits[0], 1, "the host's one CPU");
+        assert_eq!(set.bits[1], u64::MAX, "past the 8 bytes, left alone");
     }
 
     /// A length that is not a whole number of `unsigned long`s is `EINVAL` —
@@ -6251,7 +8348,7 @@ mod tests {
     /// `sched_setaffinity`.  See `design-decisions.md` §303.
     #[test]
     fn test_pthread_getaffinity_np_unaligned_size() {
-        let mut set = CpuSetT::new();
+        let mut set = empty_set();
         let unaligned = core::mem::size_of::<CpuSetT>() + 1;
         let ret = pthread_getaffinity_np(0, unaligned, &raw mut set);
         assert_eq!(ret, crate::errno::EINVAL);
@@ -6275,15 +8372,17 @@ mod tests {
         );
     }
 
+    /// The CPUs there are, not all 1024 bits: on the host, CPU 0 alone, and
+    /// every other bit cleared.
     #[test]
-    fn test_pthread_getaffinity_np_returns_all_cpus() {
-        let mut set = CpuSetT::new();
+    fn test_pthread_getaffinity_np_returns_the_online_cpus() {
+        let mut set = CpuSetT {
+            bits: [u64::MAX; 16],
+        };
         let ret = pthread_getaffinity_np(0, core::mem::size_of::<CpuSetT>(), &raw mut set);
         assert_eq!(ret, 0);
-        // All bits should be set.
-        for word in &set.__bits {
-            assert_eq!(*word, u64::MAX);
-        }
+        assert_eq!(set.bits[0], 1);
+        assert!(set.bits[1..].iter().all(|&w| w == 0));
     }
 
     // -----------------------------------------------------------------------
@@ -6478,5 +8577,499 @@ mod tests {
         );
         assert_eq!(current_cancel_state(), PTHREAD_CANCEL_DISABLE);
         assert_eq!(current_cancel_type(), PTHREAD_CANCEL_ASYNCHRONOUS);
+    }
+
+    // -- futex-based synchronisation, under real threads --
+
+    /// A shareable raw pointer for handing pthread objects to std threads.
+    struct Shared<T>(*mut T);
+    // By hand: `derive` would demand `T: Copy`, and the pthread objects are
+    // not.
+    impl<T> Clone for Shared<T> {
+        fn clone(&self) -> Self {
+            *self
+        }
+    }
+    impl<T> Copy for Shared<T> {}
+    // SAFETY: the pthread objects behind these pointers are designed for
+    // concurrent use, and every test joins its threads before the object
+    // goes out of scope.
+    unsafe impl<T> Send for Shared<T> {}
+    impl<T> Shared<T> {
+        /// By value, so a closure calling it captures the whole wrapper,
+        /// not the (non-`Send`) pointer field.
+        fn get(self) -> *mut T {
+            self.0
+        }
+    }
+
+    fn ts(sec: i64, nsec: i64) -> crate::stat::Timespec {
+        crate::stat::Timespec {
+            tv_sec: sec,
+            tv_nsec: nsec,
+        }
+    }
+
+    /// `clock`'s now, plus `ms` milliseconds.
+    fn in_ms(clock: i32, ms: i64) -> crate::stat::Timespec {
+        let now = crate::lowlevellock::now_on(clock);
+        let total = now.tv_nsec + ms * 1_000_000;
+        ts(now.tv_sec + total / 1_000_000_000, total % 1_000_000_000)
+    }
+
+    #[test]
+    fn futex_mutex_excludes_under_contention() {
+        let mut m = PTHREAD_MUTEX_INITIALIZER;
+        let mp = Shared(&raw mut m);
+        let mut counter = 0u64;
+        let cp = Shared(&raw mut counter);
+        let threads: Vec<_> = (0..8)
+            .map(|_| {
+                std::thread::spawn(move || {
+                    let (mp, cp) = (mp.get(), cp.get());
+                    for _ in 0..500 {
+                        assert_eq!(unsafe { pthread_mutex_lock(mp) }, 0);
+                        unsafe { *cp += 1 };
+                        assert_eq!(unsafe { pthread_mutex_unlock(mp) }, 0);
+                    }
+                })
+            })
+            .collect();
+        for t in threads {
+            t.join().unwrap();
+        }
+        assert_eq!(counter, 4000);
+        assert_eq!(m.locked.load(Ordering::Relaxed), 0, "left unlocked");
+    }
+
+    /// The owner is the calling thread's cached id: an error-checking mutex
+    /// held by one thread is EPERM to unlock from another and EDEADLK to
+    /// relock from its owner.
+    #[test]
+    fn futex_mutex_ownership_is_per_thread() {
+        let mut attr: PthreadMutexattrT = [0; 4];
+        pthread_mutexattr_init(&mut attr);
+        pthread_mutexattr_settype(&mut attr, PTHREAD_MUTEX_ERRORCHECK);
+        let mut m = PTHREAD_MUTEX_INITIALIZER;
+        assert_eq!(unsafe { pthread_mutex_init(&raw mut m, &attr) }, 0);
+        assert_eq!(unsafe { pthread_mutex_lock(&raw mut m) }, 0);
+        assert_eq!(unsafe { pthread_mutex_lock(&raw mut m) }, errno::EDEADLK);
+        let mp = Shared(&raw mut m);
+        let other = std::thread::spawn(move || {
+            let mp = mp.get();
+            unsafe { pthread_mutex_unlock(mp) }
+        })
+        .join()
+        .unwrap();
+        assert_eq!(other, errno::EPERM);
+        assert_eq!(unsafe { pthread_mutex_unlock(&raw mut m) }, 0);
+    }
+
+    /// A lazily-checked deadline: an uncontended timed lock never reads it,
+    /// NULL included; a held lock times out.
+    #[test]
+    fn futex_mutex_timedlock() {
+        let mut m = PTHREAD_MUTEX_INITIALIZER;
+        assert_eq!(pthread_mutex_timedlock(&raw mut m, core::ptr::null()), 0);
+        let mp = Shared(&raw mut m);
+        let r = std::thread::spawn(move || {
+            let mp = mp.get();
+            let soon = in_ms(crate::time::CLOCK_REALTIME, 20);
+            pthread_mutex_timedlock(mp, &raw const soon)
+        })
+        .join()
+        .unwrap();
+        assert_eq!(r, errno::ETIMEDOUT);
+        assert_eq!(unsafe { pthread_mutex_unlock(&raw mut m) }, 0);
+    }
+
+    /// `pthread_mutex_clocklock` judges its clock before the mutex.
+    #[test]
+    fn futex_mutex_clocklock_clock_first() {
+        assert_eq!(
+            pthread_mutex_clocklock(core::ptr::null_mut(), 42, core::ptr::null()),
+            errno::EINVAL
+        );
+        let mut m = PTHREAD_MUTEX_INITIALIZER;
+        let at = in_ms(crate::time::CLOCK_MONOTONIC, 10);
+        assert_eq!(
+            pthread_mutex_clocklock(&raw mut m, crate::time::CLOCK_MONOTONIC, &raw const at),
+            0
+        );
+        assert_eq!(unsafe { pthread_mutex_unlock(&raw mut m) }, 0);
+    }
+
+    /// A producer and a consumer hand values over a condition variable; the
+    /// consumer sees every one in order.
+    #[test]
+    fn futex_cond_hands_over_values() {
+        let mut m = PTHREAD_MUTEX_INITIALIZER;
+        let mut c: PthreadCondT = unsafe { core::mem::zeroed() };
+        assert_eq!(pthread_cond_init(&raw mut c, core::ptr::null()), 0);
+        let mut slot: Option<u32> = None;
+        let (mp, cp, sp) = (
+            Shared(&raw mut m),
+            Shared(&raw mut c),
+            Shared(&raw mut slot),
+        );
+        let consumer = std::thread::spawn(move || {
+            let (mp, cp, sp) = (mp.get(), cp.get(), sp.get());
+            let mut got = Vec::new();
+            for _ in 0..100 {
+                unsafe { pthread_mutex_lock(mp) };
+                while unsafe { (*sp).is_none() } {
+                    assert_eq!(pthread_cond_wait(cp, mp), 0);
+                }
+                got.push(unsafe { (*sp).take() }.unwrap());
+                pthread_cond_broadcast(cp);
+                unsafe { pthread_mutex_unlock(mp) };
+            }
+            got
+        });
+        for v in 0..100u32 {
+            unsafe { pthread_mutex_lock(&raw mut m) };
+            while slot.is_some() {
+                assert_eq!(pthread_cond_wait(&raw mut c, &raw mut m), 0);
+            }
+            slot = Some(v);
+            pthread_cond_signal(&raw mut c);
+            unsafe { pthread_mutex_unlock(&raw mut m) };
+        }
+        assert_eq!(consumer.join().unwrap(), (0..100).collect::<Vec<_>>());
+    }
+
+    /// The attribute's clock is the one the deadline is measured on.  A
+    /// monotonic deadline 30 ms ahead waits about 30 ms; until 2026-09-26 it
+    /// was read as real time -- decades past -- and returned at once.
+    #[test]
+    fn futex_cond_timedwait_honours_the_attribute_clock() {
+        let mut attr: PthreadCondattrT = [0; 4];
+        pthread_condattr_init(&mut attr);
+        assert_eq!(
+            pthread_condattr_setclock(&mut attr, crate::time::CLOCK_MONOTONIC),
+            0
+        );
+        let mut c: PthreadCondT = unsafe { core::mem::zeroed() };
+        assert_eq!(pthread_cond_init(&raw mut c, &attr), 0);
+        assert_eq!(c.clock, crate::time::CLOCK_MONOTONIC);
+        let mut m = PTHREAD_MUTEX_INITIALIZER;
+        unsafe { pthread_mutex_lock(&raw mut m) };
+        let start = std::time::Instant::now();
+        let at = in_ms(crate::time::CLOCK_MONOTONIC, 30);
+        assert_eq!(
+            pthread_cond_timedwait(&raw mut c, &raw mut m, &raw const at),
+            errno::ETIMEDOUT
+        );
+        assert!(
+            start.elapsed() >= std::time::Duration::from_millis(25),
+            "{:?}",
+            start.elapsed()
+        );
+        // The mutex is held again on return.
+        assert!(m.locked.load(Ordering::Relaxed) != 0);
+        unsafe { pthread_mutex_unlock(&raw mut m) };
+    }
+
+    /// `pthread_cond_clockwait` reads the deadline, then judges the clock,
+    /// then the condition variable; and it measures on the clock it is
+    /// given.
+    #[test]
+    fn futex_cond_clockwait() {
+        let bad = ts(0, 1_000_000_000);
+        assert_eq!(
+            pthread_cond_clockwait(
+                core::ptr::null_mut(),
+                core::ptr::null_mut(),
+                crate::time::CLOCK_MONOTONIC,
+                &raw const bad
+            ),
+            errno::EINVAL,
+            "the deadline first"
+        );
+        let ok = ts(0, 0);
+        assert_eq!(
+            pthread_cond_clockwait(
+                core::ptr::null_mut(),
+                core::ptr::null_mut(),
+                9,
+                &raw const ok
+            ),
+            errno::EINVAL,
+            "then the clock"
+        );
+        let mut c: PthreadCondT = unsafe { core::mem::zeroed() };
+        pthread_cond_init(&raw mut c, core::ptr::null());
+        let mut m = PTHREAD_MUTEX_INITIALIZER;
+        unsafe { pthread_mutex_lock(&raw mut m) };
+        let at = in_ms(crate::time::CLOCK_MONOTONIC, 20);
+        let start = std::time::Instant::now();
+        assert_eq!(
+            pthread_cond_clockwait(
+                &raw mut c,
+                &raw mut m,
+                crate::time::CLOCK_MONOTONIC,
+                &raw const at
+            ),
+            errno::ETIMEDOUT
+        );
+        assert!(start.elapsed() >= std::time::Duration::from_millis(15));
+        unsafe { pthread_mutex_unlock(&raw mut m) };
+    }
+
+    /// `pthread_cond_timedwait` reads the deadline before the condition
+    /// variable: NULL pointers with a malformed deadline are EINVAL.
+    #[test]
+    fn futex_cond_timedwait_deadline_first() {
+        let bad = ts(0, -1);
+        assert_eq!(
+            pthread_cond_timedwait(core::ptr::null_mut(), core::ptr::null_mut(), &raw const bad),
+            errno::EINVAL
+        );
+        assert_eq!(
+            pthread_cond_timedwait(
+                core::ptr::null_mut(),
+                core::ptr::null_mut(),
+                core::ptr::null()
+            ),
+            errno::EFAULT
+        );
+    }
+
+    /// A condition variable's wait returns its mutex's unlock error, having
+    /// not waited: an error-checking mutex the caller does not hold.
+    #[test]
+    fn futex_cond_wait_on_a_mutex_not_held() {
+        let mut attr: PthreadMutexattrT = [0; 4];
+        pthread_mutexattr_init(&mut attr);
+        pthread_mutexattr_settype(&mut attr, PTHREAD_MUTEX_ERRORCHECK);
+        let mut m = PTHREAD_MUTEX_INITIALIZER;
+        unsafe { pthread_mutex_init(&raw mut m, &attr) };
+        let mut c: PthreadCondT = unsafe { core::mem::zeroed() };
+        pthread_cond_init(&raw mut c, core::ptr::null());
+        assert_eq!(pthread_cond_wait(&raw mut c, &raw mut m), errno::EPERM);
+        assert_eq!(c.waiters.load(Ordering::Relaxed), 0);
+    }
+
+    #[test]
+    fn futex_rwlock_readers_share_writers_exclude() {
+        // SAFETY: all-zero is `PTHREAD_RWLOCK_INITIALIZER`'s value.
+        let mut rw: PthreadRwlockT = unsafe { core::mem::zeroed() };
+        let p = Shared(&raw mut rw);
+        let mut value = 0u64;
+        let vp = Shared(&raw mut value);
+        let writers: Vec<_> = (0..4)
+            .map(|_| {
+                std::thread::spawn(move || {
+                    let (p, vp) = (p.get(), vp.get());
+                    for _ in 0..200 {
+                        assert_eq!(pthread_rwlock_wrlock(p), 0);
+                        unsafe { *vp += 1 };
+                        assert_eq!(pthread_rwlock_unlock(p), 0);
+                        assert_eq!(pthread_rwlock_rdlock(p), 0);
+                        let _ = unsafe { *vp };
+                        assert_eq!(pthread_rwlock_unlock(p), 0);
+                    }
+                })
+            })
+            .collect();
+        for t in writers {
+            t.join().unwrap();
+        }
+        assert_eq!(value, 800);
+        assert_eq!(rw.state.load(Ordering::Relaxed), 0);
+    }
+
+    /// The writer relocking is EDEADLK (glibc checks `__cur_writer`); a
+    /// timed write lock times out while a reader holds the lock.
+    #[test]
+    fn futex_rwlock_edeadlk_and_timeouts() {
+        // SAFETY: all-zero is `PTHREAD_RWLOCK_INITIALIZER`'s value.
+        let mut rw: PthreadRwlockT = unsafe { core::mem::zeroed() };
+        assert_eq!(pthread_rwlock_wrlock(&raw mut rw), 0);
+        assert_eq!(pthread_rwlock_wrlock(&raw mut rw), errno::EDEADLK);
+        assert_eq!(pthread_rwlock_rdlock(&raw mut rw), errno::EDEADLK);
+        assert_eq!(pthread_rwlock_unlock(&raw mut rw), 0);
+        assert_eq!(pthread_rwlock_rdlock(&raw mut rw), 0);
+        let p = Shared(&raw mut rw);
+        let r = std::thread::spawn(move || {
+            let p = p.get();
+            let soon = in_ms(crate::time::CLOCK_REALTIME, 20);
+            pthread_rwlock_timedwrlock(p, &raw const soon)
+        })
+        .join()
+        .unwrap();
+        assert_eq!(r, errno::ETIMEDOUT);
+        assert_eq!(pthread_rwlock_unlock(&raw mut rw), 0);
+        // The timed forms judge their deadline eagerly, before the lock.
+        let bad = ts(0, 1_000_000_000);
+        assert_eq!(
+            pthread_rwlock_timedrdlock(core::ptr::null_mut(), &raw const bad),
+            errno::EINVAL
+        );
+        assert_eq!(
+            pthread_rwlock_clockwrlock(core::ptr::null_mut(), 7, &raw const bad),
+            errno::EINVAL
+        );
+        assert_eq!(
+            pthread_rwlock_timedwrlock(&raw mut rw, core::ptr::null()),
+            errno::EFAULT
+        );
+    }
+
+    /// Many rounds of a reused barrier: in every round exactly one thread is
+    /// the serial one, and no thread leaves a round before all have arrived.
+    #[test]
+    fn futex_barrier_rounds() {
+        const N: usize = 4;
+        const ROUNDS: usize = 50;
+        let mut b: PthreadBarrierT = unsafe { core::mem::zeroed() };
+        assert_eq!(
+            pthread_barrier_init(&raw mut b, core::ptr::null(), N as u32),
+            0
+        );
+        let bp = Shared(&raw mut b);
+        let arrivals: std::sync::Arc<Vec<std::sync::atomic::AtomicUsize>> = std::sync::Arc::new(
+            (0..ROUNDS)
+                .map(|_| std::sync::atomic::AtomicUsize::new(0))
+                .collect(),
+        );
+        let serials: std::sync::Arc<Vec<std::sync::atomic::AtomicUsize>> = std::sync::Arc::new(
+            (0..ROUNDS)
+                .map(|_| std::sync::atomic::AtomicUsize::new(0))
+                .collect(),
+        );
+        let threads: Vec<_> = (0..N)
+            .map(|_| {
+                let (arrivals, serials) = (arrivals.clone(), serials.clone());
+                std::thread::spawn(move || {
+                    let bp = bp.get();
+                    for round in 0..ROUNDS {
+                        arrivals[round].fetch_add(1, Ordering::SeqCst);
+                        let r = pthread_barrier_wait(bp);
+                        assert_eq!(arrivals[round].load(Ordering::SeqCst), N, "left early");
+                        if r == PTHREAD_BARRIER_SERIAL_THREAD {
+                            serials[round].fetch_add(1, Ordering::SeqCst);
+                        } else {
+                            assert_eq!(r, 0);
+                        }
+                    }
+                })
+            })
+            .collect();
+        for t in threads {
+            t.join().unwrap();
+        }
+        for round in 0..ROUNDS {
+            assert_eq!(serials[round].load(Ordering::SeqCst), 1, "round {round}");
+        }
+    }
+
+    static ONCE_RUNS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+    extern "C" fn slow_once_init() {
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        ONCE_RUNS.fetch_add(1, Ordering::SeqCst);
+    }
+
+    /// Callers racing `pthread_once` wait for the one running `init` -- and
+    /// find it done when they return.
+    #[test]
+    fn futex_once_waiters_see_init_done() {
+        let mut once = PTHREAD_ONCE_INIT;
+        let op = Shared(&raw mut once);
+        let threads: Vec<_> = (0..6)
+            .map(|_| {
+                std::thread::spawn(move || {
+                    let op = op.get();
+                    assert_eq!(unsafe { pthread_once(op, Some(slow_once_init)) }, 0);
+                    assert!(
+                        ONCE_RUNS.load(Ordering::SeqCst) >= 1,
+                        "returned before init finished"
+                    );
+                })
+            })
+            .collect();
+        for t in threads {
+            t.join().unwrap();
+        }
+        assert_eq!(ONCE_RUNS.load(Ordering::SeqCst), 1);
+    }
+
+    /// The thread id is cached in the per-thread block: the same across
+    /// calls, and different between threads.
+    #[test]
+    fn current_tid_is_cached_and_per_thread() {
+        let a = current_tid();
+        assert_ne!(a, 0);
+        assert_eq!(current_tid(), a);
+        assert_eq!(unsafe { (*crate::perthread::current()).tid }, a);
+        let b = std::thread::spawn(current_tid).join().unwrap();
+        assert_ne!(a, b);
+    }
+
+    // -- the last thread's pthread_exit is exit(0) --
+
+    #[test]
+    fn only_the_last_thread_is_the_last() {
+        let n = AtomicUsize::new(1);
+        live_threads_add(&n);
+        live_threads_add(&n);
+        assert!(!live_threads_remove(&n), "three running, one ends");
+        assert!(!live_threads_remove(&n), "two running, one ends");
+        assert!(live_threads_remove(&n), "the initial thread's count, last");
+    }
+
+    #[test]
+    fn a_thread_that_ends_before_its_creator_resumes_is_not_the_last() {
+        // The creator counts it before the system call, so the order in
+        // which the two run cannot make the new thread look like the last.
+        let n = AtomicUsize::new(1);
+        live_threads_add(&n);
+        assert!(!live_threads_remove(&n), "the creator is still running");
+        assert_eq!(n.load(Ordering::Acquire), 1);
+    }
+
+    #[test]
+    fn a_zero_count_does_not_wrap() {
+        let n = AtomicUsize::new(0);
+        assert!(live_threads_remove(&n));
+        assert_eq!(n.load(Ordering::Acquire), 0, "saturates at zero");
+    }
+
+    // -- A NULL start routine or once routine (design-decisions.md §1115) --
+
+    /// A done once needs no routine: 0, as in glibc.  One not yet run would
+    /// have glibc call the NULL; here it is EFAULT, and the once can still be
+    /// run by a real routine afterwards.
+    #[test]
+    fn a_null_once_routine_is_efault_only_when_it_would_run() {
+        static RAN: AtomicI32 = AtomicI32::new(0);
+        extern "C" fn mark() {
+            RAN.fetch_add(1, Ordering::Relaxed);
+        }
+        let mut once = PTHREAD_ONCE_INIT;
+        // SAFETY: a live once control.
+        unsafe {
+            assert_eq!(pthread_once(&mut once, None), errno::EFAULT);
+            assert_eq!(RAN.load(Ordering::Relaxed), 0);
+            assert_eq!(pthread_once(&mut once, Some(mark)), 0, "still runnable");
+            assert_eq!(RAN.load(Ordering::Relaxed), 1);
+            assert_eq!(pthread_once(&mut once, None), 0, "done: nothing to call");
+        }
+    }
+
+    /// A NULL start routine is judged only after the thread's memory has been
+    /// had: glibc creates the thread, which faults calling it.  The host has
+    /// no memory to give a thread, so there its EAGAIN is the answer -- the
+    /// NULL is not judged first.  (With the memory, it is EFAULT and no
+    /// thread.)
+    #[test]
+    fn a_null_start_routine_is_judged_after_the_threads_memory() {
+        let mut t: PthreadT = 0;
+        assert_eq!(
+            pthread_create(&mut t, core::ptr::null(), None, core::ptr::null_mut()),
+            errno::EAGAIN
+        );
+        assert_eq!(t, 0);
     }
 }

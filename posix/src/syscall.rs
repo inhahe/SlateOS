@@ -276,6 +276,65 @@ pub const SYS_TTY_SET_TERMIOS: u64 = 542;
 /// which returns one raw keyboard byte and so delivered `^C` as byte 0x03.
 /// Returns the byte count (0 at EOF) or a negative error.
 pub const SYS_TTY_READ: u64 = 543;
+/// Discard a terminal's queued input, output or both (`tcflush`,
+/// `tcsetattr(TCSAFLUSH)`). `arg0` is the terminal -- `0` for the caller's
+/// controlling terminal, an owned pty handle otherwise, as for
+/// [`SYS_PTY_GET_WINSIZE`] -- and `arg1` the queue with Linux's values
+/// (`TCIFLUSH` 0, `TCOFLUSH` 1, `TCIOFLUSH` 2). Returns 0 or a negative error;
+/// a background caller is stopped with `SIGTTOU` first, as for
+/// [`SYS_TTY_SET_TERMIOS`].
+///
+/// New on 2026-09-24 (lane A; `requests/a-d-native-tcflush-and-tcsaflush-have-a-syscall-now.md`),
+/// when the line discipline moved from `read` to input arrival and a terminal
+/// acquired an input queue to flush. A kernel without it answers "no such
+/// syscall", which `ioctl.rs`'s `flush_terminal` treats as nothing to flush.
+pub const SYS_TTY_FLUSH: u64 = 1076;
+
+// ---------------------------------------------------------------------------
+// The process's working-directory and file-creation-mask record (1077-1079)
+// ---------------------------------------------------------------------------
+
+/// Record the calling process's working directory: `arg0` the path, `arg1`
+/// its length (no NUL). Returns 0.
+///
+/// The path must already be canonical -- absolute, no `.`, `..` or empty
+/// component, no trailing `/` but the root's, no NUL, at most
+/// [`CWD_RECORD_MAX`] bytes -- and anything else is refused, never rewritten:
+/// `chdir` has resolved and `stat`ed the directory, and a rewritten path would
+/// be one it never checked.
+///
+/// A record, not a lookup base (design-decisions.md §960): no native call
+/// resolves a path against it, and every relative path this libc hands the
+/// kernel is still made absolute here first. It exists so the directory
+/// survives what this libc's own copy cannot -- `exec`, which replaces the
+/// memory holding it, and spawn, which starts a child in its parent's -- and it
+/// is what `/proc/<pid>/cwd` shows.
+///
+/// New on 2026-09-25 (lane A, answering
+/// `requests/d-a-cwd-and-umask-do-not-survive-exec.md`). A kernel without it
+/// answers "no such syscall", and this libc then keeps the directory to itself,
+/// as it always had.
+pub const SYS_PROCESS_SET_CWD: u64 = 1077;
+
+/// Copy the calling process's recorded working directory out: `arg0` the
+/// buffer, `arg1` its capacity. Returns the length written, without a NUL, or
+/// `BufferTooSmall` with nothing written -- a truncated directory is a
+/// different directory. Start-up reads it once, so a program begins where its
+/// parent was rather than at `/`.
+pub const SYS_PROCESS_GET_CWD: u64 = 1078;
+
+/// Set (`0..=0o777`) or query ([`UMASK_QUERY`]) the calling process's
+/// file-creation mask; returns the previous mask. The same record the Linux
+/// shim's `umask` uses: inherited by `fork`, kept by `exec`, given to a
+/// spawned child. A value above `0o777` is refused, not truncated.
+pub const SYS_PROCESS_UMASK: u64 = 1079;
+
+/// [`SYS_PROCESS_UMASK`]'s argument meaning "report the mask, change nothing".
+pub const UMASK_QUERY: u64 = u64::MAX;
+
+/// The longest working directory [`SYS_PROCESS_SET_CWD`] records: the
+/// kernel's `pcb::CWD_MAX_LEN`, `PATH_MAX` less its terminator.
+pub const CWD_RECORD_MAX: usize = 4095;
 
 // ---------------------------------------------------------------------------
 // Pseudo-terminals (544–556)
@@ -503,9 +562,10 @@ pub const SYS_PTY_SET_TERMIOS: u64 = 556;
 /// deliberately: answering `NoSuchProcess` for a dead pid and
 /// `PermissionDenied` for a live one would make this call a process-existence
 /// oracle for any process on the system.  Linux's `prlimit64` does distinguish
-/// them and [`crate::linux_rlimit`] keeps doing so, because reproducing Linux's
-/// observable behaviour is that layer's whole job; the native ABI is not
-/// obliged to inherit the leak.  See §723.
+/// them and the kernel's Linux-ABI `prlimit64` (`kernel/src/syscall/linux.rs`)
+/// keeps doing so, because reproducing Linux's observable behaviour is that
+/// layer's whole job; the native ABI is not obliged to inherit the leak.  See
+/// §723.
 pub const SYS_RLIMIT_GET: u64 = 557;
 
 /// Write one resource limit.  Arguments as for [`SYS_RLIMIT_GET`], with `arg2`
@@ -527,7 +587,7 @@ pub const SYS_RLIMIT_GET: u64 = 557;
 ///
 /// Gate order is **resource before pid** on both calls, so that a caller
 /// probing whether a resource number is understood gets the same answer
-/// whoever they are.  [`crate::linux_rlimit`]'s `prlimit64` keeps Linux's own
+/// whoever they are.  The kernel's Linux-ABI `prlimit64` keeps Linux's own
 /// order (copy-in, pid, permission, resource); the two ABIs agree on outcomes,
 /// not on which of two simultaneous errors wins.
 pub const SYS_RLIMIT_SET: u64 = 558;
@@ -937,6 +997,25 @@ pub const SYS_PIPE_TRY_READ: u64 = 224;
 pub const SYS_PIPE_CLOSE: u64 = 225;
 pub const SYS_PIPE_POLL: u64 = 228;
 pub const SYS_PIPE_READABLE_BYTES: u64 = 229;
+
+// Shared-memory regions (kernel/src/syscall/number.rs 230-234), behind
+// System V shared memory (`crate::sysv_shm`).
+//   CREATE: (size) -> handle; the size is rounded up to pages, the memory
+//           committed, and the creating process authorized to map it.
+//   SIZE:   (handle) -> size in bytes.
+//   CLOSE:  (handle) -> 0; the memory lives on in every mapping of it.
+//   MAP:    (handle, SHM_MAP_READ | SHM_MAP_WRITE) -> the address of a new
+//           mapping -- a fresh one every call; never executable.
+//   UNMAP:  (addr, size) -> 0; `munmap`'s.
+pub const SYS_SHM_CREATE: u64 = 230;
+pub const SYS_SHM_SIZE: u64 = 231;
+pub const SYS_SHM_CLOSE: u64 = 232;
+pub const SYS_SHM_MAP: u64 = 233;
+pub const SYS_SHM_UNMAP: u64 = 234;
+/// `SYS_SHM_MAP`: map readable (the kernel's `MAP_READ`).
+pub const SHM_MAP_READ: u64 = 1 << 0;
+/// `SYS_SHM_MAP`: map writable (the kernel's `MAP_WRITE`).
+pub const SHM_MAP_WRITE: u64 = 1 << 1;
 // Later pipe additions live in the free extension range (657+): the original
 // 220-229 block is full (230 starts shared memory). Backs tee(2) — peek copies
 // buffered bytes without consuming, wait_readable blocks for data/EOF.

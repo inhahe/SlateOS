@@ -153,9 +153,10 @@ pub const LC_COLLATE_MASK: i32 = 1 << LC_COLLATE;
 pub const LC_MONETARY_MASK: i32 = 1 << LC_MONETARY;
 /// Mask for `LC_MESSAGES`.
 pub const LC_MESSAGES_MASK: i32 = 1 << LC_MESSAGES;
-/// Mask for all categories (LC_CTYPE through LC_MESSAGES).
-#[allow(clippy::cast_possible_truncation)]
-pub const LC_ALL_MASK: i32 = (1 << LC_ALL) - 1;
+/// Every category: musl's `0x7fffffff`, as a C program's `<locale.h>` has it
+/// -- all bits, not just the six categories there are (it was `(1 << LC_ALL)
+/// - 1`, 63, until 2026-09-27).  `newlocale` takes any mask.
+pub const LC_ALL_MASK: i32 = 0x7fff_ffff;
 
 // ---------------------------------------------------------------------------
 // Tests
@@ -274,7 +275,7 @@ mod tests {
         assert_eq!(LC_MONETARY_MASK, 16); // 1 << 4
         assert_eq!(LC_MESSAGES_MASK, 32); // 1 << 5
         // LC_ALL_MASK should cover all categories.
-        assert_eq!(LC_ALL_MASK, 63); // (1 << 6) - 1 = 63
+        assert_eq!(LC_ALL_MASK, 0x7fff_ffff); // musl's, probed 2026-09-27
     }
 
     #[test]

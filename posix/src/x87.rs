@@ -3,8 +3,8 @@
 //! Rust has no 80-bit float type, but `long double` is unavoidable at our C
 //! ABI boundary: `printf("%Lf", …)`, `scanf("%Lf", …)` and `strtold` all speak
 //! it, and a C caller's `long double` is 80 bits whether we like it or not.
-//! This module is the single place that knows the format, so the rest of the
-//! sysroot can keep working in `f64`.
+//! This module holds the type, [`LongDouble`] -- the value in memory as the
+//! ABI lays it out -- and the exact narrowing to `f64` and widening from it.
 //!
 //! ## Why this exists at all
 //!
@@ -23,19 +23,24 @@
 //!   conversion character, consumed no argument, and left every *subsequent*
 //!   argument shifted by 16 bytes.
 //!
-//! ## What this module does and does not promise
+//! ## Where the rest of `long double` lives
 //!
-//! It gets the **format and the ABI** exactly right: values cross the boundary
-//! in the encoding C expects, and the narrowing to `f64` is correctly rounded
-//! (round-to-nearest, ties-to-even) with no double rounding, including into
-//! the subnormal range.
+//! For its first two months the sysroot computed every `long double` in
+//! `f64` -- narrowed on the way in, widened on the way out -- which kept the
+//! format and the ABI right and the precision at 53 bits
+//! (`TD-POSIX-LONG-DOUBLE-PRECISION` in `known-issues.md`). None of it is
+//! narrowed now:
 //!
-//! It does **not** give 64-bit-mantissa *arithmetic*. Anything we compute is
-//! computed in `f64`, so a `long double` that round-trips through the sysroot
-//! keeps 53 bits of significand, not 64. That is a documented limitation
-//! (`TD-POSIX-LONG-DOUBLE-PRECISION` in `known-issues.md`), and it is a far
-//! better failure than the previous one: results are accurate to `double`
-//! rather than arbitrary.
+//! - **Arithmetic and `<math.h>`**: `ld80.rs`, on the x87 unit itself, and
+//!   `mathl.rs` over it (design-decisions §1134).
+//! - **Calls**: `ld_abi.rs`'s thunks put a result in `%st(0)` and hand the
+//!   Rust side pointers to its stack arguments.
+//! - **Conversions**: `decfloat.rs` prints and parses all 64 bits of the
+//!   significand, exactly, in the current rounding direction -- `printf`'s
+//!   `%L` conversions, `strtold`, `wcstold`, `scanf`'s `%Lf`.
+//!
+//! What stays here is the narrowing, [`to_f64`], for the functions whose C
+//! signature narrows (`nexttoward` and the like), and its inverse.
 //!
 //! ## The format
 //!
@@ -56,7 +61,7 @@
 /// parameter/object layout. Only the first 10 bytes are meaningful; the rest
 /// is padding whose contents are unspecified (we zero it when we write one).
 #[repr(C, align(16))]
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug)]
 pub struct LongDouble {
     /// Significand, with the integer bit explicitly stored at bit 63.
     pub significand: u64,

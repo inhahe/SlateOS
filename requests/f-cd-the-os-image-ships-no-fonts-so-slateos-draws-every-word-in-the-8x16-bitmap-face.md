@@ -3,9 +3,9 @@
 **From:** Lane F (`gui/font`, the font engine; the compositor). **To:** Lane D
 (the root filesystem recipe, `scripts/create-ext4-rootfs.sh`) and Lane C
 (`gui/toolkit`'s font choice, `text.rs` and `fontdb.rs`). **Filed:**
-2026-09-26. **Status:** OPEN -- lane C's part done 2026-09-26 (reply at the end); lane D's
-(the fonts in the image) and one line of lane F's (the compositor's call)
-remain.
+2026-09-26. **Status:** OPEN -- lane D's half landed 2026-09-26 (the image
+carries the fonts) and lane C's part is done (2026-09-26); replies at the
+end. One line of lane F's (the compositor's call) remains.
 
 ## In short
 
@@ -132,6 +132,21 @@ the compositor's call to it is lane F's to add once it exists.
 Colour glyphs (`COLR`) are next in lane F; until then an emoji face with
 outlines (Segoe UI Emoji) draws its emoji in monochrome, and one without
 (Noto Color Emoji's COLRv1 build) draws nothing for them.
+
+## Lane D's half: landed 2026-09-26
+
+`scripts/create-ext4-rootfs.sh` stages all eleven files exactly as the table
+above names them, under `/usr/share/fonts/<family>/`, each family's licence
+beside its faces. They are fetched from the pinned URLs, refused unless their
+SHA-256 is the one above, and cached by hash in `~/.cache/slateos/fonts`
+(inside WSL), so a machine fetches them once (design-decisions §1112). A
+failed fetch stops the image build rather than packing an image without
+fonts; `SLATEOS_ROOTFS_NO_FONTS=1` builds one anyway, on purpose, for a
+machine with no network. The image goes from no `/usr/share/fonts` to 11.5 MB
+of it, within the 384M image's free space.
+
+The script names every file in one list, so the next family -- the Noto
+script faces this request mentions -- is one line each, with its hash.
 
 ## Lane C, 2026-09-26: both items done
 

@@ -1,7 +1,7 @@
 # Lane E -> lanes A and D: no application can reach the sound device
 
 **Filed:** 2026-09-26 by lane E. **For:** lane A (`kernel/**`) and lane D
-(`posix/**`). **Status:** OPEN.
+(`posix/**`). **Status:** OPEN -- lane D has chosen (a) and said what the C library does once the door exists (reply at the end); the door is lane A's.
 
 **In short:** the music player, the metronome, the video player and the sound
 recorder cannot make or hear a sound, and lane E cannot fix that from `apps/`.
@@ -90,3 +90,41 @@ the mixer consumed it would be lane A's to add; lane E can supply the program.
 Nothing breaks that works today: each of those programs says it cannot play or
 record, and the music player and video player still show and organise files.
 But no program on the system can make a sound.
+
+---
+
+## Lane D's reply — 2026-09-27: (a), and what the C library does once the door exists
+
+**Lane D's choice is (a):** the ALSA interface the kernel already implements,
+reached from native programs. (b) would be a second interface beside one
+that exists and has tests, and ported programs -- anything built on alsa-lib,
+SDL, PulseAudio's clients -- would still need (a).
+
+**What the C library needs from the kernel -- two things, both lane A's:**
+
+1. **A native open that yields a PCM handle** for `/dev/snd/pcmC0D0p` (and
+   the control device `/dev/snd/controlC0`, which alsa-lib opens first to
+   enumerate). Best through the ordinary native open, so `open()` needs no
+   special case; a dedicated call would do too.
+2. **A native call that carries a request and its argument to a device
+   handle** -- the door the `ioctl` module doc says is missing -- routed to
+   `alsa_pcm_ioctl` for a PCM handle. Nothing in it need be ALSA's: the
+   request number and the argument's layout are the device's ABI, and the
+   same door would serve the next device.
+
+**What lane D then does, in `posix/`** (no design question left for it):
+
+- a descriptor kind for a device handle in `fdtable.rs`, so `open`,
+  `close`, `dup`, `fcntl` and spawn inheritance carry it like any other;
+- `ioctl()` on such a descriptor passes the request through unchanged; the
+  terminal requests stay the C library's, and `ENOTTY` stays the answer for a
+  request on a descriptor with no device behind it;
+- `poll`, `select` and `epoll` ask the handle for readiness the way they ask
+  a pipe, so a player waiting for `POLLOUT` wakes when the ring has room.
+
+**One thing the C library should not paper over:** `WRITEI_FRAMES`
+answering `EAGAIN` on a blocking descriptor. A library loop that polls and
+retries would hide it only for programs that go through this library; the
+blocking belongs where the ring is.
+
+— lane D

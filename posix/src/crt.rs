@@ -11,146 +11,88 @@
 //! returns, `exit(main_retval)` is called, which runs `atexit` handlers
 //! and then calls `_exit`.
 //!
-//! ## atexit / at_quick_exit
+//! ## Exit handlers
 //!
-//! Registered functions are called in reverse order (LIFO) during
-//! `exit()` or `quick_exit()` respectively.  Maximum 32 handlers each.
+//! `atexit`, `on_exit`, `__cxa_atexit` (a C++ static object's destructor and
+//! the object) and `at_quick_exit` register onto the lists in
+//! [`crate::exit_list`], which `exit` and `quick_exit` run newest first, with
+//! no limit on how many; `__cxa_finalize` runs a module's destructors early.
+//! `__cxa_thread_atexit_impl` registers a `thread_local` object's destructor,
+//! run when its thread ends.
 //!
-//! ## C++ ABI Stubs
+//! ## Stack canaries
 //!
-//! `__cxa_atexit` and `__cxa_finalize` are C++ destructor registration
-//! functions.  `__stack_chk_fail` and `__stack_chk_guard` support
-//! stack canary protection (GCC/Clang -fstack-protector).
+//! `__stack_chk_fail` and `__stack_chk_guard` support stack canary
+//! protection (GCC/Clang -fstack-protector).
 
 #[cfg(target_os = "none")]
 use core::arch::global_asm;
 use core::ptr::addr_of_mut;
 
-/// Maximum number of atexit handlers.
-const MAX_ATEXIT: usize = 32;
+use crate::exit_list::{self, Handler, Which};
 
-/// atexit handler function pointer type.
-type AtexitFn = extern "C" fn();
+/// `atexit`'s and `at_quick_exit`'s handler.
+type AtexitFn = exit_list::AtexitFn;
 
-/// Registered atexit handlers, in registration order.
-static mut ATEXIT_FUNCS: [Option<AtexitFn>; MAX_ATEXIT] = [None; MAX_ATEXIT];
-/// Number of registered handlers.
-static mut ATEXIT_COUNT: usize = 0;
-
-/// Registered at_quick_exit handlers (C11), in registration order.
-static mut QUICKEXIT_FUNCS: [Option<AtexitFn>; MAX_ATEXIT] = [None; MAX_ATEXIT];
-/// Number of registered quick-exit handlers.
-static mut QUICKEXIT_COUNT: usize = 0;
-
-/// Register a function to be called at normal process termination.
+/// Register `func` to be called at normal process termination.
 ///
-/// Returns 0 on success, -1 if the atexit table is full.
+/// 0, or -1 with `errno` `ENOMEM` when the list cannot grow; there is no
+/// fixed limit.  A NULL `func` is refused -- see [`null_handler`].
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
-pub extern "C" fn atexit(func: AtexitFn) -> i32 {
-    // SAFETY: Single-threaded access.
-    let count = unsafe { addr_of_mut!(ATEXIT_COUNT).read() };
-    if count >= MAX_ATEXIT {
-        return -1;
-    }
-
-    // SAFETY: count < MAX_ATEXIT, so index is valid.
-    // SAFETY: count < MAX_ATEXIT verified above.
-    unsafe {
-        let funcs = addr_of_mut!(ATEXIT_FUNCS);
-        if let Some(slot) = (*funcs).get_mut(count) {
-            *slot = Some(func);
-        }
-        addr_of_mut!(ATEXIT_COUNT).write(count.wrapping_add(1));
-    }
-    0
+pub extern "C" fn atexit(func: Option<AtexitFn>) -> i32 {
+    func.map_or_else(null_handler, |f| {
+        exit_list::register(Which::Exit, Handler::At(f))
+    })
 }
 
-/// Terminate the process, running atexit handlers first.
-///
-/// Calls registered atexit functions in reverse order, then
-/// calls `_exit(status)`.
+/// A NULL handler handed to `atexit`, `at_quick_exit`, `on_exit` or
+/// `__cxa_atexit`.  glibc asserts that it is not NULL (`__internal_atexit`,
+/// `__on_exit`: "detect NULL early with an assertion instead of a SIGSEGV at
+/// program exit when the handler is run", bug 20544), so its process ends
+/// there; C leaves the call undefined.  The call can fail, so here it does,
+/// with nothing registered: -1 and `EINVAL` (design-decisions.md §1115).
+/// Until 2026-09-26 it succeeded, registering nothing.
+fn null_handler() -> i32 {
+    crate::errno::set_errno(crate::errno::EINVAL);
+    -1
+}
+
+/// Terminate the process: run the calling thread's `thread_local`
+/// destructors, then every `atexit`, `on_exit` and `__cxa_atexit` handler
+/// newest first, then flush every stream and `_exit(status)` -- glibc's
+/// `__run_exit_handlers`, in its order.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn exit(status: i32) -> ! {
-    // Run atexit handlers in LIFO order.
-    // SAFETY: Single-threaded access.
-    let count = unsafe { addr_of_mut!(ATEXIT_COUNT).read() };
+    exit_list::run_thread_dtors();
+    exit_list::run(Which::Exit, status);
 
-    let mut i = count;
-    while i > 0 {
-        i = i.wrapping_sub(1);
-        // SAFETY: i < count <= MAX_ATEXIT.
-        // SAFETY: i < count <= MAX_ATEXIT, so index is valid.
-        let func = unsafe {
-            let funcs = addr_of_mut!(ATEXIT_FUNCS);
-            (*funcs).get(i).copied().flatten()
-        };
-        if let Some(f) = func {
-            f();
-        }
-    }
-
-    // Reset count (in case an atexit handler calls exit again).
-    unsafe {
-        addr_of_mut!(ATEXIT_COUNT).write(0);
-    }
-
-    // POSIX: flush all open output streams before termination.
-    // This ensures buffered printf/fputs output is not lost.
-    crate::stdio::fflush(core::ptr::null_mut());
+    // Every stream's output flushed, and every used input stream's
+    // descriptor moved back to where the program stopped reading --
+    // glibc's `_IO_cleanup`.
+    crate::stdio::exit_cleanup();
 
     #[allow(clippy::used_underscore_items)]
     crate::process::_exit(status);
 }
 
-/// C11: Register a function to be called by `quick_exit`.
+/// C11: register `func` to be called by `quick_exit`, and not by `exit`.
 ///
-/// Unlike `atexit`, these handlers are only called by `quick_exit`,
-/// not by normal `exit`.  Returns 0 on success, -1 if full.
+/// 0, or -1 with `errno` `ENOMEM`; a NULL `func` is refused, as
+/// [`null_handler`] says.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
-pub extern "C" fn at_quick_exit(func: AtexitFn) -> i32 {
-    // SAFETY: Single-threaded access.
-    let count = unsafe { addr_of_mut!(QUICKEXIT_COUNT).read() };
-    if count >= MAX_ATEXIT {
-        return -1;
-    }
-
-    unsafe {
-        let funcs = addr_of_mut!(QUICKEXIT_FUNCS);
-        if let Some(slot) = (*funcs).get_mut(count) {
-            *slot = Some(func);
-        }
-        addr_of_mut!(QUICKEXIT_COUNT).write(count.wrapping_add(1));
-    }
-    0
+pub extern "C" fn at_quick_exit(func: Option<AtexitFn>) -> i32 {
+    func.map_or_else(null_handler, |f| {
+        exit_list::register(Which::QuickExit, Handler::At(f))
+    })
 }
 
-/// C11: Terminate the process, running `at_quick_exit` handlers.
-///
-/// Unlike `exit`, does NOT call `atexit` handlers or flush stdio.
-/// Calls handlers registered with `at_quick_exit` in LIFO order,
-/// then calls `_Exit`.
+/// C11: terminate the process, running only the `at_quick_exit` handlers,
+/// newest first, then `_Exit(status)`: no `atexit` handler, no destructor
+/// and no stdio flush, as in glibc.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn quick_exit(status: i32) -> ! {
-    // Run at_quick_exit handlers in LIFO order.
-    let count = unsafe { addr_of_mut!(QUICKEXIT_COUNT).read() };
+    exit_list::run(Which::QuickExit, status);
 
-    let mut i = count;
-    while i > 0 {
-        i = i.wrapping_sub(1);
-        let func = unsafe {
-            let funcs = addr_of_mut!(QUICKEXIT_FUNCS);
-            (*funcs).get(i).copied().flatten()
-        };
-        if let Some(f) = func {
-            f();
-        }
-    }
-
-    unsafe {
-        addr_of_mut!(QUICKEXIT_COUNT).write(0);
-    }
-
-    // quick_exit calls _Exit (not exit), skipping atexit handlers.
     #[allow(clippy::used_underscore_items, non_snake_case)]
     crate::process::_Exit(status);
 }
@@ -347,9 +289,10 @@ static mut INIT_ENVP: [*const u8; MAX_INIT_PTRS + 1] = [core::ptr::null(); MAX_I
 
 /// Maximum number of inherited fd map entries we can receive.
 ///
-/// Matches [`crate::spawn::MAX_FD_MAP`] and covers the common case
-/// (3 standard fds + redirected pipes).
-const MAX_INIT_FDS: usize = 32;
+/// Exactly what the parent can send (`spawn::MAX_FD_MAP`, one per slot of
+/// the fd table). It was 32 on both sides until 2026-09-24, so descriptors
+/// from 32 up never reached a child at all.
+const MAX_INIT_FDS: usize = crate::spawn::MAX_FD_MAP;
 
 /// Static buffer for `SYS_PROCESS_GET_INITIAL_FDS` output.
 static mut INIT_FDS_BUF: [crate::spawn::FdMapEntry; MAX_INIT_FDS] = [crate::spawn::FdMapEntry {
@@ -759,12 +702,16 @@ pub(crate) unsafe fn retrieve_initial_args_from<S: InitArgSource>(
         *envp_ptrs.add(env_idx) = core::ptr::null();
     }
 
-    // Load environment variables into the environ store so that
-    // getenv()/setenv() work.  This must happen before init_environ().
-    if envc > 0 && envp_data_len > 0 {
-        unsafe {
-            crate::environ::load_packed_envp(envp_start, envp_data_len, envc);
-        }
+    // The environment *is* this array: `environ` points at it from here on,
+    // with no copy and no per-entry or count limit. The loader this replaced
+    // copied into a 128-slot table of 256-byte entries and silently dropped
+    // whatever did not fit, so a child whose parent had a long `PATH` simply
+    // did not have one. This must happen before `init_environ()`.
+    if env_idx > 0 {
+        // SAFETY: `envp_ptrs` was NULL-terminated just above, and both it and
+        // the strings it points into are statics or `grow`n memory that live
+        // for the whole process.
+        unsafe { crate::environ::adopt_initial_envp(envp_ptrs) };
     }
 
     #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
@@ -898,20 +845,23 @@ pub unsafe extern "C" fn __libc_start_main(
         }
     }
 
-    // Ensure `environ` points at a valid (empty) null-terminated array.
-    // POSIX requires environ to be non-NULL so programs can safely
-    // iterate it without checking for NULL first.
-    //
-    // Note: if the kernel provided envp, load_packed_envp() was already
-    // called by retrieve_initial_args() to populate ENV_STORE.  This
-    // call to init_environ() rebuilds the pointer array, which will
-    // include those entries.
+    // Ensure `environ` is never NULL, so programs can iterate it without
+    // checking. If the kernel provided an environment,
+    // `retrieve_initial_args()` has already pointed `environ` at it
+    // (`environ::adopt_initial_envp`); otherwise this leaves it at the
+    // shared empty list.
     crate::environ::init_environ();
 
     // Register the signal trampoline so the kernel can deliver
     // catchable signals to handlers installed via signal()/sigaction().
     // Until this runs the kernel applies signal default actions itself.
     crate::signal::init_signals();
+
+    // The working directory and file-creation mask this process was given --
+    // its parent's, carried across spawn and exec by the kernel -- before a
+    // constructor or `main` can ask for either (design-decisions.md §960).
+    crate::unistd::init_cwd_from_record();
+    crate::file::init_umask_from_record();
 
     // Ask the kernel which capabilities this process actually holds and
     // project them onto Linux's capability words, so `capget()` reports the
@@ -926,25 +876,30 @@ pub unsafe extern "C" fn __libc_start_main(
     // leaves behaviour exactly as it was before this call existed.
     let _ = crate::sys_capability::kernel_view::refresh();
 
-    // Run ELF global constructors (.preinit_array then .init_array) and
-    // arrange for destructors (.fini_array) to run at exit.  Constructors
-    // must run after environ/signal setup (they may call getenv, install
-    // handlers, etc.) but before main.  For pure-Rust programs the arrays
-    // are empty (weak boundary symbols are null), so this is a no-op.
+    // Arrange for the destructors (.fini_array) to run at exit, then run the
+    // ELF global constructors (.preinit_array then .init_array).
+    // Constructors must run after environ/signal setup (they may call
+    // getenv, install handlers, etc.) but before main.  For pure-Rust
+    // programs the arrays are empty (weak boundary symbols are null), so
+    // this is a no-op.
     //
-    // `run_destructors` is registered *before* main runs, so exit()'s LIFO
-    // atexit order fires it after any handler main registers — matching the
-    // conventional libc ordering (destructors after atexit handlers).
+    // `run_destructors` is registered *first*, before the constructors, as
+    // glibc registers `call_fini`: a C++ constructor registers its object's
+    // destructor with `__cxa_atexit`, and the exit list runs newest first, so
+    // only this order runs every static destructor, and every handler `main`
+    // registers, before `.fini_array`.  It was registered after the
+    // constructors until 2026-09-26, which ran `.fini_array` ahead of every
+    // destructor a constructor registered.
     #[cfg(target_os = "none")]
     {
+        // The list is empty here and holds 32 entries without allocating, so
+        // this registration cannot fail.
+        let _ = atexit(Some(run_destructors));
         run_constructors();
-        let _ = atexit(run_destructors);
     }
 
     // Call main.
-    let ret = main(actual_argc, actual_argv, unsafe {
-        crate::environ::environ.cast()
-    });
+    let ret = main(actual_argc, actual_argv, crate::environ::current_environ());
 
     // Exit with main's return value.
     exit(ret);
@@ -1055,41 +1010,36 @@ global_asm!(
 // C++ ABI support — __cxa_atexit / __cxa_finalize
 // ---------------------------------------------------------------------------
 //
-// C++ static destructors register via __cxa_atexit (per Itanium C++ ABI).
-// When exit() is called, __cxa_finalize runs them.  Our implementation
-// piggybacks on the atexit table.
+// The Itanium C++ ABI's DSO object destruction API (§3.3.5): a C++ static
+// object's constructor registers `__cxa_atexit(destructor, object,
+// &__dso_handle)`, and the destructor must later be called as
+// `destructor(object)` -- at exit, or when its module is finalised.  The
+// entries share `atexit`'s list (`crate::exit_list`), so every kind of
+// handler runs in one reverse order of registration.
 
-/// C++ ABI: Register a destructor for a static/global object.
+/// C++ ABI: register `func(arg)` to run at exit, or when the module
+/// `dso_handle` is finalised -- a static object's destructor and the object.
 ///
-/// `func` is the destructor, `arg` is the object, `dso_handle` identifies
-/// the shared library (ignored since we don't support dynamic loading).
-///
-/// We ignore `arg` and `dso_handle` and simply register `func` as an
-/// atexit handler.  This is correct for single-module static binaries.
+/// 0, or -1 with `errno` `ENOMEM`.  Compilers do not check the result.  A
+/// NULL `func` is refused, as [`null_handler`] says.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn __cxa_atexit(
-    func: extern "C" fn(*mut u8),
-    _arg: *mut u8,
-    _dso_handle: *mut u8,
+    func: Option<extern "C" fn(*mut u8)>,
+    arg: *mut u8,
+    dso_handle: *mut u8,
 ) -> i32 {
-    // Wrap the C++ destructor as a plain atexit function.
-    // We lose the `arg` parameter here — C++ destructors for static
-    // objects with non-trivial destructors will not receive their `this`.
-    // A full implementation needs a separate destructor list with
-    // (func, arg, dso_handle) triples.  This is a link-compatibility stub.
-    let wrapper: AtexitFn = unsafe { core::mem::transmute(func) };
-    atexit(wrapper)
+    func.map_or_else(null_handler, |f| {
+        exit_list::register(Which::Exit, Handler::Cxa(f, arg, dso_handle))
+    })
 }
 
-/// C++ ABI: Run destructors registered by `__cxa_atexit`.
-///
-/// If `dso_handle` is NULL, runs all destructors (called at exit).
-/// If non-NULL, runs destructors for that specific DSO (called at dlclose).
-/// Since we don't support dynamic loading, this is a no-op (atexit
-/// handlers are run by `exit()` instead).
+/// C++ ABI: run, newest first, the `__cxa_atexit` destructors of module
+/// `dso_handle` -- every termination function, for NULL -- and remove them,
+/// so that `exit` does not run them again.  Called by a module's
+/// `.fini_array` (`crtbeginS.o`'s `__do_global_dtors_aux`).
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
-pub extern "C" fn __cxa_finalize(_dso_handle: *mut u8) {
-    // No-op: exit() runs atexit handlers.
+pub extern "C" fn __cxa_finalize(dso_handle: *mut u8) {
+    exit_list::finalize(dso_handle);
 }
 
 // ---------------------------------------------------------------------------
@@ -1243,28 +1193,46 @@ pub extern "C" fn __libc_csu_init() {
 pub extern "C" fn __libc_csu_fini() {
     // No-op link-compat symbol.  `.fini_array` destructors are run at exit
     // via `run_destructors` (registered with atexit in `__libc_start_main`),
-    // and C++ static destructors via __cxa_finalize.
+    // and C++ static destructors are entries of the same exit list
+    // (`crate::exit_list`).
 }
 
 // ---------------------------------------------------------------------------
 // C++ thread-local destructor support
 // ---------------------------------------------------------------------------
 
-/// C++ ABI: Register a thread-local destructor.
+/// C++ ABI: register `dtor(obj)` to run when the calling thread ends -- the
+/// destructor of a `thread_local` object, which the C++ runtime's
+/// `__cxa_thread_atexit` forwards here.
 ///
-/// Called by the C++ runtime for objects with `thread_local` storage
-/// duration that have non-trivial destructors.  Since we don't support
-/// thread-local storage cleanup yet, we ignore the registration.
-/// The destructor will leak (not be called at thread exit).
+/// The thread's destructors run newest first, from `pthread_exit` (which a
+/// returning start routine reaches too) and, for the thread calling it, from
+/// `exit`, before any `atexit` handler -- glibc's `__call_tls_dtors`.
+/// `dso_handle` is unused: glibc takes it to keep the module loaded while
+/// the destructor is pending, and nothing here unloads modules.
+///
+/// Returns 0.  When the entry cannot be allocated the process is aborted with
+/// a message, as glibc does: the caller has no way to act on a failure, so a
+/// destructor that silently never ran would be the only alternative.  A NULL
+/// `dtor` ends the process the same way -- glibc registers it, and its
+/// process ends when the thread does, calling it (design-decisions.md
+/// §1115).  Until 2026-09-26 it registered nothing.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn __cxa_thread_atexit_impl(
-    _dtor: extern "C" fn(*mut u8),
-    _obj: *mut u8,
+    dtor: Option<extern "C" fn(*mut u8)>,
+    obj: *mut u8,
     _dso_handle: *mut u8,
 ) -> i32 {
-    // Stub: accept registration but never call the destructor.
-    // When thread-local storage is fully supported, these destructors
-    // should run at thread exit in reverse registration order.
+    let Some(dtor) = dtor else {
+        crate::unistd::libc_fatal(
+            b"Fatal libc error: __cxa_thread_atexit_impl: the destructor is NULL\n",
+        );
+    };
+    if exit_list::register_thread_dtor(dtor, obj).is_err() {
+        crate::unistd::libc_fatal(
+            b"Fatal libc error: failed to register TLS destructor: out of memory\n",
+        );
+    }
     0
 }
 
@@ -1740,36 +1708,17 @@ pub extern "C" fn __stack_chk_fail_local() -> ! {
 /// Takes the exit status and a user-provided argument.
 pub type OnExitFn = extern "C" fn(i32, *mut u8);
 
-/// Maximum number of `on_exit` handlers.
-const MAX_ON_EXIT: usize = 32;
-
-/// Registered `on_exit` handlers.
-static mut ON_EXIT_FUNCS: [(Option<OnExitFn>, *mut u8); MAX_ON_EXIT] =
-    [(None, core::ptr::null_mut()); MAX_ON_EXIT];
-/// Number of registered `on_exit` handlers.
-static mut ON_EXIT_COUNT: usize = 0;
-
-/// `on_exit` — register a function to be called at normal process exit.
+/// `on_exit` — register `func(status, arg)` to be called at normal process
+/// exit, in the same reverse order as `atexit`'s handlers.
 ///
-/// Like `atexit`, but the callback receives the exit status and a
-/// user-provided argument.  SunOS/glibc extension.
+/// SunOS/glibc extension.  0, or -1 with `errno` `ENOMEM`; a NULL `func`
+/// is refused, as [`null_handler`] says.  Until 2026-09-26 the handler was
+/// stored in a table `exit` never read.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
-pub extern "C" fn on_exit(func: OnExitFn, arg: *mut u8) -> i32 {
-    // SAFETY: single-threaded access.
-    let count = unsafe { (&raw const ON_EXIT_COUNT).read() };
-    if count >= MAX_ON_EXIT {
-        return -1;
-    }
-    unsafe {
-        // `count < MAX_ON_EXIT == ON_EXIT_FUNCS.len()` from the
-        // check just above.
-        #[allow(clippy::indexing_slicing)]
-        {
-            ON_EXIT_FUNCS[count] = (Some(func), arg);
-        }
-        (&raw mut ON_EXIT_COUNT).write(count.wrapping_add(1));
-    }
-    0
+pub extern "C" fn on_exit(func: Option<OnExitFn>, arg: *mut u8) -> i32 {
+    func.map_or_else(null_handler, |f| {
+        exit_list::register(Which::Exit, Handler::On(f, arg))
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -1804,25 +1753,6 @@ pub extern "C" fn gnu_dev_makedev(major: u32, minor: u32) -> u64 {
 
 #[cfg(test)]
 mod tests {
-
-    /// Serialises the tests that register `atexit`/`on_exit` handlers.
-    ///
-    /// `ON_EXIT_FUNCS` and `ON_EXIT_COUNT` are a fixed 32-entry table and a
-    /// count, and `on_exit` appends to them without a lock -- correct for a
-    /// libc, where registration happens on one thread during startup. Two
-    /// `#[test]`s calling it concurrently are not that: they can interleave
-    /// read-modify-write on the count and lose a registration or overrun the
-    /// table. Unlike the other crt.rs entries the detector reports, this pair
-    /// genuinely writes.
-    static ON_EXIT_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
-
-    /// Poison-tolerant, so one failing test does not make its sibling panic in
-    /// `.unwrap()` and report two failures for one defect.
-    fn on_exit_test_guard() -> std::sync::MutexGuard<'static, ()> {
-        ON_EXIT_TEST_LOCK
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-    }
 
     // -- the standard-descriptor fallback table --
 
@@ -1872,14 +1802,6 @@ mod tests {
         assert_eq!(STD_FD_FALLBACKS.len(), 3);
     }
     use super::*;
-
-    // -- Constants --
-
-    #[test]
-    fn test_max_atexit() {
-        // POSIX minimum is 32 for atexit handlers.
-        assert!(MAX_ATEXIT >= 32);
-    }
 
     #[test]
     fn guard_takes_the_leading_eight_bytes_of_at_random() {
@@ -2207,108 +2129,153 @@ mod tests {
         assert_eq!(__gxx_personality_v0(), 8);
     }
 
-    // -- atexit registration (without calling exit) --
+    // -- the registration functions, and what they register --
+    //
+    // `exit` and `quick_exit` end the process, so these register and then
+    // run the list the way they do, through `crate::exit_list::run`.  The
+    // lists are per-thread on the host, so the tests need no lock.
 
-    // We can test atexit registration by checking the return value.
-    // We can't test exit() itself because it calls _exit which terminates.
-    // But we CAN test that atexit returns 0 for valid registrations.
-
-    /// Serialises every test that touches `ATEXIT_COUNT` / `QUICKEXIT_COUNT`.
-    ///
-    /// Those are process-global, and each of these tests works by *writing* a
-    /// starting count, calling the registration function, and asserting the
-    /// resulting count — so two of them running concurrently (cargo's default is
-    /// a thread per test) trample each other's setup. That is exactly what
-    /// happened: five of these failed intermittently with counts from a
-    /// neighbouring test (`test_at_quick_exit_multiple_registrations` expecting
-    /// 2 and seeing 5, `test_atexit_table_full` expecting the table full and
-    /// seeing an empty one). Same reasoning and same shape as
-    /// `INIT_ARRAY_TEST_LOCK` above.
-    ///
-    /// The guard must cover the reset *and* the cleanup, not just the
-    /// assertion — the reset is half the shared state being mutated.
-    static ATEXIT_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
-
-    /// Take [`ATEXIT_TEST_LOCK`], ignoring poisoning.
-    ///
-    /// A failing assertion panics while holding the guard, which poisons the
-    /// mutex. Propagating that would turn one genuine failure into six
-    /// confusing "test lock poisoned" ones and hide the real cause, so recover
-    /// the guard instead: these tests reset the counters they depend on at
-    /// entry, so a predecessor's abandoned state cannot affect them.
-    fn atexit_test_guard() -> std::sync::MutexGuard<'static, ()> {
-        ATEXIT_TEST_LOCK
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    std::thread_local! {
+        /// What the handlers below saw, in order.
+        static SEEN: core::cell::RefCell<Vec<(char, usize, i32)>> =
+            const { core::cell::RefCell::new(Vec::new()) };
     }
 
-    extern "C" fn dummy_atexit_handler() {}
+    fn seen(tag: char, v: usize, status: i32) {
+        SEEN.with(|s| s.borrow_mut().push((tag, v, status)));
+    }
 
-    #[test]
-    fn test_atexit_returns_zero() {
-        let _guard = atexit_test_guard();
-        // Reset state for this test.
-        unsafe {
-            addr_of_mut!(ATEXIT_COUNT).write(0);
-        }
-        let result = atexit(dummy_atexit_handler);
-        assert_eq!(result, 0);
-        // Cleanup.
-        unsafe {
-            addr_of_mut!(ATEXIT_COUNT).write(0);
-        }
+    fn take_seen() -> Vec<(char, usize, i32)> {
+        SEEN.with(|s| core::mem::take(&mut *s.borrow_mut()))
+    }
+
+    extern "C" fn handler_one() {
+        seen('a', 1, 0);
+    }
+    extern "C" fn handler_two() {
+        seen('a', 2, 0);
+    }
+    extern "C" fn on_exit_handler(status: i32, arg: *mut u8) {
+        seen('o', arg.addr(), status);
+    }
+    extern "C" fn destructor(obj: *mut u8) {
+        seen('c', obj.addr(), 0);
     }
 
     #[test]
-    fn test_atexit_table_full() {
-        let _guard = atexit_test_guard();
-        // Fill the table, then try one more.
-        unsafe {
-            addr_of_mut!(ATEXIT_COUNT).write(MAX_ATEXIT);
-        }
-        let result = atexit(dummy_atexit_handler);
-        assert_eq!(result, -1);
-        // Cleanup.
-        unsafe {
-            addr_of_mut!(ATEXIT_COUNT).write(0);
-        }
+    fn cxa_atexit_keeps_the_object() {
+        // THE REGRESSION PIN, at the ABI: `__cxa_atexit` dropped `arg`, and
+        // CMake's first static destructor ran on `this = NULL` and faulted.
+        let obj = 0x1234_5678 as *mut u8;
+        let dso = (&raw const __dso_handle).cast_mut();
+        assert_eq!(__cxa_atexit(Some(destructor), obj, dso), 0);
+        crate::exit_list::run(Which::Exit, 0);
+        assert_eq!(take_seen(), vec![('c', 0x1234_5678, 0)]);
     }
 
     #[test]
-    fn test_at_quick_exit_returns_zero() {
-        let _guard = atexit_test_guard();
-        unsafe {
-            addr_of_mut!(QUICKEXIT_COUNT).write(0);
-        }
-        let result = at_quick_exit(dummy_atexit_handler);
-        assert_eq!(result, 0);
-        unsafe {
-            addr_of_mut!(QUICKEXIT_COUNT).write(0);
-        }
+    fn every_registration_runs_newest_first() {
+        assert_eq!(atexit(Some(handler_one)), 0);
+        assert_eq!(on_exit(Some(on_exit_handler), 7 as *mut u8), 0);
+        assert_eq!(
+            __cxa_atexit(Some(destructor), 8 as *mut u8, core::ptr::null_mut()),
+            0
+        );
+        assert_eq!(atexit(Some(handler_two)), 0);
+        crate::exit_list::run(Which::Exit, 42);
+        assert_eq!(
+            take_seen(),
+            vec![('a', 2, 0), ('c', 8, 0), ('o', 7, 42), ('a', 1, 0)],
+            "on_exit's handler is called, with the exit status"
+        );
     }
 
     #[test]
-    fn test_at_quick_exit_table_full() {
-        let _guard = atexit_test_guard();
-        unsafe {
-            addr_of_mut!(QUICKEXIT_COUNT).write(MAX_ATEXIT);
+    fn more_than_32_handlers_all_register_and_run() {
+        // The tables were 32 long; the 33rd registration failed, and C++
+        // does not check `__cxa_atexit`'s result.
+        for i in 0usize..200 {
+            assert_eq!(
+                __cxa_atexit(Some(destructor), i as *mut u8, core::ptr::null_mut()),
+                0
+            );
         }
-        let result = at_quick_exit(dummy_atexit_handler);
-        assert_eq!(result, -1);
-        unsafe {
-            addr_of_mut!(QUICKEXIT_COUNT).write(0);
+        for _ in 0..40 {
+            assert_eq!(atexit(Some(handler_one)), 0);
+            assert_eq!(on_exit(Some(on_exit_handler), core::ptr::null_mut()), 0);
         }
+        crate::exit_list::run(Which::Exit, 0);
+        assert_eq!(take_seen().len(), 280);
+    }
+
+    #[test]
+    fn cxa_finalize_runs_a_modules_destructors_once() {
+        let dso = 0x7000 as *mut u8;
+        assert_eq!(__cxa_atexit(Some(destructor), 1 as *mut u8, dso), 0);
+        assert_eq!(atexit(Some(handler_one)), 0);
+        assert_eq!(__cxa_atexit(Some(destructor), 2 as *mut u8, dso), 0);
+        __cxa_finalize(dso);
+        assert_eq!(take_seen(), vec![('c', 2, 0), ('c', 1, 0)]);
+        crate::exit_list::run(Which::Exit, 0);
+        assert_eq!(
+            take_seen(),
+            vec![('a', 1, 0)],
+            "exit does not run them again"
+        );
+    }
+
+    #[test]
+    fn quick_exit_handlers_are_separate_from_exits() {
+        assert_eq!(at_quick_exit(Some(handler_one)), 0);
+        assert_eq!(atexit(Some(handler_two)), 0);
+        crate::exit_list::run(Which::QuickExit, 0);
+        assert_eq!(take_seen(), vec![('a', 1, 0)]);
+        crate::exit_list::run(Which::Exit, 0);
+        assert_eq!(take_seen(), vec![('a', 2, 0)]);
+    }
+
+    /// glibc asserts a handler is not NULL; here the call fails instead,
+    /// registering nothing (design-decisions.md §1115).  It succeeded until
+    /// 2026-09-26.  (`__cxa_thread_atexit_impl`'s NULL ends the process, as
+    /// glibc's ends when the thread exits; that is not a test's to take.)
+    #[test]
+    fn a_null_handler_is_refused_and_registers_nothing() {
+        let calls: [(&str, i32); 4] = [
+            ("atexit", atexit(None)),
+            ("at_quick_exit", at_quick_exit(None)),
+            ("on_exit", on_exit(None, core::ptr::null_mut())),
+            (
+                "__cxa_atexit",
+                __cxa_atexit(None, core::ptr::null_mut(), core::ptr::null_mut()),
+            ),
+        ];
+        for (call, ret) in calls {
+            assert_eq!(ret, -1, "{call}");
+        }
+        crate::errno::set_errno(0);
+        assert_eq!(atexit(None), -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+        crate::exit_list::run(Which::Exit, 0);
+        crate::exit_list::run(Which::QuickExit, 0);
+        assert!(take_seen().is_empty());
     }
 
     // -- __cxa_thread_atexit_impl --
 
-    extern "C" fn dummy_dtor(_: *mut u8) {}
-
     #[test]
-    fn test_cxa_thread_atexit_impl_accepts() {
-        let result =
-            __cxa_thread_atexit_impl(dummy_dtor, core::ptr::null_mut(), core::ptr::null_mut());
-        assert_eq!(result, 0);
+    fn cxa_thread_atexit_impl_runs_the_destructor_on_its_object() {
+        // It accepted the registration and never ran the destructor.
+        let obj = 0xBEEF as *mut u8;
+        assert_eq!(
+            __cxa_thread_atexit_impl(Some(destructor), obj, core::ptr::null_mut()),
+            0
+        );
+        assert_eq!(
+            __cxa_thread_atexit_impl(Some(destructor), 0xF00D as *mut u8, core::ptr::null_mut()),
+            0
+        );
+        crate::exit_list::run_thread_dtors();
+        assert_eq!(take_seen(), vec![('c', 0xF00D, 0), ('c', 0xBEEF, 0)]);
     }
 
     // -- GCC CRT stubs --
@@ -2373,7 +2340,10 @@ mod tests {
 
     #[test]
     fn test_max_init_fds() {
-        assert_eq!(MAX_INIT_FDS, 32);
+        // Exactly what a parent can send: one entry per fd-table slot. It was
+        // 32, so a child never received descriptors 32..256.
+        assert_eq!(MAX_INIT_FDS, crate::spawn::MAX_FD_MAP);
+        assert_eq!(MAX_INIT_FDS, crate::fdtable::MAX_FDS);
     }
 
     #[test]
@@ -2424,63 +2394,6 @@ mod tests {
         __cxa_guard_release(&raw mut guard);
         // Should not acquire again
         assert_eq!(__cxa_guard_acquire(&raw mut guard), 0);
-    }
-
-    // -- Multiple atexit registrations --
-
-    extern "C" fn dummy_handler2() {}
-    extern "C" fn dummy_handler3() {}
-
-    #[test]
-    fn test_atexit_multiple_registrations() {
-        let _guard = atexit_test_guard();
-        unsafe {
-            addr_of_mut!(ATEXIT_COUNT).write(0);
-        }
-        assert_eq!(atexit(dummy_atexit_handler), 0);
-        assert_eq!(atexit(dummy_handler2), 0);
-        assert_eq!(atexit(dummy_handler3), 0);
-        let count = unsafe { addr_of_mut!(ATEXIT_COUNT).read() };
-        assert_eq!(count, 3);
-        unsafe {
-            addr_of_mut!(ATEXIT_COUNT).write(0);
-        }
-    }
-
-    #[test]
-    fn test_at_quick_exit_multiple_registrations() {
-        let _guard = atexit_test_guard();
-        unsafe {
-            addr_of_mut!(QUICKEXIT_COUNT).write(0);
-        }
-        assert_eq!(at_quick_exit(dummy_atexit_handler), 0);
-        assert_eq!(at_quick_exit(dummy_handler2), 0);
-        let count = unsafe { addr_of_mut!(QUICKEXIT_COUNT).read() };
-        assert_eq!(count, 2);
-        unsafe {
-            addr_of_mut!(QUICKEXIT_COUNT).write(0);
-        }
-    }
-
-    // -- atexit and quick_exit stacks are separate --
-
-    #[test]
-    fn test_atexit_and_quick_exit_separate() {
-        let _guard = atexit_test_guard();
-        unsafe {
-            addr_of_mut!(ATEXIT_COUNT).write(0);
-            addr_of_mut!(QUICKEXIT_COUNT).write(0);
-        }
-        atexit(dummy_atexit_handler);
-        at_quick_exit(dummy_handler2);
-        let a = unsafe { addr_of_mut!(ATEXIT_COUNT).read() };
-        let q = unsafe { addr_of_mut!(QUICKEXIT_COUNT).read() };
-        assert_eq!(a, 1);
-        assert_eq!(q, 1);
-        unsafe {
-            addr_of_mut!(ATEXIT_COUNT).write(0);
-            addr_of_mut!(QUICKEXIT_COUNT).write(0);
-        }
     }
 
     // -- getauxval edge cases --
@@ -2541,14 +2454,6 @@ mod tests {
         assert_eq!(result, 0);
     }
 
-    // -- __cxa_thread_atexit_impl with non-null args --
-
-    #[test]
-    fn test_cxa_thread_atexit_impl_nonzero() {
-        let result = __cxa_thread_atexit_impl(dummy_dtor, 0x1000 as *mut u8, 0x2000 as *mut u8);
-        assert_eq!(result, 0);
-    }
-
     // -- Program invocation globals accessible --
 
     #[test]
@@ -2579,21 +2484,14 @@ mod tests {
     // on_exit
     // -----------------------------------------------------------------------
 
-    extern "C" fn dummy_on_exit(_status: i32, _arg: *mut u8) {}
-
     #[test]
-    fn test_on_exit_registers() {
-        let _g = on_exit_test_guard();
-        let ret = on_exit(dummy_on_exit, core::ptr::null_mut());
-        assert_eq!(ret, 0, "on_exit should succeed");
-    }
-
-    #[test]
-    fn test_on_exit_with_arg() {
-        let _g = on_exit_test_guard();
+    fn on_exit_handlers_are_called_with_the_status_and_argument() {
+        // They were stored in a table `exit` never read.
         let mut data: i32 = 42;
-        let ret = on_exit(dummy_on_exit, (&raw mut data) as *mut u8);
-        assert_eq!(ret, 0);
+        let arg = (&raw mut data).cast::<u8>();
+        assert_eq!(on_exit(Some(on_exit_handler), arg), 0);
+        crate::exit_list::run(Which::Exit, 3);
+        assert_eq!(take_seen(), vec![('o', arg.addr(), 3)]);
     }
 
     // -----------------------------------------------------------------------

@@ -91,13 +91,6 @@ pub const DEV_TTY0: &str = "/dev/tty0";
 pub const DEV_TTYS0: &str = "/dev/ttyS0";
 
 // ---------------------------------------------------------------------------
-// Defaults
-// ---------------------------------------------------------------------------
-
-pub const TTY_DEFAULT_ROWS: u16 = 24;
-pub const TTY_DEFAULT_COLS: u16 = 80;
-
-// ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
 
@@ -165,11 +158,7 @@ mod tests {
     }
 
     #[test]
-    fn test_default_tty_size_is_vt100_80x24() {
-        // The classic VT100 dimensions are the historical default when
-        // no window-size message has arrived.
-        assert_eq!(TTY_DEFAULT_COLS, 80);
-        assert_eq!(TTY_DEFAULT_ROWS, 24);
+    fn test_device_paths() {
         assert_eq!(DEV_TTY, "/dev/tty");
         assert_eq!(DEV_CONSOLE, "/dev/console");
     }

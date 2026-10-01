@@ -52,7 +52,8 @@
 //! - `tcsendbreak` — send break condition (stub)
 //! - `tcdrain` — wait for output to complete (stub, writes are synchronous)
 //! - `tcflow` — suspend/restart I/O (stub, no flow control)
-//! - `tcflush` — discard pending I/O (stub, no buffered data)
+//! - `tcflush` — discard a terminal's queued input and/or output
+//!   (`SYS_TTY_FLUSH`; also `ioctl(TCFLSH)` and `tcsetattr(TCSAFLUSH)`)
 //!
 //! ## isatty / ttyname
 //!
@@ -82,6 +83,10 @@ pub const TCSETS: u64 = 0x5402;
 pub const TCSETSW: u64 = 0x5403;
 /// Set termios after draining output and flushing input.
 pub const TCSETSF: u64 = 0x5404;
+/// Discard queued terminal input and/or output; the argument is the queue
+/// selector (`TCIFLUSH`/`TCOFLUSH`/`TCIOFLUSH`) passed by value, not a
+/// pointer. What `tcflush` is, in glibc and here.
+pub const TCFLSH: u64 = 0x540B;
 /// Make this the controlling terminal (for session leaders).
 pub const TIOCSCTTY: u64 = 0x540E;
 /// Get foreground process group of terminal.
@@ -678,11 +683,12 @@ pub extern "C" fn ioctl(fd: i32, request: u64, arg: *mut u8) -> i32 {
         TIOCGWINSZ => handle_tiocgwinsz(entry.kind, entry.handle, arg),
         TIOCSWINSZ => handle_tiocswinsz(entry.kind, entry.handle, arg),
         FIONBIO => handle_fionbio(fd, arg),
-        FIONREAD => handle_fionread(entry.kind, entry.handle, arg),
+        FIONREAD => handle_fionread(fd, entry.kind, entry.handle, arg),
         TCGETS => handle_tcgets(entry.kind, entry.handle, arg),
-        TCSETS | TCSETSW | TCSETSF => handle_tcsets(entry.kind, entry.handle, arg),
-        TIOCGPGRP => handle_tiocgpgrp(fd, entry.kind, entry.handle, arg),
-        TIOCSPGRP => handle_tiocspgrp(fd, entry.kind, entry.handle, arg),
+        TCSETS | TCSETSW | TCSETSF => handle_tcsets(entry.kind, entry.handle, request, arg),
+        TCFLSH => handle_tcflsh(entry.kind, entry.handle, arg),
+        TIOCGPGRP => handle_tiocgpgrp(entry.kind, entry.handle, arg),
+        TIOCSPGRP => handle_tiocspgrp(entry.kind, entry.handle, arg),
         TIOCSCTTY => handle_tiocsctty(entry.kind, entry.handle),
         TIOCNOTTY => handle_tiocnotty(entry.kind, entry.handle),
         _ => {
@@ -817,9 +823,19 @@ fn handle_fionbio(fd: i32, arg: *mut u8) -> i32 {
 
 /// FIONREAD — get number of bytes available to read.
 ///
-/// Returns 0 for Console fds (we don't buffer input), ENOTTY for
-/// non-terminal fds (files don't support FIONREAD via ioctl; use
-/// stat + seek instead).
+/// Linux 6.6's order: the descriptor (the dispatcher), then whether this file
+/// answers FIONREAD at all — `do_vfs_ioctl` does for a regular file
+/// (fs/ioctl.c:829), and otherwise the file's own ioctl does or it is `ENOTTY`
+/// — and only then the write through `arg`, where a NULL faults.  Until
+/// 2026-09-26 the NULL test came first, so an epoll descriptor with a NULL
+/// `arg` said `EFAULT` rather than `ENOTTY`; a regular file was `ENOTTY`
+/// ("files don't support FIONREAD"), where Linux answers its size less the
+/// offset; an inotify descriptor was `ENOTTY`, where `inotify_ioctl` counts
+/// its queued events' bytes; and a listening TCP socket said 0, where
+/// `tcp_ioctl` says `EINVAL`.
+///
+/// The console answers 0: its input is buffered in the kernel, which exposes
+/// no count.
 ///
 /// The pty arms answer `0` or `1` rather than a true count, because the
 /// kernel exposes no readable-byte count for a pty — only the readable bit
@@ -827,35 +843,65 @@ fn handle_fionbio(fd: i32, arg: *mut u8) -> i32 {
 /// deliberate approximation and not a silent one; it is tracked as
 /// `TD-B-PTY-FIONREAD-IS-A-BOOLEAN` and requested of lane A in
 /// `requests/b-a-pty-gaps-master-inheritance-and-readable-bytes.md`.
-fn handle_fionread(kind: HandleKind, handle: u64, arg: *mut u8) -> i32 {
-    use crate::syscall::{SYS_TCP_INFO, syscall3};
-
-    if arg.is_null() {
-        errno::set_errno(errno::EFAULT);
-        return -1;
-    }
-    match kind {
-        HandleKind::Console => {
-            // Console: no buffering visible from userspace.
-            // SAFETY: arg must be at least sizeof(i32).
+fn handle_fionread(fd: i32, kind: HandleKind, handle: u64, arg: *mut u8) -> i32 {
+    match fionread_count(fd, kind, handle) {
+        Ok(available) => {
+            if arg.is_null() {
+                errno::set_errno(errno::EFAULT);
+                return -1;
+            }
+            // SAFETY: a non-NULL `arg` points at an `int`, per ioctl(FIONREAD).
             unsafe {
-                core::ptr::write_unaligned(arg.cast::<i32>(), 0);
+                core::ptr::write_unaligned(arg.cast::<i32>(), available);
             }
             0
         }
+        Err(e) => {
+            errno::set_errno(e);
+            -1
+        }
+    }
+}
+
+/// `do_vfs_ioctl`'s FIONREAD for a regular file (fs/ioctl.c:833): its size
+/// less the file offset, converted to an `int` as `put_user` converts it — so
+/// negative when the offset is past the end.  Anything else a `File`
+/// descriptor can name, a directory above all, is `ENOTTY`: its own ioctl
+/// has no FIONREAD.
+fn fionread_for_file(mode: u32, size: i64, offset: i64) -> Result<i32, i32> {
+    if mode & crate::fcntl::S_IFMT != crate::fcntl::S_IFREG {
+        return Err(errno::ENOTTY);
+    }
+    // The truncation is Linux's: `put_user` into an `int`.
+    Ok(size.wrapping_sub(offset) as i32)
+}
+
+/// What FIONREAD reports for `fd`, or the errno it fails with — everything
+/// but the write through `arg`, which [`handle_fionread`] does after.
+fn fionread_count(fd: i32, kind: HandleKind, handle: u64) -> Result<i32, i32> {
+    use crate::syscall::{SYS_TCP_INFO, syscall3};
+
+    match kind {
+        HandleKind::Console => Ok(0),
         HandleKind::Pipe => {
             // Query actual buffered byte count from the kernel.
             use crate::syscall::{SYS_PIPE_READABLE_BYTES, syscall1};
-            let bytes = syscall1(SYS_PIPE_READABLE_BYTES, handle) as i32;
-            // SAFETY: arg must be at least sizeof(i32).
-            unsafe {
-                core::ptr::write_unaligned(arg.cast::<i32>(), bytes);
-            }
-            0
+            Ok(syscall1(SYS_PIPE_READABLE_BYTES, handle) as i32)
         }
         HandleKind::File => {
-            errno::set_errno(errno::ENOTTY);
-            -1
+            // SAFETY: `Stat` is a plain C struct; all zeroes is a value.
+            let mut st: crate::stat::Stat = unsafe { core::mem::zeroed() };
+            if crate::file::fstat(fd, &raw mut st) < 0 {
+                return Err(errno::get_errno());
+            }
+            if st.st_mode & crate::fcntl::S_IFMT != crate::fcntl::S_IFREG {
+                return Err(errno::ENOTTY);
+            }
+            let offset = crate::file::lseek(fd, 0, crate::fcntl::SEEK_CUR);
+            if offset < 0 {
+                return Err(errno::get_errno());
+            }
+            fionread_for_file(st.st_mode, st.st_size, offset)
         }
         HandleKind::UnixStream => {
             // Query actual buffered byte count from the kernel.
@@ -865,19 +911,11 @@ fn handle_fionread(kind: HandleKind, handle: u64, arg: *mut u8) -> i32 {
                 use crate::syscall::{SYS_SOCKETPAIR_READABLE_BYTES, syscall1};
                 syscall1(SYS_SOCKETPAIR_READABLE_BYTES, handle) as i32
             };
-            // SAFETY: arg must be at least sizeof(i32).
-            unsafe {
-                core::ptr::write_unaligned(arg.cast::<i32>(), bytes);
-            }
-            0
+            Ok(bytes)
         }
         HandleKind::TcpStream => {
             if handle == 0 {
-                // SAFETY: arg must be at least sizeof(i32).
-                unsafe {
-                    core::ptr::write_unaligned(arg.cast::<i32>(), 0);
-                }
-                return 0;
+                return Ok(0);
             }
             // Query TCP_INFO to get rx_buffered (bytes 24..28).
             let mut info_buf = [0u8; 48];
@@ -888,20 +926,12 @@ fn handle_fionread(kind: HandleKind, handle: u64, arg: *mut u8) -> i32 {
             } else {
                 0
             };
-            // SAFETY: arg must be at least sizeof(i32).
-            unsafe {
-                core::ptr::write_unaligned(arg.cast::<i32>(), available as i32);
-            }
-            0
+            Ok(available as i32)
         }
         HandleKind::TcpListener => {
-            // For listeners: number of pending connections (1 or 0).
-            // Simplistically reported as 0 for now.
-            // SAFETY: arg must be at least sizeof(i32).
-            unsafe {
-                core::ptr::write_unaligned(arg.cast::<i32>(), 0);
-            }
-            0
+            // `tcp_ioctl`: `if (sk->sk_state == TCP_LISTEN) return -EINVAL;`
+            // (net/ipv4/tcp.c).  It answered 0 until 2026-09-26.
+            Err(errno::EINVAL)
         }
         HandleKind::UdpSocket => {
             // FIONREAD on UDP returns byte size of the first deliverable
@@ -912,11 +942,7 @@ fn handle_fionread(kind: HandleKind, handle: u64, arg: *mut u8) -> i32 {
             } else {
                 syscall1(SYS_UDP_RX_FRONT_BYTES, handle) as i32
             };
-            // SAFETY: arg must be at least sizeof(i32).
-            unsafe {
-                core::ptr::write_unaligned(arg.cast::<i32>(), bytes);
-            }
-            0
+            Ok(bytes)
         }
         HandleKind::PtyMaster | HandleKind::PtySlave => {
             // A real count, from the kernel's ring, since `SYS_PTY_READABLE_BYTES`
@@ -943,19 +969,19 @@ fn handle_fionread(kind: HandleKind, handle: u64, arg: *mut u8) -> i32 {
             // say "unknown", and reporting a negative as a count would be read as
             // an enormous positive by a caller that stores it unsigned — so fall
             // back to the exact-and-safe answer rather than propagating garbage.
-            let available = i32::try_from(bytes).unwrap_or(0).max(0);
-            // SAFETY: arg must be at least sizeof(i32).
-            unsafe {
-                core::ptr::write_unaligned(arg.cast::<i32>(), available);
-            }
-            0
+            Ok(i32::try_from(bytes).unwrap_or(0).max(0))
         }
-        HandleKind::Eventfd | HandleKind::Epoll | HandleKind::Timerfd | HandleKind::Inotify => {
-            // Linux's eventfd / epoll / timerfd / inotify have no .ioctl
-            // handler, so ioctl() returns ENOTTY on them.  Match that
-            // behavior.
-            errno::set_errno(errno::ENOTTY);
-            -1
+        HandleKind::Inotify => {
+            // `inotify_ioctl` answers FIONREAD with the bytes its queued events
+            // would read as (fs/notify/inotify/inotify_user.c:329).  The
+            // comment here said inotify had no ioctl until 2026-09-26.
+            crate::epoll::inotify_pending_bytes(handle)
+        }
+        HandleKind::Eventfd | HandleKind::Epoll | HandleKind::Timerfd => {
+            // No FIONREAD in eventfd's, epoll's or timerfd's file operations
+            // (timerfd's ioctl knows only TFD_IOC_SET_TICKS), so the ioctl is
+            // ENOTTY.
+            Err(errno::ENOTTY)
         }
     }
 }
@@ -993,17 +1019,21 @@ fn handle_tcgets(kind: HandleKind, handle: u64, arg: *mut u8) -> i32 {
 /// installs it via `SYS_TTY_SET_TERMIOS`, so raw mode, `ECHO` and the
 /// control characters take real effect on the next console read.
 ///
-/// All three requests behave identically: `TCSETSW` waits for queued output
-/// to drain and `TCSETSF` additionally flushes pending input, and we have
-/// neither an output queue nor a kernel-side input queue to act on.  The
-/// Linux shim collapses the same three for the same reason.
+/// `TCSETSW` is `TCSETS`: it waits for queued output to drain, and there is
+/// no output queue. `TCSETSF` is not quite: since 2026-09-24 the kernel's line
+/// discipline runs as input arrives, so a terminal has a real input queue,
+/// and `TCSETSF` -- `tcsetattr(TCSAFLUSH)`, what a password prompt uses to
+/// throw away type-ahead -- empties it with `SYS_TTY_FLUSH` once the new
+/// settings are in. Linux flushes first; the kernel's own `TCSETSF` flushes
+/// after a *successful* set, so a refused request discards nothing, and this
+/// does the same. The end state is identical either way.
 ///
 /// This was previously accepted and thrown away, on the rationale that "our
 /// console has no configurable line discipline".  That stopped being true
 /// when `kernel/src/tty.rs` gained one; the comment outlived the fact, and
 /// every native-ABI program that asked for raw mode silently got cooked
 /// mode instead.
-fn handle_tcsets(kind: HandleKind, handle: u64, arg: *mut u8) -> i32 {
+fn handle_tcsets(kind: HandleKind, handle: u64, request: u64, arg: *mut u8) -> i32 {
     let Some(term) = terminal_arg(kind, handle) else {
         errno::set_errno(errno::ENOTTY);
         return -1;
@@ -1014,11 +1044,102 @@ fn handle_tcsets(kind: HandleKind, handle: u64, arg: *mut u8) -> i32 {
     }
     // SAFETY: Caller must provide a buffer large enough for Termios.
     let t = unsafe { core::ptr::read_unaligned(arg.cast::<Termios>()) };
-    if set_kernel_termios(term, &t) {
-        0
-    } else {
+    if !set_kernel_termios(term, &t) {
         // errno already set by the translation of the kernel's error.
-        -1
+        return -1;
+    }
+    if request == TCSETSF {
+        // Not expected to fail once the set has succeeded on the same
+        // terminal -- the selector is fixed and valid -- but if it does, the
+        // caller asked for its type-ahead to be discarded and must not be told
+        // it was.
+        if let Err(e) = flush_terminal(term, TCIFLUSH) {
+            errno::set_errno(e);
+            return -1;
+        }
+    }
+    0
+}
+
+/// TCFLSH -- `tcflush`: discard queued input, output or both.
+///
+/// The selector arrives by value in the pointer slot, as it does from C's
+/// variadic `ioctl(fd, TCFLSH, TCIFLUSH)`. Only the low 32 bits are the `int`:
+/// a variadic `int` travels in a 64-bit register whose upper half the caller
+/// need not clear.
+///
+/// Error order is Linux's: a descriptor that is not a terminal is `ENOTTY`
+/// before an unknown selector is `EINVAL`.
+fn handle_tcflsh(kind: HandleKind, handle: u64, arg: *mut u8) -> i32 {
+    let Some(term) = terminal_arg(kind, handle) else {
+        errno::set_errno(errno::ENOTTY);
+        return -1;
+    };
+    let queue = arg as usize as u32 as i32;
+    if !(TCIFLUSH..=TCIOFLUSH).contains(&queue) {
+        errno::set_errno(errno::EINVAL);
+        return -1;
+    }
+    match flush_terminal(term, queue) {
+        Ok(()) => 0,
+        Err(e) => {
+            errno::set_errno(e);
+            -1
+        }
+    }
+}
+
+/// Discard a terminal's queued input, output or both (`SYS_TTY_FLUSH`).
+///
+/// `term` follows [`terminal_arg`]'s convention, which is the syscall's own:
+/// `0` for the caller's controlling terminal, an owned pty handle otherwise.
+/// `queue` is `TCIFLUSH`, `TCOFLUSH` or `TCIOFLUSH`, already validated.
+///
+/// A kernel older than the call answers "no such syscall", and that is
+/// success: on such a kernel the line discipline ran inside `read`, so
+/// typed-ahead input was raw bytes nobody had looked at yet and there was no
+/// queue to empty. Discarding nothing is the truthful result there, and it is
+/// what `tcflush` always returned before the call existed.
+fn flush_terminal(term: u64, queue: i32) -> Result<(), i32> {
+    #[cfg(target_os = "none")]
+    {
+        let ret = crate::syscall::syscall2(crate::syscall::SYS_TTY_FLUSH, term, queue as u64);
+        if ret >= 0 {
+            return Ok(());
+        }
+        match errno::errno_for(ret) {
+            errno::ENOSYS => Ok(()),
+            e => Err(e),
+        }
+    }
+    #[cfg(not(target_os = "none"))]
+    {
+        host_flush::record(term, queue);
+        Ok(())
+    }
+}
+
+/// Host-build record of the flushes asked for, so the tests can check that
+/// `tcflush`, `ioctl(TCFLSH)` and `tcsetattr(TCSAFLUSH)` issue the right one --
+/// the host has no kernel to flush anything. Per-thread, like `host_termios`.
+#[cfg(not(target_os = "none"))]
+mod host_flush {
+    extern crate std;
+    use core::cell::RefCell;
+    use std::vec::Vec;
+
+    std::thread_local! {
+        static FLUSHES: RefCell<Vec<(u64, i32)>> = const { RefCell::new(Vec::new()) };
+    }
+
+    pub(super) fn record(term: u64, queue: i32) {
+        FLUSHES.with(|f| f.borrow_mut().push((term, queue)));
+    }
+
+    /// The flushes recorded on this thread since the last call, oldest first.
+    #[cfg(test)]
+    pub(super) fn take() -> Vec<(u64, i32)> {
+        FLUSHES.with(|f| core::mem::take(&mut *f.borrow_mut()))
     }
 }
 
@@ -1066,12 +1187,19 @@ fn is_pgrp_terminal(kind: HandleKind) -> bool {
 /// controlling terminal, or when nothing has claimed the named pty yet), so a
 /// -1 is propagated rather than written into the caller's buffer as if it were
 /// a process group.
-fn handle_tiocgpgrp(fd: i32, kind: HandleKind, handle: u64, arg: *mut u8) -> i32 {
+///
+/// Linux's `tiocgpgrp` (drivers/tty/tty_jobctrl.c) refuses a console or
+/// slave that is not the caller's controlling terminal before its
+/// `put_user`, so there a NULL `arg` is `EFAULT` only once there is a group
+/// to write; it was tested first until 2026-09-26.  A master skips that
+/// check and its lookup cannot fail, so on a master a NULL `arg` is always
+/// `EFAULT`, and is tested first.
+fn handle_tiocgpgrp(kind: HandleKind, handle: u64, arg: *mut u8) -> i32 {
     if !is_pgrp_terminal(kind) && kind != HandleKind::PtyMaster {
         errno::set_errno(errno::ENOTTY);
         return -1;
     }
-    if arg.is_null() {
+    if kind == HandleKind::PtyMaster && arg.is_null() {
         errno::set_errno(errno::EFAULT);
         return -1;
     }
@@ -1084,14 +1212,18 @@ fn handle_tiocgpgrp(fd: i32, kind: HandleKind, handle: u64, arg: *mut u8) -> i32
             }
         }
     } else {
-        let v = crate::process::tcgetpgrp(fd);
+        let v = crate::process::ctty_get_fg();
         if v < 0 {
-            // errno is already set by tcgetpgrp.
+            // errno is already set.
             return -1;
         }
         v
     };
-    // SAFETY: arg must be at least sizeof(i32) per ioctl contract.
+    if arg.is_null() {
+        errno::set_errno(errno::EFAULT);
+        return -1;
+    }
+    // SAFETY: a non-NULL `arg` points at a `pid_t`, per the ioctl contract.
     unsafe {
         core::ptr::write_unaligned(arg.cast::<i32>(), pgrp);
     }
@@ -1109,7 +1241,16 @@ fn handle_tiocgpgrp(fd: i32, kind: HandleKind, handle: u64, arg: *mut u8) -> i32
 /// pgid as `arg0`, while 871 takes the terminal as `arg0` and the pgid as
 /// `arg1`.  That is not gratuitous: 537/538 are invoked as `syscall0`/`syscall1`
 /// and so have no free register to widen into.
-fn handle_tiocspgrp(fd: i32, kind: HandleKind, handle: u64, arg: *mut u8) -> i32 {
+///
+/// Linux's `tiocspgrp` order after the terminal check: the `get_user`
+/// (`EFAULT`), a negative group (`EINVAL`), then the controlling-terminal and
+/// session checks and the group's existence, which are the kernel's.  The
+/// negative test is here because nothing below it makes it: until 2026-09-26
+/// `tcsetpgrp` made it, and refused 0 too, which Linux does not.  (Linux runs
+/// `tty_check_change` before the `get_user`, so a background caller passing a
+/// NULL `arg` gets `SIGTTOU` there and `EFAULT` here: our kernel makes that
+/// check inside the call, which a NULL `arg` never reaches.)
+fn handle_tiocspgrp(kind: HandleKind, handle: u64, arg: *mut u8) -> i32 {
     if !is_pgrp_terminal(kind) && kind != HandleKind::PtyMaster {
         errno::set_errno(errno::ENOTTY);
         return -1;
@@ -1120,6 +1261,10 @@ fn handle_tiocspgrp(fd: i32, kind: HandleKind, handle: u64, arg: *mut u8) -> i32
     }
     // SAFETY: arg must be at least sizeof(i32) per ioctl contract.
     let pgrp = unsafe { core::ptr::read_unaligned(arg.cast::<i32>()) };
+    if pgrp < 0 {
+        errno::set_errno(errno::EINVAL);
+        return -1;
+    }
     if kind == HandleKind::PtyMaster {
         return match pty_master_set_pgrp(handle, pgrp) {
             Ok(()) => 0,
@@ -1129,7 +1274,7 @@ fn handle_tiocspgrp(fd: i32, kind: HandleKind, handle: u64, arg: *mut u8) -> i32
             }
         };
     }
-    crate::process::tcsetpgrp(fd, pgrp)
+    crate::process::ctty_set_fg(pgrp)
 }
 
 /// `SYS_PTY_GET_PGRP` behind an `errno`-shaped result.
@@ -1587,6 +1732,30 @@ pub extern "C" fn tcgetattr(fd: i32, termios_p: *mut Termios) -> i32 {
     ioctl(fd, TCGETS, termios_p.cast::<u8>())
 }
 
+/// The terminal's size, into `*ws` (POSIX.1-2024): `TIOCGWINSZ`, as musl's
+/// is. `ENOTTY` for a descriptor that is no terminal.
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub extern "C" fn tcgetwinsize(fd: i32, ws: *mut Winsize) -> i32 {
+    ioctl(fd, TIOCGWINSZ, ws.cast::<u8>())
+}
+
+/// Set the terminal's size from `*ws` (POSIX.1-2024): `TIOCSWINSZ`. The
+/// buffer is only read -- `ioctl` takes one pointer type for both directions.
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub extern "C" fn tcsetwinsize(fd: i32, ws: *const Winsize) -> i32 {
+    ioctl(fd, TIOCSWINSZ, ws.cast_mut().cast::<u8>())
+}
+
+/// Hang up the controlling terminal (Linux). The kernel here has no way to
+/// simulate a hangup on a terminal -- the job `vhangup` exists for, which
+/// Linux reserves to `CAP_SYS_TTY_CONFIG` -- so this answers `ENOSYS`, as a
+/// Linux kernel does whose terminal layer lacks the call.
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub extern "C" fn vhangup() -> i32 {
+    crate::errno::set_errno(crate::errno::ENOSYS);
+    -1
+}
+
 /// Set terminal attributes.
 ///
 /// `optional_actions` specifies when the change takes effect:
@@ -1802,14 +1971,20 @@ pub extern "C" fn tcdrain(fd: i32) -> i32 {
     0
 }
 
-/// TCOON — restart suspended output.
-pub const TCOON: i32 = 0;
+// `tcflow`'s actions, as musl's `<bits/termios.h>` and the kernel's
+// `asm-generic/termbits.h` number them: suspend before restart. Until
+// 2026-09-27 each pair was the other way round -- TCOON 0, TCOOFF 1 --
+// and a test pinned that order; `tcflow` accepts all four and does nothing
+// with them, so no caller saw it, but an implementation of flow control
+// would have run every one backwards.
 /// TCOOFF — suspend output.
-pub const TCOOFF: i32 = 1;
-/// TCION — restart suspended input.
-pub const TCION: i32 = 2;
-/// TCIOFF — suspend input.
-pub const TCIOFF: i32 = 3;
+pub const TCOOFF: i32 = 0;
+/// TCOON — restart suspended output.
+pub const TCOON: i32 = 1;
+/// TCIOFF — send a STOP character, to suspend the terminal's input.
+pub const TCIOFF: i32 = 2;
+/// TCION — send a START character, to restart it.
+pub const TCION: i32 = 3;
 
 /// Suspend or restart terminal I/O.
 ///
@@ -1821,7 +1996,7 @@ pub extern "C" fn tcflow(fd: i32, action: i32) -> i32 {
         errno::set_errno(e);
         return -1;
     }
-    if !(TCOON..=TCIOFF).contains(&action) {
+    if !(TCOOFF..=TCION).contains(&action) {
         errno::set_errno(errno::EINVAL);
         return -1;
     }
@@ -1835,22 +2010,23 @@ pub const TCOFLUSH: i32 = 1;
 /// TCIOFLUSH — flush both input and output.
 pub const TCIOFLUSH: i32 = 2;
 
-/// Discard pending terminal I/O data.
+/// Discard a terminal's queued input (`TCIFLUSH`), output (`TCOFLUSH`) or
+/// both (`TCIOFLUSH`).
 ///
-/// Our console doesn't buffer data beyond the framebuffer, so there
-/// is nothing to flush.  Validates `fd` is a terminal and
-/// `queue_selector` is a known constant.
+/// `ioctl(fd, TCFLSH, queue_selector)`, as in glibc, so the descriptor checks
+/// are `ioctl`'s: `EBADF` for a bad or `O_PATH` descriptor, `ENOTTY` for one
+/// that is not a terminal (the console or either end of a pty), then `EINVAL`
+/// for an unknown selector.
+///
+/// Until 2026-09-25 this checked its arguments and discarded nothing, and
+/// refused a pty outright: there was no queue to empty. There is now (the
+/// kernel's line discipline runs as input arrives), and `SYS_TTY_FLUSH`
+/// empties it -- see [`flush_terminal`].
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn tcflush(fd: i32, queue_selector: i32) -> i32 {
-    if let Err(e) = validate_terminal_fd(fd) {
-        errno::set_errno(e);
-        return -1;
-    }
-    if !(TCIFLUSH..=TCIOFLUSH).contains(&queue_selector) {
-        errno::set_errno(errno::EINVAL);
-        return -1;
-    }
-    0
+    // The selector travels in the pointer slot, as it does through C's
+    // variadic `ioctl`; `handle_tcflsh` reads back its low 32 bits.
+    ioctl(fd, TCFLSH, queue_selector as u32 as usize as *mut u8)
 }
 
 /// Validate that `fd` is an open terminal.
@@ -1896,6 +2072,25 @@ pub extern "C" fn tcgetsid(fd: i32) -> i32 {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn vhangup_is_enosys() {
+        crate::errno::set_errno(0);
+        assert_eq!(super::vhangup(), -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::ENOSYS);
+    }
+
+    #[test]
+    fn tcgetwinsize_of_no_terminal_fails() {
+        let mut ws = super::Winsize {
+            ws_row: 1,
+            ws_col: 2,
+            ws_xpixel: 3,
+            ws_ypixel: 4,
+        };
+        assert_eq!(super::tcgetwinsize(-1, &raw mut ws), -1);
+        assert_eq!(super::tcsetwinsize(-1, &raw const ws), -1);
+    }
+
     use super::*;
 
     // -- Structure size tests --
@@ -2378,12 +2573,15 @@ mod tests {
 
     // -- tcflow / tcflush action constants --
 
+    /// musl's `<bits/termios.h>` (and the kernel's `asm-generic/termbits.h`):
+    /// suspend before restart, output before input.  Checked against musl's
+    /// header with a probe on 2026-09-27, when this test had the pairs swapped.
     #[test]
     fn test_tcflow_action_constants() {
-        assert_eq!(TCOON, 0);
-        assert_eq!(TCOOFF, 1);
-        assert_eq!(TCION, 2);
-        assert_eq!(TCIOFF, 3);
+        assert_eq!(TCOOFF, 0);
+        assert_eq!(TCOON, 1);
+        assert_eq!(TCIOFF, 2);
+        assert_eq!(TCION, 3);
     }
 
     #[test]
@@ -2669,13 +2867,54 @@ mod tests {
         assert_eq!(crate::errno::get_errno(), crate::errno::EFAULT);
     }
 
+    /// `do_vfs_ioctl` answers FIONREAD for a regular file with its size less
+    /// the offset, as an `int`; anything else is ENOTTY.  (The host has no
+    /// `fstat` for a `File` descriptor, so the arithmetic is tested here and
+    /// the descriptor's `fstat` failure below.)
+    #[test]
+    fn test_fionread_for_a_regular_file_is_what_is_left() {
+        let reg = crate::fcntl::S_IFREG | 0o644;
+        assert_eq!(fionread_for_file(reg, 100, 30), Ok(70));
+        assert_eq!(fionread_for_file(reg, 100, 100), Ok(0));
+        assert_eq!(fionread_for_file(reg, 100, 130), Ok(-30), "past the end");
+        assert_eq!(
+            fionread_for_file(reg, 1 << 33, 0),
+            Ok(0),
+            "`int` truncation, as Linux"
+        );
+        let dir = crate::fcntl::S_IFDIR | 0o755;
+        assert_eq!(fionread_for_file(dir, 4096, 0), Err(crate::errno::ENOTTY));
+    }
+
     #[test]
     fn test_ioctl_fionread_file() {
+        // A File descriptor is no longer refused outright; on the host its
+        // `fstat` fails, and that failure is what comes back -- not ENOTTY.
         let fd = fdtable::alloc_fd(HandleKind::File, 302).unwrap();
         let mut avail: i32 = 0;
         let ret = ioctl(fd, FIONREAD, (&raw mut avail).cast::<u8>());
-        assert_eq!(ret, -1, "FIONREAD on File → ENOTTY");
-        assert_eq!(crate::errno::get_errno(), crate::errno::ENOTTY);
+        assert_eq!(ret, -1);
+        assert_ne!(crate::errno::get_errno(), crate::errno::ENOTTY);
+        let _ = fdtable::close_fd(fd);
+    }
+
+    /// A file that has no FIONREAD is ENOTTY even with a NULL `arg`: the
+    /// file is asked before the pointer is used.  It was EFAULT until
+    /// 2026-09-26.
+    #[test]
+    fn test_ioctl_fionread_unsupported_kind_beats_null_arg() {
+        for kind in [HandleKind::Epoll, HandleKind::Eventfd, HandleKind::Timerfd] {
+            let fd = fdtable::alloc_fd(kind, 0).unwrap();
+            crate::errno::set_errno(0);
+            assert_eq!(ioctl(fd, FIONREAD, core::ptr::null_mut()), -1, "{kind:?}");
+            assert_eq!(crate::errno::get_errno(), crate::errno::ENOTTY, "{kind:?}");
+            let _ = fdtable::close_fd(fd);
+        }
+        // A listening socket is EINVAL, NULL or not.
+        let fd = fdtable::alloc_fd(HandleKind::TcpListener, 0).unwrap();
+        crate::errno::set_errno(0);
+        assert_eq!(ioctl(fd, FIONREAD, core::ptr::null_mut()), -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
         let _ = fdtable::close_fd(fd);
     }
 
@@ -3091,6 +3330,112 @@ mod tests {
         assert_eq!(tcflush(fd, TCIFLUSH), -1);
         assert_eq!(crate::errno::get_errno(), crate::errno::ENOTTY);
         let _ = fdtable::close_fd(fd);
+    }
+
+    // -- tcflush / TCFLSH / TCSAFLUSH reach SYS_TTY_FLUSH --
+    //
+    // Until 2026-09-25 all three checked their arguments and discarded
+    // nothing. The host has no kernel, so `host_flush` records what would have
+    // been asked of it.
+
+    #[test]
+    fn test_tcflush_asks_the_kernel_to_flush_the_named_queue() {
+        ensure_std_fds();
+        let _ = host_flush::take();
+        assert_eq!(tcflush(0, TCIFLUSH), 0);
+        assert_eq!(tcflush(0, TCOFLUSH), 0);
+        assert_eq!(tcflush(0, TCIOFLUSH), 0);
+        assert_eq!(
+            host_flush::take(),
+            [(CTTY, TCIFLUSH), (CTTY, TCOFLUSH), (CTTY, TCIOFLUSH)],
+            "the console is the controlling terminal, 0"
+        );
+    }
+
+    #[test]
+    fn test_tcflush_refusals_flush_nothing() {
+        ensure_std_fds();
+        let _ = host_flush::take();
+        assert_eq!(tcflush(0, 3), -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+        assert_eq!(tcflush(-1, TCIFLUSH), -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EBADF);
+        let fd = fdtable::alloc_fd(HandleKind::File, 312).unwrap();
+        // Not a terminal is ENOTTY even with a bad selector: Linux's order.
+        assert_eq!(tcflush(fd, 99), -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::ENOTTY);
+        let _ = fdtable::close_fd(fd);
+        assert_eq!(host_flush::take(), [], "a refused call flushes nothing");
+    }
+
+    /// A pty is a terminal. `tcflush` used to accept only the console, so a
+    /// program on a pty -- every program in a terminal emulator -- got ENOTTY.
+    #[test]
+    fn test_tcflush_on_a_pty_names_the_pty() {
+        let _ = host_flush::take();
+        let slave = fdtable::alloc_fd(HandleKind::PtySlave, 4242).unwrap();
+        let master = fdtable::alloc_fd(HandleKind::PtyMaster, 4343).unwrap();
+        assert_eq!(tcflush(slave, TCIFLUSH), 0);
+        assert_eq!(tcflush(master, TCOFLUSH), 0);
+        let _ = fdtable::close_fd(slave);
+        let _ = fdtable::close_fd(master);
+        assert_eq!(host_flush::take(), [(4242, TCIFLUSH), (4343, TCOFLUSH)]);
+    }
+
+    /// `ioctl(fd, TCFLSH, q)` from C: the selector is a variadic `int`, so the
+    /// upper half of its register is whatever the caller left there.
+    #[test]
+    fn test_ioctl_tcflsh_reads_only_the_int() {
+        ensure_std_fds();
+        let _ = host_flush::take();
+        let dirty = 0xdead_beef_0000_0001_u64 as usize as *mut u8;
+        assert_eq!(ioctl(0, TCFLSH, dirty), 0);
+        assert_eq!(host_flush::take(), [(CTTY, TCOFLUSH)]);
+        let bad = 0x0000_0001_0000_0007_u64 as usize as *mut u8;
+        assert_eq!(ioctl(0, TCFLSH, bad), -1, "7 is no selector");
+        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+    }
+
+    /// `tcsetattr(TCSAFLUSH)` -- what a password prompt uses to throw away
+    /// type-ahead -- sets the terminal *and then* flushes its input; the other
+    /// two actions flush nothing.
+    #[test]
+    fn test_tcsaflush_sets_then_flushes_input() {
+        ensure_std_fds();
+        let mut t = default_termios();
+        assert_eq!(tcgetattr(0, &raw mut t), 0);
+        let _ = host_flush::take();
+        assert_eq!(tcsetattr(0, TCSANOW, &raw const t), 0);
+        assert_eq!(tcsetattr(0, TCSADRAIN, &raw const t), 0);
+        assert_eq!(host_flush::take(), [], "TCSANOW/TCSADRAIN flush nothing");
+        t.c_lflag &= !ECHO;
+        assert_eq!(tcsetattr(0, TCSAFLUSH, &raw const t), 0);
+        assert_eq!(host_flush::take(), [(CTTY, TCIFLUSH)]);
+        let mut back = default_termios();
+        assert_eq!(tcgetattr(0, &raw mut back), 0);
+        assert_eq!(back.c_lflag & ECHO, 0, "and the settings went in");
+    }
+
+    /// A refused set flushes nothing: the kernel's own `TCSETSF` flushes only
+    /// after a successful set, and so does this.
+    #[test]
+    fn test_tcsaflush_refused_set_flushes_nothing() {
+        ensure_std_fds();
+        let _ = host_flush::take();
+        assert_eq!(tcsetattr(0, TCSAFLUSH, core::ptr::null()), -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EFAULT);
+        let fd = fdtable::alloc_fd(HandleKind::Pipe, 313).unwrap();
+        let t = default_termios();
+        assert_eq!(tcsetattr(fd, TCSAFLUSH, &raw const t), -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::ENOTTY);
+        let _ = fdtable::close_fd(fd);
+        assert_eq!(host_flush::take(), []);
+    }
+
+    #[test]
+    fn test_tcflsh_is_linuxs_number() {
+        assert_eq!(TCFLSH, 0x540B);
+        assert_eq!(TCFLSH, u64::from(crate::linux_tty_user_types::TCFLSH));
     }
 
     // -- Additional cfmakeraw / termios tests --
@@ -3571,15 +3916,17 @@ mod tests {
         assert_eq!(nul_pos, Some(12), "Null terminator at position 12");
     }
 
-    // -- Fionread on TcpListener gives 0 --
+    // -- FIONREAD on a listening socket is EINVAL (tcp_ioctl) --
 
     #[test]
     fn test_ioctl_fionread_tcp_listener() {
+        // It answered 0 until 2026-09-26.
         let fd = fdtable::alloc_fd(HandleKind::TcpListener, 0).unwrap();
         let mut avail: i32 = -1;
         let ret = ioctl(fd, FIONREAD, (&raw mut avail).cast::<u8>());
-        assert_eq!(ret, 0);
-        assert_eq!(avail, 0, "TcpListener FIONREAD should return 0");
+        assert_eq!(ret, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+        assert_eq!(avail, -1, "nothing written");
         let _ = fdtable::close_fd(fd);
     }
 

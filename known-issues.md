@@ -1465,6 +1465,8 @@ The remaining 39 rows are other causes: `-i`/`-I` address formatting, `-a` and
 
 ## B-POSIX-LOCALHOST-IS-RESOLVED-BY-ASKING-A-DNS-SERVER (lane B, 2026-09-14) — OPEN, fix is lane A's
 
+**Status:** FIXED 2026-09-27 -- the kernel's resolver consults its hosts table (`requests/a-b-dns-resolve-now-consults-the-hosts-table.md`), and the C library reads `/etc/hosts` before it asks the kernel (lane D, `D-POSIX-HOSTS-FILE-WAS-NEVER-READ`).
+
 `getaddrinfo("localhost", …)` and `gethostbyname("localhost")` send a DNS query
 over the network. There is no hosts-file lookup anywhere in the path, so on a
 machine with no DNS server — or one whose upstream declines to answer for
@@ -9538,9 +9540,26 @@ tolerance that `math.rs` cannot meet can't masquerade as an ABI break.
 still cached may hold the old soft-float `libc.a`; a full sysroot + fixture +
 rootfs rebuild is required to be sure.
 
-### [D] TD-D-THE-SYSROOT-FIX-RESTS-ON-A-FLAG-RUSTC-IS-PHASING-OUT — 2026-09-22 — OPEN
+### [D] TD-D-THE-SYSROOT-FIX-RESTS-ON-A-FLAG-RUSTC-IS-PHASING-OUT — 2026-09-22 — FIXED 2026-09-25
 
-**Status:** OPEN — found while provisioning `os-lane-f`; lane D's (`toolchain/build-sysroot.ps1`).
+**Status:** FIXED 2026-09-25 (lane D), by the proper fix below, plus one thing
+it had not foreseen. `libc.a` is built for `posix/x86_64-slateos-libc.json`,
+which is `x86_64-unknown-none` with the hard-float ABI, the large code model
+and a static relocation model. It uses `-Zbuild-std=core,compiler_builtins`,
+so `core` and `compiler_builtins` are compiled for it too, and the archive no
+longer mixes a soft-float `core` into a hard-float libc. The build emits no
+soft-float warning. The unforeseen part: the precompiled `compiler_builtins`
+carried compiler-rt's C-only builtins (its `c` feature) and a source build does
+not. Diffing the two archives with `nm` found 35 missing, among them
+`__muldc3`/`__divdc3`, the `-ftrapv` family, `__popcount*` and `__cmp*`.
+CMake's binary uses some of them, so they are ported to Rust in
+`posix/src/compiler_rt.rs`. After that, the new archive defines every
+C-visible symbol the old one did, and all 19 C fixtures link against it with
+nothing undefined. The sysroot stamp hashes the spec
+(`scripts/ctest-fixtures.py`, one additive line). design-decisions.md §1106
+records the alternatives.
+
+*(As filed:)* found while provisioning `os-lane-f`; lane D's (`toolchain/build-sysroot.ps1`).
 
 **What.** The fix for BUG-SYSROOT-SOFT-FLOAT-ABI, directly above, builds `posix`
 and the stubs for `x86_64-unknown-none` with `-C
@@ -17424,7 +17443,19 @@ QEMU boot self-test that spawns a native thread which reads/writes a
 the initiative-F milestone (first real fastpy component) is
 single-threaded, so this isn't yet on the critical path.
 
-### D-PTHREAD-SLOT-PUBLISH-RACE. A child thread can outrun the publication of its own `ThreadSlot` — 2026-07-30
+### D-PTHREAD-SLOT-PUBLISH-RACE. A child thread can outrun the publication of its own `ThreadSlot` — 2026-07-30 — FIXED 2026-09-26
+
+**Fixed 2026-09-26 (shape 1, below).** `pthread_create` claims and fills the
+slot before `SYS_THREAD_CREATE`, and leaves the slot's address in the new
+thread's per-thread block (`PerThread::thread_slot`), so the thread reaches
+its slot without a lookup by task id. A thread that exits before its creator
+has published its id waits for that store (a few of the creator's
+instructions) before it lets go of the slot, so a slot is never released
+under a creator about to write it. `pthread_getattr_np` of the calling thread
+answers from the same slot, which exists before the thread runs -- Rust's std
+asks as the thread starts, and a lookup by id then found nothing and reported
+the main thread's stack. The table also stopped being 64 slots: it grows a
+chunk at a time (`B-D-PTHREAD-CREATE-IGNORED-ITS-ATTRIBUTE`).
 
 **Where:** `posix/src/pthread.rs`, `pthread_create`. The sequence is
 `mmap` the combined stack+TLS region → `SYS_THREAD_CREATE` → *then*
@@ -20174,6 +20205,21 @@ comes first.
 
 ### TD-POSIX-LONG-DOUBLE-PRECISION. `long double` has the right *ABI* but only `double` (53-bit) *precision* — ACCEPTED LIMITATION 2026-07-30
 
+**Status (2026-09-28): FIXED.** Nothing in the C library narrows a `long
+double` to a `double` any more, except where a C signature does
+(`nexttoward`). The maths functions compute in 80 bits on the x87 unit
+(`posix/src/mathl.rs`, `ld80.rs`, `ld_abi.rs`; design-decisions §1134), and
+the conversions carry all 64 bits of the significand: `printf`'s `%La %Le %Lf
+%Lg` print the value's exact digits, and `strtold`, `strtold_l`, `wcstold` and
+`scanf`'s `%Lf` round the text into the 80-bit format -- both in the current
+rounding direction, and over the whole range, subnormals and all
+(`posix/src/decfloat.rs`, design-decisions §1138). Replayed against glibc
+2.39: 15,780 `printf` calls of long doubles, the encodings the unit rejects
+among them, and 624 `strtold` calls (`wcstold` the same 624), literals of
+11,500 digits among them, in all four rounding modes
+(`posix/tools/oracle/conv_harness.py`). What follows is the entry as it
+stood.
+
 **Where:** `posix/src/x87.rs` (`to_f64`/`from_f64`), `posix/src/printf.rs`
 (`va_arg_long_double`), `posix/src/stdlib.rs` (`strtold`).
 
@@ -20192,7 +20238,8 @@ double is produced) re-encoded. Consequences:
   (round-to-nearest, overflow → ±inf) rather than producing a wrong finite
   number, so it degrades predictably.
 - There are no `sqrtl`/`powl`/`fabsl`/… in the sysroot at all. That is the
-  *safe* failure mode: a link error, not a silently wrong answer.
+  *safe* failure mode: a link error, not a silently wrong answer. (No longer
+  so: they exist, in 80 bits, since 2026-09-28 -- §1134.)
 
 **Why accepted:** the double-precision core is shared with every other float
 path in the sysroot and is well tested; an 80-bit software arithmetic layer
@@ -23735,20 +23782,740 @@ predicate upstream before you write one** — and then check whether the
 upstream predicate is glibc's or the kernel's, because the two disagree and
 the disagreement is load-bearing.
 
+**Tenth pass, 2026-09-25 — `process.rs` and `epoll.rs` (19 sites), lane D.**
+The two files the ninth pass named as the last clusters. Eleven functions were
+wrong, two were right, and the pass turned up a fact about the kernel that
+changes how the NULL test should be placed everywhere.
+
+- **`clone` was this entry's founding bug in miniature.** glibc's
+  `x86_64/clone.S` loads `-EINVAL` and refuses a NULL function, then a stack
+  that is zero once aligned down to 16 (`andq $-16, %rsi`) — so a stack of
+  1-15 as well. The doc comment above `clone` said `EINVAL` throughout; the
+  code and three tests said `EFAULT`. That is the blanket sweep's signature
+  exactly: code and tests edited to agree, the one sentence that was right
+  left behind.
+- **`clone3` had a comment claiming "Linux order" for the reverse of it.**
+  `copy_clone_args_from_user` (kernel/fork.c:3074-3077) tests the size before
+  `copy_struct_from_user` reads the struct, so `clone3(NULL, 8)` is `EINVAL`.
+- **`process_vm_readv`/`writev` had four faults.** The pid came second;
+  upstream looks it up last, after both vectors (mm/process_vm_access.c:196).
+  Both counts came before either pointer; upstream validates the local vector
+  completely before it reads the remote one. A rule that each vector's *summed*
+  lengths fit `ssize_t` came from the man page; the code tests each length
+  alone (lib/iov_iter.c:1380) and caps the total. And the local vector's range
+  test (`access_ok`, :1484 — once per segment, or once on the truncated length
+  for a single segment) was missing, so a local range running into the kernel
+  half was accepted. The doc comment also placed `process_vm_rw` in
+  fs/read_write.c. Upstream's two zero-byte early returns are honoured but
+  answered `ENOSYS` rather than 0 (design-decisions §1107).
+- **`mount` was reworked against fs/namespace.c.** It refused flag bits
+  outside a whitelist (upstream refuses only `MS_NOUSER`), refused any two
+  "mode" bits together (refusing `MS_REMOUNT | MS_BIND`, the usual way to make
+  a bind mount read-only), gave `EFAULT` for a NULL source or type (upstream:
+  `EINVAL` from the operation, and a NULL source is legal for a new mount),
+  collapsed an empty type to `EINVAL` (upstream: `ENODEV`), capped the type at
+  an invented 256 bytes, and asked for privilege last (upstream asks before the
+  operation is chosen). The string limits were off by one — 4096 bytes of name
+  were accepted where `PATH_MAX` counts the NUL — and a too-long type or source
+  is `EINVAL` (`strndup_user`), not `ENAMETOOLONG`, and outranks the target.
+- **`umount`/`umount2` described a kernel older than the reference.** They
+  asked for privilege before the path, citing `ksys_umount`. That was true
+  before 5.9; since then `may_mount` is in `can_umount` (fs/namespace.c:1873),
+  after `user_path_at`. `umount` is now `umount2(name, 0)`, as glibc's is.
+- **`waitid` wrote the wrong amount.** Linux writes six fields of `*infop` —
+  zeros — on a `WNOHANG` miss *and on every error* (kernel/exit.c:1726-1737).
+  We wrote nothing on an error and zeroed all 128 bytes on a miss, each under a
+  comment giving a reason.
+- **`epoll_ctl`** copied the event only for ADD and MOD; upstream copies it for
+  every op but DEL (`ep_op_has_event`), so an unknown op with a NULL event is
+  `EFAULT`. It had no `EPERM` for a target without `poll` — a regular file was
+  accepted and then reported ready on every wait — and compared descriptor
+  numbers where upstream compares files, so a `dup` of the epoll fd could be
+  added to itself.
+- **`epoll_wait` had been "fixed" away from upstream.** A comment said the
+  order before it — `maxevents`, `access_ok`, `fdget` — had been a bug, and
+  moved the lookup first. That order *is* `do_epoll_wait`'s (:2291-2299).
+- **`eventfd_read`/`eventfd_write`** refused a descriptor of another kind with
+  an `EINVAL` attributed to the kernel's read. glibc's are `read`/`write` of
+  eight bytes and nothing else; they are that now.
+- **`signalfd`** sent an open descriptor to `ENOSYS` behind a `TODO` (with no
+  `todo.txt` entry) saying the kind could not be told. It can: nothing libc
+  holds is a signalfd, so an open one is `EINVAL`, as `do_signalfd4` says.
+- **`inotify_add_watch`** tested for one of the twelve event bits, which is
+  wrong both ways: upstream refuses a bit outside `ALL_INOTIFY_BITS` and a zero
+  mask, and accepts a mask of flags alone. The `IN_MASK_ADD | IN_MASK_CREATE`
+  refusal was missing.
+- **Right already:** `timerfd_settime`/`timerfd_gettime`, cited and checked
+  against fs/timerfd.c:454-578; `wait4`'s and `waitid`'s optional pointers.
+- Every descriptor lookup in `epoll.rs` now goes through an `fdget` that, like
+  upstream's (fs/file.c:1030), cannot see an `O_PATH` descriptor.
+
+**The habit this pass adds: on x86-64, `access_ok` admits NULL.**
+`valid_user_address` is `(long)(x) >= 0` (arch/x86/include/asm/uaccess_64.h:57)
+and `__access_ok` a range test on the end (:85), so a NULL buffer passes it and
+faults at its first *use*. Earlier passes put the NULL test where `access_ok`
+sits. That keeps the `EBADF` ordering right when a descriptor lookup precedes
+the range check — `ksys_read` looks up first — but answers `EFAULT` where the
+call would have copied nothing, and it is wrong outright when the lookup comes
+second: `do_epoll_wait` runs `access_ok` *before* `fdget`, so NULL there must
+not outrank `EBADF`, and does not fault at all when nothing is ready. **Put the
+NULL test where the copy is, not where the range check is.** (The x86 headers were added to the
+`D:\refsrc\linux-6.6` sparse checkout for this: `git -c
+core.protectNTFS=false sparse-checkout add arch/x86/include`.)
+
+And the defect-marker habit held again: `clone3`'s "Linux order", `epoll_wait`'s
+"previously … a bug", `eventfd_read`'s kernel `EINVAL`, `umount`'s
+unprivileged caller who "never learns" about its path, and two `mount` test
+stories — one in which Linux refuses a stale flag through a whitelist it does
+not have, one in which it "requires two separate calls" for a bind remount it
+performs in one. Nine for nine across four passes. One refinement: `umount`'s
+comment was *true of an older kernel*. Before trusting a cited order, check
+which kernel it describes.
+
+**Eleventh pass, 2026-09-26 — a seeded sample of twenty from the tail, lane D.**
+The tenth pass proposed retiring this entry by sampling: classify twenty of the
+tail's sites at random and close the entry if they came back clean. They did
+not. Twelve of the twenty were wrong — nearly all in their *order* — and
+functions beside five of them were wrong too. (The sample is reproducible: the
+sites are every non-comment `is_null()` line in `posix/src` with `EFAULT` in
+the next four lines, outside test modules and the seven files walked by passes
+three to ten, sorted; then `random.seed(20260926); random.sample(sites, 20)`.)
+
+Sampled and wrong:
+
+- **`aio_fsync`** tested `aiocbp` before `op`, and let a closed descriptor
+  through to the asynchronous status; glibc tests `op`, then asks
+  `fcntl(F_GETFL)` (rt/aio_fsync.c) — under a comment calling the reverse
+  "Linux's libaio/glibc convention".
+- **`scandir`** refused a NULL `namelist` before opening the directory, walked
+  the directory twice (calling the filter twice per entry), and stored an
+  empty allocation for no entries. glibc's `__scandir_tail` opens first, walks
+  once, and stores NULL; `scandirat` had the same order.
+- **`getdents64`** refused a zero count and a NULL buffer before a closed
+  descriptor. fs/readdir.c looks the descriptor up first and judges the count
+  and the buffer per entry, so at the end of a directory the answer is 0
+  whatever they are; a NULL buffer is now probed rather than refused. Legacy
+  `getdents`, beside it, had the same order and answered `ENOSYS` to every valid
+  call, "because the legacy record's inode field is 32 bits" — true only of
+  32-bit architectures. It writes `struct linux_dirent` now (§1108).
+- **`ftw`** refused `nopenfd < 1` with `EINVAL`; glibc's `ftw_startup` makes it
+  1. Beside it, the walk stopped `nopenfd` levels deep
+  (`B-D-FTW-STOPS-AT-NOPENFD-DEEP`) — both fixed the same day by porting
+  glibc's walker (§1109).
+- **`io_getevents`** refused a NULL `events` before looking for events; fs/aio.c
+  faults only in the copy, so with nothing to deliver the answer is 0, and a
+  fault leaves the event queued.
+- **`landlock_create_ruleset`** read flags 0 with a NULL `attr` as a malformed
+  probe (`EINVAL`). Flags 0 is the create form, whose NULL `attr` is
+  `copy_min_struct_from_user`'s `EFAULT`, before the size — the comment said
+  the reverse.
+- **`posix_memalign`** refused a NULL `memptr` before the alignment; glibc tests
+  the alignment (`EINVAL`), allocates, and only then writes.
+- **`mq_getattr`/`mq_setattr`**: a NULL `attr` was `EFAULT`. glibc's
+  `mq_getattr` is `mq_setattr (mqdes, NULL, attr)`, and ipc/mqueue.c treats
+  either NULL as "not asked". `mq_setattr` also accepted flags other than
+  `O_NONBLOCK`.
+- **`mq_timedsend`/`mq_timedreceive`** refused a NULL timeout. It is no
+  timeout: glibc's own `mq_send` is `mq_timedsend` with NULL.
+- **`sched_setaffinity`** refused a mask shorter than 128 bytes with `EINVAL`
+  ("our stub does not zero-pad"), and a NULL mask of length 0 with `EFAULT`.
+  `get_user_cpu_mask` zero-extends a short mask — `sizeof (unsigned long)` is
+  a size Linux programs pass — and copies nothing for length 0.
+- **`mknod`** refused type 0 with `EINVAL`, which Linux makes a regular file,
+  and a directory with `EINVAL` rather than `EPERM` — both after the path,
+  where `may_mknod` runs first; its tests called Linux "strict" about type 0.
+  `mknodat`, beside it, the same.
+- **`fattach`** validated its arguments; glibc 2.39's is `ENOSYS` whatever they
+  are (posix/streams-compat.c). So are `fdetach`, `putmsg`, `putpmsg`,
+  `getmsg` and `getpmsg`, which had the same invented validation — added by an
+  earlier phase to give "probing callers meaningful feedback", which did the
+  opposite: a probe with placeholder arguments was told `EBADF`, not the
+  `ENOSYS` it tests for (§1108). `isastream` called a closed descriptor "not a
+  stream"; glibc says `EBADF`.
+
+Sampled and right: `setkey`'s `EFAULT` (crypt.rs: the §303 substitute, with no
+upstream to check against since glibc 2.39 dropped `setkey`); `TIOCSPGRP`
+(ioctl.rs: `ENOTTY` before the `get_user`, as `tiocspgrp`); `perf_event_open`
+(`perf_copy_attr`'s order); `SECCOMP_GET_ACTION_AVAIL`; `getpwuid_r` (the §303
+substitute — upstream's answer depends on the NSS backend); the NULL pointers of
+`clock_adjtime`, `clock_gettime` and `timer_create`. Beside those last three,
+though: `clock_adjtime(CLOCK_TAI)` adjusted the real-time clock, where 6.6's
+`clock_tai` has no `clock_adj` and the answer is `EOPNOTSUPP`; and `timer_create`
+armed `CLOCK_MONOTONIC_RAW` and the two `_COARSE` clocks, which can be read but
+not armed (`EOPNOTSUPP`), and reported a full timer table after the event and
+pointer checks it precedes.
+
+**So sampling cannot retire this entry.** With twelve of twenty wrong, the
+tail is presumptively wrong, not presumptively right, and gets a full sweep.
+
+**Twelfth pass, 2026-09-26 — `ioctl.rs` (8 sites), lane D.** The first file
+of the full sweep. `TIOCGWINSZ`, `TIOCSWINSZ`, `FIONBIO`, `TCGETS` and
+`TIOCSPGRP`'s pointer were in Linux's place already; three were not, and each
+opened onto more:
+
+- **`FIONREAD`** tested its pointer before asking whether the file answers
+  FIONREAD at all, so an epoll descriptor with a NULL `arg` said `EFAULT`
+  where Linux says `ENOTTY`. Behind it: a regular file was `ENOTTY` ("files
+  don't support FIONREAD"), where `do_vfs_ioctl` answers size less offset; an
+  inotify descriptor was `ENOTTY` under a comment saying inotify has no ioctl
+  — `inotify_ioctl` counts the queued events' bytes; and a listening TCP
+  socket said 0, where `tcp_ioctl` says `EINVAL`.
+- **`TIOCGPGRP`** tested its pointer before the controlling-terminal check
+  `tiocgpgrp` makes first on a console or slave (on a master there is no such
+  check and a NULL is `EFAULT`, as it was).
+- **`TIOCSPGRP`** left the negative-group test to `tcsetpgrp`, and
+  **`tcgetpgrp`/`tcsetpgrp`** accepted any open descriptor — a regular file's
+  included — under a comment saying descriptor kinds were not tracked, which
+  `ioctl` two files away was using. They are glibc's now: `ioctl(fd,
+  TIOCGPGRP/TIOCSPGRP, …)`. `tcsetpgrp` also refused a group of 0 itself; that
+  is the kernel's call, and Linux's answer is `ESRCH`, not `EINVAL`
+  (`requests/d-a-tcsetpgrp-of-group-0-and-a-terminal-that-is-not-ours.md`).
+- In the inotify read path the FIONREAD count needed: names were cut at 63
+  bytes — another file's name, not a shorter one — and rounded to 8 bytes
+  where Linux rounds to 16; and a dead instance read as an empty queue rather
+  than `EBADF`.
+
+`TCSETS`'s pointer is Linux's too, with one ordering left: `set_termios` runs
+`tty_check_change` (which stops a background caller with `SIGTTOU`) before
+its copy, and our kernel makes that check inside the call, which a NULL
+pointer never reaches.
+
+**Thirteenth pass, 2026-09-26 — `semaphore.rs` (8 sites), lane D.** Against
+glibc 2.39's nptl and posix/shm-directory.c. `sem_wait`, `sem_trywait`,
+`sem_post` and `sem_getvalue` were right: the pointer is the first thing each
+touches. The rest:
+
+- **`sem_init`** tested `sem` before the value; glibc refuses a value past
+  `SEM_VALUE_MAX` first.
+- **`sem_timedwait`** tested both pointers before the deadline; glibc reads
+  `abstime->tv_nsec` first, so a NULL `sem` with a malformed deadline is
+  `EINVAL`.
+- **`sem_close(NULL)`** was `EFAULT`; glibc looks the pointer up among its
+  mappings and never dereferences it, so it is `EINVAL`.
+- **The name check** required one leading `/`, refused a second, and called a
+  long name `EINVAL`. glibc's `__shm_get_name` strips *every* leading `/` —
+  `"sem"`, `"/sem"` and `"//sem"` are one semaphore — refuses only an empty
+  name or an inner `/`, and a name too long for `/dev/shm/sem.NAME` is
+  `ENAMETOOLONG`; names were also capped at 63 bytes.
+- Beside them: `sem_init` accepts a non-zero `pshared` and then works only
+  inside one process, and the pthread calls that ask for process-shared
+  objects do not exist — `B-D-PROCESS-SHARED-SYNC-IS-SILENTLY-PRIVATE` (new).
+
+**Fourteenth pass, 2026-09-26 — `time.rs` (6 sites; `clock_gettime` and
+`timer_create` were the eleventh pass's), lane D.** `nanosleep`,
+`timer_gettime` and `getitimer` were right.
+
+- **`clock_nanosleep`** refused every flag bit but `TIMER_ABSTIME`, ahead of
+  everything, under a comment citing `if (flags & ~TIMER_ABSTIME) return
+  -EINVAL;` in `common_nsleep` — which is not there; Linux reads only
+  `TIMER_ABSTIME`. Behind it: the clocks that cannot be slept on
+  (`CLOCK_MONOTONIC_RAW` and the `_COARSE` pair) are `EOPNOTSUPP`, and the
+  calling thread's CPU clock is glibc's `EINVAL`; a negative `tv_sec` was
+  "already past" (0) in the absolute form and `EINTR` in the relative one,
+  where `timespec64_valid` says `EINVAL`; every failure of a relative sleep
+  was reported as `EINTR`; an interrupted absolute sleep answered 0; and a
+  distant absolute deadline overflowed its nanosecond sum.
+- **`clock_settime`** lacked `timespec64_valid_settod`'s upper bound
+  (`TIME_SETTOD_SEC_MAX`).
+- **`setitimer`** refused a NULL new value with `EFAULT`; Linux 6.6 takes it as
+  zeros — disarm — a "misfeature" it still supports, and reads the value before
+  judging `which`.
+
+The defect-marker habit held again, in its strongest form yet: a comment
+quoting upstream code that upstream does not contain. **Check a quoted line
+against the source before believing the quotation.**
+
+**Fifteenth pass, 2026-09-26 — `aio.rs` (6 sites), lane D.** Against glibc
+2.39's rt/ (`aio_misc.c`, `aio_suspend.c`, `lio_listio-common.c`,
+`aio_cancel.c`), read in full. `aio_fsync` was right (the eleventh pass). The
+rest:
+
+- **`aio_read`/`aio_write`** refused a bad descriptor, buffer or offset at
+  once. glibc refuses only a priority outside `0..=AIO_PRIO_DELTA_MAX` before
+  it queues a request (recording `EINVAL` in the `aiocb` too); everything
+  else is the request's own outcome, read through `aio_error`. The priority
+  check was missing.
+- **`aio_suspend`** tested the list before `nent` and refused `nent == 0`;
+  glibc refuses a negative `nent` first, returns 0 for an empty list, and
+  reads the list only when it has entries.
+- **`lio_listio`** tested the list before `mode` and `nent`, refused an
+  unknown opcode at once, and returned the last request's `errno` where glibc
+  returns `EIO`.
+- **`aio_error(NULL)`** returned `EINVAL` as its *value* — "the request failed
+  with EINVAL" — where glibc faults; it is -1 with `EFAULT`, POSIX's shape for
+  `aio_error` itself failing.
+- Beside them, reading the rest of rt/ turned up the module's real faults —
+  outcomes evicted after 16 requests, notification ignored —
+  `B-D-AIO-OUTCOMES-EVICTED-AND-NEVER-NOTIFIED` (new, fixed with it).
+
+**Sixteenth pass, 2026-09-26 — `sched.rs` (6 sites), lane D.** Against Linux
+6.6's kernel/sched/core.c and glibc 2.39's `sched_getaffinity` wrapper.
+`sched_rr_get_interval` was right, and `sched_setaffinity` was the eleventh
+pass's.
+
+- **`sched_setscheduler`, `sched_setparam`, `sched_getparam`** answered a NULL
+  `param` with `EFAULT`; Linux's `if (!param || pid < 0) return -EINVAL;`
+  answers `EINVAL`, before any copy. They had been `EINVAL` until "Phase
+  210" changed them, reasoning from `copy_from_user` without reading the line
+  above it -- the defect marker again, this time as a phase header.
+- **`sched_getaffinity`** refused every mask shorter than the whole 128-byte
+  `cpu_set_t`, though Linux takes any whole number of `unsigned long`s that
+  covers the CPUs -- 8 bytes on a machine of up to 64 -- and it did not
+  refuse a length that is not such a number. A mask longer than 128 bytes
+  kept its old tail, which glibc's wrapper zeroes.
+- Beside them: `SCHED_RESET_ON_FORK` made any policy unknown, where Linux
+  strips it; and `sched_setscheduler(SCHED_DEADLINE)` was accepted, or
+  `EPERM`, where Linux says `EINVAL` -- a deadline task's parameters come only
+  from `sched_setattr`, and through this call they are zero.
+
+**Seventeenth pass, 2026-09-26 — `mqueue.rs` (5 sites), lane D.** Against Linux
+6.6's ipc/mqueue.c and glibc 2.39's wrappers. The name's NULL (`EFAULT`, where
+glibc reads `name[0]`) was right, and the eleventh pass had already made NULL
+timeouts and attributes Linux's.
+
+- **`mq_send`** refused a NULL message before the priority, the descriptor
+  and the size; Linux's order is the priority (`EINVAL`), the descriptor
+  (`EBADF`), its write access (`EBADF` -- not kept at all), the size
+  (`EMSGSIZE`), and the message last (`load_msg`, `EFAULT`).
+- **`mq_receive`** refused a NULL buffer before the descriptor, the size and
+  an empty queue. Linux reaches the buffer only after taking the message:
+  `store_msg` faults, the call fails with `EFAULT`, and the message is gone.
+- **`mq_notify`** looked at the descriptor before the `sigevent`; Linux
+  judges `sigev_notify` and the signal first.
+- Beside them, the module was a small static pool -- 8 queues of 32
+  messages of 256 bytes, a default message size of 64, busy-spinning waits,
+  no access modes, no `mq_notify` --
+  `B-D-MQUEUE-LIMITS-ACCESS-AND-ERROR-ORDER` (new, fixed with it).
+
+**Eighteenth pass, 2026-09-26 — `linux_futex.rs` (4 sites), lane D.** Against
+Linux 6.6's kernel/futex/ (`SYSCALL_DEFINE6(futex)`, `do_futex`,
+`get_futex_key`).
+
+- A malformed timeout is `EINVAL` before the word is looked at (it was
+  `EFAULT` for a NULL word); a misaligned word is `EINVAL` before `EFAULT`;
+  a private `FUTEX_WAKE` never reads its word, so a NULL one answers 0.
+- `FUTEX_CLOCK_REALTIME` was stripped and ignored; Linux answers `ENOSYS`
+  for it on any command without an absolute timeout.
+- Beside them, the finding of the pass: `FUTEX_WAIT_BITSET` was `ENOSYS` --
+  `B-D-FUTEX-WAIT-BITSET-WAS-ENOSYS` (new, fixed with it).
+
+**Nineteenth pass, 2026-09-26 — `resolv.rs` (5 sites), lane D.** The query
+calls were stubs that checked their arguments and answered `ENOSYS`, and two
+of the checks were inventions: `""` refused as `EINVAL` (it is the root name)
+and `res_send` judging the query's length (glibc judges the answer buffer's,
+after "no nameserver"). So the pass became the resolver --
+`B-D-RES-QUERY-WAS-ENOSYS` (new, fixed with it). Its NULLs now fall where
+glibc's would: a NULL name or answer is `EFAULT` with `h_errno`
+`NETDB_INTERNAL`, since glibc faults; `res_send` makes glibc's two checks
+first (`ESRCH`, then `EINVAL`); `res_mkquery` answers -1, as glibc answers
+its own refusals; and `dn_expand`, `dn_comp` and `dn_skipname` set
+`EMSGSIZE` when they fail, as glibc's do.
+
+**Twentieth pass, 2026-09-26 — `statvfs.rs` (4 sites), lane D.** Against
+Linux 6.6's fs/statfs.c and glibc 2.39's `statvfs64.c` and `fstatvfs64.c`.
+
+- **`statvfs`, `statfs`** refused a NULL buffer before they looked at the
+  path. Linux finds the filesystem first (`user_statfs`) and copies the
+  answer out last (`do_statfs_native`, `EFAULT`); glibc's `statvfs` makes
+  that call into a local of its own and converts it afterwards. So an empty
+  path is `ENOENT`, and an overlong one `ENAMETOOLONG`, even beside a NULL
+  buffer. A NULL path stays `EFAULT` -- the kernel's `getname` faults on it.
+- **`fstatvfs`, `fstatfs`** already put `EBADF` first; the query of the
+  descriptor's stored path now comes before the buffer too, as `fd_statfs`
+  comes before the copy.
+- Beside them: every answer is written whole, so `statvfs` zeroes
+  `__f_spare` as glibc's conversion does, and `statfs` sets `ST_VALID` in
+  `f_flags`, as Linux does on every answer. The host tests resolve the path
+  as the target does; only the kernel's figures are defaults there.
+
+**Twenty-first pass, 2026-09-26 — `linux_module.rs` (4 sites), lane D.**
+Against Linux 6.6's kernel/module/main.c. Every call still ends in `ENOSYS`
+where Linux would start loading or unloading; what changed is which checks
+come before that.
+
+- **`init_module`, `finit_module`** answered a NULL parameter string with
+  `EFAULT`. Linux copies `uargs` only inside `load_module`, once the image
+  has been checked and accepted as a module -- past the point where these
+  calls end -- so it is no longer looked at. The image's NULL (`EFAULT`,
+  after the length checks) was right.
+- **`finit_module`** refused only a negative descriptor; one that was not
+  open, was `O_PATH`, or was not open for reading went on to `ENOSYS`.
+  Linux's `fdget` finds neither of the first two and
+  `idempotent_init_module` refuses the third, all with `EBADF`.
+- **`delete_module`**'s NULL (`EFAULT`, after `EPERM`) was right, but it
+  refused an empty name, a long one, one holding a `/`, and an unknown flag,
+  all with `EINVAL`. Linux refuses none of them: it looks any name up
+  (`ENOENT` when no module has it) and reads the flags only for a module it
+  finds in use. The four checks are gone.
+
+**Twenty-second pass, 2026-09-26 — `sysv_msg.rs` (4 sites), lane D.** Against
+Linux 6.6's ipc/msg.c (`ksys_msgsnd`, `do_msgrcv`, `ksys_msgctl`).
+
+- **`msgsnd`**'s NULL (`EFAULT`, first: `get_user` of the type) was right.
+- **`msgrcv`** refused a NULL buffer before the id and the queue. Linux
+  reaches the buffer only when it writes the message out: a bad id is
+  `EINVAL`, an empty queue with `IPC_NOWAIT` is `ENOMSG`, and with a message
+  there the call takes it and then fails with `EFAULT`. `MSG_COPY` alone
+  reads the buffer first (`prepare_copy`).
+- **`msgctl(IPC_SET)`** looked the queue up before its buffer; Linux copies
+  the buffer in first, so a NULL one is `EFAULT` whatever the id.
+  `IPC_STAT`'s order (the queue, then `EFAULT`) was right.
+- Beside them, the module was a small static pool with none of Linux's
+  limits, permissions or waiting --
+  `B-D-SYSV-MSG-LIMITS-PERMISSIONS-AND-ERROR-ORDER` (new, fixed with it).
+
+**Twenty-third pass, 2026-09-26 — `sys_sysctl.rs` (4 sites), lane D.** Against
+glibc 2.39's `sysdeps/unix/sysv/linux/sysctl.c` and Linux 6.6, which has no
+`sysctl` system call (removed in 5.5).
+
+- **All four NULLs** (`args`, the name, `oldlenp` beside a buffer, `newval`
+  beside a length) were `EFAULT`, among checks for `EINVAL`, `ENOTDIR` and
+  `E2BIG` that no kernel made in that combination -- the pre-5.5 kernel said
+  `ENOTDIR` for a bad length, not `EINVAL`. glibc keeps `sysctl` only as a
+  compat stub that answers `ENOSYS` whatever it is given, so every one of
+  them is `ENOSYS` now.
+- Beside them: `sysctl` took the removed system call's one argument, a
+  `struct __sysctl_args *`, where glibc's function takes six (`name`, `nlen`,
+  `oldval`, `oldlenp`, `newval`, `newlen`) -- a C caller's name array was
+  read as that structure. It has glibc's signature now, and `SysctlArgs` the
+  kernel's 80 bytes (`__unused[4]` was missing).
+
+**Twenty-fourth pass, 2026-09-26 — `stat.rs` (4 sites), lane D.** Against
+glibc 2.39's `__mknodat`, `mknod`, `mkfifo` and `mkfifoat` (io/,
+sysdeps/posix/) and Linux 6.6's `do_mknodat` (fs/namei.c).
+
+- **`mknod` and `mknodat`** put their NULL (`EFAULT`) after `may_mknod`, as
+  `do_mknodat` does -- right -- but glibc makes one check first: a device
+  number wider than the kernel's 32 bits is `EINVAL` before the system call.
+  It was ignored.
+- **`mkfifo` and `mkfifoat`** judged their NULL first. glibc's are
+  `mknodat(fd, path, mode | S_IFIFO, 0)`, so type bits in `mode` beside the
+  FIFO's make a type `may_mknod` refuses: `EINVAL`, ahead of the path. They
+  are that call now, as `mknod` is `mknodat(AT_FDCWD, ...)`.
+- Beside them: the directory descriptor was judged for an absolute path too
+  (`EBADF`), which `path_init` never looks at; and a regular file -- type 0
+  or `S_IFREG` -- answered `ENOSYS` where Linux's `vfs_create` makes it. It
+  is made now, through `openat(O_CREAT | O_EXCL)`.
+
+**Twenty-fifth pass, 2026-09-26 — `sysv_sem.rs` (3 sites), lane D.** Against
+Linux 6.6's ipc/sem.c (`ksys_semtimedop`, `do_semtimedop`, `semctl_main`) and
+glibc 2.39's `__semctl64`.
+
+- **`semop`, `semtimedop`** refused a NULL operation array before the count.
+  Linux judges the count first -- more than `SEMOPM` (500) is `E2BIG`, none
+  is `EINVAL` (it was `E2BIG`) -- and only then copies the array (`EFAULT`).
+- **`GETALL`, `SETALL`** reach their array after the lookup and the
+  permission, as `semctl_main` does: a bad id is `EINVAL` whatever the
+  array. They were separate functions `semctl` could not reach -- the
+  finding below.
+- Beside them, the finding of the pass: `semctl` took three arguments, so
+  C's fourth never arrived, and `semtimedop`'s timeout was read as a date --
+  `B-D-SYSV-SEM-SEMCTL-TIMEOUT-AND-LIMITS` (new, fixed with it).
+
+**Twenty-sixth pass, 2026-09-26 — `linux_aio_abi.rs` (3 sites), lane D.**
+Against Linux 6.6's fs/aio.c.
+
+- **`io_submit`** refused a NULL iocb pointer with `EINVAL`; `io_submit_one`'s
+  `copy_from_user` makes it `EFAULT`. A NULL `iocbpp` was already `EFAULT`,
+  and stays so, after the context.
+- **`io_setup`**'s NULL `ctxp` was right (`get_user`, first) -- and nothing
+  after it was: the limits, the context's id, and how much it holds.
+- **`io_getevents`**' NULL `events` was fixed by the eleventh pass.
+- Beside them, the finding of the pass: nothing Linux refuses at submission
+  was refused at submission here, `io_getevents` did not wait, and a context
+  id was a slot number libaio dereferences -- `B-D-AIO-WAS-NOT-LINUXS` (new,
+  fixed with it).
+
+**Twenty-seventh pass, 2026-09-26 — `linux_seccomp.rs` (4 sites), lane D.**
+Against Linux 6.6's kernel/seccomp.c and net/core/filter.c.
+
+- **`SECCOMP_SET_MODE_FILTER`** faulted on a NULL program header in the right
+  place, but never read a real one: after the header come its length (0, or
+  more than 4096 instructions, is `EINVAL`), then the privilege gate
+  (`EACCES`), then the program pointer (NULL is `EINVAL`,
+  `bpf_check_basics_ok`) -- a length of 0 reached the gate, and a NULL
+  program was `ENOSYS`.
+- **`SECCOMP_GET_ACTION_AVAIL`, `SECCOMP_GET_NOTIF_SIZES`, strict mode** --
+  right.
+- Beside them, the finding of the pass: two flag rules 6.6 does not have,
+  and `prctl`'s seccomp options answering `EINVAL` --
+  `B-D-SECCOMP-FLAGS-AND-PRCTL` (new, fixed with it).
+
+**Twenty-eighth pass, 2026-09-26 — `mman.rs` (5 sites), lane D.** Against
+Linux 6.6's mm/mmap.c, mm/mprotect.c, mm/mincore.c and mm/memfd.c.
+
+- **`munmap(NULL, n)`** was `EINVAL`; `do_vmi_munmap` unmaps `[0, n)` and
+  answers 0.  Its range check was missing, so a kernel-half address reached
+  the kernel -- which then unmapped it (lane A's, reported and being fixed).
+- **`mprotect(NULL, n)`** was `EINVAL` before anything; `do_mprotect_pkey`
+  judges the growth flags, the alignment, a zero length (0), the range's end
+  (`ENOMEM`) and only then the prot bits, and a NULL range is the kernel's
+  `ENOMEM`.
+- **`mincore(addr, 0, NULL)`** was `EFAULT`; with no pages nothing is copied,
+  so it is 0.
+- **`memfd_create(NULL, …)`** was right, and the name beside it was not --
+  `B-D-MEMFD-NAME-WAS-A-PATH` (new, fixed with it).
+- `shm_open(NULL, …)` keeps the §303 substitute: glibc reads the name at
+  once and faults.
+
+**Twenty-ninth pass, 2026-09-26 — `resource.rs` (5 sites), lane D.** Against
+glibc 2.39's getrlimit64.c/setrlimit64.c and Linux 6.6's `prlimit64`.
+
+- **`getrlimit(res, NULL)`, `setrlimit(res, NULL)`** were `EFAULT`.  glibc on
+  x86-64 makes neither system call: both are `prlimit64` with the other
+  pointer NULL, so a NULL pointer asks for nothing and a valid resource is 0
+  -- `B-D-RLIMIT-NULL-WAS-EFAULT` (new, fixed with it).
+- **`prlimit`**'s two pointers: the new limit is read first and the old one
+  written last, only if nothing before it failed.
+- **`getrusage(who, NULL)`** -- right: `who` first, then the copy.
+
+**Thirtieth pass, 2026-09-26 — `crypt.rs` (4 sites), lane D.** Against
+libxcrypt 4.4.36 -- glibc 2.39 has no `crypt` -- as Ubuntu 24.04 builds it,
+failure tokens on, and probed there.
+
+- **`crypt(NULL, s)`, `crypt(k, NULL)`, `crypt_r(NULL, s, d)`,
+  `crypt_r(k, NULL, d)`** were NULL with `EFAULT`; libxcrypt returns its
+  failure token, `"*0"`, with `EINVAL`.
+- **`crypt_r(k, s, NULL)`** stays NULL, now documented as the substitute for
+  the fault libxcrypt takes writing its token there; it is `EFAULT`.
+- **`encrypt(NULL, …)`, `setkey(NULL)`** keep `EFAULT` for the same reason.
+- Beside them, the finding of the pass: every failure was NULL where
+  libxcrypt returns the token, and three of libxcrypt's refusals were missing
+  -- `B-D-CRYPT-FAILED-WITH-NULL` (new, fixed with it).
+
+**Thirty-first pass, 2026-09-26 — `iconv.rs` (3 sites), lane D.** Against
+glibc 2.39's iconv/iconv.c, iconv_open.c and iconv_close.c, and probed on
+Ubuntu 24.04.
+
+- **`iconv_open(NULL, …)`, `iconv_open(…, NULL)`** were `EINVAL`, the answer
+  for an unknown character set; glibc faults reading the name, so the
+  substitute is `EFAULT`.
+- **`iconv(cd, NULL, …)` and `iconv(cd, &p, …)` with `p` NULL** -- the reset
+  -- were 0 for any descriptor; glibc checks it first (`EBADF`).
+- **`iconv` with a NULL count or output pointer** was `EFAULT` -- right, as the
+  substitute for glibc's fault -- but after the reset's test rather than in
+  glibc's order, which reads `*outbuf` first.
+- Beside them, the finding of the pass: the conversions themselves were not
+  glibc's -- `B-D-ICONV-WAS-NOT-GLIBCS` (new, fixed with it).
+
+**Thirty-second pass, 2026-09-26 — `linux_io_uring.rs` (3 sites), lane D.**
+Against Linux 6.6's io_uring/io_uring.c and io_uring/sqpoll.c.
+
+- **`io_uring_setup(n, NULL)`** was `EFAULT` -- right, first, as
+  `copy_from_user` is -- and a block in the kernel half now is too.
+- **`io_uring_enter(fd, …, sig, sigsz)`** judged `sig` and `sigsz` before
+  the descriptor; Linux reads them only from a ring it has found, and there
+  is none, so a bad descriptor is `EBADF` whatever they are.
+- **`io_uring_register(fd, op, NULL, n)`** refused a NULL argument per
+  operation before the descriptor; the same holds -- the per-operation
+  checks come after the ring.
+- Beside them, the finding of the pass: the three calls validated in an
+  order of their own -- `B-D-IO-URING-WAS-NOT-LINUXS` (new, fixed with it).
+
+**Thirty-third pass, 2026-09-26 — `sysv_shm.rs` (2 sites), lane D.** Against
+Linux 6.6's ipc/shm.c.
+
+- **`shmctl(id, IPC_SET, NULL)`** looked the segment up first, so a bad id
+  was `EINVAL`; `ksys_shmctl` copies the buffer before anything
+  (`copy_shmid_from_user`), so it is `EFAULT` whatever the id.
+- **`shmctl(id, IPC_STAT, NULL)`** was `EFAULT` before the lookup; Linux
+  looks the segment up and checks the permission first, and faults writing.
+- Beside them, the finding of the pass: the segments were a four-slot pool
+  of 64 KiB -- `B-D-SYSV-SHM-WAS-A-STATIC-POOL` (new, fixed with it).
+
+**Thirty-fourth pass, 2026-09-26 — `sys_quota.rs` (2 sites), lane D.** Against
+Linux 6.6's fs/quota/quota.c.
+
+- **`quotactl(cmd, NULL, …)`** was `EFAULT`, the doc comment citing a
+  `getname` of the NULL name; Linux tests `special` for NULL itself and
+  answers `ENODEV` -- or, for `Q_SYNC`, syncs every filesystem with quotas
+  and returns 0.
+- **`quotactl(cmd, special, …, NULL)`** was `EFAULT` before the device was
+  looked at; Linux reaches `addr` only inside a filesystem's quota
+  operations, and no filesystem here has any.
+- Beside them, the finding of the pass: the whole order was its own --
+  `B-D-QUOTACTL-WAS-NOT-LINUXS` (new, fixed with it).
+
+**Thirty-fifth pass, 2026-09-26 — `sys_timex.rs` (2 sites), lane D.** Against
+Linux 6.6's kernel/time/timekeeping.c and ntp.c, and glibc 2.39's
+adjtime.c.
+
+- **`adjtimex(NULL)`, `clock_adjtime(id, NULL)`** were `EFAULT`, first --
+  right, as `copy_from_user` is -- and a block in the kernel half now is too.
+- Beside them, the finding of the pass: what came after the copy was not
+  Linux's, and `adjtime` did not exist -- `B-D-ADJTIMEX-WAS-NOT-LINUXS` (new,
+  fixed with it).
+
+**Thirty-sixth pass, 2026-09-26 — `linux_landlock.rs` (3 sites), lane D.**
+Against Linux 6.6's security/landlock/syscalls.c and glibc 2.39, which has
+no Landlock functions.
+
+- **`landlock_create_ruleset(NULL, …)`, `landlock_add_rule(…, NULL, 0)`,
+  `landlock_restrict_self`'s gate** -- the three sites were validators for a
+  call that cannot succeed here: the kernel has no Landlock. They went with
+  the calls themselves.
+- Beside them, the finding of the pass: the version probe said ABI 1 and
+  every ruleset was then refused -- `B-D-LANDLOCK-SAID-YES-THEN-NO` (new,
+  fixed with it).
+
+**Thirty-seventh pass, 2026-09-26 — `fts.rs` and `ftw.rs` (2 sites each),
+lane D.** Against glibc 2.39's io/fts.c and io/ftw.c, on which both files
+were rebuilt on 2026-09-25 and 26 -- but their NULLs had not been put to
+them.
+
+- **`fts_open(NULL, …)`** was `EFAULT` before the options were looked at;
+  glibc judges the options, allocates the stream, and faults only when it
+  reads `argv`. A bad option beside a NULL list is `EINVAL` now. The same
+  reading found an invented check: `fts_open` refused both and neither of
+  `FTS_LOGICAL` and `FTS_PHYSICAL`, because the manual page says one must be
+  given. glibc checks neither -- `FTS_LOGICAL` makes the walk logical, and
+  without it the walk is physical -- so a program that gave neither worked
+  there and failed here. Removed.
+- **`fts_set(sp, NULL, …)`** was `EFAULT` before the instruction was
+  judged, and a NULL `sp` was `EBADF`; glibc judges the instruction first
+  and never reads `sp`. Both are glibc's now, and `fts_children` judges its
+  instruction before its stream.
+- **`ftw(NULL, …)`, `nftw(NULL, …)`** were right: glibc reads `dir[0]`
+  first, after `nftw`'s flags. Their callback is another matter -- it could
+  not be NULL at all, and nor could a dozen others; that is the
+  thirty-ninth pass.
+
+**Thirty-eighth pass, 2026-09-26 — `xattr.rs` (2 sites), lane D.** Against
+Linux 6.6's fs/xattr.c. The fourth pass had put the path before the flags
+and the name; this one read what each of those steps does besides.
+
+- **The name** is `strncpy_from_user` into `XATTR_NAME_MAX + 1` bytes, which
+  answers more than the NULL: an empty name and one of 256 bytes or more are
+  `ERANGE`. The kernel below let the first through and called the second
+  `EINVAL`, so both are the libc's now, at the name's place in the order.
+- **A setter's value** is judged after the name -- `E2BIG` over 64 KiB, before
+  it is read, then `EFAULT` for a NULL one -- where the kernel said `EINVAL`
+  to both.
+- **A getter's or lister's buffer** is never tested by Linux; a NULL one
+  with a size was `EINVAL`, before the lookup.
+- Beside them, the finding of the pass: the edges were the kernel's, not
+  Linux's -- `B-D-XATTR-SIZES-AND-BUFFERS-WERE-NOT-LINUXS` (new; the libc's
+  half fixed with it, the kernel's requested of lane A).
+
+**Thirty-ninth pass, 2026-09-26 — the C callbacks, lane D.** Not a file at a
+count, but a kind of site the count could not see: a function pointer a C
+caller may pass as NULL, which the Rust signature typed as a function --
+never NULL -- so that a NULL was undefined behaviour before the call began. A
+scan of every exported signature found fourteen calls in four files: `ftw`,
+`nftw`, `ftw64` and `nftw64`; `tsearch`, `tfind`, `tdelete`, `lfind` and
+`lsearch`; `qsort`, `qsort_r` and `bsearch`; `pthread_create` and
+`pthread_once`. The exit handlers in `crt.rs` were nullable already, but
+answered as glibc does not. Each now takes a NULL and answers it as
+design-decisions.md §1115 sets out -- `B-D-C-CALLBACKS-COULD-NOT-BE-NULL`
+(new, fixed with it). Beside them, `lfind`, `lsearch` and `bsearch` lost
+checks glibc does not make.
+
+**Fortieth pass, 2026-09-26 — `pipe.rs` (1 site), lane D.** Against Linux
+6.6's fs/pipe.c. The first of the ten files the sweep counted at one.
+
+- **`pipe(NULL)`, `pipe2(NULL, …)`** were `EFAULT` before the pipe existed.
+  `do_pipe2` copies the descriptors out last -- after the flags, the pipe and
+  the two descriptors -- so a full descriptor table is `EMFILE` there, not
+  `EFAULT`. The check is at the copy now, and the pipe and its descriptors
+  are given back.
+- Beside it, `O_NOTIFICATION_PIPE` (`O_EXCL`'s bit, Linux 5.8's keyring and
+  mount notifications) was outside the flag mask and `EINVAL`; Linux 6.6
+  accepts it there and refuses it as the pipe is made, `ENOPKG` from a kernel
+  built without watch queues -- which is what this one is.
+
+**Forty-first pass, 2026-09-26 — `poll.rs` (1 site), lane D.** Against
+glibc 2.39's `select`, `pselect` and `ppoll` and Linux 6.6's fs/select.c.
+
+- **`poll(NULL, n, …)`** was right: `EFAULT` after the `nfds` check, as
+  `do_sys_poll` copies.
+- Beside it, the finding of the pass: every timeout but `poll`'s was judged
+  in an order of its own, or not at all --
+  `B-D-SELECT-AND-PPOLL-TIMEOUTS-WERE-NOT-LINUXS` (new, fixed with it).
+
+**Forty-second pass, 2026-09-26 — `shadow.rs` (1 site), lane D.** Against
+glibc 2.39's `getspnam_r`.
+
+- **`getspnam_r(NULL, …)`** was `EFAULT` first. glibc has no nscd path for
+  shadow, so nss_files opens `/etc/shadow` and reads its first entry before
+  the name is touched -- comparing it with that entry. An unreadable file
+  is its own `EACCES` now, and a file with no entries "not found", whatever
+  the name; `EFAULT` comes at the first comparison. (`getpwnam_r`'s NULL
+  stays first: glibc's nscd client reads the name before anything else.)
+
+**Forty-third pass, 2026-09-26 — `ndbm.rs` (1 site), lane D.** The module is
+gone. `<ndbm.h>` is not glibc's or musl's -- on Linux the `dbm_*` calls come
+from a library, gdbm's `gdbm_compat` or Berkeley DB -- and no header in this
+system's sysroot declares them. The module was validators in front of a
+`dbm_open` that always failed with `ENOSYS`, so the only thing it could do to
+a C program was shadow a ported `gdbm_compat`'s `dbm_open` with one that
+opens nothing: a static link takes whichever definition comes first. Nothing
+in the tree used it. As design-decisions.md §1114 took libaio's names out,
+this took the module out. (`scripts/check-libc-abi.py`'s `NO_ORACLE` entry
+for `Dbm` now names a type that is gone; it is harmless, and `scripts/**` is
+unassigned -- A-Q11 -- so it is left for whoever next edits that table.)
+
+**Forty-fourth pass, 2026-09-26 — `linux_perf_event.rs` and `linux_bpf.rs`
+(1 site each), lane D.** Neither needed anything at its NULL -- `perf_event_open`
+judges its flags, then the attribute; `bpf` reads its attribute only when
+there is something to read -- but both were exported under names glibc does
+not have, as were `linux_io_uring.rs`'s three. perf, libbpf and liburing make
+these calls by number, and liburing (2.2 on) defines `io_uring_setup`,
+`io_uring_enter` and `io_uring_register` itself, so ours could only shadow a
+ported one at a static link; meanwhile `syscall()` answered all five `ENOSYS`
+without a look. Now `syscall()` runs the same Linux 6.6 checks -- the answers
+the kernel's own Linux table gives -- and the names are gone, as libaio's
+went (§1114).
+
+**Forty-fifth pass, 2026-09-26 — `utmpx.rs` (1 site), lane D.** Against
+glibc 2.39's login/utmp_file.c. The site -- `pututxline(NULL)`, `EFAULT` --
+sat in a module of stubs: nothing read, `pututxline` reporting success while
+writing nothing. So the pass became the database -- `B-D-UTMPX-WAS-A-STUB`
+(new, fixed with it) -- and the NULL now falls where glibc first touches the
+entry: comparing it with a record read, or writing it, after the file's own
+errors. `malloc.rs`'s site needed nothing (its `posix_memalign` was put in
+glibc's order earlier on 2026-09-26), nor did `utsname.rs`'s (`uname`'s only
+error is its copy-out) or `uio.rs`'s.
+
 **What remains.** The surviving `is_null() -> EFAULT` sites have not been
 individually classified. This entry stays open for coverage, not because any
 specific remaining site is known wrong. **No dense cluster is left.**
-`pthread.rs` looks like the largest concentration in a raw `rg` count (~48
+`pthread.rs` looks like the largest concentration in a raw `rg` count (~51
 sites), but it is not open work: design-decisions.md §303 already walked it,
 fixed its nine ordering bugs, and settled the pointer sites wholesale —
 NPTL has no NULL checks at all, so there is no upstream errno to look up and
-`EFAULT` is the adopted substitute. Do not re-open it by grep count. After
-`file.rs`, the largest genuinely-unclassified files are `process.rs` (10) and
-`epoll.rs` (9), and everything below that is a long tail of eight or fewer per
-file — a shape that argues for retiring this entry by sampling rather than by
-another file-at-a-time sweep.
+`EFAULT` is the adopted substitute. Do not re-open it by grep count. The same
+goes for `file.rs`, `spawn.rs`, `socket.rs`, `unistd.rs`, `process.rs` and
+`epoll.rs`, walked by passes five to ten. What is left is a long tail, and
+the eleventh pass showed it cannot be retired by sampling: it needs the
+file-at-a-time sweep. On 2026-09-26 the sampling script counted 128 sites in 39
+files — about a dozen of them classified by that pass. Passes twelve to
+thirty-eight swept `ioctl.rs`, `semaphore.rs`, `time.rs`, `aio.rs`,
+`sched.rs`, `mqueue.rs`, `linux_futex.rs`, `resolv.rs`, `statvfs.rs`,
+`linux_module.rs`, `sysv_msg.rs`, `sys_sysctl.rs`, `stat.rs`, `sysv_sem.rs`,
+`linux_aio_abi.rs`, `linux_seccomp.rs`, `mman.rs`, `resource.rs`, `crypt.rs`,
+`iconv.rs`, `linux_io_uring.rs`, `sysv_shm.rs`, `sys_quota.rs`,
+`sys_timex.rs`, `linux_landlock.rs`, `fts.rs`, `ftw.rs` and `xattr.rs`. That
+finishes every file the sweep counted at four, three and two, the three the
+recount of 2026-09-26 added among them: `pwd.rs`, `dirent.rs` and `signal.rs`
+needed nothing at their NULLs -- `pwd.rs`'s database did
+(`B-D-PWD-KNEW-ONLY-ROOT`). The ten it counted at one are done too, by
+the fortieth to forty-fifth passes, and with them every file the count of
+2026-09-26 named. The thirty-ninth pass was across files, not at a count:
+the callbacks. The thirty-ninth pass was across files,
+not at a count: the callbacks.
 
-Four habits carry forward, one per pass that produced one. From `socket.rs`:
+One item is not a site count: `read`, `write`, `pread` and `pwrite`
+(`posix/src/file.rs`) still test a NULL buffer where `access_ok` sits, so a NULL
+read at end of file, of an empty non-blocking pipe or of a directory says
+`EFAULT` where Linux says 0, `EAGAIN` or `EISDIR`. The fix is the tenth pass's
+habit — test at each per-kind copy — and it has to be done arm by arm, because
+several arms (eventfd, timerfd, inotify) dereference the buffer themselves
+(design-decisions §1107, point 2).
+
+Six habits carry forward, one per pass that produced one. From the
+eleventh pass: **port an upstream stub as a stub** — validation in front of its
+`ENOSYS` changes the one answer its callers test for. From the tenth pass: **the NULL test belongs where the copy is, not where `access_ok` is**,
+because on x86-64 `access_ok` admits NULL. From `socket.rs`:
 **do not generalise a rule from one sibling call to the next** — `bind` and
 `connect` order `ENOTSOCK` oppositely, and `sendmsg` and `sendto` order
 `EBADF` oppositely, in the same file. From `spawn.rs`: **when sibling
@@ -68103,6 +68870,16 @@ design-decisions.md §382.)*
 
 ## B-FORTY-TWO-BINARY-NAMES-ARE-BUILT-BY-TWO-PACKAGES (lane B, 2026-08-22) — harnesses fixed, the duplication itself is open
 
+**Status (lane D, 2026-09-28):** two pairs are left, `kill` and `logger`,
+and both are on the image now, so "nothing we *install* is affected" below no
+longer holds: built in one cargo invocation, the image's `/bin/kill` was
+coreutils' copy, without `killall`. `scripts/create-ext4-rootfs.sh` now builds
+the standalone crates in a second invocation, so theirs are the copies left in
+`release/`, and refuses to stage coreutils' copy of a name two packages build.
+Merging the two pairs is asked of lane B in
+`requests/d-b-kill-and-logger-are-built-twice-and-three-image-crates-miss-sysroot-dep.md`.
+
+
 **In short:** Forty-two of our command-line utilities exist *twice* in this
 tree, as two separate programs with the same name — one inside the big
 `userspace/coreutils` package, one as its own little `userspace/<name>` crate.
@@ -83272,6 +84049,15 @@ module docs say so.
 closed-descriptor sweep (todo item 9). The port is complete and correct — it
 calls `getlogin` and reports its failure exactly as GNU does — so nothing in
 `logname` needs to change when this is fixed.
+
+**Addendum (lane D, 2026-09-26): the database is real; `getlogin` waits on
+its writers.** `utmpx.rs` reads and writes `/var/run/utmp` as glibc does now
+(`B-D-UTMPX-WAS-A-STUB`). Both halves this entry names are in `posix/`, which
+is lane D's since the six-lane split, not lane B's. `getlogin` stays the
+single-account constant for now on purpose: glibc's answer -- the `ut_user` of
+the terminal's login record -- would be "no login name" for every session
+until something writes one, which is lane B's `login` (asked in
+`requests/d-b-utmp-is-a-real-file-now-create-it-and-write-logins.md`). When it does, lane D switches `getlogin` over.
 
 ---
 
@@ -126175,7 +126961,7 @@ that mattered; raising it is bounded by `dirent`'s 64-slot `Dir` pool
 (`MAX_FTS_INSTANCES * MAX_FTS_DEPTH` streams are held at full depth) and is
 tracked as `TD-B-FTS-DEPTH-IS-CAPPED-AT-EIGHT` below.
 
-### TD-B-FTS-DEPTH-IS-CAPPED-AT-EIGHT. `find`/`rm -r`/`du` stop at the eighth level — 2026-09-04 — OPEN
+### TD-B-FTS-DEPTH-IS-CAPPED-AT-EIGHT. `find`/`rm -r`/`du` stop at the eighth level — 2026-09-04 — FIXED 2026-09-25
 
 **Where:** `posix/src/fts.rs`, `MAX_FTS_DEPTH`.
 
@@ -126199,6 +126985,33 @@ that may have been replaced in between — which needs the same descriptor-
 identity check `rm -r`'s walk already does (design-decisions.md §752). Until
 then, raising `MAX_FTS_DEPTH` to 16 (32 of 64 slots) is a cheap partial step
 that halves the pool for a walk, and is not obviously the right trade.
+
+**Update (lane D, 2026-09-25) — who is actually affected.** Nobody in the tree
+today. `userspace/coreutils`'s `find`, `grep` and `mv` mention `fts_*` only in
+comments that trace GNU's logic; each walks the tree itself, and no program,
+port or fixture calls `fts_open` (checked with a tree-wide search). So the cap
+bites only a future C program that uses `<fts.h>` — and that program would meet
+more than the cap: one root only (`fts_open` ignores every path after the
+first), no `compar` sorting, no `fts_children`, no `FTS_XDEV`/`FTS_SEEDOT`, and
+no cycle detection under `FTS_LOGICAL`. The fix worth doing is therefore not the
+`telldir`/`seekdir` juggling above but BSD's model, which the real allocator
+(design-decisions §1101) now makes cheap: each frame copies its directory's
+listing into a growable heap array and closes the stream at once, so depth
+costs neither `Dir` slots nor descriptors; instances and the frame stack live on
+the heap; and `FTS_DC` compares each new directory's device and inode with its
+ancestors'. Lane D's next `fts` task, after the allocator is in.
+
+**FIXED (lane D, 2026-09-25) — by replacing the walker, not by raising the cap.**
+`posix/src/fts.rs` is now BSD's algorithm with glibc's ABI (design-decisions
+§1103): a directory is read into a list of heap entries in one pass and its
+stream released before `fts_read` returns, so depth costs neither `Dir` slots
+nor descriptors, and streams are heap objects rather than a pool of two. A
+600-level tree whose path outgrows the buffer several times is walked to the
+bottom in the tests. The same change makes every root walked, honours
+`compar`, `FTS_SEEDOT` and `FTS_XDEV`, implements `fts_children`, reports
+symlink cycles as `FTS_DC`, and gives `FTSENT`/`FTS` and the constants glibc's
+values — the instruction constants had been swapped, so a glibc-built caller's
+`FTS_SKIP` was read as "no instruction".
 
 ### B-NFTW-IGNORES-FTW-PHYS-AND-SKIPS-WHAT-IT-CANNOT-WALK. Four defects in one walker — 2026-09-04 — FIXED 2026-09-04
 
@@ -165464,7 +166277,7 @@ what the rungs found, rather than only the latter. Without (b) the next
 artifact added without a rung reproduces this exactly.
 
 ### [A] `getcwd(NULL, n)` returns EINVAL, so bash cannot learn its own directory -- on every boot, inside a rung that reports OK -- 2026-09-18
-**Status:** OPEN (root-caused; the fix is in `posix/**`, filed to lane B)
+**Status:** FIXED 2026-09-24 in `posix/**` (lane D, which owns `posix/` since the six-lane split): a NULL `buf` now allocates -- `size` bytes, or exactly the path's length plus one when `size == 0` -- with `ERANGE` checked before allocating, and `EINVAL` kept only for a non-NULL `buf` with `size == 0`. `get_current_dir_name` delegates to it; `__getcwd_chk` clamps to `buflen`. The tests that had pinned the bug (`test_getcwd_null_buf`, `test_getcwd_chk_null`) now pin the fix. **Still open, lane A's:** the bash rung asserting an empty stderr (option (b) in the request), which is what would have caught this on day one.
 
 **In short:** the shell prints an error at startup saying it cannot work out
 which directory it is in. It has done this on every boot for at least 20
@@ -169256,6 +170069,801 @@ name, they read identically at the call site, and only one of them answers
 in `scripts/key-survey.py`, written to fix this exact defect in the survey --
 by the same hand that then wrote it into thirty-eight tests.
 
+### [D] TD-D-CWD-AND-UMASK-DO-NOT-SURVIVE-EXEC-OR-SPAWN — 2026-09-24 — FIXED (libc half 2026-09-25; takes effect with lane A's kernel half)
+
+**Status:** FIXED in both halves, which reach `main` separately. Lane A's kernel
+half is `ff5f98db8` on `lane-a` (design-decisions.md §960): native syscalls
+1077-1079 and spawn inheritance. Lane D's libc half landed on `lane-d` on
+2026-09-25:
+- `chdir` (and `fchdir`, which goes through it) records the directory with
+  `SYS_PROCESS_SET_CWD` *before* updating this libc's copy, so a refusal leaves
+  the two agreeing.
+- `umask` keeps `SYS_PROCESS_UMASK` current.
+- `crt.rs` start-up reads both back (`init_cwd_from_record`,
+  `init_umask_from_record`) before constructors and `main`.
+- `posix_spawn`'s `addchdir_np` actions are applied in order. Each is resolved
+  against where the previous ones left the child and checked to be a directory,
+  and relative `open` actions after one follow it. The result goes to the kernel
+  in `SpawnEx2Args::cwd_ptr`/`cwd_len`, through 559.
+
+On a kernel without the record, all of this falls back to the old behaviour:
+the calls answer "no such syscall", which is treated as "keep it in libc", and
+`posix_spawn` then hands the kernel no directory (`kernel_keeps_cwd`). That is
+the reason for the note at the end of this entry. Host tests cover every path
+through a modelled kernel (`cwd_record::host`, `umask_record::host`,
+`host_dirs`). No ring-3 rung exercises it yet.
+
+**Still missing, smaller:** `posix_spawn_file_actions_addfchdir_np` (glibc
+2.29+) does not exist, so a program that uses it fails to link, loudly.
+`addchdir_np`/`addopen` paths are capped at 255 bytes (`ACTION_PATH_MAX`) where
+glibc allows `PATH_MAX`.
+
+*(The entry as filed follows.)*
+
+**In short:** every program a SlateOS-native program starts begins in `/`,
+with the default file-creation mask (`umask`, the permission bits a new file
+must not get) of `022`, whatever its parent had. So a shell's `cd` is forgotten
+by every command it runs, and a `umask 077` is forgotten too. Found by reading
+the code; no boot has exercised it, because every ring-3 rung runs from `/`
+with absolute paths, which is the one case where right and wrong agree.
+
+**Where:** the working directory is a libc `process_global!` buffer in
+`posix/src/unistd.rs` (initialised to `/`); the umask is `UMASK_VALUE` in
+`posix/src/file.rs` (initialised to `022`). Both are copied by `fork` (address
+space) and both reset in a new image, because `crt.rs` start-up has nobody to
+ask: no native syscall reads or writes `pcb.cwd` / `pcb.linux_umask`.
+
+**Who it reaches:**
+- C programs that `fork` + `exec*`.
+- Everything that uses `posix_spawn`, which includes **all of Rust's
+  `std::process::Command`** on this target (`os: linux, env: musl`, so `std`
+  runs on this libc). `Command::current_dir` on musl always becomes
+  `posix_spawn_file_actions_addchdir_np`, which `posix_spawn` records as tag 4
+  and then ignores (`build_fd_map`'s `_ => {}` arm) — so Oils, which sets
+  `current_dir` on every external command (`userspace/oils/src/interp.rs`),
+  `login` and `sshd` all start their children in `/`.
+- Linux-ABI children of native parents too: native spawn leaves the child's
+  `pcb` record at its defaults.
+
+**Proper fix:** `pcb.cwd` and `pcb.linux_umask` become the record for every
+ABI (native `SET_CWD`/`GET_CWD`/`UMASK`, spawn inherits both, `SpawnEx2Args`
+carries an optional `cwd` for `addchdir_np`), with libc keeping them current
+and reading them at start-up. Why that does not reopen `design-decisions.md`
+§648 is argued in the request: no native call resolves against the record.
+
+**Not done in the meantime, deliberately:** making `addchdir_np` fail loudly
+instead of being ignored. Oils uses it for every command, so refusing it would
+turn "runs in the wrong directory" into "runs nothing", and the fix for both is
+the same kernel half.
+
+The same reasoning shaped the fix. A kernel from before the record refuses
+the new spawn fields rather than ignoring them, so sending them to such a
+kernel would turn every Oils command into a failed spawn. `posix_spawn`
+therefore sends a directory only once `kernel_keeps_cwd()` has seen the record
+answer.
+
+### [D] TD-D-POSIX-SPAWN-IGNORES-ITS-ATTRIBUTES — 2026-09-24 — OPEN
+
+**Status:** OPEN — lane D's code; the proper fix needs spawn-time fields in
+lane A's `SpawnEx2Args`, requested 2026-09-25 in
+`requests/d-a-ignored-signals-and-spawn-attributes-need-a-kernel-record.md`.
+
+**In short:** a program can ask `posix_spawn` to start its child in a new
+process group, with certain signals blocked or reset, or in a new session. All
+of those requests are accepted and then ignored: the child starts in the
+parent's group, with the parent's signal mask. Job-control shells and anything
+using Rust's `Command::process_group` get a child that `^C` and `fg`/`bg` will
+treat as part of the parent.
+
+**Where:** `posix/src/spawn.rs` — `posix_spawn` and `posix_spawnp` take
+`attrp` and hand nothing of it to `spawn_impl`. `posix_spawnattr_set*` store
+their values faithfully (and have tests), so the object is right and the
+consumer is missing: `POSIX_SPAWN_SETPGROUP`, `SETSIGMASK`, `SETSIGDEF`,
+`SETSID`, `RESETIDS` and `SETSCHEDULER` are all no-ops. The module doc's claim
+that `SETPGROUP` "is meaningfully supported" is not true of the code.
+
+**Who reaches it:** Rust `std` on this target takes the `posix_spawn` path for
+any `Command` without a `pre_exec` closure; `process_group(pgid)` there
+becomes `POSIX_SPAWN_SETPGROUP`. (Oils uses `pre_exec`, so it takes the
+`fork` + `execvp` path and calls `setpgid` itself — not affected.)
+
+**Proper fix:** the child must be in its group and have its mask *before* its
+first instruction, which the parent cannot arrange after the spawn returns
+without a race. That means `SpawnEx2Args` fields — `pgid`, `sigmask`,
+`sigdefault`, a `setsid` flag — applied by the kernel as `SpawnOptions` already
+applies `cwd` and `uid_gid`; `struct_size` makes them additive. The interim of
+calling `setpgid(child, pgid)` from the parent after the syscall is the race
+shells tolerate for `fork`, but it is not what `posix_spawn` promises, and it
+does not help the signal attributes at all. File with the cwd request if lane A
+takes that one, since both widen the same struct.
+
+### [D] TD-D-FORTIFY-MEM-AND-STR-CHK-IGNORE-THE-OBJECT-SIZE — 2026-09-24 — FIXED 2026-09-25
+
+**Status:** FIXED 2026-09-25. `__chk_fail` exists (`posix/src/fortify.rs`), glibc's message and then `abort()`. The ten memory and string copies check their bound and abort before writing. `__read_chk`/`__pread_chk` clamp to the object instead. When each kind applies, and why, is design-decisions.md §1105. Host tests cover every copy at its exact bound and with an unknown object size. The aborting side needs a process that can die: `services/ctest-fortify-abort`, whose rung is requested in `requests/d-a-run-the-ctest-fortify-abort-fixture.md`. Added later the same day, by the same rule: `__fdelt_chk`/`__fdelt_warn`, the `__open_2` family (it aborts on `O_CREAT`/`O_TMPFILE` without a mode, as glibc does), `__explicit_bzero_chk`, `__poll_chk`/`__ppoll_chk` (abort), and `__recv_chk`, `__recvfrom_chk`, `__gethostname_chk`, `__getlogin_r_chk`, `__ttyname_r_chk`, `__ptsname_r_chk`, `__confstr_chk` and `__getgroups_chk` (clamp). Added 2026-09-26, by the same rule (design-decisions §1105's table): the ten wide-character copies and the eight multibyte conversions (abort — a clamped conversion would hide the truncation its caller tests for), `__fgetws_chk` and `__vswprintf_chk`/`__swprintf_chk` (clamp), with `wcpcpy` and `wcpncpy`, which this libc had lacked, each in its own archive member because gnulib replaces them; the ring-3 cases are in the same fixture. Writing `__vswprintf_chk`'s tests found a bug under it, fixed with it: `vswprintf` read its own formatted output as a string without terminating it (`format_core` does not; `_snprintf_impl` does), so `swprintf` into an uninitialised buffer miscounted or failed with `EILSEQ` — every existing test had used a zeroed one. The wide printf family to streams followed the same day — `fwprintf`, `wprintf`, `vfwprintf` and `vwprintf`, which this libc had lacked altogether, with `__fwprintf_chk`, `__wprintf_chk`, `__vfwprintf_chk` and `__vwprintf_chk` over them (`posix/src/printf.rs`, checked at ring 3 by `services/ctest-printf-streams`). Still absent, so a program using them fails to link rather than fails to check: `__fgetws_unlocked_chk`, for want of `fgetws_unlocked`; `__wcslcpy_chk`/`__wcslcat_chk`, for want of `wcslcpy`/`wcslcat`; `__getwd_chk`, for want of `getwd`; and `__longjmp_chk`, since this libc has no `longjmp` of its own.
+
+*(As filed:)* found while fixing `__getcwd_chk`.
+
+**What:** the `_FORTIFY_SOURCE` entry points for memory and strings —
+`__memcpy_chk`, `__memmove_chk`, `__mempcpy_chk`, `__memset_chk`,
+`__strcpy_chk`, `__stpcpy_chk`, `__strncpy_chk`, `__stpncpy_chk`,
+`__strcat_chk`, `__strncat_chk` in `posix/src/string.rs`, and `__read_chk` /
+`__pread_chk` / `__pread64_chk` in `posix/src/file.rs` — ignore the object size
+they are passed and do the unchecked operation. There is no `__chk_fail`. So an
+object compiled against glibc headers with `-D_FORTIFY_SOURCE` and linked here
+gets none of the overflow protection it was built to have.
+
+**Why low:** nothing we build calls them. `zig cc` compiles against musl's
+headers, and musl deliberately does not implement `_FORTIFY_SOURCE`, so no C
+fixture or port generates these calls; only a prebuilt glibc-compiled object
+would. The printf `_chk` family already makes a documented choice — clamp to
+the object size rather than abort (`services/ctest-fortify/main.c`) — and
+`__readlink_chk` and now `__getcwd_chk` clamp too.
+
+**Proper fix:** add `__chk_fail` (write `*** buffer overflow detected ***:
+terminated` to stderr, then `abort()`, as glibc) and have each wrapper check
+its bound. For the copy functions clamping is not a meaningful alternative — a
+`memcpy` that copies less than asked is a different bug, not a safe one — so
+these want the abort even though the printf family clamps.
+
+### [D] TD-D-MALLOC-HAS-ONE-LOCK-AND-INLINE-METADATA — 2026-09-25 — OPEN
+
+**Status:** OPEN — accepted costs of the allocator adopted 2026-09-25
+(design-decisions §1101), written down so they are found rather than
+rediscovered. Nothing is broken.
+
+**In short:** the C library's heap — every `malloc`, and every `Box`, `Vec` and
+`String` in the Rust userland — is now Doug Lea's allocator behind a single
+lock. Two things about it are weaker than they could be: every thread in a
+process takes that one lock to allocate, so a program with many busy threads
+queues on it; and the allocator keeps its bookkeeping beside the program's data,
+so a C program that writes past the end of a block can corrupt the heap in ways
+an attacker can use.
+
+**Where:** `posix/src/malloc.rs` (`HEAP`, `HeapGuard`); the vendored core,
+`posix/src/malloc/dlmalloc.rs` (inline chunk headers, as in glibc).
+
+**Also missing, same place:** ~~`malloc_trim`, `mallinfo`/`mallinfo2` and
+`malloc_stats`~~ — **added 2026-09-25**, on upstream's `trim` and a port of C
+dlmalloc's `internal_mallinfo` walk (`Dlmalloc::stats`, VENDORED.md local change
+7). `malloc_trim` can release only whole free segments, because `free_part`
+cannot unmap part of a mapping. `mallinfo`'s `int`s saturate rather than wrap.
+`malloc_stats` omits glibc's two "max mmap" lines, which dlmalloc does not
+track. Still missing: `mallopt` and `malloc_info`. No port has linked against
+either (bash, make, pkgconf, CMake and CPython all link with nothing missing),
+and `mallopt` would need the mapping threshold, now a constant, to become a
+setting.
+
+**Proper fix:** measure first. Contention → per-thread caches in front of the
+shared heap. Hardening → an allocator with out-of-band metadata (musl's
+mallocng) or a size-class design. The choice between them is
+`deferred-questions.md` → "[D] Which allocator should the C library's heap be
+in the long run?", with its triggers. Any of them replaces only the core behind
+`SlateSystem` and `HeapGuard`.
+
+### [D] TD-D-TLS-NEEDS-MAPPED-PROGRAM-HEADERS — 2026-09-25 — OPEN
+
+**Status:** OPEN — the narrow residual of the fix for
+`requests/a-bd-coreutils-cannot-start-two-link-faults.md` fault 1; the proper
+fix is a kernel ABI addition (lane A), requested at low priority in
+`requests/d-a-native-processes-could-be-told-where-their-program-headers-are.md`.
+
+**In short:** the C library finds a program's thread-local variables through the
+program's own ELF header in memory. A linker script that leaves the header out
+of the loaded image used to crash every program linked with it on its first
+instructions; since 2026-09-25 the library treats "no header" as "no
+thread-local variables", as glibc and musl do. That is right for every such
+program today. A program that had both an unmapped header *and* C `__thread`
+variables would start those variables at zero instead of their initial values,
+silently.
+
+**Where:** `posix/src/tls.rs` → `image()` (design-decisions §1102).
+
+**Proper fix:** give native processes the program headers' address the way
+Linux does — `AT_PHDR`/`AT_PHNUM` in an auxiliary vector (the kernel already
+builds one for Linux-ABI processes, `kernel/src/proc/linux_stack.rs`), or the
+headers copied onto the new stack when no segment maps them — and read that
+here before `__ehdr_start`. Until then, every native linker script must map
+`FILEHDR PHDRS` into its first `PT_LOAD`; lld's default layout does.
+
+### [D] TD-D-SIG-IGN-DOES-NOT-SURVIVE-EXEC-OR-SPAWN — 2026-09-25 — OPEN
+
+**Status:** OPEN — needs a kernel record of the ignored set (lane A), requested
+in `requests/d-a-ignored-signals-and-spawn-attributes-need-a-kernel-record.md`;
+the libc half is lane D's and waits on it.
+
+**In short:** a program that tells the system to ignore a signal and then runs
+another program should pass that on: `nohup cmd` ignores the hang-up signal so
+that `cmd` survives the terminal closing, and shells ignore `^C` for background
+jobs the same way. On SlateOS the next program always starts with every signal
+back at its default, so `cmd` dies on hang-up anyway and a background job dies
+on `^C`. Separately, `SIGCHLD` set to "ignore" is supposed to stop dead children
+lingering as zombies, and cannot, because only the kernel could do that.
+
+**Where:** `posix/src/signal.rs` — the dispositions are a static table in the
+libc, consulted by `dispatch_self_signal` after the kernel has delivered every
+catchable signal to the trampoline. A new image's table starts all-default, so
+`SIG_IGN` never crosses `exec` or `posix_spawn` (`fork` copies the table with
+the address space, so it is fine there).
+
+**Reproduce (by reading; no rung exercises it):** `signal(SIGHUP, SIG_IGN);
+execvp("sleep", ...)`, then send `SIGHUP` to the `sleep` — it dies, where Linux
+keeps it alive.
+
+**Proper fix:** the kernel holds the ignored set per process, keeps it across
+`exec`, copies it on `fork` and spawn, drops an ignored signal at send time, and
+auto-reaps children when `SIGCHLD` is ignored; the libc keeps it current from
+`signal`/`sigaction` and seeds its table from it at start-up. Details and the
+syscall shapes in the request above.
+
+### [D] B-D-USED-STATIC-TAGGED-THE-SERVICES-GNU — 2026-09-25 — FIXED
+
+**Status:** FIXED 2026-09-25, the day it was introduced — by e6d9cee96, the
+commit that gave the five bare-metal services their SlateOS ABI note.
+
+**In short:** marking the five small built-in programs as "SlateOS-native" made
+them look like Linux programs to any kernel that has not learned to read the
+mark. Such a kernel runs them with Linux's system-call numbers, which mean
+different things, so they never finish. On lane D's boot of 2026-09-25 the
+kernel's container self-test, which runs `hello`, waited forever behind it.
+
+**What happened:** e6d9cee96 carried the note in each service as a `#[used]`
+static in section `.note.slateos`. On ELF, Rust's `#[used]` gives the section
+`SHF_GNU_RETAIN`, and LLVM tags every object that uses a GNU extension
+`ELFOSABI_GNU`, so the linked services read `OS/ABI: UNIX - GNU` where they had
+read System V (checked with `readelf -h` against lanes A and C's builds). The
+kernel on `main` takes `ELFOSABI_GNU` as its first Linux signal
+(`ElfFile::detect_linux_abi`) and ran `hello` on the Linux table, where its
+`SYS_EXIT` (1) is Linux's `write`. The liveness monitor reported `SUSPECTED
+LIVELOCK` behind `/bin/hello` (task 428, zero context switches) from about 3,000
+s into the boot; the run could not progress and was stopped. Saved serial log:
+`build/serial-run5-livelock.txt` in lane D's worktree.
+
+Lane A's kernel ranks the note above every Linux signal (`has_slateos_marker`
+first in `detect_linux_abi`), so the tag is harmless there. But it only has to be
+harmless on the kernel the binary happens to meet, and that depends on merge
+order.
+
+**Fix:** each service assembles its note with `global_asm!`
+(`.pushsection .note.slateos, "a", @note`), as posix's crt0 does. That sets no
+GNU flag, and `KEEP` in each `linker.ld` keeps the section. All five read
+System V again, with the note in a PT_NOTE of their own (`readelf -h`, `-l`,
+`-n`).
+
+**Lesson:** a `#[used]` static on an ELF target changes the object's OS/ABI
+byte, which this kernel reads as an ABI decision. Emit marker notes with
+assembler directives, never with `#[used]`.
+
+### [D] B-D-EPOLL-DOES-NOT-FORGET-A-CLOSED-DESCRIPTOR — 2026-09-25 — FIXED 2026-09-26
+
+**Fix.** As the proper fix below describes. An entry records the target's
+`(kind, handle)` at `EPOLL_CTL_ADD`; readiness comes from that; ADD, MOD and
+DEL find an entry by `(descriptor, kind, handle)`, as upstream's `ep_find` does
+by `(file, fd)`; and `close()` and `dup2()`'s eviction call
+`epoll::forget_file` once a file's last descriptor is gone, as upstream's
+`eventpoll_release` does. `EPOLL_CTL_DEL` of a closed descriptor is `EBADF`
+again, as upstream — the deviation that let it succeed existed only for this
+bug. Tests: `test_epoll_forgets_a_closed_descriptor`,
+`test_epoll_entry_follows_the_file_not_the_number` (the dup case, the reused
+number, and DEL's `EBADF`), `test_epoll_forgets_a_file_dup2_evicts`.
+
+**Where:** `posix/src/epoll.rs` — `EpollEntry` is keyed by descriptor number,
+and `compute_revents` looks the number up at wait time; `posix/src/file.rs`
+`close()` does not tell epoll.
+
+**What.** Linux removes a file from every epoll interest list when its last
+reference is closed (`eventpoll_release`, fs/eventpoll.c). Here the entry
+stays, with two results:
+
+- `epoll_wait` reports it as `EPOLLERR | EPOLLHUP` on every call from then
+  on, with the caller's `data` — typically a pointer to the state the caller
+  freed along with the descriptor. An event loop that closes before it
+  deletes (legal, and common, on Linux) is handed a dangling pointer.
+- If the number is reused by a later `open`, the stale entry reports the
+  *new* file's readiness under the old registration's `data` and mask, and
+  `EPOLL_CTL_ADD` of the new file is refused with `EEXIST` because the number
+  is "already present". Linux keys an entry by (file, descriptor), so the new
+  file is a new entry.
+
+`epoll_ctl`'s one kept deviation — `EPOLL_CTL_DEL` of a closed descriptor
+succeeds, where Linux says `EBADF` — exists only to let a caller clean up after
+this.
+
+**Reproduce.** `e = eventfd(0,0); ADD e with data p; close(e); epoll_wait` →
+1 event, `EPOLLERR|EPOLLHUP`, data `p` (Linux: none). Then `f = open(...)`
+returning the same number, `ADD f` → `EEXIST` (Linux: 0).
+
+**Proper fix.** Key entries by the open file: record the target's
+`(kind, handle)` at `EPOLL_CTL_ADD`, compute readiness from that rather than
+from the number, and treat `(descriptor, kind, handle)` as the entry's
+identity, as upstream's `epitem` is `(file, fd)`. In `close()`, once the
+handle has no descriptor left (`fdtable::is_handle_referenced`), purge every
+entry naming it from every instance. A `dup` then keeps the entry alive as it
+does upstream, and the `EPOLL_CTL_DEL` deviation can go.
+
+### [D] B-D-FTW-STOPS-AT-NOPENFD-DEEP — 2026-09-26 — FIXED 2026-09-26
+
+**Fix.** `ftw` and `nftw` are glibc 2.39's io/ftw.c now (design-decisions
+§1109). Each level reads its directory's names into memory and closes the
+stream before descending — glibc's spill, done eagerly, which costs nothing
+extra because our `DIR` is already a snapshot — so the walk holds one
+descriptor at a time at any depth, and `nopenfd < 1` is 1. Without `FTW_PHYS`
+every directory entered is recorded by `(st_dev, st_ino)` and one entered
+before is skipped, as glibc's `find_object` does; that is what stops a
+symlink cycle now that `MAX_DEPTH` is gone. On the way, the rest of
+`ftw_startup`/`process_entry`/`ftw_dir`: an empty root is `ENOENT`, a root
+that cannot be `stat`ed gets no callback, trailing slashes come off the root,
+a `stat` failure other than `EACCES`/`ENOENT` and an `opendir` failure other
+than `EACCES` end the walk, an unknown `nftw` flag is `EINVAL`, and
+`FTW_ACTIONRETVAL` works. The walker reaches the filesystem through a small
+trait, so the host tests walk trees of their own — the walk itself had no
+tests at all, because on the host every path is missing.
+
+**Where:** `posix/src/ftw.rs` — `ftw`, `nftw` (the `Walker`).
+
+**In short:** `ftw(root, fn, n)` and `nftw` visit only the top `n` levels of a
+tree, and never more than 32: a directory deeper than that is reported as
+unreadable (`FTW_DNR`, `errno` `ENOMEM`) and nothing inside it is visited.
+glibc walks the whole tree whatever `n` is; `n` only limits how many
+directories it holds open at once. A program passing a small `n` — `ftw(dir,
+fn, 1)` is common, 20 traditional — silently misses files, and a traversal
+that omits files is worse than one that fails.
+
+**Repro:** a tree `a/b/c/f`; `ftw("a", cb, 1)` reports `a` as `FTW_D` and
+`a/b` as `FTW_DNR`; `c` and `f` are never seen.
+
+**Why.** The walker holds one directory stream open per level, so the
+descriptor budget is also a depth budget (`depth_limit`, capped by
+`MAX_DEPTH`). Found by the NULL-pointer audit's eleventh pass.
+
+**Proper fix.** glibc's (io/ftw.c, `open_dir_stream`): when a new level needs a
+stream and `n` are open, read the rest of the oldest open stream's entries into
+memory, close it, and serve that level from memory when the walk returns to it.
+Then no depth cap is needed but `PATH_MAX`'s, and `nopenfd < 1` becomes 1, as
+glibc's `ftw_startup` makes it, instead of `EINVAL`. Symlink cycles without
+`FTW_PHYS` then need glibc's other half, the set of directories already walked
+(`find_object`), since `MAX_DEPTH` is what stops them today.
+
+### [D] B-D-PROCESS-SHARED-SYNC-IS-SILENTLY-PRIVATE — 2026-09-26 — PARTIAL 2026-09-26 (libc's half done)
+
+**Done 2026-09-26 (libc).** Step 1 below: `sem_init` with a non-zero
+`pshared` and every `setpshared(PTHREAD_PROCESS_SHARED)` are `ENOTSUP`, as
+glibc answers where shared futexes are unsupported, so nothing is silently
+private any more; and the missing calls exist, in glibc's attribute layout —
+`pthread_mutexattr_{get,set}{pshared,protocol,prioceiling,robust}` (with the
+`_np` robust names), `pthread_mutex_consistent`, `pthread_mutex_{get,set}prioceiling`,
+`pthread_condattr_{get,set}pshared` and the `pthread_barrierattr_*` family. A
+protocol other than none, and robustness, are stored and then refused by
+`pthread_mutex_init` with `ENOTSUP`, as glibc refuses what it lacks.
+**Still open:** step 2, requested of lane A
+(`requests/d-a-futexes-keyed-by-physical-page-for-process-shared-objects.md`).
+
+**Where:** `posix/src/semaphore.rs` (`sem_init`), `posix/src/pthread.rs` (the
+attribute calls), `kernel/src/ipc/futex.rs` (lane A).
+
+**In short:** a semaphore made with `sem_init(sem, 1, n)` — "shared between
+processes" — is accepted and then works only inside one process: a waiter in
+one process is never woken by a post in another, because the kernel's futex
+queues are keyed by (address space, virtual address), not by the physical page
+two processes share. And the calls that ask for a process-shared mutex,
+condition variable or barrier do not exist, so a program using them fails to
+link: `pthread_mutexattr_setpshared`/`getpshared`,
+`pthread_condattr_setpshared`/`getpshared`, the whole `pthread_barrierattr_*`
+family, and the mutex protocol and robustness attributes
+(`pthread_mutexattr_setprotocol`, `setprioceiling`, `setrobust`,
+`pthread_mutex_consistent`). Only `pthread_rwlockattr_setpshared` exists, and
+it already refuses `PTHREAD_PROCESS_SHARED` with `ENOTSUP`.
+
+**Found by:** the NULL-pointer audit's thirteenth pass (`semaphore.rs`), whose
+`sem_init` says "`pshared` is ignored".
+
+**Proper fix:**
+1. Now, in libc: glibc's own answer where shared futexes are unsupported —
+   `futex_supports_pshared` returns `ENOTSUP` — for `sem_init` with a non-zero
+   `pshared` and for each `setpshared(PTHREAD_PROCESS_SHARED)`; add the missing
+   attribute calls, with `ENOTSUP` for what the kernel cannot back
+   (process-shared objects, `PTHREAD_PRIO_INHERIT` without PI futexes, robust
+   mutexes without a robust list).
+2. Then, in the kernel (a request to lane A): key a futex on a shared mapping by
+   its physical page, as Linux does for a non-private futex, so that
+   process-shared objects can be allowed.
+
+### [D] B-D-PTHREAD-SYNC-POLLED-IN-1MS-STEPS — 2026-09-26 — FIXED 2026-09-26
+
+**Where:** `posix/src/pthread.rs` — mutexes, condition variables, rwlocks,
+barriers, `pthread_once`; now over `posix/src/lowlevellock.rs`.
+
+**What it was.** None of pthread's blocking calls used a futex. A contended
+`pthread_mutex_lock` spun 100 times and then slept in 1 ms steps, polling;
+so did `pthread_cond_wait`/`timedwait`, `pthread_rwlock_rdlock`/`wrlock` and
+`pthread_barrier_wait`; `pthread_mutex_timedlock` busy-yielded; a thread
+waiting in `pthread_once` spun without yielding for however long `init` took.
+Every hand-off cost up to a millisecond, and a waiter nobody would wake kept
+waking up. Every lock, uncontended included, made a `SYS_TASK_ID` syscall
+first — the whole cost of what should be one compare-and-swap
+(`performance-targets.md`, "Futex wait/wake (uncontended)").
+
+And three correctness faults beside it: a condition variable ignored its
+attribute's clock, so a `CLOCK_MONOTONIC` deadline (seconds past boot) read
+as real time had always passed and every timed wait returned `ETIMEDOUT` at
+once; a barrier reused at once could release a thread with the round it did
+not belong to (between the last arrival's reset of the count and its advance
+of the generation); and `pthread_rwlock_timedrdlock`/`timedwrlock` did not
+exist.
+
+**Fix (design-decisions §1110).** A low-level futex lock (Drepper's
+three-state mutex, glibc's `lll_lock`) under every mutex, the barrier and the
+timed paths; a sequence-counter futex under condition variables, with the
+waiter count kept so a signal nobody waits for costs no syscall; a futex
+rwlock that answers `EDEADLK` to its writer; the calling thread's task id
+cached in its per-thread block (reset in a `fork` child). The clock a
+condition variable was made with is kept and used, and glibc 2.30's
+`pthread_cond_clockwait`, `pthread_mutex_clocklock`,
+`pthread_rwlock_clock{rd,wr}lock` and `sem_clockwait` exist, with the
+`pthread_rwlock_timed*` pair. Host tests drive each with real threads.
+
+### [D] B-D-PTHREAD-CREATE-IGNORED-ITS-ATTRIBUTE — 2026-09-26 — FIXED 2026-09-26
+
+**Where:** `posix/src/pthread.rs` — `pthread_create`, the thread table,
+`pthread_attr_init`; `posix/src/perthread.rs`.
+
+**What it was.** `pthread_create` took its attribute as `_attr` and never
+read it. Every thread got a 64 KiB stack whatever size it asked for -- Rust's
+std asks for 2 MiB -- with no guard page below it, so a thread that used more
+than 64 KiB wrote into whatever was mapped below its stack, silently. A
+thread asked to start `PTHREAD_CREATE_DETACHED` started joinable, and since
+nothing joined it, its stack leaked. A stack the caller supplied
+(`pthread_attr_setstack`) was ignored. And the thread table held 64 threads:
+the 65th ran untracked, its mapping leaked on join, `pthread_detach` told the
+caller it did not exist, and `pthread_getattr_np` reported the main thread's
+stack for it. `pthread_attr_init` recorded a guard of 0, where glibc records
+a page. Found reading `pthread_create` for the aio notification thread, which
+must be created detached.
+
+Two smaller faults beside it: `find_slot` matched the sentinels, so
+`pthread_detach(0)` found an empty slot, marked it detached and answered 0;
+and the slot was published only after the thread started
+(`D-PTHREAD-SLOT-PUBLISH-RACE`).
+
+**Fix.** `pthread_create` reads the attribute: the stack size (rounded up to
+pages), a guard of the attribute's size below the stack, mapped inaccessible
+(one page by default, as glibc and musl), a caller's stack as given with the
+TLS part in a small mapping of its own (never unmapping the caller's memory),
+and the detach state. The table grows a chunk of 64 slots at a time and never
+shrinks, so a slot's address is stable and can be handed to its thread.
+Host tests cover the attribute reading, the layout arithmetic, the table's
+growth and the sentinels; `services/ctest-pthread` checks it all in ring 3,
+once lane A runs it (`requests/d-a-run-the-ctest-pthread-fixture.md`).
+Design choices in `design-decisions.md` §1111.
+
+### [D] B-D-SYSV-SEM-SEMCTL-TIMEOUT-AND-LIMITS — 2026-09-26 — FIXED 2026-09-26
+
+**Where:** `posix/src/sysv_sem.rs`; the plumbing it shares with
+`sysv_msg.rs` is the new `posix/src/sysv_ipc.rs`.
+
+**What it was.** `semctl` was declared with three arguments, so the fourth a
+C program passes -- `SETVAL`'s value, `GETALL`'s and `SETALL`'s array,
+`IPC_STAT`'s buffer -- never arrived: `semctl(id, 0, SETVAL, 1)`, the way
+every program sets a semaphore up, did not set it, and `IPC_STAT`,
+`IPC_SET`, `GETALL` and `SETALL` were reachable only through extra functions
+no C program calls. `semtimedop` read its timeout as a `CLOCK_REALTIME`
+deadline, so "wait five seconds" had passed in 1970 and every timed wait
+failed at once with `EAGAIN`. One `IPC_NOWAIT` anywhere in a batch made
+every operation in it non-blocking. The sets were a static pool of 16 sets
+of 32 semaphores; `GETPID`, `GETNCNT` and `GETZCNT` were always 0; a blocked
+call spun without yielding; permissions were not checked; `IPC_INFO`,
+`SEM_INFO` and `SEM_STAT` did not exist.
+
+**Fix.** Linux 6.6's ipc/sem.c behind glibc's `semctl`, inside one process:
+`semctl` takes `union semun`; `semtimedop`'s timeout is relative;
+operations apply in order, all or none, the one that cannot proceed
+deciding between `EAGAIN` and a sleep; Linux's limits (`SEMMSL` 32000,
+`SEMMNI` 32000, `SEMOPM` 500) and error orders; `SEM_UNDO`'s range;
+`GETPID`, `GETNCNT` and `GETZCNT` counted as Linux counts them; `IPC_INFO`,
+`SEM_INFO`, `SEM_STAT` and `SEM_STAT_ANY`; futex waits and `EIDRM`. Ids,
+permissions and the table of slots moved into `sysv_ipc.rs`, which
+`sysv_msg.rs` now uses too.
+
+**What remains.** The sets are one process's (D-Q3), so `SEM_UNDO`'s
+adjustment is kept but never applied: nothing outlives the process to undo.
+The ring-3 check is `services/ctest-sysvipc`, its rung requested of lane A.
+
+### [D] B-D-PWD-KNEW-ONLY-ROOT — 2026-09-26 — FIXED 2026-09-26
+
+**Where:** `posix/src/pwd.rs`, `posix/src/shadow.rs`, and the new
+`posix/src/nss_files.rs`.
+
+**What it was.** The C library's user, group and shadow databases were one
+built-in `root` entry and nothing else. `getpwnam`, `getpwuid`, `getgrnam`,
+`getgrgid`, `getgrouplist`, `getspnam` and the enumerations never read
+`/etc/passwd`, `/etc/group` or `/etc/shadow`, so every C program -- the owner
+column of `ls -l`, `id`, `su`, Python's `pwd` module -- knew no user but root,
+whatever the files held (they are generated from `/etc/users.yaml`,
+design-decisions §353). A NULL name was "not found" where glibc faults, a
+reentrant group lookup assumed the caller's buffer was 8-byte aligned, and
+`getpwent_r` and `getgrent_r` did not exist.
+
+**Fix.** The three files are read as glibc 2.39's `nss_files` reads them:
+its line syntax (comments and blank lines skipped, leading white space
+dropped, numbers as `strtou32`, NIS `+`/`-` lines skipped by lookups and kept
+by enumeration), its `_r` results (0 for found and for not found, `ERANGE`,
+`errno` set to the return), the non-reentrant forms' own buffer, and
+`getgrouplist` as `initgroups_dyn`. `/etc/shadow`'s privilege is the file's
+own: without it the lookup fails with `open`'s `EACCES`. A missing file is
+still the built-in root (design-decisions §1113).
+
+**What remains.** `getlogin` still answers `root` rather than the terminal's
+utmp entry; `initgroups` still succeeds without setting anything (the kernel
+keeps no supplementary groups); `fgetpwent`, `putpwent` and their group and
+shadow counterparts do not exist.
+
+### [D] B-D-SYSV-MSG-LIMITS-PERMISSIONS-AND-ERROR-ORDER — 2026-09-26 — FIXED 2026-09-26
+
+**Where:** `posix/src/sysv_msg.rs`.
+
+**What it was.** System V message queues were a static pool: 8 queues, 32
+messages each, 256 bytes a message, 8192 bytes a queue. `msgsnd` refused a
+message over 256 bytes, where Linux takes 8192, and `msgrcv` refused any
+*buffer* over 256 bytes with `EINVAL` -- so the ordinary receive into a
+`char mtext[8192]` failed however small the message. A blocked call spun on
+the CPU without yielding. Permissions were stored and never checked;
+`IPC_SET` clamped `msg_qbytes` silently where Linux refuses it without
+`CAP_SYS_RESOURCE`, and let any caller change the owner; the timestamps and
+pids `IPC_STAT` reports were always 0; and `IPC_INFO`, `MSG_INFO` and
+`MSG_STAT` -- what `ipcs -q` reads -- were `EINVAL`. A NULL buffer was
+`EFAULT` before the id, the queue or the message had been looked at, and
+`IPC_SET` looked the queue up before reading its buffer.
+
+**Fix.** Linux 6.6's ipc/msg.c, inside one process: its limits (8192-byte
+messages; 16384-byte queues, holding as many messages as bytes; 32000
+queues), each message allocated at its size; `ipcperms`, and the owner test
+for `IPC_SET` and `IPC_RMID`; the error orders of `ksys_msgsnd`,
+`do_msgrcv` and `ksys_msgctl`; `IPC_INFO`, `MSG_INFO`, `MSG_STAT` and
+`MSG_STAT_ANY`; the timestamps and pids; futex waits; and `EIDRM` for a call
+blocked on a queue that is removed.
+
+**What remains.** The queues are one process's, as the POSIX queues are
+(D-Q3). The blocking paths are tested on the host with the waiting step
+played by the test; no ring-3 fixture has yet run two threads against one
+queue.
+
+### [D] B-D-RES-QUERY-WAS-ENOSYS — 2026-09-26 — FIXED 2026-09-26
+
+**Where:** `posix/src/resolv.rs`.
+
+**What it was.** `res_query`, `res_search`, `res_mkquery` and `res_send`
+checked their arguments and returned `ENOSYS`: a program looking up anything
+but an address -- a mail exchanger, a service record, a text record -- got
+nothing. `getaddrinfo` works only because the kernel's network stack
+answers address lookups itself (`SYS_DNS_RESOLVE`). Beside them, `dn_comp`
+wrote no compression pointers and ignored its table, `dn_expand` did not
+escape special characters and refused a compression pointer that pointed
+forward, and neither set `errno`.
+
+**Fix.** A resolver: `resolv.conf` read into `_res` (`__res_state()`) as
+glibc reads it; names converted by glibc's `ns_name_*` rules, `dn_comp`
+compressing against its table; `res_mkquery` building glibc's query;
+`res_send` asking every nameserver over UDP, again at intervals, waiting past
+`SERVFAIL`/`NOTIMP`/`REFUSED` as glibc moves past them, and asking again over
+TCP when the answer is truncated -- musl's transport; `res_query` and
+`res_search` reporting through `h_errno` as glibc does. The transport is
+tested against a scripted network; everything else is pure and tested on the
+host.
+
+**What remains.** IPv6 nameservers are read and skipped; `sortlist`, EDNS0,
+`HOSTALIASES` and DNSSEC are not done. Nothing has queried a live server yet:
+that needs a ring-3 fixture against the boot's network.
+
+### [D] B-D-FUTEX-WAIT-BITSET-WAS-ENOSYS — 2026-09-26 — FIXED 2026-09-26
+
+**Where:** `posix/src/linux_futex.rs` (`futex`, which `syscall(SYS_futex, …)`
+routes to).
+
+**What it was.** Rust's standard library puts a thread to sleep with
+`futex(FUTEX_WAIT_BITSET | FUTEX_PRIVATE_FLAG, …, FUTEX_BITSET_MATCH_ANY)`
+and an absolute `CLOCK_MONOTONIC` deadline -- in `Mutex`, `Condvar`,
+`thread::park` and `Once`. Here that command was `ENOSYS`, which std reads as
+"woken", so every contended Rust lock and every condition-variable wait on
+this system spun at full speed instead of sleeping -- and on one CPU, spun
+against the very thread it was waiting for.
+
+**Fix.** `FUTEX_WAIT_BITSET` and `FUTEX_WAKE_BITSET` are served by the
+kernel's plain futex wait and wake: the absolute deadline is turned into the
+kernel's relative one (an expired one is `ETIMEDOUT`, after the value is
+compared, as `futex_wait` orders it), and a bitset is treated as matching
+everything -- at worst a spurious wake-up, which every futex caller must
+already tolerate. A zero bitset is `EINVAL`.
+
+**What remains.** The requeue and `WAKE_OP` commands, `FUTEX_TRYLOCK_PI` and
+`FUTEX_LOCK_PI2` are still `ENOSYS`: the kernel has no futex requeue yet.
+glibc and Rust's std use none of them for their locks.
+
+### [D] B-D-MQUEUE-LIMITS-ACCESS-AND-ERROR-ORDER — 2026-09-26 — FIXED 2026-09-26
+
+**Where:** `posix/src/mqueue.rs`.
+
+**What it was.** POSIX message queues were a static pool: 8 queues of 32
+messages of up to 256 bytes, names up to 63 bytes, and a default message size
+of 64 -- so a program that opened a queue with no attributes and sent 100
+bytes got `EMSGSIZE`, where Linux's default queue holds 10 messages of 8192.
+The descriptor's access mode was not kept, so a queue opened `O_RDONLY` could
+be sent to. `O_WRONLY|O_RDWR` was refused before the lookup, where Linux
+refuses it only for a queue that already exists (after `EEXIST`). Names were
+judged by their own rule: `"/"` was `EINVAL` (Linux: `ENOENT`), `"/a/b"`
+`EINVAL` (`EACCES`). A blocked `mq_send` or `mq_receive` busy-spun without
+yielding. `mq_notify` was `ENOSYS`. The errors came in the wrong order (the
+seventeenth pass).
+
+**Fix.** Linux's semantics throughout: the kernel's defaults and limits
+(10 x 8192; up to 10 and 8192, or 65536 and 16 MiB with `CAP_SYS_RESOURCE`;
+256 queues), each queue's storage allocated at its size; access modes kept
+and enforced; names judged as glibc and the kernel judge them; errors in the
+kernel's order; waits that sleep on a futex until the queues change; and
+`mq_notify` -- one registration per queue, fired once when a message arrives
+in the empty queue with no receiver waiting, through the notification code
+aio uses (now `posix/src/sigevent.rs`).
+
+**What remains.** Queues live in one process: two programs opening one name
+get two queues. That is open question D-Q3. An `mqd_t` is an index into this
+module's table, not a file descriptor, so `poll`, `select` and `close` do not
+take one, as Linux's do.
+
+### [D] B-D-AIO-OUTCOMES-EVICTED-AND-NEVER-NOTIFIED — 2026-09-26 — FIXED 2026-09-26
+
+**Where:** `posix/src/aio.rs`.
+
+**What it was.** Found in the fifteenth NULL-pointer pass, reading glibc's
+rt/ in full:
+
+- Each request's outcome lived in a 16-entry table keyed by the `aiocb`'s
+  address, and the 17th request evicted the oldest outcome whether or not
+  anyone had collected it. `aio_error` then answered `EINVAL` — "that I/O
+  failed with EINVAL" — for a request that had succeeded: a `lio_listio` of
+  17 requests lost its first. `aio_return` also dropped the outcome, so the
+  common `n = aio_return(cb); if (n < 0) e = aio_error(cb);` read `EINVAL`.
+- `aio_sigevent` was ignored, and `lio_listio`'s `sig`: a program waiting for
+  its `SIGEV_THREAD` callback or its signal waited forever.
+- `aio_cancel` answered `AIO_ALLDONE` to everything, a descriptor that is not
+  open (glibc: `EBADF`) and another descriptor's `aiocb` (`EINVAL`) included.
+- `aio_fsync(O_DSYNC)` ran `fsync`; a positioned read or write on a pipe or
+  socket failed with `ESPIPE` where glibc falls back to a plain one; an
+  interrupted one failed with `EINTR` where glibc retries.
+- `aio_suspend` never waited, so a request another thread was still
+  performing was reported complete.
+
+**Fix.** The outcome lives in the `aiocb`, in the two private words musl keeps
+there (`__err`, `__ret`) — no table and no limit — and reads as glibc's does,
+`EINPROGRESS` while another thread performs the request. Completion is
+notified as `aio_sigevent` asks: `SIGEV_THREAD` on a new detached thread,
+`SIGEV_SIGNAL` by `raise`. `aio_suspend` sleeps on a futex until a listed
+request completes; `aio_cancel` follows glibc's order and answers
+`AIO_NOTCANCELED` for a request being performed. Host tests drive reads and
+writes through an eventfd, which also takes the `ESPIPE` fallback.
+
+**What remains, by design.** Requests are still performed in the calling
+thread before the call returns, as this module always has — a program gains
+no overlap from aio. `SIGEV_SIGNAL` carries no value, since `sigqueue`
+delivers none yet (plain `raise` is glibc's own fallback without queued
+signals).
+
+### [D] TD-D-TSD-IS-A-GLOBAL-TABLE-KEYED-BY-TASK-ID — 2026-09-26 — FIXED 2026-09-26
+
+**Fixed 2026-09-26**, as proposed below: the keys are a table of 128
+(musl's `PTHREAD_KEYS_MAX`, and what `sysconf(_SC_THREAD_KEYS_MAX)` reports),
+each with a sequence number and a destructor; each thread's values are in
+blocks of 32 hanging off its per-thread block, allocated as it first sets a
+key in each and freed when it exits; `pthread_getspecific` is loads and a
+compare. A deleted key's index is reused, a value set under it before reads
+as NULL, and deleting a key not in use is `EINVAL`, as in glibc. The
+destructor sweep repeats only while destructors set values again, up to
+four times.
+
+**Where:** `posix/src/pthread.rs` — `TSD_TABLE` and `pthread_key_create`,
+`pthread_key_delete`, `pthread_getspecific`, `pthread_setspecific`.
+
+**What it is.** Thread-specific data lives in one process-wide table of 64
+rows, one per thread that has set a key, keyed by kernel task id, under a spin
+lock. Every `pthread_getspecific` makes a `SYS_TASK_ID` syscall, takes the
+lock and scans up to 64 rows -- for what glibc does with two loads. A 65th
+thread holding values at once gets `ENOMEM` from `pthread_setspecific`. And
+keys are never reused: `pthread_key_delete` leaves the index taken, so a
+program that creates and deletes keys runs out after 64 creations (`EAGAIN`)
+with none alive. The row count was the thread table's until that table
+learned to grow (`B-D-PTHREAD-CREATE-IGNORED-ITS-ATTRIBUTE`).
+
+**Proper fix.** glibc's design: each thread's values in its own per-thread
+block (an inline first block, further blocks allocated on first use), keys
+carrying a sequence number so that a deleted-and-recreated key reads NULL in a
+thread holding a stale value, and neither a lock nor a syscall on
+`pthread_getspecific`. The inline block goes in `PerThread`, within its
+2048-byte budget (`the_block_stays_small_enough_to_ride_in_every_thread`).
+
+### [D] TD-D-TSEARCH-IS-AN-UNBALANCED-TREE — 2026-09-26 — FIXED 2026-09-26
+
+**Fix.** glibc 2.39's misc/tsearch.c, ported: `tsearch` splits and rotates on
+the way down, `tdelete` overwrites the key with its successor's, unchains the
+successor and repairs a lost black node on the way up, and `twalk` visits in
+the same order. `twalk_r` exists. Host tests check the red-black invariants
+(no red node with a red child, one black height, keys in order) after every
+deletion of a scrambled 3000-operation run, and a 20,000-key sorted build
+stays within `2 * log2(n + 1)` of height. Two answers differ from before:
+`tdelete` of the root now returns a non-null pointer (`rootp`) — it returned
+the new root, null once the last node went, which read as "not found" — and a
+null `twalk` action or `tdestroy` free function is accepted instead of being
+undefined behaviour at the call.
+
+**Where:** `posix/src/search.rs` — `tsearch`, `tfind`, `tdelete`, `twalk`,
+`tdestroy`.
+
+**In short:** the `<search.h>` binary tree is a plain, unbalanced binary
+search tree. Keys inserted in order — the usual case: sorted input, increasing
+ids, a file's lines — make it a linked list, so each insertion and lookup costs
+O(n) and building a tree of n keys O(n²). glibc's is a red-black tree
+(misc/tsearch.c), O(log n) each, and programs are written against that.
+
+**Found by:** the ftw port (§1109), which needed a set of `(st_dev, st_ino)`
+keys — inode numbers arrive in near-sorted order — and uses a private hash
+table instead.
+
+**Proper fix:** port glibc 2.39's misc/tsearch.c: the red-black insertion
+with its top-down rebalancing, `tdelete`'s rebalancing, and `twalk`'s
+preorder/postorder/endorder/leaf visits, which callers depend on the order of.
+`twalk_r` (glibc 2.30) is missing too.
+
+### [D] B-D-PRINTF-DROPPED-EVERYTHING-PAST-4096-BYTES — 2026-09-26 — FIXED
+
+**Where:** `posix/src/printf.rs` — `_printf_impl`, `_fprintf_impl`,
+`_dprintf_impl`, and so `printf`, `fprintf`, `dprintf` and their `v` forms.
+
+**What it was.** Each formatted into a 4096-byte stack buffer and then wrote
+`min(n, 4096)` bytes while returning `n`. One call producing more than 4096
+bytes — a long line, a report, a JSON document — lost everything past the
+4096th byte, and its return value said all of it had been written, so nothing
+downstream could notice.
+
+**Fix.** The engine's output (`FmtOutput`) has a sink: a bounded buffer for the
+`snprintf` family, as before, or a stream or descriptor, which receives each
+full buffer as it fills, and the tail at the end. The three functions now
+stream through the same 4096-byte buffer, write everything, and return -1 if
+the stream refuses a write. `dprintf` also retries short writes, which it did
+not. Host tests drive the sink with outputs of 4095, 4096, 4097, 8192 and
+10,000 bytes; `services/ctest-printf-streams` checks the byte count at the far
+end of a pipe at ring 3 (its rung is requested of lane A).
+
+### [D] TD-D-INOTIFY-SHIM-IGNORES-ITS-CONTROL-FLAGS — 2026-09-25 — PARTIAL 2026-09-26 (four of six done)
+
+**Done 2026-09-26.** `IN_ONLYDIR` refuses a non-directory with `ENOTDIR`, after
+the missing-path `ENOENT`, as `LOOKUP_DIRECTORY` does. `IN_MASK_CREATE` refuses
+an existing watch with `EEXIST`, and `IN_MASK_ADD` ORs the new mask (and
+oneshot) into the old — `watch_after_add`, a port of
+`inotify_update_existing_watch`, tested on the host. `IN_ONESHOT` retires the
+watch after its first event with an `IN_IGNORED`, in the event pump
+(`retire_after_first_event`, tested on the host; upstream is
+inotify_fsnotify.c:132). **Still open:** `IN_DONT_FOLLOW` and `IN_EXCL_UNLINK`,
+as the proper fix below says, and a ring-3 check of the four done ones — the
+host cannot reach `inotify_add_watch`'s existing-watch branch at all, because
+`stat_self` has no host double and every path is missing there.
+
+**Where:** `posix/src/epoll.rs`, `inotify_add_watch` and the event pump
+(`IN_KNOWN_EVENTS`'s doc comment says so outright).
+
+**What.** The mask is validated as Linux 6.6 validates it (tenth NULL-pointer
+pass), but of the control flags only the validation is real. `IN_MASK_ADD`
+should OR the new mask into an existing watch's and replaces it instead;
+`IN_MASK_CREATE` should refuse an existing watch with `EEXIST`; `IN_ONLYDIR`
+should refuse a non-directory with `ENOTDIR`; `IN_ONESHOT` should remove the
+watch (queuing `IN_IGNORED`) after its first event; `IN_DONT_FOLLOW` should
+not follow a final symlink; `IN_EXCL_UNLINK` should drop events for unlinked
+children. All six are accepted and ignored, which is a silent failure: a
+caller asking for "only if it is a directory" gets a watch on a file.
+
+**Proper fix.** The first four are libc's to do: the existing-watch search in
+`inotify_add_watch` already finds the slot `IN_MASK_ADD`/`IN_MASK_CREATE`
+need, `stat_self` already returns whether the path is a directory, and the pump
+can retire a oneshot watch as it queues the event. `IN_DONT_FOLLOW` needs an
+`lstat`-based resolution. `IN_EXCL_UNLINK` needs the kernel's watch to know
+which children are unlinked; check what lane A's `fs::notify` records before
+deciding whose change that is.
+
 ### [E] The terminal's shell ran on pipes, so it was never on a terminal -- 2026-09-24
 **Status:** FIXED 2026-09-24 (lane E)
 
@@ -170448,6 +172056,621 @@ memfs-style and ext4-style numbering, and fails without the events.
   not. The VFS has working xattrs (ext4's included). Moving the tables there
   is a larger change, with on-disk format consequences, and would retire most
   of `fs::perfile`.
+
+### [D] B-D-CXA-ATEXIT-DROPPED-THE-OBJECT — 2026-09-26 — FIXED 2026-09-26
+
+**Where:** `posix/src/crt.rs` — `__cxa_atexit`, `__cxa_finalize`, `atexit`,
+`on_exit`, `at_quick_exit`, `exit`, `quick_exit`,
+`__cxa_thread_atexit_impl`, `__libc_start_main`; now built on
+`posix/src/exit_list.rs`. Reported by lane A twice
+(`requests/a-d-cxa-atexit-drops-this-so-cmake-dies-in-its-static-destructors.md`,
+`requests/a-d-cxa-atexit-drops-the-object-so-static-destructors-run-on-null.md`).
+
+**In short:** when a C++ program ends, the C library must run the destructor
+of every global object and give each one its object. Ours threw the object
+away, so every such destructor ran on a garbage pointer: CMake, the first large
+C++ program to finish its work on SlateOS, crashed in its first one (lane A's
+Path-Z CMake rung, exit -8). Several neighbouring defects sat in the same
+thirty lines.
+
+**What was wrong**, all of it silent:
+
+| | was | now |
+|---|---|---|
+| `__cxa_atexit(f, obj, dso)` | `f` registered as a no-argument `atexit` handler; `obj` dropped, so `f` ran on whatever `rdi` held | `f(obj)`, as the Itanium C++ ABI requires |
+| capacity | three fixed tables of 32; the 33rd registration of any kind returned -1, which no compiler checks, so those destructors never ran | 32 entries in place, then a `malloc`ed block that doubles; no limit |
+| `on_exit(f, arg)` | stored in a table `exit` never read | `f(status, arg)`, in the one reverse order with the rest |
+| order | `atexit` and `__cxa_atexit` entries in one table, `on_exit` in another | one list per kind of exit, glibc's `__exit_funcs`, newest first across every kind |
+| a handler that registers another | the new one was never run (the count was read once) | it runs next, as glibc's `__run_exit_handlers` does |
+| `__cxa_finalize(dso)` | a no-op | runs the module's destructors newest first and marks them done, so `exit` does not run them twice; NULL runs every termination function |
+| `.fini_array` | registered *after* the constructors, so it ran before every destructor a constructor registered | registered first, as glibc registers `call_fini`, so it runs last |
+| `__cxa_thread_atexit_impl` | accepted, and the destructor never run | a per-thread list, run by `pthread_exit` (a returning thread reaches it too) and, for the calling thread, first thing in `exit`; out of memory aborts with a message, as glibc does |
+| a NULL handler | undefined behaviour in the Rust signature | refused with -1 and `EINVAL`, nothing registered; a NULL thread destructor ends the process (the thirty-ninth NULL-pointer pass, design-decisions.md §1115) |
+
+**Tests.** `exit_list`'s host tests: the object reaches its destructor; every
+kind runs newest first with its arguments; 1000 entries; a handler registered
+during exit runs next; `__cxa_finalize` per module, once, and for NULL; a
+restart when a destructor registers another; finalised entries reused rather
+than piled up; `quick_exit`'s list separate; `thread_local` destructors newest
+first, per thread, every node freed. `crt.rs` repeats the regression pins at
+the ABI (`__cxa_atexit`, `on_exit`, 280 registrations, a NULL handler). The
+ring-3 check is lane A's Path-Z CMake rung, which this change should turn
+green.
+
+**Not glibc's, and not visible yet.** glibc's `atexit` passes its caller's
+`__dso_handle`; ours cannot, so `__cxa_finalize(dso)` for one module never
+runs an `atexit` handler that module registered. Nothing unloads modules
+(`dlclose` is a stub), so nothing can see the difference until something does.
+
+### [D] B-D-LAST-THREAD-SKIPPED-EXIT — 2026-09-26 — FIXED 2026-09-26
+
+**Where:** `posix/src/pthread.rs` — `pthread_exit`, `launch`
+(`LIVE_THREADS`); `posix/src/process.rs` — `fork`'s child.
+
+**In short:** when the last thread of a program ends by calling
+`pthread_exit` -- because `main` called it and left its threads to finish --
+POSIX says the program then ends exactly as if `exit(0)` had been called: its
+`atexit` handlers and static destructors run and its buffered output is
+written. Ours ended in the kernel instead, so none of that happened, and a
+program whose threads wrote through `printf` lost whatever was still
+buffered.
+
+**What it was.** `pthread_exit` always issued `SYS_THREAD_EXIT`, and the
+kernel ends a process whose last thread exits; nothing in the C library knew
+which thread was the last.
+
+**Fix.** glibc's shape (`__nptl_nthreads`): a count of the process's running
+threads, 1 for the initial thread, raised by `pthread_create`'s `launch` *before*
+`SYS_THREAD_CREATE` (so a new thread that ends at once cannot look like the
+last) and lowered by `pthread_exit` after the thread's destructors. The thread
+that lowers it to zero calls `exit(0)`. `fork`'s child resets it to 1. Host
+tests pin the counting (`only_the_last_thread_is_the_last`, the ordering case,
+saturation at zero).
+
+**Still not covered:** a thread the kernel kills on its own (an unhandled
+fault in that thread alone) never reaches `pthread_exit`, so it is never
+subtracted, and when the others have all called `pthread_exit` the kernel ends
+the process as before, without `exit`'s work. That is the old behaviour, and
+no worse; covering it needs the kernel to tell the process a thread died.
+
+### [D] B-D-IOPRIO-CHECK-WAS-PRE-6-5 — 2026-09-26 — FIXED 2026-09-26
+
+**Where:** `posix/src/process.rs`, `ioprio_check_cap` (new) and `ioprio_set`.
+
+**What it was.** `ioprio_set` judged an I/O priority by the rule Linux
+dropped in 6.5: all thirteen data bits as the level, so a priority carrying a
+hint (bits 3-12, `IOPRIO_PRIO_HINT`) was `EINVAL`, and a class field above
+three bits was a class nothing matched. Linux 6.6's `ioprio_check_cap` masks
+the class to three bits and reads only the low three as the level.
+
+**Fix.** `ioprio_check_cap`, 6.6's, shared by `ioprio_set` and kernel AIO's
+`IOCB_FLAG_IOPRIO`.
+
+### [D] B-D-PROCESS-VM-IMPORTED-ITS-OWN-VECTOR — 2026-09-26 — FIXED 2026-09-26
+
+**Where:** `posix/src/process.rs` (`process_vm_vector_bytes`); the new
+`posix/src/uio.rs`.
+
+**What it was.** `process_vm_readv`/`writev` carried their own copy of
+lib/iov_iter.c's vector checks. It judged the local count at 64 bits, where
+`import_iovec` takes an `unsigned` -- so `1 << 32` segments was `EINVAL`
+where Linux sees none and answers 0 -- and it read an array in the kernel
+half of the address space rather than refuse it with `EFAULT`.
+
+**Fix.** One copy of the checks, `uio.rs` (`import_ubuf`, `iovec_from_user`,
+`import_iovec`), used by these two calls and by kernel AIO's vectored
+commands. The `readv` family's own copy is replaced in the next change.
+
+### [D] B-D-VECTORED-IO-JUDGED-FLAGS-FIRST — 2026-09-26 — FIXED 2026-09-26
+
+**Where:** `posix/src/file.rs`: `readv`, `writev`, `preadv`, `pwritev`,
+`preadv2`, `pwritev2`, and `plan_rw_flags`, which kernel AIO shares.
+
+**What it was.** `preadv2` and `pwritev2` judged their `RWF_*` flags before
+the descriptor, where fs/read_write.c judges them last -- so a bad
+descriptor with a bad flag said `EINVAL`, and a transfer of nothing was
+refused over a flag Linux never looks at. The flags themselves were not
+Linux's: an unknown bit was `EINVAL` (Linux: `EOPNOTSUPP`), `RWF_DSYNC` and
+`RWF_SYNC` on a read were refused (Linux accepts them and does nothing), and
+`RWF_APPEND` was refused (Linux writes at the end). The four older calls
+checked their vector with a copy of `iovec_from_user` that skipped a
+segment length past `SSIZE_MAX` (`EINVAL`), `access_ok` (`EFAULT`) and the
+`MAX_RW_COUNT` cap.
+
+**Fix.** One engine for the six, in `do_readv`/`do_preadv`'s order; the
+vector imported by `uio.rs`; the flags as Linux 6.6's `kiocb_set_rw_flags`
+takes them, with `do_loop_readv_writev`'s stricter rule for a descriptor
+with no `read_iter`/`write_iter`; `RWF_APPEND` honoured.
+
+**What remains.** Linux judges `FMODE_READ`/`FMODE_WRITE` after the vector;
+here the transfer does, because only descriptors `open` made record their
+access mode reliably -- so a zero-length vector on a descriptor open the
+other way is 0 here where Linux says `EBADF`. `RWF_NOWAIT` is the `EAGAIN` of
+a transfer not attempted: correct for a caller that falls back, and a busy
+loop for one that polls and then insists on `RWF_NOWAIT` (none known).
+
+### [D] B-D-AIO-WAS-NOT-LINUXS — 2026-09-26 — FIXED 2026-09-26
+
+**Where:** `posix/src/linux_aio_abi.rs`; the `syscall()` routes in
+`posix/src/sys_syscall.rs`.
+
+**What it was.** Linux's kernel asynchronous I/O -- `io_setup`, `io_submit`,
+`io_getevents` and the rest -- as a pool of eight contexts of at most 256
+events, whose ids were the numbers 1 to 8. libaio's `io_getevents` reads the
+ring header at the id's address, so any libaio program would have faulted at
+address 1. Every refusal Linux makes when a request is submitted -- a bad
+descriptor, an unknown command, a bad flag, a bad buffer -- came back later
+as a completion event instead, with `io_submit` reporting success;
+`io_getevents` ignored its timeout and answered `EAGAIN` where Linux waits;
+a request blocked in its transfer (a read of an empty pipe) held a spin lock
+every other AIO call spun on; `io_cancel` and `io_pgetevents` did not exist;
+and the four functions were exported under libaio's names with `syscall()`'s
+return convention, which libaio's callers do not expect -- while
+`syscall(SYS_io_setup, ...)`, the way C actually reaches them, said `ENOSYS`.
+
+**Fix.** Linux 6.6's fs/aio.c inside one process: a context is a ring laid
+out as Linux's `struct aio_ring` and its id is the ring's address; requests
+are accounted as `reqs_available` accounts them, including events the caller
+reaps by moving `head` itself; `__io_submit_one`'s checks in its order, each
+refusal synchronous; `io_getevents` waits on a futex, with a relative
+monotonic timeout, and is woken by another thread's `io_submit` or by
+`io_destroy`, which in turn waits for the calls still inside the context;
+`io_cancel` and `io_pgetevents`; and the six numbers routed through
+`syscall()`, with the names no longer exported (design-decisions §1114).
+
+**What remains.** `IOCB_CMD_POLL` is refused (`B-D-AIO-HAS-NO-POLL`); the
+transfer is still the ordinary calls, so a file's `pread` moves its shared
+position meanwhile (`B-D-PREAD-MOVES-THE-SHARED-FILE-POSITION`); and the
+ring-3 check of the whole path is `services/ctest-aio`.
+
+### [D] B-D-AIO-HAS-NO-POLL — 2026-09-26 — OPEN
+
+**Where:** `posix/src/linux_aio_abi.rs`, `prepare`.
+
+**What it is.** `IOCB_CMD_POLL` (Linux 4.18) asks for a completion when a
+descriptor becomes ready. It is refused with `EINVAL` -- fs/aio.c's own
+answer, "same as no support for IOCB_CMD_POLL", which is what a program
+probing for it (ScyllaDB's reactor does) takes as "use epoll instead". A poll
+that is ready at once could complete at once; one that is not has to be
+completed later, while the program may be in no call of ours at all -- it
+may be waiting on the eventfd it asked to be signalled, or reaping the ring
+itself -- so only something running beside the program can complete it.
+
+**The proper fix.** A helper thread, started on the first pending poll: it
+waits (`poll`) on every pending request's descriptor plus a wake-up eventfd,
+and completes the ready ones into their rings, signalling their eventfds and
+waking `io_getevents` as a completion does now. `io_cancel` then has
+something to find -- a cancelled poll completes with `res` 0 and
+`io_cancel` answers `EINPROGRESS` -- and `io_destroy` cancels its context's
+polls before it waits. glibc runs its POSIX AIO the same way. Trigger: a port
+that submits `IOCB_CMD_POLL` and has no fallback.
+
+### [D] B-D-PREAD-MOVES-THE-SHARED-FILE-POSITION — 2026-09-26 — OPEN
+
+**Where:** `posix/src/file.rs`: `pread`, `pwrite`, and `at_position` under
+`preadv`, `pwritev`, `preadv2` and `pwritev2` -- and so kernel AIO's reads
+and writes of files.
+
+**What it is.** The kernel has no positional read or write, so these save
+the descriptor's position, seek, transfer and seek back. For the length of
+the call the shared position is wrong: another thread reading, writing or
+`lseek`ing the same descriptor meanwhile uses the moved position, and a
+second `pread` on it at the same moment can put the first one's position
+back under it. Linux's `pread` never touches the position.
+
+**The proper fix.** Positional transfers in the kernel's file interface --
+its VFS already reads and writes at an offset (`read_at`/`write_at`, which
+`copy_file_range` uses, and the Linux-ABI `pread64` reaches) -- exposed as
+native syscalls, and `pread` built on them: lane A's, asked for in
+`requests/d-a-positional-file-read-and-write.md`.
+
+### [D] B-D-SECCOMP-FLAGS-AND-PRCTL — 2026-09-26 — FIXED 2026-09-26
+
+**Where:** `posix/src/linux_seccomp.rs` (`check_set_mode_filter`, new);
+`posix/src/unistd.rs` (`prctl`).
+
+**What it was.** `seccomp(SECCOMP_SET_MODE_FILTER)` refused `TSYNC` with
+`NEW_LISTENER` even alongside `TSYNC_ESRCH` -- the flag that exists to make
+that pair unambiguous, which Linux accepts -- and refused `TSYNC_ESRCH`
+without `TSYNC`, a rule Linux 6.6 does not have. It never read the program
+header it was given, so a zero-length program reached the privilege gate and
+a header with no program answered `ENOSYS`. And `prctl(PR_GET_SECCOMP)` and
+`prctl(PR_SET_SECCOMP)` answered `EINVAL`: a sandbox asking whether it is
+already confined was told the call does not exist.
+
+**Fix.** Linux 6.6's order: the flags, the header (`EFAULT`), its length
+(`EINVAL`), the gate (`EACCES`), the program pointer (`EINVAL`), then
+`ENOSYS` as before. `PR_GET_SECCOMP` answers the mode, disabled;
+`PR_SET_SECCOMP` is `seccomp()` by `prctl_set_seccomp`'s mapping.
+
+### [D] B-D-MEMFD-NAME-WAS-A-PATH — 2026-09-26 — FIXED 2026-09-26
+
+**Where:** `posix/src/mman.rs`, `memfd_create`.
+
+**What it was.** The name a program gives a memfd is a label -- Linux shows it
+in `/proc` and accepts any bytes in it. Ours was spliced into the path of the
+file behind the descriptor, `/dev/shm/.memfd_<n>_<name>`, so a name with a
+`/` in it was refused with `EINVAL`, and names were limited to 200 bytes of
+Linux's 249. The counter that made the path unique was the process's own, so
+two processes creating memfds at the same moment could pick the same path,
+and the second failed with `EEXIST`.
+
+**Fix.** The name is measured (`EFAULT`, and `EINVAL` past 249 bytes) and
+not used; the path is `/dev/shm/.memfd_<pid>_<n>`, retried past a name
+another process left.
+
+### [D] B-D-RLIMIT-NULL-WAS-EFAULT — 2026-09-26 — FIXED 2026-09-26
+
+**Where:** `posix/src/resource.rs`: `getrlimit`, `setrlimit`, `prlimit`.
+
+**What it was.** `getrlimit(resource, NULL)` and `setrlimit(resource, NULL)`
+answered `EFAULT` -- the answers of Linux's old `getrlimit`/`setrlimit`
+system calls, which glibc on x86-64 never makes: its `getrlimit` is
+`prlimit64(0, resource, NULL, rlim)` and its `setrlimit`
+`prlimit64(0, resource, rlim, NULL)`, where a NULL pointer asks for nothing.
+So both are 0 for a valid resource, and a bad resource is `EINVAL` whatever
+the pointer (`setrlimit` said `EFAULT` for that too). `prlimit` itself wrote
+the old limit before trying the new one, so a refused call still overwrote
+the caller's buffer.
+
+**Fix.** `getrlimit` and `setrlimit` are `prlimit` with the other pointer
+NULL, as glibc's are; `prlimit` reads the new limit first and writes the old
+one last, only on success.
+
+### [D] B-D-CRYPT-FAILED-WITH-NULL — 2026-09-26 — FIXED 2026-09-26
+
+**Where:** `posix/src/crypt.rs` -- `crypt`, `crypt_r`, `encrypt`, and the
+safe API's `hash_into`/`verify` through `compute_into`.
+
+**In short:** when a password cannot be hashed, the `crypt` that Linux
+systems ship (libxcrypt, since glibc dropped its own) still returns a string,
+`"*0"`, that can never match a stored password, and sets `errno` to say why.
+Ours returned NULL instead, so a program written for Linux that compares the
+result directly -- common in login code -- would crash where Linux refuses
+the login. It also accepted a few inputs libxcrypt refuses.
+
+**What was wrong, against libxcrypt 4.4.36 as Ubuntu 24.04 builds it (probed
+there):**
+
+| | was | now |
+|---|---|---|
+| any failure | NULL | the failure token, `"*0"` (`"*1"` if the setting begins `"*0"`), written into the buffer before anything is checked |
+| NULL passphrase or setting | `EFAULT` | `EINVAL` |
+| a passphrase of 512 bytes or more | hashed | `ERANGE` |
+| a setting with a space, a control or non-ASCII byte, or `! * : ; \` | hashed, with that byte in the salt -- a `:` would have split an `/etc/shadow` line | `EINVAL` |
+| `encrypt(block, 2)` | `EINVAL` | `ENOSYS`, the stub's answer (libxcrypt reads any non-zero flag as "decrypt") |
+
+The safe Rust API refuses what `crypt` refuses, so a C program and
+`passwd`/`login` cannot disagree about one `/etc/shadow` entry.
+
+**Still missing, and tracked in `todo.txt`:** libxcrypt's other methods --
+traditional and BSDi DES, bcrypt (`$2b$`), scrypt (`$7$`), yescrypt (`$y$`,
+Ubuntu's default for new passwords), and the rest -- and real DES behind
+`encrypt`/`setkey`, which Ubuntu's libxcrypt provides. Their settings get the
+token and `EINVAL`, never a made-up hash.
+
+### [D] B-D-ICONV-WAS-NOT-GLIBCS — 2026-09-26 — FIXED 2026-09-26
+
+**Where:** `posix/src/iconv.rs` (rewritten), with glibc's C-locale
+transliteration table in `posix/src/iconv_translit.rs`, generated by
+`posix/tools/gen_iconv_translit.py` from glibc 2.39's
+`locale/C-translit.h.in`.
+
+**In short:** `iconv` converts text between character sets. Ours did not
+convert the way glibc does, so a program that relies on its errors to find
+text it cannot convert -- a mail client, a terminal, anything that falls back
+to another character set -- never heard of a problem, and one that asks for
+glibc's substitution or skipping was refused outright.
+
+**What was wrong, against glibc 2.39 as probed on Ubuntu 24.04:**
+
+| | was | glibc, and now |
+|---|---|---|
+| a character the target cannot write (é into ASCII) | replaced by `?` and counted | `EILSEQ`, stopped at it |
+| `//TRANSLIT`, `//IGNORE` after the target's name | the name was unknown: `EINVAL` from `iconv_open` | glibc's C-locale table (`€` → `EUR`, `©` → `(C)`, else `?`), or skipped with `EILSEQ` at the end |
+| invalid input to a same-set conversion (UTF-8 to UTF-8, ASCII to ASCII) | copied through | `EILSEQ`; a character cut off at the end is `EINVAL` |
+| a byte above 0x7F in ASCII input | copied through | `EILSEQ` |
+| UTF-8 | four bytes at most | glibc's six-byte form, overlongs and surrogates refused |
+| the reset call, `iconv_close` | 0 for any descriptor | `EBADF` for one `iconv_open` did not return |
+| a NULL name to `iconv_open` | `EINVAL` | `EFAULT`, where glibc faults |
+| the empty name | unknown | the locale's character set -- ASCII, in the C locale |
+
+**Still missing:** every character set but UTF-8, ASCII and ISO-8859-1 --
+glibc has hundreds. The ones programs reach for first are UTF-16, UTF-32,
+UCS-2/UCS-4, `WCHAR_T` and CP1252; `todo.txt` (lane D) records what Ubuntu
+answered for each, byte orders and BOMs included. They are refused with
+`EINVAL` from `iconv_open`, as before.
+
+**Addendum (2026-09-26):** those five convert now, and the three here were
+found to disagree with glibc in a few more places once glibc's source was
+read beside the probes -- `B-D-ICONV-HAD-THREE-CHARSETS`.
+
+### [D] B-D-IO-URING-WAS-NOT-LINUXS — 2026-09-26 — FIXED 2026-09-26
+
+**Where:** `posix/src/linux_io_uring.rs` -- `io_uring_setup`,
+`io_uring_enter`, `io_uring_register`, and the `IORING_SETUP_*` constants.
+
+**In short:** SlateOS has no io_uring, and programs that can use it check
+for it at startup and fall back when it is missing. They tell "missing" from
+"called wrongly" by the error, so the error has to be Linux's. Ours checked
+arguments in an order of its own, refused combinations Linux accepts and
+accepted flags Linux 6.6 does not have -- and one flag constant had another
+flag's value.
+
+**What was wrong, against Linux 6.6:**
+
+| | was | now |
+|---|---|---|
+| `IORING_SETUP_SINGLE_ISSUER` | `1 << 8` -- the same bit as `IORING_SETUP_COOP_TASKRUN` | `1 << 12`, Linux's (the three other modules defining it had it right) |
+| accepted setup flags | `HYBRID_IOPOLL` (6.13's) in, `NO_MMAP` and `REGISTERED_FD_ONLY` (6.5's) out | bits 0 to 16, 6.6's set |
+| accepted enter flags, register opcodes | 6.12's `ABS_TIMER` and 6.13's `EXT_ARG_REG`; opcodes up to 31 | 6.6's: five flags, opcodes below 26 |
+| `SQPOLL` with `IOPOLL` | `EINVAL` | accepted (then `ENOSYS`) |
+| `SQPOLL` without `CAP_SYS_NICE` | `EPERM` | no capability is asked for, as in 6.6 |
+| `SQPOLL` with `COOP_TASKRUN`, `TASKRUN_FLAG` or `DEFER_TASKRUN`; `TASKRUN_FLAG` without `COOP_TASKRUN` or `DEFER_TASKRUN`; a CQ smaller than the SQ | accepted -- and the CQ compared before rounding, so a CQ of 5 for 8 entries was refused | `EINVAL` as Linux refuses them, the CQ compared after both round up to a power of two |
+| `io_uring_enter` | `min_complete`, `sig` and `sigsz` judged before the descriptor; every descriptor `EBADF` | flags, then the ring: not open `EBADF`, open `EOPNOTSUPP`, a registered-ring index `EINVAL` |
+| `io_uring_register` | per-operation argument shapes (and an invented `E2BIG`) before the descriptor | opcode, then the ring, as for `io_uring_enter` |
+
+`io_uring_setup` stops where Linux would allocate the rings and answers
+`ENOSYS`; the checks Linux makes afterwards (`ATTACH_WQ`'s descriptor,
+`SQ_AFF`'s CPU) are about rings that cannot exist here.
+
+### [D] B-D-SYSV-SHM-WAS-A-STATIC-POOL — 2026-09-26 — FIXED 2026-09-26
+
+**Where:** `posix/src/sysv_shm.rs` (rewritten), over the kernel's
+shared-memory regions (`SYS_SHM_CREATE`/`MAP`/`UNMAP`/`CLOSE`, now named in
+`posix/src/syscall.rs`).
+
+**In short:** System V shared memory is how some programs share a block of
+memory between their parts -- PostgreSQL, X11's shared-memory extension,
+many older Unix programs. Ours held four blocks of at most 64 KiB each, gave
+the same address to every attach, and checked no permissions, so anything
+larger or more numerous failed, and a program comparing two attach addresses
+was told they were one mapping. It is now Linux's, as the message queues and
+semaphores already were.
+
+**What was wrong, against Linux 6.6:**
+
+| | was | now |
+|---|---|---|
+| sizes, counts | four segments, 64 KiB each | `SHMMIN` 1 byte to `SHMMAX`, `SHMALL` pages in all, `SHMMNI` 4096 segments -- Linux's defaults |
+| memory | a static pool inside the library | a kernel shared-memory region per segment; every `shmat` maps it afresh, so two attaches are two addresses of the same bytes |
+| permissions | stored, never checked | `ipcperms` for `shmget`, `shmat` (read, or read and write) and `IPC_STAT`; owner or creator (or `CAP_SYS_ADMIN`) for `IPC_SET` and `IPC_RMID`; `SHM_LOCK` the owner's, or `CAP_IPC_LOCK` |
+| removal while attached | kept the key usable | `SHM_DEST` in the mode, the key made private, freed at the last detach -- the id still attaches, as on Linux |
+| `shmget` on an existing key | -- | `EEXIST`, then a larger `size` `EINVAL` before the permission's `EACCES`, as `ipcget` orders them |
+| `IPC_SET`/`IPC_STAT` with a NULL buffer | the segment looked up first | `IPC_SET` reads the buffer first; `IPC_STAT` writes it after the lookup and the permission |
+| `IPC_INFO`, `SHM_INFO`, `SHM_STAT`, `SHM_STAT_ANY` | `EINVAL` | Linux's figures and ids |
+| times, pids | 0 | `shm_atime`, `shm_dtime`, `shm_ctime`, `shm_cpid`, `shm_lpid` kept |
+
+**Still not Linux's:**
+
+- **An address the caller chooses** (`shmat(id, addr, …)` with `addr`
+  non-NULL) is `EINVAL`: `SYS_SHM_MAP` picks the address itself. Asked of
+  lane A in `requests/d-a-shm-map-at-an-address.md`.
+- **`SHM_EXEC`** is `EACCES`: the kernel never maps shared memory
+  executable.
+- **Across `fork` and between programs** a segment is not shared: the table
+  is this process's (open question D-Q3, as for the message queues and
+  semaphores), and a child's `shmat` of an inherited id is refused by the
+  kernel, which authorizes only a region's creator.
+- **`SHM_HUGETLB`** is `ENOMEM`, as on a Linux system with no huge pages set
+  aside.
+
+### [D] B-D-QUOTACTL-WAS-NOT-LINUXS — 2026-09-26 — FIXED 2026-09-26
+
+**Where:** `posix/src/sys_quota.rs`, `quotactl`.
+
+**In short:** `quotactl` manages disk quotas, which no filesystem here
+supports. Quota tools ask it anyway and decide from the error what to say --
+"no such device", "not a block device", "quotas not supported". Ours judged
+the call in an order of its own, so the tools were told the wrong thing: a
+missing device was a bad address, and an unprivileged query was "permission
+denied" rather than "not supported".
+
+**What was wrong, against Linux 6.6 (fs/quota/quota.c):**
+
+| | was | Linux, and now |
+|---|---|---|
+| a bad quota type with `Q_SYNC` | ignored | `EINVAL`, first, for every subcommand |
+| an unknown subcommand | `EINVAL`, first | never judged: `ENODEV` with no device, `ENOSYS` with one |
+| no `special` | `EFAULT` | `ENODEV`; `Q_SYNC` returns 0 |
+| a NULL `addr` | `EFAULT`, before the device | never reached: a filesystem's quota operations read it, and there are none |
+| `special` naming no file, or not a block device | `ENOSYS` | `stat`'s error, or `ENOTBLK` (`lookup_bdev`) |
+| no `CAP_SYS_ADMIN` | `EPERM`, before `ENOSYS` | never reached: `do_quotactl`'s `ENOSYS` comes first |
+
+### [D] B-D-ADJTIMEX-WAS-NOT-LINUXS — 2026-09-26 — FIXED 2026-09-26
+
+**Where:** `posix/src/sys_timex.rs` -- `adjtimex`, `ntp_adjtime`,
+`clock_adjtime`, and `adjtime` (new).
+
+**In short:** `adjtimex` is how time daemons -- chrony, ntpd,
+systemd-timesyncd -- steer the system clock, and `adjtime` is the older call
+many programs still use to nudge it. Ours refused `adjtime`'s form of the
+call outright, so there was no `adjtime` at all, and it judged the rest in a
+different order from Linux, so an unprivileged daemon could be told its
+values were wrong when Linux would have said it lacked the right to change
+the clock.
+
+**What was wrong, against Linux 6.6 (`timekeeping_validate_timex`,
+`__do_adjtimex`) and glibc 2.39:**
+
+| | was | now |
+|---|---|---|
+| `ADJ_OFFSET_SINGLESHOT`, `ADJ_OFFSET_SS_READ` -- `adjtime`'s modes | `EINVAL`, as unknown mode bits | Linux's: a one-time slew kept and the pending one returned; reading needs no capability |
+| any other unknown mode bit | `EINVAL` | accepted: Linux has no such check |
+| a change without `CAP_SYS_TIME` beside a bad value | the value's `EINVAL` | `EPERM`, which Linux asks first |
+| `ADJ_FREQUENCY` that overflows when scaled | accepted | `EINVAL` |
+| `time` in the reply | 0 | the current time, in microseconds or nanoseconds by `STA_NANO` |
+| `adjtime(3)` | missing | glibc's: `ADJ_OFFSET_SINGLESHOT` over `clock_adjtime`, `EINVAL` past its ±2145 s, the pending slew split as glibc splits it |
+
+**Still not Linux's:** the slew is only kept and reported -- the clock here
+has no slew, so the time does not move by it -- and the discipline state is
+this process's, not the system's.
+
+### [D] B-D-LANDLOCK-SAID-YES-THEN-NO — 2026-09-26 — FIXED 2026-09-26
+
+**Where:** `posix/src/linux_landlock.rs`.
+
+**In short:** Landlock lets a program lock itself out of files it does not
+need -- a sandbox it sets up for itself. SlateOS's kernel does not enforce
+it. A program asks first which Landlock version is there; ours answered
+"version 1", and then refused every attempt to use it. So a program told
+Landlock was available tried to sandbox itself and failed; a careful one
+stopped rather than run unconfined. A kernel without Landlock answers the
+first question "not supported", and the program carries on without it.
+
+**What it was.** The module exported `landlock_create_ruleset`,
+`landlock_add_rule` and `landlock_restrict_self` as C functions -- glibc has
+none; programs make the three system calls through `syscall()` -- and the
+version probe returned 1 while a real create answered `ENOSYS`, after
+validators for arguments that could never be used.
+
+**Fix.** The functions are gone, as the kernel-AIO ones went
+(design-decisions.md §1114); the module is the header's constants and
+structures. `syscall(SYS_landlock_*)` answers `ENOSYS` to all three, the
+probe included -- "not supported by the current kernel", which every
+Landlock-aware program tests for.
+
+**What would change it:** a kernel that enforces Landlock (VFS and network
+hooks, lane A's), at which point `syscall()` routes the three numbers to it.
+
+### [D] B-D-XATTR-SIZES-AND-BUFFERS-WERE-NOT-LINUXS — 2026-09-26 — FIXED 2026-09-26 (libc); kernel half requested
+
+**Where:** `posix/src/xattr.rs` -- every `*xattr` call. The kernel half is
+lane A's: `sys_fs_get_xattr`, `sys_fs_set_xattr` and `sys_fs_list_xattrs`
+(`kernel/src/syscall/handlers.rs`) and the VFS below them.
+
+**In short:** Extended attributes are small named values kept with a file --
+a comment, a security label, an access list. Tools that copy files with them
+(`cp -a`, `rsync -X`, `tar --xattrs`) read the list and every value, and
+decide from the error what to do when something does not fit. Ours answered
+the edges differently from Linux: an empty or too-long name, a too-large
+value and a NULL buffer were all "invalid argument", where Linux says "out of
+range", "too big", "bad address" -- or, for a NULL buffer, often nothing at
+all, since Linux complains about a buffer only when it has something to put
+in it.
+
+**What was wrong, against Linux 6.6 (fs/xattr.c):**
+
+| | was | Linux, and now |
+|---|---|---|
+| an empty name | handed to the filesystem | `ERANGE` -- `strncpy_from_user` copied 0 bytes |
+| a name of 256 bytes or more | `EINVAL` | `ERANGE` |
+| a setter's value over 64 KiB | `EINVAL` | `E2BIG`, before the value is read |
+| a setter's NULL value with a size | `EINVAL` | `EFAULT`, after the name and the size |
+| a getter's or lister's NULL buffer with a size | `EINVAL`, before the lookup | the lookup's error, `ERANGE` if the result does not fit, 0 if it is empty; `EFAULT` only for a result that would be copied |
+| a getter's or lister's size over 64 KiB | the buffer checked to its full stated size | 64 KiB (`XATTR_SIZE_MAX`, `XATTR_LIST_MAX`) |
+
+**Still the kernel's, and asked of lane A** (`requests/d-a-xattr-answers-only-the-filesystem-can-give.md`):
+
+- a getter's buffer that is too small is written up to its size before the
+  `ERANGE`; Linux leaves it as it was (`listxattr` already writes nothing);
+- a non-NULL buffer is checked against its stated size before the lookup,
+  so a bad one is `EFAULT` where Linux gives the lookup's answer;
+- a name in no namespace (`foo`, not `user.foo`) is stored, where Linux
+  refuses it with `EOPNOTSUPP`, and a bare prefix (`user.`) with `EINVAL`;
+- `trusted.*` is not gated on `CAP_SYS_ADMIN`, nor `user.*` kept to regular
+  files and directories, as Linux's `xattr_permission` does.
+
+### [D] B-D-C-CALLBACKS-COULD-NOT-BE-NULL — 2026-09-26 — FIXED 2026-09-26
+
+**Where:** `posix/src/ftw.rs`, `search.rs`, `stdlib.rs` and `pthread.rs`,
+and the exit handlers in `crt.rs`.
+
+**In short:** Many C library calls take a function to call back -- the
+comparison `qsort` sorts by, the routine a new thread starts in, the visitor
+of a directory walk. C lets a program pass NULL there, by mistake. Fourteen
+of ours declared the parameter with a Rust type that cannot be NULL, so a
+NULL broke a rule the compiler builds on, and what happened next was
+undefined -- possibly nothing visible, possibly memory corruption. Now each
+takes NULL and answers it as glibc's behaviour shapes: harmlessly where glibc
+never calls the function, and otherwise with an error or, where the call has
+no way to report one, by ending the program with a message, as glibc's
+crashes.
+
+**What each does with a NULL now** (design-decisions.md §1115):
+
+| call | when glibc would not call it | when it would |
+|---|---|---|
+| `ftw`, `nftw` (and the `64` names) | a root with nothing to report: the walk's own error | -1 and `EFAULT`, at the first entry |
+| `pthread_create` | -- | `EFAULT`, once the thread's memory is had |
+| `pthread_once` | done, or being done by another thread: 0 | `EFAULT`, and the once can still be run |
+| `tsearch` | an empty tree: the key is inserted | NULL and `EFAULT` |
+| `tfind`, `tdelete` | an empty tree: NULL | the process ends |
+| `lfind`, `lsearch` | an empty array: NULL, or the key appended | the process ends |
+| `qsort`, `qsort_r` | fewer than two elements: nothing | the process ends |
+| `bsearch` | an empty array: NULL | the process ends |
+| `atexit`, `at_quick_exit`, `on_exit`, `__cxa_atexit` | -- | -1 and `EINVAL`, nothing registered (glibc asserts); they succeeded, registering nothing |
+| `__cxa_thread_atexit_impl` | -- | the process ends (glibc's ends when the thread exits); it registered nothing |
+
+**Beside them.** `lfind` and `lsearch` refused a NULL key, a NULL array and
+a width of 0 without comparing -- glibc checks none of them, and hands
+whatever it is given to `compar` -- and `bsearch` refused a size of 0; those
+checks are gone. A NULL count `lfind` would read, a NULL array `qsort` would
+write through, and a NULL key or array `lsearch` would copy through end the
+process now, where they were "not found" or "nothing to do".
+
+**Tests.** The host tests take every case in the table where the program
+goes on. The ones that end it are one line each, a call of `libc_fatal`
+where glibc would make the call, and are there to be read: a test cannot
+take its own process down.
+
+### [D] B-D-SELECT-AND-PPOLL-TIMEOUTS-WERE-NOT-LINUXS — 2026-09-26 — FIXED 2026-09-26
+
+**Where:** `posix/src/poll.rs` -- `select`, `pselect`, `ppoll`.
+
+**In short:** `select`, `pselect` and `ppoll` wait for input on several
+descriptors at once, up to a timeout. Ours judged the timeout after
+everything else, never refused a bad one -- a negative `ppoll` timeout
+waited a millisecond instead of failing -- and `select` never told the
+caller how much of the timeout was left, which Linux does and event loops
+written for Linux use to keep a deadline.
+
+**What was wrong, against glibc 2.39 and Linux 6.6 (fs/select.c):**
+
+| | was | Linux, and now |
+|---|---|---|
+| `select`'s negative seconds or microseconds | treated as zero | `EINVAL`, before `nfds` is looked at (glibc's own check) |
+| `select`'s microseconds past a second | added in as nanoseconds | carried into the seconds; read as a 32-bit `int`, as glibc reads them |
+| `select`'s `*timeout` on return | untouched | what is left of the wait, on every return -- the kernel's update, which glibc hands back; a zero timeout stays zero |
+| `pselect` / `ppoll` with a `timespec` outside `timespec64_valid` | converted without a check: a negative `ppoll` timeout waited 1 ms | `EINVAL`, before `nfds` and `fds` |
+| `ppoll` past `i32::MAX` milliseconds | cut to about 24 days | the whole wait |
+
+`pselect` and `ppoll` still do not write their timeout back: glibc passes
+the kernel a copy, and POSIX makes it `const`.
+
+### [D] B-D-UTMPX-WAS-A-STUB — 2026-09-26 — FIXED 2026-09-26 (libc); the file and its writers requested
+
+**Where:** `posix/src/utmpx.rs` -- `setutxent`, `getutxent`, `getutxid`,
+`getutxline`, `pututxline`, `endutxent`, `utmpxname`, `updwtmpx`, and
+glibc's names for them (`getutent_r` and the other `_r` calls are new).
+
+**In short:** Unix keeps a small file of who is logged in where,
+`/var/run/utmp`, and a history of logins, `/var/log/wtmp`; `who`, `w`,
+`last` and `getlogin` read them, and `login` and `sshd` write them. The C
+library's calls for this were stubs: every read found nothing, and a write
+reported success without writing anything. They are glibc's now.
+
+**What it does, as glibc 2.39's `login/utmp_file.c` does:**
+
+- The file is glibc's: 384-byte records with 32-bit time fields -- what every
+  Linux tool reads, and what this tree's `utmpfile` crate reads for `who`,
+  `last`, `w` and `finger`. A C program holds musl's 400-byte `struct utmpx`;
+  each record is converted on its way in and out.
+- `getutxid` matches the time records by type and the process records by
+  `ut_id` (by `ut_line` when an id is empty); `getutxline` finds login and
+  user records by line; both read forward from where the reading stopped.
+- `pututxline` overwrites the record it matches -- the last one read first --
+  or appends, and returns the caller's own pointer; a record written in part
+  is cut off again (`ENOSPC`). `updwtmpx` appends to the history the same way.
+- A missing file is never created: every call answers with the failed
+  `open`, as glibc's do.
+- Locks are `fcntl(F_SETLKW)`, as glibc's -- which this libc does not enforce
+  yet (`requests/b-a-advisory-record-locking-is-a-stub-that-always-succeeds.md`).
+
+**What it waits on, outside the libc** (`requests/d-b-utmp-is-a-real-file-now-create-it-and-write-logins.md`):
+nothing creates `/var/run/utmp` or `/var/log/wtmp` at boot, and nothing
+writes a record at login -- so until something does, `who` still sees
+nobody, as it does on a Linux system whose init never made the file.
 
 ### [F] On SlateOS the compositor still asks its listener for connections every frame, because `poll` never reports one waiting -- 2026-09-25
 
@@ -172348,6 +174571,515 @@ flag), `glyf_shift`, and the phantom-point handling in `outline_into_at`.
 **How to see it.** `python gui/font/tools/hint_oracle.py C:\Windows\Fonts\arial.ttf
 --gids 100,118`: every y agrees, every x is off by the same amount.
 
+### [D] B-D-ICONV-HAD-THREE-CHARSETS — 2026-09-26 — FIXED 2026-09-26
+
+**Where:** `posix/src/iconv.rs` (rewritten as glibc's conversion steps);
+`posix/src/linux_iconv_types.rs` (deleted).
+
+**In short:** `iconv` converted only UTF-8, ASCII and Latin-1, so a program
+that reads or writes UTF-16 -- Windows text files, much of what Java and
+JavaScript exchange -- or converts to and from `wchar_t`, or reads Windows'
+Latin-1, was told the character set does not exist. It now converts the sets
+programs reach for first, as glibc 2.39 does; and the three it had answered
+glibc differently in five places, fixed with them.
+
+**What converts now,** by every name glibc gives it, read as glibc reads a
+name: UTF-16 and UTF-32 (a byte-order mark written and read -- FF FE,
+little-endian, on x86-64 -- as glibc's), `UTF-16LE`/`BE` and `UTF-32LE`/`BE`
+(no mark), UCS-2 and `UCS-2BE`, `UNICODE` (UCS-2 behind the mark), UCS-4
+(big-endian) and `UCS-4LE`, `WCHAR_T`, and CP1252.
+
+**How:** as glibc does it. Each character set is a step to or from glibc's
+internal UCS-4; a conversion is two steps through an 8160-character buffer,
+or one to or from `WCHAR_T`; each step's loop checks what glibc's checks, in
+its order; the rounds are glibc's `iconv/skeleton.c`'s. That is where a
+simpler converter goes wrong: which error a full buffer next to bad input
+gives, where the input stops, when `//IGNORE` reports a skip, when the mark
+goes out. All of it was probed on Ubuntu 24.04 and pinned in the module's
+tests (design-decisions.md §1116).
+
+**What the three got wrong, and now do not:**
+
+| | was | glibc, and now |
+|---|---|---|
+| a full buffer, then input cut off or invalid (`"ab\xc3"` into 2 bytes) | `E2BIG` | `EINVAL` (`EILSEQ`): glibc decodes ahead of the output |
+| `//IGNORE`, a full buffer, then a byte to skip at the end | `E2BIG`, the byte left | skipped; `EILSEQ` |
+| a Unicode tag character (U+E0000-U+E007F) into ASCII or Latin-1 | `EILSEQ` | dropped without a word |
+| names | `-` and `_` ignored: `UTF_8` and `LATIN-1` opened; `8859_1` and `" UTF-8"` did not | glibc's names, read as glibc reads them: the first two refused, the last two open |
+| a conversion with `*outbuf` NULL and no room | went ahead | `EFAULT`, where glibc's assertion ends the program |
+
+**Deliberately not glibc** (§1116): three glibc bugs. Its reset keeps the
+byte order a mark gave, so a second stream after a big-endian one is misread;
+its `//TRANSLIT` into `UTF-16`, `UTF-32` or `UNICODE` writes an extra mark
+before each substitute; and a mark read by a call that then runs out of room
+is read again from the next two bytes, losing a leading U+FEFF.
+
+**Beside it:** `posix/src/linux_iconv_types.rs` defined `ICONV_ENC_*`
+"encoding IDs as used by glibc internals" and `ICONV_FLAG_*` flags. glibc has
+neither -- `<iconv.h>` declares `iconv_t` and three functions -- and nothing
+used them. Deleted.
+
+**Still missing:** glibc's other character sets: UTF-7, the ISO-8859 family
+beyond Latin-1, the other Windows and IBM code pages, KOI8, and the East Asian
+multibyte sets -- `todo.txt` (lane D).
+
+**Addendum (2026-09-26): glibc's table-driven 8-bit sets convert too** --
+all 141 modules glibc generates from a charmap (iconvdata/Makefile's
+`gen-8bit-modules` and `gen-8bit-gap-modules`): the ISO-8859 family, the
+Windows code pages but CP1255 and CP1258, KOI8-R and KOI8-U, the IBM and DOS
+code pages, the Mac sets, EBCDIC, TIS-620 and the rest, by all 614 of their
+names. The tables are generated from glibc's own charmaps
+(`posix/tools/gen_iconv_8bit.py` → `posix/src/iconv_8bit.rs`), and every
+byte, every writable code point and every name was checked against Ubuntu's
+glibc (design-decisions.md §1117). CP1252, hand-written above, is one of
+them now. Still missing: UTF-7, the 8-bit sets glibc writes by hand (CP1255
+and CP1258, whose combining marks make them stateful, and a dozen more), and
+the East Asian multibyte sets.
+
+**Addendum (2026-09-26): UTF-7 and UTF-7-IMAP convert too** -- RFC 2152's
+mail-safe Unicode and IMAP's variant for folder names, from glibc's
+iconvdata/utf-7.c. They are the first sets here with state that lasts from
+call to call -- an open base64 run and the bits waiting in it -- kept per
+descriptor, decoded again from the round's start when the output stops short
+(glibc's `SAVE_RESET_STATE`), and closed by the reset, `iconv(cd, NULL, ...)`,
+into the caller's buffer when there is one (`E2BIG` if the close does not
+fit). glibc's answers were probed on Ubuntu and are pinned in the tests --
+among them that an invalid byte inside a run leaves the run open unless
+`//IGNORE` skips it, and that `//IGNORE` then skips the byte that ended the
+run as well, even a `.`.
+
+### [D] TD-D-1700-CONSTANT-MODULES-NOTHING-USED — 2026-09-26 — FIXED 2026-09-26
+
+**Where:** `posix/src/linux_*_types.rs` -- 1,715 modules until today, 12 now.
+
+**In short:** the C library's source carried 1,715 files of Linux and glibc
+constants -- 240,374 lines, written in batches long ago, each with tests of
+its constants against themselves. Code the library exports reaches 11 of
+them, and none had been checked against the headers they copy: one was
+invented outright (iconv "encoding IDs as used by glibc internals", which
+glibc does not have -- `B-D-ICONV-HAD-THREE-CHARSETS`), and checking the ones
+in use found wrong values. 1,703 are deleted (238,411 lines). Twelve are
+kept, checked constant by constant: the 11, and `linux_virtio_types`, whose
+only users are the `linux_virtio_*` constant modules -- which nothing reaches
+either, and which wait with the library's other unreached modules
+(`todo.txt`, lane D; design-decisions.md §1118).
+
+**The check,** of the 15 modules other files named -- three of which turned
+out to be named only in comments, and went with the rest. gcc on Ubuntu 24.04
+printed every name they define
+from the real headers (glibc 2.39, the kernel's UAPI), macros and enum
+constants both; the names no header defines were read by hand against Linux
+6.6 and glibc 2.39:
+
+- **wrong:** `VIRTIO_ID_BT` and `VIRTIO_ID_GPIO` were 28 and 29 -- the
+  header's 0x28 and 0x29 read as decimal. Now 40 and 41, and every virtio
+  device id is pinned to Linux's by a test; the old test asked only that they
+  differ.
+- **wrong, and unused:** `PIDFD_THREAD`, 0x10000000 -- Linux's is `O_EXCL`,
+  0o200, which `process.rs` had right on its own.
+- **invented, and unused -- removed:** two pidfd ioctl numbers Linux does not
+  have, `PTHREAD_GUARD_DEFAULT` (4096; a page here is 16 KiB),
+  `PTHREAD_STACK_DEFAULT`, `TIMER_RELTIME`, default terminal dimensions,
+  getdents buffer sizes, and a second name for `MEMBARRIER_CMD_FLAG_CPU`.
+- **right:** the rest -- derived layouts (`dirent64`'s and `utsname`'s
+  offsets), syscall numbers, `perf_event_attr`'s bit positions, Linux 6.9's
+  pidfd flags among them.
+
+**Kept within reach.** `linux_clock_user_types.rs`, one of the deleted, held
+the only field-by-field check of `struct tm`'s layout against glibc's; that
+check is in `time.rs`'s own tests now. Any deleted file is one `git show`
+away.
+
+**Addendum (2026-09-27): 313 more, not named `*_types`.** The same kind of
+module under other names -- `linux_acl.rs` to `linux_zswap.rs`, and `ar`,
+`cpio`, `tar`, `sysexits`, `sys_ttydefaults` and the `net_*` header
+transcriptions: constants only, each tested against itself, reached by
+nothing the library exports or any other crate imports. Deleted as a closed
+set -- no module that stays names one -- 47,977 lines, by §1118's rule.
+Three constant modules that staying modules do name (`linux_fs.rs`,
+`linux_netfilter.rs`, `sys_random.rs`) stay for the review of the rest
+(`todo.txt`, lane D). Three doc comments in `syscall.rs` and `resource.rs`
+credited `crate::linux_rlimit` -- a header transcription -- with the Linux-ABI
+`prlimit64`; that is the kernel's (`kernel/src/syscall/linux.rs`), and they
+say so now.
+
+**Closed (2026-09-27).** The review of what else nothing reached is done: of
+the 149 modules a scan of that day found unreached, 103 were header
+transcriptions, facades and duplicates whose tests reached nothing live, and
+went in one commit; the 46 whose tests called live functions went once those
+tests had moved to the modules they test -- `getrandom`'s flag checks and
+`personality`'s to `unistd.rs`, `reboot`'s to `process.rs` (where one of them
+turned out to certify the wrong order), `getifaddrs`'s to `socket.rs` (where
+the function turned out to hand every caller the same static list). No module
+remains that nothing reaches but `abi_layout.rs`, which a script runs.
+
+## D-POSIX-CONSTANTS-WERE-NOT-MUSLS — 83 constants a C caller passes or reads back had values of their own, or glibc's (lane D, 2026-09-27) — **Status: FIXED 2026-09-27**
+
+**In short:** a C program here is compiled against musl's headers, so the
+numbers it hands the C library -- flags, item numbers, error codes -- are
+musl's. 83 of the library's disagreed, and each disagreement was a silent
+wrong answer: `nl_langinfo(CODESET)` said "Sun", `getaddrinfo`'s errors
+matched none of the names a program tests them against, and every `nftw`
+callback misread the kind of every file. design-decisions.md §1119.
+
+| Where | What was wrong | What a program saw |
+|---|---|---|
+| `langinfo.rs` | all 55 `nl_item`s numbered 0-55 in an order of the module's own; musl's (and glibc's) are `(category << 16) \| index` | `nl_langinfo(CODESET)` (14) answered ABDAY_1's "Sun": CPython's locale encoding, gnulib's `locale_charset` in every GNU port; every other item answered the wrong string or "" |
+| `socket.rs` | `EAI_*` were 1 to 11; musl's are -1 to -11 | `rc == EAI_NONAME`, `rc == EAI_AGAIN` never true; `gai_strerror` agreed only with itself |
+| `ftw.rs` | `FTW_F` .. `FTW_SLN` were glibc's 0-6; musl's are 1-7 | `typeflag == FTW_F` false for files, true for directories |
+| `ioctl.rs` | `TCOOFF`/`TCOON`, `TCIOFF`/`TCION` swapped in pairs | nothing yet: `tcflow` accepts all four and does nothing |
+| `unistd.rs` | `_SC_THREAD_KEYS_MAX` 76 and `_SC_THREAD_THREADS_MAX` 74, each the other's | `sysconf` answered the keys' question with the threads' limit and back |
+| `linux_pthread_key_types.rs` | `PTHREAD_STACK_MIN` glibc's 16384 (musl 2048), `PTHREAD_KEYS_MAX` glibc's 1024 (the library allows musl's 128) | `pthread_attr_setstacksize(&a, PTHREAD_STACK_MIN + 4096)` was `EINVAL` |
+| `sysv_shm.rs`, `locale.rs` | `SHM_NORESERVE` `0o10000000` (musl `0o10000`), `LC_ALL_MASK` 63 (musl `0x7fffffff`) | nothing: neither is read |
+
+**How it was found.** Reviewing a facade module's tests turned up `tcflow`'s
+swap; that prompted an audit of every constant of the live modules against
+musl's headers -- a probe built with `zig cc --target=x86_64-linux-musl` and
+run under WSL, 1,374 names compared. The tests that pinned the wrong values
+(`tcflow`'s, `EAI_*`'s, `FTW_*`'s, `LC_ALL_MASK`'s, `PTHREAD_STACK_MIN`'s)
+had each been written from the module rather than from a header.
+
+**Worth knowing.** Two of the wrong values had passed a check the day before:
+the *_types modules kept on 2026-09-26 (`TD-D-1700-CONSTANT-MODULES-NOTHING-USED`)
+were compared with glibc's headers, not musl's, and `PTHREAD_STACK_MIN` and
+`PTHREAD_KEYS_MAX` are two of the few numbers where the two differ. The
+oracle has to be the header the callers include.
+
+**Kept true since 2026-09-27** by the constants half of
+`scripts/check-libc-abi.py` (design-decisions.md §1130), which compares every
+public constant whose name a musl header defines with that header's value on
+each push that touches `posix/src`.  Its first run found three the audit had
+not reached, each fixed in the same change:
+
+| Where | What was wrong | Why the audit missed it |
+|---|---|---|
+| `linux_perf_event.rs` | `PERF_EVENT_IOC_SET_BPF` was 0x2408, as if it were an `_IO`; the kernel's is `_IOW('$', 8, __u32)`, 0x40042408 | its header, `linux/perf_event.h`, was not among the audit's |
+| `stdio.rs` | `TMP_MAX` was glibc's 238328; musl's is 10000.  `tmpnam` still tries glibc's 62 cubed names | it arrived with the stdio rewrite, nine hours after the audit |
+| `perthread.rs` | `BLOCK_SIZE`, the per-thread block's size, was public under the name musl's `sys/mount.h` gives 1024 -- not a wrong number but an internal one wearing a C name; now crate-private | its value is computed with `size_of`, which the audit's evaluator could not compute |
+
+## D-POSIX-STDIN-WAS-A-NULL-POINTER — C's `stdin` was NULL, and CPython's REPL took it for a string (lane D, 2026-09-27) — **Status: FIXED 2026-09-27**
+
+**In short:** the C library's `stdin`, `stdout` and `stderr` were the numbers
+0, 1 and 2 standing in for the real stream objects -- which made `stdin` a
+NULL pointer. CPython's tokenizer takes a NULL file to mean "the input is a
+string", so its interactive prompt never read the terminal: it parsed
+leftover heap memory as Python source, printed five SyntaxErrors and exited.
+That was `ctest-python-repl`'s exit 4.
+
+**The chain**, read from the serial log of lane-d `c721b2a13`, the
+fixture's new diagnostics, and CPython 3.12.3's `Parser/tokenizer.c`:
+
+1. The fixture typed `print(6*7)`; the pty echoed it; no `>>> ` prompt ever
+   appeared.
+2. The interpreter reported five lines of three bytes -- `\x80\x1b0`,
+   `@\x973`, `P\x9b3`, `\xc0C3`, `\xd0G3` -- each a little-endian pointer
+   into libc malloc's regions (0x6000301b80, ...), cut at the pointer's zero
+   byte: dlmalloc's free-list link, left in a recycled block.
+3. `tok_nextc` dispatches `else if (tok->fp == NULL) rc =
+   tok_underflow_string(tok);`. With `stdin` NULL, each round's tokenizer
+   read its fresh, uninitialised `PyMem_Malloc(BUFSIZ)` buffer as a string --
+   never calling `PyOS_Readline`, so no prompt and no read -- until a block
+   began with a zero byte, which is end of input. Exit 0.
+
+**Fixed:** the three symbols (and glibc's `_IO_std*_` aliases) hold the
+statics' addresses; the library passes the same pointers; `fdopen(0..2)`,
+which returned the sentinel -- NULL for `fdopen(0, "r")`, i.e. failure --
+returns the stream; `getwchar`, which passed NULL on purpose, passes stdin.
+A NULL `FILE *` is now no stream (design-decisions.md §1120).
+
+**How long it hid.** Every stdio call mapped the NULL back to stdin, so C code
+that only *passed* `stdin` worked; only code that *compared* it with NULL
+broke, and nothing in the tree's own tests or fixtures does. The ring-3 C
+fixtures write with `write()`, not stdio. The probe added to
+`ctest-python-repl` on 2026-09-27 (CPython's own sequence of stdio calls, in
+a child on a pty) would not have caught it either -- it is the comparison,
+not the calls, that fails.
+
+## D-POSIX-GETIFADDRS-SHARED-ONE-STATIC-LIST — every `getifaddrs` caller got the same list, rewritten by the next call (lane D, 2026-09-27) — **Status: FIXED 2026-09-27**
+
+**In short:** asking the C library for the machine's network addresses
+returned a list kept in one fixed place in memory. A second request --
+another thread's, or a library's -- rewrote that list while the first
+caller might still be reading it, and freeing the list did nothing. The
+interface numbers were also muddled: the loopback and the network card
+were both "interface 1".
+
+| Call | Was | Now |
+|---|---|---|
+| `getifaddrs` | static list, `eth0` then `lo`; `eth0` flagged `IFF_BROADCAST` with a NULL broadcast address | one allocation per call; `lo` then `eth0` (Linux's order); `eth0`'s broadcast address set |
+| `freeifaddrs` | nothing | `free` of that allocation, as glibc |
+| `if_nameindex` / `if_freenameindex` | static array holding `eth0` alone; free did nothing | one allocation per call, `lo` 1 and `eth0` 2; freed |
+| `if_nametoindex` | "lo" 1, "eth0" 1 | 1 and 2; 0 with `ENODEV` for any other name |
+| `if_indextoname` | 1 "eth0" | 1 "lo", 2 "eth0"; NULL with `ENXIO` otherwise |
+
+**How it was found:** reviewing `ifaddrs.rs`, a facade nothing reached, for
+tests worth keeping (`todo.txt`, the islands item): its one test was the only
+test `getifaddrs` had, and reading the function behind it showed the static
+storage. Found by reading, not by a failure -- no program in the tree calls it
+from two threads.
+
+**Since closed:** the `AF_PACKET` entries it lacked, with three more
+differences from glibc that an oracle found --
+`D-POSIX-GETIFADDRS-WAS-NOT-GLIBCS`.
+
+## D-POSIX-SETPRIORITY-RENICED-THE-CALLER — `setpriority` and `getpriority` acted on the calling program whatever process they were given (lane D, 2026-09-27) — **Status: FIXED 2026-09-27 (they refuse); reaching another process waits on lane A**
+
+**In short:** `renice -n 10 -p 1234` asks the C library to lower process
+1234's priority. The library ignored the 1234, lowered `renice`'s own
+priority instead, and said it had worked -- so `renice` printed that 1234 had
+changed when nothing had, and a task manager wired to it would have
+reprioritised itself. Reading another process's priority returned the
+caller's. Now anything but the caller is refused, and `renice` says so.
+
+| Target | Was | Now |
+|---|---|---|
+| `PRIO_PROCESS`, `who` 0 or the caller's pid | the caller | the caller |
+| `PRIO_PROCESS`, another pid | the caller, success | `-1`: `ESRCH` if no such process (Linux's answer), `EPERM` if there is one |
+| `PRIO_PGRP` / `PRIO_USER`, any `who` | the caller, success | `-1` with `EPERM` (`ESRCH` for a group with no member) |
+
+The group and user forms are refused even for the caller's own group or user:
+on Linux they act on every process in the group or of the user, so doing it to
+the caller alone would be the same false success, in part.
+
+**Where:** `posix/src/resource.rs`, `prio_target_is_caller`. The native calls
+behind these, `SYS_PROCESS_GET_NICE` and `SYS_PROCESS_SET_NICE`, take no
+process argument and act on the caller; the kernel's Linux-ABI
+`sys_setpriority` does take `who`, but a native program cannot reach it.
+
+**Still open:** a native call that names another process, with the rule for
+who may renice whom, and `/proc/<pid>/stat`'s nice field (always 0) -- both
+lane A's, in `requests/e-ad-renicing-another-process-renices-the-caller.md`.
+When the call exists, `prio_target_is_caller` becomes the route to it.
+
+## D-POSIX-STDIO-WAS-SIXTEEN-UNLOCKED-SLOTS — the C library's streams were a fixed pool with no locks, and a dozen calls answered what glibc does not (lane D, 2026-09-27) — **Status: FIXED 2026-09-27**
+
+**In short:** a C program's streams -- how it reads and writes files
+through `fopen`, `fgets` and `printf` -- came from a pool of sixteen, so its
+seventeenth open file failed; nothing locked them, so two threads writing one
+stream could corrupt it; `fread` from a pipe could return early saying
+neither "end of file" nor "error"; and `fopen` ignored the letters that ask
+for "fail if it exists" (`x`) and "close on exec" (`e`), so `"wx"` truncated
+a file it should have refused.  The streams are rewritten on musl's design
+and behave as glibc's do (design-decisions.md §1121).
+
+| What | Was | Now |
+|---|---|---|
+| open streams | 16 slots; the 17th `fopen` failed `EMFILE` | as many as memory allows |
+| threads | no lock (`flockfile` a no-op) | a recursive lock per stream; `flockfile`, `ftrylockfile`, `funlockfile`, `__fsetlocking` |
+| `fread` from a pipe | returned after one short `read`, flags unset | waits for all it asked for, end of file or an error |
+| buffering | 1 KiB; `stdout` always line buffered | 4096 bytes; line buffered only on a terminal |
+| `fopen` modes | `+` seen 2nd or 3rd only; `x`, `e` ignored | glibc's letters: `x` `O_EXCL`, `e` `O_CLOEXEC`, `+` anywhere in six, `,` ends |
+| `fopen` NULL path or mode | `EINVAL` | `EFAULT` (§1115) |
+| `fdopen` | mode ignored, any descriptor taken; 0-2 returned `stdin`/`stdout`/`stderr` | glibc's: `EBADF` for a closed descriptor, `EINVAL` for a mode it cannot give, `a` sets `O_APPEND`; always a new stream |
+| writing a read-only stream | buffered and reported success; failed at the flush | `EOF` and `EBADF` at once |
+| a write after a read on `r+` | landed after the read-ahead | lands at the stream's position |
+| `fclose(stdout)` | flushed; never closed descriptor 1 | closes it |
+| `freopen(NULL, mode, f)` | did nothing | reopens the file (glibc); changes the flags in place for a pipe |
+| `fflush` on an input stream | nothing | gives back the read-ahead |
+| `exit` | flushed output | flushes output and gives back the unread input of streams used |
+| `popen` | no `e`; the child inherited earlier `popen` pipes; `pclose` of another stream `EINVAL` | glibc's: `e`, `sh -c --`, earlier pipes closed in the child, `pclose` of any stream closes it |
+| wide streams | no orientation; `ungetwc` ASCII only; over-long UTF-8 accepted | `fwide` orientation as glibc keeps it; `ungetwc` of any character; over-long forms and surrogates `EILSEQ` and a stream error |
+| `remove` of a directory | failed | `rmdir` after `EISDIR` |
+| `tmpnam` | `/tmp/tmp_NNNNNN` from a counter, never checked | `/tmp/fileXXXXXX`, random, checked with `lstat` |
+| new calls | -- | `fopencookie`, `fmemopen`, `open_memstream`, `open_wmemstream`, `fcloseall`, `fgetln`, `getw`, `putw`, `tempnam`, `fileno_unlocked`, `fgetc_unlocked`, `fgets_unlocked`, `__getdelim`, `_flushlbf`, `__freading`, `__fwriting`, `__freadable`, `__fwritable`, `__flbf`, `__fbufsize`, `__fsetlocking`, `fpurge`, and the wide `_unlocked` forms |
+| removed | exported data symbols `BUFSIZ`, `FILENAME_MAX`, `_IOFBF`, `_IOLBF`, `_IONBF` (C macros, never symbols) and `stdio_rename` | -- |
+
+**How it was found:** following the `fopen` mode bug into the rest of
+`stdio.rs`.  Found by reading, not by a failure.
+
+**Where:** `posix/src/stdio.rs` (rewritten); `wchar.rs` (the wide calls go
+through `stdio::WideStream`); `printf.rs` (a stream is held for a whole
+`printf`); `crt.rs` (`exit`); `process.rs` (`fork` holds the stream list);
+`stdlib.rs` (`tmpfile` closes its descriptor if `fdopen` fails); and the
+memory streams, new, in `stdio_mem.rs`.
+
+**Still open:** `fscanf` reads around the stream (next entry), and the
+wide `scanf` family does not exist yet.  The ring-3 fixture `services/ctest-stdio` waits on
+a rung from lane A (`requests/d-a-run-the-ctest-stdio-fixture.md`).
+
+## D-POSIX-SCANF-READS-AROUND-THE-STREAM — `scanf` and `fscanf` read a whole line from the descriptor and parse only that (lane D, 2026-09-27) — **Status: FIXED 2026-09-27**
+
+**In short:** `scanf("%d", &n)` does not read through the stream's buffer:
+it reads one line straight from the file descriptor, a byte per system call,
+and parses that line alone.  So `12 34` typed on one line gives the first
+`scanf` 12 and throws 34 away; a format whose input spans two lines fails;
+and whatever `fgets` or `getc` had already buffered is skipped.  All three
+lose data without an error.
+
+**Where:** `posix/src/scanf.rs` -- `vfscanf` takes `fileno(stream)` and calls
+`scan_fd_source`, whose `read_line_from_fd` reads to the newline.
+
+**The proper fix:** scan through the `FILE`, one character of lookahead
+pushed back with `ungetc` when the conversion stops -- glibc's `inchar` /
+`ungetc` in `vfscanf-internal.c`.  The scanning engine reads a
+NUL-terminated string today; it needs a source it can pull from and push one
+character back to, over a string for `sscanf` and over a stream for
+`fscanf`.
+
+**Fixed 2026-09-27** by porting glibc's engine (design-decisions.md §1122):
+one engine, reading one character at a time and giving back the one it
+looked at too far, over the string for `sscanf` and through the stream for
+`scanf` and `fscanf`.  The port also fixed what the old engine got wrong
+beside it:
+
+| What | Was | Now |
+|---|---|---|
+| `%hd`, `%hhd`, `%hn` | stored four bytes, over what followed a `short` or `char` | two, one |
+| an integer out of range | wrapped | saturates with `ERANGE`, as `strtol` |
+| `0xZ` with `%x`, `1ex` with `%f`, `infinx` | a look-ahead left `xZ`, `ex`, `infinx` | glibc's consumption: `Z` left, `x` left, a matching failure |
+| `nan(...)` | payload read | not read -- glibc's scanf reads `nan` only |
+| `%[z-a]`, `%[abc` | swapped to `a-z`; accepted | three members; a conversion error |
+| NUL in a stream | ended the input | a character |
+| new | -- | `%m`, `%p` (and `(nil)`), `%b`, `%lc`, `%ls`, `%l[`, `%C`, `%S`, `%N$`, C23's `w` modifiers |
+
+### [D] D-POSIX-INET-ADDRESSES-WERE-NOT-GLIBCS — 2026-09-27 — FIXED 2026-09-27
+
+**Where:** `posix/src/inet.rs` (was `posix/src/socket.rs`).
+
+**What it was.** The address-conversion functions were this library's own,
+and disagreed with glibc at the edges programs meet:
+
+| Call | Was | glibc (now) |
+|---|---|---|
+| `inet_aton("127.1")`, `inet_addr("0x7f000001")`, `"0177.0.0.1"` | refused: dotted quads only | 127.0.0.1: the BSD forms, a C number per part |
+| `inet_aton("10.0.0.1 junk")` | refused | accepted: white space ends the address |
+| `inet_aton(s, NULL)` | 0 | 1 for a valid address: the text is only checked |
+| `inet_pton(AF_INET, "01.2.3.4")` | accepted | refused: no leading zeros |
+| `inet_ntop` of `::ffff:1.2.3.4` | `::ffff:102:304` | `::ffff:1.2.3.4`, and `::1.2.3.4` for the compatible form |
+| `inet_network`, `inet_makeaddr`, `inet_lnaof`, `inet_netof` | missing | glibc's, wrapping included |
+| `ether_aton`, `ether_ntoa` and their `_r` forms, `ether_line` | missing | glibc's; `ether_ntoa` writes `0:11:...`, not `00:11:...` |
+
+**Fix.** glibc 2.40's `inet_aton_end`, `inet_pton4`/`inet_pton6`,
+`inet_ntop4`/`inet_ntop6`, `inet_network`, the classful helpers and the
+`ether_*` functions, ported. The tests replay glibc 2.39's answers for 186
+inputs (`posix/tools/oracle/addr_oracle.c`, run under WSL) and compare every one.
+`ether_aton`'s and `inet_ntoa`'s buffers are the calling thread's.
+
+### [D] D-POSIX-SERVICES-WERE-A-BUILT-IN-TABLE — 2026-09-27 — FIXED 2026-09-27
+
+**Where:** `posix/src/netdb.rs` (was `posix/src/socket.rs`).
+
+**What it was.** `/etc/services` and `/etc/protocols` were never read:
+`getservbyname` searched a table of 27 services with no aliases, one of
+them under a name no system uses (`dns` for port 53), and `getprotobyname`
+compared names ignoring case, where glibc compares them exactly. There was
+no `getservbyname_r`, `getservbyport_r`, `getservent_r`, `getprotobyname_r`,
+`getprotobynumber_r` or `getprotoent_r`, and no networks or ethers database
+at all (`getnetbyname`, `getnetbyaddr`, `getnetent`, `ether_hostton`,
+`ether_ntohost`). And a lookup in the middle of `getservent`'s enumeration
+rewound it unless `setservent(1)` had been called -- the behaviour of glibc
+before 2.33, not after: glibc 2.39, asked, keeps the enumeration's place.
+
+**Fix.** The four databases as glibc 2.40's `nss_files` reads them: the file
+when there is one, a built-in copy when there is not (design-decisions.md
+§1127), parsed by `files-parse.c`'s rules -- including the service port's
+base-0 number (`0x1f/tcp` is 31) that the macro's argument order gives it.
+The tests replay glibc 2.39's answers to 100 lookups and enumerations over files built to
+exercise the parser (`posix/tools/oracle/netdb_oracle.c`, run under WSL with those
+files in place of `/etc`). A number past 32 bits clamped to `0xffffffff` as
+upstream glibc clamps it; since 2026-09-28 it makes the line no entry, as
+Debian's glibc (its `local-nss-overflow.diff`, and the oracle) has it --
+for every one of these files at once (design-decisions §1136).
+
+### [D] D-POSIX-HOSTS-FILE-WAS-NEVER-READ — 2026-09-27 — FIXED 2026-09-27
+
+**Where:** `posix/src/hosts.rs` (was `posix/src/socket.rs`).
+
+**What it was.** Every host lookup went straight to the kernel's resolver:
+the C library never read `/etc/hosts` or `/etc/host.conf`, so a name a
+program's own container, chroot or administrator had written there was not
+found. Beside that:
+
+- `gethostbyname("1.2.3.4")` asked the resolver instead of answering the
+  number; `gethostbyname2(..., AF_INET6)` answered "no data" for everything,
+  `::1` included;
+- `gethostbyname2_r`, `gethostent`, `gethostent_r`, `sethostent` and
+  `endhostent` were missing;
+- the `_r` functions returned musl's codes (`ENOENT` for "not found"); glibc
+  returns 0 with a NULL result;
+- `herror` wrote to the kernel console, not standard error, and
+  `hstrerror`'s messages were not glibc's ("Host not found" for "Unknown
+  host").
+
+**Fix.** The hosts database as glibc 2.40 answers it with `hosts: files dns`,
+the kernel's resolver standing in for DNS (design-decisions.md §1128):
+numbers answered as themselves, then `/etc/hosts` (`multi`, `reorder` and
+`trim` from `host.conf`), then the kernel -- whose failures are reported as
+glibc's DNS module reports them. The tests replay glibc 2.39's answers to 66
+lookups under two `host.conf` files, with the network down
+(`posix/tools/oracle/hosts_oracle.c`), and its `host.conf` warnings byte for byte.
+
+**What remains.** The kernel's resolver answers one IPv4 address and no
+canonical name: see `requests/d-a-sys-dns-resolve-answers-one-ipv4-address.md`.
+
+### [D] D-POSIX-GETADDRINFO-WAS-IPV4-ONLY-AND-UNSORTED — 2026-09-27 — FIXED 2026-09-27
+
+**Where:** `posix/src/gai.rs` (was `posix/src/socket.rs`).
+
+**What it was.** `getaddrinfo` knew one family and one address:
+
+- an `AF_INET6` hint was `EAI_FAMILY`, and a numeric IPv6 host (`::1`) was
+  sent to the resolver as a name;
+- `ai_protocol` was ignored, unknown `ai_flags` were accepted, `AI_CANONNAME`
+  without a host was accepted, and `*` meant nothing;
+- `AI_ADDRCONFIG`, `AI_V4MAPPED` and `AI_ALL` did nothing; `SOCK_RAW`
+  entries were never listed, nor DCCP, UDP-Lite or SCTP when asked for;
+- a resolver failure was `EAI_NONAME` whatever it was -- a timeout included;
+- a service was read by this library's own rule, not `strtoul`'s (`+80`,
+  `70000`, `2147483648` all differ);
+- nothing was sorted, and `getnameinfo` refused IPv6 and `AF_UNIX` addresses.
+
+**Fix.** glibc 2.40's `getaddrinfo` and `getnameinfo`, ported, over the hosts
+database (§1128), with RFC 3484 sorting and `/etc/gai.conf` (§1129). The
+tests replay glibc 2.39's answers to 100 calls under two `gai.conf` files, on
+a sandbox with one IPv4 address and no IPv6 (`posix/tools/oracle/gai_oracle.c`).
+
+### [D] D-POSIX-GETSOCKNAME-SAID-0.0.0.0-AFTER-CONNECT — 2026-09-27 — FIXED 2026-09-27
+
+**Where:** `posix/src/socket.rs` (`connect`, `accept`, `getsockname`).
+
+**What it was.** A socket's local address was only ever what `bind` set, so
+`getsockname` on a connected or accepted socket said `0.0.0.0`. Programs ask
+exactly this to learn their own address -- "connect a UDP socket to
+8.8.8.8, read its name" is the common idiom -- and FTP's active mode, SIP and
+`getaddrinfo`'s own sorting rely on it.
+
+**Fix.** `connect` and `accept` record the address the connection goes out
+from, as this system routes it (`route_source`): the loopback's for
+127/8 and 0.0.0.0, `eth0`'s for anything its subnet or gateway reaches. A
+datagram disconnect forgets it again, as Linux's does, unless `bind` set it.
+
+**What remains.** The route is the C library's reading of `eth0`'s
+configuration; a kernel with several interfaces or real routes would need to
+say which it used.
+
+### [D] D-POSIX-GETIFADDRS-WAS-NOT-GLIBCS — 2026-09-27 — FIXED 2026-09-27
+
+**Where:** `posix/src/socket.rs` (`getifaddrs`, `for_each_ipv4_interface`).
+
+**What it was.** `getifaddrs` listed one `AF_INET` entry per interface that
+had an address.  glibc 2.39's list, printed field by field in network
+sandboxes shaped like this system (`posix/tools/oracle/ifaddrs_oracle.c`: `lo`, and a
+veth named `eth0` with QEMU's MAC), differs in four ways:
+
+| | Was | glibc (now) |
+|---|---|---|
+| Link entries | none | one `AF_PACKET` entry per interface, before the addresses: `ifa_addr` a `sockaddr_ll` with the hardware address (`ARPHRD_LOOPBACK` and zeros, or `ARPHRD_ETHER` and the NIC's MAC), `ifa_broadaddr` the broadcast MAC, `ifa_netmask` NULL, and `ifa_data` pointing at the link's `struct rtnl_link_stats` -- which programs read without a NULL check |
+| Flags | 0x49 for `lo`, 0x1043 for an up `eth0` | 0x10049 and 0x11043: `IFF_LOWER_UP` as well, which netlink reports and glibc passes on |
+| `lo`'s `ifa_broadaddr` | NULL | 127.0.0.1: glibc reads the loopback's netlink answer as a point-to-point link's |
+| A down `eth0` | left out | listed, with its address and flags 0x1002: Linux keeps an address on a link that is down |
+
+The last rule now holds for `AI_ADDRCONFIG` and `host.conf`'s `reorder` too
+(`for_each_ipv4_interface`), as glibc's `check_pf` and `SIOCGIFCONF` count an
+address on a down link; routing (`route_source`) still needs the link up.  A
+/31 or /32 reports the address itself as its broadcast address, as glibc does
+where Linux sets none.
+
+**What still differs.** `lo`'s counters are zero: the kernel counts no
+loopback traffic.  Of `eth0`'s, the kernel keeps six -- bytes, packets and
+errors sent, bytes, packets and drops received (`SYS_NET_STAT`) -- and the
+other eighteen are zero.
+
 ### [E] Deleting or moving a folder reached through the links inside it, and a paste could replace a file with itself -- 2026-09-27
 
 **Status: FIXED 2026-09-27** (lane E, before either reached `main`'s users
@@ -172383,6 +175115,219 @@ old code.
 **Still true:** on a Windows host without the symbolic-link privilege a link
 cannot be *copied* -- the one action fails and says why, and a move leaves
 that link where it was. The target OS makes links like any unix.
+
+### [D] D-POSIX-THE-WIDE-SCANF-FAMILY-WAS-MISSING — 2026-09-27 — FIXED 2026-09-27
+
+**Where:** `posix/src/scanf.rs`, `posix/src/stdio.rs`.
+
+**What it was.** `swscanf`, `wscanf`, `fwscanf` and their `v` forms -- C95's
+wide `scanf` -- did not exist, so a program that reads wide text with them
+did not link.  They are glibc's now: the `scanf` engine, written once over a
+character unit as glibc compiles `vfscanf-internal.c` twice
+(design-decisions.md §1131).  The tests replay glibc 2.39's answers for 78
+`swscanf` calls and seven stream cases (`posix/tools/oracle/wscanf_harness.py`,
+`wscanf_stream_oracle.c`).
+
+**Two byte-path answers the oracle showed were not glibc's**, fixed in the
+same change:
+
+| Call | Was | glibc (now) |
+|---|---|---|
+| `fscanf` on a stream not open for reading | `EOF`, `EBADF`, and the stream's error flag set | `EOF` and `EBADF` only: glibc's `ARGCHECK` sets no error flag (`ferror` answers 0) |
+| a `scanf` whose input ended on an error -- `EIO`, or in `fwscanf` a byte sequence that is no character | `errno` put back to its old value by the whitespace skip | the error's `errno`: glibc's `inchar` keeps the `errno` of the moment the input ended and puts it back at every read after |
+
+**One difference kept, on purpose:** after a wide `%s` or `%[` stored as
+`char`, glibc writes a second NUL past the terminator; this library writes
+the terminator alone (§1131).
+
+### [D] D-POSIX-ETC-MTAB-IS-MISSING — 2026-09-27 — OPEN, fix is lane A's
+
+**Where:** the root filesystem the kernel builds at boot
+(`kernel/src/main.rs`, where `/etc` is made); the C library's side is
+`posix/src/unistd.rs`'s mntent calls.
+
+**What it is.** A program that opens `/etc/mtab` -- glibc's `MOUNTED` and
+`_PATH_MOUNTED` -- gets `ENOENT`.  The mount table is there to read
+(`/proc/mounts`, `/proc/self/mounts`, served by `kernel/src/fs/procfs.rs`),
+and on Linux `/etc/mtab` is a symlink to `/proc/self/mounts`; here nothing
+makes the link.  Programs that name `/proc/mounts` or call `setmntent` on it
+are not affected.
+
+**The fix** is one symlink at boot, asked of lane A in
+`requests/d-a-make-etc-mtab-at-boot.md`.  Not the rootfs recipe's: the image
+is mounted at `/mnt`, not `/`.
+
+## D-POSIX-AFFINITY-SETTERS-REPORTED-A-CHANGE-THEY-NEVER-MADE — `sched_setaffinity` and `pthread_setaffinity_np` said a process was pinned to some CPUs, and it was not (lane D, 2026-09-27) — **Status: FIXED 2026-09-27 (they refuse what they cannot do); pinning waits on lane A**
+
+**In short:** `taskset -c 0 -p 1234` asks the C library to keep process 1234 on
+CPU 0. The library checked the request and said it had worked, and nothing
+changed: 1234 went on running on every CPU. Nothing in the system can confine
+a program to some of its CPUs yet -- so the library now says that ("function
+not implemented"), except for the one request it can honour truthfully:
+"every CPU", which is what every program already has.
+
+| Call | Was | Now |
+|---|---|---|
+| `sched_setaffinity`, `pthread_setaffinity_np`: a mask of every online CPU | success | success -- it is the mask in force |
+| the same, a narrower mask | success, nothing applied | `-1` / `ENOSYS` |
+| the same, no online CPU in the mask | `EINVAL` | `EINVAL` |
+| `sched_getaffinity(pid)`, a pid that is not there | every CPU | `-1` / `ESRCH` |
+| `pthread_getaffinity_np` | all 1024 bits, CPUs that do not exist included; any mask shorter than 128 bytes refused | the online CPUs, zeroes after; 8 bytes accepted, as Linux takes |
+| `pthread_setaffinity_np`, a mask shorter than 128 bytes | `EINVAL` | read as Linux reads one: zero-extended |
+
+`ENOSYS` is the answer glibc gives where the kernel has no such call; hwloc and
+the OpenMP runtimes take it to mean "affinity is not available here" and carry
+on, rather than failing.
+
+**Where:** `posix/src/sched.rs` (`affinity_change`, `affinity_target_exists`,
+`read_affinity_mask`, `fill_affinity`), and `posix/src/pthread.rs`'s two calls
+over them. pthread.rs's own copy of `cpu_set_t` went in the same change: the
+two had to be checked against each other in `abi_layout.rs` because a duplicate
+type is what drifts.
+
+**Why nothing can pin:** the scheduler has a per-task CPU mask
+(`kernel/src/sched/mod.rs`, `Task::cpu_affinity`, `set_cpu_affinity`), but
+it is set only inside the kernel -- its own tasks at spawn, and the kernel
+shell's `taskset` debugging command. The native ABI has no call that sets it,
+and the Linux ABI's `sys_sched_setaffinity` (`kernel/src/syscall/linux.rs`)
+checks its arguments and applies nothing. (A mask set from the kernel shell is
+therefore invisible to `sched_getaffinity`, which answers "every CPU".)
+
+**Still open:** a native call that reads and sets a named process's or
+thread's mask, with the rule for who may -- lane A's, in
+`requests/e-adf-what-the-process-explorer-still-cannot-ask.md`. When it
+exists, `affinity_change` is where the route to it goes.
+
+## D-POSIX-INITGROUPS-SET-NOTHING — `initgroups` returned success and left a dropping process with root's groups (lane D, 2026-09-27) — **Status: FIXED 2026-09-27**
+
+**In short:** programs that switch from the administrator to an ordinary
+user -- sign-in, `su`, most background services -- first call `initgroups`
+to take on that user's groups, then give up the administrator's identity.
+The C library's `initgroups` did nothing and said it had worked, so such a
+program kept the administrator's extra groups and never got the user's --
+more access than intended, and less. It now sets them, as glibc does.
+
+**What it was:** `posix/src/pwd.rs` `initgroups` returned 0, citing "the
+kernel keeps no supplementary groups yet". That stopped being true when lane A
+landed `SYS_PROCESS_SETGROUPS` and `setgroups` was wired to it (2026-09-12);
+the stub was not revisited, and nothing tested what it set.
+
+**What it is:** glibc's `grp/initgroups.c` -- `getgrouplist`'s list handed to
+`setgroups`, shortened one group at a time while the kernel says `EINVAL`.
+Errors are `setgroups`'s (`EPERM` without `CAP_SETGID`) or `ENOMEM`.
+
+**Who it reaches:** nothing in the tree calls it yet -- `userspace/capsh`
+names it in `--user`'s help, and `userspace/oils` and `userspace/pwdb` build
+the same list for display -- but every ported program that drops privilege
+does (`login`, `su`, `sshd`, cron daemons, and the backup scheduler lane D is
+writing for `requests/e-db-the-backup-service-runs-backup-run-due.md`).
+Without `CAP_SETGID` they now fail loudly instead of silently keeping root's
+groups: the right failure, but a new one.
+
+## D-POSIX-MATH-WAS-HAND-WRITTEN — the C library's maths was written here, and wrong in places no test looked (lane D, 2026-09-27) — **Status: FIXED 2026-09-27**
+
+**In short:** `sin`, `exp`, `pow`, `sqrt`, `round` and the rest of `<math.h>`
+were hand-written approximations -- "accurate to roughly 10-15 digits", their
+documentation said -- and some were much worse than that. Every Rust program
+on SlateOS used them too, since `f64::sin` and its kin compile to these
+symbols there. They are now musl's libm through rust-lang's `libm` crate, with
+glibc's `errno` (design-decisions §1132).
+
+| Was | Example |
+|---|---|
+| `round` as `floor(x + 0.5)` | `round(0.49999999999999994)` = 1; `round(2^52 + 1)` = 2^52 + 2 (lane E's `requests/e-d-libc-round-is-wrong-just-below-a-half-and-past-2-52.md`) |
+| `ceil`, `trunc`, `rint` lost a zero's sign | `ceil(-0.3)` = +0.0 |
+| `fma` as `x*y + z`, two roundings | `f64::mul_add` was not fused |
+| `sqrt` by Newton's method | not correctly rounded, which IEEE 754 requires |
+| `sin`/`cos`/`tan` reduced by `fmod(x, 2*pi)` | `sin(1e22)` was noise |
+| `exp` saturated at |x| = 709 | `exp(709.5)` was infinity; `exp(-710)` was 0, not a subnormal |
+| `ldexp` truncated subnormal results, and misread subnormal arguments | `ldexp(5e-324, 1)` wrong |
+| `lround`/`lrint` saturated | glibc and musl answer `LONG_MIN` out of range |
+| no `errno` anywhere | `log(-1)` left `errno` alone; glibc sets `EDOM` |
+| `nan(tag)` ignored the tag | glibc puts it in the payload |
+| missing: `llrint`, `llrintf`, `__fpclassify`, `__fpclassifyf`, `__signbit`, `signgam`, `j0f`..`ynf`, `roundeven` | C programs using them did not link |
+
+**Where:** `posix/src/math.rs` (the C ABI and glibc's `errno` rules),
+`posix/vendor/libm` (the implementations, vendored as published).
+**Tests:** `math::tests::every_answer_is_glibcs_or_within_its_error` replays
+23,113 calls answered by glibc 2.39 under WSL (`posix/tools/oracle/math_harness.py`).
+
+## D-POSIX-MATH-HAS-NO-FENV-LONG-DOUBLE-OR-COMPLEX — `<fenv.h>`, the `long double` functions and `<complex.h>` do not exist (lane D, 2026-09-27) — **Status: FIXED 2026-09-28 -- the 22 `long double` complex functions were the last (`posix/src/complexl.rs`; D-POSIX-LIBM-LACKS-GLIBC-EXTENSIONS). Before that: OPEN (`<fenv.h>` done 2026-09-27: posix/src/fenv.rs, glibc's x86-64 fenv; `<complex.h>` done 2026-09-28 but for its `long double` functions: posix/src/complex.rs, FreeBSD's msun; the `long double` functions done 2026-09-28: posix/src/mathl.rs, §1134; the 22 `long double` complex functions remain)**
+
+**In short:** three parts of C's maths are missing from the C library, so a C
+program that uses them does not link: changing or reading the rounding mode
+and the exception flags (`fesetround`, `fetestexcept` ...), the `long double`
+versions of every function (`sinl`, `sqrtl` ...), and complex numbers
+(`cabs`, `cexp` ...). Rust programs are not affected -- none of it is
+reached from Rust's standard library.
+
+**What each needs:**
+
+- **`<fenv.h>`** -- `fegetround`, `fesetround`, `feclearexcept`,
+  `fetestexcept`, `feraiseexcept`, `fegetenv`, `fesetenv`, `feholdexcept`,
+  `feupdateenv`, `fegetexceptflag`, `fesetexceptflag`: musl's
+  `src/fenv/x86_64/fenv.s`, i.e. `stmxcsr`/`ldmxcsr` for SSE and
+  `fnstcw`/`fldcw`/`fnstsw`/`fnclex` for the x87 unit, as `core::arch::asm!`.
+  Until it exists, `rint` and `nearbyint` always round to nearest, which is
+  also what they do after any `fesetround` a program could not link.
+  **Done 2026-09-27** (`posix/src/fenv.rs`): glibc 2.39's `sysdeps/x86_64/fpu`,
+  both units, with `feenableexcept`/`fedisableexcept`/`fegetexcept`,
+  `fesetexcept`/`fetestexceptflag` and `__flt_rounds`; `nearbyint` holds the
+  flags as glibc's does. Only C23's `fegetmode`/`fesetmode` wait -- musl's
+  headers, which the ABI gate checks against, have no `femode_t`.
+- **`long double`** -- on x86-64 an 80-bit x87 value: musl's
+  `src/math/x86_64/*.s` for the functions the x87 unit computes (`sqrtl`,
+  `fabsl`, `rintl`, `floorl` ... `expl`, `logl`, `atan2l`), and its generic
+  `ld80` C for the rest. Rust has no 80-bit type, so these are `asm!` over
+  memory operands.
+  **Done 2026-09-28** (`posix/src/mathl.rs`, `ld80.rs`, `ld_abi.rs`,
+  design-decisions §1134): all 72 C names, each an assembly thunk in front of
+  Rust, computing on the x87 unit; musl's algorithms but for `powl` and
+  `exp10l`, whose general case is new (musl's `powl` was off by up to 303
+  ulps); replayed against glibc 2.39 for 31,062 calls.
+- **`<complex.h>`** -- musl's `src/complex/`: seventy functions, formulas over
+  the real ones plus their special cases (Annex G).
+  **Done 2026-09-28** (`posix/src/complex.rs`) but for the 22 `long double`
+  functions, and from FreeBSD's msun rather than musl: musl's `casin`,
+  `cacos`, `casinh`, `cacosh` and `clog` are the schoolbook formulas, which
+  lose their digits near the branch points and near `|z| = 1`
+  (design-decisions §1133). The 44 `double` and `float` functions replay
+  glibc 2.39 for 44,958 calls.
+
+**Where:** `posix/src/math.rs` (and new `fenv.rs`, `complex.rs`).
+**Found by** reading the archive's symbols while replacing the maths
+(`D-POSIX-MATH-WAS-HAND-WRITTEN`).
+
+## D-SCHEDULED-BACKUPS-STILL-DO-NOT-RUN — the backup service exists, but nothing installs it, starts it, or confines what it starts (lane D, 2026-09-28) — **Status: OPEN**
+
+**In short:** a backup scheduled with `backup schedule` still never runs by
+itself. The service that runs them, `services/backupd`, is written and tested:
+once at start and every 15 minutes it runs `backup run-due` for each account
+that has schedules, as that account, and journals what happens
+(design-decisions §1426, lane E's
+`requests/e-db-the-backup-service-runs-backup-run-due.md`). Three things
+stand between it and a machine that backs itself up, and none of them is in
+lane D's tree:
+
+| Missing | Whose | Where it is asked for |
+|---|---|---|
+| `/bin/backup` on the system image | lane E's crate (no SlateOS build yet); which programs the image carries is lane B's `B-Q21` | lane D's reply in the request above |
+| A boot at which the image can name what to start, and whose `/` holds the image's accounts: today the kernel writes `/etc/startup.conf` itself, listing `/bin/ticker` alone, and the image is at `/mnt` | lane A | `requests/d-a-nothing-on-the-system-image-can-be-started-at-boot.md` |
+| A run that is only its user: a process that sets its uid keeps root's capabilities, so each run would still hold root's authority | lane A | `requests/d-a-a-process-that-gives-up-root-keeps-roots-authority.md` |
+
+**What lane D does as they land.** With the first two: build `backupd` for
+the image as the programs in `userspace/` are built (a `sysroot-dep` build
+script, a line in `scripts/rootfs-bin-manifest.txt`, `-p backupd` in the image
+recipe's build command), list it in the image's startup file, and add a
+ring-3 test that runs `backupd --once` against a stand-in `backup` and reads
+the journal. The third needs nothing from the service: it already switches
+the POSIX way (groups, then gid, then uid, in the child), which is right the
+day the kernel makes it confining.
+
+**Until then** it can be run by hand, as root, from wherever it is:
+`backupd --once --backup <path to backup>` runs one check and exits 1 if
+anything in it went wrong; `--log FILE` journals somewhere other than
+`/var/log/syslog.jsonl`.
 
 ## TD-C-THE-RETAINED-WIDGET-TREE-HAS-NO-USER-AND-FIVE-OF-ITS-WIDGETS-DRAW-NOTHING (lane C, 2026-09-27)
 
@@ -172636,6 +175581,194 @@ whole image again. A window leaving the stream takes its images with it.
 Tests: capture, encode, decode and `apply_scene_frame` end to end, with an
 upload, a patch, a drop and a late-joining viewer.
 
+## D-POSIX-LGAMMA-LOSES-DIGITS-NEAR-NEGATIVE-ROOTS — `lgamma`, `lgammaf` and `lgammal` are only absolutely accurate where the gamma function is +-1 below -2 (lane D, 2026-09-28) — **Status: FIXED 2026-09-28 -- `lgamma` and `lgammaf` CORE-MATH's, correctly rounded (`posix/src/lgamma.rs`); `lgammal` by an expansion about each zero in double-long-double (`posix/src/mathl.rs`), within 3 ulps where glibc's reaches 7**
+
+**Status (2026-09-28):** `lgamma`, `lgammaf`, `lgamma_r`, `lgammaf_r`, `gamma` and `gammaf` are CORE-MATH's correctly rounded functions now (MIT, ported in `posix/src/lgamma.rs`), checked bit for bit against its C on every float and on 1.6 million hard and 2 billion random doubles in all four rounding directions; `math.rs`'s glibc replay no longer excuses them (`near_root`). The first row of the table below is 5.619192358950097e-17 now, 0.17 ulp from mpmath's value. `lgammal` followed the same day. CORE-MATH has no 80-bit `lgamma`, so `mathl.rs` does what the proper fix below describes, within 1/4 of each of the 58 zeros for n = 2..=30 (`lgammal_near_zero`): `lgamma(x) = A + B` about the zero, `A` the logarithm of a ratio of sines formed without subtracting them, `B` a Taylor series about `1 - x0`, both in double-long-double -- at the zero near -2.748 they still cancel by a factor of 2.2 -- with the zeros and coefficients from mpmath (`posix/tools/oracle/lgammal_zeros.py`). Against mpmath at 80 digits, on 3,776 points beside every zero and pole plus 28,000 across (-4, -2), the worst error is 3 ulps (on musl's side of the window, near -2.17) and 89% are exact; glibc's `lgammal` reaches 7 ulps on the same points. `mathl.rs`'s glibc replay compares `lgammal` relatively everywhere now.
+
+**In short:** `lgamma(x)` is the logarithm of |gamma(x)|. Below -2 the
+gamma function passes through 1 or -1 twice in every unit interval, so
+`lgamma` is 0 there and tiny near it -- and there our library's answers are
+right only to about 1e-16 *absolutely*, not relatively. `lgamma(-2.4570247382208006)`
+is 5.6191923589500965e-17 (glibc returns that); ours returns 1.1e-16, twice
+it. Nothing crashes and no other argument is affected; a program sees it only
+if it takes `lgamma` of a negative number near one of those points and relies
+on the digits of the near-zero result.
+
+**Where:** `posix/src/math.rs` (`lgamma`, `lgammaf`, `lgamma_r`, `lgammaf_r`,
+`gamma`, `gammaf`, from musl's `e_lgamma_r.c` via the vendored `libm`) and
+`posix/src/mathl.rs` (`lgammal_core`, musl's ld80 `lgammal.c`). All three use
+the reflection formula, `lgamma(x) = log(pi / |x sin(pi x)|) - lgamma(-x)`,
+which subtracts two numbers near 1 to get one near 0.
+
+| x | true value (mpmath) | glibc 2.39 | ours (musl) |
+|---|---|---|---|
+| -2.4570247382208006 | 5.6191923589500965e-17 | 5.6191923589500967e-17 | 1.1102230246251565e-16 |
+| -2.457024738220801 | -6.1687121408846648e-16 | -6.1687121408846647e-16 | -7.2164496600635175e-16 |
+| -3.1435808883499798 | 1.6978655906121084e-15 | 1.6978655906121083e-15 | 1.7763568394002505e-15 |
+
+`lgammal` loses less, relatively (5.6568e-17 for glibc's 5.6521e-17 at the
+long double nearest the first root), for the same reason.
+
+**The tests allow it:** `math.rs`'s oracle replay compares `lgamma` by
+absolute error when glibc's result is under 1 (`near_root`), and `mathl.rs`'s
+does the same for `lgammal`. Both allowances go when this is fixed.
+
+**Proper fix:** evaluate near each root from an expansion about the root, as
+glibc's `lgamma_neg.c` does -- but not by translating it: glibc is LGPL, and
+this library is linked statically into every program (design-decisions §1133's
+licence note). The mathematics is public: tabulate each root `x_k` below -2
+where |gamma| = 1, to twice the working precision (`x_k = hi + lo`), and the
+Taylor coefficients of `log|gamma|` about it (`psi(x_k)`, `psi'(x_k)/2`, ...),
+both computed offline with mpmath; near `x_k` answer the polynomial in
+`(x - hi) - lo`. Only finitely many roots matter -- the k-th lies about
+`1/k!` from a negative integer, and once that is under the spacing of the
+numbers there, no argument can land near it: about 16 integers deep for
+double, 20 for long double. For float, CORE-MATH's correctly rounded
+`lgammaf` (MIT) is a ready alternative.
+
+## D-POSIX-LIBM-LACKS-GLIBC-EXTENSIONS — glibc's libm exports about 150 functions ours does not: the long double complex and Bessel functions, and C23's newer families (lane D, 2026-09-28) — **Status: OPEN (the 22 `long double` complex functions done 2026-09-28, `posix/src/complexl.rs`: replayed against glibc 2.39 for 27,134 calls, and from C in ring 3, `ctest-longdouble` 92-99; the exact C23 functions -- `nextup` to `fminimum_mag_num`, all three precisions -- and `scalbl` done the same day, `posix/src/c23math.rs`, every value, flag and `errno` of glibc 2.39's for 21,390 calls; the eighteen narrowing functions the same day, `posix/src/narrow.rs`, glibc's round to odd, every value, flag and `errno` of its for 52,876 calls in the four rounding directions; `clog10`, `clog10f` and `clog10l` the same day, glibc's algorithm in `complex.rs` and `complexl.rs`, replayed against glibc for 3,212 calls; the `long double` Bessel functions remain)**
+
+**In short:** a C program that calls one of the functions below does not
+link. None is in C99; they are C23 additions, GNU extensions, or the `long
+double` versions of functions the library has for `double`. The list is exact:
+every name glibc 2.39's `libm.so.6` exports that `libc.a` does not, less the
+`_FloatN` aliases and glibc-internal names (`comm` of the two symbol tables).
+
+| Family | Names | Notes |
+|---|---|---|
+| `long double` complex | `cabsl` `cacosl` `cacoshl` `cargl` `casinl` `casinhl` `catanl` `catanhl` `ccosl` `ccoshl` `cexpl` `cimagl` `clogl` `conjl` `cpowl` `cprojl` `creall` `csinl` `csinhl` `csqrtl` `ctanl` `ctanhl` | **done 2026-09-28** (`complexl.rs`): FreeBSD msun's `ld80` versions where it has them, `complex.rs`'s `double` algorithms carried to 80 bits for `ccoshl`, `csinhl`, `ctanhl` and their circular twins, glibc's `cpowl`; with `__mulxc3` and `__divxc3`, which a C compiler calls for `long double complex` `*` and `/` and which were missing too |
+| GNU complex | `clog10` `clog10f` `clog10l` | **done 2026-09-28**: glibc's `s_clog10_template.c`, its exact `x^2 + y^2 - 1` near `|z| = 1` included |
+| `long double` Bessel | `j0l` `j1l` `jnl` `y0l` `y1l` `ynl` | musl has none; FreeBSD msun has no `ld80` Bessel either; glibc's are LGPL -- needs its own derivation (Cephes' `j0l` family is the usual permissive source) |
+| C23, all three precisions | `nextup` `nextdown` `llogb` `canonicalize` `fromfp` `fromfpx` `ufromfp` `ufromfpx` `getpayload` `setpayload` `setpayloadsig` `totalorder` `totalordermag` `fmaxmag` `fminmag` `fmaximum_mag` `fminimum_mag` `fmaximum_mag_num` `fminimum_mag_num` (each with `f` and `l`) | **done 2026-09-28** (`c23math.rs`): glibc's code, bit for bit, down to the x87 encodings it refuses |
+| C23, `long double` only | `fmaximuml` `fminimuml` `fmaximum_numl` `fminimum_numl` | **done 2026-09-28**, all twelve (`c23math.rs`, with oracle rows): the `double` and `float` ones are ours now, where they were compiler_builtins' weak exports |
+| C23 narrowing | `fadd` `faddl` `fsub` `fsubl` `fmul` `fmull` `fdiv` `fdivl` `fsqrt` `fsqrtl` `ffma` `ffmal` `daddl` `dsubl` `dmull` `ddivl` `dsqrtl` `dfmal` | **done 2026-09-28** (`narrow.rs`): round-to-odd in the wider one, then round, as glibc's `math-narrow.h` |
+| XSI, obsolete | `scalbl` | removed from POSIX in 2008; glibc keeps them (`scalb` and `scalbf`, which musl declares, done 2026-09-28; `scalbl` the same day, `c23math.rs`: glibc's x87 `e_scalbl.S`, operation for operation) |
+| fenv | `fegetmode` `fesetmode` | waits on musl's headers (D-POSIX-MATH-HAS-NO-FENV-LONG-DOUBLE-OR-COMPLEX) |
+
+`matherr` (an SVID hook glibc keeps only for old binaries) is deliberately
+absent.
+
+**Where:** `posix/src/math.rs`, `mathl.rs`, `complex.rs`. **Found by**
+comparing the symbol tables while adding the `long double` functions
+(design-decisions §1134).
+
+## D-POSIX-CONVERSIONS-IGNORE-THE-ROUNDING-MODE — `printf` and `strtod` always round to nearest; glibc's follow `fesetround` (lane D, 2026-09-28) — **Status: FIXED 2026-09-28 -- `printf`'s `%f %e %g %a` and their `%L` forms, `strtod`, `strtof`, `strtold`, `wcstod`, `wcstof`, `wcstold`, `scanf`, the `ecvt` family -- every line of glibc 2.39's in all four modes replayed (`posix/tools/oracle/conv_harness.py`); `long double` the same day as `double`, with its full precision (TD-POSIX-LONG-DOUBLE-PRECISION)**
+
+**In short:** a program that changes the rounding direction with
+`fesetround` -- to round up, say, for interval arithmetic -- gets glibc's
+directed rounding from `printf` and `strtod` there, and not here: ours round
+to nearest whatever the mode. `printf("%.1f", 0.25)` under `FE_UPWARD` prints
+`0.3` on glibc and `0.2` here; `strtod("0.3")` under `FE_UPWARD` is
+`0x3fd3333333333334` on glibc and `...333` here. Under the default mode, which
+nearly every program keeps, the two agree. It became reachable on 2026-09-27,
+when `fesetround` started working (`posix/src/fenv.rs`).
+
+| Call, under the mode | glibc 2.39 | ours |
+|---|---|---|
+| `printf("%.1f", 0.25)`, `FE_UPWARD` | `0.3` | `0.2` |
+| `printf("%.1f", -0.25)`, `FE_DOWNWARD` | `-0.3` | `-0.2` |
+| `printf("%.0e", 25.0)`, `FE_UPWARD` | `3e+01` | `2e+01` |
+| `printf("%.2a", 1 + 0x1p-12)`, `FE_UPWARD` | `0x1.01p+0` | `0x1.00p+0` |
+| `strtod("0.3")`, `FE_UPWARD` | `0x3fd3333333333334` | `0x3fd3333333333333` |
+| `strtof("0.3")`, `FE_DOWNWARD` | `0x3e999999` | `0x3e99999a` |
+
+**Where:** `posix/src/decfloat.rs` -- `Decimal::round_to_significant`
+(printf's `%f`/`%e`/`%g`), `round_to_binary` (`strtod`, `strtof`, `wcstod`,
+`scanf`) -- and `printf.rs`'s `%a` rounding: each rounds ties-to-even and
+never reads the mode.
+
+**Proper fix:** read `fegetround()` once per conversion and round the exact
+expansion (which decfloat already has, so every case is decidable) in that
+direction: toward +inf rounds a positive value's magnitude up when anything
+nonzero is dropped, toward -inf a negative one's, toward zero never. Due with
+the 80-bit conversions (TD-POSIX-LONG-DOUBLE-PRECISION), which go through the
+same code.
+
+## D-POSIX-LIBC-LACKS-FUNCTIONS-ITS-HEADERS-DECLARE — 104 functions musl's headers declare do not exist in `libc.a`, so a C program calling one does not link (lane D, 2026-09-28) — **Status: FIXED 2026-09-28 -- all 104 (2026-09-28: C11 `<threads.h>` (posix/src/threads.rs), the pthread cleanup helpers, scheduling attributes, `pthread_setschedprio`, the concurrency hint and default attributes, the nine `_l` functions, `wcsnlen`, `wcswcs`, the seven signal functions; then `ecvt`/`fcvt`/`gcvt` (exact digits, design-decisions §1135), `hcreate_r`/`hsearch_r`/`hdestroy_r`, `tcgetwinsize`/`tcsetwinsize`, `posix_close`, `_Fork`, `ftime`, `stime`, `clock_getcpuclockid`, `ftok`, `lcong48`, `scalb`/`scalbf`, `dlinfo`, and `vhangup`/`acct`/`remap_file_pages` as `ENOSYS` -- the kernel has no such facility; then the account-file functions -- `fgetpwent`, `putpwent`, `fgetgrent`, `putgrent`, `fgetspent`, `sgetspent`, `putspent`, `lckpwdf`, `ulckpwdf`, the `getusershell` three, `cuserid`, `getpass` (design-decisions §1137); then `ns_initparse`, `ns_parserr`, `ns_skiprr`, `ns_name_uncompress` and `pthread_tryjoin_np`/`pthread_timedjoin_np` (D-POSIX-TRYJOIN-CANNOT-SEE-A-KILLED-THREAD); then `getdate`, with glibc's `getdate_r` and POSIX's `getdate_err`, replayed against glibc 2.39; then the `ucontext` four, `getcontext`, `setcontext`, `makecontext` and `swapcontext` (`posix/src/ucontext.rs`, and in C in ring 3 `services/ctest-ucontext`, once lane A runs it: `requests/d-a-run-ctest-ucontext.md`). `scripts/check-libc-declared.py` refuses a new one, and its baseline is empty since the 22 `long double` complex functions of D-POSIX-LIBM-LACKS-GLIBC-EXTENSIONS landed the same day)**
+
+**In short:** C programs here are compiled against musl's headers (`zig cc`)
+and linked against our `libc.a`. The headers declare 126 functions the library
+does not define -- 22 are the `long double` complex functions
+(D-POSIX-LIBM-LACKS-GLIBC-EXTENSIONS) and these 104 are the rest. A program
+that calls one compiles and then fails to link. Two are invisible in the
+source: musl's `pthread_cleanup_push`/`pthread_cleanup_pop` are macros that
+call `_pthread_cleanup_push`/`_pthread_cleanup_pop`, so *any* C program using
+cleanup handlers fails to link; and the whole of C11's `<threads.h>` is
+missing, so no program written to it links at all.
+
+| Area | Missing |
+|---|---|
+| C11 threads | `thrd_create` `thrd_current` `thrd_detach` `thrd_equal` `thrd_exit` `thrd_join` `thrd_sleep` `thrd_yield` `mtx_init` `mtx_lock` `mtx_timedlock` `mtx_trylock` `mtx_unlock` `mtx_destroy` `cnd_init` `cnd_signal` `cnd_broadcast` `cnd_wait` `cnd_timedwait` `cnd_destroy` `tss_create` `tss_delete` `tss_get` `tss_set` `call_once` |
+| POSIX threads | `_pthread_cleanup_push` `_pthread_cleanup_pop` `pthread_attr_getinheritsched` `pthread_attr_setinheritsched` `pthread_attr_getschedparam` `pthread_attr_setschedparam` `pthread_attr_getschedpolicy` `pthread_attr_setschedpolicy` `pthread_attr_getscope` `pthread_attr_setscope` `pthread_getattr_default_np` `pthread_setattr_default_np` `pthread_getconcurrency` `pthread_setconcurrency` `pthread_setschedprio` `pthread_timedjoin_np` `pthread_tryjoin_np` |
+| locale (`_l`) | `strcasecmp_l` `strncasecmp_l` `iswctype_l` `wctype_l` `towctrans_l` `wctrans_l` `wcscasecmp_l` `wcsncasecmp_l` `wcsftime_l` |
+| strings | `wcsnlen` `wcswcs` |
+| signals (XSI) | `sighold` `sigignore` `sigpause` `sigrelse` `sigandset` `sigorset` `sigisemptyset` |
+| accounts | `fgetpwent` `putpwent` `fgetgrent` `putgrent` `fgetspent` `sgetspent` `putspent` `lckpwdf` `ulckpwdf` `getusershell` `setusershell` `endusershell` `cuserid` `getpass` |
+| numbers | `ecvt` `fcvt` `gcvt` `lcong48` `scalb` `scalbf` |
+| search | `hcreate_r` `hsearch_r` `hdestroy_r` |
+| time | `getdate` `stime` `ftime` `clock_getcpuclockid` |
+| DNS messages | `ns_initparse` `ns_parserr` `ns_skiprr` `ns_name_uncompress` |
+| contexts | `getcontext` `setcontext` `makecontext` `swapcontext` (musl declares them and does not define them either) |
+| terminals | `tcgetwinsize` `tcsetwinsize` `vhangup` |
+| processes, files, IPC | `_Fork` `posix_close` `acct` `remap_file_pages` `dlinfo` `ftok` |
+
+**Where:** `posix/src/` -- each belongs beside its siblings (`pthread.rs`,
+`string.rs`, `wchar.rs`, `signal*.rs`, `pwd.rs`/`grp.rs`, `stdlib.rs`,
+`search.rs`, `time.rs`, `termios.rs`, `unistd.rs`).
+
+**How it was found:** preprocess each of the 182 musl headers zig ships, on
+its own, with `_GNU_SOURCE`, take every declared function's name, and subtract
+the names `libc.a` defines. Six hits are not functions and are left out:
+`return` (`tgmath.h`), `volatile` (`sys/io.h`'s inline assembly),
+`seqbuf_dump` (a macro's helper in `sys/soundcard.h`), and `cachectl`,
+`cacheflush`, `_flush_cache` (MIPS-only `sys/cachectl.h`). No gate does this
+today -- `check-libc-abi.py` checks the layouts and numbers of what exists,
+not that what is declared exists.
+
+**Proper fix:** implement them, most are a few lines (the `_l` functions
+delegate as `isalpha_l` does; `wcsnlen` is `wcslen` with a bound), and add the
+subtraction above as a gate with a baseline that can only shrink, so the next
+function a header declares cannot go missing unnoticed. `ecvt`/`fcvt`/`gcvt`
+need a decision first: glibc's scale by powers of ten in floating point and
+so round differently from the exact digits musl's `sprintf`-based versions
+give.
+
+## D-POSIX-FCNTL-RECORD-LOCKS-NEVER-REACH-THE-KERNEL — a native program's `fcntl(F_SETLK)` still says yes to every lock (lane D, 2026-09-28) — **Status: OPEN (blocked on lane A: `requests/d-a-native-programs-cannot-reach-the-record-lock-table.md`)**
+
+**In short:** two SlateOS programs can both "hold" the same exclusive file
+lock. File locks are how SQLite keeps two writers from corrupting a
+database, how `login` and `who` share the utmp file, and how the tools that
+edit `/etc/passwd` keep out of each other's way (`lckpwdf`). A program built
+for SlateOS gets its `fcntl` from this libc, whose record locking never asks
+the kernel -- it answers "granted" to everything.
+
+**Where:** `posix/src/fcntl_ops.rs`, `F_GETLK`/`F_SETLK`/`F_SETLKW`: the
+first always reports "no conflicting lock", the other two always succeed.
+
+**Why it is still open:** the kernel's lock table is real now (lane A,
+`kernel/src/fs/reclock.rs`, 2026-09-21, with its release on exit and on
+final close), but only the Linux personality reaches it -- `linux.rs`'s
+`fcntl` is its one caller. A native program runs on this libc's descriptor
+table, which holds a kernel file handle for each descriptor and has no
+system call to lock through one. Lane A's answer to lane B
+(`requests/a-b-record-locks-are-real-now-do-not-return-enolck.md`) was
+written when `posix/**` was lane B's; under the six-lane map it is lane D's,
+and the missing piece is a native system call, which is lane A's.
+
+**Who is waiting on it:** SQLite inside CPython (lane B's original report,
+`requests/b-a-advisory-record-locking-is-a-stub-that-always-succeeds.md`);
+`posix/src/utmpx.rs`, which locks with `F_SETLKW` as glibc's does; and
+`lckpwdf` (`posix/src/shadow.rs`, 2026-09-28), which locks
+`/etc/.pwd.lock` the same way -- written against `fcntl` so that it becomes
+real with nothing further to change.
+
+**Proper fix:** lane A's native call (the request proposes
+`SYS_FS_RECORD_LOCK(handle, op, flock *)` with `linux.rs`'s semantics), then
+`fcntl_ops.rs` wired through it: `F_SETLK` and `F_GETLK` as they are asked,
+`F_SETLKW` as `F_SETLK` retried with a yield until granted (the kernel does
+not block for locks yet -- the same shape `flock` has), and `F_OFD_*`
+refused with `EINVAL` until they are wired too.
+
 ### [E] Notes cannot change a checklist's items or a table's cells -- 2026-09-28
 
 **Status:** open. Writing in them is refused, and says why, since 2026-09-28.
@@ -172693,6 +175826,30 @@ cells, and a selection's copy carries the marks. Whether the font places the
 mark over its base is the text layer's (`GPOS` mark attachment, which
 `gui/toolkit`'s shaper has); the terminal's part is to keep the mark and hand
 it over.
+
+## D-POSIX-TRYJOIN-CANNOT-SEE-A-KILLED-THREAD — `pthread_tryjoin_np` and `pthread_timedjoin_np` never see a thread killed before it could exit (lane D, 2026-09-28) — **Status: OPEN (blocked on lane A: `requests/d-a-a-thread-join-that-does-not-wait.md`)**
+
+**In short:** a program can ask "has that thread finished?" without waiting
+(`pthread_tryjoin_np`), or wait only so long (`pthread_timedjoin_np`). Both
+work for a thread that ends normally. A thread that is killed instead -- by
+a fault it did not handle -- never gets to say it has ended, so both keep
+answering "still running" (`EBUSY`, then `ETIMEDOUT`), while a plain
+`pthread_join` would have returned at once with `PTHREAD_CANCELED`.
+
+**Where:** `posix/src/pthread.rs`, `join_readiness`: "exited" is the
+thread's slot's `STATE_EXITED`, which the thread sets itself in
+`pthread_exit`. The kernel knows better -- `SYS_THREAD_JOIN` reports a
+killed thread as `Cancelled` -- but it only answers once the thread is gone,
+and waits until then.
+
+**Why it is still open:** the one call that can tell "gone" from "running"
+without the thread's help is the kernel's, and it has no form that returns
+at once or gives up at a deadline.
+
+**Proper fix:** lane A's join with a deadline (the request proposes a
+timeout argument to `SYS_THREAD_JOIN`, 0 meaning "don't wait"); then
+`pthread_tryjoin_np` asks it with 0, and `pthread_timedjoin_np` with the
+time left, instead of polling the slot every millisecond as it does now.
 
 ### [C] The canary's window check refused a boot test over its own controller's delay -- 2026-09-28
 
@@ -172784,6 +175941,121 @@ header and footer, everything placed from it, the hit test reading the same
 layout, and the symbol centred by measuring it (`guitk::text::measure`,
 `line_height`). Tests over a range of window sizes, as those games carry:
 nothing drawn outside the window, and every gem's hit box on its gem.
+
+## D-POSIX-TIME-CONVERSIONS-COUNTED-YEAR-BY-YEAR — `gmtime` and `mktime` walked the calendar a year at a time, so a large time never came back (lane D, 2026-09-28) — **Status: FIXED 2026-09-28 -- closed form, `EOVERFLOW` where glibc gives it, every row of glibc 2.39's replayed but two documented kinds (below)**
+
+**In short:** turning a timestamp into a date (`gmtime`, `localtime`) counted
+forward one year at a time from 1970, and turning a date back (`mktime`,
+`timegm`) did the same. A timestamp far in the future -- `gmtime` of
+2^62, which any program can pass -- ran for hours and then overflowed the
+year counter. Nothing ever answered `EOVERFLOW` (the year does not fit),
+which is what glibc answers. Several smaller differences from glibc came to
+light in the same comparison and went in the same change.
+
+| Call | Was | glibc 2.39 (now) |
+|---|---|---|
+| `gmtime(&t)`, `t` = 2^62 | 146 billion loop turns, then a wrapped year | NULL, `EOVERFLOW` |
+| `mktime` with `tm_year = INT_MAX`, month 12 | two billion loop turns | -1, `EOVERFLOW`, `*tm` untouched |
+| `gmtime`/`timegm`'s `tm_zone` | `"UTC"` | `"GMT"` |
+| `mktime`, 2025-07-01 12:00, `tm_isdst = 0`, US Eastern | 12:00 EDT (the flag ignored) | 17:00 UTC, i.e. 13:00 EDT (standard time, as asked) |
+| `mktime`, a zone with no daylight time, `tm_isdst = 1` | the flag ignored | an hour earlier |
+| `strftime("%s")` of a local `struct tm` | the fields read as UTC: off by the zone's offset | `mktime`'s answer |
+| `asctime` of year -1, of year 10000 | `"… 0000"`, `"… 0000"` | `"… -1"`, `"… 10000"` |
+| `asctime_r` of year 10000 | `"… 0000"`: the year's last four digits | NULL, `EOVERFLOW`: its 26 bytes cannot hold it |
+| `asctime(NULL)`, `ctime` of a year past `int` | `"??? ??? ?? ??:??:?? ????"` | NULL, `EINVAL` |
+
+**Where:** `posix/src/time.rs` -- `Broken::of` (one instant, broken down,
+through `tzrules`' `civil_from_days`), `wall_secs`, `tm_to_secs`,
+`resolve_local` (`mktime`'s choice of offset), `format_asctime`.
+
+**Tests:** `time_conversions_answer_as_glibc_does` replays glibc 2.39's
+answers for 1,399 calls (`posix/tools/oracle/timeconv_harness.py`): every
+value, field and `errno`, from the calendar's corners to both ends of
+`time_t` and `int`, in UTC and in `EST5EDT,M3.2.0,M11.1.0`.
+
+**Two differences kept, on purpose:**
+
+- A `TZ` rule string's daylight time before 1970. glibc applies the rule only
+  from 1970 -- it anchors every earlier year's transitions in 1970, so no
+  earlier instant is ever daylight time -- and past year 5,885,486 its day
+  count overflows an `int`. `tzrules` applies the rule in every year, as
+  POSIX reads it and musl does. Only a `TZ` string is affected: a zone file,
+  which is what `/etc/localtime` holds, carries its own history.
+- On `EOVERFLOW`, glibc's `gmtime_r` and `localtime_r` have already written
+  some fields -- which ones depends on where the zone came from; this
+  library writes none.
+
+## D-POSIX-STRPTIME-PARSED-HALF-OF-WHAT-GLIBCS-DOES — `strptime` knew some conversions, read the rest wrongly or not at all, and filled in nothing after a parse (lane D, 2026-09-28) — **Status: FIXED 2026-09-28 -- glibc 2.39's rules, every conversion; 4,073 of its answers replayed from two starting `struct tm`s; three glibc bugs with the `E`/`O` modifiers not copied (below)**
+
+**In short:** `strptime` turns text such as `"Mon, 28 Sep 2026 10:35:00"` into
+a `struct tm` by a format such as `"%a, %d %b %Y %H:%M:%S"`. Ours lacked
+`%c %D %F %r %R %T %x %X %s %U %W %C` and the `E`/`O` modifiers outright,
+so a program parsing an ISO date with `%F` or a time with `%T` got NULL.
+What it did read, it read differently from glibc: numbers with no range
+check (month 13 accepted), no white space skipped before a number, `%G`
+taken as the year, `%y` and `%C` not combined -- and after a parse it never
+worked out the weekday and day of the year, which glibc always does.
+
+| Call | Was | glibc 2.39 (now) |
+|---|---|---|
+| `strptime("2026-09-28", "%F", &tm)` | NULL | the date, `tm_wday` 1, `tm_yday` 270 |
+| `strptime("13", "%m", &tm)` | `tm_mon` 12, out of range | NULL: 1 to 12 |
+| `strptime("23", "%m", &tm)` | `tm_mon` 22 | February, `"3"` left over: a second digit that would pass 12 is not read |
+| `strptime("2026-13-01", "%Y-%m-%d", &tm)` | a match, `tm_mon` 12 | NULL, the year already stored: a failing call leaves what it stored |
+| `strptime(" 5", "%d", &tm)` | NULL | 5: numbers skip white space first |
+| `strptime("20", "%C", &tm)` from a `tm` in 1977 | 2077: the old year's last two digits kept | 2000: a century alone is its first year |
+| `strptime("2026 38 1", "%Y %U %w", &tm)` | NULL (`%U` unknown) | Monday of week 38: 2026-09-21 |
+| `strptime("12", "%D", &tm)` | NULL | NULL, nothing stored: composites are all or nothing |
+
+**Where:** `posix/src/time.rs` -- `strptime`, `parse`, `conversion`,
+`number`, `Parse::finish` (the fields a whole match implies).
+
+**Tests:** `strptime_answers_as_glibc_does` replays
+`posix/tools/oracle/strptime_harness.py`: every conversion over 83 inputs,
+and 700-odd combinations programs use, each from two starting `struct tm`s --
+the bytes taken or NULL, and every field.
+
+**Differences kept, on purpose:**
+
+- The `E` and `O` modifiers mean nothing in the C locale, which has no eras
+  and no alternative digits, and here they change nothing. glibc's do: its
+  `%Ey` reads a second number after the year, every `%O` conversion after a
+  format's first is no match (`"%OH:%OM"` never matches), and its `%Oy`
+  ignores `%C`'s century. A modified conversion answers here as the plain
+  one does, in glibc as here.
+- `%s` of a number past `time_t` is NULL, with nothing stored; glibc's
+  arithmetic wraps (signed overflow, undefined in C) and so reads
+  18446744073709551617 as 1.
+
+## D-QEMU-TCG-EMULATES-TWO-X87-THINGS-WRONGLY — under QEMU without hardware virtualisation, `fprem1` reports no quotient and `fsin`/`fcos`/`fsincos`/`fptan` answer in double precision (lane D, 2026-09-28) — **Status: WORKED AROUND in our libc; open for any other x87 code, and not ours to fix**
+
+**In short:** SlateOS's boot test runs on QEMU's software CPU (TCG), and so
+may SlateOS itself. Two of the x87 floating-point instructions do not behave
+there as they do on a real processor. Our C library no longer depends on
+either, but a program that does -- one linked against glibc or musl, which
+do -- gets wrong answers under that emulation and right ones on hardware.
+
+| Instruction | Hardware | QEMU TCG (11.x and master, `target/i386/tcg/fpu_helper.c`) | Who meets it |
+|---|---|---|---|
+| `fprem1` | reports the rounded quotient's low three bits in C0, C3, C1 | leaves all three clear: `floatx80_modrem` is passed `mod ? quotient : NULL`, so the quotient is worked out for `fprem` only | `remquol` in musl and glibc: `remquol(10, 3)` gives quotient 0, not 3 |
+| `fsin`, `fcos`, `fsincos`, `fptan` | 64-bit significand | computed by the host's `sin`/`cos`/`tan` on a `double`, 53 bits | `long double` trigonometry built on them: glibc's x86-64 `sinl`, `cosl` and `tanl` use them; musl's `ld80` ones, and ours, are software |
+
+**How it was found:** `services/ctest-longdouble` 72 failed in the boot test
+of lane-d `49b08d0df` -- the first boot to run the `long double` `<math.h>`
+checks -- while the host tests, on hardware, passed. Reading QEMU's source
+found the null pointer.
+
+**What our libc does:** `mathl::remquol` takes the truncated quotient's bits
+from `fprem`, which QEMU does report, and adds one when `fprem1`'s remainder
+differs from `fprem`'s (lane-d `bdf1ee181`); `ld80.rs`'s `partial_remainder`
+says to trust only `fprem`'s bits. Nothing in `posix/src` issues `fsin`,
+`fcos`, `fsincos` or `fptan`.
+
+**The proper fix** is QEMU's: pass the quotient to `floatx80_modrem` for
+`fprem1` too (its REM path already computes the quotient, and an earlier
+implementation reported it), and implement the four trigonometric instructions in
+`floatx80` as `fpatan`, `fyl2x` and `f2xm1` were in 2020. Worth reporting
+upstream if the operator wants it reported; nothing here depends on it.
 
 ### [C] A second save moments after the first fails on a busy Windows machine (`apps/safeio`, lane E's) -- 2026-09-28
 

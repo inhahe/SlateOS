@@ -670,6 +670,23 @@ fn a_caret_below_the_box_scrolls_the_view_to_it() {
     assert_eq!(area.scroll_y(&m), 0.0);
 }
 
+/// **A row of the right-click menu keeps the caret in view, as its key
+/// does**: twenty lines pasted into a five-line box leave the view at their
+/// end, where the caret is.
+#[test]
+fn a_paste_from_the_menu_scrolls_the_view_to_the_caret() {
+    use crate::editmenu::EditCommand;
+    let m = wide(5);
+    let text: Vec<String> = (0..20).map(|n| format!("line {n}")).collect();
+    crate::clipboard::set_text(&text.join("\n"));
+    let mut area = TextArea::with_text("");
+    assert_eq!(
+        area.edit_command(EditCommand::Paste.id(), &m),
+        KeyEdit::Changed
+    );
+    assert_eq!(area.scroll_y(&m), 20.0 * m.line_height() - m.height);
+}
+
 #[test]
 fn the_wheel_scrolls_the_view_and_leaves_the_caret() {
     let (mut area, m) = tall();

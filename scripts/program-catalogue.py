@@ -272,8 +272,12 @@ def render(progs: list[dict]) -> str:
                   "|---|---|---|---|---|"]
         for p in group:
             names = [f"`{a}`" for a in installed.get(p["name"], [])]
-            if p["name"] == p["crate"]:
-                names += [f"`{a}` *(not installed)*" for a in alias.get(p["crate"], [])]
+            # The ledger names a crate's personalities by the crate, and a
+            # coreutils binary's by the binary (multicall-aliases.py's
+            # `survey`), so the row that owns them is found two ways.
+            owner = p["name"] if p["crate"] == "coreutils" else p["crate"]
+            if p["name"] == owner:
+                names += [f"`{a}` *(not installed)*" for a in alias.get(owner, [])]
             extra = ", ".join(names)
             crate = "" if p["crate"] == p["name"] else f"`{p['crate']}`"
             lines.append(

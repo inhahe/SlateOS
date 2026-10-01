@@ -227,11 +227,16 @@ _EXTRACTS_NAME = re.compile(
 # number had been predicted before the run -- "6 shadowing, down from 8" reads
 # as progress otherwise, which is the failure this gate exists to detect,
 # committed by the gate itself.
+#
+# Every literal pattern takes an optional `b`: a program that compares its name
+# as bytes -- `hostname`, matching `b"dnsdomainname"` as net-tools' `strcmp`
+# does -- dispatches exactly as one comparing a `&str`, and the string-only
+# patterns could not see it (2026-10-01).
 _CHAIN = re.compile(
-    r'((?:"[a-z][a-z0-9_.+-]{0,20}"\s*\|\s*)*"[a-z][a-z0-9_.+-]{0,20}")'
+    r'((?:b?"[a-z][a-z0-9_.+-]{0,20}"\s*\|\s*)*b?"[a-z][a-z0-9_.+-]{0,20}")'
     r'\s*=>\s*(?:Some\(|Ok\()?Personality::'
 )
-_LITERAL = re.compile(r'"([a-z][a-z0-9_.+-]{0,20})"')
+_LITERAL = re.compile(r'b?"([a-z][a-z0-9_.+-]{0,20})"')
 # `match <name-var> { "atq" => .., "batch" => .. }` -- the third dispatch shape.
 #
 # `_CHAIN` above catches a match whose arms map to `Personality::`, and that
@@ -246,7 +251,7 @@ _LITERAL = re.compile(r'"([a-z][a-z0-9_.+-]{0,20})"')
 # is stronger than a type name, because it follows the assignment chain rather
 # than trusting what somebody called the enum.
 _MATCH_HEAD = r"\bmatch\s+{var}\s*(?:\.\s*(?:as_str|as_ref|as_deref|trim)\s*\(\s*\))*\s*\{{"
-_ARM = re.compile(r'((?:"[a-z][a-z0-9_.+-]{0,20}"\s*\|\s*)*"[a-z][a-z0-9_.+-]{0,20}")\s*=>')
+_ARM = re.compile(r'((?:b?"[a-z][a-z0-9_.+-]{0,20}"\s*\|\s*)*b?"[a-z][a-z0-9_.+-]{0,20}")\s*=>')
 
 
 def match_arm_literals(chunk: str, var: str) -> set[str]:
@@ -281,7 +286,7 @@ _NAMEVAR = (
     r"basename|base_name|prog_name|progname|program|arg0|argv0|invoked|"
     r"invoked_as|exe_name|cmd_name|self_name"
 )
-_COMPARE = re.compile(rf'(?:{_NAMEVAR})\s*==\s*"([a-z][a-z0-9_.+-]{{0,20}})"')
+_COMPARE = re.compile(rf'(?:{_NAMEVAR})\s*==\s*b?"([a-z][a-z0-9_.+-]{{0,20}})"')
 # `let <ident> = <rest-of-line>` and `<ident>: &str` (a function parameter).
 # Used to FOLLOW the invocation name through rebindings rather than guess what
 # it is called -- see `name_vars`.
@@ -458,7 +463,7 @@ def invocation_aliases(text: str, crate: str) -> set[str]:
             for var in name_vars(chunk):
                 names |= set(
                     re.findall(
-                        rf'{re.escape(var)}\s*==\s*"([a-z][a-z0-9_.+-]{{0,20}})"',
+                        rf'{re.escape(var)}\s*==\s*b?"([a-z][a-z0-9_.+-]{{0,20}})"',
                         chunk)
                 )
                 names |= match_arm_literals(chunk, var)
@@ -662,6 +667,25 @@ fn main() {
     expect("a chain rustfmt broke over two lines still corroborates",
            invocation_aliases(wrapped, "crond"), {"anacron"})
 
+    # BYTES. `hostname` matches the last component of argv[0] as bytes, as
+    # net-tools' `strcmp`s do, and every literal pattern here demanded a `"`
+    # where the arm has `b"`: the four names it answers to were invisible.
+    bytes_arm = """
+fn main() { let invocation = std::env::args_os().next(); }
+fn run(io: &Io) -> Exit {
+    let progname = io.short_name();
+    let kind = match progname {
+        b"dnsdomainname" => Type::Dns,
+        b"ypdomainname" | b"nisdomainname" => Type::NisDef,
+        _ => Type::Default,
+    };
+    if progname == b"domainname" { nis() }
+}
+"""
+    expect("a byte-string arm or comparison is dispatch as a string one is",
+           invocation_aliases(bytes_arm, "hostname"),
+           {"dnsdomainname", "ypdomainname", "nisdomainname", "domainname"})
+
     # THE MANIFEST, on a scratch tree. `crond = cron` installs cron's own
     # binary under the name, so that personality is REACHED; `crontab =
     # other` gives the name to a different binary, so cron's branch for it
@@ -674,8 +698,15 @@ fn main() {
         with open(os.path.join(scratch, "userspace", "cron", "src", "main.rs"),
                   "w", encoding="utf-8", newline="\n") as f:
             f.write(cron)
+        # A coreutils binary in the directory shape (`src/bin/NAME/main.rs`),
+        # answering to four names the manifest installs one of.
+        os.makedirs(os.path.join(scratch, COREUTILS_BIN, "hostname"))
+        with open(os.path.join(scratch, COREUTILS_BIN, "hostname", "main.rs"),
+                  "w", encoding="utf-8", newline="\n") as f:
+            f.write(bytes_arm)
         with open(os.path.join(scratch, MANIFEST), "w", encoding="utf-8", newline="\n") as f:
-            f.write("# a comment = not an alias\ncron\ncrond = cron\ncrontab = other\n")
+            f.write("# a comment = not an alias\ncron\ncrond = cron\ncrontab = other\n"
+                    "dnsdomainname = hostname\n")
         rows = survey(gittree.WorkTree(scratch))
     expect("a manifest line naming this crate's binary installs the personality",
            [r for r in rows if r[1] == "crond"],
@@ -683,6 +714,12 @@ fn main() {
     expect("...and one naming another binary shadows it",
            [r for r in rows if r[1] == "crontab"],
            [("cron", "crontab", ["rootfs-bin-manifest.txt's `crontab = other`"], False)])
+    expect("a coreutils binary's personalities are surveyed under its name",
+           sorted(r for r in rows if r[0] == "hostname"),
+           [("hostname", "dnsdomainname", [], True),
+            ("hostname", "domainname", [], False),
+            ("hostname", "nisdomainname", [], False),
+            ("hostname", "ypdomainname", [], False)])
 
     print(f"multicall-aliases: self-test "
           f"{'FAILED' if failures else 'passed'} ({failures} failure(s))")
@@ -750,6 +787,19 @@ def _leaf(rel: str) -> str:
     return rel.rsplit("/", 1)[-1]
 
 
+def home(crate: str) -> str:
+    """Where the program a ledger row names lives, or `""` if it is gone: its
+    own crate under `userspace/`, or a coreutils binary -- the two kinds
+    `survey` reads."""
+    if (ROOT / USERSPACE / crate).is_dir():
+        return f"{USERSPACE}/{crate}"
+    if (ROOT / COREUTILS_BIN / f"{crate}.rs").is_file():
+        return f"{COREUTILS_BIN}/{crate}.rs"
+    if (ROOT / COREUTILS_BIN / crate / "main.rs").is_file():
+        return f"{COREUTILS_BIN}/{crate}"
+    return ""
+
+
 def survey(tree: gittree.Tree) -> list[tuple[str, str, list[str], bool]]:
     """`(crate, alias, other producers, installed)` for every personality.
 
@@ -792,6 +842,29 @@ def survey(tree: gittree.Tree) -> list[tuple[str, str, list[str], bool]]:
                 alias,
                 producers(tree, alias, crate, cu_bins, staged, manifest),
                 manifest.get(alias) == crate,
+            ))
+    # coreutils' binaries, each a program of its own -- installed under its own
+    # name, and as free as any crate to answer to others. Until 2026-10-01 only
+    # `userspace/*/src/main.rs` was read, so a personality here was invisible:
+    # `hostname` answers to four more names and the ledger saw none of them.
+    # Each is reported under its binary's name, which is also how the manifest
+    # names it (`dnsdomainname = hostname`).
+    for rel, is_dir in tree.entries(COREUTILS_BIN):
+        leaf = _leaf(rel)
+        if is_dir:
+            name, text = leaf, tree.read_text(f"{rel}/main.rs")
+        elif leaf.endswith(".rs"):
+            name, text = leaf[:-3], tree.read_text(rel)
+        else:
+            continue
+        if text is None:
+            continue
+        for alias in sorted(invocation_aliases(text, name)):
+            rows.append((
+                name,
+                alias,
+                producers(tree, alias, name, cu_bins, staged, manifest),
+                manifest.get(alias) == name,
             ))
     return rows
 
@@ -995,15 +1068,16 @@ def main() -> int:
     fixed, gone = [], []
     for name in left:
         crate = name.split(":", 1)[0]
-        (gone if not (ROOT / "userspace" / crate).is_dir() else fixed).append(name)
+        (gone if not home(crate) else fixed).append(name)
 
     for name in fixed:
         print(f"fixed: {name} is now produced -- run --update-baseline to record it")
     for name in gone:
         crate, alias = name.split(":", 1)
         print(
-            f"gone:  {name} -- userspace/{crate} no longer exists, so nothing "
-            f"answers to `{alias}`; run --update-baseline to drop the line"
+            f"gone:  {name} -- neither userspace/{crate} nor coreutils' {crate} "
+            f"exists any more, so nothing answers to `{alias}`; run "
+            f"--update-baseline to drop the line"
         )
     if new:
         print(
@@ -1014,7 +1088,7 @@ def main() -> int:
         )
         for name in new:
             crate, alias = name.split(":", 1)
-            print(f"  {alias:<20} (a personality of userspace/{crate})", file=sys.stderr)
+            print(f"  {alias:<20} (a personality of {home(crate) or crate})", file=sys.stderr)
         print(
             "\nDecide each name rather than adding it to the baseline (design-decisions\n"
             "1045): delete it if it names a subsystem SlateOS does not have; else\n"

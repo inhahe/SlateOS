@@ -2716,6 +2716,15 @@ if [ -z "$FASTPY_NEWEST" ]; then
     echo "[rootfs] NOTE: no fastpy checkout found — a fastpy fixture built by an"
     echo "[rootfs]       older compiler cannot be detected as stale by this gate."
 fi
+# The header overlay is the C fixtures' as the compiler is the fastpy ones':
+# every ctest-* recipe compiles main.c with -I posix/include, so its macros
+# and declarations are in the ELF, and an edit to a header alone moves none
+# of the files above -- ctest-obstack, which exists to run <obstack.h>'s
+# macros, would go on testing the old ones. The newest file stands for the
+# directory, as in scripts/ctest-fixtures.py::_newest_overlay_header, which
+# must agree with this.
+OVERLAY_NEWEST="$(find "$ROOT_DIR/posix/include" -type f -printf '%T@ %p\n' 2>/dev/null \
+    | sort -rn | head -1 | cut -d' ' -f2- || true)"
 
 for _recipe in "$ROOT_DIR"/services/ctest-*/build.py "$ROOT_DIR"/services/fastpy-*/build.py; do
     [ -e "$_recipe" ] || continue
@@ -2738,12 +2747,17 @@ for _recipe in "$ROOT_DIR"/services/ctest-*/build.py "$ROOT_DIR"/services/fastpy
         [ "$_src" -nt "$_elf" ] || continue
         _behind="${_behind:+$_behind, }$(basename "$_src")"
     done
-    # The compiler that generated it — fastpy fixtures only; a ctest fixture is
-    # C compiled by zig and has no such input.
+    # The compiler that generated a fastpy fixture; the headers a C fixture is
+    # compiled against (OVERLAY_NEWEST, above).
     case "$_name" in
         fastpy-*)
             if [ -n "$FASTPY_NEWEST" ] && [ "$FASTPY_NEWEST" -nt "$_elf" ]; then
                 _behind="${_behind:+$_behind, }fastpy $(basename "$FASTPY_NEWEST")"
+            fi
+            ;;
+        ctest-*)
+            if [ -n "$OVERLAY_NEWEST" ] && [ "$OVERLAY_NEWEST" -nt "$_elf" ]; then
+                _behind="${_behind:+$_behind, }${OVERLAY_NEWEST#"$ROOT_DIR"/}"
             fi
             ;;
     esac

@@ -455,6 +455,10 @@ def _inputs(fixture: Path) -> list[tuple[str, Path, bool]]:
     a staleness gate can, and a fixture that cannot be rebuilt is not made more
     truthful by being called stale.
 
+    **So are the overlay headers, for the C fixtures** -- `posix/include`,
+    which every `ctest-*` recipe compiles against; see
+    `_newest_overlay_header`.
+
     The third element is "this is text": true for tracked sources, whose line
     endings differ between worktrees without differing between commits, and
     false for `libc.a`, which is a build product where every byte counts.
@@ -476,7 +480,50 @@ def _inputs(fixture: Path) -> list[tuple[str, Path, bool]]:
         newest = _newest_compiler_source()
         if newest is not None:
             got.append((f"fastpy {newest.name}", newest, True))
+    if fixture.name.startswith("ctest-"):
+        newest = _newest_overlay_header()
+        if newest is not None:
+            got.append((newest.relative_to(REPO).as_posix(), newest, True))
     return got
+
+
+def _newest_overlay_header() -> Path | None:
+    """The most recently modified file under `posix/include`.
+
+    **The header overlay is an input of every C fixture, and used not to
+    be.** Each `ctest-*` recipe compiles `main.c` with `-I posix/include`, so
+    what its macros expand to and what its declarations say is in the ELF --
+    and none of `build.py`, `main.c` or `libc.a` moves when only a header
+    does. `ctest-obstack` is the sharpest case: it exists to run
+    `<obstack.h>`'s macros, which are the header's and never the library's,
+    so a fixed macro left the fixture testing the broken one while this gate
+    called it current. Every C fixture had the same exposure through any
+    header it includes.
+
+    The newest file stands in for the directory, as the newest `.py` does for
+    the fastpy compiler: an ordering test needs only the latest. It is read
+    under `REPO` at call time, so a test that rebinds `REPO` gets its own
+    tree's, and cached per directory for the same reason. `None` when the
+    directory has no files (or is absent), which leaves the input out rather
+    than inventing one.
+    """
+    root = REPO / "posix" / "include"
+    if root not in _NEWEST_OVERLAY_HEADER:
+        newest = None
+        try:
+            files = [p for p in root.rglob("*") if p.is_file()]
+            if files:
+                newest = max(files, key=lambda p: p.stat().st_mtime)
+        except OSError:
+            # A file that vanished between glob and stat: unknown, as for the
+            # compiler, rather than a crash in an advisory gate.
+            newest = None
+        _NEWEST_OVERLAY_HEADER[root] = newest
+    return _NEWEST_OVERLAY_HEADER[root]
+
+
+# The newest overlay file, per `posix/include` directory looked at.
+_NEWEST_OVERLAY_HEADER: dict[Path, Path | None] = {}
 
 
 def _newest_compiler_source() -> Path | None:

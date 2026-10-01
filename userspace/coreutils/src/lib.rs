@@ -506,7 +506,9 @@ pub use ::errmsg;
 pub mod extfloat;
 pub mod fileid;
 pub mod filekind;
-pub mod fnmatch;
+// POSIX fnmatch over bytes -- the shared `fnmatch` crate since 2026-10-01,
+// re-exported here so `coreutils::fnmatch` and `crate::fnmatch` stand.
+pub use ::fnmatch;
 pub mod fsattr;
 pub mod getopt;
 pub mod grouplist;

@@ -1,6 +1,10 @@
 //! POSIX `fnmatch` over bytes — the shell-glob matcher `find -name`,
 //! `du --exclude`, `tar --exclude` and `cpio`'s pattern list all need.
 //!
+//! It was coreutils' `src/fnmatch.rs` until 2026-10-01, when `sudo` needed it to
+//! match a sudoers rule's arguments as sudoers does (`fnmatch(3)`, with
+//! `FNM_PATHNAME` for sudoedit's); `coreutils::fnmatch` re-exports it.
+//!
 //! # Why this is shared rather than written per utility
 //!
 //! Eight binaries in this tree had already written it: `find`, `du`'s
@@ -140,7 +144,7 @@ impl std::ops::BitOr for Flags {
 /// Does `name` match `pattern`?
 ///
 /// ```
-/// use coreutils::fnmatch::{Flags, fnmatch};
+/// use fnmatch::{Flags, fnmatch};
 ///
 /// assert!(fnmatch(b"*.o", b"main.o", Flags::NONE));
 /// assert!(fnmatch(b"[[:digit:]]*", b"9lives", Flags::NONE));

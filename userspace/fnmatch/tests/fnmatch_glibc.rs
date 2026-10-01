@@ -1,4 +1,4 @@
-//! [`coreutils::fnmatch`] against glibc's `fnmatch(3)`, case for case.
+//! [`fnmatch`] against glibc's `fnmatch(3)`, case for case.
 //!
 //! The expectations are not written by hand and are not derived from reading
 //! glibc's source. They were *measured*: `scripts/fnmatch-probe.c` calls the
@@ -25,13 +25,13 @@
 //!
 //! ```text
 //! wsl -e sh -c 'gcc -O2 -o /tmp/fnprobe scripts/fnmatch-probe.c && /tmp/fnprobe' \
-//!     > userspace/coreutils/tests/fnmatch-glibc.txt
+//!     > userspace/fnmatch/tests/fnmatch-glibc.txt
 //! ```
 //!
 //! Where we differ from glibc on purpose, [`DELIBERATE`] says so and why; every
-//! other difference is a bug in [`coreutils::fnmatch`].
+//! other difference is a bug in [`fnmatch`].
 
-use coreutils::fnmatch::{Flags, fnmatch};
+use fnmatch::{Flags, fnmatch};
 
 const FIXTURE: &str = include_str!("fnmatch-glibc.txt");
 
@@ -49,7 +49,7 @@ fn unhex(s: &str) -> Vec<u8> {
 /// Patterns whose glibc answer we do not reproduce, and the reason.
 ///
 /// Both entries are the same decision, documented in the module docs of
-/// [`coreutils::fnmatch`]: a collating symbol `[.x.]` and an equivalence class
+/// [`fnmatch`]: a collating symbol `[.x.]` and an equivalence class
 /// `[=x=]` are rejected as a malformed bracket rather than parsed. glibc parses
 /// them and, in the C locale, reduces each to the single character between the
 /// delimiters. No caller in this tree writes one, and refusing is the safer of

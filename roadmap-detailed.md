@@ -1896,23 +1896,23 @@ _Minimal hotkey defaults: Alt+F4, Alt+Tab, Ctrl+C/V/X, Ctrl+Z, Print Screen. Eve
 ### 3.5 GUI Toolkit / Widget API
 
 #### Layout Engine
-- [ ] Flexbox-based layout (main axis, cross axis, flex-grow, flex-shrink, alignment)
-- [ ] Grid-based layout
-- [ ] Implemented as native layout engines, NOT through CSS parsing
-- [ ] Align elements vertically, horizontally
-- [ ] Justify: left, right, center / top, bottom, center
-- [ ] Size item to content
-- [ ] Size to length of given text
-- [ ] Dynamic sizing based on content and available space
-- [ ] Margin (with color), padding, outline (curvature, thickness, color) on all or individual sides
+- [x] Flexbox-based layout (main axis, cross axis, flex-grow, flex-shrink, alignment) — *2026-10-01: `guitk::layout::flex_layout` follows CSS Flexbox §9 — lines when wrapping, grow and shrink with min/max freezing, `align_content`, baselines, margins, reversed directions as mirror images (`design-decisions.md` §1455). Until then wrapping and `align_content` were declared and ignored, and a growing item in a content-sized container became infinitely wide.*
+- [x] Grid-based layout — *2026-10-01: `guitk::layout::grid` (`grid_layout`): pixel, content-sized, shared (`fr`) and min/max tracks, spans, CSS's sparse auto-placement, rows and columns added as items need them, gaps, item and content alignment; it answers each item's box and every track's place.*
+- [x] Implemented as native layout engines, NOT through CSS parsing — *both engines are functions over sizes; nothing parses a style sheet.*
+- [x] Align elements vertically, horizontally — *flex: `align_items`/`align_self` across a line, `justify` along it; grid: `justify_items`/`align_items` and each item's own.*
+- [x] Justify: left, right, center / top, bottom, center — *start, end and centre on either axis, and the space-between/around/evenly distributions.*
+- [x] Size item to content — *a widget's intrinsic size; a container's from its children laid out unbounded (fixed 2026-10-01: a container measured nothing, so a column inside a row was zero wide).*
+- [x] Size to length of given text — *labels, buttons and check boxes are sized by `Widget::measure`, the shaper's width of their text.*
+- [x] Dynamic sizing based on content and available space — *flex grow/shrink and grid shares divide the room there is; an unbounded container sizes to its content.*
+- [-] Margin (with color), padding, outline (curvature, thickness, color) on all or individual sides — *margins and padding per side are laid out (margins keep their room since 2026-10-01); corners round per corner (`border_radius`); a border's sides each have their width and colour, drawn side by side when they differ (2026-10-01; it was the top side's all round). Not done: a margin has no colour — a coloured band around a widget is its border.*
 - [ ] Auto-scale images by OS DPI/scale factor
-- [ ] Image scaling: max fit in space, optional no-upscale with justify, fill to dimensions
-- [ ] Read size of any item/section
-- [ ] Nested sections
-- [ ] Horizontal/vertical rules
-- [ ] Rounded corners
-- [ ] Transparency support
-- [ ] Focus management (set/unset focus on app, input field, etc.)
+- [x] Image scaling: max fit in space, optional no-upscale with justify, fill to dimensions — *2026-10-01: `guitk::layout::fit_image` — contain, cover, stretch or natural size, never enlarging when told not to, placed by fractions across and down; the desktop's wallpaper and login screen fit through it.*
+- [x] Read size of any item/section — *every widget's `layout` box after `WidgetTree::layout`; a grid answers where each column and row ended up.*
+- [x] Nested sections — *containers nest, each measured from its children, drawn and hit in its own content space (fixed 2026-10-01: clicks were not translated into a nested container's space).*
+- [x] Horizontal/vertical rules — *`Widget::separator` (`WidgetKind::Separator`, either way).*
+- [x] Rounded corners — *`Style::border_radius` (`CornerRadii`, per corner), on backgrounds and borders.*
+- [x] Transparency support — *colours carry alpha; a widget's `opacity` fades it and its children (2026-10-01: it was stored and never applied). Pictures are not faded — the render protocol has no image opacity.*
+- [x] Focus management (set/unset focus on app, input field, etc.) — *`WidgetTree::focus`, `focus_first`, `focus_next`, Tab and Shift+Tab in reading order, a click focusing what it lands on.*
 
 #### Styling — CSS Subset with Inheritance, No Cascade
 - [ ] **Keep:** color, background-color, font-family/size/weight, margin, padding, border, border-radius, width, height, min/max-width/height, opacity, box-shadow, text-shadow. Shorthands. Colors: hex, rgb(), rgba(), hsl(), hsla(), named. Units: px, %, em, rem, cm, mm, vw, vh, ch. var()/custom properties (OS theme variables). calc(). Transitions. Pseudo-classes: :hover, :active, :focus, :disabled, :checked. Selectors: type, .class, #id, > child. Position: absolute, relative, fixed. z-index.

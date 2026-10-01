@@ -6533,16 +6533,18 @@ fn destroy_process_resources(
     // Release any advisory file locks (flock) held by this process.
     // Locks are owner-keyed by PID; without this a crashed lock holder
     // would block every other waiter on that path until reboot.
-    crate::fs::Vfs::funlock_all(pid);
+    // As a process owner: a flock lock held through a handle belongs to the
+    // open file description and ends at its final close, not here.
+    crate::fs::Vfs::funlock_all(crate::fs::vfs::flock_process_owner(pid));
     // And the byte-range record locks (fcntl F_SETLK), which are a separate
     // table from flock because POSIX makes them separate lock spaces. Same
     // reason, same moment: a dead owner's write lock on a range would refuse
     // every live process that overlaps it, and nothing else clears one.
-    // Through `posix_owner`, not the bare pid: `reclock` owns the owner
-    // encoding, and a second place building the same value by hand is how
-    // the two silently stop matching. They agree today only because the
-    // mask clears a bit no real pid sets.
-    crate::fs::reclock::release_all(crate::fs::reclock::posix_owner(pid));
+    // `release_process` rather than a release by owner: `reclock` owns the
+    // owner encoding, and it also drops any wait entry a task of this
+    // process left behind, which would otherwise feed the deadlock search an
+    // edge from a process that no longer waits.
+    crate::fs::reclock::release_process(pid);
 
     // Close all IPC handles owned by this process.  In the normal exit
     // path these were already drained and closed at the zombie
@@ -6763,24 +6765,36 @@ pub fn set_exec_close_handles(pid: ProcessId, handles: Vec<(u8, u64)>) {
     }
 }
 
-/// Take the close-on-exec handle list, for an exec attempt that is starting
-/// -- less any handle the exec also keeps under a descriptor
-/// ([`Process::exec_inherited_fds`]). A handle that is both dropped and kept
-/// is still in use, and closing it would close the kept descriptor's file.
-/// Taken under one lock, so the two lists are compared as they stand.
-pub fn take_exec_close_handles(pid: ProcessId) -> Vec<(u8, u64)> {
+/// What an exec does with the close-on-exec list libc named
+/// ([`take_exec_close_handles`]).
+#[derive(Debug, Default, PartialEq, Eq)]
+pub struct ExecCloseList {
+    /// The handles to close, as `close()` closes them.
+    pub close: Vec<(u8, u64)>,
+    /// Handles the exec also keeps under a descriptor
+    /// ([`Process::exec_inherited_fds`]). They stay open -- closing one would
+    /// close the kept descriptor's file -- but the dropped descriptor still
+    /// counts as closed for the rules that come with any close: the
+    /// process's record locks on the file go (POSIX).
+    pub shared: Vec<(u8, u64)>,
+}
+
+/// Take the close-on-exec handle list, for an exec attempt that is starting,
+/// split into the handles to close and those a kept descriptor shares
+/// ([`ExecCloseList`]). Taken under one lock, so the two lists are compared
+/// as they stand.
+pub fn take_exec_close_handles(pid: ProcessId) -> ExecCloseList {
     let mut table = PROCESS_TABLE.lock();
     let Some(proc) = table.get_mut(&pid) else {
-        return Vec::new();
+        return ExecCloseList::default();
     };
-    let mut handles = core::mem::take(&mut proc.exec_close_handles);
-    handles.retain(|&(ty, h)| {
-        !proc
-            .exec_inherited_fds
+    let handles = core::mem::take(&mut proc.exec_close_handles);
+    let (shared, close) = handles.into_iter().partition(|&(ty, h)| {
+        proc.exec_inherited_fds
             .iter()
             .any(|&(_, kept_ty, kept_h)| kept_ty == ty && kept_h == h)
     });
-    handles
+    ExecCloseList { close, shared }
 }
 
 /// Take (move out) the exec-carried fd snapshot from a process's PCB.
@@ -7085,7 +7099,7 @@ pub fn clear_linux_saved_auxv(pid: ProcessId) {
 /// processes.  Called by `exec_process` when re-using an existing
 /// Linux fd table across an `execve()`.
 ///
-/// The returned list:
+/// [`ExecCloexec::to_close`]:
 /// - Excludes `HandleKind::Console` entries (no kernel resource).
 /// - Excludes any `(kind, raw_handle)` still referenced by a
 ///   non-cloexec fd left in the table (so the open file description
@@ -7093,12 +7107,15 @@ pub fn clear_linux_saved_auxv(pid: ProcessId) {
 /// - Is deduplicated by `(kind, raw_handle)` so that two cloexec fds
 ///   pointing at the same handle yield exactly one close.
 ///
-/// Returns an empty vector if `pid` has no Linux fd table (e.g. it
-/// was previously a Native-ABI process); the caller can then install
-/// a fresh stdio-only table via [`linux_fd_install_stdio`].  Returns
-/// `None` only if `pid` does not refer to a live process at all.
+/// [`ExecCloexec::removed`] is every resource-bearing entry taken out,
+/// referenced or not, for the rules that come with any descriptor's close.
+///
+/// Both lists are empty when no fd was close-on-exec. Returns `None` if
+/// `pid` does not refer to a live process, or has no Linux fd table (e.g.
+/// it was previously a Native-ABI process); the caller can then install a
+/// fresh stdio-only table via [`linux_fd_install_stdio`].
 #[must_use]
-pub fn linux_fd_exec_cloexec(pid: ProcessId) -> Option<alloc::vec::Vec<super::linux_fd::FdEntry>> {
+pub fn linux_fd_exec_cloexec(pid: ProcessId) -> Option<ExecCloexec> {
     use super::linux_fd::FdEntry;
 
     let mut table = PROCESS_TABLE.lock();
@@ -7108,29 +7125,42 @@ pub fn linux_fd_exec_cloexec(pid: ProcessId) -> Option<alloc::vec::Vec<super::li
     let taken = fd_table.take_cloexec_entries();
     fd_table.ensure_stdio();
 
-    // Build the to-close list: kernel-resource-bearing entries, not
-    // referenced by any remaining fd, deduplicated by (kind, raw).
-    let mut to_close: alloc::vec::Vec<FdEntry> = alloc::vec::Vec::new();
+    // Build both lists from the kernel-resource-bearing entries,
+    // deduplicated by (kind, raw); to-close keeps only those no remaining
+    // fd references.
+    let mut out = ExecCloexec {
+        to_close: alloc::vec::Vec::new(),
+        removed: alloc::vec::Vec::new(),
+    };
+    let same = |a: &FdEntry, b: &FdEntry| a.kind == b.kind && a.raw_handle == b.raw_handle;
     for entry in taken {
-        if !entry.kind.needs_kernel_close() {
+        if !entry.kind.needs_kernel_close() || out.removed.iter().any(|e| same(e, &entry)) {
             continue;
         }
-        let already_listed = to_close
-            .iter()
-            .any(|e| e.kind == entry.kind && e.raw_handle == entry.raw_handle);
-        if already_listed {
-            continue;
-        }
+        out.removed.push(entry);
         // `excluded_fd` is irrelevant here — the cloexec entries are
         // already gone from the table, so we just scan what remains.
         // Use -1 (never a valid fd) to mean "exclude nothing extra".
         let still_referenced = fd_table.is_handle_referenced(entry.kind, entry.raw_handle, -1);
         if !still_referenced {
-            to_close.push(entry);
+            out.to_close.push(entry);
         }
     }
 
-    Some(to_close)
+    Some(out)
+}
+
+/// What an exec's close-on-exec took out of a Linux fd table
+/// ([`linux_fd_exec_cloexec`]).
+pub struct ExecCloexec {
+    /// The kernel handles to release: referenced by no fd left in the
+    /// table, each `(kind, raw_handle)` once.
+    pub to_close: alloc::vec::Vec<super::linux_fd::FdEntry>,
+    /// Every resource-bearing entry removed, released or not, each
+    /// `(kind, raw_handle)` once. POSIX attaches some rules to the close of
+    /// any descriptor: a process's record locks on a file go with any
+    /// descriptor for it. Those cannot wait for the last one.
+    pub removed: alloc::vec::Vec<super::linux_fd::FdEntry>,
 }
 
 /// Look up `fd` in the Linux fd table.  Returns `None` if the process

@@ -169863,8 +169863,10 @@ once, on one target, is a gate I have not shown to be stable, and dd-956 says
 measure the population before building the gate.
 
 ### [A] `F_SETLK` grants every exclusive record lock, and the reason it gives for that has expired -- 2026-09-21
-**Status:** PARTLY FIXED 2026-09-21 -- POSIX locks now real and released on exit;
-**OFD locks have no release path** (see the addendum at the end of this entry)
+**Status:** FIXED 2026-10-01. POSIX locks real and released on exit
+(2026-09-21); OFD locks released at a description's final close; `F_SETLKW`
+waits, refusing a deadlock; native programs reach the table
+(`SYS_FS_RECORD_LOCK`). See the 2026-10-01 addendum at the end of this entry.
 
 **In short:** a program can ask the kernel for exclusive use of part of a file
 -- the mechanism databases use to stop two copies of themselves writing the
@@ -169969,6 +169971,29 @@ hand, and an owner space belongs to the module that owns it.
 **F_GETLK** needs the same treatment: it currently reports `F_UNLCK`
 unconditionally, which is a *claim about the world* rather than a lookup, and
 `reclock::query` is the lookup it should do.
+
+**Addendum, 2026-10-01 -- every part of this entry is done (design-decisions §1505).**
+- **OFD release:** `reclock::release_ofd` on a description's final close, as
+  proposed above. A memfd's OFD locks now have their own owner tag and are
+  released by `memfd::close`. They had shared a number space with file
+  handles, so memfd 5's locks and file handle 5's were one owner.
+- **`F_SETLKW` waits** (`reclock::set_wait`), and is woken by whatever frees
+  its range. A wait that could never end is `EDEADLK`. A signal ends it with
+  a restart, so `SA_RESTART` restarts it, as on Linux.
+- **Native programs** reach the table through `SYS_FS_RECORD_LOCK` (1093).
+  The work for both ABIs is one module, `syscall::record_lock`
+  (`requests/d-a-native-programs-cannot-reach-the-record-lock-table.md`).
+- **Found and fixed in the same change:**
+  - Locks were keyed by re-resolving the handle's path through the caller's
+    namespace, applying a jailed process's jail twice.
+  - A lock on a stale handle went to the empty path.
+  - A memfd's locks were looked up in the file-handle table under its id.
+  - `F_GETLK` zeroed `l_pid` where Linux leaves the fields alone, and kept
+    the caller's `l_whence` beside an absolute range.
+  - The access mode (`EBADF`) and a full table (`ENOLCK`) went unchecked or
+    unmapped.
+  - POSIX's close rule (closing any descriptor drops the process's locks on
+    the file) was not applied on any close path.
 
 ### [A] Five boots in one day, each killed by one of my own defects -- three a local check would have caught in under five minutes, and one caused BY running those checks during the boot -- 2026-09-21
 **Status:** OPEN as a workflow note. No code fix; the remedy is an order of operations.
@@ -176730,11 +176755,17 @@ address space holding a shared page. Both sides must map the one frame
 writable, with no `COW` and no rmap entry, and the reference counts must
 balance through teardown. `mark_cow` must refuse the page.
 
-**Not done.** The Linux ABI still has no writable shared mapping at all
-(`MAP_SHARED | MAP_ANONYMOUS` and writable `MAP_SHARED` of a file are
-`ENOSYS`), and native `SYS_MMAP` ignores `MAP_SHARED`. So the everyday
-POSIX way to share memory with a child -- map it shared, then fork -- does
-not exist yet. The kernel half of it is now right.
+**Shared anonymous memory, done 2026-10-01.** Native `SYS_MMAP` takes
+`MAP_SHARED` (`1 << 7`): committed pages marked `SHARED`, so a fork shares
+them. `MAP_SHARED | MAP_LAZY` is refused, since a lazily faulted page would
+not be shared. The Linux `MAP_SHARED | MAP_ANONYMOUS` maps the same way
+(it was `ENOSYS`), and a map with neither type is `EINVAL`. Test:
+`syscall::dispatch::test_dispatch_shared_anonymous_memory`. libc's half --
+it passes `prot` through as the native flags and never says `MAP_SHARED` --
+is `requests/a-d-libc-mmap-should-say-map-shared-and-translate-prot.md`.
+
+**Still not done:** a writable `MAP_SHARED` of a *file* is `ENOSYS`. There is
+no writeback, so a write could not reach the file.
 
 ### [A] A-MPROTECT-READ-ONLY-DID-NOT-STICK-ON-COPY-ON-WRITE-PAGES: a page made read-only after a fork could still be written -- 2026-09-27
 **Status:** FIXED on lane-a 2026-09-27, awaiting a boot. Found alongside
@@ -180141,9 +180172,12 @@ nowhere.
   check possession, close deregisters, and a dead process's semaphores are
   closed (waiters get `ChannelClosed`). Not inherited across fork, like a
   channel.
-- **Points 3 and 4 of lane F's request are features, on lane A's backlog.**
-  A Linux-ABI process (every Rust `std` program) cannot reach channels at all,
-  and nothing waits on a channel together with anything else.
+- **Point 3 of lane F's request is a feature, on lane A's backlog.** A
+  Linux-ABI process (every Rust `std` program) cannot reach channels at all.
+  Point 4 -- waiting on a channel together with anything else -- was done the
+  same day: `SYS_WAIT_MULTIPLE` takes channels and service listeners, and
+  completion ports wake when their sources become ready (they had slept until
+  a `notify()` that channels, pipes and eventfds never made).
 - **Moving an end to another process is not supported.** Capability transfer
   in a message moves capability-table entries, and nothing makes a channel end
   one. A process can hand another process an end only through the service
@@ -180341,6 +180375,235 @@ it should not share a boot with other suspects.
 **Reproduce.** Two processes with the `Socket` capability: one opens a TCP
 connection; the other calls `SYS_TCP_CLOSE` with that number, and the first
 process's connection is gone.
+
+### A-FLOCK-OWNERS-COLLIDED-AND-THE-NATIVE-DOORS-TOOK-ANY-OWNER -- 2026-10-01 -- FIXED (lane A)
+
+**In short:** `flock`, the whole-file lock `flock(1)`, package managers and
+lock files use, had four defects in the kernel. Any process could release
+anyone's lock. Two unrelated owners could be treated as one. A request that
+had to wait failed at once instead. Two holders upgrading their shared locks
+could wait on each other forever. All four are fixed (design-decisions
+§1506).
+
+| defect | where | what a user saw |
+|---|---|---|
+| The native doors took the owner from the caller | `SYS_FS_FLOCK` (`arg3`), `SYS_FS_FUNLOCK` (`arg2`), the latter with no capability check | any process could take a lock in another's name, or release anyone's lock: mutual exclusion gone |
+| Two owner spaces in one table | `vfs::LOCK_TABLE`: native locks keyed by pid, Linux `flock(2)` by handle; exit released by pid | pid 57's lock and handle 57's did not conflict, and process 57's exit dropped handle 57's locks |
+| `flock` never waited | Linux `sys_flock`: `EWOULDBLOCK` with or without `LOCK_NB`; native libc polled | blocking callers failed or spun; libc's poll could not be ended by a signal (lane B's `TD-B-FLOCK-WAIT-POLLS`) |
+| An upgrade was atomic | `Vfs::flock_resolved`: shared to exclusive only with no other holder, keeping the shared lock while refused | two sharers both upgrading, once they can wait, wait on each other forever |
+
+**The fix:**
+- **Owner tags.** `vfs::flock_process_owner(pid)` and
+  `vfs::flock_description_owner(handle)` are disjoint owner spaces. The
+  native path doors take the caller's own; exit releases it.
+- **Waiting.** `Vfs::flock_wait_resolved` parks until the lock is free.
+  Every release, conversion and unmount wakes its file's waiters. A signal
+  ends the wait with a restart, as Linux's `flock` restarts. The Linux
+  `flock(2)` waits without `LOCK_NB`.
+- **Linux's conversion.** A conversion first gives up the lock held
+  (`flock_lock_inode`).
+- **A door with BSD semantics for native programs:** `SYS_FS_FLOCK_HANDLE`
+  (1094). The lock belongs to the open file description, shared by `dup`
+  and `fork`, and ends at the final close. It is the Linux `flock(2)`'s
+  lock.
+- **`/proc/locks`** speaks Linux's format (`lslocks` parses it), and lists
+  record locks as well as `flock` ones.
+
+**Tests:** `vfs::self_test`'s new rungs (owner tags, a refused upgrade),
+`vfs::self_test_flock_wait` (a waiter woken into the lock; two upgrading
+sharers), `procfs::self_test_locks`, and `syscall::dispatch`'s
+`test_dispatch_flock` (1094 across two processes; 609/640 ignore a
+caller-named owner).
+
+**Left for lane D:** libc's `flock` can move to 1094 and drop its polling
+loop. That also closes lane B's `TD-B-FLOCK-WAIT-POLLS`: a blocking
+`flock` a signal interrupts.
+
+### A-ST_DEV-IS-ZERO-FOR-EVERY-FILE -- 2026-10-01 -- FIXED the same day (lane A; design-decisions §1507)
+
+**In short:** every file on every filesystem reports device number 0. Tools
+recognise "the same file" by the pair (device, inode), so two different
+files on two filesystems that happen to share an inode number look like one
+file. That affects `tar` and `rsync -H`, which preserve hard links (a false
+one corrupts the archive), `cp -a`, `du` (counts a "hard link" once) and
+`find -samefile`. It also blinds `find -xdev` and `du -x`, which stay on
+one filesystem by comparing devices.
+
+**Where:** `syscall/linux.rs`'s `stat` and `statx` fills write `st_dev = 0`
+(`put_u64(buf, 0, 0); // st_dev`), and `FileMeta` carries no device at
+all. The VFS knows the answer, `FileId::fs_id`: each mount's stable id,
+already the identity key of the page cache and the lock tables.
+
+**Found** while giving `/proc/locks` Linux's `major:minor:inode` field.
+That field now prints the filesystem id under major 0, as Linux numbers its
+anonymous filesystems, which matches `stat` once `stat` reports it.
+
+**Fixed, 2026-10-01:**
+- **A device number per live mount** (`vfs::dev_of`). It is small,
+  assigned at mount and reused after unmount, as Linux reuses an anonymous
+  device's minor. It is not `fs_id`, which must never be reused because it
+  keys the page cache and the lock tables.
+- **`FileMeta::dev`**, filled by the VFS from the mount a file was found
+  on.
+- **Who reports it:**
+  - Linux `stat` (`st_dev = makedev(0, dev)`) and `statx`
+    (`stx_dev_major`/`stx_dev_minor`);
+  - the native stat record, in its three reserved bytes `[9..12]`. libc
+    still has to read them: lane D, by message;
+  - `/proc/locks`;
+  - `/proc/<pid>/mountinfo`'s `major:minor`, which was the mount's index
+    and moved whenever an earlier mount went;
+  - `/proc/<pid>/maps` for a file-backed region, now with its offset,
+    inode and path as well.
+- **Tests:** `vfs`'s `device_numbers_self_test` (a scratch mount's files
+  report a device of their own, the number is reused, and the `dev_t`
+  survives glibc's `minor()`), and the `mountinfo` and `maps` render
+  tests.
+
+**Found doing it:** `A-LINUX-FSTAT-OF-A-FILE-WAS-MADE-UP`, the next entry.
+
+### A-FIVE-NATIVE-FS-DOORS-SKIPPED-THEIR-GATE -- 2026-10-01 -- FIXED (lane A)
+
+**In short:** five native file calls missed the check their siblings make.
+Two could move another program's file position. Two worked without the
+file capability every other file call asks for. One created a file nothing
+ever deleted, and handed back a handle its caller could not use.
+
+| call | missing | sibling that has it |
+|---|---|---|
+| `SYS_FS_SEEK_DATA`, `SYS_FS_SEEK_HOLE` | possession (`require_file_handle_owner`): any process could move any description's offset by counting handle numbers | `SYS_FS_SEEK` |
+| `SYS_FS_READDIR_AT` | the File capability (READ) | `SYS_FS_LIST_DIR` |
+| `SYS_FS_FALLOCATE` | the File capability (WRITE) | `SYS_FS_TRUNCATE` |
+| `SYS_FS_TMPFILE` | everything. It created a *named* `.tmp_<tsc>` file nothing deleted (its doc said the file vanished at close), and never registered the handle, so the caller's own reads, writes and close were refused and the open file leaked | -- |
+
+All five are gated now. `SYS_FS_TMPFILE` answers `NotSupported` until a
+handle can hold a file that has no name (the next entry); nothing called it.
+Found by listing every native handler that touches `fs::handle` or reads a
+user path, beside the gates it calls. `syscall::dispatch`'s
+`test_dispatch_fs_gates` checks each, as a scratch process with no
+capability.
+
+### A-AN-OPEN-FILE-FOLLOWS-ITS-NAME -- 2026-10-01 -- FIXED the same day for memfs and ext4 (steps 1-4 of the plan below; design-decisions §1508); step 5, `O_TMPFILE`, open (lane A)
+
+**In short:** opening a file here gives a program a handle to the file's
+*name*, not to the file. Every read and write looks the name up again. So a
+file renamed or deleted while a program has it open is lost to that
+program, or quietly swapped for whatever takes the name next. POSIX keeps an
+open file alive and in place until its last close, and programs depend on
+it every day.
+
+**What breaks:**
+- **Deleting an open file.** SQLite opens each temporary file (sorts, temp
+  tables, statement journals) and deletes it at once, keeping only the
+  descriptor (`SQLITE_OPEN_DELETEONCLOSE`). Here the next write fails with
+  `NotFound`. CPython's `tempfile.TemporaryFile` does the same. So does
+  libc's `tmpfile`, which keeps a visible name for this reason (lane B's
+  tmpfile entry). `O_TMPFILE` and `SYS_FS_TMPFILE` are refused.
+- **Renaming an open file.** Log rotation (`mv app.log app.log.1`), an
+  editor saving by rename over the file another program has open, `mv` of
+  a file being written. The writer's next write fails, or lands in a new
+  file that took the old name.
+- **Everything keyed by a handle's path:** record and `flock` locks fall
+  back to the open-time name, and so do the identity a lock reports and
+  `/proc/<pid>/fd`.
+
+**Where:** `fs::handle::OpenFile { path }`; `read`, `write`, `read_at`,
+`write_at`, `fstat` and `ftruncate` go through `Vfs::*_resolved(path)`.
+Directory handles already carry an identity (`dir_pin`) and check it; file
+handles do not.
+
+**The proper fix:** a handle holds its file, the mount and the inode, not
+its name.
+- Each filesystem gains inode-addressed I/O.
+- A file unlinked while open stays, with its blocks, until the last handle
+  closes: an orphan list, as ext4 keeps one for exactly this, and a
+  refcount on memfs nodes.
+- Then `O_TMPFILE` and `SYS_FS_TMPFILE` become real, `tmpfile` can unlink at
+  once, and every lock key is the file's identity.
+
+It touches the VFS and each writable filesystem (memfs, ext4, FAT), so it
+is a task of its own with a boot of its own. Lane A takes it after
+`A-ST_DEV-IS-ZERO-FOR-EVERY-FILE`.
+
+**Reproduce:** open a file, delete it, write through the handle. On memfs,
+the root of the boot test, the write *re-creates* the file under its old
+name: `write_at` creates a missing path, so the file comes back holding
+zeros up to the offset, then the data. On Linux the write succeeds and the
+data stays readable through the handle, and nowhere else, until the close.
+
+**Two more faces of the same design, found 2026-10-01:**
+- **A handle never sees another writer's growth.** `read`, `pread`,
+  `SEEK_END`, `SEEK_DATA` and `SEEK_HOLE` use a size cached in the handle
+  at open, updated only by that handle's own writes. So a reader stops at
+  the size the file had when it opened it:
+  - `tail -f` prints nothing new, although `fstat` shows the file growing;
+  - two processes sharing a SQLite database read short pages from the one
+    the other has grown.
+- **An `O_APPEND` write lands at the cached end**, not at the file's real
+  end. Two appenders through separate opens overwrite each other.
+
+**The plan** (lane A, now):
+1. `FileSystem` gains inode-addressed calls: read, write, truncate,
+   metadata, and pin/unpin, which keep an inode alive while open. They
+   default to `NotSupported`, which keeps today's path behaviour for
+   filesystems without inodes (FAT, the pseudo filesystems).
+2. memfs implements them. An open count on a node keeps an unlinked node
+   alive until its last unpin.
+3. `fs::handle` holds the object (filesystem, `fs_id`, inode) for a
+   regular file on such a filesystem. Its I/O goes through it, sizes come
+   from the file at each call, and the final close unpins. Unmount
+   refuses while any file on it is open.
+4. ext4: the same calls, plus the on-disk orphan list (`s_last_orphan`,
+   chained through `i_dtime`), so a file unlinked while open survives
+   until its last close and is reclaimed at the next mount after a crash.
+   The superblock field exists today and nothing reads or writes it.
+5. `O_TMPFILE` and `SYS_FS_TMPFILE`: create, open, unlink.
+
+**Done, 2026-10-01** (design-decisions §1508):
+- **Steps 1-3:** commit 82d5088e3. Test: `fs::handle`'s `test_held_files`.
+- **Step 4, ext4:**
+  - The inode-addressed calls.
+  - Pins per inode.
+  - The orphan list, written at an unlink of a held file and read back at
+    mount. `Ext4Fs::open` frees anything a crash left there before the
+    filesystem is mounted.
+  - A replacing rename orphans a held target the same way.
+  - Test: `ext4::self_test`'s held-file rung, on the boot test's `/mnt`.
+    The free-inode count shows the inode kept while held and freed at the
+    last close.
+- **Still open:**
+  - Step 5, `O_TMPFILE` and `SYS_FS_TMPFILE`. They are now buildable as
+    create, hold, unlink, but still refuse.
+  - On FAT and the pseudo filesystems a handle still goes by name, so
+    everything above applies to them as before.
+
+### A-LINUX-FSTAT-OF-A-FILE-WAS-MADE-UP -- 2026-10-01 -- FIXED the same day (lane A)
+
+**In short:** a Linux program asking about a file it had open got an
+answer the kernel made up. The size was 0, the permissions 0644, the owner
+root, the inode the handle's number, and every timestamp "now". Asking
+about the same file by name gave the true answer. glibc's `fstat` is
+`newfstatat(fd, "", AT_EMPTY_PATH)`, which reached the made-up answer, as
+did `statx` with `AT_EMPTY_PATH`.
+
+**Who it hit:**
+- anything that sizes a buffer or a mapping from `st_size` (`mmap` of
+  "an empty file");
+- `cp` and `install` copying a mode, which came out 0644, dropping
+  execute bits;
+- anything comparing `(st_dev, st_ino)` through a descriptor with the same
+  pair from a path, which never matched;
+- `make`-like tools reading `st_mtime` through a descriptor.
+
+**Where:** `syscall/linux.rs`'s `fill_stat_for_fd` and `fill_statx_for_fd`.
+They predate the VFS: an old `todo.txt` note says they "must report real
+inode numbers, sizes ... when a real VFS lands". The path-based `stat` was
+moved onto `FileMeta` then; these were not.
+
+**Fixed:** a `HandleKind::File` descriptor now answers with its file's
+metadata (`fs::handle::fstat`), through the same fill the path-based calls
+use. The made-up answer stays for descriptors with no file behind them:
+pipes, sockets, anonymous inodes.
 
 ## Lane B: new entries
 

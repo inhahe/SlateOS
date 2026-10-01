@@ -940,7 +940,9 @@ pub fn sys_dma_detach(args: &SyscallArgs) -> SyscallResult {
 ///
 /// Returns: virtual address of the mapped region, or negative error.
 pub fn sys_mmap(args: &SyscallArgs) -> SyscallResult {
-    use super::number::{MAP_EXEC, MAP_LAZY, MAP_MMIO, MAP_NOCACHE, MAP_READ, MAP_WRITE};
+    use super::number::{
+        MAP_EXEC, MAP_LAZY, MAP_MMIO, MAP_NOCACHE, MAP_READ, MAP_SHARED, MAP_WRITE,
+    };
     use crate::mm::frame::{FRAME_SIZE, PhysFrame};
     use crate::mm::page_table::{self, PageFlags, VirtAddr};
     use crate::proc::{pcb, thread};
@@ -949,6 +951,14 @@ pub fn sys_mmap(args: &SyscallArgs) -> SyscallResult {
     let size = args.arg1;
     let mut flags = args.arg2;
     let phys_addr = args.arg3;
+    // Shared anonymous memory is always committed: a page faulted in lazily
+    // would be faulted separately in each process after a fork and share
+    // nothing (see `MAP_SHARED`). An explicit request for both is a contract
+    // nobody can keep; device memory is shared already, so MMIO ignores it.
+    let shared_anon = flags & MAP_SHARED != 0 && flags & MAP_MMIO == 0;
+    if shared_anon && flags & MAP_LAZY != 0 {
+        return SyscallResult::err(KernelError::InvalidArgument);
+    }
 
     // If the caller didn't explicitly specify a commit bit (MAP_LAZY /
     // MAP_MMIO), pick the default commit mode.  A per-process policy
@@ -956,7 +966,7 @@ pub fn sys_mmap(args: &SyscallArgs) -> SyscallResult {
     // the system-wide default (PARAM_MM_LAZY_DEFAULT) applies.  MMIO
     // mappings are always committed (they must map specific physical
     // addresses), so they bypass this entirely.
-    if flags & (MAP_LAZY | MAP_MMIO) == 0 {
+    if flags & (MAP_LAZY | MAP_MMIO) == 0 && !shared_anon {
         let sysctl_lazy = crate::sysctl::get(crate::sysctl::PARAM_MM_LAZY_DEFAULT) == Some(1);
         let policy = thread::owner_process(sched::current_task_id())
             .and_then(pcb::get_mmap_commit_policy)
@@ -1012,6 +1022,13 @@ pub fn sys_mmap(args: &SyscallArgs) -> SyscallResult {
     }
     if flags & MAP_NOCACHE != 0 {
         page_flags |= PageFlags::NO_CACHE;
+    }
+    // Shared anonymous memory: fork maps these frames into the child as they
+    // are instead of copy-on-write, and a futex in them is keyed by the
+    // physical page (`ipc::futex`). The VMA carries the flag too, so the
+    // committed path below maps every page with it.
+    if shared_anon {
+        page_flags |= PageFlags::SHARED;
     }
 
     // Pick a virtual address.
@@ -3368,6 +3385,7 @@ fn decode_wait_source(source_type: u64, handle: u64) -> Option<WaitSource> {
         5 => Some(WaitSource::Timer(handle)),
         6 => Some(WaitSource::Semaphore(handle)),
         7 => Some(WaitSource::IoCompletion(handle)),
+        8 => Some(WaitSource::Listener(handle)),
         _ => None,
     }
 }
@@ -3398,6 +3416,10 @@ fn require_wait_source(source: &WaitSource) -> Result<(), KernelError> {
             }
         }
         WaitSource::Semaphore(h) => require_ipc_handle(ResourceType::Semaphore, h),
+        // A listener is registered under `Service` when `SYS_SERVICE_REGISTER`
+        // hands it out: knowing that a service has callers waiting is the
+        // service's business.
+        WaitSource::Listener(h) => require_ipc_handle(ResourceType::Service, h),
         WaitSource::ProcessExit(_) => Ok(()),
     }
 }
@@ -3421,7 +3443,7 @@ pub fn sys_cp_create(args: &SyscallArgs) -> SyscallResult {
 /// `SYS_CP_REGISTER` — register a source with a completion port.
 ///
 /// `arg0`: CP handle.
-/// `arg1`: source type (0-3).
+/// `arg1`: source type (0-8; see the syscall number's docs).
 /// `arg2`: source handle.
 /// `arg3`: `user_data`.
 pub fn sys_cp_register(args: &SyscallArgs) -> SyscallResult {
@@ -3487,6 +3509,7 @@ fn encode_event(event: &completion::CompletionEvent) -> CpEventRaw {
         WaitSource::Timer(h) => (5, h),
         WaitSource::Semaphore(h) => (6, h),
         WaitSource::IoCompletion(h) => (7, h),
+        WaitSource::Listener(h) => (8, h),
     };
     CpEventRaw {
         source_type,
@@ -4364,6 +4387,9 @@ pub(crate) fn close_handle_at_exec(
     }
     match handle_type {
         fd_handle_type::FILE => {
+            // As `sys_fs_close`: the process's record locks on the file go
+            // with any descriptor for it. Locks themselves survive an exec.
+            super::record_lock::release_on_close(pid, super::record_lock::Target::File(handle));
             crate::fs::handle::close(handle)?;
         }
         fd_handle_type::PIPE => pipe::close(PipeHandle::from_raw(handle)),
@@ -10480,7 +10506,9 @@ pub fn sys_fs_rmdir(args: &SyscallArgs) -> SyscallResult {
 /// ```text
 ///   [0..8]   size         (u64)
 ///   [8]      entry_type   (u8: 0=file 1=dir 2=volume-label 3=symlink)
-///   [9..12]  reserved     (zero)
+///   [9..12]  dev          (u24: the filesystem's device number, `st_dev`'s
+///                          minor under major 0; 0 = unknown. Reserved, and
+///                          zero, until 2026-10-01: an older reader ignores it)
 ///   [12..16] nlinks       (u32)
 ///   [16..20] permissions  (u32, Unix mode bits; 0 = unknown, synthesize)
 ///   [20..24] uid          (u32)
@@ -10527,6 +10555,10 @@ fn encode_fs_stat_result(meta: &crate::fs::FileMeta) -> [u8; FS_STAT_RESULT_LEN]
     };
     put(0, &meta.size.to_le_bytes());
     put(8, &[type_byte]);
+    // Three bytes: the device numbers are dense (`vfs::dev_of`), as many as
+    // filesystems mounted at once, so they fit.
+    let [d0, d1, d2, _] = meta.dev.to_le_bytes();
+    put(9, &[d0, d1, d2]);
     put(12, &meta.nlinks.to_le_bytes());
     put(16, &u32::from(meta.permissions).to_le_bytes());
     put(20, &meta.uid.to_le_bytes());
@@ -11455,6 +11487,12 @@ pub fn sys_fs_close(args: &SyscallArgs) -> SyscallResult {
     let handle = args.arg0;
     if let Err(e) = require_file_handle_owner(handle) {
         return SyscallResult::err(e);
+    }
+    // POSIX: closing a descriptor releases the process's record locks on the
+    // file, whichever descriptor took them. Before the close, while the
+    // handle still names its file.
+    if let Some(pid) = caller_pid() {
+        super::record_lock::release_on_close(pid, super::record_lock::Target::File(handle));
     }
     match crate::fs::handle::close(handle) {
         Ok(()) => {
@@ -13299,12 +13337,14 @@ pub fn sys_fs_lstat(args: &SyscallArgs) -> SyscallResult {
     }
 }
 
-/// `SYS_FS_FLOCK` — acquire an advisory file lock.
+/// `SYS_FS_FLOCK` — take a `flock` lock by path, for the calling process,
+/// without waiting. See the number's doc.
 ///
 /// `arg0`: pointer to path string.
 /// `arg1`: path length.
 /// `arg2`: lock type (0 = shared, 1 = exclusive).
-/// `arg3`: owner ID.
+/// `arg3`: ignored. It was the owner, taken as given, so any process could
+/// lock in another's name.
 pub fn sys_fs_flock(args: &SyscallArgs) -> SyscallResult {
     if let Err(e) = require_cap_type(crate::cap::ResourceType::File, crate::cap::Rights::METADATA) {
         return SyscallResult::err(e);
@@ -13321,7 +13361,8 @@ pub fn sys_fs_flock(args: &SyscallArgs) -> SyscallResult {
         _ => return SyscallResult::err(KernelError::InvalidArgument),
     };
 
-    let owner = args.arg3;
+    // The caller's own: never a value the caller chose.
+    let owner = crate::fs::vfs::flock_process_owner(caller_pid().unwrap_or(0));
 
     match crate::fs::Vfs::flock(&path, owner, lock_type) {
         Ok(()) => SyscallResult::ok(0),
@@ -13329,23 +13370,118 @@ pub fn sys_fs_flock(args: &SyscallArgs) -> SyscallResult {
     }
 }
 
-/// `SYS_FS_FUNLOCK` — release an advisory file lock.
+/// `SYS_FS_FUNLOCK` — release the calling process's `flock` lock on a path.
 ///
 /// `arg0`: pointer to path string.
 /// `arg1`: path length.
-/// `arg2`: owner ID.
+/// `arg2`: ignored. It was the owner, taken as given, so any process could
+/// release any lock.
 pub fn sys_fs_funlock(args: &SyscallArgs) -> SyscallResult {
     let path = match read_user_path(args.arg0, args.arg1 as usize) {
         Ok(p) => p,
         Err(e) => return SyscallResult::err(e),
     };
 
-    let owner = args.arg2;
+    // The caller's own lock: a process releases nothing but what it holds.
+    let owner = crate::fs::vfs::flock_process_owner(caller_pid().unwrap_or(0));
 
     match crate::fs::Vfs::funlock(&path, owner) {
         Ok(()) => SyscallResult::ok(0),
         Err(e) => SyscallResult::err(e),
     }
+}
+
+/// `SYS_FS_FLOCK_HANDLE` — BSD `flock(2)` on an open file: a whole-file lock
+/// that belongs to the open file description, waiting unless `FLOCK_NB`.
+/// See the number's doc.
+pub fn sys_fs_flock_handle(args: &SyscallArgs) -> SyscallResult {
+    use super::number::{FLOCK_EX, FLOCK_NB, FLOCK_SH, FLOCK_UN};
+    use crate::fs::LockType;
+
+    let handle = args.arg0;
+    let op = args.arg1;
+    // The op before the handle, as Linux's `flock` checks them.
+    if op & !(FLOCK_SH | FLOCK_EX | FLOCK_NB | FLOCK_UN) != 0 {
+        return SyscallResult::err(KernelError::InvalidArgument);
+    }
+    let lock_type = match op & !FLOCK_NB {
+        FLOCK_SH => Some(LockType::Shared),
+        FLOCK_EX => Some(LockType::Exclusive),
+        FLOCK_UN => None,
+        _ => return SyscallResult::err(KernelError::InvalidArgument),
+    };
+    if let Err(e) = require_file_handle_owner(handle) {
+        return SyscallResult::err(e);
+    }
+    // The host path captured at open: the `_resolved` workers, so a jailed
+    // caller's jail is not applied twice.
+    let path = match crate::fs::handle::handle_path(handle) {
+        Ok(p) => p,
+        Err(e) => return SyscallResult::err(e),
+    };
+    let owner = crate::fs::vfs::flock_description_owner(handle);
+    let result = match lock_type {
+        None => crate::fs::Vfs::funlock_resolved(&path, owner),
+        Some(lt) if op & FLOCK_NB != 0 => crate::fs::Vfs::flock_resolved(&path, owner, lt),
+        Some(lt) => crate::fs::Vfs::flock_wait_resolved(&path, owner, lt),
+    };
+    match result {
+        Ok(()) => SyscallResult::ok(0),
+        // Restartable, as Linux's `flock` is: the signal-delivery checkpoint
+        // restarts it under `SA_RESTART` and otherwise answers `Interrupted`.
+        Err(KernelError::Interrupted) => crate::syscall::linux::restart::restart_result(
+            crate::syscall::linux::restart::ERESTARTSYS,
+        ),
+        Err(e) => SyscallResult::err(e),
+    }
+}
+
+/// `SYS_FS_RECORD_LOCK` -- a POSIX record lock on an open file: `fcntl`'s
+/// `F_GETLK`, `F_SETLK` and `F_SETLKW` for a native program. See the
+/// number's doc. The work is [`super::record_lock::apply`], which the Linux
+/// `fcntl` shares, so the two ABIs cannot describe one lock differently.
+pub fn sys_fs_record_lock(args: &SyscallArgs) -> SyscallResult {
+    use super::number::{RECORD_LOCK_GET, RECORD_LOCK_SET, RECORD_LOCK_SET_WAIT};
+    use super::record_lock::{self, Flock, Op, Owner, Target};
+
+    let handle = args.arg0;
+    let op = match args.arg1 {
+        RECORD_LOCK_GET => Op::Get,
+        RECORD_LOCK_SET => Op::Set,
+        RECORD_LOCK_SET_WAIT => Op::SetWait,
+        _ => return SyscallResult::err(KernelError::InvalidArgument),
+    };
+    if let Err(e) = require_file_handle_owner(handle) {
+        return SyscallResult::err(e);
+    }
+    let mut flock = match Flock::read_user(args.arg2) {
+        Ok(f) => f,
+        Err(e) => return SyscallResult::err(e),
+    };
+    let pid = caller_pid();
+    // Still the caller's once the lock is taken? A lock taken while another
+    // thread closed the handle is dropped again: the close's release has
+    // already run (`record_lock::apply`).
+    let still_held = || pid.is_none_or(|p| pcb::owns_ipc_handle(p, ResourceType::File, handle));
+    let owner = Owner::Process(pid.unwrap_or(0));
+    match record_lock::apply(Target::File(handle), owner, op, &mut flock, still_held) {
+        Ok(()) => {}
+        // A wait a signal ended is restartable, as Linux's `F_SETLKW` is: the
+        // signal-delivery checkpoint restarts it under `SA_RESTART` and
+        // otherwise answers `Interrupted`.
+        Err(KernelError::Interrupted) => {
+            return crate::syscall::linux::restart::restart_result(
+                crate::syscall::linux::restart::ERESTARTSYS,
+            );
+        }
+        Err(e) => return SyscallResult::err(e),
+    }
+    if op == Op::Get {
+        if let Err(e) = flock.write_user(args.arg2) {
+            return SyscallResult::err(e);
+        }
+    }
+    SyscallResult::ok(0)
 }
 
 /// `SYS_FS_SYNC` — flush all filesystems to stable storage.
@@ -13678,6 +13814,11 @@ pub fn sys_fs_handle_path(args: &SyscallArgs) -> SyscallResult {
 /// Returns: packed `(total_entries << 32) | entries_written`.
 #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
 pub fn sys_fs_readdir_at(args: &SyscallArgs) -> SyscallResult {
+    // The File capability, as `SYS_FS_LIST_DIR` asks it: the two list the
+    // same directories, and only one of them was gated.
+    if let Err(e) = require_cap_type(crate::cap::ResourceType::File, crate::cap::Rights::READ) {
+        return SyscallResult::err(e);
+    }
     // Validate path pointer.
     let path_len = args.arg1 as usize;
     if path_len == 0 {
@@ -13813,49 +13954,27 @@ pub fn sys_fs_readdir_at(args: &SyscallArgs) -> SyscallResult {
     SyscallResult::ok(result as i64)
 }
 
-/// `SYS_FS_TMPFILE` — create a temporary file with no directory entry.
+/// `SYS_FS_TMPFILE` — a temporary file with no directory entry: refused,
+/// `NotSupported`, until an open file can outlive its name.
 ///
-/// `arg0`: pointer to directory path string.
-/// `arg1`: path length (bytes).
-/// `arg2`: open flags.
+/// A handle here reaches its file by path (`fs::handle` re-resolves it on
+/// every read and write), so a file with no name cannot be read through its
+/// own handle. Until 2026-10-01 this call created a *named* file,
+/// `.tmp_<timestamp>` in the given directory, and returned a handle to it,
+/// which broke all three of its promises:
+/// - the file had a name anyone could open;
+/// - nothing ever deleted it, so every call left one behind;
+/// - the handle was never registered to the caller, so the caller's own
+///   reads, writes and close were refused as not its handle, and the open
+///   file leaked until reboot.
 ///
-/// Returns: file handle on success.
-#[allow(clippy::cast_possible_wrap)]
-pub fn sys_fs_tmpfile(args: &SyscallArgs) -> SyscallResult {
-    let path_len = args.arg1 as usize;
-    if path_len == 0 || path_len > 4096 {
-        return SyscallResult::err(KernelError::InvalidArgument);
-    }
-    let dir_path = match read_user_path(args.arg0, path_len) {
-        Ok(p) => p,
-        Err(e) => return SyscallResult::err(e),
-    };
-
-    // Generate a unique temporary filename using the TSC for entropy.
-    // SAFETY: _rdtsc is always available on x86_64; no side-effects.
-    let tsc = unsafe { core::arch::x86_64::_rdtsc() };
-    // Joined as a path component rather than formatted into a string, so a
-    // non-UTF-8 directory name survives verbatim.
-    let tmp_name = dir_path.join(alloc::format!(".tmp_{tsc:016x}"));
-
-    // Create the file.
-    if let Err(e) = crate::fs::Vfs::write_file(&tmp_name, &[]) {
-        return SyscallResult::err(e);
-    }
-
-    // Open it as a handle.
-    let flags = args.arg2 as u32;
-    match crate::fs::handle::open(&tmp_name, crate::fs::handle::OpenFlags::from_bits(flags)) {
-        Ok(handle) => SyscallResult::ok(handle as i64),
-        Err(e) => {
-            // Clean up the file if we can't open it.
-            let _ = crate::fs::Vfs::remove(&tmp_name);
-            SyscallResult::err(e)
-        }
-    }
-    // Note: the file is NOT auto-deleted on close in this implementation.
-    // True tmpfile (unlinked at creation) requires filesystem support
-    // (ext4 O_TMPFILE).  For now, callers should delete after use.
+/// Nothing in the tree calls it: libc's `tmpfile` makes a named file and
+/// removes it itself (`posix/src/tempname.rs`). An honest refusal beats a
+/// door that leaks a file per call. It becomes real with the VFS redesign
+/// that lets a handle hold its file rather than its name (known-issues,
+/// lane B's tmpfile entry and lane A's `O_TMPFILE` todo).
+pub fn sys_fs_tmpfile(_args: &SyscallArgs) -> SyscallResult {
+    SyscallResult::err(KernelError::NotSupported)
 }
 
 /// `SYS_FS_FALLOCATE` — pre-allocate disk space.
@@ -13864,6 +13983,11 @@ pub fn sys_fs_tmpfile(args: &SyscallArgs) -> SyscallResult {
 /// `arg1`: path length (bytes).
 /// `arg2`: size in bytes to pre-allocate.
 pub fn sys_fs_fallocate(args: &SyscallArgs) -> SyscallResult {
+    // The File capability with WRITE, as `SYS_FS_TRUNCATE` asks it: both
+    // change a file's size by path.
+    if let Err(e) = require_cap_type(crate::cap::ResourceType::File, crate::cap::Rights::WRITE) {
+        return SyscallResult::err(e);
+    }
     let path_len = args.arg1 as usize;
     if path_len == 0 || path_len > 4096 {
         return SyscallResult::err(KernelError::InvalidArgument);
@@ -13888,6 +14012,12 @@ pub fn sys_fs_fallocate(args: &SyscallArgs) -> SyscallResult {
 pub fn sys_fs_seek_data(args: &SyscallArgs) -> SyscallResult {
     let handle = args.arg0;
     let offset = args.arg1;
+    // Possession, as `SYS_FS_SEEK` checks it: a seek moves the description's
+    // offset, which another process sharing nothing must not be able to do
+    // by counting handle numbers (`require_file_handle_owner`).
+    if let Err(e) = require_file_handle_owner(handle) {
+        return SyscallResult::err(e);
+    }
 
     match crate::fs::handle::seek(handle, crate::fs::handle::SeekFrom::Data(offset)) {
         Ok(pos) => SyscallResult::ok(pos as i64),
@@ -13903,6 +14033,10 @@ pub fn sys_fs_seek_data(args: &SyscallArgs) -> SyscallResult {
 pub fn sys_fs_seek_hole(args: &SyscallArgs) -> SyscallResult {
     let handle = args.arg0;
     let offset = args.arg1;
+    // Possession: see `sys_fs_seek_data`.
+    if let Err(e) = require_file_handle_owner(handle) {
+        return SyscallResult::err(e);
+    }
 
     match crate::fs::handle::seek(handle, crate::fs::handle::SeekFrom::Hole(offset)) {
         Ok(pos) => SyscallResult::ok(pos as i64),
@@ -17267,6 +17401,12 @@ enum WaitTest {
     StreamSocket,
     /// A pty end. Native-only, and the one ownership-checked handle space.
     Pty,
+    /// A channel end: readable when a message is waiting or the peer has
+    /// closed. Native-only.
+    Channel,
+    /// A service listener: readable when a connection is waiting to be
+    /// accepted. Native-only.
+    Listener,
 }
 
 /// An item that resolved to something waitable.
@@ -17300,6 +17440,8 @@ fn wait_test_for(kind: ResourceType) -> Option<WaitTest> {
         ResourceType::NetSocket => WaitTest::Handle(HandleKind::Socket),
         ResourceType::StreamSocket => WaitTest::StreamSocket,
         ResourceType::Pty => WaitTest::Pty,
+        ResourceType::Channel => WaitTest::Channel,
+        ResourceType::Service => WaitTest::Listener,
         _ => return None,
     })
 }
@@ -17348,6 +17490,28 @@ fn wait_revents(test: WaitTest, raw: u64, events: u16, pid: u64) -> u16 {
                 poll_bits::POLLHUP
             }
         }
+        WaitTest::Channel => {
+            let h = crate::ipc::channel::ChannelHandle::from_raw(raw);
+            let mut r = 0u16;
+            if crate::ipc::channel::has_pending(h) {
+                r |= poll_bits::POLLIN | poll_bits::POLLRDNORM;
+            }
+            // A closed peer (or a channel gone) is POLLHUP, as a socket
+            // whose peer has gone: a receive answers ChannelClosed.
+            if crate::ipc::channel::readable(h) && r == 0 {
+                r |= poll_bits::POLLHUP;
+            }
+            r
+        }
+        WaitTest::Listener => {
+            if crate::ipc::service::readable(crate::ipc::service::ServiceListenerHandle::from_raw(
+                raw,
+            )) {
+                poll_bits::POLLIN | poll_bits::POLLRDNORM
+            } else {
+                0
+            }
+        }
     };
 
     bits & (events | always)
@@ -17368,6 +17532,8 @@ fn wait_target_for(test: WaitTest, raw: u64) -> crate::ipc::multiwait::WaitTarge
         WaitTest::Handle(kind) => super::linux::wait_target_for_handle(kind, raw),
         WaitTest::StreamSocket => WaitTarget::StreamSocket(raw),
         WaitTest::Pty => WaitTarget::Pty(raw),
+        WaitTest::Channel => WaitTarget::Channel(raw),
+        WaitTest::Listener => WaitTarget::Listener(raw),
     }
 }
 

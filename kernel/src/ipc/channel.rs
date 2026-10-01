@@ -68,7 +68,9 @@ use crate::sync::PreemptSpinMutex as Mutex;
 use alloc::collections::BTreeMap;
 use alloc::collections::VecDeque;
 use alloc::vec::Vec;
-use core::sync::atomic::{AtomicU64, Ordering};
+use core::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+
+use super::waiters::{WaiterSet, wake_all};
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -318,6 +320,15 @@ struct Channel {
     /// consumes a message (via recv/try_recv), the sender is woken.
     sender_waiters: [Option<TaskId>; 2],
 
+    /// Tasks waiting for a side to become *readable* without receiving --
+    /// `SYS_WAIT_MULTIPLE` and completion ports, through
+    /// [`register_waiter`]. Indexed like `waiters`: `ready_waiters[side]` is
+    /// woken when a message arrives for `side` or `side`'s peer closes. Kept
+    /// apart from the single blocking-receive slot, which a readiness waiter
+    /// must not occupy: a synchronous send hands its message only to a task
+    /// actually blocked in `recv`.
+    ready_waiters: [WaiterSet; 2],
+
     /// Whether this is a synchronous (rendezvous) channel.
     ///
     /// Sync channels have no internal message buffer.  A sender parks
@@ -380,6 +391,7 @@ impl Channel {
             closed: [false, false],
             waiters: [None, None],
             sender_waiters: [None, None],
+            ready_waiters: [WaiterSet::new(), WaiterSet::new()],
             sync: false,
             rendezvous_slots: [None, None],
             creds: [None, None],
@@ -392,6 +404,7 @@ impl Channel {
             closed: [false, false],
             waiters: [None, None],
             sender_waiters: [None, None],
+            ready_waiters: [WaiterSet::new(), WaiterSet::new()],
             sync: true,
             rendezvous_slots: [None, None],
             creds: [None, None],
@@ -584,6 +597,7 @@ pub fn send(handle: ChannelHandle, msg: Message) -> KernelResult<()> {
     if let Some(task_id) = wake_task {
         sched::wake(task_id);
     }
+    wake_ready(handle);
 
     crate::ktrace::record(
         crate::ktrace::Category::Ipc,
@@ -645,6 +659,7 @@ pub fn send_blocking(handle: ChannelHandle, msg: Message) -> KernelResult<()> {
                     if let Some(task_id) = wake_task {
                         sched::wake(task_id);
                     }
+                    wake_ready(handle);
                     super::stats::channel_send(msg_len);
                     return Ok(());
                 }
@@ -669,6 +684,7 @@ pub fn send_blocking(handle: ChannelHandle, msg: Message) -> KernelResult<()> {
                     if let Some(task_id) = wake_task {
                         sched::wake(task_id);
                     }
+                    wake_ready(handle);
                     super::stats::channel_send(msg_len);
                     return Ok(());
                 }
@@ -678,6 +694,7 @@ pub fn send_blocking(handle: ChannelHandle, msg: Message) -> KernelResult<()> {
             }
         }
 
+        wake_ready(handle);
         super::stats::channel_send_block();
         sched::block_current();
 
@@ -746,6 +763,7 @@ pub fn send_timeout(handle: ChannelHandle, msg: Message, timeout_ns: u64) -> Ker
                 if let Some(task_id) = wake_task {
                     sched::wake(task_id);
                 }
+                wake_ready(handle);
                 super::stats::channel_send(msg_len);
                 return Ok(());
             }
@@ -758,6 +776,7 @@ pub fn send_timeout(handle: ChannelHandle, msg: Message, timeout_ns: u64) -> Ker
                 if let Some(task_id) = wake_task {
                     sched::wake(task_id);
                 }
+                wake_ready(handle);
                 super::stats::channel_send(msg_len);
                 return Ok(());
             }
@@ -823,6 +842,7 @@ pub fn send_timeout(handle: ChannelHandle, msg: Message, timeout_ns: u64) -> Ker
                     if let Some(task_id) = wake_task {
                         sched::wake(task_id);
                     }
+                    wake_ready(handle);
                     super::stats::channel_send(msg_len);
                     return Ok(());
                 }
@@ -845,6 +865,7 @@ pub fn send_timeout(handle: ChannelHandle, msg: Message, timeout_ns: u64) -> Ker
                     if let Some(task_id) = wake_task {
                         sched::wake(task_id);
                     }
+                    wake_ready(handle);
                     super::stats::channel_send(msg_len);
                     return Ok(());
                 }
@@ -862,6 +883,7 @@ pub fn send_timeout(handle: ChannelHandle, msg: Message, timeout_ns: u64) -> Ker
             }
         }
 
+        wake_ready(handle);
         super::stats::channel_send_block();
         sched::block_current();
     }
@@ -1007,6 +1029,93 @@ pub fn try_recv_with_caps(
 /// Returns `true` if at least one message is queued for this
 /// endpoint, `false` otherwise (including if the handle is invalid).
 ///
+/// Registered readiness waiters across every channel (`ready_waiters`), so
+/// a send with nobody watching -- the common case -- skips [`wake_ready`]'s
+/// lock. Changed only under `CHANNELS`, and read after the sender's own
+/// critical section, so a waiter registered before a send is always seen by
+/// that send's check.
+static READY_WAITERS: AtomicUsize = AtomicUsize::new(0);
+
+/// Take `side`'s readiness waiters, keeping [`READY_WAITERS`] exact. Call
+/// with `CHANNELS` held; wake what it returns once the lock is dropped.
+fn take_ready(ch: &mut Channel, side: usize) -> Vec<TaskId> {
+    let Some(set) = ch.ready_waiters.get_mut(side) else {
+        return Vec::new();
+    };
+    let tasks = set.take_all();
+    READY_WAITERS.fetch_sub(tasks.len(), Ordering::Relaxed);
+    tasks
+}
+
+/// Wake the readiness waiters of the side `sender` delivers to (its peer):
+/// a message or a parked rendezvous message has just become available
+/// there. Called with no lock held.
+fn wake_ready(sender: ChannelHandle) {
+    if READY_WAITERS.load(Ordering::Relaxed) == 0 {
+        return;
+    }
+    let tasks = {
+        let mut channels = CHANNELS.lock();
+        match channels.get_mut(&sender.channel_id()) {
+            Some(ch) => take_ready(ch, sender.peer_side()),
+            None => Vec::new(),
+        }
+    };
+    wake_all(tasks);
+}
+
+/// Add `task` to the readiness waiters of `handle`'s side: it is woken when a
+/// message arrives for `handle` or the peer closes. For `SYS_WAIT_MULTIPLE`
+/// and completion ports (`multiwait::WaitTarget::Channel`); a no-op for a
+/// channel that is gone. Idempotent.
+pub fn register_waiter(handle: ChannelHandle, task: TaskId) {
+    let mut channels = CHANNELS.lock();
+    let Some(set) = channels
+        .get_mut(&handle.channel_id())
+        .and_then(|ch| ch.ready_waiters.get_mut(handle.side()))
+    else {
+        return;
+    };
+    let before = set.count();
+    set.insert(task);
+    READY_WAITERS.fetch_add(set.count().saturating_sub(before), Ordering::Relaxed);
+}
+
+/// Undo [`register_waiter`]. Idempotent, and a no-op for a channel that is
+/// gone.
+pub fn deregister_waiter(handle: ChannelHandle, task: TaskId) {
+    let mut channels = CHANNELS.lock();
+    let Some(set) = channels
+        .get_mut(&handle.channel_id())
+        .and_then(|ch| ch.ready_waiters.get_mut(handle.side()))
+    else {
+        return;
+    };
+    let before = set.count();
+    set.remove(task);
+    READY_WAITERS.fetch_sub(before.saturating_sub(set.count()), Ordering::Relaxed);
+}
+
+/// Whether a receive on `handle` would not block: a message is waiting, the
+/// peer has closed (the receive answers `ChannelClosed`), or the channel is
+/// gone. This is readiness for `SYS_WAIT_MULTIPLE` and completion ports;
+/// [`has_pending`] is the narrower "a message is waiting".
+#[must_use]
+pub fn readable(handle: ChannelHandle) -> bool {
+    let channels = CHANNELS.lock();
+    let Some(ch) = channels.get(&handle.channel_id()) else {
+        return true;
+    };
+    let pending = if ch.sync {
+        ch.rendezvous_slots
+            .get(handle.peer_side())
+            .is_some_and(Option::is_some)
+    } else {
+        ch.queues.get(handle.side()).is_some_and(|q| !q.is_empty())
+    };
+    pending || ch.closed.get(handle.peer_side()).copied().unwrap_or(true)
+}
+
 /// Used by the completion port to poll channels without consuming
 /// messages.
 pub fn has_pending(handle: ChannelHandle) -> bool {
@@ -1279,6 +1388,7 @@ pub fn recv_timeout(handle: ChannelHandle, timeout_ns: u64) -> KernelResult<Mess
 /// no-op.
 pub fn close(handle: ChannelHandle) {
     let mut wake_tasks: [Option<TaskId>; 2] = [None, None];
+    let ready: Vec<TaskId>;
 
     {
         let mut channels = CHANNELS.lock();
@@ -1298,6 +1408,10 @@ pub fn close(handle: ChannelHandle) {
         // queue — they'll see ChannelClosed on retry.
         wake_tasks[1] = ch.sender_waiters[peer].take();
 
+        // And everyone waiting for the peer side to become readable: a
+        // closed peer is readable, as `ChannelClosed`.
+        ready = take_ready(ch, peer);
+
         // For sync channels: drop any parked message from our side
         // (no one will ever take it).  Also drop the peer's parked
         // message since we're closing — the peer's sender_waiter was
@@ -1308,7 +1422,17 @@ pub fn close(handle: ChannelHandle) {
 
         // If both sides are closed, remove the channel entirely.
         if ch.closed[0] && ch.closed[1] {
-            channels.remove(&handle.channel_id());
+            if let Some(gone) = channels.remove(&handle.channel_id()) {
+                // Registrations left on a removed channel are dropped with it
+                // (their owners' deregistration finds nothing); keep the
+                // count exact.
+                let left = gone
+                    .ready_waiters
+                    .iter()
+                    .map(WaiterSet::count)
+                    .fold(0usize, usize::saturating_add);
+                READY_WAITERS.fetch_sub(left, Ordering::Relaxed);
+            }
             super::stats::channel_destroyed();
         }
     }
@@ -1316,6 +1440,7 @@ pub fn close(handle: ChannelHandle) {
     for task_id in wake_tasks.iter().flatten() {
         sched::wake(*task_id);
     }
+    wake_all(ready);
 }
 
 // ---------------------------------------------------------------------------

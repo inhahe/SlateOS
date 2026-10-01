@@ -271,6 +271,15 @@ pub struct FileMeta {
     /// than a real inode.  ext4 reports the real inode number; memfs a
     /// stable synthetic id assigned at node creation.
     pub ino: u64,
+    /// The device the file is on: its filesystem's device number, which
+    /// `stat` reports as `st_dev`'s minor under major 0 ([`dev_of`]).
+    ///
+    /// Filled by the VFS from the mount the file was found on, never by a
+    /// filesystem, which leaves it 0; 0 means unknown. One `(dev, ino)` pair
+    /// is one file -- how `tar`, `cp -a`, `du` and `find -samefile` tell two
+    /// names of one file from two files. Until 2026-10-01 every file reported
+    /// 0, so files on two filesystems that shared an inode number were one.
+    pub dev: u32,
 
     // --- Timestamps (nanoseconds since the Unix epoch, wall-clock;
     //     0 = not available). These are absolute wall-clock times, not
@@ -352,6 +361,7 @@ impl FileMeta {
             size,
             entry_type,
             ino: 0,
+            dev: 0,
             created_ns: 0,
             modified_ns: 0,
             accessed_ns: 0,
@@ -374,6 +384,7 @@ impl FileMeta {
             size,
             entry_type,
             ino: 0,
+            dev: 0,
             created_ns: now,
             modified_ns: now,
             accessed_ns: now,
@@ -636,6 +647,61 @@ pub trait FileSystem: Send {
         };
         contents.resize(size as usize, 0);
         self.write_file(path, &contents)
+    }
+
+    // ----- An open regular file, by inode -----
+    //
+    // `fs::handle` holds an open regular file as its inode on a filesystem
+    // that offers these (`Vfs::open_object`; known-issues
+    // A-AN-OPEN-FILE-FOLLOWS-ITS-NAME), so a rename or an unlink of its name
+    // cannot take the file from under the handle. The defaults answer
+    // `NotSupported`, and such a filesystem's handles go by path.
+
+    /// Hold inode `ino` open. Its last name may then go without the file:
+    /// it stays, unnamed, until the matching [`unpin_ino`](Self::unpin_ino).
+    /// `NotSupported` for an inode the filesystem does not hold this way.
+    fn pin_ino(&mut self, ino: u64) -> KernelResult<()> {
+        let _ = ino;
+        Err(KernelError::NotSupported)
+    }
+
+    /// Give back one [`pin_ino`](Self::pin_ino). A file with no name left
+    /// goes with its last pin.
+    fn unpin_ino(&mut self, ino: u64) {
+        let _ = ino;
+    }
+
+    /// [`read_at`](Self::read_at) for a held inode.
+    fn read_ino(&mut self, ino: u64, offset: u64, len: usize) -> KernelResult<Vec<u8>> {
+        let _ = (ino, offset, len);
+        Err(KernelError::NotSupported)
+    }
+
+    /// [`write_at`](Self::write_at) for a held inode. Never creates a file.
+    fn write_ino(&mut self, ino: u64, offset: u64, data: &[u8]) -> KernelResult<()> {
+        let _ = (ino, offset, data);
+        Err(KernelError::NotSupported)
+    }
+
+    /// Write `data` at a held inode's end, the end found and written in one
+    /// call so two appenders cannot land on one offset (`O_APPEND`). Returns
+    /// the offset it landed at.
+    fn append_ino(&mut self, ino: u64, data: &[u8]) -> KernelResult<u64> {
+        let _ = (ino, data);
+        Err(KernelError::NotSupported)
+    }
+
+    /// [`truncate`](Self::truncate) for a held inode.
+    fn truncate_ino(&mut self, ino: u64, size: u64) -> KernelResult<()> {
+        let _ = (ino, size);
+        Err(KernelError::NotSupported)
+    }
+
+    /// [`metadata`](Self::metadata) for a held inode: `nlinks` 0 once its
+    /// last name has gone, as Linux's `fstat` reports it.
+    fn metadata_ino(&mut self, ino: u64) -> KernelResult<FileMeta> {
+        let _ = ino;
+        Err(KernelError::NotSupported)
     }
 
     /// Rename or move a file or directory.
@@ -1114,6 +1180,132 @@ struct MountPoint {
     /// identifies a file system-wide), used as the page-cache key — see
     /// design-decisions §23/§36.
     fs_id: u64,
+    /// Open files held on this mount as objects ([`Vfs::open_object`]). An
+    /// unmount refuses while any is, as Linux's `umount` answers `EBUSY`:
+    /// I/O through a held file must never reach a filesystem that has gone.
+    /// Counted under the mount table's lock, which is what keeps an open
+    /// racing an unmount from slipping between the check and the removal.
+    objects: usize,
+}
+
+/// An open regular file held as its filesystem and inode, not its name
+/// (known-issues A-AN-OPEN-FILE-FOLLOWS-ITS-NAME).
+///
+/// While one exists its inode is pinned (`FileSystem::pin_ino`): a rename
+/// leaves the holder on the file, and unlinking its last name removes the
+/// name while the file lives on until the last release
+/// ([`Vfs::release_object`]). It also holds its mount, which cannot be
+/// unmounted while it does.
+///
+/// A clone is a second reference for one call's use, not a second hold:
+/// each hold comes from [`Vfs::open_object`] or [`Vfs::reopen_object`] and
+/// goes back through one [`Vfs::release_object`].
+#[derive(Clone)]
+pub struct FileObject {
+    fs: MountedFs,
+    fs_id: u64,
+    ino: u64,
+}
+
+impl FileObject {
+    /// The file's system-wide identity: the key of the page cache and of the
+    /// lock tables.
+    #[must_use]
+    pub fn id(&self) -> FileId {
+        FileId {
+            fs_id: self.fs_id,
+            ino: self.ino,
+        }
+    }
+}
+
+impl core::fmt::Debug for FileObject {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("FileObject")
+            .field("fs_id", &self.fs_id)
+            .field("ino", &self.ino)
+            .finish_non_exhaustive()
+    }
+}
+
+/// Give back one hold on mount `fs_id` (`MountPoint::objects`).
+fn release_mount_hold(fs_id: u64) {
+    let mut vfs = VFS.lock();
+    if let Some(mp) = vfs.mounts.iter_mut().find(|m| m.fs_id == fs_id) {
+        mp.objects = mp.objects.saturating_sub(1);
+    }
+}
+
+/// `ReadOnlyFilesystem` if mount `fs_id` is read-only now, `NotFound` if it
+/// has gone: what can change under a file opened for writing.
+fn check_writable_fs(fs_id: u64) -> KernelResult<()> {
+    let vfs = VFS.lock();
+    let mp = vfs
+        .mounts
+        .iter()
+        .find(|m| m.fs_id == fs_id)
+        .ok_or(KernelError::NotFound)?;
+    if mp.options.read_only {
+        Err(KernelError::ReadOnlyFilesystem)
+    } else {
+        Ok(())
+    }
+}
+
+/// The files held open, by identity: how many holds each has, and -- once
+/// its last name has gone while held -- the name its per-file state was kept
+/// under (`super::perfile`).
+///
+/// That state (an ACL, flags, seals, attributes) ends with the file, which
+/// for a held file is its last release, not the unlink: a write-sealed file
+/// unlinked while open must stay sealed to the handle still writing it.
+/// `perfile::object_unlinked` asks [`defer_forget_if_held`]; the last
+/// [`Vfs::release_object`] then ends it, and drops the file's cached pages,
+/// since its inode number may be given to another file. A leaf lock.
+struct Held {
+    holds: usize,
+    unlinked_as: Option<PathBuf>,
+}
+
+static HELD: Mutex<alloc::collections::BTreeMap<FileId, Held>> =
+    Mutex::new(alloc::collections::BTreeMap::new());
+
+/// One more hold on `id`.
+fn note_hold(id: FileId) {
+    let mut held = HELD.lock();
+    let entry = held.entry(id).or_insert(Held {
+        holds: 0,
+        unlinked_as: None,
+    });
+    entry.holds = entry.holds.saturating_add(1);
+}
+
+/// One hold on `id` gone. When it was the last, and the file's last name had
+/// gone while it was held, the name its state was kept under: the file is
+/// gone now, and its state goes with it.
+fn note_release(id: FileId) -> Option<PathBuf> {
+    let mut held = HELD.lock();
+    let entry = held.get_mut(&id)?;
+    entry.holds = entry.holds.saturating_sub(1);
+    if entry.holds == 0 {
+        held.remove(&id).and_then(|h| h.unlinked_as)
+    } else {
+        None
+    }
+}
+
+/// `id`'s last name, `path`, has gone. If the file is held open it lives
+/// on, unnamed: record that, and answer `true`, so its per-file state is
+/// kept until the last release instead of ended now.
+pub(crate) fn defer_forget_if_held(id: FileId, path: &Path) -> bool {
+    let mut held = HELD.lock();
+    match held.get_mut(&id) {
+        Some(entry) => {
+            entry.unlinked_as = Some(path.to_path_buf());
+            true
+        }
+        None => false,
+    }
 }
 
 /// Monotonic source of stable mount ids ([`MountPoint::fs_id`]).
@@ -1122,6 +1314,59 @@ struct MountPoint {
 /// ids are never reused, so a `FileId` minted for one mount can never collide
 /// with a later mount even after the original is unmounted.
 static NEXT_FS_ID: AtomicU64 = AtomicU64::new(1);
+
+/// Device numbers of the mounted filesystems: `fs_id` to the number `stat`
+/// reports as `st_dev`'s minor, under major 0, as Linux numbers its
+/// anonymous filesystems.
+///
+/// Not `fs_id` itself. That is never reused, because it keys the page cache
+/// and the lock tables, and a reused one would alias a dead mount's entries;
+/// so it only grows. A device number is reused once its mount is gone, as
+/// Linux reuses an anonymous device's minor, so it stays as small as the
+/// number of filesystems mounted at once and fits the native stat record's
+/// 24 bits.
+///
+/// A leaf lock: nothing is taken under it, so `/proc` may read it under its
+/// own filesystem lock.
+static MOUNT_DEVS: Mutex<alloc::collections::BTreeMap<u64, u32>> =
+    Mutex::new(alloc::collections::BTreeMap::new());
+
+/// Give mount `fs_id` the smallest device number no mounted filesystem has,
+/// from 1.
+fn assign_dev(fs_id: u64) {
+    let mut devs = MOUNT_DEVS.lock();
+    let mut used: Vec<u32> = devs.values().copied().collect();
+    used.sort_unstable();
+    let mut dev: u32 = 1;
+    for u in used {
+        if u == dev {
+            dev = dev.saturating_add(1);
+        } else if u > dev {
+            break;
+        }
+    }
+    devs.insert(fs_id, dev);
+}
+
+/// Mount `fs_id` is gone: its device number is free again.
+fn release_dev(fs_id: u64) {
+    MOUNT_DEVS.lock().remove(&fs_id);
+}
+
+/// The device number (`st_dev`'s minor) of mounted filesystem `fs_id`, or 0
+/// for one that is not mounted.
+#[must_use]
+pub fn dev_of(fs_id: u64) -> u32 {
+    MOUNT_DEVS.lock().get(&fs_id).copied().unwrap_or(0)
+}
+
+/// Linux's `dev_t` for device number `dev` under major 0, as glibc's
+/// `makedev(0, dev)` builds it: the minor's low byte in bits 0-7 and the rest
+/// from bit 20. `major()` and `minor()` take it apart again.
+#[must_use]
+pub fn linux_dev_t(dev: u32) -> u64 {
+    u64::from(dev & 0xff) | (u64::from(dev & 0xffff_ff00) << 12)
+}
 
 /// A system-wide-unique identity for a filesystem object.
 ///
@@ -1234,10 +1479,14 @@ pub enum LockType {
 /// A single advisory lock held on a file.
 #[derive(Debug, Clone)]
 struct FileLock {
-    /// Owning process/task ID (0 = kernel).
+    /// Who holds it: a process ([`flock_process_owner`]) or an open file
+    /// description ([`flock_description_owner`]).
     owner: u64,
     /// Lock type.
     lock_type: LockType,
+    /// The process that took it, for `/proc/locks` (0 for a kernel task).
+    /// For a description's lock this is who asked; the description holds it.
+    pid: u64,
 }
 
 /// Per-path lock table entry.
@@ -1296,6 +1545,49 @@ static LOCK_TABLE: Mutex<Vec<PathLockEntry>> = Mutex::new(Vec::new());
 
 /// Maximum number of distinct file paths that can be locked.
 const MAX_LOCKED_PATHS: usize = 1024;
+
+/// Tag bit marking a `flock` owner that is a **process**, as against an open
+/// file description.
+///
+/// Locks taken through a handle -- Linux `flock(2)`, the native
+/// `SYS_FS_FLOCK_HANDLE` -- belong to the open file description, as BSD and
+/// Linux `flock` locks do. The native path-based `SYS_FS_FLOCK` takes them
+/// for the calling process. Pids and handles are both small counters from 1,
+/// and until 2026-10-01 they were one owner space: pid 57's lock and handle
+/// 57's never conflicted, and process 57's exit released handle 57's locks.
+const FLOCK_PROCESS_TAG: u64 = 1 << 63;
+
+/// The `flock` owner for a process: the native path-based `SYS_FS_FLOCK`.
+/// Released when the process exits.
+#[must_use]
+pub fn flock_process_owner(pid: u64) -> u64 {
+    pid | FLOCK_PROCESS_TAG
+}
+
+/// The `flock` owner for an open file description, by handle: Linux
+/// `flock(2)` and the native `SYS_FS_FLOCK_HANDLE`. Released at the
+/// description's final close (`fs::handle::close`).
+#[must_use]
+pub fn flock_description_owner(handle: u64) -> u64 {
+    handle & !FLOCK_PROCESS_TAG
+}
+
+/// A task parked in [`Vfs::flock_wait_resolved`], and the file it waits on.
+struct FlockWaiter {
+    task: crate::sched::task::TaskId,
+    path: PathBuf,
+    id: Option<FileId>,
+}
+
+/// Tasks waiting for a `flock`. A list of its own, never held with
+/// `LOCK_TABLE`: a waiter registers here before each attempt (see
+/// `flock_wait_resolved`), which keeps a release between its attempt and its
+/// park from being lost.
+static FLOCK_WAITERS: Mutex<Vec<FlockWaiter>> = Mutex::new(Vec::new());
+
+/// Tasks that may wait for a `flock` at once. Each is a parked task; the
+/// bound is on heap use.
+const MAX_FLOCK_WAITERS: usize = 1024;
 
 // ---------------------------------------------------------------------------
 // VFS path resolution cache (dcache)
@@ -1725,13 +2017,18 @@ impl Vfs {
         );
 
         let fs_type = String::from(fs.fs_type());
+        // Stable, never-reused id for this mount instance (see FileId), and
+        // the device number `stat` reports for its files: assigned before
+        // the mount is visible, so no `stat` of it can see 0.
+        let fs_id = NEXT_FS_ID.fetch_add(1, Ordering::Relaxed);
+        assign_dev(fs_id);
         vfs.mounts.push(MountPoint {
             path: mount_path.to_path_buf(),
             fs: Arc::new(Mutex::new(fs)),
             fs_type,
             options,
-            // Stable, never-reused id for this mount instance (see FileId).
-            fs_id: NEXT_FS_ID.fetch_add(1, Ordering::Relaxed),
+            fs_id,
+            objects: 0,
         });
 
         // Mount changes affect path resolution — invalidate entire dcache.
@@ -1856,8 +2153,15 @@ impl Vfs {
             // is already gone; removing the newcomer would be the bug.
             return Ok(());
         }
+        // A file held open on it keeps it, as Linux's `umount` answers EBUSY.
+        // Checked under the lock the holds are counted under, so no open can
+        // slip in between this and the removal.
+        if vfs.mounts.get(idx).is_some_and(|mp| mp.objects > 0) {
+            return Err(KernelError::DeviceBusy);
+        }
 
         vfs.mounts.remove(idx);
+        release_dev(fs_id);
         crate::serial_println!(
             "[vfs] Unmounted {} from '{}'",
             fs_type,
@@ -1876,6 +2180,10 @@ impl Vfs {
         LOCK_TABLE
             .lock()
             .retain(|entry| !crate::fs::pathutil::path_in_subtree(&entry.path, mount_path));
+        // Whoever waited for one of those locks tries again, and finds the
+        // file gone or free. After the table lock: the two are never held
+        // together.
+        wake_all_flock_waiters();
 
         // And the state kept about its files outside it: no identity on this
         // filesystem can match again (`super::perfile`). After the lock above
@@ -3228,7 +3536,7 @@ impl Vfs {
         let path = path.as_ref();
         crate::ipc::namespace::check_writable(path)?;
         let path = Self::resolve_follow(path)?;
-        Self::append_resolved(&path, data)
+        Self::append_resolved(&path, data).map(|_| ())
     }
 
     /// Like [`append`](Self::append) but on an **already-resolved** host path
@@ -3239,7 +3547,9 @@ impl Vfs {
     /// overwritten and an append overwrites nothing.
     ///
     /// [`write_file_resolved`]: Self::write_file_resolved
-    pub fn append_resolved(path: impl AsRef<Path>, data: &[u8]) -> KernelResult<()> {
+    ///
+    /// Returns the offset the data landed at: the end it found.
+    pub fn append_resolved(path: impl AsRef<Path>, data: &[u8]) -> KernelResult<u64> {
         let path = path.as_ref();
         check_path_access(path, PathAccess::Write)?;
         check_writable(path)?;
@@ -3253,13 +3563,20 @@ impl Vfs {
             // The end, and the write at it, under the same hold: nothing can
             // move the end in between. A missing file is created under the
             // same hold, so a second creator finds it and appends.
-            match guard.stat(&relative) {
-                Ok(entry) => guard.write_at(&relative, entry.size, data)?,
-                Err(KernelError::NotFound) => guard.write_file(&relative, data)?,
+            let at = match guard.stat(&relative) {
+                Ok(entry) => {
+                    guard.write_at(&relative, entry.size, data)?;
+                    entry.size
+                }
+                Err(KernelError::NotFound) => {
+                    guard.write_file(&relative, data)?;
+                    0
+                }
                 Err(e) => return Err(e),
-            }
-            cache_identity(&mut guard, fs_id, &relative)
+            };
+            (at, cache_identity(&mut guard, fs_id, &relative))
         };
+        let (at, cache_inval) = cache_inval;
         if let Some((fs_id, ino)) = cache_inval {
             crate::mm::page_cache::invalidate_identity(fs_id, ino);
         }
@@ -3270,7 +3587,7 @@ impl Vfs {
         super::index::on_file_changed(path);
         super::journal::record(super::journal::JournalEventType::Modified, path);
         super::audit::log_ok(super::audit::AuditOp::Write, 0, path);
-        Ok(())
+        Ok(at)
     }
 
     /// Truncate a file to the given size.
@@ -3301,6 +3618,254 @@ impl Vfs {
         super::notify::emit_modified(path);
         super::journal::record(super::journal::JournalEventType::Modified, path);
         Ok(())
+    }
+
+    // ----- An open regular file, held as its object -----
+    //
+    // `fs::handle` holds an open regular file as its filesystem and inode
+    // where the filesystem allows (known-issues
+    // A-AN-OPEN-FILE-FOLLOWS-ITS-NAME): a rename or an unlink of the name it
+    // was opened under leaves the handle on the file, and its sizes are the
+    // file's own at each call. These are those calls. Everything else about a
+    // handle -- events, quota's audit trail, `/proc` -- keeps the open-time
+    // name.
+
+    /// Hold the regular file at already-resolved `path` as an object.
+    ///
+    /// `Ok(None)` where it cannot be held: not a regular file, no stable
+    /// inode, or a filesystem without inode-addressed I/O (FAT, the pseudo
+    /// filesystems). The caller then goes by path, as every handle did
+    /// before.
+    ///
+    /// The hold is counted on the mount first, under the mount table's lock,
+    /// so an unmount racing this open either sees the count or removes the
+    /// mount before it is found; it never leaves an object on a filesystem it
+    /// has taken away.
+    ///
+    /// # Errors
+    ///
+    /// The filesystem's own, from looking the file up or pinning it.
+    pub fn open_object(path: impl AsRef<Path>) -> KernelResult<Option<FileObject>> {
+        let path = path.as_ref();
+        let (fs, fs_id, relative) = {
+            let mut vfs = VFS.lock();
+            let (mp, relative) = find_mount(&mut vfs, path)?;
+            mp.objects = mp.objects.saturating_add(1);
+            (Arc::clone(&mp.fs), mp.fs_id, relative.to_path_buf())
+        };
+        let pinned = {
+            let mut guard = fs.lock();
+            match guard.metadata(&relative) {
+                Ok(meta) if meta.entry_type == EntryType::File && meta.ino != 0 => {
+                    guard.pin_ino(meta.ino).map(|()| Some(meta.ino))
+                }
+                Ok(_) => Ok(None),
+                Err(e) => Err(e),
+            }
+        };
+        match pinned {
+            Ok(Some(ino)) => {
+                note_hold(FileId { fs_id, ino });
+                Ok(Some(FileObject { fs, fs_id, ino }))
+            }
+            Ok(None) | Err(KernelError::NotSupported) => {
+                release_mount_hold(fs_id);
+                Ok(None)
+            }
+            Err(e) => {
+                release_mount_hold(fs_id);
+                Err(e)
+            }
+        }
+    }
+
+    /// A second hold on `obj`'s file, for a second open file description of
+    /// it (`fs::handle::dup`). Given back by its own [`release_object`].
+    ///
+    /// [`release_object`]: Self::release_object
+    ///
+    /// # Errors
+    ///
+    /// `NotFound` if the mount has gone; the filesystem's own from pinning.
+    pub fn reopen_object(obj: &FileObject) -> KernelResult<FileObject> {
+        {
+            let mut vfs = VFS.lock();
+            let mp = vfs
+                .mounts
+                .iter_mut()
+                .find(|m| m.fs_id == obj.fs_id)
+                .ok_or(KernelError::NotFound)?;
+            mp.objects = mp.objects.saturating_add(1);
+        }
+        if let Err(e) = obj.fs.lock().pin_ino(obj.ino) {
+            release_mount_hold(obj.fs_id);
+            return Err(e);
+        }
+        note_hold(obj.id());
+        Ok(obj.clone())
+    }
+
+    /// Give back one hold. A file whose last name went while it was held goes
+    /// with its last hold; the mount may be unmounted once none is left.
+    pub fn release_object(obj: FileObject) {
+        obj.fs.lock().unpin_ino(obj.ino);
+        if let Some(name) = note_release(obj.id()) {
+            // The last hold on a file whose last name went while it was held:
+            // the file is gone now. Its cached pages go, since its inode
+            // number may be given to another file, and so does the state kept
+            // about it, deferred at the unlink (`defer_forget_if_held`).
+            crate::mm::page_cache::invalidate_identity(obj.fs_id, obj.ino);
+            super::perfile::object_unlinked(
+                super::perfile::Unlinked {
+                    id: Some(obj.id()),
+                    last_name: true,
+                },
+                &name,
+            );
+        }
+        release_mount_hold(obj.fs_id);
+    }
+
+    /// The file's metadata now, its device included. `nlinks` is 0 once its
+    /// last name has gone.
+    ///
+    /// # Errors
+    ///
+    /// The filesystem's own.
+    pub fn object_metadata(obj: &FileObject) -> KernelResult<FileMeta> {
+        let mut meta = obj.fs.lock().metadata_ino(obj.ino)?;
+        meta.dev = dev_of(obj.fs_id);
+        Ok(meta)
+    }
+
+    /// Read through an object: through the page cache, as
+    /// [`read_at_resolved`](Self::read_at_resolved) is for a path, and
+    /// clamped to the file's size now rather than when it was opened, so a
+    /// reader sees what another writer has added. `path` names it for the
+    /// access event.
+    ///
+    /// # Errors
+    ///
+    /// `OutOfMemory` for a buffer that cannot be had; the filesystem's own.
+    pub fn object_read(
+        obj: &FileObject,
+        path: &Path,
+        offset: u64,
+        len: usize,
+    ) -> KernelResult<Vec<u8>> {
+        if len == 0 {
+            return Ok(Vec::new());
+        }
+        let size = obj.fs.lock().metadata_ino(obj.ino)?.size;
+        if offset >= size {
+            return Ok(Vec::new());
+        }
+        let avail = size.saturating_sub(offset);
+        let out_len = usize::try_from(avail).map_or(len, |a| a.min(len));
+        // As in `read_at_routed`: a failed allocation is an error, not an
+        // abort.
+        let mut buf: Vec<u8> = Vec::new();
+        buf.try_reserve_exact(out_len)
+            .map_err(|_| KernelError::OutOfMemory)?;
+        buf.resize(out_len, 0u8);
+        crate::mm::page_cache::read_through(obj.id(), offset, &mut buf, |page_off, page_buf| {
+            let data = obj.fs.lock().read_ino(obj.ino, page_off, page_buf.len())?;
+            let n = data.len().min(page_buf.len());
+            if let (Some(dst), Some(src)) = (page_buf.get_mut(..n), data.get(..n)) {
+                dst.copy_from_slice(src);
+            }
+            Ok(())
+        })?;
+        if super::notify::interest_includes(super::notify::FsEventMask::ACCESS) {
+            super::notify::emit(super::notify::FsEventType::Accessed, path, None);
+        }
+        Ok(buf)
+    }
+
+    /// [`object_read`](Self::object_read) straight from the filesystem, past
+    /// the page cache: the cache's own fill, for an `mmap` fault.
+    ///
+    /// # Errors
+    ///
+    /// The filesystem's own.
+    pub fn object_read_uncached(
+        obj: &FileObject,
+        offset: u64,
+        len: usize,
+    ) -> KernelResult<Vec<u8>> {
+        obj.fs.lock().read_ino(obj.ino, offset, len)
+    }
+
+    /// Write through an object at `offset`.
+    ///
+    /// The open was the access check, as POSIX has it: a `chmod` after the
+    /// open does not take a descriptor's write away. What is checked here is
+    /// what can change under an open file: the mount turned read-only, an
+    /// interceptor, quota. Never creates a file: a held file whose name is
+    /// gone is written where it is, unnamed. `path` names it for events.
+    ///
+    /// # Errors
+    ///
+    /// `ReadOnlyFilesystem`, `DiskFull` (quota), an interceptor's refusal,
+    /// the filesystem's own.
+    pub fn object_write(
+        obj: &FileObject,
+        path: &Path,
+        offset: u64,
+        data: &[u8],
+    ) -> KernelResult<()> {
+        Self::object_write_checks(obj, path, data.len())?;
+        obj.fs.lock().write_ino(obj.ino, offset, data)?;
+        Self::object_written(obj, path, data.len());
+        Ok(())
+    }
+
+    /// Write through an object at the file's end, found and written in one
+    /// call so two appenders cannot land on one offset: `O_APPEND`. Returns
+    /// where it landed. Checks as [`object_write`](Self::object_write).
+    ///
+    /// # Errors
+    ///
+    /// As [`object_write`](Self::object_write).
+    pub fn object_append(obj: &FileObject, path: &Path, data: &[u8]) -> KernelResult<u64> {
+        Self::object_write_checks(obj, path, data.len())?;
+        let at = obj.fs.lock().append_ino(obj.ino, data)?;
+        Self::object_written(obj, path, data.len());
+        Ok(at)
+    }
+
+    /// Cut or extend a held file to `size`. Checks as
+    /// [`object_write`](Self::object_write), less quota.
+    ///
+    /// # Errors
+    ///
+    /// `ReadOnlyFilesystem`, the filesystem's own.
+    pub fn object_truncate(obj: &FileObject, path: &Path, size: u64) -> KernelResult<()> {
+        check_writable_fs(obj.fs_id)?;
+        obj.fs.lock().truncate_ino(obj.ino, size)?;
+        crate::mm::page_cache::invalidate_identity(obj.fs_id, obj.ino);
+        super::notify::emit_modified(path);
+        super::journal::record(super::journal::JournalEventType::Modified, path);
+        Ok(())
+    }
+
+    /// What may refuse a write to a held file: the mount turned read-only,
+    /// an interceptor, quota.
+    fn object_write_checks(obj: &FileObject, path: &Path, len: usize) -> KernelResult<()> {
+        check_writable_fs(obj.fs_id)?;
+        // Before the filesystem lock, as for every write: interceptors must
+        // not call back into the VFS while it is held.
+        super::intercept::pre_write(path)?;
+        enforce_quota_write(path, len as u64)
+    }
+
+    /// After a write to a held file: cached pages are stale, and the write is
+    /// counted and announced.
+    fn object_written(obj: &FileObject, path: &Path, len: usize) {
+        crate::mm::page_cache::invalidate_identity(obj.fs_id, obj.ino);
+        super::quota::charge_bytes(0, 0, len as u64);
+        super::notify::emit_modified(path);
+        super::journal::record(super::journal::JournalEventType::Modified, path);
     }
 
     /// Pre-allocate space for a file.
@@ -3550,6 +4115,26 @@ impl Vfs {
             .collect()
     }
 
+    /// Every mount point with its device number (`st_dev`'s minor), for
+    /// `/proc/<pid>/mountinfo`, whose `major:minor` field is the `st_dev` of
+    /// the files under it.
+    ///
+    /// Locks no filesystem, as [`Self::mounts`].
+    pub fn mounts_with_dev() -> Vec<(PathBuf, String, MountOptions, u32)> {
+        let vfs = VFS.lock();
+        vfs.mounts
+            .iter()
+            .map(|mp| {
+                (
+                    mp.path.clone(),
+                    mp.fs_type.clone(),
+                    mp.options,
+                    dev_of(mp.fs_id),
+                )
+            })
+            .collect()
+    }
+
     /// Get mount options for the filesystem containing `path`.
     pub fn mount_options(path: impl AsRef<Path>) -> KernelResult<MountOptions> {
         let path = path.as_ref();
@@ -3655,8 +4240,10 @@ impl Vfs {
     /// path (see [`read_at_resolved`](Self::read_at_resolved)).
     pub fn metadata_resolved(path: impl AsRef<Path>) -> KernelResult<FileMeta> {
         let path = path.as_ref();
-        let (fs, _id, _opts, relative) = resolve_mount(path)?;
-        fs.lock().metadata(&relative)
+        let (fs, fs_id, _opts, relative) = resolve_mount(path)?;
+        let mut meta = fs.lock().metadata(&relative)?;
+        meta.dev = dev_of(fs_id);
+        Ok(meta)
     }
 
     /// Resolve `path` to its stable system-wide [`FileId`], or `None` if the
@@ -3879,11 +4466,14 @@ impl Vfs {
         let mut guard = fs.lock();
         verify_pinned(&mut guard, fs_id, &dir_rel, dir)?;
         let child_rel = dir_rel.join(name);
-        if no_follow {
-            guard.lmetadata(&child_rel)
+        let mut meta = if no_follow {
+            guard.lmetadata(&child_rel)?
         } else {
-            guard.metadata(&child_rel)
-        }
+            guard.metadata(&child_rel)?
+        };
+        drop(guard);
+        meta.dev = dev_of(fs_id);
+        Ok(meta)
     }
 
     /// Change the permission bits of `name` within the directory a handle was
@@ -5072,8 +5662,10 @@ impl Vfs {
         let path = path.as_ref();
         let path = Self::resolve_no_follow(path)?;
         check_path_access(&path, PathAccess::Metadata)?;
-        let (fs, _id, _opts, relative) = resolve_mount(&path)?;
-        fs.lock().lmetadata(&relative)
+        let (fs, fs_id, _opts, relative) = resolve_mount(&path)?;
+        let mut meta = fs.lock().lmetadata(&relative)?;
+        meta.dev = dev_of(fs_id);
+        Ok(meta)
     }
 
     /// Return debug statistics for the filesystem mounted at `path`.
@@ -5612,31 +6204,36 @@ impl Vfs {
 
     // ----- Advisory file locking -----
 
-    /// Acquire an advisory lock on a file.
+    /// Take a `flock` lock on a file, without waiting.
     ///
-    /// `path` is resolved (symlinks followed) before locking.
-    /// `owner` identifies the lock holder (typically a process/task ID).
+    /// `path` is resolved (symlinks followed) before locking. `owner` is the
+    /// holder: a process ([`flock_process_owner`]) or an open file
+    /// description ([`flock_description_owner`]).
     ///
-    /// ## Semantics
+    /// ## Semantics (Linux's `flock_lock_inode`)
     ///
     /// - **Shared lock**: compatible with other shared locks, incompatible
     ///   with exclusive locks from other owners.
     /// - **Exclusive lock**: incompatible with any lock from another owner.
-    /// - If the owner already holds a lock on this path, the lock is
-    ///   upgraded or downgraded atomically.
+    /// - **Conversion is not atomic.** An owner asking for the other type
+    ///   first loses the lock it holds, then asks as anyone would. So two
+    ///   holders of a shared lock that both ask for exclusive do not wait on
+    ///   each other forever: one gets it. A refused conversion leaves the
+    ///   owner with no lock, as on Linux.
     ///
-    /// Returns `WouldBlock` if the lock cannot be acquired (non-blocking).
+    /// `WouldBlock` while another owner's lock is in the way;
+    /// [`flock_wait_resolved`](Self::flock_wait_resolved) waits instead.
+    /// `ResourceExhausted` when the table is full (`ENOLCK`).
     pub fn flock(path: impl AsRef<Path>, owner: u64, lock_type: LockType) -> KernelResult<()> {
         let path = path.as_ref();
         let path = Self::resolve_follow(path)?;
         Self::flock_resolved(&path, owner, lock_type)
     }
 
-    /// Acquire an advisory lock on an already-resolved host path.
+    /// [`flock`](Self::flock) on an already-resolved host path.
     ///
-    /// Like [`flock_resolved`](Self::flock_resolved) for `read_at_resolved`:
-    /// handle-backed callers already hold a resolved host path (captured at
-    /// `open`), so they must NOT re-run namespace translation — doing so would
+    /// Handle-backed callers already hold a resolved host path (captured at
+    /// `open`), so they must NOT re-run namespace translation -- doing so would
     /// re-apply the chroot jail prefix a second time (double-jail) and key the
     /// lock on the wrong path. This worker operates directly on `path`.
     pub fn flock_resolved(
@@ -5657,69 +6254,67 @@ impl Vfs {
         // against an advisory lock on any procfs file). The table lock never
         // kept a rename out anyway, so nothing is lost by looking first.
         let id = Self::file_identity_resolved(path).unwrap_or(None);
-        let mut table = LOCK_TABLE.lock();
+        flock_attempt(path, id, owner, lock_type)
+    }
 
-        // Find or create the entry for this path.
-        let entry_idx = table.iter().position(|e| lock_entry_matches(e, path, id));
+    /// [`flock_resolved`](Self::flock_resolved), waiting while another
+    /// owner's lock is in the way: `flock` without `LOCK_NB`.
+    ///
+    /// Woken by every change that can let it in: an unlock, a release at a
+    /// close or an exit, a conversion. It then tries again, and parks again
+    /// if it lost the race.
+    ///
+    /// # Errors
+    ///
+    /// - `Interrupted` when a deliverable signal arrives during the wait. The
+    ///   syscall layers restart it under `SA_RESTART`, as Linux restarts
+    ///   `flock`, and answer `EINTR` otherwise. Kernel tasks have no signals
+    ///   and wait uninterruptibly.
+    /// - `ResourceExhausted` when the table, or the list of waiters, is full.
+    pub fn flock_wait_resolved(
+        path: impl AsRef<Path>,
+        owner: u64,
+        lock_type: LockType,
+    ) -> KernelResult<()> {
+        use crate::ipc::waiters;
 
-        if let Some(idx) = entry_idx {
-            let entry = &mut table[idx];
-
-            // Check if this owner already has a lock (upgrade/downgrade).
-            if let Some(pos) = entry.locks.iter().position(|l| l.owner == owner) {
-                // Re-lock: upgrade/downgrade.
-                match lock_type {
-                    LockType::Exclusive => {
-                        // Can only upgrade to exclusive if no other locks exist.
-                        if entry.locks.len() > 1 {
-                            return Err(KernelError::WouldBlock);
-                        }
-                        entry.locks[pos].lock_type = LockType::Exclusive;
-                    }
-                    LockType::Shared => {
-                        // Downgrade is always allowed.
-                        entry.locks[pos].lock_type = LockType::Shared;
-                    }
-                }
-                return Ok(());
-            }
-
-            // New lock on this path.
-            match lock_type {
-                LockType::Shared => {
-                    // Compatible only if no exclusive lock exists.
-                    if entry
-                        .locks
-                        .iter()
-                        .any(|l| l.lock_type == LockType::Exclusive)
-                    {
-                        return Err(KernelError::WouldBlock);
-                    }
-                }
-                LockType::Exclusive => {
-                    // Incompatible with any existing lock.
-                    if !entry.locks.is_empty() {
-                        return Err(KernelError::WouldBlock);
-                    }
-                }
-            }
-
-            entry.locks.push(FileLock { owner, lock_type });
-        } else {
-            // No existing entry — create one.
-            if table.len() >= MAX_LOCKED_PATHS {
-                return Err(KernelError::OutOfMemory);
-            }
-            table.push(PathLockEntry {
-                // Stored so a later lookup by a DIFFERENT name for the same
-                // file finds this entry rather than creating a second one.
-                id,
-                path: path.to_path_buf(),
-                locks: alloc::vec![FileLock { owner, lock_type }],
-            });
+        let path = path.as_ref();
+        // Resolved once, before any lock, as in `flock_resolved`.
+        let id = Self::file_identity_resolved(path).unwrap_or(None);
+        // The uncontended case takes no lock on the waiter list at all.
+        match flock_attempt(path, id, owner, lock_type) {
+            Err(KernelError::WouldBlock) => {}
+            other => return other,
         }
-
-        Ok(())
+        let task = crate::sched::current_task_id();
+        let pid = waiters::current_user_pid();
+        loop {
+            // Registered BEFORE each attempt: a release that follows the
+            // attempt finds this task to wake, and one that precedes it is
+            // seen by the attempt. Never with `LOCK_TABLE` held.
+            {
+                let mut list = FLOCK_WAITERS.lock();
+                if list.len() >= MAX_FLOCK_WAITERS {
+                    return Err(KernelError::ResourceExhausted);
+                }
+                list.push(FlockWaiter {
+                    task,
+                    path: path.to_path_buf(),
+                    id,
+                });
+            }
+            let attempt = flock_attempt(path, id, owner, lock_type);
+            if attempt != Err(KernelError::WouldBlock) {
+                remove_flock_waiter(task);
+                return attempt;
+            }
+            if waiters::deliverable_signal_pending(pid) {
+                remove_flock_waiter(task);
+                return Err(KernelError::Interrupted);
+            }
+            waiters::park_interruptible(pid, task);
+            remove_flock_waiter(task);
+        }
     }
 
     /// Release an advisory lock on a file.
@@ -5731,49 +6326,59 @@ impl Vfs {
         Self::funlock_resolved(&path, owner)
     }
 
-    /// Release an advisory lock on an already-resolved host path.
+    /// Release an advisory lock on an already-resolved host path, waking
+    /// whoever was waiting for it.
     ///
     /// Worker for [`funlock`](Self::funlock); handle-backed callers pass the
     /// resolved host path directly to avoid double-jailing (see
     /// [`flock_resolved`](Self::flock_resolved)).
     pub fn funlock_resolved(path: impl AsRef<Path>, owner: u64) -> KernelResult<()> {
         let path = path.as_ref();
-        // Identity of the file this path names, resolved per call. Not
-        // cached: if the name is repointed between operations the identity
-        // should differ, which is the whole reason for keying on it.
-        //
-        // Resolved BEFORE `LOCK_TABLE` is taken, never under it: resolving
-        // locks the mounted filesystem, and procfs's `/proc/locks` takes
-        // `LOCK_TABLE` while its own filesystem lock is held -- so resolving
-        // under the table was the reverse order, an AB/BA deadlock lockdep
-        // reported on the 2026-09-26 integration boot (a `/proc/locks` read
-        // against an advisory lock on any procfs file). The table lock never
-        // kept a rename out anyway, so nothing is lost by looking first.
+        // Resolved before `LOCK_TABLE` is taken, never under it: see
+        // `flock_resolved`.
         let id = Self::file_identity_resolved(path).unwrap_or(None);
-        let mut table = LOCK_TABLE.lock();
-        if let Some(idx) = table.iter().position(|e| lock_entry_matches(e, path, id)) {
-            let entry = &mut table[idx];
-            entry.locks.retain(|l| l.owner != owner);
-
-            // Clean up empty entries to prevent unbounded growth.
-            if entry.locks.is_empty() {
-                table.swap_remove(idx);
+        let released = {
+            let mut table = LOCK_TABLE.lock();
+            let mut released = false;
+            if let Some(idx) = table.iter().position(|e| lock_entry_matches(e, path, id))
+                && let Some(entry) = table.get_mut(idx)
+            {
+                let before = entry.locks.len();
+                entry.locks.retain(|l| l.owner != owner);
+                released = entry.locks.len() != before;
+                // Clean up empty entries to prevent unbounded growth.
+                if entry.locks.is_empty() {
+                    table.swap_remove(idx);
+                }
             }
+            released
+        };
+        if released {
+            wake_flock_waiters(path, id);
         }
-
         Ok(())
     }
 
-    /// Release all advisory locks held by a given owner (process cleanup).
-    ///
-    /// Called during process exit to avoid leaked locks.
+    /// Release every advisory lock one owner holds: a process's at its
+    /// exit. Wakes the waiters of every file it held.
     pub fn funlock_all(owner: u64) {
-        let mut table = LOCK_TABLE.lock();
-        // Remove this owner from every entry, then clean up empties.
-        table.retain_mut(|entry| {
-            entry.locks.retain(|l| l.owner != owner);
-            !entry.locks.is_empty()
-        });
+        let freed: Vec<(PathBuf, Option<FileId>)> = {
+            let mut table = LOCK_TABLE.lock();
+            let mut freed = Vec::new();
+            // Remove this owner from every entry, then clean up empties.
+            table.retain_mut(|entry| {
+                let before = entry.locks.len();
+                entry.locks.retain(|l| l.owner != owner);
+                if entry.locks.len() != before {
+                    freed.push((entry.path.clone(), entry.id));
+                }
+                !entry.locks.is_empty()
+            });
+            freed
+        };
+        for (path, id) in &freed {
+            wake_flock_waiters(path, *id);
+        }
     }
 
     /// Query the lock state of a file.
@@ -5793,17 +6398,8 @@ impl Vfs {
     /// [`flock_resolved`](Self::flock_resolved)).
     pub fn lock_query_resolved(path: impl AsRef<Path>) -> KernelResult<Option<(LockType, usize)>> {
         let path = path.as_ref();
-        // Identity of the file this path names, resolved per call. Not
-        // cached: if the name is repointed between operations the identity
-        // should differ, which is the whole reason for keying on it.
-        //
-        // Resolved BEFORE `LOCK_TABLE` is taken, never under it: resolving
-        // locks the mounted filesystem, and procfs's `/proc/locks` takes
-        // `LOCK_TABLE` while its own filesystem lock is held -- so resolving
-        // under the table was the reverse order, an AB/BA deadlock lockdep
-        // reported on the 2026-09-26 integration boot (a `/proc/locks` read
-        // against an advisory lock on any procfs file). The table lock never
-        // kept a rename out anyway, so nothing is lost by looking first.
+        // Resolved before `LOCK_TABLE` is taken, never under it: see
+        // `flock_resolved`.
         let id = Self::file_identity_resolved(path).unwrap_or(None);
         let table = LOCK_TABLE.lock();
         if let Some(entry) = table.iter().find(|e| lock_entry_matches(e, path, id)) {
@@ -5826,22 +6422,370 @@ impl Vfs {
     }
 }
 
+/// One `flock` attempt, with the file's identity already looked up: the
+/// table half of [`Vfs::flock_resolved`] and [`Vfs::flock_wait_resolved`].
+///
+/// A conversion removes the owner's old lock before anything else (see
+/// [`Vfs::flock`]), and that removal can let a waiter in, so it wakes the
+/// file's waiters -- after the table lock is dropped, whatever the attempt's
+/// own answer.
+fn flock_attempt(
+    path: &Path,
+    id: Option<FileId>,
+    owner: u64,
+    lock_type: LockType,
+) -> KernelResult<()> {
+    // Which process took it, for `/proc/locks`. Asked before the table lock:
+    // it takes the thread table's.
+    let pid = crate::ipc::waiters::current_user_pid();
+    let (result, converted) = {
+        let mut table = LOCK_TABLE.lock();
+        flock_in_table(&mut table, path, id, owner, lock_type, pid)
+    };
+    if converted {
+        wake_flock_waiters(path, id);
+    }
+    result
+}
+
+/// The decision itself, under the table lock: Linux's `flock_lock_inode`.
+///
+/// - The owner's own lock of the asked type: nothing to do.
+/// - Its lock of the other type: removed first, and the request goes on as
+///   a new one. The second value says this happened.
+/// - A new lock: refused with `WouldBlock` while another owner's lock
+///   conflicts, else added.
+fn flock_in_table(
+    table: &mut Vec<PathLockEntry>,
+    path: &Path,
+    id: Option<FileId>,
+    owner: u64,
+    lock_type: LockType,
+    pid: u64,
+) -> (KernelResult<()>, bool) {
+    let Some(idx) = table.iter().position(|e| lock_entry_matches(e, path, id)) else {
+        if table.len() >= MAX_LOCKED_PATHS {
+            return (Err(KernelError::ResourceExhausted), false);
+        }
+        table.push(PathLockEntry {
+            // Stored so a later lookup by a DIFFERENT name for the same
+            // file finds this entry rather than creating a second one.
+            id,
+            path: path.to_path_buf(),
+            locks: alloc::vec![FileLock {
+                owner,
+                lock_type,
+                pid,
+            }],
+        });
+        return (Ok(()), false);
+    };
+    let Some(entry) = table.get_mut(idx) else {
+        return (Err(KernelError::InternalError), false);
+    };
+    let mut converted = false;
+    if let Some(pos) = entry.locks.iter().position(|l| l.owner == owner) {
+        if entry
+            .locks
+            .get(pos)
+            .is_some_and(|l| l.lock_type == lock_type)
+        {
+            return (Ok(()), false);
+        }
+        entry.locks.remove(pos);
+        converted = true;
+    }
+    let conflict = match lock_type {
+        LockType::Shared => entry
+            .locks
+            .iter()
+            .any(|l| l.lock_type == LockType::Exclusive),
+        LockType::Exclusive => !entry.locks.is_empty(),
+    };
+    if conflict {
+        // Not empty: something conflicts. The converted owner's lock is gone.
+        return (Err(KernelError::WouldBlock), converted);
+    }
+    entry.locks.push(FileLock {
+        owner,
+        lock_type,
+        pid,
+    });
+    (Ok(()), converted)
+}
+
+/// Wake the tasks waiting for a `flock` on one file, taking them off the
+/// list: each tries again, and re-registers if it loses.
+fn wake_flock_waiters(path: &Path, id: Option<FileId>) {
+    let woken: Vec<crate::sched::task::TaskId> = {
+        let mut list = FLOCK_WAITERS.lock();
+        let mut woken = Vec::new();
+        list.retain(|w| {
+            let same = match (w.id, id) {
+                (Some(a), Some(b)) => a == b,
+                _ => w.path.as_path() == path,
+            };
+            if same {
+                woken.push(w.task);
+            }
+            !same
+        });
+        woken
+    };
+    crate::ipc::waiters::wake_all(woken);
+}
+
+/// Wake every task waiting for a `flock`: the files under an unmounted
+/// filesystem lose their locks all at once.
+fn wake_all_flock_waiters() {
+    let woken: Vec<crate::sched::task::TaskId> =
+        FLOCK_WAITERS.lock().drain(..).map(|w| w.task).collect();
+    crate::ipc::waiters::wake_all(woken);
+}
+
+/// Take `task` off the waiter list, on every way out of a wait.
+fn remove_flock_waiter(task: crate::sched::task::TaskId) {
+    FLOCK_WAITERS.lock().retain(|w| w.task != task);
+}
+
 // ---------------------------------------------------------------------------
 // Lock table dump (for procfs)
 // ---------------------------------------------------------------------------
 
-/// Dump all active advisory locks for display in `/proc/locks`.
+/// Files report their filesystem's device number (`st_dev`), and a device
+/// number is reused once its mount is gone.
 ///
-/// Returns `(path, lock_type, owner)` for each active lock.
-pub fn lock_table_dump() -> Vec<(PathBuf, LockType, u64)> {
+/// Until 2026-10-01 every file reported 0, so two files on two filesystems
+/// that shared an inode number were one file to `tar`, `cp -a` and `du`.
+fn device_numbers_self_test() -> KernelResult<()> {
+    const MNT: &str = "/tmp/vfsdev";
+    const FILE: &str = "/tmp/vfsdev/probe";
+    crate::serial_println!("[vfs]   Testing device numbers...");
+
+    // The encoding first: glibc's `minor()` must take back what was put in.
+    let decode = |d: u64| (d & 0xff) | ((d >> 12) & 0xffff_ff00);
+    for dev in [1u32, 0xff, 0x100, 0x12_3456] {
+        let encoded = linux_dev_t(dev);
+        if decode(encoded) != u64::from(dev) || encoded & 0xffff_f000_000f_ff00 != 0 {
+            crate::serial_println!(
+                "[vfs]   FAIL: device {:#x} encodes as {:#x}, which decodes to minor {:#x}, major bits {:#x}",
+                dev,
+                encoded,
+                decode(encoded),
+                encoded & 0xffff_f000_000f_ff00
+            );
+            return Err(KernelError::InternalError);
+        }
+    }
+
+    crate::fs::memfs::mount(MNT)?;
+    let outcome = (|| -> KernelResult<(u32, u32, u32, u32)> {
+        Vfs::write_file(FILE, b"dev")?;
+        let tmp = Vfs::metadata("/tmp")?.dev;
+        let file = Vfs::metadata(FILE)?.dev;
+        let unfollowed = Vfs::lmetadata(FILE)?.dev;
+        let root = Vfs::metadata(MNT)?.dev;
+        Ok((tmp, file, unfollowed, root))
+    })();
+    // Best effort: the file goes with the scratch mount.
+    let _ = Vfs::remove(FILE);
+    Vfs::unmount(MNT)?;
+    let (tmp, file, unfollowed, root) = outcome?;
+    // The mount's own root is on it, and so is the file; /tmp is not.
+    if tmp == 0 || file == 0 || file == tmp || unfollowed != file || root != file {
+        crate::serial_println!(
+            "[vfs]   FAIL: device numbers: /tmp {}, a file on a mount under it {} (lstat {}), the mount's root {}",
+            tmp,
+            file,
+            unfollowed,
+            root
+        );
+        return Err(KernelError::InternalError);
+    }
+
+    // The number is free again: the next mount takes the smallest free one,
+    // which is it, unless another mount came in between.
+    crate::fs::memfs::mount(MNT)?;
+    let again = Vfs::metadata(MNT).map(|m| m.dev);
+    Vfs::unmount(MNT)?;
+    match again {
+        Ok(dev) if dev == file => {}
+        Ok(dev) if dev != 0 => crate::serial_println!(
+            "[vfs]     note: the remount took device {} rather than {} (another mount in between)",
+            dev,
+            file
+        ),
+        other => {
+            crate::serial_println!("[vfs]   FAIL: a remount reported device {:?}", other);
+            return Err(KernelError::InternalError);
+        }
+    }
+    crate::serial_println!(
+        "[vfs]   device numbers: per mount, reused after unmount, Linux's dev_t: OK"
+    );
+    Ok(())
+}
+
+/// One `flock` lock, as `/proc/locks` reports it.
+#[derive(Debug, Clone)]
+pub struct FlockInfo {
+    /// The resolved path it was taken on.
+    pub path: PathBuf,
+    /// The file's identity, where its filesystem has one.
+    pub id: Option<FileId>,
+    pub lock_type: LockType,
+    /// The process that took it (0 for a kernel task).
+    pub pid: u64,
+}
+
+/// Every `flock` lock held, for `/proc/locks`.
+pub fn lock_table_dump() -> Vec<FlockInfo> {
     let table = LOCK_TABLE.lock();
     let mut result = Vec::new();
     for entry in table.iter() {
         for lock in &entry.locks {
-            result.push((entry.path.clone(), lock.lock_type, lock.owner));
+            result.push(FlockInfo {
+                path: entry.path.clone(),
+                id: entry.id,
+                lock_type: lock.lock_type,
+                pid: lock.pid,
+            });
         }
     }
     result
+}
+
+/// What [`flock_wait_task`] returned: 0 while still waiting, 1 for `Ok`,
+/// `0x100 | -code` for an error.
+static FLOCK_WAIT_RESULT: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+
+/// The file [`self_test_flock_wait`] locks: a real one, so it has an identity.
+const FLOCK_WAIT_TEST_PATH: &str = "/tmp/_vfs_flock_wait_test";
+
+/// [`Vfs::flock_wait_resolved`] on the rungs' file, in a task of its own:
+/// `arg` is the owner, with bit 32 set for an exclusive lock.
+extern "C" fn flock_wait_task(arg: u64) {
+    let lock_type = if arg & (1 << 32) != 0 {
+        LockType::Exclusive
+    } else {
+        LockType::Shared
+    };
+    let got = match Vfs::flock_wait_resolved(FLOCK_WAIT_TEST_PATH, arg & 0xFFFF_FFFF, lock_type) {
+        Ok(()) => 1,
+        Err(e) => 0x100 | u64::from(e.code().unsigned_abs()),
+    };
+    FLOCK_WAIT_RESULT.store(got, core::sync::atomic::Ordering::SeqCst);
+}
+
+/// Start [`flock_wait_task`] and give it time to park.
+fn spawn_flock_waiter(arg: u64) -> KernelResult<()> {
+    FLOCK_WAIT_RESULT.store(0, core::sync::atomic::Ordering::SeqCst);
+    crate::sched::spawn(b"flock-wait", 16, flock_wait_task, arg, 0)?;
+    crate::sched::sleep_ns_interruptible(20_000_000);
+    Ok(())
+}
+
+/// Whether the waiter is parked: registered, and not yet returned.
+fn flock_waiter_parked() -> bool {
+    let registered = FLOCK_WAITERS
+        .lock()
+        .iter()
+        .filter(|w| w.path.as_path() == Path::new(FLOCK_WAIT_TEST_PATH))
+        .count();
+    registered == 1 && FLOCK_WAIT_RESULT.load(core::sync::atomic::Ordering::SeqCst) == 0
+}
+
+/// [`FLOCK_WAIT_RESULT`] once it is set, or 0 after about a second without.
+fn await_flock_wait_result() -> u64 {
+    let deadline = crate::hrtimer::now_ns().saturating_add(1_000_000_000);
+    loop {
+        let got = FLOCK_WAIT_RESULT.load(core::sync::atomic::Ordering::SeqCst);
+        if got != 0 || crate::hrtimer::now_ns() >= deadline {
+            return got;
+        }
+        crate::sched::yield_now();
+    }
+}
+
+/// `flock` without `LOCK_NB` waits, and is woken.
+///
+/// Run once interrupts are on (`main.rs`, beside `fs::reclock`'s waiting
+/// rungs): a waiter that cannot park is not tested.
+///
+/// 1. A waiter for an exclusive lock parks behind another owner's, and the
+///    unlock wakes it into the lock.
+/// 2. Two holders of a shared lock both upgrading. The one that waits gives
+///    its shared lock up first, so the other's upgrade is granted, and that
+///    one's unlock lets the waiter in. With an atomic upgrade, as this table
+///    had before 2026-10-01, each would wait on the other forever.
+///
+/// # Errors
+///
+/// `InternalError` when a rung answers wrongly; the setup's own otherwise.
+pub fn self_test_flock_wait() -> KernelResult<()> {
+    const A: u64 = 9301;
+    const B: u64 = 9302;
+    // Best effort: a leftover from an earlier boot's failure.
+    let _ = Vfs::remove(FLOCK_WAIT_TEST_PATH);
+    Vfs::write_file(FLOCK_WAIT_TEST_PATH, b"flock wait")?;
+    let outcome = flock_wait_rungs(A, B);
+    // A waiter a failing rung left parked is woken by these releases, and
+    // takes its lock; the second release of B returns it.
+    Vfs::funlock_all(A);
+    Vfs::funlock_all(B);
+    let _ = await_flock_wait_result();
+    Vfs::funlock_all(B);
+    // Best effort: the file is this test's own scratch.
+    let _ = Vfs::remove(FLOCK_WAIT_TEST_PATH);
+    outcome?;
+    crate::serial_println!("[vfs] flock waiting: PASSED");
+    Ok(())
+}
+
+/// [`self_test_flock_wait`]'s rungs, as owners `a` and `b`.
+fn flock_wait_rungs(a: u64, b: u64) -> KernelResult<()> {
+    const EXCLUSIVE: u64 = 1 << 32;
+    let path = FLOCK_WAIT_TEST_PATH;
+
+    // 1. Parked behind an exclusive lock; the unlock lets it in.
+    Vfs::flock_resolved(path, a, LockType::Exclusive)?;
+    spawn_flock_waiter(b | EXCLUSIVE)?;
+    let parked = flock_waiter_parked();
+    Vfs::funlock_resolved(path, a)?;
+    let woke = await_flock_wait_result();
+    let held = Vfs::lock_query_resolved(path)?;
+    Vfs::funlock_resolved(path, b)?;
+    if !parked || woke != 1 || !matches!(held, Some((LockType::Exclusive, 1))) {
+        crate::serial_println!(
+            "[vfs]   FAIL: flock wait: parked {}, returned {:#x}, then {:?}",
+            parked,
+            woke,
+            held
+        );
+        return Err(KernelError::InternalError);
+    }
+    crate::serial_println!("[vfs]     a waiter parks, and the unlock wakes it into the lock OK");
+
+    // 2. Two sharers upgrading: B waits, A's upgrade is granted.
+    Vfs::flock_resolved(path, a, LockType::Shared)?;
+    Vfs::flock_resolved(path, b, LockType::Shared)?;
+    spawn_flock_waiter(b | EXCLUSIVE)?;
+    let parked = flock_waiter_parked();
+    let upgraded = Vfs::flock_resolved(path, a, LockType::Exclusive);
+    Vfs::funlock_resolved(path, a)?;
+    let woke = await_flock_wait_result();
+    Vfs::funlock_resolved(path, b)?;
+    if !parked || upgraded.is_err() || woke != 1 {
+        crate::serial_println!(
+            "[vfs]   FAIL: two upgrading sharers: B parked {}, A's upgrade {:?}, B returned {:#x}",
+            parked,
+            upgraded,
+            woke
+        );
+        return Err(KernelError::InternalError);
+    }
+    crate::serial_println!("[vfs]     two sharers upgrading do not wait on each other OK");
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------
@@ -6941,6 +7885,44 @@ pub fn self_test() -> KernelResult<()> {
         }
         serial_println!("[vfs]     downgrade exclusive→shared OK");
 
+        // A process and a description are different owners even when their
+        // numbers match: process 300's exclusive request is refused by the
+        // shared lock 300 -- a handle number -- holds. Until 2026-10-01 they
+        // were one owner, so it was a conversion and was granted.
+        let as_process = Vfs::flock(test_path, flock_process_owner(300), LockType::Exclusive);
+        if as_process != Err(KernelError::WouldBlock) {
+            serial_println!(
+                "[vfs]   FAIL: process 300 and handle 300 were one flock owner: {:?}",
+                as_process
+            );
+            Vfs::funlock_all(flock_process_owner(300));
+            Vfs::funlock_all(300);
+            let _ = Vfs::remove(test_path);
+            return Err(KernelError::InternalError);
+        }
+        serial_println!("[vfs]     a process and a handle with one number are two owners OK");
+
+        // A conversion is not atomic, as Linux's is not: asking for the other
+        // type first gives up the lock held. So a refused upgrade leaves its
+        // owner with nothing -- the price of two sharers that both upgrade
+        // never waiting on each other forever (`self_test_flock_wait`).
+        Vfs::flock(test_path, 400, LockType::Shared)?;
+        let refused = Vfs::flock(test_path, 400, LockType::Exclusive);
+        let after = Vfs::lock_query(test_path)?;
+        Vfs::funlock_all(400);
+        if refused != Err(KernelError::WouldBlock) || !matches!(after, Some((LockType::Shared, 1)))
+        {
+            serial_println!(
+                "[vfs]   FAIL: a refused upgrade answered {:?} and left {:?} (want WouldBlock, then 300's Shared alone)",
+                refused,
+                after
+            );
+            Vfs::funlock_all(300);
+            let _ = Vfs::remove(test_path);
+            return Err(KernelError::InternalError);
+        }
+        serial_println!("[vfs]     a refused upgrade gives up the lock held OK");
+
         // funlock_all cleanup.
         Vfs::funlock_all(300);
 
@@ -7907,6 +8889,11 @@ pub fn self_test() -> KernelResult<()> {
             return Err(e);
         }
         serial_println!("[vfs]   mount path normalisation: OK");
+    }
+
+    // --- Device numbers (st_dev) ---
+    if has_tmp {
+        device_numbers_self_test()?;
     }
 
     // --- Permission gate: POSIX ACL enforcement ---

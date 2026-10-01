@@ -36,13 +36,26 @@
 //!
 //! ## Notification Model
 //!
-//! When a registered source becomes ready, the owning IPC subsystem
-//! calls [`notify()`] to post a completion event to the port.  This
-//! wakes any task blocked in `wait()`.
+//! `wait()` parks through [`super::multiwait::wait_multiple`]: it registers
+//! the waiting task on each source's own waiter set (channel, pipe, eventfd,
+//! service listener), scans every source, and parks until one of them wakes
+//! it. Readiness is level-triggered -- a wake only makes the waiter scan
+//! again -- so a wake can neither be lost nor report a stale event.
 //!
-//! For the initial implementation, `wait()` uses a poll-then-block
-//! approach: it checks all registered sources, and if none are ready,
-//! blocks.  Sources call `notify()` when they transition to ready.
+//! Timers and io_rings push instead: they hold the port they were registered
+//! with and call [`notify()`] (or [`try_notify()`] from softirq context), which
+//! queues an event and wakes the port's waiter. User posts (`SYS_CP_POST`) do
+//! the same.
+//!
+//! Process exit and semaphores have no waiter set a waiter can join without
+//! taking a unit, so a port watching one parks with multiwait's capped
+//! backoff (0.5 ms up to 20 ms) rather than indefinitely.
+//!
+//! Until 2026-10-01 `wait()` polled once and parked until a `notify()` --
+//! which channels, pipes, eventfds and semaphores never made -- so a port
+//! waiting on them slept through their readiness. Its own self-test called
+//! `notify()` by hand to get past it
+//! (`requests/b-a-a-server-cannot-wait-for-a-new-client-and-its-clients-at-once.md`).
 //!
 //! ## Performance Target
 //!
@@ -91,6 +104,10 @@ pub enum WaitSource {
     /// An io_ring — ready when the completion queue has pending entries.
     /// The u64 is the ring handle from `io_ring::setup()`.
     IoCompletion(u64),
+    /// A service listener — ready when a connection is waiting to be
+    /// accepted, or the listener is gone. The u64 is the listener handle
+    /// from `service::register()`.
+    Listener(u64),
 }
 
 impl WaitSource {
@@ -105,7 +122,8 @@ impl WaitSource {
             | Self::ProcessExit(h)
             | Self::Timer(h)
             | Self::Semaphore(h)
-            | Self::IoCompletion(h) => h,
+            | Self::IoCompletion(h)
+            | Self::Listener(h) => h,
         }
     }
 
@@ -121,6 +139,7 @@ impl WaitSource {
             Self::Timer(h) => (5, h),
             Self::Semaphore(h) => (6, h),
             Self::IoCompletion(h) => (7, h),
+            Self::Listener(h) => (8, h),
         }
     }
 }
@@ -203,6 +222,10 @@ struct CompletionPort {
     waiter: Option<TaskId>,
     /// Whether the port has been closed.
     closed: bool,
+    /// Bumped by every register and unregister, so a `wait()` parked on a
+    /// snapshot of the registrations notices the set changed and takes a
+    /// new one.
+    generation: u64,
 }
 
 impl CompletionPort {
@@ -212,6 +235,7 @@ impl CompletionPort {
             event_queue: Vec::new(),
             waiter: None,
             closed: false,
+            generation: 0,
         }
     }
 }
@@ -230,10 +254,12 @@ static CP_TABLE: Mutex<BTreeMap<CpId, CompletionPort>> = Mutex::new(BTreeMap::ne
 // Source polling helpers
 // ---------------------------------------------------------------------------
 
-/// Check if a channel has a message available (non-consuming peek).
+/// Check if a receive on a channel would not block: a message is waiting or
+/// the peer has closed (non-consuming). A closed peer counted as not ready
+/// until 2026-10-01, so a port never reported a client that went away.
 fn poll_channel(handle_raw: u64) -> bool {
     use crate::ipc::channel::{self, ChannelHandle};
-    channel::has_pending(ChannelHandle::from_raw(handle_raw))
+    channel::readable(ChannelHandle::from_raw(handle_raw))
 }
 
 /// Check if a pipe read end has data or is at EOF.
@@ -267,6 +293,24 @@ fn poll_source(source: WaitSource) -> bool {
             super::semaphore::has_value(super::semaphore::SemHandle::from_raw(h))
         }
         WaitSource::IoCompletion(h) => super::io_ring::has_completions_ready(h),
+        WaitSource::Listener(h) => {
+            super::service::readable(super::service::ServiceListenerHandle::from_raw(h))
+        }
+    }
+}
+
+/// The waiter set a source wakes, as a multiwait target, or `None` for a
+/// source that announces itself through [`notify()`] instead (timers,
+/// io_rings) and so wakes the port's `waiter` directly.
+fn wait_target(source: WaitSource) -> Option<super::multiwait::WaitTarget> {
+    use super::multiwait::WaitTarget;
+    match source {
+        WaitSource::Channel(h) => Some(WaitTarget::Channel(h)),
+        WaitSource::PipeRead(h) | WaitSource::PipeWrite(h) => Some(WaitTarget::Pipe(h)),
+        WaitSource::EventFd(h) => Some(WaitTarget::EventFd(h)),
+        WaitSource::Listener(h) => Some(WaitTarget::Listener(h)),
+        WaitSource::ProcessExit(_) | WaitSource::Semaphore(_) => Some(WaitTarget::PollOnly),
+        WaitSource::Timer(_) | WaitSource::IoCompletion(_) => None,
     }
 }
 
@@ -329,6 +373,7 @@ pub fn register(cp: CpHandle, source: WaitSource, user_data: u64) -> KernelResul
     }
 
     port.registrations.push(Registration { source, user_data });
+    port.generation = port.generation.wrapping_add(1);
 
     // For timer and io_ring sources, tell the subsystem which CP to
     // notify.  This enables push-based notification instead of poll-only.
@@ -349,6 +394,12 @@ pub fn register(cp: CpHandle, source: WaitSource, user_data: u64) -> KernelResul
         _ => {}
     }
 
+    // A waiter parked on the old set must take the new one.
+    let waiter = port.waiter.take();
+    drop(table);
+    if let Some(task) = waiter {
+        sched::wake(task);
+    }
     Ok(())
 }
 
@@ -372,6 +423,7 @@ pub fn unregister(cp: CpHandle, source: WaitSource) -> KernelResult<()> {
         .ok_or(KernelError::NotFound)?;
 
     port.registrations.swap_remove(pos);
+    port.generation = port.generation.wrapping_add(1);
 
     // Remove any queued events for this source.
     port.event_queue.retain(|e| e.source.key() != key);
@@ -390,6 +442,12 @@ pub fn unregister(cp: CpHandle, source: WaitSource) -> KernelResult<()> {
         _ => {}
     }
 
+    // A waiter parked on the old set must take the new one.
+    let waiter = port.waiter.take();
+    drop(table);
+    if let Some(task) = waiter {
+        sched::wake(task);
+    }
     Ok(())
 }
 
@@ -493,68 +551,113 @@ pub fn try_notify(cp: CpHandle, source: WaitSource) -> bool {
 /// - `InvalidHandle` — completion port not found.
 /// - `ChannelClosed` — port was closed while waiting.
 pub fn wait(cp: CpHandle) -> KernelResult<Vec<CompletionEvent>> {
+    let task = sched::current_task_id();
     loop {
-        {
+        // Queued events first; otherwise snapshot the registrations and
+        // record this task as the port's waiter, so a notify() -- timers,
+        // io_rings, posted events -- or a change to the set wakes it.
+        let (regs, generation) = {
             let mut table = CP_TABLE.lock();
             let port = table.get_mut(&cp.id()).ok_or(KernelError::InvalidHandle)?;
-
             if port.closed {
                 return Err(KernelError::ChannelClosed);
             }
-
-            // First: drain any queued events from notify().
             if !port.event_queue.is_empty() {
                 let drain_count = port.event_queue.len().min(MAX_EVENTS_PER_WAIT);
                 let events: Vec<CompletionEvent> = port.event_queue.drain(..drain_count).collect();
                 super::stats::completion_wait();
                 return Ok(events);
             }
-
-            // Collect registrations so we can poll outside the lock.
-            // We must drop the CP table lock before polling to avoid
-            // deadlock (poll_source takes source-specific locks).
+            port.waiter = Some(task);
             let regs: Vec<(WaitSource, u64)> = port
                 .registrations
                 .iter()
                 .map(|r| (r.source, r.user_data))
                 .collect();
+            (regs, port.generation)
+        };
+        let targets: Vec<super::multiwait::WaitTarget> =
+            regs.iter().filter_map(|(s, _)| wait_target(*s)).collect();
 
-            // Record that we'll block if nothing is ready.
-            port.waiter = Some(sched::current_task_id());
-            drop(table);
+        let mut outcome = Scan::Nothing;
+        let parked = super::multiwait::wait_multiple(&targets, None, || {
+            outcome = scan(cp, &regs, generation);
+            usize::from(!matches!(outcome, Scan::Nothing))
+        });
 
-            // Poll sources outside the CP table lock.
-            let mut events = Vec::new();
-            for (source, user_data) in &regs {
-                if events.len() >= MAX_EVENTS_PER_WAIT {
-                    break;
-                }
-                if poll_source(*source) {
-                    events.push(CompletionEvent {
-                        source: *source,
-                        user_data: *user_data,
-                    });
+        // No longer parked here: let a later notify() find no one.
+        {
+            let mut table = CP_TABLE.lock();
+            if let Some(port) = table.get_mut(&cp.id()) {
+                if port.waiter == Some(task) {
+                    port.waiter = None;
                 }
             }
-
-            if !events.is_empty() {
-                // Clear the waiter — we're not actually blocking.
-                let mut table = CP_TABLE.lock();
-                if let Some(port) = table.get_mut(&cp.id()) {
-                    // Only clear if it's still us.
-                    if port.waiter == Some(sched::current_task_id()) {
-                        port.waiter = None;
-                    }
-                }
+        }
+        // A signal: the caller's handler runs first.
+        parked?;
+        match outcome {
+            Scan::Events(events) => {
                 super::stats::completion_wait();
                 return Ok(events);
             }
-
-            // Nothing ready — fall through to block.
+            Scan::Closed => return Err(KernelError::ChannelClosed),
+            Scan::Gone => return Err(KernelError::InvalidHandle),
+            // The registrations changed under the snapshot: take a new one.
+            Scan::Changed | Scan::Nothing => {}
         }
+    }
+}
 
-        super::stats::completion_wait_block();
-        sched::block_current();
+/// What one look at a port found, for [`wait`].
+enum Scan {
+    /// Nothing ready: park.
+    Nothing,
+    /// Queued or polled events to return.
+    Events(Vec<CompletionEvent>),
+    /// The registrations changed since the snapshot.
+    Changed,
+    /// The port was closed.
+    Closed,
+    /// The port is gone.
+    Gone,
+}
+
+/// Look at port `cp` once: its state and queued events under the table lock,
+/// then the sources in `regs` outside it (polling takes each source's lock).
+fn scan(cp: CpHandle, regs: &[(WaitSource, u64)], generation: u64) -> Scan {
+    {
+        let mut table = CP_TABLE.lock();
+        let Some(port) = table.get_mut(&cp.id()) else {
+            return Scan::Gone;
+        };
+        if port.closed {
+            return Scan::Closed;
+        }
+        if !port.event_queue.is_empty() {
+            let drain_count = port.event_queue.len().min(MAX_EVENTS_PER_WAIT);
+            return Scan::Events(port.event_queue.drain(..drain_count).collect());
+        }
+        if port.generation != generation {
+            return Scan::Changed;
+        }
+    }
+    let mut events = Vec::new();
+    for (source, user_data) in regs {
+        if events.len() >= MAX_EVENTS_PER_WAIT {
+            break;
+        }
+        if poll_source(*source) {
+            events.push(CompletionEvent {
+                source: *source,
+                user_data: *user_data,
+            });
+        }
+    }
+    if events.is_empty() {
+        Scan::Nothing
+    } else {
+        Scan::Events(events)
     }
 }
 
@@ -667,6 +770,20 @@ pub fn self_test() -> KernelResult<()> {
     Ok(())
 }
 
+/// Sources wake a parked port by themselves (test 6).
+///
+/// Separate from [`self_test`], and run once interrupts are on (`main.rs`,
+/// beside the multiwait test), because it is only a test when the waiter
+/// really parks. `self_test` runs in early init with interrupts off, where a
+/// sleep spins on the HPET without yielding. There the waiter would first run
+/// after the message was already queued, its first scan would find it, and
+/// the rung would pass without any wake being needed.
+pub fn self_test_sources_wake() -> KernelResult<()> {
+    test_sources_wake_the_waiter()?;
+    serial_println!("[completion] Sources wake a parked port: PASSED");
+    Ok(())
+}
+
 /// Test 1: create a CP, register an eventfd, signal it, poll.
 fn test_create_and_poll() -> KernelResult<()> {
     use crate::ipc::eventfd;
@@ -747,6 +864,101 @@ extern "C" fn cp_waiter_task(cp_raw: u64) {
     {
         CP_TEST_RESULT.store(ev.user_data, core::sync::atomic::Ordering::SeqCst);
     }
+}
+
+/// Wait, in a task of its own, for the next event on the port in `cp_raw`, and
+/// record its `user_data` -- or `u64::MAX` when the wait ended without one.
+extern "C" fn cp_source_waiter_task(cp_raw: u64) {
+    let cp = CpHandle::from_raw(cp_raw);
+    let got = match wait(cp) {
+        Ok(events) => events.first().map_or(u64::MAX, |ev| ev.user_data),
+        Err(_) => u64::MAX,
+    };
+    CP_TEST_RESULT.store(got, core::sync::atomic::Ordering::SeqCst);
+}
+
+/// Spin (yielding) until [`CP_TEST_RESULT`] is non-zero or about a second has
+/// passed; the value it holds then.
+fn await_cp_result() -> u64 {
+    let deadline = crate::hrtimer::now_ns().saturating_add(1_000_000_000);
+    loop {
+        let got = CP_TEST_RESULT.load(core::sync::atomic::Ordering::SeqCst);
+        if got != 0 || crate::hrtimer::now_ns() >= deadline {
+            return got;
+        }
+        sched::yield_now();
+    }
+}
+
+/// Test 6: a port waiting on a **channel** wakes when a message is sent --
+/// with no `notify()` from anyone -- and one waiting on a **service
+/// listener** wakes when a client connects
+/// (`requests/b-a-a-server-cannot-wait-for-a-new-client-and-its-clients-at-once.md`).
+///
+/// Until 2026-10-01 `wait()` parked until a `notify()`, which a channel never
+/// made: this test's waiter would have slept to its deadline. The send and
+/// the connect happen after the waiter has parked, so the first scan cannot
+/// satisfy it; a lost wake fails with the waiter still blocked, and closing
+/// the port then releases it.
+fn test_sources_wake_the_waiter() -> KernelResult<()> {
+    use crate::ipc::{channel, service};
+
+    // A channel.
+    CP_TEST_RESULT.store(0, core::sync::atomic::Ordering::SeqCst);
+    let cp = create();
+    let (ours, theirs) = channel::create();
+    register(cp, WaitSource::Channel(theirs.raw()), 61)?;
+    sched::spawn(b"cp-chan", 16, cp_source_waiter_task, cp.raw(), 0)?;
+    sched::sleep_ns_interruptible(20_000_000);
+    // Still waiting, so its first scan found nothing and the send below is
+    // what has to wake it.
+    let parked = CP_TEST_RESULT.load(core::sync::atomic::Ordering::SeqCst) == 0;
+    let sent = channel::send(ours, channel::Message::from_bytes(b"wake")?);
+    let got = await_cp_result();
+    close(cp);
+    channel::close(ours);
+    channel::close(theirs);
+    if !parked || sent.is_err() || got != 61 {
+        serial_println!(
+            "[completion]   FAIL: a channel message did not wake the port (parked {}, send {:?}, got {})",
+            parked,
+            sent,
+            got
+        );
+        return Err(KernelError::InternalError);
+    }
+
+    // A service listener.
+    CP_TEST_RESULT.store(0, core::sync::atomic::Ordering::SeqCst);
+    let cp = create();
+    let listener = service::register(b"cp-listener-probe")?;
+    register(cp, WaitSource::Listener(listener.raw()), 62)?;
+    sched::spawn(b"cp-listen", 16, cp_source_waiter_task, cp.raw(), 0)?;
+    sched::sleep_ns_interruptible(20_000_000);
+    let parked = CP_TEST_RESULT.load(core::sync::atomic::Ordering::SeqCst) == 0;
+    let client = service::connect(b"cp-listener-probe");
+    let got = await_cp_result();
+    close(cp);
+    if let Ok(c) = client {
+        channel::close(c);
+    }
+    let accepted = service::try_accept(listener);
+    if let Ok(Some(server)) = accepted {
+        channel::close(server);
+    }
+    let unregistered = service::unregister(listener);
+    if !parked || client.is_err() || got != 62 || unregistered.is_err() {
+        serial_println!(
+            "[completion]   FAIL: a connection did not wake the port (parked {}, connect {:?}, got {})",
+            parked,
+            client.map(|_| ()),
+            got
+        );
+        return Err(KernelError::InternalError);
+    }
+
+    serial_println!("[completion]   A channel message and a connection wake the waiter: OK");
+    Ok(())
 }
 
 /// Test 3: notify wakes a blocked waiter.

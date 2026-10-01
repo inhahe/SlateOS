@@ -91115,3 +91115,200 @@ process's own number, as Linux does. `/proc/<pid>` is then the process, and
 **Revisit** if exec by a non-leader thread is modelled (Linux's `de_thread`
 hands it the leader's id), or if the leader-exit gap above matters to a
 program.
+
+## 1505. Record locks: native programs use the Linux `fcntl`'s own code, and a lock that must wait does wait, refusing only a wait that could never end
+
+**Date:** 2026-10-01 · **Decided by:** Claude (autonomous) · **Lane:** A
+
+**In short:** a program can lock part of a file so that no other program
+writes it at the same time; databases such as SQLite rely on this. Programs
+built for SlateOS itself could not reach the kernel's lock table at all, so
+their `fcntl` said yes to every lock and two of them could hold the same
+exclusive lock. They now reach it through a new system call that runs the same
+code as the Linux one, so the two kinds of program see each other's locks. A
+request that has to wait (`F_SETLKW`) now waits; it used to fail at once with
+"try again". A wait that could never end is refused with "would deadlock":
+two programs, each waiting for a range the other holds.
+
+**What changed:**
+- **`SYS_FS_RECORD_LOCK` (1093):** `(handle, op, flock_ptr)`. The ops are
+  `F_GETLK`, `F_SETLK` and `F_SETLKW` (0, 1, 2), with the `struct flock` in
+  the Linux layout, so libc passes its own structure through
+  (`requests/d-a-native-programs-cannot-reach-the-record-lock-table.md`).
+- **`syscall::record_lock`** is the one implementation both ABIs call. It
+  reads the `struct flock`, resolves the range against the handle, applies
+  the access-mode rule, and fills in `F_GETLK`'s answer.
+- **`fs::reclock`** gained the wait (`set_wait`), the deadlock search, the
+  merging of touching locks, and a key type (`LockKey`). The key names a file
+  without resolving its path again: the old path-taking API applied a jailed
+  process's namespace a second time. It also names a memfd, whose locks had
+  been looked up in the file-handle table under the memfd's number.
+- **POSIX's close rule:** closing *any* descriptor for a file drops the
+  process's locks on it, on every path that removes one (close, `dup2`,
+  `close_range`, close-on-exec, the native close).
+- **Linux fidelity fixes:**
+  - `F_GETLK` leaves the fields alone when nothing is in the way; it zeroed
+    `l_pid`.
+  - It reports a holder's range from byte 0 (`l_whence = SEEK_SET`).
+  - `F_GETLK` with `F_UNLCK` is `EINVAL`, and with `F_OFD_GETLK` it reports
+    the description's own lock.
+  - A lock the open mode does not allow is `EBADF`.
+  - A full table is `ENOLCK`.
+  - A lock taken while another thread closed the descriptor is dropped
+    (`EBADF`), as Linux's `fcntl_setlk` does.
+
+**The deadlock search -- alternatives:**
+
+| | What changes | For | Against |
+|---|---|---|---|
+| **A. Search the whole wait-for graph (chosen)** | any cycle of waiting processes is refused with `EDEADLK` | no cycle goes undetected, however long; the work is bounded by the waiters present | answers differ from Linux's for cycles longer than ten processes, where Linux lets them hang |
+| B. Linux's search: one chain, ten steps | identical answers to Linux | bit-for-bit Linux | misses longer cycles, and where a process has several waiting threads it follows one arbitrarily |
+| C. No search | `F_SETLKW` just waits | simplest | two deadlocked programs hang forever; POSIX asks for `EDEADLK` where the system can tell |
+
+Both A and B share one false alarm, as Linux documents for itself. The owner
+of a lock is a process, so a cycle through one waiting thread of a
+multi-threaded process is reported even when another of its threads could
+still release the lock. OFD locks take no part, as on Linux: their owner is
+an open file description, not something that waits.
+
+**The native ABI -- what was left out, and why:**
+- **OFD ops.** Lane D asked for none; nothing native uses them. They fit as
+  op values 3 to 5 when something does.
+- **Closes the kernel never sees.** A native process's descriptor table is
+  libc's, so closing one of two descriptors that share a handle does not
+  reach the kernel. libc applies the close rule itself, with a whole-file
+  `F_UNLCK` through the same call. The kernel applies it on `SYS_FS_CLOSE`
+  and on close-on-exec.
+
+**Consequences:**
+- A file renamed or unlinked since it was opened keeps being locked under
+  its open-time path when the filesystem cannot give its identity, as
+  before. The path is what the VFS hands a handle; keying by the file
+  itself waits on handles that carry their file's identity (the VFS
+  unlinked-open-file redesign).
+
+**Revisit** when handles carry their file's identity (key by it), or if a
+program is found that relies on Linux's ten-step limit.
+
+## 1506. `flock` locks belong to the open file description, a contended one waits, and the native path-based door no longer takes an owner from the caller
+
+**Date:** 2026-10-01 · **Decided by:** Claude (autonomous) · **Lane:** A
+
+**In short:** `flock` is the whole-file lock that `flock(1)`, package
+managers and lock files use. Through the native calls any program could
+release any other program's lock, because the caller named the owner. A
+request that had to wait failed instead. Locks now belong to whoever holds
+them, never to a name the caller supplies. A request without "don't wait"
+waits until the lock is free. Native programs get a call with the same
+behaviour Linux and BSD programs have.
+
+**What changed:**
+- **Owners.** A lock belongs to a process (`vfs::flock_process_owner`, the
+  path-based `SYS_FS_FLOCK`) or to an open file description
+  (`vfs::flock_description_owner`: the Linux `flock(2)` and the new
+  `SYS_FS_FLOCK_HANDLE`). The two are tagged apart; they had collided
+  numerically. The path doors ignore their owner argument now.
+- **Waiting.** `Vfs::flock_wait_resolved`, woken by releases, conversions
+  and unmounts; a signal ends it with a restart.
+- **Conversion.** As Linux's `flock_lock_inode`: the lock held is given up
+  first.
+- **`SYS_FS_FLOCK_HANDLE` (1094):** `(handle, op)` with Linux's `LOCK_*`
+  values, per description, waiting unless `LOCK_NB`.
+
+**Alternatives for the path-based door's owner argument:**
+
+| | What changes | For | Against |
+|---|---|---|---|
+| **A. Ignore it; the owner is the caller (chosen)** | libc's calls are unchanged, since it passed its own pid | closes the hole with no caller to update | a caller that meant another owner silently gets its own |
+| B. Refuse an owner that is not the caller's pid | the same, plus `InvalidArgument` for a stranger's | a misuse is reported, not absorbed | a pid is not the only sensible value a caller passed (a tid), and nothing passes another |
+| C. Retire the path doors | callers must move to 1094 | one door | breaks the libc in the field until lane D moves |
+
+**Alternatives for conversion:**
+
+| | What changes | For | Against |
+|---|---|---|---|
+| **A. Linux's: give up the held lock first (chosen)** | a refused upgrade leaves no lock, as on Linux | two sharers that both upgrade cannot wait on each other forever; ported programs see Linux's behaviour | a refused `LOCK_NB` upgrade loses the shared lock |
+| B. Atomic: keep the held lock until the new one is granted | a refused upgrade keeps the shared lock | nothing lost on refusal | with waiting, two upgrading sharers deadlock; differs from Linux |
+
+**Revisit** if a native program is found that passed a meaningful owner other
+than its own pid to `SYS_FS_FLOCK`.
+
+## 1507. A file's device number is a small number per mounted filesystem, reused after unmount, not the mount's permanent id
+
+**Date:** 2026-10-01 · **Decided by:** Claude (autonomous) · **Lane:** A
+
+**In short:** every file reports which disk or filesystem it lives on
+(`st_dev`). Tools use it, with the file's inode number, to tell "two names
+for one file" from "two files": `tar`, `cp -a`, `du`, `find -samefile`.
+Every file here reported 0, so files on different filesystems could be
+mistaken for one another. Each mounted filesystem now has a small number of
+its own. It is given back when the filesystem is unmounted, and a later
+mount may take it, as on Linux.
+
+**Alternatives:**
+
+| | What changes | For | Against |
+|---|---|---|---|
+| **A. A dense number per live mount, reused (chosen)** | devices count 1, 2, 3 ... as filesystems are mounted at once | small enough for every place a device is reported, the native record's 24 bits included; Linux's own behaviour for anonymous filesystems | a number seen before an unmount can name a different filesystem after; tools compare devices within one walk, so it does not matter there |
+| B. The mount's `fs_id` | the permanent id, never reused | no lookup | grows with every mount for the whole uptime; outgrows 24 bits under container churn, and Linux's own 20-bit minor |
+| C. A number per filesystem *type* or backing device | e.g. one per disk | stable across remounts | two mounts of one type collide; `tmpfs` has no device at all |
+
+**The encoding:** major 0, the number as minor, built as glibc's
+`makedev(0, minor)` (`vfs::linux_dev_t`), so `major()` and `minor()` in a
+ported program take it apart.
+
+**Revisit** when real block devices are numbered (a disk partition should
+report its block device's numbers, as Linux's ext4 does), or if a program is
+found that keeps device numbers across an unmount.
+
+## 1508. An open file is held as the file itself, not its name
+
+**Date:** 2026-10-01 · **Decided by:** Claude (autonomous) · **Lane:** A
+
+**In short:** when a program opened a file, the system remembered only its
+name and looked that name up again for every read and write. So a file
+deleted or renamed while a program had it open was lost to that program, or
+silently swapped for whatever took the name next. Reads also stopped at the
+size the file had at open, so a program never saw another program's
+additions. Now an open file is held as the file itself, as on Linux. It
+survives a rename and a delete until the last program closes it, and every
+read sees the file as it is now.
+
+**What changed** (known-issues `A-AN-OPEN-FILE-FOLLOWS-ITS-NAME`):
+- **`FileSystem` gains inode-addressed calls:** pin/unpin, read, write,
+  append, truncate, metadata. memfs and ext4 implement them.
+- **`Vfs::open_object` returns a `FileObject`** (the mount plus the inode),
+  which `fs::handle` holds for a regular file. All its I/O goes through it.
+- **A file whose last name goes while held lives on,** unnamed, until its
+  last close. On memfs an open count keeps the node. On ext4 the inode goes
+  on the on-disk orphan list (`s_last_orphan`, chained through `i_dtime`),
+  and the next mount frees anything a crash left there.
+- **Sizes are the file's own at each call.** `O_APPEND` finds the end and
+  writes in one hold of the filesystem lock.
+
+**Alternatives, the main one:**
+
+| | What changes | For | Against |
+|---|---|---|---|
+| **A. Handles hold (mount, inode), filesystems pin (chosen)** | open files behave as on Linux on memfs and ext4 | small, local to the handle layer and two filesystems; everything path-based elsewhere is untouched | two ways for a handle to reach its file: FAT and the pseudo filesystems still go by name |
+| B. A Linux-style inode and dentry cache in the VFS | every filesystem behind one in-memory inode | one model for all | rewrites the VFS and every filesystem; months of churn for the same behaviour on the two filesystems that matter |
+| C. Keep names; follow renames, refuse unlinks of open files | a rename updates every handle's name; an unlink of an open file fails | no filesystem changes | `unlink` of an open file is POSIX-legal and common (SQLite); refusing it breaks programs |
+
+**Smaller decisions that came with it:**
+
+| decision | alternative | why this one |
+|---|---|---|
+| Access is checked at open only | re-check the path's permissions on every write, as before | POSIX: a descriptor survives a later `chmod`. Re-checking also cannot work for a file with no name |
+| An unmount refuses while a file on the mount is held (`DeviceBusy`) | lazy unmount: detach now, free at the last close | Linux's default `umount` answers `EBUSY`; lazy unmount would leave I/O reaching a detached filesystem |
+| `ftruncate` leaves the offset alone | clamp it to the new end, as before | POSIX says so: a later write leaves a hole |
+| Per-file state (ACL, seals, flags) of an unlinked held file ends at its last release | end it at the unlink, as before | a write-sealed file must stay sealed to the handle still writing it |
+| ext4 orphans go on the on-disk list | keep them in memory only | a crash with a deleted-but-open file would leak its blocks until `fsck`; the list is what ext4 has for this, and Linux reads it too |
+
+**Consequences:**
+- On FAT and the pseudo filesystems a handle still goes by name. They have
+  no stable inode numbers to hold.
+- `O_TMPFILE` and `SYS_FS_TMPFILE` can now be built (create, hold, unlink)
+  and are not yet; they still refuse.
+
+**Revisit** if FAT needs held files: it would need an object identity of
+its own, such as the first cluster.

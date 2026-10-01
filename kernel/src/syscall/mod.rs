@@ -30,6 +30,7 @@ pub(crate) mod handlers;
 pub mod linux;
 pub mod number;
 pub mod profile;
+pub mod record_lock;
 pub mod trace;
 pub mod wait;
 

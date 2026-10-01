@@ -41,54 +41,55 @@ use super::number::{
     SYS_EVENTFD_READ, SYS_EVENTFD_READ_TIMEOUT, SYS_EVENTFD_TRY_READ, SYS_EVENTFD_WRITE,
     SYS_EVENTFD_WRITE_TIMEOUT, SYS_EXIT, SYS_FS_APPEND, SYS_FS_CHECK, SYS_FS_CLOSE, SYS_FS_COPY,
     SYS_FS_DELETE, SYS_FS_DUP, SYS_FS_FALLOCATE, SYS_FS_FCHMODAT_PINNED, SYS_FS_FLOCK,
-    SYS_FS_FORMAT, SYS_FS_FSTAT, SYS_FS_FSTATAT_PINNED, SYS_FS_FTRUNCATE, SYS_FS_FUNLOCK,
-    SYS_FS_GET_XATTR, SYS_FS_GETDENTS_PINNED, SYS_FS_HANDLE_PATH, SYS_FS_JOURNAL_CURSOR,
-    SYS_FS_JOURNAL_FLUSH, SYS_FS_JOURNAL_READ, SYS_FS_LINK, SYS_FS_LINKAT_PINNED, SYS_FS_LIST_DIR,
-    SYS_FS_LIST_XATTRS, SYS_FS_LSTAT, SYS_FS_METADATA, SYS_FS_MKDIR, SYS_FS_MKDIR_MODE,
-    SYS_FS_MKDIRAT_PINNED, SYS_FS_MOUNT, SYS_FS_OPEN, SYS_FS_OPEN_MODE, SYS_FS_OPENAT2,
-    SYS_FS_PREAD, SYS_FS_PWRITE, SYS_FS_READ, SYS_FS_READ_FILE, SYS_FS_READDIR_AT, SYS_FS_READLINK,
-    SYS_FS_REMOVE_XATTR, SYS_FS_RENAME, SYS_FS_RENAMEAT_PINNED, SYS_FS_RMDIR, SYS_FS_SEEK,
-    SYS_FS_SEEK_DATA, SYS_FS_SEEK_HOLE, SYS_FS_SET_ATTR, SYS_FS_SET_OWNER, SYS_FS_SET_PERMS,
-    SYS_FS_SET_TIMES, SYS_FS_SET_XATTR, SYS_FS_STAT, SYS_FS_STATVFS, SYS_FS_SYMLINK,
-    SYS_FS_SYMLINKAT_PINNED, SYS_FS_SYNC, SYS_FS_TMPFILE, SYS_FS_TRASH, SYS_FS_TRASH_EMPTY,
-    SYS_FS_TRASH_LIST, SYS_FS_TRASH_RESTORE, SYS_FS_TRIM, SYS_FS_TRUNCATE, SYS_FS_UMOUNT,
-    SYS_FS_UNLINKAT_PINNED, SYS_FS_UTIMENSAT_PINNED, SYS_FS_WATCH_CLOSE, SYS_FS_WATCH_CREATE,
-    SYS_FS_WATCH_READ, SYS_FS_WATCH_READ_RECORDS, SYS_FS_WRITE, SYS_FS_WRITE_FILE,
-    SYS_FUTEX_CMP_REQUEUE_PI, SYS_FUTEX_LOCK_PI, SYS_FUTEX_LOCK_PI_TIMEOUT, SYS_FUTEX_REQUEUE,
-    SYS_FUTEX_TRYLOCK_PI, SYS_FUTEX_UNLOCK_PI, SYS_FUTEX_WAIT, SYS_FUTEX_WAIT_REQUEUE_PI,
-    SYS_FUTEX_WAIT_TIMEOUT, SYS_FUTEX_WAKE, SYS_GETRANDOM, SYS_HOSTNAME_SET, SYS_ICMP_PING,
-    SYS_ICMP_PING_WAIT, SYS_IO_RING_DESTROY, SYS_IO_RING_ENTER, SYS_IO_RING_SETUP,
-    SYS_IRQ_REGISTER, SYS_IRQ_RELEASE, SYS_IRQ_WAIT, SYS_ITIMER_GET, SYS_ITIMER_SET,
-    SYS_KEYLAYOUT_SET, SYS_LOADAVG, SYS_LOG_READ, SYS_MM_GET_PROFILE, SYS_MM_SET_PROFILE, SYS_MMAP,
-    SYS_MPROTECT, SYS_MUNMAP, SYS_NET_FW_ADD_RULE, SYS_NET_FW_DEL_RULE, SYS_NET_FW_ENABLE,
-    SYS_NET_FW_FLUSH, SYS_NET_FW_SET_POLICY, SYS_NET_IF_CONFIG, SYS_NET_IF_INFO, SYS_NET_RAW_CLOSE,
-    SYS_NET_RAW_OPEN, SYS_NET_RAW_RX, SYS_NET_RAW_TX, SYS_NET_ROUTE_ADD, SYS_NET_ROUTE_DEL,
-    SYS_NET_ROUTE_LIST, SYS_NET_STAT, SYS_NOTIFY_READY, SYS_NS_ATTACH, SYS_NS_BIND, SYS_NS_CREATE,
-    SYS_NS_HIDE, SYS_NS_QUERY, SYS_NS_UNBIND, SYS_PHYS_PAGES_AVAIL, SYS_PHYS_PAGES_TOTAL,
-    SYS_PIPE_CLOSE, SYS_PIPE_CREATE, SYS_PIPE_PEEK, SYS_PIPE_POLL, SYS_PIPE_READ,
-    SYS_PIPE_READ_TIMEOUT, SYS_PIPE_READABLE_BYTES, SYS_PIPE_TRY_READ, SYS_PIPE_TRY_WRITE,
-    SYS_PIPE_WAIT_READABLE, SYS_PIPE_WRITE, SYS_PIPE_WRITE_TIMEOUT, SYS_PORT_READ, SYS_PORT_WRITE,
-    SYS_PROCESS_CHROOT, SYS_PROCESS_COUNT, SYS_PROCESS_CRASH_INFO, SYS_PROCESS_GET_ARGS,
-    SYS_PROCESS_GET_CREDENTIALS, SYS_PROCESS_GET_CWD, SYS_PROCESS_GET_INITIAL_FDS,
-    SYS_PROCESS_GET_NICE, SYS_PROCESS_GET_PGID, SYS_PROCESS_GET_PRIORITY, SYS_PROCESS_GET_RUSAGE,
-    SYS_PROCESS_GET_SID, SYS_PROCESS_ID, SYS_PROCESS_IS_READY, SYS_PROCESS_KILL,
-    SYS_PROCESS_PARENT_ID, SYS_PROCESS_SET_CREDENTIALS, SYS_PROCESS_SET_CWD,
-    SYS_PROCESS_SET_EXEC_CLOSE, SYS_PROCESS_SET_EXEC_FDS, SYS_PROCESS_SET_NICE,
-    SYS_PROCESS_SET_PGID, SYS_PROCESS_SET_PRIORITY, SYS_PROCESS_SET_SID, SYS_PROCESS_SETGROUPS,
-    SYS_PROCESS_SPAWN, SYS_PROCESS_SPAWN_EX, SYS_PROCESS_SPAWN_EX2, SYS_PROCESS_TRY_WAIT,
-    SYS_PROCESS_UMASK, SYS_PROCESS_WAIT, SYS_PROCESS_WAIT_STATUS, SYS_PTY_CLOSE, SYS_PTY_CREATE,
-    SYS_PTY_DUP, SYS_PTY_GET_PGRP, SYS_PTY_GET_TERMIOS, SYS_PTY_GET_WINSIZE, SYS_PTY_MASTER_READ,
-    SYS_PTY_MASTER_TRY_READ, SYS_PTY_MASTER_TRY_WRITE, SYS_PTY_MASTER_WRITE, SYS_PTY_POLL,
-    SYS_PTY_READABLE_BYTES, SYS_PTY_SET_PGRP, SYS_PTY_SET_TERMIOS, SYS_PTY_SET_WINSIZE,
-    SYS_PTY_SLAVE_ID, SYS_PTY_SLAVE_READ, SYS_PTY_SLAVE_TRY_READ, SYS_PTY_SLAVE_WRITE,
-    SYS_RLIMIT_GET, SYS_RLIMIT_SET, SYS_SCHED_GET_PROFILE, SYS_SCHED_GET_TIMESLICE,
-    SYS_SCHED_RECONFIGURE, SYS_SCHED_SET_PROFILE, SYS_SCHED_SET_TIMESLICE, SYS_SECUREBOOT_ENROLL,
-    SYS_SECUREBOOT_REMOVE, SYS_SECUREBOOT_VERIFY, SYS_SEM_CLOSE, SYS_SEM_CREATE, SYS_SEM_SIGNAL,
-    SYS_SEM_TRY_WAIT, SYS_SEM_WAIT, SYS_SEM_WAIT_TIMEOUT, SYS_SERVICE_ACCEPT,
-    SYS_SERVICE_ACCEPT_TIMEOUT, SYS_SERVICE_CONNECT, SYS_SERVICE_REGISTER, SYS_SERVICE_TRY_ACCEPT,
-    SYS_SERVICE_UNREGISTER, SYS_SET_EXCEPTION_HANDLER, SYS_SET_FS_BASE, SYS_SHM_CLOSE,
-    SYS_SHM_CREATE, SYS_SHM_MAP, SYS_SHM_MAP_AT, SYS_SHM_SIZE, SYS_SHM_UNMAP, SYS_SIGNAL_ALTSTACK,
-    SYS_SIGNAL_MASK, SYS_SIGNAL_PENDING, SYS_SIGNAL_QUEUE, SYS_SIGNAL_REGISTER, SYS_SIGNAL_SEND,
+    SYS_FS_FLOCK_HANDLE, SYS_FS_FORMAT, SYS_FS_FSTAT, SYS_FS_FSTATAT_PINNED, SYS_FS_FTRUNCATE,
+    SYS_FS_FUNLOCK, SYS_FS_GET_XATTR, SYS_FS_GETDENTS_PINNED, SYS_FS_HANDLE_PATH,
+    SYS_FS_JOURNAL_CURSOR, SYS_FS_JOURNAL_FLUSH, SYS_FS_JOURNAL_READ, SYS_FS_LINK,
+    SYS_FS_LINKAT_PINNED, SYS_FS_LIST_DIR, SYS_FS_LIST_XATTRS, SYS_FS_LSTAT, SYS_FS_METADATA,
+    SYS_FS_MKDIR, SYS_FS_MKDIR_MODE, SYS_FS_MKDIRAT_PINNED, SYS_FS_MOUNT, SYS_FS_OPEN,
+    SYS_FS_OPEN_MODE, SYS_FS_OPENAT2, SYS_FS_PREAD, SYS_FS_PWRITE, SYS_FS_READ, SYS_FS_READ_FILE,
+    SYS_FS_READDIR_AT, SYS_FS_READLINK, SYS_FS_RECORD_LOCK, SYS_FS_REMOVE_XATTR, SYS_FS_RENAME,
+    SYS_FS_RENAMEAT_PINNED, SYS_FS_RMDIR, SYS_FS_SEEK, SYS_FS_SEEK_DATA, SYS_FS_SEEK_HOLE,
+    SYS_FS_SET_ATTR, SYS_FS_SET_OWNER, SYS_FS_SET_PERMS, SYS_FS_SET_TIMES, SYS_FS_SET_XATTR,
+    SYS_FS_STAT, SYS_FS_STATVFS, SYS_FS_SYMLINK, SYS_FS_SYMLINKAT_PINNED, SYS_FS_SYNC,
+    SYS_FS_TMPFILE, SYS_FS_TRASH, SYS_FS_TRASH_EMPTY, SYS_FS_TRASH_LIST, SYS_FS_TRASH_RESTORE,
+    SYS_FS_TRIM, SYS_FS_TRUNCATE, SYS_FS_UMOUNT, SYS_FS_UNLINKAT_PINNED, SYS_FS_UTIMENSAT_PINNED,
+    SYS_FS_WATCH_CLOSE, SYS_FS_WATCH_CREATE, SYS_FS_WATCH_READ, SYS_FS_WATCH_READ_RECORDS,
+    SYS_FS_WRITE, SYS_FS_WRITE_FILE, SYS_FUTEX_CMP_REQUEUE_PI, SYS_FUTEX_LOCK_PI,
+    SYS_FUTEX_LOCK_PI_TIMEOUT, SYS_FUTEX_REQUEUE, SYS_FUTEX_TRYLOCK_PI, SYS_FUTEX_UNLOCK_PI,
+    SYS_FUTEX_WAIT, SYS_FUTEX_WAIT_REQUEUE_PI, SYS_FUTEX_WAIT_TIMEOUT, SYS_FUTEX_WAKE,
+    SYS_GETRANDOM, SYS_HOSTNAME_SET, SYS_ICMP_PING, SYS_ICMP_PING_WAIT, SYS_IO_RING_DESTROY,
+    SYS_IO_RING_ENTER, SYS_IO_RING_SETUP, SYS_IRQ_REGISTER, SYS_IRQ_RELEASE, SYS_IRQ_WAIT,
+    SYS_ITIMER_GET, SYS_ITIMER_SET, SYS_KEYLAYOUT_SET, SYS_LOADAVG, SYS_LOG_READ,
+    SYS_MM_GET_PROFILE, SYS_MM_SET_PROFILE, SYS_MMAP, SYS_MPROTECT, SYS_MUNMAP,
+    SYS_NET_FW_ADD_RULE, SYS_NET_FW_DEL_RULE, SYS_NET_FW_ENABLE, SYS_NET_FW_FLUSH,
+    SYS_NET_FW_SET_POLICY, SYS_NET_IF_CONFIG, SYS_NET_IF_INFO, SYS_NET_RAW_CLOSE, SYS_NET_RAW_OPEN,
+    SYS_NET_RAW_RX, SYS_NET_RAW_TX, SYS_NET_ROUTE_ADD, SYS_NET_ROUTE_DEL, SYS_NET_ROUTE_LIST,
+    SYS_NET_STAT, SYS_NOTIFY_READY, SYS_NS_ATTACH, SYS_NS_BIND, SYS_NS_CREATE, SYS_NS_HIDE,
+    SYS_NS_QUERY, SYS_NS_UNBIND, SYS_PHYS_PAGES_AVAIL, SYS_PHYS_PAGES_TOTAL, SYS_PIPE_CLOSE,
+    SYS_PIPE_CREATE, SYS_PIPE_PEEK, SYS_PIPE_POLL, SYS_PIPE_READ, SYS_PIPE_READ_TIMEOUT,
+    SYS_PIPE_READABLE_BYTES, SYS_PIPE_TRY_READ, SYS_PIPE_TRY_WRITE, SYS_PIPE_WAIT_READABLE,
+    SYS_PIPE_WRITE, SYS_PIPE_WRITE_TIMEOUT, SYS_PORT_READ, SYS_PORT_WRITE, SYS_PROCESS_CHROOT,
+    SYS_PROCESS_COUNT, SYS_PROCESS_CRASH_INFO, SYS_PROCESS_GET_ARGS, SYS_PROCESS_GET_CREDENTIALS,
+    SYS_PROCESS_GET_CWD, SYS_PROCESS_GET_INITIAL_FDS, SYS_PROCESS_GET_NICE, SYS_PROCESS_GET_PGID,
+    SYS_PROCESS_GET_PRIORITY, SYS_PROCESS_GET_RUSAGE, SYS_PROCESS_GET_SID, SYS_PROCESS_ID,
+    SYS_PROCESS_IS_READY, SYS_PROCESS_KILL, SYS_PROCESS_PARENT_ID, SYS_PROCESS_SET_CREDENTIALS,
+    SYS_PROCESS_SET_CWD, SYS_PROCESS_SET_EXEC_CLOSE, SYS_PROCESS_SET_EXEC_FDS,
+    SYS_PROCESS_SET_NICE, SYS_PROCESS_SET_PGID, SYS_PROCESS_SET_PRIORITY, SYS_PROCESS_SET_SID,
+    SYS_PROCESS_SETGROUPS, SYS_PROCESS_SPAWN, SYS_PROCESS_SPAWN_EX, SYS_PROCESS_SPAWN_EX2,
+    SYS_PROCESS_TRY_WAIT, SYS_PROCESS_UMASK, SYS_PROCESS_WAIT, SYS_PROCESS_WAIT_STATUS,
+    SYS_PTY_CLOSE, SYS_PTY_CREATE, SYS_PTY_DUP, SYS_PTY_GET_PGRP, SYS_PTY_GET_TERMIOS,
+    SYS_PTY_GET_WINSIZE, SYS_PTY_MASTER_READ, SYS_PTY_MASTER_TRY_READ, SYS_PTY_MASTER_TRY_WRITE,
+    SYS_PTY_MASTER_WRITE, SYS_PTY_POLL, SYS_PTY_READABLE_BYTES, SYS_PTY_SET_PGRP,
+    SYS_PTY_SET_TERMIOS, SYS_PTY_SET_WINSIZE, SYS_PTY_SLAVE_ID, SYS_PTY_SLAVE_READ,
+    SYS_PTY_SLAVE_TRY_READ, SYS_PTY_SLAVE_WRITE, SYS_RLIMIT_GET, SYS_RLIMIT_SET,
+    SYS_SCHED_GET_PROFILE, SYS_SCHED_GET_TIMESLICE, SYS_SCHED_RECONFIGURE, SYS_SCHED_SET_PROFILE,
+    SYS_SCHED_SET_TIMESLICE, SYS_SECUREBOOT_ENROLL, SYS_SECUREBOOT_REMOVE, SYS_SECUREBOOT_VERIFY,
+    SYS_SEM_CLOSE, SYS_SEM_CREATE, SYS_SEM_SIGNAL, SYS_SEM_TRY_WAIT, SYS_SEM_WAIT,
+    SYS_SEM_WAIT_TIMEOUT, SYS_SERVICE_ACCEPT, SYS_SERVICE_ACCEPT_TIMEOUT, SYS_SERVICE_CONNECT,
+    SYS_SERVICE_REGISTER, SYS_SERVICE_TRY_ACCEPT, SYS_SERVICE_UNREGISTER,
+    SYS_SET_EXCEPTION_HANDLER, SYS_SET_FS_BASE, SYS_SHM_CLOSE, SYS_SHM_CREATE, SYS_SHM_MAP,
+    SYS_SHM_MAP_AT, SYS_SHM_SIZE, SYS_SHM_UNMAP, SYS_SIGNAL_ALTSTACK, SYS_SIGNAL_MASK,
+    SYS_SIGNAL_PENDING, SYS_SIGNAL_QUEUE, SYS_SIGNAL_REGISTER, SYS_SIGNAL_SEND,
     SYS_SIGNAL_STOP_SELF, SYS_SIGNAL_TGKILL, SYS_SLEEP, SYS_SOCKETPAIR_CLOSE,
     SYS_SOCKETPAIR_CREATE, SYS_SOCKETPAIR_POLL, SYS_SOCKETPAIR_READABLE_BYTES, SYS_SOCKETPAIR_RECV,
     SYS_SOCKETPAIR_RECV_TIMEOUT, SYS_SOCKETPAIR_SEND, SYS_SOCKETPAIR_SEND_TIMEOUT,
@@ -559,6 +560,8 @@ const fn build_v1_table() -> SyscallTable {
     handlers[SYS_PROCESS_SET_EXEC_CLOSE as usize] = Some(handlers::sys_process_set_exec_close);
     handlers[SYS_FS_WATCH_READ_RECORDS as usize] = Some(handlers::sys_fs_watch_read_records);
     handlers[SYS_CPU_CURRENT as usize] = Some(handlers::sys_cpu_current);
+    handlers[SYS_FS_RECORD_LOCK as usize] = Some(handlers::sys_fs_record_lock);
+    handlers[SYS_FS_FLOCK_HANDLE as usize] = Some(handlers::sys_fs_flock_handle);
     handlers[SYS_SIGNAL_MASK as usize] = Some(handlers::sys_signal_mask);
     handlers[SYS_SIGNAL_PENDING as usize] = Some(handlers::sys_signal_pending);
     handlers[SYS_SIGNAL_STOP_SELF as usize] = Some(handlers::sys_signal_stop_self);
@@ -1025,6 +1028,7 @@ pub fn self_test() -> KernelResult<()> {
     test_dispatch_exec_close()?;
     test_dispatch_tioc_and_watch_records()?;
     test_cpu_current()?;
+    test_dispatch_shared_anonymous_memory()?;
     test_dispatch_secureboot_doors()?;
     test_dispatch_ipc_possession()?;
     test_dispatch_dropping_root_is_one_way()?;
@@ -1221,6 +1225,12 @@ pub fn self_test_fs() -> KernelResult<()> {
     test_dispatch_uts_name()?;
     test_dispatch_dns_hosts()?;
     test_dispatch_brightness_gated()?;
+    // Record locks, flock and the fs doors' gates: each writes a file in
+    // /tmp, so after the mount (they were put in the Step 11 list first, and
+    // would have failed there for want of a filesystem).
+    test_dispatch_record_lock()?;
+    test_dispatch_flock()?;
+    test_dispatch_fs_gates()?;
 
     serial_println!("[syscall] Post-mount dispatch self-test PASSED");
     Ok(())
@@ -2278,7 +2288,6 @@ fn test_dispatch_signal_siginfo_frame() -> KernelResult<()> {
     let pid = pcb::create("siginfo-frame", 0);
     let stranger = pcb::create("siginfo-stranger", 0);
     let pids = [pid, stranger];
-    let me = crate::sched::current_task_id();
     let as_pid = |nr: u64, a: SyscallArgs| self_test_as_process(pid, || dispatch(nr, &a).value);
 
     // Registration answers what it honours, and the registry agrees.
@@ -2341,8 +2350,16 @@ fn test_dispatch_signal_siginfo_frame() -> KernelResult<()> {
         return fail("sigqueue's signal 65", &pids);
     }
 
-    // tgkill: this task counts as a thread of `pid` for the test.
-    if as_pid(SYS_SIGNAL_TGKILL, args(pid, me, SIGUSR2)) != 0 {
+    // tgkill: a thread of `pid`. Not this task: the self-test runs on the
+    // boot task, whose id is 0, which no thread has -- tgkill refuses it,
+    // as Linux does. An id far above any the id counter reaches stands in.
+    const THREAD: u64 = 0x7FFF_0001;
+    let tgkill = |tgid: u64, tid: u64| {
+        crate::proc::thread::self_test_with_thread(THREAD, pid, || {
+            as_pid(SYS_SIGNAL_TGKILL, args(tgid, tid, SIGUSR2))
+        })
+    };
+    if tgkill(pid, THREAD) != 0 {
         return fail("tgkill to its own thread refused", &pids);
     }
     match signal::take_deliverable_info(pid) {
@@ -2353,12 +2370,11 @@ fn test_dispatch_signal_siginfo_frame() -> KernelResult<()> {
             return fail("tgkill's record", &pids);
         }
     }
-    if as_pid(SYS_SIGNAL_TGKILL, args(stranger, me, SIGUSR2)) != code(KernelError::NoSuchProcess) {
+    if tgkill(stranger, THREAD) != code(KernelError::NoSuchProcess) {
         return fail("tgkill named a thread of another process", &pids);
     }
-    for (tgid, tid) in [(0, me), (pid, 0)] {
-        if as_pid(SYS_SIGNAL_TGKILL, args(tgid, tid, SIGUSR2)) != code(KernelError::InvalidArgument)
-        {
+    for (tgid, tid) in [(0, THREAD), (pid, 0)] {
+        if tgkill(tgid, tid) != code(KernelError::InvalidArgument) {
             return fail("tgkill with an id not above zero", &pids);
         }
     }
@@ -2590,14 +2606,18 @@ fn test_dispatch_exec_close() -> KernelResult<()> {
         ],
     );
     let taken = pcb::take_exec_close_handles(pid);
-    let want = alloc::vec![
-        (fd_handle_type::PIPE, write_end),
-        (fd_handle_type::TCP_SOCKET, 5),
-        (fd_handle_type::CONSOLE, 0),
-    ];
-    if taken != want || !pcb::take_exec_close_handles(pid).is_empty() {
+    let want = pcb::ExecCloseList {
+        close: alloc::vec![
+            (fd_handle_type::PIPE, write_end),
+            (fd_handle_type::TCP_SOCKET, 5),
+            (fd_handle_type::CONSOLE, 0),
+        ],
+        // Kept open; its descriptor still counts as closed for record locks.
+        shared: alloc::vec![(fd_handle_type::PIPE, read_end)],
+    };
+    if taken != want || pcb::take_exec_close_handles(pid) != pcb::ExecCloseList::default() {
         serial_println!("[syscall]   took {:?}, want {:?} once", taken, want);
-        return fail("the close list was not taken less the kept handle", &pids);
+        return fail("the close list was not split by the kept handle", &pids);
     }
 
     // Closing the write end: the reader sees end-of-file at once.
@@ -2802,6 +2822,465 @@ fn test_cpu_current() -> KernelResult<()> {
     serial_println!(
         "[syscall]   SYS_CPU_CURRENT (1092): CPU {}, node 0: OK",
         got
+    );
+    Ok(())
+}
+
+/// Shared anonymous memory, through both ABIs, as a scratch process maps it
+/// (known-issues `A-FORK-MADE-SHARED-MEMORY-COPY-ON-WRITE`, "Not done"):
+///
+/// - native `SYS_MMAP` with `MAP_SHARED` maps committed pages marked
+///   `PageFlags::SHARED`, which fork shares rather than copies
+///   (`mm::cow::test_fork_keeps_shared_pages_shared`) and futexes key by
+///   physical page;
+/// - `MAP_SHARED | MAP_LAZY` is refused;
+/// - the Linux `MAP_SHARED | MAP_ANONYMOUS` does the same (it was `ENOSYS`),
+///   and a map with neither `MAP_SHARED` nor `MAP_PRIVATE` is `EINVAL`.
+fn test_dispatch_shared_anonymous_memory() -> KernelResult<()> {
+    use super::number::{MAP_LAZY, MAP_READ, MAP_SHARED, MAP_WRITE};
+    use crate::mm::page_table::{VirtAddr, shared_phys};
+    use crate::proc::pcb;
+    use crate::proc::thread::self_test_as_process;
+
+    fn fail(msg: &str, pid: pcb::ProcessId) -> KernelResult<()> {
+        serial_println!("[syscall]   FAIL: shared anonymous memory: {}", msg);
+        pcb::destroy(pid);
+        Err(KernelError::InternalError)
+    }
+    let args = |arg0: u64, arg1: u64, arg2: u64, arg3: u64| SyscallArgs {
+        arg0,
+        arg1,
+        arg2,
+        arg3,
+        arg4: u64::MAX, // the Linux fd: -1
+        arg5: 0,
+    };
+    const LEN: u64 = 0x8000; // two 16 KiB frames
+
+    let pid = pcb::create("shared-anon", 0);
+    let Some(pml4) = pcb::get_pml4(pid).filter(|&p| p != 0) else {
+        return fail("the scratch process has no address space", pid);
+    };
+    let as_pid = |nr: u64, a: SyscallArgs| self_test_as_process(pid, || dispatch(nr, &a).value);
+    let shared_at = |va: u64| shared_phys(pml4, VirtAddr::new(va)).is_some();
+
+    // Native: committed, shared, every page.
+    let native = as_pid(SYS_MMAP, args(0, LEN, MAP_READ | MAP_WRITE | MAP_SHARED, 0));
+    let Ok(native) = u64::try_from(native) else {
+        serial_println!("[syscall]     native MAP_SHARED answered {}", native);
+        return fail("native MAP_SHARED did not map", pid);
+    };
+    let native_ok = shared_at(native) && shared_at(native.saturating_add(0x4000));
+    let unmapped = as_pid(SYS_MUNMAP, args(native, LEN, 0, 0));
+    if !native_ok || unmapped != 0 {
+        return fail("native MAP_SHARED pages are not marked shared", pid);
+    }
+    if as_pid(SYS_MMAP, args(0, LEN, MAP_READ | MAP_SHARED | MAP_LAZY, 0))
+        != i64::from(KernelError::InvalidArgument.code())
+    {
+        return fail("MAP_SHARED | MAP_LAZY was not refused", pid);
+    }
+
+    // Linux: MAP_SHARED | MAP_ANONYMOUS (0x21), PROT_READ | PROT_WRITE.
+    let linux = self_test_as_process(pid, || {
+        super::linux::dispatch_linux(super::linux::nr::MMAP, &args(0, LEN, 0x3, 0x21)).value
+    });
+    let Ok(linux) = u64::try_from(linux) else {
+        serial_println!(
+            "[syscall]     Linux MAP_SHARED|MAP_ANONYMOUS answered {}",
+            linux
+        );
+        return fail("Linux shared anonymous mmap did not map", pid);
+    };
+    let linux_ok = shared_at(linux);
+    let linux_unmapped = self_test_as_process(pid, || {
+        super::linux::dispatch_linux(super::linux::nr::MUNMAP, &args(linux, LEN, 0, 0)).value
+    });
+    let neither = self_test_as_process(pid, || {
+        super::linux::dispatch_linux(super::linux::nr::MMAP, &args(0, LEN, 0x3, 0x20)).value
+    });
+    if !linux_ok || linux_unmapped != 0 {
+        return fail("Linux shared anonymous pages are not marked shared", pid);
+    }
+    if neither != i64::from(super::linux::errno::EINVAL).wrapping_neg() {
+        serial_println!("[syscall]     a map with no type answered {}", neither);
+        return fail(
+            "a map with neither MAP_SHARED nor MAP_PRIVATE was not EINVAL",
+            pid,
+        );
+    }
+
+    pcb::destroy(pid);
+    serial_println!(
+        "[syscall]   shared anonymous memory (native MAP_SHARED, Linux MAP_SHARED|MAP_ANONYMOUS): OK"
+    );
+    Ok(())
+}
+
+/// `SYS_FS_RECORD_LOCK` (1093) as two scratch processes call it, with each
+/// one's `struct flock` in its own user memory
+/// (`requests/d-a-native-programs-cannot-reach-the-record-lock-table.md`):
+///
+/// - an unknown op is `InvalidArgument`, a handle the caller does not hold
+///   `InvalidHandle`, and a `struct flock` in kernel memory `InvalidAddress`;
+/// - one process's write lock refuses the other's (`WouldBlock`), and the
+///   other's `F_GETLK` names the holder's pid and range, from byte 0;
+/// - the holder's `SYS_FS_CLOSE` releases its locks, POSIX's close rule, so
+///   the other can then take the range.
+///
+/// Waiting (`RECORD_LOCK_SET_WAIT`) and the rest of the rules are
+/// `fs::reclock::self_test` and `syscall::record_lock::self_test`; this is
+/// the door.
+fn test_dispatch_record_lock() -> KernelResult<()> {
+    use super::number::{MAP_READ, MAP_WRITE, RECORD_LOCK_GET, RECORD_LOCK_SET};
+    use super::record_lock::{F_WRLCK, Flock, SEEK_SET};
+    use crate::cap::ResourceType;
+    use crate::fs::handle::{self, OpenFlags};
+    use crate::mm::user::{copy_from_user_as, copy_to_user_as};
+    use crate::proc::pcb::{self, ProcessId};
+    use crate::proc::thread::self_test_as_process;
+
+    const PATH: &str = "/tmp/record-lock-dispatch";
+
+    fn fail(msg: &str, pids: &[ProcessId]) -> KernelResult<()> {
+        serial_println!("[syscall]   FAIL: record lock: {}", msg);
+        for &p in pids {
+            pcb::destroy(p);
+        }
+        // Best effort: the file is this test's own scratch.
+        let _ = crate::fs::Vfs::remove(PATH);
+        Err(KernelError::InternalError)
+    }
+    let args = |arg0: u64, arg1: u64, arg2: u64| SyscallArgs {
+        arg0,
+        arg1,
+        arg2,
+        arg3: 0,
+        arg4: 0,
+        arg5: 0,
+    };
+    let code = |e: KernelError| i64::from(e.code());
+
+    let holder = pcb::create("reclock-holder", 0);
+    let other = pcb::create("reclock-other", 0);
+    let pids = [holder, other];
+    // Best effort: a leftover from an earlier boot's failure.
+    let _ = crate::fs::Vfs::remove(PATH);
+    if crate::fs::Vfs::write_file(PATH, b"0123456789abcdef").is_err() {
+        return fail("could not create the scratch file", &pids);
+    }
+    let rw = OpenFlags::READ.union(OpenFlags::WRITE);
+    let (Ok(h1), Ok(h2)) = (handle::open(PATH, rw), handle::open(PATH, rw)) else {
+        return fail("could not open the scratch file twice", &pids);
+    };
+    // Given to the processes as an open would give them; their teardown
+    // closes them.
+    pcb::register_ipc_handle(holder, ResourceType::File, h1);
+    pcb::register_ipc_handle(other, ResourceType::File, h2);
+
+    // A page of user memory in each process for its struct flock.
+    let map = |pid: ProcessId| {
+        self_test_as_process(pid, || {
+            dispatch(SYS_MMAP, &args(0, 0x4000, MAP_READ | MAP_WRITE)).value
+        })
+    };
+    let (Ok(buf1), Ok(buf2)) = (u64::try_from(map(holder)), u64::try_from(map(other))) else {
+        return fail("could not map the scratch processes' memory", &pids);
+    };
+    let (Some(pml1), Some(pml2)) = (
+        pcb::get_pml4(holder).filter(|&p| p != 0),
+        pcb::get_pml4(other).filter(|&p| p != 0),
+    ) else {
+        return fail("a scratch process has no address space", &pids);
+    };
+    // One call: the flock written to the caller's memory, the syscall made
+    // as the caller, and the flock read back.
+    let call = |pid: ProcessId, pml4: u64, buf: u64, h: u64, op: u64, f: Flock| {
+        if copy_to_user_as(pml4, buf, &f.to_bytes()).is_err() {
+            return (i64::MIN, None);
+        }
+        let r = self_test_as_process(pid, || {
+            dispatch(SYS_FS_RECORD_LOCK, &args(h, op, buf)).value
+        });
+        let mut back = [0u8; Flock::SIZE];
+        let f = copy_from_user_as(pml4, buf, &mut back)
+            .ok()
+            .map(|()| Flock::from_bytes(back));
+        (r, f)
+    };
+    let write_0_10 = Flock::new(F_WRLCK, SEEK_SET, 0, 10);
+    let write_5_6 = Flock::new(F_WRLCK, SEEK_SET, 5, 1);
+
+    // The door's own refusals.
+    let unknown_op = call(holder, pml1, buf1, h1, 3, write_0_10).0;
+    let not_held = call(holder, pml1, buf1, h2, RECORD_LOCK_SET, write_0_10).0;
+    let kernel_flock = write_0_10.to_bytes();
+    let from_kernel = self_test_as_process(holder, || {
+        dispatch(
+            SYS_FS_RECORD_LOCK,
+            &args(h1, RECORD_LOCK_SET, kernel_flock.as_ptr() as u64),
+        )
+        .value
+    });
+    if unknown_op != code(KernelError::InvalidArgument)
+        || not_held != code(KernelError::InvalidHandle)
+        || from_kernel != code(KernelError::InvalidAddress)
+    {
+        serial_println!(
+            "[syscall]     op 3 {}, another's handle {}, kernel memory {}",
+            unknown_op,
+            not_held,
+            from_kernel
+        );
+        return fail("a refusal answered wrongly", &pids);
+    }
+
+    // The holder locks [0,10); the other is refused, and asks who holds it.
+    let taken = call(holder, pml1, buf1, h1, RECORD_LOCK_SET, write_0_10).0;
+    let refused = call(other, pml2, buf2, h2, RECORD_LOCK_SET, write_5_6).0;
+    let (asked, report) = call(other, pml2, buf2, h2, RECORD_LOCK_GET, write_5_6);
+    let want = write_0_10.with_pid(i32::try_from(holder).unwrap_or(-1));
+    if taken != 0 || refused != code(KernelError::WouldBlock) || asked != 0 || report != Some(want)
+    {
+        serial_println!(
+            "[syscall]     take {}, the other's {}, its F_GETLK {} -> {:?}",
+            taken,
+            refused,
+            asked,
+            report
+        );
+        return fail(
+            "a lock did not refuse another process, or was misreported",
+            &pids,
+        );
+    }
+
+    // The holder closes its handle; the close takes its locks with it.
+    let closed = self_test_as_process(holder, || dispatch(SYS_FS_CLOSE, &args(h1, 0, 0)).value);
+    let after = call(other, pml2, buf2, h2, RECORD_LOCK_SET, write_5_6).0;
+    if closed != 0 || after != 0 {
+        serial_println!(
+            "[syscall]     close {}, then the other's lock {}",
+            closed,
+            after
+        );
+        return fail("closing the handle did not release its locks", &pids);
+    }
+
+    for &p in &pids {
+        pcb::destroy(p);
+    }
+    // Best effort: the file is this test's own scratch.
+    let _ = crate::fs::Vfs::remove(PATH);
+    serial_println!(
+        "[syscall]   SYS_FS_RECORD_LOCK (1093): refusals, conflicts, F_GETLK, close: OK"
+    );
+    Ok(())
+}
+
+/// The `flock` doors.
+///
+/// **`SYS_FS_FLOCK_HANDLE` (1094)**, as two scratch processes with an open
+/// each of one file, opened read-only, since `flock` needs no write access:
+/// - an op that is not one of the three is `InvalidArgument`, and a handle
+///   the caller does not hold `InvalidHandle`;
+/// - one description's exclusive lock refuses the other's shared one under
+///   `FLOCK_NB` (`WouldBlock`);
+/// - the holder's final close releases it.
+///
+/// **`SYS_FS_FLOCK` / `SYS_FS_FUNLOCK` (609/640) take their owner from the
+/// caller.** A lock taken "for" owner 12345 is not 12345's, and a release
+/// "for" 777 leaves 777's lock alone. Both were the caller's to name until
+/// 2026-10-01. These run on this kernel task, whose pointers pass the
+/// user-pointer checks; with no process, it is process 0's owner.
+fn test_dispatch_flock() -> KernelResult<()> {
+    use super::number::{FLOCK_EX, FLOCK_NB, FLOCK_SH};
+    use crate::cap::ResourceType;
+    use crate::fs::handle::{self, OpenFlags};
+    use crate::fs::vfs::{LockType, flock_process_owner};
+    use crate::proc::pcb::{self, ProcessId};
+    use crate::proc::thread::self_test_as_process;
+
+    const PATH: &str = "/tmp/flock-dispatch";
+
+    fn fail(msg: &str, pids: &[ProcessId]) -> KernelResult<()> {
+        serial_println!("[syscall]   FAIL: flock: {}", msg);
+        for &p in pids {
+            pcb::destroy(p);
+        }
+        crate::fs::Vfs::funlock_all(flock_process_owner(0));
+        crate::fs::Vfs::funlock_all(777);
+        crate::fs::Vfs::funlock_all(12345);
+        // Best effort: the file is this test's own scratch.
+        let _ = crate::fs::Vfs::remove(PATH);
+        Err(KernelError::InternalError)
+    }
+    let args = |arg0: u64, arg1: u64, arg2: u64, arg3: u64| SyscallArgs {
+        arg0,
+        arg1,
+        arg2,
+        arg3,
+        arg4: 0,
+        arg5: 0,
+    };
+    let code = |e: KernelError| i64::from(e.code());
+
+    let holder = pcb::create("flock-holder", 0);
+    let other = pcb::create("flock-other", 0);
+    let pids = [holder, other];
+    // Best effort: a leftover from an earlier boot's failure.
+    let _ = crate::fs::Vfs::remove(PATH);
+    if crate::fs::Vfs::write_file(PATH, b"flock").is_err() {
+        return fail("could not create the scratch file", &pids);
+    }
+    let (Ok(h1), Ok(h2)) = (
+        handle::open(PATH, OpenFlags::READ),
+        handle::open(PATH, OpenFlags::READ),
+    ) else {
+        return fail("could not open the scratch file twice", &pids);
+    };
+    // Given to the processes as an open would give them; their teardown
+    // closes them.
+    pcb::register_ipc_handle(holder, ResourceType::File, h1);
+    pcb::register_ipc_handle(other, ResourceType::File, h2);
+    let call = |pid: ProcessId, h: u64, op: u64| {
+        self_test_as_process(pid, || {
+            dispatch(SYS_FS_FLOCK_HANDLE, &args(h, op, 0, 0)).value
+        })
+    };
+
+    let bad_op = call(holder, h1, FLOCK_SH | FLOCK_EX);
+    let not_held = call(holder, h2, FLOCK_EX | FLOCK_NB);
+    let taken = call(holder, h1, FLOCK_EX | FLOCK_NB);
+    let refused = call(other, h2, FLOCK_SH | FLOCK_NB);
+    let closed = self_test_as_process(holder, || dispatch(SYS_FS_CLOSE, &args(h1, 0, 0, 0)).value);
+    let after = call(other, h2, FLOCK_EX | FLOCK_NB);
+    if bad_op != code(KernelError::InvalidArgument)
+        || not_held != code(KernelError::InvalidHandle)
+        || taken != 0
+        || refused != code(KernelError::WouldBlock)
+        || closed != 0
+        || after != 0
+    {
+        serial_println!(
+            "[syscall]     SH|EX {}, another's handle {}, take {}, the other's {}, close {}, then {}",
+            bad_op,
+            not_held,
+            taken,
+            refused,
+            closed,
+            after
+        );
+        return fail("SYS_FS_FLOCK_HANDLE answered wrongly", &pids);
+    }
+    for &p in &pids {
+        pcb::destroy(p);
+    }
+
+    // The path-based doors: the owner is the caller's, whatever arg3 says.
+    let path = PATH.as_bytes();
+    let (ptr, len) = (path.as_ptr() as u64, path.len() as u64);
+    let named = dispatch(SYS_FS_FLOCK, &args(ptr, len, 1, 12345)).value;
+    let as_12345 = crate::fs::Vfs::flock(PATH, 12345, LockType::Exclusive);
+    crate::fs::Vfs::funlock_all(flock_process_owner(0));
+    crate::fs::Vfs::funlock_all(12345);
+    let theirs = crate::fs::Vfs::flock(PATH, 777, LockType::Exclusive);
+    let released = dispatch(SYS_FS_FUNLOCK, &args(ptr, len, 777, 0)).value;
+    let still = crate::fs::Vfs::lock_query(PATH);
+    crate::fs::Vfs::funlock_all(777);
+    if named != 0
+        || as_12345 != Err(KernelError::WouldBlock)
+        || theirs.is_err()
+        || released != 0
+        || !matches!(still, Ok(Some((LockType::Exclusive, 1))))
+    {
+        serial_println!(
+            "[syscall]     lock {} then owner 12345's {:?}; 777's {:?}, a release naming it {}, then {:?}",
+            named,
+            as_12345,
+            theirs,
+            released,
+            still
+        );
+        return fail("the path-based flock doors took a caller-chosen owner", &[]);
+    }
+
+    // Best effort: the file is this test's own scratch.
+    let _ = crate::fs::Vfs::remove(PATH);
+    serial_println!(
+        "[syscall]   flock: SYS_FS_FLOCK_HANDLE (1094) per description; 609/640 owned by the caller: OK"
+    );
+    Ok(())
+}
+
+/// The native fs doors that skipped their gate (2026-10-01 audit), as a
+/// scratch process that holds no capability:
+///
+/// - `SYS_FS_SEEK_DATA` and `SYS_FS_SEEK_HOLE` refuse a handle the caller
+///   does not hold (`InvalidHandle`), as `SYS_FS_SEEK` does, and take one it
+///   does;
+/// - `SYS_FS_READDIR_AT` and `SYS_FS_FALLOCATE` ask for the File capability
+///   (`PermissionDenied` without it), as `SYS_FS_LIST_DIR` and
+///   `SYS_FS_TRUNCATE` do. The gate comes before the path is read, so the
+///   null path cannot be what refuses;
+/// - `SYS_FS_TMPFILE` is `NotSupported` rather than a named file nobody
+///   deletes.
+fn test_dispatch_fs_gates() -> KernelResult<()> {
+    use crate::cap::ResourceType;
+    use crate::fs::handle::{self, OpenFlags};
+    use crate::proc::pcb;
+    use crate::proc::thread::self_test_as_process;
+
+    const PATH: &str = "/tmp/fs-gates-dispatch";
+    let args = |arg0: u64, arg1: u64| SyscallArgs {
+        arg0,
+        arg1,
+        arg2: 0,
+        arg3: 0,
+        arg4: 0,
+        arg5: 0,
+    };
+    let code = |e: KernelError| i64::from(e.code());
+
+    // Best effort: a leftover from an earlier boot's failure.
+    let _ = crate::fs::Vfs::remove(PATH);
+    crate::fs::Vfs::write_file(PATH, b"seek data")?;
+    let h = handle::open(PATH, OpenFlags::READ)?;
+    let pid = pcb::create("fs-gates", 0);
+    let as_pid = |nr: u64, a: SyscallArgs| self_test_as_process(pid, || dispatch(nr, &a).value);
+
+    let data_unheld = as_pid(SYS_FS_SEEK_DATA, args(h, 0));
+    let hole_unheld = as_pid(SYS_FS_SEEK_HOLE, args(h, 0));
+    let readdir = as_pid(SYS_FS_READDIR_AT, args(0, 4));
+    let fallocate = as_pid(SYS_FS_FALLOCATE, args(0, 4));
+    let tmpfile = as_pid(SYS_FS_TMPFILE, args(0, 4));
+    // Given to the process as an open would give it; its teardown closes it.
+    pcb::register_ipc_handle(pid, ResourceType::File, h);
+    let data_held = as_pid(SYS_FS_SEEK_DATA, args(h, 0));
+    pcb::destroy(pid);
+    // Best effort: the file is this test's own scratch.
+    let _ = crate::fs::Vfs::remove(PATH);
+
+    if data_unheld != code(KernelError::InvalidHandle)
+        || hole_unheld != code(KernelError::InvalidHandle)
+        || data_held == code(KernelError::InvalidHandle)
+        || readdir != code(KernelError::PermissionDenied)
+        || fallocate != code(KernelError::PermissionDenied)
+        || tmpfile != code(KernelError::NotSupported)
+    {
+        serial_println!(
+            "[syscall]   FAIL: fs gates: seek-data {} / {} held, seek-hole {}, readdir-at {}, fallocate {}, tmpfile {}",
+            data_unheld,
+            data_held,
+            hole_unheld,
+            readdir,
+            fallocate,
+            tmpfile
+        );
+        return Err(KernelError::InternalError);
+    }
+    serial_println!(
+        "[syscall]   fs gates: seek-data/hole possession, readdir-at/fallocate capability, tmpfile refused: OK"
     );
     Ok(())
 }

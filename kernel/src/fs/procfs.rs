@@ -1361,33 +1361,134 @@ fn gen_cacheinfo() -> Vec<u8> {
     text.into_bytes()
 }
 
-/// `/proc/locks` — advisory file lock information.
+/// `/proc/locks` — every advisory lock held, in Linux's format, which
+/// `lslocks` and `lsof` parse:
+///
+/// ```text
+/// 1: POSIX  ADVISORY  WRITE 1234 00:03:131074 0 EOF
+/// 2: OFDLCK ADVISORY  READ -1 00:03:131074 100 199
+/// 3: FLOCK  ADVISORY  WRITE 5678 00:03:131075 0 EOF
+/// ```
+///
+/// - the class: `POSIX` (a process's `fcntl` lock), `OFDLCK` (an open file
+///   description's), or `FLOCK` (whole-file);
+/// - `READ` or `WRITE`;
+/// - the holder's pid: the process for a POSIX lock, the process that took
+///   it for a `FLOCK`, -1 for an OFD lock, as Linux reports one;
+/// - the file as `major:minor:inode`: the device `stat` reports
+///   (`st_dev`, major 0, as Linux numbers its anonymous filesystems) and the
+///   inode. A file with no stable identity is `00:00:0`, and a memfd shows
+///   its id as the inode;
+/// - the first and last byte locked, `EOF` for an open end; `0 EOF` for a
+///   `FLOCK`, which is whole-file.
+///
+/// Empty when nothing is locked, as on Linux. Until 2026-10-01 it had a
+/// format of its own and listed `flock` locks only.
 fn gen_locks() -> Vec<u8> {
-    // Query the lock table directly via Vfs internal.
-    // We can use lock_query for individual paths, but for a full dump
-    // we need to access the table.  Use a simpler approach: just report
-    // that the lock subsystem is active.
-    let mut text = String::from("LOCK  TYPE       OWNER    PATH\n");
+    use crate::fs::reclock::{LockKey, RecordLockType};
 
-    // Access the global lock table through a helper on Vfs.
-    let lock_info = super::vfs::lock_table_dump();
-    if lock_info.is_empty() {
-        text.push_str("(no active locks)\n");
-    } else {
-        for (path, lock_type, owner) in &lock_info {
-            let type_str = match lock_type {
-                super::vfs::LockType::Shared => "SHARED   ",
-                super::vfs::LockType::Exclusive => "EXCLUSIVE",
-            };
-            text.push_str(&format!(
-                "FLOCK {} {:>8}  {}\n",
-                type_str,
-                owner,
-                path.display()
-            ));
-        }
+    let mut text = String::new();
+    let mut n: u64 = 0;
+    // The device as `stat` reports it (`vfs::dev_of`), not the mount's
+    // internal id, so `lslocks` can match a lock to a file's `st_dev`.
+    let file = |id: Option<super::vfs::FileId>| {
+        id.map_or((0, 0), |f| (super::vfs::dev_of(f.fs_id), f.ino))
+    };
+    for (key, lock) in crate::fs::reclock::dump() {
+        n = n.saturating_add(1);
+        let ofd = crate::fs::reclock::owner_is_ofd(lock.owner);
+        let class = if ofd { "OFDLCK" } else { "POSIX " };
+        let kind = match lock.lock_type {
+            RecordLockType::Read => "READ",
+            RecordLockType::Write => "WRITE",
+        };
+        let pid = if ofd {
+            -1
+        } else {
+            i64::try_from(lock.owner).unwrap_or(-1)
+        };
+        let (fs, ino): (u32, u64) = match key {
+            LockKey::File { id, .. } => file(id),
+            LockKey::MemFd(id) => (0, id),
+        };
+        let last = if lock.len == 0 {
+            String::from("EOF")
+        } else {
+            format!("{}", lock.end().saturating_sub(1))
+        };
+        text.push_str(&format!(
+            "{}: {} ADVISORY  {} {} 00:{:02x}:{} {} {}\n",
+            n, class, kind, pid, fs, ino, lock.start, last
+        ));
+    }
+    for info in super::vfs::lock_table_dump() {
+        n = n.saturating_add(1);
+        let kind = match info.lock_type {
+            super::vfs::LockType::Shared => "READ",
+            super::vfs::LockType::Exclusive => "WRITE",
+        };
+        let (fs, ino) = file(info.id);
+        text.push_str(&format!(
+            "{}: FLOCK  ADVISORY  {} {} 00:{:02x}:{} 0 EOF\n",
+            n, kind, info.pid, fs, ino
+        ));
     }
     text.into_bytes()
+}
+
+/// `/proc/locks` lists record locks and `flock` locks in Linux's format.
+///
+/// Takes one of each on a scratch file, as owners no process uses, and
+/// checks the two lines; residue-free on every path.
+///
+/// # Errors
+///
+/// `InternalError` when a line is missing or malformed.
+pub fn self_test_locks() -> KernelResult<()> {
+    use crate::fs::reclock::{self, LockKey, RecordLockType};
+
+    const PATH: &str = "/tmp/_procfs_locks_test";
+    const RECORD_PID: u64 = 9401;
+    let flock_owner = super::vfs::flock_description_owner(9402);
+    // Best effort: a leftover from an earlier boot's failure.
+    let _ = super::Vfs::remove(PATH);
+    super::Vfs::write_file(PATH, b"proc locks")?;
+    let key = LockKey::for_path(PATH);
+    let owner = reclock::posix_owner(RECORD_PID);
+    let taken = reclock::set(&key, owner, 10, 5, RecordLockType::Write)
+        .and_then(|()| super::Vfs::flock(PATH, flock_owner, super::vfs::LockType::Shared));
+    let text = gen_locks();
+    reclock::release_all(owner);
+    super::Vfs::funlock_all(flock_owner);
+    // Best effort: the file is this test's own scratch.
+    let _ = super::Vfs::remove(PATH);
+    taken?;
+
+    let ino = match &key {
+        LockKey::File { id: Some(id), .. } => id.ino,
+        _ => 0,
+    };
+    // Every byte of it is this function's own ASCII; anything else is a fault.
+    let text = core::str::from_utf8(&text).map_err(|_| KernelError::InternalError)?;
+    let posix = format!("POSIX  ADVISORY  WRITE {} ", RECORD_PID);
+    let flock = "FLOCK  ADVISORY  READ ";
+    let posix_ok = text
+        .lines()
+        .any(|l| l.contains(&posix) && l.ends_with(&format!(":{} 10 14", ino)));
+    let flock_ok = text
+        .lines()
+        .any(|l| l.contains(flock) && l.ends_with(&format!(":{} 0 EOF", ino)));
+    if !posix_ok || !flock_ok {
+        crate::serial_println!(
+            "[procfs]   FAIL: /proc/locks (POSIX line {}, FLOCK line {}):\n{}",
+            posix_ok,
+            flock_ok,
+            text
+        );
+        return Err(KernelError::InternalError);
+    }
+    crate::serial_println!("[procfs] /proc/locks: record and flock locks, Linux's format: OK");
+    Ok(())
 }
 
 /// `/proc/diskstats` — block device statistics.
@@ -2876,9 +2977,11 @@ fn build_pid_stat(task: &crate::sched::TaskInfo, proc_id: u64) -> Vec<u8> {
 ///   guard (design-decisions §32).  All our VMAs are private mappings, so the
 ///   fourth char is always `p`.  Guard VMAs are never backed and carry no
 ///   access rights → `---p`.
-/// - `offset`/`dev`/`inode`: we do not track file-backed mappings yet, so
-///   these are `0`/`00:00`/`0`, exactly as Linux reports for anonymous
-///   mappings.
+/// - `offset`/`dev`/`inode`: for a file-backed region, the offset into the
+///   file it maps and the file's device and inode, as `stat` reports them;
+///   `0`/`00:00`/`0` otherwise, exactly as Linux reports for anonymous
+///   mappings. A file-backed region showed the anonymous triple until
+///   2026-10-01.
 /// - `pathname`: a bracketed tag identifying the region kind (`[stack]`,
 ///   `[guard]`, anonymous = empty, fixed = `[fixed]`), mirroring Linux's
 ///   `[stack]`/`[heap]` pseudo-paths.
@@ -2919,22 +3022,44 @@ fn render_maps(vmas: &[crate::mm::vma::Vma]) -> Vec<u8> {
             VmaKind::Guard => "[guard]",
             VmaKind::Fixed => "[fixed]",
             VmaKind::Brk => "[heap]",
-            // A file-backed private mapping; Linux would show the backing
-            // pathname here, but we don't cache the path in the VMA, so the
-            // region renders unnamed (like an anonymous mapping).
-            VmaKind::FileBacked { .. } => "",
-            VmaKind::Anonymous => "",
+            // A file-backed region is named by its file, below.
+            VmaKind::FileBacked { .. } | VmaKind::Anonymous => "",
+        };
+        // A file-backed region names its file as Linux's does: the offset
+        // into it, its device and inode, and the path its handle was opened
+        // under. A handle closed in a race leaves the name empty.
+        let (offset, dev, ino, file_path) = match &vma.kind {
+            VmaKind::FileBacked {
+                handle,
+                file_offset,
+                file_id,
+            } => (
+                *file_offset,
+                file_id.map_or(0, |f| crate::fs::vfs::dev_of(f.fs_id)),
+                file_id.map_or(0, |f| f.ino),
+                crate::fs::handle::handle_path(*handle).ok(),
+            ),
+            _ => (0, 0, 0, None),
         };
         // `write!` into a String is infallible; the Result is ignored.
         // Linux zero-pads start/end to a minimum of 8 hex digits
         // (fs/proc/task_mmu.c show_vma_header_prefix -> seq_put_hex_ll(.., 8));
         // addresses wider than 32 bits print their natural width.  Match that
         // with `{:08x}` so sub-4 GiB addresses align byte-for-byte with Linux.
-        let _ = writeln!(
-            text,
-            "{:08x}-{:08x} {r}{w}{x}p 00000000 00:00 0 {pathname}",
-            vma.start, vma.end
-        );
+        let _ = match file_path {
+            Some(path) => writeln!(
+                text,
+                "{:08x}-{:08x} {r}{w}{x}p {offset:08x} 00:{dev:02x} {ino} {}",
+                vma.start,
+                vma.end,
+                path.display()
+            ),
+            None => writeln!(
+                text,
+                "{:08x}-{:08x} {r}{w}{x}p {offset:08x} 00:{dev:02x} {ino} {pathname}",
+                vma.start, vma.end
+            ),
+        };
     }
     text.into_bytes()
 }
@@ -3002,15 +3127,17 @@ fn mangle_mount_field(s: impl AsRef<[u8]>) -> String {
 /// - `parent_id`: the root mount's id for every entry.  We do not model a
 ///   mount tree, so all mounts are reported as children of the root mount;
 ///   the root reports itself.  Parsers that build a tree tolerate this.
-/// - `major:minor`: `0:<index+1>`.  We have no block-device numbers, and
-///   Linux uses `0:N` minors for anonymous/virtual filesystems anyway.
+/// - `major:minor`: `0:<dev>`, the device number `stat` reports for files
+///   on that mount (`vfs::dev_of`), as Linux numbers its anonymous
+///   filesystems. It was the mount's index until 2026-10-01, which moved when
+///   an earlier mount went and matched no `st_dev`.
 /// - `root`: always `/` (we mount whole filesystems, never subtrees).
 /// - optional fields: none, so the separator `-` follows the options
 ///   directly (a valid, common case in real `mountinfo`).
 /// - `source`: `none` (we do not track backing devices), matching what we
 ///   already emit in `/proc/mounts`.
 /// - per-mount and super options are the same `MountOptions` string.
-fn render_mountinfo(mounts: &[(PathBuf, String, crate::fs::vfs::MountOptions)]) -> Vec<u8> {
+fn render_mountinfo(mounts: &[(PathBuf, String, crate::fs::vfs::MountOptions, u32)]) -> Vec<u8> {
     use core::fmt::Write as _;
 
     /// Base for synthetic mount ids.  Linux ids are arbitrary positive
@@ -3020,9 +3147,8 @@ fn render_mountinfo(mounts: &[(PathBuf, String, crate::fs::vfs::MountOptions)]) 
     let root_id = MOUNT_ID_BASE;
 
     let mut text = String::with_capacity(mounts.len().saturating_mul(96).max(16));
-    for (i, (path, fs_type, options)) in mounts.iter().enumerate() {
+    for (i, (path, fs_type, options, minor)) in mounts.iter().enumerate() {
         let mount_id = MOUNT_ID_BASE.saturating_add(i);
-        let minor = i.saturating_add(1);
         let opts = options.to_string();
         // Linux mangles the mount-point and fstype fields (see
         // `mangle_mount_field`); the options string is composed of
@@ -3051,6 +3177,18 @@ fn render_mountinfo(mounts: &[(PathBuf, String, crate::fs::vfs::MountOptions)]) 
 /// child was reported as uncovered and got the wrong fstype.
 fn mount_path_covers(mount_path: &Path, host: &Path) -> bool {
     crate::fs::pathutil::path_in_subtree(host, mount_path)
+}
+
+/// The mount serving host path `host`: the longest mount point covering it,
+/// as [`fstype_for_host_path`] chooses, with the device number beside it.
+fn host_mount_for<'a>(
+    host: &Path,
+    global: &'a [(PathBuf, String, crate::fs::vfs::MountOptions, u32)],
+) -> Option<&'a (PathBuf, String, crate::fs::vfs::MountOptions, u32)> {
+    global
+        .iter()
+        .filter(|m| mount_path_covers(&m.0, host))
+        .max_by_key(|m| m.0.len())
 }
 
 /// Resolve the filesystem type serving host path `host` from the global mount
@@ -3085,7 +3223,7 @@ fn fstype_for_host_path<'a>(
 /// what a write would actually do inside the container.
 fn render_container_mountinfo(
     view: &[crate::ipc::namespace::MountViewEntry],
-    global: &[(PathBuf, String, crate::fs::vfs::MountOptions)],
+    global: &[(PathBuf, String, crate::fs::vfs::MountOptions, u32)],
 ) -> Vec<u8> {
     use core::fmt::Write as _;
 
@@ -3095,8 +3233,11 @@ fn render_container_mountinfo(
     let mut text = String::with_capacity(view.len().saturating_mul(96).max(16));
     for (i, entry) in view.iter().enumerate() {
         let mount_id = MOUNT_ID_BASE.saturating_add(i);
-        let minor = i.saturating_add(1);
-        let fstype = mangle_mount_field(fstype_for_host_path(&entry.host_target, global));
+        // The host mount that serves it: its type, and the device number its
+        // files report, which a container sees as it is.
+        let host = host_mount_for(&entry.host_target, global);
+        let minor = host.map_or(0, |m| m.3);
+        let fstype = mangle_mount_field(host.map_or("none", |m| m.1.as_str()));
         let mount_point = mangle_mount_field(&entry.guest_path);
         let opts = if entry.read_only { "ro" } else { "rw" };
         let _ = writeln!(
@@ -3122,7 +3263,7 @@ fn gen_pid_mountinfo(task_id: u64) -> KernelResult<Vec<u8>> {
     if crate::proc::pcb::state(task_id).is_none() {
         return Err(KernelError::NotFound);
     }
-    let mounts = crate::fs::Vfs::mounts_full();
+    let mounts = crate::fs::Vfs::mounts_with_dev();
     // A container (jailed) process sees its own mount view, not the host's.
     if let Some(view) = crate::ipc::namespace::mount_view_for(task_id) {
         return Ok(render_container_mountinfo(&view, &mounts));
@@ -16727,6 +16868,23 @@ pub fn self_test() -> KernelResult<()> {
                 kind: VmaKind::Anonymous,
                 flags: PageFlags::PRESENT | PageFlags::NO_EXECUTE,
             },
+            // File-backed: the offset it maps and the file's inode. The
+            // handle names nothing and the filesystem id no mount, so the
+            // path is empty and the device 00:00 -- the fields that do not
+            // depend on live state are the ones pinned here.
+            Vma {
+                start: 0x30_0000,
+                end: 0x30_4000,
+                kind: VmaKind::FileBacked {
+                    handle: u64::MAX,
+                    file_offset: 0x4000,
+                    file_id: Some(crate::fs::vfs::FileId {
+                        fs_id: u64::MAX,
+                        ino: 77,
+                    }),
+                },
+                flags: PageFlags::PRESENT | PageFlags::USER_ACCESSIBLE | PageFlags::NO_EXECUTE,
+            },
         ];
         let rendered = render_maps(&vmas);
         let maps_text = core::str::from_utf8(&rendered).map_err(|_| KernelError::InternalError)?;
@@ -16739,6 +16897,7 @@ pub fn self_test() -> KernelResult<()> {
             "000c0000-00100000 ---p 00000000 00:00 0 [guard]",
             "555555550000-555555560000 r-xp 00000000 00:00 0 ",
             "00200000-00210000 ---p 00000000 00:00 0 ",
+            "00300000-00304000 r--p 00004000 00:00 77 ",
         ];
         if lines.len() != expected.len() {
             serial_println!(
@@ -16768,16 +16927,20 @@ pub fn self_test() -> KernelResult<()> {
     // options string appears in both the per-mount and super-options slots.
     {
         use crate::fs::vfs::MountOptions;
+        // Device numbers out of index order, so a renderer that numbered by
+        // position would be caught.
         let mounts = [
             (
                 PathBuf::from("/"),
                 String::from("ext4"),
                 MountOptions::defaults(),
+                5,
             ),
             (
                 PathBuf::from("/tmp"),
                 String::from("tmpfs"),
                 MountOptions::parse("ro,noatime"),
+                2,
             ),
             // A mount point containing a space exercises the Linux
             // `mangle()`-equivalent escaping: the space must become `\040`
@@ -16786,15 +16949,16 @@ pub fn self_test() -> KernelResult<()> {
                 PathBuf::from("/mnt/my disk"),
                 String::from("ext4"),
                 MountOptions::defaults(),
+                9,
             ),
         ];
         let rendered = render_mountinfo(&mounts);
         let mi_text = core::str::from_utf8(&rendered).map_err(|_| KernelError::InternalError)?;
         let lines: Vec<&str> = mi_text.lines().collect();
         let expected = [
-            "20 20 0:1 / / rw - ext4 none rw",
+            "20 20 0:5 / / rw - ext4 none rw",
             "21 20 0:2 / /tmp ro,noatime - tmpfs none ro,noatime",
-            "22 20 0:3 / /mnt/my\\040disk rw - ext4 none rw",
+            "22 20 0:9 / /mnt/my\\040disk rw - ext4 none rw",
         ];
         if lines.len() != expected.len() {
             serial_println!(
@@ -16881,16 +17045,19 @@ pub fn self_test() -> KernelResult<()> {
                 PathBuf::from("/"),
                 String::from("ext4"),
                 MountOptions::defaults(),
+                1,
             ),
             (
                 PathBuf::from("/containers/c1/rootfs"),
                 String::from("overlay"),
                 MountOptions::defaults(),
+                4,
             ),
             (
                 PathBuf::from("/var/lib/slate/tmpfs/1-0"),
                 String::from("tmpfs"),
                 MountOptions::defaults(),
+                6,
             ),
         ];
         // Container view: read-only rootfs, a read-only bind volume served by
@@ -16916,12 +17083,14 @@ pub fn self_test() -> KernelResult<()> {
         let text = core::str::from_utf8(&rendered).map_err(|_| KernelError::InternalError)?;
         let lines: Vec<&str> = text.lines().collect();
         let expected = [
-            // rootfs `/` → overlay, read-only, source hidden.
-            "20 20 0:1 / / ro - overlay none ro",
-            // /logs bind → served by the ext4 host root, read-only.
-            "21 20 0:2 / /logs ro - ext4 none ro",
+            // rootfs `/` → overlay, read-only, source hidden; the
+            // overlay mount's device.
+            "20 20 0:4 / / ro - overlay none ro",
+            // /logs bind → served by the ext4 host root, read-only, and
+            // so on the root's device.
+            "21 20 0:1 / /logs ro - ext4 none ro",
             // /tmp tmpfs → served by the memfs mount, writable.
-            "22 20 0:3 / /tmp rw - tmpfs none rw",
+            "22 20 0:6 / /tmp rw - tmpfs none rw",
         ];
         if lines.len() != expected.len() {
             serial_println!(
@@ -16960,7 +17129,12 @@ pub fn self_test() -> KernelResult<()> {
 
         // The `/proc/mounts` line format for the same container view:
         // `none <mount_point> <fstype> <opts> 0 0`, source hidden.
-        let mounts_rendered = render_container_mounts(&view, &global);
+        // `/proc/mounts` has no device field: the table without it.
+        let global3: Vec<(PathBuf, String, MountOptions)> = global
+            .iter()
+            .map(|(p, t, o, _)| (p.clone(), t.clone(), *o))
+            .collect();
+        let mounts_rendered = render_container_mounts(&view, &global3);
         let mounts_text =
             core::str::from_utf8(&mounts_rendered).map_err(|_| KernelError::InternalError)?;
         let mounts_lines: Vec<&str> = mounts_text.lines().collect();

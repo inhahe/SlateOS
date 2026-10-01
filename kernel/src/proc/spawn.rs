@@ -2445,9 +2445,16 @@ pub fn exec_process(
             // Re-use the existing table: close cloexec entries (and
             // ensure stdio remains populated) via the kernel helper,
             // then close each returned handle.
-            if let Some(to_close) = pcb::linux_fd_exec_cloexec(pid) {
-                let count = to_close.len();
-                for entry in to_close {
+            if let Some(cloexec) = pcb::linux_fd_exec_cloexec(pid) {
+                // Each close-on-exec descriptor is closed, so the process's
+                // record locks on its file go -- even where another fd keeps
+                // the handle open. Before the closes: the key is the handle's
+                // file. The locks themselves otherwise survive the exec.
+                for entry in &cloexec.removed {
+                    crate::syscall::linux::release_record_locks_on_close(pid, entry);
+                }
+                let count = cloexec.to_close.len();
+                for entry in cloexec.to_close {
                     let res = crate::syscall::linux::close_handle(entry);
                     if res.value < 0 {
                         serial_println!(
@@ -2503,7 +2510,20 @@ pub fn exec_process(
     // pipe's reader sees end-of-file now, not when the new program exits.
     // A Linux image's were closed from its own fd table above.
     if old_abi_mode != Some(pcb::AbiMode::Linux) {
-        close_handles_at_exec(pid, &close_at_exec);
+        close_handles_at_exec(pid, &close_at_exec.close);
+        // A dropped descriptor whose handle a kept one shares: the handle
+        // stays, but a descriptor for the file was closed, so the process's
+        // record locks on it go (POSIX). Only the process's own handles.
+        for &(handle_type, handle) in &close_at_exec.shared {
+            if handle_type == fd_handle_type::FILE
+                && pcb::owns_ipc_handle(pid, crate::cap::ResourceType::File, handle)
+            {
+                crate::syscall::record_lock::release_on_close(
+                    pid,
+                    crate::syscall::record_lock::Target::File(handle),
+                );
+            }
+        }
     }
 
     // Step 6: Store argv/envp in the PCB for the new process image.

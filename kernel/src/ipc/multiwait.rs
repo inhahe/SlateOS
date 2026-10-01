@@ -25,7 +25,7 @@
 //!
 //! | set contents | behaviour |
 //! |---|---|
-//! | every item blockable (pipe, eventfd, socketpair, timerfd, pty) | true block: woken by the object, zero wakeups while idle |
+//! | every item blockable (pipe, eventfd, socketpair, timerfd, pty, channel, service listener) | true block: woken by the object, zero wakeups while idle |
 //! | any item poll-only | park capped at an adaptive backoff, re-scanning on each wake |
 //!
 //! [`WaitTarget::EpollCtl`] sits outside that table because it is not a
@@ -121,6 +121,14 @@ pub enum WaitTarget {
     TimerFd(u64),
     /// [`crate::tty::pty::PtyHandle`] raw value.
     Pty(u64),
+    /// [`super::channel::ChannelHandle`] raw value: woken when a message
+    /// arrives for this end or its peer closes
+    /// ([`super::channel::register_waiter`]).
+    Channel(u64),
+    /// [`super::service::ServiceListenerHandle`] raw value: woken when a
+    /// connection is queued or the listener goes
+    /// ([`super::service::register_waiter`]).
+    Listener(u64),
     /// [`super::epoll::EpollHandle`] raw value — the instance's
     /// **interest-set-change** notification, *not* its readiness.
     ///
@@ -166,6 +174,15 @@ impl WaitTarget {
             Self::Pty(raw) => {
                 crate::tty::pty::register_waiter(crate::tty::pty::PtyHandle::from_raw(raw), task);
             }
+            Self::Channel(raw) => {
+                super::channel::register_waiter(super::channel::ChannelHandle::from_raw(raw), task);
+            }
+            Self::Listener(raw) => {
+                super::service::register_waiter(
+                    super::service::ServiceListenerHandle::from_raw(raw),
+                    task,
+                );
+            }
             Self::EpollCtl(raw) => {
                 super::epoll::register_waiter(super::epoll::EpollHandle::from_raw(raw), task);
             }
@@ -201,6 +218,18 @@ impl WaitTarget {
             }
             Self::Pty(raw) => {
                 crate::tty::pty::deregister_waiter(crate::tty::pty::PtyHandle::from_raw(raw), task);
+            }
+            Self::Channel(raw) => {
+                super::channel::deregister_waiter(
+                    super::channel::ChannelHandle::from_raw(raw),
+                    task,
+                );
+            }
+            Self::Listener(raw) => {
+                super::service::deregister_waiter(
+                    super::service::ServiceListenerHandle::from_raw(raw),
+                    task,
+                );
             }
             Self::EpollCtl(raw) => {
                 super::epoll::deregister_waiter(super::epoll::EpollHandle::from_raw(raw), task);

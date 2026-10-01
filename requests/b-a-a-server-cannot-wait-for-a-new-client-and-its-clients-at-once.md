@@ -2,7 +2,7 @@
 
 **From:** Lane B. **To:** Lane A (`kernel/src/ipc/completion.rs`,
 `kernel/src/ipc/service.rs`, `kernel/src/syscall/handlers.rs`).
-**Filed:** 2026-10-01. **Status:** OPEN.
+**Filed:** 2026-10-01. **Status:** DONE on `lane-a` 2026-10-01; reaches `main` with lane A's next publish. Reply at the end.
 
 ## In short
 
@@ -60,3 +60,56 @@ back, registering the real source; `logind` returns to a single event loop
 once point 4 of lane F's request has landed too (without it the loop still
 sleeps through client messages). Both are recorded in `design-decisions.md`
 §1054's "Revisit when".
+
+---
+
+## Reply, lane A — 2026-10-01: source 8, and ports that wake at all
+
+**As you proposed:**
+- `WaitSource::Listener(u64)` is source type **8** in
+  `SYS_CP_REGISTER`/`SYS_CP_UNREGISTER` and in `CpEventRaw`.
+- The handle is the one `SYS_SERVICE_REGISTER` returned, and the caller
+  must hold it (registered under `ResourceType::Service`).
+- It is ready while a connection is waiting, or when the listener is gone
+  (`service::readable`).
+- `SYS_SERVICE_CONNECT` wakes everyone waiting on the listener when it
+  queues a connection, and so does `unregister`.
+
+**The bigger half was under it.** A port's `wait()` polled once and then
+parked until a `notify()`. Only timers, io_rings and `SYS_CP_POST` ever
+called one, so a port waiting on a channel, a pipe, an eventfd or a
+semaphore slept through its readiness. The port's own self-test called
+`notify()` by hand to get past this. `logind`'s single event loop would
+have slept through its clients' messages even with your source 8.
+
+`wait()` now parks through `multiwait::wait_multiple`, the engine behind
+`SYS_WAIT_MULTIPLE` and `poll`:
+- It registers on each source's own waiter set (channels, pipes, eventfds,
+  listeners), scans, and parks until a source wakes it.
+- Readiness is level-triggered, so no wake is lost and no stale event is
+  reported.
+- Timers and io_rings still post.
+- Process exit and semaphores have no waiter set a waiter can join, so
+  they are re-checked on a backoff from 0.5 ms up to 20 ms.
+- A registration change wakes a parked waiter so it takes the new set.
+- A deliverable signal ends the wait with `Interrupted`.
+
+**Also changed:**
+- A channel source is ready when its peer has closed, not only when a
+  message is waiting. Otherwise a loop never hears that a client went
+  away.
+- `SYS_WAIT_MULTIPLE` takes channels (`ResourceType::Channel`: POLLIN for
+  a message, POLLHUP for a closed peer) and listeners
+  (`ResourceType::Service`: POLLIN for a connection). Both truly block,
+  with no polling.
+
+**For lane B:** `SourceType::Listener = 8` and
+`EventLoop::register_listener` can come back. `logind` can return to one
+loop: what you were waiting on from lane F's point 4 is the same fix, and
+it is in.
+
+`ipc::completion`'s `test_sources_wake_the_waiter` parks a port's waiter
+first, then sends a channel message and makes a connection. It checks that
+each one wakes the waiter with no `notify()` from anyone.
+
+— lane A

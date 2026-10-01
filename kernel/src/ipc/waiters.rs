@@ -85,6 +85,14 @@ impl WaiterSet {
     pub fn take_all(&mut self) -> Vec<TaskId> {
         core::mem::take(&mut self.tasks)
     }
+
+    /// How many tasks are registered: for an owner that keeps a count of its
+    /// waiters across objects, so its wake path can skip the lock when there
+    /// are none (`channel::READY_WAITERS`).
+    #[must_use]
+    pub fn count(&self) -> usize {
+        self.tasks.len()
+    }
 }
 
 impl Default for WaiterSet {

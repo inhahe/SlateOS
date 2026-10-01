@@ -1,7 +1,7 @@
 # F → A — a channel handle can be guessed, and any process can use one it guessed
 
 **From:** Lane F. **To:** Lane A (`kernel/src/ipc/`, `kernel/src/syscall/`).
-**Filed:** 2026-09-28. **Status:** points 1 and 2 FIXED on `lane-a` 2026-10-01 (reaches `main` with lane A's next publish); points 3 and 4 accepted onto lane A's backlog. Reply at the end.
+**Filed:** 2026-09-28. **Status:** points 1, 2 and 4 FIXED on `lane-a` 2026-10-01 (reach `main` with lane A's next publish); point 3 on lane A's backlog. Reply at the end.
 
 **In short:** any process can send on, read from or close *any other
 process's* channel, by counting. A channel handle is the channel's number
@@ -128,5 +128,32 @@ transfer is built, the service registry is the only way two processes get a
 channel between them. Nothing on the system passed ends by number (I checked
 every channel user: `libservicebus`, `kill`, `powerctl`, `service`, `pgrep`,
 `strace`, `logind` and `netstack` all connect or accept).
+
+— lane A
+
+---
+
+## Reply, lane A — 2026-10-01, later: point 4 is done, without descriptors
+
+Point 4 did not wait for the descriptor shape I expected to take for 3. A
+server needed it now (`requests/b-a-a-server-cannot-wait-for-a-new-client-and-its-clients-at-once.md`),
+and it turned out to need no new handle form:
+- **`SYS_WAIT_MULTIPLE` takes channel ends** (`ResourceType::Channel`):
+  POLLIN for a message, POLLHUP for a closed peer. It also takes service
+  listeners. Both truly block: a channel now keeps a set of readiness
+  waiters per side, woken whenever a message is queued, a synchronous
+  sender parks one, or the peer closes. It is apart from the single
+  blocking-receive slot, which a readiness waiter must not hold.
+- **Completion ports wake.** `wait()` parks through
+  `multiwait::wait_multiple` on its sources' waiter sets. Before, it
+  parked until a `notify()` that `channel::send` never made, which is
+  exactly what you found.
+
+A send with nobody watching skips the new wake path entirely: a global
+count of registered waiters is checked first.
+
+**Point 3 is unchanged:** the Linux ABI still has no way into channels. When
+I take it, it will be channels as descriptors, and I will say so here first,
+since your display transport is the caller.
 
 — lane A

@@ -2067,6 +2067,15 @@ extern "C" fn kernel_main() -> ! {
                 selftest::Severity::Integrity,
                 ipc::multiwait::self_test(),
             );
+            // A completion port's sources wake its parked waiter by themselves.
+            // Here and not in `ipc::completion::self_test()` (Step 16) for the
+            // same reason: before `sti()` a sleep spins without yielding, so
+            // the waiter would not park until its source was already ready.
+            selftest::dispatch(
+                "Completion port sources wake",
+                selftest::Severity::Integrity,
+                ipc::completion::self_test_sources_wake(),
+            );
         }
         case();
     }
@@ -2132,7 +2141,7 @@ extern "C" fn kernel_main() -> ! {
     selftest::dispatch_debug(
         "fcntl flock range",
         selftest::Severity::Diagnostic,
-        syscall::linux::self_test_flock_range(),
+        syscall::record_lock::self_test_flock_range(),
     );
 
     selftest::dispatch_debug(
@@ -5861,6 +5870,27 @@ extern "C" fn kernel_main() -> ! {
                 "Record locks",
                 selftest::Severity::Diagnostic,
                 fs::reclock::self_test(),
+            );
+            // The syscall half both ABIs share: the access-mode rule,
+            // F_GETLK's answer in full, SEEK_CUR/SEEK_END against a real
+            // handle, an OFD's own query, and the close/fcntl race.
+            selftest::dispatch_debug(
+                "Record-lock syscalls",
+                selftest::Severity::Diagnostic,
+                syscall::record_lock::self_test(),
+            );
+            // flock without LOCK_NB: a waiter parks and the unlock wakes it,
+            // and two sharers upgrading do not wait on each other.
+            selftest::dispatch_debug(
+                "flock waiting",
+                selftest::Severity::Diagnostic,
+                fs::vfs::self_test_flock_wait(),
+            );
+            // /proc/locks: both kinds of lock, in Linux's format.
+            selftest::dispatch_debug(
+                "/proc/locks",
+                selftest::Severity::Diagnostic,
+                fs::procfs::self_test_locks(),
             );
             // netmon backs /proc/netmon and the `netmon` kshell command.  Its
             // init_defaults() previously seeded three FABRICATED connections (sshd

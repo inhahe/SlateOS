@@ -67,6 +67,8 @@ use alloc::string::String;
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicU64, Ordering};
 
+use super::waiters::{WaiterSet, wake_all};
+
 // ---------------------------------------------------------------------------
 // Constants
 // ---------------------------------------------------------------------------
@@ -134,6 +136,11 @@ struct ServiceEntry {
 
     /// Task blocked on `accept` (if any).
     accept_waiter: Option<TaskId>,
+
+    /// Tasks waiting for a connection to accept without accepting it --
+    /// `SYS_WAIT_MULTIPLE` and completion ports, through [`register_waiter`].
+    /// Woken when a connection is queued and when the listener goes.
+    ready_waiters: WaiterSet,
 
     /// Whether the service has been unregistered (closed).
     closed: bool,
@@ -274,6 +281,7 @@ pub fn register(name: &[u8]) -> KernelResult<ServiceListenerHandle> {
         name: name.to_vec(),
         pending: pre_queued,
         accept_waiter: None,
+        ready_waiters: WaiterSet::new(),
         closed: false,
         namespace_id: ns_id,
         provider_pid,
@@ -370,6 +378,7 @@ pub fn connect(name: &[u8]) -> KernelResult<ChannelHandle> {
     }
 
     let wake_task: Option<TaskId>;
+    let ready: Vec<TaskId>;
 
     {
         let mut reg = SERVICE_REGISTRY.lock();
@@ -418,8 +427,10 @@ pub fn connect(name: &[u8]) -> KernelResult<ChannelHandle> {
                 // Queue the server endpoint for the service to accept.
                 entry.pending.push_back(server_ep);
 
-                // Wake the service if it's blocked on accept.
+                // Wake the service if it's blocked on accept, and everyone
+                // waiting for the listener to become ready.
                 wake_task = entry.accept_waiter.take();
+                ready = entry.ready_waiters.take_all();
             }
             None => {
                 // Service not registered — check socket activation.
@@ -466,8 +477,40 @@ pub fn connect(name: &[u8]) -> KernelResult<ChannelHandle> {
     if let Some(task_id) = wake_task {
         sched::wake(task_id);
     }
+    wake_all(ready);
 
     Ok(client_ep)
+}
+
+/// Add `task` to the readiness waiters of `listener`: it is woken when a
+/// connection is queued or the listener goes. For `SYS_WAIT_MULTIPLE` and
+/// completion ports (`multiwait::WaitTarget::Listener`); a no-op for a
+/// listener that is gone. Idempotent.
+pub fn register_waiter(listener: ServiceListenerHandle, task: TaskId) {
+    if let Some(entry) = SERVICE_REGISTRY.lock().listeners.get_mut(&listener.0) {
+        entry.ready_waiters.insert(task);
+    }
+}
+
+/// Undo [`register_waiter`]. Idempotent, and a no-op for a listener that is
+/// gone.
+pub fn deregister_waiter(listener: ServiceListenerHandle, task: TaskId) {
+    if let Some(entry) = SERVICE_REGISTRY.lock().listeners.get_mut(&listener.0) {
+        entry.ready_waiters.remove(task);
+    }
+}
+
+/// Whether an accept on `listener` would not block: a connection is waiting,
+/// or the listener is gone (the accept answers its error). Readiness for
+/// `SYS_WAIT_MULTIPLE` and completion ports
+/// (`requests/b-a-a-server-cannot-wait-for-a-new-client-and-its-clients-at-once.md`).
+#[must_use]
+pub fn readable(listener: ServiceListenerHandle) -> bool {
+    SERVICE_REGISTRY
+        .lock()
+        .listeners
+        .get(&listener.0)
+        .is_none_or(|entry| entry.closed || !entry.pending.is_empty())
 }
 
 /// Accept a pending connection (blocking).
@@ -660,6 +703,7 @@ pub fn provider_pid(name: &[u8]) -> Option<u64> {
 /// - [`InvalidHandle`] — listener handle not found.
 pub fn unregister(listener: ServiceListenerHandle) -> KernelResult<()> {
     let wake_task: Option<TaskId>;
+    let ready: Vec<TaskId>;
     let pending_handles: VecDeque<ChannelHandle>;
 
     {
@@ -671,6 +715,7 @@ pub fn unregister(listener: ServiceListenerHandle) -> KernelResult<()> {
 
         entry.closed = true;
         wake_task = entry.accept_waiter.take();
+        ready = entry.ready_waiters.take_all();
 
         // Drain pending connections — we'll close them outside the lock.
         pending_handles = core::mem::take(&mut entry.pending);
@@ -685,10 +730,12 @@ pub fn unregister(listener: ServiceListenerHandle) -> KernelResult<()> {
         reg.listeners.remove(&listener.0);
     }
 
-    // Wake blocked acceptor.
+    // Wake blocked acceptor, and the readiness waiters: a listener that is
+    // gone is ready, as `accept`'s error.
     if let Some(task_id) = wake_task {
         sched::wake(task_id);
     }
+    wake_all(ready);
 
     // Close all unaccepted connection endpoints.
     for handle in pending_handles {

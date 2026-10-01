@@ -118,10 +118,14 @@ struct MemFsNode {
     ///
     /// This is the *link count in the namespace*, not the value reported as
     /// `st_nlink` — for a directory those differ, see [`MemFs::nlink_of`].
-    /// A file or symlink whose count reaches zero has no name left and its
-    /// inode is dropped; memfs has no open-file table keeping an unlinked
-    /// inode alive, because every VFS operation here arrives by path.
+    /// A file or symlink whose count reaches zero has no name left; its
+    /// inode is dropped then unless an open handle holds it (`opens`).
     links: u32,
+    /// Open handles holding this node (`FileSystem::pin_ino`). A file whose
+    /// last name goes while one is open stays, unnamed, until the last
+    /// [`MemFs::unpin_ino`]: POSIX's rule, which SQLite's temporary files and
+    /// every `tmpfile` rely on. Only regular files are held.
+    opens: u32,
     /// Timestamps (wall-clock: nanoseconds since the Unix epoch).
     created_ns: Timestamp,
     modified_ns: Timestamp,
@@ -204,6 +208,59 @@ fn node_list_xattrs(node: &MemFsNode) -> Vec<Vec<u8>> {
 }
 
 impl MemFsNode {
+    /// `len` bytes of the file from `offset`, fewer at its end; none past it.
+    fn read_range(&self, offset: u64, len: usize) -> KernelResult<Vec<u8>> {
+        let data = self.file_data().ok_or(KernelError::IsADirectory)?;
+        let start = usize::try_from(offset)
+            .unwrap_or(usize::MAX)
+            .min(data.len());
+        let end = start.saturating_add(len).min(data.len());
+        Ok(data.get(start..end).map_or_else(Vec::new, <[u8]>::to_vec))
+    }
+
+    /// Write `data` at `offset`, growing the file as needed, under its
+    /// attributes: nothing into an immutable file, and only at the end of an
+    /// append-only one.
+    fn write_range(&mut self, offset: u64, data: &[u8]) -> KernelResult<()> {
+        let attrs = self.attributes;
+        if attrs.contains(FileAttr::IMMUTABLE) {
+            return Err(KernelError::PermissionDenied);
+        }
+        if !self.is_file() {
+            return Err(KernelError::IsADirectory);
+        }
+        if attrs.contains(FileAttr::APPEND_ONLY) && offset != self.size() {
+            return Err(KernelError::PermissionDenied);
+        }
+        let start = usize::try_from(offset).map_err(|_| KernelError::FileTooLarge)?;
+        let end = start
+            .checked_add(data.len())
+            .ok_or(KernelError::FileTooLarge)?;
+        let file_data = self.file_data_mut().ok_or(KernelError::IsADirectory)?;
+        if end > file_data.len() {
+            file_data.resize(end, 0);
+        }
+        if let Some(dest) = file_data.get_mut(start..end) {
+            dest.copy_from_slice(data);
+        }
+        self.touch_modified();
+        Ok(())
+    }
+
+    /// Cut or zero-extend the file to `size` bytes, under its attributes.
+    fn set_len(&mut self, size: u64) -> KernelResult<()> {
+        if self.attributes.contains(FileAttr::IMMUTABLE)
+            || self.attributes.contains(FileAttr::APPEND_ONLY)
+        {
+            return Err(KernelError::PermissionDenied);
+        }
+        let size = usize::try_from(size).map_err(|_| KernelError::FileTooLarge)?;
+        let file_data = self.file_data_mut().ok_or(KernelError::IsADirectory)?;
+        file_data.resize(size, 0);
+        self.touch_modified();
+        Ok(())
+    }
+
     /// Build a fresh node of `kind` with mode `permissions`, a newly
     /// allocated inode number and **one** link.
     ///
@@ -217,6 +274,7 @@ impl MemFsNode {
             kind,
             ino: alloc_memfs_ino(),
             links: 1,
+            opens: 0,
             created_ns: now,
             modified_ns: now,
             accessed_ns: now,
@@ -339,6 +397,7 @@ impl MemFsNode {
             size: self.size(),
             entry_type: self.entry_type(),
             ino: self.ino,
+            dev: 0,
             created_ns: self.created_ns,
             modified_ns: self.modified_ns,
             accessed_ns: self.accessed_ns,
@@ -580,9 +639,11 @@ impl MemFs {
             return;
         };
         node.links = node.links.saturating_sub(1);
-        if node.links == 0 {
+        if node.links == 0 && node.opens == 0 {
             self.inodes.remove(&ino);
         } else {
+            // Still named elsewhere, or held open with no name left: the
+            // file lives on, its link count changed.
             node.changed_ns = metadata_now_ns();
         }
     }
@@ -1007,18 +1068,8 @@ impl FileSystem for MemFs {
     }
 
     fn read_at(&mut self, path: &Path, offset: u64, len: usize) -> KernelResult<Vec<u8>> {
-        let result = {
-            let node = self.resolve(path)?;
-            let data = node.file_data().ok_or(KernelError::IsADirectory)?;
-            let start = (offset as usize).min(data.len());
-            let end = (start.saturating_add(len)).min(data.len());
-            data.get(start..end).map_or_else(Vec::new, |s| s.to_vec())
-        };
-        // Relatime: update access timestamp if stale.
-        if let Ok(node) = self.resolve_mut(path) {
-            node.touch_accessed_relatime();
-        }
-        Ok(result)
+        let ino = self.resolve_ino(path)?;
+        self.read_ino(ino, offset, len)
     }
 
     fn write_at(&mut self, path: &Path, offset: u64, data: &[u8]) -> KernelResult<()> {
@@ -1031,54 +1082,68 @@ impl FileSystem for MemFs {
             }
             Err(e) => return Err(e),
         };
-
-        // Enforce attribute restrictions before borrowing file_data.
-        let attrs = node.attributes;
-        if attrs.contains(FileAttr::IMMUTABLE) {
-            return Err(KernelError::PermissionDenied);
-        }
-        if !node.is_file() {
-            return Err(KernelError::IsADirectory);
-        }
-        // Check append-only: get current length before mutable borrow.
-        let current_len = node.size() as usize;
-        if attrs.contains(FileAttr::APPEND_ONLY) && (offset as usize) != current_len {
-            return Err(KernelError::PermissionDenied);
-        }
-
-        // Now perform the write.
-        let file_data = node.file_data_mut().ok_or(KernelError::IsADirectory)?;
-
-        let start = offset as usize;
-        let end = start.saturating_add(data.len());
-
-        // Extend if writing past current end.
-        if end > file_data.len() {
-            file_data.resize(end, 0);
-        }
-
-        if let Some(dest) = file_data.get_mut(start..end) {
-            dest.copy_from_slice(data);
-        }
-
-        // NLL: file_data borrow ends here (last use is the copy above).
-        node.touch_modified();
-        Ok(())
+        node.write_range(offset, data)
     }
 
     fn truncate(&mut self, path: &Path, size: u64) -> KernelResult<()> {
-        let node = self.resolve_mut(path)?;
-        // Check attributes before getting mutable data reference.
-        if node.attributes.contains(FileAttr::IMMUTABLE)
-            || node.attributes.contains(FileAttr::APPEND_ONLY)
-        {
-            return Err(KernelError::PermissionDenied);
+        self.resolve_mut(path)?.set_len(size)
+    }
+
+    // --- An open file, by inode: what `fs::handle` uses for a file it holds ---
+
+    fn pin_ino(&mut self, ino: u64) -> KernelResult<()> {
+        let node = self.node_mut(ino)?;
+        // Only regular files are held; anything else stays path-addressed.
+        if !node.is_file() {
+            return Err(KernelError::NotSupported);
         }
-        let file_data = node.file_data_mut().ok_or(KernelError::IsADirectory)?;
-        file_data.resize(size as usize, 0);
-        // NLL: file_data borrow ends here (last use is the resize above).
-        node.touch_modified();
+        node.opens = node
+            .opens
+            .checked_add(1)
+            .ok_or(KernelError::ResourceExhausted)?;
         Ok(())
+    }
+
+    fn unpin_ino(&mut self, ino: u64) {
+        let Some(node) = self.inodes.get_mut(&ino) else {
+            return;
+        };
+        node.opens = node.opens.saturating_sub(1);
+        // The last handle on a file with no name left: it goes now.
+        if node.opens == 0 && node.links == 0 {
+            self.inodes.remove(&ino);
+        }
+    }
+
+    fn read_ino(&mut self, ino: u64, offset: u64, len: usize) -> KernelResult<Vec<u8>> {
+        let out = self.node(ino)?.read_range(offset, len)?;
+        // Relatime: update the access timestamp if it is stale.
+        if let Ok(node) = self.node_mut(ino) {
+            node.touch_accessed_relatime();
+        }
+        Ok(out)
+    }
+
+    fn write_ino(&mut self, ino: u64, offset: u64, data: &[u8]) -> KernelResult<()> {
+        self.node_mut(ino)?.write_range(offset, data)
+    }
+
+    fn append_ino(&mut self, ino: u64, data: &[u8]) -> KernelResult<u64> {
+        let node = self.node_mut(ino)?;
+        let at = node.size();
+        node.write_range(at, data)?;
+        Ok(at)
+    }
+
+    fn truncate_ino(&mut self, ino: u64, size: u64) -> KernelResult<()> {
+        self.node_mut(ino)?.set_len(size)
+    }
+
+    fn metadata_ino(&mut self, ino: u64) -> KernelResult<FileMeta> {
+        // A file whose last name went while open reports 0 links, as Linux's
+        // `fstat` does; SQLite checks for exactly that.
+        let nlinks = self.nlink_of(ino);
+        Ok(self.node(ino)?.to_file_meta(nlinks))
     }
 
     fn rename(&mut self, from: &Path, to: &Path) -> KernelResult<()> {

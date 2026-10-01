@@ -107,6 +107,8 @@ pub const SYS_SLEEP: u64 = 11;
 /// | `MAP_NOCACHE` | 3   | Disable CPU caching (for MMIO)           |
 /// | `MAP_MMIO`    | 4   | Map specific phys addr from `arg3`       |
 /// | `MAP_FIXED`   | 5   | Use exact vaddr from `arg0` (must be set)|
+/// | `MAP_LAZY`    | 6   | Demand-paged rather than committed       |
+/// | `MAP_SHARED`  | 7   | Shared with every process forked from it |
 ///
 /// Returns: virtual address of the mapped region, or negative error.
 pub const SYS_MMAP: u64 = 20;
@@ -131,6 +133,19 @@ pub const MAP_FIXED: u64 = 1 << 5;
 /// committed allocation (the default per design spec: "committed
 /// memory by default, lazy allocation opt-in").
 pub const MAP_LAZY: u64 = 1 << 6;
+/// Mmap flag: anonymous memory **shared** with every process that inherits it
+/// by `fork`, rather than copied on write -- POSIX `MAP_SHARED |
+/// MAP_ANONYMOUS`, the everyday way to share memory with a child.
+///
+/// The pages are marked `PageFlags::SHARED`. Fork then maps the same frames
+/// into the child, writable on both sides, and a futex word in them is one
+/// futex in every process that maps them. Always committed: a lazily faulted
+/// page would be faulted separately in each process and share nothing, so
+/// `MAP_SHARED | MAP_LAZY` is `InvalidArgument`, and the per-process lazy
+/// default does not apply. Ignored with `MAP_MMIO`, whose device memory is
+/// shared already. Since 2026-10-01; it was ignored before, so "map it
+/// shared, then fork" did not exist.
+pub const MAP_SHARED: u64 = 1 << 7;
 
 /// Unmap a previously mapped region.
 ///
@@ -1090,9 +1105,16 @@ pub const SYS_CP_CREATE: u64 = 250;
 ///
 /// `arg0`: completion port handle.
 /// `arg1`: source type (0=channel, 1=pipe_read, 2=pipe_write, 3=eventfd,
-///         4=process_exit, 5=timer, 6=semaphore, 7=io_completion).
-/// `arg2`: source handle (raw u64).
+///         4=process_exit, 5=timer, 6=semaphore, 7=io_completion,
+///         8=service listener -- ready when a connection is waiting to be
+///         accepted, the handle `SYS_SERVICE_REGISTER` returned; since
+///         2026-10-01).
+/// `arg2`: source handle (raw u64). The caller must hold it, as that
+///         source's own syscalls require.
 /// `arg3`: `user_data` — arbitrary u64 returned with events.
+///
+/// A channel is ready when a message is waiting or the peer has closed; a
+/// listener when a connection is waiting or the listener is gone.
 ///
 /// Returns: 0 on success.
 pub const SYS_CP_REGISTER: u64 = 251;
@@ -1111,6 +1133,13 @@ pub const SYS_CP_UNREGISTER: u64 = 252;
 /// `arg0`: completion port handle.
 /// `arg1`: pointer to event buffer (array of `CpEventRaw`).
 /// `arg2`: buffer capacity (max events to return).
+///
+/// Parks until a registered source is ready: channels, pipes, eventfds and
+/// listeners wake it themselves; timers and io_rings post to it; process exit
+/// and semaphores are re-checked on a backoff from 0.5 ms to 20 ms. Until
+/// 2026-10-01 it woke only for a post, so a port waiting on a channel slept
+/// through its messages. A deliverable signal ends the wait with
+/// `Interrupted`, as any blocking call.
 ///
 /// Returns: number of events written to buffer.
 pub const SYS_CP_WAIT: u64 = 253;
@@ -3048,31 +3077,44 @@ pub const SYS_FS_STATVFS: u64 = 608;
 /// Size of the output buffer for `SYS_FS_STATVFS`.
 pub const FS_STATVFS_SIZE: usize = 64;
 
-/// Acquire an advisory file lock (flock).
+/// Take an advisory whole-file lock (`flock`) by path, for the calling
+/// process, without waiting.
 ///
 /// `arg0`: pointer to path string.
 /// `arg1`: path length (bytes).
 /// `arg2`: lock type (0 = shared/read, 1 = exclusive/write).
-/// `arg3`: owner ID (typically the process/task ID of the caller).
+/// `arg3`: ignored since 2026-10-01.
 ///
 /// ## Semantics
 ///
+/// - The lock is the **calling process's**. It ends at
+///   [`SYS_FS_FUNLOCK`] or the process's exit.
 /// - Shared locks are compatible with other shared locks but not
 ///   exclusive locks.
 /// - Exclusive locks are incompatible with all other locks.
-/// - If the owner already holds a lock, it is upgraded or downgraded.
+/// - Asking for the other type converts the lock, and, as on Linux, a
+///   conversion first gives up the lock held. So a refused upgrade leaves
+///   the process with none.
+///
+/// `arg3` was the owner, taken from the caller as given. A process could
+/// take a lock in another's name, and through `SYS_FS_FUNLOCK` release
+/// anyone's. libc passed its own pid, which is what the kernel uses now, so
+/// its calls are unchanged. A lock that belongs to an open file description,
+/// as BSD and Linux `flock` locks do, and that can wait, is
+/// [`SYS_FS_FLOCK_HANDLE`]'s.
 ///
 /// Returns: 0 on success, `WOULD_BLOCK` if the lock is held by
-/// another process, or negative error code.
+/// another owner, or negative error code.
 pub const SYS_FS_FLOCK: u64 = 609;
 
 /// Release an advisory file lock.
 ///
 /// `arg0`: pointer to path string.
 /// `arg1`: path length (bytes).
-/// `arg2`: owner ID.
+/// `arg2`: ignored since 2026-10-01: the lock released is the calling
+/// process's own (see [`SYS_FS_FLOCK`]).
 ///
-/// If the owner doesn't hold a lock on this file, this is a no-op.
+/// If the caller doesn't hold a lock on this file, this is a no-op.
 ///
 /// Returns: 0 on success, negative error code.
 pub const SYS_FS_FUNLOCK: u64 = 640;
@@ -3209,16 +3251,19 @@ pub const SYS_FS_HANDLE_PATH: u64 = 646;
 /// If the buffer is too small, entries are truncated (not an error).
 pub const SYS_FS_READDIR_AT: u64 = 647;
 
-/// Create a temporary file (no directory entry).
+/// Create a temporary file with no directory entry -- **refused with
+/// `NotSupported`** until an open file can outlive its name.
 ///
 /// `arg0`: pointer to directory path string (where to create).
 /// `arg1`: path length (bytes).
 /// `arg2`: open flags bitfield.
 ///
-/// Creates an unnamed temporary file in the specified directory.
-/// The file is automatically deleted when the handle is closed.
+/// Until 2026-10-01 it created a *named* file that nothing deleted and
+/// returned a handle its caller could not use (see `handlers::sys_fs_tmpfile`).
+/// The promised file -- unnamed, gone at its last close -- needs handles that
+/// hold files rather than paths.
 ///
-/// Returns: file handle on success, negative error code on failure.
+/// Returns: `NotSupported`.
 pub const SYS_FS_TMPFILE: u64 = 648;
 
 /// Pre-allocate disk space for a file.
@@ -5240,6 +5285,19 @@ pub const SYS_DRM_ATOMIC_COMMIT: u64 = 1060;
 /// `poll(2)`'s treatment of a bad fd: one bad entry in a large set must not
 /// deny the caller readiness for the other 99.
 ///
+/// Since 2026-10-01 two native kinds join the set, both truly blockable:
+/// - a **channel** end (`ResourceType::Channel`) -- `POLLIN` when a message is
+///   waiting, `POLLHUP` when the peer has closed (a receive answers
+///   `ChannelClosed`);
+/// - a **service listener** (`ResourceType::Service`, the handle
+///   `SYS_SERVICE_REGISTER` returned) -- `POLLIN` when a connection is
+///   waiting to be accepted, or the listener is gone.
+///
+/// So a server can wait on its listener and its clients' channels together
+/// (`requests/b-a-a-server-cannot-wait-for-a-new-client-and-its-clients-at-once.md`;
+/// lane F's `requests/f-a-a-channel-handle-can-be-guessed-and-any-process-can-use-it.md`
+/// point 4).
+///
 /// Chosen number 1066, at the high-water mark — see
 /// [`SYS_PTY_MASTER_TRY_WRITE`] for why numbers are never recycled.
 pub const SYS_WAIT_MULTIPLE: u64 = 1066;
@@ -5843,6 +5901,115 @@ pub const SYS_FS_WATCH_READ_RECORDS: u64 = 1091;
 ///
 /// Chosen number 1092, next free slot after 1091.
 pub const SYS_CPU_CURRENT: u64 = 1092;
+
+// ---------------------------------------------------------------------------
+// POSIX record locks for native programs (1093)
+// ---------------------------------------------------------------------------
+
+/// A POSIX byte-range record lock on an open file -- `fcntl`'s `F_GETLK`,
+/// `F_SETLK` and `F_SETLKW` for a native program:
+/// `fs_record_lock(handle, op, flock_ptr) -> 0`.
+///
+/// The table is the one the Linux `fcntl` uses (`fs::reclock`), through the
+/// same code (`syscall::record_lock`), so a native and a Linux program see
+/// each other's locks. Before it, a native program could not reach the
+/// table at all, and its libc granted every lock: two holders of one
+/// exclusive range, SQLite's whole defence against two writers included
+/// (`requests/d-a-native-programs-cannot-reach-the-record-lock-table.md`).
+///
+/// - `handle`: a file handle the caller holds.
+/// - `op`: [`RECORD_LOCK_GET`], [`RECORD_LOCK_SET`] or
+///   [`RECORD_LOCK_SET_WAIT`]. Anything else is `InvalidArgument`.
+/// - `flock_ptr`: the caller's `struct flock`, in the x86-64 Linux layout:
+///   `l_type` i16 at 0, `l_whence` i16 at 2, `l_start` i64 at 8, `l_len`
+///   i64 at 16, `l_pid` i32 at 24, 32 bytes in all. Read for every op, and
+///   rewritten for `RECORD_LOCK_GET`.
+///
+/// The lock belongs to the calling **process**. It ends when the process
+/// exits, when it releases it, or when it closes the handle: closing *any*
+/// descriptor for the file releases all the process's locks on it (POSIX).
+/// So libc must tell the kernel when it closes a descriptor that shares its
+/// handle with one still open. A release over the whole file does that:
+/// `RECORD_LOCK_SET` with `F_UNLCK`, `SEEK_SET`, start 0, length 0.
+///
+/// Errors (libc's errno in brackets):
+/// - `InvalidHandle` (`EBADF`): a handle the caller does not hold, or a lock
+///   its open mode does not allow. `F_RDLCK` needs it open for reading,
+///   `F_WRLCK` for writing.
+/// - `InvalidArgument` (`EINVAL`): an unknown op, `l_type` or `l_whence`; a
+///   range before byte 0 or past a signed 64-bit offset; `F_UNLCK` with
+///   `RECORD_LOCK_GET`.
+/// - `InvalidAddress` (`EFAULT`): `flock_ptr`.
+/// - `WouldBlock` (`EAGAIN`): `RECORD_LOCK_SET`, and another process's lock
+///   is in the way.
+/// - `Deadlock` (`EDEADLK`): `RECORD_LOCK_SET_WAIT`, and waiting would never
+///   end: a process in the way is itself waiting on the caller.
+/// - `Interrupted` (`EINTR`): a signal arrived during the wait. The call is
+///   restarted instead when the handler has `SA_RESTART`.
+/// - `ResourceExhausted`: the lock table is full. libc maps this code to
+///   `ENOMEM` generally; POSIX's errno for it here is `ENOLCK`.
+///
+/// Chosen number 1093, next free slot after 1092.
+pub const SYS_FS_RECORD_LOCK: u64 = 1093;
+
+/// [`SYS_FS_RECORD_LOCK`] op: `F_GETLK`. Would the lock be granted? If not,
+/// `struct flock` is rewritten to describe the first lock in the way: its
+/// type, its range from byte 0 (`l_whence` becomes `SEEK_SET`), and its
+/// holder's pid (-1 for an OFD lock taken through the Linux ABI). If so,
+/// `l_type` becomes `F_UNLCK` and nothing else changes.
+pub const RECORD_LOCK_GET: u64 = 0;
+/// [`SYS_FS_RECORD_LOCK`] op: `F_SETLK`. Take the lock now, or `WouldBlock`;
+/// with `F_UNLCK`, release the range.
+pub const RECORD_LOCK_SET: u64 = 1;
+/// [`SYS_FS_RECORD_LOCK`] op: `F_SETLKW`. Take the lock, waiting while
+/// another process's lock is in the way.
+pub const RECORD_LOCK_SET_WAIT: u64 = 2;
+
+// ---------------------------------------------------------------------------
+// flock on an open file (1094)
+// ---------------------------------------------------------------------------
+
+/// BSD `flock(2)` on an open file: `fs_flock_handle(handle, op) -> 0`.
+///
+/// A whole-file advisory lock that belongs to the **open file
+/// description**, as BSD and Linux `flock` locks do: every descriptor
+/// sharing the handle (a `dup`, a `fork`) shares the lock. It ends at
+/// `FLOCK_UN` or at the description's final close. Two separate opens of
+/// one file are separate owners, even in one process. The table is the
+/// Linux `flock(2)`'s, so native and Linux programs exclude each other.
+///
+/// - `handle`: a file handle the caller holds. Any open mode will do, as
+///   on Linux.
+/// - `op`: [`FLOCK_SH`], [`FLOCK_EX`] or [`FLOCK_UN`], optionally with
+///   [`FLOCK_NB`]. Linux's values.
+///
+/// Without `FLOCK_NB`, a request another owner's lock is in the way of
+/// **waits** until it is free. A signal ends the wait (`Interrupted`, so
+/// libc's `EINTR`), or restarts it under `SA_RESTART`, as Linux restarts
+/// `flock`. With `FLOCK_NB` it is `WouldBlock` (`EWOULDBLOCK`) at once.
+/// Asking for the other type converts the lock, and a conversion first gives
+/// up the lock held, as on Linux.
+///
+/// Errors: `InvalidArgument` (`EINVAL`) for an op that is not exactly one of
+/// the three, optionally with `FLOCK_NB`, checked first; `InvalidHandle`
+/// (`EBADF`) for a handle the caller does not hold; `ResourceExhausted` for
+/// a full table (POSIX's `ENOLCK`; libc maps the code to `ENOMEM`
+/// generally).
+///
+/// The path-based [`SYS_FS_FLOCK`] locks for the calling process instead and
+/// never waits; it stays for callers built against it.
+///
+/// Chosen number 1094, next free slot after 1093.
+pub const SYS_FS_FLOCK_HANDLE: u64 = 1094;
+
+/// [`SYS_FS_FLOCK_HANDLE`] op: a shared lock (Linux `LOCK_SH`).
+pub const FLOCK_SH: u64 = 1;
+/// [`SYS_FS_FLOCK_HANDLE`] op: an exclusive lock (Linux `LOCK_EX`).
+pub const FLOCK_EX: u64 = 2;
+/// [`SYS_FS_FLOCK_HANDLE`] op flag: do not wait (Linux `LOCK_NB`).
+pub const FLOCK_NB: u64 = 4;
+/// [`SYS_FS_FLOCK_HANDLE`] op: release (Linux `LOCK_UN`).
+pub const FLOCK_UN: u64 = 8;
 
 // ---------------------------------------------------------------------------
 // Version info

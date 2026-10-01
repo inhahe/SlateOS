@@ -1820,9 +1820,9 @@ _A theme is a declarative YAML file plus optional bundled assets. Themes are pur
 - [x] Bundled in theme directory as SVGs, or referenced by name as a separate installable icon theme package — *2026-09-26: `<theme>/icons/<name>.svg` beside `theme.yaml`, and a folder of icons alone is an icon pack; `theme.icons` in `appearance.yaml` chooses the icons independently of the colours.*
 
 ##### Tier 1 — Cursor Theme
-- [ ] Cursor shape, size, color
-- [ ] Animated cursors (loading spinner)
-- [ ] SVG-based or XCursor format
+- [-] Cursor shape, size, color — *lane C's half done 2026-10-01 (`design-decisions.md` §1459): the shapes come from the chosen cursor theme (`theme.cursors`; `appearance::cursors::CursorTheme::cursor` by CSS name, the older X11 names and `index.theme` inheritance included), the size and colour were settings already (`cursors.size`, `cursors.scheme`, §872). Drawing a theme's pictures is lane F's (`requests/c-f-draw-the-pointer-from-the-cursor-theme.md`); choosing a theme in Settings is lane E's (`requests/c-e-choose-the-cursor-theme-in-settings.md`).*
+- [-] Animated cursors (loading spinner) — *2026-10-01: every frame of an animated cursor is read with its delay (a common theme's busy pointer is sixty 16 ms frames); animating them is the compositor's, in the same request to lane F.*
+- [-] SVG-based or XCursor format — *XCursor done 2026-10-01 (`appearance::cursors::xcursor`), the format every Linux cursor theme ships, so those install here as they are. Scalable (SVG) cursors are not read yet.*
 
 ##### Tier 2 — Font Preferences (add in early update)
 - [ ] System font, monospace font, font sizes (base, small, large), font weight

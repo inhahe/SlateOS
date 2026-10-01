@@ -2129,6 +2129,40 @@ live.
   fixed that opening a folder in the toolkit's folder picker chose it, a
   fix the seven lane E applications already using the picker share.
 
+- `[C]` **Cursor themes** (`roadmap-detailed.md` → *Tier 1 — Cursor
+  Theme*; `design-decisions.md` §1459) -- lane C's half done 2026-10-01.
+  `theme.cursors` chooses a cursor theme in the format every Linux desktop
+  uses -- XCursor files by name, with `index.theme` inheritance -- so
+  Adwaita, Breeze or Bibata install as they are; `appearance::cursors` reads
+  any pointer shape at the nearest size, every frame of an animated one, each
+  file checked before it is believed. **Waiting on others:** the compositor
+  drawing the pictures (lane F, `requests/c-f-draw-the-pointer-from-the-cursor-theme.md`)
+  and a chooser in Settings (lane E, `requests/c-e-choose-the-cursor-theme-in-settings.md`).
+
+- `[C]` **Window frames are a theme axis** (`design-decisions.md` §1456) --
+  lane C's half done 2026-10-01: a theme's `window-decorations` section sets
+  the title bar (height, alignment, weight, how a long title is cut), its
+  buttons (side, order, shape, size, gap), the border and the shadow, with
+  the geometry drawing and clicking share (`DecorationStyle::title_bar`).
+  The taskbar cuts window labels as titles are cut. **Waiting on others:** the
+  compositor drawing from it (lane F, `requests/c-f-draw-window-frames-from-the-theme.md`)
+  and its chooser (lane E, `requests/c-e-choose-the-window-frames-in-settings.md`).
+
+- `[C]` **The toolkit lays out as CSS Flexbox and Grid do**
+  (`design-decisions.md` §1455) -- done 2026-10-01. `guitk::layout`: flex
+  lines, wrapping, growing and shrinking with min/max freezing, margins,
+  baselines and `align-content`; `layout::grid` with sparse auto-placement and
+  `Px`/`Auto`/`Fr`/`MinMax` tracks; `fit_image` for contain, cover, stretch
+  and natural size. The widget tree lays out and routes clicks through it.
+
+- `[C]` **A right-click on a text field offers what its keys do**
+  (`design-decisions.md` §1454) -- done 2026-10-01: Cut, Copy, Paste, Delete
+  and Select All in every toolkit text field and the code editor, and in the
+  desktop's own fields (the run box, start-menu search, a note, a rename).
+  **And the wallpaper moves** (§1457): a picture that overflows the screen
+  is dragged into place from the desktop's menu, and the login screen shows
+  the same part.
+
 - `[C]` **A ribbon in the toolkit** (`roadmap-detailed.md` → *Ribbon
   Widget*; `design-decisions.md` §1453) -- done 2026-09-30. `guitk::ribbon`:
   tabs of named groups of controls -- large, medium and small buttons,

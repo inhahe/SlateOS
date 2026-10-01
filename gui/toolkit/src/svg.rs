@@ -1104,6 +1104,17 @@ pub struct SvgDocument {
     defs: Defs,
 }
 
+/// The user-space rectangle an `<svg>` element shows, `(x, y, width,
+/// height)`: its `viewBox`, or else its `width` and `height` from the origin
+/// -- 300 by 150 where those are not given either, SVG's default size.
+fn shown_box(
+    view_box: Option<(f32, f32, f32, f32)>,
+    width: Option<f32>,
+    height: Option<f32>,
+) -> (f32, f32, f32, f32) {
+    view_box.unwrap_or((0.0, 0.0, width.unwrap_or(300.0), height.unwrap_or(150.0)))
+}
+
 impl SvgDocument {
     /// Parse an SVG string into a document tree.
     pub fn parse(svg_data: &str) -> Result<Self, SvgError> {
@@ -1114,20 +1125,13 @@ impl SvgDocument {
             .first()
             .ok_or_else(|| SvgError::MalformedXml("empty document".into()))?;
         // The gradients first, from the whole document: a shape may name one
-        // defined after it.
-        let viewport = first
-            .attr("viewBox")
-            .and_then(|s| parse_viewbox(s).ok())
-            .map_or_else(
-                || {
-                    (
-                        first.attr_f32("width").unwrap_or(300.0),
-                        first.attr_f32("height").unwrap_or(150.0),
-                    )
-                },
-                |(_, _, w, h)| (w, h),
-            );
-        let defs = Defs::collect(first, viewport);
+        // defined after it. Their percentages are of the viewport.
+        let (_, _, view_w, view_h) = shown_box(
+            first.attr("viewBox").and_then(|s| parse_viewbox(s).ok()),
+            first.attr_f32("width"),
+            first.attr_f32("height"),
+        );
+        let defs = Defs::collect(first, (view_w, view_h));
         let root = build_node(first, &defs)?;
         Ok(Self { root, defs })
     }
@@ -1135,19 +1139,15 @@ impl SvgDocument {
     /// Get the viewBox (min_x, min_y, width, height).
     /// Returns (0, 0, width, height) if no explicit viewBox is set.
     pub fn viewbox(&self) -> (f32, f32, f32, f32) {
-        if let SvgNode::Svg {
-            view_box,
-            width,
-            height,
-            ..
-        } = &self.root
-        {
-            if let Some(vb) = view_box {
-                return *vb;
-            }
-            return (0.0, 0.0, width.unwrap_or(300.0), height.unwrap_or(150.0));
+        match &self.root {
+            SvgNode::Svg {
+                view_box,
+                width,
+                height,
+                ..
+            } => shown_box(*view_box, *width, *height),
+            _ => shown_box(None, None, None),
         }
-        (0.0, 0.0, 300.0, 150.0)
     }
 
     /// Render the SVG to a pixel buffer at the given dimensions: 4 bytes per

@@ -45,8 +45,43 @@ fn a_linear_gradient_runs_across_the_box() {
     let at = |x| px(&svg, 100, 10, x, 5);
     assert!(near(at(0), [254, 0, 1, 255], 2), "{:?}", at(0));
     assert!(near(at(99), [1, 0, 254, 255], 2), "{:?}", at(99));
-    // The 50th pixel's centre is 50.5% of the way.
-    assert!(near(at(50), [126, 0, 129, 255], 2), "{:?}", at(50));
+    // The 50th pixel's centre is 50.5% of the way -- exactly: its corner,
+    // half way, would be 128 and 128.
+    assert_eq!(at(50), [126, 0, 129, 255]);
+}
+
+/// **A gradient runs along its vector, not along `x`**: corner to corner,
+/// the other two corners are half way.
+#[test]
+fn a_diagonal_gradient_runs_along_its_vector() {
+    let svg = r#"<svg viewBox="0 0 100 100" width="100" height="100">
+<linearGradient id="g" x2="1" y2="1"><stop stop-color="red"/><stop offset="1" stop-color="blue"/></linearGradient>
+<rect width="100" height="100" fill="url(#g)"/></svg>"#;
+    let at = |x, y| px(svg, 100, 100, x, y);
+    assert!(near(at(0, 0), [254, 0, 1, 255], 2), "{:?}", at(0, 0));
+    assert!(near(at(99, 99), [1, 0, 254, 255], 2), "{:?}", at(99, 99));
+    for (x, y) in [(99, 0), (0, 99), (50, 49)] {
+        assert!(near(at(x, y), [127, 0, 128, 255], 2), "{:?}", at(x, y));
+    }
+}
+
+/// **A box gradient is laid over the shape's own box**, wherever the shape
+/// is -- and the box is in user space, whatever scale the drawing is shown
+/// at.
+#[test]
+fn a_box_gradient_follows_its_shape() {
+    let moved = format!(
+        r#"<svg viewBox="0 0 100 10" width="100" height="10"><defs>{RED_TO_BLUE}</defs>
+<rect x="50" width="50" height="10" fill="url(#g)"/></svg>"#
+    );
+    // Pixel 75's centre is 25.5 into a box 50 wide: 0.51 of the way.
+    assert_eq!(px(&moved, 100, 10, 75, 5), [125, 0, 130, 255]);
+    // Ten user units shown 100 pixels wide: the box is 10 wide, not 100.
+    let scaled = format!(
+        r#"<svg viewBox="0 0 10 1"><defs>{RED_TO_BLUE}</defs>
+<rect width="10" height="1" fill="url(#g)"/></svg>"#
+    );
+    assert_eq!(px(&scaled, 100, 10, 50, 5), [126, 0, 129, 255]);
 }
 
 /// **A gradient may be defined after what paints with it**, and outside
@@ -58,6 +93,37 @@ fn a_gradient_may_come_after_its_use() {
 <rect width="100" height="10" fill="url(#g)"/>{RED_TO_BLUE}</svg>"#
     );
     assert!(near(px(&svg, 100, 10, 0, 5), [254, 0, 1, 255], 2));
+}
+
+/// **A gradient is found by its id however the reference is written** --
+/// quoted or not, spaced or not -- and in a document that writes its
+/// elements with a namespace prefix; of two with one id, the first is the
+/// one, as `getElementById` has it.
+#[test]
+fn a_gradient_is_found_by_its_id_however_it_is_written() {
+    let lime = r#"<linearGradient id="g"><stop stop-color="lime"/><stop offset="1" stop-color="lime"/></linearGradient>"#;
+    for fill in ["url('#g')", "url( #g )"] {
+        assert_eq!(
+            px(&strip(lime, fill), 100, 10, 50, 5),
+            [0, 255, 0, 255],
+            "{fill}"
+        );
+    }
+    let double_quoted = format!(
+        r##"<svg viewBox="0 0 100 10" width="100" height="10">{lime}<rect width="100" height="10" fill='url("#g")'/></svg>"##
+    );
+    assert_eq!(px(&double_quoted, 100, 10, 50, 5), [0, 255, 0, 255]);
+    let prefixed = r#"<svg xmlns:svg="http://www.w3.org/2000/svg" viewBox="0 0 100 10" width="100" height="10">
+<svg:linearGradient id="g"><svg:stop stop-color="lime"/><svg:stop offset="1" stop-color="lime"/></svg:linearGradient>
+<rect width="100" height="10" fill="url(#g)"/></svg>"#;
+    assert_eq!(px(prefixed, 100, 10, 50, 5), [0, 255, 0, 255]);
+    let twice = format!(
+        r#"{lime}<linearGradient id="g"><stop stop-color="red"/><stop offset="1" stop-color="red"/></linearGradient>"#
+    );
+    assert_eq!(
+        px(&strip(&twice, "url(#g)"), 100, 10, 50, 5),
+        [0, 255, 0, 255]
+    );
 }
 
 /// **In user space the numbers are user units**, and past the ends a padded
@@ -77,6 +143,31 @@ fn a_user_space_gradient_is_measured_in_user_units() {
         "url(#g)",
     );
     assert_eq!(px(&percent, 100, 10, 75, 5), [0, 0, 255, 255]);
+    // So are the defaults: from the viewport's left edge to its right.
+    let defaults = strip(
+        r#"<linearGradient id="g" gradientUnits="userSpaceOnUse">
+<stop offset="0" stop-color="red"/><stop offset="1" stop-color="blue"/></linearGradient>"#,
+        "url(#g)",
+    );
+    assert_eq!(px(&defaults, 100, 10, 50, 5), [126, 0, 129, 255]);
+    // With no viewBox, the viewport is the width and height.
+    let sized = r#"<svg width="100" height="10"><linearGradient id="g" gradientUnits="userSpaceOnUse" x2="50%">
+<stop offset="0" stop-color="red"/><stop offset="1" stop-color="blue"/></linearGradient>
+<rect width="100" height="10" fill="url(#g)"/></svg>"#;
+    assert_eq!(px(sized, 100, 10, 75, 5), [0, 0, 255, 255]);
+}
+
+/// **A radius in percent is of the viewport's diagonal measure** -- the root
+/// of the mean of its sides' squares, as SVG measures a length with no
+/// direction: 35.5 for a viewport 100 by 10, not its width or height.
+#[test]
+fn a_radius_in_percent_is_of_the_viewports_diagonal() {
+    let defs = r#"<radialGradient id="g" gradientUnits="userSpaceOnUse" cx="0" cy="5" r="50%">
+<stop stop-color="white"/><stop offset="1" stop-color="black"/></radialGradient>"#;
+    let svg = strip(defs, "url(#g)");
+    // Pixel 17's centre is 17.5 from the centre: 0.49 of the radius.
+    let at = px(&svg, 100, 10, 17, 5);
+    assert!(near(at, [129, 129, 129, 255], 2), "{at:?}");
 }
 
 /// **Past its ends a gradient repeats or reflects as its spread says.**
@@ -143,15 +234,19 @@ fn a_focal_point_moves_the_start() {
 }
 
 /// **A gradient that names another takes its stops, and anything it does
-/// not set itself**: the geometry from its own kind only.
+/// not set itself**: its units, transform and spread.
 #[test]
 fn a_gradient_takes_what_it_names() {
-    let defs = r##"<linearGradient id="base" x2="0.5" spreadMethod="repeat">
+    let defs = r##"<linearGradient id="base" gradientUnits="userSpaceOnUse" x2="40"
+spreadMethod="repeat" gradientTransform="translate(10 0)">
 <stop offset="0" stop-color="red"/><stop offset="1" stop-color="blue"/></linearGradient>
-<linearGradient id="g" xlink:href="#base" x2="1"/>"##;
+<linearGradient id="g" xlink:href="#base" x2="80"/>"##;
     let svg = strip(defs, "url(#g)");
-    // Its own x2, the stops and the spread from `base`.
-    assert!(near(px(&svg, 100, 10, 50, 5), [126, 0, 129, 255], 2));
+    // Its own x2, in user units, moved 10 right: pixel 50's centre is
+    // 40.5 along a vector 80 long.
+    assert_eq!(px(&svg, 100, 10, 50, 5), [126, 0, 129, 255]);
+    // Pixel 5's is 4.5 before the start, which repeats from the end.
+    assert_eq!(px(&svg, 100, 10, 5, 5), [14, 0, 241, 255]);
     // SVG 2's plain `href` too; and a chain that loops keeps what it has.
     let looped = strip(
         r##"<linearGradient id="a" href="#b"><stop stop-color="red"/></linearGradient>
@@ -203,6 +298,14 @@ fn offsets_are_held_in_order() {
     // The second stop is held to 0.5: red before the middle, blue after.
     assert_eq!(px(&svg, 100, 10, 25, 5), [255, 0, 0, 255]);
     assert_eq!(px(&svg, 100, 10, 75, 5), [0, 0, 255, 255]);
+    // A stop held forward is where the next run starts: blue at 0.6, not
+    // at 0.3, so 0.795 is 0.4875 of the way from it to white.
+    let three = strip(
+        r#"<linearGradient id="g"><stop stop-color="red"/><stop offset="0.6" stop-color="lime"/>
+<stop offset="0.3" stop-color="blue"/><stop offset="1" stop-color="white"/></linearGradient>"#,
+        "url(#g)",
+    );
+    assert_eq!(px(&three, 100, 10, 79, 5), [124, 124, 255, 255]);
 }
 
 /// **SVG's degenerate cases**: no stops paints nothing, one stop paints its
@@ -255,9 +358,15 @@ fn a_gradient_transform_moves_it() {
     assert!(near(px(svg, 10, 100, 5, 99), [1, 0, 254, 255], 3));
 }
 
-/// **`fill-opacity` is inherited**: a group's reaches its shapes.
+/// **`fill-opacity` and `stroke-opacity` are inherited**: a group's reaches
+/// its shapes.
 #[test]
-fn fill_opacity_is_inherited() {
+fn fill_and_stroke_opacity_are_inherited() {
+    let stroked = r#"<svg viewBox="0 0 10 10" width="10" height="10">
+<g stroke-opacity="0.5"><line x1="0" y1="5" x2="10" y2="5" stroke="red" stroke-width="4"/></g></svg>"#;
+    let s = px(stroked, 10, 10, 5, 5);
+    assert_eq!(&s[..3], &[255, 0, 0]);
+    assert!(s[3].abs_diff(127) <= 1, "{s:?}");
     let svg = r#"<svg viewBox="0 0 10 10" width="10" height="10">
 <g fill-opacity="0.5"><rect width="10" height="10" fill="red"/></g></svg>"#;
     let p = px(svg, 10, 10, 5, 5);

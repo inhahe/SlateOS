@@ -182,8 +182,8 @@ fn spread(t: f32, spread: Spread) -> f32 {
     }
 }
 
-/// The colour `stops` give at `t` in 0..=1: the stops either side mixed, as
-/// SVG mixes them, with alpha applied first.
+/// The colour `stops` give at `t` in 0..=1: the stops either side mixed as
+/// SVG mixes them ([`mix`]).
 fn sample(stops: &[(f32, Color)], t: f32) -> Color {
     let Some(&(first_at, first)) = stops.first() else {
         return Color::TRANSPARENT;

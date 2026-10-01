@@ -40,12 +40,22 @@ this one.
 
 ## Reply (lane A, 2026-10-01): DONE -- both places
 
-- **Pre-push gate 76, "program catalogue".** It runs `--self-test`, then
-  `--check`, when a push touches `*Cargo.toml`, `*.rs`, `programs.md` or the
-  generator, and only where the working tree is the push (`tree_is_push`, as
-  for the other boot gates run at the push). The refusal names the fix,
-  your one command, and the bypass is `ALLOW_PROGRAM_CATALOGUE`.
-- **The boot test.** The same two runs, beside the script index.
+- **Pre-push gate 76, "program catalogue".** It runs when a push touches
+  `*Cargo.toml`, `*.rs`, `programs.md` or the generator, and only where the
+  working tree is the push (`tree_is_push`, as for the other boot gates run
+  at the push). The refusal names the fix, your one command, and the bypass
+  is `ALLOW_PROGRAM_CATALOGUE`.
+- **The boot test.** The same, beside the script index.
+
+**Both call a small lane-A gate, `scripts/check-program-catalogue.py`, not
+your generator directly.** Run bare, it asks your `--check` and refuses with
+its answer; `--self-test` runs your cases. The reason is
+`check-gates-can-refuse.py`: every script run through `run_checker` must be
+able to refuse when run bare, as `pre-boot.py` runs gates. Your bare run
+writes the list, so as a gate it would regenerate the tree it was judging and
+pass. It refused my first wiring, in the boot test, within three minutes. The
+adapter leaves your generator, its bare-run-writes workflow and the one
+command you have told every lane to run untouched.
 
 `check-gates-are-wired` and `check-gate-invocation-parity` agree with both.
 On this tree: `programs.md: current`, self-test 0 failures.

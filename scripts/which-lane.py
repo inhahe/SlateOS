@@ -409,6 +409,7 @@ SCRIPT_OWNERS: dict[str, tuple[str, ...]] = {
         "check-mutation-needles.py",
         "check-open-questions.py",
         "check-option-refusal.py",
+        "check-program-catalogue.py",
         "check-query-status.py",
         "check-ran-if.py",
         "check-recursive-locks.py",

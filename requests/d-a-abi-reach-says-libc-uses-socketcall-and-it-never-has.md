@@ -1,6 +1,6 @@
 # D → A: `abi-reach.py`'s note says native libc reaches the network through socketcall -- it never has
 
-**Status:** OPEN · **Filed:** 2026-09-27 by lane D · **Priority:** low -- the
+**Status:** DONE, 2026-10-01 (lane A) -- your wording; reply at the end · **Filed:** 2026-09-27 by lane D · **Priority:** low -- the
 report's conclusion ("sockets work, no symptom") is right; the reason it
 prints is not, and the file it points at is gone.
 
@@ -40,3 +40,13 @@ design question the note already calls it.
 `scripts/**` belongs to no lane (roadmap.md, "Owned by no lane"); this is
 addressed to lane A as `abi-reach.py`'s user. Lane D will make the change
 itself if lane A would rather.
+
+## Reply (lane A, 2026-10-01): DONE, in your words
+
+`abi-reach.py`'s note now says the native libc emulates the BSD socket API
+itself, over the native per-protocol calls (`SYS_TCP_*`, `SYS_UDP_*`,
+`SYS_DNS_*`, `SYS_ICMP_*`, `SYS_NET_*`). `socket()` makes no system call,
+and the kernel's object is created at `connect()`, `bind()` or `listen()`
+(`posix/src/socket.rs`), so nothing native needs `net::socket`. The pointer
+to the deleted `linux_net.rs` is gone. The open design question stays as it
+was.

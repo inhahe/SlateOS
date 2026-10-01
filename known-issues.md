@@ -178992,3 +178992,36 @@ terminals' lines.
 **Where:** `userspace/getty/src/main.rs`; the call to copy is util-linux
 2.39.3's `term-utils/agetty.c`, `update_utmp` -- `pututxline` of a
 `LOGIN_PROCESS` record and `updwtmpx` to `wtmp`, through `libcall::utmp`.
+
+## B-PORTED-CODE-CARRIES-NO-NOTICES — lane B's ports of GNU coreutils, util-linux and others have no notices manifest, so the image would ship their code without their licences (lane B, 2026-10-01) — **Status: OPEN (next task)**
+
+**In short:** much of lane B's userland is ported from other projects --
+GNU coreutils 9.4 (about 40 programs, GPL-3.0-or-later), util-linux 2.39.3
+(`blockdev`, `blkid`, `lsblk`, `swapon`, `wipefs`, `logger`, `column`,
+`findmnt` and more, plus the `ulblkid`/`ulsysfs`/`smartcols`/`ulmount`
+library ports: GPL-2.0-or-later and LGPL-2.1-or-later), Oils (Apache-2.0)
+and others. An image may carry other people's code only with their licence
+notices, and `scripts/gather-notices.py` -- which builds the image's
+`/usr/share/licenses` and the notices page -- can find ported code only
+through a `licenses/notices.yaml` naming it (`design-decisions.md` §1433,
+`requests/c-abdef-third-party-code-needs-a-notices-manifest.md`). Lane B has
+none, except `userspace/file`'s (file 5.45, added 2026-10-01). So today the
+image carries those programs without the notices their licences require.
+
+**The fix:** one manifest for lane B's ports in `userspace/licenses/`, one
+entry per upstream project (name, version, licence, texts), with each
+project's licence texts beside it. Per project rather than per crate: the
+notices page lists components, and forty copies of the GPL would say
+nothing forty-one did not. Needs, per crate, the upstream it states and the
+version it was ported from -- most say so in their module docs ("a port of
+util-linux 2.39.3's ..."), which a survey of `userspace/` already finds for
+26 crates and 40 coreutils programs.
+
+**One thing for the operator to know, not decide here:** code ported from
+GPL projects makes those programs GPL-licensed derived works, with the
+GPL's source-availability obligations for any image distributed. That is
+already true of the tree as it stands; the manifest makes it visible
+rather than creating it.
+
+**Where:** `userspace/**`, `init/**`; the gatherer is `scripts/gather-notices.py`
+and its check runs in the boot test (`scripts/test-gather-notices.py`).

@@ -2265,6 +2265,12 @@ impl<T: Transport> ShellSession<T> {
             // `handle_hotkey_inner` both offer the chooser every event
             // before the box sees one.
             self.shell.render_chooser(),
+            // A text field's menu, over the field it is about -- the Run
+            // box's line and the start menu's search among them, both of
+            // which stay open under it. It takes every press and key while
+            // it is up (`handle_mouse_inner`, `handle_hotkey_inner`), so it
+            // is drawn over everything that could be open with it.
+            self.shell.render_field_menu(),
             // Over everything, the Run box and its chooser included: a shut
             // down waiting on the programs still open, which owns every key
             // and press while it is up.
@@ -3214,7 +3220,11 @@ impl<T: Transport> ShellSession<T> {
                 // icon is being renamed, when every key that reaches the shell
                 // is the name's. "Rename" is chosen from a menu on another of
                 // the shell's surfaces, and that surface keeps the keyboard.
-                let renaming = self.shell.icons.renaming().is_some();
+                // An open note's likewise: a row of its own menu -- Paste --
+                // is chosen on that surface too, and the typing after it is
+                // the note's.
+                let renaming = self.shell.icons.renaming().is_some()
+                    || self.shell.widgets.writing_note().is_some();
                 if !claimed && (renaming || surface.window() == self.background.window()) {
                     let action = self.shell.handle_desktop_key(&key);
                     self.act(action)?;

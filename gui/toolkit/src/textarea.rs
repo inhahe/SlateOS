@@ -731,6 +731,56 @@ impl TextArea {
         }
     }
 
+    /// The rows of the menu a right-click on this field offers
+    /// ([`crate::editmenu`]): Undo and Redo, then Cut, Copy, Paste, Delete
+    /// and Select all, each dimmed when it would do nothing.
+    #[must_use]
+    pub fn edit_menu(&self) -> Vec<crate::menu::MenuItem> {
+        crate::editmenu::rows(crate::editmenu::EditState {
+            selected: self.has_selection(),
+            editable: true,
+            has_text: !self.text.is_empty(),
+            history: true,
+            can_undo: self.can_undo(),
+            can_redo: self.can_redo(),
+        })
+    }
+
+    /// Do what the row `id` of [`edit_menu`](Self::edit_menu) says, the
+    /// caret kept in view as a key keeps it, and answer as the key that does
+    /// the same would: `Changed`, `Handled`, or `Unhandled` for an id that is
+    /// none of the menu's rows.
+    pub fn edit_command(&mut self, id: crate::menu::MenuItemId, m: &Metrics) -> KeyEdit {
+        use crate::editmenu::EditCommand;
+        let Some(command) = EditCommand::from_id(id) else {
+            return KeyEdit::Unhandled;
+        };
+        let before = self.revision;
+        match command {
+            EditCommand::Undo => {
+                self.undo();
+            }
+            EditCommand::Redo => {
+                self.redo();
+            }
+            EditCommand::Cut => self.cut(),
+            EditCommand::Copy => self.copy(),
+            EditCommand::Paste => self.paste(),
+            EditCommand::Delete => {
+                if self.has_selection() {
+                    self.delete();
+                }
+            }
+            EditCommand::SelectAll => self.select_all(),
+        }
+        self.reveal_caret(m);
+        if self.revision == before {
+            KeyEdit::Handled
+        } else {
+            KeyEdit::Changed
+        }
+    }
+
     /// Insert the program's clipboard at the caret, over the selection if
     /// there is one.
     pub fn paste(&mut self) {

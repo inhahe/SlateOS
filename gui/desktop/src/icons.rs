@@ -850,6 +850,30 @@ impl DesktopIconLayer {
         }
     }
 
+    /// The rows of the rename field's right-click menu (`guitk::editmenu`):
+    /// Cut, Copy, Paste, Delete and Select all, each dimmed when it would do
+    /// nothing. Empty with no rename under way.
+    #[must_use]
+    pub fn rename_edit_menu(&self) -> Vec<guitk::menu::MenuItem> {
+        self.renaming
+            .as_ref()
+            .map(|rename| rename.input.edit_menu())
+            .unwrap_or_default()
+    }
+
+    /// Do what a row of [`rename_edit_menu`](Self::rename_edit_menu) says to
+    /// the name being typed, as the key that does the same would. Answers
+    /// whether a rename was under way to do it to.
+    pub fn rename_edit_command(&mut self, row: guitk::menu::MenuItemId) -> bool {
+        let Some(rename) = self.renaming.as_mut() else {
+            return false;
+        };
+        // Whether it changed the name is not asked, as it is not of a key:
+        // the name is kept when the rename ends.
+        let _edit = rename.input.edit_command(row);
+        true
+    }
+
     /// Keep what has been typed as the icon's name -- Enter, or a click away.
     /// Answers whether the name changed, which is when the layout needs
     /// saving.
@@ -881,7 +905,7 @@ impl DesktopIconLayer {
 
     /// Where the rename field is on the screen, `(x, y, width, height)`, if a
     /// rename is under way: the label's place in the icon's cell.
-    fn rename_field(&self) -> Option<(f32, f32, f32, f32)> {
+    pub(crate) fn rename_field(&self) -> Option<(f32, f32, f32, f32)> {
         let rename = self.renaming.as_ref()?;
         let icon = self.get_icon(rename.id)?;
         let cw = px_f32(self.grid.cell_width());

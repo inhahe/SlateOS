@@ -828,3 +828,62 @@ fn drawing_is_clipped_to_the_box() {
     assert!(matches!(cmds.first(), Some(RenderCommand::PushClip { .. })));
     assert!(matches!(cmds.last(), Some(RenderCommand::PopClip)));
 }
+
+/// The labels of `rows` that are lit.
+fn lit(rows: &[crate::menu::MenuItem]) -> Vec<String> {
+    rows.iter()
+        .filter_map(|r| match r {
+            crate::menu::MenuItem::Action {
+                label,
+                enabled: true,
+                ..
+            } => Some(label.clone()),
+            _ => None,
+        })
+        .collect()
+}
+
+/// **A right-click menu on a text area does what its keys do**: Undo once
+/// there is a change, Cut and Copy with a selection, Paste with something
+/// to paste -- and an id that is none of its rows is not the area's.
+#[test]
+fn the_right_click_menu_does_what_the_keys_do() {
+    use crate::editmenu::EditCommand;
+    let m = wide(4);
+    crate::clipboard::set_text("");
+    let mut area = TextArea::new();
+    assert_eq!(lit(&area.edit_menu()), Vec::<String>::new());
+    type_text(&mut area, "one two", &m);
+    assert_eq!(lit(&area.edit_menu()), ["Undo", "Select all"]);
+    assert_eq!(
+        area.edit_command(EditCommand::SelectAll.id(), &m),
+        KeyEdit::Handled
+    );
+    assert_eq!(
+        lit(&area.edit_menu()),
+        ["Undo", "Cut", "Copy", "Delete", "Select all"]
+    );
+    assert_eq!(
+        area.edit_command(EditCommand::Cut.id(), &m),
+        KeyEdit::Changed
+    );
+    assert_eq!(area.text(), "");
+    assert_eq!(crate::clipboard::text(), "one two");
+    assert_eq!(
+        area.edit_command(EditCommand::Paste.id(), &m),
+        KeyEdit::Changed
+    );
+    assert_eq!(area.text(), "one two");
+    area.edit_command(EditCommand::Undo.id(), &m);
+    assert_eq!(area.text(), "", "Undo from the menu took nothing back");
+    assert!(lit(&area.edit_menu()).contains(&"Redo".to_owned()));
+    area.edit_command(EditCommand::Redo.id(), &m);
+    assert_eq!(area.text(), "one two");
+    area.edit_command(EditCommand::SelectAll.id(), &m);
+    assert_eq!(
+        area.edit_command(EditCommand::Delete.id(), &m),
+        KeyEdit::Changed
+    );
+    assert_eq!(area.text(), "");
+    assert_eq!(area.edit_command(7, &m), KeyEdit::Unhandled);
+}

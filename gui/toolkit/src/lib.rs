@@ -39,6 +39,7 @@ pub mod disabled;
 pub mod dnd;
 pub mod dock;
 pub mod dropdown;
+pub mod editmenu;
 pub mod event;
 pub mod field;
 pub mod filetypes;

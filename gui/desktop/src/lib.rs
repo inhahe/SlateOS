@@ -138,6 +138,8 @@ pub mod window_peek;
 pub mod window_rules;
 
 #[cfg(test)]
+mod field_menu_tests;
+#[cfg(test)]
 mod note_tests;
 #[cfg(test)]
 mod notification_menu_tests;
@@ -1152,6 +1154,22 @@ enum ChooserFor {
     FrameFolder(widgets::WidgetInstanceId),
 }
 
+/// The text field of the shell's own that a field menu was opened on --
+/// a right-click there, offering Cut, Copy, Paste and the rest
+/// (`guitk::editmenu`). Captured with the menu, as the pin menu captures
+/// its row: what the menu was opened on is what its rows act on.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum MenuField {
+    /// The Run box's command line.
+    RunBox,
+    /// The start menu's search.
+    StartSearch,
+    /// A note's writing area -- the note open for writing.
+    Note(widgets::WidgetInstanceId),
+    /// An icon's name being edited in place.
+    Rename,
+}
+
 /// A start-menu row pressed and perhaps being dragged.
 struct StartDrag {
     /// The press and its drag threshold, keyed by the program's path -- the
@@ -2064,6 +2082,11 @@ pub struct DesktopShell {
     /// The program is captured with the menu, as the pin menu captures its
     /// row: what the menu said it was about is what its rows act on.
     notification_menu: Option<(guitk::menu::ContextMenu, String)>,
+    /// A text field's menu -- a right-click on the Run box's command line,
+    /// the start menu's search, a note's writing area or an icon's name
+    /// being edited -- when it is open, and the field it was opened on: what
+    /// the field's keys do, for the pointer (`guitk::editmenu`).
+    field_menu: Option<(guitk::menu::ContextMenu, MenuField)>,
     /// A pinned button being dragged along the bar.
     ///
     /// Keyed on the executable path rather than the slot, for the reason the
@@ -2767,6 +2790,7 @@ impl DesktopShell {
             pin_menu: None,
             taskbar_menu: None,
             notification_menu: None,
+            field_menu: None,
             pin_drag: None,
             pin_drag_off_bar: false,
             start_drag: None,
@@ -4842,16 +4866,39 @@ impl DesktopShell {
     }
 
     fn handle_mouse_inner(&mut self, event: &MouseEvent) -> ShellAction {
-        // A rename under way owns the presses on its own field -- they place
-        // the caret -- and any other press keeps the new name before it does
-        // whatever it does, as a click away does on every desktop. First,
-        // before the menus: a right-click that opens a menu is a click away
-        // too, and the name must not be left half-typed under it.
+        // A text field's menu first of all, ahead of even the rename and the
+        // note below: it is opened over the field it is about, and a press on
+        // one of its rows must not first put that field down -- keep the
+        // name, close the note -- and leave the row nothing to act on. A
+        // press anywhere else closes it and is spent doing so, as every
+        // menu's is; the Run box or start menu it was opened in stays.
+        if self.field_menu.is_some() {
+            match event.kind {
+                MouseEventKind::Move => {
+                    if let Some((menu, _)) = self.field_menu.as_mut() {
+                        menu.handle_mouse_move(event.x, event.y);
+                    }
+                    return ShellAction::Consumed;
+                }
+                MouseEventKind::Press(_) => return self.click_field_menu(event.x, event.y),
+                _ => return ShellAction::Consumed,
+            }
+        }
+        // A rename under way owns the presses on its own field -- a left
+        // press places the caret, a right one offers the field's menu -- and
+        // any other press keeps the new name before it does whatever it does,
+        // as a click away does on every desktop. First, before the menus: a
+        // right-click that opens a menu is a click away too, and the name
+        // must not be left half-typed under it.
         if self.icons.renaming().is_some()
             && let MouseEventKind::Press(_) | MouseEventKind::DoubleClick(_) = event.kind
         {
             if self.icons.rename_field_contains(event.x, event.y) {
-                self.icons.rename_click(event.x);
+                if let MouseEventKind::Press(MouseButton::Right) = event.kind {
+                    self.open_field_menu(MenuField::Rename, event.x, event.y);
+                } else {
+                    self.icons.rename_click(event.x);
+                }
                 return ShellAction::Consumed;
             }
             self.icons_dirty |= self.icons.commit_rename();
@@ -5085,6 +5132,23 @@ impl DesktopShell {
         {
             return ShellAction::Consumed;
         }
+        // A right-click on a note's writing area offers what its keys do --
+        // Cut, Copy, Paste -- with the widget's own rows below them. A note
+        // not yet open opens, its caret where the press landed, as a left
+        // press would open it; one already open keeps its caret and its
+        // selection, which are what the rows act on. Its title bar is still
+        // the widget's, and offers the widget menu below.
+        if let MouseEventKind::Press(MouseButton::Right) = event.kind
+            && !self.any_popup_open()
+            && !self.taskbar_rect().contains(event.x, event.y)
+            && let Some(note) = self.widgets.note_body_at(event.x, event.y)
+        {
+            if self.widgets.writing_note() != Some(note) {
+                self.widgets.note_press(event.x, event.y, 1);
+            }
+            self.open_field_menu(MenuField::Note(note), event.x, event.y);
+            return ShellAction::Consumed;
+        }
         // A right-click on bare desktop opens it. Checked here rather than at
         // the bottom with the other background presses because the menu must
         // not be opened by a right-click that landed on the taskbar or a
@@ -5137,6 +5201,14 @@ impl DesktopShell {
         // taskbar keep lighting under the cursor, which is what a user moving
         // the mouse *towards* the box sees.
         if self.run_dialog.is_visible() {
+            // A right-click on the command line offers what its keys do, over
+            // the box, which stays: the menu is about its line.
+            if let MouseEventKind::Press(MouseButton::Right) = event.kind
+                && self.run_dialog.field_rect().contains(event.x, event.y)
+            {
+                self.open_field_menu(MenuField::RunBox, event.x, event.y);
+                return ShellAction::Consumed;
+            }
             let handled = self.run_dialog.handle_mouse_event(event);
             // `next()` rather than a loop, and nothing is thrown away by it: one
             // press reaches at most one button, and only the OK button executes,
@@ -5709,6 +5781,12 @@ impl DesktopShell {
         // the desktop cannot name (see `program_for_app_id`).
         if button == MouseButton::Right {
             match hit {
+                // The search field, which is part of the menu's panel: what
+                // its keys do, over the menu, which stays.
+                Hit::StartMenuPanel if self.start_search_rect().contains(x, y) => {
+                    self.open_field_menu(MenuField::StartSearch, x, y);
+                    return ShellAction::Consumed;
+                }
                 Hit::StartMenuEntry(index) => {
                     // A folder's row names no program, and `open_pin_menu`
                     // opens nothing for a target that names none.
@@ -6971,6 +7049,28 @@ impl DesktopShell {
             }
         }
 
+        // A text field's menu, on the pin menu's terms below. Ahead of the
+        // start menu and the Run box, which it may be open over: Escape
+        // closes the menu and leaves them, as a press outside the menu does.
+        if self.field_menu.is_some() {
+            let chosen = self
+                .field_menu
+                .as_mut()
+                .map(|(menu, field)| (menu.handle_key(key), *field));
+            match chosen {
+                Some((Some(MenuAction::Selected(id)), field)) => {
+                    self.field_menu = None;
+                    match self.activate_field_menu_item(id, field) {
+                        ShellAction::Launch(launch) => return HotkeyOutcome::start(vec![launch]),
+                        ShellAction::LaunchAll(launches) => return HotkeyOutcome::start(launches),
+                        _ => {}
+                    }
+                }
+                Some((Some(MenuAction::Closed), _)) => self.field_menu = None,
+                _ => {}
+            }
+            return HotkeyOutcome::consumed();
+        }
         // A notification's menu, on the pin menu's terms below. Ahead of the
         // pane, which it may be open over: Escape closes the menu and leaves
         // the pane, as a press outside the menu does.
@@ -10775,6 +10875,106 @@ impl DesktopShell {
         Some(tree)
     }
 
+    /// Open a text field's menu at `(x, y)`, over the field it is about:
+    /// what the field's keys do (`guitk::editmenu`), each row dimmed when it
+    /// would do nothing -- and on a note the widget's own rows below them,
+    /// since a right-click on a note offered removing it before it offered
+    /// anything else, and still should.
+    ///
+    /// Unlike every other menu here it does not dismiss the popups: the Run
+    /// box and the start menu are what the field is in, and closing them to
+    /// show a menu about their own field would leave the menu about nothing.
+    /// The other *menus* close, as they do whenever a menu opens. None can be
+    /// open when a press gets here -- each takes every press while it is up
+    /// -- but that is their rule, and this does not lean on it.
+    ///
+    /// Nothing opens over a field with nothing to offer: a note or a rename
+    /// that went before the press arrived.
+    fn open_field_menu(&mut self, field: MenuField, x: f32, y: f32) {
+        let mut items = match field {
+            MenuField::RunBox => self.run_dialog.edit_menu(),
+            MenuField::StartSearch => self.start_query.edit_menu(),
+            MenuField::Note(_) => self.widgets.note_edit_menu(),
+            MenuField::Rename => self.icons.rename_edit_menu(),
+        };
+        if items.is_empty() {
+            return;
+        }
+        if matches!(field, MenuField::Note(_)) {
+            items.push(MenuItem::Separator);
+            // A note is never a photo frame.
+            items.extend(Self::widget_menu_items(false));
+        }
+        self.desktop_menu.hide();
+        self.tray_overflow_menu = None;
+        self.pin_menu = None;
+        self.taskbar_menu = None;
+        self.close_notification_menu();
+        let mut menu = ContextMenu::new(items);
+        menu.show(x, y, self.viewport());
+        self.field_menu = Some((menu, field));
+    }
+
+    /// A press while a text field's menu is open: a row takes its action, and
+    /// a press anywhere else closes the menu, as every menu's does.
+    fn click_field_menu(&mut self, x: f32, y: f32) -> ShellAction {
+        let chosen = self
+            .field_menu
+            .as_mut()
+            .and_then(|(menu, field)| menu.handle_click(x, y).map(|id| (id, *field)));
+        self.field_menu = None;
+        match chosen {
+            Some((id, field)) => self.activate_field_menu_item(id, field),
+            None => ShellAction::Consumed,
+        }
+    }
+
+    /// One row of a text field's menu, chosen by click or by key. An edit row
+    /// does to the field what its key would, with what follows a change
+    /// there: the Run box's suggestions and the start menu's list follow its
+    /// text, and a note's change is saved with the layout, as a typed one is.
+    /// A note's widget rows are the widget menu's.
+    fn activate_field_menu_item(&mut self, id: MenuItemId, field: MenuField) -> ShellAction {
+        match field {
+            MenuField::RunBox => {
+                // Whether the row was the line's is not asked: every row of
+                // the menu was, and the box redraws either way.
+                let _edited = self.run_dialog.edit_command(id);
+            }
+            MenuField::StartSearch => {
+                if self.start_query.edit_command(id) == KeyEdit::Changed {
+                    self.search_changed();
+                }
+            }
+            MenuField::Note(note) => {
+                if guitk::editmenu::EditCommand::from_id(id).is_none() {
+                    // "Remove this widget", "Remove all widgets": about the
+                    // note, as the widget menu's rows are about its widget.
+                    self.menu_widget = Some(note);
+                    return self.activate_desktop_menu_item(id);
+                }
+                if self.widgets.note_edit_command(id) == widgets::NoteKey::Changed {
+                    self.widgets_dirty = true;
+                }
+            }
+            MenuField::Rename => {
+                // Whether one was under way is not asked: the menu closed
+                // with it, and the name is kept when the rename ends.
+                let _edited = self.icons.rename_edit_command(id);
+            }
+        }
+        ShellAction::Consumed
+    }
+
+    /// A text field's menu's draw commands, `None` when it is closed.
+    #[must_use]
+    pub fn render_field_menu(&self) -> Option<RenderTree> {
+        let (menu, _) = self.field_menu.as_ref()?;
+        let mut tree = RenderTree::new();
+        tree.commands.extend(self.render_menu(menu));
+        Some(tree)
+    }
+
     /// `menu`'s draw commands, each row's picture found in the icon theme
     /// and drawn in the menu's text colour (`TD-C-MENU-ROWS-DRAW-NO-ICONS`,
     /// fixed): a jump list's action, an item a program added to a file's
@@ -13517,6 +13717,7 @@ impl DesktopShell {
             || self.pin_menu.is_some()
             || self.taskbar_menu.is_some()
             || self.notification_menu.is_some()
+            || self.field_menu.is_some()
             || self.ending_listing()
             || self.start_menu_open
             || self.power_menu_open
@@ -13543,6 +13744,7 @@ impl DesktopShell {
         self.pin_menu = None;
         self.taskbar_menu = None;
         self.close_notification_menu();
+        self.field_menu = None;
         // The list, not the wait: dismissing the popups -- opening a menu,
         // say -- is not the user changing their mind about shutting down.
         if self.ending_listing() {

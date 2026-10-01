@@ -26,7 +26,9 @@
 //! that set the text without moving the caret would leave an offset pointing
 //! into the middle of a character, and the next arrow key would panic.
 
+use crate::editmenu::{EditCommand, EditState};
 use crate::event::{Key, KeyEvent};
+use crate::menu::{MenuItem, MenuItemId};
 use crate::render::FontWeightHint;
 use crate::text;
 use crate::text::TextCursor;
@@ -422,6 +424,44 @@ impl TextInput {
             self.insert_text(&clip);
         }
     }
+
+    /// The rows of the menu a right-click on this field offers
+    /// ([`crate::editmenu`]): Cut, Copy, Paste, Delete and Select all, each
+    /// dimmed when it would do nothing.
+    #[must_use]
+    pub fn edit_menu(&self) -> Vec<MenuItem> {
+        crate::editmenu::rows(EditState {
+            selected: self.has_selection(),
+            editable: true,
+            has_text: !self.text.is_empty(),
+            ..EditState::default()
+        })
+    }
+
+    /// Do what the row `id` of [`edit_menu`](Self::edit_menu) says, and
+    /// answer as the key that does the same would: `Changed` when the text
+    /// changed, `Handled` when it did not, `Unhandled` for an id that is
+    /// none of the menu's rows -- a row of the window's own beside them.
+    pub fn edit_command(&mut self, id: MenuItemId) -> KeyEdit {
+        let Some(command) = EditCommand::from_id(id) else {
+            return KeyEdit::Unhandled;
+        };
+        let before = self.text.clone();
+        match command {
+            EditCommand::Cut => self.cut(),
+            EditCommand::Copy => self.copy(),
+            EditCommand::Paste => self.paste(),
+            EditCommand::Delete => {
+                if self.has_selection() {
+                    self.delete_selection();
+                }
+            }
+            EditCommand::SelectAll => self.select_all(),
+            // A one-line field keeps no history, and offers neither.
+            EditCommand::Undo | EditCommand::Redo => return KeyEdit::Unhandled,
+        }
+        KeyEdit::of(&before, &self.text)
+    }
 }
 
 /// What [`TextInput::edit_key`] did with a keystroke.
@@ -785,6 +825,65 @@ mod tests {
     #[test]
     fn a_text_field_stays_sixty_four_bytes() {
         assert_eq!(core::mem::size_of::<TextInput>(), 64);
+    }
+
+    /// **A field's right-click menu does what its keys do**, each row lit
+    /// only when it can act; a one-line field offers no Undo, and an id that
+    /// is none of its rows is not the field's.
+    #[test]
+    fn the_right_click_menu_does_what_the_keys_do() {
+        use crate::editmenu::EditCommand;
+        let lit = |input: &TextInput| -> Vec<String> {
+            input
+                .edit_menu()
+                .into_iter()
+                .filter_map(|r| match r {
+                    crate::menu::MenuItem::Action {
+                        label,
+                        enabled: true,
+                        ..
+                    } => Some(label),
+                    _ => None,
+                })
+                .collect()
+        };
+        crate::clipboard::set_text("");
+        let mut input = TextInput::new();
+        assert!(lit(&input).is_empty());
+        input.insert_text("hello");
+        assert_eq!(lit(&input), ["Select all"]);
+        assert_eq!(
+            input.edit_command(EditCommand::SelectAll.id()),
+            KeyEdit::Handled
+        );
+        assert_eq!(lit(&input), ["Cut", "Copy", "Delete", "Select all"]);
+        assert_eq!(input.edit_command(EditCommand::Copy.id()), KeyEdit::Handled);
+        assert_eq!(crate::clipboard::text(), "hello");
+        assert_eq!(
+            input.edit_command(EditCommand::Delete.id()),
+            KeyEdit::Changed
+        );
+        assert_eq!(input.text(), "");
+        assert_eq!(lit(&input), ["Paste"]);
+        assert_eq!(
+            input.edit_command(EditCommand::Paste.id()),
+            KeyEdit::Changed
+        );
+        assert_eq!(input.text(), "hello");
+        input.select_all();
+        assert_eq!(input.edit_command(EditCommand::Cut.id()), KeyEdit::Changed);
+        assert_eq!(input.text(), "");
+        assert_eq!(
+            input.edit_command(EditCommand::Undo.id()),
+            KeyEdit::Unhandled
+        );
+        assert_eq!(input.edit_command(42), KeyEdit::Unhandled);
+        assert!(
+            !input.edit_menu().iter().any(
+                |r| matches!(r, crate::menu::MenuItem::Action { label, .. } if label == "Undo")
+            ),
+            "a field with no history offers Undo"
+        );
     }
 
     /// **Two fields share the program's clipboard**: a copy in one pastes in

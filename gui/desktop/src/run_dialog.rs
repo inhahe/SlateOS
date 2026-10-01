@@ -697,6 +697,47 @@ impl RunDialog {
         EventResult::Consumed
     }
 
+    /// The command line as it stands, for the shell's tests.
+    #[cfg(test)]
+    pub(crate) fn line(&self) -> &str {
+        self.input.text()
+    }
+
+    /// Where the command field is on screen: where it is drawn, and where a
+    /// right-click offers the field's menu (`guitk::editmenu`).
+    #[must_use]
+    pub fn field_rect(&self) -> guitk::frame::Rect {
+        guitk::frame::Rect::new(
+            self.dialog_x + PADDING + 40.0,
+            self.dialog_y + INPUT_Y_OFFSET,
+            DIALOG_WIDTH - PADDING * 2.0 - 40.0,
+            INPUT_HEIGHT,
+        )
+    }
+
+    /// The rows of the command field's right-click menu: Cut, Copy, Paste,
+    /// Delete and Select all, each dimmed when it would do nothing.
+    #[must_use]
+    pub fn edit_menu(&self) -> Vec<guitk::menu::MenuItem> {
+        self.input.edit_menu()
+    }
+
+    /// Do what a row of [`edit_menu`](Self::edit_menu) says, as the key that
+    /// does the same would: a change brings new suggestions and takes away
+    /// the last complaint, as typing does. Answers whether the row was one of
+    /// the field's.
+    pub fn edit_command(&mut self, id: guitk::menu::MenuItemId) -> bool {
+        match self.input.edit_command(id) {
+            guitk::textinput::KeyEdit::Unhandled => false,
+            guitk::textinput::KeyEdit::Handled => true,
+            guitk::textinput::KeyEdit::Changed => {
+                self.update_suggestions();
+                self.error_message = None;
+                true
+            }
+        }
+    }
+
     /// Handle a mouse event. Returns `EventResult::Consumed` if the dialog handled it.
     pub fn handle_mouse_event(&mut self, event: &MouseEvent) -> EventResult {
         if !self.visible {
@@ -860,9 +901,11 @@ impl RunDialog {
             overflow: TextOverflow::Clip,
         });
 
-        // Input field background.
-        let input_x = x + PADDING + 40.0;
-        let input_w = DIALOG_WIDTH - PADDING * 2.0 - 40.0;
+        // Input field background: where a right-click offers the field's
+        // menu, from the one answer to where the field is.
+        let field = self.field_rect();
+        let input_x = field.x;
+        let input_w = field.w;
 
         // The toolkit's field (`guitk::field`), in the theme's shape: it has
         // the keyboard whenever the box is up, and a command that does not
@@ -870,7 +913,7 @@ impl RunDialog {
         guitk::field::draw(
             &mut cmds,
             p,
-            guitk::frame::Rect::new(input_x, y + INPUT_Y_OFFSET, input_w, INPUT_HEIGHT),
+            field,
             guitk::field::State {
                 focused: true,
                 invalid: self.error_message.is_some(),
@@ -2273,5 +2316,88 @@ mod tests {
         let event = make_key(Key::Tab, false, false, None);
         dialog.handle_key_event(&event);
         assert_eq!(dialog.input.text(), "calculator");
+    }
+
+    // ====================================================================
+    // The field's right-click menu
+    // ====================================================================
+
+    /// **The field's menu does what its keys do, and a change made from it
+    /// is a change as a typed one is**: Paste brings suggestions for what it
+    /// put in and takes the last complaint away; Copy changes nothing and
+    /// keeps the complaint; a row that is none of the field's is not taken.
+    #[test]
+    fn the_fields_menu_edits_as_typing_does() {
+        use guitk::editmenu::EditCommand;
+        let mut dialog = RunDialog::new();
+        dialog.show_failed(OsStr::new("nonexistent"), "not found".to_owned());
+        assert!(dialog.error_message.is_some());
+        guitk::clipboard::set_text("term");
+        dialog.input.select_all();
+
+        assert!(dialog.edit_command(EditCommand::Paste.id()));
+        assert_eq!(dialog.input.text(), "term");
+        assert!(
+            dialog.error_message.is_none(),
+            "a paste left the complaint about the old line up"
+        );
+        assert!(
+            dialog.suggestions.iter().any(|s| s.text == "terminal"),
+            "a paste brought no suggestions for what it put in"
+        );
+
+        dialog.error_message = Some("not found".to_owned());
+        dialog.input.select_all();
+        assert!(dialog.edit_command(EditCommand::Copy.id()));
+        assert_eq!(guitk::clipboard::text(), "term");
+        assert!(
+            dialog.error_message.is_some(),
+            "a copy changed nothing, and took the complaint away"
+        );
+
+        assert!(!dialog.edit_command(1));
+        assert_eq!(dialog.input.text(), "term");
+    }
+
+    /// **The field is drawn where `field_rect` says**, which is where a
+    /// right-click offers its menu: the line typed is drawn inside it, and
+    /// the "Open:" label beside it and the buttons below are not.
+    #[test]
+    fn the_field_is_drawn_where_its_menu_is_offered() {
+        let mut dialog = RunDialog::new();
+        dialog.set_position(100.0, 50.0);
+        dialog.show();
+        dialog.input.set_text("terminal");
+        let field = dialog.field_rect();
+        let drawn = dialog.render(&Palette::for_mode(false));
+        let at = |wanted: &str| {
+            drawn
+                .iter()
+                .find_map(|c| match c {
+                    RenderCommand::Text { text, x, y, .. } if text == wanted => Some((*x, *y)),
+                    _ => None,
+                })
+                .unwrap_or_else(|| panic!("{wanted:?} is not drawn"))
+        };
+        let (tx, ty) = at("terminal");
+        assert!(
+            field.contains(tx + 1.0, ty + 1.0),
+            "the line is drawn outside the field"
+        );
+        let (lx, ly) = at("Open:");
+        assert!(
+            !field.contains(lx + 1.0, ly + 1.0),
+            "the label is inside the field"
+        );
+        let (bx, by) = at("OK");
+        assert!(
+            !field.contains(bx + 1.0, by + 1.0),
+            "a button is inside the field"
+        );
+        // Inside the box, and as tall as the field is drawn.
+        let (dx, dy) = dialog.position();
+        assert!(field.x > dx && field.y > dy);
+        assert!(field.x + field.w < dx + DIALOG_WIDTH);
+        assert!((field.h - INPUT_HEIGHT).abs() < f32::EPSILON);
     }
 }

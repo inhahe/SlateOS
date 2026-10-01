@@ -7381,6 +7381,94 @@ fn a_note_is_written_through_the_desktop_and_saved_as_it_is_written() {
     });
 }
 
+/// **A note's right-click menu is put on the screen, its Paste is saved as
+/// typing is, and the typing after it is the note's** -- though it arrives on
+/// the popup surface the menu was chosen on, which is where the compositor
+/// leaves the keyboard after a click there. A session that handed a note
+/// only the desktop's own keys would type the rest of it into nothing.
+#[test]
+fn a_notes_menu_is_drawn_and_the_typing_after_it_is_the_notes() {
+    settingsfile::testing::with_scratch_config("desktop-note-menu", |_root| {
+        let (mut session, desktop, _turn) = session();
+        let (id, body) = {
+            let shell = session.shell_mut();
+            let _ = shell.activate_desktop_menu_item(DesktopShell::MENU_ADD_NOTE);
+            let id = shell
+                .widgets
+                .all_widgets()
+                .iter()
+                .find(|w| matches!(w.kind, crate::widgets::WidgetKind::Notes))
+                .map(|w| w.id)
+                .expect("the menu placed a note");
+            let (x, y, w, h) = shell.widgets.content_rect(id).expect("placed");
+            (id, (x + w / 2.0, y + h / 2.0))
+        };
+        session.pump().expect("pump");
+        guitk::clipboard::set_text("eggs");
+        let popups = session.popups();
+        let before = desktop.borrow().seen.len();
+
+        right_click_at(&desktop, session.background(), body.0, body.1);
+        session.pump().expect("pump");
+        assert_eq!(
+            session.shell().widgets.writing_note(),
+            Some(id),
+            "the right-click did not open the note"
+        );
+        assert!(
+            desktop.borrow().seen[before..].iter().any(|r| r.body
+                == RequestBody::SetVisible {
+                    window: popups.window(),
+                    visible: true
+                }),
+            "the note's menu opened with nothing to draw it on"
+        );
+
+        let (x, y) = {
+            let (menu, _) = session
+                .shell()
+                .field_menu
+                .as_ref()
+                .expect("the note's menu is open");
+            let paste = menu
+                .items()
+                .iter()
+                .position(|i| {
+                    matches!(i, guitk::menu::MenuItem::Action { label, .. } if label == "Paste")
+                })
+                .expect("a Paste row");
+            let r = menu.item_rect(paste).expect("shown");
+            (r.x + r.w / 2.0, r.y + r.h / 2.0)
+        };
+        press_at(&desktop, popups, x, y);
+        release_at(&desktop, popups, x, y);
+        desktop.borrow_mut().send_input(&[InputEvent::new(
+            popups.window(),
+            guitk::event::Event::Key(KeyEvent {
+                key: Key::A,
+                pressed: true,
+                modifiers: Modifiers::default(),
+                text: "!".to_string(),
+            }),
+        )]);
+        session.pump().expect("pump");
+
+        assert!(session.shell().field_menu.is_none());
+        assert_eq!(
+            session.shell().widgets.get(id).expect("placed").state_text,
+            "eggs!",
+            "the paste, or the typing after it, did not reach the note"
+        );
+        let saved = appearance::config::load(DesktopShell::WIDGETS_CONFIG_NAME);
+        let texts: Vec<String> = saved
+            .keys(&["widgets"])
+            .iter()
+            .filter_map(|k| saved.get_str(&["widgets", k, "text"]))
+            .collect();
+        assert_eq!(texts, ["eggs!"], "the note's new words are not on disk");
+    });
+}
+
 // ---- icons -----------------------------------------------------------------------
 
 /// The icon ids a tree names, with the side each is drawn at.

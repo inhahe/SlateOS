@@ -1051,6 +1051,45 @@ impl DesktopWidgetManager {
         NoteKey::Changed
     }
 
+    /// The rows of the open note's right-click menu (`guitk::editmenu`):
+    /// Undo and Redo, Cut, Copy, Paste, Delete and Select all, each dimmed
+    /// when it would do nothing. Empty when no note is open.
+    #[must_use]
+    pub fn note_edit_menu(&self) -> Vec<guitk::menu::MenuItem> {
+        self.note
+            .as_ref()
+            .map(|note| note.area.edit_menu())
+            .unwrap_or_default()
+    }
+
+    /// Do what a row of [`note_edit_menu`](Self::note_edit_menu) says to the
+    /// open note, as the key that does the same would: `Changed` when its
+    /// text changed -- the layout needs saving, the text being the widget's
+    /// at once, as a typed change's is -- else `Handled` (a row that is none
+    /// of the note's changes nothing); `NotWriting` with no note open, and
+    /// `Closed` if its widget has gone.
+    pub fn note_edit_command(&mut self, row: guitk::menu::MenuItemId) -> NoteKey {
+        let Some(id) = self.writing_note() else {
+            return NoteKey::NotWriting;
+        };
+        let Some((_, _, m)) = self.note_box(id) else {
+            // The widget has gone: nothing is open any more.
+            self.note = None;
+            return NoteKey::Closed;
+        };
+        let Some(note) = self.note.as_mut() else {
+            return NoteKey::NotWriting;
+        };
+        if note.area.edit_command(row, &m) != KeyEdit::Changed {
+            return NoteKey::Handled;
+        }
+        let text = note.area.text().to_string();
+        if let Some(w) = self.get_mut(id) {
+            w.state_text = text;
+        }
+        NoteKey::Changed
+    }
+
     /// Add a widget. Returns the instance ID, or None if rejected.
     pub fn add_widget(&mut self, kind: WidgetKind, position: GridPos) -> Option<WidgetInstanceId> {
         if self.widgets.len() >= self.max_widgets {

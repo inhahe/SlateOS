@@ -100,7 +100,7 @@ fn the_table_is_upstreams_whole_and_in_order() {
     let names: Vec<&str> = vars::VARS.iter().map(|v| v.name).collect();
     let pos = |n: &str| names.iter().position(|&x| x == n).expect(n);
     assert!(pos("ARG_MAX") < pos("PAGESIZE"));
-    assert!(pos("_POSIX_LINK_MAX") == pos("LINK_MAX") + 1);
+    assert_eq!(pos("_POSIX_LINK_MAX"), pos("LINK_MAX") + 1);
 }
 
 #[test]

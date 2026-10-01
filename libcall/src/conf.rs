@@ -35,6 +35,10 @@ mod sys {
 /// On a host that is not Unix there is no C library to ask, and the answer is
 /// `-1` -- "not defined here" -- rather than a guessed value.
 #[must_use]
+// `c_long` is `i64` on every 64-bit target this builds for, which makes the
+// `i64::from` below a no-op there -- and dropping it a compile error on a
+// 32-bit one. Kept, and the lint told why.
+#[allow(clippy::useless_conversion)]
 pub fn sysconf(name: i32) -> i64 {
     #[cfg(unix)]
     {
@@ -63,6 +67,8 @@ pub fn pathconf(path: &CStr, name: i32) -> Result<Option<i64>, i32> {
         super::clear_errno();
         // SAFETY: `CStr` guarantees the terminator and `path` outlives the
         // call, so the library reads a valid C string and nothing past it.
+        // (The conversion is `sysconf`'s: a no-op where `long` is 64 bits.)
+        #[allow(clippy::useless_conversion)]
         let value = i64::from(unsafe { sys::pathconf(path.as_ptr(), name) });
         if value != -1 {
             return Ok(Some(value));

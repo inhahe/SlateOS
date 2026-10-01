@@ -44,15 +44,17 @@ pub(crate) fn inflate_partial(data: &[u8], limit: usize) -> (Vec<u8>, Option<Err
     (output, end.err())
 }
 
-/// Reads bits from a byte buffer, least-significant-bit first.
-struct BitReader<'a> {
+/// Reads bits from a byte buffer, least-significant-bit first. Crate-visible
+/// for `lib.rs`'s `complete_codes` tests, which read a dynamic block's header
+/// with it.
+pub(crate) struct BitReader<'a> {
     data: &'a [u8],
     pos: usize, // byte position
     bit: u8,    // bit position within current byte (0-7)
 }
 
 impl<'a> BitReader<'a> {
-    fn new(data: &'a [u8]) -> Self {
+    pub(crate) fn new(data: &'a [u8]) -> Self {
         Self {
             data,
             pos: 0,
@@ -61,7 +63,7 @@ impl<'a> BitReader<'a> {
     }
 
     /// Read `n` bits (1..=25) and return as u32 (LSB first).
-    fn read_bits(&mut self, n: u8) -> Result<u32> {
+    pub(crate) fn read_bits(&mut self, n: u8) -> Result<u32> {
         let mut val = 0u32;
         for i in 0..n {
             let Some(&byte) = self.data.get(self.pos) else {
@@ -109,7 +111,7 @@ impl<'a> BitReader<'a> {
 /// flat table indexed by reversed bit pattern.  For a kernel where
 /// memory is limited, we use the "counts + symbols" approach from
 /// puff.c which is compact and fast.
-struct HuffmanTable {
+pub(crate) struct HuffmanTable {
     /// Number of codes of each length (index = length, 0..=MAX_BITS).
     counts: [u16; MAX_BITS + 1],
     /// Symbols sorted by code, then by symbol value.
@@ -131,7 +133,7 @@ impl HuffmanTable {
     ///
     /// `lengths[i]` is the code length for symbol `i`.  A length of 0
     /// means the symbol is not present in the alphabet.
-    fn build(lengths: &[u8]) -> Result<Self> {
+    pub(crate) fn build(lengths: &[u8]) -> Result<Self> {
         let mut table = Self::empty();
         table.num_symbols = lengths.len();
 
@@ -201,7 +203,7 @@ impl HuffmanTable {
     /// Reads bits one at a time, accumulating a code and checking
     /// against each code length.  This is simple (no lookup tables)
     /// and works well for the small alphabets in DEFLATE.
-    fn decode(&self, reader: &mut BitReader<'_>) -> Result<u16> {
+    pub(crate) fn decode(&self, reader: &mut BitReader<'_>) -> Result<u16> {
         let mut code: u32 = 0;
         let mut first: u32 = 0; // first code of this length
         let mut index: u32 = 0; // index into symbols for this length

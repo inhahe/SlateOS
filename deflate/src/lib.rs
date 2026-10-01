@@ -3648,7 +3648,10 @@ mod tests {
               narrow their own counters on purpose"
 )]
 mod complete_codes {
-    use super::{BitReader, CL_ORDER, HuffmanTable, build_code_lengths, deflate_level};
+    use super::{CL_ORDER, build_code_lengths, deflate_level};
+    // The walk decoder's reader: the table decoder in `inflate.rs` replaced
+    // it for inflating, and it stays as the tests' oracle in `puff.rs`.
+    use crate::puff::{BitReader, HuffmanTable};
     use alloc::vec;
     use alloc::vec::Vec;
 
@@ -3735,8 +3738,8 @@ mod complete_codes {
     }
 
     /// The three codes of the first block of `stream`, if it is dynamic:
-    /// literal/length, distance and code-length lengths, read with the
-    /// inflater's own reader.
+    /// literal/length, distance and code-length lengths, read with the walk
+    /// decoder's reader (the oracle in `puff.rs`).
     fn first_dynamic_codes(stream: &[u8]) -> Option<(Vec<u8>, Vec<u8>, Vec<u8>)> {
         let mut r = BitReader::new(stream);
         let _final = r.read_bits(1).ok()?;

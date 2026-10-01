@@ -1,7 +1,7 @@
 # C -> A: the canary's window check counts the controller's own delay as poll slack, and refused a boot test
 
 **Filed:** 2026-09-28 by lane C. **For:** lane A (`scripts/canary-load.py`,
-`scripts/test-canary-load.py`). **Status:** OPEN.
+`scripts/test-canary-load.py`). **Status:** DONE, 2026-10-01 (lane A) -- as you proposed; reply at the end.
 
 **In short:** a boot test on `lane-c @ cabf43019` ran 4854 seconds and then
 refused to build, because `test-canary-load.py` found three benchmarks
@@ -55,3 +55,22 @@ so moving this one check to the trigger's stamp changes no measurement.
 ## What it cost
 
 One boot test (4854 s, `ERROR: refusing to build`), re-run.
+
+## Reply (lane A, 2026-10-01): DONE, as you proposed
+
+- **`canary-load.py` records the trigger's read.** `trigger_read_at` is
+  the stamp of the read that held the trigger, the stamp the window's first
+  completions share. The record gives it as `trigger_seen_at`, and the
+  controller's reaction from it to the fire as `fire_latency_seconds`.
+- **`test-canary-load.py` judges the left edge against it.** The edge is
+  exact: every window completion carries that stamp or a later one. A
+  third check asks that the fire follow the trigger's read. The reaction
+  is printed, not judged, so a slow controller is visible without refusing
+  a build.
+
+On this host: 0.0001 s, and all canary-load tests pass. Your 0.23 s case
+now passes the edge checks and prints its reaction.
+
+This was the second half of lane E's
+`e-a-canary-load-live-case-fails-under-transient-load.md` too, now
+stamped.

@@ -16,6 +16,7 @@
 //! not a heuristic about the characters ahead.
 
 use crate::value::Str;
+use ere::awk::{self as escape, Warnings};
 
 /// One token, with the source offset that produced it so a diagnostic can point
 /// at the right place in the program text.
@@ -43,8 +44,15 @@ pub enum Tok {
     Number(f64),
     /// A string literal, with escapes already resolved.
     Str(Str),
-    /// A `/…/` regular-expression literal, with `\/` resolved to `/`.
-    Ere(Str),
+    /// A `/…/` regular-expression literal.
+    Ere {
+        /// The text between the slashes as written, continuations removed:
+        /// what a diagnostic quotes, as gawk's does.
+        source: Str,
+        /// `source` through awk's escape layer ([`escape::regexp`]): what the
+        /// regex compiler is given.
+        pattern: Str,
+    },
     /// An identifier that is not a keyword.
     Name(String),
     /// `name(` with no space — awk's rule for a *call*, which is how a user
@@ -173,6 +181,9 @@ pub struct Lexer<'a> {
     /// The previous significant token, which decides both whether a newline
     /// terminates a statement and whether `/` starts a regex.
     prev: Option<Tok>,
+    /// What the escape layers had to say about the strings and regexes read
+    /// so far; see [`Lexer::tokenize`].
+    warnings: Warnings,
 }
 
 impl<'a> Lexer<'a> {
@@ -182,15 +193,38 @@ impl<'a> Lexer<'a> {
             src,
             i: 0,
             prev: None,
+            warnings: Warnings::default(),
         }
     }
 
-    /// Tokenise the whole program.
+    /// Tokenise the whole program, its escape warnings going to `warnings`.
+    ///
+    /// The warnings are gawk's, each said once per run, so they are kept in
+    /// the run's one [`Warnings`] rather than this lexer's: the interpreter
+    /// carries on with the same one, and a `\q` the program text has already
+    /// warned about does not warn again when a dynamic regex repeats it.
+    ///
+    /// # Errors
+    /// As [`Lexer::tokens`].
+    pub fn tokenize(src: &'a [u8], warnings: &mut Warnings) -> Result<Vec<Token>, String> {
+        let mut lx = Lexer::new(src);
+        lx.warnings = std::mem::take(warnings);
+        let toks = lx.run();
+        *warnings = std::mem::take(&mut lx.warnings);
+        toks
+    }
+
+    /// Tokenise the whole program, dropping any escape warnings.
     ///
     /// # Errors
     /// Returns the diagnostic for an unterminated string or regex, or a
     /// character that cannot begin a token.
+    #[cfg(test)]
     pub fn tokens(mut self) -> Result<Vec<Token>, String> {
+        self.run()
+    }
+
+    fn run(&mut self) -> Result<Vec<Token>, String> {
         let mut out = Vec::new();
         loop {
             let t = self.next_token()?;
@@ -310,7 +344,7 @@ impl<'a> Lexer<'a> {
         }
         if c == b'/' && !self.slash_is_division() {
             return Ok(Token {
-                kind: Tok::Ere(self.ere_literal()?),
+                kind: self.ere_literal()?,
                 at,
             });
         }
@@ -459,112 +493,132 @@ impl<'a> Lexer<'a> {
         Tok::Name(name)
     }
 
+    /// A `"…"` literal: gawk's lexer, then `make_str_node` on what it kept.
+    ///
+    /// The lexer only finds the end. A backslash and the character after it
+    /// are both kept, so that `\"` does not end the string, and the escapes are
+    /// resolved afterwards by [`escape::string`] -- which is where an escape
+    /// awk does not know becomes the character itself, with a warning. (It
+    /// used to keep its backslash, `"\q"` being a backslash and a `q`; gawk
+    /// makes it a `q`, and so does every awk `awk-diff.sh` was ever run
+    /// against.)
+    ///
+    /// A backslash before a newline is a continuation in gawk, and under
+    /// `--posix` an error: "POSIX does not allow physical newlines in string
+    /// values" -- a fatal, which is why the message carries `fatal: `.
     fn string_literal(&mut self) -> Result<Str, String> {
         self.i = self.i.saturating_add(1);
-        let mut out = Str::new();
+        let mut raw = Str::new();
         loop {
             match self.bump() {
-                None | Some(b'\n') => return Err("newline in string".to_string()),
-                Some(b'"') => return Ok(out),
-                Some(b'\\') => self.escape(&mut out),
-                Some(c) => out.push(c),
-            }
-        }
-    }
-
-    /// One escape sequence, already past the backslash.
-    ///
-    /// An escape awk does not know keeps its backslash *and* its character —
-    /// `"\q"` is a backslash and a `q` — because the sequence may be headed for
-    /// a regex, where `\.` and `\(` are meaningful and eating the backslash
-    /// here would change what the pattern matches.
-    fn escape(&mut self, out: &mut Str) {
-        let Some(c) = self.bump() else {
-            out.push(b'\\');
-            return;
-        };
-        match c {
-            b'n' => out.push(b'\n'),
-            b't' => out.push(b'\t'),
-            b'r' => out.push(b'\r'),
-            b'\\' => out.push(b'\\'),
-            b'"' => out.push(b'"'),
-            b'/' => out.push(b'/'),
-            b'a' => out.push(0x07),
-            b'b' => out.push(0x08),
-            b'f' => out.push(0x0c),
-            b'v' => out.push(0x0b),
-            b'0'..=b'7' => {
-                // Up to three octal digits, counting the one just consumed.
-                let mut v = u32::from(c.wrapping_sub(b'0'));
-                let mut n = 1u32;
-                while n < 3 {
-                    match self.peek() {
-                        Some(d @ b'0'..=b'7') => {
-                            v = v
-                                .saturating_mul(8)
-                                .saturating_add(u32::from(d.wrapping_sub(b'0')));
-                            self.i = self.i.saturating_add(1);
-                            n = n.saturating_add(1);
+                None | Some(b'\n') => return Err("unterminated string".to_string()),
+                Some(b'"') => return Ok(escape::string(&raw, false, &mut self.warnings)),
+                Some(b'\\') => {
+                    let mut c = self.bump();
+                    // gawk's "allow MS-DOS files. bleah": a CR after the
+                    // backslash is dropped.
+                    if c == Some(b'\r') {
+                        c = self.bump();
+                    }
+                    match c {
+                        None => return Err("unterminated string".to_string()),
+                        Some(b'\n') => {
+                            return Err(
+                                "fatal: POSIX does not allow physical newlines in string values"
+                                    .to_string(),
+                            );
                         }
-                        _ => break,
+                        Some(c) => {
+                            raw.push(b'\\');
+                            raw.push(c);
+                        }
                     }
                 }
-                out.push(u8::try_from(v & 0xff).unwrap_or(0));
-            }
-            other => {
-                out.push(b'\\');
-                out.push(other);
+                Some(c) => raw.push(c),
             }
         }
     }
 
-    /// A `/…/` literal. Only `\/` is resolved; every other backslash is left
-    /// for the regex compiler, which is the one that knows what `\.` means.
-    fn ere_literal(&mut self) -> Result<Str, String> {
+    /// A `/…/` literal: gawk's `yylex` finding its end, then its escapes
+    /// resolved by [`escape::regexp`] -- here, as gawk does as soon as the
+    /// token is read, so that its warnings come out in program order with the
+    /// strings' (gawk's arrive interleaved, in the order the text has them).
+    ///
+    /// Finding the end is gawk's bracket count, transcribed with its quirks.
+    /// A `/` inside a bracket expression does not end the regex, so the count
+    /// has to know where brackets are: a `[` opens one when none is open, and
+    /// a `[` followed by `:` opens another inside it (`[[:alpha:]/]`); a `]`
+    /// closes one, except as the first member (`[]/]`, `[^]/]`). `[.` and
+    /// `[=` are not counted -- so `/[[.x.]/]/` ends early in gawk, and here.
+    /// A backslash keeps itself and the next character (`\/`, `\]`, `\[`), and
+    /// before a newline it is a continuation and both vanish.
+    fn ere_literal(&mut self) -> Result<Tok, String> {
         self.i = self.i.saturating_add(1);
-        let mut out = Str::new();
-        let mut in_bracket = false;
+        let mut source = Str::new();
+        // Signed, as gawk's `int` is: a `]` with no bracket open takes it
+        // below zero, and then a plain `[` no longer opens one -- so in
+        // `/a]b[/` the second slash ends the regex, which then fails to
+        // compile. A count that stopped at zero would read on past it.
+        let mut in_brack: isize = 0;
+        // Where in `source` the outermost `[` is, for the first-member rule.
+        let mut b_index: Option<usize> = None;
         loop {
-            match self.bump() {
-                None | Some(b'\n') => return Err("unterminated regular expression".to_string()),
-                Some(b'\\') => match self.bump() {
-                    None => return Err("unterminated regular expression".to_string()),
-                    // `\/` is how a slash is written inside a regex literal;
-                    // the engine has no such escape, so it is resolved here.
-                    Some(b'/') => out.push(b'/'),
-                    Some(c) => {
-                        out.push(b'\\');
-                        out.push(c);
-                    }
-                },
-                // A `/` inside a bracket expression is an ordinary character,
-                // exactly as it is for `sed`'s delimiter scan.
-                Some(b'[') if !in_bracket => {
-                    in_bracket = true;
-                    out.push(b'[');
-                    if self.peek() == Some(b'^') {
-                        out.push(b'^');
-                        self.i = self.i.saturating_add(1);
-                    }
-                    if self.peek() == Some(b']') {
-                        out.push(b']');
-                        self.i = self.i.saturating_add(1);
+            let cur_index = source.len();
+            let Some(c) = self.bump() else {
+                return Err("unterminated regexp at end of file".to_string());
+            };
+            match c {
+                b'[' => {
+                    if self.peek() == Some(b':') || in_brack == 0 {
+                        in_brack = in_brack.saturating_add(1);
+                        if in_brack == 1 {
+                            b_index = Some(cur_index);
+                        }
                     }
                 }
-                Some(b']') if in_bracket => {
-                    in_bracket = false;
-                    out.push(b']');
-                }
-                Some(b'/') if !in_bracket => {
-                    if out.is_empty() {
-                        // `//` is the empty regex, which matches everywhere.
-                        return Ok(out);
+                b']' => {
+                    let first_member = in_brack > 0
+                        && b_index.is_some_and(|b| {
+                            cur_index == b.saturating_add(1)
+                                || (cur_index == b.saturating_add(2)
+                                    && source.last() == Some(&b'^'))
+                        });
+                    if !first_member {
+                        in_brack = in_brack.saturating_sub(1);
+                        if in_brack == 0 {
+                            b_index = None;
+                        }
                     }
-                    return Ok(out);
                 }
-                Some(c) => out.push(c),
+                b'\\' => {
+                    let mut e = self.bump();
+                    if e == Some(b'\r') {
+                        e = self.bump();
+                    }
+                    match e {
+                        None => {
+                            return Err(
+                                "unterminated regexp ends with `\\' at end of file".to_string()
+                            );
+                        }
+                        // A continuation: the backslash and the newline go.
+                        Some(b'\n') => {}
+                        Some(e) => {
+                            source.push(b'\\');
+                            source.push(e);
+                        }
+                    }
+                    continue;
+                }
+                b'/' if in_brack <= 0 => {
+                    let pattern = escape::regexp(&source, &mut self.warnings)
+                        .map_err(|e| format!("fatal: {}", e.message()))?;
+                    return Ok(Tok::Ere { source, pattern });
+                }
+                b'\n' => return Err("unterminated regexp".to_string()),
+                _ => {}
             }
+            source.push(c);
         }
     }
 }
@@ -609,6 +663,30 @@ mod tests {
             .collect()
     }
 
+    /// A regex token whose escape layer changed nothing.
+    fn ere(text: &[u8]) -> Tok {
+        Tok::Ere {
+            source: text.to_vec(),
+            pattern: text.to_vec(),
+        }
+    }
+
+    /// The tokens of `src`, and every warning the lexing produced.
+    fn toks_warned(src: &[u8]) -> (Vec<Tok>, Vec<String>) {
+        let mut w = Warnings::default();
+        let toks = Lexer::tokenize(src, &mut w)
+            .unwrap()
+            .into_iter()
+            .map(|t| t.kind)
+            .collect();
+        let said = w
+            .take()
+            .into_iter()
+            .map(|m| String::from_utf8(m).unwrap())
+            .collect();
+        (toks, said)
+    }
+
     #[test]
     fn a_slash_divides_after_an_operand_and_opens_a_regex_otherwise() {
         // The case that breaks a naive lexer: three slashes on one line.
@@ -629,12 +707,12 @@ mod tests {
                 Tok::Dollar,
                 Tok::Number(1.0),
                 Tok::Match,
-                Tok::Ere(b"x".to_vec()),
+                ere(b"x"),
                 Tok::Eof
             ]
         );
         // At the start of a rule a slash is always a regex.
-        assert_eq!(toks("/x/"), vec![Tok::Ere(b"x".to_vec()), Tok::Eof]);
+        assert_eq!(toks("/x/"), vec![ere(b"x"), Tok::Eof]);
     }
 
     #[test]
@@ -689,28 +767,136 @@ mod tests {
         assert_eq!(toks("f (1)").first(), Some(&Tok::Name("f".into())));
     }
 
+    /// gawk 5.2.1 `--posix`, measured: `print "a\.b"` prints `a.b` and warns
+    /// "escape sequence `\.' treated as plain `.'", once.
     #[test]
-    fn string_escapes_resolve_but_regex_escapes_do_not() {
+    fn string_escapes_are_gawks() {
         assert_eq!(
             toks(r#""a\tb""#),
             vec![Tok::Str(b"a\tb".to_vec()), Tok::Eof]
         );
         assert_eq!(toks(r#""\101""#), vec![Tok::Str(b"A".to_vec()), Tok::Eof]);
-        // An escape awk does not know keeps both characters, because it may be
-        // on its way to the regex compiler.
+        // The low byte of the octal value, as gawk's `char` keeps.
+        assert_eq!(toks(r#""\777""#), vec![Tok::Str(vec![0xff]), Tok::Eof]);
+        assert_eq!(toks(r#""\400""#), vec![Tok::Str(vec![0]), Tok::Eof]);
+        // `--posix`: `\x` is an `x`, and its digits are digits.
+        assert_eq!(toks(r#""\x41""#), vec![Tok::Str(b"x41".to_vec()), Tok::Eof]);
         assert_eq!(
-            toks(r#""a\.b""#),
-            vec![Tok::Str(br"a\.b".to_vec()), Tok::Eof]
+            toks(r#""a\"b""#),
+            vec![Tok::Str(b"a\"b".to_vec()), Tok::Eof]
         );
-        // In a regex literal only `\/` is resolved.
-        assert_eq!(toks(r"/a\/b/"), vec![Tok::Ere(b"a/b".to_vec()), Tok::Eof]);
-        assert_eq!(toks(r"/a\.b/"), vec![Tok::Ere(br"a\.b".to_vec()), Tok::Eof]);
+        assert_eq!(
+            toks(r#""a\\b""#),
+            vec![Tok::Str(br"a\b".to_vec()), Tok::Eof]
+        );
+        // An escape awk does not know is the character itself, with a
+        // warning -- said once for each character, however often it recurs.
+        let (t, said) = toks_warned(br#"x = "a\.b\.c\q\/""#);
+        assert_eq!(t.get(2), Some(&Tok::Str(b"a.b.cq/".to_vec())));
+        assert_eq!(
+            said,
+            [
+                "escape sequence `\\.' treated as plain `.'",
+                "escape sequence `\\q' treated as plain `q'",
+                "escape sequence `\\/' treated as plain `/'",
+            ]
+        );
+    }
+
+    /// A regex literal keeps its text for diagnostics, and hands the compiler
+    /// that text through awk's escape layer. Measured against gawk 5.2.1
+    /// `--posix`: `/^a\tb$/` matches a tab, `/^\101$/` matches `A`,
+    /// `/^\x41$/` matches `x41`, and `/\y/` warns and matches `y`.
+    #[test]
+    fn regex_literal_escapes_are_gawks() {
+        let lit = |source: &[u8], pattern: &[u8]| {
+            vec![
+                Tok::Ere {
+                    source: source.to_vec(),
+                    pattern: pattern.to_vec(),
+                },
+                Tok::Eof,
+            ]
+        };
+        assert_eq!(toks(r"/a\tb/"), lit(br"a\tb", b"a\tb"));
+        assert_eq!(toks(r"/\101/"), lit(br"\101", b"A"));
+        assert_eq!(toks(r"/\x41/"), lit(br"\x41", b"x41"));
+        // `\1` is octal here, not a backreference -- POSIX's awk table.
+        assert_eq!(toks(r"/(.)\1/"), lit(br"(.)\1", b"(.)\x01"));
+        // The regex compiler's own escapes go through untouched.
+        assert_eq!(toks(r"/a\.b/"), lit(br"a\.b", br"a\.b"));
+        assert_eq!(toks(r"/a\/b/"), lit(br"a\/b", br"a\/b"));
+        assert_eq!(toks(r"/[\]]/"), lit(br"[\]]", br"[\]]"));
+        // `\8` has no octal digit: the digit, its backslash gone.
+        let (t, said) = toks_warned(br"/\8\y\w\./");
+        assert_eq!(
+            t.first(),
+            Some(&Tok::Ere {
+                source: br"\8\y\w\.".to_vec(),
+                pattern: br"8\y\w\.".to_vec(),
+            })
+        );
+        assert_eq!(
+            said,
+            [
+                "regexp escape sequence `\\8' treated as plain `8'",
+                "regexp escape sequence `\\y' is not a known regexp operator",
+                "regexp escape sequence `\\w' is not a known regexp operator",
+            ]
+        );
+    }
+
+    /// The two layers keep separate "said it" tables, as gawk's do: `\q` in a
+    /// regex and `\q` in a string each warn once.
+    #[test]
+    fn a_string_and_a_regex_each_warn_once() {
+        let (_, said) = toks_warned(br#"/\q/ { s = "\q" } /\q/ { t = "\q" }"#);
+        assert_eq!(
+            said,
+            [
+                "regexp escape sequence `\\q' is not a known regexp operator",
+                "escape sequence `\\q' treated as plain `q'",
+            ]
+        );
+    }
+
+    #[test]
+    fn a_backslash_newline_in_a_string_is_fatal_under_posix() {
+        assert_eq!(
+            Lexer::new(b"\"a\\\nb\"").tokens().unwrap_err(),
+            "fatal: POSIX does not allow physical newlines in string values"
+        );
+    }
+
+    #[test]
+    fn a_backslash_newline_in_a_regex_is_a_continuation() {
+        assert_eq!(toks("/a\\\nb/"), vec![ere(b"ab"), Tok::Eof]);
+        assert_eq!(toks("/a\\\r\nb/"), vec![ere(b"ab"), Tok::Eof]);
+    }
+
+    /// gawk's bracket count, quirks included; each measured against gawk
+    /// 5.2.1 `--posix`.
+    #[test]
+    fn the_regex_end_is_found_by_gawks_bracket_count() {
+        // A `[:` opens a second level, so its `]` does not close the bracket.
+        assert_eq!(toks("/[[:alpha:]/]/"), vec![ere(b"[[:alpha:]/]"), Tok::Eof]);
+        // A `]` first, or first after `^`, is a member.
+        assert_eq!(toks("/[]/]/"), vec![ere(b"[]/]"), Tok::Eof]);
+        assert_eq!(toks("/[^]/]/"), vec![ere(b"[^]/]"), Tok::Eof]);
+        // A quoted `]` does not close it either.
+        assert_eq!(toks(r"/[\]/]/"), vec![ere(br"[\]/]"), Tok::Eof]);
+        // A stray `]` takes the count below zero, and a plain `[` after it
+        // opens nothing: the second slash ends the regex.
+        assert_eq!(
+            toks("/a]b[/ x"),
+            vec![ere(b"a]b["), Tok::Name("x".into()), Tok::Eof]
+        );
     }
 
     #[test]
     fn a_slash_inside_a_bracket_expression_does_not_end_the_regex() {
-        assert_eq!(toks("/[/]/"), vec![Tok::Ere(b"[/]".to_vec()), Tok::Eof]);
-        assert_eq!(toks("/[^/]/"), vec![Tok::Ere(b"[^/]".to_vec()), Tok::Eof]);
+        assert_eq!(toks("/[/]/"), vec![ere(b"[/]"), Tok::Eof]);
+        assert_eq!(toks("/[^/]/"), vec![ere(b"[^/]"), Tok::Eof]);
     }
 
     #[test]

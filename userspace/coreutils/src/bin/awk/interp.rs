@@ -26,6 +26,7 @@ use crate::ast::{
 };
 use crate::io::{Inputs, Outputs, Records, Rs};
 use crate::value::{Str, Value, compare, num_to_str};
+use ere::awk::{self as escape, Warnings};
 use ere::{Regex, ch};
 use std::cell::RefCell;
 use std::collections::HashMap;
@@ -160,11 +161,31 @@ pub struct Interp {
     /// True while the END rules are running, so `exit` inside END does not
     /// re-run them.
     in_end: bool,
+    /// The run's escape warnings: gawk says each once per run, so this is the
+    /// same table the program text was lexed with ([`Interp::adopt_warnings`]).
+    warnings: Warnings,
 }
 
 /// A recursion this deep is a program that will never finish; the limit exists
 /// so it fails with a message instead of a stack overflow.
 const MAX_DEPTH: usize = 2500;
+
+/// Write every escape warning said and not yet written, as gawk's `warning()`
+/// does: `awk: warning: ...` on standard error.
+///
+/// gawk also names where it was -- `cmd. line:1:`, and at run time the input
+/// file and record -- and ours names nothing, which is the gap every one of
+/// this awk's diagnostics has (`known-issues.md`; `scripts/awk-diff.sh`
+/// records it). For `-v`, `-F` and `var=value` operands gawk names nothing
+/// either, so there the line is gawk's exactly.
+pub fn emit_warnings(w: &mut Warnings) {
+    for message in w.take() {
+        let mut line = b"awk: warning: ".to_vec();
+        line.extend_from_slice(&message);
+        line.push(b'\n');
+        coreutils::stdfd::diag_bytes(&line);
+    }
+}
 
 impl Interp {
     /// Build an interpreter for `prog`, with `argv` as awk's `ARGV[1..]`.
@@ -196,6 +217,7 @@ impl Interp {
             rng: 0,
             seed: 0.0,
             in_end: false,
+            warnings: Warnings::default(),
         };
         it.ranges = vec![false; it.prog.ranges];
         it.set_global(V_FS, Value::str(b" ".to_vec()));
@@ -239,13 +261,27 @@ impl Interp {
         it
     }
 
+    /// Carry on with the escape warnings the command line and the program text
+    /// were read with, so that what they already said is not said again.
+    pub fn adopt_warnings(&mut self, warnings: Warnings) {
+        self.warnings = warnings;
+    }
+
+    /// Write whatever the escape layers have said since last time.
+    fn say_warnings(&mut self) {
+        emit_warnings(&mut self.warnings);
+    }
+
     /// Set a variable named on the command line by `-v` or as `var=value`.
     ///
     /// The value is a strnum, so `-v n=10` compares numerically — which is what
-    /// makes `awk -v n=10 '$1 == n'` work on a numeric column.
+    /// makes `awk -v n=10 '$1 == n'` work on a numeric column. Its escapes are
+    /// already resolved: [`escape::string`] is the caller's, since `-v` is
+    /// resolved before the program is even parsed.
     ///
     /// # Errors
-    /// Returns a diagnostic if the name is one of the built-in arrays.
+    /// Returns a diagnostic if the name is one of the built-in arrays, or if
+    /// the variable is `FS` or `RS` and its value will not compile as a regex.
     pub fn assign_cli(&mut self, name: &str, value: Str) -> Result<(), String> {
         let Some(slot) = self.prog.global_names.iter().position(|n| n == name) else {
             // A name the program never mentions still has to be settable: a
@@ -476,8 +512,13 @@ impl Interp {
                 continue;
             }
             if let Some((name, value)) = command_assignment(&text) {
-                let value = unescape(&value);
-                let _ = self.assign_cli(&name, value);
+                // gawk's `arg_assign`: escapes resolved with `ELIDE_BACK_NL`,
+                // the same as `-v`.
+                let value = escape::string(&value, true, &mut self.warnings);
+                self.say_warnings();
+                // A refusal (an array named, or an `FS` that will not compile)
+                // is gawk's fatal error here too.
+                self.assign_cli(&name, value).map_err(Fatal)?;
                 continue;
             }
             self.main.opened_any = true;
@@ -921,8 +962,7 @@ impl Interp {
                 }
                 V_FS | V_RS => {
                     self.set_global(slot, val);
-                    self.refresh_separators();
-                    return Ok(());
+                    return self.refresh_separators();
                 }
                 _ => {}
             }
@@ -1061,19 +1101,60 @@ impl Interp {
 
     /// Rebuild `FS` and `RS` from their variables. Called after either is
     /// assigned, and cheap enough to be called when neither changed.
-    fn refresh_separators(&mut self) {
+    ///
+    /// # Errors
+    /// gawk's fatal error for a separator that will not compile as a regex.
+    fn refresh_separators(&mut self) -> R<()> {
         let fs = self.string_of(V_FS);
         if fs != self.fs_src {
-            self.fs = make_fs(&fs);
+            self.fs = self.make_fs(&fs)?;
             self.fs_src = fs;
             // The fields were split by the old FS; POSIX says a change to FS
             // takes effect on the *next* record, so the current split stands.
         }
         let rs = self.string_of(V_RS);
         if rs != self.rs_src {
-            self.rs = make_rs(&rs);
+            self.rs = self.make_rs(&rs)?;
             self.rs_src = rs;
         }
+        Ok(())
+    }
+
+    /// Build the field splitter `FS` describes.
+    ///
+    /// The single-character case is *literal*, not a one-character regex: POSIX
+    /// says so, and it is why `FS = "."` splits on dots rather than on
+    /// everything. Anything longer is a regex, through gawk's `make_regexp` --
+    /// escape layer included, so `FS = "\\|"` splits on a bar -- and one that
+    /// will not compile is gawk's fatal error: `FS = "a("` stops the run with
+    /// `invalid regexp: Unmatched ( or \(: /a(/`, measured. (It used to fall
+    /// back to splitting on the first character, which answered a question
+    /// the program had not asked.)
+    fn make_fs(&mut self, fs: &[u8]) -> R<Fs> {
+        Ok(match fs {
+            b" " => Fs::Whitespace,
+            b"" => Fs::Chars,
+            &[c] => Fs::Char(c),
+            other => Fs::Regex(Rc::new(self.dynamic_regex(other)?)),
+        })
+    }
+
+    /// Build the record reader `RS` describes: empty for paragraphs, one
+    /// character literally, anything longer a regex as [`Self::make_fs`]'s is.
+    fn make_rs(&mut self, rs: &[u8]) -> R<Rs> {
+        Ok(match rs {
+            b"" => Rs::Paragraph,
+            &[c] => Rs::Char(c),
+            other => Rs::Regex(Rc::new(self.dynamic_regex(other)?)),
+        })
+    }
+
+    /// Compile a regex whose text was computed at run time, saying any
+    /// escape warnings it earned.
+    fn dynamic_regex(&mut self, text: &[u8]) -> R<Regex> {
+        let compiled = crate::parse::compile_dynamic(text, &mut self.warnings);
+        self.say_warnings();
+        compiled.map_err(Fatal)
     }
 
     fn string_of(&self, slot: usize) -> Str {
@@ -1236,8 +1317,7 @@ impl Interp {
         if let Some(re) = self.re_cache.get(&text) {
             return Ok(Rc::clone(re));
         }
-        let re = crate::parse::compile_regex(&text).map_err(Fatal)?;
-        let re = Rc::new(re);
+        let re = Rc::new(self.dynamic_regex(&text)?);
         // The cache is per distinct pattern text; a program that builds a new
         // pattern from every record would otherwise grow it without bound.
         if self.re_cache.len() < 1000 {
@@ -1339,7 +1419,7 @@ impl Interp {
                     Some(e) => {
                         let v = self.eval(e)?;
                         let text = self.to_str(&v);
-                        Some(make_fs(&text))
+                        Some(self.make_fs(&text)?)
                     }
                 };
                 let parts = match &fs {
@@ -1628,42 +1708,6 @@ fn split_with(fs: &Fs, text: &[u8], paragraph_mode: bool) -> R<Vec<Str>> {
     })
 }
 
-/// Build the field splitter `FS` describes.
-///
-/// The single-character case is *literal*, not a one-character regex: POSIX
-/// says so, and it is why `FS = "."` splits on dots rather than on everything.
-fn make_fs(fs: &[u8]) -> Fs {
-    match fs {
-        b" " => Fs::Whitespace,
-        b"" => Fs::Chars,
-        one if one.len() == 1 => match one.first() {
-            Some(c) => Fs::Char(*c),
-            None => Fs::Whitespace,
-        },
-        // A two-character escape like `\t` reaching here unprocessed would be a
-        // regex that means "a tab", which is the same thing, so no special case
-        // is needed.
-        other => match Regex::new(other) {
-            Ok(re) => Fs::Regex(Rc::new(re)),
-            // An FS that will not compile is not worth killing the run over;
-            // treating it literally is what the single-character case does and
-            // is the least surprising fallback.
-            Err(_) => Fs::Char(other.first().copied().unwrap_or(b' ')),
-        },
-    }
-}
-
-fn make_rs(rs: &[u8]) -> Rs {
-    match rs {
-        b"" => Rs::Paragraph,
-        one if one.len() == 1 => Rs::Char(one.first().copied().unwrap_or(b'\n')),
-        other => match Regex::new(other) {
-            Ok(re) => Rs::Regex(Rc::new(re)),
-            Err(_) => Rs::Char(other.first().copied().unwrap_or(b'\n')),
-        },
-    }
-}
-
 fn arith(op: BinOp, l: f64, r: f64) -> R<f64> {
     Ok(match op {
         BinOp::Add => l + r,
@@ -1775,61 +1819,6 @@ pub fn command_assignment(arg: &[u8]) -> Option<(String, Str)> {
     }
     let value = arg.get(eq.saturating_add(1)..)?.to_vec();
     Some((String::from_utf8_lossy(name).into_owned(), value))
-}
-
-/// Resolve the escape sequences in a command-line assignment's value, which
-/// POSIX requires — `-F '\t'` and `-v sep='\t'` both mean a tab.
-#[must_use]
-pub fn unescape(s: &[u8]) -> Str {
-    let mut out = Str::new();
-    let mut i = 0usize;
-    while let Some(&c) = s.get(i) {
-        if c != b'\\' {
-            out.push(c);
-            i = i.saturating_add(1);
-            continue;
-        }
-        i = i.saturating_add(1);
-        let Some(&n) = s.get(i) else {
-            out.push(b'\\');
-            break;
-        };
-        i = i.saturating_add(1);
-        match n {
-            b'n' => out.push(b'\n'),
-            b't' => out.push(b'\t'),
-            b'r' => out.push(b'\r'),
-            b'\\' => out.push(b'\\'),
-            b'"' => out.push(b'"'),
-            b'/' => out.push(b'/'),
-            b'a' => out.push(0x07),
-            b'b' => out.push(0x08),
-            b'f' => out.push(0x0c),
-            b'v' => out.push(0x0b),
-            b'0'..=b'7' => {
-                let mut v = u32::from(n.wrapping_sub(b'0'));
-                let mut k = 1u32;
-                while k < 3 {
-                    match s.get(i) {
-                        Some(d @ b'0'..=b'7') => {
-                            v = v
-                                .saturating_mul(8)
-                                .saturating_add(u32::from(d.wrapping_sub(b'0')));
-                            i = i.saturating_add(1);
-                            k = k.saturating_add(1);
-                        }
-                        _ => break,
-                    }
-                }
-                out.push(u8::try_from(v & 0xff).unwrap_or(0));
-            }
-            other => {
-                out.push(b'\\');
-                out.push(other);
-            }
-        }
-    }
-    out
 }
 
 fn seconds_since_epoch() -> f64 {

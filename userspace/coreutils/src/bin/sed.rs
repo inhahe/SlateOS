@@ -73,6 +73,7 @@ use coreutils::errmsg::strerror;
 use coreutils::getopt::{self, Opt, Program, Takes};
 use coreutils::quote::{os_bytes, os_from_bytes};
 use coreutils::stdfd;
+use ere::sed::{Named, RecursiveC, control_byte, named_byte};
 use ere::{Regex, bre};
 
 /// The status for a failure that stops the run where it stands.
@@ -392,7 +393,7 @@ impl Parser<'_> {
             return;
         }
         self.dump.push(b'/');
-        let norm = normalize_regex(pat).unwrap_or_else(|_| pat.to_vec());
+        let norm = sed_regex(pat).unwrap_or_else(|_| pat.to_vec());
         for &b in &norm {
             if b == b'/' {
                 self.dump.extend_from_slice(b"\\/");
@@ -619,7 +620,7 @@ impl Parser<'_> {
         // The one funnel every pattern passes through, which is why GNU's
         // byte-naming escapes are converted here rather than at each of the
         // three places a pattern is written.
-        let pat = &normalize_regex(pat)?;
+        let pat = &sed_regex(pat)?;
         let r = if self.ere {
             Regex::new_flags(pat, ci)
         } else {
@@ -797,7 +798,7 @@ impl Parser<'_> {
                     out.push(b'\\');
                     self.i = next;
                 }
-                Some(Named::Recursive) => return Err(RECURSIVE_C.to_string()),
+                Some(Named::Recursive) => return Err(RecursiveC.message().to_string()),
                 // A continued line — the newline is part of the text — and
                 // anything else: the character itself.
                 None => out.push(n),
@@ -1106,150 +1107,15 @@ fn literal_for(c: u8) -> Vec<u8> {
     }
 }
 
-/// GNU's wording for `\c\`, which it refuses rather than guessing at.
-const RECURSIVE_C: &str = "recursive escaping after \\c not allowed";
-
-/// The escapes that name a control character by letter.
+/// GNU's `normalize_text` for a regular expression, with its one refusal worded
+/// as a diagnostic.
 ///
-/// GNU converts these in the same pass as the numeric ones below, which is why
-/// `\t` is a tab in a regular expression, in a replacement, in `y` and in `a`
-/// text alike. `\b` is deliberately absent: GNU sed 4.0 read it as a backspace,
-/// but every version since reads it as a word boundary, which is `ere`'s to
-/// interpret and not ours.
-fn control_byte(c: u8) -> Option<u8> {
-    Some(match c {
-        b'a' => 0x07,
-        b'f' => 0x0c,
-        b'n' => b'\n',
-        b'r' => b'\r',
-        b't' => b'\t',
-        b'v' => 0x0b,
-        _ => return None,
-    })
-}
-
-/// One digit of `base`, or `None` if `c` is not one.
-fn digit(c: u8, base: u8) -> Option<u8> {
-    let v = match c {
-        b'0'..=b'9' => c.wrapping_sub(b'0'),
-        b'a'..=b'f' => c.wrapping_sub(b'a').wrapping_add(10),
-        b'A'..=b'F' => c.wrapping_sub(b'A').wrapping_add(10),
-        _ => return None,
-    };
-    (v < base).then_some(v)
-}
-
-/// What one of GNU's byte-naming escapes turned out to be.
-enum Named {
-    /// The byte it names, and the index just past the escape.
-    Byte(u8, usize),
-    /// `\c` with the script ending right after it: GNU emits a lone backslash
-    /// and drops the `c`.
-    Backslash(usize),
-    /// `\c\`, which GNU refuses — see [`RECURSIVE_C`].
-    Recursive,
-}
-
-/// Read `\xNN`, `\oNNN`, `\dNNN` or `\cX`, where `raw[i]` is the character
-/// *after* the backslash.
-///
-/// `None` means the escape is none of those and belongs to whoever asked: `\w`
-/// to the regex engine, `\1` to the replacement parser, `\;` to nobody.
-///
-/// The three numeric forms are GNU's `convert_number`, measured rather than
-/// recalled: **at most two** hexadecimal digits and **at most three** decimal
-/// or octal ones, the value taken mod 256, and *no* digits at all is not an
-/// error — the letter then denotes itself, which is why `sed 's/\x/Z/'`
-/// replaces an `x`. So GNU reads `\x616` as `a` then `6`, `\d0977` as `a` then
-/// `7`, `\x0061` as NUL then `61`, and `\d300` as `,`.
-fn named_byte(raw: &[u8], i: usize) -> Option<Named> {
-    let letter = raw.get(i).copied()?;
-    let (base, max) = match letter {
-        b'x' => (16u8, 2usize),
-        b'd' => (10, 3),
-        b'o' => (8, 3),
-        b'c' => {
-            let after = i.saturating_add(1);
-            return Some(match raw.get(after).copied() {
-                None => Named::Backslash(after),
-                Some(b'\\') => Named::Recursive,
-                // GNU's own arithmetic: fold to upper case, then flip the bit
-                // that separates a control code from its printable partner, so
-                // `\cI` is a tab and `\c1` is `q`.
-                Some(c) => Named::Byte(c.to_ascii_uppercase() ^ 0x40, after.saturating_add(1)),
-            });
-        }
-        _ => return None,
-    };
-    // Accumulating in a `u8` is the mod-256 wrap, not an accident of width:
-    // GNU stores the running value in a `char`, which is why `\d300` is `,`.
-    let mut n: u8 = 0;
-    let first = i.saturating_add(1);
-    let mut j = first;
-    let end = first.saturating_add(max);
-    while j < end {
-        let Some(d) = raw.get(j).copied().and_then(|c| digit(c, base)) else {
-            break;
-        };
-        n = n.wrapping_mul(base).wrapping_add(d);
-        j = j.saturating_add(1);
-    }
-    Some(if j == first {
-        Named::Byte(letter, j)
-    } else {
-        Named::Byte(n, j)
-    })
-}
-
-/// GNU's `normalize_text` for a regular expression: every escape that names a
-/// byte becomes that byte, and every other escape is left for the regex engine.
-///
-/// The produced byte is **not** protected, which is GNU's behaviour and is
-/// surprising enough to be worth stating: `\x2e` is the metacharacter `.` and
-/// not a literal dot, so `sed 's/\x2e/Z/'` replaces the first character of any
-/// line. `\x5c` is a bare backslash, so `sed 's/\x5c/Z/'` is a *trailing
-/// backslash* error — which is exactly what GNU reports. Both measured.
-///
-/// The conversion runs after the delimiter scan, so a delimiter it produces is
-/// a character and not the end of the command: `sed 's/\x2f/Z/'` replaces a
-/// slash.
-fn normalize_regex(raw: &[u8]) -> Result<Vec<u8>, String> {
-    let mut out = Vec::with_capacity(raw.len());
-    let mut i = 0usize;
-    while let Some(&c) = raw.get(i) {
-        i = i.saturating_add(1);
-        if c != b'\\' {
-            out.push(c);
-            continue;
-        }
-        let Some(&n) = raw.get(i) else {
-            out.push(b'\\');
-            break;
-        };
-        if let Some(b) = control_byte(n) {
-            out.push(b);
-            i = i.saturating_add(1);
-            continue;
-        }
-        match named_byte(raw, i) {
-            Some(Named::Byte(b, next)) => {
-                out.push(b);
-                i = next;
-            }
-            Some(Named::Backslash(next)) => {
-                out.push(b'\\');
-                i = next;
-            }
-            Some(Named::Recursive) => return Err(RECURSIVE_C.to_string()),
-            // Not ours: `\w`, `\(`, `\1`, `\.` all reach the engine as written.
-            None => {
-                out.push(b'\\');
-                out.push(n);
-                i = i.saturating_add(1);
-            }
-        }
-    }
-    Ok(out)
+/// The conversion itself is `ere::sed::regex`, shared with the kernel shell's
+/// sed so that the two cannot disagree about what `\t` means -- and it is not
+/// the regex compiler's: like glibc's, that has no C escapes, which is why
+/// `grep '[\t]'` is a backslash or a `t` while sed's is a tab.
+fn sed_regex(raw: &[u8]) -> Result<Vec<u8>, String> {
+    ere::sed::regex(raw).map_err(|e| e.message().to_string())
 }
 
 /// `y` takes text, not a pattern, so only the escapes that name a byte apply.
@@ -1280,7 +1146,7 @@ fn unescape_y(raw: &[u8]) -> Result<Vec<u8>, String> {
                 out.push(b'\\');
                 i = next;
             }
-            Some(Named::Recursive) => return Err(RECURSIVE_C.to_string()),
+            Some(Named::Recursive) => return Err(RecursiveC.message().to_string()),
             // `\\` and anything else: the character itself.
             None => {
                 out.push(n);
@@ -1354,7 +1220,7 @@ fn parse_replacement(raw: &[u8]) -> Result<Vec<Rep>, String> {
                         lit.push(b'\\');
                         i = next;
                     }
-                    Some(Named::Recursive) => return Err(RECURSIVE_C.to_string()),
+                    Some(Named::Recursive) => return Err(RecursiveC.message().to_string()),
                     // `\&`, `\\`, `\<newline>` and anything else: the character
                     // itself.
                     None => lit.push(n),

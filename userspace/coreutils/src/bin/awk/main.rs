@@ -37,6 +37,7 @@
 //! | module | what it does |
 //! |---|---|
 //! | [`lex`] | bytes to tokens, and the two context-sensitive decisions awk's grammar needs |
+//! | `ere::awk` | gawk's two escape layers -- a string's text, and a regex's before the compiler sees it -- shared with the kernel shell's awk |
 //! | [`ast`] | the parsed shape; names are already resolved to slots |
 //! | [`parse`] | recursive descent, POSIX precedence |
 //! | [`types`] | which names are arrays — decided before the run, because arrays pass by reference |
@@ -57,15 +58,16 @@
 //! ## Where this deliberately differs from gawk
 //!
 //! `scripts/awk-diff.sh` runs both awks over the same inputs and requires them
-//! to agree. Ten cases are exempted there, and these are they — each is a
-//! decision, not an omission, and the script reports if one stops being true.
+//! to agree. The cases it exempts are recorded there with their reasons, and
+//! the script reports one that stops differing. Most are these — each a
+//! decision, not an omission; the rest are gaps of ours (diagnostics with no
+//! source location), tracked in `known-issues.md`.
 //!
 //! | Case | Ours | `gawk --posix` |
 //! |---|---|---|
 //! | `length`, `substr`, `index`, `toupper` on non-ASCII text | counts and maps characters | counts and maps bytes, in the C locale |
 //! | `printf "%c"` of a code point above 255 | that character | the low byte |
 //! | `printf "%s"` with no argument left | empty, as in bwk and mawk | fatal |
-//! | `\1`–`\9` in a pattern | a backreference, as in GNU `grep -E` | the octal escape `\001` |
 //! | an undefined function is called | refused before the program runs | fatal when first reached |
 //! | a name used as both an array and a scalar | refused before the program runs | fatal when first reached |
 //! | a built-in given the wrong number of arguments | refused before the program runs | fatal when first reached |
@@ -79,14 +81,16 @@
 //! than 2), which is the right trade: exit 1 already means "this program will
 //! not run" and that is exactly what has happened.
 //!
-//! The backreference row is inherited rather than chosen for awk: `ere` grew
-//! backreferences because `sed` and `grep` need them (`design-decisions.md`
-//! §333), and all five programs share one engine so that a pattern means one
-//! thing across them. gawk's reading is not POSIX either — POSIX leaves `\1` in
-//! an ERE undefined — so the choice is between two extensions, and the one that
-//! agrees with the other four programs on this system wins. A pattern whose
-//! backreference search exceeds the engine's budget is a fatal error here, not
-//! a non-match; see [`interp`]'s `From<ere::MatchLimit> for Fatal`.
+//! There was an eighth row until 2026-10-01: `\1`–`\9` in a pattern was a
+//! backreference here, as in GNU `grep -E`, and the octal escape `\001` in
+//! gawk. It was recorded as a choice between two extensions on the belief that
+//! POSIX leaves `\1` undefined, and that belief was wrong for awk: POSIX's awk
+//! gives its regexes C's escapes plus the octal `\ddd`, "recognized both inside
+//! and outside bracket expressions", so `\1` is the byte 0x01, exactly as gawk
+//! reads it. `ere::awk` is that layer, gawk's, in front of the engine the other
+//! programs share (`design-decisions.md` §333 and the entry that revisits it).
+//! A pattern whose search exceeds the engine's budget is still a fatal error
+//! here, not a non-match; see [`interp`]'s `From<ere::MatchLimit> for Fatal`.
 
 mod ast;
 mod fmt;
@@ -106,14 +110,24 @@ use value::Str;
 
 const USAGE: &str = "usage: awk [-F sepstring] [-v assignment]... program [argument...]\n       awk [-F sepstring] -f progfile [-f progfile]... [-v assignment]... [argument...]";
 
+/// One of the command line's assignments, as written.
+enum Preassign {
+    /// `-v name=value`.
+    Var(String, Str),
+    /// `-F value`, which POSIX defines as `-v FS=value` -- except that gawk
+    /// does not elide a backslash-newline in it, so it stays distinct.
+    Fs(Str),
+}
+
 /// The command line, once the options have been taken off the front.
 struct Args {
     /// `-f` program files, in order. Empty means the program is an operand.
     progfiles: Vec<Str>,
-    /// `-v` assignments, in order, applied before BEGIN.
-    assigns: Vec<(String, Str)>,
-    /// `-F`, if given, as an `FS=` assignment applied after the `-v`s.
-    fs: Option<Str>,
+    /// `-v` and `-F`, in the order given: each is an assignment to a
+    /// variable, and the later of two assignments to one variable wins.
+    /// (They were two lists, applied `-v`s first, so `-F: -v 'FS=;'` split on
+    /// `:` where gawk splits on `;`. Measured.)
+    preassigns: Vec<Preassign>,
     /// The program text, when there was no `-f`.
     program: Option<Str>,
     /// What goes into `ARGV[1..]`.
@@ -142,12 +156,34 @@ fn run_main() -> ExitCode {
         Err(e) => die(&e),
     };
 
+    // gawk resolves the command line's assignments before it parses the
+    // program, so their escape warnings come first -- and through the run's
+    // one table of warnings, which the parse and then the run carry on with.
+    // `-v` elides a backslash-newline and `-F` does not: gawk's `arg_assign`
+    // and `cmdline_fs` differ in exactly that.
+    let mut warnings = ere::awk::Warnings::default();
+    let preassigns: Vec<(&str, Str)> = args
+        .preassigns
+        .iter()
+        .map(|p| match p {
+            Preassign::Var(name, value) => {
+                (name.as_str(), ere::awk::string(value, true, &mut warnings))
+            }
+            Preassign::Fs(value) => ("FS", ere::awk::string(value, false, &mut warnings)),
+        })
+        .collect();
+    interp::emit_warnings(&mut warnings);
+
     // A program that will not compile is a *usage* failure — the script is
     // wrong before anything ran — and exits 1. A failure once it is running
     // exits 2. That split is gawk's, and a shell script that distinguishes them
-    // at all has been written against gawk.
-    let mut prog = match parse::parse(&source) {
+    // at all has been written against gawk. A few things gawk finds while
+    // parsing are fatal rather than syntax errors, and those say so.
+    let parsed = parse::parse(&source, &mut warnings);
+    interp::emit_warnings(&mut warnings);
+    let mut prog = match parsed {
         Ok(p) => p,
+        Err(e) if e.starts_with("fatal: ") => die(&e),
         Err(e) => die_program(&e),
     };
     if let Err(e) = types::resolve(&mut prog) {
@@ -158,18 +194,14 @@ fn run_main() -> ExitCode {
         .map(|(k, v)| (arg_bytes(&k), arg_bytes(&v)))
         .collect();
     let mut it = interp::Interp::new(prog, &args.operands, &env);
+    it.adopt_warnings(warnings);
 
-    // Order matters: `-v` runs before `-F`, and both run before BEGIN, so a
-    // BEGIN block can read what the command line set and can override it.
-    for (name, value) in &args.assigns {
-        if let Err(e) = it.assign_cli(name, interp::unescape(value)) {
+    // In the order given, and all before BEGIN, so a BEGIN block can read
+    // what the command line set and can override it.
+    for (name, value) in preassigns {
+        if let Err(e) = it.assign_cli(name, value) {
             die(&e);
         }
-    }
-    if let Some(fs) = &args.fs
-        && let Err(e) = it.assign_cli("FS", interp::unescape(fs))
-    {
-        die(&e);
     }
 
     match it.run() {
@@ -186,8 +218,7 @@ fn run_main() -> ExitCode {
 fn parse_args(raw: &[Str]) -> Result<Option<Args>, String> {
     let mut args = Args {
         progfiles: Vec::new(),
-        assigns: Vec::new(),
-        fs: None,
+        preassigns: Vec::new(),
         program: None,
         operands: Vec::new(),
     };
@@ -231,7 +262,7 @@ fn parse_args(raw: &[Str]) -> Result<Option<Args>, String> {
                         v
                     };
                     match flag {
-                        b'F' => args.fs = Some(value),
+                        b'F' => args.preassigns.push(Preassign::Fs(value)),
                         b'f' => args.progfiles.push(value),
                         _ => {
                             let Some((name, v)) = interp::command_assignment(&value) else {
@@ -240,7 +271,7 @@ fn parse_args(raw: &[Str]) -> Result<Option<Args>, String> {
                                     String::from_utf8_lossy(&value)
                                 ));
                             };
-                            args.assigns.push((name, v));
+                            args.preassigns.push(Preassign::Var(name, v));
                         }
                     }
                 }

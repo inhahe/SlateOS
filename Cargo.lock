@@ -649,8 +649,10 @@ dependencies = [
  "charwidth",
  "ere",
  "errmsg",
+ "fnmatch",
  "getoptlong",
  "gnubase64",
+ "libcall",
  "localtime",
  "md5",
  "modechange",
@@ -682,13 +684,6 @@ dependencies = [
 [[package]]
 name = "cpufeatures"
 version = "0.3.1"
-
-[[package]]
-name = "cpupower"
-version = "0.1.0"
-dependencies = [
- "quoting",
-]
 
 [[package]]
 name = "crc32"
@@ -801,13 +796,6 @@ dependencies = [
 [[package]]
 name = "daywindow"
 version = "0.1.0"
-
-[[package]]
-name = "dbus"
-version = "0.1.0"
-dependencies = [
- "quoting",
-]
 
 [[package]]
 name = "dbviewer"
@@ -1311,6 +1299,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "fnmatch"
+version = "0.1.0"
+
+[[package]]
 name = "fontmanager"
 version = "0.1.0"
 dependencies = [
@@ -1567,7 +1559,6 @@ dependencies = [
  "optionalfile",
  "quoting",
  "scratchdir",
- "usageerror",
 ]
 
 [[package]]
@@ -1986,8 +1977,7 @@ dependencies = [
 name = "lockfile"
 version = "0.1.0"
 dependencies = [
- "quoting",
- "usageerror",
+ "pwdb",
 ]
 
 [[package]]
@@ -3827,7 +3817,11 @@ name = "sudo"
 version = "0.1.0"
 dependencies = [
  "authlib",
+ "ere",
+ "errmsg",
+ "fnmatch",
  "optionalfile",
+ "posix",
  "quoting",
  "scratchdir",
  "userdb",
@@ -4076,13 +4070,6 @@ name = "textline"
 version = "0.1.0"
 dependencies = [
  "guitk",
-]
-
-[[package]]
-name = "thermald"
-version = "0.1.0"
-dependencies = [
- "quoting",
 ]
 
 [[package]]

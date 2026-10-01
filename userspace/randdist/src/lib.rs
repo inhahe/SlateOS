@@ -1,10 +1,11 @@
 //! Non-uniform distributions over a uniform source.
 //!
 //! [`randrange`] answers "a number, uniformly, in this range". This crate
-//! answers "a number, shaped like *this*" — normal, exponential, Poisson —
-//! by transforming that uniform stream. It holds no entropy of its own and
-//! opens no device; every sample here is a function of bits somebody else
-//! drew.
+//! answers "a number, shaped like *this*" — normal, exponential, Poisson, or
+//! an index chosen in proportion to its weight — by transforming that uniform
+//! stream. It holds no entropy of its own and opens no device; every sample
+//! here is a function of bits somebody else drew. `design-decisions.md` §1047
+//! is the operator's decision that asked for exactly these four.
 //!
 //! # Why this is a separate crate, and not an option on the syscall
 //!
@@ -52,7 +53,8 @@
 // saturates to an infinity or produces a NaN, and every function below either
 // cannot reach one (the parameter validation in each constructor rules out the
 // inputs that could) or is documented where it can. The integer arithmetic in
-// this crate is confined to Poisson's counter, which uses `saturating_add`.
+// this crate is confined to Poisson's counter, which uses `saturating_add`,
+// and `WeightedIndex`'s running total, which uses `checked_add`.
 #![allow(clippy::arithmetic_side_effects)]
 
 use randrange::RandomSource;
@@ -351,6 +353,255 @@ impl Distribution<u64> for Poisson {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Weighted choice
+// ---------------------------------------------------------------------------
+
+/// Why a weighted choice could not be built.
+///
+/// Its own type rather than more [`DistError`] variants, because these are
+/// failures of a *list*: no weights at all, weights that are all zero, and a
+/// total too large to hold are not things a single parameter can be. As with
+/// [`DistError`], nothing is clamped or skipped -- a weight list a caller got
+/// wrong is a bug in the caller, and a silently repaired one would sample
+/// something nobody asked for.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum WeightError {
+    /// There were no weights, so nothing to choose from.
+    Empty,
+    /// Every weight was zero, so no index could ever be chosen.
+    AllZero,
+    /// The weights add up to more than can be held: past `u64::MAX` for
+    /// [`WeightedIndex`], to infinity for [`WeightedIndexF64`].
+    TooHeavy,
+    /// A weight was NaN or infinite ([`WeightedIndexF64`] only).
+    NotFinite,
+    /// A weight was negative ([`WeightedIndexF64`] only; a `u64` cannot be).
+    Negative,
+}
+
+impl core::fmt::Display for WeightError {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        let text = match self {
+            Self::Empty => "there are no weights to choose by",
+            Self::AllZero => "every weight is zero",
+            Self::TooHeavy => "the weights add up to more than can be held",
+            Self::NotFinite => "a weight is not finite",
+            Self::Negative => "a weight is negative",
+        };
+        f.write_str(text)
+    }
+}
+
+impl std::error::Error for WeightError {}
+
+/// An index into a list, chosen with probability proportional to its weight
+/// -- **exactly**.
+///
+/// `WeightedIndex::new(&[1, 3, 6])` answers `0` one time in ten, `1` three
+/// times in ten and `2` six times in ten, and those are the true odds rather
+/// than an approximation of them. A draw is a uniform integer below the total
+/// weight, from [`RandomSource::below_u64`] -- Lemire's method with its
+/// rejection step, so every value below the total is equally likely -- and the
+/// answer is the first index whose running total exceeds it. Each index
+/// therefore owns exactly as many of the `total` equally likely draws as its
+/// weight says. A weight of zero owns none: that index is never chosen.
+///
+/// Integer weights are the exact form, and the one to reach for whenever the
+/// odds are counts -- frequencies, tallies, "three in ten". Fractional weights
+/// go to [`WeightedIndexF64`], which has to round.
+///
+/// ```
+/// use randdist::{Distribution, WeightedIndex};
+/// use randrange::SeededRng;
+///
+/// let colours = ["red", "green", "blue"];
+/// let odds = WeightedIndex::new(&[1, 3, 6]).expect("non-empty, not all zero");
+/// let mut rng = SeededRng::new(7);
+/// let pick = colours[odds.sample(&mut rng)];
+/// assert!(colours.contains(&pick));
+/// ```
+///
+/// # Cost
+///
+/// Building is `O(n)` and keeps one `u64` per index; a draw is one bounded
+/// integer draw and a binary search over the running totals, `O(log n)`. The
+/// alias method would make a draw `O(1)`, but its table is built from
+/// floating-point probabilities -- which is the exactness given up -- or from
+/// integer thresholds with a second rejection step; nothing has needed the
+/// logarithm back yet.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct WeightedIndex {
+    /// `cumulative[i]` is the sum of weights `0..=i`; the last is the total.
+    /// Never empty and never ending in zero: [`WeightedIndex::new`] refuses
+    /// both.
+    cumulative: Vec<u64>,
+}
+
+impl WeightedIndex {
+    /// A choice among `weights.len()` indices, index `i` with probability
+    /// `weights[i] / sum(weights)`.
+    ///
+    /// # Errors
+    ///
+    /// [`WeightError::Empty`] for no weights; [`WeightError::AllZero`] when
+    /// they sum to zero; [`WeightError::TooHeavy`] when the sum passes
+    /// `u64::MAX`, which is refused rather than wrapped -- a wrapped total
+    /// would quietly give the last indices odds nobody set.
+    pub fn new(weights: &[u64]) -> Result<Self, WeightError> {
+        if weights.is_empty() {
+            return Err(WeightError::Empty);
+        }
+        let mut cumulative = Vec::with_capacity(weights.len());
+        let mut total: u64 = 0;
+        for &weight in weights {
+            total = total.checked_add(weight).ok_or(WeightError::TooHeavy)?;
+            cumulative.push(total);
+        }
+        if total == 0 {
+            return Err(WeightError::AllZero);
+        }
+        Ok(Self { cumulative })
+    }
+
+    /// How many indices it chooses among: the length of the weight list,
+    /// zero weights included.
+    #[must_use]
+    pub fn len(&self) -> usize {
+        self.cumulative.len()
+    }
+
+    /// Always `false`: a choice among nothing is refused by
+    /// [`WeightedIndex::new`]. Here because a `len` without it reads as an
+    /// oversight.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.cumulative.is_empty()
+    }
+
+    /// The sum of the weights: how many equally likely draws a sample is one
+    /// of.
+    #[must_use]
+    pub fn total(&self) -> u64 {
+        self.cumulative.last().copied().unwrap_or(0)
+    }
+
+    /// The index that owns draw `r`, for `r` below [`total`](Self::total):
+    /// the first whose running total exceeds it. An index whose weight is zero
+    /// has the same running total as the one before it, so no draw can stop
+    /// there.
+    fn index_of(&self, r: u64) -> usize {
+        self.cumulative.partition_point(|&running| running <= r)
+    }
+}
+
+impl Distribution<usize> for WeightedIndex {
+    fn sample<R: RandomSource + ?Sized>(&self, src: &mut R) -> usize {
+        self.index_of(src.below_u64(self.total()))
+    }
+}
+
+/// [`WeightedIndex`] for fractional weights: an index chosen with probability
+/// proportional to its weight, to within floating-point rounding.
+///
+/// A draw scales [`unit_f64`] by the total weight and finds the first running
+/// total above it -- the method of Python's `random.choices`. The rounding
+/// lives in two places, the running totals (each a sum of `f64`s) and the
+/// scaled draw (53 bits). Both put the error far below anything a run of
+/// samples could detect; but it is not zero, and a weight smaller than the
+/// total's rounding step can be absorbed entirely, so an index with such a
+/// weight is never chosen. That is why integer weights have their own, exact
+/// type.
+///
+/// A zero weight is never chosen here either, including in the one case
+/// rounding could otherwise reach: a draw that rounds *up* to the total itself
+/// belongs to no running total, and is given to the last index that has a
+/// weight rather than to the end of the list.
+#[derive(Clone, Debug, PartialEq)]
+pub struct WeightedIndexF64 {
+    /// `cumulative[i]` is the sum of weights `0..=i`; the last is the total.
+    cumulative: Vec<f64>,
+    /// The last index whose weight is above zero -- where a draw that rounded
+    /// up to the total belongs.
+    last_weighted: usize,
+}
+
+impl WeightedIndexF64 {
+    /// A choice among `weights.len()` indices, index `i` with probability
+    /// `weights[i] / sum(weights)`, rounded.
+    ///
+    /// # Errors
+    ///
+    /// [`WeightError::Empty`] for no weights; [`WeightError::NotFinite`] for a
+    /// NaN or infinite one; [`WeightError::Negative`] for one below zero;
+    /// [`WeightError::AllZero`] when none is above zero;
+    /// [`WeightError::TooHeavy`] when finite weights sum to infinity.
+    pub fn new(weights: &[f64]) -> Result<Self, WeightError> {
+        if weights.is_empty() {
+            return Err(WeightError::Empty);
+        }
+        let mut cumulative = Vec::with_capacity(weights.len());
+        let mut total = 0.0_f64;
+        let mut last_weighted = None;
+        for (index, &weight) in weights.iter().enumerate() {
+            if !weight.is_finite() {
+                return Err(WeightError::NotFinite);
+            }
+            // `-0.0 < 0.0` is false, so a negative zero is accepted as the
+            // zero it equals.
+            if weight < 0.0 {
+                return Err(WeightError::Negative);
+            }
+            if weight > 0.0 {
+                last_weighted = Some(index);
+            }
+            total += weight;
+            cumulative.push(total);
+        }
+        if !total.is_finite() {
+            return Err(WeightError::TooHeavy);
+        }
+        let last_weighted = last_weighted.ok_or(WeightError::AllZero)?;
+        Ok(Self {
+            cumulative,
+            last_weighted,
+        })
+    }
+
+    /// How many indices it chooses among, zero weights included.
+    #[must_use]
+    pub fn len(&self) -> usize {
+        self.cumulative.len()
+    }
+
+    /// Always `false`, as for [`WeightedIndex::is_empty`].
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.cumulative.is_empty()
+    }
+
+    /// The sum of the weights.
+    #[must_use]
+    pub fn total(&self) -> f64 {
+        self.cumulative.last().copied().unwrap_or(0.0)
+    }
+
+    /// The index that owns the point `x` of `[0, total]`: the first whose
+    /// running total exceeds it, or the last weighted index for a point that
+    /// no running total exceeds (`x == total`, reachable only by rounding).
+    fn index_of(&self, x: f64) -> usize {
+        self.cumulative
+            .partition_point(|&running| running <= x)
+            .min(self.last_weighted)
+    }
+}
+
+impl Distribution<usize> for WeightedIndexF64 {
+    fn sample<R: RandomSource + ?Sized>(&self, src: &mut R) -> usize {
+        self.index_of(unit_f64(src) * self.total())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     // A test that panics on bad data should fail loudly and point at the line
@@ -638,7 +889,167 @@ mod tests {
         assert!((fraction - 0.9048).abs() < 0.01, "fraction {fraction}");
     }
 
+    // -- WeightedIndex ---------------------------------------------------
+
+    #[test]
+    fn a_weighted_index_refuses_what_it_cannot_choose_by() {
+        assert_eq!(WeightedIndex::new(&[]), Err(WeightError::Empty));
+        assert_eq!(WeightedIndex::new(&[0, 0, 0]), Err(WeightError::AllZero));
+        assert_eq!(
+            WeightedIndex::new(&[u64::MAX, 1]),
+            Err(WeightError::TooHeavy)
+        );
+        // The largest total that fits is accepted.
+        assert!(WeightedIndex::new(&[u64::MAX - 1, 1]).is_ok());
+    }
+
+    /// Exactness, proved by enumeration rather than by sampling: every one of
+    /// the `total` equally likely draws is mapped to its index, and each index
+    /// must own exactly as many as its weight -- zero for a zero weight,
+    /// wherever it stands in the list.
+    #[test]
+    fn each_index_owns_exactly_its_weight_of_the_draws() {
+        let weights = [0, 1, 3, 0, 6, 0];
+        let w = WeightedIndex::new(&weights).expect("valid");
+        assert_eq!((w.len(), w.total(), w.is_empty()), (6, 10, false));
+        let mut owned = [0_u64; 6];
+        for r in 0..w.total() {
+            let slot = owned.get_mut(w.index_of(r)).expect("an index in range");
+            *slot += 1;
+        }
+        assert_eq!(owned, weights);
+    }
+
+    /// The edges of a total that fills `u64`: the last draw belongs to the
+    /// last index, the one before the boundary to the first.
+    #[test]
+    fn a_total_that_fills_the_word_still_maps_its_edges() {
+        let w = WeightedIndex::new(&[u64::MAX - 1, 1]).expect("valid");
+        assert_eq!(w.total(), u64::MAX);
+        assert_eq!(w.index_of(0), 0);
+        assert_eq!(w.index_of(u64::MAX - 2), 0);
+        assert_eq!(w.index_of(u64::MAX - 1), 1);
+    }
+
+    #[test]
+    fn weighted_draws_come_up_in_proportion() {
+        let w = WeightedIndex::new(&[1, 3, 0, 6]).expect("valid");
+        let mut r = rng();
+        let mut counts = [0_usize; 4];
+        for _ in 0..N {
+            let slot = counts.get_mut(w.sample(&mut r)).expect("an index in range");
+            *slot += 1;
+        }
+        assert_eq!(counts[2], 0, "a zero weight was chosen");
+        for (count, weight) in [(counts[0], 1.0), (counts[1], 3.0), (counts[3], 6.0)] {
+            #[allow(clippy::cast_precision_loss)]
+            let (n, got) = (N as f64, count as f64);
+            let p = weight / 10.0;
+            // Five standard deviations of a binomial count: a real bias of a
+            // percent or two shows, a fair sampler essentially never trips it.
+            let sd = (n * p * (1.0 - p)).sqrt();
+            assert!(
+                (got - n * p).abs() < 5.0 * sd,
+                "weight {weight}: {count} of {N}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_lone_weight_is_always_chosen() {
+        let w = WeightedIndex::new(&[0, 5, 0]).expect("valid");
+        let mut r = rng();
+        for _ in 0..1_000 {
+            assert_eq!(w.sample(&mut r), 1);
+        }
+    }
+
+    // -- WeightedIndexF64 ------------------------------------------------
+
+    #[test]
+    fn a_fractional_weighted_index_refuses_bad_weights() {
+        assert_eq!(WeightedIndexF64::new(&[]), Err(WeightError::Empty));
+        assert_eq!(
+            WeightedIndexF64::new(&[0.0, -0.0]),
+            Err(WeightError::AllZero)
+        );
+        assert_eq!(
+            WeightedIndexF64::new(&[1.0, -0.5]),
+            Err(WeightError::Negative)
+        );
+        assert_eq!(
+            WeightedIndexF64::new(&[f64::NAN]),
+            Err(WeightError::NotFinite)
+        );
+        assert_eq!(
+            WeightedIndexF64::new(&[1.0, f64::INFINITY]),
+            Err(WeightError::NotFinite)
+        );
+        assert_eq!(
+            WeightedIndexF64::new(&[f64::MAX, f64::MAX]),
+            Err(WeightError::TooHeavy)
+        );
+    }
+
+    /// The boundaries, including the one only rounding reaches: a point equal
+    /// to the total goes to the last index with a weight, not past the end and
+    /// not to the zero weight after it.
+    #[test]
+    fn each_point_belongs_to_the_index_whose_span_holds_it() {
+        let w = WeightedIndexF64::new(&[0.25, 0.0, 0.75, 0.0]).expect("valid");
+        assert_eq!(w.total(), 1.0);
+        assert_eq!(w.index_of(0.0), 0);
+        assert_eq!(w.index_of(0.249), 0);
+        // A boundary belongs to the span it opens, as `[a, b)` does.
+        assert_eq!(w.index_of(0.25), 2);
+        assert_eq!(w.index_of(0.999), 2);
+        assert_eq!(w.index_of(1.0), 2, "rounding up to the total");
+    }
+
+    #[test]
+    fn fractional_draws_come_up_in_proportion() {
+        let w = WeightedIndexF64::new(&[0.1, 0.0, 0.9]).expect("valid");
+        let mut r = rng();
+        let mut counts = [0_usize; 3];
+        for _ in 0..N {
+            let slot = counts.get_mut(w.sample(&mut r)).expect("an index in range");
+            *slot += 1;
+        }
+        assert_eq!(counts[1], 0, "a zero weight was chosen");
+        #[allow(clippy::cast_precision_loss)]
+        let first = counts[0] as f64 / N as f64;
+        assert!((first - 0.1).abs() < 0.005, "fraction {first}");
+    }
+
+    /// The same seed gives the same choices, for both forms -- the property a
+    /// simulation's regression test rests on.
+    #[test]
+    fn a_seed_reproduces_weighted_choices() {
+        let exact = WeightedIndex::new(&[2, 7, 1]).expect("valid");
+        let rounded = WeightedIndexF64::new(&[0.2, 0.7, 0.1]).expect("valid");
+        let (mut a, mut b) = (rng(), rng());
+        for _ in 0..1_000 {
+            assert_eq!(exact.sample(&mut a), exact.sample(&mut b));
+            assert_eq!(rounded.sample(&mut a), rounded.sample(&mut b));
+        }
+    }
+
     // -- errors ---------------------------------------------------------
+
+    #[test]
+    fn weight_errors_describe_themselves() {
+        assert_eq!(
+            WeightError::Empty.to_string(),
+            "there are no weights to choose by"
+        );
+        assert_eq!(WeightError::AllZero.to_string(), "every weight is zero");
+        assert_eq!(
+            WeightError::TooHeavy.to_string(),
+            "the weights add up to more than can be held"
+        );
+        assert_eq!(WeightError::NotFinite.to_string(), "a weight is not finite");
+        assert_eq!(WeightError::Negative.to_string(), "a weight is negative");
+    }
 
     #[test]
     fn errors_describe_themselves() {

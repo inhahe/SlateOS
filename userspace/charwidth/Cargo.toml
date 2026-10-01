@@ -9,3 +9,7 @@ path = "src/lib.rs"
 
 [lints]
 workspace = true
+
+# No dependencies, deliberately and permanently: the C library links this crate
+# for wcwidth (see the note at the top of src/lib.rs), so a dependency here is a
+# dependency of every C program, and it builds with `core` alone.

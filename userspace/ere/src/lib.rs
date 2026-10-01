@@ -97,6 +97,23 @@
 //!   no `-E` is given, and it is *not* a subset of ERE: `a+b` is three literal
 //!   characters in BRE and a repetition in ERE, so the difference has to be
 //!   handled somewhere, and one translator is better than three parsers.
+//! * [`awk`] — awk's regular expressions: gawk's escape layers (C's escapes
+//!   and octal, which POSIX gives awk's regexes and nobody else's) in front of
+//!   the engine, compiled under [`Syntax::POSIX_AWK`]. Here rather than in
+//!   `awk` because there are two awks, userspace's and the kernel shell's.
+//! * [`sed`] — GNU sed's escapes (`\t`, `\n`, `\xHH`, `\cX`, …), which sed turns
+//!   into bytes before compiling, inside brackets too. Here for the same
+//!   reason as [`awk`]: there are two seds.
+//! * [`emacs`] — glibc's Emacs syntax, by translation, for `ptx`.
+//!
+//! ## What a backslash means
+//!
+//! Exactly what it means to glibc's `regcomp`, and nothing more: it makes the
+//! next character literal, except where it spells an operator (`\w`, `\b`,
+//! `\1`, …). There are no C escapes — `\t` is a `t` — and inside a bracket a
+//! backslash is an ordinary member unless the dialect is awk's. A language
+//! that has C escapes resolves them before the pattern arrives, as gawk and
+//! GNU sed do; see [`engine`]'s module docs for the history.
 
 // A regular expression is compiled from a pattern whose length is not known
 // until it is read, so the engine allocates: `Vec` for the program, `Vec<u8>`
@@ -113,10 +130,12 @@ extern crate alloc;
 #[cfg(test)]
 extern crate std;
 
+pub mod awk;
 pub mod bre;
 pub mod ch;
 pub mod emacs;
 pub mod engine;
+pub mod sed;
 
 pub use ch::{BStr, Ch, Str, chars, from_chars};
 pub use engine::{

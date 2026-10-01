@@ -33,7 +33,7 @@
 //! each button exactly once is refused whole, since there is no telling
 //! which button the author meant to leave out or put twice.
 
-use super::values::{at, read_choice, read_flag, value_of};
+use super::values::{at, read_choice, read_flag, read_pixels};
 use super::{
     BUILT_IN, DECORATIONS_SECTION as SECTION, FILE_NAME, ThemeDirs, ThemeError, ThemeFile,
     Warnings, is_valid_id, list, quoted, read_theme_file,
@@ -260,35 +260,6 @@ fn read_order(doc: &Document, path: &[&str], warnings: &mut Warnings) -> Option<
         return None;
     }
     order.try_into().ok()
-}
-
-/// A whole number of pixels held to `min..=max`, with a note when it was
-/// not in it; `what` names the thing measured, for the note.
-fn read_pixels(
-    doc: &Document,
-    path: &[&str],
-    min: u16,
-    max: u16,
-    what: &str,
-    warnings: &mut Warnings,
-) -> Option<u16> {
-    let raw = value_of(doc, path, "a number of pixels, like 4", warnings)?;
-    let Ok(pixels) = raw.parse::<i64>() else {
-        warnings.push(format!(
-            "`{}` is ignored: `{}` is not a whole number of pixels",
-            at(path),
-            quoted(&raw)
-        ));
-        return None;
-    };
-    let held = pixels.clamp(i64::from(min), i64::from(max));
-    if held != pixels {
-        warnings.push(format!(
-            "`{}` is taken as {held}: {what} is {min} to {max} pixels",
-            at(path)
-        ));
-    }
-    u16::try_from(held).ok()
 }
 
 // ============================================================================

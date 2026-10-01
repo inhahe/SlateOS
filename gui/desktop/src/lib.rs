@@ -89,6 +89,7 @@ pub mod calendar;
 pub mod clipboard_viewer;
 pub mod datetime_settings;
 pub mod device_settings;
+pub mod dialog_frame;
 /// The sweep that proves a module draws nothing that is immediately erased.
 ///
 /// Test-only, like `appearance`'s `palette_check`: it exists to check the other modules'
@@ -373,22 +374,10 @@ const START_ORB_GLOW_BLUR: f32 = 18.0;
 const START_ORB_GLOW_ALPHA: u8 = 230;
 /// The start picture's share of the orb's width.
 const START_ORB_PICTURE_SHARE: f32 = 0.55;
-/// Gap between the start button and the first taskbar tile: the Aero
-/// reference's `padding: 0 6px` on its row of tiles.
-const TASKBAR_BUTTON_START_GAP: f32 = 6.0;
-/// Gap between adjacent tiles: the reference's `gap: 1px`. They nearly touch,
-/// as the reference's do; a window's tile has an edge of its own, so two never
-/// run together.
-const TASKBAR_BUTTON_GAP: f32 = 1.0;
-/// Gap between the last pinned tile and the first window's, with the divider
-/// in it: `design.txt` asks for "a small space and a divider between the two
-/// sections". The reference's: the row's gap, 7 of margin, the 1-pixel
-/// divider, 9 of margin and the row's gap again. Only while both sections
-/// have tiles.
-const TASKBAR_SECTION_GAP: f32 = 19.0;
-/// From the last pinned tile's edge to the divider: the row's gap and the 7
-/// of margin before it.
-const TASKBAR_DIVIDER_OFFSET: f32 = 8.0;
+// The gaps between the tiles -- after the start button, between two tiles,
+// between the pinned programs and the windows -- are the theme's
+// `taskbar-panel` spacing (`appearance::panel::PanelStyle`), whose built-in
+// values are the reference's and say where each comes from.
 /// How tall the divider is: the reference's 30, in its 40-pixel bar.
 const TASKBAR_DIVIDER_HEIGHT: f32 = 30.0;
 /// How strongly the divider between the sections is drawn: the bar's own
@@ -2992,6 +2981,13 @@ impl DesktopShell {
         self.run_dialog.set_caret_width(appearance.caret_width());
         self.icons.set_caret_width(appearance.caret_width());
         self.widgets.set_caret_width(appearance.caret_width());
+        // The run box's frame: the theme's window frame, at the interface's
+        // scale (`dialog_frame`, design-decisions §1461).
+        self.run_dialog
+            .set_frame(dialog_frame::DialogFrame::from_settings(
+                &appearance,
+                appearance.scale_factor(),
+            ));
         // The focus width with it, to the fields that draw a focus mark
         // (`guitk::field`), for the same reason.
         self.run_dialog
@@ -3570,14 +3566,18 @@ impl DesktopShell {
         // once enough windows were open: 108 px into it with thirty-one.
         #[allow(clippy::cast_precision_loss)]
         let between = slots.len().saturating_sub(1) as f32;
-        let gaps = self.scale(TASKBAR_BUTTON_START_GAP)
-            + between * self.scale(TASKBAR_BUTTON_GAP)
+        // The gaps are the theme's (`taskbar-panel`'s spacing).
+        let panel = self.appearance.panel();
+        let tile_gap = self.scale(f32::from(panel.tile_gap));
+        let start_gap = self.scale(f32::from(panel.start_gap));
+        let gaps = start_gap
+            + between * tile_gap
             + self.section_gap_extra()
             + self.scale(TRAY_RESERVE_GAP);
         let available =
             (bar.w - self.scale(START_BUTTON_WIDTH) - self.tray_width() - gaps).max(0.0);
         let pins = self.taskbar.pinned_apps().len();
-        let mut x = bar.x + self.scale(START_BUTTON_WIDTH) + self.scale(TASKBAR_BUTTON_START_GAP);
+        let mut x = bar.x + self.scale(START_BUTTON_WIDTH) + start_gap;
         let mut tiles = Vec::with_capacity(slots.len());
         for (index, width) in fit_tiles(&wanted, &shrinks, height, available)
             .into_iter()
@@ -3587,7 +3587,7 @@ impl DesktopShell {
                 x += self.section_gap_extra();
             }
             tiles.push(Rect::new(x, top, width, height));
-            x += width + self.scale(TASKBAR_BUTTON_GAP);
+            x += width + tile_gap;
         }
         tiles
     }
@@ -3599,7 +3599,9 @@ impl DesktopShell {
         let pins = self.taskbar.pinned_apps().len();
         let running = self.taskbar_slots().len().saturating_sub(pins);
         if pins > 0 && running > 0 {
-            self.scale(TASKBAR_SECTION_GAP - TASKBAR_BUTTON_GAP)
+            let panel = self.appearance.panel();
+            let extra = panel.section_gap_drawn().saturating_sub(panel.tile_gap);
+            self.scale(f32::from(extra))
         } else {
             0.0
         }
@@ -3620,9 +3622,10 @@ impl DesktopShell {
     }
 
     /// The line between the pinned tiles and the windows', where the
-    /// reference draws it -- `TASKBAR_DIVIDER_OFFSET` past the last pin, as
-    /// tall as `TASKBAR_DIVIDER_HEIGHT` and centred in the bar -- or `None`
-    /// unless both sections have tiles.
+    /// reference draws it -- the panel's
+    /// [`divider_offset`](appearance::panel::PanelStyle::divider_offset) past
+    /// the last pin, as tall as `TASKBAR_DIVIDER_HEIGHT` and centred in the
+    /// bar -- or `None` unless both sections have tiles.
     #[must_use]
     pub fn taskbar_divider_rect(&self) -> Option<Rect> {
         let pins = self.taskbar.pinned_apps().len();
@@ -3635,7 +3638,7 @@ impl DesktopShell {
         let thickness = self.scale(1.0).max(1.0);
         let height = self.scale(TASKBAR_DIVIDER_HEIGHT).min(last_pin.h);
         Some(Rect::new(
-            last_pin.x + last_pin.w + self.scale(TASKBAR_DIVIDER_OFFSET),
+            last_pin.x + last_pin.w + self.scale(self.appearance.panel().divider_offset()),
             bar.y + (bar.h - height) / 2.0,
             thickness,
             height,
@@ -9420,7 +9423,9 @@ impl DesktopShell {
             )
         } else {
             (
-                with_alpha(Color::WHITE, TASKBAR_TILE_GLASS),
+                // Faint glass, at the panel's gloss: none on a flat one.
+                self.glossed(Color::WHITE, TASKBAR_TILE_GLASS)
+                    .unwrap_or(Color::TRANSPARENT),
                 TASKBAR_TILE_EDGE,
                 TASKBAR_TILE_HIGHLIGHT,
             )
@@ -9477,33 +9482,36 @@ impl DesktopShell {
     /// theme's colour, since the renderer draws no gradients. The reference's
     /// shadow cast *above* the bar is not drawn: the bar's surface ends at its
     /// edge.
+    ///
+    /// Each at the theme's taskbar-panel gloss, so a flat theme's bar is its
+    /// colour alone.
     fn draw_taskbar_glass(&self, tree: &mut RenderTree, bar: Rect) {
         let line = self.scale(1.0).max(1.0);
-        fill(
-            tree,
-            Rect::new(bar.x, bar.y + bar.h / 2.0, bar.w, bar.h / 2.0),
-            with_alpha(Color::BLACK, TASKBAR_FOOT_SHADE),
-        );
-        fill(
-            tree,
-            Rect::new(
-                bar.x,
-                bar.y + 2.0 * line,
-                bar.w,
-                self.scale(TASKBAR_TOP_GLOW_DEPTH).min(bar.h / 2.0),
-            ),
-            with_alpha(Color::WHITE, TASKBAR_TOP_GLOW),
-        );
-        fill(
-            tree,
-            Rect::new(bar.x, bar.y + line, bar.w, line),
-            with_alpha(Color::WHITE, TASKBAR_INNER_LIGHT),
-        );
-        fill(
-            tree,
-            Rect::new(bar.x, bar.y, bar.w, line),
-            with_alpha(Color::WHITE, TASKBAR_EDGE_LIGHT),
-        );
+        if let Some(shade) = self.glossed(Color::BLACK, TASKBAR_FOOT_SHADE) {
+            fill(
+                tree,
+                Rect::new(bar.x, bar.y + bar.h / 2.0, bar.w, bar.h / 2.0),
+                shade,
+            );
+        }
+        if let Some(glow) = self.glossed(Color::WHITE, TASKBAR_TOP_GLOW) {
+            fill(
+                tree,
+                Rect::new(
+                    bar.x,
+                    bar.y + 2.0 * line,
+                    bar.w,
+                    self.scale(TASKBAR_TOP_GLOW_DEPTH).min(bar.h / 2.0),
+                ),
+                glow,
+            );
+        }
+        if let Some(inner) = self.glossed(Color::WHITE, TASKBAR_INNER_LIGHT) {
+            fill(tree, Rect::new(bar.x, bar.y + line, bar.w, line), inner);
+        }
+        if let Some(edge) = self.glossed(Color::WHITE, TASKBAR_EDGE_LIGHT) {
+            fill(tree, Rect::new(bar.x, bar.y, bar.w, line), edge);
+        }
     }
 
     /// The start button, as the reference's orb (`aero-orb`): a round button
@@ -9600,41 +9608,46 @@ impl DesktopShell {
                 CornerRadii::all(d * h.min(w) / 2.0),
             )
         };
+        // All three, and the line inside its edge, are the panel's glass: at
+        // its gloss, and not drawn at all on a flat panel. The rings and the
+        // shadow are the orb's edge and stay.
         let (shade, shade_radii) = pill(0.2, 0.62, 0.6, 0.32);
-        fill_round(
-            tree,
-            shade,
-            with_alpha(Color::BLACK, START_ORB_SHADE_ALPHA),
-            shade_radii,
-        );
+        if let Some(color) = self.glossed(Color::BLACK, START_ORB_SHADE_ALPHA) {
+            fill_round(tree, shade, color, shade_radii);
+        }
         let (skirt, skirt_radii) = pill(0.12, 0.05, 0.76, 0.5);
-        fill_round(
-            tree,
-            skirt,
-            with_alpha(Color::WHITE, START_ORB_GLOSS_SKIRT_ALPHA),
-            skirt_radii,
-        );
+        if let Some(color) = self.glossed(Color::WHITE, START_ORB_GLOSS_SKIRT_ALPHA) {
+            fill_round(tree, skirt, color, skirt_radii);
+        }
         let (cap, cap_radii) = pill(0.2, 0.06, 0.6, 0.3);
-        fill_round(
-            tree,
-            cap,
-            with_alpha(Color::WHITE, START_ORB_GLOSS_CAP_ALPHA),
-            cap_radii,
-        );
+        if let Some(color) = self.glossed(Color::WHITE, START_ORB_GLOSS_CAP_ALPHA) {
+            fill_round(tree, cap, color, cap_radii);
+        }
         // And the line just inside its edge.
         let inner = self.scale(1.0).max(1.0);
-        stroke_round(
-            tree,
-            Rect::new(
-                orb.x + inner / 2.0,
-                orb.y + inner / 2.0,
-                (d - inner).max(0.0),
-                (d - inner).max(0.0),
-            ),
-            with_alpha(Color::WHITE, START_ORB_INNER_ALPHA),
-            inner,
-            CornerRadii::all((d - inner).max(0.0) / 2.0),
-        );
+        if let Some(color) = self.glossed(Color::WHITE, START_ORB_INNER_ALPHA) {
+            stroke_round(
+                tree,
+                Rect::new(
+                    orb.x + inner / 2.0,
+                    orb.y + inner / 2.0,
+                    (d - inner).max(0.0),
+                    (d - inner).max(0.0),
+                ),
+                color,
+                inner,
+                CornerRadii::all((d - inner).max(0.0) / 2.0),
+            );
+        }
+    }
+
+    /// `color` at `alpha` -- one of the reference's strengths of light or
+    /// shade -- as the theme's taskbar panel finishes it
+    /// ([`PanelStyle::glossed`](appearance::panel::PanelStyle::glossed)), or
+    /// `None` where the panel's gloss leaves nothing of it to draw.
+    fn glossed(&self, color: Color, alpha: u8) -> Option<Color> {
+        let alpha = self.appearance.panel().glossed(alpha);
+        (alpha > 0).then(|| with_alpha(color, alpha))
     }
 
     /// The glass every drawn tile is made of: `body`, brighter across its top
@@ -9651,26 +9664,36 @@ impl DesktopShell {
         edge: u8,
         highlight: u8,
     ) {
-        fill_round(tree, tile, body, radii);
-        fill_round(
-            tree,
-            Rect::new(tile.x, tile.y, tile.w, tile.h / 2.0),
-            with_alpha(Color::WHITE, TASKBAR_TILE_SHEEN),
-            CornerRadii::top(radii.top_left),
-        );
+        // A body made entirely of glass -- a window's tile behind -- is not
+        // there at all on a flat panel.
+        if body.a > 0 {
+            fill_round(tree, tile, body, radii);
+        }
+        // The sheen and the highlight are the glass: at the panel's gloss.
+        if let Some(sheen) = self.glossed(Color::WHITE, TASKBAR_TILE_SHEEN) {
+            fill_round(
+                tree,
+                Rect::new(tile.x, tile.y, tile.w, tile.h / 2.0),
+                sheen,
+                CornerRadii::top(radii.top_left),
+            );
+        }
         let line = self.scale(1.0).max(1.0);
         // Inside the edge, and clear of the rounded corners it would cut.
         let inset = radii.top_left.max(line);
-        fill(
-            tree,
-            Rect::new(
-                tile.x + inset,
-                tile.y + line,
-                (tile.w - 2.0 * inset).max(0.0),
-                line,
-            ),
-            with_alpha(Color::WHITE, highlight),
-        );
+        if let Some(highlight) = self.glossed(Color::WHITE, highlight) {
+            fill(
+                tree,
+                Rect::new(
+                    tile.x + inset,
+                    tile.y + line,
+                    (tile.w - 2.0 * inset).max(0.0),
+                    line,
+                ),
+                highlight,
+            );
+        }
+        // The edge is the tile's own, glass or none: a flat tile is its edge.
         stroke_round(
             tree,
             tile,
@@ -22101,6 +22124,31 @@ mod run_box_wiring_tests {
             "the taskbar still names the old layout after a switch"
         );
     }
+
+    /// **The run box wears the frame the appearance gives it**: the shell
+    /// hands the box the theme's window frame with the rest of the
+    /// appearance, so a theme whose title bars are 20 taller puts the box's
+    /// field 20 lower inside it.
+    #[test]
+    fn the_run_box_wears_the_appearances_frame() {
+        let mut shell = shell();
+        let offset = |shell: &DesktopShell| {
+            let (_, top) = shell.run_dialog.position();
+            shell.run_dialog.field_rect().y - top
+        };
+        let before = offset(&shell);
+        let mut settings = appearance::AppearanceSettings::default();
+        settings.decoration_theme = appearance::themes::DecorationTheme::from_style(
+            "tall",
+            appearance::decorations::DecorationStyle {
+                title_height: 50,
+                ..appearance::decorations::DecorationStyle::AERO
+            },
+        );
+        shell.set_appearance(settings);
+        let after = offset(&shell);
+        assert!((after - before - 20.0).abs() < 0.01, "{before} -> {after}");
+    }
 }
 
 #[cfg(test)]
@@ -23258,11 +23306,9 @@ mod taskbar_pin_tests {
             let divider = shell
                 .taskbar_divider_rect()
                 .expect("two sections, one divider");
+            // The built-in panel's divider: the reference's 8 past the pin.
             assert!(
-                (divider.x
-                    - (layout[0].x + layout[0].w + shell.scale(super::TASKBAR_DIVIDER_OFFSET)))
-                .abs()
-                    < 0.01,
+                (divider.x - (layout[0].x + layout[0].w + shell.scale(8.0))).abs() < 0.01,
                 "{divider:?} after {:?}",
                 layout[0]
             );
@@ -23960,6 +24006,147 @@ mod taskbar_pin_tests {
                 "the {what} is not between the bar and what is on it"
             );
         }
+    }
+
+    /// The panel `style`, chosen for `shell`'s taskbar.
+    fn wear(shell: &mut DesktopShell, style: appearance::panel::PanelStyle) {
+        shell.appearance.panel_theme = appearance::themes::PanelTheme::from_style("test", style);
+    }
+
+    /// **A flat theme's bar wears none of the glass**: at a taskbar-panel
+    /// gloss of 0 the bar is its colour alone -- no lines of light, no glow,
+    /// no shade -- a window's tile is its edge without the sheen, the
+    /// highlight or the faint glass, and the orb keeps its rings without its
+    /// gloss. Half the gloss is half of every strength.
+    #[test]
+    fn a_flat_themes_bar_wears_no_glass() {
+        use guitk::render::RenderCommand;
+        let mut s = shell();
+        s.apply_window_list(&WindowList::new(0, vec![window_of(1, "", "one")]));
+        let bar = s.taskbar_rect();
+        let orb = s.start_orb_rect();
+        let tile = s.taskbar_button_rect(0);
+        // What of the glass is drawn: fills as wide as the bar besides the
+        // bar itself, fills over a tile besides its body, and fills inside
+        // the orb besides its body.
+        let glass = |s: &DesktopShell| {
+            let mut found = (0, 0, 0, 0);
+            for c in &s.render_taskbar().commands {
+                match c {
+                    RenderCommand::FillRect {
+                        x,
+                        y,
+                        width,
+                        height,
+                        ..
+                    } => {
+                        let (x, y, w, h) = (*x, *y, *width, *height);
+                        if (w - bar.w).abs() < 0.01 && (h - bar.h).abs() > 0.01 {
+                            found.0 += 1;
+                        }
+                        let inside = |r: super::Rect| {
+                            x >= r.x && y >= r.y && x + w <= r.x + r.w && y + h <= r.y + r.h
+                        };
+                        if inside(tile) && (w, h) != (tile.w, tile.h) {
+                            found.1 += 1;
+                        }
+                        if inside(orb) && (w, h) != (orb.w, orb.h) {
+                            found.2 += 1;
+                        }
+                    }
+                    RenderCommand::StrokeRect {
+                        x,
+                        y,
+                        width,
+                        height,
+                        ..
+                    } if (*x, *y, *width, *height) == (tile.x, tile.y, tile.w, tile.h) => {
+                        found.3 += 1;
+                    }
+                    _ => {}
+                }
+            }
+            found
+        };
+        // The reference's: four bands across the bar, the tile's sheen and
+        // highlight over its glass, the orb's shade, skirt and cap -- and the
+        // tile's edge.
+        assert_eq!(glass(&s), (4, 2, 3, 1));
+        wear(
+            &mut s,
+            appearance::panel::PanelStyle {
+                gloss: 0,
+                ..appearance::panel::PanelStyle::AERO
+            },
+        );
+        assert_eq!(glass(&s), (0, 0, 0, 1), "a flat bar still wears glass");
+        // The tile behind is not filled at all: its glass was all it had.
+        let tree = s.render_taskbar();
+        assert!(
+            !tree.commands.iter().any(|c| matches!(c,
+                RenderCommand::FillRect { x, y, width, height, .. }
+                    if (*x, *y, *width, *height) == (tile.x, tile.y, tile.w, tile.h))),
+            "the flat tile is filled"
+        );
+        // Half the gloss: the line of light along the top at half its alpha.
+        wear(
+            &mut s,
+            appearance::panel::PanelStyle {
+                gloss: 50,
+                ..appearance::panel::PanelStyle::AERO
+            },
+        );
+        let edge = super::with_alpha(guitk::color::Color::WHITE, 58);
+        assert!(
+            s.render_taskbar().commands.iter().any(|c| matches!(c,
+                RenderCommand::FillRect { x, y, width, height, color, .. }
+                    if (*x, *y, *width, *height) == (bar.x, bar.y, bar.w, 1.0) && *color == edge)),
+            "the line of light is not at half its strength"
+        );
+    }
+
+    /// **The tiles are as far apart as the theme spaces them**: after the
+    /// start button, between two tiles, and between the pinned programs and
+    /// the windows -- with the divider eight nineteenths of the way across
+    /// that gap, wherever the gap is.
+    #[test]
+    fn the_tiles_are_spaced_as_the_theme_says() {
+        with_scratch_config("shell-panel-spacing", |_root| {
+            let mut s = shell();
+            s.pin_app(super::launcher::TERMINAL, "Terminal");
+            s.apply_window_list(&WindowList::new(
+                0,
+                vec![window_of(1, "", "one"), window_of(2, "", "two")],
+            ));
+            wear(
+                &mut s,
+                appearance::panel::PanelStyle {
+                    gloss: 100,
+                    tile_gap: 6,
+                    start_gap: 12,
+                    section_gap: 31,
+                },
+            );
+            let bar = s.taskbar_rect();
+            let tiles = s.taskbar_layout();
+            assert_eq!(tiles.len(), 3);
+            let close = |a: f32, b: f32| (a - b).abs() < 0.01;
+            assert!(
+                close(
+                    tiles[0].x,
+                    bar.x + s.scale(super::START_BUTTON_WIDTH) + s.scale(12.0)
+                ),
+                "{:?}",
+                tiles[0]
+            );
+            assert!(close(tiles[1].x - (tiles[0].x + tiles[0].w), s.scale(31.0)));
+            assert!(close(tiles[2].x - (tiles[1].x + tiles[1].w), s.scale(6.0)));
+            let divider = s.taskbar_divider_rect().expect("two sections");
+            assert!(close(
+                divider.x,
+                tiles[0].x + tiles[0].w + s.scale(31.0 * 8.0 / 19.0)
+            ));
+        });
     }
 
     /// **The tray's chevron and clock name themselves**: the chevron as the

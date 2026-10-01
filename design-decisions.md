@@ -89351,6 +89351,97 @@ libc's engine should is
 `requests/b-d-the-libc-reads-tz-unlike-glibc-and-now-unlike-date.md`'s
 question. SlateOS ships no zoneinfo tree, so neither difference shows today.
 
+## 1459. Cursor themes are the ones every Linux desktop uses: XCursor files, found by name
+
+**Date:** 2026-10-01 &middot; **Decided by:** Claude (autonomous) &middot;
+**Lane:** C, with F and E
+
+**In short:** The pointer could be any size and any of three colourings, but
+only ever one shape set -- the compositor's own drawings. A user can now
+choose a cursor theme, and the pointer's pictures come from it, animated ones
+included (a spinning busy pointer). The themes are the format every Linux
+desktop already uses, so a cursor theme made for GNOME or KDE -- Adwaita,
+Breeze, Bibata and hundreds more -- installs here unchanged. With none chosen
+the pointer is drawn as it is today. Reading the themes is done; drawing their
+pictures is the compositor's (lane F) and the choice in Settings is lane E's.
+
+| Question | Chosen | The alternative | Why |
+|---|---|---|---|
+| The format | XCursor, the one every Linux cursor theme ships | SVG cursors, as the icon axis uses SVG | a theme here should not have to be redrawn for this desktop; XCursor carries several sizes, hot spots and animation frames, which is everything a pointer needs. Scalable SVG cursors (KDE's `cursors_scalable`) can be added beside it later |
+| Where themes are found | the SlateOS theme roots first, then `$XDG_DATA_HOME/icons`, `~/.icons` and each `$XDG_DATA_DIRS/icons` | the SlateOS theme roots only | the second list is where other desktops' themes are installed, in libXcursor's order; a theme folder here can still carry `cursors/` beside its `theme.yaml` |
+| How a cursor is named | by its CSS name (`default`, `pointer`, `ns-resize`), then its older X11 and Qt names (`left_ptr`, `hand2`, `size_ver`), then each theme the `index.theme` inherits from | the exact name only, as libXcursor looks | themes ship both generations of names, and older ones only the older; trying a theme's every name before the next theme keeps one theme's look together |
+| The size | the nominal size nearest the pointer's, the first of the nearest on a tie, every frame of it | scaling to the exact size | libXcursor's rule, so a theme looks here as it does elsewhere; the pictures come at their own size and scaling them further is the compositor's choice |
+| No theme, or a cursor no theme has | no picture: the compositor's own drawing | X11's `default` theme, as libXcursor falls back to | this desktop's default pointer is its own, drawn at any size; a stray system-wide `default` theme should not override it |
+| Trust | every position, length, side and hot spot checked; 32 MiB per file, 16 Mi pixels decoded, sixteen themes per lookup | trust the files | a theme is whoever installed it; a crafted file must not crash the compositor or make it allocate gigabytes, and inheritance must not loop |
+
+## 1460. The taskbar's glass and spacing are a theme axis; how see-through it is stays the user's
+
+**Date:** 2026-10-01 &middot; **Decided by:** Claude (autonomous) &middot;
+**Lane:** C, with E
+
+**In short:** The taskbar always wore the Aero look's glass -- shiny lines
+along its top, a glow, a shade, glossy buttons -- whatever theme was
+chosen. A theme can now say how much of that glass the taskbar wears, from
+all of it to none (a flat bar in the theme's colour), and how far apart the
+taskbar's buttons are. The user still decides, separately, whether the bar
+is see-through. The built-in theme looks exactly as before. Choosing a theme
+for this in Settings is lane E's (`requests/c-e-choose-the-taskbar-panel-in-settings.md`).
+
+| Question | Chosen | The alternative | Why |
+|---|---|---|---|
+| What the axis sets | `gloss` (0 to 1) and `spacing` (between tiles, after the start button, between the sections) | every one of the reference's two dozen strengths and margins as its own setting | one knob gives what the roadmap asks -- a flat bar "without losing the rest of the default visual identity" -- and keeps the glass consistent with itself; a theme that wants other strengths draws on the colours axis, which sets what the glass is laid over |
+| What gloss scales | the bar's lines of light, glow and shade; a tile's sheen, top highlight and faint body; the start orb's shade, gloss and inner line | everything translucent | edges, hover marks, shadows and the orb's rings are how a flat bar's parts are still told apart; they are not the glass |
+| Transparency | stays the user's `taskbar_style` and `transparency` | a theme's opacity | whether one can see through the bar is an accessibility and taste choice the user already makes; a theme overriding it would undo it every time the theme changed |
+| Blur | not a setting yet | a theme's blur strength | the compositor's blur behind the bar has no strength to set (lane F's); a setting nothing reads would be the §856 failure |
+| The section gap narrower than a tile gap | drawn as the tile gap | as written | the divider's gap is there to widen the space; it must never be the narrowest on the bar |
+
+## 1461. The shell's own dialogs wear the theme's window frame, starting with the run box
+
+**Date:** 2026-10-01 &middot; **Decided by:** Claude (autonomous) &middot;
+**Lane:** C
+
+**In short:** The run box (the "Run" dialog) looked like nothing else on the
+desktop: a rounded box with a bold heading, the same under every theme. It
+now wears the frame the theme gives windows -- a title bar with its title and
+a close button, the border and the shadow -- and changes when the theme's
+window frames do. Under the built-in theme it is the size it always was, and
+its new close button does what Cancel does. The shell's two other
+window-like dialogs -- the security prompt and the print dialog, neither shown
+yet -- take it when they are wired up (`known-issues.md`
+`TD-C-THE-SHELLS-OTHER-DIALOGS-DRAW-FRAMES-OF-THEIR-OWN`).
+
+| Question | Chosen | The alternative | Why |
+|---|---|---|---|
+| Where the frame comes from | the window-decorations axis (§1456), drawn by `desktop::dialog_frame` with `DecorationStyle::title_bar`'s geometry | a dialog style of the shell's own | a dialog and a window side by side should look like one desktop; one geometry also means a dialog is clicked where a window would be |
+| The title's weight | the theme's (regular, as the built-in frame's) | bold, as the box's heading was | the box's heading was a heading; on a title bar it is a title, and titles are written as the theme writes them |
+| The close button | a face in the theme's shape, with no mark, as the compositor draws its buttons; a glyph theme's cross | a drawn cross on every face | the same button a window has, until lane F draws marks on windows' buttons too |
+| The box's size | the content fixed, the frame around it: the box grows with a theme's taller bar | the box fixed, the content squeezed | the field and the buttons keep their room under every theme; the box is centred as a whole either way |
+| The other dialogs | the security prompt and the print dialog when each is wired up, tracked; not the clipboard flyout or the shortcut card, which are not windows | all of them now | both are orphans that nothing shows yet, so converting them now changes nothing anyone sees; a flyout wearing a window's title bar would be wrong |
+
+## 1462. What an SVG file may make the toolkit's renderer do, and how a clip path's shapes join
+
+**Date:** 2026-10-01 &middot; **Decided by:** Claude (autonomous) &middot;
+**Lane:** C
+
+**In short:** SVG files reach the toolkit's renderer from anywhere: the file
+manager makes thumbnails of whatever is in a folder, icon themes are
+downloaded, the image viewer opens what it is given. When the renderer
+learned gradients, `<use>`, `<symbol>` and clip paths, it also had to decide
+what a broken or hostile file may make it do. Before this, a file of
+nothing but nested groups could crash whatever was drawing it, and a few
+dozen `<use>`s could ask for a billion shapes. These are the limits chosen,
+and one drawing choice about how a clip path's shapes are joined.
+
+| Question | Chosen | The alternative | Why |
+|---|---|---|---|
+| How deep elements may nest | 128 levels; a deeper file is refused as malformed | libxml2's 256, which librsvg inherits | measured in a debug build (the boot test runs one), building took about 2.7 KiB of stack a level, so 256 levels needed some 770 KiB: three quarters of the 1 MiB a Windows program's main thread has. 128 needs about 350 KiB. No real drawing nests past a few dozen levels |
+| How a `<use>`'s content is built | once for each element named, before the tree, from the top of the stack | built where each `<use>` stands | a part used a thousand times is kept once, and `<use>`s naming `<use>`s cannot make the build recurse deeper |
+| How much `<use>` may draw | at most 256 containers deep, and 100 000 nodes through `<use>`s in one drawing; what lies past either bound is left out | no bound | ten `<use>`s of ten `<use>`s, nine deep, is a billion shapes from a hundred elements. A real drawing repeats far less than either bound |
+| A `<use>` inside what it names | draws nothing | draws one copy | SVG calls it an error and browsers draw nothing; the file looks here as it does everywhere else |
+| A loop through several `<use>`s (a shows b, b shows a) | the content is drawn once round, cut where the loop closes | nothing drawn for any `<use>` in the loop, as browsers do | the cut falls out of drawing, without searching the whole graph of references while building; the two differ only by one copy of content that no correct file has |
+| Clip shapes that meet or overlap | each pixel's coverage added up, never past all of it | the larger of the two, or `a + b - ab` | two shapes meeting along an edge (two halves, say) add up to the whole of each pixel on it; with either alternative that edge shows as a faint seam. The cost: where two shapes overlap exactly at an edge, that edge comes out slightly harder. A seam is the more visible flaw |
+| How gradient stops mix | channel by channel, alpha with the rest, not premultiplied | premultiplied | not a free choice: SVG 2 says so ("SVG does not calculate gradients in pre-multiplied space"), and icons are drawn to look right that way. Recorded because the first version was written the other way |
+
 ## 952. A measurement the host can distort needs a repeat, not a wider bound
 
 **Date:** 2026-09-18 &middot; **Decided by:** Claude (autonomous) &middot; **Lane:** A &middot; prompted by a red boot whose kernel delta was comment text

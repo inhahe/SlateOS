@@ -60,6 +60,10 @@ pub mod themes;
 
 pub mod decorations;
 
+pub mod cursors;
+
+pub mod panel;
+
 /// Where settings files live and how they are replaced.
 ///
 /// This was `appearance::config` before it was a crate of its own, and it is
@@ -1509,6 +1513,15 @@ pub struct AppearanceSettings {
     /// "mix-and-match"). Nothing is read until an icon is drawn; see
     /// [`icons::IconTheme`].
     pub icon_theme: icons::IconTheme,
+    /// The theme the pointer's pictures come from: the built-in one -- the
+    /// compositor's own pointer -- unless the user chose another. `theme.cursors`
+    /// in the file, by the folder name of the theme, which may be another
+    /// desktop's cursor theme (Adwaita, Breeze) as well as a SlateOS one.
+    /// Nothing is read until a cursor is drawn; see [`cursors::CursorTheme`].
+    /// How large the pointer is and its colours for the built-in pictures stay
+    /// [`cursor_size`](Self::cursor_size) and
+    /// [`cursor_scheme`](Self::cursor_scheme).
+    pub cursor_theme: cursors::CursorTheme,
     /// The theme the shapes of the controls come from -- a button's corners,
     /// a field's focus mark, a scrollbar's width: the built-in one unless the
     /// user chose another. `theme.widget_style` in the file, by the theme's
@@ -1531,6 +1544,14 @@ pub struct AppearanceSettings {
     /// and hit-tests frames from [`decorations`](Self::decorations); see
     /// [`themes::DecorationTheme`] and `design-decisions.md` §1456.
     pub decoration_theme: themes::DecorationTheme,
+    /// The theme the taskbar's finish and spacing come from -- how much of
+    /// the Aero reference's glass it wears, and the gaps between its tiles:
+    /// the built-in one unless the user chose another. `theme.taskbar_panel`
+    /// in the file, by the theme's folder name. The desktop draws and lays
+    /// out its taskbar from [`panel`](Self::panel); whether the bar is
+    /// see-through stays [`taskbar_style`](Self::taskbar_style). See
+    /// [`themes::PanelTheme`] and `design-decisions.md` §1460.
+    pub panel_theme: themes::PanelTheme,
     /// The hours `System (Auto)` is light, local time: from the window's start
     /// until its end, and dark the rest of the day. `theme.auto.light_from`
     /// and `theme.auto.dark_from` in the file; 07:00 until 19:00 unless the
@@ -1796,9 +1817,11 @@ impl Default for AppearanceSettings {
             theme_mode: ThemeMode::Dark,
             color_theme: themes::ColorTheme::built_in(),
             icon_theme: icons::IconTheme::built_in(),
+            cursor_theme: cursors::CursorTheme::built_in(),
             widget_theme: themes::WidgetTheme::built_in(),
             animation_theme: themes::AnimationTheme::built_in(),
             decoration_theme: themes::DecorationTheme::built_in(),
+            panel_theme: themes::PanelTheme::built_in(),
             auto_light_hours: DEFAULT_AUTO_LIGHT_HOURS,
             auto_is_light: false,
             // Borders, per §829. The `Default` impl is what a machine with no
@@ -2063,6 +2086,14 @@ impl AppearanceSettings {
     #[must_use]
     pub fn decorations(&self) -> decorations::DecorationStyle {
         self.decoration_theme.style()
+    }
+
+    /// The taskbar's finish and spacing: the chosen taskbar-panel theme's, or
+    /// the built-in one where that could not be used
+    /// ([`themes::PanelTheme::problem`] says why).
+    #[must_use]
+    pub fn panel(&self) -> panel::PanelStyle {
+        self.panel_theme.style()
     }
 
     /// Validate and clamp settings to sane ranges.
@@ -2509,6 +2540,16 @@ impl AppearanceSettings {
         {
             s.icon_theme = icons::IconTheme::load(&pathcodec::decode_path(&name).into_os_string());
         }
+        // The cursor theme, spelled as the icon theme is, and for its reason
+        // read no further: a cursor is looked up when the pointer is drawn.
+        if let Some(name) = doc
+            .get_str(&["theme", "cursors"])
+            .map(|name| name.trim().to_string())
+            .filter(|name| !name.is_empty())
+        {
+            s.cursor_theme =
+                cursors::CursorTheme::load(&pathcodec::decode_path(&name).into_os_string());
+        }
         // The widget style, spelled and loaded as the colour theme is -- file
         // and all, since the palette carries it and a palette is resolved per
         // frame.
@@ -2522,6 +2563,10 @@ impl AppearanceSettings {
         // The window frames, the same way.
         if let Some(name) = decoration_theme_name(doc) {
             s.decoration_theme = themes::DecorationTheme::load(&name);
+        }
+        // The taskbar's panel, the same way.
+        if let Some(name) = panel_theme_name(doc) {
+            s.panel_theme = themes::PanelTheme::load(&name);
         }
         read_into!(
             s.theme_mode,
@@ -2827,6 +2872,10 @@ impl AppearanceSettings {
             &pathcodec::encode_path(std::path::Path::new(self.icon_theme.id())),
         );
         doc.set_str(
+            &["theme", "cursors"],
+            &pathcodec::encode_path(std::path::Path::new(self.cursor_theme.id())),
+        );
+        doc.set_str(
             &["theme", "widget_style"],
             &pathcodec::encode_path(std::path::Path::new(self.widget_theme.id())),
         );
@@ -2837,6 +2886,10 @@ impl AppearanceSettings {
         doc.set_str(
             &["theme", "decorations"],
             &pathcodec::encode_path(std::path::Path::new(self.decoration_theme.id())),
+        );
+        doc.set_str(
+            &["theme", "taskbar_panel"],
+            &pathcodec::encode_path(std::path::Path::new(self.panel_theme.id())),
         );
         doc.set_str(
             &["theme", "surface_style"],
@@ -3090,6 +3143,13 @@ pub(crate) fn animation_theme_name(doc: &Document) -> Option<std::ffi::OsString>
 /// [`color_theme_name`] is.
 pub(crate) fn decoration_theme_name(doc: &Document) -> Option<std::ffi::OsString> {
     theme_name_at(doc, "decorations")
+}
+
+/// The taskbar-panel theme a settings document names, decoded; `None` for
+/// the built-in one. Shared by the reader and the watcher, as
+/// [`color_theme_name`] is.
+pub(crate) fn panel_theme_name(doc: &Document) -> Option<std::ffi::OsString> {
+    theme_name_at(doc, "taskbar_panel")
 }
 
 /// The theme `theme.<axis>` names, decoded; `None` when the key is absent or
@@ -3598,6 +3658,9 @@ mod tests {
     const ROUND_TRIP_DECORATIONS: &str = "cadres é";
     const ROUND_TRIP_DECORATIONS_FILE: &str =
         "window-decorations:\n  title-bar:\n    height: 36\n  buttons:\n    side: left\n";
+    /// The round trip's taskbar-panel theme: a sixth.
+    const ROUND_TRIP_PANEL: &str = "barre ö";
+    const ROUND_TRIP_PANEL_FILE: &str = "taskbar-panel:\n  gloss: 0.25\n  spacing:\n    tiles: 4\n";
 
     /// Install a theme in the scratch user's data directory under `root`,
     /// where `AppearanceSettings::read_from` will look for it.
@@ -3623,6 +3686,9 @@ mod tests {
             // A theme of its own, not the colour theme's, so a round trip that
             // wrote one axis into the other would be caught.
             icon_theme: icons::IconTheme::load(std::ffi::OsStr::new("line-icons")),
+            // Another again, and another desktop's: a cursor theme need not
+            // be a SlateOS theme at all.
+            cursor_theme: cursors::CursorTheme::load(std::ffi::OsStr::new("Adwaita")),
             // A third, read back from the file the round trip installs.
             widget_theme: themes::WidgetTheme::from_style(
                 ROUND_TRIP_WIDGETS,
@@ -3643,6 +3709,13 @@ mod tests {
                 themes::parse(ROUND_TRIP_DECORATIONS_FILE)
                     .decorations
                     .expect("the fixture sets window frames"),
+            ),
+            // A sixth, for the taskbar's panel.
+            panel_theme: themes::PanelTheme::from_style(
+                ROUND_TRIP_PANEL,
+                themes::parse(ROUND_TRIP_PANEL_FILE)
+                    .panel
+                    .expect("the fixture sets a taskbar panel"),
             ),
             // Every one of these differs from the default, which is what the
             // fixture is for: the defaults are `None`, 600 and `true`.
@@ -3745,6 +3818,7 @@ mod tests {
             install_theme(root, ROUND_TRIP_WIDGETS, ROUND_TRIP_WIDGETS_FILE);
             install_theme(root, ROUND_TRIP_ANIMATION, ROUND_TRIP_ANIMATION_FILE);
             install_theme(root, ROUND_TRIP_DECORATIONS, ROUND_TRIP_DECORATIONS_FILE);
+            install_theme(root, ROUND_TRIP_PANEL, ROUND_TRIP_PANEL_FILE);
             AppearanceSettings::read_from(&Document::parse(&doc.to_text()))
         });
         assert_eq!(reread, settings);
@@ -3855,6 +3929,48 @@ mod tests {
             settings.write_into(&mut written);
             let back = AppearanceSettings::read_from(&written);
             assert_eq!(back.icon_theme.id(), odd.as_os_str());
+        });
+    }
+
+    /// The cursor theme is its own setting too: `theme.cursors`, apart from
+    /// the icon theme even where an icon theme and a cursor theme share a
+    /// folder (as Adwaita's do), the built-in one -- the compositor's own
+    /// pointer -- when the file names none or a blank, and a folder name that
+    /// is not text kept byte for byte.
+    #[test]
+    fn the_cursor_theme_is_its_own_setting_and_survives_a_save() {
+        config::testing::with_scratch_config("cursor-theme", |_| {
+            let s = AppearanceSettings::read_from(&Document::parse(""));
+            assert!(s.cursor_theme.is_built_in());
+
+            let doc = Document::parse("theme:\n  icons: papirus\n  cursors: Adwaita\n");
+            let s = AppearanceSettings::read_from(&doc);
+            assert_eq!(s.cursor_theme.id(), "Adwaita");
+            assert_eq!(s.icon_theme.id(), "papirus");
+            let mut saved = Document::parse("");
+            s.write_into(&mut saved);
+            assert_eq!(
+                saved.get_str(&["theme", "cursors"]).as_deref(),
+                Some("Adwaita")
+            );
+            assert_eq!(
+                saved.get_str(&["theme", "icons"]).as_deref(),
+                Some("papirus")
+            );
+
+            let blank =
+                AppearanceSettings::read_from(&Document::parse("theme:\n  cursors: \" \"\n"));
+            assert!(blank.cursor_theme.is_built_in());
+
+            let odd = std::path::Path::new(&pathcodec::decode_path("caf%E9"))
+                .as_os_str()
+                .to_os_string();
+            let mut settings = AppearanceSettings::default();
+            settings.cursor_theme = cursors::CursorTheme::load(&odd);
+            let mut written = Document::parse("");
+            settings.write_into(&mut written);
+            let back = AppearanceSettings::read_from(&written);
+            assert_eq!(back.cursor_theme.id(), odd.as_os_str());
         });
     }
 
@@ -4259,6 +4375,61 @@ mod tests {
                     .is_some_and(|why| why.contains("\"nord\" sets no window frames")),
                 "{:?}",
                 s.decoration_theme.problem()
+            );
+        });
+    }
+
+    /// **The taskbar panel is its own setting**, `theme.taskbar_panel`:
+    /// read, carried to `panel()`, written back -- the built-in panel where
+    /// nothing or a blank is chosen, and where the chosen theme cannot give
+    /// one (which keeps its name and says why).
+    #[test]
+    fn the_taskbar_panel_is_its_own_setting_and_survives_a_save() {
+        config::testing::with_scratch_config("panel-setting", |root| {
+            let none = AppearanceSettings::read_from(&Document::parse(""));
+            assert_eq!(none.panel_theme, themes::PanelTheme::built_in());
+            assert_eq!(none.panel(), panel::PanelStyle::AERO);
+            let blank =
+                AppearanceSettings::read_from(&Document::parse("theme:\n  taskbar_panel: \" \"\n"));
+            assert_eq!(blank.panel_theme, themes::PanelTheme::built_in());
+
+            let mut written = Document::new();
+            AppearanceSettings::default().write_into(&mut written);
+            assert_eq!(
+                written.get_str(&["theme", "taskbar_panel"]).as_deref(),
+                Some("aero"),
+                "the key is there to edit"
+            );
+
+            install_theme(
+                root,
+                "flat",
+                "taskbar-panel:\n  gloss: 0\n  spacing:\n    tiles: 5\n",
+            );
+            let doc = Document::parse("theme:\n  taskbar_panel: flat\n");
+            let s = AppearanceSettings::read_from(&doc);
+            assert_eq!(s.panel_theme.problem(), None);
+            assert_eq!(s.panel().gloss, 0);
+            assert_eq!(s.panel().tile_gap, 5);
+            let mut saved = doc.clone();
+            s.write_into(&mut saved);
+            assert_eq!(
+                saved.get_str(&["theme", "taskbar_panel"]).as_deref(),
+                Some("flat")
+            );
+
+            // A colours-only theme cannot give the panel.
+            install_theme(root, "nord", "colors:\n  base: \"#2e3440\"\n");
+            let s =
+                AppearanceSettings::read_from(&Document::parse("theme:\n  taskbar_panel: nord\n"));
+            assert_eq!(s.panel_theme.id(), "nord");
+            assert_eq!(s.panel(), panel::PanelStyle::AERO);
+            assert!(
+                s.panel_theme
+                    .problem()
+                    .is_some_and(|why| why.contains("\"nord\" sets no taskbar panel")),
+                "{:?}",
+                s.panel_theme.problem()
             );
         });
     }

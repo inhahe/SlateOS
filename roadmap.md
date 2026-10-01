@@ -2129,6 +2129,77 @@ live.
   fixed that opening a folder in the toolkit's folder picker chose it, a
   fix the seven lane E applications already using the picker share.
 
+- `[C]` **Icons' gradients are drawn** (`roadmap-detailed.md` → *SVG
+  rendering support*; `design-decisions.md` §1462) -- done 2026-10-01. The toolkit's SVG renderer paints a
+  fill or stroke of `url(#id)` with that linear or radial gradient, wherever
+  the document defines it: both units, `gradientTransform`, pad, reflect and
+  repeat, a focal point, one gradient inheriting another's stops through
+  `href`, and the fallback colour after a missing one; stops mix as SVG 2
+  says, unpremultiplied. `fill-opacity` and `stroke-opacity` are inherited
+  from groups, which they were not. Found on the way and fixed: `rotate()`
+  turned the drawing the wrong way and `matrix()` read its numbers
+  transposed. Then `<use>` and `<symbol>` -- an element drawn again where a
+  `<use>` names it, a symbol in the viewport the `<use>` sizes -- with each
+  element built once and a document that names itself, loops or multiplies
+  itself bounded; drawings fitted to the pixels as `preserveAspectRatio`
+  says instead of stretched; inner `<svg>`s placed in their own viewports;
+  and a document nested past 128 levels refused, where one 100 000 deep
+  overflowed the stack of whatever drew it. And clip paths -- what an
+  element draws cut to the shapes of the `<clipPath>` it names, in either
+  units, by its `clip-rule`, clips within clips multiplying. Still not
+  drawn: masks, patterns and `<style>` sheets.
+
+- `[C]` **The run box wears the theme's window frame** (`design-decisions.md`
+  §1461) -- done 2026-10-01. `desktop::dialog_frame` draws a shell dialog's
+  frame from the window-decorations axis -- its title bar, title, close button,
+  border and shadow, in the frame's colours, with the windows' geometry
+  (`DecorationStyle::title_bar`) -- and the run box lays its content out
+  inside it; its close button cancels. The security prompt and the print
+  dialog take it when they are wired up (`TD-C-THE-SHELLS-OTHER-DIALOGS-DRAW-FRAMES-OF-THEIR-OWN`).
+
+- `[C]` **The taskbar's glass and spacing are a theme axis**
+  (`roadmap-detailed.md` → *Tier 2 — Taskbar/Panel Styling*;
+  `design-decisions.md` §1460) -- done 2026-10-01. A theme's `taskbar-panel`
+  section sets how much of the Aero glass the taskbar wears -- 0 is a flat bar
+  in the theme's colour, its tiles their edges -- and the gaps between its
+  tiles; `theme.taskbar_panel` chooses it, and the desktop draws and lays out
+  the taskbar from it. Whether the bar is see-through stays the user's.
+  **Lane E:** a chooser in Settings (`requests/c-e-choose-the-taskbar-panel-in-settings.md`).
+
+- `[C]` **Cursor themes** (`roadmap-detailed.md` → *Tier 1 — Cursor
+  Theme*; `design-decisions.md` §1459) -- lane C's half done 2026-10-01.
+  `theme.cursors` chooses a cursor theme in the format every Linux desktop
+  uses -- XCursor files by name, with `index.theme` inheritance -- so
+  Adwaita, Breeze or Bibata install as they are; `appearance::cursors` reads
+  any pointer shape at the nearest size, every frame of an animated one, each
+  file checked before it is believed. **Waiting on others:** the compositor
+  drawing the pictures (lane F, `requests/c-f-draw-the-pointer-from-the-cursor-theme.md`)
+  and a chooser in Settings (lane E, `requests/c-e-choose-the-cursor-theme-in-settings.md`).
+
+- `[C]` **Window frames are a theme axis** (`design-decisions.md` §1456) --
+  lane C's half done 2026-10-01: a theme's `window-decorations` section sets
+  the title bar (height, alignment, weight, how a long title is cut), its
+  buttons (side, order, shape, size, gap), the border and the shadow, with
+  the geometry drawing and clicking share (`DecorationStyle::title_bar`).
+  The taskbar cuts window labels as titles are cut. **Waiting on others:** the
+  compositor drawing from it (lane F, `requests/c-f-draw-window-frames-from-the-theme.md`)
+  and its chooser (lane E, `requests/c-e-choose-the-window-frames-in-settings.md`).
+
+- `[C]` **The toolkit lays out as CSS Flexbox and Grid do**
+  (`design-decisions.md` §1455) -- done 2026-10-01. `guitk::layout`: flex
+  lines, wrapping, growing and shrinking with min/max freezing, margins,
+  baselines and `align-content`; `layout::grid` with sparse auto-placement and
+  `Px`/`Auto`/`Fr`/`MinMax` tracks; `fit_image` for contain, cover, stretch
+  and natural size. The widget tree lays out and routes clicks through it.
+
+- `[C]` **A right-click on a text field offers what its keys do**
+  (`design-decisions.md` §1454) -- done 2026-10-01: Cut, Copy, Paste, Delete
+  and Select All in every toolkit text field and the code editor, and in the
+  desktop's own fields (the run box, start-menu search, a note, a rename).
+  **And the wallpaper moves** (§1457): a picture that overflows the screen
+  is dragged into place from the desktop's menu, and the login screen shows
+  the same part.
+
 - `[C]` **A ribbon in the toolkit** (`roadmap-detailed.md` → *Ribbon
   Widget*; `design-decisions.md` §1453) -- done 2026-09-30. `guitk::ribbon`:
   tabs of named groups of controls -- large, medium and small buttons,

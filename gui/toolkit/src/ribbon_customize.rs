@@ -686,8 +686,10 @@ pub(super) fn draw<S: CommandSink + ?Sized>(
     }
 
     for (button, r) in &slots.buttons {
-        let on = enabled(ribbon, dialog, *button);
-        let lit = on && dialog.pressed == Some(*button);
+        // A button that cannot act now is a disabled control, and drawn as
+        // one: the off grey, which only a switched-off control may use.
+        let is_enabled = enabled(ribbon, dialog, *button);
+        let lit = is_enabled && dialog.pressed == Some(*button);
         fill(
             sink,
             *r,
@@ -701,7 +703,7 @@ pub(super) fn draw<S: CommandSink + ?Sized>(
             x: r.x + ((r.w - w) / 2.0).max(4.0),
             y: text_top(r.y, r.h, SIZE),
             text: label.to_owned(),
-            color: if on { p.text } else { p.overlay0 },
+            color: if is_enabled { p.text } else { p.overlay0 },
             font_size: SIZE,
             font_weight: FontWeightHint::Regular,
             max_width: Some(r.w - 8.0),

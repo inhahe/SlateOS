@@ -178291,6 +178291,53 @@ longer waits (there is no `Net` to linger in). The proper fix is to route
 `tcp_fetch` through `Net` and the pump like the ring paths, or retire the
 opcode.
 
+### A-CHANNEL-HANDLES-WERE-USABLE-BY-ANY-PROCESS -- 2026-10-01 -- FIXED for channels and listeners (lane A); other IPC types in progress
+
+**In short:** any process could send on, receive from or close any other
+process's channel, and ask who was on its other end. That includes logind's
+and netstack's control channels. All it took was counting: a channel handle is
+the channel's number shifted left with a side bit, and the numbers count up
+from 1. Channels from the service registry were also never released when
+their process died, and a service that died kept its name. Reported by lane F
+(`requests/f-a-a-channel-handle-can-be-guessed-and-any-process-can-use-it.md`).
+
+**Cause.** The channel syscalls looked the handle up and checked only that the
+channel was open. Nothing asked whether the caller held it. Only
+`SYS_CHANNEL_CREATE` recorded its ends in the creator's `ipc_handles`. The
+service registry's connect and accept paths did not, so their ends were
+neither the process's nor released at its death. Its listeners were recorded
+nowhere.
+
+**Fix.**
+- `require_ipc_handle(type, raw)` in `syscall/handlers.rs`: the caller must
+  hold the handle, or the answer is `InvalidHandle`, the same answer as a
+  handle that names nothing, so the error tells a process nothing about
+  others' handles.
+- Every channel syscall and every listener syscall now calls it first.
+- Connect and the three accepts record the end they return; register records
+  its listener (under `ResourceType::Service`).
+- `ipc::cleanup_handles` unregisters a dead process's listeners, freeing the
+  name and closing connections nobody accepted.
+- The dispatch rung `test_dispatch_ipc_possession` checks every channel and
+  listener call as a second scratch process, through
+  `thread::self_test_as_process`, which lends a kernel task a process's
+  identity for one call.
+
+**Left open.**
+- **Other IPC handle types are next.** Pipes, socket pairs, eventfds,
+  completion ports and their sources, and semaphores still trust the value.
+  Semaphores have no `ResourceType` and are never released when their process
+  dies.
+- **Points 3 and 4 of lane F's request are features, on lane A's backlog.**
+  A Linux-ABI process (every Rust `std` program) cannot reach channels at all,
+  and nothing waits on a channel together with anything else.
+- **Moving an end to another process is not supported.** Capability transfer
+  in a message moves capability-table entries, and nothing makes a channel end
+  one. A process can hand another process an end only through the service
+  registry. Before this fix a process could pass a channel by number,
+  insecurely, and nothing on the system did. Now it cannot at all, until
+  transfer is built.
+
 ## Lane B: new entries
 
 Lane B (userland) appends new entries at the end of this section, above the

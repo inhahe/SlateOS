@@ -851,6 +851,36 @@ pub fn owner_process(task_id: TaskId) -> Option<ProcessId> {
     owners.get(&task_id).copied()
 }
 
+/// Run `body` with the calling kernel task counted as a thread of `pid`, for
+/// a boot self-test that has to meet the syscall layer as a process does.
+///
+/// A bare kernel task passes every possession check by design (it holds
+/// handles nothing registered against a pid), so a test of those checks made
+/// from one would pass whatever they did. This lends the task a process's
+/// identity for the length of `body`, and nothing else:
+/// - only the owner lookup changes. The task is not on the process's thread
+///   list, is never scheduled as it, and keeps the kernel's address space, so
+///   a syscall under it that copies user memory answers `InvalidAddress`;
+/// - whatever mapping the task had before is put back on return.
+///
+/// For self-tests only. Nothing in a running system may make a task act for a
+/// process it does not belong to.
+pub(crate) fn self_test_as_process<R>(pid: ProcessId, body: impl FnOnce() -> R) -> R {
+    let task = sched::current_task_id();
+    let previous = THREAD_OWNERS.lock().insert(task, pid);
+    let result = body();
+    let mut owners = THREAD_OWNERS.lock();
+    match previous {
+        Some(earlier) => {
+            owners.insert(task, earlier);
+        }
+        None => {
+            owners.remove(&task);
+        }
+    }
+    result
+}
+
 /// Sum the `(user_ticks, sys_ticks)` CPU time of a process across both
 /// its **live** threads and its **already-exited** threads.
 ///

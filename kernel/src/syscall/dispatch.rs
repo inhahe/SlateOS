@@ -1010,6 +1010,7 @@ pub fn self_test() -> KernelResult<()> {
     test_tty_flush()?;
     test_process_cwd_umask_registered()?;
     test_dispatch_secureboot_doors()?;
+    test_dispatch_ipc_possession()?;
     test_dispatch_pty_syscalls()?;
     test_dispatch_rlimit_syscalls()?;
     test_dispatch_spawn_ex2_registered()?;
@@ -2291,6 +2292,156 @@ fn test_dispatch_secureboot_doors() -> KernelResult<()> {
 
     serial_println!(
         "[syscall]   Secure Boot doors (1082-1084): enrol/remove gated first, verify answers and records bytes: OK"
+    );
+    Ok(())
+}
+
+/// Channel and service-listener handles are usable only by the process that
+/// holds them (`requests/f-a-a-channel-handle-can-be-guessed-and-any-process-can-use-it.md`).
+///
+/// A handle's value is guessable -- a channel's is `(id << 1) | side`, ids
+/// counting from 1 -- so possession is what makes it a capability. A bare
+/// kernel task passes the possession check by design, so every call here is
+/// made as one of two scratch processes, through
+/// `thread::self_test_as_process`. Only calls decided before any user memory
+/// is touched are used: under a borrowed identity this task's pointers are
+/// kernel ones, which a process's syscall refuses.
+///
+/// What it shows:
+/// - a created channel's ends are registered to their creator;
+/// - another process naming them is refused `InvalidHandle` by every channel
+///   call, and its close closes nothing;
+/// - the owner's own calls pass, and its close deregisters;
+/// - a service listener is refused to another process and passes for its
+///   owner;
+/// - the owner's death releases the service name.
+///
+/// The listener is registered by `service::register` and recorded as
+/// `SYS_SERVICE_REGISTER` records it, because that syscall reads its name from
+/// user memory.
+fn test_dispatch_ipc_possession() -> KernelResult<()> {
+    use crate::cap::ResourceType;
+    use crate::proc::pcb::{self, ProcessId};
+    use crate::proc::thread::self_test_as_process;
+
+    fn fail(msg: &str, live: &[ProcessId]) -> KernelResult<()> {
+        serial_println!("[syscall]   FAIL: IPC handle possession: {}", msg);
+        for &pid in live {
+            pcb::destroy(pid);
+        }
+        Err(KernelError::InternalError)
+    }
+    let a0 = |arg0: u64| SyscallArgs {
+        arg0,
+        arg1: 0,
+        arg2: 0,
+        arg3: 0,
+        arg4: 0,
+        arg5: 0,
+    };
+    let invalid = i64::from(KernelError::InvalidHandle.code());
+
+    let owner = pcb::create("ipc-possess-own", 0);
+    let other = pcb::create("ipc-possess-oth", 0);
+    let live = [owner, other];
+
+    let created = self_test_as_process(owner, || dispatch(SYS_CHANNEL_CREATE, &a0(0)));
+    let (Ok(ep0), Ok(ep1)) = (u64::try_from(created.value), u64::try_from(created.value2)) else {
+        return fail("SYS_CHANNEL_CREATE failed for the owner", &live);
+    };
+    let owns = |pid, h| pcb::owns_ipc_handle(pid, ResourceType::Channel, h);
+    if !owns(owner, ep0) || !owns(owner, ep1) {
+        return fail("a created channel's ends were not registered to their creator", &live);
+    }
+
+    for (name, nr, handle) in [
+        ("SYS_CHANNEL_SEND", SYS_CHANNEL_SEND, ep0),
+        ("SYS_CHANNEL_RECV", SYS_CHANNEL_RECV, ep1),
+        ("SYS_CHANNEL_TRY_RECV", SYS_CHANNEL_TRY_RECV, ep1),
+        ("SYS_CHANNEL_RECV_TIMEOUT", SYS_CHANNEL_RECV_TIMEOUT, ep1),
+        ("SYS_CHANNEL_SEND_TIMEOUT", SYS_CHANNEL_SEND_TIMEOUT, ep0),
+        ("SYS_CHANNEL_SEND_BLOCKING", SYS_CHANNEL_SEND_BLOCKING, ep0),
+        ("SYS_CHANNEL_SEND_CAPS", SYS_CHANNEL_SEND_CAPS, ep0),
+        ("SYS_CHANNEL_RECV_CAPS", SYS_CHANNEL_RECV_CAPS, ep1),
+        ("SYS_CHANNEL_PEER_CRED", SYS_CHANNEL_PEER_CRED, ep0),
+        ("SYS_CHANNEL_CLOSE", SYS_CHANNEL_CLOSE, ep0),
+    ] {
+        let got = self_test_as_process(other, || dispatch(nr, &a0(handle))).value;
+        if got != invalid {
+            serial_println!(
+                "[syscall]   {} on another process's channel answered {}, not InvalidHandle",
+                name,
+                got
+            );
+            return fail("a channel end was usable by a process that does not hold it", &live);
+        }
+    }
+    if !owns(owner, ep0) {
+        return fail("another process's refused close deregistered the owner's end", &live);
+    }
+
+    // The owner's own calls pass the gate, and the refused close closed
+    // nothing: had it closed ep0, a receive on ep1 would answer
+    // `ChannelClosed`, not 0 for "empty".
+    let empty = self_test_as_process(owner, || dispatch(SYS_CHANNEL_TRY_RECV, &a0(ep1))).value;
+    if empty != 0 {
+        serial_println!("[syscall]   the owner's try-receive answered {}", empty);
+        return fail("the owner's own empty channel did not answer 0 -- was it closed?", &live);
+    }
+    for ep in [ep0, ep1] {
+        if self_test_as_process(owner, || dispatch(SYS_CHANNEL_CLOSE, &a0(ep))).value != 0 {
+            return fail("the owner could not close its own channel end", &live);
+        }
+    }
+    if owns(owner, ep0) || owns(owner, ep1) {
+        return fail("a closed channel end is still registered to its owner", &live);
+    }
+
+    // A service listener: the owner's alone, and its name freed by its death.
+    const NAME: &[u8] = b"ipc-possession-selftest";
+    let Ok(listener) = crate::ipc::service::register(NAME) else {
+        return fail("could not register the test service", &live);
+    };
+    pcb::register_ipc_handle(owner, ResourceType::Service, listener.raw());
+    for (name, nr) in [
+        ("SYS_SERVICE_ACCEPT", SYS_SERVICE_ACCEPT),
+        ("SYS_SERVICE_TRY_ACCEPT", SYS_SERVICE_TRY_ACCEPT),
+        ("SYS_SERVICE_ACCEPT_TIMEOUT", SYS_SERVICE_ACCEPT_TIMEOUT),
+        ("SYS_SERVICE_UNREGISTER", SYS_SERVICE_UNREGISTER),
+    ] {
+        let got = self_test_as_process(other, || dispatch(nr, &a0(listener.raw()))).value;
+        if got != invalid {
+            serial_println!(
+                "[syscall]   {} on another process's listener answered {}, not InvalidHandle",
+                name,
+                got
+            );
+            return fail("a service listener was usable by a process that does not hold it", &live);
+        }
+    }
+    let would_block = i64::from(KernelError::WouldBlock.code());
+    if self_test_as_process(owner, || dispatch(SYS_SERVICE_TRY_ACCEPT, &a0(listener.raw()))).value
+        != would_block
+    {
+        return fail("the owner's try-accept with nothing pending did not answer WouldBlock", &live);
+    }
+    pcb::destroy(owner);
+    match crate::ipc::service::register(NAME) {
+        Ok(again) => {
+            // Ours, made a line above; its unregistering cannot fail but for
+            // a bug the next boot's name clash would show.
+            if crate::ipc::service::unregister(again).is_err() {
+                return fail("could not unregister the test service", &[other]);
+            }
+        }
+        Err(_) => {
+            return fail("a dead process's service name was not released", &[other]);
+        }
+    }
+    pcb::destroy(other);
+
+    serial_println!(
+        "[syscall]   IPC possession: channel and listener handles refused to a process that does not hold them; a dead service's name released: OK"
     );
     Ok(())
 }

@@ -207,11 +207,43 @@ fn caller_pid() -> Option<u64> {
 /// This mirrors the `options.parent != 0` condition on the pty arm of
 /// [`crate::proc::spawn`]'s `fd_map` loop.
 fn require_file_handle_owner(handle: u64) -> Result<(), KernelError> {
+    require_ipc_handle(ResourceType::File, handle)
+}
+
+/// The calling process holds this IPC handle: it created it, accepted it, or
+/// was given it on a path that registered it in its `ipc_handles`.
+///
+/// **The handle value is not the capability.** Most IPC handles in this kernel
+/// are a counter shifted left with a side bit -- a channel's is
+/// `(channel_id << 1) | side`, with ids counting up from 1 -- so any process
+/// can name every channel, pipe or socket in the system by counting. Until
+/// 2026-10-01 most of the syscalls that take one did no more than look the
+/// value up, so any process could send on, read from or close another's
+/// channel -- logind's and netstack's included
+/// (`requests/f-a-a-channel-handle-can-be-guessed-and-any-process-can-use-it.md`).
+/// Possession is what makes a handle unforgeable, as design.txt requires of
+/// every kernel object; the value only says which one.
+///
+/// A handle the caller does not hold answers `InvalidHandle`, the same as one
+/// that names nothing: telling the two apart would let a process learn which
+/// handle values are live in other processes.
+///
+/// A bare kernel task (no calling process) passes: it holds handles nothing
+/// registered against a pid, and no user process is claiming anything.
+fn require_ipc_handle(resource_type: ResourceType, handle: u64) -> Result<(), KernelError> {
     match caller_pid() {
-        Some(pid) if !pcb::owns_ipc_handle(pid, ResourceType::File, handle) => {
+        Some(pid) if !pcb::owns_ipc_handle(pid, resource_type, handle) => {
             Err(KernelError::InvalidHandle)
         }
         _ => Ok(()),
+    }
+}
+
+/// Record a handle the kernel has just given the calling process, so that
+/// [`require_ipc_handle`] lets it be used and the process's death releases it.
+fn register_for_caller(resource_type: ResourceType, handle: u64) {
+    if let Some(pid) = caller_pid() {
+        pcb::register_ipc_handle(pid, resource_type, handle);
     }
 }
 
@@ -1458,11 +1490,10 @@ pub fn sys_channel_create(args: &SyscallArgs) -> SyscallResult {
         channel::create()
     };
 
-    // Register both endpoints for cleanup on process death.
-    if let Some(pid) = caller_pid() {
-        pcb::register_ipc_handle(pid, ResourceType::Channel, ep0.raw());
-        pcb::register_ipc_handle(pid, ResourceType::Channel, ep1.raw());
-    }
+    // Both endpoints are the caller's: usable by it alone, released when it
+    // dies.
+    register_for_caller(ResourceType::Channel, ep0.raw());
+    register_for_caller(ResourceType::Channel, ep1.raw());
 
     // Pack handles into the two return registers.
     #[allow(clippy::cast_possible_wrap)]
@@ -1494,6 +1525,9 @@ fn read_message_body(ptr: u64, len: usize) -> KernelResult<alloc::vec::Vec<u8>> 
 /// `arg2`: length of message data.
 pub fn sys_channel_send(args: &SyscallArgs) -> SyscallResult {
     let handle = ChannelHandle::from_raw(args.arg0);
+    if let Err(e) = require_ipc_handle(ResourceType::Channel, handle.raw()) {
+        return SyscallResult::err(e);
+    }
     let len = args.arg2 as usize;
 
     if args.arg1 == 0 && len > 0 {
@@ -1528,6 +1562,9 @@ pub fn sys_channel_send(args: &SyscallArgs) -> SyscallResult {
 /// Returns: message length on success.
 pub fn sys_channel_recv(args: &SyscallArgs) -> SyscallResult {
     let handle = ChannelHandle::from_raw(args.arg0);
+    if let Err(e) = require_ipc_handle(ResourceType::Channel, handle.raw()) {
+        return SyscallResult::err(e);
+    }
     let buf_cap = args.arg2 as usize;
 
     if args.arg1 == 0 && buf_cap > 0 {
@@ -1577,6 +1614,9 @@ pub fn sys_channel_recv(args: &SyscallArgs) -> SyscallResult {
 /// Returns: message length, 0 if empty, negative error code on failure.
 pub fn sys_channel_try_recv(args: &SyscallArgs) -> SyscallResult {
     let handle = ChannelHandle::from_raw(args.arg0);
+    if let Err(e) = require_ipc_handle(ResourceType::Channel, handle.raw()) {
+        return SyscallResult::err(e);
+    }
     let buf_cap = args.arg2 as usize;
 
     if args.arg1 == 0 && buf_cap > 0 {
@@ -1623,6 +1663,9 @@ pub fn sys_channel_try_recv(args: &SyscallArgs) -> SyscallResult {
 /// `arg0`: channel handle.
 pub fn sys_channel_close(args: &SyscallArgs) -> SyscallResult {
     let handle = ChannelHandle::from_raw(args.arg0);
+    if let Err(e) = require_ipc_handle(ResourceType::Channel, handle.raw()) {
+        return SyscallResult::err(e);
+    }
     if let Some(pid) = caller_pid() {
         pcb::deregister_ipc_handle(pid, ResourceType::Channel, handle.raw());
     }
@@ -1640,6 +1683,9 @@ pub fn sys_channel_close(args: &SyscallArgs) -> SyscallResult {
 /// Returns: message length on success, `TimedOut` if deadline expires.
 pub fn sys_channel_recv_timeout(args: &SyscallArgs) -> SyscallResult {
     let handle = ChannelHandle::from_raw(args.arg0);
+    if let Err(e) = require_ipc_handle(ResourceType::Channel, handle.raw()) {
+        return SyscallResult::err(e);
+    }
     let buf_cap = args.arg2 as usize;
     let timeout_ns = args.arg3;
 
@@ -1687,6 +1733,9 @@ pub fn sys_channel_recv_timeout(args: &SyscallArgs) -> SyscallResult {
 /// Returns: 0 on success, `TimedOut` if deadline expires.
 pub fn sys_channel_send_timeout(args: &SyscallArgs) -> SyscallResult {
     let handle = ChannelHandle::from_raw(args.arg0);
+    if let Err(e) = require_ipc_handle(ResourceType::Channel, handle.raw()) {
+        return SyscallResult::err(e);
+    }
     let data_len = args.arg2 as usize;
     let timeout_ns = args.arg3;
 
@@ -1719,6 +1768,9 @@ pub fn sys_channel_send_timeout(args: &SyscallArgs) -> SyscallResult {
 /// Returns: 0 on success.
 pub fn sys_channel_send_blocking(args: &SyscallArgs) -> SyscallResult {
     let handle = ChannelHandle::from_raw(args.arg0);
+    if let Err(e) = require_ipc_handle(ResourceType::Channel, handle.raw()) {
+        return SyscallResult::err(e);
+    }
     let data_len = args.arg2 as usize;
 
     if args.arg1 == 0 && data_len > 0 {
@@ -1752,6 +1804,9 @@ pub fn sys_channel_send_blocking(args: &SyscallArgs) -> SyscallResult {
 /// Returns: 0 on success.
 pub fn sys_channel_send_caps(args: &SyscallArgs) -> SyscallResult {
     let handle = ChannelHandle::from_raw(args.arg0);
+    if let Err(e) = require_ipc_handle(ResourceType::Channel, handle.raw()) {
+        return SyscallResult::err(e);
+    }
     let data_len = args.arg2 as usize;
     let caps_count = args.arg4 as usize;
 
@@ -1799,6 +1854,9 @@ pub fn sys_channel_send_caps(args: &SyscallArgs) -> SyscallResult {
 /// Returns (rdx): number of capability handles received.
 pub fn sys_channel_recv_caps(args: &SyscallArgs) -> SyscallResult {
     let handle = ChannelHandle::from_raw(args.arg0);
+    if let Err(e) = require_ipc_handle(ResourceType::Channel, handle.raw()) {
+        return SyscallResult::err(e);
+    }
     let buf_cap = args.arg2 as usize;
     let caps_out_cap = args.arg4 as usize;
 
@@ -14424,8 +14482,11 @@ pub fn sys_service_register(args: &SyscallArgs) -> SyscallResult {
     };
 
     match service::register(&name) {
-        Ok(listener) =>
-        {
+        Ok(listener) => {
+            // The listener is the caller's, and its death unregisters the
+            // name -- before this, a service that died kept its name for ever
+            // and its restart got `AlreadyExists`.
+            register_for_caller(ResourceType::Service, listener.raw());
             #[allow(clippy::cast_possible_wrap)]
             SyscallResult::ok(listener.raw() as i64)
         }
@@ -14454,8 +14515,11 @@ pub fn sys_service_connect(args: &SyscallArgs) -> SyscallResult {
     };
 
     match service::connect(&name) {
-        Ok(handle) =>
-        {
+        Ok(handle) => {
+            // The client's end: usable by the client alone, and closed when
+            // it dies, so the service sees `ChannelClosed` instead of holding
+            // the connection's state for ever.
+            register_for_caller(ResourceType::Channel, handle.raw());
             #[allow(clippy::cast_possible_wrap)]
             SyscallResult::ok(handle.raw() as i64)
         }
@@ -14470,10 +14534,13 @@ pub fn sys_service_connect(args: &SyscallArgs) -> SyscallResult {
 /// Returns: server-side channel handle.
 pub fn sys_service_accept(args: &SyscallArgs) -> SyscallResult {
     let listener = ServiceListenerHandle::from_raw(args.arg0);
+    if let Err(e) = require_ipc_handle(ResourceType::Service, listener.raw()) {
+        return SyscallResult::err(e);
+    }
 
     match service::accept(listener) {
-        Ok(handle) =>
-        {
+        Ok(handle) => {
+            register_for_caller(ResourceType::Channel, handle.raw());
             #[allow(clippy::cast_possible_wrap)]
             SyscallResult::ok(handle.raw() as i64)
         }
@@ -14488,10 +14555,13 @@ pub fn sys_service_accept(args: &SyscallArgs) -> SyscallResult {
 /// Returns: server-side channel handle, or `WouldBlock`.
 pub fn sys_service_try_accept(args: &SyscallArgs) -> SyscallResult {
     let listener = ServiceListenerHandle::from_raw(args.arg0);
+    if let Err(e) = require_ipc_handle(ResourceType::Service, listener.raw()) {
+        return SyscallResult::err(e);
+    }
 
     match service::try_accept(listener) {
-        Ok(Some(handle)) =>
-        {
+        Ok(Some(handle)) => {
+            register_for_caller(ResourceType::Channel, handle.raw());
             #[allow(clippy::cast_possible_wrap)]
             SyscallResult::ok(handle.raw() as i64)
         }
@@ -14508,11 +14578,14 @@ pub fn sys_service_try_accept(args: &SyscallArgs) -> SyscallResult {
 /// Returns: server-side channel handle, or `TimedOut`.
 pub fn sys_service_accept_timeout(args: &SyscallArgs) -> SyscallResult {
     let listener = ServiceListenerHandle::from_raw(args.arg0);
+    if let Err(e) = require_ipc_handle(ResourceType::Service, listener.raw()) {
+        return SyscallResult::err(e);
+    }
     let timeout_ns = args.arg1;
 
     match service::accept_timeout(listener, timeout_ns) {
-        Ok(handle) =>
-        {
+        Ok(handle) => {
+            register_for_caller(ResourceType::Channel, handle.raw());
             #[allow(clippy::cast_possible_wrap)]
             SyscallResult::ok(handle.raw() as i64)
         }
@@ -14527,9 +14600,17 @@ pub fn sys_service_accept_timeout(args: &SyscallArgs) -> SyscallResult {
 /// Returns: 0 on success.
 pub fn sys_service_unregister(args: &SyscallArgs) -> SyscallResult {
     let listener = ServiceListenerHandle::from_raw(args.arg0);
+    if let Err(e) = require_ipc_handle(ResourceType::Service, listener.raw()) {
+        return SyscallResult::err(e);
+    }
 
     match service::unregister(listener) {
-        Ok(()) => SyscallResult::ok(0),
+        Ok(()) => {
+            if let Some(pid) = caller_pid() {
+                pcb::deregister_ipc_handle(pid, ResourceType::Service, listener.raw());
+            }
+            SyscallResult::ok(0)
+        }
         Err(e) => SyscallResult::err(e),
     }
 }
@@ -14557,6 +14638,9 @@ pub fn sys_service_unregister(args: &SyscallArgs) -> SyscallResult {
 ///
 /// # Errors
 ///
+/// - `InvalidHandle` — the caller does not hold `arg0`. A process can ask who
+///   is on the other end of its own channels only: before 2026-10-01 any
+///   process could ask about any channel, and learn who was talking to whom.
 /// - `NotFound` — `arg0` names no live channel, or no process was ever
 ///   recorded for the peer side.  Both are *unknown*, not *nobody*, and a
 ///   service must treat either as a refusal rather than as a credential.
@@ -14567,6 +14651,9 @@ pub fn sys_service_unregister(args: &SyscallArgs) -> SyscallResult {
 /// - `Fault` — the output buffer is not writable.
 pub fn sys_channel_peer_cred(args: &SyscallArgs) -> SyscallResult {
     let handle = ChannelHandle::from_raw(args.arg0);
+    if let Err(e) = require_ipc_handle(ResourceType::Channel, handle.raw()) {
+        return SyscallResult::err(e);
+    }
 
     let Some(cred) = channel::peer_cred(handle) else {
         // "No such channel" and "no record for the peer" are deliberately

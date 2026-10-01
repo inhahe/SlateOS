@@ -1917,6 +1917,58 @@ else
     echo "[rootfs] WARNING: no services/ctest-*/*.elf found — C self-tests will self-skip"
 fi
 
+# The kernel's generic rung runs each C fixture services/ctest-generic.list
+# names, from /tests/ctest-generic.list (requests/d-a-one-rung-for-every-c-
+# fixture.md). A line the rung cannot read, or a fixture with no recipe, is
+# refused here rather than found at boot: three blank-separated fields, a
+# fixture with a services/<name>/build.py, a grant of `-` or `file`, and
+# 1 to 600 seconds.
+GENERIC_LIST="$ROOT_DIR/services/ctest-generic.list"
+if [ -f "$GENERIC_LIST" ]; then
+    _bad=0
+    _listed=0
+    while IFS= read -r _line || [ -n "$_line" ]; do
+        _line="${_line%%#*}"
+        # Fields by `read`, not `set --`, which would take the script's own
+        # arguments; and no glob is expanded.
+        _name="" _grant="" _secs="" _more=""
+        read -r _name _grant _secs _more <<<"$_line" || true
+        if [ -z "$_name" ]; then
+            continue
+        fi
+        if [ -z "$_secs" ] || [ -n "$_more" ]; then
+            echo "[rootfs] ERROR: ctest-generic.list: '$_line' is not <name> <grants> <seconds>"
+            _bad=1
+            continue
+        fi
+        if [ ! -f "$ROOT_DIR/services/$_name/build.py" ]; then
+            echo "[rootfs] ERROR: ctest-generic.list names $_name, which has no services/$_name/build.py"
+            _bad=1
+        fi
+        case "$_grant" in
+            -|file) ;;
+            *) echo "[rootfs] ERROR: ctest-generic.list: $_name's grant '$_grant' is neither - nor file"
+               _bad=1 ;;
+        esac
+        _secs_ok=0
+        case "$_secs" in
+            *[!0-9]*) ;;
+            *) if [ "$_secs" -ge 1 ] && [ "$_secs" -le 600 ]; then _secs_ok=1; fi ;;
+        esac
+        if [ "$_secs_ok" -ne 1 ]; then
+            echo "[rootfs] ERROR: ctest-generic.list: $_name's '$_secs' seconds is not 1 to 600"
+            _bad=1
+        fi
+        _listed=$((_listed + 1))
+    done < "$GENERIC_LIST"
+    if [ "$_bad" -ne 0 ]; then
+        echo "[rootfs] ERROR: services/ctest-generic.list is malformed; the image is not written"
+        exit 1
+    fi
+    cp "$GENERIC_LIST" "$STAGE/tests/ctest-generic.list"
+    echo "[rootfs] staged ctest-generic.list: $_listed fixture(s) for the kernel's generic rung"
+fi
+
 # Same rule for bash (flagged further up, enforced here so that both artifact
 # families answer to one gate and neither can be stale in a shipped image).
 #

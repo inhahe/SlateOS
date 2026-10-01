@@ -59122,6 +59122,18 @@ is already waiting, not whether the setter exists.
   SYS_FS_TMPFILE -> lift open()'s EOPNOTSUPP guard for O_TMPFILE, and
   tmpfile uses it unchanged (it is tried first).
 
+- **The C fixtures onto the generic rung, one at a time, once lane A's rung
+  is in** (services/ctest-generic.list).  Asked in
+  requests/d-a-one-rung-for-every-c-fixture.md, whose table gives each
+  fixture's grant and time limit.  When the rung is on main: merge it, then
+  for each of ctest-obstack, ctest-aio, ctest-cxx-throw, ctest-eintr,
+  ctest-fortify-abort, ctest-printf-streams, ctest-pthread, ctest-stdio,
+  ctest-sysvipc and ctest-ucontext -- and ctest-cwd-umask once the kernel
+  half of design-decisions.md §960 is in -- add its line, boot, fix what
+  fails, publish, and close the fixture's own requests/d-a-run-*.md.  A
+  fixture goes on only after a lane D boot has seen it pass, so that no
+  other lane's boot meets it failing first.
+
 ## Lane C — the start menu's Shut down button waits for programs to be asked to save (2026-09-26)
 
 - **Done 2026-09-26.** The power button reads "Shut down" and shuts down in

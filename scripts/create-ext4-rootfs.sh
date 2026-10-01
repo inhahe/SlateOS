@@ -1000,18 +1000,29 @@ elif [ -e "$LIBC_A" ]; then
     # covers whatever `ctest-fixtures.py` covers without a second person
     # remembering to edit both. sed, not a TOML parser: this branch runs only
     # when there is no python at all.
-    _dep_roots=""
-    for _dep in $(sed -n 's/.*path *= *"\([^"]*\)".*/\1/p' "$ROOT_DIR/posix/Cargo.toml" 2>/dev/null); do
+    #
+    # Each is resolved against posix/, as cargo resolves it and as
+    # `_posix_path_deps` does: a sibling (`../tzrules`) and one inside posix/
+    # (`vendor/libm`) alike; one outside the repo is not ours to check, there
+    # or here. An array, not a word list: $ROOT_DIR has a space in it on every
+    # real run ("visual studio projects"). Until 2026-10-01 this was a string
+    # expanded unquoted, which split each root into pieces that did not exist,
+    # and `vendor/libm` was skipped as "left to the python path" -- in the
+    # branch that runs when there is none -- so neither dependency was ever
+    # checked here.
+    _dep_roots=()
+    while IFS= read -r _dep; do
         case "$_dep" in
-            ../*) _dep_roots="$_dep_roots $ROOT_DIR/${_dep#../}" ;;
-            *) ;;    # not a sibling crate; leave the resolution to the python path
+            /* | ../../*) ;;
+            ../*) _dep_roots+=("$ROOT_DIR/${_dep#../}") ;;
+            ?*) _dep_roots+=("$ROOT_DIR/posix/$_dep") ;;
         esac
-    done
+    done < <(sed -n 's/.*path *= *"\([^"]*\)".*/\1/p' "$ROOT_DIR/posix/Cargo.toml" 2>/dev/null)
     for sysroot_src in "$ROOT_DIR/posix/src" \
                        "$ROOT_DIR/posix/Cargo.toml" \
                        "$ROOT_DIR/toolchain/stubs" \
                        "$ROOT_DIR/toolchain/build-sysroot.ps1" \
-                       $_dep_roots; do
+                       ${_dep_roots[@]+"${_dep_roots[@]}"}; do
         [ -e "$sysroot_src" ] || continue
         newer="$(find "$sysroot_src" -type f -newer "$LIBC_A" -print -quit 2>/dev/null || true)"
         [ -n "$newer" ] || continue

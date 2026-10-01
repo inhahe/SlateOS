@@ -213,7 +213,10 @@ esac
 # A FRESH STAGE FIRST. The block above already put /bin/ls on the previous
 # stage, and a second run over it reports the collision instead of the
 # staleness -- so without this reset the case passes or fails for the wrong
-# reason. It failed that way when first written.
+# reason. It failed that way when first written. (The first stage's tree goes
+# first: `slate_env` makes a new one, and until 2026-10-01 every run of this
+# file left the old one in /tmp.)
+rm -rf "$T"
 slate_env
 mk_manifest ls
 mk_elf "$ROOT_DIR/target/x86_64-slateos/release/ls"
@@ -668,6 +671,54 @@ case "$rc:$msg" in
 esac
 [ ! -e "$T/record" ] && ok || bad "with no python, nothing should have been run"
 rm -rf "$T"
+
+# 32. THE SYSROOT CHECK WITHOUT PYTHON. libc.a is behind its inputs when one
+# of them is newer -- posix's own sources, and its path dependencies, read out
+# of posix/Cargo.toml: a sibling crate (`../tzrules`) and one inside posix/
+# (`vendor/libm`). Run with no python on PATH, in a tree whose path has a space
+# in it, as every real one does ("visual studio projects"). Until 2026-10-01
+# the dependencies were a word list that the space split apart, and the one
+# inside posix/ was skipped, so neither case below was ever caught.
+SYSROOT_BLOCK="$(awk '/^LIBC_A=/{f=1} f{print} f && /^fi$/{exit}' "$SRC")"
+case "$SYSROOT_BLOCK" in
+    *"_dep_roots"*"no python3/python"*) ok ;;
+    *) bad "could not extract the sysroot check from $SRC" ;;
+esac
+# A PATH with sed and find on it and no python: wrappers that run the real
+# tools by their full paths, which works on Linux and under MSYS alike. Each
+# case runs in the subshell `$(...)` makes, so it removes its own tree.
+sysroot_case() {  # sysroot_case <file made newer than libc.a, or "">
+    T="$(mktemp -d)"
+    trap 'rm -rf "$T"' EXIT
+    local bin="$T/bin" tool
+    mkdir -p "$bin"
+    for tool in sed find; do
+        printf '#!/bin/sh\nexec "%s" "$@"\n' "$(command -v "$tool")" > "$bin/$tool"
+        chmod +x "$bin/$tool"
+    done
+    export ROOT_DIR="$T/visual studio projects/os"
+    mkdir -p "$ROOT_DIR/toolchain/sysroot/lib" "$ROOT_DIR/posix/src" \
+             "$ROOT_DIR/tzrules/src" "$ROOT_DIR/posix/vendor/libm/src"
+    printf '[dependencies]\ntzrules = { path = "../tzrules" }\nlibm = { path = "vendor/libm", features = ["x"] }\n' \
+        > "$ROOT_DIR/posix/Cargo.toml"
+    : > "$ROOT_DIR/posix/src/lib.rs"
+    : > "$ROOT_DIR/tzrules/src/lib.rs"
+    : > "$ROOT_DIR/posix/vendor/libm/src/lib.rs"
+    : > "$ROOT_DIR/toolchain/sysroot/lib/libc.a"
+    find "$ROOT_DIR" -type f -exec touch -d @1600000000 {} +
+    touch -d @1650000000 "$ROOT_DIR/toolchain/sysroot/lib/libc.a"
+    [ -n "$1" ] && touch -d @1700000000 "$ROOT_DIR/$1"
+    # The block's own `command -v` decides there is no python, from this PATH.
+    PATH="$bin" eval "$SYSROOT_BLOCK" > "$T/out" 2>&1
+    echo "STALE=[$SYSROOT_STALE] PY=[$SYSROOT_PY]"
+}
+for newer in "tzrules/src/lib.rs" "posix/vendor/libm/src/lib.rs" "posix/src/lib.rs"; do
+    got="$(sysroot_case "$newer")"
+    [ "$got" = "STALE=[$newer] PY=[]" ] && ok \
+        || bad "without python, $newer newer than libc.a should make it stale, got: $got"
+done
+got="$(sysroot_case "")"
+[ "$got" = "STALE=[] PY=[]" ] && ok || bad "without python, a current libc.a is not stale, got: $got"
 
 echo "test-rootfs-staging: $PASS/$((PASS + FAIL)) cases pass"
 [ "$FAIL" -eq 0 ]

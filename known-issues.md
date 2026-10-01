@@ -179267,7 +179267,7 @@ their absence is a gap to close, not a resolution.
 **Where:** a new crate per program under `userspace/`; the deleted crate is
 in history at `userspace/locale` before this entry's commit.
 
-## B-MESG-AND-WRITE-UNTIL-PORTED — `mesg`, `write` and `talk` were deleted for fabricating; `mesg` and `write` are POSIX utilities to port (lane B, 2026-10-01) — **Status: OPEN (port to do)**
+## B-MESG-AND-WRITE-UNTIL-PORTED — `mesg`, `write` and `talk` were deleted for fabricating; `mesg` and `write` are POSIX utilities to port (lane B, 2026-10-01) — **Status: DEFERRED (needs a design: `deferred-questions.md` DQ5)**
 
 **In short:** `userspace/mesg` answered as `mesg`, `write` and `talk`, and the
 three agreed with one another through files no other program reads, rather
@@ -179286,9 +179286,16 @@ terminal's `S_IWGRP` bit through `fchmod`, as POSIX specifies `mesg`) and
 `libcall::utmp`, its terminal checked writable by group, the message
 written to it with control characters made visible), each with a WSL
 differential harness. `talk` needs a `talkd` on the other end and is not
-coming back with them. Both ports depend on terminals that carry group
-`tty` and honour their mode bits, which is worth confirming with lane A's
-pty layer first.
+coming back with them.
+
+**Why it is deferred, found the same day:** those ports cannot work as
+written on SlateOS. A terminal there is reached only through a handle held
+by its owner, never by opening `/dev/pts/N` (the kernel's `fchmod` refuses a
+terminal descriptor outright, and `SYS_PTY_SLAVE_ID` documents that the name
+"grants nothing"). `write` opening someone else's terminal is exactly the
+ambient authority the design removes, so the tools need a service that holds
+the terminals and delivers with consent first -- a design question, recorded
+as `deferred-questions.md` DQ5 with its trigger.
 
 **Where:** new crates `userspace/mesg` and `userspace/write`; the deleted
 crate is in history at `userspace/mesg`.

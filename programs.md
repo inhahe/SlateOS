@@ -11,9 +11,9 @@ A new program is recorded here in the commit that creates it (§1053): run
 the script, commit `programs.md` with the program. `--check` fails when the
 two disagree.
 
-**466 programs; 88 on the image, 6 carried inside the kernel.**
+**462 programs; 88 on the image, 6 carried inside the kernel.**
 
-## Userland utilities and services (`userspace/`, lane B) -- 311
+## Userland utilities and services (`userspace/`, lane B) -- 307
 
 | Program | What it does | On image | Crate | Other names |
 |---|---|---|---|---|
@@ -23,7 +23,6 @@ two disagree.
 | `arch` | Print machine architecture. |  | `coreutils` |  |
 | `arp` | ARP Table Management Utility |  |  |  |
 | `at` | Schedule one-time command execution at a specified time |  |  | `atd` *(not installed)*, `atq` *(not installed)*, `atrm` *(not installed)*, `batch` *(not installed)* |
-| `audit` | Audit framework utilities. |  |  | `auditd` *(not installed)*, `aureport` *(not installed)*, `ausearch` *(not installed)*, `autrace` *(not installed)* |
 | `awk` | The pattern-scanning and processing language. | yes | `coreutils` |  |
 | `b2sum` | Print or check BLAKE2b checksums, 512 bits wide unless `-l` says otherwise. |  | `coreutils` |  |
 | `backup` | Backup Utility |  |  |  |
@@ -95,7 +94,6 @@ two disagree.
 | `findmnt` | Find a filesystem. |  |  |  |
 | `finger` | User information lookup |  |  |  |
 | `fio` | Multi-personality flexible I/O tester for SlateOS. |  |  | `fio-verify` *(not installed)* |
-| `firejail` | Firejail security sandbox framework. |  |  | `firecfg` *(not installed)*, `firemon` *(not installed)* |
 | `flock` | Manage file locks from shell scripts. |  |  |  |
 | `fmt` | `fmt` Utility -- Simple Text Formatter |  |  |  |
 | `fold` | Wrap each input line to fit in a given width. | yes | `coreutils` |  |
@@ -176,7 +174,6 @@ two disagree.
 | `mkdir` | Make directories. | yes | `coreutils` |  |
 | `mkfifo` | Make FIFOs (named pipes). | yes | `coreutils` |  |
 | `mkfs` | Create Filesystems |  |  |  |
-| `mkinitramfs` | Initial RAM filesystem builder. |  |  | `lsinitramfs` *(not installed)*, `update-initramfs` *(not installed)* |
 | `mknod` | Make block or character special files, or FIFOs. |  | `coreutils` |  |
 | `mktemp` | Multi-Personality Utility: mktemp / id / groups / whoami |  |  |  |
 | `monctl` | Monitor/Display Control Utility |  |  |  |
@@ -212,7 +209,6 @@ two disagree.
 | `ping` | ICMP Ping Utility |  |  |  |
 | `pinky` | A lightweight `finger`: who is logged in, or what is known about named users. |  | `coreutils` |  |
 | `pkg` | Slate OS package manager. |  |  |  |
-| `plymouth` | Boot splash system. |  |  | `plymouthd` *(not installed)* |
 | `polkit` | PolicyKit Authorization Framework |  |  |  |
 | `powerctl` | Power Management Utility | yes |  |  |
 | `pr` | Paginate or columnate files for printing. |  | `coreutils` |  |

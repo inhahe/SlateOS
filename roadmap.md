@@ -5662,14 +5662,14 @@ _Port ext4 first. Don't write a custom filesystem._
   - [x] fuser/lsof: process-file identification (/proc scanning, cwd/exe/fd/mmap detection, socket matching)
   - [x] eject/volname: removable media control (tray open/close/toggle, lock/unlock, ISO 9660 volume name, speed control)
   - [x] sar/iostat/mpstat/pidstat/cifsiostat/tapestat: system activity monitoring (CPU/memory/disk/network/per-process, 3526 lines, 153 tests)
-  - [x] auditctl/auditd/ausearch/aureport/autrace: security audit framework (rule management, log search/report, 4069 lines, 207 tests)
+  - [ ] auditctl/auditd/ausearch/aureport/autrace: security audit framework (rule management, log search/report, 4069 lines, 207 tests) -- **deleted 2026-10-01** (design-decisions §1045, §1006): the Linux audit framework (netlink rules, `/var/log/audit`), which SlateOS does not have -- its auditing is the kernel's own capability and filesystem audit rings; `auditctl` kept rules nothing enforced and `auditd` could not start
   - [ ] grub-install/grub-mkconfig/grub-editenv/grub-probe/update-grub: GRUB2 bootloader tools (EFI/BIOS detection, kernel scanning, env blocks, 3121 lines, 158 tests) -- **deleted 2026-10-01** (design-decisions §1045, §1006): SlateOS boots with Limine, and its part in a dual-boot GRUB is the installer's (`apps/installer` `--grub-*`); `grub-install` wrote no bootloader, and `grub-set-default`/`grub-reboot` wrote a grubenv no bootloader reads
   - [x] sudo/sudoedit/visudo/sudoreplay: privilege escalation (sudoers parsing, timestamp caching, env handling, 4391 lines)
   - [x] nft/nft-list: nftables packet filtering (tables/chains/rules/sets/maps, inet/ip/ip6/bridge families, 5040 lines)
   - [x] upower/upowerd: power/battery management (11 device types, battery properties, history tracking, 2789 lines, 128 tests)
-  - [x] mkinitramfs/update-initramfs/lsinitramfs: initramfs builder (CPIO newc format, kernel module inclusion, compression, 1124 lines)
+  - [ ] mkinitramfs/update-initramfs/lsinitramfs: initramfs builder (CPIO newc format, kernel module inclusion, compression, 1124 lines) -- **deleted 2026-10-01** (design-decisions §1045, §1006): SlateOS boots no initramfs -- Limine loads the kernel, which carries its services
   - [x] update-alternatives: symlink manager for package alternatives (Debian-compatible registry, priority-based auto mode, 960 lines)
-  - [x] plymouth/plymouthd/plymouth-set-default-theme: boot splash system (theme management, daemon mode, client commands, 637 lines)
+  - [ ] plymouth/plymouthd/plymouth-set-default-theme: boot splash system (theme management, daemon mode, client commands, 637 lines) -- **deleted 2026-10-01** (design-decisions §1045, §1006): no plymouth daemon exists or is planned (a boot splash would be the compositor's); the client printed what it "would" show
   - [x] hwinfo/lshw: hardware inventory (CPU/memory/PCI/USB/block/network/display/audio/input probing, JSON/XML/short output, 906 lines)
   - [x] udisksctl/udisksd/umount: disk management service (device discovery, mount/unmount, SMART data, loop devices, 896 lines)
   - [x] bootctl: EFI boot manager (systemd-boot compatible, loader.conf, boot entry discovery, install/update/remove/set-default/set-oneshot, 598 lines)
@@ -5679,7 +5679,7 @@ _Port ext4 first. Don't write a custom filesystem._
   - [x] numactl/numastat/numademo/memhog: NUMA policy control (topology discovery, memory binding, interleave, per-node stats, 805 lines)
   - [ ] btrfs/mkfs.btrfs/btrfs-convert: btrfs filesystem tools (14 subcommands, RAID profiles, scrub/balance/quota/qgroup, 4517 lines, 248 tests)
   - [ ] flatpak: application manager (22 subcommands, remote management, build pipeline, permissions, 3046 lines, 214 tests)
-  - [x] firejail/firemon/firecfg: security sandbox (profile system, namespace isolation, network filtering, 15 app profiles, 3487 lines, 168 tests)
+  - [ ] firejail/firemon/firecfg: security sandbox (profile system, namespace isolation, network filtering, 15 app profiles, 3487 lines, 168 tests) -- **deleted 2026-10-01** (design-decisions §1045, §1006): a Linux namespace-and-seccomp sandbox with nothing planned to drive (SlateOS confines programs by capabilities); it parsed profiles and refused to run anything
   - [ ] apparmor (aa-status/aa-enforce/aa-complain/aa-disable/aa-genprof/aa-logprof/aa-unconfined/apparmor_parser): MAC security (profile parser, mode switching, audit log analysis, 3306 lines, 139 tests) -- **deleted 2026-10-01** (design-decisions §1045, §1006): SlateOS has no LSM, so every command acted on a /sys interface that does not exist
   - [ ] selinux (getenforce/setenforce/sestatus/semanage/setsebool/getsebool/restorecon/chcon/seinfo/sesearch/audit2allow): SELinux tools (11 personalities, policy query, context management, 3748 lines, 150 tests) -- **deleted 2026-10-01** (design-decisions §1045, §1006): SlateOS has no LSM, so every command acted on a /sys interface that does not exist
   - [ ] snapper/snapper-timeline/snapper-cleanup: filesystem snapshot management (pre/post pairs, timeline/number/empty-pre-post cleanup, 3174 lines, 145 tests)

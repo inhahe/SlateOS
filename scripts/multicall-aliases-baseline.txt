@@ -14,10 +14,6 @@ at:atd
 at:atq
 at:atrm
 at:batch
-audit:auditd
-audit:aureport
-audit:ausearch
-audit:autrace
 capsh:captest
 capsh:getcap
 capsh:getpcaps
@@ -39,8 +35,6 @@ dmidecode:biosdecode
 efibootmgr:efivar
 eject:volname
 fio:fio-verify
-firejail:firecfg
-firejail:firemon
 fwupd:fwupdtool
 getty:mingetty
 gzip:gunzip
@@ -66,8 +60,6 @@ lp:lprm
 lp:lpstat
 mesg:talk
 mesg:write
-mkinitramfs:lsinitramfs
-mkinitramfs:update-initramfs
 newgrp:sg
 ntpd:ntpdate
 ntpd:sntp
@@ -78,7 +70,6 @@ perf:perf-record
 perf:perf-report
 perf:perf-stat
 perf:perf-top
-plymouth:plymouthd
 resolvectl:host
 resolvectl:resolvconf
 resolvectl:systemd-resolve

@@ -2382,6 +2382,20 @@ same file, asked of lane D with the lines to add
 implemented and tested in its crate and needs no permission its program
 lacks; they leave the ledger when the lines land.
 
+Deleted next, as whole crates, each for a subsystem SlateOS has not got and
+does not plan: **`userspace/audit`** (`auditctl`, `auditd`, `ausearch`,
+`aureport`, `autrace` -- the Linux audit framework's netlink rules and
+`/var/log/audit`; SlateOS's auditing is the kernel's own capability and
+filesystem audit rings, which none of them read; `auditctl` kept rules that
+nothing enforced, `auditd` could not start), **`userspace/firejail`**
+(`firecfg`, `firemon` -- a namespace-and-seccomp sandbox; it parsed profiles
+and refused to run anything, and SlateOS confines programs by capabilities,
+with no sandbox tool of this kind on the roadmap), **`userspace/mkinitramfs`**
+(`lsinitramfs`, `update-initramfs` -- SlateOS boots no initramfs: Limine loads
+the kernel, which carries its services) and **`userspace/plymouth`**
+(`plymouthd` -- no splash daemon exists or is planned, and the client printed
+what it "would" show). **The ledger stands at 106.**
+
 **The 9 new shadowed pairs were the urgent half**, because a shadowed name is
 two implementations that can disagree with the winner picked by packaging:
 

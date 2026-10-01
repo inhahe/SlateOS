@@ -41,7 +41,6 @@ userspace/acl  # bare deny(clippy::all)
 userspace/acpi
 userspace/arp
 userspace/at
-userspace/audit  # bare deny(clippy::all)
 userspace/backup
 userspace/bootctl  # bare deny(clippy::all)
 userspace/capsh  # bare deny(clippy::all)
@@ -65,7 +64,6 @@ userspace/efibootmgr  # bare deny(clippy::all)
 userspace/eject  # bare deny(clippy::all)
 userspace/fdisk
 userspace/fio  # bare deny(clippy::all)
-userspace/firejail  # bare deny(clippy::all)
 userspace/fmt
 userspace/fsck
 userspace/fuser  # bare deny(clippy::all)
@@ -111,7 +109,6 @@ userspace/m4
 userspace/make
 userspace/man
 userspace/mkfs
-userspace/mkinitramfs  # bare deny(clippy::all)
 userspace/mktemp
 userspace/monctl
 userspace/mount
@@ -130,7 +127,6 @@ userspace/perf  # bare deny(clippy::all)
 userspace/pgrep
 userspace/ping
 userspace/pkg
-userspace/plymouth  # bare deny(clippy::all)
 userspace/powerctl
 userspace/pstree  # bare deny(clippy::all)
 userspace/pv

@@ -163,14 +163,6 @@ name = "audiotags"
 version = "0.1.0"
 
 [[package]]
-name = "audit"
-version = "0.1.0"
-dependencies = [
- "optionalfile",
- "quoting",
-]
-
-[[package]]
 name = "authlib"
 version = "0.1.0"
 dependencies = [
@@ -1281,15 +1273,6 @@ version = "0.1.0"
 dependencies = [
  "procinfo",
  "sha2",
-]
-
-[[package]]
-name = "firejail"
-version = "0.1.0"
-dependencies = [
- "authlib",
- "scratchdir",
- "userdb",
 ]
 
 [[package]]
@@ -2436,15 +2419,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "mkinitramfs"
-version = "0.1.0"
-dependencies = [
- "deflate",
- "modechange",
- "quoting",
-]
-
-[[package]]
 name = "mktemp"
 version = "0.1.0"
 dependencies = [
@@ -2955,14 +2929,6 @@ dependencies = [
  "quoting",
  "scratchdir",
  "sha2",
-]
-
-[[package]]
-name = "plymouth"
-version = "0.1.0"
-dependencies = [
- "quoting",
- "scratchdir",
 ]
 
 [[package]]

@@ -16,6 +16,7 @@
 use crate::errno;
 use crate::fcntl;
 use crate::fdtable::{self, HandleKind};
+use crate::interrupt::{Mark, Restart};
 use crate::stat::Stat;
 use crate::syscall::*;
 use crate::types::*;
@@ -184,6 +185,23 @@ pub extern "C" fn open(path: *const u8, flags: i32, mode: ModeT) -> Fd {
     }
 }
 
+/// `posix_close`'s flag asking it to restart an interrupted close. Zero, as in
+/// musl's `<unistd.h>`: `close` here is never interrupted part-way, so there
+/// is nothing to restart and the only flag is no flag.
+pub const POSIX_CLOSE_RESTART: i32 = 0;
+
+/// Close `fd` (POSIX.1-2024): [`close`], whose descriptor is always released,
+/// even on failure. `flag` must be 0 -- which is also `POSIX_CLOSE_RESTART`
+/// -- and anything else is `EINVAL`, with `fd` left open.
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub extern "C" fn posix_close(fd: Fd, flag: i32) -> i32 {
+    if flag != 0 && flag != POSIX_CLOSE_RESTART {
+        errno::set_errno(errno::EINVAL);
+        return -1;
+    }
+    close(fd)
+}
+
 /// Close a file descriptor.
 ///
 /// Dispatches to the appropriate kernel close syscall based on
@@ -216,6 +234,9 @@ pub extern "C" fn close(fd: Fd) -> i32 {
     if fdtable::is_handle_referenced(entry.kind, entry.handle) {
         return 0;
     }
+    // The file's last descriptor: it leaves every epoll interest list, as
+    // upstream's `eventpoll_release` makes it.
+    crate::epoll::forget_file(entry.kind, entry.handle);
 
     let ret = match entry.kind {
         HandleKind::File => syscall1(SYS_FS_CLOSE, entry.handle),
@@ -313,6 +334,9 @@ pub extern "C" fn close(fd: Fd) -> i32 {
 /// Returns number of bytes read, 0 at EOF, -1 on error.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn read(fd: Fd, buf: *mut u8, count: SizeT) -> SsizeT {
+    // Handlers counted from here, for the reads whose waiting is this
+    // library's (`crate::interrupt`).
+    let mark = Mark::now();
     // The descriptor first, whatever `count` is.  `ksys_read`
     // (fs/read_write.c:604) opens with `fdget_pos(fd)` and returns `-EBADF`
     // when it comes back empty; only inside `vfs_read` (:458) does
@@ -347,7 +371,9 @@ pub extern "C" fn read(fd: Fd, buf: *mut u8, count: SizeT) -> SsizeT {
             if is_nb {
                 syscall3(SYS_PIPE_TRY_READ, entry.handle, buf as u64, count as u64)
             } else {
-                syscall3(SYS_PIPE_READ, entry.handle, buf as u64, count as u64)
+                crate::interrupt::restarting(Restart::IfAsked, || {
+                    syscall3(SYS_PIPE_READ, entry.handle, buf as u64, count as u64)
+                })
             }
         }
         HandleKind::UnixStream => {
@@ -363,7 +389,9 @@ pub extern "C" fn read(fd: Fd, buf: *mut u8, count: SizeT) -> SsizeT {
                     count as u64,
                 )
             } else {
-                syscall3(SYS_SOCKETPAIR_RECV, entry.handle, buf as u64, count as u64)
+                crate::interrupt::restarting(crate::socket::wait_rule(fd, true), || {
+                    syscall3(SYS_SOCKETPAIR_RECV, entry.handle, buf as u64, count as u64)
+                })
             }
         }
         HandleKind::Console => {
@@ -380,7 +408,9 @@ pub extern "C" fn read(fd: Fd, buf: *mut u8, count: SizeT) -> SsizeT {
             // effect from tcsetattr, and — worst — no terminal signals at
             // all, while a Linux-ABI program on the same console got all
             // four.  See design-decisions §114.
-            syscall2(SYS_TTY_READ, buf as u64, count as u64)
+            crate::interrupt::restarting(Restart::IfAsked, || {
+                syscall2(SYS_TTY_READ, buf as u64, count as u64)
+            })
         }
         HandleKind::TcpStream => {
             if entry.handle == 0 {
@@ -406,7 +436,7 @@ pub extern "C" fn read(fd: Fd, buf: *mut u8, count: SizeT) -> SsizeT {
             if (posix_err == errno::EAGAIN || posix_err == errno::EWOULDBLOCK) && !is_nb {
                 // Blocking socket — poll-wait with SO_RCVTIMEO.
                 // timeout_ms == 0 means wait indefinitely.
-                return crate::socket::tcp_recv_wait(entry.handle, buf, count, 0, timeout_ms);
+                return crate::socket::tcp_recv_wait(entry.handle, buf, count, 0, timeout_ms, mark);
             }
             errno::set_errno(posix_err);
             return -1;
@@ -452,7 +482,11 @@ pub extern "C" fn read(fd: Fd, buf: *mut u8, count: SizeT) -> SsizeT {
                         }
                         // Block: sleep 10ms and retry.  Matches the rest
                         // of our readiness polling.
-                        let _ = syscall1(SYS_SLEEP, 10_000_000);
+                        if mark.interrupted(Restart::IfAsked) {
+                            errno::set_errno(errno::EINTR);
+                            return -1;
+                        }
+                        crate::lowlevellock::nap(10_000_000, Restart::IfAsked, mark);
                     }
                     Ok(n) => return n as SsizeT,
                     Err(e) => {
@@ -503,7 +537,11 @@ pub extern "C" fn read(fd: Fd, buf: *mut u8, count: SizeT) -> SsizeT {
                             errno::set_errno(errno::EAGAIN);
                             return -1;
                         }
-                        let _ = syscall1(SYS_SLEEP, 10_000_000);
+                        if mark.interrupted(Restart::IfAsked) {
+                            errno::set_errno(errno::EINTR);
+                            return -1;
+                        }
+                        crate::lowlevellock::nap(10_000_000, Restart::IfAsked, mark);
                     }
                     Ok(n) => return n as SsizeT,
                     Err(e) => {
@@ -536,7 +574,9 @@ pub extern "C" fn read(fd: Fd, buf: *mut u8, count: SizeT) -> SsizeT {
                     count as u64,
                 )
             } else {
-                syscall3(SYS_PTY_MASTER_READ, entry.handle, buf as u64, count as u64)
+                crate::interrupt::restarting(Restart::IfAsked, || {
+                    syscall3(SYS_PTY_MASTER_READ, entry.handle, buf as u64, count as u64)
+                })
             }
         }
         HandleKind::PtySlave => {
@@ -569,7 +609,9 @@ pub extern "C" fn read(fd: Fd, buf: *mut u8, count: SizeT) -> SsizeT {
                     count as u64,
                 )
             } else {
-                syscall3(SYS_PTY_SLAVE_READ, entry.handle, buf as u64, count as u64)
+                crate::interrupt::restarting(Restart::IfAsked, || {
+                    syscall3(SYS_PTY_SLAVE_READ, entry.handle, buf as u64, count as u64)
+                })
             }
         }
     };
@@ -587,6 +629,8 @@ pub extern "C" fn read(fd: Fd, buf: *mut u8, count: SizeT) -> SsizeT {
 /// Returns number of bytes written, -1 on error.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn write(fd: Fd, buf: *const u8, count: SizeT) -> SsizeT {
+    // As in `read`.
+    let mark = Mark::now();
     // The descriptor first — `ksys_write` (fs/read_write.c:628) is `fdget_pos`
     // then `vfs_write`, whose `access_ok` (:458, via the same path as
     // `vfs_read`) is what yields `EFAULT`.  See `read` above.
@@ -632,7 +676,9 @@ pub extern "C" fn write(fd: Fd, buf: *const u8, count: SizeT) -> SsizeT {
             let ret = if is_nb {
                 syscall3(SYS_PIPE_TRY_WRITE, entry.handle, buf as u64, count as u64)
             } else {
-                syscall3(SYS_PIPE_WRITE, entry.handle, buf as u64, count as u64)
+                crate::interrupt::restarting(Restart::IfAsked, || {
+                    syscall3(SYS_PIPE_WRITE, entry.handle, buf as u64, count as u64)
+                })
             };
             if ret == errno::native::CHANNEL_CLOSED {
                 // Reader has closed — POSIX mandates EPIPE (not ECONNRESET).
@@ -652,7 +698,9 @@ pub extern "C" fn write(fd: Fd, buf: *const u8, count: SizeT) -> SsizeT {
                     count as u64,
                 )
             } else {
-                syscall3(SYS_SOCKETPAIR_SEND, entry.handle, buf as u64, count as u64)
+                crate::interrupt::restarting(crate::socket::wait_rule(fd, false), || {
+                    syscall3(SYS_SOCKETPAIR_SEND, entry.handle, buf as u64, count as u64)
+                })
             };
             if ret == errno::native::CHANNEL_CLOSED {
                 // Peer's read side is gone — POSIX mandates EPIPE.  The
@@ -676,7 +724,7 @@ pub extern "C" fn write(fd: Fd, buf: *const u8, count: SizeT) -> SsizeT {
                 // bytes are accepted; programs depend on this (same
                 // behavior as send() on a blocking socket).
                 let timeout_ms = crate::socket::get_meta(fd).map_or(0u64, |m| m.sndtimeo_ms);
-                return crate::socket::tcp_send_wait(entry.handle, buf, count, timeout_ms);
+                return crate::socket::tcp_send_wait(entry.handle, buf, count, timeout_ms, mark);
             }
             // Non-blocking: try once.
             let ret = syscall3(SYS_TCP_SEND, entry.handle, buf as u64, count as u64);
@@ -784,7 +832,9 @@ pub extern "C" fn write(fd: Fd, buf: *const u8, count: SizeT) -> SsizeT {
                     count as u64,
                 )
             } else {
-                syscall3(SYS_PTY_MASTER_WRITE, entry.handle, buf as u64, count as u64)
+                crate::interrupt::restarting(Restart::IfAsked, || {
+                    syscall3(SYS_PTY_MASTER_WRITE, entry.handle, buf as u64, count as u64)
+                })
             };
             if ret == errno::native::CHANNEL_CLOSED {
                 // Every slave is gone: nothing can ever read these bytes.
@@ -811,7 +861,9 @@ pub extern "C" fn write(fd: Fd, buf: *const u8, count: SizeT) -> SsizeT {
             // the `TOSTOP` job-control gate.  The return is counted in the
             // bytes we handed over, not in the CRLF-expanded ones, so a
             // caller looping on a short write makes progress.
-            let ret = syscall3(SYS_PTY_SLAVE_WRITE, entry.handle, buf as u64, count as u64);
+            let ret = crate::interrupt::restarting(Restart::IfAsked, || {
+                syscall3(SYS_PTY_SLAVE_WRITE, entry.handle, buf as u64, count as u64)
+            });
             if ret == errno::native::CHANNEL_CLOSED {
                 errno::set_errno(errno::EPIPE);
                 return -1;
@@ -1095,145 +1147,247 @@ pub struct Iovec {
     pub iov_len: SizeT,
 }
 
-/// Outcome of the argument checks `import_iovec` performs on `(iov, iovcnt)`.
-enum IovecCheck {
-    /// `nr_segs == 0`.  Upstream returns an empty iterator, so the call
-    /// succeeds transferring 0 bytes *without ever reading `iov`* — a NULL
-    /// vector at count 0 is therefore not an error.
-    Empty,
-    /// The vector is usable.
-    Usable,
-    /// `errno` has been set; the caller must fail.
-    Bad,
+/// [`crate::uio::import_iovec`] for the vectored calls.  `iovcnt` is C's
+/// `int`, which the syscall receives sign-extended into an `unsigned long`
+/// and `import_iovec` then takes as an `unsigned`: a negative count is a huge
+/// one, and `EINVAL`.
+///
+/// # Safety
+///
+/// As [`crate::uio::import_iovec`].
+unsafe fn import_vector(iov: *const Iovec, iovcnt: i32) -> Result<usize, i32> {
+    // The C call's conversion, deliberately.
+    #[allow(clippy::cast_sign_loss)]
+    let nr_segs = iovcnt as u32;
+    // SAFETY: the caller's contract.
+    unsafe { crate::uio::import_iovec(iov, nr_segs) }
 }
 
-/// The `(iov, iovcnt)` checks from `iovec_from_user` (lib/iov_iter.c), in
-/// upstream's order and with upstream's constants.
+/// Move up to `total` bytes -- the vector's size as `import_iovec` capped
+/// it -- through `iov`'s segments in order, one `step` per non-empty
+/// segment, stopping at the first short transfer: `do_loop_readv_writev`'s
+/// loop.  A failure after bytes have moved answers the bytes.
+///
+/// # Safety
+///
+/// `iov` holds `iovcnt` segments, as [`import_vector`] accepted them.
+unsafe fn transfer_segments(
+    iov: *const Iovec,
+    iovcnt: i32,
+    total: usize,
+    mut step: impl FnMut(*mut u8, usize) -> SsizeT,
+) -> SsizeT {
+    let n = usize::try_from(iovcnt).unwrap_or(0);
+    if iov.is_null() || n == 0 {
+        return 0;
+    }
+    // SAFETY: the caller's contract.
+    let segs = unsafe { core::slice::from_raw_parts(iov, n) };
+    let mut left = total;
+    let mut moved: SsizeT = 0;
+    for seg in segs {
+        let len = seg.iov_len.min(left);
+        if len == 0 {
+            if left == 0 {
+                break;
+            }
+            continue;
+        }
+        let r = step(seg.iov_base, len);
+        let Ok(got) = usize::try_from(r) else {
+            return if moved > 0 { moved } else { r };
+        };
+        moved = moved.saturating_add(r);
+        left = left.saturating_sub(got);
+        if got < len {
+            break;
+        }
+    }
+    moved
+}
+
+/// Where a vectored transfer happens.
+#[derive(Clone, Copy)]
+enum VecPos {
+    /// At the descriptor's position, moving it: `readv`, `writev`, and the
+    /// `-1` offset of `preadv2`/`pwritev2` (`do_readv`, `do_writev`).
+    Current,
+    /// At an offset, leaving the position alone (`do_preadv`, `do_pwritev`).
+    At(OffT),
+}
+
+/// Where [`at_position`] puts the position for the transfer.
+#[derive(Clone, Copy)]
+enum SeekTo {
+    Offset(OffT),
+    End,
+}
+
+/// Run `transfer` with the position of `entry`'s file at `to`, and put the
+/// position back afterwards.
+///
+/// This is how `pread`, `preadv` and their kin reach an offset here: the
+/// kernel has no positional read or write, so the shared position moves for
+/// the length of the call, and another thread using the same descriptor
+/// meanwhile sees it moved -- `B-D-PREAD-MOVES-THE-SHARED-FILE-POSITION`.
+fn at_position(entry: &fdtable::FdEntry, to: SeekTo, transfer: impl FnOnce() -> SsizeT) -> SsizeT {
+    let saved = syscall3(SYS_FS_SEEK, entry.handle, 0, crate::fcntl::SEEK_CUR as u64);
+    if saved < 0 {
+        return errno::translate(saved) as SsizeT;
+    }
+    let (offset, whence) = match to {
+        SeekTo::Offset(o) => (o as u64, crate::fcntl::SEEK_SET),
+        SeekTo::End => (0, crate::fcntl::SEEK_END),
+    };
+    let sr = syscall3(SYS_FS_SEEK, entry.handle, offset, whence as u64);
+    if sr < 0 {
+        return errno::translate(sr) as SsizeT;
+    }
+    let moved = transfer();
+    // Put the position back whatever the transfer did.  A failure here has
+    // nowhere to go: the transfer's own answer is the one the caller needs,
+    // and the position it would report is the one it just failed to set.
+    let _ = syscall3(
+        SYS_FS_SEEK,
+        entry.handle,
+        saved as u64,
+        crate::fcntl::SEEK_SET as u64,
+    );
+    moved
+}
+
+/// `do_readv`, `do_writev`, `do_preadv` and `do_pwritev` (fs/read_write.c),
+/// with their `flags`, in upstream's order:
 ///
 /// ```text
-///   nr_segs == 0          -> empty iterator, success with 0 bytes
-///   nr_segs > UIO_MAXIOV  -> EINVAL
-///   copy_iovec_from_user  -> EFAULT
+///   At(pos), pos < 0                -> EINVAL      (do_preadv, before fdget)
+///   fd not open, or O_PATH          -> EBADF       (fdget)
+///   At(_), not seekable             -> ESPIPE      (FMODE_PREAD/PWRITE)
+///   the vector                      -> EINVAL/EFAULT (import_iovec)
+///   nothing to transfer             -> 0           (do_iter_read/write)
+///   At(pos), pos + bytes overflows  -> EINVAL      (rw_verify_area)
+///   the flags                       -> EOPNOTSUPP  (plan_rw_flags)
+///   RWF_NOWAIT                      -> EAGAIN      (plan_rw_flags says why)
+///   the transfer, then RWF_[D]SYNC's sync
 /// ```
 ///
-/// The zero case is deliberate upstream, not an accident — the comment there
-/// reads "SuS says the readv() function *may* fail if the iovcnt argument was
-/// less than or equal to 0 … Linux has traditionally returned zero for zero
-/// segments".
-///
-/// Our callers take `iovcnt` as `i32` where the syscall takes an
-/// `unsigned long`, so a negative count arrives upstream as a huge value and
-/// trips the `UIO_MAXIOV` test; that is why a negative count is `EINVAL` here
-/// rather than anything else.
-///
-/// The three verdicts used to be folded into a single `EINVAL`, which told a
-/// caller passing a valid count and a bad pointer that its *count* was wrong,
-/// and rejected the traditional zero-segment call outright.
-fn check_iovec(iov: *const Iovec, iovcnt: i32) -> IovecCheck {
-    if iovcnt == 0 {
-        return IovecCheck::Empty;
+/// Upstream also judges `FMODE_READ`/`FMODE_WRITE` (`EBADF`) and
+/// `FMODE_CAN_READ`/`FMODE_CAN_WRITE` (`EINVAL`) after the vector.  Those
+/// are left to the transfer here: only descriptors `open` made record their
+/// access mode reliably, and the kernel refuses the wrong direction on the
+/// transfer itself.  So a zero-length vector on a descriptor open the other
+/// way is 0 here where upstream says `EBADF`.
+fn vectored(
+    fd: Fd,
+    iov: *const Iovec,
+    iovcnt: i32,
+    pos: VecPos,
+    is_write: bool,
+    flags: i32,
+) -> SsizeT {
+    let fail = |e: i32| -> SsizeT {
+        errno::set_errno(e);
+        -1
+    };
+    if let VecPos::At(p) = pos
+        && p < 0
+    {
+        return fail(errno::EINVAL);
     }
-    if iovcnt < 0 || iovcnt > crate::limits::IOV_MAX {
-        errno::set_errno(errno::EINVAL);
-        return IovecCheck::Bad;
+    let Some(entry) = lookup_fd(fd) else {
+        return -1;
+    };
+    if reject_path_fd_entry(&entry) {
+        return -1;
     }
-    if iov.is_null() {
-        errno::set_errno(errno::EFAULT);
-        return IovecCheck::Bad;
+    if matches!(pos, VecPos::At(_)) && entry.kind != HandleKind::File {
+        return fail(errno::ESPIPE);
     }
-    IovecCheck::Usable
+    // SAFETY: the caller's contract for `iov`.
+    let total = match unsafe { import_vector(iov, iovcnt) } {
+        Ok(n) => n,
+        Err(e) => return fail(e),
+    };
+    if total == 0 {
+        return 0;
+    }
+    if let VecPos::At(p) = pos {
+        // `total` is at most `MAX_RW_COUNT`, so it fits.
+        let bytes = OffT::try_from(total).unwrap_or(OffT::MAX);
+        if p.checked_add(bytes).is_none() {
+            return fail(errno::EINVAL);
+        }
+    }
+    let plan = match plan_rw_flags(flags, is_write, has_iter_ops(entry.kind, is_write)) {
+        Ok(plan) => plan,
+        Err(e) => return fail(e),
+    };
+    if plan.nowait {
+        return fail(errno::EAGAIN);
+    }
+    let run = || {
+        // SAFETY: `import_vector` accepted `iov` for `iovcnt` segments.
+        unsafe {
+            transfer_segments(iov, iovcnt, total, |buf, len| {
+                if is_write {
+                    write(fd, buf.cast_const(), len)
+                } else {
+                    read(fd, buf, len)
+                }
+            })
+        }
+    };
+    // Only a file has a position: `At` on anything else was ESPIPE above,
+    // and `RWF_APPEND` means nothing to a stream.
+    let moved = match (pos, entry.kind == HandleKind::File && plan.append) {
+        (VecPos::Current, false) => run(),
+        (VecPos::Current, true) => {
+            // `IOCB_APPEND` at the descriptor's position: the write goes at
+            // the end, and the position follows it there.
+            let sr = syscall3(SYS_FS_SEEK, entry.handle, 0, crate::fcntl::SEEK_END as u64);
+            if sr < 0 {
+                return errno::translate(sr) as SsizeT;
+            }
+            run()
+        }
+        (VecPos::At(p), false) => at_position(&entry, SeekTo::Offset(p), run),
+        (VecPos::At(_), true) => at_position(&entry, SeekTo::End, run),
+    };
+    if moved < 0 || !is_write {
+        return moved;
+    }
+    // The durability the caller asked for, once the bytes are written.  A
+    // failed sync replaces the byte count: the caller asked for stable
+    // storage and did not get it.
+    let rc = match plan.sync {
+        PostWriteSync::None => 0,
+        PostWriteSync::Data => fdatasync(fd),
+        PostWriteSync::Full => fsync(fd),
+    };
+    if rc < 0 {
+        return -1;
+    }
+    moved
 }
 
 /// Read data into multiple buffers (scatter read).
 ///
-/// Reads sequentially into each iovec buffer.  Returns the total
-/// number of bytes read, or -1 on error.
+/// Reads sequentially into each iovec buffer, at the descriptor's position.
+/// Returns the total number of bytes read, or -1 on error.  See
+/// [`vectored`] for the checks, in `do_readv`'s order.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn readv(fd: Fd, iov: *const Iovec, iovcnt: i32) -> SsizeT {
-    // `do_readv` (fs/read_write.c) is `fdget_pos` first and only then
-    // `vfs_readv` → `import_iovec`, so the descriptor outranks both the count
-    // and the pointer.  The per-segment `read` below repeats this lookup, but
-    // it would never run for a zero-segment call — which is exactly the case
-    // that must still report EBADF.
-    let Some(entry) = lookup_fd(fd) else {
-        return -1;
-    };
-    if reject_path_fd_entry(&entry) {
-        return -1;
-    }
-    match check_iovec(iov, iovcnt) {
-        IovecCheck::Empty => return 0,
-        IovecCheck::Bad => return -1,
-        IovecCheck::Usable => {}
-    }
-
-    let mut total: SsizeT = 0;
-    let mut i: i32 = 0;
-    while i < iovcnt {
-        // SAFETY: Caller guarantees iov is valid for iovcnt entries.
-        let vec = unsafe { &*iov.add(i as usize) };
-        if vec.iov_len > 0 {
-            let n = read(fd, vec.iov_base, vec.iov_len);
-            if n < 0 {
-                // If we already read some data, return that.
-                if total > 0 {
-                    return total;
-                }
-                return n;
-            }
-            total = total.wrapping_add(n);
-            // Short read — don't continue to next buffer.
-            if (n as SizeT) < vec.iov_len {
-                break;
-            }
-        }
-        i = i.wrapping_add(1);
-    }
-
-    total
+    vectored(fd, iov, iovcnt, VecPos::Current, false, 0)
 }
 
 /// Write data from multiple buffers (gather write).
 ///
-/// Writes sequentially from each iovec buffer.  Returns the total
-/// number of bytes written, or -1 on error.
+/// Writes sequentially from each iovec buffer, at the descriptor's position.
+/// Returns the total number of bytes written, or -1 on error.  See
+/// [`vectored`] for the checks, in `do_writev`'s order.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn writev(fd: Fd, iov: *const Iovec, iovcnt: i32) -> SsizeT {
-    // `do_writev` mirrors `do_readv`: `fdget_pos` before `import_iovec`.
-    let Some(entry) = lookup_fd(fd) else {
-        return -1;
-    };
-    if reject_path_fd_entry(&entry) {
-        return -1;
-    }
-    match check_iovec(iov, iovcnt) {
-        IovecCheck::Empty => return 0,
-        IovecCheck::Bad => return -1,
-        IovecCheck::Usable => {}
-    }
-
-    let mut total: SsizeT = 0;
-    let mut i: i32 = 0;
-    while i < iovcnt {
-        // SAFETY: Caller guarantees iov is valid for iovcnt entries.
-        let vec = unsafe { &*iov.add(i as usize) };
-        if vec.iov_len > 0 {
-            let n = write(fd, vec.iov_base.cast_const(), vec.iov_len);
-            if n < 0 {
-                if total > 0 {
-                    return total;
-                }
-                return n;
-            }
-            total = total.wrapping_add(n);
-            if (n as SizeT) < vec.iov_len {
-                break;
-            }
-        }
-        i = i.wrapping_add(1);
-    }
-
-    total
+    vectored(fd, iov, iovcnt, VecPos::Current, true, 0)
 }
 
 // ---------------------------------------------------------------------------
@@ -1245,90 +1399,11 @@ pub extern "C" fn writev(fd: Fd, iov: *const Iovec, iovcnt: i32) -> SsizeT {
 /// Like `readv`, but reads from file position `offset` without
 /// changing the file's current offset (same semantics as `pread`).
 ///
-/// Returns the total number of bytes read, or -1 on error.
+/// Returns the total number of bytes read, or -1 on error.  See
+/// [`vectored`] for the checks, in `do_preadv`'s order.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn preadv(fd: Fd, iov: *const Iovec, iovcnt: i32, offset: OffT) -> SsizeT {
-    // `do_preadv` (fs/read_write.c) fixes the order: `pos < 0` → EINVAL,
-    // `fdget` → EBADF, `!FMODE_PREAD` → ESPIPE, and only then `vfs_readv` →
-    // `import_iovec` for the count and the pointer.
-    if offset < 0 {
-        errno::set_errno(errno::EINVAL);
-        return -1;
-    }
-
-    let Some(entry) = lookup_fd(fd) else {
-        return -1;
-    };
-    if reject_path_fd_entry(&entry) {
-        return -1;
-    }
-
-    if entry.kind != HandleKind::File {
-        errno::set_errno(errno::ESPIPE);
-        return -1;
-    }
-
-    match check_iovec(iov, iovcnt) {
-        IovecCheck::Empty => return 0,
-        IovecCheck::Bad => return -1,
-        IovecCheck::Usable => {}
-    }
-
-    // Save current position.
-    let saved = syscall3(SYS_FS_SEEK, entry.handle, 0, crate::fcntl::SEEK_CUR as u64);
-    if saved < 0 {
-        return errno::translate(saved) as SsizeT;
-    }
-
-    // Seek to the requested offset.
-    let sr = syscall3(
-        SYS_FS_SEEK,
-        entry.handle,
-        offset as u64,
-        crate::fcntl::SEEK_SET as u64,
-    );
-    if sr < 0 {
-        return errno::translate(sr) as SsizeT;
-    }
-
-    // Read into each iov buffer.
-    let mut total: SsizeT = 0;
-    let mut i: i32 = 0;
-    while i < iovcnt {
-        // SAFETY: Caller guarantees iov is valid for iovcnt entries.
-        let vec = unsafe { &*iov.add(i as usize) };
-        if vec.iov_len > 0 {
-            let n = read(fd, vec.iov_base, vec.iov_len);
-            if n < 0 {
-                // Restore position before returning error.
-                let _ = syscall3(
-                    SYS_FS_SEEK,
-                    entry.handle,
-                    saved as u64,
-                    crate::fcntl::SEEK_SET as u64,
-                );
-                if total > 0 {
-                    return total;
-                }
-                return n;
-            }
-            total = total.wrapping_add(n);
-            if (n as SizeT) < vec.iov_len {
-                break;
-            }
-        }
-        i = i.wrapping_add(1);
-    }
-
-    // Restore original position.
-    let _ = syscall3(
-        SYS_FS_SEEK,
-        entry.handle,
-        saved as u64,
-        crate::fcntl::SEEK_SET as u64,
-    );
-
-    total
+    vectored(fd, iov, iovcnt, VecPos::At(offset), false, 0)
 }
 
 /// Write data from multiple buffers at a given offset (gather write).
@@ -1336,87 +1411,11 @@ pub extern "C" fn preadv(fd: Fd, iov: *const Iovec, iovcnt: i32, offset: OffT) -
 /// Like `writev`, but writes to file position `offset` without
 /// changing the file's current offset (same semantics as `pwrite`).
 ///
-/// Returns the total number of bytes written, or -1 on error.
+/// Returns the total number of bytes written, or -1 on error.  See
+/// [`vectored`] for the checks, in `do_pwritev`'s order.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn pwritev(fd: Fd, iov: *const Iovec, iovcnt: i32, offset: OffT) -> SsizeT {
-    // Same order as `preadv`, from `do_pwritev` (fs/read_write.c).
-    if offset < 0 {
-        errno::set_errno(errno::EINVAL);
-        return -1;
-    }
-
-    let Some(entry) = lookup_fd(fd) else {
-        return -1;
-    };
-    if reject_path_fd_entry(&entry) {
-        return -1;
-    }
-
-    if entry.kind != HandleKind::File {
-        errno::set_errno(errno::ESPIPE);
-        return -1;
-    }
-
-    match check_iovec(iov, iovcnt) {
-        IovecCheck::Empty => return 0,
-        IovecCheck::Bad => return -1,
-        IovecCheck::Usable => {}
-    }
-
-    // Save current position.
-    let saved = syscall3(SYS_FS_SEEK, entry.handle, 0, crate::fcntl::SEEK_CUR as u64);
-    if saved < 0 {
-        return errno::translate(saved) as SsizeT;
-    }
-
-    // Seek to the requested offset.
-    let sr = syscall3(
-        SYS_FS_SEEK,
-        entry.handle,
-        offset as u64,
-        crate::fcntl::SEEK_SET as u64,
-    );
-    if sr < 0 {
-        return errno::translate(sr) as SsizeT;
-    }
-
-    // Write from each iov buffer.
-    let mut total: SsizeT = 0;
-    let mut i: i32 = 0;
-    while i < iovcnt {
-        // SAFETY: Caller guarantees iov is valid for iovcnt entries.
-        let vec = unsafe { &*iov.add(i as usize) };
-        if vec.iov_len > 0 {
-            let n = write(fd, vec.iov_base.cast_const(), vec.iov_len);
-            if n < 0 {
-                let _ = syscall3(
-                    SYS_FS_SEEK,
-                    entry.handle,
-                    saved as u64,
-                    crate::fcntl::SEEK_SET as u64,
-                );
-                if total > 0 {
-                    return total;
-                }
-                return n;
-            }
-            total = total.wrapping_add(n);
-            if (n as SizeT) < vec.iov_len {
-                break;
-            }
-        }
-        i = i.wrapping_add(1);
-    }
-
-    // Restore original position.
-    let _ = syscall3(
-        SYS_FS_SEEK,
-        entry.handle,
-        saved as u64,
-        crate::fcntl::SEEK_SET as u64,
-    );
-
-    total
+    vectored(fd, iov, iovcnt, VecPos::At(offset), true, 0)
 }
 
 // ---------------------------------------------------------------------------
@@ -1449,63 +1448,111 @@ pub(crate) enum PostWriteSync {
     Full,
 }
 
-/// Decide what an `RWF_*` set means, or which errno refuses it.
-///
-/// One policy, in the module that owns the constants, used by `preadv2`,
-/// `pwritev2` and `linux_aio_abi`. It lived in the AIO module first and was
-/// moved here when `pwritev2` turned out to need exactly the same answers:
-/// two copies of one rule is how the two drift, and a durability rule that
-/// drifts between the AIO path and the ordinary write path is worse than
-/// either version of it.
-///
-/// Each answer comes from asking whether we can actually deliver what was
-/// requested, because the one answer never available is to accept a flag and
-/// not honour it:
-///
-/// * `RWF_HIPRI` is a scheduling hint with nothing observable behind it, and
-///   is the only flag ignored here.
-/// * `RWF_DSYNC` / `RWF_SYNC` we can deliver, with `fdatasync` / `fsync`. Be
-///   aware of what that costs on this target: both reach `SYS_FS_SYNC` (641),
-///   which is a **global** sync, so a caller writing with `RWF_DSYNC` in a
-///   loop flushes the whole system each time. Correct, and expensive; the fix
-///   is a per-fd sync syscall, not a weaker promise here —
-///   **on a write**. On a read they are meaningless, and a caller that sets
-///   them has misunderstood something, so `is_write == false` refuses them
-///   rather than quietly doing nothing.
-/// * `RWF_NOWAIT` says *fail rather than block*. Nothing here can promise not
-///   to block, so the only honest answer is the failure the flag asks for;
-///   `EAGAIN` is what callers are written to handle.
-/// * `RWF_APPEND` redirects the write to end-of-file and makes the offset
-///   irrelevant. We write at the caller's offset, so ignoring it would put
-///   bytes somewhere the caller did not ask for — corruption rather than a
-///   missing feature. Refused.
-/// * Anything else is a flag from a newer kernel we do not implement, and
-///   Linux refuses unknown `RWF_` bits with `EINVAL` too.
-pub(crate) fn plan_rw_flags(flags: i32, is_write: bool) -> Result<PostWriteSync, i32> {
-    const KNOWN: i32 = RWF_HIPRI | RWF_DSYNC | RWF_SYNC | RWF_NOWAIT | RWF_APPEND;
+/// What an accepted `RWF_*` set asks of one transfer.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct RwPlan {
+    /// The sync owed once a write's bytes have landed.
+    pub(crate) sync: PostWriteSync,
+    /// `RWF_NOWAIT`: fail with `EAGAIN` rather than block.
+    pub(crate) nowait: bool,
+    /// `RWF_APPEND` on a write: the bytes go at the end of the file.
+    pub(crate) append: bool,
+}
 
-    // Unknown bits first, so a caller that sets one alongside a flag we could
-    // have honoured hears about the bit it got wrong rather than a consequence.
-    if flags & !KNOWN != 0 {
-        return Err(errno::EINVAL);
+impl RwPlan {
+    /// No flags: a plain transfer.
+    pub(crate) const PLAIN: Self = Self {
+        sync: PostWriteSync::None,
+        nowait: false,
+        append: false,
+    };
+}
+
+/// Linux 6.6's `kiocb_set_rw_flags` (include/linux/fs.h), and the stricter
+/// rule of `do_loop_readv_writev` (fs/read_write.c) for a file with only
+/// `.read`/`.write` (`has_iter == false`, see [`has_iter_ops`]): what an
+/// `RWF_*` set asks of one transfer, or the errno that refuses it.
+///
+/// One policy, in the module that owns the constants, for `preadv2`,
+/// `pwritev2` and kernel AIO (`linux_aio_abi`): two copies of one rule is
+/// how the two drift.
+///
+/// | flag | here |
+/// |---|---|
+/// | any bit Linux does not know | `EOPNOTSUPP` |
+/// | `RWF_HIPRI` | accepted; a polling hint with nothing observable behind it |
+/// | `RWF_DSYNC` / `RWF_SYNC` | on a write, `fdatasync` / `fsync` after it; on a read, nothing |
+/// | `RWF_APPEND` | on a write, the bytes go at the end of the file; on a read, nothing |
+/// | `RWF_NOWAIT` | the transfer is not attempted: `EAGAIN` |
+///
+/// `RWF_NOWAIT` needs `FMODE_NOWAIT` upstream -- `EOPNOTSUPP` without it --
+/// and every descriptor here is taken to have it, as regular files, pipes
+/// and sockets do on Linux.  It asks the transfer to fail rather than block;
+/// nothing here can tell beforehand whether a transfer would block, so the
+/// transfer is not attempted and the answer is the `EAGAIN` a blocking one
+/// earns.  Callers use the flag as an optimisation and handle `EAGAIN` by
+/// doing the transfer without it, which works.
+///
+/// Until 2026-09-26 an unknown bit, and the durability flags on a read,
+/// were `EINVAL`, and `RWF_APPEND` was refused with `EINVAL` -- all three
+/// calls Linux accepts or refuses with `EOPNOTSUPP` -- and `preadv2` and
+/// `pwritev2` judged the flags before the descriptor, where Linux judges
+/// them last.
+pub(crate) fn plan_rw_flags(flags: i32, is_write: bool, has_iter: bool) -> Result<RwPlan, i32> {
+    const SUPPORTED: i32 = RWF_HIPRI | RWF_DSYNC | RWF_SYNC | RWF_NOWAIT | RWF_APPEND;
+
+    if flags == 0 {
+        return Ok(RwPlan::PLAIN);
     }
-    if flags & RWF_APPEND != 0 {
-        return Err(errno::EINVAL);
+    if !has_iter {
+        return if flags & !RWF_HIPRI == 0 {
+            Ok(RwPlan::PLAIN)
+        } else {
+            Err(errno::EOPNOTSUPP)
+        };
     }
-    if flags & RWF_NOWAIT != 0 {
-        return Err(errno::EAGAIN);
+    if flags & !SUPPORTED != 0 {
+        return Err(errno::EOPNOTSUPP);
     }
-    if flags & (RWF_SYNC | RWF_DSYNC) != 0 && !is_write {
-        return Err(errno::EINVAL);
+    // SYNC implies DSYNC upstream, and is the stronger promise.
+    let sync = if !is_write {
+        PostWriteSync::None
+    } else if flags & RWF_SYNC != 0 {
+        PostWriteSync::Full
+    } else if flags & RWF_DSYNC != 0 {
+        PostWriteSync::Data
+    } else {
+        PostWriteSync::None
+    };
+    Ok(RwPlan {
+        sync,
+        nowait: flags & RWF_NOWAIT != 0,
+        append: is_write && flags & RWF_APPEND != 0,
+    })
+}
+
+/// Whether a descriptor of `kind` has `read_iter` -- `write_iter` when
+/// `is_write` -- on Linux, rather than only `.read`/`.write` or nothing.
+///
+/// It decides which `RWF_*` flags the vectored calls take (see
+/// [`plan_rw_flags`]) and whether kernel AIO may read or write it at all
+/// (`aio_read`'s `EINVAL`).  eventfd has `read_iter` and a plain `.write`;
+/// timerfd and inotify have a plain `.read` and no write; epoll has neither.
+/// Files, pipes, sockets and terminals have both.
+pub(crate) fn has_iter_ops(kind: HandleKind, is_write: bool) -> bool {
+    match kind {
+        HandleKind::Eventfd => !is_write,
+        HandleKind::Timerfd | HandleKind::Inotify | HandleKind::Epoll => false,
+        HandleKind::File
+        | HandleKind::Pipe
+        | HandleKind::Console
+        | HandleKind::TcpStream
+        | HandleKind::TcpListener
+        | HandleKind::UdpSocket
+        | HandleKind::UnixStream
+        | HandleKind::PtyMaster
+        | HandleKind::PtySlave => true,
     }
-    // SYNC is the stronger promise, so it wins when both are set.
-    if flags & RWF_SYNC != 0 {
-        return Ok(PostWriteSync::Full);
-    }
-    if flags & RWF_DSYNC != 0 {
-        return Ok(PostWriteSync::Data);
-    }
-    Ok(PostWriteSync::None)
 }
 
 /// Read data from a file at an offset into multiple buffers, with flags.
@@ -1516,7 +1563,9 @@ pub(crate) fn plan_rw_flags(flags: i32, is_write: bool) -> Result<PostWriteSync,
 /// If `offset == -1`, the current file position is used and updated
 /// (like `readv`).
 ///
-/// `flags` is honoured or refused, never ignored — see [`plan_rw_flags`].
+/// `flags` is honoured or refused, never ignored — see [`plan_rw_flags`] —
+/// and judged last, as Linux judges it: a bad descriptor or vector outranks
+/// a bad flag, and a transfer of nothing never looks at the flags at all.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn preadv2(
     fd: Fd,
@@ -1525,20 +1574,17 @@ pub extern "C" fn preadv2(
     offset: OffT,
     flags: i32,
 ) -> SsizeT {
-    // is_write = false: the durability flags are write-only, and asking for
-    // them on a read is a mistake worth reporting rather than absorbing.
-    if let Err(e) = plan_rw_flags(flags, false) {
-        errno::set_errno(e);
-        return -1;
-    }
-    if offset == -1 {
-        // Use current file position (like readv).
-        return readv(fd, iov, iovcnt);
-    }
-    preadv(fd, iov, iovcnt, offset)
+    // SYSCALL_DEFINE6(preadv2): -1 is `do_readv`, anything else `do_preadv`.
+    let pos = if offset == -1 {
+        VecPos::Current
+    } else {
+        VecPos::At(offset)
+    };
+    vectored(fd, iov, iovcnt, pos, false, flags)
 }
 
-/// Write data to a file at an offset from multiple buffers, with flags.
+/// Write data from multiple buffers at a given offset (gather write), with
+/// flags.
 ///
 /// Like `pwritev`, but with an additional `flags` parameter. `flags == 0`
 /// is identical to `pwritev`.
@@ -1546,11 +1592,12 @@ pub extern "C" fn preadv2(
 /// If `offset == -1`, the current file position is used and updated
 /// (like `writev`).
 ///
-/// `flags` is honoured or refused, never ignored — see [`plan_rw_flags`].
-/// `RWF_DSYNC`/`RWF_SYNC` sync the file once the bytes are written, and a
-/// failed sync replaces the byte count: the caller asked for stable storage
-/// and did not get it, so reporting how much was written would be the
-/// durability lie this exists to remove.
+/// `flags` is honoured or refused, never ignored — see [`plan_rw_flags`] —
+/// and judged last, as Linux judges it.  `RWF_DSYNC`/`RWF_SYNC` sync the
+/// file once the bytes are written, and a failed sync replaces the byte
+/// count: the caller asked for stable storage and did not get it, so
+/// reporting how much was written would be the durability lie this exists
+/// to remove.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn pwritev2(
     fd: Fd,
@@ -1559,31 +1606,14 @@ pub extern "C" fn pwritev2(
     offset: OffT,
     flags: i32,
 ) -> SsizeT {
-    let sync_after = match plan_rw_flags(flags, true) {
-        Ok(s) => s,
-        Err(e) => {
-            errno::set_errno(e);
-            return -1;
-        }
-    };
-    let written = if offset == -1 {
-        writev(fd, iov, iovcnt)
+    // SYSCALL_DEFINE6(pwritev2): -1 is `do_writev`, anything else
+    // `do_pwritev`.
+    let pos = if offset == -1 {
+        VecPos::Current
     } else {
-        pwritev(fd, iov, iovcnt, offset)
+        VecPos::At(offset)
     };
-    if written < 0 {
-        return written;
-    }
-    let rc = match sync_after {
-        PostWriteSync::None => 0,
-        PostWriteSync::Data => fdatasync(fd),
-        PostWriteSync::Full => fsync(fd),
-    };
-    if rc < 0 {
-        // fsync/fdatasync already set errno.
-        return -1;
-    }
-    written
+    vectored(fd, iov, iovcnt, pos, true, flags)
 }
 
 /// `fadvise64` — LP64 alias for `posix_fadvise`.
@@ -1834,6 +1864,9 @@ pub extern "C" fn dup2(oldfd: Fd, newfd: Fd) -> Fd {
         };
         // Only close the old kernel handle if no other fd still uses it.
         if !fdtable::is_handle_referenced(old.kind, old.handle) {
+            // And only then does the evicted file leave epoll's interest
+            // lists — see `close()`.
+            crate::epoll::forget_file(old.kind, old.handle);
             // For TCP streams: respect SO_LINGER on the evicted socket,
             // matching close() behavior per POSIX dup2 spec ("closed first").
             if old.kind == HandleKind::TcpStream && old.handle != 0 {
@@ -4667,21 +4700,143 @@ static mut UMASK_VALUE: ModeT = 0o022;
 
 /// Set file mode creation mask.
 ///
-/// Stores the new mask and returns the previous one.  While the kernel
-/// doesn't enforce permissions yet, this gives correct POSIX semantics
-/// for programs that query or chain umask values.
+/// Stores the new mask and returns the previous one. The mask this libc
+/// applies to `open`, `mkdir` and friends is its own copy, `UMASK_VALUE`; the
+/// kernel keeps the process's record of it too (design-decisions.md §960), so
+/// that it survives `exec` and reaches a spawned child, and this keeps that
+/// record current. Start-up reads it back ([`init_umask_from_record`]).
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn umask(cmask: ModeT) -> ModeT {
+    // Only the low 9 bits (rwxrwxrwx) are meaningful for the mask.
+    let mask = cmask & 0o777;
     // SAFETY: `UMASK_VALUE` is touched only through raw pointers, never through
     // a reference, so no `&mut` to a `static mut` is formed. Serialising the
     // read-then-write against other threads is the caller's obligation — see
     // the note on `UMASK_VALUE`.
     let previous = unsafe { core::ptr::addr_of!(UMASK_VALUE).read() };
-    // Only the low 9 bits (rwxrwxrwx) are meaningful for the mask.
     unsafe {
-        core::ptr::addr_of_mut!(UMASK_VALUE).write(cmask & 0o777);
+        core::ptr::addr_of_mut!(UMASK_VALUE).write(mask);
     }
+    umask_record::set(mask);
     previous
+}
+
+/// Take the file-creation mask this process was given.
+///
+/// Called once from `__libc_start_main`, before constructors and `main`. The
+/// kernel keeps each process's mask (design-decisions.md §960): inherited by
+/// `fork`, kept by `exec`, given to a spawned child. A kernel without the
+/// record leaves the POSIX default, 022, which is what every process started
+/// with before it existed.
+pub(crate) fn init_umask_from_record() {
+    if let Some(mask) = umask_record::query() {
+        // SAFETY: as in `umask`: a raw-pointer write, before `main` and before
+        // any thread but this one exists.
+        unsafe {
+            core::ptr::addr_of_mut!(UMASK_VALUE).write(mask & 0o777);
+        }
+    }
+}
+
+/// The kernel's record of this process's file-creation mask
+/// (`SYS_PROCESS_UMASK`, design-decisions.md §960).
+///
+/// `UMASK_VALUE` stays what this libc applies; the record is what outlives it.
+mod umask_record {
+    use super::ModeT;
+
+    #[cfg(not(target_os = "none"))]
+    pub(super) use host::{query, set};
+
+    /// Record `mask`, already reduced to `0..=0o777`.
+    ///
+    /// Nothing is reported, because `umask()` has no error to report it with:
+    /// POSIX says it always succeeds. The kernel refuses only a mask above
+    /// `0o777`, which this cannot pass, and a caller with no process, which a
+    /// running program is not; a kernel without the record answers "no such
+    /// syscall", and then the mask lives in this libc alone, as it always had.
+    #[cfg(target_os = "none")]
+    pub(super) fn set(mask: ModeT) {
+        // Discarded deliberately -- see above for why no answer changes what
+        // `umask()` must do.
+        let _ = crate::syscall::syscall1(crate::syscall::SYS_PROCESS_UMASK, u64::from(mask));
+    }
+
+    /// The recorded mask, or `None` from a kernel without the record.
+    #[cfg(target_os = "none")]
+    pub(super) fn query() -> Option<ModeT> {
+        let ret = crate::syscall::syscall1(
+            crate::syscall::SYS_PROCESS_UMASK,
+            crate::syscall::UMASK_QUERY,
+        );
+        // Negative is "no such syscall" (or no process, which cannot be us);
+        // a value above 0o777 would be a kernel bug, and is not taken.
+        u32::try_from(ret).ok().filter(|&m| m <= 0o777)
+    }
+
+    /// Host builds have no kernel: the record is one process-wide value, as
+    /// `UMASK_VALUE` is, which the tests that touch it already serialise on
+    /// `UMASK_TEST_LOCK`. `u32::MAX` models a kernel without the record.
+    #[cfg(not(target_os = "none"))]
+    pub(crate) mod host {
+        use super::ModeT;
+        use core::sync::atomic::{AtomicU32, Ordering};
+
+        /// The modelled record: 022 until set, or `ABSENT`.
+        static RECORD: AtomicU32 = AtomicU32::new(0o022);
+        const ABSENT: u32 = u32::MAX;
+
+        pub(in crate::file) fn set(mask: ModeT) {
+            // A kernel without the record ignores the call; so does the model.
+            let _ = RECORD.fetch_update(Ordering::SeqCst, Ordering::SeqCst, |r| {
+                (r != ABSENT).then_some(mask)
+            });
+        }
+
+        pub(in crate::file) fn query() -> Option<ModeT> {
+            let r = RECORD.load(Ordering::SeqCst);
+            (r != ABSENT).then_some(r)
+        }
+
+        /// The record as the kernel would report it.
+        #[cfg(test)]
+        pub(crate) fn recorded() -> Option<ModeT> {
+            query()
+        }
+
+        /// Plant `mask` as a parent's record would be; `None` models a kernel
+        /// without one.
+        #[cfg(test)]
+        pub(crate) fn preset(mask: Option<ModeT>) {
+            RECORD.store(mask.unwrap_or(ABSENT), Ordering::SeqCst);
+        }
+    }
+}
+
+/// Serialises every test that sets the process umask.
+///
+/// There is one `UMASK_VALUE` for the process -- and, on the host, one modelled
+/// kernel record of it -- and `libtest` runs tests on several threads at once.
+/// Each test that sets the mask is a "reset to a known value, then assert on
+/// what the next call gives back" sequence, and that sequence is only
+/// meaningful if nothing else moves the mask in between -- so the *whole test
+/// body*, not each call, is the unit that has to be atomic. Held from the first
+/// statement for that reason.
+///
+/// Crate-visible so that a test elsewhere that sets the mask can take it too:
+/// `sys_stat.rs` had one, which ran unserialised until 2026-09-25 (the module,
+/// a facade nothing reached, went on 2026-09-27). Poison is recovered so that
+/// one genuine failure reports once instead of poisoning its siblings.
+#[cfg(test)]
+static UMASK_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+/// Take [`UMASK_TEST_LOCK`] for the rest of a test.
+#[cfg(test)]
+#[must_use = "the guard serialises the process-wide umask; bind it to `_g`"]
+pub(crate) fn lock_umask_for_test() -> std::sync::MutexGuard<'static, ()> {
+    UMASK_TEST_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
 }
 
 /// Get the current umask value without modifying it.
@@ -5438,7 +5593,9 @@ fn tee_transfer_over<P: TeePipes>(pipes: &mut P, len: usize, nonblock: bool) -> 
     while total < len {
         let chunk = len.saturating_sub(total).min(buf.len());
         // Non-destructive copy of up to `chunk` bytes at `offset`.
-        let n = pipes.peek(offset, &mut buf[..chunk]);
+        // `chunk <= buf.len()` by the `min` above; `get_mut` says so without
+        // a slice that could panic.
+        let n = pipes.peek(offset, buf.get_mut(..chunk).unwrap_or(&mut []));
         if n < 0 {
             if total > 0 {
                 break;
@@ -5472,7 +5629,9 @@ fn tee_transfer_over<P: TeePipes>(pipes: &mut P, len: usize, nonblock: bool) -> 
         let to_write = n as usize;
         let mut written: usize = 0;
         while written < to_write {
-            let nw = pipes.write(&buf[written..to_write], nonblock);
+            // `to_write <= chunk <= buf.len()`: `peek` returns at most what
+            // it was given room for.
+            let nw = pipes.write(buf.get(written..to_write).unwrap_or(&[]), nonblock);
             if nw < 0 {
                 // Destination error.  If we've made progress, return it so the
                 // caller sees a short transfer (Linux behaviour on EAGAIN/EPIPE
@@ -5712,6 +5871,7 @@ fn do_flock(fd: Fd, operation: i32) -> i32 {
 
     let lock_type: u64 = u64::from(mode == LOCK_EX);
     let nonblock = operation & LOCK_NB != 0;
+    let mark = Mark::now();
     loop {
         let ret = syscall4(
             SYS_FS_FLOCK,
@@ -5726,8 +5886,17 @@ fn do_flock(fd: Fd, operation: i32) -> i32 {
         // Negative return: map to errno (sets errno, yields -1).
         let mapped = errno::translate(ret) as i32;
         if !nonblock && errno::get_errno() == errno::EAGAIN {
-            // Contended blocking request: yield the CPU and retry.
-            let _ = syscall1(SYS_SLEEP, 0);
+            // Contended blocking request: a handler ends the wait unless it
+            // was installed with `SA_RESTART`, as Linux's `flock` is
+            // restarted (`crate::interrupt`); otherwise sleep a little, in a
+            // wait a signal ends at once, and try again.  It yielded and
+            // tried again at once until 2026-09-30, which kept a CPU busy
+            // for as long as the lock was held, and no signal ended it.
+            if mark.interrupted(Restart::IfAsked) {
+                errno::set_errno(errno::EINTR);
+                return -1;
+            }
+            crate::lowlevellock::nap(2_000_000, Restart::IfAsked, mark);
             continue;
         }
         return mapped;
@@ -6705,6 +6874,103 @@ pub extern "C" fn lstat64(path: *const u8, statbuf: *mut crate::stat::Stat) -> i
 }
 
 // ---------------------------------------------------------------------------
+// The rest of glibc's large-file names
+// ---------------------------------------------------------------------------
+//
+// glibc exports a `*64` twin of every call that takes or returns a file
+// offset, for 32-bit programs built with `_FILE_OFFSET_BITS=64`; on x86_64
+// each is the same function under a second name (glibc's are aliases). A C
+// program compiled against this library's headers never names one: musl's
+// headers define them as macros for the standard names, and only under
+// `_LARGEFILE64_SOURCE`. They are here for code that declares them itself --
+// a Rust crate written for linux-gnu, a configure probe, an object built
+// against glibc's headers -- which would otherwise fail to link.
+
+/// `pread64` -- [`pread`] by glibc's large-file name.
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub extern "C" fn pread64(fd: Fd, buf: *mut u8, count: SizeT, offset: OffT) -> SsizeT {
+    pread(fd, buf, count, offset)
+}
+
+/// `pwrite64` -- [`pwrite`] by glibc's large-file name.
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub extern "C" fn pwrite64(fd: Fd, buf: *const u8, count: SizeT, offset: OffT) -> SsizeT {
+    pwrite(fd, buf, count, offset)
+}
+
+/// `preadv64` -- [`preadv`] by glibc's large-file name.
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub extern "C" fn preadv64(fd: Fd, iov: *const Iovec, iovcnt: i32, offset: OffT) -> SsizeT {
+    preadv(fd, iov, iovcnt, offset)
+}
+
+/// `pwritev64` -- [`pwritev`] by glibc's large-file name.
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub extern "C" fn pwritev64(fd: Fd, iov: *const Iovec, iovcnt: i32, offset: OffT) -> SsizeT {
+    pwritev(fd, iov, iovcnt, offset)
+}
+
+/// `preadv64v2` -- [`preadv2`] by glibc's large-file name.
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub extern "C" fn preadv64v2(
+    fd: Fd,
+    iov: *const Iovec,
+    iovcnt: i32,
+    offset: OffT,
+    flags: i32,
+) -> SsizeT {
+    preadv2(fd, iov, iovcnt, offset, flags)
+}
+
+/// `pwritev64v2` -- [`pwritev2`] by glibc's large-file name.
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub extern "C" fn pwritev64v2(
+    fd: Fd,
+    iov: *const Iovec,
+    iovcnt: i32,
+    offset: OffT,
+    flags: i32,
+) -> SsizeT {
+    pwritev2(fd, iov, iovcnt, offset, flags)
+}
+
+/// `truncate64` -- [`truncate`] by glibc's large-file name.
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub extern "C" fn truncate64(path: *const u8, length: OffT) -> i32 {
+    truncate(path, length)
+}
+
+/// `ftruncate64` -- [`ftruncate`] by glibc's large-file name.
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub extern "C" fn ftruncate64(fd: Fd, length: OffT) -> i32 {
+    ftruncate(fd, length)
+}
+
+/// `creat64` -- [`creat`] by glibc's large-file name.
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub extern "C" fn creat64(path: *const u8, mode: ModeT) -> Fd {
+    creat(path, mode)
+}
+
+/// `openat64` -- [`openat`] by glibc's large-file name.
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub extern "C" fn openat64(dirfd: i32, path: *const u8, flags: i32, mode: ModeT) -> Fd {
+    openat(dirfd, path, flags, mode)
+}
+
+/// `posix_fadvise64` -- [`posix_fadvise`] by glibc's large-file name.
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub extern "C" fn posix_fadvise64(fd: Fd, offset: OffT, len: OffT, advice: i32) -> i32 {
+    posix_fadvise(fd, offset, len, advice)
+}
+
+/// `fallocate64` -- [`fallocate`] by glibc's large-file name.
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub extern "C" fn fallocate64(fd: Fd, mode: i32, offset: OffT, len: OffT) -> i32 {
+    fallocate(fd, mode, offset, len)
+}
+
+// ---------------------------------------------------------------------------
 // glibc __xstat family — internal stat wrappers
 // ---------------------------------------------------------------------------
 //
@@ -6755,23 +7021,27 @@ pub extern "C" fn __lxstat64(_ver: i32, path: *const u8, statbuf: *mut crate::st
 
 /// `__read_chk` — fortified `read`.
 ///
-/// `buflen` is the size of the buffer `buf` points to.  We ignore it
-/// (no runtime overflow check) and delegate to `read`.
+/// `buflen` is the size of the object `buf` points to. glibc aborts when
+/// `count > buflen`; this reads at most `buflen` bytes instead, since a short
+/// read is part of `read`'s contract and every caller must already handle one
+/// (`crate::fortify` has the rule, design-decisions.md §1105). It ignored
+/// `buflen` altogether until 2026-09-25.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
-pub extern "C" fn __read_chk(fd: Fd, buf: *mut u8, count: SizeT, _buflen: SizeT) -> SsizeT {
-    read(fd, buf, count)
+pub extern "C" fn __read_chk(fd: Fd, buf: *mut u8, count: SizeT, buflen: SizeT) -> SsizeT {
+    read(fd, buf, count.min(buflen))
 }
 
-/// `__pread_chk` — fortified `pread`.
+/// `__pread_chk` — fortified `pread`: reads at most `buflen` bytes, as
+/// [`__read_chk`] does.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn __pread_chk(
     fd: Fd,
     buf: *mut u8,
     count: SizeT,
     offset: OffT,
-    _buflen: SizeT,
+    buflen: SizeT,
 ) -> SsizeT {
-    pread(fd, buf, count, offset)
+    pread(fd, buf, count.min(buflen), offset)
 }
 
 /// `__pread64_chk` — LP64 alias for `__pread_chk`.
@@ -6787,8 +7057,19 @@ pub extern "C" fn __pread64_chk(
 }
 
 /// `__getcwd_chk` — fortified `getcwd`.
+///
+/// `buflen` is the compiler's view of how large `buf` really is.  glibc aborts
+/// when `size > buflen`; as [`__readlink_chk`] does, this clamps instead, so an
+/// overstated `size` becomes an `ERANGE` from `getcwd` rather than a write
+/// past the buffer.  A null `buf` has no object for `buflen` to describe — it
+/// is the allocating form, and `size` is passed through untouched.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
-pub extern "C" fn __getcwd_chk(buf: *mut u8, size: SizeT, _buflen: SizeT) -> *mut u8 {
+pub extern "C" fn __getcwd_chk(buf: *mut u8, size: SizeT, buflen: SizeT) -> *mut u8 {
+    let size = if buf.is_null() {
+        size
+    } else {
+        size.min(buflen)
+    };
     crate::unistd::getcwd(buf, size)
 }
 
@@ -6852,7 +7133,7 @@ pub extern "C" fn __readlinkat_chk(
 /// until 2026-09-13, which would send the next reader to build a cache that
 /// already exists instead of adding the one call that is needed.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
-pub extern "C" fn readahead(fd: Fd, offset: i64, count: usize) -> i32 {
+pub extern "C" fn readahead(fd: Fd, offset: i64, count: usize) -> isize {
     if fd < 0 {
         errno::set_errno(errno::EBADF);
         return -1;
@@ -7904,111 +8185,281 @@ pub extern "C" fn statx(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn posix_close_takes_no_flag_but_zero() {
+        errno::set_errno(0);
+        assert_eq!(super::posix_close(-1, 1), -1);
+        assert_eq!(errno::get_errno(), errno::EINVAL);
+        // Flag 0 is `close`: a bad descriptor is `EBADF`.
+        assert_eq!(super::posix_close(-1, super::POSIX_CLOSE_RESTART), -1);
+        assert_eq!(errno::get_errno(), errno::EBADF);
+    }
+
     // -- RWF_ policy (shared by preadv2/pwritev2 and kernel AIO) --
     use super::{
-        PostWriteSync, RWF_APPEND, RWF_DSYNC, RWF_HIPRI, RWF_NOWAIT, RWF_SYNC, plan_rw_flags,
+        PostWriteSync, RWF_APPEND, RWF_DSYNC, RWF_HIPRI, RWF_NOWAIT, RWF_SYNC, RwPlan,
+        plan_rw_flags,
     };
 
-    #[test]
-    fn rwf_no_flags_asks_for_nothing() {
-        assert_eq!(plan_rw_flags(0, true), Ok(PostWriteSync::None));
-        assert_eq!(plan_rw_flags(0, false), Ok(PostWriteSync::None));
+    fn plan(flags: i32, is_write: bool) -> Result<RwPlan, i32> {
+        plan_rw_flags(flags, is_write, true)
+    }
+
+    fn sync(s: PostWriteSync) -> RwPlan {
+        RwPlan {
+            sync: s,
+            ..RwPlan::PLAIN
+        }
     }
 
     #[test]
-    fn rwf_hipri_is_a_hint_and_is_the_only_flag_ignored() {
-        // Nothing observable depends on it, which is what makes ignoring it
-        // legitimate where ignoring the others is not.
-        assert_eq!(plan_rw_flags(RWF_HIPRI, true), Ok(PostWriteSync::None));
-        assert_eq!(plan_rw_flags(RWF_HIPRI, false), Ok(PostWriteSync::None));
+    fn rwf_no_flags_asks_for_nothing() {
+        assert_eq!(plan(0, true), Ok(RwPlan::PLAIN));
+        assert_eq!(plan(0, false), Ok(RwPlan::PLAIN));
+        assert_eq!(plan_rw_flags(0, true, false), Ok(RwPlan::PLAIN));
+    }
+
+    #[test]
+    fn rwf_hipri_is_a_hint_with_nothing_behind_it() {
+        assert_eq!(plan(RWF_HIPRI, true), Ok(RwPlan::PLAIN));
+        assert_eq!(plan(RWF_HIPRI, false), Ok(RwPlan::PLAIN));
     }
 
     #[test]
     fn rwf_dsync_and_sync_ask_for_the_durability_they_name() {
-        assert_eq!(plan_rw_flags(RWF_DSYNC, true), Ok(PostWriteSync::Data));
-        assert_eq!(plan_rw_flags(RWF_SYNC, true), Ok(PostWriteSync::Full));
+        assert_eq!(plan(RWF_DSYNC, true), Ok(sync(PostWriteSync::Data)));
+        assert_eq!(plan(RWF_SYNC, true), Ok(sync(PostWriteSync::Full)));
         // Both set: the stronger promise wins, never the weaker one.
         assert_eq!(
-            plan_rw_flags(RWF_SYNC | RWF_DSYNC, true),
-            Ok(PostWriteSync::Full)
+            plan(RWF_SYNC | RWF_DSYNC, true),
+            Ok(sync(PostWriteSync::Full))
         );
     }
 
     #[test]
-    fn rwf_durability_flags_on_a_read_are_refused_not_absorbed() {
-        // They are write-only. A caller setting them on preadv2 has
-        // misunderstood something, and saying so beats doing nothing quietly.
-        assert_eq!(plan_rw_flags(RWF_DSYNC, false), Err(super::errno::EINVAL));
-        assert_eq!(plan_rw_flags(RWF_SYNC, false), Err(super::errno::EINVAL));
+    fn rwf_durability_flags_on_a_read_are_accepted_and_do_nothing() {
+        // `kiocb_set_rw_flags` sets IOCB_DSYNC/IOCB_SYNC whatever the
+        // direction, and a read never looks at them.  They were EINVAL here
+        // until 2026-09-26.
+        assert_eq!(plan(RWF_DSYNC, false), Ok(RwPlan::PLAIN));
+        assert_eq!(plan(RWF_SYNC, false), Ok(RwPlan::PLAIN));
     }
 
     #[test]
-    fn rwf_nowait_is_refused_because_nothing_here_can_promise_not_to_block() {
-        assert_eq!(plan_rw_flags(RWF_NOWAIT, true), Err(super::errno::EAGAIN));
-        assert_eq!(plan_rw_flags(RWF_NOWAIT, false), Err(super::errno::EAGAIN));
-        // A refusal beats a flag we could otherwise have honoured.
-        assert_eq!(
-            plan_rw_flags(RWF_NOWAIT | RWF_DSYNC, true),
-            Err(super::errno::EAGAIN)
+    fn rwf_nowait_is_a_transfer_not_attempted() {
+        let want = RwPlan {
+            nowait: true,
+            ..RwPlan::PLAIN
+        };
+        assert_eq!(plan(RWF_NOWAIT, true), Ok(want));
+        assert_eq!(plan(RWF_NOWAIT, false), Ok(want));
+    }
+
+    #[test]
+    fn rwf_append_puts_a_write_at_the_end_and_means_nothing_to_a_read() {
+        let want = RwPlan {
+            append: true,
+            ..RwPlan::PLAIN
+        };
+        assert_eq!(plan(RWF_APPEND, true), Ok(want));
+        assert_eq!(plan(RWF_APPEND, false), Ok(RwPlan::PLAIN));
+    }
+
+    #[test]
+    fn rwf_unknown_bit_is_eopnotsupp_whatever_it_is_set_with() {
+        // `kiocb_set_rw_flags`: `flags & ~RWF_SUPPORTED` -> EOPNOTSUPP.  It
+        // was EINVAL here until 2026-09-26.
+        let unknown = 1_i32 << 20;
+        for extra in [0, RWF_DSYNC, RWF_NOWAIT] {
+            assert_eq!(plan(unknown | extra, true), Err(super::errno::EOPNOTSUPP));
+        }
+        assert_eq!(plan(i32::MIN, false), Err(super::errno::EOPNOTSUPP));
+    }
+
+    #[test]
+    fn rwf_a_file_without_iter_ops_takes_hipri_alone() {
+        // `do_loop_readv_writev`: `flags & ~RWF_HIPRI` -> EOPNOTSUPP.
+        assert_eq!(plan_rw_flags(RWF_HIPRI, false, false), Ok(RwPlan::PLAIN));
+        for f in [RWF_DSYNC, RWF_SYNC, RWF_NOWAIT, RWF_APPEND] {
+            assert_eq!(
+                plan_rw_flags(f, true, false),
+                Err(super::errno::EOPNOTSUPP),
+                "{f:#x}"
+            );
+        }
+    }
+
+    #[test]
+    fn has_iter_ops_follows_the_file_operations() {
+        use super::{HandleKind, has_iter_ops};
+        assert!(has_iter_ops(HandleKind::File, false) && has_iter_ops(HandleKind::File, true));
+        assert!(has_iter_ops(HandleKind::Pipe, true));
+        assert!(
+            has_iter_ops(HandleKind::Eventfd, false),
+            "eventfd_read is read_iter"
         );
+        assert!(
+            !has_iter_ops(HandleKind::Eventfd, true),
+            "eventfd_write is .write"
+        );
+        assert!(!has_iter_ops(HandleKind::Timerfd, false));
+        assert!(!has_iter_ops(HandleKind::Inotify, false));
+        assert!(!has_iter_ops(HandleKind::Epoll, false));
     }
 
-    #[test]
-    fn rwf_append_is_refused_because_ignoring_it_would_misplace_the_bytes() {
-        // It makes the offset irrelevant and writes at end-of-file. We write
-        // at the caller's offset, so accepting and ignoring it would put data
-        // somewhere nobody asked for -- corruption, not a missing feature.
-        assert_eq!(plan_rw_flags(RWF_APPEND, true), Err(super::errno::EINVAL));
+    // -- the vectored family's order (fs/read_write.c) --
+
+    fn one_byte(buf: &mut [u8; 1]) -> super::Iovec {
+        super::Iovec {
+            iov_base: buf.as_mut_ptr(),
+            iov_len: 1,
+        }
     }
 
-    /// The flag check must run BEFORE the I/O, so these pass a deliberately
-    /// invalid fd: getting the flag's errno rather than `EBADF` is what proves
-    /// the refusal happened first. A flag we cannot honour has to stop the
-    /// operation, not be discovered after the bytes have moved.
+    /// Linux judges the flags last: a closed descriptor is EBADF whatever
+    /// the flags.  The flags were judged first until 2026-09-26.
     #[test]
-    fn pwritev2_refuses_a_flag_before_touching_the_descriptor() {
-        let iov = super::Iovec {
+    fn pwritev2_judges_the_descriptor_before_the_flags() {
+        let mut b = [0u8; 1];
+        let iov = one_byte(&mut b);
+        for flags in [RWF_NOWAIT, 1 << 20] {
+            super::errno::set_errno(0);
+            assert_eq!(super::pwritev2(-1, &raw const iov, 1, 0, flags), -1);
+            assert_eq!(super::errno::get_errno(), super::errno::EBADF, "{flags:#x}");
+        }
+    }
+
+    /// The vector is imported before the flags are asked about.
+    #[test]
+    fn preadv2_judges_the_vector_before_the_flags() {
+        let fd = super::fdtable::alloc_fd(HandleKind::File, 0).expect("alloc_fd File failed");
+        super::errno::set_errno(0);
+        assert_eq!(super::preadv2(fd, core::ptr::null(), 1, 0, 1 << 20), -1);
+        assert_eq!(super::errno::get_errno(), super::errno::EFAULT);
+        let _ = super::close(fd);
+    }
+
+    /// `do_iter_read` returns 0 for nothing to transfer before the flags are
+    /// looked at, so an unknown flag on an empty vector is no error.
+    #[test]
+    fn preadv2_with_nothing_to_transfer_never_judges_the_flags() {
+        let fd = super::fdtable::alloc_fd(HandleKind::File, 0).expect("alloc_fd File failed");
+        let empty = super::Iovec {
             iov_base: core::ptr::null_mut(),
             iov_len: 0,
         };
-        let r = super::pwritev2(-1, &raw const iov, 1, 0, RWF_NOWAIT);
-        assert_eq!(r, -1);
+        assert_eq!(super::preadv2(fd, &raw const empty, 1, 0, 1 << 20), 0);
+        assert_eq!(super::preadv2(fd, core::ptr::null(), 0, 0, RWF_NOWAIT), 0);
+        let _ = super::close(fd);
+    }
+
+    /// With a descriptor and a vector that pass, the flags speak: an unknown
+    /// bit is EOPNOTSUPP, and RWF_NOWAIT is the EAGAIN of a transfer not
+    /// attempted.
+    #[test]
+    fn pwritev2_flags_speak_once_the_transfer_is_sound() {
+        let fd = super::fdtable::alloc_fd(HandleKind::File, 0).expect("alloc_fd File failed");
+        let mut b = [0u8; 1];
+        let iov = one_byte(&mut b);
+        super::errno::set_errno(0);
+        assert_eq!(super::pwritev2(fd, &raw const iov, 1, 0, 1 << 20), -1);
+        assert_eq!(super::errno::get_errno(), super::errno::EOPNOTSUPP);
+        super::errno::set_errno(0);
+        assert_eq!(super::pwritev2(fd, &raw const iov, 1, 0, RWF_NOWAIT), -1);
+        assert_eq!(super::errno::get_errno(), super::errno::EAGAIN);
+        super::errno::set_errno(0);
+        assert_eq!(super::preadv2(fd, &raw const iov, 1, -1, RWF_NOWAIT), -1);
         assert_eq!(
             super::errno::get_errno(),
             super::errno::EAGAIN,
-            "EAGAIN, not EBADF -- the flag must be judged before the fd"
+            "readv's path too"
         );
-
-        let r = super::pwritev2(-1, &raw const iov, 1, 0, 1 << 20);
-        assert_eq!(r, -1);
-        assert_eq!(super::errno::get_errno(), super::errno::EINVAL);
+        let _ = super::close(fd);
     }
 
+    /// `rw_verify_area`: a transfer that would end past the largest offset
+    /// is EINVAL, before the flags.
     #[test]
-    fn preadv2_refuses_a_write_only_flag_before_touching_the_descriptor() {
-        let iov = super::Iovec {
+    fn preadv_past_the_largest_offset_is_einval() {
+        let fd = super::fdtable::alloc_fd(HandleKind::File, 0).expect("alloc_fd File failed");
+        let mut b = [0u8; 1];
+        let iov = one_byte(&mut b);
+        super::errno::set_errno(0);
+        assert_eq!(super::preadv2(fd, &raw const iov, 1, i64::MAX, 1 << 20), -1);
+        assert_eq!(super::errno::get_errno(), super::errno::EINVAL);
+        let _ = super::close(fd);
+    }
+
+    /// The vector is `import_iovec`'s: a segment length past SSIZE_MAX is
+    /// EINVAL, and one in the kernel half is EFAULT -- neither was checked
+    /// until 2026-09-26.
+    #[test]
+    fn readv_imports_its_vector_as_linux_does() {
+        let bad_len = [super::Iovec {
             iov_base: core::ptr::null_mut(),
-            iov_len: 0,
-        };
-        let r = super::preadv2(-1, &raw const iov, 1, 0, RWF_DSYNC);
-        assert_eq!(r, -1);
+            iov_len: usize::MAX,
+        }];
+        super::errno::set_errno(0);
+        assert_eq!(super::readv(0, bad_len.as_ptr(), 1), -1);
         assert_eq!(super::errno::get_errno(), super::errno::EINVAL);
+        let kernel = [super::Iovec {
+            iov_base: (1usize << 63) as *mut u8,
+            iov_len: 1,
+        }];
+        super::errno::set_errno(0);
+        assert_eq!(super::writev(0, kernel.as_ptr(), 1), -1);
+        assert_eq!(super::errno::get_errno(), super::errno::EFAULT);
+    }
+
+    // -- the transfer loop --
+
+    fn segs(lens: &[usize]) -> Vec<super::Iovec> {
+        lens.iter()
+            .enumerate()
+            .map(|(i, &len)| super::Iovec {
+                iov_base: ((i + 1) * 0x1000) as *mut u8,
+                iov_len: len,
+            })
+            .collect()
     }
 
     #[test]
-    fn rwf_unknown_bit_is_einval_and_is_reported_before_anything_else() {
-        let unknown = 1_i32 << 20;
-        assert_eq!(plan_rw_flags(unknown, true), Err(super::errno::EINVAL));
+    fn transfer_segments_moves_the_capped_total_in_order() {
+        let v = segs(&[10, 0, 10]);
+        let mut calls = Vec::new();
+        // SAFETY: `v` holds three segments; the step never dereferences.
+        let moved = unsafe {
+            super::transfer_segments(v.as_ptr(), 3, 15, |buf, len| {
+                calls.push((buf as usize, len));
+                len as super::SsizeT
+            })
+        };
+        assert_eq!(moved, 15);
         assert_eq!(
-            plan_rw_flags(unknown | RWF_DSYNC, true),
-            Err(super::errno::EINVAL)
+            calls,
+            vec![(0x1000, 10), (0x3000, 5)],
+            "the empty one is skipped"
         );
-        // Checked before NOWAIT so the caller hears about the bit it got
-        // wrong rather than a consequence of it.
-        assert_eq!(
-            plan_rw_flags(unknown | RWF_NOWAIT, true),
-            Err(super::errno::EINVAL)
-        );
+    }
+
+    #[test]
+    fn transfer_segments_stops_at_a_short_transfer_and_keeps_what_moved() {
+        let v = segs(&[4, 4, 4]);
+        // SAFETY: as above.
+        let short = unsafe { super::transfer_segments(v.as_ptr(), 3, 12, |_, _| 2) };
+        assert_eq!(short, 2);
+        let mut n = 0;
+        // SAFETY: as above.
+        let failed_late = unsafe {
+            super::transfer_segments(v.as_ptr(), 3, 12, |_, len| {
+                n += 1;
+                if n == 2 { -1 } else { len as super::SsizeT }
+            })
+        };
+        assert_eq!(failed_late, 4, "bytes that moved outrank a later failure");
+        // SAFETY: as above.
+        let failed_first = unsafe { super::transfer_segments(v.as_ptr(), 3, 12, |_, _| -1) };
+        assert_eq!(failed_first, -1);
     }
 
     // ---- tee(2)'s transfer loop -------------------------------------------
@@ -8343,27 +8794,7 @@ mod tests {
         assert_eq!(lchown(b"/link\0".as_ptr(), 0, 0), 0);
     }
 
-    /// Serialises every test that sets the process umask.
-    ///
-    /// There is one `UMASK_VALUE` for the process and `libtest` runs these
-    /// three tests on three threads at once. Each one is a "reset to a known
-    /// value, then assert on what the next call gives back" sequence, and that
-    /// sequence is only meaningful if nothing else moves the mask in between —
-    /// so the *whole test body*, not each call, is the unit that has to be
-    /// atomic. Held from the first statement for that reason.
-    ///
-    /// This has not been observed to fail, unlike the `strtok` and `HTAB`
-    /// races in this crate; it is the same defect found by reading rather than
-    /// by a flake, and is fixed the same way. Poison is recovered so that one
-    /// genuine failure reports once instead of poisoning its two siblings.
-    static UMASK_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
-
-    #[must_use = "the guard serialises the process-wide umask; bind it to `_g`"]
-    fn lock_umask_for_test() -> std::sync::MutexGuard<'static, ()> {
-        UMASK_TEST_LOCK
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-    }
+    use super::lock_umask_for_test;
 
     #[test]
     fn test_umask_returns_previous() {
@@ -8388,6 +8819,55 @@ mod tests {
         assert_eq!(prev, 0o022);
         let val = umask(0o022); // Read back what was stored.
         assert_eq!(val, 0o777);
+    }
+
+    /// `umask` keeps the kernel's record current, so the mask survives `exec`
+    /// and reaches a spawned child (design-decisions.md §960).
+    #[test]
+    fn umask_records_the_mask_it_sets() {
+        let _g = lock_umask_for_test();
+        umask_record::host::preset(Some(0o022));
+        umask(0o022);
+        assert_eq!(umask(0o077), 0o022);
+        assert_eq!(umask_record::host::recorded(), Some(0o077));
+        // Only the low nine bits reach the record, as they reach UMASK_VALUE.
+        umask(0o70027);
+        assert_eq!(umask_record::host::recorded(), Some(0o027));
+        umask(0o022);
+    }
+
+    /// A kernel from before the record: `umask` behaves as it always did.
+    #[test]
+    fn umask_without_a_kernel_record_still_works() {
+        let _g = lock_umask_for_test();
+        umask(0o022);
+        umask_record::host::preset(None);
+        assert_eq!(umask(0o077), 0o022);
+        assert_eq!(get_umask(), 0o077);
+        assert_eq!(umask_record::host::recorded(), None, "nothing to record in");
+        umask_record::host::preset(Some(0o022));
+        umask(0o022);
+    }
+
+    /// Start-up: a program begins with the mask its parent recorded.
+    #[test]
+    fn start_up_takes_the_recorded_mask() {
+        let _g = lock_umask_for_test();
+        umask(0o022);
+        umask_record::host::preset(Some(0o077));
+        init_umask_from_record();
+        assert_eq!(get_umask(), 0o077);
+        umask(0o022);
+    }
+
+    #[test]
+    fn start_up_without_a_kernel_record_keeps_the_default() {
+        let _g = lock_umask_for_test();
+        umask(0o022);
+        umask_record::host::preset(None);
+        init_umask_from_record();
+        assert_eq!(get_umask(), 0o022);
+        umask_record::host::preset(Some(0o022));
     }
 
     #[test]
@@ -10270,6 +10750,133 @@ mod tests {
         assert_eq!(crate::errno::get_errno(), crate::errno::EBADF);
     }
 
+    // -- the rest of glibc's large-file names: each its base, to the errno --
+
+    /// What `f` returned and the errno it left, errno cleared first.
+    fn outcome<T>(f: impl FnOnce() -> T) -> (T, i32) {
+        errno::set_errno(0);
+        let r = f();
+        (r, errno::get_errno())
+    }
+
+    #[test]
+    fn test_large_file_io_names_are_their_bases() {
+        let console = fdtable::alloc_fd(HandleKind::Console, 0).expect("fd available");
+        let mut byte = [0u8; 1];
+        let buf = byte.as_mut_ptr();
+        let iov = Iovec {
+            iov_base: buf,
+            iov_len: 1,
+        };
+        // Every case fails, or does nothing, before any byte moves: a
+        // descriptor that is not open, a console (not seekable), a negative
+        // offset, a NULL buffer, a count of 0, a bad iovcnt, unknown flags.
+        // (preadv2 and pwritev2 at offset -1 are readv and writev, which on
+        // the console would read or write it: only a bad count is tried
+        // there.)
+        for fd in [-1, 900, console] {
+            for offset in [0, -1, -2, 1 << 40] {
+                for (p, n) in [(buf, 0), (buf, 1), (core::ptr::null_mut(), 1)] {
+                    assert_eq!(
+                        outcome(|| pread64(fd, p, n, offset)),
+                        outcome(|| pread(fd, p, n, offset)),
+                        "pread64({fd}, {n}, {offset})"
+                    );
+                    assert_eq!(
+                        outcome(|| pwrite64(fd, p.cast_const(), n, offset)),
+                        outcome(|| pwrite(fd, p.cast_const(), n, offset)),
+                        "pwrite64({fd}, {n}, {offset})"
+                    );
+                }
+                for cnt in [-1, 0, 1, 1025] {
+                    assert_eq!(
+                        outcome(|| preadv64(fd, &raw const iov, cnt, offset)),
+                        outcome(|| preadv(fd, &raw const iov, cnt, offset)),
+                        "preadv64({fd}, {cnt}, {offset})"
+                    );
+                    assert_eq!(
+                        outcome(|| pwritev64(fd, &raw const iov, cnt, offset)),
+                        outcome(|| pwritev(fd, &raw const iov, cnt, offset)),
+                        "pwritev64({fd}, {cnt}, {offset})"
+                    );
+                    if fd == console && offset == -1 && (cnt == 0 || cnt == 1) {
+                        continue;
+                    }
+                    for flags in [0, -1, 0x40] {
+                        assert_eq!(
+                            outcome(|| preadv64v2(fd, &raw const iov, cnt, offset, flags)),
+                            outcome(|| preadv2(fd, &raw const iov, cnt, offset, flags)),
+                            "preadv64v2({fd}, {cnt}, {offset}, {flags})"
+                        );
+                        assert_eq!(
+                            outcome(|| pwritev64v2(fd, &raw const iov, cnt, offset, flags)),
+                            outcome(|| pwritev2(fd, &raw const iov, cnt, offset, flags)),
+                            "pwritev64v2({fd}, {cnt}, {offset}, {flags})"
+                        );
+                    }
+                }
+            }
+        }
+        let _ = close(console);
+    }
+
+    #[test]
+    fn test_large_file_path_and_size_names_are_their_bases() {
+        let console = fdtable::alloc_fd(HandleKind::Console, 0).expect("fd available");
+        for length in [-1, 0, 1 << 40] {
+            assert_eq!(
+                outcome(|| truncate64(core::ptr::null(), length)),
+                outcome(|| truncate(core::ptr::null(), length))
+            );
+            assert_eq!(
+                outcome(|| truncate64(b"\0".as_ptr(), length)),
+                outcome(|| truncate(b"\0".as_ptr(), length))
+            );
+            for fd in [-1, 900, console] {
+                assert_eq!(
+                    outcome(|| ftruncate64(fd, length)),
+                    outcome(|| ftruncate(fd, length)),
+                    "ftruncate64({fd}, {length})"
+                );
+            }
+        }
+        assert_eq!(
+            outcome(|| creat64(core::ptr::null(), 0o600)),
+            outcome(|| creat(core::ptr::null(), 0o600))
+        );
+        assert_eq!(
+            outcome(|| creat64(b"\0".as_ptr(), 0o600)),
+            outcome(|| creat(b"\0".as_ptr(), 0o600))
+        );
+        for dirfd in [-1, 900, console] {
+            for path in [core::ptr::null(), b"\0".as_ptr(), b"relative\0".as_ptr()] {
+                assert_eq!(
+                    outcome(|| openat64(dirfd, path, fcntl::O_RDONLY, 0)),
+                    outcome(|| openat(dirfd, path, fcntl::O_RDONLY, 0)),
+                    "openat64({dirfd})"
+                );
+            }
+        }
+        for fd in [-1, 900, console] {
+            for (offset, len) in [(0, 0), (-1, 0), (0, -1), (1 << 40, 1)] {
+                for advice in [POSIX_FADV_NORMAL, POSIX_FADV_DONTNEED, 99] {
+                    assert_eq!(
+                        outcome(|| posix_fadvise64(fd, offset, len, advice)),
+                        outcome(|| posix_fadvise(fd, offset, len, advice)),
+                        "posix_fadvise64({fd}, {offset}, {len}, {advice})"
+                    );
+                }
+                for mode in [0, FALLOC_FL_KEEP_SIZE, FALLOC_FL_PUNCH_HOLE, -1] {
+                    assert_eq!(
+                        outcome(|| fallocate64(fd, mode, offset, len)),
+                        outcome(|| fallocate(fd, mode, offset, len)),
+                        "fallocate64({fd}, {mode}, {offset}, {len})"
+                    );
+                }
+            }
+        }
+        let _ = close(console);
+    }
     // -- LP64 aliases (64-bit variants) delegate to base functions --
 
     #[test]
@@ -11514,12 +12121,32 @@ mod tests {
 
     // -- __getcwd_chk --
 
+    /// A null `buf` is `getcwd`'s allocating form, fortified or not.  This test
+    /// asserted `EINVAL` until 2026-09-24 — the bug in
+    /// `requests/a-b-getcwd-rejects-the-null-buffer-form-that-bash-uses.md`.
     #[test]
-    fn test_getcwd_chk_null() {
+    fn test_getcwd_chk_null_allocates() {
         crate::errno::set_errno(0);
         let ret = __getcwd_chk(core::ptr::null_mut(), 100, 100);
+        assert!(!ret.is_null());
+        // SAFETY: `ret` is a NUL-terminated block from this crate's `malloc`.
+        unsafe {
+            assert_eq!(*ret, b'/', "CWD should start with '/'");
+            crate::malloc::free(ret);
+        }
+    }
+
+    /// An overstated `size` is clamped to the real buffer, so the call fails
+    /// with `ERANGE` instead of writing past the end of it.
+    #[test]
+    fn test_getcwd_chk_clamps_to_buflen() {
+        // The host test thread's CWD is "/", which needs two bytes.
+        let mut buf = [0xAAu8; 4];
+        crate::errno::set_errno(0);
+        let ret = __getcwd_chk(buf.as_mut_ptr(), 4096, 1);
         assert!(ret.is_null());
-        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+        assert_eq!(crate::errno::get_errno(), crate::errno::ERANGE);
+        assert_eq!(buf, [0xAA; 4], "nothing may be written on refusal");
     }
 
     #[test]

@@ -56,6 +56,11 @@ be hard about letting users replace the library.
 The operator asks two things back: whether the width-query addition to the
 terminal protocol is fine, and the renderer-versus-table concern.
 
+**Recorded by lane B (2026-09-27):** `design-decisions.md` §1042, which
+quotes this answer and replies to both follow-ups; the width query is
+`requests/b-c-the-terminal-should-answer-how-wide-it-will-draw-text.md`,
+answered by lane E's terminal (`OSC 7730`).
+
 ## Lane C's own
 
 The same message answered C-Q11, C-Q24, C-Q25 and C-Q26 (and, earlier the same

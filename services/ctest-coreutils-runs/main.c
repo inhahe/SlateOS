@@ -60,9 +60,11 @@
  *     8  /bin/basename did not exit 0
  *     9  a wait() failed or returned the wrong pid
  *    10  a read of a child's output failed or never finished
- *    11  a program could not be EXEC'd at all -- missing from the image or not
- *        executable. Plumbing, not a verdict: it is a fact about the image,
- *        and the serial names which path it was.
+ *    11  a program could not be EXEC'd at all. Plumbing, not a verdict about
+ *        the program: the child prints the path and execl's errno to the
+ *        console before exiting, so the serial says which of "not on the
+ *        image" (ENOENT), "this caller may not open it" (EACCES/EPERM) or
+ *        "not a program" (ENOEXEC) it was.
  *
  * 11 exists because it did not, and that cost a boot. `execl` failing takes
  * the child to `_exit(127)`, which arrived here as an ordinary exit status and
@@ -110,16 +112,58 @@ extern int sched_yield(void);
 #define SPIN 4000000L
 #define CAP 512
 
-static void emit(const char *s)
+static void emit_fd(int fd, const char *s)
 {
     size_t n = 0;
     while (s[n] != '\0') {
         n++;
     }
     if (n != 0) {
-        ssize_t written = write(1, s, n);
+        ssize_t written = write(fd, s, n);
         (void)written;
     }
+}
+
+static void emit(const char *s)
+{
+    emit_fd(1, s);
+}
+
+/* Name the reason an exec failed, from inside the child that saw it.
+ *
+ * WHY THE CHILD SAYS IT.  The parent learns only an exit status, and 127 is
+ * one number for every reason `execl` can return. For a week that number was
+ * explained by a guess -- "not on the image, or not executable" -- which was
+ * false both times it was checked: the file was present at mode 0755, and the
+ * real errno was EACCES from a `stat` the caller had no right to make
+ * (`requests/a-b-libc-execl-passes-a-null-path-to-execve.md`). The errno had
+ * existed in this process the whole time and nothing printed it.
+ *
+ * fd 2, not fd 1: fd 1 is now the pipe the parent is reading and comparing
+ * byte for byte, while fd 2 is still the console the kernel rung captures. */
+static void report_exec_failure(const char *path, int err)
+{
+    char digits[12];
+    int n = 0;
+    unsigned int v = err < 0 ? 0u : (unsigned int)err;
+    do {
+        digits[n++] = (char)('0' + (int)(v % 10u));
+        v /= 10u;
+    } while (v != 0u && n < (int)sizeof digits - 1);
+    char num[12];
+    int k = 0;
+    while (n > 0) {
+        num[k++] = digits[--n];
+    }
+    num[k] = '\0';
+
+    emit_fd(2, "[cu] execl(");
+    emit_fd(2, path);
+    emit_fd(2, ") failed in the child: errno ");
+    emit_fd(2, num);
+    emit_fd(2, " (");
+    emit_fd(2, strerror(err));
+    emit_fd(2, ")\n");
 }
 
 static int readable(int fd)
@@ -169,6 +213,8 @@ static int run_one(const char *path, const char *arg, char *out, int cap, int *p
         } else {
             execl(path, path, arg, (char *)0);
         }
+        /* Read errno before anything else can touch it. */
+        report_exec_failure(path, errno);
         /* 127 is the shell's convention for "could not exec", and is distinct
          * from every code this fixture returns, so it cannot be mistaken for
          * one of our checks failing. */
@@ -230,11 +276,17 @@ static int run_one(const char *path, const char *arg, char *out, int cap, int *p
          * The `_exit(127)` comment below is true of the CHILD's code and was
          * never true of what this function returns; that is the whole of the
          * mistake. */
+        /* The child has already printed WHY, with its errno, on the line
+         * above this one. The cases it distinguishes, so a reader does not
+         * have to guess the way this message used to:
+         *   ENOENT         not on the image at this path
+         *   EACCES, EPERM  present, but this caller could not open it --
+         *                  look at what its spawner granted, not the image
+         *   ENOEXEC        present and readable, and not a program */
         emit("[cu] COULD NOT EXEC ");
         emit(path);
-        emit(" -- it is not on the image, or is not executable.\n");
-        emit("[cu] This is NOT a finding about the Rust userland. Check that\n");
-        emit("[cu] create-ext4-rootfs.sh actually staged the manifest binaries.\n");
+        emit(" -- the child's errno, printed just above, says why.\n");
+        emit("[cu] This is NOT a finding about the Rust userland.\n");
         *plumbing = 11;
         return -1;
     }

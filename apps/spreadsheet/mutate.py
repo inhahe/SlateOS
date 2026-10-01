@@ -152,6 +152,17 @@ MUTATIONS = [
         "                    self.go_on(Pending::Open);",
         [CLOSE],
     ),
+    # 2026-09-28: a new book opened with sample rows in it.
+    (
+        "a new book opens with the sample rows",
+        "    pub fn opened(width: f32, height: f32) -> Self {\n        Self::new(width, height)\n    }",
+        "    pub fn opened(width: f32, height: f32) -> Self {\n"
+        "        let mut app = Self::new(width, height);\n"
+        "        app.seed_sample_content();\n"
+        "        app\n"
+        "    }",
+        ["a_new_book_opens_blank"],
+    ),
 ]
 
 if __name__ == "__main__":

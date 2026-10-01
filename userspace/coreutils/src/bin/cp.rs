@@ -325,7 +325,7 @@ const LONG_OPTIONS: &[(&str, Takes)] = &[
 
 /// The one pair of spellings in [`LONG_OPTIONS`] that name a single option.
 ///
-/// See [`Program::resolve_long_aliased`]: without this, `--path` would count as
+/// See [`Program::resolve_long_aliased`](getoptlong::Program::resolve_long_aliased): without this, `--path` would count as
 /// a second candidate for the prefix `--pa` and make `--parents` impossible to
 /// abbreviate — which GNU allows. It does **not** make `--p` unambiguous, and a
 /// test below pins that: `--p` still matches `--preserve`, which is a genuinely
@@ -344,7 +344,7 @@ const SHORT_OPTIONS: &str = "abdfHilLnprst:uvxPRS:TZ";
 /// One word of a `--preserve=` or `--no-preserve=` list.
 ///
 /// GNU's `enum File_attribute`, declared inside `decode_preserve_arg`
-/// (`cp.c:874`). The values matter to [`Program::argmatch`], which judges an
+/// (`cp.c:874`). The values matter to [`Program::argmatch`](getoptlong::Program::argmatch), which judges an
 /// ambiguous prefix **by value rather than by spelling**: two words meaning the
 /// same thing would not be ambiguous. None of these seven mean the same thing,
 /// so every prefix that matches more than one is refused, exactly as GNU's
@@ -1003,7 +1003,7 @@ fn parse_args(args: &[OsString]) -> Result<Request, getopt::Error> {
 
 /// The diagnostic for an option that GNU `cp` has and this one does not.
 ///
-/// Deliberately not [`Program::invalid_option`]: `-p` is not a typo, and telling
+/// Deliberately not [`Program::invalid_option`](getoptlong::Program::invalid_option): `-p` is not a typo, and telling
 /// the user it is invalid sends them to check their spelling of a flag they
 /// spelled correctly.
 fn unimplemented_short(flag: u8) -> getopt::Error {
@@ -1050,7 +1050,7 @@ fn unimplemented_attribute(word: &str, because: &str) -> getopt::Error {
 /// # Errors
 ///
 /// A word that names nothing, a prefix that names several things that disagree
-/// — both from [`Program::argmatch`], in gnulib's own wording — or a word this
+/// — both from [`Program::argmatch`](getoptlong::Program::argmatch), in gnulib's own wording — or a word this
 /// implementation does not have, in the `on` direction.
 fn decode_preserve(list: &OsString, on: bool, flags: &mut CpFlags) -> Result<(), getopt::Error> {
     let option = if on { "--preserve" } else { "--no-preserve" };

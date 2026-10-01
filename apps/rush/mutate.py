@@ -174,9 +174,8 @@ MUTATIONS = [
         # A control that swallows a click and does nothing is worse than no
         # control: the click it ate would otherwise have reached the yard.
         "the exit strip eats clicks aimed past it",
-        "            fill(f, l.exit, PLAYER_COLOR, CornerRadii::all(l.gap.max(1.0)));",
-        "            fill(f, l.exit, PLAYER_COLOR, CornerRadii::all(l.gap.max(1.0)));\n"
-        "            f.hit(Target::Cell(EXIT_ROW, 0), l.exit);",
+        "                l.exit,\n                self.colours.player,\n                CornerRadii::all(l.gap.max(1.0)),\n            );\n",
+        "                l.exit,\n                self.colours.player,\n                CornerRadii::all(l.gap.max(1.0)),\n            );\n            f.hit(Target::Cell(EXIT_ROW, 0), l.exit);\n",
         ["the_exit_strip_is_not_a_hit_target"],
     ),
     (
@@ -191,8 +190,8 @@ MUTATIONS = [
     ),
     (
         "the puzzle sheet does not take the yard away from the pointer",
-        "        fill(f, l.window, SCRIM, CornerRadii::ZERO);\n        f.discard_hits();",
-        "        fill(f, l.window, SCRIM, CornerRadii::ZERO);",
+        "            Chrome::of(&self.palette).scrim,\n            CornerRadii::ZERO,\n        );\n        f.discard_hits();",
+        "            Chrome::of(&self.palette).scrim,\n            CornerRadii::ZERO,\n        );",
         ["the_sheet_hides_the_yard_from_the_pointer"],
     ),
     (
@@ -212,8 +211,8 @@ MUTATIONS = [
     (
         # An opaque scrim paints out the very jam it is celebrating.
         "the scrim over a covered yard is opaque",
-        "const SCRIM: Color = Color::rgba(0x11, 0x11, 0x1B, 0xB4);",
-        "const SCRIM: Color = Color::rgba(0x11, 0x11, 0x1B, 0xFF);",
+        "            Chrome::of(&self.palette).scrim,\n            CornerRadii::ZERO,\n        );\n\n        // Nothing behind the panel",
+        "            self.colours.crust,\n            CornerRadii::ZERO,\n        );\n\n        // Nothing behind the panel",
         ["the_scrim_over_a_covered_yard_is_translucent"],
     ),
     # ── Text ────────────────────────────────────────────────────────
@@ -626,10 +625,14 @@ MUTATIONS = [
         ["no_pass_paints_outside_the_region_it_owns"],
     ),
     (
+        # What spills is a row of the puzzle sheet.  It was a control's label,
+        # centred in a band too short for its line; the controls are the
+        # toolkit's buttons now, which refuse such a label themselves, and the
+        # sheet's rows and hint are what this file still centres.
         "a centred label centres without asking",
         "    let Some(y) = centre_line(r, lh) else {\n        return;\n    };",
         "    let y = r.y + (r.h - lh) / 2.0;",
-        ["no_pass_paints_outside_the_region_it_owns"],
+        ["every_run_the_sheet_draws_stays_inside_its_panel"],
     ),
     (
         # The header stacks one or two lines and then centres the stack.  Asking
@@ -746,8 +749,8 @@ MUTATIONS = [
     ),
     (
         "the mat is painted over the whole window",
-        "        fill(f, l.board_mat, CRUST, CornerRadii::all(l.gap.max(1.0)));",
-        "        fill(f, l.window, CRUST, CornerRadii::all(l.gap.max(1.0)));",
+        "            l.board_mat,\n            self.colours.crust,",
+        "            l.window,\n            self.colours.crust,",
         ["no_pass_paints_outside_the_region_it_owns"],
     ),
     (
@@ -805,6 +808,114 @@ MUTATIONS = [
         "            hint_h,\n"
         "        )) {",
         ["every_run_the_sheet_draws_stays_inside_its_panel"],
+    ),
+    (
+        "the sheet's scrim is opaque",
+        "            Chrome::of(&self.palette).scrim,\n            CornerRadii::ZERO,\n        );\n        f.discard_hits();",
+        "            self.colours.crust,\n            CornerRadii::ZERO,\n        );\n        f.discard_hits();",
+        ["the_scrim_over_a_covered_yard_is_translucent"],
+    ),
+    (
+        "the theme is never taken up",
+        "        self.palette = *palette;\n        self.colours = Colours::of(palette);",
+        "        let _ = palette;",
+        ["the_window_is_drawn_in_the_users_colours"],
+    ),
+    (
+        "the colours are not rebuilt with the palette",
+        "        self.colours = Colours::of(palette);",
+        "        let _ = Colours::of(palette);",
+        ["the_window_is_drawn_in_the_users_colours"],
+    ),
+    (
+        "the red car keeps Mocha's red whatever the theme",
+        "        if v.player {\n            return self.player;\n        }",
+        "        if v.player {\n            return Color::from_hex(0xF38BA8);\n        }",
+        ["the_window_is_drawn_in_the_users_colours"],
+    ),
+    (
+        "a blocker is dealt the red car's red",
+        "                p.ink(p.blue),",
+        "                p.ink(p.red),",
+        ["no_blocker_wears_the_red_cars_colour"],
+    ),
+    (
+        "peach is dealt to the blockers again",
+        "                p.ink(p.mauve),",
+        "                p.ink(p.peach),",
+        ["no_blocker_wears_the_red_cars_colour"],
+    ),
+    (
+        "a car's letter is written dark whatever the car",
+        "                        color: gamechrome::legible_on(INKS, colour),",
+        "                        color: INKS.1,",
+        ["every_text_reads_on_what_is_under_it_in_either_theme"],
+    ),
+    (
+        "a beginner's puzzle is Mocha's green whatever the theme",
+        "            Self::Beginner => c.green,",
+        "            Self::Beginner => Color::from_hex(0xA6E3A1),",
+        ["the_window_is_drawn_in_the_users_colours"],
+    ),
+    (
+        "the undo count is the faintest grey",
+        "            // Secondary text: the faintest grey is 2.3:1 on a light band.\n            color: self.colours.subtext0,",
+        "            // Secondary text: the faintest grey is 2.3:1 on a light band.\n            color: self.palette.overlay0,",
+        ["every_text_reads_on_what_is_under_it_in_either_theme"],
+    ),
+    (
+        "the footer's keys are the faintest grey",
+        "                    // the palette's faintest grey is 2.3:1 on a light band.\n                    color: self.colours.subtext0,",
+        "                    // the palette's faintest grey is 2.3:1 on a light band.\n                    color: self.palette.overlay0,",
+        ["every_text_reads_on_what_is_under_it_in_either_theme"],
+    ),
+    (
+        "the sheet's hint is the faintest grey",
+        "                    // Secondary text: the faintest grey is 2.3:1 on a light\n                    // panel.\n                    color: self.colours.subtext0,",
+        "                    // Secondary text: the faintest grey is 2.3:1 on a light\n                    // panel.\n                    color: self.palette.overlay0,",
+        ["every_text_reads_on_what_is_under_it_in_either_theme"],
+    ),
+    (
+        "the undo button is never switched off",
+        "            self.button(f, r, name, size, false, live, self.colours.mantle);",
+        "            self.button(f, r, name, size, false, true, self.colours.mantle);",
+        ["the_undo_button_is_drawn_dim_until_there_is_something_to_undo"],
+    ),
+    (
+        "the win panel has no ground of its own",
+        "            l.pad * 1.2,\n            Surface::Panel,\n        );",
+        "            l.pad * 1.2,\n            Surface::Card,\n        );",
+        ["the_win_panel_is_grounded_and_offers_the_next_puzzle_first"],
+    ),
+    (
+        "the puzzle sheet has no ground of its own",
+        "                l.pad * 1.2,\n                Surface::Panel,",
+        "                l.pad * 1.2,\n                Surface::Card,",
+        ["the_puzzle_sheet_is_the_toolkits_panel_and_rows"],
+    ),
+    (
+        "the row under the cursor is not the selected row",
+        "                    if on_cursor {\n                        Surface::Selected\n                    } else {\n                        Surface::Card\n                    },",
+        "                    Surface::Card,",
+        ["the_puzzle_sheet_is_the_toolkits_panel_and_rows"],
+    ),
+    (
+        "the next puzzle is offered like the other ways on",
+        "                target == Target::Next,",
+        "                false,",
+        ["the_win_panel_is_grounded_and_offers_the_next_puzzle_first"],
+    ),
+    (
+        "the halo is Mocha's text colour whatever the theme",
+        "                    Rect::new(r.x - grow, r.y - grow, r.w + grow * 2.0, r.h + grow * 2.0),\n                    self.colours.text,",
+        "                    Rect::new(r.x - grow, r.y - grow, r.w + grow * 2.0, r.h + grow * 2.0),\n                    Color::from_hex(0xCDD6F4),",
+        ["the_window_is_drawn_in_the_users_colours"],
+    ),
+    (
+        "the blockers are the palette's raw hues, pale on a user's light theme",
+        "                p.ink(p.yellow),\n                p.ink(p.mauve),",
+        "                p.yellow,\n                p.ink(p.mauve),",
+        ["the_yard_is_seen_in_either_theme"],
     ),
 ]
 

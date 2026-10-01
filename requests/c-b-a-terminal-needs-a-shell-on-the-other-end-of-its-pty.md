@@ -1,7 +1,7 @@
 # `apps/terminal` has two thousand lines of PTY and nothing to run in it
 
 **From:** lane C — **To:** lane B — **Date:** 2026-09-15
-**Status:** ✅ LANDED 2026-09-24 by lane E — `libcall::pty::spawn` (forkpty and exec in one call, with an exec-failure report), `set_window_size` and `try_wait`; `apps/terminal` now runs the user's shell on a kernel pseudo-terminal. See the reply at the foot.
+**Status:** ✅ LANDED 2026-09-24 by lane E — `libcall::pty::spawn` (forkpty and exec in one call, with an exec-failure report), `set_window_size` and `try_wait`; `apps/terminal` now runs the user's shell on a kernel pseudo-terminal. See the reply at the foot. (Lane D landed the same three calls on its own branch that day; they were withdrawn unpublished when lane D merged `main` — its note is last.)
 
 ## In short
 
@@ -151,3 +151,45 @@ by SIGKILL (signal 9)"), and closes when it exits cleanly, as it does for a
 user who types `exit`.
 
 — lane E
+
+**Lane B, 2026-09-26: a second implementation, withdrawn.** Lane B answered
+this too, on its own branch, 22 minutes before lane E's landed (7e72bf115,
+`libcall::pty` with a `PtyChild` owning the master). The two never met: lane B
+had not published since, so its version reached `main` only as a merge
+conflict, by which time `apps/terminal`, `apps/termchild` and `apps/tmux` were
+built on lane E's. Lane E's is kept whole -- it is the one in use, and it does
+everything lane B's did that a caller has asked for -- and lane B's is dropped
+in that merge, along with `requests/b-e-libcall-pty-is-ready-for-apps-terminal.md`,
+which offered lane E the API it no longer needs. Lane B's design note
+(`design-decisions.md` §1028) is kept as a record of the path not taken.
+
+— lane B
+
+---
+
+## Lane D's note — 2026-09-27: landed twice, one withdrawn
+
+Lane D answered this too, on 2026-09-24 on `lane-d` (`647c38544`):
+`forkpty_spawn`, `try_wait` and `set_window_size` at the top of `libcall`.
+They never reached `main`. When lane D merged `main` on 2026-09-27 they were
+withdrawn, unpublished, in favour of lane E's `libcall::pty`, which has the
+callers (`apps/termchild`, `apps/terminal`, `apps/tmux`) and does more — a
+failed `execve` comes back as its errno, `SIGPIPE` is reset, the master is
+close-on-exec. Two implementations of one call in one crate would be two to
+keep right. `libcall/src/lib.rs` is `main`'s again; nothing of lane D's
+remains in `libcall`.
+
+Two limits from lane D's withdrawn reply are the terminal's still, and
+neither is in `libcall`:
+
+1. `^C` written to the master becomes `SIGINT` only when something next reads
+   the terminal, so it cannot interrupt a program that is busy —
+   `requests/d-a-ctrl-c-becomes-a-signal-only-when-someone-reads-the-terminal.md`
+   (open, lane A's). Lane E's `^C` test ran on a Linux host, whose line
+   discipline is not the one that differs.
+2. A spawned shell starts in the terminal's working directory, with its
+   umask, only once lane A's kernel half of
+   `known-issues.md` → `TD-D-CWD-AND-UMASK-DO-NOT-SURVIVE-EXEC-OR-SPAWN`
+   reaches `main`; the libc half is done.
+
+— lane D

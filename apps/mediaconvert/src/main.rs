@@ -1540,6 +1540,10 @@ pub struct MediaConvertApp {
     pub setting_row: SettingRow,
     /// The job running, on its thread.
     worker: Option<engine::Worker>,
+    /// Where a test holds the next job to start, before it reads anything
+    /// (`engine::Gate`); `None` runs it straight away.
+    #[cfg(test)]
+    hold: Option<engine::Gate>,
     /// The file and folder picker, and what it is up for.
     pub picker: FilePicker,
     pub picker_for: PickerFor,
@@ -1591,6 +1595,8 @@ impl MediaConvertApp {
             window_height: 800.0,
             setting_row: SettingRow::Profile,
             worker: None,
+            #[cfg(test)]
+            hold: None,
             picker: FilePicker::default(),
             picker_for: PickerFor::Files,
             source_scroll: 0,
@@ -2304,12 +2310,18 @@ impl MediaConvertApp {
             return false;
         };
         job.start(ts);
-        self.worker = Some(engine::Worker::start(
+        let (id, recipe, input, output) = (
             job.id,
             job.recipe.clone(),
             job.source.path.clone(),
             job.output_path.clone(),
-        ));
+        );
+        #[cfg(test)]
+        if let Some(gate) = self.hold.clone() {
+            self.worker = Some(engine::Worker::start_held(id, recipe, input, output, gate));
+            return true;
+        }
+        self.worker = Some(engine::Worker::start(id, recipe, input, output));
         // The status line keeps what queueing said -- which files were left
         // out and why; the queue shows the job running.
         true
@@ -3824,17 +3836,25 @@ mod tests {
     #[test]
     fn a_cancelled_job_writes_nothing() {
         let dir = Scratch::new("cancel");
-        let source = dir.wav("long.wav", 48_000, 2, 6.0);
+        let source = dir.wav("long.wav", 48_000, 2, 1.0);
         let mut app = MediaConvertApp::new();
+        // The job is held before it reads anything, so the cancel lands on a
+        // job that is certainly still running. It raced the click unheld: on
+        // a machine busy with a boot test the six-second file was converted
+        // and written before the click was read, and the job completed.
+        let gate = engine::Gate::default();
+        app.hold = Some(gate.clone());
         app.add_file(&source).unwrap();
         app.select_profile(profile(&app, "WAV, speech"));
         app.handle_event(&key_ev(Key::Enter, true));
         let id = app.jobs[0].id;
+        assert_eq!(app.jobs[0].status, JobStatus::Running);
         probe::click(&mut app, Target::CancelJob(id));
         assert!(
             app.jobs[0].stopping,
             "a running job did not say it is stopping"
         );
+        gate.open();
         run_queue(&mut app);
         assert_eq!(app.jobs[0].status, JobStatus::Cancelled);
         assert!(

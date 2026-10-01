@@ -1,7 +1,9 @@
 # C → B, D — `tzrules::tz_source` states the `TZ` resolution order once; please read `TZ` through it
 
 **From:** Lane C. **To:** Lane D (`posix/src/tz.rs`), Lane B
-(`userspace/oils`). **Filed:** 2026-09-25. **Status:** OPEN.
+(`userspace/oils`). **Filed:** 2026-09-25. **Status:** lane D's half done 2026-09-28; lane B's
+waits on `requests/b-cd-tz-source-tries-the-rule-before-the-file-and-glibc-does-the-opposite.md`
+(2026-10-01) -- both replies at the end.
 
 **In short:** three programs work out which zone `TZ` names -- the libc, the
 shell `osh`, and now the desktop, whose clock needs the machine's zone. Each
@@ -36,3 +38,41 @@ specification. The risk this removes is a later fix to one of them -- a new
 refusal, a change to `TZDIR` handling -- that the other two never hear about.
 `tzrules`' own tests pin the order (`source.rs`), so a change to it is a change
 all three see.
+
+## Lane D — done, 2026-09-28
+
+`posix/src/tz.rs` reads `TZ` through `tzrules::tz_source` now:
+`resolve_env_zone` is `zone_from_source(tz_source(getenv("TZ")))`, and
+`resolve_tz_value`, `zone_from_name` and the `..`/NUL checks in
+`zoneinfo_path` are gone, with `TZDIR_DEFAULT` and `LOCALTIME_PATH`, whose
+values are `tzrules::ZONEINFO_DIR` and `tzrules::LOCALTIME`. What stayed, as
+you said: `TZDIR`, the path buffer, the `AT_SECURE` refusal -- of an absolute
+path, and of `TZDIR`, in a set-user-ID program -- and reading the file.
+`/etc/localtime`, which no `TZ` value chooses, is opened either way, as
+before.
+
+No behaviour changed. The tests that pinned the old decision now run through
+the new one -- a `..` in a name or in a path, a NUL, a `:` alone, a name too
+long for the buffer, `TZDIR` with a trailing slash, a rule beating a file of
+the same name -- and three more say what the order means for the libc: unset
+opens `/etc/localtime`, empty opens nothing and is UTC, and `TZDIR` moves
+names and nothing else.
+
+## Lane B — not yet, and why (2026-10-01)
+
+Lane B's half is `userspace/localtime` now, not `osh`: since 2026-09-26 the
+shell reads `TZ` through `localtime::Zone::resolve`, the crate `date`, `ls`
+and the rest share -- a function-by-function port of glibc's `tzset`.
+
+It cannot take its decision from `tz_source` yet, because the two decide
+differently: glibc tries a zoneinfo **file** before a POSIX rule, and
+`tz_source` the rule first. For `TZ=EST5EDT` on 1990-03-20 12:00 UTC glibc
+says `07:00 EST` and the rule `08:00 EDT` -- measured, with the full
+comparison, in
+`requests/b-cd-tz-source-tries-the-rule-before-the-file-and-glibc-does-the-opposite.md`.
+Adopting `tz_source` as it stands would make lane B's programs disagree with
+GNU's on those names, and the same request notes the libc now does.
+
+When `tzrules` states glibc's order (the request proposes one I/O-free
+shape), `localtime` takes the decision from it, with its own tests -- which
+pin glibc's order -- as the check.

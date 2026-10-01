@@ -7,7 +7,8 @@
 //! to read and no faster to build. This library is for the exceptions: the
 //! things where two utilities disagreeing would itself be the bug.
 //!
-//! There are twenty-eight so far. Three are about the interface these programs share
+//! Twenty-eight of them are narrated one at a time below, and the rest are
+//! listed after those. Three are about the interface these programs share
 //! whether or not anyone designed it that way: a script that reads `grep`'s
 //! diagnostic and a script that reads `cp`'s are the same script, and a person
 //! who learned to type `ls --col` expects `cat --squeeze` to work too.
@@ -454,28 +455,72 @@
 //!   which is what makes the walk safe on a kernel whose `openat` still
 //!   resolves textually.
 //!
+//! The rest are one upstream source file built into several programs, or one
+//! gnulib module several programs link, and are here for the plain reason that
+//! a second copy would be a second home for every bug:
+//!
+//! - [`basenc`] — `base64`, `base32` and `basenc`, which upstream builds from
+//!   one `basenc.c`.
+//! - [`chowncore`] — the walk and the reporting `chown` and `chgrp` share
+//!   (`chown-core.c`).
+//! - [`cksum`] — the POSIX CRC, for `cksum` with and without `-a crc`.
+//! - [`sum`] — the BSD and System V checksums, for `sum` and for `cksum -a
+//!   bsd` and `-a sysv`.
+//! - [`grouplist`] — the group list `id -G`, `id` and `groups` print.
+//! - [`locale`] — the locale `setlocale (LC_ALL, "")` would select, and
+//!   gnulib's `hard_locale`, for `ls`, `cmp` and `pinky`. Two private copies
+//!   had disagreed about whether `LC_ALL=` is set.
+//! - [`ls`] — `ls`, `dir` and `vdir`: `ls.c` built three times.
+//! - [`mbswidth`] — gnulib's `mbswidth`, the columns a string occupies, for
+//!   `df`'s column widths and `pr`'s centred page header.
+//! - [`parse_datetime`] — gnulib's `parse-datetime`, the date language of
+//!   `date -d`, `touch -d` and `find -newermt`: upstream's Bison tables and
+//!   actions, not a reimplementation of the forms they accept.
+//! - [`posixtm`] — gnulib's `posixtm`, the `[[CC]YY]MMDDhhmm[.ss]` stamps
+//!   of `touch -t` and the obsolete `touch MMDDhhmm[YY]` operand.
+//! - [`posixver`] — gnulib's `posix2_version`, the POSIX edition
+//!   `_POSIX2_VERSION` names, for `sort`, `tail`, `touch` and `uniq`.
+//! - [`randint`] — gnulib's `randread` and `randint`, for `shred`.
+//! - [`remove`] — what `rm` and `mv` must agree on about deleting a tree.
+//! - [`setfields`] — the `cut`-style LIST of fields, for `cut` and `numfmt
+//!   --field` (`set-fields.c`).
+//! - [`utsname`] — the `uname(2)` answers `uname` and `arch` both print.
+//!
 //! The regex engine, which is the other thing they must not disagree about,
 //! lives in `userspace/ere` rather than here — the shell needs it too, and it
 //! cannot depend on the coreutils. See `design-decisions.md` §322.
 
 pub mod backup;
-mod bignat;
+pub mod basenc;
+pub mod bignat;
 pub mod canon;
 pub mod cfmt;
+pub mod chowncore;
+pub mod cksum;
 pub mod copy;
 pub mod digest;
 pub mod dirfd;
-pub mod errmsg;
+// strerror(3)'s wording for an io::Error -- the shared `errmsg` crate since
+// 2026-09-26, re-exported here so `coreutils::errmsg` and `crate::errmsg` stand.
+pub use ::errmsg;
 pub mod extfloat;
 pub mod fileid;
 pub mod filekind;
 pub mod fnmatch;
 pub mod fsattr;
 pub mod getopt;
+pub mod grouplist;
 pub mod hardlink;
 pub mod human;
+pub mod locale;
+pub mod ls;
+pub mod mbswidth;
 pub mod overwrite;
+pub mod parse_datetime;
 pub mod pathname;
+pub mod posixtm;
+pub mod posixver;
+pub mod randint;
 /// How a name is rendered inside a diagnostic — now `userspace/quoting`.
 ///
 /// Re-exported under its old path so that `use coreutils::quote::quotef_os`
@@ -485,8 +530,17 @@ pub mod pathname;
 pub use quoting as quote;
 pub mod remove;
 pub mod rename;
-pub mod shell;
+pub mod setfields;
+// Handing a command line to `sh -c`. This was `src/shell.rs` until 2026-09-27;
+// it became the `shellcmd` crate so that GNU AutoGen's libopts (`autoopts`,
+// whose `--more-help` runs `$PAGER`) runs its pager the same way.
+pub use shellcmd as shell;
 pub mod stdfd;
+/// `coreutils::guard_std_fds!()`, as every binary here writes it: the
+/// `stdfdguard` crate's since 2026-09-26, when it moved out of `stdfd` so the
+/// programs outside coreutils could have it.
+pub use stdfdguard::guard_std_fds;
+pub mod sum;
 pub mod tabstops;
 pub mod umask;
 // `userspec` is its own crate as of 2026-09-12, and is re-exported here so
@@ -499,6 +553,7 @@ pub mod umask;
 // on any system with an account named `1000`.
 pub use userspec;
 pub mod utimecmp;
+pub mod utsname;
 pub mod vercmp;
 pub mod xnum;
 pub mod yesno;

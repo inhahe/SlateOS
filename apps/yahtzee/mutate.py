@@ -270,8 +270,8 @@ MUTATIONS = [
     ),
     (
         "the button says the same thing whatever a click on it would do",
-        "            GamePhase::MustScore => (OVERLAY0, \"No Rolls Left\"),",
-        "            GamePhase::MustScore => (OVERLAY0, \"Roll (R)\"),",
+        "            GamePhase::MustScore => \"No Rolls Left\",",
+        "            GamePhase::MustScore => \"Roll (R)\",",
         ["the_button_says_what_the_click_will_do"],
     ),
     # -- The scorecard -------------------------------------------------
@@ -547,6 +547,36 @@ MUTATIONS = [
         "        if self.turn_number >= NUM_TURNS {",
         "        if false {",
         ["a_box_that_is_already_filled_cannot_be_spent_twice"],
+    ),
+    (
+        "the theme is never taken up",
+        "    fn theme_changed(&mut self, palette: &Palette) {\n        self.palette = *palette;",
+        "    fn theme_changed(&mut self, palette: &Palette) {\n        let _ = palette;",
+        ["the_window_is_drawn_in_the_users_colours"],
+    ),
+    (
+        "a die is the dark theme's grey it was",
+        "            color: DIE_FACE,\n",
+        "            color: c.chrome.raised,\n",
+        ["a_die_is_white_with_black_pips_in_either_theme"],
+    ),
+    (
+        "the pips are the theme's text colour",
+        "                color: DIE_PIP,",
+        "                color: Color::from_hex(0xCDD6F4),",
+        ["a_die_is_white_with_black_pips_in_either_theme"],
+    ),
+    (
+        "the roll button is live with no rolls left",
+        "                disabled: self.phase() == GamePhase::MustScore,",
+        "                disabled: false,",
+        ["the_roll_button_is_switched_off_with_no_rolls_left"],
+    ),
+    (
+        "a category's words are the page's inks, 3.0:1 on its row",
+        "                let on = c.chrome.on(ground);",
+        "                let on = c.chrome;",
+        ["every_text_reads_on_what_is_under_it_in_either_theme"],
     ),
 ]
 

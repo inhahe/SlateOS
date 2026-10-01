@@ -1620,7 +1620,14 @@ mod tests {
                     for query in ["", "rich", "matches-nothing-at-all"] {
                         for selected in [None, Some(0), Some(1)] {
                             let v = wound(filter, focused, query, selected);
-                            assert_drawn_from(&p, &v.render(&p), &[], "clipboard viewer");
+                            // The active filter chip is lettered for the
+                            // accent it is filled with.
+                            assert_drawn_from(
+                                &p,
+                                &v.render(&p),
+                                &[p.on_accent()],
+                                "clipboard viewer",
+                            );
                         }
                     }
                 }

@@ -69,6 +69,8 @@
 //! input — key or click — turns into an [`Intent`] and goes through
 //! [`SudokuApp::apply`], so the two can never drift apart.
 
+use gamechrome::Ink;
+use guitk::button::{Kind, State};
 use guitk::color::Color;
 use guitk::event::{Event, EventResult, Key, KeyEvent, MouseButton, MouseEvent, MouseEventKind};
 use guitk::frame::Rect;
@@ -77,6 +79,7 @@ use guitk::probe::Probe;
 use guitk::render::{FontWeightHint, RenderCommand, RenderTree, TextOverflow};
 use guitk::style::CornerRadii;
 use guitk::text;
+use guitk::theme::with_alpha;
 use oswindow::app::{self, App, Response};
 use randrange::{RandomSource, SeededRng, seed_from_system};
 use std::process::ExitCode;
@@ -85,24 +88,103 @@ use std::time::Duration;
 /// The frame this program draws into, with its own control identifiers.
 pub type Frame = guitk::frame::Frame<Target>;
 
-// ── Catppuccin Mocha palette ───────────────────────────────────────────────
-const BASE: Color = Color::from_hex(0x001E_1E2E);
-const MANTLE: Color = Color::from_hex(0x0018_1825);
-const CRUST: Color = Color::from_hex(0x0011_111B);
-const SURFACE0: Color = Color::from_hex(0x0031_3244);
-const SURFACE1: Color = Color::from_hex(0x0045_475A);
-const SURFACE2: Color = Color::from_hex(0x0058_5B70);
-const TEXT_COLOR: Color = Color::from_hex(0x00CD_D6F4);
-const SUBTEXT0: Color = Color::from_hex(0x00A6_ADC8);
-const BLUE: Color = Color::from_hex(0x0089_B4FA);
-const GREEN: Color = Color::from_hex(0x00A6_E3A1);
-const RED: Color = Color::from_hex(0x00F3_8BA8);
-const YELLOW: Color = Color::from_hex(0x00F9_E2AF);
-const PEACH: Color = Color::from_hex(0x00FA_B387);
-const LAVENDER: Color = Color::from_hex(0x00B4_BEFE);
-const OVERLAY0: Color = Color::from_hex(0x006C_7086);
-const TEAL: Color = Color::from_hex(0x0094_E2D5);
-const MAUVE: Color = Color::from_hex(0x00CB_A6F7);
+// ── Colours ─────────────────────────────────────────────────────────
+//
+// Everything in this game follows the user's palette (the operator's answer
+// to C-Q16, §1422, and lane C's call for this game): its surfaces and text
+// from the palette's roles, each hue in the palette's ink for it, which reads
+// on the page in a light theme as in a dark one. It was all a copy of
+// Catppuccin Mocha, dark on a light desktop.
+
+/// The colours the window draws in, from the user's palette.
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct Colours {
+    /// The page.
+    base: Color,
+    /// A band.
+    mantle: Color,
+    /// A well.
+    crust: Color,
+    /// Raised.
+    surface0: Color,
+    /// Raised further.
+    surface1: Color,
+    /// Raised furthest.
+    surface2: Color,
+    /// The palette's blue, inked for the page.
+    blue: Color,
+    /// The palette's green, inked for the page.
+    green: Color,
+    /// The palette's yellow, inked for the page.
+    yellow: Color,
+    /// The palette's lavender, inked for the page.
+    lavender: Color,
+    /// Faint lines: the boxes' outlines.
+    overlay0: Color,
+    /// Secondary text: the footer's record.
+    subtext0: Color,
+    /// The digits, one ink for each kind a player tells apart: a clue, the
+    /// player's own, a hint, and a digit that clashes with another. Each is
+    /// the palette's ink for its hue -- made for the page -- moved only as
+    /// far as it must be to read on every square it can sit on
+    /// (`gamechrome::Ink`), in a strength for large text and one for small:
+    /// a digit is six tenths of a square, large in a roomy window and small
+    /// in a cramped one. A selected square is darker than the page in a light
+    /// theme and lighter in a dark one, and a hint and a clash fell to 2.5:1
+    /// on it in the light theme.
+    clue: Ink,
+    own: Ink,
+    hint: Ink,
+    clash: Ink,
+    /// A square's pencil marks: small text, so held to 4.5:1 on every square
+    /// an empty one can be.
+    note: Color,
+}
+
+/// How much of the palette's blue tints a square holding the selected digit,
+/// and of its red a square that clashes, out of 255. Shared by the drawing and
+/// by [`Colours::of`], which reads the digits against the tinted squares.
+const MATCH_ALPHA: u8 = 45;
+const CLASH_ALPHA: u8 = 60;
+
+impl Colours {
+    fn of(p: &Palette) -> Self {
+        // What a digit can sit on: a square at rest, one in the selected
+        // square's row, column and box, the selected one, and one tinted as
+        // holding the selected digit -- the tint over the grid's own fill, as
+        // it is drawn. A clash keeps its own tint even under the cursor.
+        let squares = [
+            p.surface0,
+            p.surface1,
+            p.surface2,
+            with_alpha(p.blue, MATCH_ALPHA).over(p.crust),
+        ];
+        let clashing = with_alpha(p.red, CLASH_ALPHA).over(p.crust);
+        Self {
+            base: p.base,
+            mantle: p.mantle,
+            crust: p.crust,
+            surface0: p.surface0,
+            surface1: p.surface1,
+            surface2: p.surface2,
+            blue: p.ink(p.blue),
+            green: p.ink(p.green),
+            yellow: p.ink(p.yellow),
+            lavender: p.ink(p.lavender),
+            overlay0: p.overlay0,
+            subtext0: p.subtext0,
+            clue: Ink::on(p.text, &squares),
+            own: Ink::on(p.ink(p.blue), &squares),
+            // Green, not the peach it was: peach and a clash's red are
+            // neighbours, and moved to read on the squares they closed to
+            // 28 apart in the light theme -- a hint that looks like a mistake.
+            hint: Ink::on(p.ink(p.green), &squares),
+            clash: Ink::on(p.ink(p.red), &[clashing]),
+            // An empty square is never tinted: marks sit on the three greys.
+            note: Ink::on(p.subtext0, &[p.surface0, p.surface1, p.surface2]).small,
+        }
+    }
+}
 
 // ── Board shape ────────────────────────────────────────────────────────────
 
@@ -189,16 +271,6 @@ impl Difficulty {
             Self::Easy => "Easy",
             Self::Medium => "Medium",
             Self::Hard => "Hard",
-        }
-    }
-
-    /// The colour that word is drawn in.
-    #[must_use]
-    pub fn color(self) -> Color {
-        match self {
-            Self::Easy => GREEN,
-            Self::Medium => YELLOW,
-            Self::Hard => RED,
         }
     }
 
@@ -899,6 +971,12 @@ pub struct SudokuApp {
     size: (f32, f32),
     /// Whether the shortcut list is up.
     show_help: bool,
+    /// The user's colours, replaced whenever the theme changes. Seeded from
+    /// the defaults; the framework calls `App::theme_changed` before the
+    /// first frame.
+    palette: Palette,
+    /// `palette`'s colours as this window draws them: rebuilt with it.
+    colours: Colours,
 }
 
 impl SudokuApp {
@@ -948,6 +1026,8 @@ impl SudokuApp {
             seed_counter: 0,
             size: (WINDOW_WIDTH, WINDOW_HEIGHT),
             show_help: false,
+            palette: Palette::for_mode(false),
+            colours: Colours::of(&Palette::for_mode(false)),
         }
     }
 
@@ -1509,13 +1589,13 @@ pub fn status_text(status: GameStatus) -> &'static str {
     }
 }
 
-/// The colour that word is drawn in.
+/// The colour that word is drawn in, in the window's colours `c`.
 #[must_use]
-pub fn status_color(status: GameStatus) -> Color {
+fn status_color(status: GameStatus, c: &Colours) -> Color {
     match status {
-        GameStatus::Playing => BLUE,
-        GameStatus::Won => GREEN,
-        GameStatus::Paused => YELLOW,
+        GameStatus::Playing => c.blue,
+        GameStatus::Won => c.green,
+        GameStatus::Paused => c.yellow,
     }
 }
 
@@ -1864,16 +1944,46 @@ fn left_in(f: &mut Frame, r: Rect, s: &str, size: f32, color: Color, weight: Fon
     );
 }
 
-fn chip(f: &mut Frame, r: Rect, target: Target, s: &str, size: f32, accent: Color) {
-    if r.is_empty() {
-        return;
-    }
-    fill(f, r, SURFACE0, 5.0);
-    f.hit(target, r);
-    centred_in(f, r, s, size, accent, FontWeightHint::Bold);
-}
-
 impl SudokuApp {
+    /// A control: the toolkit's push button at this game's size, on the band
+    /// it sits in, recording its hit box. `on` draws a switch that is on --
+    /// note mode, a pause -- as the toolkit's primary button, and `live`
+    /// false draws the switched-off look. The hit box is recorded either way,
+    /// so a press on a spent key lands on the key and is refused there rather
+    /// than reaching whatever is drawn under it.
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "a button's place, target, label, size and two states; a struct for them would be built at every call and read once"
+    )]
+    fn chip(
+        &self,
+        f: &mut Frame,
+        r: Rect,
+        target: Target,
+        s: &str,
+        size: f32,
+        on: bool,
+        live: bool,
+    ) {
+        if r.is_empty() {
+            return;
+        }
+        gamechrome::button(
+            f,
+            &self.palette,
+            (r.x, r.y, r.w, r.h),
+            s,
+            size,
+            if on { Kind::Primary } else { Kind::Plain },
+            State {
+                disabled: !live,
+                ..State::default()
+            },
+            self.colours.mantle,
+        );
+        f.hit(target, r);
+    }
+
     /// Draw the whole window at `width` x `height`, recording a hit box for
     /// every control drawn.
     #[must_use]
@@ -1883,7 +1993,7 @@ impl SudokuApp {
         // The background is the window's, not the board's. This program used to
         // fill a rectangle computed from its cell size, which is a picture of a
         // window rather than the window.
-        fill(&mut f, l.window, BASE, 0.0);
+        fill(&mut f, l.window, self.colours.base, 0.0);
         self.draw_header(&mut f, &l);
         self.draw_board(&mut f, &l);
         self.draw_keypad(&mut f, &l);
@@ -1894,12 +2004,7 @@ impl SudokuApp {
         if self.show_help {
             guitk::shortcut::render_card(
                 &mut f,
-                // This app draws from twelve hardcoded `Color` constants --
-                // `BASE` is Mocha's base -- rather than from the user's
-                // palette, so the card is built for the same mode and matches
-                // the window around it. If sudoku is ever themed, this becomes
-                // `&self.palette` and the mismatch disappears with it.
-                &Palette::for_mode(false),
+                &self.palette,
                 (width, height),
                 0.0,
                 SHORTCUTS,
@@ -1913,29 +2018,30 @@ impl SudokuApp {
         if !l.shows(l.header) {
             return;
         }
-        fill(f, l.header, MANTLE, 0.0);
+        fill(f, l.header, self.colours.mantle, 0.0);
 
-        chip(
+        // The pause chip is a switch: on while the game is paused, and with
+        // nothing to pause once it is won.
+        let paused = self.status == GameStatus::Paused;
+        self.chip(
             f,
             l.chip(0),
             Target::Pause,
-            if self.status == GameStatus::Paused {
-                "Resume"
-            } else {
-                "Pause"
-            },
+            if paused { "Resume" } else { "Pause" },
             l.font,
-            YELLOW,
+            paused,
+            self.status != GameStatus::Won,
         );
-        chip(
+        self.chip(
             f,
             l.chip(1),
             Target::Difficulty,
             self.difficulty.label(),
             l.font,
-            self.difficulty.color(),
+            false,
+            true,
         );
-        chip(f, l.chip(2), Target::NewGame, "New", l.font, LAVENDER);
+        self.chip(f, l.chip(2), Target::NewGame, "New", l.font, false, true);
 
         let left = Rect::new(
             l.header.x + l.pad,
@@ -1953,7 +2059,7 @@ impl SudokuApp {
             top,
             &format!("Sudoku  {}", format_time(self.elapsed_secs())),
             l.big,
-            LAVENDER,
+            self.colours.lavender,
             FontWeightHint::Bold,
         );
         left_in(
@@ -1967,7 +2073,7 @@ impl SudokuApp {
                 if self.note_mode { "on" } else { "off" },
             ),
             l.font,
-            status_color(self.status),
+            status_color(self.status, &self.colours),
             FontWeightHint::Regular,
         );
     }
@@ -1976,7 +2082,7 @@ impl SudokuApp {
         if !l.shows(l.grid) {
             return;
         }
-        fill(f, l.grid, CRUST, 4.0);
+        fill(f, l.grid, self.colours.crust, 4.0);
         let conflicts = self.conflicts();
         for i in 0..TOTAL_CELLS {
             let (row, col) = row_col(i);
@@ -1984,7 +2090,13 @@ impl SudokuApp {
         }
         for box_row in 0..BOX_SIZE {
             for box_col in 0..BOX_SIZE {
-                stroke(f, l.box_rect(box_row, box_col), OVERLAY0, 1.5, 2.0);
+                stroke(
+                    f,
+                    l.box_rect(box_row, box_col),
+                    self.colours.overlay0,
+                    1.5,
+                    2.0,
+                );
             }
         }
     }
@@ -2010,23 +2122,25 @@ impl SudokuApp {
             !hidden && !cell.is_empty() && cell.value == self.value(srow, scol) && !selected;
         let in_scope = row == srow || col == scol || box_origin(row, col) == box_origin(srow, scol);
 
+        // A clash keeps its tint under the cursor: the selected square is
+        // told by its outline, and the tint is what says the digit is wrong.
         let bg = if hidden {
-            SURFACE0
-        } else if selected {
-            SURFACE2
+            self.colours.surface0
         } else if conflicting {
-            Color::rgba(243, 139, 168, 60)
+            with_alpha(self.palette.red, CLASH_ALPHA)
+        } else if selected {
+            self.colours.surface2
         } else if matching {
-            Color::rgba(137, 180, 250, 45)
+            with_alpha(self.palette.blue, MATCH_ALPHA)
         } else if in_scope {
-            SURFACE1
+            self.colours.surface1
         } else {
-            SURFACE0
+            self.colours.surface0
         };
         fill(f, r, bg, l.cell * 0.06);
         f.hit(Target::Cell(row, col), r);
         if selected {
-            stroke(f, r, BLUE, 2.0, l.cell * 0.06);
+            stroke(f, r, self.colours.blue, 2.0, l.cell * 0.06);
         }
         if hidden {
             // A pause that leaves the board on screen has paused the clock and
@@ -2037,13 +2151,13 @@ impl SudokuApp {
             self.draw_notes(f, l, r, cell);
             return;
         }
-        let color = if conflicting {
-            RED
+        let ink = if conflicting {
+            self.colours.clash
         } else {
             match cell.origin {
-                Origin::Given => TEXT_COLOR,
-                Origin::Hint => PEACH,
-                Origin::Player => BLUE,
+                Origin::Given => self.colours.clue,
+                Origin::Hint => self.colours.hint,
+                Origin::Player => self.colours.own,
             }
         };
         let weight = if cell.origin == Origin::Given {
@@ -2051,7 +2165,9 @@ impl SudokuApp {
         } else {
             FontWeightHint::Regular
         };
-        centred_in(f, r, &cell.value.to_string(), l.cell * 0.6, color, weight);
+        let size = l.cell * 0.6;
+        let color = ink.at(size, weight == FontWeightHint::Bold);
+        centred_in(f, r, &cell.value.to_string(), size, color, weight);
     }
 
     fn draw_notes(&self, f: &mut Frame, l: &Layout, r: Rect, cell: Cell) {
@@ -2072,7 +2188,7 @@ impl SudokuApp {
                 Rect::new(r.x + ncol * third, r.y + nrow * third, third, third),
                 &digit.to_string(),
                 size,
-                SUBTEXT0,
+                self.colours.note,
                 FontWeightHint::Light,
             );
         }
@@ -2082,24 +2198,25 @@ impl SudokuApp {
         if !l.shows(l.keypad) {
             return;
         }
-        fill(f, l.keypad, MANTLE, 0.0);
+        fill(f, l.keypad, self.colours.mantle, 0.0);
         for (i, &target) in KEYPAD.iter().enumerate() {
             let r = l.key_rect(i);
             if r.is_empty() {
                 continue;
             }
-            let accent = match target {
-                Target::Notes if self.note_mode => TEAL,
-                Target::Notes => SUBTEXT0,
-                Target::Hint if self.hints_remaining() == 0 => OVERLAY0,
-                Target::Hint => PEACH,
-                Target::Undo if self.undo_stack.is_empty() => OVERLAY0,
-                Target::Redo if self.redo_stack.is_empty() => OVERLAY0,
-                Target::Undo | Target::Redo => MAUVE,
-                Target::Erase => SUBTEXT0,
-                _ => TEXT_COLOR,
-            };
-            chip(f, r, target, &key_label(target), l.font, accent);
+            // A key that would do nothing is switched off: every key while
+            // the game is paused or won, when the board takes nothing, and
+            // hint, undo and redo when they have nothing to give. Note mode,
+            // a switch, shows it is on.
+            let live = self.status == GameStatus::Playing
+                && match target {
+                    Target::Hint => self.hints_remaining() > 0,
+                    Target::Undo => !self.undo_stack.is_empty(),
+                    Target::Redo => !self.redo_stack.is_empty(),
+                    _ => true,
+                };
+            let on = target == Target::Notes && self.note_mode;
+            self.chip(f, r, target, &key_label(target), l.font, on, live);
         }
     }
 
@@ -2107,7 +2224,7 @@ impl SudokuApp {
         if !l.shows(l.footer) {
             return;
         }
-        fill(f, l.footer, MANTLE, 0.0);
+        fill(f, l.footer, self.colours.mantle, 0.0);
         let best = self
             .stats
             .best_time(self.difficulty)
@@ -2135,7 +2252,9 @@ impl SudokuApp {
                 }
             ),
             l.font,
-            OVERLAY0,
+            // Secondary text, not the palette's faintest grey: the record is
+            // read, and the grey is 3.6:1 on the band in the dark theme.
+            self.colours.subtext0,
             FontWeightHint::Regular,
         );
     }
@@ -2161,6 +2280,11 @@ pub fn handle_event(app: &mut SudokuApp, event: &Event) -> EventResult {
 }
 
 impl App for SudokuApp {
+    fn theme_changed(&mut self, palette: &Palette) {
+        self.palette = *palette;
+        self.colours = Colours::of(palette);
+    }
+
     fn title(&self) -> String {
         "Sudoku".to_string()
     }
@@ -2250,6 +2374,399 @@ fn main() -> ExitCode {
 )]
 mod tests {
     use super::*;
+
+    /// The colours a game draws in until the theme says otherwise.
+    fn colours() -> Colours {
+        Colours::of(&Palette::for_mode(false))
+    }
+
+    /// The lower face of the button drawn exactly over `r`.
+    fn face_in(f: &Frame, r: Rect) -> Color {
+        f.commands()
+            .iter()
+            .find_map(|c| match c {
+                RenderCommand::FillRect {
+                    x,
+                    y,
+                    width,
+                    height,
+                    color,
+                    ..
+                } if (*x - r.x).abs() < 0.01
+                    && (*y - r.y).abs() < 0.01
+                    && (*width - r.w).abs() < 0.01
+                    && (*height - r.h).abs() < 0.01 =>
+                {
+                    Some(*color)
+                }
+                _ => None,
+            })
+            .unwrap_or_else(|| panic!("no button is drawn over {r:?}"))
+    }
+
+    /// The face the keypad key for `target` is drawn with.
+    fn key_face(a: &SudokuApp, target: Target) -> Color {
+        let i = KEYPAD
+            .iter()
+            .position(|&t| t == target)
+            .unwrap_or_else(|| panic!("{target:?} is not a key"));
+        face_in(&a.frame(SIZE.0, SIZE.1), layout_of(a).key_rect(i))
+    }
+
+    /// The faces the toolkit gives a control on the bands: live, switched
+    /// off, and a switch that is on.
+    fn faces(p: &Palette) -> (Color, Color, Color) {
+        let paint = |kind, disabled| {
+            guitk::button::paint(
+                p,
+                kind,
+                State {
+                    disabled,
+                    ..State::default()
+                },
+                p.mantle,
+            )
+            .lower
+        };
+        (
+            paint(Kind::Plain, false),
+            paint(Kind::Plain, true),
+            paint(Kind::Primary, false),
+        )
+    }
+
+    /// **The window is drawn in the user's colours**, light or dark -- a game
+    /// with a square selected, a clash, marks and a hint, paused, won, and
+    /// under the shortcut card -- every colour the palette's or the toolkit's
+    /// buttons' (the operator's C-Q16). It drew in its own copy of Catppuccin
+    /// Mocha, dark on a light desktop.
+    #[test]
+    fn the_window_is_drawn_in_the_users_colours() {
+        for light in [false, true] {
+            let p = Palette::for_mode(light);
+            let mut derived = gamechrome::button_colours(&p, Kind::Plain, p.mantle);
+            derived.extend(gamechrome::button_colours(&p, Kind::Primary, p.mantle));
+            // The digits' inks, each moved to read on the squares, in both
+            // strengths.
+            let c = Colours::of(&p);
+            for ink in [c.clue, c.own, c.hint, c.clash] {
+                derived.extend([ink.large, ink.small]);
+            }
+            derived.push(c.note);
+            let mut a = playground();
+            a.theme_changed(&p);
+            // A clash: row 1 already holds a 6.
+            select(&mut a, 1, 7);
+            a.apply(Intent::Digit(6));
+            // Marks in another hole, and a hint in the third.
+            select(&mut a, 4, 0);
+            a.apply(Intent::ToggleNotes);
+            a.apply(Intent::Digit(1));
+            a.apply(Intent::Digit(2));
+            a.apply(Intent::ToggleNotes);
+            select(&mut a, 7, 1);
+            a.apply(Intent::Hint);
+            let playing = a.frame(SIZE.0, SIZE.1);
+            a.apply(Intent::Pause);
+            let paused = a.frame(SIZE.0, SIZE.1);
+            a.apply(Intent::Pause);
+            a.show_help = true;
+            let help = a.frame(SIZE.0, SIZE.1);
+            let mut b = almost_done();
+            b.theme_changed(&p);
+            b.apply(Intent::Digit(9));
+            assert_eq!(b.status(), GameStatus::Won);
+            let won = b.frame(SIZE.0, SIZE.1);
+            for (what, f) in [
+                ("playing", playing),
+                ("paused", paused),
+                ("help", help),
+                ("won", won),
+            ] {
+                appearance::palette_check::assert_drawn_from(
+                    &p,
+                    f.commands(),
+                    &derived,
+                    &format!("sudoku, {what}, light: {light}"),
+                );
+            }
+        }
+    }
+
+    /// **Every digit drawn reads on the square drawn under it, in either
+    /// theme**: a clue, the player's own, a hint and a clash, at rest, in the
+    /// selected square's row, column and box, selected, and tinted as holding
+    /// the selected digit or as a clash -- every square selected in turn, so
+    /// every pairing the board can show is drawn. A digit is six tenths of a
+    /// square high, large text, held to 3:1; a pencil mark is small text,
+    /// held to 4.5:1. The ground is the square's fill over the grid's, as the
+    /// screen shows it. In the light theme the hint's peach and the clash's
+    /// red were 2.5:1 on the selected square.
+    #[test]
+    fn every_digit_reads_on_the_square_under_it_in_either_theme() {
+        for light in [false, true] {
+            let p = Palette::for_mode(light);
+            let mut a = board(&[idx(1, 7), idx(7, 1), idx(4, 0), idx(2, 2)]);
+            a.theme_changed(&p);
+            // A clash: row 1 already holds a 6.
+            select(&mut a, 1, 7);
+            a.apply(Intent::Digit(6));
+            // The player's own right digit, a hint, and marks.
+            select(&mut a, 2, 2);
+            a.apply(Intent::Digit(KNOWN_SOLUTION[idx(2, 2)]));
+            select(&mut a, 7, 1);
+            a.apply(Intent::Hint);
+            select(&mut a, 4, 0);
+            a.apply(Intent::ToggleNotes);
+            for digit in [1, 5, 9] {
+                a.apply(Intent::Digit(digit));
+            }
+            a.apply(Intent::ToggleNotes);
+            assert!(!a.conflicts().is_empty(), "there is no clash to read");
+
+            let grid = a.colours.crust;
+            let (mut digits, mut marks, mut small) = (0, 0, 0);
+            // The default window, where a digit is large text, and a cramped
+            // one, where it is not and takes the stronger ink.
+            for (w, h) in [SIZE, (360.0, 440.0)] {
+                a.resize(w, h);
+                let l = layout_of(&a);
+                for i in 0..TOTAL_CELLS {
+                    let (row, col) = row_col(i);
+                    a.apply(Intent::Select(row, col));
+                    let f = a.frame(w, h);
+                    for j in 0..TOTAL_CELLS {
+                        let (r2, c2) = row_col(j);
+                        let square = l.cell_rect(r2, c2);
+                        // The last fill over the square is the one on top.
+                        let ground = f
+                            .commands()
+                            .iter()
+                            .rev()
+                            .find_map(|cmd| match cmd {
+                                RenderCommand::FillRect {
+                                    x,
+                                    y,
+                                    width,
+                                    height,
+                                    color,
+                                    ..
+                                } if (*x - square.x).abs() < 0.01
+                                    && (*y - square.y).abs() < 0.01
+                                    && (*width - square.w).abs() < 0.01
+                                    && (*height - square.h).abs() < 0.01 =>
+                                {
+                                    Some(*color)
+                                }
+                                _ => None,
+                            })
+                            .unwrap_or_else(|| panic!("square ({r2}, {c2}) is not drawn"))
+                            .over(grid);
+                        for cmd in f.commands() {
+                            let RenderCommand::Text {
+                                x,
+                                y,
+                                text,
+                                color,
+                                font_size,
+                                font_weight,
+                                ..
+                            } = cmd
+                            else {
+                                continue;
+                            };
+                            if !square.contains(*x + 0.5, *y + 0.5) {
+                                continue;
+                            }
+                            let ratio = guitk::theme::contrast_ratio(*color, ground);
+                            let large = gamechrome::legibility::is_large(
+                                *font_size,
+                                *font_weight == FontWeightHint::Bold,
+                            );
+                            let kind = if *font_size >= l.cell * 0.5 {
+                                digits += 1;
+                                if !large {
+                                    small += 1;
+                                }
+                                "digit"
+                            } else {
+                                marks += 1;
+                                "mark"
+                            };
+                            let floor = if large { 3.0 } else { 4.5 };
+                            assert!(
+                                ratio >= floor,
+                                "the {kind} {text} at ({r2}, {c2}) is {ratio:.2}:1 on its square \
+                             with ({row}, {col}) selected (light: {light})"
+                            );
+                        }
+                    }
+                }
+            }
+            assert!(
+                digits > 0 && marks > 0 && small > 0,
+                "nothing was read: {digits} digits ({small} small), {marks} marks"
+            );
+        }
+    }
+
+    /// **Every text reads on what is drawn under it, in either theme** -- the
+    /// header, the keys, the board's digits and marks, the footer and the
+    /// shortcut card -- held to WCAG's floor for its size over the fills
+    /// under it (`gamechrome::legibility`). A switched-off key's label is
+    /// exempt, as WCAG exempts an inactive control.
+    #[test]
+    fn every_text_reads_on_what_is_under_it_in_either_theme() {
+        for light in [false, true] {
+            let p = Palette::for_mode(light);
+            // A switched-off key's label on a switched-off key's face: the
+            // ink and the ground both, so a text that merely shares the
+            // disabled grey -- the footer's, say -- is still held to the floor.
+            let off = |kind| {
+                guitk::button::paint(
+                    &p,
+                    kind,
+                    State {
+                        disabled: true,
+                        ..State::default()
+                    },
+                    p.mantle,
+                )
+            };
+            let exempt = [off(Kind::Plain), off(Kind::Primary)];
+            let mut frames = Vec::new();
+            let mut a = playground();
+            a.theme_changed(&p);
+            select(&mut a, 1, 7);
+            a.apply(Intent::Digit(6));
+            select(&mut a, 4, 0);
+            a.apply(Intent::ToggleNotes);
+            a.apply(Intent::Digit(1));
+            a.apply(Intent::ToggleNotes);
+            select(&mut a, 7, 1);
+            a.apply(Intent::Hint);
+            frames.push(("playing", a.frame(SIZE.0, SIZE.1)));
+            a.apply(Intent::Pause);
+            frames.push(("paused", a.frame(SIZE.0, SIZE.1)));
+            // Not the shortcut card: the toolkit paints it as a card, and
+            // under the default bordered theme a card has no fill, so its
+            // words land on the grid under it -- 3.0:1 in the light theme.
+            // Lane C's to fix, once, for every app that raises one
+            // (requests/e-c-the-shortcut-card-is-see-through-under-the-default-theme.md);
+            // the help frame joins this list when it is.
+            let mut b = almost_done();
+            b.theme_changed(&p);
+            b.apply(Intent::Digit(9));
+            frames.push(("won", b.frame(SIZE.0, SIZE.1)));
+            for (what, f) in frames {
+                let bad = gamechrome::legibility::illegible(f.commands(), p.base, |r| {
+                    exempt
+                        .iter()
+                        .any(|o| r.ink == o.ink && (r.ground == o.lower || r.ground == o.upper))
+                });
+                assert!(
+                    bad.is_empty(),
+                    "sudoku, {what}, light: {light}: {:?}",
+                    bad.iter()
+                        .map(|r| format!("{:?} {:.2}:1", r.text, r.ratio()))
+                        .collect::<Vec<_>>()
+                );
+            }
+        }
+    }
+
+    /// **The four kinds of digit are told apart in either theme** -- a clue,
+    /// the player's own, a hint and a clash -- after each has been moved to
+    /// read on the squares, which moves them all toward the same pole. A hint
+    /// was peach, and a clash's red came within 28 of it in the light theme.
+    #[test]
+    fn the_kinds_of_digit_are_told_apart_in_either_theme() {
+        for light in [false, true] {
+            let c = Colours::of(&Palette::for_mode(light));
+            for (strength, kinds) in [
+                (
+                    "large",
+                    [
+                        ("clue", c.clue.large),
+                        ("own", c.own.large),
+                        ("hint", c.hint.large),
+                        ("clash", c.clash.large),
+                    ],
+                ),
+                (
+                    "small",
+                    [
+                        ("clue", c.clue.small),
+                        ("own", c.own.small),
+                        ("hint", c.hint.small),
+                        ("clash", c.clash.small),
+                    ],
+                ),
+            ] {
+                for (i, &(a, x)) in kinds.iter().enumerate() {
+                    for &(b, y) in kinds.iter().skip(i + 1) {
+                        // A clue is bold and the player's own digit is not
+                        // (`a_clue_a_hint_and_the_players_own_digit_are_three_different_colours`),
+                        // and in the dark theme the palette's text and blue are
+                        // near: weight is the cue there, and colour the second.
+                        if (a, b) == ("clue", "own") {
+                            continue;
+                        }
+                        assert!(
+                            !guitk::palette::hard_to_tell_apart(x, y),
+                            "a {a} and a {b} look alike, {strength}: {x:?} and {y:?} (light: {light})"
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    /// **Every key is switched off while the game is paused or won**: the
+    /// board takes no digit, mark, hint or undo then, and a key drawn live
+    /// promised one. The pause chip, which ends a pause, stays live and shows
+    /// the pause is on; once the game is won it has nothing to pause.
+    #[test]
+    fn the_keys_are_switched_off_while_the_game_is_paused_or_won() {
+        let mut a = playground();
+        select(&mut a, 1, 7);
+        a.apply(Intent::Digit(4));
+        let (live, off, on) = faces(&a.palette);
+        assert_eq!(
+            key_face(&a, Target::Undo),
+            live,
+            "undo has work, and looks off"
+        );
+        a.apply(Intent::Pause);
+        for &target in KEYPAD.iter() {
+            assert_eq!(
+                key_face(&a, target),
+                off,
+                "{target:?} looks live in a paused game"
+            );
+        }
+        let chip = |a: &SudokuApp| face_in(&a.frame(SIZE.0, SIZE.1), layout_of(a).chip(0));
+        assert_eq!(chip(&a), on, "the pause chip does not show the pause");
+        a.apply(Intent::Pause);
+        assert_eq!(
+            key_face(&a, Target::Undo),
+            live,
+            "resuming left the keys off"
+        );
+        assert_eq!(chip(&a), live, "the pause chip still shows a pause");
+
+        let mut b = almost_done();
+        b.apply(Intent::Digit(9));
+        assert_eq!(b.status(), GameStatus::Won);
+        for &target in KEYPAD.iter() {
+            assert_eq!(
+                key_face(&b, target),
+                off,
+                "{target:?} looks live after the win"
+            );
+        }
+        assert_eq!(chip(&b), off, "a won game offers to pause");
+    }
     use guitk::event::Modifiers;
     use guitk::probe::{self, ctrl, press, press_with};
     use std::collections::HashSet;
@@ -2708,18 +3225,12 @@ mod tests {
     }
 
     #[test]
-    fn every_difficulty_has_its_own_name_and_its_own_colour() {
+    fn every_difficulty_has_its_own_name() {
         let names: HashSet<&str> = Difficulty::ALL.iter().map(|d| d.label()).collect();
         assert_eq!(
             names.len(),
             Difficulty::ALL.len(),
             "two levels share a name"
-        );
-        let colors: HashSet<Color> = Difficulty::ALL.iter().map(|d| d.color()).collect();
-        assert_eq!(
-            colors.len(),
-            Difficulty::ALL.len(),
-            "two levels share a colour"
         );
         assert!(
             Difficulty::ALL.iter().all(|d| !d.label().is_empty()),
@@ -4120,9 +4631,15 @@ mod tests {
         assert_eq!(status_text(GameStatus::Playing), "Playing");
         assert_eq!(status_text(GameStatus::Won), "Completed");
         assert_eq!(status_text(GameStatus::Paused), "Paused");
-        assert_eq!(status_color(GameStatus::Playing), BLUE);
-        assert_eq!(status_color(GameStatus::Won), GREEN);
-        assert_eq!(status_color(GameStatus::Paused), YELLOW);
+        assert_eq!(
+            status_color(GameStatus::Playing, &colours()),
+            colours().blue
+        );
+        assert_eq!(status_color(GameStatus::Won, &colours()), colours().green);
+        assert_eq!(
+            status_color(GameStatus::Paused, &colours()),
+            colours().yellow
+        );
         let seen: HashSet<&str> = [GameStatus::Playing, GameStatus::Won, GameStatus::Paused]
             .into_iter()
             .map(status_text)
@@ -4346,7 +4863,7 @@ mod tests {
             short,
             "Sudoku",
             30.0,
-            TEXT_COLOR,
+            colours().clue.large,
             FontWeightHint::Bold,
         );
 
@@ -5086,16 +5603,16 @@ mod tests {
                 .find(|t| t.contains('/'))
                 .expect("the state line is not drawn")
         };
-        assert_eq!(text_color(&playing, &line(&playing)), Some(BLUE));
+        assert_eq!(text_color(&playing, &line(&playing)), Some(colours().blue));
 
         a.apply(Intent::Pause);
         let paused = a.frame(SIZE.0, SIZE.1);
-        assert_eq!(text_color(&paused, &line(&paused)), Some(YELLOW));
+        assert_eq!(text_color(&paused, &line(&paused)), Some(colours().yellow));
 
         let mut b = almost_done();
         b.apply(Intent::Digit(9));
         let won = b.frame(SIZE.0, SIZE.1);
-        assert_eq!(text_color(&won, &line(&won)), Some(GREEN));
+        assert_eq!(text_color(&won, &line(&won)), Some(colours().green));
     }
 
     #[test]
@@ -5132,9 +5649,18 @@ mod tests {
         assert_eq!(clue, KNOWN_SOLUTION[idx(4, 4)].to_string());
         assert_eq!(own, KNOWN_SOLUTION[idx(1, 7)].to_string());
         assert_eq!(hint, KNOWN_SOLUTION[idx(7, 1)].to_string());
-        assert_eq!(clue_color, TEXT_COLOR);
-        assert_eq!(own_color, BLUE, "the player's own digit looks like a clue");
-        assert_eq!(hint_color, PEACH, "a hint looks like the player's own work");
+        let size = l.cell * 0.6;
+        assert_eq!(clue_color, colours().clue.at(size, true));
+        assert_eq!(
+            own_color,
+            colours().own.at(size, false),
+            "the player's own digit looks like a clue"
+        );
+        assert_eq!(
+            hint_color,
+            colours().hint.at(size, false),
+            "a hint looks like the player's own work"
+        );
         assert_eq!(clue_weight, FontWeightHint::Bold);
         assert_eq!(own_weight, FontWeightHint::Regular);
     }
@@ -5149,7 +5675,11 @@ mod tests {
         let l = layout_of(&a);
         let f = a.frame(SIZE.0, SIZE.1);
         let (_, color, _) = text_in(&f, l.cell_rect(1, 7)).expect("no digit drawn");
-        assert_eq!(color, RED, "a digit that breaks a rule is not flagged");
+        assert_eq!(
+            color,
+            colours().clash.at(l.cell * 0.6, false),
+            "a digit that breaks a rule is not flagged"
+        );
         assert!(a.conflicts().contains(&(1, 7)));
     }
 
@@ -5320,47 +5850,51 @@ mod tests {
     #[test]
     fn a_key_that_would_do_nothing_is_drawn_greyed_out() {
         let mut a = playground();
-        let l = layout_of(&a);
-        let accent = |a: &SudokuApp, target: Target| {
-            let i = KEYPAD.iter().position(|&t| t == target).unwrap();
-            text_in(&a.frame(SIZE.0, SIZE.1), l.key_rect(i))
-                .unwrap_or_else(|| panic!("{target:?} is drawn with no label"))
-                .1
-        };
-
+        let (live, off, on) = faces(&a.palette);
         assert_eq!(
-            accent(&a, Target::Undo),
-            OVERLAY0,
+            key_face(&a, Target::Undo),
+            off,
             "undo looks live with nothing to undo"
         );
-        assert_eq!(accent(&a, Target::Redo), OVERLAY0);
-        assert_eq!(accent(&a, Target::Hint), PEACH, "the hints look spent");
-        assert_eq!(accent(&a, Target::Notes), SUBTEXT0);
+        assert_eq!(key_face(&a, Target::Redo), off);
+        assert_eq!(key_face(&a, Target::Hint), live, "the hints look spent");
+        assert_eq!(key_face(&a, Target::Notes), live);
 
         select(&mut a, 1, 7);
         a.apply(Intent::Digit(4));
-        assert_eq!(accent(&a, Target::Undo), MAUVE, "undo stayed grey");
-        assert_eq!(accent(&a, Target::Redo), OVERLAY0, "redo lit up too early");
+        assert_eq!(key_face(&a, Target::Undo), live, "undo stayed off");
+        assert_eq!(key_face(&a, Target::Redo), off, "redo came on too early");
         a.apply(Intent::Undo);
-        assert_eq!(accent(&a, Target::Redo), MAUVE, "redo stayed grey");
+        assert_eq!(key_face(&a, Target::Redo), live, "redo stayed off");
 
         a.apply(Intent::ToggleNotes);
-        assert_eq!(accent(&a, Target::Notes), TEAL, "note mode does not show");
+        assert_eq!(key_face(&a, Target::Notes), on, "note mode does not show");
     }
 
     #[test]
     fn the_hint_key_greys_out_when_the_hints_are_gone() {
-        let mut a = board(&[0, 1, 2, 3, 4]);
-        let l = layout_of(&a);
-        let i = KEYPAD.iter().position(|&t| t == Target::Hint).unwrap();
+        // One hole more than there are hints: with as many holes as hints,
+        // the last hint finishes the board, and a won game switches every key
+        // off whatever the hints -- the test passed with the hint key's own
+        // rule deleted.
+        let mut a = board(&[0, 1, 2, 3, 4, 5]);
         for slot in 0..MAX_HINTS {
             let (r, c) = row_col(slot);
             select(&mut a, r, c);
             a.apply(Intent::Hint);
         }
         assert_eq!(a.hints_remaining(), 0);
-        let color = text_in(&a.frame(SIZE.0, SIZE.1), l.key_rect(i)).unwrap().1;
-        assert_eq!(color, OVERLAY0, "the hint key looks live with none left");
+        assert_eq!(
+            a.status(),
+            GameStatus::Playing,
+            "the hints finished the game"
+        );
+        let (_, off, _) = faces(&a.palette);
+        assert_eq!(
+            key_face(&a, Target::Hint),
+            off,
+            "the hint key looks live with none left"
+        );
     }
 
     #[test]

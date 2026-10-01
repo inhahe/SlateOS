@@ -3,4 +3,12 @@ name = "libservicebus"
 version = "0.1.0"
 edition = "2024"
 description = "SlateOS service bus client library — connect to services, call methods, subscribe to signals"
+
 [dependencies]
+# The kernel's native error codes, by name. This crate used to carry its own
+# table of them, numbered -1 to -8 like errnos, and every entry but one was
+# wrong: -1 is the kernel's InternalError, not "not found" (-500).
+kerror = { path = "../kerror" }
+
+[lints]
+workspace = true

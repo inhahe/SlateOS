@@ -34,7 +34,7 @@ use std::net::{Shutdown, TcpStream, ToSocketAddrs};
 use std::sync::mpsc::{self, Receiver};
 use std::sync::{Arc, Mutex};
 use std::task::Waker;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use crate::des;
 
@@ -58,6 +58,130 @@ const ZRLE: i32 = 16;
 /// under this.
 const MAX_ZRLE_BYTES: u32 = 64 << 20;
 const DESKTOP_SIZE: i32 = -223;
+
+/// How many bits a pixel crosses the network in (RFC 6143 section 7.4):
+/// what a profile's colour depth asks of the server, in the three sizes RFB
+/// allows. Fewer bits are fewer bytes -- a 16-bit screen is half the traffic
+/// of a 32-bit one, an 8-bit one a quarter -- at the cost of colours.
+///
+/// Whatever crosses the network, every [`Update::Pixels`] is `0x00RRGGBB`:
+/// each pixel is converted as it is read.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PixelBits {
+    /// 256 colours: three bits of red, three of green and two of blue, blue
+    /// highest -- the BGR233 layout VNC viewers ask for at eight bits.
+    Eight,
+    /// 65,536 colours: five bits of red, six of green, five of blue.
+    Sixteen,
+    /// Every colour a screen shows: 24 bits of it in 32, the top byte unused.
+    ThirtyTwo,
+}
+
+impl PixelBits {
+    /// The SetPixelFormat message asking for this: little endian, true
+    /// colour, with its layout's maxima and shifts.
+    fn set_pixel_format(self) -> [u8; 20] {
+        let (bits, depth, [r_max, g_max, b_max], [r_shift, g_shift, b_shift]): (
+            u8,
+            u8,
+            [u16; 3],
+            [u8; 3],
+        ) = match self {
+            Self::Eight => (8, 8, [7, 7, 3], [0, 3, 6]),
+            Self::Sixteen => (16, 16, [31, 63, 31], [11, 5, 0]),
+            Self::ThirtyTwo => (32, 24, [255, 255, 255], [16, 8, 0]),
+        };
+        let ([r0, r1], [g0, g1], [b0, b1]) = (
+            r_max.to_be_bytes(),
+            g_max.to_be_bytes(),
+            b_max.to_be_bytes(),
+        );
+        [
+            0, 0, 0, 0, bits, depth, 0, 1, r0, r1, g0, g1, b0, b1, r_shift, g_shift, b_shift, 0, 0,
+            0,
+        ]
+    }
+
+    /// Bytes a pixel takes on the network.
+    fn bytes(self) -> usize {
+        match self {
+            Self::Eight => 1,
+            Self::Sixteen => 2,
+            Self::ThirtyTwo => 4,
+        }
+    }
+
+    /// Bytes a ZRLE compact pixel takes: three for 32 bits that carry 24,
+    /// otherwise a pixel's own (RFC 6143 section 7.7.6).
+    fn compact_bytes(self) -> usize {
+        match self {
+            Self::Eight => 1,
+            Self::Sixteen => 2,
+            Self::ThirtyTwo => 3,
+        }
+    }
+
+    /// A pixel's bytes, little endian, as `0x00RRGGBB`.
+    ///
+    /// Each channel is widened to eight bits by scaling, rounded, so its
+    /// full intensity stays full: five bits of 31 is 255, not 248.
+    fn rgb(self, bytes: &[u8]) -> u32 {
+        let raw = bytes
+            .iter()
+            .rev()
+            .fold(0_u32, |acc, b| (acc << 8) | u32::from(*b));
+        let widen = |value: u32, max: u32| -> u32 {
+            value
+                .saturating_mul(255)
+                .saturating_add(max / 2)
+                .checked_div(max)
+                .unwrap_or(0)
+        };
+        let (r, g, b) = match self {
+            Self::Eight => (
+                widen(raw & 7, 7),
+                widen((raw >> 3) & 7, 7),
+                widen((raw >> 6) & 3, 3),
+            ),
+            Self::Sixteen => (
+                widen((raw >> 11) & 31, 31),
+                widen((raw >> 5) & 63, 63),
+                widen(raw & 31, 31),
+            ),
+            Self::ThirtyTwo => return raw & 0x00FF_FFFF,
+        };
+        (r << 16) | (g << 8) | b
+    }
+}
+
+/// What a session asks of the server's picture.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Picture {
+    /// How many bits a pixel.
+    pub bits: PixelBits,
+    /// Frames a second at most; 0 asks for each as soon as the last arrives.
+    pub frames_per_second: u8,
+}
+
+impl Picture {
+    /// Full colour, as fast as the server sends it -- for the tests; a
+    /// session the window opens asks for its profile's.
+    #[cfg(test)]
+    pub const FULL: Self = Self {
+        bits: PixelBits::ThirtyTwo,
+        frames_per_second: 0,
+    };
+
+    /// The least time between one frame's request and the next's.
+    ///
+    /// Asking for the next frame the moment the last arrives is what makes
+    /// a VNC client use all the bandwidth a busy screen can take; a frame
+    /// rate is kept by asking no sooner than this after the last request.
+    #[must_use]
+    pub fn frame_gap(self) -> Option<Duration> {
+        Duration::from_secs(1).checked_div(u32::from(self.frames_per_second))
+    }
+}
 
 /// What the session tells the window.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -103,13 +227,19 @@ pub struct Session {
 
 impl Session {
     /// Connect to `host`:`port` and authenticate with `password` (unused if
-    /// the server asks for none), on a thread of its own, waking `waker` with
-    /// each batch of news.
+    /// the server asks for none), on a thread of its own, asking for
+    /// `picture` and waking `waker` with each batch of news.
     ///
     /// # Errors
     ///
     /// When the thread cannot be started.
-    pub fn open(host: &str, port: u16, password: &str, waker: Option<Waker>) -> io::Result<Self> {
+    pub fn open(
+        host: &str,
+        port: u16,
+        password: &str,
+        picture: Picture,
+        waker: Option<Waker>,
+    ) -> io::Result<Self> {
         let writer: Arc<Mutex<Option<TcpStream>>> = Arc::new(Mutex::new(None));
         let (tx, updates) = mpsc::channel();
         let slot = Arc::clone(&writer);
@@ -124,7 +254,7 @@ impl Session {
                         waker.wake_by_ref();
                     }
                 };
-                let why = run(&host, port, &password, &slot, &tell);
+                let why = run(&host, port, &password, picture, &slot, &tell);
                 tell(Update::Closed(why));
             })?;
         Ok(Self { writer, updates })
@@ -197,6 +327,7 @@ fn run(
     host: &str,
     port: u16,
     password: &[u8],
+    picture: Picture,
     writer: &Mutex<Option<TcpStream>>,
     tell: &dyn Fn(Update),
 ) -> String {
@@ -215,6 +346,9 @@ fn run(
         stream,
         writer,
         zrle: deflate::PiecewiseInflater::zlib(),
+        bits: picture.bits,
+        gap: picture.frame_gap(),
+        asked: None,
     };
     match conn.handshake(password) {
         Ok((width, height, name)) => {
@@ -260,6 +394,12 @@ struct Conn<'a> {
     writer: &'a Mutex<Option<TcpStream>>,
     /// ZRLE's zlib stream, which lasts the whole session.
     zrle: deflate::PiecewiseInflater,
+    /// How many bits a pixel was asked for.
+    bits: PixelBits,
+    /// The least time between two requests for a frame; none, no limit.
+    gap: Option<Duration>,
+    /// When a frame was last asked for.
+    asked: Option<Instant>,
 }
 
 impl Conn<'_> {
@@ -371,11 +511,9 @@ impl Conn<'_> {
             ));
         }
 
-        // SetPixelFormat: 32 bpp, depth 24, little endian, true colour,
-        // 255/255/255 maxima, red at 16, green at 8, blue at 0.
-        self.write(&[
-            0, 0, 0, 0, 32, 24, 0, 1, 0, 255, 0, 255, 0, 255, 16, 8, 0, 0, 0, 0,
-        ])?;
+        // SetPixelFormat: the bits a pixel the profile asked for, little
+        // endian, true colour.
+        self.write(&self.bits.set_pixel_format())?;
         // SetEncodings, most wanted first: ZRLE, Hextile, CopyRect, Raw, and
         // the DesktopSize pseudo-encoding.
         let mut encodings = vec![2, 0, 0, 5];
@@ -386,12 +524,15 @@ impl Conn<'_> {
         Ok((width, height, name))
     }
 
-    /// One pixel as the client asked for them: four bytes, little endian.
+    /// One pixel as the client asked for them, as `0x00RRGGBB`.
     fn pixel(&mut self) -> Result<u32, String> {
         let mut p = [0_u8; 4];
-        self.read_exact(&mut p)?;
-        let [b, g, r, _] = p;
-        Ok(u32::from_le_bytes([b, g, r, 0]))
+        let bits = self.bits;
+        let bytes = p
+            .get_mut(..bits.bytes())
+            .ok_or_else(|| String::from("a pixel is at most four bytes"))?;
+        self.read_exact(bytes)?;
+        Ok(bits.rgb(bytes))
     }
 
     /// A Hextile rectangle (RFC 6143 section 7.7.4), `w` by `h`: 16x16 tiles
@@ -463,8 +604,17 @@ impl Conn<'_> {
         Ok(out)
     }
 
-    /// Ask for the screen: all of it, or what changed since the last frame.
+    /// Ask for the screen: all of it, or what changed since the last frame
+    /// -- no sooner after the last request than the frame rate allows.
     fn request(&mut self, incremental: bool, width: u16, height: u16) -> Result<(), String> {
+        if let (Some(gap), Some(asked)) = (self.gap, self.asked)
+            && let Some(wait) = asked
+                .checked_add(gap)
+                .and_then(|due| due.checked_duration_since(Instant::now()))
+        {
+            std::thread::sleep(wait);
+        }
+        self.asked = Some(Instant::now());
         let mut msg = vec![3, u8::from(incremental), 0, 0, 0, 0];
         msg.extend_from_slice(&width.to_be_bytes());
         msg.extend_from_slice(&height.to_be_bytes());
@@ -524,17 +674,18 @@ impl Conn<'_> {
                     let mut data = vec![0_u8; usize::try_from(len).unwrap_or(0)];
                     self.read_exact(&mut data)?;
                     // The most a rectangle's tiles can take: every pixel raw
-                    // at three bytes, and a subencoding byte and a full
-                    // palette for each tile.
+                    // at a compact pixel's size, and a subencoding byte and a
+                    // full palette for each tile.
+                    let compact = self.bits.compact_bytes() as u64;
                     let tiles = u64::from(w.div_ceil(64)).saturating_mul(u64::from(h.div_ceil(64)));
-                    let most = area
-                        .saturating_mul(3)
-                        .saturating_add(tiles.saturating_mul(1 + 127 * 3));
+                    let most = area.saturating_mul(compact).saturating_add(
+                        tiles.saturating_mul(compact.saturating_mul(127).saturating_add(1)),
+                    );
                     let raw = self
                         .zrle
                         .inflate_piece(&data, usize::try_from(most).unwrap_or(usize::MAX))
                         .map_err(|e| format!("the server's ZRLE stream is broken: {e}"))?;
-                    let pixels = zrle_tiles(&raw, w, h)?;
+                    let pixels = zrle_tiles(&raw, w, h, self.bits)?;
                     tell(Update::Pixels { x, y, w, h, pixels });
                 }
                 HEXTILE => {
@@ -544,14 +695,14 @@ impl Conn<'_> {
                 }
                 RAW => {
                     let area = inside((x, y, w, h), (*width, *height))?;
-                    let mut raw = vec![0_u8; usize::try_from(area.saturating_mul(4)).unwrap_or(0)];
+                    let bits = self.bits;
+                    let size = bits.bytes() as u64;
+                    let mut raw =
+                        vec![0_u8; usize::try_from(area.saturating_mul(size)).unwrap_or(0)];
                     self.read_exact(&mut raw)?;
                     let pixels = raw
-                        .chunks_exact(4)
-                        .map(|p| match p {
-                            [b, g, r, _] => u32::from_le_bytes([*b, *g, *r, 0]),
-                            _ => 0,
-                        })
+                        .chunks_exact(bits.bytes())
+                        .map(|p| bits.rgb(p))
                         .collect();
                     tell(Update::Pixels { x, y, w, h, pixels });
                 }
@@ -647,6 +798,7 @@ fn inside((x, y, w, h): (u16, u16, u16, u16), (width, height): (u16, u16)) -> Re
 struct Cursor<'a> {
     data: &'a [u8],
     at: usize,
+    bits: PixelBits,
 }
 
 impl Cursor<'_> {
@@ -660,11 +812,15 @@ impl Cursor<'_> {
         Ok(b)
     }
 
-    /// A compact pixel: the three bytes of the four that carry colour, for
-    /// the 32-bit, 24-deep true colour this client asks for.
+    /// A compact pixel: at 32 bits a pixel the three bytes of the four that
+    /// carry colour, otherwise a whole pixel.
     fn cpixel(&mut self) -> Result<u32, String> {
-        let (b, g, r) = (self.u8()?, self.u8()?, self.u8()?);
-        Ok(u32::from_le_bytes([b, g, r, 0]))
+        let mut p = [0_u8; 3];
+        let bits = self.bits;
+        for b in p.iter_mut().take(bits.compact_bytes()) {
+            *b = self.u8()?;
+        }
+        Ok(bits.rgb(p.get(..bits.compact_bytes()).unwrap_or(&[])))
     }
 
     /// A run length: bytes added up while they are 255, plus one.
@@ -689,8 +845,8 @@ impl Cursor<'_> {
 /// palette, or runs of colour or of palette entries. A run past its tile, a
 /// palette index past its palette, or a subencoding RFB does not define ends
 /// the session in words, never a read out of bounds.
-fn zrle_tiles(data: &[u8], w: u16, h: u16) -> Result<Vec<u32>, String> {
-    let mut at = Cursor { data, at: 0 };
+fn zrle_tiles(data: &[u8], w: u16, h: u16, bits: PixelBits) -> Result<Vec<u32>, String> {
+    let mut at = Cursor { data, at: 0, bits };
     let width = usize::from(w);
     let mut out = vec![0_u32; width.saturating_mul(usize::from(h))];
     for ty in (0..h).step_by(64) {
@@ -917,7 +1073,7 @@ mod tests {
         script.push(Step::Hear(10)); // the incremental request after it
         let (port, heard) = server(script);
 
-        let session = Session::open("127.0.0.1", port, "", None).unwrap();
+        let session = Session::open("127.0.0.1", port, "", Picture::FULL, None).unwrap();
         let updates = collect(&session, |u| {
             u.iter().any(|x| matches!(x, Update::Pixels { .. }))
         });
@@ -997,7 +1153,7 @@ mod tests {
             Step::Hear(10),
         ];
         let (port, heard) = server(script);
-        let session = Session::open("127.0.0.1", port, "password", None).unwrap();
+        let session = Session::open("127.0.0.1", port, "password", Picture::FULL, None).unwrap();
         collect(&session, |u| {
             u.iter().any(|x| matches!(x, Update::Ready { .. }))
         });
@@ -1033,7 +1189,7 @@ mod tests {
             Step::Say(failed),
         ];
         let (port, _heard) = server(script);
-        let session = Session::open("127.0.0.1", port, "wrong", None).unwrap();
+        let session = Session::open("127.0.0.1", port, "wrong", Picture::FULL, None).unwrap();
         let updates = collect(&session, |u| {
             u.iter().any(|x| matches!(x, Update::Closed(_)))
         });
@@ -1062,7 +1218,7 @@ mod tests {
         update.extend_from_slice(&RAW.to_be_bytes());
         script.push(Step::Say(update));
         let (port, _heard) = server(script);
-        let session = Session::open("127.0.0.1", port, "", None).unwrap();
+        let session = Session::open("127.0.0.1", port, "", Picture::FULL, None).unwrap();
         let updates = collect(&session, |u| {
             u.iter().any(|x| matches!(x, Update::Closed(_)))
         });
@@ -1091,7 +1247,7 @@ mod tests {
         cut.extend_from_slice(b"hi");
         script.push(Step::Say(cut));
         let (port, heard) = server(script);
-        let session = Session::open("127.0.0.1", port, "", None).unwrap();
+        let session = Session::open("127.0.0.1", port, "", Picture::FULL, None).unwrap();
         let updates = collect(&session, |u| {
             u.iter().any(|x| matches!(x, Update::CutText(_)))
         });
@@ -1156,7 +1312,7 @@ mod tests {
         script.push(Step::Say(update));
         script.push(Step::Hear(10));
         let (port, _heard) = server(script);
-        let session = Session::open("127.0.0.1", port, "", None).unwrap();
+        let session = Session::open("127.0.0.1", port, "", Picture::FULL, None).unwrap();
         let updates = collect(&session, |u| {
             u.iter().any(|x| matches!(x, Update::Pixels { .. }))
         });
@@ -1221,7 +1377,7 @@ mod tests {
         script.push(Step::Say(update));
         script.push(Step::Hear(10));
         let (port, _heard) = server(script);
-        let session = Session::open("127.0.0.1", port, "", None).unwrap();
+        let session = Session::open("127.0.0.1", port, "", Picture::FULL, None).unwrap();
         let updates = collect(&session, |u| {
             u.iter()
                 .filter(|x| matches!(x, Update::Pixels { .. }))
@@ -1251,11 +1407,11 @@ mod tests {
     #[test]
     fn a_zrle_run_past_its_tile_is_refused() {
         // Plain RLE: one colour for a run of nine in a 4x2 tile.
-        let refused = zrle_tiles(&[128, 1, 2, 3, 8], 4, 2).unwrap_err();
+        let refused = zrle_tiles(&[128, 1, 2, 3, 8], 4, 2, PixelBits::ThirtyTwo).unwrap_err();
         assert!(refused.contains("past its tile"), "{refused}");
-        let unknown = zrle_tiles(&[17], 4, 2).unwrap_err();
+        let unknown = zrle_tiles(&[17], 4, 2, PixelBits::ThirtyTwo).unwrap_err();
         assert!(unknown.contains("does not define"), "{unknown}");
-        let short = zrle_tiles(&[0, 1, 2], 4, 2).unwrap_err();
+        let short = zrle_tiles(&[0, 1, 2], 4, 2, PixelBits::ThirtyTwo).unwrap_err();
         assert!(short.contains("ended early"), "{short}");
     }
 
@@ -1266,7 +1422,7 @@ mod tests {
         script.push(Step::Hear(8));
         script.push(Step::Hear(6));
         let (port, heard) = server(script);
-        let session = Session::open("127.0.0.1", port, "", None).unwrap();
+        let session = Session::open("127.0.0.1", port, "", Picture::FULL, None).unwrap();
         collect(&session, |u| {
             u.iter().any(|x| matches!(x, Update::Ready { .. }))
         });
@@ -1286,6 +1442,128 @@ mod tests {
     }
 
     /// A character outside Latin-1 is sent as its code point, flagged.
+    /// **A profile's colour depth is what the server is asked for**, and
+    /// what it sends in fewer bits arrives as the same `0x00RRGGBB`: a 16-bit
+    /// Raw rectangle, an 8-bit one, and a 16-bit ZRLE tile of one colour.
+    #[test]
+    fn fewer_bits_a_pixel_are_asked_for_and_read_as_full_colour() {
+        for (bits, format, raw, want) in [
+            (
+                PixelBits::Sixteen,
+                [16_u8, 16, 0, 1, 0, 31, 0, 63, 0, 31, 11, 5, 0],
+                // Pure red, then pure blue, in 5-6-5, little endian.
+                vec![0x00, 0xF8, 0x1F, 0x00],
+                vec![0x00FF_0000, 0x0000_00FF],
+            ),
+            (
+                PixelBits::Eight,
+                [8, 8, 0, 1, 0, 7, 0, 7, 0, 3, 0, 3, 6],
+                // Pure green, then white, in BGR233.
+                vec![0b0011_1000, 0xFF],
+                vec![0x0000_FF00, 0x00FF_FFFF],
+            ),
+        ] {
+            let mut script = super::fake::handshake_none();
+            let mut update = vec![0, 0, 0, 1, 0, 0, 0, 0, 0, 2, 0, 1];
+            update.extend_from_slice(&RAW.to_be_bytes());
+            update.extend_from_slice(&raw);
+            script.push(Step::Say(update));
+            script.push(Step::Hear(10));
+            let (port, heard) = server(script);
+            let picture = Picture {
+                bits,
+                frames_per_second: 0,
+            };
+            let session = Session::open("127.0.0.1", port, "", picture, None).unwrap();
+            let updates = collect(&session, |u| {
+                u.iter().any(|x| matches!(x, Update::Pixels { .. }))
+            });
+            assert!(
+                updates.contains(&Update::Pixels {
+                    x: 0,
+                    y: 0,
+                    w: 2,
+                    h: 1,
+                    pixels: want.clone()
+                }),
+                "{bits:?}: {updates:?}"
+            );
+            for _ in 0..3 {
+                heard.recv_timeout(Duration::from_secs(5)).unwrap();
+            }
+            let asked = heard.recv_timeout(Duration::from_secs(5)).unwrap();
+            assert_eq!(
+                &asked[4..17],
+                &format,
+                "{bits:?}: the wrong pixel format was asked for"
+            );
+        }
+    }
+
+    #[test]
+    fn a_zrle_compact_pixel_is_a_whole_pixel_below_32_bits() {
+        // One 2x1 tile, solid (subencoding 1), in 16 bits: pure green.
+        let pixels = zrle_tiles(&[1, 0xE0, 0x07], 2, 1, PixelBits::Sixteen).unwrap();
+        assert_eq!(pixels, [0x0000_FF00, 0x0000_FF00]);
+        let eight = zrle_tiles(&[1, 0b1100_0000], 2, 1, PixelBits::Eight).unwrap();
+        assert_eq!(eight, [0x0000_00FF, 0x0000_00FF], "pure blue in BGR233");
+    }
+
+    #[test]
+    fn every_channel_widens_to_its_full_range() {
+        for (bits, bytes, want) in [
+            (PixelBits::Sixteen, vec![0xFF, 0xFF], 0x00FF_FFFF),
+            (PixelBits::Sixteen, vec![0x00, 0x00], 0),
+            (PixelBits::Eight, vec![0xFF], 0x00FF_FFFF),
+            (PixelBits::Eight, vec![0x00], 0),
+            (
+                PixelBits::ThirtyTwo,
+                vec![0x33, 0x22, 0x11, 0xFF],
+                0x0011_2233,
+            ),
+            // Half of five bits: 16 of 31 is 132 of 255, rounded.
+            (PixelBits::Sixteen, vec![0x00, 0x80], 0x0084_0000),
+        ] {
+            assert_eq!(bits.rgb(&bytes), want, "{bits:?} {bytes:x?}");
+        }
+    }
+
+    /// **A frame rate is kept by asking no sooner than it allows.** At ten
+    /// frames a second, the request after a frame waits for the tenth of a
+    /// second since the last; with no rate it goes at once.
+    #[test]
+    fn a_frame_rate_spaces_the_requests() {
+        assert_eq!(Picture::FULL.frame_gap(), None);
+        let ten = Picture {
+            bits: PixelBits::ThirtyTwo,
+            frames_per_second: 10,
+        };
+        assert_eq!(ten.frame_gap(), Some(Duration::from_millis(100)));
+
+        let mut script = super::fake::handshake_none();
+        for _ in 0..2 {
+            // An update with no rectangles, then the request after it.
+            script.push(Step::Say(vec![0, 0, 0, 0]));
+            script.push(Step::Hear(10));
+        }
+        let (port, heard) = server(script);
+        // Timed from before the session opens to the third request: the
+        // client cannot send it sooner than two gaps after the first, so
+        // this is a floor that a slow test machine can only raise.
+        let opened = Instant::now();
+        let _session = Session::open("127.0.0.1", port, "", ten, None).unwrap();
+        // Version, sign-in, share, pixel format, encodings, then three
+        // requests: the first, and one after each frame.
+        for _ in 0..8 {
+            heard.recv_timeout(Duration::from_secs(5)).unwrap();
+        }
+        let took = opened.elapsed();
+        assert!(
+            took >= Duration::from_millis(195),
+            "three requests in {took:?} at ten frames a second"
+        );
+    }
+
     #[test]
     fn keysyms_follow_the_convention() {
         assert_eq!(keysym_of_char('A'), 0x41);

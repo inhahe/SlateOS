@@ -178,18 +178,18 @@ the system's `/usr/share/applications/mimeapps.list`.
 ## 5. File types
 
 **Extensions:** U4 (the toolkit's table, `guitk::filetypes`) is where file types
-belong, and it lacked 33 that K4 and K5 knew. **Twenty-three are carried**,
+belong, and it lacked 33 that K4 and K5 knew. **Twenty-four are carried**,
 each with K4's type:
 
 `a`, `bat`, `cc`, `cmd`, `cpio`, `cxx`, `diff`, `epub`, `gzip`, `htm`, `hxx`,
-`jar`, `lib`, `markdown`, `mjs`, `o`, `patch`, `psm1`, `pyw`, `text`, `xsd`,
-`xsl`, `zstd`.
+`jar`, `lib`, `markdown`, `mjs`, `o`, `oga`, `patch`, `psm1`, `pyw`, `text`,
+`xsd`, `xsl`, `zstd`.
 
-**One, `oga` (Ogg audio), is held back** only because `apps/fileassoc`'s test of
-applying a program to the Music group counts the toolkit's audio types by hand
-("5 of 10"), and an eleventh would fail it; lane E is asked to derive the count
-from the table (`requests/c-e-a-test-that-counts-the-toolkits-audio-types.md`),
-and `oga` goes in when that lands.
+`oga` (Ogg audio) came last: `apps/fileassoc`'s test of applying a program to
+the Music group counted the toolkit's audio types by hand ("5 of 10"), and an
+eleventh would have failed it; lane E derived the count from the table
+(`3275adc99`, `requests/c-e-a-test-that-counts-the-toolkits-audio-types.md`)
+before it went in.
 
 **Nine wait on a decision the toolkit had already recorded** (`known-issues.md`,
 the `filesearch` entry), and stay out, pinned by the toolkit's
@@ -265,6 +265,12 @@ first-start pins:
 | K7 favourites | Files, Terminal, Editor, Settings, Calculator | the start menu's first-start pins, the same five |
 | K7 quick links | Settings, Terminal | the start menu's Settings and Terminal buttons, which the shell already has |
 | K8 launcher entries | Files, Terminal, Browser, Settings, Text Editor, with search words | their words are in section 2's keywords |
+
+Built 2026-09-27 (`FIRST_START_TASKBAR_PINS` and `FIRST_START_MENU_PINS` in
+`gui/desktop`, named by desktop file id so they follow a program that moves).
+They are not written down by loading, and a list the user saved empty stays
+empty. Held by `gui/desktop`'s `taskbar_pin_tests::a_first_start_has_the_pins_the_kernel_listed`
+and its two neighbours, since the shell and not this crate is what reads them.
 
 ## 8. Deliberately not carried
 

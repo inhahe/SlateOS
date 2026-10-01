@@ -3,7 +3,7 @@
 **From:** Lane E (`apps/imageviewer`, and every application that filters its
 open dialog). **To:** Lane C (`gui/toolkit/src/dialog.rs`). **Filed:**
 2026-09-26.
-**Status:** LANDED on `lane-c` 2026-09-27 (lane C); it reaches `main` with lane C's next publish. The filter reads a pattern's extension without regard to ASCII case (`dialog::has_extension`, byte-wise, so `*.tar.gz` still works and no multi-byte character is folded), and the Save dialog's appended extension does too -- `report.PDF` under `*.pdf` stays `report.PDF`. An exact-name pattern stays exact. The same bug as `requests/e-c-a-file-dialog-filter-hides-an-upper-case-extension.md`, fixed once.
+**Status:** DONE -- landed on `lane-c` 2026-09-27 (lane C), on `main` since 2026-09-28 (`9154182d0`). The filter reads a pattern's extension without regard to ASCII case (`dialog::has_extension`, byte-wise, so `*.tar.gz` still works and no multi-byte character is folded), and the Save dialog's appended extension does too -- `report.PDF` under `*.pdf` stays `report.PDF`. An exact-name pattern stays exact. The same bug as `requests/e-c-a-file-dialog-filter-hides-an-upper-case-extension.md`, fixed once.
 
 **In short:** a camera or phone names its pictures `IMG_0001.JPG`. An open
 dialog filtered to pictures (`*.jpg`) does not list them, because the filter

@@ -430,19 +430,62 @@ impl Default for MixerApp {
 }
 
 impl MixerApp {
-    /// A mixer with the stub device and stream list, seeded from the kernel.
+    /// The mixer the program opens: what this system has to mix, which today
+    /// is nothing -- no program is playing and there is no device to play
+    /// through, and the window says so ([`NO_AUDIO`]).
+    ///
+    /// Until 2026-09-28 it opened on [`with_seed`](Self::with_seed)'s set:
+    /// "Music Player", "Firefox" and "Discord" playing, their peak meters
+    /// bouncing, on "Speakers", "Headphones" and "HDMI Output" at 48 and 96 kHz
+    /// -- every one invented, the meters driven by a random number generator,
+    /// on a system with no audio driver and no Firefox. A mixer is where a
+    /// user goes to find out what is making sound, and it answered with
+    /// programs that were not there.
     #[must_use]
     pub fn new() -> Self {
-        Self::with_seed(seed_from_system(FALLBACK_SEED))
+        Self::nothing_to_mix(seed_from_system(FALLBACK_SEED))
     }
 
-    /// The same mixer at a seed the caller names.
-    ///
-    /// The tests use this rather than `new`. On this host the kernel's random
-    /// device is out of reach, so `new` falls back to `FALLBACK_SEED` and two
-    /// mixers happen to agree — but that is a property of the host, not of the
-    /// program, and a suite that depends on it is a suite that goes red the
-    /// first time it is run somewhere the kernel answers.
+    /// The layout at a size, with a column for each stream -- and, with none,
+    /// the master at the width it has beside four and the rest of the band
+    /// left for [`NO_AUDIO`], rather than one fader the width of the window.
+    /// The drawing and the hit test both come through here, so a column is
+    /// where it is drawn.
+    fn layout_at(&self, width: f32, height: f32) -> Layout {
+        let cols = if self.streams.is_empty() {
+            EMPTY_BAND_COLUMNS
+        } else {
+            self.streams.len()
+        };
+        Layout::new(width, height, cols)
+    }
+
+    /// No streams and no devices: the state of a system without audio.
+    fn nothing_to_mix(seed: u64) -> Self {
+        Self {
+            palette: Palette::from_settings(&appearance::AppearanceSettings::default()),
+            master_volume: 0.75,
+            master_muted: false,
+            streams: Vec::new(),
+            output_devices: Vec::new(),
+            input_devices: Vec::new(),
+            selected_output: 0,
+            selected_input: 0,
+            selection: Selection::Master,
+            picker: Picker::None,
+            picker_row: 0,
+            meter_accum: 0,
+            steps: 0,
+            size: (WINDOW_WIDTH, WINDOW_HEIGHT),
+            rng: SeededRng::new(seed),
+        }
+    }
+
+    /// A mixer with a sample set of streams and devices, at a seed the caller
+    /// names -- what the window used to open with, kept for the tests of the
+    /// faders, meters and pickers it exercises. The meters' random draw only
+    /// ever animates these.
+    #[cfg(test)]
     #[must_use]
     pub fn with_seed(seed: u64) -> Self {
         let streams = vec![
@@ -535,21 +578,10 @@ impl MixerApp {
         ];
 
         Self {
-            palette: Palette::from_settings(&appearance::AppearanceSettings::default()),
-            master_volume: 0.75,
-            master_muted: false,
             streams,
             output_devices,
             input_devices,
-            selected_output: 0,
-            selected_input: 0,
-            selection: Selection::Master,
-            picker: Picker::None,
-            picker_row: 0,
-            meter_accum: 0,
-            steps: 0,
-            size: (WINDOW_WIDTH, WINDOW_HEIGHT),
-            rng: SeededRng::new(seed),
+            ..Self::nothing_to_mix(seed)
         }
     }
 
@@ -891,7 +923,7 @@ impl MixerApp {
 
     #[must_use]
     pub fn layout(&self) -> Layout {
-        Layout::new(self.size.0, self.size.1, self.streams.len())
+        self.layout_at(self.size.0, self.size.1)
     }
 
     // ── Input ──────────────────────────────────────────────────────────────
@@ -1400,6 +1432,20 @@ fn label(
 }
 
 /// A string centred in `r`, horizontally and vertically.
+/// What the window says in place of the programs' columns when there is
+/// nothing to mix: no program is playing, and there is no device to play
+/// through, because nothing here drives sound hardware yet (the kernel's
+/// audio driver is lane A's, in progress). The master fader stays, as the
+/// setting a user will want when there is sound to set it for.
+/// How many columns' room the band keeps beside the master when there are no
+/// streams -- the room [`NO_AUDIO`] is written in.
+const EMPTY_BAND_COLUMNS: usize = 4;
+
+const NO_AUDIO: [&str; 2] = [
+    "No sound here yet: this system has no audio driver.",
+    "No program is playing and there is no device to play through, so there is nothing to mix.",
+];
+
 fn centred_in(f: &mut Frame, r: Rect, s: &str, size: f32, color: Color, weight: FontWeightHint) {
     if r.w <= 0.0 || r.h <= 0.0 || size <= 0.0 {
         return;
@@ -1465,12 +1511,15 @@ impl MixerApp {
     /// The whole window, and every hit box in it.
     #[must_use]
     pub fn frame(&self, width: f32, height: f32) -> Frame {
-        let l = Layout::new(width, height, self.streams.len());
+        let l = self.layout_at(width, height);
         let mut f = Frame::new(width, height);
         fill(&mut f, l.window, self.palette.base, 0.0);
 
         self.draw_devices(&mut f, &l);
         self.draw_columns(&mut f, &l);
+        if self.streams.is_empty() && self.output_devices.is_empty() {
+            self.draw_no_audio(&mut f, &l);
+        }
         self.draw_shortcuts(&mut f, &l);
         if self.picker != Picker::None {
             self.draw_picker(&mut f, &l);
@@ -1549,6 +1598,32 @@ impl MixerApp {
                     FontWeightHint::Regular,
                 );
             }
+        }
+    }
+
+    /// [`NO_AUDIO`], where the programs' columns would stand.
+    fn draw_no_audio(&self, f: &mut Frame, l: &Layout) {
+        let master = l.master();
+        let x = master.right() + l.gap;
+        let area = Rect::new(x, l.band.y, (l.band.right() - x).max(0.0), l.band.h);
+        if area.w <= 0.0 || area.h <= 0.0 {
+            return;
+        }
+        let line_h = text::line_height(l.font, FontWeightHint::Regular) * 1.4;
+        #[allow(clippy::cast_precision_loss, reason = "two lines")]
+        let top = area.y + (area.h - line_h * NO_AUDIO.len() as f32) / 2.0;
+        for (i, (line, weight, color)) in NO_AUDIO
+            .iter()
+            .zip([
+                (FontWeightHint::Bold, self.palette.text),
+                (FontWeightHint::Regular, self.palette.subtext0),
+            ])
+            .map(|(line, (w, c))| (line, w, c))
+            .enumerate()
+        {
+            #[allow(clippy::cast_precision_loss, reason = "two lines")]
+            let row = Rect::new(area.x, top + i as f32 * line_h, area.w, line_h);
+            centred_in(f, row, line, l.font, color, weight);
         }
     }
 
@@ -1930,6 +2005,52 @@ fn main() -> ExitCode {
 mod tests {
     use super::*;
 
+    /// **The window invents nothing.** It opened on five programs "playing"
+    /// and three output devices, none of them there; it opens empty now, and
+    /// says why where the programs' columns would stand.
+    #[test]
+    fn the_shipping_mixer_invents_nothing_and_says_why() {
+        let mut app = MixerApp::new();
+        assert!(
+            app.streams.is_empty(),
+            "the mixer opens on programs nobody started"
+        );
+        assert!(
+            app.current_output_device().is_none() && app.current_input_device().is_none(),
+            "the mixer names a device that is not there"
+        );
+        let texts: Vec<String> = app
+            .render(WINDOW_WIDTH, WINDOW_HEIGHT)
+            .commands
+            .iter()
+            .filter_map(|c| match c {
+                RenderCommand::Text { text, .. } => Some(text.clone()),
+                _ => None,
+            })
+            .collect();
+        for line in NO_AUDIO {
+            assert!(
+                texts.iter().any(|t| t == line),
+                "{line:?} is not said: {texts:?}"
+            );
+        }
+        // And nothing it has moves: the meters are fed by nothing.
+        for _ in 0..50 {
+            app.tick(40);
+        }
+        assert!(app.streams.is_empty());
+        // The sample set does not say it.
+        let sample = MixerApp::with_seed(TEST_SEED);
+        assert!(!sample.streams.is_empty(), "control");
+        let said = sample
+            .frame(WINDOW_WIDTH, WINDOW_HEIGHT)
+            .into_tree()
+            .commands
+            .iter()
+            .any(|c| matches!(c, RenderCommand::Text { text, .. } if text == NO_AUDIO[0]));
+        assert!(!said, "a mixer with programs to mix says there are none");
+    }
+
     /// Every colour the mixer draws comes from the user's palette.
     ///
     /// **Both device pickers, either selection, muted and not.** This rendered
@@ -1944,7 +2065,7 @@ mod tests {
             for picker in [Picker::None, Picker::Output, Picker::Input] {
                 for selection in [Selection::Master, Selection::Stream(0)] {
                     for muted in [false, true] {
-                        let mut app = MixerApp::new();
+                        let mut app = MixerApp::with_seed(TEST_SEED);
                         app.palette = Palette::for_mode(light);
                         app.picker = picker;
                         app.selection = selection;
@@ -3984,19 +4105,5 @@ mod tests {
     /// Two lengths that are the same to within a pixel's rounding.
     fn close(a: f32, b: f32) -> bool {
         (a - b).abs() < 0.01
-    }
-
-    /// The layout a window of this size would get, without resizing the app.
-    ///
-    /// Built from the app's own stream count rather than a literal, so a test
-    /// that adds a stream does not have to remember to update the layout it
-    /// compares against.
-    trait LayoutAt {
-        fn layout_at(&self, w: f32, h: f32) -> Layout;
-    }
-    impl LayoutAt for MixerApp {
-        fn layout_at(&self, w: f32, h: f32) -> Layout {
-            Layout::new(w, h, self.stream_count())
-        }
     }
 }

@@ -238,7 +238,9 @@ impl Layout {
     /// — reachable with `Down`, invisible once reached.
     pub fn settings_row_h(&self) -> f32 {
         let rows = SETTING_COUNT as f32;
-        ((self.content.h - 60.0) / rows).clamp(18.0, 34.0)
+        // Less the heading above the rows and the note beneath them, which
+        // a window of any height keeps room for.
+        ((self.content.h - 80.0) / rows).clamp(18.0, 34.0)
     }
 
     pub fn settings_row(&self, index: usize) -> Rect {
@@ -409,6 +411,16 @@ impl Settings {
         ]
     }
 }
+
+/// What the settings say beneath their rows about the one nothing honours.
+///
+/// "Notification Sound: On" was a row the arrows flipped and nothing else
+/// read: a session ended in silence either way, because nothing here plays a
+/// sound. `scripts/find-drawn-only-settings.py` found it -- read only to be
+/// drawn and to be flipped. The row stays, as the settings pages across the
+/// desktop keep theirs: it is the choice a user will want kept for when
+/// something can play it, and until then it says so.
+const NO_SOUND: &str = "Notification Sound is not applied: nothing here plays sound.";
 
 fn yes_no(flag: bool) -> &'static str {
     if flag { "Yes" } else { "No" }
@@ -1768,6 +1780,23 @@ impl PomodoroApp {
                 centred(frame, box_rect, glyph, font, self.palette.text, true);
                 frame.hit(target, box_rect);
             }
+        }
+
+        // Beneath the rows, what one of them cannot do.
+        let below = layout
+            .settings_row(SETTING_COUNT.saturating_sub(1))
+            .bottom()
+            + 10.0;
+        if below + 12.0 <= layout.content.bottom() {
+            label(
+                frame,
+                x,
+                below,
+                NO_SOUND.into(),
+                10.0,
+                self.palette.subtext0,
+                w,
+            );
         }
     }
 
@@ -3267,6 +3296,28 @@ mod tests {
         assert!(shows(&app, "thesis"), "no task label");
         assert!(shows(&app, "Skip"), "no result");
         assert!(shows(&app, "Focus Log (1 entries)"));
+    }
+
+    #[test]
+    fn the_sound_row_says_nothing_plays_it() {
+        let mut app = sample();
+        app.screen = Screen::Settings;
+        // Large, the window's own default, and short: the rows leave room
+        // for the note at every height they fit in.
+        for (w, h) in [
+            (900.0, 800.0),
+            (DEFAULT_WIDTH, DEFAULT_HEIGHT),
+            (640.0, 360.0),
+        ] {
+            app.resize(w, h);
+            assert!(
+                shows(&app, NO_SOUND),
+                "at {w}x{h} the settings do not say the sound is not played"
+            );
+        }
+        // Only where the settings are.
+        app.screen = Screen::Timer;
+        assert!(!shows(&app, NO_SOUND));
     }
 
     #[test]

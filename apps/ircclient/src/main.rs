@@ -364,7 +364,7 @@ const NOT_CONNECTED_LINES: [&str; 3] = [
 /// not an offer of the ones that would work.
 const COMMANDS: &[(&str, &str)] = &[
     (
-        "/connect server [port]",
+        "/connect server [port] [password]",
         "Connect to a network, in plain text",
     ),
     ("/disconnect", "Leave the network"),
@@ -377,6 +377,20 @@ const COMMANDS: &[(&str, &str)] = &[
     ("/timestamps", "Show or hide the time beside each message"),
     ("/help", "This list"),
 ];
+
+/// `line` as the input history keeps it: a `/connect` or `/server` line's
+/// password, the fourth word, as stars; any other line as typed.
+fn without_password(line: &str) -> String {
+    let words: Vec<&str> = line.split_whitespace().collect();
+    match words.as_slice() {
+        [cmd, host, port, _password, ..]
+            if cmd.eq_ignore_ascii_case("/connect") || cmd.eq_ignore_ascii_case("/server") =>
+        {
+            format!("{cmd} {host} {port} ********")
+        }
+        _ => line.to_string(),
+    }
+}
 
 /// Every key, and what it does.
 const SHORTCUTS: &[(&str, &str)] = &[
@@ -2049,7 +2063,9 @@ impl IrcClientApp {
         if line.trim().is_empty() {
             return false;
         }
-        self.input_history.push(line.clone());
+        // Kept for Up and Down -- except a server password, which is kept
+        // as stars: a line recalled from history is shown on screen.
+        self.input_history.push(without_password(&line));
         self.chat_scroll = 0;
 
         if line.starts_with('/') {
@@ -2148,6 +2164,12 @@ impl IrcClientApp {
                         return;
                     }
                 };
+                // The server password, sent as `PASS` before anything else
+                // (RFC 1459 4.1.1). `register` always sent one when there was
+                // one and nothing could give it one, so a server that wants
+                // one could not be joined. Given for this connection only:
+                // a /connect without one clears it.
+                self.server_config.password = words.next().map(str::to_string);
                 self.connect(&host, port);
                 return;
             }
@@ -4973,5 +4995,59 @@ mod tests {
             fills(&mut app),
             "high contrast reached every other surface but not this window"
         );
+    }
+
+    // == The server password (2026-09-27) ========================================
+
+    /// `/connect host port password` sends `PASS password` before the
+    /// nickname, and the history keeps stars in its place.
+    #[test]
+    fn a_server_password_is_sent_first_and_not_kept_in_history() {
+        let server = net::fake::server();
+        let mut app = IrcClientApp::new(WINDOW_WIDTH, WINDOW_HEIGHT);
+        type_line(
+            &mut app,
+            &format!("/connect 127.0.0.1 {} s3cret", server.port),
+        );
+        app.handle_event(&key(Key::Enter));
+        assert_eq!(app.server_config.password.as_deref(), Some("s3cret"));
+        let history = app.input_history.last().cloned().unwrap_or_default();
+        assert!(!history.contains("s3cret"), "{history}");
+        assert!(history.ends_with("********"), "{history}");
+
+        pump_until(&mut app, |a| a.connection == ConnectionState::Registering);
+        assert_eq!(
+            server.next(),
+            "PASS s3cret",
+            "the password must come before the nickname"
+        );
+        assert_eq!(server.next(), "NICK SlateOSUser");
+    }
+
+    #[test]
+    fn a_connect_without_a_password_clears_the_last_one() {
+        let mut app = IrcClientApp::new(WINDOW_WIDTH, WINDOW_HEIGHT);
+        app.server_config.password = Some("old".to_string());
+        type_line(&mut app, "/connect 127.0.0.1 9");
+        app.handle_event(&key(Key::Enter));
+        assert_eq!(app.server_config.password, None);
+    }
+
+    #[test]
+    fn only_a_connect_lines_fourth_word_is_starred() {
+        assert_eq!(
+            without_password("/connect a.b 6667 pw"),
+            "/connect a.b 6667 ********"
+        );
+        assert_eq!(
+            without_password("/SERVER a.b 6667 pw"),
+            "/SERVER a.b 6667 ********"
+        );
+        assert_eq!(without_password("/connect a.b 6667"), "/connect a.b 6667");
+        assert_eq!(
+            without_password("hello /connect a b c"),
+            "hello /connect a b c"
+        );
+        assert_eq!(without_password("/msg bob hi there"), "/msg bob hi there");
     }
 }

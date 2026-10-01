@@ -158,6 +158,16 @@ members = [
     # the gzip trailer and `gui/imagecodec` needs it for PNG chunk CRCs, and
     # neither can name `crate::crypto`.
     "crc32",
+    # CRC-32C (Castagnoli), CRC-64 (ECMA-182, the /WE and bare framings) and
+    # XXH64: the superblock checksums libblkid's probers verify -- ext4, XFS,
+    # btrfs, bcache, bcachefs, EROFS and more. The kernel keeps its own CRC-32C
+    # in `crypto.rs` for the same reason `crc32` once lived there; these are
+    # the copies everything outside the kernel links, checked against the
+    # values util-linux's own `lib/crc32c.c`, `lib/crc64.c` and bundled
+    # `xxhash.h` compute.
+    "crc32c",
+    "crc64",
+    "xxhash64",
     # AES (FIPS-197) and RFC 3394 key wrap. Nothing in the tree implemented the
     # cipher at all -- `kernel/src/fs/diskencrypt.rs` names `Aes256Xts` in an
     # enum and stops there -- so the first caller that genuinely needed it, the
@@ -220,6 +230,15 @@ members = [
     # `default-members` for the usual reason -- the workspace-root target is
     # x86_64-unknown-none, which has no `std` at all.
     "procinfo",
+    # BLAKE2b and SM3 for `b2sum` and `cksum -a` (lane B, 2026-09-25): each a
+    # *port* of a vetted implementation (design-decisions.md §539) -- BLAKE2b
+    # from the BLAKE2 reference code GNU coreutils builds `b2sum` from, SM3
+    # from RustCrypto's `sm3` -- and each `no_std` with no `alloc`, like
+    # `sha2`, so any caller that can link one can link them. Separate crates
+    # because they are separate primitives; BLAKE2b is also Argon2's inner
+    # hash, so the password-hash work in C-Q5 has a place to find it.
+    "blake2",
+    "sm3",
     # The plain API over the vendored RustCrypto crates beside it:
     # XChaCha20-Poly1305 and Argon2id, for everything that keeps a secret at
     # rest (design-decisions.md §539 -- primitives are ported, not written).
@@ -227,6 +246,14 @@ members = [
     # tests run with the rest; the vendored crates themselves are excluded
     # below. no_std + alloc, so kept out of `default-members` like `yamldoc`.
     "rustcrypto/seal",
+    # The backup service (design-decisions.md §1426; lane E's
+    # requests/e-db-the-backup-service-runs-backup-run-due.md). A `std`
+    # daemon, so a member although `services` is excluded below: that
+    # exclusion is for the bare-metal services, each with its own target and
+    # lockfile, and a member named explicitly inside an excluded directory is
+    # a member, as `rustcrypto/seal` is. Out of `default-members` for
+    # procinfo's reason.
+    "services/backupd",
 ]
 # Default members: only the crates that build under the workspace-root
 # target (x86_64-unknown-none). A plain `cargo build` from the project
@@ -303,6 +330,9 @@ exclude = [
     "init/.cargo",
     "net/.cargo",
     "userspace/.cargo",
+    # rust-lang's libm, vendored as published (posix/vendor/README.md): a path
+    # dependency of posix, judged by its own lint settings, as rustcrypto is.
+    "posix/vendor",
 ]
 
 [workspace.lints.rust]

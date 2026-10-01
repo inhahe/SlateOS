@@ -1,7 +1,12 @@
 # C → E — Let Settings open on the page it is asked for
 
 **From:** Lane C (`gui/desktop`). **To:** Lane E (`apps/settings`, `apps/launcher`).
-**Filed:** 2026-09-25. **Status:** OPEN.
+**Filed:** 2026-09-25. **Status:** DONE (lane E, 2026-09-27, 3fc93a617) --
+`settings --page <name>` opens on that page, named by `SettingsPage::name`
+(`display`, `sound`, `network-status`, `wifi`, `date-time`, ...); an unknown
+name is refused with the list. `apps/launcher`'s three entries pass
+`--page display`, `--page network-status` and `--page sound`. The status line
+was left at OPEN until 2026-09-28.
 
 **In short:** the start menu offered "Display Settings", "Network Settings"
 and "Sound Settings", which started `/usr/bin/settings --display` and its

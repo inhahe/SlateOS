@@ -52,9 +52,9 @@ MUTATIONS = [
         "a save leaves the picture marked",
         "                self.document_path = Some(path.to_path_buf());\n"
         "                self.dirty = false;\n"
-        '                format!("Saved {}", path.display())',
+        '                format!("Saved {}", path.shown())',
         "                self.document_path = Some(path.to_path_buf());\n"
-        '                format!("Saved {}", path.display())',
+        '                format!("Saved {}", path.shown())',
         [MARKS],
     ),
     (
@@ -180,6 +180,69 @@ MUTATIONS = [
         "        if let Some(status) = &self.file_status {",
         "        if let Some(status) = None::<&String> {",
         ["the_status_bar_says_what_the_last_save_did"],
+    ),
+    (
+        "a palette click chooses nothing",
+        "                    self.fg_color = colour;",
+        "                    let _ = colour;",
+        ["a_palette_colour_is_chosen_by_clicking_it"],
+    ),
+    (
+        "a right click chooses the foreground",
+        "                if right {\n                    self.bg_color = colour;",
+        "                if false {\n                    self.bg_color = colour;",
+        ["a_palette_colour_is_chosen_by_clicking_it"],
+    ),
+    (
+        "the tool buttons are pictures",
+        "            self.current_tool = tool;\n            return true;",
+        "            let _ = tool;\n            return true;",
+        ["a_tool_button_chooses_its_tool"],
+    ),
+    (
+        "the foreground swatch opens nothing",
+        "        if layout.fg.contains(x, y) {\n            self.open_color_dialog(true);",
+        "        if layout.fg.contains(x, y) {",
+        ["the_swatches_and_c_open_the_colour_dialog_and_enter_keeps_the_colour"],
+    ),
+    (
+        "Enter leaves the colour",
+        "                    self.color_picker.apply_hex_input();\n                }\n                self.apply_color_dialog();",
+        "                    self.color_picker.apply_hex_input();\n                }\n                self.color_picker.close();",
+        [
+            "the_swatches_and_c_open_the_colour_dialog_and_enter_keeps_the_colour",
+            "a_typed_hex_colour_is_kept_and_letters_are_not_tools",
+        ],
+    ),
+    (
+        "a drag does not move the slider",
+        "                let Some(index) = self.color_picker.active_slider else {\n                    return false;\n                };",
+        "                let Some(index) = None::<u8> else {\n                    return false;\n                };",
+        ["the_swatches_and_c_open_the_colour_dialog_and_enter_keeps_the_colour"],
+    ),
+    (
+        "hex letters reach the tools",
+        "        if self.color_picker.is_open && key.key != Key::F1 {\n            return self.picker_key(key);\n        }",
+        "",
+        ["a_typed_hex_colour_is_kept_and_letters_are_not_tools"],
+    ),
+    (
+        "Tab chooses no other slider",
+        "        self.color_picker.focus = self.color_picker.focus.wrapping_add(by) % 4;",
+        "        let _ = by;",
+        ["tab_and_the_arrows_move_the_chosen_slider"],
+    ),
+    (
+        "a slider runs past its ends",
+        ".saturating_add(delta).clamp(0, 255))",
+        ".saturating_add(delta))",
+        ["tab_and_the_arrows_move_the_chosen_slider"],
+    ),
+    (
+        "C opens nothing",
+        "                self.open_color_dialog(!shift);",
+        "                let _ = shift;",
+        ["the_swatches_and_c_open_the_colour_dialog_and_enter_keeps_the_colour"],
     ),
 ]
 

@@ -304,6 +304,31 @@ MAIN = [
         "        if false && operation == FileOperation::Move {",
         [SELF_PASTE],
     ),
+    # requests/c-e-the-explorers-address-completions-are-drawn-under-its-listing.md
+    (
+        "the address bar is drawn before the panes it hangs over",
+        "        self.render_sidebar(&mut tree, &mut zones);\n\n"
+        "        // File list\n        self.render_file_list(&mut tree, &mut zones);\n\n"
+        "        // The Transfers view over the bottom of the listing, before the\n"
+        "        // status bar it sits above.\n        self.render_transfers(&mut tree);\n\n"
+        "        // The address bar after the panes, because the completions it offers\n"
+        "        // hang below it, over the sidebar and the listing: drawn before them,\n"
+        "        // as it was, the list was there -- Tab and the arrows worked on it --\n"
+        "        // and painted over, so nobody could see it. The bar's own rectangle\n"
+        "        // overlaps nothing, so nothing else moves.\n"
+        "        self.render_address_bar(&mut tree);\n",
+        "        self.render_address_bar(&mut tree);\n"
+        "        self.render_sidebar(&mut tree, &mut zones);\n"
+        "        self.render_file_list(&mut tree, &mut zones);\n"
+        "        self.render_transfers(&mut tree);\n",
+        ["the_address_completions_are_drawn_over_the_listing_and_take_a_press"],
+    ),
+    (
+        "a press on a completion goes to what is under it",
+        "        address.contains(x, y)\n            || self\n",
+        "        address.contains(x, y)\n            || false && self\n",
+        ["the_address_completions_are_drawn_over_the_listing_and_take_a_press"],
+    ),
 ]
 
 COLUMNS = [
@@ -350,6 +375,12 @@ COLUMNS = [
         "            imagecodec::tiff::orientation(bytes)",
         "            imagecodec::jpeg::orientation(bytes)",
         [EXIF],
+    ),
+    (
+        "the picture columns leave AVIF out",
+        "            \"png\", \"jpg\", \"jpeg\", \"gif\", \"bmp\", \"webp\", \"avif\", \"ico\", \"cur\", \"tif\", \"tiff\",",
+        "            \"png\", \"jpg\", \"jpeg\", \"gif\", \"bmp\", \"webp\", \"ico\", \"cur\", \"tif\", \"tiff\",",
+        ["an_avif_is_measured"],
     ),
 ]
 

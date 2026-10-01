@@ -729,6 +729,9 @@ pub struct DesktopIconLayer {
     /// How wide the rename field's caret is drawn: the accessibility setting,
     /// pushed in by the shell as the icon size is.
     caret_width: f32,
+    /// How wide the rename field's focus mark is drawn: the user's focus
+    /// width, pushed in with the caret's.
+    focus_ring: f32,
     /// The names the user gave the default icons, by icon key -- what
     /// `LABELS_KEY` in the layout file holds. Kept here rather than read back
     /// off the icons because a default's own name is not remembered anywhere
@@ -753,6 +756,7 @@ impl DesktopIconLayer {
             glyph_px: DEFAULT_GLYPH_PX,
             renaming: None,
             caret_width: DEFAULT_CARET_WIDTH,
+            focus_ring: guitk::style::FOCUS_RING_WIDTH,
             label_overrides: BTreeMap::new(),
             icon_registry: crate::IconRegistry::default(),
         }
@@ -777,6 +781,12 @@ impl DesktopIconLayer {
     /// How wide the rename field's caret is drawn, in pixels.
     pub fn set_caret_width(&mut self, width: f32) {
         self.caret_width = width;
+    }
+
+    /// How wide the rename field's focus mark is drawn, in pixels
+    /// (`AppearanceSettings::focus_ring_width`).
+    pub fn set_focus_ring_width(&mut self, width: f32) {
+        self.focus_ring = width;
     }
 
     /// Start editing `id`'s name in place, all of it selected so that typing
@@ -2443,23 +2453,18 @@ impl DesktopIconLayer {
         else {
             return;
         };
-        cmds.push(RenderCommand::FillRect {
-            x,
-            y,
-            width: w,
-            height: h,
-            color: p.base,
-            corner_radii: CornerRadii::all(3.0),
-        });
-        cmds.push(RenderCommand::StrokeRect {
-            x,
-            y,
-            width: w,
-            height: h,
-            color: p.accent,
-            line_width: 1.0,
-            corner_radii: CornerRadii::all(3.0),
-        });
+        // The toolkit's field (`guitk::field`), in the theme's shape, with
+        // the keyboard: a rename is typed into it.
+        guitk::field::draw(
+            cmds,
+            p,
+            guitk::frame::Rect::new(x, y, w, h),
+            guitk::field::State {
+                focused: true,
+                ..guitk::field::State::default()
+            },
+            self.focus_ring,
+        );
         let mut tree = RenderTree::new();
         textedit::draw(
             &mut tree,

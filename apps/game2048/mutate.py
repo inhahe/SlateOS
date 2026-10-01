@@ -779,15 +779,15 @@ MUTATIONS = [
     ),
     (
         "every tile is painted the colour of an empty one",
-        "                fill(f, r, tile_face(val), (r.h * 0.12).min(8.0));",
-        "                fill(f, r, tile_face(0), (r.h * 0.12).min(8.0));",
+        "                fill(f, r, c.tile_face(val), (r.h * 0.12).min(8.0));",
+        "                fill(f, r, c.tile_face(0), (r.h * 0.12).min(8.0));",
         ["a_tile_is_painted_in_its_own_colour_and_not_the_empty_one"],
     ),
     (
         "every tile takes the same ink",
-        "        2 | 4 => COL_CRUST,\n        _ => COL_TEXT,",
-        "        _ => COL_TEXT,",
-        ["a_pale_tile_takes_dark_ink_and_a_dark_tile_light_ink"],
+        "        gamechrome::legible_on(TILE_INKS, self.tile_face(value))",
+        "        TILE_INKS.0",
+        ["every_tiles_number_is_drawn_in_an_ink_that_reads_on_it"],
     ),
     (
         "the info line does not say how many moves have been made",
@@ -803,14 +803,14 @@ MUTATIONS = [
     ),
     (
         "the best box shows the score rather than the best",
-        '        self.draw_score_box(f, l, best, "BEST", self.board.best_score);',
-        '        self.draw_score_box(f, l, best, "BEST", self.board.score);',
+        "        self.draw_score_box(f, l, c, best, \"BEST\", self.board.best_score);",
+        "        self.draw_score_box(f, l, c, best, \"BEST\", self.board.score);",
         ["the_score_and_the_best_score_are_both_on_screen_and_are_told_apart"],
     ),
     (
         "both readouts are drawn in the same box",
-        '        self.draw_score_box(f, l, score, "SCORE", self.board.score);',
-        '        self.draw_score_box(f, l, best, "SCORE", self.board.score);',
+        "        self.draw_score_box(f, l, c, score, \"SCORE\", self.board.score);",
+        "        self.draw_score_box(f, l, c, best, \"SCORE\", self.board.score);",
         ["the_score_and_the_best_score_are_both_on_screen_and_are_told_apart"],
     ),
     (
@@ -840,8 +840,8 @@ MUTATIONS = [
     ),
     (
         "the direction pad is never greyed",
-        "                if playable { COL_SURFACE1 } else { COL_SURFACE0 },",
-        "                COL_SURFACE1,",
+        "                dir.glyph(),\n                (r.h * 0.55).min(l.font * 1.6),\n                playable,",
+        "                dir.glyph(),\n                (r.h * 0.55).min(l.font * 1.6),\n                true,",
         ["the_direction_buttons_are_greyed_while_the_board_is_frozen"],
     ),
     (
@@ -887,21 +887,21 @@ MUTATIONS = [
     ),
     (
         "the help sheet does not cover what it is drawn over",
-        "        if self.show_help {\n            self.draw_help(&mut f, &l);\n        }",
-        "        if self.show_help {\n            self.draw_help(&mut f, &l);\n        }\n        self.draw_dpad(&mut f, &l);",
+        "        if self.show_help {\n            self.draw_help(&mut f, &l, &c);\n        }",
+        "        if self.show_help {\n            self.draw_help(&mut f, &l, &c);\n        }\n        self.draw_dpad(&mut f, &l, &c);",
         ["the_help_sheet_hides_what_it_covers_from_a_click"],
     ),
     # ── Drawing: the banner and the help sheet ────────────────────────────
     (
         "the loss banner offers to keep going",
-        '            GameStatus::Lost => self.draw_banner(&mut f, &l, "Game over", COL_RED, false),',
-        '            GameStatus::Lost => self.draw_banner(&mut f, &l, "Game over", COL_RED, true),',
+        "            GameStatus::Lost => self.draw_banner(&mut f, &l, &c, \"Game over\", c.chrome.bad, false),",
+        "            GameStatus::Lost => self.draw_banner(&mut f, &l, &c, \"Game over\", c.chrome.bad, true),",
         ["the_win_banner_offers_to_keep_going_and_the_loss_banner_does_not"],
     ),
     (
         "the win banner does not offer to keep going",
-        '            GameStatus::Won => self.draw_banner(&mut f, &l, "You win!", COL_GREEN, true),',
-        '            GameStatus::Won => self.draw_banner(&mut f, &l, "You win!", COL_GREEN, false),',
+        "            GameStatus::Won => self.draw_banner(&mut f, &l, &c, \"You win!\", c.chrome.good, true),",
+        "            GameStatus::Won => self.draw_banner(&mut f, &l, &c, \"You win!\", c.chrome.good, false),",
         ["the_win_banner_offers_to_keep_going_and_the_loss_banner_does_not"],
     ),
     (
@@ -918,8 +918,8 @@ MUTATIONS = [
     ),
     (
         "the help sheet is drawn over a game nobody asked it about",
-        "        if self.show_help {\n            self.draw_help(&mut f, &l);",
-        "        if true {\n            self.draw_help(&mut f, &l);",
+        "        if self.show_help {\n            self.draw_help(&mut f, &l, &c);",
+        "        if true {\n            self.draw_help(&mut f, &l, &c);",
         ["the_help_sheet_is_only_drawn_when_it_is_open"],
     ),
     (
@@ -963,6 +963,54 @@ MUTATIONS = [
         "                h.x + l.pad + key_w,",
         "                h.x + l.pad,",
         ["the_help_sheet_puts_each_key_beside_its_own_meaning"],
+    ),
+    (
+        "the theme is never taken up",
+        "    fn theme_changed(&mut self, palette: &Palette) {\n        self.palette = *palette;",
+        "    fn theme_changed(&mut self, palette: &Palette) {\n        let _ = palette;",
+        ["the_window_is_drawn_in_the_users_colours"],
+    ),
+    (
+        "the banner's veil is Mocha's whatever the theme",
+        "        fill(f, b, c.chrome.veil, (b.h * 0.08).min(10.0));",
+        "        fill(f, b, Color::rgba(17, 17, 27, 224), (b.h * 0.08).min(10.0));",
+        ["the_window_is_drawn_in_the_users_colours"],
+    ),
+    (
+        "an empty square is painted in a tile's colour",
+        "        if value == 0 {\n            return self.chrome.raised;",
+        "        if value == 0 {\n            return Color::from_hex(0xEEE4DA);",
+        ["a_tile_is_painted_in_its_own_colour_and_not_the_empty_one"],
+    ),
+    (
+        "a tile past the table is painted as an empty square",
+        "            .map_or(self.chrome.high, |&(_, face)| face)",
+        "            .map_or(self.chrome.raised, |&(_, face)| face)",
+        ["a_tile_past_the_table_is_not_drawn_as_an_empty_square"],
+    ),
+    (
+        "a tile's number is written in its own face's colour",
+        "                centred(f, r, &body, size, c.tile_ink(val), FontWeightHint::Bold);",
+        "                centred(f, r, &body, size, c.tile_face(val), FontWeightHint::Bold);",
+        ["every_tiles_number_is_drawn_in_an_ink_that_reads_on_it"],
+    ),
+    (
+        "the page is Mocha's base whatever the theme",
+        "        fill(&mut f, l.window, c.chrome.page, 0.0);",
+        "        fill(&mut f, l.window, Color::from_hex(0x1E1E2E), 0.0);",
+        ["the_window_is_drawn_in_the_users_colours"],
+    ),
+    (
+        "the score captions are the page's grey, 4.1:1 on their box",
+        "            Ink::on(c.chrome.dim, &[c.chrome.raised]).at(l.small.min(cap_h * 0.8), false),",
+        "            c.chrome.dim,",
+        ["every_text_reads_on_what_is_under_it_in_either_theme"],
+    ),
+    (
+        "the help sheet has no ground of its own",
+        "                Surface::Panel,\n",
+        "                Surface::Card,\n",
+        ["every_text_reads_on_what_is_under_it_in_either_theme"],
     ),
 ]
 

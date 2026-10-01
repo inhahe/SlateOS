@@ -278,6 +278,64 @@ impl ContextMenu {
         self.visible
     }
 
+    /// Never be narrower than `width`.
+    ///
+    /// A drop-down's list is at least as wide as the field it drops from
+    /// (`guitk::dropdown`); a list narrower than its field would look like a
+    /// different control's. A width that is not a finite number is ignored.
+    pub fn set_min_width(&mut self, width: f32) {
+        let natural = Self::calculate_width(&self.items);
+        self.width = if width.is_finite() {
+            natural.max(width)
+        } else {
+            natural
+        };
+    }
+
+    /// Put the highlight on item `index` and scroll it into view, as a
+    /// drop-down's list opens on the current choice. Call it after
+    /// [`show`](Self::show), which clears the highlight. Ignored for an item
+    /// that is not an enabled action -- Enter must never act on a row that
+    /// cannot be chosen.
+    pub fn highlight(&mut self, index: usize) {
+        if matches!(
+            self.items.get(index),
+            Some(MenuItem::Action { enabled: true, .. })
+        ) {
+            self.hover_index = Some(index);
+            self.scroll_index_into_view(index);
+        }
+    }
+
+    /// The highlighted item, if any.
+    #[must_use]
+    pub fn highlighted(&self) -> Option<usize> {
+        self.hover_index
+    }
+
+    /// Where item `index` is drawn now, in the space the menu was shown in --
+    /// for a host recording hit boxes, or a test aiming a click. `None` for an
+    /// index past the end, or a row scrolled out of the panel.
+    #[must_use]
+    pub fn item_rect(&self, index: usize) -> Option<crate::frame::Rect> {
+        if !self.visible {
+            return None;
+        }
+        let strip = self.strip();
+        let (top, height) = (strip.top(index)?, strip.height(index)?);
+        if top < self.viewport_top() || top + height > self.viewport_bottom() {
+            return None;
+        }
+        Some(crate::frame::Rect::new(self.x, top, self.width, height))
+    }
+
+    /// The panel's rectangle while the menu is shown.
+    #[must_use]
+    pub fn panel_rect(&self) -> Option<crate::frame::Rect> {
+        self.visible
+            .then(|| crate::frame::Rect::new(self.x, self.y, self.width, self.panel_height()))
+    }
+
     /// Handle a mouse click. Returns the selected item ID if an action item was clicked.
     pub fn handle_click(&mut self, mx: f32, my: f32) -> Option<MenuItemId> {
         if !self.visible {

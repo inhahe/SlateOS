@@ -10,6 +10,10 @@ description = "SlateOS system log daemon — JSON-lines log aggregation and quer
 # than a formatting one. No dependencies, `&str` in and `String` out, so
 # §768 exempt.
 journalrec = { path = "../journalrec" }
+# The journal's append/rewrite/rotate protocol (design-decisions §1037): an
+# entry, `clean` and the rotation each take the file's lock, so none of them
+# loses a record another program appends meanwhile.
+journalio = { path = "../journalio" }
 # It interpolates `level` into "warning: unknown level {}, using 'info'".
 # That value is an argv word, so it is whatever the user typed and not text
 # this program chose.

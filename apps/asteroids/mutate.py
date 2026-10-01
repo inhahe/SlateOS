@@ -142,16 +142,14 @@ MUTATIONS = [
     # -- The header ----------------------------------------------------
     (
         "the high score is left off the header",
-        "            (\n                Target::HighScore,\n"
-        '                format!("Hi: {}", self.high_score),\n'
-        "                YELLOW,\n            ),",
-        "            (Target::HighScore, String::new(), YELLOW),",
+        "            (\n                Target::HighScore,\n                format!(\"Hi: {}\", self.high_score),\n                self.colours.yellow,\n            ),",
+        "            (Target::HighScore, String::new(), self.colours.yellow),",
         ["the_header_names_every_reading"],
     ),
     (
         "the header reads out a score that is not the score",
-        '            (Target::Score, format!("Score: {}", self.score), TEXT_COLOR),',
-        '            (Target::Score, String::from("Score: 0"), TEXT_COLOR),',
+        "                Target::Score,\n                format!(\"Score: {}\", self.score),",
+        "                Target::Score,\n                String::from(\"Score: 0\"),",
         ["the_score_on_screen_is_the_score"],
     ),
     (
@@ -206,7 +204,6 @@ MUTATIONS = [
         ["the_playfield_is_on_screen_and_inside_the_body"],
     ),
     (
-        "the playfield's hit box is recorded last and swallows everything",
         # Moved, not deleted. Written as a deletion this row did fail tests --
         # but the ones that fail when the field has no hit box at all
         # (`a_click_during_play_does_nothing`, which clicks it), not the one
@@ -214,20 +211,9 @@ MUTATIONS = [
         # mutation has to be a reordering: the hit goes to the end, after the
         # asteroids and the ship, where `hit_test`'s reverse search finds it
         # first and it swallows everything drawn inside it.
-        "        f.hit(Target::Field, field.rect);\n\n"
-        "        draw_stars(&mut f, &field);\n"
-        "        self.draw_particles(&mut f, &field);\n"
-        "        self.draw_asteroids(&mut f, &field);\n"
-        "        self.draw_bullets(&mut f, &field);\n"
-        "        if self.ship_alive {\n"
-        "            self.draw_ship(&mut f, &field);\n        }",
-        "        draw_stars(&mut f, &field);\n"
-        "        self.draw_particles(&mut f, &field);\n"
-        "        self.draw_asteroids(&mut f, &field);\n"
-        "        self.draw_bullets(&mut f, &field);\n"
-        "        if self.ship_alive {\n"
-        "            self.draw_ship(&mut f, &field);\n        }\n"
-        "        f.hit(Target::Field, field.rect);",
+        "the playfield's hit box is recorded last and swallows everything",
+        "        f.hit(Target::Field, field.rect);\n\n        draw_stars(&mut f, &field, &self.colours);\n        self.draw_particles(&mut f, &field);\n        self.draw_asteroids(&mut f, &field);\n        self.draw_bullets(&mut f, &field);\n        if self.ship_alive {\n            self.draw_ship(&mut f, &field);\n        }",
+        "        draw_stars(&mut f, &field, &self.colours);\n        self.draw_particles(&mut f, &field);\n        self.draw_asteroids(&mut f, &field);\n        self.draw_bullets(&mut f, &field);\n        if self.ship_alive {\n            self.draw_ship(&mut f, &field);\n        }\n        f.hit(Target::Field, field.rect);",
         ["an_asteroid_wins_the_hit_test_over_the_playfield_behind_it"],
     ),
     (
@@ -269,12 +255,8 @@ MUTATIONS = [
     # -- The overlays --------------------------------------------------
     (
         "the pause sheet does not offer a new game",
-        "            (\n                Target::NewGame,\n"
-        '                "Press N for new game",\n'
-        "                l.font * 0.85,\n"
-        "                FontWeightHint::Regular,\n"
-        "                TEAL,\n            ),",
-        '            (Target::NewGame, "", l.font * 0.85, FontWeightHint::Regular, TEAL),',
+        "                \"Press N for new game\",",
+        "                \"\",",
         ["the_pause_sheet_names_both_ways_out"],
     ),
     (
@@ -443,8 +425,8 @@ MUTATIONS = [
     ),
     (
         "the window is never woken, so nothing moves",
-        "    fn tick_interval(&self) -> Option<Duration> {\n        Some(TICK)\n    }",
-        "    fn tick_interval(&self) -> Option<Duration> {\n        None\n    }",
+        "        (self.state == GameState::Playing).then_some(TICK)",
+        "        None",
         ["the_window_asks_to_be_woken_for_the_animation"],
     ),
     (
@@ -515,8 +497,8 @@ MUTATIONS = [
     ),
     (
         "a clip is opened and never closed",
-        "        fill(&mut f, l.window, BASE, CornerRadii::ZERO);",
-        "        f.clip(l.window);\n        fill(&mut f, l.window, BASE, CornerRadii::ZERO);",
+        "        fill(&mut f, l.window, self.colours.base, CornerRadii::ZERO);",
+        "        f.clip(l.window);\n        fill(&mut f, l.window, self.colours.base, CornerRadii::ZERO);",
         ["the_frame_is_balanced"],
     ),
     # -- The faults the wiring exposed ---------------------------------
@@ -557,6 +539,54 @@ MUTATIONS = [
         "    if r.is_empty() {\n        return;\n    }",
         "fn fill(f: &mut Frame<Target>, r: Rect, color: Color, corner_radii: CornerRadii) {",
         ["a_window_of_no_size_still_draws_a_frame"],
+    ),
+    (
+        "the theme is never taken up",
+        "        self.palette = *palette;\n        self.colours = Colours::of(palette);",
+        "        let _ = palette;",
+        ["the_window_is_drawn_in_the_users_colours"],
+    ),
+    (
+        "the colours are not rebuilt with the palette",
+        "        self.colours = Colours::of(palette);",
+        "        let _ = Colours::of(palette);",
+        ["the_window_is_drawn_in_the_users_colours"],
+    ),
+    (
+        "a new game drops the user's colours",
+        "        self.palette = palette;\n        self.colours = Colours::of(&palette);",
+        "        let _ = palette;",
+        ["a_new_game_keeps_the_users_colours"],
+    ),
+    (
+        "a small rock is the palette's surface grey",
+        "            rock_small: p.subtext0,",
+        "            rock_small: p.surface2,",
+        ["every_rock_the_ship_and_a_bullet_stand_off_the_field"],
+    ),
+    (
+        "a spark keeps the colour it was made in",
+        "                Spark::Rock(size) => size.color(&self.colours),",
+        "                Spark::Rock(size) => size.color(&Colours::of(&Palette::for_mode(false))),",
+        ["the_window_is_drawn_in_the_users_colours"],
+    ),
+    (
+        "the stars are Mocha's whatever the theme",
+        "    let (dim, bright) = (c.star_dim, c.star_bright);",
+        "    let (dim, bright) = (Color::rgba(100, 100, 140, 60), Color::rgba(150, 150, 200, 100));",
+        ["the_window_is_drawn_in_the_users_colours"],
+    ),
+    (
+        "the pause lines have no panel under them",
+        "        self.palette\n            .push_surface(f, box_.x, box_.y, box_.w, box_.h, 8.0, Surface::Panel);\n        stack_centred(f, box_, l.pad, &lines);",
+        "        stack_centred(f, box_, l.pad, &lines);",
+        ["every_text_reads_on_what_is_under_it_in_either_theme"],
+    ),
+    (
+        "the controls line is the faintest grey",
+        "                    // faintest grey is 2.3:1 on a light band.\n                    color: self.colours.subtext0,",
+        "                    // faintest grey is 2.3:1 on a light band.\n                    color: self.palette.overlay0,",
+        ["every_text_reads_on_what_is_under_it_in_either_theme"],
     ),
 ]
 

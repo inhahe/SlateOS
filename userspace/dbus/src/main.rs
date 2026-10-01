@@ -734,8 +734,8 @@ impl<'a> UnmarshalCursor<'a> {
             }
             b'h' => Ok(DbusType::UnixFd(self.read_u32()?)),
             _ => Err(DbusError::UnmarshalError(format!(
-                "unknown type code: '{}'",
-                type_code as char
+                "unknown type code: {}",
+                quoting::quoteaf(&[type_code])
             ))),
         }
     }
@@ -1228,7 +1228,8 @@ pub fn validate_bus_name(name: &str) -> Result<(), DbusError> {
             }
             if !c.is_ascii_alphanumeric() && c != '_' && c != '-' {
                 return Err(DbusError::InvalidBusName(format!(
-                    "invalid character '{c}' in name"
+                    "invalid character {} in name",
+                    quoteaf_os(c.to_string())
                 )));
             }
         }
@@ -1264,7 +1265,8 @@ pub fn validate_object_path(path: &str) -> Result<(), DbusError> {
         for c in element.chars() {
             if !c.is_ascii_alphanumeric() && c != '_' {
                 return Err(DbusError::InvalidObjectPath(format!(
-                    "invalid character '{c}'"
+                    "invalid character {}",
+                    quoteaf_os(c.to_string())
                 )));
             }
         }
@@ -1299,7 +1301,8 @@ pub fn validate_interface_name(name: &str) -> Result<(), DbusError> {
             }
             if !c.is_ascii_alphanumeric() && c != '_' {
                 return Err(DbusError::InvalidInterface(format!(
-                    "invalid character '{c}'"
+                    "invalid character {}",
+                    quoteaf_os(c.to_string())
                 )));
             }
         }
@@ -1385,8 +1388,8 @@ fn validate_single_complete_type(sig: &[u8], pos: usize) -> Result<usize, DbusEr
             Ok(p + 1) // skip '}'
         }
         c => Err(DbusError::MarshalError(format!(
-            "unknown type code '{}' in signature",
-            c as char
+            "unknown type code {} in signature",
+            quoting::quoteaf(&[c])
         ))),
     }
 }

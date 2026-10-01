@@ -37,6 +37,21 @@ pub const ADJ_NANO: u32 = 0x2000;
 pub const ADJ_SETOFFSET: u32 = 0x0100;
 /// Adjust tick value.
 pub const ADJ_TICK: u32 = 0x4000;
+/// Linux's switch to `adjtime`'s meaning of `modes` and `offset`.
+pub const ADJ_ADJTIME: u32 = 0x8000;
+/// With [`ADJ_ADJTIME`]: only read the pending adjustment.  The same bit as
+/// [`ADJ_NANO`], which it means without `ADJ_ADJTIME`.
+pub const ADJ_OFFSET_READONLY: u32 = 0x2000;
+/// `adjtime(3)`: slew the clock by `offset`, once; `offset` comes back as
+/// the adjustment that was still pending.
+pub const ADJ_OFFSET_SINGLESHOT: u32 = 0x8001;
+/// `adjtime(3)` with no new adjustment: read the pending one.
+pub const ADJ_OFFSET_SS_READ: u32 = 0xa001;
+
+/// Linux's `PPM_SCALE`, `NSEC_PER_USEC << (NTP_SCALE_SHIFT - SHIFT_USEC)`:
+/// `ADJ_FREQUENCY`'s `freq` is refused when multiplying by it would
+/// overflow.
+const PPM_SCALE: i64 = 1000 << 16;
 /// Don't actually adjust — just return status.
 pub const MOD_OFFSET: u32 = ADJ_OFFSET;
 /// Alias for `ADJ_FREQUENCY`.
@@ -227,6 +242,9 @@ use core::sync::atomic::{AtomicBool, Ordering};
 /// `Timex` fields that adjtimex actually carries between calls.
 struct TimexState {
     offset: i64,
+    /// `adjtime`'s pending adjustment, in microseconds: Linux's
+    /// `time_adjust`, kept apart from the PLL's `offset`.
+    adjust: i64,
     freq: i64,
     maxerror: i64,
     esterror: i64,
@@ -246,6 +264,7 @@ process_global! {
     /// read-modify-write and both see a state neither asked for.
     fn timex_state_ptr() -> TimexState = TimexState {
         offset: 0,
+        adjust: 0,
         // Default NTP frequency tolerance: 32_768_000 scaled ppm (Linux's
         // `MAXFREQ * (1 << 16)`).
         freq: 0,
@@ -309,21 +328,25 @@ fn status_to_return(status: i32) -> i32 {
 /// returns the appropriate `TIME_*` code.  Setting `modes = 0` is a
 /// read-only query.
 ///
-/// # Errors (Linux-matching priority order)
+/// With [`ADJ_ADJTIME`] set, `modes` is `adjtime`'s instead: `offset` is a
+/// one-time slew in microseconds (none if [`ADJ_OFFSET_READONLY`]), and
+/// comes back as the one that was pending -- the slew itself is not made,
+/// the clock here having no slew, so the adjustment is only kept and
+/// reported.  Either way the current time comes back in `time`.
 ///
-/// 1. `EFAULT` — `tx` is NULL.
-/// 2. `EINVAL` — `modes` contains an unrecognised bit, or
-///    `ADJ_TICK`/`ADJ_SETOFFSET` carries an out-of-range value
-///    (matches Linux's `ntp_validate_timex`).
-/// 3. **Phase 173:** `EPERM` — `modes != 0` (i.e. the caller is
-///    requesting a write) and the caller lacks `CAP_SYS_TIME`.
-///    Read-only queries (`modes == 0`) require no capability.
+/// # Errors, in Linux 6.6's order (`timekeeping_validate_timex`)
 ///
-/// The cap check sits after argument-domain `EINVAL` because Linux's
-/// `do_adjtimex` calls `ntp_validate_timex` *before* the
-/// `capable(CAP_SYS_TIME)` probe — so a bad mode bit or a wild tick
-/// value still returns `EINVAL` to an unprivileged caller, never
-/// `EPERM`.
+/// 1. `EFAULT` — `tx` cannot be read.
+/// 2. `EPERM` — a change without `CAP_SYS_TIME`: any `modes` but a read-only
+///    `adjtime` one.
+/// 3. `EINVAL` — an `ADJ_TICK` more than 10% off the default tick.
+/// 4. `EPERM`, then `EINVAL` — `ADJ_SETOFFSET` without the capability, or
+///    with a sub-second field below 0 or of a second or more.
+/// 5. `EINVAL` — an `ADJ_FREQUENCY` that would overflow when scaled.
+///
+/// No unknown mode bit is refused: Linux has no such check.  Until
+/// 2026-09-26 this refused them with `EINVAL` -- `adjtime`'s modes among
+/// them -- and judged the values before the capability.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn adjtimex(tx: *mut Timex) -> i32 {
     if tx.is_null() {
@@ -331,192 +354,335 @@ pub extern "C" fn adjtimex(tx: *mut Timex) -> i32 {
         return -1;
     }
 
-    // SAFETY: caller contract — `tx` points to a writable Timex.
-    let modes = unsafe { (*tx).modes };
-
-    // Reject mode bits we don't recognise.
-    const KNOWN_MODES: u32 = ADJ_OFFSET
-        | ADJ_FREQUENCY
-        | ADJ_MAXERROR
-        | ADJ_ESTERROR
-        | ADJ_STATUS
-        | ADJ_TIMECONST
-        | ADJ_TAI
-        | ADJ_MICRO
-        | ADJ_NANO
-        | ADJ_SETOFFSET
-        | ADJ_TICK;
-    if (modes & !KNOWN_MODES) != 0 {
-        errno::set_errno(errno::EINVAL);
+    // `copy_from_user`: a block in the kernel half cannot be read.
+    if !crate::uio::access_ok(tx.addr(), size_of::<Timex>()) {
+        errno::set_errno(errno::EFAULT);
         return -1;
     }
-
-    // Phase 161: Linux's `ntp_validate_timex` rejects ADJ_TICK with a
-    // tick value outside [MIN_TICK, MAX_TICK] (±10% of the default
-    // jiffy length).  Pre-fix we silently applied any tick value the
-    // caller passed, including 0 and `i64::MAX` — a divergence that
-    // would let buggy or malicious callers derail the NTP discipline
-    // state.  We validate before taking the lock so the state stays
-    // untouched on rejection.
-    if (modes & ADJ_TICK) != 0 {
-        // SAFETY: caller contract — `tx` points to a readable Timex.
-        let tick = unsafe { (*tx).tick };
-        if !(MIN_TICK..=MAX_TICK).contains(&tick) {
-            errno::set_errno(errno::EINVAL);
-            return -1;
-        }
-    }
-
-    // Phase 162: Linux's `ntp_validate_timex` rejects an
-    // `ADJ_SETOFFSET` whose sub-second field is out of range.  The
-    // field is interpreted as nanoseconds if `ADJ_NANO` is set in the
-    // same call, otherwise as microseconds.  Pre-fix we silently
-    // accepted any value (negative, ≥ 1s) and dropped it on the floor
-    // because we don't yet have an RTC to apply the step to —
-    // surfacing the EINVAL still matters because chrony's
-    // `clock_step()` falls back to settimeofday on a SETOFFSET
-    // failure, and silently "succeeding" hides the bug.
-    if (modes & ADJ_SETOFFSET) != 0 {
-        // SAFETY: caller contract — `tx` points to a readable Timex.
-        let sub_sec = unsafe { (*tx).time_tv_usec };
-        let limit = if (modes & ADJ_NANO) != 0 {
-            NSEC_PER_SEC
-        } else {
-            USEC_PER_SEC
-        };
-        if !(0..limit).contains(&sub_sec) {
-            errno::set_errno(errno::EINVAL);
-            return -1;
-        }
-    }
-
-    // Phase 173: Linux's `do_adjtimex` gates any modify-mode call on
-    // CAP_SYS_TIME.  A pure read-only query (modes == 0) is allowed for
-    // unprivileged callers — only writes need the cap.  The probe runs
-    // after `ntp_validate_timex` (our EINVAL guards above), matching the
-    // kernel's `validate then capable` ordering.
-    if modes != 0 && !crate::sys_capability::has_capability(crate::sys_capability::CAP_SYS_TIME) {
-        errno::set_errno(errno::EPERM);
+    // SAFETY: the caller's block, in user memory (checked).
+    let req = unsafe { tx.read_unaligned() };
+    if let Err(e) = validate(&req) {
+        errno::set_errno(e);
         return -1;
     }
+    let modes = req.modes;
 
-    // ADJ_SETOFFSET requests an immediate step of the wall clock by the
-    // supplied (possibly negative) offset.  Capture the delta now — before the
-    // read-back below zeroes the tx time fields — and apply it to the kernel
-    // clock after the discipline state is updated.  The sub-second field is
-    // nanoseconds when ADJ_NANO is set, otherwise microseconds (already range-
-    // checked above); the seconds field is signed, so the total may be
-    // negative (stepping the clock backwards).  saturating_* guards the
-    // astronomically large offsets that would only arise from a malformed tx.
-    let setoffset_delta_ns: Option<i64> = if (modes & ADJ_SETOFFSET) != 0 {
-        // SAFETY: caller contract — `tx` points to a readable Timex.
-        let (secs, sub) = unsafe { ((*tx).time_tv_sec, (*tx).time_tv_usec) };
-        let sub_ns = if (modes & ADJ_NANO) != 0 {
-            sub
+    // ADJ_SETOFFSET steps the wall clock, before anything is read back, as
+    // `do_adjtimex` injects the offset before `__do_adjtimex` reports the
+    // time.  The sub-second field is nanoseconds with ADJ_NANO, else
+    // microseconds (range-checked above); the seconds are signed, so the
+    // step may go backwards.  `saturating_*` bounds only offsets no clock
+    // could hold.
+    if modes & ADJ_SETOFFSET != 0 {
+        let sub_ns = if modes & ADJ_NANO != 0 {
+            req.time_tv_usec
         } else {
-            sub.saturating_mul(1_000)
+            req.time_tv_usec.saturating_mul(1_000)
         };
-        Some(secs.saturating_mul(1_000_000_000).saturating_add(sub_ns))
-    } else {
-        None
-    };
+        let delta_ns = req
+            .time_tv_sec
+            .saturating_mul(1_000_000_000)
+            .saturating_add(sub_ns);
+        step_clock(delta_ns);
+    }
+    let now = crate::lowlevellock::now_on(crate::time::CLOCK_REALTIME);
 
     let _guard = lock_timex();
 
     // SAFETY: serialized by TIMEX_LOCK.
     let state = unsafe { &mut *timex_state_ptr() };
 
-    // SAFETY: caller-supplied writable struct.
-    unsafe {
-        // Apply each requested update.
-        if (modes & ADJ_OFFSET) != 0 {
-            state.offset = (*tx).offset;
+    let offset_out = if modes & ADJ_ADJTIME != 0 {
+        // `adjtime()` is independent from `ntp_adjtime()`.
+        let pending = state.adjust;
+        if modes & ADJ_OFFSET_READONLY == 0 {
+            state.adjust = req.offset;
         }
-        if (modes & ADJ_FREQUENCY) != 0 {
-            state.freq = (*tx).freq;
+        pending
+    } else {
+        if modes & ADJ_OFFSET != 0 {
+            state.offset = req.offset;
         }
-        if (modes & ADJ_MAXERROR) != 0 {
-            state.maxerror = (*tx).maxerror;
+        if modes & ADJ_FREQUENCY != 0 {
+            state.freq = req.freq;
         }
-        if (modes & ADJ_ESTERROR) != 0 {
-            state.esterror = (*tx).esterror;
+        if modes & ADJ_MAXERROR != 0 {
+            state.maxerror = req.maxerror;
         }
-        if (modes & ADJ_STATUS) != 0 {
-            state.status = (*tx).status;
+        if modes & ADJ_ESTERROR != 0 {
+            state.esterror = req.esterror;
         }
-        if (modes & ADJ_TIMECONST) != 0 {
-            state.constant = (*tx).constant;
+        if modes & ADJ_STATUS != 0 {
+            state.status = req.status;
         }
-        if (modes & ADJ_TAI) != 0 {
-            state.tai = (*tx).tai;
+        if modes & ADJ_TIMECONST != 0 {
+            state.constant = req.constant;
         }
-        if (modes & ADJ_TICK) != 0 {
-            state.tick = (*tx).tick;
+        if modes & ADJ_TAI != 0 {
+            state.tai = req.tai;
+        }
+        if modes & ADJ_TICK != 0 {
+            state.tick = req.tick;
         }
         // ADJ_NANO / ADJ_MICRO toggle the STA_NANO bit but otherwise
         // don't carry a value.
-        if (modes & ADJ_NANO) != 0 {
+        if modes & ADJ_NANO != 0 {
             state.status |= STA_NANO;
         }
-        if (modes & ADJ_MICRO) != 0 {
+        if modes & ADJ_MICRO != 0 {
             state.status &= !STA_NANO;
         }
+        state.offset
+    };
 
-        // Now read everything back into the caller's struct.
-        (*tx).offset = state.offset;
-        (*tx).freq = state.freq;
-        (*tx).maxerror = state.maxerror;
-        (*tx).esterror = state.esterror;
-        (*tx).status = state.status;
-        (*tx).constant = state.constant;
-        (*tx).precision = 1; // 1 unit (nano if STA_NANO else micro).
-        // 32_768_000 scaled ppm = NTP's MAXFREQ default.
-        (*tx).tolerance = 32_768_000;
-        (*tx).tick = state.tick;
-        (*tx).tai = state.tai;
-        // Wall clock fields we don't track stay at whatever the caller
-        // wrote — set them to 0 so reads after a fresh adjtimex are
-        // deterministic.
-        (*tx).time_tv_sec = 0;
-        (*tx).time_tv_usec = 0;
-        (*tx).ppsfreq = 0;
-        (*tx).jitter = 0;
-        (*tx).shift = 0;
-        (*tx).stabil = 0;
-        (*tx).jitcnt = 0;
-        (*tx).calcnt = 0;
-        (*tx).errcnt = 0;
-        (*tx).stbcnt = 0;
-    }
-
-    // Apply the ADJ_SETOFFSET clock step to the kernel wall clock.  This is
-    // the abrupt correction chrony/ntpd issue via clock_step(); before this
-    // was wired, the step was validated and "succeeded" but never moved the
-    // clock, so the daemon believed it had stepped and would not fall back to
-    // settimeofday.  We discard the kernel return: SYS_CLOCK_ADJTIME only
-    // fails (EINVAL) when the realtime base is uninitialized (no usable RTC),
-    // in which case the clock is 0-based anyway and there is nothing to step;
-    // adjtimex's return value reflects the NTP status word, not the step
-    // result, matching Linux's do_adjtimex semantics.
-    #[cfg(target_os = "none")]
-    #[allow(clippy::cast_sign_loss)]
-    if let Some(delta_ns) = setoffset_delta_ns {
-        let _ = syscall1(SYS_CLOCK_ADJTIME, delta_ns as u64);
-    }
-    // On the host test build there is no kernel to step; the discipline-state
-    // update and return value above are identical on both builds (which is
-    // what the host tests assert), so we only need to keep the captured delta
-    // from tripping the unused-variable lint.
-    #[cfg(not(target_os = "none"))]
-    let _ = &setoffset_delta_ns;
+    let mut out = req;
+    out.offset = offset_out;
+    out.freq = state.freq;
+    out.maxerror = state.maxerror;
+    out.esterror = state.esterror;
+    out.status = state.status;
+    out.constant = state.constant;
+    out.precision = 1; // 1 unit (nano if STA_NANO else micro).
+    // Linux's MAXFREQ_SCALED / PPM_SCALE: 500 ppm, scaled.
+    out.tolerance = 32_768_000;
+    out.tick = state.tick;
+    out.tai = state.tai;
+    // The time now, in the unit STA_NANO chooses, as `__do_adjtimex` fills it.
+    out.time_tv_sec = now.tv_sec;
+    out.time_tv_usec = if state.status & STA_NANO != 0 {
+        now.tv_nsec
+    } else {
+        now.tv_nsec / 1_000
+    };
+    // No PPS source: `pps_fill_timex`'s zeroes.
+    out.ppsfreq = 0;
+    out.jitter = 0;
+    out.shift = 0;
+    out.stabil = 0;
+    out.jitcnt = 0;
+    out.calcnt = 0;
+    out.errcnt = 0;
+    out.stbcnt = 0;
+    // SAFETY: the caller's block, writable per the C contract.
+    unsafe { tx.write_unaligned(out) };
 
     status_to_return(state.status)
+}
+
+/// Linux 6.6's `timekeeping_validate_timex`: the capability before the
+/// values, and no unknown mode bit refused.
+fn validate(tx: &Timex) -> Result<(), i32> {
+    let modes = tx.modes;
+    let may_set = || crate::sys_capability::has_capability(crate::sys_capability::CAP_SYS_TIME);
+    if modes & ADJ_ADJTIME != 0 {
+        // Linux then tests `!(modes & ADJ_OFFSET_SINGLESHOT)` "so singleshot
+        // is not used with other bits" -- false whenever ADJ_ADJTIME is set,
+        // so it refuses nothing, and neither does this.
+        if modes & ADJ_OFFSET_READONLY == 0 && !may_set() {
+            return Err(errno::EPERM);
+        }
+    } else {
+        if modes != 0 && !may_set() {
+            return Err(errno::EPERM);
+        }
+        if modes & ADJ_TICK != 0 && !(MIN_TICK..=MAX_TICK).contains(&tx.tick) {
+            return Err(errno::EINVAL);
+        }
+    }
+    if modes & ADJ_SETOFFSET != 0 {
+        if !may_set() {
+            return Err(errno::EPERM);
+        }
+        let limit = if modes & ADJ_NANO != 0 {
+            NSEC_PER_SEC
+        } else {
+            USEC_PER_SEC
+        };
+        if !(0..limit).contains(&tx.time_tv_usec) {
+            return Err(errno::EINVAL);
+        }
+    }
+    if modes & ADJ_FREQUENCY != 0
+        && !(i64::MIN / PPM_SCALE..=i64::MAX / PPM_SCALE).contains(&tx.freq)
+    {
+        return Err(errno::EINVAL);
+    }
+    Ok(())
+}
+
+/// Step the kernel's wall clock by `delta_ns`.
+///
+/// The result is discarded: `SYS_CLOCK_ADJTIME` fails only when the
+/// realtime base is uninitialised (no usable RTC), and then the clock is
+/// 0-based and there is nothing to step; `adjtimex` returns the NTP status,
+/// not the step's.  The host build has no kernel to step.
+fn step_clock(delta_ns: i64) {
+    #[cfg(target_os = "none")]
+    #[allow(clippy::cast_sign_loss)]
+    {
+        let _ = syscall1(SYS_CLOCK_ADJTIME, delta_ns as u64);
+    }
+    #[cfg(not(target_os = "none"))]
+    let _ = delta_ns;
+}
+
+/// `adjtime(3)`: slew the clock by `delta` and report in `olddelta` the slew
+/// still pending -- glibc's, over `clock_adjtime(CLOCK_REALTIME)` with
+/// [`ADJ_OFFSET_SINGLESHOT`], or [`ADJ_OFFSET_SS_READ`] for a NULL `delta`.
+///
+/// `EINVAL` for a `delta` of 2145 seconds or more either way, as glibc
+/// refuses one whose microseconds would not fit an `int`; `EPERM` without
+/// `CAP_SYS_TIME` for a new slew.  The slew itself is not made (see
+/// [`adjtimex`]): the adjustment is kept and reported.
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub extern "C" fn adjtime(
+    delta: *const crate::time::Timeval,
+    olddelta: *mut crate::time::Timeval,
+) -> i32 {
+    // glibc's MAX_SEC and MIN_SEC.
+    const MAX_SEC: i64 = i32::MAX as i64 / 1_000_000 - 2;
+    const MIN_SEC: i64 = i32::MIN as i64 / 1_000_000 + 2;
+    let mut tx = Timex::zeroed();
+    if delta.is_null() {
+        tx.modes = ADJ_OFFSET_SS_READ;
+    } else {
+        // SAFETY: the caller's `struct timeval`.
+        let d = unsafe { delta.read_unaligned() };
+        let sec = d.tv_sec.saturating_add(d.tv_usec / 1_000_000);
+        if !(MIN_SEC..=MAX_SEC).contains(&sec) {
+            errno::set_errno(errno::EINVAL);
+            return -1;
+        }
+        // `sec` is within ±2145 (checked) and the remainder within a second,
+        // so neither can overflow.
+        tx.offset = (d.tv_usec % 1_000_000).saturating_add(sec.saturating_mul(1_000_000));
+        tx.modes = ADJ_OFFSET_SINGLESHOT;
+    }
+    if clock_adjtime(CLOCK_REALTIME_ID, &raw mut tx) < 0 {
+        return -1;
+    }
+    if !olddelta.is_null() {
+        // glibc splits a negative offset as `-(-offset / 1000000)` and
+        // `-(-offset % 1000000)`; Rust's division truncates toward zero, as
+        // C's does, so those are these -- without the negation, which would
+        // overflow for `i64::MIN`.
+        let (tv_sec, tv_usec) = (tx.offset / 1_000_000, tx.offset % 1_000_000);
+        // SAFETY: the caller's `struct timeval`.
+        unsafe { olddelta.write_unaligned(crate::time::Timeval { tv_sec, tv_usec }) };
+    }
+    0
 }
 
 /// NTP-compatible clock adjustment (identical to `adjtimex`).
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn ntp_adjtime(tx: *mut Timex) -> i32 {
     adjtimex(tx)
+}
+
+// ---------------------------------------------------------------------------
+// ntp_gettime, ntp_gettimex: the time and its error bounds
+// ---------------------------------------------------------------------------
+
+/// `struct ntptimeval`, glibc's: the clock's time and error bounds as
+/// [`ntp_gettimex`] reads them.  musl's has only the first three fields --
+/// the struct as it was before the TAI offset -- and the overlay's
+/// `<sys/timex.h>` gives C this one in its place.
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct NtpTimeval {
+    /// The time: seconds, and microseconds -- nanoseconds when the clock's
+    /// status has [`STA_NANO`].
+    pub time: crate::time::Timeval,
+    /// The maximum error, in microseconds.
+    pub maxerror: i64,
+    /// The estimated error, in microseconds.
+    pub esterror: i64,
+    /// The TAI offset, in seconds.
+    pub tai: i64,
+    /// glibc's four reserved words, which [`ntp_gettimex`] zeroes.
+    pub reserved: [i64; 4],
+}
+
+/// The clock as `adjtimex` reads it with no modes, which needs no
+/// privilege: its state (`TIME_OK` ... `TIME_ERROR`), or -1 with `errno`
+/// set; and what it filled in.
+fn clock_reading() -> (i32, Timex) {
+    let mut tx = Timex::zeroed();
+    let rc = clock_adjtime(CLOCK_REALTIME_ID, &raw mut tx);
+    (rc, tx)
+}
+
+/// The time and its error bounds in the struct as it was before the TAI
+/// offset -- `time`, `maxerror` and `esterror`, all of it -- as glibc's
+/// `ntp_gettime` symbol fills it: the clock's state (`TIME_OK` ...
+/// `TIME_ERROR`), or -1 with `errno` set (`EFAULT` for a NULL `ntv`, where
+/// glibc's, declared `nonnull`, would fault).
+///
+/// A program compiled against `<sys/timex.h>` does not call this: the
+/// header sends the name to [`ntp_gettimex`], as glibc's does, since the
+/// struct it declares is the newer one.  This is the library's symbol, for
+/// what calls it by name -- a `configure` link test, a program with its own
+/// declaration.
+///
+/// # Safety
+///
+/// `ntv` is NULL or writable for the older struct's 32 bytes.
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub unsafe extern "C" fn ntp_gettime(ntv: *mut NtpTimeval) -> i32 {
+    if ntv.is_null() {
+        errno::set_errno(errno::EFAULT);
+        return -1;
+    }
+    let (rc, tx) = clock_reading();
+    if rc < 0 {
+        return -1;
+    }
+    let time = crate::time::Timeval {
+        tv_sec: tx.time_tv_sec,
+        tv_usec: tx.time_tv_usec,
+    };
+    // SAFETY: the older struct's three fields, its first 32 bytes, which
+    // the caller's `ntv` has room for.
+    unsafe {
+        (&raw mut (*ntv).time).write_unaligned(time);
+        (&raw mut (*ntv).maxerror).write_unaligned(tx.maxerror);
+        (&raw mut (*ntv).esterror).write_unaligned(tx.esterror);
+    }
+    rc
+}
+
+/// The time, its error bounds and the TAI offset -- every field of
+/// [`NtpTimeval`], the reserved ones 0 -- as glibc's `ntp_gettimex` fills
+/// them, and what `<sys/timex.h>` sends `ntp_gettime` to: the clock's state
+/// (`TIME_OK` ... `TIME_ERROR`), or -1 with `errno` set (`EFAULT` for a
+/// NULL `ntv`).
+///
+/// # Safety
+///
+/// `ntv` is NULL or writable for an [`NtpTimeval`].
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub unsafe extern "C" fn ntp_gettimex(ntv: *mut NtpTimeval) -> i32 {
+    if ntv.is_null() {
+        errno::set_errno(errno::EFAULT);
+        return -1;
+    }
+    let (rc, tx) = clock_reading();
+    if rc < 0 {
+        return -1;
+    }
+    let value = NtpTimeval {
+        time: crate::time::Timeval {
+            tv_sec: tx.time_tv_sec,
+            tv_usec: tx.time_tv_usec,
+        },
+        maxerror: tx.maxerror,
+        esterror: tx.esterror,
+        tai: i64::from(tx.tai),
+        reserved: [0; 4],
+    };
+    // SAFETY: writable for an `NtpTimeval`, by contract.
+    unsafe { ntv.write_unaligned(value) };
+    rc
 }
 
 // ---------------------------------------------------------------------------
@@ -535,10 +701,12 @@ pub extern "C" fn ntp_adjtime(tx: *mut Timex) -> i32 {
 //         return kc->clock_adj(id, t);
 //     }
 //
-// Only `CLOCK_REALTIME` and `CLOCK_TAI` have a `clock_adj` callback.
-// Every other standard clock (MONOTONIC, BOOTTIME, the CPU-time
-// clocks, the COARSE variants, the ALARM variants) is recognised but
-// returns `EOPNOTSUPP`.  Pre-Phase-163 we lumped MONOTONIC in with
+// Of the standard clocks only `CLOCK_REALTIME` has a `clock_adj`
+// callback (kernel/time/posix-timers.c:1434; the other one in the tree is
+// the dynamic POSIX clocks', posix-clock.c:316).  Every other standard
+// clock -- TAI included -- is recognised but returns `EOPNOTSUPP`.  Phase
+// 163 counted `CLOCK_TAI` as adjustable; 6.6's `clock_tai` (:1480) has no
+// `clock_adj`, and it was corrected on 2026-09-26.  Pre-Phase-163 we lumped MONOTONIC in with
 // REALTIME and rejected everything else with `EINVAL` — both
 // divergent.
 //
@@ -549,8 +717,8 @@ pub extern "C" fn ntp_adjtime(tx: *mut Timex) -> i32 {
 // hoisting the null-tx check above the clock-id dispatch.
 
 /// Standard POSIX clock ids recognised by `clock_adjtime`.  These
-/// mirror `linux_clock2_types::CLOCK_*` but kept as `i32` because the
-/// syscall takes a signed `clockid_t`.
+/// mirror [`crate::time::CLOCK_REALTIME`] and the rest but kept as `i32`
+/// because the syscall takes a signed `clockid_t`.
 const CLOCK_REALTIME_ID: i32 = 0;
 const CLOCK_MONOTONIC_ID: i32 = 1;
 const CLOCK_PROCESS_CPUTIME_ID_ID: i32 = 2;
@@ -565,9 +733,9 @@ const CLOCK_TAI_ID: i32 = 11;
 
 /// Per-clock adjtimex (`clock_adjtime(2)`).
 ///
-/// Linux dispatches by clock id: `CLOCK_REALTIME` and `CLOCK_TAI`
-/// forward to `do_adjtimex`; every other *known* standard clock
-/// returns `EOPNOTSUPP`; unknown clock ids return `EINVAL`.  A null
+/// Linux dispatches by clock id: `CLOCK_REALTIME` forwards to
+/// `do_adjtimex`; every other *known* standard clock, `CLOCK_TAI` among
+/// them, returns `EOPNOTSUPP`; unknown clock ids return `EINVAL`.  A null
 /// `tx` always returns `EFAULT`, even when the clock id is also
 /// invalid — matching `SYSCALL_DEFINE2`'s `copy_from_user`-first
 /// ordering.
@@ -581,13 +749,12 @@ pub extern "C" fn clock_adjtime(clk_id: i32, tx: *mut Timex) -> i32 {
     }
 
     match clk_id {
-        // Adjustable clocks — forward to the shared NTP state.  TAI
-        // shares the same discipline; the +/-leap offset would be
-        // applied to reads, but we don't yet expose a wall clock.
-        CLOCK_REALTIME_ID | CLOCK_TAI_ID => adjtimex(tx),
+        // The one adjustable standard clock — forward to the NTP state.
+        CLOCK_REALTIME_ID => adjtimex(tx),
 
         // Known clocks that don't support `clock_adj` in Linux.
-        CLOCK_MONOTONIC_ID
+        CLOCK_TAI_ID
+        | CLOCK_MONOTONIC_ID
         | CLOCK_PROCESS_CPUTIME_ID_ID
         | CLOCK_THREAD_CPUTIME_ID_ID
         | CLOCK_MONOTONIC_RAW_ID
@@ -771,13 +938,239 @@ mod tests {
     }
 
     #[test]
-    fn test_adjtimex_unknown_modes_einval() {
+    fn test_adjtimex_unknown_modes_are_not_refused() {
+        // Linux 6.6 has no unknown-bit check; this refused them with EINVAL.
         errno::set_errno(0);
         let mut tx = Timex::zeroed();
-        tx.modes = 0x8000_0000; // Not in KNOWN_MODES.
-        let ret = adjtimex(&mut tx);
-        assert_eq!(ret, -1);
+        tx.modes = 0x8000_0000;
+        assert!(adjtimex(&mut tx) >= 0);
+    }
+
+    #[test]
+    fn adjtime_modes_keep_and_report_the_pending_slew() {
+        let mut tx = Timex::zeroed();
+        tx.modes = ADJ_OFFSET_SINGLESHOT;
+        tx.offset = 1_500;
+        assert!(adjtimex(&mut tx) >= 0);
+        assert_eq!(tx.offset, 0, "nothing was pending");
+        let mut read = Timex::zeroed();
+        read.modes = ADJ_OFFSET_SS_READ;
+        read.offset = 99;
+        assert!(adjtimex(&mut read) >= 0);
+        assert_eq!(read.offset, 1_500, "read-only: reported, not replaced");
+        let mut again = Timex::zeroed();
+        again.modes = ADJ_OFFSET_SS_READ;
+        assert!(adjtimex(&mut again) >= 0);
+        assert_eq!(again.offset, 1_500);
+        // The PLL's offset is apart.
+        let mut pll = Timex::zeroed();
+        assert!(adjtimex(&mut pll) >= 0);
+        assert_eq!(pll.offset, 0);
+    }
+
+    #[test]
+    fn adjtimex_reports_the_time() {
+        let mut tx = Timex::zeroed();
+        assert!(adjtimex(&mut tx) >= 0);
+        let now = crate::lowlevellock::now_on(crate::time::CLOCK_REALTIME);
+        assert!(
+            (now.tv_sec - tx.time_tv_sec).abs() <= 1,
+            "{} vs {}",
+            tx.time_tv_sec,
+            now.tv_sec
+        );
+        assert!((0..USEC_PER_SEC).contains(&tx.time_tv_usec), "microseconds");
+    }
+
+    #[test]
+    fn adjtimex_refuses_a_frequency_that_overflows_scaled() {
+        let mut tx = Timex::zeroed();
+        tx.modes = ADJ_FREQUENCY;
+        tx.freq = i64::MAX / PPM_SCALE + 1;
+        errno::set_errno(0);
+        assert_eq!(adjtimex(&mut tx), -1);
         assert_eq!(errno::get_errno(), errno::EINVAL);
+        tx.freq = i64::MAX / PPM_SCALE;
+        assert!(adjtimex(&mut tx) >= 0);
+    }
+
+    #[test]
+    fn adjtimex_refuses_a_kernel_half_block() {
+        errno::set_errno(0);
+        assert_eq!(adjtimex(0xFFFF_8000_0000_0000_usize as *mut Timex), -1);
+        assert_eq!(errno::get_errno(), errno::EFAULT);
+    }
+
+    /// glibc 2.39's `ntp_gettime` and `ntp_gettimex`
+    /// (`posix/tools/oracle/ntp_harness.py`).
+    const NTP_ORACLE: &str = include_str!("ntp_oracle.txt");
+
+    /// The harness's `probe`: which of the struct's nine words `f` writes
+    /// (it is filled with 0x55 first), and whether what it wrote is
+    /// adjtimex's, read just before and after.
+    fn ntp_probe(what: &str, f: unsafe extern "C" fn(*mut NtpTimeval) -> i32) -> String {
+        let size = size_of::<NtpTimeval>();
+        let mut v = core::mem::MaybeUninit::<NtpTimeval>::uninit();
+        // SAFETY: `size` bytes of `v`'s own storage.
+        unsafe { v.as_mut_ptr().cast::<u8>().write_bytes(0x55, size) };
+        let mut before = Timex::zeroed();
+        let mut after = Timex::zeroed();
+        let want = adjtimex(&mut before);
+        errno::set_errno(12345);
+        // SAFETY: `v` is writable for a whole `NtpTimeval`.
+        let rc = unsafe { f(v.as_mut_ptr()) };
+        let err = errno::get_errno();
+        adjtimex(&mut after);
+        // SAFETY: every byte of `v` is initialised: 0x55, or written.
+        let (bytes, v) = unsafe {
+            (
+                core::slice::from_raw_parts(v.as_ptr().cast::<u8>(), size),
+                v.assume_init(),
+            )
+        };
+        let written: String = bytes
+            .chunks(8)
+            .map(|w| {
+                if w.iter().all(|&b| b == 0x55) {
+                    '-'
+                } else {
+                    'w'
+                }
+            })
+            .collect();
+        let judge = |ok: bool| if ok { "adjtimex's" } else { "other" };
+        let time_ok = (before.time_tv_sec..=after.time_tv_sec).contains(&v.time.tv_sec);
+        let max_ok = (before.maxerror..=after.maxerror).contains(&v.maxerror);
+        let est_ok = v.esterror == before.esterror || v.esterror == after.esterror;
+        let mut line = format!(
+            "{what} = {} written={written} errno={} time={} maxerror={} esterror={}",
+            judge(rc == want),
+            if err == 12345 { "kept" } else { "changed" },
+            judge(time_ok),
+            judge(max_ok),
+            judge(est_ok)
+        );
+        if written.as_bytes().get(4) == Some(&b'w') {
+            let tai_ok = v.tai == i64::from(before.tai) || v.tai == i64::from(after.tai);
+            let [a, b, c, d] = v.reserved;
+            line += &format!(" tai={} reserved={a},{b},{c},{d}", judge(tai_ok));
+        }
+        line
+    }
+
+    /// Every line of glibc's: the struct's size and layout, and which words
+    /// each function writes -- `ntp_gettime`, the library's symbol, the
+    /// older struct's four; `ntp_gettimex` all nine, the reserved ones 0.
+    /// `header ntp_gettime` is a C program's call, which `<sys/timex.h>`
+    /// sends to `ntp_gettimex` (`check-libc-overlay.py` holds its label to
+    /// glibc's); here it is that call.
+    #[test]
+    fn ntp_gettime_and_ntp_gettimex_are_glibcs() {
+        let ours = [
+            format!("sizeof(struct ntptimeval) = {}", size_of::<NtpTimeval>()),
+            format!(
+                "offsetof tai = {}, __glibc_reserved1 = {}",
+                core::mem::offset_of!(NtpTimeval, tai),
+                core::mem::offset_of!(NtpTimeval, reserved)
+            ),
+            ntp_probe("ntp_gettime", ntp_gettime),
+            ntp_probe("ntp_gettimex", ntp_gettimex),
+            ntp_probe("header ntp_gettime", ntp_gettimex),
+        ];
+        let glibc: std::vec::Vec<&str> =
+            NTP_ORACLE.lines().filter(|l| !l.starts_with('#')).collect();
+        assert_eq!(glibc, ours);
+    }
+
+    /// The TAI offset and the error bounds are the clock's: what
+    /// `ADJ_TAI`, `ADJ_MAXERROR` and `ADJ_ESTERROR` set, `ntp_gettimex`
+    /// reads back, and `ntp_gettime` the two bounds of.
+    #[test]
+    fn ntp_gettimex_reads_what_adjtimex_set() {
+        let mut set = Timex::zeroed();
+        set.modes = ADJ_TAI | ADJ_MAXERROR | ADJ_ESTERROR;
+        set.tai = 37;
+        set.maxerror = 1_234;
+        set.esterror = 56;
+        assert!(adjtimex(&mut set) >= 0, "errno {}", errno::get_errno());
+        let mut v = NtpTimeval {
+            time: crate::time::Timeval::default(),
+            maxerror: 0,
+            esterror: 0,
+            tai: 0,
+            reserved: [9; 4],
+        };
+        // SAFETY: a whole `NtpTimeval`.
+        let rc = unsafe { ntp_gettimex(&mut v) };
+        assert!(rc >= 0);
+        assert_eq!(
+            (v.tai, v.maxerror, v.esterror, v.reserved),
+            (37, 1_234, 56, [0; 4])
+        );
+        let mut old = NtpTimeval { tai: -1, ..v };
+        old.maxerror = 0;
+        // SAFETY: as above.
+        assert!(unsafe { ntp_gettime(&mut old) } >= 0);
+        assert_eq!(
+            (old.maxerror, old.esterror, old.tai),
+            (1_234, 56, -1),
+            "tai untouched"
+        );
+        let mut reset = Timex::zeroed();
+        reset.modes = ADJ_TAI | ADJ_MAXERROR | ADJ_ESTERROR;
+        reset.maxerror = 16_000_000;
+        reset.esterror = 16_000_000;
+        assert!(adjtimex(&mut reset) >= 0);
+    }
+
+    #[test]
+    fn ntp_gettime_refuses_null() {
+        for f in [ntp_gettime, ntp_gettimex] {
+            errno::set_errno(0);
+            // SAFETY: NULL is the input under test.
+            assert_eq!(unsafe { f(core::ptr::null_mut()) }, -1);
+            assert_eq!(errno::get_errno(), errno::EFAULT);
+        }
+    }
+
+    #[test]
+    fn adjtime_is_glibcs() {
+        use crate::time::Timeval;
+        let delta = Timeval {
+            tv_sec: 1,
+            tv_usec: 250_000,
+        };
+        let mut old = Timeval {
+            tv_sec: 7,
+            tv_usec: 7,
+        };
+        assert_eq!(adjtime(&raw const delta, &raw mut old), 0);
+        assert_eq!((old.tv_sec, old.tv_usec), (0, 0), "nothing pending before");
+        assert_eq!(adjtime(core::ptr::null(), &raw mut old), 0);
+        assert_eq!((old.tv_sec, old.tv_usec), (1, 250_000), "read back");
+        let back = Timeval {
+            tv_sec: -1,
+            tv_usec: -500_000,
+        };
+        assert_eq!(adjtime(&raw const back, core::ptr::null_mut()), 0);
+        assert_eq!(adjtime(core::ptr::null(), &raw mut old), 0);
+        assert_eq!(
+            (old.tv_sec, old.tv_usec),
+            (-1, -500_000),
+            "negative, as glibc splits it"
+        );
+        let far = Timeval {
+            tv_sec: 2146,
+            tv_usec: 0,
+        };
+        errno::set_errno(0);
+        assert_eq!(adjtime(&raw const far, core::ptr::null_mut()), -1);
+        assert_eq!(errno::get_errno(), errno::EINVAL, "past glibc's MAX_SEC");
+        let edge = Timeval {
+            tv_sec: 2145,
+            tv_usec: 0,
+        };
+        assert_eq!(adjtime(&raw const edge, core::ptr::null_mut()), 0);
     }
 
     #[test]
@@ -977,11 +1370,10 @@ mod tests {
     }
 
     #[test]
-    fn test_adjtimex_phase161_unknown_mode_beats_tick_einval() {
-        // Unknown mode-bit check fires before tick range check.
-        // Both would yield EINVAL, but the unknown-mode branch returns
-        // first; we confirm by setting a clearly-bad mode + bad tick
-        // and asserting EINVAL (and that the state is untouched).
+    fn test_adjtimex_phase161_unknown_bits_do_not_hide_a_bad_tick() {
+        // Unknown mode bits are not refused (Linux has no such check), so
+        // the bad tick beside one is what is refused, and the state is
+        // untouched.
         errno::set_errno(0);
         let mut tx = Timex::zeroed();
         tx.modes = ADJ_TICK | 0x8000_0000; // unknown bit + tick
@@ -1280,10 +1672,9 @@ mod tests {
     }
 
     #[test]
-    fn test_adjtimex_phase162_unknown_mode_beats_setoffset_einval() {
-        // Unknown mode bit short-circuits before SETOFFSET check.
-        // Both yield EINVAL but the precedence matters because the
-        // unknown-mode branch doesn't read `time_tv_usec` at all.
+    fn test_adjtimex_phase162_unknown_bits_do_not_hide_a_bad_setoffset() {
+        // Unknown mode bits are not refused (Linux has no such check), so
+        // the bad sub-second field beside one is what is refused.
         errno::set_errno(0);
         let mut tx = Timex::zeroed();
         tx.modes = ADJ_SETOFFSET | 0x8000_0000;
@@ -1437,8 +1828,9 @@ mod tests {
     //
     // Linux's `do_clock_adjtime` walks a per-clock `k_clock` table:
     // unknown id → EINVAL, known id without `clock_adj` → EOPNOTSUPP,
-    // known id with `clock_adj` → forward.  Only CLOCK_REALTIME and
-    // CLOCK_TAI implement `clock_adj`.  Additionally, the syscall
+    // known id with `clock_adj` → forward.  Of the standard clocks only
+    // CLOCK_REALTIME implements `clock_adj` (see the note above
+    // `clock_adjtime`; Phase 163 counted TAI too).  Additionally, the syscall
     // entry runs `copy_from_user` *before* `do_clock_adjtime`, so a
     // null `tx` returns EFAULT even when the clock id is also bogus.
     //
@@ -1449,7 +1841,9 @@ mod tests {
     //     known-but-unsupported clocks (BOOTTIME, CPU-time, COARSE,
     //     ALARM variants), which Linux gives EOPNOTSUPP.
     //   * `clk_id == 11` (CLOCK_TAI) returned EINVAL — wrong; Linux
-    //     supports adjtime on TAI.
+    //     knows the clock but has no `clock_adj` for it: EOPNOTSUPP.
+    //     (Phase 163 made it adjustable instead, which was wrong the
+    //     other way; corrected 2026-09-26.)
     //   * Ordering: `clock_adjtime(99, NULL)` returned EINVAL — wrong;
     //     Linux returns EFAULT because copy_from_user fires first.
 
@@ -1527,18 +1921,19 @@ mod tests {
         assert_eq!(errno::get_errno(), errno::EOPNOTSUPP);
     }
 
-    // ---- CLOCK_TAI accepted ----
+    // ---- CLOCK_TAI: known, not adjustable ----
 
     #[test]
-    fn test_clock_adjtime_phase163_tai_forwards_to_adjtimex() {
-        // CLOCK_TAI (id 11) is one of only two clocks whose
-        // `clock_adj` callback Linux populates.  Pre-fix we returned
-        // EINVAL for id=11; post-fix it must succeed.
+    fn test_clock_adjtime_tai_eopnotsupp() {
+        // 6.6's `clock_tai` (kernel/time/posix-timers.c:1480) has no
+        // `clock_adj`, so `do_clock_adjtime` says EOPNOTSUPP.  Phase 163
+        // asserted it forwarded to adjtimex, as "one of only two clocks
+        // whose clock_adj callback Linux populates"; it is not.
         errno::set_errno(0);
         let mut tx = Timex::zeroed();
         let ret = clock_adjtime(11, &mut tx);
-        // Boot default has STA_UNSYNC → TIME_ERROR (not -1).
-        assert_eq!(ret, TIME_ERROR);
+        assert_eq!(ret, -1);
+        assert_eq!(errno::get_errno(), errno::EOPNOTSUPP);
     }
 
     // ---- Unknown clock id → EINVAL ----
@@ -1607,16 +2002,18 @@ mod tests {
 
     #[test]
     fn test_clock_adjtime_phase163_chrony_capability_probe_workflow() {
-        // chrony probes for adjustable clocks at startup: it tries
-        // CLOCK_REALTIME, CLOCK_TAI, then falls back if either
-        // returns EOPNOTSUPP.  Pre-fix we returned EINVAL on TAI,
-        // confusing the probe.  Post-fix both succeed.
-        // REALTIME — supported.
+        // A probe for adjustable clocks: REALTIME is, TAI answers
+        // EOPNOTSUPP — the answer a probe falls back on, as on Linux.
         let mut tx = Timex::zeroed();
         assert_ne!(clock_adjtime(0, &mut tx), -1, "REALTIME must be adjustable");
-        // TAI — supported.
         let mut tx2 = Timex::zeroed();
-        assert_ne!(clock_adjtime(11, &mut tx2), -1, "TAI must be adjustable");
+        errno::set_errno(0);
+        assert_eq!(clock_adjtime(11, &mut tx2), -1);
+        assert_eq!(
+            errno::get_errno(),
+            errno::EOPNOTSUPP,
+            "TAI has no clock_adj"
+        );
     }
 
     #[test]
@@ -1692,30 +2089,35 @@ mod tests {
     }
 
     #[test]
-    fn test_clock_adjtime_tai_no_longer_einval_phase163() {
-        // Sentinel: pre-Phase-163, CLOCK_TAI was wrongly rejected
-        // with EINVAL.  Post-fix it forwards to adjtimex.
+    fn test_clock_adjtime_tai_is_not_einval() {
+        // Sentinel: TAI is a *known* clock, so EOPNOTSUPP, never the
+        // unknown-clock EINVAL it was before Phase 163.
         errno::set_errno(0);
         let mut tx = Timex::zeroed();
-        let ret = clock_adjtime(11, &mut tx);
-        // Returns a TIME_* code (TIME_ERROR by default), NOT -1.
-        assert_ne!(ret, -1, "post-Phase-163: TAI must succeed");
-        // errno must be preserved (POSIX success contract).
-        assert_eq!(errno::get_errno(), 0);
+        assert_eq!(clock_adjtime(11, &mut tx), -1);
+        assert_eq!(errno::get_errno(), errno::EOPNOTSUPP);
     }
 
     // ---- Cross-checks ----
 
     #[test]
-    fn test_clock_adjtime_phase163_tai_propagates_tick_validation() {
-        // The Phase-161 tick validation applies via TAI too — proves
-        // TAI really does forward to the same code path.
+    fn test_clock_adjtime_tai_refuses_before_validating_tx() {
+        // `do_clock_adjtime` returns EOPNOTSUPP for a clock without
+        // `clock_adj` before `tx` is looked at, so a bad tick through TAI
+        // is EOPNOTSUPP, not the tick validation's EINVAL.  (Phase 163's
+        // version of this test asserted EINVAL, to prove TAI forwarded.)
         errno::set_errno(0);
         let mut tx = Timex::zeroed();
         tx.modes = ADJ_TICK;
         tx.tick = 0;
-        let ret = clock_adjtime(11, &mut tx);
-        assert_eq!(ret, -1);
+        assert_eq!(clock_adjtime(11, &mut tx), -1);
+        assert_eq!(errno::get_errno(), errno::EOPNOTSUPP);
+        // Through REALTIME the tick validation does run.
+        errno::set_errno(0);
+        let mut tx = Timex::zeroed();
+        tx.modes = ADJ_TICK;
+        tx.tick = 0;
+        assert_eq!(clock_adjtime(0, &mut tx), -1);
         assert_eq!(errno::get_errno(), errno::EINVAL);
     }
 
@@ -1906,23 +2308,24 @@ mod tests {
             assert_eq!(errno::get_errno(), errno::EFAULT);
         }
 
-        /// Unknown mode bits → EINVAL even without cap (ntp_validate_timex
-        /// runs before the cap probe).
+        /// Unknown mode bits are a change like any other: EPERM without the
+        /// capability.  (These three asserted the opposite order until
+        /// 2026-09-26; Linux 6.6's `timekeeping_validate_timex` asks
+        /// `capable(CAP_SYS_TIME)` before it looks at any value.)
         #[test]
-        fn test_adjtimex_phase173_bad_modes_einval_beats_eperm() {
+        fn test_adjtimex_phase173_unknown_modes_eperm_without_cap() {
             let _g = CapGuard::snapshot();
             drop_cap_sys_time();
             let mut tx = Timex::zeroed();
-            // 0x8000_0000 is not a known mode bit.
             tx.modes = 0x8000_0000;
             errno::set_errno(0);
             assert_eq!(adjtimex(&mut tx), -1);
-            assert_eq!(errno::get_errno(), errno::EINVAL);
+            assert_eq!(errno::get_errno(), errno::EPERM);
         }
 
-        /// ADJ_TICK with out-of-range tick → EINVAL even without cap.
+        /// ADJ_TICK with an out-of-range tick: EPERM before its EINVAL.
         #[test]
-        fn test_adjtimex_phase173_bad_tick_einval_beats_eperm() {
+        fn test_adjtimex_phase173_eperm_beats_bad_tick() {
             let _g = CapGuard::snapshot();
             drop_cap_sys_time();
             let mut tx = Timex::zeroed();
@@ -1930,22 +2333,40 @@ mod tests {
             tx.tick = MAX_TICK + 1;
             errno::set_errno(0);
             assert_eq!(adjtimex(&mut tx), -1);
-            assert_eq!(errno::get_errno(), errno::EINVAL);
+            assert_eq!(errno::get_errno(), errno::EPERM);
         }
 
-        /// ADJ_SETOFFSET with out-of-range sub-second → EINVAL even
-        /// without cap.
+        /// ADJ_SETOFFSET with an out-of-range sub-second field: EPERM before
+        /// its EINVAL.
         #[test]
-        fn test_adjtimex_phase173_bad_setoffset_einval_beats_eperm() {
+        fn test_adjtimex_phase173_eperm_beats_bad_setoffset() {
             let _g = CapGuard::snapshot();
             drop_cap_sys_time();
             let mut tx = Timex::zeroed();
             tx.modes = ADJ_SETOFFSET;
-            // Default unit is microseconds; USEC_PER_SEC is out-of-range.
             tx.time_tv_usec = USEC_PER_SEC;
             errno::set_errno(0);
             assert_eq!(adjtimex(&mut tx), -1);
-            assert_eq!(errno::get_errno(), errno::EINVAL);
+            assert_eq!(errno::get_errno(), errno::EPERM);
+        }
+
+        /// adjtime's read needs no capability; its slew does.
+        #[test]
+        fn test_adjtime_read_needs_no_cap_but_a_slew_does() {
+            let _g = CapGuard::snapshot();
+            drop_cap_sys_time();
+            let mut tx = Timex::zeroed();
+            tx.modes = ADJ_OFFSET_SS_READ;
+            assert!(adjtimex(&mut tx) >= 0);
+            tx.modes = ADJ_OFFSET_SINGLESHOT;
+            errno::set_errno(0);
+            assert_eq!(adjtimex(&mut tx), -1);
+            assert_eq!(errno::get_errno(), errno::EPERM);
+            let mut old = crate::time::Timeval {
+                tv_sec: 0,
+                tv_usec: 0,
+            };
+            assert_eq!(adjtime(core::ptr::null(), &raw mut old), 0);
         }
 
         // -- Workflow / recovery ----------------------------------------
@@ -2074,7 +2495,7 @@ mod tests {
             assert_eq!(errno::get_errno(), errno::EPERM);
         }
 
-        // -- clock_adjtime forwarding (REALTIME/TAI inherit the gate) ----
+        // -- clock_adjtime forwarding (REALTIME inherits the gate) ----
 
         /// clock_adjtime(CLOCK_REALTIME, write) without cap → EPERM via
         /// the adjtimex forward.
@@ -2089,16 +2510,19 @@ mod tests {
             assert_eq!(errno::get_errno(), errno::EPERM);
         }
 
-        /// clock_adjtime(CLOCK_TAI, write) without cap → EPERM.
+        /// clock_adjtime(CLOCK_TAI, write) without cap → EOPNOTSUPP, as for
+        /// any clock with no `clock_adj`: the dispatch refuses before the
+        /// cap probe.  (This asserted EPERM, via a TAI forward, until
+        /// 2026-09-26.)
         #[test]
-        fn test_clock_adjtime_phase173_tai_write_no_cap_eperm() {
+        fn test_clock_adjtime_phase173_tai_write_no_cap_eopnotsupp() {
             let _g = CapGuard::snapshot();
             drop_cap_sys_time();
             let mut tx = Timex::zeroed();
             tx.modes = ADJ_OFFSET;
             errno::set_errno(0);
             assert_eq!(clock_adjtime(11 /* CLOCK_TAI */, &mut tx), -1);
-            assert_eq!(errno::get_errno(), errno::EPERM);
+            assert_eq!(errno::get_errno(), errno::EOPNOTSUPP);
         }
 
         /// clock_adjtime on a non-adjustable clock returns EOPNOTSUPP

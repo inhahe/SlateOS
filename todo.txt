@@ -4539,6 +4539,25 @@
 
 ## Judgment Calls
 
+### 2026-10-01 (lane B) — a refused power change is not forced, and the
+### service manager's method names were chosen by its clients
+
+`powerctl` used to read the service manager's answer as text and treat
+anything starting `ERR` as "not accepted" -- the same `false` as nobody
+answering -- so a refused shutdown fell through to the direct fallback and
+happened anyway. On the service bus a refusal is its own kind of reply, and
+`powerctl` now reports it and exits 1 without forcing (as `systemctl`
+does when logind refuses). Reverse in `userspace/powerctl/src/main.rs`,
+`ask_or_fall_back`, if forcing on refusal is wanted -- better as an
+explicit `--force` than as the default.
+
+The method names (`PowerOff`, `Reboot`, `Suspend`, `Hibernate`,
+`SchedulePower`, `CancelScheduledPower`; `StartService` ... `ReloadService`)
+are the interface a provider of `org.slateos.ServiceManager` must
+implement. Nothing provides it yet (known-issues.md), so they were chosen on
+the clients' side, after systemd's where one exists; whoever writes the
+provider may rename them in both clients.
+
 ### 2026-09-16 — pushed with ALLOW_STALE_RELEASE=1, and did NOT update
 ### bench/last-release-boot.json
 
@@ -7864,15 +7883,18 @@ Remaining net improvements (diminishing returns):
   always-ready per POSIX.  Polling loop uses 10ms sleep — a true epoll/
   kqueue would still be a nice optimization but not a correctness issue.
 
-- getaddrinfo() uses static storage (no heap) and returns at most one
-  result.  Not re-entrant — same as POSIX gethostbyname().
+- (DONE 2026-09-27, lane D) getaddrinfo() used static storage and returned
+  one result: it is glibc's now (known-issues.md,
+  D-POSIX-GETADDRINFO-WAS-IPV4-ONLY-AND-UNSORTED).
 
 - ioctl TCSETS/TCGETS are accepted but don't actually change terminal
   behavior (no line discipline).  Programs that set raw mode work via
   VT100 escape sequences.  Will need real terminal mode support when
   porting interactive programs (vim, less, etc.).
 
-- (DONE) stdio buffering: Replaced unbuffered FILE* sentinels with real
+- (DONE, SUPERSEDED 2026-09-27 by the rewrite in design-decisions.md §1121 --
+  the pool, the 1 KiB buffers and the stdout rule below are gone) stdio
+  buffering: Replaced unbuffered FILE* sentinels with real
   FILE structs backed by 1 KiB internal buffers.  stdout is line-buffered
   (flushes on '\n'), stderr is unbuffered, fopen'd files fully-buffered.
   Static pool of 16 FILE slots for fopen'd files.  Read-ahead buffering
@@ -7884,26 +7906,6 @@ Remaining net improvements (diminishing returns):
   because the crate targets x86_64-unknown-none.  Need a QEMU-based
   test runner or a separate host-testable crate that extracts pure
   logic functions.
-
-- (DONE 2026-05-29) crypt() real SHA-256/SHA-512 hashing: replaced the
-  insecure "$0$<key>" stub (which stored passwords in cleartext with a
-  marker prefix — any program hashing a password was effectively storing
-  the plaintext) with proper SHA-crypt ($5$ / $6$) per Ulrich Drepper's
-  spec.  New self-contained SHA-2 cores in posix/src/sha2.rs (no heap, no
-  external crate; works on target_os="none"), verified against NIST FIPS
-  180-4 vectors.  crypt.rs now parses "rounds=N$", clamps to [1000,
-  999999999], truncates salt to 16 bytes, and emits the crypt-base64
-  encoding.  Verified against the canonical Drepper $5$/$6$ test vectors.
-  Sequences P and S are fed incrementally (add_repeated) so no unbounded
-  stack/heap buffer is needed regardless of password length.
-  FOLLOW-UP (DONE 2026-05-29): MD5 crypt ($1$) now implemented too —
-  Poul-Henning Kamp's md5crypt, new MD5 core in posix/src/md5.rs (RFC
-  1321 vectors), verified against OpenSSL 3.5 `passwd -1`.  crypt() now
-  dispatches $1$/$5$/$6$.  Only legacy DES (2-char salt) remains
-  unimplemented; it returns NULL + EINVAL rather than a fake result.
-  Implement DES crypt only if a ported program must verify ancient
-  DES-format /etc/shadow entries (low priority; DES crypt is obsolete
-  and insecure).
 
 - (DONE 2026-05-30) CRITICAL stat() ABI translation bug fixed.  The kernel's
   SYS_FS_STAT/SYS_FS_LSTAT/SYS_FS_FSTAT write a compact 16-byte FsStatResult
@@ -8891,6 +8893,9 @@ Remaining net improvements (diminishing returns):
       THREAD_TABLE and report their mmap'd stack region (guard = 0, since
       pthread_create installs no guard page).  Any other thread (i.e. the
       main thread) reports the kernel main-stack geometry.
+      [2026-09-26: pthread_create now maps a guard -- one page by default --
+      and pthread_getattr_np reports it; known-issues.md
+      B-D-PTHREAD-CREATE-IGNORED-ITS-ATTRIBUTE.]
     * pthread_attr_getstack / pthread_attr_setstack: read/write the stack
       address ([16..24)) and size ([0..8)) in the opaque attr buffer.
     * pthread_attr_getguardsize / pthread_attr_setguardsize: read/write the
@@ -54887,6 +54892,19 @@ FAILs).  Reversible (pure translator change; no PCB/state).
 ##   "revisit if/when" clauses, and the "### How to reverse" heading form
 ##   (about 30 entries) which the bolded-label grep does not match.
 ##
+##   TRACKED FROM BIRTH (lane B, 2026-10-01): S1054 -- logind serves a thread
+##   per client because a completion port is neither woken by channel sends
+##   nor able to wait on a listener. Its reversing condition is BOTH of:
+##   lane F's requests/f-a-a-channel-handle-...md point 4 (channel::send
+##   notifies the ports that registered the channel) AND
+##   requests/b-a-a-server-cannot-wait-for-a-new-client-and-its-clients-at-once.md
+##   (a listener wait source). Falsifier: a `completion::notify` call in
+##   kernel/src/ipc/channel.rs's send path, and a `Listener` arm in
+##   handlers.rs's `encode_event`. When both exist: libservicebus gets
+##   SourceType::Listener + EventLoop::register_listener, logind's serve goes
+##   back to one event loop, known-issues B-LOGIND-SERVES-A-THREAD-PER-CLIENT-...
+##   closes.
+##
 ##   AUDIT PASS 2026-08-18 (lane A) -- IN PROGRESS, resumable. Findings so far:
 ##   * S59 (GPU accel scope, Q18): PREMISE HAS FIRED. It defers the Mesa port
 ##     "until a virgl test environment exists"; one exists and always did. The
@@ -56560,14 +56578,47 @@ failed; no session started" instead of being let in with a warning. That is the
 correct behaviour for an expired password and the wrong reason for it, so if it
 shows up, check setuid before changing this code.
 
+## Games: read every word under themes that leave no room (lane E, 2026-09-28) -- NEXT
+
+The games' legibility tests read the four stock looks (light and dark, bordered
+and card). Those palettes' text and hues read on every ground a game fills
+itself -- a raised panel, a well, a board, a score track -- with room to
+spare, so a word a game forgot to move for such a ground passes. A user's
+theme need not leave that room: `Palette::ink` holds a theme's text colours to
+4.5:1 on the palette's own text grounds (the page, and under the card look the
+card grounds) and no further. Found by the sweep: reversi's score counts are
+moved for their track (`Chrome::on(lit)`) and no stock look can tell -- the
+row "the score bar's counts are the page's text on its track" was dropped
+from `apps/reversi/mutate.py` for now, to come back with this.
+
+What it wants: a list of such themes in `gamechrome::legibility` (soft text,
+light and dark -- a mid grey the palette moves only as far as the page needs,
+as Solarized's `#657b83`; pale hues on light; deep hues on dark; each in both
+surface looks), read by every game's legibility test beside the stock looks,
+and every word it finds moved for the ground it is on (`Chrome::on`,
+`gamechrome::Ink::on`). Not needed for the toolkit's own panel, where the
+palette's inks read as they are (known-issues, "[E] Text on a panel an
+application fills itself").
+
 ## C-Q17: what is left of "wire the five up" (lane E, 2026-09-27)
 
 The operator answered C-Q17 (lane C's design-decisions §1423): the five
 finished-but-unreachable features are wired up, and where a live twin exists
 the survivor takes everything both could do. State, measured 2026-09-27:
 
-* installer bootloader setup -- wired (known-issues
-  `TD-C-THE-INSTALLER-RECORDS-A-GRUB-PATH-NOTHING-EVER-READS`, fixed 09-25).
+* installer bootloader setup -- **wired 2026-09-28.** (The line here said
+  "wired" on 09-25, when two dead fields had been deleted from `grub.rs`
+  (known-issues `TD-C-THE-INSTALLER-RECORDS-A-GRUB-PATH-NOTHING-EVER-READS`);
+  nothing reached the module until 09-28.) A configuration's `bootloader:`
+  section chooses Limine or a GRUB entry, which the plan adds after Limine;
+  `installer --grub-detect`, `--grub-add`, `--grub-update` and
+  `--grub-remove` find a GRUB and write, rewrite or remove its
+  `/etc/grub.d/40_slateos`, rebuilding the running system's menu and reading
+  it back (another system's root is left for that system to rebuild). The
+  entry chainloads Limine: GRUB loading the kernel itself waits on a
+  multiboot2 header (known-issues `[E] GRUB cannot load the kernel itself`).
+  What is still missing is the installer's executor -- every step of an
+  install, this one included, is a dry run that prints what it would do.
 * system information's hardware queries -- wired (fixed 09-15).
 * image viewer's video -- the code is gone; `apps/videoplayer` is the live
   twin and had everything it did.
@@ -58802,6 +58853,19 @@ test of the fixture, not of the bound.
   wants reformatting, it belongs in an explicit "Format document" command;
   reversing this is the one `as_bytes()` in each save function.
 
+- **Minesweeper's level chip is the toolkit's button, and loses the level's
+  colour.** (2026-09-28, `apps/minesweeper/src/main.rs` -> `chip`, and
+  `every_difficulty_has_its_own_name`.) The chip was a raised slab with the
+  level's name in its colour (Beginner green, Intermediate yellow, Expert
+  red), which read at 3.6:1 in the light theme. The operator's polish ask
+  for C-Q16 names the toolkit's buttons for a game's chrome, and a toolkit
+  button writes its label in the toolkit's ink, so the colour went with the
+  slab; the level is still named on its button and in the header's line.
+  The alternative -- keep the slab and ink its word for it
+  (`gamechrome::Ink`) -- keeps the colour at the cost of the one chrome
+  control in the games that is not the toolkit's. Reversing it is the
+  `chip` function and a `Difficulty::color` again.
+
 ### Deferred, each with the condition that un-defers it
 
 - **`apps/textline` can go.** Lane C extended `guitk::textinput::TextInput`
@@ -59027,20 +59091,98 @@ is already waiting, not whether the setter exists.
   design-decisions §1302). A fixed vblank-aligned grid would not drift, but the
   kernel sends no flip event to align to; revisit when it does.
 
-## Lane C — the toolkit's font cache follows the hinting setting (2026-09-26)
+## Lane B — Judgment Calls (lsblk port, 2026-09-27)
 
-- **Wire `FontSettings::hinting` into the toolkit's own `FontCache`.** Lane F
-  made hinting live in the compositor (lane-f 98dff3b7b, a port of FreeType's
-  light auto-hinter, on by default through the compositor's settings mapping).
-  Text the toolkit rasterizes itself -- into an application's own buffers --
-  is still drawn unhinted, so at small sizes it looks slightly different from
-  the same text drawn by the compositor. The fix: a
-  `guitk::text::set_rendering(hinting)` that calls
-  `FontCache::set_rendering(Rendering { hinting, .. })` on the process cache,
-  called from `appearance::FontSettings::apply` beside `set_font_family`, with
-  a test that the setting reaches the cache. **Trigger:** 98dff3b7b (the
-  `Rendering` type and `FontCache::set_rendering`) is on origin/main -- it
-  cannot be referenced before then. Told by lane F, 2026-09-26.
+### lsblk asks udev only where udev runs (lane B, 2026-09-27)
+- **What:** `userspace/lsblk/src/props.rs` (`udev_is_running`) reads a
+  device's FSTYPE/LABEL/UUID/... from udev's database only when
+  `/run/udev/data` is a directory; otherwise it goes straight to libblkid
+  (`ulblkid`, root only).
+- **Why:** upstream is built with libudev, whose device lookup succeeds from
+  sysfs alone -- so on a system without udev every device gets properties,
+  all empty, and libblkid is never asked: `lsblk -f` is blank. util-linux
+  built without libudev asks libblkid instead. SlateOS has no udev; the WSL
+  reference runs one. Keying on udev's database gives upstream-with-libudev
+  wherever udev runs (what `scripts/lsblk-diff.sh` measures) and
+  upstream-without-libudev where it does not (SlateOS).
+- **Where it differs from upstream:** only on a Linux system with libudev but
+  no udevd (a container), where upstream shows empty properties and this
+  probes. To reverse: drop the `udev_is_running()` test in
+  `get_properties_by_udev`.
+## Lane D — POSIX, libc & toolchain
+
+- **crypt: libxcrypt's other methods** (posix/src/crypt.rs).  Only $1$, $5$
+  and $6$ hash; every other setting gets the failure token "*0" with EINVAL,
+  as libxcrypt answers for a method it lacks.  Ubuntu 24.04's libxcrypt has,
+  probed 2026-09-26: traditional DES (two-character salt), BSDi DES ("_"),
+  bcrypt ($2b$), scrypt ($7$), yescrypt ($y$), gost-yescrypt ($gy$),
+  sha1crypt ($sha1$), SunMD5 ($md5$) and NT ($3$), and real DES behind
+  encrypt/setkey (compat symbols there; ours answer ENOSYS).  yescrypt comes
+  first: it is Ubuntu's default for new passwords, so an /etc/shadow brought
+  from Ubuntu does not verify here.  Port from libxcrypt 4.4.36 (source in
+  D:\refsrc\libxcrypt-4.4.36), per design-decisions.md §539: primitives
+  ported, not written.  (Replaces the DES follow-up of the 2026-05-29
+  crypt entry, deleted as done.)
+
+- **iconv: glibc's other character sets** (posix/src/iconv.rs).  UTF-8,
+  ASCII, ISO-8859-1, UTF-16, UTF-32, UCS-2, UCS-4, UNICODE, WCHAR_T, UTF-7
+  and UTF-7-IMAP, glibc's 141 table-driven 8-bit sets
+  (posix/src/iconv_8bit.rs, generated from glibc's charmaps by
+  posix/tools/gen_iconv_8bit.py), and CP1255, CP1258 and TCVN5712-1
+  (posix/src/iconv_combining.rs, read out of glibc's cp1255.c, cp1258.c
+  and tcvn5712-1.c by posix/tools/gen_iconv_combining.py) convert as glibc
+  2.39's (B-D-ICONV-HAD-THREE-CHARSETS), and since 2026-09-28 the 25
+  single-byte sets glibc writes by hand whose converters are their
+  charmaps -- iso646.c's 23 national variants, ISO_11548-1 and ARMSCII-8
+  (iconv_8bit.rs, checked against glibc's own converters by
+  posix/tools/oracle/iconv_hand_harness.py), the two-byte-diacritic sets
+  T.61, ISO_6937, ISO_6937-2 and ANSI_X3.110 (iconv_prefix.rs, read out of
+  glibc's running converters by posix/tools/gen_iconv_prefix.py), and
+  TSCII (iconv.rs: glibc's tscii.c, but for three bugs it has where the
+  output runs out, which that section lists), and the 55 single-byte sets
+  glibc builds from table headers of its own -- IBM's EBCDIC and PC code
+  pages past the generated ones, CP737, CP775, ISIRI-3342 (iconv_8bit.rs,
+  read from iconvdata's headers by gen_iconv_8bit.py and checked against
+  glibc's converters by iconv_hand_harness.py); every other name is
+  refused with EINVAL.  That is every single-byte set glibc has.  Next:
+  the multibyte sets -- IBM's double-byte EBCDIC ones (IBM930 ...) and
+  the East Asian ones (EUC-JP,
+  SHIFT_JIS, EUC-KR, GBK/GB18030, BIG5, ISO-2022-JP), whose tables run to
+  megabytes -- and whose size in every program that links iconv is its own
+  question (design-decisions.md §1117).  A new set is a Charset variant, a
+  decoder and an encoder in its glibc module's check order (glibc 2.39's
+  source is in D:\refsrc\glibc-2.39), and its names from
+  iconvdata/gconv-modules* -- each probed against Ubuntu before it is
+  trusted, as the module docs say.  The `iconv` program (userspace/iconv,
+  lane B) converts with tables of its own; the libc now has every set it
+  knows, so it can be glibc's iconv_prog over the libc's iconv -- asked in
+  requests/d-b-the-iconv-program-can-run-on-the-libc.md.
+
+- **tmpfile: unlink at once, as glibc does, when the kernel allows it**
+  (posix/src/stdlib.rs `tmpfile`, posix/src/stdio.rs `hold_temporary`).
+  tmpfile keeps `/tmp/tmpfXXXXXX` until the stream lets go of the file
+  (fclose, freopen onto another, exit) because this kernel's descriptors
+  re-resolve their file's name on every read and write
+  (kernel/src/fs/handle.rs), so unlinking an open file loses it, and
+  O_TMPFILE is refused (posix/src/file.rs) -- design-decisions.md §1151,
+  known-issues.md D-POSIX-TMPFILE-WAS-NEVER-REMOVED-AND-MKSTEMP-WAS-NOT-GLIBCS.
+  Asked of lane A: requests/d-a-an-unlinked-open-file-is-lost-to-its-own-descriptor.md.
+  Trigger and fix: descriptors that outlive their names -> unlink right
+  after gen_tempname in tmpfile and drop hold_temporary; or a nameless
+  SYS_FS_TMPFILE -> lift open()'s EOPNOTSUPP guard for O_TMPFILE, and
+  tmpfile uses it unchanged (it is tried first).
+
+- **The C fixtures onto the generic rung, one at a time, once lane A's rung
+  is in** (services/ctest-generic.list).  Asked in
+  requests/d-a-one-rung-for-every-c-fixture.md, whose table gives each
+  fixture's grant and time limit.  When the rung is on main: merge it, then
+  for each of ctest-obstack, ctest-aio, ctest-cxx-throw, ctest-eintr,
+  ctest-fortify-abort, ctest-printf-streams, ctest-pthread, ctest-stdio,
+  ctest-sysvipc and ctest-ucontext -- and ctest-cwd-umask once the kernel
+  half of design-decisions.md §960 is in -- add its line, boot, fix what
+  fails, publish, and close the fixture's own requests/d-a-run-*.md.  A
+  fixture goes on only after a lane D boot has seen it pass, so that no
+  other lane's boot meets it failing first.
 
 ## Lane C — the start menu's Shut down button waits for programs to be asked to save (2026-09-26)
 
@@ -59066,27 +59208,6 @@ is already waiting, not whether the setter exists.
   object, before a shutdown or log out. Then: split `power_button_rect` into
   the main part (runs `PowerChoice::ShutDown`) and a caret (opens the power
   menu), with the menu's own list unchanged.
-
-## Lane C — C-Q11's measurement, under the machine's normal load (2026-09-27)
-
-- **Open.** The operator left C-Q11 (whether to check that every crate still
-  builds before a merge) to lane C, asking that the check's cost be measured
-  **while the machine carries its normal load** -- today that means all six
-  lanes and the operator's other projects running, which is heavier than when
-  the earlier figures (15-49 s) were taken -- and set against the time the
-  check has saved, or would have. A first attempt on 2026-09-27 was stopped
-  because the other lanes were down at the time, so it would have measured the
-  light case.
-  **Trigger:** the lanes are running again. **Then:** in `os-lane-c` (its own
-  target directory), time a warm-up `cargo check --workspace --target
-  x86_64-pc-windows-gnu` (not the gate's cost -- a gate runs warm), a no-op
-  check, a check after touching `gui/toolkit/src/lib.rs` (`guitk`, 144
-  dependents) and one after touching `quoting`'s (773 dependents, the widest
-  crate), sampling the CPU load alongside each; repeat at two or three times of
-  day; count, from `git log` and `known-issues.md`, the compile breaks
-  that reached `main` and what each cost the lanes that inherited it (a boot is
-  now about 2.5 hours); decide, and write the decision up as a
-  `design-decisions.md` entry (Decided by: Claude, operator-approved scope).
 
 ## Lane C — automatic sign-in: the chooser key and the start for repair (2026-09-27)
 

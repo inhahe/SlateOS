@@ -1,2174 +1,2190 @@
-//! C math library functions (`<math.h>`).
+//! C math library functions (`<math.h>`): musl's libm, through rust-lang's
+//! `libm` crate, with glibc's error reporting.
 //!
-//! Provides software implementations of common math functions for
-//! `no_std` environments.  These are not high-performance — programs
-//! needing fast math should use SIMD or FPU-optimized versions.
+//! ## Where the answers come from
 //!
-//! ## Implemented Functions
+//! Every function here is a C entry point over [`libm`] -- the crate
+//! `compiler-builtins` uses to give Rust's own float methods a libm where the
+//! platform has none, and a line-for-line port of musl's libm (itself
+//! FreeBSD's msun, fdlibm's descendant), tested upstream against MPFR. It is
+//! vendored exactly as crates.io publishes it, in `posix/vendor/libm`
+//! (`posix/vendor/README.md` has the version and checksum).
 //!
-//! - `fabs`, `fabsf` — absolute value
-//! - `floor`, `floorf`, `ceil`, `ceilf` — rounding
-//! - `round`, `roundf`, `trunc`, `truncf` — rounding
-//! - `rint`, `rintf`, `nearbyint`, `nearbyintf` — round to nearest (ties to even)
-//! - `lround`, `lroundf`, `llround`, `llroundf` — float→integer
-//! - `lrint`, `lrintf` — float→integer (ties to even)
-//! - `fmod`, `fmodf` — floating-point remainder (truncated)
-//! - `remainder`, `remainderf` — IEEE 754 remainder (rounded)
-//! - `sqrt`, `sqrtf` — square root (Newton's method)
-//! - `cbrt`, `cbrtf` — cube root
-//! - `hypot`, `hypotf` — Euclidean distance
-//! - `pow`, `powf` — power (via exp/log)
-//! - `log`, `logf`, `log2`, `log2f`, `log10`, `log10f` — logarithms
-//! - `log1p`, `log1pf` — log(1+x) accurate for small x
-//! - `exp`, `expf`, `exp2`, `exp2f` — exponential
-//! - `expm1`, `expm1f` — exp(x)-1 accurate for small x
-//! - `sin`, `sinf`, `cos`, `cosf`, `tan`, `tanf` — trigonometry
-//! - `asin`, `asinf`, `acos`, `acosf`, `atan`, `atanf` — inverse trig
-//! - `atan2`, `atan2f` — two-argument arctangent
-//! - `sinh`, `sinhf`, `cosh`, `coshf`, `tanh`, `tanhf` — hyperbolic
-//! - `asinh`, `asinhf`, `acosh`, `acoshf`, `atanh`, `atanhf` — inverse hyperbolic
-//! - `frexp`, `frexpf`, `ldexp`, `ldexpf`, `modf`, `modff` — decomposition
-//! - `scalbn`, `scalbnf`, `scalbln`, `scalblnf` — scale by power of 2
-//! - `ilogb`, `ilogbf`, `logb`, `logbf` — exponent extraction
-//! - `isnan`, `isinf`, `isfinite` — classification
-//! - `copysign`, `copysignf` — sign manipulation
-//! - `nextafter`, `nextafterf` — adjacent representable value
-//! - `fmin`, `fmax`, `fminf`, `fmaxf` — min/max
-//! - `fdim`, `fdimf` — positive difference
-//! - `fma`, `fmaf` — fused multiply-add
-//! - `remquo`, `remquof` — IEEE remainder with quotient bits
-//! - `nan`, `nanf` — quiet NaN
-//! - `erf`, `erff`, `erfc`, `erfcf` — error function
-//! - `lgamma`, `lgammaf`, `lgamma_r`, `lgammaf_r` — log-gamma
-//! - `tgamma`, `tgammaf` — true gamma function
-//! - `sincos`, `sincosf` — simultaneous sin/cos
-//! - `exp10`, `exp10f`, `pow10`, `pow10f` — base-10 exponential
-//! - `j0`, `j1`, `jn` — Bessel functions (first kind)
-//! - `y0`, `y1`, `yn` — Bessel functions (second kind)
-//! - `finite`, `significand`, `drem`, `gamma` — deprecated aliases
+//! Until 2026-09-27 this file wrote its own: `sqrt` by Newton's method, `sin`
+//! reduced by `fmod(x, 2*pi)` (so `sin(1e22)` was noise), `exp` saturating at
+//! |x| = 709 (the true limits are 709.78 above and -745.13 below), `round` as
+//! `floor(x + 0.5)` (`round(0.49999999999999994)` was 1), `fma` as `x*y + z`
+//! with two roundings, `ldexp` truncating subnormal results, and "accurate to
+//! roughly 10-15 digits", as its own documentation said. Every Rust program on
+//! SlateOS reached them too: with no SSE4.1 or FMA on the baseline, `f64::sin`,
+//! `f64::round` and `f64::mul_add` compile to calls to these symbols
+//! (`requests/e-d-libc-round-is-wrong-just-below-a-half-and-past-2-52.md`).
+//! design-decisions §1132 records why a port, and why this one.
 //!
-//! ## Accuracy
+//! ## errno: glibc's
 //!
-//! These use polynomial/Taylor approximations and are accurate to
-//! roughly 10-15 digits for `f64`, 5-7 digits for `f32`.  Edge cases
-//! (NaN, infinity, denormals) are handled but not exhaustively tested.
+//! glibc reports a math error in `errno` as well as in the floating-point
+//! flags (`math_errhandling` is `MATH_ERRNO | MATH_ERREXCEPT`); musl, and so
+//! the crate, only in the flags. This library answers as glibc does, and each
+//! function's rule is glibc 2.39's wrapper for it -- `math/w_*_template.c`,
+//! or where the double implementation sets `errno` itself
+//! (`sysdeps/ieee754/dbl-64/w_exp.c` says "Not needed"), the implementation:
+//!
+//! | Error | `errno` | Example |
+//! |---|---|---|
+//! | domain: no defined result | `EDOM` | `log(-1)`, `sqrt(-1)`, `acos(2)`, `sin(inf)`, `fmod(x, 0)` |
+//! | pole: an exact infinity from a finite argument | `ERANGE` | `log(0)`, `atanh(1)`, `lgamma(-2)`, `pow(0, -1)` |
+//! | overflow | `ERANGE` | `exp(710)`, `cosh(711)`, `ldexp(1, 2000)` |
+//! | underflow to zero | `ERANGE` | `exp(-746)`, `pow(2, -1076)` |
+//!
+//! `errno` is only ever set, never cleared: a caller that wants to know clears
+//! it first, as C requires. The crate raises the IEEE flags as musl does, and
+//! `fetestexcept` (`fenv.rs`) reads them.
+//!
+//! ## Every rounding direction
+//!
+//! A program may round in any of four directions (`fesetround`), and each
+//! function must still answer within its error in all four. musl writes for
+//! round-to-nearest, and replaying glibc in the three others
+//! (`math_modes_oracle.txt`) found three ways that fails:
+//!
+//! - **Argument reduction.** musl's `__rem_pio2` rounds `x / (pi/2)` to an
+//!   integer by adding and subtracting 1.5 * 2^52, which rounds in the
+//!   caller's direction instead, and hands the polynomial after it an
+//!   argument outside the interval it was fitted on: `sin(pi)` rounding
+//!   upward was 2.3e-11. Every sine, cosine and tangent, and every Bessel
+//!   function (whose asymptotic forms call them), is computed to nearest
+//!   ([`crate::fenv::in_nearest`]) and so answers in every direction what it
+//!   answers to nearest -- as glibc's own `sin`, `cos` and `tan` do.
+//! - **Overflow and underflow.** musl rounds them its own way: its `exp`
+//!   answers 0 below -745.13 in every direction, where upward rounding owes
+//!   the least subnormal, and its `sinh` rounds the magnitude and then
+//!   negates it, so downward an overflow to -inf came out -DBL_MAX.
+//!   [`ranged`] answers every overflow and underflow as IEEE 754 prescribes
+//!   for the direction: an infinity or the largest finite value, zero or the
+//!   least subnormal.
+//! - **Signed zeros.** Rounding downward, `x - x` is -0: musl's `acosh(1)`
+//!   was -0 (C's Annex F says +0) and `atanh(1)` a NaN, `2 / -0` being -inf.
+//!   Both are answered before the algorithm starts.
+//!
+//! **`errno` does not depend on the direction.** A range error is decided on
+//! the round-to-nearest result -- the one glibc's rules above were written
+//! for -- so `exp(1000)` sets `ERANGE` whether it answers `inf` (to nearest,
+//! upward) or `DBL_MAX` (downward, toward zero). glibc is not consistent
+//! here: its `exp` sets `ERANGE` for `DBL_MAX` past |x| = 1024 but not below,
+//! its `ldexp` never for `DBL_MAX`, and its `tgamma(-190.5)` rounding
+//! downward answers the least subnormal without one where to nearest the
+//! same call answers -0 with it. C leaves `errno` in the directed modes to
+//! the implementation (7.12.1 specifies overflow's only "when default
+//! rounding is in effect", and underflow's is implementation-defined
+//! throughout); one rule for all four is the choice here.
+//!
+//! ## Tested against glibc
+//!
+//! The tests replay 23,545 calls to glibc 2.39 under WSL
+//! (`posix/tools/oracle/math_harness.py`, table `math_oracle.txt`): bit for bit, with
+//! `errno`, for everything IEEE fixes exactly (rounding, `fma`, `sqrt`,
+//! `fmod`, `ldexp`, `frexp`, `nextafter` ...), and within a stated distance in
+//! units in the last place for the rest, where glibc and musl use different
+//! approximations and neither is exact. They replay the same calls in each
+//! directed rounding mode too (`math_modes_harness.py`, table
+//! `math_modes_oracle.txt`: the 12,103 of 70,635 answers that differ from
+//! nearest), within one ulp more, and with the four exceptions
+//! `directed_answer` in the tests lists -- the `errno` rule above, and three
+//! places where glibc's directed answer is not IEEE's.
 
-use core::f64::consts;
+use crate::errno;
+use core::sync::atomic::{AtomicI32, Ordering};
+
+#[inline]
+fn set(e: i32) {
+    errno::set_errno(e);
+}
 
 // ---------------------------------------------------------------------------
-// Constants
+// Range errors, in every rounding direction
 // ---------------------------------------------------------------------------
 
-const PI: f64 = consts::PI;
-const HALF_PI: f64 = consts::FRAC_PI_2;
-const QUARTER_PI: f64 = consts::FRAC_PI_4;
-const TWO_PI: f64 = consts::TAU;
-const LN2: f64 = consts::LN_2;
-const LN10: f64 = consts::LN_10;
-const LOG2E: f64 = consts::LOG2_E;
+/// Where a function's result lies against the range of its type, judged on
+/// its round-to-nearest value ([`ranged`]).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) enum Range {
+    /// In range; or exactly an infinity or a zero (a pole, `pow(0, 2)`), or
+    /// not a number. No range error.
+    Within,
+    /// Beyond the largest finite value: an infinity to nearest.
+    Overflow,
+    /// Too small for the least subnormal: a zero to nearest.
+    Underflow,
+}
 
-/// Special value constants.
+/// What [`ranged`] needs of a floating-point type: `f64` and `f32` here,
+/// which compute in the SSE unit, and `long double` in `mathl.rs`, which
+/// computes in the x87 unit -- each with its own rounding direction.
+pub(crate) trait Real: Copy {
+    /// Whether a result is where the rounding direction can decide between a
+    /// range error and none: within a factor of 2 of the largest finite
+    /// value, or below twice the least normal one (zero included). An
+    /// infinity is; a NaN is not.
+    fn at_the_edge(self) -> bool;
+    /// Whether it is a zero, of either sign.
+    fn is_zero(self) -> bool;
+    /// Whether it is an infinity, of either sign.
+    fn is_inf(self) -> bool;
+    /// Whether the unit the type computes in rounds to nearest.
+    fn unit_rounds_to_nearest() -> bool;
+    /// `f(args)` with that unit rounding to nearest
+    /// ([`crate::fenv::in_nearest`], [`crate::fenv::in_nearest_x87`]).
+    fn to_nearest<A>(args: A, f: impl FnOnce(A) -> Self) -> Self;
+    /// An overflow with `sign`'s sign, rounded in the current direction: the
+    /// largest finite value times itself -- an infinity, or the largest
+    /// finite value where the direction rounds toward zero -- with the
+    /// overflow and inexact flags the multiplication raises.
+    fn overflow(sign: Self) -> Self;
+    /// An underflow with `sign`'s sign too small for the least subnormal,
+    /// rounded in the current direction: a tiny power of two times itself --
+    /// zero, or the least subnormal where the direction rounds away from
+    /// zero -- with the underflow and inexact flags.
+    fn underflow(sign: Self) -> Self;
+}
+
+impl Real for f64 {
+    fn at_the_edge(self) -> bool {
+        let a = self.abs();
+        // 2^-1021 and 2^1023.
+        a < f64::from_bits(0x0020_0000_0000_0000) || a >= f64::from_bits(0x7FE0_0000_0000_0000)
+    }
+
+    fn is_zero(self) -> bool {
+        self == 0.0
+    }
+
+    fn is_inf(self) -> bool {
+        self.is_infinite()
+    }
+
+    fn unit_rounds_to_nearest() -> bool {
+        crate::fenv::sse_rounds_to_nearest()
+    }
+
+    fn to_nearest<A>(args: A, f: impl FnOnce(A) -> Self) -> Self {
+        crate::fenv::in_nearest(args, f)
+    }
+
+    fn overflow(sign: f64) -> f64 {
+        // `black_box` keeps the product from being folded at compile time,
+        // where it would round to nearest.
+        core::hint::black_box(f64::MAX).copysign(sign) * core::hint::black_box(f64::MAX)
+    }
+
+    fn underflow(sign: f64) -> f64 {
+        // 2^-600, whose square 2^-1200 is far below the least subnormal.
+        let tiny = core::hint::black_box(f64::from_bits(0x1A70_0000_0000_0000));
+        tiny.copysign(sign) * tiny
+    }
+}
+
+impl Real for f32 {
+    fn at_the_edge(self) -> bool {
+        let a = self.abs();
+        // 2^-125 and 2^127.
+        a < f32::from_bits(0x0100_0000) || a >= f32::from_bits(0x7F00_0000)
+    }
+
+    fn is_zero(self) -> bool {
+        self == 0.0
+    }
+
+    fn is_inf(self) -> bool {
+        self.is_infinite()
+    }
+
+    fn unit_rounds_to_nearest() -> bool {
+        crate::fenv::sse_rounds_to_nearest()
+    }
+
+    fn to_nearest<A>(args: A, f: impl FnOnce(A) -> Self) -> Self {
+        crate::fenv::in_nearest(args, f)
+    }
+
+    fn overflow(sign: f32) -> f32 {
+        core::hint::black_box(f32::MAX).copysign(sign) * core::hint::black_box(f32::MAX)
+    }
+
+    fn underflow(sign: f32) -> f32 {
+        // 2^-100, whose square 2^-200 is far below the least subnormal.
+        let tiny = core::hint::black_box(f32::from_bits(0x0D80_0000));
+        tiny.copysign(sign) * tiny
+    }
+}
+
+/// `f(args)`, with its range error reported as `ERANGE` -- the one `range`
+/// finds in its round-to-nearest value, or in the value it answers -- and an
+/// overflow or underflow answered as the rounding direction gives the exact
+/// result.
+///
+/// To nearest -- the default, and all but every call -- this is `f` and two
+/// comparisons: only a result at an end of the range ([`Real::at_the_edge`])
+/// is judged at all, and it is its own round-to-nearest value. In another
+/// direction such a result is also judged on `f(args)` computed again to
+/// nearest ([`Real::to_nearest`]) -- the module documentation says why --
+/// and where that overflows or underflows to zero, the answer is
+/// [`Real::overflow`] or [`Real::underflow`]: an infinity or the largest
+/// finite value, zero or the least subnormal, as IEEE 754 prescribes for the
+/// direction, in place of whatever the algorithm's own arithmetic made of
+/// it.
+///
+/// `range` must answer `Underflow` only for a zero.
+pub(crate) fn ranged<A: Copy, R: Real>(
+    args: A,
+    f: impl Fn(A) -> R,
+    range: impl Fn(R) -> Range,
+) -> R {
+    let (r, error) = saturated(args, f, range);
+    if error {
+        set(errno::ERANGE);
+    }
+    r
+}
+
+/// [`ranged`] without the `errno`: the answer, and whether it is a range
+/// error. For the functions that report no range error of their own but are
+/// built from ones that do -- the complex functions, whose `sinh` must still
+/// answer an overflow as the direction rounds it.
+pub(crate) fn saturated<A: Copy, R: Real>(
+    args: A,
+    f: impl Fn(A) -> R,
+    range: impl Fn(R) -> Range,
+) -> (R, bool) {
+    let r = f(args);
+    if !r.at_the_edge() {
+        return (r, false);
+    }
+    if R::unit_rounds_to_nearest() {
+        return (r, range(r) != Range::Within);
+    }
+    let near = R::to_nearest(args, &f);
+    match range(near) {
+        // In range to nearest, but perhaps not as rounded here: DBL_MAX + 1
+        // rounded upward is an infinity, the least subnormal times 0.9
+        // rounded downward zero.
+        Range::Within => (r, range(r) != Range::Within),
+        Range::Overflow => (R::overflow(near), true),
+        Range::Underflow => (
+            if near.is_zero() {
+                R::underflow(near)
+            } else {
+                r
+            },
+            true,
+        ),
+    }
+}
+
+/// The range of a result that overflows to an infinity and underflows to
+/// zero from finite arguments and is never exactly either: `exp`, `exp2`,
+/// `exp10` (glibc's `w_exp_template.c`, and the double implementations'
+/// `__math_oflow` and `__math_uflow`), `ldexp` and its kin (`w_scalbn`).
+pub(crate) fn overflow_or_underflow<R: Real>(args_finite: bool, r: R) -> Range {
+    if !args_finite {
+        Range::Within
+    } else if r.is_inf() {
+        Range::Overflow
+    } else if r.is_zero() {
+        Range::Underflow
+    } else {
+        Range::Within
+    }
+}
+
+/// The range of a result that can overflow but not underflow: an infinity
+/// from finite arguments (`expm1`, `sinh`, `cosh`, `hypot`).
+pub(crate) fn overflow_only<R: Real>(args_finite: bool, r: R) -> Range {
+    if args_finite && r.is_inf() {
+        Range::Overflow
+    } else {
+        Range::Within
+    }
+}
+
+/// The range of a result that can underflow but not overflow: a zero where
+/// the function is not zero (`erfc`, `atan2`, the Bessel `j`s).
+pub(crate) fn underflow_only(underflowed: bool) -> Range {
+    if underflowed {
+        Range::Underflow
+    } else {
+        Range::Within
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Exact functions: IEEE fixes the answer
+// ---------------------------------------------------------------------------
+
+/// `|x|`.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
-pub static HUGE_VAL: f64 = f64::INFINITY;
-#[cfg_attr(target_os = "none", unsafe(no_mangle))]
-pub static HUGE_VALF: f32 = f32::INFINITY;
-
-// ---------------------------------------------------------------------------
-// Absolute value
-// ---------------------------------------------------------------------------
-
-#[cfg_attr(target_os = "none", unsafe(no_mangle))]
-#[allow(clippy::arithmetic_side_effects)]
 pub extern "C" fn fabs(x: f64) -> f64 {
-    // Bit manipulation handles -0.0 correctly (IEEE 754: -0.0 < 0.0 is false,
-    // so a comparison-based approach would return -0.0 unchanged).
-    f64::from_bits(x.to_bits() & 0x7FFF_FFFF_FFFF_FFFF)
+    libm::fabs(x)
 }
 
+/// `|x|` (float).
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
-#[allow(clippy::arithmetic_side_effects)]
 pub extern "C" fn fabsf(x: f32) -> f32 {
-    f32::from_bits(x.to_bits() & 0x7FFF_FFFF)
+    libm::fabsf(x)
 }
 
-// ---------------------------------------------------------------------------
-// Rounding
-// ---------------------------------------------------------------------------
-
+/// `|x|` with `y`'s sign.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
-#[allow(clippy::cast_precision_loss)]
+pub extern "C" fn copysign(x: f64, y: f64) -> f64 {
+    libm::copysign(x, y)
+}
+
+/// `|x|` with `y`'s sign (float).
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub extern "C" fn copysignf(x: f32, y: f32) -> f32 {
+    libm::copysignf(x, y)
+}
+
+/// glibc's internal name for [`copysign`], which old binaries import.
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub extern "C" fn __copysign(x: f64, y: f64) -> f64 {
+    libm::copysign(x, y)
+}
+
+/// The largest integer not above `x`.
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn floor(x: f64) -> f64 {
-    if x.is_nan() || x.is_infinite() {
-        return x;
-    }
-    // Preserve ±0.0 (IEEE 754 / POSIX: floor(-0.0) = -0.0).
-    if x == 0.0 {
-        return x;
-    }
-    // All f64 values with |x| >= 2^52 are already exact integers;
-    // casting them to i64 would saturate and corrupt the value.
-    if x >= 4_503_599_627_370_496.0 || x <= -4_503_599_627_370_496.0 {
-        return x;
-    }
-    let i = x as i64;
-    let f = i as f64;
-    if x < f { f - 1.0 } else { f }
+    libm::floor(x)
 }
 
+/// The largest integer not above `x` (float).
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
-#[allow(clippy::cast_precision_loss)]
 pub extern "C" fn floorf(x: f32) -> f32 {
-    if x.is_nan() || x.is_infinite() {
-        return x;
-    }
-    if x == 0.0 {
-        return x;
-    }
-    // All f32 values with |x| >= 2^23 are already exact integers.
-    if x >= 8_388_608.0 || x <= -8_388_608.0 {
-        return x;
-    }
-    let i = x as i32;
-    let f = i as f32;
-    if x < f { f - 1.0 } else { f }
+    libm::floorf(x)
 }
 
+/// The smallest integer not below `x`; `ceil(-0.3)` is `-0.0`.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
-#[allow(clippy::cast_precision_loss)]
 pub extern "C" fn ceil(x: f64) -> f64 {
-    if x.is_nan() || x.is_infinite() {
-        return x;
-    }
-    if x == 0.0 {
-        return x;
-    }
-    if x >= 4_503_599_627_370_496.0 || x <= -4_503_599_627_370_496.0 {
-        return x;
-    }
-    let i = x as i64;
-    let f = i as f64;
-    if x > f { f + 1.0 } else { f }
+    libm::ceil(x)
 }
 
+/// The smallest integer not below `x` (float).
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
-#[allow(clippy::cast_precision_loss)]
 pub extern "C" fn ceilf(x: f32) -> f32 {
-    if x.is_nan() || x.is_infinite() {
-        return x;
-    }
-    if x == 0.0 {
-        return x;
-    }
-    if x >= 8_388_608.0 || x <= -8_388_608.0 {
-        return x;
-    }
-    let i = x as i32;
-    let f = i as f32;
-    if x > f { f + 1.0 } else { f }
+    libm::ceilf(x)
 }
 
+/// `x` without its fraction; `trunc(-0.3)` is `-0.0`.
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub extern "C" fn trunc(x: f64) -> f64 {
+    libm::trunc(x)
+}
+
+/// `x` without its fraction (float).
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub extern "C" fn truncf(x: f32) -> f32 {
+    libm::truncf(x)
+}
+
+/// The nearest integer, a tie away from zero, whatever the rounding
+/// direction.
+///
+/// Not `libm::round`, `trunc(x + copysign(0.5 - 2^-54, x))`: that sum rounds
+/// in the current direction, so under `FE_UPWARD` `round(-2.5)` was -2. As
+/// [`roundeven`]: the integer part from the bits, the exact fraction, a
+/// comparison, and an exact step away from zero.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn round(x: f64) -> f64 {
-    // POSIX: round halfway cases away from zero.
-    // floor(x + 0.5) alone gives wrong results for negative halves:
-    // round(-0.5) would be floor(0.0) = 0.0 instead of -1.0.
-    if x >= 0.0 {
-        floor(x + 0.5)
+    if x.is_nan() {
+        return x + x;
+    }
+    let t = libm::trunc(x);
+    if (x - t).abs() >= 0.5 {
+        t + 1.0_f64.copysign(x)
     } else {
-        ceil(x - 0.5)
+        t
     }
 }
 
+/// [`round`] (float).
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn roundf(x: f32) -> f32 {
-    if x >= 0.0 {
-        floorf(x + 0.5)
+    if x.is_nan() {
+        return x + x;
+    }
+    let t = libm::truncf(x);
+    if (x - t).abs() >= 0.5 {
+        t + 1.0_f32.copysign(x)
     } else {
-        ceilf(x - 0.5)
+        t
     }
 }
 
+/// The nearest integer, a tie to even, whatever the rounding direction (C23;
+/// IEEE 754's roundToIntegralTiesToEven).
+///
+/// Not `libm::roundeven`, which adds and subtracts 2^52 and so rounds in the
+/// *current* direction: under `FE_UPWARD` it made `roundeven(2.3)` 3. Here
+/// the integer part comes from the bits (`trunc`), the fraction `x - t` is
+/// exact, and a comparison decides; `t +- 1` is exact too, below 2^52 where
+/// there is a fraction at all. No flag is raised but invalid, for a
+/// signalling NaN.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
-#[allow(clippy::cast_precision_loss)]
-pub extern "C" fn trunc(x: f64) -> f64 {
-    if x.is_nan() || x.is_infinite() {
-        return x;
+pub extern "C" fn roundeven(x: f64) -> f64 {
+    if x.is_nan() {
+        return x + x;
     }
-    // Preserve ±0.0 (IEEE 754 / POSIX: trunc(-0.0) = -0.0).
-    if x == 0.0 {
-        return x;
-    }
-    // All f64 values with |x| >= 2^52 are already exact integers.
-    if x >= 4_503_599_627_370_496.0 || x <= -4_503_599_627_370_496.0 {
-        return x;
-    }
-    x as i64 as f64
-}
-
-#[cfg_attr(target_os = "none", unsafe(no_mangle))]
-#[allow(clippy::cast_precision_loss)]
-pub extern "C" fn truncf(x: f32) -> f32 {
-    if x.is_nan() || x.is_infinite() {
-        return x;
-    }
-    if x == 0.0 {
-        return x;
-    }
-    if x >= 8_388_608.0 || x <= -8_388_608.0 {
-        return x;
-    }
-    x as i32 as f32
-}
-
-// ---------------------------------------------------------------------------
-// Remainder
-// ---------------------------------------------------------------------------
-
-#[cfg_attr(target_os = "none", unsafe(no_mangle))]
-#[allow(clippy::arithmetic_side_effects)]
-pub extern "C" fn fmod(x: f64, y: f64) -> f64 {
-    if y == 0.0 {
-        return f64::NAN;
-    }
-    x - trunc(x / y) * y
-}
-
-#[cfg_attr(target_os = "none", unsafe(no_mangle))]
-#[allow(clippy::arithmetic_side_effects)]
-pub extern "C" fn fmodf(x: f32, y: f32) -> f32 {
-    if y == 0.0 {
-        return f32::NAN;
-    }
-    x - truncf(x / y) * y
-}
-
-// ---------------------------------------------------------------------------
-// Square root — Newton-Raphson
-// ---------------------------------------------------------------------------
-
-#[cfg_attr(target_os = "none", unsafe(no_mangle))]
-#[allow(clippy::arithmetic_side_effects, clippy::suboptimal_flops)]
-pub extern "C" fn sqrt(x: f64) -> f64 {
-    if x < 0.0 {
-        return f64::NAN;
-    }
-    if x == 0.0 || x.is_nan() || x.is_infinite() {
-        return x;
-    }
-
-    // Decompose x = m * 2^e (0.5 <= m < 1) for a good initial guess.
-    // The naive initial guess (x * 0.5) fails catastrophically for values
-    // far from 1.0 because Newton's method only halves the error per step
-    // when the guess is orders of magnitude off.  By halving the exponent
-    // we start within a factor of ~sqrt(2) of the true answer, giving
-    // quadratic convergence (each iteration doubles correct digits).
-    let mut e: i32 = 0;
-    let m = frexp_internal(x, &mut e);
-    let guess = if e & 1 == 0 {
-        // e even: sqrt(m * 2^e) = sqrt(m) * 2^(e/2)
-        ldexp(m, e / 2)
+    let t = libm::trunc(x);
+    let d = (x - t).abs();
+    if d > 0.5 || (d == 0.5 && libm::fmod(t, 2.0) != 0.0) {
+        t + 1.0_f64.copysign(x)
     } else {
-        // e odd: sqrt(2m) * 2^((e-1)/2)
-        ldexp(m * 2.0, (e - 1) / 2)
-    };
-
-    // Newton's method: g = (g + x/g) / 2.
-    // 6 iterations from a good guess gives full f64 precision (~15 digits).
-    let mut g = guess;
-    let mut iter = 0;
-    while iter < 6 {
-        g = (g + x / g) * 0.5;
-        iter += 1;
+        t
     }
-    g
 }
 
+/// [`roundeven`] (float, C23).
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
-pub extern "C" fn sqrtf(x: f32) -> f32 {
-    sqrt(f64::from(x)) as f32
-}
-
-// ---------------------------------------------------------------------------
-// Exponential — Taylor series
-// ---------------------------------------------------------------------------
-
-#[cfg_attr(target_os = "none", unsafe(no_mangle))]
-#[allow(clippy::arithmetic_side_effects)]
-pub extern "C" fn exp(x: f64) -> f64 {
+pub extern "C" fn roundevenf(x: f32) -> f32 {
     if x.is_nan() {
-        return f64::NAN;
+        return x + x;
     }
-    if x > 709.0 {
-        return f64::INFINITY;
-    }
-    if x < -709.0 {
-        return 0.0;
-    }
-
-    // Range reduction: exp(x) = 2^k * exp(r) where r = x - k*ln(2).
-    // Precision loss on i64→f64 is acceptable: k is small (|k| <= ~1024).
-    #[allow(clippy::cast_precision_loss)]
-    let k = (x * LOG2E) as i64;
-    #[allow(clippy::cast_precision_loss)]
-    let r = x - (k as f64) * LN2;
-
-    // Taylor series for exp(r), |r| <= ln(2)/2.
-    let mut term = 1.0_f64;
-    let mut sum = 1.0_f64;
-    let mut n: i32 = 1;
-    while n <= 20 {
-        term *= r / f64::from(n);
-        sum += term;
-        if fabs(term) < 1e-16 {
-            break;
-        }
-        n += 1;
-    }
-
-    // Multiply by 2^k.
-    #[allow(clippy::cast_possible_truncation)]
-    ldexp(sum, k as i32)
-}
-
-#[cfg_attr(target_os = "none", unsafe(no_mangle))]
-#[allow(clippy::arithmetic_side_effects)]
-pub extern "C" fn expf(x: f32) -> f32 {
-    exp(f64::from(x)) as f32
-}
-
-#[cfg_attr(target_os = "none", unsafe(no_mangle))]
-#[allow(clippy::arithmetic_side_effects)]
-pub extern "C" fn exp2(x: f64) -> f64 {
-    exp(x * LN2)
-}
-
-#[cfg_attr(target_os = "none", unsafe(no_mangle))]
-#[allow(clippy::arithmetic_side_effects)]
-pub extern "C" fn exp2f(x: f32) -> f32 {
-    expf(x * LN2 as f32)
-}
-
-// ---------------------------------------------------------------------------
-// Natural logarithm
-// ---------------------------------------------------------------------------
-
-#[cfg_attr(target_os = "none", unsafe(no_mangle))]
-#[allow(clippy::arithmetic_side_effects)]
-pub extern "C" fn log(x: f64) -> f64 {
-    if x < 0.0 {
-        return f64::NAN;
-    }
-    if x == 0.0 {
-        return f64::NEG_INFINITY;
-    }
-    if x.is_nan() || x.is_infinite() {
-        return x;
-    }
-
-    // Decompose: x = m * 2^e, 0.5 <= m < 1.
-    let mut e_val: i32 = 0;
-    let m = frexp_internal(x, &mut e_val);
-
-    // ln(x) = ln(m * 2^e) = ln(m) + e*ln(2).
-    // Use the series ln((1+t)/(1-t)) = 2*(t + t^3/3 + t^5/5 + ...)
-    // where t = (m-1)/(m+1), valid for m near 1.
-    // Since 0.5 <= m < 1, adjust: use m*2 to get range [1, 2).
-    let adj_m = m * 2.0;
-    let adj_e = e_val - 1;
-
-    let t = (adj_m - 1.0) / (adj_m + 1.0);
-    let t2 = t * t;
-
-    let mut sum = t;
-    let mut term = t;
-    let mut k: i32 = 3;
-    while k <= 41 {
-        term *= t2;
-        sum += term / f64::from(k);
-        k += 2;
-    }
-
-    2.0 * sum + f64::from(adj_e) * LN2
-}
-
-#[cfg_attr(target_os = "none", unsafe(no_mangle))]
-pub extern "C" fn logf(x: f32) -> f32 {
-    log(f64::from(x)) as f32
-}
-
-#[cfg_attr(target_os = "none", unsafe(no_mangle))]
-#[allow(clippy::arithmetic_side_effects)]
-pub extern "C" fn log2(x: f64) -> f64 {
-    log(x) * LOG2E
-}
-
-#[cfg_attr(target_os = "none", unsafe(no_mangle))]
-#[allow(clippy::arithmetic_side_effects)]
-pub extern "C" fn log2f(x: f32) -> f32 {
-    logf(x) * LOG2E as f32
-}
-
-#[cfg_attr(target_os = "none", unsafe(no_mangle))]
-#[allow(clippy::arithmetic_side_effects)]
-pub extern "C" fn log10(x: f64) -> f64 {
-    log(x) / LN10
-}
-
-#[cfg_attr(target_os = "none", unsafe(no_mangle))]
-#[allow(clippy::arithmetic_side_effects)]
-pub extern "C" fn log10f(x: f32) -> f32 {
-    logf(x) / LN10 as f32
-}
-
-// ---------------------------------------------------------------------------
-// Power
-// ---------------------------------------------------------------------------
-
-#[cfg_attr(target_os = "none", unsafe(no_mangle))]
-#[allow(clippy::float_cmp)] // Exact comparisons are intentional for special-value handling.
-pub extern "C" fn pow(base: f64, exponent: f64) -> f64 {
-    if exponent == 0.0 {
-        return 1.0;
-    }
-    if base == 1.0 {
-        return 1.0;
-    }
-    if base.is_nan() || exponent.is_nan() {
-        return f64::NAN;
-    }
-    if base == 0.0 {
-        // pow(0, positive) = 0; pow(0, negative) = ∞ (pole error).
-        if exponent > 0.0 {
-            return 0.0;
-        }
-        return f64::INFINITY;
-    }
-
-    // Integer exponents: use repeated squaring.
-    #[allow(clippy::cast_precision_loss)]
-    let e_trunc = exponent as i64;
-    #[allow(clippy::cast_precision_loss)]
-    let e_back = e_trunc as f64;
-    if exponent == e_back {
-        return ipow(base, e_trunc);
-    }
-
-    // Negative base with fractional exponent → domain error (NaN).
-    // log(negative) is undefined in the reals; we make this explicit
-    // rather than relying on NaN propagation through log→exp.
-    if base < 0.0 {
-        return f64::NAN;
-    }
-
-    // General case: base^exp = exp(exp * ln(base)).
-    exp(exponent * log(base))
-}
-
-#[cfg_attr(target_os = "none", unsafe(no_mangle))]
-pub extern "C" fn powf(base: f32, exponent: f32) -> f32 {
-    pow(f64::from(base), f64::from(exponent)) as f32
-}
-
-/// Integer power via repeated squaring.
-#[allow(clippy::arithmetic_side_effects)]
-fn ipow(mut base: f64, mut exp: i64) -> f64 {
-    if exp < 0 {
-        base = 1.0 / base;
-        // wrapping_neg of i64::MIN gives i64::MIN (still negative).
-        // Handle that case: base is already inverted, and 2^63 iterations
-        // would produce 0 or infinity depending on |base|.
-        exp = exp.wrapping_neg();
-        if exp < 0 {
-            // exp was i64::MIN; |base| has been inverted above.
-            let a = fabs(base);
-            return if a < 1.0 {
-                0.0
-            } else if a > 1.0 {
-                f64::INFINITY
-            } else {
-                1.0
-            };
-        }
-    }
-
-    let mut result = 1.0;
-    while exp > 0 {
-        if exp & 1 == 1 {
-            result *= base;
-        }
-        base *= base;
-        exp >>= 1;
-    }
-    result
-}
-
-// ---------------------------------------------------------------------------
-// Trigonometry — Taylor series
-// ---------------------------------------------------------------------------
-
-#[cfg_attr(target_os = "none", unsafe(no_mangle))]
-#[allow(clippy::arithmetic_side_effects)]
-pub extern "C" fn sin(x: f64) -> f64 {
-    if x.is_nan() || x.is_infinite() {
-        return f64::NAN;
-    }
-
-    // Range reduce to [-π, π].
-    let mut r = fmod(x, TWO_PI);
-    if r > PI {
-        r -= TWO_PI;
-    }
-    if r < -PI {
-        r += TWO_PI;
-    }
-
-    // Taylor series: sin(x) = x - x^3/3! + x^5/5! - ...
-    let x2 = r * r;
-    let mut term = r;
-    let mut sum = r;
-    let mut n: i32 = 1;
-    while n <= 12 {
-        let denom = f64::from(2 * n) * f64::from(2 * n + 1);
-        term *= -x2 / denom;
-        sum += term;
-        n += 1;
-    }
-    sum
-}
-
-#[cfg_attr(target_os = "none", unsafe(no_mangle))]
-pub extern "C" fn sinf(x: f32) -> f32 {
-    sin(f64::from(x)) as f32
-}
-
-#[cfg_attr(target_os = "none", unsafe(no_mangle))]
-#[allow(clippy::arithmetic_side_effects)]
-pub extern "C" fn cos(x: f64) -> f64 {
-    sin(x + HALF_PI)
-}
-
-#[cfg_attr(target_os = "none", unsafe(no_mangle))]
-pub extern "C" fn cosf(x: f32) -> f32 {
-    cos(f64::from(x)) as f32
-}
-
-#[cfg_attr(target_os = "none", unsafe(no_mangle))]
-#[allow(clippy::arithmetic_side_effects)]
-pub extern "C" fn tan(x: f64) -> f64 {
-    if x.is_nan() || x.is_infinite() {
-        return f64::NAN;
-    }
-    // IEEE 754 division handles near-zero cosine correctly: when cos(x)
-    // is very small, sin(x)/cos(x) produces a large value with the right
-    // sign.  An explicit guard (`if fabs(c) < eps { return INFINITY }`)
-    // would lose the sign, making tan wrong for x just above π/2.
-    let c = cos(x);
-    sin(x) / c
-}
-
-#[cfg_attr(target_os = "none", unsafe(no_mangle))]
-pub extern "C" fn tanf(x: f32) -> f32 {
-    tan(f64::from(x)) as f32
-}
-
-// ---------------------------------------------------------------------------
-// Inverse trigonometry
-// ---------------------------------------------------------------------------
-
-/// Two-argument arctangent.
-///
-/// Returns the angle (in radians) whose tangent is y/x, using the
-/// signs of both arguments to determine the quadrant.
-#[cfg_attr(target_os = "none", unsafe(no_mangle))]
-#[allow(clippy::arithmetic_side_effects)]
-pub extern "C" fn atan2(y: f64, x: f64) -> f64 {
-    if x.is_nan() || y.is_nan() {
-        return f64::NAN;
-    }
-
-    if x > 0.0 {
-        return atan_approx(y / x);
-    }
-    if x < 0.0 {
-        if y >= 0.0 {
-            return atan_approx(y / x) + PI;
-        }
-        return atan_approx(y / x) - PI;
-    }
-    // x == 0
-    if y > 0.0 {
-        return HALF_PI;
-    }
-    if y < 0.0 {
-        return -HALF_PI;
-    }
-    0.0 // Both zero.
-}
-
-#[cfg_attr(target_os = "none", unsafe(no_mangle))]
-pub extern "C" fn atan2f(y: f32, x: f32) -> f32 {
-    atan2(f64::from(y), f64::from(x)) as f32
-}
-
-/// Arctangent approximation using range reduction + Taylor series.
-///
-/// Uses three ranges for fast convergence:
-/// - |x| > 1: atan(x) = sign(x)*π/2 - atan(1/x)
-/// - |x| > 0.5: atan(x) = π/4 + atan((x-1)/(x+1))  [maps to |t| ≤ 1/3]
-/// - |x| ≤ 0.5: direct Taylor series (converges fast)
-///
-/// Accuracy: ~1e-15 relative error (near full f64 precision).
-#[allow(clippy::arithmetic_side_effects)]
-fn atan_approx(x: f64) -> f64 {
-    // Range reduction for |x| > 1.
-    if fabs(x) > 1.0 {
-        let sign = if x > 0.0 { 1.0 } else { -1.0 };
-        return sign * HALF_PI - atan_approx(1.0 / x);
-    }
-
-    // For |x| > 0.5, use the identity:
-    //   atan(x) = π/4 + atan((x - 1) / (x + 1))
-    // This maps (0.5, 1] to (-1/3, 0], where the Taylor series converges
-    // much faster than at x=1 (the series boundary).
-    if fabs(x) > 0.5 {
-        let sign = if x > 0.0 { 1.0 } else { -1.0 };
-        let a = fabs(x);
-        let t = (a - 1.0) / (a + 1.0);
-        return sign * (QUARTER_PI + atan_taylor(t));
-    }
-
-    // Direct Taylor series for |x| <= 0.5.
-    atan_taylor(x)
-}
-
-/// Taylor series for atan: x - x³/3 + x⁵/5 - x⁷/7 + ...
-///
-/// Assumes |x| <= 0.5 for rapid convergence (16 terms give ~1e-15 accuracy).
-#[allow(clippy::arithmetic_side_effects)]
-fn atan_taylor(x: f64) -> f64 {
-    let x2 = x * x;
-    let mut term = x;
-    let mut sum = x;
-    let mut n: i32 = 1;
-    while n <= 15 {
-        let k = 2 * n + 1;
-        term *= -x2;
-        sum += term / f64::from(k);
-        n += 1;
-    }
-    sum
-}
-
-// ---------------------------------------------------------------------------
-// Floating-point decomposition
-// ---------------------------------------------------------------------------
-
-/// Break a float into fraction and exponent.
-///
-/// Returns m such that x = m * 2^exp, where 0.5 <= |m| < 1.
-#[cfg_attr(target_os = "none", unsafe(no_mangle))]
-#[allow(clippy::arithmetic_side_effects)]
-pub extern "C" fn frexp(x: f64, exp: *mut i32) -> f64 {
-    if exp.is_null() {
-        return x;
-    }
-    let mut e: i32 = 0;
-    let m = frexp_internal(x, &mut e);
-    unsafe {
-        *exp = e;
-    }
-    m
-}
-
-/// Internal frexp without pointer.
-#[allow(clippy::arithmetic_side_effects)]
-fn frexp_internal(x: f64, exp: &mut i32) -> f64 {
-    if x == 0.0 || x.is_nan() || x.is_infinite() {
-        *exp = 0;
-        return x;
-    }
-
-    let bits = x.to_bits();
-    let biased_exp = ((bits >> 52) & 0x7FF) as i32;
-
-    if biased_exp == 0 {
-        // Subnormal: value = (-1)^s × 0.mantissa × 2^(-1022).
-        // No implicit leading 1; we must normalize by scaling up.
-        // Multiply by 2^64 to move the value into normal range,
-        // then recurse and subtract 64 from the exponent.
-        // 2^54 is exactly representable in f64 (sign 0, biased exponent
-        // 1023+54 = 1077 = 0x435, mantissa 0).  Building it via
-        // `f64::from_bits` avoids any precision-loss cast.
-        let scaled = x * f64::from_bits(0x4350_0000_0000_0000); // 2^54
-        let m = frexp_internal(scaled, exp);
-        *exp -= 54;
-        return m;
-    }
-
-    *exp = biased_exp - 1022; // Adjust so that 0.5 <= |m| < 1.
-
-    // Replace exponent with 1022 (which gives 0.5 * mantissa).
-    let mantissa_bits = (bits & 0x800F_FFFF_FFFF_FFFF) | (1022_u64 << 52);
-    f64::from_bits(mantissa_bits)
-}
-
-/// Scale a float by a power of 2.
-///
-/// Returns x * 2^exp.
-#[cfg_attr(target_os = "none", unsafe(no_mangle))]
-#[allow(clippy::arithmetic_side_effects)]
-pub extern "C" fn ldexp(x: f64, exp: i32) -> f64 {
-    if x == 0.0 || x.is_nan() || x.is_infinite() {
-        return x;
-    }
-
-    let bits = x.to_bits();
-    let biased_exp = ((bits >> 52) & 0x7FF) as i32;
-    let new_exp = biased_exp + exp;
-
-    if new_exp >= 2047 {
-        return if x > 0.0 {
-            f64::INFINITY
-        } else {
-            f64::NEG_INFINITY
-        };
-    }
-    if new_exp <= 0 {
-        // Subnormal result: shift the mantissa right to encode the value
-        // in the IEEE 754 subnormal range (biased exponent = 0).
-        // The implicit leading 1 bit becomes explicit in the mantissa.
-        let shift = 1 - new_exp; // Number of positions to shift right.
-        if shift > 52 {
-            // Shifted entirely out of the 52-bit mantissa — flush to zero.
-            return 0.0;
-        }
-        let sign = bits & 0x8000_0000_0000_0000;
-        // Add the implicit leading 1 (bit 52) back into the mantissa.
-        let mantissa = (bits & 0x000F_FFFF_FFFF_FFFF) | 0x0010_0000_0000_0000;
-        let shifted = mantissa >> (shift as u64);
-        return f64::from_bits(sign | shifted);
-    }
-
-    let new_bits = (bits & 0x800F_FFFF_FFFF_FFFF) | ((new_exp as u64) << 52);
-    f64::from_bits(new_bits)
-}
-
-/// Split a float into integer and fractional parts.
-#[cfg_attr(target_os = "none", unsafe(no_mangle))]
-pub extern "C" fn modf(x: f64, iptr: *mut f64) -> f64 {
-    let int_part = trunc(x);
-    if !iptr.is_null() {
-        unsafe {
-            *iptr = int_part;
-        }
-    }
-    x - int_part
-}
-
-// ---------------------------------------------------------------------------
-// Classification
-// ---------------------------------------------------------------------------
-
-#[cfg_attr(target_os = "none", unsafe(no_mangle))]
-pub extern "C" fn isnan(x: f64) -> i32 {
-    i32::from(x.is_nan())
-}
-
-#[cfg_attr(target_os = "none", unsafe(no_mangle))]
-pub extern "C" fn isinf(x: f64) -> i32 {
-    if x == f64::INFINITY {
-        1
-    } else if x == f64::NEG_INFINITY {
-        -1
+    let t = libm::truncf(x);
+    let d = (x - t).abs();
+    if d > 0.5 || (d == 0.5 && libm::fmodf(t, 2.0) != 0.0) {
+        t + 1.0_f32.copysign(x)
     } else {
-        0
+        t
     }
 }
 
+/// The integer nearest `x` in the current rounding direction
+/// ([`crate::fenv::fesetround`]; to nearest, ties to even, by default).
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
-pub extern "C" fn isfinite(x: f64) -> i32 {
-    i32::from(x.is_finite())
-}
-
-// ---------------------------------------------------------------------------
-// Sign manipulation
-// ---------------------------------------------------------------------------
-
-#[cfg_attr(target_os = "none", unsafe(no_mangle))]
-#[allow(clippy::arithmetic_side_effects)]
-pub extern "C" fn copysign(x: f64, y: f64) -> f64 {
-    let mag = x.to_bits() & 0x7FFF_FFFF_FFFF_FFFF;
-    let sign = y.to_bits() & 0x8000_0000_0000_0000;
-    f64::from_bits(mag | sign)
-}
-
-#[cfg_attr(target_os = "none", unsafe(no_mangle))]
-#[allow(clippy::arithmetic_side_effects)]
-pub extern "C" fn copysignf(x: f32, y: f32) -> f32 {
-    let mag = x.to_bits() & 0x7FFF_FFFF;
-    let sign = y.to_bits() & 0x8000_0000;
-    f32::from_bits(mag | sign)
-}
-
-// ---------------------------------------------------------------------------
-// Min / Max
-// ---------------------------------------------------------------------------
-
-#[cfg_attr(target_os = "none", unsafe(no_mangle))]
-pub extern "C" fn fmin(x: f64, y: f64) -> f64 {
-    if x.is_nan() {
-        return y;
-    }
-    if y.is_nan() {
-        return x;
-    }
-    if x < y { x } else { y }
-}
-
-#[cfg_attr(target_os = "none", unsafe(no_mangle))]
-pub extern "C" fn fmax(x: f64, y: f64) -> f64 {
-    if x.is_nan() {
-        return y;
-    }
-    if y.is_nan() {
-        return x;
-    }
-    if x > y { x } else { y }
-}
-
-#[cfg_attr(target_os = "none", unsafe(no_mangle))]
-pub extern "C" fn fminf(x: f32, y: f32) -> f32 {
-    if x.is_nan() {
-        return y;
-    }
-    if y.is_nan() {
-        return x;
-    }
-    if x < y { x } else { y }
-}
-
-#[cfg_attr(target_os = "none", unsafe(no_mangle))]
-pub extern "C" fn fmaxf(x: f32, y: f32) -> f32 {
-    if x.is_nan() {
-        return y;
-    }
-    if y.is_nan() {
-        return x;
-    }
-    if x > y { x } else { y }
-}
-
-// ---------------------------------------------------------------------------
-// Inverse trigonometry (single-argument)
-// ---------------------------------------------------------------------------
-
-/// Compute arc tangent of x.
-///
-/// Returns a value in [-π/2, π/2].
-#[cfg_attr(target_os = "none", unsafe(no_mangle))]
-pub extern "C" fn atan(x: f64) -> f64 {
-    if x.is_nan() {
-        return f64::NAN;
-    }
-    atan_approx(x)
-}
-
-#[cfg_attr(target_os = "none", unsafe(no_mangle))]
-pub extern "C" fn atanf(x: f32) -> f32 {
-    atan(f64::from(x)) as f32
-}
-
-/// Compute arc sine of x.
-///
-/// Returns a value in [-π/2, π/2].  Domain: |x| <= 1.
-#[cfg_attr(target_os = "none", unsafe(no_mangle))]
-#[allow(clippy::arithmetic_side_effects)]
-pub extern "C" fn asin(x: f64) -> f64 {
-    if x.is_nan() {
-        return f64::NAN;
-    }
-    if !(-1.0..=1.0).contains(&x) {
-        return f64::NAN;
-    }
-    // Comparisons against exact boundary constants ±1.0 are intentional.
-    #[allow(clippy::float_cmp)]
-    if x == 1.0 {
-        return HALF_PI;
-    }
-    #[allow(clippy::float_cmp)]
-    if x == -1.0 {
-        return -HALF_PI;
-    }
-    // asin(x) = atan2(x, sqrt(1 - x²))
-    atan2(x, sqrt(1.0 - x * x))
-}
-
-#[cfg_attr(target_os = "none", unsafe(no_mangle))]
-pub extern "C" fn asinf(x: f32) -> f32 {
-    asin(f64::from(x)) as f32
-}
-
-/// Compute arc cosine of x.
-///
-/// Returns a value in [0, π].  Domain: |x| <= 1.
-#[cfg_attr(target_os = "none", unsafe(no_mangle))]
-#[allow(clippy::arithmetic_side_effects)]
-pub extern "C" fn acos(x: f64) -> f64 {
-    if x.is_nan() {
-        return f64::NAN;
-    }
-    if !(-1.0..=1.0).contains(&x) {
-        return f64::NAN;
-    }
-    // Comparisons against exact boundary constants ±1.0 are intentional.
-    #[allow(clippy::float_cmp)]
-    if x == 1.0 {
-        return 0.0;
-    }
-    #[allow(clippy::float_cmp)]
-    if x == -1.0 {
-        return PI;
-    }
-    // acos(x) = atan2(sqrt(1 - x²), x)
-    atan2(sqrt(1.0 - x * x), x)
-}
-
-#[cfg_attr(target_os = "none", unsafe(no_mangle))]
-pub extern "C" fn acosf(x: f32) -> f32 {
-    acos(f64::from(x)) as f32
-}
-
-// ---------------------------------------------------------------------------
-// Hyperbolic functions
-// ---------------------------------------------------------------------------
-
-/// Hyperbolic sine.
-#[cfg_attr(target_os = "none", unsafe(no_mangle))]
-#[allow(clippy::arithmetic_side_effects)]
-pub extern "C" fn sinh(x: f64) -> f64 {
-    if x.is_nan() {
-        return f64::NAN;
-    }
-    if x.is_infinite() {
-        return x;
-    }
-    // sinh(x) = (e^x - e^(-x)) / 2
-    let ex = exp(x);
-    (ex - 1.0 / ex) * 0.5
-}
-
-#[cfg_attr(target_os = "none", unsafe(no_mangle))]
-pub extern "C" fn sinhf(x: f32) -> f32 {
-    sinh(f64::from(x)) as f32
-}
-
-/// Hyperbolic cosine.
-#[cfg_attr(target_os = "none", unsafe(no_mangle))]
-#[allow(clippy::arithmetic_side_effects)]
-pub extern "C" fn cosh(x: f64) -> f64 {
-    if x.is_nan() {
-        return f64::NAN;
-    }
-    if x.is_infinite() {
-        return f64::INFINITY;
-    }
-    // cosh(x) = (e^x + e^(-x)) / 2
-    let ex = exp(x);
-    (ex + 1.0 / ex) * 0.5
-}
-
-#[cfg_attr(target_os = "none", unsafe(no_mangle))]
-pub extern "C" fn coshf(x: f32) -> f32 {
-    cosh(f64::from(x)) as f32
-}
-
-/// Hyperbolic tangent.
-#[cfg_attr(target_os = "none", unsafe(no_mangle))]
-#[allow(clippy::arithmetic_side_effects)]
-pub extern "C" fn tanh(x: f64) -> f64 {
-    if x.is_nan() {
-        return f64::NAN;
-    }
-    if x > 20.0 {
-        return 1.0;
-    }
-    if x < -20.0 {
-        return -1.0;
-    }
-    // tanh(x) = (e^2x - 1) / (e^2x + 1)
-    let e2x = exp(2.0 * x);
-    (e2x - 1.0) / (e2x + 1.0)
-}
-
-#[cfg_attr(target_os = "none", unsafe(no_mangle))]
-pub extern "C" fn tanhf(x: f32) -> f32 {
-    tanh(f64::from(x)) as f32
-}
-
-// ---------------------------------------------------------------------------
-// Other commonly needed functions
-// ---------------------------------------------------------------------------
-
-/// Euclidean distance: sqrt(x² + y²) without overflow.
-#[cfg_attr(target_os = "none", unsafe(no_mangle))]
-#[allow(clippy::arithmetic_side_effects)]
-pub extern "C" fn hypot(x: f64, y: f64) -> f64 {
-    if x.is_infinite() || y.is_infinite() {
-        return f64::INFINITY;
-    }
-    if x.is_nan() || y.is_nan() {
-        return f64::NAN;
-    }
-    // Use the "scaled" method to avoid overflow for large x,y.
-    let ax = fabs(x);
-    let ay = fabs(y);
-    let (big, small) = if ax >= ay { (ax, ay) } else { (ay, ax) };
-    if big == 0.0 {
-        return 0.0;
-    }
-    let ratio = small / big;
-    big * sqrt(1.0 + ratio * ratio)
-}
-
-#[cfg_attr(target_os = "none", unsafe(no_mangle))]
-pub extern "C" fn hypotf(x: f32, y: f32) -> f32 {
-    hypot(f64::from(x), f64::from(y)) as f32
-}
-
-/// Cube root.
-#[cfg_attr(target_os = "none", unsafe(no_mangle))]
-#[allow(clippy::arithmetic_side_effects)]
-pub extern "C" fn cbrt(x: f64) -> f64 {
-    if x.is_nan() || x.is_infinite() || x == 0.0 {
-        return x;
-    }
-    // Newton's method: cbrt(x) via y = x^(1/3).
-    // Initial estimate using pow.
-    let sign = if x < 0.0 { -1.0 } else { 1.0 };
-    let ax = fabs(x);
-    // Use Halley's method for fast convergence.
-    let mut y = pow(ax, 1.0 / 3.0);
-    // Two refinement iterations for full f64 precision.
-    y = (2.0 * y + ax / (y * y)) / 3.0;
-    y = (2.0 * y + ax / (y * y)) / 3.0;
-    sign * y
-}
-
-#[cfg_attr(target_os = "none", unsafe(no_mangle))]
-pub extern "C" fn cbrtf(x: f32) -> f32 {
-    cbrt(f64::from(x)) as f32
-}
-
-/// log(1 + x), accurate for small x.
-///
-/// For |x| < 1e-4, uses Taylor series to avoid catastrophic cancellation
-/// in the naive `log(1 + x)`.
-#[cfg_attr(target_os = "none", unsafe(no_mangle))]
-#[allow(clippy::arithmetic_side_effects)]
-pub extern "C" fn log1p(x: f64) -> f64 {
-    if x.is_nan() {
-        return f64::NAN;
-    }
-    if x == f64::INFINITY {
-        return f64::INFINITY;
-    }
-    if x < -1.0 {
-        return f64::NAN;
-    }
-    // Comparison against exact boundary -1.0 is intentional (pole of log1p).
-    #[allow(clippy::float_cmp)]
-    if x == -1.0 {
-        return f64::NEG_INFINITY;
-    }
-    if fabs(x) < 1e-4 {
-        // Taylor: log(1+x) ≈ x - x²/2 + x³/3 - x⁴/4 + ...
-        let x2 = x * x;
-        let x3 = x2 * x;
-        let x4 = x3 * x;
-        return x - x2 * 0.5 + x3 / 3.0 - x4 * 0.25;
-    }
-    log(1.0 + x)
-}
-
-#[cfg_attr(target_os = "none", unsafe(no_mangle))]
-pub extern "C" fn log1pf(x: f32) -> f32 {
-    log1p(f64::from(x)) as f32
-}
-
-/// exp(x) - 1, accurate for small x.
-///
-/// For |x| < 1e-4, uses Taylor series to avoid catastrophic cancellation.
-#[cfg_attr(target_os = "none", unsafe(no_mangle))]
-#[allow(clippy::arithmetic_side_effects)]
-pub extern "C" fn expm1(x: f64) -> f64 {
-    if x.is_nan() {
-        return f64::NAN;
-    }
-    if x == f64::INFINITY {
-        return f64::INFINITY;
-    }
-    if x == f64::NEG_INFINITY {
-        return -1.0;
-    }
-    if fabs(x) < 1e-4 {
-        // Taylor: e^x - 1 ≈ x + x²/2 + x³/6 + x⁴/24
-        let x2 = x * x;
-        let x3 = x2 * x;
-        let x4 = x3 * x;
-        return x + x2 * 0.5 + x3 / 6.0 + x4 / 24.0;
-    }
-    exp(x) - 1.0
-}
-
-#[cfg_attr(target_os = "none", unsafe(no_mangle))]
-pub extern "C" fn expm1f(x: f32) -> f32 {
-    expm1(f64::from(x)) as f32
-}
-
-/// Positive difference: max(x - y, 0).
-#[cfg_attr(target_os = "none", unsafe(no_mangle))]
-#[allow(clippy::arithmetic_side_effects)]
-pub extern "C" fn fdim(x: f64, y: f64) -> f64 {
-    if x.is_nan() || y.is_nan() {
-        return f64::NAN;
-    }
-    if x > y { x - y } else { 0.0 }
-}
-
-#[cfg_attr(target_os = "none", unsafe(no_mangle))]
-pub extern "C" fn fdimf(x: f32, y: f32) -> f32 {
-    fdim(f64::from(x), f64::from(y)) as f32
-}
-
-/// Fused multiply-add: x * y + z (computed without intermediate rounding).
-///
-/// On x86_64, FMA3 is available via intrinsic; we use a simple
-/// implementation that computes at f64 precision (which gives correct
-/// rounding for most cases in the f32 variant).
-#[cfg_attr(target_os = "none", unsafe(no_mangle))]
-#[allow(clippy::arithmetic_side_effects)]
-pub extern "C" fn fma(x: f64, y: f64, z: f64) -> f64 {
-    // Without hardware FMA, this is the best we can do portably.
-    // The rounding error is at most 1 ULP for typical inputs.
-    x * y + z
-}
-
-#[cfg_attr(target_os = "none", unsafe(no_mangle))]
-#[allow(clippy::arithmetic_side_effects)]
-pub extern "C" fn fmaf(x: f32, y: f32, z: f32) -> f32 {
-    // Perform in f64 for correct f32 result (f64 has enough precision
-    // to represent the exact f32 product without rounding).
-    (f64::from(x) * f64::from(y) + f64::from(z)) as f32
-}
-
-/// Round to nearest integer, ties away from zero (long).
-#[cfg_attr(target_os = "none", unsafe(no_mangle))]
-pub extern "C" fn lround(x: f64) -> i64 {
-    round(x) as i64
-}
-
-#[cfg_attr(target_os = "none", unsafe(no_mangle))]
-pub extern "C" fn lroundf(x: f32) -> i64 {
-    roundf(x) as i64
-}
-
-/// Round to nearest integer, ties away from zero (long long).
-#[cfg_attr(target_os = "none", unsafe(no_mangle))]
-pub extern "C" fn llround(x: f64) -> i64 {
-    round(x) as i64
-}
-
-#[cfg_attr(target_os = "none", unsafe(no_mangle))]
-pub extern "C" fn llroundf(x: f32) -> i64 {
-    roundf(x) as i64
-}
-
-/// Round to nearest integer, ties to even (long).
-///
-/// Uses floor-based approach: `x - floor(x)` gives the fractional part
-/// in [0, 1).  A tie occurs when the fractional part is exactly 0.5.
-/// On a tie, round to the nearest even integer (banker's rounding).
-#[cfg_attr(target_os = "none", unsafe(no_mangle))]
-#[allow(clippy::cast_precision_loss)]
-pub extern "C" fn lrint(x: f64) -> i64 {
-    if x.is_nan() || x.is_infinite() {
-        return 0;
-    }
-    // Large values are already integers; avoid i64 saturation.
-    if x >= 4_503_599_627_370_496.0 || x <= -4_503_599_627_370_496.0 {
-        return x as i64;
-    }
-    let f = floor(x);
-    let frac = x - f;
-    let fi = f as i64;
-    // Comparison against exact 0.5 is intentional: detects the half-way tie case.
-    #[allow(clippy::float_cmp)]
-    if frac == 0.5 {
-        // Tie: round to nearest even.  floor(x) is the lower candidate,
-        // floor(x)+1 is the upper.  Pick whichever is even.
-        if fi & 1 == 0 { fi } else { fi.wrapping_add(1) }
-    } else {
-        // Not a tie: round to nearest (same as round-half-away-from-zero
-        // since only exact 0.5 is a tie).
-        round(x) as i64
-    }
-}
-
-#[cfg_attr(target_os = "none", unsafe(no_mangle))]
-pub extern "C" fn lrintf(x: f32) -> i64 {
-    lrint(f64::from(x))
-}
-
-/// Round to nearest integer value (as floating-point), ties to even.
-#[cfg_attr(target_os = "none", unsafe(no_mangle))]
-#[allow(clippy::cast_precision_loss)]
 pub extern "C" fn rint(x: f64) -> f64 {
-    if x.is_nan() || x.is_infinite() {
-        return x;
-    }
-    if x == 0.0 {
-        return x;
-    } // Preserve ±0.0.
-    // Values with |x| >= 2^52 are already exact integers.
-    if x >= 4_503_599_627_370_496.0 || x <= -4_503_599_627_370_496.0 {
-        return x;
-    }
-    lrint(x) as f64
+    libm::rint(x)
 }
 
+/// [`rint`] (float).
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
-// The guard above ensures |x| < 2^23, so the integer value fits exactly in f32.
-#[allow(clippy::cast_precision_loss)]
 pub extern "C" fn rintf(x: f32) -> f32 {
-    if x.is_nan() || x.is_infinite() {
-        return x;
-    }
-    if x == 0.0 {
-        return x;
-    }
-    if x >= 8_388_608.0 || x <= -8_388_608.0 {
-        return x;
-    }
-    lrintf(x) as f32
+    libm::rintf(x)
 }
 
-/// Same as `rint`, but does not raise FP exceptions.
+/// [`rint`], without raising the inexact flag: glibc's `s_nearbyint.c`
+/// rounds with the SSE unit's flags held, and puts them back. A NaN or an
+/// infinity is `x + x` outside the hold (a signaling NaN still raises
+/// invalid), and past 2^52 a double has no fraction to round.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn nearbyint(x: f64) -> f64 {
-    rint(x)
+    if !x.is_finite() {
+        return x + x;
+    }
+    if x.abs() >= 4_503_599_627_370_496.0 {
+        return x;
+    }
+    crate::fenv::with_flags_held(x, libm::rint)
 }
 
+/// [`nearbyint`] (float; past 2^23 a float has no fraction).
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn nearbyintf(x: f32) -> f32 {
-    rintf(x)
-}
-
-/// Multiply by power of 2 (integer exponent).
-#[cfg_attr(target_os = "none", unsafe(no_mangle))]
-#[allow(clippy::arithmetic_side_effects)]
-pub extern "C" fn scalbn(x: f64, n: i32) -> f64 {
-    ldexp(x, n)
-}
-
-#[cfg_attr(target_os = "none", unsafe(no_mangle))]
-pub extern "C" fn scalbnf(x: f32, n: i32) -> f32 {
-    ldexp(f64::from(x), n) as f32
-}
-
-#[cfg_attr(target_os = "none", unsafe(no_mangle))]
-pub extern "C" fn scalbln(x: f64, n: i64) -> f64 {
-    // Clamp to i32 range (exponents beyond ±1074 produce 0 or inf anyway).
-    let clamped = n.clamp(i64::from(i32::MIN), i64::from(i32::MAX)) as i32;
-    ldexp(x, clamped)
-}
-
-#[cfg_attr(target_os = "none", unsafe(no_mangle))]
-pub extern "C" fn scalblnf(x: f32, n: i64) -> f32 {
-    scalbln(f64::from(x), n) as f32
-}
-
-/// Extract unbiased exponent as integer.
-///
-/// Returns the exponent of x such that 1 <= |x| * 2^(-ilogb(x)) < 2.
-/// Special: ilogb(0) = `FP_ILOGB0`, ilogb(inf) = `INT_MAX`,
-/// ilogb(NaN) = `FP_ILOGBNAN`.
-#[cfg_attr(target_os = "none", unsafe(no_mangle))]
-#[allow(clippy::arithmetic_side_effects)]
-pub extern "C" fn ilogb(x: f64) -> i32 {
-    if x.is_nan() {
-        return i32::MAX;
-    } // FP_ILOGBNAN
-    if x.is_infinite() {
-        return i32::MAX;
+    if !x.is_finite() {
+        return x + x;
     }
-    if x == 0.0 {
-        return i32::MIN;
-    } // FP_ILOGB0
-    let bits = x.to_bits();
-    let exp_field = ((bits >> 52) & 0x7FF) as i32;
-    if exp_field == 0 {
-        // Subnormal — count leading zeros in mantissa.
-        let mantissa = bits & 0x000F_FFFF_FFFF_FFFF;
-        // leading_zeros() <= 64, minus 12 won't overflow i32.
-        let lz = mantissa.leading_zeros() as i32 - 12; // 64 - 52 = 12
-        -1023 - lz
-    } else {
-        // exp_field is 1..=2046 (0 handled above, 0x7FF is inf/nan).
-        exp_field - 1023
-    }
-}
-
-#[cfg_attr(target_os = "none", unsafe(no_mangle))]
-pub extern "C" fn ilogbf(x: f32) -> i32 {
-    ilogb(f64::from(x))
-}
-
-/// Extract unbiased exponent as f64.
-#[cfg_attr(target_os = "none", unsafe(no_mangle))]
-pub extern "C" fn logb(x: f64) -> f64 {
-    if x == 0.0 {
-        return f64::NEG_INFINITY;
-    }
-    if x.is_infinite() {
-        return f64::INFINITY;
-    }
-    if x.is_nan() {
-        return f64::NAN;
-    }
-    f64::from(ilogb(x))
-}
-
-#[cfg_attr(target_os = "none", unsafe(no_mangle))]
-pub extern "C" fn logbf(x: f32) -> f32 {
-    logb(f64::from(x)) as f32
-}
-
-/// Next representable f64 value after `from` in the direction of `to`.
-#[cfg_attr(target_os = "none", unsafe(no_mangle))]
-pub extern "C" fn nextafter(from: f64, to: f64) -> f64 {
-    if from.is_nan() || to.is_nan() {
-        return f64::NAN;
-    }
-    // Exact bit-level equality check is intentional: nextafter(x, x) == x per IEEE 754.
-    #[allow(clippy::float_cmp)]
-    if from == to {
-        return to;
-    }
-    if from == 0.0 {
-        // Smallest subnormal in the direction of `to`.
-        let bits: u64 = if to > 0.0 { 1 } else { 0x8000_0000_0000_0001 };
-        return f64::from_bits(bits);
-    }
-    let bits = from.to_bits();
-    let next_bits = if (to > from) == (from > 0.0) {
-        bits.wrapping_add(1)
-    } else {
-        bits.wrapping_sub(1)
-    };
-    f64::from_bits(next_bits)
-}
-
-#[cfg_attr(target_os = "none", unsafe(no_mangle))]
-pub extern "C" fn nextafterf(from: f32, to: f32) -> f32 {
-    if from.is_nan() || to.is_nan() {
-        return f32::NAN;
-    }
-    // Exact bit-level equality check is intentional: nextafterf(x, x) == x per IEEE 754.
-    #[allow(clippy::float_cmp)]
-    if from == to {
-        return to;
-    }
-    if from == 0.0 {
-        let bits: u32 = if to > 0.0 { 1 } else { 0x8000_0001 };
-        return f32::from_bits(bits);
-    }
-    let bits = from.to_bits();
-    let next_bits = if (to > from) == (from > 0.0) {
-        bits.wrapping_add(1)
-    } else {
-        bits.wrapping_sub(1)
-    };
-    f32::from_bits(next_bits)
-}
-
-/// IEEE 754 remainder (difference from `fmod`: uses round-to-nearest-even).
-#[cfg_attr(target_os = "none", unsafe(no_mangle))]
-#[allow(clippy::arithmetic_side_effects)]
-pub extern "C" fn remainder(x: f64, y: f64) -> f64 {
-    if y == 0.0 || x.is_infinite() {
-        return f64::NAN;
-    }
-    if y.is_nan() || x.is_nan() {
-        return f64::NAN;
-    }
-    if y.is_infinite() {
+    if x.abs() >= 8_388_608.0 {
         return x;
     }
-    // IEEE 754 remainder uses round-to-nearest-even (rint), NOT
-    // round-half-away-from-zero (round).  E.g. remainder(2.5, 1.0):
-    //   rint(2.5) = 2  →  2.5 - 2*1 =  0.5  (correct)
-    //   round(2.5) = 3 →  2.5 - 3*1 = -0.5  (wrong)
-    let n = rint(x / y);
-    x - n * y
+    crate::fenv::with_flags_held(x, libm::rintf)
 }
 
+/// An integral double as a `long`, or `LONG_MIN` -- what x86-64's conversion
+/// instruction answers, and so what glibc and musl return -- for one that is
+/// not a `long`: a NaN, an infinity, or a value out of range. Nothing sets
+/// `errno`; glibc raises `FE_INVALID`, as the conversion itself does.
+fn to_long(r: f64) -> i64 {
+    // -2^63 is a long; 2^63 is not.
+    if r.is_finite() && r >= -9_223_372_036_854_775_808.0 && r < 9_223_372_036_854_775_808.0 {
+        #[allow(clippy::cast_possible_truncation)]
+        let v = r as i64;
+        v
+    } else {
+        i64::MIN
+    }
+}
+
+/// [`to_long`] for a float's answer.
+fn to_long_f(r: f32) -> i64 {
+    to_long(f64::from(r))
+}
+
+/// [`round`] as a `long`; `LONG_MIN` when it is not one.
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub extern "C" fn lround(x: f64) -> i64 {
+    to_long(round(x))
+}
+
+/// [`roundf`] as a `long`.
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub extern "C" fn lroundf(x: f32) -> i64 {
+    to_long_f(roundf(x))
+}
+
+/// [`round`] as a `long long` (the same width here).
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub extern "C" fn llround(x: f64) -> i64 {
+    to_long(round(x))
+}
+
+/// [`roundf`] as a `long long`.
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub extern "C" fn llroundf(x: f32) -> i64 {
+    to_long_f(roundf(x))
+}
+
+/// [`rint`] as a `long`.
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub extern "C" fn lrint(x: f64) -> i64 {
+    to_long(libm::rint(x))
+}
+
+/// [`rintf`] as a `long`.
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub extern "C" fn lrintf(x: f32) -> i64 {
+    to_long_f(libm::rintf(x))
+}
+
+/// [`rint`] as a `long long`. Missing until 2026-09-27: a C program calling
+/// it did not link.
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub extern "C" fn llrint(x: f64) -> i64 {
+    to_long(libm::rint(x))
+}
+
+/// [`rintf`] as a `long long`.
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub extern "C" fn llrintf(x: f32) -> i64 {
+    to_long_f(libm::rintf(x))
+}
+
+/// Whether a NaN is signaling: its quiet bit (the mantissa's top) is clear.
+fn signaling(x: f64) -> bool {
+    x.is_nan() && x.to_bits() & (1u64 << 51) == 0
+}
+
+/// [`signaling`] (float).
+fn signaling_f(x: f32) -> bool {
+    x.is_nan() && x.to_bits() & (1u32 << 22) == 0
+}
+
+/// glibc's x86-64 `fmin`/`fmax` (`sysdeps/x86_64/fpu/s_fmin.S`, `s_fmax.S`),
+/// which C leaves open on two points and these settle: two zeros give the
+/// second argument (`minsd`/`maxsd` return it when neither is less/greater:
+/// `fmax(+0, -0)` is -0), and a quiet NaN loses to a number while a
+/// signaling NaN, or two NaNs, give `x + y` (a quiet NaN).
+fn min_max(x: f64, y: f64, x_wins: bool) -> f64 {
+    if !x.is_nan() && !y.is_nan() {
+        return if x_wins { x } else { y };
+    }
+    if x.is_nan() && y.is_nan() || signaling(x) || signaling(y) {
+        return x + y;
+    }
+    if x.is_nan() { y } else { x }
+}
+
+/// [`min_max`] (float).
+fn min_max_f(x: f32, y: f32, x_wins: bool) -> f32 {
+    if !x.is_nan() && !y.is_nan() {
+        return if x_wins { x } else { y };
+    }
+    if x.is_nan() && y.is_nan() || signaling_f(x) || signaling_f(y) {
+        return x + y;
+    }
+    if x.is_nan() { y } else { x }
+}
+
+/// The smaller, a NaN losing to a number; two equal values (`+0`, `-0`)
+/// give the second.
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub extern "C" fn fmin(x: f64, y: f64) -> f64 {
+    min_max(x, y, x < y)
+}
+
+/// [`fmin`] (float).
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub extern "C" fn fminf(x: f32, y: f32) -> f32 {
+    min_max_f(x, y, x < y)
+}
+
+/// The larger, a NaN losing to a number; two equal values (`+0`, `-0`)
+/// give the second.
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub extern "C" fn fmax(x: f64, y: f64) -> f64 {
+    min_max(x, y, x > y)
+}
+
+/// [`fmax`] (float).
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub extern "C" fn fmaxf(x: f32, y: f32) -> f32 {
+    min_max_f(x, y, x > y)
+}
+
+/// `x - y` if positive, else +0 (glibc's `s_fdim_template.c`: `ERANGE` when
+/// finite arguments overflow, [`ranged`]).
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub extern "C" fn fdim(x: f64, y: f64) -> f64 {
+    ranged(
+        (x, y),
+        |(x, y)| libm::fdim(x, y),
+        |r| overflow_only(!x.is_infinite() && !y.is_infinite(), r),
+    )
+}
+
+/// [`fdim`] (float).
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub extern "C" fn fdimf(x: f32, y: f32) -> f32 {
+    ranged(
+        (x, y),
+        |(x, y)| libm::fdimf(x, y),
+        |r| overflow_only(!x.is_infinite() && !y.is_infinite(), f64::from(r)),
+    )
+}
+
+/// `x * y + z`, rounded once: fused, as C requires -- by the processor's
+/// FMA instruction where it has one and the OS saves its registers, in
+/// software where not (`fmadd.rs`); the same answer either way.
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub extern "C" fn fma(x: f64, y: f64, z: f64) -> f64 {
+    crate::fmadd::fma(x, y, z)
+}
+
+/// [`fma`] (float).
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub extern "C" fn fmaf(x: f32, y: f32, z: f32) -> f32 {
+    crate::fmadd::fmaf(x, y, z)
+}
+
+/// The square root, correctly rounded (`EDOM` for `x < 0`, glibc's
+/// `w_sqrt_template.c`).
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub extern "C" fn sqrt(x: f64) -> f64 {
+    if x < 0.0 {
+        set(errno::EDOM);
+    }
+    libm::sqrt(x)
+}
+
+/// [`sqrt`] (float).
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub extern "C" fn sqrtf(x: f32) -> f32 {
+    if x < 0.0 {
+        set(errno::EDOM);
+    }
+    libm::sqrtf(x)
+}
+
+/// The rule glibc's `w_fmod_template.c` and `w_remainder_template.c` share:
+/// `EDOM` for an infinite `x` or a zero `y`, unless either is a NaN.
+fn rem_domain(x: f64, y: f64) {
+    if (x.is_infinite() || y == 0.0) && !x.is_nan() && !y.is_nan() {
+        set(errno::EDOM);
+    }
+}
+
+/// `x - n*y`, `n` truncated.
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub extern "C" fn fmod(x: f64, y: f64) -> f64 {
+    rem_domain(x, y);
+    libm::fmod(x, y)
+}
+
+/// [`fmod`] (float).
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub extern "C" fn fmodf(x: f32, y: f32) -> f32 {
+    rem_domain(f64::from(x), f64::from(y));
+    libm::fmodf(x, y)
+}
+
+/// `x - n*y`, `n` rounded to nearest, ties to even.
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub extern "C" fn remainder(x: f64, y: f64) -> f64 {
+    rem_domain(x, y);
+    libm::remainder(x, y)
+}
+
+/// [`remainder`] (float).
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn remainderf(x: f32, y: f32) -> f32 {
-    remainder(f64::from(x), f64::from(y)) as f32
+    rem_domain(f64::from(x), f64::from(y));
+    libm::remainderf(x, y)
 }
 
-/// NaN with optional tag string (C99 nan("")).
-///
-/// The tag is ignored (implementation-defined payload).
-#[cfg_attr(target_os = "none", unsafe(no_mangle))]
-pub extern "C" fn nan(_tag: *const u8) -> f64 {
-    f64::NAN
-}
-
-/// NaN (f32 variant).
-#[cfg_attr(target_os = "none", unsafe(no_mangle))]
-pub extern "C" fn nanf(_tag: *const u8) -> f32 {
-    f32::NAN
-}
-
-/// frexp for f32.
-#[cfg_attr(target_os = "none", unsafe(no_mangle))]
-pub extern "C" fn frexpf(x: f32, exp: *mut i32) -> f32 {
-    frexp(f64::from(x), exp) as f32
-}
-
-/// ldexp for f32.
-#[cfg_attr(target_os = "none", unsafe(no_mangle))]
-pub extern "C" fn ldexpf(x: f32, exp: i32) -> f32 {
-    ldexp(f64::from(x), exp) as f32
-}
-
-/// modf for f32.
-#[cfg_attr(target_os = "none", unsafe(no_mangle))]
-pub extern "C" fn modff(x: f32, iptr: *mut f32) -> f32 {
-    let mut id: f64 = 0.0;
-    let frac = modf(f64::from(x), &raw mut id);
-    if !iptr.is_null() {
-        // SAFETY: caller guarantees iptr is valid.
-        unsafe {
-            *iptr = id as f32;
-        }
-    }
-    frac as f32
-}
-
-/// Return the floating-point number with the magnitude of `x` and the
-/// sign of the product `x * y` (GNU extension used by some libm ports).
-#[cfg_attr(target_os = "none", unsafe(no_mangle))]
-#[allow(clippy::arithmetic_side_effects)]
-pub extern "C" fn __copysign(x: f64, y: f64) -> f64 {
-    copysign(x, y)
-}
-
-// ---------------------------------------------------------------------------
-// Error function and gamma function
-// ---------------------------------------------------------------------------
-
-/// Error function.
-///
-/// Approximation using Abramowitz and Stegun formula 7.1.26.
-/// Accurate to ~1.5e-7 relative error.
-#[cfg_attr(target_os = "none", unsafe(no_mangle))]
-#[allow(clippy::arithmetic_side_effects)]
-pub extern "C" fn erf(x: f64) -> f64 {
-    // Constants from A&S 7.1.26.
-    const A1: f64 = 0.254_829_592;
-    const A2: f64 = -0.284_496_736;
-    const A3: f64 = 1.421_413_741;
-    const A4: f64 = -1.453_152_027;
-    const A5: f64 = 1.061_405_429;
-    const P: f64 = 0.327_591_1;
-
-    let sign = if x < 0.0 { -1.0 } else { 1.0 };
-    let a = fabs(x);
-    let t = 1.0 / (1.0 + P * a);
-    let t2 = t * t;
-    let t3 = t2 * t;
-    let t4 = t3 * t;
-    let t5 = t4 * t;
-    let y = 1.0 - (A1 * t + A2 * t2 + A3 * t3 + A4 * t4 + A5 * t5) * exp(-a * a);
-    sign * y
-}
-
-/// Complementary error function: erfc(x) = 1 - erf(x).
-#[cfg_attr(target_os = "none", unsafe(no_mangle))]
-#[allow(clippy::arithmetic_side_effects)]
-pub extern "C" fn erfc(x: f64) -> f64 {
-    1.0 - erf(x)
-}
-
-/// Error function (f32).
-#[cfg_attr(target_os = "none", unsafe(no_mangle))]
-pub extern "C" fn erff(x: f32) -> f32 {
-    erf(f64::from(x)) as f32
-}
-
-/// Complementary error function (f32).
-#[cfg_attr(target_os = "none", unsafe(no_mangle))]
-pub extern "C" fn erfcf(x: f32) -> f32 {
-    erfc(f64::from(x)) as f32
-}
-
-/// Natural log of the absolute value of the gamma function.
-///
-/// Uses the Stirling approximation with correction terms for x >= 7,
-/// and the recurrence relation to reduce smaller x to that range.
-/// Returns +∞ for x = 0 and negative integers.
-#[cfg_attr(target_os = "none", unsafe(no_mangle))]
-#[allow(clippy::arithmetic_side_effects)]
-pub extern "C" fn lgamma(x: f64) -> f64 {
-    // Handle special cases.
-    if x.is_nan() {
-        return x;
-    }
-    if x.is_infinite() {
-        return f64::INFINITY;
-    }
-    // Poles at 0 and negative integers.  Exact comparison is intentional:
-    // floor(x) returns the exact integer, and x must equal it exactly.
-    #[allow(clippy::float_cmp)]
-    if x <= 0.0 && x == floor(x) {
-        return f64::INFINITY;
-    }
-
-    // Use reflection formula for x < 0.5:
-    //   Γ(x) * Γ(1-x) = π / sin(πx)
-    //   lgamma(x) = ln(π/sin(πx)) - lgamma(1-x)
-    if x < 0.5 {
-        let reflect = consts::PI / sin(consts::PI * x);
-        return log(fabs(reflect)) - lgamma(1.0 - x);
-    }
-
-    // Use recurrence Γ(x+1) = x*Γ(x) to get x >= 7.
-    let mut xx = x;
-    let mut correction: f64 = 0.0;
-    while xx < 7.0 {
-        correction -= log(xx);
-        xx += 1.0;
-    }
-
-    // Stirling series: ln(Γ(x)) ≈ (x-0.5)*ln(x) - x + 0.5*ln(2π) + Σ B_{2n}/(2n*(2n-1)*x^{2n-1})
-    let x2 = xx * xx;
-    let result = (xx - 0.5) * log(xx) - xx + 0.918_938_533_204_672_7 // 0.5*ln(2π)
-        + 1.0 / (12.0 * xx)
-        - 1.0 / (360.0 * x2 * xx)
-        + 1.0 / (1260.0 * x2 * x2 * xx);
-
-    result + correction
-}
-
-/// f32 version of lgamma.
-#[cfg_attr(target_os = "none", unsafe(no_mangle))]
-pub extern "C" fn lgammaf(x: f32) -> f32 {
-    lgamma(f64::from(x)) as f32
-}
-
-/// Gamma function: Γ(x) = exp(lgamma(x)).
-///
-/// Returns the true gamma function value, handling sign correctly.
-#[cfg_attr(target_os = "none", unsafe(no_mangle))]
-#[allow(clippy::arithmetic_side_effects)]
-pub extern "C" fn tgamma(x: f64) -> f64 {
-    // Special cases.
-    if x.is_nan() {
-        return x;
-    }
-    if x.is_infinite() {
-        return if x > 0.0 { f64::INFINITY } else { f64::NAN };
-    }
-    // Poles at 0 and negative integers.  Exact comparison is intentional:
-    // floor(x) returns the exact integer, and x must equal it exactly.
-    #[allow(clippy::float_cmp)]
-    if x <= 0.0 && x == floor(x) {
-        return f64::NAN;
-    }
-
-    // For positive x, Γ(x) = exp(lgamma(x)).
-    if x > 0.0 {
-        return exp(lgamma(x));
-    }
-
-    // Negative x: use reflection formula.
-    // Γ(x) = π / (sin(πx) * Γ(1-x))
-    let sin_pi_x = sin(consts::PI * x);
-    if fabs(sin_pi_x) < 1e-15 {
-        return f64::NAN; // Near a pole.
-    }
-    consts::PI / (sin_pi_x * tgamma(1.0 - x))
-}
-
-/// f32 version of tgamma.
-#[cfg_attr(target_os = "none", unsafe(no_mangle))]
-pub extern "C" fn tgammaf(x: f32) -> f32 {
-    tgamma(f64::from(x)) as f32
-}
-
-// ---------------------------------------------------------------------------
-// Inverse hyperbolic functions
-// ---------------------------------------------------------------------------
-
-/// Inverse hyperbolic sine: asinh(x) = ln(x + √(x² + 1)).
-#[cfg_attr(target_os = "none", unsafe(no_mangle))]
-#[allow(clippy::arithmetic_side_effects)]
-pub extern "C" fn asinh(x: f64) -> f64 {
-    if x.is_nan() || x.is_infinite() {
-        return x;
-    }
-    // For large |x|, avoid x*x overflow: asinh(x) ≈ sign(x) * (ln(2) + ln(|x|)).
-    let a = fabs(x);
-    if a > 1e150 {
-        let r = consts::LN_2 + log(a);
-        return if x < 0.0 { -r } else { r };
-    }
-    // For small |x|, use log1p for accuracy: asinh(x) = log1p(x + x²/(1+√(1+x²))).
-    if a < 0.5 {
-        let r = log1p(a + a * a / (1.0 + sqrt(1.0 + a * a)));
-        return if x < 0.0 { -r } else { r };
-    }
-    let r = log(a + sqrt(a * a + 1.0));
-    if x < 0.0 { -r } else { r }
-}
-
-/// Inverse hyperbolic sine (f32).
-#[cfg_attr(target_os = "none", unsafe(no_mangle))]
-pub extern "C" fn asinhf(x: f32) -> f32 {
-    asinh(f64::from(x)) as f32
-}
-
-/// Inverse hyperbolic cosine: acosh(x) = ln(x + √(x² - 1)), x >= 1.
-#[cfg_attr(target_os = "none", unsafe(no_mangle))]
-#[allow(clippy::arithmetic_side_effects)]
-pub extern "C" fn acosh(x: f64) -> f64 {
-    if x.is_nan() {
-        return x;
-    }
-    if x < 1.0 {
-        return f64::NAN; // Domain error.
-    }
-    if x.is_infinite() {
-        return f64::INFINITY;
-    }
-    // For large x, avoid overflow: acosh(x) ≈ ln(2) + ln(x).
-    if x > 1e150 {
-        return consts::LN_2 + log(x);
-    }
-    // For x near 1, use log1p for accuracy:
-    //   acosh(x) = log1p((x-1) + √((x-1)*(x+1)))
-    if x < 2.0 {
-        let t = x - 1.0;
-        return log1p(t + sqrt(t * (x + 1.0)));
-    }
-    log(x + sqrt(x * x - 1.0))
-}
-
-/// Inverse hyperbolic cosine (f32).
-#[cfg_attr(target_os = "none", unsafe(no_mangle))]
-pub extern "C" fn acoshf(x: f32) -> f32 {
-    acosh(f64::from(x)) as f32
-}
-
-/// Inverse hyperbolic tangent: atanh(x) = 0.5 * ln((1+x)/(1-x)), |x| < 1.
-#[cfg_attr(target_os = "none", unsafe(no_mangle))]
-#[allow(clippy::arithmetic_side_effects)]
-pub extern "C" fn atanh(x: f64) -> f64 {
-    if x.is_nan() {
-        return x;
-    }
-    // Comparisons against exact boundary constants ±1.0 are intentional (poles of atanh).
-    #[allow(clippy::float_cmp)]
-    if x == 1.0 {
-        return f64::INFINITY;
-    }
-    #[allow(clippy::float_cmp)]
-    if x == -1.0 {
-        return f64::NEG_INFINITY;
-    }
-    if fabs(x) > 1.0 {
-        return f64::NAN; // Domain error.
-    }
-    // Use log1p for accuracy: atanh(x) = 0.5 * log1p(2x / (1-x)).
-    0.5 * log1p(2.0 * x / (1.0 - x))
-}
-
-/// Inverse hyperbolic tangent (f32).
-#[cfg_attr(target_os = "none", unsafe(no_mangle))]
-pub extern "C" fn atanhf(x: f32) -> f32 {
-    atanh(f64::from(x)) as f32
-}
-
-// ---------------------------------------------------------------------------
-// sincos — compute sin and cos simultaneously
-// ---------------------------------------------------------------------------
-
-/// Compute sine and cosine simultaneously (GNU extension).
-///
-/// More efficient than calling sin() and cos() separately when both
-/// are needed.
-///
-/// # Safety
-///
-/// `sinp` and `cosp` must be valid, writable pointers.
-#[cfg_attr(target_os = "none", unsafe(no_mangle))]
-#[allow(clippy::arithmetic_side_effects)]
-pub extern "C" fn sincos(x: f64, sinp: *mut f64, cosp: *mut f64) {
-    // SAFETY: Caller must provide valid pointers per POSIX convention.
-    if !sinp.is_null() {
-        unsafe {
-            *sinp = sin(x);
-        }
-    }
-    if !cosp.is_null() {
-        unsafe {
-            *cosp = cos(x);
-        }
-    }
-}
-
-/// sincos (f32).
-#[cfg_attr(target_os = "none", unsafe(no_mangle))]
-pub extern "C" fn sincosf(x: f32, sinp: *mut f32, cosp: *mut f32) {
-    if !sinp.is_null() {
-        unsafe {
-            *sinp = sinf(x);
-        }
-    }
-    if !cosp.is_null() {
-        unsafe {
-            *cosp = cosf(x);
-        }
-    }
-}
-
-// ---------------------------------------------------------------------------
-// remquo — IEEE remainder with quotient
-// ---------------------------------------------------------------------------
-
-/// IEEE 754 remainder with quotient bits.
-///
-/// Returns the same remainder as `remainder(x, y)`, and stores at least
-/// the low 3 bits of the integral quotient in `*quo` (with the sign
-/// of `x/y`).
-///
-/// # Safety
-///
-/// `quo` must be a valid, writable pointer.
-#[cfg_attr(target_os = "none", unsafe(no_mangle))]
-#[allow(clippy::arithmetic_side_effects, clippy::cast_possible_truncation)]
-pub extern "C" fn remquo(x: f64, y: f64, quo: *mut i32) -> f64 {
-    if y == 0.0 || x.is_nan() || y.is_nan() || x.is_infinite() {
-        if !quo.is_null() {
-            // SAFETY: quo verified non-null.
-            unsafe {
-                *quo = 0;
-            }
-        }
-        if x.is_nan() {
-            return x;
-        }
-        if y.is_nan() {
-            return y;
-        }
-        return f64::NAN;
-    }
-
-    // Compute quotient and remainder.
-    // IEEE 754: remainder uses round-to-nearest-even (rint), not
-    // round-half-away-from-zero (round).
-    let q_exact = x / y;
-    let q_rounded = rint(q_exact);
-    let rem = x - q_rounded * y;
-
-    if !quo.is_null() {
-        // Store low bits of the quotient magnitude with the correct sign.
-        // POSIX requires at least 3 bits of the quotient; we provide 31.
-        let q_int = q_rounded as i64;
-        // Extract magnitude, then truncate to 31 bits.
-        let mag = q_int.unsigned_abs();
-        let q_low = (mag & 0x7FFF_FFFF) as i32;
-        // Apply the sign of x/y (positive when same sign, negative otherwise).
-        let signed_q = if (x < 0.0) == (y < 0.0) {
-            q_low
-        } else {
-            -q_low
-        };
-        // SAFETY: quo verified non-null.
-        unsafe {
-            *quo = signed_q;
-        }
-    }
-
-    rem
-}
-
-/// remquo (f32).
-#[cfg_attr(target_os = "none", unsafe(no_mangle))]
-pub extern "C" fn remquof(x: f32, y: f32, quo: *mut i32) -> f32 {
-    remquo(f64::from(x), f64::from(y), quo) as f32
-}
-
-// ---------------------------------------------------------------------------
-// exp10 / pow10 — base-10 exponential (GNU extensions)
-// ---------------------------------------------------------------------------
-
-/// Compute 10^x (GNU extension).
-#[cfg_attr(target_os = "none", unsafe(no_mangle))]
-pub extern "C" fn exp10(x: f64) -> f64 {
-    pow(10.0, x)
-}
-
-/// exp10 (f32).
-#[cfg_attr(target_os = "none", unsafe(no_mangle))]
-pub extern "C" fn exp10f(x: f32) -> f32 {
-    powf(10.0, x)
-}
-
-/// Alias for `exp10` (GNU extension, deprecated).
-#[cfg_attr(target_os = "none", unsafe(no_mangle))]
-pub extern "C" fn pow10(x: f64) -> f64 {
-    exp10(x)
-}
-
-/// pow10 (f32).
-#[cfg_attr(target_os = "none", unsafe(no_mangle))]
-pub extern "C" fn pow10f(x: f32) -> f32 {
-    exp10f(x)
-}
-
-// ---------------------------------------------------------------------------
-// lgamma_r — thread-safe lgamma with sign
-// ---------------------------------------------------------------------------
-
-/// Thread-safe lgamma: returns lgamma(x) and stores the sign of Γ(x) in `*signp`.
-///
-/// `*signp` is set to 1 if Γ(x) >= 0, or -1 if Γ(x) < 0.
-///
-/// # Safety
-///
-/// `signp` must be a valid, writable pointer (or NULL, in which case
-/// the sign is not stored).
-#[cfg_attr(target_os = "none", unsafe(no_mangle))]
-#[allow(clippy::arithmetic_side_effects)]
-// float_cmp: x == floor(x) intentionally checks exact integer equality (gamma poles).
-#[allow(clippy::float_cmp)]
-pub extern "C" fn lgamma_r(x: f64, signp: *mut i32) -> f64 {
-    // Compute the sign of Γ(x).
-    // Γ(x) > 0 for x > 0.
-    // For x < 0 non-integer, sign alternates:
-    //   Γ(x) < 0 for x ∈ (-1,0), (-3,-2), (-5,-4), ... (floor is odd)
-    //   Γ(x) > 0 for x ∈ (-2,-1), (-4,-3), (-6,-5), ... (floor is even)
-    let sign: i32 = if x > 0.0 || x.is_nan() || x.is_infinite() {
-        1
-    } else if x == floor(x) {
-        // Pole — sign is undefined, use +1 by convention.
-        1
-    } else {
-        // floor(x) for negative non-integer x:
-        //   x ∈ (-1,0) → floor = -1 (odd)  → Γ < 0
-        //   x ∈ (-2,-1) → floor = -2 (even) → Γ > 0
-        //   x ∈ (-3,-2) → floor = -3 (odd)  → Γ < 0
-        // In Rust, -1 % 2 == -1 (nonzero) and -2 % 2 == 0.
-        let n = floor(x) as i64;
-        if n % 2 == 0 { 1 } else { -1 }
-    };
-
-    if !signp.is_null() {
-        // SAFETY: signp verified non-null.
-        unsafe {
-            *signp = sign;
-        }
-    }
-
-    lgamma(x)
-}
-
-/// lgamma_r (f32).
-#[cfg_attr(target_os = "none", unsafe(no_mangle))]
-pub extern "C" fn lgammaf_r(x: f32, signp: *mut i32) -> f32 {
-    lgamma_r(f64::from(x), signp) as f32
-}
-
-// ---------------------------------------------------------------------------
-// Deprecated / compatibility aliases
-// ---------------------------------------------------------------------------
-
-/// `finite(x)` — deprecated BSD alias for `isfinite(x)`.
-///
-/// Returns non-zero if `x` is not infinity or NaN.
-#[cfg_attr(target_os = "none", unsafe(no_mangle))]
-pub extern "C" fn finite(x: f64) -> i32 {
-    isfinite(x)
-}
-
-/// `finitef(x)` — f32 variant of `finite`.
-#[cfg_attr(target_os = "none", unsafe(no_mangle))]
-pub extern "C" fn finitef(x: f32) -> i32 {
-    i32::from(!(x.is_infinite() || x.is_nan()))
-}
-
-/// `drem(x, y)` — deprecated alias for `remainder(x, y)`.
+/// BSD's name for [`remainder`].
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn drem(x: f64, y: f64) -> f64 {
     remainder(x, y)
 }
 
-/// `dremf(x, y)` — f32 variant.
+/// BSD's name for [`remainderf`].
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn dremf(x: f32, y: f32) -> f32 {
     remainderf(x, y)
 }
 
-/// `gamma(x)` — deprecated alias for `lgamma(x)`.
+/// [`remainder`], and the low bits of the quotient, with its sign, in
+/// `*quo`. A NULL `quo` is not written.
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub extern "C" fn remquo(x: f64, y: f64, quo: *mut i32) -> f64 {
+    let (r, q) = libm::remquo(x, y);
+    if !quo.is_null() {
+        // SAFETY: non-null, and the caller's `int *`.
+        unsafe { quo.write(q) };
+    }
+    r
+}
+
+/// [`remquo`] (float).
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub extern "C" fn remquof(x: f32, y: f32, quo: *mut i32) -> f32 {
+    let (r, q) = libm::remquof(x, y);
+    if !quo.is_null() {
+        // SAFETY: non-null, and the caller's `int *`.
+        unsafe { quo.write(q) };
+    }
+    r
+}
+
+/// `x` as a fraction in [0.5, 1) and a power of two in `*exp`. A NULL `exp`
+/// is not written.
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub extern "C" fn frexp(x: f64, exp: *mut i32) -> f64 {
+    let (m, e) = libm::frexp(x);
+    if !exp.is_null() {
+        // SAFETY: non-null, and the caller's `int *`.
+        unsafe { exp.write(e) };
+    }
+    m
+}
+
+/// [`frexp`] (float).
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub extern "C" fn frexpf(x: f32, exp: *mut i32) -> f32 {
+    let (m, e) = libm::frexpf(x);
+    if !exp.is_null() {
+        // SAFETY: non-null, and the caller's `int *`.
+        unsafe { exp.write(e) };
+    }
+    m
+}
+
+/// The fraction of `x`, its integral part in `*iptr`. A NULL `iptr` is not
+/// written.
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub extern "C" fn modf(x: f64, iptr: *mut f64) -> f64 {
+    let (frac, int) = libm::modf(x);
+    if !iptr.is_null() {
+        // SAFETY: non-null, and the caller's `double *`.
+        unsafe { iptr.write(int) };
+    }
+    frac
+}
+
+/// [`modf`] (float).
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub extern "C" fn modff(x: f32, iptr: *mut f32) -> f32 {
+    let (frac, int) = libm::modff(x);
+    if !iptr.is_null() {
+        // SAFETY: non-null, and the caller's `float *`.
+        unsafe { iptr.write(int) };
+    }
+    frac
+}
+
+/// `x * 2^n` as glibc's `s_ldexp_template.c` has it, which `ldexp`,
+/// `scalbn`, (through `w_scalbln_template.c`) `scalbln` and `scalb` all are:
+/// a zero or non-finite `x` is its own answer, and `ERANGE` when the result
+/// overflows or underflows to zero ([`ranged`]: judged to nearest).
+fn scaled(x: f64, n: i32) -> f64 {
+    if !x.is_finite() || x == 0.0 {
+        return x + x;
+    }
+    ranged(
+        (x, n),
+        |(x, n)| libm::scalbn(x, n),
+        |r| overflow_or_underflow(true, r),
+    )
+}
+
+/// [`scaled`] (float).
+fn scaled_f(x: f32, n: i32) -> f32 {
+    if !x.is_finite() || x == 0.0 {
+        return x + x;
+    }
+    ranged(
+        (x, n),
+        |(x, n)| libm::scalbnf(x, n),
+        |r| overflow_or_underflow(true, f64::from(r)),
+    )
+}
+
+/// A `long` exponent as an `int` one, clamped: past `±2^31` every double has
+/// long since overflowed or underflowed, so the clamp changes no answer.
+fn clamp_exp(n: i64) -> i32 {
+    i32::try_from(n).unwrap_or(if n < 0 { i32::MIN } else { i32::MAX })
+}
+
+/// `x * 2^n`, rounded once.
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub extern "C" fn ldexp(x: f64, n: i32) -> f64 {
+    scaled(x, n)
+}
+
+/// [`ldexp`] (float).
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub extern "C" fn ldexpf(x: f32, n: i32) -> f32 {
+    scaled_f(x, n)
+}
+
+/// [`ldexp`], by its C99 name.
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub extern "C" fn scalbn(x: f64, n: i32) -> f64 {
+    scaled(x, n)
+}
+
+/// [`ldexpf`], by its C99 name.
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub extern "C" fn scalbnf(x: f32, n: i32) -> f32 {
+    scaled_f(x, n)
+}
+
+/// `x * 2^fn` for a floating `fn` (XSI; removed from POSIX in 2008, still in
+/// glibc and declared by musl): fdlibm's `e_scalb.c`, as musl has it -- a NaN
+/// for an `fn` that is no integer, the exponent clamped at +-65000, beyond
+/// which every double has overflowed or underflowed -- under glibc's
+/// `w_scalb` `errno`: `EDOM` for a NaN made from non-NaN arguments, `ERANGE`
+/// for an infinity from finite ones or a zero from a nonzero `x` and finite
+/// `fn`.
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub extern "C" fn scalb(x: f64, fn_: f64) -> f64 {
+    if x.is_nan() || fn_.is_nan() {
+        return x * fn_;
+    }
+    if !fn_.is_finite() {
+        // An exact infinity or zero, or a NaN from 0 * inf or inf / inf.
+        let z = if fn_ > 0.0 { x * fn_ } else { x / -fn_ };
+        if z.is_nan() {
+            set(errno::EDOM);
+        }
+        return z;
+    }
+    if libm::rint(fn_) != fn_ {
+        set(errno::EDOM);
+        return domain_nan(fn_);
+    }
+    // An integer, clamped at +-65000 (exact within it).
+    #[allow(clippy::cast_possible_truncation)]
+    let n = fn_.clamp(-65000.0, 65000.0) as i32;
+    scaled(x, n)
+}
+
+/// [`scalb`] (float).
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub extern "C" fn scalbf(x: f32, fn_: f32) -> f32 {
+    if x.is_nan() || fn_.is_nan() {
+        return x * fn_;
+    }
+    if !fn_.is_finite() {
+        let z = if fn_ > 0.0 { x * fn_ } else { x / -fn_ };
+        if z.is_nan() {
+            set(errno::EDOM);
+        }
+        return z;
+    }
+    if libm::rintf(fn_) != fn_ {
+        set(errno::EDOM);
+        return domain_nanf(fn_);
+    }
+    #[allow(clippy::cast_possible_truncation)]
+    let n = fn_.clamp(-65000.0, 65000.0) as i32;
+    scaled_f(x, n)
+}
+
+/// 0/0 made from `x`, a finite value: the processor's default NaN with
+/// "invalid" raised -- IEEE's domain error as fdlibm makes it, which a
+/// constant NaN would not raise.
+#[allow(clippy::eq_op)]
+fn domain_nan(x: f64) -> f64 {
+    (x - x) / (x - x)
+}
+
+/// [`domain_nan`] (float).
+#[allow(clippy::eq_op)]
+fn domain_nanf(x: f32) -> f32 {
+    (x - x) / (x - x)
+}
+
+/// [`scalbn`] with a `long` exponent.
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub extern "C" fn scalbln(x: f64, n: i64) -> f64 {
+    scaled(x, clamp_exp(n))
+}
+
+/// [`scalbnf`] with a `long` exponent.
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub extern "C" fn scalblnf(x: f32, n: i64) -> f32 {
+    scaled_f(x, clamp_exp(n))
+}
+
+/// `FP_ILOGB0`: glibc's value on x86-64, `INT_MIN`.
+pub const FP_ILOGB0: i32 = i32::MIN;
+/// `FP_ILOGBNAN`: glibc's value on x86-64, `INT_MIN` too.
+pub const FP_ILOGBNAN: i32 = i32::MIN;
+
+/// glibc's `w_ilogb_template.c`: `EDOM` and invalid for the three answers
+/// that are not an exponent -- zero, NaN, infinity. (The vendored libm's
+/// `ilogb` raises nothing; until 2026-09-28 neither did this, which the math
+/// oracle, recording `errno` but not the flags, could not see. The C23
+/// oracle's `llogb` rows, which record both, did.)
+fn ilogb_errno(r: i32) -> i32 {
+    if r == FP_ILOGB0 || r == FP_ILOGBNAN || r == i32::MAX {
+        set(errno::EDOM);
+        // The return value only reports an argument outside FE_ALL_EXCEPT.
+        let _ = crate::fenv::feraiseexcept(crate::fenv::FE_INVALID);
+    }
+    r
+}
+
+/// The exponent of `x`: `FP_ILOGB0` for zero, `FP_ILOGBNAN` for a NaN,
+/// `INT_MAX` for an infinity, each with `EDOM` and invalid. The crate answers musl's
+/// values, which are these (`INT_MIN`, `INT_MIN`, `INT_MAX`).
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub extern "C" fn ilogb(x: f64) -> i32 {
+    ilogb_errno(libm::ilogb(x))
+}
+
+/// [`ilogb`] (float).
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub extern "C" fn ilogbf(x: f32) -> i32 {
+    ilogb_errno(libm::ilogbf(x))
+}
+
+/// The exponent of `x`, as a double: musl's `logb.c` over [`libm::ilogb`] --
+/// `-inf` (a pole: division by zero, no `errno` in glibc) for zero, `x * x`
+/// for an infinity or a NaN.
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub extern "C" fn logb(x: f64) -> f64 {
+    if !x.is_finite() {
+        return x * x;
+    }
+    if x == 0.0 {
+        return -1.0 / (x * x);
+    }
+    f64::from(libm::ilogb(x))
+}
+
+/// [`logb`] (float).
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub extern "C" fn logbf(x: f32) -> f32 {
+    if !x.is_finite() {
+        return x * x;
+    }
+    if x == 0.0 {
+        return -1.0 / (x * x);
+    }
+    #[allow(clippy::cast_precision_loss)]
+    let e = libm::ilogbf(x) as f32;
+    e
+}
+
+/// `x` scaled into [1, 2): glibc's `s_significand.c`, `scalb(x, -ilogb(x))`.
+/// A zero, an infinity or a NaN is its own answer -- with `EDOM`, because
+/// the `ilogb` glibc calls there is the public one, which sets it for those
+/// three (the oracle below has the three).
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub extern "C" fn significand(x: f64) -> f64 {
+    if !x.is_finite() || x == 0.0 {
+        set(errno::EDOM);
+        return x;
+    }
+    libm::scalbn(x, libm::ilogb(x).saturating_neg())
+}
+
+/// [`significand`] (float).
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub extern "C" fn significandf(x: f32) -> f32 {
+    if !x.is_finite() || x == 0.0 {
+        set(errno::EDOM);
+        return x;
+    }
+    libm::scalbnf(x, libm::ilogbf(x).saturating_neg())
+}
+
+/// glibc's `s_nextafter.c`: `ERANGE` when the step overflows, or lands on a
+/// subnormal or zero -- except from zero itself, which answers the least
+/// subnormal and sets nothing.
+fn next_errno(x: f64, r: f64) -> f64 {
+    let exp_bits = (r.to_bits() >> 52) & 0x7FF;
+    if x != 0.0 && x.is_finite() && (exp_bits == 0x7FF || exp_bits == 0) && !r.is_nan() {
+        set(errno::ERANGE);
+    }
+    r
+}
+
+/// The next double after `x` toward `y`.
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub extern "C" fn nextafter(x: f64, y: f64) -> f64 {
+    let r = libm::nextafter(x, y);
+    if x == y || x.is_nan() || y.is_nan() {
+        return r;
+    }
+    next_errno(x, r)
+}
+
+/// The next float after `x` toward `y` (glibc's `s_nextafterf.c`: the same
+/// rule at float's exponent width).
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub extern "C" fn nextafterf(x: f32, y: f32) -> f32 {
+    let r = libm::nextafterf(x, y);
+    if x == y || x.is_nan() || y.is_nan() {
+        return r;
+    }
+    let exp_bits = (r.to_bits() >> 23) & 0xFF;
+    if x != 0.0 && x.is_finite() && (exp_bits == 0xFF || exp_bits == 0) {
+        set(errno::ERANGE);
+    }
+    r
+}
+
+// ---------------------------------------------------------------------------
+// Exponentials and logarithms
+// ---------------------------------------------------------------------------
+
+/// The rule glibc's `w_exp_template.c` (and `exp2`, `exp10`) apply: `ERANGE`
+/// when a finite argument overflows or underflows to zero ([`ranged`]).
+fn exp_like(x: f64, f: fn(f64) -> f64) -> f64 {
+    ranged(x, f, |r| overflow_or_underflow(x.is_finite(), r))
+}
+
+/// [`exp_like`] (float).
+fn exp_like_f(x: f32, f: fn(f32) -> f32) -> f32 {
+    ranged(x, f, |r| overflow_or_underflow(x.is_finite(), f64::from(r)))
+}
+
+/// `e^x`.
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub extern "C" fn exp(x: f64) -> f64 {
+    exp_like(x, libm::exp)
+}
+
+/// [`exp`] (float).
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub extern "C" fn expf(x: f32) -> f32 {
+    exp_like_f(x, libm::expf)
+}
+
+/// `2^x`.
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub extern "C" fn exp2(x: f64) -> f64 {
+    exp_like(x, libm::exp2)
+}
+
+/// [`exp2`] (float).
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub extern "C" fn exp2f(x: f32) -> f32 {
+    exp_like_f(x, libm::exp2f)
+}
+
+/// `10^x` (a GNU extension, now C23's).
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub extern "C" fn exp10(x: f64) -> f64 {
+    exp_like(x, libm::exp10)
+}
+
+/// [`exp10`] (float).
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub extern "C" fn exp10f(x: f32) -> f32 {
+    exp_like_f(x, libm::exp10f)
+}
+
+/// glibc's old name for [`exp10`].
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub extern "C" fn pow10(x: f64) -> f64 {
+    exp10(x)
+}
+
+/// glibc's old name for [`exp10f`].
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub extern "C" fn pow10f(x: f32) -> f32 {
+    exp10f(x)
+}
+
+/// `e^x - 1`, exact near 0 (glibc's `s_expm1.c`: `ERANGE` on overflow only;
+/// it cannot underflow).
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub extern "C" fn expm1(x: f64) -> f64 {
+    ranged(x, libm::expm1, |r| overflow_only(x.is_finite(), r))
+}
+
+/// [`expm1`] (float).
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub extern "C" fn expm1f(x: f32) -> f32 {
+    ranged(x, libm::expm1f, |r| {
+        overflow_only(x.is_finite(), f64::from(r))
+    })
+}
+
+/// The rule glibc's `w_log_template.c`, `w_log2_template.c` and
+/// `w_log10_template.c` share: `ERANGE` for zero (a pole), `EDOM` below it.
+fn log_errno(x: f64) {
+    if x <= 0.0 {
+        set(if x == 0.0 { errno::ERANGE } else { errno::EDOM });
+    }
+}
+
+/// The natural logarithm.
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub extern "C" fn log(x: f64) -> f64 {
+    log_errno(x);
+    libm::log(x)
+}
+
+/// [`log`] (float).
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub extern "C" fn logf(x: f32) -> f32 {
+    log_errno(f64::from(x));
+    libm::logf(x)
+}
+
+/// The base-2 logarithm.
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub extern "C" fn log2(x: f64) -> f64 {
+    log_errno(x);
+    libm::log2(x)
+}
+
+/// [`log2`] (float).
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub extern "C" fn log2f(x: f32) -> f32 {
+    log_errno(f64::from(x));
+    libm::log2f(x)
+}
+
+/// The base-10 logarithm.
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub extern "C" fn log10(x: f64) -> f64 {
+    log_errno(x);
+    libm::log10(x)
+}
+
+/// [`log10`] (float).
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub extern "C" fn log10f(x: f32) -> f32 {
+    log_errno(f64::from(x));
+    libm::log10f(x)
+}
+
+/// glibc's `w_log1p_template.c`: `ERANGE` at -1 (a pole), `EDOM` below.
+fn log1p_errno(x: f64) {
+    if x <= -1.0 {
+        set(if x == -1.0 {
+            errno::ERANGE
+        } else {
+            errno::EDOM
+        });
+    }
+}
+
+/// `log(1 + x)`, exact near 0.
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub extern "C" fn log1p(x: f64) -> f64 {
+    log1p_errno(x);
+    libm::log1p(x)
+}
+
+/// [`log1p`] (float).
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub extern "C" fn log1pf(x: f32) -> f32 {
+    log1p_errno(f64::from(x));
+    libm::log1pf(x)
+}
+
+/// glibc's `w_pow_template.c`: a non-finite answer from finite arguments is
+/// `EDOM` if it is a NaN (a negative base to a non-integer power) and
+/// `ERANGE` otherwise -- `pow(0, y<0)`'s pole, or an overflow; a zero from a
+/// finite nonzero base and a finite power is an underflow, `ERANGE`. The
+/// pole and the NaN are the arguments' doing and are reported here; the
+/// overflow and the underflow are [`pow_range`]'s, through [`ranged`].
+fn pow_errno(x: f64, y: f64, z: f64) {
+    if x.is_finite() && y.is_finite() {
+        if z.is_nan() {
+            set(errno::EDOM);
+        } else if x == 0.0 && y < 0.0 {
+            set(errno::ERANGE);
+        }
+    }
+}
+
+/// [`Range`] for `pow`: an infinity from a finite nonzero base and a finite
+/// power overflowed, and a zero from them underflowed.
+fn pow_range(x: f64, y: f64, z: f64) -> Range {
+    if !x.is_finite() || !y.is_finite() || x == 0.0 {
+        Range::Within
+    } else if z.is_infinite() {
+        Range::Overflow
+    } else if z == 0.0 {
+        Range::Underflow
+    } else {
+        Range::Within
+    }
+}
+
+/// `x^y`.
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub extern "C" fn pow(x: f64, y: f64) -> f64 {
+    let z = ranged((x, y), |(x, y)| libm::pow(x, y), |z| pow_range(x, y, z));
+    pow_errno(x, y, z);
+    z
+}
+
+/// [`pow`] (float).
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub extern "C" fn powf(x: f32, y: f32) -> f32 {
+    let z = ranged(
+        (x, y),
+        |(x, y)| libm::powf(x, y),
+        |z| pow_range(f64::from(x), f64::from(y), f64::from(z)),
+    );
+    pow_errno(f64::from(x), f64::from(y), f64::from(z));
+    z
+}
+
+/// The cube root.
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub extern "C" fn cbrt(x: f64) -> f64 {
+    libm::cbrt(x)
+}
+
+/// [`cbrt`] (float).
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub extern "C" fn cbrtf(x: f32) -> f32 {
+    libm::cbrtf(x)
+}
+
+/// `sqrt(x*x + y*y)` without the intermediate overflow (glibc: `ERANGE` when
+/// finite arguments overflow).
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub extern "C" fn hypot(x: f64, y: f64) -> f64 {
+    ranged(
+        (x, y),
+        |(x, y)| libm::hypot(x, y),
+        |z| overflow_only(x.is_finite() && y.is_finite(), z),
+    )
+}
+
+/// [`hypot`] (float).
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub extern "C" fn hypotf(x: f32, y: f32) -> f32 {
+    ranged(
+        (x, y),
+        |(x, y)| libm::hypotf(x, y),
+        |z| overflow_only(x.is_finite() && y.is_finite(), f64::from(z)),
+    )
+}
+
+// ---------------------------------------------------------------------------
+// Trigonometry
+// ---------------------------------------------------------------------------
+
+/// glibc's `s_sin.c`, `s_tan.c`, `s_sincos.c` (and their float twins): the
+/// sine, cosine or tangent of an infinity is a domain error.
 ///
-/// Note: historically `gamma()` meant the log-gamma function, not the
-/// true gamma function.  Use `tgamma()` for Γ(x).
+/// Every function here is computed to nearest ([`crate::fenv::in_nearest`]):
+/// musl reduces the argument modulo pi/2 by rounding `x * 2/pi` to an integer
+/// with 1.5 * 2^52 added and taken away, which in another rounding direction
+/// rounds that way instead, and leaves the polynomials an argument up to
+/// 3pi/4 where they were fitted to pi/4 -- `sin(pi)` rounding upward was
+/// 2.3e-11, `tanf(2^23 + 1)` 3,310 ulps out. glibc's `sin`, `cos` and `tan`
+/// switch to nearest the same way (`SET_RESTORE_ROUND_53BIT`).
+fn trig_domain(x: f64) {
+    if x.is_infinite() {
+        set(errno::EDOM);
+    }
+}
+
+/// The sine.
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub extern "C" fn sin(x: f64) -> f64 {
+    trig_domain(x);
+    crate::fenv::in_nearest(x, libm::sin)
+}
+
+/// [`sin`] (float).
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub extern "C" fn sinf(x: f32) -> f32 {
+    trig_domain(f64::from(x));
+    crate::fenv::in_nearest(x, libm::sinf)
+}
+
+/// The cosine.
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub extern "C" fn cos(x: f64) -> f64 {
+    trig_domain(x);
+    crate::fenv::in_nearest(x, libm::cos)
+}
+
+/// [`cos`] (float).
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub extern "C" fn cosf(x: f32) -> f32 {
+    trig_domain(f64::from(x));
+    crate::fenv::in_nearest(x, libm::cosf)
+}
+
+/// The tangent.
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub extern "C" fn tan(x: f64) -> f64 {
+    trig_domain(x);
+    crate::fenv::in_nearest(x, libm::tan)
+}
+
+/// [`tan`] (float).
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub extern "C" fn tanf(x: f32) -> f32 {
+    trig_domain(f64::from(x));
+    crate::fenv::in_nearest(x, libm::tanf)
+}
+
+/// The sine into `*s` and the cosine into `*c`, from one reduction. A NULL
+/// pointer is not written.
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub extern "C" fn sincos(x: f64, s: *mut f64, c: *mut f64) {
+    trig_domain(x);
+    let (sv, cv) = crate::fenv::in_nearest(x, libm::sincos);
+    if !s.is_null() {
+        // SAFETY: non-null, and the caller's `double *`.
+        unsafe { s.write(sv) };
+    }
+    if !c.is_null() {
+        // SAFETY: as for `s`.
+        unsafe { c.write(cv) };
+    }
+}
+
+/// [`sincos`] (float).
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub extern "C" fn sincosf(x: f32, s: *mut f32, c: *mut f32) {
+    trig_domain(f64::from(x));
+    let (sv, cv) = crate::fenv::in_nearest(x, libm::sincosf);
+    if !s.is_null() {
+        // SAFETY: non-null, and the caller's `float *`.
+        unsafe { s.write(sv) };
+    }
+    if !c.is_null() {
+        // SAFETY: as for `s`.
+        unsafe { c.write(cv) };
+    }
+}
+
+/// `EDOM` for |x| > 1: glibc's `w_asin_template.c` and `w_acos_template.c`.
+fn unit_domain(x: f64) {
+    if x.abs() > 1.0 {
+        set(errno::EDOM);
+    }
+}
+
+/// The arcsine.
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub extern "C" fn asin(x: f64) -> f64 {
+    unit_domain(x);
+    libm::asin(x)
+}
+
+/// [`asin`] (float).
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub extern "C" fn asinf(x: f32) -> f32 {
+    unit_domain(f64::from(x));
+    libm::asinf(x)
+}
+
+/// The arccosine.
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub extern "C" fn acos(x: f64) -> f64 {
+    unit_domain(x);
+    libm::acos(x)
+}
+
+/// [`acos`] (float).
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub extern "C" fn acosf(x: f32) -> f32 {
+    unit_domain(f64::from(x));
+    libm::acosf(x)
+}
+
+/// The arctangent.
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub extern "C" fn atan(x: f64) -> f64 {
+    libm::atan(x)
+}
+
+/// [`atan`] (float).
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub extern "C" fn atanf(x: f32) -> f32 {
+    libm::atanf(x)
+}
+
+/// The angle of the point (`x`, `y`) -- note the order, `y` first. glibc's
+/// `w_atan2_template.c`: `ERANGE` when a nonzero `y` and finite `x`
+/// underflow to zero ([`ranged`]).
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub extern "C" fn atan2(y: f64, x: f64) -> f64 {
+    ranged(
+        (y, x),
+        |(y, x)| libm::atan2(y, x),
+        |z| underflow_only(z == 0.0 && y != 0.0 && x.is_finite()),
+    )
+}
+
+/// [`atan2`] (float).
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub extern "C" fn atan2f(y: f32, x: f32) -> f32 {
+    ranged(
+        (y, x),
+        |(y, x)| libm::atan2f(y, x),
+        |z| underflow_only(z == 0.0 && y != 0.0 && x.is_finite()),
+    )
+}
+
+// ---------------------------------------------------------------------------
+// Hyperbolic
+// ---------------------------------------------------------------------------
+
+/// The hyperbolic sine (glibc's `w_sinh_template.c`: `ERANGE` when a finite
+/// argument overflows, [`ranged`]).
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub extern "C" fn sinh(x: f64) -> f64 {
+    ranged(x, libm::sinh, |z| overflow_only(x.is_finite(), z))
+}
+
+/// [`sinh`] (float).
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub extern "C" fn sinhf(x: f32) -> f32 {
+    ranged(x, libm::sinhf, |z| {
+        overflow_only(x.is_finite(), f64::from(z))
+    })
+}
+
+/// The hyperbolic cosine (`w_cosh_template.c`: as [`sinh`]).
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub extern "C" fn cosh(x: f64) -> f64 {
+    ranged(x, libm::cosh, |z| overflow_only(x.is_finite(), z))
+}
+
+/// [`cosh`] (float).
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub extern "C" fn coshf(x: f32) -> f32 {
+    ranged(x, libm::coshf, |z| {
+        overflow_only(x.is_finite(), f64::from(z))
+    })
+}
+
+/// The hyperbolic tangent.
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub extern "C" fn tanh(x: f64) -> f64 {
+    libm::tanh(x)
+}
+
+/// [`tanh`] (float).
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub extern "C" fn tanhf(x: f32) -> f32 {
+    libm::tanhf(x)
+}
+
+/// The inverse hyperbolic sine.
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub extern "C" fn asinh(x: f64) -> f64 {
+    libm::asinh(x)
+}
+
+/// [`asinh`] (float).
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub extern "C" fn asinhf(x: f32) -> f32 {
+    libm::asinhf(x)
+}
+
+/// The inverse hyperbolic cosine (`EDOM`, and a NaN, below 1: glibc's
+/// `w_acosh_template.c` and `e_acosh.c`).
+///
+/// The NaN is made here and not left to the crate: musl's `acosh.c` leaves
+/// "x < 1" to the `log` it ends in, and for a large negative `x` the
+/// argument that reaches it cancels to a small positive number, so
+/// `acosh(-427000)` answered 2.65 (found by the glibc oracle below).
+///
+/// `acosh(1)` is +0 in every rounding direction (C's Annex F): musl's
+/// `log1p(x - 1 + ...)` makes it -0 rounding downward, where `1 - 1` is -0.
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub extern "C" fn acosh(x: f64) -> f64 {
+    if x < 1.0 {
+        set(errno::EDOM);
+        // glibc's e_acosh.c, and IEEE's way to make the domain error: 0/0
+        // raises "invalid" and yields the processor's default NaN (on x86-64
+        // the one printf shows as -nan), as every other domain error here
+        // does. A constant NaN would do neither.
+        #[allow(clippy::eq_op)]
+        return (x - x) / (x - x);
+    }
+    if x == 1.0 {
+        return 0.0;
+    }
+    libm::acosh(x)
+}
+
+/// [`acosh`] (float; `acoshf.c` has the same shape).
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub extern "C" fn acoshf(x: f32) -> f32 {
+    if x < 1.0 {
+        set(errno::EDOM);
+        // As in `acosh`.
+        #[allow(clippy::eq_op)]
+        return (x - x) / (x - x);
+    }
+    if x == 1.0 {
+        return 0.0;
+    }
+    libm::acoshf(x)
+}
+
+/// glibc's `w_atanh_template.c`: `ERANGE` at ±1 (a pole), `EDOM` beyond.
+fn atanh_errno(x: f64) {
+    if x.abs() >= 1.0 {
+        set(if x.abs() == 1.0 {
+            errno::ERANGE
+        } else {
+            errno::EDOM
+        });
+    }
+}
+
+/// The inverse hyperbolic tangent.
+///
+/// At +-1, the poles, `x / 0` -- an infinity of `x`'s sign, raising
+/// divide-by-zero -- as glibc's `e_atanh.c` answers: musl's `2x / (1 - x)`
+/// divides by -0 there when rounding downward, and its `log1p(-inf)` is a
+/// NaN.
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub extern "C" fn atanh(x: f64) -> f64 {
+    atanh_errno(x);
+    if x.abs() == 1.0 {
+        return x / core::hint::black_box(0.0);
+    }
+    libm::atanh(x)
+}
+
+/// [`atanh`] (float).
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub extern "C" fn atanhf(x: f32) -> f32 {
+    atanh_errno(f64::from(x));
+    if x.abs() == 1.0 {
+        return x / core::hint::black_box(0.0);
+    }
+    libm::atanhf(x)
+}
+
+// ---------------------------------------------------------------------------
+// Error and gamma functions
+// ---------------------------------------------------------------------------
+
+/// The error function.
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub extern "C" fn erf(x: f64) -> f64 {
+    libm::erf(x)
+}
+
+/// [`erf`] (float).
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub extern "C" fn erff(x: f32) -> f32 {
+    libm::erff(x)
+}
+
+/// `1 - erf(x)`, without the cancellation (glibc's `s_erf.c`: `ERANGE` when a
+/// positive argument underflows to zero, [`ranged`]).
+///
+/// +0 and 2 at the infinities, here: musl's `2 * sign + 1 / x` for them
+/// converts its unsigned `sign` to a double, which x86-64 does without an
+/// instruction for it by subtracting 2^52 from 2^52 + `sign` -- -0 rounding
+/// downward, so `erfc(inf)` was -0.
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub extern "C" fn erfc(x: f64) -> f64 {
+    if x.is_infinite() {
+        return if x > 0.0 { 0.0 } else { 2.0 };
+    }
+    ranged(x, libm::erfc, |r| {
+        underflow_only(r == 0.0 && x > 0.0 && x.is_finite())
+    })
+}
+
+/// [`erfc`] (float).
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub extern "C" fn erfcf(x: f32) -> f32 {
+    ranged(x, libm::erfcf, |r| {
+        underflow_only(r == 0.0 && x > 0.0 && x.is_finite())
+    })
+}
+
+/// The sign of Γ(x) the last [`lgamma`] found, as C declares it: `int
+/// signgam`, which glibc exports (the symbol was missing until 2026-09-27).
+///
+/// One global, as glibc's is: `lgamma` is not thread-safe for exactly this
+/// reason, and `lgamma_r` exists so that callers who care need not read it.
+/// An `AtomicI32` rather than a `static mut` all the same: it has C's `int`
+/// layout, so a C program reads and assigns it as the `int` it declares, but
+/// two threads calling `lgamma` at once -- a C program's race, which C
+/// permits it to have -- are then not undefined behaviour inside this
+/// library. Relaxed: the value is one call's result, ordered with nothing.
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub static signgam: AtomicI32 = AtomicI32::new(0);
+
+/// glibc's `w_lgamma_template.c`: `ERANGE` when a finite argument gives an
+/// infinity -- a pole at 0 or a negative integer, reported here, or an
+/// overflow past 2.5e305, [`ranged`]'s.
+fn lgamma_errno(x: f64) {
+    if x.is_finite() && x <= 0.0 && libm::floor(x) == x {
+        set(errno::ERANGE);
+    }
+}
+
+/// [`Range`] for `lgamma`: an infinity from a finite argument that is no pole
+/// overflowed.
+fn lgamma_range(x: f64, y: f64) -> Range {
+    let pole = x <= 0.0 && libm::floor(x) == x;
+    overflow_only(x.is_finite() && !pole, y)
+}
+
+/// `(log|gamma(x)|, sign of gamma(x))` from CORE-MATH's port, with
+/// [`lgamma_errno`] and [`lgamma_range`]'s `ERANGE`. The pair is recomputed
+/// in full where [`ranged`] needs the round-to-nearest value; the sign does
+/// not depend on the rounding.
+fn lgamma_ranged(x: f64) -> (f64, i32) {
+    lgamma_errno(x);
+    let sign = core::cell::Cell::new(1);
+    let y = ranged(
+        x,
+        |x| {
+            let (y, s) = crate::lgamma::lgamma_cr(x);
+            sign.set(s);
+            y
+        },
+        |y| lgamma_range(x, y),
+    );
+    (y, sign.get())
+}
+
+/// [`lgamma_ranged`] (float).
+fn lgammaf_ranged(x: f32) -> (f32, i32) {
+    lgamma_errno(f64::from(x));
+    let sign = core::cell::Cell::new(1);
+    let y = ranged(
+        x,
+        |x| {
+            let (y, s) = crate::lgamma::lgammaf_cr(x);
+            sign.set(s);
+            y
+        },
+        |y| lgamma_range(f64::from(x), f64::from(y)),
+    );
+    (y, sign.get())
+}
+
+/// For the tests: `signgam` is one process-wide `int` by C's definition, and
+/// every `lgamma`, `lgammaf`, `gamma`, `gammaf` and `lgammal` call writes it
+/// -- `mathl.rs`'s `lgammal` stores to this same global. Each test that makes
+/// one, in this module or in `mathl.rs`, directly or through an oracle's
+/// table, takes this first, so that `lgamma_sets_signgam` reads the sign its
+/// own call left. (Until 2026-09-28 the lock was `math.rs`'s tests' alone,
+/// and `mathl.rs`'s tests wrote `signgam` beside it -- a race the pre-push
+/// gate's shuffled orders could lose.) Poison is recovered so that one real
+/// failure reports once. Every test calls this itself, with no wrapper
+/// between: the pre-push gate's `scripts/raced-globals.py` looks one call deep
+/// from a test for the lock it takes, and a wrapper hid this one.
+#[cfg(test)]
+pub(crate) fn signgam_test_lock() -> std::sync::MutexGuard<'static, ()> {
+    static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    LOCK.lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
+/// `log|Γ(x)|`, correctly rounded (CORE-MATH's: `lgamma.rs`), its sign
+/// stored in [`signgam`].
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub extern "C" fn lgamma(x: f64) -> f64 {
+    let (y, sign) = lgamma_ranged(x);
+    signgam.store(sign, Ordering::Relaxed);
+    y
+}
+
+/// [`lgamma`] (float).
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub extern "C" fn lgammaf(x: f32) -> f32 {
+    let (y, sign) = lgammaf_ranged(x);
+    signgam.store(sign, Ordering::Relaxed);
+    y
+}
+
+/// `log|Γ(x)|`, its sign in `*sign` rather than [`signgam`]. A NULL `sign` is
+/// not written.
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub extern "C" fn lgamma_r(x: f64, sign: *mut i32) -> f64 {
+    let (y, s) = lgamma_ranged(x);
+    if !sign.is_null() {
+        // SAFETY: non-null, and the caller's `int *`.
+        unsafe { sign.write(s) };
+    }
+    y
+}
+
+/// [`lgamma_r`] (float).
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub extern "C" fn lgammaf_r(x: f32, sign: *mut i32) -> f32 {
+    let (y, s) = lgammaf_ranged(x);
+    if !sign.is_null() {
+        // SAFETY: non-null, and the caller's `int *`.
+        unsafe { sign.write(s) };
+    }
+    y
+}
+
+/// The old name for [`lgamma`], which glibc keeps.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn gamma(x: f64) -> f64 {
     lgamma(x)
 }
 
-/// `gammaf(x)` — f32 variant.
+/// The old name for [`lgammaf`].
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn gammaf(x: f32) -> f32 {
     lgammaf(x)
 }
 
-/// `significand(x)` — extract significand (mantissa) scaled to [1, 2).
-///
-/// Returns `x * 2^(-ilogb(x))`, i.e. the significand as if the
-/// exponent were 0.
-#[cfg_attr(target_os = "none", unsafe(no_mangle))]
-#[allow(clippy::arithmetic_side_effects)]
-pub extern "C" fn significand(x: f64) -> f64 {
-    if x.is_nan() || x.is_infinite() || x == 0.0 {
-        return x;
+/// glibc's `w_tgamma_template.c`: a non-finite or zero answer from a finite
+/// argument (or from -inf) is `ERANGE` at 0 (a pole), `EDOM` at a negative
+/// integer -- both the argument's doing, reported here -- and `ERANGE`
+/// otherwise: an overflow or an underflow, [`tgamma_range`]'s.
+fn tgamma_errno(x: f64) {
+    if x == 0.0 {
+        set(errno::ERANGE);
+    } else if x < 0.0 && libm::floor(x) == x {
+        // -inf included.
+        set(errno::EDOM);
     }
-    // scalbn(x, -ilogb(x)) normalizes x to [1, 2).
-    scalbn(x, -ilogb(x))
 }
 
-/// `significandf(x)` — f32 variant.
+/// [`Range`] for `tgamma`: an infinity or a zero from a finite argument that
+/// is neither 0 nor a negative integer overflowed or underflowed.
+fn tgamma_range(x: f64, y: f64) -> Range {
+    let exact = x == 0.0 || (x < 0.0 && libm::floor(x) == x);
+    overflow_or_underflow(x.is_finite() && !exact, y)
+}
+
+/// Γ(x).
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
-pub extern "C" fn significandf(x: f32) -> f32 {
-    significand(f64::from(x)) as f32
+pub extern "C" fn tgamma(x: f64) -> f64 {
+    tgamma_errno(x);
+    ranged(x, libm::tgamma, |y| tgamma_range(x, y))
+}
+
+/// [`tgamma`] (float).
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub extern "C" fn tgammaf(x: f32) -> f32 {
+    tgamma_errno(f64::from(x));
+    ranged(x, libm::tgammaf, |y| {
+        tgamma_range(f64::from(x), f64::from(y))
+    })
 }
 
 // ---------------------------------------------------------------------------
-// Bessel functions (first and second kind)
+// Bessel functions: glibc's w_j0/j1/jn templates -- the `y` functions are a
+// domain error below 0 and a pole at 0, the `j` functions a domain of
+// everything -- and what glibc's e_j1.c and e_jn.c add on top: a result that
+// underflows to zero is ERANGE, one that overflows to -inf is ERANGE, and at
+// an infinity an odd order keeps the argument's sign (j1(-inf) is -0, where
+// musl answers +0).
+//
+// Each is computed to nearest ([`crate::fenv::in_nearest`]): past x = 2 their
+// asymptotic forms take the sine and cosine of x, with the sine's argument
+// reduction (see `trig_domain`), and in another rounding direction `j0(pi)`
+// was 188,000 ulps out and `j1(3.83)`, near its root, 7,000 times too large.
+// Their range errors go through [`ranged`].
 // ---------------------------------------------------------------------------
+
+/// `EDOM` below 0, `ERANGE` at 0 (the `y` templates).
+fn bessel_y_errno(x: f64) {
+    if x <= 0.0 {
+        set(if x < 0.0 { errno::EDOM } else { errno::ERANGE });
+    }
+}
+
+/// A `j` function's range: a zero from a nonzero finite argument underflowed
+/// (e_j1.c's `ret == 0 && x != 0` for `0.5 * x`, and e_jn.c's `ret == 0`).
+fn bessel_underflow(x: f64, r: f64) -> Range {
+    underflow_only(r == 0.0 && x != 0.0 && x.is_finite())
+}
+
+/// A `y` function's range: an infinity from a positive finite argument
+/// overflowed (e_j1.c's `-tpi / x` for tiny `x`, and e_jn.c's "if B is
+/// +-Inf").
+fn bessel_overflow(x: f64, r: f64) -> Range {
+    overflow_only(x > 0.0 && x.is_finite(), r)
+}
+
+/// An order as glibc's jn/yn take it: its magnitude, and whether it is odd.
+fn order(n: i32) -> (u32, bool) {
+    let m = n.unsigned_abs();
+    (m, m % 2 == 1)
+}
 
 /// Bessel function of the first kind, order 0.
-///
-/// Uses polynomial approximation: rational for |x| <= 3, and
-/// asymptotic expansion for |x| > 3.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
-#[allow(clippy::arithmetic_side_effects)]
 pub extern "C" fn j0(x: f64) -> f64 {
-    let a = fabs(x);
-
-    if a <= 3.0 {
-        // Rational approximation for small |x|.
-        // J0(x) ≈ 1 - x²/4 + x⁴/64 - x⁶/2304 + ...
-        let x2 = x * x;
-        let x4 = x2 * x2;
-        let x6 = x4 * x2;
-        let x8 = x4 * x4;
-        1.0 - x2 / 4.0 + x4 / 64.0 - x6 / 2304.0 + x8 / 147_456.0
-    } else {
-        // Asymptotic: J0(x) ≈ √(2/(πx)) * cos(x - π/4).
-        let phase = a - consts::FRAC_PI_4;
-        sqrt(2.0 / (consts::PI * a)) * cos(phase)
-    }
+    crate::fenv::in_nearest(x, libm::j0)
 }
 
-/// Bessel function of the first kind, order 1.
+/// Bessel function of the first kind, order 1 (`1/x`, a signed zero, at an
+/// infinity, as e_j1.c answers).
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
-#[allow(clippy::arithmetic_side_effects)]
 pub extern "C" fn j1(x: f64) -> f64 {
-    let a = fabs(x);
-    let sign = if x < 0.0 { -1.0 } else { 1.0 };
-
-    if a <= 3.0 {
-        // Series: J1(x) = x/2 * (1 - x²/8 + x⁴/192 - x⁶/9216 + ...).
-        let x2 = x * x;
-        let x4 = x2 * x2;
-        let x6 = x4 * x2;
-        sign * a / 2.0 * (1.0 - a * a / 8.0 + x4 / 192.0 - x6 / 9216.0)
-    } else {
-        // Asymptotic: J1(x) ≈ √(2/(πx)) * cos(x - 3π/4).
-        let phase = a - 3.0 * consts::FRAC_PI_4;
-        sign * sqrt(2.0 / (consts::PI * a)) * cos(phase)
+    if x.is_infinite() {
+        return 1.0 / x;
     }
+    ranged(
+        x,
+        |x| crate::fenv::in_nearest(x, libm::j1),
+        |r| bessel_underflow(x, r),
+    )
 }
 
-/// Bessel function of the first kind, order n (integer).
-///
-/// Uses Miller's backward recurrence for stability.
+/// Bessel function of the first kind, order `n`: e_jn.c's `J(-n, x) =
+/// J(n, -x)`, a signed zero at 0 and at an infinity, `ERANGE` on underflow.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
-#[allow(clippy::arithmetic_side_effects)]
 pub extern "C" fn jn(n: i32, x: f64) -> f64 {
-    if n == 0 {
-        return j0(x);
+    if x.is_nan() {
+        return x + x;
     }
-    if n == 1 {
-        return j1(x);
+    let (m, odd) = order(n);
+    let xx = if n < 0 { -x } else { x };
+    match m {
+        0 => j0(xx),
+        1 => j1(xx),
+        _ => {
+            if xx == 0.0 || xx.is_infinite() {
+                return if odd && xx.is_sign_negative() {
+                    -0.0
+                } else {
+                    0.0
+                };
+            }
+            ranged(
+                (n, x),
+                |a| crate::fenv::in_nearest(a, |(n, x)| libm::jn(n, x)),
+                |r| bessel_underflow(x, r),
+            )
+        }
     }
-
-    let sign = if n < 0 && (-n) % 2 != 0 { -1.0 } else { 1.0 };
-    let n_abs = if n < 0 { -n } else { n };
-    let a = fabs(x);
-
-    if a == 0.0 {
-        return 0.0;
-    }
-
-    // Forward recurrence: J_{n+1}(x) = (2n/x)*J_n(x) - J_{n-1}(x).
-    // Stable for n < x; for n > x, accuracy degrades but is acceptable
-    // for our purposes.
-    let mut j_prev = j0(a);
-    let mut j_curr = j1(a);
-
-    let mut k: i32 = 1;
-    while k < n_abs {
-        let j_next = (2.0 * f64::from(k) / a) * j_curr - j_prev;
-        j_prev = j_curr;
-        j_curr = j_next;
-        k = k.wrapping_add(1);
-    }
-
-    let result = if x < 0.0 && n_abs % 2 != 0 {
-        -j_curr
-    } else {
-        j_curr
-    };
-    sign * result
 }
 
 /// Bessel function of the second kind, order 0.
-///
-/// Y0(x) ≈ (2/π) * (J0(x) * (ln(x/2) + γ) + series correction).
-/// Uses asymptotic expansion for large x.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
-#[allow(clippy::arithmetic_side_effects)]
 pub extern "C" fn y0(x: f64) -> f64 {
-    // Euler-Mascheroni constant γ ≈ 0.5772156649.
-    const EULER_GAMMA: f64 = 0.577_215_664_901_532_9;
-
-    if x <= 0.0 {
-        return if x == 0.0 {
-            f64::NEG_INFINITY
-        } else {
-            f64::NAN
-        };
-    }
-    if x.is_nan() {
-        return x;
-    }
-
-    if x > 3.0 {
-        // Asymptotic: Y0(x) ≈ √(2/(πx)) * sin(x - π/4).
-        let phase = x - consts::FRAC_PI_4;
-        return sqrt(2.0 / (consts::PI * x)) * sin(phase);
-    }
-
-    // Small x: Y0(x) = (2/π) * (J0(x)*(ln(x/2) + γ) + correction).
-    let j0x = j0(x);
-    let ln_term = log(x / 2.0) + EULER_GAMMA;
-
-    // First few correction terms from the series.
-    let x2 = x * x;
-    let correction = x2 / 4.0 - x2 * x2 * 3.0 / 128.0;
-
-    (2.0 / consts::PI) * (j0x * ln_term + correction)
+    bessel_y_errno(x);
+    crate::fenv::in_nearest(x, libm::y0)
 }
 
 /// Bessel function of the second kind, order 1.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
-#[allow(clippy::arithmetic_side_effects)]
 pub extern "C" fn y1(x: f64) -> f64 {
-    // Euler-Mascheroni constant γ ≈ 0.5772156649.
-    const EULER_GAMMA: f64 = 0.577_215_664_901_532_9;
-
-    if x <= 0.0 {
-        return if x == 0.0 {
-            f64::NEG_INFINITY
-        } else {
-            f64::NAN
-        };
-    }
-    if x.is_nan() {
-        return x;
-    }
-
-    if x > 3.0 {
-        // Asymptotic: Y1(x) ≈ √(2/(πx)) * sin(x - 3π/4).
-        let phase = x - 3.0 * consts::FRAC_PI_4;
-        return sqrt(2.0 / (consts::PI * x)) * sin(phase);
-    }
-
-    // Small x: Y1(x) ≈ (2/π) * (J1(x)*ln(x/2) - 1/x).
-    let j1x = j1(x);
-    let ln_term = log(x / 2.0) + EULER_GAMMA;
-    (2.0 / consts::PI) * (j1x * ln_term - 1.0 / x)
+    bessel_y_errno(x);
+    ranged(
+        x,
+        |x| crate::fenv::in_nearest(x, libm::y1),
+        |r| bessel_overflow(x, r),
+    )
 }
 
-/// Bessel function of the second kind, order n (integer).
-///
-/// Uses forward recurrence from Y0 and Y1.
+/// Bessel function of the second kind, order `n` (e_jn.c: `Y(-n, x) =
+/// (-1)^n Y(n, x)`, so order -1 at +inf is -0; +0 at +inf otherwise).
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
-#[allow(clippy::arithmetic_side_effects)]
 pub extern "C" fn yn(n: i32, x: f64) -> f64 {
-    if x <= 0.0 {
-        return if x == 0.0 {
-            f64::NEG_INFINITY
-        } else {
-            f64::NAN
-        };
+    bessel_y_errno(x);
+    if x.is_nan() {
+        return x + x;
     }
-    if n == 0 {
-        return y0(x);
-    }
-    if n == 1 {
-        return y1(x);
-    }
-
-    let n_abs = if n < 0 { -n } else { n };
-
-    // Forward recurrence: Y_{n+1}(x) = (2n/x)*Y_n(x) - Y_{n-1}(x).
-    let mut y_prev = y0(x);
-    let mut y_curr = y1(x);
-
-    let mut k: i32 = 1;
-    while k < n_abs {
-        let y_next = (2.0 * f64::from(k) / x) * y_curr - y_prev;
-        y_prev = y_curr;
-        y_curr = y_next;
-        k = k.wrapping_add(1);
-    }
-
-    if n < 0 && (-n) % 2 != 0 {
-        -y_curr
-    } else {
-        y_curr
+    let (m, odd) = order(n);
+    let sign = if n < 0 && odd { -1.0 } else { 1.0 };
+    match m {
+        0 => crate::fenv::in_nearest(x, libm::y0),
+        1 => ranged(
+            x,
+            |x| sign * crate::fenv::in_nearest(x, libm::y1),
+            |r| bessel_overflow(x, r),
+        ),
+        _ if x == f64::INFINITY => 0.0,
+        _ => ranged(
+            (n, x),
+            |a| crate::fenv::in_nearest(a, |(n, x)| libm::yn(n, x)),
+            |r| bessel_overflow(x, r),
+        ),
     }
 }
 
-// ===========================================================================
-// Tests
-// ===========================================================================
+/// [`j0`] (float; a GNU extension, missing until 2026-09-27).
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub extern "C" fn j0f(x: f32) -> f32 {
+    crate::fenv::in_nearest(x, libm::j0f)
+}
+
+/// [`j1`] (float).
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub extern "C" fn j1f(x: f32) -> f32 {
+    if x.is_infinite() {
+        return 1.0 / x;
+    }
+    ranged(
+        x,
+        |x| crate::fenv::in_nearest(x, libm::j1f),
+        |r| bessel_underflow(f64::from(x), f64::from(r)),
+    )
+}
+
+/// [`jn`] (float).
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub extern "C" fn jnf(n: i32, x: f32) -> f32 {
+    if x.is_nan() {
+        return x + x;
+    }
+    let (m, odd) = order(n);
+    let xx = if n < 0 { -x } else { x };
+    match m {
+        0 => j0f(xx),
+        1 => j1f(xx),
+        _ => {
+            if xx == 0.0 || xx.is_infinite() {
+                return if odd && xx.is_sign_negative() {
+                    -0.0
+                } else {
+                    0.0
+                };
+            }
+            ranged(
+                (n, x),
+                |a| crate::fenv::in_nearest(a, |(n, x)| libm::jnf(n, x)),
+                |r| bessel_underflow(f64::from(x), f64::from(r)),
+            )
+        }
+    }
+}
+
+/// [`y0`] (float).
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub extern "C" fn y0f(x: f32) -> f32 {
+    bessel_y_errno(f64::from(x));
+    crate::fenv::in_nearest(x, libm::y0f)
+}
+
+/// [`y1`] (float).
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub extern "C" fn y1f(x: f32) -> f32 {
+    bessel_y_errno(f64::from(x));
+    ranged(
+        x,
+        |x| crate::fenv::in_nearest(x, libm::y1f),
+        |r| bessel_overflow(f64::from(x), f64::from(r)),
+    )
+}
+
+/// [`yn`] (float).
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub extern "C" fn ynf(n: i32, x: f32) -> f32 {
+    bessel_y_errno(f64::from(x));
+    if x.is_nan() {
+        return x + x;
+    }
+    let (m, odd) = order(n);
+    let sign = if n < 0 && odd { -1.0 } else { 1.0 };
+    match m {
+        0 => crate::fenv::in_nearest(x, libm::y0f),
+        1 => ranged(
+            x,
+            |x| sign * crate::fenv::in_nearest(x, libm::y1f),
+            |r| bessel_overflow(f64::from(x), f64::from(r)),
+        ),
+        _ if x == f32::INFINITY => 0.0,
+        _ => ranged(
+            (n, x),
+            |a| crate::fenv::in_nearest(a, |(n, x)| libm::ynf(n, x)),
+            |r| bessel_overflow(f64::from(x), f64::from(r)),
+        ),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Classification. C writes these as macros over the bits (musl's <math.h>
+// does); glibc also exports them as functions, which old binaries and a few
+// build systems' probes call.
+// ---------------------------------------------------------------------------
+
+/// `FP_NAN`, `FP_INFINITE`, `FP_ZERO`, `FP_SUBNORMAL`, `FP_NORMAL`: glibc's
+/// (and musl's) values.
+pub const FP_NAN: i32 = 0;
+/// See [`FP_NAN`].
+pub const FP_INFINITE: i32 = 1;
+/// See [`FP_NAN`].
+pub const FP_ZERO: i32 = 2;
+/// See [`FP_NAN`].
+pub const FP_SUBNORMAL: i32 = 3;
+/// See [`FP_NAN`].
+pub const FP_NORMAL: i32 = 4;
+
+/// Which kind of number `x` is -- what musl's `fpclassify` macro calls for a
+/// double, so a C program using `fpclassify` did not link until 2026-09-27.
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub extern "C" fn __fpclassify(x: f64) -> i32 {
+    match x.classify() {
+        core::num::FpCategory::Nan => FP_NAN,
+        core::num::FpCategory::Infinite => FP_INFINITE,
+        core::num::FpCategory::Zero => FP_ZERO,
+        core::num::FpCategory::Subnormal => FP_SUBNORMAL,
+        core::num::FpCategory::Normal => FP_NORMAL,
+    }
+}
+
+/// [`__fpclassify`] (float).
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub extern "C" fn __fpclassifyf(x: f32) -> i32 {
+    __fpclassify(f64::from(x))
+}
+
+/// Whether `x`'s sign bit is set (-0.0 and negative NaNs included), as
+/// glibc's `__signbit`.
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub extern "C" fn __signbit(x: f64) -> i32 {
+    i32::from(x.is_sign_negative())
+}
+
+/// [`__signbit`] (float).
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub extern "C" fn __signbitf(x: f32) -> i32 {
+    i32::from(x.is_sign_negative())
+}
+
+/// 1 for a NaN, else 0.
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub extern "C" fn isnan(x: f64) -> i32 {
+    i32::from(x.is_nan())
+}
+
+/// `isnanf`: [`isnan`] (float).
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub extern "C" fn isnanf(x: f32) -> i32 {
+    i32::from(x.is_nan())
+}
+
+/// glibc's `isinf`: 1 for +inf, -1 for -inf, 0 otherwise.
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub extern "C" fn isinf(x: f64) -> i32 {
+    if x.is_infinite() {
+        if x > 0.0 { 1 } else { -1 }
+    } else {
+        0
+    }
+}
+
+/// [`isinf`] (float).
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub extern "C" fn isinff(x: f32) -> i32 {
+    isinf(f64::from(x))
+}
+
+/// 1 for a number that is neither infinite nor NaN.
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub extern "C" fn finite(x: f64) -> i32 {
+    i32::from(x.is_finite())
+}
+
+/// [`finite`] (float).
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub extern "C" fn finitef(x: f32) -> i32 {
+    i32::from(x.is_finite())
+}
+
+/// C99's `isfinite`, which glibc also exports as a function.
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub extern "C" fn isfinite(x: f64) -> i32 {
+    finite(x)
+}
+
+// ---------------------------------------------------------------------------
+// nan(tag)
+// ---------------------------------------------------------------------------
+
+/// The NUL-terminated `tag`, as bytes; empty for NULL.
+///
+/// # Safety
+///
+/// `tag` is NULL or a NUL-terminated string that outlives `'a`.
+pub(crate) unsafe fn tag_bytes<'a>(tag: *const u8) -> &'a [u8] {
+    if tag.is_null() {
+        return &[];
+    }
+    // SAFETY: the caller's NUL-terminated string (this function's contract);
+    // `n` stops at the NUL, which the string has, so it never passes the end
+    // of the allocation, and the slice ends before it.
+    unsafe {
+        let mut n = 0usize;
+        while *tag.add(n) != 0 {
+            n = n.wrapping_add(1);
+        }
+        core::slice::from_raw_parts(tag, n)
+    }
+}
+
+/// A quiet NaN, `tag` in its payload as glibc puts it there: glibc's
+/// `nan` is `__strtod_nan (tag, NULL, 0)`, so the whole tag must be
+/// n-chars (`[0-9A-Za-z_]`), read as `strtoull` reads a number, and
+/// anything else is the default NaN (`crate::decfloat::nan_payload`, shared
+/// with `strtod`'s `nan(...)`). Until 2026-09-27 the tag was ignored.
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub extern "C" fn nan(tag: *const u8) -> f64 {
+    // SAFETY: `nan`'s contract: `tag` is NULL or the caller's C string.
+    crate::decfloat::nan_f64(tag_payload(unsafe { tag_bytes(tag) }), false)
+}
+
+/// [`nan`] (float: 22 payload bits).
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub extern "C" fn nanf(tag: *const u8) -> f32 {
+    // SAFETY: as in `nan`.
+    crate::decfloat::nan_f32(tag_payload(unsafe { tag_bytes(tag) }), false)
+}
+
+/// The payload of a whole tag: every byte an n-char, the run a number.
+pub(crate) fn tag_payload(tag: &[u8]) -> Option<u64> {
+    if !tag.iter().all(|&c| crate::decfloat::is_nchar(c)) {
+        return None;
+    }
+    crate::decfloat::nan_payload(&crate::decfloat::SliceSource(tag), 0, tag.len())
+}
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    // Approximate comparison helpers.  Taylor-series implementations are
-    // accurate to roughly 10-15 digits (f64) and 5-7 digits (f32), so we
-    // use tolerances that are tight but not tighter than the implementation
-    // can deliver.
+    // The constants the old hand-written module kept for itself; the tests
+    // written against it still name them.
+    const PI: f64 = core::f64::consts::PI;
+    const HALF_PI: f64 = core::f64::consts::FRAC_PI_2;
+    const TWO_PI: f64 = core::f64::consts::TAU;
+    const LN2: f64 = core::f64::consts::LN_2;
+
+    // Approximate comparison helpers, from when this module was a set of
+    // Taylor series; the tolerances are loose for libm, which is why the
+    // oracle test at the end compares in ulps instead.
 
     /// Assert two f64 values are approximately equal within `eps`.
     fn assert_approx(a: f64, b: f64, eps: f64, msg: &str) {
@@ -3109,7 +3125,9 @@ mod tests {
         assert_eq!(ilogb(0.5), -1, "ilogb(0.5)");
         assert_eq!(ilogb(0.0), i32::MIN, "ilogb(0) = FP_ILOGB0");
         assert_eq!(ilogb(f64::INFINITY), i32::MAX, "ilogb(inf) = INT_MAX");
-        assert_eq!(ilogb(f64::NAN), i32::MAX, "ilogb(NaN) = FP_ILOGBNAN");
+        // glibc's FP_ILOGBNAN on x86-64 is INT_MIN, as musl's is (the oracle
+        // below has it); this said INT_MAX, the old implementation's answer.
+        assert_eq!(ilogb(f64::NAN), i32::MIN, "ilogb(NaN) = FP_ILOGBNAN");
     }
 
     #[test]
@@ -3207,8 +3225,28 @@ mod tests {
     // Gamma functions
     // -----------------------------------------------------------------------
 
+    /// `lgamma` leaves the sign of Γ(x) in `signgam`: Γ is negative between
+    /// -1 and 0 and positive between -2 and -1, and positive for every
+    /// positive x.
+    #[test]
+    fn lgamma_sets_signgam() {
+        let _g = super::signgam_test_lock();
+        let sign = || signgam.load(Ordering::Relaxed);
+        let _ = lgamma(-0.5);
+        assert_eq!(sign(), -1, "gamma(-0.5) is -3.54");
+        let _ = lgamma(-1.5);
+        assert_eq!(sign(), 1, "gamma(-1.5) is 2.36");
+        let _ = lgamma(0.5);
+        assert_eq!(sign(), 1);
+        let _ = lgammaf(-0.5);
+        assert_eq!(sign(), -1, "and lgammaf writes the same global");
+        let _ = gamma(-2.5);
+        assert_eq!(sign(), -1, "gamma(-2.5) is -0.945; gamma is lgamma");
+    }
+
     #[test]
     fn test_lgamma_values() {
+        let _g = super::signgam_test_lock();
         // lgamma(1) = ln(0!) = ln(1) = 0.
         assert_approx(lgamma(1.0), 0.0, 1e-8, "lgamma(1)");
         // lgamma(2) = ln(1!) = ln(1) = 0.
@@ -3219,6 +3257,7 @@ mod tests {
 
     #[test]
     fn test_lgamma_poles() {
+        let _g = super::signgam_test_lock();
         assert_eq!(lgamma(0.0), f64::INFINITY, "lgamma(0) = inf");
         assert_eq!(lgamma(-1.0), f64::INFINITY, "lgamma(-1) = inf");
     }
@@ -3235,8 +3274,17 @@ mod tests {
 
     #[test]
     fn test_tgamma_poles() {
-        assert!(tgamma(0.0).is_nan(), "tgamma(0) is NaN");
+        // The gamma function has a pole at 0 -- +inf, with ERANGE -- and no
+        // value at the negative integers: NaN, with EDOM (glibc's
+        // w_tgamma_template.c; this said tgamma(0) was a NaN, the old
+        // implementation's answer).
+        errno::set_errno(0);
+        assert_eq!(tgamma(0.0), f64::INFINITY, "tgamma(0) = +inf");
+        assert_eq!(errno::get_errno(), errno::ERANGE);
+        assert_eq!(tgamma(-0.0), f64::NEG_INFINITY, "tgamma(-0) = -inf");
+        errno::set_errno(0);
         assert!(tgamma(-1.0).is_nan(), "tgamma(-1) is NaN");
+        assert_eq!(errno::get_errno(), errno::EDOM);
     }
 
     // -----------------------------------------------------------------------
@@ -3329,6 +3377,7 @@ mod tests {
 
     #[test]
     fn test_lgamma_r_sign() {
+        let _g = super::signgam_test_lock();
         let mut sign: i32 = 0;
         let val = lgamma_r(5.0, &mut sign);
         assert_approx(val, lgamma(5.0), EPS, "lgamma_r(5) value");
@@ -3826,10 +3875,12 @@ mod tests {
 
     #[test]
     fn lrint_special_values() {
-        // NaN and Inf → 0 per our implementation.
-        assert_eq!(lrint(f64::NAN), 0, "lrint(NaN) → 0");
-        assert_eq!(lrint(f64::INFINITY), 0, "lrint(inf) → 0");
-        assert_eq!(lrint(f64::NEG_INFINITY), 0, "lrint(-inf) → 0");
+        // NaN and the infinities are no long: LONG_MIN, what x86-64's
+        // conversion answers and glibc and musl return (this said 0, the old
+        // implementation's answer).
+        assert_eq!(lrint(f64::NAN), i64::MIN, "lrint(NaN) = LONG_MIN");
+        assert_eq!(lrint(f64::INFINITY), i64::MIN, "lrint(inf) = LONG_MIN");
+        assert_eq!(lrint(f64::NEG_INFINITY), i64::MIN, "lrint(-inf) = LONG_MIN");
     }
 
     #[test]
@@ -3903,7 +3954,11 @@ mod tests {
         assert_eq!(ilogb(-0.0), i32::MIN, "ilogb(-0) = FP_ILOGB0");
         assert_eq!(ilogb(f64::INFINITY), i32::MAX, "ilogb(inf) = INT_MAX");
         assert_eq!(ilogb(f64::NEG_INFINITY), i32::MAX, "ilogb(-inf) = INT_MAX");
-        assert_eq!(ilogb(f64::NAN), i32::MAX, "ilogb(NaN) = FP_ILOGBNAN");
+        assert_eq!(
+            ilogb(f64::NAN),
+            FP_ILOGBNAN,
+            "ilogb(NaN) = FP_ILOGBNAN, INT_MIN"
+        );
     }
 
     #[test]
@@ -4350,6 +4405,7 @@ mod tests {
 
     #[test]
     fn lgammaf_values() {
+        let _g = super::signgam_test_lock();
         // lgamma(1) = ln(Γ(1)) = ln(1) = 0
         assert_approx(f64::from(lgammaf(1.0)), 0.0, 1e-5, "lgammaf(1)");
         // lgamma(2) = ln(Γ(2)) = ln(1) = 0
@@ -4360,6 +4416,7 @@ mod tests {
 
     #[test]
     fn lgammaf_poles() {
+        let _g = super::signgam_test_lock();
         // lgamma at non-positive integers → +inf.
         assert_eq!(lgammaf(0.0), f32::INFINITY, "lgammaf(0) = inf");
         assert_eq!(lgammaf(-1.0), f32::INFINITY, "lgammaf(-1) = inf");
@@ -4618,6 +4675,7 @@ mod tests {
 
     #[test]
     fn gammaf_is_lgammaf() {
+        let _g = super::signgam_test_lock();
         // gamma is a deprecated alias for lgamma.
         let vals = [1.0f32, 2.0, 5.0, 0.5];
         for &x in &vals {
@@ -4807,6 +4865,7 @@ mod tests {
 
     #[test]
     fn test_gamma_is_lgamma() {
+        let _g = super::signgam_test_lock();
         let vals = [1.0, 2.0, 5.0, 0.5, 10.0];
         for &x in &vals {
             #[allow(clippy::float_cmp)]
@@ -4818,13 +4877,1117 @@ mod tests {
 
     #[test]
     fn test_gamma_one() {
+        let _g = super::signgam_test_lock();
         // gamma(1) = lgamma(1) = ln(0!) = 0.
         assert_approx(gamma(1.0), 0.0, 1e-6, "gamma(1) ≈ 0");
     }
 
     #[test]
     fn test_gamma_two() {
+        let _g = super::signgam_test_lock();
         // gamma(2) = lgamma(2) = ln(1!) = 0.
         assert_approx(gamma(2.0), 0.0, 1e-6, "gamma(2) ≈ 0");
+    }
+
+    // -----------------------------------------------------------------------
+    // glibc 2.39, call by call (posix/tools/oracle/math_harness.py)
+    // -----------------------------------------------------------------------
+
+    /// The glibc oracle's table: one call a line, `<function> <inputs> =
+    /// <outputs> <errno>`, floats as their bits in hex.
+    const ORACLE: &str = include_str!("math_oracle.txt");
+
+    /// glibc's answers in the three directed rounding modes, for each call
+    /// of [`ORACLE`] that answers otherwise than to nearest: `<mode>
+    /// <function> <inputs> = <outputs> <errno>`, mode `down`, `up` or `zero`
+    /// (`posix/tools/oracle/math_modes_harness.py`).
+    const MODES_ORACLE: &str = include_str!("math_modes_oracle.txt");
+
+    std::thread_local! {
+        /// What [`ulps_allowed`] adds to an inexact function's bound: 1 while
+        /// [`every_answer_in_every_rounding_direction`] replays a directed
+        /// mode, where both libraries' roundings go the direction's way
+        /// rather than to nearest; 0 otherwise.
+        static DIRECTED_SLACK: core::cell::Cell<u64> = const { core::cell::Cell::new(0) };
+        /// Whether an infinity or a zero must match exactly
+        /// ([`same_d_near`]): always to nearest, and in a directed mode where
+        /// the call answers one to nearest -- an overflow, an underflow, a
+        /// pole, an exact zero. Elsewhere a directed answer may be the least
+        /// subnormal where the other is zero, 1 ulp apart like any two
+        /// neighbours: `tanh(-5e-324)` is -0 toward zero in glibc and
+        /// -5e-324 here, both within an ulp of the exact value.
+        static EDGES_EXACT: core::cell::Cell<bool> = const { core::cell::Cell::new(true) };
+    }
+
+    /// How far from glibc's answer ours may be, in units in the last place.
+    ///
+    /// 0 for everything IEEE 754 defines exactly -- rounding, `sqrt`, `fma`,
+    /// remainders, scaling, decomposition, classification -- where any
+    /// difference is a bug, in every rounding direction. For the rest, glibc
+    /// and musl use different approximations; the bounds are the larger of
+    /// the two libraries' documented worst cases (glibc's `libm-test-ulps`
+    /// for x86_64), so a difference past one is a bug in one of them -- and
+    /// one more in a directed mode ([`DIRECTED_SLACK`]).
+    fn ulps_allowed(name: &str) -> u64 {
+        match ulps_allowed_to_nearest(name) {
+            0 => 0,
+            n => n + DIRECTED_SLACK.with(core::cell::Cell::get),
+        }
+    }
+
+    /// [`ulps_allowed`] to nearest.
+    fn ulps_allowed_to_nearest(name: &str) -> u64 {
+        match double_name(name) {
+            "fabs" | "floor" | "ceil" | "round" | "trunc" | "rint" | "nearbyint" | "sqrt"
+            | "fmod" | "remainder" | "drem" | "remquo" | "copysign" | "fmin" | "fmax" | "fdim"
+            | "fma" | "frexp" | "ldexp" | "scalbn" | "scalbln" | "scalb" | "modf" | "ilogb"
+            | "logb" | "nextafter" | "lround" | "llround" | "lrint" | "significand" | "finite"
+            | "isnan" | "isinf" => 0,
+            "exp" | "exp2" | "exp10" | "log" | "log2" | "log10" | "cbrt" | "hypot" | "atan"
+            | "asin" | "acos" | "atan2" | "sin" | "cos" | "tan" | "sincos" | "tanh" | "asinh"
+            | "acosh" | "atanh" | "sinh" | "cosh" | "pow" | "expm1" | "log1p" | "erf" => 2,
+            "erfc" => 5,
+            "lgamma" | "lgamma_r" | "gamma" | "tgamma" => 16,
+            "j0" | "j1" | "y0" | "y1" | "jn" | "yn" => 64,
+            other => panic!("no tolerance for {other}"),
+        }
+    }
+
+    /// The double function a name belongs to: `sinf` is `sin`'s, `modff`
+    /// `modf`'s, `lgammaf_r` `lgamma_r`'s -- while `modf`, `erf` and the
+    /// other names that end in `f` of their own are themselves.
+    fn double_name(name: &str) -> &str {
+        const OWN_F: [&str; 3] = ["modf", "erf", "significand"];
+        if name == "lgammaf_r" {
+            return "lgamma_r";
+        }
+        if OWN_F.contains(&name) {
+            return name;
+        }
+        match name.strip_suffix('f') {
+            Some(base) if !base.is_empty() => base,
+            _ => name,
+        }
+    }
+
+    /// The distance between two doubles in units in the last place: their
+    /// bit patterns laid out as one ordered line, so the step across zero is
+    /// one step like any other.
+    fn ulp_distance(a: f64, b: f64) -> u64 {
+        fn line(x: f64) -> i128 {
+            let b = x.to_bits();
+            let mag = i128::from(b & 0x7FFF_FFFF_FFFF_FFFF);
+            if b >> 63 == 1 { -mag } else { mag }
+        }
+        u64::try_from((line(a) - line(b)).unsigned_abs()).unwrap_or(u64::MAX)
+    }
+
+    /// [`ulp_distance`] for floats.
+    fn ulp_distance_f(a: f32, b: f32) -> u64 {
+        fn line(x: f32) -> i64 {
+            let b = x.to_bits();
+            let mag = i64::from(b & 0x7FFF_FFFF);
+            if b >> 31 == 1 { -mag } else { mag }
+        }
+        (line(a) - line(b)).unsigned_abs()
+    }
+
+    /// Whether our double answers glibc's, for `name`: bit for bit where the
+    /// tolerance is 0 (a NaN matching any NaN -- the payload of a computed
+    /// NaN is not specified -- except where the function is defined on the
+    /// bits), within the tolerance otherwise, and a zero's sign always.
+    fn same_d(name: &str, ours: f64, glibc: f64) -> Result<(), String> {
+        same_d_near(name, ours, glibc, false)
+    }
+
+    /// [`same_d`], and when `near_root` -- a function evaluated where its
+    /// result is ill-conditioned (see [`near_root`]) -- a result under 1 may
+    /// instead be within the same number of ulps *of 1*: an absolute error.
+    fn same_d_near(name: &str, ours: f64, glibc: f64, near_root: bool) -> Result<(), String> {
+        if ours.is_nan() || glibc.is_nan() {
+            if ours.is_nan() && glibc.is_nan() {
+                let bitwise = matches!(name, "fabs" | "copysign");
+                return if !bitwise || ours.to_bits() == glibc.to_bits() {
+                    Ok(())
+                } else {
+                    Err(format!(
+                        "NaN {:#018x}, glibc {:#018x}",
+                        ours.to_bits(),
+                        glibc.to_bits()
+                    ))
+                };
+            }
+            return Err(format!("{ours:e}, glibc {glibc:e}"));
+        }
+        if ours == 0.0 && glibc == 0.0 && ours.is_sign_negative() != glibc.is_sign_negative() {
+            return Err(format!("{ours:?}, glibc {glibc:?}: the sign of zero"));
+        }
+        // An infinity or a zero is no "ulp" from the finite value beside it:
+        // it is an overflow or an underflow, or not, which the rounding
+        // direction decides and the answer must agree with exactly.
+        if EDGES_EXACT.with(core::cell::Cell::get)
+            && (ours.is_infinite() || glibc.is_infinite() || ours == 0.0 || glibc == 0.0)
+            && ours.to_bits() != glibc.to_bits()
+        {
+            return Err(format!(
+                "{ours:e} ({:#018x}), glibc {glibc:e} ({:#018x}): an infinity or a zero is exact",
+                ours.to_bits(),
+                glibc.to_bits()
+            ));
+        }
+        let d = ulp_distance(ours, glibc);
+        let tol = ulps_allowed(name);
+        #[allow(clippy::cast_precision_loss)]
+        let absolute = tol as f64 * f64::EPSILON;
+        if d > tol && !(near_root && glibc.abs() < 1.0 && (ours - glibc).abs() <= absolute) {
+            return Err(format!(
+                "{ours:e} ({:#018x}), glibc {glibc:e} ({:#018x}): {d} ulp",
+                ours.to_bits(),
+                glibc.to_bits()
+            ));
+        }
+        Ok(())
+    }
+
+    /// [`same_d`] for floats.
+    fn same_f(name: &str, ours: f32, glibc: f32) -> Result<(), String> {
+        same_f_near(name, ours, glibc, false)
+    }
+
+    /// [`same_d_near`] for floats.
+    fn same_f_near(name: &str, ours: f32, glibc: f32, near_root: bool) -> Result<(), String> {
+        if ours.is_nan() || glibc.is_nan() {
+            if ours.is_nan() && glibc.is_nan() {
+                let bitwise = matches!(name, "fabsf" | "copysignf");
+                return if !bitwise || ours.to_bits() == glibc.to_bits() {
+                    Ok(())
+                } else {
+                    Err(format!(
+                        "NaN {:#010x}, glibc {:#010x}",
+                        ours.to_bits(),
+                        glibc.to_bits()
+                    ))
+                };
+            }
+            return Err(format!("{ours:e}, glibc {glibc:e}"));
+        }
+        if ours == 0.0 && glibc == 0.0 && ours.is_sign_negative() != glibc.is_sign_negative() {
+            return Err(format!("{ours:?}, glibc {glibc:?}: the sign of zero"));
+        }
+        // An infinity or a zero is no "ulp" from the finite value beside it:
+        // it is an overflow or an underflow, or not, which the rounding
+        // direction decides and the answer must agree with exactly.
+        if EDGES_EXACT.with(core::cell::Cell::get)
+            && (ours.is_infinite() || glibc.is_infinite() || ours == 0.0 || glibc == 0.0)
+            && ours.to_bits() != glibc.to_bits()
+        {
+            return Err(format!(
+                "{ours:e} ({:#010x}), glibc {glibc:e} ({:#010x}): an infinity or a zero is exact",
+                ours.to_bits(),
+                glibc.to_bits()
+            ));
+        }
+        let d = ulp_distance_f(ours, glibc);
+        let tol = ulps_allowed(name);
+        #[allow(clippy::cast_precision_loss)]
+        let absolute = tol as f32 * f32::EPSILON;
+        if d > tol && !(near_root && glibc.abs() < 1.0 && (ours - glibc).abs() <= absolute) {
+            return Err(format!(
+                "{ours:e} ({:#010x}), glibc {glibc:e} ({:#010x}): {d} ulp",
+                ours.to_bits(),
+                glibc.to_bits()
+            ));
+        }
+        Ok(())
+    }
+
+    /// Where a relative comparison says nothing: near a root of the
+    /// function, a result of 1e-17 carrying an absolute error of 1e-17 is
+    /// "a million ulps" off and as good as musl's formula can do. That is
+    /// every call of the Bessel functions (infinitely many roots), and of the
+    /// trigonometric functions only at |x| >= 2^20, where a result near zero
+    /// depends on the last bits of the argument reduction. (`lgamma` was here
+    /// until 2026-09-28, when CORE-MATH's correctly rounded one replaced
+    /// musl's; see lgamma.rs.)
+    fn near_root(name: &str, x: f64) -> bool {
+        match double_name(name) {
+            "j0" | "j1" | "y0" | "y1" | "jn" | "yn" => true,
+            "sin" | "cos" | "tan" | "sincos" => x.abs() >= 1_048_576.0,
+            _ => false,
+        }
+    }
+
+    fn d(hex: &str) -> f64 {
+        f64::from_bits(u64::from_str_radix(hex, 16).expect("a double's bits"))
+    }
+
+    fn f(hex: &str) -> f32 {
+        f32::from_bits(u32::from_str_radix(hex, 16).expect("a float's bits"))
+    }
+
+    fn int(s: &str) -> i64 {
+        s.parse().expect("an integer")
+    }
+
+    /// What C fixes of `remquo`'s quotient: its sign (unless it is zero) and
+    /// its magnitude's low three bits. glibc stores three bits, musl 31, so
+    /// that much and no more is compared.
+    fn quo_agrees(q: i32, want: i64) -> bool {
+        let q = i64::from(q);
+        q.unsigned_abs() % 8 == want.unsigned_abs() % 8 && q.signum() * want.signum() >= 0
+    }
+
+    /// Our answer to one oracle line, compared: `Err` says how it differs.
+    #[allow(clippy::too_many_lines)]
+    fn replay_math(name: &str, ins: &[&str], outs: &[&str]) -> Result<(), String> {
+        let want_errno: i32 = outs.last().expect("errno").parse().expect("errno");
+        errno::set_errno(0);
+        let d1 = |g: extern "C" fn(f64) -> f64| {
+            let x = d(ins[0]);
+            same_d_near(name, g(x), d(outs[0]), near_root(name, x))
+        };
+        let f1 = |g: extern "C" fn(f32) -> f32| {
+            let x = f(ins[0]);
+            same_f_near(name, g(x), f(outs[0]), near_root(name, f64::from(x)))
+        };
+        let d2 =
+            |g: extern "C" fn(f64, f64) -> f64| same_d(name, g(d(ins[0]), d(ins[1])), d(outs[0]));
+        let f2 =
+            |g: extern "C" fn(f32, f32) -> f32| same_f(name, g(f(ins[0]), f(ins[1])), f(outs[0]));
+        let exact_int = |ours: i64| {
+            let glibc = int(outs[0]);
+            if ours == glibc {
+                Ok(())
+            } else {
+                Err(format!("{ours}, glibc {glibc}"))
+            }
+        };
+        let result = match name {
+            "fabs" => d1(fabs),
+            "fabsf" => f1(fabsf),
+            "floor" => d1(floor),
+            "floorf" => f1(floorf),
+            "ceil" => d1(ceil),
+            "ceilf" => f1(ceilf),
+            "round" => d1(round),
+            "roundf" => f1(roundf),
+            "trunc" => d1(trunc),
+            "truncf" => f1(truncf),
+            "sqrt" => d1(sqrt),
+            "sqrtf" => f1(sqrtf),
+            "exp" => d1(exp),
+            "expf" => f1(expf),
+            "exp2" => d1(exp2),
+            "exp2f" => f1(exp2f),
+            "exp10" => d1(exp10),
+            "exp10f" => f1(exp10f),
+            "expm1" => d1(expm1),
+            "expm1f" => f1(expm1f),
+            "log" => d1(log),
+            "logf" => f1(logf),
+            "log2" => d1(log2),
+            "log2f" => f1(log2f),
+            "log10" => d1(log10),
+            "log10f" => f1(log10f),
+            "log1p" => d1(log1p),
+            "log1pf" => f1(log1pf),
+            "sin" => d1(sin),
+            "sinf" => f1(sinf),
+            "cos" => d1(cos),
+            "cosf" => f1(cosf),
+            "tan" => d1(tan),
+            "tanf" => f1(tanf),
+            "asin" => d1(asin),
+            "asinf" => f1(asinf),
+            "acos" => d1(acos),
+            "acosf" => f1(acosf),
+            "atan" => d1(atan),
+            "atanf" => f1(atanf),
+            "sinh" => d1(sinh),
+            "sinhf" => f1(sinhf),
+            "cosh" => d1(cosh),
+            "coshf" => f1(coshf),
+            "tanh" => d1(tanh),
+            "tanhf" => f1(tanhf),
+            "asinh" => d1(asinh),
+            "asinhf" => f1(asinhf),
+            "acosh" => d1(acosh),
+            "acoshf" => f1(acoshf),
+            "atanh" => d1(atanh),
+            "atanhf" => f1(atanhf),
+            "cbrt" => d1(cbrt),
+            "cbrtf" => f1(cbrtf),
+            "erf" => d1(erf),
+            "erff" => f1(erff),
+            "erfc" => d1(erfc),
+            "erfcf" => f1(erfcf),
+            "lgamma" => d1(lgamma),
+            "lgammaf" => f1(lgammaf),
+            "tgamma" => d1(tgamma),
+            "tgammaf" => f1(tgammaf),
+            "gamma" => d1(gamma),
+            "rint" => d1(rint),
+            "rintf" => f1(rintf),
+            "nearbyint" => d1(nearbyint),
+            "nearbyintf" => f1(nearbyintf),
+            "logb" => d1(logb),
+            "logbf" => f1(logbf),
+            "significand" => d1(significand),
+            "j0" => d1(j0),
+            "j1" => d1(j1),
+            "y0" => d1(y0),
+            "y1" => d1(y1),
+            "fmod" => d2(fmod),
+            "fmodf" => f2(fmodf),
+            "pow" => d2(pow),
+            "powf" => f2(powf),
+            "atan2" => d2(atan2),
+            "atan2f" => f2(atan2f),
+            "copysign" => d2(copysign),
+            "copysignf" => f2(copysignf),
+            "fmin" => d2(fmin),
+            "fminf" => f2(fminf),
+            "fmax" => d2(fmax),
+            "fmaxf" => f2(fmaxf),
+            "hypot" => d2(hypot),
+            "hypotf" => f2(hypotf),
+            "fdim" => d2(fdim),
+            "fdimf" => f2(fdimf),
+            "nextafter" => d2(nextafter),
+            "nextafterf" => f2(nextafterf),
+            "remainder" => d2(remainder),
+            "remainderf" => f2(remainderf),
+            "drem" => d2(drem),
+            "scalb" => d2(scalb),
+            "scalbf" => f2(scalbf),
+            "fma" => same_d(name, fma(d(ins[0]), d(ins[1]), d(ins[2])), d(outs[0])),
+            "fmaf" => same_f(name, fmaf(f(ins[0]), f(ins[1]), f(ins[2])), f(outs[0])),
+            "ilogb" => exact_int(i64::from(ilogb(d(ins[0])))),
+            "ilogbf" => exact_int(i64::from(ilogbf(f(ins[0])))),
+            "lround" => exact_int(lround(d(ins[0]))),
+            "llround" => exact_int(llround(d(ins[0]))),
+            "lrint" => exact_int(lrint(d(ins[0]))),
+            "lroundf" => exact_int(lroundf(f(ins[0]))),
+            "llroundf" => exact_int(llroundf(f(ins[0]))),
+            "lrintf" => exact_int(lrintf(f(ins[0]))),
+            "finite" => exact_int(i64::from(finite(d(ins[0])))),
+            "finitef" => exact_int(i64::from(finitef(f(ins[0])))),
+            "isnan" => exact_int(i64::from(isnan(d(ins[0])))),
+            "isinf" => exact_int(i64::from(isinf(d(ins[0])))),
+            "ldexp" | "scalbn" => {
+                let n = i32::try_from(int(ins[1])).expect("an int exponent");
+                let r = if name == "ldexp" {
+                    ldexp(d(ins[0]), n)
+                } else {
+                    scalbn(d(ins[0]), n)
+                };
+                same_d(name, r, d(outs[0]))
+            }
+            "scalbln" => same_d(name, scalbln(d(ins[0]), int(ins[1])), d(outs[0])),
+            "ldexpf" | "scalbnf" => {
+                let n = i32::try_from(int(ins[1])).expect("an int exponent");
+                let r = if name == "ldexpf" {
+                    ldexpf(f(ins[0]), n)
+                } else {
+                    scalbnf(f(ins[0]), n)
+                };
+                same_f(name, r, f(outs[0]))
+            }
+            "scalblnf" => same_f(name, scalblnf(f(ins[0]), int(ins[1])), f(outs[0])),
+            "jn" | "yn" => {
+                let n = i32::try_from(int(ins[0])).expect("an int order");
+                let r = if name == "jn" {
+                    jn(n, d(ins[1]))
+                } else {
+                    yn(n, d(ins[1]))
+                };
+                same_d_near(name, r, d(outs[0]), true)
+            }
+            "frexp" | "lgamma_r" => {
+                let mut o = 12345;
+                let x = d(ins[0]);
+                let r = if name == "frexp" {
+                    frexp(x, &raw mut o)
+                } else {
+                    lgamma_r(x, &raw mut o)
+                };
+                // glibc leaves the exponent unspecified for a NaN or an
+                // infinity; both libraries write 0 there, so it is compared.
+                same_d_near(name, r, d(outs[0]), near_root(name, x)).and_then(|()| {
+                    let want = int(outs[1]);
+                    if i64::from(o) == want {
+                        Ok(())
+                    } else {
+                        Err(format!("*out {o}, glibc {want}"))
+                    }
+                })
+            }
+            "frexpf" | "lgammaf_r" => {
+                let mut o = 12345;
+                let x = f(ins[0]);
+                let r = if name == "frexpf" {
+                    frexpf(x, &raw mut o)
+                } else {
+                    lgammaf_r(x, &raw mut o)
+                };
+                same_f_near(name, r, f(outs[0]), near_root(name, f64::from(x))).and_then(|()| {
+                    let want = int(outs[1]);
+                    if i64::from(o) == want {
+                        Ok(())
+                    } else {
+                        Err(format!("*out {o}, glibc {want}"))
+                    }
+                })
+            }
+            "modf" => {
+                let mut o = 0.0;
+                let r = modf(d(ins[0]), &raw mut o);
+                same_d(name, r, d(outs[0])).and_then(|()| same_d(name, o, d(outs[1])))
+            }
+            "modff" => {
+                let mut o = 0.0;
+                let r = modff(f(ins[0]), &raw mut o);
+                same_f(name, r, f(outs[0])).and_then(|()| same_f(name, o, f(outs[1])))
+            }
+            "remquo" => {
+                let mut q = 12345;
+                let r = remquo(d(ins[0]), d(ins[1]), &raw mut q);
+                // C fixes only the quotient's sign and its low three bits.
+                same_d(name, r, d(outs[0])).and_then(|()| {
+                    let want = int(outs[1]);
+                    if r.is_nan() || quo_agrees(q, want) {
+                        Ok(())
+                    } else {
+                        Err(format!("quo {q}, glibc {want}"))
+                    }
+                })
+            }
+            "remquof" => {
+                let mut q = 12345;
+                let r = remquof(f(ins[0]), f(ins[1]), &raw mut q);
+                same_f(name, r, f(outs[0])).and_then(|()| {
+                    let want = int(outs[1]);
+                    if r.is_nan() || quo_agrees(q, want) {
+                        Ok(())
+                    } else {
+                        Err(format!("quo {q}, glibc {want}"))
+                    }
+                })
+            }
+            "sincos" => {
+                let (mut s, mut c) = (0.0, 0.0);
+                let x = d(ins[0]);
+                sincos(x, &raw mut s, &raw mut c);
+                let near = near_root(name, x);
+                same_d_near(name, s, d(outs[0]), near)
+                    .and_then(|()| same_d_near(name, c, d(outs[1]), near))
+            }
+            "sincosf" => {
+                let (mut s, mut c) = (0.0, 0.0);
+                let x = f(ins[0]);
+                sincosf(x, &raw mut s, &raw mut c);
+                let near = near_root(name, f64::from(x));
+                same_f_near(name, s, f(outs[0]), near)
+                    .and_then(|()| same_f_near(name, c, f(outs[1]), near))
+            }
+            other => Err(format!(
+                "the oracle calls {other}, which this replay does not know"
+            )),
+        };
+        let got_errno = errno::get_errno();
+        result.and_then(|()| {
+            if got_errno == want_errno {
+                Ok(())
+            } else {
+                Err(format!("errno {got_errno}, glibc {want_errno}"))
+            }
+        })
+    }
+
+    /// Lane E's cases (`requests/e-d-libc-round-is-wrong-just-below-a-half-and-past-2-52.md`):
+    /// `floor(x + 0.5)` rounded the addition before the floor, so the double
+    /// just below a half went to 1 and an odd number past 2^52 to the next
+    /// even one; and a negative result of zero kept its sign.
+    #[test]
+    fn round_is_right_just_below_a_half_and_past_2_52() {
+        let below_half = 0.499_999_999_999_999_94_f64;
+        assert_eq!(below_half.to_bits(), 0x3FDF_FFFF_FFFF_FFFF);
+        assert_eq!(round(below_half).to_bits(), 0.0_f64.to_bits());
+        assert_eq!(round(-below_half).to_bits(), (-0.0_f64).to_bits());
+        assert_eq!(round(4_503_599_627_370_497.0), 4_503_599_627_370_497.0);
+        assert_eq!(round(-4_503_599_627_370_497.0), -4_503_599_627_370_497.0);
+        assert_eq!(roundf(0.499_999_97_f32).to_bits(), 0.0_f32.to_bits());
+        assert_eq!(roundf(8_388_609.0), 8_388_609.0);
+        assert_eq!(round(0.5), 1.0);
+        assert_eq!(round(-0.5), -1.0);
+        assert_eq!(round(2.5), 3.0);
+        assert_eq!(round(-2.5), -3.0);
+        assert_eq!(
+            round(-0.3).to_bits(),
+            (-0.0_f64).to_bits(),
+            "round(-0.3) is -0.0"
+        );
+        assert_eq!(lround(below_half), 0);
+        assert_eq!(llround(4_503_599_627_370_497.0), 4_503_599_627_370_497);
+        assert_eq!(lroundf(0.499_999_97_f32), 0);
+        assert_eq!(llroundf(8_388_609.0), 8_388_609);
+    }
+
+    /// `fma` rounds once: `(1 + e)(1 - e) - 1` is `-e^2` exactly, where the
+    /// two-rounding `x*y + z` it used to be gives 0.
+    #[test]
+    fn fma_rounds_once() {
+        let e = f64::EPSILON;
+        assert_eq!(fma(1.0 + e, 1.0 - e, -1.0), -(e * e));
+        assert_eq!(
+            (1.0 + e) * (1.0 - e) - 1.0,
+            0.0,
+            "the two-rounding answer, for contrast"
+        );
+        let ef = f32::EPSILON;
+        assert_eq!(fmaf(1.0 + ef, 1.0 - ef, -1.0), -(ef * ef));
+    }
+
+    /// `nan(tag)` puts glibc's payload in: the tag read as `strtoull` reads
+    /// it, below the quiet bit; anything else is the default NaN.
+    #[test]
+    fn nan_takes_its_tag_as_glibc_does() {
+        let bits = |t: &core::ffi::CStr| nan(t.as_ptr().cast()).to_bits();
+        let quiet = f64::NAN.to_bits();
+        assert_eq!(bits(c""), quiet);
+        assert_eq!(bits(c"0x12"), quiet | 0x12);
+        assert_eq!(bits(c"017"), quiet | 0o17);
+        assert_eq!(bits(c"42"), quiet | 42);
+        assert_eq!(bits(c"0"), quiet, "a zero payload is the default NaN");
+        assert_eq!(bits(c"0x"), quiet, "no digits after 0x");
+        assert_eq!(bits(c"08"), quiet, "8 is no octal digit");
+        assert_eq!(bits(c"abc"), quiet, "not a number");
+        assert_eq!(bits(c" 1"), quiet, "a space is no n-char");
+        assert_eq!(nan(core::ptr::null()).to_bits(), quiet);
+        assert_eq!(
+            nanf(c"0x7".as_ptr().cast()).to_bits(),
+            f32::NAN.to_bits() | 7
+        );
+    }
+
+    /// Rounds in `mode` until dropped, then to nearest again -- so that an
+    /// assertion failing half-way (libtest may run the next test on the same
+    /// thread) leaves no direction behind.
+    struct Rounding;
+
+    impl Rounding {
+        fn set(mode: i32) -> Self {
+            assert_eq!(crate::fenv::fesetround(mode), 0);
+            Self
+        }
+    }
+
+    impl Drop for Rounding {
+        fn drop(&mut self) {
+            crate::fenv::fesetround(crate::fenv::FE_TONEAREST);
+        }
+    }
+
+    /// The three directed modes, by name.
+    const DIRECTED: [(&str, i32); 3] = [
+        ("down", crate::fenv::FE_DOWNWARD),
+        ("up", crate::fenv::FE_UPWARD),
+        ("zero", crate::fenv::FE_TOWARDZERO),
+    ];
+
+    /// The functions computed to nearest answer in every direction exactly
+    /// what they answer to nearest: before, `sin(pi)` rounding upward was
+    /// 2.3e-11, `tanf(2^23 + 1)` 3,310 ulps out, `j0(pi)` rounding upward
+    /// 188,000.
+    #[test]
+    fn trig_and_bessel_answer_as_to_nearest_in_every_direction() {
+        use core::hint::black_box as bb;
+        let xs = [
+            core::f64::consts::PI,
+            -core::f64::consts::PI,
+            core::f64::consts::FRAC_PI_2,
+            3.832_705_970_207_512,
+            7.0,
+            1e22,
+            -9.998_172_463_489_65,
+            0.1,
+        ];
+        let doubles: [(&str, extern "C" fn(f64) -> f64); 7] = [
+            ("sin", sin),
+            ("cos", cos),
+            ("tan", tan),
+            ("j0", j0),
+            ("j1", j1),
+            ("y0", y0),
+            ("y1", y1),
+        ];
+        let floats: [(&str, extern "C" fn(f32) -> f32); 7] = [
+            ("sinf", sinf),
+            ("cosf", cosf),
+            ("tanf", tanf),
+            ("j0f", j0f),
+            ("j1f", j1f),
+            ("y0f", y0f),
+            ("y1f", y1f),
+        ];
+        for x in xs {
+            #[allow(clippy::cast_possible_truncation)]
+            let xf = x as f32;
+            let near: Vec<u64> = doubles.iter().map(|(_, g)| g(bb(x)).to_bits()).collect();
+            let near_f: Vec<u32> = floats.iter().map(|(_, g)| g(bb(xf)).to_bits()).collect();
+            let near_n = [jn(3, bb(x)).to_bits(), yn(3, bb(x.abs())).to_bits()];
+            let (mut s0, mut c0) = (0.0, 0.0);
+            sincos(bb(x), &raw mut s0, &raw mut c0);
+            for (mode_name, mode) in DIRECTED {
+                let _r = Rounding::set(mode);
+                for ((name, g), want) in doubles.iter().zip(&near) {
+                    assert_eq!(
+                        g(bb(x)).to_bits(),
+                        *want,
+                        "{name}({x}) rounding {mode_name}"
+                    );
+                }
+                for ((name, g), want) in floats.iter().zip(&near_f) {
+                    assert_eq!(
+                        g(bb(xf)).to_bits(),
+                        *want,
+                        "{name}({xf}) rounding {mode_name}"
+                    );
+                }
+                assert_eq!(jn(3, bb(x)).to_bits(), near_n[0], "jn(3, {x}) {mode_name}");
+                assert_eq!(
+                    yn(3, bb(x.abs())).to_bits(),
+                    near_n[1],
+                    "yn(3, {x}) {mode_name}"
+                );
+                let (mut s, mut c) = (0.0, 0.0);
+                sincos(bb(x), &raw mut s, &raw mut c);
+                assert_eq!(
+                    (s.to_bits(), c.to_bits()),
+                    (s0.to_bits(), c0.to_bits()),
+                    "sincos({x}) {mode_name}"
+                );
+            }
+        }
+    }
+
+    /// An overflow or an underflow answers what IEEE 754 prescribes for the
+    /// direction, and `ERANGE` either way: musl's `exp` answered 0 below
+    /// -745.13 in every direction, and its `sinh` rounded the magnitude and
+    /// then negated it.
+    #[test]
+    fn overflow_and_underflow_answer_as_the_direction_rounds() {
+        use core::hint::black_box as bb;
+        let tiny = f64::from_bits(1);
+        //                    down           up             zero
+        let cases: [(&str, extern "C" fn(f64) -> f64, f64, [f64; 3]); 8] = [
+            ("exp", exp, 1000.0, [f64::MAX, f64::INFINITY, f64::MAX]),
+            ("exp", exp, -1000.0, [0.0, tiny, 0.0]),
+            // Past the overflow threshold but under 1024, where glibc's exp
+            // answers DBL_MAX rounding downward and sets nothing.
+            ("exp", exp, 709.79, [f64::MAX, f64::INFINITY, f64::MAX]),
+            ("exp2", exp2, -1080.0, [0.0, tiny, 0.0]),
+            ("expm1", expm1, 1000.0, [f64::MAX, f64::INFINITY, f64::MAX]),
+            (
+                "sinh",
+                sinh,
+                -1000.0,
+                [f64::NEG_INFINITY, -f64::MAX, -f64::MAX],
+            ),
+            ("cosh", cosh, -1000.0, [f64::MAX, f64::INFINITY, f64::MAX]),
+            ("erfc", erfc, 30.0, [0.0, tiny, 0.0]),
+        ];
+        for (name, g, x, want) in cases {
+            for ((mode_name, mode), w) in DIRECTED.into_iter().zip(want) {
+                let _r = Rounding::set(mode);
+                errno::set_errno(0);
+                let got = g(bb(x));
+                assert_eq!(
+                    got.to_bits(),
+                    w.to_bits(),
+                    "{name}({x}) rounding {mode_name}: {got:e}"
+                );
+                assert_eq!(
+                    errno::get_errno(),
+                    errno::ERANGE,
+                    "{name}({x}) rounding {mode_name}"
+                );
+            }
+        }
+        // Two arguments, and the float side.
+        for ((mode_name, mode), (pw, ld, fd, ef)) in DIRECTED.into_iter().zip([
+            (0.0, f64::MAX, f64::MAX, f32::MAX),
+            (tiny, f64::INFINITY, f64::INFINITY, f32::INFINITY),
+            (0.0, f64::MAX, f64::MAX, f32::MAX),
+        ]) {
+            let _r = Rounding::set(mode);
+            let calls: [(&str, &dyn Fn() -> f64, f64); 3] = [
+                ("pow(2, -1100)", &|| pow(bb(2.0), bb(-1100.0)), pw),
+                ("ldexp(1, 2000)", &|| ldexp(bb(1.0), 2000), ld),
+                (
+                    "fdim(DBL_MAX, -DBL_MAX)",
+                    &|| fdim(bb(f64::MAX), bb(-f64::MAX)),
+                    fd,
+                ),
+            ];
+            for (name, call, w) in calls {
+                errno::set_errno(0);
+                let got = call();
+                assert_eq!(
+                    got.to_bits(),
+                    w.to_bits(),
+                    "{name} rounding {mode_name}: {got:e}"
+                );
+                assert_eq!(
+                    errno::get_errno(),
+                    errno::ERANGE,
+                    "{name} rounding {mode_name}"
+                );
+            }
+            errno::set_errno(0);
+            let got = expf(bb(100.0));
+            assert_eq!(
+                got.to_bits(),
+                ef.to_bits(),
+                "expf(100) rounding {mode_name}: {got:e}"
+            );
+            assert_eq!(
+                errno::get_errno(),
+                errno::ERANGE,
+                "expf(100) rounding {mode_name}"
+            );
+        }
+    }
+
+    /// A range error is reported where either the result to nearest or the
+    /// result answered is out of range: `fdim(DBL_MAX, -1)` is DBL_MAX to
+    /// nearest and an infinity rounding upward -- `ERANGE` there only -- and
+    /// `exp` of just under the least subnormal's logarithm is the least
+    /// subnormal to nearest and zero rounding downward.
+    #[test]
+    fn a_range_error_is_one_in_either_rounding() {
+        use core::hint::black_box as bb;
+        errno::set_errno(0);
+        assert_eq!(fdim(bb(f64::MAX), bb(-1.0)), f64::MAX);
+        assert_eq!(errno::get_errno(), 0, "fdim(DBL_MAX, -1) to nearest");
+        {
+            let _r = Rounding::set(crate::fenv::FE_UPWARD);
+            assert_eq!(fdim(bb(f64::MAX), bb(-1.0)), f64::INFINITY);
+            assert_eq!(
+                errno::get_errno(),
+                errno::ERANGE,
+                "fdim(DBL_MAX, -1) upward"
+            );
+        }
+        let x = -745.133_219_101_941_1;
+        errno::set_errno(0);
+        assert_eq!(exp(bb(x)).to_bits(), 1, "exp({x}) to nearest");
+        assert_eq!(errno::get_errno(), 0);
+        {
+            let _r = Rounding::set(crate::fenv::FE_DOWNWARD);
+            assert_eq!(exp(bb(x)).to_bits(), 0, "exp({x}) downward");
+            assert_eq!(errno::get_errno(), errno::ERANGE, "exp({x}) downward");
+        }
+    }
+
+    /// The exact answers made before the algorithm: `acosh(1)` is +0 (Annex
+    /// F), `atanh(+-1)` an infinity with `ERANGE`, `erfc(inf)` +0 -- in
+    /// every direction. Downward, `1 - 1` is -0: musl's `acosh(1)` was -0,
+    /// its `atanh(1)` a NaN, and its `erfc(inf)` -0 (the unsigned-to-double
+    /// conversion of 0).
+    #[test]
+    fn exact_answers_keep_their_signs_in_every_direction() {
+        use core::hint::black_box as bb;
+        for (mode_name, mode) in DIRECTED {
+            let _r = Rounding::set(mode);
+            assert_eq!(acosh(bb(1.0)).to_bits(), 0, "acosh(1) {mode_name}");
+            assert_eq!(acoshf(bb(1.0)).to_bits(), 0, "acoshf(1) {mode_name}");
+            for x in [1.0_f64, -1.0] {
+                errno::set_errno(0);
+                assert_eq!(
+                    atanh(bb(x)),
+                    f64::INFINITY.copysign(x),
+                    "atanh({x}) {mode_name}"
+                );
+                assert_eq!(errno::get_errno(), errno::ERANGE);
+                errno::set_errno(0);
+                #[allow(clippy::cast_possible_truncation)]
+                let xf = x as f32;
+                assert_eq!(
+                    atanhf(bb(xf)),
+                    f32::INFINITY.copysign(xf),
+                    "atanhf({x}) {mode_name}"
+                );
+                assert_eq!(errno::get_errno(), errno::ERANGE);
+            }
+            assert_eq!(
+                erfc(bb(f64::INFINITY)).to_bits(),
+                0,
+                "erfc(inf) {mode_name}"
+            );
+            assert_eq!(erfc(bb(f64::NEG_INFINITY)), 2.0, "erfc(-inf) {mode_name}");
+            assert_eq!(
+                erfcf(bb(f32::INFINITY)).to_bits(),
+                0,
+                "erfcf(inf) {mode_name}"
+            );
+        }
+    }
+
+    /// What a call answers rounding in `mode` ("down", "up", "zero"), given
+    /// glibc's answers to nearest (`near`) and in that mode (`glibc`, the
+    /// same where [`MODES_ORACLE`] lists none): outputs then `errno`, as
+    /// [`replay_math`] takes them.
+    ///
+    /// glibc's, but for four rules:
+    ///
+    /// - `errno` is the round-to-nearest one where that is set, and glibc's
+    ///   in `mode` where it is not: this library reports a range error where
+    ///   either the result to nearest or the result answered is out of range
+    ///   (the module documentation), and glibc's rules judge the answer.
+    /// - An underflow -- zero and `ERANGE` to nearest -- answers what IEEE
+    ///   754 prescribes: the least subnormal where `mode` rounds away from
+    ///   zero, the zero where toward it. glibc's `atan2(5e-324, 2)` rounding
+    ///   upward is 0, below the exact value. (`nextafter` rounds nothing: its
+    ///   zero is exact, and its `ERANGE` glibc's rule for a step that lands
+    ///   on a zero or a subnormal.)
+    /// - A remainder that is zero has `x`'s sign (754-2019 5.3.1), where
+    ///   glibc's `remainderf(3, 1)` rounding downward is -0.
+    /// - `pow(x, 1)` is `x`, exactly and without an error, where glibc's
+    ///   `pow(5e-324, 1)` rounding downward is 0 with `ERANGE` and its
+    ///   `powf(FLT_MAX, 1)` rounding upward an infinity.
+    ///
+    /// And a function computed to nearest in every direction
+    /// ([`computed_to_nearest`]) answers what glibc's does to nearest,
+    /// wherever that is finite and nonzero.
+    fn directed_answer(
+        mode: &str,
+        name: &str,
+        ins: &[&str],
+        near: &str,
+        glibc: &str,
+    ) -> Vec<String> {
+        let near_outs: Vec<&str> = near.split(' ').collect();
+        let glibc = if computed_to_nearest(name) && !answers_an_int(name) && {
+            let hex = near_outs[0];
+            let v = if hex.len() == 16 {
+                d(hex)
+            } else {
+                f64::from(f(hex))
+            };
+            v.is_finite() && v != 0.0
+        } {
+            near
+        } else {
+            glibc
+        };
+        let mut outs: Vec<String> = glibc.split(' ').map(str::to_owned).collect();
+        let near_errno = *near_outs.last().expect("an errno");
+        if near_errno != "0" {
+            *outs.last_mut().expect("an errno") = near_errno.to_owned();
+        }
+        if answers_an_int(name) {
+            return outs;
+        }
+        let wide = near_outs[0].len() == 16;
+        let value = |hex: &str| if wide { d(hex) } else { f64::from(f(hex)) };
+        let zero_hex = |negative: bool| {
+            match (wide, negative) {
+                (true, false) => "0000000000000000",
+                (true, true) => "8000000000000000",
+                (false, false) => "00000000",
+                (false, true) => "80000000",
+            }
+            .to_owned()
+        };
+        let near0 = value(near_outs[0]);
+        let rounds = !matches!(
+            name,
+            "nextafter" | "nextafterf" | "nexttoward" | "nexttowardf"
+        );
+        if near0 == 0.0 && near_errno == "34" && rounds {
+            let negative = near0.is_sign_negative();
+            let away = matches!((mode, negative), ("up", false) | ("down", true));
+            outs[0] = if away {
+                match (wide, negative) {
+                    (true, false) => "0000000000000001",
+                    (true, true) => "8000000000000001",
+                    (false, false) => "00000001",
+                    (false, true) => "80000001",
+                }
+                .to_owned()
+            } else {
+                zero_hex(negative)
+            };
+        }
+        if matches!(
+            name,
+            "remainder" | "remainderf" | "drem" | "remquo" | "remquof" | "fmod" | "fmodf"
+        ) && value(&outs[0]) == 0.0
+        {
+            let x_wide = ins[0].len() == 16;
+            let negative = if x_wide {
+                d(ins[0]).is_sign_negative()
+            } else {
+                f(ins[0]).is_sign_negative()
+            };
+            outs[0] = zero_hex(negative);
+        }
+        if matches!(name, "pow" | "powf") && value(ins[1]) == 1.0 {
+            outs[0] = ins[0].to_owned();
+            *outs.last_mut().expect("an errno") = "0".to_owned();
+        }
+        outs
+    }
+
+    /// Whether `name` is computed to nearest in every rounding direction:
+    /// the trigonometric and Bessel functions.
+    fn computed_to_nearest(name: &str) -> bool {
+        matches!(
+            double_name(name),
+            "sin" | "cos" | "tan" | "sincos" | "j0" | "j1" | "jn" | "y0" | "y1" | "yn"
+        )
+    }
+
+    /// Whether `name` answers an integer, not a float's bits.
+    fn answers_an_int(name: &str) -> bool {
+        matches!(
+            name,
+            "ilogb"
+                | "ilogbf"
+                | "lround"
+                | "llround"
+                | "lrint"
+                | "lroundf"
+                | "llroundf"
+                | "lrintf"
+                | "finite"
+                | "finitef"
+                | "isnan"
+                | "isinf"
+        )
+    }
+
+    /// Every call of [`ORACLE`] again in each directed rounding mode, against
+    /// [`directed_answer`]: within the bound to nearest and one ulp more,
+    /// bit for bit for the exact functions -- and an infinity or a zero
+    /// exactly where the call answers one to nearest ([`EDGES_EXACT`]).
+    #[test]
+    fn every_answer_in_every_rounding_direction() {
+        let _g = super::signgam_test_lock();
+        let mut directed = std::collections::HashMap::new();
+        for line in MODES_ORACLE
+            .lines()
+            .filter(|l| !l.starts_with('#') && !l.is_empty())
+        {
+            let (mode, call) = line.split_once(' ').expect("a mode");
+            let (lhs, rhs) = call.split_once(" = ").expect("an =");
+            directed.insert((mode, lhs), rhs);
+        }
+        let mut failures = Vec::new();
+        let mut calls = 0usize;
+        let mut listed = std::collections::HashSet::new();
+        for (mode_name, mode) in DIRECTED {
+            for line in ORACLE
+                .lines()
+                .filter(|l| !l.starts_with('#') && !l.is_empty())
+            {
+                let (lhs, near) = line.split_once(" = ").expect("an =");
+                let glibc = directed.get(&(mode_name, lhs)).copied();
+                if glibc.is_some() {
+                    listed.insert((mode_name, lhs));
+                }
+                let mut words = lhs.split(' ');
+                let name = words.next().expect("a function name");
+                let ins: Vec<&str> = words.collect();
+                let outs = directed_answer(mode_name, name, &ins, near, glibc.unwrap_or(near));
+                let outs: Vec<&str> = outs.iter().map(String::as_str).collect();
+                let near0 = near.split(' ').next().expect("an output");
+                let edge = if answers_an_int(name) {
+                    false
+                } else if near0.len() == 16 {
+                    let v = d(near0);
+                    v == 0.0 || v.is_infinite()
+                } else {
+                    let v = f(near0);
+                    v == 0.0 || v.is_infinite()
+                };
+                calls += 1;
+                DIRECTED_SLACK.with(|s| s.set(1));
+                EDGES_EXACT.with(|s| s.set(edge));
+                let result = {
+                    let _r = Rounding::set(mode);
+                    replay_math(name, &ins, &outs)
+                };
+                DIRECTED_SLACK.with(|s| s.set(0));
+                EDGES_EXACT.with(|s| s.set(true));
+                if let Err(why) = result {
+                    failures.push(format!(
+                        "{mode_name} {lhs} = {}\n    to nearest: {near}; glibc {mode_name}: {}\n    ours: {why}",
+                        outs.join(" "),
+                        glibc.unwrap_or("as to nearest")
+                    ));
+                }
+            }
+        }
+        assert_eq!(
+            listed.len(),
+            directed.len(),
+            "every line of the directed table is a call of ORACLE's"
+        );
+        assert!(
+            calls > 60_000,
+            "the replay is {calls} calls; it should be the whole table three times"
+        );
+        assert!(
+            failures.is_empty(),
+            "{} of {calls} calls differ in a directed mode:\n{}",
+            failures.len(),
+            failures
+                .iter()
+                .take(80)
+                .cloned()
+                .collect::<Vec<_>>()
+                .join("\n")
+        );
+    }
+
+    /// glibc 2.39's answer to every call in the oracle, and its `errno`:
+    /// bit for bit for the exact functions, within [`ulps_allowed`] for the
+    /// rest.
+    #[test]
+    fn every_answer_is_glibcs_or_within_its_error() {
+        let _g = super::signgam_test_lock();
+        let mut failures = Vec::new();
+        let mut calls = 0usize;
+        for line in ORACLE
+            .lines()
+            .filter(|l| !l.starts_with('#') && !l.is_empty())
+        {
+            let (lhs, rhs) = line.split_once(" = ").expect("an oracle line has an =");
+            let mut words = lhs.split(' ');
+            let name = words.next().expect("a function name");
+            let ins: Vec<&str> = words.collect();
+            let outs: Vec<&str> = rhs.split(' ').collect();
+            calls += 1;
+            if let Err(why) = replay_math(name, &ins, &outs) {
+                failures.push(format!("{line}\n    ours: {why}"));
+            }
+        }
+        assert!(
+            calls > 20_000,
+            "the oracle is {calls} calls; it should be the whole table"
+        );
+        assert!(
+            failures.is_empty(),
+            "{} of {calls} calls differ from glibc:\n{}",
+            failures.len(),
+            failures
+                .iter()
+                .take(80)
+                .cloned()
+                .collect::<Vec<_>>()
+                .join("\n")
+        );
     }
 }

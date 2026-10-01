@@ -36,6 +36,13 @@ The path spellings are the ones git itself treats differently -- `dir/` against
 case -- and the ones the list must refuse to answer (`?`, `[...]`, pathspec
 magic, a `*` that is not a leading one), which must fall through to git.
 
+The list itself comes from `pushed_paths`, which the tooling-suite gate also
+reads for the names of the pushed scripts. In every scenario its names are held
+to each pushed commit's own `diff-tree`, asked of git one commit at a time --
+the check that `rev-list | xargs git diff-tree`, which listed nothing for a push
+of three commits or more, would have failed
+(requests/e-ab-pre-push-suites-never-run-on-a-multi-commit-push.md).
+
 It also reads every `touches` call in the hook and fails if one is spelled in a
 way the list cannot answer. Such a gate would still be judged correctly -- the
 call goes to git -- but every push would pay for it again, silently. The
@@ -346,6 +353,9 @@ class Scenario:
     hook: dict[tuple[str, ...], bool] = field(default_factory=dict)
     gits: dict[tuple[str, ...], bool] = field(default_factory=dict)
     list_rc: dict[tuple[str, ...], int] = field(default_factory=dict)
+    # `pushed_paths`' names, and each pushed commit's own, asked of git.
+    paths: set[str] = field(default_factory=set)
+    git_paths: set[str] = field(default_factory=set)
 
     def asked(self) -> list[tuple[str, ...]]:
         seen = list(self.truths)
@@ -459,8 +469,12 @@ def run_hook_side(h: History, block: str, all_: list[Scenario]) -> None:
 
     def one(index: int, sc: Scenario) -> None:
         shas = "".join(" " + h.sha[name] for name in sc.pushed)
+        # Relative to the repository, where the shell runs: a file, because a
+        # name git quotes is one line but a list of them has no fixed length.
+        paths_file = f".git/touches-paths-{index:02d}.txt"
         lines = ["set -u", block,
                  f"remote_name={q(sc.remote)}", f"pushed_shas={q(shas)}",
+                 f"pushed_paths > {q(paths_file)}",
                  "touches_prepare",
                  'echo "MODE $touches_mode"',
                  'ans() { touches "$@"; echo "ANS $?"; }',
@@ -486,6 +500,8 @@ def run_hook_side(h: History, block: str, all_: list[Scenario]) -> None:
             sc.hook[specs] = out.pop(0).split()[1] == "0"
         for specs in sc.listed:
             sc.list_rc[tuple(specs)] = int(out.pop(0).split()[1])
+        with open(os.path.join(h.root, paths_file), "rb") as fh:
+            sc.paths = {p for p in fh.read().decode("utf-8").split("\n") if p}
 
     with concurrent.futures.ThreadPoolExecutor(max_workers=6) as pool:
         # list(): so an exception in any scenario is raised here, not lost.
@@ -507,6 +523,28 @@ def run_git_side(h: History, all_: list[Scenario]) -> None:
         for sc, specs, answer in pool.map(lambda job: ask(*job), jobs):
             sc.gits[specs] = answer
 
+    def own_paths(sc: Scenario) -> tuple[Scenario, set[str]]:
+        """Each unpublished commit of the push diffed alone -- `diff-tree`
+        one commit at a time, which is what the hook's
+        `rev-list | xargs git diff-tree` meant and, handed three commits,
+        did not do."""
+        shas = [h.sha[name] for name in sc.pushed]
+        if not shas:
+            return sc, set()
+        commits = git(h.root, "rev-list", "--no-merges", *shas, "--not",
+                      f"--remotes={sc.remote}").decode("ascii").split()
+        found: set[str] = set()
+        for commit in commits:
+            out = git(h.root, "-c", "core.quotePath=false", "diff-tree",
+                      "--root", "--no-renames", "--no-commit-id",
+                      "--name-only", "-r", commit)
+            found |= {p for p in out.decode("utf-8").split("\n") if p}
+        return sc, found
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=6) as pool:
+        for sc, found in pool.map(own_paths, all_):
+            sc.git_paths = found
+
 
 def judge(all_: list[Scenario], scopes: list[list[str]]) -> None:
     for sc in all_:
@@ -518,6 +556,17 @@ def judge(all_: list[Scenario], scopes: list[list[str]]) -> None:
             check(f"{sc.label}: `{' '.join(specs)}` -> "
                   f"{'touched' if want else 'untouched'}",
                   sc.gits[specs], want)
+    for sc in all_:
+        check(f"{sc.label}: pushed_paths names each pushed commit's own paths",
+              sorted(sc.paths), sorted(sc.git_paths))
+    # Non-vacuous where it failed: five commits, whose paths are the union of
+    # five changes -- not the difference of two trees, and not nothing, which
+    # is what `xargs git diff-tree` made of them.
+    multi = next(sc for sc in all_ if sc.label == "every kind of change")
+    check("every kind of change: five commits' paths, all of them",
+          sorted(multi.paths),
+          sorted({"docs/x.md", "x.RS", "gui/app.rs", "apps/app.rs",
+                  "scripts/check-text-ink.py"}))
     root = all_[0]
     for specs in UNANSWERABLE:
         check(f"root commit: `{' '.join(specs)}` is left to git",

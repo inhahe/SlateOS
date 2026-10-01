@@ -122,23 +122,10 @@ pub mod security_dialog;
 pub mod session;
 pub mod session_mgr;
 pub mod shortcut_editor;
-/// The horizontal value slider every settings panel draws, in one place.
-///
-/// Five panels drew it by hand and disagreed about the thumb's colour; one of
-/// them inked it the same accent as the fill underneath it. The thumb is now
-/// `text` — and deliberately *not* derived from the fill, because unlike a
-/// switch knob it overhangs its track.
-pub mod slider;
 pub mod snap;
 pub mod sound_settings;
 pub mod startup_settings;
 pub mod storage_settings;
-/// The on/off switch every settings panel draws, in one place.
-///
-/// Seventeen panels drew it by hand and all seventeen filled the knob with
-/// `p.text`, which on an accent track is 1.35:1 against it. The knob is now
-/// derived from the track it sits on.
-pub mod switch;
 pub mod taskbar;
 pub mod taskbar_autohide;
 pub mod touchpad;
@@ -207,6 +194,26 @@ const TASKBAR_CONFIG_NAME: &str = "taskbar";
 
 /// The file the programs pinned to the start menu live in.
 const START_MENU_CONFIG_NAME: &str = "startmenu";
+
+/// The programs on the taskbar of a desktop that has never saved its pins:
+/// the kernel's `fs::pinnedapps` defaults, carried when the program lists
+/// became one (`gui/programs/INVENTORY.md` section 7, design-decisions §1425),
+/// less the web browser this system does not have.
+pub const FIRST_START_TASKBAR_PINS: [&str; 3] = [
+    "org.slateos.Explorer.desktop",
+    "org.slateos.Terminal.desktop",
+    "org.slateos.Settings.desktop",
+];
+
+/// The programs pinned to the start menu of a desktop that has never saved
+/// them: the kernel's `fs::startmenu` favourites (inventory section 7).
+pub const FIRST_START_MENU_PINS: [&str; 5] = [
+    "org.slateos.Explorer.desktop",
+    "org.slateos.Terminal.desktop",
+    "org.slateos.Editor.desktop",
+    "org.slateos.Settings.desktop",
+    "org.slateos.Calculator.desktop",
+];
 
 /// The toolkit's rectangle, re-exported so the shell and its widgets share
 /// one. This crate declared an identical copy -- same four floats, same
@@ -2465,13 +2472,6 @@ pub struct DesktopTheme {
     /// The start menu's places column: a shade apart from the programs
     /// column, as the reference's darker glass is, so the two read as two.
     pub start_menu_side_bg: Color,
-    /// The well of the start menu's search field: the palette's `crust`,
-    /// where the toolkit sinks every text input.
-    pub start_menu_field_bg: Color,
-    /// The line round that well: the palette's `border`, as quiet as the
-    /// reference's `#aac6e0` edge. The caret, not a coloured ring, is what
-    /// says the typing goes there.
-    pub start_menu_field_border: Color,
     /// Floating overlays such as the Alt+Tab switcher.
     pub overlay_bg: Color,
     pub overlay_fg: Color,
@@ -2525,8 +2525,6 @@ impl DesktopTheme {
             start_menu_bg: p.base,
             start_menu_fg: p.text,
             start_menu_side_bg: p.mantle,
-            start_menu_field_bg: p.crust,
-            start_menu_field_border: p.border,
             overlay_bg: p.base,
             overlay_fg: p.text,
             overlay_selected_bg: p.surface1,
@@ -2810,6 +2808,16 @@ impl DesktopShell {
     /// that a later appearance change cannot forget it.
     pub fn set_appearance(&mut self, appearance: AppearanceSettings) {
         self.theme = DesktopTheme::from_settings(&appearance);
+        // How things move, to every animator the shell owns: the animation
+        // theme at the user's speed (design-decisions §1446). Pushed from here
+        // for the caret width's reason below. Under a still motion a fade or a
+        // slide in progress lands where it was going.
+        let motion = guitk::palette::PaletteSource::motion(&appearance);
+        self.notifications.set_motion(motion);
+        self.osd.set_motion(motion);
+        if motion.is_still() {
+            self.overview.end_fade();
+        }
         // Every icon is drawn again, in the new colours and the new theme's
         // pictures, under new ids; the old requests would only be a registry
         // of images the session has dropped.
@@ -2822,11 +2830,17 @@ impl DesktopShell {
         // `Palette`, and a palette is colours: 839 put the caret's width in
         // the appearance settings, not in the theme's colour table. Pushing it
         // from the one place that knows the settings changed is the same shape
-        // as `sync_animation_speed`, and for the same reason -- a second door
+        // as the motion above, and for the same reason -- a second door
         // the caller has to remember is a door somebody forgets.
         self.run_dialog.set_caret_width(appearance.caret_width());
         self.icons.set_caret_width(appearance.caret_width());
         self.widgets.set_caret_width(appearance.caret_width());
+        // The focus width with it, to the fields that draw a focus mark
+        // (`guitk::field`), for the same reason.
+        self.run_dialog
+            .set_focus_ring_width(appearance.focus_ring_width());
+        self.icons
+            .set_focus_ring_width(appearance.focus_ring_width());
         // The icon size goes to the layer that draws icons, for the same
         // reason: it was a setting with a working control and no reader --
         // `known-issues.md` TD-C-FOUR-APPEARANCE-SETTINGS-HAVE-A-WORKING-CONTROL-
@@ -2838,6 +2852,14 @@ impl DesktopShell {
         // After the store: the taskbar's thickness follows the scale just
         // set, and the icons must stay clear of the bar as it is drawn.
         self.sync_icon_area();
+    }
+
+    /// How the desktop's transitions move now: the animation theme at the
+    /// user's speed -- what a palette resolved from these settings carries as
+    /// `Palette::motion` (design-decisions §1446).
+    #[must_use]
+    pub fn motion(&self) -> guitk::motion::Motion {
+        guitk::palette::PaletteSource::motion(&self.appearance)
     }
 
     /// Load the user's saved appearance settings from disk and apply them.
@@ -2993,6 +3015,24 @@ impl DesktopShell {
                 .saturating_sub(into_minute)
                 .max(1),
         ))
+    }
+
+    /// The picture the time-of-day wallpaper schedule has up at `utc_secs`,
+    /// in this shell's zone -- `None` when there is no schedule. See
+    /// `AppearanceSettings::scheduled_wallpaper_at`.
+    #[must_use]
+    pub fn scheduled_wallpaper(&self, utc_secs: u64) -> Option<&Path> {
+        self.appearance
+            .scheduled_wallpaper_at(utc_secs, self.local_zone())
+    }
+
+    /// How long until the scheduled wallpaper next changes, in this shell's
+    /// zone. The shell sleeps exactly this long, as it does for the
+    /// automatic light/dark mode.
+    #[must_use]
+    pub fn next_wallpaper_change(&self, utc_secs: u64) -> Option<Duration> {
+        self.appearance
+            .next_wallpaper_change(utc_secs, self.local_zone())
     }
 
     /// How long until the automatic light/dark mode next changes, if the mode
@@ -3541,9 +3581,18 @@ impl DesktopShell {
     /// on it comes from the launcher's entry for that path at the moment it is
     /// drawn. Storing the name too would be a second copy of it, stale the
     /// first time an application is renamed.
+    ///
+    /// A desktop that has never saved its pins -- no `pinned` in the file, or
+    /// no file -- starts with [`FIRST_START_TASKBAR_PINS`]. Not written back:
+    /// they are defaults until the user changes them, and a pin removed is
+    /// saved as a list without it, so it does not come back.
     pub fn load_pinned(&mut self) {
         let doc = config::load(TASKBAR_CONFIG_NAME);
         let Some(execs) = doc.get_seq(&["pinned"]) else {
+            for exec in self.first_start_programs(&FIRST_START_TASKBAR_PINS) {
+                let name = self.app_name_for(&exec);
+                self.pin_app_without_saving(&exec, &name);
+            }
             return;
         };
         for exec in execs {
@@ -3552,42 +3601,29 @@ impl DesktopShell {
         }
     }
 
-    /// Adopt the programs installed on this machine -- their desktop entries,
-    /// which the session reads -- beside the shell's own list.
+    /// Adopt the programs this machine has, as the start menu lists them: the
+    /// installed ones whose entries a menu shows, then SlateOS's own that no
+    /// installed entry replaces -- the session's list, made by the one rule
+    /// every list of programs uses (`programs::with_built_in`,
+    /// design-decisions §1445: an installed entry replaces SlateOS's own
+    /// when their desktop file IDs match).
     ///
-    /// An installed program replaces the shell's own entry for the same
-    /// program, matched by file name (the entry says `calculator`, the
-    /// shell's list `/usr/bin/calculator`): the entry is the one the program
-    /// ships, with its own name, picture and command line. The shell's own
-    /// stay for programs no entry names, so a machine with none installed --
-    /// every one today -- still has a menu.
+    /// The whole list, not the installed part of it: the shell starts with
+    /// SlateOS's own alone ([`launcher::builtin_app_database`]), and this
+    /// replaces it.
     ///
     /// The list is kept in name order, which is the order the menu lists
     /// programs in. Each program's launch count carries over, and the
     /// programs pinned to the start menu are looked up again, so a pin shows
     /// the installed entry's name and picture.
-    pub fn set_installed_apps(&mut self, installed: Vec<AppEntry>) {
+    pub fn set_programs(&mut self, programs: Vec<AppEntry>) {
         use std::collections::BTreeMap;
-        use std::ffi::OsString;
-        let file_name = |exec: &str| {
-            Path::new(exec)
-                .file_name()
-                .map(std::ffi::OsStr::to_os_string)
-        };
-        let named: std::collections::BTreeSet<OsString> = installed
-            .iter()
-            .filter_map(|app| file_name(&app.executable_path))
-            .collect();
         let counts: BTreeMap<String, u32> = self
             .apps
             .iter()
             .map(|app| (app.executable_path.clone(), app.launch_count))
             .collect();
-        let mut apps: Vec<AppEntry> = launcher::builtin_app_database()
-            .into_iter()
-            .filter(|own| file_name(&own.executable_path).is_none_or(|name| !named.contains(&name)))
-            .chain(installed)
-            .collect();
+        let mut apps = programs;
         for app in &mut apps {
             if let Some(count) = counts.get(&app.executable_path) {
                 app.launch_count = *count;
@@ -4303,9 +4339,10 @@ impl DesktopShell {
                 }
             }
         }
-        let Some(execs) = doc.get_seq(&["pinned"]) else {
-            return;
-        };
+        // Never saved: the first start's pins, as for the taskbar.
+        let execs = doc
+            .get_seq(&["pinned"])
+            .unwrap_or_else(|| self.first_start_programs(&FIRST_START_MENU_PINS));
         for exec in execs {
             if exec.is_empty() || self.is_pinned_to_start(&exec) {
                 continue;
@@ -4313,6 +4350,24 @@ impl DesktopShell {
             let entry = self.start_entry_for(&exec);
             self.start_pins.push(entry);
         }
+    }
+
+    /// The programs `ids` name -- desktop file ids of SlateOS's own
+    /// programs -- by the path each is started by, in order; an id the menu
+    /// does not list is left out rather than pinned as a button that starts
+    /// nothing.
+    ///
+    /// By id rather than by path so the defaults follow a program that moves:
+    /// the one list (`gui/programs`) says where each is.
+    fn first_start_programs(&self, ids: &[&str]) -> Vec<String> {
+        ids.iter()
+            .filter_map(|id| {
+                self.apps
+                    .iter()
+                    .find(|app| app.desktop_id.as_deref() == Some(id))
+                    .map(|app| app.executable_path.clone())
+            })
+            .collect()
     }
 
     /// Note that `launch` is being started: the program it starts goes to the
@@ -9548,14 +9603,19 @@ impl DesktopShell {
     fn render_start_search(&self, tree: &mut RenderTree) {
         let field = self.start_search_rect();
         let size = self.font_size(TextRole::Body);
-        let radii = CornerRadii::all(self.scale(4.0));
-        fill_round(tree, field, self.theme.start_menu_field_bg, radii);
-        stroke_round(
+        // The toolkit's field (`guitk::field`), in the theme's shape and at the
+        // display's scaling -- but with no focus mark. The search has the
+        // keyboard whenever the menu is open, so a mark would say nothing the
+        // open menu does not; the reference draws none (its input is
+        // `outline: none` inside a bordered box), and the caret is what says
+        // the typing goes here.
+        guitk::field::draw_at_scale(
             tree,
-            field,
-            self.theme.start_menu_field_border,
+            &Palette::from_settings(&self.appearance),
+            guitk::frame::Rect::new(field.x, field.y, field.w, field.h),
+            guitk::field::State::default(),
+            0.0,
             self.scale(1.0),
-            radii,
         );
         let hint = with_alpha(self.theme.start_menu_fg, START_MENU_HINT_ALPHA);
         let inset = self.scale(START_SEARCH_INSET);
@@ -12423,19 +12483,17 @@ impl DesktopShell {
                 self.open_path(Path::new("/"), &label)
             }
             icons::IconAction::LaunchSystem(what) if what == icons::RECYCLE_BIN => {
-                // The bin exists -- the file manager moves files into it and
-                // restores them -- but nothing can show what is in it: the
-                // file manager has no view of it, and pointing it at the bin's
-                // storage would list internal entry folders named by ids.
-                // Said rather than faked. `requests/c-e-the-recycle-bin-icon-
-                // has-nowhere-to-open.md` asks lane E for the view.
-                self.say_cannot_open(
-                    &label,
-                    "Nothing can show the recycle bin's contents yet. What is \
-                     in it is kept, in the .recycle folder in your home \
-                     folder, until something can.",
-                );
-                ShellAction::Consumed
+                // The file manager's view of the bin: each item under its own
+                // name and the folder it came from, with Restore, Delete
+                // permanently and Empty -- lane E's answer to
+                // `requests/c-e-the-recycle-bin-icon-has-nowhere-to-open.md`.
+                // Until it existed this said the bin could not be shown,
+                // because pointing the file manager at the bin's storage would
+                // have listed internal folders named by ids.
+                ShellAction::Launch(hotkeys::Launch {
+                    program: PathBuf::from(launcher::FILE_MANAGER),
+                    args: vec![std::ffi::OsString::from(launcher::RECYCLE_BIN_VIEW_ARG)],
+                })
             }
             // A destination this build does not know -- a layout written by a
             // newer desktop -- or an application-defined action with no
@@ -12834,6 +12892,7 @@ impl DesktopShell {
                 budget,
                 self.shortcut_context(),
                 self.appearance.caret_width(),
+                self.appearance.focus_ring_width(),
             );
             self.push_shortcut_message(&mut tree, &p, x, y, width, height);
             return Some(tree);
@@ -21125,6 +21184,122 @@ mod taskbar_pin_tests {
         });
     }
 
+    // ---- the first start's pins (gui/programs/INVENTORY.md section 7) ----
+
+    /// The execs the pins name, taskbar then start menu.
+    fn pinned_execs(shell: &DesktopShell) -> (Vec<String>, Vec<String>) {
+        (
+            shell
+                .pinned_apps()
+                .iter()
+                .map(|pin| pin.exec_path.clone())
+                .collect(),
+            shell
+                .start_pins()
+                .iter()
+                .map(|entry| entry.executable_path.clone())
+                .collect(),
+        )
+    }
+
+    /// **A desktop that has never saved its pins starts with the kernel's
+    /// defaults** -- File Explorer, Terminal and Settings on the taskbar, and
+    /// the five favourites in the start menu -- carried when the program lists
+    /// became one, less the web browser this system does not have.
+    #[test]
+    fn a_first_start_has_the_pins_the_kernel_listed() {
+        with_scratch_config("shell-first-start-pins", |_root| {
+            let mut shell = shell();
+            shell.load_pinned();
+            shell.load_start_menu();
+            let (taskbar, start) = pinned_execs(&shell);
+            assert_eq!(
+                taskbar,
+                [
+                    super::launcher::FILE_MANAGER,
+                    super::launcher::TERMINAL,
+                    super::launcher::SETTINGS
+                ]
+            );
+            assert_eq!(
+                start,
+                [
+                    super::launcher::FILE_MANAGER,
+                    super::launcher::TERMINAL,
+                    "/usr/bin/editor",
+                    super::launcher::SETTINGS,
+                    "/usr/bin/calculator"
+                ]
+            );
+        });
+    }
+
+    /// **Loading them writes nothing**: they are defaults until the user
+    /// changes something, and reading a file must not create it.
+    #[test]
+    fn the_first_starts_pins_are_not_written_down_by_loading() {
+        with_scratch_config("shell-first-start-no-write", |root| {
+            let mut shell = shell();
+            shell.load_pinned();
+            shell.load_start_menu();
+            assert!(!shell.take_start_menu_dirty(), "loading asked for a save");
+            let written: Vec<std::path::PathBuf> = walk(root);
+            assert!(written.is_empty(), "loading wrote {written:?}");
+        });
+    }
+
+    /// **Unpinning everything sticks**: a list saved empty is the user's
+    /// choice, not a first start, so the defaults do not come back.
+    #[test]
+    fn a_pin_list_saved_empty_stays_empty() {
+        with_scratch_config("shell-first-start-emptied", |_root| {
+            let mut first = shell();
+            first.load_pinned();
+            first.load_start_menu();
+            let (taskbar, start) = pinned_execs(&first);
+            for exec in &taskbar {
+                first.unpin_app(exec);
+            }
+            for exec in &start {
+                first.unpin_from_start(exec);
+            }
+            first.save_start_menu().expect("saved");
+
+            let mut restarted = shell();
+            restarted.load_pinned();
+            restarted.load_start_menu();
+            let (taskbar, start) = pinned_execs(&restarted);
+            assert!(
+                taskbar.is_empty(),
+                "the taskbar's defaults came back: {taskbar:?}"
+            );
+            assert!(
+                start.is_empty(),
+                "the start menu's defaults came back: {start:?}"
+            );
+        });
+    }
+
+    /// Every file under `root`, for the test that loading writes nothing.
+    fn walk(root: &std::path::Path) -> Vec<std::path::PathBuf> {
+        let mut out = Vec::new();
+        let mut dirs = vec![root.to_path_buf()];
+        while let Some(dir) = dirs.pop() {
+            let Ok(entries) = std::fs::read_dir(&dir) else {
+                continue;
+            };
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if path.is_dir() {
+                    dirs.push(path);
+                } else {
+                    out.push(path);
+                }
+            }
+        }
+        out
+    }
+
     /// Pinning the same program twice leaves one button.
     #[test]
     fn pinning_the_same_program_twice_leaves_one_button() {
@@ -21321,21 +21496,16 @@ mod taskbar_pin_tests {
     #[test]
     fn a_window_is_known_by_its_entrys_name_or_class() {
         let mut shell = shell();
-        let entry = |text: &str, id: &str| {
-            let parsed = desktopentry::DesktopEntry::parse(text.as_bytes()).expect("parses");
-            let app = desktopentry::App::from_entry(&parsed, id, None).expect("valid");
-            super::launcher::AppEntry::from_desktop(app).expect("startable")
-        };
-        shell.set_installed_apps(vec![
-            entry(
+        shell.set_programs(crate::start_search_tests::known_with(vec![
+            crate::start_search_tests::installed_as(
                 "[Desktop Entry]\nType=Application\nName=Sketchpad\nExec=/opt/sketch/run\n",
                 "org.example.Sketch.desktop",
             ),
-            entry(
+            crate::start_search_tests::installed_as(
                 "[Desktop Entry]\nType=Application\nName=Paint\nExec=/opt/paint/run\nStartupWMClass=PaintStudio\n",
                 "paint.desktop",
             ),
-        ]);
+        ]));
         let named = |app_id: &str| shell.program_for_app_id(app_id).map(|a| a.name.clone());
         assert_eq!(named("org.example.Sketch").as_deref(), Some("Sketchpad"));
         assert_eq!(named("ORG.EXAMPLE.SKETCH").as_deref(), Some("Sketchpad"));
@@ -22942,9 +23112,7 @@ mod taskbar_pin_tests {
             )
             .expect("parses");
             let app = desktopentry::App::from_entry(&entry, "sketch.desktop", None).expect("valid");
-            shell.set_installed_apps(vec![
-                super::launcher::AppEntry::from_desktop(app).expect("startable"),
-            ]);
+            shell.set_programs(crate::start_search_tests::known_with(vec![app]));
             shell.apply_window_list(&WindowList::new(
                 0,
                 vec![window_of(1, "sketch", "a drawing")],
@@ -25646,19 +25814,26 @@ mod start_search_tests {
                 "Terminal",
                 "# All apps",
                 "[Accessories]",
+                "  Archive Manager",
                 "  Calculator",
                 "  File Explorer",
                 "  Screenshot",
                 "  Text Editor",
+                "[Development]",
+                "  Hex Editor",
                 "[Graphics]",
                 "  Image Viewer",
                 "[Multimedia]",
                 "  Music Player",
+                "  Video Player",
+                "[Office]",
+                "  Calendar",
+                "  PDF Viewer",
                 "[Settings]",
                 "  Settings",
                 "[System]",
                 "  Process Explorer",
-                "  System Info",
+                "  System Information",
                 "  Terminal",
             ]
         );
@@ -25729,14 +25904,14 @@ mod start_search_tests {
         )
         .expect("parses");
         let app = desktopentry::App::from_entry(&entry, "htop.desktop", None).expect("valid");
-        let top = super::launcher::AppEntry::from_desktop(app).expect("startable");
+        let top = super::launcher::AppEntry::from_desktop(app.clone()).expect("startable");
         let launch = top.launch();
         assert_eq!(
             launch.program,
             std::path::PathBuf::from(super::launcher::TERMINAL),
             "the premise: it starts in a terminal"
         );
-        shell.set_installed_apps(vec![top]);
+        shell.set_programs(known_with(vec![app]));
         shell.note_started(&launch);
         assert_eq!(shell.start_recent(), ["htop"], "credited to the terminal");
     }
@@ -25993,7 +26168,7 @@ mod start_search_tests {
     #[test]
     fn a_programs_menu_starts_with_its_jump_list() {
         let mut shell = shell();
-        shell.set_installed_apps(vec![installed(SKETCHPAD_WITH_ACTIONS)]);
+        shell.set_programs(known_with(vec![installed(SKETCHPAD_WITH_ACTIONS)]));
         let row = row_named(&shell, "Sketchpad");
         shell.open_pin_menu(super::PinTarget::StartMenuRow(row), 100.0, 100.0);
         let labels = pin_menu_labels(&shell);
@@ -26012,7 +26187,7 @@ mod start_search_tests {
     #[test]
     fn a_jump_list_row_starts_its_action() {
         let mut shell = shell();
-        shell.set_installed_apps(vec![installed(SKETCHPAD_WITH_ACTIONS)]);
+        shell.set_programs(known_with(vec![installed(SKETCHPAD_WITH_ACTIONS)]));
         let row = row_named(&shell, "Sketchpad");
         let blank = super::DesktopShell::MENU_JUMP_LIST_BASE + 2;
         assert_eq!(
@@ -26027,7 +26202,7 @@ mod start_search_tests {
         // By key: the first row, chosen with Down and Enter.
         let mut shell = super::DesktopShell::new(1920, 1080);
         shell.toggle_start_menu();
-        shell.set_installed_apps(vec![installed(SKETCHPAD_WITH_ACTIONS)]);
+        shell.set_programs(known_with(vec![installed(SKETCHPAD_WITH_ACTIONS)]));
         let row = row_named(&shell, "Sketchpad");
         shell.open_pin_menu(super::PinTarget::StartMenuRow(row), 100.0, 100.0);
         drop(shell.handle_hotkey(&press(Key::Down)));
@@ -26058,7 +26233,7 @@ mod start_search_tests {
     fn a_click_on_the_jump_list_starts_its_action() {
         use guitk::event::{MouseButton, MouseEvent, MouseEventKind};
         let mut shell = shell();
-        shell.set_installed_apps(vec![installed(SKETCHPAD_WITH_ACTIONS)]);
+        shell.set_programs(known_with(vec![installed(SKETCHPAD_WITH_ACTIONS)]));
         let row = row_named(&shell, "Sketchpad");
         shell.open_pin_menu(super::PinTarget::StartMenuRow(row), 100.0, 100.0);
 
@@ -26089,7 +26264,7 @@ mod start_search_tests {
         // Pinning saves the taskbar's pins: a directory of the test's own.
         settingsfile::testing::with_scratch_config("shell-jump-list", |_root| {
             let mut shell = shell();
-            shell.set_installed_apps(vec![installed(SKETCHPAD_WITH_ACTIONS)]);
+            shell.set_programs(known_with(vec![installed(SKETCHPAD_WITH_ACTIONS)]));
             shell.pin_app("sketch", "Sketchpad");
             let index = shell
                 .pinned_apps()
@@ -26236,12 +26411,26 @@ mod start_search_tests {
         assert_eq!(shell.start_query.text(), name);
     }
 
-    /// An installed program's entry, as the session makes it from the
-    /// program's desktop entry.
-    fn installed(text: &str) -> super::launcher::AppEntry {
+    /// An installed program's entry, under the desktop file ID
+    /// `fixture.desktop`.
+    fn installed(text: &str) -> desktopentry::App {
+        installed_as(text, "fixture.desktop")
+    }
+
+    /// An installed program's entry, under the desktop file ID `id`.
+    pub(super) fn installed_as(text: &str, id: &str) -> desktopentry::App {
         let entry = desktopentry::DesktopEntry::parse(text.as_bytes()).expect("parses");
-        let app = desktopentry::App::from_entry(&entry, "fixture.desktop", None).expect("valid");
-        super::launcher::AppEntry::from_desktop(app).expect("startable")
+        desktopentry::App::from_entry(&entry, id, None).expect("valid")
+    }
+
+    /// The programs a machine with `installed` has, as the session lists
+    /// them: `installed`, then SlateOS's own whose IDs none of them has.
+    pub(super) fn known_with(installed: Vec<desktopentry::App>) -> Vec<super::launcher::AppEntry> {
+        let ids: Vec<String> = installed.iter().map(|app| app.id.clone()).collect();
+        programs::with_built_in(installed, |id| ids.iter().any(|i| i == id), None)
+            .into_iter()
+            .filter_map(super::launcher::AppEntry::from_desktop)
+            .collect()
     }
 
     fn launch(program: &str, args: &[&str]) -> crate::hotkeys::Launch {
@@ -26257,9 +26446,9 @@ mod start_search_tests {
     #[test]
     fn an_installed_program_starts_as_its_entry_says() {
         let mut shell = shell();
-        shell.set_installed_apps(vec![installed(
+        shell.set_programs(known_with(vec![installed(
             "[Desktop Entry]\nType=Application\nName=Sketchpad\nExec=sketch --new \"blank page\" %U\nIcon=applications-graphics\nCategories=Graphics;\n",
-        )]);
+        )]));
         assert!(names(&shell).contains(&"Sketchpad".to_owned()));
         type_text(&mut shell, "Sketchpad");
         let outcome = shell.handle_hotkey(&press(Key::Enter));
@@ -26270,21 +26459,34 @@ mod start_search_tests {
         );
     }
 
-    /// **An installed program replaces the shell's own entry for it**, and
-    /// the shell's own stay for the programs nothing installed names.
+    /// **An installed entry with SlateOS's entry's ID replaces it**; one
+    /// under another ID -- even one starting a program of the same name --
+    /// sits beside it; and SlateOS's own stay for the IDs nothing installed
+    /// has (design-decisions §1445).
     #[test]
     fn an_installed_program_replaces_the_shells_own_entry_for_it() {
         let mut shell = shell();
         let before = names(&shell);
         assert!(before.contains(&"Calculator".to_owned()), "the premise");
-        shell.set_installed_apps(vec![installed(
-            "[Desktop Entry]\nType=Application\nName=Abacus\nExec=/opt/bin/calculator\n",
-        )]);
+        shell.set_programs(known_with(vec![
+            installed_as(
+                "[Desktop Entry]\nType=Application\nName=Abacus\nExec=/opt/bin/calculator\n",
+                "org.slateos.Calculator.desktop",
+            ),
+            installed_as(
+                "[Desktop Entry]\nType=Application\nName=Other Calculator\nExec=calculator --scientific\n",
+                "org.example.Calc.desktop",
+            ),
+        ]));
         let after = names(&shell);
         assert!(after.contains(&"Abacus".to_owned()));
         assert!(
             !after.contains(&"Calculator".to_owned()),
             "the shell's own entry stayed beside the installed one: {after:?}"
+        );
+        assert!(
+            after.contains(&"Other Calculator".to_owned()),
+            "an entry under another ID replaced nothing and is listed: {after:?}"
         );
         assert!(
             after.contains(&"Terminal".to_owned()),
@@ -26301,9 +26503,9 @@ mod start_search_tests {
     #[test]
     fn a_terminal_program_is_started_in_the_terminal() {
         let mut shell = shell();
-        shell.set_installed_apps(vec![installed(
+        shell.set_programs(known_with(vec![installed(
             "[Desktop Entry]\nType=Application\nName=Top\nExec=htop --tree\nTerminal=true\n",
-        )]);
+        )]));
         assert_eq!(
             shell.launch_for("htop"),
             launch(super::launcher::TERMINAL, &["-e", "htop", "--tree"])
@@ -26321,9 +26523,9 @@ mod start_search_tests {
             "paint",
             "named for its file, unknown"
         );
-        shell.set_installed_apps(vec![installed(
+        shell.set_programs(known_with(vec![installed(
             "[Desktop Entry]\nType=Application\nName=Paint Studio\nExec=/opt/bin/paint --studio\n",
-        )]);
+        )]));
         assert_eq!(shell.start_pins()[0].name, "Paint Studio");
         assert_eq!(
             shell.launch_for("/opt/bin/paint"),
@@ -26347,7 +26549,7 @@ mod start_search_tests {
         {
             app.launch_count = 7;
         }
-        shell.set_installed_apps(Vec::new());
+        shell.set_programs(known_with(Vec::new()));
         let count = shell
             .apps
             .iter()

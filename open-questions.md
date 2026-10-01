@@ -84,6 +84,307 @@ subsystem".)
 one: write it up in `design-decisions.md` as a `Decided by: Operator` entry,
 **delete the entry from here**, and add one line to the `
 
+## D-Q7 — [D] The C library tells programs text is plain ASCII, then reads and writes it as UTF-8. Which should it be? — Status: OPEN (raised 2026-09-29)
+
+**In short:** a program can ask the C library how text is encoded -- whether
+"é" is an error (plain ASCII, which has no accented letters) or two bytes
+(UTF-8, what SlateOS uses everywhere). Asked, the library says ASCII; but
+when it actually converts text, it treats it as UTF-8. Programs that go by
+the answer -- every GNU program ported here -- act as though
+accented text could not occur (plain quotes instead of curly ones, a
+conversion to "the user's encoding" failing on "é"); programs that just
+convert, work. The choice: say UTF-8 everywhere, as your August decision
+for the shell (Q38: "no non-UTF-8 locale") suggests, or copy Linux, where a
+program starts in a one-byte-per-character mode and switches to UTF-8 when
+it asks for the user's settings.
+
+**Terms.** *Locale*: a program's language and text settings, chosen with
+`setlocale`; "C" is the built-in one every program starts in, and
+`LC_ALL=C` in a script asks for it. *`CODESET`*: the question "which
+encoding?", asked with `nl_langinfo`. *`MB_CUR_MAX`*: the longest character,
+in bytes.
+
+What each part says today:
+
+| Part | Says |
+|---|---|
+| `nl_langinfo(CODESET)` | `ANSI_X3.4-1968`: plain ASCII |
+| `iconv`'s default encoding (its empty name) | ASCII |
+| `setlocale(LC_ALL, "")` -- "use the user's settings" | "C", whatever was asked for |
+| `MB_CUR_MAX` | 4: UTF-8's |
+| `mbrtowc`, `wcrtomb` and the other conversions | UTF-8, in every locale |
+| `mbrtoc16`, `mbrtoc32`, `c16rtomb`, `c32rtomb` | ASCII only -- a bug either way, being made UTF-8 like `mbrtowc` now |
+| the `locale` command (lane B) | the C locale's character set is ASCII |
+
+| Option | *What changes:* |
+|---|---|
+| **A. UTF-8 everywhere, and said so** | "Which encoding?" answers UTF-8 in every locale, `setlocale(LC_ALL, "")` answers `C.UTF-8`, `iconv`'s default is UTF-8, the `locale` command says UTF-8. `LC_ALL=C` changes nothing about text. |
+| **B. As Linux and musl: one byte a character in "C", UTF-8 when asked for** | A program starts in a "C" locale where every byte is one character (as POSIX.1-2024 requires of it); `setlocale(LC_ALL, "")` gives it `C.UTF-8` -- SlateOS's default setting -- where text is UTF-8 and everything says so. `LC_ALL=C` in a script gives byte-at-a-time behaviour, as on Linux. |
+| C. Leave it | The mismatch above stays. |
+
+- **A**: the least work, and what the library already does when converting;
+  consistent with Q38. But `LC_ALL=C` -- which `./configure` scripts and
+  many build and shell scripts set to get byte-at-a-time behaviour, and
+  which makes GNU `grep`, `sed` and `sort` take their fast one-byte paths
+  -- would no longer mean that here, and a program that never calls
+  `setlocale` gets UTF-8 where on Linux it gets bytes. It departs from
+  POSIX.1-2024, which requires the "C" locale to be one byte a character.
+- **B**: ported programs behave exactly as they do on Linux, scripts' `LC_ALL=C`
+  included, and it is what POSIX requires; every program that asks for the
+  user's settings -- nearly all that handle text -- gets UTF-8, so what a user
+  sees is UTF-8 throughout. More work: every conversion, `MB_CUR_MAX` and
+  the character-class functions have to follow the program's (or thread's)
+  locale -- a few hours. The "C" locale would be the one non-UTF-8 setting,
+  which Q38's premise said SlateOS does not have; osh stays UTF-8-only
+  either way.
+
+**If never answered:** nothing breaks and nothing is blocked; ported
+programs keep taking accented text for errors in the places that ask the
+encoding by name, and each port that meets it is a case of this question.
+
+**Claude's recommendation:** **B**, with the "C" locale as musl's --
+every byte a character, so nothing in it is ever an encoding error -- and
+`C.UTF-8` the default setting. It is what the software being ported is
+written against, and what POSIX asks for, while keeping SlateOS UTF-8
+wherever a user's text is shown. In the meantime lane D fixes only what is
+wrong either way (`<uchar.h>`'s conversions, which must agree with
+`mbrtowc`'s), and leaves the ASCII answers alone.
+
+**Where it bites:** `posix/src/langinfo.rs` (`CODESET`), `posix/src/locale.rs`
+(`setlocale`), `posix/src/wchar.rs` and `posix/src/uchar.rs` (the
+conversions), `posix/src/ctype.rs` (`MB_CUR_MAX`), `posix/src/iconv.rs`
+(the empty name), `userspace/locale` (lane B); design-decisions §104 and
+§351, which assume no non-UTF-8 locale.
+
+## D-Q6 — [D] Some of the C library is translated from glibc, whose licence binds every program the library is built into. Keep it, or rewrite those parts? — Status: OPEN (raised 2026-09-28)
+
+**In short:** to make the C library behave exactly as Linux's (glibc)
+does, several parts of it were written by translating glibc's own source
+code into Rust, line by line -- most recently the Tamil character set,
+the new C23 maths functions and `clog10` -- and `<obstack.h>`'s macros
+follow glibc's header's, macro for macro. glibc's licence (the LGPL)
+allows that, on a condition: anyone who receives a program containing it
+must be able to rebuild that program with their own copy of the library.
+The C library is built into *every* program on SlateOS, so the condition
+reaches every program, ours and anyone else's. An earlier decision
+(design-decisions.md §1133) assumed the library should stay free of that
+condition and chose other sources for the complex-number functions; the
+translations since have not followed it. Which should hold?
+
+**Terms used below.** *LGPL*: the licence glibc is under -- free to use and
+change, but code derived from it stays under it, and a program containing
+it must let the user swap in their own build of that code. *Statically
+linked*: the library's code is copied into each program, as all programs
+here are today. *Clean-room rewrite*: writing the code again from the
+standards and from glibc's observable behaviour, without its source open --
+the tests that compare us with glibc (glibc as the *oracle*) stay exactly as
+they are, since running a program is not copying it.
+
+What is translated, as far as lane D knows:
+
+| Where | From glibc's | Since |
+|---|---|---|
+| `posix/src/iconv.rs`: the CP1255, CP1258 and TCVN converters' loops | `iconvdata/cp1255.c`, `cp1258.c`, `tcvn5712-1.c` | 2026-09-27, on `main` |
+| `posix/src/iconv.rs`: the T.61 / ISO 6937 / ANSI X3.110 decoder | `iconvdata/t.61.c` and kin | 2026-09-28, on `main` |
+| `posix/src/iconv.rs`: TSCII | `iconvdata/tscii.c` | 2026-09-28, on `main` |
+| `posix/src/c23math.rs`: `nextup` ... `fminimum_mag_num`, `scalbl` | `math/`, `sysdeps/ieee754/*`, `e_scalbl.S` | 2026-09-28, on `main` |
+| `posix/src/narrow.rs`: the narrowing functions' checks | `math/math-narrow.h` | 2026-09-28, on `main` |
+| `posix/src/complex*.rs`: `clog10` | `math/s_clog10_template.c`, `x2y2m1` | 2026-09-28, on `main` |
+| `posix/include/obstack.h`: the macros, macro for macro -- C, in a header a program compiles into itself | the installed `<obstack.h>` (`malloc/obstack.h`) | 2026-09-30 |
+
+One more part, since this was raised, was written with glibc's source
+open, though not translated from it: `posix/src/regex/parse.rs`
+(2026-09-30) takes the order of glibc's `regcomp.c` checks -- which
+character is special where, which error a malformed interval gets, and
+what each of the GNU interface's syntax bits changes -- from reading that
+file, and the oracles' cases then pin each rule: 11,250 pairs of tokens in
+POSIX's two syntaxes, some 41,000 patterns in the GNU ones. Its code is not
+glibc's: an explicit stack where glibc recurses, its own types, none of
+glibc's lines. Under **B** it would be derived again from the oracles'
+answers alone, which already fix every rule it has. (The matcher behind
+it, the rest of `posix/src/regex/`, follows the standard and owes glibc's
+code nothing; its fastmap, `fastmap.rs`, reaches glibc's answer by its
+own reasoning over the tree, where glibc reads its automaton's states.)
+
+The obstack functions behind `<obstack.h>`'s macros, `posix/src/obstack.rs`,
+are not translated: they are held to the oracle's answers, which show every
+chunk size the program's allocation function is asked for. The header is the
+interface itself -- a program expands its macros, and must get what glibc's
+give -- so under **B** it would be written again from the glibc manual's
+description of each macro and held to the same check
+(`posix/tools/oracle/obstack_harness.py --header`: both of the header's forms,
+over glibc's own functions). (The LGPL, in 2.1's §5, lifts its conditions
+from a program that uses only a header's data structure layouts and small
+macros, ten lines or fewer -- as each of these is; whether that settles it
+for this header is part of this question.)
+
+(The character tables themselves -- which byte means which letter -- are
+facts read from glibc's data files and from running its converters, not
+code; they are not in question. And not everything follows glibc's
+source: the `long double` Bessel functions, `posix/src/besl.rs`, were
+written from the mathematics, with glibc only run to see its answers.)
+
+| Option | *What changes:* |
+|---|---|
+| **A.** Keep the translations; honour the LGPL | The files above say they are LGPL. Every program built on the C library must be re-linkable by its user -- which means shipping the library's object files with the system, or making the C library a shared library (`libc.so`) as design.txt plans for later. Nothing is rewritten. |
+| **B.** Rewrite those parts clean-room; glibc stays the oracle, never the source | The library stays under whatever licence SlateOS chooses, with no condition on programs. The six parts are written again from the standards (C23, IEEE 754, the TSCII and ISO 6937 specifications) and must pass the same glibc-comparison tests they pass now; a rule is written down: glibc may be tested against, not read and copied. |
+| **C.** Decide before the first public release, not now | Work continues as it is; the table above is kept current; before anything is distributed as a binary, A or B is applied. |
+
+**If never answered:** nothing breaks and nothing is distributed yet; the
+cost of B grows with every further translation, and lane D will keep
+translating where glibc is the clearest description of the behaviour
+wanted.
+
+**Claude's recommendation:** **B.** The C library is the one piece of code
+every program contains; keeping it free of conditions is worth a few hours
+of rewriting, and the glibc comparison tests -- the part that actually
+guarantees glibc's behaviour -- stay unchanged, so the rewrites cannot drift
+from what the translations do today. Until you answer, new lane D work is
+written from the standards with glibc as the oracle only.
+
+**Where it bites:** the six places above; `design-decisions.md` §1133 (the
+earlier assumption); and every future port where glibc's behaviour is the
+target.
+
+## D-Q5 — [D] Chinese, Japanese and Korean text conversion needs about a megabyte of tables. Build them into every program that converts text, or load them from files? — Status: OPEN (raised 2026-09-28)
+
+**In short:** the C library's `iconv` (the function programs call to
+convert text between character sets -- say from an old Japanese e-mail's
+Shift-JIS into UTF-8) now handles every character set that uses one byte a
+character, 221 of them, with their tables built into the library. What is
+left is Chinese, Japanese and Korean, whose character sets need two or more
+bytes a character and tables of thousands of entries each: about 0.7 MB for
+all of them even stored compactly, one direction only. The question is
+whether that megabyte goes inside every program that uses `iconv`, or into
+files the library reads the first time a program asks for one of these sets.
+
+**Terms used below.** *Statically linked*: the library's code and data are
+copied into each program, as all programs here are today; there is no shared
+copy on disk. *Multibyte set*: a character set with more than one byte for
+some characters -- EUC-JP, Shift-JIS, EUC-KR, GBK, GB18030, Big5,
+ISO-2022-JP, and IBM's double-byte mainframe sets. *mmap*: reading a file by
+mapping it into memory, so every program using it shares one copy in RAM.
+
+| Option | *What changes:* |
+|---|---|
+| **A.** Built in, as the one-byte sets are (design-decisions §1117): the reading half stored, the writing half built when `iconv_open` first opens the set | Every program that calls `iconv` grows by about 0.7 MB on disk, and each open multibyte converter takes about 80 KB of memory and a few milliseconds to open. Nothing else to install; works on any disk layout. |
+| **B.** Table files in the system image (`/usr/lib/iconv/`, one per set), read with mmap the first time a program opens that set -- what glibc does with its converter modules | Programs stay their current size; all of them share one copy of a table in RAM. The files must be on the disk: a program on a system without them is told the set is not available, as glibc says when its modules are missing. |
+| **C.** A, until the C library can be a shared library (`libc.so`, one copy for every program), then nothing more to do | Same as A today; the per-program cost disappears when shared libraries arrive -- which design.txt plans ("within one system generation, apps share .so files") but nothing has built. |
+
+**If never answered:** nothing gets worse -- these sets are refused today, as
+they have been. It blocks Chinese, Japanese and Korean conversion in every C
+program (a mail reader, `iconv -f SHIFT_JIS`, a text editor opening a legacy
+file). The single-byte sets are unaffected.
+
+**Claude's recommendation:** **B.** A megabyte in every program that happens
+to convert text is the wrong place for data that most of them will never
+touch, and sharing one mapped copy is how every mature system does it
+(glibc's modules, ICU's data file). The files are made by the same generator
+that makes the built-in tables today, and lane D's image recipe installs
+them. If shared libraries arrive later, B still costs nothing extra.
+
+**Where it bites:** `posix/src/iconv.rs` (the converters, whichever way the
+tables arrive), `posix/tools/gen_iconv_*.py` (the tables),
+`scripts/create-ext4-rootfs.sh` (installing them, for B).
+
+## D-Q4 — [D] Background services that run before anyone signs in need passwords too. Where should they keep them? — Status: OPEN (raised 2026-09-27)
+
+**In short:** some programs that run in the background need a password to do
+their job, and must do it while nobody is signed in: dynamic DNS (keeping a
+web address such as `myhome.duckdns.org` pointed at a home network) needs the
+DNS provider's password; a scheduled backup to another computer needs that
+computer's password; joining Wi-Fi at startup needs the network's passphrase.
+The password manager cannot give them one at startup: each user's store is
+locked with that user's own master password, so until they sign in and unlock
+it, nothing can read it -- even a program you have allowed to (your C-Q25
+answer). These passwords need a home a background service can reach at
+startup, and the choice is how well that home is protected.
+
+**Terms used below.** *Background service*: a program the system starts at
+boot, before any sign-in (the backup scheduler and the dynamic-DNS updater are
+two). *Encrypted at rest*: stored scrambled, so reading the disk directly -- a
+stolen laptop, or the disk moved to another machine -- shows nothing useful.
+*TPM*: a security chip in most PCs that keeps a key and hands it over only to
+this machine's own, unmodified startup. *Capability*: a permission a program
+holds as a token, as in C-Q25's "a capability key specifically for this".
+
+| Option | *What changes:* |
+|---|---|
+| **A.** A file only the service can read -- what Linux does for Wi-Fi (`/etc/wpa_supplicant/wpa_supplicant.conf`) and NetworkManager's saved networks | Works at startup, simple. The password is stored unscrambled, guarded by who may open the file: other programs on the running system cannot read it, but anyone who reads the disk directly can -- unless the whole disk is encrypted, which then covers it (the kernel has a volume-encryption module, `fs::diskencrypt`; nothing encrypts the system disk with it yet). |
+| **B.** A *system* section of the password manager, unlocked at startup with a key the TPM keeps, readable by services holding a capability for it -- C-Q25's idea, extended to startup | Encrypted at rest even without whole-disk encryption, and one place to see and revoke every stored service password. Needs TPM support, which does not exist yet; on a machine without a TPM the unlocking key must sit on disk, which makes it A with extra steps. |
+| **C.** No stored passwords for background services -- they run only while their owner is signed in and has unlocked the password manager, reading it through C-Q25's capability | Nothing new to protect. Dynamic DNS, backups to another computer and Wi-Fi at startup stop whenever nobody is signed in -- which for a home server is all the time. |
+
+**If never answered:** nothing gets worse today -- no background service
+stores a password yet. It blocks the part of the dynamic-DNS updater that signs
+in to the provider (`requests/e-ad-dynamic-dns-is-a-userspace-service-not-a-kernel-table.md`);
+the rest of it can be built meanwhile.
+
+**Claude's recommendation:** **A now, B when a TPM-backed store exists.** A is
+what every Linux system does for these same passwords, and whole-disk
+encryption, once the system disk uses it, gives A the at-rest protection B
+would. The service, not Settings, writes the file (Settings hands it the
+password and the service checks Settings may), and each service reads its
+passwords through one small function -- so moving to B later changes that
+function and nothing else.
+
+**Where it bites:** `services/dyndns` (lane D, not yet written); lane E's
+Dynamic DNS page in `apps/settings/src/remote.rs`, which would hand the
+password to the service rather than store it in the password manager; later,
+Wi-Fi at startup (`userspace/wpa`, lane B) and backups to another computer
+(`requests/e-db-the-backup-service-runs-backup-run-due.md`).
+
+## D-Q3 — [D] Programs cannot share memory, message queues or named semaphores with each other. Where should the shared ones live? — Status: OPEN (raised 2026-09-26)
+
+**In short:** Unix programs often cooperate through things they open by name:
+a block of shared memory, a queue of messages, a named counter that makes one
+program wait for another. Here each of those is private to the program that
+opened it — two programs opening the same name each get their own — and the
+system cannot yet give two programs the same writable memory at all. So a
+database whose worker programs share memory (PostgreSQL works exactly this
+way) cannot run, and a message one program queues is never seen by another.
+Making them shared needs a home outside any one program; which home?
+
+**What exists now**, all of it in the C library (libc: the library every
+program links for these calls), per program:
+
+| Family | Calls | State |
+|---|---|---|
+| POSIX shared memory | `shm_open` + `mmap(MAP_SHARED)` | a file under `/dev/shm`, but the kernel refuses writable shared file mappings (`ENOSYS`, design-decisions §23) |
+| POSIX named semaphores (counters programs wait on) | `sem_open` | a table inside libc |
+| POSIX message queues | `mq_open`, `mq_send` | a table inside libc: 8 queues of 32 small messages |
+| System V (the older Unix interface for all three) | `shmget`, `msgget`, `semget` | tables inside libc |
+| Locks placed in shared memory | `PTHREAD_PROCESS_SHARED` | refused (`ENOTSUP`): the kernel's futex (its wait/wake primitive) cannot wake across programs yet — requested of lane A |
+
+**The question.** Every option below first needs the kernel to share writable
+memory between programs — anonymous and file-backed `MAP_SHARED` (a mapping
+two programs see the same bytes through). That part is lane A's and not in
+question. What is in question is where the *named objects* live:
+
+| Option | *What changes:* |
+|---|---|
+| **A.** In the kernel, as Linux does | All six families work between programs; each call is a kernel call. The kernel gains three new kinds of object. |
+| **B.** In a service program (an `ipcd`) | All six work between programs; libc asks the service over the system's message channels, so every send or receive costs a round trip through it. The kernel gains nothing beyond shared memory. |
+| **C.** In libc, over shared files — glibc's own design for named semaphores | All six work between programs; each object is a file under `/dev/shm`, mapped into every program that opens it, waits sleep on shared futexes. No new kernel objects and no service; file permissions decide who may open what. A program that dies halfway through an update can leave that one queue stuck, as a crashed lock holder can anywhere. |
+| **D.** Leave it | Programs that use these only within themselves keep working; nothing can share them. |
+
+**If never answered:** safe for everything in the tree today (nothing here
+shares these between programs), but it blocks every port that does —
+PostgreSQL, anything using `sem_open` between programs, daemons built on
+message queues. It does not get worse on its own.
+
+**Claude's recommendation:** **C.** It is how glibc already builds named
+semaphores, it keeps the kernel as small as the design asks (only scheduling,
+memory, IPC primitives and capabilities in the kernel), and its only kernel
+needs — shared writable memory and cross-program futexes — are needed by every
+option anyway. A stays available for System V message queues if a port turns
+out to need kernel-side behaviour C cannot give. Meanwhile lane D keeps the
+single-program versions correct.
+
+**Where it bites:** `posix/src/mqueue.rs`, `posix/src/semaphore.rs`
+(`sem_open`), `posix/src/sysv_*.rs`, `posix/src/mman.rs` (`shm_open`); lane A:
+`kernel/src/mm` (shared mappings) and `kernel/src/ipc/futex.rs`
+(`requests/d-a-futexes-keyed-by-physical-page-for-process-shared-objects.md`).
+
 ## F-Q3 — [F] Screenshots: how does a program get permission to read what is on the screen? — Status: OPEN (raised 2026-09-27)
 
 **In short:** the screenshot tool cannot take screenshots, because no program
@@ -411,6 +712,42 @@ costs the other two lanes their merges.
 the head-of-line witness entry: `socket.rs:356`, `netstack_client.rs:158`, and
 `services/netstack/src/main.rs:2594`.*
 
+## C-Q31 — [C] You suggested a lane say when it starts work outside its own part of the tree. The tool exists -- may `CLAUDE.md` make it a rule? — Status: OPEN (raised 2026-09-27)
+
+**In short:** answering C-Q20 you suggested that whenever a lane takes on a task
+the roadmap does not clearly give it, it should write that down where the other
+lanes will see it, so two lanes do not build the same thing. There is now a
+small tool for exactly that: a lane records "I am doing X" and every other lane
+sees it at once, without waiting for anyone's work to be merged. A tool nobody
+is told about goes unused, and the place every lane is told things is
+`CLAUDE.md`, which changes only on your word. So the question is whether to add
+the paragraph below.
+
+**The tool:** `scripts/lane-claims.py`. A claim is a small file in the one
+folder all six lanes share -- where "stop everything" halts already live -- so it
+is seen the moment it is written. It is a notice, not a lock: nothing is refused
+because of it. Claims older than a week are shown as stale, not hidden.
+
+**The paragraph proposed**, for `CLAUDE.md` under "Six Sessions", after the
+paragraph about `requests/`:
+
+> **Before starting a task the roadmap does not clearly give your lane, check
+> and claim it.** `python scripts/lane-claims.py --check <the paths you will
+> touch>` shows whether another lane has claimed them; if not, `python
+> scripts/lane-claims.py --claim "<what>" --paths <paths>` tells every lane at
+> once, and `--release <what>` when it is done or dropped. A claim is a notice,
+> not a lock.
+
+| Option | *What changes* |
+|---|---|
+| **A. Add it as written** (recommended) | every lane checks for and records a claim before out-of-territory work |
+| **B. Add it, worded your way** | the same, in your words -- tell me the change, or edit it in yourself |
+| **C. Leave `CLAUDE.md` as it is** | the tool exists and is used only by lanes that remember it |
+
+**If it is never answered:** nothing breaks and nothing is blocked; the tool is
+there and lane C uses it. What is lost is the protection it exists for, because
+a claim only helps if the lane about to duplicate the work thinks to look.
+
 ## C-Q29 — [C] Copying in one program and pasting in another works nowhere. Should copy and paste travel through the window system? — Status: OPEN (raised 2026-09-26)
 
 **In short:** nothing you copy can be pasted into a *different* program. Each
@@ -524,358 +861,6 @@ and on two entries sharing an identifier while one is still open. It only
 **warns** about a missing `C-Q<n>`-style identifier and about the two historic
 duplicate numbers in the archive, both of which are another lane's text to fix
 or history's to keep. Reasoning: `design-decisions.md` §903.
-
-## B-Q8 — [B] Two programs we copy disagree about the width of 626 mostly-invisible characters. Which do we copy? — Status: OPEN (re-asked 2026-09-14)
-
-**In short:** Terminal text sits in fixed cells. A Chinese character takes two,
-an accent mark that sits on the previous letter takes none, most things take
-one. We keep one table of those numbers. The two things we are cloning — the
-**bash** shell and the **GNU command-line tools** — ship *different* tables, and
-they disagree about 626 characters. We currently match bash. **The question is
-only which of the two we copy.**
-
-### Your two questions from 2026-09-14, answered first
-
-**"Why wouldn't the table simply report how wide we actually print each
-character?"** — It should, and **as of 2026-09-14 it effectively does, which
-removes this from the decision.**
-
-When you asked, the answer was bad enough to be its own defect: our terminal
-had no notion of width at all. It advanced one column for every character, so
-it drew Chinese, Korean, Japanese and emoji one cell wide when they need two —
-**185,074** characters where screen and table disagreed, against the 626 this
-question is about. That was filed to lane C, who own the terminal.
-
-They have fixed it, and they fixed it the better way round: rather than
-rewriting the table to describe the renderer, **they made the renderer read the
-table.** A wide character now takes two cells, a combining mark takes none, and
-the two can no longer drift apart because there is only one source. **On `main`
-since 2026-09-15**, verified here rather than taken from the report.
-
-**So screen-correctness is no longer part of this choice.** Whichever table you
-pick, the terminal will draw what the table says. What is left is the narrow
-question below: which upstream do we match on 626 characters.
-
-**"Why wouldn't the GNU and bash programs ask how wide a character is, and
-adjust?"** — Two separate reasons, and the first is the one that surprises
-people:
-
-1. **There is no way to ask a terminal how wide it will draw something.** No
-   such query exists in the protocol. The only way to find out is to print it
-   and see where the cursor lands — a round trip per character, and impossible
-   when the output is a file or a pipe, which is exactly where `ls` decides its
-   columns. So *every* implementation everywhere embeds a static table and
-   hopes it matches.
-2. **bash and the GNU tools are not programs running on SlateOS that could
-   consult our table** — they are the two upstreams we are *reimplementing*.
-   Our own programs do all ask one shared table, which is the part that works
-   as you would expect. The 626 exists because on Linux bash asks the C library
-   and GNU coreutils 9.5 deliberately overrides the C library with its own
-   newer Unicode tables. We can match one or the other, not both.
-
-### The options
-
-| Option | *What changes:* |
-|---|---|
-| **(a) Copy the GNU tools' table** *(recommended)* | Our `ls` and `wc -L` match GNU byte-for-byte on those 626; our shell's menu stops matching bash on them. It is a pinned, re-derivable upstream (Unicode 15.1.0); ours came from whatever Python the build machine had. |
-| **(b) Keep bash's table — today's behaviour** | Nothing changes. Those 626 stay permanently marked "differs on purpose" in the `ls` harness, which dulls it. |
-| **(c) Describe our own renderer instead** | **Withdrawn — overtaken.** It existed to make screen and table agree; lane C achieved that by pointing the renderer at the table, so there is nothing left for it to fix. |
-
-A fourth option — two tables, one for the shell and one for the utilities — is
-what `charwidth` exists to prevent: the symptom is a menu and a listing that do
-not line up on the same screen. I do not recommend it.
-
-**Why (a):** six utilities consult a width (`ls`, `wc -L`, and `sort`, `pr`,
-`df`, `numfmt` when written) against one shell, and gnulib's table is a named
-upstream we can re-dump mechanically. **Why I have not just done it:** it
-silently changes on-screen layout in six programs to win a byte-diff in one,
-and user-visible behaviour is yours.
-
-**If never answered:** safe, and it does not worsen. Today's behaviour is (b).
-The cost is two permanently-deferred cases in the `ls` harness, and the 626 are
-mostly invisible marks and unassigned code points — nobody has a filename made
-of them by accident.
-
-**Where it bites:** `userspace/charwidth/src/lib.rs`;
-`userspace/oils/tests/gen_display_width.py`; `userspace/oils/src/width.rs`;
-`userspace/coreutils/src/bin/{ls,wc}.rs`; `userspace/column/src/main.rs`;
-`scripts/ls-diff.sh` (fixture `y/`). Full technical detail, including the
-185,074 measurement and the gnulib source that causes the split, is in
-`known-issues.md` → `TD-B-OUR-WIDTH-TABLE-IS-BASHS-AND-COREUTILS-9.5S-IS-NOT`.
-
-## B-Q9 — [B] We wrote our own copy of a shell because we could not build the original. We can now. Keep the copy, or switch to the original? — Status: OPEN
-
-**In short:** the *shell* is the program that runs the commands you type. SlateOS
-has one we wrote ourselves, in Rust — a re-creation of an existing open-source
-shell called Oils. We re-created it because Oils is written in C++, and at the
-time we had no way to build C++ programs for SlateOS. **That is no longer
-true**, as of a measurement made today. So the original is now obtainable, and
-it comes with a second, more modern command language that our copy does not
-have at all. The question is whether to keep our copy, offer both, or replace
-ours with the original.
-
-### What changed
-
-Oils ships two languages: **OSH** (compatible with the shell most people
-already know) and **YSH** (its newer one, with real lists, dictionaries and
-functions). We have a hand-written Rust version of OSH only. YSH has always
-been deferred — not for lack of interest, but because building it meant
-building C++ for SlateOS, which nothing could do.
-
-Today's check: the compiler we already use for C (`zig`) turns out to build
-C++ for our target as well — it is the same program, and we have had it since
-July. A C++ test program compiles under our own build settings, and when
-linked against SlateOS's own C library **every unresolved name is a C++
-standard-library one and none is ours**. So the missing piece is link-line
-wiring, not a missing tool.
-
-**Not yet established:** nobody has built genuine Oils, and no C++ program has
-been run on SlateOS. This says the *obstacle* is gone, not that the job is
-done. Expect the port to be real work — just ordinary work rather than
-blocked work.
-
-**How much work, measured and then done since this was written:** all three
-remaining link-line gaps were closed the same day. A C++ program using
-`<string>`, `<vector>` and a real `throw`/`catch` now **links** for SlateOS
-against our own C library, with nothing missing and nothing colliding.
-
-That sharpens the question rather than answering it. The obstacle this entry
-was written around is gone, and what is left is the ordinary work of a port:
-Oils' build system generates its C++ from Python, and whether that survives
-cross-compilation is still unmeasured. **Nothing C++ has been run on SlateOS
-yet** — a linked binary is not a working one, and the CPython and bash ports
-each sat at exactly this stage before anyone knew whether they ran.
-
-So option (c), "not yet", is now a weaker position than it was: the thing it
-was waiting for has happened.
-
-### The options
-
-| | *What changes:* |
-|---|---|
-| **(a) Keep ours as the default; ship Oils as an optional install** | Typing `sh` still gets our Rust shell. Someone who wants YSH installs a package and gets it. Two shells exist; each keeps working. |
-| **(b) Replace ours with genuine Oils** | Typing `sh` gets upstream Oils. YSH is present for everyone. Our Rust shell is deleted, and roughly a year of accumulated behaviour goes with it. |
-| **(c) Neither yet — stay as we are** | Nothing changes. No YSH, and our Rust shell keeps needing hand-maintenance to track upstream. |
-
-These are the two the original decision itself left open (`design-decisions.md`
-§73), plus the option of not moving.
-
-### A consideration on each side, briefly
-
-**For (b):** our copy will always chase upstream, and any behaviour we have not
-re-created is a difference someone eventually trips over. The original is the
-definition of correct by construction.
-
-**For (a):** our Rust shell is small, boots early, and has no C++ runtime under
-it — which matters for a shell that has to work when little else does. Deleting
-it trades a dependable small thing for a faithful large one.
-
-**Against hurrying either:** the measurement says the *tool* exists. Whether
-Oils' own build system, which is unusual (it generates C++ from Python),
-survives cross-compilation is unmeasured. It would be reasonable to answer this
-only after somebody tries the build.
-
-### If this is never answered
-
-Nothing breaks and nothing degrades: option (c) is the status quo and is safe.
-The cost is only that YSH stays absent and our shell keeps needing hand-work.
-The one thing worth avoiding is leaving the *reason* stale — the project has
-already lost ~1,100 commits once to a decision whose premise had quietly
-expired, which is why this was checked at all.
-
-## B-Q12 — [B] Should `osh` quote names in its error messages, when bash does not? — Status: OPEN
-
-**In short:** Our shell prints errors like `osh: unset: myvar: cannot unset`,
-copying bash exactly. The name in the middle comes from whatever the user
-typed. If a user types a name that contains a newline, the second half of it
-lands on its own line and looks like a *separate error message the shell never
-printed*. Everywhere else in this tree we prevent that by putting quotes round
-the name; bash does not, and the whole point of `osh` is to behave like bash.
-So: copy bash, or be safer than bash?
-
-**Glossary.** *Forging a line* — making a program appear to print something it
-never printed, by hiding a newline inside a value it echoes back. *osh* — our
-bash-compatible shell, `userspace/oils`.
-
-**A worked example.** A script does `unset "$name"` where `$name` happens to
-hold `foo` followed by a newline followed by `osh: rm: /etc: removed`. Today
-the user sees two lines, the second indistinguishable from a real message.
-Nothing downstream — a log reader, a test harness, a person — can tell.
-
-**How this came up.** Gate 22 (`scripts/quote-names.py`) was widened on
-2026-09-11 to see `format!`, and it then reached `osh` for the first time,
-flagging 16 sites. It had never seen them before because `osh` writes through
-its own `perrln` rather than `eprintln!`.
-
-**What is NOT at stake, so it does not confuse the decision:**
-
-* *Byte fidelity.* One might expect the names to be raw bytes that `format!`
-  mangles. They are not: `format!` needs `Display`, which byte strings do not
-  implement, so every one of these values is already text. `osh`'s real
-  byte-string debt is elsewhere and is unaffected either way.
-* *One of the 16 is not a name at all* — `hash: {opt}:` interpolates a fixed
-  `"-d"` or `"-t"`. That one is simply not a defect.
-
-**Options**
-
-**A. Copy bash. Leave the messages exactly as they are.**
-*What changes:* nothing; the messages stay byte-identical to bash's.
-*For:* `osh` exists to be bash, and a script that greps stderr for a known bash
-message keeps working. `osh` already has a documented convention for this —
-`perrln`'s doc says shell data is written through unchanged because
-"`ls: cannot access 'aÿb'` names the file you can actually `rm`".
-*Against:* we knowingly keep a hole the rest of the tree closed, in the one
-program most likely to be handed hostile input.
-
-**B. Quote the name, diverging from bash.**
-*What changes:* `osh: unset: myvar: cannot unset` becomes
-`osh: unset: 'myvar': cannot unset`.
-*For:* closes the hole; matches every other program we ship.
-*Against:* a real, visible divergence in a compatibility-critical program, and
-scripts that match on the exact text break.
-
-**C. Make it a toggle, defaulting to bash's behaviour** — the shape already
-used twice here: `OSH_BASH_COMPAT` (§78) and `OSH_UID`/`OSH_EUID` (§79).
-*What changes:* nothing by default; an operator who wants the safer behaviour
-sets an environment variable.
-*For:* no compatibility regression, and the safety is available. The precedent
-is this project's own and the operator set it both times.
-*Against:* a third knob, and the safe behaviour is off for everyone who does
-not know it exists — which is everyone.
-
-**Recommendation: C**, on the strength of the precedent rather than on my own
-judgement of the tradeoff — the operator has twice chosen exactly this shape
-for exactly this kind of bash divergence in this exact program.
-
-**If it is never answered:** nothing breaks and nothing gets worse. The 16
-sites are exempted in the gate's IGNORE table pointing at this question, so the
-ledger is honest rather than silently zero. The risk is real but is bash's risk,
-which every shell script in the world already runs.
-
-## B-Q11 — [B] 169 command names exist inside other programs and cannot be run. Give them their own programs, or delete them? — Status: OPEN
-
-**In short:** A program can behave as several different commands depending on
-the name it was started under — the same file installed as `useradd` and as
-`userdel` does two different jobs. We have 169 such extra names, and **not one
-of them is installed anywhere**, so the code behind them is finished, tested,
-and unrunnable. `useradd` answers to `userdel`, `usermod`, `groupadd`,
-`groupdel` and `groupmod`; `systemctl` to 14 more names; `selinux` to 11. The
-question is whether to give those names real programs, install one program
-under many names, or delete the code.
-
-**Why it is not just a packaging chore.** SlateOS grants permissions
-per-program: the kernel decides what a program may do by looking at *which
-binary* it is, not at what name it was started under. So one file installed
-under six names holds one set of permissions — the union of all six jobs.
-`userdel` would run holding everything `useradd` needs, and vice versa. That is
-the reason `design-decisions.md` §8 retired multi-name programs in the first
-place. §1005 later overruled §8 for the `coreutils` bundle specifically, and
-left everything else unstated, which is why this is a question rather than a
-lookup.
-
-### The options
-
-**A. One crate per name — 169 new programs.**
-*What changes:* `userdel` exists as its own command and can be granted only the
-permission to delete a user. Every name gets its own permission set.
-Cost: 169 crates to create and keep building; much of each is a thin wrapper
-around shared code that already exists.
-
-**B. Install the one program under every name.**
-*What changes:* `userdel` runs, and is the same file as `useradd`, so it holds
-`useradd`'s permissions too. Cheapest by far — a packaging list, no new code —
-and it is how busybox and toybox ship. It gives up per-command permissions for
-these 169.
-
-**C. Delete the extra names.**
-*What changes:* `userdel` does not exist; deleting a user is whatever
-`useradd` itself offers. Removes several thousand lines of working code, and
-scripts written for Linux that call `userdel` stop working.
-
-**D. Case by case.**
-*What changes:* nothing uniform. Some names get crates (the ones a script is
-likely to call), some are deleted (tools for subsystems SlateOS does not have,
-like the 11 SELinux ones), some are left. Best end result, most judgement, and
-needs a rule for deciding or it becomes 169 separate arguments.
-
-**My recommendation: D, with a default of B for anything kept.** The
-permission argument is real but it is not equally real for every name: the
-five `useradd` siblings all edit the same two files and would end up with
-near-identical grants anyway, whereas `systemctl`'s 14 are genuinely different
-jobs. Starting from B costs nothing and can be narrowed to A later for names
-where the permission split turns out to matter; starting from A commits 169
-crates up front to buy a separation most of them do not need.
-
-**If this is never answered:** nothing breaks and nothing gets worse. The code
-is unreachable, so it cannot misbehave; it is dead weight that can drift from
-the reachable copy beside it — which has already happened once, where a bug was
-fixed in `coreutils`' `logname` and left in the unreachable copy inside
-`nproc`. The ledger (`scripts/multicall-aliases-baseline.txt`) only shrinks, so
-the number cannot quietly grow while the question waits.
-
-**Where it bites:** `scripts/multicall-aliases.py` and its baseline;
-`known-issues.md` →
-`TD-B-ONE-HUNDRED-AND-SEVENTY-TWO-COMMAND-NAMES-NOBODY-CAN-RUN`.
-
-## B-Q10 — [B] Your grep's manual and your grep disagree about one flag. Which one is right? — Status: OPEN
-
-**In short:** we are copying your `grep`'s extra features into SlateOS's. One
-of them — the `-P` proximity search — behaves differently from the way your
-`README.md` describes it, and we found this by running your own program. Before
-copying it, we would like to know which of the two you meant, because we will
-faithfully reproduce whichever you say.
-
-### What the manual says
-
-> `-P` with a NUM at least as large as the file is exactly equivalent to the
-> default whole-file gate. That equivalence is asserted by the test suite.
-
-### What the program does
-
-A three-line file, searched for two words:
-
-```text
-line 01 ALPHA
-line 02 BETA
-line 03 ALPHA
-```
-
-| command | prints |
-|---|---|
-| `grep.py ALPHA -e BETA` (no `-P`) | lines 1, 2, **3** |
-| `grep.py -P 100 ALPHA -e BETA` | lines 1, 2 |
-
-100 is far larger than the file, so by the manual these should match. They do
-not: line 3 is missing from the second.
-
-### Why
-
-`-P` clears its record of which words it has seen each time it completes a
-group. The `BETA` on line 2 is used up by the group that ends there, so the
-`ALPHA` on line 3 has no `BETA` left to pair with and is not part of any group.
-The no-`-P` path has no such step — once the file is known to contain every
-word, it prints every matching line.
-
-### The options
-
-| | *What changes:* |
-|---|---|
-| **(a) The program is right; the manual is wrong** | Nothing changes in your tool. SlateOS's grep copies the behaviour above, and the README sentence gets corrected. |
-| **(b) The manual is right; the program has a bug** | Your `-P` would print line 3 as well, i.e. a word can belong to more than one group. SlateOS's grep copies *that*, and your tool needs a fix. |
-| **(c) Both are intended, and the manual means something narrower** | Say what the equivalence is meant to hold for and we will test that instead. |
-
-### If this is never answered
-
-Nothing breaks. We implement **(a)** — the behaviour your program actually has,
-since that is what you are used to seeing — and note the divergence from your
-manual. The risk of leaving it is only that if you meant (b), we will have
-faithfully copied a bug, and it will be harder to change later once scripts
-depend on it.
-
-**Not urgent, and not a criticism of the tool.** We only found it because the
-port needed the exact rule, and the manual's own example was not enough to
-derive it either.
-
 
 ## A-Q13: Eight times in two days, one agent's push has cost another agent a 20-minute test run. Should pushing be gated?
 
@@ -1046,615 +1031,6 @@ needs in the meantime, which is faster than a request queue.
 
 *Raised by lane A 2026-09-12 after lane B flagged the mismatch. Lane A is not a neutral
 party here and offers no recommendation between the first two options.*
-
-## B-Q13 — [B] Two trailing questions the operator asked in their answers, which nobody had picked up — Status: OPEN
-
-**In short:** the operator's answers arrive in
-`open-questions-answers.txt` in the integration tree — untracked, on no branch,
-named by no script. Lane A found it by accident in `git status` five days late.
-Two of the answers end with a question back to us, and neither had been recorded
-anywhere. They are reproduced verbatim below so the operator can see we read
-them rather than paraphrased them.
-
-### 1. Randomisation shapes
-
-> *(answering the 2026-09-05 question about the test machine's random numbers)*
-> "A. By the way, can and should we provide sophisticated randomization options
-> such as bell curve, etc.?"
-
-**Can:** yes, and cheaply. A normal (bell-curve) draw is a short transform of
-two uniform draws, and the same is true of the other common shapes —
-exponential, Poisson, a weighted pick. None needs kernel support beyond the
-uniform source that already exists; they are arithmetic on top of it.
-
-**Should — and this is the part worth the operator's judgement.** Where they go
-decides whether they are useful or a liability:
-
-| where | good for | bad for |
-|---|---|---|
-| a library every program can call | simulations, test data, jitter/backoff | nothing much |
-| the kernel's random syscall | — | **security.** A non-uniform source is the wrong thing for keys, nonces or ASLR, and putting it beside the uniform one invites picking the wrong one |
-
-**Recommendation:** a userspace library, deliberately *not* reachable through
-the same call as cryptographic randomness. The two have opposite requirements —
-one wants a named, reproducible-from-a-seed distribution, the other must never
-be reproducible — and a single API offering both is a footgun rather than a
-convenience.
-
-*What changes if never answered:* nothing breaks. No program in the tree wants
-a bell curve today; this is a capability question, not a defect.
-
-### 2. Is "I want the best thing regardless of effort" in SlateOS's CLAUDE.md?
-
-> *(answering B-Q7)* "...I generally want the best thing regardless of how much
-> more work it might take (and by the way, is this in Slate OS's claude.md? If
-> not, it should be)"
-
-**Checked, and the answer is "yes, but not in the file you probably mean."**
-
-* `E:\visual studio projects\CLAUDE.md` — **has it, in full**, as *"What I
-  Optimize For: The End Result, Not Time or Risk"*.
-* `E:\visual studio projects\os\CLAUDE.md` — **does not mention it at all.**
-
-The first file covers SlateOS: its own header says it lives at the drive root
-rather than in `os/` so that one copy serves all three lane accounts, because a
-user-level rule would otherwise need three copies kept in step by hand. So the
-rule **is in force**, and every lane reads it.
-
-**We have deliberately not copied it into `os/CLAUDE.md`**, and want the
-operator's ruling rather than guessing. Duplicating it would create exactly the
-drift the parent file was written to prevent — two statements of one rule, which
-is the shape this tree has spent a lot of effort removing elsewhere. The
-alternative, if the operator wants `os/CLAUDE.md` to stand alone, is a one-line
-pointer to the parent file rather than a second copy.
-
-*What changes if never answered:* nothing. The rule is already being followed;
-this is about where it is written down.
-
-
-## B-Q14 — [B] `logger` writes to the terminal instead of to the log. Which of the two implementations survives? — Status: OPEN
-
-**In short:** `logger` is the command a shell script uses to record a line in
-the system log — `logger "backup finished"`. This tree has two of them and they
-do completely different things with that line. One **prints it to the screen**;
-the other **sends it to the system log** the way every other Unix does. One of
-the two is going to be deleted, and which one decides whether a script that logs
-a message ends up spraying text over a user's terminal. I do not think I should
-pick this one on my own, because it is a user-visible behaviour change either
-way and the argument for the current coreutils behaviour cites an architectural
-rule that I think it is misreading.
-
-**The two:**
-
-| | `coreutils`'s `logger` | `userspace/logger` |
-|---|---|---|
-| Where the message goes | **stdout** — the terminal | `/dev/log` socket, or appends to a log file |
-| Options | 2 (`-t`, `-p`) | 23 |
-| Upstream fidelity | none claimed | "Compatible with POSIX/BSD logger(1)" |
-
-**Why the stdout version exists, and why I think the reason is a
-misreading.** Its module doc says: *"Writes a syslog-style text line to stdout
-(our OS uses text-based logs, not binary syslog)."* The rule it is pointing at
-is real — `CLAUDE.md` says **"No binary logs. Text-based (JSON-lines)
-structured logging."** But that rule is about the **format** a log is written
-in, not about **where** a log lives. A text log still has a destination. Writing
-to stdout does not make the log textual; it means there is no log, and the
-message goes to whatever the caller's stdout happened to be.
-
-The practical difference: a cron job or init script that runs
-`logger "started"` expects silence on the terminal and a line in the log. With
-the stdout version it gets the opposite — nothing logged, and a line of noise
-in whatever captured that script's output.
-
-**Options:**
-
-**(a) Keep `userspace/logger`, delete coreutils'.** *What changes:* `logger
-"msg"` prints nothing and the line appears in the system log; 21 more options
-start working. Pro: matches every other Unix, so existing scripts behave as
-written. Con: it is the larger, less-reviewed implementation, and it needs a
-log destination to actually exist on SlateOS — if nothing is listening on
-`/dev/log`, messages go to a file append or are lost, which is a quieter
-failure than printing them.
-
-**(b) Keep coreutils', delete `userspace/logger`.** *What changes:* nothing
-today. Pro: the surviving code is small and reviewed, and while SlateOS has no
-log service, printing is at least visible. Con: `logger` does not log, which is
-the one thing its name promises, and the option surface stays at 2 of 23.
-
-**(c) Merge: coreutils' implementation, `userspace/logger`'s destination.**
-*What changes:* same as (a), but the code that survives is the small one, with
-socket/file output ported into it. Pro: keeps the reviewed implementation and
-fixes the destination. Con: the most work, and it needs the same decision about
-what to do when no log service is listening.
-
-**My recommendation is (c)**, with (a) as the fallback if the port is bigger
-than it looks. The thing I am least sure about — and the reason this is a
-question rather than a judgment call — is whether the operator intended
-`logger` to be a terminal tool on this OS. If that was deliberate, (b) is
-right and the module doc should say so in those words instead of citing the
-binary-logs rule.
-
-**If this is never answered:** nothing breaks and nothing gets worse on its
-own. `logger` stays at 2 options and keeps printing to the terminal, and the
-duplicate pair stays in `dup-bins-survey`'s table as undecided. It only bites
-when something starts relying on the system log actually receiving what was
-sent to it.
-
-## B-Q16 — [B] Two decisions of yours are cited 33 times and were never written down. Record them? — Status: OPEN
-
-**In short:** a *design decision* here is a numbered note in
-`design-decisions.md` explaining why the code is the way it is. Two of
-yours from 2026-09-07 — numbered §1005 and §1006 — are referred to by
-name in 33 places across the project's documents, and by me in several
-commit messages today, but neither note itself exists. Anyone following
-one of those references finds nothing. Nothing is broken in the running
-system; what is missing is the written reason behind a rule everyone is
-already following.
-
-**How I know they are missing rather than misplaced.** `design-decisions.md`
-contains the string `1005` eight times: two are references saying
-"SUPERSEDED by §1005", and the other six are font glyph numbers in an
-unrelated entry. No heading numbered §1005 or §1006 — or any four-digit
-number — exists in any document in the repository. The numbers are inside
-lane B's reserved band (§1000–§1099), so they were allocated deliberately
-and then the notes were never appended.
-
-**What the references say the two decisions were.** Reconstructed from the
-33 citations, not from memory:
-
-| | What the citations say it ruled |
-|---|---|
-| **§1005** | `coreutils` is the one home for a coreutils command. It resolved the open question "we have two of several commands — which ones do we keep?", superseded an earlier §8, and un-suspended an entry that §8 had put on hold. |
-| **§1006** | Described as *your* ruling: "delete every fabricating command" — a command that does not work is deleted rather than kept as a stub that refuses. |
-
-**Update, 2026-09-12: your own words for §1006 exist, and I found them.**
-There is an untracked file `open-questions-answers.txt` in the
-integration checkout (`E:\visual studio projects\os`), dated 2026-09-07
-— the same date as both missing numbers. It answers the lane-B question
-"2,288 of the 2,756 commands in `userspace/` report success for work
-they never did. Which ones do we keep?" with:
-
-> Why not delet all of them that don't work, rather than just the ones
-> that can never work? You said yourself tat a command's existence
-> itself is a claim, and it could be misleading not only to scripts and
-> installers, but users who see the command's existence. The ones that
-> don't work but could work later can simply be added when we actually
-> implement them?
-
-That is §1006, in your words rather than my reconstruction of them, and
-it says something the 33 citations had lost: the reason is that **a
-command's existence is itself a claim**, and the standard is *does not
-work* rather than *can never work*. The citations had compressed this to
-"delete every fabricating command", which is the same rule with its
-justification and its scope removed.
-
-**This changes my recommendation for §1006 but not for §1005.** For
-§1006, option 1 is no longer a reconstruction — it is a quotation, and I
-would be transcribing rather than paraphrasing you. For §1005 (`coreutils`
-is the one home for a coreutils command) that file contains nothing: it
-holds only two lane-B answers, and the other is about the random-number
-generator. So §1005 remains a reconstruction from citations alone.
-
-**One thing worth your attention regardless of how you answer.** That
-file is untracked, so it is in no branch, no lane can see it, and nothing
-backs it up. I first wrote here that losing it would lose the answers,
-and then checked instead of leaving it asserted: it would not. Every
-2026-09-07 answer I sampled — Q46, Q47, Q56, Q57, A-Q3, C-Q6, C-Q7 — is
-already relayed into this file's resolved lists, and B-Q8 records your
-reply to it in full.
-
-What would be lost is narrower and, on today's evidence, still worth
-something: the **verbatim wording**. §1006 is the demonstration. The
-decision survived in thirty-three citations; the *reason* ("a command's
-existence itself is a claim") and the *scope* (delete what does not
-work, not merely what can never work) did not survive the relay into
-those citations, and I have been applying the compressed version all
-day. A relayed summary keeps the choice and loses the argument for it,
-which is exactly what a decision record is supposed to preserve.
-
-I have applied both repeatedly today — deleting `nohup`, `nice` and
-`renice` from the `timeout` crate, and deleting `blkzone`, which printed
-two hardcoded disk zones for any device on any machine. So the rules are
-in force and are doing useful work. Only the record of them is absent.
-
-**Why I am asking rather than just writing them.** The project's own
-instruction is that when *you* make a decision, I ask before recording it
-in `design-decisions.md` rather than assume. §1006 is explicitly
-attributed to you in the text that cites it, and §1005 resolved a
-question that had been put to you. Writing up your reasoning from my
-reconstruction of it, and signing it `Decided by: Operator`, is exactly
-the thing that instruction exists to prevent — the reconstruction above
-may be right in substance and wrong in emphasis, and a decision record
-that misstates the emphasis is worse than an absent one.
-
-**Options**
-
-1. **I write both entries from the reconstruction above, marked as
-   reconstructed, and you correct them.**
-   *What changes:* the 33 references resolve to something; the text is
-   mine until you edit it.
-2. **You dictate the two entries and I paste them.**
-   *What changes:* the record is yours, and costs you ten minutes.
-3. **Leave them unwritten and stop citing them.**
-   *What changes:* commit messages and documents stop referring to §1005
-   and §1006 by number, and the rules survive only as practice.
-
-**Recommendation: 1.** The reconstruction is well-evidenced — 33
-independent citations agree with each other — and being marked as
-reconstructed makes its status honest. Option 3 loses the numbering that
-33 documents already depend on.
-
-**If this is never answered:** nothing breaks. The rules keep being
-followed because they are written into the code and the commit history.
-The cost is that every future citation of §1005 or §1006 points at
-nothing, and that a later reader trying to understand *why* a working
-command was deleted has to reconstruct the argument as I just did.
-
-
-
-## B-Q17 — [B] `sbctl` said it signed your kernel and did not. It refuses now — should the commands be deleted instead? — Status: OPEN
-
-**Added 2026-09-15: this answer governs more than `sbctl`.**
-
-*(Corrected the same day: I first wrote that a gate was BLOCKED on this and
-that no lane could get past pre-boot. That was wrong. The audit runs only in
-`scripts/pre-boot.py`, which the tree's own comment calls "a ~40-minute local
-pre-flight nobody is obliged to run"; `scripts/boot-test.sh`, the shared
-blocking gate, does not run it at all. I inferred the blast radius from where
-the gate was WIRED rather than from what that wiring does, and one `grep` of
-boot-test.sh would have settled it before I raised the alarm. Nothing else in
-this entry changes -- the question is as real as it was, just not urgent.)*
-
-`scripts/audit-cli-fabrication.py --check` is red on `main`. It names two
-commands. One, `passwd`, is the audit being wrong -- its work is real
-and delegated to helper crates the audit does not follow, and lane C has been
-told. The other is `unshare`, and it is red for exactly the reason this
-question asks about: **it refuses now, and §1006 as quoted says a command that
-does not work should be deleted rather than left refusing.**
-
-So the two readings give opposite answers for the same command:
-
-| reading | `unshare` | the gate |
-|---|---|---|
-| refusing is enough -- the defect was the false claim | keep it | the audit should not flag a refusing command |
-| §1006 means delete -- existence is itself a claim | delete it | the audit is right and I should act |
-
-**The commands your answer decides, beyond `sbctl`'s six.** All were made to
-refuse on 2026-09-15 for the same reason -- each stated something it had not
-done -- and all could work later if the missing kernel support arrives:
-
-| command | what it could not do | could it work later |
-|---|---|---|
-| `unshare` | create namespaces; `unshare(2)` is not there | yes |
-| `nsenter` | enter a namespace, same gap | yes |
-| `dbus-daemon`, `dbus-send`, `dbus-monitor` | speak to a bus that does not exist | yes |
-| `lp`, `lprm` | reach a print spooler | yes |
-| `eject` | tell a drive to open | probably not |
-
-**Your words in `open-questions-answers.txt` point at deletion**, and I want to
-be sure I am reading them the way you meant, because they were about the 2,288
-fabricating commands rather than about this narrower set: *"The ones that don't
-work but could work later can simply be added when we actually implement
-them?"* Taken literally that settles it -- delete all of the above. I have not,
-because deleting eleven more commands on my reading of a sentence written about
-a different set is exactly the kind of inference worth checking first.
-
-**If you do not answer:** the audit stays red in the optional pre-flight,
-which costs whoever runs it one failed line in a report and blocks nothing. I
-can clear it by teaching the audit that "refuses" is not
-"states a fact it did not measure" -- those are genuinely different things and
-its own error text says the first. That leaves the deletion question open
-rather than answering it by default, which is why I would rather do that than
-pin either command.
-
-**In short:** `sbctl` is the tool that manages Secure Boot — the firmware
-feature that refuses to start a kernel unless it carries a cryptographic
-signature the machine recognises. Ours reported creating those signing keys,
-and reported signing kernel images, and did **neither**: not one byte was ever
-written by it. I have made those commands stop and say why. Your own rule
-§1006 says a command that cannot work should be **deleted** rather than left
-refusing, and I want to check you meant that here before removing six
-subcommands from a security tool.
-
-**What was happening, exactly.** `sbctl sign /boot/vmlinuz` printed
-`Signing '/boot/vmlinuz'` and left the file byte-for-byte unchanged.
-`sbctl create-keys` printed six lines naming key files it did not write.
-`sbctl enroll-keys` printed `Proceed? [y/N]` and then never read the answer —
-it "proceeded" regardless of what you would have typed. None of this is
-detectable from the output; it is discovered by the firmware refusing to boot,
-later, by someone with no reason to suspect this tool.
-
-**Two different things are missing, with different prospects.**
-
-| commands | blocked on | can it ever work here? |
-|---|---|---|
-| `enroll-keys`, `reset` | a way for ordinary programs to reach the kernel's key store, which exists and is real but has no door to userspace | **yes** — I have asked lane A for the door |
-| `create-keys`, `sign`, `rotate-keys`, `bundle` | RSA and X.509 (the maths and the certificate format that make a signature), plus Authenticode (the specific way Windows-style binaries are signed) | **not without a cryptography library this project does not have and has not planned** |
-
-**The options**
-
-1. **Leave them refusing** (what I have done).
-   *What changes:* `sbctl sign foo` prints `sbctl: cannot sign 'foo': this
-   system has no RSA or X.509 implementation` and exits non-zero. The command
-   still appears in `--help`.
-2. **Delete the four that need cryptography, keep the two waiting on lane A.**
-   *What changes:* `sbctl sign` becomes an unknown subcommand. `--help` gets
-   shorter. Someone reading the help is never told about a capability we do
-   not have.
-3. **Delete all six.**
-   *What changes:* `sbctl` becomes a read-only tool — `status`, `verify`,
-   `list-files` — which is the half that genuinely works today.
-
-**My recommendation: 2.** It follows §1006 exactly where §1006 clearly
-applies — a command that cannot work is not kept — while not deleting two
-commands that are one lane-A change away from working. The reason I am asking
-rather than just doing it is that deleting subcommands from a security tool
-changes what a user is told the system can do, and that is your call rather
-than mine.
-
-**If this is never answered:** the current state is safe. Nothing claims to
-sign anything any more, and the refusals name what is missing. The cost of
-leaving it is only that `sbctl --help` continues to advertise four commands
-that cannot work on this system.
-
-**Where it bites:** `userspace/sbctl/src/main.rs`; `roadmap.md:3835`, which
-claimed this was done and now says `[~]`;
-`requests/b-a-sbctl-needs-a-userspace-door-to-fs-secureboot.md`.
-## B-Q18 — [B] My roadmap list is down to three huge ports. Which one, and is now the time? — Status: OPEN
-
-**In short:** The list of jobs assigned to me has run out, except for three
-very large ones. Each is "take a big program other people wrote and make it run
-on SlateOS", and each is weeks of work rather than hours. I have been working
-from the bug list instead, which is not empty and is producing real fixes — but
-nobody has decided which of the three big jobs comes next, or whether any of
-them should start yet. I would rather you picked than have me pick for you,
-because the three lead the project in genuinely different directions.
-
-**What is actually left.** `roadmap.md` has exactly three unstarted items
-tagged for my lane:
-
-| | what it means in plain terms | where it leads |
-|---|---|---|
-| **Rust toolchain** | SlateOS can compile its own kernel, on itself | the machine stops needing Windows to rebuild itself |
-| **fastpy compiler** | the Python-to-native compiler runs on SlateOS | already part-built (initiative F); this is the rest of it |
-| **WINE** | Windows programs run on SlateOS | a large existing app library, at once |
-
-Everything else assigned to me is either done or is a bug, and bugs I can pick
-up without asking.
-
-**Why I am asking rather than choosing.** The standing rule is that I should
-just start the next task, and for anything ordinary I do. These three are the
-named exception: each is a *giant external port*, each takes the project
-somewhere different, and the cost of starting the wrong one is weeks, not
-minutes. It is also possible the right answer is "none yet" — see below.
-
-### The options
-
-**A. Rust toolchain first.**
-*What changes:* you could rebuild the kernel from inside SlateOS instead of
-from Windows. Today the OS cannot reproduce itself; after this it can.
-Self-hosting is also the usual milestone at which an OS stops being an
-experiment.
-
-**B. fastpy compiler first.**
-*What changes:* programs written in Python compile to native code *on* SlateOS.
-This is the least risky of the three because roughly half of it already exists
-and works — the cross-compiler, the linker step and the C runtime are done and
-tested. It is finishing something rather than starting something.
-
-**C. WINE first.**
-*What changes:* a large body of existing Windows software becomes runnable. It
-is the biggest single jump in what the OS can *do* for a user, and by far the
-largest and least predictable of the three — WINE leans on a great deal of
-Linux behaviour we have only partly built.
-
-**D. None of them yet — keep working the bug list.**
-*What changes:* nothing visible; I carry on fixing defects. Today that has
-meant `patch` and `diff`, both of which were giving wrong answers on ordinary
-files. There is no shortage of this work, and it is what makes the ports
-land on solid ground when they do start.
-
-**My recommendation is B, then D as the standing default.** B is half-built
-and its remaining half is the part that unblocks writing OS components in
-Python at all, which the design spec already assumes. A and C both rest on
-libc and kernel surface that is still gaining features weekly — starting either
-now means porting against a moving target, and re-porting later.
-
-### If this is never answered
-
-Nothing breaks and nothing is blocked. I will keep working the bug list, which
-is option D, and the three ports stay unstarted. The cost of leaving it is not
-risk but direction: the project keeps getting more correct without getting
-more capable, and at some point that becomes the wrong trade. There is no
-deadline on answering.
-
-
-## B-Q19 — [B] Two lanes hit the same editing mistake six times in one day. Add a standing rule, and if so which? — Status: OPEN
-
-**In short:** When we change code we usually tell a script "find this text and
-replace it". Six times today, across two of the three Claude sessions, that
-found *different* text than intended — or found it in three or four places when
-we meant one — and the wrong edit landed silently. Both lanes independently
-arrived at the same two habits that catch it. The question is whether those
-habits should become a written rule all three lanes follow, which only you can
-decide: rules like that live in `CLAUDE.md`, and that file is yours.
-
-**The shortest evidence is that filing this question tripped its own rule.**
-The first anchor I used to insert it matched **eight** places in this file; the
-count check stopped the edit, and a more specific anchor matched one. The habit
-caught its own proposal before the proposal was written down.
-
-**The two habits.** Neither needs new tooling.
-
-1. **Assert the match count before replacing.** A script that means to change
-   one place checks that exactly one place matched, and stops otherwise. This
-   caught an edit of mine today whose anchor appeared **four** times in the
-   file; it would have modified an unrelated test. It also caught the filing of
-   *this question* — my first anchor for it matched 8 places.
-2. **Do not let the explanation and the implementation be the same action.**
-   All four cases where one of us wrote a comment explaining a trap *and
-   simultaneously fell into it* happened in a single pass. Both cases we caught
-   had something run in between — a test, a gate, a merge — so we returned to
-   the code as a reader rather than as its author. Operationally: write the
-   comment, run *something*, then read it back. The run need not be related; it
-   only has to cost enough attention that you come back cold.
-
-**Why this is yours.** Lane C offered to write it down and asked whether I had
-a natural home for it. The natural home is `CLAUDE.md`, and I am told not to
-edit that file except when you tell me to make a specific change — a peer
-suggesting it is explicitly not that. So the proposal comes here rather than
-being applied. I have not filed it elsewhere either: a working-practice rule
-scattered through three lanes' commit messages is how it gets re-derived next
-month.
-
-| Option | *What changes:* |
-|---|---|
-| **A. Add both to `CLAUDE.md`** *(recommended)* | All three lanes follow the same two habits; a wrong edit is caught by the script rather than by whoever happens to read the diff. |
-| **B. Add only the count assertion** | The mechanical half becomes standard and the attention half stays folklore. Cheaper to state, and it is the half with hard evidence — six incidents, each caught or missed by exactly this. |
-| **C. Leave it unwritten** | Each lane keeps its own habit. That has worked twice today and failed four times, and a new session starts with neither. |
-
-**If this is never answered:** nothing breaks. Both lanes already use the
-habits, and the incidents are recorded in commit messages. The cost is that a
-future session — including a future me, with no memory of today — starts
-without them and re-derives them from its own wrong edit.
-
-**Where it bit today:** `userspace/ar/src/main.rs` (anchor matched four places,
-caught), `userspace/oils/src/interp.rs` (a comment about a timing trap written
-in the same pass as a smaller version of that trap, not caught until lane C
-reported it), and four more in lane C's tree.
-
-## B-Q20 — [B] `shred --random-source` is refused. Making it work means changing how the file is overwritten — which way? — Status: OPEN
-
-**In short:** `shred` destroys a file by overwriting it several times. There is
-an option to say "take the random bytes from this file instead of generating
-them", and ours currently refuses that option outright rather than pretending.
-Making it work properly would change the *order* in which we overwrite, and
-because the tool exists to destroy data, that order matters if the machine dies
-partway through. The question is which of two ways you want.
-
-**Why it refuses today rather than ignoring the flag.** The option was parsed,
-stored, and read by nothing — and its advertised default (`/dev/urandom`) was
-wrong too, because nothing here opens that device. `shred` destroys the file, so
-a user who asks for a particular source of random bytes and silently gets a
-different one has already lost the data by the time they could notice. Refusing
-before the first overwrite is the only outcome that leaves them a choice.
-
-**Why it is not a small fix.** Our overwrite scheme is: even passes are random
-bytes, and each odd pass is the **bitwise complement** (every 1 becomes a 0 and
-vice versa) of the pass before it. We can produce the complement cheaply
-because we generate the random bytes from a formula and can re-run it from the
-same starting point. Bytes read from a *file* cannot be re-run: you would have
-to either keep them or re-read them, and the usual sources (`/dev/urandom`, a
-pipe) cannot be rewound.
-
-| | *What changes* |
-|---|---|
-| **A. Overwrite in pairs, a chunk at a time** | Same passes, same bytes on disk at the end. What changes is the order during the wipe: we would write a chunk's random pass and its complement together before moving on, instead of sweeping the whole file once per pass. Memory stays small (one chunk). **If the power fails mid-wipe, the file is partly-wiped in a different pattern than today** — early chunks fully done, later ones untouched, rather than every chunk one pass deep. |
-| **B. Keep sweeping whole passes, buffer the pass** | Nothing observable changes about order or result. **A 4 GB file needs 4 GB of memory**, so it works on small files and fails on exactly the large ones people shred. |
-| **C. Leave it refused** (today) | `shred --random-source=FILE` exits 1 and the file is untouched. Everything else about `shred` works. |
-
-**One thing I will not do without you saying so.** A fourth option is to use
-the file to *seed* our formula rather than consuming it as the byte stream.
-That keeps the current scheme and costs nothing — but it is **not what GNU
-shred does**, and a user who supplied a specific stream of bytes would get
-different bytes on disk than they asked for. Silently diverging from the
-reference on a data-destruction tool is the kind of surprise this whole entry
-exists to avoid, so it is listed here and not taken.
-
-**My recommendation: A.** The memory bound in B is not a detail — it fails on
-the large files that are the reason anyone shreds rather than deletes. A's cost
-is a different partial-wipe pattern after a power cut, and I think that is the
-lesser harm: in both cases an interrupted wipe leaves recoverable data, so
-neither is safe to rely on, and A at least leaves *some* chunks completely
-destroyed rather than all of them one pass deep.
-
-**If this is never answered:** nothing breaks and nothing gets worse. `shred`
-works; only `--random-source` is unavailable, and it says so plainly instead of
-lying. This is a missing feature with an honest refusal, not a defect sitting
-in the tree. It is in your queue because the fix has a security dimension and a
-user-visible change of behaviour, not because anything is on fire.
-
-Recorded in `known-issues.md` as
-`TD-B-SHRED-RANDOM-SOURCE-IS-REFUSED-NOT-HONOURED`, which had the analysis but
-was not in this file — so it was never actually in front of you.
-
-## B-Q21 — [B] 203 of the 278 programs we have written are never installed. Should they be? — Status: OPEN
-
-**In short:** we have written 278 small programs for this OS. 75 of them end up
-on the disk image that boots; the other 203 are built, tested, and then left
-behind. The reason is size: together they are bigger than the image we build.
-The question is whether to make the image bigger, pick a subset deliberately,
-or leave things as they are.
-
-*(Corrected 2026-09-16: this first said "211 of 214", which counted CRATES and
-called them programs. One crate — `coreutils` — holds 83 of the programs, so
-counting crates understates what ships by a lot. The image also carries 14
-compiled-Python utilities promoted by the fastpy block — `cat`, `ls`, `grep`,
-`mv` and others — so `/bin` holds about 89 commands we wrote, not three. The
-decision below is unchanged; the scale of it is not what I first said.)*
-
-**The numbers, measured 2026-09-16** (alias lines of the form `ranlib = ar`
-resolved to their producer, so these count crates rather than names).
-`scripts/rootfs-bin-manifest.txt` has 75 entries:
-
-| producer | names it supplies |
-|---|---|
-| `coreutils` | 71 (including `awk`) |
-| `ar` | 3 (`ar`, `ranlib`, `strip`) |
-| `logrotate` | 1 |
-
-So **3 of 214 `userspace/` crates reach `/bin`**, and `/bin` is the only
-place userspace binaries land: the rootfs script's only other destinations
-are `/tests`, `/lib` and `/usr/share/make`, with no `/sbin` or `/usr/bin`.
-
-**Correction, 2026-09-16, made before you read this.** An earlier version of
-this entry said `awk` had *no producer anywhere in the tree*. That was my
-measurement being wrong, not the tree. `awk` is
-`userspace/coreutils/src/bin/awk/` — cargo's directory form for a
-multi-file binary (`main.rs`, `lex.rs`, `parse.rs`, `interp.rs`, and four
-more), and it passes 171 differential cases against GNU awk. My scan looked
-only at `src/bin/*.rs` files and did not know about `src/bin/<name>/main.rs`,
-so it reported a working implementation as absent. The count of crates
-reaching `/bin` is unaffected — `awk` ships from `coreutils`, which was
-already counted.
-
-**Why, and it is a real constraint rather than an oversight.** All 276 built
-binaries come to 204 MiB against a fixed 384 MiB image that already carries
-~127 MiB of fastpy test fixtures. They do not fit. `IMG_SIZE` is a variable in
-`scripts/create-ext4-rootfs.sh` and nothing outside that script reads it.
-
-| | *What changes* |
-|---|---|
-| **A. Raise `IMG_SIZE` and stage everything that builds** | Every utility we write is on the machine and can be run. The image grows past 384 MiB — roughly 600 MiB to hold all 204 MiB with headroom. Boot-test download/copy times grow with it. |
-| **B. Curate: decide which utilities earn their bytes** | Someone picks a list; the rest stay unshipped. The image stays small. Requires a judgement per program, and the list needs maintaining as programs are added. |
-| **C. Leave it** (today) | `coreutils` and a couple of others ship. Everything else is a library that compiles and a test suite that passes, reachable only by a developer. |
-
-**What you may actually be deciding.** Not disk space — it is a VM image and
-the host has room. It is whether "we wrote a `logind`" means a user has one.
-Today it does not, and nothing in the tree says so at the point where someone
-would look; I found it only by grepping the manifest for a program I had spent
-a day improving.
-
-**My recommendation: B, but A first as a stopgap** if you want the question
-answered later rather than now. A costs bytes on a VM image, which is cheap,
-and buys the ability to *run* what we build — which is currently untested for
-almost everything. B is the right long-term answer and needs a criterion, and I
-do not think I should invent that criterion on your behalf: "which utilities
-earn their bytes" is a question about what this OS is for.
-
-**If this is never answered:** nothing breaks. The build stays green, the tests
-stay green, and the work keeps accumulating out of reach. The cost is invisible
-and compounding — it is effort spent on programs no one can run, and the longer
-it runs the larger the pile of code whose first real execution is still ahead of
-it.
-
-**Related but different:** `deferred-questions.md` DQ1 asks which *implementation*
-(fastpy or Rust) a stock install should prefer once one is proven better. That
-assumes both ship. This asks whether they ship at all. Recorded in
-`known-issues.md` under the image-staging entry, which names "which utilities
-earn their bytes" as a real question and correctly declines to answer it — but
-named it there rather than here, so it has never been in front of you.
-
 
 ## A-Q16 — [A] Two kinds of lock in the kernel; one skips the deadlock checker, for a reason that turns out not to be true. Which way should that be settled? — Status: OPEN
 
@@ -1951,8 +1327,6 @@ fetch itself would sit on `net/httpclient`'s request/response parsing and a
 plain `TcpStream`, as `userspace/pkg` does.
 
 
-
-
 ## E-Q3 — [E] System Restore now keeps the programs' settings and data. Should it also cover the system's own files, and how? — Status: OPEN (raised 2026-09-27)
 
 **In short:** System Restore can now take a restore point of every program's
@@ -2218,6 +1592,128 @@ and mechanical (the pattern is in `kernel/src/fs/immutable.rs`); it is the
 *behaviour* that needs your call, not the work. Background in
 `design-decisions.md` §957.
 
+## B-Q22 — [B] `kill PID` should ask a program to stop. One of our two `kill`s ends it on the spot instead. Which design do we keep? — Status: OPEN (raised 2026-09-25)
+
+**In short:** two different programs are both called `kill`, and which one the
+system ends up with depends on which one the build happened to link last. One
+sends Unix-style signals, which works today. The other was written to send a
+"please shut down" message to a system service -- which is what the design
+notes prefer -- but that service was never built, so the message always fails
+and the program then ends the target immediately, giving it no chance to save
+anything. So with that one, the ordinary `kill 1234` behaves like the
+last-resort `kill -9 1234`. Which approach should the single `kill` we keep
+use?
+
+**The two programs.**
+
+| | `userspace/kill` (the "native" one) | `coreutils`' `kill` |
+|---|---|---|
+| How it stops a program | a message to `org.slateos.ProcessManager`, then a forced kill when that fails | a signal (Unix's numbered "please stop" notification) through the kernel's `SYS_SIGNAL_SEND`, the same path every program's own `kill()` call uses |
+| Does its delivery work today? | **No**: nothing anywhere provides that service, so every plain `kill PID` falls through to the forced kill | Yes; a program that asked to be told can clean up first |
+| The command line scripts use (`kill -s TERM PID`, `kill -l`) | not understood: `-s` is read as a signal called `s` | yes, measured against procps (the Linux `kill`) |
+| Extras | `killall NAME`, `-w` (wait for it to exit), `--timeout` | none |
+
+The system image installs `kill`, and `killall` as another name for it -- which
+works only if the build picked `userspace/kill`.
+
+**The design note.** `design.txt`: *"should signals just be done through
+[IPC]... ai agrees that shutdown should be done through ipc rather than linux
+signals"*. So the native program follows the design's preference; it just has
+nothing on the other end.
+
+| Option | *What changes:* |
+|---|---|
+| **A.** One `kill`, signals through the kernel | `kill PID` asks politely and `kill -9` forces, as on Linux; scripts' `kill -s TERM` and `kill -l` work; `killall` becomes its own small program. |
+| **B.** One `kill`, the shutdown-message design, built for real | Same command line as A, but a program is asked to stop by a message it must know how to receive; this needs the service written and a message every program understands, and programs that ignore it are forced after a timeout. |
+| **C.** Leave both | `kill PID` means either "ask" or "force", depending on the build order. |
+
+- **A** is small (the signal half exists and passes its tests; the work is
+  merging the extras across and deleting the other crate) and matches what
+  every program ported from elsewhere already expects: bash, Python and the
+  POSIX layer all stop programs through that same kernel call.
+- **B** is the design note's direction, but it is a new system protocol, not a
+  `kill` change: a service to write, a message format, and every program taught
+  to answer it. Until then a message-based `kill` has no one to deliver to.
+  Nothing about A prevents B later -- the kernel's signal delivery is itself a
+  message the kernel carries, and a future shutdown protocol could sit behind
+  the same command line.
+
+**If never answered:** not safe, quietly. Whenever the build links
+`userspace/kill` last, every `kill PID` on the system ends programs without
+letting them clean up; whenever it links the other, `killall` stops working.
+Nothing reports either.
+
+**Claude's recommendation:** **A** now, with **B** recorded as its own future
+project if you want shutdown to become a message protocol. It fixes the
+forced-kill behaviour and the build-order lottery immediately and forecloses
+nothing.
+
+**Where it bites:** `userspace/kill/src/main.rs` (`ipc_graceful_terminate`,
+and its fallback to `SYS_PROCESS_KILL`); `userspace/coreutils/src/bin/kill.rs`;
+`scripts/rootfs-bin-manifest.txt` (`kill`, `killall = kill`);
+`scripts/check-bin-collisions.py`'s one remaining baseline entry;
+`known-issues.md` → `TD-B-TWO-PACKAGES-BUILD-A-BINARY-CALLED-KILL`.
+
+## B-Q23 — [B] What is SlateOS for? The answer decides which of its 469 programs ship. — Status: OPEN (raised 2026-10-01, as the operator asked in B-Q21)
+
+**In short:** we have written 469 programs. You asked (answering B-Q21) for a
+list of all of them with a line each -- that is now `programs.md`, generated
+from the code so it cannot go stale -- and for options on what SlateOS is for,
+each with what it would drop. For now everything that builds goes on the disk
+image (your answer A); this question is about the image a user eventually
+installs. Nothing here deletes code: a program left off the image stays in the
+repository, and can be installed later by the package manager (`pkg`).
+
+**The 469, grouped** (the full list with descriptions is `programs.md`):
+
+| Group | Count | Examples |
+|---|---|---|
+| Everyday command-line tools | 139 | `ls`, `cp`, `grep`, `sed`, `awk`, `tar`, `less`, `nano`, the shell |
+| Running the system | 99 | services, users and passwords, logs, disks and partitions, boot |
+| Hardware and performance | 27 | `lscpu`, `lspci`, `top`, `htop`, `free`, power and thermal tools |
+| Networking tools | 29 | `ping`, `ip`, `curl`, `wget`, `ssh`, `rsync`, `dig`, `tcpdump`, firewalls |
+| Network servers | 6 | `sshd`, `ftpd`, `telnet`, `inetd`, `ntpd`, `finger` -- programs other machines connect *to* |
+| Linux security frameworks | 6 | `apparmor`, `selinux`, `audit`, `firejail`, `polkit`, `sanitize` |
+| Developer tools | 17 | `make`, `gdb`, `strace`, `perf`, `objdump`, `readelf`, `yacc` |
+| Desktop applications | 94 | editor, email, calendar, file explorer, spreadsheet, music and video players |
+| Games | 45 | chess, solitaire, minesweeper, tetris, sudoku |
+| The desktop itself | 7 | compositor (draws the screen), desktop shell, notifications |
+
+**One group is odd out whatever you pick.** The six Linux security frameworks
+configure mechanisms SlateOS does not have -- its security is capabilities
+(tokens a program must hold to touch anything), not Linux's labels and profiles
+-- so they are candidates for deletion under your rule that a command which
+does not work should not exist (§1006), not merely for leaving off an image.
+That is checked one program at a time, separately from this question.
+
+### The options
+
+| Option | *What changes* | Drops from the image |
+|---|---|---|
+| **A. Everything, for everyone** -- a desktop that is also a developer's machine and a small server | Every program is installed; nothing to choose. The image is the largest. | nothing |
+| **B. A desktop for people who also program** | The servers are not running on a desktop by default. | the 6 network servers |
+| **C. A desktop for people** | As B, and the programming tools move to an optional "developer" package. | 6 servers + 17 developer tools |
+| **D. A lean desktop** | As C, and games become an optional package. | 6 servers + 17 developer tools + 45 games |
+| **E. Let the installer's question decide** -- `design.txt` already has the installer ask what the machine is for (it lists desktop, gaming, development, server and others, to tune memory and scheduling) | Each answer installs its own set: *desktop* is B, *development* adds nothing to B (it already has the tools), *gaming* is B, *server* drops the applications and games and keeps the servers. A user who picks wrongly adds a package later. | depends on the answer |
+
+**My recommendation: E, with B as what "desktop" means.** The installer
+already asks the question this entry is asking, per machine rather than once
+for everybody -- so the image can hold everything (your "A for now") while
+each installation takes the part it was chosen for. Within a desktop, `make`
+and `gdb` cost little and "install the developer package first" is friction
+exactly when someone is trying something; network servers are the opposite --
+a server a desktop does not need is attack surface (a door into the machine)
+even when idle, so installing one should be a choice.
+
+**If this is never answered:** nothing breaks. Your B-Q21 answer (A, "for now")
+stays in force: everything that builds goes on the image. The cost is only that
+the image stays at its largest and every program on it is something that must
+keep working.
+
+**Where it bites:** `scripts/rootfs-bin-manifest.txt` and
+`scripts/create-ext4-rootfs.sh` (lane D's), and the package definitions in
+`pkg/`.
+
 # Resolved
 
 **The body above holds OPEN questions only.** When the operator answers one,
@@ -2326,6 +1822,48 @@ answered question left in the body is pure cost — and, being older, it sorts
 
 ## Resolved — lane B
 
+- B-Q8 through B-Q21 (not B-Q15) -- answered by the operator on 2026-09-27
+  in lane F's session and relayed verbatim to lane B; each is written up in
+  `design-decisions.md` with the operator's words:
+  - B-Q8 Which width table? -- (§1042) the operator left the table to Claude,
+    which took GNU's (gnulib, Unicode 15.1.0); SlateOS's terminal is to answer
+    a width query too (requested from lane C), and the operator's worry about
+    glyphs that disagree with the table is answered there.
+  - B-Q9 Keep our shell or switch to genuine Oils? -- (§1043) **genuine Oils
+    becomes the default**; the Rust OSH is kept as a fallback, not deleted.
+  - B-Q10 grep's `-P`: manual or program? -- (§1044) **the manual**: a match can
+    belong to any number of windows. Fixed the same day in the operator's
+    `grep.py` and `grep.cpp` and in ours.
+  - B-Q11 169 names inside other programs -- (§1045) Claude's recommendation:
+    case by case, and a kept name is installed as the same file.
+  - B-Q12 Should `osh` quote names? -- (§1046) no change: genuine Oils is to be
+    the default, so a toggle in ours is not worth having.
+  - B-Q13 Randomness shapes; the effort rule's home -- (§1047) Claude's
+    recommendation: a userspace library, apart from cryptographic randomness;
+    the rule stays in the parent `CLAUDE.md` only.
+  - B-Q14 Which `logger` survives? -- (§1048) Claude's recommendation; the tree
+    had already arrived there -- util-linux's logger, ported, is the survivor.
+  - B-Q16 Record §1005 and §1006? -- option 1. Both entries existed (written
+    2026-09-07; the question searched for the wrong heading format), so
+    nothing was missing to write.
+  - B-Q17 Delete sbctl's refusing commands? -- (§1049) **option 2**: the four
+    that need RSA/X.509 are deleted; `enroll-keys` and `reset` wait for lane A.
+  - B-Q18 Which large port next? -- (§1050) Claude's recommendation, the fastpy
+    compiler; the operator's further ports (Mono, Xonsh, Nushell on SlateOS,
+    their WinDirStat fork, a debugger, a LithicBackup reimplementation) are now
+    on the roadmap.
+  - B-Q19 A standing rule for search-and-replace edits? -- (§1051) **yes, both
+    habits, in the `CLAUDE.md` of all three accounts** -- to be applied when
+    the operator confirms in lane B's own session, since the answer came by
+    relay.
+  - B-Q20 `shred --random-source` -- (§1052) the premise had gone: `shred` is now
+    a port of GNU's with the option working; the one detail the operator
+    proposed differently (restart a source file each pass) is kept as GNU's
+    and put back to them.
+  - B-Q21 Most programs never reach the image -- (§1053) **stage everything that
+    builds for now** (lane D's recipe), then a catalogue of every program and
+    options for what the OS is for; a program is recorded where every lane
+    looks.
 - B-Q7 Which copy of the command-line tools is canonical, after the premise
   behind June's §8 turned out to be false? — resolved 2026-09-07 (§1005,
   `Decided by: Operator`): **B, `coreutils` is the one home.** The better half
@@ -2446,9 +1984,10 @@ answered question left in the body is pure cost — and, being older, it sorts
 - **Should something build every crate before a merge?** (C-Q11) — answered
   2026-09-27 by delegation: the operator left it to Claude, asking that the
   check's cost be measured while the machine carries its normal load and set
-  against the time it has saved. The measurement waits for the lanes to be
-  running again (`todo.txt`, lane C, "C-Q11's measurement"); the decision will
-  be written up as a `design-decisions.md` entry when it is taken. The
+  against the time it has saved. Measured and decided 2026-09-27
+  (`design-decisions.md` §1430): the boot test already builds and lints every
+  crate before a merge, at about 2.4% of its time, and has caught real breaks;
+  nothing is added. The
   operator's two testing ideas that came with the answer went to lane A:
   `requests/c-a-two-ways-to-test-a-change-without-a-full-boot.md`.
 

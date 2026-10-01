@@ -236,6 +236,11 @@ pub enum FileCompareStatus {
     OnlyLeft,
     /// File exists only in the right directory.
     OnlyRight,
+    /// In both, and one of the two could not be read: not known to differ.
+    Unreadable,
+    /// In both at the same size, and not compared: the comparison had read
+    /// as much as it reads in one go ([`FOLDER_COMPARE_BYTES`]).
+    NotCompared,
 }
 
 impl fmt::Display for FileCompareStatus {
@@ -245,6 +250,8 @@ impl fmt::Display for FileCompareStatus {
             Self::Different => write!(f, "Different"),
             Self::OnlyLeft => write!(f, "Only in left"),
             Self::OnlyRight => write!(f, "Only in right"),
+            Self::Unreadable => write!(f, "Could not be read"),
+            Self::NotCompared => write!(f, "Not compared"),
         }
     }
 }
@@ -258,6 +265,9 @@ pub struct DirCompareEntry {
     pub is_dir: bool,
     /// Comparison status.
     pub status: FileCompareStatus,
+    /// The path relative to each compared folder, exactly -- for opening the
+    /// pair. `path` is the same as text for the list.
+    pub rel: std::path::PathBuf,
 }
 
 /// Result of comparing two directories.
@@ -273,6 +283,161 @@ pub struct DirCompareResult {
     pub only_left_count: usize,
     /// Count of files only in right.
     pub only_right_count: usize,
+}
+
+/// How many bytes one folder comparison reads before it stops comparing
+/// contents. Past it, two files of the same size are `NotCompared` rather
+/// than guessed the same: the comparison runs on the window's thread, and a
+/// pair of folders full of disk images must not hold the window for minutes.
+pub const FOLDER_COMPARE_BYTES: u64 = 256 * 1024 * 1024;
+
+/// How many entries of one folder a comparison walks.
+pub const FOLDER_COMPARE_ENTRIES: usize = 20_000;
+
+/// One side's tree: every file and folder below `root`, by path relative to
+/// it (as `/`-separated text for the list, kept as a path for opening), with
+/// whether it is a folder. Links are entries, never followed.
+fn walk_folder(root: &std::path::Path) -> (Vec<(std::path::PathBuf, bool)>, bool) {
+    let mut out = Vec::new();
+    let mut pending = vec![std::path::PathBuf::new()];
+    let mut cut = false;
+    while let Some(rel) = pending.pop() {
+        let Ok(read) = std::fs::read_dir(root.join(&rel)) else {
+            continue;
+        };
+        for entry in read.flatten() {
+            if out.len() >= FOLDER_COMPARE_ENTRIES {
+                cut = true;
+                break;
+            }
+            let child = rel.join(entry.file_name());
+            let is_dir = entry.file_type().is_ok_and(|t| t.is_dir());
+            if is_dir {
+                pending.push(child.clone());
+            }
+            out.push((child, is_dir));
+        }
+    }
+    (out, cut)
+}
+
+/// Whether two files hold the same bytes, reading at most `budget` more.
+///
+/// `Ok(None)` when the budget ran out first: not known.
+fn same_bytes(
+    a: &std::path::Path,
+    b: &std::path::Path,
+    budget: &mut u64,
+) -> std::io::Result<Option<bool>> {
+    use std::io::Read;
+    let (ma, mb) = (std::fs::metadata(a)?, std::fs::metadata(b)?);
+    if ma.len() != mb.len() {
+        return Ok(Some(false));
+    }
+    if ma.len() > *budget {
+        return Ok(None);
+    }
+    let (mut fa, mut fb) = (std::fs::File::open(a)?, std::fs::File::open(b)?);
+    let (mut ba, mut bb) = (vec![0u8; 64 * 1024], vec![0u8; 64 * 1024]);
+    loop {
+        let n = fa.read(&mut ba)?;
+        if n == 0 {
+            return Ok(Some(true));
+        }
+        // The same size, so the other has as many bytes left; read exactly
+        // them.
+        let chunk_b = bb
+            .get_mut(..n)
+            .ok_or_else(|| std::io::Error::other("short buffer"))?;
+        fb.read_exact(chunk_b)?;
+        *budget = budget.saturating_sub(n as u64);
+        if ba.get(..n) != Some(&*chunk_b) {
+            return Ok(Some(false));
+        }
+    }
+}
+
+/// Compare two folders on disk: every file below each, by its path relative
+/// to its folder.
+///
+/// A folder on one side only is one entry, not every file inside it; a file
+/// in both is compared byte for byte (sizes first), until
+/// [`FOLDER_COMPARE_BYTES`] have been read; a file one side cannot read is
+/// `Unreadable`, never guessed the same or different.
+#[must_use]
+pub fn compare_folders(
+    left: &std::path::Path,
+    right: &std::path::Path,
+) -> (DirCompareResult, bool) {
+    use std::collections::BTreeMap;
+    let (left_entries, left_cut) = walk_folder(left);
+    let (right_entries, right_cut) = walk_folder(right);
+    let mut by_path: BTreeMap<std::path::PathBuf, (Option<bool>, Option<bool>)> = BTreeMap::new();
+    for (rel, is_dir) in left_entries {
+        by_path.entry(rel).or_default().0 = Some(is_dir);
+    }
+    for (rel, is_dir) in right_entries {
+        by_path.entry(rel).or_default().1 = Some(is_dir);
+    }
+    let mut result = DirCompareResult::default();
+    let mut budget = FOLDER_COMPARE_BYTES;
+    // A folder on one side only stands for everything in it.
+    let mut one_sided: Vec<std::path::PathBuf> = Vec::new();
+    for (rel, sides) in by_path {
+        if one_sided.iter().any(|dir| rel.starts_with(dir)) {
+            continue;
+        }
+        let status = match sides {
+            (Some(l), None) => {
+                if l {
+                    one_sided.push(rel.clone());
+                }
+                FileCompareStatus::OnlyLeft
+            }
+            (None, Some(r)) => {
+                if r {
+                    one_sided.push(rel.clone());
+                }
+                FileCompareStatus::OnlyRight
+            }
+            // A folder in both is its contents, listed below it.
+            (Some(true), Some(true)) | (None, None) => continue,
+            (Some(l), Some(r)) if l != r => FileCompareStatus::Different,
+            (Some(_), Some(_)) => {
+                match same_bytes(&left.join(&rel), &right.join(&rel), &mut budget) {
+                    Ok(Some(true)) => FileCompareStatus::Same,
+                    Ok(Some(false)) => FileCompareStatus::Different,
+                    Ok(None) => FileCompareStatus::NotCompared,
+                    Err(_) => FileCompareStatus::Unreadable,
+                }
+            }
+        };
+        match status {
+            FileCompareStatus::Same => result.same_count = result.same_count.saturating_add(1),
+            FileCompareStatus::Different => {
+                result.different_count = result.different_count.saturating_add(1);
+            }
+            FileCompareStatus::OnlyLeft => {
+                result.only_left_count = result.only_left_count.saturating_add(1);
+            }
+            FileCompareStatus::OnlyRight => {
+                result.only_right_count = result.only_right_count.saturating_add(1);
+            }
+            FileCompareStatus::Unreadable | FileCompareStatus::NotCompared => {}
+        }
+        let is_dir = matches!(sides, (Some(true), None) | (None, Some(true)));
+        result.entries.push(DirCompareEntry {
+            path: rel
+                .components()
+                .map(|c| c.as_os_str().shown().to_string())
+                .collect::<Vec<_>>()
+                .join("/"),
+            is_dir,
+            status,
+            rel,
+        });
+    }
+    (result, left_cut || right_cut)
 }
 
 /// Compare two lists of filenames (simulated directory comparison).
@@ -302,6 +467,7 @@ pub fn compare_directories(
                     result.entries.push(DirCompareEntry {
                         path: lname.to_string(),
                         is_dir: false,
+                        rel: std::path::PathBuf::new(),
                         status: FileCompareStatus::Same,
                     });
                     result.same_count = result.same_count.saturating_add(1);
@@ -309,6 +475,7 @@ pub fn compare_directories(
                     result.entries.push(DirCompareEntry {
                         path: lname.to_string(),
                         is_dir: false,
+                        rel: std::path::PathBuf::new(),
                         status: FileCompareStatus::Different,
                     });
                     result.different_count = result.different_count.saturating_add(1);
@@ -320,6 +487,7 @@ pub fn compare_directories(
                 result.entries.push(DirCompareEntry {
                     path: lname.to_string(),
                     is_dir: false,
+                    rel: std::path::PathBuf::new(),
                     status: FileCompareStatus::OnlyLeft,
                 });
                 result.only_left_count = result.only_left_count.saturating_add(1);
@@ -329,6 +497,7 @@ pub fn compare_directories(
                 result.entries.push(DirCompareEntry {
                     path: rname.to_string(),
                     is_dir: false,
+                    rel: std::path::PathBuf::new(),
                     status: FileCompareStatus::OnlyRight,
                 });
                 result.only_right_count = result.only_right_count.saturating_add(1);
@@ -342,6 +511,7 @@ pub fn compare_directories(
         result.entries.push(DirCompareEntry {
             path: lname.to_string(),
             is_dir: false,
+            rel: std::path::PathBuf::new(),
             status: FileCompareStatus::OnlyLeft,
         });
         result.only_left_count = result.only_left_count.saturating_add(1);
@@ -353,6 +523,7 @@ pub fn compare_directories(
         result.entries.push(DirCompareEntry {
             path: rname.to_string(),
             is_dir: false,
+            rel: std::path::PathBuf::new(),
             status: FileCompareStatus::OnlyRight,
         });
         result.only_right_count = result.only_right_count.saturating_add(1);
@@ -838,6 +1009,7 @@ const SHORTCUTS: &[(&str, &str)] = &[
     ),
     ("Alt+B", "Take both sides of this hunk"),
     ("Ctrl+O", "Open a file into the left pane"),
+    ("Ctrl+D", "Compare two folders, the left first"),
     (
         "Ctrl+1 / Ctrl+2 / Ctrl+3",
         "Side by side / inline / unified view",
@@ -925,6 +1097,15 @@ pub struct FileDiffApp {
 
     /// Scroll offset for directory comparison view.
     pub dir_scroll: f32,
+    /// The entry of the folder comparison the arrows are on.
+    pub dir_selected: usize,
+    /// While choosing two folders to compare: which one is being chosen.
+    pub folder_step: Option<Side>,
+    /// The two folders compared, to open a pair from.
+    pub folders: Option<(std::path::PathBuf, std::path::PathBuf)>,
+    /// Whether the files on screen were opened from the folder comparison,
+    /// so Escape goes back to it.
+    pub from_folders: bool,
 
     /// Currently selected hunk index for merge operations.
     pub selected_hunk: usize,
@@ -977,6 +1158,10 @@ impl FileDiffApp {
             dir_compare: None,
             dir_mode: false,
             dir_scroll: 0.0,
+            dir_selected: 0,
+            folder_step: None,
+            folders: None,
+            from_folders: false,
             selected_hunk: 0,
             view_mode_dropdown_open: false,
         }
@@ -1175,10 +1360,134 @@ impl FileDiffApp {
         }
     }
 
+    /// Ask for two folders to compare, the left first.
+    pub fn choose_folders(&mut self) {
+        self.folder_step = Some(Side::Left);
+        self.put_up_folder_picker();
+    }
+
+    fn put_up_folder_picker(&mut self) {
+        let dialog = guitk::dialog::FileDialog::select_folder()
+            .with_initial_path(FilePicker::default_start());
+        self.picker.put_up(dialog, false);
+    }
+
+    /// Compare `left` with `right` and show the folder view.
+    pub fn compare_folders_at(&mut self, left: &std::path::Path, right: &std::path::Path) {
+        let (result, cut) = compare_folders(left, right);
+        let unsure = result
+            .entries
+            .iter()
+            .filter(|e| {
+                matches!(
+                    e.status,
+                    FileCompareStatus::Unreadable | FileCompareStatus::NotCompared
+                )
+            })
+            .count();
+        let mut said = vec![format!("Compared {} with {}", left.shown(), right.shown())];
+        if unsure > 0 {
+            said.push(format!(
+                "{unsure} pair(s) not compared -- unreadable, or past what one comparison reads"
+            ));
+        }
+        if cut {
+            said.push(format!(
+                "stopped after {FOLDER_COMPARE_ENTRIES} entries of a folder"
+            ));
+        }
+        self.status_message = said.join("; ");
+        self.dir_compare = Some(result);
+        self.dir_mode = true;
+        self.dir_selected = 0;
+        self.dir_scroll = 0.0;
+        self.folders = Some((left.to_path_buf(), right.to_path_buf()));
+        self.from_folders = false;
+    }
+
+    /// Open the chosen entry of the folder comparison as a file comparison.
+    fn open_folder_entry(&mut self) -> EventResult {
+        let (Some(result), Some((left, right))) = (&self.dir_compare, &self.folders) else {
+            return EventResult::Ignored;
+        };
+        let Some(entry) = result.entries.get(self.dir_selected) else {
+            return EventResult::Ignored;
+        };
+        if entry.is_dir
+            || !matches!(
+                entry.status,
+                FileCompareStatus::Same
+                    | FileCompareStatus::Different
+                    | FileCompareStatus::NotCompared
+            )
+        {
+            self.status_message = format!("{} is not a file on both sides", entry.path);
+            return EventResult::Consumed;
+        }
+        let (l, r) = (left.join(&entry.rel), right.join(&entry.rel));
+        let said_left = self.read_into(Side::Left, &l);
+        let said_right = self.read_into(Side::Right, &r);
+        self.status_message =
+            format!("{said_left}; {said_right} -- Escape goes back to the folders");
+        self.dir_mode = false;
+        self.from_folders = true;
+        EventResult::Consumed
+    }
+
+    /// The keys of the folder view: the arrows choose, Enter opens the pair,
+    /// Escape leaves the view.
+    fn handle_folder_key(&mut self, key: &KeyEvent) -> Option<EventResult> {
+        let count = self.dir_compare.as_ref().map_or(0, |r| r.entries.len());
+        match key.key {
+            Key::Down => {
+                if self.dir_selected.saturating_add(1) < count {
+                    self.dir_selected = self.dir_selected.saturating_add(1);
+                    self.reveal_dir_selected();
+                }
+                Some(EventResult::Consumed)
+            }
+            Key::Up => {
+                self.dir_selected = self.dir_selected.saturating_sub(1);
+                self.reveal_dir_selected();
+                Some(EventResult::Consumed)
+            }
+            Key::Enter => Some(self.open_folder_entry()),
+            Key::Escape => {
+                self.dir_mode = false;
+                Some(EventResult::Consumed)
+            }
+            _ => None,
+        }
+    }
+
+    /// Scroll the folder view so the chosen entry is drawn.
+    fn reveal_dir_selected(&mut self) {
+        let height = self.height - TOOLBAR_HEIGHT - STATUS_BAR_HEIGHT - LINE_HEIGHT;
+        #[allow(
+            clippy::cast_possible_truncation,
+            clippy::cast_sign_loss,
+            clippy::cast_precision_loss,
+            reason = "a row count on screen, and a row index: small and non-negative"
+        )]
+        let (rows, row) = (
+            ((height / LINE_HEIGHT).max(1.0)) as usize,
+            self.dir_selected as f32,
+        );
+        #[allow(clippy::cast_precision_loss, reason = "a row count on screen")]
+        let rows_f = rows as f32;
+        if row < self.dir_scroll {
+            self.dir_scroll = row;
+        } else if row >= self.dir_scroll + rows_f {
+            self.dir_scroll = row - rows_f + 1.0;
+        }
+    }
+
     /// Handle events from the UI.
     /// Ask for a file to put in one of the two panes.
     pub fn open_into(&mut self, side: Side) {
         self.pending_side = side;
+        self.folder_step = None;
+        self.from_folders = false;
         self.picker.open_to_read();
     }
 
@@ -1205,7 +1514,6 @@ impl FileDiffApp {
                     }
                 }
                 self.dir_mode = false;
-                self.dir_compare = None;
                 self.recompute_diff();
                 format!("{note}Opened {name}")
             }
@@ -1217,11 +1525,30 @@ impl FileDiffApp {
         // The picker takes input first while it is up.
         match self.picker.handle(event, self.width, self.height) {
             Picked::Chose(path) => {
-                let side = self.pending_side;
-                self.status_message = self.read_into(side, &path);
+                match self.folder_step.take() {
+                    // The left folder: now the right one.
+                    Some(Side::Left) => {
+                        self.folders = Some((path.clone(), path));
+                        self.folder_step = Some(Side::Right);
+                        self.status_message = "Now the folder to compare it with".to_string();
+                        self.put_up_folder_picker();
+                    }
+                    Some(Side::Right) => {
+                        let left = self.folders.take().map(|(l, _)| l).unwrap_or_default();
+                        self.compare_folders_at(&left, &path);
+                    }
+                    None => {
+                        let side = self.pending_side;
+                        self.status_message = self.read_into(side, &path);
+                    }
+                }
                 return EventResult::Consumed;
             }
-            Picked::Handled | Picked::Cancelled => return EventResult::Consumed,
+            Picked::Cancelled => {
+                self.folder_step = None;
+                return EventResult::Consumed;
+            }
+            Picked::Handled => return EventResult::Consumed,
             Picked::Ignored => {}
         }
         match event {
@@ -1252,8 +1579,26 @@ impl FileDiffApp {
         if self.search.visible {
             return self.handle_search_key(key);
         }
+        if self.dir_mode
+            && let Some(answered) = self.handle_folder_key(key)
+        {
+            return answered;
+        }
+        // From a pair opened out of the folder comparison, Escape goes back.
+        if key.key == Key::Escape && self.from_folders && self.dir_compare.is_some() {
+            self.dir_mode = true;
+            self.from_folders = false;
+            return EventResult::Consumed;
+        }
 
         match key.key {
+            // Ctrl+D: compare two folders. The folder view was drawn from a
+            // result nothing could make: no key entered it, and its
+            // comparison was over names and texts held in memory.
+            Key::D if key.modifiers.ctrl => {
+                self.choose_folders();
+                EventResult::Consumed
+            }
             // Navigation
             Key::Down | Key::J => {
                 self.scroll_left = (self.scroll_left + 1.0).min(self.max_scroll());
@@ -2346,7 +2691,7 @@ impl FileDiffApp {
             .push_surface(tree, 0.0, y, self.width, LINE_HEIGHT, 0.0, Surface::Card);
 
         let summary = format!(
-            "Directory Compare: {} same, {} different, {} left only, {} right only",
+            "Folders: {} same, {} different, {} left only, {} right only -- Enter compares the pair, Escape leaves",
             result.same_count,
             result.different_count,
             result.only_left_count,
@@ -2370,6 +2715,16 @@ impl FileDiffApp {
         {
             let ey = list_y + vi as f32 * LINE_HEIGHT;
             if let Some(entry) = result.entries.get(entry_idx) {
+                if entry_idx == self.dir_selected {
+                    tree.push(RenderCommand::FillRect {
+                        x: 0.0,
+                        y: ey,
+                        width: self.width,
+                        height: LINE_HEIGHT,
+                        color: with_alpha(self.palette.accent, 40),
+                        corner_radii: CornerRadii::ZERO,
+                    });
+                }
                 render_dir_entry(tree, &self.palette, ey, entry);
             }
         }
@@ -2829,6 +3184,8 @@ fn render_dir_entry(tree: &mut RenderTree, pal: &Palette, ey: f32, entry: &DirCo
         FileCompareStatus::Different => (pal.yellow, "Diff"),
         FileCompareStatus::OnlyLeft => (pal.red, "Left"),
         FileCompareStatus::OnlyRight => (pal.blue, "Right"),
+        FileCompareStatus::Unreadable => (pal.peach, "Unread"),
+        FileCompareStatus::NotCompared => (pal.subtext0, "Unchecked"),
     };
 
     // Status indicator
@@ -5285,5 +5642,121 @@ mod tests {
             });
             assert!(!crowded, "{line:?} shares its row with other text");
         }
+    }
+
+    // == Comparing two folders (2026-09-27) =====================================
+
+    fn folder_pair() -> (
+        scratchdir::ScratchDir,
+        std::path::PathBuf,
+        std::path::PathBuf,
+    ) {
+        let scratch = scratchdir::ScratchDir::new("filediff-folders");
+        let (left, right) = (scratch.path("left"), scratch.path("right"));
+        for (dir, files) in [
+            (
+                &left,
+                &[
+                    ("same.txt", "one\n"),
+                    ("changed.txt", "left\n"),
+                    ("mine.txt", "l\n"),
+                ][..],
+            ),
+            (
+                &right,
+                &[
+                    ("same.txt", "one\n"),
+                    ("changed.txt", "right\n"),
+                    ("yours.txt", "r\n"),
+                ][..],
+            ),
+        ] {
+            std::fs::create_dir_all(dir.join("sub")).unwrap();
+            for (name, text) in files {
+                std::fs::write(dir.join(name), text).unwrap();
+            }
+            std::fs::write(dir.join("sub").join("deep.txt"), "deep\n").unwrap();
+        }
+        std::fs::create_dir_all(left.join("only-here")).unwrap();
+        std::fs::write(left.join("only-here").join("inside.txt"), "x").unwrap();
+        (scratch, left, right)
+    }
+
+    #[test]
+    fn two_real_folders_are_compared_file_by_file() {
+        let (_scratch, left, right) = folder_pair();
+        let (result, cut) = compare_folders(&left, &right);
+        assert!(!cut);
+        let status = |p: &str| {
+            result.entries.iter().find(|e| e.path == p).map_or_else(
+                || panic!("{p} is not listed: {:?}", result.entries),
+                |e| e.status,
+            )
+        };
+        assert_eq!(status("same.txt"), FileCompareStatus::Same);
+        assert_eq!(status("changed.txt"), FileCompareStatus::Different);
+        assert_eq!(status("mine.txt"), FileCompareStatus::OnlyLeft);
+        assert_eq!(status("yours.txt"), FileCompareStatus::OnlyRight);
+        assert_eq!(status("sub/deep.txt"), FileCompareStatus::Same);
+        assert_eq!(status("only-here"), FileCompareStatus::OnlyLeft);
+        assert!(
+            !result
+                .entries
+                .iter()
+                .any(|e| e.path.starts_with("only-here/")),
+            "a one-sided folder's contents were listed one by one"
+        );
+        assert_eq!((result.same_count, result.different_count), (2, 1));
+    }
+
+    #[test]
+    fn same_size_different_bytes_is_different_and_the_budget_is_honest() {
+        let scratch = scratchdir::ScratchDir::new("filediff-bytes");
+        let (a, b) = (scratch.path("a"), scratch.path("b"));
+        std::fs::write(&a, "abcdef").unwrap();
+        std::fs::write(&b, "abcxef").unwrap();
+        let mut budget = 1024;
+        assert_eq!(same_bytes(&a, &b, &mut budget).unwrap(), Some(false));
+        // A file that starts with the whole of the other is not the same file.
+        let c = scratch.path("c");
+        std::fs::write(&c, "abcdefg").unwrap();
+        assert_eq!(same_bytes(&a, &c, &mut budget).unwrap(), Some(false));
+        let mut tiny = 2;
+        assert_eq!(
+            same_bytes(&a, &a, &mut tiny).unwrap(),
+            None,
+            "a file past the budget was called the same"
+        );
+    }
+
+    #[test]
+    fn enter_opens_the_pair_and_escape_goes_back_to_the_folders() {
+        let (_scratch, left, right) = folder_pair();
+        let mut app = FileDiffApp::new();
+        app.compare_folders_at(&left, &right);
+        assert!(app.dir_mode);
+        let at = app
+            .dir_compare
+            .as_ref()
+            .and_then(|r| r.entries.iter().position(|e| e.path == "changed.txt"))
+            .expect("listed");
+        for _ in 0..at {
+            app.handle_key(&key(Key::Down));
+        }
+        assert_eq!(app.dir_selected, at);
+        assert_eq!(app.handle_key(&key(Key::Enter)), EventResult::Consumed);
+        assert!(!app.dir_mode, "the pair did not open");
+        assert_eq!(app.left_content, "left\n");
+        assert_eq!(app.right_content, "right\n");
+        app.handle_key(&key(Key::Escape));
+        assert!(app.dir_mode, "Escape did not go back to the folder list");
+    }
+
+    #[test]
+    fn ctrl_d_asks_for_the_left_folder_then_the_right() {
+        let mut app = FileDiffApp::new();
+        assert_eq!(app.handle_key(&ctrl(Key::D)), EventResult::Consumed);
+        assert_eq!(app.folder_step, Some(Side::Left));
+        assert!(app.picker.is_open());
     }
 }

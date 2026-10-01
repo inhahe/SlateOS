@@ -35,33 +35,110 @@
 //! the clock in the corner read `00:00` for the whole puzzle and the end card
 //! congratulated every player on a time of `00:00`.
 
+use gamechrome::{Chrome, Ink};
+use guitk::button::{Kind, State};
 use guitk::color::Color;
 use guitk::event::{Event, EventResult, Key, KeyEvent, MouseButton, MouseEvent, MouseEventKind};
 use guitk::frame::{Frame, Rect};
+use guitk::palette::Palette;
 use guitk::probe::Probe;
 use guitk::render::{FontWeightHint, RenderCommand, RenderTree, TextOverflow};
 use guitk::style::CornerRadii;
+use guitk::surface::Surface;
 use guitk::text;
 use guitk::wheel::Accumulator;
 use oswindow::app::{self, App, Response};
 use std::process::ExitCode;
 
-// ── Catppuccin Mocha palette ────────────────────────────────────────
-const BASE: Color = Color::from_hex(0x1E1E2E);
-const MANTLE: Color = Color::from_hex(0x181825);
-const CRUST: Color = Color::from_hex(0x11111B);
-const SURFACE0: Color = Color::from_hex(0x313244);
-const SURFACE1: Color = Color::from_hex(0x45475A);
-const TEXT_COLOR: Color = Color::from_hex(0xCDD6F4);
-const SUBTEXT0: Color = Color::from_hex(0xA6ADC8);
-const BLUE: Color = Color::from_hex(0x89B4FA);
-const GREEN: Color = Color::from_hex(0xA6E3A1);
-const RED: Color = Color::from_hex(0xF38BA8);
-const YELLOW: Color = Color::from_hex(0xF9E2AF);
-const PEACH: Color = Color::from_hex(0xFAB387);
-const LAVENDER: Color = Color::from_hex(0xB4BEFE);
-const OVERLAY0: Color = Color::from_hex(0x6C7086);
-const TEAL: Color = Color::from_hex(0x94E2D5);
+// ── Colours ─────────────────────────────────────────────────────────
+//
+// Everything in this game follows the user's palette (the operator's answer
+// to C-Q16, §1422, and lane C's call for this game): its surfaces and text
+// from the palette's roles, each hue in the palette's ink for it, which reads
+// on the page in a light theme as in a dark one. It was all a copy of
+// Catppuccin Mocha, dark on a light desktop.
+
+/// The colours the window draws in, from the user's palette.
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct Colours {
+    /// The page.
+    base: Color,
+    /// A band.
+    mantle: Color,
+    /// A well.
+    crust: Color,
+    /// Raised.
+    surface0: Color,
+    /// Raised further.
+    surface1: Color,
+    /// Text.
+    text: Color,
+    /// Secondary text.
+    subtext0: Color,
+    /// The palette's blue, inked for the page.
+    blue: Color,
+    /// The palette's green, inked for the page.
+    green: Color,
+    /// The palette's red, inked for the page.
+    red: Color,
+    /// The palette's yellow, inked for the page.
+    yellow: Color,
+    /// The palette's peach, inked for the page.
+    peach: Color,
+    /// The palette's lavender, inked for the page.
+    lavender: Color,
+    /// A switched-off control, and faint lines.
+    overlay0: Color,
+    /// The palette's teal, inked for the page.
+    teal: Color,
+    /// What is written on the cursor's square -- its letter and its number --
+    /// on whichever of the three cursor colours it is (`Crossword::draw_grid`).
+    on_cursor: Ink,
+    /// A letter, a letter Check marks wrong, a revealed letter, and a
+    /// square's number, on the squares they sit on. The palette's inks are
+    /// made for the page; a square is darker than it in a light theme and
+    /// lighter in a dark one, and the numbers, in the palette's faintest
+    /// grey, were 1.4:1 on them.
+    letter: Ink,
+    wrong: Ink,
+    revealed: Ink,
+    number: Ink,
+    /// The current clue, on the banner's well.
+    banner: Color,
+}
+
+impl Colours {
+    fn of(p: &Palette) -> Self {
+        // A square not under the cursor: plain, or in the cursor's word.
+        let squares = [p.surface0, p.surface1];
+        // The cursor's square: blue, or red over a wrong letter and teal
+        // over a revealed one.
+        let cursors = [p.ink(p.blue), p.ink(p.red), p.ink(p.teal)];
+        Self {
+            base: p.base,
+            mantle: p.mantle,
+            crust: p.crust,
+            surface0: p.surface0,
+            surface1: p.surface1,
+            text: p.text,
+            subtext0: p.subtext0,
+            blue: p.ink(p.blue),
+            green: p.ink(p.green),
+            red: p.ink(p.red),
+            yellow: p.ink(p.yellow),
+            peach: p.ink(p.peach),
+            lavender: p.ink(p.lavender),
+            overlay0: p.overlay0,
+            teal: p.ink(p.teal),
+            on_cursor: Ink::on(p.crust, &cursors),
+            letter: Ink::on(p.text, &squares),
+            wrong: Ink::on(p.ink(p.red), &squares),
+            revealed: Ink::on(p.ink(p.teal), &squares),
+            number: Ink::on(p.subtext0, &squares),
+            banner: Ink::on(p.ink(p.yellow), &[p.crust]).small,
+        }
+    }
+}
 
 // ── The window ──────────────────────────────────────────────────────
 /// What the app asks the compositor for. It is a request, not a promise: every
@@ -591,6 +668,12 @@ struct Crossword {
     /// The window the last frame was drawn in, so a click can be resolved
     /// against the picture the player is actually looking at.
     size: (f32, f32),
+    /// The user's colours, replaced whenever the theme changes. Seeded from
+    /// the defaults; the framework calls `App::theme_changed` before the
+    /// first frame.
+    palette: Palette,
+    /// `palette`'s colours as this window draws them: rebuilt with it.
+    colours: Colours,
 }
 
 impl Crossword {
@@ -611,6 +694,8 @@ impl Crossword {
             clue_scroll: 0,
             scroll: Accumulator::default(),
             size: (WINDOW_WIDTH, WINDOW_HEIGHT),
+            palette: Palette::for_mode(false),
+            colours: Colours::of(&Palette::for_mode(false)),
         }
     }
 
@@ -1338,7 +1423,7 @@ impl Crossword {
     fn frame(&self, width: f32, height: f32) -> Frame<Target> {
         let mut f = Frame::new(width, height);
         let l = Layout::solve(width, height, self.width, self.height);
-        fill(&mut f, l.window, BASE, 0.0);
+        fill(&mut f, l.window, self.colours.base, 0.0);
         match self.view {
             View::PuzzleSelect => self.draw_menu(&mut f, &l),
             View::Playing => {
@@ -1379,7 +1464,7 @@ impl Crossword {
                 head.w,
                 ty,
                 heading,
-                TEXT_COLOR,
+                self.colours.text,
                 l.title,
                 FontWeightHint::Bold,
             );
@@ -1393,7 +1478,15 @@ impl Crossword {
                 break;
             }
             let on = i == self.selected_puzzle;
-            fill(f, r, if on { SURFACE1 } else { SURFACE0 }, l.pad * 0.4);
+            self.palette.push_surface(
+                f,
+                r.x,
+                r.y,
+                r.w,
+                r.h,
+                l.pad * 0.4,
+                if on { Surface::Selected } else { Surface::Card },
+            );
 
             // The dimensions sit at the right-hand end, measured, and the name
             // gets what is left. Both were previously free to run the whole
@@ -1409,7 +1502,11 @@ impl Crossword {
                     r.x + l.pad,
                     y,
                     def.name,
-                    if on { BLUE } else { TEXT_COLOR },
+                    if on {
+                        self.colours.blue
+                    } else {
+                        self.colours.text
+                    },
                     l.font,
                     FontWeightHint::Bold,
                     dims_x - l.pad * 0.5 - (r.x + l.pad),
@@ -1421,7 +1518,7 @@ impl Crossword {
                     dims_x,
                     y,
                     &size,
-                    SUBTEXT0,
+                    self.colours.subtext0,
                     l.small,
                     FontWeightHint::Regular,
                     dims_w,
@@ -1453,7 +1550,9 @@ impl Crossword {
                 strip.x,
                 ty,
                 "Up/Down to choose, Enter to start -- or click a puzzle",
-                OVERLAY0,
+                // Secondary text: an instruction is read, and the palette's
+                // faintest grey is 2.3:1 on a light page.
+                self.colours.subtext0,
                 l.small,
                 FontWeightHint::Regular,
                 strip.w,
@@ -1462,7 +1561,7 @@ impl Crossword {
     }
 
     fn draw_header(&self, f: &mut Frame<Target>, l: &Layout) {
-        fill(f, l.header, MANTLE, 0.0);
+        fill(f, l.header, self.colours.mantle, 0.0);
         if l.header.is_empty() {
             return;
         }
@@ -1478,8 +1577,8 @@ impl Crossword {
         // cannot end with a name drawn through a clock.
         let (filled, total) = self.filled_count();
         let readouts = [
-            (self.format_time(), TEXT_COLOR),
-            (format!("{filled}/{total}"), SUBTEXT0),
+            (self.format_time(), self.colours.text),
+            (format!("{filled}/{total}"), self.colours.subtext0),
         ];
         let mut x = l.header.right() - l.pad;
         for (s, colour) in readouts {
@@ -1503,7 +1602,7 @@ impl Crossword {
                 l.pad,
                 y,
                 self.puzzle_name(),
-                TEXT_COLOR,
+                self.colours.text,
                 l.title,
                 FontWeightHint::Bold,
                 x - l.pad * 0.5 - l.pad,
@@ -1513,7 +1612,7 @@ impl Crossword {
 
     /// The strip naming the word the cursor is in.
     fn draw_banner(&self, f: &mut Frame<Target>, l: &Layout) {
-        fill(f, l.banner, CRUST, 0.0);
+        fill(f, l.banner, self.colours.crust, 0.0);
         if l.banner.is_empty() {
             return;
         }
@@ -1541,7 +1640,7 @@ impl Crossword {
                 l.pad,
                 y,
                 &s,
-                YELLOW,
+                self.colours.banner,
                 l.font,
                 FontWeightHint::Regular,
                 (l.banner.w - l.pad * 2.0).max(0.0),
@@ -1559,17 +1658,28 @@ impl Crossword {
             for col in 0..self.width {
                 let r = l.cell_rect(row, col);
                 let Some(cell) = self.cell(row, col) else {
-                    fill(f, r, CRUST, 0.0);
+                    fill(f, r, self.colours.crust, 0.0);
                     continue;
                 };
 
                 let on_cursor = self.cursor == (row, col);
+                let wrong = self.is_wrong(row, col);
+                let revealed = cell.revealed && cell.entry.is_some();
                 let bg = if on_cursor {
-                    BLUE
+                    // The cursor's square takes the colour of what it holds:
+                    // a wrong letter's red, drawn on the cursor's blue, was
+                    // 1.1:1 -- the one letter Check had to show vanished.
+                    if wrong {
+                        self.colours.red
+                    } else if revealed {
+                        self.colours.teal
+                    } else {
+                        self.colours.blue
+                    }
                 } else if word.contains(&(row, col)) {
-                    SURFACE1
+                    self.colours.surface1
                 } else {
-                    SURFACE0
+                    self.colours.surface0
                 };
                 fill(
                     f,
@@ -1604,7 +1714,12 @@ impl Crossword {
                             corner.x,
                             corner.y,
                             &n,
-                            if on_cursor { CRUST } else { OVERLAY0 },
+                            if on_cursor {
+                                self.colours.on_cursor
+                            } else {
+                                self.colours.number
+                            }
+                            .at(size, false),
                             size,
                             FontWeightHint::Regular,
                             corner.w,
@@ -1613,16 +1728,17 @@ impl Crossword {
                 }
 
                 if let Some(entry) = cell.entry {
-                    let colour = if self.is_wrong(row, col) {
-                        RED
-                    } else if cell.revealed {
-                        TEAL
-                    } else if on_cursor {
-                        CRUST
-                    } else {
-                        TEXT_COLOR
-                    };
                     let size = l.cell * 0.5;
+                    let colour = if on_cursor {
+                        self.colours.on_cursor
+                    } else if wrong {
+                        self.colours.wrong
+                    } else if cell.revealed {
+                        self.colours.revealed
+                    } else {
+                        self.colours.letter
+                    }
+                    .at(size, true);
                     let s = entry.to_string();
                     // Measured, not centred by subtracting six pixels from the
                     // middle of the cell as it was before -- and vertically
@@ -1645,7 +1761,7 @@ impl Crossword {
             y: l.grid.y,
             width: l.grid.w,
             height: l.grid.h,
-            color: OVERLAY0,
+            color: self.colours.overlay0,
             line_width: (l.cell * 0.05).clamp(1.0, 4.0),
             corner_radii: CornerRadii::ZERO,
         });
@@ -1692,7 +1808,7 @@ impl Crossword {
                             r.x,
                             ty,
                             dir.label(),
-                            LAVENDER,
+                            self.colours.lavender,
                             l.small,
                             FontWeightHint::Bold,
                             r.w,
@@ -1707,7 +1823,8 @@ impl Crossword {
             };
             let on = current == Some(index);
             if on {
-                fill(f, r, SURFACE0, l.small * 0.3);
+                self.palette
+                    .push_surface(f, r.x, r.y, r.w, r.h, l.small * 0.3, Surface::Selected);
             }
             let weight = if on {
                 FontWeightHint::Bold
@@ -1728,7 +1845,11 @@ impl Crossword {
                     // are both "7", and a panel showing one of them without
                     // its heading would not say which.
                     &format!("{}{}. {}", clue.number, clue.direction.initial(), clue.text),
-                    if on { YELLOW } else { SUBTEXT0 },
+                    if on {
+                        self.colours.yellow
+                    } else {
+                        self.colours.subtext0
+                    },
                     l.small,
                     weight,
                     // The renderer is the only thing that knows how wide the
@@ -1748,7 +1869,7 @@ impl Crossword {
     /// It used to be one line of text naming eight keystrokes, drawn in the one
     /// strip of the window that exists to be clicked.
     fn draw_footer(&self, f: &mut Frame<Target>, l: &Layout) {
-        fill(f, l.footer, MANTLE, 0.0);
+        fill(f, l.footer, self.colours.mantle, 0.0);
         if l.footer.is_empty() {
             return;
         }
@@ -1767,33 +1888,31 @@ impl Crossword {
         let mut x = l.pad;
         for button in BUTTONS {
             let label = button.label();
-            let w = text::measure(label, size, FontWeightHint::Bold) + l.pad;
+            // As wide as the toolkit's button needs to show the label whole.
+            let w = gamechrome::button_width(label, size, h);
             // A button that would not fit whole is left out rather than drawn
             // off the edge of the window.
             if x + w > l.footer.right() - l.pad {
                 break;
             }
             let r = Rect::new(x, y, w, h);
+            // Check and Help are switches, and on, each is the toolkit's
+            // primary button. The toolkit's button drops a label taller than
+            // itself rather than drawing it over its edges: a 7pt floor on
+            // `size` in a footer that can be shorter than 9pt put the label
+            // out of the window's bottom edge once.
             let on = button == Button::Check && self.check_mode
                 || button == Button::Help && self.show_help;
-            fill(f, r, if on { SURFACE1 } else { SURFACE0 }, h * 0.25);
-            // `cy - size / 2.0` centred the font size in the button and left
-            // the label low in it by a sixth of a line; a 7pt floor on `size`
-            // in a footer that can be shorter than 9pt put it out of the
-            // window's bottom edge altogether. The label is dropped rather
-            // than drawn outside the button that is meant to contain it.
-            if let Some(ty) = centre_line(r, text::line_height(size, FontWeightHint::Bold)) {
-                centred(
-                    f,
-                    r.x,
-                    r.w,
-                    ty,
-                    label,
-                    if on { TEXT_COLOR } else { SUBTEXT0 },
-                    size,
-                    FontWeightHint::Bold,
-                );
-            }
+            gamechrome::button(
+                f,
+                &self.palette,
+                (r.x, r.y, r.w, r.h),
+                label,
+                size,
+                if on { Kind::Primary } else { Kind::Plain },
+                State::default(),
+                self.colours.mantle,
+            );
             f.hit(Target::Button(button), r);
             x += w + gap;
         }
@@ -1805,7 +1924,7 @@ impl Crossword {
     /// literal offsets inside it, so in any window narrower than 360 the help
     /// was drawn outside the window that needed it.
     fn draw_help(&self, f: &mut Frame<Target>, l: &Layout) {
-        fill(f, l.window, Color::rgba(0, 0, 0, 180), 0.0);
+        fill(f, l.window, Chrome::of(&self.palette).scrim, 0.0);
 
         let mut rows: Vec<(String, String)> = vec![
             (String::from("Arrows"), String::from("Move the cursor")),
@@ -1839,7 +1958,15 @@ impl Crossword {
             card_w,
             card_h,
         );
-        fill(f, card, MANTLE, l.pad * 0.6);
+        self.palette.push_surface(
+            f,
+            card.x,
+            card.y,
+            card.w,
+            card.h,
+            l.pad * 0.6,
+            Surface::Panel,
+        );
         // The heading owns the band the rows begin after, and is centred in
         // it rather than written at `card.y + l.pad`. In a window shorter than
         // the card's natural height the card is cut to the window, and the
@@ -1853,7 +1980,7 @@ impl Crossword {
                 card.w,
                 ty,
                 heading,
-                TEXT_COLOR,
+                self.colours.text,
                 l.title,
                 FontWeightHint::Bold,
             );
@@ -1886,7 +2013,7 @@ impl Crossword {
                 key_x,
                 y,
                 key,
-                BLUE,
+                self.colours.blue,
                 l.small,
                 FontWeightHint::Bold,
                 key_limit,
@@ -1896,7 +2023,7 @@ impl Crossword {
                 desc_x,
                 y,
                 desc,
-                SUBTEXT0,
+                self.colours.subtext0,
                 l.small,
                 FontWeightHint::Regular,
                 desc_limit,
@@ -1910,7 +2037,7 @@ impl Crossword {
 
     /// The card shown when the puzzle is solved, sized to the window it is in.
     fn draw_completed(&self, f: &mut Frame<Target>, l: &Layout) {
-        fill(f, l.window, CRUST, 0.0);
+        fill(f, l.window, self.colours.crust, 0.0);
         let revealed = self.revealed_count();
         let time = format!("Time: {}", self.format_time());
         let helped = if revealed > 0 {
@@ -1919,14 +2046,29 @@ impl Crossword {
             String::from("Solved unaided")
         };
         let lines: [(&str, f32, Color, FontWeightHint); 5] = [
-            ("Puzzle Complete!", l.title, GREEN, FontWeightHint::Bold),
-            (self.puzzle_name(), l.font, TEXT_COLOR, FontWeightHint::Bold),
-            (&time, l.font, TEXT_COLOR, FontWeightHint::Regular),
-            (&helped, l.small, PEACH, FontWeightHint::Regular),
+            (
+                "Puzzle Complete!",
+                l.title,
+                self.colours.green,
+                FontWeightHint::Bold,
+            ),
+            (
+                self.puzzle_name(),
+                l.font,
+                self.colours.text,
+                FontWeightHint::Bold,
+            ),
+            (&time, l.font, self.colours.text, FontWeightHint::Regular),
+            (
+                &helped,
+                l.small,
+                self.colours.peach,
+                FontWeightHint::Regular,
+            ),
             (
                 "Press Enter for the menu",
                 l.small,
-                OVERLAY0,
+                self.colours.subtext0,
                 FontWeightHint::Regular,
             ),
         ];
@@ -1945,7 +2087,15 @@ impl Crossword {
             card_w,
             card_h,
         );
-        fill(f, card, SURFACE0, l.pad * 0.5);
+        self.palette.push_surface(
+            f,
+            card.x,
+            card.y,
+            card.w,
+            card.h,
+            l.pad * 0.5,
+            Surface::Panel,
+        );
 
         let mut y = card.y + l.pad;
         for (s, size, colour, weight) in lines {
@@ -2086,6 +2236,11 @@ fn centred(
 // ── The window ──────────────────────────────────────────────────────
 
 impl App for Crossword {
+    fn theme_changed(&mut self, palette: &Palette) {
+        self.palette = *palette;
+        self.colours = Colours::of(palette);
+    }
+
     fn title(&self) -> String {
         String::from(TITLE)
     }
@@ -2177,6 +2332,276 @@ mod tests {
     )]
 
     use super::*;
+
+    /// The colours a game draws in until the theme says otherwise.
+    fn colours() -> Colours {
+        Colours::of(&Palette::for_mode(false))
+    }
+
+    /// The palette for a light or a dark theme, in the bordered look (the
+    /// default) or the card look.
+    fn palette(light: bool, cards: bool) -> Palette {
+        let mut p = Palette::for_mode(light);
+        p.set_surface_style(if cards {
+            guitk::palette::SurfaceStyle::Cards
+        } else {
+            guitk::palette::SurfaceStyle::Borders
+        });
+        p
+    }
+
+    /// Every screen, and the board with letters in it: a wrong one shown by
+    /// Check, a revealed one, and the cursor on a letter.
+    fn every_look(p: &Palette) -> Vec<(&'static str, Crossword)> {
+        let mut screens = every_screen(Crossword::SIZE);
+        let marked = || {
+            let mut app = playing(0);
+            for ch in ['Q', 'Z', 'X'] {
+                app.enter_letter(ch);
+            }
+            app.check_mode = true;
+            app.reveal_letter();
+            app.cursor = (0, 0);
+            app
+        };
+        screens.push(("marked", marked()));
+        // And cramped, where a letter is small text and takes the stronger
+        // ink: at the default size every letter is large.
+        let mut cramped = marked();
+        cramped.size = (320.0, 260.0);
+        screens.push(("marked, cramped", cramped));
+        for (_, app) in &mut screens {
+            app.theme_changed(p);
+        }
+        screens
+    }
+
+    /// The fill of the square at `(row, col)`, as drawn in `app`'s window.
+    fn square_face(app: &Crossword, row: usize, col: usize) -> Color {
+        let l = Layout::solve(app.size.0, app.size.1, app.width, app.height);
+        let r = l.cell_rect(row, col);
+        let inset = Rect::new(r.x + 1.0, r.y + 1.0, r.w - 2.0, r.h - 2.0);
+        app.frame(app.size.0, app.size.1)
+            .commands()
+            .iter()
+            .find_map(|c| match c {
+                RenderCommand::FillRect {
+                    x,
+                    y,
+                    width,
+                    height,
+                    color,
+                    ..
+                } if (*x - inset.x).abs() < 0.01
+                    && (*y - inset.y).abs() < 0.01
+                    && (*width - inset.w).abs() < 0.01
+                    && (*height - inset.h).abs() < 0.01 =>
+                {
+                    Some(*color)
+                }
+                _ => None,
+            })
+            .unwrap_or_else(|| panic!("square ({row}, {col}) is not drawn"))
+    }
+
+    /// **Check shows a wrong letter under the cursor too**: the cursor's
+    /// square is red over a letter Check marks wrong and teal over a revealed
+    /// one. The letter's own red, on the cursor's blue, was 1.1:1 -- the one
+    /// letter the player was looking at was the one Check could not show.
+    #[test]
+    fn check_shows_a_wrong_letter_under_the_cursor() {
+        let mut app = playing(0);
+        let right = app.cell(0, 0).expect("the corner is a letter").solution;
+        let wrong = if right == 'Q' { 'Z' } else { 'Q' };
+        app.cursor = (0, 0);
+        app.enter_letter(wrong);
+        app.cursor = (0, 0);
+        let c = app.colours;
+        assert_eq!(square_face(&app, 0, 0), c.blue, "the cursor is not blue");
+        app.check_mode = true;
+        assert!(app.is_wrong(0, 0));
+        assert_eq!(
+            square_face(&app, 0, 0),
+            c.red,
+            "Check does not show the wrong letter under the cursor"
+        );
+        app.reveal_letter();
+        app.cursor = (0, 0);
+        assert!(
+            !app.is_wrong(0, 0),
+            "revealing did not put the right letter in"
+        );
+        assert_eq!(
+            square_face(&app, 0, 0),
+            c.teal,
+            "a revealed letter under the cursor does not show it was given"
+        );
+    }
+
+    /// **Check and Help show when they are on**, as the toolkit's primary
+    /// button: both are switches, and a switch that looks the same on and off
+    /// says nothing about which it is.
+    #[test]
+    fn the_footer_switches_show_when_they_are_on() {
+        let face_of = |app: &Crossword, label: &str| {
+            let f = app.frame(app.size.0, app.size.1);
+            let (tx, ty) = f
+                .commands()
+                .iter()
+                .find_map(|c| match c {
+                    RenderCommand::Text { text, x, y, .. } if text == label => Some((*x, *y)),
+                    _ => None,
+                })
+                .unwrap_or_else(|| panic!("{label} is not drawn"));
+            let l = Layout::solve(app.size.0, app.size.1, app.width, app.height);
+            f.commands()
+                .iter()
+                .find_map(|c| match c {
+                    RenderCommand::FillRect {
+                        x,
+                        y,
+                        width,
+                        height,
+                        color,
+                        ..
+                    } if l.footer.contains(*x, *y)
+                        && Rect::new(*x, *y, *width, *height).contains(tx + 1.0, ty + 1.0)
+                        && *width < l.footer.w / 2.0 =>
+                    {
+                        Some(*color)
+                    }
+                    _ => None,
+                })
+                .unwrap_or_else(|| panic!("{label} has no face"))
+        };
+        let app = playing(0);
+        let paint = |kind| {
+            guitk::button::paint(&app.palette, kind, State::default(), app.colours.mantle).lower
+        };
+        let (off, on) = (paint(Kind::Plain), paint(Kind::Primary));
+        let mut checking = playing(0);
+        assert_eq!(face_of(&checking, "Check"), off, "Check looks on while off");
+        checking.check_mode = true;
+        assert_eq!(face_of(&checking, "Check"), on, "Check looks off while on");
+        let mut helped = playing(0);
+        assert_eq!(face_of(&helped, "Help"), off, "Help looks on while off");
+        helped.show_help = true;
+        assert_eq!(
+            face_of(&helped, "Help"),
+            on,
+            "Help looks off while its card is up"
+        );
+    }
+
+    /// **The chosen puzzle looks chosen**, in either surface look: its row
+    /// is the toolkit's selected row and the others are its plain cards.
+    #[test]
+    fn the_chosen_puzzle_looks_chosen() {
+        for cards in [false, true] {
+            let p = palette(false, cards);
+            // A border is stroked half a pixel inside the box it outlines, so
+            // the paint is matched to the row within that.
+            let paint_of_first_row = |chosen: usize| {
+                let mut app = Crossword::new();
+                app.theme_changed(&p);
+                app.selected_puzzle = chosen;
+                let row = rect_of_sized(&app, Target::PuzzleRow(0), Crossword::SIZE)
+                    .expect("the first puzzle has no row");
+                app.frame(Crossword::SIZE.0, Crossword::SIZE.1)
+                    .commands()
+                    .iter()
+                    .filter_map(|c| match c {
+                        RenderCommand::FillRect {
+                            x,
+                            y,
+                            width,
+                            height,
+                            color,
+                            ..
+                        }
+                        | RenderCommand::StrokeRect {
+                            x,
+                            y,
+                            width,
+                            height,
+                            color,
+                            ..
+                        } if (*x - row.x).abs() <= 0.51
+                            && (*y - row.y).abs() <= 0.51
+                            && (*width - row.w).abs() <= 1.01
+                            && (*height - row.h).abs() <= 1.01 =>
+                        {
+                            Some(*color)
+                        }
+                        _ => None,
+                    })
+                    .collect::<Vec<_>>()
+            };
+            let (chosen, not) = (paint_of_first_row(0), paint_of_first_row(1));
+            let selected = p.painted(Surface::Selected);
+            assert!(
+                chosen.contains(&selected),
+                "the chosen puzzle's row is not the selected row: {chosen:?} (cards: {cards})"
+            );
+            assert!(
+                !not.contains(&selected),
+                "a puzzle not chosen looks chosen (cards: {cards})"
+            );
+        }
+    }
+
+    /// **The window is drawn in the user's colours**, light or dark, on every
+    /// screen -- every colour the palette's or the toolkit's buttons' (the
+    /// operator's C-Q16). It drew in its own copy of Catppuccin Mocha, dark
+    /// on a light desktop.
+    #[test]
+    fn the_window_is_drawn_in_the_users_colours() {
+        for (light, cards) in [(false, false), (true, false), (false, true), (true, true)] {
+            let p = palette(light, cards);
+            let mut derived = gamechrome::button_colours(&p, Kind::Plain, p.mantle);
+            derived.extend(gamechrome::button_colours(&p, Kind::Primary, p.mantle));
+            // The inks moved to read on the game's own grounds.
+            let c = Colours::of(&p);
+            for ink in [c.on_cursor, c.letter, c.wrong, c.revealed, c.number] {
+                derived.extend([ink.large, ink.small]);
+            }
+            derived.push(c.banner);
+            for (what, app) in every_look(&p) {
+                let f = app.frame(app.size.0, app.size.1);
+                appearance::palette_check::assert_drawn_from(
+                    &p,
+                    f.commands(),
+                    &derived,
+                    &format!("crossword, {what}, light: {light}, cards: {cards}"),
+                );
+            }
+        }
+    }
+
+    /// **Every text reads on what is drawn under it, in either theme**, on
+    /// every screen: held to WCAG's floor for its size (4.5:1, or 3:1 for
+    /// large text), over the fills under it as they are stacked. The
+    /// palette's inks are made for the page; a clue, a letter and a number
+    /// are written on a lot else.
+    #[test]
+    fn every_text_reads_on_what_is_under_it_in_either_theme() {
+        let mut bad = Vec::new();
+        for (light, cards) in [(false, false), (true, false), (false, true), (true, true)] {
+            let p = palette(light, cards);
+            for (what, app) in every_look(&p) {
+                let f = app.frame(app.size.0, app.size.1);
+                for r in gamechrome::legibility::illegible(f.commands(), p.base, |_| false) {
+                    bad.push(format!(
+                        "{what}, light: {light}, cards: {cards}: {:?} {:.2}:1 on {:?}",
+                        r.text,
+                        r.ratio(),
+                        r.ground
+                    ));
+                }
+            }
+        }
+        assert!(bad.is_empty(), "crossword: {bad:#?}");
+    }
     use guitk::probe::{click_sized, ctrl, is_visible_sized, press, rect_of_sized, release, shift};
     use std::collections::BTreeMap;
 
@@ -2747,7 +3172,7 @@ mod tests {
                 10.0,
                 10.0,
                 s,
-                TEXT_COLOR,
+                colours().text,
                 size,
                 FontWeightHint::Regular,
                 limit,
@@ -2764,7 +3189,7 @@ mod tests {
             10.0,
             10.0,
             "Across",
-            TEXT_COLOR,
+            colours().text,
             12.0,
             FontWeightHint::Regular,
             100.0,
@@ -2798,6 +3223,11 @@ mod tests {
         let mut per: BTreeMap<&str, u32> = BTreeMap::new();
         for (w, h) in SIZES {
             let mut app = playing(0);
+            // In the card look, where the current clue's row is filled: under
+            // the bordered look (the default) it is outlined, and an outline
+            // is not a band to pair its run with. The centring is the same
+            // code in either look.
+            app.theme_changed(&palette(false, true));
             app.size = (w, h);
             app.check_mode = true;
             // A freshly-opened puzzle has no letters in it, and a grid with no
@@ -2815,7 +3245,20 @@ mod tests {
             ] {
                 let mut f = Frame::new(w, h);
                 pass(&app, &mut f, &l);
-                for band in filled(&f) {
+                // A toolkit button is one face with a gloss laid over its top
+                // half, and its label is centred in the face: the gloss is
+                // not a band anything is written in, and its bottom edge runs
+                // exactly through the label's centre.
+                let fills = filled(&f);
+                let gloss = |b: &Rect| {
+                    fills.iter().any(|c| {
+                        (c.x - b.x).abs() < 0.01
+                            && (c.y - b.y).abs() < 0.01
+                            && (c.w - b.w).abs() < 0.01
+                            && (c.h - b.h * 2.0).abs() < 0.01
+                    })
+                };
+                for band in fills.iter().copied().filter(|b| !gloss(b)) {
                     for (s, r) in inked(&f) {
                         // Paired by the run's *centre point*, not by whole
                         // containment. A cell's fill is its box inset by a

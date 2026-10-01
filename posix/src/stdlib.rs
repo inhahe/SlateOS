@@ -1,8 +1,8 @@
 //! C standard library conversion functions.
 //!
 //! Implements integer and floating-point conversion, absolute value,
-//! integer division structs, sorting, searching, random numbers, and
-//! temporary file creation.
+//! integer division structs, sorting, searching, and temporary file
+//! creation. The pseudo-random number generators are [`crate::prng`].
 //!
 //! ## Functions
 //!
@@ -12,7 +12,6 @@
 //! - `abs`, `labs`, `llabs` — absolute value
 //! - `div`, `ldiv`, `lldiv` — integer division with quotient/remainder
 //! - `qsort`, `bsearch` — array sorting/searching
-//! - `srand`, `rand`, `rand_r` — pseudo-random numbers
 //! - `mkstemp`, `tmpfile` — temporary file creation
 //!
 //! These are not strictly POSIX but are required by virtually every
@@ -431,8 +430,8 @@ unsafe fn scan_float_cstr(
 /// Parses decimal floating-point strings of the form:
 ///   `[whitespace][sign]digits[.digits][e[sign]digits]`
 ///
-/// Also supports `INF`, `INFINITY`, and `NAN` (case-insensitive).
-/// Hex floats (`0x` prefix) are not currently supported.
+/// Also supports `INF`, `INFINITY`, `NAN` and `NAN(chars)` (case-insensitive),
+/// and C99's hexadecimal form, `0x1.8p+3`.
 ///
 /// The digits are collected exactly and rounded once, so the result is the
 /// nearest `double` to the input, ties to even.
@@ -447,13 +446,13 @@ pub unsafe extern "C" fn strtod(nptr: *const u8, endptr: *mut *const u8) -> f64 
     let (token, negative) = unsafe { scan_float_cstr(nptr, endptr, &mut acc) };
     let value = match token {
         crate::decfloat::FloatToken::None => return 0.0,
-        crate::decfloat::FloatToken::Nan => return f64::NAN,
+        crate::decfloat::FloatToken::Nan(p) => return crate::decfloat::nan_f64(p, negative),
         crate::decfloat::FloatToken::Infinity => f64::INFINITY,
         crate::decfloat::FloatToken::Number => {
-            let (v, out_of_range) = acc.to_f64();
-            // POSIX: ERANGE on overflow and on underflow.  `decimal_to_f64`
-            // also reports a subnormal result — gradual underflow — which is
-            // what glibc flags.
+            let (v, out_of_range) = acc.to_f64(negative);
+            // ERANGE on overflow, and on underflow as glibc judges it: a
+            // result tiny after rounding and inexact -- an exact subnormal
+            // is no error. Rounded in the current direction, as glibc's.
             if out_of_range {
                 crate::errno::set_errno(crate::errno::ERANGE);
             }
@@ -463,16 +462,6 @@ pub unsafe extern "C" fn strtod(nptr: *const u8, endptr: *mut *const u8) -> f64 
     if negative { -value } else { value }
 }
 
-/// Convert a C string to a float (`strtof`).
-///
-/// Rounds to `f32` directly from the decimal digits rather than by way of
-/// `strtod`: two roundings are not one, and a value a hair above an `f32`
-/// midpoint can land exactly on that midpoint in `f64` and then be sent the
-/// wrong way by ties-to-even.
-///
-/// # Safety
-///
-/// `nptr` must be a valid null-terminated string.
 /// `strtof` in an explicit locale.
 ///
 /// We have exactly one locale, so this is `strtof` and the handle is ignored —
@@ -492,6 +481,16 @@ pub unsafe extern "C" fn strtof_l(
     unsafe { strtof(nptr, endptr) }
 }
 
+/// Convert a C string to a float (`strtof`).
+///
+/// Rounds to `f32` directly from the decimal digits rather than by way of
+/// `strtod`: two roundings are not one, and a value a hair above an `f32`
+/// midpoint can land exactly on that midpoint in `f64` and then be sent the
+/// wrong way by ties-to-even.
+///
+/// # Safety
+///
+/// `nptr` must be a valid null-terminated string.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub unsafe extern "C" fn strtof(nptr: *const u8, endptr: *mut *const u8) -> f32 {
     let mut acc = crate::decfloat::DigitCollector::new();
@@ -499,10 +498,10 @@ pub unsafe extern "C" fn strtof(nptr: *const u8, endptr: *mut *const u8) -> f32 
     let (token, negative) = unsafe { scan_float_cstr(nptr, endptr, &mut acc) };
     let value = match token {
         crate::decfloat::FloatToken::None => return 0.0,
-        crate::decfloat::FloatToken::Nan => return f32::NAN,
+        crate::decfloat::FloatToken::Nan(p) => return crate::decfloat::nan_f32(p, negative),
         crate::decfloat::FloatToken::Infinity => f32::INFINITY,
         crate::decfloat::FloatToken::Number => {
-            let (v, out_of_range) = acc.to_f32();
+            let (v, out_of_range) = acc.to_f32(negative);
             if out_of_range {
                 crate::errno::set_errno(crate::errno::ERANGE);
             }
@@ -512,60 +511,77 @@ pub unsafe extern "C" fn strtof(nptr: *const u8, endptr: *mut *const u8) -> f32 
     if negative { -value } else { value }
 }
 
-/// Convert a C string to a long double — the `f64` core of `strtold`.
+/// `strtold`'s conversion, for this library's own callers: the `long double`
+/// the text names, to all 64 bits of x87's significand, rounded in the
+/// current direction -- glibc's answer for every input, `ERANGE` included.
 ///
-/// On x86_64 a `long double` is 80-bit extended precision, classified
-/// X87/X87UP, and is **returned in `%st(0)`** — never in `%xmm0`. Rust has no
-/// 80-bit float type and cannot express that return convention, so this
-/// function is *not* `strtold`: it is exported as `__strtold_f64` and returns
-/// the value in `%xmm0` like any other `f64`. The `strtold` symbol a C caller
-/// links against is the assembly thunk below, which calls this and pushes the
-/// result onto the x87 stack.
-///
-/// (Before this split, the Rust function was exported as `strtold` directly,
-/// so every C caller read `%st(0)` — whatever stale value the x87 stack
-/// happened to hold — and got garbage regardless of the input string. See
-/// BUG-POSIX-LONG-DOUBLE-ABI.)
-///
-/// The value itself is computed by `strtod`, so it carries only `f64`
-/// precision; that is the sysroot's documented limitation
-/// (TD-POSIX-LONG-DOUBLE-PRECISION), and unlike the return-register bug it
-/// degrades gracefully rather than corrupting.
+/// `None`, with `*endptr` set to `nptr` as if nothing were converted, when
+/// the digits need more memory than there is: a literal of more than 768
+/// significant digits, or a value outside about `1e-2550` to `1e1800`, takes a
+/// block sized to it ([`crate::decfloat::DigitCollector::to_ld80`]).
 ///
 /// # Safety
 ///
-/// `nptr` must be a valid null-terminated string.
-#[cfg_attr(target_os = "none", unsafe(export_name = "__strtold_f64"))]
-pub unsafe extern "C" fn strtold(nptr: *const u8, endptr: *mut *const u8) -> f64 {
-    // SAFETY: strtod safety requirements are identical.
-    unsafe { strtod(nptr, endptr) }
+/// `nptr` must be a valid null-terminated string, and `endptr` either NULL or
+/// a valid `char **`.
+pub(crate) unsafe fn strtold_ld(
+    nptr: *const u8,
+    endptr: *mut *const u8,
+) -> Option<crate::x87::LongDouble> {
+    let mut acc = crate::decfloat::DigitCollector::for_long_double();
+    // SAFETY: forwarding this function's own contract.
+    let (token, negative) = unsafe { scan_float_cstr(nptr, endptr, &mut acc) };
+    let Some((value, out_of_range)) = crate::decfloat::ld80_of(token, negative, &acc) else {
+        if !endptr.is_null() {
+            // SAFETY: the caller promises `endptr` is writable.
+            unsafe { *endptr = nptr };
+        }
+        return None;
+    };
+    if out_of_range {
+        crate::errno::set_errno(crate::errno::ERANGE);
+    }
+    Some(value)
 }
 
-// `strtold` returns a `long double` in `%st(0)`. Rust cannot express that, so
-// the exported symbol is this thunk: it forwards `nptr`/`endptr` untouched in
-// `%rdi`/`%rsi`, takes the `f64` back in `%xmm0`, and re-loads it through
-// memory with `fld qword` — which widens exactly, since every f64 is
-// representable in the 80-bit format.
-//
-// Stack discipline: `push rbp; mov rbp, rsp` leaves `%rsp` 16-byte aligned, so
-// the `call` below satisfies the ABI's alignment requirement. The 16-byte
-// frame is the spill slot for `%xmm0` (8 needed, 16 to keep the alignment).
-// Exactly one x87 register is live on return, as the ABI requires.
+/// Convert a C string to a `long double` (`strtold`), at the format's full
+/// precision ([`strtold_ld`]).
+///
+/// When the digits need more memory than there is, nothing is converted:
+/// the result is 0, `*endptr` is `nptr`, and `errno` is `ENOMEM` -- rather
+/// than a value the text does not name. glibc never allocates here, so it
+/// has no such case; it can arise only for a literal of more than 768
+/// significant digits or a value outside about `1e-2550` to `1e1800`.
+///
+/// A `long double` comes back in `%st(0)`, which Rust cannot express, so the
+/// C symbol is a thunk ([`crate::ld_c`]) into `__slate_ld_strtold`. Until
+/// 2026-09-28 it was a `double` conversion widened, 53 bits of the 64
+/// (`TD-POSIX-LONG-DOUBLE-PRECISION`).
+///
+/// # Safety
+///
+/// As [`strtold_ld`].
+pub unsafe fn strtold(nptr: *const u8, endptr: *mut *const u8) -> crate::x87::LongDouble {
+    // SAFETY: forwarding this function's own contract.
+    unsafe { strtold_ld(nptr, endptr) }.unwrap_or_else(|| {
+        crate::errno::set_errno(crate::errno::ENOMEM);
+        crate::x87::LongDouble::POS_ZERO
+    })
+}
+
+/// `strtold` for C, through the thunk: the result into `out`.
 #[cfg(target_os = "none")]
-core::arch::global_asm!(
-    ".global strtold",
-    ".type strtold, @function",
-    "strtold:",
-    "push rbp",
-    "mov rbp, rsp",
-    "sub rsp, 16",
-    "call __strtold_f64",
-    "movsd [rsp], xmm0",
-    "fld qword ptr [rsp]",
-    "add rsp, 16",
-    "pop rbp",
-    "ret",
-);
+#[unsafe(no_mangle)]
+unsafe extern "C" fn __slate_ld_strtold(
+    nptr: *const u8,
+    endptr: *mut *const u8,
+    out: *mut crate::x87::LongDouble,
+) {
+    // SAFETY: `strtold`'s contract is the C caller's; `out` is the thunk's
+    // result slot.
+    unsafe { out.write(strtold(nptr, endptr)) }
+}
+crate::ld_c!(l_pp "strtold" => __slate_ld_strtold);
 
 // The `_l` variants: same conversion, explicit locale object.
 //
@@ -599,42 +615,120 @@ pub unsafe extern "C" fn strtod_l(
     unsafe { strtod(nptr, endptr) }
 }
 
-/// `strtold_l(nptr, endptr, loc)` — `strtold` in an explicit locale.
-///
-/// Exported through the same `fld`-widening thunk as `strtold`; see the
-/// commentary on that one for why Rust cannot return the value directly.
+/// `strtol_l` -- [`strtol`] in a locale, C's.
 ///
 /// # Safety
 ///
-/// As [`strtod_l`].
-#[cfg_attr(target_os = "none", unsafe(export_name = "__strtold_l_f64"))]
-pub unsafe extern "C" fn strtold_l(
+/// As [`strtol`].
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub unsafe extern "C" fn strtol_l(
+    nptr: *const u8,
+    endptr: *mut *const u8,
+    base: i32,
+    _loc: crate::locale::LocaleT,
+) -> i64 {
+    // SAFETY: forwarded.
+    unsafe { strtol(nptr, endptr, base) }
+}
+
+/// `strtoul_l` -- [`strtoul`] in a locale, C's.
+///
+/// # Safety
+///
+/// As [`strtoul`].
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub unsafe extern "C" fn strtoul_l(
+    nptr: *const u8,
+    endptr: *mut *const u8,
+    base: i32,
+    _loc: crate::locale::LocaleT,
+) -> u64 {
+    // SAFETY: forwarded.
+    unsafe { strtoul(nptr, endptr, base) }
+}
+
+/// `strtoll_l` -- [`strtoll`] in a locale, C's.
+///
+/// # Safety
+///
+/// As [`strtol`].
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub unsafe extern "C" fn strtoll_l(
+    nptr: *const u8,
+    endptr: *mut *const u8,
+    base: i32,
+    _loc: crate::locale::LocaleT,
+) -> i64 {
+    // SAFETY: forwarded.
+    unsafe { strtoll(nptr, endptr, base) }
+}
+
+/// `strtoull_l` -- [`strtoull`] in a locale, C's.
+///
+/// # Safety
+///
+/// As [`strtoul`].
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub unsafe extern "C" fn strtoull_l(
+    nptr: *const u8,
+    endptr: *mut *const u8,
+    base: i32,
+    _loc: crate::locale::LocaleT,
+) -> u64 {
+    // SAFETY: forwarded.
+    unsafe { strtoull(nptr, endptr, base) }
+}
+
+/// `strtoq` -- 4.4BSD's name for [`strtoll`].
+///
+/// # Safety
+///
+/// As [`strtol`].
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub unsafe extern "C" fn strtoq(nptr: *const u8, endptr: *mut *const u8, base: i32) -> i64 {
+    // SAFETY: forwarded.
+    unsafe { strtoll(nptr, endptr, base) }
+}
+
+/// `strtouq` -- 4.4BSD's name for [`strtoull`].
+///
+/// # Safety
+///
+/// As [`strtoul`].
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub unsafe extern "C" fn strtouq(nptr: *const u8, endptr: *mut *const u8, base: i32) -> u64 {
+    // SAFETY: forwarded.
+    unsafe { strtoull(nptr, endptr, base) }
+}
+
+/// `strtold_l(nptr, endptr, loc)` — `strtold` in an explicit locale, which
+/// is always C's here, as for [`strtod_l`].
+///
+/// # Safety
+///
+/// As [`strtold`].
+pub unsafe fn strtold_l(
     nptr: *const u8,
     endptr: *mut *const u8,
     _loc: crate::locale::LocaleT,
-) -> f64 {
+) -> crate::x87::LongDouble {
     // SAFETY: identical requirements, forwarded.
-    unsafe { strtod(nptr, endptr) }
+    unsafe { strtold(nptr, endptr) }
 }
 
-// As for `strtold`: `%rdi`/`%rsi`/`%rdx` carry `nptr`/`endptr`/`loc` and are
-// left untouched, so the thunk only has to move the `f64` result out of
-// `%xmm0` and back in through the x87 stack.
+/// `strtold_l` for C, through the thunk: the result into `out`.
 #[cfg(target_os = "none")]
-core::arch::global_asm!(
-    ".global strtold_l",
-    ".type strtold_l, @function",
-    "strtold_l:",
-    "push rbp",
-    "mov rbp, rsp",
-    "sub rsp, 16",
-    "call __strtold_l_f64",
-    "movsd [rsp], xmm0",
-    "fld qword ptr [rsp]",
-    "add rsp, 16",
-    "pop rbp",
-    "ret",
-);
+#[unsafe(no_mangle)]
+unsafe extern "C" fn __slate_ld_strtold_l(
+    nptr: *const u8,
+    endptr: *mut *const u8,
+    loc: crate::locale::LocaleT,
+    out: *mut crate::x87::LongDouble,
+) {
+    // SAFETY: as in `__slate_ld_strtold`.
+    unsafe { out.write(strtold_l(nptr, endptr, loc)) }
+}
+crate::ld_c!(l_ppp "strtold_l" => __slate_ld_strtold_l);
 
 /// Convert a C string to a double (`atof`).
 ///
@@ -1011,6 +1105,28 @@ unsafe fn qsort_partition<C: Fn(*const u8, *const u8) -> i32>(
     j
 }
 
+/// What `qsort` and `qsort_r` check before they sort, as glibc 2.39's
+/// `__qsort_r` meets them: fewer than two elements return at once, calling
+/// nothing, so they need no `compar`.  Otherwise glibc calls `compar` and moves
+/// elements through `base`, so a NULL either (with elements of some size to
+/// move) is where its process faults -- and `qsort` has no way to fail, so here
+/// it ends too, with a message (design-decisions.md §1115).  Until 2026-09-26
+/// the parameter could not be NULL, and a NULL `base` sorted nothing.
+///
+/// `None` means there is nothing to do.
+fn qsort_comparator<F>(base: *mut u8, nmemb: usize, size: usize, compar: Option<F>) -> Option<F> {
+    if nmemb <= 1 {
+        return None;
+    }
+    let Some(f) = compar else {
+        crate::unistd::libc_fatal(b"Fatal libc error: qsort: the comparison function is NULL\n");
+    };
+    if size != 0 && base.is_null() {
+        crate::unistd::libc_fatal(b"Fatal libc error: qsort: the array is NULL\n");
+    }
+    Some(f)
+}
+
 /// The shared introsort engine behind `qsort` and `qsort_r`.
 ///
 /// Recursion is replaced by an explicit stack that always defers the *smaller*
@@ -1129,14 +1245,18 @@ unsafe fn qsort_core<C: Fn(*const u8, *const u8) -> i32>(
 /// # Safety
 ///
 /// `base` must point to an array of at least `nmemb` elements, each
-/// of `size` bytes.  `compar` must be a valid comparison function.
+/// of `size` bytes.  `compar` must be a valid comparison function, or NULL
+/// for fewer than two elements (see [`qsort_comparator`]).
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub unsafe extern "C" fn qsort(
     base: *mut u8,
     nmemb: usize,
     size: usize,
-    compar: unsafe extern "C" fn(*const u8, *const u8) -> i32,
+    compar: Option<unsafe extern "C" fn(*const u8, *const u8) -> i32>,
 ) {
+    let Some(compar) = qsort_comparator(base, nmemb, size, compar) else {
+        return;
+    };
     // SAFETY: forwarded from this function's contract; the closure only calls
     // the caller's comparator on the pointers the engine hands it.
     unsafe { qsort_core(base, nmemb, size, &|a, b| compar(a, b)) };
@@ -1169,9 +1289,12 @@ mod gnu_qsort_r {
         base: *mut u8,
         nmemb: usize,
         size: usize,
-        compar: unsafe extern "C" fn(*const u8, *const u8, *mut core::ffi::c_void) -> i32,
+        compar: Option<unsafe extern "C" fn(*const u8, *const u8, *mut core::ffi::c_void) -> i32>,
         arg: *mut core::ffi::c_void,
     ) {
+        let Some(compar) = super::qsort_comparator(base, nmemb, size, compar) else {
+            return;
+        };
         // SAFETY: forwarded from this function's contract.
         unsafe { qsort_core(base, nmemb, size, &|a, b| compar(a, b, arg)) };
     }
@@ -1195,9 +1318,12 @@ pub unsafe extern "C" fn qsort_r(
     base: *mut u8,
     nmemb: usize,
     size: usize,
-    compar: unsafe extern "C" fn(*const u8, *const u8, *mut core::ffi::c_void) -> i32,
+    compar: Option<unsafe extern "C" fn(*const u8, *const u8, *mut core::ffi::c_void) -> i32>,
     arg: *mut core::ffi::c_void,
 ) {
+    let Some(compar) = qsort_comparator(base, nmemb, size, compar) else {
+        return;
+    };
     // SAFETY: forwarded from this function's contract.
     unsafe { qsort_core(base, nmemb, size, &|a, b| compar(a, b, arg)) };
 }
@@ -1205,6 +1331,14 @@ pub unsafe extern "C" fn qsort_r(
 /// Binary search a sorted array.
 ///
 /// Returns a pointer to the matching element, or NULL if not found.
+///
+/// glibc's (bits/stdlib-bsearch.h), which checks nothing: the elements are
+/// computed from `base` and handed to `compar`, and a `size` of 0 makes every
+/// element `base` -- which was "not found" without a comparison until
+/// 2026-09-26.  An empty array needs no `compar`.  A NULL one with elements
+/// to compare ends the process: glibc faults calling it, and "not found" is
+/// the only failure `bsearch` could report, which would be a wrong answer
+/// rather than a failure (design-decisions.md §1115).
 ///
 /// # Safety
 ///
@@ -1216,19 +1350,23 @@ pub unsafe extern "C" fn bsearch(
     base: *const u8,
     nmemb: usize,
     size: usize,
-    compar: unsafe extern "C" fn(*const u8, *const u8) -> i32,
+    compar: Option<unsafe extern "C" fn(*const u8, *const u8) -> i32>,
 ) -> *mut u8 {
-    if nmemb == 0 || size == 0 {
+    if nmemb == 0 {
         return core::ptr::null_mut();
     }
+    let Some(compar) = compar else {
+        crate::unistd::libc_fatal(b"Fatal libc error: bsearch: the comparison function is NULL\n");
+    };
 
     let mut lo: usize = 0;
     let mut hi: usize = nmemb;
 
     while lo < hi {
         let mid = lo.wrapping_add(hi.wrapping_sub(lo) / 2);
-        // SAFETY: mid < nmemb, so base + mid*size is within the array.
-        let elem = unsafe { base.add(mid.wrapping_mul(size)) };
+        // Computed, not dereferenced: the element is `compar`'s to read.
+        let elem = base.wrapping_add(mid.wrapping_mul(size));
+        // SAFETY: the caller's comparator on the caller's key and element.
         let cmp = unsafe { compar(key, elem) };
         match cmp.cmp(&0) {
             core::cmp::Ordering::Less => hi = mid,
@@ -1246,303 +1384,152 @@ pub unsafe extern "C" fn bsearch(
 // ---------------------------------------------------------------------------
 // Random number generation
 // ---------------------------------------------------------------------------
-
-/// Linear congruential PRNG state.
-///
-/// Uses the glibc LCG parameters. POSIX gives a process exactly one `rand`
-/// sequence, so this is shared by specification and cannot become per-thread —
-/// `rand_r` is the reentrant form for callers that need their own stream.
-///
-/// Serialising it is therefore the *caller's* obligation, not this module's;
-/// POSIX marks `rand`/`srand` as not thread-safe for exactly this reason. The
-/// crate's own tests discharge it with `tests::lock_rand_for_test`.
-static mut RAND_STATE: u64 = 1;
-
-/// Seed the random number generator.
-#[cfg_attr(target_os = "none", unsafe(no_mangle))]
-pub extern "C" fn srand(seed: u32) {
-    // SAFETY: `addr_of_mut!` never forms a reference to the static, so no
-    // aliasing rule is at stake; the write is a plain aligned store to a
-    // `u64` that outlives the program.
-    //
-    // Concurrency is a *caller* obligation imported from POSIX, not a fact
-    // about this program: `srand` is one of the functions POSIX explicitly
-    // declines to make thread-safe. (The previous comment here claimed
-    // "single-threaded userspace", which was false — this crate's own test
-    // suite runs it on several libtest threads at once, and the determinism
-    // tests silently depended on winning that race.)
-    unsafe {
-        core::ptr::addr_of_mut!(RAND_STATE).write(u64::from(seed));
-    }
-}
-
-/// Generate a pseudo-random integer in [0, RAND_MAX].
-///
-/// Uses the glibc LCG: state = state * 6364136223846793005 + 1.
-/// Returns the upper 31 bits.
-#[cfg_attr(target_os = "none", unsafe(no_mangle))]
-pub extern "C" fn rand() -> i32 {
-    // SAFETY: As `srand` — `addr_of_mut!` forms no reference, and the
-    // read-modify-write below is *not* atomic, which is exactly why POSIX
-    // makes serialising `rand` the caller's job. See `RAND_STATE`.
-    let state = unsafe { core::ptr::addr_of_mut!(RAND_STATE).read() };
-    let new_state = state
-        .wrapping_mul(6_364_136_223_846_793_005)
-        .wrapping_add(1);
-    unsafe {
-        core::ptr::addr_of_mut!(RAND_STATE).write(new_state);
-    }
-    // Return upper 31 bits as a non-negative i32.
-    ((new_state >> 33) & 0x7FFF_FFFF) as i32
-}
-
-/// Thread-safe pseudo-random number generator.
-///
-/// Uses caller-provided state instead of the global `RAND_STATE`.
-/// The algorithm matches glibc's LCG for compatibility.
-///
-/// # Safety
-///
-/// `seed` must point to a valid `u32`.
-#[cfg_attr(target_os = "none", unsafe(no_mangle))]
-pub unsafe extern "C" fn rand_r(seed: *mut u32) -> i32 {
-    if seed.is_null() {
-        return 0;
-    }
-    // Use a 32-bit LCG: state = state * 1103515245 + 12345 (POSIX spec).
-    let state = unsafe { *seed };
-    let new_state = state.wrapping_mul(1_103_515_245).wrapping_add(12_345);
-    unsafe {
-        *seed = new_state;
-    }
-    // Return upper bits as a non-negative i32.
-    ((new_state >> 1) & 0x7FFF_FFFF) as i32
-}
-
-/// Maximum value returned by rand().
-#[cfg_attr(target_os = "none", unsafe(no_mangle))]
-pub static RAND_MAX: i32 = 0x7FFF_FFFF;
-
-/// POSIX: Seed the better random number generator.
-///
-/// For our purposes, this is identical to `srand`.  POSIX specifies
-/// `random()`/`srandom()` as a better-quality RNG than `rand()`/`srand()`,
-/// but our implementation uses the same LCG for both.
-#[cfg_attr(target_os = "none", unsafe(no_mangle))]
-pub extern "C" fn srandom(seed: u32) {
-    srand(seed);
-}
-
-/// POSIX: Generate a pseudo-random integer in [0, 2^31).
-///
-/// Better-quality RNG than `rand()` per POSIX, but our implementation
-/// delegates to the same LCG.  Returns a `i64` (`long`) per POSIX.
-#[cfg_attr(target_os = "none", unsafe(no_mangle))]
-pub extern "C" fn random() -> i64 {
-    i64::from(rand())
-}
-
-/// POSIX: Initialize random state for `random_r`.
-///
-/// Stub — stores the seed in the state buffer for compatibility.
-///
-/// # Safety
-///
-/// `statebuf` must be a valid pointer to at least 8 bytes.
-#[cfg_attr(target_os = "none", unsafe(no_mangle))]
-pub unsafe extern "C" fn initstate(seed: u32, statebuf: *mut u8, n: usize) -> *mut u8 {
-    if statebuf.is_null() || n < 8 {
-        return core::ptr::null_mut();
-    }
-    srand(seed);
-    statebuf
-}
-
-/// POSIX: Set the random state buffer.
-///
-/// Stub — accepts the state pointer for API compatibility.
-///
-/// # Safety
-///
-/// `statebuf` must have been returned by a prior `initstate` call.
-#[cfg_attr(target_os = "none", unsafe(no_mangle))]
-pub unsafe extern "C" fn setstate(statebuf: *mut u8) -> *mut u8 {
-    // No-op: we use a global state regardless.
-    statebuf
-}
+//
+// rand, random, the rand48 family, their reentrant forms and RAND_MAX are
+// crate::prng's.
 
 // ---------------------------------------------------------------------------
 // Temporary files
 // ---------------------------------------------------------------------------
+//
+// Each over crate::tempname -- glibc's __gen_tempname and __path_search --
+// where what a template must be, and what becomes of it, is written down.
+// mkstemp, mkostemp, mkstemps, mkostemps and mkdtemp are archive members of
+// their own (gnulib replaces them: check-libc-shape.py's REPLACEABLE), and
+// their large-file names one more, written over crate::tempname rather than
+// over them: a program that brings its own mkstemp is neither given this
+// library's by mkstemp64 nor has its own run by it.
 
 /// Own archive member — gnulib replaces `mkstemp`. See string.rs's module header.
 mod gnu_mkstemp {
-    /// Create a unique temporary file.
-    ///
-    /// The `template` string must end with exactly six 'X' characters
-    /// (e.g., `"/tmp/fileXXXXXX"`).  These are replaced with unique
-    /// characters and the file is created atomically.
-    ///
-    /// Returns an open file descriptor on success, or -1 on error.
+    /// `mkstemp(template)`: a new file, named by the template with its last
+    /// six `X`s made letters and digits, opened `O_RDWR`, mode 0600 before
+    /// the umask.  Its descriptor, or -1 with `errno`: `EINVAL` for a
+    /// template that does not end in six `X`s (or is NULL, where glibc's
+    /// faults), `EEXIST` when every name tried was taken, else the `open`'s
+    /// (the template then holding the name that failed).
     ///
     /// # Safety
     ///
-    /// `template` must be a writable null-terminated string with at least
-    /// 6 trailing 'X' characters.
+    /// `template` must be NULL or a writable C string.
     #[cfg_attr(target_os = "none", unsafe(no_mangle))]
     pub unsafe extern "C" fn mkstemp(template: *mut u8) -> i32 {
-        if template.is_null() {
-            crate::errno::set_errno(crate::errno::EINVAL);
-            return -1;
-        }
-
-        let len = unsafe { crate::string::strlen(template) };
-        if len < 6 {
-            crate::errno::set_errno(crate::errno::EINVAL);
-            return -1;
-        }
-
-        // Verify the last 6 characters are 'X'.
-        let suffix_start = len.wrapping_sub(6);
-        let mut i: usize = 0;
-        while i < 6 {
-            if unsafe { *template.add(suffix_start.wrapping_add(i)) } != b'X' {
-                crate::errno::set_errno(crate::errno::EINVAL);
-                return -1;
-            }
-            i = i.wrapping_add(1);
-        }
-
-        // Try up to 100 unique names.
-        let mut attempt: u32 = 0;
-        while attempt < 100 {
-            // Generate random bytes for the suffix.  Use getrandom (backed
-            // by RDRAND) for unpredictability — predictable temp file names
-            // are a security vulnerability (symlink attacks).
-            let mut rand_bytes = [0u8; 6];
-            crate::unistd::getrandom(rand_bytes.as_mut_ptr(), 6, 0);
-
-            // Fill the 6 X's with alphanumeric characters from random bytes.
-            let mut j: usize = 0;
-            while j < 6 {
-                let rb = rand_bytes.get(j).copied().unwrap_or(0);
-                let idx = rb % 36;
-                let ch = if idx < 10 {
-                    b'0'.wrapping_add(idx)
-                } else {
-                    b'a'.wrapping_add(idx.wrapping_sub(10))
-                };
-                // SAFETY: suffix_start + j < len, template is writable.
-                unsafe {
-                    *template.add(suffix_start.wrapping_add(j)) = ch;
-                }
-                j = j.wrapping_add(1);
-            }
-
-            // Try to create the file exclusively.
-            let flags = crate::fcntl::O_RDWR | crate::fcntl::O_CREAT | crate::fcntl::O_EXCL;
-            let fd = crate::file::open(template, flags, 0o600);
-            if fd >= 0 {
-                return fd;
-            }
-
-            // If EEXIST, try again.  Any other error, bail.
-            if crate::errno::get_errno() != crate::errno::EEXIST {
-                return -1;
-            }
-
-            attempt = attempt.wrapping_add(1);
-        }
-
-        crate::errno::set_errno(crate::errno::EEXIST);
-        -1
+        // SAFETY: the caller's contract.
+        unsafe { crate::tempname::make_file(template, 0, 0) }
     }
 }
 pub use gnu_mkstemp::mkstemp;
 
-/// Generate a unique temporary filename (DEPRECATED — use `mkstemp`).
+/// `mktemp(template)`: the template's last six `X`s made a name nothing has
+/// yet, as `mkstemp` makes one, but nothing created -- which is why it is
+/// obsolete: the name is free when it is returned and anyone's after.
 ///
-/// Replaces the last 6 'X' characters in `template` with random
-/// characters to create a unique filename.  Does NOT create the file,
-/// which is inherently racy (TOCTOU vulnerability).
-///
-/// Returns `template` on success, or sets errno and returns NULL on
-/// failure.
+/// Returns `template`, always, as SUSv2 and glibc have it: empty (its first
+/// byte NUL) if no name could be made, whatever the reason, with `errno`
+/// saying which -- `EINVAL` for a template that does not end in six `X`s,
+/// `ENOTDIR` for one inside a file, `EEXIST` when every name was taken.  (It
+/// returned NULL for some of those until 2026-09-30.)  A NULL template,
+/// where glibc's faults, is NULL with `EINVAL`.
 ///
 /// # Safety
 ///
-/// `template` must be a writable null-terminated string with at least
-/// 6 trailing 'X' characters.
+/// `template` must be NULL or a writable C string.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub unsafe extern "C" fn mktemp(template: *mut u8) -> *mut u8 {
     if template.is_null() {
         crate::errno::set_errno(crate::errno::EINVAL);
         return core::ptr::null_mut();
     }
-
-    let len = unsafe { crate::string::strlen(template) };
-    if len < 6 {
-        crate::errno::set_errno(crate::errno::EINVAL);
-        // POSIX: mktemp sets template[0] = '\0' on error.
-        unsafe {
-            *template = 0;
-        }
-        return core::ptr::null_mut();
+    // SAFETY: a writable C string, the caller's.
+    if unsafe { crate::tempname::gen_tempname(template, 0, crate::tempname::Kind::NoCreate) } < 0 {
+        // SAFETY: as above; the string has at least its NUL.
+        unsafe { *template = 0 };
     }
-
-    // Verify the last 6 characters are 'X'.
-    let suffix_start = len.wrapping_sub(6);
-    let mut i: usize = 0;
-    while i < 6 {
-        if unsafe { *template.add(suffix_start.wrapping_add(i)) } != b'X' {
-            crate::errno::set_errno(crate::errno::EINVAL);
-            unsafe {
-                *template = 0;
-            }
-            return core::ptr::null_mut();
-        }
-        i = i.wrapping_add(1);
-    }
-
-    // Generate random suffix.
-    let mut rand_bytes = [0u8; 6];
-    crate::unistd::getrandom(rand_bytes.as_mut_ptr(), 6, 0);
-
-    let mut j: usize = 0;
-    while j < 6 {
-        let rb = rand_bytes.get(j).copied().unwrap_or(0);
-        let idx = rb % 36;
-        let ch = if idx < 10 {
-            b'0'.wrapping_add(idx)
-        } else {
-            b'a'.wrapping_add(idx.wrapping_sub(10))
-        };
-        unsafe {
-            *template.add(suffix_start.wrapping_add(j)) = ch;
-        }
-        j = j.wrapping_add(1);
-    }
-
     template
 }
 
-/// Create a temporary file.
+/// `tmpfile()`: a new file, read and written through the stream returned
+/// (`w+b`), and removed when the stream is closed or the program exits, as
+/// ISO C has it.  NULL, with `errno`, if none could be made.
 ///
-/// Returns a FILE* stream for a unique temporary file opened in "w+b"
-/// mode, or null on error.  The file is automatically deleted when
-/// closed.
+/// glibc makes the file nameless -- `O_TMPFILE` in `/tmp` -- and failing
+/// that makes `/tmp/tmpfXXXXXX` as `mkstemp` makes a name and unlinks it at
+/// once, the file living on through its descriptor.  The first is tried
+/// here too.  The second cannot be done as glibc does it: this kernel's
+/// descriptors reach a file through its name, so unlinking an open file
+/// cuts every descriptor off from it.  The name stays, then, until the
+/// stream lets go of the file -- `fclose`, `freopen` onto another, `exit` --
+/// and is removed then, by the process that made it (a child that inherits
+/// the stream leaves it to the parent).  A program that ends otherwise
+/// (`_exit`, a fault) leaves the file, which ISO C allows
+/// (design-decisions.md §1151).  It never did anything else: until
+/// 2026-09-30 the file was `/tmp/tmpXXXXXX` and was never removed at all.
 ///
-/// Note: Automatic deletion is not implemented (no unlink-on-close
-/// support yet).  The file persists until manually removed.
+/// A success leaves `errno` as it was, as glibc's does where the nameless
+/// file can be made.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn tmpfile() -> *mut u8 {
-    let mut template: [u8; 20] = *b"/tmp/tmpXXXXXX\0\0\0\0\0\0";
-    let fd = unsafe { mkstemp(template.as_mut_ptr()) };
+    use crate::fcntl::{O_EXCL, O_RDWR, O_TMPFILE};
+    use crate::tempname::{FILE_MODE, Kind, gen_tempname, path_search, remove_name};
+    let saved = crate::errno::get_errno();
+    // glibc's __gen_tempfd: a nameless file, where there are any.
+    let fd = crate::file::open(
+        c"/tmp".as_ptr().cast(),
+        O_RDWR | O_TMPFILE | O_EXCL,
+        FILE_MODE,
+    );
+    if fd >= 0 {
+        crate::errno::set_errno(saved);
+        // SAFETY: a C string for the mode.
+        let f = unsafe { crate::stdio::fdopen(fd, c"w+b".as_ptr().cast()) };
+        if f.is_null() {
+            let e = crate::errno::get_errno();
+            crate::file::close(fd);
+            crate::errno::set_errno(e);
+        }
+        return f;
+    }
+    crate::errno::set_errno(saved);
+    let mut name = [0u8; crate::unistd::PATH_MAX];
+    // SAFETY: NULL for the directory, a C string for the prefix.
+    if unsafe { path_search(&mut name, core::ptr::null(), c"tmpf".as_ptr().cast(), false) }
+        .is_none()
+    {
+        return core::ptr::null_mut();
+    }
+    // SAFETY: `path_search` wrote a C string into `name`.
+    let fd = unsafe { gen_tempname(name.as_mut_ptr(), 0, Kind::File(0)) };
     if fd < 0 {
         return core::ptr::null_mut();
     }
-    // Return a FILE* (not a raw fd) per POSIX.
-    crate::stdio::fdopen(fd, c"w+".as_ptr().cast::<u8>())
+    // The name, for the stream to remove; without room for it, the file is
+    // removed now, as there would be nothing to remove it by later.
+    // SAFETY: a C string.
+    let held = unsafe { crate::string::strdup(name.as_ptr()) };
+    let f = if held.is_null() {
+        core::ptr::null_mut()
+    } else {
+        // SAFETY: a C string for the mode.
+        unsafe { crate::stdio::fdopen(fd, c"w+b".as_ptr().cast()) }
+    };
+    if f.is_null() {
+        let e = crate::errno::get_errno();
+        crate::file::close(fd);
+        remove_name(name.as_ptr());
+        // SAFETY: strdup's allocation, or NULL.
+        unsafe { crate::malloc::free(held) };
+        crate::errno::set_errno(e);
+        return core::ptr::null_mut();
+    }
+    // SAFETY: a stream just made, and a name `malloc`ed for it.
+    unsafe { crate::stdio::hold_temporary(f, held) };
+    f
+}
+
+/// `tmpfile64`: [`tmpfile`] by glibc's large-file name.
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub extern "C" fn tmpfile64() -> *mut u8 {
+    tmpfile()
 }
 
 // ---------------------------------------------------------------------------
@@ -1551,80 +1538,19 @@ pub extern "C" fn tmpfile() -> *mut u8 {
 
 /// Own archive member — gnulib replaces `mkostemp`. See string.rs's module header.
 mod gnu_mkostemp {
-    /// Create a unique temporary file with additional open flags.
-    ///
-    /// Like `mkstemp` but `flags` can include `O_CLOEXEC`, `O_APPEND`,
-    /// etc.  Currently, the flags are accepted but not enforced (our open
-    /// implementation doesn't support `O_CLOEXEC`).
+    /// `mkostemp(template, flags)`: [`mkstemp`](super::mkstemp) with
+    /// `flags` for the `open` -- `O_APPEND`, `O_CLOEXEC`, `O_SYNC` and the
+    /// rest -- their access mode replaced by `O_RDWR`, as glibc's is; the
+    /// rest are the `open`'s to judge.  (Until 2026-09-30 an access mode was
+    /// or'd into `O_RDWR`, and `O_WRONLY` made an `open` of mode 3.)
     ///
     /// # Safety
     ///
-    /// `template` must be a writable null-terminated string with at least
-    /// 6 trailing 'X' characters.
+    /// `template` must be NULL or a writable C string.
     #[cfg_attr(target_os = "none", unsafe(no_mangle))]
     pub unsafe extern "C" fn mkostemp(template: *mut u8, flags: i32) -> i32 {
-        if template.is_null() {
-            crate::errno::set_errno(crate::errno::EINVAL);
-            return -1;
-        }
-
-        let len = unsafe { crate::string::strlen(template) };
-        if len < 6 {
-            crate::errno::set_errno(crate::errno::EINVAL);
-            return -1;
-        }
-
-        // Verify the last 6 characters are 'X'.
-        let suffix_start = len.wrapping_sub(6);
-        let mut i: usize = 0;
-        while i < 6 {
-            if unsafe { *template.add(suffix_start.wrapping_add(i)) } != b'X' {
-                crate::errno::set_errno(crate::errno::EINVAL);
-                return -1;
-            }
-            i = i.wrapping_add(1);
-        }
-
-        // Try up to 100 unique names.
-        let mut attempt: u32 = 0;
-        while attempt < 100 {
-            // Use getrandom for unpredictable suffix (same rationale as mkstemp).
-            let mut rand_bytes = [0u8; 6];
-            crate::unistd::getrandom(rand_bytes.as_mut_ptr(), 6, 0);
-
-            let mut j: usize = 0;
-            while j < 6 {
-                let rb = rand_bytes.get(j).copied().unwrap_or(0);
-                let idx = rb % 36;
-                let ch = if idx < 10 {
-                    b'0'.wrapping_add(idx)
-                } else {
-                    b'a'.wrapping_add(idx.wrapping_sub(10))
-                };
-                unsafe {
-                    *template.add(suffix_start.wrapping_add(j)) = ch;
-                }
-                j = j.wrapping_add(1);
-            }
-
-            // OR the caller's flags (e.g., O_CLOEXEC, O_APPEND) with the
-            // mandatory O_RDWR | O_CREAT | O_EXCL flags.
-            let open_flags =
-                crate::fcntl::O_RDWR | crate::fcntl::O_CREAT | crate::fcntl::O_EXCL | flags;
-            let fd = crate::file::open(template, open_flags, 0o600);
-            if fd >= 0 {
-                return fd;
-            }
-
-            if crate::errno::get_errno() != crate::errno::EEXIST {
-                return -1;
-            }
-
-            attempt = attempt.wrapping_add(1);
-        }
-
-        crate::errno::set_errno(crate::errno::EEXIST);
-        -1
+        // SAFETY: the caller's contract.
+        unsafe { crate::tempname::make_file(template, 0, flags) }
     }
 }
 pub use gnu_mkostemp::mkostemp;
@@ -1635,23 +1561,18 @@ pub use gnu_mkostemp::mkostemp;
 
 /// Own archive member — gnulib replaces `mkstemps`. See string.rs's module header.
 mod gnu_mkstemps {
-    use super::*;
-
-    /// Create a unique temporary file with a user-specified suffix.
-    ///
-    /// Like `mkstemp`, but the last `suffixlen` characters of `template`
-    /// are preserved as a suffix (e.g., `"/tmp/fileXXXXXX.txt"` with
-    /// `suffixlen=4`).  The 6 'X' characters before the suffix are replaced
-    /// with unique characters.
-    ///
-    /// Returns an open fd on success, -1 on error.
+    /// `mkstemps(template, suffixlen)`: [`mkstemp`](super::mkstemp) with the
+    /// six `X`s before the template's last `suffixlen` bytes, which stay
+    /// (`"/tmp/fileXXXXXX.txt"`, 4).  A negative `suffixlen`, or one that
+    /// leaves no room for six `X`s, is `EINVAL`.
     ///
     /// # Safety
     ///
-    /// `template` must be a writable null-terminated string.
+    /// `template` must be NULL or a writable C string.
     #[cfg_attr(target_os = "none", unsafe(no_mangle))]
     pub unsafe extern "C" fn mkstemps(template: *mut u8, suffixlen: i32) -> i32 {
-        unsafe { mkostemps(template, suffixlen, 0) }
+        // SAFETY: the caller's contract.
+        unsafe { crate::tempname::make_file(template, suffixlen, 0) }
     }
 }
 pub use gnu_mkstemps::mkstemps;
@@ -1662,82 +1583,76 @@ pub use gnu_mkstemps::mkstemps;
 
 /// Own archive member — gnulib replaces `mkostemps`. See string.rs's module header.
 mod gnu_mkostemps {
-    /// Create a unique temporary file with a suffix and open flags.
-    ///
-    /// Combines `mkstemps` (suffix support) with `mkostemp` (additional
-    /// open flags like `O_CLOEXEC`).
-    ///
-    /// Returns an open fd on success, -1 on error.
+    /// `mkostemps(template, suffixlen, flags)`: [`mkstemps`](super::mkstemps)
+    /// with [`mkostemp`](super::mkostemp)'s flags.
     ///
     /// # Safety
     ///
-    /// `template` must be a writable null-terminated string.
+    /// `template` must be NULL or a writable C string.
     #[cfg_attr(target_os = "none", unsafe(no_mangle))]
     pub unsafe extern "C" fn mkostemps(template: *mut u8, suffixlen: i32, flags: i32) -> i32 {
-        if template.is_null() || suffixlen < 0 {
-            crate::errno::set_errno(crate::errno::EINVAL);
-            return -1;
-        }
-
-        let slen = suffixlen as usize;
-        let len = unsafe { crate::string::strlen(template) };
-        // Need at least 6 'X' before the suffix.
-        if len < 6_usize.wrapping_add(slen) {
-            crate::errno::set_errno(crate::errno::EINVAL);
-            return -1;
-        }
-
-        // Check that the 6 chars before the suffix are 'X'.
-        let x_start = len.wrapping_sub(slen).wrapping_sub(6);
-        let mut i: usize = 0;
-        while i < 6 {
-            if unsafe { *template.add(x_start.wrapping_add(i)) } != b'X' {
-                crate::errno::set_errno(crate::errno::EINVAL);
-                return -1;
-            }
-            i = i.wrapping_add(1);
-        }
-
-        // Try up to 100 unique names.
-        let mut attempt: u32 = 0;
-        while attempt < 100 {
-            let mut rand_bytes = [0u8; 6];
-            crate::unistd::getrandom(rand_bytes.as_mut_ptr(), 6, 0);
-
-            let mut j: usize = 0;
-            while j < 6 {
-                // `j < 6 == rand_bytes.len()`, so the index is in bounds.
-                #[allow(clippy::indexing_slicing)]
-                let ch = rand_bytes[j] % 36;
-                let c = if ch < 10 {
-                    b'0'.wrapping_add(ch)
-                } else {
-                    b'a'.wrapping_add(ch.wrapping_sub(10))
-                };
-                unsafe {
-                    *template.add(x_start.wrapping_add(j)) = c;
-                }
-                j = j.wrapping_add(1);
-            }
-
-            let base_flags = crate::fcntl::O_RDWR | crate::fcntl::O_CREAT | crate::fcntl::O_EXCL;
-            let fd = crate::file::open(template, base_flags | flags, 0o600);
-            if fd >= 0 {
-                return fd;
-            }
-
-            if crate::errno::get_errno() != crate::errno::EEXIST {
-                return -1;
-            }
-
-            attempt = attempt.wrapping_add(1);
-        }
-
-        crate::errno::set_errno(crate::errno::EEXIST);
-        -1
+        // SAFETY: the caller's contract.
+        unsafe { crate::tempname::make_file(template, suffixlen, flags) }
     }
 }
 pub use gnu_mkostemps::mkostemps;
+
+// ---------------------------------------------------------------------------
+// The large-file names of the four
+// ---------------------------------------------------------------------------
+
+/// glibc's `mkstemp64`, `mkostemp64`, `mkstemps64` and `mkostemps64` (its
+/// `O_LARGEFILE`, all they add, is 0 on x86_64): an archive member of their
+/// own, over crate::tempname -- see this section's head.
+mod lfs_mkstemp {
+    /// `mkstemp64`: [`mkstemp`](super::mkstemp) by glibc's large-file name.
+    ///
+    /// # Safety
+    ///
+    /// `template` must be NULL or a writable C string.
+    #[cfg_attr(target_os = "none", unsafe(no_mangle))]
+    pub unsafe extern "C" fn mkstemp64(template: *mut u8) -> i32 {
+        // SAFETY: the caller's contract.
+        unsafe { crate::tempname::make_file(template, 0, 0) }
+    }
+
+    /// `mkostemp64`: [`mkostemp`](super::mkostemp) by glibc's large-file
+    /// name.
+    ///
+    /// # Safety
+    ///
+    /// `template` must be NULL or a writable C string.
+    #[cfg_attr(target_os = "none", unsafe(no_mangle))]
+    pub unsafe extern "C" fn mkostemp64(template: *mut u8, flags: i32) -> i32 {
+        // SAFETY: the caller's contract.
+        unsafe { crate::tempname::make_file(template, 0, flags) }
+    }
+
+    /// `mkstemps64`: [`mkstemps`](super::mkstemps) by glibc's large-file
+    /// name.
+    ///
+    /// # Safety
+    ///
+    /// `template` must be NULL or a writable C string.
+    #[cfg_attr(target_os = "none", unsafe(no_mangle))]
+    pub unsafe extern "C" fn mkstemps64(template: *mut u8, suffixlen: i32) -> i32 {
+        // SAFETY: the caller's contract.
+        unsafe { crate::tempname::make_file(template, suffixlen, 0) }
+    }
+
+    /// `mkostemps64`: [`mkostemps`](super::mkostemps) by glibc's large-file
+    /// name.
+    ///
+    /// # Safety
+    ///
+    /// `template` must be NULL or a writable C string.
+    #[cfg_attr(target_os = "none", unsafe(no_mangle))]
+    pub unsafe extern "C" fn mkostemps64(template: *mut u8, suffixlen: i32, flags: i32) -> i32 {
+        // SAFETY: the caller's contract.
+        unsafe { crate::tempname::make_file(template, suffixlen, flags) }
+    }
+}
+pub use lfs_mkstemp::{mkostemp64, mkostemps64, mkstemp64, mkstemps64};
 
 // ---------------------------------------------------------------------------
 // mkdtemp — create a unique temporary directory
@@ -1745,79 +1660,24 @@ pub use gnu_mkostemps::mkostemps;
 
 /// Own archive member — gnulib replaces `mkdtemp`. See string.rs's module header.
 mod gnu_mkdtemp {
-    /// Create a unique temporary directory.
-    ///
-    /// Modifies `template` in-place (replacing the trailing 6 'X' chars
-    /// with a unique suffix) and creates the directory with mode 0700.
-    /// Returns `template` on success, or null on error.
+    /// `mkdtemp(template)`: a new directory, named as
+    /// [`mkstemp`](super::mkstemp) names a file, mode 0700 before the
+    /// umask.  `template`, or NULL with `errno` as `mkstemp`'s.
     ///
     /// # Safety
     ///
-    /// `template` must be a writable null-terminated string with at least
-    /// 6 trailing 'X' characters.
+    /// `template` must be NULL or a writable C string.
     #[cfg_attr(target_os = "none", unsafe(no_mangle))]
     pub unsafe extern "C" fn mkdtemp(template: *mut u8) -> *mut u8 {
         if template.is_null() {
             crate::errno::set_errno(crate::errno::EINVAL);
             return core::ptr::null_mut();
         }
-
-        let len = unsafe { crate::string::strlen(template) };
-        if len < 6 {
-            crate::errno::set_errno(crate::errno::EINVAL);
+        // SAFETY: a writable C string, the caller's.
+        if unsafe { crate::tempname::gen_tempname(template, 0, crate::tempname::Kind::Dir) } < 0 {
             return core::ptr::null_mut();
         }
-
-        // Verify the last 6 characters are 'X'.
-        let suffix_start = len.wrapping_sub(6);
-        let mut i: usize = 0;
-        while i < 6 {
-            if unsafe { *template.add(suffix_start.wrapping_add(i)) } != b'X' {
-                crate::errno::set_errno(crate::errno::EINVAL);
-                return core::ptr::null_mut();
-            }
-            i = i.wrapping_add(1);
-        }
-
-        // Try up to 100 unique names.
-        let mut attempt: u32 = 0;
-        while attempt < 100 {
-            // Generate a cryptographically random suffix via RDRAND-backed getrandom.
-            let mut rand_bytes = [0u8; 6];
-            crate::unistd::getrandom(rand_bytes.as_mut_ptr(), 6, 0);
-
-            let mut j: usize = 0;
-            while j < 6 {
-                let rb = rand_bytes.get(j).copied().unwrap_or(0);
-                let idx = rb % 36;
-                let ch = if idx < 10 {
-                    b'0'.wrapping_add(idx)
-                } else {
-                    b'a'.wrapping_add(idx.wrapping_sub(10))
-                };
-                // SAFETY: suffix_start + j < len, template is writable.
-                unsafe {
-                    *template.add(suffix_start.wrapping_add(j)) = ch;
-                }
-                j = j.wrapping_add(1);
-            }
-
-            // Try to create the directory.
-            let ret = crate::file::mkdir(template, 0o700);
-            if ret == 0 {
-                return template;
-            }
-
-            // If EEXIST, try again.
-            if crate::errno::get_errno() != crate::errno::EEXIST {
-                return core::ptr::null_mut();
-            }
-
-            attempt = attempt.wrapping_add(1);
-        }
-
-        crate::errno::set_errno(crate::errno::EEXIST);
-        core::ptr::null_mut()
+        template
     }
 }
 pub use gnu_mkdtemp::mkdtemp;
@@ -1914,218 +1774,530 @@ fn char_to_digit(c: u8, base: i32) -> i32 {
 }
 
 // ---------------------------------------------------------------------------
-// drand48 / lrand48 / mrand48 family — 48-bit LCG PRNG (POSIX)
+// ecvt, fcvt, gcvt
 // ---------------------------------------------------------------------------
 //
-// Uses the standard POSIX 48-bit linear congruential generator:
-//   X_{n+1} = (a * X_n + c) mod 2^48
-// where a = 0x5DEECE66D, c = 0xB.
+// The legacy digit-string conversions (removed from POSIX in 2008; musl's
+// <stdlib.h> declares the three, glibc also has the `_r` forms), with
+// glibc's conventions -- how many digits, where `decpt` points, what zero,
+// the infinities and a rounding carry look like -- and exact digits: the
+// value's own, correctly rounded, which is what `printf` gives. glibc's
+// `ecvt` scales the value into [1, 10) by repeated multiplication by ten, in
+// floating point, and gets the last digits wrong about one call in six;
+// that is not copied (design-decisions §1135).
 
-/// 48-bit PRNG state.
-///
-/// One sequence per process, by specification — `drand48_r` and friends are the
-/// reentrant forms for a caller that wants its own. So, as with [`RAND_STATE`],
-/// serialising this is the caller's obligation; `tests::lock_rand48_for_test`
-/// is how this crate's own tests meet it.
-static mut RAND48_STATE: u64 = 0x330E_ABCD_1234_u64;
+/// The most digits `ecvt` produces and the most fraction digits `fcvt` does,
+/// glibc's `NDIGIT_MAX` for a double: 17, enough to tell every double apart.
+const NDIGIT_MAX: i32 = 17;
+/// glibc's static buffer sizes: `NDIGIT_MAX + 3`, and for `fcvt` room for
+/// `DBL_MAX`'s 309 integer digits as well.
+const ECVT_BUF: usize = 20;
+/// See [`ECVT_BUF`].
+const FCVT_BUF: usize = 308 + 20;
 
-/// LCG multiplier (POSIX standard value).
-const RAND48_A: u64 = 0x0005_DEEC_E66D;
-/// LCG addend (POSIX standard value).
-const RAND48_C: u64 = 0xB;
-/// 48-bit mask.
-const RAND48_MASK: u64 = (1_u64 << 48) - 1;
-
-/// Advance the 48-bit LCG state.
-#[inline]
-fn rand48_step() -> u64 {
-    // SAFETY: `addr_of_mut!` forms no reference to the static. The
-    // read-modify-write is deliberately non-atomic: POSIX assigns the caller
-    // responsibility for serialising the `drand48` family, so adding a lock
-    // here would slow every caller to fix a problem only unserialised ones
-    // have. See `RAND48_STATE`.
-    let state = unsafe { core::ptr::addr_of_mut!(RAND48_STATE).read() };
-    let next = (state.wrapping_mul(RAND48_A).wrapping_add(RAND48_C)) & RAND48_MASK;
-    unsafe {
-        core::ptr::addr_of_mut!(RAND48_STATE).write(next);
-    }
-    next
+/// Append `b` to `out` at `*len`; `None` when it does not fit.
+fn put_digit(out: &mut [u8], len: &mut usize, b: u8) -> Option<()> {
+    *out.get_mut(*len)? = b;
+    *len = len.checked_add(1)?;
+    Some(())
 }
 
-/// Return a non-negative `f64` in [0.0, 1.0).
-///
-/// Uses the full 48-bit state scaled to a double.
-#[cfg_attr(target_os = "none", unsafe(no_mangle))]
-#[allow(clippy::arithmetic_side_effects, clippy::cast_precision_loss)]
-pub extern "C" fn drand48() -> f64 {
-    let state = rand48_step();
-    // 2^48 = 281474976710656.0; 48-bit value fits in f64's 52-bit mantissa.
-    state as f64 / 281_474_976_710_656.0
+/// A value as the digit routines take it: a `double`'s or a `long double`'s
+/// class and sign, and a finite one's magnitude, exactly expanded.
+struct Cvt<D> {
+    nan: bool,
+    infinite: bool,
+    negative: bool,
+    zero: bool,
+    dec: crate::decfloat::Decimal<D>,
 }
 
-/// Return a non-negative `i64` in [0, 2^31).
-#[cfg_attr(target_os = "none", unsafe(no_mangle))]
-pub extern "C" fn lrand48() -> i64 {
-    let state = rand48_step();
-    (state >> 17) as i64 // Upper 31 bits.
-}
-
-/// Return a signed `i64` in [-2^31, 2^31).
-#[cfg_attr(target_os = "none", unsafe(no_mangle))]
-pub extern "C" fn mrand48() -> i64 {
-    let state = rand48_step();
-    // Interpret upper 32 bits as signed.
-    i64::from((state >> 16) as i32)
-}
-
-/// Seed the 48-bit PRNG with a 32-bit value.
-///
-/// Sets the upper 32 bits of state; lower 16 bits are set to 0x330E
-/// (POSIX default).
-#[cfg_attr(target_os = "none", unsafe(no_mangle))]
-pub extern "C" fn srand48(seedval: i64) {
-    let hi = (seedval as u64) << 16;
-    let state = (hi | 0x330E) & RAND48_MASK;
-    unsafe {
-        core::ptr::addr_of_mut!(RAND48_STATE).write(state);
+impl Cvt<[u8; crate::decfloat::MAX_DIGITS]> {
+    fn of_f64(value: f64) -> Self {
+        Self {
+            nan: value.is_nan(),
+            infinite: value.is_infinite(),
+            negative: value.is_sign_negative(),
+            zero: value == 0.0,
+            dec: crate::decfloat::Decimal::new(if value.is_finite() { value.abs() } else { 0.0 }),
+        }
     }
 }
 
-/// Seed the 48-bit PRNG with a full 48-bit value.
+impl Cvt<crate::decfloat::DigitBuf> {
+    /// A `long double`: `None` when a value far outside a `double`'s range
+    /// cannot get the memory its expansion needs.
+    fn of_ld(l: crate::x87::LongDouble) -> Option<Self> {
+        let finite = l.is_finite();
+        let dec = if finite {
+            crate::printf::long_expansion(l)?
+        } else {
+            crate::decfloat::Decimal::of_parts(0, 0)?
+        };
+        Some(Self {
+            nan: l.is_nan(),
+            infinite: l.is_infinite(),
+            negative: l.is_sign_negative(),
+            zero: finite && l.is_zero(),
+            dec,
+        })
+    }
+}
+
+/// What `printf("%.*f")` writes for a non-finite value: `inf`, `-inf`,
+/// `nan` or `-nan` -- which `fcvt` hands back as its "digits", with
+/// `decpt` 0 and `sign` 0, as glibc does.
+fn non_finite_text(nan: bool, negative: bool) -> &'static [u8] {
+    match (nan, negative) {
+        (true, false) => b"nan",
+        (true, true) => b"-nan",
+        (false, false) => b"inf",
+        (false, true) => b"-inf",
+    }
+}
+
+/// `fcvt_r`'s digits for `value` into `out` (unterminated): `(len, decpt,
+/// sign)`, or `None` when `out` is too small.
+fn fcvt_digits(value: f64, ndigit: i32, out: &mut [u8]) -> Option<(usize, i32, bool)> {
+    fcvt_parts(Cvt::of_f64(value), ndigit, NDIGIT_MAX, out)
+}
+
+/// [`fcvt_digits`], for either precision: at most `max` fraction digits.
 ///
-/// `seed16v` points to an array of 3 `u16` values.
-/// Returns a pointer to the previous seed (static storage).
+/// glibc's recipe, computed exactly: `printf("%.*f", min(ndigit, max))` of
+/// `|value|`; the integer digits, then the fraction's, with the point
+/// dropped; `decpt` the number of integer digits -- and a value below 1 that
+/// is not zero has its `0.` and the zeros after it stripped, each lowering
+/// `decpt`, so 0.00123 is "123" with `decpt` -2. A negative `ndigit` rounds
+/// to the left of the point, to `10^-ndigit` -- but, glibc's loop, never so
+/// far that the value would drop below 1: 5 with `ndigit` -2 stays "5".
+fn fcvt_parts<D: AsRef<[u8]> + AsMut<[u8]>>(
+    v: Cvt<D>,
+    ndigit: i32,
+    max: i32,
+    out: &mut [u8],
+) -> Option<(usize, i32, bool)> {
+    let mut len = 0usize;
+    if v.nan || v.infinite {
+        for &b in non_finite_text(v.nan, v.negative) {
+            put_digit(out, &mut len, b)?;
+        }
+        return Some((len, 0, false));
+    }
+    let sign = v.negative;
+    let mut dec = v.dec;
+    // The place to round at, and the fraction digits written.
+    let precision = if ndigit < 0 {
+        // Integer digits, 0 below 1; the scaling stops at one.
+        let int_digits = if dec.is_zero() { 0 } else { dec.decpt().max(0) };
+        let k = if int_digits >= 2 {
+            ndigit.saturating_neg().min(int_digits.saturating_sub(1))
+        } else {
+            0
+        };
+        dec.round_to_place_in(
+            k.saturating_neg(),
+            crate::decfloat::Rounding::current(),
+            sign,
+        );
+        0
+    } else {
+        let p = ndigit.min(max);
+        dec.round_to_place_in(p, crate::decfloat::Rounding::current(), sign);
+        p
+    };
+    let decpt = dec.decpt();
+    // The integer digits `%f` writes: at least one.
+    let int_len = if dec.is_zero() || decpt <= 0 {
+        1
+    } else {
+        decpt
+    };
+    let strip = precision > 0 && !v.zero && (dec.is_zero() || decpt <= 0);
+    if !strip {
+        for i in 0..int_len {
+            let d = if dec.is_zero() || decpt <= 0 {
+                b'0'
+            } else {
+                dec.digit(i)
+            };
+            put_digit(out, &mut len, d)?;
+        }
+        for j in 0..precision {
+            put_digit(out, &mut len, dec.digit(decpt.saturating_add(j)))?;
+        }
+        return Some((len, int_len, sign));
+    }
+    // A nonzero value below 1: the `0.` goes, and each zero after it.
+    let mut dp = 0i32;
+    let mut leading = true;
+    for j in 0..precision {
+        let d = if dec.is_zero() {
+            b'0'
+        } else {
+            dec.digit(decpt.saturating_add(j))
+        };
+        if leading && d == b'0' {
+            dp = dp.saturating_sub(1);
+            continue;
+        }
+        leading = false;
+        put_digit(out, &mut len, d)?;
+    }
+    Some((len, dp, sign))
+}
+
+/// `ecvt_r`'s digits for `value` into `out` (unterminated): `(len, decpt,
+/// sign)`, or `None` when `out` is too small.
+fn ecvt_digits(value: f64, ndigit: i32, out: &mut [u8]) -> Option<(usize, i32, bool)> {
+    ecvt_parts(Cvt::of_f64(value), ndigit, NDIGIT_MAX, out)
+}
+
+/// [`ecvt_digits`], for either precision: at most `max` digits.
+///
+/// `min(ndigit, max)` significant digits, correctly rounded, `decpt` where
+/// the point goes. glibc's conventions: an `ndigit` of 0 or less is no
+/// digits, `decpt` still the value's; zero is that many zeros with `decpt`
+/// 1; the infinities and NaNs are `fcvt`'s text; and a rounding that carries
+/// into a new leading digit is written with one digit more -- 9.9999 to one
+/// digit is "10", `decpt` 2 -- as glibc's scaled `fcvt` writes it.
+fn ecvt_parts<D: AsRef<[u8]> + AsMut<[u8]>>(
+    v: Cvt<D>,
+    ndigit: i32,
+    max: i32,
+    out: &mut [u8],
+) -> Option<(usize, i32, bool)> {
+    let finite = !v.nan && !v.infinite;
+    if ndigit <= 0 {
+        // No digits -- but `decpt` still says where the point is, as glibc's
+        // adds the value's exponent after its early branch: 1 for zero and
+        // the non-finite, else the value's own.
+        let decpt = if finite && !v.zero { v.dec.decpt() } else { 1 };
+        return Some((0, decpt, finite && v.negative));
+    }
+    if !finite {
+        return fcvt_parts(v, 0, max, out);
+    }
+    let n = ndigit.min(max);
+    let mut len = 0usize;
+    if v.zero {
+        for _ in 0..n {
+            put_digit(out, &mut len, b'0')?;
+        }
+        return Some((len, 1, v.negative));
+    }
+    let negative = v.negative;
+    let mut dec = v.dec;
+    let before = dec.decpt();
+    dec.round_to_significant_in(n, crate::decfloat::Rounding::current(), negative);
+    let carried = dec.decpt() > before;
+    let digits = if carried { n.saturating_add(1) } else { n };
+    for i in 0..digits {
+        put_digit(out, &mut len, dec.digit(i))?;
+    }
+    Some((len, dec.decpt(), negative))
+}
+
+/// Write `(digits, decpt, sign)` out through the C pointers; `buf` gets the
+/// terminator after `len`. `-1` for a result that did not fit.
 ///
 /// # Safety
 ///
-/// `seed16v` must point to at least 3 `u16` values.
-#[cfg_attr(target_os = "none", unsafe(no_mangle))]
-pub extern "C" fn seed48(seed16v: *const u16) -> *const u16 {
-    /// Storage for the value `seed48` hands back. Same hazard as [`L64A_BUF`]:
-    /// the caller gets a pointer *into* it, so it is still shared while being
-    /// read. It rides on `tests::lock_rand48_for_test` rather than a lock of
-    /// its own, because `seed48` writes this and `RAND48_STATE` in one call —
-    /// two locks could not make that pair atomic.
-    static mut OLD_SEED: [u16; 3] = [0; 3];
-
-    // Use addr_of_mut to avoid creating shared references to mutable
-    // statics (Rust 2024).  addr_of_mut! is safe; only the dereference
-    // is unsafe.
-    let old_seed_ptr = core::ptr::addr_of_mut!(OLD_SEED);
-
-    if seed16v.is_null() {
-        return old_seed_ptr.cast::<u16>();
+/// `decpt` and `sign` are NULL or valid `int *`s; `buf` holds `buflen` bytes.
+unsafe fn cvt_finish(
+    r: Option<(usize, i32, bool)>,
+    buf: *mut u8,
+    buflen: usize,
+    decpt: *mut i32,
+    sign: *mut i32,
+) -> i32 {
+    let Some((len, dp, sg)) = r else {
+        return -1;
+    };
+    if len >= buflen {
+        return -1;
     }
-
-    // Save old state.
-    let old = unsafe { core::ptr::addr_of_mut!(RAND48_STATE).read() };
+    // SAFETY: this function's contract; `len < buflen`.
     unsafe {
-        (*old_seed_ptr)[0] = (old & 0xFFFF) as u16;
-        (*old_seed_ptr)[1] = ((old >> 16) & 0xFFFF) as u16;
-        (*old_seed_ptr)[2] = ((old >> 32) & 0xFFFF) as u16;
+        buf.add(len).write(0);
+        if let Some(d) = decpt.as_mut() {
+            *d = dp;
+        }
+        if let Some(s) = sign.as_mut() {
+            *s = i32::from(sg);
+        }
     }
-
-    // Set new state from seed16v[0..3].
-    // SAFETY: seed16v verified non-null, caller guarantees 3 elements.
-    let s0 = u64::from(unsafe { *seed16v });
-    let s1 = u64::from(unsafe { *seed16v.add(1) });
-    let s2 = u64::from(unsafe { *seed16v.add(2) });
-    let state = (s2 << 32) | (s1 << 16) | s0;
-    unsafe {
-        core::ptr::addr_of_mut!(RAND48_STATE).write(state & RAND48_MASK);
-    }
-
-    old_seed_ptr.cast::<u16>()
+    0
 }
 
-/// Same as `lrand48` but uses caller-provided state.
+/// [`fcvt`] into the caller's buffer (GNU): 0, or -1 when it does not fit,
+/// or `EINVAL` for a NULL `buf`.
 ///
 /// # Safety
 ///
-/// `xsubi` must point to an array of 3 `u16` values that the
-/// function will read and update.
+/// `buf` is NULL or holds `len` bytes; `decpt` and `sign` valid `int *`s.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
-#[allow(clippy::arithmetic_side_effects)]
-pub extern "C" fn nrand48(xsubi: *mut u16) -> i64 {
-    if xsubi.is_null() {
-        return 0;
+pub unsafe extern "C" fn fcvt_r(
+    value: f64,
+    ndigit: i32,
+    decpt: *mut i32,
+    sign: *mut i32,
+    buf: *mut u8,
+    len: usize,
+) -> i32 {
+    if buf.is_null() {
+        crate::errno::set_errno(crate::errno::EINVAL);
+        return -1;
     }
-
-    // Read state from xsubi.
-    let s0 = u64::from(unsafe { *xsubi });
-    let s1 = u64::from(unsafe { *xsubi.add(1) });
-    let s2 = u64::from(unsafe { *xsubi.add(2) });
-    let state = (s2 << 32) | (s1 << 16) | s0;
-
-    // Step.
-    let next = (state.wrapping_mul(RAND48_A).wrapping_add(RAND48_C)) & RAND48_MASK;
-
-    // Write back.
-    unsafe {
-        *xsubi = (next & 0xFFFF) as u16;
-        *xsubi.add(1) = ((next >> 16) & 0xFFFF) as u16;
-        *xsubi.add(2) = ((next >> 32) & 0xFFFF) as u16;
-    }
-
-    (next >> 17) as i64
+    // SAFETY: `len` bytes at `buf`, the caller's.
+    let out = unsafe { core::slice::from_raw_parts_mut(buf, len) };
+    let r = fcvt_digits(value, ndigit, out);
+    // SAFETY: this function's contract.
+    unsafe { cvt_finish(r, buf, len, decpt, sign) }
 }
 
-/// Same as `drand48` but uses caller-provided state.
+/// [`ecvt`] into the caller's buffer (GNU); as [`fcvt_r`].
 ///
 /// # Safety
 ///
-/// `xsubi` must point to an array of 3 `u16` values.
+/// As for [`fcvt_r`].
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
-#[allow(clippy::arithmetic_side_effects, clippy::cast_precision_loss)]
-pub extern "C" fn erand48(xsubi: *mut u16) -> f64 {
-    if xsubi.is_null() {
-        return 0.0;
+pub unsafe extern "C" fn ecvt_r(
+    value: f64,
+    ndigit: i32,
+    decpt: *mut i32,
+    sign: *mut i32,
+    buf: *mut u8,
+    len: usize,
+) -> i32 {
+    if buf.is_null() {
+        crate::errno::set_errno(crate::errno::EINVAL);
+        return -1;
     }
-
-    let s0 = u64::from(unsafe { *xsubi });
-    let s1 = u64::from(unsafe { *xsubi.add(1) });
-    let s2 = u64::from(unsafe { *xsubi.add(2) });
-    let state = (s2 << 32) | (s1 << 16) | s0;
-
-    let next = (state.wrapping_mul(RAND48_A).wrapping_add(RAND48_C)) & RAND48_MASK;
-
-    unsafe {
-        *xsubi = (next & 0xFFFF) as u16;
-        *xsubi.add(1) = ((next >> 16) & 0xFFFF) as u16;
-        *xsubi.add(2) = ((next >> 32) & 0xFFFF) as u16;
-    }
-
-    // 48-bit value fits in f64's 52-bit mantissa — no precision loss.
-    next as f64 / 281_474_976_710_656.0
+    // SAFETY: `len` bytes at `buf`, the caller's.
+    let out = unsafe { core::slice::from_raw_parts_mut(buf, len) };
+    let r = ecvt_digits(value, ndigit, out);
+    // SAFETY: this function's contract.
+    unsafe { cvt_finish(r, buf, len, decpt, sign) }
 }
 
-/// Same as `mrand48` but uses caller-provided state.
+/// `value`'s first `ndigit` significant digits (at most 17), as a string in
+/// storage the next call reuses, with the point's position in `*decpt` and
+/// the sign in `*sign`. See [`ecvt_digits`] for the conventions.
 ///
 /// # Safety
 ///
-/// `xsubi` must point to an array of 3 `u16` values.
+/// `decpt` and `sign` are valid `int *`s. Not thread-safe (one buffer), as
+/// in every C library.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
-#[allow(clippy::arithmetic_side_effects)]
-pub extern "C" fn jrand48(xsubi: *mut u16) -> i64 {
-    if xsubi.is_null() {
-        return 0;
-    }
-
-    let s0 = u64::from(unsafe { *xsubi });
-    let s1 = u64::from(unsafe { *xsubi.add(1) });
-    let s2 = u64::from(unsafe { *xsubi.add(2) });
-    let state = (s2 << 32) | (s1 << 16) | s0;
-
-    let next = (state.wrapping_mul(RAND48_A).wrapping_add(RAND48_C)) & RAND48_MASK;
-
+pub unsafe extern "C" fn ecvt(value: f64, ndigit: i32, decpt: *mut i32, sign: *mut i32) -> *mut u8 {
+    static mut BUF: [u8; ECVT_BUF] = [0; ECVT_BUF];
+    let buf = core::ptr::addr_of_mut!(BUF).cast::<u8>();
+    // SAFETY: the static buffer's own size; the caller's pointers. A result
+    // always fits: 18 digits, a terminator.
     unsafe {
-        *xsubi = (next & 0xFFFF) as u16;
-        *xsubi.add(1) = ((next >> 16) & 0xFFFF) as u16;
-        *xsubi.add(2) = ((next >> 32) & 0xFFFF) as u16;
+        let _ = ecvt_r(value, ndigit, decpt, sign, buf, ECVT_BUF);
+    }
+    buf
+}
+
+/// `value` with `ndigit` fraction digits (at most 17; a negative `ndigit`
+/// rounds left of the point), as a string of digits without the point, in
+/// storage the next call reuses. See [`fcvt_digits`] for the conventions.
+///
+/// # Safety
+///
+/// As for [`ecvt`].
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub unsafe extern "C" fn fcvt(value: f64, ndigit: i32, decpt: *mut i32, sign: *mut i32) -> *mut u8 {
+    static mut BUF: [u8; FCVT_BUF] = [0; FCVT_BUF];
+    let buf = core::ptr::addr_of_mut!(BUF).cast::<u8>();
+    // SAFETY: as in `ecvt`; `DBL_MAX` with 17 fraction digits fits.
+    unsafe {
+        let _ = fcvt_r(value, ndigit, decpt, sign, buf, FCVT_BUF);
+    }
+    buf
+}
+
+/// `sprintf(buf, "%.*g", min(ndigit, 17), value)`: glibc's `gcvt`.
+///
+/// # Safety
+///
+/// `buf` has room for the result: 25 bytes always do.
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub unsafe extern "C" fn gcvt(value: f64, ndigit: i32, buf: *mut u8) -> *mut u8 {
+    let p = usize::try_from(ndigit.clamp(0, NDIGIT_MAX)).unwrap_or(0);
+    // SAFETY: this function's contract.
+    unsafe { crate::printf::format_g_into(buf, value, p) };
+    buf
+}
+
+// ---------------------------------------------------------------------------
+// qecvt, qfcvt, qgcvt: the same, for a long double
+// ---------------------------------------------------------------------------
+//
+// glibc's `q` forms (<stdlib.h>, `__USE_MISC`): the conventions above with
+// glibc's limit for a `long double`, 21 digits, and exact digits here too --
+// glibc's scale the value by repeated multiplication by ten in `long double`
+// arithmetic and get the last digit wrong some of the time
+// (`posix/tools/oracle/qcvt_harness.py` counts 156 of 2,160 calls;
+// design-decisions §1135). A `long double` reaches each through
+// `ld_abi.rs`'s thunk, by pointer.
+
+/// glibc's `NDIGIT_MAX` for a `long double`.
+const QNDIGIT_MAX: i32 = 21;
+/// glibc's `qecvt` buffer: `NDIGIT_MAX + 12`.
+const QECVT_BUF: usize = 33;
+/// glibc's `qfcvt` buffer: `LDBL_MAX_10_EXP` more, for `LDBL_MAX`'s 4,933
+/// integer digits.
+const QFCVT_BUF: usize = 4932 + 33;
+
+mod q_forms {
+    use super::{Cvt, QECVT_BUF, QFCVT_BUF, QNDIGIT_MAX, cvt_finish, ecvt_parts, fcvt_parts};
+    use crate::x87::LongDouble;
+
+    /// The `_r` forms' shared body.
+    ///
+    /// # Safety
+    ///
+    /// `value` is a readable `long double`; `buf` NULL or `len` bytes;
+    /// `decpt` and `sign` NULL or valid.
+    unsafe fn q_r(
+        ecvt: bool,
+        value: *const LongDouble,
+        ndigit: i32,
+        decpt: *mut i32,
+        sign: *mut i32,
+        buf: *mut u8,
+        len: usize,
+    ) -> i32 {
+        if buf.is_null() {
+            crate::errno::set_errno(crate::errno::EINVAL);
+            return -1;
+        }
+        // SAFETY: the thunk's pointer to the caller's argument.
+        let Some(v) = Cvt::of_ld(unsafe { value.read() }) else {
+            crate::errno::set_errno(crate::errno::ENOMEM);
+            return -1;
+        };
+        // SAFETY: `len` bytes at `buf`, the caller's.
+        let out = unsafe { core::slice::from_raw_parts_mut(buf, len) };
+        let r = if ecvt {
+            ecvt_parts(v, ndigit, QNDIGIT_MAX, out)
+        } else {
+            fcvt_parts(v, ndigit, QNDIGIT_MAX, out)
+        };
+        // SAFETY: this function's contract.
+        unsafe { cvt_finish(r, buf, len, decpt, sign) }
     }
 
-    i64::from((next >> 16) as i32)
+    /// `qecvt_r` (glibc): [`ecvt_r`](super::ecvt_r) of a `long double`, at
+    /// most 21 digits.
+    ///
+    /// # Safety
+    ///
+    /// As `ecvt_r`, and `value` a readable `long double`.
+    #[cfg_attr(target_os = "none", unsafe(no_mangle))]
+    pub unsafe extern "C" fn __slate_ld_qecvt_r(
+        value: *const LongDouble,
+        ndigit: i32,
+        decpt: *mut i32,
+        sign: *mut i32,
+        buf: *mut u8,
+        len: usize,
+    ) -> i32 {
+        // SAFETY: this function's contract.
+        unsafe { q_r(true, value, ndigit, decpt, sign, buf, len) }
+    }
+    crate::ld_c!(i_lipppn "qecvt_r" => __slate_ld_qecvt_r);
+
+    /// `qfcvt_r` (glibc): [`fcvt_r`](super::fcvt_r) of a `long double`, at
+    /// most 21 fraction digits.
+    ///
+    /// # Safety
+    ///
+    /// As `fcvt_r`, and `value` a readable `long double`.
+    #[cfg_attr(target_os = "none", unsafe(no_mangle))]
+    pub unsafe extern "C" fn __slate_ld_qfcvt_r(
+        value: *const LongDouble,
+        ndigit: i32,
+        decpt: *mut i32,
+        sign: *mut i32,
+        buf: *mut u8,
+        len: usize,
+    ) -> i32 {
+        // SAFETY: this function's contract.
+        unsafe { q_r(false, value, ndigit, decpt, sign, buf, len) }
+    }
+    crate::ld_c!(i_lipppn "qfcvt_r" => __slate_ld_qfcvt_r);
+
+    /// `qecvt` (glibc): [`qecvt_r`](__slate_ld_qecvt_r) into storage the
+    /// next call reuses.
+    ///
+    /// # Safety
+    ///
+    /// `value` is a readable `long double`; `decpt` and `sign` valid. Not
+    /// thread-safe (one buffer), as in every C library.
+    #[cfg_attr(target_os = "none", unsafe(no_mangle))]
+    pub unsafe extern "C" fn __slate_ld_qecvt(
+        value: *const LongDouble,
+        ndigit: i32,
+        decpt: *mut i32,
+        sign: *mut i32,
+    ) -> *mut u8 {
+        static mut BUF: [u8; QECVT_BUF] = [0; QECVT_BUF];
+        let buf = core::ptr::addr_of_mut!(BUF).cast::<u8>();
+        // SAFETY: the static buffer's own size, which every result fits: 22
+        // digits and a terminator. A value whose expansion finds no memory
+        // leaves the buffer as it was, as nothing better can be said here.
+        let _ = unsafe { q_r(true, value, ndigit, decpt, sign, buf, QECVT_BUF) };
+        buf
+    }
+    crate::ld_c!(p_lipp "qecvt" => __slate_ld_qecvt);
+
+    /// `qfcvt` (glibc): [`qfcvt_r`](__slate_ld_qfcvt_r) into storage the
+    /// next call reuses.
+    ///
+    /// # Safety
+    ///
+    /// As [`__slate_ld_qecvt`].
+    #[cfg_attr(target_os = "none", unsafe(no_mangle))]
+    pub unsafe extern "C" fn __slate_ld_qfcvt(
+        value: *const LongDouble,
+        ndigit: i32,
+        decpt: *mut i32,
+        sign: *mut i32,
+    ) -> *mut u8 {
+        static mut BUF: [u8; QFCVT_BUF] = [0; QFCVT_BUF];
+        let buf = core::ptr::addr_of_mut!(BUF).cast::<u8>();
+        // SAFETY: as in qecvt; `LDBL_MAX` with 21 fraction digits fits.
+        let _ = unsafe { q_r(false, value, ndigit, decpt, sign, buf, QFCVT_BUF) };
+        buf
+    }
+    crate::ld_c!(p_lipp "qfcvt" => __slate_ld_qfcvt);
+
+    /// `qgcvt` (glibc): `sprintf(buf, "%.*Lg", min(ndigit, 21), value)`.
+    ///
+    /// # Safety
+    ///
+    /// `value` is a readable `long double`; `buf` has room for the result:
+    /// 32 bytes always do.
+    #[cfg_attr(target_os = "none", unsafe(no_mangle))]
+    pub unsafe extern "C" fn __slate_ld_qgcvt(
+        value: *const LongDouble,
+        ndigit: i32,
+        buf: *mut u8,
+    ) -> *mut u8 {
+        let p = usize::try_from(ndigit.clamp(0, QNDIGIT_MAX)).unwrap_or(0);
+        // SAFETY: this function's contract.
+        unsafe { crate::printf::format_lg_into(buf, value.read(), p) };
+        buf
+    }
+    crate::ld_c!(p_lip "qgcvt" => __slate_ld_qgcvt);
 }
+pub use q_forms::{
+    __slate_ld_qecvt, __slate_ld_qecvt_r, __slate_ld_qfcvt, __slate_ld_qfcvt_r, __slate_ld_qgcvt,
+};
 
 // ---------------------------------------------------------------------------
 // getsubopt — parse suboption strings
@@ -2381,47 +2553,426 @@ pub extern "C" fn l64a(n: i64) -> *const u8 {
 mod tests {
     use super::*;
 
+    // -- ecvt / fcvt / gcvt against glibc 2.39 --
+
+    /// glibc's answers (`posix/tools/oracle/cvt_harness.py`): one call a
+    /// line, `<fn> <bits> <ndigit> = <digits>|<decpt>|<sign> <exact>` for
+    /// ecvt and fcvt, `gcvt <bits> <ndigit> = <text>`.
+    const CVT_ORACLE: &str = include_str!("cvt_oracle.txt");
+
+    fn cvt(f: &str, x: f64, n: i32) -> (String, i32, i32) {
+        let (mut dp, mut sg) = (i32::MIN, i32::MIN);
+        // SAFETY: valid out-pointers; the result is the function's buffer,
+        // NUL-terminated.
+        let s = unsafe {
+            let r = if f == "ecvt" {
+                ecvt(x, n, &raw mut dp, &raw mut sg)
+            } else {
+                fcvt(x, n, &raw mut dp, &raw mut sg)
+            };
+            core::ffi::CStr::from_ptr(r.cast())
+                .to_string_lossy()
+                .into_owned()
+        };
+        (s, dp, sg)
+    }
+
+    /// What `ecvt` should answer when glibc's own digits are wrong: the
+    /// value's first `n` digits, correctly rounded, from Rust's formatter --
+    /// an implementation independent of this library's -- written with
+    /// glibc's conventions (one digit more when rounding carried).
+    fn exact_ecvt(x: f64, n: i32) -> (String, i32) {
+        // The value's own decpt, from its exact expansion: 800 digits never
+        // round a double, which has at most 767 significant ones.
+        let own = if x.is_finite() && x != 0.0 {
+            let t = format!("{:.800e}", x.abs());
+            t.split_once('e').unwrap().1.parse::<i32>().unwrap() + 1
+        } else {
+            1
+        };
+        if n <= 0 {
+            return (String::new(), own);
+        }
+        let n = n.min(17);
+        let t = format!("{:.*e}", usize::try_from(n - 1).unwrap(), x.abs());
+        let (m, e) = t.split_once('e').unwrap();
+        let mut digits: String = m.chars().filter(char::is_ascii_digit).collect();
+        let dp = e.parse::<i32>().unwrap() + 1;
+        if x != 0.0 && dp > own {
+            digits.push('0');
+        }
+        (digits, dp)
+    }
+
+    /// What `fcvt` with a negative `ndigit` should answer when glibc's digits
+    /// are wrong (it divides by ten in floating point): |x| rounded, ties to
+    /// even, at 10^k -- k = -ndigit, but at most one less than the integer
+    /// digits, and 0 below 10, where glibc's loop stops -- from Rust's exact
+    /// expansion of the value, then the k zeros.
+    fn exact_fcvt(x: f64, n: i32) -> (String, i32) {
+        assert!(n < 0, "glibc's fcvt is exact for ndigit >= 0");
+        let t = format!("{:.1100}", x.abs());
+        let (int, frac) = t.split_once('.').unwrap();
+        let k = if x.abs() >= 10.0 {
+            usize::try_from(-n).unwrap().min(int.len() - 1)
+        } else {
+            0
+        };
+        let (kept, dropped) = int.split_at(int.len() - k);
+        let rest = format!("{dropped}{frac}");
+        let last_odd = kept.bytes().last().is_some_and(|d| (d - b'0') % 2 == 1);
+        let up = match rest.as_bytes().first() {
+            Some(b'6'..=b'9') => true,
+            Some(b'5') => rest[1..].bytes().any(|d| d != b'0') || last_odd,
+            _ => false,
+        };
+        let mut r = kept.as_bytes().to_vec();
+        if up {
+            let mut i = r.len();
+            loop {
+                if i == 0 {
+                    r.insert(0, b'1');
+                    break;
+                }
+                i -= 1;
+                if r[i] == b'9' {
+                    r[i] = b'0';
+                } else {
+                    r[i] += 1;
+                    break;
+                }
+            }
+        }
+        let digits = String::from_utf8(r).unwrap() + &"0".repeat(k);
+        let dp = i32::try_from(digits.len()).unwrap();
+        (digits, dp)
+    }
+
+    /// glibc 2.39's `strtod`, `strtof` and `strtold` of every input the
+    /// conversion oracle holds, in each of the four rounding directions
+    /// (`posix/tools/oracle/conv_harness.py`): the value's bits, the bytes
+    /// consumed, and `errno`. `strtold`'s answers include literals of
+    /// thousands of digits, exact rounding boundaries written out in full;
+    /// `wcstold` must give each of them too, from the same text widened.
+    #[test]
+    fn strtod_strtof_and_strtold_answer_as_glibc_does_in_every_rounding_mode() {
+        let modes = [
+            crate::fenv::FE_TONEAREST,
+            crate::fenv::FE_UPWARD,
+            crate::fenv::FE_DOWNWARD,
+            crate::fenv::FE_TOWARDZERO,
+        ];
+        let mut bad = Vec::new();
+        let mut calls = 0;
+        for line in crate::decfloat::CONV_ORACLE
+            .lines()
+            .filter(|l| l.starts_with("s "))
+        {
+            let (lhs, want) = line.split_once(" = ").unwrap();
+            let w: Vec<&str> = lhs.split(' ').collect();
+            let f = w[2];
+            let mode: usize = w[1].parse().unwrap();
+            let mut input: Vec<u8> = (0..w[3].len())
+                .step_by(2)
+                .map(|i| u8::from_str_radix(&w[3][i..i + 2], 16).unwrap())
+                .collect();
+            input.push(0);
+            assert_eq!(crate::fenv::fesetround(modes[mode]), 0);
+            crate::errno::set_errno(0);
+            let mut end: *const u8 = core::ptr::null();
+            // SAFETY: a NUL-terminated input and an out-pointer of this frame.
+            let bits = unsafe {
+                match f {
+                    "strtod" => format!("{:016x}", strtod(input.as_ptr(), &raw mut end).to_bits()),
+                    "strtof" => format!("{:08x}", strtof(input.as_ptr(), &raw mut end).to_bits()),
+                    "strtold" => {
+                        let v = strtold(input.as_ptr(), &raw mut end);
+                        format!("{:04x}:{:016x}", v.sign_exp, v.significand)
+                    }
+                    other => panic!("oracle function {other}"),
+                }
+            };
+            let err = crate::errno::get_errno();
+            let used = end as usize - input.as_ptr() as usize;
+            let got = format!("{bits} {used} {err}");
+            let wide_got = (f == "strtold").then(|| {
+                let wide: Vec<crate::wchar::WcharT> = input
+                    .iter()
+                    .map(|&b| crate::wchar::WcharT::from(b))
+                    .collect();
+                crate::errno::set_errno(0);
+                let mut wend: *const crate::wchar::WcharT = core::ptr::null();
+                // SAFETY: as above, over the widened copy.
+                let v = unsafe { crate::wchar::wcstold(wide.as_ptr(), &raw mut wend) };
+                let wused = (wend as usize - wide.as_ptr() as usize)
+                    / core::mem::size_of::<crate::wchar::WcharT>();
+                let werr = crate::errno::get_errno();
+                format!("{:04x}:{:016x} {wused} {werr}", v.sign_exp, v.significand)
+            });
+            assert_eq!(crate::fenv::fesetround(crate::fenv::FE_TONEAREST), 0);
+            calls += 1;
+            if got != want {
+                bad.push((
+                    mode,
+                    format!("{}\n    ours {got}", &line[..line.len().min(300)]),
+                ));
+            }
+            if let Some(wide_got) = wide_got.filter(|g| g != want) {
+                bad.push((
+                    mode,
+                    format!(
+                        "wcstold {}\n    ours {wide_got}",
+                        &line[..line.len().min(300)]
+                    ),
+                ));
+            }
+        }
+        assert!(calls > 1000, "only {calls} calls");
+        let mut per_mode = [0usize; 4];
+        for (m, _) in &bad {
+            per_mode[*m] += 1;
+        }
+        // Round-to-nearest first: it is the mode almost every program runs in.
+        bad.sort_by_key(|(m, _)| *m);
+        assert!(
+            bad.is_empty(),
+            "{} of {calls} differ (by mode {per_mode:?}):\n{}",
+            bad.len(),
+            bad.iter()
+                .take(60)
+                .map(|(_, s)| s.clone())
+                .collect::<Vec<_>>()
+                .join("\n")
+        );
+    }
+
+    #[test]
+    fn ecvt_fcvt_and_gcvt_answer_as_glibc_does_but_exactly() {
+        let mut bad = Vec::new();
+        let mut n_rows = 0;
+        for line in CVT_ORACLE.lines().filter(|l| !l.is_empty()) {
+            n_rows += 1;
+            let (lhs, rhs) = line.split_once(" = ").unwrap();
+            let mut w = lhs.split(' ');
+            let (f, bits, n) = (w.next().unwrap(), w.next().unwrap(), w.next().unwrap());
+            let x = f64::from_bits(u64::from_str_radix(bits, 16).unwrap());
+            let n: i32 = n.parse().unwrap();
+            if f == "gcvt" {
+                let mut buf = [0u8; 64];
+                // SAFETY: 64 bytes hold any `%.17g`.
+                let got = unsafe {
+                    gcvt(x, n, buf.as_mut_ptr());
+                    core::ffi::CStr::from_ptr(buf.as_ptr().cast())
+                        .to_string_lossy()
+                        .into_owned()
+                };
+                if got != rhs {
+                    bad.push(format!("{line}\n    ours {got}"));
+                }
+                continue;
+            }
+            let (want, exact) = rhs.rsplit_once(' ').unwrap();
+            let mut parts = want.split('|');
+            let (wd, wdp, wsg) = (
+                parts.next().unwrap(),
+                parts.next().unwrap(),
+                parts.next().unwrap(),
+            );
+            let (gd, gdp, gsg) = cvt(f, x, n);
+            let ok = if exact == "1" {
+                gd == wd && gdp.to_string() == wdp && gsg.to_string() == wsg
+            } else {
+                let (ed, edp) = if f == "ecvt" {
+                    exact_ecvt(x, n)
+                } else {
+                    exact_fcvt(x, n)
+                };
+                // Not glibc's length or decpt either: its inexact scaling can
+                // carry where the value does not (1e23 to the hundreds is
+                // 99999999999999991611400, not "1" and 23 zeros).
+                gd == ed && gdp == edp && gsg.to_string() == wsg
+            };
+            if !ok {
+                bad.push(format!("{line}\n    ours {gd}|{gdp}|{gsg}"));
+            }
+        }
+        assert!(n_rows > 5000, "only {n_rows} rows");
+        assert!(
+            bad.is_empty(),
+            "{} of {n_rows} differ:\n{}",
+            bad.len(),
+            bad.join("\n")
+        );
+    }
+
+    /// glibc's `q` forms (`posix/tools/oracle/qcvt_harness.py`): one call a
+    /// line, `<fn> <sexp>:<significand> <ndigit> = <glibc's digits>|<decpt>|
+    /// <sign> <exact digits>|<exact decpt>` for qecvt and qfcvt, `qgcvt ... =
+    /// <text>`; `\x` is the empty string.
+    const QCVT_ORACLE: &str = include_str!("qcvt_oracle.txt");
+
+    /// Every call of the oracle answered with the value's exact digits --
+    /// glibc's own where they are exact, which is all but 156 -- glibc's
+    /// sign, and glibc's `qgcvt` text.
+    #[test]
+    fn qecvt_qfcvt_and_qgcvt_answer_as_glibc_does_but_exactly() {
+        let unesc = |t: &str| if t == "\\x" { "" } else { t }.to_owned();
+        let (mut n, mut inexact) = (0, 0);
+        let mut bad = Vec::new();
+        for line in QCVT_ORACLE.lines().filter(|l| !l.starts_with('#')) {
+            let (head, rest) = line.split_once(" = ").unwrap();
+            let mut h = head.split(' ');
+            let (f, bits, nd) = (h.next().unwrap(), h.next().unwrap(), h.next().unwrap());
+            let nd: i32 = nd.parse().unwrap();
+            let (se, sig) = bits.split_once(':').unwrap();
+            let x = crate::x87::LongDouble::from_bits(
+                u16::from_str_radix(se, 16).unwrap(),
+                u64::from_str_radix(sig, 16).unwrap(),
+            );
+            n += 1;
+            if f == "qgcvt" {
+                let mut buf = [0u8; 64];
+                // SAFETY: a long double and a buffer of this frame's.
+                unsafe { __slate_ld_qgcvt(&raw const x, nd, buf.as_mut_ptr()) };
+                let got = core::ffi::CStr::from_bytes_until_nul(&buf).unwrap();
+                if got.to_str().unwrap() != unesc(rest) {
+                    bad.push(format!("{line}\n    ours {got:?}"));
+                }
+                continue;
+            }
+            let (glibc, exact) = rest.split_once(' ').unwrap();
+            let mut g = glibc.split('|');
+            let (gd, gdp, gsg) = (g.next().unwrap(), g.next().unwrap(), g.next().unwrap());
+            let (xd, xdp) = exact.split_once('|').unwrap();
+            if (gd, gdp) != (xd, xdp) {
+                inexact += 1;
+            }
+            let (mut dp, mut sg) = (i32::MIN, i32::MIN);
+            // SAFETY: a long double and out-pointers of this frame's; the
+            // result is the function's buffer, terminated.
+            let got = unsafe {
+                let r = if f == "qecvt" {
+                    __slate_ld_qecvt(&raw const x, nd, &raw mut dp, &raw mut sg)
+                } else {
+                    __slate_ld_qfcvt(&raw const x, nd, &raw mut dp, &raw mut sg)
+                };
+                core::ffi::CStr::from_ptr(r.cast())
+                    .to_string_lossy()
+                    .into_owned()
+            };
+            if (got.as_str(), dp.to_string(), sg.to_string())
+                != (unesc(xd).as_str(), xdp.to_owned(), gsg.to_owned())
+            {
+                bad.push(format!("{line}\n    ours {got}|{dp}|{sg}"));
+            }
+        }
+        assert_eq!(n, 2160, "calls");
+        assert!(
+            inexact >= 100,
+            "glibc's inexact answers, held to the exact: {inexact}"
+        );
+        assert!(
+            bad.is_empty(),
+            "{} of {n} differ:\n{}",
+            bad.len(),
+            bad.iter().take(20).cloned().collect::<Vec<_>>().join("\n")
+        );
+    }
+
+    /// The `q` `_r` forms refuse as the double ones do: `EINVAL` for a NULL
+    /// buffer, -1 for one too small.
+    #[test]
+    fn the_q_r_forms_refuse_a_null_or_small_buffer() {
+        let x = crate::x87::LongDouble::from_bits(0x3FFF, 0xC000_0000_0000_0000); // 1.5
+        let (mut dp, mut sg) = (0, 0);
+        let mut small = [0u8; 2];
+        // SAFETY: a long double and pointers of this frame's.
+        unsafe {
+            crate::errno::set_errno(0);
+            assert_eq!(
+                __slate_ld_qecvt_r(
+                    &raw const x,
+                    5,
+                    &raw mut dp,
+                    &raw mut sg,
+                    core::ptr::null_mut(),
+                    9
+                ),
+                -1
+            );
+            assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+            assert_eq!(
+                __slate_ld_qfcvt_r(
+                    &raw const x,
+                    5,
+                    &raw mut dp,
+                    &raw mut sg,
+                    small.as_mut_ptr(),
+                    2
+                ),
+                -1
+            );
+            let mut buf = [0u8; 16];
+            assert_eq!(
+                __slate_ld_qecvt_r(
+                    &raw const x,
+                    3,
+                    &raw mut dp,
+                    &raw mut sg,
+                    buf.as_mut_ptr(),
+                    16
+                ),
+                0
+            );
+            assert_eq!(&buf[..4], b"150\0");
+            assert_eq!((dp, sg), (1, 0));
+        }
+    }
+
+    #[test]
+    fn the_r_forms_refuse_a_null_or_small_buffer() {
+        let (mut dp, mut sg) = (0, 0);
+        crate::errno::set_errno(0);
+        // SAFETY: a NULL buffer is checked; the others are local.
+        unsafe {
+            assert_eq!(
+                fcvt_r(1.5, 2, &raw mut dp, &raw mut sg, core::ptr::null_mut(), 10),
+                -1
+            );
+            assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+            let mut small = [0u8; 3];
+            assert_eq!(
+                ecvt_r(1.5, 5, &raw mut dp, &raw mut sg, small.as_mut_ptr(), 3),
+                -1
+            );
+            let mut ok = [0u8; 8];
+            assert_eq!(
+                ecvt_r(1.5, 5, &raw mut dp, &raw mut sg, ok.as_mut_ptr(), 8),
+                0
+            );
+            assert_eq!(&ok[..6], b"15000\0");
+            assert_eq!((dp, sg), (1, 0));
+        }
+    }
+
     // -- Serialising the process-wide state these tests drive -------------
     //
-    // `cargo test` runs these on separate threads, and three of the globals
-    // below are shared *by specification* -- POSIX gives a process one `rand`
-    // sequence, one `drand48` sequence and one `l64a` return buffer, so they
+    // `cargo test` runs these on separate threads, and `l64a`'s return buffer
+    // is shared *by specification* -- POSIX gives a process one -- so it
     // cannot stop being shared the way a test-only counter can (which would
-    // become a `thread_local!`; see `posix::malloc::live_regions`). The
-    // remaining option is to stop the tests overlapping.
+    // become a `thread_local!`; see `posix::malloc::live_allocations`). The
+    // remaining option is to stop the tests overlapping. (The generators'
+    // tests, which need the same, are crate::prng's.)
     //
-    // Each guard must be the FIRST statement of its test and stay bound for
-    // the whole body: the indivisible unit is the entire "seed it, draw from
-    // it, read the result back" sequence, not any single call inside it.
+    // The guard must be the FIRST statement of its test and stay bound for
+    // the whole body: the indivisible unit is the entire "call it, read the
+    // result back" sequence, not any single call inside it.
     //
     // Poison is recovered rather than propagated. A test that genuinely fails
-    // while holding one of these should report once, not poison its fourteen
-    // siblings and bury the cause under a wall of secondary panics.
-    //
-    // Three locks rather than one, because these are three unrelated pieces of
-    // state and a single lock would serialise 21 tests that mostly do not
-    // contend. `OLD_SEED` rides on the rand48 lock because `seed48` writes both
-    // it and `RAND48_STATE` in one call.
+    // while holding it should report once, not poison its siblings and bury
+    // the cause under a wall of secondary panics.
 
-    static RAND_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
-    static RAND48_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
     static L64A_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
-
-    /// Serialises `RAND_STATE` (`srand`/`rand`).
-    #[must_use = "the guard serialises the global rand state; bind it to `_g`"]
-    fn lock_rand_for_test() -> std::sync::MutexGuard<'static, ()> {
-        RAND_TEST_LOCK
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-    }
-
-    /// Serialises `RAND48_STATE` and `seed48`'s `OLD_SEED`.
-    #[must_use = "the guard serialises the global rand48 state; bind it to `_g`"]
-    fn lock_rand48_for_test() -> std::sync::MutexGuard<'static, ()> {
-        RAND48_TEST_LOCK
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-    }
 
     /// Serialises `L64A_BUF`.
     ///
@@ -2611,7 +3162,7 @@ mod tests {
                 arr.as_mut_ptr().cast(),
                 5,
                 core::mem::size_of::<i32>(),
-                cmp_i32,
+                Some(cmp_i32),
             );
         }
         assert_eq!(arr, [1, 2, 3, 4, 5]);
@@ -2625,7 +3176,7 @@ mod tests {
                 arr.as_mut_ptr().cast(),
                 4,
                 core::mem::size_of::<i32>(),
-                cmp_i32,
+                Some(cmp_i32),
             );
         }
         assert_eq!(arr, [1, 2, 3, 4]);
@@ -2639,7 +3190,7 @@ mod tests {
                 arr.as_mut_ptr().cast(),
                 4,
                 core::mem::size_of::<i32>(),
-                cmp_i32,
+                Some(cmp_i32),
             );
         }
         assert_eq!(arr, [1, 2, 3, 4]);
@@ -2653,7 +3204,7 @@ mod tests {
                 arr.as_mut_ptr().cast(),
                 1,
                 core::mem::size_of::<i32>(),
-                cmp_i32,
+                Some(cmp_i32),
             );
         }
         assert_eq!(arr, [42]);
@@ -2667,7 +3218,7 @@ mod tests {
                 arr.as_mut_ptr().cast(),
                 0,
                 core::mem::size_of::<i32>(),
-                cmp_i32,
+                Some(cmp_i32),
             );
         }
         // Should not crash.
@@ -2685,7 +3236,7 @@ mod tests {
                 arr.as_ptr().cast(),
                 5,
                 core::mem::size_of::<i32>(),
-                cmp_i32,
+                Some(cmp_i32),
             )
         };
         assert!(!p.is_null());
@@ -2702,31 +3253,10 @@ mod tests {
                 arr.as_ptr().cast(),
                 5,
                 core::mem::size_of::<i32>(),
-                cmp_i32,
+                Some(cmp_i32),
             )
         };
         assert!(p.is_null());
-    }
-
-    // -- rand / srand tests --
-
-    #[test]
-    fn test_srand_rand_deterministic() {
-        let _g = lock_rand_for_test();
-        srand(12345);
-        let a = rand();
-        srand(12345);
-        let b = rand();
-        assert_eq!(a, b);
-    }
-
-    #[test]
-    fn test_rand_nonnegative() {
-        let _g = lock_rand_for_test();
-        srand(42);
-        for _ in 0..100 {
-            assert!(rand() >= 0);
-        }
     }
 
     // -- getsubopt tests --
@@ -2862,7 +3392,7 @@ mod tests {
         unsafe extern "C" fn cmp(a: *const u8, b: *const u8) -> i32 {
             unsafe { *(a as *const i32) - *(b as *const i32) }
         }
-        unsafe { qsort(arr.as_mut_ptr().cast(), 0, 4, cmp) };
+        unsafe { qsort(arr.as_mut_ptr().cast(), 0, 4, Some(cmp)) };
     }
 
     #[test]
@@ -2871,7 +3401,7 @@ mod tests {
         unsafe extern "C" fn cmp(a: *const u8, b: *const u8) -> i32 {
             unsafe { *(a as *const i32) - *(b as *const i32) }
         }
-        unsafe { qsort(arr.as_mut_ptr().cast(), 1, 4, cmp) };
+        unsafe { qsort(arr.as_mut_ptr().cast(), 1, 4, Some(cmp)) };
         assert_eq!(arr[0], 42);
     }
 
@@ -2881,7 +3411,7 @@ mod tests {
         unsafe extern "C" fn cmp(a: *const u8, b: *const u8) -> i32 {
             unsafe { *(a as *const i32) - *(b as *const i32) }
         }
-        unsafe { qsort(arr.as_mut_ptr().cast(), 5, 4, cmp) };
+        unsafe { qsort(arr.as_mut_ptr().cast(), 5, 4, Some(cmp)) };
         assert_eq!(arr, [1, 2, 3, 4, 5]);
     }
 
@@ -2891,7 +3421,7 @@ mod tests {
         unsafe extern "C" fn cmp(a: *const u8, b: *const u8) -> i32 {
             unsafe { *(a as *const i32) - *(b as *const i32) }
         }
-        unsafe { qsort(arr.as_mut_ptr().cast(), 5, 4, cmp) };
+        unsafe { qsort(arr.as_mut_ptr().cast(), 5, 4, Some(cmp)) };
         assert_eq!(arr, [1, 2, 3, 4, 5]);
     }
 
@@ -2901,7 +3431,7 @@ mod tests {
         unsafe extern "C" fn cmp(a: *const u8, b: *const u8) -> i32 {
             unsafe { *(a as *const i32) - *(b as *const i32) }
         }
-        unsafe { qsort(arr.as_mut_ptr().cast(), 11, 4, cmp) };
+        unsafe { qsort(arr.as_mut_ptr().cast(), 11, 4, Some(cmp)) };
         assert_eq!(arr, [1, 1, 2, 3, 3, 4, 5, 5, 5, 6, 9]);
     }
 
@@ -2953,7 +3483,7 @@ mod tests {
         let mut expected = arr.clone();
         expected.sort_unstable();
         let n = arr.len();
-        unsafe { qsort(arr.as_mut_ptr().cast(), n, 4, qcmp_i32) };
+        unsafe { qsort(arr.as_mut_ptr().cast(), n, 4, Some(qcmp_i32)) };
         assert_eq!(arr, expected, "n = {n}");
     }
 
@@ -3022,7 +3552,7 @@ mod tests {
                 *b = (key as u8).wrapping_add(j as u8);
             }
         }
-        unsafe { qsort(buf.as_mut_ptr(), n, W, qcmp_i32) };
+        unsafe { qsort(buf.as_mut_ptr(), n, W, Some(qcmp_i32)) };
 
         keys.sort_unstable();
         for (i, want) in keys.iter().enumerate() {
@@ -3071,7 +3601,7 @@ mod tests {
             }
             0
         }
-        unsafe { qsort(buf.as_mut_ptr(), n, W, cmp_be3) };
+        unsafe { qsort(buf.as_mut_ptr(), n, W, Some(cmp_be3)) };
 
         for (i, want) in expected.iter().enumerate() {
             assert_eq!(&buf[i * W..i * W + 3], &want[..], "element {i}");
@@ -3138,7 +3668,7 @@ mod tests {
                 arr.as_mut_ptr().cast(),
                 n,
                 4,
-                cmp_dir,
+                Some(cmp_dir),
                 (&raw mut dir).cast::<core::ffi::c_void>(),
             );
         }
@@ -3150,7 +3680,7 @@ mod tests {
                 arr.as_mut_ptr().cast(),
                 n,
                 4,
-                cmp_dir,
+                Some(cmp_dir),
                 (&raw mut dir).cast::<core::ffi::c_void>(),
             );
         }
@@ -3164,10 +3694,11 @@ mod tests {
         }
         let mut arr = [3i32, 1, 2];
         // size == 0: nothing can be swapped meaningfully.
-        unsafe { qsort(arr.as_mut_ptr().cast(), 3, 0, cmp_never) };
+        unsafe { qsort(arr.as_mut_ptr().cast(), 3, 0, Some(cmp_never)) };
         assert_eq!(arr, [3, 1, 2]);
-        // A NULL base with a non-zero count must not be dereferenced.
-        unsafe { qsort(core::ptr::null_mut(), 5, 4, cmp_never) };
+        // A NULL base with elements to move is where glibc's process faults,
+        // and it ends this one too (`qsort_comparator`) -- not a test's to
+        // take.  It returned without sorting until 2026-09-26.
     }
 
     // -----------------------------------------------------------------------
@@ -3209,7 +3740,7 @@ mod tests {
         let mut e2: *const u8 = core::ptr::null();
         let a = unsafe { strtold(s.as_ptr(), &mut e1) };
         let b = unsafe { strtold_l(s.as_ptr(), &mut e2, crate::locale::LC_GLOBAL_LOCALE) };
-        assert!((a - b).abs() < f64::EPSILON);
+        assert_eq!((a.sign_exp, a.significand), (b.sign_exp, b.significand));
         assert_eq!(e1, e2);
     }
 
@@ -3224,8 +3755,15 @@ mod tests {
         unsafe extern "C" fn cmp(a: *const u8, b: *const u8) -> i32 {
             unsafe { *(a as *const i32) - *(b as *const i32) }
         }
-        let result =
-            unsafe { bsearch((&key as *const i32).cast(), arr.as_ptr().cast(), 6, 4, cmp) };
+        let result = unsafe {
+            bsearch(
+                (&key as *const i32).cast(),
+                arr.as_ptr().cast(),
+                6,
+                4,
+                Some(cmp),
+            )
+        };
         assert!(!result.is_null());
         assert_eq!(unsafe { *(result as *const i32) }, 7);
     }
@@ -3237,8 +3775,15 @@ mod tests {
         unsafe extern "C" fn cmp(a: *const u8, b: *const u8) -> i32 {
             unsafe { *(a as *const i32) - *(b as *const i32) }
         }
-        let result =
-            unsafe { bsearch((&key as *const i32).cast(), arr.as_ptr().cast(), 6, 4, cmp) };
+        let result = unsafe {
+            bsearch(
+                (&key as *const i32).cast(),
+                arr.as_ptr().cast(),
+                6,
+                4,
+                Some(cmp),
+            )
+        };
         assert!(result.is_null());
     }
 
@@ -3248,7 +3793,15 @@ mod tests {
         unsafe extern "C" fn cmp(a: *const u8, b: *const u8) -> i32 {
             unsafe { *(a as *const i32) - *(b as *const i32) }
         }
-        let result = unsafe { bsearch((&key as *const i32).cast(), core::ptr::null(), 0, 4, cmp) };
+        let result = unsafe {
+            bsearch(
+                (&key as *const i32).cast(),
+                core::ptr::null(),
+                0,
+                4,
+                Some(cmp),
+            )
+        };
         assert!(result.is_null());
     }
 
@@ -3370,6 +3923,182 @@ mod tests {
     fn test_strtod_nan() {
         let v = unsafe { strtod(b"nan\0".as_ptr(), core::ptr::null_mut()) };
         assert!(v.is_nan());
+    }
+
+    /// glibc 2.39's `strtod`, `strtof`, `wcstod` and `wcstof` on NaN
+    /// spellings (`posix/tools/oracle/strtod_nan_harness.py`): the bits -- sign and
+    /// payload -- how much was consumed, and `errno`. Until 2026-09-27 every
+    /// NaN came back positive and without its payload, and any bytes up to a
+    /// `)` were taken for an n-char-sequence.
+    // Generated by posix/tools/oracle/strtod_nan_harness.py from glibc 2.39 under WSL:
+    // (function, input, result bits, characters consumed, errno).
+    const GLIBC_NAN: &[(&str, &str, u64, usize, i32)] = &[
+        ("strtod", "nan", 0x7ff8000000000000, 3, 0),
+        ("strtof", "nan", 0x7fc00000, 3, 0),
+        ("wcstod", "nan", 0x7ff8000000000000, 3, 0),
+        ("wcstof", "nan", 0x7fc00000, 3, 0),
+        ("strtod", "-nan", 0xfff8000000000000, 4, 0),
+        ("strtof", "-nan", 0xffc00000, 4, 0),
+        ("wcstod", "-nan", 0xfff8000000000000, 4, 0),
+        ("wcstof", "-nan", 0xffc00000, 4, 0),
+        ("strtod", "+nan", 0x7ff8000000000000, 4, 0),
+        ("strtof", "+nan", 0x7fc00000, 4, 0),
+        ("wcstod", "+nan", 0x7ff8000000000000, 4, 0),
+        ("wcstof", "+nan", 0x7fc00000, 4, 0),
+        ("strtod", "NAN", 0x7ff8000000000000, 3, 0),
+        ("strtof", "NAN", 0x7fc00000, 3, 0),
+        ("wcstod", "NAN", 0x7ff8000000000000, 3, 0),
+        ("wcstof", "NAN", 0x7fc00000, 3, 0),
+        ("strtod", "NaN(1234)", 0x7ff80000000004d2, 9, 0),
+        ("strtof", "NaN(1234)", 0x7fc004d2, 9, 0),
+        ("wcstod", "NaN(1234)", 0x7ff80000000004d2, 9, 0),
+        ("wcstof", "NaN(1234)", 0x7fc004d2, 9, 0),
+        ("strtod", "nan(0x12)", 0x7ff8000000000012, 9, 0),
+        ("strtof", "nan(0x12)", 0x7fc00012, 9, 0),
+        ("wcstod", "nan(0x12)", 0x7ff8000000000012, 9, 0),
+        ("wcstof", "nan(0x12)", 0x7fc00012, 9, 0),
+        ("strtod", "nan(017)", 0x7ff800000000000f, 8, 0),
+        ("strtof", "nan(017)", 0x7fc0000f, 8, 0),
+        ("wcstod", "nan(017)", 0x7ff800000000000f, 8, 0),
+        ("wcstof", "nan(017)", 0x7fc0000f, 8, 0),
+        ("strtod", "nan(abc)", 0x7ff8000000000000, 8, 0),
+        ("strtof", "nan(abc)", 0x7fc00000, 8, 0),
+        ("wcstod", "nan(abc)", 0x7ff8000000000000, 8, 0),
+        ("wcstof", "nan(abc)", 0x7fc00000, 8, 0),
+        ("strtod", "nan(1 2)", 0x7ff8000000000000, 3, 0),
+        ("strtof", "nan(1 2)", 0x7fc00000, 3, 0),
+        ("wcstod", "nan(1 2)", 0x7ff8000000000000, 3, 0),
+        ("wcstof", "nan(1 2)", 0x7fc00000, 3, 0),
+        ("strtod", "nan(", 0x7ff8000000000000, 3, 0),
+        ("strtof", "nan(", 0x7fc00000, 3, 0),
+        ("wcstod", "nan(", 0x7ff8000000000000, 3, 0),
+        ("wcstof", "nan(", 0x7fc00000, 3, 0),
+        ("strtod", "nan()", 0x7ff8000000000000, 5, 0),
+        ("strtof", "nan()", 0x7fc00000, 5, 0),
+        ("wcstod", "nan()", 0x7ff8000000000000, 5, 0),
+        ("wcstof", "nan()", 0x7fc00000, 5, 0),
+        ("strtod", "-nan(0x8000000000000)", 0xfff8000000000000, 21, 0),
+        ("strtof", "-nan(0x8000000000000)", 0xffc00000, 21, 0),
+        ("wcstod", "-nan(0x8000000000000)", 0xfff8000000000000, 21, 0),
+        ("wcstof", "-nan(0x8000000000000)", 0xffc00000, 21, 0),
+        (
+            "strtod",
+            "nan(99999999999999999999999)",
+            0x7fffffffffffffff,
+            28,
+            34,
+        ),
+        ("strtof", "nan(99999999999999999999999)", 0x7fffffff, 28, 34),
+        (
+            "wcstod",
+            "nan(99999999999999999999999)",
+            0x7fffffffffffffff,
+            28,
+            34,
+        ),
+        ("wcstof", "nan(99999999999999999999999)", 0x7fffffff, 28, 34),
+        ("strtod", "nan(0x7ffffffffffff)", 0x7fffffffffffffff, 20, 0),
+        ("strtof", "nan(0x7ffffffffffff)", 0x7fffffff, 20, 0),
+        ("wcstod", "nan(0x7ffffffffffff)", 0x7fffffffffffffff, 20, 0),
+        ("wcstof", "nan(0x7ffffffffffff)", 0x7fffffff, 20, 0),
+        ("strtod", "  +nan(5)x", 0x7ff8000000000005, 9, 0),
+        ("strtof", "  +nan(5)x", 0x7fc00005, 9, 0),
+        ("wcstod", "  +nan(5)x", 0x7ff8000000000005, 9, 0),
+        ("wcstof", "  +nan(5)x", 0x7fc00005, 9, 0),
+        ("strtod", "nanx", 0x7ff8000000000000, 3, 0),
+        ("strtof", "nanx", 0x7fc00000, 3, 0),
+        ("wcstod", "nanx", 0x7ff8000000000000, 3, 0),
+        ("wcstof", "nanx", 0x7fc00000, 3, 0),
+        ("strtod", "nan(_)", 0x7ff8000000000000, 6, 0),
+        ("strtof", "nan(_)", 0x7fc00000, 6, 0),
+        ("wcstod", "nan(_)", 0x7ff8000000000000, 6, 0),
+        ("wcstof", "nan(_)", 0x7fc00000, 6, 0),
+        ("strtod", "nan(1_2)", 0x7ff8000000000000, 8, 0),
+        ("strtof", "nan(1_2)", 0x7fc00000, 8, 0),
+        ("wcstod", "nan(1_2)", 0x7ff8000000000000, 8, 0),
+        ("wcstof", "nan(1_2)", 0x7fc00000, 8, 0),
+        ("strtod", "-nan(42)", 0xfff800000000002a, 8, 0),
+        ("strtof", "-nan(42)", 0xffc0002a, 8, 0),
+        ("wcstod", "-nan(42)", 0xfff800000000002a, 8, 0),
+        ("wcstof", "-nan(42)", 0xffc0002a, 8, 0),
+        ("strtod", "nan(0x)", 0x7ff8000000000000, 7, 0),
+        ("strtof", "nan(0x)", 0x7fc00000, 7, 0),
+        ("wcstod", "nan(0x)", 0x7ff8000000000000, 7, 0),
+        ("wcstof", "nan(0x)", 0x7fc00000, 7, 0),
+        ("strtod", "nan(08)", 0x7ff8000000000000, 7, 0),
+        ("strtof", "nan(08)", 0x7fc00000, 7, 0),
+        ("wcstod", "nan(08)", 0x7ff8000000000000, 7, 0),
+        ("wcstof", "nan(08)", 0x7fc00000, 7, 0),
+        ("strtod", "nan(0x1g)", 0x7ff8000000000000, 9, 0),
+        ("strtof", "nan(0x1g)", 0x7fc00000, 9, 0),
+        ("wcstod", "nan(0x1g)", 0x7ff8000000000000, 9, 0),
+        ("wcstof", "nan(0x1g)", 0x7fc00000, 9, 0),
+        ("strtod", "nan(0X1F)", 0x7ff800000000001f, 9, 0),
+        ("strtof", "nan(0X1F)", 0x7fc0001f, 9, 0),
+        ("wcstod", "nan(0X1F)", 0x7ff800000000001f, 9, 0),
+        ("wcstof", "nan(0X1F)", 0x7fc0001f, 9, 0),
+        ("strtod", "nan(0x400000)", 0x7ff8000000400000, 13, 0),
+        ("strtof", "nan(0x400000)", 0x7fc00000, 13, 0),
+        ("wcstod", "nan(0x400000)", 0x7ff8000000400000, 13, 0),
+        ("wcstof", "nan(0x400000)", 0x7fc00000, 13, 0),
+        ("strtod", "nan(4194303)", 0x7ff80000003fffff, 12, 0),
+        ("strtof", "nan(4194303)", 0x7fffffff, 12, 0),
+        ("wcstod", "nan(4194303)", 0x7ff80000003fffff, 12, 0),
+        ("wcstof", "nan(4194303)", 0x7fffffff, 12, 0),
+        ("strtod", "nan(4194304)", 0x7ff8000000400000, 12, 0),
+        ("strtof", "nan(4194304)", 0x7fc00000, 12, 0),
+        ("wcstod", "nan(4194304)", 0x7ff8000000400000, 12, 0),
+        ("wcstof", "nan(4194304)", 0x7fc00000, 12, 0),
+        ("strtod", "nan(-1)", 0x7ff8000000000000, 3, 0),
+        ("strtof", "nan(-1)", 0x7fc00000, 3, 0),
+        ("wcstod", "nan(-1)", 0x7ff8000000000000, 3, 0),
+        ("wcstof", "nan(-1)", 0x7fc00000, 3, 0),
+    ];
+
+    #[test]
+    fn nan_spellings_are_read_as_glibc_reads_them() {
+        let mut failures = std::vec::Vec::new();
+        for &(func, input, bits, consumed, want_errno) in GLIBC_NAN {
+            let mut c = input.as_bytes().to_vec();
+            c.push(0);
+            let wide: std::vec::Vec<crate::wchar::WcharT> =
+                c.iter().map(|&b| crate::wchar::WcharT::from(b)).collect();
+            crate::errno::set_errno(0);
+            let (got_bits, got_consumed) = match func {
+                "strtod" | "strtof" => {
+                    let mut end: *const u8 = core::ptr::null();
+                    // SAFETY: `c` is NUL-terminated and outlives the call.
+                    let b = unsafe {
+                        if func == "strtod" {
+                            strtod(c.as_ptr(), &raw mut end).to_bits()
+                        } else {
+                            u64::from(strtof(c.as_ptr(), &raw mut end).to_bits())
+                        }
+                    };
+                    (b, end as usize - c.as_ptr() as usize)
+                }
+                _ => {
+                    let mut end: *const crate::wchar::WcharT = core::ptr::null();
+                    // SAFETY: `wide` is NUL-terminated and outlives the call.
+                    let b = unsafe {
+                        if func == "wcstod" {
+                            crate::wchar::wcstod(wide.as_ptr(), &raw mut end).to_bits()
+                        } else {
+                            u64::from(crate::wchar::wcstof(wide.as_ptr(), &raw mut end).to_bits())
+                        }
+                    };
+                    let width = core::mem::size_of::<crate::wchar::WcharT>();
+                    (b, (end as usize - wide.as_ptr() as usize) / width)
+                }
+            };
+            let got_errno = crate::errno::get_errno();
+            if (got_bits, got_consumed, got_errno) != (bits, consumed, want_errno) {
+                failures.push(format!(
+                    "{func}({input:?}): {got_bits:#x} after {got_consumed}, errno {got_errno}; glibc {bits:#x} after {consumed}, errno {want_errno}"
+                ));
+            }
+        }
+        assert!(failures.is_empty(), "{}", failures.join("\n"));
     }
 
     #[test]
@@ -3531,174 +4260,6 @@ mod tests {
         };
         assert_eq!(v, u64::MAX);
         assert_eq!(crate::errno::get_errno(), crate::errno::ERANGE);
-    }
-
-    // -----------------------------------------------------------------------
-    // drand48 / lrand48 / mrand48 — LCG PRNG
-    // -----------------------------------------------------------------------
-
-    #[test]
-    fn drand48_range() {
-        let _g = lock_rand48_for_test();
-        // After seeding, drand48 must return values in [0.0, 1.0).
-        srand48(12345);
-        for _ in 0..100 {
-            let v = drand48();
-            assert!(v >= 0.0 && v < 1.0, "drand48 returned {v}, expected [0, 1)");
-        }
-    }
-
-    #[test]
-    fn lrand48_range() {
-        let _g = lock_rand48_for_test();
-        // lrand48 returns values in [0, 2^31).
-        srand48(42);
-        for _ in 0..100 {
-            let v = lrand48();
-            assert!(v >= 0, "lrand48 returned negative {v}");
-            assert!(v < (1_i64 << 31), "lrand48 returned {v} >= 2^31");
-        }
-    }
-
-    #[test]
-    fn mrand48_full_signed_range() {
-        let _g = lock_rand48_for_test();
-        // mrand48 returns values in [-2^31, 2^31).  After many calls,
-        // we should see at least one negative and one positive value.
-        srand48(99);
-        let mut seen_neg = false;
-        let mut seen_pos = false;
-        for _ in 0..1000 {
-            let v = mrand48();
-            assert!(v >= i64::from(i32::MIN), "mrand48 out of range: {v}");
-            assert!(v <= i64::from(i32::MAX), "mrand48 out of range: {v}");
-            if v < 0 {
-                seen_neg = true;
-            }
-            if v > 0 {
-                seen_pos = true;
-            }
-        }
-        assert!(seen_neg, "mrand48 never returned negative");
-        assert!(seen_pos, "mrand48 never returned positive");
-    }
-
-    #[test]
-    fn srand48_deterministic() {
-        let _g = lock_rand48_for_test();
-        // Same seed must produce same sequence.
-        srand48(777);
-        let a1 = drand48();
-        let a2 = drand48();
-        let a3 = drand48();
-
-        srand48(777);
-        let b1 = drand48();
-        let b2 = drand48();
-        let b3 = drand48();
-
-        assert_eq!(a1.to_bits(), b1.to_bits());
-        assert_eq!(a2.to_bits(), b2.to_bits());
-        assert_eq!(a3.to_bits(), b3.to_bits());
-    }
-
-    #[test]
-    fn srand48_different_seeds_diverge() {
-        let _g = lock_rand48_for_test();
-        srand48(1);
-        let a = drand48();
-        srand48(2);
-        let b = drand48();
-        assert_ne!(
-            a.to_bits(),
-            b.to_bits(),
-            "different seeds should produce different values"
-        );
-    }
-
-    // -----------------------------------------------------------------------
-    // nrand48 / erand48 / jrand48 — caller-provided state
-    // -----------------------------------------------------------------------
-
-    #[test]
-    fn nrand48_range_and_state_update() {
-        let mut state: [u16; 3] = [0x1234, 0x5678, 0x9ABC];
-        let original = state;
-        let v = nrand48(state.as_mut_ptr());
-        assert!(v >= 0, "nrand48 returned negative {v}");
-        assert!(v < (1_i64 << 31), "nrand48 returned {v} >= 2^31");
-        // State should have been updated.
-        assert_ne!(state, original, "nrand48 should update state");
-    }
-
-    #[test]
-    fn nrand48_null_returns_zero() {
-        let v = nrand48(core::ptr::null_mut());
-        assert_eq!(v, 0, "nrand48(NULL) should return 0");
-    }
-
-    #[test]
-    fn erand48_range() {
-        let mut state: [u16; 3] = [0x0001, 0x0002, 0x0003];
-        for _ in 0..100 {
-            let v = erand48(state.as_mut_ptr());
-            assert!(v >= 0.0 && v < 1.0, "erand48 returned {v}, expected [0, 1)");
-        }
-    }
-
-    #[test]
-    fn erand48_null_returns_zero() {
-        let v = erand48(core::ptr::null_mut());
-        assert_eq!(v, 0.0);
-    }
-
-    #[test]
-    fn jrand48_signed_range() {
-        let mut state: [u16; 3] = [0xFFFF, 0xFFFF, 0x7FFF];
-        let v = jrand48(state.as_mut_ptr());
-        // jrand48 returns i32-range signed values extended to i64.
-        assert!(v >= i64::from(i32::MIN), "jrand48 out of range: {v}");
-        assert!(v <= i64::from(i32::MAX), "jrand48 out of range: {v}");
-    }
-
-    #[test]
-    fn jrand48_null_returns_zero() {
-        let v = jrand48(core::ptr::null_mut());
-        assert_eq!(v, 0);
-    }
-
-    #[test]
-    fn nrand48_deterministic() {
-        // Same initial state must produce same sequence.
-        let mut s1: [u16; 3] = [0xDEAD, 0xBEEF, 0xCAFE];
-        let mut s2: [u16; 3] = [0xDEAD, 0xBEEF, 0xCAFE];
-        let a = nrand48(s1.as_mut_ptr());
-        let b = nrand48(s2.as_mut_ptr());
-        assert_eq!(a, b, "same state should produce same result");
-        assert_eq!(s1, s2, "same state should produce same next state");
-    }
-
-    // -----------------------------------------------------------------------
-    // seed48 — full 48-bit seeding
-    // -----------------------------------------------------------------------
-
-    #[test]
-    fn seed48_basic() {
-        let _g = lock_rand48_for_test();
-        let seed: [u16; 3] = [0x1111, 0x2222, 0x3333];
-        let old_ptr = seed48(seed.as_ptr());
-        assert!(!old_ptr.is_null(), "seed48 should return non-null");
-
-        // After seeding, drand48 should produce deterministic results.
-        let v = drand48();
-        assert!(v >= 0.0 && v < 1.0);
-    }
-
-    #[test]
-    fn seed48_null_returns_old_pointer() {
-        let _g = lock_rand48_for_test();
-        let ptr = seed48(core::ptr::null());
-        assert!(!ptr.is_null());
     }
 
     // -----------------------------------------------------------------------
@@ -4084,7 +4645,7 @@ mod tests {
                 arr.as_mut_ptr().cast(),
                 100,
                 core::mem::size_of::<i32>(),
-                cmp_i32_stress,
+                Some(cmp_i32_stress),
             );
         }
         for &v in &arr {
@@ -4100,7 +4661,7 @@ mod tests {
                 arr.as_mut_ptr().cast(),
                 64,
                 core::mem::size_of::<i32>(),
-                cmp_i32_stress,
+                Some(cmp_i32_stress),
             );
         }
         for i in 0..64 {
@@ -4116,7 +4677,7 @@ mod tests {
                 arr.as_mut_ptr().cast(),
                 128,
                 core::mem::size_of::<i32>(),
-                cmp_i32_stress,
+                Some(cmp_i32_stress),
             );
         }
         for i in 0..128 {
@@ -4133,7 +4694,7 @@ mod tests {
                 arr.as_mut_ptr().cast(),
                 80,
                 core::mem::size_of::<i32>(),
-                cmp_i32_stress,
+                Some(cmp_i32_stress),
             );
         }
         // First 40 should be 0, last 40 should be 1.
@@ -4153,7 +4714,7 @@ mod tests {
                 arr.as_mut_ptr().cast(),
                 10,
                 core::mem::size_of::<i32>(),
-                cmp_i32_stress,
+                Some(cmp_i32_stress),
             );
         }
         assert_eq!(arr, [-999, -100, -50, -5, -3, -1, 0, 7, 10, 42]);
@@ -4167,7 +4728,7 @@ mod tests {
                 arr.as_mut_ptr().cast(),
                 2,
                 core::mem::size_of::<i32>(),
-                cmp_i32_stress,
+                Some(cmp_i32_stress),
             );
         }
         assert_eq!(arr, [1, 2]);
@@ -4183,7 +4744,7 @@ mod tests {
                 arr.as_mut_ptr().cast(),
                 50,
                 core::mem::size_of::<i32>(),
-                cmp_i32_stress,
+                Some(cmp_i32_stress),
             );
         }
         // Verify sorted.
@@ -4219,7 +4780,7 @@ mod tests {
                 arr.as_mut_ptr().cast(),
                 10,
                 core::mem::size_of::<Big>(),
-                cmp_big,
+                Some(cmp_big),
             );
         }
 
@@ -4237,7 +4798,7 @@ mod tests {
                 arr.as_mut_ptr().cast(),
                 60,
                 core::mem::size_of::<i32>(),
-                cmp_i32_stress,
+                Some(cmp_i32_stress),
             );
         }
         for i in 1..60 {
@@ -4264,7 +4825,7 @@ mod tests {
                 arr.as_ptr().cast(),
                 10,
                 core::mem::size_of::<i32>(),
-                cmp_i32_stress,
+                Some(cmp_i32_stress),
             )
         };
         assert!(!ret.is_null());
@@ -4281,7 +4842,7 @@ mod tests {
                 arr.as_ptr().cast(),
                 10,
                 core::mem::size_of::<i32>(),
-                cmp_i32_stress,
+                Some(cmp_i32_stress),
             )
         };
         assert!(!ret.is_null());
@@ -4298,7 +4859,7 @@ mod tests {
                 arr.as_ptr().cast(),
                 10,
                 core::mem::size_of::<i32>(),
-                cmp_i32_stress,
+                Some(cmp_i32_stress),
             )
         };
         assert!(!ret.is_null());
@@ -4315,7 +4876,7 @@ mod tests {
                 arr.as_ptr().cast(),
                 5,
                 core::mem::size_of::<i32>(),
-                cmp_i32_stress,
+                Some(cmp_i32_stress),
             )
         };
         assert!(ret.is_null());
@@ -4331,7 +4892,7 @@ mod tests {
                 arr.as_ptr().cast(),
                 5,
                 core::mem::size_of::<i32>(),
-                cmp_i32_stress,
+                Some(cmp_i32_stress),
             )
         };
         assert!(ret.is_null());
@@ -4347,7 +4908,7 @@ mod tests {
                 arr.as_ptr().cast(),
                 5,
                 core::mem::size_of::<i32>(),
-                cmp_i32_stress,
+                Some(cmp_i32_stress),
             )
         };
         assert!(ret.is_null());
@@ -4363,7 +4924,7 @@ mod tests {
                 arr.as_ptr().cast(),
                 1,
                 core::mem::size_of::<i32>(),
-                cmp_i32_stress,
+                Some(cmp_i32_stress),
             )
         };
         assert!(!ret.is_null());
@@ -4380,7 +4941,7 @@ mod tests {
                 arr.as_ptr().cast(),
                 1,
                 core::mem::size_of::<i32>(),
-                cmp_i32_stress,
+                Some(cmp_i32_stress),
             )
         };
         assert!(ret.is_null());
@@ -4398,7 +4959,7 @@ mod tests {
                 arr.as_ptr().cast(),
                 256,
                 core::mem::size_of::<i32>(),
-                cmp_i32_stress,
+                Some(cmp_i32_stress),
             )
         };
         assert!(!ret.is_null());
@@ -4416,7 +4977,7 @@ mod tests {
                 arr.as_ptr().cast(),
                 256,
                 core::mem::size_of::<i32>(),
-                cmp_i32_stress,
+                Some(cmp_i32_stress),
             )
         };
         assert!(ret.is_null());
@@ -4435,7 +4996,7 @@ mod tests {
                 arr.as_ptr().cast(),
                 2,
                 4,
-                cmp_i32_stress,
+                Some(cmp_i32_stress),
             )
         };
         let r2 = unsafe {
@@ -4444,7 +5005,7 @@ mod tests {
                 arr.as_ptr().cast(),
                 2,
                 4,
-                cmp_i32_stress,
+                Some(cmp_i32_stress),
             )
         };
         let r3 = unsafe {
@@ -4453,7 +5014,7 @@ mod tests {
                 arr.as_ptr().cast(),
                 2,
                 4,
-                cmp_i32_stress,
+                Some(cmp_i32_stress),
             )
         };
 
@@ -4886,21 +5447,108 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
-    // strtold — LP64 alias for strtod
+    // strtold -- at the long double's own precision
     // -----------------------------------------------------------------------
+
+    /// A `long double`'s bits, `(sign_exp, significand)`.
+    fn ld_bits(v: crate::x87::LongDouble) -> (u16, u64) {
+        (v.sign_exp, v.significand)
+    }
 
     #[test]
     fn test_strtold_basic() {
         let s = b"3.14\0";
         let mut end: *const u8 = core::ptr::null();
         let val = unsafe { strtold(s.as_ptr(), &raw mut end) };
-        assert!((val - 3.14).abs() < 0.001);
+        // 3.14 to 64 bits: 0xc8f5c28f5c28f5c3 * 2^-62, rounded up.
+        assert_eq!(ld_bits(val), (0x4000, 0xC8F5_C28F_5C28_F5C3));
+        assert_eq!(end, unsafe { s.as_ptr().add(4) });
     }
 
     #[test]
     fn test_strtold_null() {
         let val = unsafe { strtold(core::ptr::null(), core::ptr::null_mut()) };
-        assert_eq!(val, 0.0);
+        assert_eq!(ld_bits(val), (0, 0));
+    }
+
+    /// The digits a `double` cannot hold: 2^64 + 1 is a `long double`, and
+    /// 0.1 has eleven more bits than a `double` gives it.
+    #[test]
+    fn strtold_keeps_all_64_bits() {
+        let v = unsafe { strtold(b"18446744073709551617\0".as_ptr(), core::ptr::null_mut()) };
+        // 2^64 + 1 needs 65 bits: a tie between 2^64 and 2^64 + 2, to even.
+        assert_eq!(ld_bits(v), (0x403F, 0x8000_0000_0000_0000));
+        let v = unsafe { strtold(b"18446744073709551615\0".as_ptr(), core::ptr::null_mut()) };
+        assert_eq!(ld_bits(v), (0x403E, u64::MAX));
+        let v = unsafe { strtold(b"0.1\0".as_ptr(), core::ptr::null_mut()) };
+        assert_eq!(ld_bits(v), (0x3FFB, 0xCCCC_CCCC_CCCC_CCCD));
+        let v = unsafe {
+            strtold(
+                b"-0x1.fffffffffffffffep+16383\0".as_ptr(),
+                core::ptr::null_mut(),
+            )
+        };
+        assert_eq!(ld_bits(v), (0xFFFE, u64::MAX));
+    }
+
+    /// The range ends: the least subnormal, the greatest finite value, and
+    /// one past each; `ERANGE` as glibc sets it.
+    #[test]
+    fn strtold_range_ends() {
+        let conv = |t: &[u8]| {
+            crate::errno::set_errno(0);
+            let v = unsafe { strtold(t.as_ptr(), core::ptr::null_mut()) };
+            (
+                ld_bits(v),
+                crate::errno::get_errno() == crate::errno::ERANGE,
+            )
+        };
+        assert_eq!(
+            conv(b"1.18973149535723176502e+4932\0"),
+            ((0x7FFE, u64::MAX), false)
+        );
+        assert_eq!(conv(b"1.2e4932\0"), ((0x7FFF, 1 << 63), true));
+        assert_eq!(conv(b"3.64519953188247460253e-4951\0"), ((0, 1), true));
+        assert_eq!(conv(b"1e-4952\0"), ((0, 0), true));
+        assert_eq!(conv(b"1e-10000\0"), ((0, 0), true));
+        assert_eq!(conv(b"1e10000\0"), ((0x7FFF, 1 << 63), true));
+        // The least normal number is no error, and neither is an exact
+        // subnormal.
+        assert_eq!(conv(b"0x1p-16382\0"), ((0x0001, 1 << 63), false));
+        assert_eq!(conv(b"0x1p-16445\0"), ((0, 1), false));
+    }
+
+    /// NaN and infinity keep their sign; a payload lands in the low 62 bits.
+    #[test]
+    fn strtold_nan_and_infinity() {
+        let v = unsafe { strtold(b"-inf\0".as_ptr(), core::ptr::null_mut()) };
+        assert_eq!(ld_bits(v), (0xFFFF, 1 << 63));
+        let v = unsafe { strtold(b"nan\0".as_ptr(), core::ptr::null_mut()) };
+        assert_eq!(ld_bits(v), (0x7FFF, 0xC000_0000_0000_0000));
+        let v = unsafe { strtold(b"-nan(0x12)\0".as_ptr(), core::ptr::null_mut()) };
+        assert_eq!(ld_bits(v), (0xFFFF, 0xC000_0000_0000_0012));
+    }
+
+    /// A literal longer than a `double`'s 768 digits spills its digits to
+    /// the heap, and every one of them still counts: this is the midpoint
+    /// between 1 and the next `long double` up, `1 + 2^-64`, written out in
+    /// full and then nudged either side.
+    #[test]
+    fn strtold_digits_past_a_doubles_worth() {
+        // 2^-64 = 5.42101086242752217003726400434970855712890625e-20 exactly,
+        // so 1 + 2^-64 has 64 significant decimal digits; padded with
+        // zeroes to 2000 digits it is still the exact tie.
+        let mut tie =
+            b"1.0000000000000000000542101086242752217003726400434970855712890625".to_vec();
+        tie.resize(2002, b'0');
+        let mut above = tie.clone();
+        above.push(b'1');
+        tie.push(0);
+        above.push(0);
+        let v = unsafe { strtold(tie.as_ptr(), core::ptr::null_mut()) };
+        assert_eq!(ld_bits(v), (0x3FFF, 1 << 63), "a tie goes to even");
+        let v = unsafe { strtold(above.as_ptr(), core::ptr::null_mut()) };
+        assert_eq!(ld_bits(v), (0x3FFF, (1 << 63) | 1), "a hair above goes up");
     }
 
     // -----------------------------------------------------------------------
@@ -4929,213 +5577,6 @@ mod tests {
     fn test_atof_with_exponent() {
         let val = unsafe { atof(b"1e3\0".as_ptr()) };
         assert!((val - 1000.0).abs() < 0.1);
-    }
-
-    // -----------------------------------------------------------------------
-    // srandom / random
-    // -----------------------------------------------------------------------
-
-    #[test]
-    fn test_srandom_random_deterministic() {
-        srandom(42);
-        let a = random();
-        srandom(42);
-        let b = random();
-        assert_eq!(a, b, "Same seed should produce same sequence");
-    }
-
-    #[test]
-    fn test_random_range() {
-        srandom(1);
-        for _ in 0..20 {
-            let val = random();
-            assert!(val >= 0, "random() must be non-negative");
-            assert!(val < (1_i64 << 31), "random() must be < 2^31");
-        }
-    }
-
-    #[test]
-    fn test_random_different_seeds_differ() {
-        srandom(1);
-        let a = random();
-        srandom(999);
-        let b = random();
-        assert_ne!(a, b, "Different seeds should produce different values");
-    }
-
-    // -----------------------------------------------------------------------
-    // initstate / setstate
-    // -----------------------------------------------------------------------
-
-    #[test]
-    fn test_initstate_valid() {
-        let mut buf = [0u8; 256];
-        let ret = unsafe { initstate(42, buf.as_mut_ptr(), 256) };
-        assert!(!ret.is_null());
-        assert_eq!(ret, buf.as_mut_ptr());
-    }
-
-    #[test]
-    fn test_initstate_null_returns_null() {
-        let ret = unsafe { initstate(42, core::ptr::null_mut(), 256) };
-        assert!(ret.is_null());
-    }
-
-    #[test]
-    fn test_initstate_too_small_returns_null() {
-        let mut buf = [0u8; 4];
-        let ret = unsafe { initstate(42, buf.as_mut_ptr(), 4) };
-        assert!(ret.is_null(), "Buffer too small for initstate");
-    }
-
-    #[test]
-    fn test_setstate_returns_input() {
-        let mut buf = [0u8; 256];
-        let ret = unsafe { setstate(buf.as_mut_ptr()) };
-        assert_eq!(ret, buf.as_mut_ptr());
-    }
-
-    #[test]
-    fn test_setstate_null_returns_null() {
-        let ret = unsafe { setstate(core::ptr::null_mut()) };
-        assert!(ret.is_null());
-    }
-
-    // -----------------------------------------------------------------------
-    // drand48 / lrand48 / mrand48 / srand48 / seed48
-    // -----------------------------------------------------------------------
-
-    #[test]
-    fn test_srand48_drand48_deterministic() {
-        let _g = lock_rand48_for_test();
-        srand48(123);
-        let a = drand48();
-        srand48(123);
-        let b = drand48();
-        assert_eq!(a, b, "Same seed should produce same drand48 value");
-    }
-
-    #[test]
-    fn test_drand48_range() {
-        let _g = lock_rand48_for_test();
-        srand48(42);
-        for _ in 0..20 {
-            let val = drand48();
-            assert!(val >= 0.0, "drand48 must be >= 0");
-            assert!(val < 1.0, "drand48 must be < 1");
-        }
-    }
-
-    #[test]
-    fn test_lrand48_range() {
-        let _g = lock_rand48_for_test();
-        srand48(42);
-        for _ in 0..20 {
-            let val = lrand48();
-            assert!(val >= 0, "lrand48 must be non-negative");
-            assert!(val < (1_i64 << 31), "lrand48 must be < 2^31");
-        }
-    }
-
-    #[test]
-    fn test_mrand48_signed() {
-        let _g = lock_rand48_for_test();
-        // mrand48 returns values in [-2^31, 2^31).
-        srand48(42);
-        // Just verify it doesn't crash and produces i64 values.
-        for _ in 0..20 {
-            let _val = mrand48();
-        }
-    }
-
-    #[test]
-    fn test_seed48_returns_old_seed() {
-        let _g = lock_rand48_for_test();
-        srand48(0);
-        let seed: [u16; 3] = [0x1234, 0x5678, 0x9ABC];
-        let old = seed48(seed.as_ptr());
-        assert!(!old.is_null(), "seed48 must return non-null old seed");
-    }
-
-    #[test]
-    fn test_seed48_null_returns_old_seed() {
-        let _g = lock_rand48_for_test();
-        let old = seed48(core::ptr::null());
-        assert!(
-            !old.is_null(),
-            "seed48(NULL) must still return old seed pointer"
-        );
-    }
-
-    #[test]
-    fn test_seed48_updates_state() {
-        let _g = lock_rand48_for_test();
-        let seed: [u16; 3] = [1, 2, 3];
-        seed48(seed.as_ptr());
-        let a = drand48();
-
-        // Re-seed with the same value.
-        seed48(seed.as_ptr());
-        let b = drand48();
-        assert_eq!(
-            a, b,
-            "Re-seeding with same values should reproduce sequence"
-        );
-    }
-
-    // -----------------------------------------------------------------------
-    // nrand48 / erand48 / jrand48
-    // -----------------------------------------------------------------------
-
-    #[test]
-    fn test_nrand48_caller_state() {
-        let mut xsubi: [u16; 3] = [1, 2, 3];
-        let val = nrand48(xsubi.as_mut_ptr());
-        assert!(val >= 0, "nrand48 must be non-negative");
-        assert!(val < (1_i64 << 31), "nrand48 must be < 2^31");
-        // State should have been updated.
-        assert!(xsubi != [1, 2, 3], "nrand48 must update caller state");
-    }
-
-    #[test]
-    fn test_nrand48_null_returns_zero() {
-        assert_eq!(nrand48(core::ptr::null_mut()), 0);
-    }
-
-    #[test]
-    fn test_erand48_range() {
-        let mut xsubi: [u16; 3] = [10, 20, 30];
-        let val = erand48(xsubi.as_mut_ptr());
-        assert!(val >= 0.0, "erand48 must be >= 0");
-        assert!(val < 1.0, "erand48 must be < 1");
-    }
-
-    #[test]
-    fn test_erand48_null_returns_zero() {
-        assert_eq!(erand48(core::ptr::null_mut()), 0.0);
-    }
-
-    #[test]
-    fn test_erand48_deterministic() {
-        let mut a: [u16; 3] = [100, 200, 300];
-        let mut b: [u16; 3] = [100, 200, 300];
-        let va = erand48(a.as_mut_ptr());
-        let vb = erand48(b.as_mut_ptr());
-        assert_eq!(va, vb, "Same state should produce same erand48 value");
-        assert_eq!(a, b, "States should match after identical sequences");
-    }
-
-    #[test]
-    fn test_jrand48_caller_state() {
-        let mut xsubi: [u16; 3] = [5, 10, 15];
-        let _val = jrand48(xsubi.as_mut_ptr());
-        // jrand48 returns signed values and updates state.
-        assert!(xsubi != [5, 10, 15], "jrand48 must update caller state");
-    }
-
-    #[test]
-    fn test_jrand48_null_returns_zero() {
-        assert_eq!(jrand48(core::ptr::null_mut()), 0);
     }
 
     // -----------------------------------------------------------------------
@@ -5392,7 +5833,7 @@ mod tests {
     }
 
     // ===================================================================
-    // Additional coverage — atoll, rand_r
+    // Additional coverage — atoll
     // ===================================================================
 
     #[test]
@@ -5403,32 +5844,6 @@ mod tests {
     #[test]
     fn test_atoll_negative_large() {
         assert_eq!(unsafe { atoll(b"-9876543210\0".as_ptr()) }, -9_876_543_210);
-    }
-
-    #[test]
-    fn test_rand_r_deterministic_same_seed() {
-        let mut seed: u32 = 123;
-        let a = unsafe { rand_r(&mut seed) };
-        let mut seed2: u32 = 123;
-        let b = unsafe { rand_r(&mut seed2) };
-        assert_eq!(a, b);
-    }
-
-    #[test]
-    fn test_rand_r_advances_seed() {
-        let mut seed: u32 = 42;
-        let original = seed;
-        let _ = unsafe { rand_r(&mut seed) };
-        assert_ne!(seed, original, "rand_r should advance the seed");
-    }
-
-    #[test]
-    fn test_rand_r_non_negative() {
-        let mut seed: u32 = 7;
-        for _ in 0..20 {
-            let val = unsafe { rand_r(&mut seed) };
-            assert!(val >= 0, "rand_r should return non-negative values");
-        }
     }
 
     #[test]
@@ -5740,6 +6155,60 @@ mod tests {
                 let got = unsafe { strtof(z.as_ptr(), core::ptr::null_mut()) };
                 assert_eq!(got, text.parse::<f32>().unwrap(), "strtof({text})");
             }
+        }
+    }
+
+    // -- A NULL comparison function (design-decisions.md §1115) --
+
+    /// Fewer than two elements are sorted without a comparison, so they take
+    /// a NULL `compar`, as in glibc; so does an empty `bsearch`.  (A NULL one
+    /// with work to do ends the process, which is not a test's to take.)
+    #[test]
+    fn a_null_compar_is_harmless_with_nothing_to_compare() {
+        let mut one = [9i32];
+        // SAFETY: a one-element array; nothing is compared.
+        unsafe {
+            qsort(one.as_mut_ptr().cast(), 1, 4, None);
+            qsort(core::ptr::null_mut(), 0, 4, None);
+            qsort_r(one.as_mut_ptr().cast(), 1, 4, None, core::ptr::null_mut());
+            assert!(bsearch(one.as_ptr().cast(), one.as_ptr().cast(), 0, 4, None).is_null());
+        }
+        assert_eq!(one, [9]);
+    }
+
+    /// glibc's bsearch computes every element from `base`, so a size of 0
+    /// compares `base` itself -- it was "not found" without a comparison.
+    #[test]
+    fn bsearch_of_size_zero_compares_the_base() {
+        extern "C" fn always_equal(_: *const u8, _: *const u8) -> i32 {
+            0
+        }
+        let base = 64 as *const u8;
+        // SAFETY: `always_equal` reads neither pointer.
+        let got = unsafe { bsearch(core::ptr::null(), base, 3, 0, Some(always_equal)) };
+        assert_eq!(got.cast_const(), base);
+    }
+
+    /// The `_l` conversions and the BSD `q` names answer as the functions
+    /// they stand for, end pointer included.
+    #[test]
+    fn the_locale_and_q_forms_are_their_functions() {
+        let s = b"  -0x1Fg\0".as_ptr();
+        let (mut a, mut b): (*const u8, *const u8) = (core::ptr::null(), core::ptr::null());
+        // SAFETY: a NUL-terminated string; the end pointers are locals.
+        unsafe {
+            assert_eq!(strtol_l(s, &raw mut a, 16, 0), strtol(s, &raw mut b, 16));
+            assert_eq!(a, b);
+            assert_eq!(strtoll_l(s, core::ptr::null_mut(), 0, 0), -31);
+            assert_eq!(strtoq(s, core::ptr::null_mut(), 0), -31);
+            assert_eq!(
+                strtoul_l(s, core::ptr::null_mut(), 16, 0),
+                strtoul(s, core::ptr::null_mut(), 16)
+            );
+            assert_eq!(
+                strtoull_l(s, core::ptr::null_mut(), 16, 0),
+                strtouq(s, core::ptr::null_mut(), 16)
+            );
         }
     }
 }

@@ -66,6 +66,12 @@
  *     8  /bin/python3 could not be EXEC'd -- missing from the image or not
  *        executable. A fact about the image, not about the pty or the REPL.
  *
+ * On 3 and 4 the fixture also prints what it DID read from the master --
+ * escaped, the first KiB -- and how the interpreter ended, so the serial log
+ * carries the evidence: a traceback, a "Fatal Python error", a prompt with
+ * nothing after it. Until 2026-09-26 it printed neither, and exit 4 sat red
+ * on every boot with nothing to say which of those it was.
+ *
  * 8 exists because 2 was standing for it. The child execs `/bin/python3` and
  * `_exit(127)`s if that fails; the parent then writes to the master WITHOUT
  * having reaped it, the slave is already closed, the write gets EIO, and the
@@ -84,7 +90,9 @@
  */
 
 #include <errno.h>
+#include <fcntl.h>
 #include <poll.h>
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/wait.h>
@@ -124,6 +132,79 @@ static void emit(const char *s)
         ssize_t written = write(1, s, n);
         (void)written;
     }
+}
+
+/* Write `v` in decimal. */
+static void emit_long(long v)
+{
+    char d[24];
+    size_t i = sizeof d - 1;
+    unsigned long u = (v < 0) ? (unsigned long)(-(v + 1)) + 1UL : (unsigned long)v;
+    d[i] = '\0';
+    do {
+        d[--i] = (char)('0' + (int)(u % 10UL));
+        u /= 10UL;
+    } while (u != 0UL && i > 1);
+    if (v < 0) {
+        d[--i] = '-';
+    }
+    emit(d + i);
+}
+
+/* Write the first KiB of what the interpreter sent, every byte that is not
+ * printable ASCII shown as \xHH, so an echo, a prompt and an error message can
+ * be told apart in the serial log. A failure's evidence, not a transcript. */
+static void emit_received(const char *buf, long n)
+{
+    static const char hex[] = "0123456789abcdef";
+    char out[4 * 1024 + 1];
+    size_t o = 0;
+    if (n > 1024) {
+        n = 1024;
+    }
+    for (long i = 0; i < n; i++) {
+        unsigned char c = (unsigned char)buf[i];
+        if (c >= 0x20 && c < 0x7f && c != '\\') {
+            out[o++] = (char)c;
+        } else {
+            out[o++] = '\\';
+            out[o++] = 'x';
+            out[o++] = hex[c >> 4];
+            out[o++] = hex[c & 0xf];
+        }
+    }
+    out[o] = '\0';
+    emit(out);
+}
+
+/* How did the interpreter end -- or has it not? Bounded like every other wait
+ * here: a counted spin on `WNOHANG` with `sched_yield`. */
+static void report_child(pid_t child)
+{
+    for (long i = 0; i < SPIN; i++) {
+        int status = 0;
+        pid_t got = waitpid(child, &status, WNOHANG);
+        if (got == child) {
+            if (WIFEXITED(status)) {
+                emit("[py] the interpreter exited with status ");
+                emit_long((long)WEXITSTATUS(status));
+            } else if (WIFSIGNALED(status)) {
+                emit("[py] the interpreter was ended by signal ");
+                emit_long((long)WTERMSIG(status));
+            } else {
+                emit("[py] the interpreter stopped, status word ");
+                emit_long((long)status);
+            }
+            emit("\n");
+            return;
+        }
+        if (got < 0) {
+            emit("[py] waitpid could not say how the interpreter ended\n");
+            return;
+        }
+        sched_yield();
+    }
+    emit("[py] the interpreter is still running\n");
 }
 
 /* Is `fd` readable right now? Zero timeout, so this never waits.
@@ -230,6 +311,154 @@ static int exec_failed(pid_t child)
     return 0;
 }
 
+/* ---------------------------------------------------------------------------
+ * THE STDIO PROBE (2026-09-27) -- CPython's line read, without CPython.
+ *
+ * On the boot of c721b2a13 the interpreter read `print(6*7)` as five lines of
+ * three bytes each -- `\x80\x1b0`, `@\x973`, `P\x9b3`, `\xc0C3`, `\xd0G3` --
+ * printed five SyntaxErrors, never printed its `>>> ` prompt, and exited 0.
+ * Each "line" is a little-endian pointer into libc malloc's own regions
+ * (0x6000301b80, 0x6000339740, ...) cut short by the pointer's zero byte:
+ * dlmalloc's free-list link, left in a block that was recycled. So what the
+ * tokenizer read was a buffer nothing had written -- which, in
+ * `PyOS_StdioReadline`, means `fgets` said "done" without putting a byte in it,
+ * or wrote somewhere else.
+ *
+ * Whether that is this libc's stdio on a pty or something only the
+ * interpreter does is the first question, and one boot can answer it: do
+ * exactly what CPython 3.12 does -- `-u` makes `config_init_stdio` set all
+ * three streams `_IONBF`; `PyOS_StdioReadline` flushes stdout, prints the
+ * prompt to stderr with `fprintf`, `realloc`s a 100-byte buffer from NULL and
+ * `fgets` into it -- in a forked child on a pty of its own, and report what
+ * came back with `write`, not stdio. Then the same without `setvbuf`. The
+ * verdict of this fixture is still the interpreter's; the probe only prints.
+ *
+ * THE ANSWER was neither, and the probe could not have given it: C's `stdin`
+ * was a NULL pointer (the library exported the integers 0, 1 and 2 for the
+ * three streams), and CPython's tokenizer takes `fp == NULL` for "the input
+ * is a string" -- so the interpreter never called `fgets` at all, and parsed
+ * its own uninitialised buffer. Every stdio call made with that NULL worked,
+ * which is why a probe that makes the calls passes; only a comparison with
+ * NULL fails. Fixed 2026-09-27 (known-issues.md,
+ * `D-POSIX-STDIN-WAS-A-NULL-POINTER`). The probe stays as a check that a
+ * line typed at a pty reaches `fgets`, buffered and not.
+ * ------------------------------------------------------------------------- */
+
+static size_t append(char *out, size_t o, size_t cap, const char *s)
+{
+    while (*s != '\0' && o + 1 < cap) {
+        out[o++] = *s++;
+    }
+    out[o] = '\0';
+    return o;
+}
+
+static size_t append_long(char *out, size_t o, size_t cap, long v)
+{
+    char d[24];
+    size_t i = sizeof d - 1;
+    unsigned long u = (v < 0) ? (unsigned long)(-(v + 1)) + 1UL : (unsigned long)v;
+    d[i] = '\0';
+    do {
+        d[--i] = (char)('0' + (int)(u % 10UL));
+        u /= 10UL;
+    } while (u != 0UL && i > 1);
+    if (v < 0) {
+        d[--i] = '-';
+    }
+    return append(out, o, cap, d + i);
+}
+
+static size_t append_hex(char *out, size_t o, size_t cap, const unsigned char *p, size_t n)
+{
+    static const char hex[] = "0123456789abcdef";
+    for (size_t i = 0; i < n && o + 4 < cap; i++) {
+        out[o++] = hex[p[i] >> 4];
+        out[o++] = hex[p[i] & 0xf];
+        out[o++] = ' ';
+    }
+    out[o] = '\0';
+    return o;
+}
+
+static void stdio_probe_child(int unbuffered)
+{
+    if (unbuffered) {
+        setvbuf(stdin, (char *)NULL, _IONBF, BUFSIZ);
+        setvbuf(stdout, (char *)NULL, _IONBF, BUFSIZ);
+        setvbuf(stderr, (char *)NULL, _IONBF, BUFSIZ);
+    }
+    int fl = fcntl(0, F_GETFL);
+    int tty = isatty(fileno(stdin));
+    fflush(stdout);
+    fprintf(stderr, "%s", ">>> ");
+    fflush(stderr);
+    char *p = (char *)realloc((void *)0, 100);
+    if (p == (char *)0) {
+        _exit(3);
+    }
+    memset(p, 'Z', 100);
+    p[99] = '\0';
+    errno = 0;
+    clearerr(stdin);
+    char *r = fgets(p, 100, stdin);
+    int err = errno;
+    char out[1024];
+    size_t o = 0;
+    o = append(out, o, sizeof out, "{probe isatty=");
+    o = append_long(out, o, sizeof out, (long)tty);
+    o = append(out, o, sizeof out, " fl=");
+    o = append_long(out, o, sizeof out, (long)fl);
+    o = append(out, o, sizeof out, (r == p) ? " fgets=buf" : (r == (char *)0) ? " fgets=NULL" : " fgets=OTHER");
+    o = append(out, o, sizeof out, " errno=");
+    o = append_long(out, o, sizeof out, (long)err);
+    o = append(out, o, sizeof out, " feof=");
+    o = append_long(out, o, sizeof out, (long)feof(stdin));
+    o = append(out, o, sizeof out, " ferror=");
+    o = append_long(out, o, sizeof out, (long)ferror(stdin));
+    o = append(out, o, sizeof out, " strlen=");
+    o = append_long(out, o, sizeof out, (long)strlen(p));
+    o = append(out, o, sizeof out, " bytes=");
+    o = append_hex(out, o, sizeof out, (const unsigned char *)p, 16);
+    o = append(out, o, sizeof out, "}\n");
+    ssize_t w = write(1, out, o);
+    (void)w;
+    _exit(0);
+}
+
+static void stdio_probe(int unbuffered)
+{
+    int pm = -1;
+    char pbuf[CAP];
+    long ptotal = 0;
+    pbuf[0] = '\0';
+    pid_t pc = forkpty(&pm, (char *)0, (const void *)0, (const void *)0);
+    if (pc < 0) {
+        emit("[py] probe: forkpty failed\n");
+        return;
+    }
+    if (pc == 0) {
+        stdio_probe_child(unbuffered);
+    }
+    if (write_all(pm, "print(6*7)\n") != 0) {
+        emit("[py] probe: writing the line failed\n");
+    }
+    int found = scan_for(pm, "}", pbuf, SPIN * 4L, &ptotal);
+    emit(unbuffered ? "[py] probe, streams _IONBF (as -u)" : "[py] probe, streams as they start");
+    emit(found ? ": " : " (no report): ");
+    emit_received(pbuf, ptotal);
+    emit("\n");
+    for (long i = 0; i < SPIN; i++) {
+        int status = 0;
+        pid_t got = waitpid(pc, &status, WNOHANG);
+        if (got == pc || got < 0) {
+            break;
+        }
+        sched_yield();
+    }
+    close(pm);
+}
+
 int main(void)
 {
     int master = -1;
@@ -237,6 +466,9 @@ int main(void)
     long total = 0;
 
     buf[0] = '\0';
+
+    stdio_probe(1);
+    stdio_probe(0);
 
     emit("[py] fork (interpreter on the slave end of a pty)\n");
     pid_t child = forkpty(&master, (char *)0, (const void *)0, (const void *)0);
@@ -288,7 +520,15 @@ int main(void)
     if (!scan_for(master, "42", buf, STARTUP_SPIN, &total)) {
         /* Nothing at all means the interpreter never started -- a loader or
          * staging fault. Output without the answer means it started and the
-         * REPL did not evaluate, which is this fixture's subject. */
+         * REPL did not evaluate, which is this fixture's subject. Either way,
+         * say what came back and how the interpreter ended: that is the
+         * finding, and the exit code alone is not. */
+        emit("[py] received ");
+        emit_long(total);
+        emit(" byte(s): ");
+        emit_received(buf, total);
+        emit("\n");
+        report_child(child);
         return (total == 0) ? 3 : 4;
     }
 

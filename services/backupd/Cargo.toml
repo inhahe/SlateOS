@@ -1,0 +1,17 @@
+[package]
+name = "backupd"
+version = "0.1.0"
+edition = "2024"
+description = "Runs every account's scheduled backups, as that account, at boot and every 15 minutes"
+
+# A `std` daemon, unlike the bare-metal services beside it: it runs children,
+# reads their output on threads and reads the user database through the C
+# library, so it is a workspace member built for x86_64-slateos like the
+# programs in userspace/ (the root Cargo.toml says why a member may live here).
+
+[lints]
+workspace = true
+
+[dependencies]
+journalrec = { path = "../../userspace/journalrec" }
+quoting = { path = "../../userspace/quoting" }

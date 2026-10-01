@@ -456,8 +456,8 @@ MUTATIONS = [
     ),
     (
         "no hit box is recorded for a device bar",
-        "            fill(f, r, if open { SURFACE1 } else { SURFACE0 }, 5.0);\n            f.hit(target, r);",
-        "            fill(f, r, if open { SURFACE1 } else { SURFACE0 }, 5.0);",
+        "                5.0,\n            );\n            f.hit(target, r);",
+        "                5.0,\n            );",
         ["the_device_bars_open_the_picker_they_name"],
     ),
     (
@@ -694,8 +694,8 @@ MUTATIONS = [
     ),
     (
         "the sheet does not block the controls underneath it",
-        "        f.hit(Target::ClosePicker, l.window);\n\n        fill(f, l.sheet, MANTLE, 8.0);",
-        "        fill(f, l.sheet, MANTLE, 8.0);",
+        "        f.hit(Target::ClosePicker, l.window);\n\n        fill(f, l.sheet, self.palette.mantle, 8.0);",
+        "        fill(f, l.sheet, self.palette.mantle, 8.0);",
         ["while_the_sheet_is_up_no_click_reaches_the_controls_beneath_it"],
     ),
     (
@@ -763,8 +763,8 @@ MUTATIONS = [
     ),
     (
         "the layout is taken from the window it was built at, not the one asked for",
-        "        Layout::new(self.size.0, self.size.1, self.streams.len())",
-        "        Layout::new(WINDOW_WIDTH, WINDOW_HEIGHT, self.streams.len())",
+        "        self.layout_at(self.size.0, self.size.1)",
+        "        self.layout_at(WINDOW_WIDTH, WINDOW_HEIGHT)",
         ["the_layout_is_read_from_the_window_and_not_remembered"],
     ),
     (
@@ -837,6 +837,32 @@ MUTATIONS = [
         "    pub fn mute_of(&self, col: Rect) -> Rect {",
         "    pub fn mute_of(&self, col: Rect) -> Rect {\n        #[allow(clippy::needless_return)]\n        if true {\n            return self.name_of(col);\n        }",
         ["the_parts_of_a_column_stack_up_without_overlapping"],
+    ),
+    # 2026-09-28: the window opened on five invented programs and three
+    # invented devices, meters driven by a random number generator.
+    (
+        "the window opens on the invented set",
+        "        Self::nothing_to_mix(seed_from_system(FALLBACK_SEED))",
+        "        Self::with_seed(seed_from_system(FALLBACK_SEED))",
+        ["the_shipping_mixer_invents_nothing_and_says_why"],
+    ),
+    (
+        "nothing to mix is not said",
+        "        if self.streams.is_empty() && self.output_devices.is_empty() {",
+        "        if false {",
+        ["the_shipping_mixer_invents_nothing_and_says_why"],
+    ),
+    (
+        "nothing to mix is said over programs to mix",
+        "        if self.streams.is_empty() && self.output_devices.is_empty() {",
+        "        if true {",
+        ["the_shipping_mixer_invents_nothing_and_says_why"],
+    ),
+    (
+        "with nothing to mix the master takes the whole band",
+        "            EMPTY_BAND_COLUMNS",
+        "            0",
+        ["the_shipping_mixer_invents_nothing_and_says_why"],
     ),
 ]
 

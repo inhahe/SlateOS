@@ -294,10 +294,9 @@ apps/ircclient/src/main.rs:topic_set_by
 # none is on a path a user can currently reach.
 apps/musicplayer/src/main.rs:track_number
 
-# apps/paint --
-# Not yet triaged individually. Each is a value computed and discarded, and
-# none is on a path a user can currently reach.
-apps/paint/src/main.rs:active_slider
+# apps/paint -- PAID OFF 2026-09-27. `active_slider` is written by a press on
+# a colour slider and read by the drag that follows it: the colour dialog
+# works, opened by the swatches or C / Shift+C (find-options-only-emptied).
 
 # apps/pdfviewer -- PAID OFF 2026-09-27. `pdf_version` was written only by
 # `create_sample`, the invented lorem-ipsum document, which is `#[cfg(test)]`
@@ -340,15 +339,20 @@ apps/sysmonitor/src/main.rs:running_count
 # 2026-09-25): `TerminalState::paste` fences a paste when a program asked for
 # bracketed paste, and text marked blinking blinks on a clock of its own.
 
+# apps/speedtest -- PAID OFF 2026-09-27 (lane E, 6a49720f0). `probe_timer_secs`
+# surfaced when a `#[cfg(test)]` on a field stopped hiding the next item from
+# this gate: it was reset in production and read only by the test-only
+# `tick_latency`. The field, its initialiser and its only reader are
+# `#[cfg(test)]` together now, and a network run no longer writes it.
+
 # apps/torrent --
 # Not yet triaged individually. Each is a value computed and discarded, and
 # none is on a path a user can currently reach.
 apps/torrent/src/main.rs:completed_time
 
-# apps/whiteboard --
-# Not yet triaged individually. Each is a value computed and discarded, and
-# none is on a path a user can currently reach.
-apps/whiteboard/src/main.rs:marquee
+# apps/whiteboard -- PAID OFF 2026-09-27. `marquee` is gone: the selection
+# box works through `DragState::Marquee`, and this was a second copy only ever
+# cleared (find-options-only-emptied).
 
 # gui/desktop --
 # Five shell fields.
@@ -379,6 +383,27 @@ gui/desktop/src/file_drop.rs:ctrl_held
 gui/desktop/src/power.rs:low_battery_warned
 gui/desktop/src/resmon.rs:last_snapshot
 gui/desktop/src/window_peek.rs:last_tick_ms
+
+# gui/syntax -- NOT DEAD: read across the FFI boundary (2026-09-28, lane C).
+# `TSLexer`, `TSLanguage` and `LanguageMetadata` in src/ffi.rs are
+# `#[repr(C)]` copies of tree-sitter's own C structs (design-decisions 1437):
+# the grammars fill them in (their statics are generated into OUT_DIR, which
+# this gate does not read) and the runtime, `tree-sitter-c2rust`, reads every
+# field through the pointer it is handed -- `abi_version` to accept the
+# grammar, `lex_fn` to lex, `result_symbol` for the token a lexer found. No
+# Rust source in this tree performs those reads, so they cannot be seen here.
+# The layout test in ffi.rs pins where each field is, and
+# `the_runtime_reads_each_grammar_as_it_was_written` asks the runtime for the
+# ones at the struct's far end.
+gui/syntax/src/ffi.rs:abi_version
+gui/syntax/src/ffi.rs:external_scanner
+gui/syntax/src/ffi.rs:keyword_lex_fn
+gui/syntax/src/ffi.rs:lex_fn
+gui/syntax/src/ffi.rs:major_version
+gui/syntax/src/ffi.rs:minor_version
+gui/syntax/src/ffi.rs:patch_version
+gui/syntax/src/ffi.rs:result_symbol
+gui/syntax/src/ffi.rs:symbol_count
 
 # gui/toolkit --
 # Not yet triaged individually. Each is a value computed and discarded, and

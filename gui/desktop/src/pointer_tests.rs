@@ -190,6 +190,11 @@ fn the_start_button_opens_and_closes_the_menu() {
 
 /// The point of the whole exercise: the Settings entry a user sees in the start
 /// menu has to actually start the Settings application.
+///
+/// Scrolled to as a user would, a wheel detent at a time: the menu lists every
+/// program SlateOS has (fifteen since 2026-09-27, from `gui/programs`), and
+/// Settings is not in the first screenful. The test asserted it was, which was
+/// true of a ten-program table and says nothing about the click.
 #[test]
 fn clicking_settings_in_the_start_menu_asks_for_the_settings_program() {
     let mut shell = shell();
@@ -202,12 +207,18 @@ fn clicking_settings_in_the_start_menu_asks_for_the_settings_program() {
             |row| matches!(row, crate::StartRow::Program { entry, .. } if entry.name == "Settings"),
         )
         .expect("the start menu must offer Settings");
-    assert!(
-        row < shell.start_menu_visible_rows(),
-        "Settings must be reachable without scrolling first"
-    );
+    let visible = shell.start_menu_visible_rows();
+    let (x, y) = centre(shell.start_menu_row_rect(0));
+    while row >= shell.start_menu_scroll + visible {
+        let before = shell.start_menu_scroll;
+        shell.handle_mouse(&scroll(x, y, -1.0));
+        assert!(
+            shell.start_menu_scroll > before,
+            "the list would not scroll as far as Settings"
+        );
+    }
 
-    let rect = shell.start_menu_row_rect(row);
+    let rect = shell.start_menu_row_rect(row - shell.start_menu_scroll);
     let action = choose_at(&mut shell, rect);
     assert_eq!(
         action,
@@ -500,9 +511,10 @@ fn the_start_menu_glows_and_has_a_light_inside_its_edge() {
     });
 }
 
-/// **The search field is the reference's `aero-sm-search`**: a well with a
-/// quiet line round it -- not the accent's ring -- and a magnifier at its
-/// start, before the hint and before anything typed.
+/// **The search field is the reference's `aero-sm-search`**, drawn as the
+/// toolkit's field: a well with a quiet line round it -- not a focus mark,
+/// though it has the keyboard -- and a magnifier at its start, before the hint
+/// and before anything typed.
 #[test]
 fn the_start_menu_search_field_is_a_well_with_a_magnifier() {
     let mut shell = shell();
@@ -511,10 +523,14 @@ fn the_start_menu_search_field_is_a_well_with_a_magnifier() {
     let same =
         |x: f32, y: f32, w: f32, h: f32| (x, y, w, h) == (field.x, field.y, field.w, field.h);
     let tree = shell.render_start_menu().expect("open");
+    let quiet = guitk::field::paint(
+        &guitk::palette::Palette::from_settings(&shell.appearance),
+        guitk::field::State::default(),
+    );
     assert!(
         tree.commands.iter().any(|c| matches!(c,
             RenderCommand::FillRect { x, y, width, height, color, .. }
-                if same(*x, *y, *width, *height) && *color == shell.theme.start_menu_field_bg)),
+                if same(*x, *y, *width, *height) && *color == quiet.well)),
         "the field is not a well"
     );
     let rings: Vec<guitk::color::Color> = tree
@@ -534,8 +550,8 @@ fn the_start_menu_search_field_is_a_well_with_a_magnifier() {
         .collect();
     assert_eq!(
         rings,
-        [shell.theme.start_menu_field_border],
-        "the field's line is not the quiet border alone"
+        [quiet.edge],
+        "the field's line is not the quiet edge alone"
     );
 
     // The magnifier, inside the field at its start.
@@ -2715,10 +2731,12 @@ fn this_pc_opens_the_root_in_the_file_manager() {
     });
 }
 
-/// **The Recycle Bin says it cannot show its contents yet**, rather than
-/// opening its storage -- internal folders named by ids -- or nothing at all.
+/// **The Recycle Bin opens the file manager's view of the bin** -- each item
+/// under its own name, with Restore -- not the bin's storage, internal folders
+/// named by ids. Until the file manager had that view (`explorer
+/// --recycle-bin`, lane E) the icon said it could not show the bin.
 #[test]
-fn the_recycle_bin_says_it_cannot_show_its_contents_yet() {
+fn the_recycle_bin_opens_the_file_managers_view_of_it() {
     settingsfile::testing::with_scratch_config("icons-open-bin", |_root| {
         let mut shell = shell_with_icons();
         let id = shell
@@ -2733,10 +2751,17 @@ fn the_recycle_bin_says_it_cannot_show_its_contents_yet() {
             })
             .expect("the Recycle Bin is a default icon");
 
-        assert_eq!(double_click_icon(&mut shell, id), ShellAction::Consumed);
-        let notices = cannot_open_notices(&shell);
-        assert_eq!(notices.len(), 1, "{notices:?}");
-        assert_eq!(notices[0].0, "Cannot open Recycle Bin");
+        assert_eq!(
+            double_click_icon(&mut shell, id),
+            ShellAction::Launch(crate::hotkeys::Launch {
+                program: std::path::PathBuf::from(launcher::FILE_MANAGER),
+                args: vec![std::ffi::OsString::from("--recycle-bin")],
+            })
+        );
+        assert!(
+            cannot_open_notices(&shell).is_empty(),
+            "the bin still says it cannot be shown"
+        );
     });
 }
 
@@ -4400,4 +4425,54 @@ fn a_press_on_a_place_first_closes_the_power_menu() {
     assert_eq!(click_at(&mut shell, rect), ShellAction::Consumed);
     assert!(!shell.power_menu_open);
     assert!(shell.start_menu_open, "the start menu closed as well");
+}
+
+/// **The user's focus width reaches the shell's own text fields.** The shell
+/// had never read `focus_ring_scale`; its fields are the toolkit's now
+/// (`guitk::field`), and the Run box and an icon's rename field draw their
+/// focus mark -- the built-in theme's halo -- at the width the settings ask
+/// for, pushed in with the caret width.
+#[test]
+fn the_users_focus_width_reaches_the_shells_text_fields() {
+    let mut shell = shell();
+    let mut settings = shell.appearance.clone();
+    settings.focus_ring_scale = 3.0;
+    let wanted = settings.focus_ring_width();
+    shell.set_appearance(settings);
+    let p = guitk::palette::Palette::from_settings(&shell.appearance);
+    let halo_widths = |cmds: &[RenderCommand]| -> Vec<f32> {
+        cmds.iter()
+            .filter_map(|c| match c {
+                RenderCommand::StrokeRect {
+                    color, line_width, ..
+                } if (color.r, color.g, color.b) == (p.accent.r, p.accent.g, p.accent.b)
+                    && color.a < 255 =>
+                {
+                    Some(*line_width)
+                }
+                _ => None,
+            })
+            .collect()
+    };
+
+    shell.run_dialog.show();
+    assert_eq!(
+        halo_widths(&shell.run_dialog.render(&p)),
+        [wanted],
+        "the Run box's field"
+    );
+
+    let id = icon_for(
+        &mut shell,
+        "notes.txt",
+        std::path::Path::new("/tmp/notes.txt"),
+    );
+    assert!(shell.icons.begin_rename(id));
+    // (The selected icon's own outline is a faint accent line too, a pixel
+    // wide; the field's halo is the one at the user's width.)
+    let drawn = halo_widths(&shell.icons.render(&p));
+    assert!(
+        drawn.contains(&wanted) && !drawn.contains(&guitk::style::FOCUS_RING_WIDTH),
+        "the rename field's mark is not at the user's width: {drawn:?}"
+    );
 }

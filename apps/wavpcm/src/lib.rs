@@ -800,6 +800,36 @@ fn header(
     Ok((out, pad == 1))
 }
 
+/// `v` rounded to the nearest integer, halves away from zero, and clamped
+/// to `lo..=hi` -- what `v.round().clamp(lo, hi)` promises, for every `v`:
+/// NaN gives 0 as that cast did, and the infinities the ends.
+///
+/// Not `f64::round`, for two reasons. On this target's x86-64 baseline, which
+/// has no SSE4.1, it is a call into libm -- once per sample of every file
+/// written (lane F's finding, design-decisions.md section 1323). And not
+/// every libm keeps its promise: mingw's rounds -0.49999999999999994 to -1,
+/// and SlateOS's own computes `floor(x + 0.5)`, which gives 1 for the
+/// positive one (the addition rounds 0.99999999999999994 up to 1.0) and adds
+/// one to every odd integer from 2^52 to 2^53. The cast truncates in one
+/// instruction, and what it cut off is exact: the fraction of a double is
+/// itself a double, so comparing it with a half decides the rounding with no
+/// error. Past 2^52 a double has no fraction and the cast is the answer; past
+/// what an `i64` holds the cast saturates and the fraction, huge, only pushes
+/// further the way the clamp was going anyway.
+#[allow(
+    clippy::cast_possible_truncation,
+    clippy::cast_precision_loss,
+    reason = "the truncation is the point; the integer it gives came from a double"
+)]
+fn round_clamped(v: f64, lo: i64, hi: i64) -> i64 {
+    let whole = v as i64;
+    let frac = v - whole as f64;
+    whole
+        .saturating_add(i64::from(frac >= 0.5))
+        .saturating_sub(i64::from(frac <= -0.5))
+        .clamp(lo, hi)
+}
+
 /// One sample, in `format`, onto `out`.
 #[allow(
     clippy::cast_possible_truncation,
@@ -808,29 +838,32 @@ fn header(
 )]
 fn encode_sample(format: SampleFormat, s: f32, dither: &mut Dither, out: &mut Vec<u8>) {
     // Scaled to the target's full range, dithered, rounded and clamped.
-    let quantise = |scale: f32, dither: &mut Dither| -> f64 {
+    let quantise = |scale: i32, dither: &mut Dither| -> i64 {
         let v = f64::from(s) * f64::from(scale) + f64::from(dither.triangular());
-        v.round().clamp(-f64::from(scale), f64::from(scale) - 1.0)
+        let top = i64::from(scale);
+        round_clamped(v, top.saturating_neg(), top.saturating_sub(1))
     };
     match format {
         SampleFormat::U8 => {
-            let v = quantise(128.0, dither) + 128.0;
+            let v = quantise(128, dither).saturating_add(128);
             out.push(v as u8);
         }
         SampleFormat::I16 => {
-            out.extend_from_slice(&(quantise(32_768.0, dither) as i16).to_le_bytes());
+            out.extend_from_slice(&(quantise(32_768, dither) as i16).to_le_bytes());
         }
         SampleFormat::I24 => {
-            let v = quantise(8_388_608.0, dither) as i32;
+            let v = quantise(8_388_608, dither) as i32;
             let b = v.to_le_bytes();
             out.extend_from_slice(b.get(..3).unwrap_or(&[0, 0, 0]));
         }
         SampleFormat::I32 => {
             // No dither at 32 bits: f32 carries 24 bits, far above this
             // format's least significant one.
-            let v = (f64::from(s) * 2_147_483_648.0)
-                .round()
-                .clamp(-2_147_483_648.0, 2_147_483_647.0) as i32;
+            let v = round_clamped(
+                f64::from(s) * 2_147_483_648.0,
+                i64::from(i32::MIN),
+                i64::from(i32::MAX),
+            ) as i32;
             out.extend_from_slice(&v.to_le_bytes());
         }
         SampleFormat::F32 => out.extend_from_slice(&s.to_le_bytes()),
@@ -1072,6 +1105,164 @@ mod tests {
         let took = start.elapsed();
         assert_eq!(out.sample_rate, 48_000);
         println!("resample 10 s mono 44.1 kHz -> 48 kHz: {took:?}");
+    }
+
+    /// How long encoding a minute of sound takes, in each integer format.
+    ///
+    /// The quantiser rounds once per sample; on this target's x86-64
+    /// baseline `f64::round` is a call into libm (lane F, design-decisions.md
+    /// section 1323). Run: `cargo test -p wavpcm --release -- --ignored
+    /// --nocapture encode_speed`.
+    #[test]
+    #[ignore = "a measurement, not a test: run with --release --ignored"]
+    fn encode_speed() {
+        let audio = tone(48_000, 440.0, 60.0, 0.5);
+        for format in [
+            SampleFormat::U8,
+            SampleFormat::I16,
+            SampleFormat::I24,
+            SampleFormat::I32,
+        ] {
+            // Best of five, so a scheduling hiccup is not the figure.
+            let mut best = std::time::Duration::MAX;
+            for _ in 0..5 {
+                let start = std::time::Instant::now();
+                let out = encode(&audio, format, 7).expect("encodes");
+                best = best.min(start.elapsed());
+                std::hint::black_box(out);
+            }
+            println!("encode 60 s mono 48 kHz as {format:?}: {best:?}");
+        }
+    }
+
+    /// The rounding alone, both ways, over the same ten million values:
+    /// `f64::round` and a clamp, then `round_clamped`.
+    #[test]
+    #[ignore = "a measurement, not a test: run with --release --ignored"]
+    fn rounding_speed() {
+        let values: Vec<f64> = (0..10_000_000_u32)
+            .map(|i| (f64::from(i) * 0.618_033_988_7).sin() * 40_000.0)
+            .collect();
+        let time = |f: &dyn Fn(f64) -> i64| {
+            let mut best = std::time::Duration::MAX;
+            for _ in 0..7 {
+                let start = std::time::Instant::now();
+                let sum = values.iter().fold(0_i64, |acc, &v| {
+                    acc.wrapping_add(f(std::hint::black_box(v)))
+                });
+                best = best.min(start.elapsed());
+                std::hint::black_box(sum);
+            }
+            best
+        };
+        let libm = time(&|v| v.round().clamp(-32_768.0, 32_767.0) as i64);
+        let cast = time(&|v| round_clamped(v, -32_768, 32_767));
+        println!("ten million roundings: f64::round {libm:?}, round_clamped {cast:?}");
+    }
+
+    /// `v` rounded to the nearest integer, halves away from zero, by integer
+    /// arithmetic on its bits -- the rounding `f64::round` promises, worked
+    /// out without trusting any platform's `round` to keep the promise.
+    ///
+    /// Not `v.round()`, because they do not all keep it: on
+    /// `x86_64-pc-windows-gnu` (mingw's libm) `(-0.49999999999999994).round()`
+    /// is -1, and SlateOS's own libc computes `floor(x + 0.5)`, which is 1 for
+    /// the positive one -- the addition rounds 0.99999999999999994 up to 1.0.
+    /// `None` for NaN; the infinities saturate.
+    fn exact_round(v: f64) -> Option<i128> {
+        if v.is_nan() {
+            return None;
+        }
+        if v.is_infinite() {
+            return Some(if v > 0.0 { i128::MAX } else { i128::MIN });
+        }
+        let bits = v.to_bits();
+        let negative = bits >> 63 == 1;
+        let exponent = ((bits >> 52) & 0x7FF) as i32;
+        let fraction = bits & ((1_u64 << 52) - 1);
+        // |v| is mantissa x 2^power, exactly.
+        let (mantissa, power) = if exponent == 0 {
+            (fraction, -1074)
+        } else {
+            (fraction | (1 << 52), exponent - 1075)
+        };
+        let magnitude: i128 = if power >= 0 {
+            if power > 70 {
+                i128::MAX
+            } else {
+                i128::from(mantissa) << power
+            }
+        } else if power < -53 {
+            // Below 2^53 x 2^-54: under a half.
+            0
+        } else {
+            let shift = power.unsigned_abs();
+            let whole = i128::from(mantissa >> shift);
+            let rest = mantissa & ((1_u64 << shift) - 1);
+            whole + i128::from(rest >= 1_u64 << (shift - 1))
+        };
+        Some(if negative { -magnitude } else { magnitude })
+    }
+
+    /// The quantiser's rounding is exactly the round and clamp it replaced:
+    /// halves both ways, the double just short of a half, fractions at every
+    /// magnitude a sample reaches, the ends, and what is not a number.
+    #[test]
+    fn rounding_without_libm_gives_what_round_gave() {
+        let reference = |v: f64, lo: i64, hi: i64| {
+            exact_round(v).map_or(0, |r| r.clamp(i128::from(lo), i128::from(hi)) as i64)
+        };
+        // The reference itself, on the cases platforms get wrong.
+        assert_eq!(exact_round(0.499_999_999_999_999_94), Some(0));
+        assert_eq!(exact_round(-0.499_999_999_999_999_94), Some(0));
+        assert_eq!(exact_round(-0.5), Some(-1));
+        assert_eq!(exact_round(2.5), Some(3));
+        assert_eq!(
+            exact_round(4_503_599_627_370_497.0),
+            Some(4_503_599_627_370_497)
+        );
+        let mut values = vec![
+            0.0,
+            -0.0,
+            f64::NAN,
+            f64::INFINITY,
+            f64::NEG_INFINITY,
+            f64::MAX,
+            f64::MIN,
+            f64::MIN_POSITIVE,
+            4_503_599_627_370_496.0, // 2^52
+            4_503_599_627_370_497.0,
+            9.3e18, // past i64::MAX
+            -9.3e18,
+        ];
+        for k in -40_i32..40 {
+            let half = f64::from(k) + 0.5;
+            values.extend([half, -half, half.next_down(), half.next_up()]);
+            values.extend([(-half).next_down(), (-half).next_up()]);
+        }
+        let mut x = 0x9E37_79B9_7F4A_7C15_u64;
+        for _ in 0..200_000 {
+            x ^= x << 13;
+            x ^= x >> 7;
+            x ^= x << 17;
+            // A sample's range and past it, at every scale the formats use.
+            let unit = (x >> 11) as f64 / (1_u64 << 53) as f64 * 4.0 - 2.0;
+            for scale in [128.0, 32_768.0, 8_388_608.0, 2_147_483_648.0] {
+                values.push(unit * scale);
+            }
+        }
+        for (lo, hi) in [(-128, 127), (-32_768, 32_767), (-8_388_608, 8_388_607)]
+            .into_iter()
+            .chain([(i64::from(i32::MIN), i64::from(i32::MAX))])
+        {
+            for &v in &values {
+                assert_eq!(
+                    round_clamped(v, lo, hi),
+                    reference(v, lo, hi),
+                    "{v:e} ({v:?}) within {lo}..={hi}"
+                );
+            }
+        }
     }
 
     fn rms(samples: &[f32]) -> f32 {

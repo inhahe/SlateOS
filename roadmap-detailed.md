@@ -605,6 +605,15 @@ _Four workload profiles: Desktop (default, interactive/responsive), Database (hi
 - [x] Process/thread pause while running
 - [x] Process/thread resume while running
 - [x] Process/thread priority change while running
+- [ ] **A default priority per program, remembered.** _Proposed by the operator, 2026-09-26; `design.txt` already asks for per-application I/O priorities kept "in the registry" and overridable by the user._ The user can attach a default priority — CPU, and the I/O priority `resource.io_priority` governs — to:
+  - an **executable** (by path, and also by package identity, so the rule survives an update that moves the file);
+  - an **application** as a whole (every executable a package installs);
+  - a **launcher entry** — a desktop icon, pinned taskbar app or Start menu item (§3.4; whatever form those entries take, they are where a "link file" setting belongs);
+  - a **launch parameter** — a `--priority` on the shell's launch command and a field in the program-launch API, for one launch only.
+  - [ ] **One precedence order**, most specific first: launch parameter > launcher entry > the user's rule for the executable > the user's rule for the application > a system-wide rule > the application's own declared default > inherited from the parent.
+  - [ ] **Applied where every launch passes**, at process creation, so it holds however the program is started — shell, desktop, or another program — and not only from the launchers that know about it.
+  - [ ] **Lowering is always allowed; raising is not free.** A rule that sets a priority above normal, or into the realtime band, is accepted only if the user setting it holds the grant that level needs (`proc.priority_other`, and the elevated grant for realtime) — a rule file must not become a way to launder priority.
+  - [ ] **Set it where the priority is seen:** Settings → per-app priority, and in the task manager next to the running process ("Always use this priority for this program"). Precedents: Windows' per-executable `PerfOptions` (`CpuPriorityClass`, `IoPriority`) and Process Lasso's remembered priorities; on Linux, `ananicy`, and systemd units' `Nice=`/`CPUWeight=`.
 - [x] Workload profile presets for scheduler parameters
 - [x] Benchmark: pick_next_task must be O(1) or O(log n), never O(n)
 - [x] Benchmark: context switch target < 5us (Linux: 1-3us) — measured 67ns WHPX, 398ns TCG
@@ -881,6 +890,8 @@ _Scoping mechanics: the grant carries a list of extension strings (or `*` if the
 - [ ] `access.automate` — emulate mouse/keyboard input to other programs
 - [ ] `access.read_screen` — read screen content of other windows
 - [ ] `access.window_control` — move/resize/close other windows
+- [ ] `automation.headless` — create private headless sessions and launch programs into them; `automation.headless_frames` / `automation.headless_input` — read the rendered frames of, and inject input into, a headless session the grantee controls (§4.13 → Headless Sessions)
+- [ ] `automation.background` — drive a program in the user's visible session through its widget tree without taking the user's focus or pointer; the target always shows a "being automated" indicator (§4.13 → Headless Sessions)
 - [ ] Dedicated accessibility capability class — ensure capability model doesn't block accessibility tools
 
 #### Capability Types — Resource Limits
@@ -1489,9 +1500,14 @@ a direct user gesture and needs none of them._
   osh as the exact-bash escape hatch and the intended on-device differential
   oracle (§305).
 - [ ] Port Nushell as default interactive shell (Rust, structured data piping)
+- [ ] **xonsh as an optional shell** (<https://xon.sh> — a Python-powered shell: Python and shell syntax in one language). _Proposed by the operator, 2026-09-26._ An installable package, not a default — Nushell stays the default and Oils the POSIX shell. xonsh is pure Python (plus `prompt_toolkit`, also pure Python), so once its prerequisites exist the port is mostly packaging, and it is a useful stress test of them:
+  - **Something to run the Python typed at the prompt.** xonsh turns each input into a Python AST and runs it with `compile()` and `exec()`, in one long-lived process whose state carries over from line to line. Two routes:
+    - **Interactive CPython** — the direct one. CPython 3.12.3 already runs on SlateOS, but interactive use has not yet been verified (`roadmap.md`).
+    - **fastpy's planned in-process JIT REPL** (fastpy `roadmap.md` item 19, planned 2026-09-26): each input compiled to native code in memory and run once, with the session's state kept between inputs — exactly the shape xonsh needs, and it would run the typed Python at native speed. fastpy's *existing* REPL (`python -m compiler --repl`, built 2026-04-28) cannot serve: it re-runs the whole session for every input, and in a shell that would re-run every earlier command. The JIT route adds to CPython rather than replacing it — its host embeds CPython to run the fastpy compiler, so on SlateOS it needs that compiler self-hosted (with llvmlite, and so LLVM) — and the `exec()` JIT it builds on crashes today (fastpy `known-issues.md`, BUG-JIT-SYMBOL-TABLE-ALWAYS-EMPTY-ON-WIN64 and the entry after it). fastpy's pure ahead-of-time mode, the one SlateOS targets first (Q29, §80), cannot run code it did not compile ahead of time, so it cannot host xonsh on its own.
+  - **Job control and terminal handling** in the POSIX layer — process groups, `tcsetpgrp`, stop/continue, `termios`, a pty — which Oils needs as well.
 - [ ] **Windows-shell familiarity layer: a `cmd.exe` emulator (and, stretch, a PowerShell emulator).** For users migrating from Windows, provide a shell that accepts classic `cmd.exe` syntax — the builtin commands (`dir`, `copy`, `move`, `del`, `ren`, `type`, `cd`/`chdir`, `md`/`mkdir`, `rd`/`rmdir`, `cls`, `echo`, `set`, `path`, `where`, `for`, `if`, `goto`, `call`, `start`, `title`, `%VAR%`/`%ERRORLEVEL%` expansion, `&`/`&&`/`||`/`|` operators, `.bat`/`.cmd` batch-file execution) — mapping them onto native filesystem/process/env syscalls so muscle-memory and existing `.bat` scripts work. It is an *emulation/compat layer*, not the default shell (Nushell stays default); it lives alongside Oils the same way. **Stretch goal: a PowerShell emulator** — much larger scope (a real object pipeline, cmdlets, .NET-esque type system). Two realistic paths, to be decided when tackled: (a) port PowerShell Core (open-source, MIT) via the .NET/CoreCLR runtime once that's available on the OS — the faithful option; or (b) a *subset* emulator covering the most common cmdlets (`Get-ChildItem`/`gci`, `Get-Content`, `Set-Location`, `Copy-Item`, `Where-Object`, `ForEach-Object`, `Select-Object`, `$_`, object pipeline basics) mapped onto Nushell's already-structured pipeline where semantics align. Record as an open question which path to take before starting PowerShell specifically; the `cmd.exe` emulator is the committed near-term deliverable and does not depend on it.
 
-_Nushell as default interactive shell (structured data, Rust-native). Oils for POSIX/bash compatibility (replaces bash). A `cmd.exe` emulator (and stretch PowerShell emulator) ships as a Windows-familiarity compat layer, not as a default shell._
+_Nushell as default interactive shell (structured data, Rust-native). Oils for POSIX/bash compatibility (replaces bash). A `cmd.exe` emulator (and stretch PowerShell emulator) ships as a Windows-familiarity compat layer, not as a default shell. xonsh is an optional installable shell for Python users._
 
 #### Core Utilities
 - [ ] Port coreutils (ls, cp, mv, rm, mkdir, cat, etc.)
@@ -1693,7 +1709,7 @@ _2D library: Vello (Rust-native, GPU compute shaders) + HarfBuzz FFI for complex
 
 #### System Tray
 - [-] System tray icons: clock, wifi, volume, battery, emoji input, keyboard layout, network drives, GPU usage, date/time — *2026-09-26, checked against the code: the clock with the date under it (`design-decisions.md` §1404) and the keyboard layout are drawn. The rest wait on something outside the shell: wifi on a way for the desktop to learn the network changed without polling (`known-issues.md` `TD-C-THE-NETWORK-INDICATOR-HAS-A-SOURCE-AND-NOTHING-TO-WAKE-IT`); volume on an audio service, of which there is none (`known-issues.md`, the volume popup's row in lane C's table of removed invented data); battery on a producer for `/proc/battery`, which reports no sources; emoji input on the picker (`apps/emojipicker`) being installed and handing its pick to something -- it keeps it in `last_selected`, which nothing reads, because no program can reach the clipboard (`open-questions.md` C-Q29); network drives and GPU usage have nothing to read yet.*
-- [ ] Can drag and drop icons into and out of system tray
+- [~] Can drag and drop icons into and out of system tray — *checked 2026-09-27: icons can be dragged to reorder along the tray (`tray_dnd`, the shell's `TrayDrag`), and what does not fit the bar's quarter goes behind the chevron (`design-decisions.md` §844). Choosing which icons stay out -- dragging one onto the chevron to hide it, or out of the overflow to show it -- is a choice about a program that must outlast a restart, and a tray icon names its program only by process id: blocked on lane F for a stable name (`requests/c-f-name-a-tray-icons-program.md`).*
 - [ ] Apps can start in system tray or minimize to system tray
 - [ ] User can override any app: always start in system tray, always in taskbar, or neither
 - [ ] **One permanent "Activity" tray icon** (never one per app or per process), alongside clock/wifi/volume/battery and as fixed as they are. Click opens a flyout listing the apps currently narrating and what each is doing; picking one opens its console window. It does not badge or shout — a log is a door you go through, not an alert. See §4.14.
@@ -1772,15 +1788,15 @@ _A theme is a declarative YAML file plus optional bundled assets. Themes are pur
 ##### Theme Format
 - [x] YAML theme file following the OS config convention (comment-preserving parser) — 2026-09-25, `appearance::themes` (§874): `<name>/theme.yaml` under `/usr/share/slateos/themes` or the user's `~/.local/share/slateos/themes`, read with `yamldoc`. What a file gets wrong costs that line, not the theme, and is listed for its author.
 - [x] `meta` block: name, author, version, license, tags, screenshots, `supports` list — 2026-09-25. Lists may be written as a block or `[a, b]`; a screenshot that would resolve outside the theme's folder is dropped.
-- [-] `supports` field declares which axes this theme covers (e.g., `[colors, window-decorations, icons, cursors, widget-style, sounds, terminal]`) — *read and kept for a theme list to show (2026-09-25); not trusted over what the file actually sets, and only `colors` exists as an axis so far.*
-- [-] Mix-and-match: each axis is independently overridable — user can apply one theme's colors with a different theme's icons. A "full theme" sets everything, but no axis is mandatory. — *The choice is per axis (`theme.colors` in `appearance.yaml`), so the next axis is a key beside it; colours is the only axis yet.*
+- [-] `supports` field declares which axes this theme covers (e.g., `[colors, window-decorations, icons, cursors, widget-style, sounds, terminal]`) — *read and kept for a theme list to show (2026-09-25); not trusted over what the file actually sets, and only `colors` exists as an axis so far.* *2026-09-28: three axes exist -- colours, icons (§880) and the widget style (§1435, a `widget-style` section) -- and a theme's listing says which it can give (`ThemeInfo::provides_colors`, `provides_icons`, `provides_widget_style`).* *2026-09-29: a fourth, the animation (§1446, an `animation` section; `ThemeInfo::provides_animation`).*
+- [-] Mix-and-match: each axis is independently overridable — user can apply one theme's colors with a different theme's icons. A "full theme" sets everything, but no axis is mandatory. — *The choice is per axis (`theme.colors` in `appearance.yaml`), so the next axis is a key beside it; colours is the only axis yet.* *2026-09-28: `theme.colors`, `theme.icons` and `theme.widget_style` each name a theme of their own.* *2026-09-29: and `theme.animation` (§1446).*
 
 ##### Tier 1 — Colors (baseline, include from the start)
 - [x] Semantic color tokens (~30-40 defined by OS): `background`, `surface`, `primary`, `secondary`, `accent`, `error`, `warning`, `text`, `text-dim`, `text-on-primary`, `border`, etc. — the palette's 27 roles (`guitk::palette::Palette`); a theme sets 26 of them by the palette's own names (`THEME_ROLES`), the accent being the user's. Why those names and not the example ones here: §874.
 - [x] Apps reference semantic tokens, not hardcoded colors — theme redefines tokens and everything updates — 2026-09-25: a theme is loaded with the settings (`AppearanceSettings::read_from`), so every program that resolves `Palette::from_settings` -- the shell, the compositor, applications through `oswindow` -- draws in it. (Whether each app draws *only* from the palette is the conversion sweeps' question, not this one.)
 - [x] Light and dark mode variants in a single theme file (`colors` and `colors-light` sections) — 2026-09-25. A theme with only one section is shown in that mode in both (§874).
 - [-] Auto mode: switch light/dark based on time of day or system toggle — *time of day done 2026-09-25 (§876): "System (Auto)" is light from 07:00 until 19:00 unless the user sets other hours (`theme.auto.light_from` / `dark_from`), in the clock's zone; the shell sleeps until the edge and every program re-reads there. A quick system toggle is not built, and the Settings page for the hours is lane E's (`requests/c-e-the-automatic-modes-hours.md`).*
-- [ ] Theme color API for applications (apps query current token values)
+- [x] Theme color API for applications (apps query current token values) — *checked 2026-09-27: every application is handed the resolved palette -- all of the theme's roles, the user's accent, the mode -- by `oswindow`'s `App::theme_changed`, once at start and again on every change (`gui/window/src/app.rs`, `hand_over`); `appearance::Palette::from_settings` answers the same question directly for code with the settings in hand. 102 applications use one or the other.*
 
 ##### Tier 1 — Window Decorations
 - [ ] Title bar: height, button layout (close/min/max order and position), button shape (circle, square, icon), title font, title alignment
@@ -1813,11 +1829,12 @@ _A theme is a declarative YAML file plus optional bundled assets. Themes are pur
 - [ ] Themes recommend fonts (not bundle — licensing issues). Settings app offers to install recommended fonts from package manager.
 
 ##### Tier 2 — Widget Styling
-- [ ] Button shape: border radius, padding, shadow
-- [ ] Input field styling: border style, focus ring color/style
-- [ ] Scrollbar appearance: thin/wide, overlay/always-visible, color
-- [ ] Checkbox/radio/toggle appearance (e.g., pill toggle vs. checkbox)
-- [ ] These variables define the visual feel (flat modern vs. skeuomorphic vs. glassmorphism)
+_2026-09-28 (`design-decisions.md` §1435): the axis exists -- a theme's `widget-style` section, chosen as `theme.widget_style` in `appearance.yaml` and carried on the palette (`guitk::widget_style`, `Palette::widget_style`). The built-in values are the Aero reference's, written out in `aero/theme.yaml` as the template. Each control below is marked done when it draws from it._
+- [x] Button shape: border radius, padding, shadow — *`button.radius`, `button.padding`, `button.gloss` (the brighter upper half) and `button.shadow`, drawn by the toolkit's button (`guitk::button`) -- every dialog's and the shell's. The padding widens a button, and the alert dialog lays its row out with the style it draws it in and tests a click against what it drew, so a click lands on the button under it in any theme.*
+- [-] Input field styling: border style, focus ring color/style — *read: `field.radius`, `field.border` (`box` or `underline`) and `field.focus` (`ring`, `glow` or `underline`). The focus colour is not a theme's: it is always the user's accent, which a theme cannot make vanish (§1435). Drawn by `guitk::field`, the one box every toolkit field now uses -- the drop-down, the address bar, the input dialog, the Save box and the colour picker's hex field -- and the shell's: the Run box, the start menu's search, the login screen's password, the shortcut editor and an icon's rename. A field that is wrong has a red edge and, while it has the keyboard, a red focus mark. Applications that draw their own boxes are lane E's (`requests/c-e-a-theme-can-shape-the-controls.md`).*
+- [-] Scrollbar appearance: thin/wide, overlay/always-visible, color — *read: `scrollbar.width` (`thin` or `normal`, the full column) and `scrollbar.visibility` (`always`, or `overlay`: a thin line that widens under the pointer). The bar is drawn inside a column that is the same in every theme, so a click lands where it always did (§1435) -- which is why there is no width wider than the column. The colour is the colours axis's `surface2`. Drawn by `guitk::scrollbar::draw`, which the file dialog and the tree view use; the explorer's, the terminal's and the dictionary's are lane E's to adopt. The menus' and the start menu's four-pixel scroll indicators are not scrollbars (nothing to press) and stay as they are.*
+- [x] Checkbox/radio/toggle appearance (e.g., pill toggle vs. checkbox) — *`toggle` (`pill` or `checkbox`) and `check.radius` (up to a circle), drawn by the toolkit's check box and switch -- every on/off setting in the shell. A switch drawn as a box sits in the pill's room, so nothing it is laid out with moves, and keeps its caller's "on" colour (a "safe" switch's green). A radio button is always round.*
+- [-] These variables define the visual feel (flat modern vs. skeuomorphic vs. glassmorphism) — *the gloss, shadow, radii and focus mark are the difference between the three; high contrast keeps a theme's shapes but not its gloss, shadow, soft focus or hiding scrollbar.*
 
 ##### Tier 2 — Taskbar/Panel Styling
 - [ ] Transparency/blur level
@@ -1838,17 +1855,17 @@ _A theme is a declarative YAML file plus optional bundled assets. Themes are pur
 - [ ] Optional — many users run silent, but themes that pair colors with sounds are more cohesive
 
 ##### Tier 3 — Animation Tuning
-- [ ] `animation-duration-ms` (global default for window open/close, menu transitions) — unblocked 2026-08-22, not yet started
-- [ ] `animation-easing` (ease-out, spring, linear) — unblocked 2026-08-22, not yet started
-- [ ] `enable-animations` (bool — global kill switch) — unblocked 2026-08-22; the mechanism exists (`AnimationManager::reduced_motion`, `ShellSession::set_reduced_motion`), the *theme key* does not
-- [ ] Not full custom animations (that would be a compositor plugin). Just tuning built-in animation parameters.
+- [x] `animation-duration-ms` (global default for window open/close, menu transitions) — unblocked 2026-08-22, not yet started *2026-09-29 (§1446): an `animation` section in `theme.yaml`, chosen as `theme.animation` -- `enabled`, `duration-ms` (the standard transition every one of the desktop's is stated against, 50-1000 ms) and `easing` (`ease-out`, `linear`, `spring`); the user's speed scales it, and `Palette::motion` carries the result to the overview's fade, the notification pane, the on-screen display, auto-hide, the animation manager and the toast daemon.*
+- [x] `animation-easing` (ease-out, spring, linear) — unblocked 2026-08-22, not yet started *2026-09-29 (§1446): `easing: ease-out | linear | spring`, arriving and leaving read differently (`guitk::motion`).*
+- [x] `enable-animations` (bool — global kill switch) — unblocked 2026-08-22; the mechanism exists (`AnimationManager::reduced_motion`, `ShellSession::set_reduced_motion`), the *theme key* does not *2026-09-29 (§1446): the key is `animation.enabled`; `false` is the still motion, as the user's speed of Off is.*
+- [x] Not full custom animations (that would be a compositor plugin). Just tuning built-in animation parameters. *Held to: a theme sets a standard length, a curve and a switch (§1446).*
 - **Blocked as a group, 2026-08-22:** there is nothing to tune. `oswindow::EventLoop::run` blocks in `Connection::wait()`, which takes no timeout, and there is no timer or frame callback anywhere in the stack — so no shell animation can advance, and `gui/desktop/src/animations.rs` (1036 lines, six `tick()` methods) has no caller anywhere in the tree. Discovered while wiring the desktop overview, whose own open fade was deleted for this reason (design-decisions.md §520). The prerequisite is a deadline-aware wait in `EventLoop`; see `known-issues.md` → `TD-C-THE-SHELL-HAS-NO-FRAME-CLOCK` for the proposed fix. Lane C owns it.
 - **Half-unblocked, 2026-08-22 (same day):** `TD-C-THE-SHELL-HAS-NO-FRAME-CLOCK` is **RESOLVED** — `EventLoop` now has `wake_at`/`wake_after`/`cancel_wake`, bounds its park by the nearest deadline, and delivers a measured `Event::Tick { elapsed_ms }`; `ShellSession` parks through it. See `design-decisions.md` §521. The three items above stay `[~]` because the *second* half is still open: `animations.rs` still has no caller and `paint_chrome` is still driven from input rather than from the loop, so there remain no live animations whose duration or easing a setting could change. The blocker is now "wire `animations.rs` to the frame clock", which is a lane-C task with no external dependency — not a missing mechanism.
 - **Fully unblocked, 2026-08-22 (same day):** the second half landed too. `ShellSession::step_frame` steps `AnimationManager` and the overview's backdrop fade from `Event::Tick`, arms the next one-shot wake-up only while something is moving, and repaints from the tick — so `paint_chrome` is no longer input-driven. Crucially for *this* section, `animations.rs` now counts **milliseconds, not frames**: it was written with `duration_ticks`/`current_tick` and a module doc reading "one tick = one frame", under which `animation-duration-ms` had no honest conversion at all, because the frame rate is by construction not a constant. It is now `duration_ms`/`elapsed_ms` with `tick(dt_ms)`, so a duration *setting* is directly expressible. See `design-decisions.md` §522. What is left for these three items is settings work, not mechanism: a theme/appearance key that reaches the per-component durations (today `OverviewConfig::fade_ms` and `animations::DEFAULT_DURATION_MS`), an easing name parsed into `animations::Easing`, and a kill switch bound to the existing `reduced_motion` flag. Note also that only the overview's fade is wired so far — the start menu, calendar, Alt-Tab, notification pane and login screen are drawn by the shell and are not yet animated, so a global duration key would currently affect one transition.
 
 ##### Tier 3 — Wallpaper Integration
 - [ ] Theme can bundle or recommend wallpapers
-- [ ] Dynamic wallpapers: list of images with time-of-day triggers (e.g., day image 06:00-18:00, night image 18:00-06:00)
+- [x] Dynamic wallpapers: list of images with time-of-day triggers (e.g., day image 06:00-18:00, night image 18:00-06:00) — *2026-09-27: `wallpaper.schedule` in `appearance.yaml`, one `"HH:MM path"` per entry; each picture is up from its time until the next entry's, the last one wrapping round midnight. The shell shows it in its own time zone, ahead of a rotation folder or a single picture, and sleeps until the next edge exactly. The Settings page's control for it is lane E's: `requests/c-e-day-and-night-wallpapers-need-a-place-in-settings.md`.*
 
 ##### Tier 3 — Terminal Color Scheme
 - [x] 16 ANSI colors + background + foreground, specifically for terminal emulators — *2026-09-27 (`design-decisions.md` §1410): `Palette::terminal`, the theme's own hues in a terminal's slots by default; the terminal application adopting it is lane E's (`requests/c-e-the-terminal-draws-in-the-themes-terminal-colours.md`).*
@@ -1909,15 +1926,15 @@ _Minimal hotkey defaults: Alt+F4, Alt+Tab, Ctrl+C/V/X, Ctrl+Z, Print Screen. Eve
 - [x] Buttons (text, graphic)
 - [x] Labels
 - [x] Menus — *`menu.rs` and `menubar.rs`.*
-- [x] Checkboxes
-- [x] Tristate checkboxes (yes/no/default — useful for cascading option overrides) — *`CheckState::{Unchecked, Checked, Indeterminate}`.*
-- [x] Radio buttons (grouped, only one selected)
+- [x] Checkboxes — *checked 2026-09-27: the tick here was for the retained widget tree's `WidgetKind::Checkbox`, and nothing uses that tree (`known-issues.md` `TD-C-THE-RETAINED-WIDGET-TREE-HAS-NO-USER-AND-FIVE-OF-ITS-WIDGETS-DRAW-NOTHING`), so programs drew their own. Since 2026-09-27 it is a component a program can use: `guitk::checkbox` -- the input's well and edge, the accent's tick, the label part of a 24-pixel target, Space to flip (§1432). Adoption by the applications: `requests/c-e-the-toolkit-has-switches-checkboxes-radio-buttons-and-drop-downs.md`.*
+- [x] Tristate checkboxes (yes/no/default — useful for cascading option overrides) — *`CheckState::{Unchecked, Checked, Indeterminate}`.* *2026-09-27: `guitk::checkbox::Mode::ThreeState` is the yes/no/default box -- a click steps unchecked, default, checked, so from the default the first click says yes; `Mode::TwoState` is the summary box, whose "partly" is shown and never chosen (§1432).*
+- [x] Radio buttons (grouped, only one selected) — *checked 2026-09-27: likewise the retained tree's; the component is `guitk::radio` since 2026-09-27 -- a `RadioGroup`, arrows that choose and wrap, Home/End, Space.*
 - [x] Treeview — *`gui/toolkit/src/treeview.rs`, 2026-09-24. The data stays in the application behind a one-method `TreeSource` trait; the view holds what is open, selected, scrolled and ticked, keyed by key path so that opening a node cannot redirect the next click. Lazily-loaded children, the desktop keyboard conventions (Right opens then steps in, Left closes then steps out, type-ahead), double-click, context menu, wheel and scrollbar, and drawing into an application's own `Frame`. **No consumer yet:** the five applications that hand-roll a tree (`archivemanager`, `jsonviewer`, `devicemanager`, `dbviewer`, `diskanalyzer`) are lane E's, and moving them onto it is `requests/c-e-the-toolkit-has-a-treeview-now-and-five-apps-draw-their-own.md`.*
 - [x] Tristate checkbox treeview (with function to populate from directory) — *`TreeView::checkable`, plus `gui/toolkit/src/dirtree.rs` for the directory: `DirectoryTree::open_checkable(root, options, default)`, each folder read when opened, links never followed, unreadable folders greyed with the error as the reason. A tick is a rule on the node clicked, covering unread and future files, and a click that leaves every child alike folds into the parent so the box never disagrees with what the selection means — `design-decisions.md` §868. `inclusion_rules()` is the saved form. Consumer pending with the treeview's, above.*
 - [x] Tabs view — *`gui/toolkit/src/tabs.rs`.*
 - [x] Grid view — *`gui/toolkit/src/grid.rs`.*
 - [x] Color picker (like qtpyrc's) — *`gui/toolkit/src/colorpicker.rs`: HSV square and hue bar, RGB/HSV sliders, hex entry, alpha, presets, eyedropper and a recent-colours history, as `ColorPicker` (inline) and `ColorPickerDialog`. Consumers: `apps/paint`, `apps/colorpicker`, and `apps/settings` since 2026-09-17.*
-- [ ] **Font picker dialog** (family, style/weight, size, and other font attributes).
+- [ ] **Font picker dialog** (family, style/weight, size, and other font attributes). — *~ blocked 2026-09-28 by lane F: a render tree can name only the UI and the fixed-pitch faces (`FontFamily::{Ui, Mono}`), so the preview cannot draw a family by name, nor can a host preview its document in one. Asked in `requests/c-f-text-in-a-family-the-drawing-names.md`; the dialog follows its answer.*
   - [ ] **Live "tentative selection" events.** The picker fires an event *whenever
     the user tentatively/temporarily changes any font attribute* (hovers or
     highlights a family, changes the size, toggles bold/italic, etc.) — before the
@@ -1940,7 +1957,7 @@ _Minimal hotkey defaults: Alt+F4, Alt+Tab, Ctrl+C/V/X, Ctrl+Z, Print Screen. Eve
 - [x] Simple alert popup with icon — `AlertDialog::{info,warning,error,question}`,
   wrapped multi-line message, button row bottom-right, click-outside dismissal.
 
-_Click selected radio button to deselect (returns group to no-selection state)._
+_Click selected radio button to deselect (returns group to no-selection state)._ *2026-09-27: per group, not everywhere -- `RadioGroup::deselectable(true)` for a group whose "none" is an answer; elsewhere the click does nothing, since a setting left with no value is worse than the old click being ignored (`design-decisions.md` §1432, which answers `design.txt`'s own doubt about this gesture).*
 
 #### Text Views
 - [x] Simple text view: plain text, single font, ANSI colors (for terminals/logs) — *`guitk::textview::SimpleTextView`: ANSI colour, vertical scrolling, selection, copy and search. **Nothing consumes it.** *(Corrected later the same day: the obvious candidate is not one. `apps/logviewer` does hand-roll scrolling, wrapping, selection and search, and does lack ANSI colour — but it is not a text view. It parses structured entries, reads a `level`/`lvl`/`severity` field into a `LogLevel`, and filters by a severity floor; `SimpleTextView` models lines of ANSI-styled text and has no entry, level or filter. The overlap is in the mechanics, not the model, so this is unlike `TextInput`, where the app-side code was a strictly worse copy of the same thing. A first consumer for these widgets is still wanted; logviewer is not it.)* **`SimpleTextView` got one on 2026-09-17**: `apps/explorer`'s preview pane draws a selected text file's first 200 lines as readable text. It previously showed either the thumbnailer's 96-pixel minimap of the same lines — a picture *of* writing, since the pane never enlarges a thumbnail past its own pixels — or "No preview for this file" when the thumbnail had not been uploaded yet.
@@ -1959,30 +1976,30 @@ _Click selected radio button to deselect (returns group to no-selection state)._
 
 #### Dockable Panel / Splitter Layout Widget
 *Started 2026-09-17: `gui/toolkit/src/splitter.rs` holds the geometry — pure functions, the same shape as `scrollbar`, so the caller keeps the layout and every case is testable headless. A layout is fractions summing to one rather than pixels, so a saved arrangement survives a window resize; per-pane minimums are what stop them collapsing. **Its first consumer landed the same day**: `apps/explorer`'s preview panel splits the file pane with it and drags its divider, so this is a widget in use rather than a container nothing reaches.*
-- [-] Container widget that holds named panels separated by draggable splitters *Geometry done: `panes`, `dividers`. Nesting is composition — a pane's rectangle is an area another split can divide — so arbitrary nesting needs no extra machinery, only a caller that does it.*
-- [ ] User can drag panels to rearrange (reorder, move to different split)
+- [x] Container widget that holds named panels separated by draggable splitters *Done 2026-09-28: `guitk::dock::Dock` -- a tree of tab groups in splits, laid out by `Dock::layout`, each visible panel given its rectangle by `Layout::panels`. Geometry done 2026-09-17: `panes`, `dividers`. Nesting is composition — a pane's rectangle is an area another split can divide — so arbitrary nesting needs no extra machinery, only a caller that does it.*
+- [x] User can drag panels to rearrange (reorder, move to different split) *Done 2026-09-28: `gui/toolkit/src/dock.rs`, on the splitter's geometry. A tab dragged along its own bar reorders; onto another group's bar it joins those tabs where the pointer is; onto the outer quarter of a group's contents it splits that group on that side; onto the dock's own edge it takes a column or row of the whole dock. `DockInput` turns press, drag and release into these, with a 5-pixel threshold between a click and a drag, and `draw` shows where a drop would land.*
 - [x] User can drag splitters to resize *`divider_at` finds the divider under the pointer, `resize` moves it. A drag past a neighbour's minimum stops there rather than being refused, because a drag that does nothing reads as broken; but a pair that cannot satisfy both minimums is left alone entirely, since any split would be a lie.*
-- [ ] Add/remove panels from a menu or context menu
-- [-] Horizontal and vertical splits, arbitrarily nested *Both axes done; nesting is available by composition and untested until something nests.*
-- [ ] Layout serialization (save/restore user's arrangement)
-- [ ] Panel tabs when multiple panels share a region
+- [x] Add/remove panels from a menu or context menu *Done 2026-09-28: `Dock::menu` gives one entry per panel kind -- ticked while open and toggling, or "New ..." for a kind that can be open many times -- and `Dock::perform` carries it out; every tab has a close button, which closes only if the press is released on it.*
+- [x] Horizontal and vertical splits, arbitrarily nested *Done 2026-09-28: nested in `Dock`'s tree, and tested: every move from every panel to every drop, from three starting arrangements, leaves the tree tidy (no empty group, no one-child split, no split inside one on its own axis) with no panel lost or doubled.*
+- [x] Layout serialization (save/restore user's arrangement) *Done 2026-09-28: `Dock::to_text` / `Dock::from_text`, one line for a settings file -- `h(0.25:[files],0.75:v(0.7:[*editor,outline],0.3:[terminal]))`. Fractions, so it survives a resize; a panel the application no longer offers is dropped and the layout closes up, rather than the whole arrangement being refused.*
+- [x] Panel tabs when multiple panels share a region *Done 2026-09-28: each group draws its tabs through `guitk::tabs::TabView`, whose tab geometry became public (`TabView::tab_rects`) so the bar, its clicks and the dock's drags all use one statement of where the tabs are; Ctrl+Tab and Ctrl+Shift+Tab cycle a group.*
 - [x] Minimum size constraints per panel *Per-pane, in pixels, honoured by `resize` from both sides.*
-- [ ] Apps define available panel types; user arranges them
+- [x] Apps define available panel types; user arranges them *Done 2026-09-28: `PanelKind { kind, title, multiple }`; a panel is named `kind` or `kind#2` (`PanelId`). Lane E is told in `requests/c-e-the-toolkit-has-a-dock.md`.*
 
 #### Code-Aware TextEdit Widget
 *Audited 2026-09-17: none of this exists as a widget, and most of it exists twice as an application. `apps/editor` and `apps/markdowneditor` each implement undo/redo, find/replace, syntax highlighting and a line-number gutter separately — by mention count they are comparable in size, and `apps/notes` has a third, smaller find. So these bullets are not stale: the capabilities are real and the shared widget is the gap, which is the same shape as `SimpleTextView` against `apps/logviewer` above. Extracting one from two working editors is the work, and the two would have to agree on a buffer first — which is what the bullet below is about.*
-- [ ] Rope or gap buffer backing (efficient for large files)
-- [ ] Syntax highlighting via tree-sitter integration
-- [ ] Line numbers (toggleable)
-- [ ] Undo/redo stack — *[-] 2026-09-27: the history exists and is a tree, not a stack (`guitk::undo`, `design-decisions.md` §1420), and the multi-line text area uses it; this widget, which would use it too, does not exist yet.*
-- [ ] Multi-cursor support
-- [ ] Selection modes: line, word, block/column
-- [ ] Find/replace (regex-capable)
-- [ ] Soft wrap or horizontal scroll (user choice)
-- [ ] Indent/dedent selection
-- [ ] Auto-indent
-- [ ] Bracket matching
-- [ ] Configurable tab width, tabs vs spaces
+- [x] Rope or gap buffer backing (efficient for large files) — *2026-09-28: `guitk::textbuffer::TextBuffer`, the text in chunks of at most 4 KiB with the byte offset and newline count before each: an edit rewrites the chunks it touches, a line lookup is a binary search and a scan of one chunk. On a 10 MB file, loading takes 20 ms, a keystroke with its line lookups about 12 µs. Batches of edits (several carets) in the offsets before the batch; offsets inside a character are refused, not rounded. The editors in `apps/` still keep `Vec<String>`; the widget below is what moves them.*
+- [-] Syntax highlighting via tree-sitter integration — *2026-09-28: `gui/syntax` (`design-decisions.md` §1437): tree-sitter's runtime as Rust (`tree-sitter-c2rust`), each grammar's generated `parser.c` converted to Rust at build time by `gui/tsgrammar` and its external scanner ported by hand, so nothing needs a C compiler; each grammar's own test corpus passes against the conversion. `guitk::codeview::CodeView::set_highlighter` takes it (or any `guitk::highlight::Highlighter`): edits re-parse incrementally within the keystroke, a large file's first parse arrives a slice at a time (`CodeView::work`), and the colours are the theme's `syntax` section. Grammars so far: Ada, Bash, C, C++, CSS, diffs, Dockerfiles, DTD, Go, HTML, INI, Java, JavaScript (with JSX), JSON, linker scripts, Lua, Makefiles, Markdown (block and inline), PowerShell, Python, Rust, SQL, TOML, TypeScript and TSX, XML, YAML; injections (Markdown's code fences, front matter and inline text, Rust macro bodies, JavaScript's tagged templates, HTML's scripts and styles, C++'s raw strings, JavaScript's regular expressions and JSDoc comments) and the grammars' own highlight tests pass (§1438); a name is coloured as its declaration is where the grammar has a locals query (§1440). A diff's hunks in their files' languages (§1444). XML (and SVG, XSLT, plists) and DTDs; Dockerfiles, their RUN commands and `RUN <<EOF` scripts in Bash. SQL -- PostgreSQL's, MySQL's and SQLite's dialects in one grammar, PostgreSQL's dollar-quoted strings and function bodies read by its ported scanner.*
+- [x] Line numbers (toggleable) — *2026-09-28: `guitk::codeview::CodeView`'s gutter (`ViewOptions::line_numbers`), the caret's line in the text's ink; a press in it selects the line.*
+- [x] Undo/redo stack — *[-] 2026-09-27: the history exists and is a tree, not a stack (`guitk::undo`, `design-decisions.md` §1420), and the multi-line text area uses it; this widget, which would use it too, does not exist yet.* *2026-09-28: `guitk::codeedit::CodeEditor` records every batch -- one edit at every caret -- as one step of that tree, typing gathered a word at a time; undo puts back exactly what a batch changed however its carets shifted each other.*
+- [x] Multi-cursor support — *2026-09-28, the model (`guitk::codeedit`): any number of selections, sorted and merged where they meet; typing, deleting, newline, tab, paste and cut at every caret as one batch; a caret added above or below, the next occurrence (Ctrl+D), a block; copying from several carets and pasting at as many puts each piece back at its own. Drawing them and the keys are the view's, not yet built.* *Later the same day: drawn and driven by `guitk::codeview` -- Ctrl+click adds a caret, Alt+drag makes a block, Ctrl+Alt+Up/Down add one above or below, Ctrl+D the next occurrence, Escape keeps only the primary.*
+- [x] Selection modes: line, word, block/column — *2026-09-28: `CodeEditor::select_word`, `select_line` (again takes in the next line), `select_block` (a column range on every line between two points, held to short lines).*
+- [x] Find/replace (regex-capable) — *2026-09-28, the model: `codeedit::FindQuery` compiles to a `Finder` -- plain text through `textfind`, or a regular expression through the `regex` crate (§1436), case-folded or not, whole words or not; the editor steps through matches round the end both ways, selects them all as carets, replaces the selected one and moves on, or replaces every one as one undo step, a regex replacement taking the match's groups (`$1`, `${name}`). The view's find bar is next.* *Later the same day, done: `CodeView`'s find bar (Ctrl+F, Ctrl+H) -- searching as it is typed from where the caret was, Enter and Shift+Enter through the matches, Alt+Enter every match as a caret, Alt+C/W/R and clickable switches for case, whole words and regular expressions, replace and replace-all (one undo step), every match on screen outlined, "3 of 12" or why a pattern is not one; F3 from the text.*
+- [x] Soft wrap or horizontal scroll (user choice) — *2026-09-28: `ViewOptions::wrap`. Wrapped, a line breaks after a blank near the edge and Up/Down move by row keeping the caret's distance from the left; unwrapped, the view scrolls sideways to keep the caret in sight. Rows are laid out only for the lines on screen, so any file costs a screenful.*
+- [x] Indent/dedent selection — *2026-09-28: Tab on a selection spanning lines indents every line it touches and keeps it selected; Shift+Tab takes off a tab or up to a tab width of spaces; empty lines are left empty.*
+- [x] Auto-indent — *2026-09-28: a new line keeps its line's indentation, one level more after an opening bracket, and a closer right after the caret goes to a line of its own at the outer level.*
+- [x] Bracket matching — *2026-09-28: `CodeEditor::matching_bracket` finds the partner of the bracket at or before the caret through nesting (brackets in strings count; a language-aware matcher can take over). Highlighting the pair is the view's.* *Later the same day: the view outlines the pair at the primary caret.* *2026-09-29: language-aware -- `Highlighter::brackets`: the syntax highlighter pairs a bracket by the tree (and a language inside another by its own), so a bracket in a string or a comment is none; the view counts only where it cannot say.*
+- [x] Configurable tab width, tabs vs spaces — *2026-09-28: `codeedit::Options` -- tab width 1-16, spaces or tabs; Tab runs to the next stop, Backspace in leading spaces back to the previous one.*
 
 #### Ribbon Widget
 _A tabbed command surface (Office-style) for command-dense applications: file explorer, text editor, image editor, etc. The ribbon is a widget, not a mandatory chrome — apps that don't want one use traditional menus and toolbars instead._
@@ -2012,8 +2029,8 @@ _Patent timeline: most of Microsoft's ribbon-specific patents (filed around 2005
 - [ ] Drag-and-drop (OLE-style multi-format)
 - [ ] File picker / save dialog (reuses file explorer component)
 - [ ] DPI/scaling awareness
-- [ ] **Forgiving drag margins.** Every draggable divider/edge (window resize borders, dockable-panel splitters, list/table column dividers, and any other "grab the boundary and drag" affordance) must be easy to hit — either the visible grab strip is drawn thick enough to target comfortably, or the drag hit-region extends a few pixels past the visible margin on both sides (a hysteresis/"snap-to-edge" hit-target that starts the drag mode slightly before the cursor reaches the exact pixel line). Users should never have to pixel-hunt to start a resize/reposition drag.
-- [ ] **Generous hit-regions for draggable control handles (sliders too).** The same "clickable region wider than the visible norm" principle applies to every draggable *handle*, not just dividers — most importantly **slider thumbs and their tracks**: the grab region for a slider handle (and the click-to-jump region along its track) extends past the drawn thumb/track so the user can grab and drag it without pixel-hunting, and a thin visual track still presents a comfortably tall/wide hit-strip. Generalize to any small draggable affordance (scrollbar thumbs, resize grips, dockable-panel drag handles, color-picker sliders §colorpicker, volume sliders §audio): the *interactive* region is decoupled from and larger than the *drawn* region. Implemented once in the toolkit's hit-testing layer so every widget inherits it uniformly; scale the extra padding with DPI/scaling so it stays a consistent physical target.
+- [x] **Forgiving drag margins.** Every draggable divider/edge (window resize borders, dockable-panel splitters, list/table column dividers, and any other "grab the boundary and drag" affordance) must be easy to hit — either the visible grab strip is drawn thick enough to target comfortably, or the drag hit-region extends a few pixels past the visible margin on both sides (a hysteresis/"snap-to-edge" hit-target that starts the drag mode slightly before the cursor reaches the exact pixel line). Users should never have to pixel-hunt to start a resize/reposition drag. — *checked 2026-09-27: the rule is `guitk::grab::edge` -- three pixels either side of a drawn edge, in logical pixels so it scales with the drawing (`design-decisions.md` §1431) -- and the toolkit's splitter uses it. A window's edges (lane F's compositor) are grabbed over the frame and its shadow; the spreadsheet's column edges over five pixels either side. The toolkit's table has no resizable columns yet; when it has, `grab::edge` is their rule.*
+- [x] **Generous hit-regions for draggable control handles (sliders too).** The same "clickable region wider than the visible norm" principle applies to every draggable *handle*, not just dividers — most importantly **slider thumbs and their tracks**: the grab region for a slider handle (and the click-to-jump region along its track) extends past the drawn thumb/track so the user can grab and drag it without pixel-hunting, and a thin visual track still presents a comfortably tall/wide hit-strip. Generalize to any small draggable affordance (scrollbar thumbs, resize grips, dockable-panel drag handles, color-picker sliders §colorpicker, volume sliders §audio): the *interactive* region is decoupled from and larger than the *drawn* region. Implemented once in the toolkit's hit-testing layer so every widget inherits it uniformly; scale the extra padding with DPI/scaling so it stays a consistent physical target. — *done 2026-09-27 (`design-decisions.md` §1431): the rule is `guitk::grab` -- a handle's region reaches four pixels past its rim and is at least 24 pixels across (WCAG 2.2 SC 2.5.8), a thumb in a track of its own grows along the track only (`in_track`), and `nearest` gives a press in overlapping regions to the handle drawn nearer; all in logical pixels, so the regions scale with the display. In the toolkit: the new slider (`guitk::slider` -- drag with a grip, click-to-jump, keys, the wheel while focused), the colour picker's square, hue bar, alpha bar and slider rows (which also keep their grip now), and the file dialog's and tree view's scrollbar thumbs. The desktop's quick-settings sliders are on the slider; window resize edges (lane F) are grabbed over the frame and its shadow. Applications that draw their own sliders move onto the toolkit's in `requests/c-e-the-toolkit-has-a-slider-now.md` (lane E).*
 - [ ] Enable/disable controls API (grey out, set/clear tooltip explaining why disabled)
 - [ ] Encourage (but don't enforce) tooltip on disabled controls explaining why disabled
 - [ ] SVG rendering support
@@ -2691,6 +2708,58 @@ authors never wrote a single automation handler.
 - [ ] `automate` CLI and the `on`/`invoke` shell builtins gain widget-tree
   subcommands (e.g. `automate ui <program> tree|find|invoke`) so widget
   automation is scriptable exactly like declared actions.
+
+#### Headless Sessions — Control Without Interfering With the User
+
+_Proposed by the operator, 2026-09-26._ A program holding the right capabilities
+can run another application **headless** — launched into a private session whose
+windows never appear on the user's displays — and drive it through the widget
+tree above, and through its rendered pixels where a tree is not enough. The
+clients this is for are automation agents — test runners, RPA-style scripts, and
+AI agents the user chooses to install — that must work inside an app *while the
+user keeps using the machine*: no stolen focus, no windows appearing, no pointer
+moving under the user's hand. (The OS supplies the mechanism, not an agent, so
+this is consistent with "no AI features in the OS": an agent is an ordinary
+third-party program with ordinary grants.) Precedents, each covering part of it:
+Windows UI Automation (the structured tree, which the widget tree above already
+matches), separate Windows desktops/sessions (`CreateDesktop`, RDP) for invisible
+execution, headless Wayland/Xvfb on Linux, and Android's per-app
+`VirtualDisplay`.
+
+- [ ] **A headless session is a compositor session with no display.** Its windows
+  get real surfaces, rendered but never composited onto a user display. It has
+  its own focus and input queue, its own clipboard, and its own notification and
+  audio sinks (delivered to the controller, muted by default), so nothing in it
+  can reach the user's screen, steal focus, or make a sound. Frames are rendered
+  on demand — when the controller asks for one — so an idle headless app costs
+  close to nothing.
+- [ ] **Launching into one.** `automation.headless` — create a headless session
+  and launch programs into it. A program launched headless keeps exactly its
+  own capabilities: running headless grants it nothing and costs it nothing. The
+  session, and every process in it, ends when the controller releases it or
+  exits.
+- [ ] **Driving it semantically first.** The widget tree above — `ui.tree`,
+  `ui.find`, `ui.get`, and invoking a widget's own action — works identically
+  against a headless instance, and is the preferred way to control one: no
+  pixels, no coordinates, and the app's own validation and enabled-state rules
+  apply to every action.
+- [ ] **...and graphically where needed.** For canvas-drawn apps, games, and
+  checking what the user *would* see: read the session's rendered frames
+  (`automation.headless_frames`) and inject pointer and keyboard input into that
+  session only (`automation.headless_input`) — never into the user's session,
+  which is what `access.automate` covers and which stays a separate grant.
+- [ ] **Working in an app the user already has open, without disturbing them.**
+  Driving a visible instance through the widget tree without moving the user's
+  pointer or focus is a distinct and more sensitive grant than driving a headless
+  instance the controller launched itself: it needs the widget tree's own
+  interaction grants on that app (`automation.invoke` + `automation.ui_control`)
+  *and* `automation.background`, and the compositor marks the target
+  window with a persistent "being automated" indicator (the same posture as a
+  screen-recording indicator). "Invisible" means *not interfering*, never
+  *undetectable*.
+- [ ] Secure-entry fields stay unreadable in a headless session exactly as they
+  do elsewhere (see the password-field rule above), and every headless grant is
+  per controller and audit-logged like the rest of the automation grants.
 
 #### Shell Integration
 
@@ -3573,10 +3642,11 @@ _Typst as OS-level library (Rust crate, ~30MB). LaTeX as installable package for
 
 ### 6.8 Hot-Reload for Updates
 
-- [ ] Userspace services: restart with new version (no reboot)
+- [ ] Userspace services: restart with new version (no reboot) -- the default for every service; a state hand-over only by per-service opt-in, where a restart would be visible (design-decisions §1126)
 - [ ] Kernel modules/drivers: unload old, load new
 - [ ] Shared libraries: update via generation-based package manager, restart affected services
-- [ ] NOT hot-reloadable: core kernel code (scheduler, memory manager, syscall dispatch)
+- [ ] NOT hot-reloadable: core kernel code (scheduler, memory manager, syscall dispatch) -- *in place*, still true; **superseded 2026-09-27 for the kernel as a whole** by design-decisions §1126: the kernel is replaced whole, not patched
+- [ ] Kernel: replace the running kernel whole -- freeze, hand-over records in the ABI's terms, jump to the new image, rebuild, thaw; falls back to the old kernel if the rebuild fails; shares its freeze and records with `power.hibernate` (§1126; lane A, `requests/d-a-replace-the-running-kernel-without-a-reboot.md`)
 - [ ] Rollback any update, permanently disable or retry later
 
 ### 6.9 ABI Stability

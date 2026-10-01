@@ -38,6 +38,11 @@ pub const SCHED_BATCH: i32 = 3;
 pub const SCHED_IDLE: i32 = 5;
 /// Deadline scheduling policy (Linux extension).
 pub const SCHED_DEADLINE: i32 = 6;
+/// Or'd into a policy: the task's children start as `SCHED_OTHER` (Linux's
+/// `<linux/sched.h>`).  `sched_setscheduler` accepts and strips it, as
+/// `_sched_setscheduler` does; this scheduler has no children's policy to
+/// reset.
+pub const SCHED_RESET_ON_FORK: i32 = 0x4000_0000;
 
 // ---------------------------------------------------------------------------
 // sched_param
@@ -125,18 +130,25 @@ pub extern "C" fn sched_getscheduler(pid: i32) -> i32 {
 
 /// Set the scheduling policy and parameters of a process.
 ///
-/// Linux validation order (`kernel/sched/syscalls.c::__sched_setscheduler`):
-///   1. `pid < 0` → `EINVAL`.
-///   2. Unknown policy → `EINVAL`.
-///   3. `param == NULL` → `EFAULT` (Linux: `copy_from_user` returns
-///      `-EFAULT` for an invalid user pointer).
-///   4. `sched_priority` outside `[min(policy), max(policy)]` → `EINVAL`.
-///   5. **Phase 170 / §314**: switching to a real-time policy (`SCHED_FIFO`,
+/// Linux 6.6's order (kernel/sched/core.c: `SYSCALL_DEFINE3(sched_setscheduler)`,
+/// then `do_sched_setscheduler`, `_sched_setscheduler` and
+/// `__sched_setscheduler`):
+///   1. `policy < 0` → `EINVAL`.
+///   2. `param == NULL` or `pid < 0` → `EINVAL`.  A NULL `param` is not a
+///      fault: `do_sched_setscheduler` tests `!param` before it copies.  (It
+///      was `EFAULT` here until 2026-09-26.)
+///   3. `SCHED_RESET_ON_FORK` is stripped from `policy`.  (It made any
+///      policy unknown until 2026-09-26.)
+///   4. Unknown policy → `EINVAL`.
+///   5. `sched_priority` outside `[min(policy), max(policy)]` → `EINVAL`.
+///   6. `SCHED_DEADLINE` → `EINVAL`: a deadline task's runtime, deadline and
+///      period come only from `sched_setattr`; through this call they are
+///      zero, which `__checkparam_dl` refuses before any permission check.
+///      (It was accepted, or `EPERM`, until 2026-09-26.)
+///   7. **Phase 170 / §314**: switching to a real-time policy (`SCHED_FIFO`,
 ///      `SCHED_RR`) is permitted when the requested `sched_priority` is
 ///      within a non-zero `RLIMIT_RTPRIO` **or** the caller holds
-///      `CAP_SYS_NICE`; otherwise `EPERM`.  `SCHED_DEADLINE` has no rlimit
-///      alternative in Linux — `user_check_sched_setscheduler` refuses it
-///      for any unprivileged caller — so it stays a pure capability test.
+///      `CAP_SYS_NICE`; otherwise `EPERM`.
 ///
 ///      The rlimit half is not a formality.  Linux's `RLIMIT_RTPRIO` is the
 ///      *reason* `CAP_SYS_NICE` is only sometimes needed, and it is the
@@ -154,16 +166,13 @@ pub extern "C" fn sched_getscheduler(pid: i32) -> i32 {
 /// `SCHED_*` constant.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn sched_setscheduler(pid: i32, policy: i32, param: *const SchedParam) -> i32 {
-    if pid < 0 {
+    if policy < 0 || param.is_null() || pid < 0 {
         errno::set_errno(errno::EINVAL);
         return -1;
     }
+    let policy = policy & !SCHED_RESET_ON_FORK;
     if !is_valid_policy(policy) {
         errno::set_errno(errno::EINVAL);
-        return -1;
-    }
-    if param.is_null() {
-        errno::set_errno(errno::EFAULT);
         return -1;
     }
     // SAFETY: param non-null per the check above; SchedParam is repr(C)
@@ -177,6 +186,12 @@ pub extern "C" fn sched_setscheduler(pid: i32, policy: i32, param: *const SchedP
         return -1;
     };
     if prio < lo || prio > hi {
+        errno::set_errno(errno::EINVAL);
+        return -1;
+    }
+    // `__checkparam_dl`: this call leaves a deadline task's parameters zero,
+    // and a zero deadline is refused.
+    if policy == SCHED_DEADLINE {
         errno::set_errno(errno::EINVAL);
         return -1;
     }
@@ -196,14 +211,9 @@ pub extern "C" fn sched_setscheduler(pid: i32, policy: i32, param: *const SchedP
     // Our task is always SCHED_OTHER with rt_priority 0, so `policy !=
     // p->policy` holds for every RT switch and `p->rt_priority` is 0.  Both
     // RT clauses therefore reduce to: the capability is required unless the
-    // limit is non-zero *and* covers the requested priority.
-    let is_rt = matches!(policy, SCHED_FIFO | SCHED_RR);
-    let is_deadline = policy == SCHED_DEADLINE;
-    // SCHED_DEADLINE first: it has no rlimit alternative at all, so an
-    // rlimit that would have covered an RT priority must not leak into it.
-    let needs_cap = if is_deadline {
-        true
-    } else if is_rt {
+    // limit is non-zero *and* covers the requested priority.  (The
+    // `dl_policy` arm is unreachable from this call: step 6 refused it.)
+    let needs_cap = if matches!(policy, SCHED_FIFO | SCHED_RR) {
         let rlim_rtprio = current_rtprio_limit();
         // `prio` passed the [lo, hi] range check above and every RT policy's
         // `lo` is 1, so it is strictly positive here — `unsigned_abs` is an
@@ -248,16 +258,13 @@ fn current_rtprio_limit() -> u64 {
 
 /// Get the scheduling parameters of a process.
 ///
-/// Returns priority 0 (default).  A negative pid is rejected with
-/// `EINVAL` to match Linux's prologue.
+/// Returns priority 0 (default).  A NULL `param` or a negative pid is
+/// `EINVAL`: Linux's prologue is `if (!param || pid < 0) return -EINVAL;`
+/// (a NULL `param` was `EFAULT` until 2026-09-26).
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn sched_getparam(pid: i32, param: *mut SchedParam) -> i32 {
-    if pid < 0 {
+    if param.is_null() || pid < 0 {
         errno::set_errno(errno::EINVAL);
-        return -1;
-    }
-    if param.is_null() {
-        errno::set_errno(errno::EFAULT);
         return -1;
     }
     // SAFETY: param verified non-null.
@@ -272,15 +279,13 @@ pub extern "C" fn sched_getparam(pid: i32, param: *mut SchedParam) -> i32 {
 /// Linux's `sched_setparam` keeps the current policy and adjusts the
 /// priority.  Because we report every task as `SCHED_OTHER`, the
 /// priority must be 0 (the only valid value for that policy).
-/// A negative pid is rejected with `EINVAL`.
+/// A NULL `param` or a negative pid is `EINVAL`, from
+/// `do_sched_setscheduler`, which `sched_setparam` shares with
+/// `sched_setscheduler` (a NULL `param` was `EFAULT` until 2026-09-26).
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn sched_setparam(pid: i32, param: *const SchedParam) -> i32 {
-    if pid < 0 {
+    if param.is_null() || pid < 0 {
         errno::set_errno(errno::EINVAL);
-        return -1;
-    }
-    if param.is_null() {
-        errno::set_errno(errno::EFAULT);
         return -1;
     }
     // SAFETY: param non-null per the check above.
@@ -436,119 +441,133 @@ pub extern "C" fn __sched_cpucount(setsize: usize, setp: *const CpuSetT) -> i32 
     i32::try_from(count).unwrap_or(i32::MAX)
 }
 
-/// Get the CPU affinity mask for a process.
+/// Get the CPU affinity mask for a process: every online CPU, which is the
+/// mask every process here has -- nothing a program can call narrows one
+/// (see [`affinity_change`]).  The kernel shell's `taskset`, a debugging
+/// console's command, can; a mask set that way is not seen here.  The process must exist: another pid is looked up,
+/// and `ESRCH` if there is none, as Linux answers.
 ///
-/// Populates `mask` with bits 0..N set, where N is the number of online CPUs
-/// (capped at `CPU_SETSIZE`).  Our scheduler doesn't yet support per-thread
-/// affinity restriction, so every thread can be dispatched to any online CPU.
+/// Linux 6.6's `SYSCALL_DEFINE3(sched_getaffinity)` and glibc 2.39's wrapper
+/// (sysdeps/unix/sysv/linux/sched_getaffinity.c), in their order:
+///   1. A mask too short for the CPUs (`len * 8 < nr_cpu_ids`), or not a
+///      whole number of `unsigned long`s → `EINVAL`.
+///   2. `pid` not found → `ESRCH` (negative pids fall into this case, as
+///      `find_task_by_vpid` cannot resolve them).
+///   3. The kernel writes `min(len, cpumask_size())` bytes -- a NULL mask
+///      faults, `EFAULT` -- and glibc zeroes the rest of the caller's
+///      `cpusetsize` bytes.
 ///
-/// Validation order matches Linux's `SYSCALL_DEFINE3(sched_getaffinity)`
-/// in `kernel/sched/syscalls.c`:
-///   1. `cpusetsize` too small → `EINVAL` (Linux: `len*8 < nr_cpu_ids`)
-///   2. `pid` not found → `ESRCH` (Linux: `find_process_by_pid` returns NULL,
-///      which `sched_getaffinity` maps to `-ESRCH`; negative pids fall into
-///      this case because `find_task_by_vpid` cannot resolve them).
-///   3. `mask` unwritable → `EFAULT` (Linux: late `copy_to_user` failure).
-///      Our stub checks for NULL up front; a real implementation would
-///      catch this on the write.
+/// Until 2026-09-26 anything shorter than the whole 128-byte `cpu_set_t` was
+/// `EINVAL`, though Linux takes 8 bytes on a machine of up to 64 CPUs (what
+/// `CPU_ALLOC_SIZE(n)` gives for small `n`), and a longer mask had its tail
+/// left as it was.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn sched_getaffinity(pid: i32, cpusetsize: usize, mask: *mut CpuSetT) -> i32 {
-    if cpusetsize < core::mem::size_of::<CpuSetT>() {
-        errno::set_errno(errno::EINVAL);
-        return -1;
-    }
-    if pid < 0 {
-        // Linux: find_process_by_pid(negative) → NULL → -ESRCH.
-        errno::set_errno(errno::ESRCH);
-        return -1;
-    }
-    if mask.is_null() {
-        // Linux: copy_to_user with bad user pointer → -EFAULT.
-        errno::set_errno(errno::EFAULT);
-        return -1;
-    }
-
-    let ncpus = online_cpu_count().min(CPU_SETSIZE_BITS);
-
-    // SAFETY: mask is non-null and cpusetsize is large enough.
-    unsafe {
-        // Zero the mask first.
-        let bytes = mask.cast::<u8>();
-        let mut i: usize = 0;
-        while i < core::mem::size_of::<CpuSetT>() {
-            *bytes.add(i) = 0;
-            i = i.wrapping_add(1);
-        }
-        // Set bits 0..ncpus.
-        let mut cpu: usize = 0;
-        while cpu < ncpus {
-            let word = cpu / 64;
-            let bit = cpu % 64;
-            (*mask).bits[word] |= 1u64 << bit;
-            cpu = cpu.wrapping_add(1);
+    let ncpus = online_cpus();
+    let result = affinity_len_ok(cpusetsize, ncpus)
+        .and_then(|()| affinity_target_exists(pid))
+        .and_then(|()| fill_affinity(cpusetsize, mask, ncpus));
+    match result {
+        Ok(()) => 0,
+        Err(e) => {
+            errno::set_errno(e);
+            -1
         }
     }
-
-    0
 }
 
-/// Set the CPU affinity mask for a process.
+/// The CPUs a mask can report: the online ones, as many as a `CpuSetT` holds.
+pub(crate) fn online_cpus() -> usize {
+    online_cpu_count().min(CPU_SETSIZE_BITS)
+}
+
+/// Linux's two length tests for reading a mask, before anything else
+/// (`SYSCALL_DEFINE3(sched_getaffinity)`): `EINVAL` if `cpusetsize` bytes
+/// cannot hold every CPU, or are not a whole number of `unsigned long`s.
+/// glibc passes the kernel `MIN (INT_MAX, cpusetsize)`.
+pub(crate) fn affinity_len_ok(cpusetsize: usize, ncpus: usize) -> Result<(), i32> {
+    let len = cpusetsize.min(i32::MAX as usize);
+    if len.saturating_mul(8) < ncpus || len % 8 != 0 {
+        return Err(errno::EINVAL);
+    }
+    Ok(())
+}
+
+/// Write the mask of CPUs `0..ncpus` over `cpusetsize` bytes at `mask` --
+/// what the kernel copies out, and the zeroes glibc writes after it.  `len` is
+/// at least 8 once [`affinity_len_ok`] passed, so the copy touches the mask:
+/// `EFAULT` for a NULL one.
+pub(crate) fn fill_affinity(
+    cpusetsize: usize,
+    mask: *mut CpuSetT,
+    ncpus: usize,
+) -> Result<(), i32> {
+    if mask.is_null() {
+        return Err(errno::EFAULT);
+    }
+    let out = mask.cast::<u8>();
+    for i in 0..cpusetsize {
+        // SAFETY: the caller's contract makes `mask` writable for
+        // `cpusetsize` bytes, which may be more or fewer than a `CpuSetT`.
+        unsafe { out.add(i).write(affinity_byte(i, ncpus)) };
+    }
+    Ok(())
+}
+
+/// Whether `pid` names a process there is, as Linux's `find_process_by_pid`
+/// asks before anything is done with it: the caller by 0 or by its own pid,
+/// another found by `kill(pid, 0)`.  `ESRCH` for none, and for a negative
+/// pid, which is never found.  The caller's `errno` is left as it was.
+fn affinity_target_exists(pid: i32) -> Result<(), i32> {
+    if pid < 0 {
+        return Err(errno::ESRCH);
+    }
+    if pid == 0 || pid == crate::process::getpid() {
+        return Ok(());
+    }
+    let saved = errno::get_errno();
+    let probe = crate::signal::kill(pid, 0);
+    let found = probe == 0 || errno::get_errno() != errno::ESRCH;
+    errno::set_errno(saved);
+    if found { Ok(()) } else { Err(errno::ESRCH) }
+}
+
+/// Byte `i` of a mask holding CPUs `0..ncpus`.
+fn affinity_byte(i: usize, ncpus: usize) -> u8 {
+    let first = i.saturating_mul(8);
+    if first >= ncpus {
+        0
+    } else if ncpus - first >= 8 {
+        0xFF
+    } else {
+        (1u8 << (ncpus - first)) - 1
+    }
+}
+
+/// Set the CPU affinity mask for a process -- which here can only be to the
+/// mask it has.
 ///
-/// Validates the mask (non-NULL, sufficient size, at least one valid CPU bit
-/// set) but does not actually constrain scheduling — our scheduler treats all
-/// online CPUs as eligible.  Returns 0 on success, -1 with errno on failure.
+/// Every process runs on every online CPU, and nothing a program can call
+/// narrows that: the scheduler's per-task mask (`Task::cpu_affinity`) is set
+/// only inside the kernel -- its own tasks at spawn, and the kernel shell's
+/// `taskset` debugging command -- the native ABI has no call for it, and the
+/// Linux ABI's `sys_sched_setaffinity` (`kernel/src/syscall/linux.rs`) checks
+/// its arguments and applies nothing.  So a mask holding every online CPU is
+/// already in force and succeeds, and a narrower one is `ENOSYS` -- until
+/// 2026-09-27 it was accepted and ignored, and `taskset` reported pinning a
+/// process that went on running everywhere
+/// (`requests/e-adf-what-the-process-explorer-still-cannot-ask.md`).
+/// `ENOSYS` is what glibc answers where the kernel has no such call, and what
+/// hwloc and the OpenMP runtimes take to mean "affinity is not available
+/// here" rather than a failure.  Returns 0 on success, -1 with errno.
 ///
-/// Validation order matches Linux's `SYSCALL_DEFINE3(sched_setaffinity)`
-/// in `kernel/sched/syscalls.c`:
-///   1. `mask` unreadable → `EFAULT` (Linux: `get_user_cpu_mask` calls
-///      `copy_from_user`, which is the first thing the syscall does).
-///   2. `cpusetsize` too small → `EINVAL` (Linux is more forgiving here,
-///      zero-extending undersized masks; we are stricter because our
-///      stub does not zero-pad).
-///   3. `pid` not found → `ESRCH` (Linux: `find_process_by_pid` → NULL →
-///      `-ESRCH`; negative pids fall into this case).
-///   4. Mask has no valid CPU bit → `EINVAL` (Linux: `cpumask_subset`
-///      against `cpus_allowed` returns false).
+/// Linux's order (`SYSCALL_DEFINE3(sched_setaffinity)`, kernel/sched/):
+///   1. `mask` unreadable → `EFAULT`: `get_user_cpu_mask` copies it first.
+///   2. `pid` not found → `ESRCH` (negative pids included).
+///   3. No online CPU in the mask → `EINVAL`.
+///   4. Then the change itself, which is where `ENOSYS` sits.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn sched_setaffinity(pid: i32, cpusetsize: usize, mask: *const CpuSetT) -> i32 {
-    if mask.is_null() {
-        // Linux: copy_from_user with bad user pointer → -EFAULT.
-        errno::set_errno(errno::EFAULT);
-        return -1;
-    }
-    if cpusetsize < core::mem::size_of::<CpuSetT>() {
-        errno::set_errno(errno::EINVAL);
-        return -1;
-    }
-    if pid < 0 {
-        // Linux: find_process_by_pid(negative) → NULL → -ESRCH.
-        errno::set_errno(errno::ESRCH);
-        return -1;
-    }
-
-    let ncpus = online_cpu_count().min(CPU_SETSIZE_BITS);
-
-    // SAFETY: mask is non-null and large enough.
-    let any_valid = unsafe {
-        let mut found = false;
-        let mut cpu: usize = 0;
-        while cpu < ncpus {
-            let word = cpu / 64;
-            let bit = cpu % 64;
-            if (*mask).bits[word] & (1u64 << bit) != 0 {
-                found = true;
-                break;
-            }
-            cpu = cpu.wrapping_add(1);
-        }
-        found
-    };
-
-    if !any_valid {
-        errno::set_errno(errno::EINVAL);
-        return -1;
-    }
-
     // §314: no capability gate here.  Linux's `sched_setaffinity` calls
     // `check_same_owner(p)` and only falls back to `ns_capable(CAP_SYS_NICE)`
     // when that fails — so the capability is the *alternative*, not the rule.
@@ -561,187 +580,110 @@ pub extern "C" fn sched_setaffinity(pid: i32, cpusetsize: usize, mask: *const Cp
     // it cannot evaluate `check_same_owner` for the cases where the answer is
     // not already obvious, and a test it cannot evaluate is a guess.
     //
-    // This function does not yet reach the kernel (it validates its arguments
-    // and reports success), so there is no syscall answer to defer to either.
-    // When the real call lands it carries the check, as `sys_fs_set_owner`
-    // does for `chown`.
+    // It does not reach the kernel -- there is no call to reach -- so there
+    // is no syscall answer to defer to either.  When the real call lands it
+    // carries the check, as `sys_fs_set_owner` does for `chown`.
+    let result = read_affinity_mask(cpusetsize, mask).and_then(|local| {
+        affinity_target_exists(pid)?;
+        affinity_change(&local, online_cpus())
+    });
+    match result {
+        Ok(()) => 0,
+        Err(e) => {
+            errno::set_errno(e);
+            -1
+        }
+    }
+}
 
-    0
+/// A caller's mask as the kernel reads one (`get_user_cpu_mask`,
+/// kernel/sched/core.c): cleared, then `min(len, cpumask_size())` bytes
+/// copied in -- so a short mask is zero-extended, not refused, and a NULL one
+/// faults (`EFAULT`) only if a byte is copied.  Until 2026-09-26 a mask
+/// shorter than the whole `cpu_set_t` was `EINVAL`, though
+/// `sizeof (unsigned long)` is a size Linux programs pass.
+pub(crate) fn read_affinity_mask(cpusetsize: usize, mask: *const CpuSetT) -> Result<CpuSetT, i32> {
+    let mut local = CpuSetT {
+        bits: [0; CPU_SETSIZE_BITS / 64],
+    };
+    let copy = cpusetsize.min(core::mem::size_of::<CpuSetT>());
+    if copy > 0 {
+        if mask.is_null() {
+            return Err(errno::EFAULT);
+        }
+        // SAFETY: the caller's contract makes `mask` readable for
+        // `cpusetsize >= copy` bytes, and `local` holds a whole `CpuSetT`.
+        unsafe {
+            core::ptr::copy_nonoverlapping(mask.cast::<u8>(), (&raw mut local).cast::<u8>(), copy);
+        }
+    }
+    Ok(local)
+}
+
+/// What making `mask` a task's affinity would take, with CPUs `0..ncpus`
+/// online: `EINVAL` if it holds none of them, as Linux says of a mask with no
+/// CPU the task may use; nothing, if it holds every one -- the mask every task
+/// already has; and otherwise `ENOSYS`, because confining a task to some CPUs
+/// is a change nothing here can make (see [`sched_setaffinity`]).
+pub(crate) fn affinity_change(mask: &CpuSetT, ncpus: usize) -> Result<(), i32> {
+    let holds = |cpu: usize| {
+        mask.bits
+            .get(cpu / 64)
+            .is_some_and(|word| word & (1u64 << (cpu % 64)) != 0)
+    };
+    if !(0..ncpus).any(holds) {
+        return Err(errno::EINVAL);
+    }
+    if (0..ncpus).all(holds) {
+        Ok(())
+    } else {
+        Err(errno::ENOSYS)
+    }
 }
 
 // ---------------------------------------------------------------------------
-// CPU set manipulation functions
+// The CPU_SET family
 // ---------------------------------------------------------------------------
 //
-// glibc provides these as macros; we export them as `extern "C"` functions
-// for our libc.  Programs compiled against our headers will call these.
+// Nothing to export: glibc and musl write `CPU_ZERO`, `CPU_SET`, `CPU_CLR`,
+// `CPU_ISSET`, `CPU_AND`, `CPU_OR`, `CPU_XOR` and `CPU_EQUAL` as macros in
+// <sched.h> that work on the caller's mask in place, and the one that calls
+// into the library, `CPU_COUNT`, calls `__sched_cpucount` (above).  Until
+// 2026-09-27 this file also exported nine functions named `cpu_zero` ...
+// `cpu_equal`, which no C library has, nothing called, and a program is free
+// to define for itself -- a duplicate symbol at link time once this module's
+// archive member was pulled in for `sched_getaffinity`.
 
-/// Zero out a CPU set (clear all CPUs).
-#[cfg_attr(target_os = "none", unsafe(no_mangle))]
-pub extern "C" fn cpu_zero(set: *mut CpuSetT) {
-    if set.is_null() {
-        return;
-    }
-    // SAFETY: set is non-null.
-    unsafe {
-        let mut i: usize = 0;
-        while i < 16 {
-            (*set).bits[i] = 0;
-            i = i.wrapping_add(1);
-        }
-    }
-}
-
-/// Add a CPU to a CPU set.
-#[cfg_attr(target_os = "none", unsafe(no_mangle))]
-pub extern "C" fn cpu_set(cpu: i32, set: *mut CpuSetT) {
-    if set.is_null() || cpu < 0 || cpu as usize >= CPU_SETSIZE {
-        return;
-    }
-    let word = cpu as usize / 64;
-    let bit = cpu as usize % 64;
-    // SAFETY: set is non-null, word < 16 (cpu < 1024, 1024/64 = 16).
-    unsafe {
-        (*set).bits[word] |= 1u64 << bit;
-    }
-}
-
-/// Remove a CPU from a CPU set.
-#[cfg_attr(target_os = "none", unsafe(no_mangle))]
-pub extern "C" fn cpu_clr(cpu: i32, set: *mut CpuSetT) {
-    if set.is_null() || cpu < 0 || cpu as usize >= CPU_SETSIZE {
-        return;
-    }
-    let word = cpu as usize / 64;
-    let bit = cpu as usize % 64;
-    // SAFETY: set is non-null, word < 16.
-    unsafe {
-        (*set).bits[word] &= !(1u64 << bit);
-    }
-}
-
-/// Test if a CPU is in a CPU set.
-#[cfg_attr(target_os = "none", unsafe(no_mangle))]
-pub extern "C" fn cpu_isset(cpu: i32, set: *const CpuSetT) -> i32 {
-    if set.is_null() || cpu < 0 || cpu as usize >= CPU_SETSIZE {
-        return 0;
-    }
-    let word = cpu as usize / 64;
-    let bit = cpu as usize % 64;
-    // SAFETY: set is non-null, word < 16.
-    let val = unsafe { (*set).bits[word] };
-    i32::from(val & (1u64 << bit) != 0)
-}
-
-/// Count the number of CPUs in a CPU set.
-#[cfg_attr(target_os = "none", unsafe(no_mangle))]
-pub extern "C" fn cpu_count(set: *const CpuSetT) -> i32 {
-    if set.is_null() {
-        return 0;
-    }
-    let mut count: u32 = 0;
-    let mut i: usize = 0;
-    // SAFETY: set is non-null.
-    while i < 16 {
-        let val = unsafe { (*set).bits[i] };
-        count = count.wrapping_add(val.count_ones());
-        i = i.wrapping_add(1);
-    }
-    count as i32
-}
-
-/// Compute the bitwise AND of two CPU sets (intersection).
+/// Get the CPU number on which the calling thread is running -- which this
+/// library cannot find out, so it answers 0 on every CPU.
 ///
-/// `destset = srcset1 & srcset2`.
-#[cfg_attr(target_os = "none", unsafe(no_mangle))]
-pub extern "C" fn cpu_and(destset: *mut CpuSetT, srcset1: *const CpuSetT, srcset2: *const CpuSetT) {
-    if destset.is_null() || srcset1.is_null() || srcset2.is_null() {
-        return;
-    }
-    // SAFETY: all pointers verified non-null.
-    let mut i: usize = 0;
-    while i < 16 {
-        unsafe {
-            (*destset).bits[i] = (*srcset1).bits[i] & (*srcset2).bits[i];
-        }
-        i = i.wrapping_add(1);
-    }
-}
-
-/// Compute the bitwise OR of two CPU sets (union).
-///
-/// `destset = srcset1 | srcset2`.
-#[cfg_attr(target_os = "none", unsafe(no_mangle))]
-pub extern "C" fn cpu_or(destset: *mut CpuSetT, srcset1: *const CpuSetT, srcset2: *const CpuSetT) {
-    if destset.is_null() || srcset1.is_null() || srcset2.is_null() {
-        return;
-    }
-    let mut i: usize = 0;
-    while i < 16 {
-        unsafe {
-            (*destset).bits[i] = (*srcset1).bits[i] | (*srcset2).bits[i];
-        }
-        i = i.wrapping_add(1);
-    }
-}
-
-/// Compute the bitwise XOR of two CPU sets (symmetric difference).
-///
-/// `destset = srcset1 ^ srcset2`.
-#[cfg_attr(target_os = "none", unsafe(no_mangle))]
-pub extern "C" fn cpu_xor(destset: *mut CpuSetT, srcset1: *const CpuSetT, srcset2: *const CpuSetT) {
-    if destset.is_null() || srcset1.is_null() || srcset2.is_null() {
-        return;
-    }
-    let mut i: usize = 0;
-    while i < 16 {
-        unsafe {
-            (*destset).bits[i] = (*srcset1).bits[i] ^ (*srcset2).bits[i];
-        }
-        i = i.wrapping_add(1);
-    }
-}
-
-/// Test if two CPU sets are equal.
-///
-/// Returns 1 if the sets are identical, 0 otherwise.
-#[cfg_attr(target_os = "none", unsafe(no_mangle))]
-pub extern "C" fn cpu_equal(set1: *const CpuSetT, set2: *const CpuSetT) -> i32 {
-    if set1.is_null() || set2.is_null() {
-        return 0;
-    }
-    let mut i: usize = 0;
-    while i < 16 {
-        // SAFETY: both pointers verified non-null.
-        if unsafe { (*set1).bits[i] != (*set2).bits[i] } {
-            return 0;
-        }
-        i = i.wrapping_add(1);
-    }
-    1
-}
-
-/// Get the CPU number on which the calling thread is running.
-///
-/// Stub: always returns 0 (single-CPU assumption until SMP is
-/// implemented in the kernel).
+/// The kernel is SMP and knows (`smp::current_cpu_index`, which the Linux
+/// ABI's `sys_getcpu` returns), but the native ABI has no call that asks;
+/// `requests/d-a-a-native-getcpu-for-sched-getcpu.md` asks lane A for one,
+/// and this becomes a route to it.  Until then 0 rather than `-1`/`ENOSYS`:
+/// callers turn the answer into a per-CPU array index (jemalloc's per-CPU
+/// arenas do), where `-1` is out of bounds, whereas 0 is merely every
+/// thread sharing CPU 0's slot -- slower under contention, never wrong,
+/// since a thread may migrate the instant after it asked anyway.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn sched_getcpu() -> i32 {
     0
 }
 
-/// Get CPU and NUMA node (Linux vDSO interface).
-///
-/// Stub: returns 0 for both CPU and node.
+/// Get CPU and NUMA node (Linux's `getcpu`): 0 and 0, for the reason
+/// [`sched_getcpu`] gives -- the node is 0 in fact, the machine being one
+/// node as far as the kernel knows (its `sys_getcpu` says the same).
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn getcpu(cpu: *mut u32, node: *mut u32) -> i32 {
     if !cpu.is_null() {
-        // SAFETY: Caller guarantees pointer validity.
+        // SAFETY: non-null, and the caller's contract makes it a writable
+        // `unsigned`, as for Linux's `getcpu`.
         unsafe {
             *cpu = 0;
         }
     }
     if !node.is_null() {
+        // SAFETY: as for `cpu`.
         unsafe {
             *node = 0;
         }
@@ -756,6 +698,13 @@ pub extern "C" fn getcpu(cpu: *mut u32, node: *mut u32) -> i32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Put CPU `cpu` in `set`, as `CPU_SET` does.
+    fn add_cpu(set: &mut CpuSetT, cpu: usize) {
+        if let Some(word) = set.bits.get_mut(cpu / 64) {
+            *word |= 1u64 << (cpu % 64);
+        }
+    }
 
     // -- __sched_cpucount (the out-of-line CPU_COUNT) --
 
@@ -855,14 +804,50 @@ mod tests {
         assert_eq!(sched_setscheduler(0, SCHED_RR, &raw const param), 0);
     }
 
+    /// `do_sched_setscheduler` tests `!param` before it copies: `EINVAL`,
+    /// not a fault -- ahead of the policy too, and alongside a bad pid.
     #[test]
     fn test_sched_setscheduler_null_param() {
-        assert_eq!(sched_setscheduler(0, SCHED_RR, core::ptr::null()), -1);
+        for (pid, policy) in [(0, SCHED_RR), (0, 99), (-1, SCHED_OTHER)] {
+            errno::set_errno(0);
+            assert_eq!(sched_setscheduler(pid, policy, core::ptr::null()), -1);
+            assert_eq!(errno::get_errno(), errno::EINVAL);
+        }
     }
 
     #[test]
     fn test_sched_setparam_null_param() {
+        errno::set_errno(0);
         assert_eq!(sched_setparam(0, core::ptr::null()), -1);
+        assert_eq!(errno::get_errno(), errno::EINVAL);
+    }
+
+    /// `SCHED_RESET_ON_FORK` rides on a policy and is stripped; it is not a
+    /// policy of its own, and `sched_get_priority_*` do not know it.
+    #[test]
+    fn test_sched_setscheduler_reset_on_fork() {
+        let zero = SchedParam::default();
+        assert_eq!(
+            sched_setscheduler(0, SCHED_OTHER | SCHED_RESET_ON_FORK, &raw const zero),
+            0
+        );
+        errno::set_errno(0);
+        assert_eq!(
+            sched_setscheduler(0, 4 | SCHED_RESET_ON_FORK, &raw const zero),
+            -1
+        );
+        assert_eq!(errno::get_errno(), errno::EINVAL);
+        assert_eq!(sched_get_priority_max(SCHED_RR | SCHED_RESET_ON_FORK), -1);
+    }
+
+    /// Through `sched_setscheduler` a deadline task's parameters are zero,
+    /// which `__checkparam_dl` refuses before any permission check.
+    #[test]
+    fn test_sched_setscheduler_deadline_is_einval() {
+        let zero = SchedParam::default();
+        errno::set_errno(0);
+        assert_eq!(sched_setscheduler(0, SCHED_DEADLINE, &raw const zero), -1);
+        assert_eq!(errno::get_errno(), errno::EINVAL);
     }
 
     // -- sched_getparam --
@@ -880,8 +865,10 @@ mod tests {
 
     #[test]
     fn test_sched_getparam_null() {
+        errno::set_errno(0);
         let ret = sched_getparam(0, core::ptr::null_mut());
         assert_eq!(ret, -1);
+        assert_eq!(errno::get_errno(), errno::EINVAL);
     }
 
     // -- sched_setparam --
@@ -980,6 +967,42 @@ mod tests {
         assert_eq!(errno::get_errno(), errno::EFAULT);
     }
 
+    /// Linux takes any whole number of `unsigned long`s that covers the
+    /// CPUs: 8 bytes here (`CPU_ALLOC_SIZE(1)`), written and no further.
+    #[test]
+    fn test_sched_getaffinity_takes_a_short_mask() {
+        let mut buf = [0xAAu8; 16];
+        assert_eq!(sched_getaffinity(0, 8, buf.as_mut_ptr().cast()), 0);
+        assert_eq!(buf[0], 1, "CPU 0, the host's only one");
+        assert!(buf[1..8].iter().all(|&b| b == 0));
+        assert!(
+            buf[8..].iter().all(|&b| b == 0xAA),
+            "nothing past the 8 bytes"
+        );
+        errno::set_errno(0);
+        assert_eq!(sched_getaffinity(0, 12, buf.as_mut_ptr().cast()), -1);
+        assert_eq!(errno::get_errno(), errno::EINVAL, "not a whole u64");
+    }
+
+    /// A mask longer than a `cpu_set_t` (`CPU_ALLOC` of many CPUs) is zeroed
+    /// to its end, as glibc's wrapper zeroes what the kernel did not write.
+    #[test]
+    fn test_sched_getaffinity_clears_a_long_mask() {
+        let mut buf = [0xFFu8; 256];
+        assert_eq!(sched_getaffinity(0, 256, buf.as_mut_ptr().cast()), 0);
+        assert_eq!(buf[0], 1);
+        assert!(buf[1..].iter().all(|&b| b == 0));
+    }
+
+    #[test]
+    fn test_affinity_byte() {
+        assert_eq!(affinity_byte(0, 1), 0x01);
+        assert_eq!(affinity_byte(0, 8), 0xFF);
+        assert_eq!(affinity_byte(1, 12), 0x0F);
+        assert_eq!(affinity_byte(1, 8), 0);
+        assert_eq!(affinity_byte(usize::MAX, 8), 0);
+    }
+
     #[test]
     fn test_sched_getaffinity_too_small_einval() {
         let mut cpuset = CpuSetT { bits: [0; 16] };
@@ -1006,12 +1029,28 @@ mod tests {
         assert_eq!(errno::get_errno(), errno::EFAULT);
     }
 
+    /// A short mask is zero-extended, as `get_user_cpu_mask` does: one byte
+    /// holding CPU 0 is a valid mask.  This was EINVAL until 2026-09-26.
     #[test]
-    fn test_sched_setaffinity_too_small_einval() {
+    fn test_sched_setaffinity_short_mask_is_zero_extended() {
         let cpuset = CpuSetT { bits: [1; 16] };
         let ret = sched_setaffinity(0, 1, &raw const cpuset);
-        assert_eq!(ret, -1);
+        assert_eq!(ret, 0);
+        // Eight bytes -- sizeof (unsigned long), a size Linux programs pass.
+        assert_eq!(sched_setaffinity(0, 8, &raw const cpuset), 0);
+    }
+
+    /// With nothing to copy the pointer is never read: a NULL mask of
+    /// length 0 is an empty mask, EINVAL for our own pid and ESRCH for a
+    /// bad one -- never EFAULT.
+    #[test]
+    fn test_sched_setaffinity_zero_length_null_mask() {
+        errno::set_errno(0);
+        assert_eq!(sched_setaffinity(0, 0, core::ptr::null()), -1);
         assert_eq!(errno::get_errno(), errno::EINVAL);
+        errno::set_errno(0);
+        assert_eq!(sched_setaffinity(-1, 0, core::ptr::null()), -1);
+        assert_eq!(errno::get_errno(), errno::ESRCH);
     }
 
     #[test]
@@ -1032,6 +1071,61 @@ mod tests {
         let ret = sched_setaffinity(0, 128, &raw const cpuset);
         assert_eq!(ret, -1);
         assert_eq!(errno::get_errno(), errno::EINVAL);
+    }
+
+    /// With more than one CPU online, a mask naming only some of them is a
+    /// change nothing can make: `ENOSYS`, where it used to be accepted and
+    /// ignored.  Every CPU -- with or without bits past the last -- is the
+    /// mask already in force; none of them is `EINVAL`.
+    #[test]
+    fn test_affinity_change_verdicts() {
+        let mask = |cpus: &[usize]| {
+            let mut m = CpuSetT { bits: [0; 16] };
+            for &c in cpus {
+                add_cpu(&mut m, c);
+            }
+            m
+        };
+        assert_eq!(affinity_change(&mask(&[0, 1, 2, 3]), 4), Ok(()));
+        assert_eq!(affinity_change(&mask(&[0, 1, 2, 3, 9]), 4), Ok(()));
+        assert_eq!(affinity_change(&mask(&[0]), 4), Err(errno::ENOSYS));
+        assert_eq!(affinity_change(&mask(&[1, 3]), 4), Err(errno::ENOSYS));
+        assert_eq!(affinity_change(&mask(&[]), 4), Err(errno::EINVAL));
+        assert_eq!(affinity_change(&mask(&[4, 100]), 4), Err(errno::EINVAL));
+        assert_eq!(affinity_change(&mask(&[0]), 1), Ok(()));
+    }
+
+    /// `sched_setaffinity` reaches the verdict: on the host's one CPU, CPU 0
+    /// is every CPU, so it succeeds; a mask without it holds no CPU at all.
+    #[test]
+    fn test_sched_setaffinity_to_every_cpu_succeeds() {
+        let mut m = CpuSetT { bits: [0; 16] };
+        add_cpu(&mut m, 0);
+        errno::set_errno(0);
+        assert_eq!(sched_setaffinity(0, 8, &raw const m), 0);
+        assert_eq!(errno::get_errno(), 0);
+        let none = CpuSetT { bits: [0; 16] };
+        assert_eq!(sched_setaffinity(0, 8, &raw const none), -1);
+        assert_eq!(errno::get_errno(), errno::EINVAL);
+    }
+
+    /// Another process's mask is read only if there is one: on the host the
+    /// probe finds nothing, so `ESRCH` -- where every pid used to answer
+    /// "every CPU".  The caller, by 0 or by its own pid, always answers, and
+    /// the lookup leaves `errno` as it was.
+    #[test]
+    fn test_sched_getaffinity_looks_the_process_up() {
+        let me = crate::process::getpid();
+        let other = if me == 1 { 2 } else { 1 };
+        let mut m = CpuSetT { bits: [0; 16] };
+        errno::set_errno(0);
+        assert_eq!(sched_getaffinity(other, 128, &raw mut m), -1);
+        assert_eq!(errno::get_errno(), errno::ESRCH);
+        errno::set_errno(errno::EAGAIN);
+        assert_eq!(sched_getaffinity(me.max(1), 128, &raw mut m), 0);
+        assert_eq!(sched_getaffinity(0, 128, &raw mut m), 0);
+        assert_eq!(errno::get_errno(), errno::EAGAIN, "errno untouched");
+        assert_eq!(m.bits[0], 1, "the host's one CPU");
     }
 
     #[test]
@@ -1088,370 +1182,6 @@ mod tests {
         assert_eq!(core::mem::size_of::<SchedParam>(), 48);
         // The field a caller actually reads is where it always was.
         assert_eq!(core::mem::offset_of!(SchedParam, sched_priority), 0);
-    }
-
-    // -- CPU set manipulation --
-
-    #[test]
-    fn test_cpu_zero_clears_all() {
-        let mut set = CpuSetT {
-            bits: [0xFFFF_FFFF_FFFF_FFFF; 16],
-        };
-        cpu_zero(&raw mut set);
-        for i in 0..16 {
-            assert_eq!(set.bits[i], 0, "bits[{i}] not zeroed");
-        }
-    }
-
-    #[test]
-    fn test_cpu_set_and_isset() {
-        let mut set = CpuSetT { bits: [0; 16] };
-        cpu_set(0, &raw mut set);
-        assert_eq!(cpu_isset(0, &raw const set), 1);
-        assert_eq!(cpu_isset(1, &raw const set), 0);
-
-        cpu_set(63, &raw mut set);
-        assert_eq!(cpu_isset(63, &raw const set), 1);
-        assert_eq!(cpu_isset(62, &raw const set), 0);
-
-        cpu_set(64, &raw mut set);
-        assert_eq!(cpu_isset(64, &raw const set), 1);
-        assert_eq!(set.bits[1], 1); // bit 0 of word 1
-    }
-
-    #[test]
-    fn test_cpu_clr() {
-        let mut set = CpuSetT { bits: [0; 16] };
-        cpu_set(5, &raw mut set);
-        assert_eq!(cpu_isset(5, &raw const set), 1);
-        cpu_clr(5, &raw mut set);
-        assert_eq!(cpu_isset(5, &raw const set), 0);
-    }
-
-    #[test]
-    fn test_cpu_count() {
-        let mut set = CpuSetT { bits: [0; 16] };
-        assert_eq!(cpu_count(&raw const set), 0);
-        cpu_set(0, &raw mut set);
-        assert_eq!(cpu_count(&raw const set), 1);
-        cpu_set(100, &raw mut set);
-        assert_eq!(cpu_count(&raw const set), 2);
-        cpu_set(1023, &raw mut set);
-        assert_eq!(cpu_count(&raw const set), 3);
-    }
-
-    #[test]
-    fn test_cpu_set_out_of_range() {
-        let mut set = CpuSetT { bits: [0; 16] };
-        // These should be no-ops (not crash).
-        cpu_set(-1, &raw mut set);
-        cpu_set(1024, &raw mut set);
-        cpu_set(i32::MAX, &raw mut set);
-        assert_eq!(cpu_count(&raw const set), 0);
-    }
-
-    #[test]
-    fn test_cpu_isset_out_of_range() {
-        let set = CpuSetT { bits: [0xFF; 16] };
-        assert_eq!(cpu_isset(-1, &raw const set), 0);
-        assert_eq!(cpu_isset(1024, &raw const set), 0);
-    }
-
-    // -- cpu_and --
-
-    #[test]
-    fn test_cpu_and_basic() {
-        let mut a = CpuSetT { bits: [0; 16] };
-        let mut b = CpuSetT { bits: [0; 16] };
-        let mut dest = CpuSetT { bits: [0xFF; 16] };
-        cpu_set(0, &raw mut a);
-        cpu_set(1, &raw mut a);
-        cpu_set(2, &raw mut a);
-        cpu_set(1, &raw mut b);
-        cpu_set(2, &raw mut b);
-        cpu_set(3, &raw mut b);
-        cpu_and(&raw mut dest, &raw const a, &raw const b);
-        // Intersection: CPUs 1 and 2.
-        assert_eq!(cpu_isset(0, &raw const dest), 0);
-        assert_eq!(cpu_isset(1, &raw const dest), 1);
-        assert_eq!(cpu_isset(2, &raw const dest), 1);
-        assert_eq!(cpu_isset(3, &raw const dest), 0);
-        assert_eq!(cpu_count(&raw const dest), 2);
-    }
-
-    #[test]
-    fn test_cpu_and_disjoint() {
-        let mut a = CpuSetT { bits: [0; 16] };
-        let mut b = CpuSetT { bits: [0; 16] };
-        let mut dest = CpuSetT { bits: [0xFF; 16] };
-        cpu_set(0, &raw mut a);
-        cpu_set(1, &raw mut b);
-        cpu_and(&raw mut dest, &raw const a, &raw const b);
-        assert_eq!(cpu_count(&raw const dest), 0);
-    }
-
-    #[test]
-    fn test_cpu_and_null_safety() {
-        let set = CpuSetT { bits: [0; 16] };
-        let mut dest = CpuSetT { bits: [0xFF; 16] };
-        // Should not crash.
-        cpu_and(core::ptr::null_mut(), &raw const set, &raw const set);
-        cpu_and(&raw mut dest, core::ptr::null(), &raw const set);
-        cpu_and(&raw mut dest, &raw const set, core::ptr::null());
-    }
-
-    // -- cpu_or --
-
-    #[test]
-    fn test_cpu_or_basic() {
-        let mut a = CpuSetT { bits: [0; 16] };
-        let mut b = CpuSetT { bits: [0; 16] };
-        let mut dest = CpuSetT { bits: [0; 16] };
-        cpu_set(0, &raw mut a);
-        cpu_set(1, &raw mut b);
-        cpu_or(&raw mut dest, &raw const a, &raw const b);
-        assert_eq!(cpu_isset(0, &raw const dest), 1);
-        assert_eq!(cpu_isset(1, &raw const dest), 1);
-        assert_eq!(cpu_count(&raw const dest), 2);
-    }
-
-    #[test]
-    fn test_cpu_or_overlapping() {
-        let mut a = CpuSetT { bits: [0; 16] };
-        let mut b = CpuSetT { bits: [0; 16] };
-        let mut dest = CpuSetT { bits: [0; 16] };
-        cpu_set(5, &raw mut a);
-        cpu_set(5, &raw mut b);
-        cpu_set(10, &raw mut b);
-        cpu_or(&raw mut dest, &raw const a, &raw const b);
-        assert_eq!(cpu_isset(5, &raw const dest), 1);
-        assert_eq!(cpu_isset(10, &raw const dest), 1);
-        assert_eq!(cpu_count(&raw const dest), 2);
-    }
-
-    // -- cpu_xor --
-
-    #[test]
-    fn test_cpu_xor_basic() {
-        let mut a = CpuSetT { bits: [0; 16] };
-        let mut b = CpuSetT { bits: [0; 16] };
-        let mut dest = CpuSetT { bits: [0; 16] };
-        cpu_set(0, &raw mut a);
-        cpu_set(1, &raw mut a);
-        cpu_set(1, &raw mut b);
-        cpu_set(2, &raw mut b);
-        cpu_xor(&raw mut dest, &raw const a, &raw const b);
-        // Symmetric difference: CPUs 0 and 2.
-        assert_eq!(cpu_isset(0, &raw const dest), 1);
-        assert_eq!(cpu_isset(1, &raw const dest), 0);
-        assert_eq!(cpu_isset(2, &raw const dest), 1);
-        assert_eq!(cpu_count(&raw const dest), 2);
-    }
-
-    #[test]
-    fn test_cpu_xor_same_sets() {
-        let mut a = CpuSetT { bits: [0; 16] };
-        let mut dest = CpuSetT { bits: [0xFF; 16] };
-        cpu_set(0, &raw mut a);
-        cpu_set(5, &raw mut a);
-        cpu_xor(&raw mut dest, &raw const a, &raw const a);
-        // XOR of a set with itself is empty.
-        assert_eq!(cpu_count(&raw const dest), 0);
-    }
-
-    // -- cpu_equal --
-
-    #[test]
-    fn test_cpu_equal_identical() {
-        let mut a = CpuSetT { bits: [0; 16] };
-        let mut b = CpuSetT { bits: [0; 16] };
-        cpu_set(3, &raw mut a);
-        cpu_set(3, &raw mut b);
-        assert_eq!(cpu_equal(&raw const a, &raw const b), 1);
-    }
-
-    #[test]
-    fn test_cpu_equal_different() {
-        let mut a = CpuSetT { bits: [0; 16] };
-        let mut b = CpuSetT { bits: [0; 16] };
-        cpu_set(3, &raw mut a);
-        cpu_set(4, &raw mut b);
-        assert_eq!(cpu_equal(&raw const a, &raw const b), 0);
-    }
-
-    #[test]
-    fn test_cpu_equal_both_empty() {
-        let a = CpuSetT { bits: [0; 16] };
-        let b = CpuSetT { bits: [0; 16] };
-        assert_eq!(cpu_equal(&raw const a, &raw const b), 1);
-    }
-
-    #[test]
-    fn test_cpu_equal_null_returns_zero() {
-        let a = CpuSetT { bits: [0; 16] };
-        assert_eq!(cpu_equal(core::ptr::null(), &raw const a), 0);
-        assert_eq!(cpu_equal(&raw const a, core::ptr::null()), 0);
-        assert_eq!(cpu_equal(core::ptr::null(), core::ptr::null()), 0);
-    }
-
-    #[test]
-    fn test_cpu_equal_high_cpus() {
-        let mut a = CpuSetT { bits: [0; 16] };
-        let mut b = CpuSetT { bits: [0; 16] };
-        cpu_set(1023, &raw mut a);
-        cpu_set(1023, &raw mut b);
-        assert_eq!(cpu_equal(&raw const a, &raw const b), 1);
-
-        cpu_set(0, &raw mut a);
-        assert_eq!(cpu_equal(&raw const a, &raw const b), 0);
-    }
-
-    // -- CPU set word boundary tests --
-
-    #[test]
-    fn test_cpu_set_word_boundary_63() {
-        let mut set = CpuSetT { bits: [0; 16] };
-        cpu_set(63, &raw mut set);
-        assert_eq!(cpu_isset(63, &raw const set), 1);
-        assert_eq!(set.bits[0], 1u64 << 63);
-        assert_eq!(set.bits[1], 0);
-    }
-
-    #[test]
-    fn test_cpu_set_word_boundary_64() {
-        let mut set = CpuSetT { bits: [0; 16] };
-        cpu_set(64, &raw mut set);
-        assert_eq!(cpu_isset(64, &raw const set), 1);
-        assert_eq!(set.bits[0], 0);
-        assert_eq!(set.bits[1], 1);
-    }
-
-    #[test]
-    fn test_cpu_set_word_boundary_127() {
-        let mut set = CpuSetT { bits: [0; 16] };
-        cpu_set(127, &raw mut set);
-        assert_eq!(cpu_isset(127, &raw const set), 1);
-        assert_eq!(set.bits[1], 1u64 << 63);
-        assert_eq!(set.bits[2], 0);
-    }
-
-    #[test]
-    fn test_cpu_set_word_boundary_128() {
-        let mut set = CpuSetT { bits: [0; 16] };
-        cpu_set(128, &raw mut set);
-        assert_eq!(cpu_isset(128, &raw const set), 1);
-        assert_eq!(set.bits[1], 0);
-        assert_eq!(set.bits[2], 1);
-    }
-
-    #[test]
-    fn test_cpu_set_last_valid_1023() {
-        let mut set = CpuSetT { bits: [0; 16] };
-        cpu_set(1023, &raw mut set);
-        assert_eq!(cpu_isset(1023, &raw const set), 1);
-        // 1023 = word 15, bit 63
-        assert_eq!(set.bits[15], 1u64 << 63);
-    }
-
-    #[test]
-    fn test_cpu_clr_word_boundary() {
-        let mut set = CpuSetT { bits: [0; 16] };
-        cpu_set(63, &raw mut set);
-        cpu_set(64, &raw mut set);
-        assert_eq!(cpu_count(&raw const set), 2);
-        cpu_clr(63, &raw mut set);
-        assert_eq!(cpu_isset(63, &raw const set), 0);
-        assert_eq!(cpu_isset(64, &raw const set), 1);
-        assert_eq!(cpu_count(&raw const set), 1);
-    }
-
-    // -- CPU set all bits in a word --
-
-    #[test]
-    fn test_cpu_set_fill_first_word() {
-        let mut set = CpuSetT { bits: [0; 16] };
-        for i in 0..64 {
-            cpu_set(i, &raw mut set);
-        }
-        assert_eq!(set.bits[0], u64::MAX);
-        assert_eq!(set.bits[1], 0);
-        assert_eq!(cpu_count(&raw const set), 64);
-    }
-
-    #[test]
-    fn test_cpu_set_fill_second_word() {
-        let mut set = CpuSetT { bits: [0; 16] };
-        for i in 64..128 {
-            cpu_set(i, &raw mut set);
-        }
-        assert_eq!(set.bits[0], 0);
-        assert_eq!(set.bits[1], u64::MAX);
-        assert_eq!(cpu_count(&raw const set), 64);
-    }
-
-    #[test]
-    fn test_cpu_count_all_bits_set() {
-        let set = CpuSetT {
-            bits: [u64::MAX; 16],
-        };
-        assert_eq!(cpu_count(&raw const set), 1024);
-    }
-
-    // -- CPU set operations across words --
-
-    #[test]
-    fn test_cpu_and_cross_word() {
-        let mut a = CpuSetT { bits: [0; 16] };
-        let mut b = CpuSetT { bits: [0; 16] };
-        let mut dest = CpuSetT { bits: [0; 16] };
-
-        // Set bits in different words
-        cpu_set(63, &raw mut a); // word 0
-        cpu_set(64, &raw mut a); // word 1
-        cpu_set(64, &raw mut b); // word 1
-        cpu_set(128, &raw mut b); // word 2
-
-        cpu_and(&raw mut dest, &raw const a, &raw const b);
-        // Only 64 is in both
-        assert_eq!(cpu_isset(63, &raw const dest), 0);
-        assert_eq!(cpu_isset(64, &raw const dest), 1);
-        assert_eq!(cpu_isset(128, &raw const dest), 0);
-        assert_eq!(cpu_count(&raw const dest), 1);
-    }
-
-    #[test]
-    fn test_cpu_or_cross_word() {
-        let mut a = CpuSetT { bits: [0; 16] };
-        let mut b = CpuSetT { bits: [0; 16] };
-        let mut dest = CpuSetT { bits: [0; 16] };
-
-        cpu_set(63, &raw mut a); // word 0
-        cpu_set(128, &raw mut b); // word 2
-        cpu_set(511, &raw mut b); // word 7
-
-        cpu_or(&raw mut dest, &raw const a, &raw const b);
-        assert_eq!(cpu_isset(63, &raw const dest), 1);
-        assert_eq!(cpu_isset(128, &raw const dest), 1);
-        assert_eq!(cpu_isset(511, &raw const dest), 1);
-        assert_eq!(cpu_count(&raw const dest), 3);
-    }
-
-    #[test]
-    fn test_cpu_xor_cross_word() {
-        let mut a = CpuSetT { bits: [0; 16] };
-        let mut b = CpuSetT { bits: [0; 16] };
-        let mut dest = CpuSetT { bits: [0; 16] };
-
-        cpu_set(0, &raw mut a);
-        cpu_set(0, &raw mut b); // same — cancels
-        cpu_set(64, &raw mut a); // only in a
-        cpu_set(128, &raw mut b); // only in b
-
-        cpu_xor(&raw mut dest, &raw const a, &raw const b);
-        assert_eq!(cpu_isset(0, &raw const dest), 0); // cancelled
-        assert_eq!(cpu_isset(64, &raw const dest), 1);
-        assert_eq!(cpu_isset(128, &raw const dest), 1);
-        assert_eq!(cpu_count(&raw const dest), 2);
     }
 
     // -- CpuSetT layout --
@@ -1527,20 +1257,6 @@ mod tests {
         let min = sched_get_priority_min(SCHED_OTHER);
         let max = sched_get_priority_max(SCHED_OTHER);
         assert!(min <= max, "min ({min}) should be <= max ({max})");
-    }
-
-    // -- cpu_isset with clr'd bit --
-
-    #[test]
-    fn test_cpu_isset_after_clr_out_of_range() {
-        let mut set = CpuSetT {
-            bits: [u64::MAX; 16],
-        };
-        // Clear out of range should be no-op
-        cpu_clr(-1, &raw mut set);
-        cpu_clr(1024, &raw mut set);
-        // All bits should still be set
-        assert_eq!(cpu_count(&raw const set), 1024);
     }
 
     // =====================================================================
@@ -1836,7 +1552,7 @@ mod tests {
         // Phase 118: negative pid now returns ESRCH (matches Linux's
         // find_process_by_pid(negative) → NULL → -ESRCH path), not EINVAL.
         let mut cpuset = CpuSetT { bits: [0; 16] };
-        cpu_set(0, &raw mut cpuset);
+        add_cpu(&mut cpuset, 0);
         errno::set_errno(0);
         assert_eq!(
             sched_setaffinity(-1, core::mem::size_of::<CpuSetT>(), &raw const cpuset),
@@ -1958,7 +1674,7 @@ mod tests {
     fn test_sched_setscheduler_workflow_each_policy_valid_priority() {
         // For each recognised policy, the lowest and highest in-range
         // priorities must succeed.
-        for &p in &[SCHED_OTHER, SCHED_BATCH, SCHED_IDLE, SCHED_DEADLINE] {
+        for &p in &[SCHED_OTHER, SCHED_BATCH, SCHED_IDLE] {
             // Range [0, 0] → only 0.
             let param = SchedParam {
                 sched_priority: 0,
@@ -2084,8 +1800,7 @@ mod tests {
 
     #[test]
     fn test_setaffinity_phase118_null_mask_wins_over_small_size() {
-        // (mask=NULL, cpusetsize=1): Linux copy_from_user fails before
-        // any len-related logic kicks in → EFAULT.
+        // (mask=NULL, cpusetsize=1): one byte is copied, and faults.
         errno::set_errno(0);
         let ret = sched_setaffinity(0, 1, core::ptr::null());
         assert_eq!(ret, -1);
@@ -2093,14 +1808,15 @@ mod tests {
     }
 
     #[test]
-    fn test_setaffinity_phase118_size_wins_over_negative_pid() {
-        // (mask valid, cpusetsize=1, pid=-1): in our strict stub the
-        // size check fires before the pid lookup → EINVAL.
+    fn test_setaffinity_phase118_short_size_is_not_an_error() {
+        // (mask valid, cpusetsize=1, pid=-1): the short mask is
+        // zero-extended, so the pid decides → ESRCH.  This asserted the
+        // "strict stub"'s EINVAL until 2026-09-26.
         let cpuset = CpuSetT { bits: [1; 16] };
         errno::set_errno(0);
         let ret = sched_setaffinity(-1, 1, &raw const cpuset);
         assert_eq!(ret, -1);
-        assert_eq!(errno::get_errno(), errno::EINVAL);
+        assert_eq!(errno::get_errno(), errno::ESRCH);
     }
 
     #[test]
@@ -2118,7 +1834,7 @@ mod tests {
     fn test_setaffinity_phase118_clean_args_still_succeed() {
         // After reorder, valid args still succeed.
         let mut cpuset = CpuSetT { bits: [0; 16] };
-        cpu_set(0, &raw mut cpuset);
+        add_cpu(&mut cpuset, 0);
         errno::set_errno(0);
         let ret = sched_setaffinity(0, core::mem::size_of::<CpuSetT>(), &raw const cpuset);
         assert_eq!(ret, 0);
@@ -2284,10 +2000,11 @@ mod tests {
             assert_eq!(errno::get_errno(), errno::EPERM);
         }
 
-        /// SCHED_DEADLINE requires CAP_SYS_NICE unconditionally on
-        /// Linux (no rlim fallback).
+        /// SCHED_DEADLINE through `sched_setscheduler` is EINVAL before
+        /// the capability is looked at (`__checkparam_dl`).  This asserted
+        /// EPERM until 2026-09-26.
         #[test]
-        fn test_sched_setscheduler_phase170_deadline_no_cap_eperm() {
+        fn test_sched_setscheduler_phase170_deadline_no_cap_einval() {
             let _g = CapGuard::snapshot();
             drop_cap_sys_nice();
             // SCHED_DEADLINE's priority range is (0, 0).
@@ -2297,7 +2014,7 @@ mod tests {
             };
             errno::set_errno(0);
             assert_eq!(sched_setscheduler(0, SCHED_DEADLINE, &raw const p), -1,);
-            assert_eq!(errno::get_errno(), errno::EPERM);
+            assert_eq!(errno::get_errno(), errno::EINVAL);
         }
 
         // -- Ordering matrix ----------------------------------------------
@@ -2332,15 +2049,15 @@ mod tests {
             assert_eq!(errno::get_errno(), errno::EINVAL);
         }
 
-        /// EFAULT on NULL param beats EPERM (Linux: copy_from_user
-        /// fails before the cap check runs).
+        /// A NULL param is EINVAL, and beats EPERM: `do_sched_setscheduler`
+        /// tests `!param` before anything else.  (EFAULT until 2026-09-26.)
         #[test]
-        fn test_sched_setscheduler_phase170_efault_null_beats_eperm() {
+        fn test_sched_setscheduler_phase170_null_param_einval_beats_eperm() {
             let _g = CapGuard::snapshot();
             drop_cap_sys_nice();
             errno::set_errno(0);
             assert_eq!(sched_setscheduler(0, SCHED_FIFO, core::ptr::null()), -1,);
-            assert_eq!(errno::get_errno(), errno::EFAULT);
+            assert_eq!(errno::get_errno(), errno::EINVAL);
         }
 
         /// EINVAL on out-of-range priority beats EPERM (Linux
@@ -2494,7 +2211,8 @@ mod tests {
                 sched_priority: 0,
                 ..SchedParam::default()
             };
-            assert_eq!(sched_setscheduler(0, SCHED_DEADLINE, &raw const p_dl), 0,);
+            // The capability does not make a zero deadline valid.
+            assert_eq!(sched_setscheduler(0, SCHED_DEADLINE, &raw const p_dl), -1,);
         }
 
         // -- Cross-checks -------------------------------------------------
@@ -2622,9 +2340,9 @@ mod tests {
             assert_eq!(errno::get_errno(), errno::EPERM);
         }
 
-        /// `SCHED_DEADLINE` has no rlimit alternative in Linux
-        /// (`dl_policy(policy)` jumps straight to the capability test), so a
-        /// generous `RLIMIT_RTPRIO` must not leak into it.
+        /// A generous `RLIMIT_RTPRIO` does not make `SCHED_DEADLINE`
+        /// acceptable through this call: it is refused as a parameter error
+        /// before either the limit or the capability is consulted.
         #[test]
         fn test_sched_setscheduler_deadline_ignores_the_rtprio_rlimit() {
             let _g = CapGuard::snapshot();
@@ -2638,10 +2356,10 @@ mod tests {
             assert_eq!(
                 sched_setscheduler(0, SCHED_DEADLINE, &raw const p),
                 -1,
-                "SCHED_DEADLINE is capability-only on Linux however high \
-                 RLIMIT_RTPRIO is",
+                "SCHED_DEADLINE through sched_setscheduler is EINVAL however \
+                 high RLIMIT_RTPRIO is",
             );
-            assert_eq!(errno::get_errno(), errno::EPERM);
+            assert_eq!(errno::get_errno(), errno::EINVAL);
         }
 
         /// The cold-start limit is `0`, which leaves the capability as the
@@ -2801,19 +2519,24 @@ mod tests {
             );
         }
 
-        /// pid > 0 with cap held succeeds.
+        /// Another pid is looked up, cap or no cap: on the host nothing
+        /// answers the probe, so `ESRCH` -- never a success for a process
+        /// that is not there.
         #[test]
         fn test_setaffinity_other_cap_held() {
             assert!(crate::sys_capability::has_capability(CAP_SYS_NICE));
             let m = valid_mask();
             crate::errno::set_errno(0);
             assert_eq!(
-                sched_setaffinity(1, core::mem::size_of::<CpuSetT>(), &m as *const _,),
-                0,
+                sched_setaffinity(other_pid(), core::mem::size_of::<CpuSetT>(), &m as *const _,),
+                -1,
             );
+            assert_eq!(crate::errno::get_errno(), crate::errno::ESRCH);
         }
 
-        /// pid > 0 without `CAP_SYS_NICE` is not denied by libc (§314).
+        /// Another pid without `CAP_SYS_NICE` is not refused for the want of
+        /// it (§314): it is looked up like any other -- `ESRCH` on the host,
+        /// not `EPERM`.
         #[test]
         fn test_setaffinity_other_no_cap_is_not_libc_denied() {
             let _g = CapGuard::snapshot();
@@ -2821,10 +2544,15 @@ mod tests {
             let m = valid_mask();
             crate::errno::set_errno(0);
             assert_eq!(
-                sched_setaffinity(1, core::mem::size_of::<CpuSetT>(), &m as *const _,),
-                0,
+                sched_setaffinity(other_pid(), core::mem::size_of::<CpuSetT>(), &m as *const _,),
+                -1,
             );
-            assert_ne!(crate::errno::get_errno(), crate::errno::EPERM);
+            assert_eq!(crate::errno::get_errno(), crate::errno::ESRCH);
+        }
+
+        /// A pid that is not the caller's.
+        fn other_pid() -> i32 {
+            if crate::process::getpid() == 1 { 2 } else { 1 }
         }
 
         /// The bug the Phase-207 gate actually had: setting **your own**
@@ -2879,7 +2607,11 @@ mod tests {
             assert_eq!(crate::errno::get_errno(), crate::errno::ESRCH);
         }
 
-        /// EINVAL (no valid CPU) takes priority over EPERM.
+        /// EINVAL (no valid CPU) takes priority over EPERM: without
+        /// `CAP_SYS_NICE`, the caller -- which the lookup finds -- is told its
+        /// empty mask is invalid, not that it may not ask.  (Another pid is
+        /// looked up first, and on the host is not found: `ESRCH`, as
+        /// `test_setaffinity_other_no_cap_is_not_libc_denied` shows.)
         #[test]
         fn test_setaffinity_einval_mask_before_eperm() {
             let _g = CapGuard::snapshot();
@@ -2888,7 +2620,7 @@ mod tests {
             let m = CpuSetT { bits: [0u64; 16] };
             crate::errno::set_errno(0);
             assert_eq!(
-                sched_setaffinity(1, core::mem::size_of::<CpuSetT>(), &m as *const _,),
+                sched_setaffinity(0, core::mem::size_of::<CpuSetT>(), &m as *const _,),
                 -1,
             );
             assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
@@ -2919,41 +2651,41 @@ mod tests {
     }
 
     // =================================================================
-    // Phase 210 — NULL-pointer errno: EINVAL → EFAULT cleanup
+    // Phase 210 — NULL-pointer errno, and its reversal on 2026-09-26
     //
-    // Linux returns EFAULT for NULL user-space pointers via
-    // `copy_from_user` / `copy_to_user`.  Our stubs originally used
-    // EINVAL because the rest of the sched module did so.  Phase 210
-    // corrects these four functions to match Linux:
-    //   sched_setscheduler, sched_getparam, sched_setparam,
-    //   sched_rr_get_interval.
-    //
-    // sched_getaffinity / sched_setaffinity already used EFAULT since
-    // Phase 118.
+    // Phase 210 turned these functions' EINVAL for a NULL pointer into
+    // EFAULT, reasoning that Linux's `copy_from_user`/`copy_to_user`
+    // would fault.  For three of the four, Linux never gets that far:
+    // `do_sched_setscheduler` (sched_setscheduler, sched_setparam) and
+    // `sched_getparam` open with `if (!param || pid < 0) return
+    // -EINVAL;`.  So a NULL `param` is EINVAL, as it was before Phase
+    // 210.  `sched_rr_get_interval` really does reach `put_timespec64`,
+    // and keeps its EFAULT.
     // =================================================================
 
-    /// sched_setscheduler: NULL param → EFAULT (not EINVAL).
+    /// sched_setscheduler: NULL param → EINVAL, as Linux's
+    /// `do_sched_setscheduler` answers it.
     #[test]
-    fn test_phase210_setscheduler_null_param_efault() {
+    fn test_phase210_setscheduler_null_param_einval() {
         errno::set_errno(0);
         assert_eq!(sched_setscheduler(0, SCHED_RR, core::ptr::null()), -1);
-        assert_eq!(errno::get_errno(), errno::EFAULT);
+        assert_eq!(errno::get_errno(), errno::EINVAL);
     }
 
-    /// sched_getparam: NULL param → EFAULT.
+    /// sched_getparam: NULL param → EINVAL.
     #[test]
-    fn test_phase210_getparam_null_param_efault() {
+    fn test_phase210_getparam_null_param_einval() {
         errno::set_errno(0);
         assert_eq!(sched_getparam(0, core::ptr::null_mut()), -1);
-        assert_eq!(errno::get_errno(), errno::EFAULT);
+        assert_eq!(errno::get_errno(), errno::EINVAL);
     }
 
-    /// sched_setparam: NULL param → EFAULT.
+    /// sched_setparam: NULL param → EINVAL.
     #[test]
-    fn test_phase210_setparam_null_param_efault() {
+    fn test_phase210_setparam_null_param_einval() {
         errno::set_errno(0);
         assert_eq!(sched_setparam(0, core::ptr::null()), -1);
-        assert_eq!(errno::get_errno(), errno::EFAULT);
+        assert_eq!(errno::get_errno(), errno::EINVAL);
     }
 
     /// sched_rr_get_interval: NULL tp → EFAULT.
@@ -3010,10 +2742,10 @@ mod tests {
     /// state from the failed NULL-pointer path.
     #[test]
     fn test_phase210_recovery_after_efault() {
-        // sched_getparam: EFAULT then success.
+        // sched_getparam: EINVAL then success.
         errno::set_errno(0);
         assert_eq!(sched_getparam(0, core::ptr::null_mut()), -1);
-        assert_eq!(errno::get_errno(), errno::EFAULT);
+        assert_eq!(errno::get_errno(), errno::EINVAL);
         let mut param = SchedParam {
             sched_priority: 99,
             ..SchedParam::default()
@@ -3022,10 +2754,10 @@ mod tests {
         assert_eq!(sched_getparam(0, &raw mut param), 0);
         assert_eq!(param.sched_priority, 0);
 
-        // sched_setparam: EFAULT then success.
+        // sched_setparam: EINVAL then success.
         errno::set_errno(0);
         assert_eq!(sched_setparam(0, core::ptr::null()), -1);
-        assert_eq!(errno::get_errno(), errno::EFAULT);
+        assert_eq!(errno::get_errno(), errno::EINVAL);
         let p = SchedParam {
             sched_priority: 0,
             ..SchedParam::default()

@@ -1726,8 +1726,8 @@ impl PackageHooks {
                     Ok(true)
                 } else {
                     Err(format!(
-                        "hook '{}' failed with exit code {}",
-                        command,
+                        "hook {} failed with exit code {}",
+                        quoteaf_os(command),
                         status.code().unwrap_or(-1)
                     ))
                 }

@@ -86,6 +86,22 @@ whatever assembles the production rootfs `/bin`), `kernel/src/proc/spawn.rs`
 living — most likely the settings surface rather than a build flag, since §108
 makes it a user choice.
 
+**The operator's remark, 2026-09-27** (made while answering lane B's B-Q21,
+§1053, and added here by lane B because it bears on this entry; it does not
+answer it -- the trigger above still stands):
+
+> As for the second question, I guess there's no point in having both a fastpy
+> and a Rust implementation of anything. Wait, yes there is. We may determine
+> that the Rust implementation is better and make that the stock install, but
+> the user may find Python much easier to edit. And vice versa, they may prefer
+> Rust for some reason even if we think the Python version is better. Though
+> another option is to keep the alternative versions in the repo but not
+> included in the OS distribution.
+
+So both implementations may be kept, whichever becomes the default -- and a
+fourth option joins the three above: **D, ship one, keep the other in the
+repository only.**
+
 ---
 
 ## DQ2 (was D-Q2) — Install `clang` + `lld` and turn on LLVM CFI for C code?
@@ -522,3 +538,43 @@ only their costs moved):
 > to miss. Three settings stay inert — `cursor_size`, `cursor_scheme` and the
 > whole `CursorShape` vocabulary — and every accessibility question about pointer
 > size stays unanswerable. Nothing degrades with time; it simply does not exist.
+
+---
+
+## DQ4 — Which allocator should the C library's heap be in the long run? — deferred 2026-09-25 (lane D)
+
+**In short:** every SlateOS program's memory allocation now goes through Doug
+Lea's allocator (design-decisions §1101) — mature, fast for ordinary programs,
+and a large improvement on what it replaced. It has two known weaknesses: every
+thread in a program shares one lock to allocate, and its bookkeeping sits right
+next to program data, so a buggy or attacked C program can corrupt it in
+exploitable ways. Whether either matters enough to replace it — and with what —
+needs measurements this project cannot take yet. Nothing is wrong today and
+nothing is waiting on an answer.
+
+**Why this is not in `open-questions.md`.** Both weaknesses are hypothetical
+until a real workload shows them, and the options differ mainly in performance
+and hardening that can only be compared on SlateOS itself. Asking now would be
+asking for a guess.
+
+**The choice, when it arrives:**
+
+| Option | *What changes* |
+|---|---|
+| Keep dlmalloc, add per-thread caches in front (glibc's tcache shape) | *Busy multi-threaded programs stop queueing on the heap lock; heap-overflow exploits stay as easy as on glibc.* |
+| Port musl's mallocng | *A heap overflow in a C program becomes far harder to turn into an exploit; allocation gets somewhat slower.* |
+| A mimalloc/jemalloc-style size-class allocator | *Fastest under many threads and closest to where `memory management.txt` leaned; the largest port, and hardening depends on which.* |
+
+Any of them replaces only the core behind `posix/src/malloc.rs`'s `SlateSystem`
+and `HeapGuard`; programs see no difference in interface.
+
+**Trigger to promote this into `open-questions.md`:** whichever comes first —
+(a) a program on SlateOS shows the heap lock in a profile, or allocation in
+general as a hot spot (the heap benchmark belongs in the same commit that
+measures it); (b) hardening against memory-corruption exploits is scheduled for
+userspace; (c) a heap-corruption bug in a ported C program is traced to inline
+metadata being overwritten.
+
+**Related:** `known-issues.md` → `TD-D-MALLOC-HAS-ONE-LOCK-AND-INLINE-METADATA`;
+`memory management.txt` (the operator's own allocator discussion, which ends
+recommending geometric size classes).

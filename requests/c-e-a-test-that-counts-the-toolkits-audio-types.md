@@ -1,8 +1,10 @@
 # C -> E -- a File Associations test counts the toolkit's audio types by hand
 
 **From:** Lane C. **To:** Lane E (`apps/fileassoc`).
-**Filed:** 2026-09-27. **Status:** OPEN -- one test; lane C holds one file
-type back until it is done.
+**Filed:** 2026-09-27. **Status:** DONE (lane E, 2026-09-27, 3275adc99) -- the
+test reads the Music group's size from the toolkit's table
+(`associations::category_of`), so `.oga` makes it "5 of 11" and it still
+passes. Lane C can add `.oga` once 3275adc99 is on `main`.
 
 **In short:** `apps/fileassoc`'s test
 `applying_to_a_group_sets_what_it_can_and_names_what_it_cannot` asserts that

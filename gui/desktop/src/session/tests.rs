@@ -318,6 +318,44 @@ fn only_the_overlay_surface_refuses_the_mouse() {
     assert!(specs[3].input_transparent);
 }
 
+/// **What the settings watch reports is announced to every window, each file
+/// once** (design-decisions 1418). A save and the editor's second save of the
+/// same file, reported in two batches before the loop came round, are one
+/// change as far as any window needs to know.
+#[test]
+fn every_settings_file_the_watch_reports_is_announced_once() {
+    let (mut session, desktop, _turn) = session();
+    let (reports, names) = std::sync::mpsc::channel();
+    session.watch_settings_from(names);
+    let name = |s: &str| guitk::event::SettingsName::new(s.as_bytes()).unwrap();
+    let announced = |desktop: &Desktop| -> Vec<String> {
+        desktop
+            .borrow()
+            .seen
+            .iter()
+            .filter_map(|r| match r.body {
+                RequestBody::AnnounceSettings { name } => Some(name.as_str().to_owned()),
+                _ => None,
+            })
+            .collect()
+    };
+    assert_eq!(
+        announced(&desktop),
+        Vec::<String>::new(),
+        "nothing before a report"
+    );
+
+    reports.send(vec![name("notes"), name("calendar")]).unwrap();
+    reports.send(vec![name("notes")]).unwrap();
+    session.pump().unwrap();
+    assert_eq!(announced(&desktop), ["notes", "calendar"]);
+
+    // A later change to the same file is a new change, and announced again.
+    reports.send(vec![name("notes")]).unwrap();
+    session.pump().unwrap();
+    assert_eq!(announced(&desktop), ["notes", "calendar", "notes"]);
+}
+
 #[test]
 fn the_shell_asks_to_be_told_about_windows_it_does_not_own() {
     let (_session, desktop, _turn) = session();
@@ -538,7 +576,14 @@ fn right_clicking_a_pinned_tile_draws_its_menu() {
             .shell_mut()
             .pin_app(crate::launcher::TERMINAL, "Terminal");
         session.pump().expect("pump");
-        let tile = session.shell().taskbar_button_rect(0);
+        let slot = session
+            .shell()
+            .taskbar
+            .pinned_apps()
+            .iter()
+            .position(|pin| pin.exec_path == crate::launcher::TERMINAL)
+            .expect("Terminal is pinned");
+        let tile = session.shell().taskbar_button_rect(slot);
         let before = desktop.borrow().seen.len();
         let frames = frames_on(&desktop, popups);
 
@@ -705,7 +750,14 @@ fn a_program_started_from_its_pin_is_recently_used() {
             .shell_mut()
             .pin_app(crate::launcher::TERMINAL, "Terminal");
         session.pump().expect("pump");
-        let tile = session.shell().taskbar_button_rect(0);
+        let slot = session
+            .shell()
+            .taskbar
+            .pinned_apps()
+            .iter()
+            .position(|pin| pin.exec_path == crate::launcher::TERMINAL)
+            .expect("Terminal is pinned");
+        let tile = session.shell().taskbar_button_rect(slot);
         let (x, y) = (tile.x + tile.w / 2.0, tile.y + tile.h / 2.0);
 
         press_at(&desktop, session.panel(), x, y);
@@ -1059,6 +1111,13 @@ fn the_compositors_window_list_is_what_the_taskbar_is_drawn_from() {
     assert_eq!(titles, ["Terminal", "notes.txt"]);
 }
 
+/// The taskbar slot of the `n`th window's button: after the pinned programs,
+/// which a desktop that has never saved its pins has from its first start
+/// (`FIRST_START_TASKBAR_PINS`).
+fn window_slot(session: &Session, n: usize) -> usize {
+    session.shell().taskbar.pinned_apps().len() + n
+}
+
 #[test]
 fn a_taskbar_button_asks_the_compositor_rather_than_changing_anything() {
     let (mut session, desktop, _turn) = session();
@@ -1067,7 +1126,11 @@ fn a_taskbar_button_asks_the_compositor_rather_than_changing_anything() {
         .send_window_list(&[app(1, "Terminal"), app(2, "notes.txt")]);
     session.pump().expect("pump");
 
-    let button = centre(session.shell().taskbar_button_rect(1));
+    let button = centre(
+        session
+            .shell()
+            .taskbar_button_rect(window_slot(&session, 1)),
+    );
     press_at(&desktop, session.panel(), button.0, button.1);
     release_at(&desktop, session.panel(), button.0, button.1);
     session.pump().expect("pump");
@@ -1095,7 +1158,11 @@ fn a_second_press_on_the_focused_windows_button_asks_for_it_to_be_minimised() {
         .send_window_list(&[app(1, "Terminal"), focused]);
     session.pump().expect("pump");
 
-    let button = centre(session.shell().taskbar_button_rect(1));
+    let button = centre(
+        session
+            .shell()
+            .taskbar_button_rect(window_slot(&session, 1)),
+    );
     press_at(&desktop, session.panel(), button.0, button.1);
     release_at(&desktop, session.panel(), button.0, button.1);
     session.pump().expect("pump");
@@ -1323,7 +1390,11 @@ fn a_window_list_arriving_with_a_click_is_folded_in_after_it() {
         .send_window_list(&[app(1, "Terminal"), app(2, "notes.txt")]);
     session.pump().expect("pump");
 
-    let button = centre(session.shell().taskbar_button_rect(1));
+    let button = centre(
+        session
+            .shell()
+            .taskbar_button_rect(window_slot(&session, 1)),
+    );
     {
         let mut d = desktop.borrow_mut();
         // Both in flight at once, the list first — the worst ordering for a
@@ -2063,6 +2134,145 @@ fn an_animation_speed_of_off_stops_the_shell_animating() {
         assert!(
             !session.animations().has_active(),
             "Off should start nothing"
+        );
+    });
+}
+
+// ============================================================================
+// The desktop's motion reaches everything that moves
+// ============================================================================
+
+/// **A saved speed of Off moves nothing on screen.** It used to reach only the
+/// animation manager, which nothing on the desktop is drawn by: the overview
+/// still faded in and the notification pane still slid, at their own fixed
+/// lengths, whatever the user had chosen. Now Off is the still motion, and
+/// every animator is handed it.
+#[test]
+fn a_speed_of_off_moves_nothing_on_screen() {
+    settingsfile::testing::with_scratch_config("session-motion-off", |_root| {
+        let mut file = appearance::AppearanceFile::load();
+        file.settings.animation_speed = AnimationSpeed::Off;
+        file.save().expect("save");
+
+        let (mut session, _desktop, _turn) = bound_session();
+        session.load_appearance();
+        let panel = session.panel().window();
+        // Loading asks for a frame of its own (quiet hours' edge); the
+        // question below is whether the overview asks for one.
+        session.events_mut().cancel_wake(panel);
+
+        deliver(&mut session, panel, super_tab());
+        assert!(session.shell().overview.visible, "Super+Tab did nothing");
+        assert!(
+            !session.shell().overview.is_fading(),
+            "Off still faded the overview in"
+        );
+        assert!(
+            !session.events_mut().is_waking(panel),
+            "Off still armed the frame clock for a fade it did not run"
+        );
+        deliver(&mut session, panel, super_tab());
+
+        deliver(&mut session, panel, super_n());
+        assert!(session.shell().notifications.pane_state().is_visible());
+        assert!(
+            !session.shell().notifications.is_sliding(),
+            "Off still slid the notification pane"
+        );
+        assert!(session.shell().osd.config.motion.is_still());
+        assert!(session.autohide.motion().is_still());
+    });
+}
+
+/// **A theme whose animation is off moves nothing either**, at the user's
+/// normal speed: the theme's `enabled: false` is the same still motion.
+#[test]
+fn a_still_animation_theme_moves_nothing_on_screen() {
+    settingsfile::testing::with_scratch_config("session-motion-theme", |root| {
+        let dir = settingsfile::testing::scratch_data_dir(root)
+            .join("slateos")
+            .join("themes")
+            .join("calm");
+        std::fs::create_dir_all(&dir).expect("the scratch directory is writable");
+        std::fs::write(
+            dir.join(appearance::themes::FILE_NAME),
+            "animation:
+  enabled: false
+",
+        )
+        .expect("the scratch directory is writable");
+        let mut file = appearance::AppearanceFile::load();
+        file.settings.animation_theme =
+            appearance::themes::AnimationTheme::load(std::ffi::OsStr::new("calm"));
+        file.save().expect("save");
+
+        let (mut session, _desktop, _turn) = bound_session();
+        session.load_appearance();
+        assert!(session.shell().motion().is_still());
+        let panel = session.panel().window();
+        deliver(&mut session, panel, super_tab());
+        assert!(session.shell().overview.visible);
+        assert!(!session.shell().overview.is_fading());
+        assert!(!session.animations().has_active());
+    });
+}
+
+/// **A saved speed reaches every animator the desktop has** -- the overview's
+/// fade, the pane, the on-screen display, auto-hide and the manager -- as one
+/// motion: Slow is the built-in standard half again as long.
+#[test]
+fn the_saved_speed_reaches_every_animator() {
+    use guitk::motion::{Curve, Motion};
+    settingsfile::testing::with_scratch_config("session-motion-slow", |_root| {
+        let mut file = appearance::AppearanceFile::load();
+        file.settings.animation_speed = AnimationSpeed::Slow;
+        file.save().expect("save");
+
+        let (mut session, _desktop, _turn) = bound_session();
+        session.load_appearance();
+        let slow = Motion::new(300, Curve::EaseOut);
+        assert_eq!(session.shell().motion(), slow);
+        assert_eq!(session.shell().notifications.motion(), slow);
+        assert_eq!(session.shell().osd.config.motion, slow);
+        assert_eq!(session.autohide.motion(), slow);
+        assert!((session.animations().duration_scale() - 1.5).abs() < f32::EPSILON);
+
+        // The overview's fade is half again as long: still going where the
+        // standard one would have finished.
+        let panel = session.panel().window();
+        deliver(&mut session, panel, super_tab());
+        assert!(session.shell().overview.is_fading());
+        let fade_ms = session.shell().overview_config.fade_ms;
+        frame(&mut session, u64::from(fade_ms));
+        assert!(
+            session.shell().overview.is_fading(),
+            "Slow finished the fade in the standard time"
+        );
+    });
+}
+
+/// **Turning motion off mid-fade lands everything**: a fade or a slide in
+/// progress when the setting arrives is where it was going, not frozen
+/// part-way asking for frames.
+#[test]
+fn turning_motion_off_mid_fade_lands_everything() {
+    settingsfile::testing::with_scratch_config("session-motion-live", |_root| {
+        let (mut session, desktop, _turn) = bound_session();
+        session.load_appearance();
+        let panel = session.panel().window();
+        deliver(&mut session, panel, super_tab());
+        assert!(session.shell().overview.is_fading());
+
+        let mut file = appearance::AppearanceFile::load();
+        file.settings.animation_speed = AnimationSpeed::Off;
+        file.save().expect("save");
+        announce(&desktop, session.panel(), SettingsGroup::Appearance);
+        session.pump().expect("pump");
+
+        assert!(!session.shell().overview.is_fading());
+        assert!(
+            (session.shell().overview.fade_opacity() - 1.0).abs() < f32::EPSILON,
+            "the fade was left part-way"
         );
     });
 }
@@ -3301,6 +3511,77 @@ fn a_wallpaper_named_in_the_settings_is_adopted() {
 /// `follow_desktop_base` and a solid colour draw the same pixels today and
 /// diverge the moment the user switches between light and dark. Only one of
 /// them is a decision the user made.
+/// **A time-of-day schedule is the wallpaper**, over a fixed picture and over
+/// a rotation folder, as the settings' own docs say.
+///
+/// One entry, so it is up whatever the time and zone the test runs in.
+#[test]
+fn a_scheduled_wallpaper_wins_over_a_picture_and_a_folder() {
+    let (mut session, _desktop, _turn) = session();
+    session.shell_mut().appearance.wallpaper = Some(fixture("rgb8"));
+    session.shell_mut().appearance.wallpaper_folder = Some(std::env::temp_dir());
+    session.shell_mut().appearance.wallpaper_schedule = vec![appearance::ScheduledWallpaper {
+        from: appearance::TimeOfDay::MIDNIGHT,
+        image: fixture("gray8"),
+    }];
+    session.sync_wallpaper();
+    assert_eq!(
+        session.wallpaper_mut().current_image_path(),
+        Some(fixture("gray8").as_path()),
+        "the schedule's picture is not the one up"
+    );
+
+    // Take the schedule away: the folder is the wallpaper again.
+    session.shell_mut().appearance.wallpaper_schedule.clear();
+    session.sync_wallpaper();
+    assert_ne!(
+        session.wallpaper_mut().current_image_path(),
+        Some(fixture("gray8").as_path()),
+        "the scheduled picture stayed up after the schedule went"
+    );
+}
+
+/// **A schedule with two pictures wakes the desktop at its next edge**, and
+/// no later: nothing else would change the picture at 18:00 on a desktop
+/// nobody is touching.
+#[test]
+fn a_wallpaper_schedule_arms_a_wake_up_at_its_next_edge() {
+    let (mut session, desktop, _turn) = session();
+    assert_eq!(
+        armed_in(&mut session),
+        None,
+        "the fixture starts with a timer"
+    );
+    session.shell_mut().appearance.wallpaper_schedule = vec![
+        appearance::ScheduledWallpaper {
+            from: appearance::TimeOfDay::MIDNIGHT,
+            image: fixture("rgb8"),
+        },
+        appearance::ScheduledWallpaper {
+            from: appearance::TimeOfDay::new(12, 0).expect("noon"),
+            image: fixture("gray8"),
+        },
+    ];
+    session.sync_wallpaper();
+    // A frame, which ends by arming the next wake-up -- the path every
+    // change on a running desktop takes.
+    woken_after(&mut session, &desktop, 16);
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .expect("after 1970")
+        .as_secs();
+    let edge = session
+        .shell()
+        .next_wallpaper_change(now)
+        .expect("two pictures change twice a day");
+    assert!(edge <= std::time::Duration::from_hours(12), "{edge:?}");
+    let until = armed_in(&mut session).expect("the schedule armed no wake-up");
+    assert!(
+        until <= edge + std::time::Duration::from_secs(2),
+        "armed for {until:?}, past the schedule's edge in {edge:?}"
+    );
+}
+
 #[test]
 fn clearing_the_wallpaper_goes_back_to_following_the_theme() {
     let (mut session, _desktop, _turn) = session();
@@ -3519,6 +3800,47 @@ fn an_entry_that_cannot_be_used_is_reported_once() {
     assert!(problems.iter().all(|p| !p.why.is_empty()));
     assert!(session.take_app_problems().is_empty(), "reported twice");
     assert!(menu_names(&session).contains(&"Sketchpad".to_owned()));
+}
+
+/// **An installed entry with the ID of one of SlateOS's own replaces it in
+/// the menu, and a hidden copy takes it off**; an entry under another ID
+/// starting the same program is listed beside it (design-decisions §1445).
+#[test]
+fn an_installed_entry_replaces_slateoss_own_by_its_id() {
+    let (mut session, _desktop, _turn) = session();
+    let scratch = scratchdir::ScratchDir::new("session-installed-replaces");
+    let dir = data_dir(
+        &scratch,
+        &[
+            (
+                "org.slateos.Calculator.desktop",
+                "[Desktop Entry]\nType=Application\nName=Abacus\nExec=calculator\n",
+            ),
+            (
+                "org.slateos.Editor.desktop",
+                "[Desktop Entry]\nHidden=true\n",
+            ),
+            (
+                "org.example.Calc.desktop",
+                "[Desktop Entry]\nType=Application\nName=Scientific\nExec=calculator --scientific\n",
+            ),
+        ],
+    );
+    let before = menu_names(&session);
+    for own in ["Calculator", "Text Editor", "Terminal"] {
+        assert!(before.contains(&own.to_owned()), "the premise: {own}");
+    }
+    session.set_app_dirs(desktopentry::scan::DataDirs::new(vec![dir]));
+    let names = menu_names(&session);
+    assert!(names.contains(&"Abacus".to_owned()), "{names:?}");
+    assert!(names.contains(&"Scientific".to_owned()), "{names:?}");
+    for gone in ["Calculator", "Text Editor"] {
+        assert!(
+            !names.contains(&gone.to_owned()),
+            "{gone} stayed: {names:?}"
+        );
+    }
+    assert!(names.contains(&"Terminal".to_owned()), "{names:?}");
 }
 
 /// Opening the menu with nothing changed does not read every entry again:
@@ -5995,6 +6317,15 @@ fn a_start_menu_pin_is_saved_and_comes_back_at_the_next_login() {
             .clone();
         first.shell_mut().pin_to_start(&exec);
         first.pump().expect("pump");
+        // Whatever the pins were -- the first start's, and the one added --
+        // is what the next login must find.
+        let saved: Vec<String> = first
+            .shell()
+            .start_pins()
+            .iter()
+            .map(|entry| entry.executable_path.clone())
+            .collect();
+        assert!(saved.contains(&exec), "the pin was not made");
         drop(first);
 
         let (restarted, _d2, _turn2) = session();
@@ -6004,7 +6335,7 @@ fn a_start_menu_pin_is_saved_and_comes_back_at_the_next_login() {
             .iter()
             .map(|entry| entry.executable_path.clone())
             .collect();
-        assert_eq!(pins, [exec]);
+        assert_eq!(pins, saved);
     });
 }
 

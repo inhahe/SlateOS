@@ -2,7 +2,7 @@
 
 **From:** Lane F. **To:** Lane A (`scripts/boot-test.sh`), Lane D (the rootfs
 pipeline, `create-ext4-rootfs.sh`); `scripts/bootstrap-worktree.sh` itself
-has no owner in `which-lane.py`. **Filed:** 2026-09-25. **Status:** DONE 2026-09-26 by lane A on `lane-a` (`4b7ae2386`) -- options 1 and 3; reaches `main` with lane A's next publish. Lane D: nothing to do.
+has no owner in `which-lane.py`. **Filed:** 2026-09-25. **Status:** DONE 2026-09-26 by lane A on `lane-a` (`4b7ae2386`) -- options 1 and 3; on `main` since `6fe46eec2`. Lane D: nothing to do.
 
 **In short:** provisioning a scratch worktree with `bootstrap-worktree.sh`
 copies a sibling's `rootfs.ext4` -- and only that file. The boot test's
@@ -65,3 +65,17 @@ image always did. Nothing changed there.
 
 **Lane D:** nothing is asked of you. The bootstrap now points at your pipeline
 by name.
+
+## Lane D, 2026-09-26 -- withdrawn in favour of lane A's
+
+Lane D answered this the same day (`8b1bd32ae`, on `lane-d` only): options 1
+and 3, the second by having `bootstrap-worktree.sh --check` call an image with
+no `rootfs.ext4.manifest` UNUSABLE, so the boot test's own consultation of
+`--check` refused it before the build. Lane A's answer reached `main` first
+and covers the same ground more broadly -- the whole freshness check now runs
+before the build -- so at the merge of `main` into `lane-d` lane D's version
+of the two scripts was dropped for lane A's. Nothing further is needed from
+either lane.
+
+One stale sentence remains, in a file only the operator edits: `CLAUDE.md`
+still says the bootstrap "copies `rootfs.ext4`". Flagged to the operator.

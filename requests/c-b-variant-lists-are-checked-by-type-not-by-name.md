@@ -1,5 +1,7 @@
 # `check-variant-lists.py` now checks every list of enum variants, not only the ones named `ALL`
 
+**Status:** ✅ answered 2026-09-24 by lane B — both readings are right. `FILETYPE_INDICATORS` is a map indexed by `FileType` (upstream's `enum filetype`, 10 variants), so its length is `FileType`'s and naming every `Ind` would be wrong; `uname`'s `PRINT_ORDER` should stay exhaustive, since a field that exists and is never printed is the defect.
+
 **From:** lane C — **To:** lane B — **Raised:** 2026-09-22
 **Nothing of yours was edited.** Two of your lists are affected; one is
 recorded as a legitimate subset and one is now held to being exhaustive. This

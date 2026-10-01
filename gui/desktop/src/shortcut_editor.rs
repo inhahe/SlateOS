@@ -733,6 +733,7 @@ impl ShortcutEditor {
         max_height: f32,
         cx: Context,
         caret_width: f32,
+        focus_ring: f32,
     ) {
         let (width, height) = self.picker_size(max_height);
         hotkeys::push_card(&mut tree.commands, p, x, y, width, height);
@@ -758,28 +759,21 @@ impl ShortcutEditor {
             overflow: TextOverflow::Ellipsis,
         });
 
-        // The field: a well with the text in it.
+        // The field: the toolkit's (`guitk::field`), in the theme's shape,
+        // with the keyboard -- what is typed goes into it.
         let field_x = x + hotkeys::PADDING;
         let field_y = y + hotkeys::HEADER_HEIGHT;
         let field_w = width - hotkeys::PADDING * 2.0;
-        tree.push(RenderCommand::FillRect {
-            x: field_x,
-            y: field_y,
-            width: field_w,
-            height: FIELD_HEIGHT,
-            color: p.crust,
-            corner_radii: CornerRadii::all(6.0),
-        });
-        tree.push(RenderCommand::StrokeRect {
-            x: field_x,
-            y: field_y,
-            width: field_w,
-            height: FIELD_HEIGHT,
-            // The field has the keyboard, and the accent says where it is.
-            color: p.accent,
-            line_width: 1.0,
-            corner_radii: CornerRadii::all(6.0),
-        });
+        guitk::field::draw(
+            tree,
+            p,
+            guitk::frame::Rect::new(field_x, field_y, field_w, FIELD_HEIGHT),
+            guitk::field::State {
+                focused: true,
+                ..guitk::field::State::default()
+            },
+            focus_ring,
+        );
         let line_h = hotkeys::LABEL_FONT_SIZE + 4.0;
         let text_y = field_y + (FIELD_HEIGHT - line_h) / 2.0;
         if let Some(input) = field {
@@ -1544,6 +1538,7 @@ mod tests {
             0.0,
             900.0,
             CX,
+            2.0,
             2.0,
         );
         let texts: Vec<String> = tree

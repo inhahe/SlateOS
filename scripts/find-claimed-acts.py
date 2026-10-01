@@ -69,16 +69,24 @@ WHAT IT CANNOT SEE, stated plainly:
     `std::net` to parse an address, which is not network access -- the same
     blind spot `find-stale-admissions` documents, and for the same reason.
 
-THE SIX IT STILL REPORTS, so nobody investigates them twice. All six are
-correct code: the first four read against the source on 2026-09-15, the last
-two on 2026-09-17 -- and those two were investigated from scratch that day
-precisely because this list still said four. A list like this is only worth
+THE NINE IT STILL REPORTS, so nobody investigates them twice. All nine are
+correct code: four read against the source on 2026-09-15, two on 2026-09-17 --
+investigated from scratch that day precisely because this list still said four
+-- and three on 2026-09-27, when it said six. A list like this is only worth
 having if it is added to when the scanner's output grows.
 
-  * `apps/terminal` [process] -- "terminated by {s:?}". A `Display` impl for an
-    exit-status enum. It describes how a child process ended; it does not claim
+  * `apps/termchild` [process] -- "was killed by {name} (signal {sig})" and
+    "was killed by signal {sig}". The `Display` impl for a child's exit status
+    (it was `apps/terminal`'s "terminated by {s:?}" until the child moved into
+    its own crate). It describes how a child process ended; it does not claim
     this program ended it. The vocabulary cannot tell a report of someone
     else's act from a claim about one's own.
+  * `apps/terminal` [network] -- "No shell. {why} Nothing is connected to this
+    terminal, so what you type goes nowhere". A denial, not a claim: "connected"
+    is network vocabulary, and the sentence says nothing is.
+  * `apps/rssreader` [network] -- "Open a feed file you have downloaded -- Open…
+    or Ctrl+O -- to read it here." An instruction to the user, who did the
+    downloading; the reader claims no fetch, and has none.
   * `apps/tmux` [process] -- "Killed session: {name}". A tmux session here is
     one of the app's own panes in its own `Vec`, and it really is removed. The
     `process` kind assumes the object is external, and this one is not.
@@ -114,57 +122,13 @@ import re
 import sys
 
 from rustlex import live_code, string_literals
-# The count this file's "IT STILL REPORTS" note claims, so the scan can say
-# when the two have drifted apart.
-#
-# Twice on 2026-09-17 a note like that sat beside a larger scan and nobody
-# noticed: `find-claimed-acts` listed four while reporting six, and
-# `find-stale-admissions` listed three while reporting eight -- and three of
-# that eight were real, windows denying capabilities they had gained. The note
-# exists so nobody investigates a known-good finding twice, and it can only do
-# that if it covers everything reported. The gap is the finding, so the tool
-# says so rather than leaving it to be spotted.
-_COUNT_WORDS = {
-    "ZERO": 0, "ONE": 1, "TWO": 2, "THREE": 3, "FOUR": 4, "FIVE": 5,
-    "SIX": 6, "SEVEN": 7, "EIGHT": 8, "NINE": 9, "TEN": 10, "ELEVEN": 11,
-    "TWELVE": 12,
-}
-
-
-def documented_count():
-    """How many findings this file's own note says it covers, or None."""
-    match = re.search(r"THE ([A-Z]+) IT STILL REPORTS", __doc__ or "")
-    if match is None:
-        return None
-    return _COUNT_WORDS.get(match.group(1))
+from stillreports import report_drift as _report_drift  # noqa: E402
 
 
 def report_drift(found, out=sys.stdout):
-    """Say so when the scan reports more than this file's note covers.
-
-    One direction only. Finding *fewer* than the note lists is usually not
-    staleness: a documented entry can sit outside the roots this run scanned,
-    and warning on that would cry wolf on every default run. A checker nobody
-    believes is worse than no checker. The dangerous direction is the other
-    one, where something is reported that nobody has ever read.
-    """
-    documented = documented_count()
-    if documented is None or found <= documented:
-        return False
-    missing = found - documented
-    print("", file=out)
-    print(
-        "  NOTE OUT OF DATE: this file documents {} known-good finding(s) and"
-        " the scan reports {}.".format(documented, found),
-        file=out,
-    )
-    print(
-        "  The {} not covered have never been read. Read them, and either fix"
-        " what they".format(missing),
-        file=out,
-    )
-    print("  found or add them to the note with the reason.", file=out)
-    return True
+    """This file's note against what the scan found -- `stillreports`, one copy
+    for the three scanners that keep such a note."""
+    return _report_drift(__doc__, found, out)
 
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent

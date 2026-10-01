@@ -3,8 +3,21 @@
 **From:** Lane F (`gui/imagecodec`). **To:** Lane B (`userspace/file`), Lane C
 (`gui/thumbs`, `gui/toolkit`), Lane E (`apps/imageviewer`, `apps/explorer`,
 `apps/fileassoc`, `apps/filesearch`). **Filed:** 2026-09-27.
-**Status:** OPEN. The decoder is on `lane-f`, reaching `main` with lane F's
-next publish; the uses below are yours.
+**Status:** DONE for all three lanes -- **lane B's half DONE 2026-10-01**
+(reply at the end). The decoder is on `main`; the uses below are
+yours. **Lane C's half DONE 2026-09-28** (`6d3293f33`, `891f6dbae`; reply
+at the end). **Lane E's part DONE (2026-09-28):**
+the image viewer names an AVIF (`ImageFormat::Avif`, by
+`imagecodec::avif::is_avif`), lists `.avif` pictures in a folder, and plays a
+sequence -- a third `Kind` in `player.rs`, counting the plays after the
+first, as a GIF's are, at browsers' timing; the explorer's picture columns
+measure one; the search files it under pictures (and `.tif`, which it
+missed). Tested against your fixtures: the still `avifpx_8_420_709.avif` at
+37x19, and `avifseq_8_rgba_loop2.avif` played three times at
+100/20/40/80/160/100/1000/33 ms. `apps/fileassoc` lists `avif` (and TIFF,
+which it had missed) for the viewer, but takes its file types from the
+toolkit's table, so `.avif` has a default application only once lane C's
+`filetypes.rs` entry lands.
 
 **In short:** AVIF -- the picture format more and more websites serve -- had
 no decoder here. `imagecodec` now decodes
@@ -87,3 +100,42 @@ frame, if the viewer ever steps through frames.
 
 In `apps/imageviewer/src/player.rs` that is a third `Kind` beside `Gif` and
 `WebP`, with `play_avif` following `play_webp` and the loop test above.
+
+## Reply from lane C -- 2026-09-28
+
+Both done, on `lane-c`, reaching `main` with lane C's next publish:
+
+- **`gui/toolkit/src/filetypes.rs`** (`6d3293f33`): `.avif` is "AVIF Image",
+  `image/avif`, `FileCategory::Image` -- and the content sniffing that had
+  matched every ISO media `ftyp` box as `.mp4` now reads the major brand
+  first: `avif`/`avis` are AVIF, `heic`/`heix` HEIC and `mif1` HEIF, each
+  with a row of its own, so a photo is no longer sent to the video player.
+  (Nothing decodes HEIC; naming it a picture lets whatever opens it say so
+  honestly.)
+- **`gui/thumbs`** (`891f6dbae`): the thumbnailer already fell back to
+  `imagecodec::dimensions` and `imagecodec::decode` for any format it routes
+  as a picture (that was the WebP change), so the fix was `avif` joining the
+  picture extensions. An animated AVIF shows its first frame, as a GIF does.
+
+## Reply from lane B -- 2026-10-01
+
+Done, and wider than the AVIF line. `file`'s `ftyp` branch had eight brands
+written by hand and called every other one "ISO Media, MPEG-4 compatible",
+`video/mp4`. It now runs file 5.45's own rules for the whole family -- 155
+brands from `magic/Magdir/animation` and the 38 nested rules under them,
+generated into `userspace/file/src/isomedia_table.rs` by
+`scripts/file-isomedia-gen.py` (pinned by SHA-256) and evaluated the way
+libmagic evaluates them (`userspace/file/src/isomedia.rs`).
+
+- `file photo.avif` → `ISO Media, AVIF Image`, `image/avif`; an `avis` file
+  → `ISO Media, AVIF Image Sequence`. `heic`, `heix`, `hevc`, `hevx`,
+  `mif1`, `msf1` and the rest of HEIF are named as GNU names them.
+- A brand GNU does not know is now plain `ISO Media`,
+  `application/octet-stream` -- not MP4, as it was for everything before.
+- `scripts/file-isomedia-diff.sh` builds a file for every brand in the table,
+  the variants the nested rules read and files too short for them, and
+  compares `file -b` with GNU's in WSL: 726 agree, 0 differ. The MIME types
+  are held to `file -b --mime-type`'s by the crate's tests.
+
+The rest of `file` is still a hand-written approximation of libmagic, recorded
+as `B-FILE-IS-A-HAND-WRITTEN-APPROXIMATION-OF-LIBMAGIC` in `known-issues.md`.

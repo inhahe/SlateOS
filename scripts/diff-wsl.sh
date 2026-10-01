@@ -129,6 +129,7 @@
 # | `DIFF_GNU_SOURCE`| (none) | a coreutils version (`9.4`) to fetch, build and compare against, *instead of* the installed binary. See "Why a built reference" below |
 # | `DIFF_GNU_DIR`   | (none) | an already-built `coreutils-N/src` to use instead of building one. The escape hatch for `DIFF_GNU_SOURCE`; ignored without it |
 # | `DIFF_GNU_CACHE` | `$HOME/.cache/slateos-diff-gnu` | where the tarball is downloaded and unpacked |
+# | `DIFF_GNU_EXTRA` | (none) | programs upstream builds only on request (`arch`, `hostname`, `coreutils`: its `no_install__progs`), made in the built tree with `make src/NAME`. Without it `arch` has no reference at all |
 # | `DIFF_GNU_VERIFY_WITH` | the first `DIFF_BINS` entry | which binary in the built tree is asked for its `--version`. For the one utility that cannot answer; see "Why a built reference" below |
 # | `DIFF_NEED`      | (none) | other commands that must exist inside WSL, or the run is skipped rather than run without them |
 # | `DIFF_NO_REF`    | (unset) | do not look for a reference; the harness finds its own |
@@ -139,7 +140,7 @@
 # | name | |
 # |---|---|
 # | `root`       | the repository root |
-# | `target_dir` | the shared Linux target directory |
+# | `target_dir` | this worktree's Linux target directory (see "4. the subject") |
 # | `OURS`       | our binary, absolute (a single `DIFF_BINS`, or a single `DIFF_EXAMPLES` and no `DIFF_BINS`) |
 # | `gnu_real`   | the reference binary, absolute (single `DIFF_BINS`, unless `DIFF_NO_REF`) |
 # | `gnu_dir`    | the built reference's `src` directory, or empty without `DIFF_GNU_SOURCE` |
@@ -785,6 +786,22 @@ if [ -n "$DIFF_GNU_SOURCE" ] && [ -z "$gnu_dir" ]; then
   fi
   gnu_dir=$diff_gnu_src/src
 fi
+# Upstream's `no_install__progs` -- `arch`, `hostname` and `coreutils` -- are
+# automake EXTRA_PROGRAMS: `make` compiles them only when asked for by name, so
+# a default build has no `src/arch` at all. A harness comparing one names it in
+# `DIFF_GNU_EXTRA`, and it is built here, in the finished tree. Naming a target
+# is safe at this point: the BUILT_SOURCES trap described above bites only a
+# tree that has not been built. Only a missing binary is built, so the cost is
+# paid once per cache, and again only after the tree itself is rebuilt.
+if [ -n "$DIFF_GNU_SOURCE" ] && [ -z "${DIFF_GNU_DIR:-}" ]; then
+  for diff_extra in ${DIFF_GNU_EXTRA:-}; do
+    [ -x "$gnu_dir/$diff_extra" ] && continue
+    ( cd "$diff_gnu_src" && make -s "src/$diff_extra" ) >&2 || {
+      echo "$DIFF_PROG-diff: could not build src/$diff_extra in coreutils $DIFF_GNU_SOURCE" >&2
+      exit 1
+    }
+  done
+fi
 # What the reference can actually do, read from the tree rather than inferred
 # from what it was asked to do. `gl_FUNC_XATTR` can decide `use_xattr=no` and
 # only *warn*, so intent is not evidence: a tree configured with the flags can
@@ -881,7 +898,20 @@ if [ -z "${DIFF_NO_REF:-}" ]; then
 fi
 
 # --- 4. the subject -----------------------------------------------------------
-target_dir=$HOME/.cache/slateos-diff-target
+# One cache PER WORKTREE, never one for all of them. Cargo names a workspace
+# member's artifacts by a hash of its path RELATIVE to the workspace root, and
+# records its sources relative to that root too, so `os-lane-b` and
+# `os-lane-d` build `userspace/localtime` into the very same files -- and
+# freshness is by mtime. A worktree whose own `localtime` was last edited at
+# 10:00 therefore takes another worktree's build of ITS older `localtime`,
+# made at 14:00, as fresh, and compiles against the other tree's source. On
+# 2026-09-26 that failed lane B's push hook with `no StructTm in the root`
+# against a tree that has one; the unlucky shape is a harness certifying a
+# binary built from someone else's source. It is also the explanation the
+# 2026-08-24 note below goes looking for. Keyed by the root's own path, so two
+# checkouts can never share one; `coreutils-check.sh` computes the same key,
+# so the push gate and the harnesses of one worktree share its cache.
+target_dir=$HOME/.cache/slateos-diff-target/$(basename "$root")-$(printf '%s' "$root" | sha256sum | cut -c1-12)
 
 # The path of one of the binaries built above.
 diff_ours() {
@@ -1260,13 +1290,29 @@ if [ -z "${DIFF_NO_BINDIR:-}" ]; then
           DIFF_SKIPPED="$DIFF_SKIPPED $diff_b"
           continue
         fi
-        ln -s "$diff_bin" "$bindir/ours/$diff_b"
-        ln -s "$diff_gnu" "$bindir/gnu/$diff_b"
+        ln -s "$diff_bin" "$bindir/ours/$diff_b" || exit 1
+        ln -s "$diff_gnu" "$bindir/gnu/$diff_b" || exit 1
       done
       ;;
     *)
-      ln -s "$OURS" "$bindir/ours/$DIFF_PROG"
-      ln -s "$gnu_real" "$bindir/gnu/$DIFF_PROG"
+      # One subject, reached on both sides as `DIFF_PROG` -- the knob's
+      # contract, and why `time-diff.sh` can build `time_cmd` and run `time`.
+      #
+      # So there must be a reference to link. `DIFF_NO_REF` with one
+      # `DIFF_BINS` and these directories has none, and `ln -s ''` failing is
+      # the only sign of it: every later `env PATH=$bindir/gnu NAME` then fails
+      # "not found" exactly as the ours side does if *its* link is misnamed,
+      # the two errors agree, and the harness passes having compared nothing.
+      # That is not hypothetical -- `strftime-diff.sh` did it on its first run,
+      # 225 green chunks of which the `date` half had run nothing at all.
+      if [ -z "$gnu_real" ]; then
+        echo "$DIFF_PROG-diff: nothing to put on the gnu PATH as $DIFF_PROG" >&2
+        echo "  (DIFF_NO_REF with a single DIFF_BINS: set DIFF_PROG to the name both" >&2
+        echo "  sides are run by and let the reference be found, or DIFF_NO_BINDIR=1)" >&2
+        exit 1
+      fi
+      ln -s "$OURS" "$bindir/ours/$DIFF_PROG" || exit 1
+      ln -s "$gnu_real" "$bindir/gnu/$DIFF_PROG" || exit 1
       ;;
   esac
 fi

@@ -222,13 +222,7 @@ MUTATIONS = [
         "two levels share a name",
         "            Self::Medium => \"Medium\",",
         "            Self::Medium => \"Easy\",",
-        ["every_difficulty_has_its_own_name_and_its_own_colour"],
-    ),
-    (
-        "two levels share a colour",
-        "            Self::Medium => YELLOW,",
-        "            Self::Medium => GREEN,",
-        ["every_difficulty_has_its_own_name_and_its_own_colour"],
+        ["every_difficulty_has_its_own_name"],
     ),
     (
         "the total counts only the easy games",
@@ -715,8 +709,8 @@ MUTATIONS = [
     ),
     (
         "two states share a colour",
-        "        GameStatus::Won => GREEN,",
-        "        GameStatus::Won => BLUE,",
+        "        GameStatus::Won => c.green,",
+        "        GameStatus::Won => c.blue,",
         ["the_status_word_and_its_colour_agree_with_the_state"],
     ),
     # ── The keyboard ──────────────────────────────────────────────────────
@@ -1055,24 +1049,21 @@ MUTATIONS = [
     ),
     (
         "a chip records no hit box",
-        "    fill(f, r, SURFACE0, 5.0);\n    f.hit(target, r);",
-        "    fill(f, r, SURFACE0, 5.0);\n    let _ = target;",
+        "            self.colours.mantle,\n        );\n        f.hit(target, r);",
+        "            self.colours.mantle,\n        );\n        let _ = target;",
         ["every_control_the_program_has_can_be_reached_with_a_mouse"],
     ),
     (
         "the background is the board's rather than the window's",
-        "        fill(&mut f, l.window, BASE, 0.0);",
-        "        fill(&mut f, l.grid, BASE, 0.0);",
+        "        fill(&mut f, l.window, self.colours.base, 0.0);",
+        "        fill(&mut f, l.grid, self.colours.base, 0.0);",
         ["a_window_too_small_for_anything_still_draws_something"],
     ),
     (
         "a paused game does not say how to come back",
-        "            if self.status == GameStatus::Paused {\n                \"Resume\"\n            } else {\n                \"Pause\"\n            },",
+        "            if paused { \"Resume\" } else { \"Pause\" },",
         "            \"Pause\",",
-        [
-            "pausing_hides_the_board",
-            "the_pause_chip_offers_to_come_back_while_the_game_is_paused",
-        ],
+        ["pausing_hides_the_board", "the_pause_chip_offers_to_come_back_while_the_game_is_paused"],
     ),
     (
         "the header does not say how far along the player is",
@@ -1082,8 +1073,8 @@ MUTATIONS = [
     ),
     (
         "the header's state line is always the same colour",
-        "            status_color(self.status),\n            FontWeightHint::Regular,",
-        "            BLUE,\n            FontWeightHint::Regular,",
+        "            status_color(self.status, &self.colours),\n            FontWeightHint::Regular,",
+        "            self.colours.blue,\n            FontWeightHint::Regular,",
         ["the_state_line_is_drawn_in_the_colour_of_the_state"],
     ),
     (
@@ -1106,14 +1097,14 @@ MUTATIONS = [
     ),
     (
         "every square is outlined, not only the selected one",
-        "        if selected {\n            stroke(f, r, BLUE, 2.0, l.cell * 0.06);\n        }",
-        "        stroke(f, r, BLUE, 2.0, l.cell * 0.06);",
+        "        if selected {\n            stroke(f, r, self.colours.blue, 2.0, l.cell * 0.06);\n        }",
+        "        stroke(f, r, self.colours.blue, 2.0, l.cell * 0.06);",
         ["only_the_selected_square_is_outlined"],
     ),
     (
         "the selected square is shaded like its neighbours",
-        "        let bg = if hidden {\n            SURFACE0\n        } else if selected {\n            SURFACE2",
-        "        let bg = if hidden {\n            SURFACE0\n        } else if selected {\n            SURFACE1",
+        "        } else if selected {\n            self.colours.surface2\n",
+        "        } else if selected {\n            self.colours.surface1\n",
         ["the_selected_square_is_shaded_differently_from_its_neighbours"],
     ),
     (
@@ -1124,20 +1115,20 @@ MUTATIONS = [
     ),
     (
         "a digit that breaks a rule is drawn like any other",
-        "        let color = if conflicting {\n            RED\n        } else {",
-        "        let color = if false {\n            RED\n        } else {",
+        "        let ink = if conflicting {\n            self.colours.clash\n",
+        "        let ink = if false {\n            self.colours.clash\n",
         ["a_digit_that_breaks_a_rule_is_drawn_in_red"],
     ),
     (
         "a hint is drawn in the player's colour",
-        "                Origin::Hint => PEACH,",
-        "                Origin::Hint => BLUE,",
+        "                Origin::Hint => self.colours.hint,",
+        "                Origin::Hint => self.colours.own,",
         ["a_clue_a_hint_and_the_players_own_digit_are_three_different_colours"],
     ),
     (
         "a clue is drawn in the player's colour",
-        "                Origin::Given => TEXT_COLOR,",
-        "                Origin::Given => BLUE,",
+        "                Origin::Given => self.colours.clue,",
+        "                Origin::Given => self.colours.own,",
         ["a_clue_a_hint_and_the_players_own_digit_are_three_different_colours"],
     ),
     (
@@ -1172,26 +1163,26 @@ MUTATIONS = [
     ),
     (
         "the notes key is not lit while note mode is on",
-        "                Target::Notes if self.note_mode => TEAL,",
-        "                Target::Notes if self.note_mode => SUBTEXT0,",
+        "            let on = target == Target::Notes && self.note_mode;",
+        "            let on = false;",
         ["a_key_that_would_do_nothing_is_drawn_greyed_out"],
     ),
     (
         "the hint key stays lit when the hints are gone",
-        "                Target::Hint if self.hints_remaining() == 0 => OVERLAY0,",
-        "                Target::Hint if self.hints_remaining() == 0 => PEACH,",
+        "                    Target::Hint => self.hints_remaining() > 0,",
+        "                    Target::Hint => true,",
         ["the_hint_key_greys_out_when_the_hints_are_gone"],
     ),
     (
         "the undo key stays lit with nothing to take back",
-        "                Target::Undo if self.undo_stack.is_empty() => OVERLAY0,",
-        "                Target::Undo if self.undo_stack.is_empty() => MAUVE,",
+        "                    Target::Undo => !self.undo_stack.is_empty(),",
+        "                    Target::Undo => true,",
         ["a_key_that_would_do_nothing_is_drawn_greyed_out"],
     ),
     (
         "the redo key stays lit with nothing to put back",
-        "                Target::Redo if self.redo_stack.is_empty() => OVERLAY0,",
-        "                Target::Redo if self.redo_stack.is_empty() => MAUVE,",
+        "                    Target::Redo => !self.redo_stack.is_empty(),",
+        "                    Target::Redo => true,",
         ["a_key_that_would_do_nothing_is_drawn_greyed_out"],
     ),
     (
@@ -1272,6 +1263,72 @@ MUTATIONS = [
         "        \"sudoku\".to_string()",
         "        \"Sudoku game\".to_string()",
         ["the_program_names_itself_the_same_way_everywhere"],
+    ),
+    (
+        "the theme is never taken up",
+        "        self.palette = *palette;\n        self.colours = Colours::of(palette);",
+        "        let _ = palette;",
+        ["the_window_is_drawn_in_the_users_colours"],
+    ),
+    (
+        "the colours are not rebuilt with the palette",
+        "        self.colours = Colours::of(palette);",
+        "        let _ = Colours::of(palette);",
+        ["the_window_is_drawn_in_the_users_colours"],
+    ),
+    (
+        "the shortcut card is in the default colours",
+        "            guitk::shortcut::render_card(\n                &mut f,\n                &self.palette,",
+        "            guitk::shortcut::render_card(\n                &mut f,\n                &Palette::for_mode(false),",
+        ["the_window_is_drawn_in_the_users_colours"],
+    ),
+    (
+        "the keys stay live while the game is paused or won",
+        "            let live = self.status == GameStatus::Playing\n",
+        "            let live = self.status != GameStatus::Won\n",
+        ["the_keys_are_switched_off_while_the_game_is_paused_or_won"],
+    ),
+    (
+        "the pause chip does not show the pause",
+        "            l.font,\n            paused,\n            self.status != GameStatus::Won,\n",
+        "            l.font,\n            false,\n            self.status != GameStatus::Won,\n",
+        ["the_keys_are_switched_off_while_the_game_is_paused_or_won"],
+    ),
+    (
+        "a won game offers to pause",
+        "            l.font,\n            paused,\n            self.status != GameStatus::Won,\n",
+        "            l.font,\n            paused,\n            true,\n",
+        ["the_keys_are_switched_off_while_the_game_is_paused_or_won"],
+    ),
+    (
+        "a clash's ink is the page's, not its square's",
+        "            clash: Ink::on(p.ink(p.red), &[clashing]),",
+        "            clash: Ink::on(p.ink(p.red), &[]),",
+        ["every_digit_reads_on_the_square_under_it_in_either_theme"],
+    ),
+    (
+        "a clash loses its tint under the cursor",
+        "        } else if conflicting {\n            with_alpha(self.palette.red, CLASH_ALPHA)\n        } else if selected {\n            self.colours.surface2\n",
+        "        } else if selected {\n            self.colours.surface2\n        } else if conflicting {\n            with_alpha(self.palette.red, CLASH_ALPHA)\n",
+        ["every_digit_reads_on_the_square_under_it_in_either_theme"],
+    ),
+    (
+        "pencil marks are the palette's grey wherever they sit",
+        "            note: Ink::on(p.subtext0, &[p.surface0, p.surface1, p.surface2]).small,",
+        "            note: p.subtext0,",
+        ["every_digit_reads_on_the_square_under_it_in_either_theme"],
+    ),
+    (
+        "a hint is peach again, a neighbour of a clash",
+        "            hint: Ink::on(p.ink(p.green), &squares),",
+        "            hint: Ink::on(p.ink(p.peach), &squares),",
+        ["the_kinds_of_digit_are_told_apart_in_either_theme"],
+    ),
+    (
+        "a digit takes the large ink whatever its size",
+        "        let color = ink.at(size, weight == FontWeightHint::Bold);",
+        "        let color = ink.large;",
+        ["every_digit_reads_on_the_square_under_it_in_either_theme"],
     ),
 ]
 

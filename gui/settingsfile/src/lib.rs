@@ -49,6 +49,11 @@ use std::path::PathBuf;
 
 use yamldoc::Document;
 
+/// The name of a settings file; re-exported so a program saving its settings
+/// can hold its own name as one, checked when it is written rather than
+/// on every save.
+pub use settingsname::SettingsName;
+
 /// Give an enum a spelling in the configuration file.
 ///
 /// These names are deliberately **not** the enum's `label`. A label is what the
@@ -118,12 +123,20 @@ pub fn config_dir() -> Option<PathBuf> {
     Some(PathBuf::from(home).join(".config").join("slateos"))
 }
 
-/// The file a named settings group lives in.
+/// The file a named settings group lives in, `<name>.yaml` in [`config_dir`].
+///
+/// `None` for a name that is not a settings name ([`SettingsName`]: 1 to 32
+/// bytes of `a`-`z`, `0`-`9`, `_` and `-`), as well as when there is no
+/// configuration directory. The rule is the display protocol's, so every file
+/// written here is one the settings watcher can announce by name; and it is
+/// what keeps a name from reaching anywhere else -- this used to push the
+/// name as a path and set its extension, so `a.b` became `a.yaml` and
+/// `../x` a file outside the folder.
 #[must_use]
 pub fn path_for(name: &str) -> Option<PathBuf> {
+    let name = SettingsName::new(name.as_bytes())?;
     let mut path = config_dir()?;
-    path.push(name);
-    path.set_extension("yaml");
+    path.push(format!("{name}.yaml"));
     Some(path)
 }
 
@@ -162,6 +175,15 @@ pub fn load(name: &str) -> Document {
 /// written outside the system's temporary directory: a test writing the
 /// developer's own configuration. See `testing::refuse_a_real_configuration`.
 pub fn store(name: &str, doc: &Document) -> io::Result<()> {
+    if SettingsName::new(name.as_bytes()).is_none() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!(
+                "{name:?} is not a settings name: 1 to {} bytes of a-z, 0-9, _ and -",
+                SettingsName::MAX_LEN
+            ),
+        ));
+    }
     let path = path_for(name).ok_or_else(|| {
         io::Error::new(
             io::ErrorKind::NotFound,
@@ -1048,6 +1070,34 @@ mod tests {
             load("nothing-here")
         });
         assert!(doc.is_empty());
+    }
+
+    /// Only a settings name names a file, and only in the folder: a name
+    /// with a dot used to lose everything after it (`a.b` was `a.yaml`), and
+    /// one with a path in it reached outside the folder.
+    #[test]
+    fn a_name_that_is_not_a_settings_name_names_no_file() {
+        let temp = ScratchDir::new("slateos-cfg-names");
+        let root = temp.dir().to_str().unwrap().to_owned();
+        with_env(Some(&root), None, || {
+            for bad in ["a.b", "../escape", "sub/file", "Calendar", "", "two words"] {
+                assert_eq!(path_for(bad), None, "{bad:?} named a file");
+                let mut doc = Document::new();
+                doc.set_i64(&["a"], 1);
+                let err = store(bad, &doc).expect_err("a bad name is refused");
+                assert_eq!(err.kind(), io::ErrorKind::InvalidInput, "{bad:?}");
+                assert!(load(bad).is_empty(), "{bad:?} loaded something");
+            }
+            assert_eq!(
+                path_for("notes-2"),
+                Some(PathBuf::from(&root).join("slateos").join("notes-2.yaml"))
+            );
+        });
+        // Nothing was written anywhere: not in the folder, and not beside it.
+        let wrote: Vec<_> = std::fs::read_dir(temp.dir())
+            .map(|d| d.filter_map(Result::ok).map(|e| e.file_name()).collect())
+            .unwrap_or_default();
+        assert!(wrote.is_empty(), "a refused name left {wrote:?}");
     }
 
     #[test]

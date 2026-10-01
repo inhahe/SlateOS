@@ -594,6 +594,18 @@ MUTATIONS = [
         "                let _ = &path;",
         [CHOSEN],
     ),
+    (
+        "an AVIF is not recognised",
+        "        if imagecodec::avif::is_avif(data) {\n            return Self::Avif;\n        }",
+        "        if false {\n            return Self::Avif;\n        }",
+        ["every_format_the_decoder_reads_is_named", "an_avif_opens_and_is_named"],
+    ),
+    (
+        "the folder's list leaves AVIF out",
+        "    \"bmp\", \"png\", \"jpg\", \"jpeg\", \"gif\", \"webp\", \"avif\", \"ico\", \"tiff\", \"tif\", \"svg\",",
+        "    \"bmp\", \"png\", \"jpg\", \"jpeg\", \"gif\", \"webp\", \"ico\", \"tiff\", \"tif\", \"svg\",",
+        ["an_avif_opens_and_is_named"],
+    ),
 ]
 
 # The WebP half is tested with a hand-built animated WebP (solid-colour
@@ -637,8 +649,8 @@ PLAYER = [
     ),
     (
         "no WebP frame is the first",
-        "                Err(_) => return,\n            };\n            let first = plays == 0 && index == 0;",
-        "                Err(_) => return,\n            };\n            let first = false;",
+        "                Ok(Some(frame)) => frame,\n                Ok(None) => break,\n                // A broken frame ends the animation where it is.\n                Err(_) => return,\n            };\n            let first = plays == 0 && index == 0;",
+        "                Ok(Some(frame)) => frame,\n                Ok(None) => break,\n                // A broken frame ends the animation where it is.\n                Err(_) => return,\n            };\n            let first = false;",
         [WEBP],
     ),
     (
@@ -646,6 +658,30 @@ PLAYER = [
         "            imagecodec::webp::Animation::new(bytes, limits).is_ok_and(|a| a.frame_count() > 1)",
         "            imagecodec::webp::Animation::new(bytes, limits).is_ok_and(|a| a.frame_count() > 99)",
         [WEBP],
+    ),
+    (
+        "an AVIF sequence is not played",
+        "    } else if imagecodec::avif::is_avif(bytes) {\n        Some(Kind::Avif)\n    } else {",
+        "    } else {",
+        ["an_avif_sequence_plays_its_count"],
+    ),
+    (
+        "an AVIF's count is read as the plays in all, as a WebP's",
+        "            Repeat::Count(more) if plays <= more => {}",
+        "            Repeat::Count(more) if plays < more => {}",
+        ["an_avif_sequence_plays_its_count"],
+    ),
+    (
+        "an AVIF frame is shown for as long as the file asks, even 10 ms",
+        "            if !send(to, frame.image, frame.display_duration_ms(), first, turn) {\n                return;\n            }\n            index = index.saturating_add(1);\n        }\n        if index == 0 {\n            return;\n        }\n        plays = plays.saturating_add(1);\n        match animation.repeat() {\n            Repeat::Forever => {}\n            // The count is the plays after the first, as a GIF's is.",
+        "            if !send(to, frame.image, frame.duration_ms, first, turn) {\n                return;\n            }\n            index = index.saturating_add(1);\n        }\n        if index == 0 {\n            return;\n        }\n        plays = plays.saturating_add(1);\n        match animation.repeat() {\n            Repeat::Forever => {}\n            // The count is the plays after the first, as a GIF's is.",
+        ["an_avif_sequence_plays_its_count"],
+    ),
+    (
+        "no AVIF frame is the first",
+        "                // before its colour track did, where libavif stops too.\n                Ok(None) => break,\n                // A broken frame ends the animation where it is.\n                Err(_) => return,\n            };\n            let first = plays == 0 && index == 0;",
+        "                // before its colour track did, where libavif stops too.\n                Ok(None) => break,\n                // A broken frame ends the animation where it is.\n                Err(_) => return,\n            };\n            let first = false;",
+        ["an_avif_sequence_plays_its_count"],
     ),
 ]
 

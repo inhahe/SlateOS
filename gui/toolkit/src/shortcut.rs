@@ -509,7 +509,14 @@ pub fn render_card<S: CommandSink + ?Sized>(
     let x = ((window_w - w) / 2.0).max(0.0);
     let y = ((window_h - h) / 2.0).max(keep_clear);
 
-    palette.push_surface(out, x, y, w, h, 6.0, Surface::Card);
+    // A panel, not a card: the list floats over whatever the window drew,
+    // and a card under the default bordered theme is only an outline -- its
+    // words landed on the window's own (sudoku's squares, a note's text;
+    // requests/e-c-the-shortcut-card-is-see-through-under-the-default-theme.md).
+    // A panel has a ground in every style, and the inks below are made
+    // legible on both of them. No scrim: the list is read beside the window
+    // it describes, so the window stays as it is.
+    palette.push_surface(out, x, y, w, h, 6.0, Surface::Panel);
     out.emit(RenderCommand::Text {
         x: x + PAD,
         y: y + 12.0,
@@ -785,6 +792,47 @@ mod tests {
                 _ => None,
             })
             .collect()
+    }
+
+    /// **The card has a ground of its own in every style and mode**, so
+    /// nothing it says is written over the window: the first thing drawn is
+    /// a fill -- `base` under the bordered theme, `mantle` under cards --
+    /// and every word lies inside it. Under the bordered theme a card was an
+    /// outline, and the list read over sudoku's squares at 3.0:1.
+    #[test]
+    fn the_card_has_a_ground_of_its_own_in_every_style() {
+        use crate::palette::SurfaceStyle;
+        for light in [false, true] {
+            for style in [SurfaceStyle::Borders, SurfaceStyle::Cards] {
+                let mut p = Palette::for_mode(light);
+                p.set_surface_style(style);
+                let mut cmds = Vec::new();
+                render_card(&mut cmds, &p, (1280.0, 720.0), 40.0, ROWS, "F1 closes this");
+                let Some(RenderCommand::FillRect {
+                    x,
+                    y,
+                    width,
+                    height,
+                    color,
+                    ..
+                }) = cmds.first()
+                else {
+                    panic!("{style:?}, light = {light}: no ground under the card: {cmds:?}");
+                };
+                let ground = if style == SurfaceStyle::Borders {
+                    p.base
+                } else {
+                    p.mantle
+                };
+                assert_eq!(*color, ground, "{style:?}, light = {light}");
+                for (tx, ty, t) in texts(&cmds) {
+                    assert!(
+                        tx >= *x && tx <= x + width && ty >= *y && ty <= y + height,
+                        "{style:?}, light = {light}: {t:?} at ({tx}, {ty}) is off the ground"
+                    );
+                }
+            }
+        }
     }
 
     #[test]

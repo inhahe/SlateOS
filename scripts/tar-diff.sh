@@ -66,6 +66,10 @@ DIFF_NEED='find stat cmp od sha256sum touch ln readlink mkfifo'
 # shellcheck source=diff-wsl.sh
 . "$(dirname "$0")/diff-wsl.sh"
 
+# Variables tar runs with in `list_case`, on both sides, and nothing else does.
+# Empty unless a case sets it.
+ENVV=()
+
 pass=0; fail=0; xfail=0; xpass=0
 
 # GNU's format normalisation. See the header.
@@ -290,12 +294,12 @@ interop_case() {
 list_case() {
   local label="$1"; shift
   local o_rc g_rc
-  diff_run timeout -k 2 60 env PATH="$bindir/ours" tar "$@" </dev/null >"$DIFF_TMP/o.out" 2>"$DIFF_TMP/o.err"
+  diff_run timeout -k 2 60 env ${ENVV[@]+"${ENVV[@]}"} PATH="$bindir/ours" tar "$@" </dev/null >"$DIFF_TMP/o.out" 2>"$DIFF_TMP/o.err"
   o_rc=$?
-  diff_run timeout -k 2 60 env PATH="$bindir/gnu" tar "$@" </dev/null >"$DIFF_TMP/g.out" 2>"$DIFF_TMP/g.err"
+  diff_run timeout -k 2 60 env ${ENVV[@]+"${ENVV[@]}"} PATH="$bindir/gnu" tar "$@" </dev/null >"$DIFF_TMP/g.out" 2>"$DIFF_TMP/g.err"
   g_rc=$?
   settle "$o_rc" "$g_rc"
-  report "list: tar $* ($label)"
+  report "list: ${ENVV[*]:+${ENVV[*]} }tar $* ($label)"
 }
 
 # ---------------------------------------------------------------------------
@@ -597,6 +601,14 @@ interop_case 'symlinks, a hard link and a fifo' special
 "$gnu_real" $GNUFMT -cf ref.tar tree long
 list_case 'a normal archive'  -tf ref.tar
 list_case 'the same, with -v' -tvf ref.tar
+# GNU tar parses with argp's ARGP_IN_ORDER, which never stops at an operand, so
+# `-v` after a member name is an option whatever `POSIXLY_CORRECT` says -- where
+# every plain getopt program would take it for a second name. Measured on
+# 2026-09-25.
+list_case 'an option after a member'      -tf ref.tar tree -v
+ENVV=(POSIXLY_CORRECT=1)
+list_case 'the same, under the variable'  -tf ref.tar tree -v
+ENVV=()
 
 # An archive that is not one. A reader that trusts the header can be walked off
 # the end of the file by a size field, so a truncated and a corrupt archive are

@@ -23,37 +23,84 @@
 //! Black's reply now arrives on an [`Event::Tick`], and the phase in between is
 //! a phase [`ChessApp::frame`] can paint.
 
+use gamechrome::Chrome;
 use guitk::color::Color;
 use guitk::event::{Event, EventResult, Key, KeyEvent, MouseButton, MouseEvent, MouseEventKind};
 use guitk::frame::{Frame, Rect};
+use guitk::palette::Palette;
 use guitk::probe::Probe;
 use guitk::render::{FontWeightHint, RenderCommand, RenderTree, TextOverflow};
 use guitk::style::CornerRadii;
 use guitk::text;
+use guitk::theme::with_alpha;
 use oswindow::app::{self, App, Response};
 use std::process::ExitCode;
 use std::time::Duration;
 
-// ── Catppuccin Mocha palette ────────────────────────────────────────
-const BASE: Color = Color::from_hex(0x1E1E2E);
-const SURFACE0: Color = Color::from_hex(0x313244);
-const TEXT_COLOR: Color = Color::from_hex(0xCDD6F4);
-const SUBTEXT0: Color = Color::from_hex(0xA6ADC8);
-const BLUE: Color = Color::from_hex(0x89B4FA);
-const GREEN: Color = Color::from_hex(0xA6E3A1);
-const RED: Color = Color::from_hex(0xF38BA8);
-const YELLOW: Color = Color::from_hex(0xF9E2AF);
-const LAVENDER: Color = Color::from_hex(0xB4BEFE);
-const OVERLAY0: Color = Color::from_hex(0x6C7086);
-const MAUVE: Color = Color::from_hex(0xCBA6F7);
+// ── Colours ─────────────────────────────────────────────────────────
+//
+// White and black are which side is which, so the pieces keep their colours
+// in every theme; the squares, the marks on them and the window round the
+// board follow the user's palette (the operator's answer to C-Q16, §1422, and
+// lane C's call for this game). It was all a copy of Catppuccin Mocha, and
+// every piece was drawn in its text colour: in a dark theme that made black's
+// solid glyphs the *light* pieces on the board and white's hollow ones the
+// dark.
 
-// ── Board colors ────────────────────────────────────────────────────
-const LIGHT_SQUARE: Color = Color::from_hex(0x9CA0B0);
-const DARK_SQUARE: Color = Color::from_hex(0x585B70);
-const SELECTED_SQUARE: Color = Color::from_hex(0x89B4FA);
-const LEGAL_MOVE_DOT: Color = Color::rgba(166, 227, 161, 140);
-const LAST_MOVE_HIGHLIGHT: Color = Color::rgba(250, 179, 135, 80);
-const CHECK_HIGHLIGHT: Color = Color::rgba(243, 139, 168, 120);
+/// White's pieces: a white body, outlined in near-black.
+const WHITE_PIECE: Color = Color::from_hex(0xF8F8F8);
+const WHITE_EDGE: Color = Color::from_hex(0x1A1A1A);
+/// Black's pieces: a near-black body, outlined only where the square is as
+/// dark (`gamechrome::edge_on`).
+const BLACK_PIECE: Color = Color::from_hex(0x1A1A1A);
+
+/// The colours the window and the board draw in, from the user's palette.
+#[derive(Clone, Copy, Debug)]
+struct Colours {
+    chrome: Chrome,
+    /// The board's two squares (`gamechrome::squares`).
+    light_square: Color,
+    dark_square: Color,
+    /// The keyboard's square: the accent, as every focus ring is.
+    cursor: Color,
+    /// The ring round the piece picked up, and the marks where it may go: the
+    /// theme's strongest mark, which reads on either square in either theme.
+    selected: Color,
+    legal: Color,
+    /// The washes over the last move's two squares, and over a king in check.
+    last: Color,
+    check: Color,
+}
+
+impl Colours {
+    fn of(p: &Palette) -> Self {
+        let (light_square, dark_square) = gamechrome::squares(p);
+        Self {
+            chrome: Chrome::of(p),
+            light_square,
+            dark_square,
+            cursor: p.accent,
+            selected: p.text,
+            legal: p.text,
+            last: with_alpha(p.peach, 110),
+            check: with_alpha(p.red, 130),
+        }
+    }
+}
+
+/// A piece's two inks on a square of colour `ground`, `(body, outline)`.
+fn piece_inks(side: Side, ground: Color) -> (Color, Color) {
+    match side {
+        Side::White => (
+            WHITE_PIECE,
+            gamechrome::edge_on(WHITE_EDGE, WHITE_PIECE, ground),
+        ),
+        Side::Black => (
+            BLACK_PIECE,
+            gamechrome::edge_on(BLACK_PIECE, BLACK_PIECE, ground),
+        ),
+    }
+}
 
 /// The window the program asks for, and the size its tests draw at.
 const WINDOW_WIDTH: f32 = 900.0;
@@ -1315,6 +1362,10 @@ struct ChessApp {
     /// The size the last frame was drawn at, which is the size the next click
     /// is read against.
     size: (f32, f32),
+    /// The user's colours, replaced whenever the theme changes. Seeded from
+    /// the defaults; the framework calls `App::theme_changed` before the
+    /// first frame.
+    palette: Palette,
 }
 
 impl ChessApp {
@@ -1332,6 +1383,7 @@ impl ChessApp {
             cursor: Pos::new(0, 0),
             thinking: false,
             size: (WINDOW_WIDTH, WINDOW_HEIGHT),
+            palette: Palette::for_mode(false),
         }
     }
 
@@ -1341,12 +1393,13 @@ impl ChessApp {
     /// hand, which is what it used to do: a field added to the struct and not
     /// to that list is a piece of the finished game that survives into the next
     /// one, and `thinking` -- added when the search moved onto a tick -- would
-    /// have been exactly that. The window size is the one thing carried over,
-    /// because it describes the window rather than the game.
+    /// have been exactly that. The window's size and its colours are what is
+    /// carried over, because they describe the window rather than the game.
     fn new_game(&mut self) {
-        let size = self.size;
+        let (size, palette) = (self.size, self.palette);
         *self = Self::new();
         self.size = size;
+        self.palette = palette;
     }
 
     /// Remember the size the frame was last drawn at.
@@ -1632,24 +1685,25 @@ impl ChessApp {
     /// painted a fixed 852x612 picture into whatever window it was given.
     fn frame(&self, width: f32, height: f32) -> Frame<Target> {
         let l = Layout::solve(width, height);
+        let c = Colours::of(&self.palette);
         let mut f = Frame::new(width, height);
         f.push(RenderCommand::FillRect {
             x: 0.0,
             y: 0.0,
             width: l.window.w,
             height: l.window.h,
-            color: BASE,
+            color: c.chrome.page,
             corner_radii: CornerRadii::ZERO,
         });
-        self.draw_header(&mut f, &l);
-        self.draw_board(&mut f, &l);
-        self.draw_labels(&mut f, &l);
-        self.draw_panel(&mut f, &l);
+        self.draw_header(&mut f, &l, &c);
+        self.draw_board(&mut f, &l, &c);
+        self.draw_labels(&mut f, &l, &c);
+        self.draw_panel(&mut f, &l, &c);
         f
     }
 
     /// The title, and the one line that says what the game is doing.
-    fn draw_header(&self, f: &mut Frame<Target>, l: &Layout) {
+    fn draw_header(&self, f: &mut Frame<Target>, l: &Layout, c: &Colours) {
         if l.header.is_empty() {
             return;
         }
@@ -1663,7 +1717,7 @@ impl ChessApp {
             baseline,
             l.title,
             FontWeightHint::Bold,
-            LAVENDER,
+            c.chrome.title,
             Some((l.header.w - l.pad * 2.0).max(0.0)),
         );
 
@@ -1674,16 +1728,16 @@ impl ChessApp {
         let status_color = match self.game_result {
             GameResult::Ongoing => {
                 if self.thinking {
-                    BLUE
+                    c.chrome.key
                 } else if self.board.is_in_check(self.board.side_to_move) {
-                    RED
+                    c.chrome.bad
                 } else {
-                    SUBTEXT0
+                    c.chrome.dim
                 }
             }
-            GameResult::WhiteWins => GREEN,
-            GameResult::BlackWins => RED,
-            GameResult::Stalemate | GameResult::Draw => YELLOW,
+            GameResult::WhiteWins => c.chrome.good,
+            GameResult::BlackWins => c.chrome.bad,
+            GameResult::Stalemate | GameResult::Draw => c.chrome.even,
         };
         text_at(
             f,
@@ -1699,7 +1753,7 @@ impl ChessApp {
 
     /// The sixty-four squares, what stands on them, and what may be done to
     /// them.
-    fn draw_board(&self, f: &mut Frame<Target>, l: &Layout) {
+    fn draw_board(&self, f: &mut Frame<Target>, l: &Layout, c: &Colours) {
         if l.square <= 0.0 {
             return;
         }
@@ -1715,9 +1769,9 @@ impl ChessApp {
                 // which puts a dark square in each player's lower left -- the
                 // rule a chess board is checked against.
                 let base_color = if row.saturating_add(col) % 2 != 0 {
-                    LIGHT_SQUARE
+                    c.light_square
                 } else {
-                    DARK_SQUARE
+                    c.dark_square
                 };
                 f.push(RenderCommand::FillRect {
                     x: r.x,
@@ -1736,7 +1790,7 @@ impl ChessApp {
                         y: r.y,
                         width: r.w,
                         height: r.h,
-                        color: LAST_MOVE_HIGHLIGHT,
+                        color: c.last,
                         corner_radii: CornerRadii::ZERO,
                     });
                 }
@@ -1747,7 +1801,7 @@ impl ChessApp {
                         y: r.y,
                         width: r.w,
                         height: r.h,
-                        color: CHECK_HIGHLIGHT,
+                        color: c.check,
                         corner_radii: CornerRadii::ZERO,
                     });
                 }
@@ -1759,7 +1813,7 @@ impl ChessApp {
                         y: r.y + inset,
                         width: (r.w - inset * 2.0).max(0.0),
                         height: (r.h - inset * 2.0).max(0.0),
-                        color: SELECTED_SQUARE,
+                        color: c.selected,
                         line_width: (l.square * 0.05).max(1.0),
                         corner_radii: CornerRadii::ZERO,
                     });
@@ -1772,25 +1826,36 @@ impl ChessApp {
                         y: r.y + inset,
                         width: (r.w - inset * 2.0).max(0.0),
                         height: (r.h - inset * 2.0).max(0.0),
-                        color: MAUVE,
+                        color: c.cursor,
                         line_width: (l.square * 0.035).max(1.0),
                         corner_radii: CornerRadii::ZERO,
                     });
                 }
 
                 if let Some(piece) = self.board.get(pos) {
-                    let glyph = piece.unicode();
-                    let w = text::measure(glyph, l.piece, FontWeightHint::Regular);
-                    text_at(
-                        f,
-                        glyph,
-                        r.x + (r.w - w) / 2.0,
-                        r.y + (r.h - l.piece) / 2.0,
-                        l.piece,
-                        FontWeightHint::Regular,
-                        TEXT_COLOR,
-                        None,
-                    );
+                    // Twice over: the piece's solid shape in its side's
+                    // colour, then its outline on top. The two sets of chess
+                    // glyphs are one design, black's solid and white's
+                    // hollow, so the hollow one lies along the solid one's
+                    // edge -- a white piece with a black line round it, or a
+                    // black piece ringed where its square is as dark.
+                    let (body, outline) = piece_inks(piece.side, base_color);
+                    for (glyph, ink) in [
+                        (piece.kind.unicode_black(), body),
+                        (piece.kind.unicode_white(), outline),
+                    ] {
+                        let w = text::measure(glyph, l.piece, FontWeightHint::Regular);
+                        text_at(
+                            f,
+                            glyph,
+                            r.x + (r.w - w) / 2.0,
+                            r.y + (r.h - l.piece) / 2.0,
+                            l.piece,
+                            FontWeightHint::Regular,
+                            ink,
+                            None,
+                        );
+                    }
                 }
 
                 // Recorded last, so the box covers everything drawn in the
@@ -1811,7 +1876,7 @@ impl ChessApp {
                     y: r.y + inset,
                     width: (r.w - inset * 2.0).max(0.0),
                     height: (r.h - inset * 2.0).max(0.0),
-                    color: LEGAL_MOVE_DOT,
+                    color: c.legal,
                     line_width: (l.square * 0.05).max(1.0),
                     corner_radii: CornerRadii::all(l.square * 0.06),
                 });
@@ -1822,7 +1887,7 @@ impl ChessApp {
                     y: cy - l.dot,
                     width: l.dot * 2.0,
                     height: l.dot * 2.0,
-                    color: LEGAL_MOVE_DOT,
+                    color: c.legal,
                     corner_radii: CornerRadii::all(l.dot),
                 });
             }
@@ -1834,7 +1899,7 @@ impl ChessApp {
     ///
     /// They are dropped whole when the margin the layout could spare is too
     /// small to hold them, rather than drawn overlapping the board.
-    fn draw_labels(&self, f: &mut Frame<Target>, l: &Layout) {
+    fn draw_labels(&self, f: &mut Frame<Target>, l: &Layout, c: &Colours) {
         if l.square <= 0.0 || l.margin < l.label {
             return;
         }
@@ -1851,7 +1916,7 @@ impl ChessApp {
                 r.y + (r.h - l.label) / 2.0,
                 l.label,
                 FontWeightHint::Regular,
-                SUBTEXT0,
+                c.chrome.dim,
                 None,
             );
         }
@@ -1868,7 +1933,7 @@ impl ChessApp {
                 r.bottom() + (l.margin - l.label) / 2.0,
                 l.label,
                 FontWeightHint::Regular,
-                SUBTEXT0,
+                c.chrome.dim,
                 None,
             );
         }
@@ -1881,7 +1946,7 @@ impl ChessApp {
     /// running past it: the move list used to grow downward without a bound
     /// and painted straight off the bottom of the window after about thirty
     /// moves.
-    fn draw_panel(&self, f: &mut Frame<Target>, l: &Layout) {
+    fn draw_panel(&self, f: &mut Frame<Target>, l: &Layout, c: &Colours) {
         if l.panel.w <= 0.0 {
             return;
         }
@@ -1909,7 +1974,7 @@ impl ChessApp {
                 y,
                 l.label,
                 FontWeightHint::Bold,
-                SUBTEXT0,
+                c.chrome.dim,
                 Some(w),
             );
             y += line;
@@ -1926,7 +1991,7 @@ impl ChessApp {
                     y,
                     l.font,
                     FontWeightHint::Regular,
-                    TEXT_COLOR,
+                    c.chrome.text,
                     Some(w),
                 );
             }
@@ -1941,7 +2006,7 @@ impl ChessApp {
                 y,
                 l.label,
                 FontWeightHint::Bold,
-                SUBTEXT0,
+                c.chrome.dim,
                 Some(w),
             );
             y += line;
@@ -1972,7 +2037,7 @@ impl ChessApp {
                 y,
                 l.small,
                 FontWeightHint::Regular,
-                TEXT_COLOR,
+                c.chrome.text,
                 Some(w),
             );
             y += l.small * 1.3;
@@ -1987,40 +2052,31 @@ impl ChessApp {
                 cy,
                 l.small,
                 FontWeightHint::Regular,
-                OVERLAY0,
+                c.chrome.dim,
                 Some(w),
             );
             cy += l.small * 1.5;
         }
 
-        self.draw_button(f, l);
+        self.draw_button(f, l, c);
     }
 
     /// The one thing in the panel that can be clicked.
-    fn draw_button(&self, f: &mut Frame<Target>, l: &Layout) {
+    fn draw_button(&self, f: &mut Frame<Target>, l: &Layout, c: &Colours) {
         let r = l.new_game;
         if r.is_empty() {
             return;
         }
-        f.push(RenderCommand::FillRect {
-            x: r.x,
-            y: r.y,
-            width: r.w,
-            height: r.h,
-            color: SURFACE0,
-            corner_radii: CornerRadii::all(l.pad * 0.4),
-        });
-        let label = "New game";
-        let tw = text::measure(label, l.font, FontWeightHint::Bold);
-        text_at(
+        // The toolkit's push button, on the page the panel is drawn on.
+        gamechrome::button(
             f,
-            label,
-            r.x + (r.w - tw).max(0.0) / 2.0,
-            r.y + (r.h - l.font).max(0.0) / 2.0,
+            &self.palette,
+            (r.x, r.y, r.w, r.h),
+            "New game",
             l.font,
-            FontWeightHint::Bold,
-            TEXT_COLOR,
-            Some(r.w),
+            guitk::button::Kind::Plain,
+            guitk::button::State::default(),
+            c.chrome.page,
         );
         f.hit(Target::NewGame, r);
     }
@@ -2060,6 +2116,10 @@ fn text_at(
 }
 
 impl App for ChessApp {
+    fn theme_changed(&mut self, palette: &Palette) {
+        self.palette = *palette;
+    }
+
     fn title(&self) -> String {
         String::from("Chess")
     }
@@ -2157,6 +2217,216 @@ fn main() -> ExitCode {
 )]
 mod tests {
     use super::*;
+
+    /// **The window is drawn in the user's colours**, light or dark -- a
+    /// piece picked up with its moves shown, a move just played, a king in
+    /// check, and a finished game -- with only the pieces' own colours, and
+    /// the rim a piece is ringed in, not the palette's (the operator's C-Q16).
+    #[test]
+    fn the_window_is_drawn_in_the_users_colours() {
+        for (light, cards) in LOOKS {
+            let p = palette(light, cards);
+            let c = Colours::of(&p);
+            let mut derived = vec![
+                WHITE_PIECE,
+                WHITE_EDGE,
+                BLACK_PIECE,
+                gamechrome::RIMS.0,
+                gamechrome::RIMS.1,
+            ];
+            derived.extend(gamechrome::button_colours(
+                &p,
+                guitk::button::Kind::Plain,
+                c.chrome.page,
+            ));
+            for (what, f) in every_look(&p) {
+                appearance::palette_check::assert_drawn_from(
+                    &p,
+                    f.commands(),
+                    &derived,
+                    &format!("chess, {what}, light: {light}, cards: {cards}"),
+                );
+            }
+        }
+    }
+
+    /// The palette for a light or a dark theme, in the bordered look (the
+    /// default) or the card look.
+    fn palette(light: bool, cards: bool) -> Palette {
+        let mut p = Palette::for_mode(light);
+        p.set_surface_style(if cards {
+            guitk::palette::SurfaceStyle::Cards
+        } else {
+            guitk::palette::SurfaceStyle::Borders
+        });
+        p
+    }
+
+    /// `(light, cards)`: both themes, in both surface looks.
+    const LOOKS: [(bool, bool); 4] = [(false, false), (true, false), (false, true), (true, true)];
+
+    /// Every state the palette and legibility tests read, drawn in `p`'s
+    /// colours, and a cramped window.
+    fn every_look(p: &Palette) -> Vec<(&'static str, Frame<Target>)> {
+        let mut app = ChessApp::new();
+        app.theme_changed(p);
+        let fresh = app.draw(ChessApp::SIZE);
+        let cramped = app.draw((320.0, 360.0));
+        assert!(app.click_square(Pos::new(1, 4)), "e2 was not picked up");
+        let picked = app.draw(ChessApp::SIZE);
+        app.game_result = GameResult::WhiteWins;
+        let over = app.draw(ChessApp::SIZE);
+        vec![
+            ("fresh", fresh),
+            ("picked", picked),
+            ("over", over),
+            ("cramped", cramped),
+        ]
+    }
+
+    /// **Every text reads on what is drawn under it**, in either theme and
+    /// either surface look (`gamechrome::legibility`: each run held to
+    /// WCAG's floor for its size against the fills under it). A
+    /// switched-off button's label is exempt, as WCAG exempts an inactive
+    /// control.
+    #[test]
+    fn every_text_reads_on_what_is_under_it_in_either_theme() {
+        let mut bad = Vec::new();
+        for (light, cards) in LOOKS {
+            let p = palette(light, cards);
+            let chrome = gamechrome::Chrome::of(&p);
+            let off: Vec<_> = [chrome.band, chrome.page, chrome.well]
+                .into_iter()
+                .flat_map(|ground| {
+                    [guitk::button::Kind::Plain, guitk::button::Kind::Primary].map(|kind| {
+                        guitk::button::paint(
+                            &p,
+                            kind,
+                            guitk::button::State {
+                                disabled: true,
+                                ..guitk::button::State::default()
+                            },
+                            ground,
+                        )
+                    })
+                })
+                .collect();
+            // A piece is not text: it is two glyphs, a solid body and a
+            // hollow ring, and is seen by whichever of them stands off its
+            // square -- a black body on a dark square by its ring, a white
+            // piece's dark ring on a dark square not at all, because its body
+            // does the work. `every_piece_is_seen_on_its_square_in_either_theme`
+            // holds that; each glyph read on its own would fail the half
+            // that is not meant to show.
+            let piece = |r: &gamechrome::legibility::Read| {
+                r.text
+                    .chars()
+                    .all(|ch| ('\u{2654}'..='\u{265F}').contains(&ch))
+            };
+            let exempt = |r: &gamechrome::legibility::Read| {
+                piece(r)
+                    || off
+                        .iter()
+                        .any(|o| r.ink == o.ink && (r.ground == o.lower || r.ground == o.upper))
+            };
+            for (what, f) in every_look(&p) {
+                for r in gamechrome::legibility::illegible(f.commands(), p.base, exempt) {
+                    bad.push(format!(
+                        "{what}, light: {light}, cards: {cards}: {:?} {:.2}:1 on {:?}",
+                        r.text,
+                        r.ratio(),
+                        r.ground
+                    ));
+                }
+            }
+        }
+        assert!(bad.is_empty(), "chess: {bad:#?}");
+    }
+
+    /// **White's pieces are white and black's black, in either theme**, and
+    /// every piece is seen on its square: its body or its outline stands off
+    /// the square. Every piece was drawn in the text colour, so a dark theme
+    /// drew black's solid pieces light.
+    #[test]
+    fn each_side_is_its_own_colour_and_every_piece_is_seen() {
+        for light in [false, true] {
+            let p = Palette::for_mode(light);
+            let c = Colours::of(&p);
+            let mut app = ChessApp::new();
+            app.theme_changed(&p);
+            let f = app.draw(ChessApp::SIZE);
+            let l = Layout::solve(ChessApp::SIZE.0, ChessApp::SIZE.1);
+            for (row, side) in [
+                (0i8, Side::White),
+                (1, Side::White),
+                (6, Side::Black),
+                (7, Side::Black),
+            ] {
+                for col in 0..8i8 {
+                    let r = l.square_rect(Pos::new(row, col));
+                    let inks: Vec<Color> = f
+                        .commands()
+                        .iter()
+                        .filter_map(|cmd| match cmd {
+                            RenderCommand::Text { x, y, color, .. }
+                                if r.contains(*x + 0.5, *y + 0.5) =>
+                            {
+                                Some(*color)
+                            }
+                            _ => None,
+                        })
+                        .collect();
+                    assert_eq!(inks.len(), 2, "({row}, {col}): a body and an outline");
+                    let body = inks[0];
+                    let want = if side == Side::White {
+                        WHITE_PIECE
+                    } else {
+                        BLACK_PIECE
+                    };
+                    assert_eq!(body, want, "({row}, {col}) is not its side's colour");
+                    let square = if (row + col) % 2 != 0 {
+                        c.light_square
+                    } else {
+                        c.dark_square
+                    };
+                    let seen = inks
+                        .iter()
+                        .map(|&ink| guitk::theme::contrast_ratio(ink, square))
+                        .fold(0.0, f32::max);
+                    assert!(
+                        seen >= 3.0,
+                        "({row}, {col}) is seen at {seen:.2}:1 (light: {light})"
+                    );
+                }
+            }
+        }
+    }
+
+    /// **The marks on the board read on it in either theme**: the ring round
+    /// the piece picked up, and where it may go.
+    #[test]
+    fn the_marks_on_the_board_read_in_either_theme() {
+        for light in [false, true] {
+            let c = Colours::of(&Palette::for_mode(light));
+            for square in [c.light_square, c.dark_square] {
+                for (what, mark) in [("selection", c.selected), ("legal move", c.legal)] {
+                    let ratio = guitk::theme::contrast_ratio(mark, square);
+                    assert!(ratio >= 3.0, "the {what} is {ratio:.2}:1 (light: {light})");
+                }
+            }
+        }
+    }
+
+    /// **A new game keeps the user's colours.** It rebuilds the game from
+    /// scratch, and would have rebuilt the palette with it.
+    #[test]
+    fn a_new_game_keeps_the_users_colours() {
+        let light = Palette::for_mode(true);
+        let mut app = ChessApp::new();
+        app.theme_changed(&light);
+        app.new_game();
+        assert_eq!(app.palette, light);
+    }
 
     // ── Board setup helpers ─────────────────────────────────────────
 

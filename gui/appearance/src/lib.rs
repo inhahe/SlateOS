@@ -72,7 +72,7 @@ use core::time::Duration;
 use datetimesettings::Tz;
 pub use daywindow::{DailyWindow, TimeOfDay};
 use guitk::color::Color;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use yamldoc::Document;
 
 // ============================================================================
@@ -236,6 +236,19 @@ impl PaletteSource for AppearanceSettings {
 
     fn theme(&self) -> Option<&ThemeColors> {
         self.color_theme.colors()
+    }
+
+    fn widget_style(&self) -> guitk::widget_style::WidgetStyle {
+        self.widget_theme.style()
+    }
+
+    /// The animation theme's motion at the user's speed: Slow makes the
+    /// theme's transitions half again as long, and Off -- like a theme's own
+    /// `enabled: false` -- is still.
+    fn motion(&self) -> guitk::motion::Motion {
+        self.animation_theme
+            .motion()
+            .at_speed(self.animation_speed.multiplier())
     }
 }
 
@@ -1162,6 +1175,31 @@ pub struct FontsApplied {
 }
 
 impl FontSettings {
+    /// How glyphs are rasterized under these settings: smoothing, the subpixel
+    /// order and hinting, with `palette` -- which of a colour font's palettes
+    /// its emoji are painted with -- taken from the theme in force.
+    ///
+    /// The one mapping from the settings to a rasterizer's terms, for every
+    /// process that rasterizes text: the toolkit's own cache (through
+    /// [`apply`](Self::apply)) and the compositor's, which must agree or the
+    /// same label looks different depending on who drew it.
+    #[must_use]
+    pub fn rendering(&self, palette: guitk::text::ColourPalette) -> guitk::text::Rendering {
+        use guitk::text::Subpixel;
+        guitk::text::Rendering {
+            smoothing: self.smoothing,
+            subpixel: match self.subpixel {
+                SubpixelMode::None => Subpixel::None,
+                SubpixelMode::Rgb => Subpixel::Rgb,
+                SubpixelMode::Bgr => Subpixel::Bgr,
+                SubpixelMode::VRgb => Subpixel::VRgb,
+                SubpixelMode::VBgr => Subpixel::VBgr,
+            },
+            hinting: self.hinting,
+            palette,
+        }
+    }
+
     /// Draw in these families from now on, in *this* process.
     ///
     /// `guitk`'s font selection is per-process global state, and its own
@@ -1186,6 +1224,11 @@ impl FontSettings {
     /// machine does not have.
     #[must_use]
     pub fn apply(&self) -> FontsApplied {
+        // The way glyphs are rasterized, alongside the faces: text this
+        // process's toolkit rasterizes itself was drawn unhinted while the
+        // compositor's was hinted. The colour-emoji palette is the theme's,
+        // which this section does not know, so the one in force is kept.
+        guitk::text::set_rendering(self.rendering(guitk::text::rendering().palette));
         // Asking first, because installing is not free: `set_font_family`
         // reloads the faces and drops every rasterized glyph, so calling it
         // for the family already in use would throw the cache away to arrive
@@ -1460,6 +1503,21 @@ pub struct AppearanceSettings {
     /// "mix-and-match"). Nothing is read until an icon is drawn; see
     /// [`icons::IconTheme`].
     pub icon_theme: icons::IconTheme,
+    /// The theme the shapes of the controls come from -- a button's corners,
+    /// a field's focus mark, a scrollbar's width: the built-in one unless the
+    /// user chose another. `theme.widget_style` in the file, by the theme's
+    /// folder name, which may name a third theme again. Read with the file,
+    /// for [`color_theme`](Self::color_theme)'s reason; see
+    /// [`themes::WidgetTheme`] and `design-decisions.md` §1435.
+    pub widget_theme: themes::WidgetTheme,
+    /// The theme the desktop's transitions move by -- how long the standard
+    /// one takes, its curve, or that nothing moves: the built-in one unless
+    /// the user chose another. `theme.animation` in the file, by the theme's
+    /// folder name, which may name a fourth theme again. The user's
+    /// [`animation_speed`](Self::animation_speed) then scales it; the two
+    /// reach everything that animates together, as `Palette::motion`. See
+    /// [`themes::AnimationTheme`] and `design-decisions.md` §1446.
+    pub animation_theme: themes::AnimationTheme,
     /// The hours `System (Auto)` is light, local time: from the window's start
     /// until its end, and dark the rest of the day. `theme.auto.light_from`
     /// and `theme.auto.dark_from` in the file; 07:00 until 19:00 unless the
@@ -1563,6 +1621,24 @@ pub struct AppearanceSettings {
 
     /// Whether the rotation is shuffled or goes in directory order.
     pub wallpaper_shuffle: bool,
+
+    /// Pictures that take turns by the time of day: each entry is up from its
+    /// `from` time until the next entry's.
+    ///
+    /// `roadmap-detailed.md` §3.4's "dynamic wallpapers: list of images with
+    /// time-of-day triggers (e.g., day image 06:00-18:00, night image
+    /// 18:00-06:00)". Kept sorted by time. The day wraps: before the first
+    /// entry's time, the last entry is up -- a night picture from 18:00 is
+    /// still up at 03:00.
+    ///
+    /// Takes precedence over [`wallpaper_folder`](Self::wallpaper_folder) and
+    /// [`wallpaper`](Self::wallpaper), for the reason the folder takes
+    /// precedence over the picture: a schedule *is* the wallpaper, and
+    /// honouring two would leave one visible only in the file.
+    ///
+    /// Written as `wallpaper.schedule`, one `"HH:MM path"` per entry, the path
+    /// encoded as the other wallpaper paths are.
+    pub wallpaper_schedule: Vec<ScheduledWallpaper>,
 
     /// Names to leave out of a rotation, as glob patterns.
     ///
@@ -1690,11 +1766,14 @@ impl Default for AppearanceSettings {
             // on sees it work without waiting for the next day.
             wallpaper_interval_secs: 600,
             wallpaper_shuffle: true,
+            wallpaper_schedule: Vec::new(),
             wallpaper_exclusions: Vec::new(),
             login_background: LoginBackground::Theme,
             theme_mode: ThemeMode::Dark,
             color_theme: themes::ColorTheme::built_in(),
             icon_theme: icons::IconTheme::built_in(),
+            widget_theme: themes::WidgetTheme::built_in(),
+            animation_theme: themes::AnimationTheme::built_in(),
             auto_light_hours: DEFAULT_AUTO_LIGHT_HOURS,
             auto_is_light: false,
             // Borders, per §829. The `Default` impl is what a machine with no
@@ -1849,6 +1928,53 @@ impl AppearanceSettings {
         ))
     }
 
+    /// The scheduled picture that is up at `utc_secs` in `zone`, if there is a
+    /// schedule: the entry with the latest time not after now, or -- before
+    /// the day's first entry -- the last entry, still up from the evening
+    /// before.
+    #[must_use]
+    pub fn scheduled_wallpaper_at(&self, utc_secs: u64, zone: Tz) -> Option<&Path> {
+        let now = local_time_of_day(utc_secs, zone);
+        self.wallpaper_schedule
+            .iter()
+            .rev()
+            .find(|entry| entry.from <= now)
+            .or_else(|| self.wallpaper_schedule.last())
+            .map(|entry| entry.image.as_path())
+    }
+
+    /// How long until the scheduled picture next changes, if there is a
+    /// schedule with more than one time in it.
+    ///
+    /// For a process with a clock to sleep until -- the shell -- as
+    /// [`next_auto_change`](Self::next_auto_change) is. Never zero.
+    #[must_use]
+    pub fn next_wallpaper_change(&self, utc_secs: u64, zone: Tz) -> Option<Duration> {
+        let first = self.wallpaper_schedule.first()?;
+        if self.wallpaper_schedule.iter().all(|e| e.from == first.from) {
+            return None;
+        }
+        let now = local_time_of_day(utc_secs, zone).minutes();
+        let next = self
+            .wallpaper_schedule
+            .iter()
+            .map(|e| e.from.minutes())
+            .find(|&m| m > now)
+            .unwrap_or_else(|| {
+                first
+                    .from
+                    .minutes()
+                    .saturating_add(daywindow::MINUTES_PER_DAY)
+            });
+        let minutes = next.saturating_sub(now);
+        Some(Duration::from_secs(
+            u64::from(minutes)
+                .saturating_mul(60)
+                .saturating_sub(utc_secs % 60)
+                .max(1),
+        ))
+    }
+
     /// Whether the automatic mode's light hours contain `utc_secs` in `zone`
     /// -- what [`auto_is_light`](Self::auto_is_light) will say when the
     /// settings are next read, for a caller holding a clock to compare against
@@ -1882,7 +2008,14 @@ impl AppearanceSettings {
         self.scaling_percent as f32 / 100.0
     }
 
-    /// Whether any animations are enabled.
+    /// Whether the user has left animation on: their speed is not Off.
+    ///
+    /// The user's own switch, and only theirs. A theme whose transitions do
+    /// not move (`animation.enabled: false`) does not make this false: that is
+    /// a look, not the user asking for less motion -- a picture viewer asks
+    /// this before playing an animated picture, and a theme's taste in panel
+    /// slides is no reason to stop one. The transitions themselves follow
+    /// `Palette::motion`, which reads both.
     pub fn animations_enabled(&self) -> bool {
         self.animation_speed != AnimationSpeed::Off
     }
@@ -2289,6 +2422,12 @@ impl AppearanceSettings {
         if let Some(shuffle) = doc.get_i64(&["wallpaper", "shuffle"]) {
             s.wallpaper_shuffle = shuffle != 0;
         }
+        if let Some(entries) = doc.get_seq(&["wallpaper", "schedule"]) {
+            let encoded = doc
+                .get_str(&["wallpaper", "image_encoding"])
+                .is_some_and(|v| v.trim() == WALLPAPER_ENCODING);
+            s.wallpaper_schedule = read_wallpaper_schedule(&entries, encoded);
+        }
         if let Some(patterns) = doc.get_seq(&["wallpaper", "exclude"]) {
             // Empty lines dropped: a YAML list a person edited by hand grows
             // blank entries, and an empty pattern matches nothing useful but
@@ -2315,6 +2454,16 @@ impl AppearanceSettings {
             .filter(|name| !name.is_empty())
         {
             s.icon_theme = icons::IconTheme::load(&pathcodec::decode_path(&name).into_os_string());
+        }
+        // The widget style, spelled and loaded as the colour theme is -- file
+        // and all, since the palette carries it and a palette is resolved per
+        // frame.
+        if let Some(name) = widget_theme_name(doc) {
+            s.widget_theme = themes::WidgetTheme::load(&name);
+        }
+        // The motion, for the same reason: the palette carries it.
+        if let Some(name) = animation_theme_name(doc) {
+            s.animation_theme = themes::AnimationTheme::load(&name);
         }
         read_into!(
             s.theme_mode,
@@ -2567,6 +2716,13 @@ impl AppearanceSettings {
             .map(String::as_str)
             .collect();
         doc.set_seq(&["wallpaper", "exclude"], &excludes);
+        let schedule: Vec<String> = self
+            .wallpaper_schedule
+            .iter()
+            .map(|entry| format!("{} {}", entry.from, pathcodec::encode_path(&entry.image)))
+            .collect();
+        let schedule: Vec<&str> = schedule.iter().map(String::as_str).collect();
+        doc.set_seq(&["wallpaper", "schedule"], &schedule);
         doc.set_str(&["wallpaper", "fit"], self.wallpaper_fit.yaml_name());
         doc.set_str(&["login", "background"], self.login_background.yaml_name());
         match &self.login_background {
@@ -2603,6 +2759,14 @@ impl AppearanceSettings {
         doc.set_str(
             &["theme", "icons"],
             &pathcodec::encode_path(std::path::Path::new(self.icon_theme.id())),
+        );
+        doc.set_str(
+            &["theme", "widget_style"],
+            &pathcodec::encode_path(std::path::Path::new(self.widget_theme.id())),
+        );
+        doc.set_str(
+            &["theme", "animation"],
+            &pathcodec::encode_path(std::path::Path::new(self.animation_theme.id())),
         );
         doc.set_str(
             &["theme", "surface_style"],
@@ -2785,13 +2949,76 @@ pub fn local_time_of_day(utc_secs: u64, zone: Tz) -> TimeOfDay {
     TimeOfDay::from_minutes(minutes).unwrap_or(TimeOfDay::MIDNIGHT)
 }
 
+/// One picture in a time-of-day wallpaper schedule: up from `from` until the
+/// next entry's time.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ScheduledWallpaper {
+    /// When it goes up, in the local time of day.
+    pub from: TimeOfDay,
+    /// The picture.
+    pub image: PathBuf,
+}
+
+/// Read `wallpaper.schedule`'s entries: `"HH:MM path"` each, the path encoded
+/// when `encoded` says the file encodes its paths.
+///
+/// An entry that does not start with a time, or names no picture, is left
+/// out -- the file is hand-editable, and one line typed wrong should cost
+/// that line rather than the schedule. Two entries at the same time: the later
+/// line wins, as a later setting does everywhere else in the file. The result
+/// is sorted by time.
+fn read_wallpaper_schedule(entries: &[String], encoded: bool) -> Vec<ScheduledWallpaper> {
+    let mut out: Vec<ScheduledWallpaper> = Vec::new();
+    for entry in entries {
+        let entry = entry.trim();
+        let Some((time, path)) = entry.split_once(char::is_whitespace) else {
+            continue;
+        };
+        let (Some(from), path) = (TimeOfDay::parse(time), path.trim()) else {
+            continue;
+        };
+        if path.is_empty() {
+            continue;
+        }
+        let image = if encoded {
+            pathcodec::decode_path(path)
+        } else {
+            PathBuf::from(path)
+        };
+        out.retain(|e| e.from != from);
+        out.push(ScheduledWallpaper { from, image });
+    }
+    out.sort_by_key(|e| e.from);
+    out
+}
+
 /// The colour theme a settings document names, decoded; `None` when it names
 /// none -- the key is absent or blank, which is the built-in theme.
 ///
 /// One decoding, shared by the reader and the watcher's fingerprint, so the
 /// two cannot disagree about which theme a file means.
 pub(crate) fn color_theme_name(doc: &Document) -> Option<std::ffi::OsString> {
-    let name = doc.get_str(&["theme", "colors"])?;
+    theme_name_at(doc, "colors")
+}
+
+/// The widget-style theme a settings document names, decoded; `None` for the
+/// built-in one. Shared by the reader and the watcher, as
+/// [`color_theme_name`] is.
+pub(crate) fn widget_theme_name(doc: &Document) -> Option<std::ffi::OsString> {
+    theme_name_at(doc, "widget_style")
+}
+
+/// The animation theme a settings document names, decoded; `None` for the
+/// built-in one. Shared by the reader and the watcher, as
+/// [`color_theme_name`] is.
+pub(crate) fn animation_theme_name(doc: &Document) -> Option<std::ffi::OsString> {
+    theme_name_at(doc, "animation")
+}
+
+/// The theme `theme.<axis>` names, decoded; `None` when the key is absent or
+/// blank.
+fn theme_name_at(doc: &Document, axis: &str) -> Option<std::ffi::OsString> {
+    let name = doc.get_str(&["theme", axis])?;
     let name = name.trim();
     (!name.is_empty()).then(|| pathcodec::decode_path(name).into_os_string())
 }
@@ -3205,6 +3432,54 @@ mod tests {
         );
     }
 
+    /// The settings' rasterizing choices reach the toolkit's own cache.
+    ///
+    /// Text the toolkit rasterizes itself was drawn unhinted while the
+    /// compositor's was hinted. The cache starts unhinted, and every caller of
+    /// `apply` in this binary applies the defaults, whose hinting is on --
+    /// so this holds whatever runs beside it.
+    #[test]
+    fn applying_the_fonts_sets_how_this_process_rasterizes() {
+        let _ = FontSettings::default().apply();
+        let r = guitk::text::rendering();
+        assert!(r.hinting, "hinting did not reach the toolkit's cache");
+        assert!(r.smoothing);
+        assert_eq!(r.subpixel, guitk::text::Subpixel::Rgb);
+    }
+
+    /// One mapping from the settings to a rasterizer's terms, field by field.
+    #[test]
+    fn the_rendering_is_the_settings_field_for_field() {
+        use guitk::text::{ColourPalette, Subpixel};
+        let plain = FontSettings {
+            hinting: false,
+            smoothing: false,
+            subpixel: SubpixelMode::None,
+            ..FontSettings::default()
+        };
+        let r = plain.rendering(ColourPalette::Dark);
+        assert!(!r.hinting && !r.smoothing);
+        assert_eq!(r.subpixel, Subpixel::None);
+        assert_eq!(
+            r.palette,
+            ColourPalette::Dark,
+            "the palette is the caller's"
+        );
+        for (mode, want) in [
+            (SubpixelMode::Rgb, Subpixel::Rgb),
+            (SubpixelMode::Bgr, Subpixel::Bgr),
+            (SubpixelMode::VRgb, Subpixel::VRgb),
+            (SubpixelMode::VBgr, Subpixel::VBgr),
+        ] {
+            let s = FontSettings {
+                subpixel: mode,
+                ..FontSettings::default()
+            };
+            assert_eq!(s.rendering(ColourPalette::Light).subpixel, want, "{mode:?}");
+            assert!(s.rendering(ColourPalette::Light).hinting);
+        }
+    }
+
     /// Choosing nothing is not the same as choosing something absent.
     ///
     /// The distinction is the reason this returns an enum rather than a bool:
@@ -3234,6 +3509,14 @@ mod tests {
     const ROUND_TRIP_THEME: &str = "nord 100% ça";
     const ROUND_TRIP_THEME_FILE: &str =
         "colors:\n  base: \"#102030\"\ncolors-light:\n  text: \"#0a0b0c\"\n";
+    /// The round trip's widget-style theme: a third theme, so a writer that
+    /// crossed one axis's name into another's key is caught.
+    const ROUND_TRIP_WIDGETS: &str = "round été";
+    const ROUND_TRIP_WIDGETS_FILE: &str =
+        "widget-style:\n  button:\n    radius: 11\n    gloss: false\n  toggle: checkbox\n";
+    /// The round trip's animation theme: a fourth, for the same reason.
+    const ROUND_TRIP_ANIMATION: &str = "ressort ü";
+    const ROUND_TRIP_ANIMATION_FILE: &str = "animation:\n  duration-ms: 320\n  easing: spring\n";
 
     /// Install a theme in the scratch user's data directory under `root`,
     /// where `AppearanceSettings::read_from` will look for it.
@@ -3259,11 +3542,37 @@ mod tests {
             // A theme of its own, not the colour theme's, so a round trip that
             // wrote one axis into the other would be caught.
             icon_theme: icons::IconTheme::load(std::ffi::OsStr::new("line-icons")),
+            // A third, read back from the file the round trip installs.
+            widget_theme: themes::WidgetTheme::from_style(
+                ROUND_TRIP_WIDGETS,
+                themes::parse(ROUND_TRIP_WIDGETS_FILE)
+                    .widget_style
+                    .expect("the fixture sets a widget style"),
+            ),
+            // A fourth, read back from the file the round trip installs.
+            animation_theme: themes::AnimationTheme::from_motion(
+                ROUND_TRIP_ANIMATION,
+                themes::parse(ROUND_TRIP_ANIMATION_FILE)
+                    .motion
+                    .expect("the fixture sets a motion"),
+            ),
             // Every one of these differs from the default, which is what the
             // fixture is for: the defaults are `None`, 600 and `true`.
             wallpaper_folder: Some(PathBuf::from("/home/u/Pictures/rotation")),
             // Non-default, like every other field here: the default is empty.
             wallpaper_exclusions: vec!["*.gif".to_string(), "draft-*".to_string()],
+            // Two pictures, one with a space, a non-ASCII letter and a `%` in
+            // its name, so a round trip that lost the path codec shows.
+            wallpaper_schedule: vec![
+                ScheduledWallpaper {
+                    from: TimeOfDay::new(6, 0).unwrap(),
+                    image: PathBuf::from("/home/u/Pictures/d\u{ed}a 100%.png"),
+                },
+                ScheduledWallpaper {
+                    from: TimeOfDay::new(18, 30).unwrap(),
+                    image: PathBuf::from("/home/u/Pictures/night.png"),
+                },
+            ],
             // Not `SameAsDesktop`: that one carries no value, so a round trip
             // could lose the path and still compare equal. The variant with
             // something to lose is the one worth round-tripping.
@@ -3344,6 +3653,8 @@ mod tests {
         // where the reader looks: a scratch user's data directory.
         let reread = config::testing::with_scratch_config("round-trip", |root| {
             install_theme(root, ROUND_TRIP_THEME, ROUND_TRIP_THEME_FILE);
+            install_theme(root, ROUND_TRIP_WIDGETS, ROUND_TRIP_WIDGETS_FILE);
+            install_theme(root, ROUND_TRIP_ANIMATION, ROUND_TRIP_ANIMATION_FILE);
             AppearanceSettings::read_from(&Document::parse(&doc.to_text()))
         });
         assert_eq!(reread, settings);
@@ -3508,6 +3819,342 @@ mod tests {
         });
     }
 
+    // ---- the widget style ----
+
+    /// A theme's controls reach the palette from the settings file and the
+    /// theme's own, as its colours do -- and they are a separate choice: the
+    /// colours stay the built-in ones.
+    #[test]
+    fn a_chosen_widget_style_reaches_the_palette() {
+        config::testing::with_scratch_config("widget-palette", |root| {
+            install_theme(
+                root,
+                "soft",
+                "widget-style:\n  button:\n    radius: 10\n  scrollbar:\n    width: thin\n",
+            );
+            let s =
+                AppearanceSettings::read_from(&Document::parse("theme:\n  widget_style: soft\n"));
+            assert_eq!(s.widget_theme.problem(), None);
+            let p = Palette::from_settings(&s);
+            assert_eq!(p.widget_style.button.radius, 10);
+            assert_eq!(
+                p.widget_style.scrollbar.width,
+                guitk::widget_style::ScrollbarWidth::Thin
+            );
+            // What the theme left out is the built-in theme's.
+            assert_eq!(
+                p.widget_style.field,
+                guitk::widget_style::WidgetStyle::AERO.field
+            );
+            // And the colours are not the theme's business here.
+            assert_eq!(
+                p.roles(),
+                Palette::from_settings(&AppearanceSettings::default()).roles()
+            );
+        });
+    }
+
+    /// The widget style is its own setting: read from `theme.widget_style`,
+    /// written back there, the built-in one when the file names none or a
+    /// blank -- and a theme that cannot be used keeps its name through a save
+    /// and says why, while the built-in controls are drawn.
+    #[test]
+    fn the_widget_style_is_its_own_setting_and_survives_a_save() {
+        config::testing::with_scratch_config("widget-setting", |root| {
+            let none = AppearanceSettings::read_from(&Document::parse(""));
+            assert_eq!(none.widget_theme, themes::WidgetTheme::built_in());
+            let blank =
+                AppearanceSettings::read_from(&Document::parse("theme:\n  widget_style: \" \"\n"));
+            assert_eq!(blank.widget_theme, themes::WidgetTheme::built_in());
+
+            let mut written = Document::new();
+            AppearanceSettings::default().write_into(&mut written);
+            assert_eq!(
+                written.get_str(&["theme", "widget_style"]).as_deref(),
+                Some("aero"),
+                "the key is there to edit"
+            );
+
+            // A colours-only theme cannot give the controls.
+            install_theme(root, "nord", "colors:\n  base: \"#2e3440\"\n");
+            let doc = Document::parse("theme:\n  colors: nord\n  widget_style: nord\n");
+            let s = AppearanceSettings::read_from(&doc);
+            assert_eq!(s.color_theme.problem(), None, "the colours are usable");
+            assert_eq!(s.widget_theme.id(), "nord");
+            assert_eq!(
+                s.widget_theme.style(),
+                guitk::widget_style::WidgetStyle::AERO
+            );
+            assert!(
+                s.widget_theme
+                    .problem()
+                    .is_some_and(|why| why.contains("\"nord\" sets no widget style")),
+                "{:?}",
+                s.widget_theme.problem()
+            );
+            let mut saved = doc.clone();
+            s.write_into(&mut saved);
+            assert_eq!(
+                saved.get_str(&["theme", "widget_style"]).as_deref(),
+                Some("nord")
+            );
+        });
+    }
+
+    /// **High contrast keeps the chosen controls, less what hides**: the
+    /// corners and the pill stay, the gloss and the overlaid scrollbar go.
+    #[test]
+    fn high_contrast_keeps_the_widget_style_less_what_hides() {
+        use guitk::widget_style::{ScrollbarVisibility, WidgetStyle};
+        let mut chosen = WidgetStyle::AERO;
+        chosen.button.radius = 12;
+        chosen.scrollbar.visibility = ScrollbarVisibility::Overlay;
+        let s = AppearanceSettings {
+            widget_theme: themes::WidgetTheme::from_style("soft", chosen),
+            high_contrast: Some(HighContrastScheme::WhiteOnBlack),
+            ..AppearanceSettings::default()
+        };
+        let p = Palette::from_settings(&s);
+        assert_eq!(p.widget_style, chosen.for_high_contrast());
+        assert_eq!(p.widget_style.button.radius, 12);
+        assert!(!p.widget_style.button.gloss);
+        assert_eq!(
+            p.widget_style.scrollbar.visibility,
+            ScrollbarVisibility::Always
+        );
+        // A palette built for high contrast with no settings at all is the
+        // built-in shapes, adjusted the same way.
+        let bare = Palette::high_contrast(
+            Color::rgb(0, 0, 0),
+            Color::rgb(255, 255, 255),
+            Color::rgb(0, 128, 255),
+        );
+        assert_eq!(bare.widget_style, WidgetStyle::AERO.for_high_contrast());
+    }
+
+    /// `watcher()` sees the chosen widget-style theme's file edited in place,
+    /// as it sees a colour theme's -- the controls change without a byte of
+    /// `appearance.yaml` changing.
+    #[test]
+    fn the_appearance_watcher_sees_the_chosen_widget_style_edited_in_place() {
+        config::testing::with_scratch_config("watch-widgets", |root| {
+            install_theme(root, "soft", "widget-style:\n  button:\n    radius: 10\n");
+            let mut file = AppearanceFile::load();
+            file.settings.widget_theme = themes::WidgetTheme::load(std::ffi::OsStr::new("soft"));
+            file.save().unwrap();
+
+            let mut w = watcher();
+            assert!(w.poll().is_some(), "the first look");
+            assert!(w.poll().is_none(), "nothing has changed");
+
+            install_theme(root, "soft", "widget-style:\n  button:\n    radius: 2\n");
+            let doc = w.poll().expect("the theme changed, so the controls did");
+            let s = AppearanceSettings::read_from(&doc);
+            assert_eq!(Palette::from_settings(&s).widget_style.button.radius, 2);
+            assert!(w.poll().is_none(), "reported once");
+        });
+    }
+
+    /// A theme chosen for both axes is one file, and depends on it once: the
+    /// fingerprint is the colours-only one, not that file twice.
+    #[test]
+    fn a_theme_chosen_for_both_axes_is_one_dependency() {
+        config::testing::with_scratch_config("both-axes", |root| {
+            install_theme(
+                root,
+                "nord",
+                "colors:\n  base: \"#2e3440\"\nwidget-style:\n  toggle: checkbox\n",
+            );
+            install_theme(root, "soft", "widget-style:\n  button:\n    radius: 10\n");
+            let colours = Document::parse("theme:\n  colors: nord\n");
+            let both = Document::parse("theme:\n  colors: nord\n  widget_style: nord\n");
+            let two = Document::parse("theme:\n  colors: nord\n  widget_style: soft\n");
+            assert!(!themes::fingerprint(&colours).is_empty());
+            assert_eq!(themes::fingerprint(&both), themes::fingerprint(&colours));
+            assert_ne!(themes::fingerprint(&two), themes::fingerprint(&colours));
+            // The widget theme alone depends on its file too.
+            let widgets = Document::parse("theme:\n  widget_style: soft\n");
+            assert!(!themes::fingerprint(&widgets).is_empty());
+        });
+    }
+
+    // ---- the animation ----
+
+    /// A theme's motion reaches the palette from the settings file and the
+    /// theme's own, at the user's speed -- and it is a separate choice: the
+    /// colours and the controls stay the built-in ones.
+    #[test]
+    fn a_chosen_animation_reaches_the_palette_at_the_users_speed() {
+        use guitk::motion::{Curve, Motion};
+        config::testing::with_scratch_config("animation-palette", |root| {
+            install_theme(
+                root,
+                "springy",
+                "animation:\n  duration-ms: 300\n  easing: spring\n",
+            );
+            for (speed, standard_ms) in [("normal", 300), ("slow", 450), ("fast", 225)] {
+                let s = AppearanceSettings::read_from(&Document::parse(&format!(
+                    "theme:\n  animation: springy\neffects:\n  animation_speed: {speed}\n"
+                )));
+                assert_eq!(s.animation_theme.problem(), None);
+                let p = Palette::from_settings(&s);
+                assert_eq!(p.motion, Motion::new(standard_ms, Curve::Spring), "{speed}");
+                assert_eq!(
+                    p.roles(),
+                    Palette::from_settings(&AppearanceSettings::default()).roles()
+                );
+                assert_eq!(p.widget_style, guitk::widget_style::WidgetStyle::AERO);
+            }
+            let off = AppearanceSettings::read_from(&Document::parse(
+                "theme:\n  animation: springy\neffects:\n  animation_speed: off\n",
+            ));
+            assert!(Palette::from_settings(&off).motion.is_still());
+        });
+        // With nothing chosen, the built-in motion at the normal speed.
+        assert_eq!(
+            Palette::from_settings(&AppearanceSettings::default()).motion,
+            Motion::STANDARD
+        );
+    }
+
+    /// **A still theme is still at every speed** -- and it is not the user
+    /// turning animation off: `animations_enabled` is the user's switch, and
+    /// stays on.
+    #[test]
+    fn a_still_theme_is_still_at_every_speed() {
+        for speed in [
+            AnimationSpeed::Fast,
+            AnimationSpeed::Normal,
+            AnimationSpeed::Slow,
+        ] {
+            let s = AppearanceSettings {
+                animation_theme: themes::AnimationTheme::from_motion(
+                    "calm",
+                    guitk::motion::Motion::STILL,
+                ),
+                animation_speed: speed,
+                ..AppearanceSettings::default()
+            };
+            assert!(Palette::from_settings(&s).motion.is_still(), "{speed:?}");
+            assert!(s.animations_enabled(), "{speed:?}");
+        }
+    }
+
+    /// The animation is its own setting: read from `theme.animation`, written
+    /// back there, the built-in one when the file names none or a blank --
+    /// and a theme that cannot be used keeps its name through a save and says
+    /// why, while the built-in motion is used.
+    #[test]
+    fn the_animation_is_its_own_setting_and_survives_a_save() {
+        config::testing::with_scratch_config("animation-setting", |root| {
+            let none = AppearanceSettings::read_from(&Document::parse(""));
+            assert_eq!(none.animation_theme, themes::AnimationTheme::built_in());
+            let blank =
+                AppearanceSettings::read_from(&Document::parse("theme:\n  animation: \" \"\n"));
+            assert_eq!(blank.animation_theme, themes::AnimationTheme::built_in());
+
+            let mut written = Document::new();
+            AppearanceSettings::default().write_into(&mut written);
+            assert_eq!(
+                written.get_str(&["theme", "animation"]).as_deref(),
+                Some("aero"),
+                "the key is there to edit"
+            );
+
+            // A colours-only theme cannot give the motion.
+            install_theme(root, "nord", "colors:\n  base: \"#2e3440\"\n");
+            let doc = Document::parse("theme:\n  colors: nord\n  animation: nord\n");
+            let s = AppearanceSettings::read_from(&doc);
+            assert_eq!(s.color_theme.problem(), None, "the colours are usable");
+            assert_eq!(s.animation_theme.id(), "nord");
+            assert_eq!(
+                Palette::from_settings(&s).motion,
+                guitk::motion::Motion::STANDARD
+            );
+            assert!(
+                s.animation_theme
+                    .problem()
+                    .is_some_and(|why| why.contains("\"nord\" sets no animation")),
+                "{:?}",
+                s.animation_theme.problem()
+            );
+            let mut saved = doc.clone();
+            s.write_into(&mut saved);
+            assert_eq!(
+                saved.get_str(&["theme", "animation"]).as_deref(),
+                Some("nord")
+            );
+        });
+    }
+
+    /// **High contrast keeps the motion, whole**: it is about telling things
+    /// apart, and how fast they move does not change that.
+    #[test]
+    fn high_contrast_keeps_the_motion() {
+        use guitk::motion::{Curve, Motion};
+        let chosen = Motion::new(400, Curve::Linear);
+        let s = AppearanceSettings {
+            animation_theme: themes::AnimationTheme::from_motion("slowish", chosen),
+            high_contrast: Some(HighContrastScheme::WhiteOnBlack),
+            ..AppearanceSettings::default()
+        };
+        assert_eq!(Palette::from_settings(&s).motion, chosen);
+        let bare = Palette::high_contrast(
+            Color::rgb(0, 0, 0),
+            Color::rgb(255, 255, 255),
+            Color::rgb(0, 128, 255),
+        );
+        assert_eq!(bare.motion, Motion::STANDARD);
+    }
+
+    /// `watcher()` sees the chosen animation theme's file edited in place, as
+    /// it sees a colour theme's -- the motion changes without a byte of
+    /// `appearance.yaml` changing.
+    #[test]
+    fn the_appearance_watcher_sees_the_chosen_animation_edited_in_place() {
+        config::testing::with_scratch_config("watch-animation", |root| {
+            install_theme(root, "springy", "animation:\n  easing: spring\n");
+            let mut file = AppearanceFile::load();
+            file.settings.animation_theme =
+                themes::AnimationTheme::load(std::ffi::OsStr::new("springy"));
+            file.save().unwrap();
+
+            let mut w = watcher();
+            assert!(w.poll().is_some(), "the first look");
+            assert!(w.poll().is_none(), "nothing has changed");
+
+            install_theme(root, "springy", "animation:\n  enabled: false\n");
+            let doc = w.poll().expect("the theme changed, so the motion did");
+            let s = AppearanceSettings::read_from(&doc);
+            assert!(Palette::from_settings(&s).motion.is_still());
+            assert!(w.poll().is_none(), "reported once");
+        });
+    }
+
+    /// A theme chosen for every axis is one file, and depends on it once; the
+    /// animation theme alone depends on its file too.
+    #[test]
+    fn a_theme_chosen_for_every_axis_is_one_dependency() {
+        config::testing::with_scratch_config("every-axis", |root| {
+            install_theme(
+                root,
+                "nord",
+                "colors:\n  base: \"#2e3440\"\nwidget-style:\n  toggle: checkbox\n\
+                 animation:\n  easing: linear\n",
+            );
+            install_theme(root, "calm", "animation:\n  enabled: false\n");
+            let colours = Document::parse("theme:\n  colors: nord\n");
+            let all = Document::parse(
+                "theme:\n  colors: nord\n  widget_style: nord\n  animation: nord\n",
+            );
+            let other = Document::parse("theme:\n  colors: nord\n  animation: calm\n");
+            assert_eq!(themes::fingerprint(&all), themes::fingerprint(&colours));
+            assert_ne!(themes::fingerprint(&other), themes::fingerprint(&colours));
+            let alone = Document::parse("theme:\n  animation: calm\n");
+            assert!(!themes::fingerprint(&alone).is_empty());
+        });
+    }
+
     /// The built-in theme depends on no file, so its fingerprint is empty and
     /// nothing about a theme directory can make its watcher report.
     #[test]
@@ -3602,6 +4249,129 @@ mod tests {
             AppearanceSettings::read_from(&one_end).auto_light_hours,
             DEFAULT_AUTO_LIGHT_HOURS,
             "a start without an end is a window nobody chose"
+        );
+    }
+
+    /// A schedule of a day picture and a night picture.
+    fn day_and_night() -> AppearanceSettings {
+        AppearanceSettings {
+            wallpaper_schedule: read_wallpaper_schedule(
+                &[
+                    "18:00 /pics/night.jpg".to_string(),
+                    "06:00 /pics/day.jpg".to_string(),
+                ],
+                false,
+            ),
+            ..AppearanceSettings::default()
+        }
+    }
+
+    /// The picture up at a time is the latest entry not after it, and before
+    /// the first entry of the day it is the last, still up from the evening.
+    #[test]
+    fn the_scheduled_picture_is_the_latest_one_started() {
+        let utc = datetimesettings::Tz::utc();
+        let s = day_and_night();
+        let at = |h: u64, m: u64| NOON - 12 * 3600 + h * 3600 + m * 60;
+        let pic = |t| s.scheduled_wallpaper_at(t, utc).map(Path::to_path_buf);
+        assert_eq!(
+            pic(at(3, 0)),
+            Some(PathBuf::from("/pics/night.jpg")),
+            "03:00 is still night"
+        );
+        assert_eq!(
+            pic(at(6, 0)),
+            Some(PathBuf::from("/pics/day.jpg")),
+            "06:00 on the dot"
+        );
+        assert_eq!(pic(at(12, 0)), Some(PathBuf::from("/pics/day.jpg")));
+        assert_eq!(pic(at(17, 59)), Some(PathBuf::from("/pics/day.jpg")));
+        assert_eq!(pic(at(18, 0)), Some(PathBuf::from("/pics/night.jpg")));
+        assert_eq!(pic(at(23, 59)), Some(PathBuf::from("/pics/night.jpg")));
+        assert_eq!(
+            AppearanceSettings::default().scheduled_wallpaper_at(NOON, utc),
+            None
+        );
+    }
+
+    /// The next change is the next entry's time, round the end of the day;
+    /// a schedule that never changes has none; the seconds already gone in
+    /// this minute come off, and it is never zero.
+    #[test]
+    fn the_schedule_says_when_it_next_changes() {
+        let utc = datetimesettings::Tz::utc();
+        let s = day_and_night();
+        assert_eq!(
+            s.next_wallpaper_change(NOON, utc),
+            Some(Duration::from_hours(6))
+        );
+        let eight_pm = NOON + 8 * 3600;
+        assert_eq!(
+            s.next_wallpaper_change(eight_pm, utc),
+            Some(Duration::from_hours(10))
+        );
+        assert_eq!(
+            s.next_wallpaper_change(NOON + 20, utc),
+            Some(Duration::from_secs(6 * 3600 - 20))
+        );
+        let one = AppearanceSettings {
+            wallpaper_schedule: read_wallpaper_schedule(&["09:00 /a.png".to_string()], false),
+            ..AppearanceSettings::default()
+        };
+        assert_eq!(
+            one.next_wallpaper_change(NOON, utc),
+            None,
+            "one picture never changes"
+        );
+        assert_eq!(
+            one.scheduled_wallpaper_at(NOON, utc),
+            Some(Path::new("/a.png")),
+            "and is up all day"
+        );
+        assert_eq!(
+            AppearanceSettings::default().next_wallpaper_change(NOON, utc),
+            None
+        );
+        // In a zone ahead of UTC the edge comes that much sooner: 12:00 UTC is
+        // 21:00 in Tokyo, night, and day again at 06:00 -- nine hours on.
+        let tokyo = datetimesettings::zone("Asia/Tokyo").unwrap().rule;
+        assert_eq!(
+            s.next_wallpaper_change(NOON, tokyo),
+            Some(Duration::from_hours(9))
+        );
+        assert_eq!(
+            s.scheduled_wallpaper_at(NOON, tokyo),
+            Some(Path::new("/pics/night.jpg"))
+        );
+    }
+
+    /// A line typed wrong costs that line; a time given twice keeps the later
+    /// line; the result is in time order.
+    #[test]
+    fn a_schedule_line_typed_wrong_costs_only_that_line() {
+        let lines: Vec<String> = [
+            "",
+            "nonsense",
+            "25:00 /late.png",
+            "07:00",
+            "07:00    ",
+            "12:00 /noon-first.png",
+            "08:15 /morning.png",
+            "12:00 /noon-second.png",
+        ]
+        .map(String::from)
+        .to_vec();
+        let read = read_wallpaper_schedule(&lines, false);
+        let got: Vec<(String, PathBuf)> = read
+            .iter()
+            .map(|e| (e.from.to_string(), e.image.clone()))
+            .collect();
+        assert_eq!(
+            got,
+            vec![
+                ("08:15".to_string(), PathBuf::from("/morning.png")),
+                ("12:00".to_string(), PathBuf::from("/noon-second.png")),
+            ]
         );
     }
 

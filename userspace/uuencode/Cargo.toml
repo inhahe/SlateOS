@@ -1,0 +1,22 @@
+[package]
+name = "uuencode"
+version = "0.1.0"
+edition = "2024"
+description = "uuencode from GNU sharutils 4.15.2: a file as mailable text, traditional or base64"
+
+[lints]
+workspace = true
+
+[dependencies]
+# sharutils' option machinery -- flags, ~/.sharrc, --help, --version, the
+# save/load of options -- as libopts 41.1 does it.
+autoopts = { path = "../autoopts" }
+# stdout buffered as glibc buffers it, so the call that meets a full disk is
+# the one reported.
+ulclosestream = { path = "../ulclosestream" }
+# A closed descriptor 0 or 1 stays closed, as upstream sees it.
+stdfdguard = { path = "../stdfdguard" }
+# strerror, for "fserr %d (%s) performing ...".
+errmsg = { path = "../errmsg" }
+# gnulib's base64_encode, for -m and -e.
+gnubase64 = { path = "../gnubase64" }

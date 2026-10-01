@@ -1439,13 +1439,14 @@ fn parse_cat_opts(args: &[String]) -> Result<CatOpts, String> {
     Ok(opts)
 }
 
-/// One journal record per input line.
+/// One journal record per input line, each handed to `sink` whole, its
+/// newline included.
 ///
 /// Separated from the file handling so a test can read back what it wrote
 /// without a `/var/log` to write into.
 fn cat_records(
     input: &mut dyn BufRead,
-    sink: &mut dyn Write,
+    sink: &mut dyn FnMut(&[u8]) -> io::Result<()>,
     opts: &CatOpts,
     now: u64,
 ) -> io::Result<()> {
@@ -1458,7 +1459,9 @@ fn cat_records(
             msg: line,
             pid: Some(opts.pid),
         };
-        writeln!(sink, "{}", record.to_json_line())?;
+        let mut line = record.to_json_line().into_bytes();
+        line.push(b'\n');
+        sink(&line)?;
     }
     Ok(())
 }
@@ -1468,20 +1471,22 @@ fn run_cat_journal(out: &mut dyn Write, opts: &CatOpts) -> io::Result<i32> {
     // sees: `journalctl` reads JSON-lines records, and the two tools that
     // exist to be each other's ends did not meet.
     let path = journalrec::MAIN_LOG_PATH;
-    let file = fs::OpenOptions::new().create(true).append(true).open(path);
-    let mut file = match file {
-        Ok(f) => f,
-        Err(e) => {
-            writeln!(out, "systemd-cat: {path}: {e}")?;
-            return Ok(1);
-        }
-    };
+    // Opened first only to say at once when the log cannot be written. Each
+    // record is then appended on its own, under the journal's lock
+    // (design-decisions §1037): a descriptor held across the whole input
+    // would carry records into a file a vacuum or a rotation had already
+    // replaced -- and they would be lost with it.
+    if let Err(e) = fs::OpenOptions::new().create(true).append(true).open(path) {
+        writeln!(out, "systemd-cat: {path}: {e}")?;
+        return Ok(1);
+    }
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map_or(0, |d| d.as_secs());
     let stdin = io::stdin();
     let mut locked = stdin.lock();
-    match cat_records(&mut locked, &mut file, opts, now) {
+    let mut append = |line: &[u8]| journalio::append(std::path::Path::new(path), line);
+    match cat_records(&mut locked, &mut append, opts, now) {
         Ok(()) => Ok(0),
         Err(e) => {
             writeln!(out, "systemd-cat: {path}: {e}")?;
@@ -1598,12 +1603,22 @@ fn print_cgroup_tree(out: &mut dyn Write, dir: &Path, prefix: &str) -> io::Resul
 }
 
 fn run_cgls(out: &mut dyn Write) -> io::Result<i32> {
+    cgls_at(out, Path::new(CGROUP_ROOT))
+}
+
+/// `systemd-cgls` over the hierarchy at `root`: a parameter, so a test can
+/// point it at a directory of its own rather than at whatever the machine
+/// running the suite has.
+fn cgls_at(out: &mut dyn Write, root: &Path) -> io::Result<i32> {
     // This used to print a fixed tree -- `init.scope`, `dbus.service`, pids
     // 1 and 100 -- for every machine, having read nothing. The hierarchy is
     // a directory tree, so there was never a reason to invent it.
-    let root = Path::new(CGROUP_ROOT);
     if !root.is_dir() {
-        writeln!(out, "systemd-cgls: {CGROUP_ROOT} is not a directory")?;
+        writeln!(
+            out,
+            "systemd-cgls: {} is not a directory",
+            quoting::quotef_os(root)
+        )?;
         return Ok(1);
     }
     writeln!(out, "Control group /:")?;
@@ -1688,11 +1703,20 @@ fn cgroup_usage_rows(root: &Path, base: &Path, into: &mut Vec<(String, Option<u6
 }
 
 fn run_cgtop(out: &mut dyn Write) -> io::Result<i32> {
+    cgtop_at(out, Path::new(CGROUP_ROOT))
+}
+
+/// `systemd-cgtop` over the hierarchy at `root`, a parameter as
+/// [`cgls_at`]'s is.
+fn cgtop_at(out: &mut dyn Write, root: &Path) -> io::Result<i32> {
     // This used to print five invented cgroups with invented task counts,
     // CPU percentages and memory figures, having read nothing.
-    let root = Path::new(CGROUP_ROOT);
     if !root.is_dir() {
-        writeln!(out, "systemd-cgtop: {CGROUP_ROOT} is not a directory")?;
+        writeln!(
+            out,
+            "systemd-cgtop: {} is not a directory",
+            quoting::quotef_os(root)
+        )?;
         return Ok(1);
     }
     writeln!(
@@ -2597,7 +2621,16 @@ mod tests {
         };
         let mut input = io::Cursor::new(b"first\nsecond\n".to_vec());
         let mut sink: Vec<u8> = Vec::new();
-        cat_records(&mut input, &mut sink, &opts, 1_716_000_000).expect("write");
+        cat_records(
+            &mut input,
+            &mut |line| {
+                sink.extend_from_slice(line);
+                Ok(())
+            },
+            &opts,
+            1_716_000_000,
+        )
+        .expect("write");
         let text = String::from_utf8(sink).expect("ascii");
         let lines: Vec<&str> = text.lines().collect();
         assert_eq!(lines.len(), 2, "{text}");
@@ -2620,7 +2653,20 @@ mod tests {
         let hostile = b"oops\",\"level\":\"emerg\n".to_vec();
         let mut input = io::Cursor::new(hostile);
         let mut sink: Vec<u8> = Vec::new();
-        cat_records(&mut input, &mut sink, &opts, 1).expect("write");
+        let mut records = 0usize;
+        cat_records(
+            &mut input,
+            &mut |line| {
+                sink.extend_from_slice(line);
+                records += 1;
+                Ok(())
+            },
+            &opts,
+            1,
+        )
+        .expect("write");
+        // One record, delivered as one piece.
+        assert_eq!(records, 1);
         let text = String::from_utf8(sink).expect("ascii");
         assert_eq!(text.lines().count(), 1, "{text}");
         assert!(text.contains(r#""level":"info""#), "{text}");
@@ -3691,8 +3737,12 @@ mod tests {
     /// worse than no test: it makes the lie look verified.
     #[test]
     fn a_host_without_cgroups_is_told_so_rather_than_shown_a_tree() {
-        // No `/sys/fs/cgroup` on the machine this suite runs on.
-        let (out, code) = capture(|buf| run_cgls(buf));
+        // A hierarchy that is not there. This used to be the machine's own
+        // `/sys/fs/cgroup`, assumed absent -- true on the Windows host, and
+        // false on every Linux the suite also runs on.
+        let scratch = scratchdir::ScratchDir::new("cgls-none");
+        let none = scratch.path("no-cgroups-here");
+        let (out, code) = capture(|buf| cgls_at(buf, &none));
         assert_eq!(code, 1, "{out}");
         assert!(out.contains("not a directory"), "{out}");
         assert!(!out.contains("system.slice"), "{out}");
@@ -3741,7 +3791,9 @@ mod tests {
     /// the row was hardcoded.
     #[test]
     fn cgtop_on_a_host_without_cgroups_says_so() {
-        let (out, code) = capture(|buf| run_cgtop(buf));
+        let scratch = scratchdir::ScratchDir::new("cgtop-none");
+        let none = scratch.path("no-cgroups-here");
+        let (out, code) = capture(|buf| cgtop_at(buf, &none));
         assert_eq!(code, 1, "{out}");
         assert!(out.contains("not a directory"), "{out}");
         assert!(!out.contains("system.slice"), "{out}");

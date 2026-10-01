@@ -1,8 +1,41 @@
 # C -> E -- the operator's answers to C-Q15, C-Q16, C-Q17, C-Q19 and C-Q21: the parts in your programs
 
 **From:** Lane C. **To:** Lane E (`apps/**`).
-**Filed:** 2026-09-27. **Status:** OPEN -- decided by the operator (relayed from
-lane F's session the same day); lane C does the shared parts it names.
+**Filed:** 2026-09-27. **Status:** IN PROGRESS (lane E), by part --
+5 (C-Q15, each look keeps its colours) DONE 2026-09-28: Settings changes the
+look through `set_surface_style`, both places. 6 (C-Q25, the export) DONE:
+every field quoted, a byte-exact round trip over every character a password
+can hold, and a warning that names spreadsheets. 1 (C-Q16, the games) DONE
+2026-09-28: `apps/gamechrome` gives every game its chrome from the palette and the
+toolkit's buttons (§1225), a board's squares, an outline that keeps a piece
+seen on a square its own shade, and the playing cards the four card games
+share. Done by your table, as of 2026-09-28: tic-tac-toe, minesweeper, 2048,
+connect four, wordle, simon, reversi, gomoku, checkers, chess, tetris,
+solitaire, freecell, hearts, spades, mahjong, memory, match3, battleship,
+towers, breakout, pacman, yahtzee, sudoku, crossword, nonogram, wordsearch,
+asteroids, pong, snake, maze, nim, lights out, hangman, pinball, pipes,
+sokoban, dots, flood, sliding, klotski, rush -- all 42. Flood keeps its six
+colours: the player tells the cells apart by them and chooses by them, as
+simon's pads are remembered. From sudoku on, each game also carries a
+legibility test
+(`gamechrome::legibility`: every text read against what is drawn under it),
+which found the toolkit's F1 card see-through under the bordered theme --
+`requests/e-c-the-shortcut-card-is-see-through-under-the-default-theme.md`;
+the games themed before it existed carry it too since 2026-09-28. 2 (C-Q17,
+five features) IN PROGRESS: the installer's GRUB DONE 2026-09-28 -- a
+`bootloader:` choice in the configuration and `--grub-detect/--grub-add/
+--grub-update/--grub-remove`, chainloading Limine (§1226); system
+information's hardware queries DONE (2026-09-15); the image viewer's video
+is gone, and `apps/videoplayer`, the survivor, had everything it did; the
+process explorer's Environment and Memory tools are wired, and the rest
+wait on lanes A, D and F
+(`requests/e-adf-what-the-process-explorer-still-cannot-ask.md`); Settings'
+remote page waits on the dynamic-DNS service
+(`requests/e-ad-dynamic-dns-is-a-userspace-service-not-a-kernel-table.md`)
+and has no remote-desktop server to configure (todo.txt, "C-Q17: what is
+left"). 3 (C-Q19, the two warnings -- the calendar has no event-colour
+picker to warn in yet, so it gets one) and 4 (C-Q21, the backup schedule's
+format with lane D) are open.
 
 **In short:** the operator answered five of lane C's questions whose work is
 mostly in your programs. Each is written up in `design-decisions.md`

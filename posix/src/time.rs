@@ -33,6 +33,7 @@
 //! in `known-issues.md`.
 
 use crate::errno;
+use crate::interrupt::Mark;
 use crate::stat::Timespec;
 use crate::syscall::*;
 use crate::types::*;
@@ -106,32 +107,49 @@ pub(crate) fn valid_nanoseconds(ns: i64) -> bool {
     (0..1_000_000_000).contains(&ns)
 }
 
+/// Sleep `ns` nanoseconds on the monotonic clock, handlers counted from
+/// `mark`: `Err(left)` when a signal handler ended it
+/// ([`crate::lowlevellock::sleep_until`]).
+fn sleep_ns(ns: u64, mark: Mark) -> Result<(), Timespec> {
+    let now = crate::lowlevellock::now_on(CLOCK_MONOTONIC);
+    let deadline = crate::lowlevellock::after(&now, ns);
+    crate::lowlevellock::sleep_until(CLOCK_MONOTONIC, &deadline, mark)
+}
+
 /// Sleep for a specified number of seconds.
 ///
-/// Returns 0 on success, or the remaining seconds if interrupted.
+/// Returns 0 once they have passed, or -- when a signal handler ends the
+/// sleep, which any does (signal(7) never restarts one) -- the whole seconds
+/// that were still to go, as glibc's `seconds + ts.tv_sec` counts them:
+/// truncated, so a sleep cut short in its last second answers 0.  `errno` is
+/// then `nanosleep`'s `EINTR`, and otherwise left as it was, as glibc's is.
+///
+/// Until 2026-09-30 no signal ended a sleep here: `SYS_SLEEP` sleeps its full
+/// time, and this answered 0 whatever happened.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn sleep(seconds: u32) -> u32 {
-    // Convert seconds to nanoseconds for our native SYS_SLEEP.
-    let ns: u64 = u64::from(seconds).saturating_mul(1_000_000_000);
-    let ret = syscall1(SYS_SLEEP, ns);
-
-    if ret < 0 {
-        // Sleep was interrupted — return remaining seconds.
-        // Our kernel doesn't report remaining time, so return 0.
-        0
-    } else {
-        0
+    let mark = Mark::now();
+    match sleep_ns(u64::from(seconds).saturating_mul(1_000_000_000), mark) {
+        Ok(()) => 0,
+        Err(left) => {
+            errno::set_errno(errno::EINTR);
+            u32::try_from(left.tv_sec).unwrap_or(u32::MAX)
+        }
     }
 }
 
 /// High-resolution sleep.
 ///
-/// Sleeps for the time specified in `req`.  If interrupted, the
-/// remaining time is stored in `rem` (if non-null).
+/// Sleeps for the time specified in `req` -- or until a signal handler runs
+/// on the thread, `SA_RESTART` or not: -1 with `EINTR`, and the time that
+/// was still to go in `rem` (if non-null).  A signal that runs no handler
+/// here does not end it ([`crate::interrupt`]).  Until 2026-09-30 nothing
+/// did: `SYS_SLEEP` sleeps its full time.
 ///
 /// Returns 0 on success, -1 if interrupted (errno = EINTR).
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn nanosleep(req: *const Timespec, rem: *mut Timespec) -> i32 {
+    let mark = Mark::now();
     if req.is_null() {
         errno::set_errno(errno::EFAULT);
         return -1;
@@ -146,40 +164,42 @@ pub extern "C" fn nanosleep(req: *const Timespec, rem: *mut Timespec) -> i32 {
         return -1;
     }
 
-    // Convert to nanoseconds (both values are now non-negative, cast is safe).
-    let ns: u64 = (ts.tv_sec as u64)
+    // Both fields are non-negative now.
+    let ns = u64::try_from(ts.tv_sec)
+        .unwrap_or(0)
         .saturating_mul(1_000_000_000)
-        .saturating_add(ts.tv_nsec as u64);
+        .saturating_add(u64::try_from(ts.tv_nsec).unwrap_or(0));
 
-    let ret = syscall1(SYS_SLEEP, ns);
-
-    if ret < 0 {
-        // Interrupted.  Our kernel doesn't report remaining time,
-        // so set rem to zero.
-        if !rem.is_null() {
-            unsafe {
-                (*rem).tv_sec = 0;
-                (*rem).tv_nsec = 0;
+    match sleep_ns(ns, mark) {
+        Ok(()) => 0,
+        Err(left) => {
+            if !rem.is_null() {
+                // SAFETY: a non-null `rem` is writable, per the contract.
+                unsafe { core::ptr::write_unaligned(rem, left) };
             }
+            errno::set_errno(errno::EINTR);
+            -1
         }
-        errno::set_errno(errno::EINTR);
-        return -1;
     }
-
-    0
 }
 
 /// Sleep for a specified number of microseconds.
 ///
 /// This is obsolete in POSIX.1-2008 (use `nanosleep` instead) but
-/// many programs still use it.
+/// many programs still use it, and it is glibc's: `nanosleep` of the time,
+/// any number of microseconds, -1 with `EINTR` when a signal handler ends it.
 ///
 /// Returns 0 on success, -1 on error.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn usleep(usec: u32) -> i32 {
-    let ns: u64 = u64::from(usec).saturating_mul(1_000);
-    let ret = syscall1(SYS_SLEEP, ns);
-    if ret < 0 { -1 } else { 0 }
+    let mark = Mark::now();
+    match sleep_ns(u64::from(usec).saturating_mul(1_000), mark) {
+        Ok(()) => 0,
+        Err(_) => {
+            errno::set_errno(errno::EINTR);
+            -1
+        }
+    }
 }
 
 /// Get time from a specific clock.
@@ -314,6 +334,28 @@ pub unsafe extern "C" fn timespec_get(ts: *mut Timespec, base: i32) -> i32 {
     base
 }
 
+/// `timespec_getres(ts, base)` (C23 7.29.2.7): the resolution of the time
+/// base `base` into `*ts`, unless `ts` is NULL, and `base` back; 0, and
+/// `*ts` untouched, for a number that is no time base. `TIME_UTC` is the only
+/// one, as in glibc 2.39, and its resolution is `CLOCK_REALTIME`'s.
+///
+/// Not in `gnu_timespec_get`'s archive member, which must define
+/// `timespec_get` alone (`scripts/check-libc-shape.py`).
+///
+/// # Safety
+///
+/// `ts` must be NULL or point to a writable `struct timespec`.
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub unsafe extern "C" fn timespec_getres(ts: *mut Timespec, base: i32) -> i32 {
+    if base != TIME_UTC {
+        return 0;
+    }
+    if !ts.is_null() && clock_getres(CLOCK_REALTIME, ts) != 0 {
+        return 0;
+    }
+    base
+}
+
 /// Check whether a clock ID reports wall-clock (Unix-epoch) time.
 ///
 /// Only `CLOCK_REALTIME` and its coarse variant track the wall clock; all
@@ -336,6 +378,11 @@ fn is_valid_clock(clk_id: ClockidT) -> bool {
             | CLOCK_BOOTTIME
     )
 }
+
+/// Linux's `TIME_SETTOD_SEC_MAX`: `KTIME_SEC_MAX` (`KTIME_MAX` in seconds)
+/// less `TIME_UPTIME_SEC_MAX` (30 years), the largest `tv_sec` that
+/// `clock_settime` accepts.
+const TIME_SETTOD_SEC_MAX: i64 = i64::MAX / 1_000_000_000 - 30 * 365 * 86_400;
 
 /// Check whether a clock ID is one that may be modified by
 /// `clock_settime`.
@@ -450,6 +497,14 @@ pub extern "C" fn clock_settime(clk_id: ClockidT, tp: *const Timespec) -> i32 {
         errno::set_errno(errno::EINVAL);
         return -1;
     }
+    // `timespec64_valid_settod` (include/linux/time64.h): a time past
+    // `TIME_SETTOD_SEC_MAX` -- 30 years short of where `ktime_t` overflows --
+    // is refused, so the clock cannot be set somewhere an uptime could carry
+    // it past the end.  Missing until 2026-09-26.
+    if ts.tv_sec >= TIME_SETTOD_SEC_MAX {
+        errno::set_errno(errno::EINVAL);
+        return -1;
+    }
 
     // 5. Phase 177: gate on CAP_SYS_TIME.  Linux's settable clocks
     //    (CLOCK_REALTIME via posix_clock_realtime_set, CLOCK_TAI via
@@ -546,72 +601,75 @@ pub extern "C" fn clock_nanosleep(
     request: *const Timespec,
     remain: *mut Timespec,
 ) -> i32 {
-    // Phase 102 invariant: any flag bit other than TIMER_ABSTIME is
-    // a programming error.  Reject up-front so a buggy caller is
-    // told about it before any other diagnostic dilutes the signal.
-    // clock_nanosleep returns the error number directly (no errno
-    // set), per POSIX.
-    if flags & !TIMER_ABSTIME != 0 {
+    // Handlers are counted from here: in Linux the call is one system call,
+    // and a signal that comes at any point in it ends the sleep.
+    let mark = Mark::now();
+    // glibc 2.39 (sysdeps/unix/sysv/linux/clock_nanosleep.c) answers the
+    // calling thread's CPU clock itself, before any other check.
+    if clk_id == CLOCK_THREAD_CPUTIME_ID {
         return errno::EINVAL;
     }
-
-    // Phase 153: clock dispatch precedes the user-pointer check, to
-    // match Linux's `clockid_to_kclock` running before
-    // `get_timespec64`.  Observable effect: `clock_nanosleep(
-    // BAD_CLOCK, 0, NULL, NULL)` returns EINVAL (clock reason) rather
-    // than EFAULT (NULL reason).
+    // Linux 6.6 (kernel/time/posix-timers.c:1373): an unknown clock, then a
+    // clock that cannot be slept on -- `CLOCK_MONOTONIC_RAW` and the two
+    // `_COARSE` clocks have no `nsleep` -- then the copy of the request, then
+    // `timespec64_valid`.  `flags` is only ever asked whether TIMER_ABSTIME
+    // is set: the other bits are ignored.  Until 2026-09-26 any other bit was
+    // EINVAL, ahead of everything, under a comment citing a check in
+    // `common_nsleep` that is not there.
     if !is_valid_clock(clk_id) {
         return errno::EINVAL;
     }
-
-    // Phase 153: NULL request → EFAULT, matching Linux's
-    // get_timespec64 / copy_from_user failure path.  Pre-Phase-153
-    // this returned EINVAL.
+    if matches!(
+        clk_id,
+        CLOCK_MONOTONIC_RAW | CLOCK_REALTIME_COARSE | CLOCK_MONOTONIC_COARSE
+    ) {
+        return errno::EOPNOTSUPP;
+    }
     if request.is_null() {
         return errno::EFAULT;
     }
-
-    // POSIX: EINVAL if tv_nsec not in [0, 999_999_999].
-    // SAFETY: request is non-null (checked above).
-    let req = unsafe { &*request };
-    if req.tv_nsec < 0 || req.tv_nsec > 999_999_999 {
+    // SAFETY: `request` is non-null, and the caller's contract makes it a
+    // readable `timespec`; read unaligned, as a C caller's may not be.
+    let req = unsafe { core::ptr::read_unaligned(request) };
+    // `timespec64_valid`: a negative second or an out-of-range nanosecond.
+    // A negative `tv_sec` was taken for "already past" in the absolute form,
+    // and reported as EINTR in the relative one, until 2026-09-26.
+    if req.tv_sec < 0 || !(0..1_000_000_000).contains(&req.tv_nsec) {
         return errno::EINVAL;
     }
 
-    if flags & TIMER_ABSTIME != 0 {
-        // Absolute time: compute the relative duration.
-        let mut now = Timespec {
-            tv_sec: 0,
-            tv_nsec: 0,
-        };
-        if clock_gettime(clk_id, &raw mut now) < 0 {
-            return errno::EINVAL;
-        }
-
-        // SAFETY: request is non-null.
-        let req = unsafe { &*request };
-        #[allow(clippy::arithmetic_side_effects)]
-        let target_ns = req.tv_sec * 1_000_000_000 + req.tv_nsec;
-        #[allow(clippy::arithmetic_side_effects)]
-        let now_ns = now.tv_sec * 1_000_000_000 + now.tv_nsec;
-
-        if target_ns <= now_ns {
-            return 0; // Already past.
-        }
-
-        #[allow(clippy::arithmetic_side_effects)]
-        let sleep_ns = (target_ns - now_ns) as u64;
-        let _ = syscall1(SYS_SLEEP, sleep_ns);
+    // The deadline, on the sleep's own clock: the request itself when
+    // absolute, else the request from now.  A deadline already passed, or a
+    // relative sleep of nothing, returns at once, as `hrtimer_nanosleep` does.
+    let absolute = flags & TIMER_ABSTIME != 0;
+    let deadline = if absolute {
+        req
     } else {
-        // Relative time: same as nanosleep.
-        // Propagate EINTR if interrupted (clock_nanosleep returns error
-        // codes directly, not via errno).
-        if nanosleep(request, remain) != 0 {
-            return errno::EINTR;
+        let now = crate::lowlevellock::now_on(clk_id);
+        crate::lowlevellock::after(&now, timespec_to_ns_saturating(&req))
+    };
+    match crate::lowlevellock::sleep_until(clk_id, &deadline, mark) {
+        Ok(()) => 0,
+        Err(left) => {
+            // A signal handler ended it, `SA_RESTART` or not.  Only the
+            // relative form reports what is left: Linux drops `rmtp` for
+            // TIMER_ABSTIME.
+            if !absolute && !remain.is_null() {
+                // SAFETY: a non-null `remain` is writable, per the contract.
+                unsafe { core::ptr::write_unaligned(remain, left) };
+            }
+            errno::EINTR
         }
     }
+}
 
-    0
+/// A non-negative `timespec` as nanoseconds, saturating at `u64::MAX`: an
+/// absolute deadline years away is a sleep that outlasts the caller, not an
+/// overflow.  Until 2026-09-26 the absolute form multiplied unchecked.
+fn timespec_to_ns_saturating(ts: &Timespec) -> u64 {
+    let secs = u64::try_from(ts.tv_sec).unwrap_or(0);
+    let nsecs = u64::try_from(ts.tv_nsec).unwrap_or(0);
+    secs.saturating_mul(1_000_000_000).saturating_add(nsecs)
 }
 
 /// Get time of day (legacy interface).
@@ -936,6 +994,8 @@ impl Tm {
 /// POSIX contract, and the reason `gmtime_r` exists.  The buffer lives in
 /// [`crate::perthread`], so another thread calling `gmtime` concurrently
 /// cannot clobber this result.
+///
+/// A year that does not fit `tm_year` is `EOVERFLOW` and NULL, as in glibc.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn gmtime(timep: *const TimeT) -> *mut Tm {
     if timep.is_null() {
@@ -946,8 +1006,12 @@ pub extern "C" fn gmtime(timep: *const TimeT) -> *mut Tm {
     // and no other thread holds a pointer into this block.
     let tm = unsafe { &raw mut (*crate::perthread::current()).tm };
     // SAFETY: as above — `tm` points at this thread's own `Tm`.
-    secs_to_tm(secs, unsafe { &mut *tm });
-    tm
+    if secs_to_tm(secs, unsafe { &mut *tm }) {
+        tm
+    } else {
+        crate::errno::set_errno(crate::errno::EOVERFLOW);
+        core::ptr::null_mut()
+    }
 }
 
 /// Convert time_t to broken-down **local** time, honouring `TZ`.
@@ -965,47 +1029,114 @@ pub extern "C" fn localtime(timep: *const TimeT) -> *mut Tm {
     // and no other thread holds a pointer into this block.
     let tm = unsafe { &raw mut (*crate::perthread::current()).tm };
     // SAFETY: as above — `tm` points at this thread's own `Tm`.
-    secs_to_local_tm(secs, unsafe { &mut *tm });
-    tm
+    if secs_to_local_tm(secs, unsafe { &mut *tm }) {
+        tm
+    } else {
+        crate::errno::set_errno(crate::errno::EOVERFLOW);
+        core::ptr::null_mut()
+    }
 }
 
-/// Fill `tm` with the broken-down local time for UTC instant `secs`.
+/// Fill `tm` with the broken-down local time for UTC instant `secs`; `false`,
+/// with `tm` untouched, when its year does not fit `tm_year`.
 ///
-/// Shared by `localtime` and `localtime_r` so the two cannot drift apart.
-fn secs_to_local_tm(secs: TimeT, tm: &mut Tm) {
+/// Shared by `localtime`, `localtime_r` and `mktime` so they cannot drift
+/// apart.
+fn secs_to_local_tm(secs: TimeT, tm: &mut Tm) -> bool {
     publish_tz_globals();
     let info = crate::tz::current().lookup(secs);
-    // Rendering local time is just rendering a shifted instant; the offset is
-    // then recorded so `%z`/`%Z` and `mktime` can recover the zone.
-    secs_to_tm(secs.saturating_add(i64::from(info.gmtoff)), tm);
+    // Rendering local time is rendering the instant at the zone's offset; the
+    // offset is then recorded so `%z`/`%Z` and `mktime` can recover the zone.
+    let Some(b) = Broken::of(secs, i64::from(info.gmtoff)) else {
+        return false;
+    };
+    b.store(tm);
     tm.tm_isdst = i32::from(info.is_dst);
     tm.tm_gmtoff = i64::from(info.gmtoff);
     tm.tm_zone = crate::tz::name_ptr(usize::from(info.is_dst));
+    true
 }
 
 /// Convert broken-down **local** time to time_t, honouring `TZ`.
 ///
-/// Normalizes the `Tm` fields in place, resolves the zone offset for the
-/// resulting wall-clock time (respecting `tm_isdst`: negative means "work it
-/// out", zero forces standard time, positive forces daylight time), and
-/// writes back `tm_isdst`, `tm_gmtoff` and `tm_zone` to describe the answer.
+/// Every field may be out of range -- a 32nd of January, a -1st hour -- and
+/// is carried into the next, as C requires; the fields are then rewritten to
+/// describe the resulting instant, `tm_wday` and `tm_yday` included. The
+/// zone's offset is chosen as glibc 2.39 chooses it ([`resolve_local`]):
+/// `tm_isdst` negative lets the zone decide, zero or positive asks for
+/// standard or daylight time and gets the nearest offset of that kind.
+///
+/// When the answer's year does not fit `tm_year`, the result is -1 with
+/// `errno` `EOVERFLOW` and `*tm` is left as it was.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn mktime(tm: *mut Tm) -> TimeT {
     if tm.is_null() {
         return -1;
     }
     let t = unsafe { &mut *tm };
+    mktime_tm(t).unwrap_or_else(|| {
+        crate::errno::set_errno(crate::errno::EOVERFLOW);
+        -1
+    })
+}
+
+/// `mktime`'s work: `t` normalised as local time, and the instant it names;
+/// `None`, with `t` untouched, when the year does not fit `tm_year`.
+fn mktime_tm(t: &mut Tm) -> Option<TimeT> {
     publish_tz_globals();
-    // Normalise first, reading the fields *as if* UTC; the result is the local
-    // wall clock expressed as an instant, which is what `local_to_utc` wants.
-    let isdst_hint = t.tm_isdst;
-    let local = tm_to_secs(t);
-    let (utc, _) = crate::tz::current().local_to_utc(local, isdst_hint);
-    // Re-render from the resolved instant so the normalised fields describe
-    // the same wall clock the caller asked for even when the offset moved
-    // (the DST-transition cases), and so `tm_wday`/`tm_yday` stay consistent.
-    secs_to_local_tm(utc, t);
-    utc
+    let utc = resolve_local(&crate::tz::current(), wall_secs(t), t.tm_isdst);
+    secs_to_local_tm(utc, t).then_some(utc)
+}
+
+/// The UTC instant for wall time `local` (seconds since the epoch as if the
+/// wall clock were UTC) in `zone`, with `mktime`'s `tm_isdst` hint `isdst`,
+/// chosen as glibc 2.39's `mktime` chooses it:
+///
+/// - negative: the reading the zone makes consistent -- in the repeated
+///   autumn hour the earlier, in the vanished spring hour the standard-time
+///   reading, which lands just past the jump (`Zone::local_to_utc`);
+/// - in the vanished hour, zero or positive: the reading whose own state is
+///   the *other* kind, as glibc settles its oscillation there -- daylight
+///   time asked for gives the instant just before the jump, standard time
+///   the one just after;
+/// - otherwise, when the zone's state there is not the kind asked for: the
+///   offset of the nearest time that is, probing a week at a time out to
+///   about seven years either way; and with none, an hour's difference
+///   (`tm_isdst` 1 in a zone with no daylight time reads an hour earlier).
+#[allow(clippy::arithmetic_side_effects)]
+fn resolve_local(zone: &crate::tz::Zone, local: i64, isdst: i32) -> i64 {
+    // glibc's probe stride and bound: the shortest DST period in the tz
+    // database, and half its longest run of either kind plus a stride.
+    const STRIDE: i64 = 601_200;
+    const BOUND: i64 = 457_243_200 / 2 + STRIDE;
+    let (t, _) = zone.local_to_utc(local, -1);
+    if isdst < 0 {
+        return t;
+    }
+    let want_dst = isdst > 0;
+    let here = zone.lookup(t);
+    // `t`'s wall clock is not `local` only in the vanished hour.
+    if t + i64::from(here.gmtoff) != local {
+        let other = local - i64::from(here.gmtoff);
+        return if here.is_dst != want_dst { t } else { other };
+    }
+    if here.is_dst == want_dst {
+        return t;
+    }
+    let mut delta = STRIDE;
+    while delta < BOUND {
+        for probe in [t - delta, t + delta] {
+            let there = zone.lookup(probe);
+            if there.is_dst == want_dst {
+                return local - i64::from(there.gmtoff);
+            }
+        }
+        delta += STRIDE;
+    }
+    // No time of the kind asked for: +1 if standard time was wanted and the
+    // zone is on daylight time here, -1 the other way round.
+    let dst_difference = i64::from(!want_dst) - i64::from(!here.is_dst);
+    t + 3600 * dst_difference
 }
 
 /// Own archive member — gnulib replaces `timegm`. See string.rs's module header.
@@ -1015,25 +1146,35 @@ mod gnu_timegm {
     /// Convert broken-down **UTC** time to seconds since epoch.
     ///
     /// The zone-independent counterpart to `mktime`: the `Tm` is read as UTC
-    /// whatever `TZ` says.  (It used to be an alias for `mktime`, which was
-    /// harmless only while `mktime` itself was UTC-only.)
+    /// whatever `TZ` says, normalised in place, and given glibc's zone
+    /// fields for UTC (`GMT`). A year that does not fit `tm_year` is -1 with
+    /// `EOVERFLOW`, `*tm` untouched.
     #[cfg_attr(target_os = "none", unsafe(no_mangle))]
     pub extern "C" fn timegm(tm: *mut Tm) -> TimeT {
         if tm.is_null() {
             return -1;
         }
         let t = unsafe { &mut *tm };
-        let secs = tm_to_secs(t);
-        t.tm_isdst = 0;
-        t.tm_gmtoff = 0;
-        t.tm_zone = UTC_NAME.as_ptr().cast::<u8>();
+        let Some(secs) = tm_to_secs(t) else {
+            crate::errno::set_errno(crate::errno::EOVERFLOW);
+            return -1;
+        };
+        set_utc_zone(t);
         secs
     }
 }
 pub use gnu_timegm::timegm;
 
-/// The zone name UTC renderings report, independent of `TZ`.
-static UTC_NAME: &core::ffi::CStr = c"UTC";
+/// The zone name glibc's UTC renderings report -- `gmtime` and `timegm` --
+/// whatever `TZ` says.
+static UTC_NAME: &core::ffi::CStr = c"GMT";
+
+/// The zone fields of a UTC rendering.
+fn set_utc_zone(tm: &mut Tm) {
+    tm.tm_isdst = 0;
+    tm.tm_gmtoff = 0;
+    tm.tm_zone = UTC_NAME.as_ptr().cast::<u8>();
+}
 
 /// Convert broken-down local time to seconds since epoch.
 ///
@@ -1049,28 +1190,38 @@ pub extern "C" fn timelocal(tm: *mut Tm) -> TimeT {
 /// "Wed Jun 30 21:49:08 1993\n\0", in storage owned by the library and
 /// overwritten by the *calling thread's* next `asctime`/`ctime` (see
 /// [`crate::perthread`]; `asctime_r` is the reentrant form).
+///
+/// As glibc's: C's `"%.3s %.3s%3d %.2d:%.2d:%.2d %d\n"`, whatever the
+/// fields hold -- a name out of range is `???`, a number prints at its own
+/// width -- and so any year, where `asctime_r` is held to 26 bytes. NULL
+/// with `EINVAL` for a NULL `tm`, and with `EOVERFLOW` for a year past
+/// `INT_MAX`.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn asctime(tm: *const Tm) -> *const u8 {
     if tm.is_null() {
-        return c"??? ??? ?? ??:??:?? ????\n".as_ptr().cast::<u8>();
+        crate::errno::set_errno(crate::errno::EINVAL);
+        return core::ptr::null();
     }
-
+    // SAFETY: the caller's `struct tm`, checked non-null.
     let t = unsafe { &*tm };
-
     // SAFETY: `perthread::current()` is non-null and valid for this thread,
     // and no other thread holds a pointer into this block.  `t` may alias
     // the same block (`ctime` passes `localtime`'s result straight in), but
     // `format_asctime` reads `t` fully before writing the buffer, and the
     // two fields do not overlap.
     let buf = unsafe { &mut (*crate::perthread::current()).asctime };
-    let len = format_asctime(t, buf);
-    let _ = len; // We always null-terminate.
+    if format_asctime(t, buf).is_none() {
+        crate::errno::set_errno(crate::errno::EOVERFLOW);
+        return core::ptr::null();
+    }
     buf.as_ptr()
 }
 
 /// Convert time_t to string.
 ///
-/// Equivalent to `asctime(localtime(timep))`.
+/// Exactly `asctime(localtime(timep))`, as glibc defines it: a time whose
+/// year does not fit `tm_year` makes `localtime` NULL, and `asctime` of
+/// NULL is NULL with `EINVAL`.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn ctime(timep: *const TimeT) -> *const u8 {
     asctime(localtime(timep))
@@ -1088,6 +1239,9 @@ pub extern "C" fn ctime(timep: *const TimeT) -> *const u8 {
 /// # Safety
 ///
 /// Both pointers must be valid and non-null.
+///
+/// A year that does not fit `tm_year` is NULL with `EOVERFLOW`, and
+/// `*result` is left as it was.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub unsafe extern "C" fn gmtime_r(timep: *const TimeT, result: *mut Tm) -> *mut Tm {
     if timep.is_null() || result.is_null() {
@@ -1095,8 +1249,12 @@ pub unsafe extern "C" fn gmtime_r(timep: *const TimeT, result: *mut Tm) -> *mut 
     }
     let secs = unsafe { *timep };
     let tm = unsafe { &mut *result };
-    secs_to_tm(secs, tm);
-    result
+    if secs_to_tm(secs, tm) {
+        result
+    } else {
+        crate::errno::set_errno(crate::errno::EOVERFLOW);
+        core::ptr::null_mut()
+    }
 }
 
 /// Convert time_t to broken-down local time (reentrant), honouring `TZ`.
@@ -1104,6 +1262,9 @@ pub unsafe extern "C" fn gmtime_r(timep: *const TimeT, result: *mut Tm) -> *mut 
 /// # Safety
 ///
 /// Both pointers must be valid and non-null.
+///
+/// A year that does not fit `tm_year` is NULL with `EOVERFLOW`, and
+/// `*result` is left as it was.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub unsafe extern "C" fn localtime_r(timep: *const TimeT, result: *mut Tm) -> *mut Tm {
     if timep.is_null() || result.is_null() {
@@ -1111,14 +1272,21 @@ pub unsafe extern "C" fn localtime_r(timep: *const TimeT, result: *mut Tm) -> *m
     }
     let secs = unsafe { *timep };
     let tm = unsafe { &mut *result };
-    secs_to_local_tm(secs, tm);
-    result
+    if secs_to_local_tm(secs, tm) {
+        result
+    } else {
+        crate::errno::set_errno(crate::errno::EOVERFLOW);
+        core::ptr::null_mut()
+    }
 }
 
 /// Convert broken-down time to string (reentrant).
 ///
-/// Writes the result into the caller-supplied `buf` (must be at least
-/// 26 bytes).  Returns `buf` on success, null on error.
+/// `asctime`'s text into the caller's `buf`, which POSIX sizes at 26 bytes:
+/// text that does not fit them -- a year past 9999 or before -999, a field
+/// of more digits than it should have -- is NULL with `EOVERFLOW`, as in
+/// glibc, rather than an overrun. A NULL `tm` or `buf` is NULL with
+/// `EINVAL`.
 ///
 /// # Safety
 ///
@@ -1126,31 +1294,27 @@ pub unsafe extern "C" fn localtime_r(timep: *const TimeT, result: *mut Tm) -> *m
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub unsafe extern "C" fn asctime_r(tm: *const Tm, buf: *mut u8) -> *mut u8 {
     if tm.is_null() || buf.is_null() {
+        crate::errno::set_errno(crate::errno::EINVAL);
         return core::ptr::null_mut();
     }
+    // SAFETY: the caller's `struct tm`, checked non-null.
     let t = unsafe { &*tm };
-    // Write into a local buffer then copy to user buf.
-    // format_asctime produces exactly 25 chars ("Thu Jan  1 00:00:00 1970\n")
-    // and null-terminates, so we copy at most 25 content bytes + 1 null = 26 bytes.
-    let mut tmp = [0u8; 32];
-    let len = format_asctime(t, &mut tmp);
-    // Cap content to 25 bytes so that content + null fits in the
-    // 26-byte minimum buffer guaranteed by POSIX.
-    let copy_len = if len > 25 { 25 } else { len };
-    let mut i: usize = 0;
-    while i < copy_len {
-        // SAFETY: i < copy_len <= 25 < 32 = tmp.len(), so this is in-bounds.
-        let byte = *tmp.get(i).unwrap_or(&0);
-        unsafe {
-            *buf.add(i) = byte;
+    let mut text = [0u8; ASCTIME_MAX];
+    match format_asctime(t, &mut text) {
+        Some(len) if len < ASCTIME_R_SIZE => {
+            // The text and its NUL, at most 26 bytes.
+            let with_nul = text.get(..=len).unwrap_or(&[]);
+            // SAFETY: `buf` holds 26 bytes (this function's contract), which
+            // `with_nul` does not exceed; `text` is a local, so the two
+            // cannot overlap.
+            unsafe { core::ptr::copy_nonoverlapping(with_nul.as_ptr(), buf, with_nul.len()) };
+            buf
         }
-        i = i.wrapping_add(1);
+        _ => {
+            crate::errno::set_errno(crate::errno::EOVERFLOW);
+            core::ptr::null_mut()
+        }
     }
-    // Null-terminate (at most at index 25 = 26th byte).
-    unsafe {
-        *buf.add(i) = 0;
-    }
-    buf
 }
 
 /// Convert time_t to string (reentrant).
@@ -1168,11 +1332,12 @@ pub unsafe extern "C" fn ctime_r(timep: *const TimeT, buf: *mut u8) -> *mut u8 {
     let mut result = Tm::ZERO;
     // `ctime` is defined as `asctime(localtime(t))`, so the reentrant form
     // must use `localtime_r` too — it used `gmtime_r`, which was invisible
-    // only while the two were the same function.
-    if unsafe { localtime_r(timep, &raw mut result) }.is_null() {
-        return core::ptr::null_mut();
-    }
-    unsafe { asctime_r(&raw const result, buf) }
+    // only while the two were the same function. A NULL from `localtime_r`
+    // goes on to `asctime_r`, which makes it `EINVAL`, as glibc's does.
+    // SAFETY: this function's contract, forwarded.
+    let tm = unsafe { localtime_r(timep, &raw mut result) };
+    // SAFETY: `tm` is NULL or `result`, a local `Tm`.
+    unsafe { asctime_r(tm, buf) }
 }
 
 /// Format time according to a format string.
@@ -1475,9 +1640,11 @@ pub unsafe extern "C" fn strftime(
 
             // --- GNU extension ---
             b's' => {
-                // Seconds since epoch (GNU extension).
+                // Seconds since epoch (GNU extension): `mktime` of a copy,
+                // the local time it names -- and so its -1 when the year
+                // overflows, as glibc prints it.
                 let mut tmp = unsafe { *tm };
-                let epoch = tm_to_secs(&mut tmp);
+                let epoch = mktime(&raw mut tmp);
                 pos = write_i64(buf, limit, pos, epoch);
             }
 
@@ -1511,9 +1678,6 @@ pub unsafe extern "C" fn strftime(
 // ---------------------------------------------------------------------------
 // Time conversion helpers
 // ---------------------------------------------------------------------------
-
-/// Days in each month (non-leap year).
-const DAYS_IN_MONTH: [i32; 12] = [31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31];
 
 /// Check if a year is a leap year.
 #[inline]
@@ -1583,229 +1747,172 @@ fn iso_week_date(tm: &Tm) -> (i32, i32) {
     (year, week)
 }
 
-/// Days in a given month (1-indexed month, with leap year check).
-#[inline]
-fn days_in_month(mon: i32, year: i32) -> i32 {
-    if mon == 1 && is_leap(year) {
-        29
-    } else {
-        DAYS_IN_MONTH.get(mon as usize).copied().unwrap_or(30)
+/// A broken-down time with every field in range, computed before anything
+/// is stored: what `gmtime` and `localtime` write.
+struct Broken {
+    sec: i32,
+    min: i32,
+    hour: i32,
+    mday: i32,
+    mon: i32,
+    year: i32,
+    wday: i32,
+    yday: i32,
+}
+
+impl Broken {
+    /// The instant `secs` seconds after the epoch, at `gmtoff` seconds east
+    /// of UTC; `None` when its year does not fit `tm_year` -- glibc's
+    /// `EOVERFLOW`, at years past about 2^31. In closed form, through
+    /// `tzrules`' calendar, so an instant 292 billion years out costs what
+    /// one in 1970 does.
+    #[allow(clippy::arithmetic_side_effects, clippy::cast_possible_truncation)]
+    fn of(secs: i64, gmtoff: i64) -> Option<Self> {
+        // `|gmtoff|` is under a day, so the sum cannot overflow.
+        let rem = secs.rem_euclid(86_400) + gmtoff;
+        let days = secs.div_euclid(86_400) + rem.div_euclid(86_400);
+        let rem = rem.rem_euclid(86_400);
+        let (y, m, d) = tzrules::civil_from_days(days);
+        let year = i32::try_from(y - 1900).ok()?;
+        let yday = days - tzrules::days_from_civil(y, 1, 1);
+        // Each of these is in range by construction: `rem < 86400`,
+        // `m` in 1..=12, `d` in 1..=31, `yday` in 0..=365.
+        Some(Self {
+            sec: (rem % 60) as i32,
+            min: (rem / 60 % 60) as i32,
+            hour: (rem / 3600) as i32,
+            mday: d as i32,
+            mon: m as i32 - 1,
+            year,
+            wday: (days + 4).rem_euclid(7) as i32,
+            yday: yday as i32,
+        })
+    }
+
+    /// Store the eight calendar fields; the zone fields are the caller's.
+    fn store(&self, tm: &mut Tm) {
+        tm.tm_sec = self.sec;
+        tm.tm_min = self.min;
+        tm.tm_hour = self.hour;
+        tm.tm_mday = self.mday;
+        tm.tm_mon = self.mon;
+        tm.tm_year = self.year;
+        tm.tm_wday = self.wday;
+        tm.tm_yday = self.yday;
     }
 }
 
-/// Convert seconds since epoch (1970-01-01 00:00:00 UTC) to broken-down time.
-///
-/// Handles both positive timestamps (post-1970) and negative ones
-/// (pre-1970) correctly.  Uses Euclidean division (always positive
-/// remainders) for time-of-day decomposition.
+/// Convert seconds since epoch (1970-01-01 00:00:00 UTC) to broken-down UTC
+/// time, with glibc's zone fields for UTC; `false`, with `tm` untouched, when
+/// the year does not fit `tm_year`.
+fn secs_to_tm(secs: TimeT, tm: &mut Tm) -> bool {
+    let Some(b) = Broken::of(secs, 0) else {
+        return false;
+    };
+    b.store(tm);
+    set_utc_zone(tm);
+    true
+}
+
+/// `tm`'s wall clock read as UTC, in seconds since the epoch: the fields
+/// taken at face value, whatever their range, and carried -- a 13th month
+/// is the next January, a 0th day the last of the month before. No field
+/// of a `Tm` can overflow this: the year is within 2^31 of zero, so the
+/// days within 2^40 and the seconds within 2^57.
 #[allow(clippy::arithmetic_side_effects)]
-fn secs_to_tm(secs: TimeT, tm: &mut Tm) {
-    // Use Euclidean division to always get non-negative remainders.
-    // Rust's % truncates toward zero: -1 % 60 = -1, but we need 59.
-    let mut rem = secs;
-
-    // Seconds.
-    tm.tm_sec = (rem.rem_euclid(60)) as i32;
-    rem = rem.div_euclid(60);
-    // Minutes.
-    tm.tm_min = (rem.rem_euclid(60)) as i32;
-    rem = rem.div_euclid(60);
-    // Hours.
-    tm.tm_hour = (rem.rem_euclid(24)) as i32;
-    rem = rem.div_euclid(24);
-
-    // rem is now days since epoch (can be negative for pre-1970).
-    // 1970-01-01 was a Thursday (wday=4).
-    tm.tm_wday = ((rem + 4).rem_euclid(7)) as i32;
-
-    // Compute year and day-of-year.
-    let mut year: i32 = 1970;
-    if rem >= 0 {
-        // Post-epoch: count forward.
-        loop {
-            let days_this_year: i64 = if is_leap(year) { 366 } else { 365 };
-            if rem < days_this_year {
-                break;
-            }
-            rem -= days_this_year;
-            year += 1;
-        }
-    } else {
-        // Pre-epoch: count backward.
-        loop {
-            year -= 1;
-            let days_this_year: i64 = if is_leap(year) { 366 } else { 365 };
-            rem += days_this_year;
-            if rem >= 0 {
-                break;
-            }
-        }
-    }
-
-    tm.tm_year = year - 1900;
-    tm.tm_yday = rem as i32;
-
-    // Compute month and day.
-    let mut mon: i32 = 0;
-    let mut remaining_days = rem as i32;
-    while mon < 11 {
-        let dim = days_in_month(mon, year);
-        if remaining_days < dim {
-            break;
-        }
-        remaining_days -= dim;
-        mon += 1;
-    }
-
-    tm.tm_mon = mon;
-    tm.tm_mday = remaining_days + 1;
-    // This renders a UTC instant, so the zone fields describe UTC. A local
-    // caller (`secs_to_local_tm`) overwrites all three afterwards; leaving
-    // them stale here would make `%z`/`%Z` report the previous conversion's
-    // zone, which is worse than reporting UTC.
-    tm.tm_isdst = 0;
-    tm.tm_gmtoff = 0;
-    tm.tm_zone = UTC_NAME.as_ptr().cast::<u8>();
+fn wall_secs(tm: &Tm) -> i64 {
+    let mon = i64::from(tm.tm_mon);
+    let year = i64::from(tm.tm_year) + 1900 + mon.div_euclid(12);
+    // `rem_euclid(12) + 1` is 1..=12, which `days_from_civil` takes as it is.
+    let month = u32::try_from(mon.rem_euclid(12) + 1).unwrap_or(1);
+    let days = tzrules::days_from_civil(year, month, 1) + i64::from(tm.tm_mday) - 1;
+    days * 86_400 + i64::from(tm.tm_hour) * 3600 + i64::from(tm.tm_min) * 60 + i64::from(tm.tm_sec)
 }
 
-/// Convert broken-down time to seconds since epoch.
-///
-/// Per POSIX, `mktime` normalizes all fields of the `Tm` structure:
-/// - Seconds overflow into minutes, minutes into hours, etc.
-/// - Negative values borrow from the next-higher unit.
-/// - Month values > 11 or < 0 adjust the year.
-/// - After normalization, `tm_wday` and `tm_yday` are set.
-#[allow(clippy::arithmetic_side_effects)]
-fn tm_to_secs(tm: &mut Tm) -> TimeT {
-    // --- Normalize time-of-day fields (bottom up) ---
-
-    // Seconds → minutes.
-    let total_sec = i64::from(tm.tm_sec);
-    tm.tm_sec = total_sec.rem_euclid(60) as i32;
-    let carry_min = total_sec.div_euclid(60);
-
-    // Minutes → hours.
-    let total_min = i64::from(tm.tm_min) + carry_min;
-    tm.tm_min = total_min.rem_euclid(60) as i32;
-    let carry_hour = total_min.div_euclid(60);
-
-    // Hours → days.
-    let total_hour = i64::from(tm.tm_hour) + carry_hour;
-    tm.tm_hour = total_hour.rem_euclid(24) as i32;
-    let carry_day = total_hour.div_euclid(24);
-
-    // Adjust mday with carry from hours.
-    let mut mday = i64::from(tm.tm_mday) + carry_day;
-
-    // --- Normalize month → year ---
-    let mon_raw = i64::from(tm.tm_mon);
-    let norm_mon = mon_raw.rem_euclid(12) as i32;
-    let carry_year = mon_raw.div_euclid(12) as i32;
-    tm.tm_mon = norm_mon;
-    tm.tm_year += carry_year;
-
-    let mut year = tm.tm_year + 1900;
-
-    // --- Normalize day-of-month into month/year ---
-    // Handle overflow (mday > days-in-month) and underflow (mday < 1).
-    // Loop because adjusting the month may change the days-in-month
-    // (e.g., stepping from March into February changes the limit).
-    loop {
-        let dim = i64::from(days_in_month(tm.tm_mon, year));
-        if mday > dim {
-            mday -= dim;
-            tm.tm_mon += 1;
-            if tm.tm_mon > 11 {
-                tm.tm_mon = 0;
-                tm.tm_year += 1;
-                year += 1;
-            }
-        } else if mday < 1 {
-            tm.tm_mon -= 1;
-            if tm.tm_mon < 0 {
-                tm.tm_mon = 11;
-                tm.tm_year -= 1;
-                year -= 1;
-            }
-            mday += i64::from(days_in_month(tm.tm_mon, year));
-        } else {
-            break;
-        }
-    }
-
-    tm.tm_mday = mday as i32;
-
-    // --- Compute total days from epoch ---
-    let mut days: i64 = 0;
-    if year > 1970 {
-        let mut y = 1970;
-        while y < year {
-            days += if is_leap(y) { 366 } else { 365 };
-            y += 1;
-        }
-    } else if year < 1970 {
-        let mut y = 1969;
-        while y >= year {
-            days -= if is_leap(y) { 366 } else { 365 };
-            y -= 1;
-        }
-    }
-
-    // Add days for months.
-    let mut mon = 0;
-    while mon < tm.tm_mon {
-        days += i64::from(days_in_month(mon, year));
-        mon += 1;
-    }
-
-    // Day of month (1-based).
-    days += i64::from(tm.tm_mday - 1);
-
-    // Update tm_yday.
-    tm.tm_yday = 0;
-    let mut m2 = 0;
-    while m2 < tm.tm_mon {
-        tm.tm_yday += days_in_month(m2, year);
-        m2 += 1;
-    }
-    tm.tm_yday += tm.tm_mday - 1;
-
-    // Update tm_wday: 1970-01-01 was Thursday (wday=4).
-    tm.tm_wday = ((days + 4).rem_euclid(7)) as i32;
-
-    days * 86400 + i64::from(tm.tm_hour) * 3600 + i64::from(tm.tm_min) * 60 + i64::from(tm.tm_sec)
+/// Convert broken-down time, read as UTC, to seconds since epoch, and
+/// normalise its eight calendar fields to describe that instant -- `timegm`
+/// less the zone fields. `None`, with `tm` untouched, when the normalised
+/// year does not fit `tm_year`.
+fn tm_to_secs(tm: &mut Tm) -> Option<TimeT> {
+    let secs = wall_secs(tm);
+    Broken::of(secs, 0)?.store(tm);
+    Some(secs)
 }
 
-/// Format asctime output into buffer.
-fn format_asctime(tm: &Tm, buf: &mut [u8; 32]) -> usize {
-    let mut pos: usize = 0;
-    let limit = buf.len().wrapping_sub(1);
+/// Size of `asctime`'s per-thread buffer: its longest text, every field at
+/// an `int`'s widest, is 67 bytes and the NUL.
+pub(crate) const ASCTIME_MAX: usize = 72;
 
-    pos = write_str(buf.as_mut_ptr(), limit, pos, wday_abbr(tm.tm_wday));
-    pos = write_char(buf.as_mut_ptr(), limit, pos, b' ');
-    pos = write_str(buf.as_mut_ptr(), limit, pos, mon_abbr(tm.tm_mon));
-    pos = write_char(buf.as_mut_ptr(), limit, pos, b' ');
-    // POSIX: asctime uses space-padded day (" 1" not "01").
-    pos = write_space_dec2(buf.as_mut_ptr(), limit, pos, tm.tm_mday);
-    pos = write_char(buf.as_mut_ptr(), limit, pos, b' ');
-    pos = write_dec2(buf.as_mut_ptr(), limit, pos, tm.tm_hour);
-    pos = write_char(buf.as_mut_ptr(), limit, pos, b':');
-    pos = write_dec2(buf.as_mut_ptr(), limit, pos, tm.tm_min);
-    pos = write_char(buf.as_mut_ptr(), limit, pos, b':');
-    pos = write_dec2(buf.as_mut_ptr(), limit, pos, tm.tm_sec);
-    pos = write_char(buf.as_mut_ptr(), limit, pos, b' ');
-    pos = write_dec4(buf.as_mut_ptr(), limit, pos, tm.tm_year.wrapping_add(1900));
-    pos = write_char(buf.as_mut_ptr(), limit, pos, b'\n');
+/// The buffer POSIX gives `asctime_r`: the 25 characters of a four-digit
+/// year and the NUL.
+const ASCTIME_R_SIZE: usize = 26;
 
-    if pos < buf.len() {
-        if let Some(slot) = buf.get_mut(pos) {
-            *slot = 0;
+/// `n` as C's `%W.Pd` writes it -- at least `precision` digits, the sign,
+/// then spaces to `width` -- at `pos` in `out`; the new position.
+#[allow(clippy::arithmetic_side_effects, clippy::cast_possible_truncation)]
+fn put_int(out: &mut [u8], mut pos: usize, n: i64, width: usize, precision: usize) -> usize {
+    let mut digits = [0u8; 20];
+    let mut len = 0;
+    let mut v = n.unsigned_abs();
+    while v > 0 || len < precision.max(1) {
+        if let Some(slot) = digits.get_mut(len) {
+            *slot = b'0' + (v % 10) as u8;
         }
-    } else if let Some(slot) = buf.last_mut() {
-        *slot = 0;
+        v /= 10;
+        len += 1;
     }
-
+    let body = len + usize::from(n < 0);
+    for _ in body..width {
+        if let Some(slot) = out.get_mut(pos) {
+            *slot = b' ';
+        }
+        pos += 1;
+    }
+    if n < 0 {
+        if let Some(slot) = out.get_mut(pos) {
+            *slot = b'-';
+        }
+        pos += 1;
+    }
+    for i in (0..len).rev() {
+        if let (Some(slot), Some(&d)) = (out.get_mut(pos), digits.get(i)) {
+            *slot = d;
+        }
+        pos += 1;
+    }
     pos
+}
+
+/// `asctime`'s text for `tm` into `out`, NUL-terminated -- C's
+/// `"%.3s %.3s%3d %.2d:%.2d:%.2d %d\n"`, glibc's -- and its length; `None`
+/// when `tm_year + 1900` overflows an `int`, glibc's `EOVERFLOW`.
+#[allow(clippy::arithmetic_side_effects)]
+fn format_asctime(tm: &Tm, out: &mut [u8; ASCTIME_MAX]) -> Option<usize> {
+    let year = tm.tm_year.checked_add(1900)?;
+    let mut pos = 0;
+    let put = |out: &mut [u8; ASCTIME_MAX], bytes: &[u8], pos: &mut usize| {
+        for &b in bytes {
+            if let Some(slot) = out.get_mut(*pos) {
+                *slot = b;
+            }
+            *pos += 1;
+        }
+    };
+    put(out, wday_abbr(tm.tm_wday), &mut pos);
+    put(out, b" ", &mut pos);
+    put(out, mon_abbr(tm.tm_mon), &mut pos);
+    pos = put_int(out, pos, i64::from(tm.tm_mday), 3, 1);
+    put(out, b" ", &mut pos);
+    pos = put_int(out, pos, i64::from(tm.tm_hour), 0, 2);
+    put(out, b":", &mut pos);
+    pos = put_int(out, pos, i64::from(tm.tm_min), 0, 2);
+    put(out, b":", &mut pos);
+    pos = put_int(out, pos, i64::from(tm.tm_sec), 0, 2);
+    put(out, b" ", &mut pos);
+    pos = put_int(out, pos, i64::from(year), 0, 1);
+    put(out, b"\n\0", &mut pos);
+    // The NUL is not part of the length.
+    Some(pos - 1)
 }
 
 // ---------------------------------------------------------------------------
@@ -2032,448 +2139,900 @@ pub extern "C" fn clock() -> i64 {
 mod gnu_strptime {
     use super::*;
 
-    /// Parse a time string according to a format.
+    /// Parse a time string according to a format -- the inverse of
+    /// `strftime`, as glibc 2.39's does it in the C locale.
     ///
-    /// Inverse of `strftime`.  Reads from `buf` according to `format`,
-    /// filling fields in `tm`.  Returns a pointer to the first character
-    /// not consumed, or NULL if the input doesn't match.
+    /// Every conversion glibc knows, with its rules: a number skips white
+    /// space first and reads at most its field's digits, stopping early
+    /// once one more digit would pass the field's maximum (`%m` of "23" is
+    /// 2, "3" left over), and must land in range; names (`%a %A %b %B %h`)
+    /// match whole or abbreviated, in any case, with no space skipped; white
+    /// space in the format matches any run of it, none included; `%c %D %F
+    /// %r %R %T %x %X` parse their C-locale expansions all or nothing;
+    /// strftime's flags and field widths are accepted and mean nothing.
     ///
-    /// Supports: `%Y`, `%C`, `%y`, `%m`, `%d`, `%e`, `%H`, `%I`, `%M`,
-    /// `%S`, `%j`, `%w`, `%u`, `%p`, `%n`, `%t`, `%%`.
+    /// Fields are stored as they parse, so a call that fails part-way leaves
+    /// the earlier ones written, as glibc's does. After a whole match, what
+    /// the parse implies is filled in: `%I` with `%p` makes a 24-hour hour,
+    /// `%C` sets the century of a `%y` year (or makes the year on its own),
+    /// a date sets `tm_wday` and `tm_yday`, a day of the year sets the month
+    /// and day, and a week number (`%U` or `%W`) with a weekday sets the
+    /// date. `%s` reads seconds since the epoch into local time.
+    ///
+    /// The `E` and `O` modifiers change nothing in the C locale, which has no
+    /// eras and no alternative digits, and here they do not. glibc's do:
+    /// its `%Ey` reads a second number after the first, and every `%O`
+    /// conversion after the first in a format fails
+    /// (`posix/tools/oracle/strptime_harness.py`, and the test that replays
+    /// it).
     ///
     /// # Safety
     ///
     /// `buf` and `format` must be valid null-terminated strings.
     /// `tm` must point to a valid `Tm`.
     #[cfg_attr(target_os = "none", unsafe(no_mangle))]
-    #[allow(clippy::arithmetic_side_effects, clippy::too_many_lines)]
     pub unsafe extern "C" fn strptime(buf: *const u8, format: *const u8, tm: *mut Tm) -> *const u8 {
-        if buf.is_null() || format.is_null() || tm.is_null() {
-            return core::ptr::null();
-        }
-
-        let mut bi: usize = 0; // Index into buf.
-        let mut fi: usize = 0; // Index into format.
-
-        loop {
-            let fc = unsafe { *format.add(fi) };
-            if fc == 0 {
-                // End of format — success. Return pointer to remaining input.
-                return unsafe { buf.add(bi) };
-            }
-
-            if fc == b'%' {
-                fi = fi.wrapping_add(1);
-                let spec = unsafe { *format.add(fi) };
-                if spec == 0 {
-                    return core::ptr::null();
-                }
-                fi = fi.wrapping_add(1);
-
-                match spec {
-                    b'Y' => {
-                        // 4-digit year.
-                        let (val, consumed) = parse_int(buf, bi, 4);
-                        if consumed == 0 {
-                            return core::ptr::null();
-                        }
-                        unsafe {
-                            (*tm).tm_year = val - 1900;
-                        }
-                        bi = bi.wrapping_add(consumed);
-                    }
-                    b'C' => {
-                        // Century (2 digits).  Sets year = century*100 + (year%100).
-                        let (val, consumed) = parse_int(buf, bi, 2);
-                        if consumed == 0 {
-                            return core::ptr::null();
-                        }
-                        unsafe {
-                            let cur_y2 = ((*tm).tm_year.wrapping_add(1900)) % 100;
-                            (*tm).tm_year = val
-                                .wrapping_mul(100)
-                                .wrapping_add(cur_y2)
-                                .wrapping_sub(1900);
-                        }
-                        bi = bi.wrapping_add(consumed);
-                    }
-                    b'y' => {
-                        // 2-digit year. 69-99 → 1969-1999, 00-68 → 2000-2068.
-                        let (val, consumed) = parse_int(buf, bi, 2);
-                        if consumed == 0 {
-                            return core::ptr::null();
-                        }
-                        let full_year = if val >= 69 {
-                            val.wrapping_add(1900)
-                        } else {
-                            val.wrapping_add(2000)
-                        };
-                        unsafe {
-                            (*tm).tm_year = full_year.wrapping_sub(1900);
-                        }
-                        bi = bi.wrapping_add(consumed);
-                    }
-                    b'm' => {
-                        // Month 01-12.
-                        let (val, consumed) = parse_int(buf, bi, 2);
-                        if consumed == 0 {
-                            return core::ptr::null();
-                        }
-                        unsafe {
-                            (*tm).tm_mon = val - 1;
-                        }
-                        bi = bi.wrapping_add(consumed);
-                    }
-                    b'd' | b'e' => {
-                        // Day 01-31 (or space-padded for %e).
-                        // Skip leading space for %e.
-                        if spec == b'e' {
-                            while (unsafe { *buf.add(bi) }) == b' ' {
-                                bi = bi.wrapping_add(1);
-                            }
-                        }
-                        let (val, consumed) = parse_int(buf, bi, 2);
-                        if consumed == 0 {
-                            return core::ptr::null();
-                        }
-                        unsafe {
-                            (*tm).tm_mday = val;
-                        }
-                        bi = bi.wrapping_add(consumed);
-                    }
-                    b'H' | b'k' => {
-                        // Hour 00-23 (%k allows space-padded).
-                        if spec == b'k' {
-                            while (unsafe { *buf.add(bi) }) == b' ' {
-                                bi = bi.wrapping_add(1);
-                            }
-                        }
-                        let (val, consumed) = parse_int(buf, bi, 2);
-                        if consumed == 0 {
-                            return core::ptr::null();
-                        }
-                        unsafe {
-                            (*tm).tm_hour = val;
-                        }
-                        bi = bi.wrapping_add(consumed);
-                    }
-                    b'I' | b'l' => {
-                        // Hour 01-12 (12-hour clock).
-                        if spec == b'l' {
-                            while (unsafe { *buf.add(bi) }) == b' ' {
-                                bi = bi.wrapping_add(1);
-                            }
-                        }
-                        let (val, consumed) = parse_int(buf, bi, 2);
-                        if consumed == 0 {
-                            return core::ptr::null();
-                        }
-                        // Store as-is; %p adjusts for AM/PM later.
-                        unsafe {
-                            (*tm).tm_hour = val;
-                        }
-                        bi = bi.wrapping_add(consumed);
-                    }
-                    b'M' => {
-                        // Minute 00-59.
-                        let (val, consumed) = parse_int(buf, bi, 2);
-                        if consumed == 0 {
-                            return core::ptr::null();
-                        }
-                        unsafe {
-                            (*tm).tm_min = val;
-                        }
-                        bi = bi.wrapping_add(consumed);
-                    }
-                    b'S' => {
-                        // Second 00-60.
-                        let (val, consumed) = parse_int(buf, bi, 2);
-                        if consumed == 0 {
-                            return core::ptr::null();
-                        }
-                        unsafe {
-                            (*tm).tm_sec = val;
-                        }
-                        bi = bi.wrapping_add(consumed);
-                    }
-                    b'j' => {
-                        // Day of year 001-366.
-                        let (val, consumed) = parse_int(buf, bi, 3);
-                        if consumed == 0 {
-                            return core::ptr::null();
-                        }
-                        unsafe {
-                            (*tm).tm_yday = val - 1;
-                        }
-                        bi = bi.wrapping_add(consumed);
-                    }
-                    b'w' => {
-                        // Weekday 0-6 (Sunday=0).
-                        let (val, consumed) = parse_int(buf, bi, 1);
-                        if consumed == 0 {
-                            return core::ptr::null();
-                        }
-                        unsafe {
-                            (*tm).tm_wday = val;
-                        }
-                        bi = bi.wrapping_add(consumed);
-                    }
-                    b'u' => {
-                        // ISO weekday 1-7 (Monday=1).
-                        let (val, consumed) = parse_int(buf, bi, 1);
-                        if consumed == 0 {
-                            return core::ptr::null();
-                        }
-                        unsafe {
-                            (*tm).tm_wday = if val == 7 { 0 } else { val };
-                        }
-                        bi = bi.wrapping_add(consumed);
-                    }
-                    b'p' | b'P' => {
-                        // AM/PM (or am/pm). Adjusts tm_hour for 12-hour input.
-                        let c1 = unsafe { *buf.add(bi) };
-                        let c2 = unsafe { *buf.add(bi.wrapping_add(1)) };
-                        let afternoon = (c1 == b'P' || c1 == b'p') && (c2 == b'M' || c2 == b'm');
-                        let morning = (c1 == b'A' || c1 == b'a') && (c2 == b'M' || c2 == b'm');
-                        if !afternoon && !morning {
-                            return core::ptr::null();
-                        }
-                        unsafe {
-                            if afternoon && (*tm).tm_hour < 12 {
-                                (*tm).tm_hour = (*tm).tm_hour.wrapping_add(12);
-                            } else if morning && (*tm).tm_hour == 12 {
-                                (*tm).tm_hour = 0;
-                            }
-                        }
-                        bi = bi.wrapping_add(2);
-                    }
-                    b'b' | b'B' | b'h' => {
-                        // Month name (abbreviated or full).
-                        if let Some((mon, consumed)) = match_month_name(buf, bi) {
-                            unsafe {
-                                (*tm).tm_mon = mon;
-                            }
-                            bi = bi.wrapping_add(consumed);
-                        } else {
-                            return core::ptr::null();
-                        }
-                    }
-                    b'a' | b'A' => {
-                        // Weekday name (abbreviated or full).
-                        if let Some((wday, consumed)) = match_wday_name(buf, bi) {
-                            unsafe {
-                                (*tm).tm_wday = wday;
-                            }
-                            bi = bi.wrapping_add(consumed);
-                        } else {
-                            return core::ptr::null();
-                        }
-                    }
-                    b'V' => {
-                        // ISO 8601 week number (01-53) — informational only,
-                        // we parse the digits but don't derive date fields from
-                        // the week number alone (would need %G too).
-                        let (_, consumed) = parse_int(buf, bi, 2);
-                        if consumed == 0 {
-                            return core::ptr::null();
-                        }
-                        bi = bi.wrapping_add(consumed);
-                    }
-                    b'G' => {
-                        // ISO 8601 week-based year — treat as regular year.
-                        let (val, consumed) = parse_int(buf, bi, 4);
-                        if consumed == 0 {
-                            return core::ptr::null();
-                        }
-                        unsafe {
-                            (*tm).tm_year = val - 1900;
-                        }
-                        bi = bi.wrapping_add(consumed);
-                    }
-                    b'g' => {
-                        // ISO 8601 week-based year (2-digit).
-                        let (val, consumed) = parse_int(buf, bi, 2);
-                        if consumed == 0 {
-                            return core::ptr::null();
-                        }
-                        let full_year = if val >= 69 {
-                            val.wrapping_add(1900)
-                        } else {
-                            val.wrapping_add(2000)
-                        };
-                        unsafe {
-                            (*tm).tm_year = full_year.wrapping_sub(1900);
-                        }
-                        bi = bi.wrapping_add(consumed);
-                    }
-                    b'z' => {
-                        // Timezone offset (`+HHMM` or `-HHMM`), recorded in
-                        // `tm_gmtoff` the way glibc's strptime does — discarding
-                        // it would silently drop the one piece of zone
-                        // information the input actually carried.
-                        let sign = unsafe { *buf.add(bi) };
-                        if sign != b'+' && sign != b'-' {
-                            return core::ptr::null();
-                        }
-                        bi = bi.wrapping_add(1);
-                        let (val, consumed) = parse_int(buf, bi, 4);
-                        if consumed < 2 {
-                            return core::ptr::null();
-                        }
-                        // Two digits mean whole hours; four mean `hhmm`.
-                        let secs = if consumed >= 4 {
-                            i64::from(val / 100) * 3600 + i64::from(val % 100) * 60
-                        } else {
-                            i64::from(val) * 3600
-                        };
-                        unsafe {
-                            (*tm).tm_gmtoff = if sign == b'-' { -secs } else { secs };
-                        }
-                        bi = bi.wrapping_add(consumed);
-                    }
-                    b'Z' => {
-                        // Timezone abbreviation — skip alphabetic chars.
-                        while (unsafe { *buf.add(bi) }).is_ascii_alphabetic() {
-                            bi = bi.wrapping_add(1);
-                        }
-                    }
-                    b'n' | b't' => {
-                        // Skip any whitespace.
-                        while (unsafe { *buf.add(bi) }) == b' '
-                            || (unsafe { *buf.add(bi) }) == b'\t'
-                        {
-                            bi = bi.wrapping_add(1);
-                        }
-                    }
-                    b'%' => {
-                        // Literal %.
-                        if unsafe { *buf.add(bi) } != b'%' {
-                            return core::ptr::null();
-                        }
-                        bi = bi.wrapping_add(1);
-                    }
-                    _ => {
-                        // Unknown specifier — fail.
-                        return core::ptr::null();
-                    }
-                }
-            } else if fc == b' ' || fc == b'\t' {
-                // Whitespace in format matches any amount of whitespace in buf.
-                while (unsafe { *buf.add(bi) }) == b' ' || (unsafe { *buf.add(bi) }) == b'\t' {
-                    bi = bi.wrapping_add(1);
-                }
-                fi = fi.wrapping_add(1);
-            } else {
-                // Literal character — must match.
-                if unsafe { *buf.add(bi) } != fc {
-                    return core::ptr::null();
-                }
-                bi = bi.wrapping_add(1);
-                fi = fi.wrapping_add(1);
-            }
-        }
+        // SAFETY: this function's contract, which is the parse's.
+        unsafe { strptime_in_c_locale(buf, format, tm) }
     }
 }
 pub use gnu_strptime::strptime;
 
-/// Parse up to `max_digits` decimal digits from `buf` starting at offset `off`.
+/// What [`strptime`] and [`strptime_l`] do: parse `buf` by `format` into
+/// `*tm`, in the C locale, returning the end of what matched or NULL.
 ///
-/// Returns (value, number_of_digits_consumed).
+/// Out here rather than in `gnu_strptime` so that that archive member
+/// defines `strptime` alone: a program that brings its own `strptime`, as
+/// gnulib's do, then declines it and still has [`strptime_l`]
+/// (`scripts/check-libc-shape.py`, which found `strptime_l` beside it).
+///
+/// # Safety
+///
+/// As [`strptime`].
+unsafe fn strptime_in_c_locale(buf: *const u8, format: *const u8, tm: *mut Tm) -> *const u8 {
+    if buf.is_null() || format.is_null() || tm.is_null() {
+        return core::ptr::null();
+    }
+    // SAFETY: the caller's NUL-terminated format.
+    let fmt = unsafe { core::ffi::CStr::from_ptr(format.cast()) }.to_bytes();
+    // SAFETY: the caller's `struct tm`, checked non-null.
+    let t = unsafe { &mut *tm };
+    let input = Input(buf);
+    let mut state = Parse::default();
+    let Some(end) = parse(&input, 0, fmt, t, &mut state) else {
+        return core::ptr::null();
+    };
+    state.finish(t);
+    // SAFETY: `end` is within the input: the parse only moves past bytes it
+    // has read, and never past the terminator.
+    unsafe { buf.add(end) }
+}
+
+/// `strptime_l` -- [`strptime`] in a locale, which is always C's here
+/// (`locale.rs`).
+///
+/// # Safety
+///
+/// As [`strptime`].
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub unsafe extern "C" fn strptime_l(
+    buf: *const u8,
+    format: *const u8,
+    tm: *mut Tm,
+    _loc: crate::locale::LocaleT,
+) -> *const u8 {
+    // SAFETY: this function's contract.
+    unsafe { strptime_in_c_locale(buf, format, tm) }
+}
+
+/// The input of a `strptime` parse: a NUL-terminated string, read a byte
+/// at a time and never past its terminator -- every step forward is over a
+/// byte already read and found not to be NUL.
+struct Input(*const u8);
+
+impl Input {
+    /// The byte at `i`, which must not be past the terminator.
+    fn at(&self, i: usize) -> u8 {
+        // SAFETY: the invariant above: `i` is at most the terminator's index.
+        unsafe { *self.0.add(i) }
+    }
+
+    /// Past any white space at `pos`.
+    fn skip_space(&self, mut pos: usize) -> usize {
+        while is_c_space(self.at(pos)) {
+            pos = pos.wrapping_add(1);
+        }
+        pos
+    }
+
+    /// Whether `word` is at `pos`, in any case.
+    fn has_word(&self, pos: usize, word: &[u8]) -> bool {
+        word.iter()
+            .enumerate()
+            .all(|(k, w)| self.at(pos.wrapping_add(k)).eq_ignore_ascii_case(w))
+    }
+}
+
+/// C's `isspace` in the C locale.
+const fn is_c_space(c: u8) -> bool {
+    matches!(c, b' ' | b'\t' | b'\n' | 0x0b | 0x0c | b'\r')
+}
+
+/// What a `strptime` parse has learnt besides the fields it stored: what
+/// decides the fields filled in after it ([`Parse::finish`]).
+#[derive(Clone, Copy, Default)]
+struct Parse {
+    /// The hour came from the 12-hour clock (`%I`), and `%p` said PM.
+    have_i: bool,
+    is_pm: bool,
+    /// `%C`'s century.
+    century: Option<i32>,
+    /// The year came from `%y`, two digits, which `%C` completes.
+    want_century: bool,
+    /// Something named the date: compute the weekday and day of the year.
+    want_xday: bool,
+    have_wday: bool,
+    have_yday: bool,
+    have_mon: bool,
+    have_mday: bool,
+    /// A week number (`%U` or `%W`), and which.
+    have_uweek: bool,
+    have_wweek: bool,
+    week_no: i32,
+}
+
+/// Cumulative days before each month, in a common year and a leap year,
+/// the thirteenth entry the year's length.
+const MON_YDAY: [[i32; 13]; 2] = [
+    [0, 31, 59, 90, 120, 151, 181, 212, 243, 273, 304, 334, 365],
+    [0, 31, 60, 91, 121, 152, 182, 213, 244, 274, 305, 335, 366],
+];
+
+/// `MON_YDAY` for `tm_year`'s year and month `mon` -- 0 for a month out of
+/// range, which only an input that never named its month can reach.
+fn mon_yday(tm_year: i32, mon: i32) -> i32 {
+    let leap = usize::from(is_leap(tm_year.wrapping_add(1900)));
+    usize::try_from(mon)
+        .ok()
+        .and_then(|m| MON_YDAY.get(leap).and_then(|row| row.get(m)))
+        .copied()
+        .unwrap_or(0)
+}
+
+/// Leap days from year 0 through year `y`, as the weekday arithmetic below
+/// counts them: `y/4 - y/100 + y/400` for a year from 0 on, grouped so
+/// that for a negative year the hundreds round the other way, as glibc's
+/// do.
 #[allow(clippy::arithmetic_side_effects)]
-fn parse_int(buf: *const u8, off: usize, max_digits: usize) -> (i32, usize) {
-    let mut val: i32 = 0;
-    let mut count: usize = 0;
-    while count < max_digits {
-        let c = unsafe { *buf.add(off.wrapping_add(count)) };
-        if !c.is_ascii_digit() {
+fn leap_days(y: i32) -> i32 {
+    let quads = y / 4;
+    let centuries = quads / 25;
+    // Divisions by nonzero constants, and a sum of values each under
+    // `|y| / 4`: nothing here can overflow.
+    quads - centuries + i32::from(quads % 25 < 0) + centuries / 4
+}
+
+/// The weekday of `tm`'s date, as glibc computes it after a parse: whole
+/// days from 1970-01-01, the months counted as in a common year and the
+/// leap days up to the year before -- or up to this year, from March on.
+/// In C's `int` arithmetic exactly, wrapping and all, because `getdate`
+/// hands `strptime` a `struct tm` whose unset fields are `INT_MIN` and uses
+/// the weekday that comes out: a 0th or a 32nd of the month is a day
+/// either side, and year 0's January and February are a day off, as in
+/// glibc.
+fn weekday_of(tm: &Tm) -> i32 {
+    let corr = 1900i32
+        .wrapping_add(tm.tm_year)
+        .wrapping_sub(i32::from(tm.tm_mon < 2));
+    let month_days = usize::try_from(tm.tm_mon)
+        .ok()
+        .and_then(|m| MON_YDAY[0].get(m))
+        .copied()
+        .unwrap_or(0);
+    // January 1st 1970 was a Thursday: 4, less the leap days to 1969.
+    let days = 4i32
+        .wrapping_sub(leap_days(1969))
+        .wrapping_add(tm.tm_year.wrapping_sub(70).wrapping_mul(365))
+        .wrapping_add(leap_days(corr))
+        .wrapping_add(month_days)
+        .wrapping_add(tm.tm_mday)
+        .wrapping_sub(1);
+    // C's `((days % 7) + 7) % 7`: the remainder into 0..7.
+    days.rem_euclid(7)
+}
+
+impl Parse {
+    /// Fill in what a whole match implies (see `strptime`), in C's `int`
+    /// arithmetic, wrapping as glibc's does on `getdate`'s `INT_MIN`s.
+    #[allow(clippy::arithmetic_side_effects)]
+    fn finish(&self, tm: &mut Tm) {
+        if self.have_i && self.is_pm {
+            tm.tm_hour = tm.tm_hour.wrapping_add(12);
+        }
+        if let Some(c) = self.century {
+            // `c` is 0..=99, so `(c - 19) * 100` cannot overflow.
+            tm.tm_year = if self.want_century {
+                (tm.tm_year % 100).wrapping_add((c - 19) * 100)
+            } else {
+                (c - 19) * 100
+            };
+        }
+        let mut have_mon = self.have_mon;
+        let mut have_mday = self.have_mday;
+        // The weekday and the day of the year are worked out only for a
+        // month that is one -- whatever the year and the day hold, as
+        // glibc's are (`getdate` leaves unset fields `INT_MIN`).
+        if self.want_xday && !self.have_wday {
+            if !(have_mon && have_mday) && self.have_yday {
+                date_of_yday(tm, have_mon, have_mday);
+                have_mon = true;
+                have_mday = true;
+            }
+            if (0..12).contains(&tm.tm_mon) {
+                tm.tm_wday = weekday_of(tm);
+            }
+        }
+        if self.want_xday && !self.have_yday && (0..12).contains(&tm.tm_mon) {
+            tm.tm_yday = mon_yday(tm.tm_year, tm.tm_mon)
+                .wrapping_add(tm.tm_mday)
+                .wrapping_sub(1);
+        }
+        if (self.have_uweek || self.have_wweek) && self.have_wday {
+            let wday = tm.tm_wday;
+            let (mday, mon) = (tm.tm_mday, tm.tm_mon);
+            let offset = i32::from(!self.have_uweek);
+            // The weekday of the year's first day.
+            tm.tm_mday = 1;
+            tm.tm_mon = 0;
+            let jan1 = weekday_of(tm);
+            if have_mday {
+                tm.tm_mday = mday;
+            }
+            if have_mon {
+                tm.tm_mon = mon;
+            }
+            if !self.have_yday {
+                tm.tm_yday =
+                    (7 - (jan1 - offset)) % 7 + (self.week_no - 1) * 7 + (wday - offset + 7) % 7;
+            }
+            if !have_mday || !have_mon {
+                date_of_yday(tm, have_mon, have_mday);
+            }
+            tm.tm_wday = wday;
+        }
+    }
+}
+
+/// `tm_mon` and `tm_mday` -- whichever the parse did not name -- from
+/// `tm_yday`: the last month starting on or before it, December at the
+/// latest, so a day of the year past the year's end is a day of December
+/// past its 31st, as glibc has it.
+fn date_of_yday(tm: &mut Tm, have_mon: bool, have_mday: bool) {
+    let started = (0..12)
+        .take_while(|&m| mon_yday(tm.tm_year, m) <= tm.tm_yday)
+        .count();
+    // The last month started, or -1 for a day before the year's first: the
+    // day then counts from the year's start, as glibc's does.
+    let mon = started
+        .checked_sub(1)
+        .and_then(|m| i32::try_from(m).ok())
+        .unwrap_or(-1);
+    if !have_mon {
+        tm.tm_mon = mon;
+    }
+    if !have_mday {
+        let start = if mon < 0 {
+            0
+        } else {
+            mon_yday(tm.tm_year, mon)
+        };
+        tm.tm_mday = tm.tm_yday.wrapping_sub(start).wrapping_add(1);
+    }
+}
+
+/// A number of at most `digits` digits in `from..=to`, after any white
+/// space: the digits stop early when one more would take the value past
+/// `to`, as glibc's do. `None` if there is no digit or the value is out of
+/// range.
+#[allow(clippy::arithmetic_side_effects)]
+fn number(input: &Input, pos: &mut usize, from: i32, to: i32, digits: usize) -> Option<i32> {
+    *pos = input.skip_space(*pos);
+    if !input.at(*pos).is_ascii_digit() {
+        return None;
+    }
+    let mut val = 0i32;
+    let mut left = digits;
+    loop {
+        val = val * 10 + i32::from(input.at(*pos) - b'0');
+        *pos += 1;
+        left -= 1;
+        if left == 0 || val * 10 > to || !input.at(*pos).is_ascii_digit() {
             break;
         }
-        val = val * 10 + i32::from(c.wrapping_sub(b'0'));
-        count = count.wrapping_add(1);
     }
-    (val, count)
+    (from..=to).contains(&val).then_some(val)
 }
 
-/// Match a month name (abbreviated or full) at position `off` in `buf`.
+/// The weekday or month named at `pos`, whole or abbreviated: `(index,
+/// length)`.
+fn name(
+    input: &Input,
+    pos: usize,
+    count: i32,
+    full: fn(i32) -> &'static [u8],
+    abbr: fn(i32) -> &'static [u8],
+) -> Option<(i32, usize)> {
+    (0..count).find_map(|i| {
+        [full(i), abbr(i)]
+            .into_iter()
+            .find(|w| input.has_word(pos, w))
+            .map(|w| (i, w.len()))
+    })
+}
+
+/// Parse `input` from `pos` against `fmt`, storing into `tm` and `state`:
+/// the position after the last byte matched, or `None`.
+#[allow(clippy::arithmetic_side_effects)]
+fn parse(
+    input: &Input,
+    mut pos: usize,
+    fmt: &[u8],
+    tm: &mut Tm,
+    state: &mut Parse,
+) -> Option<usize> {
+    let mut fi = 0;
+    while let Some(&c) = fmt.get(fi) {
+        fi += 1;
+        if is_c_space(c) {
+            pos = input.skip_space(pos);
+            continue;
+        }
+        if c != b'%' {
+            if input.at(pos) != c {
+                return None;
+            }
+            pos += 1;
+            continue;
+        }
+        // strftime's flags and field width mean nothing here.
+        while matches!(fmt.get(fi), Some(b'-' | b'_' | b'0' | b'^' | b'#')) {
+            fi += 1;
+        }
+        while fmt.get(fi).is_some_and(u8::is_ascii_digit) {
+            fi += 1;
+        }
+        let mut conv = *fmt.get(fi)?;
+        fi += 1;
+        // The C locale's alternative forms are the plain ones; a modifier on
+        // a conversion that has none is no match.
+        if conv == b'E' || conv == b'O' {
+            let next = *fmt.get(fi)?;
+            fi += 1;
+            let allowed: &[u8] = if conv == b'E' {
+                b"cCxXyY"
+            } else {
+                b"bBhdeHImMSUVWwy"
+            };
+            if !allowed.contains(&next) {
+                return None;
+            }
+            conv = next;
+        }
+        pos = conversion(input, pos, conv, tm, state)?;
+    }
+    Some(pos)
+}
+
+/// `sub`, a C-locale expansion, parsed into copies of `tm` and `state` that
+/// replace them only if it matches whole -- glibc's composite conversions
+/// are all or nothing.
+fn composite(
+    input: &Input,
+    pos: usize,
+    sub: &[u8],
+    tm: &mut Tm,
+    state: &mut Parse,
+) -> Option<usize> {
+    let mut t = *tm;
+    let mut s = *state;
+    let end = parse(input, pos, sub, &mut t, &mut s)?;
+    *tm = t;
+    *state = s;
+    Some(end)
+}
+
+/// One conversion, `conv`, at `pos`: the position after it.
+#[allow(clippy::arithmetic_side_effects, clippy::too_many_lines)]
+fn conversion(
+    input: &Input,
+    mut pos: usize,
+    conv: u8,
+    tm: &mut Tm,
+    state: &mut Parse,
+) -> Option<usize> {
+    match conv {
+        b'%' => {
+            if input.at(pos) != b'%' {
+                return None;
+            }
+            pos += 1;
+        }
+        b'a' | b'A' => {
+            let (wday, len) = name(input, pos, 7, wday_full, wday_abbr)?;
+            tm.tm_wday = wday;
+            state.have_wday = true;
+            pos += len;
+        }
+        b'b' | b'B' | b'h' => {
+            let (mon, len) = name(input, pos, 12, mon_full, mon_abbr)?;
+            tm.tm_mon = mon;
+            state.have_mon = true;
+            state.want_xday = true;
+            pos += len;
+        }
+        b'c' => {
+            pos = composite(input, pos, b"%a %b %e %H:%M:%S %Y", tm, state)?;
+            state.want_xday = true;
+        }
+        b'C' => {
+            state.century = Some(number(input, &mut pos, 0, 99, 2)?);
+            state.want_xday = true;
+        }
+        b'd' | b'e' => {
+            tm.tm_mday = number(input, &mut pos, 1, 31, 2)?;
+            state.have_mday = true;
+            state.want_xday = true;
+        }
+        b'F' => {
+            pos = composite(input, pos, b"%Y-%m-%d", tm, state)?;
+            state.want_xday = true;
+        }
+        b'x' | b'D' => {
+            pos = composite(input, pos, b"%m/%d/%y", tm, state)?;
+            state.want_xday = true;
+        }
+        b'k' | b'H' => {
+            tm.tm_hour = number(input, &mut pos, 0, 23, 2)?;
+            state.have_i = false;
+        }
+        b'l' | b'I' => {
+            tm.tm_hour = number(input, &mut pos, 1, 12, 2)? % 12;
+            state.have_i = true;
+        }
+        b'j' => {
+            tm.tm_yday = number(input, &mut pos, 1, 366, 3)? - 1;
+            state.have_yday = true;
+        }
+        b'm' => {
+            tm.tm_mon = number(input, &mut pos, 1, 12, 2)? - 1;
+            state.have_mon = true;
+            state.want_xday = true;
+        }
+        b'M' => tm.tm_min = number(input, &mut pos, 0, 59, 2)?,
+        b'n' | b't' => pos = input.skip_space(pos),
+        b'p' => {
+            if input.has_word(pos, b"AM") {
+                state.is_pm = false;
+            } else if input.has_word(pos, b"PM") {
+                state.is_pm = true;
+            } else {
+                return None;
+            }
+            pos += 2;
+        }
+        b'r' => pos = composite(input, pos, b"%I:%M:%S %p", tm, state)?,
+        b'R' => pos = composite(input, pos, b"%H:%M", tm, state)?,
+        b's' => {
+            // Seconds since the epoch, any number of digits; one past
+            // `time_t` is no match (glibc's wraps).
+            if !input.at(pos).is_ascii_digit() {
+                return None;
+            }
+            let mut secs: TimeT = 0;
+            while input.at(pos).is_ascii_digit() {
+                secs = secs
+                    .checked_mul(10)?
+                    .checked_add(TimeT::from(input.at(pos) - b'0'))?;
+                pos += 1;
+            }
+            if !secs_to_local_tm(secs, tm) {
+                return None;
+            }
+        }
+        b'S' => tm.tm_sec = number(input, &mut pos, 0, 61, 2)?,
+        b'X' | b'T' => pos = composite(input, pos, b"%H:%M:%S", tm, state)?,
+        b'u' => {
+            tm.tm_wday = number(input, &mut pos, 1, 7, 1)? % 7;
+            state.have_wday = true;
+        }
+        // The ISO 8601 week-based year and week: read, and not used -- they
+        // cannot name a date without the rest of the ISO week date.
+        b'g' => {
+            number(input, &mut pos, 0, 99, 2)?;
+        }
+        b'G' => {
+            if !input.at(pos).is_ascii_digit() {
+                return None;
+            }
+            while input.at(pos).is_ascii_digit() {
+                pos += 1;
+            }
+        }
+        b'V' => {
+            number(input, &mut pos, 0, 53, 2)?;
+        }
+        b'U' | b'W' => {
+            state.week_no = number(input, &mut pos, 0, 53, 2)?;
+            state.have_uweek = conv == b'U';
+            state.have_wweek = conv == b'W';
+        }
+        b'w' => {
+            tm.tm_wday = number(input, &mut pos, 0, 6, 1)?;
+            state.have_wday = true;
+        }
+        b'y' => {
+            let yy = number(input, &mut pos, 0, 99, 2)?;
+            tm.tm_year = if yy >= 69 { yy } else { yy + 100 };
+            state.want_century = true;
+            state.want_xday = true;
+        }
+        b'Y' => {
+            tm.tm_year = number(input, &mut pos, 0, 9999, 4)? - 1900;
+            state.want_century = false;
+            state.want_xday = true;
+        }
+        b'Z' => {
+            // A zone name: read and not used.
+            pos = input.skip_space(pos);
+            while input.at(pos) != 0 && !is_c_space(input.at(pos)) {
+                pos += 1;
+            }
+        }
+        b'z' => {
+            pos = input.skip_space(pos);
+            if input.at(pos) == b'Z' {
+                pos += 1;
+                tm.tm_gmtoff = 0;
+            } else {
+                let negative = match input.at(pos) {
+                    b'+' => false,
+                    b'-' => true,
+                    _ => return None,
+                };
+                pos += 1;
+                // `hh`, `hhmm` or `hh:mm`.
+                let mut val = 0i64;
+                let mut n = 0;
+                while n < 4 && input.at(pos).is_ascii_digit() {
+                    val = val * 10 + i64::from(input.at(pos) - b'0');
+                    pos += 1;
+                    n += 1;
+                    if n == 2 && input.at(pos) == b':' && input.at(pos + 1).is_ascii_digit() {
+                        pos += 1;
+                    }
+                }
+                match n {
+                    2 => val *= 100,
+                    4 if val % 100 < 60 => {}
+                    _ => return None,
+                }
+                let secs = val / 100 * 3600 + val % 100 * 60;
+                tm.tm_gmtoff = if negative { -secs } else { secs };
+            }
+        }
+        _ => return None,
+    }
+    Some(pos)
+}
+
+// ---------------------------------------------------------------------------
+// getdate — a date by the templates a file lists
+// ---------------------------------------------------------------------------
+
+/// Why the last `getdate` failed, numbered as POSIX numbers it: 1 `DATEMSK`
+/// unset or empty; 2 its file cannot be opened for reading; 3 its status
+/// cannot be read; 4 it is not a regular file; 5 reading it failed; 6 no
+/// memory; 7 no template matches the input; 8 the input names no valid
+/// date.
 ///
-/// Returns `(month_0_indexed, chars_consumed)` or `None` if no match.
+/// C declares it `extern int getdate_err`: one process-wide `int`, as
+/// glibc's is -- an `AtomicI32` for the reason `signgam` is one
+/// ([`crate::math::signgam`]): C's layout, and no undefined behaviour here
+/// when two threads fail at once.
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub static getdate_err: core::sync::atomic::AtomicI32 = core::sync::atomic::AtomicI32::new(0);
+
+/// `getdate(string)`: the date `string` names, by the first template in the
+/// file `DATEMSK` names that matches it whole ([`getdate_r`]); NULL, with
+/// [`getdate_err`] set, when there is none or the date is not one. The
+/// result is this thread's own storage, overwritten by its next `getdate`.
 ///
 /// # Safety
 ///
-/// `buf` must be valid for at least `off + 9` bytes (longest month name).
-fn match_month_name(buf: *const u8, off: usize) -> Option<(i32, usize)> {
-    // Try full names first (longer match wins), then abbreviated.
-    static MONTHS: [(&[u8], &[u8]); 12] = [
-        (b"January", b"Jan"),
-        (b"February", b"Feb"),
-        (b"March", b"Mar"),
-        (b"April", b"Apr"),
-        (b"May", b"May"),
-        (b"June", b"Jun"),
-        (b"July", b"Jul"),
-        (b"August", b"Aug"),
-        (b"September", b"Sep"),
-        (b"October", b"Oct"),
-        (b"November", b"Nov"),
-        (b"December", b"Dec"),
-    ];
-
-    for (i, (full, abbr)) in MONTHS.iter().enumerate() {
-        // Try full name first.
-        if ci_match(buf, off, full) {
-            return Some((i as i32, full.len()));
-        }
-        // Then abbreviated.
-        if ci_match(buf, off, abbr) {
-            return Some((i as i32, abbr.len()));
+/// `string` must be a NUL-terminated string.
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub unsafe extern "C" fn getdate(string: *const u8) -> *mut Tm {
+    // SAFETY: `perthread::current()` is non-null and valid for this thread,
+    // and no other thread holds a pointer into this block.
+    let tm = unsafe { &raw mut (*crate::perthread::current()).getdate };
+    // SAFETY: this function's contract; `tm` is this thread's own `Tm`.
+    match unsafe { getdate_r(string, tm) } {
+        0 => tm,
+        err => {
+            getdate_err.store(err, core::sync::atomic::Ordering::Relaxed);
+            core::ptr::null_mut()
         }
     }
-    None
 }
 
-/// Match a weekday name (abbreviated or full) at position `off` in `buf`.
+/// `getdate_r(string, tp)`: [`getdate`] into the caller's `*tp`, returning
+/// its error number -- 0 for a date -- rather than setting `getdate_err`.
+/// A GNU extension, glibc's.
 ///
-/// Returns `(wday_sunday_0, chars_consumed)` or `None` if no match.
+/// `DATEMSK` names a text file of `strptime` formats, one per line; the
+/// input, less leading and trailing white space, is tried against each in
+/// turn, and the first that consumes all of it is the match. What the
+/// match left out comes from the present, as POSIX's `getdate` says
+/// ([`getdate_fill`]). On a failure `*tp` holds what the last attempt left
+/// there, as glibc's does.
 ///
 /// # Safety
 ///
-/// `buf` must be valid for at least `off + 9` bytes (longest weekday name).
-fn match_wday_name(buf: *const u8, off: usize) -> Option<(i32, usize)> {
-    static WDAYS: [(&[u8], &[u8]); 7] = [
-        (b"Sunday", b"Sun"),
-        (b"Monday", b"Mon"),
-        (b"Tuesday", b"Tue"),
-        (b"Wednesday", b"Wed"),
-        (b"Thursday", b"Thu"),
-        (b"Friday", b"Fri"),
-        (b"Saturday", b"Sat"),
-    ];
-
-    for (i, (full, abbr)) in WDAYS.iter().enumerate() {
-        if ci_match(buf, off, full) {
-            return Some((i as i32, full.len()));
-        }
-        if ci_match(buf, off, abbr) {
-            return Some((i as i32, abbr.len()));
-        }
+/// `string` must be a NUL-terminated string, and `tp` a valid `Tm`.
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub unsafe extern "C" fn getdate_r(string: *const u8, tp: *mut Tm) -> i32 {
+    if string.is_null() || tp.is_null() {
+        return 7;
     }
-    None
+    // SAFETY: the name is a NUL-terminated literal.
+    let path = unsafe { crate::environ::getenv(c"DATEMSK".as_ptr().cast()) };
+    // SAFETY: `getenv` returns NULL or a NUL-terminated value.
+    if path.is_null() || unsafe { *path } == 0 {
+        return 1;
+    }
+    let mut st = crate::stat::Stat::zeroed();
+    if crate::file::stat(path, &raw mut st) != 0 {
+        return 3;
+    }
+    if !st.is_file() {
+        return 4;
+    }
+    if crate::file::access(path, crate::fcntl::R_OK) != 0 {
+        return 2;
+    }
+    // SAFETY: a NUL-terminated path and mode.
+    let file = unsafe { crate::stdio::fopen(path, c"rce".as_ptr().cast()) };
+    if file.is_null() {
+        return 2;
+    }
+    // SAFETY: an open stream, and the caller's `Tm`.
+    let rc = unsafe { getdate_stream(string, file, &mut *tp, time(core::ptr::null_mut())) };
+    // The stream was only read; closing it cannot lose anything.
+    let _ = crate::stdio::fclose(file);
+    rc
 }
 
-/// Case-insensitive match of `pattern` against `buf[off..]`.
+/// `getdate_r` once its template file is open: `string` against each line
+/// of `file`, then [`getdate_fill`] from `now`.
 ///
 /// # Safety
 ///
-/// `buf` must be valid for at least `off + pattern.len()` bytes.
-fn ci_match(buf: *const u8, off: usize, pattern: &[u8]) -> bool {
-    for (j, &p) in pattern.iter().enumerate() {
-        // SAFETY: Caller guarantees buf is valid for off + pattern.len() bytes.
-        let c = unsafe { *buf.add(off.wrapping_add(j)) };
-        if !c.eq_ignore_ascii_case(&p) {
-            return false;
+/// `string` is NUL-terminated and `file` an open stream.
+unsafe fn getdate_stream(string: *const u8, file: *mut u8, tp: &mut Tm, now: TimeT) -> i32 {
+    // SAFETY: this function's contract.
+    let Some(input) = (unsafe { GetdateInput::new(string) }) else {
+        return 6;
+    };
+    let mut line: *mut u8 = core::ptr::null_mut();
+    let mut cap = 0usize;
+    let mut found = false;
+    loop {
+        // SAFETY: a `getline` pair of this function's, and an open stream.
+        let n = unsafe { crate::stdio::getline(&raw mut line, &raw mut cap, file) };
+        let Ok(n) = usize::try_from(n) else {
+            break;
+        };
+        // One template, its newline cut.
+        if let Some(i) = n.checked_sub(1) {
+            // SAFETY: `getline` wrote `n` bytes and a NUL at `line`, and
+            // `i < n`.
+            let last = unsafe { line.add(i) };
+            // SAFETY: as above; the byte is within the line.
+            if unsafe { *last } == b'\n' {
+                // SAFETY: as above.
+                unsafe { *last = 0 };
+            }
+        }
+        if getdate_try(input.ptr(), line, tp) {
+            found = true;
+            break;
+        }
+        if crate::stdio::feof(file) != 0 {
+            break;
         }
     }
-    true
+    // SAFETY: `line` is NULL or `getline`'s `malloc` block.
+    unsafe { crate::malloc::free(line.cast()) };
+    if crate::stdio::ferror(file) != 0 {
+        return 5;
+    }
+    if !found {
+        return 7;
+    }
+    getdate_fill(tp, now)
+}
+
+/// The input as `getdate` matches it: past its leading white space, and --
+/// when it has trailing white space -- a copy without it, as glibc makes.
+struct GetdateInput {
+    start: *const u8,
+    copy: Option<crate::decfloat::MallocBuf<u8>>,
+}
+
+impl GetdateInput {
+    /// `None` when the copy cannot be allocated (`getdate`'s 6).
+    ///
+    /// # Safety
+    ///
+    /// `string` is NUL-terminated.
+    #[allow(clippy::arithmetic_side_effects)]
+    unsafe fn new(string: *const u8) -> Option<Self> {
+        let mut start = string;
+        // SAFETY: within the string, stopping at its NUL.
+        while is_c_space(unsafe { *start }) {
+            // SAFETY: as above.
+            start = unsafe { start.add(1) };
+        }
+        // SAFETY: `start` is within the NUL-terminated string.
+        let bytes = unsafe { core::ffi::CStr::from_ptr(start.cast()) }.to_bytes();
+        let kept = bytes
+            .iter()
+            .rposition(|&b| !is_c_space(b))
+            .map_or(0, |i| i + 1);
+        if kept == bytes.len() {
+            return Some(Self { start, copy: None });
+        }
+        let mut copy = crate::decfloat::MallocBuf::<u8>::zeroed(kept + 1)?;
+        if let (Some(dst), Some(src)) = (copy.as_mut().get_mut(..kept), bytes.get(..kept)) {
+            dst.copy_from_slice(src);
+        }
+        Some(Self {
+            start,
+            copy: Some(copy),
+        })
+    }
+
+    /// The NUL-terminated input.
+    fn ptr(&self) -> *const u8 {
+        self.copy
+            .as_ref()
+            .map_or(self.start, |c| c.as_ref().as_ptr())
+    }
+}
+
+/// `getdate`'s marker for a field no template set.
+const GETDATE_UNSET: i32 = i32::MIN;
+
+/// One template: `tp` marked unset in every field a template can set, then
+/// `strptime`; whether it consumed the whole input.
+fn getdate_try(input: *const u8, template: *const u8, tp: &mut Tm) -> bool {
+    tp.tm_year = GETDATE_UNSET;
+    tp.tm_mon = GETDATE_UNSET;
+    tp.tm_mday = GETDATE_UNSET;
+    tp.tm_wday = GETDATE_UNSET;
+    tp.tm_hour = GETDATE_UNSET;
+    tp.tm_min = GETDATE_UNSET;
+    tp.tm_sec = GETDATE_UNSET;
+    tp.tm_isdst = -1;
+    tp.tm_gmtoff = 0;
+    tp.tm_zone = core::ptr::null();
+    // SAFETY: both are NUL-terminated (the callers' contracts).
+    let end = unsafe { strptime(input, template, tp) };
+    // SAFETY: a non-NULL result points into the NUL-terminated input.
+    !end.is_null() && unsafe { *end } == 0
+}
+
+/// What the matching template left out, filled in as POSIX's `getdate`
+/// says, from `now` in local time -- and then the whole normalised by
+/// `mktime`. 0, or 8 when the date is not one.
+///
+/// - A weekday alone is the next such day, today included.
+/// - A month without a day is the next such month, this one included, at
+///   its first day -- or its first such weekday, when one was matched.
+/// - No hour, minute or second: now's; any one missing: 0.
+/// - An hour without a date is the next such hour, the current one
+///   included, judged by the hour alone -- 13:45 at 13:50 is today's, as
+///   in glibc.
+/// - A missing year or month is the present one.
+#[allow(clippy::arithmetic_side_effects)]
+fn getdate_fill(tp: &mut Tm, now: TimeT) -> i32 {
+    let mut here = Tm::ZERO;
+    if !secs_to_local_tm(now, &mut here) {
+        return 8;
+    }
+    let unset = GETDATE_UNSET;
+    let mut mday_ok = false;
+    // The present's fields are all in range, so none of the sums below can
+    // overflow.
+    if (0..=6).contains(&tp.tm_wday)
+        && tp.tm_year == unset
+        && tp.tm_mon == unset
+        && tp.tm_mday == unset
+    {
+        tp.tm_year = here.tm_year;
+        tp.tm_mon = here.tm_mon;
+        tp.tm_mday = here.tm_mday + (tp.tm_wday - here.tm_wday + 7) % 7;
+        mday_ok = true;
+    }
+    if (0..=11).contains(&tp.tm_mon) && tp.tm_mday == unset {
+        if tp.tm_year == unset {
+            tp.tm_year = here.tm_year + i32::from(tp.tm_mon < here.tm_mon);
+        }
+        tp.tm_mday = first_weekday(tp.tm_year, tp.tm_mon, tp.tm_wday);
+        mday_ok = true;
+    }
+    if tp.tm_hour == unset && tp.tm_min == unset && tp.tm_sec == unset {
+        tp.tm_hour = here.tm_hour;
+        tp.tm_min = here.tm_min;
+        tp.tm_sec = here.tm_sec;
+    }
+    for field in [&mut tp.tm_hour, &mut tp.tm_min, &mut tp.tm_sec] {
+        if *field == unset {
+            *field = 0;
+        }
+    }
+    if (0..=23).contains(&tp.tm_hour)
+        && tp.tm_mon == unset
+        && tp.tm_mday == unset
+        && tp.tm_wday == unset
+    {
+        tp.tm_mon = here.tm_mon;
+        tp.tm_mday = here.tm_mday + i32::from(tp.tm_hour < here.tm_hour);
+        mday_ok = true;
+    }
+    if tp.tm_year == unset {
+        tp.tm_year = here.tm_year;
+    }
+    if tp.tm_mon == unset {
+        tp.tm_mon = here.tm_mon;
+    }
+    if !mday_ok && !day_in_month(tp.tm_year, tp.tm_mon, tp.tm_mday) {
+        return 8;
+    }
+    if mktime_tm(tp).is_none() {
+        return 8;
+    }
+    0
+}
+
+/// Whether `mday` is a day of month `mon` (0-based) of `tm_year`'s year.
+fn day_in_month(tm_year: i32, mon: i32, mday: i32) -> bool {
+    let Some(month) = u32::try_from(mon).ok().filter(|m| *m < 12) else {
+        return false;
+    };
+    let days = tzrules::days_in_month(month.wrapping_add(1), i64::from(tm_year).wrapping_add(1900));
+    u32::try_from(mday).is_ok_and(|d| (1..=days).contains(&d))
+}
+
+/// The first day of month `mon` of `tm_year`'s year that falls on weekday
+/// `wday`, found through `mktime` in local time; the 1st when no weekday
+/// was matched.
+#[allow(clippy::arithmetic_side_effects)]
+fn first_weekday(tm_year: i32, mon: i32, wday: i32) -> i32 {
+    if wday == GETDATE_UNSET {
+        return 1;
+    }
+    let mut first = Tm {
+        tm_year,
+        tm_mon: mon,
+        tm_mday: 1,
+        ..Tm::ZERO
+    };
+    // A year past `tm_year` leaves the weekday 0, as glibc's unchecked
+    // `mktime` does.
+    let _ = mktime_tm(&mut first);
+    // `wday` is 0..=6 from `strptime`, and `tm_wday` 0..=6.
+    1 + (wday - first.tm_wday + 7) % 7
 }
 
 // ---------------------------------------------------------------------------
@@ -2488,8 +3047,12 @@ fn ci_match(buf: *const u8, off: usize, pattern: &[u8]) -> bool {
 // `signal.rs`'s trampoline.  It is that nothing here asks the kernel for
 // a timer.  See the module doc and `known-issues.md`.
 
-/// Timer ID type.
-pub type TimerT = i32;
+/// Timer ID type: pointer-wide, as musl's `<time.h>` makes `timer_t` a
+/// `void *`. It was an `i32` until 2026-09-29, and `timer_create` stored
+/// four bytes into the caller's eight, leaving the other four whatever they
+/// were -- so a `timer_t` compared with another, or with `NULL`, compared
+/// garbage.
+pub type TimerT = usize;
 
 /// Timer specification (interval + initial expiration).
 #[repr(C)]
@@ -2622,11 +3185,20 @@ mod timer_store {
 ///
 /// 1. `copy_from_user(&event, timer_event_spec, sizeof(event))` if
 ///    `timer_event_spec` non-null → `EFAULT` (user copy fail)
-/// 2. `posix_clocks[which_clock]` unavailable → `EINVAL`
-/// 3. `event->sigev_notify` unrecognised → `EINVAL`
-/// 4. `posix_timer_add(new_timer)` allocates the timer slot.
-/// 5. `copy_to_user(created_timer_id, ...)` → `EFAULT` (which
+/// 2. `clockid_to_kclock(which_clock)` unknown → `EINVAL` (:452)
+/// 3. the clock has no `timer_create` → `EOPNOTSUPP` (:454):
+///    `CLOCK_MONOTONIC_RAW` and the two `_COARSE` clocks, which can be
+///    read but not armed
+/// 4. `alloc_posix_timer`/`posix_timer_add` allocate the timer → `EAGAIN`
+///    when there is no room (:458, :467)
+/// 5. `good_sigevent(event)` → `EINVAL` for an unrecognised
+///    `sigev_notify` (:480-483)
+/// 6. `copy_to_user(created_timer_id, ...)` → `EFAULT` (which
 ///    destroys the just-allocated timer before returning).
+///
+/// Steps 3 and 4 were missing and misplaced until 2026-09-26: the
+/// unarmable clocks were armed, and a full table was reported last, after
+/// the event and pointer checks it precedes.
 ///
 /// **Phase 147**: pre-Phase-147 we returned `EINVAL` when `timerid`
 /// was NULL.  Linux's NULL-`timerid` path goes through
@@ -2651,7 +3223,26 @@ pub extern "C" fn timer_create(
         errno::set_errno(errno::EINVAL);
         return -1;
     }
-    // Step 3: sigev_notify validation → EINVAL.  A null sevp is
+    // Step 3: a clock with no `timer_create` → EOPNOTSUPP.
+    if matches!(
+        clockid,
+        CLOCK_MONOTONIC_RAW | CLOCK_REALTIME_COARSE | CLOCK_MONOTONIC_COARSE
+    ) {
+        errno::set_errno(errno::EOPNOTSUPP);
+        return -1;
+    }
+    // Step 4: room for the timer → EAGAIN, before the event and the
+    // pointer are looked at.  The slot is claimed at the end.
+    // SAFETY: the pointer is non-null, aligned, and points at storage
+    // reachable only from this thread (see `timer_store`); the borrow ends
+    // with this statement.
+    let has_room = unsafe { timer_store::timers().as_ref() }
+        .is_some_and(|table| table.iter().any(Option::is_none));
+    if !has_room {
+        errno::set_errno(errno::EAGAIN);
+        return -1;
+    }
+    // Step 5: sigev_notify validation → EINVAL.  A null sevp is
     // treated as SIGEV_SIGNAL with SIGALRM, per POSIX.
     if !sevp.is_null() {
         // SAFETY: caller asserts sevp points to a valid Sigevent.  We
@@ -2663,7 +3254,7 @@ pub extern "C" fn timer_create(
             return -1;
         }
     }
-    // Step 5: NULL `timerid` → EFAULT.  Linux's `copy_to_user` would
+    // Step 6: NULL `timerid` → EFAULT.  Linux's `copy_to_user` would
     // segfault on a NULL destination and return EFAULT.  Phase 147
     // fix: pre-Phase-147 we returned EINVAL here.
     if timerid.is_null() {
@@ -2671,7 +3262,7 @@ pub extern "C" fn timer_create(
         return -1;
     }
 
-    // Step 4: allocate a slot.  Find a free entry.
+    // Step 4, completed: claim the free slot found above.
     // SAFETY: the pointer is non-null, aligned, and points at storage
     // reachable only from this thread (see `timer_store`); no other
     // reference to the table is live across this borrow.
@@ -2693,9 +3284,10 @@ pub extern "C" fn timer_create(
                     tv_nsec: 0,
                 },
             });
-            // SAFETY: timerid verified non-null above; idx fits in i32.
+            // SAFETY: timerid verified non-null above; a table index is a
+            // `timer_t`, all eight bytes of it.
             unsafe {
-                *timerid = idx as TimerT;
+                *timerid = idx;
             }
             return 0;
         }
@@ -2785,7 +3377,7 @@ pub extern "C" fn timer_settime(
         return -1;
     };
 
-    let Some(slot) = table.get_mut(timerid as usize) else {
+    let Some(slot) = table.get_mut(timerid) else {
         errno::set_errno(errno::EINVAL);
         return -1;
     };
@@ -2858,7 +3450,7 @@ pub extern "C" fn timer_gettime(timerid: TimerT, curr_value: *mut Itimerspec) ->
         return -1;
     };
 
-    let Some(slot) = table.get(timerid as usize) else {
+    let Some(slot) = table.get(timerid) else {
         errno::set_errno(errno::EINVAL);
         return -1;
     };
@@ -2892,7 +3484,7 @@ pub extern "C" fn timer_delete(timerid: TimerT) -> i32 {
         return -1;
     };
 
-    let Some(slot) = table.get_mut(timerid as usize) else {
+    let Some(slot) = table.get_mut(timerid) else {
         errno::set_errno(errno::EINVAL);
         return -1;
     };
@@ -2946,7 +3538,7 @@ pub extern "C" fn timer_getoverrun(timerid: TimerT) -> i32 {
         return -1;
     };
 
-    let Some(slot) = table.get(timerid as usize) else {
+    let Some(slot) = table.get(timerid) else {
         errno::set_errno(errno::EINVAL);
         return -1;
     };
@@ -3124,19 +3716,32 @@ pub extern "C" fn setitimer(
     new_value: *const Itimerval,
     old_value: *mut Itimerval,
 ) -> i32 {
-    if which != ITIMER_REAL && which != ITIMER_VIRTUAL && which != ITIMER_PROF {
+    // Linux 6.6's order (kernel/time/itimer.c): the new value is read and
+    // validated first, then `which` (`do_setitimer`).  A NULL new value is not
+    // EFAULT: Linux takes it as all zeros -- disarm -- a "misfeature" it still
+    // supports, with a warning, and glibc passes the call straight through.
+    // Until 2026-09-26 `which` came first and NULL was EFAULT.
+    let val = if new_value.is_null() {
+        Itimerval {
+            it_interval: Timeval {
+                tv_sec: 0,
+                tv_usec: 0,
+            },
+            it_value: Timeval {
+                tv_sec: 0,
+                tv_usec: 0,
+            },
+        }
+    } else {
+        // SAFETY: new_value is non-NULL (just checked).  Read unaligned to
+        // tolerate caller buffers that aren't naturally aligned.
+        unsafe { core::ptr::read_unaligned(new_value) }
+    };
+    if !itimer_timeval_valid(&val.it_value) || !itimer_timeval_valid(&val.it_interval) {
         errno::set_errno(errno::EINVAL);
         return -1;
     }
-    if new_value.is_null() {
-        errno::set_errno(errno::EFAULT);
-        return -1;
-    }
-
-    // SAFETY: new_value is non-NULL (just checked).  Read unaligned to
-    // tolerate caller buffers that aren't naturally aligned.
-    let val = unsafe { core::ptr::read_unaligned(new_value) };
-    if !itimer_timeval_valid(&val.it_value) || !itimer_timeval_valid(&val.it_interval) {
+    if which != ITIMER_REAL && which != ITIMER_VIRTUAL && which != ITIMER_PROF {
         errno::set_errno(errno::EINVAL);
         return -1;
     }
@@ -3224,9 +3829,125 @@ pub extern "C" fn getitimer(which: i32, curr_value: *mut Itimerval) -> i32 {
 // Unit tests
 // ---------------------------------------------------------------------------
 
+// ---------------------------------------------------------------------------
+// The old time interfaces musl's headers still declare
+// ---------------------------------------------------------------------------
+
+/// `struct timeb`, `ftime`'s result: seconds, milliseconds, and two fields
+/// every implementation now leaves 0.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Timeb {
+    /// Seconds since the Epoch.
+    pub time: TimeT,
+    /// Milliseconds past `time`.
+    pub millitm: u16,
+    /// Minutes west of Greenwich: always 0, as in glibc and musl.
+    pub timezone: i16,
+    /// Daylight-saving flag: always 0, as in glibc and musl.
+    pub dstflag: i16,
+}
+
+/// The time now, to the millisecond (removed from POSIX in 2008; glibc and
+/// musl still answer it from `CLOCK_REALTIME`, with no zone).
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub extern "C" fn ftime(tp: *mut Timeb) -> i32 {
+    let mut ts = Timespec {
+        tv_sec: 0,
+        tv_nsec: 0,
+    };
+    if clock_gettime(CLOCK_REALTIME, &raw mut ts) != 0 {
+        return -1;
+    }
+    // SAFETY: NULL or the caller's `struct timeb`.
+    let Some(out) = (unsafe { tp.as_mut() }) else {
+        errno::set_errno(errno::EFAULT);
+        return -1;
+    };
+    *out = Timeb {
+        time: ts.tv_sec,
+        // Below 1000: `tv_nsec` is below 10^9.
+        millitm: u16::try_from(ts.tv_nsec / 1_000_000).unwrap_or(0),
+        timezone: 0,
+        dstflag: 0,
+    };
+    0
+}
+
+/// Set the system time to `*t` seconds (SVID; glibc keeps it for old
+/// binaries): `settimeofday` with no microseconds, so `EPERM` without the
+/// privilege. A NULL `t` is `EINVAL`, as glibc's compatibility `stime`
+/// checks.
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub extern "C" fn stime(t: *const TimeT) -> i32 {
+    // SAFETY: NULL or the caller's `time_t`.
+    let Some(&secs) = (unsafe { t.as_ref() }) else {
+        errno::set_errno(errno::EINVAL);
+        return -1;
+    };
+    let tv = Timeval {
+        tv_sec: secs,
+        tv_usec: 0,
+    };
+    settimeofday(&raw const tv, core::ptr::null())
+}
+
+/// The CPU-time clock of process `pid`, into `*clock_id`; the error number
+/// on failure, as POSIX has it return. The calling process's own clock is
+/// `CLOCK_PROCESS_CPUTIME_ID`. Another process's CPU time is not something
+/// this system can read -- `clock_gettime` has no clock for it -- so an
+/// existing other process is `EPERM` (the error POSIX gives for "may not
+/// access that clock") rather than a clock id every later call would refuse,
+/// and one that does not exist is `ESRCH`.
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub extern "C" fn clock_getcpuclockid(pid: PidT, clock_id: *mut ClockidT) -> i32 {
+    if pid == 0 || pid == crate::process::getpid() {
+        // SAFETY: NULL or the caller's `clockid_t`.
+        let Some(out) = (unsafe { clock_id.as_mut() }) else {
+            return errno::EFAULT;
+        };
+        *out = CLOCK_PROCESS_CPUTIME_ID;
+        return 0;
+    }
+    let saved = errno::get_errno();
+    let exists = crate::signal::kill(pid, 0) == 0 || errno::get_errno() == errno::EPERM;
+    errno::set_errno(saved);
+    if exists { errno::EPERM } else { errno::ESRCH }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn stime_of_null_is_einval() {
+        errno::set_errno(0);
+        assert_eq!(stime(core::ptr::null()), -1);
+        assert_eq!(errno::get_errno(), errno::EINVAL);
+    }
+
+    #[test]
+    fn ftime_of_null_is_efault_and_zone_fields_are_zero() {
+        errno::set_errno(0);
+        let mut tb = Timeb {
+            time: 7,
+            millitm: 9,
+            timezone: 5,
+            dstflag: 1,
+        };
+        if ftime(&raw mut tb) == 0 {
+            assert!(tb.millitm < 1000);
+            assert_eq!((tb.timezone, tb.dstflag), (0, 0));
+        }
+    }
+
+    #[test]
+    fn clock_getcpuclockid_of_self_is_the_process_clock() {
+        let mut id: ClockidT = -1;
+        assert_eq!(clock_getcpuclockid(0, &raw mut id), 0);
+        assert_eq!(id, CLOCK_PROCESS_CPUTIME_ID);
+        assert_eq!(clock_getcpuclockid(0, core::ptr::null_mut()), errno::EFAULT);
+    }
 
     /// Create a zeroed Tm.
     fn zero_tm() -> Tm {
@@ -3574,7 +4295,7 @@ mod tests {
         assert_eq!(tm.tm_sec, 45);
     }
 
-    // -- is_leap / days_in_month tests --
+    // -- is_leap tests --
 
     #[test]
     fn test_leap_years() {
@@ -3582,15 +4303,6 @@ mod tests {
         assert!(!is_leap(1900)); // Divisible by 100 but not 400.
         assert!(is_leap(2024)); // Divisible by 4 but not 100.
         assert!(!is_leap(2023)); // Not divisible by 4.
-    }
-
-    #[test]
-    fn test_days_in_month_values() {
-        assert_eq!(days_in_month(0, 2023), 31); // January
-        assert_eq!(days_in_month(1, 2023), 28); // February (non-leap)
-        assert_eq!(days_in_month(1, 2024), 29); // February (leap)
-        assert_eq!(days_in_month(3, 2023), 30); // April
-        assert_eq!(days_in_month(11, 2023), 31); // December
     }
 
     // -- mktime null --
@@ -4095,6 +4807,24 @@ mod tests {
             assert_eq!((&raw const tm.tm_gmtoff).cast::<u8>().offset_from(base), 40);
             assert_eq!((&raw const tm.tm_zone).cast::<u8>().offset_from(base), 48);
         }
+        // Every field, in glibc's order: the nine `int`s four bytes apart.
+        // (Until 2026-09-26 this half lived in linux_clock_user_types.rs,
+        // deleted with the other unused constant modules.)
+        use core::mem::offset_of;
+        let ints = [
+            offset_of!(Tm, tm_sec),
+            offset_of!(Tm, tm_min),
+            offset_of!(Tm, tm_hour),
+            offset_of!(Tm, tm_mday),
+            offset_of!(Tm, tm_mon),
+            offset_of!(Tm, tm_year),
+            offset_of!(Tm, tm_wday),
+            offset_of!(Tm, tm_yday),
+            offset_of!(Tm, tm_isdst),
+        ];
+        assert_eq!(ints, [0, 4, 8, 12, 16, 20, 24, 28, 32]);
+        assert_eq!(offset_of!(Tm, tm_gmtoff), 40);
+        assert_eq!(offset_of!(Tm, tm_zone), 48);
     }
 
     #[test]
@@ -4700,7 +5430,7 @@ mod tests {
         tm.tm_year = 70; // 1970
         tm.tm_mon = 11; // December
         tm.tm_mday = 32; // Dec 32 = Jan 1 next year
-        let secs = tm_to_secs(&mut tm);
+        let secs = tm_to_secs(&mut tm).unwrap();
 
         assert_eq!(tm.tm_year, 71); // Normalized to 1971
         assert_eq!(tm.tm_mon, 0); // January
@@ -4821,7 +5551,7 @@ mod tests {
         tm.tm_hour = 23;
         tm.tm_min = 59;
         tm.tm_sec = 59;
-        let secs = tm_to_secs(&mut tm);
+        let secs = tm_to_secs(&mut tm).unwrap();
 
         let mut tm2 = zero_tm();
         secs_to_tm(secs, &mut tm2);
@@ -4840,7 +5570,7 @@ mod tests {
         tm.tm_year = 100;
         tm.tm_mon = 2; // March
         tm.tm_mday = 1;
-        let secs = tm_to_secs(&mut tm);
+        let secs = tm_to_secs(&mut tm).unwrap();
 
         let mut tm2 = zero_tm();
         secs_to_tm(secs, &mut tm2);
@@ -5177,8 +5907,9 @@ mod tests {
         assert_eq!(tm.tm_hour, 12);
         assert_eq!(tm.tm_isdst, 0);
         assert_eq!(tm.tm_gmtoff, 0);
-        // SAFETY: `tm_zone` points at the static "UTC" literal.
-        assert_eq!(unsafe { cstr(tm.tm_zone) }, b"UTC");
+        // glibc names UTC renderings "GMT", whatever `TZ` says.
+        // SAFETY: `tm_zone` points at the static "GMT" literal.
+        assert_eq!(unsafe { cstr(tm.tm_zone) }, b"GMT");
     }
 
     /// `mktime` reads its `Tm` as local time; `timegm` reads the same
@@ -5715,6 +6446,35 @@ mod tests {
         let _ = super::host_itimer::swap(0, 0);
     }
 
+    /// `do_timer_create` refuses a clock that can be read but not armed
+    /// with EOPNOTSUPP (kernel/time/posix-timers.c:454); an unknown clock
+    /// is still EINVAL.
+    #[test]
+    fn test_timer_create_unarmable_clocks_eopnotsupp() {
+        for clock in [
+            CLOCK_MONOTONIC_RAW,
+            CLOCK_REALTIME_COARSE,
+            CLOCK_MONOTONIC_COARSE,
+        ] {
+            let mut id: TimerT = 0;
+            crate::errno::set_errno(0);
+            assert_eq!(
+                timer_create(clock, core::ptr::null(), &raw mut id),
+                -1,
+                "clock {clock}"
+            );
+            assert_eq!(
+                crate::errno::get_errno(),
+                crate::errno::EOPNOTSUPP,
+                "clock {clock}"
+            );
+        }
+        let mut id: TimerT = 0;
+        crate::errno::set_errno(0);
+        assert_eq!(timer_create(999, core::ptr::null(), &raw mut id), -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+    }
+
     #[test]
     fn test_timer_create_basic() {
         reset_timers();
@@ -6017,7 +6777,7 @@ mod tests {
     fn test_timer_getoverrun_negative_timer_id_einval_phase149() {
         reset_timers();
         crate::errno::set_errno(0);
-        let ret = timer_getoverrun(-1);
+        let ret = timer_getoverrun(usize::MAX);
         assert_eq!(ret, -1);
         assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
     }
@@ -6137,7 +6897,7 @@ mod tests {
         assert_eq!(timer_getoverrun(id), 0);
 
         crate::errno::set_errno(0);
-        assert_eq!(timer_getoverrun(-2), -1);
+        assert_eq!(timer_getoverrun(usize::MAX - 1), -1);
         assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
 
         timer_delete(id);
@@ -6326,7 +7086,7 @@ mod tests {
     fn test_timer_gettime_negative_timer_id_beats_null_curr_value_phase148() {
         reset_timers();
         crate::errno::set_errno(0);
-        let ret = timer_gettime(-1, core::ptr::null_mut());
+        let ret = timer_gettime(usize::MAX, core::ptr::null_mut());
         assert_eq!(ret, -1);
         assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
     }
@@ -6599,8 +7359,11 @@ mod tests {
         assert_eq!(id, 999, "no slot should be allocated on EINVAL");
     }
 
-    /// Every clock the rest of the API recognises is also accepted by
-    /// `timer_create`.
+    /// Every clock the rest of the API recognises and that can be armed is
+    /// accepted by `timer_create`.  The three that can only be read --
+    /// `CLOCK_MONOTONIC_RAW` and the two `_COARSE` clocks -- were listed
+    /// here too until 2026-09-26; they are EOPNOTSUPP (see
+    /// `test_timer_create_unarmable_clocks_eopnotsupp`).
     #[test]
     fn test_timer_create_accepts_all_valid_clocks() {
         for clk in [
@@ -6608,16 +7371,16 @@ mod tests {
             CLOCK_MONOTONIC,
             CLOCK_PROCESS_CPUTIME_ID,
             CLOCK_THREAD_CPUTIME_ID,
-            CLOCK_MONOTONIC_RAW,
-            CLOCK_REALTIME_COARSE,
-            CLOCK_MONOTONIC_COARSE,
             CLOCK_BOOTTIME,
         ] {
             reset_timers();
-            let mut id: TimerT = -1;
+            let mut id: TimerT = TimerT::MAX;
             let ret = timer_create(clk, core::ptr::null(), &raw mut id);
             assert_eq!(ret, 0, "clock {clk} should be accepted");
-            assert!(id >= 0, "clock {clk}: a valid slot must be returned");
+            assert!(
+                id < MAX_TIMERS,
+                "clock {clk}: a valid slot must be returned"
+            );
             timer_delete(id);
         }
     }
@@ -6652,7 +7415,7 @@ mod tests {
                 sigev_notify: notify,
                 _pad: [0u8; 48],
             };
-            let mut id: TimerT = -1;
+            let mut id: TimerT = TimerT::MAX;
             let ret = timer_create(CLOCK_REALTIME, &raw const sev, &raw mut id);
             assert_eq!(ret, 0, "sigev_notify {notify} should be accepted");
             timer_delete(id);
@@ -6828,7 +7591,7 @@ mod tests {
         );
         assert_eq!(crate::errno::get_errno(), crate::errno::EFAULT);
 
-        let mut id: TimerT = -1;
+        let mut id: TimerT = TimerT::MAX;
         crate::errno::set_errno(0);
         let ret = timer_create(CLOCK_REALTIME, core::ptr::null(), &raw mut id);
         assert_eq!(ret, 0);
@@ -6874,7 +7637,7 @@ mod tests {
         reset_timers();
 
         // Burn one slot first to establish baseline.
-        let mut id0: TimerT = -1;
+        let mut id0: TimerT = TimerT::MAX;
         assert_eq!(
             timer_create(CLOCK_REALTIME, core::ptr::null(), &raw mut id0),
             0
@@ -6890,7 +7653,7 @@ mod tests {
         assert_eq!(crate::errno::get_errno(), crate::errno::EFAULT);
 
         // Next valid call must land in slot 1 (slot 0 still held).
-        let mut id1: TimerT = -1;
+        let mut id1: TimerT = TimerT::MAX;
         assert_eq!(
             timer_create(CLOCK_REALTIME, core::ptr::null(), &raw mut id1),
             0
@@ -6922,7 +7685,7 @@ mod tests {
             sigev_notify: 55,
             _pad: [0u8; 48],
         };
-        let mut id_tmp: TimerT = -1;
+        let mut id_tmp: TimerT = TimerT::MAX;
         crate::errno::set_errno(0);
         assert_eq!(
             timer_create(CLOCK_REALTIME, &raw const bad_sev, &raw mut id_tmp),
@@ -6939,7 +7702,7 @@ mod tests {
         assert_eq!(crate::errno::get_errno(), crate::errno::EFAULT);
 
         // Now valid: must land in slot 0.
-        let mut id: TimerT = -1;
+        let mut id: TimerT = TimerT::MAX;
         let ret = timer_create(CLOCK_REALTIME, core::ptr::null(), &raw mut id);
         assert_eq!(ret, 0);
         assert_eq!(id, 0, "no slot should have been consumed by the bad calls");
@@ -6960,7 +7723,7 @@ mod tests {
             assert_eq!(crate::errno::get_errno(), crate::errno::EFAULT);
         }
         // Table still empty: first allocation goes to slot 0.
-        let mut id: TimerT = -1;
+        let mut id: TimerT = TimerT::MAX;
         assert_eq!(
             timer_create(CLOCK_REALTIME, core::ptr::null(), &raw mut id),
             0
@@ -6974,7 +7737,7 @@ mod tests {
     fn test_timer_create_success_doesnt_touch_errno_phase147() {
         reset_timers();
         crate::errno::set_errno(54321);
-        let mut id: TimerT = -1;
+        let mut id: TimerT = TimerT::MAX;
         let ret = timer_create(CLOCK_REALTIME, core::ptr::null(), &raw mut id);
         assert_eq!(ret, 0);
         assert_eq!(
@@ -7852,14 +8615,27 @@ mod tests {
         assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
     }
 
+    /// Linux 6.6 takes a NULL new value as zeros -- disarm -- rather than
+    /// EFAULT (kernel/time/itimer.c, "Misfeature support will be removed"),
+    /// and glibc passes the call through.  It was EFAULT until 2026-09-26.
     #[test]
-    fn test_setitimer_null_new_value() {
-        crate::errno::set_errno(0);
+    fn test_setitimer_null_new_value_disarms() {
+        reset_timers();
+        let armed = itimerval(0, 0, 5, 0);
         assert_eq!(
-            setitimer(ITIMER_REAL, core::ptr::null(), core::ptr::null_mut()),
-            -1
+            setitimer(ITIMER_REAL, &raw const armed, core::ptr::null_mut()),
+            0
         );
-        assert_eq!(crate::errno::get_errno(), crate::errno::EFAULT);
+        let mut old = itimerval(9, 9, 9, 9);
+        assert_eq!(setitimer(ITIMER_REAL, core::ptr::null(), &raw mut old), 0);
+        assert_eq!(old.it_value.tv_sec, 5, "the old value comes back");
+        let mut now = itimerval(9, 9, 9, 9);
+        assert_eq!(getitimer(ITIMER_REAL, &raw mut now), 0);
+        assert_eq!(
+            (now.it_value.tv_sec, now.it_value.tv_usec),
+            (0, 0),
+            "disarmed"
+        );
     }
 
     #[test]
@@ -8143,13 +8919,13 @@ mod tests {
     }
 
     #[test]
-    fn test_setitimer_phase87_efault_takes_precedence_over_field_check() {
-        // NULL pointer beats bogus fields we can't even read.
+    fn test_setitimer_phase87_null_value_still_checks_which() {
+        // A NULL value is zeros, not a fault, so `which` is still judged.
         reset_timers();
         errno::set_errno(0);
-        let ret = setitimer(ITIMER_REAL, core::ptr::null(), core::ptr::null_mut());
+        let ret = setitimer(42, core::ptr::null(), core::ptr::null_mut());
         assert_eq!(ret, -1);
-        assert_eq!(errno::get_errno(), errno::EFAULT);
+        assert_eq!(errno::get_errno(), errno::EINVAL);
     }
 
     #[test]
@@ -8342,15 +9118,12 @@ mod tests {
         );
     }
 
-    // -- Phase 102: clock_nanosleep flag-mask validation --
+    // -- clock_nanosleep's flags: only TIMER_ABSTIME is read --
     //
-    // Linux semantics (kernel/time/posix-timers.c::common_nsleep):
-    //   if (flags & ~TIMER_ABSTIME) return -EINVAL;
-    // The check precedes request / clk_id / nsec inspection.  Our
-    // previous code never inspected the flag mask at all; only
-    // TIMER_ABSTIME (== 1) was conditionally used, and stray bits
-    // were silently dropped.  clock_nanosleep returns the error
-    // number directly (not via errno) per POSIX.
+    // Linux 6.6 never tests the other bits (kernel/time/posix-timers.c:
+    // `common_nsleep` asks `flags & TIMER_ABSTIME` and nothing else).
+    // The tests here asserted an EINVAL for them, citing a check that
+    // `common_nsleep` does not contain, until 2026-09-26.
 
     #[test]
     fn test_clock_nanosleep_timer_abstime_is_bit_zero() {
@@ -8363,58 +9136,6 @@ mod tests {
             TIMER_ABSTIME & (TIMER_ABSTIME - 1),
             0,
             "TIMER_ABSTIME must be a single bit"
-        );
-    }
-
-    #[test]
-    fn test_clock_nanosleep_unknown_flag_einval() {
-        // An arbitrary stray bit must yield EINVAL up-front, BEFORE
-        // any of the other validations.  We pass a null request +
-        // bad clock id deliberately so that if the mask check were
-        // missing, we'd still see EINVAL from the existing paths —
-        // i.e. this test depends on the mask path returning first.
-        // We can't observe ordering via the value alone (all paths
-        // return EINVAL), but we can observe that the mask path is
-        // hit BEFORE the null-request dereference.
-        let bad = 1 << 4;
-        assert_eq!(
-            clock_nanosleep(
-                CLOCK_REALTIME,
-                bad,
-                core::ptr::null(),
-                core::ptr::null_mut()
-            ),
-            crate::errno::EINVAL
-        );
-    }
-
-    #[test]
-    fn test_clock_nanosleep_high_bit_einval() {
-        // i32::MIN sets the sign bit — far outside the valid mask.
-        let req = Timespec {
-            tv_sec: 0,
-            tv_nsec: 0,
-        };
-        assert_eq!(
-            clock_nanosleep(CLOCK_REALTIME, i32::MIN, &req, core::ptr::null_mut()),
-            crate::errno::EINVAL
-        );
-    }
-
-    #[test]
-    fn test_clock_nanosleep_einval_wins_with_garbage_inputs() {
-        // Both bad flags AND bad request would normally trigger
-        // separate EINVAL paths.  Regression guard: the flag-mask
-        // check fires first, before the null check or clock check.
-        // We verify the path is reachable with otherwise-valid
-        // inputs except the stray flag bit.
-        let req = Timespec {
-            tv_sec: 0,
-            tv_nsec: 0,
-        };
-        assert_eq!(
-            clock_nanosleep(CLOCK_REALTIME, 1 << 5, &req, core::ptr::null_mut()),
-            crate::errno::EINVAL
         );
     }
 
@@ -8459,107 +9180,206 @@ mod tests {
     }
 
     #[test]
-    fn test_clock_nanosleep_abstime_plus_unknown_einval() {
-        // Mixing TIMER_ABSTIME with a stray bit must still EINVAL —
-        // no partial acceptance.
+    fn test_clock_nanosleep_ignores_every_other_flag_bit() {
+        // Every single bit but TIMER_ABSTIME, and the sign bit, is ignored:
+        // a zero relative sleep succeeds with any of them set.
         let req = Timespec {
             tv_sec: 0,
             tv_nsec: 0,
         };
-        let mixed = TIMER_ABSTIME | (1 << 8);
-        assert_eq!(
-            clock_nanosleep(CLOCK_REALTIME, mixed, &req, core::ptr::null_mut()),
-            crate::errno::EINVAL
-        );
-    }
-
-    #[test]
-    fn test_clock_nanosleep_o_append_value_rejected() {
-        // O_APPEND (a file flag) has no meaning here.  In our
-        // numbering it's 0o2000 == 1<<10, which is not TIMER_ABSTIME
-        // (1<<0).  Must EINVAL.
-        let req = Timespec {
-            tv_sec: 0,
-            tv_nsec: 0,
-        };
+        for bit in (1..31)
+            .map(|shift| 1i32 << shift)
+            .chain([i32::MIN, crate::fcntl::O_APPEND])
+        {
+            assert_eq!(
+                clock_nanosleep(CLOCK_REALTIME, bit, &req, core::ptr::null_mut()),
+                0,
+                "bit {bit:#x}"
+            );
+        }
+        // With TIMER_ABSTIME alongside, the absolute form still runs: a
+        // deadline at the epoch has passed.
         assert_eq!(
             clock_nanosleep(
                 CLOCK_REALTIME,
-                crate::fcntl::O_APPEND,
+                TIMER_ABSTIME | (1 << 8),
                 &req,
+                core::ptr::null_mut()
+            ),
+            0
+        );
+    }
+
+    /// The clocks Linux cannot sleep on are EOPNOTSUPP, after the clock
+    /// check and before the request is read; the calling thread's CPU clock
+    /// is glibc's EINVAL, before anything.
+    #[test]
+    fn test_clock_nanosleep_clocks_that_cannot_sleep() {
+        for clk in [
+            CLOCK_MONOTONIC_RAW,
+            CLOCK_REALTIME_COARSE,
+            CLOCK_MONOTONIC_COARSE,
+        ] {
+            assert_eq!(
+                clock_nanosleep(clk, 0, core::ptr::null(), core::ptr::null_mut()),
+                crate::errno::EOPNOTSUPP,
+                "clk={clk}"
+            );
+        }
+        assert_eq!(
+            clock_nanosleep(
+                CLOCK_THREAD_CPUTIME_ID,
+                0,
+                core::ptr::null(),
                 core::ptr::null_mut()
             ),
             crate::errno::EINVAL
         );
     }
 
+    /// `timespec64_valid` refuses a negative second in both forms.  The
+    /// relative form answered EINTR and the absolute form 0 until 2026-09-26.
     #[test]
-    fn test_clock_nanosleep_recovery_after_einval() {
-        // A rejected call must not corrupt state — a subsequent
-        // valid-flags call still behaves correctly.
+    fn test_clock_nanosleep_negative_seconds_einval() {
         let req = Timespec {
-            tv_sec: 0,
+            tv_sec: -1,
             tv_nsec: 0,
         };
-        let r1 = clock_nanosleep(CLOCK_REALTIME, 1 << 7, &req, core::ptr::null_mut());
-        assert_eq!(r1, crate::errno::EINVAL);
-        let r2 = clock_nanosleep(CLOCK_REALTIME, 0, &req, core::ptr::null_mut());
-        assert_ne!(
-            r2,
-            crate::errno::EINVAL,
-            "valid call after rejected one must still succeed"
-        );
-    }
-
-    #[test]
-    fn test_clock_nanosleep_single_bits_outside_mask_all_rejected() {
-        // Exhaustive: every single-bit value 1<<1 .. 1<<30 must be
-        // rejected (1<<0 is TIMER_ABSTIME itself and is valid).
-        // Guards against a future TIMER_ABSTIME change silently
-        // widening the accepted mask.
-        let req = Timespec {
-            tv_sec: 0,
-            tv_nsec: 0,
-        };
-        for shift in 1..31 {
-            let bit = 1i32 << shift;
+        for flags in [0, TIMER_ABSTIME] {
             assert_eq!(
-                clock_nanosleep(CLOCK_REALTIME, bit, &req, core::ptr::null_mut()),
+                clock_nanosleep(CLOCK_REALTIME, flags, &req, core::ptr::null_mut()),
                 crate::errno::EINVAL,
-                "bit {:#x} should be rejected by clock_nanosleep mask",
-                bit
+                "flags {flags}"
             );
         }
     }
 
-    #[test]
-    fn test_clock_nanosleep_bad_flags_before_invalid_clock() {
-        // Both bad flags AND bad clock id would normally produce
-        // EINVAL via different paths.  Mask check must fire first
-        // (matches Linux ordering).  We can't differentiate the
-        // value, but the test exercises the path with valid clock
-        // checks unreachable.
-        let req = Timespec {
-            tv_sec: 0,
-            tv_nsec: 0,
+    fn handle_usr1(handler: crate::signal::SighandlerT, flags: u32) {
+        let act = crate::signal::Sigaction {
+            sa_handler: handler,
+            sa_mask: crate::signal::SigsetT::EMPTY,
+            sa_flags: flags,
+            sa_restorer: 0,
         };
-        assert_eq!(
-            clock_nanosleep(99_999, 1 << 9, &req, core::ptr::null_mut()),
-            crate::errno::EINVAL
-        );
+        // SAFETY: a valid action; the old one is not wanted.
+        let rc = unsafe {
+            crate::signal::sigaction(
+                crate::signal::SIGUSR1,
+                &raw const act,
+                core::ptr::null_mut(),
+            )
+        };
+        assert_eq!(rc, 0);
     }
 
+    extern "C" fn nothing(_: i32) {}
+
+    /// A signal handler ends a sleep whatever its `SA_RESTART`, and the sleep
+    /// answers the time that was still to go.  The kernel ending the sleep
+    /// is played by `interrupt::script`.
     #[test]
-    fn test_clock_nanosleep_bad_flags_before_invalid_nsec() {
-        // Bad flags must fire before the nsec validation.
-        let req = Timespec {
-            tv_sec: 0,
-            tv_nsec: 2_000_000_000,
+    fn a_signal_handler_ends_a_sleep_with_the_time_still_to_go() {
+        use crate::interrupt::script::{self, Step};
+        use crate::signal::{SA_RESTART, SIG_DFL, SIGUSR1};
+        let handler = nothing as *const () as crate::signal::SighandlerT;
+        let five = Timespec {
+            tv_sec: 5,
+            tv_nsec: 0,
         };
-        assert_eq!(
-            clock_nanosleep(CLOCK_REALTIME, 1 << 6, &req, core::ptr::null_mut()),
-            crate::errno::EINVAL
-        );
+        for flags in [0, SA_RESTART] {
+            handle_usr1(handler, flags);
+            script::set([Step::Signal(SIGUSR1)]);
+            let mut rem = Timespec {
+                tv_sec: -1,
+                tv_nsec: -1,
+            };
+            errno::set_errno(0);
+            assert_eq!(nanosleep(&five, &mut rem), -1, "flags {flags:#x}");
+            assert_eq!(errno::get_errno(), errno::EINTR);
+            assert_eq!(rem.tv_sec, 4, "nearly all of it was still to go");
+            assert!((0..1_000_000_000).contains(&rem.tv_nsec));
+            assert_eq!(script::clear(), 0);
+
+            script::set([Step::Signal(SIGUSR1)]);
+            assert_eq!(sleep(5), 4, "the whole seconds still to go, truncated");
+            script::set([Step::Signal(SIGUSR1)]);
+            assert_eq!(usleep(5_000_000), -1);
+            assert_eq!(errno::get_errno(), errno::EINTR);
+
+            // clock_nanosleep answers the error, and says what is left only
+            // for a relative sleep.
+            script::set([Step::Signal(SIGUSR1)]);
+            let mut left = Timespec {
+                tv_sec: -1,
+                tv_nsec: -1,
+            };
+            assert_eq!(
+                clock_nanosleep(CLOCK_MONOTONIC, 0, &five, &mut left),
+                errno::EINTR
+            );
+            assert_eq!(left.tv_sec, 4);
+            let mut at = crate::lowlevellock::now_on(CLOCK_MONOTONIC);
+            at.tv_sec += 5;
+            script::set([Step::Signal(SIGUSR1)]);
+            let mut untouched = Timespec {
+                tv_sec: -1,
+                tv_nsec: -1,
+            };
+            assert_eq!(
+                clock_nanosleep(CLOCK_MONOTONIC, TIMER_ABSTIME, &at, &mut untouched),
+                errno::EINTR
+            );
+            assert_eq!((untouched.tv_sec, untouched.tv_nsec), (-1, -1));
+        }
+        handle_usr1(SIG_DFL, 0);
+    }
+
+    /// A signal that runs no handler here -- ignored, or handled on another
+    /// thread -- does not end a sleep: it runs its course.
+    #[test]
+    fn a_signal_that_runs_no_handler_here_does_not_end_a_sleep() {
+        use crate::interrupt::script::{self, Step};
+        use crate::signal::{SIG_DFL, SIG_IGN, SIGUSR1};
+        let short = Timespec {
+            tv_sec: 0,
+            tv_nsec: 20_000_000,
+        };
+        handle_usr1(SIG_IGN, 0);
+        for step in [
+            Step::Signal(SIGUSR1),
+            Step::SignalElsewhere(std::boxed::Box::new(|| {})),
+        ] {
+            script::set([step]);
+            let start = crate::lowlevellock::now_on(CLOCK_MONOTONIC);
+            assert_eq!(nanosleep(&short, core::ptr::null_mut()), 0);
+            let end = crate::lowlevellock::now_on(CLOCK_MONOTONIC);
+            assert!(
+                crate::lowlevellock::ns_until(&start, &end).unwrap_or(0) >= 20_000_000,
+                "it slept all of it"
+            );
+            assert_eq!(script::clear(), 0);
+        }
+        // errno is left alone by a sleep that runs its course.
+        errno::set_errno(12345);
+        assert_eq!(sleep(0), 0);
+        assert_eq!(errno::get_errno(), 12345);
+        handle_usr1(SIG_DFL, 0);
+    }
+
+    /// An absolute deadline far in the future does not overflow: the sum
+    /// saturates, where it used to multiply unchecked.
+    #[test]
+    fn test_timespec_to_ns_saturates() {
+        let far = Timespec {
+            tv_sec: i64::MAX,
+            tv_nsec: 999_999_999,
+        };
+        assert_eq!(timespec_to_ns_saturating(&far), u64::MAX);
+        let one = Timespec {
+            tv_sec: 1,
+            tv_nsec: 5,
+        };
+        assert_eq!(timespec_to_ns_saturating(&one), 1_000_000_005);
     }
 
     // -- Phase 153: clock_nanosleep clock-vs-NULL ordering + NULL→EFAULT --
@@ -8590,15 +9410,12 @@ mod tests {
 
     #[test]
     fn test_clock_nanosleep_every_valid_clock_null_request_efault_phase153() {
-        // The EFAULT path must apply uniformly to every valid clock.
+        // The EFAULT path applies to every clock that can be slept on; the
+        // others are `test_clock_nanosleep_clocks_that_cannot_sleep`'s.
         for &clk in &[
             CLOCK_REALTIME,
             CLOCK_MONOTONIC,
             CLOCK_PROCESS_CPUTIME_ID,
-            CLOCK_THREAD_CPUTIME_ID,
-            CLOCK_MONOTONIC_RAW,
-            CLOCK_REALTIME_COARSE,
-            CLOCK_MONOTONIC_COARSE,
             CLOCK_BOOTTIME,
         ] {
             assert_eq!(
@@ -8647,11 +9464,9 @@ mod tests {
     }
 
     #[test]
-    fn test_clock_nanosleep_flag_mask_still_beats_null_phase153() {
-        // Phase 102 invariant must survive Phase 153: stray flag bits
-        // are diagnosed BEFORE the clock check and BEFORE the NULL
-        // check.  Bad flag + valid clock + NULL must give EINVAL
-        // (from flag mask), not EFAULT (from NULL).
+    fn test_clock_nanosleep_stray_flag_does_not_beat_null_phase153() {
+        // A stray flag bit is not a verdict, so a NULL request is EFAULT
+        // with it as without it.  (EINVAL, from the mask, until 2026-09-26.)
         assert_eq!(
             clock_nanosleep(
                 CLOCK_REALTIME,
@@ -8659,17 +9474,7 @@ mod tests {
                 core::ptr::null(),
                 core::ptr::null_mut()
             ),
-            crate::errno::EINVAL,
-            "flag mask must still fire before clock/NULL checks"
-        );
-    }
-
-    #[test]
-    fn test_clock_nanosleep_flag_mask_still_beats_bad_clock_phase153() {
-        // Bad flag + bad clock + NULL: still EINVAL via flag mask.
-        assert_eq!(
-            clock_nanosleep(99_999, i32::MIN, core::ptr::null(), core::ptr::null_mut()),
-            crate::errno::EINVAL
+            crate::errno::EFAULT
         );
     }
 
@@ -9191,12 +9996,12 @@ mod tests {
     #[test]
     fn test_ctime_null() {
         let _tz = TzGuard::utc();
-        // ctime(NULL) → localtime(NULL) → NULL → asctime(NULL) → fallback "???" string
+        // ctime(NULL) → localtime(NULL) → NULL → asctime(NULL) → NULL with
+        // EINVAL, as glibc's.
+        errno::set_errno(0);
         let ptr = ctime(core::ptr::null());
-        // asctime(NULL) returns a valid fallback string, not NULL.
-        assert!(!ptr.is_null());
-        let c = unsafe { *ptr };
-        assert_eq!(c, b'?');
+        assert!(ptr.is_null());
+        assert_eq!(errno::get_errno(), errno::EINVAL);
     }
 
     #[test]
@@ -9529,18 +10334,27 @@ mod tests {
 
     #[test]
     fn test_clock_settime_large_tv_sec_realtime_cap_gate() {
-        // A far-future timestamp (year ~2262) — must still pass the
-        // argument check and reach the cap gate (EPERM, cap dropped).
+        // `timespec64_valid_settod` runs before the capability check
+        // (kernel/time/time.c:174), so a time at or past
+        // `TIME_SETTOD_SEC_MAX` is EINVAL even without CAP_SYS_TIME; one just
+        // short of it reaches the cap gate.  The year-2262 time here reached
+        // the gate until 2026-09-26.
         let _g = CapGuard::snapshot();
         drop_cap_sys_time();
-        let ts = Timespec {
-            tv_sec: 9_223_372_036,
-            tv_nsec: 500,
-        };
-        errno::set_errno(0);
-        let ret = clock_settime(CLOCK_REALTIME, &raw const ts);
-        assert_eq!(ret, -1);
-        assert_eq!(errno::get_errno(), errno::EPERM);
+        for (secs, want) in [
+            (9_223_372_036, errno::EINVAL),
+            (TIME_SETTOD_SEC_MAX, errno::EINVAL),
+            (TIME_SETTOD_SEC_MAX - 1, errno::EPERM),
+        ] {
+            let ts = Timespec {
+                tv_sec: secs,
+                tv_nsec: 500,
+            };
+            errno::set_errno(0);
+            let ret = clock_settime(CLOCK_REALTIME, &raw const ts);
+            assert_eq!(ret, -1, "tv_sec {secs}");
+            assert_eq!(errno::get_errno(), want, "tv_sec {secs}");
+        }
     }
 
     // ------------------------------------------------------------------
@@ -10401,5 +11215,606 @@ mod tests {
             assert_eq!(settimeofday(&raw const bad, core::ptr::null()), -1);
             assert_eq!(errno::get_errno(), errno::EINVAL);
         }
+    }
+
+    // -- glibc's answers, replayed --
+
+    /// glibc 2.39's time conversions (`posix/tools/oracle/timeconv_harness.py`).
+    const TIMECONV_ORACLE: &str = include_str!("timeconv_oracle.txt");
+
+    /// The zones the oracle ran in, by index.
+    const ORACLE_ZONES: [&[u8]; 2] = [b"UTC0", b"EST5EDT,M3.2.0,M11.1.0"];
+
+    /// The recognisable `struct tm` every oracle call starts from.
+    fn sentinel_tm() -> Tm {
+        Tm {
+            tm_sec: 47,
+            tm_min: 37,
+            tm_hour: 17,
+            tm_mday: 27,
+            tm_mon: 6,
+            tm_year: 77,
+            tm_wday: 3,
+            tm_yday: 222,
+            tm_isdst: -7,
+            tm_gmtoff: -12345,
+            tm_zone: c"sentinel".as_ptr().cast(),
+        }
+    }
+
+    /// A `Tm` as the oracle prints one.
+    fn oracle_tm(t: &Tm) -> String {
+        let zone = if t.tm_zone.is_null() {
+            String::from("-")
+        } else {
+            // SAFETY: every `tm_zone` here is a NUL-terminated static.
+            unsafe { core::ffi::CStr::from_ptr(t.tm_zone.cast()) }
+                .to_str()
+                .unwrap()
+                .to_owned()
+        };
+        format!(
+            "{} {} {} {} {} {} {} {} {} {} {zone}",
+            t.tm_sec,
+            t.tm_min,
+            t.tm_hour,
+            t.tm_mday,
+            t.tm_mon,
+            t.tm_year,
+            t.tm_wday,
+            t.tm_yday,
+            t.tm_isdst,
+            t.tm_gmtoff
+        )
+    }
+
+    /// A C string as the oracle prints one: its bytes in hex, `-` for NULL
+    /// or empty.
+    fn oracle_text(p: *const u8) -> String {
+        if p.is_null() {
+            return String::from("-");
+        }
+        // SAFETY: a NUL-terminated result of the function under test.
+        let bytes = unsafe { core::ffi::CStr::from_ptr(p.cast()) }.to_bytes();
+        if bytes.is_empty() {
+            return String::from("-");
+        }
+        let mut out = String::new();
+        for b in bytes {
+            core::fmt::Write::write_fmt(&mut out, format_args!("{b:02x}")).unwrap();
+        }
+        out
+    }
+
+    /// glibc 2.39's `gmtime_r`, `localtime_r`, `mktime`, `timegm`,
+    /// `strftime("%s")`, `ctime`, `ctime_r`, `asctime` and `asctime_r`, over
+    /// the whole of `time_t` and `int` and in two zones, one with daylight
+    /// time: every value, `errno` and field it produced.
+    ///
+    /// Two differences, on purpose:
+    ///
+    /// - When `gmtime_r` or `localtime_r` refuse a year that does not fit
+    ///   `tm_year` (`EOVERFLOW`), glibc has already written some fields --
+    ///   which ones depends on where the zone came from -- and this library
+    ///   has written none. Only the NULL and the `errno` are compared there.
+    /// - In the zone with daylight time, glibc applies a `TZ` string's rule
+    ///   only from 1970: for an earlier year it anchors the transitions in
+    ///   1970, so no earlier instant is ever daylight time; and past year
+    ///   5,885,486 its day count overflows an `int`. `tzrules` applies the
+    ///   rule in every year, as POSIX reads it and musl does, so those
+    ///   instants ([`glibc_tz_rule_differs`]) are not compared. (A zone
+    ///   file's history, which is what `/etc/localtime` holds, is unaffected
+    ///   either way.)
+    #[test]
+    #[allow(clippy::too_many_lines)]
+    fn time_conversions_answer_as_glibc_does() {
+        let _tz = TzGuard::utc();
+        let mut zone = usize::MAX;
+        let mut set_zone = |z: &str| {
+            let z: usize = z.parse().unwrap();
+            if z != zone {
+                TzGuard::put(ORACLE_ZONES[z]);
+                zone = z;
+            }
+        };
+        let mut bad = Vec::new();
+        let mut calls = 0;
+        let mut skipped = 0;
+        for line in TIMECONV_ORACLE.lines() {
+            let (lhs, want) = line.split_once(" = ").unwrap();
+            let w: Vec<&str> = lhs.split(' ').collect();
+            // The instant glibc's answer is about, for the zone rule above.
+            let instant = match w[0] {
+                "l" | "c" | "C" => w[2].parse::<i64>().ok(),
+                "m" => want.split(' ').next().and_then(|t| t.parse().ok()),
+                "f" => want
+                    .split(' ')
+                    .nth(2)
+                    .and_then(|h| String::from_utf8(unhex(h)).ok())
+                    .and_then(|t| t.parse().ok()),
+                _ => None,
+            };
+            if instant.is_some_and(|t| glibc_tz_rule_differs(w[1], t)) {
+                skipped += 1;
+                continue;
+            }
+            let mut want = want.to_owned();
+            errno::set_errno(0);
+            let got = match w[0] {
+                "g" | "l" => {
+                    set_zone(w[1]);
+                    let secs: TimeT = w[2].parse().unwrap();
+                    let mut t = sentinel_tm();
+                    // SAFETY: a local `time_t` and `Tm`.
+                    let r = unsafe {
+                        if w[0] == "g" {
+                            gmtime_r(&raw const secs, &raw mut t)
+                        } else {
+                            localtime_r(&raw const secs, &raw mut t)
+                        }
+                    };
+                    let e = errno::get_errno();
+                    if r.is_null() {
+                        // glibc's partial fields are not compared (above).
+                        want = want.split(' ').take(2).collect::<Vec<_>>().join(" ");
+                        format!("0 {e}")
+                    } else {
+                        format!("1 {e} {}", oracle_tm(&t))
+                    }
+                }
+                "m" | "t" | "f" => {
+                    set_zone(w[1]);
+                    let v: Vec<i32> = w[2..9].iter().map(|x| x.parse().unwrap()).collect();
+                    let mut t = sentinel_tm();
+                    t.tm_sec = v[0];
+                    t.tm_min = v[1];
+                    t.tm_hour = v[2];
+                    t.tm_mday = v[3];
+                    t.tm_mon = v[4];
+                    t.tm_year = v[5];
+                    t.tm_isdst = v[6];
+                    if w[0] == "f" {
+                        let mut buf = [0u8; 64];
+                        // SAFETY: a 64-byte buffer, a NUL-terminated format and
+                        // a local `Tm`.
+                        let n = unsafe {
+                            strftime(
+                                buf.as_mut_ptr(),
+                                buf.len(),
+                                c"%s".as_ptr().cast(),
+                                &raw const t,
+                            )
+                        };
+                        let e = errno::get_errno();
+                        let text = if n == 0 {
+                            String::from("-")
+                        } else {
+                            oracle_text(buf.as_ptr())
+                        };
+                        format!("{n} {e} {text}")
+                    } else {
+                        let r = if w[0] == "m" {
+                            mktime(&raw mut t)
+                        } else {
+                            timegm(&raw mut t)
+                        };
+                        let e = errno::get_errno();
+                        format!("{r} {e} {}", oracle_tm(&t))
+                    }
+                }
+                "c" | "C" => {
+                    set_zone(w[1]);
+                    let secs: TimeT = w[2].parse().unwrap();
+                    let mut buf = [0u8; 64];
+                    // SAFETY: a local `time_t` and a 64-byte buffer.
+                    let r: *const u8 = if w[0] == "c" {
+                        unsafe { ctime_r(&raw const secs, buf.as_mut_ptr()) }
+                    } else {
+                        ctime(&raw const secs)
+                    };
+                    let e = errno::get_errno();
+                    format!("{} {e} {}", u8::from(!r.is_null()), oracle_text(r))
+                }
+                "a" | "A" if w[1] == "null" => {
+                    let r = asctime(core::ptr::null());
+                    let e = errno::get_errno();
+                    format!("{} {e} {}", u8::from(!r.is_null()), oracle_text(r))
+                }
+                "a" | "A" => {
+                    let v: Vec<i32> = w[1..8].iter().map(|x| x.parse().unwrap()).collect();
+                    let mut t = sentinel_tm();
+                    t.tm_sec = v[0];
+                    t.tm_min = v[1];
+                    t.tm_hour = v[2];
+                    t.tm_mday = v[3];
+                    t.tm_mon = v[4];
+                    t.tm_year = v[5];
+                    t.tm_wday = v[6];
+                    let mut buf = [0u8; 64];
+                    // SAFETY: a local `Tm` and a 64-byte buffer.
+                    let r: *const u8 = if w[0] == "a" {
+                        unsafe { asctime_r(&raw const t, buf.as_mut_ptr()) }
+                    } else {
+                        asctime(&raw const t)
+                    };
+                    let e = errno::get_errno();
+                    format!("{} {e} {}", u8::from(!r.is_null()), oracle_text(r))
+                }
+                other => panic!("oracle row {other}"),
+            };
+            calls += 1;
+            if got != want {
+                bad.push(format!("{line}\n    ours {got}"));
+            }
+        }
+        assert!(calls > 1000, "only {calls} calls");
+        // The rows the zone rule sets aside: the pre-1970 and far-future
+        // instants in the zone with daylight time -- half its random
+        // sample, and the calendar's corners. A third of all the rows would
+        // mean the rule had grown to swallow what it should not.
+        assert!(skipped * 3 < calls, "{skipped} rows set aside of {calls}");
+        assert!(
+            bad.is_empty(),
+            "{} of {calls} differ:\n{}",
+            bad.len(),
+            bad.iter().take(60).cloned().collect::<Vec<_>>().join("\n")
+        );
+    }
+
+    /// Whether glibc's answer about `instant` in oracle zone `zone` rests on
+    /// its reading of a `TZ` rule outside 1970 to year 5,885,486 (see
+    /// [`time_conversions_answer_as_glibc_does`]).
+    fn glibc_tz_rule_differs(zone: &str, instant: i64) -> bool {
+        zone == "1" && !(0..180_000_000_000_000).contains(&instant)
+    }
+
+    /// Hex text as bytes; empty for the oracle's `-`.
+    fn unhex(h: &str) -> Vec<u8> {
+        if h == "-" {
+            return Vec::new();
+        }
+        (0..h.len())
+            .step_by(2)
+            .map(|i| u8::from_str_radix(&h[i..i + 2], 16).unwrap())
+            .collect()
+    }
+
+    // -- strptime, against glibc --
+
+    /// glibc 2.39's `strptime` (`posix/tools/oracle/strptime_harness.py`).
+    const STRPTIME_ORACLE: &str = include_str!("strptime_oracle.txt");
+
+    /// `fmt` without its `E` and `O` modifiers -- those on a conversion
+    /// that takes one -- if it had any.
+    fn without_modifiers(fmt: &[u8]) -> Option<Vec<u8>> {
+        let mut out = Vec::new();
+        let mut changed = false;
+        let mut i = 0;
+        while let Some(&c) = fmt.get(i) {
+            out.push(c);
+            i += 1;
+            if c != b'%' {
+                continue;
+            }
+            while let Some(&f) = fmt.get(i).filter(|f| b"-_0^#123456789".contains(f)) {
+                out.push(f);
+                i += 1;
+            }
+            let pair = (fmt.get(i).copied(), fmt.get(i + 1).copied());
+            let takes = match pair {
+                (Some(b'E'), Some(n)) => b"cCxXyY".contains(&n),
+                (Some(b'O'), Some(n)) => b"bBhdeHImMSUVWwy".contains(&n),
+                _ => false,
+            };
+            if takes {
+                i += 1;
+                changed = true;
+            }
+            if let Some(&n) = fmt.get(i) {
+                out.push(n);
+                i += 1;
+            }
+        }
+        changed.then_some(out)
+    }
+
+    /// The `struct tm` an oracle row starts from.
+    fn strptime_start(kind: &str) -> Tm {
+        match kind {
+            "s" => Tm {
+                tm_zone: core::ptr::null(),
+                ..sentinel_tm()
+            },
+            _ => Tm::ZERO,
+        }
+    }
+
+    /// glibc 2.39's `strptime` for every conversion, alone and in the
+    /// combinations programs use, from two starting `struct tm`s: the
+    /// bytes it took, or NULL, and every field -- those a failing call had
+    /// already stored included.
+    ///
+    /// Two kinds of row are held to another answer than glibc's:
+    ///
+    /// - A format with an `E` or `O` modifier answers as the same format
+    ///   without it, which is what the modifiers mean in the C locale. glibc
+    ///   parts from that in three ways: its `%Ey` reads a second number
+    ///   after the year, every `%O` conversion after a format's first is no
+    ///   match, and its `%Oy` does not take `%C`'s century.
+    /// - Where `%s`'s number or its year is too big and the call is NULL,
+    ///   glibc has stored some of the fields `localtime` was part-way
+    ///   through; this library has stored none. Only the NULL is compared.
+    #[test]
+    fn strptime_answers_as_glibc_does() {
+        let _tz = TzGuard::utc();
+        let mut answers = std::collections::HashMap::new();
+        for line in STRPTIME_ORACLE.lines() {
+            let (lhs, want) = line.split_once(" = ").unwrap();
+            let w: Vec<&str> = lhs.split(' ').collect();
+            answers.insert((unhex(w[0]), unhex(w[1]), w[2]), want);
+        }
+        let mut bad = Vec::new();
+        let mut calls = 0;
+        for line in STRPTIME_ORACLE.lines() {
+            let (lhs, glibc) = line.split_once(" = ").unwrap();
+            let w: Vec<&str> = lhs.split(' ').collect();
+            let (fmt, input) = (unhex(w[0]), unhex(w[1]));
+            let mut want = match without_modifiers(&fmt) {
+                Some(plain) => (*answers.get(&(plain, input.clone(), w[2])).unwrap()).to_owned(),
+                None => glibc.to_owned(),
+            };
+            let mut t = strptime_start(w[2]);
+            let (mut f, mut i) = (fmt.clone(), input.clone());
+            f.push(0);
+            i.push(0);
+            // SAFETY: NUL-terminated format and input, and a local `Tm`.
+            let r = unsafe { strptime(i.as_ptr(), f.as_ptr(), &raw mut t) };
+            let consumed = if r.is_null() {
+                -1
+            } else {
+                // SAFETY: a non-NULL result points into `i`.
+                unsafe { r.offset_from(i.as_ptr()) }
+            };
+            let mut got = format!(
+                "{consumed} {} {} {} {} {} {} {} {} {} {}",
+                t.tm_sec,
+                t.tm_min,
+                t.tm_hour,
+                t.tm_mday,
+                t.tm_mon,
+                t.tm_year,
+                t.tm_wday,
+                t.tm_yday,
+                t.tm_isdst,
+                t.tm_gmtoff
+            );
+            if fmt.windows(2).any(|p| p == b"%s") && want.starts_with("-1 ") {
+                want.truncate(2);
+                got.truncate(got.find(' ').unwrap_or(got.len()));
+            }
+            calls += 1;
+            if got != want {
+                bad.push(format!(
+                    "\"{}\" \"{}\" {} = {want}\n    ours {got}",
+                    fmt.escape_ascii(),
+                    input.escape_ascii(),
+                    w[2]
+                ));
+            }
+        }
+        assert!(calls > 7000, "only {calls} calls");
+        assert!(
+            bad.is_empty(),
+            "{} of {calls} differ:\n{}",
+            bad.len(),
+            bad.iter().take(60).cloned().collect::<Vec<_>>().join("\n")
+        );
+    }
+
+    // -- getdate, against glibc --
+
+    /// glibc 2.39's `getdate` and `getdate_r`
+    /// (`posix/tools/oracle/getdate_harness.py`).
+    const GETDATE_ORACLE: &str = include_str!("getdate_oracle.txt");
+
+    /// `getdate_r`'s matching and filling, over templates held in memory
+    /// rather than read from `DATEMSK`'s file: `getdate_stream`'s loop, for
+    /// the host, where no file system answers.
+    fn getdate_lines(string: *const u8, templates: &[Vec<u8>], tp: &mut Tm, now: TimeT) -> i32 {
+        // SAFETY: the callers pass NUL-terminated input.
+        let Some(input) = (unsafe { GetdateInput::new(string) }) else {
+            return 6;
+        };
+        if !templates
+            .iter()
+            .any(|t| getdate_try(input.ptr(), t.as_ptr(), tp))
+        {
+            return 7;
+        }
+        getdate_fill(tp, now)
+    }
+
+    /// A `Tm` as the getdate oracle prints one.
+    fn getdate_fields(t: &Tm) -> String {
+        format!(
+            "{} {} {} {} {} {} {} {} {}",
+            t.tm_sec,
+            t.tm_min,
+            t.tm_hour,
+            t.tm_mday,
+            t.tm_mon,
+            t.tm_year,
+            t.tm_wday,
+            t.tm_yday,
+            t.tm_isdst
+        )
+    }
+
+    /// glibc 2.39's `getdate` and `getdate_r`: 49 inputs against 21
+    /// templates in two zones, each replayed at the second glibc's call ran
+    /// in -- weekdays, months and times alone resolved from it -- with the
+    /// result, the error number and every field, those a failure leaves
+    /// included; and the errors of `DATEMSK` itself that this host can
+    /// reach (unset, empty, naming no file). The other two, a directory and
+    /// an empty file, need a file system.
+    #[test]
+    #[allow(clippy::too_many_lines)]
+    fn getdate_answers_as_glibc_does() {
+        let _tz = TzGuard::utc();
+        let mut lines = GETDATE_ORACLE.lines();
+        let templates: Vec<Vec<u8>> = lines
+            .next()
+            .unwrap()
+            .strip_prefix("T ")
+            .unwrap()
+            .split(' ')
+            .map(|h| {
+                let mut t = unhex(h);
+                t.push(0);
+                t
+            })
+            .collect();
+        let mut zone = usize::MAX;
+        let mut bad = Vec::new();
+        let mut calls = 0;
+        let mut file_errors = std::collections::HashMap::new();
+        for line in lines {
+            let (lhs, want) = line.split_once(" = ").unwrap();
+            let w: Vec<&str> = lhs.split(' ').collect();
+            if w[0] == "E" {
+                file_errors.insert(w[1].to_owned(), want.to_owned());
+                continue;
+            }
+            let z: usize = w[1].parse().unwrap();
+            // A date before 1970 in the zone with daylight time: glibc
+            // applies a `TZ` string's rule only from 1970, `tzrules` in
+            // every year ([`glibc_tz_rule_differs`]); `tm_isdst` differs.
+            let year = want.split(' ').nth(if w[0] == "g" { 7 } else { 6 });
+            if z == 1
+                && year
+                    .and_then(|y| y.parse::<i32>().ok())
+                    .is_some_and(|y| y < 70)
+            {
+                continue;
+            }
+            if z != zone {
+                TzGuard::put(ORACLE_ZONES[z]);
+                zone = z;
+            }
+            let now: TimeT = w[2].parse().unwrap();
+            let mut input = unhex(w[3]);
+            input.push(0);
+            let mut t = Tm::ZERO;
+            let rc = getdate_lines(input.as_ptr(), &templates, &mut t, now);
+            let got = match (w[0], rc) {
+                ("g", 0) => format!("1 0 {}", getdate_fields(&t)),
+                ("g", _) => format!("0 {rc} -"),
+                _ => format!("{rc} {}", getdate_fields(&t)),
+            };
+            calls += 1;
+            if got != want {
+                bad.push(format!("{line}\n    ours {got}"));
+            }
+        }
+        assert!(calls > 150, "only {calls} calls");
+        assert!(
+            bad.is_empty(),
+            "{} of {calls} differ:\n{}",
+            bad.len(),
+            bad.iter().take(60).cloned().collect::<Vec<_>>().join("\n")
+        );
+
+        for (case, setting) in [
+            ("unset", None),
+            ("empty", Some(&b"\0"[..])),
+            ("missing", Some(&b"/nonexistent/templates\0"[..])),
+        ] {
+            // SAFETY: NUL-terminated name and value; the test holds the
+            // environment's lock (`TzGuard`).
+            let rc = unsafe {
+                match setting {
+                    None => crate::environ::unsetenv(c"DATEMSK".as_ptr().cast()),
+                    Some(v) => crate::environ::setenv(c"DATEMSK".as_ptr().cast(), v.as_ptr(), 1),
+                }
+            };
+            assert_eq!(rc, 0);
+            getdate_err.store(0, core::sync::atomic::Ordering::Relaxed);
+            // SAFETY: a NUL-terminated input.
+            let r = unsafe { getdate(c"2026-09-28".as_ptr().cast()) };
+            let got = format!(
+                "{} {}",
+                u8::from(!r.is_null()),
+                getdate_err.load(core::sync::atomic::Ordering::Relaxed)
+            );
+            assert_eq!(&got, file_errors.get(case).unwrap(), "DATEMSK {case}");
+        }
+        // SAFETY: as above.
+        assert_eq!(
+            unsafe { crate::environ::unsetenv(c"DATEMSK".as_ptr().cast()) },
+            0
+        );
+    }
+
+    /// `strptime_l` parses as `strptime` does.
+    #[test]
+    fn strptime_l_is_strptime() {
+        let mut a = zero_tm();
+        let mut b = zero_tm();
+        let input = b"2026-09-29 17:05:03\0".as_ptr();
+        let format = b"%Y-%m-%d %H:%M:%S\0".as_ptr();
+        // SAFETY: NUL-terminated strings; `Tm`s on the stack.
+        let (ra, rb) = unsafe {
+            (
+                strptime_l(input, format, &raw mut a, 0),
+                strptime(input, format, &raw mut b),
+            )
+        };
+        assert_eq!(ra, rb);
+        assert!(!ra.is_null());
+        assert_eq!(
+            (a.tm_year, a.tm_mon, a.tm_mday, a.tm_hour),
+            (126, 8, 29, 17)
+        );
+        assert_eq!(
+            (a.tm_min, a.tm_sec, a.tm_wday, a.tm_yday),
+            (b.tm_min, b.tm_sec, b.tm_wday, b.tm_yday)
+        );
+    }
+
+    /// `timespec_getres` against glibc 2.39's answers
+    /// (`posix/tools/oracle/strfrom_harness.py`): `TIME_UTC` and no other
+    /// base, with or without a `timespec` to fill -- and what it fills is
+    /// `CLOCK_REALTIME`'s resolution.
+    #[test]
+    fn timespec_getres_is_glibcs() {
+        let line = include_str!("strfrom_oracle.txt")
+            .lines()
+            .find_map(|l| l.strip_prefix("timespec_getres "))
+            .expect("the oracle's timespec_getres line");
+        let marker = Timespec {
+            tv_sec: -7,
+            tv_nsec: -7,
+        };
+        let mut got = String::new();
+        for base in 0..=5 {
+            let mut ts = marker;
+            let r = unsafe { timespec_getres(&raw mut ts, base) };
+            got.push_str(&format!("{r} "));
+            if r == 0 {
+                assert_eq!(
+                    (ts.tv_sec, ts.tv_nsec),
+                    (-7, -7),
+                    "untouched for base {base}"
+                );
+            } else {
+                let mut want = marker;
+                assert_eq!(clock_getres(CLOCK_REALTIME, &raw mut want), 0);
+                assert_eq!((ts.tv_sec, ts.tv_nsec), (want.tv_sec, want.tv_nsec));
+            }
+        }
+        got.push_str(&format!("/ {}", unsafe {
+            timespec_getres(core::ptr::null_mut(), TIME_UTC)
+        }));
+        assert_eq!(got, line);
     }
 }

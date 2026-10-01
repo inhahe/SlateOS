@@ -98,6 +98,12 @@ pub struct Skipped {
     pub path: PathBuf,
     /// Why, in a sentence.
     pub why: String,
+    /// The desktop file ID the file claims, when it has one: a file that
+    /// could not be read is still the entry for its ID, and shadows the
+    /// same ID further down ([`Scan::claims`]) -- a user's copy that went
+    /// wrong is reported, not quietly replaced by the system's. `None` for
+    /// a directory that could not be listed, or a name that is no ID.
+    pub id: Option<String>,
 }
 
 /// What a scan found.
@@ -107,6 +113,20 @@ pub struct Scan {
     pub found: Vec<Found>,
     /// Files that could not be read or parsed.
     pub skipped: Vec<Skipped>,
+}
+
+impl Scan {
+    /// Whether a file this scan found claims the desktop file ID `id` --
+    /// read or not, valid or not, hidden or not. Such a file is the entry
+    /// for that ID, and shadows any other that would claim it: a program
+    /// list with entries of its own behind the installed ones (SlateOS's,
+    /// `programs::known_in`) leaves out each one claimed here, as the scan
+    /// leaves out a system file a user's copy shadows.
+    #[must_use]
+    pub fn claims(&self, id: &str) -> bool {
+        self.found.iter().any(|f| f.id == id)
+            || self.skipped.iter().any(|s| s.id.as_deref() == Some(id))
+    }
 }
 
 /// Find every desktop entry under `dirs`.
@@ -134,11 +154,13 @@ pub fn scan(dirs: &DataDirs) -> Scan {
                     Err(why) => scan.skipped.push(Skipped {
                         path,
                         why: why.to_string(),
+                        id: Some(id),
                     }),
                 },
                 Err(why) => scan.skipped.push(Skipped {
                     path,
                     why: why.to_string(),
+                    id: Some(id),
                 }),
             }
         }
@@ -163,6 +185,7 @@ fn walk(
             skipped.push(Skipped {
                 path: dir.to_path_buf(),
                 why: why.to_string(),
+                id: None,
             });
             return;
         }
@@ -174,6 +197,7 @@ fn walk(
             Err(why) => skipped.push(Skipped {
                 path: dir.to_path_buf(),
                 why: why.to_string(),
+                id: None,
             }),
         }
     }
@@ -200,6 +224,7 @@ fn walk(
             None => skipped.push(Skipped {
                 path,
                 why: "its name is not UTF-8, so it has no desktop file ID".to_owned(),
+                id: None,
             }),
         }
     }
@@ -236,6 +261,7 @@ pub fn apps(scan: &Scan, locale: Option<&Locale>) -> (Vec<App>, Vec<Skipped>) {
             Err(why) => invalid.push(Skipped {
                 path: found.path.clone(),
                 why: why.to_string(),
+                id: Some(found.id.clone()),
             }),
         }
     }
@@ -480,5 +506,34 @@ mod tests {
             !program_exists(bin.to_str().expect("utf-8"), None),
             "a directory is not a program"
         );
+    }
+
+    /// **A scan claims every ID a file of it has** -- read and valid,
+    /// hidden, or unreadable -- and no other.
+    #[test]
+    fn a_scan_claims_every_id_a_file_has_read_or_not() {
+        let scratch = ScratchDir::new("desktopentry-claims");
+        let dir = scratch.path("data");
+        write(&dir, "applications/good.desktop", &entry("Good"));
+        write(
+            &dir,
+            "applications/hidden.desktop",
+            "[Desktop Entry]\nHidden=true\n",
+        );
+        write(&dir, "applications/broken.desktop", "this is no entry\n[\n");
+        let found = scan(&DataDirs::new(vec![dir]));
+        assert!(
+            found
+                .skipped
+                .iter()
+                .any(|s| s.id.as_deref() == Some("broken.desktop")),
+            "{:?}",
+            found.skipped
+        );
+        for id in ["good.desktop", "hidden.desktop", "broken.desktop"] {
+            assert!(found.claims(id), "{id}");
+        }
+        assert!(!found.claims("other.desktop"));
+        assert!(!found.claims(""));
     }
 }

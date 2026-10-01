@@ -821,11 +821,9 @@ impl DateTimeSettingsUI {
             overflow: TextOverflow::Ellipsis,
         });
         let sw_x = x + width - 44.0;
-        cmds.extend(crate::switch::switch(
-            sw_x,
-            y + 2.0,
-            40.0,
-            22.0,
+        cmds.extend(guitk::switch::shapes(
+            p,
+            guitk::frame::Rect::new(sw_x, y + 2.0, 40.0, 22.0),
             enabled,
             if enabled { p.accent } else { p.surface2 },
         ));

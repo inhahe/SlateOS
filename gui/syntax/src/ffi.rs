@@ -1,0 +1,678 @@
+//! Where a grammar meets the runtime: the C structures the two share, as
+//! Rust, and the functions the runtime calls a grammar through.
+//!
+//! A grammar is, to the tree-sitter runtime, a `TSLanguage` -- a struct of
+//! counts, pointers to tables, and function pointers to its lexers and its
+//! external scanner, laid out as `tree_sitter/parser.h` declares it. The
+//! tables and lexers are generated from each grammar's `parser.c` by
+//! `tsgrammar` (see `build.rs`); what they need from this side is here:
+//!
+//! - the `#[repr(C)]` mirrors of the shared structs ([`TSLanguage`],
+//!   [`TSLexer`] and the table rows), so the runtime reads the generated
+//!   statics as it would read the C compiler's;
+//! - [`Lexer`], the runtime's lexer as a safe type, which every generated
+//!   lexer and every hand-ported scanner works through -- and which counts
+//!   the characters they step over ([`advances`]), the part of parsing's
+//!   work the runtime's own count of its steps does not see;
+//! - [`ExternalScanner`], the trait a hand-ported scanner implements, and
+//!   [`scanner_table`], which turns one into the five functions the runtime
+//!   calls.
+//!
+//! **This module is the crate's only `unsafe`.** Each block's argument is the
+//! runtime's contract with a grammar -- which the C grammars rely on too --
+//! written down where it is relied on.
+
+use core::cell::Cell;
+use core::ffi::{c_char, c_void};
+use core::marker::PhantomData;
+
+#[cfg(target_endian = "big")]
+compile_error!(
+    "the grammars' tables are written little-endian, which is also all the runtime (tree-sitter-c2rust) supports"
+);
+
+/// `TSLexer`, as `tree_sitter/parser.h` declares it: the character ahead,
+/// the symbol a token is, and the runtime's own functions.
+#[repr(C)]
+pub(crate) struct TSLexer {
+    lookahead: i32,
+    result_symbol: u16,
+    advance: Option<unsafe extern "C" fn(*mut TSLexer, bool)>,
+    mark_end: Option<unsafe extern "C" fn(*mut TSLexer)>,
+    get_column: Option<unsafe extern "C" fn(*mut TSLexer) -> u32>,
+    is_at_included_range_start: Option<unsafe extern "C" fn(*const TSLexer) -> bool>,
+    eof: Option<unsafe extern "C" fn(*const TSLexer) -> bool>,
+    /// `log`, which is variadic and never called from here: present for its
+    /// size and place only.
+    log: *const c_void,
+}
+
+thread_local! {
+    /// Characters every lexer on this thread has stepped over: see
+    /// [`advances`].
+    static ADVANCES: Cell<u64> = const { Cell::new(0) };
+}
+
+/// How many characters every lexer on this thread -- generated or
+/// hand-ported -- has stepped over, ever. The difference across a parse is
+/// the lexing it did: work the runtime's own count of its steps does not
+/// see, since a scanner may read a whole line again for every token it is
+/// asked for (Markdown's does, for a line of `*`s). With the runtime's steps
+/// it measures a parse by what it did rather than by the clock, which a
+/// busy machine stretches.
+pub(crate) fn advances() -> u64 {
+    ADVANCES.with(Cell::get)
+}
+
+/// What one state of a generated lexer does with the character ahead: take
+/// it into the token and go to a state, step over it and go to one, or stop
+/// -- answering whether a token was accepted. (`ADVANCE`, `SKIP` and
+/// `END_STATE` in the C.)
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum LexStep {
+    /// Take the character; go to this state.
+    Take(u16),
+    /// Step over the character, leaving it out of the token; go to this state.
+    Skip(u16),
+    /// Stop: whether a token was accepted.
+    Stop(bool),
+}
+
+/// One state of a generated lexer, as `tsgrammar` writes it: the lexer, the
+/// character ahead, whether the text has ended, and whether a token has been
+/// accepted so far (which the state may set).
+pub(crate) type LexState = fn(&mut Lexer<'_>, i32, bool, &mut bool) -> LexStep;
+
+/// Run a generated lexer from state `start`: each state's function says
+/// where to go, and this takes the character and goes -- the C's jumps, as
+/// calls. A state `states` has no function for runs `default`; `reads_eof`
+/// is whether the lexer asks, at each character, if the text has ended.
+pub(crate) fn run_lexer(
+    lexer: &mut Lexer<'_>,
+    start: u16,
+    states: &[Option<LexState>],
+    default: LexState,
+    reads_eof: bool,
+) -> bool {
+    let mut state = start;
+    let mut accepted = false;
+    loop {
+        let lookahead = lexer.lookahead();
+        let eof = reads_eof && lexer.eof();
+        let run = states
+            .get(usize::from(state))
+            .copied()
+            .flatten()
+            .unwrap_or(default);
+        match run(lexer, lookahead, eof, &mut accepted) {
+            LexStep::Take(next) => {
+                lexer.advance_with(false);
+                state = next;
+            }
+            LexStep::Skip(next) => {
+                lexer.advance_with(true);
+                state = next;
+            }
+            LexStep::Stop(answer) => return answer,
+        }
+    }
+}
+
+/// The runtime's lexer, as a grammar's lexer or scanner uses it: the
+/// character ahead, and what can be done with it.
+pub struct Lexer<'a> {
+    raw: *mut TSLexer,
+    _borrow: PhantomData<&'a mut TSLexer>,
+}
+
+impl Lexer<'_> {
+    /// The runtime's lexer, handed to a grammar's function.
+    ///
+    /// # Safety
+    ///
+    /// `raw` is the lexer the runtime passed to the function now running: it
+    /// is valid, and nothing else uses it, for as long as the `Lexer` lives --
+    /// which is the runtime's contract with every lexer function and scanner
+    /// it calls.
+    pub(crate) unsafe fn from_raw(raw: *mut TSLexer) -> Self {
+        Self {
+            raw,
+            _borrow: PhantomData,
+        }
+    }
+
+    /// The character ahead, as a code point; 0 at the end of the text.
+    #[must_use]
+    pub fn lookahead(&self) -> i32 {
+        // SAFETY: `raw` is valid while `self` lives (`from_raw`); a field
+        // read through it makes no reference to the runtime's struct.
+        unsafe { (*self.raw).lookahead }
+    }
+
+    /// Take the character ahead into the token.
+    pub fn advance(&mut self) {
+        self.advance_with(false);
+    }
+
+    /// Step over the character ahead, leaving it out of the token (blanks
+    /// before one).
+    pub fn skip(&mut self) {
+        self.advance_with(true);
+    }
+
+    /// Step over the character ahead: into the token, or skipped.
+    pub fn advance_with(&mut self, skip: bool) {
+        ADVANCES.with(|n| n.set(n.get().wrapping_add(1)));
+        // SAFETY: `raw` is valid while `self` lives; the function is the
+        // runtime's own, called with the lexer it belongs to, as C does.
+        unsafe {
+            if let Some(advance) = (*self.raw).advance {
+                advance(self.raw, skip);
+            }
+        }
+    }
+
+    /// End the token here: what was advanced over so far is the token, and
+    /// looking further ahead does not change that.
+    pub fn mark_end(&mut self) {
+        // SAFETY: as `advance_with`.
+        unsafe {
+            if let Some(mark_end) = (*self.raw).mark_end {
+                mark_end(self.raw);
+            }
+        }
+    }
+
+    /// The column of the character ahead: how many characters since its line
+    /// began (`get_column`). The runtime may have to read back to the line's
+    /// start to answer, so it is asked only where a scanner needs it.
+    pub fn column(&mut self) -> u32 {
+        // SAFETY: as `advance_with`.
+        unsafe {
+            (*self.raw)
+                .get_column
+                .map_or(0, |get_column| get_column(self.raw))
+        }
+    }
+
+    /// Whether the character ahead is where one of the ranges the parse was
+    /// given begins (`is_at_included_range_start`): the text's start, or
+    /// where it resumes after a stretch left out of the parse -- a
+    /// template's code, say, on the far side of the template's own markup.
+    #[must_use]
+    pub fn is_at_included_range_start(&self) -> bool {
+        // SAFETY: as `advance_with`.
+        unsafe {
+            (*self.raw)
+                .is_at_included_range_start
+                .is_some_and(|at| at(self.raw))
+        }
+    }
+
+    /// Whether the text has ended.
+    #[must_use]
+    pub fn eof(&self) -> bool {
+        // SAFETY: as `advance_with`.
+        unsafe { (*self.raw).eof.is_some_and(|eof| eof(self.raw)) }
+    }
+
+    /// Say which symbol the token is.
+    pub fn set_result(&mut self, symbol: u16) {
+        // SAFETY: as `lookahead`, and writing the one field the runtime
+        // gives a lexer to write.
+        unsafe {
+            (*self.raw).result_symbol = symbol;
+        }
+    }
+
+    /// The token so far is `symbol`, and ends here: `ACCEPT_TOKEN`.
+    pub fn accept(&mut self, symbol: u16) {
+        self.set_result(symbol);
+        self.mark_end();
+    }
+}
+
+/// Whether `c` is in `ranges` -- sorted, apart, each inclusive: a generated
+/// lexer's character set, as `set_contains` in `tree_sitter/parser.h`.
+#[must_use]
+pub fn set_contains(ranges: &[(i32, i32)], c: i32) -> bool {
+    ranges
+        .binary_search_by(|&(start, end)| {
+            if end < c {
+                core::cmp::Ordering::Less
+            } else if start > c {
+                core::cmp::Ordering::Greater
+            } else {
+                core::cmp::Ordering::Equal
+            }
+        })
+        .is_ok()
+}
+
+/// A grammar's table as its generated file carries it: deflated (RFC 1951,
+/// raw), and how long it is inflated.
+pub struct Deflated {
+    /// The deflated bytes.
+    pub bytes: &'static [u8],
+    /// How many bytes they inflate to.
+    pub len: usize,
+}
+
+impl Deflated {
+    /// The table, inflated into memory aligned for any row it holds -- a
+    /// `TSParseActionEntry`'s eight bytes at most -- which is kept for the
+    /// life of the process, as the runtime needs a grammar's tables to be:
+    /// each grammar's are inflated once, the first time it is asked for.
+    ///
+    /// Bytes that do not inflate to `len` -- a broken build, which the tests
+    /// rule out for every table of every grammar -- give `len` zeros: a
+    /// grammar that reads nothing, rather than a table shorter than the
+    /// runtime will read.
+    #[must_use]
+    pub fn inflate(&self) -> *const u8 {
+        let mut words = vec![0u64; self.len.div_ceil(8)];
+        if let Ok(bytes) = deflate::inflate_limited(self.bytes, self.len)
+            && bytes.len() == self.len
+        {
+            for (word, chunk) in words.iter_mut().zip(bytes.chunks(8)) {
+                let mut eight = [0u8; 8];
+                if let Some(into) = eight.get_mut(..chunk.len()) {
+                    into.copy_from_slice(chunk);
+                }
+                // The bytes in the order they came: native order, which
+                // is little-endian here (a big-endian build does not
+                // compile).
+                *word = u64::from_ne_bytes(eight);
+            }
+        }
+        Box::leak(words.into_boxed_slice()).as_ptr().cast::<u8>()
+    }
+
+    /// Whether the bytes inflate to exactly `len` of them.
+    #[cfg(test)]
+    pub fn inflates(&self) -> bool {
+        deflate::inflate_limited(self.bytes, self.len).is_ok_and(|b| b.len() == self.len)
+    }
+}
+
+/// A row of the parse actions: `TSParseActionEntry`, eight bytes, read only
+/// by the runtime.
+#[repr(C)]
+pub struct ParseActionEntry {
+    _bytes: [u16; 4],
+}
+
+/// `TSMapSlice`.
+#[repr(C)]
+pub struct MapSlice {
+    _index: u16,
+    _length: u16,
+}
+
+/// `TSFieldMapEntry`.
+#[repr(C)]
+pub struct FieldMapEntry {
+    _field_id: u16,
+    _child_index: u8,
+    _inherited: bool,
+}
+
+/// `TSSymbolMetadata`.
+#[repr(C)]
+pub struct SymbolMetadata {
+    _visible: bool,
+    _named: bool,
+    _supertype: bool,
+}
+
+/// `TSLexerMode` (`TSLexMode`, its first two fields, before ABI 15).
+#[repr(C)]
+pub struct LexerMode {
+    _lex_state: u16,
+    _external_lex_state: u16,
+    _reserved_word_set_id: u16,
+}
+
+/// `TSLanguageMetadata`.
+#[repr(C)]
+pub struct LanguageMetadata {
+    /// The grammar's version, as its author numbered it.
+    pub major_version: u8,
+    /// See [`major_version`](Self::major_version).
+    pub minor_version: u8,
+    /// See [`major_version`](Self::major_version).
+    pub patch_version: u8,
+}
+
+/// A language's external scanner, as the runtime calls it.
+#[repr(C)]
+pub struct ExternalScannerTable {
+    states: *const bool,
+    symbol_map: *const u16,
+    create: Option<unsafe extern "C" fn() -> *mut c_void>,
+    destroy: Option<unsafe extern "C" fn(*mut c_void)>,
+    scan: Option<unsafe extern "C" fn(*mut c_void, *mut TSLexer, *const bool) -> bool>,
+    serialize: Option<unsafe extern "C" fn(*mut c_void, *mut c_char) -> u32>,
+    deserialize: Option<unsafe extern "C" fn(*mut c_void, *const c_char, u32)>,
+}
+
+impl ExternalScannerTable {
+    /// No external scanner.
+    pub const NONE: Self = Self {
+        states: core::ptr::null(),
+        symbol_map: core::ptr::null(),
+        create: None,
+        destroy: None,
+        scan: None,
+        serialize: None,
+        deserialize: None,
+    };
+}
+
+/// `TSLanguage`, as `tree_sitter/parser.h` (ABI 15) declares it, field for
+/// field. An ABI-14 grammar fills the same struct and leaves the fields after
+/// `primary_state_ids` empty, which the runtime does not read below 15.
+#[repr(C)]
+pub struct TSLanguage {
+    pub abi_version: u32,
+    pub symbol_count: u32,
+    pub alias_count: u32,
+    pub token_count: u32,
+    pub external_token_count: u32,
+    pub state_count: u32,
+    pub large_state_count: u32,
+    pub production_id_count: u32,
+    pub field_count: u32,
+    pub max_alias_sequence_length: u16,
+    pub parse_table: *const u16,
+    pub small_parse_table: *const u16,
+    pub small_parse_table_map: *const u32,
+    pub parse_actions: *const ParseActionEntry,
+    pub symbol_names: *const *const c_char,
+    pub field_names: *const *const c_char,
+    pub field_map_slices: *const MapSlice,
+    pub field_map_entries: *const FieldMapEntry,
+    pub symbol_metadata: *const SymbolMetadata,
+    pub public_symbol_map: *const u16,
+    pub alias_map: *const u16,
+    pub alias_sequences: *const u16,
+    pub lex_modes: *const LexerMode,
+    pub lex_fn: Option<unsafe extern "C" fn(*mut TSLexer, u16) -> bool>,
+    pub keyword_lex_fn: Option<unsafe extern "C" fn(*mut TSLexer, u16) -> bool>,
+    pub keyword_capture_token: u16,
+    pub external_scanner: ExternalScannerTable,
+    pub primary_state_ids: *const u16,
+    pub name: *const c_char,
+    pub reserved_words: *const u16,
+    pub max_reserved_word_set_size: u16,
+    pub supertype_count: u32,
+    pub supertype_symbols: *const u16,
+    pub supertype_map_slices: *const MapSlice,
+    pub supertype_map_entries: *const u16,
+    pub metadata: LanguageMetadata,
+}
+
+/// A grammar's language, as a static the runtime can be handed.
+#[repr(transparent)]
+pub struct SyncLanguage(pub TSLanguage);
+
+// SAFETY: every pointer in a grammar's `TSLanguage` points at memory nothing
+// writes to and nothing frees -- its tables, inflated once and kept for the
+// life of the process; its names and functions, statics -- and the runtime
+// only reads through them: reading from several threads at once is sound.
+unsafe impl Sync for SyncLanguage {}
+
+// SAFETY: as for `Sync`: the pointers are to memory that outlives every
+// thread and is never written, so the struct may move to another thread.
+unsafe impl Send for SyncLanguage {}
+
+/// A grammar's symbol or field names: pointers to C string literals.
+#[repr(transparent)]
+pub struct SyncPtrs<T>(pub T);
+
+// SAFETY: the pointers are to string literals, which are immutable statics;
+// nothing writes through them.
+unsafe impl<const N: usize> Sync for SyncPtrs<[*const c_char; N]> {}
+
+/// A grammar's lexer function, as the runtime calls it: `$name` wraps the
+/// generated `$body`, which works through a [`Lexer`].
+macro_rules! lexer_entry {
+    ($name:ident, $body:ident) => {
+        unsafe extern "C" fn $name(lexer: *mut crate::ffi::TSLexer, state: u16) -> bool {
+            // SAFETY: the runtime calls a grammar's lexer with its own lexer,
+            // valid and used by nothing else for the length of the call.
+            let mut lexer = unsafe { crate::ffi::Lexer::from_raw(lexer) };
+            $body(&mut lexer, state)
+        }
+    };
+}
+pub(crate) use lexer_entry;
+
+/// The handle the runtime takes a grammar by, for the `language()` a
+/// generated file defines.
+macro_rules! language_fn {
+    () => {
+        extern "C" fn language_raw() -> *const () {
+            core::ptr::from_ref(language()).cast()
+        }
+
+        /// The grammar, as the runtime takes it.
+        pub(crate) fn language_fn() -> tree_sitter_language::LanguageFn {
+            // SAFETY: `language_raw` returns a pointer to a `TSLanguage`
+            // built once and kept for the life of the process, its tables
+            // inflated into memory kept as long, laid out as
+            // `tree_sitter/parser.h` lays it out -- what the runtime asks of
+            // the function a `LanguageFn` wraps.
+            unsafe { tree_sitter_language::LanguageFn::from_raw(language_raw) }
+        }
+    };
+}
+pub(crate) use language_fn;
+
+/// The most a scanner may write when its state is saved:
+/// `TREE_SITTER_SERIALIZATION_BUFFER_SIZE`.
+pub const SERIALIZATION_BUFFER_SIZE: usize = 1024;
+
+/// A hand-ported external scanner: the part of a grammar's lexing its
+/// author wrote by hand in C (`scanner.c`), for tokens a state machine
+/// cannot recognise -- indentation, raw strings, nested comments.
+pub trait ExternalScanner: Default {
+    /// Its tokens, in the grammar's order: what a `valid` list is indexed
+    /// by. Checked against the grammar's own list (`EXTERNAL_TOKENS`) when
+    /// the grammar is built ([`same_names`]): a scanner whose list is not
+    /// its grammar's does not compile.
+    const TOKENS: &'static [&'static str];
+
+    /// Try to recognise, at the lexer's position, one of the tokens `valid`
+    /// allows; say which with [`Lexer::set_result`] and answer whether one
+    /// was found.
+    fn scan(&mut self, lexer: &mut Lexer<'_>, valid: &[bool]) -> bool;
+
+    /// Save the scanner's state into `buffer`, answering how many bytes it
+    /// wrote -- at most `buffer.len()`, which is [`SERIALIZATION_BUFFER_SIZE`].
+    fn serialize(&self, buffer: &mut [u8]) -> usize;
+
+    /// Restore a state [`serialize`](Self::serialize) wrote; empty means the
+    /// state it starts in.
+    fn deserialize(&mut self, bytes: &[u8]);
+}
+
+/// Whether two lists of names are the same, name for name and in order:
+/// a scanner's [`TOKENS`](ExternalScanner::TOKENS) and its grammar's, which
+/// `grammars::generated!` compares while compiling.
+#[must_use]
+pub const fn same_names(a: &[&str], b: &[&str]) -> bool {
+    match (a, b) {
+        ([], []) => true,
+        ([x, a @ ..], [y, b @ ..]) => same_bytes(x.as_bytes(), y.as_bytes()) && same_names(a, b),
+        _ => false,
+    }
+}
+
+/// Whether two byte strings are the same: `==`, which a `const fn` cannot
+/// call.
+const fn same_bytes(a: &[u8], b: &[u8]) -> bool {
+    match (a, b) {
+        ([], []) => true,
+        ([x, a @ ..], [y, b @ ..]) => *x == *y && same_bytes(a, b),
+        _ => false,
+    }
+}
+
+/// The runtime's table of functions for scanner `S`, over the grammar's
+/// generated `states` and `symbol_map`.
+#[must_use]
+pub const fn scanner_table<S: ExternalScanner>(
+    states: *const bool,
+    symbol_map: *const u16,
+) -> ExternalScannerTable {
+    ExternalScannerTable {
+        states,
+        symbol_map,
+        create: Some(scanner_create::<S>),
+        destroy: Some(scanner_destroy::<S>),
+        scan: Some(scanner_scan::<S>),
+        serialize: Some(scanner_serialize::<S>),
+        deserialize: Some(scanner_deserialize::<S>),
+    }
+}
+
+extern "C" fn scanner_create<S: ExternalScanner>() -> *mut c_void {
+    Box::into_raw(Box::new(S::default())).cast()
+}
+
+unsafe extern "C" fn scanner_destroy<S: ExternalScanner>(payload: *mut c_void) {
+    if !payload.is_null() {
+        // SAFETY: `payload` is what `scanner_create::<S>` returned for this
+        // language -- a `Box<S>` -- and the runtime destroys each exactly
+        // once, after its last use.
+        drop(unsafe { Box::from_raw(payload.cast::<S>()) });
+    }
+}
+
+unsafe extern "C" fn scanner_scan<S: ExternalScanner>(
+    payload: *mut c_void,
+    lexer: *mut TSLexer,
+    valid: *const bool,
+) -> bool {
+    // SAFETY: `payload` is a live `Box<S>` from `scanner_create::<S>` that
+    // the runtime uses for nothing else during the call; `valid` is a row of
+    // the grammar's scanner states -- `external_token_count` flags, which is
+    // `S::TOKENS.len()` (each grammar's `generated!` does not compile
+    // otherwise) -- or the runtime's own list of as many; `lexer` is as in
+    // `lexer_entry!`.
+    let (scanner, valid, mut lexer) = unsafe {
+        (
+            &mut *payload.cast::<S>(),
+            core::slice::from_raw_parts(valid, S::TOKENS.len()),
+            Lexer::from_raw(lexer),
+        )
+    };
+    scanner.scan(&mut lexer, valid)
+}
+
+unsafe extern "C" fn scanner_serialize<S: ExternalScanner>(
+    payload: *mut c_void,
+    buffer: *mut c_char,
+) -> u32 {
+    // SAFETY: `payload` as in `scanner_scan`, only read; `buffer` is the
+    // runtime's serialization buffer, `SERIALIZATION_BUFFER_SIZE` bytes,
+    // ours alone for the call.
+    let (scanner, buffer) = unsafe {
+        (
+            &*payload.cast::<S>(),
+            core::slice::from_raw_parts_mut(buffer.cast::<u8>(), SERIALIZATION_BUFFER_SIZE),
+        )
+    };
+    let written = scanner.serialize(buffer).min(SERIALIZATION_BUFFER_SIZE);
+    u32::try_from(written).unwrap_or(0)
+}
+
+unsafe extern "C" fn scanner_deserialize<S: ExternalScanner>(
+    payload: *mut c_void,
+    buffer: *const c_char,
+    length: u32,
+) {
+    // SAFETY: `payload` as in `scanner_scan`.
+    let scanner = unsafe { &mut *payload.cast::<S>() };
+    let length = usize::try_from(length).unwrap_or(0);
+    let bytes: &[u8] = if length == 0 || buffer.is_null() {
+        &[]
+    } else {
+        // SAFETY: the runtime passes a state it saved: `length` bytes it
+        // holds for the length of the call.
+        unsafe { core::slice::from_raw_parts(buffer.cast::<u8>(), length) }
+    };
+    scanner.deserialize(bytes);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// **The mirrors are the C structs' sizes on this target**: what a C
+    /// compiler makes of `tree_sitter/parser.h` for x86-64. A field out of
+    /// place in `TSLanguage` would have every grammar read from the wrong
+    /// table; `the_runtime_reads_each_grammar_as_it_was_written` in lib.rs
+    /// checks the fields the runtime reads by reading them through it.
+    #[test]
+    #[cfg(target_pointer_width = "64")]
+    fn the_mirrors_are_the_c_structs_sizes() {
+        use core::mem::{offset_of, size_of};
+        assert_eq!(size_of::<ParseActionEntry>(), 8);
+        assert_eq!(size_of::<MapSlice>(), 4);
+        assert_eq!(size_of::<FieldMapEntry>(), 4);
+        assert_eq!(size_of::<SymbolMetadata>(), 3);
+        assert_eq!(size_of::<LexerMode>(), 6);
+        assert_eq!(size_of::<TSLexer>(), 56);
+        assert_eq!(size_of::<ExternalScannerTable>(), 56);
+        // Nine u32s, a u16, padding to 8: 40.
+        assert_eq!(offset_of!(TSLanguage, parse_table), 40);
+        assert_eq!(offset_of!(TSLanguage, lex_fn), 40 + 13 * 8);
+        assert_eq!(offset_of!(TSLanguage, keyword_capture_token), 160);
+        assert_eq!(offset_of!(TSLanguage, external_scanner), 168);
+        assert_eq!(offset_of!(TSLanguage, primary_state_ids), 224);
+        assert_eq!(offset_of!(TSLanguage, name), 232);
+        assert_eq!(offset_of!(TSLanguage, max_reserved_word_set_size), 248);
+        assert_eq!(offset_of!(TSLanguage, supertype_count), 252);
+        assert_eq!(offset_of!(TSLanguage, metadata), 280);
+        assert_eq!(size_of::<TSLanguage>(), 288);
+    }
+
+    /// **Two lists of names are the same only name for name, in order** --
+    /// what keeps a scanner from reading past the flags it is given.
+    #[test]
+    fn names_are_the_same_only_name_for_name() {
+        assert!(same_names(&[], &[]));
+        assert!(same_names(&["a", "bc"], &["a", "bc"]));
+        for (a, b) in [
+            (&["a", "bc"][..], &["a", "b"][..]),
+            (&["a", "bc"], &["a", "bd"]),
+            (&["a", "bc"], &["bc", "a"]),
+            (&["a", "bc"], &["a"]),
+            (&["a"], &["a", ""]),
+            (&[""], &[]),
+        ] {
+            assert!(!same_names(a, b), "{a:?} {b:?}");
+            assert!(!same_names(b, a), "{b:?} {a:?}");
+        }
+    }
+
+    /// **A set holds a character when a range does**, ends included.
+    #[test]
+    fn a_set_holds_what_its_ranges_hold() {
+        let set = [(65, 90), (97, 122), (192, 591)];
+        for (c, want) in [
+            (64, false),
+            (65, true),
+            (90, true),
+            (91, false),
+            (100, true),
+            (591, true),
+            (592, false),
+        ] {
+            assert_eq!(set_contains(&set, c), want, "{c}");
+        }
+        assert!(!set_contains(&[], 1));
+    }
+}

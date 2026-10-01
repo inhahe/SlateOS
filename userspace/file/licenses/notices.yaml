@@ -1,0 +1,12 @@
+# The third-party code userspace/file carries (design-decisions 1433), read by
+# scripts/gather-notices.py.
+#
+# src/isomedia_table.rs is generated from file 5.45's magic database
+# (magic/Magdir/animation, the ISO base media rules) by
+# scripts/file-isomedia-gen.py, so file's notice travels with it. The same
+# notice opens the generated file, as file's licence asks of source.
+file:
+  version: 5.45
+  licence: BSD-2-Clause
+  texts:
+    - file-COPYING

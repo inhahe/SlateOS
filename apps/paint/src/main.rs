@@ -1296,6 +1296,57 @@ impl Default for TextInput {
 }
 
 // ============================================================================
+// Geometry the painters and the pointer share
+// ============================================================================
+
+/// A rectangle on screen.
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct Area {
+    x: f32,
+    y: f32,
+    w: f32,
+    h: f32,
+}
+
+impl Area {
+    const fn new(x: f32, y: f32, w: f32, h: f32) -> Self {
+        Self { x, y, w, h }
+    }
+
+    fn contains(self, px: f32, py: f32) -> bool {
+        px >= self.x && px < self.x + self.w && py >= self.y && py < self.y + self.h
+    }
+
+    /// Grown by `dx` each side horizontally and `dy` vertically: a slider's
+    /// track is 8 pixels tall, and a target that thin is missed.
+    fn grown(self, dx: f32, dy: f32) -> Self {
+        Self::new(
+            self.x - dx,
+            self.y - dy,
+            self.w + 2.0 * dx,
+            self.h + 2.0 * dy,
+        )
+    }
+}
+
+/// The tool panel's parts, from [`PaintApp::toolbar_layout`].
+struct ToolbarLayout {
+    buttons: Vec<(Tool, Area)>,
+    fg: Area,
+    bg: Area,
+    palette: Vec<Area>,
+    palette_y: f32,
+}
+
+/// The colour dialog's parts, from [`PaintApp::picker_layout`].
+struct PickerLayout {
+    dialog: Area,
+    tracks: [Area; 4],
+    ok: Area,
+    cancel: Area,
+}
+
+// ============================================================================
 // Color picker state
 // ============================================================================
 
@@ -1318,6 +1369,8 @@ pub struct ColorPicker {
     pub editing_foreground: bool,
     /// Which slider is being dragged (0=R, 1=G, 2=B, 3=A, None=nothing).
     pub active_slider: Option<u8>,
+    /// The slider Left and Right move (0=R ... 3=A), chosen with Tab.
+    pub focus: u8,
 }
 
 impl ColorPicker {
@@ -1333,7 +1386,56 @@ impl ColorPicker {
             is_open: false,
             editing_foreground: true,
             active_slider: None,
+            focus: 0,
         }
+    }
+
+    /// Channel `index` (0=R, 1=G, 2=B, 3=A), to change.
+    fn channel_mut(&mut self, index: u8) -> Option<&mut u8> {
+        match index {
+            0 => Some(&mut self.red),
+            1 => Some(&mut self.green),
+            2 => Some(&mut self.blue),
+            3 => Some(&mut self.alpha),
+            _ => None,
+        }
+    }
+
+    /// Set channel `index` from where the pointer is along its track.
+    fn set_channel_at(&mut self, index: u8, x: f32, track_x: f32, track_w: f32) {
+        let ratio = if track_w > 0.0 {
+            ((x - track_x) / track_w).clamp(0.0, 1.0)
+        } else {
+            0.0
+        };
+        #[allow(
+            clippy::cast_possible_truncation,
+            clippy::cast_sign_loss,
+            reason = "a ratio clamped to 0..=1, times 255, rounded: 0..=255"
+        )]
+        let value = (ratio * 255.0).round() as u8;
+        if let Some(channel) = self.channel_mut(index) {
+            *channel = value;
+        }
+        self.sync_hex();
+    }
+
+    /// Move the focused channel by `delta`, stopping at 0 and 255.
+    fn nudge(&mut self, delta: i16) {
+        let focus = self.focus;
+        if let Some(channel) = self.channel_mut(focus) {
+            *channel = u8::try_from(i16::from(*channel).saturating_add(delta).clamp(0, 255))
+                .unwrap_or(*channel);
+        }
+        self.sync_hex();
+    }
+
+    /// Show the colour the sliders now say in the hex field.
+    fn sync_hex(&mut self) {
+        self.hex_input = TextInput::with_text(&format!(
+            "{:02X}{:02X}{:02X}",
+            self.red, self.green, self.blue
+        ));
     }
 
     /// Returns the currently selected color.
@@ -1376,6 +1478,7 @@ impl ColorPicker {
     pub fn close(&mut self) {
         self.is_open = false;
         self.active_slider = None;
+        self.focus = 0;
     }
 }
 
@@ -1584,10 +1687,9 @@ const SHORTCUTS: &[(&str, &str)] = &[
     // is not the same as a card being complete, and the guard beside it only
     // checks the converse: that everything advertised works.
     ("Shift+M", "Shape fill: outline, filled, both"),
-    ("[", "Decrease brush size"),
-    ("]", "Increase brush size"),
-    ("H", "Flip horizontal"),
-    ("V", "Flip vertical"),
+    ("[ / ]", "Brush smaller / larger"),
+    ("H / V", "Flip horizontal / vertical"),
+    ("C / Shift+C", "Choose the colour / the background colour"),
     ("F5", "Toggle grid"),
     ("Enter", "Finish polygon / place text"),
     ("Escape", "Cancel / deselect"),
@@ -1861,16 +1963,24 @@ impl PaintApp {
         }
     }
 
-    /// Route a mouse event to the canvas.
+    /// Route a mouse event: the colour dialog while it is up, then the tool
+    /// panel -- a tool, a colour swatch, a palette colour -- then the canvas.
     ///
-    /// Only the canvas is wired. The toolbar, the option bar, the colour
-    /// swatches and the layers panel all compute their geometry inline in their
-    /// own render functions, so hit-testing them means extracting that geometry
-    /// first — the same job `apps/fontmanager` needed, and the reason a second
-    /// hand-written copy of it is not written here. Tools are reachable from
-    /// the keyboard meanwhile. Tracked in known-issues.md under
-    /// `TD-NO-APP-CONNECTS-TO-THE-COMPOSITOR`.
+    /// The panel's geometry comes from [`Self::toolbar_layout`], which its
+    /// painter reads too. It was drawn from numbers inline in the painter and
+    /// hit-tested by nothing, so every tool button, both swatches and the
+    /// whole palette were pictures: a colour could not be chosen at all --
+    /// the palette ignored clicks, and the colour dialog was opened only by a
+    /// test. The option bar and the layers panel are still drawn only.
     fn handle_mouse(&mut self, mouse: &MouseEvent) -> bool {
+        if self.color_picker.is_open {
+            return self.picker_mouse(mouse);
+        }
+        if let MouseEventKind::Press(button @ (MouseButton::Left | MouseButton::Right)) = mouse.kind
+            && self.toolbar_press(mouse.x, mouse.y, button == MouseButton::Right)
+        {
+            return true;
+        }
         match mouse.kind {
             MouseEventKind::Press(MouseButton::Left) => {
                 if !self.in_canvas_viewport(mouse.x, mouse.y) {
@@ -1933,6 +2043,11 @@ impl PaintApp {
     /// `TD-ONLY-ONE-KEYBOARD-LAYOUT` is closed this function is the one place
     /// that has to learn about layouts.
     fn handle_key(&mut self, key: &KeyEvent) -> bool {
+        // The colour dialog, while it is up, takes every key: a letter typed
+        // into its hex field is not a tool.
+        if self.color_picker.is_open && key.key != Key::F1 {
+            return self.picker_key(key);
+        }
         // The card is raised here rather than in `handle_key_press`, which is
         // given a `char` and would have to be told about a key that produces
         // none. Escape closes it before `SpecialKey::Escape` reaches the
@@ -3404,6 +3519,218 @@ impl PaintApp {
         }
     }
 
+    /// Where the tool panel's parts are: each tool's button, the two colour
+    /// swatches and each palette colour. One function for the painter and
+    /// the pointer.
+    fn toolbar_layout(&self) -> ToolbarLayout {
+        let tb_y = OPTION_BAR_HEIGHT;
+        let tools = Tool::all();
+        let buttons = tools
+            .iter()
+            .enumerate()
+            .map(|(i, &tool)| {
+                #[allow(clippy::cast_precision_loss, reason = "a dozen tools")]
+                let y = tb_y + 4.0 + i as f32 * 36.0;
+                (tool, Area::new(4.0, y, TOOLBAR_WIDTH - 8.0, 32.0))
+            })
+            .collect();
+        #[allow(clippy::cast_precision_loss, reason = "a dozen tools")]
+        let swatch_y = tb_y + 4.0 + tools.len() as f32 * 36.0 + 8.0;
+        let fg = Area::new(4.0 + 2.0, swatch_y + 2.0, 22.0, 22.0);
+        let bg = Area::new(4.0 + 14.0, swatch_y + 14.0, 22.0, 22.0);
+        let palette_y = swatch_y + 50.0;
+        let cell = 6.0;
+        let cols = 6usize;
+        let palette = (0..self.palette.len())
+            .map(|i| {
+                #[allow(clippy::cast_precision_loss, reason = "a palette of dozens")]
+                let (col, row) = ((i % cols) as f32, (i / cols) as f32);
+                Area::new(
+                    3.0 + col * (cell + 1.0),
+                    palette_y + row * (cell + 1.0),
+                    cell,
+                    cell,
+                )
+            })
+            .filter(|a| a.y + a.h <= palette_y + PALETTE_HEIGHT)
+            .collect();
+        ToolbarLayout {
+            buttons,
+            fg,
+            bg,
+            palette,
+            palette_y,
+        }
+    }
+
+    /// A press on the tool panel, if it was one: a tool button chooses the
+    /// tool; the foreground or background swatch opens the colour dialog for
+    /// it; a palette colour becomes the foreground -- or, with the right
+    /// button, the background.
+    fn toolbar_press(&mut self, x: f32, y: f32, right: bool) -> bool {
+        let layout = self.toolbar_layout();
+        if let Some(&(tool, _)) = layout.buttons.iter().find(|(_, a)| a.contains(x, y)) {
+            self.current_tool = tool;
+            return true;
+        }
+        // The foreground swatch is drawn over the background one, so it is
+        // asked first.
+        if layout.fg.contains(x, y) {
+            self.open_color_dialog(true);
+            return true;
+        }
+        if layout.bg.contains(x, y) {
+            self.open_color_dialog(false);
+            return true;
+        }
+        if let Some(index) = layout.palette.iter().position(|a| a.contains(x, y)) {
+            if let Some(&colour) = self.palette.get(index) {
+                if right {
+                    self.bg_color = colour;
+                } else {
+                    self.fg_color = colour;
+                }
+            }
+            return true;
+        }
+        // The rest of the panel is the panel's: a press between buttons is not
+        // a press on the canvas.
+        x < TOOLBAR_WIDTH && y >= OPTION_BAR_HEIGHT
+    }
+
+    /// Open the colour dialog on the foreground colour, or the background.
+    fn open_color_dialog(&mut self, foreground: bool) {
+        let current = if foreground {
+            self.fg_color
+        } else {
+            self.bg_color
+        };
+        self.color_picker.open_for(foreground, current);
+    }
+
+    /// Put the dialog's colour where it was opened for, and close it.
+    fn apply_color_dialog(&mut self) {
+        let colour = self.color_picker.color();
+        if self.color_picker.editing_foreground {
+            self.fg_color = colour;
+        } else {
+            self.bg_color = colour;
+        }
+        self.color_picker.close();
+    }
+
+    /// Where the colour dialog's parts are, for the window: one function for
+    /// its painter and the pointer.
+    fn picker_layout(&self) -> PickerLayout {
+        let (w, h) = (280.0, 300.0);
+        let x = (self.window_width - w) / 2.0;
+        let y = (self.window_height - h) / 2.0;
+        let preview_y = y + 36.0;
+        let slider_x = x + 12.0;
+        let slider_w = w - 24.0;
+        let track = |i: usize| {
+            #[allow(clippy::cast_precision_loss, reason = "four sliders")]
+            let sy = preview_y + 52.0 + i as f32 * 40.0;
+            Area::new(slider_x, sy + 16.0, slider_w, 8.0)
+        };
+        let hex_y = preview_y + 52.0 + 4.0 * 40.0 + 8.0;
+        let btn_y = hex_y + 28.0;
+        PickerLayout {
+            dialog: Area::new(x, y, w, h),
+            tracks: [track(0), track(1), track(2), track(3)],
+            ok: Area::new(slider_x, btn_y, 70.0, 24.0),
+            cancel: Area::new(slider_x + 80.0, btn_y, 70.0, 24.0),
+        }
+    }
+
+    /// The pointer, while the colour dialog is up. It takes every event: a
+    /// press behind it is not a press on the canvas.
+    fn picker_mouse(&mut self, mouse: &MouseEvent) -> bool {
+        let layout = self.picker_layout();
+        match mouse.kind {
+            MouseEventKind::Press(MouseButton::Left) => {
+                if layout.ok.contains(mouse.x, mouse.y) {
+                    self.apply_color_dialog();
+                } else if layout.cancel.contains(mouse.x, mouse.y) {
+                    self.color_picker.close();
+                } else if let Some((index, track)) = (0u8..)
+                    .zip(layout.tracks)
+                    .find(|(_, track)| track.grown(0.0, 8.0).contains(mouse.x, mouse.y))
+                {
+                    self.color_picker.active_slider = Some(index);
+                    self.color_picker.focus = index;
+                    self.color_picker
+                        .set_channel_at(index, mouse.x, track.x, track.w);
+                }
+                true
+            }
+            MouseEventKind::Move => {
+                let Some(index) = self.color_picker.active_slider else {
+                    return false;
+                };
+                let Some(track) = layout.tracks.get(usize::from(index)) else {
+                    return false;
+                };
+                self.color_picker
+                    .set_channel_at(index, mouse.x, track.x, track.w);
+                true
+            }
+            MouseEventKind::Release(MouseButton::Left) => {
+                self.color_picker.active_slider.take().is_some()
+            }
+            _ => true,
+        }
+    }
+
+    /// A key, while the colour dialog is up: Tab and Shift+Tab choose a
+    /// slider and Left and Right move it (Shift: sixteen at a time); hex
+    /// digits and Backspace type the hex field, which Enter reads; Enter
+    /// keeps the colour and Escape leaves it.
+    fn picker_key(&mut self, key: &KeyEvent) -> bool {
+        let step: i16 = if key.modifiers.shift { 16 } else { 1 };
+        match key.key {
+            Key::Enter => {
+                // Typed hex wins over the sliders when it is a whole colour:
+                // it is what was typed last.
+                if self
+                    .color_picker
+                    .hex_input
+                    .text
+                    .trim_start_matches('#')
+                    .len()
+                    == 6
+                {
+                    self.color_picker.apply_hex_input();
+                }
+                self.apply_color_dialog();
+            }
+            Key::Escape => self.color_picker.close(),
+            Key::Tab => {
+                // Round the four: back one is forward three.
+                let by = if key.modifiers.shift { 3 } else { 1 };
+                self.color_picker.focus = self.color_picker.focus.wrapping_add(by) % 4;
+            }
+            Key::Left => self.color_picker.nudge(step.saturating_neg()),
+            Key::Right => self.color_picker.nudge(step),
+            Key::Backspace => {
+                self.color_picker.hex_input.backspace();
+            }
+            _ => {
+                let Some(digit) = key.text.chars().next().filter(char::is_ascii_hexdigit) else {
+                    return true;
+                };
+                let hex = &mut self.color_picker.hex_input;
+                // A fresh colour replaces the six shown rather than adding to
+                // them: the field starts full.
+                if hex.text.len() >= 6 {
+                    *hex = TextInput::new();
+                }
+                hex.insert_char(digit.to_ascii_uppercase());
+            }
+        }
+        true
+    }
+
     /// Renders the left-side tool panel.
     fn render_toolbar(&self, cmds: &mut Vec<RenderCommand>) {
         let tb_x = 0.0;
@@ -3431,12 +3758,9 @@ impl PaintApp {
         });
 
         // Tool buttons
-        let tools = Tool::all();
-        for (i, &tool) in tools.iter().enumerate() {
-            let btn_x = tb_x + 4.0;
-            let btn_y = tb_y + 4.0 + i as f32 * 36.0;
-            let btn_w = TOOLBAR_WIDTH - 8.0;
-            let btn_h = 32.0;
+        let layout = self.toolbar_layout();
+        for &(tool, area) in &layout.buttons {
+            let (btn_x, btn_y, btn_w, btn_h) = (area.x, area.y, area.w, area.h);
 
             let is_active = tool == self.current_tool;
             let bg = if is_active {
@@ -3475,12 +3799,12 @@ impl PaintApp {
             });
         }
 
-        // Color swatches (below tools)
-        let swatch_y = tb_y + 4.0 + tools.len() as f32 * 36.0 + 8.0;
-        self.render_color_swatches(cmds, tb_x + 4.0, swatch_y);
+        // Color swatches (below tools), where the layout says the
+        // foreground one is.
+        self.render_color_swatches(cmds, layout.fg.x - 2.0, layout.fg.y - 2.0);
 
         // Palette below swatches (constrained to PALETTE_HEIGHT area)
-        let palette_y = swatch_y + 50.0;
+        let palette_y = layout.palette_y;
         let palette_max_y = palette_y + PALETTE_HEIGHT;
         cmds.push(RenderCommand::PushClip {
             x: tb_x,
@@ -3546,21 +3870,16 @@ impl PaintApp {
     }
 
     /// Renders a compact palette display in the toolbar.
-    fn render_palette_compact(&self, cmds: &mut Vec<RenderCommand>, base_x: f32, base_y: f32) {
-        let cell_size = 6.0;
-        let cols = 6u32;
-
-        for (i, color) in self.palette.iter().enumerate() {
-            let col = (i as u32) % cols;
-            let row = (i as u32) / cols;
-            let px = base_x + 3.0 + col as f32 * (cell_size + 1.0);
-            let py = base_y + row as f32 * (cell_size + 1.0);
-
+    fn render_palette_compact(&self, cmds: &mut Vec<RenderCommand>, base_x: f32, _base_y: f32) {
+        // Each colour where the layout says it is, so the cell drawn is the
+        // cell clicked.
+        let layout = self.toolbar_layout();
+        for (area, color) in layout.palette.iter().zip(&self.palette) {
             cmds.push(RenderCommand::FillRect {
-                x: px,
-                y: py,
-                width: cell_size,
-                height: cell_size,
+                x: base_x + area.x,
+                y: area.y,
+                width: area.w,
+                height: area.h,
                 color: *color,
                 corner_radii: CornerRadii::ZERO,
             });
@@ -4289,10 +4608,13 @@ impl PaintApp {
 
     /// Renders the color picker dialog (RGB sliders + hex input).
     fn render_color_picker_dialog(&self, cmds: &mut Vec<RenderCommand>) {
-        let dlg_w = 280.0;
-        let dlg_h = 300.0;
-        let dlg_x = (self.window_width - dlg_w) / 2.0;
-        let dlg_y = (self.window_height - dlg_h) / 2.0;
+        let layout = self.picker_layout();
+        let (dlg_x, dlg_y, dlg_w, dlg_h) = (
+            layout.dialog.x,
+            layout.dialog.y,
+            layout.dialog.w,
+            layout.dialog.h,
+        );
 
         // Shadow
         cmds.push(RenderCommand::BoxShadow {
@@ -4412,23 +4734,34 @@ impl PaintApp {
             ("A", self.color_picker.alpha, Color::rgb(200, 200, 200)),
         ];
 
-        for (i, &(label, value, bar_color)) in sliders.iter().enumerate() {
-            let sy = preview_y + 52.0 + i as f32 * 40.0;
+        for (i, (&(label, value, bar_color), track)) in
+            sliders.iter().zip(layout.tracks).enumerate()
+        {
+            let sy = track.y - 16.0;
 
-            // Label
+            // Label -- with a marker on the one Left and Right move.
+            let focused = usize::from(self.color_picker.focus) == i;
             cmds.push(RenderCommand::Text {
                 x: slider_x,
                 y: sy,
-                text: format!("{label}: {value}"),
+                text: if focused {
+                    format!("\u{25b8} {label}: {value}")
+                } else {
+                    format!("{label}: {value}")
+                },
                 font_size: 12.0,
                 color: self.theme.text,
-                font_weight: FontWeightHint::Regular,
+                font_weight: if focused {
+                    FontWeightHint::Bold
+                } else {
+                    FontWeightHint::Regular
+                },
                 max_width: None,
                 overflow: TextOverflow::Clip,
             });
 
             // Slider track
-            let track_y = sy + 16.0;
+            let track_y = track.y;
             self.theme.push_surface(
                 cmds,
                 slider_x,
@@ -4648,6 +4981,12 @@ impl PaintApp {
         match key {
             'x' | 'X' => {
                 self.swap_colors();
+                true
+            }
+            // C chooses the foreground colour, Shift+C the background: the
+            // colour dialog, which nothing but a test had ever opened.
+            'c' | 'C' => {
+                self.open_color_dialog(!shift);
                 true
             }
             '[' => {
@@ -7339,8 +7678,13 @@ mod tests {
     fn a_press_on_the_chrome_is_not_a_stroke() {
         let mut app = PaintApp::new(1024.0, 768.0);
         app.current_tool = Tool::Pencil;
-        assert!(!press(&mut app, 4.0, 400.0), "a press on the toolbar drew");
+        // The tool panel answers a press now -- it may choose a tool -- and
+        // it still never draws.
+        let before: Vec<Canvas> = app.layers.iter().map(|l| l.pixels.clone()).collect();
+        press(&mut app, 4.0, 400.0);
         assert!(!app.mouse_down, "a press on the toolbar began a stroke");
+        let after: Vec<Canvas> = app.layers.iter().map(|l| l.pixels.clone()).collect();
+        assert_eq!(after, before, "a press on the toolbar drew");
         assert!(
             !press(&mut app, 500.0, 4.0),
             "a press on the option bar drew"
@@ -7595,5 +7939,180 @@ mod tests {
             fills(&mut app),
             "high contrast reached every other surface but not this window"
         );
+    }
+
+    // == Choosing a colour (2026-09-27) ==========================================
+
+    fn press_at(app: &mut PaintApp, x: f32, y: f32, button: MouseButton) {
+        app.handle_event(&Event::Mouse(MouseEvent {
+            x,
+            y,
+            kind: MouseEventKind::Press(button),
+        }));
+    }
+
+    fn centre(a: Area) -> (f32, f32) {
+        (a.x + a.w / 2.0, a.y + a.h / 2.0)
+    }
+
+    #[test]
+    fn a_palette_colour_is_chosen_by_clicking_it() {
+        let mut app = PaintApp::new(640.0, 480.0);
+        let layout = app.toolbar_layout();
+        let (x, y) = centre(layout.palette[3]);
+        let want = app.palette[3];
+        press_at(&mut app, x, y, MouseButton::Left);
+        assert_eq!(
+            app.fg_color, want,
+            "a left click did not choose the foreground"
+        );
+        // A background no palette colour matches, so the right click is seen
+        // to change it -- and the foreground is seen to stay.
+        app.bg_color = Color::rgba(1, 2, 3, 4);
+        let (x, y) = centre(layout.palette[5]);
+        let want_bg = app.palette[5];
+        press_at(&mut app, x, y, MouseButton::Right);
+        assert_eq!(
+            app.bg_color, want_bg,
+            "a right click did not choose the background"
+        );
+        assert_eq!(app.fg_color, want, "a right click changed the foreground");
+    }
+
+    #[test]
+    fn a_tool_button_chooses_its_tool() {
+        let mut app = PaintApp::new(640.0, 480.0);
+        let layout = app.toolbar_layout();
+        let &(tool, area) = layout
+            .buttons
+            .iter()
+            .find(|(t, _)| *t != app.current_tool)
+            .expect("another tool");
+        let (x, y) = centre(area);
+        press_at(&mut app, x, y, MouseButton::Left);
+        assert_eq!(app.current_tool, tool);
+    }
+
+    #[test]
+    fn the_swatches_and_c_open_the_colour_dialog_and_enter_keeps_the_colour() {
+        let mut app = PaintApp::new(640.0, 480.0);
+        let layout = app.toolbar_layout();
+        let (x, y) = centre(layout.fg);
+        press_at(&mut app, x, y, MouseButton::Left);
+        assert!(app.color_picker.is_open && app.color_picker.editing_foreground);
+
+        // Drag the red slider to its end, then type nothing: Enter keeps it.
+        let picker = app.picker_layout();
+        let red = picker.tracks[0];
+        press_at(
+            &mut app,
+            red.x + 1.0,
+            red.y + red.h / 2.0,
+            MouseButton::Left,
+        );
+        app.handle_event(&Event::Mouse(MouseEvent {
+            x: red.x + red.w + 20.0,
+            y: red.y,
+            kind: MouseEventKind::Move,
+        }));
+        app.handle_event(&Event::Mouse(MouseEvent {
+            x: red.x + red.w + 20.0,
+            y: red.y,
+            kind: MouseEventKind::Release(MouseButton::Left),
+        }));
+        assert_eq!(
+            app.color_picker.red, 255,
+            "dragging past the end did not reach 255"
+        );
+        app.handle_event(&Event::Key(KeyEvent {
+            key: Key::Enter,
+            pressed: true,
+            modifiers: guitk::event::Modifiers::NONE,
+            text: String::new(),
+        }));
+        assert!(!app.color_picker.is_open);
+        assert_eq!(app.fg_color.r, 255);
+
+        // Shift+C opens it on the background; Escape leaves it as it was.
+        let before = app.bg_color;
+        app.handle_event(&Event::Key(KeyEvent {
+            key: Key::C,
+            pressed: true,
+            modifiers: guitk::event::Modifiers {
+                shift: true,
+                ..guitk::event::Modifiers::NONE
+            },
+            text: "C".to_string(),
+        }));
+        assert!(app.color_picker.is_open && !app.color_picker.editing_foreground);
+        app.handle_event(&Event::Key(KeyEvent {
+            key: Key::Right,
+            pressed: true,
+            modifiers: guitk::event::Modifiers::NONE,
+            text: String::new(),
+        }));
+        app.handle_event(&Event::Key(KeyEvent {
+            key: Key::Escape,
+            pressed: true,
+            modifiers: guitk::event::Modifiers::NONE,
+            text: String::new(),
+        }));
+        assert!(!app.color_picker.is_open);
+        assert_eq!(app.bg_color, before, "Escape changed the colour");
+    }
+
+    #[test]
+    fn a_typed_hex_colour_is_kept_and_letters_are_not_tools() {
+        let mut app = PaintApp::new(640.0, 480.0);
+        let tool = app.current_tool;
+        app.open_color_dialog(true);
+        for c in "12AB3c".chars() {
+            app.handle_event(&Event::Key(KeyEvent {
+                key: Key::A,
+                pressed: true,
+                modifiers: guitk::event::Modifiers::NONE,
+                text: c.to_string(),
+            }));
+        }
+        assert_eq!(app.current_tool, tool, "a hex letter switched the tool");
+        app.handle_event(&Event::Key(KeyEvent {
+            key: Key::Enter,
+            pressed: true,
+            modifiers: guitk::event::Modifiers::NONE,
+            text: String::new(),
+        }));
+        assert_eq!(
+            (app.fg_color.r, app.fg_color.g, app.fg_color.b),
+            (0x12, 0xAB, 0x3C)
+        );
+    }
+
+    #[test]
+    fn tab_and_the_arrows_move_the_chosen_slider() {
+        let mut app = PaintApp::new(640.0, 480.0);
+        app.fg_color = Color::rgb(10, 20, 30);
+        app.open_color_dialog(true);
+        let press = |app: &mut PaintApp, key: Key, shift: bool| {
+            app.handle_event(&Event::Key(KeyEvent {
+                key,
+                pressed: true,
+                modifiers: guitk::event::Modifiers {
+                    shift,
+                    ..guitk::event::Modifiers::NONE
+                },
+                text: String::new(),
+            }));
+        };
+        press(&mut app, Key::Tab, false);
+        assert_eq!(app.color_picker.focus, 1);
+        press(&mut app, Key::Right, true);
+        assert_eq!(app.color_picker.green, 36);
+        press(&mut app, Key::Tab, true);
+        press(&mut app, Key::Left, false);
+        assert_eq!(app.color_picker.red, 9);
+        for _ in 0..40 {
+            press(&mut app, Key::Left, true);
+        }
+        assert_eq!(app.color_picker.red, 0, "it went below zero");
     }
 }

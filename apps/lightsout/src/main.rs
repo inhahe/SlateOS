@@ -44,41 +44,76 @@
 //! blanket `#![allow(dead_code)]` is what let it sit there unnoticed. It is
 //! drawn now.
 
+use gamechrome::Chrome;
+use guitk::button::{Kind, State};
 use guitk::color::Color;
 use guitk::event::{Event, EventResult, Key, KeyEvent, MouseButton, MouseEvent, MouseEventKind};
 use guitk::frame::Rect;
+use guitk::palette::Palette;
 use guitk::probe::Probe;
 use guitk::render::{FontWeightHint, RenderCommand, RenderTree, TextOverflow};
 use guitk::rng::{RandomSource, SeededRng, seeded_from_system};
 use guitk::style::CornerRadii;
+use guitk::surface::Surface;
 use guitk::text;
 use oswindow::app::{self, App, Response};
 use std::process::ExitCode;
 
-// ── Catppuccin Mocha, only the entries this program actually paints with ──
-const COL_BASE: Color = Color::from_hex(0x1E1E2E);
-const COL_CRUST: Color = Color::from_hex(0x11111B);
-const COL_SURFACE0: Color = Color::from_hex(0x313244);
-const COL_SURFACE1: Color = Color::from_hex(0x45475A);
-const COL_TEXT: Color = Color::from_hex(0xCDD6F4);
-const COL_SUBTEXT: Color = Color::from_hex(0xA6ADC8);
-const COL_OVERLAY: Color = Color::from_hex(0x6C7086);
-const COL_BLUE: Color = Color::from_hex(0x89B4FA);
-const COL_GREEN: Color = Color::from_hex(0xA6E3A1);
-const COL_YELLOW: Color = Color::from_hex(0xF9E2AF);
-const COL_LAVENDER: Color = Color::from_hex(0xB4BEFE);
+// ── Colours ─────────────────────────────────────────────────────────
+//
+// Everything in this game follows the user's palette (the operator's answer
+// to C-Q16, §1422, and lane C's call for this game): its surfaces and text
+// from the palette's roles, each hue in the palette's ink for it, which reads
+// on the page in a light theme as in a dark one. It was all a copy of
+// Catppuccin Mocha, dark on a light desktop.
 
-/// A lit cell, and an unlit one.
-const LIGHT_ON: Color = COL_YELLOW;
-const LIGHT_OFF: Color = COL_SURFACE0;
-/// The keyboard cursor's ring. Distinct in hue from both light states, so it
-/// reads as "you are here" rather than as a third kind of light.
-const CURSOR_COLOR: Color = COL_BLUE;
+/// The colours the window draws in, from the user's palette.
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct Colours {
+    /// The page.
+    base: Color,
+    /// A well.
+    crust: Color,
+    /// Text.
+    text: Color,
+    /// Secondary text.
+    subtext0: Color,
+    /// The palette's blue, inked for the page.
+    blue: Color,
+    /// The palette's green, inked for the page.
+    green: Color,
+    /// The palette's yellow, inked for the page.
+    yellow: Color,
+    /// The palette's lavender, inked for the page.
+    lavender: Color,
 
-/// Translucent fills. `Color` has no float constructor — the alpha is a byte.
-const COL_SCRIM: Color = Color::rgba(0x1E, 0x1E, 0x2E, 158);
-const COL_BANNER: Color = Color::rgba(0x11, 0x11, 0x1B, 224);
-const COL_VEIL: Color = Color::rgba(0x11, 0x11, 0x1B, 214);
+    /// A lit cell, and an unlit one.
+    light_on: Color,
+    light_off: Color,
+    /// The keyboard cursor's ring, on a lit cell and on an unlit one:
+    /// whichever of the text and the page stands off it.
+    cursor_on: Color,
+    cursor_off: Color,
+}
+
+impl Colours {
+    fn of(p: &Palette) -> Self {
+        Self {
+            base: p.base,
+            crust: p.crust,
+            text: p.text,
+            subtext0: p.subtext0,
+            blue: p.ink(p.blue),
+            green: p.ink(p.green),
+            yellow: p.ink(p.yellow),
+            lavender: p.ink(p.lavender),
+            light_on: p.ink(p.yellow),
+            light_off: p.surface0,
+            cursor_on: gamechrome::legible_on((p.text, p.base), p.ink(p.yellow)),
+            cursor_off: gamechrome::legible_on((p.text, p.base), p.surface0),
+        }
+    }
+}
 
 /// Every board size the game offers, in the order they are offered.
 ///
@@ -348,6 +383,12 @@ pub struct LightsOut {
     rng: SeededRng,
     width: f32,
     height: f32,
+    /// The user's colours, replaced whenever the theme changes. Seeded from
+    /// the defaults; the framework calls `App::theme_changed` before the
+    /// first frame.
+    palette: Palette,
+    /// `palette`'s colours as this window draws them: rebuilt with it.
+    colours: Colours,
 }
 
 impl Default for LightsOut {
@@ -377,6 +418,8 @@ impl LightsOut {
             rng,
             width: WINDOW_WIDTH,
             height: WINDOW_HEIGHT,
+            palette: Palette::for_mode(false),
+            colours: Colours::of(&Palette::for_mode(false)),
         }
     }
 
@@ -649,7 +692,7 @@ impl LightsOut {
     pub fn frame(&self, width: f32, height: f32) -> Frame {
         let l = Layout::new(width, height);
         let mut f = Frame::new(l.window.w, l.window.h);
-        fill(&mut f, l.window, COL_BASE, 0.0);
+        fill(&mut f, l.window, self.colours.base, 0.0);
 
         if l.shows_header() {
             self.draw_header(&mut f, &l);
@@ -673,6 +716,22 @@ impl LightsOut {
         f
     }
 
+    /// A control: the toolkit's push button at this window's size, on the
+    /// page; `on` draws a choice that is made -- the board size in play, the
+    /// help up -- as the toolkit's primary button.
+    fn button(&self, f: &mut Frame, r: Rect, body: &str, size: f32, on: bool) {
+        gamechrome::button(
+            f,
+            &self.palette,
+            (r.x, r.y, r.w, r.h),
+            body,
+            size,
+            if on { Kind::Primary } else { Kind::Plain },
+            State::default(),
+            self.colours.base,
+        );
+    }
+
     fn draw_header(&self, f: &mut Frame, l: &Layout) {
         let cy = l.header.y + l.header.h / 2.0;
         let btn = l.help_button();
@@ -683,32 +742,13 @@ impl LightsOut {
             cy - text::line_height(l.font, FontWeightHint::Bold) / 2.0,
             "Lights Out",
             l.font,
-            COL_LAVENDER,
+            self.colours.lavender,
             FontWeightHint::Bold,
             Some(title_span),
         );
 
         if btn.w > 0.0 && btn.h > 0.0 {
-            fill(
-                f,
-                btn,
-                if self.show_help {
-                    COL_SURFACE1
-                } else {
-                    COL_SURFACE0
-                },
-                (btn.h * 0.25).min(6.0),
-            );
-            centred_in(
-                f,
-                btn.x,
-                btn.w,
-                btn.y + btn.h / 2.0,
-                "?",
-                l.small,
-                COL_TEXT,
-                FontWeightHint::Bold,
-            );
+            self.button(f, btn, "?", l.small, self.show_help);
             f.hit(Target::Help, btn);
         }
     }
@@ -730,7 +770,7 @@ impl LightsOut {
             l.info.y + l.info.h / 2.0,
             &body,
             l.small,
-            COL_SUBTEXT,
+            self.colours.subtext0,
             FontWeightHint::Regular,
         );
     }
@@ -750,7 +790,9 @@ impl LightsOut {
             l.best.y + l.best.h / 2.0,
             &body,
             l.small,
-            COL_OVERLAY,
+            // Secondary text: the record is read, and the palette's faintest
+            // grey is 2.3:1 on a light page.
+            self.colours.subtext0,
             FontWeightHint::Regular,
         );
     }
@@ -760,7 +802,7 @@ impl LightsOut {
             return;
         }
         let size = self.size();
-        fill(f, l.board, COL_CRUST, (l.board.w * 0.02).min(8.0));
+        fill(f, l.board, self.colours.crust, (l.board.w * 0.02).min(8.0));
 
         // The gutter between lights. Proportional, so a 7x7 board in a small
         // window still shows seven distinct cells instead of one yellow slab.
@@ -778,10 +820,19 @@ impl LightsOut {
                     (outer.w - inset * 2.0).max(0.0),
                     (outer.h - inset * 2.0).max(0.0),
                 );
-                fill(f, face, if on { LIGHT_ON } else { LIGHT_OFF }, radius);
+                fill(
+                    f,
+                    face,
+                    if on {
+                        self.colours.light_on
+                    } else {
+                        self.colours.light_off
+                    },
+                    radius,
+                );
 
                 if (row, col) == (self.cursor_row, self.cursor_col) {
-                    self.draw_cursor(f, face);
+                    self.draw_cursor(f, face, on);
                 }
                 // The hit box is the whole cell, gutter included: a click one
                 // pixel into the gap between two lights should pick one of
@@ -794,25 +845,29 @@ impl LightsOut {
     /// A ring around the cell the keyboard is on, drawn as four bars because
     /// a stroked rectangle would be centred on the edge and bleed outward
     /// into the gutter.
-    fn draw_cursor(&self, f: &mut Frame, face: Rect) {
+    fn draw_cursor(&self, f: &mut Frame, face: Rect, on: bool) {
+        // Whichever of the text and the page stands off the cell: a hue
+        // cannot, when the cell under it is lit in one theme's yellow and dark
+        // in the other's -- the blue ring was 1.6:1 on a lit cell in a light
+        // theme.
+        let ring = if on {
+            self.colours.cursor_on
+        } else {
+            self.colours.cursor_off
+        };
         let t = (face.w * 0.08).clamp(1.0, 4.0);
         if face.w <= t * 2.0 || face.h <= t * 2.0 {
             return;
         }
-        fill(f, Rect::new(face.x, face.y, face.w, t), CURSOR_COLOR, 0.0);
+        fill(f, Rect::new(face.x, face.y, face.w, t), ring, 0.0);
         fill(
             f,
             Rect::new(face.x, face.bottom() - t, face.w, t),
-            CURSOR_COLOR,
+            ring,
             0.0,
         );
-        fill(f, Rect::new(face.x, face.y, t, face.h), CURSOR_COLOR, 0.0);
-        fill(
-            f,
-            Rect::new(face.right() - t, face.y, t, face.h),
-            CURSOR_COLOR,
-            0.0,
-        );
+        fill(f, Rect::new(face.x, face.y, t, face.h), ring, 0.0);
+        fill(f, Rect::new(face.right() - t, face.y, t, face.h), ring, 0.0);
     }
 
     fn draw_banner(&self, f: &mut Frame, l: &Layout) {
@@ -820,7 +875,8 @@ impl LightsOut {
         if r.w <= 0.0 || r.h <= 0.0 {
             return;
         }
-        fill(f, r, COL_BANNER, (r.h * 0.15).min(8.0));
+        self.palette
+            .push_surface(f, r.x, r.y, r.w, r.h, (r.h * 0.15).min(8.0), Surface::Panel);
         let head = format!("All lights off in {} moves", self.moves);
         centred_in(
             f,
@@ -829,7 +885,7 @@ impl LightsOut {
             r.y + r.h * 0.34,
             &head,
             l.font,
-            COL_GREEN,
+            self.colours.green,
             FontWeightHint::Bold,
         );
         centred_in(
@@ -839,7 +895,7 @@ impl LightsOut {
             r.y + r.h * 0.72,
             "N for the next puzzle",
             l.small,
-            COL_SUBTEXT,
+            self.colours.subtext0,
             FontWeightHint::Regular,
         );
         // The banner says what to press, so it may as well be the button.
@@ -850,48 +906,24 @@ impl LightsOut {
         for (i, size) in SIZES.iter().enumerate() {
             let r = l.footer_button(i);
             let current = *size == self.size();
-            fill(
-                f,
-                r,
-                if current { COL_SURFACE1 } else { COL_SURFACE0 },
-                (r.h * 0.2).min(6.0),
-            );
-            centred_in(
-                f,
-                r.x,
-                r.w,
-                r.y + r.h / 2.0,
-                &format!("{size}x{size}"),
-                l.small,
-                if current { COL_YELLOW } else { COL_TEXT },
-                FontWeightHint::Bold,
-            );
+            self.button(f, r, &format!("{size}x{size}"), l.small, current);
             // Recorded even for the size already showing: a click there should
             // stop at the button, not reach whatever is behind it.
             f.hit(Target::Size(*size), r);
         }
 
         let r = l.footer_button(SIZES.len());
-        fill(f, r, COL_SURFACE0, (r.h * 0.2).min(6.0));
-        centred_in(
-            f,
-            r.x,
-            r.w,
-            r.y + r.h / 2.0,
-            "New",
-            l.small,
-            COL_BLUE,
-            FontWeightHint::Bold,
-        );
+        self.button(f, r, "New", l.small, false);
         f.hit(Target::NewGame, r);
     }
 
     fn draw_help(&self, f: &mut Frame, l: &Layout) {
         // Dim the whole window first, then the panel on top of it, so the
         // sheet reads as in front of the game rather than part of it.
-        fill(f, l.window, COL_SCRIM, 0.0);
+        fill(f, l.window, Chrome::of(&self.palette).scrim, 0.0);
         let p = l.help;
-        fill(f, p, COL_VEIL, 10.0);
+        self.palette
+            .push_surface(f, p.x, p.y, p.w, p.h, 10.0, Surface::Panel);
 
         let pad = (p.w * 0.06).clamp(6.0, 18.0);
         let inner = (p.w - pad * 2.0).max(0.0);
@@ -902,7 +934,7 @@ impl LightsOut {
             p.y + pad,
             HELP_TITLE,
             l.font,
-            COL_YELLOW,
+            self.colours.yellow,
             FontWeightHint::Bold,
             Some(inner),
         );
@@ -925,7 +957,7 @@ impl LightsOut {
                     y,
                     v,
                     l.small,
-                    COL_SUBTEXT,
+                    self.colours.subtext0,
                     FontWeightHint::Regular,
                     Some(inner),
                 );
@@ -936,7 +968,7 @@ impl LightsOut {
                     y,
                     k,
                     l.small,
-                    COL_BLUE,
+                    self.colours.blue,
                     FontWeightHint::Bold,
                     Some(key_span),
                 );
@@ -946,7 +978,7 @@ impl LightsOut {
                     y,
                     v,
                     l.small,
-                    COL_TEXT,
+                    self.colours.text,
                     FontWeightHint::Regular,
                     Some((inner - key_span).max(0.0)),
                 );
@@ -1057,6 +1089,11 @@ pub fn handle_event(app: &mut LightsOut, event: &Event) -> EventResult {
 }
 
 impl App for LightsOut {
+    fn theme_changed(&mut self, palette: &Palette) {
+        self.palette = *palette;
+        self.colours = Colours::of(palette);
+    }
+
     fn title(&self) -> String {
         "Lights Out".to_string()
     }
@@ -1136,6 +1173,250 @@ mod tests {
     )]
 
     use super::*;
+
+    /// The palette for a light or a dark theme, in the bordered look (the
+    /// default) or the card look.
+    fn palette(light: bool, cards: bool) -> Palette {
+        let mut p = Palette::for_mode(light);
+        p.set_surface_style(if cards {
+            guitk::palette::SurfaceStyle::Cards
+        } else {
+            guitk::palette::SurfaceStyle::Borders
+        });
+        p
+    }
+
+    /// Every look in `p`'s colours: a puzzle in play, the help sheet, a
+    /// puzzle solved, and a cramped window.
+    fn every_look(p: &Palette) -> Vec<(&'static str, LightsOut)> {
+        let mut help = game();
+        help.show_help = true;
+        let mut won = game();
+        won.state = GameState::Won;
+        let cramped = windowed(360.0, 380.0);
+        let mut looks = vec![
+            ("playing", game()),
+            ("help", help),
+            ("won", won),
+            ("cramped", cramped),
+        ];
+        for (_, g) in &mut looks {
+            g.theme_changed(p);
+        }
+        looks
+    }
+
+    /// **The window is drawn in the user's colours**, light or dark, in
+    /// either surface look -- every colour the palette's or the toolkit's
+    /// buttons' (the operator's C-Q16). It drew in its own copy of
+    /// Catppuccin Mocha, dark on a light desktop.
+    #[test]
+    fn the_window_is_drawn_in_the_users_colours() {
+        for (light, cards) in [(false, false), (true, false), (false, true), (true, true)] {
+            let p = palette(light, cards);
+            let mut derived = gamechrome::button_colours(&p, Kind::Plain, p.base);
+            derived.extend(gamechrome::button_colours(&p, Kind::Primary, p.base));
+            for (what, g) in every_look(&p) {
+                appearance::palette_check::assert_drawn_from(
+                    &p,
+                    g.frame(g.width, g.height).commands(),
+                    &derived,
+                    &format!("lightsout, {what}, light: {light}, cards: {cards}"),
+                );
+            }
+        }
+    }
+
+    /// **Every text reads on what is drawn under it**, in either theme and
+    /// either surface look (`gamechrome::legibility`).
+    #[test]
+    fn every_text_reads_on_what_is_under_it_in_either_theme() {
+        let mut bad = Vec::new();
+        for (light, cards) in [(false, false), (true, false), (false, true), (true, true)] {
+            let p = palette(light, cards);
+            for (what, g) in every_look(&p) {
+                let f = g.frame(g.width, g.height);
+                for r in gamechrome::legibility::illegible(f.commands(), p.base, |_| false) {
+                    bad.push(format!(
+                        "{what}, light: {light}, cards: {cards}: {:?} {:.2}:1 on {:?}",
+                        r.text,
+                        r.ratio(),
+                        r.ground
+                    ));
+                }
+            }
+        }
+        assert!(bad.is_empty(), "lightsout: {bad:#?}");
+    }
+
+    /// **The board size in play looks chosen** among the size buttons, as
+    /// the toolkit's primary button.
+    #[test]
+    fn the_board_size_in_play_looks_chosen() {
+        let g = game();
+        let f = g.frame(g.width, g.height);
+        let face_of = |label: &str| {
+            let (tx, ty) = f
+                .commands()
+                .iter()
+                .find_map(|c| match c {
+                    RenderCommand::Text { text, x, y, .. } if text == label => Some((*x, *y)),
+                    _ => None,
+                })
+                .unwrap_or_else(|| panic!("{label} is not drawn"));
+            f.commands()
+                .iter()
+                .find_map(|c| match c {
+                    RenderCommand::FillRect {
+                        x,
+                        y,
+                        width,
+                        height,
+                        color,
+                        ..
+                    } if Rect::new(*x, *y, *width, *height).contains(tx + 1.0, ty + 1.0)
+                        && *width < g.width / 3.0 =>
+                    {
+                        Some(*color)
+                    }
+                    _ => None,
+                })
+                .unwrap_or_else(|| panic!("{label} has no face"))
+        };
+        let paint =
+            |kind| guitk::button::paint(&g.palette, kind, State::default(), g.colours.base).lower;
+        for size in SIZES {
+            let want = if size == g.size() {
+                Kind::Primary
+            } else {
+                Kind::Plain
+            };
+            assert_eq!(
+                face_of(&format!("{size}x{size}")),
+                paint(want),
+                "{size}x{size} looks wrong"
+            );
+        }
+    }
+
+    /// **The banner and the help sheet have grounds of their own** -- the
+    /// toolkit's panel, filled in either surface look -- so their words do
+    /// not land on the lights under them.
+    #[test]
+    fn the_banner_and_the_sheet_have_grounds_of_their_own() {
+        let opaque_at = |g: &LightsOut, r: Rect| {
+            g.frame(g.width, g.height).commands().iter().any(|c| {
+                matches!(c, RenderCommand::FillRect { x, y, width, height, color, .. }
+                    if (*x - r.x).abs() < 0.01
+                        && (*y - r.y).abs() < 0.01
+                        && (*width - r.w).abs() < 0.01
+                        && (*height - r.h).abs() < 0.01
+                        && color.a == u8::MAX)
+            })
+        };
+        for cards in [false, true] {
+            let mut won = game();
+            won.state = GameState::Won;
+            won.theme_changed(&palette(false, cards));
+            let l = Layout::new(won.width, won.height);
+            assert!(
+                opaque_at(&won, l.banner()),
+                "the banner has no ground (cards: {cards})"
+            );
+            let mut help = game();
+            help.show_help = true;
+            help.theme_changed(&palette(false, cards));
+            let l = Layout::new(help.width, help.height);
+            assert!(
+                opaque_at(&help, l.help),
+                "the help sheet has no ground (cards: {cards})"
+            );
+        }
+    }
+
+    /// **The cursor as drawn is seen on the cell under it**, lit or unlit,
+    /// in either theme: the ring's bars against the cell's face, as they are
+    /// painted.
+    #[test]
+    fn the_cursor_as_drawn_is_seen_on_the_cell_under_it() {
+        for light in [false, true] {
+            for lit in [false, true] {
+                let mut g = game();
+                g.theme_changed(&Palette::for_mode(light));
+                let (row, col) = (g.cursor_row, g.cursor_col);
+                if let Some(cell) = g.grid.get_mut(row).and_then(|r| r.get_mut(col)) {
+                    *cell = lit;
+                }
+                assert_eq!(
+                    g.at(row, col),
+                    Some(lit),
+                    "the fixture did not set the cell"
+                );
+                let face = if lit {
+                    g.colours.light_on
+                } else {
+                    g.colours.light_off
+                };
+                let l = Layout::new(g.width, g.height);
+                let cell = l.cell(g.size(), row, col);
+                let bars: Vec<Color> = g
+                    .frame(g.width, g.height)
+                    .commands()
+                    .iter()
+                    .filter_map(|c| match c {
+                        RenderCommand::FillRect {
+                            x,
+                            y,
+                            width,
+                            height,
+                            color,
+                            ..
+                        } if cell.contains(*x + 0.5, *y + 0.5)
+                            && width.min(*height) <= cell.w * 0.1 =>
+                        {
+                            Some(*color)
+                        }
+                        _ => None,
+                    })
+                    .collect();
+                assert_eq!(
+                    bars.len(),
+                    4,
+                    "the ring is not four bars (light: {light}, lit: {lit})"
+                );
+                for bar in bars {
+                    let ratio = guitk::theme::contrast_ratio(bar, face);
+                    assert!(
+                        ratio >= 3.0,
+                        "the cursor is {ratio:.2}:1 on a {} cell (light: {light})",
+                        if lit { "lit" } else { "dark" }
+                    );
+                }
+            }
+        }
+    }
+
+    /// **A lit cell is told from an unlit one, and the cursor is seen on
+    /// either, in either theme** (WCAG 1.4.11's 3:1): a blue ring was 1.6:1
+    /// on a lit cell in a light theme.
+    #[test]
+    fn the_lights_and_the_cursor_are_seen_in_either_theme() {
+        for light in [false, true] {
+            let c = Colours::of(&Palette::for_mode(light));
+            let ratio = guitk::theme::contrast_ratio(c.light_on, c.light_off);
+            assert!(
+                ratio >= 3.0,
+                "lit and unlit are {ratio:.2}:1 apart (light: {light})"
+            );
+            for (cell, ring) in [(c.light_on, c.cursor_on), (c.light_off, c.cursor_off)] {
+                let ratio = guitk::theme::contrast_ratio(ring, cell);
+                assert!(
+                    ratio >= 3.0,
+                    "the cursor is {ratio:.2}:1 on {cell:?} (light: {light})"
+                );
+            }
+        }
+    }
     use guitk::probe;
 
     /// Windows to check the layout against, from a desktop down to something
@@ -1538,7 +1819,7 @@ mod tests {
                     matches!(
                         c,
                         RenderCommand::FillRect { color, .. }
-                            if *color == LIGHT_ON || *color == LIGHT_OFF
+                            if *color == app.colours.light_on || *color == app.colours.light_off
                     )
                 })
                 .count();
@@ -1680,14 +1961,30 @@ mod tests {
     #[test]
     fn the_cursor_ring_follows_the_cell_it_is_on() {
         let mut app = game();
+        // The ring's four bars: thin fills in the cursor's colour for the cell
+        // under it -- which may be the text's or the page's, so the bars are
+        // told from any other fill of that colour by being thin.
         let ring = |app: &LightsOut| {
+            let on = app.at(app.cursor_row, app.cursor_col).unwrap_or(false);
+            let colour = if on {
+                app.colours.cursor_on
+            } else {
+                app.colours.cursor_off
+            };
+            let l = Layout::new(app.width, app.height);
+            let cell = l.cell(app.size(), 0, 0);
             app.frame(app.width, app.height)
                 .commands()
                 .iter()
                 .filter_map(|c| match c {
-                    RenderCommand::FillRect { x, y, color, .. } if *color == CURSOR_COLOR => {
-                        Some((*x, *y))
-                    }
+                    RenderCommand::FillRect {
+                        x,
+                        y,
+                        width,
+                        height,
+                        color,
+                        ..
+                    } if *color == colour && width.min(*height) <= cell.w * 0.1 => Some((*x, *y)),
                     _ => None,
                 })
                 .fold((f32::MAX, f32::MAX), |acc, p| {

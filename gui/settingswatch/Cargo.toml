@@ -1,0 +1,18 @@
+[package]
+name = "settingswatch"
+version = "0.1.0"
+edition = "2024"
+description = "Notices a settings file being rewritten, so the desktop can tell every open window (design-decisions 1418)"
+
+[dependencies]
+# inotify, through the linked C library rather than as a second libc.
+libcall = { path = "../../libcall" }
+# The one rule for a settings file's name, which the announcement carries.
+settingsname = { path = "../settingsname" }
+
+[dev-dependencies]
+# A private directory per test, for the folder listings.
+scratchdir = { path = "../../userspace/scratchdir" }
+
+[lints]
+workspace = true

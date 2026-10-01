@@ -100,7 +100,7 @@
 //! element is likewise left unexpanded, since resolving it needs `getpwnam`.
 //! Both are recorded in `known-issues.md`.
 
-use coreutils::getopt::{self, Opt, Program, Takes};
+use coreutils::getopt::{self, Opt, Program, Report, Takes};
 use coreutils::quote::{os_bytes, os_from_bytes};
 use coreutils::stdfd::{self, Stream};
 use std::ffi::OsString;

@@ -63,7 +63,9 @@
 
 use core::ffi::CStr;
 
+pub mod inotify;
 pub mod pty;
+pub mod utmp;
 
 // ---------------------------------------------------------------------------
 // Values

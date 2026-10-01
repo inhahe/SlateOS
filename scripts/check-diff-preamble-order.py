@@ -62,15 +62,25 @@ def unquoted_prefix(line, in_quote):
     and it was wrong.
     """
     out = []
+    prev = " "
     for ch in line:
         if in_quote:
             if ch == in_quote:
                 in_quote = None
             continue
+        # An unquoted `#` at the start of a word begins a comment, and nothing
+        # after it opens a quote. Without this, the apostrophe in a comment such
+        # as "upstream's snapshots" opened a quote that ran on until the next
+        # stray one, and every line in between was skipped as its inside --
+        # which is how four harnesses sourcing util-linux-source.sh first went
+        # unseen while three with the same lines were caught.
+        if ch == "#" and prev.isspace():
+            break
         if ch in (chr(34), chr(39)):
             in_quote = ch
             continue
         out.append(ch)
+        prev = ch
     return "".join(out), in_quote
 
 
@@ -91,6 +101,13 @@ def offenders_in(text):
         # and "inspected nothing" print the same word.
         if SOURCE.match(raw.strip()) and "diff-wsl.sh" in raw:
             return found, True
+        # util-linux-source.sh is written to be sourced BEFORE the preamble
+        # (its own header says so) and to be a no-op on the first pass: it
+        # returns at once unless `uname -s` is Linux, and in WSL it fetches
+        # once and then finds its `.unpacked` marker. Its second run is the
+        # no-op this gate asks for, promised by the file itself.
+        if SOURCE.match(raw.strip()) and "util-linux-source.sh" in raw and in_quote is None:
+            continue
         visible, next_quote = unquoted_prefix(raw, in_quote)
         was_in_quote = in_quote is not None
         in_quote = next_quote
@@ -134,6 +151,19 @@ SELFTEST = [
     ('a comment mentioning diff-wsl.sh is not a source line',
      ['# see diff-wsl.sh', 'mkdir -p x', '. "$(dirname "$0")/diff-wsl.sh"'],
      1, True),
+    ('an apostrophe in a comment does not hide the command after it',
+     ["# upstream's snapshots", 'mkdir -p x', '. "$(dirname "$0")/diff-wsl.sh"'],
+     1, True),
+    ('...nor does one in a comment after a command',
+     ["DIFF_PROG=x  # it's here", 'mkdir -p x', '. "$(dirname "$0")/diff-wsl.sh"'],
+     1, True),
+    ('a # inside a word is not a comment',
+     ['DIFF_PROG=a#b', 'mkdir -p x', '. "$(dirname "$0")/diff-wsl.sh"'],
+     1, True),
+    ('sourcing util-linux-source.sh first is accepted',
+     ["# upstream's source", 'DIFF_PROG=x', '. "$(dirname "$0")/util-linux-source.sh"',
+      '. "$(dirname "$0")/diff-wsl.sh"'],
+     0, True),
 ]
 
 

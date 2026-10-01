@@ -167,12 +167,10 @@ fn run_main() -> ExitCode {
 /// Whether `POSIXLY_CORRECT` is set, which is the *only* thing that decides
 /// `-L` versus `-P` when neither was given.
 ///
-/// It has a second effect upstream that is not implemented here: gnulib's
-/// `getopt` stops permuting when it is set, so `POSIXLY_CORRECT=1 pwd foo -L`
-/// would treat `-L` as another ignored operand. That gap is crate-wide rather
-/// than `pwd`'s -- see `known-issues.md:29600` -- and `pwd` is the one utility
-/// where it cannot change the output, since every operand is ignored anyway
-/// and the warning is printed either way.
+/// Its second effect upstream is getopt's, and the shared parser has it too:
+/// the first operand ends option parsing, so `POSIXLY_CORRECT=1 pwd foo -P`
+/// treats `-P` as another ignored operand and stays logical. See
+/// `coreutils::getopt`, "Where option parsing stops".
 fn posixly_correct() -> bool {
     env::var_os("POSIXLY_CORRECT").is_some()
 }

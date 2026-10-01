@@ -1,0 +1,19 @@
+[package]
+name = "blake2"
+version = "0.1.0"
+edition = "2024"
+description = "BLAKE2b (RFC 7693), ported from the BLAKE2 reference implementation."
+
+[lib]
+path = "src/lib.rs"
+
+# `no_std`, no `alloc`, no dependencies — the same terms as `sha2`, so any
+# caller that can link one can link the other. The state is fixed-size and the
+# digest is returned in a fixed array. BLAKE2b does not share `blockbuf`: it
+# has no Merkle-Damgard length padding, and it must hold back a full final
+# block rather than compress it, because the last block is compressed with a
+# flag the others are not.
+[dependencies]
+
+[lints]
+workspace = true

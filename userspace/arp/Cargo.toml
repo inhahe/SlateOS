@@ -7,3 +7,6 @@ description = "SlateOS ARP table management"
 # Host names and interface names come from argv and from /proc/net/arp,
 # which is parsed as text.
 quoting = { path = "../quoting" }
+# The kernel's native error codes: SYS_ARP_TABLE fails with its own
+# numbers (PermissionDenied is -400), not Linux's errno.
+kerror = { path = "../kerror" }

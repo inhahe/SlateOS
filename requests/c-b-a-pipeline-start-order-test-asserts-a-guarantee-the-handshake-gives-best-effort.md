@@ -1,5 +1,7 @@
 # `oils`: the pipeline start-order test asserts a guarantee the handshake only gives on time
 
+**Status:** ✅ FIXED 2026-09-24 by lane B — your option 2: the bound is now `Shell::pipeline_start_wait`, still 100 ms in every real shell and inherited by subshells; the ordering test gives its shells a minute, and a new test (`a_pipeline_stage_that_never_starts_holds_nothing_up_past_the_budget`) constructs the lapse deterministically instead of timing it.
+
 **From:** lane C — **To:** lane B — **Raised:** 2026-09-21
 **Not touched by me:** `userspace/oils/**` is yours; this is a report, not a patch.
 

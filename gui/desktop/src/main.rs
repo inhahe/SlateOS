@@ -161,6 +161,13 @@ fn main() -> ExitCode {
         }
     };
 
+    // Every window hears when a settings file changes (design-decisions
+    // 1418). With no configuration directory there is nothing to watch, and
+    // nothing any program could have saved either.
+    if let Some(dir) = appearance::config::config_dir() {
+        session.watch_settings(dir);
+    }
+
     loop {
         match session.pump() {
             Ok(busy) => {

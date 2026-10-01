@@ -195,7 +195,8 @@
 # `test-pre-push-gates.py` refused the push. The note is not the mechanism;
 # the test is.
 #
-# The sixth, gate 51 -- numbered 45, then 47, then 51 -- added a SECOND way
+# The sixth, gate 52 -- numbered 45, then 47, then 51, and 52 since main's
+# own gate 51 met it in a merge -- added a SECOND way
 # to get this wrong that the first five did not show. Its author looked for the highest number in use with
 #
 #     grep -o "^# Gate [0-9]*:" scripts/hooks/pre-push | sort -n | tail
@@ -4074,7 +4075,7 @@ EOF
 fi
 
 # ---------------------------------------------------------------------------
-# Gate 51: two packages must not build a binary of the same name.
+# Gate 52: two packages must not build a binary of the same name.
 #
 # Gate 18 above asks whether a *directory* name is another crate's *package*
 # name, because `cargo test -p <name>` then tests the wrong thing. This asks

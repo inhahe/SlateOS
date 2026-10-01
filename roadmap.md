@@ -2144,8 +2144,10 @@ live.
   itself bounded; drawings fitted to the pixels as `preserveAspectRatio`
   says instead of stretched; inner `<svg>`s placed in their own viewports;
   and a document nested past 128 levels refused, where one 100 000 deep
-  overflowed the stack of whatever drew it. Still not drawn: clip paths,
-  masks, patterns and `<style>` sheets.
+  overflowed the stack of whatever drew it. And clip paths -- what an
+  element draws cut to the shapes of the `<clipPath>` it names, in either
+  units, by its `clip-rule`, clips within clips multiplying. Still not
+  drawn: masks, patterns and `<style>` sheets.
 
 - `[C]` **The run box wears the theme's window frame** (`design-decisions.md`
   §1461) -- done 2026-10-01. `desktop::dialog_frame` draws a shell dialog's

@@ -24,7 +24,10 @@
 //!   itself through other `use`s is drawn once; and depth and the number of
 //!   nodes drawn through `use` are bounded, so a document cannot multiply
 //!   itself without end
-//! - Clip paths, masks, patterns and filters are not applied
+//! - `clip-path`: what an element draws is cut to the `<clipPath>` it names
+//!   (the `clip` module says how); a symbol's or inner `<svg>`'s viewport
+//!   does not yet cut what overflows it
+//! - Masks, patterns and filters are not applied
 //! - Container elements: the outermost svg, its viewBox fitted to the pixels
 //!   as its `preserveAspectRatio` says; an svg inside it, placed in a
 //!   viewport of its own (what overflows that viewport is drawn, not cut);
@@ -49,13 +52,17 @@ use crate::color::Color;
 use core::f32::consts::PI;
 use std::collections::HashMap;
 
+mod clip;
 mod paint;
 #[cfg(test)]
 mod use_tests;
 #[cfg(test)]
 mod viewport_tests;
 
+pub use clip::Clip;
+use clip::{ClipIds, ClipPath, MAX_CLIP_DEPTH, Mask, clip_path_frame, may_clip};
 use paint::{Defs, Gradient};
+use std::rc::Rc;
 
 // ─── Error Types ─────────────────────────────────────────────────────────────
 
@@ -1134,6 +1141,10 @@ pub struct SvgStyle {
     pub fill_opacity: Option<f32>,
     /// The stroke's opacity, inherited the same way.
     pub stroke_opacity: Option<f32>,
+    /// The rule a clip path's shapes are filled by; inherited.
+    pub clip_rule: Option<FillRule>,
+    /// What the element is clipped to: not inherited -- each element's own.
+    pub clip: Option<Clip>,
 }
 
 impl Default for SvgStyle {
@@ -1149,6 +1160,8 @@ impl Default for SvgStyle {
             opacity: 1.0,
             fill_opacity: None,
             stroke_opacity: None,
+            clip_rule: None,
+            clip: None,
         }
     }
 }
@@ -1224,9 +1237,13 @@ pub enum SvgNode {
     /// built once, however many `<use>`s name it, and kept with the
     /// document; `content` is its place there.
     Use {
-        /// The `<use>`'s own transform, its `x` and `y`, and for a
-        /// `<symbol>` or `<svg>` the viewport it is shown in.
+        /// The `<use>`'s own transform and its `x` and `y`: the user space
+        /// of the group SVG says a `<use>` stands for, which its clip path
+        /// is measured in.
         transform: Transform,
+        /// For a `<symbol>` or `<svg>`, its place in the viewport the
+        /// `<use>` shows it in; otherwise nothing.
+        placement: Transform,
         /// The `<use>`'s style, which the content inherits.
         style: SvgStyle,
         content: usize,
@@ -1244,6 +1261,8 @@ pub struct SvgDocument {
     /// What its `<use>` elements draw: each element one names, built once,
     /// at the place [`SvgNode::Use`] gives.
     reused: Vec<SvgNode>,
+    /// Its `<clipPath>`s, at the places [`Clip::Path`] gives.
+    clips: Vec<ClipPath>,
 }
 
 /// The user-space rectangle an `<svg>` element shows, `(x, y, width,
@@ -1295,12 +1314,17 @@ impl SvgDocument {
         // defined after it. Their percentages are of the viewport.
         let (_, _, view_w, view_h) = DeclaredSize::of(first).shown();
         let defs = Defs::collect(first, (view_w, view_h));
-        // Then every element a `<use>` names, so that a `<use>` met while
-        // building finds its content's place already given.
-        let reusable = Reusable::collect(first);
+        // Then every element a `<use>` names, and every `<clipPath>`, so that
+        // a `<use>` or a `clip-path` met while building finds its place
+        // already given, wherever in the document what it names is.
+        let mut by_id = HashMap::new();
+        index_ids(first, &mut by_id);
+        let reusable = Reusable::collect(first, &by_id);
+        let clip_ids = ClipIds::collect(first, &by_id);
         let builder = Builder {
             defs: &defs,
             reusable: &reusable,
+            clips: &clip_ids,
             ancestors: None,
             viewport: (view_w, view_h),
             outermost: true,
@@ -1310,8 +1334,18 @@ impl SvgDocument {
             .iter()
             .map(|&(id, target)| build_reused(id, target, builder.inner()))
             .collect();
+        let clips = clip_ids
+            .elements
+            .iter()
+            .map(|elem| build_clip_path(elem, builder.inner()))
+            .collect();
         let root = build_node(first, builder)?;
-        Ok(Self { root, defs, reused })
+        Ok(Self {
+            root,
+            defs,
+            reused,
+            clips,
+        })
     }
 
     /// Get the viewBox (min_x, min_y, width, height).
@@ -1337,7 +1371,7 @@ impl SvgDocument {
     /// a drawing asked for at another shape is not stretched. A view box with
     /// no area draws nothing.
     pub fn render(&self, width: u32, height: u32) -> Vec<u8> {
-        let mut renderer = SvgRenderer::new(width, height, &self.defs, &self.reused);
+        let mut renderer = SvgRenderer::new(width, height, &self.defs, &self.reused, &self.clips);
         let aspect = match &self.root {
             SvgNode::Svg { aspect, .. } => *aspect,
             _ => AspectRatio::DEFAULT,
@@ -1454,20 +1488,144 @@ fn scaled_alpha(alpha: u8, share: f32) -> u8 {
 /// precision.
 fn user_bbox(subpaths: &[Subpath], ctm: Transform) -> Option<(f32, f32, f32, f32)> {
     let inverse = ctm.inverse()?;
-    let (mut min_x, mut min_y) = (f32::INFINITY, f32::INFINITY);
-    let (mut max_x, mut max_y) = (f32::NEG_INFINITY, f32::NEG_INFINITY);
+    let mut extent = Extent::default();
     for subpath in subpaths {
         for &(x, y) in &subpath.points {
             let (ux, uy) = inverse.apply(x, y);
-            if ux.is_finite() && uy.is_finite() {
-                min_x = min_x.min(ux);
-                min_y = min_y.min(uy);
-                max_x = max_x.max(ux);
-                max_y = max_y.max(uy);
-            }
+            extent.add(ux, uy);
         }
     }
-    (min_x <= max_x && min_y <= max_y).then_some((min_x, min_y, max_x - min_x, max_y - min_y))
+    extent.rect()
+}
+
+/// The smallest box holding the points added to it.
+#[derive(Clone, Copy, Debug)]
+struct Extent {
+    min_x: f32,
+    min_y: f32,
+    max_x: f32,
+    max_y: f32,
+}
+
+impl Default for Extent {
+    /// Holding nothing yet.
+    fn default() -> Self {
+        Self {
+            min_x: f32::INFINITY,
+            min_y: f32::INFINITY,
+            max_x: f32::NEG_INFINITY,
+            max_y: f32::NEG_INFINITY,
+        }
+    }
+}
+
+impl Extent {
+    /// Take in the point `(x, y)`; one that is not a number is no point.
+    fn add(&mut self, x: f32, y: f32) {
+        if x.is_finite() && y.is_finite() {
+            self.min_x = self.min_x.min(x);
+            self.min_y = self.min_y.min(y);
+            self.max_x = self.max_x.max(x);
+            self.max_y = self.max_y.max(y);
+        }
+    }
+
+    /// The box as `x, y, width, height`, or `None` if nothing was added.
+    fn rect(&self) -> Option<(f32, f32, f32, f32)> {
+        (self.min_x <= self.max_x && self.min_y <= self.max_y).then_some((
+            self.min_x,
+            self.min_y,
+            self.max_x - self.min_x,
+            self.max_y - self.min_y,
+        ))
+    }
+
+    /// The pixels it reaches on a surface `width` by `height`, as columns
+    /// `x0..x1` and rows `y0..y1` -- or `None` where it reaches none.
+    fn pixels(&self, width: u32, height: u32) -> Option<(u32, u32, u32, u32)> {
+        let (x, y, w, h) = self.rect()?;
+        // Held to the surface first, so the casts neither wrap nor lose
+        // anything that matters.
+        #[allow(
+            clippy::cast_possible_truncation,
+            clippy::cast_sign_loss,
+            clippy::cast_precision_loss,
+            reason = "held to 0..=the surface's side first"
+        )]
+        let clamp = |v: f32, side: u32| v.clamp(0.0, side as f32) as u32;
+        let (x0, y0) = (clamp(x.floor(), width), clamp(y.floor(), height));
+        let (x1, y1) = (clamp((x + w).ceil(), width), clamp((y + h).ceil(), height));
+        (x0 < x1 && y0 < y1).then_some((x0, y0, x1, y1))
+    }
+}
+
+/// An element's own style: `None` for the outermost `<svg>`, whose style is
+/// on a group inside it.
+fn style_of(node: &SvgNode) -> Option<&SvgStyle> {
+    match node {
+        SvgNode::Svg { .. } => None,
+        SvgNode::Group { style, .. }
+        | SvgNode::Rect { style, .. }
+        | SvgNode::Circle { style, .. }
+        | SvgNode::Ellipse { style, .. }
+        | SvgNode::Line { style, .. }
+        | SvgNode::Polyline { style, .. }
+        | SvgNode::Polygon { style, .. }
+        | SvgNode::Path { style, .. }
+        | SvgNode::Use { style, .. } => Some(style),
+    }
+}
+
+/// The transform an element carries what it holds by: from its own user
+/// space to its parent's. For a `<use>`, its `x` and `y` with it, the
+/// placement of a symbol it shows not.
+fn local_transform(node: &SvgNode) -> Transform {
+    match node {
+        SvgNode::Svg { .. } => Transform::IDENTITY,
+        SvgNode::Group { transform, .. }
+        | SvgNode::Rect { transform, .. }
+        | SvgNode::Circle { transform, .. }
+        | SvgNode::Ellipse { transform, .. }
+        | SvgNode::Line { transform, .. }
+        | SvgNode::Polyline { transform, .. }
+        | SvgNode::Polygon { transform, .. }
+        | SvgNode::Path { transform, .. }
+        | SvgNode::Use { transform, .. } => *transform,
+    }
+}
+
+/// The outline of the shape `node`, its geometry -- in its own user space,
+/// inside its `transform` -- carried by `to`; nothing for a container, which
+/// has no outline of its own. What drawing a shape fills and strokes, a clip
+/// path's shape fills its mask with, and a box is measured round.
+fn shape_outline(node: &SvgNode, to: Transform) -> Vec<Subpath> {
+    match node {
+        SvgNode::Rect {
+            x,
+            y,
+            width,
+            height,
+            rx,
+            ry,
+            ..
+        } => rect_subpath(*x, *y, *width, *height, *rx, *ry, to)
+            .into_iter()
+            .collect(),
+        SvgNode::Circle { cx, cy, r, .. } => {
+            ellipse_subpath(*cx, *cy, *r, *r, to).into_iter().collect()
+        }
+        SvgNode::Ellipse { cx, cy, rx, ry, .. } => ellipse_subpath(*cx, *cy, *rx, *ry, to)
+            .into_iter()
+            .collect(),
+        SvgNode::Line { x1, y1, x2, y2, .. } => {
+            vec![points_subpath(&[(*x1, *y1), (*x2, *y2)], to, false)]
+        }
+        // A polyline is open: no closing segment.
+        SvgNode::Polyline { points, .. } => vec![points_subpath(points, to, false)],
+        SvgNode::Polygon { points, .. } => vec![points_subpath(points, to, true)],
+        SvgNode::Path { commands, .. } => path_to_subpaths(commands, to),
+        SvgNode::Svg { .. } | SvgNode::Group { .. } | SvgNode::Use { .. } => Vec::new(),
+    }
 }
 
 // ─── XML Parser (minimal, SVG-only) ─────────────────────────────────────────
@@ -1800,6 +1958,9 @@ struct Builder<'b> {
     /// The elements `<use>`s name, and each one's place among the content
     /// the document keeps for them.
     reusable: &'b Reusable<'b>,
+    /// The document's `<clipPath>`s, by `id`, for a `clip-path` that names
+    /// one.
+    clips: &'b ClipIds<'b>,
     /// The innermost element with an `id` that the element is inside: a
     /// `<use>` naming any of these would draw itself inside itself.
     ancestors: Option<&'b Ancestor<'b>>,
@@ -1854,17 +2015,15 @@ struct Reusable<'x> {
 }
 
 impl<'x> Reusable<'x> {
-    /// Every element a `<use>` in the document under `root` names: the
-    /// first with that `id`, where two share one, as `getElementById` has
-    /// it.
-    fn collect(root: &'x XmlElement) -> Self {
-        let mut by_id = HashMap::new();
-        index_ids(root, &mut by_id);
+    /// Every element a `<use>` in the document under `root` names, as
+    /// `by_id` finds it: the first with that `id`, where two share one, as
+    /// `getElementById` has it.
+    fn collect(root: &'x XmlElement, by_id: &HashMap<&'x str, &'x XmlElement>) -> Self {
         let mut reusable = Self {
             places: HashMap::new(),
             targets: Vec::new(),
         };
-        reusable.gather(root, &by_id);
+        reusable.gather(root, by_id);
         reusable
     }
 
@@ -2011,8 +2170,9 @@ fn build_use(elem: &XmlElement, b: Builder<'_>) -> Result<SvgNode, SvgError> {
         .transpose()?
         .unwrap_or(Transform::IDENTITY);
     Ok(SvgNode::Use {
-        transform: own.then(offset).then(placement),
-        style: parse_style_attrs(elem, b.defs)?,
+        transform: own.then(offset),
+        placement,
+        style: parse_style_attrs(elem, b)?,
         content,
     })
 }
@@ -2048,11 +2208,35 @@ fn build_reused(id: &str, target: &XmlElement, b: Builder<'_>) -> SvgNode {
     let content = build_children(target, Builder { viewport, ..b }).and_then(|children| {
         Ok(SvgNode::Group {
             transform: Transform::IDENTITY,
-            style: parse_style_attrs(target, b.defs)?,
+            style: parse_style_attrs(target, b)?,
             children,
         })
     });
     content.unwrap_or_else(|_| nothing())
+}
+
+/// A `<clipPath>`, built: its shapes and `<use>`s -- nothing else may stand in
+/// one -- each as it would be drawn, with what the clip path says of itself.
+///
+/// A child that cannot be built is left out of the clip, as content a `<use>`
+/// names is left out of the drawing, and for the same reason: a clip path
+/// draws nothing where it stands, so before clip paths were read a bad shape
+/// in one failed nothing.
+fn build_clip_path(elem: &XmlElement, b: Builder<'_>) -> ClipPath {
+    let (units, transform, rule, clip) = clip_path_frame(elem, b.clips);
+    let children = elem
+        .children
+        .iter()
+        .filter(|child| may_clip(&child.tag))
+        .filter_map(|child| build_node(child, b).ok())
+        .collect();
+    ClipPath {
+        units,
+        transform,
+        rule,
+        clip,
+        children,
+    }
 }
 
 fn build_node(elem: &XmlElement, b: Builder<'_>) -> Result<SvgNode, SvgError> {
@@ -2117,7 +2301,7 @@ fn build_svg(elem: &XmlElement, b: Builder<'_>) -> Result<SvgNode, SvgError> {
     // such icon drew its outlines as solid black shapes: the default fill,
     // unstroked. A group carrying them gives them the inheritance a `<g>`
     // already has, without a second kind of node to walk.
-    let style = parse_style_attrs(elem, b.defs)?;
+    let style = parse_style_attrs(elem, b)?;
     let children = if style == SvgStyle::default() {
         children
     } else {
@@ -2195,7 +2379,7 @@ fn build_inner_svg(elem: &XmlElement, b: Builder<'_>) -> Result<SvgNode, SvgErro
     let children = build_children(elem, Builder { viewport, ..b })?;
     Ok(SvgNode::Group {
         transform: own.then(placement),
-        style: parse_style_attrs(elem, b.defs)?,
+        style: parse_style_attrs(elem, b)?,
         children,
     })
 }
@@ -2206,7 +2390,7 @@ fn build_group(elem: &XmlElement, b: Builder<'_>) -> Result<SvgNode, SvgError> {
         .map(parse_transform)
         .transpose()?
         .unwrap_or(Transform::IDENTITY);
-    let style = parse_style_attrs(elem, b.defs)?;
+    let style = parse_style_attrs(elem, b)?;
     let children = build_children(elem, b.inner());
     Ok(SvgNode::Group {
         transform,
@@ -2235,7 +2419,7 @@ fn build_rect(elem: &XmlElement, b: Builder<'_>) -> Result<SvgNode, SvgError> {
             .map(parse_transform)
             .transpose()?
             .unwrap_or(Transform::IDENTITY),
-        style: parse_style_attrs(elem, b.defs)?,
+        style: parse_style_attrs(elem, b)?,
     })
 }
 
@@ -2249,7 +2433,7 @@ fn build_circle(elem: &XmlElement, b: Builder<'_>) -> Result<SvgNode, SvgError> 
             .map(parse_transform)
             .transpose()?
             .unwrap_or(Transform::IDENTITY),
-        style: parse_style_attrs(elem, b.defs)?,
+        style: parse_style_attrs(elem, b)?,
     })
 }
 
@@ -2264,7 +2448,7 @@ fn build_ellipse(elem: &XmlElement, b: Builder<'_>) -> Result<SvgNode, SvgError>
             .map(parse_transform)
             .transpose()?
             .unwrap_or(Transform::IDENTITY),
-        style: parse_style_attrs(elem, b.defs)?,
+        style: parse_style_attrs(elem, b)?,
     })
 }
 
@@ -2279,7 +2463,7 @@ fn build_line(elem: &XmlElement, b: Builder<'_>) -> Result<SvgNode, SvgError> {
             .map(parse_transform)
             .transpose()?
             .unwrap_or(Transform::IDENTITY),
-        style: parse_style_attrs(elem, b.defs)?,
+        style: parse_style_attrs(elem, b)?,
     })
 }
 
@@ -2296,7 +2480,7 @@ fn build_polyline(elem: &XmlElement, b: Builder<'_>) -> Result<SvgNode, SvgError
             .map(parse_transform)
             .transpose()?
             .unwrap_or(Transform::IDENTITY),
-        style: parse_style_attrs(elem, b.defs)?,
+        style: parse_style_attrs(elem, b)?,
     })
 }
 
@@ -2313,7 +2497,7 @@ fn build_polygon(elem: &XmlElement, b: Builder<'_>) -> Result<SvgNode, SvgError>
             .map(parse_transform)
             .transpose()?
             .unwrap_or(Transform::IDENTITY),
-        style: parse_style_attrs(elem, b.defs)?,
+        style: parse_style_attrs(elem, b)?,
     })
 }
 
@@ -2327,7 +2511,7 @@ fn build_path(elem: &XmlElement, b: Builder<'_>) -> Result<SvgNode, SvgError> {
             .map(parse_transform)
             .transpose()?
             .unwrap_or(Transform::IDENTITY),
-        style: parse_style_attrs(elem, b.defs)?,
+        style: parse_style_attrs(elem, b)?,
     })
 }
 
@@ -2406,9 +2590,9 @@ fn paint_property(
     elem.attr(name).map(paint).transpose()
 }
 
-fn parse_style_attrs(elem: &XmlElement, defs: &Defs) -> Result<SvgStyle, SvgError> {
-    let fill = paint_property(elem, "fill", defs)?;
-    let stroke = paint_property(elem, "stroke", defs)?;
+fn parse_style_attrs(elem: &XmlElement, b: Builder<'_>) -> Result<SvgStyle, SvgError> {
+    let fill = paint_property(elem, "fill", b.defs)?;
+    let stroke = paint_property(elem, "stroke", b.defs)?;
     let stroke_width = property(elem, "stroke-width").and_then(length);
     let number = |name: &str| property(elem, name).and_then(|v| v.parse::<f32>().ok());
     let opacity = number("opacity").unwrap_or(1.0);
@@ -2455,6 +2639,8 @@ fn parse_style_attrs(elem: &XmlElement, defs: &Defs) -> Result<SvgStyle, SvgErro
         opacity,
         fill_opacity,
         stroke_opacity,
+        clip_rule: clip::clip_rule(elem),
+        clip: property(elem, "clip-path").and_then(|value| b.clips.clip(value)),
     })
 }
 
@@ -3380,7 +3566,16 @@ struct SvgRenderer<'d> {
     depth: usize,
     /// How many more nodes may be drawn inside `<use>`s.
     reuse_budget: usize,
+    /// The document's `<clipPath>`s, for a `clip-path` that names one.
+    clips: &'d [ClipPath],
+    /// What the clips around the node being drawn leave of each pixel:
+    /// coverage is multiplied by it. `None` where nothing is clipped.
+    mask: Option<Rc<Mask>>,
 }
+
+/// The mask that was in force round a clipped element, to put back once the
+/// element is drawn: `None` where nothing was clipped.
+struct OuterMask(Option<Rc<Mask>>);
 
 /// How many containers deep drawing goes, `<use>`s counted: twice as deep
 /// as a document may nest, for content a `<use>` shows inside content
@@ -3397,7 +3592,13 @@ const MAX_DRAWN_DEPTH: usize = 2 * MAX_NESTING;
 const MAX_REUSED_NODES: usize = 100_000;
 
 impl<'d> SvgRenderer<'d> {
-    fn new(width: u32, height: u32, defs: &'d Defs, reused: &'d [SvgNode]) -> Self {
+    fn new(
+        width: u32,
+        height: u32,
+        defs: &'d Defs,
+        reused: &'d [SvgNode],
+        clips: &'d [ClipPath],
+    ) -> Self {
         // A size that does not fit in `usize` could not be allocated even if it
         // were computed, so an empty buffer is the honest answer rather than a
         // wrapped one. Every write goes through `pixel_mut`, which checks the
@@ -3419,6 +3620,8 @@ impl<'d> SvgRenderer<'d> {
             drawing: Vec::new(),
             depth: 0,
             reuse_budget: MAX_REUSED_NODES,
+            clips,
+            mask: None,
         }
     }
 
@@ -3444,6 +3647,8 @@ impl<'d> SvgRenderer<'d> {
             self.reuse_budget = left;
         }
         self.depth = self.depth.saturating_add(1);
+        // A clipped element is drawn under its clip, all it holds with it.
+        let outer_mask = self.enter_clip(node, transform);
         match node {
             SvgNode::Svg { children, .. } => {
                 for child in children {
@@ -3463,6 +3668,7 @@ impl<'d> SvgRenderer<'d> {
             }
             SvgNode::Use {
                 transform: local_xf,
+                placement,
                 style,
                 content,
             } => {
@@ -3472,7 +3678,7 @@ impl<'d> SvgRenderer<'d> {
                 if !self.drawing.contains(content)
                     && let Some(shown) = reused.get(*content)
                 {
-                    let combined = transform.then(*local_xf);
+                    let combined = transform.then(*local_xf).then(*placement);
                     let resolved = parent_style.with_overrides(style);
                     self.drawing.push(*content);
                     self.render_node(shown, combined, &resolved);
@@ -3481,99 +3687,178 @@ impl<'d> SvgRenderer<'d> {
             }
             _ => self.render_shape(node, transform, parent_style),
         }
+        if let Some(OuterMask(outer)) = outer_mask {
+            self.mask = outer;
+        }
         self.depth = self.depth.saturating_sub(1);
     }
 
-    /// Draw the shape `node` -- anything but a container, which draws nothing
-    /// here -- in the space `transform` carries to the pixels.
-    fn render_shape(&mut self, node: &SvgNode, transform: Transform, parent_style: &ResolvedStyle) {
-        match node {
-            SvgNode::Svg { .. } | SvgNode::Group { .. } | SvgNode::Use { .. } => {}
-            SvgNode::Rect {
-                x,
-                y,
-                width,
-                height,
-                rx,
-                ry,
-                transform: local_xf,
-                style,
-            } => {
-                let combined = transform.then(*local_xf);
-                let resolved = parent_style.with_overrides(style);
-                let outline = rect_subpath(*x, *y, *width, *height, *rx, *ry, combined);
-                self.paint(outline.as_slice(), &resolved, combined);
-            }
-            SvgNode::Circle {
-                cx,
-                cy,
-                r,
-                transform: local_xf,
-                style,
-            } => {
-                let combined = transform.then(*local_xf);
-                let resolved = parent_style.with_overrides(style);
-                let outline = ellipse_subpath(*cx, *cy, *r, *r, combined);
-                self.paint(outline.as_slice(), &resolved, combined);
-            }
-            SvgNode::Ellipse {
-                cx,
-                cy,
-                rx,
-                ry,
-                transform: local_xf,
-                style,
-            } => {
-                let combined = transform.then(*local_xf);
-                let resolved = parent_style.with_overrides(style);
-                let outline = ellipse_subpath(*cx, *cy, *rx, *ry, combined);
-                self.paint(outline.as_slice(), &resolved, combined);
-            }
-            SvgNode::Line {
-                x1,
-                y1,
-                x2,
-                y2,
-                transform: local_xf,
-                style,
-            } => {
-                let combined = transform.then(*local_xf);
-                let resolved = parent_style.with_overrides(style);
-                let outline = points_subpath(&[(*x1, *y1), (*x2, *y2)], combined, false);
-                self.paint(&[outline], &resolved, combined);
-            }
-            SvgNode::Polyline {
-                points,
-                transform: local_xf,
-                style,
-            } => {
-                let combined = transform.then(*local_xf);
-                let resolved = parent_style.with_overrides(style);
-                // A polyline is open: no closing segment.
-                let outline = points_subpath(points, combined, false);
-                self.paint(&[outline], &resolved, combined);
-            }
-            SvgNode::Polygon {
-                points,
-                transform: local_xf,
-                style,
-            } => {
-                let combined = transform.then(*local_xf);
-                let resolved = parent_style.with_overrides(style);
-                let outline = points_subpath(points, combined, true);
-                self.paint(&[outline], &resolved, combined);
-            }
-            SvgNode::Path {
-                commands,
-                transform: local_xf,
-                style,
-            } => {
-                let combined = transform.then(*local_xf);
-                let resolved = parent_style.with_overrides(style);
-                let subpaths = path_to_subpaths(commands, combined);
-                self.paint(&subpaths, &resolved, combined);
+    /// Lay `node`'s clip, if it has one, over what is already clipped round
+    /// it -- `transform` carrying its parent's user space to the pixels -- and
+    /// answer what to put back once it is drawn; `None` where nothing
+    /// changed: no clip, or one that names no clip path.
+    fn enter_clip(&mut self, node: &SvgNode, transform: Transform) -> Option<OuterMask> {
+        let clip = style_of(node)?.clip?;
+        let local = transform.then(local_transform(node));
+        let mask = self.clip_mask(clip, node, local, 0)?;
+        let mask = match &self.mask {
+            Some(outer) => outer.intersect(&mask),
+            None => mask,
+        };
+        Some(OuterMask(self.mask.replace(Rc::new(mask))))
+    }
+
+    /// What `clip` leaves of the surface for `node`, whose own user space
+    /// `local` carries to the pixels: its clip path's shapes filled into a
+    /// mask, as its units and transform place them, under the clip path's own
+    /// clip. `None` for a clip that names no clip path, which clips nothing.
+    fn clip_mask(
+        &self,
+        clip: Clip,
+        node: &SvgNode,
+        local: Transform,
+        depth: usize,
+    ) -> Option<Mask> {
+        let Clip::Path(place) = clip;
+        let path = self.clips.get(place)?;
+        let to_clip = match path.units {
+            paint::Units::UserSpaceOnUse => local.then(path.transform),
+            paint::Units::ObjectBoundingBox => match self.bounds(node) {
+                Some((x, y, w, h)) if w > 0.0 && h > 0.0 => local
+                    .then(path.transform)
+                    .then(Transform::translate(x, y))
+                    .then(Transform::scale(w, h)),
+                // Measured against a box with no area, it leaves nothing.
+                _ => return Some(Mask::nothing()),
+            },
+        };
+        // Each shape's outline on the surface, and the rule it is filled by.
+        let base_rule = path.rule.unwrap_or(FillRule::NonZero);
+        let mut shapes: Vec<(Vec<Subpath>, FillRule)> = Vec::new();
+        for child in &path.children {
+            let own_rule = style_of(child).and_then(|style| style.clip_rule);
+            if let SvgNode::Use {
+                transform,
+                placement,
+                content,
+                ..
+            } = child
+            {
+                // A `<use>` in a clip path stands for the shape it names.
+                if let Some(shown) = self.reused.get(*content) {
+                    let rule = style_of(shown)
+                        .and_then(|style| style.clip_rule)
+                        .or(own_rule)
+                        .unwrap_or(base_rule);
+                    let to = to_clip
+                        .then(*transform)
+                        .then(*placement)
+                        .then(local_transform(shown));
+                    shapes.push((shape_outline(shown, to), rule));
+                }
+            } else {
+                let to = to_clip.then(local_transform(child));
+                shapes.push((shape_outline(child, to), own_rule.unwrap_or(base_rule)));
             }
         }
+        let mut extent = Extent::default();
+        for (outline, _) in &shapes {
+            for subpath in outline {
+                for &(x, y) in &subpath.points {
+                    extent.add(x, y);
+                }
+            }
+        }
+        let mut mask = extent
+            .pixels(self.width, self.height)
+            .map_or_else(Mask::nothing, |(x0, y0, x1, y1)| Mask::over(x0, y0, x1, y1));
+        for (outline, rule) in &shapes {
+            let outlines: Vec<&[(f32, f32)]> = outline
+                .iter()
+                .map(|subpath| subpath.points.as_slice())
+                .collect();
+            scan_shape(
+                self.width,
+                self.height,
+                self.ss_factor,
+                &outlines,
+                *rule,
+                |row, first_col, coverage| mask.add_row(row, first_col, coverage),
+            );
+        }
+        if let Some(outer) = path.clip
+            && depth < MAX_CLIP_DEPTH
+            && let Some(clipped) = self.clip_mask(outer, node, local, depth.saturating_add(1))
+        {
+            mask = mask.intersect(&clipped);
+        }
+        Some(mask)
+    }
+
+    /// The box of what `node` draws, in its own user space -- inside its
+    /// `transform` -- as `x, y, width, height`: its shapes' geometry, strokes
+    /// not counted, as SVG's bounding box is. `None` for one that draws no
+    /// shape.
+    fn bounds(&self, node: &SvgNode) -> Option<(f32, f32, f32, f32)> {
+        let mut extent = Extent::default();
+        let mut budget = MAX_REUSED_NODES;
+        self.add_extent(node, Transform::IDENTITY, &mut extent, 0, &mut budget);
+        extent.rect()
+    }
+
+    /// Add what `node` draws, its own user space carried by `to`, to
+    /// `extent`: as deep as drawing goes, and no more nodes than `budget`.
+    fn add_extent(
+        &self,
+        node: &SvgNode,
+        to: Transform,
+        extent: &mut Extent,
+        depth: usize,
+        budget: &mut usize,
+    ) {
+        let Some(left) = budget.checked_sub(1) else {
+            return;
+        };
+        *budget = left;
+        if depth >= MAX_DRAWN_DEPTH {
+            return;
+        }
+        let deeper = depth.saturating_add(1);
+        match node {
+            SvgNode::Svg { children, .. } | SvgNode::Group { children, .. } => {
+                for child in children {
+                    let into = to.then(local_transform(child));
+                    self.add_extent(child, into, extent, deeper, budget);
+                }
+            }
+            SvgNode::Use {
+                placement, content, ..
+            } => {
+                if let Some(shown) = self.reused.get(*content) {
+                    let into = to.then(*placement).then(local_transform(shown));
+                    self.add_extent(shown, into, extent, deeper, budget);
+                }
+            }
+            _ => {
+                for subpath in shape_outline(node, to) {
+                    for &(x, y) in &subpath.points {
+                        extent.add(x, y);
+                    }
+                }
+            }
+        }
+    }
+
+    /// Draw the shape `node` -- anything but a container -- in the space
+    /// `transform` carries its parent's user space to the pixels.
+    fn render_shape(&mut self, node: &SvgNode, transform: Transform, parent_style: &ResolvedStyle) {
+        let Some(style) = style_of(node) else {
+            return;
+        };
+        let combined = transform.then(local_transform(node));
+        let resolved = parent_style.with_overrides(style);
+        let outline = shape_outline(node, combined);
+        self.paint(&outline, &resolved, combined);
     }
 
     /// Fill and stroke one shape, `subpaths` in device space, as `style` says.
@@ -3670,133 +3955,48 @@ impl<'d> SvgRenderer<'d> {
         if self.buffer.is_empty() || invisible {
             return;
         }
-        let mut edges: Vec<FillEdge> = Vec::new();
-        let (mut min_x, mut max_x) = (f32::INFINITY, f32::NEG_INFINITY);
-        let (mut min_y, mut max_y) = (f32::INFINITY, f32::NEG_INFINITY);
-        for outline in outlines {
-            let closing = match outline {
-                [first, .., last] => Some((*last, *first)),
-                _ => None,
-            };
-            let sides = outline
-                .windows(2)
-                .filter_map(|w| match *w {
-                    [a, b] => Some((a, b)),
-                    _ => None,
-                })
-                .chain(closing);
-            for (a, b) in sides {
-                if !(a.0.is_finite() && a.1.is_finite() && b.0.is_finite() && b.1.is_finite()) {
-                    continue;
-                }
-                let (top, bottom, winding) = match a.1.partial_cmp(&b.1) {
-                    Some(core::cmp::Ordering::Less) => (a, b, 1),
-                    Some(core::cmp::Ordering::Greater) => (b, a, -1),
-                    // Level: crosses no scanline.
-                    _ => continue,
-                };
-                min_x = min_x.min(a.0).min(b.0);
-                max_x = max_x.max(a.0).max(b.0);
-                min_y = min_y.min(top.1);
-                max_y = max_y.max(bottom.1);
-                edges.push(FillEdge {
-                    x_top: top.0,
-                    y_top: top.1,
-                    y_bottom: bottom.1,
-                    slope: (bottom.0 - top.0) / (bottom.1 - top.1),
-                    winding,
-                });
-            }
-        }
-        if edges.is_empty() {
-            return;
-        }
-        edges.sort_by(|a, b| a.y_top.total_cmp(&b.y_top));
-
-        // Rows and columns the shape can reach, on the surface.
-        let rows = (min_y.floor().max(0.0) as u32)..(max_y.ceil().min(self.height as f32) as u32);
-        let first_col = min_x.floor().max(0.0) as u32;
-        let end_col = max_x.ceil().min(self.width as f32) as u32;
-        let Ok(columns) = usize::try_from(end_col.saturating_sub(first_col)) else {
-            return;
-        };
-        if rows.is_empty() || columns == 0 {
-            return;
-        }
-        let origin = first_col as f32;
-        let ss = self.ss_factor.max(1);
-        let weight = 1.0 / ss as f32;
-
-        let mut coverage = vec![0.0f32; columns];
-        let mut active: Vec<usize> = Vec::new();
-        let mut next_edge = 0usize;
-        let mut crossings: Vec<(f32, i32)> = Vec::new();
-        for row in rows {
-            coverage.fill(0.0);
-            for sub in 0..ss {
-                let scan_y = row as f32 + (sub as f32 + 0.5) * weight;
-                // Edges that have begun by this line join the active list...
-                while let Some(edge) = edges.get(next_edge) {
-                    if edge.y_top > scan_y {
-                        break;
-                    }
-                    active.push(next_edge);
-                    next_edge = next_edge.saturating_add(1);
-                }
-                // ...and those that have ended leave it.
-                active.retain(|&i| edges.get(i).is_some_and(|e| e.y_bottom > scan_y));
-                crossings.clear();
-                crossings.extend(active.iter().filter_map(|&i| {
-                    edges
-                        .get(i)
-                        .map(|e| (e.x_top + (scan_y - e.y_top) * e.slope, e.winding))
-                }));
-                crossings.sort_by(|a, b| a.0.total_cmp(&b.0));
-                let mut winding = 0i32;
-                for pair in crossings.windows(2) {
-                    let &[(left, turn), (right, _)] = pair else {
+        // What the clip paths around the shape leave of each pixel.
+        let mask = self.mask.clone();
+        let (width, height, ss) = (self.width, self.height, self.ss_factor);
+        scan_shape(
+            width,
+            height,
+            ss,
+            outlines,
+            rule,
+            |row, first_col, coverage| {
+                for (col, &cov) in (first_col..).zip(coverage) {
+                    let cov = mask.as_ref().map_or(cov, |mask| cov * mask.share(col, row));
+                    if cov <= 0.0 {
                         continue;
+                    }
+                    // The colour here: the one colour, or the gradient's at this
+                    // pixel's centre.
+                    let color = match fill {
+                        Fill::Solid(color) => *color,
+                        Fill::Gradient {
+                            gradient,
+                            inverse,
+                            alpha,
+                        } => {
+                            let (gx, gy) = inverse.apply(col as f32 + 0.5, row as f32 + 0.5);
+                            let c = gradient.color_at(gx, gy);
+                            Color::rgba(c.r, c.g, c.b, scaled_alpha(c.a, *alpha))
+                        }
                     };
-                    winding = winding.saturating_add(turn);
-                    let inside = match rule {
-                        FillRule::NonZero => winding != 0,
-                        FillRule::EvenOdd => winding & 1 != 0,
-                    };
-                    if inside {
-                        cover_span(&mut coverage, left - origin, right - origin, weight);
+                    // `+ 0.5` and truncate, not `.round()`: on the x86-64
+                    // baseline `round` is a call into libm (`roundf`), not an
+                    // instruction, and this runs once per pixel -- lane F measured
+                    // the same call at most of a per-pixel pass's cost
+                    // (design-decisions §1323). Coverage is never negative, so the
+                    // two agree, and `as` saturates past 255.
+                    let alpha = (cov.min(1.0) * f32::from(color.a) + 0.5) as u8;
+                    if alpha > 0 {
+                        self.blend_pixel(col, row, Color::rgba(color.r, color.g, color.b, alpha));
                     }
                 }
-            }
-            for (col, &cov) in (first_col..).zip(&coverage) {
-                if cov <= 0.0 {
-                    continue;
-                }
-                // The colour here: the one colour, or the gradient's at this
-                // pixel's centre.
-                let color = match fill {
-                    Fill::Solid(color) => *color,
-                    Fill::Gradient {
-                        gradient,
-                        inverse,
-                        alpha,
-                    } => {
-                        let (gx, gy) = inverse.apply(col as f32 + 0.5, row as f32 + 0.5);
-                        let c = gradient.color_at(gx, gy);
-                        Color::rgba(c.r, c.g, c.b, scaled_alpha(c.a, *alpha))
-                    }
-                };
-                // `+ 0.5` and truncate, not `.round()`: on the x86-64
-                // baseline `round` is a call into libm (`roundf`), not an
-                // instruction, and this runs once per pixel -- lane F measured
-                // the same call at most of a per-pixel pass's cost
-                // (design-decisions §1323). Coverage is never negative, so the
-                // two agree, and `as` saturates past 255.
-                let alpha = (cov.min(1.0) * f32::from(color.a) + 0.5) as u8;
-                if alpha > 0 {
-                    self.blend_pixel(col, row, Color::rgba(color.r, color.g, color.b, alpha));
-                }
-            }
-        }
+            },
+        );
     }
 
     /// The four bytes of one pixel, or `None` if it lies outside the surface.
@@ -3832,6 +4032,127 @@ impl<'d> SvgRenderer<'d> {
         let [r, g, b, a] = *pixel;
         let result = color.over(Color::rgba(r, g, b, a));
         *pixel = [result.r, result.g, result.b, result.a];
+    }
+}
+
+/// Find the share of each pixel the shape `outlines` bound -- each closed back
+/// to its start -- covers under `rule`, on a surface `width` by `height`
+/// pixels with `ss` sub-scanlines to a row, and hand it over a row at a time:
+/// `each(row, first_col, coverage)` for each row the shape reaches, `coverage`
+/// the share of column `first_col` and of each column after it.
+///
+/// One shape, not one polygon at a time: every edge of every outline takes
+/// part in one winding count, so an outline inside another is a hole where
+/// the rule makes it one, and a pixel two outlines overlap is covered once.
+/// Each sub-scanline's crossings are found from the edges it passes through,
+/// which a list sorted by top keeps short. Filling a shape and building a
+/// clip mask both take their coverage from here.
+fn scan_shape(
+    width: u32,
+    height: u32,
+    ss_factor: u32,
+    outlines: &[&[(f32, f32)]],
+    rule: FillRule,
+    mut each: impl FnMut(u32, u32, &[f32]),
+) {
+    let mut edges: Vec<FillEdge> = Vec::new();
+    let (mut min_x, mut max_x) = (f32::INFINITY, f32::NEG_INFINITY);
+    let (mut min_y, mut max_y) = (f32::INFINITY, f32::NEG_INFINITY);
+    for outline in outlines {
+        let closing = match outline {
+            [first, .., last] => Some((*last, *first)),
+            _ => None,
+        };
+        let sides = outline
+            .windows(2)
+            .filter_map(|w| match *w {
+                [a, b] => Some((a, b)),
+                _ => None,
+            })
+            .chain(closing);
+        for (a, b) in sides {
+            if !(a.0.is_finite() && a.1.is_finite() && b.0.is_finite() && b.1.is_finite()) {
+                continue;
+            }
+            let (top, bottom, winding) = match a.1.partial_cmp(&b.1) {
+                Some(core::cmp::Ordering::Less) => (a, b, 1),
+                Some(core::cmp::Ordering::Greater) => (b, a, -1),
+                // Level: crosses no scanline.
+                _ => continue,
+            };
+            min_x = min_x.min(a.0).min(b.0);
+            max_x = max_x.max(a.0).max(b.0);
+            min_y = min_y.min(top.1);
+            max_y = max_y.max(bottom.1);
+            edges.push(FillEdge {
+                x_top: top.0,
+                y_top: top.1,
+                y_bottom: bottom.1,
+                slope: (bottom.0 - top.0) / (bottom.1 - top.1),
+                winding,
+            });
+        }
+    }
+    if edges.is_empty() {
+        return;
+    }
+    edges.sort_by(|a, b| a.y_top.total_cmp(&b.y_top));
+
+    // Rows and columns the shape can reach, on the surface.
+    let rows = (min_y.floor().max(0.0) as u32)..(max_y.ceil().min(height as f32) as u32);
+    let first_col = min_x.floor().max(0.0) as u32;
+    let end_col = max_x.ceil().min(width as f32) as u32;
+    let Ok(columns) = usize::try_from(end_col.saturating_sub(first_col)) else {
+        return;
+    };
+    if rows.is_empty() || columns == 0 {
+        return;
+    }
+    let origin = first_col as f32;
+    let ss = ss_factor.max(1);
+    let weight = 1.0 / ss as f32;
+
+    let mut coverage = vec![0.0f32; columns];
+    let mut active: Vec<usize> = Vec::new();
+    let mut next_edge = 0usize;
+    let mut crossings: Vec<(f32, i32)> = Vec::new();
+    for row in rows {
+        coverage.fill(0.0);
+        for sub in 0..ss {
+            let scan_y = row as f32 + (sub as f32 + 0.5) * weight;
+            // Edges that have begun by this line join the active list...
+            while let Some(edge) = edges.get(next_edge) {
+                if edge.y_top > scan_y {
+                    break;
+                }
+                active.push(next_edge);
+                next_edge = next_edge.saturating_add(1);
+            }
+            // ...and those that have ended leave it.
+            active.retain(|&i| edges.get(i).is_some_and(|e| e.y_bottom > scan_y));
+            crossings.clear();
+            crossings.extend(active.iter().filter_map(|&i| {
+                edges
+                    .get(i)
+                    .map(|e| (e.x_top + (scan_y - e.y_top) * e.slope, e.winding))
+            }));
+            crossings.sort_by(|a, b| a.0.total_cmp(&b.0));
+            let mut winding = 0i32;
+            for pair in crossings.windows(2) {
+                let &[(left, turn), (right, _)] = pair else {
+                    continue;
+                };
+                winding = winding.saturating_add(turn);
+                let inside = match rule {
+                    FillRule::NonZero => winding != 0,
+                    FillRule::EvenOdd => winding & 1 != 0,
+                };
+                if inside {
+                    cover_span(&mut coverage, left - origin, right - origin, weight);
+                }
+            }
+        }
+        each(row, first_col, &coverage);
     }
 }
 

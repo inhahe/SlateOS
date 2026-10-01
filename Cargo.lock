@@ -1962,13 +1962,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "locale"
-version = "0.1.0"
-dependencies = [
- "quoting",
-]
-
-[[package]]
 name = "localectl"
 version = "0.1.0"
 dependencies = [

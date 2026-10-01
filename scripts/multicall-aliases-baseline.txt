@@ -49,8 +49,6 @@ hwinfo:lshw
 inotify:inotifywatch
 last:lastb
 last:lastlog
-locale:getconf
-locale:localedef
 loginctl:userdbctl
 losetup:lodetach
 lp:cancel

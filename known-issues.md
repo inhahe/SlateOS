@@ -2406,7 +2406,10 @@ different command -- so the crate is deleted (a port of the `attr`
 package's tools replaces it when they are wanted); and `chattr`'s **`lsattr`**
 reported the extents flag for every file whose flags it could not read.
 `lsattr` is kept -- it waits on the FS_IOC_GETFLAGS lane A scheduled -- and
-now refuses instead (b3367ac33). **The ledger stands at 104.**
+now refuses instead (b3367ac33). **The ledger stood at 104**, and stands at
+**102** after `userspace/locale` (`getconf`, `localedef`), deleted for the same
+reason: all three of its programs fabricated, as
+`B-NO-GETCONF-OR-LOCALE-UNTIL-PORTED` records with the ports that replace them.
 
 **The 9 new shadowed pairs were the urgent half**, because a shadowed name is
 two implementations that can disagree with the winner picked by packaging:
@@ -179162,3 +179165,30 @@ than take `PATH`'s.
 
 **How to see it:** in PowerShell, `cargo test -p oils --lib --target
 x86_64-pc-windows-msvc`; the same command in Git Bash passes.
+
+## B-NO-GETCONF-OR-LOCALE-UNTIL-PORTED — `getconf`, `locale` and `localedef` were deleted for fabricating, and POSIX requires all three (lane B, 2026-10-01) — **Status: OPEN (port to do)**
+
+**In short:** `userspace/locale` answered as `locale`, `localedef` and
+`getconf`, and all three made their answers up: `locale -a` listed twelve
+locales (`de_DE.UTF-8`, `ja_JP.UTF-8`...) on a system whose C library
+supports only the C locale (`posix/src/locale.rs`'s `setlocale` returns `"C"`
+whatever it is asked); `localedef` printed "locale ... created" and compiled
+nothing; `getconf` printed a fixed table (`OPEN_MAX` 1024, `CHILD_MAX`
+32768...) instead of asking `sysconf`. Per §1006 the crate was deleted
+(2026-10-01, in the §1045 triage). POSIX requires all three utilities, so
+their absence is a gap to close, not a resolution.
+
+**The proper fix, in order of use:**
+
+* **`getconf`** first -- configure scripts and build systems call it
+  (`getconf _NPROCESSORS_ONLN`, `getconf LONG_BIT`, `getconf PAGESIZE`). A
+  port of glibc 2.39's `posix/getconf.c`, answering every name through the
+  C library's `sysconf`, `pathconf` and `confstr` (lane D's), so it can
+  never disagree with what a C program on the same system is told. Its
+  notice joins the glibc entry in `userspace/localtime/licenses/`.
+* **`locale`** and **`localedef`** when the C library has locales to report
+  and an archive to compile into -- lane D's `setlocale` first. Until then a
+  `locale` would have exactly one locale to print.
+
+**Where:** a new crate per program under `userspace/`; the deleted crate is
+in history at `userspace/locale` before this entry's commit.

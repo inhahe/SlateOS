@@ -5556,7 +5556,7 @@ _Port ext4 first. Don't write a custom filesystem._
   - [x] shuf/factor/numfmt: randomization and number tools (Fisher-Yates shuffle, prime factorization, SI/IEC unit conversion)
   - [x] tput/reset/clear: terminal capability tools (built-in terminfo database, parameterized string expansion, terminal reset)
   - [x] m4: macro processor (define/undefine, ifdef/ifelse, translit, eval with full precedence, divert/undivert, changequote, include)
-  - [x] locale/localedef/getconf: locale and system config (12 locales, LC_* data, 25 getconf variables, PAGE_SIZE=16384)
+  - [ ] locale/localedef/getconf: locale and system config (12 locales, LC_* data, 25 getconf variables, PAGE_SIZE=16384) -- **deleted 2026-10-01** (design-decisions §1006): all three fabricated -- `locale -a` listed twelve locales a C-locale-only libc does not have, `localedef` reported "locale created" and compiled nothing, `getconf` printed a hard-coded table instead of asking `sysconf`; known-issues B-NO-GETCONF-OR-LOCALE-UNTIL-PORTED
   - [x] pv/truncate/shred/fuser: pipe/file management (progress bar, rate limit, secure overwrite, process finder via /proc)
   - [x] xdg-open/xdg-mime/mimeopen: file association (200+ MIME types, 25+ magic signatures, mimeapps.list, .desktop files)
   - [x] nproc/arch/pathchk/logname/users/tty: simple system info (CPU count, architecture, path validation, login/tty)

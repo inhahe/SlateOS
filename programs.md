@@ -11,9 +11,9 @@ A new program is recorded here in the commit that creates it (§1053): run
 the script, commit `programs.md` with the program. `--check` fails when the
 two disagree.
 
-**461 programs; 88 on the image, 6 carried inside the kernel.**
+**460 programs; 88 on the image, 6 carried inside the kernel.**
 
-## Userland utilities and services (`userspace/`, lane B) -- 306
+## Userland utilities and services (`userspace/`, lane B) -- 305
 
 | Program | What it does | On image | Crate | Other names |
 |---|---|---|---|---|
@@ -144,7 +144,6 @@ two disagree.
 | `lex` | Lexical analyzer generator (lex/flex compatible) |  |  |  |
 | `link` | Call the link function to create a link named FILE2 to FILE1. |  | `coreutils` |  |
 | `ln` | Create links between files. | yes | `coreutils` |  |
-| `locale` | `locale` / `localedef` / `getconf` -- locale and system configuration. |  |  | `getconf` *(not installed)*, `localedef` *(not installed)* |
 | `localectl` | Locale and keyboard configuration. |  |  |  |
 | `lockfile` | Create semaphore files, as procmail's `lockfile(1)` does. |  |  |  |
 | `logger` | Enter messages into the system log. | yes |  |  |

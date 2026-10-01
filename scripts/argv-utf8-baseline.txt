@@ -79,7 +79,6 @@ userspace/last/src/main.rs:argv-as-string
 userspace/ldd/src/main.rs:argv-as-string
 userspace/less/src/main.rs:argv-as-string
 userspace/lex/src/main.rs:argv-as-string
-userspace/locale/src/main.rs:argv-as-string
 userspace/localectl/src/main.rs:argv-as-string
 userspace/loginctl/src/main.rs:argv-as-string
 userspace/logind/src/main.rs:argv-as-string

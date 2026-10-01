@@ -59,9 +59,14 @@ pub(super) mod world {
     #[derive(Clone, Copy, Debug)]
     enum Open {
         /// A socket, and the daemon and connection it reached.
-        Socket { kind: i32, peer: Option<(u32, u64)> },
+        Socket {
+            kind: i32,
+            peer: Option<(u32, u64)>,
+        },
         Console,
-        File { ino: u64 },
+        File {
+            ino: u64,
+        },
     }
 
     /// What reached the daemon: a datagram, or what one stream connection
@@ -179,7 +184,9 @@ pub(super) mod world {
 
         /// The journal's contents, when there is one.
         pub fn journal(&self) -> Option<&[u8]> {
-            let ino = self.paths.get(super::super::JOURNAL_PATH.strip_suffix(b"\0")?)?;
+            let ino = self
+                .paths
+                .get(super::super::JOURNAL_PATH.strip_suffix(b"\0")?)?;
             self.inodes.get(ino).map(Vec::as_slice)
         }
 
@@ -218,7 +225,10 @@ pub(super) mod world {
                         return fail(e, -1);
                     }
                     let n = self.write_limit.map_or(data.len(), |l| l.min(data.len()));
-                    self.inodes.entry(ino).or_default().extend_from_slice(&data[..n]);
+                    self.inodes
+                        .entry(ino)
+                        .or_default()
+                        .extend_from_slice(&data[..n]);
                     n as isize
                 }
                 _ => fail(errno::EBADF, -1),
@@ -240,7 +250,8 @@ pub(super) mod world {
     }
 
     fn name(path: &[u8]) -> &[u8] {
-        path.strip_suffix(b"\0").expect("a path the library passes is NUL-terminated")
+        path.strip_suffix(b"\0")
+            .expect("a path the library passes is NUL-terminated")
     }
 
     // -- What `syslog.rs`'s `sys` provides ---------------------------------
@@ -503,7 +514,10 @@ const STAMP: &[u8; 16] = b"Oct  1 08:26:20 ";
 /// A `va_list` holding `gp` (integers and pointers) and `fp` (doubles), in
 /// registers.
 fn with_va<R>(gp: &[u64], fp: &[f64], f: impl FnOnce(*mut VaList) -> R) -> R {
-    assert!(gp.len() <= 6 && fp.len() <= 8, "more than the registers hold");
+    assert!(
+        gp.len() <= 6 && fp.len() <= 8,
+        "more than the registers hold"
+    );
     let mut reg = [0u8; 176];
     for (i, v) in gp.iter().enumerate() {
         reg[i * 8..i * 8 + 8].copy_from_slice(&v.to_le_bytes());
@@ -553,7 +567,13 @@ fn record(pri: i32, rest: &[u8]) -> Vec<u8> {
 }
 
 /// The journal line `journalrec` writes for these fields, newline included.
-fn journalrec_line(level: &str, service: &str, msg: &str, pid: u32, facility: Option<&str>) -> Vec<u8> {
+fn journalrec_line(
+    level: &str,
+    service: &str,
+    msg: &str,
+    pid: u32,
+    facility: Option<&str>,
+) -> Vec<u8> {
     let r = journalrec::Record {
         ts: 1_790_843_180,
         level: level.to_string(),
@@ -583,7 +603,10 @@ fn every_scenario_is_glibcs() {
         if line.starts_with("=== ") {
             scenarios.push(Vec::new());
         }
-        scenarios.last_mut().expect("the oracle starts with a scenario").push(line);
+        scenarios
+            .last_mut()
+            .expect("the oracle starts with a scenario")
+            .push(line);
     }
     assert_eq!(scenarios.len(), 44, "scenarios in the oracle");
     let mut compared = 0;
@@ -785,7 +808,9 @@ fn hex(bytes: &[u8]) -> String {
 /// `name(a, b, ...)` as the name and its top-level arguments.
 fn split_call(stmt: &str) -> (&str, Vec<&str>) {
     let open = stmt.find('(').expect("a call");
-    let inner = stmt[open + 1..].strip_suffix(')').expect("a call ends in )");
+    let inner = stmt[open + 1..]
+        .strip_suffix(')')
+        .expect("a call ends in )");
     let mut args = Vec::new();
     let (mut depth, mut quoted, mut escaped, mut start) = (0, false, false, 0);
     for (i, c) in inner.char_indices() {
@@ -842,10 +867,16 @@ fn term(t: &str) -> i32 {
     if t.starts_with(|c: char| c.is_ascii_digit() || c == '-') {
         return t.parse().expect("a number");
     }
-    if let Some(inner) = t.strip_prefix("LOG_UPTO(").and_then(|r| r.strip_suffix(')')) {
+    if let Some(inner) = t
+        .strip_prefix("LOG_UPTO(")
+        .and_then(|r| r.strip_suffix(')'))
+    {
         return log_upto(eval(inner));
     }
-    if let Some(inner) = t.strip_prefix("LOG_MASK(").and_then(|r| r.strip_suffix(')')) {
+    if let Some(inner) = t
+        .strip_prefix("LOG_MASK(")
+        .and_then(|r| r.strip_suffix(')'))
+    {
         return log_mask(eval(inner));
     }
     constant(t)
@@ -958,7 +989,10 @@ fn the_stack_buffer_and_the_heap_build_the_same_record() {
         let msg = vec![b'm'; len];
         log(LOG_INFO, &msg);
         let (sent, _, _) = look();
-        assert_eq!(sent, [record(14, &[b"syslog-oracle: ".as_slice(), &msg].concat())]);
+        assert_eq!(
+            sent,
+            [record(14, &[b"syslog-oracle: ".as_slice(), &msg].concat())]
+        );
         let allocations = world::with(|w| w.allocations);
         assert_eq!(allocations, usize::from(heap), "{len} bytes of message");
     }
@@ -1035,7 +1069,11 @@ fn a_null_format_logs_nothing_and_a_null_va_list_reads_zeros() {
 /// The complaint spells the whole priority in hex, as `%x` does.
 #[test]
 fn the_complaint_spells_the_priority_in_hex() {
-    for (pri, hex) in [(0x400 | LOG_INFO, "406"), (i32::MIN, "80000000"), (0x7fff_ffff, "7fffffff")] {
+    for (pri, hex) in [
+        (0x400 | LOG_INFO, "406"),
+        (i32::MIN, "80000000"),
+        (0x7fff_ffff, "7fffffff"),
+    ] {
         let _g = fresh(glibc_world("dgram"));
         log(pri, b"m");
         let (sent, _, _) = look();
@@ -1104,7 +1142,11 @@ fn without_unix_sockets_a_record_is_a_journal_line() {
     );
     let (sent, stderr, console) = look();
     assert!(sent.is_empty() && stderr.is_empty() && console.is_empty());
-    assert_eq!(world::with(|w| w.open_descriptors()), 0, "the journal is closed again");
+    assert_eq!(
+        world::with(|w| w.open_descriptors()),
+        0,
+        "the journal is closed again"
+    );
 }
 
 /// Every message is escaped as `journalrec::escape` escapes it, byte for
@@ -1117,9 +1159,15 @@ fn a_record_is_escaped_as_journalrec_escapes_it() {
         (b"back\\slash", "back\\slash"),
         (b"two\nlines", "two\nlines"),
         (b"cr\rtab\t", "cr\rtab\t"),
-        (b"bell\x07 esc\x1b unit\x1f", "bell\u{7} esc\u{1b} unit\u{1f}"),
+        (
+            b"bell\x07 esc\x1b unit\x1f",
+            "bell\u{7} esc\u{1b} unit\u{1f}",
+        ),
         (b"del\x7f", "del\u{7f}"),
-        ("caf\u{e9} \u{65e5}\u{672c} \u{2028}".as_bytes(), "caf\u{e9} \u{65e5}\u{672c} \u{2028}"),
+        (
+            "caf\u{e9} \u{65e5}\u{672c} \u{2028}".as_bytes(),
+            "caf\u{e9} \u{65e5}\u{672c} \u{2028}",
+        ),
         (b"ends in a newline\n", "ends in a newline"),
         (b"ends in two\n\n", "ends in two\n"),
         (b"\n", ""),
@@ -1163,7 +1211,12 @@ fn the_facility_and_level_are_named_as_glibc_names_them() {
     let cases: [(Option<i32>, i32, &str, Option<&str>); 10] = [
         (Some(0), LOG_INFO, "info", Some("kern")),
         (None, LOG_AUTH | LOG_NOTICE, "notice", Some("auth")),
-        (None, LOG_AUTHPRIV | LOG_WARNING, "warning", Some("authpriv")),
+        (
+            None,
+            LOG_AUTHPRIV | LOG_WARNING,
+            "warning",
+            Some("authpriv"),
+        ),
         (None, LOG_FTP | LOG_CRIT, "crit", Some("ftp")),
         (None, (12 << 3) | LOG_ALERT, "alert", None),
         (None, (24 << 3) | LOG_EMERG, "emerg", Some("mark")),
@@ -1192,7 +1245,10 @@ fn a_record_carries_the_pid_without_log_pid() {
     world::with(|w| w.pid = 99);
     log(LOG_INFO, b"m");
     let journal = world::with(|w| w.journal().map(<[u8]>::to_vec)).expect("a journal");
-    assert!(journal.windows(10).any(|w| w == b",\"pid\":99,"), "{journal:?}");
+    assert!(
+        journal.windows(10).any(|w| w == b",\"pid\":99,"),
+        "{journal:?}"
+    );
 }
 
 /// A clock before the epoch is stamped 0, as `logger` stamps it.
@@ -1236,7 +1292,12 @@ fn a_journal_that_cannot_be_opened_is_retried_then_the_console() {
     log(LOG_ERR, b"to the console");
     let (_, _, console) = look();
     assert_eq!(console, b"tag: to the console\r\n");
-    let opens = world::with(|w| w.trace.iter().filter(|t| t.starts_with("open /var")).count());
+    let opens = world::with(|w| {
+        w.trace
+            .iter()
+            .filter(|t| t.starts_with("open /var"))
+            .count()
+    });
     assert_eq!(opens, 2);
     log(LOG_INFO, b"later");
     let journal = world::with(|w| w.journal().map(<[u8]>::to_vec));
@@ -1275,8 +1336,14 @@ fn the_lock_is_retried_after_a_signal_and_skipped_without_locks() {
         });
         log(LOG_INFO, b"no locks");
         let trace = world::with(|w| w.trace.clone());
-        assert!(!trace.iter().any(|t| t.starts_with("same")), "{e}: {trace:?}");
-        assert!(trace.iter().any(|t| t.starts_with("write")), "{e}: {trace:?}");
+        assert!(
+            !trace.iter().any(|t| t.starts_with("same")),
+            "{e}: {trace:?}"
+        );
+        assert!(
+            trace.iter().any(|t| t.starts_with("write")),
+            "{e}: {trace:?}"
+        );
     }
 
     world::with(|w| w.flock_errors = vec![errno::EIO, errno::EIO]);
@@ -1321,7 +1388,13 @@ fn a_journal_rewritten_while_waiting_gets_the_record_after_the_rewrite() {
     log(LOG_INFO, b"after");
     let journal = world::with(|w| w.journal().map(<[u8]>::to_vec)).expect("a journal");
     let mut want = b"kept\n".to_vec();
-    want.extend(journalrec_line("info", "syslog-oracle", "after", 4242, Some("user")));
+    want.extend(journalrec_line(
+        "info",
+        "syslog-oracle",
+        "after",
+        4242,
+        Some("user"),
+    ));
     assert_eq!(journal, want);
     assert_eq!(world::with(|w| w.open_descriptors()), 0);
 }
@@ -1334,7 +1407,11 @@ fn a_journal_that_keeps_being_replaced_is_written_after_64_tries() {
     world::with(|w| w.rewrites = 1000);
     log(LOG_INFO, b"at last");
     world::with(|w| {
-        let opens = w.trace.iter().filter(|t| t.starts_with("open /var")).count();
+        let opens = w
+            .trace
+            .iter()
+            .filter(|t| t.starts_with("open /var"))
+            .count();
         assert_eq!(opens, 64);
         let line = journalrec_line("info", "syslog-oracle", "at last", 4242, Some("user"));
         assert_eq!(w.inodes.values().filter(|c| **c == line).count(), 1);
@@ -1387,7 +1464,13 @@ fn a_long_record_is_built_on_the_heap_or_not_at_all() {
     let msg = vec![b'"'; 900];
     log(LOG_INFO, &msg);
     let journal = world::with(|w| w.journal().map(<[u8]>::to_vec));
-    let want = journalrec_line("info", "syslog-oracle", &"\"".repeat(900), 4242, Some("user"));
+    let want = journalrec_line(
+        "info",
+        "syslog-oracle",
+        &"\"".repeat(900),
+        4242,
+        Some("user"),
+    );
     assert_eq!(journal.as_deref(), Some(want.as_slice()));
 
     world::with(|w| {
@@ -1470,26 +1553,48 @@ fn closelog_keeps_the_options_facility_and_mask() {
     closelog();
     log(LOG_NOTICE, b"m");
     log(LOG_INFO, b"masked");
-    assert_eq!(look().0, [record(LOG_LOCAL1 | LOG_NOTICE, b"syslog-oracle[4242]: m")]);
+    assert_eq!(
+        look().0,
+        [record(LOG_LOCAL1 | LOG_NOTICE, b"syslog-oracle[4242]: m")]
+    );
 }
 
 #[test]
 fn the_values_are_glibcs() {
     assert_eq!(
-        [LOG_EMERG, LOG_ALERT, LOG_CRIT, LOG_ERR, LOG_WARNING, LOG_NOTICE, LOG_INFO, LOG_DEBUG],
+        [
+            LOG_EMERG,
+            LOG_ALERT,
+            LOG_CRIT,
+            LOG_ERR,
+            LOG_WARNING,
+            LOG_NOTICE,
+            LOG_INFO,
+            LOG_DEBUG
+        ],
         [0, 1, 2, 3, 4, 5, 6, 7]
     );
     assert_eq!(
-        [LOG_KERN, LOG_USER, LOG_MAIL, LOG_DAEMON, LOG_AUTH, LOG_SYSLOG, LOG_LPR, LOG_NEWS],
+        [
+            LOG_KERN, LOG_USER, LOG_MAIL, LOG_DAEMON, LOG_AUTH, LOG_SYSLOG, LOG_LPR, LOG_NEWS
+        ],
         [0, 8, 16, 24, 32, 40, 48, 56]
     );
-    assert_eq!([LOG_UUCP, LOG_CRON, LOG_AUTHPRIV, LOG_FTP], [64, 72, 80, 88]);
     assert_eq!(
-        [LOG_LOCAL0, LOG_LOCAL1, LOG_LOCAL2, LOG_LOCAL3, LOG_LOCAL4, LOG_LOCAL5, LOG_LOCAL6, LOG_LOCAL7],
+        [LOG_UUCP, LOG_CRON, LOG_AUTHPRIV, LOG_FTP],
+        [64, 72, 80, 88]
+    );
+    assert_eq!(
+        [
+            LOG_LOCAL0, LOG_LOCAL1, LOG_LOCAL2, LOG_LOCAL3, LOG_LOCAL4, LOG_LOCAL5, LOG_LOCAL6,
+            LOG_LOCAL7
+        ],
         [128, 136, 144, 152, 160, 168, 176, 184]
     );
     assert_eq!(
-        [LOG_PID, LOG_CONS, LOG_ODELAY, LOG_NDELAY, LOG_NOWAIT, LOG_PERROR],
+        [
+            LOG_PID, LOG_CONS, LOG_ODELAY, LOG_NDELAY, LOG_NOWAIT, LOG_PERROR
+        ],
         [1, 2, 4, 8, 16, 32]
     );
     assert_eq!((LOG_PRIMASK, LOG_FACMASK, LOG_NFACILITIES), (7, 0x3f8, 24));
@@ -1511,9 +1616,28 @@ fn the_facility_table_is_glibcs() {
     assert_eq!(
         names,
         [
-            &b"auth"[..], b"authpriv", b"cron", b"daemon", b"ftp", b"kern", b"lpr", b"mail", b"mark",
-            b"news", b"security", b"syslog", b"user", b"uucp", b"local0", b"local1", b"local2",
-            b"local3", b"local4", b"local5", b"local6", b"local7",
+            &b"auth"[..],
+            b"authpriv",
+            b"cron",
+            b"daemon",
+            b"ftp",
+            b"kern",
+            b"lpr",
+            b"mail",
+            b"mark",
+            b"news",
+            b"security",
+            b"syslog",
+            b"user",
+            b"uucp",
+            b"local0",
+            b"local1",
+            b"local2",
+            b"local3",
+            b"local4",
+            b"local5",
+            b"local6",
+            b"local7",
         ]
     );
     let names: Vec<&str> = PRIORITY_NAMES

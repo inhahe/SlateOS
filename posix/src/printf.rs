@@ -1763,14 +1763,26 @@ fn format_errno(dst: &mut FmtOutput, spec: &FormatSpec) {
     if spec.flags.alt_form {
         let name = crate::string::strerrorname_np(errnum);
         if name.is_null() {
-            format_signed(dst, i64::from(errnum), &spec.flags, spec.width, spec.precision);
+            format_signed(
+                dst,
+                i64::from(errnum),
+                &spec.flags,
+                spec.width,
+                spec.precision,
+            );
         } else {
             format_string(dst, name, &spec.flags, spec.width, spec.precision);
         }
         return;
     }
     if let Some(text) = crate::string::error_text(errnum) {
-        format_string(dst, text.as_ptr().cast(), &spec.flags, spec.width, spec.precision);
+        format_string(
+            dst,
+            text.as_ptr().cast(),
+            &spec.flags,
+            spec.width,
+            spec.precision,
+        );
         return;
     }
     // GNU `strerror_r`'s text for a number that names no error, in a buffer
@@ -5676,7 +5688,10 @@ pub(crate) mod tests {
                 crate::errno::set_errno(errnum);
                 _snprintf_impl(buf.as_mut_ptr(), buf.len(), fmt.as_ptr(), args)
             });
-            let got = usize::try_from(got_ret).ok().and_then(|n| buf.get(..n)).unwrap_or(&[]);
+            let got = usize::try_from(got_ret)
+                .ok()
+                .and_then(|n| buf.get(..n))
+                .unwrap_or(&[]);
             if got_ret != want_ret || got != want.as_slice() {
                 failures.push(std::format!(
                     "errno {errnum}, {:?}: glibc {want_ret} {:?}, here {got_ret} {:?}",

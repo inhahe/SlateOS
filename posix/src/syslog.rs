@@ -500,7 +500,8 @@ unsafe fn vsyslog_internal(pri: i32, fmt: *const u8, va: Option<VaList>) {
     let mut bufs = [0u8; BUFS];
     let mut heap = None;
     // SAFETY: the caller's contract on `fmt` and `va`, passed on.
-    let Some(built) = (unsafe { build(&header, &mut bufs, &mut heap, saved_errno, fmt, va) }) else {
+    let Some(built) = (unsafe { build(&header, &mut bufs, &mut heap, saved_errno, fmt, va) })
+    else {
         return;
     };
     let whole: &[u8] = match &heap {
@@ -1129,7 +1130,11 @@ fn put_escaped(out: &mut Cursor<'_>, s: &[u8]) {
 fn append(line: &[u8]) -> Result<(), i32> {
     let mut attempt = 0usize;
     loop {
-        let fd = sys::open(JOURNAL_PATH, O_WRONLY | O_CREAT | O_APPEND | O_CLOEXEC, 0o666);
+        let fd = sys::open(
+            JOURNAL_PATH,
+            O_WRONLY | O_CREAT | O_APPEND | O_CLOEXEC,
+            0o666,
+        );
         if fd < 0 {
             return Err(errno::get_errno());
         }

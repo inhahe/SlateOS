@@ -9600,6 +9600,10 @@ mod tests {
         );
         assert_eq!(app.focus, Focus::None, "a chord gave a field the keys");
         assert!(!app.show_help, "a chord raised the keys");
+        // On its own, so nothing after it can put the dialog away again:
+        // AltGr+E, typing nothing, is not Ctrl+E's export.
+        app.handle_event(&held(Key::E, "", altgr), SIZE);
+        assert!(!app.picker.is_open(), "AltGr+E opened the export dialog");
 
         // A new contact's form: chords type nothing and do not save it;
         // AltGr's `ś` is typed; Ctrl+S keeps the book rather than typing.

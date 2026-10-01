@@ -520,7 +520,7 @@ rm -rf "$T"
 # /usr/share/slateos/themes byte for byte, and as data: 0644 files in 0755
 # directories, whatever mode the tree was read with -- WSL reads the NTFS one
 # as 0777 throughout.
-THEMES_BLOCK="$(awk '/^THEMES_SRC=/{f=1} /^# --- Completeness/{f=0} f' "$SRC")"
+THEMES_BLOCK="$(awk '/^THEMES_SRC=/{f=1} /^# --- notices/{f=0} f' "$SRC")"
 if [ -n "$THEMES_BLOCK" ]; then ok; else bad "could not extract the THEMES_SRC block from $SRC"; fi
 T="$(mktemp -d)"
 export ROOT_DIR="$T/repo" STAGE="$T/stage"
@@ -556,6 +556,117 @@ case "$rc:$msg" in
     1:*"checkout is broken"*) ok ;;
     *) bad "a missing theme tree must be fatal, got rc=$rc: $msg" ;;
 esac
+rm -rf "$T"
+
+# 28. THE NOTICES. scripts/gather-notices.py writes the third-party notices
+# into /usr/share/licenses; here a stand-in for it records what it was given
+# -- its arguments, and the CARGO_HOME it ran with -- and writes a bundle of
+# two components with modes a umask of 077 would give.
+NOTICES_BLOCK="$(awk '/^# --- notices:/{f=1} /^# --- Completeness/{f=0} f' "$SRC")"
+if [ -n "$NOTICES_BLOCK" ]; then ok; else bad "could not extract the notices block from $SRC"; fi
+case "$THEMES_BLOCK" in
+    *gather-notices*) bad "the themes block should end where the notices begin" ;;
+    *) ok ;;
+esac
+TEST_PY="$(command -v python3 || command -v python)"
+# Is the path the stand-in recorded the one meant? Under Git Bash the Python
+# is a Windows one, and MSYS hands it `/tmp/x` as `C:/Users/.../Temp/x`, in
+# its arguments and its environment alike.
+same_path() {
+    [ "$1" = "$2" ] && return 0
+    command -v cygpath >/dev/null 2>&1 && [ "$1" = "$(cygpath -m "$2")" ]
+}
+notices_env() {
+    T="$(mktemp -d)"
+    export ROOT_DIR="$T/repo" STAGE="$T/stage" NOTICES_TEST_RECORD="$T/record"
+    SYSROOT_PY="$TEST_PY"
+    mkdir -p "$ROOT_DIR/scripts" "$STAGE"
+    cat > "$ROOT_DIR/scripts/gather-notices.py" <<'PY'
+import os
+import sys
+from pathlib import Path
+
+Path(os.environ["NOTICES_TEST_RECORD"]).write_text(
+    " ".join(sys.argv[1:]) + "\n" + os.environ.get("CARGO_HOME", "<unset>") + "\n")
+if os.environ.get("NOTICES_TEST_FAIL"):
+    sys.exit(int(os.environ["NOTICES_TEST_FAIL"]))
+out = Path(sys.argv[2])
+for component, text in (("comp-a", "LICENSE"), ("comp-b", "COPYING")):
+    (out / component).mkdir(parents=True)
+    (out / component / text).write_text("text\n")
+    os.chmod(out / component / text, 0o600)
+    os.chmod(out / component, 0o700)
+(out / "index.yaml").write_text("comp-a: {}\ncomp-b: {}\n")
+(out / "NOTICES.txt").write_text("both\n")
+PY
+}
+notices_env
+export SLATEOS_CARGO_HOME="$T/cache"
+msg="$(eval "$NOTICES_BLOCK" 2>&1)"
+rc=$?
+unset SLATEOS_CARGO_HOME
+D="$STAGE/usr/share/licenses"
+{ [ "$rc" -eq 0 ] && [ -f "$D/index.yaml" ] && [ -f "$D/NOTICES.txt" ] \
+    && [ -f "$D/comp-a/LICENSE" ] && [ -f "$D/comp-b/COPYING" ]; } && ok \
+    || bad "the bundle should be staged under /usr/share/licenses, got rc=$rc: $msg"
+{ [ "$(head -1 "$T/record" | cut -d' ' -f1)" = "--out" ] \
+    && same_path "$(head -1 "$T/record" | cut -d' ' -f2-)" "$D"; } && ok \
+    || bad "the gatherer should be asked for --out \$STAGE/usr/share/licenses, got: $(head -1 "$T/record")"
+same_path "$(sed -n 2p "$T/record")" "$T/cache" && ok \
+    || bad "SLATEOS_CARGO_HOME should be the gatherer's CARGO_HOME, got: $(sed -n 2p "$T/record")"
+{ [ "$(stat -c %a "$D/comp-a")" = 755 ] && [ "$(stat -c %a "$D/comp-a/LICENSE")" = 644 ] \
+    && [ "$(stat -c %a "$D/index.yaml")" = 644 ]; } && ok \
+    || bad "notices are data: 0644 files in 0755 directories"
+case "$msg" in
+    *"staged the notices of 2 component(s) under /usr/share/licenses (4 files)"*) ok ;;
+    *) bad "the count should be reported, got: $msg" ;;
+esac
+rm -rf "$T"
+
+# 29. Without SLATEOS_CARGO_HOME, the registry is Windows cargo's when the
+# recipe runs under WSL -- cmd.exe and wslpath both there -- and otherwise
+# cargo's own, whatever CARGO_HOME the recipe was given.
+notices_env
+export CARGO_HOME="$T/env-cache"
+msg="$(eval "$NOTICES_BLOCK" 2>&1)"
+rc=$?
+unset CARGO_HOME
+seen="$(sed -n 2p "$T/record")"
+if command -v cmd.exe >/dev/null 2>&1 && command -v wslpath >/dev/null 2>&1; then
+    case "$rc:$seen" in
+        0:/mnt/?/*) ok ;;
+        *) bad "under WSL the registry should be Windows cargo's, got rc=$rc, CARGO_HOME=$seen: $msg" ;;
+    esac
+else
+    { [ "$rc" -eq 0 ] && same_path "$seen" "$T/env-cache"; } && ok \
+        || bad "off WSL the registry should be cargo's own, got rc=$rc, CARGO_HOME=$seen: $msg"
+fi
+rm -rf "$T"
+
+# 30. A gatherer that fails fails the image, with its exit status named:
+# an image missing a notice is what this exists to prevent.
+notices_env
+export NOTICES_TEST_FAIL=3
+msg="$(eval "$NOTICES_BLOCK" 2>&1)"
+rc=$?
+unset NOTICES_TEST_FAIL
+case "$rc:$msg" in
+    1:*"gather-notices.py failed (exit 3"*) ok ;;
+    *) bad "a failed gather must be fatal, got rc=$rc: $msg" ;;
+esac
+rm -rf "$T"
+
+# 31. ...as does having no Python to gather with.
+notices_env
+# shellcheck disable=SC2034  # read by the block `eval` runs
+SYSROOT_PY=""
+msg="$(eval "$NOTICES_BLOCK" 2>&1)"
+rc=$?
+case "$rc:$msg" in
+    1:*"no python3/python"*) ok ;;
+    *) bad "no python must be fatal, got rc=$rc: $msg" ;;
+esac
+[ ! -e "$T/record" ] && ok || bad "with no python, nothing should have been run"
 rm -rf "$T"
 
 echo "test-rootfs-staging: $PASS/$((PASS + FAIL)) cases pass"

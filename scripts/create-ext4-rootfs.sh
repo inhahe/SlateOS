@@ -2640,6 +2640,79 @@ THEMES_STAGED="$(find "$THEMES_DST" -name theme.yaml | wc -l)"
 THEMES_FILES="$(find "$THEMES_DST" -type f | wc -l)"
 echo "[rootfs] staged $THEMES_STAGED colour theme(s) under /usr/share/slateos/themes ($THEMES_FILES files)"
 
+# --- notices: the licences of the code other people wrote ---------------------
+#
+# requests/c-d-put-the-third-party-notices-in-the-image.md (lane C;
+# design-decisions §1433). An image may be handed to anyone only if it carries
+# the licence notices of the third-party code in it: the crates.io libraries,
+# the vendored crates, the ported decoders. scripts/gather-notices.py gathers
+# every notice the tree holds -- from the source tree, Cargo.lock and cargo's
+# registry cache -- into /usr/share/licenses: `index.yaml`, which gui/notices
+# reads; a directory of texts per component; and NOTICES.txt, all of them in
+# one file.
+#
+# A failure is fatal, as the request asks: a notice that could not be gathered
+# is the failure this exists to prevent, and an image without one may not be
+# published. So is having no Python to run it with, for the same reason.
+#
+# The bundle is written whole into a directory that does not exist yet, and
+# $STAGE is a fresh `mktemp -d`; nothing is removed first, so a step above that
+# had put something in /usr/share/licenses would be refused here, not lost.
+#
+# The registry cache is the one the workspace was built with. This script runs
+# under WSL, and the workspace is built by Windows cargo, whose cache is under
+# %CARGO_HOME% or %USERPROFILE%\.cargo on the Windows side. WSL's own ~/.cargo,
+# if there is one, holds only what WSL's builds fetched. Measured 2026-10-01:
+# gather-notices.py failed against WSL's, and gathered 96 notices in 12 s
+# against Windows'. SLATEOS_CARGO_HOME overrides the search; off WSL, or
+# without interop, it is cargo's own: $CARGO_HOME, else ~/.cargo.
+#
+# Prints the directory, or nothing for cargo's own; always succeeds, since
+# under `set -e` a failing `$(...)` in an assignment would end the script
+# without a word.
+notices_cargo_home() {
+    if [ -n "${SLATEOS_CARGO_HOME:-}" ]; then
+        printf '%s\n' "$SLATEOS_CARGO_HOME"
+        return 0
+    fi
+    command -v cmd.exe >/dev/null 2>&1 && command -v wslpath >/dev/null 2>&1 || return 0
+    local win
+    win="$(cmd.exe /d /c 'if defined CARGO_HOME (echo %CARGO_HOME%) else (echo %USERPROFILE%\.cargo)' 2>/dev/null | tr -d '\r')" || true
+    case "$win" in
+        [A-Za-z]:\\*) wslpath -u "$win" 2>/dev/null || true ;;
+    esac
+    return 0
+}
+NOTICES_DST="$STAGE/usr/share/licenses"
+if [ -z "$SYSROOT_PY" ]; then
+    echo "[rootfs] ERROR: no python3/python, so scripts/gather-notices.py cannot gather"
+    echo "[rootfs]        the third-party notices the image must carry."
+    exit 1
+fi
+NOTICES_CARGO_HOME="$(notices_cargo_home)"
+NOTICES_RC=0
+if [ -n "$NOTICES_CARGO_HOME" ]; then
+    echo "[rootfs] gathering the third-party notices (cargo's registry: $NOTICES_CARGO_HOME)"
+    CARGO_HOME="$NOTICES_CARGO_HOME" "$SYSROOT_PY" "$ROOT_DIR/scripts/gather-notices.py" \
+        --out "$NOTICES_DST" || NOTICES_RC=$?
+else
+    echo "[rootfs] gathering the third-party notices (cargo's registry: ${CARGO_HOME:-~/.cargo})"
+    "$SYSROOT_PY" "$ROOT_DIR/scripts/gather-notices.py" --out "$NOTICES_DST" || NOTICES_RC=$?
+fi
+if [ "$NOTICES_RC" -ne 0 ]; then
+    echo "[rootfs] ERROR: scripts/gather-notices.py failed (exit $NOTICES_RC, above): the"
+    echo "[rootfs]        image would lack a licence notice it must carry. A package"
+    echo "[rootfs]        missing from the registry is fetched by building the"
+    echo "[rootfs]        workspace; a cache elsewhere is named by SLATEOS_CARGO_HOME."
+    exit 1
+fi
+# Data, like the themes: fixed modes rather than whatever the umask gave.
+find "$NOTICES_DST" -type d -exec chmod 0755 {} +
+find "$NOTICES_DST" -type f -exec chmod 0644 {} +
+NOTICES_COMPONENTS="$(find "$NOTICES_DST" -mindepth 1 -maxdepth 1 -type d | wc -l)"
+NOTICES_FILES="$(find "$NOTICES_DST" -type f | wc -l)"
+echo "[rootfs] staged the notices of $NOTICES_COMPONENTS component(s) under /usr/share/licenses ($NOTICES_FILES files)"
+
 # --- Completeness: the check that replaces the retired content stamps ---------
 #
 # There used to be a second gate here, hashing build.py + main.c + libc.a into a

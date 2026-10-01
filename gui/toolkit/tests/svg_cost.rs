@@ -19,6 +19,7 @@
 //! | gradients | 1 418 | 34 475 |
 //! | clipped | 2 126 | 43 269 |
 //! | reused | 1 666 | 21 269 |
+//! | masked (measured with masks, later the same day) | 2 444 | 56 312 |
 //!
 //! # Why the ceilings are where they are
 //!
@@ -94,12 +95,22 @@ const REUSED: &str = r##"<svg viewBox="0 0 48 48"><symbol id="dot" viewBox="0 0 
 <use href="#dot" x="38" y="38" width="9" height="9"/><use href="#dot" x="38" y="0" width="9" height="9"/>
 <use href="#dot" x="0" y="38" width="9" height="9"/><use href="#dot" x="19" y="38" width="9" height="9"/></svg>"##;
 
+/// A group faded through a gradient mask, as glossy icons draw their shine:
+/// its content drawn once into a scratch surface and once through the mask.
+const MASKED: &str = r##"<svg viewBox="0 0 48 48"><defs>
+<linearGradient id="fade" x2="0" y2="1"><stop stop-color="#fff"/><stop offset="1" stop-color="#000"/></linearGradient>
+<mask id="shine"><rect width="48" height="48" fill="url(#fade)"/></mask></defs>
+<rect width="48" height="48" rx="8" fill="#3a6ea5"/>
+<g mask="url(#shine)"><ellipse cx="24" cy="12" rx="20" ry="10" fill="#fff"/><path d="M4 10 h40 v6 h-40 z" fill="#8bb3e3"/></g></svg>"##;
+
 /// **Drawing an icon stays cheap**: each shape of icon, at a taskbar's 48
 /// pixels and at 256, under its ceiling.
 #[test]
 fn drawing_an_icon_stays_cheap() {
     // Ceilings in microseconds: twenty times what was measured.
-    let cases: [(&str, &str, u32, u32, f64); 8] = [
+    let cases: [(&str, &str, u32, u32, f64); 10] = [
+        ("masked", MASKED, 48, 20, 50_000.0),
+        ("masked", MASKED, 256, 5, 1_100_000.0),
         ("flat", FLAT, 48, 20, 25_000.0),
         ("flat", FLAT, 256, 5, 400_000.0),
         ("gradients", GRADIENTS, 48, 20, 30_000.0),

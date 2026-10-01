@@ -59,29 +59,39 @@ pub(super) struct ClipPath {
     pub(super) children: Vec<SvgNode>,
 }
 
-/// The `<clipPath>`s of a document, by `id`, found before anything is built so
-/// a `clip-path` can name one defined after it.
-pub(super) struct ClipIds<'x> {
+/// The elements of one kind in a document -- its `<clipPath>`s, its
+/// `<mask>`s -- by `id`, found before anything is built so that a property
+/// can name one defined after it.
+pub(super) struct Referable<'x> {
     places: HashMap<&'x str, usize>,
     /// In order of place.
     pub(super) elements: Vec<&'x XmlElement>,
 }
 
-impl<'x> ClipIds<'x> {
-    /// Every `<clipPath>` under `root` that `by_id` -- the first element with
-    /// each `id` -- names: one whose `id` an earlier element took is not found
-    /// by it.
-    pub(super) fn collect(root: &'x XmlElement, by_id: &HashMap<&'x str, &'x XmlElement>) -> Self {
+impl<'x> Referable<'x> {
+    /// Every element called `tag` under `root` that `by_id` -- the first
+    /// element with each `id` -- names: one whose `id` an earlier element
+    /// took is not found by it.
+    pub(super) fn collect(
+        root: &'x XmlElement,
+        by_id: &HashMap<&'x str, &'x XmlElement>,
+        tag: &str,
+    ) -> Self {
         let mut ids = Self {
             places: HashMap::new(),
             elements: Vec::new(),
         };
-        ids.gather(root, by_id);
+        ids.gather(root, by_id, tag);
         ids
     }
 
-    fn gather(&mut self, elem: &'x XmlElement, by_id: &HashMap<&'x str, &'x XmlElement>) {
-        if elem.tag == "clipPath"
+    fn gather(
+        &mut self,
+        elem: &'x XmlElement,
+        by_id: &HashMap<&'x str, &'x XmlElement>,
+        tag: &str,
+    ) {
+        if elem.tag == tag
             && let Some((&id, &first)) = elem
                 .attr("id")
                 .map(str::trim)
@@ -92,20 +102,25 @@ impl<'x> ClipIds<'x> {
             self.elements.push(elem);
         }
         for child in &elem.children {
-            self.gather(child, by_id);
+            self.gather(child, by_id, tag);
         }
     }
 
-    /// What a `clip-path` value says: the `<clipPath>` a `url(#id)` names,
-    /// or nothing -- for `none`, a name in no `<clipPath>`, or anything else.
-    pub(super) fn clip(&self, value: &str) -> Option<Clip> {
+    /// The place of the element a `url(#id)` value names, if it names one of
+    /// these -- not for `none`, a name in none of them, or anything else.
+    pub(super) fn place(&self, value: &str) -> Option<usize> {
         let reference = value.trim().strip_prefix("url(")?;
         let (reference, _) = reference.split_once(')')?;
         let id = reference
             .trim()
             .trim_matches(|c| c == '"' || c == '\'')
             .strip_prefix('#')?;
-        self.places.get(id).map(|&place| Clip::Path(place))
+        self.places.get(id).copied()
+    }
+
+    /// What a `clip-path` value says, of a document's `<clipPath>`s.
+    pub(super) fn clip(&self, value: &str) -> Option<Clip> {
+        self.place(value).map(Clip::Path)
     }
 }
 
@@ -113,7 +128,7 @@ impl<'x> ClipIds<'x> {
 /// transform, `clip-rule` and own `clip-path`.
 pub(super) fn clip_path_frame(
     elem: &XmlElement,
-    ids: &ClipIds<'_>,
+    ids: &Referable<'_>,
 ) -> (Units, Transform, Option<FillRule>, Option<Clip>) {
     let units = match elem.attr("clipPathUnits").map(str::trim) {
         Some("objectBoundingBox") => Units::ObjectBoundingBox,
@@ -191,6 +206,19 @@ impl Mask {
             width,
             height,
             left: vec![0; size],
+        }
+    }
+
+    /// A mask over the region `x0..x1` by `y0..y1` leaving `left` of its
+    /// pixels -- one share a pixel, 0 to 255, row by row -- or leaving
+    /// nothing where `left` is not one share a pixel of that region.
+    pub(super) fn from_left(x0: u32, y0: u32, x1: u32, y1: u32, left: Vec<u8>) -> Self {
+        let mut mask = Self::over(x0, y0, x1, y1);
+        if mask.left.len() == left.len() {
+            mask.left = left;
+            mask
+        } else {
+            Self::nothing()
         }
     }
 

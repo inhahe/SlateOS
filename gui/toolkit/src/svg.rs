@@ -29,7 +29,9 @@
 //! - `clip-path`: what an element draws is cut to the `<clipPath>` it names
 //!   (the `clip` module says how); and a symbol's or inner `<svg>`'s
 //!   viewport cuts what overflows it, unless it says `overflow: visible`
-//! - Masks, patterns and filters are not applied
+//! - `mask`: what an element draws is kept as the luminance (or alpha) of
+//!   the `<mask>` it names says (the `mask` module); patterns and filters
+//!   are not applied
 //! - Container elements: the outermost svg, its viewBox fitted to the pixels
 //!   as its `preserveAspectRatio` says; an svg inside it, placed in a
 //!   viewport of its own; g (with inheritance)
@@ -55,6 +57,7 @@ use std::collections::HashMap;
 
 mod clip;
 mod css;
+mod mask;
 mod paint;
 #[cfg(test)]
 mod use_tests;
@@ -62,7 +65,8 @@ mod use_tests;
 mod viewport_tests;
 
 pub use clip::Clip;
-use clip::{ClipIds, ClipPath, MAX_CLIP_DEPTH, Mask, clip_path_frame, may_clip};
+use clip::{ClipPath, MAX_CLIP_DEPTH, Mask, Referable, clip_path_frame, may_clip};
+use mask::{MaskDef, kept, mask_frame};
 use paint::{Defs, Gradient};
 use std::rc::Rc;
 
@@ -1147,6 +1151,9 @@ pub struct SvgStyle {
     pub clip_rule: Option<FillRule>,
     /// What the element is clipped to: not inherited -- each element's own.
     pub clip: Option<Clip>,
+    /// The `<mask>` the element is masked by, by its place among the
+    /// document's: not inherited.
+    pub mask: Option<usize>,
 }
 
 impl Default for SvgStyle {
@@ -1164,6 +1171,7 @@ impl Default for SvgStyle {
             stroke_opacity: None,
             clip_rule: None,
             clip: None,
+            mask: None,
         }
     }
 }
@@ -1269,6 +1277,8 @@ pub struct SvgDocument {
     reused: Vec<SvgNode>,
     /// Its `<clipPath>`s, at the places [`Clip::Path`] gives.
     clips: Vec<ClipPath>,
+    /// Its `<mask>`s, at the places [`SvgStyle::mask`] gives.
+    masks: Vec<MaskDef>,
 }
 
 /// The user-space rectangle an `<svg>` element shows, `(x, y, width,
@@ -1331,11 +1341,13 @@ impl SvgDocument {
         let mut by_id = HashMap::new();
         index_ids(first, &mut by_id);
         let reusable = Reusable::collect(first, &by_id);
-        let clip_ids = ClipIds::collect(first, &by_id);
+        let clip_ids = Referable::collect(first, &by_id, "clipPath");
+        let mask_ids = Referable::collect(first, &by_id, "mask");
         let builder = Builder {
             defs: &defs,
             reusable: &reusable,
             clips: &clip_ids,
+            masks: &mask_ids,
             ancestors: None,
             viewport: (view_w, view_h),
             outermost: true,
@@ -1350,12 +1362,18 @@ impl SvgDocument {
             .iter()
             .map(|elem| build_clip_path(elem, builder.inner()))
             .collect();
+        let masks = mask_ids
+            .elements
+            .iter()
+            .map(|elem| build_mask(elem, builder.inner()))
+            .collect();
         let root = build_node(first, builder)?;
         Ok(Self {
             root,
             defs,
             reused,
             clips,
+            masks,
         })
     }
 
@@ -1382,7 +1400,14 @@ impl SvgDocument {
     /// a drawing asked for at another shape is not stretched. A view box with
     /// no area draws nothing.
     pub fn render(&self, width: u32, height: u32) -> Vec<u8> {
-        let mut renderer = SvgRenderer::new(width, height, &self.defs, &self.reused, &self.clips);
+        let mut renderer = SvgRenderer::new(
+            width,
+            height,
+            &self.defs,
+            &self.reused,
+            &self.clips,
+            &self.masks,
+        );
         let aspect = match &self.root {
             SvgNode::Svg { aspect, .. } => *aspect,
             _ => AspectRatio::DEFAULT,
@@ -2062,7 +2087,9 @@ struct Builder<'b> {
     reusable: &'b Reusable<'b>,
     /// The document's `<clipPath>`s, by `id`, for a `clip-path` that names
     /// one.
-    clips: &'b ClipIds<'b>,
+    clips: &'b Referable<'b>,
+    /// The document's `<mask>`s, by `id`, for a `mask` that names one.
+    masks: &'b Referable<'b>,
     /// The innermost element with an `id` that the element is inside: a
     /// `<use>` naming any of these would draw itself inside itself.
     ancestors: Option<&'b Ancestor<'b>>,
@@ -2316,6 +2343,25 @@ fn build_reused(id: &str, target: &XmlElement, b: Builder<'_>) -> SvgNode {
         })
     });
     content.unwrap_or_else(|_| nothing())
+}
+
+/// A `<mask>`, built: where it is measured, and its content, which is drawn
+/// as any content is. A child that cannot be built is left out, as a clip
+/// path's is, and for the same reason.
+fn build_mask(elem: &XmlElement, b: Builder<'_>) -> MaskDef {
+    let (units, content_units, rect, luminance) = mask_frame(elem, b.viewport);
+    let children = elem
+        .children
+        .iter()
+        .filter_map(|child| build_node(child, b).ok())
+        .collect();
+    MaskDef {
+        units,
+        content_units,
+        rect,
+        luminance,
+        children,
+    }
 }
 
 /// A `<clipPath>`, built: its shapes and `<use>`s -- nothing else may stand in
@@ -2795,6 +2841,7 @@ fn parse_style_attrs(elem: &XmlElement, b: Builder<'_>) -> Result<SvgStyle, SvgE
         stroke_opacity,
         clip_rule: clip::clip_rule(elem),
         clip: property(elem, "clip-path").and_then(|value| b.clips.clip(value)),
+        mask: property(elem, "mask").and_then(|value| b.masks.place(value)),
     })
 }
 
@@ -3722,8 +3769,13 @@ struct SvgRenderer<'d> {
     reuse_budget: usize,
     /// The document's `<clipPath>`s, for a `clip-path` that names one.
     clips: &'d [ClipPath],
-    /// What the clips around the node being drawn leave of each pixel:
-    /// coverage is multiplied by it. `None` where nothing is clipped.
+    /// The document's `<mask>`s, for a `mask` that names one.
+    masks: &'d [MaskDef],
+    /// How many masks' content this drawing is inside: a mask whose content
+    /// is masked by itself ends at [`MAX_CLIP_DEPTH`].
+    mask_depth: usize,
+    /// What the clips and masks around the node being drawn leave of each
+    /// pixel: coverage is multiplied by it. `None` where nothing is clipped.
     mask: Option<Rc<Mask>>,
 }
 
@@ -3752,6 +3804,7 @@ impl<'d> SvgRenderer<'d> {
         defs: &'d Defs,
         reused: &'d [SvgNode],
         clips: &'d [ClipPath],
+        masks: &'d [MaskDef],
     ) -> Self {
         // A size that does not fit in `usize` could not be allocated even if it
         // were computed, so an empty buffer is the honest answer rather than a
@@ -3775,6 +3828,8 @@ impl<'d> SvgRenderer<'d> {
             depth: 0,
             reuse_budget: MAX_REUSED_NODES,
             clips,
+            masks,
+            mask_depth: 0,
             mask: None,
         }
     }
@@ -3858,8 +3913,114 @@ impl<'d> SvgRenderer<'d> {
     /// answer what to put back once it is drawn; `None` where nothing
     /// changed: no clip, or one that names no clip path.
     fn enter_clip(&mut self, node: &SvgNode, transform: Transform) -> Option<OuterMask> {
-        let clip = style_of(node)?.clip?;
-        self.push_clip(clip, node, transform.then(local_transform(node)))
+        let style = style_of(node)?;
+        let (clip, masked_by) = (style.clip, style.mask);
+        if clip.is_none() && masked_by.is_none() {
+            return None;
+        }
+        let local = transform.then(local_transform(node));
+        let before = self.mask.clone();
+        let mut changed = false;
+        if let Some(clip) = clip {
+            changed |= self.push_clip(clip, node, local).is_some();
+        }
+        // Its mask, over its clip.
+        if let Some(place) = masked_by
+            && let Some(kept) = self.element_mask(place, node, local)
+        {
+            let kept = match &self.mask {
+                Some(outer) => outer.intersect(&kept),
+                None => kept,
+            };
+            self.mask = Some(Rc::new(kept));
+            changed = true;
+        }
+        changed.then_some(OuterMask(before))
+    }
+
+    /// What the `<mask>` at `place` keeps of the surface for `node`, whose
+    /// own user space `local` carries to the pixels -- or `None` where no
+    /// mask is there, which masks nothing.
+    ///
+    /// Its content is drawn into a scratch surface over the region its
+    /// rectangle covers, cut to that rectangle, and each pixel's luminance
+    /// times its alpha -- or its alpha alone -- is the share kept there.
+    /// Measured against a box with no area, or nested in masks deeper than
+    /// [`MAX_CLIP_DEPTH`], it keeps nothing.
+    fn element_mask(&mut self, place: usize, node: &SvgNode, local: Transform) -> Option<Mask> {
+        let masks = self.masks;
+        let def = masks.get(place)?;
+        if self.mask_depth >= MAX_CLIP_DEPTH {
+            return Some(Mask::nothing());
+        }
+        let in_box = |units: paint::Units| units == paint::Units::ObjectBoundingBox;
+        let to_box = if in_box(def.units) || in_box(def.content_units) {
+            match self.bounds(node) {
+                Some((x, y, w, h)) if w > 0.0 && h > 0.0 => {
+                    Transform::translate(x, y).then(Transform::scale(w, h))
+                }
+                _ => return Some(Mask::nothing()),
+            }
+        } else {
+            Transform::IDENTITY
+        };
+        let space = |units: paint::Units| {
+            if in_box(units) {
+                local.then(to_box)
+            } else {
+                local
+            }
+        };
+        let [rx, ry, rw, rh] = def.rect;
+        // The region the rectangle covers on the surface.
+        let mut extent = Extent::default();
+        if let Some(outline) = rect_subpath(rx, ry, rw, rh, 0.0, 0.0, space(def.units)) {
+            for &(x, y) in &outline.points {
+                extent.add(x, y);
+            }
+        }
+        let Some((x0, y0, x1, y1)) = extent.pixels(self.width, self.height) else {
+            return Some(Mask::nothing());
+        };
+        #[allow(
+            clippy::cast_precision_loss,
+            reason = "a pixel coordinate on the surface, far inside f32's exact range"
+        )]
+        let shift = Transform::translate(-(x0 as f32), -(y0 as f32));
+        let mut scratch = SvgRenderer::new(
+            x1.saturating_sub(x0),
+            y1.saturating_sub(y0),
+            self.defs,
+            self.reused,
+            self.clips,
+            self.masks,
+        );
+        scratch.mask_depth = self.mask_depth.saturating_add(1);
+        scratch.depth = self.depth;
+        scratch.drawing.clone_from(&self.drawing);
+        scratch.reuse_budget = self.reuse_budget;
+        // Nothing outside the rectangle is kept: the content is drawn cut to
+        // it.
+        let rect: Vec<Subpath> =
+            rect_subpath(rx, ry, rw, rh, 0.0, 0.0, shift.then(space(def.units)))
+                .into_iter()
+                .collect();
+        scratch.mask = Some(Rc::new(scratch.mask_of(&[(rect, FillRule::NonZero)])));
+        let content = shift.then(space(def.content_units));
+        for child in &def.children {
+            scratch.render_node(child, content, &ResolvedStyle::default());
+        }
+        // What the mask's content drew through `<use>`s is spent.
+        self.reuse_budget = scratch.reuse_budget;
+        let left = scratch
+            .buffer
+            .chunks_exact(4)
+            .map(|pixel| match *pixel {
+                [r, g, b, a] => kept([r, g, b, a], def.luminance),
+                _ => 0,
+            })
+            .collect();
+        Some(Mask::from_left(x0, y0, x1, y1, left))
     }
 
     /// Lay `clip` over what is already clipped, for `node`, whose own user

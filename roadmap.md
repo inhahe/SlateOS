@@ -2158,7 +2158,8 @@ live.
   element draws cut to the shapes of the `<clipPath>` it names, in either
   units, by its `clip-rule`, clips within clips multiplying. And `<style>`
   sheets, so a drawing coloured by CSS classes, as Illustrator writes them,
-  is no longer drawn in black. Still not drawn: masks and patterns.
+  is no longer drawn in black; and masks, the shine glossy icons fade
+  through a gradient. Still not drawn: patterns and filters.
 
 - `[C]` **The run box wears the theme's window frame** (`design-decisions.md`
   §1461) -- done 2026-10-01. `desktop::dialog_frame` draws a shell dialog's

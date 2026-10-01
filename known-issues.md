@@ -151282,7 +151282,21 @@ on any host whose name is in the hosts table.
 
 ---
 
-## TD-B-PATCH-AUTO-DETECTS-A-BARE-NORMAL-DIFF-WHERE-GNU-CALLS-IT-GARBAGE (lane B, 2026-09-16) — **open**
+## TD-B-PATCH-AUTO-DETECTS-A-BARE-NORMAL-DIFF-WHERE-GNU-CALLS-IT-GARBAGE (lane B, 2026-09-16) — **FIXED** 2026-10-01
+
+**Resolution (2026-10-01).** GNU's reading was adopted, because it is GNU's
+rule and not a choice: `patch.c` passes `need_header = !(inname ||
+posixly_correct)` to `intuit_diff_type`, which skips every line that is not a
+header naming a file (`*** `, `+++ `, `Index:`, `diff --git `, `--- `) until
+one has -- so with no file operand a bare normal diff is never seen, and the
+input is garbage. `detect_dialect` now takes the same flag, and also requires
+a `< `/`> ` line after a normal command, as GNU's test does. Two related
+differences went with it, found by the `Index:` row: a normal diff's leading
+text is quoted under "The text leading up to this was:", and the `-p` hint is
+given by dialect (never for a normal diff) rather than by whether there was
+text to quote. Rows in `patch-diff.sh`: `patch -i n.patch` and
+`patch -i ni.patch`. (POSIXLY_CORRECT clears `need_header` as well; that row
+is not in the harness because GNU then reads its prompt from /dev/tty.)
 
 **In short:** a "normal" diff — the bare `2c2` kind, with no `---`/`+++` header
 naming a file — carries no filename at all. Handed one with **no target on the

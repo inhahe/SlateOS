@@ -614,8 +614,23 @@ enum Dialect {
     Unknown,
 }
 
-fn detect_dialect(input: &[u8]) -> Dialect {
+///
+/// `need_header` is GNU's argument of the same name, `!(inname ||
+/// posixly_correct)` in `patch.c`: true when the command line named no file to
+/// patch and `POSIXLY_CORRECT` is unset. While it holds, `intuit_diff_type`
+/// passes over every line that is not a header naming a file -- so a normal
+/// diff, which has no such header, is never recognised, and GNU answers `Only
+/// garbage was found in the patch input.` (exit 2) where this used to accept the
+/// hunk and then ask which file to patch (exit 1). Measured, GNU patch 2.7.6:
+/// `patch -i n.patch` is garbage, `patch -i n.patch base.txt` and `patch -n -i
+/// n.patch` are not. (`known-issues.md`,
+/// TD-B-PATCH-AUTO-DETECTS-A-BARE-NORMAL-DIFF-WHERE-GNU-CALLS-IT-GARBAGE.)
+///
+/// A normal command counts only with a `< ` or `> ` line after it, as in GNU,
+/// whose test is `last_line_was_command` followed by one of those.
+fn detect_dialect(input: &[u8], need_header: bool) -> Dialect {
     let lines: Vec<&[u8]> = bytes::lines(input);
+    let mut need_header = need_header;
     for (i, line) in lines.iter().enumerate() {
         let next = lines.get(i.saturating_add(1)).copied().unwrap_or(&[]);
         if line.starts_with(b"*** ") && next.starts_with(b"--- ") {
@@ -624,11 +639,35 @@ fn detect_dialect(input: &[u8]) -> Dialect {
         if line.starts_with(b"--- ") && next.starts_with(b"+++ ") {
             return Dialect::Unified;
         }
-        if parse_normal_command(line).is_some() {
+        if names_a_file(line) {
+            need_header = false;
+            continue;
+        }
+        if need_header {
+            continue;
+        }
+        if parse_normal_command(line).is_some()
+            && (next.starts_with(b"< ") || next.starts_with(b"> "))
+        {
             return Dialect::Normal;
         }
     }
     Dialect::Unknown
+}
+
+/// Whether `line` is one of the headers that name a file -- the lines on which
+/// GNU's `intuit_diff_type` clears `need_header`: `*** `, `+++ `, `Index:`,
+/// `diff --git `, and `--- ` behind any number of RFC 934 `- ` prefixes.
+fn names_a_file(line: &[u8]) -> bool {
+    let mut unprefixed = line;
+    while let Some(rest) = unprefixed.strip_prefix(b"- ") {
+        unprefixed = rest;
+    }
+    line.starts_with(b"*** ")
+        || line.starts_with(b"+++ ")
+        || line.starts_with(b"Index:")
+        || line.starts_with(b"diff --git ")
+        || unprefixed.starts_with(b"--- ")
 }
 
 /// `2c2`, `1,3d0`, `4a5,7` -- a normal diff's command line.
@@ -895,12 +934,17 @@ fn context_hunk(
 /// A normal hunk has no context lines, so it is applied by line number rather
 /// than by matching surroundings. `old_start` is therefore load-bearing in a
 /// way it is not for unified.
+///
+/// Whatever comes before the first hunk -- an `Index:` line, a mail header --
+/// is kept as the patch's `header_lines`: GNU's `skip_to` prints it under
+/// "The text leading up to this was:" when it has to ask which file to patch.
 fn parse_normal_patch(input: &[u8]) -> Vec<FilePatch> {
     let lines: Vec<&[u8]> = bytes::lines(input);
     let mut hunks: Vec<Hunk> = Vec::new();
     let mut i = 0;
     let mut first_hunk_line = 1;
     let mut seen_first = false;
+    let mut leading: Vec<Vec<u8>> = Vec::new();
 
     while let Some(line) = lines.get(i).copied() {
         let Some((os, oe, action, ns, ne)) = parse_normal_command(line) else {
@@ -910,6 +954,12 @@ fn parse_normal_patch(input: &[u8]) -> Vec<FilePatch> {
         if !seen_first {
             first_hunk_line = i.saturating_add(1);
             seen_first = true;
+            leading = lines
+                .get(..i)
+                .unwrap_or_default()
+                .iter()
+                .map(|l| l.to_vec())
+                .collect();
         }
         i = i.saturating_add(1);
         let mut body: Vec<HunkLine> = Vec::new();
@@ -965,7 +1015,7 @@ fn parse_normal_patch(input: &[u8]) -> Vec<FilePatch> {
         old_path: Vec::new(),
         new_path: Vec::new(),
         hunks,
-        header_lines: Vec::new(),
+        header_lines: leading,
         first_hunk_line,
         malformed_at: None,
     }]
@@ -1594,9 +1644,14 @@ fn main() {
     // than quietly fall back to detection. The refusal costs nothing to
     // produce -- the chosen parser finds no hunks, and the empty-vs-garbage
     // branch below already answers with GNU's own sentence and exit 2.
+    // GNU's `need_header`: no file named on the command line, and not
+    // `POSIXLY_CORRECT` (`patch.c`: `there_is_another_patch (! (inname ||
+    // posixly_correct), ...)`). A forced dialect does not ask: GNU clears it for
+    // `-n` and `-e`, and the other two have headers of their own.
+    let need_header = opts.target_file.is_none() && std::env::var_os("POSIXLY_CORRECT").is_none();
     let dialect = opts
         .forced_dialect
-        .unwrap_or_else(|| detect_dialect(&patch_input));
+        .unwrap_or_else(|| detect_dialect(&patch_input, need_header));
     let file_patches = match dialect {
         Dialect::Context => parse_context_patch(&patch_input),
         Dialect::Normal => parse_normal_patch(&patch_input),
@@ -1803,7 +1858,16 @@ fn main() {
                         // Found by a harness row added for `-n`, which was the
                         // first case here with a header-less patch and no
                         // target file named on the command line.
-                        if !fp.header_lines.is_empty() {
+                        //
+                        // The two halves are GNU's two separate tests, though,
+                        // and they part company when a normal diff has text
+                        // above it (an `Index:` line): the hint is for every
+                        // dialect but normal and ed (`diff_type != ED_DIFF &&
+                        // diff_type != NORMAL_DIFF`), while the quotation is
+                        // `skip_to`'s, printed whenever there is any text
+                        // before the hunk. Measured, GNU patch 2.7.6: such a
+                        // patch is quoted with no hint.
+                        if dialect != Dialect::Normal {
                             block.extend_from_slice(if opts.strip.is_none() {
                                 b"Perhaps you should have used the -p or --strip option?
 "
@@ -1811,6 +1875,8 @@ fn main() {
                                 b"Perhaps you used the wrong -p or --strip option?
 "
                             });
+                        }
+                        if !fp.header_lines.is_empty() {
                             block.extend_from_slice(
                                 b"The text leading up to this was:
 ",
@@ -3358,14 +3424,50 @@ mod tests {
 
     #[test]
     fn the_three_dialects_are_told_apart() {
-        assert_eq!(detect_dialect(ctx(CTX).as_bytes()), Dialect::Context);
-        assert_eq!(detect_dialect(SIMPLE_PATCH.as_bytes()), Dialect::Unified);
+        for need_header in [false, true] {
+            assert_eq!(
+                detect_dialect(ctx(CTX).as_bytes(), need_header),
+                Dialect::Context
+            );
+            assert_eq!(
+                detect_dialect(SIMPLE_PATCH.as_bytes(), need_header),
+                Dialect::Unified
+            );
+            assert_eq!(
+                detect_dialect(b"this is not a patch", need_header),
+                Dialect::Unknown
+            );
+            assert_eq!(detect_dialect(b"", need_header), Dialect::Unknown);
+        }
         assert_eq!(
-            detect_dialect(ctx("2c2~< bravo~---~> BRAVO~").as_bytes()),
+            detect_dialect(ctx("2c2~< bravo~---~> BRAVO~").as_bytes(), false),
             Dialect::Normal
         );
-        assert_eq!(detect_dialect(b"this is not a patch"), Dialect::Unknown);
-        assert_eq!(detect_dialect(b""), Dialect::Unknown);
+    }
+
+    /// GNU's `need_header`: with no file named on the command line, a hunk
+    /// counts only after a header line has named one, so a bare normal diff
+    /// is garbage there -- measured, GNU patch 2.7.6.
+    #[test]
+    fn a_bare_normal_diff_needs_a_file_named_somewhere() {
+        let bare = ctx("2c2~< bravo~---~> BRAVO~");
+        assert_eq!(detect_dialect(bare.as_bytes(), true), Dialect::Unknown);
+        // A header naming one is enough, whatever kind it is.
+        for header in [
+            "Index: base.txt~",
+            "diff --git a/b b/b~",
+            "--- base.txt~",
+            "- --- base.txt~",
+        ] {
+            let named = ctx(&format!("{header}2c2~< bravo~---~> BRAVO~"));
+            assert_eq!(
+                detect_dialect(named.as_bytes(), true),
+                Dialect::Normal,
+                "{header}"
+            );
+        }
+        // And a command with no `<`/`>` line after it is not a normal diff.
+        assert_eq!(detect_dialect(b"2c2\n", false), Dialect::Unknown);
     }
 
     /// THE ORDER OF THE TESTS IS THE WHOLE OF IT. A context diff's SECOND
@@ -3375,7 +3477,10 @@ mod tests {
     #[test]
     fn a_context_header_is_not_read_as_a_unified_one() {
         let headers_only = ctx("*** x/a/base.txt~--- y/a/base.txt~");
-        assert_eq!(detect_dialect(headers_only.as_bytes()), Dialect::Context);
+        assert_eq!(
+            detect_dialect(headers_only.as_bytes(), true),
+            Dialect::Context
+        );
     }
 
     #[test]

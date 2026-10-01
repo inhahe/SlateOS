@@ -1341,9 +1341,14 @@ list moved to lane D on 2026-09-22):
     and a new open question -- what SlateOS is for, each answer with what it
     would drop. Lane D is asked to raise `IMG_SIZE` and stage everything that
     builds.
-  - `[B]` **Shaped random numbers** (§1047): a userspace library (normal,
+  - `[x]` `[B]` **Shaped random numbers** (§1047): a userspace library (normal,
     exponential, Poisson, weighted choice) over a caller-given uniform source,
-    and deliberately not reachable from the cryptographic one.
+    and deliberately not reachable from the cryptographic one. Done
+    2026-10-01: `userspace/randdist` -- normal, exponential and Poisson since
+    `26148aa43`; weighted choice added 2026-10-01 as `WeightedIndex` (integer
+    weights, *exact*: a uniform draw below the total by `randrange`'s
+    `below_u64`, proved by enumerating every draw) and `WeightedIndexF64`
+    (fractional weights, rounded, as Python's `random.choices`).
   - `[B]` **The fastpy compiler on SlateOS -- lane B's next large port**
     (§1050, B-Q18). The Rust toolchain and WINE wait behind it.
   - `[B]` **Genuine Oils, the default shell** (§1043): upstream's

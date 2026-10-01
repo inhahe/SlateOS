@@ -256,6 +256,10 @@ fn comments_are_read_as_css_reads_them() {
     };
     assert_eq!(colour(&own("fill:/* not red */#0000ff")), BLUE);
     assert_eq!(colour(&own("fi/**/ll:red")), LIME);
+    // So in a sheet's declarations.
+    let split = r#"<svg viewBox="0 0 4 4"><style>rect{fi/**/ll:red}</style>
+<rect width="4" height="4" fill="lime"/></svg>"#;
+    assert_eq!(colour(split), LIME);
     // And so with a sheet in the document as well.
     let both = r#"<svg viewBox="0 0 4 4"><style>rect{stroke:none}</style>
 <rect width="4" height="4" style="fill:/**/#0000ff"/></svg>"#;

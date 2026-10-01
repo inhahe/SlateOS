@@ -2523,9 +2523,12 @@ fn viewport_placement(
         ),
         None => (Transform::translate(x, y), (width, height)),
     };
+    // CSS keywords, in any case.
     let overflows = property(elem, "overflow")
         .map(str::trim)
-        .is_some_and(|value| value == "visible" || value == "auto");
+        .is_some_and(|value| {
+            value.eq_ignore_ascii_case("visible") || value.eq_ignore_ascii_case("auto")
+        });
     Some(Placement {
         transform,
         inner,

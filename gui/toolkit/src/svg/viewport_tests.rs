@@ -242,6 +242,10 @@ fn an_inner_svg_is_cut_to_its_viewport() {
     };
     assert_eq!(painted(&make(""), 20, 20), 25);
     assert_eq!(painted(&make(r#"overflow="visible""#), 20, 20), 100);
+    // A CSS keyword is a keyword in any case; `hidden` and `scroll` cut.
+    assert_eq!(painted(&make(r#"overflow=" Visible ""#), 20, 20), 100);
+    assert_eq!(painted(&make(r#"style="overflow:AUTO""#), 20, 20), 100);
+    assert_eq!(painted(&make(r#"overflow="scroll""#), 20, 20), 25);
 }
 
 /// **An inner `<svg>`'s own clip is measured in its parent's space**, as

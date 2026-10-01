@@ -11,9 +11,9 @@ A new program is recorded here in the commit that creates it (§1053): run
 the script, commit `programs.md` with the program. `--check` fails when the
 two disagree.
 
-**452 programs; 88 on the image, 6 carried inside the kernel.**
+**450 programs; 88 on the image, 6 carried inside the kernel.**
 
-## Userland utilities and services (`userspace/`, lane B) -- 297
+## Userland utilities and services (`userspace/`, lane B) -- 295
 
 | Program | What it does | On image | Crate | Other names |
 |---|---|---|---|---|
@@ -51,7 +51,6 @@ two disagree.
 | `coredumpctl` | Slate OS core dump management |  |  |  |
 | `cp` | Copy files and directories. | yes | `coreutils` |  |
 | `cpio` | Cpio Archive Utility |  |  |  |
-| `cpupower` | Slate OS CPU frequency and power management |  |  | `cpufreq-info` *(not installed)*, `cpufreq-set` *(not installed)* |
 | `crond` | Cron Daemon (`crond`) with anacron support |  |  | `anacron` *(not installed)* |
 | `crontab` | Per-user cron schedule management |  |  |  |
 | `csplit` | Output pieces of a file separated by patterns. | yes | `coreutils` |  |
@@ -78,7 +77,7 @@ two disagree.
 | `echo` | Write arguments to standard output. | yes | `coreutils` |  |
 | `ed` | The standard line editor. | yes | `coreutils` |  |
 | `efibootmgr` | EFI boot manager. |  |  | `efivar` *(not installed)* |
-| `eject` | Removable media ejection utility. |  |  | `volname` *(not installed)* |
+| `eject` | Removable media ejection utility: `eject`. |  |  |  |
 | `env` | Run a command in a modified environment, or print the environment. | yes | `coreutils` |  |
 | `expand` | Convert tabs in each file to spaces. | yes | `coreutils` |  |
 | `expr` | Evaluate an expression given as command-line arguments. | yes | `coreutils` |  |
@@ -117,7 +116,7 @@ two disagree.
 | `hostnamectl` | Query and set the system hostname and related settings. |  |  |  |
 | `htop` | Interactive Process Viewer |  |  |  |
 | `hwclock` | Hardware clock and time management utility for SlateOS. |  |  |  |
-| `hwinfo` | Hardware information utility. |  |  | `lshw` *(not installed)* |
+| `hwinfo` | Hardware information utility: `hwinfo`, a comprehensive hardware inventory. |  |  |  |
 | `iconv` | Character encoding conversion utility. |  |  |  |
 | `id` | Print user and group information for each specified USER, or (when USER is omitted) for the current process. | yes | `coreutils` |  |
 | `ifconfig` | Classic network interface configuration utility. |  |  |  |
@@ -146,7 +145,7 @@ two disagree.
 | `lockfile` | Create semaphore files, as procmail's `lockfile(1)` does. |  |  |  |
 | `logger` | Enter messages into the system log. | yes |  |  |
 | `login` | User login program |  |  |  |
-| `loginctl` | Slate OS session and user management |  |  | `userdbctl` *(not installed)* |
+| `loginctl` | Slate OS session and user management |  |  |  |
 | `logind` | Session manager (logind/loginctl) |  |  |  |
 | `logname` | Print the user's login name. | yes | `coreutils` |  |
 | `logrotate` | Rotate, retain and compress log files. | yes |  |  |
@@ -270,7 +269,6 @@ two disagree.
 | `tee` | Copy standard input to each FILE, and also to standard output. | yes | `coreutils` |  |
 | `telnet` | `Slate OS` Telnet Client |  |  |  |
 | `test` | Evaluate a conditional expression. | yes | `coreutils` |  |
-| `thermald` | Slate OS thermal management daemon |  |  | `thermal-conf` *(not installed)*, `thermal-monitor` *(not installed)* |
 | `time_cmd` | Run a command and report its resource usage. | yes | `coreutils` |  |
 | `timeout` | Run a command with a time limit, for Slate OS |  |  |  |
 | `top` | Interactive Process Monitor |  |  |  |

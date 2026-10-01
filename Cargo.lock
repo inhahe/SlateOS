@@ -685,13 +685,6 @@ name = "cpufeatures"
 version = "0.3.1"
 
 [[package]]
-name = "cpupower"
-version = "0.1.0"
-dependencies = [
- "quoting",
-]
-
-[[package]]
 name = "crc32"
 version = "0.1.0"
 
@@ -4071,13 +4064,6 @@ name = "textline"
 version = "0.1.0"
 dependencies = [
  "guitk",
-]
-
-[[package]]
-name = "thermald"
-version = "0.1.0"
-dependencies = [
- "quoting",
 ]
 
 [[package]]

@@ -193,3 +193,24 @@ Staging "every binary the workspace builds" picks the new names up with no
 special case; `scripts/multicall-aliases.py` now reads a crate's binary name
 from its `Cargo.toml` when it judges whether a manifest line installs a name,
 so a line naming the crate would show up there as not installing anything.
+
+## The names lane B keeps -- sixth batch (2026-10-01)
+
+```
+efivar = efibootmgr
+sudoedit = sudo
+inotifywatch = inotifywait
+xdg-mime = xdg-open
+mimeopen = xdg-open
+```
+
+`efivar` lists what `efibootmgr` reports from, efivarfs, and like it says so
+when there is none; `sudoedit` is `sudo -e`, a link to `sudo` upstream too;
+`inotifywatch` gathers statistics from the same kernel watch `inotifywait`
+reads; `xdg-mime` and `mimeopen` share `xdg-open`'s MIME table and its
+`mimeapps.list`. The producers are binary names: `inotifywait` and `xdg-open`
+are the `inotify` and `xdg` crates, built under those names since today. With
+this batch every name in `scripts/multicall-aliases-baseline.txt` is decided:
+each is either in one of this file's six batches, or is `visudo` or
+`sudoreplay`, which lane B is moving into crates of their own and which will
+need no line here.

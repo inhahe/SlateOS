@@ -22,11 +22,8 @@ cgroup:cgget
 cgroup:cgset
 cgroup:lssubsys
 chattr:lsattr
-cpupower:cpufreq-info
-cpupower:cpufreq-set
 crond:anacron
 efibootmgr:efivar
-eject:volname
 getty:mingetty
 gzip:gunzip
 gzip:gzcat
@@ -36,11 +33,9 @@ hostname:dnsdomainname
 hostname:domainname
 hostname:nisdomainname
 hostname:ypdomainname
-hwinfo:lshw
 inotify:inotifywatch
 last:lastb
 last:lastlog
-loginctl:userdbctl
 lp:cancel
 lp:lpq
 lp:lpr
@@ -60,8 +55,6 @@ systemctl:systemd-cgls
 systemctl:systemd-cgtop
 systemctl:systemd-escape
 systemctl:systemd-path
-thermald:thermal-conf
-thermald:thermal-monitor
 tput:clear
 tput:reset
 tput:tset

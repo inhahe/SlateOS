@@ -2510,6 +2510,29 @@ which picks its default from those names as Debian installs them; they are
 reads coreutils' binaries as well as the crates' so it can see them (the four
 rows are renamed, not added). **The ledger stands at 64.**
 
+**Fifth pass** (2026-10-01). Three names went for answering with something
+made up, or for something SlateOS does not have: `lshw` (hwinfo -- its "H/W
+path" column was `/sys/device/<index>`, a path that names nothing, and its XML
+was not lshw's), `userdbctl` (loginctl -- `services` listed three systemd
+varlink services SlateOS has none of, and `user`/`group` read a UID or GID that
+did not parse as 0, which is root), and `volname` (eject -- no current
+distribution ships it, SlateOS has no optical drive device, and it read the
+whole device to look at 32 bytes). Two crates went whole, under §1006 and
+§1049: **`userspace/cpupower`** (`cpufreq-info`, `cpufreq-set`), which reported
+2.4 GHz current, an 800 MHz to 4.5 GHz range and three governors as this
+machine's whenever sysfs had no cpufreq data -- every run here -- where no
+frequency source exists or is planned (roadmap's `/sys/devices` row); and
+**`userspace/thermald`** (`thermal-monitor`, `thermal-conf`), whose daemon
+printed "D-Bus interface enabled" and "daemon ready" and exited having managed
+nothing, under two tool names no upstream ships. **Kept, sixth batch:**
+`efivar` (efibootmgr: both read efivarfs and say so when it is absent),
+`sudoedit` (sudo, as upstream links it), `inotifywatch` (inotifywait), and
+`xdg-mime` and `mimeopen` (xdg-open). Four crates are now built under their
+command's name -- `lscgroup`, `sar`, `inotifywait`, `xdg-open` -- which also
+corrected the producers named in batches two and three. **The ledger stands at
+57, and every name left in it is decided:** the kept batches wait on lane D's
+manifest, and `visudo` and `sudoreplay` on the split into crates of their own.
+
 **The 9 new shadowed pairs were the urgent half**, because a shadowed name is
 two implementations that can disagree with the winner picked by packaging:
 

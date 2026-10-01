@@ -50,7 +50,6 @@ userspace/chpasswd
 userspace/chroot
 userspace/coredumpctl  # bare deny(clippy::all)
 userspace/cpio
-userspace/cpupower  # bare deny(clippy::all)
 userspace/crond
 userspace/crontab
 userspace/ctags
@@ -141,7 +140,6 @@ userspace/syslogd
 userspace/sysstat  # bare deny(clippy::all)
 userspace/systemctl  # bare deny(clippy::all)
 userspace/tac
-userspace/thermald  # bare deny(clippy::all)
 userspace/timeout
 userspace/top
 userspace/tput

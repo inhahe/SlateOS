@@ -5609,6 +5609,28 @@ pub const SYS_SECUREBOOT_REMOVE: u64 = 1083;
 pub const SYS_SECUREBOOT_VERIFY: u64 = 1084;
 
 // ---------------------------------------------------------------------------
+// Joining a thread with a time limit (1085)
+// ---------------------------------------------------------------------------
+
+/// Join a thread, waiting at most a time:
+/// `thread_join_timeout(target_task, out_ptr, timeout_ns) -> 0`.
+///
+/// As [`SYS_THREAD_JOIN`] -- the same target, the same exit value written to
+/// `out_ptr` (if non-zero), `Cancelled` for a thread that was killed -- with
+/// `timeout_ns` of the monotonic clock as the most it waits: 0 answers at once
+/// (`pthread_tryjoin_np`), `u64::MAX` waits for ever. A thread still running
+/// when the time is up answers `TimedOut`, which is not `WouldBlock`: that one
+/// still means another thread is already joining it.
+///
+/// A sibling rather than a third argument to [`SYS_THREAD_JOIN`], because
+/// callers of that one never set the third argument register, and whatever it
+/// held would have been read as a time limit
+/// (`requests/d-a-a-thread-join-that-does-not-wait.md`).
+///
+/// Chosen number 1085, next free slot after 1084.
+pub const SYS_THREAD_JOIN_TIMEOUT: u64 = 1085;
+
+// ---------------------------------------------------------------------------
 // Version info
 // ---------------------------------------------------------------------------
 

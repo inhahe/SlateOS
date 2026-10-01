@@ -511,6 +511,45 @@ pub fn thread_exit_with_value(exit_value: i64, detached: bool) -> ! {
 /// - [`KernelError::WouldBlock`] if another thread is already joining
 ///   on the target.
 pub fn join(target_task: TaskId) -> KernelResult<i64> {
+    join_until(target_task, None)
+}
+
+/// [`join`] with a time limit: wait at most `timeout_ns` of the monotonic
+/// clock. 0 answers at once (glibc's `pthread_tryjoin_np`); `u64::MAX` waits
+/// for ever, exactly as [`join`] does.
+///
+/// Until this existed, libc's `pthread_tryjoin_np` and `pthread_timedjoin_np`
+/// had to guess from a flag the thread sets on its way out, which a thread
+/// killed by a fault never sets -- so to them it looked alive for ever
+/// (`requests/d-a-a-thread-join-that-does-not-wait.md`).
+///
+/// # Errors
+///
+/// As [`join`], and [`KernelError::TimedOut`] when the thread is still
+/// running when the time is up. That is deliberately not `WouldBlock`, which
+/// here as in [`join`] means another thread is already joining the target.
+pub fn join_timeout(target_task: TaskId, timeout_ns: u64) -> KernelResult<i64> {
+    if timeout_ns == u64::MAX {
+        return join(target_task);
+    }
+    join_until(
+        target_task,
+        Some(crate::hrtimer::now_ns().saturating_add(timeout_ns)),
+    )
+}
+
+/// Wakes a joiner whose time limit has passed. Same any-context idiom as the
+/// other hrtimer wakes: a direct wake, or a deferred one if the joiner has not
+/// parked yet.
+fn join_timeout_wake(task: u64) {
+    if !sched::try_wake(task) {
+        sched::defer_wake(task);
+    }
+}
+
+/// The body of [`join`] and [`join_timeout`]: `deadline` is an absolute
+/// monotonic time, or `None` to wait for ever.
+fn join_until(target_task: TaskId, deadline: Option<u64>) -> KernelResult<i64> {
     let caller_task = sched::current_task_id();
 
     // Can't join on yourself — that's a deadlock.
@@ -545,6 +584,13 @@ pub fn join(target_task: TaskId) -> KernelResult<i64> {
                 return Err(KernelError::PermissionDenied);
             }
         }
+    }
+
+    // A time limit already spent -- `tryjoin` -- answers here: the target is
+    // alive (its outcome was not there to take above), and waiting is not
+    // asked for.
+    if deadline.is_some_and(|d| crate::hrtimer::now_ns() >= d) {
+        return Err(KernelError::TimedOut);
     }
 
     // Register as the waiter for the target thread.
@@ -611,6 +657,18 @@ pub fn join(target_task: TaskId) -> KernelResult<i64> {
     // registration.  `on_thread_exit` removes it under the
     // `THREAD_JOIN_WAITERS` lock immediately before waking us, so while
     // the entry is still ours nothing has happened and we park again.
+    //
+    // With a deadline, an hrtimer wakes us at it; a wake after the deadline
+    // with the registration still ours is the time running out, and the
+    // registration is withdrawn -- unless the exit took it first, in which
+    // case the outcome is ours after all.
+    let timer = deadline.map(|d| {
+        crate::hrtimer::schedule_ns(
+            d.saturating_sub(crate::hrtimer::now_ns()).max(1),
+            join_timeout_wake,
+            caller_task,
+        )
+    });
     loop {
         sched::block_current();
         let released = {
@@ -620,6 +678,27 @@ pub fn join(target_task: TaskId) -> KernelResult<i64> {
         if released {
             break;
         }
+        if deadline.is_some_and(|d| crate::hrtimer::now_ns() >= d) {
+            let withdrawn = {
+                let mut waiters = THREAD_JOIN_WAITERS.lock();
+                if waiters.get(&target_task) == Some(&caller_task) {
+                    waiters.remove(&target_task);
+                    true
+                } else {
+                    false
+                }
+            };
+            if withdrawn {
+                if let Some(t) = timer {
+                    crate::hrtimer::cancel(t);
+                }
+                return Err(KernelError::TimedOut);
+            }
+            break;
+        }
+    }
+    if let Some(t) = timer {
+        crate::hrtimer::cancel(t);
     }
 
     // Woken up — retrieve the outcome.
@@ -1179,6 +1258,7 @@ pub fn self_test() -> KernelResult<()> {
     test_thread_exit_with_value()?;
     test_thread_join()?;
     test_blocking_join()?;
+    test_join_timeout()?;
     test_join_self_fails()?;
     test_detached_exit_not_retained()?;
     test_killed_thread_does_not_join_normally()?;
@@ -1870,6 +1950,111 @@ extern "C" fn bj_joiner_entry(target: u64) {
         }
     }
     BJ_DONE.store(1, SeqCst);
+}
+
+/// `join_timeout` fixture state: the target exits once `JT_RELEASE` is set;
+/// the joiner publishes its three answers (error discriminant, 0 for Ok) and
+/// the value of the last, then sets `JT_DONE`.
+static JT_RELEASE: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
+static JT_DONE: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
+static JT_ERRS: [core::sync::atomic::AtomicI32; 3] = [
+    core::sync::atomic::AtomicI32::new(i32::MIN),
+    core::sync::atomic::AtomicI32::new(i32::MIN),
+    core::sync::atomic::AtomicI32::new(i32::MIN),
+];
+static JT_VALUE: core::sync::atomic::AtomicI64 = core::sync::atomic::AtomicI64::new(i64::MIN);
+
+/// Target: stays alive until released (or ten seconds, so a broken joiner
+/// cannot keep it for ever), then exits with 9.
+extern "C" fn jt_target_entry(_arg: u64) {
+    use core::sync::atomic::Ordering::SeqCst;
+    let task_id = sched::current_task_id();
+    let give_up = crate::hrtimer::now_ns().saturating_add(10_000_000_000);
+    while JT_RELEASE.load(SeqCst) == 0 && crate::hrtimer::now_ns() < give_up {
+        sched::yield_now();
+    }
+    record_exit_value(task_id, 9, false);
+    on_thread_exit(task_id);
+}
+
+/// Joiner: tries at once, then for 20 ms, while the target lives; releases it;
+/// then waits up to five seconds for it.
+extern "C" fn jt_joiner_entry(target: u64) {
+    use core::sync::atomic::Ordering::SeqCst;
+    let code = |r: &KernelResult<i64>| match r {
+        Ok(_) => 0,
+        Err(e) => *e as i32,
+    };
+    let now = join_timeout(target, 0);
+    JT_ERRS[0].store(code(&now), SeqCst);
+    let brief = join_timeout(target, 20_000_000);
+    JT_ERRS[1].store(code(&brief), SeqCst);
+    JT_RELEASE.store(1, SeqCst);
+    let last = join_timeout(target, 5_000_000_000);
+    JT_ERRS[2].store(code(&last), SeqCst);
+    if let Ok(v) = last {
+        JT_VALUE.store(v, SeqCst);
+    }
+    JT_DONE.store(1, SeqCst);
+}
+
+/// `join_timeout` (`requests/d-a-a-thread-join-that-does-not-wait.md`): a
+/// zero limit and a 20 ms limit both answer `TimedOut` while the target
+/// lives, and a long one returns the value once it exits.
+fn test_join_timeout() -> KernelResult<()> {
+    use core::sync::atomic::Ordering::SeqCst;
+    JT_RELEASE.store(0, SeqCst);
+    JT_DONE.store(0, SeqCst);
+    for e in &JT_ERRS {
+        e.store(i32::MIN, SeqCst);
+    }
+    JT_VALUE.store(i64::MIN, SeqCst);
+
+    let pid = pcb::create("thread-test-join-timeout", 0);
+    let target = spawn(
+        pid,
+        b"jt-target",
+        sched::task::DEFAULT_PRIORITY,
+        jt_target_entry,
+        0,
+    )?;
+    let joiner = spawn(
+        pid,
+        b"jt-joiner",
+        sched::task::DEFAULT_PRIORITY,
+        jt_joiner_entry,
+        target,
+    )?;
+    let give_up = crate::hrtimer::now_ns().saturating_add(15_000_000_000);
+    while JT_DONE.load(SeqCst) == 0 && crate::hrtimer::now_ns() < give_up {
+        sched::yield_now();
+    }
+    let errs = [
+        JT_ERRS[0].load(SeqCst),
+        JT_ERRS[1].load(SeqCst),
+        JT_ERRS[2].load(SeqCst),
+    ];
+    let value = JT_VALUE.load(SeqCst);
+    JT_RELEASE.store(1, SeqCst);
+    let timed_out = KernelError::TimedOut as i32;
+    let ok = JT_DONE.load(SeqCst) != 0 && errs == [timed_out, timed_out, 0] && value == 9;
+    // Both threads have run on_thread_exit on every path but a hung one;
+    // the second call is the cleanup the other tests do.
+    on_thread_exit(target);
+    on_thread_exit(joiner);
+    pcb::destroy(pid);
+    if !ok {
+        serial_println!(
+            "[thread]   FAIL: join_timeout answered {:?} (value {}), expected [TimedOut, TimedOut, Ok] and 9",
+            errs,
+            value
+        );
+        return Err(KernelError::InternalError);
+    }
+    serial_println!(
+        "[thread]   join with a time limit: at once and after 20 ms TimedOut while alive, the value once it exits: OK"
+    );
+    Ok(())
 }
 
 /// Which task, if any, is currently registered as joining on `target`?

@@ -178946,3 +178946,35 @@ all). Neither has a workaround in lane B's code.
 **How to see it:** nothing visible today -- `logind` is not on the image yet
 (§1053's staging request). On the device, `/proc/<logind pid>/task` would
 list one thread per connected client plus the accepting thread.
+
+## B-FILE-IS-A-HAND-WRITTEN-APPROXIMATION-OF-LIBMAGIC — `file` names most formats in its own words, not file 5.45's (lane B, 2026-10-01) — **Status: OPEN (debt; the ISO media branch is done)**
+
+**In short:** `file` tells you what kind of file something is. Ours checks a
+few dozen formats with rules written by hand, so for most of them it uses
+different words from GNU's `file` (`Apple MPEG-4 audio` where GNU says `ISO
+Media, Apple iTunes ALAC/AAC-LC (.M4A) Audio`), knows far fewer formats, and
+prints `-i` as a bare type where GNU adds `; charset=binary`. Scripts that
+parse `file`'s output, which is common, get answers they do not expect.
+
+**What is already faithful:** the `ftyp` family -- MP4, QuickTime, 3GP, AVIF,
+HEIF and 150 more brands. Since 2026-10-01 that branch runs file 5.45's own
+rules (`magic/Magdir/animation`), generated into
+`userspace/file/src/isomedia_table.rs` by `scripts/file-isomedia-gen.py` and
+evaluated as libmagic evaluates them (`src/isomedia.rs`); its harness,
+`scripts/file-isomedia-diff.sh`, agrees with GNU's on all 726 files it
+builds.
+
+**The proper fix** is the same method for the rest: libmagic's `softmagic.c`
+interpreter -- offsets (including indirect ones), the numeric and string
+tests, `search`/`regex`, `name`/`use`, `default`/`clear`, the `!:mime` and
+`!:ext` annotations, strength ordering -- and file's `Magdir` database
+compiled into tables, with the encoding and `-i`/`--mime-type` output on top.
+The generator's approach scales: each `Magdir` file becomes data, and the
+interpreter grows by the test kinds that file uses. It is a port of a large
+C program and its database; recorded here rather than started inside lane
+F's AVIF request, which needed one branch.
+
+**Where:** `userspace/file/src/main.rs` (every `detect_*` but the ISO branch).
+
+**How to see it:** in WSL, `file -b x.m4a` against ours; or any format the
+hand rules do not know, which ours calls `data` where GNU names it.

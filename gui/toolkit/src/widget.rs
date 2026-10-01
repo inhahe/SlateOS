@@ -498,8 +498,10 @@ impl Widget {
         if !self.enabled || !self.visible || !self.contains(px, py) {
             return None;
         }
+        // The children were laid out in this widget's content space.
+        let (ox, oy) = self.content_origin();
         for child in self.children.iter().rev() {
-            if let Some(hit) = child.focus_target_at(px, py) {
+            if let Some(hit) = child.focus_target_at(px - ox, py - oy) {
                 return Some(hit);
             }
         }
@@ -588,78 +590,165 @@ impl Widget {
         }
     }
 
-    /// Perform layout on this widget and all children.
-    pub fn do_layout(&mut self, constraint: SizeConstraint) {
-        if !self.visible {
-            return;
-        }
-
-        let content_size = constraint.constrain(self.intrinsic_size());
-        self.layout.width = content_size.width;
-        self.layout.height = content_size.height;
-        self.layout.padding = self.style.padding;
-        self.layout.margin = self.style.margin;
-        self.layout.border_widths = Edges {
+    /// The widths of this widget's border, from its style.
+    fn border_edges(&self) -> Edges {
+        Edges {
             top: self.style.border.top.width,
             right: self.style.border.right.width,
             bottom: self.style.border.bottom.width,
             left: self.style.border.left.width,
-        };
+        }
+    }
+
+    /// What lies between this widget's border box and its content, across
+    /// and down: its padding and its border.
+    fn frame(&self) -> (f32, f32) {
+        let border = self.border_edges();
+        (
+            self.style.padding.horizontal() + border.horizontal(),
+            self.style.padding.vertical() + border.vertical(),
+        )
+    }
+
+    /// Where this widget's content starts, in its parent's content space --
+    /// the origin its children are laid out, drawn and hit from.
+    fn content_origin(&self) -> (f32, f32) {
+        (
+            self.layout.x
+                + self.layout.margin.left
+                + self.layout.border_widths.left
+                + self.layout.padding.left,
+            self.layout.y
+                + self.layout.margin.top
+                + self.layout.border_widths.top
+                + self.layout.padding.top,
+        )
+    }
+
+    /// The visible children as a flex container lays them out: each one's
+    /// border box with room to spare, and its item.
+    fn flex_children(&self) -> Vec<(Size, FlexItem)> {
+        self.children
+            .iter()
+            .filter(|c| c.visible)
+            .map(|c| (c.border_box_size(), c.flex_item_in_layout()))
+            .collect()
+    }
+
+    /// How big this widget's border box is with room to spare: its content,
+    /// padding and border. A flex container's content is what its children
+    /// take laid out unbounded -- a column of labels is as wide as its widest
+    /// -- and no less than its own size from its style.
+    fn border_box_size(&self) -> Size {
+        let (frame_h, frame_v) = self.frame();
+        let own = self.intrinsic_size();
+        let border = self.border_edges();
+        let mut size = Size::new(
+            own.width + border.horizontal(),
+            own.height + border.vertical(),
+        );
+        if let Some(ref flex) = self.flex_layout
+            && self.children.iter().any(|c| c.visible)
+        {
+            let unbounded = Size::new(f32::INFINITY, f32::INFINITY);
+            let boxes = flex_layout(unbounded, flex, &self.flex_children(), &Edges::ZERO);
+            let wide = boxes
+                .iter()
+                .map(|b| b.x + b.outer_width())
+                .fold(0.0_f32, f32::max);
+            let tall = boxes
+                .iter()
+                .map(|b| b.y + b.outer_height())
+                .fold(0.0_f32, f32::max);
+            size.width = size.width.max(wide + frame_h);
+            size.height = size.height.max(tall + frame_v);
+        }
+        size
+    }
+
+    /// This widget as an item of the flex container it is in: its flex
+    /// properties, with the room it keeps (`margin`) and the least and most
+    /// it may be (`min_*`, `max_*`) from its style -- so a style's limits hold
+    /// in a row or a column as they hold alone. The sizes are its border
+    /// box's.
+    fn flex_item_in_layout(&self) -> FlexItem {
+        let s = &self.style;
+        let item = &self.flex_item;
+        FlexItem {
+            min: Size::new(
+                s.min_width.unwrap_or(0.0).max(item.min.width),
+                s.min_height.unwrap_or(0.0).max(item.min.height),
+            ),
+            max: Size::new(
+                s.max_width.unwrap_or(f32::INFINITY).min(item.max.width),
+                s.max_height.unwrap_or(f32::INFINITY).min(item.max.height),
+            ),
+            margin: s.margin,
+            ..item.clone()
+        }
+    }
+
+    /// Lay this widget and its children out, within `constraint` -- which
+    /// bounds its border box: what its container's flex layout gave it, or
+    /// the window's room for the root.
+    ///
+    /// Afterwards `layout.width` and `layout.height` are its content size
+    /// (padding and border are outside them, as [`LayoutBox`] has it), and
+    /// each child's `layout.x` and `layout.y` are the corner of its margin
+    /// box in this widget's content space -- the space [`render`](Self::render)
+    /// draws the children in and [`handle_event`](Self::handle_event) hands
+    /// them the pointer in. A container sized by nothing (an unbounded
+    /// constraint) takes what its children take.
+    ///
+    /// Until 2026-10-01 the three disagreed: the children were laid out from
+    /// the container's padding edge and then drawn from its content edge (the
+    /// padding counted twice), a child's width was its border box though
+    /// `width` is a content size (its padding twice again), and margins moved
+    /// a widget's drawing without the layout leaving room for them.
+    pub fn do_layout(&mut self, constraint: SizeConstraint) {
+        if !self.visible {
+            return;
+        }
+        let (frame_h, frame_v) = self.frame();
+        let outer = constraint.constrain(self.border_box_size());
+        self.layout.width = (outer.width - frame_h).max(0.0);
+        self.layout.height = (outer.height - frame_v).max(0.0);
+        self.layout.padding = self.style.padding;
+        self.layout.margin = self.style.margin;
+        self.layout.border_widths = self.border_edges();
 
         if let Some(ref flex) = self.flex_layout
-            && !self.children.is_empty()
+            && self.children.iter().any(|c| c.visible)
         {
-            // Compute child intrinsic sizes
-            let child_info: Vec<(Size, FlexItem)> = self
-                .children
-                .iter()
-                .filter(|c| c.visible)
-                .map(|c| (c.intrinsic_size(), c.flex_item.clone()))
-                .collect();
-
-            let container_size = Size::new(
-                constraint.max_width - self.style.margin.horizontal(),
-                constraint.max_height - self.style.margin.vertical(),
+            // The room inside: what the constraint allows less the frame,
+            // unbounded where the constraint is.
+            let room = Size::new(
+                (constraint.max_width - frame_h).max(0.0),
+                (constraint.max_height - frame_v).max(0.0),
             );
+            let boxes = flex_layout(room, flex, &self.flex_children(), &Edges::ZERO);
 
-            let layouts = flex_layout(container_size, flex, &child_info, &self.style.padding);
-
-            // Apply layout results to children. `child_info` above was built
-            // from this same filter, and `flex_layout` returns one box per
-            // input, so the visible children and the boxes correspond one to
-            // one -- which is what `zip` says. The hand-rolled counter this
-            // replaces had to be bounds-checked against `layouts.len()` in a
-            // statement above the indexing it licensed, and was incremented
-            // outside the `if` that used it, so the two could only be seen to
-            // agree by reading the whole loop.
-            for (child, lb) in self.children.iter_mut().filter(|c| c.visible).zip(&layouts) {
-                // Recursively layout children with their computed size. The
-                // box is applied afterwards: `do_layout` sets the child's own
-                // width and height from the constraint, and would otherwise
-                // overwrite what flex decided.
-                child.do_layout(SizeConstraint {
-                    min_width: 0.0,
-                    max_width: lb.width,
-                    min_height: 0.0,
-                    max_height: lb.height,
-                });
+            // `flex_children` takes the visible children in order and
+            // `flex_layout` answers one box each, so the visible children
+            // and the boxes pair off one to one -- which is what `zip` says.
+            for (child, lb) in self.children.iter_mut().filter(|c| c.visible).zip(&boxes) {
+                // Its border box is exactly what the flex layout gave it.
+                child.do_layout(SizeConstraint::tight(Size::new(lb.width, lb.height)));
                 child.layout.x = lb.x;
                 child.layout.y = lb.y;
-                child.layout.width = lb.width;
-                child.layout.height = lb.height;
             }
 
-            // Update own size to fit content if unconstrained
-            if constraint.max_width == f32::INFINITY {
-                let max_x = layouts.iter().map(|l| l.x + l.width).fold(0.0f32, f32::max);
-                self.layout.width = max_x + self.style.padding.right;
-            }
-            if constraint.max_height == f32::INFINITY {
-                let max_y = layouts
+            if !constraint.max_width.is_finite() {
+                self.layout.width = boxes
                     .iter()
-                    .map(|l| l.y + l.height)
-                    .fold(0.0f32, f32::max);
-                self.layout.height = max_y + self.style.padding.bottom;
+                    .map(|b| b.x + b.outer_width())
+                    .fold(0.0_f32, f32::max);
+            }
+            if !constraint.max_height.is_finite() {
+                self.layout.height = boxes
+                    .iter()
+                    .map(|b| b.y + b.outer_height())
+                    .fold(0.0_f32, f32::max);
             }
         }
     }
@@ -937,9 +1026,23 @@ impl Widget {
             return EventResult::Ignored;
         }
 
-        // Try children first (front-to-back, last child is "on top")
+        // Try children first (front-to-back, last child is "on top") -- the
+        // pointer in this widget's content space, where they were laid out
+        // and are drawn.
+        let translated;
+        let inner = if let Event::Mouse(mouse) = event {
+            let (ox, oy) = self.content_origin();
+            translated = Event::Mouse(MouseEvent {
+                x: mouse.x - ox,
+                y: mouse.y - oy,
+                kind: mouse.kind.clone(),
+            });
+            &translated
+        } else {
+            event
+        };
         for child in self.children.iter_mut().rev() {
-            if child.handle_event(event) == EventResult::Consumed {
+            if child.handle_event(inner) == EventResult::Consumed {
                 return EventResult::Consumed;
             }
         }
@@ -1240,15 +1343,15 @@ impl WidgetTree {
 
     /// Perform layout on the entire tree.
     pub fn layout(&mut self) {
-        let constraint = SizeConstraint {
-            min_width: self.window_width,
-            max_width: self.window_width,
-            min_height: self.window_height,
-            max_height: self.window_height,
-        };
-        self.root.do_layout(constraint);
-        self.root.layout.width = self.window_width;
-        self.root.layout.height = self.window_height;
+        // The root's border box is the window less the root's own margins:
+        // the window is its margin box, at the window's corner.
+        let margin = self.root.style.margin;
+        self.root.do_layout(SizeConstraint::tight(Size::new(
+            (self.window_width - margin.horizontal()).max(0.0),
+            (self.window_height - margin.vertical()).max(0.0),
+        )));
+        self.root.layout.x = 0.0;
+        self.root.layout.y = 0.0;
     }
 
     /// Render the entire tree into a render command list.
@@ -1388,12 +1491,174 @@ mod tests {
         let mut tree = WidgetTree::new(root, 400.0, 300.0);
         tree.layout();
 
-        // Root should be the full window size
-        assert_eq!(tree.root.layout.width, 400.0);
-        assert_eq!(tree.root.layout.height, 300.0);
+        // The root's border box is the window; `width` and `height` are its
+        // content, inside the padding, as `LayoutBox` says they are.
+        assert_eq!(tree.root.layout.border_box_width(), 400.0);
+        assert_eq!(tree.root.layout.border_box_height(), 300.0);
+        assert_eq!(tree.root.layout.width, 380.0);
+        assert_eq!(tree.root.layout.height, 280.0);
 
-        // Children should have positions set
-        assert_eq!(tree.root.children.len(), 3);
+        // A column stacks its children from the content's corner, each as
+        // wide as the content.
+        let kids = &tree.root.children;
+        assert_eq!(kids.len(), 3);
+        assert_eq!((kids[0].layout.x, kids[0].layout.y), (0.0, 0.0));
+        assert_eq!(kids[1].layout.y, kids[0].layout.outer_height());
+        assert_eq!(
+            kids[2].layout.y,
+            kids[1].layout.y + kids[1].layout.outer_height()
+        );
+        for kid in kids {
+            assert_eq!(kid.layout.border_box_width(), 380.0);
+        }
+    }
+
+    /// The `x` of the first text a tree draws.
+    fn first_text_x(tree: &WidgetTree) -> f32 {
+        tree.render()
+            .commands
+            .iter()
+            .find_map(|c| match c {
+                RenderCommand::Text { x, .. } => Some(*x),
+                _ => None,
+            })
+            .expect("some text is drawn")
+    }
+
+    /// The sum of the translations in force where the first text is drawn.
+    fn translation_at_first_text(tree: &WidgetTree) -> f32 {
+        let mut stack: Vec<f32> = Vec::new();
+        for c in &tree.render().commands {
+            match c {
+                RenderCommand::PushTranslate { dx, .. } => stack.push(*dx),
+                RenderCommand::PopTranslate => {
+                    stack.pop();
+                }
+                RenderCommand::Text { .. } => return stack.iter().sum(),
+                _ => {}
+            }
+        }
+        panic!("no text is drawn")
+    }
+
+    /// **A padded container's child is drawn inside the padding once** --
+    /// it was twice: laid out from the padding edge, then drawn from the
+    /// content edge.
+    #[test]
+    fn a_padded_containers_child_is_drawn_inside_the_padding_once() {
+        let root = Widget::container()
+            .with_flex_direction(FlexDirection::Column)
+            .with_padding(Edges::all(10.0))
+            .with_child(Widget::label("Hello"));
+        let mut tree = WidgetTree::new(root, 300.0, 200.0);
+        tree.layout();
+        let label = &tree.root.children[0];
+        let drawn = translation_at_first_text(&tree) + first_text_x(&tree);
+        // The label's own text sits inside its own padding.
+        let expected = 10.0 + label.layout.margin.left + label.layout.padding.left;
+        assert!(
+            (drawn - expected).abs() < 0.01,
+            "the label is drawn at {drawn}, not {expected}"
+        );
+    }
+
+    /// **A margin keeps its room**: the next child in a row starts past it,
+    /// where it used to be drawn over.
+    #[test]
+    fn a_margin_keeps_its_room_in_a_row() {
+        let root = Widget::container()
+            .with_child(Widget::label("One").with_margin(Edges {
+                top: 0.0,
+                right: 8.0,
+                bottom: 0.0,
+                left: 4.0,
+            }))
+            .with_child(Widget::label("Two"));
+        let mut tree = WidgetTree::new(root, 300.0, 100.0);
+        tree.layout();
+        let kids = &tree.root.children;
+        assert_eq!(kids[0].layout.x, 0.0);
+        assert_eq!(kids[1].layout.x, kids[0].layout.outer_width());
+        assert_eq!(
+            kids[0].layout.outer_width(),
+            4.0 + kids[0].layout.border_box_width() + 8.0
+        );
+    }
+
+    /// **A column inside a row is as wide as its widest child**: a container
+    /// takes its children's size, where it used to be nothing wide and its
+    /// children overflowed it.
+    #[test]
+    fn a_nested_column_takes_its_widest_childs_width() {
+        let column = Widget::container()
+            .with_flex_direction(FlexDirection::Column)
+            .with_child(Widget::label("short"))
+            .with_child(Widget::label("a much longer label"));
+        let root = Widget::container()
+            .with_child(column)
+            .with_child(Widget::label("beside"));
+        let mut tree = WidgetTree::new(root, 600.0, 100.0);
+        tree.layout();
+        let column = &tree.root.children[0];
+        let widest = column
+            .children
+            .iter()
+            .map(|c| c.border_box_size().width)
+            .fold(0.0_f32, f32::max);
+        assert!(widest > 0.0);
+        assert_eq!(column.layout.border_box_width(), widest);
+        assert_eq!(tree.root.children[1].layout.x, widest);
+    }
+
+    /// **A style's `min_width` holds in a row**: an item squeezed by its
+    /// neighbours stops at it.
+    #[test]
+    fn a_styles_min_width_holds_in_a_row() {
+        let mut keep = Widget::label("kept at its minimum");
+        keep.style.min_width = Some(150.0);
+        let root = Widget::container()
+            .with_child(keep)
+            .with_child(Widget::label("a neighbour that would squeeze it"));
+        let mut tree = WidgetTree::new(root, 160.0, 100.0);
+        tree.layout();
+        assert!(tree.root.children[0].layout.border_box_width() >= 150.0);
+    }
+
+    /// **A click reaches a field nested in padded containers** -- the pointer
+    /// handed to each child in the space it was laid out in. It used to be
+    /// handed on unchanged, so the deeper a field sat, the further from it a
+    /// click had to land.
+    #[test]
+    fn a_click_reaches_a_field_nested_in_padded_containers() {
+        let inner = Widget::container()
+            .with_flex_direction(FlexDirection::Column)
+            .with_padding(Edges::all(12.0))
+            .with_child(Widget::text_input("", "nested"));
+        let root = Widget::container()
+            .with_flex_direction(FlexDirection::Column)
+            .with_padding(Edges::all(20.0))
+            .with_child(inner);
+        let mut tree = WidgetTree::new(root, 400.0, 300.0);
+        tree.layout();
+        let field_id = tree.root.children[0].children[0].id;
+        // The field's corner on the window: each container's content origin
+        // in turn, then the field's own margin box corner.
+        let (rx, ry) = tree.root.content_origin();
+        let (ix, iy) = tree.root.children[0].content_origin();
+        let field = &tree.root.children[0].children[0];
+        let (fx, fy) = (
+            rx + ix + field.layout.x + 2.0,
+            ry + iy + field.layout.y + 2.0,
+        );
+        assert_eq!((fx, fy), (34.0, 34.0));
+        tree.handle_event(&clicked(fx, fy));
+        assert_eq!(tree.focused_id(), Some(field_id));
+
+        // And a click in the inner container's padding, beside the field,
+        // is not the field's.
+        assert!(!tree.focus(None));
+        tree.handle_event(&clicked(25.0, 25.0));
+        assert_ne!(tree.focused_id(), Some(field_id));
     }
 
     #[test]

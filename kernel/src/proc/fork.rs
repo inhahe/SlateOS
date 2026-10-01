@@ -681,6 +681,18 @@ fn fork_process_clone_inner(
 
     let child_pid = build_fork_child(parent_pid)?;
 
+    // CLONE_CLEAR_SIGHAND: the child's caught signals go back to their
+    // default action, ignored ones staying ignored (clone(2)) -- the reset an
+    // exec makes to the Linux disposition table, applied to the copy
+    // `build_fork_child` just made. Here, before the child has a thread, so no
+    // signal can reach an inherited handler first; the mask and the alternate
+    // stack are inherited as on any clone. Plain and vfork-style clones both
+    // pass through here, and until 2026-10-01 only the vfork one honoured the
+    // flag at all, from the parent, after the child could already run.
+    if (clone_tid.flags & clone_flags::CLONE_CLEAR_SIGHAND) != 0 {
+        crate::syscall::linux::linux_sigaction_on_exec(child_pid);
+    }
+
     // CLONE_CHILD_SETTID is honoured in the child's own address space by
     // the trampoline (a CoW-safe write — see `fork_child_trampoline`), so
     // thread the target pointer through the heap image.  0 disables it.

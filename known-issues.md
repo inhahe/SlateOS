@@ -178291,7 +178291,7 @@ longer waits (there is no `Net` to linger in). The proper fix is to route
 `tcp_fetch` through `Net` and the pump like the ring paths, or retire the
 opcode.
 
-### A-CHANNEL-HANDLES-WERE-USABLE-BY-ANY-PROCESS -- 2026-10-01 -- FIXED for every IPC handle type but semaphores (lane A); semaphores in progress
+### A-CHANNEL-HANDLES-WERE-USABLE-BY-ANY-PROCESS -- 2026-10-01 -- FIXED for every IPC handle type (lane A)
 
 **In short:** any process could send on, receive from or close any other
 process's channel, and ask who was on its other end. That includes logind's
@@ -178331,9 +178331,12 @@ nowhere.
   only ptys: it had treated the pty space as the only enumerable one. Spawn's
   `fd_map` refuses a pipe, socket pair or eventfd the parent does not hold, so
   a spawn cannot launder one into a child. The dispatch rung covers every call.
-- **Semaphores are next.** They have no `ResourceType`, so they are neither
-  checked nor released when their process dies. Nothing in userspace uses
-  them yet.
+- **Semaphores were fixed the same day.** They had no `ResourceType`, so
+  they were neither checked nor released when their process died.
+  `ResourceType::Semaphore` (32) now records them, the five semaphore syscalls
+  check possession, close deregisters, and a dead process's semaphores are
+  closed (waiters get `ChannelClosed`). Not inherited across fork, like a
+  channel.
 - **Points 3 and 4 of lane F's request are features, on lane A's backlog.**
   A Linux-ABI process (every Rust `std` program) cannot reach channels at all,
   and nothing waits on a channel together with anything else.

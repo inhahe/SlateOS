@@ -3381,9 +3381,7 @@ fn decode_wait_source(source_type: u64, handle: u64) -> Option<WaitSource> {
 /// must still come off its own port.
 ///
 /// A process-exit source names a pid, not a handle; what it reveals, that a
-/// process ended, `/proc` already shows. A semaphore has no handle record yet
-/// (no `ResourceType`), so it is not checked here. That gap is the next change
-/// and is in known-issues as part of A-CHANNEL-HANDLES-WERE-USABLE-BY-ANY-PROCESS.
+/// process ended, `/proc` already shows.
 fn require_wait_source(source: &WaitSource) -> Result<(), KernelError> {
     match *source {
         WaitSource::Channel(h) => require_ipc_handle(ResourceType::Channel, h),
@@ -3399,7 +3397,8 @@ fn require_wait_source(source: &WaitSource) -> Result<(), KernelError> {
                 Err(KernelError::InvalidHandle)
             }
         }
-        WaitSource::ProcessExit(_) | WaitSource::Semaphore(_) => Ok(()),
+        WaitSource::Semaphore(h) => require_ipc_handle(ResourceType::Semaphore, h),
+        WaitSource::ProcessExit(_) => Ok(()),
     }
 }
 
@@ -14511,6 +14510,8 @@ pub fn sys_sem_create(args: &SyscallArgs) -> SyscallResult {
     let max_count = args.arg1;
 
     let handle = semaphore::create(initial, max_count);
+    // The caller's alone, and closed when it dies.
+    register_for_caller(ResourceType::Semaphore, handle.raw());
 
     #[allow(clippy::cast_possible_wrap)]
     SyscallResult::ok(handle.raw() as i64)
@@ -14524,6 +14525,9 @@ pub fn sys_sem_signal(args: &SyscallArgs) -> SyscallResult {
     use crate::ipc::semaphore::{self, SemHandle};
 
     let handle = SemHandle::from_raw(args.arg0);
+    if let Err(e) = require_ipc_handle(ResourceType::Semaphore, handle.raw()) {
+        return SyscallResult::err(e);
+    }
     let count = args.arg1;
 
     match semaphore::signal(handle, count) {
@@ -14539,6 +14543,9 @@ pub fn sys_sem_wait(args: &SyscallArgs) -> SyscallResult {
     use crate::ipc::semaphore::{self, SemHandle};
 
     let handle = SemHandle::from_raw(args.arg0);
+    if let Err(e) = require_ipc_handle(ResourceType::Semaphore, handle.raw()) {
+        return SyscallResult::err(e);
+    }
 
     match semaphore::wait(handle) {
         Ok(()) => SyscallResult::ok(0),
@@ -14553,6 +14560,9 @@ pub fn sys_sem_try_wait(args: &SyscallArgs) -> SyscallResult {
     use crate::ipc::semaphore::{self, SemHandle};
 
     let handle = SemHandle::from_raw(args.arg0);
+    if let Err(e) = require_ipc_handle(ResourceType::Semaphore, handle.raw()) {
+        return SyscallResult::err(e);
+    }
 
     match semaphore::try_wait(handle) {
         Ok(()) => SyscallResult::ok(0),
@@ -14567,6 +14577,12 @@ pub fn sys_sem_close(args: &SyscallArgs) -> SyscallResult {
     use crate::ipc::semaphore::{self, SemHandle};
 
     let handle = SemHandle::from_raw(args.arg0);
+    if let Err(e) = require_ipc_handle(ResourceType::Semaphore, handle.raw()) {
+        return SyscallResult::err(e);
+    }
+    if let Some(pid) = caller_pid() {
+        pcb::deregister_ipc_handle(pid, ResourceType::Semaphore, handle.raw());
+    }
     semaphore::close(handle);
     SyscallResult::ok(0)
 }
@@ -14581,6 +14597,9 @@ pub fn sys_sem_wait_timeout(args: &SyscallArgs) -> SyscallResult {
     use crate::ipc::semaphore::{self, SemHandle};
 
     let handle = SemHandle::from_raw(args.arg0);
+    if let Err(e) = require_ipc_handle(ResourceType::Semaphore, handle.raw()) {
+        return SyscallResult::err(e);
+    }
     let timeout_ns = args.arg1;
 
     match semaphore::wait_timeout(handle, timeout_ns) {

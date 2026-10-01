@@ -242,6 +242,10 @@ pub fn init() {
         // handed the authority by some other route, which is the same authority
         // reached by a longer path.
         ResourceType::BlockDevice,
+        // An IPC object type like Channel and Pipe above: a process holds the
+        // semaphores it creates whatever its groups, so this grants admin
+        // nothing over anyone else's.
+        ResourceType::Semaphore,
     ]
     .map(|resource_type| CapGrant {
         resource_type,

@@ -2313,9 +2313,9 @@ fn test_dispatch_secureboot_doors() -> KernelResult<()> {
 ///   call, and its close closes nothing;
 /// - the owner's own calls pass, and its close deregisters;
 /// - the same refusal for every call on a pipe, socket pair, eventfd,
-///   completion port and timer the owner made;
-/// - a completion port cannot watch another process's pipe, and can its own
-///   process's;
+///   completion port, timer and semaphore the owner made;
+/// - a completion port cannot watch another process's pipe or semaphore, and
+///   can its own process's;
 /// - a service listener is refused to another process and passes for its
 ///   owner;
 /// - the owner's death releases the service name.
@@ -2430,6 +2430,12 @@ fn test_dispatch_ipc_possession() -> KernelResult<()> {
     else {
         return fail("SYS_TIMER_CREATE failed for the owner", &live);
     };
+    let Some(sem) = one(self_test_as_process(owner, || dispatch(SYS_SEM_CREATE, &a0(0)))) else {
+        return fail("SYS_SEM_CREATE failed for the owner", &live);
+    };
+    if !pcb::owns_ipc_handle(owner, ResourceType::Semaphore, sem) {
+        return fail("a created semaphore was not registered to its creator", &live);
+    }
     for (name, nr, handle) in [
         ("SYS_PIPE_WRITE", SYS_PIPE_WRITE, pipe_w),
         ("SYS_PIPE_READ", SYS_PIPE_READ, pipe_r),
@@ -2466,6 +2472,11 @@ fn test_dispatch_ipc_possession() -> KernelResult<()> {
         ("SYS_CP_NOTIFY", SYS_CP_NOTIFY, cp),
         ("SYS_CP_CLOSE", SYS_CP_CLOSE, cp),
         ("SYS_TIMER_CANCEL", SYS_TIMER_CANCEL, timer),
+        ("SYS_SEM_SIGNAL", SYS_SEM_SIGNAL, sem),
+        ("SYS_SEM_WAIT", SYS_SEM_WAIT, sem),
+        ("SYS_SEM_TRY_WAIT", SYS_SEM_TRY_WAIT, sem),
+        ("SYS_SEM_WAIT_TIMEOUT", SYS_SEM_WAIT_TIMEOUT, sem),
+        ("SYS_SEM_CLOSE", SYS_SEM_CLOSE, sem),
     ] {
         let got = self_test_as_process(other, || dispatch(nr, &a0(handle))).value;
         if got != invalid {
@@ -2493,6 +2504,15 @@ fn test_dispatch_ipc_possession() -> KernelResult<()> {
     }
     if self_test_as_process(owner, || dispatch(SYS_CP_REGISTER, &watch(cp))).value != 0 {
         return fail("the owner could not watch its own pipe from its own port", &live);
+    }
+    let watch_sem = SyscallArgs {
+        arg0: other_cp,
+        arg1: 6, // source type: semaphore
+        arg2: sem,
+        ..a0(0)
+    };
+    if self_test_as_process(other, || dispatch(SYS_CP_REGISTER, &watch_sem)).value != invalid {
+        return fail("a completion port could watch another process's semaphore", &live);
     }
 
     // A service listener: the owner's alone, and its name freed by its death.
@@ -2539,7 +2559,7 @@ fn test_dispatch_ipc_possession() -> KernelResult<()> {
     pcb::destroy(other);
 
     serial_println!(
-        "[syscall]   IPC possession: channel, listener, pipe, socket-pair, eventfd, completion-port and timer handles refused to a process that does not hold them; a dead service's name released: OK"
+        "[syscall]   IPC possession: channel, listener, pipe, socket-pair, eventfd, completion-port, timer and semaphore handles refused to a process that does not hold them; a dead service's name released: OK"
     );
     Ok(())
 }

@@ -359,7 +359,8 @@ fn dup_one(rtype: ResourceType, id: u64) -> KernelResult<Option<(ResourceType, u
         ResourceType::Channel
         | ResourceType::SharedMemory
         | ResourceType::CompletionPort
-        | ResourceType::Timer => {
+        | ResourceType::Timer
+        | ResourceType::Semaphore => {
             serial_println!(
                 "[fork] Skipping non-inheritable handle: {:?} id={}",
                 rtype,

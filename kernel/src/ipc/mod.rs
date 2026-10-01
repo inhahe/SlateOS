@@ -82,6 +82,11 @@ pub fn cleanup_handles(handles: &[(ResourceType, u64)]) {
             ResourceType::Timer => {
                 timer::cancel(handle_raw);
             }
+            ResourceType::Semaphore => {
+                // Wakes any waiter, who gets `ChannelClosed`, as an explicit
+                // close does.
+                semaphore::close(semaphore::SemHandle::from_raw(handle_raw));
+            }
             ResourceType::StreamSocket => {
                 stream_socket::close(stream_socket::StreamSocketHandle::from_raw(handle_raw));
             }

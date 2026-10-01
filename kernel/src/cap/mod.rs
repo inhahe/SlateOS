@@ -388,6 +388,16 @@ pub enum ResourceType {
     /// erase every disk in the machine before it could draw its sidebar is one
     /// that must be launched over-privileged.
     BlockDevice = 31,
+
+    /// A kernel IPC semaphore (`SYS_SEM_*`), as a handle a process holds.
+    ///
+    /// Recorded in the creating process's `ipc_handles`, as every other IPC
+    /// object is, for two reasons it lacked until 2026-10-01: so that only
+    /// its holder can signal, wait on or close it (a semaphore handle is a
+    /// counter, so any process could name every one), and so that it is
+    /// closed when its process dies. Not inherited across fork, like a
+    /// channel: there is no refcounted duplicate.
+    Semaphore = 32,
 }
 
 impl ResourceType {
@@ -397,7 +407,7 @@ impl ResourceType {
     /// variant count. Consumers that need "every type" iterate `1..=LAST`
     /// rather than keeping their own list — see
     /// [`groups::test_admin_grants_every_resource_type`](crate::cap::groups).
-    pub const LAST: u16 = Self::BlockDevice as u16;
+    pub const LAST: u16 = Self::Semaphore as u16;
 
     /// This type's wire discriminant, as sent to userspace.
     ///
@@ -479,7 +489,8 @@ impl ResourceType {
             | Self::PrivilegedPort
             | Self::ResourceLimit
             | Self::InputDevice
-            | Self::BlockDevice => self as u16,
+            | Self::BlockDevice
+            | Self::Semaphore => self as u16,
         }
     }
 
@@ -547,6 +558,7 @@ impl ResourceType {
             29 => Self::ResourceLimit,
             30 => Self::InputDevice,
             31 => Self::BlockDevice,
+            32 => Self::Semaphore,
             _ => return None,
         };
         Some(ty)

@@ -268,6 +268,11 @@ fn named_color(name: &str) -> Option<Color> {
 /// | c  d  ty |
 /// | 0  0   1 |
 /// ```
+/// so a point `(x, y)` goes to `(a x + b y + tx, c x + d y + ty)`.
+///
+/// SVG's `matrix(a b c d e f)` writes the same six numbers column by column:
+/// its `b` is this `c` and its `c` this `b`. [`Transform::svg_matrix`] takes
+/// them in SVG's order; build one from SVG's numbers no other way.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Transform {
     pub a: f32,
@@ -327,21 +332,33 @@ impl Transform {
         }
     }
 
+    /// A turn of `angle_rad` about the origin, clockwise on a screen whose
+    /// `y` runs down -- as SVG's `rotate()` turns: the `x` axis onto the `y`
+    /// axis at a quarter turn.
     pub fn rotate(angle_rad: f32) -> Self {
         let cos = angle_rad.cos();
         let sin = angle_rad.sin();
         Self {
             a: cos,
-            b: sin,
-            c: -sin,
+            b: -sin,
+            c: sin,
             d: cos,
             tx: 0.0,
             ty: 0.0,
         }
     }
 
-    pub fn matrix(a: f32, b: f32, c: f32, d: f32, tx: f32, ty: f32) -> Self {
-        Self { a, b, c, d, tx, ty }
+    /// SVG's `matrix(a b c d e f)`, its numbers in its order: a point
+    /// `(x, y)` goes to `(a x + c y + e, b x + d y + f)`.
+    pub fn svg_matrix(a: f32, b: f32, c: f32, d: f32, e: f32, f: f32) -> Self {
+        Self {
+            a,
+            b: c,
+            c: b,
+            d,
+            tx: e,
+            ty: f,
+        }
     }
 
     /// Multiply self * other (apply other first, then self).
@@ -433,7 +450,7 @@ pub fn parse_transform(s: &str) -> Result<Transform, SvgError> {
                         "matrix() requires 6 values".into(),
                     ));
                 };
-                Transform::matrix(a, b, c, d, tx, ty)
+                Transform::svg_matrix(a, b, c, d, tx, ty)
             }
             "skewX" => {
                 let angle = args.first().copied().unwrap_or(0.0) * PI / 180.0;
@@ -3385,22 +3402,70 @@ mod tests {
         assert!((t.d - 3.0).abs() < 1e-5);
     }
 
+    /// Whether `t` takes `from` to `to`, to rounding.
+    fn maps(t: Transform, from: (f32, f32), to: (f32, f32)) -> bool {
+        let (x, y) = t.apply(from.0, from.1);
+        (x - to.0).abs() < 1e-4 && (y - to.1).abs() < 1e-4
+    }
+
+    /// **`rotate()` turns clockwise on the screen, as SVG's does**: a quarter
+    /// turn takes the `x` axis down onto the `y` axis -- and about a centre
+    /// where one is given.
     #[test]
     fn test_transform_rotate() {
         let t = parse_transform("rotate(90)").unwrap();
-        // 90 degrees: cos=0, sin=1 => a=0, b=1, c=-1, d=0
-        assert!(t.a.abs() < 1e-5);
-        assert!((t.b - 1.0).abs() < 1e-5);
-        assert!((t.c + 1.0).abs() < 1e-5);
-        assert!(t.d.abs() < 1e-5);
+        assert!(maps(t, (1.0, 0.0), (0.0, 1.0)), "{t:?}");
+        assert!(maps(t, (0.0, 1.0), (-1.0, 0.0)), "{t:?}");
+        let about = parse_transform("rotate(90 10 0)").unwrap();
+        assert!(maps(about, (10.0, 0.0), (10.0, 0.0)), "{about:?}");
+        assert!(maps(about, (11.0, 0.0), (10.0, 1.0)), "{about:?}");
     }
 
+    /// **`matrix(a b c d e f)` reads its numbers in SVG's order**: `b` and `c`
+    /// are what `y` takes of `x` and `x` of `y`, and it agrees with the named
+    /// transforms SVG defines by it.
     #[test]
     fn test_transform_matrix() {
         let t = parse_transform("matrix(1, 0, 0, 1, 50, 60)").unwrap();
-        assert!((t.a - 1.0).abs() < 1e-5);
-        assert!((t.tx - 50.0).abs() < 1e-5);
-        assert!((t.ty - 60.0).abs() < 1e-5);
+        assert!(maps(t, (1.0, 2.0), (51.0, 62.0)), "{t:?}");
+        // b = 0.5: y takes half of x.
+        let shear = parse_transform("matrix(1 0.5 0 1 0 0)").unwrap();
+        assert!(maps(shear, (2.0, 0.0), (2.0, 1.0)), "{shear:?}");
+        // SVG: rotate(a) is matrix(cos a, sin a, -sin a, cos a, 0, 0) and
+        // skewY(a) is matrix(1, tan a, 0, 1, 0, 0).
+        for (named, matrix) in [
+            ("rotate(90)", "matrix(0 1 -1 0 0 0)"),
+            ("skewY(45)", "matrix(1 1 0 1 0 0)"),
+            ("skewX(45)", "matrix(1 0 1 1 0 0)"),
+        ] {
+            let (named_t, matrix_t) = (
+                parse_transform(named).unwrap(),
+                parse_transform(matrix).unwrap(),
+            );
+            for point in [(1.0, 0.0), (0.0, 1.0), (3.0, -2.0)] {
+                let want = matrix_t.apply(point.0, point.1);
+                assert!(maps(named_t, point, want), "{named} vs {matrix}");
+            }
+        }
+    }
+
+    /// **A rotated shape is drawn where SVG puts it**: a bar along the `x`
+    /// axis, turned a quarter and moved right, stands upright.
+    #[test]
+    fn a_rotated_shape_is_drawn_where_svg_puts_it() {
+        let doc = SvgDocument::parse(
+            r#"<svg viewBox="0 0 10 10"><g transform="translate(5 0) rotate(90)">
+<rect width="10" height="2" fill="red"/></g></svg>"#,
+        )
+        .unwrap();
+        let buffer = doc.render(10, 10);
+        let at = |x: usize, y: usize| buffer[(y * 10 + x) * 4 + 3];
+        // Columns 3 and 4 the whole way down; nothing either side.
+        assert_eq!(
+            (at(3, 5), at(4, 5), at(4, 0), at(4, 9)),
+            (255, 255, 255, 255)
+        );
+        assert_eq!((at(2, 5), at(5, 5)), (0, 0));
     }
 
     #[test]

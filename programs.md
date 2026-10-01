@@ -265,7 +265,7 @@ two disagree.
 | `sysinfo` | System Information Utility |  |  |  |
 | `syslogd` | System Log Daemon (`syslogd`) |  |  |  |
 | `sysstat` | Sysstat utility |  |  | `cifsiostat` *(not installed)*, `mpstat` *(not installed)*, `pidstat` *(not installed)*, `tapestat` *(not installed)* |
-| `systemctl` | Multi-personality service management utility for SlateOS. |  |  | `blame` *(not installed)*, `critical-chain` *(not installed)*, `dot` *(not installed)*, `plot` *(not installed)*, `security` *(not installed)*, `systemd-analyze` *(not installed)*, `systemd-cat` *(not installed)*, `systemd-cgls` *(not installed)*, `systemd-cgtop` *(not installed)*, `systemd-escape` *(not installed)*, `systemd-notify` *(not installed)*, `systemd-path` *(not installed)*, `systemd-tmpfiles` *(not installed)*, `verify` *(not installed)* |
+| `systemctl` | Multi-personality service management utility for SlateOS. |  |  | `systemd-analyze` *(not installed)*, `systemd-cat` *(not installed)*, `systemd-cgls` *(not installed)*, `systemd-cgtop` *(not installed)*, `systemd-escape` *(not installed)*, `systemd-notify` *(not installed)*, `systemd-path` *(not installed)*, `systemd-tmpfiles` *(not installed)* |
 | `tac` | Reverse line printer and character reverser for Slate OS |  |  |  |
 | `tail` | Output the last part of files. | yes | `coreutils` |  |
 | `tar` | Tape archive utility. | yes | `coreutils` |  |

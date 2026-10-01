@@ -74,11 +74,6 @@ sysstat:cifsiostat
 sysstat:mpstat
 sysstat:pidstat
 sysstat:tapestat
-systemctl:blame
-systemctl:critical-chain
-systemctl:dot
-systemctl:plot
-systemctl:security
 systemctl:systemd-analyze
 systemctl:systemd-cat
 systemctl:systemd-cgls
@@ -87,7 +82,6 @@ systemctl:systemd-escape
 systemctl:systemd-notify
 systemctl:systemd-path
 systemctl:systemd-tmpfiles
-systemctl:verify
 thermald:thermal-conf
 thermald:thermal-monitor
 tput:clear

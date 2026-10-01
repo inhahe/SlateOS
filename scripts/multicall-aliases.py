@@ -318,6 +318,17 @@ IGNORE: dict[str, str] = {
     "time": "a `stty` control-character name",
     "ftp": "a protocol name -- `ftpd`",
     "w.exe": "the Windows-suffixed spelling of `w`, matched alongside it",
+    # `systemd-analyze`'s subcommands. `systemctl`'s `analyze` takes the
+    # operands after its own name and dispatches on `args.first()`, which reads
+    # exactly like `main` taking argv[0] -- so six verbs were counted as six
+    # programs (2026-10-01, found in the §1045 triage). `dot` is graphviz's
+    # program; installing these names would have been actively wrong.
+    "blame": "a `systemd-analyze` subcommand",
+    "critical-chain": "a `systemd-analyze` subcommand",
+    "dot": "a `systemd-analyze` subcommand (and graphviz's program name)",
+    "plot": "a `systemd-analyze` subcommand",
+    "security": "a `systemd-analyze` subcommand",
+    "verify": "a `systemd-analyze` subcommand",
 }
 
 

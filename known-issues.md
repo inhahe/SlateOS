@@ -2431,7 +2431,12 @@ nothing, `numademo` printed invented bandwidths. **The ledger stands at 92.**
 programs -- and `lsattr`, the seven cgroup tools and the five `lp` names,
 which refuse honestly while what they wait for (FS_IOC_GETFLAGS, the
 kernel's cgroupfs at `/sys/fs/cgroup`, its print queue) is scheduled or
-built. **Still to judge:** `capsh`'s four, `systemctl`'s fourteen, `sudo`'s
+built. Six of `systemctl`'s fourteen were never names at all -- `blame`,
+`critical-chain`, `dot`, `plot`, `security` and `verify` are
+`systemd-analyze`'s subcommands, which the detector mistook for program
+names (`dot` is graphviz's); they are excluded in its IGNORE table and the
+ledger stands at **86**. **Still to judge:** `capsh`'s four, `systemctl`'s
+eight, `sudo`'s
 three (separate permissions may earn them crates), `sysstat`, `perf`,
 `cpupower`, `thermald`, `resolvectl`, `hostnamectl`'s domain names, `ntpd`,
 `xdg`, and the single names of `coredumpctl`, `dmidecode`, `efibootmgr`,

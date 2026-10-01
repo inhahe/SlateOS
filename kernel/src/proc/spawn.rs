@@ -1763,10 +1763,8 @@ fn spawn_process_inner(
                     if parent_lacks(crate::cap::ResourceType::Pipe) {
                         Err(KernelError::InvalidHandle)
                     } else {
-                        crate::ipc::pipe::dup(crate::ipc::pipe::PipeHandle::from_raw(
-                            parent_handle,
-                        ))
-                        .map(|h| h.raw())
+                        crate::ipc::pipe::dup(crate::ipc::pipe::PipeHandle::from_raw(parent_handle))
+                            .map(|h| h.raw())
                     }
                 }
                 fd_handle_type::STREAM_SOCKET => {
@@ -11142,8 +11140,8 @@ fn run_ctest_generic(fixture: &GenericFixture<'_>) -> KernelResult<GenericOutcom
 
     // A time, not a count of yields: a fixture that sleeps is judged by the
     // clock it reads, however busy the machine is.
-    let deadline = crate::hrtimer::now_ns()
-        .saturating_add(fixture.seconds.saturating_mul(1_000_000_000));
+    let deadline =
+        crate::hrtimer::now_ns().saturating_add(fixture.seconds.saturating_mul(1_000_000_000));
     let finished = loop {
         if pcb::state(result.pid) == Some(pcb::ProcessState::Zombie) {
             break true;
@@ -11285,7 +11283,13 @@ pub fn self_test_ctest_generic_list() -> KernelResult<()> {
         .iter()
         .map(|f| (f.name, f.grants.len(), f.seconds))
         .collect();
-    if shape != [("ctest-obstack", 0, 30), ("ctest-stdio", 1, 60), ("ctest-sb", 2, 5)] {
+    if shape
+        != [
+            ("ctest-obstack", 0, 30),
+            ("ctest-stdio", 1, 60),
+            ("ctest-sb", 2, 5),
+        ]
+    {
         return fail("a well-formed list parsed to the wrong fixtures");
     }
     if list.get(2).and_then(|f| f.grants.get(1)).map(|g| g.0) != Some(ResourceType::Process) {
@@ -11320,7 +11324,10 @@ pub fn self_test_ctest_generic_list() -> KernelResult<()> {
                 return fail("a bad line was refused at the wrong line");
             }
             Ok(_) => {
-                serial_println!("[spawn]   ctest-generic list parser: '{}' was accepted", case);
+                serial_println!(
+                    "[spawn]   ctest-generic list parser: '{}' was accepted",
+                    case
+                );
                 return fail("a bad line was accepted");
             }
         }

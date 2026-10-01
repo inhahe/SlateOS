@@ -1466,7 +1466,10 @@ pub fn report_leaf_claims() {
     // leaf (A-Q16, design-decisions §975) needs all of them, and the table
     // already holds them.
     for (i, slot) in LEAF_SEEN.iter().enumerate() {
-        let (outer, inner) = (slot.0.load(Ordering::Acquire), slot.1.load(Ordering::Acquire));
+        let (outer, inner) = (
+            slot.0.load(Ordering::Acquire),
+            slot.1.load(Ordering::Acquire),
+        );
         if outer == 0 {
             continue; // An empty slot.
         }

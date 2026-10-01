@@ -82,9 +82,9 @@ use super::number::{
     SYS_PTY_SLAVE_TRY_READ, SYS_PTY_SLAVE_WRITE, SYS_RLIMIT_GET, SYS_RLIMIT_SET,
     SYS_SCHED_GET_PROFILE, SYS_SCHED_GET_TIMESLICE, SYS_SCHED_RECONFIGURE, SYS_SCHED_SET_PROFILE,
     SYS_SCHED_SET_TIMESLICE, SYS_SECUREBOOT_ENROLL, SYS_SECUREBOOT_REMOVE, SYS_SECUREBOOT_VERIFY,
-    SYS_SEM_CLOSE, SYS_SEM_CREATE, SYS_SEM_SIGNAL, SYS_SEM_TRY_WAIT,
-    SYS_SEM_WAIT, SYS_SEM_WAIT_TIMEOUT, SYS_SERVICE_ACCEPT, SYS_SERVICE_ACCEPT_TIMEOUT,
-    SYS_SERVICE_CONNECT, SYS_SERVICE_REGISTER, SYS_SERVICE_TRY_ACCEPT, SYS_SERVICE_UNREGISTER,
+    SYS_SEM_CLOSE, SYS_SEM_CREATE, SYS_SEM_SIGNAL, SYS_SEM_TRY_WAIT, SYS_SEM_WAIT,
+    SYS_SEM_WAIT_TIMEOUT, SYS_SERVICE_ACCEPT, SYS_SERVICE_ACCEPT_TIMEOUT, SYS_SERVICE_CONNECT,
+    SYS_SERVICE_REGISTER, SYS_SERVICE_TRY_ACCEPT, SYS_SERVICE_UNREGISTER,
     SYS_SET_EXCEPTION_HANDLER, SYS_SET_FS_BASE, SYS_SHM_CLOSE, SYS_SHM_CREATE, SYS_SHM_MAP,
     SYS_SHM_MAP_AT, SYS_SHM_SIZE, SYS_SHM_UNMAP, SYS_SIGNAL_ALTSTACK, SYS_SIGNAL_MASK,
     SYS_SIGNAL_PENDING, SYS_SIGNAL_REGISTER, SYS_SIGNAL_SEND, SYS_SIGNAL_STOP_SELF, SYS_SLEEP,
@@ -2228,22 +2228,36 @@ fn test_dispatch_secureboot_doors() -> KernelResult<()> {
         .value;
         if !refused(enroll) {
             serial_println!("[syscall]   SYS_SECUREBOOT_ENROLL answered {}", enroll);
-            return fail("ENROLL was not refused for a caller with no process -- ungated, or gated after its arguments");
+            return fail(
+                "ENROLL was not refused for a caller with no process -- ungated, or gated after its arguments",
+            );
         }
         let remove = dispatch(SYS_SECUREBOOT_REMOVE, &args(1, 0, 0, 0, 0)).value;
         if !refused(remove) {
             serial_println!("[syscall]   SYS_SECUREBOOT_REMOVE answered {}", remove);
-            return fail("REMOVE was not refused for a caller with no process -- ungated, or gated after its argument");
+            return fail(
+                "REMOVE was not refused for a caller with no process -- ungated, or gated after its argument",
+            );
         }
 
         let mut out = [u32::MAX; 4];
         let r = dispatch(
             SYS_SECUREBOOT_VERIFY,
-            &args(name_ptr, name_len, hash_ptr, hash_len, out.as_mut_ptr() as u64),
+            &args(
+                name_ptr,
+                name_len,
+                hash_ptr,
+                hash_len,
+                out.as_mut_ptr() as u64,
+            ),
         )
         .value;
         if r != 0 || out != [2, 0, 0, 1] {
-            serial_println!("[syscall]   SYS_SECUREBOOT_VERIFY answered {} with {:?}", r, out);
+            serial_println!(
+                "[syscall]   SYS_SECUREBOOT_VERIFY answered {} with {:?}",
+                r,
+                out
+            );
             return fail("a hash in no list, not enforcing, should answer 0 with [2, 0, 0, 1]");
         }
 
@@ -2257,7 +2271,13 @@ fn test_dispatch_secureboot_doors() -> KernelResult<()> {
         out = [u32::MAX; 4];
         let r = dispatch(
             SYS_SECUREBOOT_VERIFY,
-            &args(name_ptr, name_len, hash_ptr, hash_len, out.as_mut_ptr() as u64),
+            &args(
+                name_ptr,
+                name_len,
+                hash_ptr,
+                hash_len,
+                out.as_mut_ptr() as u64,
+            ),
         )
         .value;
         if r != 0 || out != [0, id, 1, 1] {
@@ -2281,7 +2301,10 @@ fn test_dispatch_secureboot_doors() -> KernelResult<()> {
         )
         .value;
         if r != i64::from(KernelError::InvalidAddress.code()) {
-            serial_println!("[syscall]   SYS_SECUREBOOT_VERIFY with no output answered {}", r);
+            serial_println!(
+                "[syscall]   SYS_SECUREBOOT_VERIFY with no output answered {}",
+                r
+            );
             return fail("a null output should be refused as InvalidAddress");
         }
         if secureboot::stats().1 != before {
@@ -2355,7 +2378,10 @@ fn test_dispatch_ipc_possession() -> KernelResult<()> {
     };
     let owns = |pid, h| pcb::owns_ipc_handle(pid, ResourceType::Channel, h);
     if !owns(owner, ep0) || !owns(owner, ep1) {
-        return fail("a created channel's ends were not registered to their creator", &live);
+        return fail(
+            "a created channel's ends were not registered to their creator",
+            &live,
+        );
     }
 
     for (name, nr, handle) in [
@@ -2377,11 +2403,17 @@ fn test_dispatch_ipc_possession() -> KernelResult<()> {
                 name,
                 got
             );
-            return fail("a channel end was usable by a process that does not hold it", &live);
+            return fail(
+                "a channel end was usable by a process that does not hold it",
+                &live,
+            );
         }
     }
     if !owns(owner, ep0) {
-        return fail("another process's refused close deregistered the owner's end", &live);
+        return fail(
+            "another process's refused close deregistered the owner's end",
+            &live,
+        );
     }
 
     // The owner's own calls pass the gate, and the refused close closed
@@ -2390,7 +2422,10 @@ fn test_dispatch_ipc_possession() -> KernelResult<()> {
     let empty = self_test_as_process(owner, || dispatch(SYS_CHANNEL_TRY_RECV, &a0(ep1))).value;
     if empty != 0 {
         serial_println!("[syscall]   the owner's try-receive answered {}", empty);
-        return fail("the owner's own empty channel did not answer 0 -- was it closed?", &live);
+        return fail(
+            "the owner's own empty channel did not answer 0 -- was it closed?",
+            &live,
+        );
     }
     for ep in [ep0, ep1] {
         if self_test_as_process(owner, || dispatch(SYS_CHANNEL_CLOSE, &a0(ep))).value != 0 {
@@ -2398,27 +2433,34 @@ fn test_dispatch_ipc_possession() -> KernelResult<()> {
         }
     }
     if owns(owner, ep0) || owns(owner, ep1) {
-        return fail("a closed channel end is still registered to its owner", &live);
+        return fail(
+            "a closed channel end is still registered to its owner",
+            &live,
+        );
     }
 
     // The other handle types, the same way: what the owner made, another
     // process naming it is refused by every call that takes it.
     let pair = |r: SyscallResult| (u64::try_from(r.value).ok(), u64::try_from(r.value2).ok());
     let one = |r: SyscallResult| u64::try_from(r.value).ok();
-    let (Some(pipe_r), Some(pipe_w)) =
-        pair(self_test_as_process(owner, || dispatch(SYS_PIPE_CREATE, &a0(0))))
-    else {
+    let (Some(pipe_r), Some(pipe_w)) = pair(self_test_as_process(owner, || {
+        dispatch(SYS_PIPE_CREATE, &a0(0))
+    })) else {
         return fail("SYS_PIPE_CREATE failed for the owner", &live);
     };
-    let (Some(sock), Some(_)) =
-        pair(self_test_as_process(owner, || dispatch(SYS_SOCKETPAIR_CREATE, &a0(0))))
-    else {
+    let (Some(sock), Some(_)) = pair(self_test_as_process(owner, || {
+        dispatch(SYS_SOCKETPAIR_CREATE, &a0(0))
+    })) else {
         return fail("SYS_SOCKETPAIR_CREATE failed for the owner", &live);
     };
-    let Some(efd) = one(self_test_as_process(owner, || dispatch(SYS_EVENTFD_CREATE, &a0(0)))) else {
+    let Some(efd) = one(self_test_as_process(owner, || {
+        dispatch(SYS_EVENTFD_CREATE, &a0(0))
+    })) else {
         return fail("SYS_EVENTFD_CREATE failed for the owner", &live);
     };
-    let Some(cp) = one(self_test_as_process(owner, || dispatch(SYS_CP_CREATE, &a0(0)))) else {
+    let Some(cp) = one(self_test_as_process(owner, || {
+        dispatch(SYS_CP_CREATE, &a0(0))
+    })) else {
         return fail("SYS_CP_CREATE failed for the owner", &live);
     };
     // A minute: the process is destroyed, and the timer with it, long before.
@@ -2426,15 +2468,21 @@ fn test_dispatch_ipc_possession() -> KernelResult<()> {
         arg0: 60_000_000_000,
         ..a0(0)
     };
-    let Some(timer) = one(self_test_as_process(owner, || dispatch(SYS_TIMER_CREATE, &timer_args)))
-    else {
+    let Some(timer) = one(self_test_as_process(owner, || {
+        dispatch(SYS_TIMER_CREATE, &timer_args)
+    })) else {
         return fail("SYS_TIMER_CREATE failed for the owner", &live);
     };
-    let Some(sem) = one(self_test_as_process(owner, || dispatch(SYS_SEM_CREATE, &a0(0)))) else {
+    let Some(sem) = one(self_test_as_process(owner, || {
+        dispatch(SYS_SEM_CREATE, &a0(0))
+    })) else {
         return fail("SYS_SEM_CREATE failed for the owner", &live);
     };
     if !pcb::owns_ipc_handle(owner, ResourceType::Semaphore, sem) {
-        return fail("a created semaphore was not registered to its creator", &live);
+        return fail(
+            "a created semaphore was not registered to its creator",
+            &live,
+        );
     }
     for (name, nr, handle) in [
         ("SYS_PIPE_WRITE", SYS_PIPE_WRITE, pipe_w),
@@ -2452,10 +2500,22 @@ fn test_dispatch_ipc_possession() -> KernelResult<()> {
         ("SYS_SOCKETPAIR_RECV", SYS_SOCKETPAIR_RECV, sock),
         ("SYS_SOCKETPAIR_TRY_SEND", SYS_SOCKETPAIR_TRY_SEND, sock),
         ("SYS_SOCKETPAIR_TRY_RECV", SYS_SOCKETPAIR_TRY_RECV, sock),
-        ("SYS_SOCKETPAIR_SEND_TIMEOUT", SYS_SOCKETPAIR_SEND_TIMEOUT, sock),
-        ("SYS_SOCKETPAIR_RECV_TIMEOUT", SYS_SOCKETPAIR_RECV_TIMEOUT, sock),
+        (
+            "SYS_SOCKETPAIR_SEND_TIMEOUT",
+            SYS_SOCKETPAIR_SEND_TIMEOUT,
+            sock,
+        ),
+        (
+            "SYS_SOCKETPAIR_RECV_TIMEOUT",
+            SYS_SOCKETPAIR_RECV_TIMEOUT,
+            sock,
+        ),
         ("SYS_SOCKETPAIR_POLL", SYS_SOCKETPAIR_POLL, sock),
-        ("SYS_SOCKETPAIR_READABLE_BYTES", SYS_SOCKETPAIR_READABLE_BYTES, sock),
+        (
+            "SYS_SOCKETPAIR_READABLE_BYTES",
+            SYS_SOCKETPAIR_READABLE_BYTES,
+            sock,
+        ),
         ("SYS_SOCKETPAIR_SHUTDOWN", SYS_SOCKETPAIR_SHUTDOWN, sock),
         ("SYS_SOCKETPAIR_CLOSE", SYS_SOCKETPAIR_CLOSE, sock),
         ("SYS_EVENTFD_WRITE", SYS_EVENTFD_WRITE, efd),
@@ -2485,12 +2545,17 @@ fn test_dispatch_ipc_possession() -> KernelResult<()> {
                 name,
                 got
             );
-            return fail("an IPC handle was usable by a process that does not hold it", &live);
+            return fail(
+                "an IPC handle was usable by a process that does not hold it",
+                &live,
+            );
         }
     }
     // A completion port of the other process's own cannot watch the owner's
     // pipe; the owner's port can.
-    let Some(other_cp) = one(self_test_as_process(other, || dispatch(SYS_CP_CREATE, &a0(0)))) else {
+    let Some(other_cp) = one(self_test_as_process(other, || {
+        dispatch(SYS_CP_CREATE, &a0(0))
+    })) else {
         return fail("SYS_CP_CREATE failed for the other process", &live);
     };
     let watch = |port: u64| SyscallArgs {
@@ -2499,11 +2564,18 @@ fn test_dispatch_ipc_possession() -> KernelResult<()> {
         arg2: pipe_r,
         ..a0(0)
     };
-    if self_test_as_process(other, || dispatch(SYS_CP_REGISTER, &watch(other_cp))).value != invalid {
-        return fail("a completion port could watch another process's pipe", &live);
+    if self_test_as_process(other, || dispatch(SYS_CP_REGISTER, &watch(other_cp))).value != invalid
+    {
+        return fail(
+            "a completion port could watch another process's pipe",
+            &live,
+        );
     }
     if self_test_as_process(owner, || dispatch(SYS_CP_REGISTER, &watch(cp))).value != 0 {
-        return fail("the owner could not watch its own pipe from its own port", &live);
+        return fail(
+            "the owner could not watch its own pipe from its own port",
+            &live,
+        );
     }
     let watch_sem = SyscallArgs {
         arg0: other_cp,
@@ -2512,7 +2584,10 @@ fn test_dispatch_ipc_possession() -> KernelResult<()> {
         ..a0(0)
     };
     if self_test_as_process(other, || dispatch(SYS_CP_REGISTER, &watch_sem)).value != invalid {
-        return fail("a completion port could watch another process's semaphore", &live);
+        return fail(
+            "a completion port could watch another process's semaphore",
+            &live,
+        );
     }
 
     // A service listener: the owner's alone, and its name freed by its death.
@@ -2534,14 +2609,23 @@ fn test_dispatch_ipc_possession() -> KernelResult<()> {
                 name,
                 got
             );
-            return fail("a service listener was usable by a process that does not hold it", &live);
+            return fail(
+                "a service listener was usable by a process that does not hold it",
+                &live,
+            );
         }
     }
     let would_block = i64::from(KernelError::WouldBlock.code());
-    if self_test_as_process(owner, || dispatch(SYS_SERVICE_TRY_ACCEPT, &a0(listener.raw()))).value
+    if self_test_as_process(owner, || {
+        dispatch(SYS_SERVICE_TRY_ACCEPT, &a0(listener.raw()))
+    })
+    .value
         != would_block
     {
-        return fail("the owner's try-accept with nothing pending did not answer WouldBlock", &live);
+        return fail(
+            "the owner's try-accept with nothing pending did not answer WouldBlock",
+            &live,
+        );
     }
     pcb::destroy(owner);
     match crate::ipc::service::register(NAME) {

@@ -150,7 +150,9 @@ pub fn cleanup_handles(handles: &[(ResourceType, u64)]) {
                 // frees the name for a restart and closes the connections
                 // nobody accepted. `InvalidHandle` means the process
                 // unregistered it already, which is no fault at exit.
-                if let Err(e) = service::unregister(service::ServiceListenerHandle::from_raw(handle_raw)) {
+                if let Err(e) =
+                    service::unregister(service::ServiceListenerHandle::from_raw(handle_raw))
+                {
                     if e != crate::error::KernelError::InvalidHandle {
                         crate::serial_println!(
                             "[ipc] cleanup: service listener {:#x} not unregistered: {:?}",

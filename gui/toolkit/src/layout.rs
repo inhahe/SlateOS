@@ -1423,6 +1423,37 @@ mod tests {
         assert_eq!(column[0].x, 0.0);
     }
 
+    /// **A line is as thick as lining its baselines up makes it** -- not
+    /// merely as thick as its thickest item -- so the next line starts
+    /// below the lowest item rather than over it.
+    #[test]
+    fn a_baseline_line_is_as_thick_as_its_baselines_make_it() {
+        let at = |baseline| FlexItem {
+            align_self: Some(FlexAlign::Baseline),
+            baseline: Some(baseline),
+            ..FlexItem::default()
+        };
+        let boxes = flex_layout(
+            Size::new(100.0, f32::INFINITY),
+            &FlexLayout {
+                wrap: FlexWrap::Wrap,
+                align_content: AlignContent::Start,
+                ..FlexLayout::default()
+            },
+            &[
+                // Both 30 tall: one's baseline near its bottom, the
+                // other's near its top, so lining them up takes 28 above
+                // the baseline and 28 below it.
+                (Size::new(40.0, 30.0), at(28.0)),
+                (Size::new(40.0, 30.0), at(2.0)),
+                // Too wide for the first line.
+                (Size::new(80.0, 10.0), FlexItem::default()),
+            ],
+            &Edges::ZERO,
+        );
+        assert_eq!(ys(&boxes), [0.0, 26.0, 56.0]);
+    }
+
     /// **Stretch makes an item as thick as its line, but no thicker than
     /// its `max`.**
     #[test]

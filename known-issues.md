@@ -180483,7 +180483,7 @@ user path, beside the gates it calls. `syscall::dispatch`'s
 `test_dispatch_fs_gates` checks each, as a scratch process with no
 capability.
 
-### A-AN-OPEN-FILE-FOLLOWS-ITS-NAME -- 2026-10-01 -- OPEN (lane A, planned)
+### A-AN-OPEN-FILE-FOLLOWS-ITS-NAME -- 2026-10-01 -- PARTLY FIXED the same day: memfs and the handle layer (steps 1-3 of the plan below); ext4 (step 4) next (lane A)
 
 **In short:** opening a file here gives a program a handle to the file's
 *name*, not to the file. Every read and write looks the name up again. So a
@@ -180525,8 +180525,39 @@ It touches the VFS and each writable filesystem (memfs, ext4, FAT), so it
 is a task of its own with a boot of its own. Lane A takes it after
 `A-ST_DEV-IS-ZERO-FOR-EVERY-FILE`.
 
-**Reproduce:** open a file, delete it, write through the handle: `NotFound`.
-On Linux the write succeeds and the data stays readable until the close.
+**Reproduce:** open a file, delete it, write through the handle. On memfs,
+the root of the boot test, the write *re-creates* the file under its old
+name: `write_at` creates a missing path, so the file comes back holding
+zeros up to the offset, then the data. On Linux the write succeeds and the
+data stays readable through the handle, and nowhere else, until the close.
+
+**Two more faces of the same design, found 2026-10-01:**
+- **A handle never sees another writer's growth.** `read`, `pread`,
+  `SEEK_END`, `SEEK_DATA` and `SEEK_HOLE` use a size cached in the handle
+  at open, updated only by that handle's own writes. So a reader stops at
+  the size the file had when it opened it:
+  - `tail -f` prints nothing new, although `fstat` shows the file growing;
+  - two processes sharing a SQLite database read short pages from the one
+    the other has grown.
+- **An `O_APPEND` write lands at the cached end**, not at the file's real
+  end. Two appenders through separate opens overwrite each other.
+
+**The plan** (lane A, now):
+1. `FileSystem` gains inode-addressed calls: read, write, truncate,
+   metadata, and pin/unpin, which keep an inode alive while open. They
+   default to `NotSupported`, which keeps today's path behaviour for
+   filesystems without inodes (FAT, the pseudo filesystems).
+2. memfs implements them. An open count on a node keeps an unlinked node
+   alive until its last unpin.
+3. `fs::handle` holds the object (filesystem, `fs_id`, inode) for a
+   regular file on such a filesystem. Its I/O goes through it, sizes come
+   from the file at each call, and the final close unpins. Unmount
+   refuses while any file on it is open.
+4. ext4: the same calls, plus the on-disk orphan list (`s_last_orphan`,
+   chained through `i_dtime`), so a file unlinked while open survives
+   until its last close and is reclaimed at the next mount after a crash.
+   The superblock field exists today and nothing reads or writes it.
+5. `O_TMPFILE` and `SYS_FS_TMPFILE`: create, open, unlink.
 
 ### A-LINUX-FSTAT-OF-A-FILE-WAS-MADE-UP -- 2026-10-01 -- FIXED the same day (lane A)
 

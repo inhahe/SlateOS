@@ -189,11 +189,12 @@ impl LockKey {
     /// `InvalidHandle` for a handle that is not open.
     pub fn for_handle(handle: u64) -> KernelResult<Self> {
         let path = crate::fs::handle::handle_path(handle)?;
-        // No identity keys by the path, which is what the table has always
-        // done for a file that has none: a filesystem without stable inode
-        // numbers, or a name that has since been unlinked or renamed. Every
-        // holder of the same open-time path then shares one key.
-        let id = crate::fs::Vfs::file_identity_resolved(&path).unwrap_or(None);
+        // The identity of the file the handle holds, whatever its name now
+        // (`fs::handle::file_identity`). No identity keys by the path, which
+        // is what the table has always done for a file that has none: a
+        // filesystem without stable inode numbers, held by name. Every holder
+        // of the same open-time path then shares one key.
+        let id = crate::fs::handle::file_identity(handle).unwrap_or(None);
         Ok(Self::File { path, id })
     }
 

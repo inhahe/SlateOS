@@ -649,6 +649,61 @@ pub trait FileSystem: Send {
         self.write_file(path, &contents)
     }
 
+    // ----- An open regular file, by inode -----
+    //
+    // `fs::handle` holds an open regular file as its inode on a filesystem
+    // that offers these (`Vfs::open_object`; known-issues
+    // A-AN-OPEN-FILE-FOLLOWS-ITS-NAME), so a rename or an unlink of its name
+    // cannot take the file from under the handle. The defaults answer
+    // `NotSupported`, and such a filesystem's handles go by path.
+
+    /// Hold inode `ino` open. Its last name may then go without the file:
+    /// it stays, unnamed, until the matching [`unpin_ino`](Self::unpin_ino).
+    /// `NotSupported` for an inode the filesystem does not hold this way.
+    fn pin_ino(&mut self, ino: u64) -> KernelResult<()> {
+        let _ = ino;
+        Err(KernelError::NotSupported)
+    }
+
+    /// Give back one [`pin_ino`](Self::pin_ino). A file with no name left
+    /// goes with its last pin.
+    fn unpin_ino(&mut self, ino: u64) {
+        let _ = ino;
+    }
+
+    /// [`read_at`](Self::read_at) for a held inode.
+    fn read_ino(&mut self, ino: u64, offset: u64, len: usize) -> KernelResult<Vec<u8>> {
+        let _ = (ino, offset, len);
+        Err(KernelError::NotSupported)
+    }
+
+    /// [`write_at`](Self::write_at) for a held inode. Never creates a file.
+    fn write_ino(&mut self, ino: u64, offset: u64, data: &[u8]) -> KernelResult<()> {
+        let _ = (ino, offset, data);
+        Err(KernelError::NotSupported)
+    }
+
+    /// Write `data` at a held inode's end, the end found and written in one
+    /// call so two appenders cannot land on one offset (`O_APPEND`). Returns
+    /// the offset it landed at.
+    fn append_ino(&mut self, ino: u64, data: &[u8]) -> KernelResult<u64> {
+        let _ = (ino, data);
+        Err(KernelError::NotSupported)
+    }
+
+    /// [`truncate`](Self::truncate) for a held inode.
+    fn truncate_ino(&mut self, ino: u64, size: u64) -> KernelResult<()> {
+        let _ = (ino, size);
+        Err(KernelError::NotSupported)
+    }
+
+    /// [`metadata`](Self::metadata) for a held inode: `nlinks` 0 once its
+    /// last name has gone, as Linux's `fstat` reports it.
+    fn metadata_ino(&mut self, ino: u64) -> KernelResult<FileMeta> {
+        let _ = ino;
+        Err(KernelError::NotSupported)
+    }
+
     /// Rename or move a file or directory.
     ///
     /// Both `from` and `to` are paths relative to the filesystem root.
@@ -1125,6 +1180,132 @@ struct MountPoint {
     /// identifies a file system-wide), used as the page-cache key — see
     /// design-decisions §23/§36.
     fs_id: u64,
+    /// Open files held on this mount as objects ([`Vfs::open_object`]). An
+    /// unmount refuses while any is, as Linux's `umount` answers `EBUSY`:
+    /// I/O through a held file must never reach a filesystem that has gone.
+    /// Counted under the mount table's lock, which is what keeps an open
+    /// racing an unmount from slipping between the check and the removal.
+    objects: usize,
+}
+
+/// An open regular file held as its filesystem and inode, not its name
+/// (known-issues A-AN-OPEN-FILE-FOLLOWS-ITS-NAME).
+///
+/// While one exists its inode is pinned (`FileSystem::pin_ino`): a rename
+/// leaves the holder on the file, and unlinking its last name removes the
+/// name while the file lives on until the last release
+/// ([`Vfs::release_object`]). It also holds its mount, which cannot be
+/// unmounted while it does.
+///
+/// A clone is a second reference for one call's use, not a second hold:
+/// each hold comes from [`Vfs::open_object`] or [`Vfs::reopen_object`] and
+/// goes back through one [`Vfs::release_object`].
+#[derive(Clone)]
+pub struct FileObject {
+    fs: MountedFs,
+    fs_id: u64,
+    ino: u64,
+}
+
+impl FileObject {
+    /// The file's system-wide identity: the key of the page cache and of the
+    /// lock tables.
+    #[must_use]
+    pub fn id(&self) -> FileId {
+        FileId {
+            fs_id: self.fs_id,
+            ino: self.ino,
+        }
+    }
+}
+
+impl core::fmt::Debug for FileObject {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("FileObject")
+            .field("fs_id", &self.fs_id)
+            .field("ino", &self.ino)
+            .finish_non_exhaustive()
+    }
+}
+
+/// Give back one hold on mount `fs_id` (`MountPoint::objects`).
+fn release_mount_hold(fs_id: u64) {
+    let mut vfs = VFS.lock();
+    if let Some(mp) = vfs.mounts.iter_mut().find(|m| m.fs_id == fs_id) {
+        mp.objects = mp.objects.saturating_sub(1);
+    }
+}
+
+/// `ReadOnlyFilesystem` if mount `fs_id` is read-only now, `NotFound` if it
+/// has gone: what can change under a file opened for writing.
+fn check_writable_fs(fs_id: u64) -> KernelResult<()> {
+    let vfs = VFS.lock();
+    let mp = vfs
+        .mounts
+        .iter()
+        .find(|m| m.fs_id == fs_id)
+        .ok_or(KernelError::NotFound)?;
+    if mp.options.read_only {
+        Err(KernelError::ReadOnlyFilesystem)
+    } else {
+        Ok(())
+    }
+}
+
+/// The files held open, by identity: how many holds each has, and -- once
+/// its last name has gone while held -- the name its per-file state was kept
+/// under (`super::perfile`).
+///
+/// That state (an ACL, flags, seals, attributes) ends with the file, which
+/// for a held file is its last release, not the unlink: a write-sealed file
+/// unlinked while open must stay sealed to the handle still writing it.
+/// `perfile::object_unlinked` asks [`defer_forget_if_held`]; the last
+/// [`Vfs::release_object`] then ends it, and drops the file's cached pages,
+/// since its inode number may be given to another file. A leaf lock.
+struct Held {
+    holds: usize,
+    unlinked_as: Option<PathBuf>,
+}
+
+static HELD: Mutex<alloc::collections::BTreeMap<FileId, Held>> =
+    Mutex::new(alloc::collections::BTreeMap::new());
+
+/// One more hold on `id`.
+fn note_hold(id: FileId) {
+    let mut held = HELD.lock();
+    let entry = held.entry(id).or_insert(Held {
+        holds: 0,
+        unlinked_as: None,
+    });
+    entry.holds = entry.holds.saturating_add(1);
+}
+
+/// One hold on `id` gone. When it was the last, and the file's last name had
+/// gone while it was held, the name its state was kept under: the file is
+/// gone now, and its state goes with it.
+fn note_release(id: FileId) -> Option<PathBuf> {
+    let mut held = HELD.lock();
+    let entry = held.get_mut(&id)?;
+    entry.holds = entry.holds.saturating_sub(1);
+    if entry.holds == 0 {
+        held.remove(&id).and_then(|h| h.unlinked_as)
+    } else {
+        None
+    }
+}
+
+/// `id`'s last name, `path`, has gone. If the file is held open it lives
+/// on, unnamed: record that, and answer `true`, so its per-file state is
+/// kept until the last release instead of ended now.
+pub(crate) fn defer_forget_if_held(id: FileId, path: &Path) -> bool {
+    let mut held = HELD.lock();
+    match held.get_mut(&id) {
+        Some(entry) => {
+            entry.unlinked_as = Some(path.to_path_buf());
+            true
+        }
+        None => false,
+    }
 }
 
 /// Monotonic source of stable mount ids ([`MountPoint::fs_id`]).
@@ -1847,6 +2028,7 @@ impl Vfs {
             fs_type,
             options,
             fs_id,
+            objects: 0,
         });
 
         // Mount changes affect path resolution — invalidate entire dcache.
@@ -1970,6 +2152,12 @@ impl Vfs {
             // Unmounted, and something else was mounted at the same path. Ours
             // is already gone; removing the newcomer would be the bug.
             return Ok(());
+        }
+        // A file held open on it keeps it, as Linux's `umount` answers EBUSY.
+        // Checked under the lock the holds are counted under, so no open can
+        // slip in between this and the removal.
+        if vfs.mounts.get(idx).is_some_and(|mp| mp.objects > 0) {
+            return Err(KernelError::DeviceBusy);
         }
 
         vfs.mounts.remove(idx);
@@ -3348,7 +3536,7 @@ impl Vfs {
         let path = path.as_ref();
         crate::ipc::namespace::check_writable(path)?;
         let path = Self::resolve_follow(path)?;
-        Self::append_resolved(&path, data)
+        Self::append_resolved(&path, data).map(|_| ())
     }
 
     /// Like [`append`](Self::append) but on an **already-resolved** host path
@@ -3359,7 +3547,9 @@ impl Vfs {
     /// overwritten and an append overwrites nothing.
     ///
     /// [`write_file_resolved`]: Self::write_file_resolved
-    pub fn append_resolved(path: impl AsRef<Path>, data: &[u8]) -> KernelResult<()> {
+    ///
+    /// Returns the offset the data landed at: the end it found.
+    pub fn append_resolved(path: impl AsRef<Path>, data: &[u8]) -> KernelResult<u64> {
         let path = path.as_ref();
         check_path_access(path, PathAccess::Write)?;
         check_writable(path)?;
@@ -3373,13 +3563,20 @@ impl Vfs {
             // The end, and the write at it, under the same hold: nothing can
             // move the end in between. A missing file is created under the
             // same hold, so a second creator finds it and appends.
-            match guard.stat(&relative) {
-                Ok(entry) => guard.write_at(&relative, entry.size, data)?,
-                Err(KernelError::NotFound) => guard.write_file(&relative, data)?,
+            let at = match guard.stat(&relative) {
+                Ok(entry) => {
+                    guard.write_at(&relative, entry.size, data)?;
+                    entry.size
+                }
+                Err(KernelError::NotFound) => {
+                    guard.write_file(&relative, data)?;
+                    0
+                }
                 Err(e) => return Err(e),
-            }
-            cache_identity(&mut guard, fs_id, &relative)
+            };
+            (at, cache_identity(&mut guard, fs_id, &relative))
         };
+        let (at, cache_inval) = cache_inval;
         if let Some((fs_id, ino)) = cache_inval {
             crate::mm::page_cache::invalidate_identity(fs_id, ino);
         }
@@ -3390,7 +3587,7 @@ impl Vfs {
         super::index::on_file_changed(path);
         super::journal::record(super::journal::JournalEventType::Modified, path);
         super::audit::log_ok(super::audit::AuditOp::Write, 0, path);
-        Ok(())
+        Ok(at)
     }
 
     /// Truncate a file to the given size.
@@ -3421,6 +3618,254 @@ impl Vfs {
         super::notify::emit_modified(path);
         super::journal::record(super::journal::JournalEventType::Modified, path);
         Ok(())
+    }
+
+    // ----- An open regular file, held as its object -----
+    //
+    // `fs::handle` holds an open regular file as its filesystem and inode
+    // where the filesystem allows (known-issues
+    // A-AN-OPEN-FILE-FOLLOWS-ITS-NAME): a rename or an unlink of the name it
+    // was opened under leaves the handle on the file, and its sizes are the
+    // file's own at each call. These are those calls. Everything else about a
+    // handle -- events, quota's audit trail, `/proc` -- keeps the open-time
+    // name.
+
+    /// Hold the regular file at already-resolved `path` as an object.
+    ///
+    /// `Ok(None)` where it cannot be held: not a regular file, no stable
+    /// inode, or a filesystem without inode-addressed I/O (FAT, the pseudo
+    /// filesystems). The caller then goes by path, as every handle did
+    /// before.
+    ///
+    /// The hold is counted on the mount first, under the mount table's lock,
+    /// so an unmount racing this open either sees the count or removes the
+    /// mount before it is found; it never leaves an object on a filesystem it
+    /// has taken away.
+    ///
+    /// # Errors
+    ///
+    /// The filesystem's own, from looking the file up or pinning it.
+    pub fn open_object(path: impl AsRef<Path>) -> KernelResult<Option<FileObject>> {
+        let path = path.as_ref();
+        let (fs, fs_id, relative) = {
+            let mut vfs = VFS.lock();
+            let (mp, relative) = find_mount(&mut vfs, path)?;
+            mp.objects = mp.objects.saturating_add(1);
+            (Arc::clone(&mp.fs), mp.fs_id, relative.to_path_buf())
+        };
+        let pinned = {
+            let mut guard = fs.lock();
+            match guard.metadata(&relative) {
+                Ok(meta) if meta.entry_type == EntryType::File && meta.ino != 0 => {
+                    guard.pin_ino(meta.ino).map(|()| Some(meta.ino))
+                }
+                Ok(_) => Ok(None),
+                Err(e) => Err(e),
+            }
+        };
+        match pinned {
+            Ok(Some(ino)) => {
+                note_hold(FileId { fs_id, ino });
+                Ok(Some(FileObject { fs, fs_id, ino }))
+            }
+            Ok(None) | Err(KernelError::NotSupported) => {
+                release_mount_hold(fs_id);
+                Ok(None)
+            }
+            Err(e) => {
+                release_mount_hold(fs_id);
+                Err(e)
+            }
+        }
+    }
+
+    /// A second hold on `obj`'s file, for a second open file description of
+    /// it (`fs::handle::dup`). Given back by its own [`release_object`].
+    ///
+    /// [`release_object`]: Self::release_object
+    ///
+    /// # Errors
+    ///
+    /// `NotFound` if the mount has gone; the filesystem's own from pinning.
+    pub fn reopen_object(obj: &FileObject) -> KernelResult<FileObject> {
+        {
+            let mut vfs = VFS.lock();
+            let mp = vfs
+                .mounts
+                .iter_mut()
+                .find(|m| m.fs_id == obj.fs_id)
+                .ok_or(KernelError::NotFound)?;
+            mp.objects = mp.objects.saturating_add(1);
+        }
+        if let Err(e) = obj.fs.lock().pin_ino(obj.ino) {
+            release_mount_hold(obj.fs_id);
+            return Err(e);
+        }
+        note_hold(obj.id());
+        Ok(obj.clone())
+    }
+
+    /// Give back one hold. A file whose last name went while it was held goes
+    /// with its last hold; the mount may be unmounted once none is left.
+    pub fn release_object(obj: FileObject) {
+        obj.fs.lock().unpin_ino(obj.ino);
+        if let Some(name) = note_release(obj.id()) {
+            // The last hold on a file whose last name went while it was held:
+            // the file is gone now. Its cached pages go, since its inode
+            // number may be given to another file, and so does the state kept
+            // about it, deferred at the unlink (`defer_forget_if_held`).
+            crate::mm::page_cache::invalidate_identity(obj.fs_id, obj.ino);
+            super::perfile::object_unlinked(
+                super::perfile::Unlinked {
+                    id: Some(obj.id()),
+                    last_name: true,
+                },
+                &name,
+            );
+        }
+        release_mount_hold(obj.fs_id);
+    }
+
+    /// The file's metadata now, its device included. `nlinks` is 0 once its
+    /// last name has gone.
+    ///
+    /// # Errors
+    ///
+    /// The filesystem's own.
+    pub fn object_metadata(obj: &FileObject) -> KernelResult<FileMeta> {
+        let mut meta = obj.fs.lock().metadata_ino(obj.ino)?;
+        meta.dev = dev_of(obj.fs_id);
+        Ok(meta)
+    }
+
+    /// Read through an object: through the page cache, as
+    /// [`read_at_resolved`](Self::read_at_resolved) is for a path, and
+    /// clamped to the file's size now rather than when it was opened, so a
+    /// reader sees what another writer has added. `path` names it for the
+    /// access event.
+    ///
+    /// # Errors
+    ///
+    /// `OutOfMemory` for a buffer that cannot be had; the filesystem's own.
+    pub fn object_read(
+        obj: &FileObject,
+        path: &Path,
+        offset: u64,
+        len: usize,
+    ) -> KernelResult<Vec<u8>> {
+        if len == 0 {
+            return Ok(Vec::new());
+        }
+        let size = obj.fs.lock().metadata_ino(obj.ino)?.size;
+        if offset >= size {
+            return Ok(Vec::new());
+        }
+        let avail = size.saturating_sub(offset);
+        let out_len = usize::try_from(avail).map_or(len, |a| a.min(len));
+        // As in `read_at_routed`: a failed allocation is an error, not an
+        // abort.
+        let mut buf: Vec<u8> = Vec::new();
+        buf.try_reserve_exact(out_len)
+            .map_err(|_| KernelError::OutOfMemory)?;
+        buf.resize(out_len, 0u8);
+        crate::mm::page_cache::read_through(obj.id(), offset, &mut buf, |page_off, page_buf| {
+            let data = obj.fs.lock().read_ino(obj.ino, page_off, page_buf.len())?;
+            let n = data.len().min(page_buf.len());
+            if let (Some(dst), Some(src)) = (page_buf.get_mut(..n), data.get(..n)) {
+                dst.copy_from_slice(src);
+            }
+            Ok(())
+        })?;
+        if super::notify::interest_includes(super::notify::FsEventMask::ACCESS) {
+            super::notify::emit(super::notify::FsEventType::Accessed, path, None);
+        }
+        Ok(buf)
+    }
+
+    /// [`object_read`](Self::object_read) straight from the filesystem, past
+    /// the page cache: the cache's own fill, for an `mmap` fault.
+    ///
+    /// # Errors
+    ///
+    /// The filesystem's own.
+    pub fn object_read_uncached(
+        obj: &FileObject,
+        offset: u64,
+        len: usize,
+    ) -> KernelResult<Vec<u8>> {
+        obj.fs.lock().read_ino(obj.ino, offset, len)
+    }
+
+    /// Write through an object at `offset`.
+    ///
+    /// The open was the access check, as POSIX has it: a `chmod` after the
+    /// open does not take a descriptor's write away. What is checked here is
+    /// what can change under an open file: the mount turned read-only, an
+    /// interceptor, quota. Never creates a file: a held file whose name is
+    /// gone is written where it is, unnamed. `path` names it for events.
+    ///
+    /// # Errors
+    ///
+    /// `ReadOnlyFilesystem`, `DiskFull` (quota), an interceptor's refusal,
+    /// the filesystem's own.
+    pub fn object_write(
+        obj: &FileObject,
+        path: &Path,
+        offset: u64,
+        data: &[u8],
+    ) -> KernelResult<()> {
+        Self::object_write_checks(obj, path, data.len())?;
+        obj.fs.lock().write_ino(obj.ino, offset, data)?;
+        Self::object_written(obj, path, data.len());
+        Ok(())
+    }
+
+    /// Write through an object at the file's end, found and written in one
+    /// call so two appenders cannot land on one offset: `O_APPEND`. Returns
+    /// where it landed. Checks as [`object_write`](Self::object_write).
+    ///
+    /// # Errors
+    ///
+    /// As [`object_write`](Self::object_write).
+    pub fn object_append(obj: &FileObject, path: &Path, data: &[u8]) -> KernelResult<u64> {
+        Self::object_write_checks(obj, path, data.len())?;
+        let at = obj.fs.lock().append_ino(obj.ino, data)?;
+        Self::object_written(obj, path, data.len());
+        Ok(at)
+    }
+
+    /// Cut or extend a held file to `size`. Checks as
+    /// [`object_write`](Self::object_write), less quota.
+    ///
+    /// # Errors
+    ///
+    /// `ReadOnlyFilesystem`, the filesystem's own.
+    pub fn object_truncate(obj: &FileObject, path: &Path, size: u64) -> KernelResult<()> {
+        check_writable_fs(obj.fs_id)?;
+        obj.fs.lock().truncate_ino(obj.ino, size)?;
+        crate::mm::page_cache::invalidate_identity(obj.fs_id, obj.ino);
+        super::notify::emit_modified(path);
+        super::journal::record(super::journal::JournalEventType::Modified, path);
+        Ok(())
+    }
+
+    /// What may refuse a write to a held file: the mount turned read-only,
+    /// an interceptor, quota.
+    fn object_write_checks(obj: &FileObject, path: &Path, len: usize) -> KernelResult<()> {
+        check_writable_fs(obj.fs_id)?;
+        // Before the filesystem lock, as for every write: interceptors must
+        // not call back into the VFS while it is held.
+        super::intercept::pre_write(path)?;
+        enforce_quota_write(path, len as u64)
+    }
+
+    /// After a write to a held file: cached pages are stale, and the write is
+    /// counted and announced.
+    fn object_written(obj: &FileObject, path: &Path, len: usize) {
+        crate::mm::page_cache::invalidate_identity(obj.fs_id, obj.ino);
+        super::quota::charge_bytes(0, 0, len as u64);
+        super::notify::emit_modified(path);
+        super::journal::record(super::journal::JournalEventType::Modified, path);
     }
 
     /// Pre-allocate space for a file.

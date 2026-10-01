@@ -20106,7 +20106,10 @@ fn fill_stat_from_meta(buf: &mut [u8; STAT_SIZE], meta: &crate::fs::FileMeta) {
     let atime = pick(meta.accessed_ns);
     let mtime = pick(meta.modified_ns);
     let ctime = pick(meta.changed_ns);
-    let nlink = u64::from(meta.nlinks.max(1));
+    // The true count: 0 for a file whose last name went while it was open,
+    // which SQLite (`st_nlink == 0`: "unlinked while open") and `tail -F`
+    // check. Every filesystem reports at least 1 for a named file.
+    let nlink = u64::from(meta.nlinks);
 
     put_u64(buf, 0, crate::fs::vfs::linux_dev_t(meta.dev)); // st_dev
     put_u64(buf, 8, meta.ino); // st_ino
@@ -20168,7 +20171,7 @@ fn fill_statx_from_meta(buf: &mut [u8; STATX_SIZE], meta: &crate::fs::FileMeta) 
     put_u32(buf, 0, STATX_BASIC_STATS); // stx_mask
     put_u32(buf, 4, 16 * 1024); // stx_blksize
     put_u64(buf, 8, 0); // stx_attributes
-    put_u32(buf, 16, meta.nlinks.max(1)); // stx_nlink
+    put_u32(buf, 16, meta.nlinks); // stx_nlink: 0 once unlinked, as stat's
     put_u32(buf, 20, meta.uid); // stx_uid
     put_u32(buf, 24, meta.gid); // stx_gid
     put_u16(buf, 28, mode_u16); // stx_mode

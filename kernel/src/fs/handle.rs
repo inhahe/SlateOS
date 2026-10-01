@@ -156,8 +156,20 @@ struct OpenFile {
     path: PathBuf,
     /// Current read/write cursor position.
     offset: u64,
-    /// Cached file size (updated on write/truncate/open).
-    size: u64,
+    /// The file's size as this handle last saw it -- at open, or after its
+    /// own write or truncate. **For display only** (`/proc/fdinfo`, `lsof`):
+    /// another writer's growth is not here. Every I/O decision asks the file
+    /// itself. Until 2026-10-01 reads stopped at this number, so a reader
+    /// never saw what another writer appended (`tail -f`; two SQLite
+    /// processes; known-issues A-AN-OPEN-FILE-FOLLOWS-ITS-NAME).
+    seen_size: u64,
+    /// The file itself, held as its filesystem and inode, where the
+    /// filesystem allows (`Vfs::open_object`): I/O goes through it, so a
+    /// rename or an unlink of `path` leaves this handle on its file. `None`
+    /// for a directory, and for a file on a filesystem without stable inodes
+    /// (FAT, the pseudo filesystems), which still go by `path`. Given back at
+    /// the description's final close.
+    object: Option<crate::fs::vfs::FileObject>,
     /// Flags this file was opened with.
     flags: OpenFlags,
     /// Number of owners sharing this open file description.
@@ -621,6 +633,15 @@ fn open_resolved(norm: PathBuf, flags: OpenFlags, create_mode: u16) -> KernelRes
     }
 }
 
+/// The file's size now: from the file held, or by name for one held by
+/// name.
+fn current_size(object: Option<&crate::fs::vfs::FileObject>, path: &Path) -> KernelResult<u64> {
+    match object {
+        Some(obj) => crate::fs::Vfs::object_metadata(obj).map(|m| m.size),
+        None => crate::fs::Vfs::metadata_resolved(path).map(|m| m.size),
+    }
+}
+
 /// Close an open file handle.
 ///
 /// Frees the handle ID and releases any advisory locks held with
@@ -645,12 +666,17 @@ pub fn close(handle: u64) -> KernelResult<()> {
         // and directory flag so we can release any advisory lock and emit an
         // inotify close event below (both after dropping this lock, to keep
         // the OPEN_FILES → WATCHES lock order one-directional).
-        table
-            .remove(&handle)
-            .map(|file| (file.path, file.flags.is_writable(), file.is_directory))
+        table.remove(&handle).map(|file| {
+            (
+                file.path,
+                file.flags.is_writable(),
+                file.is_directory,
+                file.object,
+            )
+        })
     };
 
-    if let Some((ref p, writable, is_dir)) = closed {
+    if let Some((ref p, writable, is_dir, object)) = closed {
         // Release any advisory lock this handle holds on the file path.
         // Using the handle ID as the owner (consistent with how flock
         // syscalls pass owner IDs).  Best-effort: ignore errors from
@@ -672,6 +698,12 @@ pub fn close(handle: u64) -> KernelResult<()> {
         // are tagged `is_dir` so the inotify adapter ORs in IN_ISDIR.  Gated
         // lock-free on the matching CLOSE interest count.
         crate::fs::notify::emit_closed(p, writable, is_dir);
+
+        // Last: the hold on the file itself. A file whose last name went
+        // while it was open goes now, with its last description.
+        if let Some(obj) = object {
+            crate::fs::Vfs::release_object(obj);
+        }
     }
 
     Ok(())
@@ -686,7 +718,7 @@ pub fn read(handle: u64, buf: &mut [u8]) -> KernelResult<usize> {
     // Snapshot what the VFS call needs, then drop the table lock before
     // making it. See `advance_offset` for why holding it across the call is
     // a deadlock and not merely a bottleneck.
-    let (path, start) = {
+    let (object, path, start) = {
         let table = OPEN_FILES.lock();
         let file = table.get(&handle).ok_or(KernelError::InvalidHandle)?;
 
@@ -698,17 +730,15 @@ pub fn read(handle: u64, buf: &mut [u8]) -> KernelResult<usize> {
             return Err(KernelError::PermissionDenied);
         }
 
-        // Nothing to read if at or past EOF.
-        if file.offset >= file.size {
-            return Ok(0);
-        }
-
-        (file.path.clone(), file.offset)
+        (file.object.clone(), file.path.clone(), file.offset)
     };
 
-    // Read via VFS.  Currently reads the whole file — the default
-    // `read_at` in the FileSystem trait slices the result.
-    let data = crate::fs::Vfs::read_at_resolved(&path, start, buf.len())?;
+    // The end of file is the file's now, not as this handle last saw it:
+    // both calls below clamp to the current size.
+    let data = match &object {
+        Some(obj) => crate::fs::Vfs::object_read(obj, &path, start, buf.len())?,
+        None => crate::fs::Vfs::read_at_resolved(&path, start, buf.len())?,
+    };
     let copy_len = data.len().min(buf.len());
 
     if let Some(dest) = buf.get_mut(..copy_len) {
@@ -757,9 +787,9 @@ fn advance_offset(handle: u64, start: u64, delta: u64) {
 /// Return the file offset at which the next byte written via
 /// [`fn@write`] would land.
 ///
-/// This is `file.size` for handles opened with [`OpenFlags::APPEND`]
-/// (POSIX rule: append-mode writes always go to EOF, ignoring the
-/// stored offset) and `file.offset` otherwise.
+/// This is the file's size now for handles opened with
+/// [`OpenFlags::APPEND`] (POSIX rule: append-mode writes always go to EOF,
+/// ignoring the stored offset) and `file.offset` otherwise.
 ///
 /// Used by the Linux ABI translation layer to enforce `RLIMIT_FSIZE`
 /// against the current-offset write paths (`write(2)`, `writev(2)`)
@@ -775,18 +805,28 @@ fn advance_offset(handle: u64, start: u64, delta: u64) {
 /// - [`KernelError::PermissionDenied`] — handle was not opened for
 ///   writing.
 pub fn peek_write_offset(handle: u64) -> KernelResult<u64> {
-    let table = OPEN_FILES.lock();
-    let file = table.get(&handle).ok_or(KernelError::InvalidHandle)?;
-    if file.is_directory {
-        return Err(KernelError::IsADirectory);
-    }
-    if !file.flags.is_writable() {
-        return Err(KernelError::PermissionDenied);
-    }
-    if file.flags.contains(OpenFlags::APPEND) {
-        Ok(file.size)
+    let (object, path, offset, append) = {
+        let table = OPEN_FILES.lock();
+        let file = table.get(&handle).ok_or(KernelError::InvalidHandle)?;
+        if file.is_directory {
+            return Err(KernelError::IsADirectory);
+        }
+        if !file.flags.is_writable() {
+            return Err(KernelError::PermissionDenied);
+        }
+        (
+            file.object.clone(),
+            file.path.clone(),
+            file.offset,
+            file.flags.contains(OpenFlags::APPEND),
+        )
+    };
+    // The size is looked up with the table lock released: see
+    // `advance_offset`.
+    if append {
+        current_size(object.as_ref(), &path)
     } else {
-        Ok(file.offset)
+        Ok(offset)
     }
 }
 
@@ -818,7 +858,7 @@ pub fn current_offset(handle: u64) -> KernelResult<u64> {
 pub fn write(handle: u64, data: &[u8]) -> KernelResult<usize> {
     // Snapshot, then release: see `advance_offset` for why the table lock
     // must not span the VFS call.
-    let (path, write_offset) = {
+    let (object, path, offset, append) = {
         let table = OPEN_FILES.lock();
         let file = table.get(&handle).ok_or(KernelError::InvalidHandle)?;
 
@@ -830,33 +870,40 @@ pub fn write(handle: u64, data: &[u8]) -> KernelResult<usize> {
             return Err(KernelError::PermissionDenied);
         }
 
-        // APPEND writes land at the cached end of file. This was never
-        // atomic against another process writing the same file through a
-        // different handle — `OPEN_FILES` does not serialise the filesystem
-        // — so releasing the lock here loses no guarantee that existed.
-        // Real append atomicity has to come from the filesystem.
-        let write_offset = if file.flags.contains(OpenFlags::APPEND) {
-            file.size
-        } else {
-            file.offset
-        };
-
-        (file.path.clone(), write_offset)
+        (
+            file.object.clone(),
+            file.path.clone(),
+            file.offset,
+            file.flags.contains(OpenFlags::APPEND),
+        )
     };
 
-    // Write via VFS.
-    crate::fs::Vfs::write_at_resolved(&path, write_offset, data)?;
+    // An APPEND write lands at the file's end as it is when it lands: the
+    // end is found and written in one hold of the filesystem's lock, so two
+    // appenders -- through this handle or any other -- never land on one
+    // offset. Until 2026-10-01 it went to the end as this handle had last
+    // seen it, and two appenders through separate opens overwrote each other.
+    let write_offset = match (&object, append) {
+        (Some(obj), true) => crate::fs::Vfs::object_append(obj, &path, data)?,
+        (Some(obj), false) => {
+            crate::fs::Vfs::object_write(obj, &path, offset, data)?;
+            offset
+        }
+        (None, true) => crate::fs::Vfs::append_resolved(&path, data)?,
+        (None, false) => {
+            crate::fs::Vfs::write_at_resolved(&path, offset, data)?;
+            offset
+        }
+    };
 
     let written = data.len();
 
-    // Update offset and cached size. Both APPEND and non-APPEND leave the
-    // cursor at the end of what was just written.
+    // Both APPEND and non-APPEND leave the cursor at the end of what was just
+    // written.
     let new_end = write_offset.saturating_add(written as u64);
     if let Some(file) = OPEN_FILES.lock().get_mut(&handle) {
         file.offset = file.offset.max(new_end);
-        if new_end > file.size {
-            file.size = new_end;
-        }
+        file.seen_size = file.seen_size.max(new_end);
     }
 
     Ok(written)
@@ -881,7 +928,7 @@ pub fn read_at(handle: u64, offset: u64, buf: &mut [u8]) -> KernelResult<usize> 
     // Snapshot, then release: see `advance_offset` for why the table lock
     // must not span the VFS call. `pread` touches no cursor, so unlike
     // `read` there is nothing to write back afterwards.
-    let path = {
+    let (object, path) = {
         let table = OPEN_FILES.lock();
         let file = table.get(&handle).ok_or(KernelError::InvalidHandle)?;
         if file.is_directory {
@@ -893,12 +940,13 @@ pub fn read_at(handle: u64, offset: u64, buf: &mut [u8]) -> KernelResult<usize> 
         if buf.is_empty() {
             return Ok(0);
         }
-        if offset >= file.size {
-            return Ok(0);
-        }
-        file.path.clone()
+        (file.object.clone(), file.path.clone())
     };
-    let data = crate::fs::Vfs::read_at_resolved(&path, offset, buf.len())?;
+    // Clamped to the file's size now, by the calls themselves.
+    let data = match &object {
+        Some(obj) => crate::fs::Vfs::object_read(obj, &path, offset, buf.len())?,
+        None => crate::fs::Vfs::read_at_resolved(&path, offset, buf.len())?,
+    };
     let copy_len = data.len().min(buf.len());
     if let Some(dest) = buf.get_mut(..copy_len) {
         if let Some(src) = data.get(..copy_len) {
@@ -924,7 +972,7 @@ pub fn read_at(handle: u64, offset: u64, buf: &mut [u8]) -> KernelResult<usize> 
 /// - [`KernelError::PermissionDenied`] — handle was not opened for reading.
 /// - VFS errors propagated unchanged.
 pub fn read_at_uncached(handle: u64, offset: u64, buf: &mut [u8]) -> KernelResult<usize> {
-    let (path, size) = {
+    let (object, path) = {
         let table = OPEN_FILES.lock();
         let file = table.get(&handle).ok_or(KernelError::InvalidHandle)?;
         if file.is_directory {
@@ -933,12 +981,16 @@ pub fn read_at_uncached(handle: u64, offset: u64, buf: &mut [u8]) -> KernelResul
         if !file.flags.is_readable() {
             return Err(KernelError::PermissionDenied);
         }
-        (file.path.clone(), file.size)
+        (file.object.clone(), file.path.clone())
     };
-    if buf.is_empty() || offset >= size {
+    if buf.is_empty() {
         return Ok(0);
     }
-    let data = crate::fs::Vfs::read_at_uncached_resolved(&path, offset, buf.len())?;
+    // Past the end, the filesystem itself returns nothing.
+    let data = match &object {
+        Some(obj) => crate::fs::Vfs::object_read_uncached(obj, offset, buf.len())?,
+        None => crate::fs::Vfs::read_at_uncached_resolved(&path, offset, buf.len())?,
+    };
     let copy_len = data.len().min(buf.len());
     if let Some(dest) = buf.get_mut(..copy_len) {
         if let Some(src) = data.get(..copy_len) {
@@ -966,7 +1018,7 @@ pub fn read_at_uncached(handle: u64, offset: u64, buf: &mut [u8]) -> KernelResul
 pub fn write_at(handle: u64, offset: u64, data: &[u8]) -> KernelResult<usize> {
     // Snapshot, then release: see `advance_offset` for why the table lock
     // must not span the VFS call.
-    let path = {
+    let (object, path) = {
         let table = OPEN_FILES.lock();
         let file = table.get(&handle).ok_or(KernelError::InvalidHandle)?;
         if file.is_directory {
@@ -978,15 +1030,16 @@ pub fn write_at(handle: u64, offset: u64, data: &[u8]) -> KernelResult<usize> {
         if data.is_empty() {
             return Ok(0);
         }
-        file.path.clone()
+        (file.object.clone(), file.path.clone())
     };
-    crate::fs::Vfs::write_at_resolved(&path, offset, data)?;
+    match &object {
+        Some(obj) => crate::fs::Vfs::object_write(obj, &path, offset, data)?,
+        None => crate::fs::Vfs::write_at_resolved(&path, offset, data)?,
+    }
     let written = data.len();
     let new_end = offset.saturating_add(written as u64);
     if let Some(file) = OPEN_FILES.lock().get_mut(&handle) {
-        if new_end > file.size {
-            file.size = new_end;
-        }
+        file.seen_size = file.seen_size.max(new_end);
     }
     Ok(written)
 }
@@ -1054,6 +1107,25 @@ pub fn set_dir_cursor(handle: u64, cursor: u64) -> KernelResult<()> {
 ///
 /// Returns the new absolute offset after seeking.
 pub fn seek(handle: u64, from: SeekFrom) -> KernelResult<u64> {
+    // The forms that need the end ask the file for it, before the table lock
+    // is taken: a VFS call must not be made under it (`advance_offset`). They
+    // used the size this handle had last seen until 2026-10-01, so
+    // `SEEK_END` missed another writer's growth.
+    let size = match from {
+        SeekFrom::End(_) | SeekFrom::Data(_) | SeekFrom::Hole(_) => {
+            let (object, path) = {
+                let table = OPEN_FILES.lock();
+                let file = table.get(&handle).ok_or(KernelError::InvalidHandle)?;
+                if file.is_directory {
+                    return Err(KernelError::IsADirectory);
+                }
+                (file.object.clone(), file.path.clone())
+            };
+            current_size(object.as_ref(), &path)?
+        }
+        SeekFrom::Start(_) | SeekFrom::Current(_) => 0,
+    };
+
     let mut table = OPEN_FILES.lock();
     let file = table.get_mut(&handle).ok_or(KernelError::InvalidHandle)?;
 
@@ -1082,21 +1154,17 @@ pub fn seek(handle: u64, from: SeekFrom) -> KernelResult<u64> {
             if delta >= 0 {
                 #[allow(clippy::cast_sign_loss)]
                 let d = delta as u64;
-                file.size
-                    .checked_add(d)
-                    .ok_or(KernelError::InvalidArgument)?
+                size.checked_add(d).ok_or(KernelError::InvalidArgument)?
             } else {
                 #[allow(clippy::cast_sign_loss)]
                 let d = delta.unsigned_abs();
-                file.size
-                    .checked_sub(d)
-                    .ok_or(KernelError::InvalidArgument)?
+                size.checked_sub(d).ok_or(KernelError::InvalidArgument)?
             }
         }
         SeekFrom::Data(pos) => {
             // For non-sparse filesystems, any offset within the file is "data".
             // Return the requested offset if it's within the file.
-            if pos >= file.size {
+            if pos >= size {
                 return Err(KernelError::InvalidArgument);
             }
             pos
@@ -1104,11 +1172,11 @@ pub fn seek(handle: u64, from: SeekFrom) -> KernelResult<u64> {
         SeekFrom::Hole(pos) => {
             // For non-sparse filesystems, the first "hole" is at EOF.
             // If pos is already past EOF, that's an error.
-            if pos > file.size {
+            if pos > size {
                 return Err(KernelError::InvalidArgument);
             }
             // Return EOF as the first hole.
-            file.size
+            size
         }
     };
 
@@ -1125,15 +1193,19 @@ pub fn seek(handle: u64, from: SeekFrom) -> KernelResult<u64> {
 pub fn fstat(handle: u64) -> KernelResult<crate::fs::FileMeta> {
     // Snapshot, then release: see `advance_offset` for why the table lock
     // must not span the VFS call.
-    let path = {
+    let (object, path) = {
         let table = OPEN_FILES.lock();
         let file = table.get(&handle).ok_or(KernelError::InvalidHandle)?;
-        file.path.clone()
+        (file.object.clone(), file.path.clone())
     };
 
-    // metadata() follows symlinks, but an open handle already refers to
-    // the resolved target, so this returns the correct underlying object.
-    crate::fs::Vfs::metadata_resolved(&path)
+    // The file held, whatever its name now; `nlinks` 0 once the last name
+    // has gone. A file held by name: metadata() follows symlinks, but an
+    // open handle already refers to the resolved target.
+    match &object {
+        Some(obj) => crate::fs::Vfs::object_metadata(obj),
+        None => crate::fs::Vfs::metadata_resolved(&path),
+    }
 }
 
 /// The flags an open handle was opened with: whether it may read and write,
@@ -1169,13 +1241,13 @@ pub fn is_directory(handle: u64) -> bool {
 
 /// Truncate a file to a given size by handle.
 ///
-/// Requires the handle to be opened with WRITE permission.
-/// Updates the cached size and clamps the offset if it was
-/// beyond the new end-of-file.
+/// Requires the handle to be opened with WRITE permission. The offset is
+/// not changed, as POSIX says: a write past the new end leaves a hole. It
+/// was clamped to the new end until 2026-10-01.
 pub fn ftruncate(handle: u64, size: u64) -> KernelResult<()> {
     // Snapshot, then release: see `advance_offset` for why the table lock
     // must not span the VFS call.
-    let path = {
+    let (object, path) = {
         let table = OPEN_FILES.lock();
         let file = table.get(&handle).ok_or(KernelError::InvalidHandle)?;
 
@@ -1187,17 +1259,16 @@ pub fn ftruncate(handle: u64, size: u64) -> KernelResult<()> {
             return Err(KernelError::PermissionDenied);
         }
 
-        file.path.clone()
+        (file.object.clone(), file.path.clone())
     };
 
-    crate::fs::Vfs::truncate_resolved(&path, size)?;
+    match &object {
+        Some(obj) => crate::fs::Vfs::object_truncate(obj, &path, size)?,
+        None => crate::fs::Vfs::truncate_resolved(&path, size)?,
+    }
 
     if let Some(file) = OPEN_FILES.lock().get_mut(&handle) {
-        file.size = size;
-        // Clamp offset: if the cursor was beyond the new EOF, move it back.
-        if file.offset > size {
-            file.offset = size;
-        }
+        file.seen_size = size;
     }
 
     Ok(())
@@ -1213,9 +1284,10 @@ pub fn dup(handle: u64) -> KernelResult<u64> {
 
     let path = file.path.clone();
     let offset = file.offset;
-    let size = file.size;
+    let size = file.seen_size;
     let flags = file.flags;
     let is_directory = file.is_directory;
+    let object = file.object.clone();
 
     // Need to drop the lock before calling allocate_handle (it
     // acquires the same lock).
@@ -1230,7 +1302,13 @@ pub fn dup(handle: u64) -> KernelResult<u64> {
         set_dir_cursor(id, offset)?;
         Ok(id)
     } else {
-        allocate_handle(path, offset, size, flags)
+        // A second description of the same file holds it as well: its own
+        // hold, given back at its own final close.
+        let object = object
+            .as_ref()
+            .map(crate::fs::Vfs::reopen_object)
+            .transpose()?;
+        allocate_handle_holding(path, offset, size, flags, object)
     }
 }
 
@@ -1285,12 +1363,16 @@ pub fn handle_path(handle: u64) -> KernelResult<PathBuf> {
 ///   filesystems); the caller must fall back to the per-mapping read path.
 /// - `Err(_)` — the handle is invalid or the path no longer resolves.
 pub fn file_identity(handle: u64) -> KernelResult<Option<crate::fs::vfs::FileId>> {
-    let path = {
+    let (object, path) = {
         let table = OPEN_FILES.lock();
         let file = table.get(&handle).ok_or(KernelError::InvalidHandle)?;
-        file.path.clone()
+        (file.object.clone(), file.path.clone())
     };
-    crate::fs::Vfs::file_identity_resolved(&path)
+    // The file held, whatever its name now; else by name.
+    match object {
+        Some(obj) => Ok(Some(obj.id())),
+        None => crate::fs::Vfs::file_identity_resolved(&path),
+    }
 }
 
 /// Recover a directory handle as a [`PinnedDir`](crate::fs::PinnedDir) — the
@@ -1332,7 +1414,8 @@ pub struct HandleInfo {
     pub path: PathBuf,
     /// Current offset.
     pub offset: u64,
-    /// Cached file size.
+    /// The file's size as the handle last saw it (see `OpenFile::seen_size`):
+    /// a display value, not the file's size now.
     pub size: u64,
     /// Open flags (raw bits).
     pub flags: u32,
@@ -1349,7 +1432,7 @@ pub fn list_handles() -> alloc::vec::Vec<HandleInfo> {
             id,
             path: file.path.clone(),
             offset: file.offset,
-            size: file.size,
+            size: file.seen_size,
             flags: file.flags.bits(),
         });
     }
@@ -1362,9 +1445,29 @@ pub fn list_handles() -> alloc::vec::Vec<HandleInfo> {
 
 /// Allocate a handle in the global table.
 fn allocate_handle(path: PathBuf, offset: u64, size: u64, flags: OpenFlags) -> KernelResult<u64> {
+    // The file itself, held before the handle exists, so no I/O through the
+    // handle can happen by name. Taken without the table lock: it locks the
+    // mount table and the filesystem.
+    let object = crate::fs::Vfs::open_object(&path)?;
+    allocate_handle_holding(path, offset, size, flags, object)
+}
+
+/// [`allocate_handle`] with the hold already taken (or none). A failure here
+/// gives the hold back.
+fn allocate_handle_holding(
+    path: PathBuf,
+    offset: u64,
+    size: u64,
+    flags: OpenFlags,
+    object: Option<crate::fs::vfs::FileObject>,
+) -> KernelResult<u64> {
     let mut table = OPEN_FILES.lock();
 
     if table.len() >= MAX_OPEN_FILES {
+        drop(table);
+        if let Some(obj) = object {
+            crate::fs::Vfs::release_object(obj);
+        }
         return Err(KernelError::OutOfMemory);
     }
 
@@ -1375,11 +1478,12 @@ fn allocate_handle(path: PathBuf, offset: u64, size: u64, flags: OpenFlags) -> K
         OpenFile {
             path,
             offset,
-            size,
+            seen_size: size,
             flags,
             refcount: 1,
             is_directory: false,
             dir_pin: None,
+            object,
         },
     );
 
@@ -1420,11 +1524,13 @@ fn allocate_dir_handle(path: PathBuf, flags: OpenFlags) -> KernelResult<u64> {
         OpenFile {
             path,
             offset: 0,
-            size: 0,
+            seen_size: 0,
             flags,
             refcount: 1,
             is_directory: true,
             dir_pin,
+            // Directories go by name, and check their pin.
+            object: None,
         },
     );
 
@@ -1434,6 +1540,147 @@ fn allocate_dir_handle(path: PathBuf, flags: OpenFlags) -> KernelResult<u64> {
 // ---------------------------------------------------------------------------
 // Self-test
 // ---------------------------------------------------------------------------
+
+/// A handle holds its file, not its name, where the filesystem allows
+/// (known-issues A-AN-OPEN-FILE-FOLLOWS-ITS-NAME). The rungs:
+///
+/// 1. The name unlinked while open: the handle still writes and reads the
+///    file, `fstat` says 0 links, and the name stays gone. On memfs the
+///    write used to re-create the file under its old name, zero-filled.
+/// 2. The name renamed while open: the handle writes the renamed file.
+/// 3. Another writer's growth is seen: a reader opened earlier reads the
+///    bytes appended after its open, and `SEEK_END` lands past them.
+/// 4. `O_APPEND` through two opens lands each write at the true end.
+/// 5. `ftruncate` leaves the offset where it was, as POSIX says.
+/// 6. A mount with a file held open on it cannot be unmounted.
+///
+/// On a root that holds files by name (FAT) the rungs do not apply, and are
+/// reported as skipped rather than passed.
+fn test_held_files(skips: &mut crate::fs::selftest::Skips) -> KernelResult<()> {
+    use crate::fs::Vfs;
+    const A: &str = "/held_a.txt";
+    const B: &str = "/held_b.txt";
+    const MNT: &str = "/tmp/held_mnt";
+
+    fn fail(what: &str, got: &dyn core::fmt::Debug) -> KernelResult<()> {
+        crate::serial_println!("[fs::handle]   FAIL: held files: {}: {:?}", what, got);
+        Err(KernelError::InternalError)
+    }
+    let rw = OpenFlags::READ.union(OpenFlags::WRITE);
+    // Best effort: leftovers from an earlier boot's failure.
+    let _ = Vfs::remove(A);
+    let _ = Vfs::remove(B);
+    Vfs::write_file(A, b"hello")?;
+    let h = open(A, rw)?;
+    let held = OPEN_FILES
+        .lock()
+        .get(&h)
+        .is_some_and(|f| f.object.is_some());
+    if !held {
+        let _ = close(h);
+        let _ = Vfs::remove(A);
+        skips.record("held files", "the root filesystem holds open files by name");
+        return Ok(());
+    }
+
+    // 1. Unlinked while open.
+    let mut buf = [0u8; 32];
+    Vfs::remove(A)?;
+    let wrote = write_at(h, 5, b" world");
+    let read_back = read_at(h, 0, &mut buf);
+    let meta = fstat(h);
+    let resurrected = Vfs::stat(A).is_ok();
+    let _ = close(h);
+    let after_close = Vfs::stat(A).is_ok();
+    match (wrote, read_back, meta) {
+        (Ok(6), Ok(11), Ok(m)) if buf.get(..11) == Some(b"hello world") && m.nlinks == 0 => {}
+        other => return fail("a file unlinked while open", &other),
+    }
+    if resurrected || after_close {
+        return fail("the unlinked name came back", &(resurrected, after_close));
+    }
+    crate::serial_println!("[fs::handle]   held: unlinked while open, still the handle's: OK");
+
+    // 2. Renamed while open.
+    Vfs::write_file(A, b"abc")?;
+    let h = open(A, rw)?;
+    Vfs::rename(A, B)?;
+    let wrote = write_at(h, 3, b"def");
+    let _ = close(h);
+    let at_b = Vfs::read_file(B);
+    let at_a = Vfs::stat(A).is_ok();
+    let _ = Vfs::remove(B);
+    match (wrote, at_b) {
+        (Ok(3), Ok(data)) if data == b"abcdef" && !at_a => {}
+        other => return fail("a file renamed while open", &(other, at_a)),
+    }
+    crate::serial_println!(
+        "[fs::handle]   held: renamed while open, the write follows the file: OK"
+    );
+
+    // 3. Another writer's growth, and SEEK_END.
+    Vfs::write_file(A, b"0123")?;
+    let reader = open(A, OpenFlags::READ)?;
+    let writer = open(A, rw)?;
+    let grew = write_at(writer, 4, b"4567");
+    let n = read(reader, &mut buf);
+    let end = seek(reader, SeekFrom::End(0));
+    let _ = close(reader);
+    let _ = close(writer);
+    match (grew, n, end) {
+        (Ok(4), Ok(8), Ok(8)) if buf.get(..8) == Some(b"01234567") => {}
+        other => return fail("another writer's growth", &other),
+    }
+    crate::serial_println!("[fs::handle]   held: a reader sees another writer's growth: OK");
+
+    // 4. O_APPEND through two opens.
+    Vfs::write_file(A, b"")?;
+    let appending = rw.union(OpenFlags::APPEND);
+    let (h1, h2) = (open(A, appending)?, open(A, appending)?);
+    let writes = [write(h1, b"a"), write(h2, b"b"), write(h1, b"c")];
+    let _ = close(h1);
+    let _ = close(h2);
+    let content = Vfs::read_file(A);
+    if writes.iter().any(|w| *w != Ok(1)) || content.as_deref() != Ok(b"abc".as_slice()) {
+        return fail("O_APPEND through two opens", &(writes, content));
+    }
+    crate::serial_println!("[fs::handle]   held: O_APPEND lands at the true end: OK");
+
+    // 5. ftruncate leaves the offset alone.
+    let h = open(A, rw)?;
+    let _ = seek(h, SeekFrom::Start(3));
+    let cut = ftruncate(h, 1);
+    let at = seek(h, SeekFrom::Current(0));
+    let _ = close(h);
+    let _ = Vfs::remove(A);
+    if cut.is_err() || at != Ok(3) {
+        return fail("ftruncate moved the offset", &(cut, at));
+    }
+    crate::serial_println!("[fs::handle]   held: ftruncate keeps the offset: OK");
+
+    // 6. A held file keeps its mount.
+    if Vfs::stat("/tmp").is_ok() {
+        crate::fs::memfs::mount(MNT)?;
+        let inner = "/tmp/held_mnt/f";
+        Vfs::write_file(inner, b"x")?;
+        let h = open(inner, OpenFlags::READ)?;
+        let busy = Vfs::unmount(MNT);
+        let _ = close(h);
+        let freed = Vfs::unmount(MNT);
+        if busy != Err(KernelError::DeviceBusy) || freed.is_err() {
+            // Best effort, so a failure does not leave the scratch mount.
+            let _ = Vfs::unmount(MNT);
+            return fail("unmount with a file held open", &(busy, freed));
+        }
+        crate::serial_println!("[fs::handle]   held: a mount with a file open is busy: OK");
+    } else {
+        skips.record(
+            "held files: busy mount",
+            "no /tmp to mount a scratch filesystem under",
+        );
+    }
+    Ok(())
+}
 
 /// Test the file handle system end-to-end.
 ///
@@ -2645,6 +2892,9 @@ pub fn self_test() -> KernelResult<()> {
     crate::fs::Vfs::remove(lock_path).ok();
     crate::fs::Vfs::remove(test_path).ok();
     crate::fs::Vfs::remove("/handle_write_test.txt").ok();
+
+    // Handles hold their files, not their names.
+    test_held_files(&mut skips)?;
 
     skips.report("[fs::handle]");
     crate::serial_println!("[fs::handle] Self-test PASSED{}", skips.suffix());

@@ -450,3 +450,18 @@ net80211/src/supplicant.rs:mic_algo
 # urgent: an unnamed working key is a discoverability defect, and a card row
 # for a key with no effect is a false claim on screen. All three do what
 # their rows say now, so all three lines are removed rather than annotated.
+
+# The window frame's style, 2026-10-01 (lane C, `design-decisions.md` §1456).
+# A theme's `window-decorations` section is read into `DecorationStyle`, and
+# what reads it is the compositor, which draws every window's frame -- lane
+# F's tree, asked in `requests/c-f-draw-window-frames-from-the-theme.md`. The
+# fields below are the three that nothing on lane C's side has a use for yet
+# (the others are read by `title_bar`, the geometry lane F is to call, and
+# `title_overflow` by the taskbar). Kept for that consumer rather than thrown
+# away: the built-in style equals what the compositor draws today, so until
+# lane F reads them a theme that sets them changes nothing on screen -- which
+# the request says, and which is why these are here and not silently passing.
+# Delete each line when the compositor reads its field.
+gui/appearance/src/decorations.rs:title_height
+gui/appearance/src/decorations.rs:title_bold
+gui/appearance/src/decorations.rs:button_shape

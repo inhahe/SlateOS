@@ -482,6 +482,11 @@ fn inheritance_that_loops_ends() {
     f.put("share", "t40", "default", 12);
     assert_eq!(colour(&f.theme("t0"), "default"), None);
     assert_eq!(colour(&f.theme("t30"), "default"), Some(12));
+    // A loop in one parent does not use up the search before the next
+    // parent is reached: each theme is visited once.
+    f.index("share", "Mine", "[Icon Theme]\nInherits=A,Real\n");
+    f.put("share", "Real", "default", 15);
+    assert_eq!(colour(&f.theme("Mine"), "default"), Some(15));
 }
 
 /// **A file that is not a cursor is passed over** for the next place, and a
@@ -494,13 +499,24 @@ fn what_is_not_a_cursor_is_passed_over() {
     fs::create_dir_all(&dir).unwrap();
     fs::write(dir.join("default"), b"not a cursor").unwrap();
     assert_eq!(colour(&f.theme("T"), "default"), Some(13));
-    // A file past the size bound is not read at all.
-    let big = fs::File::create(dir.join("left_ptr")).unwrap();
+    // A file past the size bound is not read at all -- though what it starts
+    // with is a good cursor, which would be read if it were.
+    f.put("user", "T", "left_ptr", 16);
+    assert_eq!(colour(&f.theme("T"), "default"), Some(16));
+    let big = fs::OpenOptions::new()
+        .write(true)
+        .open(dir.join("left_ptr"))
+        .unwrap();
     big.set_len(MAX_CURSOR_BYTES + 1).unwrap();
     drop(big);
     assert_eq!(colour(&f.theme("T"), "default"), Some(13));
-    // Names and themes that are not names.
+    // Names and themes that are not names, though each would reach a file
+    // if it were joined to a path: `T`'s own cursor, and one put where a
+    // theme named `..` would find it.
     assert_eq!(colour(&f.theme("T"), "../T/cursors/left_ptr"), None);
+    let above = f.scratch.dir().join(CURSORS_DIR);
+    fs::create_dir_all(&above).unwrap();
+    fs::write(above.join("default"), xcursor(&[img(24, 0xFF00_0011)])).unwrap();
     assert_eq!(colour(&f.theme(".."), "default"), None);
     assert_eq!(f.theme("T").cursor("default", 0), None);
 }
@@ -531,6 +547,11 @@ fn the_installed_themes_are_listed() {
     f.index("icons", "Adwaita", "[Icon Theme]\nName=Adwaita (mine)\n");
     // An icon theme with no cursors is not a cursor theme.
     f.index("share", "hicolor", "[Icon Theme]\nName=Hicolor\n");
+    // Sorted by the name shown, not the folder's: `aaa` is called Zulu.
+    f.put("share", "aaa", "default", 1);
+    f.index("share", "aaa", "[Icon Theme]\nName=Zulu\n");
+    // The built-in theme given cursors is still the built-in one, once.
+    f.put("system", themes::BUILT_IN, "default", 1);
     let roots = f.theme("x").roots();
     let listed: Vec<(String, bool)> = available_in(&roots)
         .into_iter()
@@ -542,6 +563,7 @@ fn the_installed_themes_are_listed() {
             (themes::BUILT_IN_NAME.to_owned(), true),
             ("Adwaita (mine)".to_owned(), false),
             ("Breeze".to_owned(), false),
+            ("Zulu".to_owned(), false),
         ]
     );
     let breeze = available_in(&roots).remove(2);

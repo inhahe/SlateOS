@@ -151,6 +151,8 @@ mod photo_frame_tests;
 mod pointer_tests;
 #[cfg(test)]
 mod service_menu_tests;
+#[cfg(test)]
+mod wallpaper_move_tests;
 
 use appearance::config;
 use guitk::menu::{ContextMenu, MenuAction, MenuItem, MenuItemId};
@@ -1170,6 +1172,18 @@ enum MenuField {
     Rename,
 }
 
+/// The wallpaper being moved -- "Move wallpaper" on the desktop's menu:
+/// `design.txt`'s "let the user scroll the image up/down or right/left to
+/// center it on the desktop how they want".
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct WallpaperMove {
+    /// Where the picture was when the move began: what Escape puts back.
+    before: (f32, f32),
+    /// A drag under way: where the pointer was pressed, and where the
+    /// picture was then.
+    drag: Option<((f32, f32), (f32, f32))>,
+}
+
 /// A start-menu row pressed and perhaps being dragged.
 struct StartDrag {
     /// The press and its drag threshold, keyed by the program's path -- the
@@ -2087,6 +2101,13 @@ pub struct DesktopShell {
     /// being edited -- when it is open, and the field it was opened on: what
     /// the field's keys do, for the pointer (`guitk::editmenu`).
     field_menu: Option<(guitk::menu::ContextMenu, MenuField)>,
+    /// How far the wallpaper's picture can move across and down the screen:
+    /// the screen's size less the picture's as it is drawn, negative where it
+    /// overflows; `None` when no picture is up or it fills the screen
+    /// exactly. The session, which draws the wallpaper, keeps it current.
+    pub wallpaper_room: Option<(f32, f32)>,
+    /// The wallpaper being moved, while it is. See [`WallpaperMove`].
+    wallpaper_move: Option<WallpaperMove>,
     /// A pinned button being dragged along the bar.
     ///
     /// Keyed on the executable path rather than the slot, for the reason the
@@ -2791,6 +2812,8 @@ impl DesktopShell {
             taskbar_menu: None,
             notification_menu: None,
             field_menu: None,
+            wallpaper_room: None,
+            wallpaper_move: None,
             pin_drag: None,
             pin_drag_off_bar: false,
             start_drag: None,
@@ -2827,6 +2850,7 @@ impl DesktopShell {
             desktop_menu: ContextMenu::new(Self::desktop_menu_items(
                 AppearanceSettings::default().icon_size,
                 icons::ArrangementMode::default(),
+                false,
             )),
             // 40 is the `taskbar_height` two lines below; both are the
             // literal because this is the initialiser that establishes it.
@@ -4883,6 +4907,11 @@ impl DesktopShell {
                 MouseEventKind::Press(_) => return self.click_field_menu(event.x, event.y),
                 _ => return ShellAction::Consumed,
             }
+        }
+        // The wallpaper being moved owns the pointer: the picture is what it
+        // is about, wherever the press lands on the desktop.
+        if self.wallpaper_move.is_some() {
+            return self.wallpaper_move_mouse(event);
         }
         // A rename under way owns the presses on its own field -- a left
         // press places the caret, a right one offers the field's menu -- and
@@ -7070,6 +7099,11 @@ impl DesktopShell {
                 _ => {}
             }
             return HotkeyOutcome::consumed();
+        }
+        // The wallpaper being moved owns the keyboard, as every mode here
+        // does: the arrows move it, Enter keeps it, Escape puts it back.
+        if self.wallpaper_move.is_some() {
+            return self.wallpaper_move_key(key);
         }
         // A notification's menu, on the pin menu's terms below. Ahead of the
         // pane, which it may be open over: Escape closes the menu and leaves
@@ -10875,6 +10909,195 @@ impl DesktopShell {
         Some(tree)
     }
 
+    /// Pixels the wallpaper moves for an arrow key, or a notch of the wheel.
+    const WALLPAPER_NUDGE: f32 = 24.0;
+
+    /// Begin moving the wallpaper: the pointer drags the picture, the wheel
+    /// and the arrow keys move it, Enter keeps where it is and Escape puts it
+    /// back -- `design.txt`'s "let the user scroll the image up/down or
+    /// right/left to center it on the desktop how they want". Answers
+    /// whether it began: a picture that fills the screen exactly has nowhere
+    /// to go.
+    fn begin_wallpaper_move(&mut self) -> bool {
+        if self.wallpaper_room.is_none() {
+            return false;
+        }
+        self.dismiss_popups();
+        self.wallpaper_move = Some(WallpaperMove {
+            before: self.appearance.wallpaper_position,
+            drag: None,
+        });
+        true
+    }
+
+    /// Whether the wallpaper is being moved.
+    #[must_use]
+    pub fn moving_wallpaper(&self) -> bool {
+        self.wallpaper_move.is_some()
+    }
+
+    /// Put the picture `(dx, dy)` pixels from where it was at `from`: as
+    /// fractions of the room it has on each axis (the room is negative where
+    /// it overflows, so a drag to the right shows more of its left), held to
+    /// 0..=1. An axis with no room does not move.
+    fn shift_wallpaper(&mut self, from: (f32, f32), dx: f32, dy: f32) {
+        let Some((room_x, room_y)) = self.wallpaper_room else {
+            return;
+        };
+        let step = |at: f32, d: f32, room: f32| {
+            if room.abs() < 0.5 {
+                at
+            } else {
+                (at + d / room).clamp(0.0, 1.0)
+            }
+        };
+        self.appearance.wallpaper_position = (step(from.0, dx, room_x), step(from.1, dy, room_y));
+    }
+
+    /// End moving the wallpaper: where it is now kept -- written to
+    /// `appearance.yaml`, the file the Settings app edits too -- or put back
+    /// where it was.
+    fn end_wallpaper_move(&mut self, keep: bool) {
+        let Some(moving) = self.wallpaper_move.take() else {
+            return;
+        };
+        if !keep {
+            self.appearance.wallpaper_position = moving.before;
+        } else if self.appearance.wallpaper_position != moving.before {
+            // Load, modify, save, and a failed write reported with the
+            // picture moved anyway, for the reasons `toggle_night_light`
+            // gives.
+            let mut file = appearance::AppearanceFile::load();
+            file.settings.wallpaper_position = self.appearance.wallpaper_position;
+            if let Err(err) = file.save() {
+                eprintln!("desktop: could not save appearance.yaml: {err}");
+            }
+        }
+    }
+
+    /// A pointer event while the wallpaper is being moved: a press on the
+    /// desktop takes hold of the picture and the pointer drags it; the wheel
+    /// moves it (Shift across); a press on the taskbar keeps it where it is
+    /// and ends the move.
+    fn wallpaper_move_mouse(&mut self, event: &MouseEvent) -> ShellAction {
+        let at = self.appearance.wallpaper_position;
+        match event.kind {
+            MouseEventKind::Press(_) if self.taskbar_rect().contains(event.x, event.y) => {
+                self.end_wallpaper_move(true);
+            }
+            MouseEventKind::Press(MouseButton::Left) => {
+                if let Some(moving) = self.wallpaper_move.as_mut() {
+                    moving.drag = Some(((event.x, event.y), at));
+                }
+            }
+            MouseEventKind::Move => {
+                if let Some(((x0, y0), from)) = self.wallpaper_move.and_then(|m| m.drag) {
+                    self.shift_wallpaper(from, event.x - x0, event.y - y0);
+                }
+            }
+            MouseEventKind::Release(_) => {
+                if let Some(moving) = self.wallpaper_move.as_mut() {
+                    moving.drag = None;
+                }
+            }
+            MouseEventKind::Scroll { dx, dy } => {
+                self.shift_wallpaper(at, dx * Self::WALLPAPER_NUDGE, dy * Self::WALLPAPER_NUDGE);
+            }
+            _ => {}
+        }
+        ShellAction::Consumed
+    }
+
+    /// A key while the wallpaper is being moved: the arrows move it, Enter
+    /// keeps it, Escape puts it back; every other key goes no further.
+    fn wallpaper_move_key(&mut self, key: &KeyEvent) -> HotkeyOutcome {
+        let at = self.appearance.wallpaper_position;
+        let n = Self::WALLPAPER_NUDGE;
+        match key.key {
+            Key::Escape => self.end_wallpaper_move(false),
+            Key::Enter => self.end_wallpaper_move(true),
+            Key::Left => self.shift_wallpaper(at, -n, 0.0),
+            Key::Right => self.shift_wallpaper(at, n, 0.0),
+            Key::Up => self.shift_wallpaper(at, 0.0, -n),
+            Key::Down => self.shift_wallpaper(at, 0.0, n),
+            _ => {}
+        }
+        HotkeyOutcome::consumed()
+    }
+
+    /// What the screen says while the wallpaper is being moved -- how to move
+    /// it and how to finish -- on a card at the top of the screen; `None`
+    /// when it is not being moved.
+    #[must_use]
+    pub fn render_wallpaper_move(&self) -> Option<RenderTree> {
+        self.wallpaper_move?;
+        let p = Palette::from_settings(&self.appearance);
+        let size = self.font_size(TextRole::Body);
+        let line = text::line_height(size, guitk::render::FontWeightHint::Regular);
+        let pad = self.scale(14.0);
+        let lines = [
+            (
+                "Move the wallpaper",
+                guitk::render::FontWeightHint::Bold,
+                p.text,
+            ),
+            (
+                "Drag the picture, or use the arrow keys, to choose the part that shows.",
+                guitk::render::FontWeightHint::Regular,
+                p.text,
+            ),
+            (
+                "Enter keeps it here -- Esc puts it back.",
+                guitk::render::FontWeightHint::Regular,
+                p.subtext0,
+            ),
+        ];
+        let wide = lines
+            .iter()
+            .map(|(words, weight, _)| text::measure(words, size, *weight))
+            .fold(0.0_f32, f32::max);
+        #[allow(clippy::cast_precision_loss, reason = "three lines")]
+        let tall = line * lines.len() as f32;
+        let (w, h) = (wide + pad * 2.0, tall + pad * 2.0);
+        #[allow(clippy::cast_precision_loss, reason = "a screen's width")]
+        let x = ((self.screen_width as f32 - w) / 2.0).max(0.0);
+        let y = self.scale(24.0);
+        let mut tree = RenderTree::new();
+        let radius = CornerRadii::all(self.scale(8.0));
+        tree.push(guitk::render::RenderCommand::FillRect {
+            x,
+            y,
+            width: w,
+            height: h,
+            color: p.surface0,
+            corner_radii: radius,
+        });
+        tree.push(guitk::render::RenderCommand::StrokeRect {
+            x,
+            y,
+            width: w,
+            height: h,
+            color: p.accent,
+            line_width: 1.0,
+            corner_radii: radius,
+        });
+        for (i, (words, weight, color)) in lines.iter().enumerate() {
+            #[allow(clippy::cast_precision_loss, reason = "three lines")]
+            let row = i as f32;
+            tree.push(guitk::render::RenderCommand::Text {
+                x: x + pad,
+                y: y + pad + row * line,
+                text: (*words).to_owned(),
+                color: *color,
+                font_size: size,
+                font_weight: *weight,
+                max_width: Some(wide),
+                overflow: guitk::render::TextOverflow::Ellipsis,
+            });
+        }
+        Some(tree)
+    }
+
     /// Open a text field's menu at `(x, y)`, over the field it is about:
     /// what the field's keys do (`guitk::editmenu`), each row dimmed when it
     /// would do nothing -- and on a note the widget's own rows below them,
@@ -12281,6 +12504,7 @@ impl DesktopShell {
     const MENU_ADD_NOTE: u64 = 9;
     const MENU_ADD_PHOTO_FRAME: u64 = 10;
     const MENU_FRAME_FOLDER: u64 = 11;
+    const MENU_MOVE_WALLPAPER: u64 = 12;
     const MENU_ADD_WIDGET_SUBMENU: u64 = 100;
     const MENU_VIEW_SUBMENU: u64 = 101;
     // An icon's own menu, opened by a right-click on the icon.
@@ -12335,6 +12559,7 @@ impl DesktopShell {
     fn desktop_menu_items(
         icon_size: appearance::IconSize,
         arrangement: icons::ArrangementMode,
+        can_move_wallpaper: bool,
     ) -> Vec<MenuItem> {
         let item = |id: u64, label: &str, checked: Option<bool>| MenuItem::Action {
             id,
@@ -12366,7 +12591,7 @@ impl DesktopShell {
             "Align icons to grid",
             Some(arrangement.aligns_to_grid()),
         ));
-        vec![
+        let mut items = vec![
             MenuItem::Submenu {
                 id: Self::MENU_VIEW_SUBMENU,
                 label: "View".to_string(),
@@ -12376,6 +12601,14 @@ impl DesktopShell {
             },
             item(Self::MENU_SORT_BY_NAME, "Sort by name", None),
             MenuItem::Separator,
+        ];
+        // Only where there is somewhere to move it: a picture that overflows
+        // the screen, or leaves room beside it.
+        if can_move_wallpaper {
+            items.push(item(Self::MENU_MOVE_WALLPAPER, "Move wallpaper", None));
+            items.push(MenuItem::Separator);
+        }
+        items.extend([
             MenuItem::Submenu {
                 id: Self::MENU_ADD_WIDGET_SUBMENU,
                 label: "Add widget".to_string(),
@@ -12391,7 +12624,8 @@ impl DesktopShell {
             },
             MenuItem::Separator,
             item(Self::MENU_REMOVE_WIDGETS, "Remove all widgets", None),
-        ]
+        ]);
+        items
     }
 
     /// The items for a right-click on the icon `id`.
@@ -13138,7 +13372,11 @@ impl DesktopShell {
             self.offer_service_menus(&mut items);
             items
         } else {
-            Self::desktop_menu_items(self.appearance.icon_size, self.icons.arrangement())
+            Self::desktop_menu_items(
+                self.appearance.icon_size,
+                self.icons.arrangement(),
+                self.wallpaper_room.is_some(),
+            )
         };
         self.desktop_menu = ContextMenu::new(items);
         self.desktop_menu.show(x, y, self.viewport());
@@ -13195,6 +13433,13 @@ impl DesktopShell {
     pub fn activate_desktop_menu_item(&mut self, id: MenuItemId) -> ShellAction {
         if let Some(action) = self.activate_open_with_item(id) {
             return action;
+        }
+        if id == Self::MENU_MOVE_WALLPAPER {
+            return if self.begin_wallpaper_move() {
+                ShellAction::Consumed
+            } else {
+                ShellAction::Pass
+            };
         }
         // "Choose folder" puts the chooser up and changes nothing yet: the
         // layout is written when a folder is chosen, not when one is asked for.
@@ -13718,6 +13963,7 @@ impl DesktopShell {
             || self.taskbar_menu.is_some()
             || self.notification_menu.is_some()
             || self.field_menu.is_some()
+            || self.wallpaper_move.is_some()
             || self.ending_listing()
             || self.start_menu_open
             || self.power_menu_open
@@ -13745,6 +13991,9 @@ impl DesktopShell {
         self.taskbar_menu = None;
         self.close_notification_menu();
         self.field_menu = None;
+        // A wallpaper being moved is kept where it is: whatever dismissed it
+        // -- another popup opening -- is not the user taking the move back.
+        self.end_wallpaper_move(true);
         // The list, not the wait: dismissing the popups -- opening a menu,
         // say -- is not the user changing their mind about shutting down.
         if self.ending_listing() {
@@ -24437,7 +24686,7 @@ mod view_menu_tests {
 
     /// The View submenu's items, as `(label, ticked)`.
     fn view_items(size: IconSize, mode: Mode) -> Vec<(String, bool)> {
-        let items = DesktopShell::desktop_menu_items(size, mode);
+        let items = DesktopShell::desktop_menu_items(size, mode, false);
         let Some(MenuItem::Submenu { children, .. }) = items
             .iter()
             .find(|i| matches!(i, MenuItem::Submenu { label, .. } if label == "View"))
@@ -24476,7 +24725,11 @@ mod view_menu_tests {
         for size in IconSize::ALL {
             for mode in Mode::ALL {
                 let mut all = Vec::new();
-                ids(&DesktopShell::desktop_menu_items(*size, mode), &mut all);
+                // With the wallpaper's item, so its id is checked too.
+                ids(
+                    &DesktopShell::desktop_menu_items(*size, mode, true),
+                    &mut all,
+                );
                 ids(&DesktopShell::widget_menu_items(true), &mut all);
                 // The widget menu repeats "Remove all widgets" on purpose --
                 // the same item, so the same id -- and nothing else.
@@ -24507,7 +24760,7 @@ mod view_menu_tests {
         }
         let mut all = Vec::new();
         ids(
-            &DesktopShell::desktop_menu_items(IconSize::Medium, Mode::SnapToGrid),
+            &DesktopShell::desktop_menu_items(IconSize::Medium, Mode::SnapToGrid, false),
             &mut all,
         );
         let named: Vec<IconSize> = all

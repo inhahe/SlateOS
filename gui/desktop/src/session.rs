@@ -1332,6 +1332,16 @@ impl<T: Transport> ShellSession<T> {
         // shown_picture`), never one still decoding -- the compositor draws
         // *nothing, silently* for an id it holds no pixels under.
         self.refresh_wallpaper_image()?;
+        // Where the picture sits follows the shell's setting from frame to
+        // frame -- a wallpaper being moved changes it with every motion of
+        // the pointer -- and the shell learns how far the picture can move,
+        // for its menu and its move. Both cost nothing: the position is
+        // applied when the wallpaper is drawn, and the room is arithmetic.
+        let position = self.shell.appearance.wallpaper_position;
+        if self.wallpaper.config.position != position {
+            self.wallpaper.set_position(position);
+        }
+        self.shell.wallpaper_room = self.wallpaper_room();
         // And each photo frame's next picture, the same way.
         self.fetch_frame_pictures();
         let tree = self.background.localize(&self.background_tree());
@@ -1347,6 +1357,37 @@ impl<T: Transport> ShellSession<T> {
         // picture the frame on screen still names would draw as nothing were
         // the compositor to draw that frame again meanwhile.
         self.release_unshown_frame_pictures()
+    }
+
+    /// How far the wallpaper's picture can move across and down the screen:
+    /// the screen's size less the picture's as it is drawn, negative where
+    /// it overflows. `None` with no picture up, for the fits that cannot
+    /// move one (stretched, tiled, spanned), and for a picture that fills
+    /// the screen exactly.
+    fn wallpaper_room(&self) -> Option<(f32, f32)> {
+        let (_, w, h) = self.wallpaper.shown_picture()?;
+        if !matches!(
+            self.wallpaper.config.fit,
+            appearance::ImageFit::Fill | appearance::ImageFit::Fit | appearance::ImageFit::Center
+        ) {
+            return None;
+        }
+        #[allow(clippy::cast_precision_loss, reason = "a screen's size")]
+        let (sw, sh) = (
+            self.shell.screen_width as f32,
+            self.shell.screen_height as f32,
+        );
+        let (_, _, pw, ph) = crate::wallpaper::compute_image_rect(
+            sw,
+            sh,
+            w,
+            h,
+            self.wallpaper.config.fit,
+            self.wallpaper.config.position,
+        );
+        let room = (sw - pw, sh - ph);
+        // Half a pixel either way is a picture that fits.
+        (room.0.abs() >= 0.5 || room.1.abs() >= 0.5).then_some(room)
     }
 
     /// What the background draws now: the wallpaper, the desktop's icons on
@@ -2272,6 +2313,10 @@ impl<T: Transport> ShellSession<T> {
             // it is up (`handle_mouse_inner`, `handle_hotkey_inner`), so it
             // is drawn over everything that could be open with it.
             self.shell.render_field_menu(),
+            // The card that says how to move the wallpaper, while it is
+            // moved: nothing else is open then (`begin_wallpaper_move`
+            // dismisses the popups), so its place here states that.
+            self.shell.render_wallpaper_move(),
             // Over everything, the Run box and its chooser included: a shut
             // down waiting on the programs still open, which owns every key
             // and press while it is up.

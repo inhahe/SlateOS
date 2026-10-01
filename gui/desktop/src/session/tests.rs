@@ -1962,6 +1962,47 @@ fn the_wallpaper_shows_the_part_the_settings_say() {
     );
 }
 
+/// **Once a picture is up the shell knows how far it can move, and a move
+/// reaches the screen as it is made**: the session records the room on each
+/// background paint, and a position the shell changes mid-move is the one the
+/// next background frame draws -- with no new image id.
+#[test]
+fn a_wallpaper_being_moved_is_drawn_as_it_moves() {
+    settingsfile::testing::with_scratch_config("session-wallpaper-move", |_root| {
+        let (mut session, _desktop, _turn) = session();
+        session.shell_mut().appearance.wallpaper = Some(fixture("rgb8"));
+        session.sync_wallpaper();
+        session.pump().expect("pump");
+        session.settle_pictures().expect("the picture went up");
+        session.pump().expect("pump");
+        let room = session
+            .shell()
+            .wallpaper_room
+            .expect("a picture filling a wide screen has room to move");
+        assert!(room.0.abs() >= 0.5 || room.1.abs() >= 0.5, "{room:?}");
+
+        let id = session.wallpaper_mut().current_image_id();
+        let drawn_at = |s: &Session| {
+            s.background_drawn.as_ref().and_then(|tree| {
+                tree.commands.iter().find_map(|c| match c {
+                    RenderCommand::Image { image_id, x, y, .. } if *image_id == id => {
+                        Some((*x, *y))
+                    }
+                    _ => None,
+                })
+            })
+        };
+        let before = drawn_at(&session).expect("the picture is drawn");
+        session.shell_mut().appearance.wallpaper_position = (0.0, 0.0);
+        session.dirty = true;
+        session.pump().expect("pump");
+        let after = drawn_at(&session).expect("the picture is still drawn");
+        assert_ne!(before, after, "the picture did not move on the screen");
+        assert_eq!(after, (0.0, 0.0), "its top-left corner is at the screen's");
+        assert_eq!(session.wallpaper_mut().current_image_id(), id);
+    });
+}
+
 /// **A rotating folder is placed as the settings say too.** Only the fixed
 /// picture's path applied the fit: a folder kept whatever fit was in force
 /// before it started, whatever the user chose after.

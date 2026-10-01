@@ -25,6 +25,8 @@ guitk = { path = "../../gui/toolkit" }
 # every control in the program was a picture of a control.
 oswindow = { path = "../../gui/window" }
 
+# `is_plain`, `is_ctrl_chord`, `types_into_field`: a chord is neither a key of the window nor typing.
+textline = { path = "../textline" }
 # Format-preserving YAML, and where the file lives. Associations are
 # configuration, and design.txt says configuration is YAML "processed with a
 # library that preserves comments and formatting" -- so they go through the two

@@ -2139,16 +2139,20 @@ impl FileAssocUI {
     }
 
     fn handle_key(&mut self, key: &KeyEvent) -> EventResult {
+        // Every key but a Ctrl chord and what is typed is taken plain: a
+        // chord with Alt or the Windows key is the window's or the desktop's
+        // and arrives carrying its key -- Alt+Enter chose what opens a type.
+        let plain = textline::is_plain(key.modifiers);
         // Above the typed-text branch, which claims every printable key. F1
         // carries no text, so this does not take anything from the caret.
-        if key.key == Key::F1 {
+        if key.key == Key::F1 && plain {
             self.show_help = !self.show_help;
             return EventResult::Consumed;
         }
         if self.show_help {
             // Modal. Ctrl+E writes a file and Enter picks what opens a type;
             // neither should happen from behind a list.
-            if matches!(key.key, Key::Escape | Key::Enter | Key::F1) {
+            if plain && matches!(key.key, Key::Escape | Key::Enter | Key::F1) {
                 self.show_help = false;
             }
             return EventResult::Consumed;
@@ -2156,8 +2160,33 @@ impl FileAssocUI {
 
         // Typed text goes wherever the caret is, and is checked before the
         // named keys so a key that produces text is not also read as a command.
-        if !key.text.is_empty() && !key.modifiers.ctrl && !key.modifiers.alt {
+        // What a key typed: AltGr's characters among it -- refused here, so a
+        // German `@` could not be typed -- and not a command's letter, which
+        // a chord carries: Windows+E typed an `e`.
+        if textline::types_into_field(key) {
             return self.type_text(&key.text);
+        }
+
+        // The Ctrl chords, as Ctrl chords: AltGr arrives as Ctrl+Alt.
+        if textline::is_ctrl_chord(key.modifiers) {
+            return match key.key {
+                Key::E => {
+                    self.open_transfer_dialog(Transfer::Export);
+                    EventResult::Consumed
+                }
+                Key::I => {
+                    self.open_transfer_dialog(Transfer::Import);
+                    EventResult::Consumed
+                }
+                Key::F => {
+                    self.search_focused = true;
+                    EventResult::Consumed
+                }
+                _ => EventResult::Ignored,
+            };
+        }
+        if !plain {
+            return EventResult::Ignored;
         }
 
         match key.key {
@@ -2180,18 +2209,6 @@ impl FileAssocUI {
             Key::Backspace => self.backspace(),
             Key::Up => self.move_selection(-1),
             Key::Down => self.move_selection(1),
-            Key::E if key.modifiers.ctrl => {
-                self.open_transfer_dialog(Transfer::Export);
-                EventResult::Consumed
-            }
-            Key::I if key.modifiers.ctrl => {
-                self.open_transfer_dialog(Transfer::Import);
-                EventResult::Consumed
-            }
-            Key::F if key.modifiers.ctrl => {
-                self.search_focused = true;
-                EventResult::Consumed
-            }
             _ => EventResult::Ignored,
         }
     }
@@ -3380,11 +3397,12 @@ impl App for FileAssocUI {
 
     fn on_event(&mut self, event: &Event) -> Response {
         // Ctrl+Q closes the window. Escape does not: it backs out of a dialog,
-        // a search or a selection, which is what the key is for here.
+        // a search or a selection, which is what the key is for here. A Ctrl
+        // chord, not Ctrl held: AltGr+Q -- Ctrl+Alt -- is a German `@`.
         if let Event::Key(key) = event
             && key.pressed
             && key.key == Key::Q
-            && key.modifiers.ctrl
+            && textline::is_ctrl_chord(key.modifiers)
         {
             return Response::Exit;
         }
@@ -3521,6 +3539,61 @@ mod tests {
     // modifier set, because the app reads `key.modifiers.ctrl` off the event it
     // was handed and never constructs one.
     use guitk::event::Modifiers;
+
+    /// **A chord is neither a key of the window nor typing, and AltGr
+    /// types**: Alt+Enter chose what opens a type, a chord arriving carrying
+    /// its key; AltGr's characters -- a German `@` -- could not be typed
+    /// into a field while Windows+E typed an `e`; and AltGr+E and AltGr+Q,
+    /// Ctrl+Alt, exported and closed the window.
+    #[test]
+    fn a_chord_is_neither_a_key_of_the_window_nor_typing() {
+        let altgr = Modifiers {
+            alt: true,
+            ..Modifiers::ctrl()
+        };
+        let key = |k: Key, text: &str, modifiers: Modifiers| {
+            Event::Key(KeyEvent {
+                key: k,
+                pressed: true,
+                modifiers,
+                text: text.to_owned(),
+            })
+        };
+        let mut ui = FileAssocUI::new();
+        ui.selected_index = Some(0);
+        for m in [Modifiers::alt(), Modifiers::super_key(), altgr] {
+            for k in [Key::Enter, Key::Down, Key::Escape, Key::F1, Key::E] {
+                assert_eq!(
+                    ui.handle_event(&key(k, "", m)),
+                    EventResult::Ignored,
+                    "{m:?} {k:?} was taken"
+                );
+            }
+        }
+        assert_eq!(
+            ui.active_dialog,
+            ActiveDialog::None,
+            "a chord opened a dialog"
+        );
+        assert_eq!(ui.selected_index, Some(0), "a chord moved the selection");
+        assert!(!ui.picker.is_open(), "AltGr+E exported");
+        assert!(!ui.show_help, "a chord raised the keys");
+        assert!(
+            !matches!(ui.on_event(&key(Key::Q, "@", altgr)), Response::Exit),
+            "AltGr+Q closed the window"
+        );
+
+        // The search types what a key typed.
+        ui.handle_event(&key(Key::F, "f", Modifiers::ctrl()));
+        assert!(ui.search_focused, "control: Ctrl+F searches");
+        ui.handle_event(&key(Key::E, "e", Modifiers::super_key()));
+        ui.handle_event(&key(Key::X, "x", Modifiers::alt()));
+        ui.handle_event(&key(Key::Q, "@", altgr));
+        assert_eq!(
+            ui.search_query, "@",
+            "the search typed a command or lost AltGr's @"
+        );
+    }
     // The free helpers -- `click`, `rect_of`, `press`. The production code
     // imports only the `Probe` trait it implements.
     use guitk::probe;

@@ -92,6 +92,36 @@ MUTATIONS = [
         '            self.register_app(AppInfo::new(&app.id, &app.name, &app.id, &opens, 0));',
         ['the_programs_open_what_their_entries_say', 'a_program_installed_here_is_offered_for_what_its_entry_opens'],
     ),
+    (
+        'a chord raises the keys',
+        '        if key.key == Key::F1 && plain {',
+        '        if key.key == Key::F1 {',
+        ['a_chord_is_neither_a_key_of_the_window_nor_typing'],
+    ),
+    (
+        "a command's letter is typed and AltGr's refused",
+        '        if textline::types_into_field(key) {',
+        '        if !key.text.is_empty() && !key.modifiers.ctrl && !key.modifiers.alt {',
+        ['a_chord_is_neither_a_key_of_the_window_nor_typing'],
+    ),
+    (
+        'AltGr is taken for Ctrl',
+        '        if textline::is_ctrl_chord(key.modifiers) {\n            return match key.key {\n                Key::E =>',
+        '        if key.modifiers.ctrl {\n            return match key.key {\n                Key::E =>',
+        ['a_chord_is_neither_a_key_of_the_window_nor_typing'],
+    ),
+    (
+        'a chord works the window',
+        '        if !plain {\n            return EventResult::Ignored;\n        }\n',
+        '',
+        ['a_chord_is_neither_a_key_of_the_window_nor_typing'],
+    ),
+    (
+        'AltGr+Q closes the window',
+        '            && textline::is_ctrl_chord(key.modifiers)\n        {\n            return Response::Exit;',
+        '            && key.modifiers.ctrl\n        {\n            return Response::Exit;',
+        ['a_chord_is_neither_a_key_of_the_window_nor_typing'],
+    ),
 ]
 
 if __name__ == "__main__":

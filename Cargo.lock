@@ -1226,6 +1226,7 @@ dependencies = [
  "safeio",
  "scratchdir",
  "settingsfile",
+ "textline",
  "yamldoc",
 ]
 

@@ -63,6 +63,30 @@ pub enum ButtonShape {
     Glyph,
 }
 
+impl ButtonShape {
+    /// The corner radius of a button's face, `size` pixels square, beside
+    /// windows whose corners are `window_radius` -- or `None` where it has no
+    /// face to draw.
+    ///
+    /// Rounded is as round as the windows are, up to a circle: a square
+    /// close button beside a curved corner is the mismatch, not the
+    /// consistency (the compositor's rule before there was a style). Circle
+    /// is a circle and Square square. Glyph has a face only while `lit`, the
+    /// pointer on it, and then the rounded one.
+    #[must_use]
+    pub fn face_radius(self, size: f32, window_radius: f32, lit: bool) -> Option<f32> {
+        let half = (size / 2.0).max(0.0);
+        // `max` first: a radius that is not a number is no rounding.
+        let rounded = window_radius.max(0.0).min(half);
+        match self {
+            Self::Rounded => Some(rounded),
+            Self::Circle => Some(half),
+            Self::Square => Some(0.0),
+            Self::Glyph => lit.then_some(rounded),
+        }
+    }
+}
+
 /// Where a window's title is written on its bar.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum TitleAlign {
@@ -418,5 +442,22 @@ mod tests {
             2000.0 - (close.x + close.w),
             f32::from(DecorationStyle::MAX_BUTTON_GAP)
         );
+    }
+
+    /// **A button's face follows its shape**: rounded as the windows are, no
+    /// rounder than a circle and never by a radius that is not a number; a
+    /// circle; square; or, for a glyph, no face until the pointer is on it.
+    #[test]
+    fn a_buttons_face_follows_its_shape() {
+        let face =
+            |shape: ButtonShape, window: f32, lit: bool| shape.face_radius(20.0, window, lit);
+        assert_eq!(face(ButtonShape::Rounded, 8.0, false), Some(8.0));
+        assert_eq!(face(ButtonShape::Rounded, 16.0, false), Some(10.0));
+        assert_eq!(face(ButtonShape::Rounded, -3.0, false), Some(0.0));
+        assert_eq!(face(ButtonShape::Rounded, f32::NAN, false), Some(0.0));
+        assert_eq!(face(ButtonShape::Circle, 8.0, false), Some(10.0));
+        assert_eq!(face(ButtonShape::Square, 8.0, true), Some(0.0));
+        assert_eq!(face(ButtonShape::Glyph, 8.0, false), None);
+        assert_eq!(face(ButtonShape::Glyph, 8.0, true), Some(8.0));
     }
 }

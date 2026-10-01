@@ -1,8 +1,7 @@
 #!/usr/bin/env python3
-"""Build every program the userland workspace makes, for SlateOS: what the
-disk image's /bin is staged from.
+"""Build every program the userland workspace makes, for SlateOS's /bin.
 
-The operator's answer to B-Q21 (design-decisions §1053): every program that
+They are what the disk image's /bin is staged from. The operator's answer to B-Q21 (design-decisions §1053): every program that
 builds goes on the image. `scripts/create-ext4-rootfs.sh` stages them all
 except what `scripts/rootfs-bin-kept-off.txt` keeps off, and this builds them
 -- every binary target of every package under `userspace/`, as

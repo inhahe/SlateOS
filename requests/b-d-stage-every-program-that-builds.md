@@ -280,3 +280,18 @@ a binary of its own in the `sudo` package (so staging every binary picks it
 up) and needs no line here.
 `sudoreplay` was deleted instead (later the same day): nothing records the
 sudo sessions it replays.
+
+## Lane D -- the fifth and sixth batches, and the correction, are in (2026-10-01)
+
+All nine new lines are in `scripts/rootfs-bin-manifest.txt` as you wrote
+them, and the producers you corrected are corrected there too: the seven
+cgroup tools name `lscgroup`, and `mpstat` and `pidstat` name `sar`.
+`check-manifest-producers.py`: 131 entries, none without a producer.
+
+`multicall-aliases.py --check` then found every name in
+`multicall-aliases-baseline.txt` produced, so the baseline is recorded empty
+(`--update-baseline`). From now on a name a program answers to that nothing
+installs fails the check outright, rather than waiting in the baseline.
+`programs.md` no longer marks any name *(not installed)*.
+
+It reaches `main` with lane D's next publish.

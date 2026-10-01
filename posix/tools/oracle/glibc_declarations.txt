@@ -310,6 +310,7 @@ mcheck	mcheck.h	c17,default,gnu,c23,gnu23,xopen,posix,bsd,bfp,ext,lfs64	int (voi
 mcheck_check_all	mcheck.h	c17,default,gnu,c23,gnu23,xopen,posix,bsd,bfp,ext,lfs64	void (void)
 mcheck_pedantic	mcheck.h	c17,default,gnu,c23,gnu23,xopen,posix,bsd,bfp,ext,lfs64	int (void (*)(enum mcheck_status))
 memccpy	string.h	default,gnu,c23,gnu23,xopen,bsd	void *(void *, const void *, int, unsigned long)
+memcpy	obstack.h	c17,default,gnu,c23,gnu23,xopen,posix,bsd,bfp,ext,lfs64	void *(void *, const void *, unsigned long)
 memfrob	string.h	gnu	void *(void *, unsigned long)
 mempcpy	string.h	default,gnu,gnu23,bsd	void *(void *, const void *, unsigned long)
 mprobe	mcheck.h	c17,default,gnu,c23,gnu23,xopen,posix,bsd,bfp,ext,lfs64	enum mcheck_status (void *)
@@ -344,6 +345,10 @@ ns_subdomain	arpa/nameser.h	c17,default,gnu,c23,gnu23,xopen,posix,bsd,bfp,ext,lf
 ntp_adjtime	sys/timex.h	c17,default,gnu,c23,gnu23,xopen,posix,bsd,bfp,ext,lfs64	int (struct timex *)
 ntp_gettime	sys/timex.h	c17,default,gnu,c23,gnu23,xopen,posix,bsd,bfp,ext,lfs64	int (struct ntptimeval *)
 ntp_gettimex	sys/timex.h	c17,default,gnu,c23,gnu23,xopen,posix,bsd,bfp,ext,lfs64	int (struct ntptimeval *)
+obstack_alloc_failed_handler	obstack.h	c17,default,gnu,c23,gnu23,xopen,posix,bsd,bfp,ext,lfs64	void (*)(void)
+obstack_exit_failure	obstack.h	c17,default,gnu,c23,gnu23,xopen,posix,bsd,bfp,ext,lfs64	int
+obstack_printf	stdio.h	gnu	int (struct obstack *, const char *, ...)
+obstack_vprintf	stdio.h	gnu	int (struct obstack *, const char *, struct __va_list_tag *)
 on_exit	stdlib.h	default,gnu,gnu23,bsd	int (void (*)(int, void *), void *)
 pidfd_getfd	sys/pidfd.h	c17,default,gnu,c23,gnu23,xopen,posix,bsd,bfp,ext,lfs64	int (int, int, unsigned int)
 pidfd_getpid	sys/pidfd.h	c17,default,gnu,c23,gnu23,xopen,posix,bsd,bfp,ext,lfs64	int (int)

@@ -12,7 +12,9 @@
 //! snprintf(s, n, fmt, ...)    → __snprintf_chk(s, n, flag, slen, fmt, ...)
 //! asprintf(&p, fmt, ...)      → __asprintf_chk(&p, flag, fmt, ...)
 //! ```
-//! plus the `__v*_chk` forms for the `va_list` variants.  An object file
+//! plus the `__v*_chk` forms for the `va_list` variants, and
+//! `obstack_printf(h, fmt, ...)` → `__obstack_printf_chk(h, flag, fmt, ...)`
+//! with its `va_list` form, in members of their own.  An object file
 //! compiled this way references the `__*_chk` symbols, so a libc that omits
 //! them cannot link those programs.
 //!
@@ -265,6 +267,39 @@ pub unsafe extern "C" fn __vswprintf_chk(
 ) -> i32 {
     // SAFETY: as for `__vprintf_chk`; the bound keeps the write inside `s`.
     unsafe { printf::vswprintf(s, maxlen.min(slen), fmt, ap) }
+}
+
+/// Own archive member: the obstack pair is called only by a program that
+/// has obstacks, and here, in the member every other `__*_chk` is in, it
+/// would bring `obstack_vprintf` and the obstack functions into every
+/// fortified program that prints.
+mod gnu_obstack_vprintf_chk {
+    use crate::printf::VaList;
+
+    /// `__obstack_vprintf_chk(h, flag, fmt, ap)`: [`crate::printf::obstack_vprintf`].
+    /// There is no object size to check; `flag` is accepted and ignored, as
+    /// by the rest of this family.
+    ///
+    /// # Safety
+    /// As [`crate::printf::obstack_vprintf`].
+    #[cfg_attr(target_os = "none", unsafe(no_mangle))]
+    pub unsafe extern "C" fn __obstack_vprintf_chk(
+        h: *mut crate::obstack::Obstack,
+        _flag: i32,
+        fmt: *const u8,
+        ap: *mut VaList,
+    ) -> i32 {
+        // SAFETY: caller contract.
+        unsafe { crate::printf::obstack_vprintf(h, fmt, ap) }
+    }
+}
+pub use gnu_obstack_vprintf_chk::__obstack_vprintf_chk;
+
+/// Own archive member, as `__obstack_vprintf_chk`'s.
+#[cfg(target_os = "none")]
+mod gnu_obstack_printf_chk {
+    use crate::printf::va_trampoline;
+    va_trampoline!("__obstack_printf_chk", "__obstack_vprintf_chk", "24", "rcx");
 }
 
 // ---------------------------------------------------------------------------

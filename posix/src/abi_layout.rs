@@ -731,6 +731,38 @@ pub(crate) fn abi_asserts() -> String {
         rm_eo
     );
 
+    // --- obstack: the program's own, which <obstack.h>'s macros open --------
+    // glibc's `struct obstack`, posix/include's; its three bit-fields, which
+    // `offsetof` cannot name, are the `unsigned int` at 80 that the size
+    // covers.
+    abi!(
+        out,
+        hdrs,
+        crate::obstack::Obstack,
+        "struct obstack",
+        "obstack.h",
+        chunk_size,
+        chunk,
+        object_base,
+        next_free,
+        chunk_limit,
+        temp,
+        alignment_mask,
+        chunkfun,
+        freefun,
+        extra_arg,
+    );
+    abi!(
+        out,
+        hdrs,
+        crate::obstack::ObstackChunk,
+        "struct _obstack_chunk",
+        "obstack.h",
+        limit,
+        prev,
+        contents
+    );
+
     // --- small odds and ends -------------------------------------------------
     abi!(
         out,

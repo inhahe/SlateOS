@@ -461,6 +461,7 @@ pub mod netgroup;
 pub mod nl_types;
 pub(crate) mod nss_files;
 pub(crate) mod objtable;
+pub mod obstack;
 pub mod paths;
 pub(crate) mod perprocess;
 pub mod perthread;

@@ -78,7 +78,7 @@ json.dump(out, open(sys.argv[4], "w"))
 # Run in WSL: argv = types file (JSON: C type -> header), flags (JSON: C type ->
 # the flags its layout is read with), output.
 LAYOUT_READER = r'''
-import json, sys
+import json, re, sys
 import clang.cindex as ci
 ci.Config.set_library_file(LIBCLANG)
 types = json.load(open(sys.argv[1]))
@@ -87,9 +87,14 @@ idx = ci.Index.create()
 out = {}
 def named_fields(t):
     # An anonymous struct's or union's members are the outer type's, as C
-    # names them (Dl_serinfo's dls_serpath); the member itself has no name.
+    # names them (Dl_serinfo's dls_serpath); the member itself has no name --
+    # libclang 18 spells it as its type, "union Dl_serinfo::(anonymous at
+    # ...)". Not a named member of an untagged type -- struct obstack's
+    # `temp` -- which the bindings' is_anonymous() also answers yes for,
+    # asking only whether the member's type has a tag: offsetof names
+    # `temp`, and has no `tempint` to name.
     for f in t.get_fields():
-        if f.is_anonymous():
+        if f.is_anonymous() and not re.fullmatch(r"[A-Za-z_]\w*", f.spelling):
             yield from named_fields(f.type.get_canonical())
         elif f.is_bitfield():
             # No offsetof names a bit-field, and the size holds them

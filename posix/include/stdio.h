@@ -37,6 +37,14 @@ int fcloseall(void);
 #define RENAME_EXCHANGE (1 << 1)
 #define RENAME_WHITEOUT (1 << 2)
 int renameat2(int, const char *, int, const char *, unsigned int);
+
+/* Formatted output onto the end of the object growing in an obstack
+ * (<obstack.h>), with no NUL after it: the bytes added, or -1. */
+struct obstack;
+int obstack_printf(struct obstack *__restrict, const char *__restrict, ...)
+    _SLATEOS_PRINTF(2, 3);
+int obstack_vprintf(struct obstack *__restrict, const char *__restrict, va_list)
+    _SLATEOS_PRINTF(2, 0);
 #endif
 
 /* fopencookie: a stream over the caller's four functions. glibc declares it

@@ -176,6 +176,8 @@ OVERLAY_TYPES: dict[str, str] = {
     "struct re_pattern_buffer": "regex.h",
     "struct re_registers": "regex.h",
     "regmatch_t": "regex.h",
+    "struct obstack": "obstack.h",
+    "struct _obstack_chunk": "obstack.h",
 }
 
 # C type -> (glibc's layout as the reference has it, the overlay's, why), each
@@ -223,7 +225,14 @@ TYPE_NAMES = {"__sigset_t": "sigset_t", "__mbstate_t": "mbstate_t", "utmp": "utm
 # ... and the tagged names glibc's typedefs are of, where musl's are of
 # untagged types: glibc's pthread_attr_t is `union pthread_attr_t`, which
 # clang writes out; musl's is an untagged struct, named only pthread_attr_t.
-TYPE_PHRASES = {"union pthread_attr_t": "pthread_attr_t"}
+#
+# A `va_list` parameter, which clang writes out as the pointer it is adjusted
+# to, `struct __va_list_tag *`, is said here as `va_list`: the tag is the
+# compiler's own record, and a probe that names `struct __va_list_tag`
+# declares a new, incomplete struct of that name instead, which no `va_list`
+# is compatible with. (<stdio.h>'s obstack_vprintf was the overlay's first
+# declaration with one, 2026-09-30.)
+TYPE_PHRASES = {"union pthread_attr_t": "pthread_attr_t", "struct __va_list_tag *": "va_list"}
 
 # name -> (glibc's type as the reference has it, the overlay's in musl's
 # names, why they differ): where the two libraries' typedefs are of different

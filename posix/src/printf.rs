@@ -970,6 +970,84 @@ mod gnu_vasprintf {
 }
 pub use gnu_vasprintf::vasprintf;
 
+/// Own archive member -- gnulib's `obstack-printf` module defines
+/// `obstack_vprintf` where the C library has none.
+mod gnu_obstack_vprintf {
+    use super::{Args, Sink, VaList, format_to_sink};
+    use crate::obstack::Obstack;
+    use core::ffi::c_void;
+
+    // A new chunk by `_obstack_newchunk`'s C name, as glibc's obstack_printf
+    // has one -- through `obstack_grow` -- so that a program with obstacks of
+    // its own (gnulib's) has this use its `_obstack_newchunk`, and nothing
+    // here brings in obstack's member beside it. On the host the library's
+    // names are not the C ones, and there is no other.
+    #[cfg(target_os = "none")]
+    unsafe extern "C" {
+        fn _obstack_newchunk(h: *mut Obstack, length: i32);
+    }
+    #[cfg(not(target_os = "none"))]
+    use crate::obstack::_obstack_newchunk;
+
+    /// `len` bytes from `src` added to the end of the object growing in the
+    /// obstack at `h`, as `obstack_grow` adds them: `false`, and nothing
+    /// added, when no room could be had -- a failure handler that returns.
+    ///
+    /// # Safety
+    /// `h` is a begun obstack; `src` holds `len` bytes.
+    unsafe fn grow(h: *mut c_void, src: *const u8, len: usize) -> bool {
+        let h = h.cast::<Obstack>();
+        let Ok(n) = i32::try_from(len) else {
+            return false;
+        };
+        // SAFETY: the caller's obstack, whose next_free and chunk_limit are
+        // in (or one past) its current chunk.
+        let room = |h: *mut Obstack| unsafe { (*h).chunk_limit.offset_from((*h).next_free) };
+        let wanted = isize::try_from(n).unwrap_or(isize::MAX);
+        if room(h) < wanted {
+            // SAFETY: per the contract.
+            unsafe { _obstack_newchunk(h, n) };
+            if room(h) < wanted {
+                return false;
+            }
+        }
+        // SAFETY: room for `len` bytes at next_free, made above.
+        unsafe {
+            core::ptr::copy_nonoverlapping(src, (*h).next_free, len);
+            (*h).next_free = (*h).next_free.add(len);
+        }
+        true
+    }
+
+    /// `obstack_vprintf(h, fmt, ap)` -- `fmt` formatted onto the end of the
+    /// object growing in `h`, as `obstack_grow` adds bytes to it, with no
+    /// NUL after: the number of bytes added, or -1.
+    ///
+    /// # Safety
+    /// `h` is an initialised obstack; `fmt` and `ap` as for `vprintf`.
+    #[cfg_attr(target_os = "none", unsafe(no_mangle))]
+    pub unsafe extern "C" fn obstack_vprintf(
+        h: *mut Obstack,
+        fmt: *const u8,
+        ap: *mut VaList,
+    ) -> i32 {
+        if h.is_null() || ap.is_null() {
+            return -1;
+        }
+        // SAFETY: as for `vprintf`.
+        let mut args = unsafe { Args::new(Some(&mut *ap)) };
+        format_to_sink(Sink::Append(h.cast(), grow), fmt, &mut args)
+    }
+}
+pub use gnu_obstack_vprintf::obstack_vprintf;
+
+/// Own archive member -- gnulib's `obstack-printf` module defines
+/// `obstack_printf` too.
+#[cfg(target_os = "none")]
+mod gnu_obstack_printf {
+    va_trampoline!("obstack_printf", "obstack_vprintf", "16", "rdx");
+}
+
 // ---------------------------------------------------------------------------
 // Core formatting engine
 // ---------------------------------------------------------------------------
@@ -991,6 +1069,17 @@ enum Sink {
     Stream(*mut u8),
     /// A file descriptor (`dprintf`): each full buffer is written to it.
     Fd(i32),
+    /// A destination of the caller's (`obstack_printf`'s growing object):
+    /// each full buffer is handed to the function, with the context, and
+    /// `false` from it fails the call.  A function the caller passes, not
+    /// one named here: this member is every printf's, and naming the
+    /// obstack code would bring obstack's member into every program that
+    /// prints -- a program with gnulib's obstacks would then have two
+    /// (scripts/check-libc-shape.py, CHECK 5).
+    Append(
+        *mut core::ffi::c_void,
+        unsafe fn(*mut core::ffi::c_void, *const u8, usize) -> bool,
+    ),
     /// Host tests: each full buffer is appended to this vector.
     #[cfg(test)]
     Capture(*mut std::vec::Vec<u8>),
@@ -1053,6 +1142,9 @@ impl FmtOutput {
                 usize::try_from(r).is_ok_and(|r| r == pending)
             }
             Sink::Fd(fd) => write_all(fd, self.buf, pending),
+            // SAFETY: the context and the function the caller paired with
+            // it, both live for the call; `buf` holds `pending` bytes.
+            Sink::Append(ctx, append) => unsafe { append(ctx, self.buf, pending) },
             #[cfg(test)]
             Sink::Capture(out) => {
                 // SAFETY: the test owns `out` for the call, and `buf` holds
@@ -2944,7 +3036,7 @@ pub use strfrom_forms::{__slate_ld_strfroml, strfromd, strfromf};
 // ---------------------------------------------------------------------------
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
 
     // -----------------------------------------------------------------------
@@ -2995,7 +3087,11 @@ mod tests {
     /// register-save layout is the one thing in this file that must match the
     /// ABI exactly, and a second copy of it is the shape the module header
     /// warns about -- "a fix to one silently missed the other".
-    fn with_valist<R>(ints: &[u64], floats: &[u64], f: impl FnOnce(*mut VaList) -> R) -> R {
+    pub(crate) fn with_valist<R>(
+        ints: &[u64],
+        floats: &[u64],
+        f: impl FnOnce(*mut VaList) -> R,
+    ) -> R {
         assert!(
             ints.len() <= 6 || floats.len() <= 8,
             "with_args cannot lay out overflowing integers and floats together; \

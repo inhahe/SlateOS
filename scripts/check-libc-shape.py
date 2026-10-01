@@ -210,6 +210,24 @@ STRICT_FAMILIES: dict[str, frozenset[str]] = {
             "verror_at_line",
         }
     ),
+    # gnulib's obstack module defines what glibc's obstack.c does, glibc's
+    # <obstack.h> being the older interface gnulib's configure refuses
+    # (2026-09-30). Its printf, `obstack_printf`, reaches this member only by
+    # `_obstack_newchunk`'s name, so that a program with gnulib's obstacks
+    # and this library's `obstack_printf` uses its own `_obstack_newchunk`.
+    "obstack": frozenset(
+        {
+            "_obstack_begin",
+            "_obstack_begin_1",
+            "_obstack_newchunk",
+            "_obstack_free",
+            "obstack_free",
+            "_obstack_memory_used",
+            "_obstack_allocated_p",
+            "obstack_alloc_failed_handler",
+            "obstack_exit_failure",
+        }
+    ),
 }
 
 # CHECK 2 (broad, generalising): no single member may define both a name that
@@ -304,7 +322,14 @@ REPLACEABLE = frozenset(
         "__freading", "__fwriting", "__flbf", "__fbufsize", "__fsetlocking",
         # misc POSIX-fillers
         "mkstemp", "mkostemp", "mkstemps", "mkostemps", "mkdtemp",
-        "canonicalize_file_name", "obstack_free",
+        "canonicalize_file_name",
+        # obstacks (lane D, 2026-09-30): the obstack module's functions and
+        # variables, posix::obstack's member -- a STRICT_FAMILIES entry --
+        # and the obstack-printf module's two, each its own member
+        "_obstack_begin", "_obstack_begin_1", "_obstack_newchunk", "_obstack_free",
+        "obstack_free", "_obstack_memory_used", "_obstack_allocated_p",
+        "obstack_alloc_failed_handler", "obstack_exit_failure",
+        "obstack_printf", "obstack_vprintf",
         "argp_parse", "getsubopt", "timegm", "strptime",
         "qsort_r", "timespec_get",
     }

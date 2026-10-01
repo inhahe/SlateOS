@@ -9,6 +9,7 @@ cookie_io_functions_t	stdio.h	32	read=0,write=8,seek=16,close=24
 femode_t	fenv.h	8	__control_word=0,__glibc_reserved=2,__mxcsr=4
 glob_t	glob.h	72	gl_pathc=0,gl_pathv=8,gl_offs=16,gl_flags=24,gl_closedir=32,gl_readdir=40,gl_opendir=48,gl_lstat=56,gl_stat=64
 regmatch_t	regex.h	8	rm_so=0,rm_eo=4
+struct _obstack_chunk	obstack.h	24	limit=0,prev=8,contents=16
 struct aioinit	aio.h	32	aio_threads=0,aio_num=4,aio_locks=8,aio_usedba=12,aio_debug=16,aio_numusers=20,aio_idle_time=24,aio_reserved=28
 struct aliasent	aliases.h	32	alias_name=0,alias_members_len=8,alias_members=16,alias_local=24
 struct dl_find_object	dlfcn.h	96	dlfo_flags=0,dlfo_map_start=8,dlfo_map_end=16,dlfo_link_map=24,dlfo_eh_frame=32,__dflo_reserved=40
@@ -18,6 +19,7 @@ struct gaicb	netdb.h	56	ar_name=0,ar_service=8,ar_request=16,ar_result=24,__retu
 struct mallinfo	malloc.h	40	arena=0,ordblks=4,smblks=8,hblks=12,hblkhd=16,usmblks=20,fsmblks=24,uordblks=28,fordblks=32,keepcost=36
 struct mallinfo2	malloc.h	80	arena=0,ordblks=8,smblks=16,hblks=24,hblkhd=32,usmblks=40,fsmblks=48,uordblks=56,fordblks=64,keepcost=72
 struct ntptimeval	sys/timex.h	72	time=0,maxerror=16,esterror=24,tai=32,__glibc_reserved1=40,__glibc_reserved2=48,__glibc_reserved3=56,__glibc_reserved4=64
+struct obstack	obstack.h	88	chunk_size=0,chunk=8,object_base=16,next_free=24,chunk_limit=32,temp=40,alignment_mask=48,chunkfun=56,freefun=64,extra_arg=72
 struct random_data	stdlib.h	48	fptr=0,rptr=8,state=16,rand_type=24,rand_deg=28,rand_sep=32,end_ptr=40
 struct re_pattern_buffer	regex.h	64	buffer=0,allocated=8,used=16,syntax=24,fastmap=32,translate=40,re_nsub=48
 struct re_registers	regex.h	24	num_regs=0,start=8,end=16

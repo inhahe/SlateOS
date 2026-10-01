@@ -154,8 +154,12 @@ fn slice_covers_and_is_placed() {
 /// nothing.
 #[test]
 fn a_view_box_with_no_area_draws_nothing() {
-    for view_box in ["0 0 0 10", "0 0 10 0", "0 0 -5 10"] {
-        let svg = format!(r#"<svg viewBox="{view_box}"><rect width="10" height="10"/></svg>"#);
+    // A square over all the plane, which any box that is drawn at all --
+    // a mirrored one too -- would put on the pixels.
+    for view_box in ["0 0 0 10", "0 0 10 0", "0 0 -5 10", "0 0 10 -5"] {
+        let svg = format!(
+            r#"<svg viewBox="{view_box}"><rect x="-1000" y="-1000" width="2000" height="2000"/></svg>"#
+        );
         assert!(alphas(&svg, 10, 10).iter().all(|&a| a == 0), "{view_box}");
     }
 }

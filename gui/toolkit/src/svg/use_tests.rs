@@ -252,20 +252,35 @@ fn a_document_cannot_multiply_itself_without_end() {
 #[test]
 fn a_long_chain_of_uses_ends() {
     let mut svg = String::from(
-        r#"<svg viewBox="0 0 10 10"><defs><rect id="c0" width="10" height="10" fill="red"/>"#,
+        r#"<svg viewBox="0 0 10 10"><defs><rect id="c0" width="1" height="1" fill="red"/>"#,
     );
     for link in 1..300 {
         svg.push_str(&format!(r##"<use id="c{link}" href="#c{}"/>"##, link - 1));
     }
-    svg.push_str(r##"</defs><use href="#c20"/><use href="#c299" x="100"/></svg>"##);
+    svg.push_str(r##"</defs><use href="#c20"/><use href="#c299" x="5"/></svg>"##);
     let drawn = std::thread::Builder::new()
         .stack_size(512 << 10)
         .spawn(move || SvgDocument::parse(&svg).unwrap().render(10, 10))
         .unwrap()
         .join()
         .unwrap();
-    // Twenty links down, the square.
+    // Twenty links down, the square; three hundred down, past where drawing
+    // goes, nothing.
     assert_eq!(&drawn[..4], &[255, 0, 0, 255]);
+    assert_eq!(drawn[5 * 4 + 3], 0);
+}
+
+/// **A `<use>` names the first element with its `id`**, as
+/// `getElementById` finds it, and one inside any element it names -- not
+/// only the nearest with an `id` -- draws nothing.
+#[test]
+fn a_use_names_the_first_and_never_what_holds_it() {
+    let twice = r##"<svg viewBox="0 0 10 10"><defs><rect id="r" width="5" height="5" fill="red"/>
+<rect id="r" width="5" height="5" fill="blue"/></defs><use href="#r"/></svg>"##;
+    assert_eq!(px(twice, 10, 10, 2, 2), [255, 0, 0, 255]);
+    let outer = r##"<svg viewBox="0 0 20 10"><g id="a"><rect width="5" height="5" fill="red"/>
+<g id="b"><use href="#a" x="10"/></g></g></svg>"##;
+    assert_eq!(painted(outer, 20, 10), 25);
 }
 
 /// **A `<symbol>` is cut to its viewport**, as SVG's own style sheet has it

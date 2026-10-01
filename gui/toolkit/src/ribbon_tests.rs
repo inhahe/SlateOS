@@ -2290,6 +2290,81 @@ fn the_dialog_lists_every_command_and_every_tab() {
     assert_eq!(dialog.buttons.len(), Button::ALL.len());
 }
 
+/// **The right-hand list follows the user's changes: tabs in the user's
+/// order, and a hidden tab listed -- to be shown again -- without its
+/// groups.**
+#[test]
+fn the_dialogs_tabs_follow_the_users_changes() {
+    let mut r = ribbon();
+    r.move_tab("view", true);
+    r.hide_tab("view", true);
+    let tree = super::customize::tree_for_tests(&r);
+    assert_eq!(
+        tree[0],
+        TreeRow::Tab("view".into()),
+        "not in the user's order"
+    );
+    assert!(
+        !tree.contains(&TreeRow::Group("view".into(), "zoom".into())),
+        "a hidden tab's groups were listed"
+    );
+    assert_eq!(tree[1], TreeRow::Tab("home".into()));
+}
+
+/// **The dialog's keys stay within their lists and their list**: Down at
+/// the last row stays there, and Space with the commands' list having the
+/// keys hides no tab chosen on the other side.
+#[test]
+fn the_dialogs_keys_stay_in_bounds() {
+    let (mut r, l) = with_dialog();
+    let count = r.catalog().len();
+    for _ in 0..count + 3 {
+        r.handle_key(&l, &key(Key::Down, false));
+    }
+    assert_eq!(
+        r.customize.as_ref().unwrap().command,
+        r.catalog().last().map(|c| c.id),
+        "Down ran off the end"
+    );
+
+    press(
+        &mut r,
+        &l,
+        centre(tree_row(&l, &TreeRow::Tab("view".into())).0),
+    );
+    r.handle_key(&l, &key(Key::Tab, false));
+    assert_eq!(r.customize.as_ref().unwrap().focus, Focus::Commands);
+    assert_eq!(
+        r.handle_key(&l, &key(Key::Space, false)),
+        RibbonEvent::Handled
+    );
+    assert!(r.hidden_tabs().is_empty(), "Space on the left hid a tab");
+}
+
+/// **A button acts when released over itself -- not when the press is
+/// carried off it -- and Add is dimmed for a group that has the command.**
+#[test]
+fn the_dialogs_buttons_are_buttons() {
+    let (mut r, l) = with_dialog();
+    press(&mut r, &l, dialog_button(&l, Button::Close));
+    let away = centre(l.dialog.as_ref().unwrap().commands);
+    release(&mut r, &l, away);
+    assert!(r.customize_open(), "a release off Close closed the dialog");
+
+    press(&mut r, &l, command_row(&l, CUT));
+    press(
+        &mut r,
+        &l,
+        centre(tree_row(&l, &TreeRow::Group("home".into(), "clipboard".into())).0),
+    );
+    let p = Palette::for_mode(false);
+    let texts = texts(&drawn(&r, &l, &p));
+    assert!(
+        texts.contains(&("Add \u{203a}".to_owned(), p.overlay0)),
+        "Add is lit for a group that already has the command"
+    );
+}
+
 /// **A command chosen on the left goes into the group chosen on the right
 /// with Add, and comes out with Remove; Add is dimmed while the group has it
 /// already.**

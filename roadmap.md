@@ -2129,6 +2129,15 @@ live.
   fixed that opening a folder in the toolkit's folder picker chose it, a
   fix the seven lane E applications already using the picker share.
 
+- `[C]` **The taskbar's glass and spacing are a theme axis**
+  (`roadmap-detailed.md` → *Tier 2 — Taskbar/Panel Styling*;
+  `design-decisions.md` §1460) -- done 2026-10-01. A theme's `taskbar-panel`
+  section sets how much of the Aero glass the taskbar wears -- 0 is a flat bar
+  in the theme's colour, its tiles their edges -- and the gaps between its
+  tiles; `theme.taskbar_panel` chooses it, and the desktop draws and lays out
+  the taskbar from it. Whether the bar is see-through stays the user's.
+  **Lane E:** a chooser in Settings (`requests/c-e-choose-the-taskbar-panel-in-settings.md`).
+
 - `[C]` **Cursor themes** (`roadmap-detailed.md` → *Tier 1 — Cursor
   Theme*; `design-decisions.md` §1459) -- lane C's half done 2026-10-01.
   `theme.cursors` chooses a cursor theme in the format every Linux desktop

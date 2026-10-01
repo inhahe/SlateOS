@@ -1783,7 +1783,7 @@ _A theme is a declarative YAML file plus optional bundled assets. Themes are pur
   - [ ] and the demo's look **is** the default theme, rather than a separate "Aero mode".
   - [ ] The practical test: changing a theme axis must visibly change the settings pages too. A settings page that stays Aero-coloured when the user picks a dark theme has hardcoded what should have been a token.
 - [-] The default theme is a normal YAML theme file — it uses the same axis system as third-party themes, so users can swap it out wholesale or override any single axis (e.g., keep Aero window decorations but switch icons to a flat-modern pack). No hard-coded "Aero mode" path in the compositor. — *Colours axis 2026-09-25 (§874): the built-in theme is `aero`, shipped as `gui/appearance/themes/aero/theme.yaml` with every colour role, and a test holds the file equal to the compiled palette. Its colours are compiled in so it cannot fail to load; the file is the template and the theme list's description. The other axes are not themes yet.*
-- [ ] Aero blur and transparency are theme axes (window-decorations, taskbar-panel-styling), so users who want a flat/opaque look can disable them without losing the rest of the default visual identity.
+- [-] Aero blur and transparency are theme axes (window-decorations, taskbar-panel-styling), so users who want a flat/opaque look can disable them without losing the rest of the default visual identity. — *2026-10-01: the taskbar's glass is the `taskbar-panel` axis's gloss (§1460) -- a theme of gloss 0 is a flat bar with the rest of the look kept; window frames' shape is the `window-decorations` axis (§1456), whose glass and blur are not settings yet.*
 
 ##### Theme Format
 - [x] YAML theme file following the OS config convention (comment-preserving parser) — 2026-09-25, `appearance::themes` (§874): `<name>/theme.yaml` under `/usr/share/slateos/themes` or the user's `~/.local/share/slateos/themes`, read with `yamldoc`. What a file gets wrong costs that line, not the theme, and is listed for its author.
@@ -1837,9 +1837,9 @@ _2026-09-28 (`design-decisions.md` §1435): the axis exists -- a theme's `widget
 - [-] These variables define the visual feel (flat modern vs. skeuomorphic vs. glassmorphism) — *the gloss, shadow, radii and focus mark are the difference between the three; high contrast keeps a theme's shapes but not its gloss, shadow, soft focus or hiding scrollbar.*
 
 ##### Tier 2 — Taskbar/Panel Styling
-- [ ] Transparency/blur level
-- [ ] Icon spacing
-- [ ] Visual treatment (color, border, shadow) — not position or size (those are layout settings, not theme)
+- [-] Transparency/blur level — *2026-10-01 (`design-decisions.md` §1460): the glass a theme gives the bar is its `taskbar-panel` gloss, 0 (flat) to 1 (the reference's), drawn by the desktop; how see-through the bar is stays the user's (`taskbar_style`, `transparency`). The compositor's blur behind it has no strength a theme sets yet.*
+- [x] Icon spacing — *2026-10-01 (§1460): `taskbar-panel` → `spacing`: between two tiles, after the start button, and between the pinned programs and the windows (the divider keeps the reference's place in it). The desktop lays its tiles out from it.*
+- [-] Visual treatment (color, border, shadow) — not position or size (those are layout settings, not theme) — *2026-10-01 (§1460): the bar's lines of light (its top border), glow and shade, and a tile's sheen and highlight, are the theme's gloss; the colours are the colours axis's. The shadow the reference casts above the bar is not drawn.*
 - [x] **Taskbar tab-label overflow styling (CSS-like `text-overflow`).** *2026-10-01: a window's label on the taskbar is cut as the theme's `title-bar.overflow` says -- the same setting as window titles, so the two are cut alike -- in fitted glyphs (`guitk::text::fit_line`), as the tile's width changes.* When a
   taskbar entry shows an app/window name (optional label mode, §Taskbar) and the
   label is wider than the tab, the theme controls truncation using the *same*

@@ -818,6 +818,66 @@ fn align_line(items: &mut [FlexLine], start: f32, thick: f32, horizontal: bool) 
     }
 }
 
+/// How a picture is fitted into a box -- CSS's `object-fit`.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum ImageScale {
+    /// As large as fits whole, its shape kept: room left on two sides.
+    #[default]
+    Contain,
+    /// As small as fills the box, its shape kept: the overflow is for the
+    /// caller to clip to the box.
+    Cover,
+    /// Exactly the box, its shape lost.
+    Stretch,
+    /// Its own size.
+    Natural,
+}
+
+/// Where a picture `image` big goes in `area`, scaled as `scale` says:
+/// the rectangle to draw it in.
+///
+/// `upscale` false never draws it larger than it is -- a small icon in a
+/// large box stays sharp rather than blurring -- for every scale. `align`
+/// places it where it does not fill the box (or, covering, which part
+/// shows), as fractions of the room left across and down: `(0.0, 0.0)` its
+/// corner at the box's, `(0.5, 0.5)` centred, `(1.0, 1.0)` at the far
+/// corner (CSS's `object-position` as percentages), held to 0..=1.
+///
+/// A picture or box with no area places nothing: an empty rectangle at the
+/// box's corner.
+#[must_use]
+pub fn fit_image(
+    image: Size,
+    area: crate::frame::Rect,
+    scale: ImageScale,
+    upscale: bool,
+    align: (f32, f32),
+) -> crate::frame::Rect {
+    let empty = crate::frame::Rect::new(area.x, area.y, 0.0, 0.0);
+    // `!(x > 0)` rather than `x <= 0`, so that a NaN is no area too.
+    if !(image.width > 0.0 && image.height > 0.0 && area.w > 0.0 && area.h > 0.0) {
+        return empty;
+    }
+    let cap = |factor: f32| if upscale { factor } else { factor.min(1.0) };
+    let (w, h) = match scale {
+        ImageScale::Contain => {
+            let factor = cap((area.w / image.width).min(area.h / image.height));
+            (image.width * factor, image.height * factor)
+        }
+        ImageScale::Cover => {
+            let factor = cap((area.w / image.width).max(area.h / image.height));
+            (image.width * factor, image.height * factor)
+        }
+        ImageScale::Stretch if upscale => (area.w, area.h),
+        ImageScale::Stretch => (area.w.min(image.width), area.h.min(image.height)),
+        ImageScale::Natural => (image.width, image.height),
+    };
+    // A NaN fraction is no position anyone chose: the middle.
+    let place = |a: f32| if a.is_nan() { 0.5 } else { a.clamp(0.0, 1.0) };
+    let (ax, ay) = (place(align.0), place(align.1));
+    crate::frame::Rect::new(area.x + (area.w - w) * ax, area.y + (area.h - h) * ay, w, h)
+}
+
 #[cfg(test)]
 mod tests {
     // A test module's job is to fail loudly the instant the code under test is
@@ -1498,5 +1558,115 @@ mod tests {
             &Edges::ZERO,
         );
         assert_eq!(boxes[0].width, 100.0);
+    }
+
+    use crate::frame::Rect;
+
+    /// **Each scale fits a picture as its name says**: Contain whole and
+    /// letterboxed, Cover filling the box and overflowing it, Stretch the
+    /// box, Natural its own size -- centred here.
+    #[test]
+    fn fit_image_fits_as_told() {
+        let area = Rect::new(10.0, 20.0, 200.0, 100.0);
+        let picture = Size::new(400.0, 400.0);
+        let middle = (0.5, 0.5);
+        let fit = |scale| fit_image(picture, area, scale, true, middle);
+        assert_eq!(
+            fit(ImageScale::Contain),
+            Rect::new(60.0, 20.0, 100.0, 100.0)
+        );
+        assert_eq!(fit(ImageScale::Cover), Rect::new(10.0, -30.0, 200.0, 200.0));
+        assert_eq!(fit(ImageScale::Stretch), area);
+        assert_eq!(
+            fit(ImageScale::Natural),
+            Rect::new(-90.0, -130.0, 400.0, 400.0)
+        );
+    }
+
+    /// **Without upscaling a small picture keeps its own size** -- an icon in
+    /// a large box stays sharp -- whatever the scale; with it, it grows.
+    #[test]
+    fn fit_image_without_upscaling_never_enlarges() {
+        let area = Rect::new(10.0, 20.0, 200.0, 100.0);
+        let icon = Size::new(16.0, 16.0);
+        let middle = (0.5, 0.5);
+        let at_size = Rect::new(102.0, 62.0, 16.0, 16.0);
+        for scale in [
+            ImageScale::Contain,
+            ImageScale::Cover,
+            ImageScale::Stretch,
+            ImageScale::Natural,
+        ] {
+            assert_eq!(
+                fit_image(icon, area, scale, false, middle),
+                at_size,
+                "{scale:?}"
+            );
+        }
+        assert_eq!(
+            fit_image(icon, area, ImageScale::Contain, true, middle).w,
+            100.0
+        );
+        // A picture larger than the box still shrinks to fit it.
+        assert_eq!(
+            fit_image(
+                Size::new(400.0, 400.0),
+                area,
+                ImageScale::Contain,
+                false,
+                middle
+            )
+            .w,
+            100.0
+        );
+    }
+
+    /// **Alignment places the picture in the room it leaves**, as fractions
+    /// held to 0..=1; a NaN is the middle.
+    #[test]
+    fn fit_image_aligns_by_fractions() {
+        let area = Rect::new(10.0, 20.0, 200.0, 100.0);
+        let picture = Size::new(400.0, 400.0);
+        let x = |align| fit_image(picture, area, ImageScale::Contain, true, align).x;
+        assert_eq!(x((0.0, 0.0)), 10.0);
+        assert_eq!(x((1.0, 0.0)), 110.0);
+        assert_eq!(x((5.0, -3.0)), 110.0);
+        assert_eq!(x((f32::NAN, 0.0)), 60.0);
+        // Covering, the fraction says which part shows: the bottom.
+        let y = fit_image(picture, area, ImageScale::Cover, true, (0.5, 1.0)).y;
+        assert_eq!(y, -80.0);
+    }
+
+    /// **A picture or a box with no area places nothing**, at the box's
+    /// corner.
+    #[test]
+    fn fit_image_with_no_area_places_nothing() {
+        let area = Rect::new(10.0, 20.0, 200.0, 100.0);
+        let nothing = Rect::new(10.0, 20.0, 0.0, 0.0);
+        let middle = (0.5, 0.5);
+        assert_eq!(
+            fit_image(Size::ZERO, area, ImageScale::Contain, true, middle),
+            nothing
+        );
+        assert_eq!(
+            fit_image(
+                Size::new(4.0, 4.0),
+                Rect::new(10.0, 20.0, 0.0, 50.0),
+                ImageScale::Cover,
+                true,
+                middle
+            ),
+            nothing
+        );
+        assert_eq!(
+            fit_image(
+                Size::new(f32::NAN, 4.0),
+                area,
+                ImageScale::Contain,
+                true,
+                middle
+            ),
+            nothing
+        );
     }
 }

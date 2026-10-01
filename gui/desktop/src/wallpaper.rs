@@ -1475,32 +1475,24 @@ pub(crate) fn compute_image_rect(
         return (0.0, 0.0, display_w, display_h);
     }
 
+    // The scaling fits are the toolkit's arithmetic, centred and free to
+    // enlarge: one implementation of a picture in a box for the desktop, the
+    // login screen and every application's image view.
+    let fitted = |scale| {
+        let r = guitk::layout::fit_image(
+            guitk::layout::Size::new(image_w, image_h),
+            guitk::frame::Rect::new(0.0, 0.0, display_w, display_h),
+            scale,
+            true,
+            (0.5, 0.5),
+        );
+        (r.x, r.y, r.w, r.h)
+    };
     match fit {
-        ImageFit::Stretch => (0.0, 0.0, display_w, display_h),
-
-        ImageFit::Fill => {
-            let scale = (display_w / image_w).max(display_h / image_h);
-            let w = image_w * scale;
-            let h = image_h * scale;
-            let x = (display_w - w) / 2.0;
-            let y = (display_h - h) / 2.0;
-            (x, y, w, h)
-        }
-
-        ImageFit::Fit => {
-            let scale = (display_w / image_w).min(display_h / image_h);
-            let w = image_w * scale;
-            let h = image_h * scale;
-            let x = (display_w - w) / 2.0;
-            let y = (display_h - h) / 2.0;
-            (x, y, w, h)
-        }
-
-        ImageFit::Center => {
-            let x = (display_w - image_w) / 2.0;
-            let y = (display_h - image_h) / 2.0;
-            (x, y, image_w, image_h)
-        }
+        ImageFit::Stretch => fitted(guitk::layout::ImageScale::Stretch),
+        ImageFit::Fill => fitted(guitk::layout::ImageScale::Cover),
+        ImageFit::Fit => fitted(guitk::layout::ImageScale::Contain),
+        ImageFit::Center => fitted(guitk::layout::ImageScale::Natural),
 
         ImageFit::Tile => {
             // For tile mode, we position the first tile at the origin.

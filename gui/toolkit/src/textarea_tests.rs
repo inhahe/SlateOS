@@ -886,4 +886,15 @@ fn the_right_click_menu_does_what_the_keys_do() {
     );
     assert_eq!(area.text(), "");
     assert_eq!(area.edit_command(7, &m), KeyEdit::Unhandled);
+
+    // The menu's Delete takes what is selected and nothing else: with
+    // nothing selected it is no Delete key, which would take the character
+    // after the caret.
+    area.edit_command(EditCommand::Paste.id(), &m);
+    area.press(0.0, 0.0, 1, false, &m);
+    assert_eq!(
+        area.edit_command(EditCommand::Delete.id(), &m),
+        KeyEdit::Handled
+    );
+    assert_eq!(area.text(), "one two");
 }

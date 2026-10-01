@@ -884,6 +884,17 @@ mod tests {
             ),
             "a field with no history offers Undo"
         );
+
+        // The menu's Delete takes what is selected and nothing else: with
+        // nothing selected it is no Delete key, which would take the
+        // character after the caret.
+        input.insert_text("abc");
+        input.move_home(false);
+        assert_eq!(
+            input.edit_command(EditCommand::Delete.id()),
+            KeyEdit::Handled
+        );
+        assert_eq!(input.text(), "abc");
     }
 
     /// **Two fields share the program's clipboard**: a copy in one pastes in

@@ -162,7 +162,8 @@ conversions), `posix/src/ctype.rs` (`MB_CUR_MAX`), `posix/src/iconv.rs`
 does, several parts of it were written by translating glibc's own source
 code into Rust, line by line -- most recently the Tamil character set,
 the new C23 maths functions and `clog10` -- and `<obstack.h>`'s macros
-follow glibc's header's, macro for macro. glibc's licence (the LGPL)
+follow glibc's header's, macro for macro, and argp glibc's source,
+function for function. glibc's licence (the LGPL)
 allows that, on a condition: anyone who receives a program containing it
 must be able to rebuild that program with their own copy of the library.
 The C library is built into *every* program on SlateOS, so the condition
@@ -191,6 +192,7 @@ What is translated, as far as lane D knows:
 | `posix/src/narrow.rs`: the narrowing functions' checks | `math/math-narrow.h` | 2026-09-28, on `main` |
 | `posix/src/complex*.rs`: `clog10` | `math/s_clog10_template.c`, `x2y2m1` | 2026-09-28, on `main` |
 | `posix/include/obstack.h`: the macros, macro for macro -- C, in a header a program compiles into itself | the installed `<obstack.h>` (`malloc/obstack.h`) | 2026-09-30 |
+| `posix/src/argp/`: the parse, the help's order and layout, the line filler -- function for function | `argp/argp-parse.c`, `argp-help.c`, `argp-fmtstream.c` | 2026-10-01 |
 
 One more part, since this was raised, was written with glibc's source
 open, though not translated from it: `posix/src/regex/parse.rs`
@@ -217,6 +219,16 @@ over glibc's own functions). (The LGPL, in 2.1's §5, lifts its conditions
 from a program that uses only a header's data structure layouts and small
 macros, ten lines or fewer -- as each of these is; whether that settles it
 for this header is part of this question.)
+
+argp, `posix/src/argp/`, was written from what glibc's argp source does, as
+known rather than read -- but for argp-fmtstream.c's line-breaking scan,
+read to settle a case -- and every rule held to the oracle: 175 scenarios
+of glibc 2.39's. Its code is its own, a parse over raw pointers and the
+crate's lists rather than glibc's structures, but its algorithms are
+glibc's on purpose: help text that breaks where glibc's does needs the
+same buffering and the same scan. Under **B** it would be written again
+from the manual and the oracle alone, which fix the order of the calls
+and the layout, though not every effect of the buffering.
 
 (The character tables themselves -- which byte means which letter -- are
 facts read from glibc's data files and from running its converters, not

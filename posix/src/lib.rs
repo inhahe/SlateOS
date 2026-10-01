@@ -349,6 +349,7 @@ mod accounts_oracle;
 pub mod aio;
 pub mod aliases;
 pub mod alloca;
+pub mod argp;
 pub mod argz;
 pub mod assert;
 pub mod besl;

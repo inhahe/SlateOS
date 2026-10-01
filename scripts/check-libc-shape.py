@@ -215,6 +215,16 @@ STRICT_FAMILIES: dict[str, frozenset[str]] = {
     # (2026-09-30). Its printf, `obstack_printf`, reaches this member only by
     # `_obstack_newchunk`'s name, so that a program with gnulib's obstacks
     # and this library's `obstack_printf` uses its own `_obstack_newchunk`.
+    # argp's four variables, each alone (lane D, 2026-10-01): a program
+    # commonly defines argp_program_version and argp_program_bug_address
+    # itself, as glibc's manual has it do, and a member defining one beside
+    # anything it needs would be a second definition. Named for gnulib's
+    # objects of them -- and short, since the self-test names its members
+    # after the families, and an ar member's name is 15 characters at most.
+    "argp_pv": frozenset({"argp_program_version"}),
+    "argp_pvh": frozenset({"argp_program_version_hook"}),
+    "argp_ba": frozenset({"argp_program_bug_address"}),
+    "argp_eexst": frozenset({"argp_err_exit_status"}),
     "obstack": frozenset(
         {
             "_obstack_begin",
@@ -330,7 +340,17 @@ REPLACEABLE = frozenset(
         "obstack_free", "_obstack_memory_used", "_obstack_allocated_p",
         "obstack_alloc_failed_handler", "obstack_exit_failure",
         "obstack_printf", "obstack_vprintf",
-        "argp_parse", "getsubopt", "timegm", "strptime",
+        # argp (lane D, 2026-10-01): gnulib's argp module defines every one of
+        # these where the C library has none, as musl has none -- the four
+        # variables each STRICT_FAMILIES' own; the functions posix::argp's
+        # member, argp_error and argp_failure each their own, with the two
+        # internal names the variadic two pass on to
+        "argp_parse", "argp_help", "argp_state_help", "argp_usage", "argp_error",
+        "argp_failure", "_option_is_short", "_option_is_end", "_argp_input",
+        "__argp_verror", "__argp_vfailure",
+        "argp_program_version", "argp_program_version_hook", "argp_program_bug_address",
+        "argp_err_exit_status",
+        "getsubopt", "timegm", "strptime",
         "qsort_r", "timespec_get",
     }
 )
@@ -1030,6 +1050,10 @@ def _selftest() -> int:
     # "fam0" silently meant getopt where the case said error -- and the two
     # disagreed about which member they were talking about.
     clean = [(family, sorted(syms)) for family, syms in STRICT_FAMILIES.items()]
+    # ...whose names must fit an ar member's, 15 characters: a longer one
+    # spills out of its header and every member after it is misread.
+    check_("every family's name fits an ar member name",
+           all(len(f) <= 15 for f in STRICT_FAMILIES))
     # The aliased names (`environ` is an unavoidable one) live in the
     # variables' member, as they do in the real archive; see `graded`.
     clean.append(("core", sorted(UNAVOIDABLE - {n for g in ALIASES for n in g})))

@@ -412,3 +412,71 @@ fn a_new_palette_is_drawn_in() {
         |c| matches!(c, RenderCommand::Text { color, .. } if *color == Palette::for_mode(true).text)
     ));
 }
+
+/// **A control is as big as its module makes it**, so what is laid out is
+/// what is drawn: a button in the theme's padding, a box or an option its
+/// mark and label, a slider its thumb's row, a picture its size.
+#[test]
+fn a_control_is_as_big_as_its_module_makes_it() {
+    let p = dark();
+    let size = |w: Widget| w.intrinsic_size(&p);
+    assert_eq!(
+        size(Widget::button("Apply")),
+        Size::new(
+            crate::button::width(&p.widget_style.button, "Apply"),
+            crate::button::HEIGHT
+        )
+    );
+    assert_eq!(
+        size(Widget::checkbox("Wrap", false)),
+        Size::new(crate::checkbox::width("Wrap"), crate::checkbox::HEIGHT)
+    );
+    assert_eq!(
+        size(Widget::radio("Large", false)),
+        Size::new(crate::radio::width("Large"), crate::checkbox::HEIGHT)
+    );
+    assert_eq!(size(Widget::slider(0.0, 1.0, 0.0)), Size::new(120.0, 20.0));
+    assert_eq!(size(Widget::image(1, 40.0, 30.0)), Size::new(40.0, 30.0));
+    assert_eq!(size(Widget::image(1, f32::NAN, -3.0)), Size::new(0.0, 0.0));
+}
+
+/// **A drag in a text area selects**, from where it was pressed to where it
+/// is let go -- even past the area's edge.
+#[test]
+fn a_drag_in_a_text_area_selects() {
+    let mut tree = tree_of(vec![Widget::text_area("hello world", "")]);
+    let w = &tree.root.children[0];
+    let (left, y) = (w.layout.x + 10.0, w.layout.y + 10.0);
+    let past = w.layout.x + w.layout.border_box_width() + 50.0;
+    tree.handle_event(&mouse(left, y, MouseEventKind::Press(MouseButton::Left)));
+    tree.handle_event(&mouse(past, y, MouseEventKind::Move));
+    tree.handle_event(&mouse(past, y, MouseEventKind::Release(MouseButton::Left)));
+    let WidgetKind::TextArea { area, .. } = &tree.root.children[0].kind else {
+        panic!("not a text area");
+    };
+    assert!(area.has_selection());
+    assert!(
+        area.selected_text().ends_with("world"),
+        "{:?}",
+        area.selected_text()
+    );
+}
+
+/// **A press below a scroll view reaches nothing scrolled out of it**,
+/// though one of its buttons lies there.
+#[test]
+fn a_press_below_a_scroll_view_reaches_nothing_in_it() {
+    let mut tree = scrolling_tree();
+    let view = &tree.root.children[0];
+    let (x, below) = (
+        view.layout.x + view.layout.border_box_width() / 2.0,
+        view.layout.y + view.layout.border_box_height() + 10.0,
+    );
+    tree.handle_event(&mouse(x, below, MouseEventKind::Press(MouseButton::Left)));
+    assert!(
+        tree.root.children[0]
+            .children
+            .iter()
+            .all(|b| matches!(b.kind, WidgetKind::Button { pressed: false, .. }))
+    );
+}

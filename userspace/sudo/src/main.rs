@@ -1046,18 +1046,23 @@ fn parse_cmnd_list(s: &str) -> Result<Vec<CmndSpec>, SudoError> {
             )));
         }
 
-        // Split command from optional arguments. `split_once` hands back both
-        // halves already past the space, so there is no `space + 1` whose
-        // correctness rests on the separator being one byte wide.
-        let (cmd, args) = part
-            .split_once(' ')
-            .map_or((part, ""), |(cmd, args)| (cmd.trim(), args.trim()));
+        // `!` negates the command after it, and sudoers allows white space
+        // between the two: `! /usr/bin/passwd` is `!/usr/bin/passwd`. Folded
+        // into the command here, so the split below sees the command rather
+        // than a bare `!` whose "arguments" are the command.
+        let (negated, rest) = strip_negation(part);
+        // The command, then its arguments after the first white space.
+        let (cmd, args) = split_command(rest);
 
         commands.push(CmndSpec {
             nopasswd,
             noexec,
             setenv,
-            command: cmd.to_string(),
+            command: if negated {
+                format!("!{cmd}")
+            } else {
+                cmd.to_string()
+            },
             args: args.to_string(),
         });
     }
@@ -1249,27 +1254,108 @@ fn validate_sudoers_line(line: &str, line_num: usize, strict: bool, errors: &mut
 // Authorization checking
 // ============================================================================
 
-/// Check if a user is authorized by the sudoers config to run a specific command.
+/// The command a decision is about, as sudoers sees it: upstream's
+/// `ctx->user.cmnd` and `ctx->user.cmnd_args`.
 ///
-/// `command` is bytes because it is a path the caller is about to `exec`, and a
-/// path here may hold any byte but `/` and NUL. The sudoers file it is matched
-/// against is text, so a command that is not text can match only `ALL` or a
-/// trailing-`*` prefix — which is the right answer, arrived at by comparison
-/// rather than by refusing to look.
+/// `command` is the program as the caller named it -- or the pseudo-command
+/// `sudoedit` -- and bytes, because it is a path the caller is about to `exec`
+/// and a path may hold any byte but `/` and NUL. `args` is every argument after
+/// it joined with single spaces, or `None` when there were none: what a rule's
+/// `""` asks for, and not the same as one argument that is empty.
+#[derive(Debug, Clone, Copy)]
+struct Request<'a> {
+    command: &'a [u8],
+    args: Option<&'a [u8]>,
+}
+
+// Only the tests ask about a command without arguments by name.
+#[cfg(test)]
+impl<'a> Request<'a> {
+    /// A request with no arguments.
+    const fn bare(command: &'a [u8]) -> Self {
+        Request {
+            command,
+            args: None,
+        }
+    }
+}
+
+/// sudo's `user_args`: the arguments joined with single spaces, or `None`
+/// when there are none.
+fn user_args(args: &[OsString]) -> Option<Vec<u8>> {
+    if args.is_empty() {
+        return None;
+    }
+    let mut joined = Vec::new();
+    for (i, arg) in args.iter().enumerate() {
+        if i > 0 {
+            joined.push(b' ');
+        }
+        joined.extend_from_slice(&os_bytes(arg));
+    }
+    Some(joined)
+}
+
+/// What one command spec says about a request: sudoers' `ALLOW`, `DENY` or
+/// `UNSPEC`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Verdict {
+    /// The spec names the command, and grants it.
+    Allow,
+    /// The spec names the command, negated: it is refused, whatever an
+    /// earlier rule said.
+    Deny,
+    /// The spec does not name the command; it decides nothing.
+    Unspec,
+}
+
+impl Verdict {
+    /// The verdict under a `!`.
+    const fn negated(self) -> Self {
+        match self {
+            Verdict::Allow => Verdict::Deny,
+            Verdict::Deny => Verdict::Allow,
+            Verdict::Unspec => Verdict::Unspec,
+        }
+    }
+}
+
+/// How deep `Cmnd_Alias`es may name one another before one is taken to name
+/// itself. Upstream refuses a loop when it reads the file; this matches
+/// nothing instead, so a loop that got past the parser grants nothing.
+const MAX_ALIAS_DEPTH: usize = 32;
+
+/// Check whether the sudoers configuration lets `username` run `request` as
+/// `target_user` (and `target_group`) on `hostname`, returning the command
+/// spec that allowed it.
+///
+/// # sudoers' rule, which this follows
+///
+/// Privileges are read from the last to the first, and within one its
+/// commands from the last to the first; **the first command spec that names
+/// the request decides, either way** -- `!/usr/bin/passwd` refuses, and that
+/// refusal stands over any earlier `ALL`. A spec that does not name the
+/// request decides nothing. (`sudoers_lookup` and `cmndlist_matches`.)
+///
+/// Until 2026-10-01 a negated spec was read as "matches every command but this
+/// one": `alice ALL = !/usr/bin/passwd` granted alice every other command, and
+/// `alice ALL = ALL, !/usr/bin/passwd` granted passwd too, because the
+/// negation did not match it and the search went on to `ALL`. And a rule's
+/// arguments were never compared at all -- `alice ALL = /usr/bin/systemctl
+/// restart nginx` let alice run `systemctl` with anything.
 fn check_authorization(
     config: &SudoersConfig,
     username: &str,
     hostname: &str,
     target_user: &str,
     target_group: &str,
-    command: &[u8],
+    request: &Request<'_>,
     user_groups: &[String],
 ) -> Option<CmndSpec> {
     // One secure path for every command spec in this decision, read once from
     // the configuration rather than per match.
     let secure = secure_path_of(config);
     let dirs = path_dirs(&secure);
-    // Iterate privileges in reverse order (last match wins, like real sudo).
     for priv_spec in config.privileges.iter().rev() {
         if !user_matches(
             &priv_spec.users,
@@ -1292,18 +1378,109 @@ fn check_authorization(
         }
 
         for cmnd in priv_spec.commands.iter().rev() {
-            if command_matches(
+            match cmnd_matches(
                 &cmnd.command,
                 &cmnd.args,
-                command,
+                request,
                 &config.cmnd_aliases,
                 &dirs,
+                0,
             ) {
-                return Some(cmnd.clone());
+                Verdict::Allow => return Some(cmnd.clone()),
+                Verdict::Deny => return None,
+                Verdict::Unspec => {}
             }
         }
     }
     None
+}
+
+/// What one command spec -- a command, a `Cmnd_Alias`, either maybe negated
+/// -- says about `request`: sudoers' `cmnd_matches`.
+fn cmnd_matches(
+    spec_cmd: &str,
+    spec_args: &str,
+    request: &Request<'_>,
+    aliases: &HashMap<String, Vec<String>>,
+    dirs: &[&str],
+    depth: usize,
+) -> Verdict {
+    let (negated, spec) = strip_negation(spec_cmd);
+    let verdict = if let Some(members) = aliases.get(spec) {
+        // An alias is a list of its own, decided the same way: the last member
+        // that names the request.
+        if depth >= MAX_ALIAS_DEPTH {
+            Verdict::Unspec
+        } else {
+            members
+                .iter()
+                .rev()
+                .map(|member| {
+                    let (cmd, args) = split_command(member);
+                    cmnd_matches(cmd, args, request, aliases, dirs, depth.saturating_add(1))
+                })
+                .find(|v| *v != Verdict::Unspec)
+                .unwrap_or(Verdict::Unspec)
+        }
+    } else if command_matches(spec, spec_args, request, dirs) {
+        Verdict::Allow
+    } else {
+        Verdict::Unspec
+    };
+    if negated { verdict.negated() } else { verdict }
+}
+
+/// A spec's `!`s, and what they negate. sudoers allows white space after
+/// each, and two cancel.
+fn strip_negation(mut spec: &str) -> (bool, &str) {
+    let mut negated = false;
+    while let Some(rest) = spec.strip_prefix('!') {
+        negated = !negated;
+        spec = rest.trim_start();
+    }
+    (negated, spec)
+}
+
+/// A command spec's command and its arguments, split at the first white
+/// space; the arguments are empty when there are none.
+fn split_command(spec: &str) -> (&str, &str) {
+    let spec = spec.trim();
+    match spec.find(char::is_whitespace) {
+        Some(i) => (
+            spec.get(..i).unwrap_or(spec),
+            spec.get(i..).unwrap_or_default().trim(),
+        ),
+        None => (spec, ""),
+    }
+}
+
+/// Whether the caller's arguments satisfy a spec's: sudoers'
+/// `command_args_match`.
+///
+/// A rule with no arguments allows any; `""` allows none; `^...$` is a POSIX
+/// extended regular expression over the joined arguments; anything else is an
+/// `fnmatch(3)` pattern over them -- with `FNM_PATHNAME` for `sudoedit`, whose
+/// arguments are paths, so a `*` there never crosses a `/`.
+fn args_match(spec_cmd: &str, spec_args: &str, user_args: Option<&[u8]>) -> bool {
+    if spec_args.is_empty() {
+        return true;
+    }
+    if spec_args == "\"\"" {
+        return user_args.is_none();
+    }
+    let args = user_args.unwrap_or_default();
+    if spec_args.len() > 1 && spec_args.starts_with('^') && spec_args.ends_with('$') {
+        // A pattern that does not compile matches nothing, as upstream's
+        // `regex_matches` denies: a rule that cannot be read grants nothing.
+        return ere::Regex::new(spec_args.as_bytes())
+            .is_ok_and(|re| re.is_match(args).unwrap_or(false));
+    }
+    let flags = if spec_cmd == "sudoedit" {
+        fnmatch::Flags::PATHNAME
+    } else {
+        fnmatch::Flags::NONE
+    };
+    fnmatch::fnmatch(spec_args.as_bytes(), args, flags)
 }
 
 /// Check if a username matches a user specification list.
@@ -1406,77 +1583,72 @@ fn runas_matches(
     user_ok && group_ok
 }
 
-/// Check if a command matches a command specification.
-fn command_matches(
-    spec_cmd: &str,
-    spec_args: &str,
-    actual_cmd: &[u8],
-    aliases: &HashMap<String, Vec<String>>,
-    // The secure path an unqualified spec resolves against; see
-    // `command_path_matches`.
-    dirs: &[&str],
-) -> bool {
-    if spec_cmd == "ALL" {
+/// Whether one command spec names `request`: sudoers' `command_matches`.
+fn command_matches(spec: &str, spec_args: &str, request: &Request<'_>, dirs: &[&str]) -> bool {
+    // `ALL` names every command, `sudoedit` among them, whatever its
+    // arguments.
+    if spec == "ALL" {
         return true;
     }
-
-    // Check aliases.
-    if let Some(members) = aliases.get(spec_cmd) {
-        for member in members {
-            if member == "ALL" {
-                return true;
-            }
-            // Split member into command and args.
-            let (cmd, args) = member
-                .split_once(' ')
-                .map_or((member.as_str(), ""), |(cmd, args)| (cmd, args.trim()));
-            if command_path_matches(cmd, actual_cmd, dirs) && (args.is_empty() || args == "*") {
-                return true;
-            }
-        }
-        return false;
+    // `sudoedit` is a pseudo-command: it names a request to edit and nothing
+    // else, and its arguments are the files. A rule letting a user RUN
+    // `/etc/motd` does not let them edit it, and a `sudoedit` rule does not
+    // let them run a program called `sudoedit`.
+    if spec == "sudoedit" || request.command == b"sudoedit" {
+        return spec == "sudoedit"
+            && request.command == b"sudoedit"
+            && args_match(spec, spec_args, request.args);
     }
-
-    // Negation.
-    if let Some(negated) = spec_cmd.strip_prefix('!') {
-        return !command_path_matches(negated, actual_cmd, dirs);
-    }
-
-    if !command_path_matches(spec_cmd, actual_cmd, dirs) {
-        return false;
-    }
-
-    // If args spec is empty, allow any args.
-    if spec_args.is_empty() || spec_args == "*" {
-        return true;
-    }
-
-    // Otherwise, we would need to compare the actual args against spec_args.
-    // For simplicity, we match if no args restriction or wildcard.
-    true
+    command_path_matches(spec, request.command, dirs) && args_match(spec, spec_args, request.args)
 }
 
-/// Compare command paths, handling directory wildcards.
-/// One sudoers command spec against one actual command path.
+/// Whether a command spec names the caller's program: the path half of
+/// sudoers' `command_matches`.
 ///
-/// `spec` is text — it came out of `/etc/sudoers`, which this crate reads with
-/// `read_to_string`. `actual` is bytes, for the reason [`check_authorization`]
-/// gives. Every comparison below is therefore between `spec`'s bytes and
-/// `actual`, which decides exactly what the `&str`/`&str` version decided for
-/// every path that *was* text, and answers rather than aborting for the rest.
+/// Both are compared as whole paths, and the caller's is resolved first: on
+/// the secure path when it names no directory, then made canonical, so
+/// `/usr/bin/../../tmp/evil` is `/tmp/evil` before any rule looks at it and a
+/// symlink is the file it points to. Then:
+///
+/// * a spec with a glob character (`*`, `?`, `[`) matches as sudoers'
+///   `fnmatch` with `FNM_PATHNAME` does -- a `*` never crosses a `/`, so
+///   `/usr/bin/*` is the programs in `/usr/bin` and nothing below or beside
+///   it;
+/// * a spec ending in `/` names every program directly in that directory;
+/// * any other spec names one program: the same file, compared canonically
+///   when both exist and by name when either does not, which is upstream's
+///   own fallback.
+///
+/// Until 2026-10-01 a pattern was a prefix test on the path as typed, so
+/// `alice ALL = /usr/bin/*` authorised `sudo /usr/bin/../../tmp/evil`.
+///
+/// `spec` is text -- it came out of `/etc/sudoers`. `actual` is bytes, for the
+/// reason [`Request`] gives, so a program whose path is not text can match
+/// only a pattern or a rule naming the same file.
 fn command_path_matches(spec: &str, actual: &[u8], dirs: &[&str]) -> bool {
-    let spec_bytes = spec.as_bytes();
-    if spec_bytes == actual {
-        return true;
+    let resolved = resolve_for_match(actual, dirs);
+    let canonical = canonical_path(&resolved);
+    if has_glob_meta(spec) {
+        // A program that does not exist cannot run, so matching it by name
+        // grants nothing -- but only a path with no `.`, `..` or empty
+        // component may be matched that way, or the canonical form would be
+        // what decides after all.
+        let subject = canonical
+            .as_deref()
+            .or_else(|| is_clean_absolute(&resolved).then_some(resolved.as_slice()));
+        return subject
+            .is_some_and(|path| fnmatch::fnmatch(spec.as_bytes(), path, fnmatch::Flags::PATHNAME));
     }
-    // Wildcard: `/usr/bin/*` matches any command in `/usr/bin/`.
-    // `strip_suffix` rather than `ends_with` followed by a length subtraction:
-    // it removes the character it names, so the two cannot disagree about how
-    // much to trim.
-    if let Some(dir) = spec.strip_suffix('*')
-        && dir.ends_with('/')
+    if spec.len() > 1
+        && let Some(dir) = spec.strip_suffix('/')
     {
-        return actual.starts_with(dir.as_bytes());
+        // Every program directly in `dir`: the canonical program's parent
+        // is the canonical directory.
+        let want = canonical_path(dir.as_bytes()).unwrap_or_else(|| dir.as_bytes().to_vec());
+        return canonical
+            .as_deref()
+            .and_then(parent_of)
+            .is_some_and(|parent| parent == want);
     }
     // AN UNQUALIFIED SPEC IS RESOLVED, NOT BASENAME-MATCHED.
     //
@@ -1499,9 +1671,50 @@ fn command_path_matches(spec: &str, actual: &[u8], dirs: &[&str]) -> bool {
         let Some(spec_full) = first_on_secure_path(spec, dirs) else {
             return false;
         };
-        return resolve_for_match(actual, dirs) == spec_full.as_bytes();
+        return same_program(spec_full.as_bytes(), &resolved, canonical.as_deref());
     }
-    false
+    same_program(spec.as_bytes(), &resolved, canonical.as_deref())
+}
+
+/// Whether a rule's path and the caller's resolved program are the same
+/// program: the same canonical path when both exist, the same name when
+/// either does not.
+fn same_program(spec: &[u8], resolved: &[u8], canonical: Option<&[u8]>) -> bool {
+    match (canonical_path(spec), canonical) {
+        (Some(want), Some(have)) => want == have,
+        _ => spec == resolved,
+    }
+}
+
+/// `path` with every symlink, `.` and `..` resolved, as bytes; `None` when it
+/// does not exist or cannot be resolved.
+fn canonical_path(path: &[u8]) -> Option<Vec<u8>> {
+    let resolved = fs::canonicalize(Path::new(&os_from_bytes(path))).ok()?;
+    Some(os_bytes(resolved.as_os_str()).into_owned())
+}
+
+/// Whether `path` is absolute and has no `.`, `..` or empty component: a path
+/// whose text is already its canonical form, symlinks aside.
+fn is_clean_absolute(path: &[u8]) -> bool {
+    let Some(rest) = path.strip_prefix(b"/") else {
+        return false;
+    };
+    rest.split(|&b| b == b'/')
+        .all(|part| !part.is_empty() && part != b"." && part != b"..")
+}
+
+/// Everything before the last `/` of an absolute path: `/` for `/x`.
+fn parent_of(path: &[u8]) -> Option<&[u8]> {
+    match path.iter().rposition(|&b| b == b'/') {
+        Some(0) => Some(b"/"),
+        Some(i) => path.get(..i),
+        None => None,
+    }
+}
+
+/// Whether a command spec is a pattern: sudoers' `has_meta`.
+fn has_glob_meta(spec: &str) -> bool {
+    spec.contains(['*', '?', '['])
 }
 
 /// The first executable named `command` in `dirs`, or `None`.
@@ -3236,48 +3449,42 @@ fn run_sudo(args: &[OsString]) -> i32 {
     // Determine the actual command.
     let target = get_user_info(&opts.target_user);
     let (target_home, target_shell) = (target.home.clone(), target.shell.clone());
-    let effective_command: Vec<OsString> = if opts.command.is_empty() {
-        // -i or -s without command: run the target user's shell.
-        vec![OsString::from(target_shell.clone())]
-    } else {
-        opts.command.clone()
-    };
 
-    // The whole command as one string, for `sh -c` and for the log. Built by
-    // pushing rather than by `join`, because `[OsString]` has no `join` and
-    // because the alternative -- joining the *lossy* forms -- would hand the
-    // shell a different command from the one that was authorised.
-    let command_str = {
-        let mut joined = OsString::new();
-        for (i, part) in effective_command.iter().enumerate() {
-            if i > 0 {
-                joined.push(" ");
-            }
-            joined.push(part);
-        }
-        joined
-    };
-
-    // Bind the program and its arguments in the same step that proves there is
-    // a program, rather than indexing `[0]` at three later points that each
-    // rest on the emptiness argument above still holding. Both branches of the
-    // `if` produce a non-empty vector, so this cannot fire -- but this is the
-    // crate that decides which user runs what, and "cannot fire" is exactly the
-    // reasoning that stops being true when the branches above are edited.
-    let Some((program, program_args)) = effective_command.split_first() else {
+    // What runs, and what sudoers is asked about -- the same thing, as upstream
+    // arranges it. See `invocation`: with `-s` or `-i` it is the shell.
+    let Some((program, program_args)) = invocation(&opts, &target_shell) else {
         eprintln!("sudo: no command to execute");
         print_sudo_usage();
         return 1;
     };
 
+    // The whole command as one string, for the log and the messages: the
+    // program and its arguments as they will run. Built by pushing rather than
+    // by `join`, because `[OsString]` has no `join` and because joining the
+    // *lossy* forms would record a different command from the one authorised.
+    let command_str = {
+        let mut joined = program.clone();
+        for part in &program_args {
+            joined.push(" ");
+            joined.push(part);
+        }
+        joined
+    };
+
     // Check authorization.
+    let program_bytes = os_bytes(&program).into_owned();
+    let joined_args = user_args(&program_args);
+    let request = Request {
+        command: &program_bytes,
+        args: joined_args.as_deref(),
+    };
     let auth_result = check_authorization(
         &config,
         &username,
         &hostname,
         &opts.target_user,
         &opts.target_group,
-        &os_bytes(program),
+        &request,
         &user_groups,
     );
 
@@ -3366,14 +3573,31 @@ fn run_sudo(args: &[OsString]) -> i32 {
         "ALLOWED",
     );
 
-    // Execute the command: a child process, which `become_user` below turns
-    // into the target user between fork and exec. Real sudo also runs the
-    // command as a child (it stays to log and relay signals), so this is not
-    // a stand-in for an `exec` -- the comment here said "we simulate" until
-    // 2026-10-01, which was false and read as a fabrication in the §1045
-    // triage.
-    let mut cmd = process::Command::new(program);
-    cmd.args(program_args);
+    // Execute the program sudoers authorised: the same resolution
+    // `command_path_matches` judged -- on the secure path when unqualified,
+    // then canonical -- so the file that runs is the file that was allowed,
+    // whatever `PATH` or a symlink says by the time the child starts. A child
+    // process, which `become_user` below turns into the target user between
+    // fork and exec; real sudo also runs the command as a child (it stays to
+    // log and relay signals).
+    let secure = secure_path_of(&config);
+    let dirs = path_dirs(&secure);
+    let resolved = resolve_for_match(&program_bytes, &dirs);
+    let exec_path = os_from_bytes(&canonical_path(&resolved).unwrap_or(resolved));
+    let mut cmd = process::Command::new(&exec_path);
+    // The name the program sees is the one the caller gave -- and for `-i`,
+    // the login form (`-sh`), which is how a shell is told it is a login
+    // shell, as upstream tells it.
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt as _;
+        if opts.login_shell {
+            cmd.arg0(authlib::identity::login_argv0(&program));
+        } else {
+            cmd.arg0(&program);
+        }
+    }
+    cmd.args(&program_args);
 
     // Set the environment.
     cmd.env_clear();
@@ -3384,28 +3608,6 @@ fn run_sudo(args: &[OsString]) -> i32 {
     if opts.login_shell {
         cmd.current_dir(&target_home);
     }
-
-    // If -i, wrap in shell -l.
-    let mut cmd = if opts.login_shell && !opts.command.is_empty() {
-        let mut shell_cmd = process::Command::new(&target_shell);
-        shell_cmd.arg("-l").arg("-c").arg(&command_str);
-        shell_cmd.env_clear();
-        for (key, val) in &_env {
-            shell_cmd.env(key, val);
-        }
-        shell_cmd.current_dir(&target_home);
-        shell_cmd
-    } else if opts.shell && !opts.command.is_empty() {
-        let mut shell_cmd = process::Command::new(&target_shell);
-        shell_cmd.arg("-c").arg(&command_str);
-        shell_cmd.env_clear();
-        for (key, val) in &_env {
-            shell_cmd.env(key, val);
-        }
-        shell_cmd
-    } else {
-        cmd
-    };
 
     // Become the target user. Until now `sudo` authorised the command against
     // `/etc/sudoers` and then ran it as the caller: the environment named the
@@ -3424,10 +3626,56 @@ fn run_sudo(args: &[OsString]) -> i32 {
     match cmd.status() {
         Ok(status) => status.code().unwrap_or(1),
         Err(e) => {
-            eprintln!("sudo: unable to execute {}: {e}", quoteaf_os(program));
+            eprintln!("sudo: unable to execute {}: {e}", quoteaf_os(&program));
             1
         }
     }
+}
+
+/// The program `sudo` runs and its arguments -- which is also what sudoers is
+/// asked about, as upstream's `parse_args` arranges it.
+///
+/// Without `-s` or `-i` that is the command line as given. With either it is
+/// the shell: alone, `sudo -s` runs it; with a command, it runs as
+/// `SHELL -c CMD`, every byte of the words that is not a letter, a digit, `_`,
+/// `-` or `$` escaped with a backslash, so the shell runs the words as typed
+/// and splits nothing of its own. Until 2026-10-01 the first WORD was
+/// authorised and the unescaped line handed to `sh -c`, so a caller allowed
+/// `ls` could run `sudo -s ls '&& id'`.
+///
+/// `None` when there is nothing to run.
+fn invocation(opts: &SudoOpts, target_shell: &str) -> Option<(OsString, Vec<OsString>)> {
+    if opts.shell || opts.login_shell {
+        let shell = OsString::from(target_shell);
+        if opts.command.is_empty() {
+            return Some((shell, Vec::new()));
+        }
+        return Some((
+            shell,
+            vec![OsString::from("-c"), shell_escaped_command(&opts.command)],
+        ));
+    }
+    let (program, args) = opts.command.split_first()?;
+    Some((program.clone(), args.to_vec()))
+}
+
+/// The words of a command, joined by single spaces, each byte that is not an
+/// ASCII letter or digit, `_`, `-` or `$` preceded by a backslash: what
+/// upstream's `parse_args` hands the shell for `sudo -s CMD`.
+fn shell_escaped_command(words: &[OsString]) -> OsString {
+    let mut out = Vec::new();
+    for (i, word) in words.iter().enumerate() {
+        if i > 0 {
+            out.push(b' ');
+        }
+        for &b in os_bytes(word).iter() {
+            if !(b.is_ascii_alphanumeric() || b == b'_' || b == b'-' || b == b'$') {
+                out.push(b'\\');
+            }
+            out.push(b);
+        }
+    }
+    os_from_bytes(&out)
 }
 
 /// Load and parse the sudoers file.
@@ -3458,37 +3706,39 @@ fn run_sudoedit(files: &[OsString]) -> i32 {
         }
     };
 
-    // Check authorization for sudoedit.
-    let auth_result = check_authorization(
+    // Check authorization: the pseudo-command `sudoedit` with the files as
+    // its arguments, as upstream asks it. Until 2026-10-01 a refusal was
+    // followed by asking whether the user might RUN each file -- so a rule
+    // letting a user run `/etc/motd` let them edit it, while a real
+    // `sudoedit /etc/motd` rule counted only if it allowed every file.
+    let files_args = user_args(files);
+    let request = Request {
+        command: b"sudoedit",
+        args: files_args.as_deref(),
+    };
+    if check_authorization(
         &config,
         &username,
         &hostname,
         "root",
         "",
-        b"sudoedit",
+        &request,
         &user_groups,
-    );
-
-    if auth_result.is_none() {
-        // Also check for the specific files.
-        for file in files {
-            let result = check_authorization(
-                &config,
-                &username,
-                &hostname,
-                "root",
-                "",
-                &os_bytes(file),
-                &user_groups,
-            );
-            if result.is_none() {
-                eprintln!(
-                    "sudoedit: {username} is not allowed to edit {} on {hostname}",
-                    quoteaf_os(file)
-                );
-                return 1;
+    )
+    .is_none()
+    {
+        let mut named = OsString::new();
+        for (i, file) in files.iter().enumerate() {
+            if i > 0 {
+                named.push(" ");
             }
+            named.push(file);
         }
+        eprintln!(
+            "sudoedit: {username} is not allowed to edit {} on {hostname}",
+            quoteaf_os(&named)
+        );
+        return 1;
     }
 
     let editor = editor_command();
@@ -4841,7 +5091,7 @@ alice ALL = (root) /usr/bin/apt, NOPASSWD: /usr/bin/ls
             "localhost",
             "root",
             "",
-            b"/usr/bin/ls",
+            &Request::bare(b"/usr/bin/ls"),
             &["root".to_string()],
         );
         assert!(result.is_some());
@@ -4856,7 +5106,7 @@ alice ALL = (root) /usr/bin/apt, NOPASSWD: /usr/bin/ls
             "localhost",
             "root",
             "",
-            b"/usr/bin/ls",
+            &Request::bare(b"/usr/bin/ls"),
             &["alice".to_string()],
         );
         assert!(result.is_none());
@@ -4871,7 +5121,7 @@ alice ALL = (root) /usr/bin/apt, NOPASSWD: /usr/bin/ls
             "localhost",
             "root",
             "",
-            b"/usr/bin/apt",
+            &Request::bare(b"/usr/bin/apt"),
             &["alice".to_string()],
         );
         assert!(result.is_some());
@@ -4886,7 +5136,7 @@ alice ALL = (root) /usr/bin/apt, NOPASSWD: /usr/bin/ls
             "localhost",
             "root",
             "",
-            b"/usr/bin/rm",
+            &Request::bare(b"/usr/bin/rm"),
             &["alice".to_string()],
         );
         assert!(result.is_none());
@@ -4901,7 +5151,7 @@ alice ALL = (root) /usr/bin/apt, NOPASSWD: /usr/bin/ls
             "localhost",
             "root",
             "",
-            b"/usr/bin/ls",
+            &Request::bare(b"/usr/bin/ls"),
             &["alice".to_string(), "wheel".to_string()],
         );
         assert!(result.is_some());
@@ -4916,7 +5166,7 @@ alice ALL = (root) /usr/bin/apt, NOPASSWD: /usr/bin/ls
             "localhost",
             "root",
             "",
-            b"/usr/bin/ls",
+            &Request::bare(b"/usr/bin/ls"),
             &["alice".to_string(), "users".to_string()],
         );
         assert!(result.is_none());
@@ -4932,7 +5182,7 @@ alice ALL = (root) /usr/bin/apt, NOPASSWD: /usr/bin/ls
             "localhost",
             "root",
             "",
-            b"/usr/bin/ls",
+            &Request::bare(b"/usr/bin/ls"),
             &["alice".to_string()],
         );
         assert!(result.is_some());
@@ -5040,7 +5290,7 @@ alice ALL = (root) /usr/bin/apt, NOPASSWD: /usr/bin/ls
             "db1",
             "root",
             "",
-            b"/usr/bin/ls",
+            &Request::bare(b"/usr/bin/ls"),
             &["alice".to_string()],
         );
         assert!(result.is_none());
@@ -5055,7 +5305,7 @@ alice ALL = (root) /usr/bin/apt, NOPASSWD: /usr/bin/ls
             "web1",
             "root",
             "",
-            b"/usr/bin/ls",
+            &Request::bare(b"/usr/bin/ls"),
             &["alice".to_string()],
         );
         assert!(result.is_some());
@@ -5071,7 +5321,7 @@ alice ALL = (root) /usr/bin/apt, NOPASSWD: /usr/bin/ls
             "web2",
             "root",
             "",
-            b"/usr/bin/ls",
+            &Request::bare(b"/usr/bin/ls"),
             &["alice".to_string()],
         );
         assert!(result.is_some());
@@ -5086,7 +5336,7 @@ alice ALL = (root) /usr/bin/apt, NOPASSWD: /usr/bin/ls
             "localhost",
             "root",
             "",
-            b"/usr/bin/ls",
+            &Request::bare(b"/usr/bin/ls"),
             &["alice".to_string()],
         );
         assert!(result.is_none());
@@ -5103,7 +5353,7 @@ alice ALL = (root) /usr/bin/apt, NOPASSWD: /usr/bin/ls
             "localhost",
             "root",
             "",
-            b"/sbin/ifconfig",
+            &Request::bare(b"/sbin/ifconfig"),
             &["alice".to_string()],
         );
         assert!(result.is_some());
@@ -5118,7 +5368,7 @@ alice ALL = (root) /usr/bin/apt, NOPASSWD: /usr/bin/ls
             "localhost",
             "root",
             "",
-            b"/usr/bin/apt",
+            &Request::bare(b"/usr/bin/apt"),
             &["alice".to_string()],
         );
         assert!(spec.is_some());
@@ -5137,7 +5387,7 @@ alice ALL = (root) /usr/bin/apt, NOPASSWD: /usr/bin/ls
             "localhost",
             "root",
             "",
-            b"/usr/bin/ls",
+            &Request::bare(b"/usr/bin/ls"),
             &["alice".to_string()],
         );
         assert!(spec.is_some());
@@ -5153,7 +5403,7 @@ alice ALL = (root) /usr/bin/apt, NOPASSWD: /usr/bin/ls
             "localhost",
             "root",
             "",
-            b"/usr/bin/anything",
+            &Request::bare(b"/usr/bin/anything"),
             &["alice".to_string()],
         );
         assert!(result.is_some());
@@ -5168,7 +5418,7 @@ alice ALL = (root) /usr/bin/apt, NOPASSWD: /usr/bin/ls
             "localhost",
             "root",
             "",
-            b"/usr/sbin/something",
+            &Request::bare(b"/usr/sbin/something"),
             &["alice".to_string()],
         );
         assert!(result.is_none());
@@ -5178,24 +5428,20 @@ alice ALL = (root) /usr/bin/apt, NOPASSWD: /usr/bin/ls
 
     #[test]
     fn command_match_exact() {
-        let aliases = HashMap::new();
         assert!(command_matches(
             "/usr/bin/ls",
             "",
-            b"/usr/bin/ls",
-            &aliases,
+            &Request::bare(b"/usr/bin/ls"),
             &SECURE
         ));
     }
 
     #[test]
     fn command_match_all() {
-        let aliases = HashMap::new();
         assert!(command_matches(
             "ALL",
             "",
-            b"/any/command",
-            &aliases,
+            &Request::bare(b"/any/command"),
             &SECURE
         ));
     }
@@ -6710,5 +6956,321 @@ alice ALL = (root) /usr/bin/apt, NOPASSWD: /usr/bin/ls
         let args = argv(&["-pEnter:", "ls"]);
         let opts = parse_sudo_args(&args).unwrap();
         assert_eq!(opts.prompt, "Enter:");
+    }
+
+    // -- sudoers' authorization rules (2026-10-01) --
+    //
+    // Each of these failed before that day's fix: arguments were ignored, a
+    // negation granted everything but what it named, a pattern was a prefix
+    // test on the path as typed, sudoedit asked about running the file, and
+    // shell mode authorised the first word of a line handed to `sh -c`.
+
+    /// Shorthand: may alice run `command` with `args` under `sudoers`?
+    fn alice_may(sudoers: &str, command: &[u8], args: Option<&[u8]>) -> bool {
+        let config = parse_sudoers(sudoers).expect("sudoers parses");
+        check_authorization(
+            &config,
+            "alice",
+            "localhost",
+            "root",
+            "",
+            &Request { command, args },
+            &["alice".to_string()],
+        )
+        .is_some()
+    }
+
+    #[test]
+    fn a_rules_arguments_restrict_it() {
+        let rule = "alice ALL = (root) /usr/bin/systemctl restart nginx\n";
+        assert!(alice_may(
+            rule,
+            b"/usr/bin/systemctl",
+            Some(b"restart nginx")
+        ));
+        assert!(!alice_may(rule, b"/usr/bin/systemctl", Some(b"stop nginx")));
+        assert!(!alice_may(
+            rule,
+            b"/usr/bin/systemctl",
+            Some(b"restart nginx sshd")
+        ));
+        assert!(!alice_may(rule, b"/usr/bin/systemctl", None));
+    }
+
+    #[test]
+    fn empty_quotes_allow_no_arguments() {
+        let rule = "alice ALL = (root) /usr/bin/id \"\"\n";
+        assert!(alice_may(rule, b"/usr/bin/id", None));
+        assert!(!alice_may(rule, b"/usr/bin/id", Some(b"-u")));
+    }
+
+    #[test]
+    fn a_rule_without_arguments_allows_any() {
+        let rule = "alice ALL = (root) /usr/bin/id\n";
+        assert!(alice_may(rule, b"/usr/bin/id", None));
+        assert!(alice_may(rule, b"/usr/bin/id", Some(b"-u root")));
+    }
+
+    #[test]
+    fn rule_arguments_are_fnmatch_patterns() {
+        let rule = "alice ALL = (root) /usr/bin/systemctl restart *\n";
+        assert!(alice_may(
+            rule,
+            b"/usr/bin/systemctl",
+            Some(b"restart nginx")
+        ));
+        // Not a sudoedit rule, so no FNM_PATHNAME: `*` crosses a `/` here,
+        // as it does upstream.
+        assert!(alice_may(rule, b"/usr/bin/systemctl", Some(b"restart a/b")));
+        assert!(!alice_may(rule, b"/usr/bin/systemctl", Some(b"stop nginx")));
+    }
+
+    #[test]
+    fn rule_arguments_between_caret_and_dollar_are_a_regex() {
+        let rule = "alice ALL = (root) /usr/bin/systemctl ^restart (nginx|apache2)$\n";
+        assert!(alice_may(
+            rule,
+            b"/usr/bin/systemctl",
+            Some(b"restart nginx")
+        ));
+        assert!(alice_may(
+            rule,
+            b"/usr/bin/systemctl",
+            Some(b"restart apache2")
+        ));
+        assert!(!alice_may(
+            rule,
+            b"/usr/bin/systemctl",
+            Some(b"restart sshd")
+        ));
+        // A pattern that does not compile grants nothing.
+        assert!(!alice_may(
+            "alice ALL = (root) /usr/bin/x ^(unclosed$\n",
+            b"/usr/bin/x",
+            Some(b"(unclosed")
+        ));
+    }
+
+    #[test]
+    fn a_negated_command_is_refused_over_all() {
+        let rule = "alice ALL = (root) ALL, !/usr/bin/passwd\n";
+        assert!(!alice_may(rule, b"/usr/bin/passwd", None));
+        assert!(alice_may(rule, b"/usr/bin/id", None));
+        // White space after the `!` is allowed, as sudoers allows it.
+        let spaced = "alice ALL = (root) ALL, ! /usr/bin/passwd\n";
+        assert!(!alice_may(spaced, b"/usr/bin/passwd", None));
+        assert!(alice_may(spaced, b"/usr/bin/id", None));
+    }
+
+    #[test]
+    fn a_negation_alone_grants_nothing() {
+        let rule = "alice ALL = (root) !/usr/bin/passwd\n";
+        assert!(!alice_may(rule, b"/usr/bin/id", None));
+        assert!(!alice_may(rule, b"/usr/bin/passwd", None));
+    }
+
+    #[test]
+    fn a_negated_alias_refuses_its_members() {
+        let rule = "Cmnd_Alias SHELLS = /bin/sh, /bin/bash\n\
+                    alice ALL = (root) ALL, !SHELLS\n";
+        assert!(!alice_may(rule, b"/bin/sh", None));
+        assert!(!alice_may(rule, b"/bin/bash", None));
+        assert!(alice_may(rule, b"/usr/bin/id", None));
+    }
+
+    /// A later privilege decides over an earlier one, as a later line of
+    /// sudoers does.
+    #[test]
+    fn the_last_rule_that_names_the_command_decides() {
+        let allow_last = "alice ALL = (root) !/usr/bin/passwd\nalice ALL = (root) ALL\n";
+        assert!(alice_may(allow_last, b"/usr/bin/passwd", None));
+        let deny_last = "alice ALL = (root) ALL\nalice ALL = (root) !/usr/bin/passwd\n";
+        assert!(!alice_may(deny_last, b"/usr/bin/passwd", None));
+    }
+
+    #[test]
+    fn sudoedit_is_its_own_command() {
+        let rule = "alice ALL = (root) sudoedit /etc/motd\n";
+        assert!(alice_may(rule, b"sudoedit", Some(b"/etc/motd")));
+        assert!(!alice_may(rule, b"sudoedit", Some(b"/etc/shadow")));
+        // Several files are one argument string, which the rule must match.
+        assert!(!alice_may(
+            rule,
+            b"sudoedit",
+            Some(b"/etc/motd /etc/shadow")
+        ));
+        // A rule to RUN a path does not grant editing it.
+        assert!(!alice_may(
+            "alice ALL = (root) /etc/motd\n",
+            b"sudoedit",
+            Some(b"/etc/motd")
+        ));
+        // A sudoedit rule runs nothing.
+        assert!(!alice_may(rule, b"/usr/bin/sudoedit", Some(b"/etc/motd")));
+        // `ALL` includes sudoedit.
+        assert!(alice_may(
+            "alice ALL = (root) ALL\n",
+            b"sudoedit",
+            Some(b"/etc/shadow")
+        ));
+    }
+
+    #[test]
+    fn sudoedit_patterns_do_not_cross_a_slash() {
+        let rule = "alice ALL = (root) sudoedit /etc/*\n";
+        assert!(alice_may(rule, b"sudoedit", Some(b"/etc/motd")));
+        assert!(!alice_may(rule, b"sudoedit", Some(b"/etc/ssh/sshd_config")));
+    }
+
+    /// None of these exists, so each is judged by its text -- and a text with
+    /// `.`, `..` or an empty component is not a path a pattern may match.
+    #[test]
+    fn a_pattern_does_not_match_through_dot_dot() {
+        let rule = "alice ALL = (root) /usr/bin/*\n";
+        assert!(!alice_may(rule, b"/usr/bin/../../tmp/evil", None));
+        assert!(!alice_may(rule, b"/usr/bin/./../sbin/x", None));
+        assert!(!alice_may(rule, b"/usr/bin//x", None));
+        assert!(!alice_may(rule, b"/usr/bin/sub/x", None));
+        assert!(alice_may(rule, b"/usr/bin/nonexistent-tool", None));
+    }
+
+    /// With real files the canonical program is what a pattern sees.
+    #[cfg(unix)]
+    #[test]
+    fn a_pattern_is_matched_against_the_canonical_program() {
+        let dir = ScratchDir::new("sudo_canon");
+        let root = fs::canonicalize(dir.dir())
+            .expect("canonical scratch dir")
+            .to_string_lossy()
+            .to_string();
+        fs::create_dir_all(format!("{root}/bin")).expect("bin");
+        fs::write(format!("{root}/bin/tool"), b"x").expect("tool");
+        fs::write(format!("{root}/evil"), b"x").expect("evil");
+
+        let rule = format!("alice ALL = (root) {root}/bin/*\n");
+        assert!(alice_may(
+            &rule,
+            format!("{root}/bin/tool").as_bytes(),
+            None
+        ));
+        assert!(!alice_may(
+            &rule,
+            format!("{root}/bin/../evil").as_bytes(),
+            None
+        ));
+
+        // A directory rule: every program directly in it.
+        let dir_rule = format!("alice ALL = (root) {root}/bin/\n");
+        assert!(alice_may(
+            &dir_rule,
+            format!("{root}/bin/tool").as_bytes(),
+            None
+        ));
+        assert!(!alice_may(
+            &dir_rule,
+            format!("{root}/evil").as_bytes(),
+            None
+        ));
+        assert!(!alice_may(
+            &dir_rule,
+            format!("{root}/bin/../evil").as_bytes(),
+            None
+        ));
+    }
+
+    #[test]
+    fn shell_mode_runs_the_shell_with_the_words_escaped() {
+        let opts = SudoOpts {
+            shell: true,
+            command: vec![OsString::from("ls"), OsString::from("&& id")],
+            ..SudoOpts::default()
+        };
+        assert_eq!(
+            invocation(&opts, "/bin/sh"),
+            Some((
+                OsString::from("/bin/sh"),
+                vec![OsString::from("-c"), OsString::from("ls \\&\\&\\ id")]
+            ))
+        );
+        // Alone, the shell itself.
+        let alone = SudoOpts {
+            login_shell: true,
+            ..SudoOpts::default()
+        };
+        assert_eq!(
+            invocation(&alone, "/bin/sh"),
+            Some((OsString::from("/bin/sh"), Vec::new()))
+        );
+    }
+
+    #[test]
+    fn without_a_shell_the_command_line_is_the_invocation() {
+        let opts = SudoOpts {
+            command: vec![OsString::from("ls"), OsString::from("-l")],
+            ..SudoOpts::default()
+        };
+        assert_eq!(
+            invocation(&opts, "/bin/sh"),
+            Some((OsString::from("ls"), vec![OsString::from("-l")]))
+        );
+        assert_eq!(invocation(&SudoOpts::default(), "/bin/sh"), None);
+    }
+
+    #[test]
+    fn shell_escaping_is_upstreams() {
+        let words = |w: &[&str]| -> Vec<OsString> { w.iter().map(OsString::from).collect() };
+        assert_eq!(
+            shell_escaped_command(&words(&["a$b_c-d9"])),
+            OsString::from("a$b_c-d9")
+        );
+        assert_eq!(
+            shell_escaped_command(&words(&["x y", "z"])),
+            OsString::from("x\\ y z")
+        );
+        assert_eq!(
+            shell_escaped_command(&words(&["a;b", "'c'"])),
+            OsString::from("a\\;b \\'c\\'")
+        );
+    }
+
+    /// In shell mode the SHELL is what sudoers is asked about, so a caller
+    /// allowed one program cannot reach the shell through it.
+    #[test]
+    fn shell_mode_authorises_the_shell_not_the_first_word() {
+        let opts = SudoOpts {
+            shell: true,
+            command: vec![OsString::from("/usr/bin/id"), OsString::from("&& reboot")],
+            ..SudoOpts::default()
+        };
+        let (program, args) = invocation(&opts, "/bin/sh").expect("something to run");
+        let program = os_bytes(&program).into_owned();
+        let joined = user_args(&args);
+        let config = parse_sudoers("alice ALL = (root) /usr/bin/id\n").expect("parses");
+        let request = Request {
+            command: &program,
+            args: joined.as_deref(),
+        };
+        assert!(
+            check_authorization(
+                &config,
+                "alice",
+                "localhost",
+                "root",
+                "",
+                &request,
+                &["alice".to_string()]
+            )
+            .is_none()
+        );
+    }
+
+    #[test]
+    fn user_args_are_joined_with_single_spaces() {
+        assert_eq!(user_args(&[]), None);
+        assert_eq!(
+            user_args(&[OsString::from("a"), OsString::from("b c")]),
+            Some(b"a b c".to_vec())
+        );
+        assert_eq!(user_args(&[OsString::new()]), Some(Vec::new()));
     }
 }

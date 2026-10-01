@@ -3820,6 +3820,8 @@ name = "sudo"
 version = "0.1.0"
 dependencies = [
  "authlib",
+ "ere",
+ "fnmatch",
  "optionalfile",
  "quoting",
  "scratchdir",

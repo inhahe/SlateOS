@@ -2532,6 +2532,10 @@ command's name -- `lscgroup`, `sar`, `inotifywait`, `xdg-open` -- which also
 corrected the producers named in batches two and three. **The ledger stands at
 57, and every name left in it is decided:** the kept batches wait on lane D's
 manifest, and `visudo` and `sudoreplay` on the split into crates of their own.
+**`sudoreplay` was deleted instead** (2026-10-01, §1049): nothing on SlateOS
+records sudo sessions -- `log_input` and `log_output` are accepted and record
+nothing, which `visudo -c` says -- so it could only ever report that there
+were none. **The ledger stands at 56**; `visudo` alone waits on its crate.
 
 **The 9 new shadowed pairs were the urgent half**, because a shadowed name is
 two implementations that can disagree with the winner picked by packaging:

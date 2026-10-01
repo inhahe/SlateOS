@@ -1,7 +1,7 @@
 //! Slate OS Privileged Command Execution Utility
 //!
-//! Multi-personality binary providing `sudo`, `sudoedit`/`visudo`, and
-//! `sudoreplay` functionality. Personality is detected via `argv[0]` basename,
+//! Multi-personality binary providing `sudo`, `sudoedit` and `visudo`.
+//! Personality is detected via `argv[0]` basename,
 //! stripping any path prefix and `.exe` suffix.
 //!
 //! # Personalities
@@ -9,7 +9,6 @@
 //! - **sudo** (default) — execute a command as another user
 //! - **sudoedit** — safely edit files with elevated privileges
 //! - **visudo** — edit the sudoers file with syntax checking
-//! - **sudoreplay** — replay recorded sudo session logs
 //!
 //! # sudo Usage
 //!
@@ -31,14 +30,11 @@
 //! visudo -s              Strict mode (error on warnings)
 //! ```
 //!
-//! # sudoreplay Usage
-//!
-//! ```text
-//! sudoreplay -l          List recorded sessions
-//! sudoreplay -d dir      Replay from specific directory
-//! sudoreplay -s factor   Set speed factor for replay
-//! sudoreplay [session]   Replay a specific session
-//! ```
+//! Until 2026-10-01 it also answered to `sudoreplay`, which replayed the
+//! session recordings in `/var/log/sudo-io` -- and nothing here makes any:
+//! `log_input` and `log_output` are accepted and record nothing (`visudo -c`
+//! says so), so it could only ever report that there were none. It comes
+//! back with session recording (design-decisions 1049).
 
 #![deny(clippy::all)]
 
@@ -60,7 +56,6 @@ use std::time::{SystemTime, UNIX_EPOCH};
 const SUDOERS_PATH: &str = "/etc/sudoers";
 const TIMESTAMP_DIR: &str = "/var/run/sudo/ts";
 const SUDO_LOG_PATH: &str = "/var/log/sudo.log";
-const SUDO_IO_DIR: &str = "/var/log/sudo-io";
 const DEFAULT_TIMEOUT: u64 = 900; // 15 minutes in seconds
 const DEFAULT_EDITOR: &str = "/usr/bin/vi";
 const DEFAULT_PROMPT: &str = "[sudo] password for %u: ";
@@ -118,7 +113,6 @@ enum Personality {
     Sudo,
     Sudoedit,
     Visudo,
-    Sudoreplay,
 }
 
 impl fmt::Display for Personality {
@@ -127,7 +121,6 @@ impl fmt::Display for Personality {
             Self::Sudo => write!(f, "sudo"),
             Self::Sudoedit => write!(f, "sudoedit"),
             Self::Visudo => write!(f, "visudo"),
-            Self::Sudoreplay => write!(f, "sudoreplay"),
         }
     }
 }
@@ -160,7 +153,6 @@ fn detect_personality<S: AsRef<OsStr>>(argv0: S) -> Personality {
     match base {
         b"sudoedit" => Personality::Sudoedit,
         b"visudo" => Personality::Visudo,
-        b"sudoreplay" => Personality::Sudoreplay,
         _ => Personality::Sudo,
     }
 }
@@ -351,7 +343,13 @@ static KNOWN_DEFAULTS: &[(&str, DefaultShape)] = &[
 /// consumer; the test `honoured_defaults_are_all_known` keeps the two lists
 /// from drifting apart, which is the failure this tree keeps rediscovering
 /// whenever two hand-maintained lists have to agree.
-static HONOURED_DEFAULTS: &[&str] = &["env_check", "env_keep", "env_reset", "timestamp_timeout"];
+static HONOURED_DEFAULTS: &[&str] = &[
+    "env_check",
+    "env_keep",
+    "env_reset",
+    "secure_path",
+    "timestamp_timeout",
+];
 
 /// Look up a setting's shape, or `None` if the name is not in [`KNOWN_DEFAULTS`].
 fn default_shape(name: &str) -> Option<DefaultShape> {
@@ -2254,197 +2252,6 @@ fn is_leap_year(year: u64) -> bool {
 }
 
 // ============================================================================
-// Session I/O recording and replay
-// ============================================================================
-
-/// A recorded session entry.
-#[derive(Debug, Clone)]
-struct SessionEntry {
-    /// The session's directory name. An `OsString` because that is what a
-    /// directory name is: the previous `String` was filled from
-    /// `file_name().and_then(|n| n.to_str())`, whose `None` arm `continue`d --
-    /// so a session directory whose name is not valid UTF-8 did not fail to
-    /// replay, it failed to *appear*, and `sudoreplay -l` listed the recording
-    /// as though it had never been made.
-    id: OsString,
-    user: String,
-    target_user: String,
-    command: String,
-    timestamp: u64,
-    _tty: String,
-}
-
-/// List recorded sessions from the I/O log directory.
-fn list_sessions(io_dir: &OsStr) -> Vec<SessionEntry> {
-    let mut sessions = Vec::new();
-    let dir = Path::new(io_dir);
-    if !dir.is_dir() {
-        return sessions;
-    }
-
-    let entries = match fs::read_dir(dir) {
-        Ok(e) => e,
-        Err(_) => return sessions,
-    };
-
-    for entry in entries {
-        let entry = match entry {
-            Ok(e) => e,
-            Err(_) => continue,
-        };
-        let path = entry.path();
-        if !path.is_dir() {
-            continue;
-        }
-
-        let Some(session_id) = path.file_name().map(OsStr::to_os_string) else {
-            continue;
-        };
-
-        // Read the log file.
-        let log_path = path.join("log");
-        let log_content = match fs::read_to_string(&log_path) {
-            Ok(c) => c,
-            Err(_) => continue,
-        };
-
-        let mut user = String::new();
-        let mut target_user = String::new();
-        let mut command = String::new();
-        let mut timestamp = 0u64;
-        let mut tty = String::new();
-
-        for line in log_content.lines() {
-            if let Some(val) = line.strip_prefix("user=") {
-                user = val.trim().to_string();
-            } else if let Some(val) = line.strip_prefix("runas_user=") {
-                target_user = val.trim().to_string();
-            } else if let Some(val) = line.strip_prefix("command=") {
-                command = val.trim().to_string();
-            } else if let Some(val) = line.strip_prefix("timestamp=") {
-                timestamp = val.trim().parse().unwrap_or(0);
-            } else if let Some(val) = line.strip_prefix("tty=") {
-                tty = val.trim().to_string();
-            }
-        }
-
-        sessions.push(SessionEntry {
-            id: session_id,
-            user,
-            target_user,
-            command,
-            timestamp,
-            _tty: tty,
-        });
-    }
-
-    sessions.sort_by_key(|b| std::cmp::Reverse(b.timestamp));
-    sessions
-}
-
-/// Replay a recorded session.
-fn replay_session(io_dir: &OsStr, session_id: &OsStr, speed_factor: f64) -> Result<(), SudoError> {
-    let session_dir = Path::new(io_dir).join(session_id);
-    if !session_dir.is_dir() {
-        return Err(SudoError::IoError(format!(
-            "session directory not found: {}",
-            session_dir.display()
-        )));
-    }
-
-    // Read timing file.
-    let timing_path = session_dir.join("timing");
-    let timing_content = fs::read_to_string(&timing_path)
-        .map_err(|e| SudoError::IoError(format!("cannot read timing file: {e}")))?;
-
-    // Read stdout data.
-    let stdout_path = session_dir.join("stdout");
-    let stdout_data = fs::read(&stdout_path)
-        .map_err(|e| SudoError::IoError(format!("cannot read stdout file: {e}")))?;
-
-    // Read log info.
-    let log_path = session_dir.join("log");
-    if let Ok(log_content) = fs::read_to_string(&log_path) {
-        eprintln!("Replaying session {}:", quoteaf_os(session_id));
-        for line in log_content.lines() {
-            eprintln!("  {line}");
-        }
-        eprintln!();
-    }
-
-    // Parse and replay timing entries.
-    // Format: TYPE SECONDS BYTES
-    // TYPE: 1 = stdout, 2 = stderr, 3 = stdin
-    let mut offset = 0usize;
-    let stdout = io::stdout();
-    let mut out = stdout.lock();
-
-    for line in timing_content.lines() {
-        let parts: Vec<&str> = line.split_whitespace().collect();
-        // A slice pattern rather than a length test followed by three indexes:
-        // the guard and the accesses were two statements of one fact, and only
-        // the pattern keeps them from disagreeing.
-        let [stream_text, delay_text, nbytes_text, ..] = parts.as_slice() else {
-            continue;
-        };
-
-        let stream_type: u32 = match stream_text.parse() {
-            Ok(t) => t,
-            Err(_) => continue,
-        };
-        let delay_secs: f64 = match delay_text.parse() {
-            Ok(d) => d,
-            Err(_) => continue,
-        };
-        let nbytes: usize = match nbytes_text.parse() {
-            Ok(n) => n,
-            Err(_) => continue,
-        };
-
-        // Apply speed factor to delay.
-        let adjusted_delay = delay_secs / speed_factor;
-        if adjusted_delay > 0.001 {
-            // Sleep for the adjusted delay.
-            // On Slate OS, this would use the real sleep syscall.
-            // For now, spin-wait approximation.
-            let target =
-                current_epoch_nanos().saturating_add((adjusted_delay * 1_000_000_000.0) as u64);
-            while current_epoch_nanos() < target {
-                std::hint::spin_loop();
-            }
-        }
-
-        // Only replay stdout (type 1).
-        if stream_type == 1 {
-            let end = offset.saturating_add(nbytes).min(stdout_data.len());
-            // `get` rather than a slice plus a separate `offset <` test: the
-            // range is clamped above, and asking for it returns None instead of
-            // panicking if a timing file ever describes bytes past the log.
-            if let Some(chunk) = stdout_data.get(offset..end) {
-                // Errors ignored: replay is best-effort output to a terminal
-                // that may have gone away, and there is nothing to recover.
-                let _ = out.write_all(chunk);
-                let _ = out.flush();
-            }
-            offset = end;
-        } else {
-            offset = offset.saturating_add(nbytes);
-        }
-    }
-
-    eprintln!("\nReplay finished.");
-    Ok(())
-}
-
-/// Get current time in nanoseconds (approximate).
-fn current_epoch_nanos() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_nanos() as u64)
-        .unwrap_or(0)
-}
-
-// ============================================================================
 // Prompt and authentication
 // ============================================================================
 
@@ -3198,85 +3005,6 @@ fn parse_visudo_args(args: &[OsString]) -> Result<VisudoOpts, SudoError> {
 }
 
 // ============================================================================
-// Sudoreplay options
-// ============================================================================
-
-/// Parsed command-line options for the sudoreplay personality.
-///
-/// `directory` and `session_id` are [`OsString`] because both are joined into
-/// a path — the session id is a directory name under `directory`, not a label.
-/// `speed_factor` stays an `f64`: it is a number, and a value that does not
-/// parse as one was already an error before any of this.
-#[derive(Debug)]
-struct SudoreplayOpts {
-    list: bool,
-    directory: OsString,
-    speed_factor: f64,
-    session_id: Option<OsString>,
-}
-
-impl Default for SudoreplayOpts {
-    fn default() -> Self {
-        Self {
-            list: false,
-            directory: OsString::from(SUDO_IO_DIR),
-            speed_factor: 1.0,
-            session_id: None,
-        }
-    }
-}
-
-/// Parse sudoreplay command-line arguments.
-fn parse_sudoreplay_args(args: &[OsString]) -> Result<SudoreplayOpts, SudoError> {
-    let mut opts = SudoreplayOpts::default();
-    // A slice cursor, as in `parse_sudo_args` and `parse_visudo_args`.
-    let mut rest = args;
-
-    while let Some((arg, tail)) = rest.split_first() {
-        rest = tail;
-        // On bytes, as in `parse_visudo_args`, and for the same reason.
-        match &*os_bytes(arg) {
-            b"-l" => opts.list = true,
-            b"-d" => {
-                let Some((value, after_value)) = rest.split_first() else {
-                    return Err(SudoError::UsageError("-d requires an argument".to_string()));
-                };
-                opts.directory = value.clone();
-                rest = after_value;
-            }
-            b"-s" => {
-                let Some((value, after_value)) = rest.split_first() else {
-                    return Err(SudoError::UsageError("-s requires an argument".to_string()));
-                };
-                rest = after_value;
-                // A speed factor that is not text is not a number either, so it
-                // takes the same arm as `-s wombat` rather than a second one.
-                opts.speed_factor = value
-                    .to_str()
-                    .and_then(|v| v.parse::<f64>().ok())
-                    .ok_or_else(|| SudoError::UsageError("invalid speed factor".to_string()))?;
-                if opts.speed_factor <= 0.0 {
-                    return Err(SudoError::UsageError(
-                        "speed factor must be positive".to_string(),
-                    ));
-                }
-            }
-            other if other.starts_with(b"-") => {
-                return Err(SudoError::UsageError(format!(
-                    "unknown option: {}",
-                    quoteaf_os(arg)
-                )));
-            }
-            _ => {
-                opts.session_id = Some(arg.clone());
-            }
-        }
-    }
-
-    Ok(opts)
-}
-
-// ============================================================================
 // Usage messages
 // ============================================================================
 
@@ -3296,13 +3024,6 @@ fn print_visudo_usage() {
     eprintln!("       -c          Check syntax only");
     eprintln!("       -f file     Edit alternate sudoers file");
     eprintln!("       -s          Strict mode (error on warnings)");
-}
-
-fn print_sudoreplay_usage() {
-    eprintln!("usage: sudoreplay [-l] [-d dir] [-s speed_factor] [session_id]");
-    eprintln!("       -l          List recorded sessions");
-    eprintln!("       -d dir      Session I/O directory");
-    eprintln!("       -s factor   Playback speed factor");
 }
 
 // ============================================================================
@@ -4527,73 +4248,6 @@ fn edit_sudoers(_path: &Path, _strict: bool, _editor: &[OsString]) -> i32 {
     1
 }
 
-/// Main entry point for the `sudoreplay` personality.
-fn run_sudoreplay(args: &[OsString]) -> i32 {
-    let opts = match parse_sudoreplay_args(args) {
-        Ok(o) => o,
-        Err(e) => {
-            eprintln!("sudoreplay: {e}");
-            print_sudoreplay_usage();
-            return 1;
-        }
-    };
-
-    // List mode.
-    if opts.list {
-        let sessions = list_sessions(&opts.directory);
-        if sessions.is_empty() {
-            println!(
-                "No recorded sessions found in {}",
-                quoteaf_os(&opts.directory)
-            );
-            return 0;
-        }
-
-        println!(
-            "{:<12} {:<12} {:<12} {:<20} COMMAND",
-            "SESSION", "USER", "RUNAS", "DATE"
-        );
-        println!("{}", "-".repeat(76));
-
-        for session in &sessions {
-            let date = format_timestamp(session.timestamp);
-            // `escape_os`, not the raw name: this is a fixed-width table, and
-            // a session directory named with a newline or a tab would otherwise
-            // rewrite the rows below it. A name that is already plain text
-            // comes through `escape_os` unchanged, so the ordinary listing is
-            // exactly as it was.
-            println!(
-                "{:<12} {:<12} {:<12} {:<20} {}",
-                escape_os(&session.id),
-                session.user,
-                session.target_user,
-                date,
-                session.command
-            );
-        }
-
-        return 0;
-    }
-
-    // Replay mode.
-    let session_id = match &opts.session_id {
-        Some(id) => id.clone(),
-        None => {
-            eprintln!("sudoreplay: no session specified");
-            print_sudoreplay_usage();
-            return 1;
-        }
-    };
-
-    match replay_session(&opts.directory, &session_id, opts.speed_factor) {
-        Ok(()) => 0,
-        Err(e) => {
-            eprintln!("sudoreplay: {e}");
-            1
-        }
-    }
-}
-
 // ============================================================================
 // Main entry point
 // ============================================================================
@@ -4627,7 +4281,6 @@ fn main() {
         Personality::Sudo => run_sudo(rest),
         Personality::Sudoedit => run_sudoedit(rest),
         Personality::Visudo => run_visudo(rest),
-        Personality::Sudoreplay => run_sudoreplay(rest),
     };
 
     process::exit(exit_code);
@@ -5112,19 +4765,6 @@ mod tests {
     }
 
     #[test]
-    fn personality_detect_sudoreplay() {
-        assert_eq!(detect_personality("sudoreplay"), Personality::Sudoreplay);
-    }
-
-    #[test]
-    fn personality_detect_sudoreplay_path() {
-        assert_eq!(
-            detect_personality("/usr/bin/sudoreplay"),
-            Personality::Sudoreplay
-        );
-    }
-
-    #[test]
     fn personality_detect_unknown_defaults_sudo() {
         assert_eq!(detect_personality("foobar"), Personality::Sudo);
     }
@@ -5154,7 +4794,6 @@ mod tests {
         assert_eq!(format!("{}", Personality::Sudo), "sudo");
         assert_eq!(format!("{}", Personality::Sudoedit), "sudoedit");
         assert_eq!(format!("{}", Personality::Visudo), "visudo");
-        assert_eq!(format!("{}", Personality::Sudoreplay), "sudoreplay");
     }
 
     // -- Sudoers parser tests --
@@ -6742,18 +6381,6 @@ alice ALL = (root) /usr/bin/apt, NOPASSWD: /usr/bin/ls
         assert_eq!(opts.file, wanted);
     }
 
-    /// Likewise the I/O-log directory and the session id, which are both
-    /// directory names.
-    #[test]
-    fn sudoreplay_takes_the_directory_and_session_as_bytes() {
-        let dir = not_text("/var/log/io", "");
-        let sess = not_text("sess", "");
-        let opts =
-            parse_sudoreplay_args(&[OsString::from("-d"), dir.clone(), sess.clone()]).unwrap();
-        assert_eq!(opts.directory, dir);
-        assert_eq!(opts.session_id, Some(sess));
-    }
-
     /// argv[0] chooses the personality, and it is a path like any other. A
     /// directory component that is not text must not stop `visudo` being
     /// `visudo` — the basename is the only part that decides.
@@ -6927,64 +6554,6 @@ alice ALL = (root) /usr/bin/apt, NOPASSWD: /usr/bin/ls
     fn parse_visudo_f_missing_value() {
         let args = argv(&["-f"]);
         assert!(parse_visudo_args(&args).is_err());
-    }
-
-    // -- Sudoreplay option parsing tests --
-
-    #[test]
-    fn parse_sudoreplay_defaults() {
-        let args: Vec<OsString> = vec![];
-        let opts = parse_sudoreplay_args(&args).unwrap();
-        assert!(!opts.list);
-        assert_eq!(opts.directory, SUDO_IO_DIR);
-        assert!((opts.speed_factor - 1.0).abs() < f64::EPSILON);
-        assert!(opts.session_id.is_none());
-    }
-
-    #[test]
-    fn parse_sudoreplay_list() {
-        let args = argv(&["-l"]);
-        let opts = parse_sudoreplay_args(&args).unwrap();
-        assert!(opts.list);
-    }
-
-    #[test]
-    fn parse_sudoreplay_directory() {
-        let args = argv(&["-d", "/tmp/logs"]);
-        let opts = parse_sudoreplay_args(&args).unwrap();
-        assert_eq!(opts.directory, "/tmp/logs");
-    }
-
-    #[test]
-    fn parse_sudoreplay_speed() {
-        let args = argv(&["-s", "2.5"]);
-        let opts = parse_sudoreplay_args(&args).unwrap();
-        assert!((opts.speed_factor - 2.5).abs() < f64::EPSILON);
-    }
-
-    #[test]
-    fn parse_sudoreplay_session_id() {
-        let args = argv(&["abc123"]);
-        let opts = parse_sudoreplay_args(&args).unwrap();
-        assert_eq!(opts.session_id.as_deref(), Some(OsStr::new("abc123")));
-    }
-
-    #[test]
-    fn parse_sudoreplay_negative_speed() {
-        let args = argv(&["-s", "-1"]);
-        assert!(parse_sudoreplay_args(&args).is_err());
-    }
-
-    #[test]
-    fn parse_sudoreplay_zero_speed() {
-        let args = argv(&["-s", "0"]);
-        assert!(parse_sudoreplay_args(&args).is_err());
-    }
-
-    #[test]
-    fn parse_sudoreplay_invalid_speed() {
-        let args = argv(&["-s", "notanumber"]);
-        assert!(parse_sudoreplay_args(&args).is_err());
     }
 
     // -- Validation tests --

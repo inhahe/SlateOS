@@ -211,6 +211,7 @@ reads; `xdg-mime` and `mimeopen` share `xdg-open`'s MIME table and its
 `mimeapps.list`. The producers are binary names: `inotifywait` and `xdg-open`
 are the `inotify` and `xdg` crates, built under those names since today. With
 this batch every name in `scripts/multicall-aliases-baseline.txt` is decided:
-each is either in one of this file's six batches, or is `visudo` or
-`sudoreplay`, which lane B is moving into crates of their own and which will
-need no line here.
+each is either in one of this file's six batches, or is `visudo`, which lane B
+is moving into a crate of its own and which will need no line here.
+`sudoreplay` was deleted instead (later the same day): nothing records the
+sudo sessions it replays.

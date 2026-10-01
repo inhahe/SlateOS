@@ -253,7 +253,7 @@ two disagree.
 | `strings` | Print the printable character sequences in a file. | yes | `coreutils` |  |
 | `stty` | Terminal Settings Utility |  |  |  |
 | `su` | User Switching Utility (`su`) |  |  |  |
-| `sudo` | Privileged Command Execution Utility |  |  | `sudoedit` *(not installed)*, `sudoreplay` *(not installed)*, `visudo` *(not installed)* |
+| `sudo` | Privileged Command Execution Utility |  |  | `sudoedit` *(not installed)*, `visudo` *(not installed)* |
 | `sum` | Checksum and count the blocks in a file. |  | `coreutils` |  |
 | `swapoff` | Disable devices and files for paging and swapping. |  | `swapon` |  |
 | `swapon` | Enable devices and files for paging and swapping. |  |  |  |

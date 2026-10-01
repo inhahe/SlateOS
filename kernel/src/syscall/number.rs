@@ -5795,6 +5795,38 @@ pub const SYS_PROCESS_SET_PRIORITY: u64 = 1089;
 pub const SYS_PROCESS_SET_EXEC_CLOSE: u64 = 1090;
 
 // ---------------------------------------------------------------------------
+// Watch events whose paths are not cut (1091)
+// ---------------------------------------------------------------------------
+
+/// Read pending filesystem-watch events as variable-length records:
+/// `fs_watch_read_records(watch_id, buf, buf_len) -> bytes`.
+///
+/// [`SYS_FS_WATCH_READ`]'s records are a fixed 528 bytes with 256 for each
+/// path, so a path longer than 255 bytes arrives cut -- and a cut name is
+/// another file's name. These carry each path whole, the shape of Linux's
+/// `inotify_event` (`requests/d-a-tcsetpgrp-of-group-0-and-a-terminal-that-is-not-ours.md`
+/// part 4). Each record, little-endian, starting 8-byte aligned:
+///
+/// ```text
+/// 0   u64  watch id
+/// 8   u32  event type, as SYS_FS_WATCH_READ's (0 created ... 255 overflow)
+/// 12  u8   1 if the subject is a directory, else 0
+/// 13  [3]  zero
+/// 16  u32  path length in bytes, without its NUL
+/// 20  u32  new-path length (renames; 0 otherwise), without its NUL
+/// 24  the path, a NUL, the new path, a NUL, zero padding to a multiple of 8
+/// ```
+///
+/// Returns the bytes written: as many whole records as fit, in order, with
+/// the rest left queued; 0 when nothing is pending. `BufferTooSmall` when the
+/// first pending record does not fit (it stays queued) -- Linux's `EINVAL` for
+/// an `inotify` read too small for one event. `InvalidHandle` for an unknown
+/// watch.
+///
+/// Chosen number 1091, next free slot after 1090.
+pub const SYS_FS_WATCH_READ_RECORDS: u64 = 1091;
+
+// ---------------------------------------------------------------------------
 // Version info
 // ---------------------------------------------------------------------------
 

@@ -53,12 +53,12 @@ use super::number::{
     SYS_FS_SYNC, SYS_FS_TMPFILE, SYS_FS_TRASH, SYS_FS_TRASH_EMPTY, SYS_FS_TRASH_LIST,
     SYS_FS_TRASH_RESTORE, SYS_FS_TRIM, SYS_FS_TRUNCATE, SYS_FS_UMOUNT, SYS_FS_UNLINKAT_PINNED,
     SYS_FS_UTIMENSAT_PINNED, SYS_FS_WATCH_CLOSE, SYS_FS_WATCH_CREATE, SYS_FS_WATCH_READ,
-    SYS_FS_WRITE, SYS_FS_WRITE_FILE, SYS_FUTEX_CMP_REQUEUE_PI, SYS_FUTEX_LOCK_PI,
-    SYS_FUTEX_LOCK_PI_TIMEOUT, SYS_FUTEX_REQUEUE, SYS_FUTEX_TRYLOCK_PI, SYS_FUTEX_UNLOCK_PI,
-    SYS_FUTEX_WAIT, SYS_FUTEX_WAIT_REQUEUE_PI, SYS_FUTEX_WAIT_TIMEOUT, SYS_FUTEX_WAKE,
-    SYS_GETRANDOM, SYS_HOSTNAME_SET, SYS_ICMP_PING, SYS_ICMP_PING_WAIT, SYS_IO_RING_DESTROY,
-    SYS_IO_RING_ENTER, SYS_IO_RING_SETUP, SYS_IRQ_REGISTER, SYS_IRQ_RELEASE, SYS_IRQ_WAIT,
-    SYS_ITIMER_GET, SYS_ITIMER_SET, SYS_KEYLAYOUT_SET, SYS_LOADAVG, SYS_LOG_READ,
+    SYS_FS_WATCH_READ_RECORDS, SYS_FS_WRITE, SYS_FS_WRITE_FILE, SYS_FUTEX_CMP_REQUEUE_PI,
+    SYS_FUTEX_LOCK_PI, SYS_FUTEX_LOCK_PI_TIMEOUT, SYS_FUTEX_REQUEUE, SYS_FUTEX_TRYLOCK_PI,
+    SYS_FUTEX_UNLOCK_PI, SYS_FUTEX_WAIT, SYS_FUTEX_WAIT_REQUEUE_PI, SYS_FUTEX_WAIT_TIMEOUT,
+    SYS_FUTEX_WAKE, SYS_GETRANDOM, SYS_HOSTNAME_SET, SYS_ICMP_PING, SYS_ICMP_PING_WAIT,
+    SYS_IO_RING_DESTROY, SYS_IO_RING_ENTER, SYS_IO_RING_SETUP, SYS_IRQ_REGISTER, SYS_IRQ_RELEASE,
+    SYS_IRQ_WAIT, SYS_ITIMER_GET, SYS_ITIMER_SET, SYS_KEYLAYOUT_SET, SYS_LOADAVG, SYS_LOG_READ,
     SYS_MM_GET_PROFILE, SYS_MM_SET_PROFILE, SYS_MMAP, SYS_MPROTECT, SYS_MUNMAP,
     SYS_NET_FW_ADD_RULE, SYS_NET_FW_DEL_RULE, SYS_NET_FW_ENABLE, SYS_NET_FW_FLUSH,
     SYS_NET_FW_SET_POLICY, SYS_NET_IF_CONFIG, SYS_NET_IF_INFO, SYS_NET_RAW_CLOSE, SYS_NET_RAW_OPEN,
@@ -557,6 +557,7 @@ const fn build_v1_table() -> SyscallTable {
     handlers[SYS_PROCESS_GET_PRIORITY as usize] = Some(handlers::sys_process_get_priority);
     handlers[SYS_PROCESS_SET_PRIORITY as usize] = Some(handlers::sys_process_set_priority);
     handlers[SYS_PROCESS_SET_EXEC_CLOSE as usize] = Some(handlers::sys_process_set_exec_close);
+    handlers[SYS_FS_WATCH_READ_RECORDS as usize] = Some(handlers::sys_fs_watch_read_records);
     handlers[SYS_SIGNAL_MASK as usize] = Some(handlers::sys_signal_mask);
     handlers[SYS_SIGNAL_PENDING as usize] = Some(handlers::sys_signal_pending);
     handlers[SYS_SIGNAL_STOP_SELF as usize] = Some(handlers::sys_signal_stop_self);
@@ -1021,6 +1022,7 @@ pub fn self_test() -> KernelResult<()> {
     test_dispatch_signal_siginfo_frame()?;
     test_dispatch_priority_doors()?;
     test_dispatch_exec_close()?;
+    test_dispatch_tioc_and_watch_records()?;
     test_dispatch_secureboot_doors()?;
     test_dispatch_ipc_possession()?;
     test_dispatch_dropping_root_is_one_way()?;
@@ -2034,18 +2036,23 @@ fn test_dispatch_ctty_syscalls() -> KernelResult<()> {
         }
     }
 
-    // (2) The argument gate runs *before* caller resolution, so a malformed
+    // (2) The argument gate runs *before* caller resolution, so a negative
     //     pgid is EINVAL even when the caller could not be established. If
     //     these two ever collapse into one verdict, a program would learn
-    //     "no such process" for what is really a bad argument.
+    //     "no such process" for what is really a bad argument. Group 0 is not
+    //     a bad argument but a group that does not exist (Linux's
+    //     `tiocspgrp`), judged after the caller and its terminal: for this
+    //     caller, which has no process, NoSuchProcess. It was InvalidArgument
+    //     until 2026-10-01.
     #[allow(clippy::cast_sign_loss)]
     let minus_one = -1_i64 as u64;
-    for (arg, what) in [(0_u64, "tcsetpgrp(0)"), (minus_one, "tcsetpgrp(-1)")] {
-        if dispatch(SYS_TTY_SET_PGRP, &mk(arg)).value
-            != i64::from(KernelError::InvalidArgument.code())
-        {
-            serial_println!("[syscall]     ({} did not report InvalidArgument)", what);
-            return fail("a non-positive pgid should be InvalidArgument");
+    for (arg, what, want) in [
+        (0_u64, "tcsetpgrp(0)", KernelError::NoSuchProcess),
+        (minus_one, "tcsetpgrp(-1)", KernelError::InvalidArgument),
+    ] {
+        if dispatch(SYS_TTY_SET_PGRP, &mk(arg)).value != i64::from(want.code()) {
+            serial_println!("[syscall]     ({} did not report {:?})", what, want);
+            return fail("tcsetpgrp's argument gate");
         }
     }
 
@@ -2633,6 +2640,138 @@ fn test_dispatch_exec_close() -> KernelResult<()> {
         return Err(KernelError::InternalError);
     }
     serial_println!("[syscall]   SYS_PROCESS_SET_EXEC_CLOSE (1090), close at exec: OK");
+    Ok(())
+}
+
+/// `requests/d-a-tcsetpgrp-of-group-0-and-a-terminal-that-is-not-ours.md`,
+/// made as a process makes the calls:
+///
+/// - through a pty **master**, a terminal no session holds has foreground
+///   group 0, Linux's answer (it was ENOTTY);
+/// - through a **slave** that is not the caller's controlling terminal, both
+///   calls are ENOTTY (they answered for the terminal anyway);
+/// - group 0, or a group that does not exist, is ESRCH after the terminal
+///   checks (0 was EINVAL);
+/// - a watch event whose path is longer than 255 bytes arrives whole through
+///   `SYS_FS_WATCH_READ_RECORDS` (1091), and a read too small for the first
+///   record leaves it queued.
+fn test_dispatch_tioc_and_watch_records() -> KernelResult<()> {
+    use crate::cap::ResourceType;
+    use crate::proc::pcb;
+    use crate::proc::thread::self_test_as_process;
+    use crate::tty::pty;
+
+    fn fail(msg: &str) -> KernelResult<()> {
+        serial_println!(
+            "[syscall]   FAIL: tcgetpgrp/tcsetpgrp, watch records: {}",
+            msg
+        );
+        Err(KernelError::InternalError)
+    }
+    let args = |arg0: u64, arg1: u64| SyscallArgs {
+        arg0,
+        arg1,
+        arg2: 0,
+        arg3: 0,
+        arg4: 0,
+        arg5: 0,
+    };
+    let code = |e: KernelError| i64::from(e.code());
+
+    let (master, slave) = pty::create()?;
+    let pid = pcb::create("tioc-session", 0);
+    pcb::register_ipc_handle(pid, ResourceType::Pty, master.raw());
+    pcb::register_ipc_handle(pid, ResourceType::Pty, slave.raw());
+    let as_pid = |nr: u64, a: SyscallArgs| self_test_as_process(pid, || dispatch(nr, &a).value);
+    let verdict = (|| {
+        // No session holds the terminal yet.
+        if as_pid(SYS_PTY_GET_PGRP, args(master.raw(), 0)) != 0 {
+            return Err("a master with no session should read group 0");
+        }
+        let not_ours = code(KernelError::NotSupported);
+        if as_pid(SYS_PTY_GET_PGRP, args(slave.raw(), 0)) != not_ours
+            || as_pid(SYS_PTY_SET_PGRP, args(slave.raw(), pid)) != not_ours
+        {
+            return Err("a slave that is not our terminal should be ENOTTY");
+        }
+        // Make the slave our controlling terminal: now it answers.
+        if pcb::ctty_acquire(pid, slave.id()).is_err() {
+            return Err("could not make the slave our terminal");
+        }
+        if as_pid(SYS_PTY_GET_PGRP, args(slave.raw(), 0)) != i64::try_from(pid).unwrap_or(-1) {
+            return Err("our own terminal's slave should read our group");
+        }
+        let missing = code(KernelError::NoSuchProcess);
+        if as_pid(SYS_PTY_SET_PGRP, args(slave.raw(), 0)) != missing
+            || as_pid(SYS_PTY_SET_PGRP, args(master.raw(), 7_654_321)) != missing
+            || as_pid(SYS_TTY_SET_PGRP, args(0, 0)) != missing
+        {
+            return Err("group 0 or a missing group should be ESRCH");
+        }
+        if as_pid(SYS_PTY_SET_PGRP, args(master.raw(), pid)) != 0 {
+            return Err("handing the terminal to our own group failed");
+        }
+        Ok(())
+    })();
+    pcb::destroy(pid);
+    // The hangups name the session just destroyed: nobody is left to tell.
+    let _ = pty::close(master);
+    let _ = pty::close(slave);
+    if let Err(msg) = verdict {
+        return fail(msg);
+    }
+
+    // A path of 300 bytes under a watched directory.
+    let mut path = alloc::vec::Vec::from(&b"/WATCH-RECORDS-PROBE/"[..]);
+    path.resize(300, b'n');
+    let watch = crate::fs::notify::create_watch(
+        "/WATCH-RECORDS-PROBE",
+        crate::fs::notify::FsEventMask::ALL_CHANGES,
+        false,
+    )?;
+    crate::fs::notify::emit_created(path.as_slice());
+    let too_small = crate::fs::notify::read_events_within(watch, 8, handlers::watch_record_len);
+    let still_queued = crate::fs::notify::pending_count(watch);
+    let read = crate::fs::notify::read_events_within(watch, 4096, handlers::watch_record_len);
+    crate::fs::notify::close_watch(watch)?;
+    if too_small.as_ref().err() != Some(&KernelError::BufferTooSmall) || still_queued != Ok(1) {
+        return fail("a read too small for the first record did not leave it queued");
+    }
+    let Ok(events) = read else {
+        return fail("the long-path event could not be read");
+    };
+    let [event] = events.as_slice() else {
+        return fail("expected exactly the one long-path event");
+    };
+    let mut record = alloc::vec::Vec::new();
+    handlers::encode_watch_record(event, &mut record);
+    let field32 = |at: usize| {
+        record
+            .get(at..at.saturating_add(4))
+            .and_then(|b| <[u8; 4]>::try_from(b).ok())
+            .map(u32::from_le_bytes)
+    };
+    let name_end = handlers::WATCH_RECORD_HEADER.saturating_add(path.len());
+    let whole = record.len() == handlers::watch_record_len(event)
+        && record.len() % 8 == 0
+        && record.get(..8) == Some(&watch.to_le_bytes()[..])
+        && field32(8) == Some(0)
+        && field32(16) == u32::try_from(path.len()).ok()
+        && field32(20) == Some(0)
+        && record.get(handlers::WATCH_RECORD_HEADER..name_end) == Some(path.as_slice())
+        && record.get(name_end) == Some(&0);
+    if !whole {
+        serial_println!(
+            "[syscall]     record of {} bytes: {:?}",
+            record.len(),
+            record.get(..24)
+        );
+        return fail("the long path did not arrive whole in its record");
+    }
+    serial_println!(
+        "[syscall]   tcgetpgrp/tcsetpgrp on named terminals, group 0, \
+         SYS_FS_WATCH_READ_RECORDS (1091): OK"
+    );
     Ok(())
 }
 

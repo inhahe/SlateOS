@@ -5420,11 +5420,12 @@ pub fn sys_tty_get_pgrp(args: &SyscallArgs) -> SyscallResult {
 /// [`pcb::ctty_set_fg_pgrp`]: crate::proc::pcb::ctty_set_fg_pgrp
 pub fn sys_tty_set_pgrp(args: &SyscallArgs) -> SyscallResult {
     // A negative value is not a process group. Reject on the full 64-bit
-    // width rather than reproducing Linux's `int` wrap; 0 is rejected by
-    // `ctty_set_fg_pgrp` itself (there is no group 0 to hand a terminal to).
+    // width rather than reproducing Linux's `int` wrap. 0 goes on through the
+    // terminal checks and is then ESRCH, as in Linux's `tiocspgrp`: there is
+    // no group 0 (`pcb::ctty_set_fg_pgrp`).
     #[allow(clippy::cast_possible_wrap)]
     let pgid_signed = args.arg0 as i64;
-    if pgid_signed <= 0 {
+    if pgid_signed < 0 {
         return SyscallResult::err(KernelError::InvalidArgument);
     }
     let pid = match caller_process_or_err() {
@@ -6804,18 +6805,41 @@ pub fn sys_pty_get_pgrp(args: &SyscallArgs) -> SyscallResult {
     // handle and its foreground group is a property of *that* terminal's
     // session. Looking the caller up first would only turn a reserved handle's
     // `InvalidHandle` into a less specific verdict.
-    let tty = match owned_pty_handle(args.arg0) {
-        Ok(h) => h.id(),
+    let tty = match named_pgrp_terminal(args.arg0) {
+        Ok(tty) => tty,
         Err(e) => return SyscallResult::err(e),
     };
-    // No session holds this terminal — a pty whose slave has not yet run
-    // TIOCSCTTY. It has no foreground group, and ENOTTY says so; returning 0
-    // would be a pgid the caller could try to signal.
+    // No session holds this terminal: a pty whose slave has not yet run
+    // TIOCSCTTY, asked about through its master. Linux's `tiocgpgrp` answers
+    // 0 for it (no group, `pid_vnr(NULL)`), and so does this since
+    // 2026-10-01; it was ENOTTY.
     match crate::proc::pcb::ctty_fg_pgrp(tty) {
         #[allow(clippy::cast_possible_wrap)]
         Some(pgid) => SyscallResult::ok(pgid as i64),
-        None => SyscallResult::err(KernelError::NotSupported),
+        None => SyscallResult::ok(0),
     }
+}
+
+/// The terminal a named `SYS_PTY_GET_PGRP`/`SYS_PTY_SET_PGRP` acts on: the
+/// pty the caller holds `raw` for.
+///
+/// Through a **master**, any session's terminal: the master is the other
+/// side of the wire, so it is never the holder's controlling terminal. Through
+/// a **slave**, only the caller's own controlling terminal. A slave that is
+/// not is `NotSupported` (ENOTTY), as in Linux's `tiocgpgrp`/`tiocspgrp`
+/// (`tty == real_tty && current->signal->tty != real_tty`). Before
+/// 2026-10-01, a slave that was not the caller's terminal answered for that
+/// terminal anyway
+/// (`requests/d-a-tcsetpgrp-of-group-0-and-a-terminal-that-is-not-ours.md`).
+fn named_pgrp_terminal(raw: u64) -> Result<crate::tty::TtyId, KernelError> {
+    let handle = owned_pty_handle(raw)?;
+    if handle.end() == crate::tty::pty::PtyEnd::Slave {
+        let pid = caller_process_or_err()?;
+        if crate::proc::pcb::ctty_tty_of(pid) != Some(handle.id()) {
+            return Err(KernelError::NotSupported);
+        }
+    }
+    Ok(handle.id())
 }
 
 /// `SYS_PTY_SET_PGRP` — hand a *named* terminal to a process group
@@ -6828,11 +6852,11 @@ pub fn sys_pty_get_pgrp(args: &SyscallArgs) -> SyscallResult {
 /// every existing caller uses.
 pub fn sys_pty_set_pgrp(args: &SyscallArgs) -> SyscallResult {
     // A negative value is not a process group. Rejected on the full 64-bit
-    // width rather than reproducing Linux's `int` wrap, matching 538; 0 is
-    // rejected further down, where "there is no group 0" is the message.
+    // width rather than reproducing Linux's `int` wrap, matching 538; 0 goes
+    // on through the terminal checks and is then ESRCH.
     #[allow(clippy::cast_possible_wrap)]
     let pgid_signed = args.arg1 as i64;
-    if pgid_signed <= 0 {
+    if pgid_signed < 0 {
         return SyscallResult::err(KernelError::InvalidArgument);
     }
     if args.arg0 == 0 {
@@ -6846,11 +6870,12 @@ pub fn sys_pty_set_pgrp(args: &SyscallArgs) -> SyscallResult {
             TtyCtlOutcome::Fail(e) => SyscallResult::err(e),
         };
     }
-    // As in `sys_pty_get_pgrp`, the named path needs no caller process: both
-    // the authority (the handle) and the POSIX group rule (the terminal's
-    // session) are properties of the terminal, not of who is asking.
-    let tty = match owned_pty_handle(args.arg0) {
-        Ok(h) => h.id(),
+    // As in `sys_pty_get_pgrp`: through a master the authority (the handle)
+    // and the POSIX group rule (the terminal's session) are properties of the
+    // terminal, not of who is asking; a slave must be the caller's own
+    // controlling terminal.
+    let tty = match named_pgrp_terminal(args.arg0) {
+        Ok(tty) => tty,
         Err(e) => return SyscallResult::err(e),
     };
     // SIGTTOU follows the terminal being written, not the caller — see
@@ -12408,6 +12433,98 @@ pub fn sys_fs_watch_create(args: &SyscallArgs) -> SyscallResult {
         }
         Err(e) => SyscallResult::err(e),
     }
+}
+
+/// Bytes before the names in a [`SYS_FS_WATCH_READ_RECORDS`] record.
+///
+/// [`SYS_FS_WATCH_READ_RECORDS`]: crate::syscall::number::SYS_FS_WATCH_READ_RECORDS
+pub(crate) const WATCH_RECORD_HEADER: usize = 24;
+
+/// The length of `event`'s [`SYS_FS_WATCH_READ_RECORDS`] record: the header,
+/// each path with its NUL, padded to a multiple of 8 so the next header is
+/// aligned.
+///
+/// [`SYS_FS_WATCH_READ_RECORDS`]: crate::syscall::number::SYS_FS_WATCH_READ_RECORDS
+pub(crate) fn watch_record_len(event: &crate::fs::notify::FsEvent) -> usize {
+    let new_path = event.new_path.as_ref().map_or(0, |p| p.as_bytes().len());
+    let names = event
+        .path
+        .as_bytes()
+        .len()
+        .saturating_add(1)
+        .saturating_add(new_path)
+        .saturating_add(1);
+    WATCH_RECORD_HEADER.saturating_add(names).saturating_add(7) & !7
+}
+
+/// Append `event`'s record to `out`, in the layout
+/// [`SYS_FS_WATCH_READ_RECORDS`] documents: exactly
+/// [`watch_record_len`] bytes.
+///
+/// [`SYS_FS_WATCH_READ_RECORDS`]: crate::syscall::number::SYS_FS_WATCH_READ_RECORDS
+pub(crate) fn encode_watch_record(
+    event: &crate::fs::notify::FsEvent,
+    out: &mut alloc::vec::Vec<u8>,
+) {
+    let start = out.len();
+    let path = event.path.as_bytes();
+    let new_path = event.new_path.as_ref().map_or(&[][..], |p| p.as_bytes());
+    // Path lengths beyond u32 cannot occur (paths are bounded far below);
+    // saturating keeps the header honest about a cut it would never make.
+    let len32 = |n: usize| u32::try_from(n).unwrap_or(u32::MAX);
+    out.extend_from_slice(&event.watch_id.to_le_bytes());
+    out.extend_from_slice(&(event.event_type as u32).to_le_bytes());
+    out.push(u8::from(event.is_dir));
+    out.extend_from_slice(&[0u8; 3]);
+    out.extend_from_slice(&len32(path.len()).to_le_bytes());
+    out.extend_from_slice(&len32(new_path.len()).to_le_bytes());
+    out.extend_from_slice(path);
+    out.push(0);
+    out.extend_from_slice(new_path);
+    out.push(0);
+    out.resize(start.saturating_add(watch_record_len(event)), 0);
+}
+
+/// `SYS_FS_WATCH_READ_RECORDS` (1091) -- read pending events as
+/// variable-length records, so a path of any length arrives whole.
+///
+/// `arg0`: watch ID. `arg1`: output buffer. `arg2`: its length in bytes.
+/// Returns the bytes written: as many whole records as fit, in order, the
+/// rest left queued. 0 when nothing is pending. `BufferTooSmall` when the
+/// first pending record does not fit, which stays queued. See
+/// [`SYS_FS_WATCH_READ_RECORDS`](crate::syscall::number::SYS_FS_WATCH_READ_RECORDS)
+/// for the layout.
+pub fn sys_fs_watch_read_records(args: &SyscallArgs) -> SyscallResult {
+    let watch_id = args.arg0;
+    let Ok(budget) = usize::try_from(args.arg2) else {
+        return SyscallResult::err(KernelError::InvalidArgument);
+    };
+    if watch_id == 0 || args.arg1 == 0 || budget == 0 {
+        return SyscallResult::err(KernelError::InvalidArgument);
+    }
+    // Fail fast on an unusable destination before dequeuing, as
+    // `sys_fs_watch_read` does: the events would otherwise be lost with it.
+    if let Err(e) = crate::mm::user::validate_user_write(args.arg1, budget) {
+        return SyscallResult::err(e);
+    }
+    let events = match crate::fs::notify::read_events_within(watch_id, budget, watch_record_len) {
+        Ok(events) => events,
+        Err(e) => return SyscallResult::err(e),
+    };
+    let mut out = alloc::vec::Vec::new();
+    for event in &events {
+        encode_watch_record(event, &mut out);
+    }
+    if !out.is_empty() {
+        // SAFETY: `out` is a live kernel buffer of `out.len()` bytes, no more
+        // than `budget` (each record was admitted against it); copy_to_user
+        // re-validates the destination and brackets the store with STAC/CLAC.
+        if let Err(e) = unsafe { crate::mm::user::copy_to_user(out.as_ptr(), args.arg1, out.len()) }
+        {
+            return SyscallResult::err(e);
+        }
+    }
+    SyscallResult::ok(i64::try_from(out.len()).unwrap_or(i64::MAX))
 }
 
 /// `SYS_FS_WATCH_READ` — read pending filesystem change events.

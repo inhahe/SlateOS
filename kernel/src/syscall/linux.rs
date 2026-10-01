@@ -1337,6 +1337,25 @@ pub fn resolve_syscall_restart(frame: &mut crate::syscall::entry::SyscallFrame, 
 // Native KernelError → Linux errno
 // ---------------------------------------------------------------------------
 
+/// The errno Linux's terminal job-control ioctls (`TIOCGPGRP`, `TIOCSPGRP`)
+/// give a native refusal. Three differ from [`linux_errno_for`]:
+/// - `NotSupported` means "no controlling terminal" here: `ENOTTY`, not the
+///   generic `ENOSYS` (which told a shell the call did not exist);
+/// - `PermissionDenied`, a group in another session, is `EPERM`, not
+///   `EACCES`;
+/// - `NoSuchProcess`, a group that does not exist, is `ESRCH`.
+///
+/// Until 2026-10-01 both ioctls used the generic map
+/// (`requests/d-a-tcsetpgrp-of-group-0-and-a-terminal-that-is-not-ours.md`).
+const fn tty_jobctl_errno(e: KernelError) -> i32 {
+    match e {
+        KernelError::NotSupported => errno::ENOTTY,
+        KernelError::PermissionDenied => errno::EPERM,
+        KernelError::NoSuchProcess => errno::ESRCH,
+        other => linux_errno_for(other),
+    }
+}
+
 /// Translate a native [`KernelError`] to the corresponding Linux errno
 /// (positive value).  Callers typically want `-(linux_errno_for(e) as i64)`
 /// as the syscall return value.
@@ -9288,7 +9307,7 @@ fn console_terminal_ioctl(
             // than another session's answer.
             let pgrp = match crate::proc::pcb::ctty_get_fg_pgrp(pid) {
                 Ok(p) => p,
-                Err(e) => return linux_err(linux_errno_for(e)),
+                Err(e) => return linux_err(tty_jobctl_errno(e)),
             };
             #[allow(clippy::cast_possible_truncation)]
             let bytes = (pgrp as i32).to_ne_bytes();
@@ -9314,9 +9333,11 @@ fn console_terminal_ioctl(
                 return linux_err(linux_errno_for(e));
             }
             let pgrp = i32::from_ne_bytes(bytes);
-            // A foreground pgrp must be a positive process-group ID.  Linux
-            // rejects pgrp <= 0 with EINVAL before any policy check.
-            if pgrp <= 0 {
+            // Linux 6.6's `tiocspgrp` rejects only a *negative* group up
+            // front (EINVAL). A 0 goes on through the terminal checks and is
+            // then ESRCH, since there is no group 0 (`pcb::ctty_set_fg_pgrp`);
+            // this refused it with EINVAL until 2026-10-01.
+            if pgrp < 0 {
                 return linux_err(errno::EINVAL);
             }
             // The session/liveness policy — the group must be a live group of
@@ -9330,7 +9351,12 @@ fn console_terminal_ioctl(
             match super::handlers::tty_set_pgrp_checked(pid, u64::from(pgrp as u32)) {
                 super::handlers::TtyCtlOutcome::Done => SyscallResult::ok(0),
                 super::handlers::TtyCtlOutcome::Restart(r) => r,
-                super::handlers::TtyCtlOutcome::Fail(e) => linux_err(linux_errno_for(e)),
+                // `tiocspgrp` turns tty_check_change's EIO (an orphaned
+                // background group) into ENOTTY.
+                super::handlers::TtyCtlOutcome::Fail(KernelError::IoError) => {
+                    linux_err(errno::ENOTTY)
+                }
+                super::handlers::TtyCtlOutcome::Fail(e) => linux_err(tty_jobctl_errno(e)),
             }
         }
         // `tty_id` here is "the terminal this fd names", which we can only

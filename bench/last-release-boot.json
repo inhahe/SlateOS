@@ -1,9 +1,7 @@
 {
-    "sha": "75a054730",
-    "date": "2026-09-27T09:15:59+00:00",
+    "sha": "1dfd7d9a2",
+    "date": "2026-10-01T13:39:53+00:00",
     "boot_number": null,
-    "baselined_failures": [
-        "CPython interactive REPL over a pty (ring 3)"
-    ],
-    "note": "Set from release boot 75a054730 (2026-09-27T09:15:59Z, lane C): BOOT_OK after 322s, release/none on QEMU TCG, clean tree. 75a054730 is 01af9ee01 (origin/main cde7df06d plus lane C's gui/, scripts/ and document changes) with its debug boot's history row. It failed exactly one self-test, the one this file still lists: 'CPython interactive REPL over a pty', exit 8 -- lane C's image has the C fixtures and no /mnt/bin/python3, and the rung checked only for its own ELF; lane A has made it skip in that case (requests/c-a-the-python-repl-rung-fails-instead-of-skipping-when-the-image-has-no-python3.md), so the name retires when that reaches main. PRUNED, per the rule the previous note set: 'our own userland runs at all (ring 3)' and 'pty ^C signal delivery (ring 3)' both PASSED in this boot (the former now reports as /bin/true, false, echo and basename running under SlateOS), so they are no longer baselined -- a boot in which either fails is not covered by this marker. A second failure of any kind means this marker does not cover the run and must not be advanced from it. The convention is unchanged from a8cebf3d1's note: this field is read by scripts/check-release-staleness.py and scripts/hooks/pre-push only; merge-readiness.py's ratchet reads bench/boot-history.jsonl. Supersedes a8cebf3d1 (2026-09-17), which was 123 kernel-touching commits behind against a threshold of 100."
+    "baselined_failures": [],
+    "note": "Set from release boot 1dfd7d9a2 (2026-10-01T13:39:53Z, lane B): BOOT_OK after 188s, release/none on QEMU TCG, clean tree, every gate green and no self-test failed. 1dfd7d9a2 is lane-b with origin/main ad07cdc73 merged (929ed25a8): lane B's design-decisions 1045 triage, the one character-width table (1042), the getconf port and the notices manifests; 084fc8324 is its history row. PRUNED, per the rule the previous note set: 'CPython interactive REPL over a pty (ring 3)' PASSED in this boot ('6*7 evaluated to 42: OK'), so it is no longer baselined and the list is empty -- a boot with any failure at all is not covered by this marker and must not advance it. The convention is unchanged from a8cebf3d1's note: this field is read by scripts/check-release-staleness.py and scripts/hooks/pre-push only; merge-readiness.py's ratchet reads bench/boot-history.jsonl. Supersedes 75a054730 (2026-09-27)."
 }

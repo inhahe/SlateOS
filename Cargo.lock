@@ -47,14 +47,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "apparmor"
-version = "0.1.0"
-dependencies = [
- "quoting",
- "scratchdir",
-]
-
-[[package]]
 name = "appearance"
 version = "0.1.0"
 dependencies = [
@@ -169,14 +161,6 @@ dependencies = [
 [[package]]
 name = "audiotags"
 version = "0.1.0"
-
-[[package]]
-name = "audit"
-version = "0.1.0"
-dependencies = [
- "optionalfile",
- "quoting",
-]
 
 [[package]]
 name = "authlib"
@@ -442,14 +426,6 @@ dependencies = [
  "appearance",
  "guitk",
  "oswindow",
-]
-
-[[package]]
-name = "capsh"
-version = "0.1.0"
-dependencies = [
- "quoting",
- "usageerror",
 ]
 
 [[package]]
@@ -1292,15 +1268,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "firejail"
-version = "0.1.0"
-dependencies = [
- "authlib",
- "scratchdir",
- "userdb",
-]
-
-[[package]]
 name = "flashcards"
 version = "0.1.0"
 dependencies = [
@@ -1407,13 +1374,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "fwupd"
-version = "0.1.0"
-dependencies = [
- "quoting",
-]
-
-[[package]]
 name = "game2048"
 version = "0.1.0"
 dependencies = [
@@ -1434,6 +1394,16 @@ dependencies = [
 [[package]]
 name = "gdb"
 version = "0.1.0"
+
+[[package]]
+name = "getconf"
+version = "0.1.0"
+dependencies = [
+ "errmsg",
+ "libcall",
+ "posix",
+ "sysroot-dep",
+]
 
 [[package]]
 name = "getent"
@@ -1484,14 +1454,6 @@ dependencies = [
  "gamechrome",
  "guitk",
  "oswindow",
-]
-
-[[package]]
-name = "grub2"
-version = "0.1.0"
-dependencies = [
- "procinfo",
- "quoting",
 ]
 
 [[package]]
@@ -1996,13 +1958,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "locale"
-version = "0.1.0"
-dependencies = [
- "quoting",
-]
-
-[[package]]
 name = "localectl"
 version = "0.1.0"
 dependencies = [
@@ -2394,14 +2349,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "mesg"
-version = "0.1.0"
-dependencies = [
- "authlib",
- "userdb",
-]
-
-[[package]]
 name = "metronome"
 version = "0.1.0"
 dependencies = [
@@ -2450,15 +2397,6 @@ dependencies = [
  "procinfo",
  "quoting",
  "scratchdir",
-]
-
-[[package]]
-name = "mkinitramfs"
-version = "0.1.0"
-dependencies = [
- "deflate",
- "modechange",
- "quoting",
 ]
 
 [[package]]
@@ -2707,13 +2645,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "numactl"
-version = "0.1.0"
-dependencies = [
- "procinfo",
-]
-
-[[package]]
 name = "objdump"
 version = "0.1.0"
 dependencies = [
@@ -2891,14 +2822,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "perf"
-version = "0.1.0"
-dependencies = [
- "procinfo",
- "quoting",
-]
-
-[[package]]
 name = "pgrep"
 version = "0.1.0"
 dependencies = [
@@ -2977,14 +2900,6 @@ dependencies = [
 [[package]]
 name = "planecompose"
 version = "0.1.0"
-
-[[package]]
-name = "plymouth"
-version = "0.1.0"
-dependencies = [
- "quoting",
- "scratchdir",
-]
 
 [[package]]
 name = "pngwrite"
@@ -3321,13 +3236,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "resolvectl"
-version = "0.1.0"
-dependencies = [
- "usageerror",
-]
-
-[[package]]
 name = "reversi"
 version = "0.1.0"
 dependencies = [
@@ -3475,13 +3383,6 @@ dependencies = [
  "chacha20poly1305",
  "hex-literal",
  "poly1305",
-]
-
-[[package]]
-name = "selinux"
-version = "0.1.0"
-dependencies = [
- "quoting",
 ]
 
 [[package]]
@@ -4306,13 +4207,6 @@ name = "ttyidle"
 version = "0.1.0"
 
 [[package]]
-name = "tuned"
-version = "0.1.0"
-dependencies = [
- "quoting",
-]
-
-[[package]]
 name = "typenum"
 version = "1.20.1"
 
@@ -4336,14 +4230,6 @@ dependencies = [
  "optionalfile",
  "quoting",
  "scratchdir",
-]
-
-[[package]]
-name = "udisks"
-version = "0.1.0"
-dependencies = [
- "procinfo",
- "quoting",
 ]
 
 [[package]]
@@ -4454,10 +4340,6 @@ version = "0.1.0"
 dependencies = [
  "embed-manifest",
 ]
-
-[[package]]
-name = "upower"
-version = "0.1.0"
 
 [[package]]
 name = "usageerror"
@@ -4700,13 +4582,6 @@ name = "wpa"
 version = "0.1.0"
 dependencies = [
  "hmac",
-]
-
-[[package]]
-name = "xattr"
-version = "0.1.0"
-dependencies = [
- "quoting",
 ]
 
 [[package]]

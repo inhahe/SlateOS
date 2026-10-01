@@ -28,6 +28,9 @@ produces an executable of that name:
     a coreutils bin  `userspace/coreutils/src/bin/<alias>.rs` exists
     a staged alias   `scripts/create-ext4-rootfs.sh` copies/links some binary
                      to that name (it already does this for `dash` -> `/bin/sh`)
+    a manifest alias `scripts/rootfs-bin-manifest.txt` has a line
+                     `name = producer`, which installs the binary under the
+                     second name as well
 
 An alias with none of the three is **unreachable**: finished code behind a
 branch no invocation can select.
@@ -51,12 +54,15 @@ having: every entry removed from the baseline is a command that now runs, and
 the file only ever shrinks.
 
 **Do not add to the baseline to make a red run green.** A new unreachable alias
-means a new personality was written without a producer -- fix that instead, by
-giving the tool its own crate. Adding a link is the wrong fix and
-`coreutils-canonical-answer.md` says why: the kernel grants capabilities per
-file, so one file answering to `sudo`, `visudo` and `sudoedit` must hold the
-union of what all three need, which is the least-privilege problem this OS
-exists to avoid.
+means a new personality was written without a producer -- fix that instead.
+How is the operator's decision, `design-decisions.md` §1045 (B-Q11): each name
+is decided on its own. A name for a subsystem SlateOS does not have is
+deleted (§1006). A name that is kept is installed as the same file -- a
+manifest alias line, as busybox installs its names -- and earns a crate of its
+own only where its permissions genuinely differ from its siblings': the
+kernel grants capabilities per file, so one file answering to `sudo`,
+`visudo` and `sudoedit` holds the union of what all three need, and that is
+the case for splitting (`coreutils-canonical-answer.md`).
 
 ## Which tree it reads, and why that is a flag
 
@@ -105,6 +111,7 @@ ROOT = Path(__file__).resolve().parent.parent
 USERSPACE = "userspace"
 COREUTILS_BIN = "userspace/coreutils/src/bin"
 ROOTFS = "scripts/create-ext4-rootfs.sh"
+MANIFEST = "scripts/rootfs-bin-manifest.txt"
 BASELINE_REL = "scripts/multicall-aliases-baseline.txt"
 BASELINE = Path(__file__).resolve().parent / "multicall-aliases-baseline.txt"
 
@@ -311,6 +318,17 @@ IGNORE: dict[str, str] = {
     "time": "a `stty` control-character name",
     "ftp": "a protocol name -- `ftpd`",
     "w.exe": "the Windows-suffixed spelling of `w`, matched alongside it",
+    # `systemd-analyze`'s subcommands. `systemctl`'s `analyze` takes the
+    # operands after its own name and dispatches on `args.first()`, which reads
+    # exactly like `main` taking argv[0] -- so six verbs were counted as six
+    # programs (2026-10-01, found in the §1045 triage). `dot` is graphviz's
+    # program; installing these names would have been actively wrong.
+    "blame": "a `systemd-analyze` subcommand",
+    "critical-chain": "a `systemd-analyze` subcommand",
+    "dot": "a `systemd-analyze` subcommand (and graphviz's program name)",
+    "plot": "a `systemd-analyze` subcommand",
+    "security": "a `systemd-analyze` subcommand",
+    "verify": "a `systemd-analyze` subcommand",
 }
 
 
@@ -644,6 +662,28 @@ fn main() {
     expect("a chain rustfmt broke over two lines still corroborates",
            invocation_aliases(wrapped, "crond"), {"anacron"})
 
+    # THE MANIFEST, on a scratch tree. `crond = cron` installs cron's own
+    # binary under the name, so that personality is REACHED; `crontab =
+    # other` gives the name to a different binary, so cron's branch for it
+    # is SHADOWED. Until 2026-10-01 both counted as "a producer", and the
+    # first was reported as shadowed by the line that installs it.
+    import tempfile
+    with tempfile.TemporaryDirectory() as scratch:
+        os.makedirs(os.path.join(scratch, "userspace", "cron", "src"))
+        os.makedirs(os.path.join(scratch, "scripts"))
+        with open(os.path.join(scratch, "userspace", "cron", "src", "main.rs"),
+                  "w", encoding="utf-8", newline="\n") as f:
+            f.write(cron)
+        with open(os.path.join(scratch, MANIFEST), "w", encoding="utf-8", newline="\n") as f:
+            f.write("# a comment = not an alias\ncron\ncrond = cron\ncrontab = other\n")
+        rows = survey(gittree.WorkTree(scratch))
+    expect("a manifest line naming this crate's binary installs the personality",
+           [r for r in rows if r[1] == "crond"],
+           [("cron", "crond", [], True)])
+    expect("...and one naming another binary shadows it",
+           [r for r in rows if r[1] == "crontab"],
+           [("cron", "crontab", ["rootfs-bin-manifest.txt's `crontab = other`"], False)])
+
     print(f"multicall-aliases: self-test "
           f"{'FAILED' if failures else 'passed'} ({failures} failure(s))")
     return 1 if failures else 0
@@ -667,9 +707,33 @@ def staged_aliases(tree: gittree.Tree) -> set[str]:
     return found
 
 
+def manifest_aliases(tree: gittree.Tree) -> dict[str, str]:
+    """Names `rootfs-bin-manifest.txt` installs as a second name for a
+    binary -- its `name = producer` lines, §1045's way of keeping a name --
+    each with the binary it is a second name *of*."""
+    text = tree.read_text(MANIFEST)
+    if text is None:
+        return {}
+    found: dict[str, str] = {}
+    for line in text.splitlines():
+        line = line.split("#", 1)[0].strip()
+        name, eq, producer = line.partition("=")
+        if eq and name.strip() and producer.strip():
+            found[name.strip()] = producer.strip()
+    return found
+
+
 def producers(
-    tree: gittree.Tree, alias: str, cu_bins: set[str], staged: set[str]
+    tree: gittree.Tree,
+    alias: str,
+    crate: str,
+    cu_bins: set[str],
+    staged: set[str],
+    manifest: dict[str, str],
 ) -> list[str]:
+    """What ELSE produces an executable called `alias` -- anything but
+    `crate`'s own binary under that name, which is the personality being
+    reached rather than shadowed (see `survey`)."""
     out = []
     if tree.is_file(f"{USERSPACE}/{alias}/Cargo.toml"):
         out.append(f"crate userspace/{alias}")
@@ -677,6 +741,8 @@ def producers(
         out.append("coreutils bin")
     if alias in staged:
         out.append("staged by create-ext4-rootfs.sh")
+    if alias in manifest and manifest[alias] != crate:
+        out.append(f"rootfs-bin-manifest.txt's `{alias} = {manifest[alias]}`")
     return out
 
 
@@ -684,7 +750,17 @@ def _leaf(rel: str) -> str:
     return rel.rsplit("/", 1)[-1]
 
 
-def survey(tree: gittree.Tree) -> list[tuple[str, str, list[str]]]:
+def survey(tree: gittree.Tree) -> list[tuple[str, str, list[str], bool]]:
+    """`(crate, alias, other producers, installed)` for every personality.
+
+    *installed* is the case §1045 keeps a name by: `rootfs-bin-manifest.txt`
+    says `alias = crate`, so the image holds `crate`'s binary under the name
+    and the personality is what answers. That is reachable, not shadowed --
+    until 2026-10-01 a manifest line counted as "a producer" like any other,
+    and so reported `ar`'s `ranlib` as shadowed by the very line that
+    installs it. A name the manifest gives to a *different* binary is still
+    a producer, and still shadowing.
+    """
     # `entries` in place of `glob("*.rs")` + `iterdir()`: one listing, then this
     # file's own predicate. The seam offers no filtering on purpose -- see
     # `gittree.Tree` -- because "a coreutils bin" means two different shapes
@@ -698,7 +774,8 @@ def survey(tree: gittree.Tree) -> list[tuple[str, str, list[str]]]:
         elif name.endswith(".rs"):
             cu_bins.add(name[:-3])
     staged = staged_aliases(tree)
-    rows: list[tuple[str, str, list[str]]] = []
+    manifest = manifest_aliases(tree)
+    rows: list[tuple[str, str, list[str], bool]] = []
     for rel, is_dir in tree.entries(USERSPACE):
         if not is_dir:
             continue
@@ -710,7 +787,12 @@ def survey(tree: gittree.Tree) -> list[tuple[str, str, list[str]]]:
         if text is None:
             continue
         for alias in sorted(invocation_aliases(text, crate)):
-            rows.append((crate, alias, producers(tree, alias, cu_bins, staged)))
+            rows.append((
+                crate,
+                alias,
+                producers(tree, alias, crate, cu_bins, staged, manifest),
+                manifest.get(alias) == crate,
+            ))
     return rows
 
 
@@ -769,8 +851,9 @@ def main() -> int:
         # new. That is the same defect as reading the disk, one step further
         # along: an answer about something other than the revision.
         shadow_pinned = read_shadow_baseline(tree)
-    unreachable = {f"{c}:{a}" for c, a, p in rows if not p}
-    shadowed = [(c, a, p) for c, a, p in rows if p]
+    unreachable = {f"{c}:{a}" for c, a, p, inst in rows if not p and not inst}
+    shadowed = [(c, a, p) for c, a, p, _ in rows if p]
+    installed = [(c, a) for c, a, p, inst in rows if inst and not p]
 
     if update:
         body = [
@@ -779,8 +862,10 @@ def main() -> int:
             "# --update-baseline`; see that script's docstring.",
             "#",
             "# THIS FILE SHOULD ONLY EVER SHRINK. A line here is a finished tool that",
-            "# no user can run. Removing one means giving that tool a real producer --",
-            "# preferably its own crate, so it gets its own capability identity.",
+            "# no user can run. design-decisions 1045 settles each: a name for a",
+            "# subsystem SlateOS does not have is deleted; a kept name is installed as",
+            "# the same file by a `name = producer` line in rootfs-bin-manifest.txt,",
+            "# or gets its own crate where its permissions differ from its siblings'.",
             "# Do NOT add a line to turn a red `--check` green: a new entry means a new",
             "# personality was written without a producer, which is the defect itself.",
             "",
@@ -842,11 +927,13 @@ def main() -> int:
     if not check:
         print(f"{'crate':<16} {'answers to':<18} produced by")
         print("-" * 78)
-        for crate, alias, prod in rows:
-            print(f"{crate:<16} {alias:<18} {'; '.join(prod) or 'NOTHING'}")
+        for crate, alias, prod, inst in rows:
+            what = "; ".join(prod) or ("installed as this binary" if inst else "NOTHING")
+            print(f"{crate:<16} {alias:<18} {what}")
         print(
             f"\n{len(rows)} personalities across "
-            f"{len({c for c, _, _ in rows})} crates: "
+            f"{len({c for c, _, _, _ in rows})} crates: "
+            f"{len(installed)} installed, "
             f"{len(unreachable)} unreachable, {len(shadowed)} shadowing a real producer"
         )
         if shadowed:
@@ -929,10 +1016,12 @@ def main() -> int:
             crate, alias = name.split(":", 1)
             print(f"  {alias:<20} (a personality of userspace/{crate})", file=sys.stderr)
         print(
-            "\nGive the tool its own crate rather than adding it to the baseline, and\n"
-            "rather than adding a symlink: one executable answering to several tool\n"
-            "names must hold the union of all their capabilities, which is the\n"
-            "least-privilege problem this OS is designed to avoid.",
+            "\nDecide each name rather than adding it to the baseline (design-decisions\n"
+            "1045): delete it if it names a subsystem SlateOS does not have; else\n"
+            "install it as the same file, with a `name = producer` line in\n"
+            "scripts/rootfs-bin-manifest.txt (lane D's -- ask by request); or give it\n"
+            "its own crate where its permissions differ from its siblings', since one\n"
+            "file answering to several names holds the union of what they need.",
             file=sys.stderr,
         )
         return 1

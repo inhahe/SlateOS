@@ -2,14 +2,22 @@
 //!
 //! This binary detects its personality from `argv[0]`:
 //!   - `systemctl`       — main service control (start/stop/status/enable/…)
-//!   - `systemd-analyze`  — boot and service analysis
 //!   - `systemd-cat`      — pipe stdin to journal
 //!   - `systemd-cgls`     — show cgroup hierarchy as a tree
 //!   - `systemd-cgtop`    — show cgroup resource usage
 //!   - `systemd-escape`   — escape strings for systemd unit names
 //!   - `systemd-path`     — show well-known system/user paths
-//!   - `systemd-notify`   — notify service manager of status changes
-//!   - `systemd-tmpfiles` — create/clean/remove temporary files
+//!
+//! Until 2026-10-01 it also answered to `systemd-analyze`, `systemd-notify`
+//! and `systemd-tmpfiles`, and all three made their answers up (the §1045
+//! triage): `systemd-analyze time` printed "Startup finished in 1.200s
+//! (kernel) + 2.500s (userspace)" and `blame` a fixed list of units on every
+//! machine; `systemd-notify --ready` printed "Sending: READY=1" and sent
+//! nothing to anyone, and `--booted` said yes on a system that is not
+//! systemd; `systemd-tmpfiles` acted on built-in entries instead of the
+//! configuration it was given. They come back when SlateOS's service manager
+//! has boot timings to report, a readiness call to forward to and a
+//! tmpfiles reader worth the name.
 //!
 //! Unit files follow an INI-like format with sections `[Unit]`, `[Service]`,
 //! `[Install]`, `[Timer]`, `[Socket]`, `[Mount]`, `[Path]`.
@@ -37,28 +45,22 @@ const VERSION: &str = "0.1.0";
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Personality {
     Systemctl,
-    Analyze,
     Cat,
     Cgls,
     Cgtop,
     Escape,
     Path,
-    Notify,
-    Tmpfiles,
 }
 
 impl Personality {
     fn name(self) -> &'static str {
         match self {
             Self::Systemctl => "systemctl",
-            Self::Analyze => "systemd-analyze",
             Self::Cat => "systemd-cat",
             Self::Cgls => "systemd-cgls",
             Self::Cgtop => "systemd-cgtop",
             Self::Escape => "systemd-escape",
             Self::Path => "systemd-path",
-            Self::Notify => "systemd-notify",
-            Self::Tmpfiles => "systemd-tmpfiles",
         }
     }
 }
@@ -68,14 +70,11 @@ fn detect_personality(argv0: &str) -> Personality {
     let base = basename(argv0);
     let stem = base.strip_suffix(".exe").unwrap_or(base);
     match stem {
-        "systemd-analyze" => Personality::Analyze,
         "systemd-cat" => Personality::Cat,
         "systemd-cgls" => Personality::Cgls,
         "systemd-cgtop" => Personality::Cgtop,
         "systemd-escape" => Personality::Escape,
         "systemd-path" => Personality::Path,
-        "systemd-notify" => Personality::Notify,
-        "systemd-tmpfiles" => Personality::Tmpfiles,
         _ => Personality::Systemctl,
     }
 }
@@ -1219,149 +1218,6 @@ fn cmd_list_dependencies(
 }
 
 // ============================================================================
-// systemd-analyze sub-commands
-// ============================================================================
-
-fn analyze_time(out: &mut dyn Write) -> io::Result<i32> {
-    writeln!(
-        out,
-        "Startup finished in 1.200s (kernel) + 2.500s (userspace) = 3.700s"
-    )?;
-    writeln!(out, "graphical.target reached after 3.500s in userspace.")?;
-    Ok(0)
-}
-
-fn analyze_blame(out: &mut dyn Write) -> io::Result<i32> {
-    let blame_data: Vec<(&str, &str)> = vec![
-        ("1.500s", "network.service"),
-        ("800ms", "sshd.service"),
-        ("400ms", "logd.service"),
-        ("200ms", "dbus.service"),
-        ("150ms", "cron.service"),
-        ("100ms", "sysctl.service"),
-        ("50ms", "tmp.mount"),
-    ];
-    for (time, unit) in &blame_data {
-        writeln!(out, "{:>10} {}", time, unit)?;
-    }
-    Ok(0)
-}
-
-fn analyze_critical_chain(out: &mut dyn Write, unit: Option<&str>) -> io::Result<i32> {
-    let target = unit.unwrap_or("graphical.target");
-    writeln!(
-        out,
-        "The time when unit became active or started is printed after the \"@\" character."
-    )?;
-    writeln!(
-        out,
-        "The time the unit took to start is printed after the \"+\" character."
-    )?;
-    writeln!(out)?;
-    writeln!(out, "{} @3.500s", target)?;
-    writeln!(out, "└─multi-user.target @3.400s")?;
-    writeln!(out, "  └─network.service @1.900s +1.500s")?;
-    writeln!(out, "    └─basic.target @1.800s")?;
-    writeln!(out, "      └─sockets.target @1.700s")?;
-    writeln!(out, "        └─dbus.socket @1.600s")?;
-    Ok(0)
-}
-
-fn analyze_plot(out: &mut dyn Write) -> io::Result<i32> {
-    // Text-mode boot chart.
-    writeln!(out, "Boot Plot (text mode)")?;
-    writeln!(out, "=====================")?;
-    writeln!(out)?;
-    writeln!(out, "0s        1s        2s        3s")?;
-    writeln!(out, "|---------|---------|---------|")?;
-    writeln!(out, "[kernel...........             ]  1.200s")?;
-    writeln!(out, "             [dbus....          ]  0.200s")?;
-    writeln!(out, "             [sysctl.]           0.100s")?;
-    writeln!(out, "               [network........]  1.500s")?;
-    writeln!(out, "               [sshd.....]       0.800s")?;
-    writeln!(out, "               [logd...]         0.400s")?;
-    writeln!(out, "               [cron.]           0.150s")?;
-    Ok(0)
-}
-
-fn analyze_dot(out: &mut dyn Write, units: &[String]) -> io::Result<i32> {
-    writeln!(out, "digraph systemd {{")?;
-    writeln!(out, "  rankdir=LR;")?;
-
-    if units.is_empty() {
-        // Default: show key dependency edges.
-        writeln!(out, "  \"graphical.target\" -> \"multi-user.target\";")?;
-        writeln!(out, "  \"multi-user.target\" -> \"basic.target\";")?;
-        writeln!(out, "  \"multi-user.target\" -> \"network.service\";")?;
-        writeln!(out, "  \"multi-user.target\" -> \"sshd.service\";")?;
-        writeln!(out, "  \"multi-user.target\" -> \"dbus.service\";")?;
-        writeln!(out, "  \"basic.target\" -> \"sockets.target\";")?;
-        writeln!(out, "  \"sockets.target\" -> \"dbus.socket\";")?;
-    } else {
-        for u in units {
-            writeln!(out, "  \"{}\" -> \"basic.target\";", u)?;
-        }
-    }
-
-    writeln!(out, "}}")?;
-    Ok(0)
-}
-
-fn analyze_verify(out: &mut dyn Write, unit_name: &str) -> io::Result<i32> {
-    // Try reading a unit file from stdin is not practical; just validate the name.
-    if !unit_name.contains('.') {
-        writeln!(
-            out,
-            "{}: Unit name should include a type suffix.",
-            unit_name
-        )?;
-        return Ok(1);
-    }
-    let ut = UnitType::from_unit_name(unit_name);
-    if ut.is_none() {
-        writeln!(out, "{}: Unknown unit type suffix.", unit_name)?;
-        return Ok(1);
-    }
-    writeln!(out, "{}: Unit file syntax OK.", unit_name)?;
-    Ok(0)
-}
-
-fn analyze_security(out: &mut dyn Write, unit: Option<&str>) -> io::Result<i32> {
-    let unit_name = unit.unwrap_or("sshd.service");
-    writeln!(
-        out,
-        "  NAME                           DESCRIPTION                          EXPOSURE"
-    )?;
-    writeln!(
-        out,
-        "✓ PrivateNetwork=               Service has private network namespace     0.5"
-    )?;
-    writeln!(
-        out,
-        "✗ PrivateTmp=                    Tmp is not private                        0.1"
-    )?;
-    writeln!(
-        out,
-        "✓ NoNewPrivileges=               No new privileges                        0.2"
-    )?;
-    writeln!(
-        out,
-        "✓ ProtectSystem=                 System is protected read-only             0.3"
-    )?;
-    writeln!(
-        out,
-        "✗ ProtectHome=                   Home is not protected                     0.2"
-    )?;
-    writeln!(out)?;
-    writeln!(
-        out,
-        "→ Overall exposure level for {}: 4.2 MEDIUM",
-        unit_name
-    )?;
-    Ok(0)
-}
-
-// ============================================================================
 // systemd-cat
 // ============================================================================
 
@@ -1406,9 +1262,9 @@ impl Default for CatOpts {
 /// Read `-p` and `-t`, which the help has always advertised and nothing
 /// parsed.
 ///
-/// `--pid` is deliberately absent: that option belongs to `systemd-notify`,
-/// further down this same file, and the sweep that found these reports per
-/// file rather than per personality.
+/// `--pid` is deliberately absent: that option belonged to `systemd-notify`,
+/// which shared this file until 2026-10-01, and the sweep that found these
+/// reports per file rather than per personality.
 fn parse_cat_opts(args: &[String]) -> Result<CatOpts, String> {
     let mut opts = CatOpts::default();
     let mut i = 0;
@@ -1877,257 +1733,6 @@ fn run_path(out: &mut dyn Write, args: &[String]) -> io::Result<i32> {
 }
 
 // ============================================================================
-// systemd-notify
-// ============================================================================
-
-fn run_notify(out: &mut dyn Write, args: &[String]) -> io::Result<i32> {
-    if args.is_empty() {
-        writeln!(out, "Usage: systemd-notify [OPTIONS] [VARIABLE=VALUE...]")?;
-        writeln!(
-            out,
-            "Notify the service manager about service status changes."
-        )?;
-        writeln!(out)?;
-        writeln!(out, "Options:")?;
-        writeln!(
-            out,
-            "  --ready         Notify that service startup is complete"
-        )?;
-        writeln!(out, "  --reloading     Notify that service is reloading")?;
-        writeln!(out, "  --stopping      Notify that service is stopping")?;
-        writeln!(out, "  --status=TEXT   Set service status text")?;
-        writeln!(
-            out,
-            "  --booted        Check if system was booted with systemd"
-        )?;
-        return Ok(0);
-    }
-
-    let mut ready = false;
-    let mut reloading = false;
-    let mut stopping = false;
-    let mut status: Option<String> = None;
-    let mut booted = false;
-    let mut vars = Vec::new();
-
-    for arg in args {
-        if arg == "--ready" {
-            ready = true;
-        } else if arg == "--reloading" {
-            reloading = true;
-        } else if arg == "--stopping" {
-            stopping = true;
-        } else if let Some(s) = arg.strip_prefix("--status=") {
-            status = Some(s.to_string());
-        } else if arg == "--booted" {
-            booted = true;
-        } else if arg.contains('=') && !arg.starts_with('-') {
-            vars.push(arg.clone());
-        } else if arg.starts_with('-') {
-            // `--pid=PID` was in the help and parsed by nothing. It did not
-            // become a variable -- the arm above already excludes dashed
-            // words -- it fell off the end of this chain and was silently
-            // dropped, so `systemd-notify --pid=123 --ready` notified
-            // readiness and said nothing about the option it ignored.
-            writeln!(
-                out,
-                "systemd-notify: {}",
-                usageerror::unknown_option(arg.as_bytes())
-            )?;
-            return Ok(1);
-        }
-    }
-
-    if booted {
-        writeln!(out, "yes")?;
-        return Ok(0);
-    }
-
-    let mut parts = Vec::new();
-    if ready {
-        parts.push("READY=1".to_string());
-    }
-    if reloading {
-        parts.push("RELOADING=1".to_string());
-    }
-    if stopping {
-        parts.push("STOPPING=1".to_string());
-    }
-    if let Some(ref s) = status {
-        parts.push(format!("STATUS={}", s));
-    }
-    for v in &vars {
-        parts.push(v.clone());
-    }
-
-    if parts.is_empty() {
-        writeln!(out, "No notification sent (no variables specified).")?;
-        return Ok(1);
-    }
-
-    for p in &parts {
-        writeln!(out, "Sending: {}", p)?;
-    }
-    Ok(0)
-}
-
-// ============================================================================
-// systemd-tmpfiles
-// ============================================================================
-
-/// A parsed tmpfiles.d configuration line.
-#[derive(Clone, Debug)]
-struct TmpfilesEntry {
-    entry_type: char,
-    path: String,
-    mode: String,
-    user: String,
-    group: String,
-    age: String,
-    // tmpfiles.d's seventh column. Parsed and not consulted, because nothing
-    // acts on a tmpfiles line yet; kept so the record matches the file format
-    // rather than the subset currently read. On the field, not the struct: the
-    // other six are read, and a struct-level allow would stop reporting them if
-    // they ever stopped being.
-    #[allow(dead_code)]
-    argument: String,
-}
-
-fn parse_tmpfiles_line(line: &str) -> Option<TmpfilesEntry> {
-    let line = line.trim();
-    if line.is_empty() || line.starts_with('#') {
-        return None;
-    }
-    let fields: Vec<&str> = line.splitn(7, char::is_whitespace).collect();
-    if fields.is_empty() {
-        return None;
-    }
-    let entry_type = fields[0].chars().next()?;
-    let path = fields.get(1).unwrap_or(&"-").to_string();
-    let mode = fields.get(2).unwrap_or(&"-").to_string();
-    let user = fields.get(3).unwrap_or(&"-").to_string();
-    let group = fields.get(4).unwrap_or(&"-").to_string();
-    let age = fields.get(5).unwrap_or(&"-").to_string();
-    let argument = fields.get(6).unwrap_or(&"-").to_string();
-
-    Some(TmpfilesEntry {
-        entry_type,
-        path,
-        mode,
-        user,
-        group,
-        age,
-        argument,
-    })
-}
-
-fn run_tmpfiles(out: &mut dyn Write, args: &[String]) -> io::Result<i32> {
-    let mut create = false;
-    let mut clean = false;
-    let mut remove = false;
-    let mut config_files: Vec<String> = Vec::new();
-
-    for arg in args {
-        match arg.as_str() {
-            "--create" => create = true,
-            "--clean" => clean = true,
-            "--remove" => remove = true,
-            "--help" => {
-                writeln!(out, "Usage: systemd-tmpfiles [OPTIONS] [CONFIGFILE...]")?;
-                writeln!(
-                    out,
-                    "Create, clean, and remove temporary files and directories."
-                )?;
-                writeln!(out)?;
-                writeln!(out, "Options:")?;
-                writeln!(out, "  --create   Create files and directories")?;
-                writeln!(out, "  --clean    Clean up old files")?;
-                writeln!(out, "  --remove   Remove files and directories")?;
-                return Ok(0);
-            }
-            _ if !arg.starts_with('-') => config_files.push(arg.clone()),
-            _ => {}
-        }
-    }
-
-    if !create && !clean && !remove {
-        writeln!(
-            out,
-            "systemd-tmpfiles: No action specified (use --create, --clean, or --remove)."
-        )?;
-        return Ok(1);
-    }
-
-    // Simulated default config entries.
-    let default_entries = [
-        "d /tmp 1777 root root 10d",
-        "d /var/tmp 1777 root root 30d",
-        "d /run/lock 0755 root root -",
-        "d /run/user 0755 root root -",
-        "f /run/utmp 0664 root utmp -",
-        "r! /tmp/.X*-lock - - - -",
-    ];
-
-    let entries: Vec<TmpfilesEntry> = if config_files.is_empty() {
-        default_entries
-            .iter()
-            .filter_map(|l| parse_tmpfiles_line(l))
-            .collect()
-    } else {
-        // We would read files in a real implementation; use defaults for now.
-        default_entries
-            .iter()
-            .filter_map(|l| parse_tmpfiles_line(l))
-            .collect()
-    };
-
-    for e in &entries {
-        match e.entry_type {
-            'd' | 'D' => {
-                if create {
-                    writeln!(
-                        out,
-                        "Creating directory {} (mode={}, user={}, group={})",
-                        e.path, e.mode, e.user, e.group
-                    )?;
-                }
-                if clean && e.age != "-" {
-                    writeln!(out, "Cleaning {} (age={})", e.path, e.age)?;
-                }
-                if remove {
-                    writeln!(out, "Removing directory {}", e.path)?;
-                }
-            }
-            'f' | 'F' => {
-                if create {
-                    writeln!(
-                        out,
-                        "Creating file {} (mode={}, user={}, group={})",
-                        e.path, e.mode, e.user, e.group
-                    )?;
-                }
-                if remove {
-                    writeln!(out, "Removing file {}", e.path)?;
-                }
-            }
-            'r' | 'R' => {
-                if remove {
-                    writeln!(out, "Removing (glob) {}", e.path)?;
-                }
-            }
-            _ => {
-                writeln!(
-                    out,
-                    "Unknown tmpfiles type '{}' for {}",
-                    e.entry_type, e.path
-                )?;
-            }
-        }
-    }
-    Ok(0)
-}
-
-// ============================================================================
 // Main dispatch
 // ============================================================================
 
@@ -2213,62 +1818,6 @@ fn run_systemctl(args: &[String]) -> io::Result<i32> {
         }
         _ => {
             writeln!(out, "Unknown command: {}", cmd)?;
-            Ok(1)
-        }
-    }
-}
-
-fn run_analyze(args: &[String]) -> io::Result<i32> {
-    let stdout = io::stdout();
-    let mut out = stdout.lock();
-
-    if args.iter().any(|a| a == "--help" || a == "-h") {
-        writeln!(out, "Usage: systemd-analyze [COMMAND]")?;
-        writeln!(out)?;
-        writeln!(out, "Commands:")?;
-        writeln!(out, "  time                 Print boot time")?;
-        writeln!(out, "  blame                Print per-unit startup time")?;
-        writeln!(out, "  critical-chain [UNIT] Print critical boot chain")?;
-        writeln!(out, "  plot                 Print boot chart (text)")?;
-        writeln!(out, "  dot [UNIT...]        Print dependency graph (DOT)")?;
-        writeln!(out, "  verify UNIT          Check unit file syntax")?;
-        writeln!(out, "  security [UNIT]      Security analysis")?;
-        writeln!(out)?;
-        writeln!(out, "  --version            Print version")?;
-        return Ok(0);
-    }
-    if args.iter().any(|a| a == "--version") {
-        writeln!(out, "systemd-analyze {}", VERSION)?;
-        return Ok(0);
-    }
-
-    let cmd = args.first().map(|s| s.as_str()).unwrap_or("time");
-    match cmd {
-        "time" => analyze_time(&mut out),
-        "blame" => analyze_blame(&mut out),
-        "critical-chain" => {
-            let unit = args.get(1).map(|s| s.as_str());
-            analyze_critical_chain(&mut out, unit)
-        }
-        "plot" => analyze_plot(&mut out),
-        "dot" => {
-            let units: Vec<String> = args.iter().skip(1).cloned().collect();
-            analyze_dot(&mut out, &units)
-        }
-        "verify" => {
-            if let Some(unit) = args.get(1) {
-                analyze_verify(&mut out, unit)
-            } else {
-                writeln!(out, "systemd-analyze verify: No unit specified.")?;
-                Ok(1)
-            }
-        }
-        "security" => {
-            let unit = args.get(1).map(|s| s.as_str());
-            analyze_security(&mut out, unit)
-        }
-        _ => {
-            writeln!(out, "Unknown analyze command: {}", cmd)?;
             Ok(1)
         }
     }
@@ -2413,7 +1962,6 @@ fn main() {
 
     let result = match personality {
         Personality::Systemctl => run_systemctl(&rest),
-        Personality::Analyze => run_analyze(&rest),
         Personality::Cat => {
             let stdout = io::stdout();
             let mut out = stdout.lock();
@@ -2519,26 +2067,6 @@ fn main() {
                 run_path(&mut out, &rest)
             }
         }
-        Personality::Notify => {
-            let stdout = io::stdout();
-            let mut out = stdout.lock();
-            if rest.iter().any(|a| a == "--version") {
-                writeln!(out, "systemd-notify {}", VERSION).ok();
-                Ok(0)
-            } else {
-                run_notify(&mut out, &rest)
-            }
-        }
-        Personality::Tmpfiles => {
-            let stdout = io::stdout();
-            let mut out = stdout.lock();
-            if rest.iter().any(|a| a == "--version") {
-                writeln!(out, "systemd-tmpfiles {}", VERSION).ok();
-                Ok(0)
-            } else {
-                run_tmpfiles(&mut out, &rest)
-            }
-        }
     };
 
     match result {
@@ -2557,26 +2085,6 @@ fn main() {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    /// A notification variable is `NAME=VALUE`; no environment variable
-    /// name starts with a dash. `--pid=123` used to be sent to the socket
-    /// as a variable literally named `--pid`, because the help advertised
-    /// an option nothing parsed.
-    #[test]
-    fn notify_refuses_a_dashed_word_instead_of_sending_it() {
-        let (out, code) = capture(|buf| run_notify(buf, &argv(&["--pid=123"])));
-        assert_eq!(code, 1, "{out}");
-        assert!(out.contains("unrecognized option"), "{out}");
-        assert!(!out.contains("READY"), "{out}");
-    }
-
-    #[test]
-    fn notify_still_sends_the_variables_it_is_given() {
-        let (out, code) = capture(|buf| run_notify(buf, &argv(&["--ready", "FOO=bar"])));
-        assert_eq!(code, 0, "{out}");
-        assert!(out.contains("FOO=bar"), "{out}");
-        assert!(out.contains("READY=1"), "{out}");
-    }
 
     // ── systemd-cat ──
 
@@ -2781,11 +2289,6 @@ mod tests {
     }
 
     #[test]
-    fn test_detect_analyze() {
-        assert_eq!(detect_personality("systemd-analyze"), Personality::Analyze);
-    }
-
-    #[test]
     fn test_detect_cat() {
         assert_eq!(detect_personality("systemd-cat"), Personality::Cat);
     }
@@ -2811,24 +2314,8 @@ mod tests {
     }
 
     #[test]
-    fn test_detect_notify() {
-        assert_eq!(detect_personality("systemd-notify"), Personality::Notify);
-    }
-
-    #[test]
-    fn test_detect_tmpfiles() {
-        assert_eq!(
-            detect_personality("systemd-tmpfiles"),
-            Personality::Tmpfiles
-        );
-    }
-
-    #[test]
     fn test_detect_exe_suffix() {
-        assert_eq!(
-            detect_personality("systemd-analyze.exe"),
-            Personality::Analyze
-        );
+        assert_eq!(detect_personality("systemd-cat.exe"), Personality::Cat);
     }
 
     #[test]
@@ -3649,86 +3136,6 @@ mod tests {
         assert!(out.is_empty(), "printed a dependency tree: {out}");
     }
 
-    // --- systemd-analyze ---
-
-    #[test]
-    fn test_analyze_time() {
-        let (out, code) = capture(|buf| analyze_time(buf));
-        assert_eq!(code, 0);
-        assert!(out.contains("Startup finished"));
-        assert!(out.contains("kernel"));
-        assert!(out.contains("userspace"));
-    }
-
-    #[test]
-    fn test_analyze_blame() {
-        let (out, code) = capture(|buf| analyze_blame(buf));
-        assert_eq!(code, 0);
-        assert!(out.contains("network.service"));
-        assert!(out.contains("1.500s"));
-    }
-
-    #[test]
-    fn test_analyze_critical_chain_default() {
-        let (out, code) = capture(|buf| analyze_critical_chain(buf, None));
-        assert_eq!(code, 0);
-        assert!(out.contains("graphical.target"));
-        assert!(out.contains("network.service"));
-    }
-
-    #[test]
-    fn test_analyze_critical_chain_unit() {
-        let (out, code) = capture(|buf| analyze_critical_chain(buf, Some("multi-user.target")));
-        assert_eq!(code, 0);
-        assert!(out.contains("multi-user.target"));
-    }
-
-    #[test]
-    fn test_analyze_plot() {
-        let (out, code) = capture(|buf| analyze_plot(buf));
-        assert_eq!(code, 0);
-        assert!(out.contains("Boot Plot"));
-        assert!(out.contains("kernel"));
-    }
-
-    #[test]
-    fn test_analyze_dot_default() {
-        let (out, code) = capture(|buf| analyze_dot(buf, &[]));
-        assert_eq!(code, 0);
-        assert!(out.contains("digraph systemd"));
-        assert!(out.contains("graphical.target"));
-    }
-
-    #[test]
-    fn test_analyze_dot_units() {
-        let units = vec!["sshd.service".to_string()];
-        let (out, code) = capture(|buf| analyze_dot(buf, &units));
-        assert_eq!(code, 0);
-        assert!(out.contains("sshd.service"));
-    }
-
-    #[test]
-    fn test_analyze_verify_ok() {
-        let (out, code) = capture(|buf| analyze_verify(buf, "sshd.service"));
-        assert_eq!(code, 0);
-        assert!(out.contains("syntax OK"));
-    }
-
-    #[test]
-    fn test_analyze_verify_no_suffix() {
-        let (out, code) = capture(|buf| analyze_verify(buf, "sshd"));
-        assert_eq!(code, 1);
-        assert!(out.contains("type suffix"));
-    }
-
-    #[test]
-    fn test_analyze_security() {
-        let (out, code) = capture(|buf| analyze_security(buf, Some("sshd.service")));
-        assert_eq!(code, 0);
-        assert!(out.contains("EXPOSURE"));
-        assert!(out.contains("MEDIUM"));
-    }
-
     // --- systemd-cgls ---
 
     /// The old test here asserted that the output contained `system.slice`
@@ -3904,130 +3311,16 @@ mod tests {
         assert!(out.contains("Unknown path"));
     }
 
-    // --- systemd-notify ---
-
-    #[test]
-    fn test_notify_help() {
-        let (out, code) = capture(|buf| run_notify(buf, &[]));
-        assert_eq!(code, 0);
-        assert!(out.contains("Usage"));
-    }
-
-    #[test]
-    fn test_notify_ready() {
-        let args = vec!["--ready".to_string()];
-        let (out, code) = capture(|buf| run_notify(buf, &args));
-        assert_eq!(code, 0);
-        assert!(out.contains("READY=1"));
-    }
-
-    #[test]
-    fn test_notify_status() {
-        let args = vec!["--status=Initializing".to_string()];
-        let (out, code) = capture(|buf| run_notify(buf, &args));
-        assert_eq!(code, 0);
-        assert!(out.contains("STATUS=Initializing"));
-    }
-
-    #[test]
-    fn test_notify_booted() {
-        let args = vec!["--booted".to_string()];
-        let (out, code) = capture(|buf| run_notify(buf, &args));
-        assert_eq!(code, 0);
-        assert!(out.trim() == "yes");
-    }
-
-    #[test]
-    fn test_notify_custom_var() {
-        let args = vec!["MAINPID=1234".to_string()];
-        let (out, code) = capture(|buf| run_notify(buf, &args));
-        assert_eq!(code, 0);
-        assert!(out.contains("MAINPID=1234"));
-    }
-
-    // --- systemd-tmpfiles ---
-
-    #[test]
-    fn test_tmpfiles_no_action() {
-        let (out, code) = capture(|buf| run_tmpfiles(buf, &[]));
-        assert_eq!(code, 1);
-        assert!(out.contains("No action specified"));
-    }
-
-    #[test]
-    fn test_tmpfiles_create() {
-        let args = vec!["--create".to_string()];
-        let (out, code) = capture(|buf| run_tmpfiles(buf, &args));
-        assert_eq!(code, 0);
-        assert!(out.contains("Creating directory /tmp"));
-        assert!(out.contains("Creating file /run/utmp"));
-    }
-
-    #[test]
-    fn test_tmpfiles_clean() {
-        let args = vec!["--clean".to_string()];
-        let (out, code) = capture(|buf| run_tmpfiles(buf, &args));
-        assert_eq!(code, 0);
-        assert!(out.contains("Cleaning /tmp"));
-    }
-
-    #[test]
-    fn test_tmpfiles_remove() {
-        let args = vec!["--remove".to_string()];
-        let (out, code) = capture(|buf| run_tmpfiles(buf, &args));
-        assert_eq!(code, 0);
-        assert!(out.contains("Removing directory /tmp"));
-        assert!(out.contains("Removing (glob)"));
-    }
-
-    #[test]
-    fn test_tmpfiles_help() {
-        let args = vec!["--help".to_string()];
-        let (out, code) = capture(|buf| run_tmpfiles(buf, &args));
-        assert_eq!(code, 0);
-        assert!(out.contains("Usage"));
-    }
-
-    // --- tmpfiles line parsing ---
-
-    #[test]
-    fn test_parse_tmpfiles_line_dir() {
-        let entry = parse_tmpfiles_line("d /tmp 1777 root root 10d").unwrap();
-        assert_eq!(entry.entry_type, 'd');
-        assert_eq!(entry.path, "/tmp");
-        assert_eq!(entry.mode, "1777");
-    }
-
-    #[test]
-    fn test_parse_tmpfiles_line_comment() {
-        assert!(parse_tmpfiles_line("# comment").is_none());
-    }
-
-    #[test]
-    fn test_parse_tmpfiles_line_empty() {
-        assert!(parse_tmpfiles_line("").is_none());
-    }
-
-    #[test]
-    fn test_parse_tmpfiles_line_file() {
-        let entry = parse_tmpfiles_line("f /run/utmp 0664 root utmp -").unwrap();
-        assert_eq!(entry.entry_type, 'f');
-        assert_eq!(entry.path, "/run/utmp");
-    }
-
     // --- Personality name ---
 
     #[test]
     fn test_personality_names() {
         assert_eq!(Personality::Systemctl.name(), "systemctl");
-        assert_eq!(Personality::Analyze.name(), "systemd-analyze");
         assert_eq!(Personality::Cat.name(), "systemd-cat");
         assert_eq!(Personality::Cgls.name(), "systemd-cgls");
         assert_eq!(Personality::Cgtop.name(), "systemd-cgtop");
         assert_eq!(Personality::Escape.name(), "systemd-escape");
         assert_eq!(Personality::Path.name(), "systemd-path");
-        assert_eq!(Personality::Notify.name(), "systemd-notify");
-        assert_eq!(Personality::Tmpfiles.name(), "systemd-tmpfiles");
     }
 
     // --- Load state / sub state ---

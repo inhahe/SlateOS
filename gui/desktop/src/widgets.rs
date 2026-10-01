@@ -1133,7 +1133,7 @@ impl DesktopWidgetManager {
     /// Choose the next picture of each photo frame that is due one -- never
     /// yet looked, or its interval ended since it last did: the picture after
     /// the one it last chose, in the order `pictures` lists its folder,
-    /// wrapping at the end ([`next_picture`]). A picture from another folder
+    /// wrapping at the end (`next_picture`). A picture from another folder
     /// -- the one it showed before its folder was changed -- is not "last
     /// chosen" here, so a new folder starts at its first.
     ///

@@ -65,6 +65,7 @@ use core::ffi::CStr;
 
 pub mod conf;
 pub mod inotify;
+pub mod netdb;
 pub mod pty;
 pub mod utmp;
 
@@ -150,6 +151,7 @@ mod sys {
         pub fn sethostname(name: *const u8, len: usize) -> i32;
         pub fn setdomainname(name: *const u8, len: usize) -> i32;
         pub fn gethostname(name: *mut u8, len: usize) -> i32;
+        pub fn getdomainname(name: *mut u8, len: usize) -> i32;
         pub fn klogctl(cmd: i32, buf: *mut u8, len: i32) -> i32;
         pub fn kill(pid: i32, sig: i32) -> i32;
         pub fn __errno_location() -> *mut i32;
@@ -418,6 +420,38 @@ pub fn hostname_into(_buf: &mut [u8]) -> Result<usize, i32> {
     Err(ENOSYS)
 }
 
+/// This machine's NIS domain name, written into `buf`, returning its length
+/// in bytes -- [`hostname_into`]'s sibling, for `getdomainname(2)`.
+///
+/// When the name fills `buf` with no room for its NUL, the length returned is
+/// `buf.len()`: glibc copies what fits and reports success, which is how a
+/// caller learns to try a bigger buffer (net-tools' `localdomain` does).
+///
+/// # Errors
+///
+/// The `errno` set by `getdomainname(2)`: SlateOS's library answers `EINVAL`
+/// for a buffer too small for the name and its NUL, where glibc truncates.
+#[cfg(unix)]
+pub fn domainname_into(buf: &mut [u8]) -> Result<usize, i32> {
+    // SAFETY: the pointer and length handed over are exactly `buf`'s own, so
+    // the library writes only within it.
+    let rc = unsafe { sys::getdomainname(buf.as_mut_ptr(), buf.len()) };
+    if rc != 0 {
+        return Err(last_errno());
+    }
+    Ok(buf.iter().position(|&b| b == 0).unwrap_or(buf.len()))
+}
+
+/// This machine's NIS domain name, written into `buf`.
+///
+/// # Errors
+///
+/// Always [`ENOSYS`]: the host build has no Slate kernel to ask.
+#[cfg(not(unix))]
+pub fn domainname_into(_buf: &mut [u8]) -> Result<usize, i32> {
+    Err(ENOSYS)
+}
+
 /// How many bytes the kernel log ring can hold.
 ///
 /// # Errors
@@ -669,6 +703,16 @@ mod tests {
         assert!(hostname_into(&mut []).is_err());
     }
 
+    /// The library answers with a terminated name that fits the room it was
+    /// given: Linux holds at most 64 bytes, `(none)` when unset.
+    #[cfg(unix)]
+    #[test]
+    fn the_domain_name_fits_a_name_sized_buffer() {
+        let mut buf = [0xAAu8; HOST_NAME_MAX + 1];
+        let got = domainname_into(&mut buf);
+        assert!(matches!(got, Ok(n) if n <= 64), "{got:?}");
+    }
+
     /// On a host, every fallible call declines rather than pretending.
     ///
     /// Asserted as a property of the whole surface rather than one call, so a
@@ -683,6 +727,7 @@ mod tests {
         assert_eq!(sethostname(b"host"), Err(ENOSYS));
         assert_eq!(setdomainname(b"domain"), Err(ENOSYS));
         assert_eq!(hostname_into(&mut [0u8; HOST_NAME_MAX + 1]), Err(ENOSYS));
+        assert_eq!(domainname_into(&mut [0u8; HOST_NAME_MAX + 1]), Err(ENOSYS));
         assert_eq!(klog_size(), Err(ENOSYS));
         assert_eq!(klog_read_all(&mut [0u8; 8]), Err(ENOSYS));
         assert_eq!(klog_clear(), Err(ENOSYS));

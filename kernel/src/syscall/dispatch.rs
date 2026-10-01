@@ -97,12 +97,12 @@ use super::number::{
     SYS_TCP_LIST, SYS_TCP_LISTENER_LIST, SYS_TCP_LISTENER_READY, SYS_TCP_LOCAL_PORT,
     SYS_TCP_PEER_ADDR, SYS_TCP_POLL_STATUS, SYS_TCP_RECV, SYS_TCP_SEND, SYS_TCP_SET_KEEPALIVE,
     SYS_TCP_SET_KEEPALIVE_PARAMS, SYS_TCP_SET_NODELAY, SYS_TCP_SHUTDOWN, SYS_THREAD_CREATE,
-    SYS_THREAD_EXIT, SYS_THREAD_JOIN, SYS_THREAD_RESUME, SYS_THREAD_SET_PRIORITY,
-    SYS_THREAD_SUSPEND, SYS_TIMER_CANCEL, SYS_TIMER_CREATE, SYS_TTY_ACQUIRE_CTTY, SYS_TTY_FLUSH,
-    SYS_TTY_GET_PGRP, SYS_TTY_GET_TERMIOS, SYS_TTY_READ, SYS_TTY_RELEASE_CTTY, SYS_TTY_SET_PGRP,
-    SYS_TTY_SET_TERMIOS, SYS_UDP_BIND, SYS_UDP_CLOSE, SYS_UDP_CONNECT, SYS_UDP_LOCAL_PORT,
-    SYS_UDP_MCAST_JOIN, SYS_UDP_MCAST_LEAVE, SYS_UDP_RECV, SYS_UDP_RX_FRONT_BYTES,
-    SYS_UDP_RX_READY, SYS_UDP_SEND, SYS_WAIT_MULTIPLE, SYS_YIELD,
+    SYS_THREAD_EXIT, SYS_THREAD_JOIN, SYS_THREAD_JOIN_TIMEOUT, SYS_THREAD_RESUME,
+    SYS_THREAD_SET_PRIORITY, SYS_THREAD_SUSPEND, SYS_TIMER_CANCEL, SYS_TIMER_CREATE,
+    SYS_TTY_ACQUIRE_CTTY, SYS_TTY_FLUSH, SYS_TTY_GET_PGRP, SYS_TTY_GET_TERMIOS, SYS_TTY_READ,
+    SYS_TTY_RELEASE_CTTY, SYS_TTY_SET_PGRP, SYS_TTY_SET_TERMIOS, SYS_UDP_BIND, SYS_UDP_CLOSE,
+    SYS_UDP_CONNECT, SYS_UDP_LOCAL_PORT, SYS_UDP_MCAST_JOIN, SYS_UDP_MCAST_LEAVE, SYS_UDP_RECV,
+    SYS_UDP_RX_FRONT_BYTES, SYS_UDP_RX_READY, SYS_UDP_SEND, SYS_WAIT_MULTIPLE, SYS_YIELD,
 };
 use crate::drm::syscall as drm_handlers;
 
@@ -558,6 +558,7 @@ const fn build_v1_table() -> SyscallTable {
     handlers[SYS_THREAD_CREATE as usize] = Some(handlers::sys_thread_create);
     handlers[SYS_THREAD_EXIT as usize] = Some(handlers::sys_thread_exit);
     handlers[SYS_THREAD_JOIN as usize] = Some(handlers::sys_thread_join);
+    handlers[SYS_THREAD_JOIN_TIMEOUT as usize] = Some(handlers::sys_thread_join_timeout);
     handlers[SYS_THREAD_SUSPEND as usize] = Some(handlers::sys_thread_suspend);
     handlers[SYS_THREAD_RESUME as usize] = Some(handlers::sys_thread_resume);
     handlers[SYS_THREAD_SET_PRIORITY as usize] = Some(handlers::sys_thread_set_priority);
@@ -1009,6 +1010,7 @@ pub fn self_test() -> KernelResult<()> {
     test_dispatch_termios_syscalls()?;
     test_tty_flush()?;
     test_process_cwd_umask_registered()?;
+    test_thread_join_timeout_registered()?;
     test_dispatch_secureboot_doors()?;
     test_dispatch_ipc_possession()?;
     test_dispatch_dropping_root_is_one_way()?;
@@ -2177,6 +2179,31 @@ fn test_process_cwd_umask_registered() -> KernelResult<()> {
         }
     }
     serial_println!("[syscall]   Native cwd/umask record (1077-1079) is wired: OK");
+    Ok(())
+}
+
+/// `SYS_THREAD_JOIN_TIMEOUT` (1085) is registered. From this kernel task the
+/// target names no thread of a process, so a wired number answers
+/// `NoSuchProcess`; an unwired one would answer `NoSuchSyscall`. The time
+/// limit itself is `proc::thread::self_test`'s (`test_join_timeout`).
+fn test_thread_join_timeout_registered() -> KernelResult<()> {
+    let args = SyscallArgs {
+        arg0: u64::MAX - 1,
+        arg1: 0,
+        arg2: 0,
+        arg3: 0,
+        arg4: 0,
+        arg5: 0,
+    };
+    let got = dispatch(SYS_THREAD_JOIN_TIMEOUT, &args).value;
+    if got != i64::from(KernelError::NoSuchProcess.code()) {
+        serial_println!(
+            "[syscall]   FAIL: SYS_THREAD_JOIN_TIMEOUT (1085) answered {}, expected NoSuchProcess -- is it registered?",
+            got
+        );
+        return Err(KernelError::InternalError);
+    }
+    serial_println!("[syscall]   SYS_THREAD_JOIN_TIMEOUT (1085) is wired: OK");
     Ok(())
 }
 

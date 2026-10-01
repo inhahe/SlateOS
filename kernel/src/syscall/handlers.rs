@@ -14144,14 +14144,26 @@ pub fn sys_thread_exit(args: &SyscallArgs) -> SyscallResult {
 pub fn sys_thread_join(args: &SyscallArgs) -> SyscallResult {
     use crate::proc::thread;
 
-    let target_task = args.arg0;
-    let out_ptr = args.arg1;
+    match thread::join(args.arg0) {
+        Ok(v) => deliver_join_value(v, args.arg1),
+        Err(e) => SyscallResult::err(e),
+    }
+}
 
-    let exit_value = match thread::join(target_task) {
-        Ok(v) => v,
-        Err(e) => return SyscallResult::err(e),
-    };
+/// `SYS_THREAD_JOIN_TIMEOUT` — [`sys_thread_join`] waiting at most `arg2`
+/// nanoseconds (0 at once, `u64::MAX` for ever). See
+/// [`SYS_THREAD_JOIN_TIMEOUT`](crate::syscall::number::SYS_THREAD_JOIN_TIMEOUT).
+pub fn sys_thread_join_timeout(args: &SyscallArgs) -> SyscallResult {
+    use crate::proc::thread;
 
+    match thread::join_timeout(args.arg0, args.arg2) {
+        Ok(v) => deliver_join_value(v, args.arg1),
+        Err(e) => SyscallResult::err(e),
+    }
+}
+
+/// Write a joined thread's exit value to `out_ptr` (if non-zero) and answer 0.
+fn deliver_join_value(exit_value: i64, out_ptr: u64) -> SyscallResult {
     if out_ptr != 0 {
         let bytes = exit_value.to_ne_bytes();
         // SAFETY: `copy_to_user` validates that the destination range lies

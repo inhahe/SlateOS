@@ -179480,3 +179480,24 @@ as `deferred-questions.md` DQ5 with its trigger.
 
 **Where:** new crates `userspace/mesg` and `userspace/write`; the deleted
 crate is in history at `userspace/mesg`.
+
+### [C] TD-C-THE-SHELLS-OTHER-DIALOGS-DRAW-FRAMES-OF-THEIR-OWN -- 2026-10-01
+
+**Status:** OPEN
+
+**In short:** the run box now wears the theme's window frame
+(`design-decisions.md` §1461), but five more dialogs the shell draws itself
+still draw a box and a heading of their own, the same under every theme: the
+security prompt (`gui/desktop/src/security_dialog.rs`), About (`about.rs`,
+which goes when lane E's About page reaches `main`), the print manager
+(`print_manager.rs`), the shortcut editor (`shortcut_editor.rs`) and the
+clipboard viewer (`clipboard_viewer.rs`). Under a theme whose window frames
+differ from the built-in ones, they look like a different desktop from the
+windows beside them.
+
+**The proper fix:** each takes a `dialog_frame::DialogFrame` from the shell
+(`set_frame`, as the run box does in `DesktopShell::set_appearance`), lays its
+content out in the frame's `content` rectangle, draws the frame first, and
+treats the frame's close button as its own Cancel or close -- with a test that
+a theme's taller title bar moves its content down and its close button closes
+it. Done one dialog at a time, as each is next changed.

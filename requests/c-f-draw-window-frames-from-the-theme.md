@@ -45,7 +45,11 @@ compositor still draws from its own constants (`TITLE_BAR_HEIGHT`,
 2. Draw `button_shape`: `Rounded` as now, `Circle` at radius = half the
    size, `Square` at radius 0, `Glyph` with no face -- the button's mark
    (`×`, `□`/`❐`, `–`) in the title text colour, with the face drawn only
-   while the pointer is on it.
+   while the pointer is on it. `ButtonShape::face_radius(size,
+   window_radius, lit)` answers the face's radius (or `None`: no face), and
+   the shell's run box already draws its close button from it
+   (`desktop::dialog_frame`, `design-decisions.md` §1461) -- so a window's
+   buttons and the box's agree if the compositor uses it too.
 3. Cut a title too long for its bar as `title_overflow` says
    (`guitk::text::Overflow`: clip, ellipsis, or keep-tail -- `…` and the
    title's end), with `guitk::text::fit_line(title, room, size, weight,

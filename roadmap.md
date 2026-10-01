@@ -2129,6 +2129,14 @@ live.
   fixed that opening a folder in the toolkit's folder picker chose it, a
   fix the seven lane E applications already using the picker share.
 
+- `[C]` **The run box wears the theme's window frame** (`design-decisions.md`
+  §1461) -- done 2026-10-01. `desktop::dialog_frame` draws a shell dialog's
+  frame from the window-decorations axis -- its title bar, title, close button,
+  border and shadow, in the frame's colours, with the windows' geometry
+  (`DecorationStyle::title_bar`) -- and the run box lays its content out
+  inside it; its close button cancels. The shell's five other dialogs follow
+  as each is touched (`TD-C-THE-SHELLS-OTHER-DIALOGS-DRAW-FRAMES-OF-THEIR-OWN`).
+
 - `[C]` **The taskbar's glass and spacing are a theme axis**
   (`roadmap-detailed.md` → *Tier 2 — Taskbar/Panel Styling*;
   `design-decisions.md` §1460) -- done 2026-10-01. A theme's `taskbar-panel`

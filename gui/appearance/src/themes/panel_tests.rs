@@ -94,6 +94,8 @@ fn gloss_is_a_share() {
     assert_eq!(gloss("1"), (Some(100), Vec::new()));
     assert_eq!(gloss("35%"), (Some(35), Vec::new()));
     assert_eq!(gloss("0.333"), (Some(33), Vec::new()));
+    // Rounded to the nearest hundredth, not cut down to the one below.
+    assert_eq!(gloss("0.996"), (Some(100), Vec::new()));
     assert_eq!(
         gloss("1.5"),
         (

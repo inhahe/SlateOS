@@ -5556,6 +5556,19 @@ fn sys_lseek(args: &SyscallArgs) -> SyscallResult {
 }
 
 /// Translate Linux `O_*` flag bits to the kernel's `OpenFlags`.
+/// The mode a Linux create asks for, as the new file will have it: the twelve
+/// permission bits of `mode`, less the caller's umask (`umask(2)`;
+/// `pcb::get_umask`). A kernel caller has none and gets 022, Linux's default.
+///
+/// Until 2026-10-01 the Linux `open`, `openat`, `openat2`, `creat`, `mkdir`
+/// and `mkdirat` dropped `mode` and the umask both, so every file was made
+/// 0644 and every directory 0755: a key a program created 0600 was readable
+/// by everyone.
+fn linux_create_mode(mode: u64) -> u16 {
+    let umask = caller_pid().and_then(pcb::get_umask).unwrap_or(0o022);
+    u16::try_from(mode & 0o7777).unwrap_or(0) & !umask
+}
+
 fn translate_open_flags(linux_flags: u32) -> u32 {
     use crate::fs::handle::OpenFlags;
     let access = linux_flags & oflags::O_ACCMODE;
@@ -5820,48 +5833,32 @@ fn try_open_evdev(path: &[u8], flags: u32) -> Option<SyscallResult> {
     }
 }
 
-/// Shared backend for `open` / `openat`.
-fn open_common(path_ptr: u64, path_len_hint: u64, flags: u32, no_symlinks: bool) -> SyscallResult {
+/// Shared backend for `open` / `openat` / `creat`. `mode` is the Linux
+/// `mode` argument, applied (less the umask) when the open creates the file.
+fn open_common(
+    path_ptr: u64,
+    path_len_hint: u64,
+    flags: u32,
+    mode: u64,
+    no_symlinks: bool,
+) -> SyscallResult {
     if path_ptr == 0 {
         return linux_err(errno::EFAULT);
     }
 
-    // Linux paths are NUL-terminated.  Scan up to a sane cap (matching
-    // sys_fs_open's internal 256-byte cap) to locate the terminator
-    // without trusting the caller-provided length.  We validate one
-    // page at a time to keep SMAP windows tight.
-    const MAX_PATH: usize = 256;
-    let mut tmp = [0u8; MAX_PATH];
-    let mut len = 0usize;
-    while len < MAX_PATH {
-        // SAFETY: copy_from_user validates each one-byte read.
-        let r = unsafe {
-            crate::mm::user::copy_from_user(
-                path_ptr.wrapping_add(len as u64),
-                tmp.as_mut_ptr().wrapping_add(len),
-                1,
-            )
-        };
-        if let Err(e) = r {
-            return linux_err(linux_errno_for(e));
-        }
-        if tmp[len] == 0 {
-            break;
-        }
-        len += 1;
-    }
-    if len == 0 || len >= MAX_PATH {
-        // Empty path or no terminator within MAX_PATH.
-        return linux_err(if len == 0 {
-            errno::ENOENT
-        } else {
-            errno::ENAMETOOLONG
-        });
+    // Linux paths are NUL-terminated, at most PATH_MAX (4096) bytes with the
+    // NUL. This read at most 255 until 2026-10-01 and answered ENAMETOOLONG
+    // past that, where Linux opens: a deep build tree's paths run past 255.
+    let tmp = match read_user_cstr(path_ptr, 4095) {
+        Ok(b) => b,
+        Err(e) => return linux_err(e),
+    };
+    let len = tmp.len();
+    if len == 0 {
+        return linux_err(errno::ENOENT);
     }
     // Synthetic device nodes (e.g. /dev/snd/pcmC0D0p) are intercepted before
     // the VFS open so they mint their own HandleKind instead of a File fd.
-    // `len < MAX_PATH` is guaranteed by the loop bound above, so `get(..len)`
-    // always yields the path slice; the fallback is unreachable.
     if let Some(path_slice) = tmp.get(..len) {
         if let Some(r) = try_open_alsa_pcm(path_slice, flags) {
             return r;
@@ -5915,7 +5912,7 @@ fn open_common(path_ptr: u64, path_len_hint: u64, flags: u32, no_symlinks: bool)
     if no_symlinks {
         kernel_flags |= crate::fs::handle::OpenFlags::NO_SYMLINKS.bits();
     }
-    let r = handlers::fs_open_kernel_path(canon_path, kernel_flags);
+    let r = handlers::fs_open_kernel_path_mode(canon_path, kernel_flags, linux_create_mode(mode));
     if r.value < 0 {
         return linux_from_native(r);
     }
@@ -5972,7 +5969,7 @@ fn open_common(path_ptr: u64, path_len_hint: u64, flags: u32, no_symlinks: bool)
 
 /// `open(path, flags, mode)` — equivalent to `openat(AT_FDCWD, path, flags, mode)`.
 fn sys_open(args: &SyscallArgs) -> SyscallResult {
-    open_common(args.arg0, 0, args.arg1 as u32, false)
+    open_common(args.arg0, 0, args.arg1 as u32, args.arg2, false)
 }
 
 /// Resolve a real (non-`AT_FDCWD`) directory `dirfd` to its **guest**
@@ -6046,9 +6043,10 @@ fn sys_openat_ex(args: &SyscallArgs, no_symlinks: bool) -> SyscallResult {
     let dirfd = args.arg0 as i32;
     let path_ptr = args.arg1;
     let flags = args.arg2 as u32;
+    let mode = args.arg3;
 
     if dirfd == AT_FDCWD {
-        return open_common(path_ptr, 0, flags, no_symlinks);
+        return open_common(path_ptr, 0, flags, mode, no_symlinks);
     }
 
     // Peek at the first byte of the path: if it's '/', dirfd is ignored
@@ -6063,7 +6061,7 @@ fn sys_openat_ex(args: &SyscallArgs, no_symlinks: bool) -> SyscallResult {
     }
     if first == b'/' {
         // Absolute path — dirfd is ignored.
-        return open_common(path_ptr, 0, flags, no_symlinks);
+        return open_common(path_ptr, 0, flags, mode, no_symlinks);
     }
     if first == 0 {
         // Empty path under openat.  Linux's "empty path" semantics
@@ -6106,12 +6104,10 @@ fn sys_openat_ex(args: &SyscallArgs, no_symlinks: bool) -> SyscallResult {
     if combined.len() > 4095 {
         return linux_err(errno::ENAMETOOLONG);
     }
-    let path_str = match core::str::from_utf8(&combined) {
-        Ok(s) => s,
-        Err(_) => return linux_err(errno::EINVAL),
-    };
-
-    open_kernel_path_install(path_str, flags, no_symlinks, None)
+    // Bytes, not UTF-8: a name may hold any byte but `/` and NUL. This
+    // answered EINVAL for a non-UTF-8 path until 2026-10-01, so such a file
+    // could not be opened relative to a directory descriptor.
+    open_kernel_path_install(Path::new(&combined), flags, mode, no_symlinks, None)
 }
 
 /// Shared installer for "open by kernel-side absolute path".
@@ -6123,8 +6119,9 @@ fn sys_openat_ex(args: &SyscallArgs, no_symlinks: bool) -> SyscallResult {
 /// plus the FdEntry install that `open_common` does — so the resulting
 /// fd is indistinguishable from one minted by plain `open()`.
 fn open_kernel_path_install(
-    path: &str,
+    path: &Path,
     flags: u32,
+    mode: u64,
     no_symlinks: bool,
     beneath: Option<crate::fs::handle::Beneath<'_>>,
 ) -> SyscallResult {
@@ -6160,9 +6157,10 @@ fn open_kernel_path_install(
     // identical, which is deliberate.  Lane B's request came from the two
     // implementations of openat2 drifting apart; a second install path here
     // would be the same mistake one layer down.
+    let create_mode = linux_create_mode(mode);
     let opened = match beneath {
-        Some(b) => crate::fs::handle::open_beneath(b, kernel_flags),
-        None => crate::fs::handle::open(path, kernel_flags),
+        Some(b) => crate::fs::handle::open_beneath_with_mode(b, kernel_flags, create_mode),
+        None => crate::fs::handle::open_with_mode(path, kernel_flags, create_mode),
     };
     let raw_handle = match opened {
         Ok(h) => h,
@@ -21023,21 +21021,22 @@ fn require_fs_write() -> Result<(), SyscallResult> {
 /// latter is actively misleading (it suggests the mount is the
 /// problem when in fact the caller's input is malformed).
 fn sys_mkdir(args: &SyscallArgs) -> SyscallResult {
-    mkdir_common(AT_FDCWD, args.arg0)
+    mkdir_common(AT_FDCWD, args.arg0, args.arg1)
 }
 
 /// `mkdirat(dirfd, path, mode)` — same Linux contract as `sys_mkdir`,
 /// see that body for empty-path ENOENT rationale (batch 482).
 fn sys_mkdirat(args: &SyscallArgs) -> SyscallResult {
     let dirfd = args.arg0 as i32;
-    mkdir_common(dirfd, args.arg1)
+    mkdir_common(dirfd, args.arg1, args.arg2)
 }
 
 /// Shared `mkdir`/`mkdirat` back-end: resolve the path, check the File-WRITE
 /// capability, then create the directory via the native VFS (which emits
-/// `IN_CREATE | IN_ISDIR`).  The Linux `mode` argument is not honoured — the
-/// native VFS does not yet track per-directory permission bits.
-fn mkdir_common(dirfd: i32, path_ptr: u64) -> SyscallResult {
+/// `IN_CREATE | IN_ISDIR`), with the permission bits of `mode` less the
+/// caller's umask (`linux_create_mode`). Until 2026-10-01 `mode` was dropped
+/// and every directory made 0755.
+fn mkdir_common(dirfd: i32, path_ptr: u64, mode: u64) -> SyscallResult {
     let path = match resolve_at_path(dirfd, path_ptr) {
         Ok(p) => p,
         Err(r) => return r,
@@ -21045,7 +21044,7 @@ fn mkdir_common(dirfd: i32, path_ptr: u64) -> SyscallResult {
     if let Err(r) = require_fs_write() {
         return r;
     }
-    match crate::fs::Vfs::mkdir(&path) {
+    match crate::fs::Vfs::mkdir_mode(&path, linux_create_mode(mode)) {
         Ok(()) => SyscallResult::ok(0),
         Err(e) => linux_err(linux_errno_for(e)),
     }
@@ -32470,6 +32469,7 @@ fn sys_openat_beneath(args: &SyscallArgs, no_symlinks: bool) -> SyscallResult {
     let dirfd = args.arg0 as i32;
     let path_ptr = args.arg1;
     let flags = args.arg2 as u32;
+    let mode = args.arg3;
 
     const MAX_REL: usize = 4096;
     let rel_bytes = match read_user_cstr(path_ptr, MAX_REL) {
@@ -32545,13 +32545,11 @@ fn sys_openat_beneath(args: &SyscallArgs, no_symlinks: bool) -> SyscallResult {
     if combined.len() > 4095 {
         return linux_err(errno::ENAMETOOLONG);
     }
-    let Ok(path_str) = core::str::from_utf8(&combined) else {
-        return linux_err(errno::EINVAL);
-    };
-
+    // Bytes, not UTF-8, as in `sys_openat_ex`.
     open_kernel_path_install(
-        path_str,
+        Path::new(&combined),
         flags,
+        mode,
         no_symlinks,
         Some(crate::fs::handle::Beneath { base: &base, rel }),
     )
@@ -46063,7 +46061,7 @@ fn sys_futex2_wait(args: &SyscallArgs) -> SyscallResult {
 fn sys_creat(args: &SyscallArgs) -> SyscallResult {
     // O_WRONLY | O_CREAT | O_TRUNC.
     let flags = oflags::O_WRONLY | oflags::O_CREAT | oflags::O_TRUNC;
-    open_common(args.arg0, 0, flags, false)
+    open_common(args.arg0, 0, flags, args.arg1, false)
 }
 
 /// `uselib(library)` — deprecated dynamic-linker primitive.
@@ -51444,8 +51442,159 @@ pub fn self_test_fs() -> crate::error::KernelResult<()> {
     test_linux_mkdir_rmdir_unlink_roundtrip()?;
     test_linux_rename_roundtrip()?;
     test_linux_fcntl_record_locks()?;
+    test_linux_create_modes()?;
 
     serial_println!("[syscall/linux] Post-mount translation self-test PASSED");
+    Ok(())
+}
+
+/// What a Linux create stamps on the file it makes (`linux_create_mode`),
+/// against `/tmp`: the `mode` argument less the umask, through `open`,
+/// `creat`, `mkdir` and the byte-path installer `openat` uses; paths past
+/// 255 bytes, up to `PATH_MAX`; a name that is not UTF-8.
+///
+/// Kernel context, whose umask is Linux's default 022, but for one rung that
+/// lends the task a process to read that process's umask: a process's path
+/// argument would have to be in its own memory, which a kernel test's is
+/// not. A kernel caller cannot hold a descriptor, so each open creates the
+/// file, gives its handle back and answers `EBADF`: the file it leaves is the
+/// answer.
+#[inline(never)]
+fn test_linux_create_modes() -> crate::error::KernelResult<()> {
+    use crate::serial_println;
+
+    const DIR: &str = "/tmp/linux-create-modes";
+    fn fail(msg: &str) -> crate::error::KernelResult<()> {
+        serial_println!("[syscall/linux]   FAIL: create modes: {}", msg);
+        // Best effort: the scratch tree, whatever is left of it.
+        let _ = crate::fs::Vfs::remove_recursive(DIR);
+        Err(KernelError::InternalError)
+    }
+    let args = |arg0: u64, arg1: u64, arg2: u64| SyscallArgs {
+        arg0,
+        arg1,
+        arg2,
+        arg3: 0,
+        arg4: 0,
+        arg5: 0,
+    };
+    let mode_of = |p: &Path| {
+        crate::fs::Vfs::metadata(p)
+            .map(|m| m.permissions & 0o7777)
+            .ok()
+    };
+    let ebadf = i64::from(errno::EBADF).wrapping_neg();
+    let create = u64::from(oflags::O_CREAT | oflags::O_WRONLY);
+
+    // Best effort: a leftover from an earlier boot's failure.
+    let _ = crate::fs::Vfs::remove_recursive(DIR);
+    crate::fs::Vfs::mkdir(DIR)?;
+
+    // The umask: the calling process's own, else Linux's default.
+    let pid = pcb::create("linux-create-modes", 0);
+    let _ = pcb::set_umask(pid, 0o027);
+    let theirs = crate::proc::thread::self_test_as_process(pid, || linux_create_mode(0o777));
+    pcb::destroy(pid);
+    if theirs != 0o750
+        || linux_create_mode(0o777) != 0o755
+        || linux_create_mode(0o170_000 | 0o4755) != 0o4755
+    {
+        return fail("the umask was not applied, or a file-type bit got through");
+    }
+
+    // open(O_CREAT): the mode less the umask, setuid kept.
+    for (name, mode, want) in [
+        (&b"/tmp/linux-create-modes/key\0"[..], 0o600, 0o600),
+        (&b"/tmp/linux-create-modes/wide\0"[..], 0o777, 0o755),
+        (&b"/tmp/linux-create-modes/suid\0"[..], 0o4755, 0o4755),
+    ] {
+        let r = dispatch_linux(nr::OPEN, &args(name.as_ptr() as u64, create, mode)).value;
+        let path = Path::new(name.strip_suffix(b"\0").unwrap_or(name));
+        if r != ebadf || mode_of(path) != Some(want) {
+            serial_println!(
+                "[syscall/linux]   open(O_CREAT, {:o}) -> {}, mode {:?}",
+                mode,
+                r,
+                mode_of(path)
+            );
+            return fail("open(O_CREAT) did not stamp its mode less the umask");
+        }
+    }
+
+    // creat(path, mode).
+    let creat = b"/tmp/linux-create-modes/creat\0";
+    let r = dispatch_linux(nr::CREAT, &args(creat.as_ptr() as u64, 0o640, 0)).value;
+    if r != ebadf || mode_of(Path::new("/tmp/linux-create-modes/creat")) != Some(0o640) {
+        return fail("creat did not stamp its mode");
+    }
+
+    // mkdir: the permission bits and sticky, less the umask.
+    for (name, mode, want) in [
+        (&b"/tmp/linux-create-modes/private\0"[..], 0o700, 0o700),
+        (&b"/tmp/linux-create-modes/shared\0"[..], 0o1777, 0o1755),
+    ] {
+        let r = dispatch_linux(nr::MKDIR, &args(name.as_ptr() as u64, mode, 0)).value;
+        let path = Path::new(name.strip_suffix(b"\0").unwrap_or(name));
+        if r != 0 || mode_of(path) != Some(want) {
+            serial_println!(
+                "[syscall/linux]   mkdir({:o}) -> {}, mode {:?}",
+                mode,
+                r,
+                mode_of(path)
+            );
+            return fail("mkdir did not stamp its mode less the umask");
+        }
+    }
+
+    // A path past 255 bytes opens, as on Linux; one with no NUL in its first
+    // 4096 bytes is ENAMETOOLONG.
+    let mut deep = alloc::vec::Vec::from(&b"/tmp/linux-create-modes/"[..]);
+    deep.extend_from_slice(&[b'd'; 120]);
+    crate::fs::Vfs::mkdir(Path::new(&deep))?;
+    deep.push(b'/');
+    deep.extend_from_slice(&[b'e'; 120]);
+    crate::fs::Vfs::mkdir(Path::new(&deep))?;
+    deep.extend_from_slice(b"/file");
+    let deep_len = deep.len();
+    deep.push(0);
+    let r = dispatch_linux(nr::OPEN, &args(deep.as_ptr() as u64, create, 0o600)).value;
+    let deep_path = Path::new(deep.get(..deep_len).unwrap_or(&[]));
+    if deep_len <= 255 || r != ebadf || mode_of(deep_path) != Some(0o600) {
+        serial_println!(
+            "[syscall/linux]   open of a {}-byte path -> {}",
+            deep_len,
+            r
+        );
+        return fail("a path past 255 bytes was not opened");
+    }
+    let mut endless = alloc::vec![b'a'; 4100];
+    if let Some(first) = endless.first_mut() {
+        *first = b'/';
+    }
+    if let Some(last) = endless.last_mut() {
+        *last = 0;
+    }
+    let r = dispatch_linux(nr::OPEN, &args(endless.as_ptr() as u64, create, 0o600)).value;
+    if r != i64::from(errno::ENAMETOOLONG).wrapping_neg() {
+        serial_println!("[syscall/linux]   open of a 4099-byte path -> {}", r);
+        return fail("a path past PATH_MAX was not ENAMETOOLONG");
+    }
+
+    // The installer `openat` uses for a path relative to a directory
+    // descriptor takes bytes: a name that is not UTF-8 is created, with its
+    // mode. It answered EINVAL until 2026-10-01.
+    let odd = b"/tmp/linux-create-modes/\xff\xfe-odd";
+    let flags = oflags::O_CREAT | oflags::O_WRONLY;
+    let r = open_kernel_path_install(Path::new(odd), flags, 0o640, false, None).value;
+    if r != ebadf || mode_of(Path::new(odd)) != Some(0o640) {
+        serial_println!("[syscall/linux]   install of a non-UTF-8 name -> {}", r);
+        return fail("a name that is not UTF-8 was not created with its mode");
+    }
+
+    crate::fs::Vfs::remove_recursive(DIR)?;
+    serial_println!(
+        "[syscall/linux]   create modes: open/creat/mkdir take mode less the umask; paths to PATH_MAX, as bytes: OK"
+    );
     Ok(())
 }
 

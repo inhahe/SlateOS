@@ -316,6 +316,29 @@ pub fn open_with_mode(
     open_impl(path.as_ref(), flags, create_mode, None)
 }
 
+/// Set an open description's status flags, as Linux's `fcntl(F_SETFL)` does
+/// (`SYS_FS_SET_STATUS_FLAGS`): `APPEND` is taken from `flags`, and the
+/// access mode and the creation bits are ignored, as `F_SETFL` ignores them.
+///
+/// It acts on the description, so every descriptor sharing the handle sees
+/// it. With `APPEND` set, each write lands at the file's end as it is when the
+/// write lands, as one opened with `O_APPEND` does.
+///
+/// # Errors
+///
+/// `InvalidHandle` for a handle that is not open; `IsADirectory` for a
+/// directory handle, which has no byte position to append at.
+pub fn set_status_flags(handle: u64, flags: OpenFlags) -> KernelResult<()> {
+    let mut table = OPEN_FILES.lock();
+    let file = table.get_mut(&handle).ok_or(KernelError::InvalidHandle)?;
+    if file.is_directory {
+        return Err(KernelError::IsADirectory);
+    }
+    let append = OpenFlags::APPEND.bits();
+    file.flags = OpenFlags::from_bits((file.flags.bits() & !append) | (flags.bits() & append));
+    Ok(())
+}
+
 /// A request to open under `openat2`'s `RESOLVE_BENEATH`.
 ///
 /// The two halves travel together in one type on purpose: a base without

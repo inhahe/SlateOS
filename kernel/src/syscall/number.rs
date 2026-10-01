@@ -6012,6 +6012,31 @@ pub const FLOCK_NB: u64 = 4;
 pub const FLOCK_UN: u64 = 8;
 
 // ---------------------------------------------------------------------------
+// An open description's status flags (1095)
+// ---------------------------------------------------------------------------
+
+/// Set an open description's status flags, as Linux's `fcntl(F_SETFL)` does:
+/// `fs_set_status_flags(handle, flags) -> 0`.
+///
+/// - `handle`: a file handle the caller holds.
+/// - `flags`: the native open flags. `APPEND` is taken from them; the access
+///   mode and the creation bits (`CREATE`, `EXCL`, `TRUNCATE`, `DIRECTORY`,
+///   `NOFOLLOW`, `NO_SYMLINKS`) are ignored, as `F_SETFL` ignores them. A bit
+///   above bit 8 is `InvalidArgument`.
+///
+/// It acts on the description: every descriptor sharing the handle sees it.
+/// With `APPEND` set, each write lands at the file's end as it is when the
+/// write lands. libc's `F_SETFL` emulated it with a seek to the end before
+/// each write, two calls another appender could get between (lane D's
+/// request, 2026-10-01).
+///
+/// Errors: `InvalidHandle` for a handle the caller does not hold;
+/// `IsADirectory` for a directory handle.
+///
+/// Chosen number 1095, the next free slot after 1094.
+pub const SYS_FS_SET_STATUS_FLAGS: u64 = 1095;
+
+// ---------------------------------------------------------------------------
 // Version info
 // ---------------------------------------------------------------------------
 

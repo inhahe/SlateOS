@@ -49,17 +49,17 @@ use super::number::{
     SYS_FS_OPEN_MODE, SYS_FS_OPENAT2, SYS_FS_PREAD, SYS_FS_PWRITE, SYS_FS_READ, SYS_FS_READ_FILE,
     SYS_FS_READDIR_AT, SYS_FS_READLINK, SYS_FS_RECORD_LOCK, SYS_FS_REMOVE_XATTR, SYS_FS_RENAME,
     SYS_FS_RENAMEAT_PINNED, SYS_FS_RMDIR, SYS_FS_SEEK, SYS_FS_SEEK_DATA, SYS_FS_SEEK_HOLE,
-    SYS_FS_SET_ATTR, SYS_FS_SET_OWNER, SYS_FS_SET_PERMS, SYS_FS_SET_TIMES, SYS_FS_SET_XATTR,
-    SYS_FS_STAT, SYS_FS_STATVFS, SYS_FS_SYMLINK, SYS_FS_SYMLINKAT_PINNED, SYS_FS_SYNC,
-    SYS_FS_TMPFILE, SYS_FS_TRASH, SYS_FS_TRASH_EMPTY, SYS_FS_TRASH_LIST, SYS_FS_TRASH_RESTORE,
-    SYS_FS_TRIM, SYS_FS_TRUNCATE, SYS_FS_UMOUNT, SYS_FS_UNLINKAT_PINNED, SYS_FS_UTIMENSAT_PINNED,
-    SYS_FS_WATCH_CLOSE, SYS_FS_WATCH_CREATE, SYS_FS_WATCH_READ, SYS_FS_WATCH_READ_RECORDS,
-    SYS_FS_WRITE, SYS_FS_WRITE_FILE, SYS_FUTEX_CMP_REQUEUE_PI, SYS_FUTEX_LOCK_PI,
-    SYS_FUTEX_LOCK_PI_TIMEOUT, SYS_FUTEX_REQUEUE, SYS_FUTEX_TRYLOCK_PI, SYS_FUTEX_UNLOCK_PI,
-    SYS_FUTEX_WAIT, SYS_FUTEX_WAIT_REQUEUE_PI, SYS_FUTEX_WAIT_TIMEOUT, SYS_FUTEX_WAKE,
-    SYS_GETRANDOM, SYS_HOSTNAME_SET, SYS_ICMP_PING, SYS_ICMP_PING_WAIT, SYS_IO_RING_DESTROY,
-    SYS_IO_RING_ENTER, SYS_IO_RING_SETUP, SYS_IRQ_REGISTER, SYS_IRQ_RELEASE, SYS_IRQ_WAIT,
-    SYS_ITIMER_GET, SYS_ITIMER_SET, SYS_KEYLAYOUT_SET, SYS_LOADAVG, SYS_LOG_READ,
+    SYS_FS_SET_ATTR, SYS_FS_SET_OWNER, SYS_FS_SET_PERMS, SYS_FS_SET_STATUS_FLAGS, SYS_FS_SET_TIMES,
+    SYS_FS_SET_XATTR, SYS_FS_STAT, SYS_FS_STATVFS, SYS_FS_SYMLINK, SYS_FS_SYMLINKAT_PINNED,
+    SYS_FS_SYNC, SYS_FS_TMPFILE, SYS_FS_TRASH, SYS_FS_TRASH_EMPTY, SYS_FS_TRASH_LIST,
+    SYS_FS_TRASH_RESTORE, SYS_FS_TRIM, SYS_FS_TRUNCATE, SYS_FS_UMOUNT, SYS_FS_UNLINKAT_PINNED,
+    SYS_FS_UTIMENSAT_PINNED, SYS_FS_WATCH_CLOSE, SYS_FS_WATCH_CREATE, SYS_FS_WATCH_READ,
+    SYS_FS_WATCH_READ_RECORDS, SYS_FS_WRITE, SYS_FS_WRITE_FILE, SYS_FUTEX_CMP_REQUEUE_PI,
+    SYS_FUTEX_LOCK_PI, SYS_FUTEX_LOCK_PI_TIMEOUT, SYS_FUTEX_REQUEUE, SYS_FUTEX_TRYLOCK_PI,
+    SYS_FUTEX_UNLOCK_PI, SYS_FUTEX_WAIT, SYS_FUTEX_WAIT_REQUEUE_PI, SYS_FUTEX_WAIT_TIMEOUT,
+    SYS_FUTEX_WAKE, SYS_GETRANDOM, SYS_HOSTNAME_SET, SYS_ICMP_PING, SYS_ICMP_PING_WAIT,
+    SYS_IO_RING_DESTROY, SYS_IO_RING_ENTER, SYS_IO_RING_SETUP, SYS_IRQ_REGISTER, SYS_IRQ_RELEASE,
+    SYS_IRQ_WAIT, SYS_ITIMER_GET, SYS_ITIMER_SET, SYS_KEYLAYOUT_SET, SYS_LOADAVG, SYS_LOG_READ,
     SYS_MM_GET_PROFILE, SYS_MM_SET_PROFILE, SYS_MMAP, SYS_MPROTECT, SYS_MUNMAP,
     SYS_NET_FW_ADD_RULE, SYS_NET_FW_DEL_RULE, SYS_NET_FW_ENABLE, SYS_NET_FW_FLUSH,
     SYS_NET_FW_SET_POLICY, SYS_NET_IF_CONFIG, SYS_NET_IF_INFO, SYS_NET_RAW_CLOSE, SYS_NET_RAW_OPEN,
@@ -562,6 +562,7 @@ const fn build_v1_table() -> SyscallTable {
     handlers[SYS_CPU_CURRENT as usize] = Some(handlers::sys_cpu_current);
     handlers[SYS_FS_RECORD_LOCK as usize] = Some(handlers::sys_fs_record_lock);
     handlers[SYS_FS_FLOCK_HANDLE as usize] = Some(handlers::sys_fs_flock_handle);
+    handlers[SYS_FS_SET_STATUS_FLAGS as usize] = Some(handlers::sys_fs_set_status_flags);
     handlers[SYS_SIGNAL_MASK as usize] = Some(handlers::sys_signal_mask);
     handlers[SYS_SIGNAL_PENDING as usize] = Some(handlers::sys_signal_pending);
     handlers[SYS_SIGNAL_STOP_SELF as usize] = Some(handlers::sys_signal_stop_self);
@@ -1231,9 +1232,97 @@ pub fn self_test_fs() -> KernelResult<()> {
     test_dispatch_record_lock()?;
     test_dispatch_flock()?;
     test_dispatch_fs_gates()?;
+    test_dispatch_status_flags()?;
 
     serial_println!("[syscall] Post-mount dispatch self-test PASSED");
     Ok(())
+}
+
+/// `SYS_FS_SET_STATUS_FLAGS` (1095), on a file in `/tmp`:
+/// - with `APPEND` set, a write after a seek to 0 lands at the end;
+/// - cleared, the next lands at the cursor again;
+/// - a bit above bit 8 is `InvalidArgument`, a directory `IsADirectory`;
+/// - a process that does not hold the handle gets `InvalidHandle`.
+fn test_dispatch_status_flags() -> KernelResult<()> {
+    use crate::fs::handle::{self, OpenFlags, SeekFrom};
+    use crate::proc::pcb;
+    use crate::proc::thread::self_test_as_process;
+
+    const PATH: &str = "/tmp/status-flags-selftest";
+    let args = |arg0: u64, arg1: u64| SyscallArgs {
+        arg0,
+        arg1,
+        arg2: 0,
+        arg3: 0,
+        arg4: 0,
+        arg5: 0,
+    };
+    // Best effort: a leftover from an earlier boot's failure.
+    let _ = crate::fs::Vfs::remove(PATH);
+    crate::fs::Vfs::write_file(PATH, b"abc")?;
+    let h = handle::open(PATH, OpenFlags::READ.union(OpenFlags::WRITE))?;
+    let dir = handle::open("/tmp", OpenFlags::READ.union(OpenFlags::DIRECTORY))?;
+    let stranger = pcb::create("status-flags", 0);
+    let append = u64::from(OpenFlags::APPEND.bits());
+
+    let outcome = (|| -> Result<(), &'static str> {
+        let rewrite_at_start = |data: &[u8]| -> Result<(), &'static str> {
+            handle::seek(h, SeekFrom::Start(0)).map_err(|_| "a seek failed")?;
+            handle::write(h, data).map_err(|_| "a write failed")?;
+            Ok(())
+        };
+        let contents = || crate::fs::Vfs::read_file(PATH).unwrap_or_default();
+
+        if dispatch(SYS_FS_SET_STATUS_FLAGS, &args(h, append)).value != 0 {
+            return Err("setting APPEND was refused");
+        }
+        rewrite_at_start(b"d")?;
+        if contents() != b"abcd" {
+            return Err("a write with APPEND set did not land at the end");
+        }
+        if dispatch(SYS_FS_SET_STATUS_FLAGS, &args(h, 0)).value != 0 {
+            return Err("clearing APPEND was refused");
+        }
+        rewrite_at_start(b"X")?;
+        if contents() != b"Xbcd" {
+            return Err("a write with APPEND cleared did not land at the cursor");
+        }
+        if dispatch(SYS_FS_SET_STATUS_FLAGS, &args(h, 1 << 9)).value
+            != i64::from(KernelError::InvalidArgument.code())
+        {
+            return Err("a bit above bit 8 was accepted");
+        }
+        if dispatch(SYS_FS_SET_STATUS_FLAGS, &args(dir, append)).value
+            != i64::from(KernelError::IsADirectory.code())
+        {
+            return Err("a directory handle took APPEND");
+        }
+        let theirs = self_test_as_process(stranger, || {
+            dispatch(SYS_FS_SET_STATUS_FLAGS, &args(h, append)).value
+        });
+        if theirs != i64::from(KernelError::InvalidHandle.code()) {
+            return Err("a process set the flags of a handle it does not hold");
+        }
+        Ok(())
+    })();
+
+    pcb::destroy(stranger);
+    // Best effort, all three: scratch state this test made.
+    let _ = handle::close(dir);
+    let _ = handle::close(h);
+    let _ = crate::fs::Vfs::remove(PATH);
+    match outcome {
+        Ok(()) => {
+            serial_println!(
+                "[syscall]   status flags: SYS_FS_SET_STATUS_FLAGS (1095) sets and clears APPEND: OK"
+            );
+            Ok(())
+        }
+        Err(msg) => {
+            serial_println!("[syscall]   FAIL: status flags: {}", msg);
+            Err(KernelError::InternalError)
+        }
+    }
 }
 
 /// Verify the **native** `SYS_FS_OPENAT2` (661): its resolve-bit gate, the

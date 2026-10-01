@@ -10664,6 +10664,27 @@ pub fn fs_open_kernel_path(
     }
 }
 
+/// [`fs_open_kernel_path`] with the permission bits a create stamps on a new
+/// file: the Linux `open` family's `mode`, already less the caller's umask.
+pub fn fs_open_kernel_path_mode(
+    path: impl AsRef<crate::fs::path::Path>,
+    flags_raw: u32,
+    create_mode: u16,
+) -> SyscallResult {
+    if let Err(e) = require_cap_type(crate::cap::ResourceType::File, crate::cap::Rights::READ) {
+        return SyscallResult::err(e);
+    }
+    let flags = crate::fs::handle::OpenFlags::from_bits(flags_raw);
+    match crate::fs::handle::open_with_mode(path, flags, create_mode) {
+        Ok(handle) => {
+            register_for_caller(ResourceType::File, handle);
+            #[allow(clippy::cast_possible_wrap)]
+            SyscallResult::ok(handle as i64)
+        }
+        Err(e) => SyscallResult::err(e),
+    }
+}
+
 pub fn sys_fs_open(args: &SyscallArgs) -> SyscallResult {
     // Capability: require READ for read-only, WRITE for write.
     // We check the broader File capability — specific rights are
@@ -13975,6 +13996,27 @@ pub fn sys_fs_readdir_at(args: &SyscallArgs) -> SyscallResult {
 /// lane B's tmpfile entry and lane A's `O_TMPFILE` todo).
 pub fn sys_fs_tmpfile(_args: &SyscallArgs) -> SyscallResult {
     SyscallResult::err(KernelError::NotSupported)
+}
+
+/// `SYS_FS_SET_STATUS_FLAGS` — set an open description's status flags, as
+/// Linux's `fcntl(F_SETFL)` does. See the number's doc.
+pub fn sys_fs_set_status_flags(args: &SyscallArgs) -> SyscallResult {
+    use crate::fs::handle::OpenFlags;
+    /// Bits 0-8 are the native open flags; anything above names nothing.
+    const KNOWN: u64 = 0x1FF;
+    let handle = args.arg0;
+    if args.arg1 & !KNOWN != 0 {
+        return SyscallResult::err(KernelError::InvalidArgument);
+    }
+    if let Err(e) = require_file_handle_owner(handle) {
+        return SyscallResult::err(e);
+    }
+    #[allow(clippy::cast_possible_truncation)]
+    let flags = OpenFlags::from_bits(args.arg1 as u32);
+    match crate::fs::handle::set_status_flags(handle, flags) {
+        Ok(()) => SyscallResult::ok(0),
+        Err(e) => SyscallResult::err(e),
+    }
 }
 
 /// `SYS_FS_FALLOCATE` — pre-allocate disk space.

@@ -1,0 +1,29 @@
+[package]
+name = "getconf"
+version = "0.1.0"
+edition = "2024"
+description = "Query system configuration variables: glibc 2.39's getconf, ported"
+
+[build-dependencies]
+# Tells cargo that the hand-built sysroot libc.a is an input, so a
+# libc rebuild relinks this binary instead of silently leaving it
+# stale. See userspace/sysroot-dep.
+sysroot-dep = { path = "../sysroot-dep" }
+
+[lints]
+workspace = true
+
+[dependencies]
+# sysconf, pathconf and confstr, asked of the one C library a program links
+# (design-decisions 768) -- the whole point of getconf is to say what that
+# library says.
+libcall = { path = "../../libcall" }
+
+# strerror(3)'s wording for `pathconf: PATH: No such file or directory`, the
+# same on every host.
+errmsg = { path = "../errmsg" }
+
+[dev-dependencies]
+# Test-only, never linked into the program: the table's constants are held to
+# the values SlateOS's C library gives the same names.
+posix = { path = "../../posix" }

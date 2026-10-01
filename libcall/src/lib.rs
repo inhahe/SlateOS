@@ -63,6 +63,7 @@
 
 use core::ffi::CStr;
 
+pub mod conf;
 pub mod inotify;
 pub mod pty;
 pub mod utmp;
@@ -230,6 +231,17 @@ fn last_errno() -> i32 {
     // stays valid for the life of the thread, and the read is of an `i32` the
     // library has already initialised.
     unsafe { *sys::__errno_location() }
+}
+
+/// Set this thread's `errno` to 0, for the calls that report "no value" by
+/// returning `-1` and leaving `errno` untouched (`pathconf`), which a caller
+/// can only tell from failure if it cleared `errno` first.
+#[cfg(unix)]
+fn clear_errno() {
+    // SAFETY: as for `last_errno` -- the pointer is valid, aligned and
+    // thread-local for the life of the thread, so writing an `i32` through it
+    // is a write to this thread's own `errno` and nothing else.
+    unsafe { *sys::__errno_location() = 0 };
 }
 
 // ---------------------------------------------------------------------------

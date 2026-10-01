@@ -5,16 +5,17 @@
 //   iostat     -- I/O statistics
 //   mpstat     -- per-CPU statistics
 //   pidstat    -- per-process statistics
-//   cifsiostat -- CIFS I/O statistics
-//   tapestat   -- tape device statistics
 //
 // Usage:
 //   sar [OPTIONS] [interval [count]]
 //   iostat [OPTIONS] [interval [count]]
 //   mpstat [OPTIONS] [interval [count]]
 //   pidstat [OPTIONS] [interval [count]]
-//   cifsiostat [interval [count]]
-//   tapestat [interval [count]]
+//
+// It also answered to `cifsiostat` and `tapestat` until 2026-10-01, the
+// §1045 triage: they read Linux's /proc/fs/cifs/Stats and /proc/scsi/tape,
+// which SlateOS has no plan to provide (its SMB/NFS shares are the kernel's
+// fs::netshare, and it drives no tape), so the names went.
 
 #![deny(clippy::all)]
 
@@ -34,8 +35,6 @@ enum Personality {
     Sar,
     Mpstat,
     Pidstat,
-    Cifsiostat,
-    Tapestat,
 }
 
 impl fmt::Display for Personality {
@@ -44,8 +43,6 @@ impl fmt::Display for Personality {
             Self::Sar => write!(f, "sar"),
             Self::Mpstat => write!(f, "mpstat"),
             Self::Pidstat => write!(f, "pidstat"),
-            Self::Cifsiostat => write!(f, "cifsiostat"),
-            Self::Tapestat => write!(f, "tapestat"),
         }
     }
 }
@@ -63,8 +60,6 @@ fn detect_personality(argv0: &str) -> Personality {
     match base {
         "mpstat" => Personality::Mpstat,
         "pidstat" => Personality::Pidstat,
-        "cifsiostat" => Personality::Cifsiostat,
-        "tapestat" => Personality::Tapestat,
         _ => Personality::Sar,
     }
 }
@@ -583,111 +578,6 @@ fn read_process_stats(target_pid: Option<u64>) -> Vec<ProcessStat> {
         return Vec::new();
     }
     stats
-}
-
-// ---------------------------------------------------------------------------
-// CIFS statistics
-// ---------------------------------------------------------------------------
-
-#[derive(Debug, Clone, Default)]
-struct CifsStat {
-    share: String,
-    reads: u64,
-    read_bytes: u64,
-    writes: u64,
-    write_bytes: u64,
-    opens: u64,
-    closes: u64,
-    locks: u64,
-}
-
-fn read_cifs_stats() -> Vec<CifsStat> {
-    if let Some(lines) = read_file_lines("/proc/fs/cifs/Stats") {
-        let mut stats = Vec::new();
-        let mut current: Option<CifsStat> = None;
-        for line in &lines {
-            let trimmed = line.trim();
-            if trimmed.starts_with("\\\\") {
-                if let Some(s) = current.take() {
-                    stats.push(s);
-                }
-                current = Some(CifsStat {
-                    share: trimmed.to_string(),
-                    ..CifsStat::default()
-                });
-            } else if let Some(ref mut s) = current {
-                if trimmed.starts_with("Reads:") {
-                    s.reads = parse_meminfo_value(trimmed).unwrap_or(0);
-                } else if trimmed.starts_with("Bytes read:") {
-                    s.read_bytes = trimmed
-                        .split_whitespace()
-                        .last()
-                        .and_then(|v| v.parse().ok())
-                        .unwrap_or(0);
-                } else if trimmed.starts_with("Writes:") {
-                    s.writes = parse_meminfo_value(trimmed).unwrap_or(0);
-                } else if trimmed.starts_with("Bytes written:") {
-                    s.write_bytes = trimmed
-                        .split_whitespace()
-                        .last()
-                        .and_then(|v| v.parse().ok())
-                        .unwrap_or(0);
-                } else if trimmed.starts_with("Opens:") {
-                    s.opens = parse_meminfo_value(trimmed).unwrap_or(0);
-                } else if trimmed.starts_with("Closes:") {
-                    s.closes = parse_meminfo_value(trimmed).unwrap_or(0);
-                } else if trimmed.starts_with("Locks:") {
-                    s.locks = parse_meminfo_value(trimmed).unwrap_or(0);
-                }
-            }
-        }
-        if let Some(s) = current.take() {
-            stats.push(s);
-        }
-        if !stats.is_empty() {
-            return stats;
-        }
-    }
-    Vec::new()
-}
-
-// ---------------------------------------------------------------------------
-// Tape statistics
-// ---------------------------------------------------------------------------
-
-#[derive(Debug, Clone, Default)]
-struct TapeStat {
-    name: String,
-    reads: u64,
-    read_kb: u64,
-    writes: u64,
-    write_kb: u64,
-    resets: u64,
-    other: u64,
-}
-
-fn read_tape_stats() -> Vec<TapeStat> {
-    if let Some(lines) = read_file_lines("/proc/scsi/tape") {
-        let mut stats = Vec::new();
-        for line in lines.iter().skip(1) {
-            let parts: Vec<&str> = line.split_whitespace().collect();
-            if parts.len() >= 7 {
-                stats.push(TapeStat {
-                    name: parts.first().unwrap_or(&"st0").to_string(),
-                    reads: parts.get(1).and_then(|s| s.parse().ok()).unwrap_or(0),
-                    read_kb: parts.get(2).and_then(|s| s.parse().ok()).unwrap_or(0),
-                    writes: parts.get(3).and_then(|s| s.parse().ok()).unwrap_or(0),
-                    write_kb: parts.get(4).and_then(|s| s.parse().ok()).unwrap_or(0),
-                    resets: parts.get(5).and_then(|s| s.parse().ok()).unwrap_or(0),
-                    other: parts.get(6).and_then(|s| s.parse().ok()).unwrap_or(0),
-                });
-            }
-        }
-        if !stats.is_empty() {
-            return stats;
-        }
-    }
-    Vec::new()
 }
 
 // ---------------------------------------------------------------------------
@@ -1482,120 +1372,6 @@ fn run_pidstat(args: &[String], out: &mut impl Write) {
 }
 
 // ---------------------------------------------------------------------------
-// CIFSIOSTAT
-// ---------------------------------------------------------------------------
-
-fn run_cifsiostat(args: &[String], out: &mut impl Write) {
-    print_system_header(out, "cifsiostat");
-    let (interval, count) = parse_interval_count(args);
-
-    let mut prev_stats = read_cifs_stats();
-    let mut iteration = 0u64;
-
-    loop {
-        if let Some(c) = count
-            && iteration >= c
-        {
-            break;
-        }
-
-        if iteration > 0 {
-            thread::sleep(Duration::from_secs(interval));
-        }
-
-        let ts = format_timestamp();
-        let interval_secs = if iteration == 0 { 1.0 } else { interval as f64 };
-        let curr_stats = read_cifs_stats();
-
-        let _ = writeln!(out);
-        let _ = writeln!(
-            out,
-            "{:<12} {:>30} {:>10} {:>12} {:>10} {:>12} {:>8} {:>8}",
-            "Time", "Filesystem", "rops/s", "rkB/s", "wops/s", "wkB/s", "open/s", "close/s"
-        );
-
-        for c in &curr_stats {
-            let p = prev_stats
-                .iter()
-                .find(|p| p.share == c.share)
-                .cloned()
-                .unwrap_or_default();
-            let rops = (c.reads.saturating_sub(p.reads)) as f64 / interval_secs;
-            let rkb = (c.read_bytes.saturating_sub(p.read_bytes)) as f64 / 1024.0 / interval_secs;
-            let wops = (c.writes.saturating_sub(p.writes)) as f64 / interval_secs;
-            let wkb = (c.write_bytes.saturating_sub(p.write_bytes)) as f64 / 1024.0 / interval_secs;
-            let open_s = (c.opens.saturating_sub(p.opens)) as f64 / interval_secs;
-            let close_s = (c.closes.saturating_sub(p.closes)) as f64 / interval_secs;
-            let _ = writeln!(
-                out,
-                "{:<12} {:>30} {:>10.2} {:>12.2} {:>10.2} {:>12.2} {:>8.2} {:>8.2}",
-                ts, c.share, rops, rkb, wops, wkb, open_s, close_s
-            );
-        }
-
-        prev_stats = curr_stats;
-        iteration += 1;
-    }
-}
-
-// ---------------------------------------------------------------------------
-// TAPESTAT
-// ---------------------------------------------------------------------------
-
-fn run_tapestat(args: &[String], out: &mut impl Write) {
-    print_system_header(out, "tapestat");
-    let (interval, count) = parse_interval_count(args);
-
-    let mut prev_stats = read_tape_stats();
-    let mut iteration = 0u64;
-
-    loop {
-        if let Some(c) = count
-            && iteration >= c
-        {
-            break;
-        }
-
-        if iteration > 0 {
-            thread::sleep(Duration::from_secs(interval));
-        }
-
-        let ts = format_timestamp();
-        let interval_secs = if iteration == 0 { 1.0 } else { interval as f64 };
-        let curr_stats = read_tape_stats();
-
-        let _ = writeln!(out);
-        let _ = writeln!(
-            out,
-            "{:<12} {:>8} {:>10} {:>12} {:>10} {:>12} {:>8} {:>8}",
-            "Time", "Tape", "r/s", "rkB/s", "w/s", "wkB/s", "Res/s", "Oth/s"
-        );
-
-        for c in &curr_stats {
-            let p = prev_stats
-                .iter()
-                .find(|p| p.name == c.name)
-                .cloned()
-                .unwrap_or_default();
-            let rs = (c.reads.saturating_sub(p.reads)) as f64 / interval_secs;
-            let rkbs = (c.read_kb.saturating_sub(p.read_kb)) as f64 / interval_secs;
-            let ws = (c.writes.saturating_sub(p.writes)) as f64 / interval_secs;
-            let wkbs = (c.write_kb.saturating_sub(p.write_kb)) as f64 / interval_secs;
-            let res_s = (c.resets.saturating_sub(p.resets)) as f64 / interval_secs;
-            let oth_s = (c.other.saturating_sub(p.other)) as f64 / interval_secs;
-            let _ = writeln!(
-                out,
-                "{:<12} {:>8} {:>10.2} {:>12.2} {:>10.2} {:>12.2} {:>8.2} {:>8.2}",
-                ts, c.name, rs, rkbs, ws, wkbs, res_s, oth_s
-            );
-        }
-
-        prev_stats = curr_stats;
-        iteration += 1;
-    }
-}
-
-// ---------------------------------------------------------------------------
 // Help
 // ---------------------------------------------------------------------------
 
@@ -1612,7 +1388,6 @@ const fn known_options(p: Personality) -> &'static [&'static str] {
         Personality::Sar => &["-u", "-r", "-b", "-n", "-d", "-q", "-h", "--help"],
         Personality::Mpstat => &["-P", "-I", "-h", "--help"],
         Personality::Pidstat => &["-p", "-u", "-r", "-d", "-t", "-h", "--help"],
-        Personality::Cifsiostat | Personality::Tapestat => &["-h", "--help"],
     }
 }
 
@@ -1688,22 +1463,6 @@ fn print_help(personality: Personality) {
             println!("  -t          Show threads");
             println!("  -h          Display this help");
         }
-        Personality::Cifsiostat => {
-            println!("Usage: cifsiostat [interval [count]]");
-            println!();
-            println!("CIFS I/O Statistics");
-            println!();
-            println!("Options:");
-            println!("  -h          Display this help");
-        }
-        Personality::Tapestat => {
-            println!("Usage: tapestat [interval [count]]");
-            println!();
-            println!("Tape Device Statistics");
-            println!();
-            println!("Options:");
-            println!("  -h          Display this help");
-        }
     }
 }
 
@@ -1737,7 +1496,7 @@ fn main() {
     }
 
     // Before any report is produced. Every personality here answered a
-    // question it had not parsed -- `cifsiostat --zzq` printed a full sysstat
+    // question it had not parsed -- `mpstat --zzq` printed a full sysstat
     // header and exited 0 -- because the parser asks for the flags it wants
     // and never looks at what else arrived.
     if let Some(bad) = first_unknown_option(personality, &rest) {
@@ -1751,8 +1510,6 @@ fn main() {
         Personality::Sar => run_sar(&rest, &mut stdout),
         Personality::Mpstat => run_mpstat(&rest, &mut stdout),
         Personality::Pidstat => run_pidstat(&rest, &mut stdout),
-        Personality::Cifsiostat => run_cifsiostat(&rest, &mut stdout),
-        Personality::Tapestat => run_tapestat(&rest, &mut stdout),
     }
 }
 
@@ -1780,19 +1537,13 @@ mod tests {
     fn an_option_a_personality_does_not_have_is_refused() {
         let a = |v: &[&str]| -> Vec<String> { v.iter().map(|s| (*s).to_string()).collect() };
 
-        for p in [
-            Personality::Sar,
-            Personality::Mpstat,
-            Personality::Pidstat,
-            Personality::Cifsiostat,
-            Personality::Tapestat,
-        ] {
+        for p in [Personality::Sar, Personality::Mpstat, Personality::Pidstat] {
             assert_eq!(
                 first_unknown_option(p, &a(&["--zzq"])).as_deref(),
                 Some("--zzq"),
                 "{p} accepted --zzq"
             );
-            // -h is the one option all five advertise.
+            // -h is the one option all three advertise.
             assert_eq!(first_unknown_option(p, &a(&["-h"])), None, "{p} refused -h");
         }
 
@@ -1850,13 +1601,7 @@ mod tests {
     /// `scripts/check-help-vs-parser.py` covers the other.
     #[test]
     fn the_known_option_table_matches_what_help_advertises() {
-        for p in [
-            Personality::Sar,
-            Personality::Mpstat,
-            Personality::Pidstat,
-            Personality::Cifsiostat,
-            Personality::Tapestat,
-        ] {
+        for p in [Personality::Sar, Personality::Mpstat, Personality::Pidstat] {
             let opts = known_options(p);
             assert!(opts.contains(&"-h"), "{p} does not allow -h");
             assert!(opts.contains(&"--help"), "{p} does not allow --help");
@@ -1893,16 +1638,6 @@ mod tests {
     }
 
     #[test]
-    fn test_personality_cifsiostat() {
-        assert_eq!(detect_personality("cifsiostat"), Personality::Cifsiostat);
-    }
-
-    #[test]
-    fn test_personality_tapestat() {
-        assert_eq!(detect_personality("tapestat"), Personality::Tapestat);
-    }
-
-    #[test]
     fn test_personality_with_path_unix() {
         // Restored with `sar` after the iostat personality was removed: this
         // test is about stripping a unix path down to its basename, and used
@@ -1927,10 +1662,7 @@ mod tests {
 
     #[test]
     fn test_personality_nested_path() {
-        assert_eq!(
-            detect_personality("/a/b/c/d/tapestat"),
-            Personality::Tapestat
-        );
+        assert_eq!(detect_personality("/a/b/c/d/pidstat"), Personality::Pidstat);
     }
 
     #[test]
@@ -1946,16 +1678,6 @@ mod tests {
     #[test]
     fn test_personality_display_pidstat() {
         assert_eq!(format!("{}", Personality::Pidstat), "pidstat");
-    }
-
-    #[test]
-    fn test_personality_display_cifsiostat() {
-        assert_eq!(format!("{}", Personality::Cifsiostat), "cifsiostat");
-    }
-
-    #[test]
-    fn test_personality_display_tapestat() {
-        assert_eq!(format!("{}", Personality::Tapestat), "tapestat");
     }
 
     #[test]
@@ -2248,31 +1970,21 @@ mod tests {
     /// Stated against the filesystem rather than against a `cfg`, because the
     /// property is about the machine and not about the compilation target --
     /// and because a `cfg(not(unix))` assertion is one this crate's own Linux
-    /// gate would never run. `/proc/scsi/tape` and the CIFS stats path are
-    /// absent on the SlateOS kernel, on the Windows host, and on the Linux
-    /// box that gate uses; `/proc/net/dev` is absent on the first two and
-    /// present on the third, which is exactly why the assertion has to ask.
+    /// gate would never run. `/proc/net/dev` is absent on the SlateOS kernel
+    /// and on the Windows host and present on the Linux box that gate uses,
+    /// which is exactly why the assertion has to ask. (The tape and CIFS
+    /// readers this also checked went with `tapestat` and `cifsiostat`.)
     ///
     /// What this used to be able to say is nothing at all: with the
     /// fabrications in place every one of these returned data on every
     /// platform, source or no source.
     #[test]
     fn a_reader_returns_data_only_when_its_source_exists() {
-        for (path, empty) in [
-            ("/proc/net/dev", read_net_dev().is_empty()),
-            ("/proc/scsi/tape", read_tape_stats().is_empty()),
-        ] {
-            let exists = std::path::Path::new(path).exists();
-            assert_eq!(
-                empty, !exists,
-                "{path} exists={exists} but the reader returned empty={empty}"
-            );
-        }
-        // CIFS reads a directory of per-share files, so "the path exists" is
-        // not the same question; an empty mount table is the ordinary case.
-        assert!(
-            read_cifs_stats().is_empty(),
-            "no CIFS share is mounted anywhere this runs"
+        let exists = std::path::Path::new("/proc/net/dev").exists();
+        let empty = read_net_dev().is_empty();
+        assert_eq!(
+            empty, !exists,
+            "/proc/net/dev exists={exists} but the reader returned empty={empty}"
         );
     }
 
@@ -3221,26 +2933,6 @@ mod tests {
         assert!(output.contains("kB_rd/s"));
     }
 
-    #[test]
-    fn test_run_cifsiostat_basic() {
-        let mut buf = Vec::new();
-        let args = vec!["1".to_string(), "1".to_string()];
-        run_cifsiostat(&args, &mut buf);
-        let output = String::from_utf8(buf).unwrap();
-        assert!(output.contains("Slate OS"));
-        assert!(output.contains("Filesystem"));
-    }
-
-    #[test]
-    fn test_run_tapestat_basic() {
-        let mut buf = Vec::new();
-        let args = vec!["1".to_string(), "1".to_string()];
-        run_tapestat(&args, &mut buf);
-        let output = String::from_utf8(buf).unwrap();
-        assert!(output.contains("Slate OS"));
-        assert!(output.contains("Tape"));
-    }
-
     // -----------------------------------------------------------------------
     // Edge cases
     // -----------------------------------------------------------------------
@@ -3298,20 +2990,6 @@ mod tests {
         assert_eq!(stat.pid, 0);
         assert_eq!(stat.comm, "");
         assert_eq!(stat._state, '\0');
-    }
-
-    #[test]
-    fn test_cifs_stat_default() {
-        let stat = CifsStat::default();
-        assert_eq!(stat.share, "");
-        assert_eq!(stat.reads, 0);
-    }
-
-    #[test]
-    fn test_tape_stat_default() {
-        let stat = TapeStat::default();
-        assert_eq!(stat.name, "");
-        assert_eq!(stat.reads, 0);
     }
 
     #[test]

@@ -3366,9 +3366,12 @@ fn run_sudo(args: &[OsString]) -> i32 {
         "ALLOWED",
     );
 
-    // Execute the command.
-    // On Slate OS, this would use exec() syscall to replace the process.
-    // For now, we simulate with std::process::Command.
+    // Execute the command: a child process, which `become_user` below turns
+    // into the target user between fork and exec. Real sudo also runs the
+    // command as a child (it stays to log and relay signals), so this is not
+    // a stand-in for an `exec` -- the comment here said "we simulate" until
+    // 2026-10-01, which was false and read as a fabrication in the §1045
+    // triage.
     let mut cmd = process::Command::new(program);
     cmd.args(program_args);
 

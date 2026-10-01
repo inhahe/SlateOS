@@ -201,8 +201,13 @@ fn run_main() -> ExitCode {
     }
     let mut prog = match parsed {
         Ok(p) => p,
-        Err(e) if e.fatal => die(&e.message),
-        Err(e) => die_program(&e.message),
+        // gawk can report several `error:`s before it stops; each is a line.
+        Err(e) => {
+            for message in &e.messages {
+                diag!("awk: {message}");
+            }
+            stdfd::exit_now(if e.fatal { 2 } else { 1 }, 2)
+        }
     };
     if let Err(e) = types::resolve(&mut prog) {
         die_program(&e);

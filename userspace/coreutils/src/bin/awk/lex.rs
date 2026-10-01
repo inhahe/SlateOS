@@ -209,19 +209,30 @@ impl<'a> Lexer<'a> {
     /// on with the same one, and a `\q` the program text has already warned
     /// about does not warn again when a dynamic regex repeats it.
     ///
-    /// # Errors
-    /// As [`Lexer::tokens`], with the offset the lexer had reached.
+    /// Every token the lexer made, and the error it stopped at, if it did:
+    /// with the offset it had reached. The tokens end in an `Eof` either way,
+    /// at that offset when the lexer stopped early, so the parser can run over
+    /// what came before the error -- which is what gawk, whose parser asks
+    /// for one token at a time, has read when its lexer complains; see
+    /// `parse::parse` for why the order matters.
     pub fn tokenize(
         src: &'a [u8],
         warnings: &mut Warnings,
         said: &mut Vec<(usize, Str)>,
-    ) -> Result<Vec<Token>, (usize, String)> {
+    ) -> (Vec<Token>, Option<(usize, String)>) {
         let mut lx = Lexer::new(src);
         lx.warnings = std::mem::take(warnings);
-        let toks = lx.run().map_err(|e| (lx.i, e));
+        let mut toks = Vec::new();
+        let stopped = lx.run(&mut toks).err().map(|e| {
+            toks.push(Token {
+                kind: Tok::Eof,
+                at: lx.i,
+            });
+            (lx.i, e)
+        });
         *warnings = std::mem::take(&mut lx.warnings);
         said.append(&mut lx.said);
-        toks
+        (toks, stopped)
     }
 
     /// Tokenise the whole program, dropping any escape warnings.
@@ -231,11 +242,14 @@ impl<'a> Lexer<'a> {
     /// character that cannot begin a token.
     #[cfg(test)]
     pub fn tokens(mut self) -> Result<Vec<Token>, String> {
-        self.run()
+        let mut out = Vec::new();
+        self.run(&mut out)?;
+        Ok(out)
     }
 
-    fn run(&mut self) -> Result<Vec<Token>, String> {
-        let mut out = Vec::new();
+    /// Lex onto the end of `out`, up to and including the `Eof`, or to the
+    /// first error, leaving behind it every token made before.
+    fn run(&mut self, out: &mut Vec<Token>) -> Result<(), String> {
         loop {
             let t = self.next_token()?;
             // Whatever a string or regex literal earned, it earned at this
@@ -247,7 +261,7 @@ impl<'a> Lexer<'a> {
             self.prev = Some(t.kind.clone());
             out.push(t);
             if end {
-                return Ok(out);
+                return Ok(());
             }
         }
     }
@@ -695,11 +709,9 @@ mod tests {
     fn toks_warned(src: &[u8]) -> (Vec<Tok>, Vec<String>) {
         let mut w = Warnings::default();
         let mut said = Vec::new();
-        let toks = Lexer::tokenize(src, &mut w, &mut said)
-            .unwrap()
-            .into_iter()
-            .map(|t| t.kind)
-            .collect();
+        let (toks, stopped) = Lexer::tokenize(src, &mut w, &mut said);
+        assert!(stopped.is_none(), "{stopped:?}");
+        let toks = toks.into_iter().map(|t| t.kind).collect();
         let said = said
             .into_iter()
             .map(|(_, m)| String::from_utf8(m).unwrap())
@@ -712,7 +724,8 @@ mod tests {
     fn a_warning_is_tied_to_its_tokens_offset() {
         let mut w = Warnings::default();
         let mut said = Vec::new();
-        Lexer::tokenize(b"x = 1\ny = \"\\q\"\n", &mut w, &mut said).unwrap();
+        let (_, stopped) = Lexer::tokenize(b"x = 1\ny = \"\\q\"\n", &mut w, &mut said);
+        assert!(stopped.is_none());
         assert_eq!(said.len(), 1);
         assert_eq!(said[0].0, 10, "the offset of the string literal");
     }

@@ -484,6 +484,22 @@ run_case abc '{printf "%s", $0}'
 run_case abc 'BEGIN {printf "no newline"}'
 run_case abc 'BEGIN {ORS = "\0"} {print}'
 run_case nonl '{print NR, $0}'
+# The parenthesised list, POSIX's `Print '(' multiple_expr_list ')'`. It was
+# a syntax error here until 2026-10-01 -- `printf("%s\n", x)`, the form most
+# programs are written in, refused before running -- and no case used it.
+# What follows the `)` tells the list from an expression that begins with a
+# grouping: the statement's end or a redirection, or more expression.
+run_case table '{printf("%s-%s\n", $1, $2)}'
+run_case table '{print($1, $2)}'
+run_case table '{printf("%s|%s\n",
+  $2, $1)}'
+run_case abc '{print ($0 > "b")}'
+run_case abc '{print ("<")($0)(">")}'
+run_case abc '{print (NR), ($0)}'
+run_case abc 'BEGIN {a[1,2]; print (1,2) in a, (2,1) in a}'
+run_case abc '{print ("x", $0) ("y")}'
+run_case abc 'BEGIN {print ()}'
+wfile_case 'a parenthesised list, redirected' 'BEGIN {print("a", "b") > "out.txt"; printf("%d\n", 7) >> "out.txt"}'
 
 # --- getline ----------------------------------------------------------------
 run_case nums 'NR == 1 {getline; print "got", $0} {print "main", $0}'
@@ -726,13 +742,47 @@ run_case abc 'BEGIN {x = "unterminated}'
 xfail_case 'an undefined function is caught before the program runs (exit 1), not when first called (gawk: exit 2)' abc 'BEGIN {nosuch()}'
 xfail_case 'an array/scalar conflict is caught before the program runs (exit 1), not when first reached (gawk: exit 2)' abc 'BEGIN {x[1] = 1; y = x}'
 xfail_case 'a built-in called with the wrong number of arguments is caught before the program runs (exit 1)' abc 'BEGIN {split("a", b, "x", "y")}'
-# gawk constant-folds, so a *literal* `1/0` is a compile-time `error:` and
-# exit 1 — the program never runs at all, and `BEGIN {if (0) print 1/0}` fails
-# too, which is a surprising thing for a fold to do. Ours is a runtime fatal,
-# exit 2. The runtime case below is the one both agree on, and it is the one
-# that matters: it is what a real program hits.
-xfail_case 'gawk folds constant arithmetic, so a literal 1/0 is a compile error (exit 1); ours is a runtime fatal (exit 2)' \
-  abc 'BEGIN {print 1/0}'
+# A divisor gawk folds to a zero constant is a parse-time `error:` at the
+# operator, exit 1, and the parse carries on (`mk_binary`): the program never
+# runs, and `BEGIN {if (0) print 1/0}` fails too. It was an xfail here until
+# 2026-10-01, when ours was a runtime fatal. What gawk folds is narrow: a
+# numeric literal, `-` or `!` of one, `^` of two -- never a string, `+0`, or
+# anything in parentheses, which are runtime fatals instead.
+msg_case abc 'BEGIN {print 1/0}'
+fmsg_case 'BEGIN { if (0) print 1/0; print "ran" }'
+fmsg_case 'function f() { return 1/0 }
+BEGIN { print "x" }'
+fmsg_case 'BEGIN { x = 1; print x/0.0 }'
+fmsg_case 'BEGIN { print 1/-0 }'
+fmsg_case 'BEGIN { x = 1; print x/1e-400 }'
+fmsg_case 'BEGIN { print 2^-1/0 }'
+fmsg_case 'BEGIN { x = 1; print x / 0^2 }'
+fmsg_case 'BEGIN { x = 1; print x / !1 }'
+fmsg_case 'BEGIN { x = 3; print x % 0 }'
+fmsg_case 'BEGIN { print 1/(0) }'
+fmsg_case 'BEGIN { print 1/(2-2) }'
+fmsg_case 'BEGIN { print 1/+0 }'
+fmsg_case 'BEGIN { print 1/"0" }'
+fmsg_case 'BEGIN { x = 1; print x / 0^-1 }'
+# Each `error:` is reported, in reading order; a syntax error or a regex
+# literal that will not compile stops the parse after them, and a lexing
+# error after them is reported after them (exit 2, being fatal).
+fmsg_case 'BEGIN { print 1/0
+ print 2%0 }'
+fmsg_case 'BEGIN { print 1/0 }
+/a(/'
+fmsg_case 'BEGIN { print 1/0 }
+BEGIN { print "a\
+b" }'
+fmsg_case '/a(/
+/b(/'
+fmsg_case 'BEGIN { print 1/0; nosuch() }'
+# `next` and `nextfile` in BEGIN or END are refused as they are parsed.
+fmsg_case 'BEGIN { next }'
+fmsg_case 'END { next }' abc.txt
+fmsg_case 'BEGIN { nextfile }'
+fmsg_case 'END { x = 1
+ nextfile }' abc.txt
 # The runtime fatals. Two verdicts are taken from each, because the two halves
 # have different standing.
 #

@@ -316,10 +316,12 @@ fn to_radix(mut n: u64, base: u32, upper: bool) -> Str {
     };
     let base64 = u64::from(base.max(2));
     let mut out = Str::new();
+    // `base64` is at least 2, so neither the remainder nor the quotient can
+    // fail; `checked_*` says so without an arithmetic lint exemption.
     while n > 0 {
-        let d = usize::try_from(n % base64).unwrap_or(0);
+        let d = usize::try_from(n.checked_rem(base64).unwrap_or(0)).unwrap_or(0);
         out.push(digits.get(d).copied().unwrap_or(b'0'));
-        n /= base64;
+        n = n.checked_div(base64).unwrap_or(0);
     }
     out.reverse();
     out

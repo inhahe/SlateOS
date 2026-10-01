@@ -62,8 +62,9 @@ const _: () = assert!(SPECIALS.len() == SPECIAL_COUNT);
 #[derive(Clone, Debug)]
 pub enum Lvalue {
     Var(VarRef),
-    /// `$expr`.
-    Field(Box<Expr>),
+    /// `$expr`, and where the `$` is: a field number below 0 is refused there,
+    /// whatever the field is being used for.
+    Field(Box<Expr>, Loc),
     /// `name[i, j]` — the subscripts are joined with SUBSEP into one key.
     Index(VarRef, Vec<Expr>),
 }
@@ -132,8 +133,29 @@ pub struct Getline {
     pub src: GetlineSrc,
 }
 
+/// An expression, and where its operator was written.
+///
+/// gawk places a diagnostic on the line of the instruction that raised it, and
+/// an instruction takes its line from the token it was made from: `/` for a
+/// division, `~` for a match, the name for a call or a built-in, `getline`
+/// for a read. So `if (1 &&\n 1/z)` fails on line 2, the line of the `/`,
+/// not on line 1 where the statement began; and a node with no operator of
+/// its own (a concatenation) takes its left operand's. `loc` is that token's.
 #[derive(Clone, Debug)]
-pub enum Expr {
+pub struct Expr {
+    pub kind: ExprKind,
+    pub loc: Loc,
+}
+
+impl Expr {
+    #[must_use]
+    pub fn new(kind: ExprKind, loc: Loc) -> Expr {
+        Expr { kind, loc }
+    }
+}
+
+#[derive(Clone, Debug)]
+pub enum ExprKind {
     Num(f64),
     Str(Rc<Str>),
     /// A `/re/` literal. In a value context this means `$0 ~ /re/`; as an

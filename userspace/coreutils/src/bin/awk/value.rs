@@ -125,6 +125,66 @@ pub fn compare(a: &Value, b: &Value, convfmt: &[u8]) -> Option<std::cmp::Orderin
     Some(a.to_str(convfmt).cmp(&b.to_str(convfmt)))
 }
 
+/// `x1 ^ x2` as gawk computes it (`calc_exp` in eval.c): an integral exponent
+/// by repeated squaring, anything else by `pow`.
+///
+/// Not `f64::powf`, because the two round differently: `1.1 ^ 50` is
+/// `117.39085287969571` by gawk's squaring and `...79` by `pow`, and
+/// `2 ^ -1074` is 0 to gawk (it takes `1 / 2^1074`, and `2^1074` is already
+/// infinite) where `pow` gives the smallest subnormal. awk's `^` is gawk's
+/// here, digit for digit.
+#[must_use]
+pub fn calc_exp(x1: f64, x2: f64) -> f64 {
+    let lx = c_long(x2);
+    // `(lx = x2) == x2`: an exponent that survives the trip through `long`.
+    // Exact on purpose -- the question is whether the value is an integer --
+    // and the cast is exact for every `lx` that can answer yes.
+    #[allow(clippy::cast_precision_loss, clippy::float_cmp)]
+    if lx as f64 == x2 {
+        if lx == 0 {
+            return 1.0;
+        }
+        return if lx > 0 {
+            calc_exp_posint(x1, lx)
+        } else {
+            // `-lx` in C, which wraps for LONG_MIN exactly as this does.
+            1.0 / calc_exp_posint(x1, lx.wrapping_neg())
+        };
+    }
+    x1.powf(x2)
+}
+
+/// `x ^ n` for a positive `n` by squaring, in gawk's order of operations so
+/// that it rounds where gawk's does.
+fn calc_exp_posint(mut x: f64, mut n: i64) -> f64 {
+    let mut mult = 1.0;
+    while n > 1 {
+        if n % 2 == 1 {
+            mult *= x;
+        }
+        x *= x;
+        n /= 2;
+    }
+    mult * x
+}
+
+/// A C `(long) d` as x86-64 performs it: truncation toward zero, and the
+/// "integer indefinite" value `LONG_MIN` for NaN and anything out of range,
+/// which is what gawk's `NR`, `FNR`, field numbers and `calc_exp` see.
+#[must_use]
+pub fn c_long(d: f64) -> i64 {
+    // 2^63 is exactly representable; anything at or above it, or below
+    // -2^63, does not fit.
+    const LIMIT: f64 = 9_223_372_036_854_775_808.0;
+    if d.is_nan() || d >= LIMIT || d < -LIMIT {
+        return i64::MIN;
+    }
+    // In range by the guard above, so the cast truncates and nothing else.
+    #[allow(clippy::cast_possible_truncation)]
+    let l = d as i64;
+    l
+}
+
 /// Render a number as awk renders it: as an integer when it is one, and through
 /// `fmt` (CONVFMT or OFMT) when it is not.
 ///
@@ -148,7 +208,10 @@ pub fn num_to_str(n: f64, fmt: &[u8]) -> Str {
             b"inf".to_vec()
         };
     }
-    if n == n.trunc() && n.abs() < 1e18 {
+    // Exact on purpose: whether `n` has a fractional part at all.
+    #[allow(clippy::float_cmp)]
+    let integral = n == n.trunc();
+    if integral && n.abs() < 1e18 {
         // The cast is exact: the guard above put `n` inside i64's range and
         // established that it has no fractional part.
         #[allow(clippy::cast_possible_truncation)]
@@ -245,7 +308,10 @@ fn trim_blanks(s: &[u8]) -> &[u8] {
     clippy::expect_used,
     clippy::panic,
     clippy::indexing_slicing,
-    clippy::arithmetic_side_effects
+    clippy::arithmetic_side_effects,
+    // The values compared are exactly representable; an epsilon would only
+    // hide a conversion that came out a bit off.
+    clippy::float_cmp
 )]
 mod tests {
     use super::*;
@@ -293,6 +359,44 @@ mod tests {
         assert!(!Value::Uninit.truthy());
         assert!(!sv("").truthy());
         assert!(sv("x").truthy());
+    }
+
+    /// gawk's `^`, digit for digit. The expected values are what gawk 5.2.1
+    /// printed with `%.17g`, which round-trips an `f64` exactly.
+    #[test]
+    fn power_rounds_where_gawks_squaring_does() {
+        assert_eq!(calc_exp(3.0, 33.0), 5_559_060_566_555_523.0);
+        // `pow` gives ...79; squaring gives ...71.
+        assert_eq!(calc_exp(1.1, 50.0), 117.390_852_879_695_71);
+        assert_eq!(calc_exp(7.0, -21.0), 1.790_363_270_599_549_8e-18);
+        // 2^1074 overflows before the reciprocal is taken.
+        assert_eq!(calc_exp(2.0, -1074.0), 0.0);
+        assert_eq!(calc_exp(2.0, 1024.0), f64::INFINITY);
+        assert_eq!(calc_exp(0.0, 0.0), 1.0);
+        assert_eq!(calc_exp(-0.0, -1.0), f64::NEG_INFINITY);
+        assert_eq!(calc_exp(-2.0, 3.0), -8.0);
+        // A fractional exponent is `pow`'s.
+        assert_eq!(calc_exp(2.0, 0.5), 2f64.sqrt());
+        assert!(calc_exp(-8.0, 1.0 / 3.0).is_nan());
+    }
+
+    /// A C `(long)` on x86-64: truncation, and `LONG_MIN` for anything that
+    /// does not fit -- which is what gawk prints for `FNR = 1e30; print FNR`.
+    #[test]
+    fn a_c_long_truncates_and_saturates_to_long_min() {
+        assert_eq!(c_long(2.5), 2);
+        assert_eq!(c_long(-2.5), -2);
+        assert_eq!(c_long(-0.5), 0);
+        assert_eq!(c_long(1e30), i64::MIN);
+        assert_eq!(c_long(-1e30), i64::MIN);
+        assert_eq!(c_long(f64::NAN), i64::MIN);
+        assert_eq!(c_long(f64::INFINITY), i64::MIN);
+        assert_eq!(c_long(9_223_372_036_854_775_808.0), i64::MIN);
+        assert_eq!(c_long(-9_223_372_036_854_775_808.0), i64::MIN);
+        assert_eq!(
+            c_long(9_223_372_036_854_774_784.0),
+            9_223_372_036_854_774_784
+        );
     }
 
     #[test]

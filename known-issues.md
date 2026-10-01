@@ -179741,3 +179741,68 @@ the fix needs a case per row that the approximation gets wrong, measured.
 `Syntax` constants, and the two or three syntax bits the table shows are not
 there yet (no intervals, a context-dependent leading `*`, limited operators) --
 rather than to a boolean, and measure every row in `find-diff.sh`.
+
+## B-AWK-GAWK-FIDELITY-SWEEP -- 33 ways our awk and gawk --posix part, three of them losing data (lane B, 2026-10-01) — **open**
+
+**Status:** OPEN — the worklist below; each row is closed by the commit that fixes it. **FIXED so far:** 5, 16, 28 (2026-10-01, the parser half: the print list, `next` in BEGIN/END, constant zero divisors).
+
+**In short:** four probe batches of `awk` against `gawk --posix` (about 230
+programs, `target/drafts/loc-probe*.sh`) found real bugs well beyond the
+diagnostic placement they were written for. Three can lose or corrupt a
+user's result: a recursive function 3000 calls deep crashes the process with
+a stack overflow; `exit` inside a function prints an empty `awk: ` line and
+exits 2 instead of exiting with its code; and `print > "/dev/full"` loses the
+output and exits 0. The everyday `printf("%s\n", x)` form is a syntax error.
+This entry is the worklist; each item is closed by the commit that fixes it.
+
+**Where.** `userspace/coreutils/src/bin/awk/` (all files), and
+`scripts/awk-diff.sh`, which gains a row for every item as it is fixed.
+
+| # | What | Ours | gawk --posix | Severity |
+|---|---|---|---|---|
+| 1 | recursion 3000 deep | stack overflow, exit 134 | works (30000 too) | crash |
+| 2 | `exit` in a function | `awk: cmd. line:1: ` (empty), exit 2 | exits with the code; END runs | wrong control flow |
+| 3 | `next`/`nextfile` in a function | ignored, record carries on | skips the record / file | wrong control flow |
+| 4 | `print > "/dev/full"`, `close()` of it | silent, exit 0 | `fatal: flush to "/dev/full" failed: No space left on device` | silent data loss |
+| 5 | `printf("%s-%s\n", 1, 2)`, `print("a", "b")` | syntax error | prints | rejects valid programs |
+| 6 | `a[i++] += 5`, `a[i++]++`, `$(i++) += 0`, `sub(re, s, a[i++])` | subscript evaluated twice | once | wrong answer |
+| 7 | number to string: `print 1e30`, `print 2^63` | `1e+30`, `9.22337e+18` | `1000000000000000019884624838656`, `9223372036854775808` (integral values print whole) | wrong output |
+| 8 | subnormal: `print 1e-320`, `printf "%g"` | `infe-320` | `9.99989e-321` | wrong output |
+| 9 | `print 2^1024`, `log(-1)` | `inf`, `nan` | `+inf`, `-nan`/`+nan` | wording |
+| 10 | `printf "%d", 2^64` / of inf, nan | saturates / `0` | `18446744073709551616` / `inf -inf -nan` | wrong output |
+| 11 | `x^n` for integer n | `powf` | gawk's `calc_exp` (repeated squaring): `1.1^50` differs in the last digits | precision |
+| 12 | plain `getline` reaching an unopenable operand | returns -1 | fatal `cannot open file` | wrong control flow |
+| 13 | a directory operand | `read error: Is a directory` | `fatal: cannot open file `/' for reading: Is a directory` | wording |
+| 14 | `NR`/`FNR` assigned a fraction, a string, 1e30 | kept as given | C `long`: truncated, `LONG_MIN` out of range | wrong answer |
+| 15 | an `FNR=10` operand | `FNR` becomes 10 | undone (`arg_assign` restores its C `FNR`) | quirk |
+| 16 | `next`/`nextfile` in BEGIN/END | ignored | parse `error:` (`next' used in BEGIN action`) | accepts invalid |
+| 17 | `next` from a function called in BEGIN/END | ignored | fatal `` `next' cannot be called from a `BEGIN' rule`` | accepts invalid |
+| 18 | a function called with extra arguments | fatal | warning per call, extras evaluated and dropped | rejects valid |
+| 19 | `close()` of a pipe that exited 3 | 3 | 0 (`--posix`) | wrong answer |
+| 20 | `system("exit 3")`, killed by signal 9 | 3, 0 | 768, 9 (raw wait status under `--posix`) | wrong answer |
+| 21 | `fflush("nope")` | 0 | warning, -1 | wrong answer |
+| 22 | `substr("hello", 1.5)` | `ello` | `hello` | wrong answer |
+| 23 | `log(-1)`, and the other math domain errors | silent | `warning: log: received negative argument -1` | missing warning |
+| 24 | printf conversions: `%k` `%5` `%-]`; `%h %l %L %j %t %z`; `%a` | error; accepted; `%e`-style | printed literally; fatal under `--posix`; hex float | wrong output |
+| 25 | `x /= 0`, `x %= 0` messages | `...attempted` / `in `%'` | `in `/='` / `in `%='` | wording |
+| 26 | `$(-1)`, `NF = -1` | no `fatal:`; NF clamps to 0 silently | `fatal: attempt to access field -1`; `fatal: NF set to negative value` | wording / silent |
+| 27 | redirection to `""`, or that cannot open | `: No such file...`; `getline < ""` is -1 | `fatal: expression for `>' redirection has null string value`; `fatal: cannot redirect to `f': ...` | wording / wrong control flow |
+| 28 | `1/0`, `x/-0`, `x/0.0` (constant zero divisor) | runtime fatal, exit 2 | parse `error:` at the `/`, exit 1, parsing continues | wrong status |
+| 29 | multi-line expression placement (`if (1 &&\n 1/z)`) | the statement's first line | the operator's line | placement |
+| 30 | `var=value` operand diagnostics | placed, with FILENAME/FNR | unplaced (`arg_assign` zeroes the line and FNR) | placement |
+| 31 | stdout and a diagnostic interleaved on one fd | diagnostic first | stdout flushed first (`err()` flushes) | ordering |
+| 32 | newline after `(`, `[`, `=`, `==`, `?`, `:` | accepted | syntax error (`?`/`:` only under `--posix`) | accepts invalid |
+| 33 | `FILENAME` numeric in a diagnostic | `(FILENAME=5 FNR=1)` | `(FNR=1)` (no string value) | wording |
+
+**Proper fix.** Each row, faithfully, against gawk 5.2.1's own source
+(`/tmp/gawk-ref` in WSL), with a harness row. Structural ones first. Every
+expression node carrying its token's line (29) is a change to `ast.rs`. Deep
+recursion (1) decides the rest: the tree walk recurses natively once per awk
+call, and the obvious cure -- run it on a thread with a huge stack -- is the
+wrong one *here*, because SlateOS commits anonymous mappings when they are made
+(`MAP_LAZY` is opt-in; `posix/src/pthread.rs` maps thread stacks without it),
+so a 1 GiB stack would cost 1 GiB of memory up front. gawk's own answer is
+the right one: compile to instructions and run them in a loop whose frames are
+on the heap. That one change also gives gawk's line model exactly (its
+`sourceline` is per instruction), resolves an lvalue once by construction (6),
+and makes `exit`/`next` from inside a function an ordinary unwind (2, 3, 17).

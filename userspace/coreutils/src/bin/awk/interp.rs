@@ -20,9 +20,9 @@
 //! how `substr($0, 1, 3)` cuts a UTF-8 character in half.
 
 use crate::ast::{
-    BinOp, Builtin, CmpOp, Expr, GetlineSrc, Loc, Lvalue, Pattern, Program, RedirMode, Redirect,
-    Stmt, V_ARGC, V_ARGV, V_CONVFMT, V_ENVIRON, V_FILENAME, V_FNR, V_FS, V_NF, V_NR, V_OFMT, V_OFS,
-    V_ORS, V_RLENGTH, V_RS, V_RSTART, V_SUBSEP, VarRef,
+    BinOp, Builtin, CmpOp, Expr, ExprKind, GetlineSrc, Loc, Lvalue, Pattern, Program, RedirMode,
+    Redirect, Stmt, V_ARGC, V_ARGV, V_CONVFMT, V_ENVIRON, V_FILENAME, V_FNR, V_FS, V_NF, V_NR,
+    V_OFMT, V_OFS, V_ORS, V_RLENGTH, V_RS, V_RSTART, V_SUBSEP, VarRef,
 };
 use crate::io::{Inputs, Outputs, Records, Rs};
 use crate::value::{Str, Value, compare, num_to_str};
@@ -817,63 +817,63 @@ impl Interp {
 
     #[allow(clippy::too_many_lines)]
     fn eval(&mut self, e: &Expr) -> R<Value> {
-        match e {
-            Expr::Num(n) => Ok(Value::Num(*n)),
-            Expr::Str(s) => Ok(Value::Str(Rc::clone(s))),
+        match &e.kind {
+            ExprKind::Num(n) => Ok(Value::Num(*n)),
+            ExprKind::Str(s) => Ok(Value::Str(Rc::clone(s))),
             // A bare regex in a value context asks whether it matches `$0`.
-            Expr::Regex(re) => {
+            ExprKind::Regex(re) => {
                 let rec = self.record().clone();
                 Ok(Value::Num(f64::from(u8::from(re.is_match(&rec)?))))
             }
-            Expr::Get(lv) => self.load(lv),
-            Expr::Assign(lv, rhs) => {
+            ExprKind::Get(lv) => self.load(lv),
+            ExprKind::Assign(lv, rhs) => {
                 let v = self.eval(rhs)?;
                 self.assign(lv, v.clone())?;
                 Ok(v)
             }
-            Expr::AugAssign(lv, op, rhs) => {
+            ExprKind::AugAssign(lv, op, rhs) => {
                 let r = self.eval(rhs)?.to_num();
                 let l = self.load(lv)?.to_num();
                 let v = Value::Num(arith(*op, l, r)?);
                 self.assign(lv, v.clone())?;
                 Ok(v)
             }
-            Expr::Cond(c, a, b) => {
+            ExprKind::Cond(c, a, b) => {
                 if self.eval(c)?.truthy() {
                     self.eval(a)
                 } else {
                     self.eval(b)
                 }
             }
-            Expr::Or(a, b) => {
+            ExprKind::Or(a, b) => {
                 if self.eval(a)?.truthy() {
                     return Ok(Value::Num(1.0));
                 }
                 Ok(Value::Num(f64::from(u8::from(self.eval(b)?.truthy()))))
             }
-            Expr::And(a, b) => {
+            ExprKind::And(a, b) => {
                 if !self.eval(a)?.truthy() {
                     return Ok(Value::Num(0.0));
                 }
                 Ok(Value::Num(f64::from(u8::from(self.eval(b)?.truthy()))))
             }
-            Expr::Not(a) => Ok(Value::Num(f64::from(u8::from(!self.eval(a)?.truthy())))),
-            Expr::Neg(a) => Ok(Value::Num(-self.eval(a)?.to_num())),
-            Expr::Pos(a) => Ok(Value::Num(self.eval(a)?.to_num())),
-            Expr::In(subs, arr) => {
+            ExprKind::Not(a) => Ok(Value::Num(f64::from(u8::from(!self.eval(a)?.truthy())))),
+            ExprKind::Neg(a) => Ok(Value::Num(-self.eval(a)?.to_num())),
+            ExprKind::Pos(a) => Ok(Value::Num(self.eval(a)?.to_num())),
+            ExprKind::In(subs, arr) => {
                 let key = self.subscript(subs)?;
                 let a = self.array_ref(*arr);
                 let present = a.borrow().contains_key(&key);
                 Ok(Value::Num(f64::from(u8::from(present))))
             }
-            Expr::Match { neg, lhs, rhs } => {
+            ExprKind::Match { neg, lhs, rhs } => {
                 let subject = self.eval(lhs)?;
                 let subject = self.to_str(&subject);
                 let re = self.regex_of(rhs)?;
                 let m = re.is_match(&subject)?;
                 Ok(Value::Num(f64::from(u8::from(m != *neg))))
             }
-            Expr::Cmp(op, a, b) => {
+            ExprKind::Cmp(op, a, b) => {
                 let l = self.eval(a)?;
                 let r = self.eval(b)?;
                 let convfmt = self.string_of(V_CONVFMT);
@@ -892,31 +892,31 @@ impl Interp {
                 };
                 Ok(Value::Num(f64::from(u8::from(yes))))
             }
-            Expr::Concat(a, b) => {
+            ExprKind::Concat(a, b) => {
                 let l = self.eval(a)?;
                 let r = self.eval(b)?;
                 let mut s = self.to_str(&l).as_ref().clone();
                 s.extend_from_slice(&self.to_str(&r));
                 Ok(Value::str(s))
             }
-            Expr::Bin(op, a, b) => {
+            ExprKind::Bin(op, a, b) => {
                 let l = self.eval(a)?.to_num();
                 let r = self.eval(b)?.to_num();
                 Ok(Value::Num(arith(*op, l, r)?))
             }
-            Expr::PreIncr(lv, d) => {
+            ExprKind::PreIncr(lv, d) => {
                 let v = self.load(lv)?.to_num() + d;
                 self.assign(lv, Value::Num(v))?;
                 Ok(Value::Num(v))
             }
-            Expr::PostIncr(lv, d) => {
+            ExprKind::PostIncr(lv, d) => {
                 let old = self.load(lv)?.to_num();
                 self.assign(lv, Value::Num(old + d))?;
                 Ok(Value::Num(old))
             }
-            Expr::Call(f, args) => self.call(*f, args),
-            Expr::Builtin(b, args) => self.builtin(*b, args),
-            Expr::Getline(g) => self.getline(g),
+            ExprKind::Call(f, args) => self.call(*f, args),
+            ExprKind::Builtin(b, args) => self.builtin(*b, args, e.loc),
+            ExprKind::Getline(g) => self.getline(g),
         }
     }
 
@@ -925,8 +925,8 @@ impl Interp {
     fn load(&mut self, lv: &Lvalue) -> R<Value> {
         match lv {
             Lvalue::Var(v) => self.get_var(*v),
-            Lvalue::Field(e) => {
-                let n = self.field_index(e)?;
+            Lvalue::Field(e, at) => {
+                let n = self.field_index(e, *at)?;
                 self.get_field(n)
             }
             Lvalue::Index(v, subs) => {
@@ -944,8 +944,8 @@ impl Interp {
     fn assign(&mut self, lv: &Lvalue, v: Value) -> R<()> {
         match lv {
             Lvalue::Var(r) => self.set_var(*r, v),
-            Lvalue::Field(e) => {
-                let n = self.field_index(e)?;
+            Lvalue::Field(e, at) => {
+                let n = self.field_index(e, *at)?;
                 let s = self.to_str(&v).as_ref().clone();
                 self.set_field(n, s)
             }
@@ -958,8 +958,11 @@ impl Interp {
         }
     }
 
-    fn field_index(&mut self, e: &Expr) -> R<usize> {
+    /// The field number `$e` names, checked where the `$` is, as gawk's
+    /// `Op_field_spec` is.
+    fn field_index(&mut self, e: &Expr, at: Loc) -> R<usize> {
         let n = self.eval(e)?.to_num();
+        self.loc = Some(at);
         if n < 0.0 || !n.is_finite() {
             return Err(Fatal(format!("attempt to access field {n}")));
         }
@@ -1255,7 +1258,10 @@ impl Interp {
                     frame.push(Cell::Arr(Rc::new(RefCell::new(HashMap::new()))));
                 }
                 None => frame.push(Cell::Val(Value::Uninit)),
-                Some(Expr::Get(Lvalue::Var(v))) if wants_array => {
+                Some(Expr {
+                    kind: ExprKind::Get(Lvalue::Var(v)),
+                    ..
+                }) if wants_array => {
                     // By reference: the callee's changes are the caller's.
                     frame.push(Cell::Arr(self.array_ref(*v)));
                 }
@@ -1361,7 +1367,7 @@ impl Interp {
     /// compiled on first use and cached, because the usual shape is a pattern
     /// held in a variable and used on every record.
     fn regex_of(&mut self, e: &Expr) -> R<Rc<Regex>> {
-        if let Expr::Regex(re) = e {
+        if let ExprKind::Regex(re) = &e.kind {
             return Ok(Rc::clone(re));
         }
         let v = self.eval(e)?;
@@ -1379,7 +1385,7 @@ impl Interp {
     }
 
     #[allow(clippy::too_many_lines)]
-    fn builtin(&mut self, b: Builtin, args: &[Expr]) -> R<Value> {
+    fn builtin(&mut self, b: Builtin, args: &[Expr], loc: Loc) -> R<Value> {
         match b {
             Builtin::Length => {
                 let Some(a) = args.first() else {
@@ -1389,7 +1395,7 @@ impl Interp {
                 // `length(arr)` is the element count. It is not POSIX, but it
                 // is in every awk in use and the alternative — the length of
                 // the empty string — is never what anyone meant.
-                if let Expr::Get(Lvalue::Var(v)) = a
+                if let ExprKind::Get(Lvalue::Var(v)) = &a.kind
                     && matches!(self.cell(*v), Some(Cell::Arr(_)))
                 {
                     let arr = self.array_ref(*v);
@@ -1459,7 +1465,7 @@ impl Interp {
             Builtin::Split => {
                 let sv = self.eval_arg(args, 0)?;
                 let s = self.to_str(&sv).as_ref().clone();
-                let Some(Expr::Get(Lvalue::Var(arr))) = args.get(1) else {
+                let Some(ExprKind::Get(Lvalue::Var(arr))) = args.get(1).map(|a| &a.kind) else {
                     return Err(Fatal(
                         "split: the second argument must be an array".to_string(),
                     ));
@@ -1467,7 +1473,10 @@ impl Interp {
                 let arr = *arr;
                 let fs = match args.get(2) {
                     None => None,
-                    Some(Expr::Regex(re)) => Some(Fs::Regex(Rc::clone(re))),
+                    Some(Expr {
+                        kind: ExprKind::Regex(re),
+                        ..
+                    }) => Some(Fs::Regex(Rc::clone(re))),
                     Some(e) => {
                         let v = self.eval(e)?;
                         let text = self.to_str(&v);
@@ -1491,7 +1500,7 @@ impl Interp {
                     u32::try_from(parts.len()).unwrap_or(u32::MAX),
                 )))
             }
-            Builtin::Sub | Builtin::Gsub => self.substitute(b == Builtin::Gsub, args),
+            Builtin::Sub | Builtin::Gsub => self.substitute(b == Builtin::Gsub, args, loc),
             Builtin::Match => {
                 let sv = self.eval_arg(args, 0)?;
                 let s = self.to_str(&sv);
@@ -1617,7 +1626,7 @@ impl Interp {
     /// The replacement's `&` stands for the matched text and `\&` for a literal
     /// ampersand — the one piece of syntax in awk where a backslash has to be
     /// interpreted at *substitution* time rather than when the string was read.
-    fn substitute(&mut self, global: bool, args: &[Expr]) -> R<Value> {
+    fn substitute(&mut self, global: bool, args: &[Expr], loc: Loc) -> R<Value> {
         let Some(pat) = args.first() else {
             return Err(Fatal("sub: missing pattern".to_string()));
         };
@@ -1625,8 +1634,12 @@ impl Interp {
         let rv = self.eval_arg(args, 1)?;
         let repl = self.to_str(&rv).as_ref().clone();
         let target = match args.get(2) {
-            Some(Expr::Get(lv)) => lv.clone(),
-            None => Lvalue::Field(Box::new(Expr::Num(0.0))),
+            Some(Expr {
+                kind: ExprKind::Get(lv),
+                ..
+            }) => lv.clone(),
+            // No target is `$0`, written where the `sub` was.
+            None => Lvalue::Field(Box::new(Expr::new(ExprKind::Num(0.0), loc)), loc),
             Some(_) => {
                 return Err(Fatal(
                     "sub: the third argument must be a variable, a field or an array element"

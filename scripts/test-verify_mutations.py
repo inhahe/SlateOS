@@ -4,7 +4,8 @@
 A harness whose rows all hold passes; a dead or ambiguous anchor, a test that
 is not there, or a duplicate row name is named and fails the run; a source
 named as a directory is read file by file, and a test in the crate's `tests/`
-counts.
+counts; and a row filed in the table of a file its anchor is not in is named
+and fails, though the anchor is in the crate.
 
 usage: python scripts/test-verify_mutations.py
 """
@@ -45,12 +46,63 @@ if __name__ == "__main__":
     raise SystemExit("a harness was run, not read")
 """
 
+# A table per file, and a row put in the wrong one: its anchor is in main.rs,
+# which its table does not sweep. Once in the crate is not once where the
+# sweep looks.
+MISFILED_BY_DICT = """from pathlib import Path
+SRC = Path(__file__).parent / "src"
+MAIN = [
+    ("x is two", "    let x = 1;", "    let x = 2;", ["a_test"]),
+]
+OTHER = [
+    ("y is gone", "    let y = 1;", "", ["a_test"]),
+    ("misfiled", "    let x = 1;", "    let x = 3;", ["a_test"]),
+]
+TABLES = {"main.rs": MAIN, "other.rs": OTHER}
+if __name__ == "__main__":
+    raise SystemExit("a harness was run, not read")
+"""
+
+MISFILED_BY_NAME = """from pathlib import Path
+SRC = Path(__file__).parent / "src" / "main.rs"
+OTHER_SRC = Path(__file__).parent / "src" / "other.rs"
+MUTATIONS = [
+    ("x is two", "    let x = 1;", "    let x = 2;", ["a_test"]),
+]
+OTHER_MUTATIONS = [
+    ("y is gone", "    let y = 1;", "", ["a_test"]),
+    {second}
+]
+if __name__ == "__main__":
+    raise SystemExit("a harness was run, not read")
+"""
+
+OTHER_SOURCE = """fn other() {
+    let y = 1;
+}
+"""
+
+# One table over two files, each row sent at sweep time to whichever holds its
+# anchor -- calendar's harness, over its `main.rs` and the store's `lib.rs`.
+# `MUTATIONS` beside `SRC` is not a claim about every row here.
+ONE_TABLE_TWO_FILES = """from pathlib import Path
+SRC = Path(__file__).parent / "src" / "main.rs"
+STORE_SRC = Path(__file__).parent / "src" / "other.rs"
+MUTATIONS = [
+    ("x is two", "    let x = 1;", "    let x = 2;", ["a_test"]),
+    ("y is gone", "    let y = 1;", "", ["a_test"]),
+]
+if __name__ == "__main__":
+    raise SystemExit("a harness was run, not read")
+"""
+
 
 def run(root, text):
     crate = root / "crate"
     (crate / "src").mkdir(parents=True, exist_ok=True)
     (crate / "tests").mkdir(parents=True, exist_ok=True)
     (crate / "src" / "main.rs").write_text(SOURCE, encoding="utf-8", newline="")
+    (crate / "src" / "other.rs").write_text(OTHER_SOURCE, encoding="utf-8", newline="")
     (crate / "tests" / "outside.rs").write_text(
         "#[test]\nfn an_integration_test() {}\n", encoding="utf-8", newline=""
     )
@@ -111,6 +163,28 @@ def main():
         case(
             "a directory source is read file by file, and tests/ counts",
             DIRECTORY_HARNESS,
+            0,
+        ),
+        case(
+            "a row in another file's table (TABLES) is named and fails",
+            MISFILED_BY_DICT,
+            1,
+            "[OTHER] ANCHOR other.rs x0: misfiled",
+        ),
+        case(
+            "a row in another file's table (X_MUTATIONS, X_SRC) is named and fails",
+            MISFILED_BY_NAME.format(second='("misfiled", "    let x = 1;", "", ["a_test"]),'),
+            1,
+            "[OTHER_MUTATIONS] ANCHOR other.rs x0: misfiled",
+        ),
+        case(
+            "a row in its own file's table (X_MUTATIONS, X_SRC) holds",
+            MISFILED_BY_NAME.format(second=""),
+            0,
+        ),
+        case(
+            "one table over two files holds each row where its anchor is",
+            ONE_TABLE_TWO_FILES,
             0,
         ),
         case(

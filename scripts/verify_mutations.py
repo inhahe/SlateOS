@@ -14,7 +14,12 @@ A harness is imported, never run -- every one keeps its sweep behind
 `(name, old, new, [tests])` rows it defines (`MUTATIONS`, or one table per file:
 `LIB_MUTATIONS`, `TABLES = {"shelf.rs": SHELF, ...}`), against every Rust source
 it names (`SRC` as a file or as a `src` directory, `STORE_SRC`, `LIB`, ...).  A
-row's anchor must occur exactly once in one of them.
+row's anchor must occur exactly once in the file its table sweeps, where the
+harness says which that is -- a `TABLES` dict of file name to table, or a table
+`X_MUTATIONS` beside a path `X_SRC` (`MUTATIONS` beside `SRC`) -- and otherwise
+exactly once in one of them.  Once in another table's file is not good enough:
+that row finds no anchor when its own table is swept, and runs nothing
+(credmanager's and email's keys rows, 2026-10-01).
 
 With no paths, every `mutate.py` git knows of: seconds for the whole tree, so
 it can run before every publish.  On 2026-09-28 it found 23 dead rows across
@@ -91,6 +96,44 @@ def sources(module):
     return found
 
 
+def table_files(module, texts):
+    """The source each table sweeps, by the table's identity, where the
+    harness says: a dict of `.rs` file names to tables (`TABLES =
+    {"main.rs": MAIN, ...}`, the names taken under a directory the harness
+    names), or -- in a harness of several tables -- a table `X_MUTATIONS`
+    beside a path `X_SRC` (`MUTATIONS` beside `SRC`) that is a file.  A
+    table neither names is absent.
+
+    A harness of one table may send each row wherever its anchor is:
+    calendar's runs a row against its own `main.rs` or the store's `lib.rs`
+    by which holds the anchor, so its `SRC` is not every row's file."""
+    found = {}
+    names = vars(module)
+    several = len(tables(module)) > 1
+    dirs = [Path(v) for v in names.values() if isinstance(v, PurePath) and Path(v).is_dir()]
+    for value in names.values():
+        if not (isinstance(value, dict) and value and all(isinstance(k, str) for k in value)):
+            continue
+        for file_name, rows in value.items():
+            if not isinstance(rows, list):
+                continue
+            under = [d / file_name for d in dirs if (d / file_name) in texts]
+            if len(under) == 1:
+                found[id(rows)] = under[0]
+    for name, value in names.items():
+        if not several or not isinstance(value, list) or id(value) in found:
+            continue
+        if name == "MUTATIONS":
+            src = names.get("SRC")
+        elif name.endswith("_MUTATIONS"):
+            src = names.get(name[: -len("MUTATIONS")] + "SRC")
+        else:
+            continue
+        if isinstance(src, PurePath) and Path(src) in texts:
+            found[id(value)] = Path(src)
+    return found
+
+
 def check(path):
     """(rows, problems) for one harness; problems printed as found."""
     module = load(path)
@@ -99,6 +142,7 @@ def check(path):
         texts[src] = src.read_text(encoding="utf-8", errors="replace", newline="")
     if not texts:
         raise ValueError("names no Rust source")
+    own_file = table_files(module, texts)
     # A named test may live anywhere a sweep's `cargo test` runs it: in the
     # sources the harness breaks, or in its crate's other files and `tests/`.
     tests = set()
@@ -110,18 +154,22 @@ def check(path):
     bad = 0
     for table, entries in tables(module):
         seen = set()
+        own = own_file.get(id(entries))
         for name, old, _new, expect in entries:
             rows += 1
             if name in seen:
                 print(f"{path} [{table}] DUPLICATE ROW NAME: {name}")
                 bad += 1
             seen.add(name)
+            # Where the sweep will look: the table's own file when the
+            # harness says which, else every source it names.
+            looked = {own: texts[own]} if own is not None else texts
             counts = [
                 text.count(old.replace("\n", "\r\n") if "\r\n" in text else old)
-                for text in texts.values()
+                for text in looked.values()
             ]
             if 1 not in counts:
-                where = ", ".join(f"{s.name} x{c}" for s, c in zip(texts, counts))
+                where = ", ".join(f"{s.name} x{c}" for s, c in zip(looked, counts))
                 print(f"{path} [{table}] ANCHOR {where}: {name}")
                 bad += 1
             for t in expect:

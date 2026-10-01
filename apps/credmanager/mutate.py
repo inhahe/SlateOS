@@ -219,39 +219,6 @@ MAIN = [
         "",
         [BUTTONS_ON_ENTRY],
     ),
-]
-
-VAULTFILE = [
-    (
-        "a file asking any amount of memory is opened",
-        "        if kdf.memory_kib > MAX_MEMORY_KIB\n",
-        "        if false\n",
-        [COSTLY],
-    ),
-    (
-        "a record not understood is skipped",
-        '            _ => return Err(bad("a record this program does not know")),',
-        "            _ => {}",
-        [REFUSED_WHOLE],
-    ),
-    (
-        "an escape never written is read anyway",
-        '            textfmt::tsv::unescape(raw).ok_or_else(|| bad("a field is not escaped as written"))',
-        "            Ok((*raw).to_string())",
-        [REFUSED_WHOLE],
-    ),
-    (
-        "the next id may be one in use",
-        "    if contents.next_id <= highest {",
-        "    if false {",
-        [REFUSED_WHOLE],
-    ),
-    (
-        "an entry may be in a folder that is not there",
-        "            if let Some(f) = folder_id\n                && !c.folders.iter().any(|folder| folder.id == f)\n",
-        "            if let Some(f) = folder_id\n                && false\n",
-        [REFUSED_WHOLE],
-    ),
     (
         "a command's letter is typed into an entry",
         '    if textline::types_into_field(key) {\n        let typed: String = key.typed().collect();',
@@ -335,6 +302,39 @@ VAULTFILE = [
         '            && textline::is_ctrl_chord(key.modifiers)',
         '            && key.modifiers.ctrl',
         ['a_chord_is_neither_a_vault_key_nor_typing_and_altgr_types'],
+    ),
+]
+
+VAULTFILE = [
+    (
+        "a file asking any amount of memory is opened",
+        "        if kdf.memory_kib > MAX_MEMORY_KIB\n",
+        "        if false\n",
+        [COSTLY],
+    ),
+    (
+        "a record not understood is skipped",
+        '            _ => return Err(bad("a record this program does not know")),',
+        "            _ => {}",
+        [REFUSED_WHOLE],
+    ),
+    (
+        "an escape never written is read anyway",
+        '            textfmt::tsv::unescape(raw).ok_or_else(|| bad("a field is not escaped as written"))',
+        "            Ok((*raw).to_string())",
+        [REFUSED_WHOLE],
+    ),
+    (
+        "the next id may be one in use",
+        "    if contents.next_id <= highest {",
+        "    if false {",
+        [REFUSED_WHOLE],
+    ),
+    (
+        "an entry may be in a folder that is not there",
+        "            if let Some(f) = folder_id\n                && !c.folders.iter().any(|folder| folder.id == f)\n",
+        "            if let Some(f) = folder_id\n                && false\n",
+        [REFUSED_WHOLE],
     ),
 ]
 

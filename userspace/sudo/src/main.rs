@@ -179,7 +179,6 @@ enum SudoError {
     AuthError(String),
     UsageError(String),
     TimestampError(String),
-    LockError(String),
 }
 
 impl fmt::Display for SudoError {
@@ -192,7 +191,6 @@ impl fmt::Display for SudoError {
             Self::AuthError(msg) => write!(f, "authentication error: {msg}"),
             Self::UsageError(msg) => write!(f, "usage error: {msg}"),
             Self::TimestampError(msg) => write!(f, "timestamp error: {msg}"),
-            Self::LockError(msg) => write!(f, "lock error: {msg}"),
         }
     }
 }
@@ -2906,40 +2904,6 @@ fn get_user_info(username: &str) -> TargetUser {
 }
 
 // ============================================================================
-// File locking for visudo
-// ============================================================================
-
-/// Simple file-based lock.
-fn acquire_lock(path: &Path) -> Result<PathBuf, SudoError> {
-    let lock_path = path.with_extension("lck");
-    if lock_path.exists() {
-        // Check if the lock is stale (older than 5 minutes).
-        if let Ok(meta) = fs::metadata(&lock_path)
-            && let Ok(modified) = meta.modified()
-            && let Ok(elapsed) = modified.elapsed()
-            && elapsed.as_secs() < 300
-        {
-            return Err(SudoError::LockError(format!(
-                "{} is locked by another process",
-                path.display()
-            )));
-        }
-        // Stale lock — remove it.
-    }
-
-    // Create the lock file with our PID.
-    fs::write(&lock_path, format!("{}\n", std::process::id()))
-        .map_err(|e| SudoError::LockError(format!("cannot create lock file: {e}")))?;
-
-    Ok(lock_path)
-}
-
-/// Release a file lock.
-fn release_lock(lock_path: &Path) {
-    let _ = fs::remove_file(lock_path);
-}
-
-// ============================================================================
 // JSON escaping
 // ============================================================================
 
@@ -4244,7 +4208,7 @@ fn run_visudo(args: &[OsString]) -> i32 {
 
         let errors = validate_sudoers(&content, opts.strict);
         if errors.is_empty() {
-            println!("{} parsed OK", quoteaf_os(&opts.file));
+            println!("{}: parsed OK", quoteaf_os(&opts.file));
             return 0;
         }
 
@@ -4259,137 +4223,288 @@ fn run_visudo(args: &[OsString]) -> i32 {
         if opts.strict {
             return 1;
         }
-        println!("{} parsed with warnings", quoteaf_os(&opts.file));
+        println!("{}: parsed with warnings", quoteaf_os(&opts.file));
         return 0;
     }
 
-    // Editing mode.
-    // Acquire lock.
-    let lock_path = match acquire_lock(file_path) {
-        Ok(p) => p,
-        Err(e) => {
-            eprintln!("visudo: {e}");
-            return 1;
-        }
-    };
+    // Editing mode: upstream's `visudo`, with the file opened and LOCKED
+    // first, the copy beside it, and the result installed by rename.
+    edit_sudoers(file_path, opts.strict, &editor_words(&editor_command()))
+}
 
-    // Read current content. See `starting_buffer` for why a failed read is
-    // not an empty buffer.
-    let original_content = match optionalfile::read_or_empty(file_path) {
-        Ok(text) => text,
-        Err(why) => {
-            eprintln!("visudo: {}: {why}", quoteaf_os(&opts.file));
-            eprintln!(
-                "visudo: refusing to open an editor -- saving would replace \
-                 the file's contents with whatever you typed"
-            );
-            release_lock(&lock_path);
+/// The mode a sudoers file is installed with: read-only, owner and group.
+#[cfg(unix)]
+const SUDOERS_MODE: u32 = 0o440;
+
+/// What becomes of an edit when the copy does not parse: upstream's
+/// `whatnow`.
+// Called only by the unix half; the host build keeps it for its tests.
+#[cfg_attr(not(unix), allow(dead_code))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum WhatNow {
+    /// `e`: edit the copy again.
+    Edit,
+    /// `x`, or the end of input: leave the file as it was.
+    Exit,
+    /// `Q`: install it anyway.
+    Quit,
+}
+
+/// One answer to "What now?" -- `None` for anything else, which upstream
+/// answers with the list of options and asks again.
+// Called only by the unix half; the host build keeps it for its tests.
+#[cfg_attr(not(unix), allow(dead_code))]
+fn what_now(answer: &str) -> Option<WhatNow> {
+    match answer.trim() {
+        "e" => Some(WhatNow::Edit),
+        "x" => Some(WhatNow::Exit),
+        "Q" => Some(WhatNow::Quit),
+        _ => None,
+    }
+}
+
+/// Ask "What now?" until there is an answer. The end of input is `x`, as it
+/// is upstream: until 2026-10-01 it was "edit again", forever.
+#[cfg(unix)]
+fn ask_what_now() -> WhatNow {
+    loop {
+        eprint!("What now? ");
+        // Ignored: a prompt that cannot be shown leaves nothing better to do
+        // than read the answer anyway.
+        let _ = io::stderr().flush();
+        let mut answer = String::new();
+        match io::stdin().read_line(&mut answer) {
+            Ok(0) | Err(_) => return WhatNow::Exit,
+            Ok(_) => {}
+        }
+        if let Some(choice) = what_now(&answer) {
+            return choice;
+        }
+        eprintln!(
+            "Options are:\n  (e)dit sudoers file again\n  e(x)it without saving changes to sudoers file\n  (Q)uit and save changes to sudoers file (DANGER!)\n"
+        );
+    }
+}
+
+/// The name of the copy `visudo` edits: upstream's `<file>.tmp`, beside the
+/// file, so the install is a rename within one directory -- atomic, and never
+/// a moment with half a sudoers file -- and in a directory only root writes,
+/// unlike `/tmp`, where the copy used to be made at a name anyone could
+/// predict and plant a symlink on.
+// Called only by the unix half; the host build keeps it for its tests.
+#[cfg_attr(not(unix), allow(dead_code))]
+fn sudoers_temp_path(path: &Path) -> PathBuf {
+    let mut name = path.as_os_str().to_os_string();
+    name.push(".tmp");
+    PathBuf::from(name)
+}
+
+/// The contents as the copy should start: the file's own, with a final
+/// newline if it lacked one, as upstream adds it.
+// Called only by the unix half; the host build keeps it for its tests.
+#[cfg_attr(not(unix), allow(dead_code))]
+fn sudoers_starting_text(original: &[u8]) -> Vec<u8> {
+    let mut text = original.to_vec();
+    if text.last().is_some_and(|&b| b != b'\n') {
+        text.push(b'\n');
+    }
+    text
+}
+
+/// Edit the sudoers file at `path`: upstream's `visudo` editing loop.
+///
+/// Until 2026-10-01 the lock was a `.lck` file that was checked for and then
+/// written, so two `visudo`s could both take it, and one more than five
+/// minutes old was "stale" and taken while its owner was still editing; the
+/// copy was made at `/tmp/visudo-<pid>`, a name anyone could predict and point
+/// at another file with a symlink; and the result was written over the file
+/// in place, with no mode or owner set. Now:
+///
+/// 1. the file itself is opened (created 0440 when absent) and locked with
+///    `flock`, held until `visudo` is done; a held lock is "busy, try again
+///    later";
+/// 2. the copy is `<file>.tmp`, opened without following a symlink, holding
+///    the file's text with a final newline and the file's time;
+/// 3. the editor runs on it (`EDITOR -- file.tmp`); a copy left empty where the
+///    file was not is refused; one whose size and time did not move, with time
+///    spent in the editor, is "unchanged" and nothing is installed;
+/// 4. a copy that does not parse is reported and the choice offered --
+///    (e)dit again, e(x)it, or (Q)uit and save;
+/// 5. a copy that does is given to root:root, mode 0440, and renamed over the
+///    file.
+#[cfg(unix)]
+fn edit_sudoers(path: &Path, strict: bool, editor: &[OsString]) -> i32 {
+    use std::os::unix::fs::{OpenOptionsExt as _, PermissionsExt as _};
+
+    let shown = quoteaf_os(path.as_os_str());
+    let mut sudoers = match fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .mode(SUDOERS_MODE)
+        .open(path)
+    {
+        Ok(file) => file,
+        Err(e) => {
+            eprintln!("visudo: {shown}: {}", errmsg::strerror(&e));
             return 1;
         }
     };
-    // Create temp file.
-    let temp_path = PathBuf::from(format!("/tmp/visudo-{}", std::process::id()));
-    if let Err(e) = fs::write(&temp_path, &original_content) {
-        eprintln!("visudo: cannot create temp file: {e}");
-        release_lock(&lock_path);
-        return 1;
+    match sudoers.try_lock() {
+        Ok(()) => {}
+        Err(fs::TryLockError::WouldBlock) => {
+            eprintln!("visudo: {shown} busy, try again later");
+            return 1;
+        }
+        Err(fs::TryLockError::Error(e)) => {
+            eprintln!("visudo: unable to lock {shown}: {}", errmsg::strerror(&e));
+            eprint!("Edit anyway? [y/N]");
+            // Ignored, as the prompt above it: the answer is read either way.
+            let _ = io::stderr().flush();
+            let mut answer = String::new();
+            let yes = io::stdin().read_line(&mut answer).is_ok()
+                && answer.trim_start().starts_with(['y', 'Y']);
+            if !yes {
+                return 1;
+            }
+        }
     }
 
-    let editor = editor_command();
-
-    // Edit loop: keep re-editing until valid or user quits.
-    loop {
-        let status = process::Command::new(&editor).arg(&temp_path).status();
-
-        match status {
-            Ok(s) if !s.success() => {
-                eprintln!(
-                    "visudo: editor exited with status {}",
-                    s.code().unwrap_or(-1)
-                );
-                let _ = fs::remove_file(&temp_path);
-                release_lock(&lock_path);
-                return 1;
-            }
-            Err(e) => {
-                eprintln!("visudo: cannot run editor {}: {e}", quoteaf_os(&editor));
-                let _ = fs::remove_file(&temp_path);
-                release_lock(&lock_path);
-                return 1;
-            }
-            _ => {}
+    let mut original = Vec::new();
+    let original_meta = match sudoers
+        .read_to_end(&mut original)
+        .and_then(|_| sudoers.metadata())
+    {
+        Ok(meta) => meta,
+        Err(e) => {
+            eprintln!("visudo: {shown}: {}", errmsg::strerror(&e));
+            return 1;
         }
+    };
 
-        // Read edited content.
-        let new_content = match fs::read_to_string(&temp_path) {
-            Ok(c) => c,
-            Err(e) => {
-                eprintln!("visudo: cannot read temp file: {e}");
-                release_lock(&lock_path);
-                return 1;
+    let temp = sudoers_temp_path(path);
+    let temp_shown = quoteaf_os(temp.as_os_str());
+    let discard = |code: i32| -> i32 {
+        // Ignored: the copy is being abandoned, and the reason has been said.
+        let _ = fs::remove_file(&temp);
+        code
+    };
+    {
+        let made = fs::OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .mode(0o700)
+            .custom_flags(O_NOFOLLOW)
+            .open(&temp)
+            .and_then(|mut copy| {
+                copy.write_all(&sudoers_starting_text(&original))?;
+                // The file's time, so an untouched copy can be told; ignored on
+                // failure, as upstream ignores it.
+                if let Ok(time) = original_meta.modified() {
+                    let _ = copy.set_modified(time);
+                }
+                Ok(())
+            });
+        if let Err(e) = made {
+            eprintln!("visudo: {temp_shown}: {}", errmsg::strerror(&e));
+            return discard(1);
+        }
+    }
+
+    let Some((editor, editor_args)) = editor.split_first() else {
+        return discard(1);
+    };
+    loop {
+        let started = SystemTime::now();
+        let ran = process::Command::new(editor)
+            .args(editor_args)
+            .arg("--")
+            .arg(&temp)
+            .status();
+        let finished = SystemTime::now();
+        // vi's exit status counts its errors (XPG4), so only a failure to run
+        // the editor at all stops here -- as upstream.
+        if ran.is_err() {
+            eprintln!(
+                "visudo: editor ({}) failed, {shown} unchanged",
+                quoteaf_os(editor)
+            );
+            return discard(1);
+        }
+        let edited = match fs::metadata(&temp) {
+            Ok(meta) => meta,
+            Err(_) => {
+                eprintln!(
+                    "visudo: unable to stat temporary file ({temp_shown}), {shown} unchanged"
+                );
+                return discard(1);
             }
         };
+        if edited.len() == 0 && !original.is_empty() {
+            eprintln!("visudo: zero length temporary file ({temp_shown}), {shown} unchanged");
+            return discard(1);
+        }
+        let untouched = edited.len() == original_meta.len()
+            && edited.modified().ok() == original_meta.modified().ok()
+            && finished != started;
+        if untouched {
+            eprintln!("visudo: {temp_shown} unchanged");
+            return discard(0);
+        }
 
-        // Validate.
-        let errors = validate_sudoers(&new_content, opts.strict);
-        let fatal_errors: Vec<&SyntaxError> = errors.iter().filter(|e| !e.is_warning).collect();
-
-        if fatal_errors.is_empty() {
-            // Valid — write back.
-            if let Err(e) = fs::write(file_path, &new_content) {
-                eprintln!("visudo: cannot write {}: {e}", quoteaf_os(&opts.file));
-                let _ = fs::remove_file(&temp_path);
-                release_lock(&lock_path);
-                return 1;
+        let text = match fs::read_to_string(&temp) {
+            Ok(text) => text,
+            Err(e) => {
+                eprintln!("visudo: {temp_shown}: {}", errmsg::strerror(&e));
+                return discard(1);
             }
-
-            // Set permissions (sudoers should be 0440).
-            // On Slate OS, this would use chmod syscall.
-
-            let _ = fs::remove_file(&temp_path);
-            release_lock(&lock_path);
-            return 0;
-        }
-
-        // Report errors and ask what to do.
-        for err in &fatal_errors {
-            eprintln!("visudo: {}: {err}", quoteaf_os(&opts.file));
-        }
-        eprint!("What now? (e)dit again, e(x)it without saving, (Q)uit and save: ");
-        let _ = io::stderr().flush();
-
-        let mut response = String::new();
-        if io::stdin().read_line(&mut response).is_err() {
-            let _ = fs::remove_file(&temp_path);
-            release_lock(&lock_path);
-            return 1;
-        }
-
-        match response.trim() {
-            "x" | "X" => {
-                let _ = fs::remove_file(&temp_path);
-                release_lock(&lock_path);
-                return 0;
+        };
+        let errors = validate_sudoers(&text, strict);
+        let fatal: Vec<&SyntaxError> = errors.iter().filter(|e| !e.is_warning).collect();
+        if !fatal.is_empty() {
+            for err in &fatal {
+                eprintln!("visudo: {temp_shown}: {err}");
             }
-            "Q" => {
-                // Save despite errors.
-                if let Err(e) = fs::write(file_path, &new_content) {
-                    eprintln!("visudo: cannot write {}: {e}", quoteaf_os(&opts.file));
-                    let _ = fs::remove_file(&temp_path);
-                    release_lock(&lock_path);
-                    return 1;
-                }
-                let _ = fs::remove_file(&temp_path);
-                release_lock(&lock_path);
-                return 0;
+            match ask_what_now() {
+                WhatNow::Edit => continue,
+                WhatNow::Exit => return discard(0),
+                WhatNow::Quit => {}
             }
-            // "e"/"E" -- and anything unrecognised, which sudo also treats as
-            // edit-again rather than as a reason to discard the file -- fall
-            // through to the loop's next iteration. These were two arms both
-            // saying `continue`, which is one behaviour written twice.
-            _ => {}
         }
+
+        // Install: root's, 0440, renamed over the file.
+        // The order matters: owner and mode are set on the copy BEFORE the
+        // rename, so the file is never readable under the wrong ones.
+        if let Err(e) = std::os::unix::fs::chown(&temp, Some(0), Some(0)) {
+            eprintln!(
+                "visudo: unable to set (uid, gid) of {temp_shown} to (0, 0): {}",
+                errmsg::strerror(&e)
+            );
+        }
+        if let Err(e) = fs::set_permissions(&temp, fs::Permissions::from_mode(SUDOERS_MODE)) {
+            eprintln!(
+                "visudo: unable to change mode of {temp_shown} to 0{SUDOERS_MODE:o}: {}",
+                errmsg::strerror(&e)
+            );
+        }
+        if let Err(e) = fs::rename(&temp, path) {
+            eprintln!(
+                "visudo: error renaming {temp_shown}, {shown} unchanged: {}",
+                errmsg::strerror(&e)
+            );
+            return discard(1);
+        }
+        return 0;
     }
+}
+
+/// `visudo` installs root's file and must be able to change owners; a host
+/// build cannot.
+#[cfg(not(unix))]
+fn edit_sudoers(_path: &Path, _strict: bool, _editor: &[OsString]) -> i32 {
+    eprintln!("visudo: this build cannot install a sudoers file");
+    1
 }
 
 /// Main entry point for the `sudoreplay` personality.
@@ -7050,12 +7165,6 @@ alice ALL = (root) /usr/bin/apt, NOPASSWD: /usr/bin/ls
     }
 
     #[test]
-    fn error_display_lock_error() {
-        let e = SudoError::LockError("locked".to_string());
-        assert_eq!(format!("{e}"), "lock error: locked");
-    }
-
-    #[test]
     fn error_from_io_error() {
         let io_err = io::Error::new(io::ErrorKind::NotFound, "not found");
         let sudo_err: SudoError = io_err.into();
@@ -7845,5 +7954,111 @@ alice ALL = (root) /usr/bin/apt, NOPASSWD: /usr/bin/ls
     #[cfg(unix)]
     fn prepare_copy(original: &Path, tmpdir: &Path, caller: Caller) -> EditFile {
         prepare_edit_unchecked(original, tmpdir, caller).expect("copy made")
+    }
+
+    // -- visudo: lock, copy beside the file, install by rename --
+
+    #[test]
+    fn what_now_takes_upstreams_three_answers() {
+        assert_eq!(what_now("e\n"), Some(WhatNow::Edit));
+        assert_eq!(what_now("x"), Some(WhatNow::Exit));
+        assert_eq!(what_now("Q\n"), Some(WhatNow::Quit));
+        // Anything else is asked again; `q` is not `Q`, as upstream has it.
+        assert_eq!(what_now("q"), None);
+        assert_eq!(what_now(""), None);
+    }
+
+    #[test]
+    fn the_copy_sits_beside_the_file() {
+        assert_eq!(
+            sudoers_temp_path(Path::new("/etc/sudoers")),
+            PathBuf::from("/etc/sudoers.tmp")
+        );
+    }
+
+    #[test]
+    fn the_copy_ends_in_a_newline() {
+        assert_eq!(sudoers_starting_text(b"a\nb"), b"a\nb\n");
+        assert_eq!(sudoers_starting_text(b"a\n"), b"a\n");
+        assert_eq!(sudoers_starting_text(b""), b"");
+    }
+
+    /// An "editor" that replaces the copy's contents: `sh -c SCRIPT sh -- FILE`,
+    /// so the copy is `$2`.
+    #[cfg(unix)]
+    fn writes(text: &str) -> Vec<OsString> {
+        vec![
+            OsString::from("sh"),
+            OsString::from("-c"),
+            OsString::from(format!("printf '%s' '{text}' > \"$2\"")),
+            OsString::from("sh"),
+        ]
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_held_lock_is_busy() {
+        let dir = ScratchDir::new("visudo_lock");
+        let path = dir.dir().join("sudoers");
+        fs::write(&path, b"root ALL = (ALL) ALL\n").expect("write");
+        let held = fs::File::open(&path).expect("open");
+        held.lock().expect("lock");
+        assert_eq!(edit_sudoers(&path, false, &writes("x")), 1);
+        // Nothing was copied or changed while it was busy.
+        assert!(!sudoers_temp_path(&path).exists());
+        assert_eq!(fs::read(&path).expect("read"), b"root ALL = (ALL) ALL\n");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_good_edit_is_installed_read_only_by_rename() {
+        use std::os::unix::fs::MetadataExt as _;
+        let dir = ScratchDir::new("visudo_install");
+        let path = dir.dir().join("sudoers");
+        fs::write(&path, b"root ALL = (ALL) ALL\n").expect("write");
+        let wanted = "root ALL = (ALL) ALL\nalice ALL = (root) /usr/bin/id\n";
+        assert_eq!(edit_sudoers(&path, false, &writes(wanted)), 0);
+        assert_eq!(fs::read_to_string(&path).expect("read"), wanted);
+        assert_eq!(fs::metadata(&path).expect("meta").mode() & 0o777, 0o440);
+        assert!(!sudoers_temp_path(&path).exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn an_untouched_copy_installs_nothing() {
+        let dir = ScratchDir::new("visudo_untouched");
+        let path = dir.dir().join("sudoers");
+        fs::write(&path, b"root ALL = (ALL) ALL\n").expect("write");
+        let editor = vec![OsString::from("true")];
+        assert_eq!(edit_sudoers(&path, false, &editor), 0);
+        assert_eq!(fs::read(&path).expect("read"), b"root ALL = (ALL) ALL\n");
+        assert!(!sudoers_temp_path(&path).exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn an_emptied_copy_is_refused() {
+        let dir = ScratchDir::new("visudo_empty");
+        let path = dir.dir().join("sudoers");
+        fs::write(&path, b"root ALL = (ALL) ALL\n").expect("write");
+        assert_eq!(edit_sudoers(&path, false, &writes("")), 1);
+        assert_eq!(fs::read(&path).expect("read"), b"root ALL = (ALL) ALL\n");
+        assert!(!sudoers_temp_path(&path).exists());
+    }
+
+    /// The copy is opened without following a symlink, so one planted at its
+    /// name cannot aim the edit at another file.
+    #[cfg(unix)]
+    #[test]
+    fn a_symlink_at_the_copys_name_is_not_followed() {
+        let dir = ScratchDir::new("visudo_link");
+        let path = dir.dir().join("sudoers");
+        fs::write(&path, b"root ALL = (ALL) ALL\n").expect("write");
+        let victim = dir.dir().join("victim");
+        fs::write(&victim, b"untouched\n").expect("victim");
+        std::os::unix::fs::symlink(&victim, sudoers_temp_path(&path)).expect("plant");
+        assert_eq!(edit_sudoers(&path, false, &writes("x")), 1);
+        assert_eq!(fs::read(&victim).expect("read"), b"untouched\n");
+        assert_eq!(fs::read(&path).expect("read"), b"root ALL = (ALL) ALL\n");
     }
 }

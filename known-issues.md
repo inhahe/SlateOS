@@ -177041,7 +177041,7 @@ day the kernel makes it confining.
 anything in it went wrong; `--log FILE` journals somewhere other than
 `/var/log/syslog.jsonl`.
 
-## TD-C-THE-RETAINED-WIDGET-TREE-HAS-NO-USER-AND-FIVE-OF-ITS-WIDGETS-DRAW-NOTHING (lane C, 2026-09-27)
+## `TD-C-THE-RETAINED-WIDGET-TREE-HAS-NO-USER-AND-FIVE-OF-ITS-WIDGETS-DRAW-NOTHING` (lane C, 2026-09-27) -- **FIXED 2026-10-01**
 
 **Status:** FIXED 2026-10-01, all three points -- the tree still has no
 program using it, which is now a choice for programs rather than a defect.

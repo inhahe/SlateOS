@@ -55,14 +55,11 @@ sudo:sudoreplay
 sudo:visudo
 sysstat:mpstat
 sysstat:pidstat
-systemctl:systemd-analyze
 systemctl:systemd-cat
 systemctl:systemd-cgls
 systemctl:systemd-cgtop
 systemctl:systemd-escape
-systemctl:systemd-notify
 systemctl:systemd-path
-systemctl:systemd-tmpfiles
 thermald:thermal-conf
 thermald:thermal-monitor
 tput:clear

@@ -2468,7 +2468,14 @@ localhost without sending a query, and ignored `-t`. **Kept, third
 batch:** `mpstat`, `pidstat` (sysstat, reading `/proc`), `sockstat` (ss,
 in BSD's format), `ntpdate`, `sntp` (ntpd, which really queries and sets
 the clock). **The ledger stands at 67.**
-**Still to judge:** `systemctl`'s eight; `cpufreq-info` and `cpufreq-set`
+`systemctl`'s eight were read next: `systemd-analyze` (a fixed "Startup
+finished in 1.200s (kernel) + 2.500s" and a fixed `blame` list),
+`systemd-notify` ("Sending: READY=1" to nobody; `--booted` said yes) and
+`systemd-tmpfiles` (built-in entries instead of its configuration) made
+their answers up and went; `systemd-cat` (the journal), `systemd-escape`,
+`systemd-path`, `systemd-cgls` and `systemd-cgtop` (honest about a missing
+cgroupfs) stay. **The ledger stands at 64.** **Still to judge:**
+`cpufreq-info` and `cpufreq-set`
 (cpupower) and `thermal-monitor`, `thermal-conf` (thermald), which wait on
 the kernel's cpufreq and thermal modules reaching `/sys`; `hostnamectl`'s
 four domain names (which belong to `hostname`, if anywhere); `xdg`'s two;

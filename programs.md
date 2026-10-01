@@ -262,7 +262,7 @@ two disagree.
 | `sysinfo` | System Information Utility |  |  |  |
 | `syslogd` | System Log Daemon (`syslogd`) |  |  |  |
 | `sysstat` | Sysstat utility |  |  | `mpstat` *(not installed)*, `pidstat` *(not installed)* |
-| `systemctl` | Multi-personality service management utility for SlateOS. |  |  | `systemd-analyze` *(not installed)*, `systemd-cat` *(not installed)*, `systemd-cgls` *(not installed)*, `systemd-cgtop` *(not installed)*, `systemd-escape` *(not installed)*, `systemd-notify` *(not installed)*, `systemd-path` *(not installed)*, `systemd-tmpfiles` *(not installed)* |
+| `systemctl` | Multi-personality service management utility for SlateOS. |  |  | `systemd-cat` *(not installed)*, `systemd-cgls` *(not installed)*, `systemd-cgtop` *(not installed)*, `systemd-escape` *(not installed)*, `systemd-path` *(not installed)* |
 | `tac` | Reverse line printer and character reverser for Slate OS |  |  |  |
 | `tail` | Output the last part of files. | yes | `coreutils` |  |
 | `tar` | Tape archive utility. | yes | `coreutils` |  |

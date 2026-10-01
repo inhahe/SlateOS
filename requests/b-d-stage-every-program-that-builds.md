@@ -141,3 +141,20 @@ query an NTP server and set the clock through `clock_settime`. Seven other
 names left the ledger instead (deleted, not kept), and so did the whole of
 `userspace/resolvectl`; `known-issues.md` ->
 `TD-B-ONE-HUNDRED-AND-SEVENTY-TWO-COMMAND-NAMES-NOBODY-CAN-RUN` has why.
+
+## The names lane B keeps -- fourth batch (2026-10-01)
+
+```
+systemd-cat = systemctl
+systemd-escape = systemctl
+systemd-path = systemctl
+systemd-cgls = systemctl
+systemd-cgtop = systemctl
+```
+
+`systemd-cat` writes the journal record `syslogd` writes, `systemd-escape`
+and `systemd-path` are pure transformations, and `systemd-cgls`/`cgtop`
+read the cgroup tree and say so when there is none (they wait, with the
+cgroup tools of batch two, on the kernel's cgroupfs reaching
+`/sys/fs/cgroup`). `systemd-analyze`, `systemd-notify` and
+`systemd-tmpfiles` were deleted instead: each made its answer up.

@@ -271,6 +271,15 @@ pub struct FileMeta {
     /// than a real inode.  ext4 reports the real inode number; memfs a
     /// stable synthetic id assigned at node creation.
     pub ino: u64,
+    /// The device the file is on: its filesystem's device number, which
+    /// `stat` reports as `st_dev`'s minor under major 0 ([`dev_of`]).
+    ///
+    /// Filled by the VFS from the mount the file was found on, never by a
+    /// filesystem, which leaves it 0; 0 means unknown. One `(dev, ino)` pair
+    /// is one file -- how `tar`, `cp -a`, `du` and `find -samefile` tell two
+    /// names of one file from two files. Until 2026-10-01 every file reported
+    /// 0, so files on two filesystems that shared an inode number were one.
+    pub dev: u32,
 
     // --- Timestamps (nanoseconds since the Unix epoch, wall-clock;
     //     0 = not available). These are absolute wall-clock times, not
@@ -352,6 +361,7 @@ impl FileMeta {
             size,
             entry_type,
             ino: 0,
+            dev: 0,
             created_ns: 0,
             modified_ns: 0,
             accessed_ns: 0,
@@ -374,6 +384,7 @@ impl FileMeta {
             size,
             entry_type,
             ino: 0,
+            dev: 0,
             created_ns: now,
             modified_ns: now,
             accessed_ns: now,
@@ -1123,6 +1134,59 @@ struct MountPoint {
 /// with a later mount even after the original is unmounted.
 static NEXT_FS_ID: AtomicU64 = AtomicU64::new(1);
 
+/// Device numbers of the mounted filesystems: `fs_id` to the number `stat`
+/// reports as `st_dev`'s minor, under major 0, as Linux numbers its
+/// anonymous filesystems.
+///
+/// Not `fs_id` itself. That is never reused, because it keys the page cache
+/// and the lock tables, and a reused one would alias a dead mount's entries;
+/// so it only grows. A device number is reused once its mount is gone, as
+/// Linux reuses an anonymous device's minor, so it stays as small as the
+/// number of filesystems mounted at once and fits the native stat record's
+/// 24 bits.
+///
+/// A leaf lock: nothing is taken under it, so `/proc` may read it under its
+/// own filesystem lock.
+static MOUNT_DEVS: Mutex<alloc::collections::BTreeMap<u64, u32>> =
+    Mutex::new(alloc::collections::BTreeMap::new());
+
+/// Give mount `fs_id` the smallest device number no mounted filesystem has,
+/// from 1.
+fn assign_dev(fs_id: u64) {
+    let mut devs = MOUNT_DEVS.lock();
+    let mut used: Vec<u32> = devs.values().copied().collect();
+    used.sort_unstable();
+    let mut dev: u32 = 1;
+    for u in used {
+        if u == dev {
+            dev = dev.saturating_add(1);
+        } else if u > dev {
+            break;
+        }
+    }
+    devs.insert(fs_id, dev);
+}
+
+/// Mount `fs_id` is gone: its device number is free again.
+fn release_dev(fs_id: u64) {
+    MOUNT_DEVS.lock().remove(&fs_id);
+}
+
+/// The device number (`st_dev`'s minor) of mounted filesystem `fs_id`, or 0
+/// for one that is not mounted.
+#[must_use]
+pub fn dev_of(fs_id: u64) -> u32 {
+    MOUNT_DEVS.lock().get(&fs_id).copied().unwrap_or(0)
+}
+
+/// Linux's `dev_t` for device number `dev` under major 0, as glibc's
+/// `makedev(0, dev)` builds it: the minor's low byte in bits 0-7 and the rest
+/// from bit 20. `major()` and `minor()` take it apart again.
+#[must_use]
+pub fn linux_dev_t(dev: u32) -> u64 {
+    u64::from(dev & 0xff) | (u64::from(dev & 0xffff_ff00) << 12)
+}
+
 /// A system-wide-unique identity for a filesystem object.
 ///
 /// A file is uniquely identified by the pair `(fs_id, ino)`: the stable mount
@@ -1772,13 +1836,17 @@ impl Vfs {
         );
 
         let fs_type = String::from(fs.fs_type());
+        // Stable, never-reused id for this mount instance (see FileId), and
+        // the device number `stat` reports for its files: assigned before
+        // the mount is visible, so no `stat` of it can see 0.
+        let fs_id = NEXT_FS_ID.fetch_add(1, Ordering::Relaxed);
+        assign_dev(fs_id);
         vfs.mounts.push(MountPoint {
             path: mount_path.to_path_buf(),
             fs: Arc::new(Mutex::new(fs)),
             fs_type,
             options,
-            // Stable, never-reused id for this mount instance (see FileId).
-            fs_id: NEXT_FS_ID.fetch_add(1, Ordering::Relaxed),
+            fs_id,
         });
 
         // Mount changes affect path resolution — invalidate entire dcache.
@@ -1905,6 +1973,7 @@ impl Vfs {
         }
 
         vfs.mounts.remove(idx);
+        release_dev(fs_id);
         crate::serial_println!(
             "[vfs] Unmounted {} from '{}'",
             fs_type,
@@ -3601,6 +3670,26 @@ impl Vfs {
             .collect()
     }
 
+    /// Every mount point with its device number (`st_dev`'s minor), for
+    /// `/proc/<pid>/mountinfo`, whose `major:minor` field is the `st_dev` of
+    /// the files under it.
+    ///
+    /// Locks no filesystem, as [`Self::mounts`].
+    pub fn mounts_with_dev() -> Vec<(PathBuf, String, MountOptions, u32)> {
+        let vfs = VFS.lock();
+        vfs.mounts
+            .iter()
+            .map(|mp| {
+                (
+                    mp.path.clone(),
+                    mp.fs_type.clone(),
+                    mp.options,
+                    dev_of(mp.fs_id),
+                )
+            })
+            .collect()
+    }
+
     /// Get mount options for the filesystem containing `path`.
     pub fn mount_options(path: impl AsRef<Path>) -> KernelResult<MountOptions> {
         let path = path.as_ref();
@@ -3706,8 +3795,10 @@ impl Vfs {
     /// path (see [`read_at_resolved`](Self::read_at_resolved)).
     pub fn metadata_resolved(path: impl AsRef<Path>) -> KernelResult<FileMeta> {
         let path = path.as_ref();
-        let (fs, _id, _opts, relative) = resolve_mount(path)?;
-        fs.lock().metadata(&relative)
+        let (fs, fs_id, _opts, relative) = resolve_mount(path)?;
+        let mut meta = fs.lock().metadata(&relative)?;
+        meta.dev = dev_of(fs_id);
+        Ok(meta)
     }
 
     /// Resolve `path` to its stable system-wide [`FileId`], or `None` if the
@@ -3930,11 +4021,14 @@ impl Vfs {
         let mut guard = fs.lock();
         verify_pinned(&mut guard, fs_id, &dir_rel, dir)?;
         let child_rel = dir_rel.join(name);
-        if no_follow {
-            guard.lmetadata(&child_rel)
+        let mut meta = if no_follow {
+            guard.lmetadata(&child_rel)?
         } else {
-            guard.metadata(&child_rel)
-        }
+            guard.metadata(&child_rel)?
+        };
+        drop(guard);
+        meta.dev = dev_of(fs_id);
+        Ok(meta)
     }
 
     /// Change the permission bits of `name` within the directory a handle was
@@ -5123,8 +5217,10 @@ impl Vfs {
         let path = path.as_ref();
         let path = Self::resolve_no_follow(path)?;
         check_path_access(&path, PathAccess::Metadata)?;
-        let (fs, _id, _opts, relative) = resolve_mount(&path)?;
-        fs.lock().lmetadata(&relative)
+        let (fs, fs_id, _opts, relative) = resolve_mount(&path)?;
+        let mut meta = fs.lock().lmetadata(&relative)?;
+        meta.dev = dev_of(fs_id);
+        Ok(meta)
     }
 
     /// Return debug statistics for the filesystem mounted at `path`.
@@ -6010,6 +6106,80 @@ fn remove_flock_waiter(task: crate::sched::task::TaskId) {
 // ---------------------------------------------------------------------------
 // Lock table dump (for procfs)
 // ---------------------------------------------------------------------------
+
+/// Files report their filesystem's device number (`st_dev`), and a device
+/// number is reused once its mount is gone.
+///
+/// Until 2026-10-01 every file reported 0, so two files on two filesystems
+/// that shared an inode number were one file to `tar`, `cp -a` and `du`.
+fn device_numbers_self_test() -> KernelResult<()> {
+    const MNT: &str = "/tmp/vfsdev";
+    const FILE: &str = "/tmp/vfsdev/probe";
+    crate::serial_println!("[vfs]   Testing device numbers...");
+
+    // The encoding first: glibc's `minor()` must take back what was put in.
+    let decode = |d: u64| (d & 0xff) | ((d >> 12) & 0xffff_ff00);
+    for dev in [1u32, 0xff, 0x100, 0x12_3456] {
+        let encoded = linux_dev_t(dev);
+        if decode(encoded) != u64::from(dev) || encoded & 0xffff_f000_000f_ff00 != 0 {
+            crate::serial_println!(
+                "[vfs]   FAIL: device {:#x} encodes as {:#x}, which decodes to minor {:#x}, major bits {:#x}",
+                dev,
+                encoded,
+                decode(encoded),
+                encoded & 0xffff_f000_000f_ff00
+            );
+            return Err(KernelError::InternalError);
+        }
+    }
+
+    crate::fs::memfs::mount(MNT)?;
+    let outcome = (|| -> KernelResult<(u32, u32, u32, u32)> {
+        Vfs::write_file(FILE, b"dev")?;
+        let tmp = Vfs::metadata("/tmp")?.dev;
+        let file = Vfs::metadata(FILE)?.dev;
+        let unfollowed = Vfs::lmetadata(FILE)?.dev;
+        let root = Vfs::metadata(MNT)?.dev;
+        Ok((tmp, file, unfollowed, root))
+    })();
+    // Best effort: the file goes with the scratch mount.
+    let _ = Vfs::remove(FILE);
+    Vfs::unmount(MNT)?;
+    let (tmp, file, unfollowed, root) = outcome?;
+    // The mount's own root is on it, and so is the file; /tmp is not.
+    if tmp == 0 || file == 0 || file == tmp || unfollowed != file || root != file {
+        crate::serial_println!(
+            "[vfs]   FAIL: device numbers: /tmp {}, a file on a mount under it {} (lstat {}), the mount's root {}",
+            tmp,
+            file,
+            unfollowed,
+            root
+        );
+        return Err(KernelError::InternalError);
+    }
+
+    // The number is free again: the next mount takes the smallest free one,
+    // which is it, unless another mount came in between.
+    crate::fs::memfs::mount(MNT)?;
+    let again = Vfs::metadata(MNT).map(|m| m.dev);
+    Vfs::unmount(MNT)?;
+    match again {
+        Ok(dev) if dev == file => {}
+        Ok(dev) if dev != 0 => crate::serial_println!(
+            "[vfs]     note: the remount took device {} rather than {} (another mount in between)",
+            dev,
+            file
+        ),
+        other => {
+            crate::serial_println!("[vfs]   FAIL: a remount reported device {:?}", other);
+            return Err(KernelError::InternalError);
+        }
+    }
+    crate::serial_println!(
+        "[vfs]   device numbers: per mount, reused after unmount, Linux's dev_t: OK"
+    );
+    Ok(())
+}
 
 /// One `flock` lock, as `/proc/locks` reports it.
 #[derive(Debug, Clone)]
@@ -8274,6 +8444,11 @@ pub fn self_test() -> KernelResult<()> {
             return Err(e);
         }
         serial_println!("[vfs]   mount path normalisation: OK");
+    }
+
+    // --- Device numbers (st_dev) ---
+    if has_tmp {
+        device_numbers_self_test()?;
     }
 
     // --- Permission gate: POSIX ACL enforcement ---

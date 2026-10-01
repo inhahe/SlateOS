@@ -339,6 +339,7 @@ impl MemFsNode {
             size: self.size(),
             entry_type: self.entry_type(),
             ino: self.ino,
+            dev: 0,
             created_ns: self.created_ns,
             modified_ns: self.modified_ns,
             accessed_ns: self.accessed_ns,

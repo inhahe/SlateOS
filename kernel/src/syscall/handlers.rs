@@ -10506,7 +10506,9 @@ pub fn sys_fs_rmdir(args: &SyscallArgs) -> SyscallResult {
 /// ```text
 ///   [0..8]   size         (u64)
 ///   [8]      entry_type   (u8: 0=file 1=dir 2=volume-label 3=symlink)
-///   [9..12]  reserved     (zero)
+///   [9..12]  dev          (u24: the filesystem's device number, `st_dev`'s
+///                          minor under major 0; 0 = unknown. Reserved, and
+///                          zero, until 2026-10-01: an older reader ignores it)
 ///   [12..16] nlinks       (u32)
 ///   [16..20] permissions  (u32, Unix mode bits; 0 = unknown, synthesize)
 ///   [20..24] uid          (u32)
@@ -10553,6 +10555,10 @@ fn encode_fs_stat_result(meta: &crate::fs::FileMeta) -> [u8; FS_STAT_RESULT_LEN]
     };
     put(0, &meta.size.to_le_bytes());
     put(8, &[type_byte]);
+    // Three bytes: the device numbers are dense (`vfs::dev_of`), as many as
+    // filesystems mounted at once, so they fit.
+    let [d0, d1, d2, _] = meta.dev.to_le_bytes();
+    put(9, &[d0, d1, d2]);
     put(12, &meta.nlinks.to_le_bytes());
     put(16, &u32::from(meta.permissions).to_le_bytes());
     put(20, &meta.uid.to_le_bytes());

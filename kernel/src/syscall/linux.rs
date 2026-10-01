@@ -20108,7 +20108,7 @@ fn fill_stat_from_meta(buf: &mut [u8; STAT_SIZE], meta: &crate::fs::FileMeta) {
     let ctime = pick(meta.changed_ns);
     let nlink = u64::from(meta.nlinks.max(1));
 
-    put_u64(buf, 0, 0); // st_dev
+    put_u64(buf, 0, crate::fs::vfs::linux_dev_t(meta.dev)); // st_dev
     put_u64(buf, 8, meta.ino); // st_ino
     put_u64(buf, 16, nlink); // st_nlink
     put_u32(buf, 24, mode); // st_mode
@@ -20184,6 +20184,9 @@ fn fill_statx_from_meta(buf: &mut [u8; STATX_SIZE], meta: &crate::fs::FileMeta) 
     put_u32(buf, 104, to_nsec(ctime));
     put_i64(buf, 112, to_sec(mtime)); // stx_mtime
     put_u32(buf, 120, to_nsec(mtime));
+    // 128..136: stx_rdev_major/minor, 0 (no device nodes here).
+    put_u32(buf, 136, 0); // stx_dev_major: anonymous filesystems are major 0
+    put_u32(buf, 140, meta.dev); // stx_dev_minor
 }
 
 /// Resolve a (cwd-canonicalised) absolute path to VFS metadata for a
@@ -20229,6 +20232,20 @@ fn stat_meta_for_path(path: &Path, follow: bool) -> Result<crate::fs::FileMeta, 
 /// Fill a 144-byte struct stat for the given Linux fd-table entry.
 fn fill_stat_for_fd(buf: &mut [u8; STAT_SIZE], entry: &crate::proc::linux_fd::FdEntry) {
     use crate::proc::linux_fd::HandleKind;
+
+    // A file or directory has a file behind it, and `stat` of its path would
+    // read it: its size, mode, owner, times, inode and device. The synthetic
+    // answer below is for objects with none (pipes, sockets, anonymous
+    // inodes). Until 2026-10-01 a regular file took it too, so every `fstat`
+    // -- glibc's `fstat` is `newfstatat(fd, "", AT_EMPTY_PATH)`, which lands
+    // here -- said size 0, mode 0644, owner root, the handle number as inode.
+    // A handle closed in a race keeps the old answer rather than failing.
+    if entry.kind == HandleKind::File
+        && let Ok(meta) = crate::fs::handle::fstat(entry.raw_handle)
+    {
+        fill_stat_from_meta(buf, &meta);
+        return;
+    }
 
     // Choose file type and mode bits based on what backs the fd.
     let (mode, blksize): (u32, u64) = match entry.kind {
@@ -20600,6 +20617,14 @@ const STATX_BASIC_STATS: u32 = STATX_TYPE
 /// Fill a 256-byte struct statx for the given fd-table entry.
 fn fill_statx_for_fd(buf: &mut [u8; STATX_SIZE], entry: &crate::proc::linux_fd::FdEntry) {
     use crate::proc::linux_fd::HandleKind;
+
+    // A file's real metadata, as `fill_stat_for_fd` takes it.
+    if entry.kind == HandleKind::File
+        && let Ok(meta) = crate::fs::handle::fstat(entry.raw_handle)
+    {
+        fill_statx_from_meta(buf, &meta);
+        return;
+    }
 
     let (mode_u16, blksize): (u16, u32) = match entry.kind {
         HandleKind::Console => ((S_IFCHR | 0o620) as u16, 1024),

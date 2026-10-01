@@ -131,6 +131,7 @@ impl Ext4Fs {
             size,
             entry_type,
             ino: u64::from(ino),
+            dev: 0,
             created_ns,
             modified_ns,
             accessed_ns,

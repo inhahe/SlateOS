@@ -180419,7 +180419,7 @@ caller-named owner).
 loop. That also closes lane B's `TD-B-FLOCK-WAIT-POLLS`: a blocking
 `flock` a signal interrupts.
 
-### A-ST_DEV-IS-ZERO-FOR-EVERY-FILE -- 2026-10-01 -- OPEN (lane A, next)
+### A-ST_DEV-IS-ZERO-FOR-EVERY-FILE -- 2026-10-01 -- FIXED the same day (lane A; design-decisions §1507)
 
 **In short:** every file on every filesystem reports device number 0. Tools
 recognise "the same file" by the pair (device, inode), so two different
@@ -180438,11 +180438,29 @@ already the identity key of the page cache and the lock tables.
 That field now prints the filesystem id under major 0, as Linux numbers its
 anonymous filesystems, which matches `stat` once `stat` reports it.
 
-**The proper fix:** carry the mount's id in `FileMeta` and report it as
-`st_dev`, under major 0 with the id as minor, encoded as Linux's
-`new_encode_dev`. Do the same in `statx` (`stx_dev_major`/`minor`), the
-native stat records, and `/proc/<pid>/maps` and `fdinfo` wherever they
-print a device. Lane A's next task.
+**Fixed, 2026-10-01:**
+- **A device number per live mount** (`vfs::dev_of`). It is small,
+  assigned at mount and reused after unmount, as Linux reuses an anonymous
+  device's minor. It is not `fs_id`, which must never be reused because it
+  keys the page cache and the lock tables.
+- **`FileMeta::dev`**, filled by the VFS from the mount a file was found
+  on.
+- **Who reports it:**
+  - Linux `stat` (`st_dev = makedev(0, dev)`) and `statx`
+    (`stx_dev_major`/`stx_dev_minor`);
+  - the native stat record, in its three reserved bytes `[9..12]`. libc
+    still has to read them: lane D, by message;
+  - `/proc/locks`;
+  - `/proc/<pid>/mountinfo`'s `major:minor`, which was the mount's index
+    and moved whenever an earlier mount went;
+  - `/proc/<pid>/maps` for a file-backed region, now with its offset,
+    inode and path as well.
+- **Tests:** `vfs`'s `device_numbers_self_test` (a scratch mount's files
+  report a device of their own, the number is reused, and the `dev_t`
+  survives glibc's `minor()`), and the `mountinfo` and `maps` render
+  tests.
+
+**Found doing it:** `A-LINUX-FSTAT-OF-A-FILE-WAS-MADE-UP`, the next entry.
 
 ### A-FIVE-NATIVE-FS-DOORS-SKIPPED-THEIR-GATE -- 2026-10-01 -- FIXED (lane A)
 
@@ -180509,6 +180527,34 @@ is a task of its own with a boot of its own. Lane A takes it after
 
 **Reproduce:** open a file, delete it, write through the handle: `NotFound`.
 On Linux the write succeeds and the data stays readable until the close.
+
+### A-LINUX-FSTAT-OF-A-FILE-WAS-MADE-UP -- 2026-10-01 -- FIXED the same day (lane A)
+
+**In short:** a Linux program asking about a file it had open got an
+answer the kernel made up. The size was 0, the permissions 0644, the owner
+root, the inode the handle's number, and every timestamp "now". Asking
+about the same file by name gave the true answer. glibc's `fstat` is
+`newfstatat(fd, "", AT_EMPTY_PATH)`, which reached the made-up answer, as
+did `statx` with `AT_EMPTY_PATH`.
+
+**Who it hit:**
+- anything that sizes a buffer or a mapping from `st_size` (`mmap` of
+  "an empty file");
+- `cp` and `install` copying a mode, which came out 0644, dropping
+  execute bits;
+- anything comparing `(st_dev, st_ino)` through a descriptor with the same
+  pair from a path, which never matched;
+- `make`-like tools reading `st_mtime` through a descriptor.
+
+**Where:** `syscall/linux.rs`'s `fill_stat_for_fd` and `fill_statx_for_fd`.
+They predate the VFS: an old `todo.txt` note says they "must report real
+inode numbers, sizes ... when a real VFS lands". The path-based `stat` was
+moved onto `FileMeta` then; these were not.
+
+**Fixed:** a `HandleKind::File` descriptor now answers with its file's
+metadata (`fs::handle::fstat`), through the same fill the path-based calls
+use. The made-up answer stays for descriptors with no file behind them:
+pipes, sockets, anonymous inodes.
 
 ## Lane B: new entries
 

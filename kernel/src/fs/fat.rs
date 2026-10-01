@@ -3329,6 +3329,7 @@ impl FileSystem for FatFs {
                     // closest stable per-file identifier.  Empty files
                     // (cluster 0) report 0 = "not available".
                     ino: u64::from(e.first_cluster),
+                    dev: 0,
                     created_ns,
                     modified_ns,
                     accessed_ns,

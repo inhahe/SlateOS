@@ -174456,6 +174456,18 @@ program that relies on a signal interrupting a blocking call benefits. Worth a r
 signal delivery is known to reach that loop; until then the polling is
 correct, only less exact.
 
+**Progress, 2026-10-01 -- the kernel half exists.** Lane A added
+`SYS_FS_FLOCK_HANDLE` (1094, commit `b108865ea`, on main with lane A's next
+publish): BSD `flock(2)` on a handle that waits *in the kernel* when
+`LOCK_NB` is absent, ends the wait with `EINTR` when a caught signal arrives,
+and restarts it under `SA_RESTART`, as Linux does. The Linux-ABI `flock(2)`
+waits for real too (it had answered `EWOULDBLOCK` even without `LOCK_NB`).
+Lane A has told lane D, whose `do_flock` can move onto 1094 and drop the nap
+loop. **Lane B's step, once that libc change is on main:** put `-w` back to
+util-linux's `setup_timer` + blocking `flock()` + `EINTR` check, delete the
+`LOCK_NB` polling, and re-run `scripts/flock-diff.sh` -- including a case that
+holds the lock past the deadline, which is the one the timer exists for.
+
 ## TD-B-LOCKFILE-IS-NOT-PROCMAILS (lane B, 2026-09-26) — **open**
 
 **In short:** `lockfile` -- the command scripts use to create a lock file

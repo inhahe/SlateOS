@@ -190,6 +190,17 @@ What is translated, as far as lane D knows:
 | `posix/src/narrow.rs`: the narrowing functions' checks | `math/math-narrow.h` | 2026-09-28, on `main` |
 | `posix/src/complex*.rs`: `clog10` | `math/s_clog10_template.c`, `x2y2m1` | 2026-09-28, on `main` |
 
+One more part, since this was raised, was written with glibc's source
+open, though not translated from it: `posix/src/regex/parse.rs`
+(2026-09-30) takes the order of glibc's `regcomp.c` checks -- which
+character is special where, which error a malformed interval gets -- from
+reading that file, and the oracle's 11,250 pairs of tokens then pin each
+rule. Its code is not glibc's: an explicit stack where glibc recurses, its
+own types, none of glibc's lines. Under **B** it would be derived again
+from the oracle's answers alone, which already fix every rule it has.
+(The matcher behind it, the rest of `posix/src/regex/`, follows the
+standard and owes glibc's code nothing.)
+
 (The character tables themselves -- which byte means which letter -- are
 facts read from glibc's data files and from running its converters, not
 code; they are not in question. And not everything follows glibc's

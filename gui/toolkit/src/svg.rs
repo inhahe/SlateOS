@@ -7,12 +7,17 @@
 //!
 //! - Basic shapes: rect, circle, ellipse, line, polyline, polygon
 //! - Path element with full command set (M, L, H, V, C, S, Q, T, A, Z)
-//! - Styling: fill, fill-rule, stroke, stroke-width, stroke-linecap,
-//!   stroke-linejoin, stroke-miterlimit, opacity, display, transforms -- as
-//!   presentation attributes or in a `style` attribute, which wins; a
-//!   `<style>` sheet's rules are not applied
+//! - Styling: fill, fill-rule, fill-opacity, stroke, stroke-width,
+//!   stroke-linecap, stroke-linejoin, stroke-miterlimit, stroke-opacity,
+//!   opacity, display, transforms -- as presentation attributes or in a
+//!   `style` attribute, which wins; a `<style>` sheet's rules are not applied
+//! - Gradients: a fill or stroke of `url(#id)` paints with the linear or
+//!   radial gradient of that id, wherever the document defines it (see the
+//!   `paint` module for what of them is drawn); a fallback colour after the
+//!   `url()` stands in for one that is missing
 //! - Definitions (`defs`, `symbol`, gradients, clip paths, masks, `style`) are
-//!   not drawn; nothing that refers to them (`use`, `url(#...)`) is supported
+//!   not drawn where they stand; `use`, clip paths, masks, patterns and
+//!   filters are not applied
 //! - Container elements: svg (with viewBox), g (with inheritance)
 //! - Color parsing: hex, named colors, rgb(), rgba(), none, transparent, currentColor
 //!
@@ -32,6 +37,10 @@
 use crate::color::Color;
 
 use core::f32::consts::PI;
+
+mod paint;
+
+use paint::{Defs, Gradient};
 
 // ─── Error Types ─────────────────────────────────────────────────────────────
 
@@ -77,6 +86,9 @@ pub enum SvgPaint {
     None,
     /// Inherit from parent context's foreground color ("currentColor").
     CurrentColor,
+    /// A gradient the document defines, named with `url(#id)`: its place in
+    /// the document's paint servers (`paint::Defs`).
+    Server(usize),
 }
 
 /// Parse an SVG color/paint string.
@@ -379,6 +391,35 @@ impl Transform {
             self.a * x + self.b * y + self.tx,
             self.c * x + self.d * y + self.ty,
         )
+    }
+
+    /// The transform that undoes this one, or `None` for one that flattens
+    /// the plane onto a line or a point (or holds a value that is not a
+    /// number), which nothing undoes.
+    #[must_use]
+    pub fn inverse(&self) -> Option<Self> {
+        let det = self.a * self.d - self.b * self.c;
+        if !det.is_finite() || det.abs() <= f32::EPSILON * f32::EPSILON {
+            return None;
+        }
+        let a = self.d / det;
+        let b = -self.b / det;
+        let c = -self.c / det;
+        let d = self.a / det;
+        let inverse = Self {
+            a,
+            b,
+            c,
+            d,
+            tx: -(a * self.tx + b * self.ty),
+            ty: -(c * self.tx + d * self.ty),
+        };
+        [
+            inverse.a, inverse.b, inverse.c, inverse.d, inverse.tx, inverse.ty,
+        ]
+        .iter()
+        .all(|v| v.is_finite())
+        .then_some(inverse)
     }
 }
 
@@ -964,8 +1005,12 @@ pub struct SvgStyle {
     /// At least 1, as SVG requires; a smaller value is not said.
     pub stroke_miterlimit: Option<f32>,
     pub opacity: f32,
-    pub fill_opacity: f32,
-    pub stroke_opacity: f32,
+    /// The fill's opacity, 0 to 1; `None` takes the parent's, as SVG's
+    /// `fill-opacity` is inherited. It was not, so a group's
+    /// `fill-opacity="0.5"` reached none of its shapes.
+    pub fill_opacity: Option<f32>,
+    /// The stroke's opacity, inherited the same way.
+    pub stroke_opacity: Option<f32>,
 }
 
 impl Default for SvgStyle {
@@ -979,8 +1024,8 @@ impl Default for SvgStyle {
             stroke_linejoin: None,
             stroke_miterlimit: None,
             opacity: 1.0,
-            fill_opacity: 1.0,
-            stroke_opacity: 1.0,
+            fill_opacity: None,
+            stroke_opacity: None,
         }
     }
 }
@@ -1055,6 +1100,8 @@ pub enum SvgNode {
 #[derive(Clone, Debug)]
 pub struct SvgDocument {
     pub root: SvgNode,
+    /// The gradients its fills and strokes name.
+    defs: Defs,
 }
 
 impl SvgDocument {
@@ -1066,8 +1113,23 @@ impl SvgDocument {
         let first = elements
             .first()
             .ok_or_else(|| SvgError::MalformedXml("empty document".into()))?;
-        let root = build_node(first)?;
-        Ok(Self { root })
+        // The gradients first, from the whole document: a shape may name one
+        // defined after it.
+        let viewport = first
+            .attr("viewBox")
+            .and_then(|s| parse_viewbox(s).ok())
+            .map_or_else(
+                || {
+                    (
+                        first.attr_f32("width").unwrap_or(300.0),
+                        first.attr_f32("height").unwrap_or(150.0),
+                    )
+                },
+                |(_, _, w, h)| (w, h),
+            );
+        let defs = Defs::collect(first, viewport);
+        let root = build_node(first, &defs)?;
+        Ok(Self { root, defs })
     }
 
     /// Get the viewBox (min_x, min_y, width, height).
@@ -1092,7 +1154,7 @@ impl SvgDocument {
     /// pixel, `[r, g, b, a]`, straight alpha, row by row.
     /// Uses 4x supersampling for anti-aliased edges.
     pub fn render(&self, width: u32, height: u32) -> Vec<u8> {
-        let mut renderer = SvgRenderer::new(width, height);
+        let mut renderer = SvgRenderer::new(width, height, &self.defs);
         let (vb_x, vb_y, vb_w, vb_h) = self.viewbox();
         let scale_x = width as f32 / vb_w;
         let scale_y = height as f32 / vb_h;
@@ -1150,39 +1212,77 @@ impl ResolvedStyle {
             line_join: style.stroke_linejoin.unwrap_or(self.line_join),
             miter_limit: style.stroke_miterlimit.unwrap_or(self.miter_limit),
             opacity: self.opacity * style.opacity,
-            fill_opacity: style.fill_opacity,
-            stroke_opacity: style.stroke_opacity,
+            fill_opacity: style.fill_opacity.unwrap_or(self.fill_opacity),
+            stroke_opacity: style.stroke_opacity.unwrap_or(self.stroke_opacity),
         }
     }
 
-    fn effective_fill_color(&self) -> Option<Color> {
+    /// The fill's paint and how opaque it is drawn, or `None` for no fill.
+    fn fill_paint(&self) -> Option<(SvgPaint, f32)> {
         match self.fill {
-            SvgPaint::Color(c) => {
-                let alpha = (c.a as f32 * self.opacity * self.fill_opacity) as u8;
-                Some(Color::rgba(c.r, c.g, c.b, alpha))
-            }
-            SvgPaint::CurrentColor => {
-                // Fallback to black for currentColor
-                let alpha = (255.0 * self.opacity * self.fill_opacity) as u8;
-                Some(Color::rgba(0, 0, 0, alpha))
-            }
             SvgPaint::None => None,
+            paint => Some((paint, self.opacity * self.fill_opacity)),
         }
     }
 
-    fn effective_stroke_color(&self) -> Option<Color> {
+    /// The stroke's paint and how opaque it is drawn, or `None` for none.
+    fn stroke_paint(&self) -> Option<(SvgPaint, f32)> {
         match self.stroke {
-            SvgPaint::Color(c) => {
-                let alpha = (c.a as f32 * self.opacity * self.stroke_opacity) as u8;
-                Some(Color::rgba(c.r, c.g, c.b, alpha))
-            }
-            SvgPaint::CurrentColor => {
-                let alpha = (255.0 * self.opacity * self.stroke_opacity) as u8;
-                Some(Color::rgba(0, 0, 0, alpha))
-            }
             SvgPaint::None => None,
+            paint => Some((paint, self.opacity * self.stroke_opacity)),
         }
     }
+}
+
+/// What a shape is filled or stroked with, ready to draw.
+enum Fill<'d> {
+    /// One colour, straight alpha.
+    Solid(Color),
+    /// A gradient: `inverse` takes a device pixel's centre into its space,
+    /// and its colours' alpha is drawn at `alpha` of itself.
+    Gradient {
+        gradient: &'d Gradient,
+        inverse: Transform,
+        alpha: f32,
+    },
+}
+
+/// `alpha` scaled by `share`, held to a byte.
+fn scaled_alpha(alpha: u8, share: f32) -> u8 {
+    // In 0..=255: a byte times a share held to 0..=1.
+    #[allow(
+        clippy::cast_possible_truncation,
+        clippy::cast_sign_loss,
+        reason = "a byte times a share in 0..=1"
+    )]
+    let scaled = (f32::from(alpha) * share.clamp(0.0, 1.0)) as u8;
+    scaled
+}
+
+/// The bounding box, in the user space `ctm` carries to device space, of
+/// the shape whose device outline is `subpaths` -- `x, y, width, height` --
+/// or `None` where `ctm` cannot be undone or the outline has no points.
+///
+/// What a gradient measured in `objectBoundingBox` units is laid over. Found
+/// from the outline already in device space rather than computed per kind of
+/// shape: the points mapped back are the shape's own, to the flattening's
+/// precision.
+fn user_bbox(subpaths: &[Subpath], ctm: Transform) -> Option<(f32, f32, f32, f32)> {
+    let inverse = ctm.inverse()?;
+    let (mut min_x, mut min_y) = (f32::INFINITY, f32::INFINITY);
+    let (mut max_x, mut max_y) = (f32::NEG_INFINITY, f32::NEG_INFINITY);
+    for subpath in subpaths {
+        for &(x, y) in &subpath.points {
+            let (ux, uy) = inverse.apply(x, y);
+            if ux.is_finite() && uy.is_finite() {
+                min_x = min_x.min(ux);
+                min_y = min_y.min(uy);
+                max_x = max_x.max(ux);
+                max_y = max_y.max(uy);
+            }
+        }
+    }
+    (min_x <= max_x && min_y <= max_y).then_some((min_x, min_y, max_x - min_x, max_y - min_y))
 }
 
 // ─── XML Parser (minimal, SVG-only) ─────────────────────────────────────────
@@ -1494,7 +1594,7 @@ fn nothing() -> SvgNode {
     }
 }
 
-fn build_node(elem: &XmlElement) -> Result<SvgNode, SvgError> {
+fn build_node(elem: &XmlElement, defs: &Defs) -> Result<SvgNode, SvgError> {
     // `display: none` takes the element and everything in it out of the
     // drawing, and a definition is not drawn where it stands.
     if NOT_DRAWN.contains(&elem.tag.as_str())
@@ -1503,18 +1603,22 @@ fn build_node(elem: &XmlElement) -> Result<SvgNode, SvgError> {
         return Ok(nothing());
     }
     match elem.tag.as_str() {
-        "svg" => build_svg(elem),
-        "g" => build_group(elem),
-        "rect" => build_rect(elem),
-        "circle" => build_circle(elem),
-        "ellipse" => build_ellipse(elem),
-        "line" => build_line(elem),
-        "polyline" => build_polyline(elem),
-        "polygon" => build_polygon(elem),
-        "path" => build_path(elem),
+        "svg" => build_svg(elem, defs),
+        "g" => build_group(elem, defs),
+        "rect" => build_rect(elem, defs),
+        "circle" => build_circle(elem, defs),
+        "ellipse" => build_ellipse(elem, defs),
+        "line" => build_line(elem, defs),
+        "polyline" => build_polyline(elem, defs),
+        "polygon" => build_polygon(elem, defs),
+        "path" => build_path(elem, defs),
         _ => {
             // Unknown elements treated as groups (e.g., <defs>, <title>)
-            let children: Result<Vec<_>, _> = elem.children.iter().map(build_node).collect();
+            let children: Result<Vec<_>, _> = elem
+                .children
+                .iter()
+                .map(|child| build_node(child, defs))
+                .collect();
             Ok(SvgNode::Group {
                 transform: Transform::IDENTITY,
                 style: SvgStyle::default(),
@@ -1524,7 +1628,7 @@ fn build_node(elem: &XmlElement) -> Result<SvgNode, SvgError> {
     }
 }
 
-fn build_svg(elem: &XmlElement) -> Result<SvgNode, SvgError> {
+fn build_svg(elem: &XmlElement, defs: &Defs) -> Result<SvgNode, SvgError> {
     let width = elem.attr_f32("width");
     let height = elem.attr_f32("height");
     let view_box = elem.attr("viewBox").and_then(|s| parse_viewbox(s).ok());
@@ -1532,7 +1636,7 @@ fn build_svg(elem: &XmlElement) -> Result<SvgNode, SvgError> {
     let children: Vec<SvgNode> = elem
         .children
         .iter()
-        .map(build_node)
+        .map(|child| build_node(child, defs))
         .collect::<Result<_, _>>()?;
     // Presentation attributes on the root element -- `fill="none"
     // stroke="currentColor"` is how most icon sets are written -- are inherited
@@ -1540,7 +1644,7 @@ fn build_svg(elem: &XmlElement) -> Result<SvgNode, SvgError> {
     // such icon drew its outlines as solid black shapes: the default fill,
     // unstroked. A group carrying them gives them the inheritance a `<g>`
     // already has, without a second kind of node to walk.
-    let style = parse_style_attrs(elem)?;
+    let style = parse_style_attrs(elem, defs)?;
     let children = if style == SvgStyle::default() {
         children
     } else {
@@ -1558,14 +1662,18 @@ fn build_svg(elem: &XmlElement) -> Result<SvgNode, SvgError> {
     })
 }
 
-fn build_group(elem: &XmlElement) -> Result<SvgNode, SvgError> {
+fn build_group(elem: &XmlElement, defs: &Defs) -> Result<SvgNode, SvgError> {
     let transform = elem
         .attr("transform")
         .map(parse_transform)
         .transpose()?
         .unwrap_or(Transform::IDENTITY);
-    let style = parse_style_attrs(elem)?;
-    let children: Result<Vec<_>, _> = elem.children.iter().map(build_node).collect();
+    let style = parse_style_attrs(elem, defs)?;
+    let children: Result<Vec<_>, _> = elem
+        .children
+        .iter()
+        .map(|child| build_node(child, defs))
+        .collect();
     Ok(SvgNode::Group {
         transform,
         style,
@@ -1573,7 +1681,7 @@ fn build_group(elem: &XmlElement) -> Result<SvgNode, SvgError> {
     })
 }
 
-fn build_rect(elem: &XmlElement) -> Result<SvgNode, SvgError> {
+fn build_rect(elem: &XmlElement, defs: &Defs) -> Result<SvgNode, SvgError> {
     // One radius given is both, as SVG has it: `rx="2"` alone rounds the
     // corners, where reading the missing `ry` as 0 left them square.
     let (rx, ry) = match (elem.attr_f32("rx"), elem.attr_f32("ry")) {
@@ -1593,11 +1701,11 @@ fn build_rect(elem: &XmlElement) -> Result<SvgNode, SvgError> {
             .map(parse_transform)
             .transpose()?
             .unwrap_or(Transform::IDENTITY),
-        style: parse_style_attrs(elem)?,
+        style: parse_style_attrs(elem, defs)?,
     })
 }
 
-fn build_circle(elem: &XmlElement) -> Result<SvgNode, SvgError> {
+fn build_circle(elem: &XmlElement, defs: &Defs) -> Result<SvgNode, SvgError> {
     Ok(SvgNode::Circle {
         cx: elem.attr_f32("cx").unwrap_or(0.0),
         cy: elem.attr_f32("cy").unwrap_or(0.0),
@@ -1607,11 +1715,11 @@ fn build_circle(elem: &XmlElement) -> Result<SvgNode, SvgError> {
             .map(parse_transform)
             .transpose()?
             .unwrap_or(Transform::IDENTITY),
-        style: parse_style_attrs(elem)?,
+        style: parse_style_attrs(elem, defs)?,
     })
 }
 
-fn build_ellipse(elem: &XmlElement) -> Result<SvgNode, SvgError> {
+fn build_ellipse(elem: &XmlElement, defs: &Defs) -> Result<SvgNode, SvgError> {
     Ok(SvgNode::Ellipse {
         cx: elem.attr_f32("cx").unwrap_or(0.0),
         cy: elem.attr_f32("cy").unwrap_or(0.0),
@@ -1622,11 +1730,11 @@ fn build_ellipse(elem: &XmlElement) -> Result<SvgNode, SvgError> {
             .map(parse_transform)
             .transpose()?
             .unwrap_or(Transform::IDENTITY),
-        style: parse_style_attrs(elem)?,
+        style: parse_style_attrs(elem, defs)?,
     })
 }
 
-fn build_line(elem: &XmlElement) -> Result<SvgNode, SvgError> {
+fn build_line(elem: &XmlElement, defs: &Defs) -> Result<SvgNode, SvgError> {
     Ok(SvgNode::Line {
         x1: elem.attr_f32("x1").unwrap_or(0.0),
         y1: elem.attr_f32("y1").unwrap_or(0.0),
@@ -1637,11 +1745,11 @@ fn build_line(elem: &XmlElement) -> Result<SvgNode, SvgError> {
             .map(parse_transform)
             .transpose()?
             .unwrap_or(Transform::IDENTITY),
-        style: parse_style_attrs(elem)?,
+        style: parse_style_attrs(elem, defs)?,
     })
 }
 
-fn build_polyline(elem: &XmlElement) -> Result<SvgNode, SvgError> {
+fn build_polyline(elem: &XmlElement, defs: &Defs) -> Result<SvgNode, SvgError> {
     let points = elem
         .attr("points")
         .map(parse_points)
@@ -1654,11 +1762,11 @@ fn build_polyline(elem: &XmlElement) -> Result<SvgNode, SvgError> {
             .map(parse_transform)
             .transpose()?
             .unwrap_or(Transform::IDENTITY),
-        style: parse_style_attrs(elem)?,
+        style: parse_style_attrs(elem, defs)?,
     })
 }
 
-fn build_polygon(elem: &XmlElement) -> Result<SvgNode, SvgError> {
+fn build_polygon(elem: &XmlElement, defs: &Defs) -> Result<SvgNode, SvgError> {
     let points = elem
         .attr("points")
         .map(parse_points)
@@ -1671,11 +1779,11 @@ fn build_polygon(elem: &XmlElement) -> Result<SvgNode, SvgError> {
             .map(parse_transform)
             .transpose()?
             .unwrap_or(Transform::IDENTITY),
-        style: parse_style_attrs(elem)?,
+        style: parse_style_attrs(elem, defs)?,
     })
 }
 
-fn build_path(elem: &XmlElement) -> Result<SvgNode, SvgError> {
+fn build_path(elem: &XmlElement, defs: &Defs) -> Result<SvgNode, SvgError> {
     let d = elem.attr("d").unwrap_or("");
     let commands = parse_path_data(d)?;
     Ok(SvgNode::Path {
@@ -1685,7 +1793,7 @@ fn build_path(elem: &XmlElement) -> Result<SvgNode, SvgError> {
             .map(parse_transform)
             .transpose()?
             .unwrap_or(Transform::IDENTITY),
-        style: parse_style_attrs(elem)?,
+        style: parse_style_attrs(elem, defs)?,
     })
 }
 
@@ -1733,27 +1841,45 @@ fn length(value: &str) -> Option<f32> {
 /// A paint the element says, if it says one.
 ///
 /// A presentation attribute this renderer cannot read is an error, as it has
-/// always been. A declaration in `style` that it cannot read -- a gradient's
-/// `url(#...)`, a colour function it does not know -- is ignored, as a browser
-/// ignores it, and the property is inherited: one unreadable declaration among
-/// the dozen Inkscape writes should not cost the whole drawing.
-fn paint_property(elem: &XmlElement, name: &str) -> Result<Option<SvgPaint>, SvgError> {
+/// always been. A declaration in `style` that it cannot read -- a colour
+/// function it does not know, a hex colour with a stray letter -- is ignored,
+/// as a browser ignores it, and the property is inherited: one unreadable
+/// declaration among the dozen Inkscape writes should not cost the whole
+/// drawing.
+///
+/// A `url(#id)` is always read: as the gradient of that id, else as the
+/// fallback colour written after it, else -- SVG 2's answer for a reference
+/// that leads nowhere -- as no paint at all.
+fn paint_property(
+    elem: &XmlElement,
+    name: &str,
+    defs: &Defs,
+) -> Result<Option<SvgPaint>, SvgError> {
+    // A paint server -- `url(#id)`, a fallback colour after it -- is named,
+    // not spelled, so it is looked up among the document's definitions.
+    let paint = |value: &str| {
+        if value.trim_start().starts_with("url(") {
+            Ok(defs.paint(value))
+        } else {
+            parse_color(value)
+        }
+    };
     if let Some(value) = elem.attr("style").and_then(|style| declared(style, name)) {
-        if let Ok(paint) = parse_color(value) {
-            return Ok(Some(paint));
+        if let Ok(found) = paint(value) {
+            return Ok(Some(found));
         }
     }
-    elem.attr(name).map(parse_color).transpose()
+    elem.attr(name).map(paint).transpose()
 }
 
-fn parse_style_attrs(elem: &XmlElement) -> Result<SvgStyle, SvgError> {
-    let fill = paint_property(elem, "fill")?;
-    let stroke = paint_property(elem, "stroke")?;
+fn parse_style_attrs(elem: &XmlElement, defs: &Defs) -> Result<SvgStyle, SvgError> {
+    let fill = paint_property(elem, "fill", defs)?;
+    let stroke = paint_property(elem, "stroke", defs)?;
     let stroke_width = property(elem, "stroke-width").and_then(length);
     let number = |name: &str| property(elem, name).and_then(|v| v.parse::<f32>().ok());
     let opacity = number("opacity").unwrap_or(1.0);
-    let fill_opacity = number("fill-opacity").unwrap_or(1.0);
-    let stroke_opacity = number("stroke-opacity").unwrap_or(1.0);
+    let fill_opacity = number("fill-opacity").map(|o| o.clamp(0.0, 1.0));
+    let stroke_opacity = number("stroke-opacity").map(|o| o.clamp(0.0, 1.0));
     // Keywords a renderer does not know are ignored, as browsers ignore them:
     // the property is then not said here and is inherited.
     let fill_rule = keyword(
@@ -2700,7 +2826,7 @@ struct FillEdge {
 }
 
 /// Software rasterizer that renders SVG to a pixel buffer.
-struct SvgRenderer {
+struct SvgRenderer<'d> {
     width: u32,
     height: u32,
     /// 4 bytes per pixel, `[r, g, b, a]`, straight alpha, row by row -- what
@@ -2709,10 +2835,12 @@ struct SvgRenderer {
     /// Sub-scanlines per pixel row, for anti-aliasing vertically; coverage
     /// across a row is measured exactly.
     ss_factor: u32,
+    /// The document's gradients, for a paint that names one.
+    defs: &'d Defs,
 }
 
-impl SvgRenderer {
-    fn new(width: u32, height: u32) -> Self {
+impl<'d> SvgRenderer<'d> {
+    fn new(width: u32, height: u32, defs: &'d Defs) -> Self {
         // A size that does not fit in `usize` could not be allocated even if it
         // were computed, so an empty buffer is the honest answer rather than a
         // wrapped one. Every write goes through `pixel_mut`, which checks the
@@ -2729,6 +2857,7 @@ impl SvgRenderer {
             height,
             buffer: vec![0u8; size],
             ss_factor: 4,
+            defs,
         }
     }
 
@@ -2848,12 +2977,18 @@ impl SvgRenderer {
         if subpaths.is_empty() {
             return;
         }
-        if let Some(fill) = style.effective_fill_color() {
+        if let Some(fill) = style
+            .fill_paint()
+            .and_then(|(paint, alpha)| self.fill_for(paint, alpha, subpaths, transform))
+        {
             let outlines: Vec<&[(f32, f32)]> =
                 subpaths.iter().map(|s| s.points.as_slice()).collect();
-            self.fill_shape(&outlines, style.fill_rule, fill);
+            self.fill_shape(&outlines, style.fill_rule, &fill);
         }
-        if let Some(stroke) = style.effective_stroke_color() {
+        if let Some(stroke) = style
+            .stroke_paint()
+            .and_then(|(paint, alpha)| self.fill_for(paint, alpha, subpaths, transform))
+        {
             let geometry = StrokeGeometry {
                 width: style.stroke_width * transform.length_scale(),
                 cap: style.line_cap,
@@ -2862,7 +2997,50 @@ impl SvgRenderer {
             };
             let polygons = stroke_polygons(subpaths, geometry);
             let outlines: Vec<&[(f32, f32)]> = polygons.iter().map(Vec::as_slice).collect();
-            self.fill_shape(&outlines, FillRule::NonZero, stroke);
+            self.fill_shape(&outlines, FillRule::NonZero, &stroke);
+        }
+    }
+
+    /// What `paint` at `alpha` of itself draws on the shape whose device
+    /// outline is `subpaths`, carried there by `ctm` -- or `None` where it
+    /// draws nothing: a gradient measured against a shape with no box, or
+    /// laid out by a transform that flattens it.
+    ///
+    /// `currentColor` is black, as it always was here: nothing tells this
+    /// renderer a colour to stand for it.
+    fn fill_for(
+        &self,
+        paint: SvgPaint,
+        alpha: f32,
+        subpaths: &[Subpath],
+        ctm: Transform,
+    ) -> Option<Fill<'d>> {
+        match paint {
+            SvgPaint::None => None,
+            SvgPaint::Color(c) => Some(Fill::Solid(Color::rgba(
+                c.r,
+                c.g,
+                c.b,
+                scaled_alpha(c.a, alpha),
+            ))),
+            SvgPaint::CurrentColor => {
+                Some(Fill::Solid(Color::rgba(0, 0, 0, scaled_alpha(255, alpha))))
+            }
+            SvgPaint::Server(index) => {
+                let gradient = self.defs.gradient(index)?;
+                // The box only where the gradient is measured against it:
+                // finding it maps every point back to user space.
+                let bbox = match gradient.units {
+                    paint::Units::ObjectBoundingBox => user_bbox(subpaths, ctm)?,
+                    paint::Units::UserSpaceOnUse => (0.0, 0.0, 0.0, 0.0),
+                };
+                let inverse = gradient.device_to_gradient(ctm, bbox)?;
+                Some(Fill::Gradient {
+                    gradient,
+                    inverse,
+                    alpha: alpha.clamp(0.0, 1.0),
+                })
+            }
         }
     }
 
@@ -2874,8 +3052,12 @@ impl SvgRenderer {
     /// the rule makes it one, and a pixel two outlines overlap is covered once
     /// rather than blended twice. Each sub-scanline's crossings are found from
     /// the edges it passes through, which a list sorted by top keeps short.
-    fn fill_shape(&mut self, outlines: &[&[(f32, f32)]], rule: FillRule, color: Color) {
-        if self.buffer.is_empty() || color.a == 0 {
+    fn fill_shape(&mut self, outlines: &[&[(f32, f32)]], rule: FillRule, fill: &Fill<'_>) {
+        let invisible = match fill {
+            Fill::Solid(color) => color.a == 0,
+            Fill::Gradient { alpha, .. } => *alpha <= 0.0,
+        };
+        if self.buffer.is_empty() || invisible {
             return;
         }
         let mut edges: Vec<FillEdge> = Vec::new();
@@ -2976,6 +3158,23 @@ impl SvgRenderer {
                 }
             }
             for (col, &cov) in (first_col..).zip(&coverage) {
+                if cov <= 0.0 {
+                    continue;
+                }
+                // The colour here: the one colour, or the gradient's at this
+                // pixel's centre.
+                let color = match fill {
+                    Fill::Solid(color) => *color,
+                    Fill::Gradient {
+                        gradient,
+                        inverse,
+                        alpha,
+                    } => {
+                        let (gx, gy) = inverse.apply(col as f32 + 0.5, row as f32 + 0.5);
+                        let c = gradient.color_at(gx, gy);
+                        Color::rgba(c.r, c.g, c.b, scaled_alpha(c.a, *alpha))
+                    }
+                };
                 // `+ 0.5` and truncate, not `.round()`: on the x86-64
                 // baseline `round` is a call into libm (`roundf`), not an
                 // instruction, and this runs once per pixel -- lane F measured
@@ -3941,16 +4140,32 @@ mod tests {
     #[test]
     fn an_unreadable_style_declaration_is_ignored() {
         let doc = SvgDocument::parse(
-            r#"<svg viewBox="0 0 10 10" fill="blue"><rect width="10" height="10" style="fill:url(#g)"/></svg>"#,
+            r#"<svg viewBox="0 0 10 10" fill="blue"><rect width="10" height="10" style="fill:#00z"/></svg>"#,
         )
         .unwrap();
         assert_eq!(&doc.render(10, 10)[..4], &[0, 0, 255, 255]);
         assert!(
             SvgDocument::parse(
-                r#"<svg viewBox="0 0 10 10"><rect width="10" height="10" fill="url(#g)"/></svg>"#
+                r##"<svg viewBox="0 0 10 10"><rect width="10" height="10" fill="#00z"/></svg>"##
             )
             .is_err()
         );
+    }
+
+    /// **A paint server named in `style` is read as one**: its fallback where
+    /// it is missing, and else -- as SVG 2 says -- nothing, not the inherited
+    /// paint.
+    #[test]
+    fn a_paint_server_in_the_style_attribute_is_read() {
+        let render = |style: &str| {
+            let svg = format!(
+                r#"<svg viewBox="0 0 10 10" fill="blue"><rect width="10" height="10" style="{style}"/></svg>"#
+            );
+            let pixel = SvgDocument::parse(&svg).unwrap().render(10, 10);
+            [pixel[0], pixel[1], pixel[2], pixel[3]]
+        };
+        assert_eq!(render("fill:url(#g) lime"), [0, 255, 0, 255]);
+        assert_eq!(render("fill:url(#g)"), [0, 0, 0, 0]);
     }
 
     /// **Definitions are not drawn where they stand**, and neither is

@@ -2129,6 +2129,18 @@ live.
   fixed that opening a folder in the toolkit's folder picker chose it, a
   fix the seven lane E applications already using the picker share.
 
+- `[C]` **Icons' gradients are drawn** (`roadmap-detailed.md` → *SVG
+  rendering support*) -- done 2026-10-01. The toolkit's SVG renderer paints a
+  fill or stroke of `url(#id)` with that linear or radial gradient, wherever
+  the document defines it: both units, `gradientTransform`, pad, reflect and
+  repeat, a focal point, one gradient inheriting another's stops through
+  `href`, and the fallback colour after a missing one; stops mix as SVG 2
+  says, unpremultiplied. `fill-opacity` and `stroke-opacity` are inherited
+  from groups, which they were not. Found on the way and fixed: `rotate()`
+  turned the drawing the wrong way and `matrix()` read its numbers
+  transposed. Still not drawn: clip paths, masks, patterns, `use`/`symbol`
+  and `<style>` sheets.
+
 - `[C]` **The run box wears the theme's window frame** (`design-decisions.md`
   §1461) -- done 2026-10-01. `desktop::dialog_frame` draws a shell dialog's
   frame from the window-decorations axis -- its title bar, title, close button,

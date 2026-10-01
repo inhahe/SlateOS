@@ -1409,6 +1409,7 @@ pub const fn linux_errno_for(e: KernelError) -> i32 {
         KernelError::ResourceExhausted => errno::ENFILE,
         KernelError::PermissionDenied => errno::EACCES,
         KernelError::InvalidCapability => errno::EPERM,
+        KernelError::NotPermitted => errno::EPERM,
         KernelError::NotFound => errno::ENOENT,
         KernelError::AlreadyExists => errno::EEXIST,
         KernelError::NotADirectory => errno::ENOTDIR,
@@ -1541,54 +1542,16 @@ fn linux_from_futex_wait(res: SyscallResult) -> SyscallResult {
     }
 }
 
-/// Recover a [`KernelError`] from its stable integer code.
+/// Recover a [`KernelError`] from its stable integer code:
+/// [`KernelError::from_code`].
 ///
-/// This is the inverse of `KernelError::code()`.  Returns `None` if
-/// the code does not name any known variant.
+/// Until 2026-10-01 this was a `match` of its own, which twelve variants added
+/// after it never reached (`BufferTooSmall`, `NoSuchSyscall`, `StaleHandle`,
+/// `NoAttribute` and the eight network errors): [`linux_from_native`] gave a
+/// Linux caller `EINVAL` for each. The list is now the enum's own.
 #[must_use]
 pub const fn kernel_error_from_code(code: i32) -> Option<KernelError> {
-    match code {
-        -1 => Some(KernelError::InternalError),
-        -2 => Some(KernelError::NotSupported),
-        -3 => Some(KernelError::InvalidArgument),
-        -4 => Some(KernelError::WouldBlock),
-        -5 => Some(KernelError::Cancelled),
-        -6 => Some(KernelError::TimedOut),
-        -7 => Some(KernelError::Deadlock),
-        -8 => Some(KernelError::Interrupted),
-        -100 => Some(KernelError::OutOfMemory),
-        -101 => Some(KernelError::InvalidAddress),
-        -102 => Some(KernelError::PageFault),
-        -103 => Some(KernelError::BadAlignment),
-        -200 => Some(KernelError::NoSuchProcess),
-        -201 => Some(KernelError::InvalidExecutable),
-        -202 => Some(KernelError::ProcessExited),
-        -203 => Some(KernelError::NoChildProcess),
-        -300 => Some(KernelError::ChannelClosed),
-        -301 => Some(KernelError::ChannelFull),
-        -302 => Some(KernelError::MessageTooLarge),
-        -303 => Some(KernelError::Overflow),
-        -304 => Some(KernelError::ResourceExhausted),
-        -400 => Some(KernelError::PermissionDenied),
-        -401 => Some(KernelError::InvalidCapability),
-        -500 => Some(KernelError::NotFound),
-        -501 => Some(KernelError::AlreadyExists),
-        -502 => Some(KernelError::NotADirectory),
-        -503 => Some(KernelError::IsADirectory),
-        -504 => Some(KernelError::DiskFull),
-        -505 => Some(KernelError::InvalidHandle),
-        -506 => Some(KernelError::TooManyLinks),
-        -507 => Some(KernelError::NotEmpty),
-        -508 => Some(KernelError::CorruptedData),
-        -509 => Some(KernelError::ReadOnlyFilesystem),
-        -510 => Some(KernelError::TooManyOpenFiles),
-        -511 => Some(KernelError::FileTooLarge),
-        -512 => Some(KernelError::CrossDevice),
-        -600 => Some(KernelError::IoError),
-        -601 => Some(KernelError::NoSuchDevice),
-        -602 => Some(KernelError::DeviceBusy),
-        _ => None,
-    }
+    KernelError::from_code(code)
 }
 
 /// Build a Linux-style error result with the given errno.
@@ -55047,12 +55010,26 @@ fn self_test_timespec_and_marshalling() -> crate::error::KernelResult<()> {
         return Err(KernelError::InternalError);
     }
 
-    // (12) kernel_error_from_code round-trips.
+    // (12) kernel_error_from_code round-trips: every variant, and by its
+    // number the ones the hand-kept list it replaced had missed.
+    for &e in KernelError::ALL {
+        if kernel_error_from_code(e.code()) != Some(e) {
+            serial_println!("[syscall/linux]   FAIL: {:?} does not round-trip", e);
+            return Err(KernelError::InternalError);
+        }
+    }
     let codes = [
         (-2_i32, KernelError::NotSupported),
         (-3, KernelError::InvalidArgument),
+        (-9, KernelError::BufferTooSmall),
+        (-10, KernelError::NoSuchSyscall),
+        (-402, KernelError::NotPermitted),
         (-500, KernelError::NotFound),
         (-505, KernelError::InvalidHandle),
+        (-513, KernelError::StaleHandle),
+        (-514, KernelError::NoAttribute),
+        (-700, KernelError::ConnectionRefused),
+        (-707, KernelError::NoAddress),
     ];
     for (code, expected) in codes {
         match kernel_error_from_code(code) {
@@ -55071,6 +55048,14 @@ fn self_test_timespec_and_marshalling() -> crate::error::KernelResult<()> {
     // Unknown codes return None.
     if kernel_error_from_code(-9999).is_some() {
         serial_println!("[syscall/linux]   FAIL: unknown code mapped to Some(_)");
+        return Err(KernelError::InternalError);
+    }
+    // What a missing one cost: a native `NoAttribute` reached a Linux caller
+    // as EINVAL rather than ENODATA.
+    if linux_from_native(SyscallResult::err(KernelError::NoAttribute)).value
+        != i64::from(errno::ENODATA).wrapping_neg()
+    {
+        serial_println!("[syscall/linux]   FAIL: a native NoAttribute is not ENODATA");
         return Err(KernelError::InternalError);
     }
 

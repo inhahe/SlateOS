@@ -17,6 +17,8 @@
 
 use crate::style::Edges;
 
+pub mod grid;
+
 /// A 2D size.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct Size {

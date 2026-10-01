@@ -48,3 +48,38 @@ with a pointer here.
 §1043 (answering B-Q9) makes genuine Oils the default shell once it runs on
 SlateOS. When lane B has it building, a separate request will ask for the
 default `sh` and login shell to point at it.
+
+## The names lane B keeps -- first batch (2026-10-01)
+
+Item 3's list begins. Each line is in the form your manifest already reads
+(`ranlib = ar`), and each producer must itself be staged (item 2) for its
+line to mean anything -- none of these five is on the image today:
+
+```
+gunzip = gzip
+zcat = gzip
+gzcat = gzip
+clear = tput
+reset = tput
+tset = tput
+groupadd = useradd
+groupdel = useradd
+groupmod = useradd
+userdel = useradd
+usermod = useradd
+w = who
+unzip = zip
+```
+
+Why these: each program dispatches on its invocation name, each name's
+branch is implemented and tested in the crate, and each set of siblings
+needs the same permissions as the program it lives in (the `useradd`
+family all edit `/etc/users.yaml` and the group files), so §1045's default
+-- the same file under a second name -- holds for all of them.
+`scripts/multicall-aliases.py` now counts a `name = producer` line as
+installing that producer's personality (it reports `ranlib`, `strip` and
+`killall` as installed already), so as these lines land the ledger in
+`scripts/multicall-aliases-baseline.txt` shrinks; lane B regenerates it
+after merging. More batches follow as the triage reaches the remaining
+names (`known-issues.md` ->
+`TD-B-ONE-HUNDRED-AND-SEVENTY-TWO-COMMAND-NAMES-NOBODY-CAN-RUN`).

@@ -2371,7 +2371,16 @@ config needs; `grub-editenv`, the one that did real work, edited a file
 GRUB's way but printed what GRUB's does not. If "boot the other system once"
 is ever wanted, it belongs in the installer's GRUB code, by setting
 `next_entry` in the grubenv it has found, with GRUB's own `grub-editenv`
-ported if a command is wanted too. The ledger is 118 after the three crates.
+ported if a command is wanted too. The ledger was 118 after the three crates,
+and is **115**: `ranlib`, `strip` and `killall` were never unreachable --
+lane D's manifest installs them (`ranlib = ar`) -- but the checker did not
+read the manifest until 2026-10-01. **Kept, first batch** -- installed as the
+same file, asked of lane D with the lines to add
+(`requests/b-d-stage-every-program-that-builds.md`): `gunzip`, `zcat`,
+`gzcat` (gzip); `clear`, `reset`, `tset` (tput); `groupadd`, `groupdel`,
+`groupmod`, `userdel`, `usermod` (useradd); `w` (who); `unzip` (zip). Each is
+implemented and tested in its crate and needs no permission its program
+lacks; they leave the ledger when the lines land.
 
 **The 9 new shadowed pairs were the urgent half**, because a shadowed name is
 two implementations that can disagree with the winner picked by packaging:

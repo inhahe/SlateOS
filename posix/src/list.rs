@@ -5,12 +5,13 @@
 //!
 //! Every growth can fail and says so: [`List::push`] and the rest return
 //! [`NoMem`] rather than aborting, because the C functions built on a list
-//! (`regcomp`, `regexec`) answer an exhausted heap with an error code, as the
-//! standard has them do.
+//! (`regcomp`, `glob`, `getaddrinfo`, `wordexp`) answer an exhausted heap
+//! with an error code, as the standard has them do -- each turns `NoMem`
+//! into its own.
 //!
-//! glob.rs, gai.rs and wordexp.rs each carry a private list of their own,
-//! written before this one; known-issues.md ->
-//! D-POSIX-PRIVATE-GROWABLE-ARRAYS has them move onto it.
+//! Until 2026-09-30 glob.rs, gai.rs and wordexp.rs each carried a private
+//! list of its own, three copies of the same unsafe code
+//! (known-issues.md -> D-POSIX-PRIVATE-GROWABLE-ARRAYS).
 
 use core::ptr::NonNull;
 
@@ -130,6 +131,32 @@ impl<T> List<T> {
     pub(crate) fn clear(&mut self) {
         self.truncate(0);
     }
+
+    /// Every element of `other` moved onto the end of this list, in order.
+    /// All or nothing: when there is no room, nothing moves, and `other` --
+    /// and so what it held -- is dropped.
+    pub(crate) fn append(&mut self, mut other: Self) -> Result<(), NoMem> {
+        let n = other.len;
+        if n == 0 {
+            return Ok(());
+        }
+        self.reserve(n)?;
+        // SAFETY: room for `n` reserved past this list's elements; `other`'s
+        // `n` are initialised, in a block of its own, and move bytewise --
+        // `other` then counts none, so its drop frees the block alone.
+        unsafe { core::ptr::copy_nonoverlapping(other.ptr, self.ptr.add(self.len), n) };
+        self.len = self.len.wrapping_add(n);
+        other.len = 0;
+        Ok(())
+    }
+
+    /// The elements, handed over: their block (NULL for a list that never
+    /// had one) and their number. The caller owns both now: it drops the
+    /// elements, if they need it, and frees the block with `free`.
+    pub(crate) fn into_raw(self) -> (*mut T, usize) {
+        let me = core::mem::ManuallyDrop::new(self);
+        (me.ptr, me.len)
+    }
 }
 
 impl<T: Copy> List<T> {
@@ -146,6 +173,11 @@ impl<T: Copy> List<T> {
 
     /// `s`'s elements at the end.
     pub(crate) fn extend_from_slice(&mut self, s: &[T]) -> Result<(), NoMem> {
+        if s.is_empty() {
+            // Nothing to copy -- and a list that has never grown has no
+            // block, where even a copy of nothing needs one.
+            return Ok(());
+        }
         self.reserve(s.len())?;
         // SAFETY: room for `s` reserved past the initialised elements; a
         // borrowed `s` cannot be this list's own storage, which `&mut self`
@@ -168,6 +200,56 @@ impl<T: Copy> List<T> {
             self.len = self.len.wrapping_add(1);
         }
         Ok(())
+    }
+}
+
+/// A list's elements taken out in order (`for x in list`); those not
+/// taken are dropped with the iterator, and the block freed.
+pub(crate) struct IntoIter<T> {
+    ptr: *mut T,
+    len: usize,
+    at: usize,
+}
+
+impl<T> Iterator for IntoIter<T> {
+    type Item = T;
+
+    fn next(&mut self) -> Option<T> {
+        if self.at >= self.len {
+            return None;
+        }
+        // SAFETY: element `at` of the block `into_raw` handed over:
+        // initialised and not yet taken, so read out exactly once.
+        let v = unsafe { self.ptr.add(self.at).read() };
+        self.at = self.at.wrapping_add(1);
+        Some(v)
+    }
+
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        let n = self.len.saturating_sub(self.at);
+        (n, Some(n))
+    }
+}
+
+impl<T> Drop for IntoIter<T> {
+    fn drop(&mut self) {
+        while self.at < self.len {
+            // SAFETY: element `at`, initialised and not taken: dropped once.
+            unsafe { self.ptr.add(self.at).drop_in_place() };
+            self.at = self.at.wrapping_add(1);
+        }
+        // SAFETY: the list's own block, or NULL.
+        unsafe { crate::malloc::free(self.ptr.cast()) };
+    }
+}
+
+impl<T> IntoIterator for List<T> {
+    type Item = T;
+    type IntoIter = IntoIter<T>;
+
+    fn into_iter(self) -> IntoIter<T> {
+        let (ptr, len) = self.into_raw();
+        IntoIter { ptr, len, at: 0 }
     }
 }
 
@@ -207,6 +289,7 @@ unsafe impl<T: Sync> Sync for List<T> {}
 #[cfg(test)]
 mod tests {
     use super::*;
+    extern crate std;
 
     #[test]
     fn grows_pops_and_truncates() {
@@ -226,6 +309,9 @@ mod tests {
 
     #[test]
     fn filled_resized_and_extended() {
+        let mut e: List<u8> = List::new();
+        e.extend_from_slice(b"").unwrap();
+        assert!(e.is_empty(), "nothing, onto a list with no block yet");
         let mut l = List::filled(3, 7u8).unwrap();
         l.extend_from_slice(b"ab").unwrap();
         assert_eq!(&l[..], b"\x07\x07\x07ab");
@@ -254,6 +340,94 @@ mod tests {
             assert_eq!(DROPPED.load(Ordering::Relaxed), 2);
         }
         assert_eq!(DROPPED.load(Ordering::Relaxed), 5);
+    }
+
+    /// `append` moves every element over, in order, and owns them after:
+    /// each dropped once, by the list it moved to.
+    #[test]
+    fn append_moves_everything_in_order_and_once() {
+        use core::sync::atomic::{AtomicUsize, Ordering};
+        static DROPPED: AtomicUsize = AtomicUsize::new(0);
+        struct D(u32);
+        impl Drop for D {
+            fn drop(&mut self) {
+                DROPPED.fetch_add(1, Ordering::Relaxed);
+            }
+        }
+        let mut a = List::new();
+        let mut b = List::new();
+        for i in 0..3 {
+            a.push(D(i)).unwrap();
+        }
+        for i in 3..40 {
+            b.push(D(i)).unwrap();
+        }
+        a.append(b).unwrap();
+        assert_eq!(
+            DROPPED.load(Ordering::Relaxed),
+            0,
+            "nothing dropped by the move"
+        );
+        let order: std::vec::Vec<u32> = a.iter().map(|d| d.0).collect();
+        assert_eq!(order, (0..40).collect::<std::vec::Vec<_>>());
+        a.append(List::new()).unwrap();
+        assert_eq!(a.len(), 40);
+        drop(a);
+        assert_eq!(DROPPED.load(Ordering::Relaxed), 40);
+    }
+
+    /// `into_raw` hands the block over: the list frees nothing.
+    #[test]
+    fn into_raw_hands_the_block_over() {
+        let before = crate::malloc::live_allocations::count();
+        let mut l = List::new();
+        l.extend_from_slice(b"abc").unwrap();
+        let (p, n) = l.into_raw();
+        assert_eq!(n, 3);
+        assert_eq!(crate::malloc::live_allocations::count(), before + 1);
+        // SAFETY: the block `into_raw` handed over, 3 initialised bytes.
+        assert_eq!(unsafe { core::slice::from_raw_parts(p, n) }, b"abc");
+        // SAFETY: the block from `into_raw`, freed once.
+        unsafe { crate::malloc::free(p) };
+        assert_eq!(crate::malloc::live_allocations::count(), before);
+        let (p, n) = List::<u8>::new().into_raw();
+        assert!(p.is_null() && n == 0);
+    }
+
+    /// Iterating a list by value takes its elements in order, and what is
+    /// left untaken is dropped with the iterator.
+    #[test]
+    fn into_iter_takes_in_order_and_drops_the_rest() {
+        use core::sync::atomic::{AtomicUsize, Ordering};
+        static DROPPED: AtomicUsize = AtomicUsize::new(0);
+        struct D(u32);
+        impl Drop for D {
+            fn drop(&mut self) {
+                DROPPED.fetch_add(1, Ordering::Relaxed);
+            }
+        }
+        let before = crate::malloc::live_allocations::count();
+        let mut l = List::new();
+        for i in 0..10 {
+            l.push(D(i)).unwrap();
+        }
+        let mut it = l.into_iter();
+        assert_eq!(it.size_hint(), (10, Some(10)));
+        let first: std::vec::Vec<u32> = it.by_ref().take(4).map(|d| d.0).collect();
+        assert_eq!(first, [0, 1, 2, 3]);
+        assert_eq!(
+            DROPPED.load(Ordering::Relaxed),
+            4,
+            "the four taken, dropped by the caller"
+        );
+        drop(it);
+        assert_eq!(
+            DROPPED.load(Ordering::Relaxed),
+            10,
+            "the six left, by the iterator"
+        );
+        assert_eq!(crate::malloc::live_allocations::count(), before);
+        assert_eq!(List::<u8>::new().into_iter().count(), 0);
     }
 
     #[test]

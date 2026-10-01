@@ -69,6 +69,7 @@
 //! `~user`.
 
 use crate::errno;
+use crate::list::{List, NoMem};
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -141,115 +142,52 @@ impl Error {
 
 type R<T> = Result<T, Error>;
 
-/// A growable array from `malloc`, its elements dropped with it.
-struct List<T> {
-    ptr: *mut T,
-    len: usize,
-    cap: usize,
-}
-
-impl<T> List<T> {
-    const fn new() -> Self {
-        Self {
-            ptr: core::ptr::null_mut(),
-            len: 0,
-            cap: 0,
-        }
-    }
-
-    /// Room for `more` elements beyond those held.
-    fn reserve(&mut self, more: usize) -> R<()> {
-        let need = self.len.checked_add(more).ok_or(Error::NoSpace)?;
-        if need <= self.cap {
-            return Ok(());
-        }
-        let cap = need.max(self.cap.saturating_mul(2)).max(8);
-        let bytes = cap
-            .checked_mul(core::mem::size_of::<T>())
-            .ok_or(Error::NoSpace)?;
-        // SAFETY: `ptr` is NULL or this list's own block.
-        let p = unsafe { crate::malloc::realloc(self.ptr.cast(), bytes) }.cast::<T>();
-        if p.is_null() {
-            return Err(Error::NoSpace);
-        }
-        self.ptr = p;
-        self.cap = cap;
-        Ok(())
-    }
-
-    fn push(&mut self, v: T) -> R<()> {
-        self.reserve(1)?;
-        // SAFETY: `len < cap`, room reserved.
-        unsafe { self.ptr.add(self.len).write(v) };
-        self.len += 1;
-        Ok(())
-    }
-
-    fn as_slice(&self) -> &[T] {
-        if self.ptr.is_null() {
-            return &[];
-        }
-        // SAFETY: `len` initialised elements.
-        unsafe { core::slice::from_raw_parts(self.ptr, self.len) }
-    }
-
-    fn clear(&mut self) {
-        while self.len > 0 {
-            self.len -= 1;
-            // SAFETY: element `len`, initialised, dropped once.
-            unsafe { self.ptr.add(self.len).drop_in_place() };
-        }
-    }
-
-    /// The elements, handed over: the block and its length, the list left
-    /// empty. The caller frees the block (and drops the elements) itself.
-    fn into_raw(mut self) -> (*mut T, usize) {
-        let r = (self.ptr, self.len);
-        self.ptr = core::ptr::null_mut();
-        self.len = 0;
-        self.cap = 0;
-        r
-    }
-}
-
-impl<T> Drop for List<T> {
-    fn drop(&mut self) {
-        self.clear();
-        // SAFETY: `ptr` is NULL or this list's own block.
-        unsafe { crate::malloc::free(self.ptr.cast()) };
+impl From<NoMem> for Error {
+    fn from(_: NoMem) -> Self {
+        Self::NoSpace
     }
 }
 
 /// A growable byte string from `malloc`.
 type Bytes = List<u8>;
 
-impl Bytes {
-    fn extend(&mut self, s: &[u8]) -> R<()> {
-        self.reserve(s.len())?;
-        // SAFETY: room for `s` reserved; the two do not overlap.
-        unsafe { core::ptr::copy_nonoverlapping(s.as_ptr(), self.ptr.add(self.len), s.len()) };
-        self.len += s.len();
-        Ok(())
-    }
+/// What word expansion asks of a byte string beyond what a list does.
+trait BytesExt: Sized {
+    /// A copy of `s`.
+    fn of(s: &[u8]) -> R<Self>;
+    /// `s` at the end.
+    fn extend(&mut self, s: &[u8]) -> R<()>;
+    /// The bytes and a NUL, as a C string from `malloc` the caller owns.
+    fn into_c_string(self) -> R<*mut u8>;
+    /// The bytes and a NUL, for handing to a C function; the NUL is not
+    /// counted afterwards.
+    fn c_str(&mut self) -> R<*const u8>;
+}
 
+impl BytesExt for Bytes {
     fn of(s: &[u8]) -> R<Self> {
         let mut b = Self::new();
-        b.extend(s)?;
+        b.extend_from_slice(s)?;
         Ok(b)
     }
 
-    /// The bytes and a NUL, as a C string from `malloc` the caller owns.
+    fn extend(&mut self, s: &[u8]) -> R<()> {
+        Ok(self.extend_from_slice(s)?)
+    }
+
     fn into_c_string(mut self) -> R<*mut u8> {
         self.push(0)?;
         Ok(self.into_raw().0)
     }
 
-    /// The bytes and a NUL, for handing to a C function; the NUL is not
-    /// counted afterwards.
     fn c_str(&mut self) -> R<*const u8> {
         self.push(0)?;
-        self.len -= 1;
-        Ok(self.ptr)
+        let n = self.len().wrapping_sub(1);
+        // The NUL stays in the block past the bytes counted: a byte needs
+        // no dropping, so `truncate` only forgets it.
+        let p = self.as_ptr();
+        self.truncate(n);
+        Ok(p)
     }
 }
 
@@ -294,11 +232,11 @@ impl Process {
         let mut size = 1024usize;
         loop {
             let mut buf = Bytes::new();
-            buf.reserve(size)?;
+            buf.resize(size, 0)?;
             // SAFETY: an all-zero passwd record is a valid one to fill.
             let mut pw: crate::pwd::Passwd = unsafe { core::mem::zeroed() };
             let mut result: *const crate::pwd::Passwd = core::ptr::null();
-            let rc = f(&raw mut pw, buf.ptr, size, &raw mut result);
+            let rc = f(&raw mut pw, buf.as_mut_ptr(), size, &raw mut result);
             if rc == errno::ERANGE && size < 1 << 20 {
                 size *= 4;
                 continue;
@@ -452,7 +390,7 @@ impl Sys for Process {
                 let name = unsafe { *g.gl_pathv.add(g.gl_offs + i) };
                 // SAFETY: each a NUL-terminated string.
                 let s = unsafe { core::slice::from_raw_parts(name, crate::string::strlen(name)) };
-                if let Err(e) = Bytes::of(s).and_then(|b| out.push(b)) {
+                if let Err(e) = Bytes::of(s).and_then(|b| Ok(out.push(b)?)) {
                     result = Err(e);
                     break;
                 }
@@ -573,7 +511,7 @@ impl Fields {
 
     /// The field in progress has anything in it.
     fn has_content(&self) -> bool {
-        self.exists || self.text.len > 0
+        self.exists || !self.text.is_empty()
     }
 
     /// A delimiter read from an expansion ends the field when the next byte
@@ -591,14 +529,14 @@ impl Fields {
     /// The field in progress is done: its pattern kept when it holds an
     /// unquoted glob character.
     fn finish(&mut self) -> R<()> {
-        let text = core::mem::replace(&mut self.text, Bytes::new());
-        let pattern = core::mem::replace(&mut self.pattern, Bytes::new());
+        let text = core::mem::take(&mut self.text);
+        let pattern = core::mem::take(&mut self.pattern);
         let glob = core::mem::replace(&mut self.glob, false);
         self.exists = false;
-        self.out.push(Field {
+        Ok(self.out.push(Field {
             text,
             pattern: glob.then_some(pattern),
-        })
+        })?)
     }
 
     /// A blank between words: the field ends if it holds anything.
@@ -644,7 +582,7 @@ impl Sink for Fields {
                 }
             }
         }
-        self.pattern.push(b)
+        Ok(self.pattern.push(b)?)
     }
 
     fn live(&mut self) -> R<()> {
@@ -665,13 +603,13 @@ struct Flat(Bytes);
 
 impl Sink for Flat {
     fn put(&mut self, b: u8, _kind: Kind) -> R<()> {
-        self.0.push(b)
+        Ok(self.0.push(b)?)
     }
     fn live(&mut self) -> R<()> {
         Ok(())
     }
     fn break_field(&mut self) -> R<()> {
-        self.0.push(b' ')
+        Ok(self.0.push(b' ')?)
     }
 }
 
@@ -684,13 +622,13 @@ impl Sink for Pattern {
         if kind == Kind::Quoted && matches!(b, b'*' | b'?' | b'[' | b'\\') {
             self.0.push(b'\\')?;
         }
-        self.0.push(b)
+        Ok(self.0.push(b)?)
     }
     fn live(&mut self) -> R<()> {
         Ok(())
     }
     fn break_field(&mut self) -> R<()> {
-        self.0.push(b' ')
+        Ok(self.0.push(b' ')?)
     }
 }
 
@@ -1226,9 +1164,9 @@ impl Expander<'_> {
                 operand_end(s, k)?
             };
             let len = match &v {
-                Value::Set(b) => b.len,
+                Value::Set(b) => b.len(),
                 Value::Unset => 0,
-                Value::Params(all) => all.len,
+                Value::Params(all) => all.len(),
             };
             self.put_value(
                 &Value::Set(decimal(i64::try_from(len).unwrap_or(i64::MAX))?),
@@ -1258,8 +1196,8 @@ impl Expander<'_> {
         let v = self.param(name)?;
         let null = match &v {
             Value::Unset => true,
-            Value::Set(b) => b.len == 0,
-            Value::Params(all) => all.len == 0,
+            Value::Set(b) => b.is_empty(),
+            Value::Params(all) => all.is_empty(),
         };
         let unset = matches!(v, Value::Unset);
         // The operand's word is expanded in the expansion's own context:
@@ -1342,7 +1280,7 @@ impl Expander<'_> {
         }
         let show = self.flags & WRDE_SHOWERR != 0;
         let (out, status) = self.sys.shell(cmd, false, show)?;
-        if out.len == 0 && status != 0 {
+        if out.is_empty() && status != 0 {
             let (_, check) = self.sys.shell(cmd, true, show)?;
             if check != 0 {
                 return Err(Error::Syntax);
@@ -1797,13 +1735,13 @@ fn expand(
         }
         r.and_then(|()| fields.separate())
     };
-    let finished = core::mem::replace(&mut fields.out, List::new());
+    let finished = core::mem::take(&mut fields.out);
     if let Err(e) = parsed {
         if e != Error::NoSpace {
             return Err((e, List::new()));
         }
         let mut partial = List::new();
-        for f in consume(finished) {
+        for f in finished {
             if partial.push(f.text).is_err() {
                 break;
             }
@@ -1813,66 +1751,26 @@ fn expand(
     // Pathname expansion: a field with an unquoted glob character is the
     // names it matches, sorted -- or itself, when none match.
     let mut out = List::new();
-    let mut pending = consume(finished);
+    let mut pending = finished.into_iter();
     for f in pending.by_ref() {
         let r = match f.pattern {
             Some(p) => {
-                let before = out.len;
+                let before = out.len();
                 sys.glob(p.as_slice(), &mut out).and_then(|()| {
-                    if out.len == before {
-                        out.push(f.text)
+                    if out.len() == before {
+                        Ok(out.push(f.text)?)
                     } else {
                         Ok(())
                     }
                 })
             }
-            None => out.push(f.text),
+            None => out.push(f.text).map_err(Error::from),
         };
         if r.is_err() {
             return Err((Error::NoSpace, out));
         }
     }
     Ok(out)
-}
-
-/// A list's elements, taken out one by one; those not taken are dropped
-/// with the iterator.
-fn consume<T>(list: List<T>) -> Drain<T> {
-    let (ptr, len) = list.into_raw();
-    Drain { ptr, len, at: 0 }
-}
-
-/// What [`consume`] answers.
-struct Drain<T> {
-    ptr: *mut T,
-    len: usize,
-    at: usize,
-}
-
-impl<T> Iterator for Drain<T> {
-    type Item = T;
-
-    fn next(&mut self) -> Option<T> {
-        if self.at >= self.len {
-            return None;
-        }
-        // SAFETY: element `at`, initialised and not yet taken.
-        let v = unsafe { self.ptr.add(self.at).read() };
-        self.at += 1;
-        Some(v)
-    }
-}
-
-impl<T> Drop for Drain<T> {
-    fn drop(&mut self) {
-        while self.at < self.len {
-            // SAFETY: element `at`, initialised and not taken: dropped once.
-            unsafe { self.ptr.add(self.at).drop_in_place() };
-            self.at += 1;
-        }
-        // SAFETY: the list's own block, or NULL.
-        unsafe { crate::malloc::free(self.ptr.cast()) };
-    }
 }
 
 /// `wordfree`'s body: the words from `we_offs` to the NULL freed, and the
@@ -1931,7 +1829,7 @@ fn wordexp_with(words: &[u8], we: &mut WordexpT, flags: i32, sys: &mut dyn Sys) 
     let mut array: List<*mut u8> = List::new();
     let Some(total) = offs
         .checked_add(old.len())
-        .and_then(|n| n.checked_add(fields.len))
+        .and_then(|n| n.checked_add(fields.len()))
         .and_then(|n| n.checked_add(1))
     else {
         return WRDE_NOSPACE;
@@ -1948,7 +1846,7 @@ fn wordexp_with(words: &[u8], we: &mut WordexpT, flags: i32, sys: &mut dyn Sys) 
         let _ = array.push(w);
     }
     let mut added = 0usize;
-    for f in consume(fields) {
+    for f in fields {
         match f.into_c_string() {
             Ok(c) => {
                 let _ = array.push(c);

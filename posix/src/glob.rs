@@ -57,6 +57,7 @@
 use core::ffi::c_void;
 
 use crate::dirent::Dirent;
+use crate::list::{List, NoMem};
 use crate::stat::Stat;
 
 // ---------------------------------------------------------------------------
@@ -178,7 +179,7 @@ impl Default for GlobT {
 }
 
 // ---------------------------------------------------------------------------
-// Owned bytes and lists, from malloc
+// Owned bytes, from malloc; lists are crate::list's
 // ---------------------------------------------------------------------------
 
 /// Memory could not be had: `GLOB_NOSPACE`.
@@ -198,6 +199,18 @@ impl From<NoSpace> for Stop {
 
 impl From<crate::fnmatch::NoMemory> for Stop {
     fn from(_: crate::fnmatch::NoMemory) -> Self {
+        Self::NoSpace
+    }
+}
+
+impl From<NoMem> for NoSpace {
+    fn from(_: NoMem) -> Self {
+        Self
+    }
+}
+
+impl From<NoMem> for Stop {
+    fn from(_: NoMem) -> Self {
         Self::NoSpace
     }
 }
@@ -253,95 +266,6 @@ impl Drop for Owned {
 struct Found {
     path: Owned,
     is_dir: bool,
-}
-
-/// A growable array from `malloc`.
-struct List<T> {
-    ptr: *mut T,
-    len: usize,
-    cap: usize,
-}
-
-impl<T> List<T> {
-    const fn new() -> Self {
-        Self {
-            ptr: core::ptr::null_mut(),
-            len: 0,
-            cap: 0,
-        }
-    }
-
-    fn push(&mut self, v: T) -> Result<(), NoSpace> {
-        if self.len == self.cap {
-            let cap = self.cap.max(4).checked_mul(2).ok_or(NoSpace)?;
-            let bytes = cap.checked_mul(size_of::<T>()).ok_or(NoSpace)?;
-            // SAFETY: `ptr` is NULL or this list's own block.
-            let p = unsafe { crate::malloc::realloc(self.ptr.cast(), bytes) }.cast::<T>();
-            if p.is_null() {
-                return Err(NoSpace);
-            }
-            self.ptr = p;
-            self.cap = cap;
-        }
-        // SAFETY: `len < cap`: room for one more.
-        unsafe { self.ptr.add(self.len).write(v) };
-        self.len = self.len.saturating_add(1);
-        Ok(())
-    }
-
-    fn as_slice(&self) -> &[T] {
-        if self.ptr.is_null() {
-            return &[];
-        }
-        // SAFETY: `len` initialised elements.
-        unsafe { core::slice::from_raw_parts(self.ptr, self.len) }
-    }
-
-    fn as_mut_slice(&mut self) -> &mut [T] {
-        if self.ptr.is_null() {
-            return &mut [];
-        }
-        // SAFETY: as above, and `&mut self` makes it unique.
-        unsafe { core::slice::from_raw_parts_mut(self.ptr, self.len) }
-    }
-
-    /// Move every element of `other` onto the end of this one, in order.
-    fn append(&mut self, mut other: Self) -> Result<(), NoSpace> {
-        let n = other.len;
-        let mut moved = 0usize;
-        let result = loop {
-            if moved == n {
-                break Ok(());
-            }
-            // SAFETY: element `moved`, initialised and not yet moved.
-            let v = unsafe { other.ptr.add(moved).read() };
-            // Consumed either way: pushed, or dropped by a push that failed.
-            moved = moved.saturating_add(1);
-            if let Err(e) = self.push(v) {
-                break Err(e);
-            }
-        };
-        // What was moved is this list's now; what was not is dropped with
-        // `other`, which must see only those.
-        if moved < n {
-            // SAFETY: shift the unmoved tail to the front: initialised
-            // elements within the block, possibly overlapping.
-            unsafe { core::ptr::copy(other.ptr.add(moved), other.ptr, n.saturating_sub(moved)) };
-        }
-        other.len = n.saturating_sub(moved);
-        result
-    }
-}
-
-impl<T> Drop for List<T> {
-    fn drop(&mut self) {
-        for i in 0..self.len {
-            // SAFETY: each initialised element, dropped once.
-            unsafe { core::ptr::drop_in_place(self.ptr.add(i)) };
-        }
-        // SAFETY: NULL or this list's own block.
-        unsafe { crate::malloc::free(self.ptr.cast()) };
-    }
 }
 
 // ---------------------------------------------------------------------------
@@ -570,7 +494,7 @@ fn brace_expand(p: &[u8], flags: i32, out: &mut List<Owned>) -> Result<(), NoSpa
         }
         i = i.saturating_add(1);
     }
-    out.push(Owned::from_parts(&[p])?)
+    Ok(out.push(Owned::from_parts(&[p])?)?)
 }
 
 /// Own archive member -- glibc and gnulib define `glob_pattern_p` in an
@@ -671,11 +595,11 @@ impl Globber {
                 return Ok(());
             }
         };
-        let before = out.len;
+        let before = out.len();
         let result = self.read_matches(d, prefix, pat, only_dirs, out);
         self.fs.closedir(d);
         result?;
-        if out.len > before || self.flags & GLOB_NOCHECK != 0 {
+        if out.len() > before || self.flags & GLOB_NOCHECK != 0 {
             self.magchar = true;
         }
         Ok(())
@@ -782,7 +706,7 @@ impl Globber {
                 dir_magic_found: false,
             };
             dirs = sub.expand(dirpart, true)?;
-            if dirs.len > 0 {
+            if !dirs.is_empty() {
                 self.dir_magic_found = true;
             }
         } else {
@@ -949,7 +873,7 @@ fn glob_bytes(
         }
     };
     let mut magchar = globber.magchar;
-    if found.len == 0 {
+    if found.is_empty() {
         let nomagic =
             flags & GLOB_NOMAGIC != 0 && !pattern.is_empty() && !needs_scan(pattern, flags);
         if flags & GLOB_NOCHECK == 0 && !nomagic {
@@ -957,10 +881,12 @@ fn glob_bytes(
             return GLOB_NOMATCH;
         }
         let pushed = Owned::from_parts(&[pattern]).and_then(|path| {
-            found.push(Found {
-                path,
-                is_dir: false,
-            })
+            found
+                .push(Found {
+                    path,
+                    is_dir: false,
+                })
+                .map_err(NoSpace::from)
         });
         if pushed.is_err() {
             return GLOB_NOSPACE;
@@ -970,7 +896,7 @@ fn glob_bytes(
     // gl_pathv: the reserved NULLs, what an earlier call left, these, NULL.
     let offs = g.gl_offs;
     let old = if g.gl_pathv.is_null() { 0 } else { g.gl_pathc };
-    let new = found.len;
+    let new = found.len();
     let Some(total) = offs
         .checked_add(old)
         .and_then(|n| n.checked_add(new))
@@ -996,12 +922,10 @@ fn glob_bytes(
             }
         }
         let at = offs.saturating_add(old);
-        for i in 0..new {
-            let f = found.ptr.add(i).read();
+        // Each name handed over to the array, the list giving it up.
+        for (i, f) in found.into_iter().enumerate() {
             v.add(at.saturating_add(i)).write(f.path.take());
         }
-        // Every element was moved out: the list owns none of them now.
-        found.len = 0;
         v.add(at.saturating_add(new)).write(core::ptr::null_mut());
     }
     g.gl_pathv = v;
@@ -1814,21 +1738,6 @@ mod tests {
         assert_eq!(u(b"a\\*b", GLOB_NOESCAPE), b"a\\*b");
         assert!(needs_scan(b"a\\b", 0) && !needs_scan(b"a\\b", GLOB_NOESCAPE));
         assert!(has_magic(b"a[", 0) && !has_magic(b"a\\[", 0));
-    }
-
-    /// `append` moves every element over, in order.
-    #[test]
-    fn list_append_keeps_order() {
-        let mut a = List::new();
-        let mut b = List::new();
-        for i in 0..3 {
-            assert!(a.push(i).is_ok());
-        }
-        for i in 3..40 {
-            assert!(b.push(i).is_ok());
-        }
-        assert!(a.append(b).is_ok());
-        assert_eq!(a.as_slice(), (0..40).collect::<Vec<_>>());
     }
 
     // -- The C library's own directories --------------------------------------

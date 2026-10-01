@@ -285,6 +285,32 @@ fn a_table_past_the_bound_is_refused() {
     assert_eq!(xcursor::read(&file(4096), 1), None);
 }
 
+/// **A picture has sides, and none past 1024** -- each refused by that rule
+/// alone: an empty picture whose hot spot is at its corner, and a good
+/// 1025-pixel strip whose pixels are all there.
+#[test]
+fn a_picture_needs_sides_within_the_bound() {
+    let strip = |width: u32, height: u32| {
+        let mut out = Vec::new();
+        le(
+            &mut out,
+            &[u32::from_le_bytes(*b"Xcur"), 16, 0x0001_0000, 1],
+        );
+        le(&mut out, &[0xfffd_0002, 24, 28]);
+        le(&mut out, &[36, 0xfffd_0002, 24, 1, width, height, 0, 0, 0]);
+        for _ in 0..width * height {
+            le(&mut out, &[OPAQUE_RED]);
+        }
+        out
+    };
+    assert_eq!(xcursor::read(&strip(0, 24), 24), None);
+    assert_eq!(xcursor::read(&strip(24, 0), 24), None);
+    let side = xcursor::MAX_SIDE;
+    assert!(xcursor::read(&strip(side, 1), 24).is_some());
+    assert_eq!(xcursor::read(&strip(side + 1, 1), 24), None);
+    assert_eq!(xcursor::read(&strip(1, side + 1), 24), None);
+}
+
 /// **A hot spot on the far edge is allowed**, as libXcursor allows it.
 #[test]
 fn a_hot_spot_on_the_edge_is_allowed() {

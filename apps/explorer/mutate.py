@@ -852,6 +852,66 @@ MAIN = [
         '            enabled: false,',
         ['open_with_offers_the_programs_that_open_the_type'],
     ),
+    (
+        'AltGr is taken for Ctrl over a folder',
+        '        let chord = textline::is_ctrl_chord(k.modifiers);',
+        '        let chord = k.modifiers.ctrl;',
+        ['a_chord_is_not_the_file_lists_key_and_altgr_is_not_ctrl'],
+    ),
+    (
+        'a chord works the file list',
+        '        let plain = textline::is_plain(k.modifiers);',
+        '        let plain = true;',
+        ['a_chord_is_not_the_file_lists_key_and_altgr_is_not_ctrl'],
+    ),
+    (
+        "a chord's letter is typed into the path",
+        '            if textline::is_alt_or_windows_chord(k.modifiers) {',
+        '            if false {',
+        ['a_chord_is_not_the_file_lists_key_and_altgr_is_not_ctrl'],
+    ),
+    (
+        'a chord raises the keys',
+        '        if self.modal.is_none() && plain {',
+        '        if self.modal.is_none() {',
+        ['a_chord_is_not_the_file_lists_key_and_altgr_is_not_ctrl'],
+    ),
+    (
+        "a chord reaches the list's plain keys",
+        '            _ if !plain => false,\n',
+        '',
+        ['a_chord_is_not_the_file_lists_key_and_altgr_is_not_ctrl'],
+    ),
+    (
+        'AltGr+A chooses all in the bin',
+        '        if k.key == Key::A && textline::is_ctrl_chord(k.modifiers) {',
+        '        if k.key == Key::A && k.modifiers.ctrl {',
+        ['a_chord_is_not_the_file_lists_key_and_altgr_is_not_ctrl'],
+    ),
+    (
+        'back is taken with AltGr or the Windows key',
+        '    k.modifiers.alt && !k.modifiers.ctrl && !k.modifiers.super_key',
+        '    k.modifiers.alt || k.modifiers.super_key',
+        ['a_chord_is_not_the_file_lists_key_and_altgr_is_not_ctrl'],
+    ),
+    (
+        'a chord works the bin',
+        '        if !textline::is_plain(k.modifiers) {\n            return false;\n        }\n',
+        '',
+        ['a_chord_is_not_the_file_lists_key_and_altgr_is_not_ctrl'],
+    ),
+    (
+        'a chord answers the taken-name prompt',
+        '            // modal.\n            Event::Key(key) if key.pressed && !textline::is_plain(key.modifiers) => (true, None),\n',
+        '            // modal.\n',
+        ['a_chord_is_not_the_file_lists_key_and_altgr_is_not_ctrl'],
+    ),
+    (
+        'a chord answers the failure prompt',
+        '            // Answered by a plain key, as the taken-name prompt is.\n            Event::Key(key) if key.pressed && !textline::is_plain(key.modifiers) => (true, None),\n',
+        '            // Answered by a plain key, as the taken-name prompt is.\n',
+        ['a_chord_is_not_the_file_lists_key_and_altgr_is_not_ctrl'],
+    ),
 ]
 
 COLUMNS = [

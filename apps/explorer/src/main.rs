@@ -726,6 +726,13 @@ enum PromptControl {
     ForTheRest,
 }
 
+/// Whether `k` is held with Alt alone -- not AltGr, which is Ctrl+Alt and
+/// types, and not with the Windows key, whose chords are the desktop's: the
+/// shape of back and forward, Alt+Left and Alt+Right.
+fn alt_alone(k: &KeyEvent) -> bool {
+    k.modifiers.alt && !k.modifiers.ctrl && !k.modifiers.super_key
+}
+
 /// The prompt's answers, left to right, with the words and the key each is
 /// drawn with. Keep both is first and is Enter's: of the four it is the one
 /// that loses nothing and changes nothing that is already there.
@@ -774,6 +781,10 @@ impl ConflictPrompt {
     /// modal -- except a tick, which the work behind it still needs.
     fn handle(&mut self, event: &Event) -> (bool, Option<ConflictAnswer>) {
         match event {
+            // Answered by a plain key: Alt+R, a chord that is no answer,
+            // replaced the file. Swallowed all the same -- the prompt is
+            // modal.
+            Event::Key(key) if key.pressed && !textline::is_plain(key.modifiers) => (true, None),
             Event::Key(key) if key.pressed => {
                 if key.key == Key::A {
                     self.for_the_rest = !self.for_the_rest;
@@ -960,6 +971,8 @@ impl ErrorPrompt {
     /// prompt's while it is up -- it is modal -- except a tick.
     fn handle(&mut self, event: &Event) -> (bool, Option<ErrorAnswer>) {
         match event {
+            // Answered by a plain key, as the taken-name prompt is.
+            Event::Key(key) if key.pressed && !textline::is_plain(key.modifiers) => (true, None),
             Event::Key(key) if key.pressed => {
                 if key.key == Key::Enter {
                     return (true, Some(ErrorAnswer::TryAgain));
@@ -6718,13 +6731,28 @@ impl ExplorerState {
         //
         // Not unconditional: a widget that swallowed keys whenever it was
         // merely *visible* would take the arrow keys the file list needs.
-        let starts_editing = k.modifiers.ctrl && k.key == Key::L;
+        //
+        // The shortcuts are Ctrl chords, not Ctrl held: AltGr arrives as
+        // Ctrl+Alt and types, and AltGr+C -- a Polish `ć` -- copied the
+        // selection. Back and forward are Alt alone. Every other key is taken
+        // plain: a chord with Alt or the Windows key is the window's or the
+        // desktop's and arrives carrying its key -- Alt+Delete asked to
+        // recycle the selection and Alt+2 changed the view.
+        let chord = textline::is_ctrl_chord(k.modifiers);
+        let plain = textline::is_plain(k.modifiers);
+        let starts_editing = chord && k.key == Key::L;
         // Typing a path is going somewhere, and the bar is not drawn over
         // the bin: leave it, and edit the folder's path.
         if starts_editing {
             self.leave_recycle_bin();
         }
         if self.pathbar.is_editing() || starts_editing {
+            // Not the bar's either: it is the toolkit's field, which types
+            // the letter of a chord it does not know -- Alt+X typed an `x`
+            // into the path.
+            if textline::is_alt_or_windows_chord(k.modifiers) {
+                return false;
+            }
             let taken = self.pathbar.handle_key_event(k);
             if self.route_to_pathbar(taken) {
                 return true;
@@ -6733,7 +6761,7 @@ impl ExplorerState {
         // The shortcut list, after the address bar and only with no dialog up:
         // both of those take typed text, and `?` belongs in a filename or a
         // path before it belongs to help.
-        if self.modal.is_none() {
+        if self.modal.is_none() && plain {
             let asked = k.key == Key::F1 || (k.key == Key::Slash && k.modifiers.shift);
             if asked {
                 self.show_help = !self.show_help;
@@ -6750,22 +6778,43 @@ impl ExplorerState {
             return self.handle_bin_key(k);
         }
 
-        let ctrl = k.modifiers.ctrl;
+        let alt = alt_alone(k);
         match k.key {
-            Key::A if ctrl => {
+            Key::A if chord => {
                 if self.entries.is_empty() {
                     return false;
                 }
                 self.select_all();
                 true
             }
-            Key::F if ctrl => {
+            Key::F if chord => {
                 self.open_search();
                 true
             }
+            Key::Z if chord => {
+                self.undo_last();
+                true
+            }
+            Key::C if chord => {
+                self.copy_selected();
+                true
+            }
+            Key::X if chord => {
+                self.cut_selected();
+                true
+            }
+            Key::V if chord => {
+                self.paste();
+                true
+            }
+            Key::H if chord => {
+                self.toggle_hidden();
+                true
+            }
+            Key::Left if alt => self.go_back_if_possible(),
+            Key::Right if alt => self.go_forward_if_possible(),
+            _ if !plain => false,
             Key::Backspace => self.go_up_if_possible(),
-            Key::Left if k.modifiers.alt => self.go_back_if_possible(),
-            Key::Right if k.modifiers.alt => self.go_forward_if_possible(),
             Key::Up | Key::Left => self.move_selection(-1),
             Key::Down | Key::Right => self.move_selection(1),
             Key::Home => self.move_selection_to(0),
@@ -6830,26 +6879,6 @@ impl ExplorerState {
             Key::Delete if k.modifiers.shift => self.ask_delete(PendingAction::DeletePermanently),
             Key::Delete => self.ask_delete(PendingAction::Recycle),
             Key::F2 => self.ask_rename(),
-            Key::Z if ctrl => {
-                self.undo_last();
-                true
-            }
-            Key::C if ctrl => {
-                self.copy_selected();
-                true
-            }
-            Key::X if ctrl => {
-                self.cut_selected();
-                true
-            }
-            Key::V if ctrl => {
-                self.paste();
-                true
-            }
-            Key::H if ctrl => {
-                self.toggle_hidden();
-                true
-            }
             _ => false,
         }
     }
@@ -6946,7 +6975,22 @@ impl ExplorerState {
 
     /// The bin's keys. Answers whether anything visible changed.
     fn handle_bin_key(&mut self, k: &KeyEvent) -> bool {
-        let (shift, ctrl, alt) = (k.modifiers.shift, k.modifiers.ctrl, k.modifiers.alt);
+        // As over a folder: Ctrl+A a Ctrl chord, back Alt alone, and every
+        // other key plain -- Alt+Delete asked to erase what was chosen.
+        let shift = k.modifiers.shift;
+        if k.key == Key::A && textline::is_ctrl_chord(k.modifiers) {
+            return self.bin.as_mut().is_some_and(|bin| {
+                bin.choose_all();
+                true
+            });
+        }
+        if k.key == Key::Left && alt_alone(k) {
+            self.leave_recycle_bin();
+            return true;
+        }
+        if !textline::is_plain(k.modifiers) {
+            return false;
+        }
         match k.key {
             // Escape stops file work first, as it does over a folder.
             Key::Escape if self.work_in_flight() => {
@@ -6954,10 +6998,6 @@ impl ExplorerState {
                 true
             }
             Key::Escape | Key::Backspace => {
-                self.leave_recycle_bin();
-                true
-            }
-            Key::Left if alt => {
                 self.leave_recycle_bin();
                 true
             }
@@ -6979,7 +7019,6 @@ impl ExplorerState {
                     Key::PageDown => bin.step(page, shift),
                     Key::Home => bin.go_to(0, shift),
                     Key::End => bin.go_to(usize::MAX, shift),
-                    Key::A if ctrl => bin.choose_all(),
                     _ => return false,
                 }
                 true
@@ -15644,6 +15683,141 @@ mod tests {
         state.paste();
         settle_until_asked(&mut state);
         state
+    }
+
+    /// **A chord is not the file list's key, and AltGr is not Ctrl**:
+    /// Alt+Delete asked to recycle the selection and Alt+2 changed the view,
+    /// each chord arriving carrying its key; AltGr+C -- a Polish `ć` --
+    /// copied the selection; and Alt+R answered the taken-name prompt with
+    /// Replace. Ctrl+C still copies, and Alt+Left alone still goes back.
+    #[test]
+    fn a_chord_is_not_the_file_lists_key_and_altgr_is_not_ctrl() {
+        use guitk::event::Modifiers;
+        let altgr = Modifiers {
+            alt: true,
+            ..Modifiers::ctrl()
+        };
+        let press = |key: Key, modifiers: Modifiers| {
+            Event::Key(KeyEvent {
+                key,
+                pressed: true,
+                modifiers,
+                text: String::new(),
+            })
+        };
+        let scratch = temp_dir("chords");
+        let root = scratch.dir().to_path_buf();
+        for name in ["a.txt", "b.txt", "c.txt"] {
+            write(&root.join(name), "x");
+        }
+        let mut state = state_at(&root);
+        assert!(state.handle_event(&Event::Key(key_press(Key::Down))));
+        let (view, selected) = (state.view_mode, state.selected_indices.clone());
+        for m in [Modifiers::alt(), Modifiers::super_key(), altgr] {
+            for k in [Key::Delete, Key::Num2, Key::Down, Key::F2, Key::C, Key::F1] {
+                assert!(!state.handle_event(&press(k, m)), "{m:?} {k:?} was taken");
+            }
+        }
+        assert!(state.modal.is_none(), "a chord asked to recycle or rename");
+        assert_eq!(state.view_mode, view, "a chord changed the view");
+        assert_eq!(
+            state.selected_indices, selected,
+            "a chord moved the selection"
+        );
+        assert!(state.clipboard.is_none(), "AltGr+C copied");
+        assert!(!state.show_help, "a chord raised the keys");
+        assert!(state.handle_event(&press(Key::C, Modifiers::ctrl())));
+        assert!(state.clipboard.is_some(), "Ctrl+C no longer copies");
+
+        // The path bar is the toolkit's field: a chord's letter is not
+        // typed into it.
+        assert!(state.handle_event(&press(Key::L, Modifiers::ctrl())));
+        assert!(state.pathbar.is_editing(), "control: Ctrl+L edits the path");
+        let path = state.pathbar.typed_text().map(str::to_owned);
+        for m in [Modifiers::alt(), Modifiers::super_key()] {
+            let x = Event::Key(KeyEvent {
+                key: Key::X,
+                pressed: true,
+                modifiers: m,
+                text: String::from("x"),
+            });
+            assert!(!state.handle_event(&x), "{m:?}+X went to the path bar");
+        }
+        assert_eq!(
+            state.pathbar.typed_text().map(str::to_owned),
+            path,
+            "a chord's letter was typed into the path"
+        );
+        assert!(state.handle_event(&Event::Key(key_press(Key::Escape))));
+
+        // The recycle bin's keys are plain too, its Ctrl+A a Ctrl chord and
+        // its way back Alt alone.
+        state.open_recycle_bin();
+        for m in [Modifiers::alt(), Modifiers::super_key(), altgr] {
+            assert!(
+                !state.handle_event(&press(Key::Delete, m)),
+                "{m:?} Delete was taken"
+            );
+            assert!(
+                !state.handle_event(&press(Key::Escape, m)),
+                "{m:?} Escape was taken"
+            );
+        }
+        for m in [Modifiers::super_key(), altgr] {
+            assert!(
+                !state.handle_event(&press(Key::Left, m)),
+                "{m:?} Left was taken"
+            );
+        }
+        assert!(
+            !state.handle_event(&press(Key::A, altgr)),
+            "AltGr+A chose everything"
+        );
+        assert!(state.bin.is_some(), "a chord left the bin");
+        assert!(state.modal.is_none(), "a chorded Delete asked to erase");
+        assert!(state.handle_event(&press(Key::Left, Modifiers::alt())));
+        assert!(state.bin.is_none(), "Alt+Left no longer leaves the bin");
+
+        // The failure prompt takes a plain answer only.
+        let scratch = temp_dir("chords_failed");
+        let root = scratch.dir().to_path_buf();
+        let mut state = paste_with_a_file_gone(&root);
+        assert!(
+            failure_prompt_of(&state).is_some(),
+            "control: the copy failed and asks"
+        );
+        for m in [Modifiers::alt(), Modifiers::super_key(), altgr] {
+            assert!(
+                state.handle_event(&press(Key::Enter, m)),
+                "the prompt let a key through"
+            );
+        }
+        assert!(
+            failure_prompt_of(&state).is_some(),
+            "a chord answered the failure prompt"
+        );
+
+        // The taken-name prompt takes a plain answer only.
+        let scratch = temp_dir("chords_prompt");
+        let root = scratch.dir().to_path_buf();
+        let mut state = paste_onto_a_taken_name(&root);
+        for m in [
+            Modifiers::alt(),
+            Modifiers::super_key(),
+            altgr,
+            Modifiers::ctrl(),
+        ] {
+            assert!(
+                state.handle_event(&press(Key::R, m)),
+                "the prompt let a key through"
+            );
+        }
+        assert!(prompt_of(&state).is_some(), "a chord answered the prompt");
+        assert_eq!(
+            fs::read_to_string(root.join("dst").join("f0.txt")).unwrap(),
+            "already here",
+            "a chord replaced the file"
+        );
     }
 
     #[test]

@@ -4379,6 +4379,61 @@ mod tests {
         });
     }
 
+    /// **The taskbar panel is its own setting**, `theme.taskbar_panel`:
+    /// read, carried to `panel()`, written back -- the built-in panel where
+    /// nothing or a blank is chosen, and where the chosen theme cannot give
+    /// one (which keeps its name and says why).
+    #[test]
+    fn the_taskbar_panel_is_its_own_setting_and_survives_a_save() {
+        config::testing::with_scratch_config("panel-setting", |root| {
+            let none = AppearanceSettings::read_from(&Document::parse(""));
+            assert_eq!(none.panel_theme, themes::PanelTheme::built_in());
+            assert_eq!(none.panel(), panel::PanelStyle::AERO);
+            let blank =
+                AppearanceSettings::read_from(&Document::parse("theme:\n  taskbar_panel: \" \"\n"));
+            assert_eq!(blank.panel_theme, themes::PanelTheme::built_in());
+
+            let mut written = Document::new();
+            AppearanceSettings::default().write_into(&mut written);
+            assert_eq!(
+                written.get_str(&["theme", "taskbar_panel"]).as_deref(),
+                Some("aero"),
+                "the key is there to edit"
+            );
+
+            install_theme(
+                root,
+                "flat",
+                "taskbar-panel:\n  gloss: 0\n  spacing:\n    tiles: 5\n",
+            );
+            let doc = Document::parse("theme:\n  taskbar_panel: flat\n");
+            let s = AppearanceSettings::read_from(&doc);
+            assert_eq!(s.panel_theme.problem(), None);
+            assert_eq!(s.panel().gloss, 0);
+            assert_eq!(s.panel().tile_gap, 5);
+            let mut saved = doc.clone();
+            s.write_into(&mut saved);
+            assert_eq!(
+                saved.get_str(&["theme", "taskbar_panel"]).as_deref(),
+                Some("flat")
+            );
+
+            // A colours-only theme cannot give the panel.
+            install_theme(root, "nord", "colors:\n  base: \"#2e3440\"\n");
+            let s =
+                AppearanceSettings::read_from(&Document::parse("theme:\n  taskbar_panel: nord\n"));
+            assert_eq!(s.panel_theme.id(), "nord");
+            assert_eq!(s.panel(), panel::PanelStyle::AERO);
+            assert!(
+                s.panel_theme
+                    .problem()
+                    .is_some_and(|why| why.contains("\"nord\" sets no taskbar panel")),
+                "{:?}",
+                s.panel_theme.problem()
+            );
+        });
+    }
+
     /// **High contrast keeps the motion, whole**: it is about telling things
     /// apart, and how fast they move does not change that.
     #[test]

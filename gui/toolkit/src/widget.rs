@@ -757,12 +757,34 @@ impl Widget {
     // Rendering
     // ======================================================================
 
-    /// Render this widget and all children into a render tree.
+    /// Render this widget and all children into a render tree -- faded by
+    /// its style's `opacity`, and its children by theirs on top of it, so
+    /// a half-transparent panel holding a half-transparent label draws the
+    /// label at a quarter. Fully transparent, it draws nothing (it is still
+    /// laid out, and still takes its room).
+    ///
+    /// The fade is each colour's: overlapping parts of one widget show
+    /// through each other where a compositor's group opacity would not, and
+    /// pictures are drawn unfaded (see [`RenderCommand::faded`]).
     pub fn render(&self, tree: &mut RenderTree) {
         if !self.visible {
             return;
         }
+        // A NaN opacity is a style nobody set on purpose: drawn as the
+        // default, opaque, rather than vanishing.
+        let opacity = self.style.opacity;
+        if opacity.is_nan() || opacity >= 1.0 {
+            self.render_opaque(tree);
+        } else if opacity > 0.0 {
+            let mut own = RenderTree::new();
+            self.render_opaque(&mut own);
+            tree.commands
+                .extend(own.commands.into_iter().map(|c| c.faded(opacity)));
+        }
+    }
 
+    /// [`render`](Self::render), at full opacity.
+    fn render_opaque(&self, tree: &mut RenderTree) {
         let x = self.layout.x + self.layout.margin.left;
         let y = self.layout.y + self.layout.margin.top;
         let w = self.layout.border_box_width();
@@ -780,18 +802,44 @@ impl Widget {
             });
         }
 
-        // Border
-        let border_width = self.style.border.top.width;
-        if border_width > 0.0 {
-            tree.push(RenderCommand::StrokeRect {
-                x,
-                y,
-                width: w,
-                height: h,
-                color: self.style.border.top.color,
-                line_width: border_width,
-                corner_radii: self.style.border_radius,
-            });
+        // Border: one stroke round a box whose four sides agree, as most do,
+        // round corners and all; otherwise each side its own strip, square
+        // -- where it used to be the top side's width and colour all round.
+        let b = &self.style.border;
+        let same = |s: &crate::style::Border| {
+            (s.width - b.top.width).abs() < f32::EPSILON && s.color == b.top.color
+        };
+        if same(&b.right) && same(&b.bottom) && same(&b.left) {
+            if b.top.width > 0.0 {
+                tree.push(RenderCommand::StrokeRect {
+                    x,
+                    y,
+                    width: w,
+                    height: h,
+                    color: b.top.color,
+                    line_width: b.top.width,
+                    corner_radii: self.style.border_radius,
+                });
+            }
+        } else {
+            let strips = [
+                (x, y, w, b.top.width, b.top.color),
+                (x, y + h - b.bottom.width, w, b.bottom.width, b.bottom.color),
+                (x, y, b.left.width, h, b.left.color),
+                (x + w - b.right.width, y, b.right.width, h, b.right.color),
+            ];
+            for (sx, sy, sw, sh, color) in strips {
+                if sw > 0.0 && sh > 0.0 {
+                    tree.push(RenderCommand::FillRect {
+                        x: sx,
+                        y: sy,
+                        width: sw,
+                        height: sh,
+                        color,
+                        corner_radii: CornerRadii::ZERO,
+                    });
+                }
+            }
         }
 
         // Content
@@ -1659,6 +1707,106 @@ mod tests {
         assert!(!tree.focus(None));
         tree.handle_event(&clicked(25.0, 25.0));
         assert_ne!(tree.focused_id(), Some(field_id));
+    }
+
+    /// The colours of the first command of each kind a tree draws.
+    fn first_fill(tree: &WidgetTree) -> Option<Color> {
+        tree.render().commands.iter().find_map(|c| match c {
+            RenderCommand::FillRect { color, .. } => Some(*color),
+            _ => None,
+        })
+    }
+
+    /// **A widget's opacity fades everything it draws, and a child's on top
+    /// of its parent's**: a half-transparent panel's half-transparent label
+    /// is drawn at a quarter. Fully transparent draws nothing; a NaN is the
+    /// default, opaque. The style's `opacity` used to be stored and never
+    /// read.
+    #[test]
+    fn opacity_fades_a_widget_and_its_children() {
+        let mut label = Widget::label("faint");
+        label.style.opacity = 0.5;
+        let mut panel = Widget::container()
+            .with_background(Color::WHITE)
+            .with_child(label);
+        panel.style.opacity = 0.5;
+        let mut tree = WidgetTree::new(panel, 200.0, 100.0);
+        tree.layout();
+        let text_alpha = |tree: &WidgetTree| {
+            tree.render().commands.iter().find_map(|c| match c {
+                RenderCommand::Text { color, .. } => Some(color.a),
+                _ => None,
+            })
+        };
+        assert_eq!(first_fill(&tree).map(|c| c.a), Some(128));
+        // 255 halved is 128 by the label, and 64 by the panel after it.
+        assert_eq!(text_alpha(&tree), Some(64));
+
+        tree.root.style.opacity = 0.0;
+        assert!(tree.render().commands.is_empty());
+
+        tree.root.style.opacity = f32::NAN;
+        assert_eq!(first_fill(&tree).map(|c| c.a), Some(255));
+    }
+
+    /// **A border whose sides differ is drawn side by side**, each side in
+    /// its own width and colour -- it used to be the top side's all round.
+    /// Four sides alike are still one stroke, round corners and all.
+    #[test]
+    fn a_border_whose_sides_differ_is_drawn_side_by_side() {
+        let red = Color::from_hex(0xFF_0000);
+        let blue = Color::from_hex(0x00_00FF);
+        let mut panel = Widget::container();
+        panel.style.border.top = crate::style::Border {
+            width: 2.0,
+            color: red,
+        };
+        panel.style.border.left = crate::style::Border {
+            width: 1.0,
+            color: blue,
+        };
+        let mut tree = WidgetTree::new(panel, 200.0, 100.0);
+        tree.layout();
+        let strips: Vec<(f32, f32, f32, f32, Color)> = tree
+            .render()
+            .commands
+            .iter()
+            .filter_map(|c| match c {
+                RenderCommand::FillRect {
+                    x,
+                    y,
+                    width,
+                    height,
+                    color,
+                    ..
+                } => Some((*x, *y, *width, *height, *color)),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            strips,
+            [(0.0, 0.0, 200.0, 2.0, red), (0.0, 0.0, 1.0, 100.0, blue)]
+        );
+
+        let all_round = crate::style::Border {
+            width: 3.0,
+            color: red,
+        };
+        tree.root.style.border = crate::style::Borders {
+            top: all_round,
+            right: all_round,
+            bottom: all_round,
+            left: all_round,
+        };
+        let strokes = tree
+            .render()
+            .commands
+            .iter()
+            .filter(
+                |c| matches!(c, RenderCommand::StrokeRect { line_width, .. } if *line_width == 3.0),
+            )
+            .count();
+        assert_eq!(strokes, 1);
     }
 
     #[test]

@@ -226,6 +226,7 @@ const PRINTF_BUF_SIZE: usize = 4096;
 /// count: every output over 4096 bytes was cut at 4096, silently, and the
 /// return value said it had all been written.
 fn format_to_sink(sink: Sink, fmt: *const u8, args: &mut Args) -> i32 {
+    let errno = crate::errno::get_errno();
     // A stream is held for the whole call, as glibc's `vfprintf` holds it, so
     // another thread's output cannot land in the middle of this one's; and a
     // wide stream is refused, as glibc refuses it (-1, `errno` untouched).
@@ -239,6 +240,7 @@ fn format_to_sink(sink: Sink, fmt: *const u8, args: &mut Args) -> i32 {
     };
     let mut buf = [0u8; PRINTF_BUF_SIZE];
     let mut dst = FmtOutput::streaming(buf.as_mut_ptr(), PRINTF_BUF_SIZE, sink);
+    dst.errno = errno;
     let n = format_into(&mut dst, fmt, args);
     if n < 0 {
         return n;
@@ -1097,6 +1099,9 @@ struct FmtOutput {
     /// The sink refused a write; nothing more is written, and the call
     /// fails.
     failed: bool,
+    /// `errno` as the call began, which `%m` prints: glibc's
+    /// `save_errno`, taken before anything the call does can change it.
+    errno: i32,
 }
 
 impl FmtOutput {
@@ -1108,6 +1113,7 @@ impl FmtOutput {
             flushed: 0,
             sink: Sink::Bounded,
             failed: false,
+            errno: 0,
         }
     }
 
@@ -1119,6 +1125,7 @@ impl FmtOutput {
             flushed: 0,
             sink,
             failed: false,
+            errno: 0,
         }
     }
 
@@ -1287,6 +1294,8 @@ fn dispatch_spec(
     match ch {
         b'%' => emit_byte(dst, b'%'),
 
+        b'm' => format_errno(dst, spec),
+
         b'd' | b'i' => {
             let val = args.int() as i64;
             format_signed(dst, val, &spec.flags, spec.width, spec.precision);
@@ -1447,6 +1456,7 @@ fn dispatch_spec(
 /// had succeeded.
 fn format_core(out: *mut u8, out_size: usize, fmt: *const u8, args: &mut Args) -> i32 {
     let mut dst = FmtOutput::new(out, out_size);
+    dst.errno = crate::errno::get_errno();
     let n = format_into(&mut dst, fmt, args);
     if dst.failed { -1 } else { n }
 }
@@ -1744,6 +1754,53 @@ fn format_unsigned(
 }
 
 /// Format a string (%s).
+/// glibc's `%m`: the text of the `errno` the call began with, and `%#m`
+/// its name -- each formatted as `%s` formats a string. `%#m` of a number
+/// that names no error is the number, formatted as `%d` would format it
+/// (`vfprintf-process-arg.c`, `form_strerror`). No argument is taken.
+fn format_errno(dst: &mut FmtOutput, spec: &FormatSpec) {
+    let errnum = dst.errno;
+    if spec.flags.alt_form {
+        let name = crate::string::strerrorname_np(errnum);
+        if name.is_null() {
+            format_signed(dst, i64::from(errnum), &spec.flags, spec.width, spec.precision);
+        } else {
+            format_string(dst, name, &spec.flags, spec.width, spec.precision);
+        }
+        return;
+    }
+    if let Some(text) = crate::string::error_text(errnum) {
+        format_string(dst, text.as_ptr().cast(), &spec.flags, spec.width, spec.precision);
+        return;
+    }
+    // GNU `strerror_r`'s text for a number that names no error, in a buffer
+    // of the call's own, as glibc's work buffer is: `strerror`'s, which a
+    // caller may still be holding a pointer into, is left alone.
+    let mut text = [0u8; 32];
+    let prefix = b"Unknown error ";
+    let mut len = 0usize;
+    let mut put = |b: u8| {
+        if let Some(slot) = text.get_mut(len) {
+            *slot = b;
+            len = len.saturating_add(1);
+        }
+    };
+    for &b in prefix {
+        put(b);
+    }
+    if errnum < 0 {
+        put(b'-');
+    }
+    let mut digits = [0u8; NUM_BUF_SIZE];
+    let n = u64_to_dec(u64::from(errnum.unsigned_abs()), &mut digits);
+    if let Some(d) = digits.get(NUM_BUF_SIZE.saturating_sub(n)..) {
+        for &b in d {
+            put(b);
+        }
+    }
+    format_string(dst, text.as_ptr(), &spec.flags, spec.width, spec.precision);
+}
+
 fn format_string(
     dst: &mut FmtOutput,
     s: *const u8,
@@ -5583,5 +5640,54 @@ pub(crate) mod tests {
         );
         assert_eq!(strfrom_spec(b"%.G"), Ok((b'G', Some(0))));
         assert_eq!(strfrom_spec(b"%F"), Ok((b'F', None)));
+    }
+
+    /// Hex text as bytes: `""` for none.
+    fn dehex_m(text: &str) -> std::vec::Vec<u8> {
+        if text == "\"\"" {
+            return std::vec::Vec::new();
+        }
+        (0..text.len())
+            .step_by(2)
+            .map(|i| u8::from_str_radix(&text[i..i + 2], 16).expect("hex"))
+            .collect()
+    }
+
+    /// glibc's `%m` and `%#m`, every line of `printf_m_oracle.txt`
+    /// (`posix/tools/oracle/printf_m_harness.py`): ten `errno`s through
+    /// twenty-one formats. Until 2026-10-01 `%m` was printed as itself.
+    #[test]
+    fn percent_m_is_glibcs() {
+        let oracle = include_str!("printf_m_oracle.txt");
+        let mut failures = std::vec::Vec::new();
+        let mut compared = 0usize;
+        for line in oracle.lines() {
+            let (left, right) = line.split_once(" | ").expect("line");
+            let (errno, fmt_hex) = left.split_once(' ').expect("errno and format");
+            let (ret, out_hex) = right.split_once(' ').expect("result");
+            let errnum: i32 = errno.parse().expect("errno");
+            let mut fmt = dehex_m(fmt_hex);
+            fmt.push(0);
+            let want_ret: i32 = ret.parse().expect("ret");
+            let want = dehex_m(out_hex);
+            let mut buf = [0u8; 512];
+            let ints: &[u64] = if fmt.contains(&b'*') { &[12] } else { &[] };
+            let got_ret = with_args(ints, &[], |args| {
+                crate::errno::set_errno(errnum);
+                _snprintf_impl(buf.as_mut_ptr(), buf.len(), fmt.as_ptr(), args)
+            });
+            let got = usize::try_from(got_ret).ok().and_then(|n| buf.get(..n)).unwrap_or(&[]);
+            if got_ret != want_ret || got != want.as_slice() {
+                failures.push(std::format!(
+                    "errno {errnum}, {:?}: glibc {want_ret} {:?}, here {got_ret} {:?}",
+                    std::string::String::from_utf8_lossy(&fmt[..fmt.len() - 1]),
+                    std::string::String::from_utf8_lossy(&want),
+                    std::string::String::from_utf8_lossy(got)
+                ));
+            }
+            compared += 1;
+        }
+        assert_eq!(compared, 210, "the whole oracle");
+        assert!(failures.is_empty(), "{}", failures.join("\n"));
     }
 }

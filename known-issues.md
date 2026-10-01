@@ -179368,7 +179368,17 @@ rather than creating it.
 **Where:** `userspace/**`, `init/**`; the gatherer is `scripts/gather-notices.py`
 and its check runs in the boot test (`scripts/test-gather-notices.py`).
 
-## B-OILS-UNIT-TESTS-RUN-WHICHEVER-GREP-PATH-FINDS — six `osh` unit tests fail when `cargo test` is run from PowerShell on this machine (lane B, 2026-10-01) — **Status: OPEN (debt)**
+## B-OILS-UNIT-TESTS-RUN-WHICHEVER-GREP-PATH-FINDS — six `osh` unit tests fail when `cargo test` is run from PowerShell on this machine (lane B, 2026-10-01) — **FIXED** 2026-10-01
+
+**Resolution.** Every unit test that piped the shell's output through `grep`
+now captures it and keeps the lines in Rust (`lines_where` beside `run` in
+`interp.rs`'s tests) -- the ten sites that executed one, including the four
+whose answer happened to survive Embarcadero's `grep`. The one child left is
+`env`, which is what the test it sits in is about (what reaches a child's
+environment); its lines are read in Rust too. From PowerShell, with
+Embarcadero's `grep` first on `PATH`, all 1507 pass. (The `tests/corpus`
+scripts still use `grep`, as shell scripts do, and are not affected: the
+differ runs bash and `osh` under the same `PATH`.)
 
 **In short:** some of `osh`'s unit tests pipe the shell's output through an
 external `grep` to pick out the lines under test (22 sites in

@@ -5994,6 +5994,11 @@ fn dirfd_to_guest_dir(dirfd: i32) -> Result<crate::fs::path::PathBuf, SyscallRes
     if entry.kind != HandleKind::File {
         return Err(linux_err(errno::ENOTDIR));
     }
+    // A descriptor of a file is no directory, whatever its name names now:
+    // `ENOTDIR` before the name is looked at.
+    if !crate::fs::handle::is_directory(entry.raw_handle) {
+        return Err(linux_err(errno::ENOTDIR));
+    }
     let host_path = match crate::fs::handle::handle_path(entry.raw_handle) {
         Ok(p) => p,
         Err(e) => return Err(linux_err(linux_errno_for(e))),
@@ -43407,15 +43412,17 @@ fn sys_fchdir(args: &SyscallArgs) -> SyscallResult {
         Ok(e) => e,
         Err(r) => return r,
     };
-    if entry.kind != HandleKind::File {
+    if entry.kind != HandleKind::File || !crate::fs::handle::is_directory(entry.raw_handle) {
         return linux_err(errno::ENOTDIR);
     }
     let path = match crate::fs::handle::handle_path(entry.raw_handle) {
         Ok(p) => p,
         Err(e) => return linux_err(linux_errno_for(e)),
     };
-    // Confirm the backing object is still a directory.
-    match crate::fs::Vfs::stat(&path) {
+    // Confirm the backing object is still a directory. `_resolved`: the
+    // handle's path is the host path captured at open, and `Vfs::stat` would
+    // apply a jailed caller's jail to it a second time.
+    match crate::fs::Vfs::stat_resolved(&path) {
         Ok(stat_entry) => {
             if stat_entry.entry_type != crate::fs::EntryType::Directory {
                 return linux_err(errno::ENOTDIR);
@@ -43509,19 +43516,21 @@ fn sys_flock(args: &SyscallArgs) -> SyscallResult {
         return linux_err(errno::EBADF);
     }
     let handle = entry.raw_handle;
-    let path = match crate::fs::handle::handle_path(handle) {
-        Ok(p) => p,
+    // Keyed on the file the descriptor holds, not on what its name names now
+    // (`fs::handle::lock_key`); the name is the resolved host path captured
+    // at open, so no namespace is applied twice.
+    let (path, id) = match crate::fs::handle::lock_key(handle) {
+        Ok(k) => k,
         Err(e) => return linux_err(linux_errno_for(e)),
     };
-
-    // `handle_path` returns the resolved host path captured at open, so use
-    // the _resolved workers — re-resolving here would double-apply a chroot
-    // jail prefix and key the lock on the wrong path.
     let owner = crate::fs::vfs::flock_description_owner(handle);
     let result = match lock_type {
-        Some(lt) if op & LOCK_NB != 0 => crate::fs::Vfs::flock_resolved(&path, owner, lt),
-        Some(lt) => crate::fs::Vfs::flock_wait_resolved(&path, owner, lt),
-        None => crate::fs::Vfs::funlock_resolved(&path, owner),
+        Some(lt) if op & LOCK_NB != 0 => crate::fs::Vfs::flock_key(&path, id, owner, lt),
+        Some(lt) => crate::fs::Vfs::flock_wait_key(&path, id, owner, lt),
+        None => {
+            crate::fs::Vfs::funlock_key(&path, id, owner);
+            Ok(())
+        }
     };
     match result {
         Ok(()) => SyscallResult::ok(0),

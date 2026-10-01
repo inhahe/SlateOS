@@ -180577,6 +180577,34 @@ data stays readable through the handle, and nowhere else, until the close.
   - On FAT and the pseudo filesystems a handle still goes by name, so
     everything above applies to them as before.
 
+**Second pass, 2026-10-01** -- what steps 1-4 left, found while building
+step 5:
+- **A close racing a call could free the file under it.** A call took a
+  copy of the handle's `FileObject` and let go of the table; a close on
+  another thread then gave the hold back at once. For a file deleted while
+  open that freed the inode -- on ext4, its blocks back in the free pool --
+  while the call was still reading or writing it. Now the hold is a
+  `FileHold` behind an `Arc`, shared by the descriptions and by each call
+  in progress, and given back by the last of them, as Linux's `fdget`
+  keeps a `struct file` alive across a syscall. Test: `test_held_files`
+  rung 7 (the file and its mount outlive the close while a call has it).
+- **`handle_path` handed out a name the file no longer had.** Every caller
+  acting by a handle's name -- the Linux `fchmod`, `fchown`, `ftruncate`,
+  `fallocate`, `futimens`, `fexecve`, `fstatfs` -- acted on whatever had
+  the name now. `handle_path` now checks that the name still names the held
+  file (`NotFound` if not). `handle_name` is the unchecked name, for
+  display: `/proc/<pid>/fd`, `/proc/<pid>/maps`, `SYS_FS_HANDLE_PATH`. Test:
+  rung 8.
+- **`flock` keyed on the open-time name.** A file renamed while open kept
+  no lock against a handle opened under its new name, and a new file under
+  its old name inherited them. The handle calls (native
+  `SYS_FS_FLOCK_HANDLE`, Linux `flock`, the release at close) now key on
+  `fs::handle::lock_key`: the identity of the file held. Test: rung 9.
+- **Linux `fchdir` and a file descriptor as a directory.** A descriptor of
+  a file is `ENOTDIR` before its name is looked at, and `fchdir`'s
+  directory check no longer applies a jailed caller's jail twice
+  (`stat_resolved`).
+
 ### A-LINUX-FSTAT-OF-A-FILE-WAS-MADE-UP -- 2026-10-01 -- FIXED the same day (lane A)
 
 **In short:** a Linux program asking about a file it had open got an

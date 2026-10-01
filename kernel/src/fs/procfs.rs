@@ -3037,7 +3037,7 @@ fn render_maps(vmas: &[crate::mm::vma::Vma]) -> Vec<u8> {
                 *file_offset,
                 file_id.map_or(0, |f| crate::fs::vfs::dev_of(f.fs_id)),
                 file_id.map_or(0, |f| f.ino),
-                crate::fs::handle::handle_path(*handle).ok(),
+                crate::fs::handle::handle_name(*handle).ok(),
             ),
             _ => (0, 0, 0, None),
         };
@@ -3567,7 +3567,7 @@ fn fd_link_target(entry: &crate::proc::linux_fd::FdEntry) -> PathBuf {
     use crate::proc::linux_fd::HandleKind;
     match entry.kind {
         HandleKind::Console => PathBuf::from("/dev/console"),
-        HandleKind::File => crate::fs::handle::handle_path(entry.raw_handle)
+        HandleKind::File => crate::fs::handle::handle_name(entry.raw_handle)
             .unwrap_or_else(|_| PathBuf::from("anon_inode:[file]")),
         HandleKind::Pipe => PathBuf::from(format!("pipe:[{}]", entry.raw_handle)),
         HandleKind::EventFd => PathBuf::from("anon_inode:[eventfd]"),

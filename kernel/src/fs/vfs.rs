@@ -1193,14 +1193,11 @@ struct MountPoint {
 ///
 /// While one exists its inode is pinned (`FileSystem::pin_ino`): a rename
 /// leaves the holder on the file, and unlinking its last name removes the
-/// name while the file lives on until the last release
-/// ([`Vfs::release_object`]). It also holds its mount, which cannot be
-/// unmounted while it does.
+/// name while the file lives on until the hold goes. It also holds its
+/// mount, which cannot be unmounted while it does.
 ///
-/// A clone is a second reference for one call's use, not a second hold:
-/// each hold comes from [`Vfs::open_object`] or [`Vfs::reopen_object`] and
-/// goes back through one [`Vfs::release_object`].
-#[derive(Clone)]
+/// Only ever inside a [`FileHold`], which gives the hold back when it is
+/// dropped. Not `Clone`, so no copy can give it back a second time.
 pub struct FileObject {
     fs: MountedFs,
     fs_id: u64,
@@ -1226,6 +1223,59 @@ impl core::fmt::Debug for FileObject {
             .field("ino", &self.ino)
             .finish_non_exhaustive()
     }
+}
+
+/// One hold on an open regular file ([`FileObject`]): the file stays, and
+/// its mount cannot be unmounted, until the hold is dropped.
+///
+/// `fs::handle` keeps each in an `Arc`, shared by the open file descriptions
+/// of the file it opened and by every call in progress through one of them.
+/// So a close on one thread, racing a read or a write on another, cannot
+/// give the file back under the call: the last reference to go gives it
+/// back, as Linux's `fdget` keeps a `struct file` alive across a syscall.
+/// Until 2026-10-01 the final close gave it back at once, and a call already
+/// in the filesystem went on with an inode that might be freed: an unlinked
+/// file's blocks back in the free pool, still being written.
+///
+/// Never to be dropped with `fs::handle`'s table lock held: giving the hold
+/// back takes the filesystem's lock and the mount table's.
+#[derive(Debug)]
+pub struct FileHold(FileObject);
+
+impl core::ops::Deref for FileHold {
+    type Target = FileObject;
+
+    fn deref(&self) -> &FileObject {
+        &self.0
+    }
+}
+
+impl Drop for FileHold {
+    fn drop(&mut self) {
+        release_hold(&self.0);
+    }
+}
+
+/// Give back one hold ([`FileHold`]'s drop). A file whose last name went
+/// while it was held goes with its last hold; the mount may be unmounted
+/// once none is left.
+fn release_hold(obj: &FileObject) {
+    obj.fs.lock().unpin_ino(obj.ino);
+    if let Some(name) = note_release(obj.id()) {
+        // The last hold on a file whose last name went while it was held:
+        // the file is gone now. Its cached pages go, since its inode number
+        // may be given to another file, and so does the state kept about it,
+        // deferred at the unlink (`defer_forget_if_held`).
+        crate::mm::page_cache::invalidate_identity(obj.fs_id, obj.ino);
+        super::perfile::object_unlinked(
+            super::perfile::Unlinked {
+                id: Some(obj.id()),
+                last_name: true,
+            },
+            &name,
+        );
+    }
+    release_mount_hold(obj.fs_id);
 }
 
 /// Give back one hold on mount `fs_id` (`MountPoint::objects`).
@@ -1260,8 +1310,8 @@ fn check_writable_fs(fs_id: u64) -> KernelResult<()> {
 /// for a held file is its last release, not the unlink: a write-sealed file
 /// unlinked while open must stay sealed to the handle still writing it.
 /// `perfile::object_unlinked` asks [`defer_forget_if_held`]; the last
-/// [`Vfs::release_object`] then ends it, and drops the file's cached pages,
-/// since its inode number may be given to another file. A leaf lock.
+/// [`FileHold`] to go then ends it, and drops the file's cached pages, since
+/// its inode number may be given to another file. A leaf lock.
 struct Held {
     holds: usize,
     unlinked_as: Option<PathBuf>,
@@ -3645,7 +3695,7 @@ impl Vfs {
     /// # Errors
     ///
     /// The filesystem's own, from looking the file up or pinning it.
-    pub fn open_object(path: impl AsRef<Path>) -> KernelResult<Option<FileObject>> {
+    pub fn open_object(path: impl AsRef<Path>) -> KernelResult<Option<FileHold>> {
         let path = path.as_ref();
         let (fs, fs_id, relative) = {
             let mut vfs = VFS.lock();
@@ -3666,7 +3716,7 @@ impl Vfs {
         match pinned {
             Ok(Some(ino)) => {
                 note_hold(FileId { fs_id, ino });
-                Ok(Some(FileObject { fs, fs_id, ino }))
+                Ok(Some(FileHold(FileObject { fs, fs_id, ino })))
             }
             Ok(None) | Err(KernelError::NotSupported) => {
                 release_mount_hold(fs_id);
@@ -3677,53 +3727,6 @@ impl Vfs {
                 Err(e)
             }
         }
-    }
-
-    /// A second hold on `obj`'s file, for a second open file description of
-    /// it (`fs::handle::dup`). Given back by its own [`release_object`].
-    ///
-    /// [`release_object`]: Self::release_object
-    ///
-    /// # Errors
-    ///
-    /// `NotFound` if the mount has gone; the filesystem's own from pinning.
-    pub fn reopen_object(obj: &FileObject) -> KernelResult<FileObject> {
-        {
-            let mut vfs = VFS.lock();
-            let mp = vfs
-                .mounts
-                .iter_mut()
-                .find(|m| m.fs_id == obj.fs_id)
-                .ok_or(KernelError::NotFound)?;
-            mp.objects = mp.objects.saturating_add(1);
-        }
-        if let Err(e) = obj.fs.lock().pin_ino(obj.ino) {
-            release_mount_hold(obj.fs_id);
-            return Err(e);
-        }
-        note_hold(obj.id());
-        Ok(obj.clone())
-    }
-
-    /// Give back one hold. A file whose last name went while it was held goes
-    /// with its last hold; the mount may be unmounted once none is left.
-    pub fn release_object(obj: FileObject) {
-        obj.fs.lock().unpin_ino(obj.ino);
-        if let Some(name) = note_release(obj.id()) {
-            // The last hold on a file whose last name went while it was held:
-            // the file is gone now. Its cached pages go, since its inode
-            // number may be given to another file, and so does the state kept
-            // about it, deferred at the unlink (`defer_forget_if_held`).
-            crate::mm::page_cache::invalidate_identity(obj.fs_id, obj.ino);
-            super::perfile::object_unlinked(
-                super::perfile::Unlinked {
-                    id: Some(obj.id()),
-                    last_name: true,
-                },
-                &name,
-            );
-        }
-        release_mount_hold(obj.fs_id);
     }
 
     /// The file's metadata now, its device included. `nlinks` is 0 once its
@@ -6257,6 +6260,25 @@ impl Vfs {
         flock_attempt(path, id, owner, lock_type)
     }
 
+    /// The `flock` calls for an open file, keyed on the file it holds --
+    /// `fs::handle::lock_key` -- rather than on what its name names now. A
+    /// file renamed while open keeps its locks, and a new file under its old
+    /// name is not locked by them; they keyed on the open-time name until
+    /// 2026-10-01. `path` is the name a lock is shown under (`/proc/locks`),
+    /// and the key for a file with no identity.
+    ///
+    /// # Errors
+    ///
+    /// As [`flock_resolved`](Self::flock_resolved).
+    pub fn flock_key(
+        path: &Path,
+        id: Option<FileId>,
+        owner: u64,
+        lock_type: LockType,
+    ) -> KernelResult<()> {
+        flock_attempt(path, id, owner, lock_type)
+    }
+
     /// [`flock_resolved`](Self::flock_resolved), waiting while another
     /// owner's lock is in the way: `flock` without `LOCK_NB`.
     ///
@@ -6276,11 +6298,27 @@ impl Vfs {
         owner: u64,
         lock_type: LockType,
     ) -> KernelResult<()> {
-        use crate::ipc::waiters;
-
         let path = path.as_ref();
         // Resolved once, before any lock, as in `flock_resolved`.
         let id = Self::file_identity_resolved(path).unwrap_or(None);
+        Self::flock_wait_key(path, id, owner, lock_type)
+    }
+
+    /// [`flock_key`](Self::flock_key), waiting while another owner's lock is
+    /// in the way, as [`flock_wait_resolved`](Self::flock_wait_resolved)
+    /// waits.
+    ///
+    /// # Errors
+    ///
+    /// As [`flock_wait_resolved`](Self::flock_wait_resolved).
+    pub fn flock_wait_key(
+        path: &Path,
+        id: Option<FileId>,
+        owner: u64,
+        lock_type: LockType,
+    ) -> KernelResult<()> {
+        use crate::ipc::waiters;
+
         // The uncontended case takes no lock on the waiter list at all.
         match flock_attempt(path, id, owner, lock_type) {
             Err(KernelError::WouldBlock) => {}
@@ -6337,6 +6375,13 @@ impl Vfs {
         // Resolved before `LOCK_TABLE` is taken, never under it: see
         // `flock_resolved`.
         let id = Self::file_identity_resolved(path).unwrap_or(None);
+        Self::funlock_key(path, id, owner);
+        Ok(())
+    }
+
+    /// [`flock_key`](Self::flock_key)'s release, waking whoever was waiting.
+    /// Nothing for an owner holding no lock on the file.
+    pub fn funlock_key(path: &Path, id: Option<FileId>, owner: u64) {
         let released = {
             let mut table = LOCK_TABLE.lock();
             let mut released = false;
@@ -6356,7 +6401,6 @@ impl Vfs {
         if released {
             wake_flock_waiters(path, id);
         }
-        Ok(())
     }
 
     /// Release every advisory lock one owner holds: a process's at its

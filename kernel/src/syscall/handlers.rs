@@ -13434,17 +13434,20 @@ pub fn sys_fs_flock_handle(args: &SyscallArgs) -> SyscallResult {
     if let Err(e) = require_file_handle_owner(handle) {
         return SyscallResult::err(e);
     }
-    // The host path captured at open: the `_resolved` workers, so a jailed
-    // caller's jail is not applied twice.
-    let path = match crate::fs::handle::handle_path(handle) {
-        Ok(p) => p,
+    // Keyed on the file the handle holds, not on what its name names now
+    // (`fs::handle::lock_key`).
+    let (path, id) = match crate::fs::handle::lock_key(handle) {
+        Ok(k) => k,
         Err(e) => return SyscallResult::err(e),
     };
     let owner = crate::fs::vfs::flock_description_owner(handle);
     let result = match lock_type {
-        None => crate::fs::Vfs::funlock_resolved(&path, owner),
-        Some(lt) if op & FLOCK_NB != 0 => crate::fs::Vfs::flock_resolved(&path, owner, lt),
-        Some(lt) => crate::fs::Vfs::flock_wait_resolved(&path, owner, lt),
+        None => {
+            crate::fs::Vfs::funlock_key(&path, id, owner);
+            Ok(())
+        }
+        Some(lt) if op & FLOCK_NB != 0 => crate::fs::Vfs::flock_key(&path, id, owner, lt),
+        Some(lt) => crate::fs::Vfs::flock_wait_key(&path, id, owner, lt),
     };
     match result {
         Ok(()) => SyscallResult::ok(0),
@@ -13774,7 +13777,9 @@ pub fn sys_fs_handle_path(args: &SyscallArgs) -> SyscallResult {
         return SyscallResult::err(e);
     }
 
-    let path = match crate::fs::handle::handle_path(handle) {
+    // The name the handle was opened under, for the caller to show; not
+    // checked to name its file still (`fs::handle::handle_name`).
+    let path = match crate::fs::handle::handle_name(handle) {
         Ok(p) => p,
         Err(e) => return SyscallResult::err(e),
     };

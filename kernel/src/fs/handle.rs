@@ -20,6 +20,7 @@
 
 use crate::sync::Mutex;
 use alloc::collections::BTreeMap;
+use alloc::sync::Arc;
 use core::sync::atomic::{AtomicU64, Ordering};
 
 use crate::error::{KernelError, KernelResult};
@@ -167,9 +168,13 @@ struct OpenFile {
     /// filesystem allows (`Vfs::open_object`): I/O goes through it, so a
     /// rename or an unlink of `path` leaves this handle on its file. `None`
     /// for a directory, and for a file on a filesystem without stable inodes
-    /// (FAT, the pseudo filesystems), which still go by `path`. Given back at
-    /// the description's final close.
-    object: Option<crate::fs::vfs::FileObject>,
+    /// (FAT, the pseudo filesystems), which still go by `path`.
+    ///
+    /// Shared: a `dup` of the description shares it, and each call in
+    /// progress through the handle takes a reference for its length, so the
+    /// hold goes back with the last of them -- never under a call that a close
+    /// raced (`FileHold`).
+    object: Option<Arc<crate::fs::vfs::FileHold>>,
     /// Flags this file was opened with.
     flags: OpenFlags,
     /// Number of owners sharing this open file description.
@@ -658,7 +663,7 @@ fn open_resolved(norm: PathBuf, flags: OpenFlags, create_mode: u16) -> KernelRes
 
 /// The file's size now: from the file held, or by name for one held by
 /// name.
-fn current_size(object: Option<&crate::fs::vfs::FileObject>, path: &Path) -> KernelResult<u64> {
+fn current_size(object: Option<&crate::fs::vfs::FileHold>, path: &Path) -> KernelResult<u64> {
     match object {
         Some(obj) => crate::fs::Vfs::object_metadata(obj).map(|m| m.size),
         None => crate::fs::Vfs::metadata_resolved(path).map(|m| m.size),
@@ -700,14 +705,16 @@ pub fn close(handle: u64) -> KernelResult<()> {
     };
 
     if let Some((ref p, writable, is_dir, object)) = closed {
-        // Release any advisory lock this handle holds on the file path.
-        // Using the handle ID as the owner (consistent with how flock
-        // syscalls pass owner IDs).  Best-effort: ignore errors from
-        // lock release.
-        // `p` is the resolved host path captured at open; use the _resolved
-        // worker so we don't re-apply namespace translation (double-jail).
-        let _ =
-            crate::fs::Vfs::funlock_resolved(p, crate::fs::vfs::flock_description_owner(handle));
+        // Release the `flock` lock this description holds, keyed on its file
+        // as it was taken (`lock_key`): the file held, else what its name --
+        // the resolved host path captured at open, so no namespace is
+        // applied twice -- names now. Best effort: a release has nothing to
+        // report.
+        let id = match &object {
+            Some(held) => Some(held.id()),
+            None => crate::fs::Vfs::file_identity_resolved(p).unwrap_or(None),
+        };
+        crate::fs::Vfs::funlock_key(p, id, crate::fs::vfs::flock_description_owner(handle));
         // And the fcntl OFD record locks. An OFD lock belongs to the open
         // file description, so the final close of that description is
         // exactly when it ends -- that is what distinguishes it from a
@@ -722,11 +729,11 @@ pub fn close(handle: u64) -> KernelResult<()> {
         // lock-free on the matching CLOSE interest count.
         crate::fs::notify::emit_closed(p, writable, is_dir);
 
-        // Last: the hold on the file itself. A file whose last name went
-        // while it was open goes now, with its last description.
-        if let Some(obj) = object {
-            crate::fs::Vfs::release_object(obj);
-        }
+        // Last: this description's reference to the file's hold. A file
+        // whose last name went while it was open goes with the last
+        // reference -- here, unless another description or a call still in
+        // progress through this one has one.
+        drop(object);
     }
 
     Ok(())
@@ -847,7 +854,7 @@ pub fn peek_write_offset(handle: u64) -> KernelResult<u64> {
     // The size is looked up with the table lock released: see
     // `advance_offset`.
     if append {
-        current_size(object.as_ref(), &path)
+        current_size(object.as_deref(), &path)
     } else {
         Ok(offset)
     }
@@ -1144,7 +1151,7 @@ pub fn seek(handle: u64, from: SeekFrom) -> KernelResult<u64> {
                 }
                 (file.object.clone(), file.path.clone())
             };
-            current_size(object.as_ref(), &path)?
+            current_size(object.as_deref(), &path)?
         }
         SeekFrom::Start(_) | SeekFrom::Current(_) => 0,
     };
@@ -1325,12 +1332,8 @@ pub fn dup(handle: u64) -> KernelResult<u64> {
         set_dir_cursor(id, offset)?;
         Ok(id)
     } else {
-        // A second description of the same file holds it as well: its own
-        // hold, given back at its own final close.
-        let object = object
-            .as_ref()
-            .map(crate::fs::Vfs::reopen_object)
-            .transpose()?;
+        // A second description of the same file shares its hold: the file
+        // stays until the last of them, and every call through them, is done.
         allocate_handle_holding(path, offset, size, flags, object)
     }
 }
@@ -1365,13 +1368,73 @@ pub fn dup_shared(handle: u64) -> KernelResult<u64> {
     Ok(handle)
 }
 
-/// Get the VFS path associated with an open handle.
+/// The name an open handle was opened under, **checked to name its file
+/// still**: for a call that must act on the file by name (`fexecve`, a
+/// directory handle as the base of a `*at` path).
 ///
-/// Useful for diagnostics and `/proc/<pid>/fd` equivalent.
+/// `NotFound` when it no longer does -- the file renamed or deleted since the
+/// open -- rather than the name, which may be another file's by now: a call
+/// acting on it would act on that file. A handle with no file held (a
+/// directory, or a file on a filesystem without inode numbers) answers its
+/// name unchecked, there being nothing to check it against; directories have
+/// [`pinned_dir`] for that.
+///
+/// Until 2026-10-01 this answered the name unchecked for every handle, so
+/// the Linux `fchmod`, `fchown`, `ftruncate`, `fallocate` and `futimens` of
+/// a file renamed while open acted on whatever had its old name.
+///
+/// [`handle_name`] is the name for display.
+///
+/// # Errors
+///
+/// `InvalidHandle` for a handle that is not open; `NotFound` as above; the
+/// filesystem's own, from the check.
 pub fn handle_path(handle: u64) -> KernelResult<PathBuf> {
+    let (object, path) = {
+        let table = OPEN_FILES.lock();
+        let file = table.get(&handle).ok_or(KernelError::InvalidHandle)?;
+        (file.object.clone(), file.path.clone())
+    };
+    if let Some(held) = &object {
+        match crate::fs::Vfs::file_identity_resolved(&path) {
+            Ok(Some(id)) if id == held.id() => {}
+            Ok(_) | Err(KernelError::NotFound) => return Err(KernelError::NotFound),
+            Err(e) => return Err(e),
+        }
+    }
+    Ok(path)
+}
+
+/// The name an open handle was opened under, for display: `/proc/<pid>/fd`,
+/// `/proc/<pid>/maps`, `SYS_FS_HANDLE_PATH`, the name a lock is shown under.
+///
+/// Not checked: a held file may have been renamed or deleted since, and
+/// another file may have its old name. To act on the file by name, use
+/// [`handle_path`]; better, act through the handle.
+///
+/// # Errors
+///
+/// `InvalidHandle` for a handle that is not open.
+pub fn handle_name(handle: u64) -> KernelResult<PathBuf> {
     let table = OPEN_FILES.lock();
     let file = table.get(&handle).ok_or(KernelError::InvalidHandle)?;
     Ok(file.path.clone())
+}
+
+/// What an open handle's `flock` locks are keyed on (`Vfs::flock_key`): the
+/// name it was opened under, to show, and the identity of the file it holds,
+/// whatever its name now. A file held by name has the identity its name has
+/// now, as before.
+///
+/// # Errors
+///
+/// `InvalidHandle` for a handle that is not open.
+pub fn lock_key(handle: u64) -> KernelResult<(PathBuf, Option<crate::fs::vfs::FileId>)> {
+    let path = handle_name(handle)?;
+    // No identity keys by the name, as for a file on a filesystem without
+    // inode numbers.
+    let id = file_identity(handle).unwrap_or(None);
+    Ok((path, id))
 }
 
 /// Resolve the stable system-wide file identity of an open handle.
@@ -1471,26 +1534,26 @@ fn allocate_handle(path: PathBuf, offset: u64, size: u64, flags: OpenFlags) -> K
     // The file itself, held before the handle exists, so no I/O through the
     // handle can happen by name. Taken without the table lock: it locks the
     // mount table and the filesystem.
-    let object = crate::fs::Vfs::open_object(&path)?;
+    let object = crate::fs::Vfs::open_object(&path)?.map(Arc::new);
     allocate_handle_holding(path, offset, size, flags, object)
 }
 
 /// [`allocate_handle`] with the hold already taken (or none). A failure here
-/// gives the hold back.
+/// gives this reference to the hold back.
 fn allocate_handle_holding(
     path: PathBuf,
     offset: u64,
     size: u64,
     flags: OpenFlags,
-    object: Option<crate::fs::vfs::FileObject>,
+    object: Option<Arc<crate::fs::vfs::FileHold>>,
 ) -> KernelResult<u64> {
     let mut table = OPEN_FILES.lock();
 
     if table.len() >= MAX_OPEN_FILES {
+        // The table lock first: dropping the last reference to a hold gives
+        // it back, which must not happen under it (`FileHold`).
         drop(table);
-        if let Some(obj) = object {
-            crate::fs::Vfs::release_object(obj);
-        }
+        drop(object);
         return Err(KernelError::OutOfMemory);
     }
 
@@ -1702,6 +1765,94 @@ fn test_held_files(skips: &mut crate::fs::selftest::Skips) -> KernelResult<()> {
             "no /tmp to mount a scratch filesystem under",
         );
     }
+
+    // 7. A call in progress keeps its file, and the file's mount, through a
+    // close that races it: the reference the call took is the last hold.
+    if Vfs::stat("/tmp").is_ok() {
+        crate::fs::memfs::mount(MNT)?;
+        let inner = "/tmp/held_mnt/g";
+        Vfs::write_file(inner, b"kept")?;
+        let h = open(inner, OpenFlags::READ)?;
+        Vfs::remove(inner)?;
+        // What a read takes as it starts, before the close on "another
+        // thread".
+        let in_flight = OPEN_FILES.lock().get(&h).and_then(|f| f.object.clone());
+        let _ = close(h);
+        let busy = Vfs::unmount(MNT);
+        let read_back = in_flight
+            .as_deref()
+            .map(|held| Vfs::object_read(held, Path::new(inner), 0, 16));
+        drop(in_flight);
+        let freed = Vfs::unmount(MNT);
+        match (busy, read_back, freed) {
+            (Err(KernelError::DeviceBusy), Some(Ok(data)), Ok(())) if data == b"kept" => {}
+            other => {
+                // Best effort, so a failure does not leave the scratch mount.
+                let _ = Vfs::unmount(MNT);
+                return fail("a close racing a call in progress", &other);
+            }
+        }
+        crate::serial_println!(
+            "[fs::handle]   held: a call in progress outlives a racing close: OK"
+        );
+    } else {
+        skips.record(
+            "held files: a racing close",
+            "no /tmp to mount a scratch filesystem under",
+        );
+    }
+
+    // 8. A name the file no longer has is not handed out as its own:
+    // `handle_path` refuses it, `handle_name` still shows it.
+    Vfs::write_file(A, b"one")?;
+    let h = open(A, OpenFlags::READ)?;
+    Vfs::rename(A, B)?;
+    Vfs::write_file(A, b"two")?;
+    let checked = handle_path(h);
+    let shown = handle_name(h);
+    let _ = close(h);
+    let _ = Vfs::remove(A);
+    let _ = Vfs::remove(B);
+    match (checked, shown) {
+        (Err(KernelError::NotFound), Ok(name)) if name.as_path() == Path::new(A) => {}
+        other => return fail("the name of a file renamed while open", &other),
+    }
+    crate::serial_println!(
+        "[fs::handle]   held: a name another file has now is not the handle's: OK"
+    );
+
+    // 9. `flock` keys on the file: a lock through a handle on a file since
+    // renamed meets one through a handle opened under the new name, and not
+    // one on the new file under the old name.
+    Vfs::write_file(A, b"")?;
+    let first = open(A, OpenFlags::READ)?;
+    Vfs::rename(A, B)?;
+    Vfs::write_file(A, b"")?;
+    let second = open(B, OpenFlags::READ)?;
+    let stranger = open(A, OpenFlags::READ)?;
+    let take = |h: u64| -> KernelResult<()> {
+        let (name, id) = lock_key(h)?;
+        Vfs::flock_key(
+            &name,
+            id,
+            crate::fs::vfs::flock_description_owner(h),
+            crate::fs::LockType::Exclusive,
+        )
+    };
+    let taken = take(first);
+    let refused = take(second);
+    let other_file = take(stranger);
+    // The closes release the locks, keyed as they were taken.
+    let _ = close(stranger);
+    let _ = close(second);
+    let _ = close(first);
+    let _ = Vfs::remove(A);
+    let _ = Vfs::remove(B);
+    match (taken, refused, other_file) {
+        (Ok(()), Err(KernelError::WouldBlock), Ok(())) => {}
+        other => return fail("flock on a file renamed while open", &other),
+    }
+    crate::serial_println!("[fs::handle]   held: flock follows the file, not its name: OK");
     Ok(())
 }
 

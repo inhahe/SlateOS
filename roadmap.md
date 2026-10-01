@@ -5680,8 +5680,8 @@ _Port ext4 first. Don't write a custom filesystem._
   - [ ] btrfs/mkfs.btrfs/btrfs-convert: btrfs filesystem tools (14 subcommands, RAID profiles, scrub/balance/quota/qgroup, 4517 lines, 248 tests)
   - [ ] flatpak: application manager (22 subcommands, remote management, build pipeline, permissions, 3046 lines, 214 tests)
   - [x] firejail/firemon/firecfg: security sandbox (profile system, namespace isolation, network filtering, 15 app profiles, 3487 lines, 168 tests)
-  - [x] apparmor (aa-status/aa-enforce/aa-complain/aa-disable/aa-genprof/aa-logprof/aa-unconfined/apparmor_parser): MAC security (profile parser, mode switching, audit log analysis, 3306 lines, 139 tests)
-  - [x] selinux (getenforce/setenforce/sestatus/semanage/setsebool/getsebool/restorecon/chcon/seinfo/sesearch/audit2allow): SELinux tools (11 personalities, policy query, context management, 3748 lines, 150 tests)
+  - [ ] apparmor (aa-status/aa-enforce/aa-complain/aa-disable/aa-genprof/aa-logprof/aa-unconfined/apparmor_parser): MAC security (profile parser, mode switching, audit log analysis, 3306 lines, 139 tests) -- **deleted 2026-10-01** (design-decisions §1045, §1006): SlateOS has no LSM, so every command acted on a /sys interface that does not exist
+  - [ ] selinux (getenforce/setenforce/sestatus/semanage/setsebool/getsebool/restorecon/chcon/seinfo/sesearch/audit2allow): SELinux tools (11 personalities, policy query, context management, 3748 lines, 150 tests) -- **deleted 2026-10-01** (design-decisions §1045, §1006): SlateOS has no LSM, so every command acted on a /sys interface that does not exist
   - [ ] snapper/snapper-timeline/snapper-cleanup: filesystem snapshot management (pre/post pairs, timeline/number/empty-pre-post cleanup, 3174 lines, 145 tests)
   - [x] tuned/tuned-adm/tuned-gui: system tuning daemon (10 builtin profiles, dynamic tuning, verify, 806 lines)
   - [x] cpupower/cpufreq-info/cpufreq-set/turbostat: CPU frequency/power control (topology discovery, governor management, 661 lines)

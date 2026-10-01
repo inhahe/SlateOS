@@ -21,7 +21,6 @@
 
 userspace/acl/src/main.rs:argv-as-string
 userspace/acpi/src/main.rs:argv-as-string
-userspace/apparmor/src/main.rs:argv-as-string
 userspace/arp/src/main.rs:argv-as-string
 userspace/at/src/main.rs:argv-as-string
 userspace/audit/src/main.rs:argv-as-string
@@ -130,7 +129,6 @@ userspace/rsync/src/main.rs:argv-as-string
 userspace/sanitize/src/main.rs:argv-as-string
 userspace/scp/src/main.rs:argv-as-string
 userspace/screen/src/main.rs:argv-as-string
-userspace/selinux/src/main.rs:argv-as-string
 userspace/service/src/main.rs:argv-as-string
 userspace/sftp/src/main.rs:argv-as-string
 userspace/shuf/src/main.rs:argv-as-string

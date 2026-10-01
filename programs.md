@@ -10,15 +10,14 @@ A new program is recorded here in the commit that creates it (§1053): run
 the script, commit `programs.md` with the program. `--check` fails when the
 two disagree.
 
-**469 programs; 88 on the image, 6 carried inside the kernel.**
+**467 programs; 88 on the image, 6 carried inside the kernel.**
 
-## Userland utilities and services (`userspace/`, lane B) -- 314
+## Userland utilities and services (`userspace/`, lane B) -- 312
 
 | Program | What it does | On image | Crate | Also answers to |
 |---|---|---|---|---|
 | `acl` | POSIX access control list utility. |  |  |  |
 | `acpi` | Power management info (acpi/acpid) |  |  |  |
-| `apparmor` | AppArmor mandatory access control utilities. |  |  | `aa-complain`, `aa-disable`, `aa-enforce`, `aa-genprof`, `aa-logprof`, `aa-status`, `aa-unconfined`, `apparmor_parser` |
 | `ar` | Archive and Object File Tools | yes |  | `ranlib`, `strip` |
 | `arch` | Print machine architecture. |  | `coreutils` |  |
 | `arp` | ARP Table Management Utility |  |  |  |
@@ -240,7 +239,6 @@ two disagree.
 | `scp` | Secure File Copy (scp) |  |  |  |
 | `screen` | Terminal Multiplexer |  |  |  |
 | `sed` | The stream editor. | yes | `coreutils` |  |
-| `selinux` | SELinux security tools. |  |  | `audit2allow`, `chcon`, `getenforce`, `getsebool`, `restorecon`, `seinfo`, `semanage`, `sesearch`, `sestatus`, `setenforce`, `setsebool` |
 | `seq` | Print numbers from FIRST to LAST, in steps of INCREMENT. | yes | `coreutils` |  |
 | `service` | Service Management CLI |  |  |  |
 | `sftp` | `Slate OS` SFTP Client |  |  |  |

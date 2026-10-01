@@ -8,14 +8,6 @@
 # Do NOT add a line to turn a red `--check` green: a new entry means a new
 # personality was written without a producer, which is the defect itself.
 
-apparmor:aa-complain
-apparmor:aa-disable
-apparmor:aa-enforce
-apparmor:aa-genprof
-apparmor:aa-logprof
-apparmor:aa-status
-apparmor:aa-unconfined
-apparmor:apparmor_parser
 ar:ranlib
 ar:strip
 at:atd
@@ -99,17 +91,6 @@ resolvectl:host
 resolvectl:resolvconf
 resolvectl:systemd-resolve
 rfkill:rfkill-event
-selinux:audit2allow
-selinux:chcon
-selinux:getenforce
-selinux:getsebool
-selinux:restorecon
-selinux:seinfo
-selinux:semanage
-selinux:sesearch
-selinux:sestatus
-selinux:setenforce
-selinux:setsebool
 ss:sockstat
 sudo:sudoedit
 sudo:sudoreplay

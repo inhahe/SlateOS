@@ -2344,6 +2344,23 @@ personality of something else any more. None of the new bins is on the
 image yet: that is lane D's
 manifest, `requests/b-d-new-coreutils-programs-for-the-rootfs-manifest.md`.
 
+**UPDATE 2026-10-01: the §1045 triage has begun, and the ledger stands at
+125.** The operator's rule (B-Q11, design-decisions §1045): each name is
+decided on its own; a name for a subsystem SlateOS does not have is deleted
+(§1006), and with it the crate when its own program is the same kind; a name
+that is kept is installed as the same file. First settled, as whole crates:
+**`userspace/apparmor`** (`aa-status` and seven more) and
+**`userspace/selinux`** (`getenforce` and ten more), deleted -- SlateOS has no
+Linux security module and none is planned (its security is capabilities), so
+every command acted on `/sys/kernel/security/apparmor` or `/sys/fs/selinux`,
+neither of which exists, and `apparmor_parser`'s load was a comment where the
+write would be. `grub2` is *not* in this batch, although it looked like it:
+design.txt (lines 1237-1243) plans for SlateOS to live beside a Linux GRUB on
+dual-boot machines, so its file-editing commands (`grub-editenv`,
+`grub-set-default`, `grub-reboot`) may have a purpose there while
+`grub-install` (which prints the EFI binary it "would" write) has none; it is
+judged command by command next.
+
 **The 9 new shadowed pairs were the urgent half**, because a shadowed name is
 two implementations that can disagree with the winner picked by packaging:
 

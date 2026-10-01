@@ -47,14 +47,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "apparmor"
-version = "0.1.0"
-dependencies = [
- "quoting",
- "scratchdir",
-]
-
-[[package]]
 name = "appearance"
 version = "0.1.0"
 dependencies = [
@@ -3470,13 +3462,6 @@ dependencies = [
  "chacha20poly1305",
  "hex-literal",
  "poly1305",
-]
-
-[[package]]
-name = "selinux"
-version = "0.1.0"
-dependencies = [
- "quoting",
 ]
 
 [[package]]

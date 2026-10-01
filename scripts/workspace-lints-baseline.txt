@@ -39,7 +39,6 @@ services/ticker
 services/udpget
 userspace/acl  # bare deny(clippy::all)
 userspace/acpi
-userspace/apparmor  # bare deny(clippy::all)
 userspace/arp
 userspace/at
 userspace/audit  # bare deny(clippy::all)
@@ -144,7 +143,6 @@ userspace/rsync
 userspace/sanitize
 userspace/scp  # bare deny(clippy::all)
 userspace/screen
-userspace/selinux  # bare deny(clippy::all)
 userspace/service
 userspace/shell
 userspace/shuf

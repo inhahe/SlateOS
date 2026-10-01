@@ -2,8 +2,15 @@
 name = "sbctl"
 version = "0.1.0"
 edition = "2024"
+description = "Secure Boot status, and the keys the kernel holds"
+
+[lints]
+workspace = true
+
 [dependencies]
-# sbctl names EFI binaries, signing keys and certificates by path, all
-# supplied by the caller. It is a secure-boot tool, so a diagnostic that
-# misrepresents which file was signed is a diagnostic that matters.
+# Arguments are bytes; a name in a diagnostic is quoted.
 quoting = { path = "../quoting" }
+# close_stdout's checks, and diagnostics in util-linux's shape.
+ulclosestream = { path = "../ulclosestream" }
+# A standard descriptor sbctl was started without stays closed.
+stdfdguard = { path = "../stdfdguard" }

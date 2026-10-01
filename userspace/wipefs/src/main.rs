@@ -1,1015 +1,1091 @@
-//! Slate OS filesystem signature wiping utility.
+//! wipefs -- wipe signatures from a device.
 //!
-//! Multi-personality binary providing:
-//! - **wipefs** — wipe filesystem/RAID/partition-table signatures
-//! - **blkdiscard** — discard device sectors
+//! A port of util-linux 2.39.3's `misc-utils/wipefs.c`, function by
+//! function and with upstream's names, on top of `ulblkid` (the port of
+//! libblkid) and `smartcols` (of libsmartcols): every signature libblkid
+//! knows is found by stepping `blkid_do_probe` over the device, hiding each
+//! one found so the next can be seen, and erased with `blkid_do_wipe`.
+//! Measured against `wipefs from util-linux 2.39.3` by
+//! `scripts/wipefs-diff.sh`.
 //!
-//! Detects and optionally removes filesystem signatures from block devices.
+//! This replaces a hand-written program that knew fifteen signature types.
+//!
+//! Upstream's quirks are kept where they show:
+//!
+//! * An `-o` offset another device already matched is not reported "not
+//!   found" for a later device: the mark is kept across devices.
+//! * `--backup` writes over an existing backup file without truncating it.
+//! * A nested partition table on a partition is left alone (and reported)
+//!   unless `--force`.
+//!
+//! # What is not upstream's
+//!
+//! * **A name in a diagnostic** has its unprintable bytes escaped
+//!   (design-decisions §370).
 
-#![deny(clippy::all)]
+use getoptlong::{Opt, Program, Takes};
+use quoting::{escape_unprintable, os_bytes};
+use smartcols::{ColumnId, JsonType, Table};
+use std::ffi::{OsStr, OsString};
+use std::fs::File;
+use std::process::ExitCode;
+use std::rc::Rc;
+use ulblkid::{
+    PARTS_FORCE_GPT, PARTS_MAGIC, Probe, SUBLKS_BADCSUM, SUBLKS_LABEL, SUBLKS_MAGIC, SUBLKS_TYPE,
+    SUBLKS_USAGE, SUBLKS_UUID,
+};
+use ulclosestream::{Stdout, stderr_write, warn, warnx};
 
-use quoting::quoteaf_os;
-use std::env;
-use std::fs;
-use std::io::{self, Seek, SeekFrom, Write};
-use std::path::Path;
-use std::process;
+/// Getopt's errors are only sentences here; the referral follows them.
+const WIPEFS: Program = Program::new("wipefs", 1);
 
-const VERSION: &str = "0.1.0";
+/// Upstream's option string.
+const SHORTS: &str = "abfhiJnO:o:pqt:V";
+/// `OPT_LOCK`: `CHAR_MAX + 1`.
+const OPT_LOCK: i32 = 128;
 
-// ============================================================================
-// Filesystem signature database
-// ============================================================================
+/// Upstream's `longopts[]`, in its order, and each one's `val`.
+const LONGS: &[(&str, Takes)] = &[
+    ("all", Takes::Nothing),
+    ("backup", Takes::Nothing),
+    ("force", Takes::Nothing),
+    ("help", Takes::Nothing),
+    ("lock", Takes::Optional),
+    ("no-act", Takes::Nothing),
+    ("offset", Takes::Required),
+    ("parsable", Takes::Nothing),
+    ("quiet", Takes::Nothing),
+    ("types", Takes::Required),
+    ("version", Takes::Nothing),
+    ("json", Takes::Nothing),
+    ("noheadings", Takes::Nothing),
+    ("output", Takes::Required),
+];
+const LONG_VALS: [i32; 14] = [
+    b'a' as i32,
+    b'b' as i32,
+    b'f' as i32,
+    b'h' as i32,
+    OPT_LOCK,
+    b'n' as i32,
+    b'o' as i32,
+    b'p' as i32,
+    b'q' as i32,
+    b't' as i32,
+    b'V' as i32,
+    b'J' as i32,
+    b'i' as i32,
+    b'O' as i32,
+];
 
-#[derive(Clone, Debug)]
-struct FsSignature {
+/// `excl[]`: `-O`, `-a` and `-o` exclude each other.
+const EXCL: [&[i32]; 1] = [&[b'O' as i32, b'a' as i32, b'o' as i32]];
+
+/// `EBUSY`.
+#[cfg(unix)]
+const EBUSY: i32 = 16;
+
+/// The output columns.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Col {
+    Uuid,
+    Label,
+    Len,
+    Type,
+    Offset,
+    Usage,
+    Device,
+}
+
+/// `struct colinfo`.
+struct ColInfo {
+    id: Col,
     name: &'static str,
-    magic: &'static [u8],
-    offset: u64,
-    _sig_type: SigType,
+    whint: f64,
+    help: &'static str,
 }
 
-#[derive(Clone, Debug)]
-enum SigType {
-    Filesystem,
-    Raid,
-    PartitionTable,
-    Crypto,
-}
-
-#[derive(Clone, Debug)]
-struct DetectedSig {
-    device: String,
-    offset: u64,
-    sig_type: String,
-    name: String,
-    magic_hex: String,
-    /// Bytes of magic to overwrite when wiping this signature.
-    length: usize,
-}
-
-const SIGNATURES: &[FsSignature] = &[
-    // Filesystem signatures.
-    FsSignature {
-        name: "ext2/ext3/ext4",
-        magic: &[0x53, 0xEF],
-        offset: 0x438,
-        _sig_type: SigType::Filesystem,
+/// `infos[]`.
+const INFOS: [ColInfo; 7] = [
+    ColInfo {
+        id: Col::Uuid,
+        name: "UUID",
+        whint: 4.0,
+        help: "partition/filesystem UUID",
     },
-    FsSignature {
-        name: "xfs",
-        magic: b"XFSB",
-        offset: 0,
-        _sig_type: SigType::Filesystem,
+    ColInfo {
+        id: Col::Label,
+        name: "LABEL",
+        whint: 5.0,
+        help: "filesystem LABEL",
     },
-    FsSignature {
-        name: "btrfs",
-        magic: b"_BHRfS_M",
-        offset: 0x10040,
-        _sig_type: SigType::Filesystem,
+    ColInfo {
+        id: Col::Len,
+        name: "LENGTH",
+        whint: 6.0,
+        help: "magic string length",
     },
-    FsSignature {
-        name: "ntfs",
-        magic: b"NTFS    ",
-        offset: 3,
-        _sig_type: SigType::Filesystem,
+    ColInfo {
+        id: Col::Type,
+        name: "TYPE",
+        whint: 4.0,
+        help: "superblok type",
     },
-    FsSignature {
-        name: "fat32",
-        magic: b"FAT32   ",
-        offset: 82,
-        _sig_type: SigType::Filesystem,
+    ColInfo {
+        id: Col::Offset,
+        name: "OFFSET",
+        whint: 5.0,
+        help: "magic string offset",
     },
-    FsSignature {
-        name: "fat16",
-        magic: b"FAT16   ",
-        offset: 54,
-        _sig_type: SigType::Filesystem,
+    ColInfo {
+        id: Col::Usage,
+        name: "USAGE",
+        whint: 5.0,
+        help: "type description",
     },
-    FsSignature {
-        name: "fat12",
-        magic: b"FAT12   ",
-        offset: 54,
-        _sig_type: SigType::Filesystem,
-    },
-    FsSignature {
-        name: "swap",
-        magic: b"SWAPSPACE2",
-        offset: 0xFF6,
-        _sig_type: SigType::Filesystem,
-    },
-    FsSignature {
-        name: "swap",
-        magic: b"SWAP-SPACE",
-        offset: 0xFF6,
-        _sig_type: SigType::Filesystem,
-    },
-    FsSignature {
-        name: "iso9660",
-        magic: &[0x01, b'C', b'D', b'0', b'0', b'1'],
-        offset: 0x8001,
-        _sig_type: SigType::Filesystem,
-    },
-    FsSignature {
-        name: "zfs",
-        magic: &[0x00, 0x00, 0x02, 0xF5, 0xB0, 0x07, 0xB1, 0x0C],
-        offset: 0x2000,
-        _sig_type: SigType::Filesystem,
-    },
-    FsSignature {
-        name: "reiserfs",
-        magic: b"ReIsErFs",
-        offset: 0x10034,
-        _sig_type: SigType::Filesystem,
-    },
-    FsSignature {
-        name: "jfs",
-        magic: b"JFS1",
-        offset: 0x8000,
-        _sig_type: SigType::Filesystem,
-    },
-    FsSignature {
-        name: "hfs+",
-        magic: &[b'H', b'+', 0x00, 0x04],
-        offset: 0x400,
-        _sig_type: SigType::Filesystem,
-    },
-    // RAID signatures.
-    FsSignature {
-        name: "linux_raid",
-        magic: &[0xFC, 0x4E, 0x2B, 0xA9],
-        offset: 0x1000,
-        _sig_type: SigType::Raid,
-    },
-    // Partition table signatures.
-    FsSignature {
-        name: "dos",
-        magic: &[0x55, 0xAA],
-        offset: 0x1FE,
-        _sig_type: SigType::PartitionTable,
-    },
-    FsSignature {
-        name: "gpt",
-        magic: b"EFI PART",
-        offset: 0x200,
-        _sig_type: SigType::PartitionTable,
-    },
-    // Crypto.
-    FsSignature {
-        name: "luks",
-        magic: b"LUKS\xBA\xBE",
-        offset: 0,
-        _sig_type: SigType::Crypto,
+    ColInfo {
+        id: Col::Device,
+        name: "DEVICE",
+        whint: 5.0,
+        help: "block device name",
     },
 ];
 
-// ============================================================================
-// Signature detection
-// ============================================================================
+/// `columns[]`'s capacity: `ARRAY_SIZE(infos) * 2`.
+const MAX_COLUMNS: usize = 14;
 
-/// Read `device` and return the signatures actually present in it.
-///
-/// An unreadable device is an ERROR, not an empty result. It used to return
-/// the same empty vector as a device with no signatures, so
-/// `wipefs /dev/does-not-exist` printed a table header and exited 0 -- and in
-/// wipe mode reported success for a device it had never opened.
-fn detect_signatures(device: &Path) -> std::io::Result<Vec<DetectedSig>> {
-    let mut results = Vec::new();
-
-    let data = fs::read(device)?;
-
-    for sig in SIGNATURES {
-        let off = sig.offset as usize;
-        let end = off + sig.magic.len();
-        if end <= data.len() && data[off..end] == *sig.magic {
-            let magic_hex = sig
-                .magic
-                .iter()
-                .map(|b| format!("{b:02x}"))
-                .collect::<Vec<_>>()
-                .join("");
-            let sig_type = match sig._sig_type {
-                SigType::Filesystem => "filesystem",
-                SigType::Raid => "raid",
-                SigType::PartitionTable => "partition-table",
-                SigType::Crypto => "crypto",
-            };
-            results.push(DetectedSig {
-                device: device.display().to_string(),
-                offset: sig.offset,
-                sig_type: sig_type.to_string(),
-                name: sig.name.to_string(),
-                magic_hex,
-                length: sig.magic.len(),
-            });
-        }
-    }
-
-    Ok(results)
+/// `struct wipe_desc`: one signature.
+#[derive(Clone, Debug, Default)]
+struct WipeDesc {
+    /// `offset`: of the magic string.
+    offset: i64,
+    /// `len`: of the magic string.
+    len: usize,
+    /// `magic`.
+    magic: Vec<u8>,
+    /// `usage`: raid, filesystem...
+    usage: Option<Vec<u8>>,
+    /// `type`.
+    ty: Option<Vec<u8>>,
+    /// `label`.
+    label: Option<Vec<u8>>,
+    /// `uuid`.
+    uuid: Option<Vec<u8>>,
+    /// `on_disk`.
+    on_disk: bool,
+    /// `is_parttable`.
+    is_parttable: bool,
 }
 
-/// Overwrite a signature's magic bytes with zeros.
-///
-/// Nothing did this before: the wipe branch printed "wipefs: ext4 wiped at
-/// offset 0x438" and moved on without opening the device. Combined with the
-/// invented signature list removed in the previous commit, `wipefs -a` on a
-/// file with no filesystem on it announced destroying one that was never
-/// there, on a device it never touched.
-fn wipe_signature(device: &Path, sig: &DetectedSig) -> io::Result<()> {
-    let mut f = fs::OpenOptions::new().write(true).open(device)?;
-    f.seek(SeekFrom::Start(sig.offset))?;
-    f.write_all(&vec![0u8; sig.length])?;
-    // Durability matters more here than almost anywhere: the point of the
-    // call is that the signature is GONE, and a caller who reads "wiped" and
-    // pulls the disk must not find it still there.
-    f.sync_all()
+/// `struct wipe_control`.
+#[derive(Default)]
+struct Ctl {
+    devname: Vec<u8>,
+    type_pattern: Option<Vec<u8>>,
+    lockmode: Option<Vec<u8>>,
+    /// `offsets`: `-o` offsets, in the order first given.
+    offsets: Vec<WipeDesc>,
+    /// `ndevs`: devices still to probe.
+    ndevs: usize,
+    /// `reread`: devices whose partition table is re-read at the end.
+    reread: Vec<Vec<u8>>,
+    noact: bool,
+    all: bool,
+    quiet: bool,
+    backup: bool,
+    force: bool,
+    json: bool,
+    no_headings: bool,
+    parsable: bool,
 }
 
-// ============================================================================
-// wipefs command
-// ============================================================================
+/// A fatal error: what `err`/`errx` printed, and the status to exit with.
+struct Fatal(u8);
 
-fn cmd_wipefs(args: &[String]) {
-    let mut all = false;
-    let mut force = false;
-    let mut no_act = false;
-    let mut backup = false;
-    let mut types: Vec<String> = Vec::new();
-    let mut offset: Option<u64> = None;
-    let mut devices: Vec<String> = Vec::new();
-    let mut json = false;
-    let mut parsable = false;
-    let mut no_header = false;
+/// `program_invocation_short_name`: argv[0] past its last `/`.
+fn short_name(arg0: &OsStr) -> Vec<u8> {
+    let bytes = os_bytes(arg0);
+    let start = bytes
+        .iter()
+        .rposition(|&b| b == b'/')
+        .map_or(0, |i| i.saturating_add(1));
+    bytes.get(start..).unwrap_or_default().to_vec()
+}
 
-    let mut i = 0;
-    while i < args.len() {
-        match args[i].as_str() {
-            "-h" | "--help" => {
-                println!("Usage: wipefs [options] <device> [device ...]");
-                println!();
-                println!("Wipe filesystem/RAID/partition-table signatures.");
-                println!();
-                println!("Options:");
-                println!("  -a, --all          Wipe all signatures");
-                println!("  -f, --force        Force (allow wiping mounted device)");
-                println!("  -n, --no-act       Dry run");
-                println!("  -b, --backup       Backup erased data");
-                println!("  -t, --types LIST   Limit to types (fs, raid, part, crypto)");
-                println!("  -o, --offset N     Wipe only at offset");
-                println!("  -J, --json         JSON output");
-                println!("  -p, --parsable     Parsable output");
-                println!("  --no-headings      No header line");
-                println!("  -h, --help         Show help");
-                println!("  -V, --version      Show version");
-                process::exit(0);
+/// Bytes shown in a diagnostic: upstream's text, unprintable bytes escaped.
+fn shown(text: &[u8]) -> String {
+    escape_unprintable(text)
+}
+
+/// `errtryhelp(EXIT_FAILURE)`.
+fn errtryhelp(short: &[u8]) -> u8 {
+    stderr_write(format!("Try '{} --help' for more information.\n", shown(short)).as_bytes());
+    1
+}
+
+/// `warn(msg)` with `errno` as the error.
+fn warn_errno(short: &[u8], msg: &str, errno: i32) {
+    if errno == 0 {
+        warnx(short, &format!("{msg}: Success"));
+    } else {
+        warn(short, msg, &std::io::Error::from_raw_os_error(errno));
+    }
+}
+
+/// POSIX `basename(path)` (`libgen.h`'s): trailing slashes off, then the
+/// last component; `.` for an empty path, `/` for slashes alone.
+fn posix_basename(path: &[u8]) -> Vec<u8> {
+    if path.is_empty() {
+        return b".".to_vec();
+    }
+    let end = path
+        .iter()
+        .rposition(|&b| b != b'/')
+        .map(|i| i.saturating_add(1));
+    let Some(end) = end else {
+        return b"/".to_vec();
+    };
+    let trimmed = path.get(..end).unwrap_or_default();
+    let start = trimmed
+        .iter()
+        .rposition(|&b| b == b'/')
+        .map_or(0, |i| i.saturating_add(1));
+    trimmed.get(start..).unwrap_or_default().to_vec()
+}
+
+/// `usage()`.
+fn usage(short: &[u8]) -> Vec<u8> {
+    let mut t = String::from("\nUsage:\n");
+    t.push_str(&format!(" {} [options] <device>\n", shown(short)));
+    t.push('\n');
+    t.push_str("Wipe signatures from a device.\n");
+    t.push_str("\nOptions:\n");
+    t.push_str(" -a, --all           wipe all magic strings (BE CAREFUL!)\n");
+    t.push_str(" -b, --backup        create a signature backup in $HOME\n");
+    t.push_str(" -f, --force         force erasure\n");
+    t.push_str(" -i, --noheadings    don't print headings\n");
+    t.push_str(" -J, --json          use JSON output format\n");
+    t.push_str(" -n, --no-act        do everything except the actual write() call\n");
+    t.push_str(" -o, --offset <num>  offset to erase, in bytes\n");
+    t.push_str(" -O, --output <list> COLUMNS to display (see below)\n");
+    t.push_str(" -p, --parsable      print out in parsable instead of printable format\n");
+    t.push_str(" -q, --quiet         suppress output messages\n");
+    t.push_str(" -t, --types <list>  limit the set of filesystem, RAIDs or partition tables\n");
+    t.push_str("     --lock[=<mode>] use exclusive device lock (yes, no or nonblock)\n");
+    t.push_str(&format!(
+        "{:<21}{}\n{:<21}{}\n",
+        " -h, --help", "display this help", " -V, --version", "display version"
+    ));
+    t.push_str("\nArguments:\n");
+    t.push_str(" <num> arguments may be followed by the suffixes for\n   GiB, TiB, PiB, EiB, ZiB, and YiB (the \"iB\" is optional)\n");
+    t.push_str("\nAvailable output columns:\n");
+    for i in &INFOS {
+        t.push_str(&format!(" {:>8}  {}\n", i.name, i.help));
+    }
+    t.push_str("\nFor more details see wipefs(8).\n");
+    t.into_bytes()
+}
+
+/// `column_name_to_id(name, namesz)`: an exact name, in any case. Unknown,
+/// it is reported with the rest of the list after it, as upstream's C
+/// string runs on to the list's end.
+fn column_name_to_id(name: &[u8], rest: &[u8], short: &[u8]) -> Option<Col> {
+    let found = INFOS
+        .iter()
+        .find(|i| i.name.as_bytes().eq_ignore_ascii_case(name))
+        .map(|i| i.id);
+    if found.is_none() {
+        warnx(short, &format!("unknown column: {}", shown(rest)));
+    }
+    found
+}
+
+/// The column's `struct colinfo`.
+fn info(col: Col) -> &'static ColInfo {
+    INFOS.iter().find(|i| i.id == col).unwrap_or(&INFOS[0])
+}
+
+/// `init_output(ctl)`.
+fn init_output(ctl: &Ctl, columns: &[Col]) -> (Table, Vec<(Col, ColumnId)>) {
+    let mut tb = Table::new();
+    if ctl.json {
+        tb.enable_json(true);
+        tb.set_name(b"signatures");
+    }
+    tb.enable_noheadings(ctl.no_headings);
+    if ctl.parsable {
+        tb.enable_raw(true);
+        tb.set_column_separator(b",");
+    }
+    let mut cols = Vec::with_capacity(columns.len());
+    for &col in columns {
+        let i = info(col);
+        let id = tb.new_column(i.name.as_bytes(), i.whint, 0);
+        if ctl.json && col == Col::Len {
+            // The column was made by this table a line ago.
+            let _ = tb.column_set_json_type(id, JsonType::Number);
+        }
+        cols.push((col, id));
+    }
+    (tb, cols)
+}
+
+/// `fill_table_row(ctl, wp)`.
+fn fill_table_row(ctl: &Ctl, tb: &mut Table, cols: &[(Col, ColumnId)], wp: &WipeDesc) {
+    let Ok(ln) = tb.new_line(None) else {
+        return;
+    };
+    for &(col, id) in cols {
+        let data: Option<Vec<u8>> = match col {
+            Col::Uuid => wp.uuid.clone(),
+            Col::Label => wp.label.clone(),
+            Col::Offset => Some(format!("0x{:x}", wp.offset.cast_unsigned()).into_bytes()),
+            Col::Len => Some(wp.len.to_string().into_bytes()),
+            Col::Usage => wp.usage.clone(),
+            Col::Type => wp.ty.clone(),
+            Col::Device => Some(posix_basename(&ctl.devname)),
+        };
+        if let Some(d) = data {
+            // The line and the column were both made by this table.
+            let _ = tb.line_set_data(ln, id, &d);
+        }
+    }
+}
+
+/// `add_offset(&wp0, offset)`: the entry for the offset, made at the end
+/// of the list if there is none.
+fn add_offset(wp0: &mut Vec<WipeDesc>, offset: i64) -> usize {
+    if let Some(i) = wp0.iter().position(|w| w.offset == offset) {
+        return i;
+    }
+    wp0.push(WipeDesc {
+        offset,
+        ..WipeDesc::default()
+    });
+    wp0.len().saturating_sub(1)
+}
+
+/// A value, as a C string.
+fn value(pr: &Probe, name: &str) -> Option<Vec<u8>> {
+    pr.lookup_value(name).map(|v| v.as_c_str().to_vec())
+}
+
+/// `get_desc_for_probe(ctl, &wp0, pr, &offset, &len)`: the signature the
+/// probe is on, if it passes `-t` and `-o` -- added to `wp0` when given
+/// (merged with an entry already at its offset), else returned alone. The
+/// offset and length are returned whenever libblkid found something, so a
+/// signature filtered out can still be hidden.
+fn get_desc_for_probe(
+    ctl: &mut Ctl,
+    wp0: Option<&mut Vec<WipeDesc>>,
+    pr: &Probe,
+) -> (Option<WipeDesc>, i64, usize) {
+    let mut len = 0usize;
+    let (off, ty, mag, mut usage, ispt) = if let Some(ty) = value(pr, "TYPE") {
+        let (Some(off), Some(mag)) = (
+            value(pr, "SBMAGIC_OFFSET"),
+            pr.lookup_value("SBMAGIC").map(|v| v.data().to_vec()),
+        ) else {
+            if let Some(m) = pr.lookup_value("SBMAGIC")
+                && pr.lookup_value("SBMAGIC_OFFSET").is_some()
+            {
+                len = m.len();
             }
-            "-V" | "--version" => {
-                println!("wipefs {VERSION}");
-                process::exit(0);
+            return (None, 0, len);
+        };
+        (off, ty, mag, None, false)
+    } else if let Some(ty) = value(pr, "PTTYPE") {
+        let (Some(off), Some(mag)) = (
+            value(pr, "PTMAGIC_OFFSET"),
+            pr.lookup_value("PTMAGIC").map(|v| v.data().to_vec()),
+        ) else {
+            return (None, 0, len);
+        };
+        (off, ty, mag, Some(b"partition-table".to_vec()), true)
+    } else {
+        return (None, 0, len);
+    };
+    len = mag.len();
+    // `strtoll(off, NULL, 10)`, `errno` checked.
+    let Some(offset) = strtoll(&off) else {
+        return (None, 0, len);
+    };
+    // `-t`.
+    if let Some(p) = &ctl.type_pattern
+        && !ulstrutils::match_fstype(Some(&ty), Some(p))
+    {
+        return (None, offset, len);
+    }
+    // `-o`.
+    if !ctl.offsets.is_empty() {
+        let Some(w) = ctl.offsets.iter_mut().find(|w| w.offset == offset) else {
+            return (None, offset, len);
+        };
+        w.on_disk = true;
+    }
+    if usage.is_none() {
+        usage = value(pr, "USAGE");
+    }
+    let desc = WipeDesc {
+        offset,
+        len,
+        magic: mag,
+        usage,
+        ty: Some(ty),
+        label: value(pr, "LABEL"),
+        uuid: value(pr, "UUID"),
+        on_disk: true,
+        is_parttable: ispt,
+    };
+    match wp0 {
+        Some(list) => {
+            let i = add_offset(list, offset);
+            if let Some(w) = list.get_mut(i) {
+                *w = desc.clone();
             }
-            "-a" | "--all" => all = true,
-            "-f" | "--force" => force = true,
-            "-n" | "--no-act" => no_act = true,
-            "-b" | "--backup" => backup = true,
-            "-J" | "--json" => json = true,
-            "-p" | "--parsable" => parsable = true,
-            "--no-headings" => no_header = true,
-            "-t" | "--types" => {
-                i += 1;
-                if i < args.len() {
-                    for t in args[i].split(',') {
-                        types.push(t.trim().to_string());
-                    }
-                }
+            (Some(desc), offset, len)
+        }
+        None => (Some(desc), offset, len),
+    }
+}
+
+/// `strtoll(s, NULL, 10)` whose caller then checks `errno`: `None` for
+/// `ERANGE`. (No digits at all converts to 0 without an error.)
+fn strtoll(s: &[u8]) -> Option<i64> {
+    let Some(sc) = ulstrutils::scan_integer(s, 10) else {
+        return Some(0);
+    };
+    let limit = if sc.negative {
+        1u128 << 63
+    } else {
+        (1u128 << 63) - 1
+    };
+    if sc.saturated || sc.magnitude > limit {
+        return None;
+    }
+    let m = i128::try_from(sc.magnitude).ok()?;
+    i64::try_from(if sc.negative { m.wrapping_neg() } else { m }).ok()
+}
+
+/// `new_probe(devname, mode)`: a probe on the device -- opened read-only by
+/// libblkid, or as `mode` asks (read-write, and exclusive unless forced) --
+/// looking for every superblock (bad checksums accepted) and partition
+/// table (GPT without a protective MBR too). Failing is fatal.
+fn new_probe(devname: &[u8], rw_excl: Option<bool>, short: &[u8]) -> Result<Probe, Fatal> {
+    let fail = |errno: i32| {
+        warn_errno(
+            short,
+            &format!("error: {}: probing initialization failed", shown(devname)),
+            errno,
+        );
+        Fatal(1)
+    };
+    let mut pr = match rw_excl {
+        None => Probe::from_filename(devname).map_err(fail)?,
+        Some(excl) => {
+            let file = open_rw(devname, excl).map_err(fail)?;
+            let mut pr = Probe::new();
+            if pr.set_device(Some(Rc::new(file)), 0, 0) != 0 {
+                return Err(fail(pr.errno));
             }
-            "-o" | "--offset" => {
-                i += 1;
-                if i < args.len() {
-                    offset = parse_size(&args[i]);
-                }
+            pr
+        }
+    };
+    pr.enable_superblocks(true);
+    pr.set_superblocks_flags(
+        SUBLKS_MAGIC | SUBLKS_TYPE | SUBLKS_USAGE | SUBLKS_LABEL | SUBLKS_UUID | SUBLKS_BADCSUM,
+    );
+    pr.enable_partitions(true);
+    pr.set_partitions_flags(PARTS_MAGIC | PARTS_FORCE_GPT);
+    Ok(pr)
+}
+
+/// `open(devname, O_RDWR | [O_EXCL] | O_NONBLOCK)`.
+fn open_rw(devname: &[u8], excl: bool) -> Result<File, i32> {
+    let mut opts = std::fs::OpenOptions::new();
+    opts.read(true).write(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        // O_NONBLOCK, and O_EXCL: Linux's values, which SlateOS's C library
+        // shares.
+        opts.custom_flags(0o4000 | if excl { 0o200 } else { 0 });
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = excl;
+    }
+    opts.open(quoting::os_from_bytes(devname))
+        .map_err(|e| ulblkid::errno_of(&e))
+}
+
+/// `read_offsets(ctl)`: every signature on the device.
+fn read_offsets(ctl: &mut Ctl, short: &[u8]) -> Result<Vec<WipeDesc>, Fatal> {
+    let devname = ctl.devname.clone();
+    let mut pr = new_probe(&devname, None, short)?;
+    let mut wp0 = Vec::new();
+    while pr.do_probe() == 0 {
+        let (_, offset, len) = get_desc_for_probe(ctl, Some(&mut wp0), &pr);
+        // Hide it, and look again.
+        if len != 0 {
+            pr.hide_range(offset.cast_unsigned(), u64::try_from(len).unwrap_or(0));
+            pr.step_back();
+        }
+    }
+    Ok(wp0)
+}
+
+/// `do_wipe_real(ctl, pr, w)`: erase the signature the probe is on, and
+/// say so.
+fn do_wipe_real(
+    ctl: &Ctl,
+    pr: &mut Probe,
+    w: &WipeDesc,
+    out: &mut Stdout,
+    short: &[u8],
+) -> Result<(), Fatal> {
+    let ty = w.ty.clone().unwrap_or_default();
+    if pr.do_wipe(ctl.noact) != 0 {
+        warn_errno(
+            short,
+            &format!(
+                "{}: failed to erase {} magic string at offset 0x{:08x}",
+                shown(&ctl.devname),
+                shown(&ty),
+                w.offset.cast_unsigned()
+            ),
+            pr.errno,
+        );
+        return Err(Fatal(1));
+    }
+    if ctl.quiet {
+        return Ok(());
+    }
+    let (noun, verb) = if w.len == 1 {
+        ("byte", "was")
+    } else {
+        ("bytes", "were")
+    };
+    let mut line = Vec::new();
+    line.extend_from_slice(&ctl.devname);
+    line.extend_from_slice(
+        format!(
+            ": {} {noun} {verb} erased at offset 0x{:08x} (",
+            w.len,
+            w.offset.cast_unsigned()
+        )
+        .as_bytes(),
+    );
+    line.extend_from_slice(&ty);
+    line.extend_from_slice(b"): ");
+    let hex: Vec<String> = w.magic.iter().map(|b| format!("{b:02x}")).collect();
+    line.extend_from_slice(hex.join(" ").as_bytes());
+    line.push(b'\n');
+    out.write(&line);
+    Ok(())
+}
+
+/// `do_backup(wp, base)`: the magic string, into `BASE0xOFFSET.bak`.
+fn do_backup(wp: &WipeDesc, base: &[u8], short: &[u8]) -> Result<(), Fatal> {
+    let mut fname = base.to_vec();
+    fname.extend_from_slice(format!("0x{:08x}.bak", wp.offset.cast_unsigned()).as_bytes());
+    let mut opts = std::fs::OpenOptions::new();
+    // O_CREAT | O_WRONLY, no O_TRUNC.
+    opts.write(true).create(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        opts.mode(0o600);
+    }
+    let result = opts
+        .open(quoting::os_from_bytes(&fname))
+        .and_then(|mut f| std::io::Write::write_all(&mut f, &wp.magic));
+    if let Err(e) = result {
+        warn(
+            short,
+            &format!("{}: failed to create a signature backup", shown(&fname)),
+            &e,
+        );
+        return Err(Fatal(1));
+    }
+    Ok(())
+}
+
+/// `ioctl(fd, BLKRRPART)`: the kernel re-reads the partition table.
+#[cfg(unix)]
+fn blkrrpart(file: &File) -> i32 {
+    use std::os::fd::AsRawFd;
+    unsafe extern "C" {
+        fn ioctl(fd: i32, request: u64, ...) -> i32;
+    }
+    /// `BLKRRPART`: `_IO(0x12, 95)`.
+    const BLKRRPART: u64 = 0x125f;
+    // SAFETY: BLKRRPART takes no argument; the descriptor is open.
+    let rc = unsafe { ioctl(file.as_raw_fd(), BLKRRPART) };
+    if rc < 0 {
+        ulblkid::errno_of(&std::io::Error::last_os_error())
+    } else {
+        0
+    }
+}
+
+/// `rereadpt(fd, devname)`: ask the kernel to re-read a block device's
+/// partition table, retrying while it is busy, and say how it went.
+fn rereadpt(file: &File, devname: &[u8], out: &mut Stdout) {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::FileTypeExt;
+        if !file
+            .metadata()
+            .is_ok_and(|m| m.file_type().is_block_device())
+        {
+            return;
+        }
+        let mut errno;
+        let mut attempt = 0u32;
+        loop {
+            // The first re-read without a delay usually fails: the kernel or
+            // udevd is still busy with the device.
+            std::thread::sleep(std::time::Duration::from_millis(250));
+            errno = blkrrpart(file);
+            if errno != EBUSY {
+                break;
             }
-            s if !s.starts_with('-') => {
-                devices.push(s.to_string());
-            }
-            _ => {
-                eprintln!("wipefs: unknown option: {}", args[i]);
-                // Stop. This used to report the option and keep parsing, so
-                // `wipefs --zzq-not-an-option <device>` printed the refusal
-                // and then operated on the device anyway, exiting 0. For a
-                // tool that destroys data, an argument it did not understand
-                // is precisely when it must not proceed.
-                process::exit(1);
+            let again = attempt < 4;
+            attempt = attempt.saturating_add(1);
+            if !again {
+                break;
             }
         }
-        i += 1;
+        let mut line = Vec::new();
+        line.extend_from_slice(devname);
+        line.extend_from_slice(b": calling ioctl to re-read partition table: ");
+        line.extend_from_slice(
+            errmsg::strerror(&std::io::Error::from_raw_os_error(errno)).as_bytes(),
+        );
+        line.push(b'\n');
+        out.write(&line);
     }
-
-    if devices.is_empty() {
-        eprintln!("wipefs: no device specified");
-        process::exit(1);
+    #[cfg(not(unix))]
+    {
+        let _ = (file, devname, out);
     }
+}
 
-    let stdout = io::stdout();
-    let mut out = stdout.lock();
+/// `flock(fd, operation)`.
+#[cfg(unix)]
+fn flock(file: &File, op: i32) -> Result<(), i32> {
+    use std::os::fd::AsRawFd;
+    unsafe extern "C" {
+        fn flock(fd: i32, operation: i32) -> i32;
+    }
+    // SAFETY: flock only takes the descriptor, which is open.
+    let rc = unsafe { flock(file.as_raw_fd(), op) };
+    if rc == 0 {
+        Ok(())
+    } else {
+        Err(ulblkid::errno_of(&std::io::Error::last_os_error()))
+    }
+}
 
-    // Worst error across all devices, so wiping three devices and failing on
-    // one does not exit 0 because the last one happened to work.
-    let mut status = 0;
-
-    for device in &devices {
-        // `generate_default_sigs` used to fill an empty result with an
-        // invented ext4 signature at 0x438 and an invented DOS partition
-        // table at 0x1fe. Measured before removal: a 16-BYTE file, far too
-        // small to hold either, was reported as carrying both. For a tool
-        // whose output decides what gets destroyed, inventing the inventory
-        // is the worst available failure.
-        let mut sigs = match detect_signatures(Path::new(device)) {
-            Ok(s) => s,
+/// `blkdev_lock(fd, devname, lockmode)` from `lib/blkdev.c`: an exclusive
+/// `flock` on the device, as `--lock` (or `$LOCK_BLOCK_DEVICE`) asks --
+/// waiting, with a message, when another holds it. 0, or not 0 when the
+/// device must be left alone. (The only one of util-linux's ports to need
+/// it so far; it moves to a shared crate with the second.)
+fn blkdev_lock(file: &File, devname: &[u8], lockmode: Option<&[u8]>, short: &[u8]) -> i32 {
+    let env = std::env::var_os("LOCK_BLOCK_DEVICE").map(|v| os_bytes(&v).into_owned());
+    let Some(mode) = lockmode.map(<[u8]>::to_vec).or(env) else {
+        return 0;
+    };
+    const LOCK_EX: i32 = 2;
+    const LOCK_NB: i32 = 4;
+    let oper = if mode.eq_ignore_ascii_case(b"yes") || mode == b"1" {
+        LOCK_EX
+    } else if mode.eq_ignore_ascii_case(b"nonblock") {
+        LOCK_EX | LOCK_NB
+    } else if mode.eq_ignore_ascii_case(b"no") || mode == b"0" {
+        return 0;
+    } else {
+        warnx(short, &format!("unsupported lock mode: {}", shown(&mode)));
+        return -22;
+    };
+    #[cfg(unix)]
+    {
+        /// `EWOULDBLOCK`.
+        const EWOULDBLOCK: i32 = 11;
+        let mut msg = false;
+        if oper & LOCK_NB == 0 {
+            // Without blocking first, to have a message to print.
+            match flock(file, oper | LOCK_NB) {
+                Ok(()) => return 0,
+                Err(EWOULDBLOCK) => {
+                    stderr_write(
+                        format!(
+                            "{}: {}: device already locked, waiting to get lock ... ",
+                            shown(short),
+                            shown(devname)
+                        )
+                        .as_bytes(),
+                    );
+                    msg = true;
+                }
+                Err(_) => {}
+            }
+        }
+        match flock(file, oper) {
+            Ok(()) => {
+                if msg {
+                    stderr_write(b"OK\n");
+                }
+                0
+            }
+            Err(EWOULDBLOCK) => {
+                warnx(short, &format!("{}: device already locked", shown(devname)));
+                -1
+            }
             Err(e) => {
-                eprintln!("wipefs: {}: {e}", quoteaf_os(device));
-                status = 1;
-                continue;
+                warn(
+                    short,
+                    &format!("{}: failed to get lock", shown(devname)),
+                    &std::io::Error::from_raw_os_error(e),
+                );
+                -1
+            }
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = (file, devname, oper);
+        0
+    }
+}
+
+/// `close(fd)`, its failure reported as upstream reports it.
+#[cfg_attr(
+    not(unix),
+    allow(
+        clippy::unnecessary_wraps,
+        reason = "the unix half can fail; this half cannot"
+    )
+)]
+fn close_checked(file: File) -> std::io::Result<()> {
+    #[cfg(unix)]
+    {
+        use std::os::fd::IntoRawFd;
+        unsafe extern "C" {
+            fn close(fd: i32) -> i32;
+        }
+        let fd = file.into_raw_fd();
+        // SAFETY: `fd` was just released by the File that owned it, so this
+        // is its only close.
+        if unsafe { close(fd) } != 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+        Ok(())
+    }
+    #[cfg(not(unix))]
+    {
+        drop(file);
+        Ok(())
+    }
+}
+
+/// `do_wipe(ctl)`: erase the device's signatures, as `-a`, `-o` and `-t`
+/// select them.
+fn do_wipe(ctl: &mut Ctl, out: &mut Stdout, short: &[u8]) -> Result<(), Fatal> {
+    let devname = ctl.devname.clone();
+    let excl = !ctl.force;
+    let mut pr = new_probe(&devname, Some(excl), short)?;
+    let Some(file) = pr.file().cloned() else {
+        return Ok(());
+    };
+    if blkdev_lock(&file, &devname, ctl.lockmode.as_deref(), short) != 0 {
+        return Ok(());
+    }
+    let mut backup: Option<Vec<u8>> = None;
+    if ctl.backup {
+        let Some(home) = std::env::var_os("HOME") else {
+            warnx(
+                short,
+                "failed to create a signature backup, $HOME undefined",
+            );
+            return Err(Fatal(1));
+        };
+        let mut b = os_bytes(&home).into_owned();
+        b.extend_from_slice(b"/wipefs-");
+        b.extend_from_slice(&posix_basename(&devname));
+        b.push(b'-');
+        backup = Some(b);
+    }
+    let mut reread = false;
+    let mut need_force = false;
+    while pr.do_probe() == 0 {
+        let mut wiped = false;
+        let (wp, offset, len) = get_desc_for_probe(ctl, None, &pr);
+        if let Some(wp) = wp {
+            if !ctl.force && wp.is_parttable && !pr.is_wholedisk() {
+                warnx(
+                    short,
+                    &format!(
+                        "{}: ignoring nested \"{}\" partition table on non-whole disk device",
+                        shown(&devname),
+                        shown(wp.ty.as_deref().unwrap_or_default())
+                    ),
+                );
+                need_force = true;
+            } else {
+                if let Some(base) = &backup {
+                    do_backup(&wp, base, short)?;
+                }
+                do_wipe_real(ctl, &mut pr, &wp, out, short)?;
+                if wp.is_parttable {
+                    reread = true;
+                }
+                wiped = true;
+            }
+        }
+        if !wiped && len != 0 {
+            // Not wiped (-t or -o filtered it out): hide it, so that libblkid
+            // tries this superblock's other magic strings rather than going
+            // on to the next superblock.
+            pr.hide_range(offset.cast_unsigned(), u64::try_from(len).unwrap_or(0));
+            pr.step_back();
+        }
+    }
+    for w in &ctl.offsets {
+        if !w.on_disk && !ctl.quiet {
+            warnx(
+                short,
+                &format!(
+                    "{}: offset 0x{:x} not found",
+                    shown(&devname),
+                    w.offset.cast_unsigned()
+                ),
+            );
+        }
+    }
+    if need_force {
+        warnx(short, "Use the --force option to force erase.");
+    }
+    if let Err(e) = file.sync_all() {
+        warn(
+            short,
+            &format!("{}: cannot flush modified buffers", shown(&devname)),
+            &e,
+        );
+        return Err(Fatal(1));
+    }
+    if reread && excl {
+        if ctl.ndevs > 1 {
+            // More devices to go: re-read once everything is erased, so a
+            // disk's table is not re-read before its partitions are done.
+            ctl.reread.push(devname.clone());
+        } else {
+            rereadpt(&file, &devname, out);
+        }
+    }
+    drop(pr);
+    if let Ok(f) = Rc::try_unwrap(file)
+        && let Err(e) = close_checked(f)
+    {
+        warn(
+            short,
+            &format!("{}: close device failed", shown(&devname)),
+            &e,
+        );
+        return Err(Fatal(1));
+    }
+    Ok(())
+}
+
+/// The option each parsed item stands for, as upstream's switch sees it.
+fn option_code(opt: &Opt<'_>) -> Option<(i32, Option<OsString>)> {
+    match opt {
+        Opt::Short(c, value) => Some((i32::from(*c), value.clone())),
+        Opt::Long(name, value) => {
+            let i = LONGS.iter().position(|&(n, _)| n == *name)?;
+            Some((*LONG_VALS.get(i)?, value.clone()))
+        }
+        Opt::Operand(_) => None,
+    }
+}
+
+/// `option_to_longopt(c, opts)`: the first long option with this `val`.
+fn option_to_longopt(c: i32) -> Option<&'static str> {
+    LONG_VALS
+        .iter()
+        .position(|&v| v == c)
+        .and_then(|i| LONGS.get(i))
+        .map(|&(name, _)| name)
+}
+
+stdfdguard::guard_std_fds!();
+
+fn main() -> ExitCode {
+    stdfdguard::restore();
+    let argv: Vec<OsString> = std::env::args_os().collect();
+    let short = short_name(
+        argv.first()
+            .map_or(OsStr::new("wipefs"), OsString::as_os_str),
+    );
+    let mut out = Stdout::new(1);
+    let status = run(&argv, &short, &mut out);
+    ExitCode::from(out.close(status, &short))
+}
+
+/// `main()`.
+#[allow(
+    clippy::too_many_lines,
+    reason = "upstream's main, kept in one piece so it can be read against it"
+)]
+fn run(argv: &[OsString], short: &[u8], out: &mut Stdout) -> u8 {
+    let arg0 = argv
+        .first()
+        .map_or(OsStr::new("wipefs"), OsString::as_os_str);
+    let mut ctl = Ctl::default();
+    let mut outarg: Option<Vec<u8>> = None;
+    let mut operands: Vec<Vec<u8>> = Vec::new();
+    let mut excl_st = [0i32; 1];
+
+    let own = argv.get(1..).unwrap_or_default();
+    for item in WIPEFS.parse(own, SHORTS, LONGS) {
+        let opt = match item {
+            Ok(opt) => opt,
+            Err(e) => {
+                // glibc names the program by argv[0] as given.
+                stderr_write(format!("{}: {}\n", shown(&os_bytes(arg0)), e.sentence).as_bytes());
+                return errtryhelp(short);
             }
         };
-
-        // Filter by type.
-        if !types.is_empty() {
-            sigs.retain(|s| {
-                types.iter().any(|t| match t.as_str() {
-                    "fs" | "filesystem" => s.sig_type == "filesystem",
-                    "raid" => s.sig_type == "raid",
-                    "part" | "partition" | "partition-table" => s.sig_type == "partition-table",
-                    "crypto" => s.sig_type == "crypto",
-                    _ => false,
-                })
+        let Some((c, value)) = option_code(&opt) else {
+            if let Opt::Operand(o) = &opt {
+                operands.push(os_bytes(o).into_owned());
+            }
+            continue;
+        };
+        if let Some(msg) =
+            ulstrutils::err_exclusive_options(c, &EXCL, &mut excl_st, option_to_longopt, short)
+        {
+            stderr_write(msg.as_bytes());
+            return 1;
+        }
+        let arg = value.as_deref().map(|v| os_bytes(v).into_owned());
+        if c == OPT_LOCK {
+            ctl.lockmode = Some(match arg {
+                // `--lock==mode` is `--lock=mode`.
+                Some(a) => a.strip_prefix(b"=").map_or(a.clone(), <[u8]>::to_vec),
+                None => b"1".to_vec(),
             });
+            continue;
         }
-
-        // Filter by offset.
-        if let Some(off) = offset {
-            sigs.retain(|s| s.offset == off);
-        }
-
-        if all || offset.is_some() {
-            // Wipe mode.
-            for sig in &sigs {
-                if no_act {
-                    let _ = writeln!(
-                        out,
-                        "wipefs: [dry-run] would wipe {} at offset {:#x} ({} {})",
-                        device, sig.offset, sig.sig_type, sig.name
-                    );
-                    continue;
-                }
-
-                // --backup printed "backed up <name> signature at <offset>"
-                // and wrote no file. A caller who asked for a backup and was
-                // told they had one must not then have the signature
-                // destroyed, so this refuses rather than wiping without it.
-                // Implementing it properly needs a file name and location
-                // matched against the reference tool, which is a separate
-                // change.
-                if backup {
-                    eprintln!(
-                        "wipefs: --backup is not implemented; refusing to wipe {} at offset {:#x} without the backup you asked for",
-                        sig.name, sig.offset
-                    );
-                    status = 1;
-                    continue;
-                }
-
-                match wipe_signature(Path::new(device), sig) {
-                    Ok(()) => {
-                        let suffix = if force { " (force)" } else { "" };
-                        let _ = writeln!(
-                            out,
-                            "wipefs: {} wiped at offset {:#x}{suffix}",
-                            sig.name, sig.offset
-                        );
+        match u8::try_from(c).unwrap_or(0) {
+            b'a' => ctl.all = true,
+            b'b' => ctl.backup = true,
+            b'f' => ctl.force = true,
+            b'J' => ctl.json = true,
+            b'i' => ctl.no_headings = true,
+            b'O' => outarg = arg,
+            b'n' => ctl.noact = true,
+            b'o' => {
+                let a = arg.unwrap_or_default();
+                match ulstrutils::parse_size(&a) {
+                    // A uintmax_t kept in a loff_t, as C converts it.
+                    Ok(v) => {
+                        add_offset(&mut ctl.offsets, v.cast_signed());
                     }
                     Err(e) => {
-                        eprintln!(
-                            "wipefs: {}: cannot wipe {} at offset {:#x}: {e}",
-                            quoteaf_os(device),
-                            sig.name,
-                            sig.offset
+                        warnx(
+                            short,
+                            &ulstrutils::size_error_message(
+                                "invalid offset argument",
+                                &value.clone().unwrap_or_default(),
+                                e,
+                            ),
                         );
-                        status = 1;
+                        return 1;
                     }
                 }
             }
+            b'p' => {
+                ctl.parsable = true;
+                ctl.no_headings = true;
+            }
+            b'q' => ctl.quiet = true,
+            b't' => ctl.type_pattern = arg,
+            b'h' => {
+                out.write(&usage(short));
+                return 0;
+            }
+            b'V' => {
+                out.write(format!("{} from util-linux 2.39.3\n", shown(short)).as_bytes());
+                return 0;
+            }
+            _ => return errtryhelp(short),
+        }
+    }
+
+    if operands.is_empty() {
+        warnx(short, "no device specified");
+        return errtryhelp(short);
+    }
+    if ctl.backup && !ctl.all && ctl.offsets.is_empty() {
+        warnx(short, "The --backup option is meaningless in this context");
+    }
+
+    if !ctl.all && ctl.offsets.is_empty() {
+        // Print only.
+        let mut columns: Vec<Col> = if ctl.parsable {
+            // Kept backward compatible.
+            vec![Col::Offset, Col::Uuid, Col::Label, Col::Type]
         } else {
-            // List mode.
-            if json {
-                let _ = writeln!(out, "{{");
-                let _ = writeln!(out, "  \"signatures\": [");
-                for (idx, sig) in sigs.iter().enumerate() {
-                    let comma = if idx + 1 < sigs.len() { "," } else { "" };
-                    let _ = writeln!(
-                        out,
-                        "    {{\"device\":\"{}\",\"offset\":\"{:#x}\",\"type\":\"{}\",\"name\":\"{}\",\"magic\":\"{}\"}}{comma}",
-                        sig.device, sig.offset, sig.sig_type, sig.name, sig.magic_hex
-                    );
-                }
-                let _ = writeln!(out, "  ]");
-                let _ = writeln!(out, "}}");
-            } else if parsable {
-                for sig in &sigs {
-                    let _ = writeln!(
-                        out,
-                        "{}:{:#x}:{}:{}:{}",
-                        sig.device, sig.offset, sig.sig_type, sig.name, sig.magic_hex
-                    );
-                }
-            } else {
-                if !no_header {
-                    let _ = writeln!(
-                        out,
-                        "{:<12} {:>10} {:>8} {:<16} LABEL",
-                        "DEVICE", "OFFSET", "TYPE", "UUID"
-                    );
-                }
-                for sig in &sigs {
-                    let _ = writeln!(
-                        out,
-                        "{:<12} {:#10x} {:>8} {:<16} {}",
-                        sig.device, sig.offset, sig.sig_type, sig.name, sig.magic_hex
-                    );
-                }
+            // The default, which -O may extend.
+            vec![Col::Device, Col::Offset, Col::Type, Col::Uuid, Col::Label]
+        };
+        if let Some(list) = &outarg {
+            let added =
+                ulstrutils::string_add_to_idarray(list, &mut columns, MAX_COLUMNS, |name, rest| {
+                    column_name_to_id(name, rest, short)
+                });
+            if added.is_err() {
+                return 1;
             }
         }
-    }
-
-    if status != 0 {
-        process::exit(status);
-    }
-}
-
-fn parse_size(s: &str) -> Option<u64> {
-    let s = s.trim();
-    if s.starts_with("0x") || s.starts_with("0X") {
-        return u64::from_str_radix(&s[2..], 16).ok();
-    }
-    let (num_str, mult) = if let Some(n) = s.strip_suffix('K') {
-        (n, 1024u64)
-    } else if let Some(n) = s.strip_suffix('M') {
-        (n, 1024 * 1024)
-    } else if let Some(n) = s.strip_suffix('G') {
-        (n, 1024 * 1024 * 1024)
-    } else if let Some(n) = s.strip_suffix('T') {
-        (n, 1024 * 1024 * 1024 * 1024)
+        let (mut tb, cols) = init_output(&ctl, &columns);
+        for dev in &operands {
+            ctl.devname = dev.clone();
+            let wp = match read_offsets(&mut ctl, short) {
+                Ok(w) => w,
+                Err(Fatal(rc)) => return rc,
+            };
+            for w in &wp {
+                fill_table_row(&ctl, &mut tb, &cols, w);
+            }
+        }
+        // `scols_print_table`'s status is not looked at, as upstream does
+        // not look at it: what it printed before any failure is written.
+        let mut text = Vec::new();
+        let _ = tb.print_into(&mut text);
+        out.write(&text);
     } else {
-        (s, 1)
-    };
-    num_str.trim().parse::<u64>().ok().map(|n| n * mult)
-}
-
-// ============================================================================
-// blkdiscard command
-// ============================================================================
-
-fn cmd_blkdiscard(args: &[String]) {
-    let mut secure = false;
-    let mut zeroout = false;
-    let mut offset: u64 = 0;
-    let mut length: Option<u64> = None;
-    let mut device: Option<String> = None;
-    let mut verbose = false;
-
-    let mut i = 0;
-    while i < args.len() {
-        match args[i].as_str() {
-            "-h" | "--help" => {
-                println!("Usage: blkdiscard [options] <device>");
-                println!();
-                println!("Discard device sectors.");
-                println!();
-                println!("Options:");
-                println!("  -s, --secure       Secure discard");
-                println!("  -z, --zeroout      Zero-fill instead of discard");
-                println!("  -o, --offset BYTES Start offset");
-                println!("  -l, --length BYTES Number of bytes to discard");
-                println!("  -v, --verbose      Verbose output");
-                println!("  -h, --help         Show help");
-                println!("  -V, --version      Show version");
-                process::exit(0);
+        // Erase.
+        ctl.ndevs = operands.len();
+        for dev in &operands {
+            ctl.devname = dev.clone();
+            if let Err(Fatal(rc)) = do_wipe(&mut ctl, out, short) {
+                return rc;
             }
-            "-V" | "--version" => {
-                println!("blkdiscard {VERSION}");
-                process::exit(0);
-            }
-            "-s" | "--secure" => secure = true,
-            "-z" | "--zeroout" => zeroout = true,
-            "-v" | "--verbose" => verbose = true,
-            "-o" | "--offset" => {
-                // `unwrap_or(0)` before: an offset that did not parse became
-                // the START OF THE DEVICE. A user who names an offset and is
-                // silently given zero has the one region they were trying to
-                // protect destroyed first.
-                i += 1;
-                let Some(raw) = args.get(i) else {
-                    eprintln!("blkdiscard: --offset requires a byte count");
-                    process::exit(1);
-                };
-                let Some(v) = parse_size(raw) else {
-                    eprintln!("blkdiscard: invalid offset: {}", quoteaf_os(raw));
-                    process::exit(1);
-                };
-                offset = v;
-            }
-            "-l" | "--length" => {
-                // And this one defaulted the other way: a length that did not
-                // parse left `length` as None, which means ENTIRE DEVICE. The
-                // failure mode of a typo was to widen the operation from a
-                // bounded range to everything.
-                i += 1;
-                let Some(raw) = args.get(i) else {
-                    eprintln!("blkdiscard: --length requires a byte count");
-                    process::exit(1);
-                };
-                let Some(v) = parse_size(raw) else {
-                    eprintln!("blkdiscard: invalid length: {}", quoteaf_os(raw));
-                    process::exit(1);
-                };
-                length = Some(v);
-            }
-            s if !s.starts_with('-') => {
-                device = Some(s.to_string());
-            }
-            _ => {
-                eprintln!("blkdiscard: unknown option: {}", args[i]);
-                // Stop. This used to report the option and keep parsing, so
-                // `blkdiscard --zzq-not-an-option <device>` printed the refusal
-                // and then operated on the device anyway, exiting 0. For a
-                // tool that destroys data, an argument it did not understand
-                // is precisely when it must not proceed.
-                process::exit(1);
+            ctl.ndevs = ctl.ndevs.saturating_sub(1);
+        }
+        // The postponed re-reads, now that everything is erased.
+        for devname in std::mem::take(&mut ctl.reread) {
+            if let Ok(f) = File::open(quoting::os_from_bytes(&devname)) {
+                rereadpt(&f, &devname, out);
             }
         }
-        i += 1;
     }
-
-    let device = match device {
-        Some(d) => d,
-        None => {
-            eprintln!("blkdiscard: no device specified");
-            process::exit(1);
-        }
-    };
-
-    let len_str = match length {
-        Some(l) => format_size(l),
-        None => "entire device".to_string(),
-    };
-
-    let mode = if zeroout {
-        "zero-fill"
-    } else if secure {
-        "secure discard"
-    } else {
-        "discard"
-    };
-
-    if verbose {
-        eprintln!("blkdiscard: {mode} {device}: offset={offset}, length={len_str}");
-    }
-
-    // Nothing below this line used to touch the device. blkdiscard parsed its
-    // arguments, printed one sentence describing what it would have done, and
-    // exited 0 -- a data-destruction command that reported destroying data and
-    // destroyed none.
-    //
-    // Only the zero-fill can be honoured here. A real discard is the
-    // BLKDISCARD ioctl and a secure discard is BLKSECDISCARD; this kernel
-    // dispatches neither -- `posix/src/linux_blkpg.rs` carries the numbers and
-    // nothing reads them -- and there is no way to approximate a discard,
-    // because its whole point is telling the device the blocks are free rather
-    // than writing over them. Refusing names what is missing; pretending would
-    // leave a caller believing an SSD had been told to forget the data.
-    if !zeroout {
-        eprintln!(
-            "blkdiscard: {mode} needs the {} ioctl, which this kernel does not implement; use --zeroout to overwrite the range instead",
-            if secure {
-                "BLKSECDISCARD"
-            } else {
-                "BLKDISCARD"
-            }
-        );
-        process::exit(1);
-    }
-
-    let written = match zero_range(Path::new(&device), offset, length) {
-        Ok(n) => n,
-        Err(e) => {
-            eprintln!("blkdiscard: {}: {e}", quoteaf_os(&device));
-            process::exit(1);
-        }
-    };
-
-    let stdout = io::stdout();
-    let mut out = stdout.lock();
-    let _ = writeln!(
-        out,
-        "blkdiscard: {mode} {} from {} at offset {offset}",
-        format_size(written),
-        quoteaf_os(&device)
-    );
+    0
 }
-
-/// Overwrite `[offset, offset+length)` of `device` with zeros.
-///
-/// Returns the number of bytes written. `length` of `None` means "to the end
-/// of the device", which is only knowable for something whose metadata carries
-/// a size -- a raw block device reports 0 and the caller is asked for an
-/// explicit length rather than being given a guess.
-fn zero_range(device: &Path, offset: u64, length: Option<u64>) -> io::Result<u64> {
-    let mut f = fs::OpenOptions::new().write(true).open(device)?;
-    let size = f.metadata()?.len();
-
-    let end = match length {
-        Some(l) => offset.checked_add(l).ok_or_else(|| {
-            io::Error::new(io::ErrorKind::InvalidInput, "offset + length overflows")
-        })?,
-        None => {
-            if size == 0 {
-                return Err(io::Error::new(
-                    io::ErrorKind::InvalidInput,
-                    "cannot determine the device size; give an explicit --length",
-                ));
-            }
-            size
-        }
-    };
-    if size != 0 && end > size {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidInput,
-            "the range extends past the end of the device",
-        ));
-    }
-    let Some(total) = end.checked_sub(offset) else {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidInput,
-            "the offset is past the end of the range",
-        ));
-    };
-
-    f.seek(SeekFrom::Start(offset))?;
-    const CHUNK: usize = 1 << 20;
-    let zeros = vec![0u8; CHUNK];
-    let mut written = 0u64;
-    while written < total {
-        let remaining = total.saturating_sub(written);
-        let n = usize::try_from(remaining.min(CHUNK as u64)).unwrap_or(CHUNK);
-        f.write_all(zeros.get(..n).unwrap_or(&zeros))?;
-        written = written.saturating_add(n as u64);
-    }
-    f.sync_all()?;
-    Ok(written)
-}
-
-fn format_size(bytes: u64) -> String {
-    if bytes >= 1024 * 1024 * 1024 * 1024 {
-        format!(
-            "{:.1} TiB",
-            bytes as f64 / (1024.0 * 1024.0 * 1024.0 * 1024.0)
-        )
-    } else if bytes >= 1024 * 1024 * 1024 {
-        format!("{:.1} GiB", bytes as f64 / (1024.0 * 1024.0 * 1024.0))
-    } else if bytes >= 1024 * 1024 {
-        format!("{:.1} MiB", bytes as f64 / (1024.0 * 1024.0))
-    } else if bytes >= 1024 {
-        format!("{:.1} KiB", bytes as f64 / 1024.0)
-    } else {
-        format!("{bytes} bytes")
-    }
-}
-
-// ============================================================================
-// CLI
-// ============================================================================
-
-fn main() {
-    let args: Vec<String> = env::args().collect();
-
-    let prog_name = {
-        let s = args.first().map(|s| s.as_str()).unwrap_or("wipefs");
-        let bytes = s.as_bytes();
-        let mut last_sep = 0;
-        for (i, &b) in bytes.iter().enumerate() {
-            if b == b'/' || b == b'\\' {
-                last_sep = i + 1;
-            }
-        }
-        let base = &s[last_sep..];
-        let base = base.strip_suffix(".exe").unwrap_or(base);
-        base.to_string()
-    };
-
-    let rest: Vec<String> = args.into_iter().skip(1).collect();
-
-    match prog_name.as_str() {
-        "blkdiscard" => cmd_blkdiscard(&rest),
-        _ => cmd_wipefs(&rest),
-    }
-}
-
-// ============================================================================
-// Tests
-// ============================================================================
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_parse_size_plain() {
-        assert_eq!(parse_size("1024"), Some(1024));
-        assert_eq!(parse_size("0"), Some(0));
-    }
-
-    #[test]
-    fn test_parse_size_hex() {
-        assert_eq!(parse_size("0x100"), Some(256));
-        assert_eq!(parse_size("0X438"), Some(0x438));
-    }
-
-    #[test]
-    fn test_parse_size_suffixes() {
-        assert_eq!(parse_size("1K"), Some(1024));
-        assert_eq!(parse_size("2M"), Some(2 * 1024 * 1024));
-        assert_eq!(parse_size("1G"), Some(1024 * 1024 * 1024));
-        assert_eq!(parse_size("1T"), Some(1024 * 1024 * 1024 * 1024));
-    }
-
-    #[test]
-    fn test_parse_size_invalid() {
-        assert!(parse_size("abc").is_none());
-    }
-
-    #[test]
-    fn test_format_size_bytes() {
-        assert_eq!(format_size(512), "512 bytes");
-    }
-
-    #[test]
-    fn test_format_size_kib() {
-        assert_eq!(format_size(2048), "2.0 KiB");
-    }
-
-    #[test]
-    fn test_format_size_mib() {
-        assert_eq!(format_size(1024 * 1024), "1.0 MiB");
-    }
-
-    #[test]
-    fn test_format_size_gib() {
-        assert_eq!(format_size(1024 * 1024 * 1024), "1.0 GiB");
-    }
-
-    #[test]
-    fn test_format_size_tib() {
-        assert_eq!(format_size(1024 * 1024 * 1024 * 1024), "1.0 TiB");
-    }
-
-    #[test]
-    fn test_signature_database() {
-        assert!(SIGNATURES.len() >= 15);
-    }
-
-    #[test]
-    fn test_ext4_signature() {
-        let ext4 = SIGNATURES.iter().find(|s| s.name == "ext2/ext3/ext4");
-        assert!(ext4.is_some());
-        let ext4 = ext4.unwrap();
-        assert_eq!(ext4.offset, 0x438);
-        assert_eq!(ext4.magic, &[0x53, 0xEF]);
-    }
-
-    #[test]
-    fn test_gpt_signature() {
-        let gpt = SIGNATURES.iter().find(|s| s.name == "gpt");
-        assert!(gpt.is_some());
-        let gpt = gpt.unwrap();
-        assert_eq!(gpt.offset, 0x200);
-        assert_eq!(gpt.magic, b"EFI PART");
-    }
-
-    #[test]
-    fn test_ntfs_signature() {
-        let ntfs = SIGNATURES.iter().find(|s| s.name == "ntfs");
-        assert!(ntfs.is_some());
-        assert_eq!(ntfs.unwrap().offset, 3);
-    }
-
-    #[test]
-    fn test_luks_signature() {
-        let luks = SIGNATURES.iter().find(|s| s.name == "luks");
-        assert!(luks.is_some());
-        assert_eq!(luks.unwrap().offset, 0);
-    }
-
-    #[test]
-    fn a_device_that_cannot_be_read_is_an_error_not_an_empty_signature_list() {
-        // It used to return an empty Vec, which is also what a genuinely
-        // clean device returns -- so wipefs could not tell "nothing here"
-        // from "could not look".
-        let err = detect_signatures(Path::new("/nonexistent/device"))
-            .expect_err("an unreadable device must not read as clean");
-        assert_eq!(err.kind(), std::io::ErrorKind::NotFound);
-    }
-
-    #[test]
-    fn a_file_with_no_signatures_reports_none() {
-        // The other half of the two-probe rule: proof the reader RUNS, so the
-        // test above cannot pass by detection being broken outright. A file
-        // of zeros has no magic anywhere.
-        let dir =
-            std::env::temp_dir().join(format!("wipefs-clean-{}-{}", std::process::id(), line!()));
-        let _ = fs::create_dir_all(&dir);
-        let img = dir.join("zero.img");
-        fs::write(&img, vec![0u8; 4096]).expect("fixture");
-        let sigs = detect_signatures(&img).expect("readable");
-        assert!(
-            sigs.is_empty(),
-            "invented signatures in a zero file: {sigs:?}"
-        );
-        let _ = fs::remove_dir_all(&dir);
-    }
-
-    #[test]
-    fn a_real_ext4_magic_is_found_where_it_actually_is() {
-        // And proof the matcher is not merely always-empty now.
-        let dir =
-            std::env::temp_dir().join(format!("wipefs-ext4-{}-{}", std::process::id(), line!()));
-        let _ = fs::create_dir_all(&dir);
-        let img = dir.join("ext4.img");
-        let mut data = vec![0u8; 4096];
-        data[0x438] = 0x53;
-        data[0x439] = 0xEF;
-        fs::write(&img, &data).expect("fixture");
-        let sigs = detect_signatures(&img).expect("readable");
-        assert_eq!(sigs.len(), 1, "{sigs:?}");
-        assert_eq!(sigs[0].offset, 0x438);
-        assert!(sigs[0].name.contains("ext4"));
-        let _ = fs::remove_dir_all(&dir);
-    }
-
-    #[test]
-    fn test_detected_sig_clone() {
-        let sig = DetectedSig {
-            device: "/dev/sda".to_string(),
-            offset: 0x438,
-            sig_type: "filesystem".to_string(),
-            name: "ext4".to_string(),
-            magic_hex: "53ef".to_string(),
-            length: 2,
-        };
-        let c = sig.clone();
-        assert_eq!(c.device, "/dev/sda");
-        assert_eq!(c.offset, 0x438);
-        assert_eq!(c.name, "ext4");
-    }
-
-    #[test]
-    fn test_fs_signature_clone() {
-        let sig = FsSignature {
-            name: "test",
-            magic: b"TEST",
-            offset: 0,
-            _sig_type: SigType::Filesystem,
-        };
-        let c = sig.clone();
-        assert_eq!(c.name, "test");
-        assert_eq!(c.offset, 0);
-    }
-
-    #[test]
-    fn test_sig_type_clone() {
-        let st = SigType::Raid;
-        let _c = st.clone();
-    }
-
-    #[test]
-    fn test_swap_signature() {
-        let swap: Vec<_> = SIGNATURES.iter().filter(|s| s.name == "swap").collect();
-        assert_eq!(swap.len(), 2);
-    }
-
-    #[test]
-    fn test_xfs_signature() {
-        let xfs = SIGNATURES.iter().find(|s| s.name == "xfs");
-        assert!(xfs.is_some());
-        assert_eq!(xfs.unwrap().offset, 0);
-        assert_eq!(xfs.unwrap().magic, b"XFSB");
-    }
-
-    #[test]
-    fn wiping_a_signature_actually_zeroes_the_magic_on_disk() {
-        // The branch this replaces printed "wipefs: ext4 wiped at offset
-        // 0x438" without opening the device at all. Asserting on the bytes
-        // rather than on the message is the whole point: the old code would
-        // have passed any test that only checked what was printed.
-        let dir =
-            std::env::temp_dir().join(format!("wipefs-wipe-{}-{}", std::process::id(), line!()));
-        let _ = fs::create_dir_all(&dir);
-        let img = dir.join("planted.img");
-        let mut data = vec![0u8; 4096];
-        data[0x438] = 0x53;
-        data[0x439] = 0xEF;
-        fs::write(&img, &data).expect("fixture");
-
-        let sigs = detect_signatures(&img).expect("readable");
-        assert_eq!(sigs.len(), 1, "fixture did not plant one signature");
-        wipe_signature(&img, &sigs[0]).expect("wipe must succeed on a writable file");
-
-        let after = fs::read(&img).expect("reread");
-        assert_eq!(after.len(), 4096, "the wipe must not resize the device");
-        assert_eq!(&after[0x438..0x43A], &[0, 0], "the magic survived the wipe");
-        assert!(
-            detect_signatures(&img).expect("readable").is_empty(),
-            "the signature is still detected after being wiped"
-        );
-        let _ = fs::remove_dir_all(&dir);
-    }
-
-    #[test]
-    fn wiping_a_device_that_cannot_be_opened_is_an_error() {
-        // The refusing half. A wipe that could not happen must not be
-        // reported as one.
-        let sig = DetectedSig {
-            device: "/nonexistent/device".to_string(),
-            offset: 0x438,
-            sig_type: "filesystem".to_string(),
-            name: "ext4".to_string(),
-            magic_hex: "53ef".to_string(),
-            length: 2,
-        };
-        let err = wipe_signature(Path::new("/nonexistent/device"), &sig)
-            .expect_err("wiping a device that cannot be opened must not succeed");
-        assert_eq!(err.kind(), std::io::ErrorKind::NotFound);
-    }
-
-    // ---- blkdiscard: the range written is exactly the range asked for -----
-
-    fn filled_image(tag: &str, line: u32) -> (std::path::PathBuf, std::path::PathBuf) {
-        let dir = std::env::temp_dir().join(format!(
-            "blkdiscard-{}-{}-{}",
-            tag,
-            std::process::id(),
-            line
-        ));
-        let _ = fs::create_dir_all(&dir);
-        let img = dir.join("dev.img");
-        fs::write(&img, vec![0xABu8; 4096]).expect("fixture");
-        (dir, img)
-    }
-
-    #[test]
-    fn zeroing_a_bounded_range_leaves_both_sides_alone() {
-        // The strongest statement available about a destructive operation:
-        // the byte before the range and the byte after it are untouched. The
-        // code this replaces printed a sentence and wrote nothing, so it would
-        // have passed any test that checked only the message.
-        let (dir, img) = filled_image("bounded", line!());
-        let n = zero_range(&img, 1024, Some(512)).expect("writable");
-        assert_eq!(n, 512);
-        let after = fs::read(&img).expect("reread");
-        assert_eq!(after.len(), 4096, "the device was resized");
-        assert_eq!(after[1023], 0xAB, "the byte before the range was destroyed");
-        assert_eq!(after[1024], 0x00, "the range was not zeroed");
-        assert_eq!(after[1535], 0x00, "the range was not zeroed to its end");
-        assert_eq!(after[1536], 0xAB, "the write ran past the range");
-        let _ = fs::remove_dir_all(&dir);
-    }
-
-    #[test]
-    fn zeroing_with_no_length_covers_the_rest_of_the_device() {
-        let (dir, img) = filled_image("toend", line!());
-        let n = zero_range(&img, 4032, None).expect("writable");
-        assert_eq!(n, 64);
-        let after = fs::read(&img).expect("reread");
-        assert_eq!(after[4031], 0xAB);
-        assert!(after[4032..].iter().all(|b| *b == 0));
-        let _ = fs::remove_dir_all(&dir);
-    }
-
-    #[test]
-    fn a_range_past_the_end_is_refused_rather_than_extending_the_device() {
-        // Without this, `--offset 4000 --length 1000` would GROW a 4096-byte
-        // image to 5000 bytes, which is not something a discard can do to a
-        // block device and not something the caller asked for.
-        let (dir, img) = filled_image("pastend", line!());
-        let err = zero_range(&img, 4000, Some(1000)).expect_err("must refuse");
-        assert_eq!(err.kind(), std::io::ErrorKind::InvalidInput);
-        assert_eq!(fs::metadata(&img).expect("stat").len(), 4096);
-        let _ = fs::remove_dir_all(&dir);
-    }
-
-    #[test]
-    fn an_offset_plus_length_that_overflows_is_refused() {
-        let (dir, img) = filled_image("overflow", line!());
-        let err = zero_range(&img, u64::MAX, Some(2)).expect_err("must refuse");
-        assert_eq!(err.kind(), std::io::ErrorKind::InvalidInput);
-        let _ = fs::remove_dir_all(&dir);
-    }
-}
+mod tests;

@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
-"""Tests for `tree_is_push`, the precondition of pre-push gates 52-73.
+"""Tests for `tree_is_push`, the precondition of pre-push gates 53-74.
 
 Run: `python scripts/test-pre-push-tree-is-push.py` (0 = pass, 1 = fail).
 
 Why this exists
 ---------------
 
-Gates 52-73 are boot-test gates moved to the push (design-decisions 974, the
+Gates 53-74 are boot-test gates moved to the push (design-decisions 974, the
 operator's answer to A-Q13). None of their checkers takes `--head`: each reads
 the working tree. A working-tree gate judging a push is right only when the
 working tree *is* the push, and wrong in both directions otherwise -- a defect

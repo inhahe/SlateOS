@@ -1,0 +1,14 @@
+[package]
+name = "journalio"
+version = "0.1.0"
+edition = "2024"
+description = "Appending to the journal file, and rewriting or rotating it, under one lock, so no record is lost"
+
+[lints]
+workspace = true
+
+[dependencies]
+
+[dev-dependencies]
+# A directory of its own for each test's log files.
+scratchdir = { path = "../scratchdir" }

@@ -2,18 +2,24 @@
 name = "sha2"
 version = "0.1.0"
 edition = "2024"
-description = "SHA-256, written once, checked against the FIPS 180-4 vectors."
+description = "The SHA-2 family (SHA-224, SHA-256, SHA-384, SHA-512), checked against the FIPS 180-4 vectors."
 
 [lib]
 path = "src/lib.rs"
 
-# Intentionally dependency-free, and `no_std` with no `alloc`: the one-shot
-# digest is a `[u8; 32]`, the streaming state is fixed-size, and the hex form
-# is a `[u8; 64]` wrapper, so there is nothing to allocate. That matters more
-# here than for the other shared crates — the kernel, the bootloader's
-# `build.rs` and the bare-metal service binaries all hash things, and none of
-# them have a heap.
+# `no_std` with no `alloc`: the one-shot digests are fixed arrays, the
+# streaming state is fixed-size, and the hex form is a `[u8; 64]` wrapper, so
+# there is nothing to allocate. That matters more here than for the other
+# shared crates — the kernel, the bootloader's `build.rs` and the bare-metal
+# service binaries all hash things, and none of them have a heap.
 [dependencies]
+# SHA-512's partial block and padding, which MD5, SHA-1 and SM3 share. It was
+# dependency-free until SHA-512 arrived (2026-09-25); `blockbuf` is itself
+# `no_std`, no `alloc` and dependency-free, so every caller above can still
+# link this crate. SHA-256 keeps the buffering it already had rather than being
+# moved in the same change: that is a behaviour-preserving refactor of a
+# primitive the kernel links, and it belongs in a change of its own.
+blockbuf = { path = "../blockbuf" }
 
 [lints]
 workspace = true

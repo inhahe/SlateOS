@@ -43,7 +43,7 @@
 apps/chess/src/main.rs	PieceKind::PROMOTION_KINDS	a pawn may not become a king, and staying a pawn is not a promotion
 apps/finance/src/main.rs	Category::EXPENSE_CATS	Savings, Income and Investment are where money comes from, not what it is spent on
 apps/pipes/src/main.rs	PipeKind::FILL	`Empty` is the absence of a pipe, so filling a cell with it would leave the cell unfilled
-userspace/coreutils/src/bin/ls.rs	Ind::FILETYPE_INDICATORS	lane B's. `Ind` also carries the colour-control entries (Reset, Norm, Left, Right, End...), which are not file types
+userspace/coreutils/src/ls.rs	Ind::FILETYPE_INDICATORS	lane B's. `Ind` also carries the colour-control entries (Reset, Norm, Left, Right, End...), which are not file types
 
 # --- the variant carries data a fixed list cannot express --------------------
 apps/filesearch/src/main.rs	SizeFilter::CHIPS	`Custom(min, max)` carries two numbers a strip of chips cannot say, so a chip for it would not name which range it meant

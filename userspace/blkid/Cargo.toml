@@ -2,8 +2,25 @@
 name = "blkid"
 version = "0.1.0"
 edition = "2024"
-description = "SlateOS blkid - block device identification (blkid/findfs/lsblk2)"
-[dependencies]
+description = "util-linux 2.39.3's blkid, ported: locate and print block device attributes, through the libblkid port"
 
 [lints]
 workspace = true
+
+[dependencies]
+# glibc's getopt_long, with util-linux's mutually exclusive options.
+getoptlong = { path = "../getoptlong" }
+# argv and paths are bytes; a name in a diagnostic is escaped.
+quoting = { path = "../quoting" }
+# libblkid: probing (-p, -i), the device cache, tag evaluation (-L, -U).
+ulblkid = { path = "../ulblkid" }
+# lib/ismounted.c, for -o list; chrdev names, for a UBI operand.
+ulsysfs = { path = "../ulsysfs" }
+# strtosize_or_err for -O and -S; the exclusive-options check; strtoumax.
+ulstrutils = { path = "../ulstrutils" }
+# The terminal's width for -o list, and what setlocale leaves in errno.
+smartcols = { path = "../smartcols" }
+# util-linux's close_stdout, and stdout buffered as glibc buffers it.
+ulclosestream = { path = "../ulclosestream" }
+# A standard descriptor blkid was started without stays closed.
+stdfdguard = { path = "../stdfdguard" }

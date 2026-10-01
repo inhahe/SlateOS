@@ -217,7 +217,7 @@ fn main() -> ExitCode {
 fn run_main() -> ExitCode {
     stdfd::restore();
     let args: Vec<OsString> = env::args_os().skip(1).collect();
-    let request = match parse_args(&args) {
+    let request = match parse_args(&args, getopt::posixly_correct()) {
         Ok(request) => request,
         Err(refusal) => return refusal.report(),
     };
@@ -445,7 +445,10 @@ fn fold_file<W: Write>(name: &OsString, settings: &Settings, out: &mut W) -> Res
 
 // -------------------------------------------------------------------- parsing
 
-fn parse_args(args: &[OsString]) -> Result<Request, Refusal> {
+/// `posixly_correct` is [`getopt::posixly_correct`], passed in so that a test
+/// can choose it. When it is set, the first operand ends option parsing, as it
+/// does in glibc's getopt -- see "Where option parsing stops" in that module.
+fn parse_args(args: &[OsString], posixly_correct: bool) -> Result<Request, Refusal> {
     let mut settings = Settings::default();
     let mut files: Vec<OsString> = Vec::new();
     let mut only_operands = false;
@@ -464,6 +467,8 @@ fn parse_args(args: &[OsString]) -> Result<Request, Refusal> {
         } else if bytes == b"-" || bytes.first() != Some(&b'-') {
             // A lone `-` is standard input, which is an operand.
             files.push(arg.clone());
+            // Under POSIXLY_CORRECT, glibc's getopt stops at the first operand.
+            only_operands = posixly_correct;
         } else if let Some(body) = bytes.strip_prefix(b"--") {
             if let Some(request) = long_option(body, &bytes, args, &mut at, &mut settings)? {
                 return Ok(request);
@@ -614,6 +619,28 @@ fn arg_bytes(arg: &OsString) -> Vec<u8> {
 #[allow(clippy::unwrap_used, clippy::panic, clippy::indexing_slicing)]
 mod tests {
     use super::*;
+
+    /// `parse_args` with `POSIXLY_CORRECT` pinned off, so that a test putting an
+    /// option after an operand does not depend on the environment `cargo test`
+    /// inherited. The tests of the variable itself call `super::parse_args`.
+    fn parse_args(args: &[OsString]) -> Result<Request, Refusal> {
+        super::parse_args(args, false)
+    }
+
+    /// Measured against GNU on 2026-09-25: `POSIXLY_CORRECT=1 fold f -w1` takes
+    /// `-w1` for a second file, where without the variable it is an option.
+    #[test]
+    fn posixly_correct_makes_an_option_after_an_operand_an_operand() {
+        let argv: Vec<OsString> = ["f", "-w1"].iter().map(OsString::from).collect();
+        let Ok(Request::Run(_, files)) = super::parse_args(&argv, true) else {
+            panic!("expected a run");
+        };
+        assert_eq!(files, argv);
+        let Ok(Request::Run(_, files)) = super::parse_args(&argv, false) else {
+            panic!("expected a run");
+        };
+        assert_eq!(files, argv[..1]);
+    }
 
     /// Fold `input` under the given command line, ignoring operands.
     fn run(options: &[&str], input: &[u8]) -> Vec<u8> {

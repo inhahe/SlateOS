@@ -12,6 +12,9 @@ quoting = { path = "../quoting" }
 # line from forging entries around itself. Shared with `syslogd`, which
 # writes the same file.
 journalrec = { path = "../journalrec" }
+# The journal's append protocol (design-decisions §1037): each record under
+# the file's lock, so a vacuum or rotation meanwhile does not lose it.
+journalio = { path = "../journalio" }
 # getopt's usage diagnostics, spelled once; the wording is getopt's, not
 # ours. Pure formatting over `quoting`, no I/O, so §768 exempt.
 usageerror = { path = "../usageerror" }

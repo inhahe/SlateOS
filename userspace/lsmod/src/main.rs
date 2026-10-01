@@ -236,8 +236,8 @@ fn resolve_deps_recursive(
 ) -> Result<(), String> {
     if visited.contains(&entry.name) {
         return Err(format!(
-            "circular dependency detected involving '{}'",
-            entry.name
+            "circular dependency detected involving {}",
+            quoteaf_os(&entry.name)
         ));
     }
 
@@ -255,8 +255,9 @@ fn resolve_deps_recursive(
             resolve_deps_recursive(dep_entry, all_entries, result, visited)?;
         } else {
             return Err(format!(
-                "dependency '{}' of '{}' not found in modules.dep",
-                dep_name, entry.name
+                "dependency {} of {} not found in modules.dep",
+                quoteaf_os(&dep_name),
+                quoteaf_os(&entry.name)
             ));
         }
     }

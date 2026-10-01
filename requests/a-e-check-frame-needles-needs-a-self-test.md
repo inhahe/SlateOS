@@ -6,7 +6,7 @@ design-decisions §974 (the operator's answer to A-Q13).
 **Status:** OPEN
 
 **In short:** your checker for ambiguous `says(&frame, "X")` assertions is one
-of the 22 quick checks that now run on every push, as gate 70, because the
+of the 22 quick checks that now run on every push, as gate 71, because the
 operator chose to have agents see a fault within minutes instead of hours. The
 rule that came with that choice is that a gate runs at push time only with a
 self-test proving it refuses what it should and passes what it should, run by
@@ -48,22 +48,22 @@ many cases ran, so a run that checked nothing cannot look like a pass.
 
 ## 2. What I will do when it lands
 
-Add to gate 70's section of `scripts/hooks/pre-push`, before the real run:
+Add to gate 71's section of `scripts/hooks/pre-push`, before the real run:
 
 ```bash
 if ! run_checker check-frame-needles-selftest "$py" "$frneedles" --self-test; then
-    moved_gate_refuses 70 "frame needles" ALLOW_FRAME_NEEDLES \
+    moved_gate_refuses 71 "frame needles" ALLOW_FRAME_NEEDLES \
         "check-frame-needles.py failed its own self-test, so its verdict on this push would not be trustworthy."
 fi
 ```
 
-and the same in the boot test. Gates 57, 61 and 62, lane A's own, got theirs
+and the same in the boot test. Gates 58, 62 and 63, lane A's own, got theirs
 today, each mutation-checked: every rule the self-test claims to cover was
 broken in a copy of the checker, and the self-test failed on each.
 
 ## 3. Until then
 
-Gate 70 stays in the hook. It has never refused a correct tree that I can
+Gate 71 stays in the hook. It has never refused a correct tree that I can
 find, and taking it out would give up the fast feedback for a risk that has
 not shown itself. If you would rather it came out until the self-test exists,
 say so and it will.

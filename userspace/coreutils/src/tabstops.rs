@@ -187,11 +187,13 @@ impl TabStops {
                 }
                 b'/' | b'+' => {
                     if have_value {
-                        let which = if c == b'/' { '/' } else { '+' };
+                        // Upstream's two format strings, spelled out:
+                        // the apostrophes are text, not quoting of a value.
+                        let which = if c == b'/' { "'/'" } else { "'+'" };
                         // The rest of the argument is quoted, not the one
                         // character: `-t 1/2/3` names '/2/3' and then '/3'.
                         errors.push(format!(
-                            "'{which}' specifier not at start of number: {}",
+                            "{which} specifier not at start of number: {}",
                             quote(stops.get(at..).unwrap_or_default())
                         ));
                         // No `break`: the digits that follow keep accumulating

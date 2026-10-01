@@ -1,8 +1,9 @@
 # C -> B -- `an_assignment_prefix_shadows_a_computed_name` reads the clock
 
 **From:** Lane C. **To:** Lane B (`userspace/**`: `userspace/oils`).
-**Filed:** 2026-09-29. **Status:** OPEN -- not urgent; it fails a busy
-workspace gate now and then, and nothing waits on it.
+**Filed:** 2026-09-29. **Status:** DONE before it was filed, on `lane-b`
+(a88975a1e, 2026-09-24), and on `main` with lane B's 2026-10-01 publish.
+See the reply at the end.
 
 **In short:** one of oils' interpreter tests expects `$SECONDS` to read `0`
 once a command has ended. `$SECONDS` counts whole seconds since the shell
@@ -39,3 +40,15 @@ run("SECONDS=100 eval 'echo $SECONDS'; echo $SECONDS").0 == "100\n0\n"
 What the assertion means is "the shell's own counter came back, not the
 prefix's 100". Something like `echo $(( SECONDS < 100 ))` expecting `1` says
 that without depending on how long the test takes. Your call.
+
+## Reply from lane B -- 2026-10-01
+
+Fixed on `lane-b` five days before this was filed, by the change made for
+`requests/c-b-seconds-is-the-second-oils-test-that-asserts-a-clock.md`
+(a88975a1e): every test shell's `$SECONDS` now runs on a clock only the test
+moves (`SecondsClock::Manual`, installed by `new_shell`), so the `0` this
+test expects is the shell's answer, not the machine's speed. Lane C saw it
+on `main` because lane B had not published since mid-September; that
+publish is this one. The one test of the real clock,
+`seconds_on_the_real_clock_count_whole_seconds_since_the_anchor`, asserts a
+bound measured around the run rather than a number.

@@ -348,7 +348,7 @@ fn main() -> ExitCode {
 
 fn run_main() -> ExitCode {
     let args: Vec<OsString> = std::env::args_os().skip(1).collect();
-    let request = match parse_args(&args) {
+    let request = match parse_args(&args, getopt::posixly_correct()) {
         Ok(r) => r,
         Err(e) => {
             diag!("split: {}", e.message);
@@ -433,7 +433,10 @@ struct Parsed {
     operands: Vec<OsString>,
 }
 
-fn parse_args(args: &[OsString]) -> Result<Request, Fail> {
+/// `posixly_correct` is [`getopt::posixly_correct`], passed in so that a test
+/// can choose it. When it is set, the first operand ends option parsing, as it
+/// does in glibc's getopt -- see "Where option parsing stops" in that module.
+fn parse_args(args: &[OsString], posixly_correct: bool) -> Result<Request, Fail> {
     let mut state = Parsed {
         options: Options::default(),
         mode_set: false,
@@ -456,6 +459,8 @@ fn parse_args(args: &[OsString]) -> Result<Request, Fail> {
         } else if bytes == b"-" || bytes.first() != Some(&b'-') {
             // A lone `-` is standard input, which is an operand.
             state.operands.push(arg.clone());
+            // Under POSIXLY_CORRECT, glibc's getopt stops at the first operand.
+            only_operands = posixly_correct;
         } else if is_obsolete_count(&bytes) {
             // `split -5 FILE`: the historical spelling of `-l 5`, still
             // accepted by GNU. It is not a getopt option — there is no `-5`
@@ -1427,6 +1432,28 @@ fn emit_selected<'a, I: Iterator<Item = &'a [u8]>>(
 #[allow(clippy::unwrap_used, clippy::panic, clippy::expect_used)]
 mod tests {
     use super::*;
+
+    /// `parse_args` with `POSIXLY_CORRECT` pinned off, so that a test putting an
+    /// option after an operand does not depend on the environment `cargo test`
+    /// inherited. The tests of the variable itself call `super::parse_args`.
+    fn parse_args(args: &[OsString]) -> Result<Request, Fail> {
+        super::parse_args(args, false)
+    }
+
+    /// Measured against GNU on 2026-09-25: `POSIXLY_CORRECT=1 split f -l1` takes
+    /// `-l1` for the output prefix, where without the variable it is an option.
+    #[test]
+    fn posixly_correct_makes_an_option_after_an_operand_an_operand() {
+        let argv: Vec<OsString> = ["f", "-l1"].iter().map(OsString::from).collect();
+        let Ok(Request::Run(_, _, prefix)) = super::parse_args(&argv, true) else {
+            panic!("expected a run");
+        };
+        assert_eq!(Some(&prefix), argv.get(1));
+        let Ok(Request::Run(_, _, prefix)) = super::parse_args(&argv, false) else {
+            panic!("expected a run");
+        };
+        assert_eq!(prefix, OsString::from("x"));
+    }
 
     fn os(text: &str) -> OsString {
         OsString::from(text)

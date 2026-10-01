@@ -21,107 +21,105 @@
 use quoting::quoteaf_os;
 use std::env;
 use std::fs;
+use std::io::Write;
 use std::process;
 
 // ============================================================================
-// Syscall interface
+// The service manager, over the service bus
 // ============================================================================
 
-// Service manager IPC syscalls (from kernel syscall table).
-// The service manager listens on a well-known IPC channel. We send structured
-// commands and receive responses.
-const SYS_CHANNEL_OPEN: u64 = 200;
-const SYS_CHANNEL_SEND: u64 = 201;
-const SYS_CHANNEL_RECV: u64 = 202;
-const SYS_CHANNEL_CLOSE: u64 = 204;
+/// The service manager's name on the service bus.
+///
+/// Nothing registers it yet (known-issues.md, "`org.slateos.ServiceManager`
+/// has two clients and no provider"), so every request ends at "no such
+/// service" and the commands that have a fallback use it.
+const SERVICE_MANAGER: &str = "org.slateos.ServiceManager";
 
-#[cfg(target_vendor = "slateos")]
-unsafe fn syscall3(nr: u64, a1: u64, a2: u64, a3: u64) -> i64 {
-    let ret: i64;
-    // SAFETY: Caller ensures arguments are valid for the given syscall.
-    unsafe {
-        core::arch::asm!(
-            "syscall",
-            inlateout("rax") nr as i64 => ret,
-            in("rdi") a1,
-            in("rsi") a2,
-            in("rdx") a3,
-            lateout("rcx") _,
-            lateout("r11") _,
-            options(nostack),
-        );
-    }
-    ret
+/// How long to wait for the service manager's answer: 25 seconds, D-Bus's
+/// default method-call timeout, which is also what `systemctl` waits.
+const SERVICE_MANAGER_TIMEOUT_NS: u64 = libservicebus::secs_to_ns(25);
+
+/// What the service manager said to a request.
+#[derive(Debug, PartialEq, Eq)]
+enum Answer {
+    /// It did it, and said this about it (possibly nothing).
+    Done(Vec<u8>),
+    /// It refused: its error's name, and the explanation it sent, if any.
+    Refused(String, Vec<u8>),
 }
 
-/// Host stub for `syscall3` — see the gated definition above.
+/// Ask the service manager to run `method` on the service `name`.
 ///
-/// On a development host there is no SlateOS kernel to talk to, and a raw
-/// `syscall` instruction does not fail cleanly: it enters whatever kernel is
-/// actually running, with this crate's SlateOS call number in RAX. Those
-/// numbers mean unrelated things elsewhere, so the call is not a no-op — it
-/// is someone else's syscall. Returning `ENOSYS` keeps `cargo test`, `cargo
-/// run` and `clippy` on the host honest instead of dangerous.
+/// A service-bus method call whose one argument is the service's name: a
+/// return means done, an error means refused, and either's first field, if
+/// it sent one, is what it has to say. `Err` means the question could not be
+/// asked at all -- no service manager, or no answer in time.
 ///
-/// See known-issues.md
-/// `B-FORTY-SIX-USERSPACE-CRATES-CAN-ISSUE-A-RAW-SYSCALL-ON-THE-DEV-HOST`.
-#[cfg(not(target_vendor = "slateos"))]
-unsafe fn syscall3(_nr: u64, _a1: u64, _a2: u64, _a3: u64) -> i64 {
-    -38 // ENOSYS
+/// This replaced a hand-rolled channel client that called syscall 200 as
+/// "open a channel to a service". 200 is `SYS_CHANNEL_CREATE`: it took the
+/// name's *address* as its flags and returned a fresh channel connected to
+/// nothing, so no request ever reached any service (lane F's
+/// `requests/f-b-logind-refuses-every-caller-because-libservicebus-never-asks-who-it-is.md`,
+/// point 3). Connecting by name is `SYS_SERVICE_CONNECT`, which
+/// `libservicebus` wraps.
+fn ask_service_manager(method: &str, name: &str) -> Result<Answer, String> {
+    let mut conn = libservicebus::Connection::connect(SERVICE_MANAGER)
+        .map_err(|e| format!("cannot reach {SERVICE_MANAGER}: {e}"))?;
+    // A reply that sent no text has said nothing; that is an absence, not a
+    // failure being discarded.
+    match conn.call_fields(method, &[name.as_bytes()], SERVICE_MANAGER_TIMEOUT_NS) {
+        Ok(libservicebus::Outcome::Done(fields)) => {
+            Ok(Answer::Done(fields.into_iter().next().unwrap_or_default()))
+        }
+        Ok(libservicebus::Outcome::Refused { error, fields }) => Ok(Answer::Refused(
+            error,
+            fields.into_iter().next().unwrap_or_default(),
+        )),
+        Err(e) => Err(format!("{SERVICE_MANAGER} did not answer {method}: {e}")),
+    }
 }
 
-/// Send a command to the service manager via IPC.
-fn send_service_command(command: &str, service_name: &str) -> Result<String, String> {
-    // Build the IPC message: "COMMAND service_name\n"
-    let msg = format!("{command} {service_name}\0");
-
-    // Open a channel to the service manager (well-known name: "org.slateos.ServiceManager").
-    let svc_name = b"org.slateos.ServiceManager\0";
-    let channel = unsafe {
-        syscall3(
-            SYS_CHANNEL_OPEN,
-            svc_name.as_ptr() as u64,
-            svc_name.len() as u64,
-            0,
-        )
-    };
-
-    if channel < 0 {
-        return Err(format!(
-            "cannot connect to service manager (error {channel})"
-        ));
+/// Finish a request the service manager answered: print what it said, or
+/// report its refusal and exit non-zero.
+fn conclude(what: &str, answer: Answer) {
+    let code = conclude_to(
+        &mut std::io::stdout().lock(),
+        &mut std::io::stderr().lock(),
+        what,
+        &answer,
+    );
+    if code != 0 {
+        process::exit(code);
     }
+}
 
-    let ch = channel as u64;
-
-    // Send the command.
-    let send_ret = unsafe { syscall3(SYS_CHANNEL_SEND, ch, msg.as_ptr() as u64, msg.len() as u64) };
-
-    if send_ret < 0 {
-        let _ = unsafe { syscall3(SYS_CHANNEL_CLOSE, ch, 0, 0) };
-        return Err(format!("send failed (error {send_ret})"));
+/// [`conclude`]'s output and exit status, written to `out` and `err`.
+///
+/// What the service manager says is written as the bytes it sent: it is
+/// another program's text, and decoding it lossily would print something it
+/// did not say. A failure to write the terminal itself is not reported -- there
+/// is nowhere left to report it -- but it does not change the status either.
+fn conclude_to(out: &mut impl Write, err: &mut impl Write, what: &str, answer: &Answer) -> i32 {
+    match answer {
+        Answer::Done(said) => {
+            let said: &[u8] = if said.is_empty() { b"done" } else { said };
+            let _ = out.write_all(said).and_then(|()| out.write_all(b"\n"));
+            0
+        }
+        Answer::Refused(error, why) => {
+            let _ = writeln!(out);
+            let _ = write!(err, "service: the service manager refused {what}: {error}")
+                .and_then(|()| {
+                    if why.is_empty() {
+                        Ok(())
+                    } else {
+                        err.write_all(b": ").and_then(|()| err.write_all(why))
+                    }
+                })
+                .and_then(|()| err.write_all(b"\n"));
+            1
+        }
     }
-
-    // Receive the response.
-    let mut buf = [0u8; 4096];
-    let recv_ret = unsafe {
-        syscall3(
-            SYS_CHANNEL_RECV,
-            ch,
-            buf.as_mut_ptr() as u64,
-            buf.len() as u64,
-        )
-    };
-
-    let _ = unsafe { syscall3(SYS_CHANNEL_CLOSE, ch, 0, 0) };
-
-    if recv_ret < 0 {
-        return Err(format!("recv failed (error {recv_ret})"));
-    }
-
-    let len = (recv_ret as usize).min(buf.len());
-    let response = String::from_utf8_lossy(&buf[..len]).to_string();
-    Ok(response)
 }
 
 /// Create a filesystem symlink (`target` is the existing file, `link` is the
@@ -481,8 +479,8 @@ fn split_exec(exec: &str) -> Result<(&str, Vec<&str>), String> {
 
 fn cmd_start(name: &str) {
     print!("Starting {}... ", name);
-    match send_service_command("START", name) {
-        Ok(resp) => println!("{}", resp.trim()),
+    match ask_service_manager("StartService", name) {
+        Ok(answer) => conclude("the start", answer),
         Err(e) => {
             // Fall back to direct execution if service manager is unavailable.
             eprintln!("IPC failed ({e}), trying direct start...");
@@ -511,8 +509,8 @@ fn cmd_start(name: &str) {
 
 fn cmd_stop(name: &str) {
     print!("Stopping {}... ", name);
-    match send_service_command("STOP", name) {
-        Ok(resp) => println!("{}", resp.trim()),
+    match ask_service_manager("StopService", name) {
+        Ok(answer) => conclude("the stop", answer),
         Err(e) => {
             eprintln!("failed: {e}");
             process::exit(1);
@@ -522,8 +520,8 @@ fn cmd_stop(name: &str) {
 
 fn cmd_restart(name: &str) {
     print!("Restarting {}... ", name);
-    match send_service_command("RESTART", name) {
-        Ok(resp) => println!("{}", resp.trim()),
+    match ask_service_manager("RestartService", name) {
+        Ok(answer) => conclude("the restart", answer),
         Err(e) => {
             eprintln!("failed: {e}");
             process::exit(1);
@@ -532,8 +530,9 @@ fn cmd_restart(name: &str) {
 }
 
 fn cmd_enable(name: &str) {
-    match send_service_command("ENABLE", name) {
-        Ok(resp) => println!("{}", resp.trim()),
+    match ask_service_manager("EnableService", name) {
+        Ok(answer) => conclude("enabling it", answer),
+        // No service manager: the enabled-set on disk is what it would read.
         Err(_) => {
             // Fall back: create a symlink in /etc/service.d/enabled/
             let link = format!("/etc/service.d/enabled/{name}");
@@ -550,8 +549,9 @@ fn cmd_enable(name: &str) {
 }
 
 fn cmd_disable(name: &str) {
-    match send_service_command("DISABLE", name) {
-        Ok(resp) => println!("{}", resp.trim()),
+    match ask_service_manager("DisableService", name) {
+        Ok(answer) => conclude("disabling it", answer),
+        // No service manager: the enabled-set on disk is what it would read.
         Err(_) => {
             // Fall back: remove the symlink.
             let link = format!("/etc/service.d/enabled/{name}");
@@ -739,8 +739,8 @@ fn main() {
                 process::exit(1);
             }
             print!("Reloading {}... ", args[2]);
-            match send_service_command("RELOAD", &args[2]) {
-                Ok(resp) => println!("{}", resp.trim()),
+            match ask_service_manager("ReloadService", &args[2]) {
+                Ok(answer) => conclude("the reload", answer),
                 Err(e) => {
                     eprintln!("failed: {e}");
                     process::exit(1);
@@ -765,6 +765,50 @@ fn main() {
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod tests {
     use super::*;
+
+    /// No service manager is a question that could not be asked (so the
+    /// fallbacks run), never an answer. On a development host the bus says
+    /// "not supported" to everything, the same outcome as no manager
+    /// registered on SlateOS.
+    #[test]
+    fn no_service_manager_cannot_be_asked() {
+        let err = ask_service_manager("StartService", "sshd").unwrap_err();
+        assert!(err.contains(SERVICE_MANAGER), "{err}");
+    }
+
+    #[test]
+    fn what_the_service_manager_says_is_printed_as_it_was_sent() {
+        let (mut out, mut err) = (Vec::new(), Vec::new());
+        let said = Answer::Done(b"started \xffsshd".to_vec());
+        assert_eq!(conclude_to(&mut out, &mut err, "the start", &said), 0);
+        assert_eq!(out, b"started \xffsshd\n");
+        assert!(err.is_empty());
+
+        // Saying nothing is still done.
+        let (mut out, mut err) = (Vec::new(), Vec::new());
+        assert_eq!(
+            conclude_to(&mut out, &mut err, "the start", &Answer::Done(Vec::new())),
+            0
+        );
+        assert_eq!(out, b"done\n");
+    }
+
+    #[test]
+    fn a_refusal_ends_the_progress_line_and_fails() {
+        let (mut out, mut err) = (Vec::new(), Vec::new());
+        let refused = Answer::Refused(
+            "org.slateos.Error.NoSuchService".to_string(),
+            b"no sshd".to_vec(),
+        );
+        assert_eq!(conclude_to(&mut out, &mut err, "the start", &refused), 1);
+        // "Starting sshd... " is left without a newline by the caller.
+        assert_eq!(out, b"\n");
+        assert_eq!(
+            err,
+            b"service: the service manager refused the start: \
+              org.slateos.Error.NoSuchService: no sshd\n"
+        );
+    }
 
     #[test]
     fn an_exec_line_splits_into_a_program_and_its_arguments() {

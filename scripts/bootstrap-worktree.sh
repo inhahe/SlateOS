@@ -208,10 +208,43 @@ looks_like_ext4() {
     [ "$magic" = "53ef" ]
 }
 
+# Will the boot test accept the image that is here now?
+#
+# This asks `ctest-fixtures.py image-check` -- the boot test's own gate
+# (`check_rootfs_freshness`), so the answer here is the answer the boot will
+# give, not a second opinion. It matters because the boot asks *after* the
+# build: an image the gate refuses used to be reported "present" by this
+# script, and the boot test then failed at image-check three and a half hours
+# later (lane B, 2026-09-25). An image is only usable with the manifest that
+# describes it AND the fixtures that manifest names, and a sibling's fixtures
+# are its own -- they are built per worktree -- so copying the image alone
+# produced, every time, exactly the state the gate refuses.
+#
+# With no Python the gate cannot run either; the boot test warns and carries
+# on, so this does the same rather than refusing on the host's behalf.
+rootfs_verifies() {
+    local py
+    py="$(command -v python || command -v python3 || true)"
+    [ -n "$py" ] || return 0
+    # A tree without the gate has nothing that would refuse the image.
+    [ -f "$ROOT/scripts/ctest-fixtures.py" ] || return 0
+    (cd "$ROOT" && "$py" scripts/ctest-fixtures.py image-check >/dev/null 2>&1)
+}
+
 provision_rootfs() {
     if looks_like_ext4 "$ROOTFS_IMG"; then
-        echo "==> rootfs.ext4 already present"
-        return 0
+        if rootfs_verifies; then
+            echo "==> rootfs.ext4 already present"
+            return 0
+        fi
+        # Not removed: it may be the image this worktree's owner is about to
+        # repack, and the fix is theirs to choose. Said plainly instead, which is
+        # what the boot test would otherwise say hours from now.
+        echo "    rootfs.ext4 is present but the boot test will refuse it:" >&2
+        echo "    python scripts/ctest-fixtures.py image-check  says why." >&2
+        echo "    Repack it here:  wsl -d Ubuntu -- bash scripts/create-ext4-rootfs.sh" >&2
+        echo "    or move it (and rootfs.ext4.manifest) aside to boot without Path-Z." >&2
+        return 1
     fi
     if [ -f "$ROOTFS_IMG" ]; then
         echo "==> rootfs.ext4 present but has no ext4 superblock — replacing"
@@ -411,7 +444,15 @@ if [ "$check_only" -eq 1 ]; then
         fi
     fi
     if [ "$need_rootfs" -eq 1 ]; then
-        if looks_like_ext4 "$ROOTFS_IMG"; then
+        if looks_like_ext4 "$ROOTFS_IMG" && ! rootfs_verifies; then
+            # Blocking, not degrading: the boot test's image-check is fatal, so
+            # an image it refuses stops the run -- after the build, hours in,
+            # unless this says so first. `python scripts/ctest-fixtures.py
+            # image-check` prints which fixtures disagree.
+            printf '  REFUSED  rootfs.ext4 (%s) -- ctest-fixtures.py image-check will fail\n' "$ROOTFS_IMG"
+            blocking=$((blocking + 1))
+            rootfs_refused=1
+        elif looks_like_ext4 "$ROOTFS_IMG"; then
             printf '  present  rootfs.ext4 (Path-Z glibc tests)\n'
         else
             printf '  DEGRADED rootfs.ext4  (%s) — ~58 tests will silently SKIP\n' "$ROOTFS_IMG"
@@ -431,6 +472,13 @@ if [ "$check_only" -eq 1 ]; then
     fi
     if [ "$blocking" -gt 0 ]; then
         echo ""
+        if [ "${rootfs_refused:-0}" -eq 1 ]; then
+            echo "rootfs.ext4 is here but was packed from fixtures this tree no longer"
+            echo "has (python scripts/ctest-fixtures.py image-check lists them). Repack it:"
+            echo "    wsl -d Ubuntu -- bash scripts/create-ext4-rootfs.sh"
+            echo "or move rootfs.ext4 and rootfs.ext4.manifest aside to boot without Path-Z."
+            echo ""
+        fi
         echo "$blocking prerequisite$([ "$blocking" -eq 1 ] || echo s) missing."
         echo "The kernel cannot build, or the boot test cannot stage, until"
         echo "provisioned:"

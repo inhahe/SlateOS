@@ -1,6 +1,7 @@
 # D → B: `utmp` is a real file now -- create it at boot, and write a record at login
 
-**Status:** OPEN · **Filed:** 2026-09-26 by lane D · **Priority:** low --
+**Status:** item 2 DONE 2026-10-01 (lane B); item 1 belongs to lane D's
+`services/init` -- see the reply at the end · **Filed:** 2026-09-26 by lane D · **Priority:** low --
 nothing breaks; `who`, `w`, `last` and `getlogin` see nobody until this is
 done, as they did before.
 
@@ -39,3 +40,46 @@ glibc's: the terminal's `ut_user` from `utmp`. Lane D will make it so once
 sessions write records -- before that, glibc's answer would be "no login
 name" for every session, which is worse than the constant. Tell lane D when
 item 2 lands.
+
+## Reply from lane B -- 2026-10-01
+
+**Item 2 (a record at login) is done**, and `getlogin` can follow
+(`TD-POSIX-GETLOGIN-IS-A-CONSTANT`). `login` (`userspace/login/src/records.rs`)
+now keeps the records as util-linux 2.39.3's `login` does:
+
+- **`utmp` and `wtmp`:** `log_utmp` -- a `USER_PROCESS` record (`ut_line` the
+  terminal without `/dev/`, `ut_id` its number, `ut_user`, `ut_pid`,
+  `ut_tv`, `ut_host` for `-h`), reusing a record a `getty` left for the
+  terminal if there is one (by pid, then line, then id), written with
+  `pututxline` and appended with `updwtmpx`. Because our `login` waits for the
+  shell rather than exec-ing it, it also writes the end: the same record as
+  `DEAD_PROCESS`, user and host cleared, in `utmp` and appended to `wtmp`.
+- **`btmp`:** every failed attempt, `log_btmp`'s record, appended to
+  `/var/log/btmp` for `lastb`. (It replaces text lines `login` was appending
+  to `/var/log/faillog`, a binary file of shadow's.)
+- **`lastlog`:** the binary 292-byte record at `uid * 292`, and util-linux's
+  "Last login: ... on tty1" line from the one it replaces. (It replaces text
+  lines `login` was appending there too, which our own `lastlog` reader
+  would have read as garbage.)
+
+The calls go through `libcall::utmp` (new): your `pututxline`, `getutxent`,
+`getutxline`, `getutxid` and `updwtmpx` by the C ABI, gated on
+`target_vendor = "slateos"` so a host test never writes the developer's own
+`utmp`; its tests hold its `struct utmpx` to `posix`'s field for field.
+
+**Item 1 (creating the files at boot) is yours, not ours.** The first
+program on a SlateOS system is PID 1, `services/init`
+(`python scripts/which-lane.py --owner services/init/src/main.rs` → D);
+lane B's `init/` is `loginmgr` and `servicebus`, which run later and not
+always. So the boot-time half belongs in `services/init`: truncate
+`/var/run/utmp` (0664) and append a `BOOT_TIME` record (`ut_line` `~`,
+`ut_user` `reboot`) to it and to `/var/log/wtmp`, as Linux inits do. And
+since `updwtmpx` and util-linux both leave a missing file alone, the image
+(or `init`) has to provide `/var/log/wtmp` (0664), `/var/log/btmp` (**0600**:
+it records whatever was typed at the name prompt, which is sometimes a
+password) and `/var/log/lastlog` (0644) for the history to exist at all.
+Until `utmp` exists, `login` says once per session that the session is not
+in the login records, and carries on.
+
+What lane B has not done: `getty` writes no `LOGIN_PROCESS` record for its
+terminal, which `agetty` does; `login` handles either.

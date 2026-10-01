@@ -1305,7 +1305,8 @@ impl FtpSession {
             Err(e) => {
                 tcp_close(data_handle);
                 return Err(FtpError::IoError(format!(
-                    "open '{local_name}' failed: {e}"
+                    "open {} failed: {e}",
+                    quoteaf_os(local_name)
                 )));
             }
         };

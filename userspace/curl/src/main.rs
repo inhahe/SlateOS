@@ -482,7 +482,8 @@ fn parse_url(url: &str) -> Result<ParsedUrl, CurlError> {
         ("https", r)
     } else if url.contains("://") {
         return Err(CurlError::InvalidUrl(format!(
-            "unsupported scheme in '{url}'"
+            "unsupported scheme in {}",
+            quoteaf_os(url)
         )));
     } else {
         // Default to http:// if no scheme provided.
@@ -1462,7 +1463,8 @@ fn parse_args() -> Result<Options, CurlError> {
                     "PATCH" => Method::Patch,
                     other => {
                         return Err(CurlError::InvalidArgument(format!(
-                            "unknown method '{other}'"
+                            "unknown method {}",
+                            quoteaf_os(other)
                         )));
                     }
                 };
@@ -1475,7 +1477,8 @@ fn parse_args() -> Result<Options, CurlError> {
                         .push((name.trim().to_string(), header_value.trim().to_string()));
                 } else {
                     return Err(CurlError::InvalidArgument(format!(
-                        "invalid header '{val}' (expected \"Name: Value\")"
+                        "invalid header {} (expected \"Name: Value\")",
+                        quoteaf_os(val)
                     )));
                 }
             }
@@ -1508,7 +1511,8 @@ fn parse_args() -> Result<Options, CurlError> {
                         .push((name.to_string(), field_value.to_string()));
                 } else {
                     return Err(CurlError::InvalidArgument(format!(
-                        "invalid form field '{val}' (expected name=value)"
+                        "invalid form field {} (expected name=value)",
+                        quoteaf_os(val)
                     )));
                 }
                 if !explicit_method {

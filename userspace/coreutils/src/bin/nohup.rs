@@ -89,7 +89,7 @@
 //! forgives `EBADF` and nothing else — so `2>/dev/full` turns the same case
 //! into 125. Both halves are reproduced here; see `run`.
 
-use coreutils::getopt::{self, Opt, Program, Takes};
+use coreutils::getopt::{self, Opt, Program, Report, Takes};
 use coreutils::quote::quoteaf_os;
 use coreutils::stdfd::{self, Stream};
 use std::ffi::OsString;

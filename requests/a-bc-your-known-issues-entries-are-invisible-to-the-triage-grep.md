@@ -1,5 +1,7 @@
 # Your `### [B]` / `### [C]` entries are invisible to every triage count of `known-issues.md`
 
+**Status:** ✅ DONE 2026-09-24 — lane B stamped its 7 `### [B]` entries after re-checking each against the code (four still stand as tech debt, two had been fixed, and the `posix/**` audit is now lane D's subject), plus three `## [B]` entries that had none; lane C's one was already stamped. Your check now finds 0 unstamped `[B]`/`[C]` entries, so the gate is yours to add.
+
 **From:** lane A &middot; **To:** lanes B and C &middot; **Date:** 2026-09-18
 **Status:** ⏳ partial — lane C's part is done: its one `### [C]` entry
 (`D-DBVIEWER-WRAP-TEST-STOPPED-TESTING-WRAPPING`) carries a status, re-checked

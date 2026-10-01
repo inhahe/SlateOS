@@ -1,8 +1,11 @@
-// Slate OS finger — user information lookup
+// Slate OS finger — user information lookup (RFC 1288)
 //
-// Multi-personality binary:
-//   finger — user information lookup (RFC 1288)
-//   pinky  — lightweight finger
+// IT USED TO ANSWER TO `pinky` TOO, reading its own argv[0], and nothing
+// installed it under that name (scripts/multicall-aliases-baseline.txt). It
+// printed finger's layout under pinky's options -- `-b` hid the plan where
+// GNU's hides the home directory and shell, `-w` and `-i` were accepted and
+// ignored -- so the name went to `userspace/coreutils/src/bin/pinky.rs`, a
+// port of GNU's, and this is finger alone.
 //
 // IT USED TO ANSWER TO `w` TOO, and that name now belongs to `userspace/who`,
 // which performs the operation: `who -w` computes JCPU and PCPU, which this
@@ -12,7 +15,6 @@
 //
 // Usage:
 //   finger [OPTIONS] [user@host | user...]
-//   pinky [OPTIONS] [user...]
 
 #![cfg_attr(not(test), no_main)]
 // The MailStatus variants share the `Mail` postfix because that matches the
@@ -29,29 +31,6 @@
 
 use std::io::{self, Write};
 use std::path::PathBuf;
-
-// ---------------------------------------------------------------------------
-// Personality detection
-// ---------------------------------------------------------------------------
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Personality {
-    Finger,
-    Pinky,
-}
-
-fn detect_personality(argv0: &str) -> Personality {
-    let base = argv0.rsplit('/').next().unwrap_or(argv0);
-    let base = base.rsplit('\\').next().unwrap_or(base);
-    let lower = base.to_ascii_lowercase();
-    let lower = lower.strip_suffix(".exe").unwrap_or(&lower);
-    match lower {
-        "pinky" => Personality::Pinky,
-        // `finger` is the default now that `w` is gone -- and it is also the
-        // crate's name, so argv[0] and the package agree.
-        _ => Personality::Finger,
-    }
-}
 
 // ---------------------------------------------------------------------------
 // Data structures
@@ -120,9 +99,7 @@ enum MailStatus {
 
 #[derive(Debug, Clone)]
 struct Config {
-    personality: Personality,
     users: Vec<String>,
-    no_header: bool,
     short_format: bool,
     long_format: bool,
     // No option sets this. It is not an option that is parsed and ignored --
@@ -133,79 +110,45 @@ struct Config {
     idle_sort: bool,
     show_help: bool,
     show_version: bool,
-    // finger-specific
+    /// `-p`: neither `.plan` nor `.project`, as BSD finger's `-p` omits both.
     no_plan: bool,
-    no_project: bool,
     match_real_name: bool,
 }
 
 impl Default for Config {
     fn default() -> Self {
         Self {
-            personality: Personality::Finger,
             users: Vec::new(),
-            no_header: false,
             short_format: false,
             long_format: false,
             idle_sort: false,
             show_help: false,
             show_version: false,
             no_plan: false,
-            no_project: false,
             match_real_name: true,
         }
     }
 }
 
 fn parse_args(args: &[String]) -> Result<Config, String> {
-    let personality = args
-        .first()
-        .map(|a| detect_personality(a))
-        .unwrap_or(Personality::Finger);
-
-    let mut cfg = Config {
-        personality,
-        ..Default::default()
-    };
+    let mut cfg = Config::default();
 
     // Iterating rather than indexing a counter. `&args[i]` can panic and
     // `i += 1` can overflow -- neither can actually happen here, but saying so
     // in a comment is weaker than not writing the constructs, and this loop
     // never needed the index for anything else.
     for arg in args.iter().skip(1) {
-        match personality {
-            Personality::Finger => match arg.as_str() {
-                "-l" => cfg.long_format = true,
-                "-s" => cfg.short_format = true,
-                "-p" => cfg.no_plan = true,
-                "-m" => cfg.match_real_name = false,
-                "--help" => cfg.show_help = true,
-                "--version" => cfg.show_version = true,
-                other if other.starts_with('-') => {
-                    return Err(format!("finger: unknown option: {other}"));
-                }
-                _ => cfg.users.push(arg.clone()),
-            },
-            Personality::Pinky => match arg.as_str() {
-                "-l" => cfg.long_format = true,
-                "-s" => cfg.short_format = true,
-                // pinky's own help says "-f  Omit header in short
-                // format", and this set `from_field`, which only `run_w` ever
-                // read -- so `pinky -f` did nothing at all. `no_header` is the
-                // field run_pinky actually consults.
-                "-f" => cfg.no_header = true,
-                "-w" => {} // omit name field
-                "-i" => {} // show IPs
-                "-b" => cfg.no_plan = true,
-                "-h" => cfg.no_header = true,
-                "-p" => cfg.no_project = true,
-                "--help" => cfg.show_help = true,
-                "--version" => cfg.show_version = true,
-                other if other.starts_with('-') => {
-                    return Err(format!("pinky: unknown option: {other}"));
-                }
-                _ => cfg.users.push(arg.clone()),
-            },
+        match arg.as_str() {
+            "-l" => cfg.long_format = true,
+            "-s" => cfg.short_format = true,
+            "-p" => cfg.no_plan = true,
+            "-m" => cfg.match_real_name = false,
+            "--help" => cfg.show_help = true,
+            "--version" => cfg.show_version = true,
+            other if other.starts_with('-') => {
+                return Err(format!("finger: unknown option: {other}"));
+            }
+            _ => cfg.users.push(arg.clone()),
         }
     }
 
@@ -588,6 +531,11 @@ fn run_finger(cfg: &Config, writer: &mut dyn Write) -> io::Result<()> {
                     write!(writer, "{}", format_login_time(session.login_time))?;
                     writer.write_all(b" on ")?;
                     writer.write_all(&session.tty)?;
+                    // BSD finger's `from HOST`, for a remote session.
+                    if !session.host.is_empty() {
+                        writer.write_all(b" from ")?;
+                        writer.write_all(&session.host)?;
+                    }
                     writeln!(writer)?;
                 }
             }
@@ -601,97 +549,9 @@ fn run_finger(cfg: &Config, writer: &mut dyn Write) -> io::Result<()> {
 
             // Plan/project
             if !cfg.no_plan {
-                if !cfg.no_project
-                    && let Some(ref project) = info.project
-                {
+                if let Some(ref project) = info.project {
                     writeln!(writer, "Project: {}", project.trim())?;
                 }
-                if let Some(ref plan) = info.plan {
-                    writeln!(writer, "Plan:")?;
-                    write!(writer, "{plan}")?;
-                } else {
-                    writeln!(writer, "No Plan.")?;
-                }
-            }
-        }
-    }
-
-    Ok(())
-}
-
-fn run_pinky(cfg: &Config, writer: &mut dyn Write) -> io::Result<()> {
-    if cfg.users.is_empty() || cfg.short_format {
-        // Short format — list all logged in users
-        let entries = read_utmp_entries();
-        let entries: Vec<&UtmpEntry> = if cfg.users.is_empty() {
-            entries.iter().collect()
-        } else {
-            entries
-                .iter()
-                .filter(|e| cfg.users.iter().any(|u| u.as_bytes() == e.user.as_slice()))
-                .collect()
-        };
-
-        if !cfg.no_header {
-            writeln!(
-                writer,
-                "Login    Name                 TTY      Idle   When         Where"
-            )?;
-        }
-        for entry in &entries {
-            let pw = read_passwd_gecos(&entry.user);
-            write_col(writer, &entry.user, 8)?;
-            writer.write_all(b" ")?;
-            write_col(writer, &pw.real_name, 20)?;
-            writer.write_all(b" ")?;
-            write_col(writer, &entry.tty, 8)?;
-            write!(
-                writer,
-                " {} {:<12} ",
-                format_idle(entry.idle_secs),
-                format_login_time(entry.login_time)
-            )?;
-            writer.write_all(&entry.host)?;
-            writeln!(writer)?;
-        }
-    } else {
-        // Long format for specified users
-        for username in &cfg.users {
-            let info = get_user_info(username);
-            writer.write_all(b"Login name: ")?;
-            write_col(writer, &info.username, 28)?;
-            writer.write_all(b" In real life: ")?;
-            writer.write_all(&info.real_name)?;
-            writeln!(writer)?;
-            writer.write_all(b"Directory: ")?;
-            // An un-namable home directory prints as empty rather than as a
-            // guess at what the bytes might have said.
-            write_col(
-                writer,
-                info.home_dir.as_deref().unwrap_or("").as_bytes(),
-                29,
-            )?;
-            writer.write_all(b" Shell: ")?;
-            writer.write_all(&info.shell)?;
-            writeln!(writer)?;
-            if info.login_sessions.is_empty() {
-                writeln!(writer, "Never logged in.")?;
-            } else {
-                for session in &info.login_sessions {
-                    write!(
-                        writer,
-                        "On since {} on ",
-                        format_login_time(session.login_time)
-                    )?;
-                    writer.write_all(&session.tty)?;
-                    if !session.host.is_empty() {
-                        writer.write_all(b" from ")?;
-                        writer.write_all(&session.host)?;
-                    }
-                    writeln!(writer)?;
-                }
-            }
-            if !cfg.no_plan {
                 if let Some(ref plan) = info.plan {
                     writeln!(writer, "Plan:")?;
                     write!(writer, "{plan}")?;
@@ -737,50 +597,26 @@ fn write_col(writer: &mut dyn Write, bytes: &[u8], width: usize) -> io::Result<(
 // `#![cfg_attr(not(test), no_main)]`), so it is dead in the test build and
 // live in the real one. Scoped to `test` rather than allowed outright.
 #[cfg_attr(test, allow(dead_code))]
-fn print_help(personality: Personality) {
-    match personality {
-        Personality::Finger => {
-            println!("Usage: finger [OPTIONS] [user[@host]...]");
-            println!();
-            println!("User information lookup program.");
-            println!();
-            println!("Options:");
-            println!("  -l               Long output format");
-            println!("  -s               Short output format");
-            println!("  -p               Don't show .plan file");
-            println!("  -m               Match user names only (not real names)");
-            println!("  --help           Show this help");
-            println!("  --version        Show version");
-        }
-        Personality::Pinky => {
-            println!("Usage: pinky [OPTIONS] [user...]");
-            println!();
-            println!("Lightweight finger.");
-            println!();
-            println!("Options:");
-            println!("  -l               Long output format");
-            println!("  -s               Short output format (default)");
-            println!("  -f               Omit header in short format");
-            println!("  -b               Omit .plan file in long format");
-            println!("  -h               Omit column headings");
-            println!("  -p               Omit .project file");
-            println!("  -w               Omit full name in short format");
-            println!("  --help           Show this help");
-            println!("  --version        Show version");
-        }
-    }
+fn print_help() {
+    println!("Usage: finger [OPTIONS] [user[@host]...]");
+    println!();
+    println!("User information lookup program.");
+    println!();
+    println!("Options:");
+    println!("  -l               Long output format");
+    println!("  -s               Short output format");
+    println!("  -p               Don't show .plan or .project files");
+    println!("  -m               Match user names only (not real names)");
+    println!("  --help           Show this help");
+    println!("  --version        Show version");
 }
 
 // Reachable only from `main`, which the test harness replaces (this crate is
 // `#![cfg_attr(not(test), no_main)]`), so it is dead in the test build and
 // live in the real one. Scoped to `test` rather than allowed outright.
 #[cfg_attr(test, allow(dead_code))]
-fn print_version(personality: Personality) {
-    let name = match personality {
-        Personality::Finger => "finger",
-        Personality::Pinky => "pinky",
-    };
-    println!("{name} (Slate OS) 0.1.0");
+fn print_version() {
+    println!("finger (Slate OS) 0.1.0");
 }
 
 // ---------------------------------------------------------------------------
@@ -806,31 +642,22 @@ pub extern "C" fn main(_argc: i32, _argv: *const *const u8) -> i32 {
     };
 
     if cfg.show_help {
-        print_help(cfg.personality);
+        print_help();
         return 0;
     }
 
     if cfg.show_version {
-        print_version(cfg.personality);
+        print_version();
         return 0;
     }
 
     let stdout = io::stdout();
     let mut writer = stdout.lock();
 
-    let result = match cfg.personality {
-        Personality::Finger => run_finger(&cfg, &mut writer),
-        Personality::Pinky => run_pinky(&cfg, &mut writer),
-    };
-
-    match result {
+    match run_finger(&cfg, &mut writer) {
         Ok(()) => 0,
         Err(e) => {
-            let name = match cfg.personality {
-                Personality::Finger => "finger",
-                Personality::Pinky => "pinky",
-            };
-            eprintln!("{name}: {e}");
+            eprintln!("finger: {e}");
             1
         }
     }
@@ -899,16 +726,14 @@ mod tests {
         assert!(UNKNOWN_FIELD.parse::<f64>().is_err());
     }
 
+    /// argv[0] no longer chooses a program: under the name `pinky` this is
+    /// still finger, and refuses pinky's `-f` rather than half-honouring it.
     #[test]
-    fn test_detect_personality_finger() {
-        assert_eq!(detect_personality("finger"), Personality::Finger);
-        assert_eq!(detect_personality("/usr/bin/finger"), Personality::Finger);
-    }
-
-    #[test]
-    fn test_detect_personality_pinky() {
-        assert_eq!(detect_personality("pinky"), Personality::Pinky);
-        assert_eq!(detect_personality("/usr/bin/pinky"), Personality::Pinky);
+    fn the_name_pinky_no_longer_selects_a_personality() {
+        let args = vec!["pinky".to_string(), "-f".to_string()];
+        assert!(parse_args(&args).is_err());
+        let args = vec!["pinky".to_string(), "-p".to_string()];
+        assert!(parse_args(&args).unwrap().no_plan);
     }
 
     #[test]
@@ -919,18 +744,10 @@ mod tests {
     }
 
     #[test]
-    fn pinky_dash_f_omits_the_header_as_its_help_promises() {
-        // It set `from_field`, which only `run_w` read, so `pinky -f` did
-        // nothing while the help said "Omit header in short format".
-        let args = vec!["pinky".to_string(), "-f".to_string()];
-        let cfg = parse_args(&args).unwrap();
-        assert!(cfg.no_header);
-    }
-
-    #[test]
-    fn an_unknown_option_is_refused_under_the_new_default() {
-        // `-h` was `w`'s. With `w` gone the default personality is finger,
-        // which does not take it -- and says so rather than ignoring it.
+    fn an_unknown_option_is_refused_whatever_the_name() {
+        // `-h` was `w`'s. With the personalities gone this is finger under
+        // any name, which does not take it -- and says so rather than
+        // ignoring it.
         let args = vec!["w".to_string(), "-h".to_string()];
         assert!(parse_args(&args).is_err());
     }
@@ -947,7 +764,6 @@ mod tests {
         let args = vec!["finger".to_string(), "-l".to_string(), "user1".to_string()];
         let cfg = parse_args(&args).unwrap();
         assert!(cfg.long_format);
-        assert_eq!(cfg.personality, Personality::Finger);
     }
 
     #[test]
@@ -965,42 +781,17 @@ mod tests {
     }
 
     #[test]
-    fn test_parse_args_pinky_basic() {
-        let args = vec!["pinky".to_string()];
-        let cfg = parse_args(&args).unwrap();
-        assert_eq!(cfg.personality, Personality::Pinky);
-    }
-
-    #[test]
-    fn test_parse_args_pinky_long() {
-        let args = vec!["pinky".to_string(), "-l".to_string(), "user1".to_string()];
-        let cfg = parse_args(&args).unwrap();
-        assert!(cfg.long_format);
-    }
-
-    #[test]
-    fn test_parse_args_pinky_no_plan() {
-        let args = vec!["pinky".to_string(), "-b".to_string()];
-        let cfg = parse_args(&args).unwrap();
-        assert!(cfg.no_plan);
-    }
-
-    #[test]
     fn test_parse_args_version() {
-        for name in &["finger", "pinky"] {
-            let args = vec![name.to_string(), "--version".to_string()];
-            let cfg = parse_args(&args).unwrap();
-            assert!(cfg.show_version);
-        }
+        let args = vec!["finger".to_string(), "--version".to_string()];
+        let cfg = parse_args(&args).unwrap();
+        assert!(cfg.show_version);
     }
 
     #[test]
     fn test_parse_args_help() {
-        for name in &["finger", "pinky"] {
-            let args = vec![name.to_string(), "--help".to_string()];
-            let cfg = parse_args(&args).unwrap();
-            assert!(cfg.show_help);
-        }
+        let args = vec!["finger".to_string(), "--help".to_string()];
+        let cfg = parse_args(&args).unwrap();
+        assert!(cfg.show_help);
     }
 
     #[test]
@@ -1098,10 +889,7 @@ mod tests {
 
     #[test]
     fn test_run_finger_no_users() {
-        let cfg = Config {
-            personality: Personality::Finger,
-            ..Default::default()
-        };
+        let cfg = Config::default();
         let mut buf = Vec::new();
         run_finger(&cfg, &mut buf).unwrap();
         let output = String::from_utf8(buf).unwrap();
@@ -1109,21 +897,8 @@ mod tests {
     }
 
     #[test]
-    fn test_run_pinky_no_users() {
-        let cfg = Config {
-            personality: Personality::Pinky,
-            ..Default::default()
-        };
-        let mut buf = Vec::new();
-        run_pinky(&cfg, &mut buf).unwrap();
-        let output = String::from_utf8(buf).unwrap();
-        assert!(output.contains("Login"));
-    }
-
-    #[test]
     fn test_run_finger_remote() {
         let cfg = Config {
-            personality: Personality::Finger,
             users: vec!["user@remote.host".to_string()],
             ..Default::default()
         };
@@ -1160,12 +935,6 @@ mod tests {
     #[test]
     fn test_parse_args_finger_unknown() {
         let args = vec!["finger".to_string(), "--badopt".to_string()];
-        assert!(parse_args(&args).is_err());
-    }
-
-    #[test]
-    fn test_parse_args_pinky_unknown() {
-        let args = vec!["pinky".to_string(), "--badopt".to_string()];
         assert!(parse_args(&args).is_err());
     }
 }

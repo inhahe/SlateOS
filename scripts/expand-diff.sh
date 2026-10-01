@@ -58,6 +58,12 @@ DIFF_NEED=timeout
 # shellcheck source=diff-wsl.sh
 . "$(dirname "$0")/diff-wsl.sh"
 
+# Variables the program under test runs with, on both sides, and nothing else
+# does. `POSIXLY_CORRECT` changes where option parsing stops, and exported it
+# would reach this harness's own `od`, `sort` and `diff` as well. Empty unless
+# a case block sets it.
+ENVV=()
+
 pass=0; fail=0; xfail=0; xpass=0
 
 fixtures=$DIFF_TMP/fixtures
@@ -76,7 +82,7 @@ cd "$fixtures" >/dev/null || exit 1
 # report: it shows up as a status difference rather than as a hung harness.
 # `diff_run` keeps bash's own announcement of a child that died of a signal
 # out of the stderr the caller captures; `diff-wsl.sh` says why.
-run_side() { local side=$1; shift; diff_run timeout -k 2 30 env PATH="$bindir/$side" expand "$@"; }
+run_side() { local side=$1; shift; diff_run timeout -k 2 30 env ${ENVV[@]+"${ENVV[@]}"} PATH="$bindir/$side" expand "$@"; }
 
 # --- fixtures ----------------------------------------------------------------
 printf 'a\tb\tc\n'                        > plain.txt
@@ -153,7 +159,7 @@ report() {
   return 0
 }
 
-run_case()  { compare - "$@"; report "expand $*"; }
+run_case()  { compare - "$@"; report "${ENVV[*]:+${ENVV[*]} }expand $*"; }
 run_stdin() {
   local input="$1"; shift
   compare "$input" "$@"
@@ -420,6 +426,22 @@ run_case .
 # --- differ on purpose -------------------------------------------------------
 xfail_case 'our --help omits the GNU project ancillary block' --help
 xfail_case 'our --version names SlateOS' --version
+
+# --- POSIXLY_CORRECT -----------------------------------------------------------
+# glibc's getopt ends option parsing at the first operand while it is set -- to
+# anything, the empty string included -- so an option after an operand is an
+# operand, and so is a `--` after one, there being no options left for it to
+# end. Measured against GNU on 2026-09-25; `coreutils::getopt`'s module docs,
+# "Where option parsing stops".
+printf 'a\tb\n' > posix.txt
+ENVV=(POSIXLY_CORRECT=1)
+run_case posix.txt -t1
+run_case -t1 posix.txt
+run_case posix.txt -- -t1
+ENVV=(POSIXLY_CORRECT=)
+run_case posix.txt -t1
+ENVV=()
+run_case posix.txt -t1
 
 printf '\n%d passed, %d differed, %d differ on purpose' "$pass" "$fail" "$xfail"
 [ "$xpass" -gt 0 ] && printf ', %d NO LONGER differ (update the harness)' "$xpass"

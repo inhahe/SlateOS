@@ -173,50 +173,72 @@
 //! spells this `(no_dereference && fd == -1) ? AT_SYMLINK_NOFOLLOW : 0`; here
 //! the `-` case returns before [`Link`] is consulted at all.
 //!
-//! # Options this implementation does not have
+//! # Where the time comes from
 //!
-//! `-d`/`--date` and `-t`:
+//! | Given | Time written | Read by |
+//! |---|---|---|
+//! | nothing | *now*, as the kernel reads it: [`When::Now`] | the kernel |
+//! | `-r FILE` | FILE's two times | [`reference_times`] |
+//! | `-d STRING` | that date, both halves | `coreutils::parse_datetime` |
+//! | `-r FILE -d STRING` | each of FILE's times, moved by STRING | the same, once per half |
+//! | `-t [[CC]YY]MMDDhhmm[.ss]` | that local time, both halves | `coreutils::posixtm` |
+//! | `MMDDhhmm[YY] FILE…`, only while `_POSIX2_VERSION` is below 200112 | that local time | [`obsolete_stamp`] |
 //!
-//! | Option | What it needs that is not here |
-//! |---|---|
-//! | `-d STRING` | a full `parse_datetime` — `"next Thursday"`, `"2 hours ago"`, `"@1700000000"` |
-//! | `-t STAMP` | civil-time-to-epoch conversion in the *local* zone, including its history |
+//! `-d` is GNU's own date language, not a subset of it: `touch -d '2 hours
+//! ago'`, `touch -d 'next Thursday 9am'`, `touch -d @1700000000.5`. With `-r`
+//! its relative parts are relative to the reference file's times rather than
+//! to the clock — `touch -r old -d '+1 day' new` — which is why it is read
+//! twice, once per half, as upstream reads it. And `-d now` is not a time at
+//! all: when the string turns out to mean the current instant, upstream asks
+//! the kernel for *now* instead, so that `touch -d now f` succeeds wherever
+//! `touch f` would (see below), and checks that it really said "now" by
+//! parsing it once more against a different clock.
 //!
-//! Both are blocked by something this crate genuinely lacks. They are refused by
-//! name — `option -d is not implemented by this touch` — rather than ignored,
-//! because ignoring either silently does the *opposite* of what was asked: a
-//! `-d` that is ignored stamps the file with now instead of with the requested
-//! time, which is precisely the state the caller was trying to leave.
+//! *Now* is asked for, not read off the clock and written, and that is a
+//! question of permission: the kernel lets anyone who may write a file stamp it
+//! with the current time, but only its owner stamp it with a chosen one.
+//! Measured, GNU's `touch /dev/null` succeeds as an ordinary user and an
+//! explicit stamp fails with `Operation not permitted`; so did ours, until
+//! `fsattr` learned `UTIME_NOW`.
 //!
-//! `-f` is not in that list, because GNU documents it as accepted and ignored —
-//! it exists for a BSD `touch` that once had it. Ignoring it *is* the
-//! implementation.
+//! `-t` is parsed where it appears in the option loop, as upstream parses it, so
+//! `touch -t 99 --bogus f` reports the date and not the option. A second `-t`
+//! replaces the first. `-t` with `-r` is `cannot specify times from more than one
+//! source`.
+//!
+//! The obsolete operand is upstream's: GNU reads a first operand shaped like a
+//! date *as* a date when `_POSIX2_VERSION` names an edition before POSIX
+//! 1003.1-2001, there are at least two operands, and no time was given any other
+//! way -- and then warns that it is obsolete, unless `POSIXLY_CORRECT` is set.
+//! Under the default edition, 200809, the same word is a file name.
+//!
+//! # `-f`
+//!
+//! Accepted and ignored, because GNU documents it so — it exists for a BSD
+//! `touch` that once had it. Ignoring it *is* the implementation.
 //!
 //! [`LONG_OPTIONS`] carries GNU's whole table regardless of what is implemented,
 //! because the table — not the set of options acted on — is what decides whether
 //! an abbreviation is ambiguous. Drop `--no-dereference` and `touch --no`
 //! silently becomes `--no-create`, where GNU refuses it.
-//!
-//! # The obsolescent `touch MMDDhhmm file` form is deliberately absent
-//!
-//! GNU accepts a leading bare timestamp, but only when `_POSIX2_VERSION` is
-//! below 200112 — which it is not on any system built this decade. Reproducing
-//! it would mean a date-shaped first operand sometimes being a date and
-//! sometimes being a file name.
 
 use coreutils::diag;
 use coreutils::errmsg::strerror;
 use coreutils::fsattr::{self, Link, On, Times, When};
 use coreutils::getopt::{self, Opt, Program, Takes};
-use coreutils::quote::{os_bytes, quoteaf_os};
+use coreutils::parse_datetime::{Timespec, parse_datetime2};
+use coreutils::posixtm::{self, Syntax};
+use coreutils::posixver;
+use coreutils::quote::{os_bytes, quote, quoteaf_os};
 use coreutils::stdfd::{self, Stream};
+use localtime::Zone;
 use std::ffi::{OsStr, OsString};
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, Write};
 use std::mem::ManuallyDrop;
 use std::path::Path;
 use std::process::ExitCode;
-use std::time::SystemTime;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 /// Measured: `touch -q f; echo $?` prints 1.
 const TOUCH: Program = Program::new("touch", 1);
@@ -244,7 +266,7 @@ enum Which {
 
 /// `--time`'s words, with the values that decide which spellings are synonyms.
 ///
-/// The grouping is not cosmetic: [`Program::argmatch`] judges an ambiguous
+/// The grouping is not cosmetic: [`Program::argmatch`](getoptlong::Program::argmatch) judges an ambiguous
 /// abbreviation by *value*, so `--time=a` is ambiguous (it prefixes `atime` and
 /// `access`, which agree, but the empty-ish prefix rule still needs the values
 /// to compare) while `--time=m` resolves. It is also what renders GNU's list:
@@ -264,12 +286,63 @@ const TIME_WORDS: &[(&str, Which)] = &[
 ];
 
 /// GNU `touch`'s `getopt_long` string, copied verbatim.
-///
-/// `-d` and `-t` are declared as taking a value even though they are refused,
-/// so that `touch -d` answers `option requires an argument -- 'd'` as GNU does
-/// rather than jumping to the refusal — and so that the `2001-01-01` in
-/// `touch -d 2001-01-01 f` is not left behind to be created as a file.
 const SHORT_OPTIONS: &str = "acd:fhmr:t:";
+
+/// `-t`'s `[[CC]YY]MMDDhhmm[.ss]`: upstream's `PDS_LEADING_YEAR | PDS_CENTURY |
+/// PDS_SECONDS`.
+const STAMP_SYNTAX: Syntax = Syntax::LEADING_YEAR
+    .with(Syntax::CENTURY)
+    .with(Syntax::SECONDS);
+
+/// The obsolete `MMDDhhmm[YY]` operand: `PDS_TRAILING_YEAR | PDS_PRE_2000`, so
+/// a two-digit year must be 69-99 and there is no century and no seconds.
+const OBSOLETE_SYNTAX: Syntax = Syntax::TRAILING_YEAR.with(Syntax::PRE_2000);
+
+/// What `-t`, `-d` and the obsolete operand are read against: the local zone,
+/// and the current instant — for a `-t` stamp that names no year, and for
+/// everything relative in a `-d` string. Passed in rather than read, so the
+/// parser is a function of its inputs and a test can pin both.
+struct Clock {
+    zone: Zone,
+    now: Timespec,
+}
+
+impl Clock {
+    /// The process's own: `TZ` or `/etc/localtime`, and the system clock.
+    fn from_env() -> Self {
+        Clock {
+            zone: Zone::from_env(),
+            now: Timespec::now(),
+        }
+    }
+
+    /// Upstream's `date_relative`: `-d`'s string as an instant, relative to
+    /// `now`, or upstream's fatal `invalid date format`.
+    ///
+    /// # Errors
+    ///
+    /// The string is not a date.
+    fn date_relative(&self, text: &OsStr, now: Timespec) -> Result<Timespec, String> {
+        let bytes = os_bytes(text);
+        parse_datetime2(&bytes, Some(now), None, &self.zone, None)
+            .ok_or_else(|| format!("invalid date format {}", quote(&bytes)))
+    }
+}
+
+/// A `posixtime` answer as the instant `fsattr` writes. Whole seconds, as
+/// upstream's `tv_nsec = 0`.
+///
+/// `None` only for an instant the platform's `SystemTime` cannot hold, which a
+/// four-digit year never reaches; the callers treat it as a stamp that did not
+/// parse rather than invent a time.
+fn instant(secs: i64) -> Option<SystemTime> {
+    let magnitude = Duration::from_secs(secs.unsigned_abs());
+    if secs >= 0 {
+        UNIX_EPOCH.checked_add(magnitude)
+    } else {
+        UNIX_EPOCH.checked_sub(magnitude)
+    }
+}
 
 #[derive(Default, Clone)]
 #[cfg_attr(test, derive(Debug, PartialEq, Eq))]
@@ -284,6 +357,12 @@ struct TouchFlags {
     no_dereference: bool,
     /// `-r`, `--reference=FILE`.
     reference: Option<OsString>,
+    /// `-d`, `--date=STRING`: the last one, unparsed, as upstream keeps it
+    /// until the options are done — it may be relative to `-r`'s times.
+    flex_date: Option<OsString>,
+    /// `-t STAMP`, or the obsolete leading operand: the one time to write to
+    /// both halves. Upstream's `newtime` with `date_set`.
+    date: Option<SystemTime>,
 }
 
 impl TouchFlags {
@@ -328,7 +407,8 @@ impl TouchFlags {
         }
     }
 
-    /// The timestamps to write, given the reference file's if there is one.
+    /// The timestamps to write: `stamp`'s -- `-r`'s file, or `-t`'s time -- or,
+    /// with neither, *now*.
     ///
     /// A time left [`When::Omit`] means "leave this one alone" — `UTIME_OMIT`
     /// under `utimensat`, a zero `FILETIME` under `SetFileTime` — which is what
@@ -336,19 +416,23 @@ impl TouchFlags {
     /// modification time. Reading the old value and writing it back would not:
     /// it rounds to whatever the two clocks agree on, and it races anyone else
     /// writing the file.
-    fn times(&self, reference: Option<Stamp>) -> Times {
-        // No `-r` means "now", read per file rather than once for the whole
-        // run, because GNU passes `UTIME_NOW` and lets the kernel stamp each
-        // call separately.
-        let stamp = reference.unwrap_or_else(Stamp::now);
+    ///
+    /// *Now* is [`When::Now`], the kernel's `UTIME_NOW`, rather than the clock
+    /// read here and written back -- for the permission reason in the module
+    /// docs, and so that each file is stamped at its own moment, as GNU's are.
+    fn times(&self, stamp: Option<Stamp>) -> Times {
+        let (accessed, modified) = match stamp {
+            Some(s) => (When::Set(s.accessed), When::Set(s.modified)),
+            None => (When::Now, When::Now),
+        };
         Times {
             accessed: if self.change_access {
-                When::Set(stamp.accessed)
+                accessed
             } else {
                 When::Omit
             },
             modified: if self.change_modify {
-                When::Set(stamp.modified)
+                modified
             } else {
                 When::Omit
             },
@@ -364,13 +448,74 @@ struct Stamp {
 }
 
 impl Stamp {
-    fn now() -> Self {
-        let now = SystemTime::now();
+    /// The same instant for both halves: `-t`'s, `-d`'s, or the obsolete
+    /// operand's.
+    fn both(at: SystemTime) -> Self {
         Stamp {
-            accessed: now,
-            modified: now,
+            accessed: at,
+            modified: at,
         }
     }
+}
+
+/// A `parse_datetime` answer as the instant `fsattr` writes, or upstream's
+/// `invalid date format` for one the platform cannot hold.
+fn system_time(t: Timespec, text: &OsStr) -> Result<SystemTime, String> {
+    t.to_system_time()
+        .ok_or_else(|| format!("invalid date format {}", quote(&os_bytes(text))))
+}
+
+/// Which times to write, decided as upstream's `main` decides them once the
+/// options are read: `-r`'s file (each half moved by `-d`, if given), else
+/// `-d`'s date, else `-t`'s stamp — or `None`, *now*.
+///
+/// `-d` meaning the current instant is `None` too, when both halves are being
+/// set: upstream treats `touch -d now` exactly as `touch`, so that it needs
+/// only write permission. It checks the string really said "now", rather than
+/// naming a time that happens to be this one, by parsing it again against a
+/// clock one second away (`now.tv_sec ^ 1`) and seeing whether the answer
+/// followed.
+///
+/// # Errors
+///
+/// The reference file cannot be read, or `-d`'s string is not a date — both
+/// fatal upstream, and both before the missing-operand check.
+fn resolve_times(flags: &TouchFlags, clock: &Clock) -> Result<Option<Stamp>, String> {
+    if let Some(path) = flags.reference.as_ref() {
+        let mut stamp = reference_times(path, flags.link()).map_err(|e| {
+            format!(
+                "failed to get attributes of {}: {}",
+                quoteaf_os(path),
+                strerror(&e)
+            )
+        })?;
+        if let Some(text) = flags.flex_date.as_ref() {
+            if flags.change_access {
+                let base = Timespec::from_system_time(stamp.accessed);
+                stamp.accessed = system_time(clock.date_relative(text, base)?, text)?;
+            }
+            if flags.change_modify {
+                let base = Timespec::from_system_time(stamp.modified);
+                stamp.modified = system_time(clock.date_relative(text, base)?, text)?;
+            }
+        }
+        return Ok(Some(stamp));
+    }
+    if let Some(text) = flags.flex_date.as_ref() {
+        let now = clock.now;
+        let at = clock.date_relative(text, now)?;
+        if flags.change_access && flags.change_modify && at == now {
+            let notnow = Timespec {
+                tv_sec: now.tv_sec ^ 1,
+                tv_nsec: now.tv_nsec,
+            };
+            if clock.date_relative(text, notnow)? == notnow {
+                return Ok(None);
+            }
+        }
+        return Ok(Some(Stamp::both(system_time(at, text)?)));
+    }
+    Ok(flags.date.map(Stamp::both))
 }
 
 /// What the command line asked for.
@@ -392,7 +537,8 @@ fn main() -> ExitCode {
 
 fn run_main() -> ExitCode {
     let args: Vec<OsString> = std::env::args_os().skip(1).collect();
-    match parse_args(&args) {
+    let clock = Clock::from_env();
+    match parse_args(&args, &clock) {
         Ok(Request::Help) => {
             print!("{}", help_text());
             ExitCode::SUCCESS
@@ -401,11 +547,35 @@ fn run_main() -> ExitCode {
             println!("touch (SlateOS coreutils) 0.1.0");
             ExitCode::SUCCESS
         }
-        Ok(Request::Run(flags, files)) => {
+        Ok(Request::Run(mut flags, mut files)) => {
             // `Stream` and not `io::stderr()`, whose failures the runtime hides: a
             // diagnostic that never arrived has to reach `close_stderr`'s flag.
             let mut err = Stream::stderr();
-            if touch_all(&flags, &files, &mut err) {
+            let mut stamp = match resolve_times(&flags, &clock) {
+                Ok(stamp) => stamp,
+                Err(message) => {
+                    // Upstream's `error (EXIT_FAILURE, …)`: no referral.
+                    let _ = writeln!(err, "touch: {message}");
+                    return ExitCode::from(1);
+                }
+            };
+            let edition = posixver::posix2_version();
+            if let Some(warning) = obsolete_stamp(
+                &mut flags,
+                &mut files,
+                stamp.is_some(),
+                edition,
+                getopt::posixly_correct(),
+                &clock,
+            ) {
+                // A warning that cannot be written is not a reason to stop: the
+                // stamp it describes is still the one that was asked for.
+                let _ = writeln!(err, "touch: {warning}");
+            }
+            if stamp.is_none() {
+                stamp = flags.date.map(Stamp::both);
+            }
+            if touch_all(&flags, &files, stamp, &mut err) {
                 ExitCode::SUCCESS
             } else {
                 ExitCode::from(1)
@@ -432,17 +602,21 @@ change the times of the file associated with standard output.
 Mandatory arguments to long options are mandatory for short options too.
   -a                     change only the access time
   -c, --no-create        do not create any files
+  -d, --date=STRING      parse STRING and use it instead of current time
   -f                     (ignored)
   -h, --no-dereference   affect each symbolic link instead of any referenced
                          file (useful only on systems that can change the
                          timestamps of a symlink)
   -m                     change only the modification time
   -r, --reference=FILE   use this file's times instead of current time
+  -t STAMP               use [[CC]YY]MMDDhhmm[.ss] instead of current time
       --time=WORD        change the specified time:
                            WORD is access, atime, or use: equivalent to -a
                            WORD is modify or mtime: equivalent to -m
       --help             display this help and exit
       --version          output version information and exit
+
+Note that the -d and -t options accept different time-date formats.
 "
     .to_string()
 }
@@ -462,11 +636,14 @@ Mandatory arguments to long options are mandatory for short options too.
 /// `touch --bogus --help` is an error — so an option after `--help` must never
 /// be looked at.
 ///
+/// `clock` is what `-t` is read against: [`Clock::from_env`] in `main`, a
+/// pinned zone and instant in a test.
+///
 /// # Errors
 ///
-/// An unknown option, a recognised option this implementation does not have, an
-/// option missing its argument, or a bad `--time` word.
-fn parse_args(args: &[OsString]) -> Result<Request, getopt::Error> {
+/// An unknown option, an option missing its argument, a bad `--time` word, a
+/// `-t` stamp that is not one, or `-t` with `-r` or `-d`.
+fn parse_args(args: &[OsString], clock: &Clock) -> Result<Request, getopt::Error> {
     let mut flags = TouchFlags::default();
     let mut files: Vec<OsString> = Vec::new();
 
@@ -499,12 +676,35 @@ fn parse_args(args: &[OsString]) -> Result<Request, getopt::Error> {
             Opt::Long("help", _) => return Ok(Request::Help),
             Opt::Long("version", _) => return Ok(Request::Version),
 
-            // The value of `-d`/`-t` was consumed before the refusal on purpose:
-            // it means `touch -d` still reports a *missing argument*, and it
-            // means the `2001-01-01` in `touch -d 2001-01-01 f` cannot be left
-            // behind to be created as a file if the refusal is ever softened.
-            Opt::Short(flag @ (b'd' | b't'), _) => return Err(unimplemented_short(flag)),
-            Opt::Long(name, _) => return Err(unimplemented_long(name)),
+            // Read here, where it appears, as upstream reads it: a stamp that is
+            // not one stops the run before any option after it is looked at, and
+            // a second `-t` replaces the first. `Takes::Required`, so the value is
+            // always there.
+            Opt::Short(b't', value) => {
+                let text = value.unwrap_or_default();
+                let bytes = os_bytes(&text);
+                let at = posixtm::posixtime(&bytes, STAMP_SYNTAX, &clock.zone, clock.now.tv_sec)
+                    .and_then(instant);
+                let Some(at) = at else {
+                    // Upstream's `error (EXIT_FAILURE, 0, …)`: no referral.
+                    return Err(getopt::Error {
+                        sentence: format!("invalid date format {}", quote(&bytes)),
+                        referral: None,
+                        status: 1,
+                    });
+                };
+                flags.date = Some(at);
+            }
+
+            // Kept, not parsed: upstream reads it after the loop, when it knows
+            // whether `-r` supplied the times it is relative to. The last one
+            // wins.
+            Opt::Short(b'd', value) | Opt::Long("date", value) => flags.flex_date = value,
+            // Unreachable: every long option in [`LONG_OPTIONS`] is matched
+            // above, and one that is not in it never gets this far.
+            Opt::Long(name, _) => {
+                return Err(TOUCH.usage_referring(format!("option '--{name}' is unhandled")));
+            }
             // Unreachable: every letter of [`SHORT_OPTIONS`] is matched above,
             // and one that is not in it never gets this far — the walk answers
             // `invalid option` itself. It is spelled out rather than left to a
@@ -514,25 +714,57 @@ fn parse_args(args: &[OsString]) -> Result<Request, getopt::Error> {
         }
     }
 
+    // Upstream's `if (date_set && (use_ref || flex_date))`: `-t` with either of
+    // the others. `-r` with `-d` is not a conflict -- `-d` is then relative to
+    // the reference file's times.
+    if flags.date.is_some() && (flags.reference.is_some() || flags.flex_date.is_some()) {
+        return Err(TOUCH.usage_referring("cannot specify times from more than one source".into()));
+    }
+
     flags.default_to_both();
     Ok(Request::Run(flags, files))
 }
 
-/// The diagnostic for an option that GNU `touch` has and this one does not.
+/// The obsolete `touch MMDDhhmm[YY] FILE…`: when it applies, take the first
+/// operand as the time, and return the warning upstream prints about it.
 ///
-/// Deliberately not [`Program::invalid_option`]: `-d` is not a typo, and telling
-/// the user it is invalid sends them to check their spelling of a flag they
-/// spelled correctly.
-fn unimplemented_short(flag: u8) -> getopt::Error {
-    TOUCH.usage_referring(format!(
-        "option -{} is not implemented by this touch",
-        char::from(flag)
-    ))
-}
-
-fn unimplemented_long(name: &str) -> getopt::Error {
-    TOUCH.usage_referring(format!(
-        "option '--{name}' is not implemented by this touch"
+/// Upstream's rule, all four conditions at once: no time was given any other
+/// way (`date_set` — `-t`, `-r`, or a `-d` that did not mean *now*), there are
+/// at least two operands, `_POSIX2_VERSION` names an edition before POSIX
+/// 1003.1-2001, and the first operand parses as `MMDDhhmm[YY]` -- in which a
+/// two-digit year must be 69-99. Under the default edition the same word is a
+/// file name, which is why this reads the edition rather than the shape alone.
+///
+/// The warning is `None` when `POSIXLY_CORRECT` is set, as upstream's is. It
+/// names the stamp in `-t`'s own syntax, broken down in the local zone.
+fn obsolete_stamp(
+    flags: &mut TouchFlags,
+    files: &mut Vec<OsString>,
+    date_set: bool,
+    edition: i32,
+    posixly_correct: bool,
+    clock: &Clock,
+) -> Option<String> {
+    if date_set || files.len() < 2 || edition >= 200_112 {
+        return None;
+    }
+    let first = os_bytes(files.first()?).into_owned();
+    let secs = posixtm::posixtime(&first, OBSOLETE_SYNTAX, &clock.zone, clock.now.tv_sec)?;
+    let at = instant(secs)?;
+    flags.date = Some(at);
+    files.remove(0);
+    if posixly_correct {
+        return None;
+    }
+    // Upstream's `localtime`, not `localtime_r`: it runs `tzset` first.
+    let tm = clock.zone.localtime(secs, 0);
+    // The operand is printed as it was typed, upstream's `%s`. It is all ASCII
+    // digits, or `posixtime` would not have accepted it, so each byte is its
+    // own character and nothing is lost in the conversion.
+    let typed: String = first.iter().copied().map(char::from).collect();
+    Some(format!(
+        "warning: 'touch {typed}' is obsolete; use 'touch -t {:04}{:02}{:02}{:02}{:02}.{:02}'",
+        tm.year, tm.month, tm.day, tm.hour, tm.minute, tm.second
     ))
 }
 
@@ -568,27 +800,18 @@ impl Failure {
 /// parameter rather than writing to `stderr` directly so the diagnostics can be
 /// asserted on in tests; the file it replaces had no test of this path at all.
 ///
-/// One failure does not abandon the rest — but a bad `-r` does, because there is
-/// then no time to write and every operand would fail identically.
-fn touch_all<W: Write>(flags: &TouchFlags, files: &[OsString], err: &mut W) -> bool {
-    // Before the operand check, which is GNU's order: measured, `touch -r /nope`
-    // with no operands at all reports the reference and not the missing operand.
-    let reference = match flags.reference.as_ref() {
-        None => None,
-        Some(path) => match reference_times(path, flags.link()) {
-            Ok(stamp) => Some(stamp),
-            Err(e) => {
-                let _ = writeln!(
-                    err,
-                    "touch: failed to get attributes of {}: {}",
-                    quoteaf_os(path),
-                    strerror(&e)
-                );
-                return false;
-            }
-        },
-    };
-
+/// One failure does not abandon the rest. A bad `-r` or `-d` never gets here:
+/// [`resolve_times`] reports those first, which is GNU's order — measured,
+/// `touch -r /nope` with no operands at all reports the reference and not the
+/// missing operand.
+///
+/// `stamp` is what to write, or `None` for *now*.
+fn touch_all<W: Write>(
+    flags: &TouchFlags,
+    files: &[OsString],
+    stamp: Option<Stamp>,
+    err: &mut W,
+) -> bool {
     if files.is_empty() {
         let _ = writeln!(
             err,
@@ -600,7 +823,7 @@ fn touch_all<W: Write>(flags: &TouchFlags, files: &[OsString], err: &mut W) -> b
 
     let mut ok = true;
     for file in files {
-        if let Err(failure) = touch_one(flags, file, reference) {
+        if let Err(failure) = touch_one(flags, file, stamp) {
             let _ = writeln!(err, "touch: {}", failure.describe(file));
             ok = false;
         }
@@ -640,8 +863,8 @@ fn reference_times(path: &OsStr, link: Link) -> io::Result<Stamp> {
 ///
 /// The file could not be created, or its times could not be set. `-c` plus "no
 /// such file" is not an error: it is what `-c` asks for.
-fn touch_one(flags: &TouchFlags, file: &OsStr, reference: Option<Stamp>) -> Result<(), Failure> {
-    let times = flags.times(reference);
+fn touch_one(flags: &TouchFlags, file: &OsStr, stamp: Option<Stamp>) -> Result<(), Failure> {
+    let times = flags.times(stamp);
 
     if *os_bytes(file) == *b"-" {
         // `-` names standard output. Measured: `touch -` prints
@@ -768,6 +991,135 @@ fn stdout_as_file() -> ManuallyDrop<File> {
 )]
 mod tests {
     use super::*;
+
+    /// 2026-09-25 12:00:00 UTC.
+    const NOW: i64 = 1_790_337_600;
+
+    /// A fixed clock -- UTC, at [`NOW`] -- so that `-t` means the same thing
+    /// wherever `cargo test` runs.
+    fn test_clock() -> Clock {
+        Clock {
+            zone: Zone::utc(),
+            now: Timespec {
+                tv_sec: NOW,
+                tv_nsec: 0,
+            },
+        }
+    }
+
+    /// `parse_args` against [`test_clock`]. The tests of the clock itself call
+    /// `super::parse_args` with their own.
+    fn parse_args(args: &[OsString]) -> Result<Request, getopt::Error> {
+        super::parse_args(args, &test_clock())
+    }
+
+    /// `-t 202001020304.05`, the stamp most of the `-t` tests use: 2020-01-02
+    /// 03:04:05 UTC.
+    const STAMP_SECS: i64 = 1_577_934_245;
+
+    #[test]
+    fn dash_t_reads_a_posix_stamp_as_both_times() {
+        let (flags, files) = run_parse(&["-t", "202001020304.05", "f"]);
+        assert_eq!(flags.date, instant(STAMP_SECS));
+        assert_eq!(files, vec!["f"]);
+        // A second `-t` replaces the first, as upstream's does.
+        let (flags, _) = run_parse(&["-t", "199901010000", "-t", "202001020304.05", "f"]);
+        assert_eq!(flags.date, instant(STAMP_SECS));
+        // Both halves carry it.
+        let t = flags.times(flags.date.map(Stamp::both));
+        assert!(matches!(t.accessed, When::Set(at) if Some(at) == instant(STAMP_SECS)));
+        assert!(matches!(t.modified, When::Set(at) if Some(at) == instant(STAMP_SECS)));
+    }
+
+    /// Upstream's `error (EXIT_FAILURE, 0, _("invalid date format %s"), …)`:
+    /// status 1 and no referral -- and reported where `-t` appears, so an
+    /// option after it is never looked at.
+    #[test]
+    fn a_stamp_that_is_not_one_is_an_invalid_date_format() {
+        for bad in ["2020", "202001020304.5", "202009310000", "x02001020304"] {
+            let e = fail(&["-t", bad, "f"]);
+            assert_eq!(
+                e.sentence,
+                format!("invalid date format {}", quote(bad.as_bytes()))
+            );
+            assert_eq!(e.referral, None, "{bad}");
+            assert_eq!(e.status, 1, "{bad}");
+        }
+        let e = fail(&["-t", "2020", "--bogus", "f"]);
+        assert!(
+            e.sentence.starts_with("invalid date format"),
+            "{}",
+            e.sentence
+        );
+    }
+
+    #[test]
+    fn dash_t_with_dash_r_is_two_sources() {
+        let e = fail(&["-t", "202001010000", "-r", "ref", "f"]);
+        assert_eq!(e.sentence, "cannot specify times from more than one source");
+        assert!(e.referral.is_some(), "upstream follows it with usage");
+        assert_eq!(e.status, 1);
+    }
+
+    /// No time given is *now*, asked of the kernel -- `UTIME_NOW` -- on the
+    /// halves selected, and `-a`/`-m` leave the other half alone.
+    #[test]
+    fn no_time_given_is_the_kernels_now() {
+        let (flags, _) = run_parse(&["f"]);
+        let t = flags.times(None);
+        assert!(matches!(t.accessed, When::Now));
+        assert!(matches!(t.modified, When::Now));
+        let (flags, _) = run_parse(&["-a", "f"]);
+        let t = flags.times(None);
+        assert!(matches!(t.accessed, When::Now));
+        assert!(matches!(t.modified, When::Omit));
+    }
+
+    /// The obsolete operand, measured against GNU 9.4: it is a time only below
+    /// the 2001 edition, only with a second operand, and only when no other
+    /// source was given; and the warning is upstream's, unless
+    /// `POSIXLY_CORRECT` silences it.
+    #[test]
+    fn the_obsolete_operand_follows_the_edition() {
+        let clock = test_clock();
+        let run = |words: &[&str], edition: i32, posix: bool| {
+            let Request::Run(mut flags, mut files) = parse_args(&args(words)).unwrap() else {
+                panic!("expected a run for {words:?}");
+            };
+            // `-t` and `-r` both set upstream's `date_set`; no row here uses `-d`.
+            let date_set = flags.date.is_some() || flags.reference.is_some();
+            let warning = obsolete_stamp(&mut flags, &mut files, date_set, edition, posix, &clock);
+            (flags.date, files, warning)
+        };
+        // 1970-01-01 00:00 UTC is 0.
+        let (date, files, warning) = run(&["0101000070", "f"], 199_209, false);
+        assert_eq!(date, instant(0));
+        assert_eq!(files, vec![OsString::from("f")]);
+        assert_eq!(
+            warning.as_deref(),
+            Some("warning: 'touch 0101000070' is obsolete; use 'touch -t 197001010000.00'")
+        );
+        // POSIXLY_CORRECT keeps the time and drops the warning.
+        let (date, _, warning) = run(&["0101000070", "f"], 199_209, true);
+        assert_eq!(date, instant(0));
+        assert_eq!(warning, None);
+        // Each missing condition leaves the operand a file name.
+        for (words, edition) in [
+            (&["0101000070", "f"][..], posixver::DEFAULT),
+            (&["0101000070", "f"][..], 200_112),
+            (&["0101000070"][..], 199_209),
+            (&["0101000068", "f"][..], 199_209),
+            (&["-t", "202001010000", "0101000070", "f"][..], 199_209),
+            (&["-r", "ref", "0101000070", "f"][..], 199_209),
+        ] {
+            let (_, files, warning) = run(words, edition, false);
+            assert!(
+                files.iter().any(|f| f == "0101000070" || f == "0101000068"),
+                "{words:?}"
+            );
+            assert_eq!(warning, None, "{words:?} under {edition}");
+        }
+    }
     use std::path::PathBuf;
     use std::time::Duration;
 
@@ -933,9 +1285,10 @@ mod tests {
     /// A value-taking option must swallow its value, or the value becomes a
     /// file — which is exactly the class of bug the old parser had wholesale.
     #[test]
-    fn a_refused_option_still_swallows_its_value() {
-        let e = fail(&["-d", "2001-01-01", "f"]);
-        assert!(e.sentence.contains("not implemented"), "{:?}", e.sentence);
+    fn dash_d_swallows_its_value() {
+        let (flags, files) = run_parse(&["-d", "2001-01-01", "f"]);
+        assert_eq!(flags.flex_date, Some(OsString::from("2001-01-01")));
+        assert_eq!(files, vec!["f"]);
     }
 
     #[test]
@@ -1034,18 +1387,121 @@ mod tests {
         );
     }
 
-    /// Ignoring either of these silently does the *opposite* of what was asked —
-    /// see the module docs — so they are refused by name.
+    /// `-d` in each spelling, and the last one wins -- it is kept, not parsed,
+    /// until the options are done.
     #[test]
-    fn unimplemented_options_are_rejected_by_name() {
+    fn dash_d_is_kept_for_after_the_options() {
         for typed in [
             &["-d", "now", "f"][..],
             &["--date=now", "f"][..],
-            &["-t", "202001010000", "f"][..],
+            &["--date", "now", "f"][..],
+            &["-d", "bogus", "-d", "now", "f"][..],
         ] {
-            let e = parse_args(&args(typed)).unwrap_err();
-            assert!(e.sentence.contains("not implemented"), "{typed:?}: {e:?}");
+            let (flags, files) = run_parse(typed);
+            assert_eq!(flags.flex_date, Some(OsString::from("now")), "{typed:?}");
+            assert_eq!(files, vec!["f"], "{typed:?}");
         }
+        // Not parsed in the loop: a bad one does not stop the parse.
+        let (flags, _) = run_parse(&["-d", "bogus", "f"]);
+        assert_eq!(flags.flex_date, Some(OsString::from("bogus")));
+    }
+
+    #[test]
+    fn dash_t_with_dash_d_is_two_sources() {
+        let e = fail(&["-t", "202001010000", "-d", "now", "f"]);
+        assert_eq!(e.sentence, "cannot specify times from more than one source");
+        assert!(e.referral.is_some());
+        let e = fail(&["-d", "now", "-t", "202001010000", "f"]);
+        assert_eq!(e.sentence, "cannot specify times from more than one source");
+    }
+
+    /// The flags `parse_args` leaves for these words, resolved.
+    fn resolve(words: &[&str]) -> Result<Option<Stamp>, String> {
+        let (flags, _) = run_parse(words);
+        resolve_times(&flags, &test_clock())
+    }
+
+    fn secs(t: SystemTime) -> i64 {
+        Timespec::from_system_time(t).tv_sec
+    }
+
+    #[test]
+    fn dash_d_names_both_times() {
+        let stamp = resolve(&["-d", "2020-01-02 03:04:05", "f"])
+            .unwrap()
+            .unwrap();
+        assert_eq!(secs(stamp.accessed), STAMP_SECS);
+        assert_eq!(secs(stamp.modified), STAMP_SECS);
+        // Relative to the clock.
+        let stamp = resolve(&["-d", "1 hour ago", "f"]).unwrap().unwrap();
+        assert_eq!(secs(stamp.modified), NOW - 3600);
+        // Nanoseconds survive.
+        let stamp = resolve(&["-d", "@1.5", "f"]).unwrap().unwrap();
+        assert_eq!(
+            Timespec::from_system_time(stamp.accessed),
+            Timespec {
+                tv_sec: 1,
+                tv_nsec: 500_000_000
+            }
+        );
+    }
+
+    /// Upstream's `error (EXIT_FAILURE, 0, _("invalid date format %s"), …)`.
+    #[test]
+    fn a_dash_d_that_is_not_a_date_is_an_invalid_date_format() {
+        assert_eq!(
+            resolve(&["-d", "bogus", "f"]).err(),
+            Some(format!("invalid date format {}", quote(b"bogus")))
+        );
+    }
+
+    /// `-d now` is *now* asked of the kernel -- `None` -- exactly as if no
+    /// time were given, but only when both halves are being set, and only when
+    /// the string really says "now" rather than naming this instant.
+    #[test]
+    fn dash_d_now_is_the_kernels_now() {
+        assert!(resolve(&["-d", "now", "f"]).unwrap().is_none());
+        assert!(resolve(&["-d", "today", "f"]).unwrap().is_none());
+        assert!(resolve(&["-d", "+0 seconds", "f"]).unwrap().is_none());
+        // The current instant written out is not "now": the second parse,
+        // against a clock one second away, does not follow it.
+        assert!(resolve(&["-d", "@1790337600", "f"]).unwrap().is_some());
+        // With only one half selected, upstream never checks.
+        assert!(resolve(&["-a", "-d", "now", "f"]).unwrap().is_some());
+    }
+
+    /// With `-r`, `-d` is relative to each of the reference file's times.
+    #[test]
+    fn dash_d_with_dash_r_moves_each_reference_time() {
+        let d = scratch("ref_relative");
+        let r = d.join("ref");
+        fs::write(&r, b"").unwrap();
+        let accessed = UNIX_EPOCH + Duration::from_secs(1_000_000_000);
+        let modified = UNIX_EPOCH + Duration::from_secs(1_100_000_000);
+        File::options()
+            .write(true)
+            .open(&r)
+            .unwrap()
+            .set_times(
+                std::fs::FileTimes::new()
+                    .set_accessed(accessed)
+                    .set_modified(modified),
+            )
+            .unwrap();
+        let path = r.to_string_lossy().into_owned();
+        let stamp = resolve(&["-r", &path, "-d", "+1 day", "f"])
+            .unwrap()
+            .unwrap();
+        assert_eq!(secs(stamp.accessed), 1_000_000_000 + 86_400);
+        assert_eq!(secs(stamp.modified), 1_100_000_000 + 86_400);
+        // `-m` moves only the modification time; the access time stays the
+        // reference's own.
+        let stamp = resolve(&["-m", "-r", &path, "-d", "+1 day", "f"])
+            .unwrap()
+            .unwrap();
+        assert_eq!(secs(stamp.accessed), 1_000_000_000);
+        assert_eq!(secs(stamp.modified), 1_100_000_000 + 86_400);
+        let _ = fs::remove_dir_all(&d);
     }
 
     /// GNU's `--help` says `-f  (ignored)`, so ignoring it is the
@@ -1198,11 +1654,18 @@ mod tests {
         dir
     }
 
-    /// Run `touch_all`, returning `(ok, diagnostics)`.
+    /// Run what `main` runs after parsing -- `resolve_times`, then
+    /// `touch_all` -- returning `(ok, diagnostics)`.
     fn run(flags: &TouchFlags, files: &[&Path]) -> (bool, String) {
         let owned: Vec<OsString> = files.iter().map(|p| p.as_os_str().to_owned()).collect();
         let mut err: Vec<u8> = Vec::new();
-        let ok = touch_all(flags, &owned, &mut err);
+        let ok = match resolve_times(flags, &test_clock()) {
+            Ok(stamp) => touch_all(flags, &owned, stamp, &mut err),
+            Err(message) => {
+                writeln!(err, "touch: {message}").unwrap();
+                false
+            }
+        };
         (ok, String::from_utf8_lossy(&err).into_owned())
     }
 

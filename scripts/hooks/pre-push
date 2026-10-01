@@ -173,29 +173,38 @@
 #      status, which a warning leaves at 0, and the host's tests and clippy
 #      never compile `cfg(target_os = "none")` -- so a function dead there
 #      sat in every sysroot build's output for six commits, read by nothing.
-#  52. Run check-manifest-producers.py at the push (design-decisions 974): manifest producers.
-#  53. Run check-cp-diff-sees-nul.py at the push (design-decisions 974): cp-diff sees NUL.
-#  54. Run check-gates-can-refuse.py at the push (design-decisions 974): gates can refuse.
-#  55. Run check-gates-are-wired.py at the push (design-decisions 974): gates are wired.
-#  56. Run check-mutation-needles.py at the push (design-decisions 974): mutation needles.
-#  57. Run check-user-access-sites.py at the push (design-decisions 974): user-access sites.
-#  58. Run check-linux-only-capabilities.py at the push (design-decisions 974): Linux-only capabilities.
-#  59. Run check-usage-names-reach-the-command.py at the push (design-decisions 974): usage names reach the command.
-#  60. Run check-refusals-refuse.py at the push (design-decisions 974): refusals refuse.
-#  61. Run check-usage-status.py at the push (design-decisions 974): usage messages report failure.
-#  62. Run check-query-status.py at the push (design-decisions 974): queries report success.
-#  63. Run check-selftest-rung-numbers.py at the push (design-decisions 974): self-test rung numbers.
-#  64. Run check-shell-message-names.py at the push (design-decisions 974): shell message names.
-#  65. Run check-shell-noun-article.py at the push (design-decisions 974): shell noun articles.
-#  66. Run selftest-boot-gate-identity.py at the push (design-decisions 974): identity-rung gate.
-#  67. Run check-ring3-entry-regs.py at the push (design-decisions 974): ring-3 entry registers.
-#  68. Run gen-script-index.py at the push (design-decisions 974): script index.
-#  69. Run check-foreign-worktree-paths.py at the push (design-decisions 974): foreign worktree paths.
-#  70. Run check-frame-needles.py at the push (design-decisions 974): frame needles.
-#  71. Run check-generated-tables.py at the push (design-decisions 974): generated tables.
-#  72. Run check-diskcleanup-test-roots.py at the push (design-decisions 974): diskcleanup test roots.
-#  73. Run check-selftest-reinit.py at the push (design-decisions 974): self-test tables re-opened.
-#  74. Refuse a pushed revision holding a tracked file with no owner, a line
+#  52. Refuse two packages that build a binary of the same name. They share
+#      one path under `target/<triple>/<profile>/`, so the survivor is
+#      whichever cargo linked last and that is the file the rootfs stages.
+#      Proved by running one `logger.exe` twice half an hour apart with no
+#      source change: it rejected `-i` as an invalid option, then accepted
+#      it. Cargo has always warned; a warning inside a build that prints
+#      thousands of lines is not a gate. (Lane B wrote it as 51 on its own
+#      branch on 2026-09-16; main's 51 came first, and the merge of
+#      2026-10-01 numbered this one after it.)
+#  53. Run check-manifest-producers.py at the push (design-decisions 974): manifest producers.
+#  54. Run check-cp-diff-sees-nul.py at the push (design-decisions 974): cp-diff sees NUL.
+#  55. Run check-gates-can-refuse.py at the push (design-decisions 974): gates can refuse.
+#  56. Run check-gates-are-wired.py at the push (design-decisions 974): gates are wired.
+#  57. Run check-mutation-needles.py at the push (design-decisions 974): mutation needles.
+#  58. Run check-user-access-sites.py at the push (design-decisions 974): user-access sites.
+#  59. Run check-linux-only-capabilities.py at the push (design-decisions 974): Linux-only capabilities.
+#  60. Run check-usage-names-reach-the-command.py at the push (design-decisions 974): usage names reach the command.
+#  61. Run check-refusals-refuse.py at the push (design-decisions 974): refusals refuse.
+#  62. Run check-usage-status.py at the push (design-decisions 974): usage messages report failure.
+#  63. Run check-query-status.py at the push (design-decisions 974): queries report success.
+#  64. Run check-selftest-rung-numbers.py at the push (design-decisions 974): self-test rung numbers.
+#  65. Run check-shell-message-names.py at the push (design-decisions 974): shell message names.
+#  66. Run check-shell-noun-article.py at the push (design-decisions 974): shell noun articles.
+#  67. Run selftest-boot-gate-identity.py at the push (design-decisions 974): identity-rung gate.
+#  68. Run check-ring3-entry-regs.py at the push (design-decisions 974): ring-3 entry registers.
+#  69. Run gen-script-index.py at the push (design-decisions 974): script index.
+#  70. Run check-foreign-worktree-paths.py at the push (design-decisions 974): foreign worktree paths.
+#  71. Run check-frame-needles.py at the push (design-decisions 974): frame needles.
+#  72. Run check-generated-tables.py at the push (design-decisions 974): generated tables.
+#  73. Run check-diskcleanup-test-roots.py at the push (design-decisions 974): diskcleanup test roots.
+#  74. Run check-selftest-reinit.py at the push (design-decisions 974): self-test tables re-opened.
+#  75. Refuse a pushed revision holding a tracked file with no owner, a line
 #      in the ownership table naming nothing tracked, or a script owned by
 #      two lanes (design-decisions §973, the operator's answer to A-Q11). A
 #      new file gets its owner in the commit that creates it.
@@ -203,12 +212,38 @@
 # (This count was wrong before gate 9 was added: it read "Seven" while eight
 # were implemented; wrong again the moment gate 13 was written, when the
 # section and the bypass landed in `0ab4b55bc` and this list did not; and
-# wrong again at 19 and at 22, and at 35. FIVE OUT OF FIVE RECENT ADDITIONS --
-# lane A counted the first four and it is worth having, because a note that
-# stops at the second instance reads as though the problem was dealt with. The
-# fifth was written by someone who had just read this paragraph: gate 35's
-# section and bypass landed, this list did not, and `test-pre-push-gates.py`
-# refused the push. The note is not the mechanism; the test is.
+# wrong again at 19 and at 22, and at 35, and at 51. SIX OUT OF SIX RECENT
+# ADDITIONS -- lane A counted the first four and it is worth having, because a
+# note that stops at the second instance reads as though the problem was dealt
+# with. The fifth was written by someone who had just read this paragraph:
+# gate 35's section and bypass landed, this list did not, and
+# `test-pre-push-gates.py` refused the push. The note is not the mechanism;
+# the test is.
+#
+# The sixth, gate 52 -- numbered 45, then 47, then 51, and 52 since main's
+# own gate 51 met it in a merge -- added a SECOND way
+# to get this wrong that the first five did not show. Its author looked for the highest number in use with
+#
+#     grep -o "^# Gate [0-9]*:" scripts/hooks/pre-push | sort -n | tail
+#
+# got 44, and numbered the new gate 45 -- but gates 45 and 46 do not write
+# their headers in that form, so the pattern could not see them and the answer
+# was confidently wrong. Two sections then claimed 45. The lesson is not "use a
+# better regex": it is that `n+1` was derived from a SEARCH that could silently
+# match a subset, when the authoritative list is right here in this header and
+# says plainly where it ends. The test caught both faults -- the duplicate and
+# the missing line -- and named them separately, which is why the fix took one
+# minute rather than a bisect.
+#
+# It then found a THIRD way, which no test in one tree can see: every lane
+# derives `n+1` from its own branch. On 2026-09-16 lane B numbered this gate 47
+# on `lane-b`, hours after another lane had committed a different gate 47 that
+# had not yet reached `main` when lane B last merged it; that lane went on to
+# add 48 through 50. Each branch's list was internally perfect -- the collision
+# existed only in the merge, which is where it was caught, as a textual conflict
+# on this header, and where the renumbering to 51 was made. A number is not a
+# lane-safe identifier. If this recurs, the fix is to give each lane its own
+# band here as design-decisions.md does, not a better search.
 #
 # Adding a gate is THREE edits: this list, the `# Gate N` section, and the
 # bypass variable. scripts/test-pre-push-gates.py checks all three against each
@@ -608,16 +643,21 @@ touches_paths=""
 touches_nl='
 '
 
-# Decide how `touches` will answer for this push: `none` (nothing is being
-# published), `list` (from `touches_paths`), or `git` (ask on every call).
-# Every path a commit of this push changes, one per line, from one git process:
-# the published commits (reachable from $pushed_shas and from no ref of the
-# remote), each against its parent. --root: a root commit's paths count, as
-# rev-list counts them, whatever log.showRoot says. --no-renames: a rename
-# changes both of its paths. core.quotePath=false: only names git cannot print
-# as themselves are quoted. Merge commits list no paths: what a merge brings in
-# was judged where it was written. Shared by `touches_prepare` and the
-# paired-suite gate, so the two cannot drift apart again.
+# The paths the push's own commits change, one per line (with blank lines
+# between commits): every unpublished commit against its parent, a root commit
+# against nothing, a merge not at all. `touches` answers from this list when it
+# can, and the tooling-suite gate reads the names from it.
+#
+# ONE `git log` OVER EVERY COMMIT, NOT `rev-list | xargs git diff-tree`. That
+# was how the tooling-suite gate listed the pushed files, and `diff-tree` takes
+# at most two trees: handed two commits it diffed the two snapshots, and handed
+# three or more it read the rest as pathspecs and listed nothing -- so on a
+# typical lane push, neither the paired suites nor this hook's own ran, and the
+# gate said "no scripts/*.py in this push has a paired test suite"
+# (requests/e-ab-pre-push-suites-never-run-on-a-multi-commit-push.md).
+# --root: a root commit's paths count. --no-renames: a rename changes both of
+# its paths. core.quotePath=false: only a name git cannot print as itself is
+# quoted.
 pushed_paths() {
     [ -n "$pushed_shas" ] || return 0
     # shellcheck disable=SC2086
@@ -626,6 +666,8 @@ pushed_paths() {
         --not --remotes="$remote_name" -- 2>/dev/null
 }
 
+# Decide how `touches` will answer for this push: `none` (nothing is being
+# published), `list` (from `touches_paths`), or `git` (ask on every call).
 touches_prepare() {
     touches_mode=git
     if [ -z "$pushed_shas" ]; then
@@ -637,10 +679,8 @@ touches_prepare() {
     touches_merge=$(git rev-list $pushed_shas --min-parents=2 --max-count=1 \
                         --not --remotes="$remote_name" 2>/dev/null) || return 0
     [ -z "$touches_merge" ] || return 0
-    # --root: a root commit's paths count, as rev-list counts them, whatever
-    # log.showRoot says. --no-renames: a rename changes both of its paths.
-    # core.quotePath=false: only names git cannot print as themselves are
-    # quoted, and those send the push to git below.
+    # A root commit's paths count here as rev-list counts them, whatever
+    # log.showRoot says; a quoted name sends the push to git below.
     touches_paths=$(pushed_paths) || return 0
     touches_paths="$touches_nl$touches_paths$touches_nl"
     case $touches_paths in
@@ -877,6 +917,18 @@ fi
 # commits touching `posix/` or `userspace/`, so a lane A or C push never pays
 # for it and can never be blocked by it.
 #
+# The converse does not hold, and that is worth knowing before it surprises
+# you: the TRIGGER is `posix/`+`userspace/` but the SCAN is every `.rs` in the
+# tree. So a finding in another lane's crate never stops that lane's push and
+# does stop the next lane-B or lane-D push after it reaches `main`. On
+# 2026-09-24 a lane-B push was refused over `gui/vulkan` (lane F): a false
+# positive, since fixed in the checker, plus a real coverage gap, since added
+# to gate 42. Left whole-tree deliberately -- it is the only thing that grades
+# raced globals outside these two trees at all, and narrowing the verdict to
+# match the trigger would quietly stop that. The fix that removes the
+# asymmetry is to widen the trigger, which costs every lane this gate's run
+# time; that is a cross-lane call, not this gate's to make.
+#
 # WHY IT JUDGES THE COMMIT, NOT THE WORKTREE. `--head "$sha"` makes the checker
 # read that revision — every `.rs`, every `Cargo.toml`, and the baseline — via
 # scripts/gittree.py. Without it the gate enumerates the commits being pushed
@@ -985,8 +1037,8 @@ toi="${repo_root:-.}/scripts/check-test-order-independence.py"
 # times on an empty list while `note_gate` recorded them as having run. This
 # gate runs the suite once against the working tree, so there is no loop to
 # degrade to nothing. `touches` alone decides whether it runs.
-# All three crates in CRATES, or a push touching only one of them would
-# skip the gate entirely. The invocation is not scoped to the touched
+# Every crate in CRATES, or a push touching only one of them would skip the
+# gate entirely. (Three until 2026-09-24, when `gui/vulkan` joined.) The invocation is not scoped to the touched
 # crate: measured 2026-09-15, posix is ~150s of the ~230s total, authlib
 # ~27s and coreutils (--lib) ~51s, so a scoped run would save real time
 # on a coreutils-only push. Left unscoped because `touches` answers
@@ -994,8 +1046,9 @@ toi="${repo_root:-.}/scripts/check-test-order-independence.py"
 # the gate -- the failure this whole gate family keeps producing.
 # `gui/vulkan/` since 2026-09-24, with `vkloader`'s entry in CRATES: every
 # crate in that list must be a trigger here, or a push touching only it skips
-# the gate that was added to cover it.
-touches posix/ userspace/authlib/ userspace/coreutils/ gui/vulkan/         scripts/check-test-order-independence.py || skip_toi=1
+# the gate that was added to cover it. `gui/imagecodec/` for the same reason,
+# with `imagecodec`'s entry (2026-09-25).
+touches posix/ userspace/authlib/ userspace/coreutils/ gui/vulkan/ gui/imagecodec/ scripts/check-test-order-independence.py || skip_toi=1
 note_gate test-order "$skip_toi"
 
 toi_failed=0
@@ -1374,19 +1427,8 @@ note_gate tooling-suites "$skip_suites"
 suites_failed=0
 suites_ran=""
 if [ "$skip_suites" != "1" ]; then
-    # The same revision range `touches` uses, turned into file names -- by the
-    # same command `touches_prepare` uses (`pushed_paths`), which lists every
-    # published commit's paths in one process.
-    #
-    # It used to be `git rev-list ... | xargs -r git diff-tree ...`, which is
-    # right for ONE commit and wrong for more: `git diff-tree A B` compares two
-    # trees rather than each commit with its parent, and with three or more it
-    # is a usage error. Both were silenced by `2>/dev/null`, so every push of
-    # two or more commits found "no scripts/*.py in this push has a paired
-    # test suite" and ran none -- this gate's whole promise, off, on the pushes
-    # that carry the most change. Found 2026-09-26 on a six-commit push whose
-    # new suite (test-check-release-staleness.py) never ran here;
-    # scripts/test-pre-push-suites-scope.py holds it now.
+    # The same revision range `touches` uses, turned into file names by the
+    # helper beside it.
     changed_scripts=$(pushed_paths | grep -E '^scripts/' | sort -u)
     # PAIRED BY STEM, NOT BY EXTENSION.
     #
@@ -2938,7 +2980,7 @@ EOF
 fi
 
 # ---------------------------------------------------------------------------
-# Gate 74 -- file ownership: refuse to publish a tracked file with no owner.
+# Gate 75 -- file ownership: refuse to publish a tracked file with no owner.
 #
 # (Placed here, beside gate 9, rather than after gate 50: both judge what a
 # push adds under shared paths, and a reader looking for one finds the other.)
@@ -4164,6 +4206,89 @@ Full output is kept at the path named above.
 
 To push anyway:
     ALLOW_CRATE_NAME_COLLISION=1 git push $remote_name ...
+
+EOF
+    exit 1
+fi
+
+# ---------------------------------------------------------------------------
+# Gate 52: two packages must not build a binary of the same name.
+#
+# Gate 18 above asks whether a *directory* name is another crate's *package*
+# name, because `cargo test -p <name>` then tests the wrong thing. This asks
+# the neighbouring question it does not: whether two packages write the same
+# FILE. Every crate links into one `target/<triple>/<profile>/`, so two bin
+# targets sharing a name are one file, and the winner is whichever linked
+# last.
+#
+# WHY IT IS NOT ACADEMIC. On 2026-09-16 the same
+# `target/x86_64-pc-windows-gnu/debug/logger.exe` was run twice, half an hour
+# apart, with no source change in between: first it answered `logger -i` with
+# `invalid option -- 'i'`, then it accepted it. `userspace/logger` has thirteen
+# options and `userspace/coreutils/src/bin/logger.rs` has two, and
+# `create-ext4-rootfs.sh` stages whichever one is sitting there as
+# `/bin/logger`. `kill` is the same, and worse: those two do not differ in
+# options but in DESIGN -- one sends IPC as design.txt requires, the other
+# implements the POSIX signal surface.
+#
+# Cargo has been warning about both all along. A warning inside a build that
+# prints thousands of lines is not a gate, which is the whole reason this is
+# one.
+#
+# COST. `cargo metadata --no-deps` — cargo's own target list, no compilation:
+# about 0.7s. Deliberately not a hand-parse of Cargo.toml, because a bin
+# target's name comes from four different places and `autobins` can switch the
+# implicit ones off; a gate that exists because a near-miss question was asked
+# should not ask a near-miss question.
+#
+# The two collisions that already existed are baselined in the checker, for
+# gate 18's reason: resolving one means DELETING a program, and for `kill` that
+# is an open design question. The baseline may only shrink — an entry that no
+# longer collides fails too.
+# ---------------------------------------------------------------------------
+bincoll="${repo_root:-.}/scripts/check-bin-collisions.py"
+skip_bincoll=0
+if [ "${ALLOW_BIN_NAME_COLLISION:-0}" = "1" ]; then
+    echo "pre-push: ALLOW_BIN_NAME_COLLISION=1 set — skipping the binary-name gate." >&2
+    skip_bincoll=1
+fi
+[ -n "$py" ] || skip_bincoll=1
+[ -f "$bincoll" ] || skip_bincoll=1
+note_gate bin-collisions "$skip_bincoll"
+
+if [ "$skip_bincoll" != "1" ]; then
+    if ! run_checker bin-collisions-selftest "$py" "$bincoll" --selftest; then
+        echo "pre-push: check-bin-collisions.py FAILED ITS OWN SELF-TEST — its verdict is not trustworthy." >&2
+        skip_bincoll=refused
+    fi
+fi
+
+if [ "$skip_bincoll" = "refused" ] || { [ "$skip_bincoll" != "1" ] && ! run_checker bin-collisions "$py" "$bincoll"; }; then
+    cat >&2 <<'EOF'
+
+pre-push: REFUSING to push — two packages build a binary with the same name.
+
+They share one output path under target/<triple>/<profile>/, so the binary
+that survives is whichever cargo linked last, and that is the one the rootfs
+stages. The same command can ship a different program tomorrow with no source
+change to blame.
+
+Reproduce exactly what the hook saw:
+
+    python scripts/check-bin-collisions.py
+    python scripts/check-bin-collisions.py --list   # every bin target
+
+Fix it by renaming one of the bin targets (a `[[bin]] name = "..."` in the
+owning Cargo.toml), or by deleting whichever of the two programs should not
+exist. If the collision is genuinely intended, add it to KNOWN_COLLISIONS in
+that script with a comment saying which program is meant to win and why —
+but note that cargo cannot be made to honour such an intent, so "intended"
+here can only ever mean "tracked".
+
+Full output is kept at the path named above.
+
+To push anyway:
+    ALLOW_BIN_NAME_COLLISION=1 git push $remote_name ...
 
 EOF
     exit 1
@@ -6091,7 +6216,7 @@ EOF
     exit 1
 fi
 
-# Gates 52-73: boot-test gates that take seconds, run at the push too.
+# Gates 53-74: boot-test gates that take seconds, run at the push too.
 #
 # WHY. The operator's answer to A-Q13 (design-decisions 974). A fault a lane
 # pushed used to surface only in another lane's boot test, twenty minutes to
@@ -6161,7 +6286,7 @@ EOF
 }
 
 # ---------------------------------------------------------------------------
-# Gate 52 -- manifest producers.
+# Gate 53 -- manifest producers.
 # Every entry in scripts/rootfs-bin-manifest.txt must name a program something
 # in the tree builds. An entry nothing produces puts a missing program on the
 # disk image, and the image build finds out only after the boot's gates.
@@ -6182,18 +6307,18 @@ fi
 note_gate check-manifest-producers "$skip_mfprod"
 if [ "$skip_mfprod" != "1" ]; then
     if ! run_checker check-manifest-producers-selftest "$py" "$mfprod" --self-test; then
-        moved_gate_refuses 52 "manifest producers" ALLOW_MANIFEST_PRODUCERS \
+        moved_gate_refuses 53 "manifest producers" ALLOW_MANIFEST_PRODUCERS \
             "check-manifest-producers.py failed its own self-test, so its verdict on this push would not be trustworthy."
     fi
     if ! run_checker check-manifest-producers "$py" "$mfprod"; then
-        moved_gate_refuses 52 "manifest producers" ALLOW_MANIFEST_PRODUCERS "Every entry in scripts/rootfs-bin-manifest.txt must name a program something
+        moved_gate_refuses 53 "manifest producers" ALLOW_MANIFEST_PRODUCERS "Every entry in scripts/rootfs-bin-manifest.txt must name a program something
 in the tree builds. An entry nothing produces puts a missing program on the
 disk image, and the image build finds out only after the boot's gates."
     fi
 fi
 
 # ---------------------------------------------------------------------------
-# Gate 53 -- cp-diff sees NUL.
+# Gate 54 -- cp-diff sees NUL.
 # cp-diff.sh's contents() must still see a difference made only of NUL bytes.
 # If it cannot, the cp differential test passes files that differ.
 #
@@ -6213,17 +6338,17 @@ fi
 note_gate check-cp-diff-sees-nul "$skip_cpnul"
 if [ "$skip_cpnul" != "1" ]; then
     if ! run_checker check-cp-diff-sees-nul-selftest "$py" "$cpnul" --self-test; then
-        moved_gate_refuses 53 "cp-diff sees NUL" ALLOW_CP_DIFF_NUL \
+        moved_gate_refuses 54 "cp-diff sees NUL" ALLOW_CP_DIFF_NUL \
             "check-cp-diff-sees-nul.py failed its own self-test, so its verdict on this push would not be trustworthy."
     fi
     if ! run_checker check-cp-diff-sees-nul "$py" "$cpnul"; then
-        moved_gate_refuses 53 "cp-diff sees NUL" ALLOW_CP_DIFF_NUL "cp-diff.sh's contents() must still see a difference made only of NUL bytes.
+        moved_gate_refuses 54 "cp-diff sees NUL" ALLOW_CP_DIFF_NUL "cp-diff.sh's contents() must still see a difference made only of NUL bytes.
 If it cannot, the cp differential test passes files that differ."
     fi
 fi
 
 # ---------------------------------------------------------------------------
-# Gate 54 -- gates can refuse.
+# Gate 55 -- gates can refuse.
 # Every gate must be able to exit non-zero when run the way it is run. A gate
 # that cannot fail enforces nothing, however thoroughly it detects.
 #
@@ -6243,17 +6368,17 @@ fi
 note_gate check-gates-can-refuse "$skip_canref"
 if [ "$skip_canref" != "1" ]; then
     if ! run_checker check-gates-can-refuse-selftest "$py" "$canref" --selftest; then
-        moved_gate_refuses 54 "gates can refuse" ALLOW_GATES_CAN_REFUSE \
+        moved_gate_refuses 55 "gates can refuse" ALLOW_GATES_CAN_REFUSE \
             "check-gates-can-refuse.py failed its own self-test, so its verdict on this push would not be trustworthy."
     fi
     if ! run_checker check-gates-can-refuse "$py" "$canref"; then
-        moved_gate_refuses 54 "gates can refuse" ALLOW_GATES_CAN_REFUSE "Every gate must be able to exit non-zero when run the way it is run. A gate
+        moved_gate_refuses 55 "gates can refuse" ALLOW_GATES_CAN_REFUSE "Every gate must be able to exit non-zero when run the way it is run. A gate
 that cannot fail enforces nothing, however thoroughly it detects."
     fi
 fi
 
 # ---------------------------------------------------------------------------
-# Gate 55 -- gates are wired.
+# Gate 56 -- gates are wired.
 # Every gate must be run by the boot test or this hook, or pinned with a reason,
 # and every self-test that exists must be run. A gate nothing runs enforces
 # nothing.
@@ -6274,18 +6399,18 @@ fi
 note_gate check-gates-are-wired "$skip_wired"
 if [ "$skip_wired" != "1" ]; then
     if ! run_checker check-gates-are-wired-selftest "$py" "$wired" --selftest; then
-        moved_gate_refuses 55 "gates are wired" ALLOW_GATES_ARE_WIRED \
+        moved_gate_refuses 56 "gates are wired" ALLOW_GATES_ARE_WIRED \
             "check-gates-are-wired.py failed its own self-test, so its verdict on this push would not be trustworthy."
     fi
     if ! run_checker check-gates-are-wired "$py" "$wired"; then
-        moved_gate_refuses 55 "gates are wired" ALLOW_GATES_ARE_WIRED "Every gate must be run by the boot test or this hook, or pinned with a reason,
+        moved_gate_refuses 56 "gates are wired" ALLOW_GATES_ARE_WIRED "Every gate must be run by the boot test or this hook, or pinned with a reason,
 and every self-test that exists must be run. A gate nothing runs enforces
 nothing."
     fi
 fi
 
 # ---------------------------------------------------------------------------
-# Gate 56 -- mutation needles.
+# Gate 57 -- mutation needles.
 # Every needle in a gate's mutation table must still quote text in that gate.
 # A needle that matches nothing mutates nothing, and the row passes while
 # testing nothing.
@@ -6306,18 +6431,18 @@ fi
 note_gate check-mutation-needles "$skip_needles"
 if [ "$skip_needles" != "1" ]; then
     if ! run_checker check-mutation-needles-selftest "$py" "$needles" --self-test; then
-        moved_gate_refuses 56 "mutation needles" ALLOW_MUTATION_NEEDLES \
+        moved_gate_refuses 57 "mutation needles" ALLOW_MUTATION_NEEDLES \
             "check-mutation-needles.py failed its own self-test, so its verdict on this push would not be trustworthy."
     fi
     if ! run_checker check-mutation-needles "$py" "$needles"; then
-        moved_gate_refuses 56 "mutation needles" ALLOW_MUTATION_NEEDLES "Every needle in a gate's mutation table must still quote text in that gate.
+        moved_gate_refuses 57 "mutation needles" ALLOW_MUTATION_NEEDLES "Every needle in a gate's mutation table must still quote text in that gate.
 A needle that matches nothing mutates nothing, and the row passes while
 testing nothing."
     fi
 fi
 
 # ---------------------------------------------------------------------------
-# Gate 57 -- user-access sites.
+# Gate 58 -- user-access sites.
 # Kernel writes to user memory must stay inside the audited copy helpers. A
 # new site elsewhere is a write the fault handling was never reviewed for.
 #
@@ -6337,17 +6462,17 @@ fi
 note_gate check-user-access-sites "$skip_uaccess"
 if [ "$skip_uaccess" != "1" ]; then
     if ! run_checker check-user-access-sites-selftest "$py" "$uaccess" --self-test; then
-        moved_gate_refuses 57 "user-access sites" ALLOW_USER_ACCESS_SITES \
+        moved_gate_refuses 58 "user-access sites" ALLOW_USER_ACCESS_SITES \
             "check-user-access-sites.py failed its own self-test, so its verdict on this push would not be trustworthy."
     fi
     if ! run_checker check-user-access-sites "$py" "$uaccess"; then
-        moved_gate_refuses 57 "user-access sites" ALLOW_USER_ACCESS_SITES "Kernel writes to user memory must stay inside the audited copy helpers. A
+        moved_gate_refuses 58 "user-access sites" ALLOW_USER_ACCESS_SITES "Kernel writes to user memory must stay inside the audited copy helpers. A
 new site elsewhere is a write the fault handling was never reviewed for."
     fi
 fi
 
 # ---------------------------------------------------------------------------
-# Gate 58 -- Linux-only capabilities.
+# Gate 59 -- Linux-only capabilities.
 # No kernel capability may be reachable only through the Linux-ABI table. A
 # native program must be able to reach everything a Linux one can.
 #
@@ -6367,17 +6492,17 @@ fi
 note_gate check-linux-only-capabilities "$skip_linuxonly"
 if [ "$skip_linuxonly" != "1" ]; then
     if ! run_checker check-linux-only-capabilities-selftest "$py" "$linuxonly" --self-test; then
-        moved_gate_refuses 58 "Linux-only capabilities" ALLOW_LINUX_ONLY_CAPS \
+        moved_gate_refuses 59 "Linux-only capabilities" ALLOW_LINUX_ONLY_CAPS \
             "check-linux-only-capabilities.py failed its own self-test, so its verdict on this push would not be trustworthy."
     fi
     if ! run_checker check-linux-only-capabilities "$py" "$linuxonly"; then
-        moved_gate_refuses 58 "Linux-only capabilities" ALLOW_LINUX_ONLY_CAPS "No kernel capability may be reachable only through the Linux-ABI table. A
+        moved_gate_refuses 59 "Linux-only capabilities" ALLOW_LINUX_ONLY_CAPS "No kernel capability may be reachable only through the Linux-ABI table. A
 native program must be able to reach everything a Linux one can."
     fi
 fi
 
 # ---------------------------------------------------------------------------
-# Gate 59 -- usage names reach the command.
+# Gate 60 -- usage names reach the command.
 # A kshell usage line must name a command the shell can actually reach.
 #
 # Bypass: ALLOW_USAGE_NAMES=1 git push origin <branch>
@@ -6396,16 +6521,16 @@ fi
 note_gate check-usage-names "$skip_usagenames"
 if [ "$skip_usagenames" != "1" ]; then
     if ! run_checker check-usage-names-selftest "$py" "$usagenames" --self-test; then
-        moved_gate_refuses 59 "usage names reach the command" ALLOW_USAGE_NAMES \
+        moved_gate_refuses 60 "usage names reach the command" ALLOW_USAGE_NAMES \
             "check-usage-names-reach-the-command.py failed its own self-test, so its verdict on this push would not be trustworthy."
     fi
     if ! run_checker check-usage-names "$py" "$usagenames"; then
-        moved_gate_refuses 59 "usage names reach the command" ALLOW_USAGE_NAMES "A kshell usage line must name a command the shell can actually reach."
+        moved_gate_refuses 60 "usage names reach the command" ALLOW_USAGE_NAMES "A kshell usage line must name a command the shell can actually reach."
     fi
 fi
 
 # ---------------------------------------------------------------------------
-# Gate 60 -- refusals refuse.
+# Gate 61 -- refusals refuse.
 # A shell block that announces a refusal must reach a non-zero exit. A gate
 # that prints REFUSING and then returns success refuses nothing.
 #
@@ -6425,17 +6550,17 @@ fi
 note_gate check-refusals-refuse "$skip_refrefuse"
 if [ "$skip_refrefuse" != "1" ]; then
     if ! run_checker check-refusals-refuse-selftest "$py" "$refrefuse" --self-test; then
-        moved_gate_refuses 60 "refusals refuse" ALLOW_REFUSALS_REFUSE \
+        moved_gate_refuses 61 "refusals refuse" ALLOW_REFUSALS_REFUSE \
             "check-refusals-refuse.py failed its own self-test, so its verdict on this push would not be trustworthy."
     fi
     if ! run_checker check-refusals-refuse "$py" "$refrefuse"; then
-        moved_gate_refuses 60 "refusals refuse" ALLOW_REFUSALS_REFUSE "A shell block that announces a refusal must reach a non-zero exit. A gate
+        moved_gate_refuses 61 "refusals refuse" ALLOW_REFUSALS_REFUSE "A shell block that announces a refusal must reach a non-zero exit. A gate
 that prints REFUSING and then returns success refuses nothing."
     fi
 fi
 
 # ---------------------------------------------------------------------------
-# Gate 61 -- usage messages report failure.
+# Gate 62 -- usage messages report failure.
 # A kshell usage message must report failure. A command that prints its usage
 # and says it succeeded tells a script it did what it was asked.
 #
@@ -6457,16 +6582,16 @@ fi
 note_gate check-usage-status "$skip_usagestat"
 if [ "$skip_usagestat" != "1" ]; then
     if ! run_checker check-usage-status-selftest "$py" "$usagestat" --self-test; then
-        moved_gate_refuses 61 "usage messages report failure" ALLOW_USAGE_STATUS             "check-usage-status.py failed its own self-test, so its verdict on this push would not be trustworthy."
+        moved_gate_refuses 62 "usage messages report failure" ALLOW_USAGE_STATUS             "check-usage-status.py failed its own self-test, so its verdict on this push would not be trustworthy."
     fi
     if ! run_checker check-usage-status "$py" "$usagestat"; then
-        moved_gate_refuses 61 "usage messages report failure" ALLOW_USAGE_STATUS "A kshell usage message must report failure. A command that prints its usage
+        moved_gate_refuses 62 "usage messages report failure" ALLOW_USAGE_STATUS "A kshell usage message must report failure. A command that prints its usage
 and says it succeeded tells a script it did what it was asked."
     fi
 fi
 
 # ---------------------------------------------------------------------------
-# Gate 62 -- queries report success.
+# Gate 63 -- queries report success.
 # A kshell command that answers the question it was asked must report success.
 #
 # Bypass: ALLOW_QUERY_STATUS=1 git push origin <branch>
@@ -6487,15 +6612,15 @@ fi
 note_gate check-query-status "$skip_querystat"
 if [ "$skip_querystat" != "1" ]; then
     if ! run_checker check-query-status-selftest "$py" "$querystat" --self-test; then
-        moved_gate_refuses 62 "queries report success" ALLOW_QUERY_STATUS             "check-query-status.py failed its own self-test, so its verdict on this push would not be trustworthy."
+        moved_gate_refuses 63 "queries report success" ALLOW_QUERY_STATUS             "check-query-status.py failed its own self-test, so its verdict on this push would not be trustworthy."
     fi
     if ! run_checker check-query-status "$py" "$querystat"; then
-        moved_gate_refuses 62 "queries report success" ALLOW_QUERY_STATUS "A kshell command that answers the question it was asked must report success."
+        moved_gate_refuses 63 "queries report success" ALLOW_QUERY_STATUS "A kshell command that answers the question it was asked must report success."
     fi
 fi
 
 # ---------------------------------------------------------------------------
-# Gate 63 -- self-test rung numbers.
+# Gate 64 -- self-test rung numbers.
 # Kernel self-test rungs are numbered uniquely and in order, with no gaps. The
 # boot test's evidence names rungs by number.
 #
@@ -6515,17 +6640,17 @@ fi
 note_gate check-selftest-rung-numbers "$skip_rungnums"
 if [ "$skip_rungnums" != "1" ]; then
     if ! run_checker check-selftest-rung-numbers-selftest "$py" "$rungnums" --self-test; then
-        moved_gate_refuses 63 "self-test rung numbers" ALLOW_SELFTEST_RUNG_NUMBERS \
+        moved_gate_refuses 64 "self-test rung numbers" ALLOW_SELFTEST_RUNG_NUMBERS \
             "check-selftest-rung-numbers.py failed its own self-test, so its verdict on this push would not be trustworthy."
     fi
     if ! run_checker check-selftest-rung-numbers "$py" "$rungnums"; then
-        moved_gate_refuses 63 "self-test rung numbers" ALLOW_SELFTEST_RUNG_NUMBERS "Kernel self-test rungs are numbered uniquely and in order, with no gaps. The
+        moved_gate_refuses 64 "self-test rung numbers" ALLOW_SELFTEST_RUNG_NUMBERS "Kernel self-test rungs are numbered uniquely and in order, with no gaps. The
 boot test's evidence names rungs by number."
     fi
 fi
 
 # ---------------------------------------------------------------------------
-# Gate 64 -- shell message names.
+# Gate 65 -- shell message names.
 # A kshell diagnostic must name the command it actually came from.
 #
 # Bypass: ALLOW_SHELL_MESSAGE_NAMES=1 git push origin <branch>
@@ -6544,16 +6669,16 @@ fi
 note_gate check-shell-message-names "$skip_msgnames"
 if [ "$skip_msgnames" != "1" ]; then
     if ! run_checker check-shell-message-names-selftest "$py" "$msgnames" --self-test; then
-        moved_gate_refuses 64 "shell message names" ALLOW_SHELL_MESSAGE_NAMES \
+        moved_gate_refuses 65 "shell message names" ALLOW_SHELL_MESSAGE_NAMES \
             "check-shell-message-names.py failed its own self-test, so its verdict on this push would not be trustworthy."
     fi
     if ! run_checker check-shell-message-names "$py" "$msgnames"; then
-        moved_gate_refuses 64 "shell message names" ALLOW_SHELL_MESSAGE_NAMES "A kshell diagnostic must name the command it actually came from."
+        moved_gate_refuses 65 "shell message names" ALLOW_SHELL_MESSAGE_NAMES "A kshell diagnostic must name the command it actually came from."
     fi
 fi
 
 # ---------------------------------------------------------------------------
-# Gate 65 -- shell noun articles.
+# Gate 66 -- shell noun articles.
 # An operand noun whose article English picks by sound must state the spelling
 # that decides it.
 #
@@ -6573,17 +6698,17 @@ fi
 note_gate check-shell-noun-article "$skip_nounart"
 if [ "$skip_nounart" != "1" ]; then
     if ! run_checker check-shell-noun-article-selftest "$py" "$nounart" --self-test; then
-        moved_gate_refuses 65 "shell noun articles" ALLOW_SHELL_NOUN_ARTICLE \
+        moved_gate_refuses 66 "shell noun articles" ALLOW_SHELL_NOUN_ARTICLE \
             "check-shell-noun-article.py failed its own self-test, so its verdict on this push would not be trustworthy."
     fi
     if ! run_checker check-shell-noun-article "$py" "$nounart"; then
-        moved_gate_refuses 65 "shell noun articles" ALLOW_SHELL_NOUN_ARTICLE "An operand noun whose article English picks by sound must state the spelling
+        moved_gate_refuses 66 "shell noun articles" ALLOW_SHELL_NOUN_ARTICLE "An operand noun whose article English picks by sound must state the spelling
 that decides it."
     fi
 fi
 
 # ---------------------------------------------------------------------------
-# Gate 66 -- identity-rung gate.
+# Gate 67 -- identity-rung gate.
 # boot-test.sh's identity-rung gate must still fire on the case it exists for.
 #
 # Bypass: ALLOW_IDENTITY_RUNG_GATE=1 git push origin <branch>
@@ -6602,12 +6727,12 @@ fi
 note_gate identity-rung-gate-selftest "$skip_idrung"
 if [ "$skip_idrung" != "1" ]; then
     if ! run_checker identity-rung-gate-selftest "$py" "$idrung"; then
-        moved_gate_refuses 66 "identity-rung gate" ALLOW_IDENTITY_RUNG_GATE "boot-test.sh's identity-rung gate must still fire on the case it exists for."
+        moved_gate_refuses 67 "identity-rung gate" ALLOW_IDENTITY_RUNG_GATE "boot-test.sh's identity-rung gate must still fire on the case it exists for."
     fi
 fi
 
 # ---------------------------------------------------------------------------
-# Gate 67 -- ring-3 entry registers.
+# Gate 68 -- ring-3 entry registers.
 # Every transition to ring 3 must define the argument registers it hands the
 # program. An undefined one leaks kernel state into user space.
 #
@@ -6627,21 +6752,21 @@ fi
 note_gate ring3-entry-regs "$skip_r3regs"
 if [ "$skip_r3regs" != "1" ]; then
     if ! run_checker ring3-entry-regs-selftest "$py" "$r3regs" --self-test; then
-        moved_gate_refuses 67 "ring-3 entry registers" ALLOW_RING3_ENTRY_REGS \
+        moved_gate_refuses 68 "ring-3 entry registers" ALLOW_RING3_ENTRY_REGS \
             "check-ring3-entry-regs.py failed its own self-test, so its verdict on this push would not be trustworthy."
     fi
     if ! run_checker ring3-entry-regs "$py" "$r3regs" "$PROJECT_ROOT/kernel/src"; then
-        moved_gate_refuses 67 "ring-3 entry registers" ALLOW_RING3_ENTRY_REGS "Every transition to ring 3 must define the argument registers it hands the
+        moved_gate_refuses 68 "ring-3 entry registers" ALLOW_RING3_ENTRY_REGS "Every transition to ring 3 must define the argument registers it hands the
 program. An undefined one leaks kernel state into user space."
     fi
 fi
 
 # ---------------------------------------------------------------------------
-# Gate 68 -- script index.
+# Gate 69 -- script index.
 # scripts/INDEX.md must match the scripts. Regenerate it:
 #     python scripts/gen-script-index.py
 # A new script directly in scripts/ also needs its line in your lane's block of
-# SCRIPT_OWNERS in scripts/which-lane.py (gate 74).
+# SCRIPT_OWNERS in scripts/which-lane.py (gate 75).
 #
 # Bypass: ALLOW_SCRIPT_INDEX=1 git push origin <branch>
 # ---------------------------------------------------------------------------
@@ -6659,19 +6784,19 @@ fi
 note_gate script-index "$skip_scindex"
 if [ "$skip_scindex" != "1" ]; then
     if ! run_checker script-index-selftest "$py" "$scindex" --self-test; then
-        moved_gate_refuses 68 "script index" ALLOW_SCRIPT_INDEX \
+        moved_gate_refuses 69 "script index" ALLOW_SCRIPT_INDEX \
             "gen-script-index.py failed its own self-test, so its verdict on this push would not be trustworthy."
     fi
     if ! run_checker script-index "$py" "$scindex" --check; then
-        moved_gate_refuses 68 "script index" ALLOW_SCRIPT_INDEX "scripts/INDEX.md must match the scripts. Regenerate it:
+        moved_gate_refuses 69 "script index" ALLOW_SCRIPT_INDEX "scripts/INDEX.md must match the scripts. Regenerate it:
     python scripts/gen-script-index.py
 A new script directly in scripts/ also needs its line in your lane's block of
-SCRIPT_OWNERS in scripts/which-lane.py (gate 74)."
+SCRIPT_OWNERS in scripts/which-lane.py (gate 75)."
     fi
 fi
 
 # ---------------------------------------------------------------------------
-# Gate 69 -- foreign worktree paths.
+# Gate 70 -- foreign worktree paths.
 # No executable script may hardcode an absolute path to a lane worktree. It
 # runs against another lane's tree from whichever worktree it is invoked in.
 #
@@ -6691,17 +6816,17 @@ fi
 note_gate foreign-worktree "$skip_foreignwt"
 if [ "$skip_foreignwt" != "1" ]; then
     if ! run_checker foreign-worktree-selftest "$py" "$foreignwt" --self-test; then
-        moved_gate_refuses 69 "foreign worktree paths" ALLOW_FOREIGN_WORKTREE_PATHS \
+        moved_gate_refuses 70 "foreign worktree paths" ALLOW_FOREIGN_WORKTREE_PATHS \
             "check-foreign-worktree-paths.py failed its own self-test, so its verdict on this push would not be trustworthy."
     fi
     if ! run_checker foreign-worktree "$py" "$foreignwt"; then
-        moved_gate_refuses 69 "foreign worktree paths" ALLOW_FOREIGN_WORKTREE_PATHS "No executable script may hardcode an absolute path to a lane worktree. It
+        moved_gate_refuses 70 "foreign worktree paths" ALLOW_FOREIGN_WORKTREE_PATHS "No executable script may hardcode an absolute path to a lane worktree. It
 runs against another lane's tree from whichever worktree it is invoked in."
     fi
 fi
 
 # ---------------------------------------------------------------------------
-# Gate 70 -- frame needles.
+# Gate 71 -- frame needles.
 # A whole-frame text assertion in an app's tests must be scoped to the band it
 # names (lesson 91), or it passes on text drawn anywhere in the window.
 #
@@ -6721,13 +6846,13 @@ fi
 note_gate check-frame-needles "$skip_frneedles"
 if [ "$skip_frneedles" != "1" ]; then
     if ! run_checker check-frame-needles "$py" "$frneedles"; then
-        moved_gate_refuses 70 "frame needles" ALLOW_FRAME_NEEDLES "A whole-frame text assertion in an app's tests must be scoped to the band it
+        moved_gate_refuses 71 "frame needles" ALLOW_FRAME_NEEDLES "A whole-frame text assertion in an app's tests must be scoped to the band it
 names (lesson 91), or it passes on text drawn anywhere in the window."
     fi
 fi
 
 # ---------------------------------------------------------------------------
-# Gate 71 -- generated tables.
+# Gate 72 -- generated tables.
 # The generated tables checked in under gui/font must match their generators.
 # Regenerate them rather than editing a table by hand.
 #
@@ -6747,13 +6872,13 @@ fi
 note_gate check-generated-tables "$skip_gentables"
 if [ "$skip_gentables" != "1" ]; then
     if ! run_checker check-generated-tables "$py" "$gentables"; then
-        moved_gate_refuses 71 "generated tables" ALLOW_GENERATED_TABLES "The generated tables checked in under gui/font must match their generators.
+        moved_gate_refuses 72 "generated tables" ALLOW_GENERATED_TABLES "The generated tables checked in under gui/font must match their generators.
 Regenerate them rather than editing a table by hand."
     fi
 fi
 
 # ---------------------------------------------------------------------------
-# Gate 72 -- diskcleanup test roots.
+# Gate 73 -- diskcleanup test roots.
 # apps/diskcleanup's own tests must not point at the host's real directories.
 # A cleanup tool's test that walks the real disk can delete real files.
 #
@@ -6773,17 +6898,17 @@ fi
 note_gate check-diskcleanup-test-roots "$skip_dcroots"
 if [ "$skip_dcroots" != "1" ]; then
     if ! run_checker check-diskcleanup-test-roots-selftest "$py" "$dcroots" --self-test; then
-        moved_gate_refuses 72 "diskcleanup test roots" ALLOW_DISKCLEANUP_TEST_ROOTS \
+        moved_gate_refuses 73 "diskcleanup test roots" ALLOW_DISKCLEANUP_TEST_ROOTS \
             "check-diskcleanup-test-roots.py failed its own self-test, so its verdict on this push would not be trustworthy."
     fi
     if ! run_checker check-diskcleanup-test-roots "$py" "$dcroots"; then
-        moved_gate_refuses 72 "diskcleanup test roots" ALLOW_DISKCLEANUP_TEST_ROOTS "apps/diskcleanup's own tests must not point at the host's real directories.
+        moved_gate_refuses 73 "diskcleanup test roots" ALLOW_DISKCLEANUP_TEST_ROOTS "apps/diskcleanup's own tests must not point at the host's real directories.
 A cleanup tool's test that walks the real disk can delete real files."
     fi
 fi
 
 # ---------------------------------------------------------------------------
-# Gate 73 -- self-test tables re-opened.
+# Gate 74 -- self-test tables re-opened.
 # A kernel self-test that clears a /proc table must re-open it before it
 # returns, or every later reader sees the table empty.
 #
@@ -6803,11 +6928,11 @@ fi
 note_gate check-selftest-reinit "$skip_reinit"
 if [ "$skip_reinit" != "1" ]; then
     if ! run_checker check-selftest-reinit-selftest "$py" -u "$reinit" --self-test; then
-        moved_gate_refuses 73 "self-test tables re-opened" ALLOW_SELFTEST_REINIT \
+        moved_gate_refuses 74 "self-test tables re-opened" ALLOW_SELFTEST_REINIT \
             "check-selftest-reinit.py failed its own self-test, so its verdict on this push would not be trustworthy."
     fi
     if ! run_checker check-selftest-reinit "$py" -u "$reinit"; then
-        moved_gate_refuses 73 "self-test tables re-opened" ALLOW_SELFTEST_REINIT "A kernel self-test that clears a /proc table must re-open it before it
+        moved_gate_refuses 74 "self-test tables re-opened" ALLOW_SELFTEST_REINIT "A kernel self-test that clears a /proc table must re-open it before it
 returns, or every later reader sees the table empty."
     fi
 fi

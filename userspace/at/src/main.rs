@@ -432,7 +432,8 @@ fn parse_timespec(spec: &str, now_epoch: i64) -> Result<i64, Error> {
     }
 
     Err(Error::TimeParse(format!(
-        "cannot parse time specification: '{spec}'"
+        "cannot parse time specification: {}",
+        quoteaf_os(spec)
     )))
 }
 
@@ -556,8 +557,8 @@ fn parse_relative_offset(now_epoch: i64, tokens: &[&str]) -> Result<i64, Error> 
         "week" | "wk" => n * SECS_PER_DAY * 7,
         _ => {
             return Err(Error::TimeParse(format!(
-                "unknown time unit: '{}' (expected minutes, hours, days, or weeks)",
-                tokens[1]
+                "unknown time unit: {} (expected minutes, hours, days, or weeks)",
+                quoteaf_os(tokens[1])
             )));
         }
     };
@@ -585,7 +586,8 @@ fn parse_next(now_epoch: i64, unit: &str) -> Result<i64, Error> {
             datetime_to_epoch(&dt).map_err(Error::TimeParse)
         }
         _ => Err(Error::TimeParse(format!(
-            "unknown unit after 'next': '{unit}' (expected 'week' or 'month')"
+            "unknown unit after 'next': {} (expected 'week' or 'month')",
+            quoteaf_os(unit)
         ))),
     }
 }
@@ -1258,8 +1260,8 @@ fn parse_args() -> Result<Args, Error> {
                 let q = argv[i + 1].trim();
                 if q.len() != 1 || !q.as_bytes()[0].is_ascii_lowercase() {
                     return Err(Error::Usage(format!(
-                        "invalid queue letter: '{}' (must be a-z)",
-                        argv[i + 1]
+                        "invalid queue letter: {} (must be a-z)",
+                        quoteaf_os(&argv[i + 1])
                     )));
                 }
                 queue = q.as_bytes()[0] as char;

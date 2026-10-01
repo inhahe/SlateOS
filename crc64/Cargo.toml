@@ -1,0 +1,14 @@
+[package]
+name = "crc64"
+version = "0.1.0"
+edition = "2024"
+description = "CRC-64 over the ECMA-182 polynomial: CRC-64/WE and CRC-64/ECMA-182, checked against the standard check values."
+
+[lib]
+path = "src/lib.rs"
+
+# `no_std` with no `alloc`, like `crc32` and `crc32c`.
+[dependencies]
+
+[lints]
+workspace = true

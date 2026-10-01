@@ -92,7 +92,7 @@
 //! difference in output. They are logged in `known-issues.md` as
 //! `B-STRINGS-HAS-NO-OBJECT-FILE-READER`.
 
-use coreutils::getopt::{self, Opt, Program, Takes};
+use coreutils::getopt::{self, Opt, Program, Report, Takes};
 use coreutils::quote::os_bytes;
 use coreutils::stdfd::{self, Stream};
 use std::ffi::OsString;

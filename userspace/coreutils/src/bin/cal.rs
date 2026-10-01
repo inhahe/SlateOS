@@ -119,9 +119,10 @@ use std::io::Write as _;
 use std::process::ExitCode;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use coreutils::getopt::{Error, Opt, Program, Takes};
+use coreutils::getopt::{Error, Opt, Program, Report, Takes};
 use coreutils::quote::{escape_unprintable, os_bytes, quoteaf_os};
 use coreutils::stdfd::{self, Stream};
+use ulstrutils::{NumErr, c_isspace, parse_size, scan_integer, ul_strtos64, ul_strtou64};
 
 // ------------------------------------------------------------- the tables ---
 
@@ -520,35 +521,36 @@ struct BrokenDown {
     wday: i32,
 }
 
-/// `mktime` for a [`Zone`](localtime::Zone): civil local time to epoch seconds.
+/// glibc's `mktime` ([`localtime::Zone::mktime`]) on `cal`'s own
+/// [`BrokenDown`], with `tm_isdst` -1 as util-linux's `parse_timestamp` sets
+/// it -- so a skipped or repeated hour resolves as it does upstream, from the
+/// same process-wide offset guess. `None` where `mktime` fails, and where a
+/// field does not fit the `int` it is in C.
 ///
-/// The arithmetic moved to [`localtime::Zone::epoch`] on 2026-09-14 — this is
-/// now the adapter between it and `cal`'s own [`BrokenDown`], which carries a
-/// `wday` that `localtime::Civil` has no use for. The comment that stood here
-/// said "there is no inverse of `Zone::local` in the `localtime` crate, so this
-/// is it"; there is one now, and it is shared rather than being the fourth
-/// private copy of `days_from_civil` in this tree.
-fn mktime(zone: &localtime::Zone, tm: &mut BrokenDown) -> i64 {
-    let (t, resolved) = zone.epoch(&localtime::Civil {
-        year: tm.year,
-        month: tm.month,
-        day: tm.day,
-        hour: tm.hour,
-        minute: tm.minute,
-        second: tm.second,
-    });
-
-    // Write the normalised civil fields back, the way `mktime` does, so that the
-    // weekday check in `parse_timestamp` sees the resolved date rather than the
-    // one that was typed.
-    tm.year = resolved.year;
-    tm.month = i64::from(resolved.month);
-    tm.day = i64::from(resolved.day);
-    tm.hour = i64::from(resolved.hour);
-    tm.minute = i64::from(resolved.minute);
-    tm.second = i64::from(resolved.second);
-    tm.wday = i32::try_from(resolved.wday).unwrap_or(0);
-    t
+/// The normalised fields are written back, as `mktime` writes them, so the
+/// weekday check in `parse_timestamp` sees the resolved date rather than the
+/// one that was typed.
+fn mktime(zone: &localtime::Zone, tm: &mut BrokenDown) -> Option<i64> {
+    let mut stm = localtime::StructTm {
+        tm_sec: i32::try_from(tm.second).ok()?,
+        tm_min: i32::try_from(tm.minute).ok()?,
+        tm_hour: i32::try_from(tm.hour).ok()?,
+        tm_mday: i32::try_from(tm.day).ok()?,
+        tm_mon: i32::try_from(tm.month.checked_sub(1)?).ok()?,
+        tm_year: i32::try_from(tm.year.checked_sub(1900)?).ok()?,
+        tm_wday: -1,
+        tm_isdst: -1,
+        ..localtime::StructTm::default()
+    };
+    let t = zone.mktime(&mut stm)?;
+    tm.year = i64::from(stm.tm_year).saturating_add(1900);
+    tm.month = i64::from(stm.tm_mon).saturating_add(1);
+    tm.day = i64::from(stm.tm_mday);
+    tm.hour = i64::from(stm.tm_hour);
+    tm.minute = i64::from(stm.tm_min);
+    tm.second = i64::from(stm.tm_sec);
+    tm.wday = stm.tm_wday;
+    Some(t)
 }
 
 // ------------------------------------------------------- numbers, as C's ---
@@ -568,177 +570,13 @@ fn shown(s: &OsStr) -> String {
     escape_unprintable(&os_bytes(s))
 }
 
-/// What went wrong in a C string-to-number conversion, which is `errno` and is
-/// observable: `ERANGE` reaches the user through `err()` and so carries
-/// `: Numerical result out of range`, while `EINVAL` reaches it through
-/// `errx()` and carries nothing.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-enum NumErr {
-    Invalid,
-    Range,
-}
-
-impl NumErr {
-    /// `strerror` for the two values that get here.
-    fn strerror(self) -> &'static str {
-        match self {
-            NumErr::Invalid => "Invalid argument",
-            NumErr::Range => "Numerical result out of range",
-        }
-    }
-}
-
-fn c_isspace(b: u8) -> bool {
-    matches!(b, b' ' | b'\t' | b'\n' | 0x0b | 0x0c | b'\r')
-}
-
-/// The sign, magnitude and end index of a C integer conversion.
-///
-/// `magnitude` saturates rather than wrapping, and `saturated` says which
-/// happened, because that is the difference between a value and `ERANGE`.
-struct Scanned {
-    negative: bool,
-    magnitude: u128,
-    saturated: bool,
-    /// Index one past the last digit — C's `endptr`.
-    end: usize,
-}
-
-/// The digit-scanning half of `strtoimax`/`strtoumax`, shared by both.
-///
-/// `base` is 10 or 0; 0 means C's "guess from the prefix" rule, which
-/// [`parse_size`] relies on and which is why `cal -c 010` is eight columns.
-/// Returns `None` for "no conversion performed", where C leaves `endptr` equal
-/// to the input.
-fn scan_integer(s: &[u8], base: u32) -> Option<Scanned> {
-    let mut i = 0usize;
-    while s.get(i).copied().is_some_and(c_isspace) {
-        i += 1;
-    }
-    let mut negative = false;
-    if let Some(&c) = s.get(i)
-        && (c == b'+' || c == b'-')
-    {
-        negative = c == b'-';
-        i += 1;
-    }
-
-    let mut radix = base;
-    if radix == 0 {
-        if s.get(i) == Some(&b'0') {
-            match s.get(i + 1) {
-                Some(&b'x' | &b'X') if s.get(i + 2).is_some_and(u8::is_ascii_hexdigit) => {
-                    radix = 16;
-                    i += 2;
-                }
-                _ => radix = 8,
-            }
-        } else {
-            radix = 10;
-        }
-    } else if radix == 16 && s.get(i) == Some(&b'0') && matches!(s.get(i + 1), Some(&b'x' | &b'X'))
-    {
-        i += 2;
-    }
-
-    let digits_start = i;
-    // Above `SATURATE` the value cannot be represented in any type this program
-    // converts to, so accumulation stops and only the flag matters.
-    const SATURATE: u128 = 1 << 100;
-    let mut magnitude: u128 = 0;
-    let mut saturated = false;
-    while let Some(&c) = s.get(i) {
-        let Some(d) = (c as char).to_digit(radix) else {
-            break;
-        };
-        if !saturated {
-            magnitude = magnitude * u128::from(radix) + u128::from(d);
-            if magnitude > SATURATE {
-                saturated = true;
-            }
-        }
-        i += 1;
-    }
-    if i == digits_start {
-        return None;
-    }
-    Some(Scanned {
-        negative,
-        magnitude,
-        saturated,
-        end: i,
-    })
-}
-
-/// `ul_strtos64(str, &num, 10)` from `lib/strutils.c`.
-///
-/// The three refusals are C's, in C's order: an empty string is `EINVAL`;
-/// `strtoimax` overflowing is `ERANGE`; and anything left over after the digits
-/// — including nothing having been converted at all — is `EINVAL`.
-fn ul_strtos64(s: &[u8]) -> Result<i64, NumErr> {
-    if s.is_empty() {
-        return Err(NumErr::Invalid);
-    }
-    let Some(sc) = scan_integer(s, 10) else {
-        return Err(NumErr::Invalid);
-    };
-    let limit = if sc.negative {
-        u128::from(i64::MAX.unsigned_abs()) + 1
-    } else {
-        u128::from(i64::MAX.unsigned_abs())
-    };
-    if sc.saturated || sc.magnitude > limit {
-        return Err(NumErr::Range);
-    }
-    if sc.end != s.len() {
-        return Err(NumErr::Invalid);
-    }
-    // `magnitude` is at most `i64::MAX + 1`, so both branches are exact in
-    // `i128` and only the negative one can reach `i64::MIN`.
-    let magnitude = i128::try_from(sc.magnitude).map_err(|_| NumErr::Range)?;
-    let value = if sc.negative { -magnitude } else { magnitude };
-    i64::try_from(value).map_err(|_| NumErr::Range)
-}
-
-/// `ul_strtou64(str, &num, 10)`.
-///
-/// The odd shape is upstream's: it runs `strtoimax` first purely to reject a
-/// leading `-`, then *clears* `errno` and re-runs `strtoumax`, which is why
-/// `-n 10000000000000000000` is a range error from the bound check rather than
-/// from the first conversion.
-fn ul_strtou64(s: &[u8]) -> Result<u64, NumErr> {
-    if s.is_empty() {
-        return Err(NumErr::Invalid);
-    }
-    let Some(sc) = scan_integer(s, 10) else {
-        return Err(NumErr::Invalid);
-    };
-    if sc.negative && (sc.saturated || sc.magnitude != 0) {
-        return Err(NumErr::Range);
-    }
-    if sc.saturated || sc.magnitude > u128::from(u64::MAX) {
-        return Err(NumErr::Range);
-    }
-    if sc.end != s.len() {
-        return Err(NumErr::Invalid);
-    }
-    u64::try_from(sc.magnitude).map_err(|_| NumErr::Range)
-}
-
 /// The message `str2num_or_err` produces for a failed conversion.
 ///
 /// It ends `goto err`, and `err:` chooses between `err()` and `errx()` on
 /// `errno == ERANGE` — so only the range case carries a `strerror`. Compare
 /// [`size_error`], which is the same sentence with the opposite rule.
 fn num_error(msg: &str, arg: &OsStr, e: NumErr) -> Error {
-    match e {
-        NumErr::Invalid => fail(format!("{msg}: {}", quoteaf_os(arg))),
-        NumErr::Range => fail(format!(
-            "{msg}: '{}': {}",
-            shown(arg),
-            NumErr::Range.strerror()
-        )),
-    }
+    fail(ulstrutils::num_error_message(msg, arg, e))
 }
 
 /// The message `strtosize_or_err` produces for a failed conversion.
@@ -749,7 +587,7 @@ fn num_error(msg: &str, arg: &OsStr, e: NumErr) -> Error {
 /// two sentences are otherwise identical, which is why the difference is worth
 /// a function of its own rather than a flag.
 fn size_error(msg: &str, arg: &OsStr, e: NumErr) -> Error {
-    fail(format!("{msg}: {}: {}", quoteaf_os(arg), e.strerror()))
+    fail(ulstrutils::size_error_message(msg, arg, e))
 }
 
 /// `str2num_or_err`, of which `strtos32_or_err` is the `INT32_MIN..=INT32_MAX`
@@ -760,7 +598,7 @@ fn size_error(msg: &str, arg: &OsStr, e: NumErr) -> Error {
 /// still says `Numerical result out of range`.
 fn strtos32_or_err(arg: &OsStr, msg: &str) -> Result<i32, Error> {
     let bytes = os_bytes(arg);
-    match ul_strtos64(&bytes) {
+    match ul_strtos64(&bytes, 10) {
         Ok(n) => i32::try_from(n).map_err(|_| num_error(msg, arg, NumErr::Range)),
         Err(e) => Err(num_error(msg, arg, e)),
     }
@@ -770,156 +608,10 @@ fn strtos32_or_err(arg: &OsStr, msg: &str) -> Result<i32, Error> {
 /// `-n` handler, so `-n 4294967295` becomes `-1` months and prints nothing.
 fn strtou32_or_err(arg: &OsStr, msg: &str) -> Result<u32, Error> {
     let bytes = os_bytes(arg);
-    match ul_strtou64(&bytes) {
+    match ul_strtou64(&bytes, 10) {
         Ok(n) => u32::try_from(n).map_err(|_| num_error(msg, arg, NumErr::Range)),
         Err(e) => Err(num_error(msg, arg, e)),
     }
-}
-
-/// `do_scale_by_power`: multiply by `base` `power` times, refusing to wrap.
-fn do_scale_by_power(x: &mut u64, base: u64, power: i32) -> Result<(), NumErr> {
-    for _ in 0..power {
-        if u64::MAX / base < *x {
-            return Err(NumErr::Range);
-        }
-        *x *= base;
-    }
-    Ok(())
-}
-
-/// `parse_size` from `lib/strutils.c`, fractions and all.
-///
-/// `cal` uses it for one thing — `-c` — and could have used a plain integer
-/// parse, but then `cal -c 1.5K` would be an error where upstream accepts 1536.
-/// The decimal-point branch is the whole reason this is 60 lines rather than 6.
-///
-/// Note the base: the leading conversion is `strtoumax(str, &end, 0)`, so `010`
-/// is eight and `0x10` is sixteen.
-fn parse_size(s: &[u8]) -> Result<u64, NumErr> {
-    if s.is_empty() {
-        return Err(NumErr::Invalid);
-    }
-
-    // Only positive numbers are acceptable. The check is on the first
-    // non-blank byte, while the conversion below still starts at the front.
-    let mut lead = 0usize;
-    while s.get(lead).copied().is_some_and(c_isspace) {
-        lead += 1;
-    }
-    if s.get(lead) == Some(&b'-') {
-        return Err(NumErr::Invalid);
-    }
-
-    let Some(sc) = scan_integer(s, 0) else {
-        return Err(NumErr::Invalid);
-    };
-    if sc.saturated || sc.magnitude > u128::from(u64::MAX) {
-        return Err(NumErr::Range);
-    }
-    let mut x = u64::try_from(sc.magnitude).map_err(|_| NumErr::Range)?;
-    let mut p = sc.end;
-    if p >= s.len() {
-        return Ok(x); // without suffix
-    }
-
-    let mut base: u64 = 1024;
-    let mut frac: u64 = 0;
-    let mut frac_zeros = 0i32;
-
-    // `check_suffix:`, which the decimal-point branch jumps back to.
-    let at = |i: usize| -> u8 { s.get(i).copied().unwrap_or(0) };
-    loop {
-        if at(p + 1) == b'i' && (at(p + 2) == b'B' || at(p + 2) == b'b') && at(p + 3) == 0 {
-            base = 1024; // XiB, 2^N
-        } else if (at(p + 1) == b'B' || at(p + 1) == b'b') && at(p + 2) == 0 {
-            base = 1000; // XB, 10^N
-        } else if at(p + 1) != 0 {
-            // The C locale's decimal point is `.` and is one byte long.
-            if frac != 0 || at(p) != b'.' {
-                return Err(NumErr::Invalid); // unexpected suffix
-            }
-            let mut fstr = p + 1;
-            while at(fstr) == b'0' {
-                frac_zeros += 1;
-                fstr += 1;
-            }
-            let end = if at(fstr).is_ascii_digit() {
-                let Some(fsc) = scan_integer(s.get(fstr..).unwrap_or_default(), 0) else {
-                    return Err(NumErr::Invalid);
-                };
-                if fsc.saturated || fsc.magnitude > u128::from(u64::MAX) {
-                    return Err(NumErr::Range);
-                }
-                frac = u64::try_from(fsc.magnitude).map_err(|_| NumErr::Range)?;
-                fstr + fsc.end
-            } else {
-                fstr
-            };
-            if frac != 0 && end >= s.len() {
-                return Err(NumErr::Invalid); // a fraction with no suffix
-            }
-            p = end;
-            continue;
-        }
-        break;
-    }
-
-    const SUF: &[u8] = b"KMGTPEZY";
-    const SUF2: &[u8] = b"kmgtpezy";
-    let here = at(p);
-    let pwr = if let Some(i) = SUF.iter().position(|&c| c == here && c != 0) {
-        i32::try_from(i).unwrap_or(0) + 1
-    } else if let Some(i) = SUF2.iter().position(|&c| c == here && c != 0) {
-        i32::try_from(i).unwrap_or(0) + 1
-    } else {
-        return Err(NumErr::Invalid);
-    };
-
-    let scaled = do_scale_by_power(&mut x, base, pwr);
-
-    if frac != 0 && pwr != 0 {
-        let mut frac_div: u64 = 10;
-        let mut frac_poz: u64 = 1;
-        let mut frac_base: u64 = 1;
-        // Its overflow is discarded upstream, and so is it here.
-        let _ = do_scale_by_power(&mut frac_base, base, pwr);
-
-        // The divisor for the last digit: 100 for 0.05, 1000 for 0.054.
-        while frac_div < frac {
-            if frac_div <= u64::MAX / 10 {
-                frac_div *= 10;
-            } else {
-                frac /= 10;
-            }
-        }
-        for _ in 0..frac_zeros {
-            if frac_div <= u64::MAX / 10 {
-                frac_div *= 10;
-            } else {
-                frac /= 10;
-            }
-        }
-
-        // Walk the fraction backwards from its last digit, adding what each
-        // digit is worth in `frac_base`.
-        loop {
-            let seg = frac % 10;
-            let seg_div = frac_div / frac_poz;
-            frac /= 10;
-            frac_poz = frac_poz.saturating_mul(10);
-            if seg != 0 && seg_div / seg != 0 {
-                x = x.saturating_add(frac_base / (seg_div / seg));
-            }
-            if frac == 0 {
-                break;
-            }
-        }
-    }
-
-    // `parse_size` writes the (possibly overflowed) result out and *then*
-    // returns the error, so a caller that ignored the status would still see a
-    // number. `strtosize_or_err` does not ignore it.
-    scaled.map(|()| x)
 }
 
 /// `parse_reform_year`, whose table is matched case-insensitively.
@@ -1384,7 +1076,9 @@ fn parse_timestamp(zone: &localtime::Zone, reference: i64, t: &[u8]) -> Option<u
         }
     }
 
-    let x = mktime(zone, &mut tm);
+    // `if (x == (time_t) -1) return -EINVAL;` -- which refuses the second
+    // before the epoch along with a failure, as upstream's does.
+    let x = mktime(zone, &mut tm).filter(|&x| x != -1)?;
     if weekday >= 0 && tm.wday != weekday {
         return None;
     }
@@ -2529,7 +2223,7 @@ fn terminal_width() -> i32 {
     let Some(value) = std::env::var_os("COLUMNS") else {
         return 80;
     };
-    match ul_strtos64(&os_bytes(&value)) {
+    match ul_strtos64(&os_bytes(&value), 10) {
         Ok(w) if w > 0 => i32::try_from(w).unwrap_or(80),
         _ => 80,
     }
@@ -3254,45 +2948,6 @@ mod tests {
         assert_eq!(week_number(1, 1, 2010, &us), 1);
         assert_eq!(week_number(1, 1, 2016, &us), 1);
         assert_eq!(week_number(26, 12, 2010, &us), 53);
-    }
-
-    #[test]
-    fn sizes_are_read_the_way_strtosize_reads_them() {
-        assert_eq!(parse_size(b"3"), Ok(3));
-        assert_eq!(parse_size(b"+3"), Ok(3));
-        assert_eq!(parse_size(b" 5"), Ok(5));
-        assert_eq!(parse_size(b"010"), Ok(8));
-        assert_eq!(parse_size(b"0x10"), Ok(16));
-        assert_eq!(parse_size(b"1.5K"), Ok(1536));
-        assert_eq!(parse_size(b"0.5K"), Ok(512));
-        assert_eq!(parse_size(b"1kiB"), Ok(1024));
-        assert_eq!(parse_size(b"5KB"), Ok(5000));
-        assert_eq!(parse_size(b"1EiB"), Ok(1 << 60));
-        // A fraction with no suffix to divide into, and a bare `B`, are both
-        // rejected — the fraction because there is nothing to scale.
-        assert_eq!(parse_size(b"1.9"), Err(NumErr::Invalid));
-        assert_eq!(parse_size(b"1."), Err(NumErr::Invalid));
-        assert_eq!(parse_size(b".5K"), Err(NumErr::Invalid));
-        assert_eq!(parse_size(b"5B"), Err(NumErr::Invalid));
-        assert_eq!(parse_size(b"5b"), Err(NumErr::Invalid));
-        assert_eq!(parse_size(b"1x"), Err(NumErr::Invalid));
-        assert_eq!(parse_size(b"abc"), Err(NumErr::Invalid));
-        assert_eq!(parse_size(b"-1"), Err(NumErr::Invalid));
-        // `Y` overflows 64 bits, and so does one past `u64::MAX`.
-        assert_eq!(parse_size(b"1Y"), Err(NumErr::Range));
-        assert_eq!(parse_size(b"18446744073709551616"), Err(NumErr::Range));
-    }
-
-    #[test]
-    fn signed_numbers_are_read_the_way_strtos64_reads_them() {
-        assert_eq!(ul_strtos64(b"0"), Ok(0));
-        assert_eq!(ul_strtos64(b"-1"), Ok(-1));
-        assert_eq!(ul_strtos64(b"2147483647"), Ok(2_147_483_647));
-        assert_eq!(ul_strtos64(b"007"), Ok(7));
-        assert_eq!(ul_strtos64(b""), Err(NumErr::Invalid));
-        assert_eq!(ul_strtos64(b"2x"), Err(NumErr::Invalid));
-        assert_eq!(ul_strtos64(b"0x7"), Err(NumErr::Invalid));
-        assert_eq!(ul_strtos64(b"99999999999999999999"), Err(NumErr::Range));
     }
 
     #[test]

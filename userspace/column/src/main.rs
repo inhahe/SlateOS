@@ -1,1716 +1,1177 @@
-//! Slate OS `column` Utility -- Columnate Text Formatter
+//! column -- columnate lists, or lay input out as a table.
 //!
-//! Formats input text into neatly aligned columns. Supports two primary modes:
+//! A port of util-linux 2.39.3's `text-utils/column.c`, function by function
+//! and with upstream's names, handing its tables to `smartcols` (the
+//! libsmartcols port) as upstream hands them to libsmartcols; measured
+//! against `column from util-linux 2.39.3` by `scripts/column-diff.sh`.
 //!
-//! - **Fill mode** (default): arrange input words into columns that fill the
-//!   terminal width, similar to the output of `ls`.
-//! - **Table mode** (`-t`): parse delimited input into an aligned table with
-//!   auto-detected column widths.
+//! This replaces a hand-written program that laid its tables out itself,
+//! decoded its input lossily, and had its own reading of the options.
 //!
-//! # Usage
+//! # What is upstream's, and easy to get wrong
 //!
-//! ```text
-//! column [OPTION]... [FILE]...
+//! * **A line is what `getline` read, as a C string**: cut at its first NUL;
+//!   blank if nothing but C-locale white space is in it; and otherwise kept
+//!   whole, leading and trailing blanks included -- which the default
+//!   separators then skip in `-t`, but `-s` does not, and a list keeps.
+//! * **A line that does not decode** has each broken byte written `\xNN`,
+//!   and in it, and only in it, a literal `\x` is written `\x5cx`, so the
+//!   escape cannot be forged. In the C locale every byte above 0x7f is
+//!   broken. The list modes are glibc wide-stream output (`fputws`), whose
+//!   buffer counts characters (`ulclosestream::Stdout::orient_wide`).
+//! * **The default separators are greedy** (`wcstok`: runs of blanks are
+//!   one); `-s` makes every separator split, empty fields and all.
+//! * **The exit status**: a file that cannot be opened is warned about and
+//!   counted, and with no input left to print the count is the status --
+//!   two unreadable files exit 2. A printed table's status replaces it
+//!   (`eval = scols_print_table(...)`), so `column -t missing present`
+//!   exits 0.
+//! * **`--table-column width=` and `errno`.** libsmartcols refuses `width=`
+//!   whenever `errno` is set when it is read, and nothing clears it first;
+//!   the port therefore carries upstream's `errno` in [`Ctl::errno`]
+//!   through every call that changes it: loading a locale other than C and
+//!   POSIX (measured: glibc 2.39 leaves it set), `-c` and `-l` clearing it
+//!   as `ul_strtou64` does, the terminal probes' `ENOTTY` and their
+//!   `COLUMNS`/`LINES` reads clearing it again, a file that will not open,
+//!   and a first line that will not decode. What it does not model --
+//!   glibc's `isatty` on a standard input that is a character device but
+//!   no terminal, and the debug variable `LIBSMARTCOLS_DEBUG` -- no
+//!   harness case reaches.
 //!
-//! Columnate lists or create aligned tables from delimited input.
-//! With no FILE, or when FILE is -, read standard input.
+//! # What is not upstream's
 //!
-//!   -t, --table                 Create a table (determine columns from input)
-//!   -s, --separator=CHARS       Input delimiter characters for table mode
-//!   -o, --output-separator=STR  Output column separator (default: 2 spaces)
-//!   -c, --columns=N             Terminal width (default: 80)
-//!   -x, --fillrows              Fill rows before columns
-//!   -n, --no-merge              Don't merge multiple adjacent delimiters
-//!   -e, --empty                 Don't ignore empty lines
-//!   -N, --table-columns=NAMES   Comma-separated column header names
-//!   -H, --table-hide=COLS       Hide specified columns (comma-separated indices)
-//!   -R, --table-right=COLS      Right-align specified columns (comma-separated)
-//!   -J, --json                  Output as JSON array of objects
-//!       --help                  Display this help and exit
-//!       --version               Output version information and exit
-//! ```
+//! * **A name in a diagnostic** has its unprintable bytes escaped
+//!   (design-decisions §370).
+//! * **`--table-order` naming more columns than there are**: upstream
+//!   writes past the array it collects them in; here each is moved in turn.
+//! * **A range reaching `INT_MAX`** (`-R 1-2147483647`): upstream's `int`
+//!   loop overflows and, compiled as it is, never ends; here it stops once
+//!   no column can be left to find.
 
-use quoting::{quoteaf_os, quotef_os};
-use std::env;
-use std::fs::File;
-use std::io::{self, BufRead, BufReader, Write};
-use std::process;
+stdfdguard::guard_std_fds!();
 
-// ============================================================================
-// Constants
-// ============================================================================
+use getoptlong::{Opt, Program, Takes};
+use quoting::{escape_unprintable, escaped_in_quotes, os_bytes};
+use smartcols::{
+    ColumnId, FL_HIDDEN, FL_NOEXTREMES, FL_RIGHT, FL_TREE, FL_TRUNC, FL_WRAP, LineId, Table,
+    TermForce,
+};
+use std::ffi::{OsStr, OsString};
+use std::io::{BufRead, BufReader, Read};
+use std::process::ExitCode;
+use ulclosestream::{Stdout, stderr_write, warn, warnx};
+use ulstrutils::{
+    NumErr, c_isspace, err_exclusive_options, isdigit_string, num_error_message, parse_range,
+    ul_strtou64,
+};
 
-const VERSION: &str = "0.1.0";
-const DEFAULT_TERM_WIDTH: usize = 80;
-const DEFAULT_OUTPUT_SEP: &str = "  ";
+/// `TABCHAR_CELLS`: the tab stops the list modes align to.
+const TABCHAR_CELLS: usize = 8;
 
-// ============================================================================
-// Unicode display width helpers
-// ============================================================================
+/// `ENOENT`, for a failed open with no number of its own, and `EILSEQ`,
+/// what upstream's `errno` holds after a line did not decode. Only whether
+/// `errno` is zero is ever read.
+const ENOENT: i32 = 2;
+const EILSEQ: i32 = 84;
 
-/// Return the display width of a single character.
-///
-/// East Asian wide and fullwidth characters occupy two columns. Most other
-/// printable characters occupy one column. Control characters and zero-width
-/// code points occupy zero columns.
-fn char_display_width(ch: char) -> usize {
-    let cp = ch as u32;
+/// Getopt's errors are only sentences here; the referral follows them.
+const COLUMN: Program = Program::new("column", 1);
 
-    // Zero-width characters.
-    if cp == 0 {
-        return 0;
-    }
-    // C0/C1 control characters (except tab which we treat as 1 for simplicity
-    // in column-formatted output -- the caller should expand tabs first).
-    if cp < 0x20 || (0x7F..=0x9F).contains(&cp) {
-        return 0;
-    }
-    // Combining characters (a simplified range covering the common cases).
-    if (0x0300..=0x036F).contains(&cp)    // Combining Diacritical Marks
-        || (0x1AB0..=0x1AFF).contains(&cp) // Combining Diacritical Marks Extended
-        || (0x1DC0..=0x1DFF).contains(&cp) // Combining Diacritical Marks Supplement
-        || (0x20D0..=0x20FF).contains(&cp) // Combining Diacritical Marks for Symbols
-        || (0xFE00..=0xFE0F).contains(&cp) // Variation Selectors
-        || (0xFE20..=0xFE2F).contains(&cp)
-    // Combining Half Marks
-    {
-        return 0;
-    }
-    // Soft hyphen.
-    if cp == 0x00AD {
-        return 0;
-    }
-    // Zero-width space, joiner, non-joiner, word joiner.
-    if cp == 0x200B || cp == 0x200C || cp == 0x200D || cp == 0x2060 || cp == 0xFEFF {
-        return 0;
-    }
+/// Upstream's option string: GNU order, operands anywhere.
+const SHORTS: &str = "C:c:dE:eH:hi:Jl:LN:n:mO:o:p:R:r:s:T:tVW:x";
 
-    // East Asian wide and fullwidth characters.
-    if is_east_asian_wide(cp) {
-        return 2;
-    }
+/// Upstream's `longopts[]`, in its order (the order an ambiguity lists),
+/// with the deprecated `columns` and `table-empty-lines` where it has them.
+const LONGS: &[(&str, Takes)] = &[
+    ("columns", Takes::Required),
+    ("fillrows", Takes::Nothing),
+    ("help", Takes::Nothing),
+    ("json", Takes::Nothing),
+    ("keep-empty-lines", Takes::Nothing),
+    ("output-separator", Takes::Required),
+    ("output-width", Takes::Required),
+    ("separator", Takes::Required),
+    ("table", Takes::Nothing),
+    ("table-columns", Takes::Required),
+    ("table-column", Takes::Required),
+    ("table-columns-limit", Takes::Required),
+    ("table-hide", Takes::Required),
+    ("table-name", Takes::Required),
+    ("table-maxout", Takes::Nothing),
+    ("table-noextreme", Takes::Required),
+    ("table-noheadings", Takes::Nothing),
+    ("table-order", Takes::Required),
+    ("table-right", Takes::Required),
+    ("table-truncate", Takes::Required),
+    ("table-wrap", Takes::Required),
+    ("table-empty-lines", Takes::Nothing),
+    ("table-header-repeat", Takes::Nothing),
+    ("tree", Takes::Required),
+    ("tree-id", Takes::Required),
+    ("tree-parent", Takes::Required),
+    ("version", Takes::Nothing),
+];
+/// Each long option's `val`, in [`LONGS`]' order.
+const LONG_VALS: [u8; 27] = *b"cxhJLocstNClHnmEdORTWLeripV";
 
+/// `excl[]`: rows and members in ASCII order, as `err_exclusive_options`
+/// requires.
+const EXCL: [&[i32]; 3] = [
+    &[b'C' as i32, b'N' as i32],
+    &[b'J' as i32, b'x' as i32],
+    &[b't' as i32, b'x' as i32],
+];
+
+/// `COLUMN_MODE_*`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Mode {
+    FillCols,
+    FillRows,
+    Table,
+    Simple,
+}
+
+/// `struct column_control`.
+struct Ctl {
+    mode: Mode,
+    /// `termwidth`: `None` until known, `Some(0)` unlimited.
+    termwidth: Option<usize>,
+    tab: Option<Table>,
+    /// `--table-columns`, split; `None` when not given.
+    tab_colnames: Option<Vec<Vec<u8>>>,
+    tab_name: Option<Vec<u8>>,
+    tab_order: Option<Vec<u8>>,
+    /// Every `--table-column`, in order; empty when none was given.
+    tab_columns: Vec<Vec<u8>>,
+    tab_colright: Option<Vec<u8>>,
+    tab_coltrunc: Option<Vec<u8>>,
+    tab_colnoextrem: Option<Vec<u8>>,
+    tab_colwrap: Option<Vec<u8>>,
+    tab_colhide: Option<Vec<u8>>,
+    tree: Option<Vec<u8>>,
+    tree_id: Option<Vec<u8>>,
+    tree_parent: Option<Vec<u8>>,
+    /// `input_separator`, as the wide characters `mbstowcs` made of it.
+    input_separator: Vec<char>,
+    output_separator: Vec<u8>,
+    /// `ents`: the list modes' entries, as the wide strings upstream holds.
+    ents: Vec<Vec<char>>,
+    /// The widest entry, in cells.
+    maxlength: usize,
+    /// `--table-columns-limit`, 0 for none.
+    maxncols: usize,
+    greedy: bool,
+    json: bool,
+    header_repeat: bool,
+    hide_unnamed: bool,
+    maxout: bool,
+    keep_empty_lines: bool,
+    tab_noheadings: bool,
+    /// Whether the locale is UTF-8; otherwise it is C, and ASCII.
+    utf8: bool,
+    /// Upstream's `errno`, as far as `--table-column width=` reads it.
+    errno: i32,
+}
+
+fn main() -> ExitCode {
+    // Before anything touches standard I/O: a descriptor the process was
+    // started without stays closed, as upstream would find it.
+    stdfdguard::restore();
+    let argv: Vec<OsString> = std::env::args_os().collect();
+    let short = short_name(
+        argv.first()
+            .map_or(OsStr::new("column"), OsString::as_os_str),
+    );
+    let mut out = Stdout::new(1);
+    let status = run(&argv, &short, &mut out);
+    // `close_stdout`, which upstream registers with `atexit`.
+    ExitCode::from(out.close(status, &short))
+}
+
+/// `program_invocation_short_name`: argv[0] past its last `/`.
+fn short_name(arg0: &OsStr) -> Vec<u8> {
+    let bytes = os_bytes(arg0);
+    let start = bytes
+        .iter()
+        .rposition(|&b| b == b'/')
+        .map_or(0, |i| i.saturating_add(1));
+    bytes.get(start..).unwrap_or_default().to_vec()
+}
+
+/// Bytes shown in a diagnostic: upstream's text, unprintable bytes escaped.
+fn shown(text: &[u8]) -> String {
+    escape_unprintable(text)
+}
+
+/// `errtryhelp(EXIT_FAILURE)`.
+fn errtryhelp(short: &[u8]) -> u8 {
+    stderr_write(format!("Try '{} --help' for more information.\n", shown(short)).as_bytes());
     1
 }
 
-/// Check whether a code point is East Asian Wide or Fullwidth per Unicode
-/// East Asian Width property (simplified ranges covering CJK and related).
-fn is_east_asian_wide(cp: u32) -> bool {
-    // CJK Radicals Supplement .. Enclosed CJK Letters and Months
-    (0x2E80..=0x33FF).contains(&cp)
-    // CJK Compatibility
-    || (0x3400..=0x4DBF).contains(&cp)
-    // CJK Unified Ideographs
-    || (0x4E00..=0x9FFF).contains(&cp)
-    // Yi Syllables .. Yi Radicals
-    || (0xA000..=0xA4CF).contains(&cp)
-    // CJK Compatibility Ideographs
-    || (0xF900..=0xFAFF).contains(&cp)
-    // Fullwidth Forms (Fullwidth ASCII variants, Halfwidth Katakana are
-    // narrow but Fullwidth Latin/symbols are wide).
-    || (0xFF01..=0xFF60).contains(&cp)
-    || (0xFFE0..=0xFFE6).contains(&cp)
-    // CJK Unified Ideographs Extension B .. Extension I
-    || (0x20000..=0x323AF).contains(&cp)
-    // CJK Compatibility Ideographs Supplement
-    || (0x2F800..=0x2FA1F).contains(&cp)
-    // Hangul Syllables
-    || (0xAC00..=0xD7AF).contains(&cp)
-    // Hangul Jamo Extended-B
-    || (0xD7B0..=0xD7FF).contains(&cp)
-    // CJK Symbols and Punctuation, Hiragana, Katakana, Bopomofo
-    || (0x3000..=0x312F).contains(&cp)
-    // Katakana Phonetic Extensions
-    || (0x31F0..=0x31FF).contains(&cp)
-    // Enclosed CJK Letters continuation
-    || (0x3200..=0x32FF).contains(&cp)
-    // Kangxi Radicals
-    || (0x2F00..=0x2FDF).contains(&cp)
+/// `usage()`.
+fn usage(short: &[u8]) -> Vec<u8> {
+    let mut text = b"\nUsage:\n ".to_vec();
+    text.extend_from_slice(short);
+    text.extend_from_slice(
+        b" [options] [<file>...]\n\
+\nColumnate lists.\n\
+\nOptions:\n\
+\x20-t, --table                      create a table\n\
+\x20-n, --table-name <name>          table name for JSON output\n\
+\x20-O, --table-order <columns>      specify order of output columns\n\
+\x20-C, --table-column <properties>  define column\n\
+\x20-N, --table-columns <names>      comma separated columns names\n\
+\x20-l, --table-columns-limit <num>  maximal number of input columns\n\
+\x20-E, --table-noextreme <columns>  don't count long text from the columns to column width\n\
+\x20-d, --table-noheadings           don't print header\n\
+\x20-m, --table-maxout               fill all available space\n\
+\x20-e, --table-header-repeat        repeat header for each page\n\
+\x20-H, --table-hide <columns>       don't print the columns\n\
+\x20-R, --table-right <columns>      right align text in these columns\n\
+\x20-T, --table-truncate <columns>   truncate text in the columns when necessary\n\
+\x20-W, --table-wrap <columns>       wrap text in the columns when necessary\n\
+\x20-L, --keep-empty-lines           don't ignore empty lines\n\
+\x20-J, --json                       use JSON output format for table\n\
+\n\
+\x20-r, --tree <column>              column to use tree-like output for the table\n\
+\x20-i, --tree-id <column>           line ID to specify child-parent relation\n\
+\x20-p, --tree-parent <column>       parent to specify child-parent relation\n\
+\n\
+\x20-c, --output-width <width>       width of output in number of characters\n\
+\x20-o, --output-separator <string>  columns separator for table output (default is two spaces)\n\
+\x20-s, --separator <string>         possible table delimiters\n\
+\x20-x, --fillrows                   fill rows before columns\n\
+\n",
+    );
+    text.extend_from_slice(format!("{:<34}{}\n", " -h, --help", "display this help").as_bytes());
+    text.extend_from_slice(format!("{:<34}{}\n", " -V, --version", "display version").as_bytes());
+    text.extend_from_slice(b"\nFor more details see column(1).\n");
+    text
 }
 
-/// Compute the display width of a string in terminal columns.
-fn display_width(s: &str) -> usize {
-    s.chars().map(char_display_width).sum()
+/// `mbs_to_wcs(s)`: the wide characters of `s`, or `None` when it does not
+/// decode -- in a UTF-8 locale, invalid UTF-8; in the C locale, anything
+/// but ASCII.
+fn mbs_to_wcs(s: &[u8], utf8: bool) -> Option<Vec<char>> {
+    if !utf8 && !s.is_ascii() {
+        return None;
+    }
+    std::str::from_utf8(s).ok().map(|t| t.chars().collect())
 }
 
-// ============================================================================
-// Parsed configuration
-// ============================================================================
-
-/// Fully parsed command-line configuration.
-struct Config {
-    /// Input file paths. `-` means stdin.
-    file_paths: Vec<String>,
-    /// Table mode (parse delimited columns).
-    table: bool,
-    /// Input separator characters for table mode.
-    separator: Option<String>,
-    /// Output separator string.
-    output_separator: String,
-    /// Terminal width for fill mode.
-    term_width: usize,
-    /// Fill rows before columns (default: fill columns first).
-    fill_rows: bool,
-    /// Don't merge adjacent delimiters.
-    no_merge: bool,
-    /// Don't ignore empty lines.
-    keep_empty: bool,
-    /// Explicit column header names.
-    column_names: Option<Vec<String>>,
-    /// Columns to hide (0-based indices).
-    hide_columns: Vec<usize>,
-    /// Columns to right-align (0-based indices).
-    right_columns: Vec<usize>,
-    /// Output as JSON.
-    json: bool,
+/// `wcs_to_mbs(wcs)`: back to bytes.
+fn wcs_to_mbs(wcs: &[char]) -> Vec<u8> {
+    wcs.iter().collect::<String>().into_bytes()
 }
 
-/// Result of argument parsing.
-enum ParseResult {
-    Run(Config),
-    Help,
-    Version,
-}
-
-// ============================================================================
-// Argument parsing
-// ============================================================================
-
-/// Parse a comma-separated list of 1-based column indices into 0-based indices.
-/// Returns an error message on failure.
-fn parse_column_indices(s: &str) -> Result<Vec<usize>, String> {
-    let mut indices = Vec::new();
-    for part in s.split(',') {
-        let trimmed = part.trim();
-        if trimmed.is_empty() {
-            continue;
-        }
-        match trimmed.parse::<usize>() {
-            Ok(0) => return Err("column index must be >= 1, got '0'".to_string()),
-            Ok(n) => indices.push(n.saturating_sub(1)),
-            Err(_) => return Err(format!("invalid column index: {}", quoteaf_os(trimmed))),
+/// `mbs_invalid_encode(s)`: each byte that begins no valid character
+/// written `\xNN`, and the backslash of a literal `\x` too. Each broken byte
+/// is judged alone, as `mbrtowc` judges it with the string's NUL after it:
+/// an incomplete sequence at the end is broken, byte by byte.
+fn mbs_invalid_encode(s: &[u8], utf8: bool) -> Vec<u8> {
+    let mut out = Vec::with_capacity(s.len().saturating_mul(4));
+    let mut i = 0usize;
+    while let Some(&b) = s.get(i) {
+        let rest = s.get(i..).unwrap_or_default();
+        let len = if utf8 {
+            match quoting::next_mb(rest) {
+                Some(quoting::Mb::Char(_, n)) => Some(n),
+                _ => None,
+            }
+        } else {
+            b.is_ascii().then_some(1)
+        };
+        match len {
+            Some(_) if b == b'\\' && rest.get(1) == Some(&b'x') => {
+                out.extend_from_slice(b"\\x5c");
+                i = i.saturating_add(1);
+            }
+            Some(n) => {
+                out.extend_from_slice(rest.get(..n).unwrap_or(rest));
+                i = i.saturating_add(n);
+            }
+            None => {
+                out.extend_from_slice(format!("\\x{b:02x}").as_bytes());
+                i = i.saturating_add(1);
+            }
         }
     }
-    Ok(indices)
+    out
 }
 
-/// Consume the value for an option that takes an argument. Handles both
-/// `--option=value` (returns the part after `=`) and `--option value` (returns
-/// `args[i+1]` and increments `*idx`).
+/// `width(wcs)`: the cells the characters take, those `wcwidth` calls
+/// unprintable counting nothing.
+fn width(wcs: &[char]) -> usize {
+    wcs.iter()
+        .map(|&c| charwidth::char_width(c).unwrap_or(0))
+        .fold(0usize, usize::saturating_add)
+}
+
+/// Where a line's tokenizing is: `wcstok`'s or `local_wcstok`'s saved
+/// pointer.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Tok {
+    /// Nothing read yet.
+    Start,
+    /// The next token starts looking here.
+    At(usize),
+    /// `local_wcstok` found the last token, or `wcstok` the end.
+    Done,
+}
+
+/// `local_wcstok(ctl, p, &state)`: the next field of `line`, as a range.
 ///
-/// `flag_name` is used in error messages.
-fn consume_option_value<'a>(
-    args: &'a [String],
-    idx: &mut usize,
-    eq_value: Option<&'a str>,
-    flag_name: &str,
-) -> Result<&'a str, String> {
-    if let Some(val) = eq_value {
-        return Ok(val);
+/// Greedy -- the default separators -- is `wcstok`: separators before a
+/// token are skipped, so a run of them is one, and none is at either end.
+/// Otherwise every separator ends a field, empty ones included.
+fn local_wcstok(
+    greedy: bool,
+    seps: &[char],
+    line: &[char],
+    state: &mut Tok,
+) -> Option<(usize, usize)> {
+    let is_sep = |i: usize| line.get(i).is_some_and(|c| seps.contains(c));
+    let len = line.len();
+    let mut i = match *state {
+        Tok::Start => 0,
+        Tok::At(i) => i,
+        Tok::Done => return None,
+    };
+    if greedy {
+        while i < len && is_sep(i) {
+            i = i.saturating_add(1);
+        }
+        if i >= len {
+            *state = Tok::Done;
+            return None;
+        }
+        let start = i;
+        while i < len && !is_sep(i) {
+            i = i.saturating_add(1);
+        }
+        *state = Tok::At(if i < len { i.saturating_add(1) } else { len });
+        return Some((start, i));
     }
-    *idx += 1;
-    if *idx >= args.len() {
-        return Err(format!(
-            "column: option {} requires an argument",
-            quoteaf_os(flag_name)
-        ));
+    match (i..len).find(|&j| is_sep(j)) {
+        Some(j) => {
+            *state = Tok::At(j.saturating_add(1));
+            Some((i, j))
+        }
+        None => {
+            *state = Tok::Done;
+            Some((i, len))
+        }
     }
-    Ok(&args[*idx])
 }
 
-fn parse_args(args: &[String]) -> ParseResult {
-    let mut file_paths: Vec<String> = Vec::new();
-    let mut table = false;
-    let mut separator: Option<String> = None;
-    let mut output_separator: Option<String> = None;
-    let mut term_width: usize = DEFAULT_TERM_WIDTH;
-    let mut fill_rows = false;
-    let mut no_merge = false;
-    let mut keep_empty = false;
-    let mut column_names: Option<Vec<String>> = None;
-    let mut hide_columns: Vec<usize> = Vec::new();
-    let mut right_columns: Vec<usize> = Vec::new();
-    let mut json = false;
-    let mut end_of_opts = false;
+/// `strv_split(str, ",")`: the words between commas, empty ones dropped.
+fn strv_split(s: &[u8]) -> Vec<Vec<u8>> {
+    s.split(|&b| b == b',')
+        .filter(|w| !w.is_empty())
+        .map(<[u8]>::to_vec)
+        .collect()
+}
 
-    let mut i = 1;
-    while i < args.len() {
-        let arg = &args[i];
+/// `strtou32_or_err(str, errmesg)`: the refusal is the caller's to report.
+fn strtou32(s: &[u8]) -> Result<u32, NumErr> {
+    let v = ul_strtou64(s, 10)?;
+    u32::try_from(v).map_err(|_| NumErr::Range)
+}
 
-        if end_of_opts || !arg.starts_with('-') || arg == "-" {
-            file_paths.push(arg.clone());
-            i += 1;
-            continue;
-        }
-
-        if arg == "--" {
-            end_of_opts = true;
-            i += 1;
-            continue;
-        }
-
-        // Long options.
-        if arg.starts_with("--") {
-            let (opt, eq_val) = match arg.find('=') {
-                Some(pos) => (&arg[..pos], Some(&arg[pos + 1..])),
-                None => (arg.as_str(), None),
-            };
-
-            match opt {
-                "--table" => table = true,
-                "--fillrows" => fill_rows = true,
-                "--no-merge" => no_merge = true,
-                "--empty" => keep_empty = true,
-                "--json" => json = true,
-                "--help" => return ParseResult::Help,
-                "--version" => return ParseResult::Version,
-                "--separator" => match consume_option_value(args, &mut i, eq_val, "--separator") {
-                    Ok(val) => separator = Some(val.to_string()),
-                    Err(msg) => {
-                        eprintln!("{msg}");
-                        process::exit(1);
-                    }
-                },
-                "--output-separator" => {
-                    match consume_option_value(args, &mut i, eq_val, "--output-separator") {
-                        Ok(val) => output_separator = Some(val.to_string()),
-                        Err(msg) => {
-                            eprintln!("{msg}");
-                            process::exit(1);
-                        }
-                    }
-                }
-                "--columns" => match consume_option_value(args, &mut i, eq_val, "--columns") {
-                    Ok(val) => match val.parse::<usize>() {
-                        Ok(n) if n > 0 => term_width = n,
-                        _ => {
-                            eprintln!("column: invalid column count: {}", quoteaf_os(val));
-                            process::exit(1);
-                        }
-                    },
-                    Err(msg) => {
-                        eprintln!("{msg}");
-                        process::exit(1);
-                    }
-                },
-                "--table-columns" => {
-                    match consume_option_value(args, &mut i, eq_val, "--table-columns") {
-                        Ok(val) => {
-                            column_names =
-                                Some(val.split(',').map(|s| s.trim().to_string()).collect());
-                        }
-                        Err(msg) => {
-                            eprintln!("{msg}");
-                            process::exit(1);
-                        }
-                    }
-                }
-                "--table-hide" => {
-                    match consume_option_value(args, &mut i, eq_val, "--table-hide") {
-                        Ok(val) => match parse_column_indices(val) {
-                            Ok(indices) => hide_columns = indices,
-                            Err(msg) => {
-                                eprintln!("column: {msg}");
-                                process::exit(1);
-                            }
-                        },
-                        Err(msg) => {
-                            eprintln!("{msg}");
-                            process::exit(1);
-                        }
-                    }
-                }
-                "--table-right" => {
-                    match consume_option_value(args, &mut i, eq_val, "--table-right") {
-                        Ok(val) => match parse_column_indices(val) {
-                            Ok(indices) => right_columns = indices,
-                            Err(msg) => {
-                                eprintln!("column: {msg}");
-                                process::exit(1);
-                            }
-                        },
-                        Err(msg) => {
-                            eprintln!("{msg}");
-                            process::exit(1);
-                        }
-                    }
-                }
-                _ => {
-                    eprintln!("column: unrecognized option {}", quoteaf_os(arg));
-                    eprintln!("Try 'column --help' for more information.");
-                    process::exit(1);
-                }
-            }
-
-            i += 1;
-            continue;
-        }
-
-        // Short options. Options that take arguments consume the rest of the
-        // current argv element or the next argv element.
-        let short = &arg[1..];
-        let mut chars = short.chars();
-        while let Some(ch) = chars.next() {
-            match ch {
-                't' => table = true,
-                'x' => fill_rows = true,
-                'n' => no_merge = true,
-                'e' => keep_empty = true,
-                'J' => json = true,
-                's' => {
-                    let remainder: String = chars.collect();
-                    let val = if remainder.is_empty() {
-                        i += 1;
-                        if i >= args.len() {
-                            eprintln!("column: option '-s' requires an argument");
-                            process::exit(1);
-                        }
-                        args[i].clone()
-                    } else {
-                        remainder
-                    };
-                    separator = Some(val);
-                    break;
-                }
-                'o' => {
-                    let remainder: String = chars.collect();
-                    let val = if remainder.is_empty() {
-                        i += 1;
-                        if i >= args.len() {
-                            eprintln!("column: option '-o' requires an argument");
-                            process::exit(1);
-                        }
-                        args[i].clone()
-                    } else {
-                        remainder
-                    };
-                    output_separator = Some(val);
-                    break;
-                }
-                'c' => {
-                    let remainder: String = chars.collect();
-                    let val_str = if remainder.is_empty() {
-                        i += 1;
-                        if i >= args.len() {
-                            eprintln!("column: option '-c' requires an argument");
-                            process::exit(1);
-                        }
-                        args[i].clone()
-                    } else {
-                        remainder
-                    };
-                    match val_str.parse::<usize>() {
-                        Ok(n) if n > 0 => term_width = n,
-                        _ => {
-                            eprintln!("column: invalid column count: {}", quoteaf_os(&val_str));
-                            process::exit(1);
-                        }
-                    }
-                    break;
-                }
-                'N' => {
-                    let remainder: String = chars.collect();
-                    let val = if remainder.is_empty() {
-                        i += 1;
-                        if i >= args.len() {
-                            eprintln!("column: option '-N' requires an argument");
-                            process::exit(1);
-                        }
-                        args[i].clone()
-                    } else {
-                        remainder
-                    };
-                    column_names = Some(val.split(',').map(|s| s.trim().to_string()).collect());
-                    break;
-                }
-                'H' => {
-                    let remainder: String = chars.collect();
-                    let val = if remainder.is_empty() {
-                        i += 1;
-                        if i >= args.len() {
-                            eprintln!("column: option '-H' requires an argument");
-                            process::exit(1);
-                        }
-                        args[i].clone()
-                    } else {
-                        remainder
-                    };
-                    match parse_column_indices(&val) {
-                        Ok(indices) => hide_columns = indices,
-                        Err(msg) => {
-                            eprintln!("column: {msg}");
-                            process::exit(1);
-                        }
-                    }
-                    break;
-                }
-                'R' => {
-                    let remainder: String = chars.collect();
-                    let val = if remainder.is_empty() {
-                        i += 1;
-                        if i >= args.len() {
-                            eprintln!("column: option '-R' requires an argument");
-                            process::exit(1);
-                        }
-                        args[i].clone()
-                    } else {
-                        remainder
-                    };
-                    match parse_column_indices(&val) {
-                        Ok(indices) => right_columns = indices,
-                        Err(msg) => {
-                            eprintln!("column: {msg}");
-                            process::exit(1);
-                        }
-                    }
-                    break;
-                }
-                _ => {
-                    eprintln!("column: invalid option -- {}", quoteaf_os(ch.to_string()));
-                    eprintln!("Try 'column --help' for more information.");
-                    process::exit(1);
-                }
-            }
-        }
-
-        i += 1;
-    }
-
-    if file_paths.is_empty() {
-        file_paths.push("-".to_string());
-    }
-
-    ParseResult::Run(Config {
-        file_paths,
-        table,
-        separator,
-        output_separator: output_separator.unwrap_or_else(|| DEFAULT_OUTPUT_SEP.to_string()),
-        term_width,
-        fill_rows,
-        no_merge,
-        keep_empty,
-        column_names,
-        hide_columns,
-        right_columns,
-        json,
+/// `strtou32_or_err`'s refusal: `errmesg: 'arg'`, and the reason for a
+/// number out of range.
+fn strtou32_or_err(s: &[u8], errmesg: &str, short: &[u8]) -> Result<u32, u8> {
+    strtou32(s).map_err(|e| {
+        warnx(
+            short,
+            &num_error_message(errmesg, &quoting::os_from_bytes(s), e),
+        );
+        1
     })
 }
 
-// ============================================================================
-// Input reading
-// ============================================================================
+impl Ctl {
+    fn new(utf8: bool) -> Self {
+        Ctl {
+            mode: Mode::FillCols,
+            termwidth: None,
+            tab: None,
+            tab_colnames: None,
+            tab_name: None,
+            tab_order: None,
+            tab_columns: Vec::new(),
+            tab_colright: None,
+            tab_coltrunc: None,
+            tab_colnoextrem: None,
+            tab_colwrap: None,
+            tab_colhide: None,
+            tree: None,
+            tree_id: None,
+            tree_parent: None,
+            input_separator: vec!['\t', ' '],
+            output_separator: b"  ".to_vec(),
+            ents: Vec::new(),
+            maxlength: 0,
+            maxncols: 0,
+            greedy: true,
+            json: false,
+            header_repeat: false,
+            hide_unnamed: false,
+            maxout: false,
+            keep_empty_lines: false,
+            tab_noheadings: false,
+            utf8,
+            errno: 0,
+        }
+    }
 
-/// Read all lines from the specified inputs.
-/// Read every named file, reporting whether any of them could not be opened.
-///
-/// The `continue` below is deliberate and stays: `column a missing b` should
-/// still format `a` and `b`. What was missing is that the failure never
-/// reached the status, so `column /nonexistent` printed
-/// "column: ...: No such file or directory" and exited 0. Measured against
-/// util-linux `column`, which exits 1 for the same input.
-fn read_all_lines(
-    file_paths: &[String],
-    keep_empty: bool,
-    unreadable: &mut bool,
-) -> io::Result<Vec<String>> {
-    let mut lines = Vec::new();
-    let stdin = io::stdin();
-
-    for path in file_paths {
-        let reader: Box<dyn BufRead> = if path == "-" {
-            Box::new(stdin.lock())
+    /// `init_table`.
+    fn init_table(&mut self) {
+        let mut tab = Table::new();
+        // `scols_new_table`'s terminal probe.
+        self.errno = smartcols::tty::dimension_errno(self.errno, true, true);
+        tab.set_utf8(self.utf8);
+        tab.set_column_separator(&self.output_separator);
+        if self.json {
+            tab.enable_json(true);
+            tab.set_name(self.tab_name.as_deref().unwrap_or(b"table"));
         } else {
-            match File::open(path) {
-                Ok(f) => Box::new(BufReader::new(f)),
-                Err(e) => {
-                    eprintln!("column: {}: {e}", quotef_os(path));
-                    *unreadable = true;
-                    continue;
+            tab.enable_noencoding(true);
+        }
+        // Refused only with minout on, which nothing here sets; upstream
+        // does not look either.
+        let _ = tab.enable_maxout(self.maxout);
+        if !self.tab_columns.is_empty() {
+            for opts in &self.tab_columns {
+                let cl = tab.new_unnamed_column(0.0, 0);
+                // Upstream does not look at the result: a refused `width=`
+                // leaves the column as far as it got.
+                let _ = tab.column_set_properties(cl, opts, &mut self.errno);
+            }
+        } else if let Some(names) = &self.tab_colnames {
+            for name in names {
+                tab.new_column(name, 0.0, 0);
+            }
+        } else {
+            tab.enable_noheadings(true);
+        }
+        if self.tab_colnames.is_some() || !self.tab_columns.is_empty() {
+            if self.header_repeat {
+                tab.enable_header_repeat(true);
+            }
+            tab.enable_noheadings(self.tab_noheadings);
+        }
+        self.tab = Some(tab);
+    }
+
+    /// `add_line_to_table`: the line's fields as a new line of cells, a
+    /// column made for each field that has none.
+    fn add_line_to_table(&mut self, wcs: &[char], short: &[u8]) -> Result<(), u8> {
+        if self.tab.is_none() {
+            self.init_table();
+        }
+        let (greedy, maxncols, hide_unnamed) = (self.greedy, self.maxncols, self.hide_unnamed);
+        let seps = self.input_separator.clone();
+        let Some(tab) = self.tab.as_mut() else {
+            return Err(1);
+        };
+        let mut state = Tok::Start;
+        let mut n = 0usize;
+        let mut ln: Option<LineId> = None;
+        while let Some((start, end)) = local_wcstok(greedy, &seps, wcs, &mut state) {
+            // At the limit, the rest of the line is the last field.
+            let data = if maxncols != 0 && n.saturating_add(1) == maxncols {
+                wcs.get(start..).unwrap_or_default()
+            } else {
+                wcs.get(start..end).unwrap_or_default()
+            };
+            if tab.ncols() < n.saturating_add(1) {
+                if tab.is_json() && !hide_unnamed {
+                    warnx(
+                        short,
+                        &format!(
+                            "line {}: for JSON the name of the column {} is required",
+                            tab.nlines().saturating_add(1),
+                            n.saturating_add(1)
+                        ),
+                    );
+                    return Err(1);
+                }
+                tab.new_unnamed_column(0.0, if hide_unnamed { FL_HIDDEN } else { 0 });
+            }
+            let line = match ln {
+                Some(l) => l,
+                None => {
+                    let l = tab.new_line(None).map_err(|_| 1u8)?;
+                    ln = Some(l);
+                    l
+                }
+            };
+            if tab.line_refer_data(line, n, &wcs_to_mbs(data)).is_err() {
+                warnx(short, "failed to add output data");
+                return Err(1);
+            }
+            n = n.saturating_add(1);
+            if maxncols != 0 && n == maxncols {
+                break;
+            }
+        }
+        Ok(())
+    }
+
+    /// `add_emptyline_to_table`.
+    fn add_emptyline_to_table(&mut self) -> Result<(), u8> {
+        if self.tab.is_none() {
+            self.init_table();
+        }
+        let tab = self.tab.as_mut().ok_or(1u8)?;
+        tab.new_line(None).map_err(|_| 1u8)?;
+        Ok(())
+    }
+
+    /// One line of `read_input`, as `getline` read it.
+    fn read_line(&mut self, raw: &[u8], short: &[u8]) -> Result<(), u8> {
+        // The C string: to the first NUL, and without the newline.
+        let line = smartcols::mbs::c_str(raw);
+        let line = line.strip_suffix(b"\n").unwrap_or(line);
+        if line.iter().all(|&b| c_isspace(b)) {
+            if self.keep_empty_lines {
+                if self.mode == Mode::Table {
+                    self.add_emptyline_to_table()?;
+                } else {
+                    self.ents.push(Vec::new());
+                }
+            }
+            return Ok(());
+        }
+        let wcs = match mbs_to_wcs(line, self.utf8) {
+            Some(w) => w,
+            None => {
+                self.errno = EILSEQ;
+                // Invalid sequences as `\x<hex>`, and tried again; upstream's
+                // `err(EXIT_FAILURE, "read failed")` if even that does not
+                // decode (the encoding leaves only ASCII and whole
+                // characters, so it always does).
+                let encoded = mbs_invalid_encode(line, self.utf8);
+                match mbs_to_wcs(&encoded, self.utf8) {
+                    Some(w) => w,
+                    None => {
+                        warn(
+                            short,
+                            "read failed",
+                            &std::io::Error::from_raw_os_error(EILSEQ),
+                        );
+                        return Err(1);
+                    }
                 }
             }
         };
-
-        for line_result in reader.lines() {
-            let line = line_result?;
-            if !keep_empty && line.is_empty() {
-                continue;
+        match self.mode {
+            Mode::Table => self.add_line_to_table(&wcs, short)?,
+            Mode::FillCols | Mode::FillRows => {
+                let len = width(&wcs);
+                self.ents.push(wcs);
+                if self.maxlength < len {
+                    self.maxlength = len;
+                }
             }
-            lines.push(line);
+            Mode::Simple => {}
         }
+        Ok(())
     }
 
-    Ok(lines)
-}
-
-// ============================================================================
-// Fill mode
-// ============================================================================
-
-/// Collect all words from input lines (splitting on whitespace).
-fn collect_words(lines: &[String]) -> Vec<String> {
-    let mut words = Vec::new();
-    for line in lines {
-        for word in line.split_whitespace() {
-            if !word.is_empty() {
-                words.push(word.to_string());
-            }
-        }
-    }
-    words
-}
-
-/// Fill-columns mode (default): arrange words into columns, filling down each
-/// column before moving right.
-fn fill_columns(words: &[String], term_width: usize, output_sep: &str) -> Vec<String> {
-    if words.is_empty() {
-        return Vec::new();
-    }
-
-    let sep_width = display_width(output_sep);
-
-    // Binary search for the maximum number of columns that fits.
-    let max_cols = words.len();
-    let mut best_ncols = 1usize;
-
-    // Try increasing number of columns until it doesn't fit.
-    for ncols in 2..=max_cols {
-        let nrows = words.len().div_ceil(ncols);
-        let mut col_widths = vec![0usize; ncols];
-
-        // Determine each column's width.
-        for (idx, word) in words.iter().enumerate() {
-            let col = idx / nrows;
-            if col >= ncols {
-                break;
-            }
-            let w = display_width(word);
-            if w > col_widths[col] {
-                col_widths[col] = w;
-            }
-        }
-
-        // Total width: sum of column widths + separators between them.
-        let total: usize = col_widths.iter().sum::<usize>()
-            + if ncols > 1 {
-                sep_width * (ncols - 1)
-            } else {
-                0
-            };
-
-        if total <= term_width {
-            best_ncols = ncols;
-        } else {
-            break;
-        }
-    }
-
-    let ncols = best_ncols;
-    let nrows = words.len().div_ceil(ncols);
-
-    // Compute column widths for the chosen layout.
-    let mut col_widths = vec![0usize; ncols];
-    for (idx, word) in words.iter().enumerate() {
-        let col = idx / nrows;
-        if col >= ncols {
-            break;
-        }
-        let w = display_width(word);
-        if w > col_widths[col] {
-            col_widths[col] = w;
-        }
-    }
-
-    // Build output lines.
-    let mut output = Vec::with_capacity(nrows);
-    for row in 0..nrows {
-        let mut line = String::new();
-        for (col, target) in col_widths.iter().copied().enumerate().take(ncols) {
-            let idx = col * nrows + row;
-            if idx >= words.len() {
-                break;
-            }
-            if col > 0 {
-                line.push_str(output_sep);
-            }
-            let word = &words[idx];
-            line.push_str(word);
-            // Pad to column width (except for the last column).
-            if col + 1 < ncols {
-                let w = display_width(word);
-                if w < target {
-                    for _ in 0..(target - w) {
-                        line.push(' ');
-                    }
+    /// `read_input(ctl, fp)`: every line, each dealt with before the next
+    /// is read, so a table's refusal comes before a later read error.
+    fn read_input(&mut self, input: impl Read, short: &[u8]) -> Result<(), u8> {
+        let mut reader = BufReader::new(input);
+        let mut raw = Vec::new();
+        loop {
+            raw.clear();
+            match reader.read_until(b'\n', &mut raw) {
+                Ok(0) => return Ok(()),
+                Ok(_) => self.read_line(&raw, short)?,
+                Err(e) => {
+                    warn(short, "read failed", &e);
+                    return Err(1);
                 }
             }
         }
-        output.push(line);
     }
-
-    output
 }
 
-/// Fill-rows mode (`-x`): arrange words into columns, filling across each row
-/// before moving down.
-fn fill_rows(words: &[String], term_width: usize, output_sep: &str) -> Vec<String> {
-    if words.is_empty() {
-        return Vec::new();
-    }
-
-    let sep_width = display_width(output_sep);
-
-    // Try increasing number of columns until it doesn't fit.
-    let max_cols = words.len();
-    let mut best_ncols = 1usize;
-
-    for ncols in 2..=max_cols {
-        let nrows = words.len().div_ceil(ncols);
-        let mut col_widths = vec![0usize; ncols];
-
-        // With fill-rows, word at position idx goes to row = idx / ncols,
-        // col = idx % ncols.
-        for (idx, word) in words.iter().enumerate() {
-            let col = idx % ncols;
-            let w = display_width(word);
-            if w > col_widths[col] {
-                col_widths[col] = w;
-            }
-        }
-
-        let total: usize = col_widths.iter().sum::<usize>()
-            + if ncols > 1 {
-                sep_width * (ncols - 1)
-            } else {
-                0
-            };
-
-        if total <= term_width {
-            best_ncols = ncols;
-        } else {
-            break;
-        }
-        // If all words fit on one row, stop.
-        if nrows == 1 {
-            break;
-        }
-    }
-
-    let ncols = best_ncols;
-    let nrows = words.len().div_ceil(ncols);
-
-    // Compute column widths for the chosen layout.
-    let mut col_widths = vec![0usize; ncols];
-    for (idx, word) in words.iter().enumerate() {
-        let col = idx % ncols;
-        let w = display_width(word);
-        if w > col_widths[col] {
-            col_widths[col] = w;
-        }
-    }
-
-    // Build output lines.
-    let mut output = Vec::with_capacity(nrows);
-    for row in 0..nrows {
-        let mut line = String::new();
-        for (col, target) in col_widths.iter().copied().enumerate().take(ncols) {
-            let idx = row * ncols + col;
-            if idx >= words.len() {
-                break;
-            }
-            if col > 0 {
-                line.push_str(output_sep);
-            }
-            let word = &words[idx];
-            line.push_str(word);
-            // Pad to column width (except for the last column on the row).
-            let is_last_in_row = col + 1 >= ncols || (row * ncols + col + 1) >= words.len();
-            if !is_last_in_row {
-                let w = display_width(word);
-                if w < target {
-                    for _ in 0..(target - w) {
-                        line.push(' ');
-                    }
-                }
-            }
-        }
-        output.push(line);
-    }
-
-    output
+/// `column_set_flag(cl, fl)`.
+fn column_set_flag(tab: &mut Table, cl: ColumnId, fl: u32) {
+    let cur = tab.column_flags(cl).unwrap_or(0);
+    // The column is the table's own.
+    let _ = tab.column_set_flags(cl, cur | fl);
 }
 
-/// Run fill mode: read all input, collect words, arrange into columns.
-fn run_fill_mode(config: &Config) -> io::Result<i32> {
-    let mut unreadable = false;
-    let lines = read_all_lines(&config.file_paths, config.keep_empty, &mut unreadable)?;
-    let words = collect_words(&lines);
+/// `get_last_visible_column(ctl, n)`: the `n`th visible column from the
+/// end.
+fn get_last_visible_column(tab: &Table, n: usize) -> Option<ColumnId> {
+    tab.column_ids()
+        .into_iter()
+        .rev()
+        .filter(|&cl| tab.column_flags(cl).is_some_and(|f| f & FL_HIDDEN == 0))
+        .nth(n)
+}
 
-    if words.is_empty() {
-        return Ok(i32::from(unreadable));
-    }
+/// The number of visible columns.
+fn visible_columns(tab: &Table) -> usize {
+    tab.column_ids()
+        .into_iter()
+        .filter(|&cl| tab.column_flags(cl).is_some_and(|f| f & FL_HIDDEN == 0))
+        .count()
+}
 
-    let output_lines = if config.fill_rows {
-        fill_rows(&words, config.term_width, &config.output_separator)
+/// `string_to_column(ctl, str)`: a column by number (from 1), `-1` for the
+/// last visible, or name. None is `undefined column name`.
+fn string_to_column(tab: &Table, s: &[u8], short: &[u8]) -> Result<ColumnId, u8> {
+    let cl = if isdigit_string(s) {
+        let n = strtou32_or_err(s, "failed to parse column", short)?;
+        // `uint32_t` arithmetic: column 0 is number 4294967295.
+        usize::try_from(n.wrapping_sub(1))
+            .ok()
+            .and_then(|n| tab.column(n))
+    } else if s == b"-1" {
+        get_last_visible_column(tab, 0)
     } else {
-        fill_columns(&words, config.term_width, &config.output_separator)
+        tab.column_by_name(s)
     };
-
-    let stdout = io::stdout();
-    let mut out = stdout.lock();
-    for line in &output_lines {
-        out.write_all(line.as_bytes())?;
-        out.write_all(b"\n")?;
-    }
-    out.flush()?;
-
-    Ok(i32::from(unreadable))
+    cl.ok_or_else(|| {
+        warnx(
+            short,
+            &format!("undefined column name {}", escaped_in_quotes(s)),
+        );
+        1
+    })
 }
 
-// ============================================================================
-// Table mode
-// ============================================================================
+/// `has_unnamed(list)`: whether `-` is one of the list's words.
+fn has_unnamed(list: &[u8]) -> bool {
+    if list == b"-" {
+        return true;
+    }
+    if !list.contains(&b',') {
+        return false;
+    }
+    strv_split(list).iter().any(|w| w == b"-")
+}
 
-/// Split a line into fields using the given separator characters.
-///
-/// When `merge` is true (the default), adjacent delimiters are treated as a
-/// single delimiter. When false (`--no-merge`), each delimiter produces a field
-/// boundary (empty fields are preserved).
-fn split_fields(line: &str, sep: &Option<String>, merge: bool) -> Vec<String> {
-    match sep {
-        Some(sep_chars) if !sep_chars.is_empty() => {
-            if merge {
-                // Split on runs of any separator character.
-                let mut fields = Vec::new();
-                let mut current = String::new();
-                let mut in_delim = true;
-
-                for ch in line.chars() {
-                    if sep_chars.contains(ch) {
-                        if !in_delim {
-                            fields.push(current.clone());
-                            current.clear();
-                            in_delim = true;
-                        }
-                        // Skip additional consecutive delimiters.
-                    } else {
-                        in_delim = false;
-                        current.push(ch);
-                    }
-                }
-                if !in_delim {
-                    fields.push(current);
-                }
-                fields
-            } else {
-                // No merge: every delimiter produces a boundary.
-                let mut fields = Vec::new();
-                let mut current = String::new();
-
-                for ch in line.chars() {
-                    if sep_chars.contains(ch) {
-                        fields.push(current.clone());
-                        current.clear();
-                    } else {
-                        current.push(ch);
-                    }
-                }
-                fields.push(current);
-                fields
-            }
+/// `apply_columnflag_from_list(ctl, list, flag, errmsg)`: `0` is every
+/// column; otherwise each word is `-` (the unnamed columns), a range `N-M`
+/// (negative numbers counting visible columns from the end), or one column.
+fn apply_columnflag_from_list(
+    tab: &mut Table,
+    list: &[u8],
+    flag: u32,
+    short: &[u8],
+) -> Result<(), u8> {
+    if list == b"0" {
+        for cl in tab.column_ids() {
+            column_set_flag(tab, cl, flag);
         }
-        _ => {
-            // Default: split on whitespace, merge adjacent.
-            if merge {
-                line.split_whitespace().map(|s| s.to_string()).collect()
-            } else {
-                // Split on individual whitespace characters without merging.
-                let mut fields = Vec::new();
-                let mut current = String::new();
-
-                for ch in line.chars() {
-                    if ch.is_whitespace() {
-                        fields.push(current.clone());
-                        current.clear();
-                    } else {
-                        current.push(ch);
-                    }
-                }
-                fields.push(current);
-                fields
-            }
-        }
+        return Ok(());
     }
-}
-
-/// Pad a string to a given display width, respecting alignment.
-fn pad_field(field: &str, target_width: usize, right_align: bool) -> String {
-    let current_width = display_width(field);
-    if current_width >= target_width {
-        return field.to_string();
-    }
-    let padding = target_width - current_width;
-    let pad_str: String = std::iter::repeat_n(' ', padding).collect();
-    if right_align {
-        let mut result = pad_str;
-        result.push_str(field);
-        result
-    } else {
-        let mut result = field.to_string();
-        result.push_str(&pad_str);
-        result
-    }
-}
-
-/// Run table mode: parse input into fields, compute column widths, output
-/// aligned table.
-fn run_table_mode(config: &Config) -> io::Result<i32> {
-    let mut unreadable = false;
-    let lines = read_all_lines(&config.file_paths, config.keep_empty, &mut unreadable)?;
-    let merge = !config.no_merge;
-
-    // Parse each line into fields.
-    let mut rows: Vec<Vec<String>> = Vec::new();
-    for line in &lines {
-        let fields = split_fields(line, &config.separator, merge);
-        if fields.is_empty() && !config.keep_empty {
+    let mut unnamed = false;
+    for one in strv_split(list) {
+        if one == b"-" {
+            unnamed = true;
             continue;
         }
-        rows.push(fields);
-    }
-
-    if rows.is_empty() {
-        return Ok(i32::from(unreadable));
-    }
-
-    // Determine the number of columns.
-    let ncols = rows.iter().map(|r| r.len()).max().unwrap_or(0);
-    if ncols == 0 {
-        return Ok(i32::from(unreadable));
-    }
-
-    // Prepare header row if column names were specified.
-    let has_header = config.column_names.is_some();
-    let mut all_rows: Vec<Vec<String>> = Vec::new();
-
-    if let Some(ref names) = config.column_names {
-        let mut header = names.clone();
-        // Pad or truncate header to match column count.
-        while header.len() < ncols {
-            header.push(String::new());
-        }
-        all_rows.push(header);
-    }
-    all_rows.extend(rows);
-
-    // Ensure all rows have the same number of columns (pad with empty strings).
-    let total_cols = all_rows.iter().map(|r| r.len()).max().unwrap_or(0);
-    for row in &mut all_rows {
-        while row.len() < total_cols {
-            row.push(String::new());
-        }
-    }
-
-    if config.json {
-        return output_json(config, &all_rows, total_cols, has_header);
-    }
-
-    // Compute column display widths (considering hidden columns are excluded).
-    let visible_cols: Vec<usize> = (0..total_cols)
-        .filter(|c| !config.hide_columns.contains(c))
-        .collect();
-
-    let mut col_widths = vec![0usize; total_cols];
-    for row in &all_rows {
-        for (col_idx, field) in row.iter().enumerate() {
-            if config.hide_columns.contains(&col_idx) {
-                continue;
-            }
-            let w = display_width(field);
-            if w > col_widths[col_idx] {
-                col_widths[col_idx] = w;
-            }
-        }
-    }
-
-    // Output the table.
-    let stdout = io::stdout();
-    let mut out = stdout.lock();
-
-    for row in &all_rows {
-        let mut first = true;
-        for (vi, &col_idx) in visible_cols.iter().enumerate() {
-            if !first {
-                out.write_all(config.output_separator.as_bytes())?;
-            }
-            first = false;
-
-            let field = row.get(col_idx).map(|s| s.as_str()).unwrap_or("");
-            let is_last_visible = vi + 1 >= visible_cols.len();
-            let right_align = config.right_columns.contains(&col_idx);
-
-            if is_last_visible {
-                // Don't pad the last column (no trailing whitespace), unless
-                // right-aligned.
-                if right_align {
-                    let padded = pad_field(field, col_widths[col_idx], true);
-                    out.write_all(padded.as_bytes())?;
+        if one.contains(&b'-')
+            && let Ok((low, up)) = parse_range(&one, 0)
+        {
+            let (mut low, up) = (i64::from(low), i64::from(up));
+            while low <= up {
+                if low < 0 {
+                    let visible = i64::try_from(visible_columns(tab)).unwrap_or(i64::MAX);
+                    // `-low - 1` past the visible columns finds none, and
+                    // flags only ever hide more: skip to where one can be.
+                    if low.saturating_neg().saturating_sub(1) >= visible {
+                        low = visible.saturating_neg().max(low.saturating_add(1));
+                        continue;
+                    }
+                    let n = usize::try_from(low.saturating_neg().saturating_sub(1)).unwrap_or(0);
+                    if let Some(cl) = get_last_visible_column(tab, n) {
+                        column_set_flag(tab, cl, flag);
+                    }
                 } else {
-                    out.write_all(field.as_bytes())?;
+                    // `scols_table_get_column(tab, low - 1)`: 0 finds none.
+                    let n = usize::try_from(low.saturating_sub(1)).ok();
+                    if n.is_some_and(|n| n >= tab.ncols()) {
+                        break;
+                    }
+                    if let Some(cl) = n.and_then(|n| tab.column(n)) {
+                        column_set_flag(tab, cl, flag);
+                    }
                 }
-            } else {
-                let padded = pad_field(field, col_widths[col_idx], right_align);
-                out.write_all(padded.as_bytes())?;
+                low = low.saturating_add(1);
             }
+            continue;
         }
-        out.write_all(b"\n")?;
+        let cl = string_to_column(tab, &one, short)?;
+        column_set_flag(tab, cl, flag);
     }
-
-    out.flush()?;
-    Ok(i32::from(unreadable))
-}
-
-// ============================================================================
-// JSON output
-// ============================================================================
-
-/// Write a JSON-escaped string (with surrounding quotes) to the writer.
-fn write_json_string<W: Write>(w: &mut W, s: &str) -> io::Result<()> {
-    w.write_all(b"\"")?;
-    for ch in s.chars() {
-        match ch {
-            '"' => w.write_all(b"\\\"")?,
-            '\\' => w.write_all(b"\\\\")?,
-            '\n' => w.write_all(b"\\n")?,
-            '\r' => w.write_all(b"\\r")?,
-            '\t' => w.write_all(b"\\t")?,
-            c if c < '\x20' => {
-                write!(w, "\\u{:04x}", c as u32)?;
-            }
-            c => {
-                let mut utf8_buf = [0u8; 4];
-                let encoded = c.encode_utf8(&mut utf8_buf);
-                w.write_all(encoded.as_bytes())?;
+    if unnamed {
+        for cl in tab.column_ids() {
+            if tab.column_name(cl).is_none() {
+                column_set_flag(tab, cl, flag);
             }
         }
     }
-    w.write_all(b"\"")?;
     Ok(())
 }
 
-/// Output the table as JSON. If column names are provided, output as array of
-/// objects. Otherwise output as array of arrays.
-fn output_json(
-    config: &Config,
-    all_rows: &[Vec<String>],
-    total_cols: usize,
-    has_header: bool,
-) -> io::Result<i32> {
-    let stdout = io::stdout();
-    let mut out = stdout.lock();
+/// `reorder_table`: each column named, in turn, after the one before it.
+fn reorder_table(tab: &mut Table, order: &[u8], short: &[u8]) -> Result<(), u8> {
+    let mut wanted = Vec::new();
+    for one in strv_split(order) {
+        wanted.push(string_to_column(tab, &one, short)?);
+    }
+    let mut last: Option<ColumnId> = None;
+    for cl in wanted {
+        // Both are the table's own.
+        let _ = tab.move_column(last, cl);
+        last = Some(cl);
+    }
+    Ok(())
+}
 
-    let visible_cols: Vec<usize> = (0..total_cols)
-        .filter(|c| !config.hide_columns.contains(c))
-        .collect();
-
-    // Determine header keys. If explicit names were given, use the first row as
-    // keys and start data from row 1. Otherwise, generate generic keys.
-    let (keys, data_start): (Vec<String>, usize) = if has_header {
-        let header_row = &all_rows[0];
-        let keys: Vec<String> = visible_cols
-            .iter()
-            .map(|&ci| {
-                header_row
-                    .get(ci)
-                    .cloned()
-                    .unwrap_or_else(|| format!("column{}", ci + 1))
-            })
-            .collect();
-        (keys, 1)
-    } else {
-        let keys: Vec<String> = visible_cols
-            .iter()
-            .map(|&ci| format!("column{}", ci + 1))
-            .collect();
-        (keys, 0)
-    };
-
-    out.write_all(b"[\n")?;
-
-    let data_rows = &all_rows[data_start..];
-    for (row_idx, row) in data_rows.iter().enumerate() {
-        out.write_all(b"  {")?;
-        for (ki, key) in keys.iter().enumerate() {
-            if ki > 0 {
-                out.write_all(b", ")?;
+/// `create_tree`: each line made a child of the (last) line whose ID is
+/// its parent, unless that would close a loop.
+fn create_tree(
+    tab: &mut Table,
+    ctl_tree: &[u8],
+    parent: &[u8],
+    id: &[u8],
+    short: &[u8],
+) -> Result<(), u8> {
+    let cl_tree = string_to_column(tab, ctl_tree, short)?;
+    let cl_p = string_to_column(tab, parent, short)?;
+    let cl_i = string_to_column(tab, id, short)?;
+    column_set_flag(tab, cl_tree, FL_TREE);
+    let lines: Vec<LineId> = tab.line_ids().collect();
+    for &ln_i in &lines {
+        let Some(id) = tab.line_column_data(ln_i, cl_i).map(<[u8]>::to_vec) else {
+            continue;
+        };
+        for &ln in &lines {
+            if tab.line_column_data(ln, cl_p) != Some(id.as_slice()) {
+                continue;
             }
-            write_json_string(&mut out, key)?;
-            out.write_all(b": ")?;
-            let col_idx = visible_cols[ki];
-            let val = row.get(col_idx).map(|s| s.as_str()).unwrap_or("");
-            write_json_string(&mut out, val)?;
+            if tab.line_is_ancestor(ln, ln_i) {
+                continue;
+            }
+            // Both lines are the table's own.
+            let _ = tab.line_add_child(ln_i, ln);
         }
-        out.write_all(b"}")?;
-        if row_idx + 1 < data_rows.len() {
-            out.write_all(b",")?;
+    }
+    Ok(())
+}
+
+impl Ctl {
+    /// `modify_table`: the terminal, the columns' flags, the tree, and --
+    /// last -- the order.
+    fn modify_table(&mut self, short: &[u8]) -> Result<(), u8> {
+        let Some(tab) = self.tab.as_mut() else {
+            return Ok(());
+        };
+        if let Some(w) = self.termwidth
+            && w > 0
+        {
+            tab.set_termwidth(w);
+            tab.set_termforce(TermForce::Always);
         }
-        out.write_all(b"\n")?;
+        for (list, flag) in [
+            (&self.tab_colhide, FL_HIDDEN),
+            (&self.tab_colright, FL_RIGHT),
+            (&self.tab_coltrunc, FL_TRUNC),
+            (&self.tab_colnoextrem, FL_NOEXTREMES),
+            (&self.tab_colwrap, FL_WRAP),
+        ] {
+            if let Some(list) = list {
+                apply_columnflag_from_list(tab, list, flag, short)?;
+            }
+        }
+        if self.tab_colnoextrem.is_none()
+            && let Some(cl) = get_last_visible_column(tab, 0)
+        {
+            column_set_flag(tab, cl, FL_NOEXTREMES);
+        }
+        if let (Some(tree), Some(parent), Some(id)) = (&self.tree, &self.tree_parent, &self.tree_id)
+        {
+            create_tree(tab, tree, parent, id, short)?;
+        }
+        if let Some(order) = &self.tab_order {
+            reorder_table(tab, order, short)?;
+        }
+        Ok(())
     }
 
-    out.write_all(b"]\n")?;
-    out.flush()?;
-    Ok(0)
-}
-
-// ============================================================================
-// Help text
-// ============================================================================
-
-fn print_help() {
-    println!("Slate OS column v{VERSION}");
-    println!();
-    println!("Columnate lists or create aligned tables from delimited input.");
-    println!("With no FILE, or when FILE is -, read standard input.");
-    println!();
-    println!("USAGE:");
-    println!("  column [OPTION]... [FILE]...");
-    println!();
-    println!("OPTIONS:");
-    println!("  -t, --table                 Create a table from delimited input");
-    println!("  -s, --separator=CHARS       Input delimiter character(s) (default: whitespace)");
-    println!("  -o, --output-separator=STR  Output column separator (default: 2 spaces)");
-    println!(
-        "  -c, --columns=N             Terminal width override (default: {DEFAULT_TERM_WIDTH})"
-    );
-    println!("  -x, --fillrows              Fill rows before columns (default: columns first)");
-    println!("  -n, --no-merge              Don't merge multiple adjacent delimiters");
-    println!("  -e, --empty                 Don't ignore empty lines");
-    println!("  -N, --table-columns=NAMES   Comma-separated column header names");
-    println!("  -H, --table-hide=COLS       Hide specified columns (1-based, comma-separated)");
-    println!("  -R, --table-right=COLS      Right-align specified columns (1-based)");
-    println!("  -J, --json                  Output as JSON array of objects");
-    println!("      --help                  Display this help and exit");
-    println!("      --version               Output version information and exit");
-    println!();
-    println!("MODES:");
-    println!("  Default (fill): Reads input words and arranges them into columns");
-    println!("  that fill the terminal width, similar to `ls` output.");
-    println!();
-    println!("  Table (-t): Parses each input line into fields using the delimiter,");
-    println!("  determines column widths, and outputs an aligned table.");
-    println!();
-    println!("EXAMPLES:");
-    println!("  ls | column                  Columnate ls output");
-    println!("  column -t /etc/fstab         Format fstab as an aligned table");
-    println!("  echo 'a:b:c' | column -t -s ':'  Table with colon separator");
-    println!("  column -t -N 'Name,Size,Type' -R 2  Table with headers, col 2 right-aligned");
-}
-
-// ============================================================================
-// Main
-// ============================================================================
-
-fn main() {
-    let args: Vec<String> = env::args().collect();
-
-    match parse_args(&args) {
-        ParseResult::Help => {
-            print_help();
-            process::exit(0);
-        }
-        ParseResult::Version => {
-            println!("column (Slate OS) {VERSION}");
-            process::exit(0);
-        }
-        ParseResult::Run(config) => {
-            let result = if config.table || config.json {
-                run_table_mode(&config)
+    /// `columnate_fillrows`: entries across, then down.
+    fn columnate_fillrows(&mut self, out: &mut Vec<u8>) {
+        self.maxlength = self.maxlength.saturating_add(TABCHAR_CELLS) & !(TABCHAR_CELLS - 1);
+        let numcols = self
+            .termwidth
+            .unwrap_or(0)
+            .checked_div(self.maxlength)
+            .unwrap_or(0);
+        let mut endcol = self.maxlength;
+        let (mut chcnt, mut col) = (0usize, 0usize);
+        let n = self.ents.len();
+        for (i, entry) in self.ents.iter().enumerate() {
+            out.extend_from_slice(&wcs_to_mbs(entry));
+            chcnt = chcnt.saturating_add(width(entry));
+            if i.saturating_add(1) == n {
+                break;
+            }
+            col = col.saturating_add(1);
+            if col == numcols {
+                chcnt = 0;
+                col = 0;
+                endcol = self.maxlength;
+                out.extend_from_slice(b"\n");
             } else {
-                run_fill_mode(&config)
-            };
+                tab_to(out, &mut chcnt, endcol);
+                endcol = endcol.saturating_add(self.maxlength);
+            }
+        }
+        if chcnt != 0 {
+            out.extend_from_slice(b"\n");
+        }
+    }
 
-            match result {
-                Ok(code) => process::exit(code),
+    /// `columnate_fillcols`: entries down, then across.
+    fn columnate_fillcols(&mut self, out: &mut Vec<u8>) {
+        self.maxlength = self.maxlength.saturating_add(TABCHAR_CELLS) & !(TABCHAR_CELLS - 1);
+        let numcols = self
+            .termwidth
+            .unwrap_or(0)
+            .checked_div(self.maxlength)
+            .unwrap_or(0)
+            .max(1);
+        let nents = self.ents.len();
+        let numrows = nents.div_ceil(numcols);
+        for row in 0..numrows {
+            let mut endcol = self.maxlength;
+            let mut chcnt = 0usize;
+            let mut base = row;
+            for _ in 0..numcols {
+                let Some(entry) = self.ents.get(base) else {
+                    break;
+                };
+                out.extend_from_slice(&wcs_to_mbs(entry));
+                chcnt = chcnt.saturating_add(width(entry));
+                base = base.saturating_add(numrows);
+                if base >= nents {
+                    break;
+                }
+                tab_to(out, &mut chcnt, endcol);
+                endcol = endcol.saturating_add(self.maxlength);
+            }
+            out.extend_from_slice(b"\n");
+        }
+    }
+
+    /// `simple_print`: one entry a line.
+    fn simple_print(&self, out: &mut Vec<u8>) {
+        for entry in &self.ents {
+            out.extend_from_slice(&wcs_to_mbs(entry));
+            out.extend_from_slice(b"\n");
+        }
+    }
+}
+
+/// Tabs to the last tab stop at or before `endcol`.
+fn tab_to(out: &mut Vec<u8>, chcnt: &mut usize, endcol: usize) {
+    loop {
+        let cnt = chcnt.saturating_add(TABCHAR_CELLS) & !(TABCHAR_CELLS - 1);
+        if cnt > endcol {
+            break;
+        }
+        out.extend_from_slice(b"\t");
+        *chcnt = cnt;
+    }
+}
+
+/// The option each parsed item stands for, as upstream's switch sees it.
+fn option_code(opt: &Opt<'_>) -> Option<(u8, Option<OsString>)> {
+    match opt {
+        Opt::Short(c, value) => Some((*c, value.clone())),
+        Opt::Long(name, value) => {
+            let i = LONGS.iter().position(|&(n, _)| n == *name)?;
+            Some((*LONG_VALS.get(i)?, value.clone()))
+        }
+        Opt::Operand(_) => None,
+    }
+}
+
+/// `option_to_longopt(c, longopts)`: the first long option for `c`.
+fn option_to_longopt(c: i32) -> Option<&'static str> {
+    LONG_VALS
+        .iter()
+        .position(|&v| i32::from(v) == c)
+        .and_then(|i| LONGS.get(i))
+        .map(|&(name, _)| name)
+}
+
+/// `main()`.
+#[allow(
+    clippy::too_many_lines,
+    reason = "upstream's main, kept in one piece so it can be read against it"
+)]
+fn run(argv: &[OsString], short: &[u8], out: &mut Stdout) -> u8 {
+    let arg0 = argv
+        .first()
+        .map_or(OsStr::new("column"), OsString::as_os_str);
+    let mut ctl = Ctl::new(smartcols::tty::codeset_is_utf8());
+    // `setlocale(LC_ALL, "")`.
+    ctl.errno = smartcols::tty::setlocale_errno();
+    let mut excl_st = [0i32; 3];
+    let mut files: Vec<&OsString> = Vec::new();
+
+    let own = argv.get(1..).unwrap_or_default();
+    for item in COLUMN.parse(own, SHORTS, LONGS) {
+        let opt = match item {
+            Ok(opt) => opt,
+            Err(e) => {
+                // glibc names the program by argv[0] as given.
+                stderr_write(format!("{}: {}\n", shown(&os_bytes(arg0)), e.sentence).as_bytes());
+                return errtryhelp(short);
+            }
+        };
+        if let Opt::Operand(file) = opt {
+            files.push(file);
+            continue;
+        }
+        let Some((c, value)) = option_code(&opt) else {
+            continue;
+        };
+        if let Some(msg) =
+            err_exclusive_options(i32::from(c), &EXCL, &mut excl_st, option_to_longopt, short)
+        {
+            stderr_write(msg.as_bytes());
+            return 1;
+        }
+        let arg = value
+            .as_deref()
+            .map(os_bytes)
+            .unwrap_or_default()
+            .into_owned();
+        match c {
+            b'C' => ctl.tab_columns.push(arg),
+            b'c' => {
+                if arg == b"unlimited" {
+                    ctl.termwidth = Some(0);
+                } else {
+                    match strtou32_or_err(&arg, "invalid columns argument", short) {
+                        Ok(w) => ctl.termwidth = usize::try_from(w).ok(),
+                        Err(status) => return status,
+                    }
+                    // `ul_strtou64` cleared it.
+                    ctl.errno = 0;
+                }
+            }
+            b'd' => ctl.tab_noheadings = true,
+            b'E' => ctl.tab_colnoextrem = Some(arg),
+            b'e' => ctl.header_repeat = true,
+            b'H' => {
+                ctl.hide_unnamed = has_unnamed(&arg);
+                ctl.tab_colhide = Some(arg);
+            }
+            b'i' => ctl.tree_id = Some(arg),
+            b'J' => {
+                ctl.json = true;
+                ctl.mode = Mode::Table;
+            }
+            b'L' => ctl.keep_empty_lines = true,
+            b'l' => {
+                match strtou32_or_err(&arg, "invalid columns limit argument", short) {
+                    Ok(n) => ctl.maxncols = usize::try_from(n).unwrap_or(usize::MAX),
+                    Err(status) => return status,
+                }
+                ctl.errno = 0;
+                if ctl.maxncols == 0 {
+                    warnx(short, "columns limit must be greater than zero");
+                    return 1;
+                }
+            }
+            b'N' => ctl.tab_colnames = Some(strv_split(&arg)),
+            b'n' => ctl.tab_name = Some(arg),
+            b'm' => ctl.maxout = true,
+            b'O' => ctl.tab_order = Some(arg),
+            b'o' => ctl.output_separator = arg,
+            b'p' => ctl.tree_parent = Some(arg),
+            b'R' => ctl.tab_colright = Some(arg),
+            b'r' => ctl.tree = Some(arg),
+            b's' => match mbs_to_wcs(smartcols::mbs::c_str(&arg), ctl.utf8) {
+                Some(seps) => {
+                    ctl.input_separator = seps;
+                    ctl.greedy = false;
+                }
+                None => {
+                    warn(
+                        short,
+                        "failed to use input separator",
+                        &std::io::Error::from_raw_os_error(EILSEQ),
+                    );
+                    return 1;
+                }
+            },
+            b'T' => ctl.tab_coltrunc = Some(arg),
+            b't' => ctl.mode = Mode::Table,
+            b'W' => ctl.tab_colwrap = Some(arg),
+            b'x' => ctl.mode = Mode::FillRows,
+            b'h' => {
+                out.write(&usage(short));
+                return 0;
+            }
+            b'V' => {
+                let mut line = short.to_vec();
+                line.extend_from_slice(b" from util-linux 2.39.3\n");
+                out.write(&line);
+                return 0;
+            }
+            _ => return errtryhelp(short),
+        }
+    }
+
+    if ctl.termwidth.is_none() {
+        // `get_terminal_width(80)`.
+        ctl.errno = smartcols::tty::dimension_errno(ctl.errno, true, false);
+        ctl.termwidth = Some(smartcols::tty::terminal_dimension().0.unwrap_or(80));
+    }
+    if ctl.tree.is_some() {
+        ctl.mode = Mode::Table;
+        if ctl.tree_parent.is_none() || ctl.tree_id.is_none() {
+            warnx(
+                short,
+                "options --tree-id and --tree-parent are required for tree formatting",
+            );
+            return 1;
+        }
+    }
+    if ctl.mode != Mode::Table
+        && (ctl.tab_order.is_some()
+            || ctl.tab_name.is_some()
+            || ctl.tab_colwrap.is_some()
+            || ctl.tab_colhide.is_some()
+            || ctl.tab_coltrunc.is_some()
+            || ctl.tab_colnoextrem.is_some()
+            || ctl.tab_colright.is_some()
+            || ctl.tab_colnames.is_some()
+            || !ctl.tab_columns.is_empty())
+    {
+        warnx(short, "option --table required for all --table-*");
+        return 1;
+    }
+    if ctl.tab_colnames.is_none() && ctl.tab_columns.is_empty() && ctl.json {
+        warnx(
+            short,
+            "option --table-columns or --table-column required for --json",
+        );
+        return 1;
+    }
+
+    // `eval`: an unsigned int, one for each file that would not open.
+    let mut eval: u32 = 0;
+    if files.is_empty() {
+        if let Err(status) = ctl.read_input(sys::stdin(), short) {
+            return status;
+        }
+    } else {
+        for file in files {
+            match std::fs::File::open(file) {
+                Ok(f) => {
+                    if let Err(status) = ctl.read_input(f, short) {
+                        return status;
+                    }
+                }
                 Err(e) => {
-                    eprintln!("column: {e}");
-                    process::exit(1);
+                    warn(short, &shown(&os_bytes(file)), &e);
+                    ctl.errno = e.raw_os_error().unwrap_or(ENOENT);
+                    eval = eval.wrapping_add(1);
                 }
             }
         }
     }
+
+    if ctl.mode != Mode::Table {
+        if ctl.ents.is_empty() {
+            // `exit(eval)`: the count, as the low byte of the status.
+            return eval.to_le_bytes()[0];
+        }
+        if ctl.maxlength >= ctl.termwidth.unwrap_or(0) {
+            ctl.mode = Mode::Simple;
+        }
+    }
+
+    match ctl.mode {
+        Mode::Table => {
+            if ctl.tab.as_ref().is_some_and(|t| t.nlines() > 0) {
+                if let Err(status) = ctl.modify_table(short) {
+                    return status;
+                }
+                if let Some(tab) = ctl.tab.as_mut() {
+                    let mut text = Vec::new();
+                    let printed = tab.print_into(&mut text);
+                    out.write(&text);
+                    eval = u32::from(printed.is_err());
+                }
+            }
+        }
+        Mode::FillCols | Mode::FillRows | Mode::Simple => {
+            // Written at once: what glibc's buffer does with it is the same
+            // as for the pieces, since it only asks how much it holds.
+            let mut text = Vec::new();
+            match ctl.mode {
+                Mode::FillCols => ctl.columnate_fillcols(&mut text),
+                Mode::FillRows => ctl.columnate_fillrows(&mut text),
+                _ => ctl.simple_print(&mut text),
+            }
+            out.orient_wide();
+            out.write(&text);
+        }
+    }
+    u8::from(eval != 0)
 }
 
-// ============================================================================
-// Tests
-// ============================================================================
+/// Standard input, read through descriptor 0 itself: Rust's own `Stdin`
+/// reads a closed descriptor as an empty one, where upstream's `getline`
+/// fails with `EBADF` -- `read failed`.
+mod sys {
+    use std::io::Read;
+
+    #[cfg(unix)]
+    pub fn stdin() -> impl Read {
+        use std::os::fd::FromRawFd;
+        // SAFETY: descriptor 0 belongs to the process for its whole life;
+        // the `File` built on it is never dropped (`ManuallyDrop`), so it is
+        // never closed here, and reading a descriptor that is closed only
+        // fails with `EBADF`.
+        let file = unsafe { std::fs::File::from_raw_fd(0) };
+        Stdin(std::mem::ManuallyDrop::new(file))
+    }
+
+    /// Descriptor 0, borrowed.
+    #[cfg(unix)]
+    struct Stdin(std::mem::ManuallyDrop<std::fs::File>);
+
+    #[cfg(unix)]
+    impl Read for Stdin {
+        fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+            self.0.read(buf)
+        }
+    }
+
+    /// The Windows host the unit tests run on.
+    #[cfg(not(unix))]
+    pub fn stdin() -> impl Read {
+        std::io::stdin()
+    }
+}
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    // --- Display width tests ---
-
-    #[test]
-    fn test_display_width_ascii() {
-        assert_eq!(display_width("hello"), 5);
-        assert_eq!(display_width(""), 0);
-        assert_eq!(display_width("a b c"), 5);
-    }
-
-    #[test]
-    fn test_display_width_cjk() {
-        // Each CJK ideograph is 2 columns wide.
-        assert_eq!(display_width("\u{4e16}\u{754c}"), 4); // "world" in Chinese
-        assert_eq!(display_width("a\u{4e16}b"), 4); // a(1) + CJK(2) + b(1)
-    }
-
-    #[test]
-    fn test_display_width_combining() {
-        // 'e' + combining acute accent = 1 column.
-        assert_eq!(display_width("e\u{0301}"), 1);
-    }
-
-    #[test]
-    fn test_display_width_zero_width() {
-        // Zero-width space should contribute nothing.
-        assert_eq!(display_width("a\u{200B}b"), 2);
-    }
-
-    #[test]
-    fn test_display_width_fullwidth() {
-        // Fullwidth 'A' (U+FF21) is 2 columns wide.
-        assert_eq!(display_width("\u{FF21}"), 2);
-    }
-
-    // --- Fill mode tests ---
-
-    #[test]
-    fn test_fill_columns_basic() {
-        let words: Vec<String> = vec!["a", "b", "c", "d", "e", "f"]
-            .into_iter()
-            .map(String::from)
-            .collect();
-        let result = fill_columns(&words, 80, "  ");
-        // With width 80 and 1-char words, all should fit on one line.
-        assert_eq!(result.len(), 1);
-        assert!(result[0].contains("a"));
-        assert!(result[0].contains("f"));
-    }
-
-    #[test]
-    fn test_fill_columns_narrow_width() {
-        let words: Vec<String> = vec!["alpha", "beta", "gamma", "delta"]
-            .into_iter()
-            .map(String::from)
-            .collect();
-        // Width of 10: "alpha" is 5, "beta" is 4. Two cols would need at least
-        // 5+2+5 = 12 > 10, so we get 1 column.
-        let result = fill_columns(&words, 10, "  ");
-        assert_eq!(result.len(), 4);
-        assert_eq!(result[0], "alpha");
-        assert_eq!(result[1], "beta");
-        assert_eq!(result[2], "gamma");
-        assert_eq!(result[3], "delta");
-    }
-
-    #[test]
-    fn test_fill_columns_two_columns() {
-        let words: Vec<String> = vec!["aaa", "bbb", "ccc", "ddd"]
-            .into_iter()
-            .map(String::from)
-            .collect();
-        // Width 12: two cols => 3+2+3 = 8, fits. Three cols => 3+2+3+2+3 = 13 > 12.
-        let result = fill_columns(&words, 12, "  ");
-        // 4 words, 2 cols => 2 rows. Column-first order: col0=[aaa,bbb], col1=[ccc,ddd].
-        assert_eq!(result.len(), 2);
-        assert_eq!(result[0], "aaa  ccc");
-        assert_eq!(result[1], "bbb  ddd");
-    }
-
-    #[test]
-    fn test_fill_columns_empty() {
-        let words: Vec<String> = Vec::new();
-        let result = fill_columns(&words, 80, "  ");
-        assert!(result.is_empty());
-    }
-
-    #[test]
-    fn test_fill_rows_basic() {
-        let words: Vec<String> = vec!["aaa", "bbb", "ccc", "ddd"]
-            .into_iter()
-            .map(String::from)
-            .collect();
-        // Width 12: two cols => 3+2+3 = 8, fits.
-        let result = fill_rows(&words, 12, "  ");
-        // Row-first order: row0=[aaa,bbb], row1=[ccc,ddd].
-        assert_eq!(result.len(), 2);
-        assert_eq!(result[0], "aaa  bbb");
-        assert_eq!(result[1], "ccc  ddd");
-    }
-
-    #[test]
-    fn test_fill_rows_single_column() {
-        let words: Vec<String> = vec!["longword1", "longword2"]
-            .into_iter()
-            .map(String::from)
-            .collect();
-        // Width 10: "longword1" is 9. Two cols => 9+2+9 = 20 > 10. One col.
-        let result = fill_rows(&words, 10, "  ");
-        assert_eq!(result.len(), 2);
-        assert_eq!(result[0], "longword1");
-        assert_eq!(result[1], "longword2");
-    }
-
-    #[test]
-    fn test_fill_rows_empty() {
-        let words: Vec<String> = Vec::new();
-        let result = fill_rows(&words, 80, "  ");
-        assert!(result.is_empty());
-    }
-
-    #[test]
-    fn test_fill_columns_uneven() {
-        // 5 words in 2 cols => 3 rows. col0 gets 3, col1 gets 2.
-        let words: Vec<String> = vec!["a", "b", "c", "d", "e"]
-            .into_iter()
-            .map(String::from)
-            .collect();
-        let _result = fill_columns(&words, 80, "  ");
-        // With such tiny words, they likely all fit on one row. Let's use
-        // narrow width to force 2 cols.
-        let result2 = fill_columns(&words, 6, "  ");
-        // 1-char words: 2 cols need 1+2+1 = 4, fits in 6.
-        // 3 cols need 1+2+1+2+1 = 7 > 6, so 2 cols.
-        // 2 cols, 5 words => 3 rows. Col-first: col0=[a,b,c], col1=[d,e].
-        assert_eq!(result2.len(), 3);
-        assert_eq!(result2[0], "a  d");
-        assert_eq!(result2[1], "b  e");
-        assert_eq!(result2[2], "c");
-    }
-
-    // --- Table mode / field splitting tests ---
-
-    #[test]
-    fn test_split_fields_whitespace_merge() {
-        let fields = split_fields("  hello   world  ", &None, true);
-        assert_eq!(fields, vec!["hello", "world"]);
-    }
-
-    #[test]
-    fn test_split_fields_whitespace_no_merge() {
-        let fields = split_fields("a  b", &None, false);
-        // 'a', '', 'b' -- two spaces produce an empty field between.
-        assert_eq!(fields, vec!["a", "", "b"]);
-    }
-
-    #[test]
-    fn test_split_fields_custom_separator_merge() {
-        let fields = split_fields("a::b::c", &Some(":".to_string()), true);
-        assert_eq!(fields, vec!["a", "b", "c"]);
-    }
-
-    #[test]
-    fn test_split_fields_custom_separator_no_merge() {
-        let fields = split_fields("a::b", &Some(":".to_string()), false);
-        assert_eq!(fields, vec!["a", "", "b"]);
-    }
-
-    #[test]
-    fn test_split_fields_multi_char_separator() {
-        let fields = split_fields("a,b;c", &Some(",;".to_string()), true);
-        assert_eq!(fields, vec!["a", "b", "c"]);
-    }
-
-    #[test]
-    fn test_split_fields_empty_line() {
-        let fields = split_fields("", &None, true);
-        assert!(fields.is_empty());
-    }
-
-    #[test]
-    fn test_split_fields_only_delimiters() {
-        let fields = split_fields(":::", &Some(":".to_string()), true);
-        assert!(fields.is_empty());
-
-        let fields_no_merge = split_fields(":::", &Some(":".to_string()), false);
-        assert_eq!(fields_no_merge, vec!["", "", "", ""]);
-    }
-
-    // --- Padding / alignment tests ---
-
-    #[test]
-    fn test_pad_field_left() {
-        assert_eq!(pad_field("hi", 5, false), "hi   ");
-    }
-
-    #[test]
-    fn test_pad_field_right() {
-        assert_eq!(pad_field("hi", 5, true), "   hi");
-    }
-
-    #[test]
-    fn test_pad_field_exact() {
-        assert_eq!(pad_field("hello", 5, false), "hello");
-    }
-
-    #[test]
-    fn test_pad_field_wider_than_target() {
-        assert_eq!(pad_field("toolong", 3, false), "toolong");
-    }
-
-    // --- Column index parsing tests ---
-
-    #[test]
-    fn test_parse_column_indices_valid() {
-        let result = parse_column_indices("1,3,5").unwrap();
-        assert_eq!(result, vec![0, 2, 4]); // 1-based -> 0-based
-    }
-
-    #[test]
-    fn test_parse_column_indices_zero_invalid() {
-        assert!(parse_column_indices("0").is_err());
-    }
-
-    #[test]
-    fn test_parse_column_indices_non_numeric() {
-        assert!(parse_column_indices("a,b").is_err());
-    }
-
-    #[test]
-    fn test_parse_column_indices_empty_parts() {
-        let result = parse_column_indices("1,,2,").unwrap();
-        assert_eq!(result, vec![0, 1]);
-    }
-
-    // --- Argument parsing tests ---
-
-    #[test]
-    fn test_parse_args_defaults() {
-        let args: Vec<String> = vec!["column".into()];
-        match parse_args(&args) {
-            ParseResult::Run(config) => {
-                assert!(!config.table);
-                assert!(!config.fill_rows);
-                assert!(!config.no_merge);
-                assert!(!config.keep_empty);
-                assert!(!config.json);
-                assert_eq!(config.term_width, 80);
-                assert_eq!(config.output_separator, "  ");
-                assert!(config.separator.is_none());
-                assert_eq!(config.file_paths, vec!["-"]);
-            }
-            _ => panic!("Expected Run"),
-        }
-    }
-
-    #[test]
-    fn test_parse_args_table_mode() {
-        let args: Vec<String> = vec!["column".into(), "-t".into()];
-        match parse_args(&args) {
-            ParseResult::Run(config) => assert!(config.table),
-            _ => panic!("Expected Run"),
-        }
-    }
-
-    #[test]
-    fn test_parse_args_long_table() {
-        let args: Vec<String> = vec!["column".into(), "--table".into()];
-        match parse_args(&args) {
-            ParseResult::Run(config) => assert!(config.table),
-            _ => panic!("Expected Run"),
-        }
-    }
-
-    #[test]
-    fn test_parse_args_separator() {
-        let args: Vec<String> = vec!["column".into(), "-t".into(), "-s".into(), ":".into()];
-        match parse_args(&args) {
-            ParseResult::Run(config) => {
-                assert!(config.table);
-                assert_eq!(config.separator, Some(":".to_string()));
-            }
-            _ => panic!("Expected Run"),
-        }
-    }
-
-    #[test]
-    fn test_parse_args_separator_attached() {
-        let args: Vec<String> = vec!["column".into(), "-ts:".into()];
-        match parse_args(&args) {
-            ParseResult::Run(config) => {
-                assert!(config.table);
-                assert_eq!(config.separator, Some(":".to_string()));
-            }
-            _ => panic!("Expected Run"),
-        }
-    }
-
-    #[test]
-    fn test_parse_args_output_separator_long() {
-        let args: Vec<String> = vec!["column".into(), "--output-separator= | ".into()];
-        match parse_args(&args) {
-            ParseResult::Run(config) => {
-                assert_eq!(config.output_separator, " | ");
-            }
-            _ => panic!("Expected Run"),
-        }
-    }
-
-    #[test]
-    fn test_parse_args_columns() {
-        let args: Vec<String> = vec!["column".into(), "-c".into(), "120".into()];
-        match parse_args(&args) {
-            ParseResult::Run(config) => assert_eq!(config.term_width, 120),
-            _ => panic!("Expected Run"),
-        }
-    }
-
-    #[test]
-    fn test_parse_args_fillrows() {
-        let args: Vec<String> = vec!["column".into(), "-x".into()];
-        match parse_args(&args) {
-            ParseResult::Run(config) => assert!(config.fill_rows),
-            _ => panic!("Expected Run"),
-        }
-    }
-
-    #[test]
-    fn test_parse_args_file_paths() {
-        let args: Vec<String> = vec!["column".into(), "-t".into(), "file1".into(), "file2".into()];
-        match parse_args(&args) {
-            ParseResult::Run(config) => {
-                assert_eq!(config.file_paths, vec!["file1", "file2"]);
-            }
-            _ => panic!("Expected Run"),
-        }
-    }
-
-    #[test]
-    fn test_parse_args_dash_as_stdin() {
-        let args: Vec<String> = vec!["column".into(), "-".into()];
-        match parse_args(&args) {
-            ParseResult::Run(config) => {
-                assert_eq!(config.file_paths, vec!["-"]);
-            }
-            _ => panic!("Expected Run"),
-        }
-    }
-
-    #[test]
-    fn test_parse_args_help() {
-        let args: Vec<String> = vec!["column".into(), "--help".into()];
-        assert!(matches!(parse_args(&args), ParseResult::Help));
-    }
-
-    #[test]
-    fn test_parse_args_version() {
-        let args: Vec<String> = vec!["column".into(), "--version".into()];
-        assert!(matches!(parse_args(&args), ParseResult::Version));
-    }
-
-    #[test]
-    fn test_parse_args_double_dash() {
-        // After --, everything is a file path even if it starts with '-'.
-        let args: Vec<String> = vec!["column".into(), "--".into(), "-t".into()];
-        match parse_args(&args) {
-            ParseResult::Run(config) => {
-                assert!(!config.table);
-                assert_eq!(config.file_paths, vec!["-t"]);
-            }
-            _ => panic!("Expected Run"),
-        }
-    }
-
-    // --- JSON output tests ---
-
-    #[test]
-    fn test_json_string_escape() {
-        let mut buf = Vec::new();
-        write_json_string(&mut buf, "hello \"world\"").unwrap();
-        let s = String::from_utf8(buf).unwrap();
-        assert_eq!(s, "\"hello \\\"world\\\"\"");
-    }
-
-    #[test]
-    fn test_json_string_special_chars() {
-        let mut buf = Vec::new();
-        write_json_string(&mut buf, "a\tb\nc\\d").unwrap();
-        let s = String::from_utf8(buf).unwrap();
-        assert_eq!(s, "\"a\\tb\\nc\\\\d\"");
-    }
-
-    #[test]
-    fn test_json_string_control_char() {
-        let mut buf = Vec::new();
-        write_json_string(&mut buf, "\x01").unwrap();
-        let s = String::from_utf8(buf).unwrap();
-        assert_eq!(s, "\"\\u0001\"");
-    }
-
-    // --- Collect words tests ---
-
-    #[test]
-    fn test_collect_words_basic() {
-        let lines = vec!["hello world".to_string(), "  foo  bar  ".to_string()];
-        let words = collect_words(&lines);
-        assert_eq!(words, vec!["hello", "world", "foo", "bar"]);
-    }
-
-    #[test]
-    fn test_collect_words_empty() {
-        let lines: Vec<String> = Vec::new();
-        let words = collect_words(&lines);
-        assert!(words.is_empty());
-    }
-
-    #[test]
-    fn test_collect_words_blank_lines() {
-        let lines = vec!["".to_string(), "  ".to_string(), "word".to_string()];
-        let words = collect_words(&lines);
-        assert_eq!(words, vec!["word"]);
-    }
-
-    // --- East Asian width in fill mode ---
-
-    #[test]
-    fn test_fill_columns_with_cjk() {
-        let words: Vec<String> = vec![
-            "\u{4e16}\u{754c}".to_string(), // width 4
-            "ab".to_string(),               // width 2
-            "\u{4e16}".to_string(),         // width 2
-        ];
-        // Width 12: col widths [4, 2, 2] + 2 seps * 2 = 12. Fits in 3 cols.
-        let result = fill_columns(&words, 12, "  ");
-        // 3 words, 3 cols, 1 row.
-        assert_eq!(result.len(), 1);
-    }
-
-    // --- Table mode integration tests ---
-
-    #[test]
-    fn test_table_basic_alignment() {
-        // Simulate table mode manually: split + pad.
-        let lines = vec![
-            "Name Age City".to_string(),
-            "Alice 30 NYC".to_string(),
-            "Bob 25 LA".to_string(),
-        ];
-        let merge = true;
-        let mut rows: Vec<Vec<String>> = Vec::new();
-        for line in &lines {
-            rows.push(split_fields(line, &None, merge));
-        }
-
-        let ncols = rows.iter().map(|r| r.len()).max().unwrap_or(0);
-        assert_eq!(ncols, 3);
-
-        // Compute column widths.
-        let mut widths = vec![0usize; ncols];
-        for row in &rows {
-            for (ci, field) in row.iter().enumerate() {
-                let w = display_width(field);
-                if w > widths[ci] {
-                    widths[ci] = w;
-                }
-            }
-        }
-        assert_eq!(widths, vec![5, 3, 4]); // Alice=5, Age=3, City=4
-
-        // Pad first row.
-        let padded0 = pad_field(&rows[0][0], widths[0], false);
-        assert_eq!(padded0, "Name ");
-    }
-
-    #[test]
-    fn test_table_right_alignment() {
-        let field = "42";
-        let padded = pad_field(field, 6, true);
-        assert_eq!(padded, "    42");
-    }
-
-    #[test]
-    fn test_char_width_hangul() {
-        // Hangul syllable (U+AC00) should be 2 columns.
-        assert_eq!(char_display_width('\u{AC00}'), 2);
-    }
-
-    #[test]
-    fn test_char_width_tab() {
-        // Tab is < 0x20 so it returns 0 (control character).
-        assert_eq!(char_display_width('\t'), 0);
-    }
-
-    #[test]
-    fn test_char_width_normal() {
-        assert_eq!(char_display_width('A'), 1);
-        assert_eq!(char_display_width(' '), 1);
-    }
-
-    #[test]
-    fn test_single_word_fill() {
-        let words = vec!["hello".to_string()];
-        let result = fill_columns(&words, 80, "  ");
-        assert_eq!(result, vec!["hello"]);
-    }
-
-    #[test]
-    fn test_single_word_fill_rows() {
-        let words = vec!["hello".to_string()];
-        let result = fill_rows(&words, 80, "  ");
-        assert_eq!(result, vec!["hello"]);
-    }
-
-    #[test]
-    fn test_fill_columns_custom_separator() {
-        let words: Vec<String> = vec!["a", "b", "c", "d"]
-            .into_iter()
-            .map(String::from)
-            .collect();
-        // With " | " (3 chars) separator, 2 cols need 1+3+1 = 5.
-        let result = fill_columns(&words, 5, " | ");
-        assert_eq!(result.len(), 2);
-        assert_eq!(result[0], "a | c");
-        assert_eq!(result[1], "b | d");
-    }
-
-    #[test]
-    fn test_split_fields_trailing_delimiter() {
-        let fields = split_fields("a:b:", &Some(":".to_string()), false);
-        assert_eq!(fields, vec!["a", "b", ""]);
-    }
-
-    #[test]
-    fn test_split_fields_leading_delimiter_no_merge() {
-        let fields = split_fields(":a:b", &Some(":".to_string()), false);
-        assert_eq!(fields, vec!["", "a", "b"]);
-    }
-
-    #[test]
-    fn test_parse_args_json_flag() {
-        let args: Vec<String> = vec!["column".into(), "-J".into()];
-        match parse_args(&args) {
-            ParseResult::Run(config) => assert!(config.json),
-            _ => panic!("Expected Run"),
-        }
-    }
-
-    #[test]
-    fn test_parse_args_no_merge() {
-        let args: Vec<String> = vec!["column".into(), "-tn".into()];
-        match parse_args(&args) {
-            ParseResult::Run(config) => {
-                assert!(config.table);
-                assert!(config.no_merge);
-            }
-            _ => panic!("Expected Run"),
-        }
-    }
-
-    #[test]
-    fn test_parse_args_keep_empty() {
-        let args: Vec<String> = vec!["column".into(), "-e".into()];
-        match parse_args(&args) {
-            ParseResult::Run(config) => assert!(config.keep_empty),
-            _ => panic!("Expected Run"),
-        }
-    }
-}
+mod tests;

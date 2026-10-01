@@ -2417,8 +2417,16 @@ mod tests {
             y: close.y + 2.0,
             kind,
         };
+        let palette = Palette::for_mode(false);
+        let unlit = dialog.render(&palette);
         dialog.handle_mouse_event(&at(MouseEventKind::Move));
         assert!(dialog.close_hovered, "the close button is not lit");
+        // And drawn lit: the frame draws it otherwise.
+        assert_ne!(
+            dialog.render(&palette),
+            unlit,
+            "the lit close button is drawn as the unlit one"
+        );
         assert_eq!(
             dialog.handle_mouse_event(&at(MouseEventKind::Press(MouseButton::Left))),
             EventResult::Consumed

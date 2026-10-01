@@ -180483,7 +180483,7 @@ user path, beside the gates it calls. `syscall::dispatch`'s
 `test_dispatch_fs_gates` checks each, as a scratch process with no
 capability.
 
-### A-AN-OPEN-FILE-FOLLOWS-ITS-NAME -- 2026-10-01 -- PARTLY FIXED the same day: memfs and the handle layer (steps 1-3 of the plan below); ext4 (step 4) next (lane A)
+### A-AN-OPEN-FILE-FOLLOWS-ITS-NAME -- 2026-10-01 -- FIXED the same day for memfs and ext4 (steps 1-4 of the plan below; design-decisions §1508); step 5, `O_TMPFILE`, open (lane A)
 
 **In short:** opening a file here gives a program a handle to the file's
 *name*, not to the file. Every read and write looks the name up again. So a
@@ -180558,6 +180558,24 @@ data stays readable through the handle, and nowhere else, until the close.
    until its last close and is reclaimed at the next mount after a crash.
    The superblock field exists today and nothing reads or writes it.
 5. `O_TMPFILE` and `SYS_FS_TMPFILE`: create, open, unlink.
+
+**Done, 2026-10-01** (design-decisions §1508):
+- **Steps 1-3:** commit 82d5088e3. Test: `fs::handle`'s `test_held_files`.
+- **Step 4, ext4:**
+  - The inode-addressed calls.
+  - Pins per inode.
+  - The orphan list, written at an unlink of a held file and read back at
+    mount. `Ext4Fs::open` frees anything a crash left there before the
+    filesystem is mounted.
+  - A replacing rename orphans a held target the same way.
+  - Test: `ext4::self_test`'s held-file rung, on the boot test's `/mnt`.
+    The free-inode count shows the inode kept while held and freed at the
+    last close.
+- **Still open:**
+  - Step 5, `O_TMPFILE` and `SYS_FS_TMPFILE`. They are now buildable as
+    create, hold, unlink, but still refuse.
+  - On FAT and the pseudo filesystems a handle still goes by name, so
+    everything above applies to them as before.
 
 ### A-LINUX-FSTAT-OF-A-FILE-WAS-MADE-UP -- 2026-10-01 -- FIXED the same day (lane A)
 

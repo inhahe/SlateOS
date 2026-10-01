@@ -194,6 +194,61 @@ pub fn self_test() -> KernelResult<()> {
         );
     }
 
+    // A file deleted while open stays the handle's, and is freed at the last
+    // close (known-issues A-AN-OPEN-FILE-FOLLOWS-ITS-NAME). Between the two
+    // its inode is still allocated -- on the orphan list, so a crash leaves it
+    // to the next mount -- and after the close it is not: the free-inode
+    // count says both, which is what tells "kept" from "leaked" and "freed"
+    // from "freed early".
+    {
+        use crate::fs::handle::{self, OpenFlags};
+        let owned = mount_path.join("held-selftest.tmp");
+        let path = owned.as_path();
+        let free_inodes =
+            |p: &crate::fs::path::Path| crate::fs::Vfs::statvfs(p).map(|i| i.free_inodes);
+
+        crate::fs::Vfs::write_file(path, b"ext4 held")?;
+        let with_file = free_inodes(&mount_path)?;
+        let h = handle::open(path, OpenFlags::READ.union(OpenFlags::WRITE))?;
+        crate::fs::Vfs::remove(path)?;
+        let named = crate::fs::Vfs::stat(path).is_ok();
+        let wrote = handle::write_at(h, 9, b"!");
+        let mut buf = [0u8; 16];
+        let read_back = handle::read_at(h, 0, &mut buf);
+        let links = handle::fstat(h).map(|m| m.nlinks);
+        let while_held = free_inodes(&mount_path);
+        // Best effort on the failure paths below; on success, this close is
+        // the one being tested.
+        let closed = handle::close(h);
+        let after = free_inodes(&mount_path);
+        let ok = !named
+            && wrote == Ok(1)
+            && read_back == Ok(10)
+            && buf.get(..10) == Some(b"ext4 held!".as_slice())
+            && links == Ok(0)
+            && while_held == Ok(with_file)
+            && closed.is_ok()
+            && after == Ok(with_file.saturating_add(1));
+        if !ok {
+            serial_println!(
+                "[ext4]   FAIL: held file: named {}, write {:?}, read {:?}, links {:?}, \
+                 free inodes {} then {:?} then {:?} (close {:?})",
+                named,
+                wrote,
+                read_back,
+                links,
+                with_file,
+                while_held,
+                after,
+                closed
+            );
+            return Err(crate::error::KernelError::IoError);
+        }
+        serial_println!(
+            "[ext4]   held file: deleted while open, still the handle's, freed at the last close: OK"
+        );
+    }
+
     let root_stat = crate::fs::Vfs::stat(&root)?;
     serial_println!(
         "[ext4]   Root stat: type={:?}, size={}",

@@ -4609,9 +4609,17 @@ mod tests {
 
         let mut ui = populated_ui();
         let view = ui.view_tab;
+        // Each press must be refused, not only the end state checked: four
+        // chorded Tabs go round the four tabs and back, and four chorded F1s
+        // raise the card and put it away twice.
         for m in chords {
-            probe::key(&mut ui, &key(Key::Tab, "", m));
-            probe::key(&mut ui, &key(Key::F1, "", m));
+            for k in [Key::Tab, Key::F1] {
+                assert_eq!(
+                    probe::key(&mut ui, &key(k, "", m)),
+                    EventResult::Ignored,
+                    "{m:?} {k:?} was taken"
+                );
+            }
         }
         assert_eq!(ui.view_tab, view, "a chord changed the view");
         assert!(!ui.show_help, "a chord raised the keys");

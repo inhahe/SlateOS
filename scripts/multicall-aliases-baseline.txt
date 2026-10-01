@@ -3,13 +3,13 @@
 # --update-baseline`; see that script's docstring.
 #
 # THIS FILE SHOULD ONLY EVER SHRINK. A line here is a finished tool that
-# no user can run. Removing one means giving that tool a real producer --
-# preferably its own crate, so it gets its own capability identity.
+# no user can run. design-decisions 1045 settles each: a name for a
+# subsystem SlateOS does not have is deleted; a kept name is installed as
+# the same file by a `name = producer` line in rootfs-bin-manifest.txt,
+# or gets its own crate where its permissions differ from its siblings'.
 # Do NOT add a line to turn a red `--check` green: a new entry means a new
 # personality was written without a producer, which is the defect itself.
 
-ar:ranlib
-ar:strip
 at:atd
 at:atq
 at:atrm
@@ -53,7 +53,6 @@ hostnamectl:nisdomainname
 hostnamectl:ypdomainname
 hwinfo:lshw
 inotify:inotifywatch
-kill:killall
 last:lastb
 last:lastlog
 locale:getconf

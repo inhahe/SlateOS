@@ -3753,6 +3753,14 @@ extern "C" fn kernel_main() -> ! {
         selftest::Severity::Diagnostic,
         fs::vfs::self_test_append_is_atomic(),
     );
+    // The pivot the boot makes to put the system image at `/` before init
+    // (design-decisions §1513), tried on a tree under /tmp.
+    // RAN-IF: "[vfs] Running pivot_root self-test..."
+    selftest::dispatch_debug(
+        "VFS pivot_root (the system image becomes the root)",
+        selftest::Severity::Diagnostic,
+        fs::vfs::self_test_pivot_mounts(),
+    );
     // Pipe and socketpair calls copy at most what one call can move
     // (known-issues.md A-USER-SIZED-KERNEL-BUFFERS-NOW-REACH-VMALLOC).
     selftest::dispatch_debug(
@@ -9974,20 +9982,21 @@ extern "C" fn kernel_main() -> ! {
     static TICKER_ELF: &[u8] =
         include_bytes!("../../services/ticker/target/x86_64-unknown-none/release/ticker");
 
-    // Write embedded binaries to the VFS so init can spawn them.
+    // The system image is the root from here on: init and everything it
+    // starts find the image's /bin/sh, /etc and /home under their own names
+    // (design-decisions §1513). The self-tests above ran with the in-memory
+    // root and the image at /mnt, and keep doing so.
+    let image_is_root = switch_root_to_image();
+
+    // Write embedded binaries to the VFS so init can spawn them -- onto an
+    // image root only where the image has none, so an image that provides
+    // its own programs and service list (the recipe's to write) is used as
+    // it stands.
     if let Err(e) = fs::Vfs::mkdir("/bin") {
         serial_println!("[init] Note: /bin mkdir: {:?} (may already exist)", e);
     }
-    if let Err(e) = fs::Vfs::write_file("/bin/hello", HELLO_ELF) {
-        serial_println!("[init] WARNING: failed to write /bin/hello: {:?}", e);
-    } else {
-        serial_println!("[init] Installed /bin/hello ({} bytes)", HELLO_ELF.len());
-    }
-    if let Err(e) = fs::Vfs::write_file("/bin/ticker", TICKER_ELF) {
-        serial_println!("[init] WARNING: failed to write /bin/ticker: {:?}", e);
-    } else {
-        serial_println!("[init] Installed /bin/ticker ({} bytes)", TICKER_ELF.len());
-    }
+    install_boot_file("/bin/hello", HELLO_ELF, image_is_root);
+    install_boot_file("/bin/ticker", TICKER_ELF, image_is_root);
 
     // Create /etc directory and write a default service list.
     // Init reads this at startup to auto-register services.  The name is
@@ -9997,14 +10006,11 @@ extern "C" fn kernel_main() -> ! {
     if let Err(e) = fs::Vfs::mkdir("/etc") {
         serial_println!("[init] Note: /etc mkdir: {:?} (may already exist)", e);
     }
-    if let Err(e) = fs::Vfs::write_file(
+    install_boot_file(
         "/etc/startup.conf",
         b"# Startup services (one per line)\n# Format: /path/to/elf [depends:dep1,dep2]\n/bin/ticker\n",
-    ) {
-        serial_println!("[init] Note: /etc/startup.conf write: {:?}", e);
-    } else {
-        serial_println!("[init] Created /etc/startup.conf");
-    }
+        image_is_root,
+    );
     // `/etc/mtab`: the mount table at glibc's `MOUNTED` path, a link to
     // `/proc/self/mounts` as on Linux (`fs::procfs::make_etc_mtab`). The
     // self-test made it already; this is the boot's own, and a no-op then.
@@ -10369,6 +10375,73 @@ fn print_security_posture() {
     serial_println!("[security] Active:{}", active);
     if !deferred.is_empty() {
         serial_println!("[security] Deferred:{}", deferred);
+    }
+}
+
+/// Make the system image the root, just before init: the ext4 filesystem the
+/// boot mounted at `/mnt` becomes `/`, and the in-memory root the self-tests
+/// ran on moves to `/.bootfs` and is unmounted there unless a file on it is
+/// still held. Returns whether the image is the root.
+///
+/// Why: every program reads the standard paths -- `/bin/sh` for `popen`,
+/// `system` and `#!` scripts, `/etc` for accounts and settings,
+/// `/usr/share/zoneinfo`, `/home` -- and with the image at `/mnt` none of them
+/// named anything, nor could a service installed on the image be started at
+/// boot (`requests/d-a-nothing-on-the-system-image-can-be-started-at-boot.md`,
+/// `requests/d-ab-the-booted-system-has-no-bin-sh.md`; design-decisions
+/// §1513). Here, after the self-tests, so the battery's fixtures keep their
+/// `/mnt` paths; the mounts made over the old root (`/tmp`, `/proc`, `/dev`,
+/// `/sys`) stay where they are, over the new one.
+///
+/// A boot with no image (`--no-rootfs`, a diskless machine) keeps the
+/// in-memory root, and so does one whose pivot is refused, which is logged.
+fn switch_root_to_image() -> bool {
+    let image_at_mnt = fs::Vfs::mounts()
+        .iter()
+        .any(|(path, kind)| path.as_path() == fs::path::Path::new("/mnt") && kind == "ext4");
+    if !image_at_mnt {
+        serial_println!("[boot] No system image at /mnt: the in-memory root stays the root");
+        return false;
+    }
+    if let Err(e) = fs::Vfs::pivot_root("/mnt", "/.bootfs") {
+        serial_println!(
+            "[boot] WARNING: the system image could not be made the root ({:?}); the in-memory \
+             root stays the root and the image stays at /mnt",
+            e
+        );
+        return false;
+    }
+    serial_println!("[boot] Root is the system image (was at /mnt)");
+    match fs::Vfs::unmount("/.bootfs") {
+        Ok(()) => serial_println!("[boot] The boot's in-memory root is unmounted"),
+        // A file on it is still held: it stays reachable, at /.bootfs, until
+        // whoever holds it lets go, as an unmount refuses then anyway.
+        Err(e) => serial_println!(
+            "[boot] The boot's in-memory root stays at /.bootfs: {:?}",
+            e
+        ),
+    }
+    true
+}
+
+/// Write one of the kernel's boot files (an embedded program, the default
+/// service list) for init -- onto the system image only where the image has
+/// none, since what an image provides is the image's to decide; onto the
+/// in-memory root of a boot with no image, always, as before the image was
+/// the root.
+fn install_boot_file(path: &str, contents: &[u8], image_is_root: bool) {
+    if image_is_root && fs::Vfs::exists(path) {
+        serial_println!("[init] Using the image's {}", path);
+        return;
+    }
+    match fs::Vfs::write_file(path, contents) {
+        Ok(()) if image_is_root => serial_println!(
+            "[init] The image has no {}: installed the kernel's ({} bytes)",
+            path,
+            contents.len()
+        ),
+        Ok(()) => serial_println!("[init] Installed {} ({} bytes)", path, contents.len()),
+        Err(e) => serial_println!("[init] WARNING: failed to write {}: {:?}", path, e),
     }
 }
 

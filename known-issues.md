@@ -181033,6 +181033,39 @@ which does not exist yet) and run its exit path on that CPU, in that thread,
 before the process is published as dead -- after which the address-space
 deferral above is no longer needed.
 
+### A-THE-SYSTEM-IMAGE-WAS-NOT-THE-ROOT -- 2026-10-01 -- FIXED the same day (lane A)
+
+**In short:** the disk image holding the installed system was mounted at
+`/mnt`, and `/` was a filesystem the kernel built in memory, so every program
+looked for `/bin/sh`, `/etc`, `/usr/share/zoneinfo` and `/home` and found
+nothing: `popen`, `system` and `#!/bin/sh` scripts failed with `ENOENT`, a
+service found one built-in account, and nothing installed on the image could
+be started at boot. Lanes B and D (`d-ab-the-booted-system-has-no-bin-sh`,
+`d-a-nothing-on-the-system-image-can-be-started-at-boot`).
+
+**Fixed:** just before init, the boot makes the image `/` with
+`Vfs::pivot_root` (`kernel/src/main.rs`, `switch_root_to_image`); `/tmp`,
+`/proc`, `/dev` and `/sys` stay over it, and the in-memory root goes to
+`/.bootfs` and away. The kernel's default service list and programs go onto
+the image only where it has none. Design-decisions §1513. Test:
+`fs::vfs::self_test_pivot_mounts`, on a tree under `/tmp`.
+
+### A-THE-BOOT-TEST-BATTERY-STILL-SEES-THE-IMAGE-AT-MNT -- 2026-10-01 -- OPEN (lane A)
+
+**In short:** the pivot above happens after the boot's self-tests, so the
+battery -- every ring-3 fixture the boot test runs -- still sees the image at
+`/mnt` and an in-memory `/` with no `/bin/sh`. A fixture that needs the
+standard paths cannot check them at boot-test time: lane D's
+`services/ctest-stdio` reports its `popen` checks as not run.
+
+**Where:** `kernel/src/main.rs` (the pivot's place in the boot), 190 `/mnt`
+paths in the kernel's self-tests, and every lane-D fixture's `BIN "/mnt/bin/"`.
+
+**The fix:** keep `/mnt` as a second name for the image (a bind mount: one
+filesystem at two paths, which the VFS cannot do yet), move the pivot to the
+start of the boot, then let the fixtures move to the standard paths at their
+owners' pace.
+
 ## Lane B: new entries
 
 Lane B (userland) appends new entries at the end of this section, above the

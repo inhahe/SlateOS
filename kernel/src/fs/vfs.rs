@@ -2422,6 +2422,139 @@ impl Vfs {
         Ok(())
     }
 
+    /// Make the filesystem mounted at `new_root` the root, and put the one
+    /// that was the root at `put_old` -- Linux's `pivot_root(2)`, for the
+    /// boot's switch to the system image (design-decisions §1513).
+    ///
+    /// - The mount at `new_root` becomes `/`, and every mount beneath it moves
+    ///   with it: `new_root/x` becomes `/x`.
+    /// - The old root's mount moves to `put_old`, which must be a direct child
+    ///   of `/` (so it is reachable whatever the new root holds) and not
+    ///   already a mount point.
+    /// - Every other mount -- `/tmp`, `/proc`, `/dev`, `/sys` -- keeps its
+    ///   path, and from now on sits over the new root.
+    /// - Advisory locks move with their files: a lock taken by path on
+    ///   `new_root/f` is a lock on `/f`.
+    ///
+    /// A mount keeps its identity (`fs_id`), so a file held open on either
+    /// filesystem stays open and the same file. Records kept elsewhere by
+    /// *path* -- a process's working directory, a watch -- are not
+    /// rewritten: this is for the boot, before any process that keeps one
+    /// runs. The caller unmounts `put_old` afterwards if it has no further
+    /// use for it; that refuses while a file there is held, as any unmount
+    /// does.
+    ///
+    /// # Errors
+    ///
+    /// Nothing changes on an error.
+    /// - `InvalidArgument`: a path that is not absolute or has `.`/`..`;
+    ///   `new_root` is `/`; `put_old` is not a direct child of `/`, or is
+    ///   `new_root`.
+    /// - `NotFound`: nothing is mounted at `new_root` (or at `/`).
+    /// - `AlreadyExists`: something is mounted at `put_old`, or a mount moving
+    ///   with `new_root` would land on a path another mount has.
+    pub fn pivot_root(new_root: impl AsRef<Path>, put_old: impl AsRef<Path>) -> KernelResult<()> {
+        Self::pivot_mounts(Path::new("/"), new_root.as_ref(), put_old.as_ref())
+    }
+
+    /// [`Self::pivot_root`] about the mount at `root` rather than `/`: the
+    /// mount at `new_root`, strictly under `root`, takes `root`'s place with
+    /// everything beneath it, and the mount that was at `root` moves to
+    /// `put_old`, a direct child of `root`. Every rule is the root's with
+    /// `root` for `/`; separate only so the self-test can pivot a tree that
+    /// is not the one the system is running on.
+    fn pivot_mounts(root: &Path, new_root: &Path, put_old: &Path) -> KernelResult<()> {
+        for p in [root, new_root, put_old] {
+            if !p.is_absolute() || !p.has_no_dot_components() {
+                return Err(KernelError::InvalidArgument);
+            }
+        }
+        let root = normalize_mount_path(root);
+        let new_root = normalize_mount_path(new_root);
+        let put_old = normalize_mount_path(put_old);
+        if !crate::fs::pathutil::path_strictly_under(&new_root, &root)
+            || put_old.as_path().parent() != Some(root.as_path())
+            || put_old == new_root
+        {
+            return Err(KernelError::InvalidArgument);
+        }
+
+        // Every path is planned and checked before any is changed, under one
+        // hold of the table, so a refusal leaves the table as it was and no
+        // lookup ever sees half a pivot.
+        let (moves, before) = {
+            let mut vfs = VFS.lock();
+            let old_idx = vfs
+                .mounts
+                .iter()
+                .position(|m| m.path == root)
+                .ok_or(KernelError::NotFound)?;
+            let new_idx = vfs
+                .mounts
+                .iter()
+                .position(|m| m.path == new_root)
+                .ok_or(KernelError::NotFound)?;
+            if vfs.mounts.iter().any(|m| m.path == put_old) {
+                return Err(KernelError::AlreadyExists);
+            }
+            let mut plan: Vec<(usize, PathBuf)> = Vec::new();
+            plan.push((old_idx, put_old.clone()));
+            for (i, m) in vfs.mounts.iter().enumerate() {
+                if i == new_idx || crate::fs::pathutil::path_strictly_under(&m.path, &new_root) {
+                    let to = rebase_under(&m.path, &new_root, &root)
+                        .ok_or(KernelError::InvalidArgument)?;
+                    plan.push((i, to));
+                }
+            }
+            let planned = |j: usize| plan.iter().any(|&(i, _)| i == j);
+            for (_, to) in &plan {
+                let clash = vfs
+                    .mounts
+                    .iter()
+                    .enumerate()
+                    .any(|(j, m)| !planned(j) && m.path == *to);
+                if clash {
+                    return Err(KernelError::AlreadyExists);
+                }
+            }
+            let before: Vec<PathBuf> = vfs.mounts.iter().map(|m| m.path.clone()).collect();
+            let mut moves: Vec<(PathBuf, PathBuf)> = Vec::new();
+            for (i, to) in plan {
+                if let Some(m) = vfs.mounts.get_mut(i) {
+                    moves.push((core::mem::replace(&mut m.path, to.clone()), to));
+                }
+            }
+            (moves, before)
+        };
+        // Paths now resolve differently: drop every cached lookup.
+        VFS_DCACHE.lock().invalidate_all();
+
+        // Advisory locks taken by path move with their files. A lock belongs
+        // to the mount that answered its path before the pivot -- the longest
+        // mount path containing it -- and moves only if that mount did.
+        // After the table lock: the two are never held together.
+        {
+            let mut locks = LOCK_TABLE.lock();
+            for entry in locks.iter_mut() {
+                let owner = before
+                    .iter()
+                    .filter(|m| crate::fs::pathutil::path_in_subtree(&entry.path, m))
+                    .max_by_key(|m| m.as_path().components().count());
+                let moved = owner.and_then(|o| moves.iter().find(|(from, _)| from == o));
+                if let Some((from, to)) = moved {
+                    if let Some(new_path) = rebase_under(&entry.path, from, to) {
+                        entry.path = new_path;
+                    }
+                }
+            }
+        }
+
+        for (from, to) in &moves {
+            crate::serial_println!("[vfs] Pivot: '{}' -> '{}'", from.display(), to.display());
+        }
+        Ok(())
+    }
+
     // -------------------------------------------------------------------
     // VFS-level path resolution (cross-mount symlink support)
     // -------------------------------------------------------------------
@@ -7943,6 +8076,22 @@ fn mount_matches(mount_path: &Path, path: &Path) -> bool {
 ///
 /// Note this normalises *separators only*.  `.` and `..` are rejected
 /// outright at registration instead — see [`Vfs::mount_with_options`].
+/// Where `path` lands when the subtree at `from` moves to `to`: `from` itself
+/// becomes `to`, `from/x` becomes `to/x`, and `None` means `path` is not in
+/// that subtree. [`crate::fs::pathutil::rebase`], except that `from` may be
+/// `/`: a pivot moves the root, which no rename does.
+fn rebase_under(path: &Path, from: &Path, to: &Path) -> Option<PathBuf> {
+    if from.components().next().is_none() {
+        // Everything is under `/`: `/x` becomes `to/x`.
+        let mut out = to.to_path_buf();
+        for c in path.components() {
+            out.push(c);
+        }
+        return Some(out);
+    }
+    crate::fs::pathutil::rebase(path, from, to)
+}
+
 fn normalize_mount_path(p: &Path) -> PathBuf {
     // Starting from `/` rather than the empty path is what gives the
     // zero-component case (`/`, `//`, `///`) the root mount's spelling;
@@ -12066,6 +12215,136 @@ pub fn self_test_append_is_atomic() -> KernelResult<()> {
             want
         );
         return Err(KernelError::InternalError);
+    }
+    Ok(())
+}
+
+/// Where [`self_test_pivot_mounts`] builds its tree: under `/tmp`, so the
+/// pivot it makes is never the system's own.
+const PIVOT_TEST_ROOT: &str = "/tmp/pivot-test";
+
+/// [`Vfs::pivot_root`], through [`Vfs::pivot_mounts`] about a tree under
+/// `/tmp` -- the same code about a mount that is not the system's root:
+///
+/// - the mount at `new_root` takes the root's place and its sub-mount moves
+///   with it; the old root lands at `put_old`; a mount beside them (as `/proc`
+///   is beside the image) stays where it was;
+/// - each refusal -- `put_old` not a child of the root, already a mount, or
+///   the new root itself; no mount at `new_root`; a moving mount landing on
+///   another's path -- changes nothing;
+/// - a path-taken advisory lock moves with its file.
+pub fn self_test_pivot_mounts() -> KernelResult<()> {
+    crate::serial_println!("[vfs] Running pivot_root self-test...");
+    let root = PIVOT_TEST_ROOT;
+    let at = |rel: &str| alloc::format!("{root}{rel}");
+    let result = pivot_test_body(root, &at);
+    // Children before parents, whichever stage the body reached; an unmount
+    // of what is not mounted answers NotFound, which is what it means here.
+    for rel in ["/img/sys", "/img/sub", "/sub", "/sys", "/old", "/img", ""] {
+        let _ = Vfs::unmount(at(rel));
+    }
+    match result {
+        Ok(()) => {
+            crate::serial_println!(
+                "[vfs]   pivot_root: the new root and its sub-mount move, the old root to put_old, \
+                 a lock with its file; refusals change nothing: OK"
+            );
+            Ok(())
+        }
+        Err(what) => {
+            crate::serial_println!("[vfs]   FAIL: pivot_root: {}", what);
+            Err(KernelError::InternalError)
+        }
+    }
+}
+
+/// [`self_test_pivot_mounts`]'s body, for a caller that unmounts after it.
+fn pivot_test_body(root: &str, at: &dyn Fn(&str) -> String) -> Result<(), &'static str> {
+    let mount = |rel: &str| crate::fs::memfs::mount(at(rel).as_str()).map_err(|_| "a memfs mount");
+    let mark =
+        |rel: &str, text: &[u8]| Vfs::write_file(at(rel), text).map_err(|_| "writing a marker");
+    let read = |rel: &str| Vfs::read_file(at(rel)).ok();
+    // The old root, the image with a sub-mount, and a mount beside them.
+    mount("")?;
+    mark("/marker", b"old")?;
+    mount("/img")?;
+    mark("/img/marker", b"img")?;
+    mark("/img/locked", b"")?;
+    mount("/img/sub")?;
+    mark("/img/sub/marker", b"sub")?;
+    mount("/sys")?;
+    mark("/sys/marker", b"sys")?;
+
+    let as_before = || {
+        read("/marker").as_deref() == Some(b"old".as_slice())
+            && read("/img/marker").as_deref() == Some(b"img".as_slice())
+            && read("/img/sub/marker").as_deref() == Some(b"sub".as_slice())
+    };
+    let pivot = |new_root: &str, put_old: &str| {
+        Vfs::pivot_mounts(
+            Path::new(root),
+            Path::new(&at(new_root)),
+            Path::new(put_old),
+        )
+    };
+    let old = at("/old");
+    let refusals: [(&str, KernelResult<()>, KernelError); 4] = [
+        (
+            "put_old outside the root",
+            pivot("/img", "/tmp/pivot-test-elsewhere"),
+            KernelError::InvalidArgument,
+        ),
+        (
+            "put_old a mount point",
+            pivot("/img", &at("/sys")),
+            KernelError::AlreadyExists,
+        ),
+        (
+            "put_old the new root",
+            pivot("/img", &at("/img")),
+            KernelError::InvalidArgument,
+        ),
+        (
+            "no mount at new_root",
+            pivot("/nothing", &old),
+            KernelError::NotFound,
+        ),
+    ];
+    for (why, got, want) in refusals {
+        if got != Err(want) || !as_before() {
+            crate::serial_println!("[vfs]   pivot refusal '{}' answered {:?}", why, got);
+            return Err("a refusal answered wrongly, or changed the tree");
+        }
+    }
+    // A sub-mount of the new root that would land on the mount beside it.
+    mount("/img/sys")?;
+    let clash = pivot("/img", &old);
+    let _ = Vfs::unmount(at("/img/sys"));
+    if clash != Err(KernelError::AlreadyExists) || !as_before() {
+        return Err("a moving mount landing on another's path was not refused");
+    }
+
+    // A lock taken by path on the image's file.
+    let holder = flock_process_owner(0xFFF1);
+    let other = flock_process_owner(0xFFF2);
+    Vfs::flock(at("/img/locked"), holder, LockType::Exclusive).map_err(|_| "taking the lock")?;
+
+    pivot("/img", &old).map_err(|_| "the pivot itself was refused")?;
+    if read("/marker").as_deref() != Some(b"img".as_slice())
+        || read("/sub/marker").as_deref() != Some(b"sub".as_slice())
+        || read("/old/marker").as_deref() != Some(b"old".as_slice())
+        || read("/sys/marker").as_deref() != Some(b"sys".as_slice())
+        || read("/img/marker").is_some()
+    {
+        return Err("after the pivot a mount is not where it should be");
+    }
+    // The lock moved with the file: another owner is refused at its new path.
+    let blocked = Vfs::flock(at("/locked"), other, LockType::Exclusive);
+    let released = Vfs::funlock(at("/locked"), holder);
+    let taken = Vfs::flock(at("/locked"), other, LockType::Exclusive);
+    let _ = Vfs::funlock(at("/locked"), other);
+    if blocked != Err(KernelError::WouldBlock) || released.is_err() || taken.is_err() {
+        return Err("the lock did not move with its file");
     }
     Ok(())
 }

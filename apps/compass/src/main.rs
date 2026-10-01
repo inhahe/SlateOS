@@ -2853,6 +2853,18 @@ mod tests {
         assert_eq!(app.view, View::CoordinateEntry, "Alt+Enter took the form");
         app.handle_event(&held(Key::Num5, "5", altgr), SIZE);
         assert_eq!(app.entry_lat_buf, "5", "AltGr's 5 was not typed");
+        // The form's own keys are plain: Alt+Backspace deletes nothing, and
+        // Alt+Escape and Alt+Tab leave the form and the field as they are.
+        app.handle_event(&held(Key::Backspace, "", Modifiers::alt()), SIZE);
+        app.handle_event(&held(Key::Tab, "", Modifiers::alt()), SIZE);
+        app.handle_event(&held(Key::Escape, "", Modifiers::alt()), SIZE);
+        assert_eq!(app.entry_lat_buf, "5", "Alt+Backspace deleted");
+        assert_eq!(
+            app.active_coord_field,
+            CoordField::Latitude,
+            "Alt+Tab moved on"
+        );
+        assert_eq!(app.view, View::CoordinateEntry, "Alt+Escape left the form");
     }
 
     // ── Waypoint list navigation tests ──────────────────────────────

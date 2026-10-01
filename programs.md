@@ -37,7 +37,6 @@ two disagree.
 | `bootctl` | EFI boot manager control. |  |  |  |
 | `cal` | `cal`, transcribed from util-linux 2.39.3 rather than remembered. | yes | `coreutils` |  |
 | `cat` | Concatenate files and print them on the standard output. | yes | `coreutils` |  |
-| `cgroup` | Cgroup management utility. |  |  | `cgclassify` *(not installed)*, `cgcreate` *(not installed)*, `cgdelete` *(not installed)*, `cgexec` *(not installed)*, `cgget` *(not installed)*, `cgset` *(not installed)*, `lssubsys` *(not installed)* |
 | `chage` | Password-aging utility. |  |  |  |
 | `chattr` | Ext2/ext4 file attribute utilities. |  |  | `lsattr` *(not installed)* |
 | `chgrp` | Change group ownership. |  | `coreutils` |  |
@@ -124,7 +123,7 @@ two disagree.
 | `ifconfig` | Classic network interface configuration utility. |  |  |  |
 | `indexer` | Background File Indexer |  |  |  |
 | `inetd` | Internet Super-Server Daemon (inetd) |  |  |  |
-| `inotify` | Filesystem event monitoring utility. |  |  | `inotifywatch` *(not installed)* |
+| `inotifywait` | Filesystem event monitoring utility. |  | `inotify` | `inotifywatch` *(not installed)* |
 | `install` | Copy files and set attributes |  |  |  |
 | `iostat` | I/O Statistics Utility |  |  |  |
 | `ip` | Network Configuration Utility |  |  |  |
@@ -156,6 +155,7 @@ two disagree.
 | `lp` | Printing utilities (lp/lpstat/lprm/cancel) |  |  | `cancel` *(not installed)*, `lpq` *(not installed)*, `lpr` *(not installed)*, `lprm` *(not installed)*, `lpstat` *(not installed)* |
 | `ls` | List directory contents. | yes | `coreutils` |  |
 | `lsblk` | List block devices. |  |  |  |
+| `lscgroup` | Cgroup management utility. |  | `cgroup` | `cgclassify` *(not installed)*, `cgcreate` *(not installed)*, `cgdelete` *(not installed)*, `cgexec` *(not installed)*, `cgget` *(not installed)*, `cgset` *(not installed)*, `lssubsys` *(not installed)* |
 | `lscpu` | The CPU architecture, from `/proc/cpuinfo` and `/sys`. |  |  |  |
 | `lsirq` | The kernel's interrupt counters, as a table. |  |  |  |
 | `lsmem` | List the ranges of available memory with their online status. |  |  |  |
@@ -225,6 +225,7 @@ two disagree.
 | `route` | Routing Table Management |  |  |  |
 | `rsync` | File Synchronization Utility (rsync / scp) |  |  |  |
 | `sanitize` | Filename Sanitizer |  |  |  |
+| `sar` | Sysstat utility |  | `sysstat` | `mpstat` *(not installed)*, `pidstat` *(not installed)* |
 | `sbctl` | Secure Boot: what the firmware and the kernel hold, and the key-management commands this system can honestly offer. |  |  |  |
 | `scp` | Secure File Copy (scp) |  |  |  |
 | `screen` | Terminal Multiplexer |  |  |  |
@@ -261,7 +262,6 @@ two disagree.
 | `sysctl` | View and Modify Kernel Parameters |  |  |  |
 | `sysinfo` | System Information Utility |  |  |  |
 | `syslogd` | System Log Daemon (`syslogd`) |  |  |  |
-| `sysstat` | Sysstat utility |  |  | `mpstat` *(not installed)*, `pidstat` *(not installed)* |
 | `systemctl` | Multi-personality service management utility for SlateOS. |  |  | `systemd-cat` *(not installed)*, `systemd-cgls` *(not installed)*, `systemd-cgtop` *(not installed)*, `systemd-escape` *(not installed)*, `systemd-path` *(not installed)* |
 | `tac` | Reverse line printer and character reverser for Slate OS |  |  |  |
 | `tail` | Output the last part of files. | yes | `coreutils` |  |
@@ -310,7 +310,7 @@ two disagree.
 | `wipefs` | Wipe signatures from a device. |  |  |  |
 | `wpa` | WiFi Protected Access multi-personality binary. |  |  |  |
 | `xargs` | Build command lines from standard input and run them. | yes | `coreutils` |  |
-| `xdg` | XDG File Association Tools |  |  | `mimeopen` *(not installed)*, `xdg-mime` *(not installed)* |
+| `xdg-open` | XDG File Association Tools |  | `xdg` | `mimeopen` *(not installed)*, `xdg-mime` *(not installed)* |
 | `yacc` | LALR(1) parser generator |  |  |  |
 | `yes` | Output a string repeatedly until killed. | yes | `coreutils` |  |
 | `zip` | Zip/unzip archive utility. |  |  | `unzip` *(not installed)* |

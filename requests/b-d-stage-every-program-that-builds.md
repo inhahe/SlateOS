@@ -98,13 +98,13 @@ lastlog = last
 sg = newgrp
 mingetty = getty
 lsattr = chattr
-cgclassify = cgroup
-cgcreate = cgroup
-cgdelete = cgroup
-cgexec = cgroup
-cgget = cgroup
-cgset = cgroup
-lssubsys = cgroup
+cgclassify = lscgroup
+cgcreate = lscgroup
+cgdelete = lscgroup
+cgexec = lscgroup
+cgget = lscgroup
+cgset = lscgroup
+lssubsys = lscgroup
 cancel = lp
 lpq = lp
 lpr = lp
@@ -128,8 +128,8 @@ groups out; the ledger keeps them either way.
 ## The names lane B keeps -- third batch (2026-10-01)
 
 ```
-mpstat = sysstat
-pidstat = sysstat
+mpstat = sar
+pidstat = sar
 sockstat = ss
 ntpdate = ntpd
 sntp = ntpd
@@ -177,3 +177,19 @@ gone, so until these lines land nothing answers to the four names at all.
 `scripts/hostname-diff.sh` runs every one of them against Ubuntu's real
 program by that name: 123 agree, none differ. The producer is coreutils'
 `hostname` binary, which `rootfs-bin-manifest.txt` already lists.
+
+## Correction to batches two and three (2026-10-01)
+
+Batches two and three named two producers by their **crate** where the
+manifest wants a **binary**, and the two were not the same: the `cgroup` crate
+built a binary called `cgroup` and the `sysstat` crate one called `sysstat` --
+names no one types, since each crate's own program is `lscgroup` and `sar`.
+Both crates (and `inotify` and `xdg`, whose programs are `inotifywait` and
+`xdg-open`) are now built under their command's name, and the lines above are
+corrected in place: the seven cgroup tools name `lscgroup`, and `mpstat` and
+`pidstat` name `sar`.
+
+Staging "every binary the workspace builds" picks the new names up with no
+special case; `scripts/multicall-aliases.py` now reads a crate's binary name
+from its `Cargo.toml` when it judges whether a manifest line installs a name,
+so a line naming the crate would show up there as not installing anything.

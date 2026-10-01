@@ -2510,7 +2510,20 @@ pub fn exec_process(
     // pipe's reader sees end-of-file now, not when the new program exits.
     // A Linux image's were closed from its own fd table above.
     if old_abi_mode != Some(pcb::AbiMode::Linux) {
-        close_handles_at_exec(pid, &close_at_exec);
+        close_handles_at_exec(pid, &close_at_exec.close);
+        // A dropped descriptor whose handle a kept one shares: the handle
+        // stays, but a descriptor for the file was closed, so the process's
+        // record locks on it go (POSIX). Only the process's own handles.
+        for &(handle_type, handle) in &close_at_exec.shared {
+            if handle_type == fd_handle_type::FILE
+                && pcb::owns_ipc_handle(pid, crate::cap::ResourceType::File, handle)
+            {
+                crate::syscall::record_lock::release_on_close(
+                    pid,
+                    crate::syscall::record_lock::Target::File(handle),
+                );
+            }
+        }
     }
 
     // Step 6: Store argv/envp in the PCB for the new process image.

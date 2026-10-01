@@ -1029,9 +1029,6 @@ pub fn self_test() -> KernelResult<()> {
     test_dispatch_tioc_and_watch_records()?;
     test_cpu_current()?;
     test_dispatch_shared_anonymous_memory()?;
-    test_dispatch_record_lock()?;
-    test_dispatch_flock()?;
-    test_dispatch_fs_gates()?;
     test_dispatch_secureboot_doors()?;
     test_dispatch_ipc_possession()?;
     test_dispatch_dropping_root_is_one_way()?;
@@ -1228,6 +1225,12 @@ pub fn self_test_fs() -> KernelResult<()> {
     test_dispatch_uts_name()?;
     test_dispatch_dns_hosts()?;
     test_dispatch_brightness_gated()?;
+    // Record locks, flock and the fs doors' gates: each writes a file in
+    // /tmp, so after the mount (they were put in the Step 11 list first, and
+    // would have failed there for want of a filesystem).
+    test_dispatch_record_lock()?;
+    test_dispatch_flock()?;
+    test_dispatch_fs_gates()?;
 
     serial_println!("[syscall] Post-mount dispatch self-test PASSED");
     Ok(())
@@ -2285,7 +2288,6 @@ fn test_dispatch_signal_siginfo_frame() -> KernelResult<()> {
     let pid = pcb::create("siginfo-frame", 0);
     let stranger = pcb::create("siginfo-stranger", 0);
     let pids = [pid, stranger];
-    let me = crate::sched::current_task_id();
     let as_pid = |nr: u64, a: SyscallArgs| self_test_as_process(pid, || dispatch(nr, &a).value);
 
     // Registration answers what it honours, and the registry agrees.
@@ -2348,8 +2350,16 @@ fn test_dispatch_signal_siginfo_frame() -> KernelResult<()> {
         return fail("sigqueue's signal 65", &pids);
     }
 
-    // tgkill: this task counts as a thread of `pid` for the test.
-    if as_pid(SYS_SIGNAL_TGKILL, args(pid, me, SIGUSR2)) != 0 {
+    // tgkill: a thread of `pid`. Not this task: the self-test runs on the
+    // boot task, whose id is 0, which no thread has -- tgkill refuses it,
+    // as Linux does. An id far above any the id counter reaches stands in.
+    const THREAD: u64 = 0x7FFF_0001;
+    let tgkill = |tgid: u64, tid: u64| {
+        crate::proc::thread::self_test_with_thread(THREAD, pid, || {
+            as_pid(SYS_SIGNAL_TGKILL, args(tgid, tid, SIGUSR2))
+        })
+    };
+    if tgkill(pid, THREAD) != 0 {
         return fail("tgkill to its own thread refused", &pids);
     }
     match signal::take_deliverable_info(pid) {
@@ -2360,12 +2370,11 @@ fn test_dispatch_signal_siginfo_frame() -> KernelResult<()> {
             return fail("tgkill's record", &pids);
         }
     }
-    if as_pid(SYS_SIGNAL_TGKILL, args(stranger, me, SIGUSR2)) != code(KernelError::NoSuchProcess) {
+    if tgkill(stranger, THREAD) != code(KernelError::NoSuchProcess) {
         return fail("tgkill named a thread of another process", &pids);
     }
-    for (tgid, tid) in [(0, me), (pid, 0)] {
-        if as_pid(SYS_SIGNAL_TGKILL, args(tgid, tid, SIGUSR2)) != code(KernelError::InvalidArgument)
-        {
+    for (tgid, tid) in [(0, THREAD), (pid, 0)] {
+        if tgkill(tgid, tid) != code(KernelError::InvalidArgument) {
             return fail("tgkill with an id not above zero", &pids);
         }
     }
@@ -2597,14 +2606,18 @@ fn test_dispatch_exec_close() -> KernelResult<()> {
         ],
     );
     let taken = pcb::take_exec_close_handles(pid);
-    let want = alloc::vec![
-        (fd_handle_type::PIPE, write_end),
-        (fd_handle_type::TCP_SOCKET, 5),
-        (fd_handle_type::CONSOLE, 0),
-    ];
-    if taken != want || !pcb::take_exec_close_handles(pid).is_empty() {
+    let want = pcb::ExecCloseList {
+        close: alloc::vec![
+            (fd_handle_type::PIPE, write_end),
+            (fd_handle_type::TCP_SOCKET, 5),
+            (fd_handle_type::CONSOLE, 0),
+        ],
+        // Kept open; its descriptor still counts as closed for record locks.
+        shared: alloc::vec![(fd_handle_type::PIPE, read_end)],
+    };
+    if taken != want || pcb::take_exec_close_handles(pid) != pcb::ExecCloseList::default() {
         serial_println!("[syscall]   took {:?}, want {:?} once", taken, want);
-        return fail("the close list was not taken less the kept handle", &pids);
+        return fail("the close list was not split by the kept handle", &pids);
     }
 
     // Closing the write end: the reader sees end-of-file at once.

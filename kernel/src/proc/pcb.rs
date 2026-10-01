@@ -6765,24 +6765,36 @@ pub fn set_exec_close_handles(pid: ProcessId, handles: Vec<(u8, u64)>) {
     }
 }
 
-/// Take the close-on-exec handle list, for an exec attempt that is starting
-/// -- less any handle the exec also keeps under a descriptor
-/// ([`Process::exec_inherited_fds`]). A handle that is both dropped and kept
-/// is still in use, and closing it would close the kept descriptor's file.
-/// Taken under one lock, so the two lists are compared as they stand.
-pub fn take_exec_close_handles(pid: ProcessId) -> Vec<(u8, u64)> {
+/// What an exec does with the close-on-exec list libc named
+/// ([`take_exec_close_handles`]).
+#[derive(Debug, Default, PartialEq, Eq)]
+pub struct ExecCloseList {
+    /// The handles to close, as `close()` closes them.
+    pub close: Vec<(u8, u64)>,
+    /// Handles the exec also keeps under a descriptor
+    /// ([`Process::exec_inherited_fds`]). They stay open -- closing one would
+    /// close the kept descriptor's file -- but the dropped descriptor still
+    /// counts as closed for the rules that come with any close: the
+    /// process's record locks on the file go (POSIX).
+    pub shared: Vec<(u8, u64)>,
+}
+
+/// Take the close-on-exec handle list, for an exec attempt that is starting,
+/// split into the handles to close and those a kept descriptor shares
+/// ([`ExecCloseList`]). Taken under one lock, so the two lists are compared
+/// as they stand.
+pub fn take_exec_close_handles(pid: ProcessId) -> ExecCloseList {
     let mut table = PROCESS_TABLE.lock();
     let Some(proc) = table.get_mut(&pid) else {
-        return Vec::new();
+        return ExecCloseList::default();
     };
-    let mut handles = core::mem::take(&mut proc.exec_close_handles);
-    handles.retain(|&(ty, h)| {
-        !proc
-            .exec_inherited_fds
+    let handles = core::mem::take(&mut proc.exec_close_handles);
+    let (shared, close) = handles.into_iter().partition(|&(ty, h)| {
+        proc.exec_inherited_fds
             .iter()
             .any(|&(_, kept_ty, kept_h)| kept_ty == ty && kept_h == h)
     });
-    handles
+    ExecCloseList { close, shared }
 }
 
 /// Take (move out) the exec-carried fd snapshot from a process's PCB.

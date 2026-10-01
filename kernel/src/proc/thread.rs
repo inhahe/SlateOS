@@ -977,6 +977,28 @@ pub(crate) fn self_test_as_process<R>(pid: ProcessId, body: impl FnOnce() -> R) 
     result
 }
 
+/// Run `body` with task id `tid` counted as a thread of `pid`, as
+/// [`self_test_as_process`] counts the calling task: for a self-test that
+/// must name one of a process's threads. The calling task cannot always be
+/// that thread: the syscall self-tests run on the boot task, whose id is 0,
+/// which no thread may have -- `tgkill` refuses it, as Linux does.
+///
+/// For self-tests only, with an id no task has.
+pub(crate) fn self_test_with_thread<R>(tid: TaskId, pid: ProcessId, body: impl FnOnce() -> R) -> R {
+    let previous = THREAD_OWNERS.lock().insert(tid, pid);
+    let result = body();
+    let mut owners = THREAD_OWNERS.lock();
+    match previous {
+        Some(earlier) => {
+            owners.insert(tid, earlier);
+        }
+        None => {
+            owners.remove(&tid);
+        }
+    }
+    result
+}
+
 /// Sum the `(user_ticks, sys_ticks)` CPU time of a process across both
 /// its **live** threads and its **already-exited** threads.
 ///

@@ -236,6 +236,13 @@ fn a_bad_file_is_no_cursor() {
     assert_eq!(bad(image + 28, 25), None);
     // Pixels the file does not hold.
     assert_eq!(xcursor::read(&good[..good.len() - 1], 24), None);
+    // A header that says it ends inside itself, though the table it then
+    // describes -- starting at byte 4, three long -- reaches the real image
+    // entry at byte 28 as its third.
+    let mut short = good.clone();
+    poke(&mut short, 4, 4);
+    poke(&mut short, 12, 3);
+    assert_eq!(xcursor::read(&short, 24), None);
     // Nothing but bytes.
     assert_eq!(xcursor::read(b"Xcu", 24), None);
     assert_eq!(xcursor::read(&[], 24), None);
@@ -246,6 +253,36 @@ fn a_bad_file_is_no_cursor() {
         &[u32::from_le_bytes(*b"Xcur"), 16, 0x0001_0000, 0],
     );
     assert_eq!(xcursor::read(&empty, 24), None);
+}
+
+/// **A table past 4096 entries is refused** even when every entry is good:
+/// the bound is on the scan, not only on files too short to hold one.
+#[test]
+fn a_table_past_the_bound_is_refused() {
+    let file = |comments: u32| {
+        let count = comments + 1;
+        let table_end = 16 + 12 * count;
+        let mut out = Vec::new();
+        le(
+            &mut out,
+            &[u32::from_le_bytes(*b"Xcur"), 16, 0x0001_0000, count],
+        );
+        // Every comment entry names the same small comment, after the image.
+        let image_at = table_end;
+        let comment_at = image_at + 36 + 4;
+        for _ in 0..comments {
+            le(&mut out, &[0xfffe_0001, 1, comment_at]);
+        }
+        le(&mut out, &[0xfffd_0002, 1, image_at]);
+        le(
+            &mut out,
+            &[36, 0xfffd_0002, 1, 1, 1, 1, 0, 0, 0, OPAQUE_RED],
+        );
+        le(&mut out, &[20, 0xfffe_0001, 1, 1, 0]);
+        out
+    };
+    assert!(xcursor::read(&file(4095), 1).is_some());
+    assert_eq!(xcursor::read(&file(4096), 1), None);
 }
 
 /// **A hot spot on the far edge is allowed**, as libXcursor allows it.

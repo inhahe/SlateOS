@@ -22124,6 +22124,31 @@ mod run_box_wiring_tests {
             "the taskbar still names the old layout after a switch"
         );
     }
+
+    /// **The run box wears the frame the appearance gives it**: the shell
+    /// hands the box the theme's window frame with the rest of the
+    /// appearance, so a theme whose title bars are 20 taller puts the box's
+    /// field 20 lower inside it.
+    #[test]
+    fn the_run_box_wears_the_appearances_frame() {
+        let mut shell = shell();
+        let offset = |shell: &DesktopShell| {
+            let (_, top) = shell.run_dialog.position();
+            shell.run_dialog.field_rect().y - top
+        };
+        let before = offset(&shell);
+        let mut settings = appearance::AppearanceSettings::default();
+        settings.decoration_theme = appearance::themes::DecorationTheme::from_style(
+            "tall",
+            appearance::decorations::DecorationStyle {
+                title_height: 50,
+                ..appearance::decorations::DecorationStyle::AERO
+            },
+        );
+        shell.set_appearance(settings);
+        let after = offset(&shell);
+        assert!((after - before - 20.0).abs() < 0.01, "{before} -> {after}");
+    }
 }
 
 #[cfg(test)]

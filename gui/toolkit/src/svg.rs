@@ -9,8 +9,10 @@
 //! - Path element with full command set (M, L, H, V, C, S, Q, T, A, Z)
 //! - Styling: fill, fill-rule, fill-opacity, stroke, stroke-width,
 //!   stroke-linecap, stroke-linejoin, stroke-miterlimit, stroke-opacity,
-//!   opacity, display, transforms -- as presentation attributes or in a
-//!   `style` attribute, which wins; a `<style>` sheet's rules are not applied
+//!   opacity, display, transforms -- as presentation attributes, in a
+//!   `style` attribute, or from a `<style>` sheet's rules (the `css` module:
+//!   type, class, id and universal selectors, compounds, descendant and
+//!   child combinators), with CSS's cascade
 //! - Gradients: a fill or stroke of `url(#id)` paints with the linear or
 //!   radial gradient of that id, wherever the document defines it (see the
 //!   `paint` module for what of them is drawn); a fallback colour after the
@@ -27,7 +29,9 @@
 //! - `clip-path`: what an element draws is cut to the `<clipPath>` it names
 //!   (the `clip` module says how); and a symbol's or inner `<svg>`'s
 //!   viewport cuts what overflows it, unless it says `overflow: visible`
-//! - Masks, patterns and filters are not applied
+//! - `mask`: what an element draws is kept as the luminance (or alpha) of
+//!   the `<mask>` it names says (the `mask` module); patterns and filters
+//!   are not applied
 //! - Container elements: the outermost svg, its viewBox fitted to the pixels
 //!   as its `preserveAspectRatio` says; an svg inside it, placed in a
 //!   viewport of its own; g (with inheritance)
@@ -52,6 +56,8 @@ use core::f32::consts::PI;
 use std::collections::HashMap;
 
 mod clip;
+mod css;
+mod mask;
 mod paint;
 #[cfg(test)]
 mod use_tests;
@@ -59,7 +65,8 @@ mod use_tests;
 mod viewport_tests;
 
 pub use clip::Clip;
-use clip::{ClipIds, ClipPath, MAX_CLIP_DEPTH, Mask, clip_path_frame, may_clip};
+use clip::{ClipPath, MAX_CLIP_DEPTH, Mask, Referable, clip_path_frame, may_clip};
+use mask::{MaskDef, kept, mask_frame};
 use paint::{Defs, Gradient};
 use std::rc::Rc;
 
@@ -1144,6 +1151,9 @@ pub struct SvgStyle {
     pub clip_rule: Option<FillRule>,
     /// What the element is clipped to: not inherited -- each element's own.
     pub clip: Option<Clip>,
+    /// The `<mask>` the element is masked by, by its place among the
+    /// document's: not inherited.
+    pub mask: Option<usize>,
 }
 
 impl Default for SvgStyle {
@@ -1161,6 +1171,7 @@ impl Default for SvgStyle {
             stroke_opacity: None,
             clip_rule: None,
             clip: None,
+            mask: None,
         }
     }
 }
@@ -1266,6 +1277,8 @@ pub struct SvgDocument {
     reused: Vec<SvgNode>,
     /// Its `<clipPath>`s, at the places [`Clip::Path`] gives.
     clips: Vec<ClipPath>,
+    /// Its `<mask>`s, at the places [`SvgStyle::mask`] gives.
+    masks: Vec<MaskDef>,
 }
 
 /// The user-space rectangle an `<svg>` element shows, `(x, y, width,
@@ -1307,12 +1320,17 @@ impl DeclaredSize {
 impl SvgDocument {
     /// Parse an SVG string into a document tree.
     pub fn parse(svg_data: &str) -> Result<Self, SvgError> {
-        let elements = parse_xml(svg_data)?;
+        let mut elements = parse_xml(svg_data)?;
         // `first` rather than an `is_empty` check followed by `[0]`: the check
         // and the read are one expression, so they cannot drift apart.
         let first = elements
-            .first()
+            .first_mut()
             .ok_or_else(|| SvgError::MalformedXml("empty document".into()))?;
+        // The document's `<style>` sheets first, into the `style` of each
+        // element they select, so that everything read below -- gradients'
+        // stops, clip paths, shapes -- reads what they say.
+        css::Sheet::of(first).apply(first);
+        let first: &XmlElement = first;
         // The gradients first, from the whole document: a shape may name one
         // defined after it. Their percentages are of the viewport.
         let (_, _, view_w, view_h) = DeclaredSize::of(first).shown();
@@ -1323,11 +1341,13 @@ impl SvgDocument {
         let mut by_id = HashMap::new();
         index_ids(first, &mut by_id);
         let reusable = Reusable::collect(first, &by_id);
-        let clip_ids = ClipIds::collect(first, &by_id);
+        let clip_ids = Referable::collect(first, &by_id, "clipPath");
+        let mask_ids = Referable::collect(first, &by_id, "mask");
         let builder = Builder {
             defs: &defs,
             reusable: &reusable,
             clips: &clip_ids,
+            masks: &mask_ids,
             ancestors: None,
             viewport: (view_w, view_h),
             outermost: true,
@@ -1342,12 +1362,18 @@ impl SvgDocument {
             .iter()
             .map(|elem| build_clip_path(elem, builder.inner()))
             .collect();
+        let masks = mask_ids
+            .elements
+            .iter()
+            .map(|elem| build_mask(elem, builder.inner()))
+            .collect();
         let root = build_node(first, builder)?;
         Ok(Self {
             root,
             defs,
             reused,
             clips,
+            masks,
         })
     }
 
@@ -1374,7 +1400,14 @@ impl SvgDocument {
     /// a drawing asked for at another shape is not stretched. A view box with
     /// no area draws nothing.
     pub fn render(&self, width: u32, height: u32) -> Vec<u8> {
-        let mut renderer = SvgRenderer::new(width, height, &self.defs, &self.reused, &self.clips);
+        let mut renderer = SvgRenderer::new(
+            width,
+            height,
+            &self.defs,
+            &self.reused,
+            &self.clips,
+            &self.masks,
+        );
         let aspect = match &self.root {
             SvgNode::Svg { aspect, .. } => *aspect,
             _ => AspectRatio::DEFAULT,
@@ -1639,6 +1672,10 @@ struct XmlElement {
     tag: String,
     attrs: Vec<(String, String)>,
     children: Vec<XmlElement>,
+    /// The text a `<style>` element holds, its CDATA sections with it; empty
+    /// for every other element -- this renderer draws no text, and a sheet is
+    /// the one text it reads.
+    text: String,
 }
 
 impl XmlElement {
@@ -1798,6 +1835,11 @@ fn skip_prolog(c: &mut XmlCursor) {
 ///
 /// Always consumes at least one byte, which is what stops its callers' loops.
 fn skip_special(c: &mut XmlCursor) {
+    // A CDATA section runs to its `]]>`, whatever `>`s are in it.
+    if c.starts_with(CDATA_OPEN) {
+        take_cdata(c);
+        return;
+    }
     if c.starts_with(b"<!--") {
         c.advance(4);
         while !c.at_end() {
@@ -1876,6 +1918,9 @@ fn parse_element(c: &mut XmlCursor, depth: usize) -> Result<XmlElement, SvgError
     }
 
     let mut children = Vec::new();
+    // A style sheet is the one text this renderer reads.
+    let keeps_text = local_tag(&tag) == "style";
+    let mut text = String::new();
     if c.eat(b'/') {
         // Self-closing, `<tag ... />`. If the document ends before the '>',
         // the element is still what it is; there is nothing to recover.
@@ -1885,8 +1930,13 @@ fn parse_element(c: &mut XmlCursor, depth: usize) -> Result<XmlElement, SvgError
             c.skip_whitespace();
             let Some(byte) = c.peek() else { break };
             if byte != b'<' {
-                // Text content, which this parser has no use for.
-                c.bump();
+                if keeps_text {
+                    text.push_str(&decode_entities(&c.take_while(|b| b != b'<')));
+                    text.push('\n');
+                } else {
+                    // Text content, which this parser has no use for.
+                    c.bump();
+                }
                 continue;
             }
             match c.peek_at(1) {
@@ -1899,6 +1949,10 @@ fn parse_element(c: &mut XmlCursor, depth: usize) -> Result<XmlElement, SvgError
                     c.eat(b'>');
                     break;
                 }
+                Some(b'!') if keeps_text && c.starts_with(CDATA_OPEN) => {
+                    text.push_str(take_cdata(c));
+                    text.push('\n');
+                }
                 Some(b'!' | b'?') => skip_special(c),
                 _ => children.push(parse_element(c, depth.saturating_add(1))?),
             }
@@ -1909,7 +1963,77 @@ fn parse_element(c: &mut XmlCursor, depth: usize) -> Result<XmlElement, SvgError
         tag,
         attrs,
         children,
+        text,
     })
+}
+
+/// How a CDATA section opens, and closes.
+const CDATA_OPEN: &[u8] = b"<![CDATA[";
+const CDATA_CLOSE: &[u8] = b"]]>";
+
+/// The CDATA section at the cursor, read and passed: its text, which runs to
+/// its `]]>` -- not to the first `>`, which CSS's child combinator holds -- or
+/// to the end of the document if it never closes.
+fn take_cdata<'a>(c: &mut XmlCursor<'a>) -> &'a str {
+    c.advance(CDATA_OPEN.len());
+    let rest = c.rest();
+    let end = rest
+        .windows(CDATA_CLOSE.len())
+        .position(|w| w == CDATA_CLOSE)
+        .unwrap_or(rest.len());
+    c.advance(end.saturating_add(CDATA_CLOSE.len()));
+    // The document is text and the section is cut at ASCII bytes, so this
+    // cannot fail; were it to, the section reads as nothing rather than as
+    // text with its bytes replaced.
+    rest.get(..end)
+        .and_then(|section| core::str::from_utf8(section).ok())
+        .unwrap_or("")
+}
+
+/// `text` with XML's five named entities and its character references
+/// written out. One that is none of these is kept as written.
+fn decode_entities(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut rest = text;
+    while let Some(at) = rest.find('&') {
+        let (before, from) = rest.split_at(at);
+        out.push_str(before);
+        let decoded = from.find(';').and_then(|semi| {
+            let name = from.get(1..semi)?;
+            let ch = match name {
+                "lt" => '<',
+                "gt" => '>',
+                "amp" => '&',
+                "quot" => '"',
+                "apos" => '\'',
+                _ => {
+                    let code = match name.strip_prefix("#x").or_else(|| name.strip_prefix("#X")) {
+                        Some(hex) => u32::from_str_radix(hex, 16).ok()?,
+                        None => name.strip_prefix('#')?.parse::<u32>().ok()?,
+                    };
+                    char::from_u32(code)?
+                }
+            };
+            Some((ch, semi))
+        });
+        match decoded {
+            Some((ch, semi)) => {
+                out.push(ch);
+                rest = from.get(semi.saturating_add(1)..).unwrap_or("");
+            }
+            None => {
+                out.push('&');
+                rest = from.get(1..).unwrap_or("");
+            }
+        }
+    }
+    out.push_str(rest);
+    out
+}
+
+/// An element's name without a namespace prefix (`svg:style` is `style`).
+fn local_tag(tag: &str) -> &str {
+    tag.rsplit_once(':').map_or(tag, |(_, local)| local)
 }
 
 fn parse_attr_value(c: &mut XmlCursor) -> Result<String, SvgError> {
@@ -1963,7 +2087,9 @@ struct Builder<'b> {
     reusable: &'b Reusable<'b>,
     /// The document's `<clipPath>`s, by `id`, for a `clip-path` that names
     /// one.
-    clips: &'b ClipIds<'b>,
+    clips: &'b Referable<'b>,
+    /// The document's `<mask>`s, by `id`, for a `mask` that names one.
+    masks: &'b Referable<'b>,
     /// The innermost element with an `id` that the element is inside: a
     /// `<use>` naming any of these would draw itself inside itself.
     ancestors: Option<&'b Ancestor<'b>>,
@@ -2217,6 +2343,25 @@ fn build_reused(id: &str, target: &XmlElement, b: Builder<'_>) -> SvgNode {
         })
     });
     content.unwrap_or_else(|_| nothing())
+}
+
+/// A `<mask>`, built: where it is measured, and its content, which is drawn
+/// as any content is. A child that cannot be built is left out, as a clip
+/// path's is, and for the same reason.
+fn build_mask(elem: &XmlElement, b: Builder<'_>) -> MaskDef {
+    let (units, content_units, rect, luminance) = mask_frame(elem, b.viewport);
+    let children = elem
+        .children
+        .iter()
+        .filter_map(|child| build_node(child, b).ok())
+        .collect();
+    MaskDef {
+        units,
+        content_units,
+        rect,
+        luminance,
+        children,
+    }
 }
 
 /// A `<clipPath>`, built: its shapes and `<use>`s -- nothing else may stand in
@@ -2583,19 +2728,45 @@ fn property<'e>(elem: &'e XmlElement, name: &str) -> Option<&'e str> {
         .or_else(|| elem.attr(name).map(str::trim))
 }
 
-/// The value the CSS declarations in `style` give `name` -- the last one, as a
-/// later declaration overrides an earlier -- without its `!important`.
+/// The value the CSS declarations in `style` give `name`, without its
+/// `!important`: the last one, as a later declaration overrides an earlier
+/// -- but an important one over any that is not, wherever it stands.
 fn declared<'s>(style: &'s str, name: &str) -> Option<&'s str> {
-    style
-        .split(';')
-        .filter_map(|declaration| {
-            let (property, value) = declaration.split_once(':')?;
-            (property.trim() == name).then(|| {
-                let value = value.trim();
-                value.strip_suffix("!important").unwrap_or(value).trim()
-            })
-        })
-        .rfind(|value| !value.is_empty())
+    let mut found: Option<(&str, bool)> = None;
+    for declaration in style.split(';') {
+        let Some((property, value)) = declaration.split_once(':') else {
+            continue;
+        };
+        if property.trim() != name {
+            continue;
+        }
+        let (value, important) = without_important(value);
+        if value.is_empty() || found.is_some_and(|(_, was)| was && !important) {
+            continue;
+        }
+        found = Some((value, important));
+    }
+    found.map(|(value, _)| value)
+}
+
+/// A declaration's value without its `!important`, and whether it had one:
+/// as CSS reads it, a `!` and then `important` in any case, ending the
+/// value, with or without space between.
+fn without_important(value: &str) -> (&str, bool) {
+    let value = value.trim();
+    let word = value
+        .len()
+        .checked_sub("important".len())
+        .and_then(|cut| Some((value.get(..cut)?, value.get(cut..)?)));
+    match word {
+        Some((rest, word)) if word.eq_ignore_ascii_case("important") => {
+            match rest.trim_end().strip_suffix('!') {
+                Some(rest) => (rest.trim_end(), true),
+                None => (value, false),
+            }
+        }
+        _ => (value, false),
+    }
 }
 
 /// A length in user units: a number, in `px` or with no unit. Other units say
@@ -2696,6 +2867,7 @@ fn parse_style_attrs(elem: &XmlElement, b: Builder<'_>) -> Result<SvgStyle, SvgE
         stroke_opacity,
         clip_rule: clip::clip_rule(elem),
         clip: property(elem, "clip-path").and_then(|value| b.clips.clip(value)),
+        mask: property(elem, "mask").and_then(|value| b.masks.place(value)),
     })
 }
 
@@ -3623,8 +3795,13 @@ struct SvgRenderer<'d> {
     reuse_budget: usize,
     /// The document's `<clipPath>`s, for a `clip-path` that names one.
     clips: &'d [ClipPath],
-    /// What the clips around the node being drawn leave of each pixel:
-    /// coverage is multiplied by it. `None` where nothing is clipped.
+    /// The document's `<mask>`s, for a `mask` that names one.
+    masks: &'d [MaskDef],
+    /// How many masks' content this drawing is inside: a mask whose content
+    /// is masked by itself ends at [`MAX_CLIP_DEPTH`].
+    mask_depth: usize,
+    /// What the clips and masks around the node being drawn leave of each
+    /// pixel: coverage is multiplied by it. `None` where nothing is clipped.
     mask: Option<Rc<Mask>>,
 }
 
@@ -3653,6 +3830,7 @@ impl<'d> SvgRenderer<'d> {
         defs: &'d Defs,
         reused: &'d [SvgNode],
         clips: &'d [ClipPath],
+        masks: &'d [MaskDef],
     ) -> Self {
         // A size that does not fit in `usize` could not be allocated even if it
         // were computed, so an empty buffer is the honest answer rather than a
@@ -3676,6 +3854,8 @@ impl<'d> SvgRenderer<'d> {
             depth: 0,
             reuse_budget: MAX_REUSED_NODES,
             clips,
+            masks,
+            mask_depth: 0,
             mask: None,
         }
     }
@@ -3759,8 +3939,114 @@ impl<'d> SvgRenderer<'d> {
     /// answer what to put back once it is drawn; `None` where nothing
     /// changed: no clip, or one that names no clip path.
     fn enter_clip(&mut self, node: &SvgNode, transform: Transform) -> Option<OuterMask> {
-        let clip = style_of(node)?.clip?;
-        self.push_clip(clip, node, transform.then(local_transform(node)))
+        let style = style_of(node)?;
+        let (clip, masked_by) = (style.clip, style.mask);
+        if clip.is_none() && masked_by.is_none() {
+            return None;
+        }
+        let local = transform.then(local_transform(node));
+        let before = self.mask.clone();
+        let mut changed = false;
+        if let Some(clip) = clip {
+            changed |= self.push_clip(clip, node, local).is_some();
+        }
+        // Its mask, over its clip.
+        if let Some(place) = masked_by
+            && let Some(kept) = self.element_mask(place, node, local)
+        {
+            let kept = match &self.mask {
+                Some(outer) => outer.intersect(&kept),
+                None => kept,
+            };
+            self.mask = Some(Rc::new(kept));
+            changed = true;
+        }
+        changed.then_some(OuterMask(before))
+    }
+
+    /// What the `<mask>` at `place` keeps of the surface for `node`, whose
+    /// own user space `local` carries to the pixels -- or `None` where no
+    /// mask is there, which masks nothing.
+    ///
+    /// Its content is drawn into a scratch surface over the region its
+    /// rectangle covers, cut to that rectangle, and each pixel's luminance
+    /// times its alpha -- or its alpha alone -- is the share kept there.
+    /// Measured against a box with no area, or nested in masks deeper than
+    /// [`MAX_CLIP_DEPTH`], it keeps nothing.
+    fn element_mask(&mut self, place: usize, node: &SvgNode, local: Transform) -> Option<Mask> {
+        let masks = self.masks;
+        let def = masks.get(place)?;
+        if self.mask_depth >= MAX_CLIP_DEPTH {
+            return Some(Mask::nothing());
+        }
+        let in_box = |units: paint::Units| units == paint::Units::ObjectBoundingBox;
+        let to_box = if in_box(def.units) || in_box(def.content_units) {
+            match self.bounds(node) {
+                Some((x, y, w, h)) if w > 0.0 && h > 0.0 => {
+                    Transform::translate(x, y).then(Transform::scale(w, h))
+                }
+                _ => return Some(Mask::nothing()),
+            }
+        } else {
+            Transform::IDENTITY
+        };
+        let space = |units: paint::Units| {
+            if in_box(units) {
+                local.then(to_box)
+            } else {
+                local
+            }
+        };
+        let [rx, ry, rw, rh] = def.rect;
+        // The region the rectangle covers on the surface.
+        let mut extent = Extent::default();
+        if let Some(outline) = rect_subpath(rx, ry, rw, rh, 0.0, 0.0, space(def.units)) {
+            for &(x, y) in &outline.points {
+                extent.add(x, y);
+            }
+        }
+        let Some((x0, y0, x1, y1)) = extent.pixels(self.width, self.height) else {
+            return Some(Mask::nothing());
+        };
+        #[allow(
+            clippy::cast_precision_loss,
+            reason = "a pixel coordinate on the surface, far inside f32's exact range"
+        )]
+        let shift = Transform::translate(-(x0 as f32), -(y0 as f32));
+        let mut scratch = SvgRenderer::new(
+            x1.saturating_sub(x0),
+            y1.saturating_sub(y0),
+            self.defs,
+            self.reused,
+            self.clips,
+            self.masks,
+        );
+        scratch.mask_depth = self.mask_depth.saturating_add(1);
+        scratch.depth = self.depth;
+        scratch.drawing.clone_from(&self.drawing);
+        scratch.reuse_budget = self.reuse_budget;
+        // Nothing outside the rectangle is kept: the content is drawn cut to
+        // it.
+        let rect: Vec<Subpath> =
+            rect_subpath(rx, ry, rw, rh, 0.0, 0.0, shift.then(space(def.units)))
+                .into_iter()
+                .collect();
+        scratch.mask = Some(Rc::new(scratch.mask_of(&[(rect, FillRule::NonZero)])));
+        let content = shift.then(space(def.content_units));
+        for child in &def.children {
+            scratch.render_node(child, content, &ResolvedStyle::default());
+        }
+        // What the mask's content drew through `<use>`s is spent.
+        self.reuse_budget = scratch.reuse_budget;
+        let left = scratch
+            .buffer
+            .chunks_exact(4)
+            .map(|pixel| match *pixel {
+                [r, g, b, a] => kept([r, g, b, a], def.luminance),
+                _ => 0,
+            })
+            .collect();
+        Some(Mask::from_left(x0, y0, x1, y1, left))
     }
 
     /// Lay `clip` over what is already clipped, for `node`, whose own user

@@ -24,9 +24,9 @@
 //! [`crate::button::width`] makes it.
 //!
 //! A [`WidgetKind::ScrollView`] lays what it holds out at its own width and as
-//! tall as it needs, scrolls it under the wheel, cuts it to its box, and
-//! draws a bar down its right edge -- down only: the toolkit's scrollbar is a
-//! column, so content wider than the view scrolls sideways with no bar.
+//! tall as it needs, scrolls it under the wheel (sideways under its tilt),
+//! cuts it to its box, and draws its bars: down its right edge for content
+//! taller than it, across its foot for content wider.
 
 mod draw;
 #[cfg(test)]
@@ -973,7 +973,18 @@ impl Widget {
     /// palette `p`, so a control in a widget tree looks as it does anywhere
     /// else and follows the user's theme. A colour the widget's style sets is
     /// the program's choice and wins; one it leaves unset is the palette's.
+    ///
+    /// A control is drawn knowing what it is drawn on -- a button computes
+    /// its face and its label's contrast against that -- which is the
+    /// background of the nearest widget round it that has one, laid over
+    /// what that one is drawn on, and at the root the palette's `base`, the
+    /// colour the toolkit's windows clear to.
     pub fn render(&self, p: &Palette, tree: &mut RenderTree) {
+        self.render_on(p, p.base, tree);
+    }
+
+    /// [`render`](Self::render), on `ground`: the colour behind this widget.
+    fn render_on(&self, p: &Palette, ground: Color, tree: &mut RenderTree) {
         if !self.visible {
             return;
         }
@@ -981,17 +992,20 @@ impl Widget {
         // default, opaque, rather than vanishing.
         let opacity = self.style.opacity;
         if opacity.is_nan() || opacity >= 1.0 {
-            self.render_opaque(p, tree);
+            self.render_opaque(p, ground, tree);
         } else if opacity > 0.0 {
+            // Faded as a group: drawn opaque, on the same ground, and then
+            // every command faded alike -- so a child is drawn on its
+            // parent's background as it is before the fade.
             let mut own = RenderTree::new();
-            self.render_opaque(p, &mut own);
+            self.render_opaque(p, ground, &mut own);
             tree.commands
                 .extend(own.commands.into_iter().map(|c| c.faded(opacity)));
         }
     }
 
-    /// [`render`](Self::render), at full opacity.
-    fn render_opaque(&self, p: &Palette, tree: &mut RenderTree) {
+    /// [`render_on`](Self::render_on), at full opacity.
+    fn render_opaque(&self, p: &Palette, ground: Color, tree: &mut RenderTree) {
         let x = self.layout.x + self.layout.margin.left;
         let y = self.layout.y + self.layout.margin.top;
         let w = self.layout.border_box_width();
@@ -1049,8 +1063,11 @@ impl Widget {
             }
         }
 
-        // What the widget is, drawn by the component module for it.
-        self.draw_kind(p, tree, (x, y, w, h));
+        // What the widget is, drawn by the component module for it, and its
+        // children, on its background -- or, where it has none, on what it
+        // is itself drawn on.
+        let ground = self.style.background.over(ground);
+        self.draw_kind(p, ground, tree, (x, y, w, h));
 
         // Its children, from where they are -- a scroll view's scrolled -- and
         // cut to its content box.
@@ -1066,7 +1083,7 @@ impl Widget {
             });
 
             for child in &self.children {
-                child.render(p, tree);
+                child.render_on(p, ground, tree);
             }
 
             tree.push(RenderCommand::PopClip);

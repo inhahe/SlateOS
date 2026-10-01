@@ -71,6 +71,9 @@ fn preserve_aspect_ratio_is_read_as_svg_writes_it() {
         "xMidYmid",
         "xMidYMid nonsense",
         "xMidYMid meet extra",
+        // Not the default but for its last word, so a reader that stopped
+        // before that word would answer otherwise.
+        "xMinYMin slice extra",
         "xMid",
     ] {
         assert_eq!(read(bad), AspectRatio::DEFAULT, "{bad:?}");

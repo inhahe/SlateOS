@@ -79,3 +79,7 @@ the lock is converted: `ipc::unix_socket`'s `TABLE` takes `stream_socket`'s
 `PAIRS` under it, is never taken in interrupt context and is no hot path, so it
 is a `crate::sync::Mutex` (`UNIX_SOCKETS`) that lockdep now watches. rq39 hung
 before the battery's end, so the count after these is the next full boot's.
+From the older list, three more the same day: `clipboard`'s `CURRENT` and
+`HISTORY` are one lock (`CLIPBOARD`); `dragdrop` copies its drop zones out
+before taking the session's lock; `cgroupfs`' `STATE`, held across the
+kernel's cgroup calls by design, is converted (`CGROUPFS`).

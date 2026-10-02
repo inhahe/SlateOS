@@ -181453,6 +181453,36 @@ caller's filesystem uid, and its group to the caller's filesystem gid -- or
 the parent directory's gid when the parent is setgid -- in the same
 operation as the creation, as Linux's `inode_init_owner` does.
 
+### A-UNIX-SOCKETS-CARRY-NO-DESCRIPTORS-OR-CREDENTIAL-MESSAGES -- 2026-10-02 -- OPEN (lane A)
+
+**Status:** OPEN (lane A) -- what the first version of named Unix-domain
+sockets (design-decisions 1519) does not do yet.
+
+**In short:** programs can now meet at a socket's name and talk, but four
+things Linux's Unix-domain sockets also do are missing:
+- **Passing open files to another program** (`SCM_RIGHTS`). Wayland, D-Bus
+  and many servers hand descriptors across a socket. A send that tries is
+  refused with `EOPNOTSUPP`, so the program knows.
+- **Credentials as a control message** (`SCM_CREDENTIALS` with
+  `SO_PASSCRED`). The kernel records each datagram's sender, but a receive
+  returns no control messages, so a syslog daemon cannot yet log who really
+  sent a line. (`SO_PEERCRED` on a connected stream does work.)
+- **`SOCK_SEQPACKET`**: still `ENOSYS`.
+- **Receive and send timeouts** (`SO_RCVTIMEO`/`SO_SNDTIMEO`): `ENOPROTOOPT`.
+
+**Where:** `kernel/src/syscall/linux.rs` -- `unix_sendmsg`
+(`control_passes_rights`), `unix_recvmsg` (writes `msg_controllen = 0`),
+`sys_socket`; `kernel/src/ipc/unix_socket.rs`.
+
+**Proper fix:** `SCM_RIGHTS` moves each descriptor's object with the
+message, as `ipc::channel` moves capabilities -- a stream needs the rights
+attached to a byte offset, as Linux attaches them to the skb they arrive
+with. Credentials: `recvmsg` writes an `SCM_CREDENTIALS` control message
+from `Received::cred` when `SO_PASSCRED` is set (a per-socket flag to add).
+SEQPACKET: a third kind, connected like a stream with datagram boundaries
+-- a channel pair is that already. Timeouts: a deadline on the waits in
+`unix_socket`, as `stream_socket`'s `*_timeout` calls have.
+
 ## Lane B: new entries
 
 Lane B (userland) appends new entries at the end of this section, above the

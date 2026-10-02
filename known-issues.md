@@ -166472,7 +166472,7 @@ Those are features, and dd-950's point is that these modules are the outline
 of them rather than dead weight.
 
 ### [A] Two implementations of file immutability: one real and tested, one decorative -- and I nearly recorded the real one as fake -- 2026-09-18
-**Status:** OPEN -- the real one is complete as of 2026-10-02 (design-decisions §1524: Linux's rules on every filesystem, every refusal `EPERM`, `chattr`'s ioctls); the decorative `fs::immutable` remains, and is lane A's next removal
+**Status:** FIXED 2026-10-02 on lane-a-wip, awaiting a boot -- the real one is complete (design-decisions §1524: Linux's rules on every filesystem, every refusal `EPERM`, `chattr`'s ioctls) and the decorative `fs::immutable` is removed, with its `fflags` command and `/proc/immutable` (§1525)
 
 **In short:** the kernel can mark a file unchangeable, and that genuinely
 works -- writes, truncates and deletes are all refused, checked on every

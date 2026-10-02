@@ -536,8 +536,9 @@ check_bench_coverage() {
 # Returns 0 if the log shows a dead kernel, 1 otherwise.
 # Fail a boot in which a file-identity rung SKIPPED instead of running.
 #
-# WHY THIS EXISTS: the four rungs that prove the path-keyed tables (flock,
-# sealing, record locks, immutable flags) now key on FileId rather than on a
+# WHY THIS EXISTS: the rungs that prove the path-keyed tables (flock,
+# sealing, record locks -- and the immutable flags' table, until it was removed
+# on 2026-10-02) now key on FileId rather than on a
 # path string each open with two `return Ok(())` escapes -- one if /tmp cannot
 # hard-link, one if the two names do not resolve to one identity. Both print
 # SKIPPED and both return SUCCESS, because a kernel that genuinely cannot
@@ -589,10 +590,10 @@ check_identity_rungs() {
         grep -a 'identity rung SKIPPED' "$file" | head -8 | sed 's/^/  /'
         echo "  A skip here means /tmp cannot hard-link, or two names for one"
         echo "  file do not share an inode. Either falsifies the premise of the"
-        echo "  FileId conversion (kernel/src/fs/{vfs,sealing,reclock,immutable}.rs)."
+        echo "  FileId conversion (kernel/src/fs/{vfs,sealing,reclock}.rs)."
         return 1
     fi
-    # Fewer than four means a rung did not reach its verdict at all -- an
+    # Fewer than expected means a rung did not reach its verdict at all -- an
     # early `?` on an unrelated error, or a self_test that stopped being
     # called. Neither prints FAIL, so nothing else would notice.
     if [ "${ran:-0}" -lt "$expected" ]; then

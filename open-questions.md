@@ -940,7 +940,8 @@ here means re-keying both indices, not one, and resolving identities back to
 names when displaying a search result.
 
 **Where it bites:** `kernel/src/fs/history.rs`. The conversion itself is small
-and mechanical (the pattern is in `kernel/src/fs/immutable.rs`); it is the
+and mechanical (the pattern is in `kernel/src/fs/sealing.rs`, keyed the same
+way; it was `immutable.rs` until that table was removed, §1525); it is the
 *behaviour* that needs your call, not the work. Background in
 `design-decisions.md` §957.
 

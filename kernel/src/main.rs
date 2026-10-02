@@ -6508,11 +6508,6 @@ extern "C" fn kernel_main() -> ! {
                 fs::fstrim::self_test(),
             );
             selftest::dispatch_debug(
-                "immutable flags",
-                selftest::Severity::Diagnostic,
-                fs::immutable::self_test(),
-            );
-            selftest::dispatch_debug(
                 "pathbar",
                 selftest::Severity::Diagnostic,
                 fs::pathbar::self_test(),

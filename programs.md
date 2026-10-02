@@ -170,7 +170,7 @@ two disagree.
 | `mkfifo` | Make FIFOs (named pipes). | yes | `coreutils` |  |
 | `mkfs` | Create Filesystems |  |  |  |
 | `mknod` | Make block or character special files, or FIFOs. |  | `coreutils` |  |
-| `mktemp` | Multi-Personality Utility: mktemp / id / groups / whoami |  |  |  |
+| `mktemp` | Create a temporary file or directory, safely, and print its name. |  | `coreutils` |  |
 | `monctl` | Monitor/Display Control Utility |  |  |  |
 | `more` | File perusal filter for viewing text one screen at a time. | yes | `coreutils` |  |
 | `mount` | Mount/Umount Utility |  |  |  |

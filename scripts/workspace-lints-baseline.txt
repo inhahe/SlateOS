@@ -104,7 +104,6 @@ userspace/m4
 userspace/make
 userspace/man
 userspace/mkfs
-userspace/mktemp
 userspace/monctl
 userspace/mount
 userspace/nano

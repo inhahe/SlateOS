@@ -2950,7 +2950,16 @@ one that says nothing at exactly that moment.
 The existing docstring's care about `var_os` versus `var` stays relevant: a tty
 name is a path under `/dev` and may not be UTF-8.
 
-## TD-B-MKTEMPS-ACCOUNT-LOOKUPS-CANNOT-TELL-ABSENT-FROM-UNREADABLE (lane B, 2026-09-11)
+## TD-B-MKTEMPS-ACCOUNT-LOOKUPS-CANNOT-TELL-ABSENT-FROM-UNREADABLE (lane B, 2026-09-11) — **CLOSED** 2026-10-02
+
+**Status:** CLOSED 2026-10-02 — the crate is gone. `userspace/mktemp` was
+deleted when `mktemp` became coreutils 9.4's port, and `id`, `whoami` and
+`groups` had already been coreutils' (`userspace/coreutils/src/bin/id.rs` and
+its neighbours) since §1005. Those ports also read an unreadable database as an
+empty one, and that is upstream's behaviour rather than this defect again:
+glibc's `getpwnam` answers NULL when `/etc/passwd` cannot be read, and `id.c`
+turns any NULL into `'alice': no such user` without consulting `errno`. The
+four `mktemp:` lines left `scripts/read-defaults-baseline.txt` with the crate.
 
 **In short:** `userspace/mktemp` -- which is also `id`, `whoami` and `groups` --
 reads `/etc/passwd` and `/etc/group` with `Err(_) => return Vec::new()`. An
@@ -180069,3 +180078,24 @@ samples all identical from the same random bytes.
   no limit; `-o FILE` is opened after the input is read, so `shuf -o f f`
   works in place; a write failure is reported with its reason by
   `write_error`, once.
+
+## `mktemp` was one personality of a hand-written four; it is GNU's now (lane B, 2026-10-02) — **FIXED** 2026-10-02
+
+**In short:** `userspace/mktemp` was a "multi-personality utility: mktemp / id /
+groups / whoami". The other three duplicated coreutils' own `id`, `groups` and
+`whoami`, and nothing linked to them; the `mktemp` read argv as `String` (a
+template that was not UTF-8 killed it before its first statement) and its
+options its own way. It is replaced by `coreutils/src/bin/mktemp.rs`, a port of
+GNU coreutils 9.4's `mktemp.c` with gnulib's `gen_tempname_len`,
+`last_component` and `file_name_concat`, and the crate is deleted (§1005).
+`scripts/mktemp-diff.sh`: 58 cases, none differing from GNU's -- the random
+characters turned back into X's, and what was made compared instead (type,
+permissions, nothing made by `-u` or by a run whose output failed).
+
+**What the port had to reproduce, because it is observable:** the X's are the
+last run before the suffix, the suffix everything after the last `X` unless
+`--suffix` says otherwise; `-t` ranks `$TMPDIR` above `-p`'s directory and `-p`
+ranks it below; `-t` refuses a template with a slash and `-p` an absolute
+one; `-u` makes nothing but still requires the name to be free; and a name
+that cannot be printed takes its file with it, with `write error` and its
+reason.

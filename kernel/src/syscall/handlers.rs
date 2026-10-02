@@ -13776,7 +13776,8 @@ pub fn sys_fs_set_perms(args: &SyscallArgs) -> SyscallResult {
 /// `SYS_FS_SET_TIMES` — set timestamps.
 ///
 /// `arg0`: path pointer.  `arg1`: path length.
-/// `arg2`: accessed_ns (0 = unchanged).  `arg3`: modified_ns (0 = unchanged).
+/// `arg2`: accessed_ns (0 = unchanged, `u64::MAX` = now).  `arg3`:
+/// modified_ns, likewise — `fs::vfs::TIME_NOW`, which the VFS resolves.
 /// `arg4`: flags (bit 0 = `NO_FOLLOW`, i.e. `lutimes` /
 /// `utimensat(AT_SYMLINK_NOFOLLOW)` — stamp the link inode itself).
 pub fn sys_fs_set_times(args: &SyscallArgs) -> SyscallResult {

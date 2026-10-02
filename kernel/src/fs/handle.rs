@@ -344,17 +344,36 @@ pub fn open_with_mode(
 /// it. With `APPEND` set, each write lands at the file's end as it is when the
 /// write lands, as one opened with `O_APPEND` does.
 ///
+/// An append-only file's (`chattr +a`) description keeps `APPEND` as it was
+/// opened, as Linux's `setfl` keeps `O_APPEND`
+/// (`fs::attr_policy::may_change_appending`): otherwise the rule that it is
+/// opened for writing only to append would last until the first `F_SETFL`.
+///
 /// # Errors
 ///
 /// `InvalidHandle` for a handle that is not open; `IsADirectory` for a
-/// directory handle, which has no byte position to append at.
+/// directory handle, which has no byte position to append at;
+/// `NotPermitted` for a change to `APPEND` on an append-only file.
 pub fn set_status_flags(handle: u64, flags: OpenFlags) -> KernelResult<()> {
-    let mut table = OPEN_FILES.lock();
-    let file = table.get_mut(&handle).ok_or(KernelError::InvalidHandle)?;
-    if file.is_directory {
+    let append = OpenFlags::APPEND.bits();
+    let (is_directory, appending) = {
+        let table = OPEN_FILES.lock();
+        let file = table.get(&handle).ok_or(KernelError::InvalidHandle)?;
+        (file.is_directory, file.flags.bits() & append)
+    };
+    if is_directory {
         return Err(KernelError::IsADirectory);
     }
-    let append = OpenFlags::APPEND.bits();
+    // With the table lock released: the VFS is not called with it held (see
+    // `advance_offset`). A file whose metadata cannot be read has no
+    // attributes to keep the flag for, and the change goes ahead.
+    if appending != flags.bits() & append
+        && let Ok(meta) = fstat(handle)
+    {
+        crate::fs::attr_policy::may_change_appending(meta.attributes)?;
+    }
+    let mut table = OPEN_FILES.lock();
+    let file = table.get_mut(&handle).ok_or(KernelError::InvalidHandle)?;
     file.flags = OpenFlags::from_bits((file.flags.bits() & !append) | (flags.bits() & append));
     Ok(())
 }
@@ -707,6 +726,23 @@ fn open_resolved(norm: PathBuf, flags: OpenFlags, create_mode: u16) -> KernelRes
             // that meets this.
             if entry.entry_type == crate::fs::EntryType::Socket {
                 return Err(KernelError::NoSuchDeviceOrAddress);
+            }
+
+            // `chattr +i` and `+a`: refused at the open, as Linux's
+            // `may_open` refuses them, rather than at the first write
+            // (`fs::attr_policy::may_open`) -- `echo x > file` fails at its
+            // redirection. A file whose metadata cannot be read has no
+            // attributes to refuse by; the writes are checked again by the
+            // filesystem regardless, on the inode they change.
+            if (flags.is_writable() || flags.contains(OpenFlags::TRUNCATE))
+                && let Ok(meta) = crate::fs::Vfs::metadata_resolved(&norm)
+            {
+                crate::fs::attr_policy::may_open(
+                    meta.attributes,
+                    flags.is_writable(),
+                    flags.contains(OpenFlags::APPEND),
+                    flags.contains(OpenFlags::TRUNCATE),
+                )?;
             }
 
             let mut size = entry.size;
@@ -1688,6 +1724,37 @@ impl HandleFile {
         Ok(())
     }
 
+    /// The file's metadata, whatever its name now: `fstat`'s answer, for a
+    /// handle already in hand.
+    ///
+    /// # Errors
+    ///
+    /// As `check_pin`; the filesystem's.
+    pub fn metadata(&self) -> KernelResult<crate::fs::FileMeta> {
+        match &self.object {
+            Some(held) => crate::fs::Vfs::object_metadata(held),
+            None => {
+                self.check_pin()?;
+                crate::fs::Vfs::metadata_resolved(&self.path)
+            }
+        }
+    }
+
+    /// `FS_IOC_SETFLAGS`: the file's attributes (`chattr`), as
+    /// `Vfs::set_attributes` decides who may change them.
+    ///
+    /// # Errors
+    ///
+    /// As `check_change`; `ReadOnlyFilesystem`; `NotPermitted`; the
+    /// filesystem's.
+    pub fn set_attributes(&self, attrs: crate::fs::FileAttr) -> KernelResult<()> {
+        self.check_change()?;
+        match &self.object {
+            Some(held) => crate::fs::Vfs::object_set_attributes(held, &self.path, attrs),
+            None => crate::fs::Vfs::set_attributes_resolved(&self.path, attrs),
+        }
+    }
+
     /// `fgetxattr`: the attribute `name` of the file, for the calling task
     /// (`fs::xattr_policy`).
     ///
@@ -1825,11 +1892,12 @@ impl HandleFile {
         }
     }
 
-    /// `futimens`. A time of 0 is left as it is.
+    /// `futimens`. A time of 0 is left as it is; `fs::vfs::TIME_NOW` is now.
     ///
     /// # Errors
     ///
-    /// As `check_change`; the filesystem's own.
+    /// As `check_change`; `NotPermitted` for an immutable or append-only
+    /// file (`fs::attr_policy`); the filesystem's own.
     pub fn set_times(
         &self,
         accessed_ns: crate::fs::vfs::Timestamp,

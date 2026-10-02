@@ -27,6 +27,7 @@ use alloc::vec::Vec;
 
 use crate::blkdev::SECTOR_SIZE;
 use crate::error::{KernelError, KernelResult};
+use crate::fs::attr_policy;
 use crate::fs::path::{Path, PathBuf};
 use crate::fs::vfs::{DirEntry, EntryType, FileAttr, FileMeta, FileSystem, FsInfo};
 
@@ -814,6 +815,31 @@ impl FatDirEntry {
             ino: u64::from(self.first_cluster),
         }
     }
+}
+
+/// The VFS attributes a directory entry's attribute byte carries.
+///
+/// `ATTR_READ_ONLY` is `FileAttr::IMMUTABLE` on a file, so the VFS holds a
+/// read-only file to what `chattr +i` means (`fs::attr_policy`): not written,
+/// truncated, renamed or deleted until the bit is cleared. Windows refuses to
+/// write or delete one too; it allows a rename, which this does not.
+///
+/// On a directory it is nothing. Windows sets it on a folder it has
+/// customised (`desktop.ini`) and ignores it otherwise, and Linux's vfat
+/// ignores it unless mounted `rodir`: taking it for `IMMUTABLE` would have a
+/// stick written by Windows refuse new files in its customised folders.
+fn entry_attrs(attr: u8) -> FileAttr {
+    let mut attrs = FileAttr::NONE;
+    if attr & ATTR_READ_ONLY != 0 && attr & ATTR_DIRECTORY == 0 {
+        attrs = attrs.union(FileAttr::IMMUTABLE);
+    }
+    if attr & ATTR_HIDDEN != 0 {
+        attrs = attrs.union(FileAttr::HIDDEN);
+    }
+    if attr & ATTR_SYSTEM != 0 {
+        attrs = attrs.union(FileAttr::SYSTEM);
+    }
+    attrs
 }
 
 // ---------------------------------------------------------------------------
@@ -3277,8 +3303,8 @@ impl FileSystem for FatFs {
     /// packed DOS format.  We convert them to nanoseconds-since-epoch.
     /// FAT has no ownership or Unix permissions, so those stay at 0.
     ///
-    /// FAT attribute flags are mapped to VFS attributes:
-    /// - `ATTR_READ_ONLY` → `FileAttr::IMMUTABLE`
+    /// FAT attribute flags are mapped to VFS attributes ([`entry_attrs`]):
+    /// - `ATTR_READ_ONLY` → `FileAttr::IMMUTABLE`, on a file only
     /// - `ATTR_HIDDEN` → `FileAttr::HIDDEN`
     /// - `ATTR_SYSTEM` → `FileAttr::SYSTEM`
     fn metadata(&mut self, path: &Path) -> KernelResult<FileMeta> {
@@ -3306,17 +3332,7 @@ impl FileSystem for FatFs {
                 // Access date has no time component — use midnight.
                 let accessed_ns = dos_datetime_to_ns(e.access_date, 0);
 
-                // Map FAT attribute flags to VFS attributes.
-                let mut attrs = FileAttr::NONE;
-                if e.attr & ATTR_READ_ONLY != 0 {
-                    attrs = attrs.union(FileAttr::IMMUTABLE);
-                }
-                if e.attr & ATTR_HIDDEN != 0 {
-                    attrs = attrs.union(FileAttr::HIDDEN);
-                }
-                if e.attr & ATTR_SYSTEM != 0 {
-                    attrs = attrs.union(FileAttr::SYSTEM);
-                }
+                let attrs = entry_attrs(e.attr);
 
                 // Suppress unused variable warning — parent_cluster is needed
                 // by resolve_path but not used in the metadata response.
@@ -3469,6 +3485,9 @@ impl FileSystem for FatFs {
             if entry.is_directory() {
                 return Err(KernelError::IsADirectory);
             }
+            // A read-only file is immutable (`entry_attrs`): no space is
+            // given to it (`fs::attr_policy::may_allocate`).
+            attr_policy::may_allocate(entry_attrs(entry.attr))?;
             name83 = entry.name;
             first_cluster = entry.first_cluster;
 
@@ -3596,6 +3615,8 @@ impl FileSystem for FatFs {
             if existing_entry.is_directory() {
                 return Err(KernelError::IsADirectory);
             }
+            // Not a read-only one (`fs::attr_policy::may_rewrite`).
+            attr_policy::may_rewrite(entry_attrs(existing_entry.attr))?;
 
             // Free old cluster chain.
             if existing_entry.first_cluster >= 2 {
@@ -4061,6 +4082,8 @@ impl FileSystem for FatFs {
             if entry.is_directory() {
                 return Err(KernelError::IsADirectory);
             }
+            // Not into a read-only file (`fs::attr_policy::may_write_at`).
+            attr_policy::may_write_at(entry_attrs(entry.attr), offset, u64::from(entry.file_size))?;
             name83 = entry.name;
             old_cluster = entry.first_cluster;
             old_size = entry.file_size;
@@ -4247,6 +4270,8 @@ impl FileSystem for FatFs {
         if entry.is_directory() {
             return Err(KernelError::IsADirectory);
         }
+        // Not a read-only file (`fs::attr_policy::may_rewrite`).
+        attr_policy::may_rewrite(entry_attrs(entry.attr))?;
 
         let name83 = entry.name;
         let (dir_lba, dir_offset, exists) = self.find_or_create_slot_in(parent_cluster, &name83)?;
@@ -4396,10 +4421,15 @@ impl FileSystem for FatFs {
     /// - `SYSTEM`    → `ATTR_SYSTEM`    (0x04)
     ///
     /// Preserves structural flags (`ATTR_DIRECTORY`, `ATTR_VOLUME_ID`,
-    /// `ATTR_ARCHIVE`) — only the user-controllable bits change.
-    /// `APPEND_ONLY` is silently ignored since FAT has no equivalent.
+    /// `ATTR_ARCHIVE`) — only the user-controllable bits change — and a
+    /// directory's `ATTR_READ_ONLY`, which Windows sets on a customised
+    /// folder and which means nothing here ([`entry_attrs`]).
     ///
-    /// Returns `NotSupported` for the root directory (no on-disk entry).
+    /// Returns `NotSupported` for the root directory (no on-disk entry), for
+    /// `APPEND_ONLY`, which FAT has no bit for, and for `IMMUTABLE` on a
+    /// directory, which FAT's read-only bit does not mean. Both were ignored
+    /// until 2026-10-02, so `chattr +a` succeeded on a FAT file and protected
+    /// nothing -- worse than refusing, since it gives a reason to rely on it.
     #[allow(clippy::arithmetic_side_effects)]
     fn set_attributes(&mut self, path: &Path, attrs: FileAttr) -> KernelResult<()> {
         let path = as_str(path)?;
@@ -4409,6 +4439,11 @@ impl FileSystem for FatFs {
         let parent_cluster = self.resolve_dir_cluster(parent_path)?;
         let (_pc, entry_opt) = self.resolve_path(path)?;
         let entry = entry_opt.ok_or(KernelError::NotSupported)?;
+        if attrs.contains(FileAttr::APPEND_ONLY)
+            || (entry.is_directory() && attrs.contains(FileAttr::IMMUTABLE))
+        {
+            return Err(KernelError::NotSupported);
+        }
 
         // Find the on-disk location of the 8.3 entry.
         let name83 = entry.name;
@@ -4424,9 +4459,14 @@ impl FileSystem for FatFs {
         let old_attr = sector_buf.get(dir_offset + 11).copied().unwrap_or(0);
 
         // Preserve structural flags, clear user-controllable bits, then
-        // set them based on the requested VFS attributes.
-        let structural = old_attr & (ATTR_DIRECTORY | ATTR_VOLUME_ID | ATTR_ARCHIVE);
-        let mut new_attr = structural;
+        // set them based on the requested VFS attributes. A directory's
+        // read-only bit is Windows' to keep, not a user-controllable one.
+        let kept = if old_attr & ATTR_DIRECTORY != 0 {
+            ATTR_DIRECTORY | ATTR_VOLUME_ID | ATTR_ARCHIVE | ATTR_READ_ONLY
+        } else {
+            ATTR_DIRECTORY | ATTR_VOLUME_ID | ATTR_ARCHIVE
+        };
+        let mut new_attr = old_attr & kept;
 
         if attrs.contains(FileAttr::IMMUTABLE) {
             new_attr |= ATTR_READ_ONLY;
@@ -6259,6 +6299,87 @@ pub fn format_self_test() -> KernelResult<()> {
         let _ = crate::fs::Vfs::unmount(sub_mp);
         sub_ok?;
         serial_println!("[fat]   submount appears in all 3 listings: OK");
+
+        // A read-only file is immutable (`entry_attrs`), and what `chattr +i`
+        // refuses is refused (`fs::attr_policy`): the contents by this
+        // filesystem, the name by the VFS. Until 2026-10-02 FAT reported the
+        // bit and refused nothing. Here and not in `self_test`, for the reason
+        // given below: this volume is the only FAT a boot test mounts.
+        let ro = "/_fmt_selftest/RO.TXT";
+        let ro_dir = "/_fmt_selftest/RODIR";
+        let attrs_ok = (|| -> KernelResult<()> {
+            crate::fs::Vfs::write_file(ro, b"kept")?;
+            crate::fs::Vfs::set_attributes(ro, FileAttr::IMMUTABLE)?;
+            let read_only = crate::fs::Vfs::metadata(ro)?.attributes;
+            if read_only != FileAttr::IMMUTABLE {
+                serial_println!("[fat]   FAIL: a read-only file reports {:?}", read_only);
+                return Err(KernelError::InternalError);
+            }
+            let denied = Err(KernelError::NotPermitted);
+            let refusals: [(&str, KernelResult<()>); 6] = [
+                ("an overwrite", crate::fs::Vfs::write_file(ro, b"lost")),
+                ("a write", crate::fs::Vfs::write_at(ro, 0, b"X")),
+                ("a truncate", crate::fs::Vfs::truncate(ro, 0)),
+                ("an allocation", crate::fs::Vfs::fallocate(ro, 4096)),
+                (
+                    "a rename",
+                    crate::fs::Vfs::rename(ro, "/_fmt_selftest/MOVED.TXT"),
+                ),
+                ("a removal", crate::fs::Vfs::remove(ro)),
+            ];
+            for (what, got) in refusals {
+                if got != denied {
+                    serial_println!(
+                        "[fat]   FAIL: {} of a read-only file gave {:?}, want NotPermitted",
+                        what,
+                        got
+                    );
+                    return Err(KernelError::InternalError);
+                }
+            }
+            if crate::fs::Vfs::read_file(ro)?.as_slice() != b"kept" {
+                serial_println!("[fat]   FAIL: a refused change changed a read-only file");
+                return Err(KernelError::InternalError);
+            }
+            // FAT has no append-only bit, and a directory's read-only bit is
+            // not immutability: both refused rather than accepted and ignored.
+            let appending = crate::fs::Vfs::set_attributes(ro, FileAttr::APPEND_ONLY);
+            crate::fs::Vfs::mkdir(ro_dir)?;
+            let dir_frozen = crate::fs::Vfs::set_attributes(ro_dir, FileAttr::IMMUTABLE);
+            let unsupported = Err(KernelError::NotSupported);
+            if appending != unsupported || dir_frozen != unsupported {
+                serial_println!(
+                    "[fat]   FAIL: +a on a file gave {:?}, +i on a directory {:?}; want NotSupported",
+                    appending,
+                    dir_frozen
+                );
+                return Err(KernelError::InternalError);
+            }
+            // The byte as Windows leaves it on a customised folder.
+            let folder = entry_attrs(ATTR_DIRECTORY | ATTR_READ_ONLY);
+            if folder != FileAttr::NONE {
+                serial_println!("[fat]   FAIL: a read-only directory maps to {:?}", folder);
+                return Err(KernelError::InternalError);
+            }
+            // The control: cleared, the same file takes every change, so the
+            // refusals above were the bit's and not the volume's.
+            crate::fs::Vfs::set_attributes(ro, FileAttr::NONE)?;
+            crate::fs::Vfs::write_file(ro, b"changed")?;
+            crate::fs::Vfs::remove(ro)?;
+            crate::fs::Vfs::rmdir(ro_dir)?;
+            Ok(())
+        })();
+        if attrs_ok.is_err() {
+            // Best effort, so the volume can be unmounted below: what was
+            // never made is not there to remove.
+            let _ = crate::fs::Vfs::set_attributes(ro, FileAttr::NONE);
+            let _ = crate::fs::Vfs::remove(ro);
+            let _ = crate::fs::Vfs::rmdir(ro_dir);
+        }
+        attrs_ok?;
+        serial_println!(
+            "[fat]   a read-only file refuses overwrite, write, truncate, allocation, rename and removal (EPERM); +a, and +i on a directory, are refused: OK"
+        );
         Ok(())
     })();
 

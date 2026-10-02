@@ -37,8 +37,8 @@
 //!   to move every descendant node; now it moves one `u64` between two
 //!   maps, which is both O(1) and impossible to half-complete.
 //!
-//! Hard links to *directories* are refused ([`KernelError::PermissionDenied`],
-//! as on Linux): the resolver below assumes the directory graph is a tree,
+//! Hard links to *directories* are refused ([`KernelError::NotPermitted`],
+//! `EPERM`, as on Linux): the resolver below assumes the directory graph is a tree,
 //! and a second name for a directory would let a path walk loop forever.
 //!
 //! Path resolution walks the tree component by component with
@@ -52,6 +52,7 @@ use alloc::string::String;
 use alloc::vec::Vec;
 
 use crate::error::{KernelError, KernelResult};
+use crate::fs::attr_policy;
 use crate::fs::path::{Path, PathBuf};
 use crate::fs::vfs::{
     DirEntry, EntryType, FileAttr, FileMeta, FileSystem, FsInfo, Timestamp, metadata_now_ns,
@@ -249,18 +250,12 @@ impl MemFsNode {
 
     /// Write `data` at `offset`, growing the file as needed, under its
     /// attributes: nothing into an immutable file, and only at the end of an
-    /// append-only one.
+    /// append-only one (`fs::attr_policy::may_write_at`).
     fn write_range(&mut self, offset: u64, data: &[u8]) -> KernelResult<()> {
-        let attrs = self.attributes;
-        if attrs.contains(FileAttr::IMMUTABLE) {
-            return Err(KernelError::PermissionDenied);
-        }
         if !self.is_file() {
             return Err(self.not_a_file());
         }
-        if attrs.contains(FileAttr::APPEND_ONLY) && offset != self.size() {
-            return Err(KernelError::PermissionDenied);
-        }
+        attr_policy::may_write_at(self.attributes, offset, self.size())?;
         let start = usize::try_from(offset).map_err(|_| KernelError::FileTooLarge)?;
         let end = start
             .checked_add(data.len())
@@ -277,13 +272,10 @@ impl MemFsNode {
         Ok(())
     }
 
-    /// Cut or zero-extend the file to `size` bytes, under its attributes.
+    /// Cut or zero-extend the file to `size` bytes, under its attributes:
+    /// not an immutable or append-only one (`fs::attr_policy::may_rewrite`).
     fn set_len(&mut self, size: u64) -> KernelResult<()> {
-        if self.attributes.contains(FileAttr::IMMUTABLE)
-            || self.attributes.contains(FileAttr::APPEND_ONLY)
-        {
-            return Err(KernelError::PermissionDenied);
-        }
+        attr_policy::may_rewrite(self.attributes)?;
         let size = usize::try_from(size).map_err(|_| KernelError::FileTooLarge)?;
         let not_a_file = self.not_a_file();
         let file_data = self.file_data_mut().ok_or(not_a_file)?;
@@ -616,34 +608,31 @@ impl MemFs {
     /// about, so there is one implementation of the rules rather than two.
     ///
     /// # Errors
-    /// - `PermissionDenied` if `ino` is a directory.  Directory hard links
+    /// - `NotPermitted` if `ino` is a directory.  Directory hard links
     ///   would make the namespace a graph rather than a tree, which
     ///   [`resolve_path_str`](Self::resolve_path_str) assumes it is not:
     ///   a cycle would make it loop without the symlink-depth counter ever
     ///   firing, because no symlink is involved.  Linux refuses these for the
     ///   same reason (`EPERM`), so refusing costs no compatibility.
-    /// - `PermissionDenied` if `ino` or the new parent is immutable.
     /// - `AlreadyExists` if `new_path`'s final component is taken.  `link(2)`
     ///   never replaces — unlike `rename`, which does.
+    /// - `NotPermitted` if the new parent is immutable, or `ino` immutable or
+    ///   append-only (`fs::attr_policy`).
     fn link_ino(&mut self, ino: u64, new_path: &Path) -> KernelResult<()> {
+        // A directory gets no second name: `EPERM`, as Linux's `vfs_link`
+        // answers, not the `EACCES` of a permission bit.
         if self.node(ino)?.is_dir() {
-            return Err(KernelError::PermissionDenied);
-        }
-        if self.node(ino)?.attributes.contains(FileAttr::IMMUTABLE) {
-            return Err(KernelError::PermissionDenied);
+            return Err(KernelError::NotPermitted);
         }
 
         let (parent_ino, name) = self.resolve_parent(new_path)?;
-        if self
-            .node(parent_ino)?
-            .attributes
-            .contains(FileAttr::IMMUTABLE)
-        {
-            return Err(KernelError::PermissionDenied);
-        }
         if self.child_ino(parent_ino, name)?.is_some() {
             return Err(KernelError::AlreadyExists);
         }
+        // In `vfs_link`'s order, after the name: the directory, then the
+        // object (`fs::attr_policy`).
+        attr_policy::may_create(self.node(parent_ino)?.attributes)?;
+        attr_policy::may_link(self.node(ino)?.attributes)?;
 
         let name = name.to_path_buf();
         self.add_link(parent_ino, name, ino)
@@ -1001,17 +990,13 @@ impl FileSystem for MemFs {
         match self.child_ino(parent_ino, &filename)? {
             Some(existing_ino) => {
                 let existing = self.node_mut(existing_ino)?;
-                // Enforce attribute restrictions.
-                if existing.attributes.contains(FileAttr::IMMUTABLE) {
-                    return Err(KernelError::PermissionDenied);
-                }
                 if existing.is_dir() {
                     return Err(KernelError::IsADirectory);
                 }
-                // Append-only: reject full overwrites (use write_at for appends).
-                if existing.attributes.contains(FileAttr::APPEND_ONLY) {
-                    return Err(KernelError::PermissionDenied);
-                }
+                // A whole-file overwrite: not of an immutable file, nor of an
+                // append-only one, which is written only at its end
+                // (`fs::attr_policy::may_rewrite`).
+                attr_policy::may_rewrite(existing.attributes)?;
                 let not_a_file = existing.not_a_file();
                 let file_data = existing.file_data_mut().ok_or(not_a_file)?;
                 file_data.clear();
@@ -1042,11 +1027,12 @@ impl FileSystem for MemFs {
             .ok_or(KernelError::NotFound)?;
         {
             let node = self.node(ino)?;
-            if node.is_dir() {
+            let victim = node.attributes;
+            let is_dir = node.is_dir();
+            // Before the kind of name, as Linux's `may_delete` orders it.
+            attr_policy::may_delete(self.node(parent_ino)?.attributes, victim)?;
+            if is_dir {
                 return Err(KernelError::IsADirectory);
-            }
-            if node.attributes.contains(FileAttr::IMMUTABLE) {
-                return Err(KernelError::PermissionDenied);
             }
         }
         self.take_child(parent_ino, filename)?;
@@ -1060,16 +1046,10 @@ impl FileSystem for MemFs {
         // mkdir does NOT follow the final component — if the name
         // already exists (even as a symlink), it returns AlreadyExists.
         let (parent_ino, dirname) = self.resolve_parent(path)?;
-        if self
-            .node(parent_ino)?
-            .attributes
-            .contains(FileAttr::IMMUTABLE)
-        {
-            return Err(KernelError::PermissionDenied);
-        }
         if self.child_ino(parent_ino, dirname)?.is_some() {
             return Err(KernelError::AlreadyExists);
         }
+        attr_policy::may_create(self.node(parent_ino)?.attributes)?;
 
         self.insert_new(parent_ino, dirname.to_path_buf(), MemFsNode::new_dir())?;
         Ok(())
@@ -1084,11 +1064,10 @@ impl FileSystem for MemFs {
             .child_ino(parent_ino, dirname)?
             .ok_or(KernelError::NotFound)?;
         {
+            let victim = self.node(ino)?.attributes;
+            attr_policy::may_delete(self.node(parent_ino)?.attributes, victim)?;
             let node = self.node(ino)?;
             let children = node.children().ok_or(KernelError::NotADirectory)?;
-            if node.attributes.contains(FileAttr::IMMUTABLE) {
-                return Err(KernelError::PermissionDenied);
-            }
             // Must be empty.
             if !children.is_empty() {
                 return Err(KernelError::InvalidArgument); // Directory not empty.
@@ -1188,9 +1167,7 @@ impl FileSystem for MemFs {
             return Err(KernelError::NotADirectory);
         }
         // Nothing is made in an immutable directory, named or not.
-        if parent.attributes.contains(FileAttr::IMMUTABLE) {
-            return Err(KernelError::PermissionDenied);
-        }
+        attr_policy::may_create(parent.attributes)?;
         let mut node = MemFsNode::new(MemFsNodeKind::File(Vec::new()), mode & 0o7777);
         // No name, and one hold: the caller's (`pin_ino`'s count).
         node.links = 0;
@@ -1211,6 +1188,13 @@ impl FileSystem for MemFs {
     fn chmod_ino(&mut self, ino: u64, permissions: u16) -> KernelResult<()> {
         let node = self.node_mut(ino)?;
         node.permissions = permissions;
+        node.changed_ns = metadata_now_ns();
+        Ok(())
+    }
+
+    fn set_attributes_ino(&mut self, ino: u64, attrs: FileAttr) -> KernelResult<()> {
+        let node = self.node_mut(ino)?;
+        node.attributes = attrs;
         node.changed_ns = metadata_now_ns();
         Ok(())
     }
@@ -1580,16 +1564,10 @@ impl FileSystem for MemFs {
         }
 
         let (parent_ino, linkname) = self.resolve_parent(path)?;
-        if self
-            .node(parent_ino)?
-            .attributes
-            .contains(FileAttr::IMMUTABLE)
-        {
-            return Err(KernelError::PermissionDenied);
-        }
         if self.child_ino(parent_ino, linkname)?.is_some() {
             return Err(KernelError::AlreadyExists);
         }
+        attr_policy::may_create(self.node(parent_ino)?.attributes)?;
 
         self.insert_new(
             parent_ino,
@@ -1601,16 +1579,10 @@ impl FileSystem for MemFs {
 
     fn mknod_socket(&mut self, path: &Path, mode: u16) -> KernelResult<u64> {
         let (parent_ino, name) = self.resolve_parent(path)?;
-        if self
-            .node(parent_ino)?
-            .attributes
-            .contains(FileAttr::IMMUTABLE)
-        {
-            return Err(KernelError::PermissionDenied);
-        }
         if self.child_ino(parent_ino, name)?.is_some() {
             return Err(KernelError::AlreadyExists);
         }
+        attr_policy::may_create(self.node(parent_ino)?.attributes)?;
         let node = MemFsNode::new(MemFsNodeKind::Socket, mode & 0o7777);
         let ino = node.ino;
         self.insert_new(parent_ino, name.to_path_buf(), node)?;
@@ -1882,7 +1854,7 @@ pub fn self_test() -> KernelResult<()> {
     // Test immutable attribute.
     fs.set_attributes(Path::new("/meta.txt"), FileAttr::IMMUTABLE)?;
     match fs.write_file(Path::new("/meta.txt"), b"should fail") {
-        Err(KernelError::PermissionDenied) => {
+        Err(KernelError::NotPermitted) => {
             crate::serial_println!("[memfs]   immutable write rejected: OK");
         }
         _ => {
@@ -1891,7 +1863,7 @@ pub fn self_test() -> KernelResult<()> {
         }
     }
     match fs.remove(Path::new("/meta.txt")) {
-        Err(KernelError::PermissionDenied) => {
+        Err(KernelError::NotPermitted) => {
             crate::serial_println!("[memfs]   immutable remove rejected: OK");
         }
         _ => {
@@ -1905,7 +1877,7 @@ pub fn self_test() -> KernelResult<()> {
     // Test append-only attribute.
     fs.set_attributes(Path::new("/meta.txt"), FileAttr::APPEND_ONLY)?;
     match fs.truncate(Path::new("/meta.txt"), 0) {
-        Err(KernelError::PermissionDenied) => {
+        Err(KernelError::NotPermitted) => {
             crate::serial_println!("[memfs]   append-only truncate rejected: OK");
         }
         _ => {
@@ -2355,7 +2327,7 @@ fn test_symlinks(fs: &mut MemFs) -> KernelResult<()> {
     // resolver's no-cycles assumption holds.
     fs.mkdir(Path::new("/hl_dir"))?;
     match fs.link(Path::new("/hl_dir"), Path::new("/hl_dir_alias")) {
-        Err(KernelError::PermissionDenied) => {}
+        Err(KernelError::NotPermitted) => {}
         other => {
             crate::serial_println!("[memfs]   FAILED: hard link to directory gave {:?}", other);
             return Err(KernelError::IoError);

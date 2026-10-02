@@ -41,6 +41,7 @@ pub mod ar;
 pub mod archive;
 pub mod associations;
 pub mod atime;
+pub mod attr_policy;
 pub mod audiodevice;
 pub mod audioeq;
 pub mod audiomux;

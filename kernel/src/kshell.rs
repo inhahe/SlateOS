@@ -26455,8 +26455,13 @@ fn cmd_touch(args: &str) {
     // Check if file exists.
     match crate::fs::Vfs::stat(&path) {
         Ok(_) => {
-            // File exists — update timestamps.
-            let timestamp = requested.unwrap_or_else(crate::hpet::elapsed_ns);
+            // File exists — update timestamps: to the time asked for, or
+            // to now. "Now" is the VFS's to read (`TIME_NOW`): it reads the
+            // wall clock, where this read `hpet::elapsed_ns` -- time since
+            // boot -- until 2026-10-02, so `touch` dated a file to the first
+            // minutes of 1970. And a time passed as a request is `touch`'s
+            // own, which an append-only file allows.
+            let timestamp = requested.unwrap_or(crate::fs::vfs::TIME_NOW);
             match crate::fs::Vfs::set_times(&path, timestamp, timestamp) {
                 Ok(()) => {
                     shell_println!("{}: timestamps updated", path.display());

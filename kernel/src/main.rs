@@ -3602,6 +3602,14 @@ extern "C" fn kernel_main() -> ! {
         proc::spawn::self_test_linux_scm_rights(),
     );
 
+    // Ring-3 end-to-end test of chattr's and lsattr's ioctls: the immutable
+    // flag set by root and enforced, refused to the file's owner.
+    selftest::dispatch_debug(
+        "Linux file flags (ring 3)",
+        selftest::Severity::Diagnostic,
+        proc::spawn::self_test_linux_file_flags(),
+    );
+
     // Where each process's program headers are: found in a loaded segment,
     // or copied into a read-only page when none holds them -- recorded for
     // SYS_PROCESS_GET_PHDR and given to Linux programs as AT_PHDR.
@@ -6001,6 +6009,19 @@ extern "C" fn kernel_main() -> ! {
                 "xattr rules through the VFS",
                 selftest::Severity::Diagnostic,
                 fs::vfs::self_test_xattr_rules(),
+            );
+            // `chattr +i` and `+a`: Linux's rules for the immutable and
+            // append-only attributes, alone and as every VFS operation, the
+            // handle layer and memfs apply them.
+            selftest::dispatch_debug(
+                "immutable and append-only rules",
+                selftest::Severity::Diagnostic,
+                fs::attr_policy::self_test(),
+            );
+            selftest::dispatch_debug(
+                "immutable and append-only through the VFS",
+                selftest::Severity::Diagnostic,
+                fs::vfs::self_test_attr_rules(),
             );
             // netmon backs /proc/netmon and the `netmon` kshell command.  Its
             // init_defaults() previously seeded three FABRICATED connections (sshd

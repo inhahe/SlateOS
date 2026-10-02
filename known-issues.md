@@ -150399,6 +150399,7 @@ just a boundary and is fine to document. The grep that finds them is the phrase
 
 
 ## TD-B-ACCESS-CANNOT-SEE-THE-ONE-PERMISSION-MECHANISM-THAT-IS-ENFORCED (lane B, 2026-09-13)
+**Status:** FIXED by lane A on lane-a-wip 2026-10-02, awaiting a boot -- the Linux `access` answers the gates a real open or exec meets (`Vfs::access_gates`): `EPERM` for `W_OK` on an immutable file, the ACLs and capability tags (`EACCES`), `EROFS` for `W_OK` on a read-only mount; not the mode bits (design-decisions §1524)
 
 **In short:** `access(path, W_OK)` answers "yes" for any file that exists. On a
 stock system that is correct. On a system where someone has set an ACL or a
@@ -166452,7 +166453,7 @@ Those are features, and dd-950's point is that these modules are the outline
 of them rather than dead weight.
 
 ### [A] Two implementations of file immutability: one real and tested, one decorative -- and I nearly recorded the real one as fake -- 2026-09-18
-**Status:** OPEN
+**Status:** OPEN -- the real one is complete as of 2026-10-02 (design-decisions §1524: Linux's rules on every filesystem, every refusal `EPERM`, `chattr`'s ioctls); the decorative `fs::immutable` remains, and is lane A's next removal
 
 **In short:** the kernel can mark a file unchangeable, and that genuinely
 works -- writes, truncates and deletes are all refused, checked on every
@@ -181704,6 +181705,85 @@ microphone reaches it: the mixer only mixes outward.
 input stream descriptor; AC'97's PCM In channel), pumped by `audio_out` into
 a capture ring per open capture substream, which `read_frames` drains --
 waiting for data on a blocking descriptor as playback waits for room.
+
+### A-CHATTR-MARKS-WERE-HONOURED-PIECEMEAL -- 2026-10-02 -- FIXED (lane A)
+
+**Status:** FIXED on lane-a-wip 2026-10-02, awaiting a boot (design-decisions
+§1524).
+
+**In short:** a file marked immutable could still be replaced by renaming
+another file onto it, re-moded, re-owned and hard-linked; an append-only file
+could be deleted and renamed, and on ext4 overwritten whole; a file in an
+immutable ext4 directory could be created or deleted; on FAT, whose read-only
+bit was reported as the immutable mark, nothing was refused at all, and
+`chattr +a` on a FAT file succeeded and did nothing. What was refused said
+"Permission denied" (`EACCES`), where Linux -- and `rm`, `mv` and `chattr`
+quoting it -- says "Operation not permitted" (`EPERM`). `access(W_OK)` on an
+immutable file answered yes, and opening one for writing succeeded until the
+first write.
+
+**Where it was:** each filesystem checked a different subset on its own:
+memfs most, ext4 the write path, unlink and unnamed files, FAT none, and none
+of them `rename`, `link`, `chmod`, `chown` or `utimes`.
+
+**Fix:** `fs::attr_policy` holds Linux's rules once; the VFS applies the
+name and metadata rules on every filesystem under its lock (every path,
+pinned-directory and held-file entry point), the filesystems the content
+rules on the inode they write, the handle layer `may_open` and `F_SETFL`, and
+the Linux `access` the `W_OK` rule. Every refusal is `NotPermitted`.
+Verified by `fs::attr_policy::self_test` (the rules, 41 cases),
+`fs::vfs::self_test_attr_rules` (50 operations through the VFS on `/tmp`,
+each refused one checked unchanged after, each allowed once cleared),
+`fat::format_self_test` (a read-only FAT file), the ext4 and memfs self-tests
+(now expecting `EPERM`), and the ring-3 `Linux file flags` test
+(`chattr`'s ioctls as root and as the file's owner).
+
+### A-LSTAT-REPORTED-NOTHING-ON-FAT-PROCFS-DEVFS -- 2026-10-02 -- FIXED (lane A)
+
+**Status:** FIXED on lane-a-wip 2026-10-02, awaiting a boot.
+
+**In short:** `ls -l` on a FAT volume dated every file 1970 and showed no
+owner or mode: `ls` lists by `lstat`, and `lstat` reached the `FileSystem`
+trait's default `lmetadata`, which built an empty record for every name. Any
+filesystem without its own `lmetadata` -- FAT, which has no symlinks to need
+one, procfs, devfs, the overlay -- answered that way, while `stat` of the
+same file answered fully. It also hid FAT's read-only bit from the
+immutable rules, which look at a name without following it.
+
+**Fix:** the default gives `metadata` for anything but a symlink
+(`vfs.rs`, `FileSystem::lmetadata`). A symlink on such a filesystem still
+gets the minimal record; none of the four has symlinks of its own except
+procfs (`/proc/self`), whose record was minimal before too.
+
+### A-KSHELL-TOUCH-DATED-FILES-1970 -- 2026-10-02 -- FIXED (lane A)
+
+**Status:** FIXED on lane-a-wip 2026-10-02, awaiting a boot.
+
+**In short:** kshell's `touch` of an existing file without `-d` set its
+times to `hpet::elapsed_ns` -- the time since boot -- so the file showed a
+date in the first minutes of 1970. It now asks for `TIME_NOW`, which the VFS
+makes the wall clock.
+
+### A-LINUX-F_SETFL-O_APPEND-REACHES-NOTHING -- 2026-10-02 -- FIXED (lane A)
+
+**Status:** FIXED on lane-a-wip 2026-10-02, awaiting a boot -- found while
+giving append-only files Linux's `setfl` rule, and fixed with it: the ring-3
+`Linux file flags` test sets `O_APPEND` by `F_SETFL`, rewinds, writes, and
+finds the byte at the end.
+
+**In short:** `fcntl(fd, F_SETFL, O_APPEND)` on a Linux descriptor answers 0
+and `F_GETFL` then shows `O_APPEND`, but the writes do not start appending:
+the flag is recorded in the descriptor's entry and never reaches the open
+file (`fs::handle`'s `OpenFlags::APPEND`), which is what every write
+consults. Clearing it likewise changes nothing. The native
+`SYS_FS_SET_STATUS_FLAGS` reaches the open file and is right.
+
+**Where:** `kernel/src/syscall/linux.rs` `sys_fcntl`, `F_SETFL` arm.
+
+**Proper fix:** for a file descriptor, set the open file's `APPEND` through
+`fs::handle::set_status_flags` (which also refuses a change on an
+append-only file, `EPERM`) before recording the flag in the entry, so a
+refusal leaves both as they were; a directory keeps answering 0, as on Linux.
 
 ## Lane B: new entries
 

@@ -33,6 +33,7 @@ use core::sync::atomic::{AtomicU64, Ordering};
 
 use crate::error::{KernelError, KernelResult};
 
+use super::attr_policy;
 use super::xattr_policy;
 // Paths are byte strings, not UTF-8. See `super::path` for why.
 pub use super::path::{Path, PathBuf};
@@ -231,6 +232,17 @@ impl FileAttr {
 ///
 /// 0 means "not set" or "unknown".
 pub type Timestamp = u64;
+
+/// "Now", as a time requested of [`Vfs::set_times`] and its variants: Linux's
+/// `UTIME_NOW`. The VFS makes it the current wall-clock time before the
+/// filesystem sees it.
+///
+/// A request rather than a time because the two are refused differently: an
+/// append-only file may have its times set to now -- `touch` -- but not to
+/// given values, which could backdate a log (`fs::attr_policy::may_touch`).
+/// A caller that computed "now" itself would be setting a given value.
+/// `u64::MAX` is the year 2554, which no file has.
+pub const TIME_NOW: Timestamp = u64::MAX;
 
 /// Current wall-clock time for filesystem metadata timestamps.
 ///
@@ -747,6 +759,13 @@ pub trait FileSystem: Send {
         Err(KernelError::NotSupported)
     }
 
+    /// [`set_attributes`](Self::set_attributes) for a held inode:
+    /// `FS_IOC_SETFLAGS` through a descriptor, whatever the file's name now.
+    fn set_attributes_ino(&mut self, ino: u64, attrs: FileAttr) -> KernelResult<()> {
+        let _ = (ino, attrs);
+        Err(KernelError::NotSupported)
+    }
+
     /// [`set_owner`](Self::set_owner) for a held inode: `fchown`. The ids are
     /// concrete; the VFS resolves "leave unchanged" first.
     fn chown_ino(&mut self, ino: u64, uid: u32, gid: u32) -> KernelResult<()> {
@@ -843,13 +862,27 @@ pub trait FileSystem: Send {
     /// if `path` ends at a symlink, the symlink's own metadata is
     /// returned (with `entry_type == Symlink`) rather than the target's.
     ///
-    /// Default implementation builds a minimal [`FileMeta`] from
-    /// `lstat()`.  Filesystems that track timestamps, ownership, or
-    /// xattrs should override this (typically mirroring their
-    /// `metadata()` override but without symlink resolution).
+    /// Default implementation: for anything but a symlink,
+    /// [`metadata`](Self::metadata), since the two differ only at a final
+    /// symlink; for a symlink, a minimal [`FileMeta`] from `lstat()`.
+    /// Filesystems with symlinks that track timestamps, ownership, or xattrs
+    /// should override this (typically mirroring their `metadata()` override
+    /// but without symlink resolution).
+    ///
+    /// The default built the minimal [`FileMeta`] for everything until
+    /// 2026-10-02, so a filesystem with a rich `metadata` and no override --
+    /// FAT, which has no symlinks to override it for, procfs, devfs, the
+    /// overlay -- reported a regular file's `lstat` with no times, owner,
+    /// mode or attributes: `ls -l`, which lists by `lstat`, dated every FAT
+    /// file 1970, and the VFS's attribute rules (`fs::attr_policy`), which
+    /// look at a name without following it, saw no read-only bit.
     fn lmetadata(&mut self, path: &Path) -> KernelResult<FileMeta> {
         let entry = self.lstat(path)?;
-        Ok(FileMeta::minimal(entry.entry_type, entry.size))
+        if entry.entry_type == EntryType::Symlink {
+            Ok(FileMeta::minimal(entry.entry_type, entry.size))
+        } else {
+            self.metadata(path)
+        }
     }
 
     /// Set file attributes (immutable, append-only, etc.).
@@ -3323,6 +3356,12 @@ impl Vfs {
             // A write that makes the file gives it its owner; one that
             // replaces an existing file's contents leaves the owner be.
             let made = guard.lstat(&relative).is_err();
+            if made {
+                // A new name in its directory (`fs::attr_policy`). Replacing
+                // an existing file's contents is the filesystem's to refuse,
+                // on the inode it writes.
+                attr_policy::may_create(dir_attrs(&mut **guard, &relative))?;
+            }
             guard.write_file(&relative, data)?;
             if made {
                 init_new_owner(&mut **guard, &relative, creator, false)?;
@@ -3543,6 +3582,7 @@ impl Vfs {
             // filesystem -- an ACL, flags, seals, attributes -- which a file
             // reusing the number would otherwise inherit (`super::perfile`).
             let unlinked = unlinked_object(&mut guard, fs_id, &relative);
+            guard_delete(&mut **guard, &relative)?;
             guard.remove(&relative)?;
             (id, unlinked)
         };
@@ -3612,6 +3652,7 @@ impl Vfs {
         {
             let (fs, _id, _opts, relative) = resolve_mount(&path)?;
             let mut guard = fs.lock();
+            guard_create(&mut **guard, &relative)?;
             guard.mkdir(&relative)?;
             // Stamp the caller-supplied (umask-masked) permission bits; the
             // underlying mkdir stamps a 0o755 default, so only override when
@@ -3718,6 +3759,7 @@ impl Vfs {
             let mut guard = fs.lock();
             // A directory's state ends with it, as a file's does; see `remove`.
             let unlinked = unlinked_object(&mut guard, fs_id, &relative);
+            guard_delete(&mut **guard, &relative)?;
             guard.rmdir(&relative)?;
             unlinked
         };
@@ -3992,6 +4034,7 @@ impl Vfs {
                     entry.size
                 }
                 Err(KernelError::NotFound) => {
+                    attr_policy::may_create(dir_attrs(&mut **guard, &relative))?;
                     guard.write_file(&relative, data)?;
                     0
                 }
@@ -4137,27 +4180,31 @@ impl Vfs {
         let creator = creator_ids();
         let made = {
             let mut guard = fs.lock();
-            guard.create_unnamed(&relative, mode).and_then(|ino| {
-                // Its owner, as a named file's (`init_new_owner`), by inode:
-                // it has no name to give it one by.
-                let parent = guard.metadata(&relative).ok();
-                let gid = match parent {
-                    Some(p) if p.permissions & S_ISGID != 0 => p.gid,
-                    _ => creator.1,
-                };
-                if (creator.0, gid) != (0, 0) {
-                    match guard.chown_ino(ino, creator.0, gid) {
-                        Ok(()) | Err(KernelError::NotSupported) => {}
-                        Err(e) => {
-                            // Let go of the hold the creation gave it, so the
-                            // nameless file does not outlive the failure.
-                            guard.unpin_ino(ino);
-                            return Err(e);
+            // Nothing is made in an immutable directory, named or not.
+            let allowed = guard_create_in(&mut **guard, &relative);
+            allowed
+                .and_then(|()| guard.create_unnamed(&relative, mode))
+                .and_then(|ino| {
+                    // Its owner, as a named file's (`init_new_owner`), by inode:
+                    // it has no name to give it one by.
+                    let parent = guard.metadata(&relative).ok();
+                    let gid = match parent {
+                        Some(p) if p.permissions & S_ISGID != 0 => p.gid,
+                        _ => creator.1,
+                    };
+                    if (creator.0, gid) != (0, 0) {
+                        match guard.chown_ino(ino, creator.0, gid) {
+                            Ok(()) | Err(KernelError::NotSupported) => {}
+                            Err(e) => {
+                                // Let go of the hold the creation gave it, so the
+                                // nameless file does not outlive the failure.
+                                guard.unpin_ino(ino);
+                                return Err(e);
+                            }
                         }
                     }
-                }
-                Ok(ino)
-            })
+                    Ok(ino)
+                })
         };
         let ino = match made {
             Ok(ino) => ino,
@@ -4205,7 +4252,10 @@ impl Vfs {
             if fs_id != obj.fs_id {
                 return Err(KernelError::CrossDevice);
             }
-            obj.fs.lock().link_held_ino(obj.ino, &rel_new)?;
+            let mut guard = obj.fs.lock();
+            let source = ino_attrs(&mut **guard, obj.ino);
+            guard_link_attrs(&mut **guard, source, &rel_new)?;
+            guard.link_held_ino(obj.ino, &rel_new)?;
         }
         note_named(obj.id());
         // A name is counted as `link_inner` counts one.
@@ -4343,18 +4393,23 @@ impl Vfs {
 
     /// `fchmod` through a held file, whatever its name now. The open was the
     /// access check, as for every call through a handle; what can refuse it
-    /// now is the mount turned read-only. `path` names it for events.
+    /// now is the mount turned read-only, or the file made immutable or
+    /// append-only (`fs::attr_policy`). `path` names it for events.
     ///
     /// # Errors
     ///
-    /// `ReadOnlyFilesystem`; the filesystem's own.
+    /// `ReadOnlyFilesystem`; `NotPermitted`; the filesystem's own.
     pub fn object_set_permissions(
         obj: &FileObject,
         path: &Path,
         permissions: u16,
     ) -> KernelResult<()> {
         check_writable_fs(obj.fs_id)?;
-        obj.fs.lock().chmod_ino(obj.ino, permissions)?;
+        {
+            let mut guard = obj.fs.lock();
+            attr_policy::may_change_metadata(ino_attrs(&mut **guard, obj.ino))?;
+            guard.chmod_ino(obj.ino, permissions)?;
+        }
         super::notify::emit_metadata(path);
         super::journal::record(super::journal::JournalEventType::Modified, path);
         Ok(())
@@ -4366,11 +4421,14 @@ impl Vfs {
     ///
     /// # Errors
     ///
-    /// `ReadOnlyFilesystem`; the filesystem's own.
+    /// `ReadOnlyFilesystem`; `NotPermitted`; the filesystem's own.
     pub fn object_set_owner(obj: &FileObject, path: &Path, uid: u32, gid: u32) -> KernelResult<()> {
         check_writable_fs(obj.fs_id)?;
         {
             let mut fs = obj.fs.lock();
+            if changes_owner(uid, gid) {
+                attr_policy::may_change_metadata(ino_attrs(&mut **fs, obj.ino))?;
+            }
             let (uid, gid) = if uid == u32::MAX || gid == u32::MAX {
                 let meta = fs.metadata_ino(obj.ino)?;
                 (
@@ -4389,18 +4447,25 @@ impl Vfs {
 
     /// `futimens` through a held file, as
     /// [`object_set_permissions`](Self::object_set_permissions). A time of 0
-    /// is left as it is.
+    /// is left as it is; [`TIME_NOW`] is now.
     ///
     /// # Errors
     ///
-    /// `ReadOnlyFilesystem`; the filesystem's own.
+    /// `ReadOnlyFilesystem`; `NotPermitted`; the filesystem's own.
     pub fn object_set_times(
         obj: &FileObject,
         accessed_ns: Timestamp,
         modified_ns: Timestamp,
     ) -> KernelResult<()> {
         check_writable_fs(obj.fs_id)?;
-        obj.fs.lock().utimes_ino(obj.ino, accessed_ns, modified_ns)
+        let mut guard = obj.fs.lock();
+        times_rule(ino_attrs(&mut **guard, obj.ino), accessed_ns, modified_ns)?;
+        let now = metadata_now_ns();
+        guard.utimes_ino(
+            obj.ino,
+            resolve_time(accessed_ns, now),
+            resolve_time(modified_ns, now),
+        )
         // No notify/journal — timestamp changes are metadata-only.
     }
 
@@ -4516,7 +4581,9 @@ impl Vfs {
     /// `ReadOnlyFilesystem`; the filesystem's own.
     pub fn object_fallocate(obj: &FileObject, size: u64) -> KernelResult<()> {
         check_writable_fs(obj.fs_id)?;
-        obj.fs.lock().fallocate_ino(obj.ino, size)
+        let mut guard = obj.fs.lock();
+        attr_policy::may_allocate(ino_attrs(&mut **guard, obj.ino))?;
+        guard.fallocate_ino(obj.ino, size)
     }
 
     /// `fstatfs` through a held file: the filesystem it is on, read-only if
@@ -4580,7 +4647,11 @@ impl Vfs {
         check_writable(path)?;
         check_path_access(path, PathAccess::Write)?;
         let (fs, _id, _opts, relative) = resolve_mount(path)?;
-        fs.lock().fallocate(&relative, size)
+        let mut guard = fs.lock();
+        if let Some(meta) = attr_meta(&mut **guard, &relative, true) {
+            attr_policy::may_allocate(meta.attributes)?;
+        }
+        guard.fallocate(&relative, size)
     }
 
     /// Rename or move a file or directory.
@@ -4657,6 +4728,9 @@ impl Vfs {
                         Err(e) => return Err(e),
                     }
                 }
+                // After the no-replace check: `EEXIST` before `EPERM`, as
+                // Linux's lookup precedes `vfs_rename`.
+                guard_rename(&mut **guard, &rel_from, &rel_to, false)?;
                 // A replacing rename unlinks the destination's existing inode
                 // (whose number may later be reused); capture its identity
                 // before the rename so we can drop its cached pages.  The
@@ -4767,7 +4841,11 @@ impl Vfs {
                 return Err(KernelError::CrossDevice);
             }
             // Same FS — perform the atomic swap under the per-mount lock.
-            fs_b.lock().rename_exchange(&rel_a, &rel_b)?;
+            // Each name leaves its directory for the other's: both are
+            // `may_delete`'s, as Linux asks of an exchange.
+            let mut guard = fs_b.lock();
+            guard_rename(&mut **guard, &rel_a, &rel_b, true)?;
+            guard.rename_exchange(&rel_a, &rel_b)?;
         }
         // Both files keep their identities and swap names (`super::perfile`).
         super::perfile::names_exchanged(&a, &b);
@@ -5100,6 +5178,9 @@ impl Vfs {
             // nothing can move it between here and the `remove` below.
             verify_pinned(&mut guard, fs_id, &dir_rel, dir)?;
             let child_rel = dir_rel.join(name);
+            // Before the directory check below: Linux's `may_delete` refuses
+            // an immutable name before it looks at what kind of name it is.
+            guard_delete(&mut **guard, &child_rel)?;
             if remove_dir {
                 // See `remove` for why this is read before the removal.
                 let unlinked = unlinked_object(&mut guard, fs_id, &child_rel);
@@ -5260,6 +5341,7 @@ impl Vfs {
             // write would land the mode on a target that was never checked.
             // For a non-symlink the two calls are the same operation, so this
             // costs nothing and closes that window.
+            guard_metadata(&mut **guard, &child_rel, false)?;
             guard.set_permissions_no_follow(&child_rel, permissions)?;
         } else {
             // `name` is a symlink and the caller asked to follow it, so the
@@ -5271,6 +5353,7 @@ impl Vfs {
             // filesystem locks at once.
             let (fs, _id, _opts, relative) = resolve_mount(&target)?;
             let mut guard = fs.lock();
+            guard_metadata(&mut **guard, &relative, !no_follow)?;
             if no_follow {
                 guard.set_permissions_no_follow(&relative, permissions)?;
             } else {
@@ -5350,6 +5433,7 @@ impl Vfs {
             // nothing can move it between here and the `mkdir` below.
             verify_pinned(&mut guard, fs_id, &dir_rel, dir)?;
             let child_rel = dir_rel.join(name);
+            guard_create(&mut **guard, &child_rel)?;
             guard.mkdir(&child_rel)?;
             if perm != Self::DEFAULT_DIR_MODE {
                 // `no_follow`, though what was just created is a directory and
@@ -5442,6 +5526,7 @@ impl Vfs {
             // Pass 2, under the same guard as the creation.
             verify_pinned(&mut guard, fs_id, &dir_rel, dir)?;
             let child_rel = dir_rel.join(name);
+            guard_create(&mut **guard, &child_rel)?;
             guard.symlink(&child_rel, target)?;
         }
 
@@ -5513,6 +5598,13 @@ impl Vfs {
         };
         check_writable(&target)?;
         check_path_access(&target, PathAccess::Metadata)?;
+        // What the filesystem stores: `TIME_NOW` made now. The rule is
+        // decided on the request (`guard_times`).
+        let now = metadata_now_ns();
+        let (accessed, modified) = (
+            resolve_time(accessed_ns, now),
+            resolve_time(modified_ns, now),
+        );
 
         if target == child {
             // The ordinary case: `name` is not a symlink, so the object being
@@ -5525,17 +5617,25 @@ impl Vfs {
             // that `name` is not a symlink, and if it *became* one in the
             // window since, a following write would stamp a target that was
             // never checked. For a non-symlink the two are the same call.
-            guard.set_times_no_follow(&child_rel, accessed_ns, modified_ns)?;
+            guard_times(&mut **guard, &child_rel, false, accessed_ns, modified_ns)?;
+            guard.set_times_no_follow(&child_rel, accessed, modified)?;
         } else {
             // `name` is a symlink and the caller asked to follow it. Operating
             // through the target's own mount also avoids holding two
             // filesystem locks at once.
             let (fs, _id, _opts, relative) = resolve_mount(&target)?;
             let mut guard = fs.lock();
+            guard_times(
+                &mut **guard,
+                &relative,
+                !no_follow,
+                accessed_ns,
+                modified_ns,
+            )?;
             if no_follow {
-                guard.set_times_no_follow(&relative, accessed_ns, modified_ns)?;
+                guard.set_times_no_follow(&relative, accessed, modified)?;
             } else {
-                guard.set_times(&relative, accessed_ns, modified_ns)?;
+                guard.set_times(&relative, accessed, modified)?;
             }
         }
         // No notify/journal — timestamp changes are metadata-only, matching
@@ -5655,10 +5755,13 @@ impl Vfs {
                 // *became* a symlink in the window since, a following link
                 // would name an object that was never checked. For a
                 // non-symlink the two are the same operation.
-                guard.link_no_follow(&old_dir_rel.join(old_name), &new_rel)?;
+                let old_rel = old_dir_rel.join(old_name);
+                guard_link(&mut **guard, &old_rel, false, &new_rel)?;
+                guard.link_no_follow(&old_rel, &new_rel)?;
             } else {
                 // A symlink was followed out of the pinned directory; the
                 // source is wherever it resolved to, on this same mount.
+                guard_link(&mut **guard, &src_rel, true, &new_rel)?;
                 guard.link(&src_rel, &new_rel)?;
             }
         }
@@ -5787,6 +5890,7 @@ impl Vfs {
 
             match mode {
                 RenameMode::Exchange => {
+                    guard_rename(&mut **guard, &old_rel, &new_rel, true)?;
                     guard.rename_exchange(&old_rel, &new_rel)?;
                     // Both names still exist afterwards, so nothing is
                     // unlinked and no page cache identity dies.
@@ -5802,11 +5906,15 @@ impl Vfs {
                         Err(KernelError::NotFound) => {}
                         Err(e) => return Err(e),
                     }
+                    // After that check: `EEXIST` before `EPERM`, as in
+                    // `rename_inner`.
+                    guard_rename(&mut **guard, &old_rel, &new_rel, false)?;
                     guard.rename(&old_rel, &new_rel)?;
                     // Nothing was displaced -- the check above proved it.
                     (None, None)
                 }
                 RenameMode::Replace => {
+                    guard_rename(&mut **guard, &old_rel, &new_rel, false)?;
                     // A replacing rename unlinks whatever held the destination
                     // name, and that inode's number may be reused later, so
                     // its cached pages must go. Captured before the rename,
@@ -5893,17 +6001,72 @@ impl Vfs {
     }
 
     /// Set file attributes (immutable, append-only, hidden, system).
+    ///
+    /// As Linux's `FS_IOC_SETFLAGS` allows it: the file's owner may change
+    /// its attributes, but only root may change `IMMUTABLE` or `APPEND_ONLY`
+    /// -- Linux's `CAP_LINUX_IMMUTABLE` -- since an owner who could clear
+    /// them could undo a protection root placed ([`attribute_change_verdict`]).
+    /// Kernel tasks pass.
+    ///
+    /// # Errors
+    ///
+    /// `NotPermitted` (`EPERM`) as above; the filesystem's own.
     pub fn set_attributes(path: impl AsRef<Path>, attrs: FileAttr) -> KernelResult<()> {
         let path = path.as_ref();
         let path = Self::resolve_follow(path)?;
-        check_writable(&path)?;
-        check_path_access(&path, PathAccess::Metadata)?;
+        Self::set_attributes_resolved(&path, attrs)
+    }
+
+    /// [`set_attributes`](Self::set_attributes) on an already-resolved host
+    /// path: a descriptor's whose file has no inode to hold it by
+    /// (`fs::handle::HandleFile`).
+    ///
+    /// The privilege is decided on the file as it stands under its
+    /// filesystem's lock, the one the change is made under.
+    ///
+    /// # Errors
+    ///
+    /// As [`set_attributes`](Self::set_attributes).
+    pub fn set_attributes_resolved(path: &Path, attrs: FileAttr) -> KernelResult<()> {
+        check_writable(path)?;
+        check_path_access(path, PathAccess::Metadata)?;
         {
-            let (fs, _id, _opts, relative) = resolve_mount(&path)?;
-            fs.lock().set_attributes(&relative, attrs)?;
+            let (fs, _id, _opts, relative) = resolve_mount(path)?;
+            let mut guard = fs.lock();
+            if let Some((uid, _)) = caller_uid_gid() {
+                let meta = guard.metadata(&relative)?;
+                attribute_change_verdict(uid, meta.uid, meta.attributes, attrs)?;
+            }
+            guard.set_attributes(&relative, attrs)?;
         }
-        super::notify::emit_metadata(&path);
-        super::journal::record(super::journal::JournalEventType::Modified, &path);
+        super::notify::emit_metadata(path);
+        super::journal::record(super::journal::JournalEventType::Modified, path);
+        Ok(())
+    }
+
+    /// `FS_IOC_SETFLAGS` through a held file, whatever its name now, as
+    /// [`set_attributes`](Self::set_attributes) decides it. `path` names it
+    /// for events.
+    ///
+    /// # Errors
+    ///
+    /// `ReadOnlyFilesystem`; `NotPermitted`; the filesystem's own.
+    pub fn object_set_attributes(
+        obj: &FileObject,
+        path: &Path,
+        attrs: FileAttr,
+    ) -> KernelResult<()> {
+        check_writable_fs(obj.fs_id)?;
+        {
+            let mut guard = obj.fs.lock();
+            if let Some((uid, _)) = caller_uid_gid() {
+                let meta = guard.metadata_ino(obj.ino)?;
+                attribute_change_verdict(uid, meta.uid, meta.attributes, attrs)?;
+            }
+            guard.set_attributes_ino(obj.ino, attrs)?;
+        }
+        super::notify::emit_metadata(path);
+        super::journal::record(super::journal::JournalEventType::Modified, path);
         Ok(())
     }
 
@@ -5930,6 +6093,7 @@ impl Vfs {
     pub fn set_owner_resolved(path: &Path, uid: u32, gid: u32) -> KernelResult<()> {
         check_writable(path)?;
         check_path_access(path, PathAccess::Metadata)?;
+        let requested = (uid, gid);
         // Resolve "leave unchanged" sentinels before taking the VFS lock
         // (metadata_resolved() takes the lock itself).
         let (uid, gid) = if uid == u32::MAX || gid == u32::MAX {
@@ -5943,7 +6107,11 @@ impl Vfs {
         };
         {
             let (fs, _id, _opts, relative) = resolve_mount(path)?;
-            fs.lock().set_owner(&relative, uid, gid)?;
+            let mut guard = fs.lock();
+            if changes_owner(requested.0, requested.1) {
+                guard_metadata(&mut **guard, &relative, true)?;
+            }
+            guard.set_owner(&relative, uid, gid)?;
         }
         super::notify::emit_metadata(path);
         super::journal::record(super::journal::JournalEventType::Modified, path);
@@ -5963,6 +6131,7 @@ impl Vfs {
         let path = Self::resolve_no_follow(path)?;
         check_writable(&path)?;
         check_path_access(&path, PathAccess::Metadata)?;
+        let requested = (uid, gid);
         let (uid, gid) = if uid == u32::MAX || gid == u32::MAX {
             let meta = Self::lmetadata(&path)?;
             (
@@ -5974,7 +6143,11 @@ impl Vfs {
         };
         {
             let (fs, _id, _opts, relative) = resolve_mount(&path)?;
-            fs.lock().set_owner_no_follow(&relative, uid, gid)?;
+            let mut guard = fs.lock();
+            if changes_owner(requested.0, requested.1) {
+                guard_metadata(&mut **guard, &relative, false)?;
+            }
+            guard.set_owner_no_follow(&relative, uid, gid)?;
         }
         super::notify::emit_metadata(&path);
         super::journal::record(super::journal::JournalEventType::Modified, &path);
@@ -6006,7 +6179,9 @@ impl Vfs {
         check_path_access(path, PathAccess::Metadata)?;
         {
             let (fs, _id, _opts, relative) = resolve_mount(path)?;
-            fs.lock().set_permissions(&relative, permissions)?;
+            let mut guard = fs.lock();
+            guard_metadata(&mut **guard, &relative, true)?;
+            guard.set_permissions(&relative, permissions)?;
         }
         super::notify::emit_metadata(path);
         super::journal::record(super::journal::JournalEventType::Modified, path);
@@ -6027,8 +6202,9 @@ impl Vfs {
         check_path_access(&path, PathAccess::Metadata)?;
         {
             let (fs, _id, _opts, relative) = resolve_mount(&path)?;
-            fs.lock()
-                .set_permissions_no_follow(&relative, permissions)?;
+            let mut guard = fs.lock();
+            guard_metadata(&mut **guard, &relative, false)?;
+            guard.set_permissions_no_follow(&relative, permissions)?;
         }
         super::notify::emit_metadata(&path);
         super::journal::record(super::journal::JournalEventType::Modified, &path);
@@ -6061,7 +6237,14 @@ impl Vfs {
         check_writable(path)?;
         check_path_access(path, PathAccess::Metadata)?;
         let (fs, _id, _opts, relative) = resolve_mount(path)?;
-        fs.lock().set_times(&relative, accessed_ns, modified_ns)
+        let mut guard = fs.lock();
+        guard_times(&mut **guard, &relative, true, accessed_ns, modified_ns)?;
+        let now = metadata_now_ns();
+        guard.set_times(
+            &relative,
+            resolve_time(accessed_ns, now),
+            resolve_time(modified_ns, now),
+        )
         // No notify/journal — timestamp changes are metadata-only.
     }
 
@@ -6081,8 +6264,14 @@ impl Vfs {
         check_writable(&path)?;
         check_path_access(&path, PathAccess::Metadata)?;
         let (fs, _id, _opts, relative) = resolve_mount(&path)?;
-        fs.lock()
-            .set_times_no_follow(&relative, accessed_ns, modified_ns)
+        let mut guard = fs.lock();
+        guard_times(&mut **guard, &relative, false, accessed_ns, modified_ns)?;
+        let now = metadata_now_ns();
+        guard.set_times_no_follow(
+            &relative,
+            resolve_time(accessed_ns, now),
+            resolve_time(modified_ns, now),
+        )
         // No notify/journal — timestamp changes are metadata-only.
     }
 
@@ -6501,6 +6690,7 @@ impl Vfs {
         let (fs_id, ino) = {
             let (fs, fs_id, _opts, relative) = resolve_mount(&path)?;
             let mut guard = fs.lock();
+            guard_create(&mut **guard, &relative)?;
             let ino = guard.mknod_socket(&relative, mode & 0o7777)?;
             init_new_owner(&mut **guard, &relative, creator, false)?;
             (fs_id, ino)
@@ -6546,6 +6736,7 @@ impl Vfs {
         {
             let (fs, _id, _opts, relative) = resolve_mount(&path)?;
             let mut guard = fs.lock();
+            guard_create(&mut **guard, &relative)?;
             guard.symlink(&relative, target)?;
             init_new_owner(&mut **guard, &relative, creator, false)?;
         }
@@ -6657,10 +6848,12 @@ impl Vfs {
             // final on-disk lookup happens inside the FS driver — so route to
             // the matching driver method to keep the no-follow contract when a
             // symlink is the final component.
+            let mut guard = fs_existing.lock();
+            guard_link(&mut **guard, &rel_existing, follow, &rel_new)?;
             if follow {
-                fs_existing.lock().link(&rel_existing, &rel_new)?;
+                guard.link(&rel_existing, &rel_new)?;
             } else {
-                fs_existing.lock().link_no_follow(&rel_existing, &rel_new)?;
+                guard.link_no_follow(&rel_existing, &rel_new)?;
             }
         }
 
@@ -6996,12 +7189,13 @@ impl Vfs {
     ///
     /// Returns `Ok(())` if the file exists and has write permission,
     /// or an appropriate error (`NotFound`, `PermissionDenied`).
-    /// Also checks the immutable attribute.
+    /// Also checks the immutable attribute: `NotPermitted` (`EPERM`), as
+    /// [`access`](Self::access) answers it.
     pub fn is_writable(path: impl AsRef<Path>) -> KernelResult<()> {
         let path = path.as_ref();
         let meta = Self::metadata(path)?;
         if meta.attributes.contains(FileAttr::IMMUTABLE) {
-            return Err(KernelError::PermissionDenied);
+            return Err(KernelError::NotPermitted);
         }
         // Check any write permission bit (owner/group/other).
         if meta.permissions & 0o222 != 0 {
@@ -7017,7 +7211,10 @@ impl Vfs {
     /// `F_OK` (0) just checks existence.
     ///
     /// Returns `Ok(())` when every requested access is permitted, or
-    /// `NotFound` / `PermissionDenied` on failure.
+    /// `NotFound` / `PermissionDenied` on failure -- and `NotPermitted`
+    /// (`EPERM`) for `W_OK` on an immutable file, which `access(2)` lists:
+    /// "Write permission was requested to a file that has the immutable flag
+    /// set" (Linux's `inode_permission`).
     pub fn access(path: impl AsRef<Path>, mode: u32) -> KernelResult<()> {
         let path = path.as_ref();
         let meta = Self::metadata(path)?; // NotFound propagated here
@@ -7044,7 +7241,7 @@ impl Vfs {
 
         // Immutable files deny write regardless of permission bits.
         if mode & W_OK != 0 && meta.attributes.contains(FileAttr::IMMUTABLE) {
-            return Err(KernelError::PermissionDenied);
+            return Err(KernelError::NotPermitted);
         }
 
         // For each class of permission requested, at least one
@@ -7074,6 +7271,66 @@ impl Vfs {
             }
         }
 
+        Ok(())
+    }
+
+    /// What the Linux `access(2)` owes a caller: whether the gates an open or
+    /// an exec of `path` would actually meet let it in, for each of `mode`'s
+    /// [`R_OK`], [`W_OK`] and [`X_OK`] -- and nothing else. `follow`: whether
+    /// a final symlink is followed (`faccessat2` without
+    /// `AT_SYMLINK_NOFOLLOW`).
+    ///
+    /// The gates, in Linux's order (`inode_permission`, then the mount):
+    ///
+    /// - for `W_OK`, an immutable file (`NotPermitted`, `EPERM`, which
+    ///   `access(2)` lists);
+    /// - the ACLs and capability file-tags ([`check_path_access`]), for each
+    ///   access asked;
+    /// - for `W_OK`, a read-only mount (`ReadOnlyFilesystem`, `EROFS`), as
+    ///   Linux reports one for a file, a directory or a symlink -- not for a
+    ///   device, a socket or a FIFO, whose writes do not go to the mount.
+    ///
+    /// Not the mode bits, unlike [`access`](Self::access): nothing enforces
+    /// them, so a mode-`444` file is writable, and answering from them would
+    /// refuse what a write gets
+    /// (`TD-B-ACCESS-CANNOT-SEE-THE-ONE-PERMISSION-MECHANISM-THAT-IS-ENFORCED`).
+    /// Until 2026-10-02 the Linux `access` consulted no gate at all, and
+    /// answered every existing file writable.
+    ///
+    /// # Errors
+    ///
+    /// The path's (`NotFound`, ...); then as above.
+    pub fn access_gates(path: impl AsRef<Path>, mode: u32, follow: bool) -> KernelResult<()> {
+        let path = path.as_ref();
+        // `lmetadata` resolves its path itself, so it is given the caller's:
+        // given the resolved one, a jailed caller's jail would be applied
+        // twice.
+        let (resolved, meta) = if follow {
+            let resolved = Self::resolve_follow(path)?;
+            let meta = Self::metadata_resolved(&resolved)?;
+            (resolved, meta)
+        } else {
+            (Self::resolve_no_follow(path)?, Self::lmetadata(path)?)
+        };
+        if mode & W_OK != 0 && meta.attributes.contains(FileAttr::IMMUTABLE) {
+            return Err(KernelError::NotPermitted);
+        }
+        for (bit, want) in [
+            (R_OK, PathAccess::Read),
+            (W_OK, PathAccess::Write),
+            (X_OK, PathAccess::Execute),
+        ] {
+            if mode & bit != 0 {
+                check_path_access(&resolved, want)?;
+            }
+        }
+        let on_the_mount = matches!(
+            meta.entry_type,
+            EntryType::File | EntryType::Directory | EntryType::Symlink
+        );
+        if mode & W_OK != 0 && on_the_mount && Self::mount_options(&resolved)?.read_only {
+            return Err(KernelError::ReadOnlyFilesystem);
+        }
         Ok(())
     }
 
@@ -8608,6 +8865,237 @@ fn init_new_owner(
     Ok(())
 }
 
+/// The calling process's uid and gid, or `None` for a kernel task (or a
+/// process being torn down), which the permission checks let pass.
+fn caller_uid_gid() -> Option<(u32, u32)> {
+    let task_id = crate::sched::current_task_id();
+    let pid = match crate::proc::thread::owner_process(task_id) {
+        Some(pid) if pid != 0 => pid,
+        _ => return None,
+    };
+    crate::proc::pcb::get_credentials(pid).map(|c| (c.uid, c.gid))
+}
+
+/// Whether `uid` may change a file owned by `owner` from attributes `old` to
+/// `new`, as Linux's `FS_IOC_SETFLAGS` decides: root may change anything;
+/// the owner anything but `IMMUTABLE` and `APPEND_ONLY`, which need
+/// `CAP_LINUX_IMMUTABLE` (root here); anyone else nothing.
+///
+/// # Errors
+///
+/// `NotPermitted` (`EPERM`).
+pub(crate) fn attribute_change_verdict(
+    uid: u32,
+    owner: u32,
+    old: FileAttr,
+    new: FileAttr,
+) -> KernelResult<()> {
+    if uid == 0 {
+        return Ok(());
+    }
+    if uid != owner {
+        return Err(KernelError::NotPermitted);
+    }
+    let guarded = FileAttr::IMMUTABLE.union(FileAttr::APPEND_ONLY).bits();
+    if (old.bits() ^ new.bits()) & guarded != 0 {
+        return Err(KernelError::NotPermitted);
+    }
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// The immutable and append-only attributes, as the VFS applies them
+// ---------------------------------------------------------------------------
+//
+// `fs::attr_policy` holds the rules; these helpers apply them to what a
+// mount-relative path names. Each takes the filesystem under its lock and is
+// called immediately before the filesystem call it guards, under the same
+// guard, so no attribute can be set between the check and the change -- and
+// so every filesystem that reports the attributes is held to them, whether or
+// not it checks them itself.
+//
+// A lookup that fails decides nothing: the operation runs and reports its own
+// error. The lookup and the operation see the same tree under the same lock,
+// so a name that cannot be looked up cannot be operated on either, and the
+// operation's error is the one its callers expect -- `ENOENT` and `EEXIST`
+// before `EPERM`, as Linux orders them, its lookups preceding `may_delete` and
+// `may_create`.
+
+/// The metadata of what `relative` names on `fs`, or `None` when the lookup
+/// fails (see above). `follow`: whether a final symlink names the object
+/// (`true`) or is the object (`false`, as `unlink`, `rename` and `lchown` see
+/// it).
+fn attr_meta(fs: &mut dyn FileSystem, relative: &Path, follow: bool) -> Option<FileMeta> {
+    let meta = if follow {
+        fs.metadata(relative)
+    } else {
+        fs.lmetadata(relative)
+    };
+    // Discarded deliberately: a failed lookup is the operation's to report,
+    // under the same lock (see above).
+    meta.ok()
+}
+
+/// The attributes of the directory `relative` is named in; `NONE` when it
+/// cannot be looked up, as [`attr_meta`].
+fn dir_attrs(fs: &mut dyn FileSystem, relative: &Path) -> FileAttr {
+    let parent = relative.parent().unwrap_or(Path::new("/"));
+    attr_meta(fs, parent, true).map_or(FileAttr::NONE, |m| m.attributes)
+}
+
+/// The attributes of the held inode `ino`; `NONE` when it cannot be looked
+/// up, as [`attr_meta`] -- the operation reports why.
+fn ino_attrs(fs: &mut dyn FileSystem, ino: u64) -> FileAttr {
+    fs.metadata_ino(ino)
+        .map_or(FileAttr::NONE, |m| m.attributes)
+}
+
+/// [`attr_policy::may_delete`] for the name `relative`: `unlink` and
+/// `rmdir`. Nothing to decide when it names nothing.
+fn guard_delete(fs: &mut dyn FileSystem, relative: &Path) -> KernelResult<()> {
+    let Some(victim) = attr_meta(fs, relative, false) else {
+        return Ok(());
+    };
+    attr_policy::may_delete(dir_attrs(fs, relative), victim.attributes)
+}
+
+/// [`attr_policy::may_create`] for the new name `relative`. Nothing to
+/// decide when the name is taken: the operation refuses that itself, or --
+/// a whole-file write -- replaces the contents, which the filesystem checks.
+fn guard_create(fs: &mut dyn FileSystem, relative: &Path) -> KernelResult<()> {
+    if attr_meta(fs, relative, false).is_some() {
+        return Ok(());
+    }
+    attr_policy::may_create(dir_attrs(fs, relative))
+}
+
+/// [`attr_policy::may_create`] for an unnamed file made in the directory
+/// `dir` (`O_TMPFILE`).
+fn guard_create_in(fs: &mut dyn FileSystem, dir: &Path) -> KernelResult<()> {
+    let attrs = attr_meta(fs, dir, true).map_or(FileAttr::NONE, |m| m.attributes);
+    attr_policy::may_create(attrs)
+}
+
+/// Giving the object with attributes `source` the new name `new`:
+/// [`attr_policy::may_create`] for `new`'s directory, then
+/// [`attr_policy::may_link`] for the object, in Linux's `vfs_link` order.
+fn guard_link_attrs(fs: &mut dyn FileSystem, source: FileAttr, new: &Path) -> KernelResult<()> {
+    guard_create(fs, new)?;
+    attr_policy::may_link(source)
+}
+
+/// [`guard_link_attrs`] for the object `source` names. `follow`: whether a
+/// final symlink in `source` names the object (`link`) or is it
+/// (`link_no_follow`, `linkat` without `AT_SYMLINK_FOLLOW`). Nothing to
+/// decide when `source` names nothing.
+fn guard_link(
+    fs: &mut dyn FileSystem,
+    source: &Path,
+    follow: bool,
+    new: &Path,
+) -> KernelResult<()> {
+    let Some(src) = attr_meta(fs, source, follow) else {
+        return Ok(());
+    };
+    guard_link_attrs(fs, src.attributes, new)
+}
+
+/// The rules for renaming `from` to `to` on one filesystem, or for
+/// exchanging them (`exchange`, `RENAME_EXCHANGE`).
+///
+/// Linux's `vfs_rename`: the source's name leaves its directory
+/// ([`attr_policy::may_delete`]); the destination's, when it has one, leaves
+/// its own -- it is replaced, or exchanged -- and otherwise the destination's
+/// directory gains a name ([`attr_policy::may_create`]). Two names for one
+/// object are left alone before any of that, as Linux returns before
+/// `may_delete` when `source == target`: such a rename does nothing. An
+/// exchange with a missing name is the exchange's to refuse (`ENOENT`).
+fn guard_rename(
+    fs: &mut dyn FileSystem,
+    from: &Path,
+    to: &Path,
+    exchange: bool,
+) -> KernelResult<()> {
+    let Some(source) = attr_meta(fs, from, false) else {
+        return Ok(());
+    };
+    let target = attr_meta(fs, to, false);
+    if let Some(target) = &target
+        && (from == to || (source.ino != 0 && source.ino == target.ino))
+    {
+        return Ok(());
+    }
+    match target {
+        Some(target) => {
+            attr_policy::may_delete(dir_attrs(fs, from), source.attributes)?;
+            attr_policy::may_delete(dir_attrs(fs, to), target.attributes)
+        }
+        None if exchange => Ok(()),
+        None => {
+            attr_policy::may_delete(dir_attrs(fs, from), source.attributes)?;
+            attr_policy::may_create(dir_attrs(fs, to))
+        }
+    }
+}
+
+/// [`attr_policy::may_change_metadata`] for what `relative` names: `chmod`,
+/// `chown`, and times set to given values. Nothing to decide when it names
+/// nothing.
+fn guard_metadata(fs: &mut dyn FileSystem, relative: &Path, follow: bool) -> KernelResult<()> {
+    match attr_meta(fs, relative, follow) {
+        Some(meta) => attr_policy::may_change_metadata(meta.attributes),
+        None => Ok(()),
+    }
+}
+
+/// The rule for setting the times of what `relative` names to `accessed` and
+/// `modified` (0 leaves one as it is, [`TIME_NOW`] makes it now):
+/// [`attr_policy::may_touch`] when both are [`TIME_NOW`] -- what `touch`
+/// asks -- and [`attr_policy::may_change_metadata`] otherwise, as Linux
+/// tells `ATTR_TOUCH` from `ATTR_TIMES_SET`.
+fn guard_times(
+    fs: &mut dyn FileSystem,
+    relative: &Path,
+    follow: bool,
+    accessed: Timestamp,
+    modified: Timestamp,
+) -> KernelResult<()> {
+    match attr_meta(fs, relative, follow) {
+        Some(meta) => times_rule(meta.attributes, accessed, modified),
+        None => Ok(()),
+    }
+}
+
+/// [`guard_times`]'s decision, given the attributes. Nothing to decide when
+/// both times are left as they are (0): nothing changes, as Linux's
+/// `utimensat` returns before it looks when both are `UTIME_OMIT`.
+fn times_rule(attrs: FileAttr, accessed: Timestamp, modified: Timestamp) -> KernelResult<()> {
+    if accessed == 0 && modified == 0 {
+        Ok(())
+    } else if accessed == TIME_NOW && modified == TIME_NOW {
+        attr_policy::may_touch(attrs)
+    } else {
+        attr_policy::may_change_metadata(attrs)
+    }
+}
+
+/// Whether a `chown` of `uid` and `gid` changes either: `u32::MAX` leaves one
+/// as it is. Linux's `chown_common` asks `may_setattr` about neither when
+/// both are -1, so such a call is not refused on an immutable file.
+fn changes_owner(uid: u32, gid: u32) -> bool {
+    uid != u32::MAX || gid != u32::MAX
+}
+
+/// A requested time with [`TIME_NOW`] made the current wall-clock time, for
+/// the filesystem, which stores times rather than requests.
+fn resolve_time(requested: Timestamp, now: Timestamp) -> Timestamp {
+    if requested == TIME_NOW {
+        now
+    } else {
+        requested
+    }
+}
+
 /// The single permission gate every path operation passes through.
 ///
 /// Two independent checks live here, and they live *together* on purpose:
@@ -8779,6 +9267,52 @@ pub fn self_test() -> KernelResult<()> {
     use crate::serial_println;
 
     serial_println!("[vfs] Running self-test...");
+
+    // Who may change a file's attributes (`set_attributes`, FS_IOC_SETFLAGS):
+    // the decision alone, since this test runs as a kernel task, which passes.
+    {
+        let none = FileAttr::NONE;
+        let imm = FileAttr::IMMUTABLE;
+        let app = FileAttr::APPEND_ONLY;
+        let hidden = FileAttr::HIDDEN;
+        let verdicts = [
+            (
+                0,
+                1000,
+                none,
+                imm,
+                true,
+                "root sets IMMUTABLE on anyone's file",
+            ),
+            (1000, 1000, imm, none, false, "an owner clears IMMUTABLE"),
+            (1000, 1000, none, app, false, "an owner sets APPEND_ONLY"),
+            (1000, 1000, none, hidden, true, "an owner sets HIDDEN"),
+            (
+                1000,
+                1000,
+                imm,
+                imm.union(hidden),
+                true,
+                "an owner sets HIDDEN, IMMUTABLE kept",
+            ),
+            (1001, 1000, none, hidden, false, "a stranger sets HIDDEN"),
+        ];
+        for (uid, owner, old, new, allowed, what) in verdicts {
+            let verdict = attribute_change_verdict(uid, owner, old, new);
+            let ok = if allowed {
+                verdict.is_ok()
+            } else {
+                verdict == Err(KernelError::NotPermitted)
+            };
+            if !ok {
+                serial_println!("[vfs]   FAIL: attribute change: {} -> {:?}", what, verdict);
+                return Err(KernelError::InternalError);
+            }
+        }
+        serial_println!(
+            "[vfs]   attribute changes: root any, owner all but IMMUTABLE/APPEND_ONLY: OK"
+        );
+    }
 
     // Check that we have at least root and /tmp mounts.
     let mounts = Vfs::mounts();
@@ -12546,6 +13080,408 @@ pub fn self_test_xattr_rules() -> KernelResult<()> {
          written by the privileged; no change to an immutable file; the path \
          before the name; trusted. listed to the privileged only; the caller \
          a process is: OK"
+    );
+    Ok(())
+}
+
+/// The immutable and append-only attributes through every VFS operation that
+/// changes a name, the metadata or the contents, on `/tmp` (memfs):
+/// `fs::attr_policy`'s rules as the VFS, the handle layer and the filesystem
+/// apply them. Run as a kernel task, which the rules bind as they bind root.
+///
+/// Each refusal must be `NotPermitted` -- `EPERM`, not the `EACCES` these
+/// answered until 2026-10-02, and not some other error that would refuse
+/// for the wrong reason -- and what was refused must be unchanged after. The
+/// controls at the end are what make the refusals mean something: cleared,
+/// the same objects take every change.
+///
+/// # Errors
+///
+/// `InternalError` naming the first case that answered wrongly; the setup's.
+pub fn self_test_attr_rules() -> KernelResult<()> {
+    use super::handle::{self, OpenFlags};
+    use crate::serial_println;
+
+    const DIR: &str = "/tmp/_ar";
+    // An immutable file, an append-only file, a plain one.
+    const FROZEN: &str = "/tmp/_ar/frozen";
+    const LOG: &str = "/tmp/_ar/log";
+    const OTHER: &str = "/tmp/_ar/other";
+    // An immutable directory and an append-only one, each with a file.
+    const SEALED: &str = "/tmp/_ar/sealed";
+    const INSIDE: &str = "/tmp/_ar/sealed/inside";
+    const LOGS: &str = "/tmp/_ar/logs";
+    const KEPT: &str = "/tmp/_ar/logs/kept";
+    // Names a refused operation would have made.
+    const MOVED: &str = "/tmp/_ar/moved";
+    const SECOND: &str = "/tmp/_ar/second";
+
+    // Best effort, before and after: a tree left by an earlier run must not
+    // fail this one, and what is not there to remove is not an error.
+    let cleanup = || {
+        for path in [FROZEN, LOG, SEALED, LOGS] {
+            let _ = Vfs::set_attributes(path, FileAttr::NONE);
+        }
+        for path in [
+            FROZEN,
+            LOG,
+            OTHER,
+            INSIDE,
+            KEPT,
+            MOVED,
+            SECOND,
+            "/tmp/_ar/sealed/new",
+            "/tmp/_ar/sealed/created",
+            "/tmp/_ar/sealed/sym",
+            "/tmp/_ar/sealed/other",
+            "/tmp/_ar/logs/new",
+            "/tmp/_ar/logs/renamed",
+            "/tmp/_ar/logs/other",
+        ] {
+            let _ = Vfs::remove(path);
+        }
+        for path in ["/tmp/_ar/sealed/newdir", SEALED, LOGS, DIR] {
+            let _ = Vfs::rmdir(path);
+        }
+    };
+    cleanup();
+
+    // An open that succeeds is closed at once: these ask only whether it may.
+    let open = |path: &str, flags: OpenFlags| -> KernelResult<()> {
+        let h = handle::open(path, flags)?;
+        handle::close(h)
+    };
+    let (read, write) = (OpenFlags::READ, OpenFlags::WRITE);
+    let append = write.union(OpenFlags::APPEND);
+
+    let run = || -> KernelResult<()> {
+        Vfs::mkdir(DIR)?;
+        Vfs::write_file(FROZEN, b"frozen")?;
+        Vfs::write_file(LOG, b"log")?;
+        Vfs::write_file(OTHER, b"other")?;
+        Vfs::mkdir(SEALED)?;
+        Vfs::write_file(INSIDE, b"inside")?;
+        Vfs::mkdir(LOGS)?;
+        Vfs::write_file(KEPT, b"kept")?;
+        Vfs::set_attributes(FROZEN, FileAttr::IMMUTABLE)?;
+        Vfs::set_attributes(LOG, FileAttr::APPEND_ONLY)?;
+        Vfs::set_attributes(SEALED, FileAttr::IMMUTABLE)?;
+        Vfs::set_attributes(LOGS, FileAttr::APPEND_ONLY)?;
+        let before_touch = metadata_now_ns();
+
+        // `fcntl(F_SETFL)` on an append-only file's descriptor: `O_APPEND`
+        // stays as it was opened.
+        let setfl = {
+            let h = handle::open(LOG, append)?;
+            let cleared = handle::set_status_flags(h, write);
+            handle::close(h)?;
+            cleared
+        };
+
+        let denied = Err(KernelError::NotPermitted);
+        let ok = Ok(());
+        // In order: each case may stand on what an earlier one did.
+        let cases: [(&str, KernelResult<()>, KernelResult<()>); 47] = [
+            // An immutable file: nothing changes, and no name comes or goes.
+            (
+                "overwrite an immutable file",
+                Vfs::write_file(FROZEN, b"x"),
+                denied,
+            ),
+            (
+                "write into an immutable file",
+                Vfs::write_at(FROZEN, 0, b"x"),
+                denied,
+            ),
+            (
+                "append to an immutable file",
+                Vfs::append(FROZEN, b"x"),
+                denied,
+            ),
+            (
+                "truncate an immutable file",
+                Vfs::truncate(FROZEN, 0),
+                denied,
+            ),
+            (
+                "allocate to an immutable file",
+                Vfs::fallocate(FROZEN, 4096),
+                denied,
+            ),
+            (
+                "chmod an immutable file",
+                Vfs::set_permissions(FROZEN, 0o600),
+                denied,
+            ),
+            (
+                "chown an immutable file",
+                Vfs::set_owner(FROZEN, 1000, 1000),
+                denied,
+            ),
+            // Linux asks `may_setattr` nothing for a chown of (-1, -1).
+            (
+                "chown an immutable file to -1, -1",
+                Vfs::set_owner(FROZEN, u32::MAX, u32::MAX),
+                ok,
+            ),
+            (
+                "set an immutable file's times",
+                Vfs::set_times(FROZEN, 1, 1),
+                denied,
+            ),
+            (
+                "touch an immutable file",
+                Vfs::set_times(FROZEN, TIME_NOW, TIME_NOW),
+                denied,
+            ),
+            ("unlink an immutable file", Vfs::remove(FROZEN), denied),
+            (
+                "rename an immutable file",
+                Vfs::rename(FROZEN, MOVED),
+                denied,
+            ),
+            (
+                "rename onto an immutable file",
+                Vfs::rename(OTHER, FROZEN),
+                denied,
+            ),
+            // One object under one name: Linux returns before `may_delete`.
+            (
+                "rename an immutable file onto itself",
+                Vfs::rename(FROZEN, FROZEN),
+                ok,
+            ),
+            ("link an immutable file", Vfs::link(FROZEN, SECOND), denied),
+            (
+                "open an immutable file to write",
+                open(FROZEN, write),
+                denied,
+            ),
+            (
+                "open an immutable file to truncate",
+                open(FROZEN, write.union(OpenFlags::TRUNCATE)),
+                denied,
+            ),
+            ("open an immutable file to read", open(FROZEN, read), ok),
+            // An append-only file: it grows at its end and nowhere else.
+            ("append to an append-only file", Vfs::append(LOG, b"+1"), ok),
+            (
+                "write at an append-only file's end",
+                Vfs::write_at(LOG, 5, b"+2"),
+                ok,
+            ),
+            (
+                "write into an append-only file",
+                Vfs::write_at(LOG, 0, b"x"),
+                denied,
+            ),
+            (
+                "overwrite an append-only file",
+                Vfs::write_file(LOG, b"x"),
+                denied,
+            ),
+            (
+                "truncate an append-only file",
+                Vfs::truncate(LOG, 0),
+                denied,
+            ),
+            (
+                "allocate to an append-only file",
+                Vfs::fallocate(LOG, 4096),
+                ok,
+            ),
+            (
+                "chmod an append-only file",
+                Vfs::set_permissions(LOG, 0o600),
+                denied,
+            ),
+            (
+                "set an append-only file's times",
+                Vfs::set_times(LOG, 1, 1),
+                denied,
+            ),
+            (
+                "set one of its times to now",
+                Vfs::set_times(LOG, TIME_NOW, 0),
+                denied,
+            ),
+            (
+                "touch an append-only file",
+                Vfs::set_times(LOG, TIME_NOW, TIME_NOW),
+                ok,
+            ),
+            ("unlink an append-only file", Vfs::remove(LOG), denied),
+            ("link an append-only file", Vfs::link(LOG, SECOND), denied),
+            (
+                "open an append-only file to write",
+                open(LOG, write),
+                denied,
+            ),
+            (
+                "open it to append and truncate",
+                open(LOG, append.union(OpenFlags::TRUNCATE)),
+                denied,
+            ),
+            ("open an append-only file to append", open(LOG, append), ok),
+            ("F_SETFL without O_APPEND on it", setfl, denied),
+            // An immutable directory: no name comes or goes; its files'
+            // contents are theirs.
+            (
+                "create in an immutable directory",
+                Vfs::write_file("/tmp/_ar/sealed/new", b"x"),
+                denied,
+            ),
+            (
+                "O_CREAT in an immutable directory",
+                open("/tmp/_ar/sealed/created", write.union(OpenFlags::CREATE)),
+                denied,
+            ),
+            (
+                "mkdir in an immutable directory",
+                Vfs::mkdir("/tmp/_ar/sealed/newdir"),
+                denied,
+            ),
+            (
+                "symlink in an immutable directory",
+                Vfs::symlink("/tmp/_ar/sealed/sym", "inside"),
+                denied,
+            ),
+            (
+                "unlink from an immutable directory",
+                Vfs::remove(INSIDE),
+                denied,
+            ),
+            (
+                "rename out of an immutable directory",
+                Vfs::rename(INSIDE, MOVED),
+                denied,
+            ),
+            (
+                "rename into an immutable directory",
+                Vfs::rename(OTHER, "/tmp/_ar/sealed/other"),
+                denied,
+            ),
+            (
+                "link into an immutable directory",
+                Vfs::link(OTHER, "/tmp/_ar/sealed/other"),
+                denied,
+            ),
+            ("rmdir an immutable directory", Vfs::rmdir(SEALED), denied),
+            (
+                "write a file in an immutable directory",
+                Vfs::write_file(INSIDE, b"changed"),
+                ok,
+            ),
+            // The name's errors first, as Linux's lookups precede the rules.
+            (
+                "unlink a missing name there",
+                Vfs::remove("/tmp/_ar/sealed/none"),
+                Err(KernelError::NotFound),
+            ),
+            (
+                "mkdir a taken name there",
+                Vfs::mkdir(INSIDE),
+                Err(KernelError::AlreadyExists),
+            ),
+            // An append-only directory: names come and do not go.
+            (
+                "create in an append-only directory",
+                Vfs::write_file("/tmp/_ar/logs/new", b"x"),
+                ok,
+            ),
+        ];
+        for (what, got, want) in cases {
+            if got != want {
+                serial_println!("[vfs]   FAIL: {}: got {:?}, want {:?}", what, got, want);
+                return Err(KernelError::InternalError);
+            }
+        }
+        let more: [(&str, KernelResult<()>, KernelResult<()>); 3] = [
+            (
+                "unlink from an append-only directory",
+                Vfs::remove(KEPT),
+                denied,
+            ),
+            (
+                "rename within an append-only directory",
+                Vfs::rename(KEPT, "/tmp/_ar/logs/renamed"),
+                denied,
+            ),
+            (
+                "rename into an append-only directory",
+                Vfs::rename(OTHER, "/tmp/_ar/logs/other"),
+                ok,
+            ),
+        ];
+        for (what, got, want) in more {
+            if got != want {
+                serial_println!("[vfs]   FAIL: {}: got {:?}, want {:?}", what, got, want);
+                return Err(KernelError::InternalError);
+            }
+        }
+
+        // What was refused is as it was.
+        let kept: [(&str, &[u8]); 4] = [
+            (FROZEN, b"frozen"),
+            (LOG, b"log+1+2"),
+            (INSIDE, b"changed"),
+            (KEPT, b"kept"),
+        ];
+        for (path, want) in kept {
+            let got = Vfs::read_file(path)?;
+            if got.as_slice() != want {
+                serial_println!(
+                    "[vfs]   FAIL: {} holds {:?} after the refusals, want {:?}",
+                    path,
+                    got.as_slice(),
+                    want
+                );
+                return Err(KernelError::InternalError);
+            }
+        }
+        for path in [
+            MOVED,
+            SECOND,
+            "/tmp/_ar/sealed/other",
+            "/tmp/_ar/logs/renamed",
+        ] {
+            if Vfs::lstat(path).is_ok() {
+                serial_println!("[vfs]   FAIL: {} exists: a refused operation made it", path);
+                return Err(KernelError::InternalError);
+            }
+        }
+        // `TIME_NOW` reached the file as the time, not as the request.
+        let touched = Vfs::metadata(LOG)?.modified_ns;
+        if touched == TIME_NOW || touched < before_touch {
+            serial_println!(
+                "[vfs]   FAIL: touching the log stamped {}, want the time (>= {})",
+                touched,
+                before_touch
+            );
+            return Err(KernelError::InternalError);
+        }
+
+        // The controls: cleared, the same objects take every change.
+        for path in [FROZEN, LOG, SEALED, LOGS] {
+            Vfs::set_attributes(path, FileAttr::NONE)?;
+        }
+        Vfs::write_file(FROZEN, b"thawed")?;
+        Vfs::set_permissions(FROZEN, 0o600)?;
+        Vfs::set_times(FROZEN, 1, 1)?;
+        Vfs::link(FROZEN, SECOND)?;
+        Vfs::rename(FROZEN, MOVED)?;
+        Vfs::truncate(LOG, 0)?;
+        Vfs::write_file("/tmp/_ar/sealed/new", b"x")?;
+        Vfs::remove(INSIDE)?;
+        Vfs::remove(KEPT)?;
+        Ok(())
+    };
+    let result = run();
+    cleanup();
+    result?;
+    serial_println!(
+        "[vfs]   immutable and append-only: 50 operations refused or allowed as on \
+         Linux (EPERM), the refused left unchanged, and each allowed once cleared: OK"
     );
     Ok(())
 }

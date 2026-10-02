@@ -12,13 +12,11 @@
 
 use super::null_redirect;
 use super::{Array, Cell, Fatal, Flow, Fs, Interp, MainRead, R, count_chars, expand_ampersand};
-use super::{index_of, seconds_since_epoch, split_with};
-use crate::ast::{BinOp, Builtin, CmpOp, RedirMode, V_NR, V_RLENGTH, V_RSTART, V_SUBSEP, VarRef};
+use super::{index_of, new_array, seconds_since_epoch, split_with};
+use crate::ast::{BinOp, Builtin, RedirMode, V_NR, V_RLENGTH, V_RSTART, V_SUBSEP, VarRef};
 use crate::compile::{Code, Instr, Op};
 use crate::value::{Str, Value, c_long, calc_exp, compare};
 use ere::{Regex, ch};
-use std::cell::RefCell;
-use std::collections::HashMap;
 use std::rc::Rc;
 
 /// What the instructions work on.
@@ -34,11 +32,13 @@ pub(super) enum Item {
 
 /// An lvalue, resolved once: its subscripts or field number already
 /// evaluated. Reading and then writing through it -- `a[i++] += 1` -- touches
-/// one element, which a second evaluation of the subscript would not.
+/// one element, which a second evaluation of the subscript would not. An
+/// element's subscript is kept as the value it was, which finds the same
+/// element every time it is looked up.
 pub(super) enum Place {
     Var(VarRef),
     Field(usize),
-    Elem(Array, Str),
+    Elem(Array, Value),
 }
 
 /// A call in progress.
@@ -52,12 +52,12 @@ pub(super) struct Frame {
     iter_base: usize,
 }
 
-/// A `for (k in a)` loop in progress: the keys as they were when it began,
-/// because the body may delete from the array (and often does).
+/// A `for (k in a)` loop in progress: the indices as they were when it
+/// began. The body may delete from the array, and gawk visits a deleted index
+/// all the same -- the list is the loop's, not the array's.
 pub(super) struct ForIter {
-    keys: Vec<Str>,
+    keys: Vec<Value>,
     next: usize,
-    array: Array,
 }
 
 /// Which code is running, for `next` and `nextfile`, which gawk allows only
@@ -130,12 +130,19 @@ impl Interp {
                     self.stack.push(Item::Arr(a));
                 }
                 Op::Elem(v, n) => {
-                    let key = self.pop_key(*n)?;
+                    let subs = self.pop_subscript(*n)?;
                     let a = self.array_of(*v)?;
+                    let convfmt = self.convfmt();
+                    // gawk's `Op_subscript` takes the subscript's text when the
+                    // element is not there yet -- for its diagnostics -- which
+                    // settles an index from `for (k in a)` into a string.
+                    if a.borrow().get(&subs, &convfmt).is_none() {
+                        let _ = subs.to_str(&convfmt);
+                    }
                     // Referring to `a[k]` *creates* it, which is why `if (a[k]
                     // == "") ...` makes `k in a` true afterwards. Every awk does
                     // this and programs test for it.
-                    let val = a.borrow_mut().entry(key).or_insert(Value::Uninit).clone();
+                    let val = a.borrow_mut().lookup(&subs, &convfmt).clone();
                     self.push(val);
                 }
                 Op::Field => {
@@ -147,9 +154,14 @@ impl Interp {
 
                 Op::PlaceVar(v) => self.stack.push(Item::Place(Place::Var(*v))),
                 Op::PlaceElem(v, n) => {
-                    let key = self.pop_key(*n)?;
+                    let subs = self.pop_subscript(*n)?;
                     let a = self.array_of(*v)?;
-                    self.stack.push(Item::Place(Place::Elem(a, key)));
+                    // The element is made here, as gawk's `Op_subscript_lhs`
+                    // makes it, so `getline a[k]` at end of file and a `sub`
+                    // that matches nothing still leave `k in a` true.
+                    let convfmt = self.convfmt();
+                    let _ = a.borrow_mut().lookup(&subs, &convfmt);
+                    self.stack.push(Item::Place(Place::Elem(a, subs)));
                 }
                 Op::PlaceField => {
                     let n = self.pop_val()?;
@@ -203,19 +215,8 @@ impl Interp {
                 Op::Cmp(op) => {
                     let r = self.pop_val()?;
                     let l = self.pop_val()?;
-                    let convfmt = self.string_of(crate::ast::V_CONVFMT);
-                    let yes = match compare(&l, &r, &convfmt) {
-                        // NaN compares false against everything, as in C.
-                        None => false,
-                        Some(o) => match op {
-                            CmpOp::Lt => o.is_lt(),
-                            CmpOp::Le => o.is_le(),
-                            CmpOp::Gt => o.is_gt(),
-                            CmpOp::Ge => o.is_ge(),
-                            CmpOp::Eq => o.is_eq(),
-                            CmpOp::Ne => o.is_ne(),
-                        },
-                    };
+                    let convfmt = self.convfmt();
+                    let yes = compare(&l, &r, *op, &convfmt);
                     self.push(Value::Num(f64::from(u8::from(yes))));
                 }
                 Op::Concat => {
@@ -233,9 +234,10 @@ impl Interp {
                     self.push(Value::Num(f64::from(u8::from(m != *neg))));
                 }
                 Op::In(arr, n) => {
-                    let key = self.pop_key(*n)?;
+                    let subs = self.pop_subscript(*n)?;
                     let a = self.array_of(*arr)?;
-                    let present = a.borrow().contains_key(&key);
+                    let convfmt = self.convfmt();
+                    let present = a.borrow().get(&subs, &convfmt).is_some();
                     self.push(Value::Num(f64::from(u8::from(present))));
                 }
                 Op::Bool => {
@@ -353,13 +355,33 @@ impl Interp {
                 }
 
                 Op::Delete(arr, n) => {
-                    let key = self.pop_key(*n)?;
+                    let subs = self.pop_subscript(*n)?;
                     let a = self.array_of(*arr)?;
-                    a.borrow_mut().remove(&key);
+                    let convfmt = self.convfmt();
+                    // gawk's `do_delete`: an element that is not there is
+                    // not an error, but its subscript's text is taken.
+                    let present = a.borrow().get(&subs, &convfmt).is_some();
+                    if present {
+                        a.borrow_mut().remove(&subs, &convfmt);
+                    } else {
+                        let _ = subs.to_str(&convfmt);
+                    }
                 }
                 Op::DeleteAll(arr) => {
                     let a = self.array_of(*arr)?;
                     a.borrow_mut().clear();
+                }
+                Op::DeleteLoop(arr, var) => {
+                    let a = self.array_of(*arr)?;
+                    let first = a.borrow().first_index();
+                    if let Some(k) = first {
+                        a.borrow_mut().clear();
+                        // Straight into the variable, as gawk's
+                        // `do_delete_loop` assigns it: no special
+                        // variable's hook runs (`NR`, `FNR` and `NF` never
+                        // get here; see `compile::delete_loop`).
+                        self.set_cell(*var, Cell::Val(k));
+                    }
                 }
                 Op::Next => {
                     if ctx != Ctx::Rule {
@@ -394,29 +416,17 @@ impl Interp {
                 }
                 Op::ForInStart(arr) => {
                     let array = self.array_of(*arr)?;
-                    let keys: Vec<Str> = array.borrow().keys().cloned().collect();
-                    self.iters.push(ForIter {
-                        keys,
-                        next: 0,
-                        array,
-                    });
+                    let keys = array.borrow().indices();
+                    self.iters.push(ForIter { keys, next: 0 });
                 }
                 Op::ForInNext(var, exit) => {
-                    let key = loop {
-                        let Some(it) = self.iters.last_mut() else {
-                            return Err(internal("for-in without a loop"));
-                        };
-                        let Some(k) = it.keys.get(it.next).cloned() else {
-                            break None;
-                        };
-                        it.next = it.next.saturating_add(1);
-                        // A key the body deleted is skipped, not resurrected.
-                        if it.array.borrow().contains_key(&k) {
-                            break Some(k);
-                        }
+                    let Some(it) = self.iters.last_mut() else {
+                        return Err(internal("for-in without a loop"));
                     };
+                    let key = it.keys.get(it.next).cloned();
+                    it.next = it.next.saturating_add(1);
                     match key {
-                        Some(k) => self.set_var(*var, Value::from_input(k))?,
+                        Some(k) => self.set_var(*var, k)?,
                         None => pc = *exit,
                     }
                 }
@@ -485,12 +495,16 @@ impl Interp {
             .collect()
     }
 
-    /// The top `n` values as one subscript, joined with `SUBSEP`: how awk
-    /// gives a one-dimensional map two-dimensional syntax.
-    fn pop_key(&mut self, n: usize) -> R<Str> {
-        let vals = self.pop_vals(n)?;
-        if let [one] = vals.as_slice() {
-            return Ok(self.to_str(one).as_ref().clone());
+    /// The top `n` values as one subscript: one value as it is -- the array
+    /// decides what it makes of it -- and several joined with `SUBSEP` into a
+    /// string (gawk's `concat_exp`), how awk gives a one-dimensional map
+    /// two-dimensional syntax.
+    fn pop_subscript(&mut self, n: usize) -> R<Value> {
+        let mut vals = self.pop_vals(n)?;
+        if vals.len() == 1
+            && let Some(one) = vals.pop()
+        {
+            return Ok(one);
         }
         let sep = self.string_of(V_SUBSEP);
         let mut out = Str::new();
@@ -500,7 +514,7 @@ impl Interp {
             }
             out.extend_from_slice(&self.to_str(v));
         }
-        Ok(out)
+        Ok(Value::str(out))
     }
 
     /// A pattern operand: a regex literal as it is, or text compiled as a
@@ -566,11 +580,10 @@ impl Interp {
         match p {
             Place::Var(v) => self.get_var(*v),
             Place::Field(n) => self.get_field(*n),
-            Place::Elem(a, key) => Ok(a
-                .borrow_mut()
-                .entry(key.clone())
-                .or_insert(Value::Uninit)
-                .clone()),
+            Place::Elem(a, subs) => {
+                let convfmt = self.convfmt();
+                Ok(a.borrow_mut().lookup(subs, &convfmt).clone())
+            }
         }
     }
 
@@ -581,8 +594,10 @@ impl Interp {
                 let s = self.to_str(&v).as_ref().clone();
                 self.set_field(*n, s)
             }
-            Place::Elem(a, key) => {
-                a.borrow_mut().insert(key.clone(), v);
+            Place::Elem(a, subs) => {
+                let convfmt = self.convfmt();
+                // An element keeps its own copy of a field, as a variable does.
+                *a.borrow_mut().lookup(subs, &convfmt) = v.unfield();
                 Ok(())
             }
         }
@@ -617,15 +632,13 @@ impl Interp {
         let mut args = args.into_iter();
         for i in 0..params {
             let cell = match args.next() {
-                Some(Item::Val(v)) => Cell::Val(v),
+                Some(Item::Val(v)) => Cell::Val(v.for_call()),
                 Some(Item::Arr(a)) => Cell::Arr(a),
                 Some(_) => return Err(internal("expected an argument")),
                 // A parameter the caller did not pass is a local: an empty
                 // array if the function uses it as one -- that is how awk
                 // programs declare local arrays -- else uninitialised.
-                None if is_array.get(i).copied().unwrap_or(false) => {
-                    Cell::Arr(Rc::new(RefCell::new(HashMap::new())))
-                }
+                None if is_array.get(i).copied().unwrap_or(false) => Cell::Arr(new_array()),
                 None => Cell::Val(Value::Uninit),
             };
             locals.push(cell);
@@ -908,11 +921,14 @@ impl Interp {
         };
         let a = self.array_of(arr)?;
         {
+            // gawk's `do_split`: the array emptied, then each piece stored
+            // under the number of its place, so the array is an integer one.
             let mut m = a.borrow_mut();
             m.clear();
             for (i, p) in parts.iter().enumerate() {
-                let key = format!("{}", i.saturating_add(1)).into_bytes();
-                m.insert(key, Value::from_input(p.clone()));
+                #[allow(clippy::cast_precision_loss)]
+                let k = Value::Num(i.saturating_add(1) as f64);
+                *m.lookup(&k, b"%.6g") = Value::from_input(p.clone());
             }
         }
         Ok(Value::Num(f64::from(

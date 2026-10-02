@@ -682,11 +682,13 @@ fn hexadecimal(a: f64, prec: Option<usize>, upper: bool, alt: bool) -> Str {
 /// to six bytes; a negative one or a surrogate cannot be written so, and gawk
 /// then writes the value's low byte. The split matters -- `printf "%c", 65` is
 /// `A` but `printf "%c", "65"` is `6` -- and a strnum from input is a number.
+/// gawk decides by settling the value first (`fixtype`), so an index from
+/// `for (k in a)` is a string here: `6`, not `A`.
 fn character(v: &Value, convfmt: &[u8]) -> Str {
-    if let Value::Str(s) = v {
-        return ch::chars(s).next().map_or_else(|| vec![0], ch::Ch::to_str);
+    if !v.is_char_code() {
+        let s = v.to_str(convfmt);
+        return ch::chars(&s).next().map_or_else(|| vec![0], ch::Ch::to_str);
     }
-    let _ = convfmt;
     // gawk's `get_number_uj`, then `(wchar_t)`: the low 32 bits, signed.
     let code = as_u64(v.to_num()).unwrap_or(0);
     #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]

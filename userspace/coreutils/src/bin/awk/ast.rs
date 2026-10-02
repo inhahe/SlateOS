@@ -245,7 +245,14 @@ pub enum Stmt {
     Break,
     Continue,
     /// `delete a[i]`, or `delete a` when the subscripts are empty.
-    Delete(VarRef, Vec<Expr>),
+    Delete {
+        array: VarRef,
+        subs: Vec<Expr>,
+        /// The subscript's variable when the subscript is exactly one bare
+        /// name -- no parentheses -- which is the shape gawk's parser looks
+        /// for in `for (k in a) delete a[k]` (see `compile::delete_loop`).
+        bare: Option<VarRef>,
+    },
     Nop,
 }
 

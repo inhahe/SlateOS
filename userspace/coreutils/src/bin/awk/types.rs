@@ -395,7 +395,9 @@ impl Pass {
                     self.expr(ctx, e);
                 }
             }
-            Stmt::Delete(arr, subs) => {
+            Stmt::Delete {
+                array: arr, subs, ..
+            } => {
                 self.mark(ctx, *arr, Use::Array);
                 for s in subs {
                     self.expr(ctx, s);

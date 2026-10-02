@@ -14,6 +14,15 @@
 //! [`Interp::ensure_split`] splits the record with `FS`. `NF` is not stored
 //! anywhere; it is the field count, computed when read.
 //!
+//! ## A field is one value per record
+//!
+//! Each field, and `$0`, is made into a [`Value`] the first time it is read
+//! and the same value is handed out after, until the record or that field
+//! changes -- gawk's one node per field. It matters because a value from input
+//! remembers whether it has been used as a number (see `value.rs`), and a
+//! program that tests `$1 > 0` and then stores `a[$1]` stores what gawk
+//! stores.
+//!
 //! ## Where a character is not a byte
 //!
 //! Records, fields and every string are bytes, because awk is a filter and a
@@ -30,7 +39,7 @@ use crate::ast::{
 };
 use crate::compile::Code;
 use crate::io::{Inputs, Outputs, Records, Rs};
-use crate::value::{Str, Value, c_long, num_to_str};
+use crate::value::{FieldNode, Str, Value, c_long, num_to_str};
 use ere::awk::{self as escape, Warnings};
 use ere::{Regex, ch};
 use run::{Ctx, ForIter, Frame, Item};
@@ -74,7 +83,14 @@ impl From<ere::MatchLimit> for Fatal {
 type R<T> = Result<T, Fatal>;
 
 /// An awk array: shared, because arrays are passed to functions by reference.
-type Array = Rc<RefCell<HashMap<Str, Value>>>;
+/// Laid out as gawk lays them out, for gawk's `for (k in a)` order; see
+/// [`crate::array`].
+type Array = Rc<RefCell<crate::array::Array>>;
+
+/// A new, empty array.
+fn new_array() -> Array {
+    Rc::new(RefCell::new(crate::array::Array::new()))
+}
 
 /// What a variable slot holds.
 #[derive(Clone)]
@@ -124,6 +140,11 @@ enum Fs {
 struct Fields {
     record: Str,
     fields: Vec<Str>,
+    /// `$0` as a value, once read: the one node every reader shares.
+    record_value: Option<Value>,
+    /// Each field as a value, once read; `None` until then. Kept the length
+    /// of `fields`.
+    field_values: Vec<Option<Value>>,
     /// The field vector agrees with the record.
     split_valid: bool,
     /// The record agrees with the field vector.
@@ -135,6 +156,8 @@ impl Fields {
         Fields {
             record: Str::new(),
             fields: Vec::new(),
+            record_value: None,
+            field_values: Vec::new(),
             split_valid: true,
             record_valid: true,
         }
@@ -269,20 +292,26 @@ impl Interp {
         it.set_global(V_RLENGTH, Value::Num(-1.0));
         it.set_global(V_FILENAME, Value::str(Str::new()));
 
-        let environ = it.array_slot(V_ENVIRON);
+        // ENVIRON is a string array from the start, whatever its first
+        // name (gawk's `load_environ`), filled in the environment's order.
+        let environ: Array = Rc::new(RefCell::new(crate::array::Array::new_str()));
+        it.set_cell(VarRef::Global(V_ENVIRON), Cell::Arr(Rc::clone(&environ)));
         {
             let mut m = environ.borrow_mut();
             for (k, v) in env {
-                m.insert(k.clone(), Value::from_input(v.clone()));
+                *m.lookup(&Value::str(k.clone()), b"%.6g") = Value::from_input(v.clone());
             }
         }
+        // ARGV's subscripts are numbers, so it is an integer array (gawk's
+        // `init_args`).
         let argv_arr = it.array_slot(V_ARGV);
         {
             let mut m = argv_arr.borrow_mut();
-            m.insert(b"0".to_vec(), Value::str(b"awk".to_vec()));
+            *m.lookup(&Value::Num(0.0), b"%.6g") = Value::str(b"awk".to_vec());
             for (i, a) in argv.iter().enumerate() {
-                let k = format!("{}", i.saturating_add(1)).into_bytes();
-                m.insert(k, Value::from_input(a.clone()));
+                #[allow(clippy::cast_precision_loss)]
+                let k = Value::Num(i.saturating_add(1) as f64);
+                *m.lookup(&k, b"%.6g") = Value::from_input(a.clone());
             }
         }
         // ARGC counts ARGV[0] ("awk") as well as the operands, so a program that
@@ -366,14 +395,14 @@ impl Interp {
     /// only a number (gawk's `stptr` is NULL until something formats it),
     /// else the text up to its first NUL.
     fn filename_shown(&self) -> Option<Str> {
-        match self.get_global(V_FILENAME) {
-            Value::Num(_) => None,
-            other => {
-                let text = self.to_str(&other);
-                let end = text.iter().position(|b| *b == 0).unwrap_or(text.len());
-                Some(text.get(..end).unwrap_or_default().to_vec())
-            }
+        let name = self.get_global(V_FILENAME);
+        // Asked without settling anything: gawk reads the node's `stptr`.
+        if !name.has_text() {
+            return None;
         }
+        let text = self.to_str(&name);
+        let end = text.iter().position(|b| *b == 0).unwrap_or(text.len());
+        Some(text.get(..end).unwrap_or_default().to_vec())
     }
 
     /// Write whatever the escape layers have said since last time with no
@@ -441,7 +470,8 @@ impl Interp {
 
     /// The assignment itself: refused for a name that holds an array, else
     /// through `set_var` -- a strnum, so `-v n=10` compares numerically, which
-    /// is what makes `awk -v n=10 '$1 == n'` work on a numeric column.
+    /// is what makes `awk -v n=10 '$1 == n'` work on a numeric column. Already
+    /// looked at as a number, as gawk's `arg_assign` leaves it.
     fn assign_value(&mut self, name: &str, value: Str) -> R<()> {
         let Some(slot) = self.prog.global_names.iter().position(|n| n == name) else {
             // A name the program never mentions still has to be settable: a
@@ -457,7 +487,7 @@ impl Interp {
         // Through `set_var`, not `set_global`: `-F:` and `-v RS=;` have to take
         // effect, and it is `set_var` that recompiles the splitter when `FS` or
         // `RS` changes.
-        self.set_var(VarRef::Global(slot), Value::from_input(value))
+        self.set_var(VarRef::Global(slot), Value::from_assignment(value))
     }
 
     /// Run the whole program, returning the process exit status.
@@ -615,11 +645,13 @@ impl Interp {
                 self.set_counter(V_FNR, 0);
                 return Ok(true);
             }
-            let key = format!("{}", self.main.argv).into_bytes();
+            #[allow(clippy::cast_precision_loss)]
+            let key = Value::Num(self.main.argv as f64);
             self.main.argv = self.main.argv.saturating_add(1);
             let arg = {
                 let arr = self.array_slot(V_ARGV);
-                let v = arr.borrow().get(&key).cloned();
+                let convfmt = self.convfmt();
+                let v = arr.borrow().get(&key, &convfmt).cloned();
                 v.unwrap_or(Value::Uninit)
             };
             let text = self.to_str(&arg);
@@ -788,6 +820,8 @@ impl Interp {
     }
 
     fn set_var(&mut self, v: VarRef, val: Value) -> R<()> {
+        // A variable keeps its own copy of a field (gawk's `UNFIELD`).
+        let val = val.unfield();
         if let VarRef::Global(slot) = v {
             match slot {
                 V_NF => {
@@ -800,13 +834,22 @@ impl Interp {
                     }
                     let n = usize::try_from(n).unwrap_or(usize::MAX).min(16_000_000);
                     self.f.fields.resize(n, Str::new());
+                    self.f.field_values.resize(n, None);
                     self.f.record_valid = false;
+                    self.f.record_value = None;
                     self.f.split_valid = true;
                     return Ok(());
                 }
                 V_FS | V_RS => {
                     self.set_global(slot, val);
                     return self.refresh_separators();
+                }
+                // gawk's `set_OFS`, `set_ORS`, `set_SUBSEP`, `set_CONVFMT`
+                // and `set_OFMT` take the new value's text at once
+                // (`force_string`), which settles an index from `for (k in
+                // a)` into a string there and then.
+                V_OFS | V_ORS | V_SUBSEP | V_CONVFMT | V_OFMT => {
+                    let _ = self.to_str(&val);
                 }
                 V_NR | V_FNR => {
                     // gawk's `set_NR`: the long is the value's, truncated.
@@ -908,7 +951,7 @@ impl Interp {
         if let Some(Cell::Arr(a)) = self.cell(v) {
             return Rc::clone(a);
         }
-        let a: Array = Rc::new(RefCell::new(HashMap::new()));
+        let a = new_array();
         self.set_cell(v, Cell::Arr(Rc::clone(&a)));
         a
     }
@@ -917,17 +960,33 @@ impl Interp {
         self.array_ref(VarRef::Global(slot))
     }
 
+    /// `$n`: the field's value, made on first reading and the same value
+    /// after, so that what has been done to it shows (see the module docs).
     fn get_field(&mut self, n: usize) -> R<Value> {
         if n == 0 {
-            return Ok(Value::from_input(self.record().clone()));
+            self.rebuild_record();
+            let f = &mut self.f;
+            let v = f
+                .record_value
+                .get_or_insert_with(|| Value::from_field(f.record.clone(), FieldNode::Record));
+            return Ok(v.clone());
         }
         self.ensure_split()?;
-        Ok(match self.f.fields.get(n.saturating_sub(1)) {
-            Some(s) => Value::from_input(s.clone()),
+        let i = n.saturating_sub(1);
+        let Some(text) = self.f.fields.get(i) else {
             // Past NF is the empty string, and reading it does not extend the
             // record — only assigning does.
-            None => Value::Uninit,
-        })
+            return Ok(Value::Uninit);
+        };
+        if self.f.field_values.len() != self.f.fields.len() {
+            self.f.field_values.resize(self.f.fields.len(), None);
+        }
+        let make = || Value::from_field(text.clone(), FieldNode::Field);
+        let v = match self.f.field_values.get_mut(i) {
+            Some(slot) => slot.get_or_insert_with(make).clone(),
+            None => make(),
+        };
+        Ok(v)
     }
 
     fn set_field(&mut self, n: usize, s: Str) -> R<()> {
@@ -939,15 +998,21 @@ impl Interp {
         if self.f.fields.len() < n {
             self.f.fields.resize(n, Str::new());
         }
+        self.f.field_values.resize(self.f.fields.len(), None);
         if let Some(slot) = self.f.fields.get_mut(n.saturating_sub(1)) {
             *slot = s;
         }
+        if let Some(slot) = self.f.field_values.get_mut(n.saturating_sub(1)) {
+            *slot = None;
+        }
         self.f.record_valid = false;
+        self.f.record_value = None;
         Ok(())
     }
 
     fn set_record(&mut self, rec: Str) {
         self.f.record = rec;
+        self.f.record_value = None;
         self.f.record_valid = true;
         self.f.split_valid = false;
     }
@@ -958,6 +1023,8 @@ impl Interp {
         }
         let rec = self.record().clone();
         self.f.fields = self.split_record(&rec)?;
+        self.f.field_values.clear();
+        self.f.field_values.resize(self.f.fields.len(), None);
         self.f.split_valid = true;
         Ok(())
     }
@@ -1045,11 +1112,15 @@ impl Interp {
     }
 
     fn to_str(&self, v: &Value) -> Rc<Str> {
-        let convfmt = match self.globals.get(V_CONVFMT) {
+        v.to_str(&self.convfmt())
+    }
+
+    /// `CONVFMT`'s text, which turns a number into a string.
+    fn convfmt(&self) -> Rc<Str> {
+        match self.globals.get(V_CONVFMT) {
             Some(Cell::Val(v)) => v.to_str(b"%.6g"),
             _ => Rc::new(b"%.6g".to_vec()),
-        };
-        v.to_str(&convfmt)
+        }
     }
 
     /// A uniform value in `[0, 1)`, from a xorshift generator.
@@ -1097,6 +1168,7 @@ impl Interp {
             out.extend_from_slice(f);
         }
         self.f.record = out;
+        self.f.record_value = None;
         self.f.record_valid = true;
     }
 }

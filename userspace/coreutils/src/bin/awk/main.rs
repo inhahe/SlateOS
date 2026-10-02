@@ -43,6 +43,7 @@
 //! | [`parse`] | recursive descent, POSIX precedence |
 //! | [`types`] | which names are arrays — decided before the run, because arrays pass by reference |
 //! | [`value`] | the strnum rule: a field that looks like a number compares as one, a program literal never does |
+//! | [`array`] | arrays laid out as gawk lays them -- its three layouts, hashes and growth -- so `for (k in a)` runs in gawk's order |
 //! | [`fmt`] | `printf`: gawk's `format_tree` over bytes, on Rust's exact float digits |
 //! | [`io`] | records (three `RS` modes) and redirections |
 //! | [`compile`] | the parsed program to instructions, in gawk's order and with gawk's lines |
@@ -80,13 +81,17 @@
 //! | a built-in given the wrong number of arguments | refused before the program runs | fatal when first reached |
 //! | `RS` longer than one character | a regex, as in gawk without `--posix`, mawk and the one true awk | its first character only |
 //! | standard output's reader goes away (`awk ... \| head -1`) | the run ends quietly with the status it had earned | dies of `SIGPIPE`, status 141 |
+//! | `ENVIRON` when `AWKPATH` or `AWKLIBPATH` is unset | as the environment has it | both added, naming gawk's own library directories |
 //!
 //! The `RS` row is a choice POSIX leaves open ("If RS contains more than one
 //! character, the results are unspecified"), and the regex is what a program
 //! that sets one means: `RS = "\r\n"` for a file with CRLF line ends would
 //! otherwise split at the `\r` and glue each `\n` to the next record. The
 //! `SIGPIPE` row is this system's, for every utility: it does not use signals
-//! for process control (`stdfd::reader_gone`).
+//! for process control (`stdfd::reader_gone`). The `ENVIRON` row: those two
+//! are where gawk searches for `-f` files and loads extensions, directories of
+//! gawk's own installation; this awk searches no path for `-f` and loads no
+//! extensions, so the entries would name directories it never reads.
 //!
 //! The first two are the same decision twice: this system is UTF-8 throughout,
 //! and gawk's byte answers are an artifact of the C locale on the development
@@ -108,6 +113,7 @@
 //! A pattern whose search exceeds the engine's budget is still a fatal error
 //! here, not a non-match; see [`interp`]'s `From<ere::MatchLimit> for Fatal`.
 
+mod array;
 mod ast;
 mod compile;
 mod fmt;

@@ -124,6 +124,10 @@ printf 'h\xc3\xa9llo\n\x80\xff raw\n'                       > bytes.txt
 # a slash, `y`, `w`, `aa`, `a` followed by byte 1, and a bar-separated line.
 printf '.\n\\\nt\n\tx\na\tb\natb\nA\nx41\n]\n\\]\na{b}c\n/\ny\nw\naa\na\001\nb|c|d\n' > esc.txt
 printf 'a:b;c\n'                                            > semi.txt
+# Subscripts from input, for the index a string array keeps.
+printf '9 10 1.5\n'                                         > keys.txt
+printf '0 x\n'                                              > zero.txt
+printf '0\n'                                                > zline.txt
 
 # Program files, for -f.
 printf '{ print "P1:" $0 }\n'                               > p1.awk
@@ -166,14 +170,16 @@ run_side() {
   [ "$side" = ours ] && [ -n "$selfcheck" ] && flags=$GNUFLAGS
   if [ "$stdin" = "-" ]; then
     # shellcheck disable=SC2086
-    diff_run timeout -k 2 30 env PATH="$bindir/$side:/usr/bin:/bin" awk $flags "$@" \
+    diff_run timeout -k 2 30 env $RUN_ENV PATH="$bindir/$side:/usr/bin:/bin" awk $flags "$@" \
       </dev/null >"$out" 2>"$err"
   else
     # shellcheck disable=SC2086
-    diff_run timeout -k 2 30 env PATH="$bindir/$side:/usr/bin:/bin" awk $flags "$@" \
+    diff_run timeout -k 2 30 env $RUN_ENV PATH="$bindir/$side:/usr/bin:/bin" awk $flags "$@" \
       <"$stdin" >"$out" 2>"$err"
   fi
 }
+# What `env_case` puts before PATH: nothing, everywhere else.
+RUN_ENV=
 
 # Sets AGREED (stdout + status + whether stderr was loud) and AGREED_MSG (the
 # same, but stderr compared as text), plus REPORT.
@@ -247,6 +253,17 @@ run_case()  { local i="$1"; shift; compare "$(fx "$i")" "$@"; report     "$AGREE
 msg_case()  { local i="$1"; shift; compare "$(fx "$i")" "$@"; report     "$AGREED_MSG" "[$i] awk $*"; }
 file_case() { compare - "$@"; report "$AGREED" "awk $*"; }
 fmsg_case() { compare - "$@"; report "$AGREED_MSG" "awk $*"; }
+
+# `env_case 'NAME=V ...' ARGS...` — ARGS with exactly that environment (and
+# PATH), stdin empty: for the cases about ENVIRON itself and about the
+# variables gawk reads from its environment (`AWK_HASH`, `NHAT`, ...).
+env_case() {
+  local envs=$1; shift
+  RUN_ENV="-i $envs"
+  compare - "$@"
+  RUN_ENV=
+  report "$AGREED" "env -i $envs awk $*"
+}
 
 xfail_case() { local r="$1" i="$2"; shift 2; compare "$(fx "$i")" "$@"; report_x "$AGREED"     "$r" "[$i] awk $*"; }
 xmsg_case()  { local r="$1" i="$2"; shift 2; compare "$(fx "$i")" "$@"; report_x "$AGREED_MSG" "$r" "[$i] awk $*"; }
@@ -1262,6 +1279,141 @@ msg_case abc 'BEGIN {x = 0; print "before"; print 1/x}'
 run_case abc 'BEGIN {x = 0; print 1 % x}'
 msg_case abc 'BEGIN {x = 0; print 1 % x}'
 xfail_case 'an array/scalar conflict is caught before the program runs (exit 1), not when first reached (gawk: exit 2)' abc 'BEGIN {x = 1; x[2] = 3}'
+
+# --- for (k in a): gawk's order --------------------------------------------------
+# Until 2026-10-01 an array here was a Rust HashMap, seeded at random, so a
+# program's `for (k in a)` output could come out in a different order on every
+# run. Arrays are gawk's own layouts now (`array.rs`), and the order is gawk's:
+# strings in its hash's order, through each growth of the table; non-negative
+# integers ascending in power-of-two groups, a sparse one moved to a second
+# array that is listed first; negative integers in its integer hash's order.
+run_case abc 'BEGIN { a["the"]; a["cat"]; a["dog"]; a["a"]; for (k in a) print k }'
+run_case abc 'BEGIN { for (i = 0; i < 50; i++) a["k" i]; for (k in a) printf "%s ", k; print "" }'
+run_case abc 'BEGIN { for (i = 0; i < 2000; i++) a["k" i]; for (k in a) printf "%s ", k; print "" }'
+run_case abc 'BEGIN { for (i = 0; i < 50; i++) a[i * 7919 % 1000]; for (k in a) printf "%s ", k; print "" }'
+run_case abc 'BEGIN { for (i = 0; i < 50; i++) a[-i * 37]; for (k in a) printf "%s ", k; print "" }'
+run_case abc 'BEGIN { for (i = 0; i < 3000; i++) a[-i * 3]; for (k in a) printf "%s ", k; print "" }'
+run_case abc 'BEGIN { a[5]; a[1000000]; a[3]; a[70000]; for (k in a) printf "%s ", k; print "" }'
+run_case abc 'BEGIN { for (i = 0; i < 60; i++) a[i * 100003]; for (k in a) printf "%s ", k; print "" }'
+run_case abc 'BEGIN { a[3]; a["x"]; a[1]; a[-2]; a[2.5]; for (k in a) printf "%s ", k; print "" }'
+run_case abc 'BEGIN { a["b"]; a["a"]; a[1]; a["c"]; a[0]; for (k in a) printf "%s ", k; print "" }'
+run_case abc 'BEGIN { a[1.5]; a[0.5]; a[2]; for (k in a) printf "%s ", k; print "" }'
+run_case abc 'BEGIN { n = split("a b c d e f g h i j k l", p); for (k in p) printf "%s ", k; print "" }'
+# An emptied array forgets its layout; the second array takes over when the
+# integers are gone; deletions refill an integer table's buckets as gawk's do.
+run_case abc 'BEGIN { a[1]; a[2]; delete a[1]; delete a[2]; a["x"]; a[5]; a["y"]; for (k in a) printf "%s ", k; print "" }'
+run_case abc 'BEGIN { a[1]; a["x"]; a["y"]; a[2]; delete a[1]; delete a[2]; a[7]; for (k in a) printf "%s ", k; print "" }'
+run_case abc 'BEGIN { for (i = 0; i < 100; i++) a[-i]; for (i = 0; i < 100; i += 3) delete a[-i]; for (k in a) printf "%s ", k; print "" }'
+run_case abc 'BEGIN { for (i = 0; i < 100; i++) a["s" i]; for (i = 0; i < 100; i += 3) delete a["s" i]; for (k in a) printf "%s ", k; print "" }'
+run_case abc 'BEGIN { for (i = 0; i < 60; i++) a[i * 100003]; for (i = 0; i < 60; i += 2) delete a[i * 100003]; for (k in a) printf "%s ", k; print "" }'
+# A byte above 0x7f hashes as a negative C `char`, as it does in gawk.
+run_case abc 'BEGIN { a["\351t\351"]; a["caf\303\251"]; a["\377"]; a["x"]; for (k in a) printf "%s|", k; print "" }'
+# ENVIRON in the environment's order through gawk's hash, and the tunables
+# gawk reads from the environment. gawk adds AWKPATH and AWKLIBPATH to
+# ENVIRON when they are unset, and this awk does not (main.rs), so a case
+# that lists ENVIRON sets them.
+E='LANG=C.UTF-8 AWKPATH=/x AWKLIBPATH=/y'
+env_case "$E A=1 B=2 HOME=/h ZZ=3" 'BEGIN { for (k in ENVIRON) print k }'
+env_case "$E AWK_HASH=gst" 'BEGIN { for (i = 0; i < 40; i++) a["k" i]; for (k in a) printf "%s ", k; print "" }'
+env_case "$E AWK_HASH=fnv1a" 'BEGIN { for (i = 0; i < 40; i++) a["k" i]; for (k in a) printf "%s ", k; print "" }'
+env_case "$E STR_CHAIN_MAX=1" 'BEGIN { for (i = 0; i < 40; i++) a["k" i]; for (k in a) printf "%s ", k; print "" }'
+env_case "$E INT_CHAIN_MAX=1" 'BEGIN { for (i = 0; i < 60; i++) a[-i]; for (k in a) printf "%s ", k; print "" }'
+env_case "$E NHAT=4" 'BEGIN { for (i = 0; i < 60; i++) a[i * 37]; for (k in a) printf "%s ", k; print "" }'
+
+# --- the index a loop hands out --------------------------------------------------
+# From an integer array: a number until anything asks for its text or its type,
+# then a string for good, every copy included (gawk's INTIND). So the max
+# idiom over 9, 10 and 100 answers 9 -- the first comparison, against an unset
+# `max`, makes `k` a string, and `max` takes it -- as gawk's does.
+run_case abc 'BEGIN { a[9]; a[10]; a[100]; for (k in a) if (k > max) max = k; print max }'
+run_case abc 'BEGIN { a[9]; a[10]; a[100]; max = 0; for (k in a) if (k > max) max = k; print max }'
+run_case abc 'BEGIN { a[90]; a[10]; a[100]; min = 1000; for (k in a) if (k < min) min = k; print min }'
+run_case abc 'BEGIN { a[9]; a[10]; a[100]; for (k in a) s += k; print s }'
+run_case abc 'BEGIN { a[9]; for (k in a) print (k < 10), (k < 10) }'
+run_case abc 'BEGIN { a[0]; for (k in a) print "[" k "]", (k ? "T" : "F") }'
+run_case abc 'BEGIN { a[9]; for (k in a) { x = k; if (x) y = 1; print (k < 10) } }'
+run_case abc 'BEGIN { a[9]; for (k in a) { x = k + 1; y = -k; z = sprintf("%d", k); print (k < 10) } }'
+run_case abc 'BEGIN { a[9]; for (k in a) { print k; print (k < 10) } }'
+run_case abc 'BEGIN { a[9]; for (k in a) print (k < "10"), (k < 10) }'
+run_case abc 'BEGIN { a[9]; b["x"]; for (k in a) { b[k]; print (k < 10) } }'
+run_case abc 'BEGIN { a[9]; b[1]; for (k in a) { b[k]; print (k < 10) } }'
+run_case abc 'BEGIN { a[9]; b[9]; for (k in a) { b[k]; print (k < 10) } }'
+run_case abc 'BEGIN { a[9]; b["x"]; for (k in a) { y = (k in b); print (k < 10) } }'
+run_case abc 'BEGIN { a[9]; b[1]; for (k in a) { y = (k in b); print (k < 10) } }'
+run_case abc 'BEGIN { a[9]; b[1]; for (k in a) { delete b[k]; print (k < 10) } }'
+run_case abc 'BEGIN { a[9]; for (k in a) { OFS = k; print (k < 10) } }'
+run_case abc 'BEGIN { a[9]; for (k in a) { SUBSEP = k; print (k < 10) } }'
+run_case abc 'BEGIN { a[65]; for (k in a) printf "%c|%c\n", k, k + 0 }'
+run_case abc 'BEGIN { a[9]; for (k in a) y = (k < 10); for (k in a) print (k < 10) }'
+run_case abc 'BEGIN { a[-9]; a["x"]; for (k in a) print k, (k < -10) }'
+run_case abc 'function f(v) { return (v ? 1 : 0) } BEGIN { a[9]; for (k in a) { y = f(k); print (k < 10) } }'
+# From a string array: the subscript as it was stored. Input not yet used as a
+# number is kept as input and compares as a number; input already compared,
+# and a `-v` value (gawk's `arg_assign` reads it as a number at once), is kept
+# as a plain string.
+run_case keys '{ a[$3]; a[$1]; a[$2] } END { for (k in a) print k, (k < 10) }'
+run_case keys '{ x = ($1 > 0) + ($2 > 0); a[$3]; a[$1]; a[$2] } END { for (k in a) print k, (k < 10) }'
+run_case keys '{ a[$1]; a[$2] } END { for (k in a) print k, (k < 10) }'
+run_case zero '{ a[$2]; a[$1] } END { for (k in a) print k, (k ? "T" : "F") }'
+run_case zero '{ y = $1 + 0; a[$2]; a[$1] } END { for (k in a) print k, (k ? "T" : "F") }'
+run_case zero '{ y = ($1 < 1); a[$2]; a[$1] } END { for (k in a) print k, (k ? "T" : "F") }'
+run_case zero '{ v = $1; a[$2]; a[v] } END { for (k in a) print k, (k ? "T" : "F") }'
+run_case zero '{ v = $1; y = v + 0; a[$2]; a[$1] } END { for (k in a) print k, (k ? "T" : "F") }'
+# Which values are one node is gawk's too: a field is shared with what an
+# expression does to it and with a function it is passed to, but a variable
+# or an element stores a copy, and `$0` is passed to a function by value.
+run_case zero '{ b[1] = $1; y = b[1] + 0; a[$2]; a[$1] } END { for (k in a) print k, (k ? "T" : "F") }'
+run_case zero 'function f(x) { return x + 0 } { y = f($1); a[$2]; a[$1] } END { for (k in a) print k, (k ? "T" : "F") }'
+run_case zline 'function f(x) { return x + 0 } { y = f($0); a["x"]; a[$0] } END { for (k in a) print k, (k ? "T" : "F") }'
+run_case zline 'function f(x) { return x + 0 } { y = f($1); a["x"]; a[$0] } END { for (k in a) print k, (k ? "T" : "F") }'
+run_case zline '{ y = $0 + 0; a["x"]; a[$0] } END { for (k in a) print k, (k ? "T" : "F") }'
+run_case abc 'BEGIN { split("0 x", p); a[p[2]]; a[p[1]]; for (k in a) print k, (k ? "T" : "F") }'
+file_case -v v=0 'BEGIN { a["x"]; a[v]; for (k in a) print k, (k ? "T" : "F") }'
+file_case 'BEGIN { a["x"]; a[ARGV[1]]; for (k in a) print k, (k ? "T" : "F") }' 0
+run_case table '{ c[$2]++ } END { for (k in c) if (k > max) max = k; print max }'
+run_case table '{ c[$1] += $2 } END { for (k in c) print k, c[k] }'
+# A NaN compares as C compares it when neither side is flagged a string, and
+# as gawk sorts numbers (equal to itself, above everything) when one is.
+run_case abc 'BEGIN { x = 2^1024 * 0; print (x == x), (x != x), (x < 1), (x > 1), (x > u), (x < u), (x == u) }'
+run_case abc '{ y = $1; print ($1 == $1), ($1 == y) }'
+
+# --- deleting while looping --------------------------------------------------------
+# The loop walks the list it took at the start: an index deleted meanwhile is
+# still visited, as in gawk (this skipped it until 2026-10-01).
+run_case abc 'BEGIN { a[1]; a[2]; a[3]; for (k in a) { delete a[3]; print k } }'
+run_case abc 'BEGIN { a["x"]; a["y"]; a["z"]; for (k in a) { print k; delete a } }'
+run_case abc 'BEGIN { a[1]; a[2]; for (k in a) { delete a[2]; print k, (2 in a) } }'
+# `for (k in a) delete a[k]` is one instruction to gawk (`Op_K_delete_loop`):
+# `k` is left at the index the loop would have visited first, not the last.
+# Only that exact shape: braces and empty `;` statements around it are fine,
+# a parenthesised subscript or an empty `{}` is not.
+run_case abc 'BEGIN { a[3]; a[1]; a[2]; for (k in a) delete a[k]; n = 0; for (j in a) n++; print k, n }'
+run_case abc 'BEGIN { a[3]; a[1]; a[2]; for (k in a) { delete a[k] }; print k }'
+run_case abc 'BEGIN { a[3]; a[1]; a[2]; for (k in a) { delete a[k];; }; print k }'
+run_case abc 'BEGIN { a[3]; a[1]; a[2]; for (k in a) { ; delete a[k] }; print k }'
+run_case abc 'BEGIN { a[3]; a[1]; a[2]; for (k in a)
+delete a[k]
+print k }'
+run_case abc 'BEGIN { a[3]; a[1]; a[2]; for (k in a) { { delete a[k] } }; print k }'
+run_case abc 'BEGIN { a[3]; a[1]; a[2]; for (k in a) delete a[(k)]; print k }'
+run_case abc 'BEGIN { a[3]; a[1]; a[2]; for (k in a) { {} delete a[k] }; print k }'
+run_case abc 'BEGIN { a[3]; a[1]; a[2]; b[1]; for (k in a) delete b[k]; n = 0; for (j in a) n++; print k, n }'
+run_case abc 'BEGIN { a[3]; a[1]; a[2]; for (k in a) { delete a[k]; x = 1 }; print k }'
+run_case abc 'BEGIN { k = "z"; for (k in a) delete a[k]; print k }'
+run_case abc 'BEGIN { a[3]; a[1]; a[2]; for (NR in a) delete a[NR]; print NR }'
+run_case abc 'function f(   k, a, j, n) { a[3]; a[1]; a[2]; for (k in a) delete a[k]; for (j in a) n++; print k, n + 0 } BEGIN { f() }'
+run_case abc 'BEGIN { a["the"]; a["cat"]; a["dog"]; for (k in a) delete a[k]; print k }'
+run_case abc 'BEGIN { a[3]; a["x"]; a[1]; for (k in a) delete a[k]; print k }'
+run_case abc 'BEGIN { a[9]; for (k in a) delete a[k]; print (k < 10), (k < 10) }'
+
+# --- an element a target makes ------------------------------------------------------
+# `getline a[k]` and `sub(..., a[k])` make the element before they read or
+# match, as gawk's `Op_subscript_lhs` does: it is there even when nothing is
+# stored in it.
+run_case abc 'BEGIN { getline a["x"] < "/dev/null"; print ("x" in a) }'
+run_case abc 'BEGIN { r = (getline a["x"] < "/nonexistent/file"); print r, ("x" in a) }'
+run_case abc 'BEGIN { sub(/z/, "y", a["x"]); print ("x" in a) }'
+run_case abc 'BEGIN { if (!("x" in a)) print "absent"; print length(a["x"]), ("x" in a) }'
 
 printf '\n%d passed, %d differed, %d differ on purpose' "$pass" "$fail" "$xfail"
 if [ "$xpass" -gt 0 ]; then

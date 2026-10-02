@@ -819,21 +819,44 @@ impl Parser {
         };
         let arr = self.var(&name);
         if self.eat(&Tok::LBracket) {
+            let groups = self.groups;
             let subs = self.expr_list(&Tok::RBracket)?;
             self.expect(&Tok::RBracket, "`]'")?;
             if subs.is_empty() {
                 return Err("delete: an empty subscript is not a subscript".to_string());
             }
-            return Ok(Stmt::Delete(arr, subs));
+            // A lone name is bare unless a grouping was parsed around it.
+            let bare = match subs.as_slice() {
+                [
+                    Expr {
+                        kind: ExprKind::Get(Lvalue::Var(v)),
+                        ..
+                    },
+                ] if self.groups == groups => Some(*v),
+                _ => None,
+            };
+            return Ok(Stmt::Delete {
+                array: arr,
+                subs,
+                bare,
+            });
         }
         // `delete a (…)` cannot happen — the lexer only makes a `FuncName` when
         // a `(` follows, and that is the one shape `delete` does not accept.
         if self.eat(&Tok::LParen) {
             let subs = self.expr_list(&Tok::RParen)?;
             self.expect(&Tok::RParen, "`)'")?;
-            return Ok(Stmt::Delete(arr, subs));
+            return Ok(Stmt::Delete {
+                array: arr,
+                subs,
+                bare: None,
+            });
         }
-        Ok(Stmt::Delete(arr, Vec::new()))
+        Ok(Stmt::Delete {
+            array: arr,
+            subs: Vec::new(),
+            bare: None,
+        })
     }
 
     fn print_stmt(&mut self, formatted: bool) -> Result<Stmt, String> {

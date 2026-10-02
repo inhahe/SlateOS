@@ -28,7 +28,7 @@
 
 use crate::ast::{
     BinOp, Builtin, CmpOp, Expr, ExprKind, GetlineSrc, Loc, Lvalue, Pattern, Program, RedirMode,
-    Stmt, VarRef,
+    Stmt, V_FNR, V_NF, V_NR, VarRef,
 };
 use crate::value::Str;
 use ere::Regex;
@@ -154,12 +154,19 @@ pub enum Op {
     NextFile,
     /// `[status?] -> `, the flag saying whether one was given.
     Exit(bool),
-    /// Snapshot an array's keys for `for (k in a)`.
+    /// Take the list of an array's indices for `for (k in a)`, in gawk's
+    /// order, as gawk's `Op_arrayfor_init` does.
     ForInStart(VarRef),
-    /// Assign the next key that is still present to the variable, or jump
-    /// to the target (where `ForInPop` is) when there is none.
+    /// Assign the list's next index to the variable -- deleted since or not,
+    /// as gawk's `Op_arrayfor_incr` does -- or jump to the target (where
+    /// `ForInPop` is) when the list is done.
     ForInNext(VarRef, usize),
     ForInPop,
+    /// `for (k in a) delete a[k]`, which gawk's parser turns into one
+    /// instruction (`Op_K_delete_loop`): `k` gets the index the loop would
+    /// have visited first, and the array is emptied at a stroke. The array,
+    /// then the variable.
+    DeleteLoop(VarRef, VarRef),
     /// A range pattern: jump to the target if range `id` is open.
     RangeOpen(usize, usize),
     /// `[end] -> []`: having just matched its start, open the range unless
@@ -202,6 +209,43 @@ struct Compiler<'p> {
     /// The function being compiled, for its parameters' array-ness.
     func: Option<usize>,
 }
+
+/// Whether `for (var in array) body` is the loop gawk's parser rewrites into
+/// one `delete` (awkgram.y, the `LEX_FOR '(' NAME LEX_IN` rule), and if so
+/// where the `delete` was written.
+///
+/// gawk recognises it by the instructions the body compiled to: exactly one
+/// `delete` of one subscript, that subscript a bare reference to the loop's
+/// variable -- not parenthesised, which adds an instruction -- and the array
+/// the loop's. Braces around it do not count, nor do empty `;` statements;
+/// an empty `{}` does (it compiles to a no-op). The variable may not be one
+/// gawk refreshes before reading (`NR`, `FNR`, `NF`).
+fn delete_loop(var: VarRef, array: VarRef, body: &Stmt) -> Option<DeleteAt> {
+    if matches!(var, VarRef::Global(V_NR | V_FNR | V_NF)) {
+        return None;
+    }
+    let mut at = None;
+    let mut s = body;
+    loop {
+        match s {
+            Stmt::At(loc, inner) => {
+                at = Some(*loc);
+                s = inner;
+            }
+            Stmt::Block(list) if list.len() == 1 => s = list.first()?,
+            Stmt::Delete {
+                array: a,
+                subs,
+                bare: Some(v),
+            } if *a == array && *v == var && subs.len() == 1 => return Some(DeleteAt(at)),
+            _ => return None,
+        }
+    }
+}
+
+/// Where the `delete` of a loop [`delete_loop`] recognised was written, when
+/// the parser recorded it: the line gawk's one instruction carries.
+struct DeleteAt(Option<Loc>);
 
 /// Compile `prog`, which [`crate::types::resolve`] has already typed.
 #[must_use]
@@ -426,6 +470,10 @@ impl Compiler<'_> {
                 self.close_loop(cont, end);
             }
             Stmt::ForIn { var, array, body } => {
+                if let Some(DeleteAt(delete_at)) = delete_loop(*var, *array, body) {
+                    self.emit(Op::DeleteLoop(*array, *var), delete_at.or(at));
+                    return;
+                }
                 self.emit(Op::ForInStart(*array), at);
                 let top = self.here();
                 let next = self.emit(Op::ForInNext(*var, 0), at);
@@ -466,7 +514,9 @@ impl Compiler<'_> {
                     l.continues.push(j);
                 }
             }
-            Stmt::Delete(arr, subs) => {
+            Stmt::Delete {
+                array: arr, subs, ..
+            } => {
                 if subs.is_empty() {
                     self.emit(Op::DeleteAll(*arr), at);
                 } else {

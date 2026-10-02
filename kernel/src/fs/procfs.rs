@@ -5816,29 +5816,18 @@ fn gen_fcomment() -> Vec<u8> {
     use alloc::format;
     let mut out = String::new();
 
-    let (comment_count, set_ops, get_ops, search_ops) = super::fcomment::stats();
+    // Counts only. The comments are the files' own `user.xdg.comment`
+    // attributes (`fs::fcomment`), read through `getxattr` as each file's
+    // permissions allow; listing them here would show any reader the
+    // comments on files it may not read.
+    let (set_ops, get_ops, search_ops) = super::fcomment::stats();
 
     out.push_str("File Comments\n");
     out.push_str("=============\n\n");
-    out.push_str(&format!("Comments:    {}/{}\n", comment_count, 65536));
-    out.push_str(&format!("Set ops:     {}\n", set_ops));
-    out.push_str(&format!("Get ops:     {}\n", get_ops));
-    out.push_str(&format!("Search ops:  {}\n\n", search_ops));
-
-    let all = super::fcomment::list(None);
-    if !all.is_empty() {
-        out.push_str(&format!("{:40} {:8} {}\n", "PATH", "LENGTH", "PREVIEW"));
-        for (path, comment) in &all {
-            let preview: String = comment.chars().take(40).collect();
-            let preview = preview.replace('\n', " ");
-            out.push_str(&format!(
-                "{:40} {:8} {}\n",
-                path.display(),
-                comment.len(),
-                preview
-            ));
-        }
-    }
+    out.push_str("Kept as each file's user.xdg.comment attribute.\n\n");
+    out.push_str(&format!("Set or removed: {}\n", set_ops));
+    out.push_str(&format!("Read:           {}\n", get_ops));
+    out.push_str(&format!("Searches:       {}\n", search_ops));
 
     out.into_bytes()
 }

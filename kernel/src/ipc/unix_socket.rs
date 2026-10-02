@@ -2317,9 +2317,41 @@ fn run_self_test(opened: &mut Vec<UnixHandle>) -> Result<(), &'static str> {
     bind_abstract(again, b"slate-selftest-dgram")
         .map_err(|_| "a closed socket's abstract name was not freed")?;
 
-    timeout_checks(opened)?;
     rights_checks(opened)?;
     seqpacket_checks(opened)
+}
+
+/// The timeout checks ([`timeout_checks`]), apart from [`self_test`]: a
+/// blocking wait's limit is an hrtimer, which fires only once interrupts are
+/// on, and [`self_test`] runs before `cpu::sti()`. `main.rs` runs this one
+/// after it, beside the timerfd's blocking test, for the same reason. Run
+/// with interrupts off it refuses rather than waiting: on 2026-10-02 the
+/// checks, then inside [`self_test`], parked the boot thread on a timer that
+/// could not fire, and the boot sat halted until its 2400 s limit (rq39).
+///
+/// # Errors
+///
+/// `InternalError` naming the first check that failed, or that interrupts
+/// were off.
+pub fn self_test_timeouts() -> KernelResult<()> {
+    crate::serial_println!("[unix_socket] Running timeout self-test...");
+    if !crate::cpu::interrupts_enabled() {
+        crate::serial_println!(
+            "[unix_socket]   FAIL: run with interrupts off, where no timeout can fire"
+        );
+        return Err(KernelError::InternalError);
+    }
+    let mut opened: Vec<UnixHandle> = Vec::new();
+    let result = timeout_checks(&mut opened);
+    for h in opened {
+        close(h);
+    }
+    if let Err(why) = result {
+        crate::serial_println!("[unix_socket]   FAIL: {}", why);
+        return Err(KernelError::InternalError);
+    }
+    crate::serial_println!("[unix_socket] Timeout self-test PASSED");
+    Ok(())
 }
 
 /// `SO_RCVTIMEO` / `SO_SNDTIMEO`: read back as set, and only the direction

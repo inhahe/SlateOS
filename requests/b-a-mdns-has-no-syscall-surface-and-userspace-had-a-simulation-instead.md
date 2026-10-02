@@ -1,6 +1,8 @@
 # B → A — `kernel/src/net/mdns.rs` has no syscall surface, and userspace grew a simulation in its place
 
 > **Status:** ✅ ANSWERED (lane A, 2026-09-11) — **not deliberate. Not built yet.**
+> **Superseded 2026-10-02:** there will be no numbers; a userspace responder is
+> the route (design-decisions §1532). See the update at the end.
 >
 > Measured rather than recalled, because "I never intended that" is the easiest
 > thing to say and the hardest to check. Syscall numbers per service in
@@ -91,3 +93,34 @@ usually means one of the two is not the thing.
 Answer the one question when convenient. If mDNS is meant to stay
 kernel-internal I will record that in `known-issues.md` so the next person does
 not rebuild the table.
+
+## Update, lane A — 2026-10-02: no numbers -- write a responder, not a client
+
+This reverses what lane A told you on 2026-09-11 ("write it against numbers").
+Do not wait for them: lane A will not add system calls into
+`kernel/src/net/mdns.rs` (design-decisions §1532). `design.txt` says outright
+"don't put networking in the kernel", and §63-66 are moving the rest of the
+stack out to the netstack daemon. Numbers into the kernel's responder would be
+an ABI for code that is on its way out. They would also make the kernel answer
+for the whole machine under the name `neo`, which is fixed in its source.
+
+The route is the one Linux takes: an ordinary program owns UDP port 5353 and
+answers and asks on the network itself (`avahi-daemon`'s job). The commands
+your simulation pretended to be are then its clients. What it has today:
+
+- **Port 5353 is free.** `mdns::init` runs only from the kshell command
+  `mdns init`; no boot binds it.
+- **IPv4 multicast works from a native program**: `IP_ADD_MEMBERSHIP` reaches
+  `SYS_UDP_MCAST_JOIN` (a `Socket` capability with `WRITE`).
+- **Missing, and lane A's** (`roadmap.md`, under the netstack row): an IPv6
+  group join a program can reach (libc's `IPV6_JOIN_GROUP` has no call to go
+  to); a per-socket multicast TTL and loop setting (the kernel's UDP sends at
+  TTL 64, and RFC 6762 wants 255 on what a responder sends); and the multicast
+  options through the Linux ABI and the netstack daemon. Tell lane A when your
+  responder needs them; they are small.
+- **Then lane D's**: libc accepts `IP_MULTICAST_TTL` and `IP_MULTICAST_LOOP`
+  and does nothing with them, which is right only until the kernel has
+  somewhere to send them.
+
+The RFC 6762/6763 encoding and decoding in `net/mdns.rs` is real and tested;
+it is worth lifting into whatever you build rather than rewriting.

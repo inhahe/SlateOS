@@ -666,6 +666,23 @@ fn marked(handle: u64, ro_volume: bool) -> u64 {
 /// Sharing the tail is what keeps the two from drifting, which is the same
 /// failure mode lane B found between the kernel's `openat2` and libc's.
 fn open_resolved(norm: PathBuf, flags: OpenFlags, create_mode: u16) -> KernelResult<u64> {
+    open_resolved_within(norm, flags, create_mode, CREATE_RACE_RETRIES)
+}
+
+/// How many times an `O_CREAT` open whose create found the name taken -- made
+/// by another between its lookup and its create -- goes back to open what was
+/// made, before it gives up with `WouldBlock` (`EAGAIN`). One is what a real
+/// race needs; the rest are for a name made and removed repeatedly.
+const CREATE_RACE_RETRIES: u32 = 4;
+
+/// [`open_resolved`], with `create_races_left` more passes allowed after a
+/// create that found the name taken.
+fn open_resolved_within(
+    norm: PathBuf,
+    flags: OpenFlags,
+    create_mode: u16,
+    create_races_left: u32,
+) -> KernelResult<u64> {
     // Check capability tags and POSIX ACLs — the process must be a member of
     // all groups required for this path (or any ancestor with tags), and the
     // path's ACL, if it has one, must grant the access this open asks for.
@@ -785,58 +802,31 @@ fn open_resolved(norm: PathBuf, flags: OpenFlags, create_mode: u16) -> KernelRes
                 return Err(KernelError::InvalidArgument);
             }
 
-            // Create an empty file.  write_file already emits IN_CREATE; the
-            // IN_OPEN below follows it, matching Linux's O_CREAT open order.
-            crate::fs::Vfs::write_file_resolved(&norm, &[])?;
-
-            // Stamp the caller-supplied (umask-masked) permission bits.  The
-            // underlying write_file stamps a 0o644 default; overwrite it with
-            // the requested mode so O_CREAT honours its `mode` argument.
-            //
-            // Twelve bits, not nine.  This used to mask to `0o777` on the
-            // grounds that "setuid/setgid/sticky on a brand-new file are not
-            // yet plumbed through the create path" -- but they are: the VFS
-            // stores twelve (`ext4`'s `set_permissions_ino` writes
-            // `permissions & 0o7777`, `memfs` stores the `u16` whole) and
-            // reports twelve back through `metadata`, so the mask was the
-            // only thing dropping them.  Silently discarding a permission
-            // bit a caller explicitly asked for is the failure lane B and
-            // lane A agreed to rule out when settling `SYS_FS_OPENAT2`'s
-            // width; see design-decisions.md §639.
-            //
-            // Storing a setuid bit that `exec` does not yet honour is safe
-            // in this direction only: an unenforced bit grants no privilege,
-            // so the discrepancy is "less privilege than the metadata
-            // claims", which fails closed.  Enforcing a bit we did not store
-            // would not be.
-            let perm = create_mode & 0o7777;
-            if perm != DEFAULT_CREATE_MODE {
-                // `_resolved`: `norm` is resolved, and `set_permissions`
-                // would apply a jailed caller's jail to it a second time.
-                match crate::fs::Vfs::set_permissions_resolved(&norm, perm) {
-                    Ok(()) => {}
-                    // A filesystem with no permission model must not make
-                    // the create FAIL. FAT stores no mode bits and answers
-                    // `NotSupported`; propagating that reported failure for
-                    // a file that had already been created and was left
-                    // behind -- the worst of both answers, and indefensible
-                    // whichever way you think the mode should be handled.
-                    // Linux's vfat behaves as this arm does: the mode
-                    // argument is ignored and the mount's umask governs.
-                    //
-                    // `NotSupported` ONLY. On a filesystem that can store a
-                    // mode, failing to stamp one is a real failure, and
-                    // 639's agreement not to silently discard a permission
-                    // bit the caller asked for applies in full.
-                    //
-                    // Invisible to the boot test, which is why it survived:
-                    // `boot-test.sh` never attaches `disk.img`, so `fat::init`
-                    // fails, the root stays `memfs` -- which stores the u16
-                    // whole -- and this arm is unreachable there. It shows up
-                    // the moment anything boots with a real FAT root.
-                    Err(KernelError::NotSupported) => {}
-                    Err(e) => return Err(e),
+            // Create an empty file -- with its mode, `create_mode` less the
+            // caller's umask or as the directory's default ACL gives it, its
+            // owner and its ACL, under one hold of the filesystem's lock
+            // (`Vfs::create_file_resolved`). Twelve bits, not nine: the VFS
+            // stores the setuid, setgid and sticky bits a caller asks for
+            // (design-decisions.md §639; `vfs::stamp_new_mode` has the
+            // history). The create emits IN_CREATE; the IN_OPEN below follows
+            // it, matching Linux's O_CREAT open order.
+            match crate::fs::Vfs::create_file_resolved(&norm, create_mode & 0o7777) {
+                Ok(()) => {}
+                // Made by someone else between the lookup above and this
+                // create: open what they made, as Linux's O_CREAT would have
+                // (it holds the directory's lock across the lookup and the
+                // create, so it never meets this). O_EXCL is refused by the
+                // arm below, `AlreadyExists` being its answer anyway.
+                Err(KernelError::AlreadyExists) if !flags.contains(OpenFlags::EXCL) => {
+                    return match create_races_left.checked_sub(1) {
+                        Some(left) => open_resolved_within(norm, flags, create_mode, left),
+                        // A name made and removed again on every pass: not
+                        // chased further, so the recursion an adversary paces
+                        // stays bounded. Try again, which is what EAGAIN says.
+                        None => Err(KernelError::WouldBlock),
+                    };
                 }
+                Err(e) => return Err(e),
             }
 
             let handle = allocate_handle(norm.clone(), 0, 0, flags)?;

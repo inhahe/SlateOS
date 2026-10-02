@@ -8994,6 +8994,29 @@ if [ "$NO_ROOTFS" -eq 0 ] && [ -f "$ROOTFS_IMG" ]; then
     echo "=== Attaching Path-Z glibc rootfs: $ROOTFS_IMG (vdb) ==="
 fi
 
+# The virtio console's self-test port (`virtio::console::self_test`,
+# design-decisions 1534). Behind it, a UDP chardev that sends to its own
+# receiving address: what the guest writes to the port comes straight back in
+# on it, so the guest checks both directions itself, and nothing on this side
+# has to feed it or read it. (Not a file: QEMU on Windows takes no input file
+# for a file chardev, and one that reaches the end of its input closes the
+# port's host end.) The port number is one the OS hands out as free, so it is
+# outside the ranges Windows reserves; between this probe and QEMU binding it,
+# another process could take it, and QEMU would then refuse to start, loudly.
+#
+# The device costs four of the 16 queues the virtio descriptor pool holds for
+# every device together (`ada::MAX_QUEUES`): two for its control channel and
+# two for the port. With the two disks, the NIC, the GPU and the sound card,
+# this boot uses 14.
+VCON_PORT="$(python -c 'import socket; s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM); s.bind(("127.0.0.1", 0)); print(s.getsockname()[1]); s.close()')"
+# SC2054: the commas are QEMU's property separators within one argument.
+# shellcheck disable=SC2054
+VCON_ARGS=(
+    -device virtio-serial-pci,max_ports=2
+    -chardev "udp,id=vcon0,host=127.0.0.1,port=$VCON_PORT,localaddr=127.0.0.1,localport=$VCON_PORT"
+    -device virtserialport,chardev=vcon0,name=org.slateos.selftest.0
+)
+
 # CPU model.  QEMU's default (`qemu64`) advertises no SMEP, SMAP or UMIP, so
 # without this the kernel's supervisor-mode protections are silently inert under
 # test: `smep_smap::init()` logs "not supported by CPU", never touches CR4, and
@@ -9800,6 +9823,7 @@ QEMU_START_EPOCH=$(date +%s)
     -device virtio-blk-pci,drive=swap-disk \
     -drive "id=swap-disk,if=none,format=raw,file=$SWAP_IMG_WIN" \
     "${ROOTFS_ARGS[@]}" \
+    "${VCON_ARGS[@]}" \
     "${WATCHDOG_ARGS[@]}" \
     "${MONITOR_ARGS[@]}" \
     -device "$GPU_DEVICE" \
@@ -9996,7 +10020,34 @@ stall_wedge_message() {
 scan_own_output_throttled() {
     [ $((ELAPSED - OWN_LAST_SCAN)) -ge "$OWN_SCAN_EVERY" ] || return 0
     OWN_LAST_SCAN=$ELAPSED
+    OWN_SCAN_OWED=0
     scan_own_output "$1"
+}
+
+# note_serial_growth FILE -- the wait loop's record of the serial log, each
+# pass: when it last grew at all (STALL_*), and a throttled scan for the
+# boot's own output whenever one is owed -- after any growth, until a scan
+# has read it, whether or not the log grows again.
+#
+# "Whether or not" is the point. The scan used to run only on a pass that saw
+# growth, so a log that grew inside the throttle's interval and then went
+# quiet kept its last lines unread until the timeout path's final scan, which
+# stamped them with that moment: rq39 (2026-10-02) sat 34 minutes on a hung
+# self-test and was reported as "own output grew 0s ago", a budget too small.
+# With the scan owed, the record is never more than OWN_SCAN_EVERY seconds
+# behind the log, as the throttle's own comment promises.
+note_serial_growth() {
+    local cur_size
+    cur_size=$(wc -c < "$1" 2>/dev/null || echo 0)
+    if [ "$cur_size" -ne "$STALL_LAST_SIZE" ]; then
+        STALL_LAST_SIZE=$cur_size
+        STALL_LAST_GROWTH=$ELAPSED
+        OWN_SCAN_OWED=1
+    fi
+    if [ "$OWN_SCAN_OWED" -eq 1 ]; then
+        scan_own_output_throttled "$1"
+    fi
+    return 0
 }
 
 # own_output_stalled FILE -- true when --stall-secs is set and the boot has
@@ -10033,6 +10084,7 @@ OWN_LAST_GROWTH=0
 OWN_LAST_LINE=""
 OWN_LAST_SCAN=-100
 OWN_SCAN_EVERY=10
+OWN_SCAN_OWED=0
 while kill -0 "$QEMU_PID" 2>/dev/null && [ "$ELAPSED" -lt "$TIMEOUT" ]; do
     sleep 1
     ELAPSED=$(( $(date +%s) - WAIT_START_EPOCH ))
@@ -10085,12 +10137,7 @@ while kill -0 "$QEMU_PID" 2>/dev/null && [ "$ELAPSED" -lt "$TIMEOUT" ]; do
     # slow host that would eventually reach the marker): capture the RIP and
     # exit 2.
     if [ -f "$SERIAL_FILE" ]; then
-        cur_size=$(wc -c < "$SERIAL_FILE" 2>/dev/null || echo 0)
-        if [ "$cur_size" -ne "$STALL_LAST_SIZE" ]; then
-            STALL_LAST_SIZE=$cur_size
-            STALL_LAST_GROWTH=$ELAPSED
-            scan_own_output_throttled "$SERIAL_FILE"
-        fi
+        note_serial_growth "$SERIAL_FILE"
         if own_output_stalled "$SERIAL_FILE"; then
             stall_wedge_message
             if [ "${#MONITOR_ARGS[@]}" -gt 0 ] && kill -0 "$QEMU_PID" 2>/dev/null; then

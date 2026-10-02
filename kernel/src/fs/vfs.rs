@@ -5425,6 +5425,7 @@ impl Vfs {
         // than either mask, which is the argument that decided `link`'s error
         // code the same week.
         let perm = mode & 0o1777;
+        let creator = creator_ids();
         {
             let (fs, fs_id, _opts, dir_rel) = resolve_mount(&dir.path)?;
             let mut guard = fs.lock();
@@ -5460,6 +5461,11 @@ impl Vfs {
                     Err(e) => return Err(e),
                 }
             }
+            // Its creator's, after the mode as `mkdir_mode` orders them: a
+            // set-group-ID parent's inheritance adds a bit the stamp above
+            // would otherwise overwrite. Root's, whoever made it, until
+            // 2026-10-02 (`A-PINNED-CREATES-ARE-OWNED-BY-ROOT`).
+            init_new_owner(&mut **guard, &child_rel, creator, true)?;
         }
 
         super::quota::charge_inode(0, 0);
@@ -5519,6 +5525,7 @@ impl Vfs {
         check_path_access(&child, PathAccess::Write)?;
         super::intercept::pre_check(super::intercept::FsOp::Symlink, &child, Some(target))?;
         enforce_quota_create(&child)?;
+        let creator = creator_ids();
 
         {
             let (fs, fs_id, _opts, dir_rel) = resolve_mount(&dir.path)?;
@@ -5528,6 +5535,10 @@ impl Vfs {
             let child_rel = dir_rel.join(name);
             guard_create(&mut **guard, &child_rel)?;
             guard.symlink(&child_rel, target)?;
+            // Its creator's, as the path-based `symlink` makes one. It was
+            // root's, whoever made it, until 2026-10-02
+            // (`A-PINNED-CREATES-ARE-OWNED-BY-ROOT`).
+            init_new_owner(&mut **guard, &child_rel, creator, false)?;
         }
 
         super::quota::charge_inode(0, 0);
@@ -12385,7 +12396,8 @@ pub fn socket_node_self_test() -> KernelResult<()> {
 }
 
 /// Who owns a new node (`init_new_owner`): a file, directory, symlink and
-/// socket node made by a uid-1000 process are its; a file it overwrites
+/// socket node made by a uid-1000 process are its, and so are a directory
+/// and a symlink it makes through a held directory; a file it overwrites
 /// keeps its owner; in a set-group-ID directory the group is the
 /// directory's and a new directory is set-group-ID too; kernel context
 /// makes root's.
@@ -12430,6 +12442,13 @@ pub fn owner_self_test() -> KernelResult<()> {
             Vfs::write_file("/_owner_selftest/rootfile", b"overwritten")?;
             Vfs::write_file("/_owner_selftest/shared/g", b"y")?;
             Vfs::mkdir_mode("/_owner_selftest/shared/sub", 0o755)?;
+            // Through held directories, as `mkdirat` and `symlinkat` reach
+            // the kernel natively.
+            let top = Vfs::pin_dir("/_owner_selftest")?;
+            Vfs::mkdir_at_pinned(&top, b"pd", 0o755)?;
+            Vfs::symlink_at_pinned(&top, b"pl", "f")?;
+            let shared = Vfs::pin_dir("/_owner_selftest/shared")?;
+            Vfs::mkdir_at_pinned(&shared, b"psub", 0o755)?;
             Ok(())
         });
         made.map_err(|_| "a creation as the uid-1000 process failed")?;
@@ -12438,6 +12457,8 @@ pub fn owner_self_test() -> KernelResult<()> {
             "/_owner_selftest/d",
             "/_owner_selftest/l",
             "/_owner_selftest/s",
+            "/_owner_selftest/pd",
+            "/_owner_selftest/pl",
         ] {
             if owner(p).map(|o| (o.0, o.1)) != Ok((1000, 1000)) {
                 serial_println!("[vfs]   {} is {:?}", p, owner(p));
@@ -12450,13 +12471,18 @@ pub fn owner_self_test() -> KernelResult<()> {
         if owner("/_owner_selftest/shared/g").map(|o| (o.0, o.1)) != Ok((1000, 50)) {
             return Err("a file in a set-group-ID directory did not take the directory's group");
         }
-        match owner("/_owner_selftest/shared/sub") {
-            Ok((1000, 50, mode)) if mode & S_ISGID != 0 && mode & 0o777 == 0o755 => {}
-            other => {
-                serial_println!("[vfs]   shared/sub is {:?}", other);
-                return Err(
-                    "a directory in a set-group-ID directory is not set-group-ID with its group",
-                );
+        for sub in [
+            "/_owner_selftest/shared/sub",
+            "/_owner_selftest/shared/psub",
+        ] {
+            match owner(sub) {
+                Ok((1000, 50, mode)) if mode & S_ISGID != 0 && mode & 0o777 == 0o755 => {}
+                other => {
+                    serial_println!("[vfs]   {} is {:?}", sub, other);
+                    return Err(
+                        "a directory in a set-group-ID directory is not set-group-ID with its group",
+                    );
+                }
             }
         }
         Ok(())
@@ -12468,8 +12494,8 @@ pub fn owner_self_test() -> KernelResult<()> {
         return Err(KernelError::InternalError);
     }
     serial_println!(
-        "[vfs]   new nodes are their creator's; an overwrite keeps the owner; a set-group-ID \
-         directory gives its group: OK"
+        "[vfs]   new nodes are their creator's, by path and through a held directory; an \
+         overwrite keeps the owner; a set-group-ID directory gives its group: OK"
     );
     Ok(())
 }

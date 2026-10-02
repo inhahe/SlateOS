@@ -181785,6 +181785,26 @@ consults. Clearing it likewise changes nothing. The native
 append-only file, `EPERM`) before recording the flag in the entry, so a
 refusal leaves both as they were; a directory keeps answering 0, as on Linux.
 
+### A-PINNED-CREATES-ARE-OWNED-BY-ROOT -- 2026-10-02 -- FIXED (lane A)
+
+**Status:** FIXED on lane-a-wip 2026-10-02, awaiting a boot -- found while
+putting the attribute rules into the pinned-directory calls. Both now call
+`init_new_owner` under the creation's guard; `vfs::owner_self_test` makes a
+directory and a symlink through a held directory as a uid-1000 process, and
+a directory through a held set-group-ID one.
+
+**In short:** a directory or symlink made through a held directory --
+`SYS_FS_MKDIRAT_PINNED`, `SYS_FS_SYMLINKAT_PINNED`, which lane B's `cp -r`
+and lane D's `mkdirat` use -- belongs to root, whoever made it: the path-based
+`mkdir` and `symlink` give a new node its creator's owner and group
+(`init_new_owner`, since 2026-10-02), and these two were missed.
+
+**Where:** `kernel/src/fs/vfs.rs`, `Vfs::mkdir_at_pinned` and
+`Vfs::symlink_at_pinned`.
+
+**Proper fix:** call `init_new_owner` under the same guard as the creation,
+as `mkdir_mode` and `symlink` do, with the set-group-ID directory rule.
+
 ## Lane B: new entries
 
 Lane B (userland) appends new entries at the end of this section, above the

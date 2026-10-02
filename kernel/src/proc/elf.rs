@@ -2256,6 +2256,20 @@ pub fn build_linux_slate_channel_test_elf() -> alloc::vec::Vec<u8> {
 ///   sendto(d2, "ping", 4, 0, path, 16)        ; 4, else 0xE4
 ///   recvfrom(d1, buf, 64, 0, &from, &110)     ; 4, else 0xE5
 ///   fromlen == 0 (an unbound sender: none)    ; else 0xE6
+///   ; the sender's credentials, as syslog asks for them
+///   setsockopt(d1, SOL_SOCKET, SO_PASSCRED, &1, 4)  ; 0, else 0xE9
+///   sendto(d2, "ping", 4, 0, path, 16)        ; 4, else 0xEA
+///   recvmsg(d1, {iov: buf/64, control: 32 bytes}, 0)  ; 4, "ping", else 0xEB
+///   control = one whole message (cmsg_len 28) at SOL_SOCKET /
+///     SCM_CREDENTIALS, msg_controllen 32, msg_flags 0  ; else 0xEC
+///   its pid == getpid()                       ; else 0xED
+///   ; credentials the sender states, as logger --id does
+///   sendmsg(d2, {path, "ping", SCM_CREDENTIALS{getpid(), 4242, 4343}})
+///                                             ; 4 (root may claim any id), else 0xEE
+///   recvmsg(d1, ...)                          ; 4, and the stated pid, uid
+///                                             ; and gid, else 0xEF
+///   the same with a pid naming no process     ; -ESRCH, else 0xF0
+///   the same with cmsg_len 24                 ; -EINVAL, else 0xF1
 ///   unlink("/tmp/slt.sock")                   ; 0, else 0xE7
 ///   sendto(d2, "ping", 4, 0, path, 16)        ; -ENOENT, else 0xE8
 ///   exit(0x5D)
@@ -2265,8 +2279,9 @@ pub fn build_linux_slate_channel_test_elf() -> alloc::vec::Vec<u8> {
 /// second `bind` finds in use and `unlink` takes away, after which the name
 /// leads nowhere; datagrams kept whole, with an unnamed sender reported as
 /// such; a listener's backlog, connect and accept; bytes both ways over the
-/// accepted stream; the kernel's record of the peer; end of file when the
-/// client closes. Tagged `ELFOSABI_GNU` for the SysV stack + Linux ABI.
+/// accepted stream; the kernel's record of the peer, both as `SO_PEERCRED`
+/// and as an `SCM_CREDENTIALS` control message; end of file when the client
+/// closes. Tagged `ELFOSABI_GNU` for the SysV stack + Linux ABI.
 #[must_use]
 #[allow(
     clippy::indexing_slicing,
@@ -2294,6 +2309,9 @@ pub fn build_linux_unix_socket_test_elf() -> alloc::vec::Vec<u8> {
     const BIND: u32 = 49;
     const LISTEN: u32 = 50;
     const GETSOCKOPT: u32 = 55;
+    const SETSOCKOPT: u32 = 54;
+    const SENDMSG: u32 = 46;
+    const RECVMSG: u32 = 47;
     const EXIT: u32 = 60;
     const UNLINK: u32 = 87;
     // Stack layout (all [rsp + offset]).
@@ -2312,7 +2330,14 @@ pub fn build_linux_unix_socket_test_elf() -> alloc::vec::Vec<u8> {
     const FROM: u32 = 0xD0; // 110 bytes
     const UCRED: u32 = 0x150; // 12 bytes
     const PATH_ADDR: u32 = 0x170; // "/tmp/slt.sock", 16 bytes
-    const FRAME: u32 = 0x200;
+    const IOV: u32 = 0x1D0; // struct iovec: base, len
+    const SEND_IOV: u32 = 0x1E0; // the iovec sendmsg sends from
+    const CONTROL: u32 = 0x200; // 32 bytes of control messages
+    const MSGHDR: u32 = 0x240; // struct msghdr, 56 bytes
+    const ONE: u32 = 0x280; // the int 1
+    const SEND_MSGHDR: u32 = 0x2C0; // the msghdr sendmsg sends, 56 bytes
+    const SEND_CONTROL: u32 = 0x300; // its control messages, 32 bytes
+    const FRAME: u32 = 0x340;
     /// "ping", little-endian.
     const PING_WORD: u32 = 0x676E_6970;
 
@@ -2563,6 +2588,150 @@ pub fn build_linux_unix_socket_test_elf() -> alloc::vec::Vec<u8> {
     jcc_fail(&mut code, &mut fail_jumps, JNZ, 0xE5);
     cmp_mem_imm(&mut code, LEN, 0);
     jcc_fail(&mut code, &mut fail_jumps, JNZ, 0xE6);
+
+    // --- the sender's credentials, as syslog asks for them ---
+    // lea rax, [rsp + d32]
+    let lea_rax = |c: &mut alloc::vec::Vec<u8>, d: u32| {
+        c.extend_from_slice(&[0x48, 0x8D, 0x84, 0x24]);
+        c.extend_from_slice(&le(d));
+    };
+    // mov [rsp + d32], rax
+    let store_rax = |c: &mut alloc::vec::Vec<u8>, d: u32| {
+        c.extend_from_slice(&[0x48, 0x89, 0x84, 0x24]);
+        c.extend_from_slice(&le(d));
+    };
+    // mov qword [rsp + d32], imm32 (sign-extended)
+    let store_qword = |c: &mut alloc::vec::Vec<u8>, d: u32, v: u32| {
+        c.extend_from_slice(&[0x48, 0xC7, 0x84, 0x24]);
+        c.extend_from_slice(&le(d));
+        c.extend_from_slice(&le(v));
+    };
+    let mov_r8d_imm = |c: &mut alloc::vec::Vec<u8>, v: u32| {
+        c.extend_from_slice(&[0x41, 0xB8]);
+        c.extend_from_slice(&le(v));
+    };
+    // setsockopt(d1, SOL_SOCKET, SO_PASSCRED, &1, 4)
+    store_imm(&mut code, ONE, 1);
+    mov_edi_mem(&mut code, FD_D1);
+    mov_esi_imm(&mut code, 1);
+    mov_edx_imm(&mut code, 16);
+    lea_r10(&mut code, ONE);
+    mov_r8d_imm(&mut code, 4);
+    syscall(&mut code, SETSOCKOPT);
+    test_rax(&mut code);
+    jcc_fail(&mut code, &mut fail_jumps, JNZ, 0xE9);
+    mov_edi_mem(&mut code, FD_D2);
+    lea_rsi(&mut code, PING);
+    mov_edx_imm(&mut code, 4);
+    xor_r10d(&mut code);
+    lea_r8(&mut code, PATH_ADDR);
+    mov_r9d_imm(&mut code, 16);
+    syscall(&mut code, SENDTO);
+    cmp_rax_i8(&mut code, 4);
+    jcc_fail(&mut code, &mut fail_jumps, JNZ, 0xEA);
+    // recvmsg(d1, MSGHDR, 0) into rax. The iovec is the 64-byte buffer,
+    // emptied so the datagram has to land in it; the msghdr has no name, one
+    // iovec, and 32 bytes of control, emptied so nothing left over can pass
+    // for the kernel's answer.
+    let recvmsg_d1 = |c: &mut alloc::vec::Vec<u8>| {
+        store_imm(c, BUF, 0);
+        lea_rax(c, BUF);
+        store_rax(c, IOV);
+        store_qword(c, IOV + 8, 64);
+        for off in [0u32, 8, 16, 24] {
+            store_qword(c, CONTROL + off, 0);
+        }
+        store_qword(c, MSGHDR, 0); // msg_name
+        store_qword(c, MSGHDR + 8, 0); // msg_namelen
+        lea_rax(c, IOV);
+        store_rax(c, MSGHDR + 16); // msg_iov
+        store_qword(c, MSGHDR + 24, 1); // msg_iovlen
+        lea_rax(c, CONTROL);
+        store_rax(c, MSGHDR + 32); // msg_control
+        store_qword(c, MSGHDR + 40, 32); // msg_controllen
+        store_qword(c, MSGHDR + 48, 0); // msg_flags
+        mov_edi_mem(c, FD_D1);
+        lea_rsi(c, MSGHDR);
+        mov_edx_imm(c, 0);
+        syscall(c, RECVMSG);
+    };
+    recvmsg_d1(&mut code);
+    cmp_rax_i8(&mut code, 4);
+    jcc_fail(&mut code, &mut fail_jumps, JNZ, 0xEB);
+    cmp_mem_imm(&mut code, BUF, PING_WORD);
+    jcc_fail(&mut code, &mut fail_jumps, JNZ, 0xEB);
+    // One whole SCM_CREDENTIALS message: cmsg_len 28, SOL_SOCKET,
+    // SCM_CREDENTIALS, and msg_controllen 32 (its space) on the way back.
+    cmp_mem_imm(&mut code, CONTROL, 28);
+    jcc_fail(&mut code, &mut fail_jumps, JNZ, 0xEC);
+    cmp_mem_imm(&mut code, CONTROL + 8, 1);
+    jcc_fail(&mut code, &mut fail_jumps, JNZ, 0xEC);
+    cmp_mem_imm(&mut code, CONTROL + 12, 2);
+    jcc_fail(&mut code, &mut fail_jumps, JNZ, 0xEC);
+    cmp_mem_imm(&mut code, MSGHDR + 40, 32);
+    jcc_fail(&mut code, &mut fail_jumps, JNZ, 0xEC);
+    cmp_mem_imm(&mut code, MSGHDR + 48, 0);
+    jcc_fail(&mut code, &mut fail_jumps, JNZ, 0xEC);
+    syscall(&mut code, GETPID);
+    cmp_eax_mem(&mut code, CONTROL + 16);
+    jcc_fail(&mut code, &mut fail_jumps, JNZ, 0xED);
+
+    // --- credentials the sender states (SCM_CREDENTIALS on sendmsg) ---
+    // The msghdr: to the path, one iovec of "ping", 32 bytes of control
+    // holding one SCM_CREDENTIALS message -- this pid, and the uid and gid
+    // 4242 and 4343, which only root may claim (the test runs as root).
+    lea_rax(&mut code, PATH_ADDR);
+    store_rax(&mut code, SEND_MSGHDR); // msg_name
+    store_qword(&mut code, SEND_MSGHDR + 8, 16); // msg_namelen
+    lea_rax(&mut code, PING);
+    store_rax(&mut code, SEND_IOV);
+    store_qword(&mut code, SEND_IOV + 8, 4);
+    lea_rax(&mut code, SEND_IOV);
+    store_rax(&mut code, SEND_MSGHDR + 16); // msg_iov
+    store_qword(&mut code, SEND_MSGHDR + 24, 1); // msg_iovlen
+    lea_rax(&mut code, SEND_CONTROL);
+    store_rax(&mut code, SEND_MSGHDR + 32); // msg_control
+    store_qword(&mut code, SEND_MSGHDR + 40, 32); // msg_controllen
+    store_qword(&mut code, SEND_MSGHDR + 48, 0); // msg_flags
+    store_qword(&mut code, SEND_CONTROL, 28); // cmsg_len
+    store_imm(&mut code, SEND_CONTROL + 8, 1); // SOL_SOCKET
+    store_imm(&mut code, SEND_CONTROL + 12, 2); // SCM_CREDENTIALS
+    syscall(&mut code, GETPID);
+    store_eax(&mut code, SEND_CONTROL + 16);
+    store_imm(&mut code, SEND_CONTROL + 20, 4242);
+    store_imm(&mut code, SEND_CONTROL + 24, 4343);
+    store_imm(&mut code, SEND_CONTROL + 28, 0);
+    // sendmsg(d2, SEND_MSGHDR, 0) into rax.
+    let sendmsg_d2 = |c: &mut alloc::vec::Vec<u8>| {
+        mov_edi_mem(c, FD_D2);
+        lea_rsi(c, SEND_MSGHDR);
+        mov_edx_imm(c, 0);
+        syscall(c, SENDMSG);
+    };
+    sendmsg_d2(&mut code);
+    cmp_rax_i8(&mut code, 4);
+    jcc_fail(&mut code, &mut fail_jumps, JNZ, 0xEE);
+    recvmsg_d1(&mut code);
+    cmp_rax_i8(&mut code, 4);
+    jcc_fail(&mut code, &mut fail_jumps, JNZ, 0xEF);
+    syscall(&mut code, GETPID);
+    cmp_eax_mem(&mut code, CONTROL + 16);
+    jcc_fail(&mut code, &mut fail_jumps, JNZ, 0xEF);
+    cmp_mem_imm(&mut code, CONTROL + 20, 4242);
+    jcc_fail(&mut code, &mut fail_jumps, JNZ, 0xEF);
+    cmp_mem_imm(&mut code, CONTROL + 24, 4343);
+    jcc_fail(&mut code, &mut fail_jumps, JNZ, 0xEF);
+    // A pid that names no process: ESRCH, and nothing sent.
+    store_imm(&mut code, SEND_CONTROL + 16, 0x7FFF_FFF0);
+    sendmsg_d2(&mut code);
+    cmp_rax_i8(&mut code, -3); // ESRCH
+    jcc_fail(&mut code, &mut fail_jumps, JNZ, 0xF0);
+    // A credentials message of the wrong length: EINVAL, and nothing sent.
+    store_qword(&mut code, SEND_CONTROL, 24);
+    sendmsg_d2(&mut code);
+    cmp_rax_i8(&mut code, -22); // EINVAL
+    jcc_fail(&mut code, &mut fail_jumps, JNZ, 0xF1);
+
     // unlink(path): the sun_path inside the address, NUL-terminated
     lea_rdi(&mut code, PATH_ADDR + 2);
     syscall(&mut code, UNLINK);
@@ -2584,7 +2753,7 @@ pub fn build_linux_unix_socket_test_elf() -> alloc::vec::Vec<u8> {
 
     // One failure exit per sentinel.
     let mut fail_at: alloc::vec::Vec<(u8, usize)> = alloc::vec::Vec::new();
-    for sentinel in 0xD1u8..=0xE8 {
+    for sentinel in 0xD1u8..=0xF1 {
         fail_at.push((sentinel, code.len()));
         mov_edi_imm(&mut code, u32::from(sentinel));
         syscall(&mut code, EXIT);

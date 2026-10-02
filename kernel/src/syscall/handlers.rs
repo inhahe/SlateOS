@@ -8642,7 +8642,7 @@ pub fn sys_channel_peer_has_key(
 }
 
 // ---------------------------------------------------------------------------
-// Unix-domain sockets by name (SYS_UNIX_*, 1104-1116)
+// Unix-domain sockets by name (SYS_UNIX_*, 1104-1118)
 //
 // The native door to `ipc::unix_socket`; see the block in `number.rs` for the
 // ABI. Every call on a handle checks the caller holds it.
@@ -8974,6 +8974,43 @@ pub fn sys_unix_poll(args: &super::dispatch::SyscallArgs) -> super::dispatch::Sy
     use super::dispatch::SyscallResult;
     match unix_held(args.arg0) {
         Ok(h) => SyscallResult::ok(i64::from(crate::ipc::unix_socket::poll_status(h))),
+        Err(e) => SyscallResult::err(e),
+    }
+}
+
+/// `SYS_UNIX_SET_OPTION` (1117).
+pub fn sys_unix_set_option(args: &super::dispatch::SyscallArgs) -> super::dispatch::SyscallResult {
+    use super::dispatch::SyscallResult;
+    use super::number::UNIX_OPT_PASSCRED;
+    let done = unix_held(args.arg0).and_then(|h| match args.arg1 {
+        UNIX_OPT_PASSCRED => {
+            // Strictly 0 or 1, unlike Linux's "any nonzero": a value with
+            // more bits keeps them free for a later meaning.
+            let on = match args.arg2 {
+                0 => false,
+                1 => true,
+                _ => return Err(KernelError::InvalidArgument),
+            };
+            crate::ipc::unix_socket::set_passcred(h, on)
+        }
+        _ => Err(KernelError::NotSupported),
+    });
+    match done {
+        Ok(()) => SyscallResult::ok(0),
+        Err(e) => SyscallResult::err(e),
+    }
+}
+
+/// `SYS_UNIX_GET_OPTION` (1118).
+pub fn sys_unix_get_option(args: &super::dispatch::SyscallArgs) -> super::dispatch::SyscallResult {
+    use super::dispatch::SyscallResult;
+    use super::number::UNIX_OPT_PASSCRED;
+    let got = unix_held(args.arg0).and_then(|h| match args.arg1 {
+        UNIX_OPT_PASSCRED => Ok(i64::from(crate::ipc::unix_socket::passcred(h))),
+        _ => Err(KernelError::NotSupported),
+    });
+    match got {
+        Ok(v) => SyscallResult::ok(v),
         Err(e) => SyscallResult::err(e),
     }
 }

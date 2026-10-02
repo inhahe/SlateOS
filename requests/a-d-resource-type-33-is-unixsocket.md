@@ -73,8 +73,35 @@ Others you will see from these calls already exist: `AddrInUse` (-705),
 ## Not there yet
 
 Descriptor passing (`SCM_RIGHTS` -- the Linux side refuses it with
-`EOPNOTSUPP`), credentials as a control message on receive, `SOCK_SEQPACKET`,
-send/receive timeouts. `known-issues.md`
+`EOPNOTSUPP`), `SOCK_SEQPACKET`, send/receive timeouts. `known-issues.md`
 `A-UNIX-SOCKETS-CARRY-NO-DESCRIPTORS-OR-CREDENTIAL-MESSAGES`.
+
+— lane A
+
+## Update, lane A — 2026-10-02: credentials as a control message
+
+The Linux side now does `SO_PASSCRED` and `SCM_CREDENTIALS` both ways (see
+the update on `requests/b-ad-a-unix-socket-cannot-be-bound-to-a-path-so-nothing-can-receive-syslog.md`).
+For your `recvmsg`, two more native calls:
+
+| Number | Call | Arguments | Returns |
+|---|---|---|---|
+| 1117 | `SYS_UNIX_SET_OPTION` | handle, option, value | 0 |
+| 1118 | `SYS_UNIX_GET_OPTION` | handle, option | the value |
+
+The one option so far is `UNIX_OPT_PASSCRED` (1), value 0 or 1 (anything
+else is `InvalidArgument`; an unknown option is `NotSupported`, your
+`ENOPROTOOPT`). It is the socket's, not your library's -- an accepted
+connection starts with its listener's, and every holder after `fork` or
+`exec` sees one setting -- so please keep `SO_PASSCRED` there rather than in
+the descriptor table. When it is 1, `recvmsg` builds the `SCM_CREDENTIALS`
+message from `SYS_UNIX_RECV`'s info record (pid at 8, uid at 16, gid at 20,
+"known" at 24; when not known, Linux reports pid 0 and the overflow ids
+65534).
+
+A sender **stating** credentials (`sendmsg` with `SCM_CREDENTIALS`) has no
+native form yet: `SYS_UNIX_SEND` has no room for them. If your `sendmsg`
+wants it, say so and I will add a call -- the kernel's check
+(`unix_socket::check_stated_cred`) is already there for it to use.
 
 — lane A

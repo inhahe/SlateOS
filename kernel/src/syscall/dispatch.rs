@@ -110,9 +110,9 @@ use super::number::{
     SYS_YIELD,
 };
 use super::number::{
-    SYS_UNIX_ACCEPT, SYS_UNIX_BIND, SYS_UNIX_CLOSE, SYS_UNIX_CONNECT, SYS_UNIX_LISTEN,
-    SYS_UNIX_NAME, SYS_UNIX_PAIR, SYS_UNIX_PEER_CRED, SYS_UNIX_POLL, SYS_UNIX_RECV, SYS_UNIX_SEND,
-    SYS_UNIX_SHUTDOWN, SYS_UNIX_SOCKET,
+    SYS_UNIX_ACCEPT, SYS_UNIX_BIND, SYS_UNIX_CLOSE, SYS_UNIX_CONNECT, SYS_UNIX_GET_OPTION,
+    SYS_UNIX_LISTEN, SYS_UNIX_NAME, SYS_UNIX_PAIR, SYS_UNIX_PEER_CRED, SYS_UNIX_POLL,
+    SYS_UNIX_RECV, SYS_UNIX_SEND, SYS_UNIX_SET_OPTION, SYS_UNIX_SHUTDOWN, SYS_UNIX_SOCKET,
 };
 use crate::drm::syscall as drm_handlers;
 
@@ -582,7 +582,7 @@ const fn build_v1_table() -> SyscallTable {
     handlers[SYS_PROCESS_GET_PHDR as usize] = Some(handlers::sys_process_get_phdr);
     handlers[SYS_CHANNEL_PEER_HAS_KEY as usize] = Some(handlers::sys_channel_peer_has_key);
 
-    // Unix-domain sockets by name (1104-1116): the native door to
+    // Unix-domain sockets by name (1104-1118): the native door to
     // `ipc::unix_socket`, which the Linux table reaches through AF_UNIX.
     handlers[SYS_UNIX_SOCKET as usize] = Some(handlers::sys_unix_socket);
     handlers[SYS_UNIX_PAIR as usize] = Some(handlers::sys_unix_pair);
@@ -597,6 +597,8 @@ const fn build_v1_table() -> SyscallTable {
     handlers[SYS_UNIX_SHUTDOWN as usize] = Some(handlers::sys_unix_shutdown);
     handlers[SYS_UNIX_CLOSE as usize] = Some(handlers::sys_unix_close);
     handlers[SYS_UNIX_POLL as usize] = Some(handlers::sys_unix_poll);
+    handlers[SYS_UNIX_SET_OPTION as usize] = Some(handlers::sys_unix_set_option);
+    handlers[SYS_UNIX_GET_OPTION as usize] = Some(handlers::sys_unix_get_option);
 
     // Thread management (510–519).
     handlers[SYS_THREAD_CREATE as usize] = Some(handlers::sys_thread_create);
@@ -2940,15 +2942,7 @@ fn test_dispatch_process_get_phdr() -> KernelResult<()> {
     }
 }
 
-/// `SYS_CHANNEL_PEER_HAS_KEY` (1103): a service connection's peer holds the
-/// service's key only with a `(Service, key_id(name), READ)` capability, and
-/// only while it still holds its end of the channel; a channel not made by
-/// connecting to a service is `NotFound`.
-///
-/// The client connects as a process (`thread::self_test_as_process`), so
-/// the kernel records it on its end as it would a real client; its end is
-/// registered with it as the native connect does.
-/// The native Unix-domain socket calls (`SYS_UNIX_*`, 1104-1116):
+/// The native Unix-domain socket calls (`SYS_UNIX_*`, 1104-1118):
 ///
 /// - a socket is handed out to the process that makes it, and another
 ///   process may not use it (`InvalidHandle`); an unknown kind is refused;
@@ -2956,9 +2950,12 @@ fn test_dispatch_process_get_phdr() -> KernelResult<()> {
 ///   (`AddrInUse`), a relative path (`InvalidArgument` -- the library
 ///   resolves those), send to the name, receive with the info record (whole
 ///   length, an unnamed sender), `WouldBlock` when empty;
-/// - a stream: listen, connect, accept (handed out), bytes across, the
-///   accepted socket's own name, no credentials for a kernel-context peer
-///   (`NoAddress`), end of file after the peer shuts its sending half;
+/// - the `UNIX_OPT_PASSCRED` option: off on a new socket, set and read back,
+///   a value other than 0 or 1 refused, an unknown option `NotSupported`;
+/// - a stream: listen, connect, accept (handed out, with its listener's
+///   `UNIX_OPT_PASSCRED`), bytes across, the accepted socket's own name, no
+///   credentials for a kernel-context peer (`NoAddress`), end of file after
+///   the peer shuts its sending half;
 /// - a pair; and close, after which the handle is no longer held.
 ///
 /// Sockets are made in the owner's name (so they are handed out) and used
@@ -2966,7 +2963,7 @@ fn test_dispatch_process_get_phdr() -> KernelResult<()> {
 /// kernel memory. The owner's teardown closes whatever is left.
 #[allow(clippy::too_many_lines)] // one linear script
 fn test_dispatch_unix_sockets() -> KernelResult<()> {
-    use super::number::{UNIX_NAME_ABSTRACT, UNIX_NONBLOCK, UNIX_RECV_INFO_LEN};
+    use super::number::{UNIX_NAME_ABSTRACT, UNIX_NONBLOCK, UNIX_OPT_PASSCRED, UNIX_RECV_INFO_LEN};
     use crate::proc::pcb;
     use crate::proc::thread::self_test_as_process;
 
@@ -3053,19 +3050,52 @@ fn test_dispatch_unix_sockets() -> KernelResult<()> {
             return Err("an empty socket did not answer WouldBlock");
         }
 
+        // --- options ---
+        let passcred = UNIX_OPT_PASSCRED;
+        if call(SYS_UNIX_GET_OPTION, a(srv, passcred, 0, 0, 0, 0)) != 0 {
+            return Err("a new socket asks for credentials");
+        }
+        if call(SYS_UNIX_SET_OPTION, a(srv, passcred, 1, 0, 0, 0)) != 0
+            || call(SYS_UNIX_GET_OPTION, a(srv, passcred, 0, 0, 0, 0)) != 1
+        {
+            return Err("UNIX_OPT_PASSCRED did not set, or did not read back");
+        }
+        if call(SYS_UNIX_SET_OPTION, a(srv, passcred, 2, 0, 0, 0))
+            != code(KernelError::InvalidArgument)
+        {
+            return Err("UNIX_OPT_PASSCRED took a value other than 0 or 1");
+        }
+        if call(SYS_UNIX_SET_OPTION, a(srv, passcred, 0, 0, 0, 0)) != 0
+            || call(SYS_UNIX_GET_OPTION, a(srv, passcred, 0, 0, 0, 0)) != 0
+        {
+            return Err("UNIX_OPT_PASSCRED did not turn off again");
+        }
+        if call(SYS_UNIX_SET_OPTION, a(srv, 0x7FFF, 1, 0, 0, 0)) != code(KernelError::NotSupported)
+            || call(SYS_UNIX_GET_OPTION, a(srv, 0x7FFF, 0, 0, 0, 0))
+                != code(KernelError::NotSupported)
+        {
+            return Err("an unknown option was not NotSupported");
+        }
+
         // --- a stream ---
         let st = b"slt-native-st";
         let lst = handle(as_owner(SYS_UNIX_SOCKET, a(1, 0, 0, 0, 0, 0)).value)?;
         let con = handle(as_owner(SYS_UNIX_SOCKET, a(1, 0, 0, 0, 0, 0)).value)?;
         if call(SYS_UNIX_BIND, a(lst, ptr(st), len(st), 0, abs, 0)) != 0
             || call(SYS_UNIX_LISTEN, a(lst, 2, 0, 0, 0, 0)) != 0
+            || call(SYS_UNIX_SET_OPTION, a(lst, passcred, 1, 0, 0, 0)) != 0
         {
-            return Err("bind and listen failed");
+            return Err("bind, listen and UNIX_OPT_PASSCRED failed");
         }
         if call(SYS_UNIX_CONNECT, a(con, ptr(st), len(st), abs | nb, 0, 0)) != 0 {
             return Err("connect failed");
         }
         let acc = handle(as_owner(SYS_UNIX_ACCEPT, a(lst, nb, 0, 0, 0, 0)).value)?;
+        if call(SYS_UNIX_GET_OPTION, a(acc, passcred, 0, 0, 0, 0)) != 1
+            || call(SYS_UNIX_GET_OPTION, a(con, passcred, 0, 0, 0, 0)) != 0
+        {
+            return Err("the accepted socket did not take its listener's UNIX_OPT_PASSCRED");
+        }
         if call(SYS_UNIX_SEND, a(con, ptr(b"ok"), 2, 0, 0, nb)) != 2
             || call(SYS_UNIX_RECV, a(acc, buf.as_mut_ptr() as u64, 8, 0, nb, 0)) != 2
         {
@@ -3114,8 +3144,9 @@ fn test_dispatch_unix_sockets() -> KernelResult<()> {
     match result {
         Ok(()) => {
             serial_println!(
-                "[syscall]   SYS_UNIX_* (1104-1116): held by their maker, datagrams by abstract \
-                 name, a stream through listen/connect/accept, names, a pair, close: OK"
+                "[syscall]   SYS_UNIX_* (1104-1118): held by their maker, datagrams by abstract \
+                 name, the credentials option, a stream through listen/connect/accept, names, \
+                 a pair, close: OK"
             );
             Ok(())
         }
@@ -3126,6 +3157,14 @@ fn test_dispatch_unix_sockets() -> KernelResult<()> {
     }
 }
 
+/// `SYS_CHANNEL_PEER_HAS_KEY` (1103): a service connection's peer holds the
+/// service's key only with a `(Service, key_id(name), READ)` capability, and
+/// only while it still holds its end of the channel; a channel not made by
+/// connecting to a service is `NotFound`.
+///
+/// The client connects as a process (`thread::self_test_as_process`), so
+/// the kernel records it on its end as it would a real client; its end is
+/// registered with it as the native connect does.
 fn test_dispatch_channel_peer_has_key() -> KernelResult<()> {
     use crate::cap::{ResourceType, Rights};
     use crate::ipc::{channel, service};

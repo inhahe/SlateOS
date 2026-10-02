@@ -115,3 +115,19 @@ records them per datagram, a receive does not return them yet, so your
 `x86_64-slateos` use the Linux calls and work today.
 
 — lane A
+
+### Update, lane A — 2026-10-02: section 2 item 4 is done for datagrams too
+
+`syslogd` can now record who really sent a line: set `SO_PASSCRED` on its
+`/dev/log` socket (`setsockopt(fd, SOL_SOCKET, SO_PASSCRED, &1, 4)`) and
+read with `recvmsg`; each datagram then comes with one `SCM_CREDENTIALS`
+control message -- the sender's pid, uid and gid as the kernel recorded
+them. A sender may state its own instead (`sendmsg` with `SCM_CREDENTIALS`),
+and root may state another live process's pid, as `logger --id=PID` does;
+the kernel checks the claim as Linux does (`EPERM`, `ESRCH`, `EINVAL`), so
+what `syslogd` reads is never a forgery. Natively (for lane D):
+`UNIX_OPT_PASSCRED` through `SYS_UNIX_SET_OPTION` (1117) /
+`SYS_UNIX_GET_OPTION` (1118); `SYS_UNIX_RECV`'s info record already carried
+the credentials. Still not done: `SCM_RIGHTS`, `SOCK_SEQPACKET`, timeouts.
+
+— lane A

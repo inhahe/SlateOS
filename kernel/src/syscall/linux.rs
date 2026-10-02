@@ -1061,6 +1061,9 @@ pub mod errno {
     pub const EOPNOTSUPP: i32 = 95;
     pub const EAFNOSUPPORT: i32 = 97;
     pub const EADDRINUSE: i32 = 98;
+    /// `ENOBUFS` -- no buffer space: a send's control data is longer than
+    /// the kernel will copy in.
+    pub const ENOBUFS: i32 = 105;
     pub const EALREADY: i32 = 114;
     pub const EINPROGRESS: i32 = 115;
     pub const EISCONN: i32 = 106;
@@ -39206,10 +39209,12 @@ fn sys_socketpair(args: &SyscallArgs) -> SyscallResult {
 // `ipc::unix_socket`'s; this is the Linux ABI around them -- `struct
 // sockaddr_un`, the flags, and Linux's error for each refusal.
 //
-// Not yet: SOCK_SEQPACKET (ENOSYS, as before); ancillary data -- SCM_RIGHTS
-// is refused with EOPNOTSUPP rather than dropped, SCM_CREDENTIALS on a send is
-// ignored (the kernel records the sender's itself), and a receive reports no
-// control messages.
+// Ancillary data: a receive on a socket with SO_PASSCRED on carries the
+// sender's credentials (SCM_CREDENTIALS) -- as the kernel recorded them, or
+// as the sender stated them on its send, checked as Linux checks them (its
+// own; for root, any live process's).
+// Not yet: SOCK_SEQPACKET (ENOSYS, as before); SCM_RIGHTS, refused with
+// EOPNOTSUPP rather than dropped.
 // ---------------------------------------------------------------------------
 
 /// `AF_UNIX` (`AF_LOCAL`).
@@ -39608,41 +39613,89 @@ fn read_iovecs(iov_ptr: u64, count: u64) -> Result<alloc::vec::Vec<(u64, usize)>
     Ok(out)
 }
 
-/// Whether a `msg_control` buffer passes descriptors (`SCM_RIGHTS`), which
-/// this layer cannot yet carry: walked as Linux's `__cmsg` headers (length,
-/// level, type), each aligned to 8.
-fn control_passes_rights(control: u64, controllen: u64) -> Result<bool, SyscallResult> {
+/// What a send's `msg_control` carries.
+#[derive(Default)]
+struct SendControl {
+    /// `SCM_RIGHTS`: descriptors to pass, which this layer cannot yet carry.
+    rights: bool,
+    /// `SCM_CREDENTIALS`: the credentials the sender states -- `pid_t`, uid,
+    /// gid -- not yet checked. The last such message counts, as on Linux.
+    cred: Option<(i32, u32, u32)>,
+}
+
+/// Walk a send's `msg_control` as Linux's `____sys_sendmsg` and
+/// `__scm_send` do:
+/// - a length past `INT_MAX`, or past what Linux's `optmem_max` (128 KiB)
+///   lets it copy in, is `ENOBUFS`; a buffer that cannot be read is `EFAULT`;
+/// - each header (length, level, type), aligned to 8, must cover at least
+///   itself and no more than is left (`EINVAL`), and the walk ends where no
+///   whole header is left;
+/// - levels other than `SOL_SOCKET` are skipped; `SCM_RIGHTS` is noted;
+///   `SCM_CREDENTIALS` must be exactly `CMSG_LEN(sizeof(struct ucred))`
+///   long (`EINVAL`); any other `SOL_SOCKET` type is `EINVAL`.
+fn parse_send_control(control: u64, controllen: u64) -> Result<SendControl, SyscallResult> {
     const SOL_SOCKET: i32 = 1;
     const SCM_RIGHTS: i32 = 1;
-    let total = usize::try_from(controllen)
-        .unwrap_or(usize::MAX)
-        .min(64 * 1024);
-    if control == 0 || total < 16 {
-        return Ok(false);
+    const SCM_CREDENTIALS: i32 = 2;
+    /// `sizeof(struct cmsghdr)`.
+    const HDR: usize = 16;
+    /// `CMSG_LEN(sizeof(struct ucred))`.
+    const CRED_LEN: usize = 28;
+    /// Linux's `optmem_max` default: the most control data a send copies in.
+    const OPTMEM_MAX: usize = 128 * 1024;
+    let mut out = SendControl::default();
+    if controllen == 0 {
+        return Ok(out);
     }
+    let total = match usize::try_from(controllen) {
+        Ok(n) if n <= OPTMEM_MAX => n,
+        _ => return Err(linux_err(errno::ENOBUFS)),
+    };
     let bytes = crate::mm::user::read_user_vec(control, total, total)
         .map_err(|e| linux_err(linux_errno_for(e)))?;
     let mut at = 0usize;
-    while let Some(head) = bytes.get(at..at.saturating_add(16)) {
+    while let Some(head) = bytes.get(at..at.saturating_add(HDR)) {
         let field = |from: usize, to: usize| head.get(from..to).unwrap_or(&[]);
         let len = usize::try_from(u64::from_ne_bytes(field(0, 8).try_into().unwrap_or([0; 8])))
             .unwrap_or(usize::MAX);
         let level = i32::from_ne_bytes(field(8, 12).try_into().unwrap_or([0; 4]));
         let kind = i32::from_ne_bytes(field(12, 16).try_into().unwrap_or([0; 4]));
-        if len < 16 {
+        // CMSG_OK: the message covers its own header and fits in what is left.
+        if len < HDR || len > total.saturating_sub(at) {
             return Err(linux_err(errno::EINVAL));
         }
-        if level == SOL_SOCKET && kind == SCM_RIGHTS {
-            return Ok(true);
+        if level == SOL_SOCKET {
+            match kind {
+                SCM_RIGHTS => out.rights = true,
+                SCM_CREDENTIALS => {
+                    if len != CRED_LEN {
+                        return Err(linux_err(errno::EINVAL));
+                    }
+                    let word = |from: usize| {
+                        bytes
+                            .get(at.saturating_add(from)..at.saturating_add(from).saturating_add(4))
+                            .and_then(|w| <[u8; 4]>::try_from(w).ok())
+                            .unwrap_or([0; 4])
+                    };
+                    out.cred = Some((
+                        i32::from_ne_bytes(word(16)),
+                        u32::from_ne_bytes(word(20)),
+                        u32::from_ne_bytes(word(24)),
+                    ));
+                }
+                _ => return Err(linux_err(errno::EINVAL)),
+            }
         }
         at = at.saturating_add(len.saturating_add(7) & !7);
     }
-    Ok(false)
+    Ok(out)
 }
 
 /// `sendmsg(2)` on an `AF_UNIX` descriptor: the iovecs gathered into one
 /// send (one datagram, or up to [`UNIX_STREAM_CHUNK`] of a stream), to
-/// `msg_name` if it names an address.
+/// `msg_name` if it names an address. Credentials the sender states
+/// (`SCM_CREDENTIALS`) are checked as Linux checks them and carried by a
+/// datagram; `SCM_RIGHTS` is `EOPNOTSUPP`.
 fn unix_sendmsg(entry: &FdEntry, msg_ptr: u64, flags: u32) -> SyscallResult {
     use crate::ipc::unix_socket::{self, Kind, MAX_DGRAM};
     let mut mh = UserMsgHdr::default();
@@ -39653,13 +39706,30 @@ fn unix_sendmsg(entry: &FdEntry, msg_ptr: u64, flags: u32) -> SyscallResult {
     {
         return linux_err(linux_errno_for(e));
     }
-    match control_passes_rights(mh.msg_control, mh.msg_controllen) {
-        Ok(false) => {}
+    let control = match parse_send_control(mh.msg_control, mh.msg_controllen) {
+        Ok(c) => c,
+        Err(r) => return r,
+    };
+    if control.rights {
         // Refused rather than sent without them: a receiver expecting
         // descriptors that never come is worse than a sender told no.
-        Ok(true) => return linux_err(errno::EOPNOTSUPP),
-        Err(r) => return r,
+        return linux_err(errno::EOPNOTSUPP);
     }
+    // Checked before anything is sent, as Linux's scm_send runs first. A
+    // stream checks them too, but reports its connection's (unix_socket's
+    // "Credentials").
+    let stated = match control.cred {
+        None => None,
+        Some((pid, uid, gid)) => {
+            // A negative pid names no process; nor does 0, the kernel's.
+            let pid = u64::try_from(pid).unwrap_or(0);
+            let claim = crate::ipc::channel::PeerCred { pid, uid, gid };
+            match unix_socket::check_stated_cred(claim) {
+                Ok(c) => Some(c),
+                Err(e) => return unix_errno(e),
+            }
+        }
+    };
     let iovs = match read_iovecs(mh.msg_iov, mh.msg_iovlen) {
         Ok(v) => v,
         Err(r) => return r,
@@ -39691,7 +39761,7 @@ fn unix_sendmsg(entry: &FdEntry, msg_ptr: u64, flags: u32) -> SyscallResult {
     }
     let nonblocking = unix_nonblocking(entry, flags);
     let sent = if mh.msg_name == 0 || mh.msg_namelen == 0 {
-        unix_socket::send(h, &data, nonblocking)
+        unix_socket::send_as(h, &data, stated, nonblocking)
     } else {
         let addr = match read_sockaddr_un(mh.msg_name, i32::try_from(mh.msg_namelen).unwrap_or(-1))
         {
@@ -39699,7 +39769,7 @@ fn unix_sendmsg(entry: &FdEntry, msg_ptr: u64, flags: u32) -> SyscallResult {
             Err(r) => return r,
         };
         match unix_target(&addr) {
-            Ok(name) => unix_socket::send_to(h, &data, &name, nonblocking),
+            Ok(name) => unix_socket::send_to_as(h, &data, &name, stated, nonblocking),
             Err(r) => return r,
         }
     };
@@ -39710,8 +39780,11 @@ fn unix_sendmsg(entry: &FdEntry, msg_ptr: u64, flags: u32) -> SyscallResult {
 }
 
 /// `recvmsg(2)` on an `AF_UNIX` descriptor: one receive scattered across the
-/// iovecs; the sender's address to `msg_name`; no control messages
-/// (`msg_controllen` 0); `MSG_TRUNC` in `msg_flags` when a datagram was cut.
+/// iovecs; the sender's address to `msg_name`; when the socket has
+/// `SO_PASSCRED` on, the sender's credentials as one `SCM_CREDENTIALS`
+/// control message, otherwise none (`msg_controllen` 0); `MSG_TRUNC` in
+/// `msg_flags` when a datagram was cut, `MSG_CTRUNC` when the control message
+/// was.
 fn unix_recvmsg(entry: &FdEntry, msg_ptr: u64, flags: u32) -> SyscallResult {
     use crate::ipc::unix_socket::{self, Kind, MAX_DGRAM};
     let mut mh = UserMsgHdr::default();
@@ -39782,20 +39855,68 @@ fn unix_recvmsg(entry: &FdEntry, msg_ptr: u64, flags: u32) -> SyscallResult {
     {
         return r;
     }
-    // msg_controllen (offset 40) to 0: no control messages; msg_flags
-    // (offset 48) says whether the datagram was cut.
-    let zero = 0u64.to_ne_bytes();
-    let out_flags = if got.full_len > got.len {
+    // The control messages: the sender's credentials (SCM_CREDENTIALS) when
+    // SO_PASSCRED asks for them, written as Linux's put_cmsg writes one -- a
+    // 16-byte header (length, SOL_SOCKET, SCM_CREDENTIALS) and a 12-byte
+    // ucred, taking 32 bytes of space. A buffer with room for the header but
+    // not the whole message gets as much as fits, its cmsg_len saying how
+    // much; one without room for even the header gets nothing. Both are
+    // MSG_CTRUNC.
+    let mut out_flags = if got.full_len > got.len {
         msgflags::MSG_TRUNC
     } else {
         0
+    };
+    let mut control_used = 0u64;
+    if unix_socket::passcred(h) {
+        /// `sizeof(struct cmsghdr)`.
+        const CMSG_HDR: u64 = 16;
+        /// `CMSG_LEN(sizeof(struct ucred))` and `CMSG_SPACE` of it.
+        const CRED_LEN: u64 = 28;
+        const CRED_SPACE: u64 = 32;
+        /// Linux's `overflowuid`/`overflowgid`, for a sender with no process.
+        const NOBODY: u32 = 65_534;
+        /// `MSG_CTRUNC` -- a control message did not fit.
+        const MSG_CTRUNC: u32 = 0x8;
+        if mh.msg_control == 0 || mh.msg_controllen < CMSG_HDR {
+            out_flags |= MSG_CTRUNC;
+        } else {
+            if mh.msg_controllen < CRED_LEN {
+                out_flags |= MSG_CTRUNC;
+            }
+            let cmsg_len = mh.msg_controllen.min(CRED_LEN);
+            let (pid, uid, gid) = got.cred.map_or((0u32, NOBODY, NOBODY), |c| {
+                (u32::try_from(c.pid).unwrap_or(0), c.uid, c.gid)
+            });
+            let mut cmsg = [0u8; 28];
+            cmsg[..8].copy_from_slice(&cmsg_len.to_ne_bytes());
+            cmsg[8..12].copy_from_slice(&1i32.to_ne_bytes()); // SOL_SOCKET
+            cmsg[12..16].copy_from_slice(&2i32.to_ne_bytes()); // SCM_CREDENTIALS
+            cmsg[16..20].copy_from_slice(&pid.to_ne_bytes());
+            cmsg[20..24].copy_from_slice(&uid.to_ne_bytes());
+            cmsg[24..28].copy_from_slice(&gid.to_ne_bytes());
+            let n = usize::try_from(cmsg_len).unwrap_or(0);
+            // SAFETY: `n` <= 28 initialised bytes of `cmsg`; the destination
+            // is the caller's msg_control, which copy_to_user validates.
+            if let Err(e) =
+                unsafe { crate::mm::user::copy_to_user(cmsg.as_ptr(), mh.msg_control, n) }
+            {
+                return linux_err(linux_errno_for(e));
+            }
+            // The space the message takes, padding included, as Linux counts
+            // it into msg_controllen.
+            control_used = mh.msg_controllen.min(CRED_SPACE);
+        }
     }
-    .to_ne_bytes();
+    // msg_controllen (offset 40): what the control messages used; msg_flags
+    // (offset 48): whether the datagram or a control message was cut.
+    let used = control_used.to_ne_bytes();
+    let flag_bytes = out_flags.to_ne_bytes();
     // SAFETY: both writes land inside [msg_ptr, +56), validated writable by
     // the caller; copy_to_user re-checks.
     let wrote = unsafe {
-        crate::mm::user::copy_to_user(zero.as_ptr(), msg_ptr.wrapping_add(40), 8).and_then(|()| {
-            crate::mm::user::copy_to_user(out_flags.as_ptr(), msg_ptr.wrapping_add(48), 4)
+        crate::mm::user::copy_to_user(used.as_ptr(), msg_ptr.wrapping_add(40), 8).and_then(|()| {
+            crate::mm::user::copy_to_user(flag_bytes.as_ptr(), msg_ptr.wrapping_add(48), 4)
         })
     };
     if let Err(e) = wrote {
@@ -41924,20 +42045,35 @@ fn sys_setsockopt(args: &SyscallArgs) -> SyscallResult {
     if let Ok(entry) = lookup_caller_fd(fd)
         && entry.kind == HandleKind::UnixSocket
     {
-        // The options Unix-domain programs set while starting up. None
-        // changes anything here: buffers are fixed, there is no address
-        // reuse to allow, and SO_PASSCRED's credentials are recorded with
-        // every datagram whether asked for or not (a receive does not yet
-        // return them as a control message). Anything else is ENOPROTOOPT,
-        // so a program can tell.
+        // SO_PASSCRED: an int, nonzero to ask for the sender's credentials
+        // with each recvmsg (SCM_CREDENTIALS).
+        if level == sol::SOL_SOCKET && optname == so::SO_PASSCRED {
+            if optlen < 4 {
+                return linux_err(errno::EINVAL);
+            }
+            let mut raw = [0u8; 4];
+            // SAFETY: four bytes into a four-byte buffer; optval was validated
+            // readable for optlen (>= 4) bytes above, and copy_from_user
+            // re-checks.
+            if let Err(e) =
+                unsafe { crate::mm::user::copy_from_user(args.arg3, raw.as_mut_ptr(), 4) }
+            {
+                return linux_err(linux_errno_for(e));
+            }
+            let on = i32::from_ne_bytes(raw) != 0;
+            return match crate::ipc::unix_socket::set_passcred(unix_handle(&entry), on) {
+                Ok(()) => SyscallResult::ok(0),
+                Err(e) => unix_errno(e),
+            };
+        }
+        // The other options Unix-domain programs set while starting up. None
+        // changes anything here: buffers are fixed and there is no address
+        // reuse to allow. Anything else is ENOPROTOOPT, so a program can
+        // tell.
         let accepted = level == sol::SOL_SOCKET
             && matches!(
                 optname,
-                so::SO_PASSCRED
-                    | so::SO_SNDBUF
-                    | so::SO_RCVBUF
-                    | so::SO_REUSEADDR
-                    | so::SO_KEEPALIVE
+                so::SO_SNDBUF | so::SO_RCVBUF | so::SO_REUSEADDR | so::SO_KEEPALIVE
             );
         return if accepted {
             SyscallResult::ok(0)
@@ -42133,7 +42269,8 @@ fn unix_getsockopt(
             None => return linux_err(errno::EBADF),
         },
         so::SO_DOMAIN => int(i32::from(AF_UNIX)),
-        so::SO_PROTOCOL | so::SO_ERROR | so::SO_PASSCRED => int(0),
+        so::SO_PROTOCOL | so::SO_ERROR => int(0),
+        so::SO_PASSCRED => int(i32::from(unix_socket::passcred(h))),
         so::SO_ACCEPTCONN => int(i32::from(unix_socket::is_listening(h))),
         so::SO_SNDBUF | so::SO_RCVBUF => {
             int(i32::try_from(unix_socket::MAX_DGRAM).unwrap_or(i32::MAX))

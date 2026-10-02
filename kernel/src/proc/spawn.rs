@@ -22684,8 +22684,10 @@ pub fn self_test_linux_slate_channels() -> KernelResult<()> {
 /// Unix-domain sockets by name from a real Linux-ABI process
 /// ([`elf::build_linux_unix_socket_test_elf`]): datagrams by abstract name
 /// and by path, a stream through listen/connect/accept with the kernel's
-/// record of the peer, end of file on close, a node a second `bind` finds in
-/// use and `unlink` removes.
+/// record of the peer, end of file on close, the sender's credentials as an
+/// `SCM_CREDENTIALS` control message once `SO_PASSCRED` asks for them --
+/// recorded by the kernel, or stated by the sender and checked -- a node a
+/// second `bind` finds in use and `unlink` removes.
 ///
 /// # Errors
 ///
@@ -22754,7 +22756,10 @@ pub fn self_test_linux_unix_sockets() -> KernelResult<()> {
              the bytes; 0xD7-0xE1 the stream: socket, bind, listen, socket, connect, accept, \
              write, read, SO_PEERCRED, its pid, end of file; 0xE2-0xE8 by path: bind, a second \
              bind not EADDRINUSE, sendto, recvfrom, the sender's address, unlink, sendto after \
-             unlink not ENOENT)",
+             unlink not ENOENT; 0xE9-0xED credentials: setsockopt(SO_PASSCRED), sendto, \
+             recvmsg and its bytes, the SCM_CREDENTIALS message's shape, its pid; 0xEE-0xF1 \
+             stated credentials: sendmsg with them, recvmsg not reporting them, a pid naming no \
+             process not ESRCH, a short message not EINVAL)",
             exit_code,
             OK_EXIT
         );
@@ -22762,7 +22767,8 @@ pub fn self_test_linux_unix_sockets() -> KernelResult<()> {
     }
     serial_println!(
         "[spawn]   Linux Unix-domain sockets (ring 3: datagrams by abstract name and by path, \
-         listen/connect/accept, SO_PEERCRED, end of file, EADDRINUSE, unlink): OK"
+         listen/connect/accept, SO_PEERCRED, SCM_CREDENTIALS received and stated, end of \
+         file, EADDRINUSE, unlink): OK"
     );
     Ok(())
 }

@@ -6264,7 +6264,7 @@ pub const SYS_PROCESS_GET_PHDR: u64 = 1102;
 pub const SYS_CHANNEL_PEER_HAS_KEY: u64 = 1103;
 
 // ---------------------------------------------------------------------------
-// Unix-domain sockets by name (1104-1116)
+// Unix-domain sockets by name (1104-1118)
 //
 // The native door to `ipc::unix_socket`, which the Linux table reaches through
 // socket/bind/connect/... (`AF_UNIX`): the C library's `socket(AF_UNIX, ...)`
@@ -6342,6 +6342,23 @@ pub const SYS_UNIX_CLOSE: u64 = 1115;
 /// `SYS_UNIX_POLL(handle)` -- readiness: 0x01 readable, 0x04 writable, 0x08
 /// error, 0x10 hang-up.
 pub const SYS_UNIX_POLL: u64 = 1116;
+/// `SYS_UNIX_SET_OPTION(handle, option, value)` -- set one of the socket's
+/// options (the `UNIX_OPT_*` below). An option the kernel does not know is
+/// `NotSupported` (the library's `ENOPROTOOPT`); a value the option does not
+/// take is `InvalidArgument`.
+pub const SYS_UNIX_SET_OPTION: u64 = 1117;
+/// `SYS_UNIX_GET_OPTION(handle, option)` -- one of the socket's options, as
+/// the return value.
+pub const SYS_UNIX_GET_OPTION: u64 = 1118;
+
+/// Option: whether receives hand back the sender's credentials (Linux's
+/// `SO_PASSCRED`), 0 or 1; off on a new socket, and an accepted connection
+/// starts with its listener's. [`SYS_UNIX_RECV`]'s info record carries the
+/// credentials either way -- this is the setting the C library's `recvmsg`
+/// reads to decide whether to write an `SCM_CREDENTIALS` control message. It
+/// is the socket's rather than the library's so that every holder of the
+/// socket (after `fork` or `exec`) sees the same one, as on Linux.
+pub const UNIX_OPT_PASSCRED: u64 = 1;
 
 /// Bytes [`SYS_UNIX_NAME`] writes: kind, length, 108 bytes of name.
 pub const UNIX_ADDR_LEN: usize = 116;

@@ -181467,27 +181467,29 @@ operation as the creation, as Linux's `inode_init_owner` does.
 **Status:** OPEN (lane A) -- what the first version of named Unix-domain
 sockets (design-decisions 1519) does not do yet.
 
-**In short:** programs can now meet at a socket's name and talk, but four
+**In short:** programs can now meet at a socket's name and talk, but three
 things Linux's Unix-domain sockets also do are missing:
 - **Passing open files to another program** (`SCM_RIGHTS`). Wayland, D-Bus
   and many servers hand descriptors across a socket. A send that tries is
   refused with `EOPNOTSUPP`, so the program knows.
-- **Credentials as a control message** (`SCM_CREDENTIALS` with
-  `SO_PASSCRED`). The kernel records each datagram's sender, but a receive
-  returns no control messages, so a syslog daemon cannot yet log who really
-  sent a line. (`SO_PEERCRED` on a connected stream does work.)
 - **`SOCK_SEQPACKET`**: still `ENOSYS`.
 - **Receive and send timeouts** (`SO_RCVTIMEO`/`SO_SNDTIMEO`): `ENOPROTOOPT`.
 
+A fourth, **credentials as a control message** (`SCM_CREDENTIALS` with
+`SO_PASSCRED`), was done the same day: `recvmsg` hands back the sender's
+credentials, and a sender may state its own (or, as root, another live
+process's) on `sendmsg`, checked as Linux checks them. One difference is
+left there: a stream reports its connection's credentials rather than each
+write's, which shows only when one connection is written by several
+processes, or root states another process's credentials on a stream.
+
 **Where:** `kernel/src/syscall/linux.rs` -- `unix_sendmsg`
-(`control_passes_rights`), `unix_recvmsg` (writes `msg_controllen = 0`),
-`sys_socket`; `kernel/src/ipc/unix_socket.rs`.
+(`parse_send_control`), `sys_socket`; `kernel/src/ipc/unix_socket.rs`.
 
 **Proper fix:** `SCM_RIGHTS` moves each descriptor's object with the
 message, as `ipc::channel` moves capabilities -- a stream needs the rights
 attached to a byte offset, as Linux attaches them to the skb they arrive
-with. Credentials: `recvmsg` writes an `SCM_CREDENTIALS` control message
-from `Received::cred` when `SO_PASSCRED` is set (a per-socket flag to add).
+with (and per-write credentials would hang off the same boundaries).
 SEQPACKET: a third kind, connected like a stream with datagram boundaries
 -- a channel pair is that already. Timeouts: a deadline on the waits in
 `unix_socket`, as `stream_socket`'s `*_timeout` calls have.

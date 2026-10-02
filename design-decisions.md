@@ -91986,7 +91986,20 @@ not by its name, so renaming or deleting it behaves as on Linux.
 - `EntryType::Socket`, made by `bind` on memfs, devfs (`/dev/log`) and ext4
   (`FileSystem::mknod_socket`); `open` of one is `ENXIO`.
 - Linux `socket(AF_UNIX, ...)`, `socketpair`, and every call on the
-  descriptors; native `SYS_UNIX_*` (1104-1116) for the C library.
+  descriptors; native `SYS_UNIX_*` (1104-1118) for the C library.
+- The sender's credentials on receive: `SO_PASSCRED` is the socket's (an
+  accepted connection starts with its listener's, as on Linux), and
+  `recvmsg` then writes one `SCM_CREDENTIALS` message as Linux's `put_cmsg`
+  does; natively `UNIX_OPT_PASSCRED` through `SYS_UNIX_SET_OPTION` /
+  `SYS_UNIX_GET_OPTION` (1117/1118), kept on the socket rather than in the C
+  library so every holder after `fork` or `exec` sees one setting.
+- Credentials a sender states (`SCM_CREDENTIALS` on `sendmsg`, as `logger
+  --id` sends them): checked as Linux's `scm_check_creds` checks them -- its
+  own pid, uid and gid, or for root (uid 0, as the Linux layer's `set*id`
+  calls take it) any live process's pid and any ids -- and carried by the
+  datagram in place of the kernel's record. A stream checks them but reports
+  its connection's credentials: its bytes keep no write boundaries to hang
+  them on.
 
 **Alternatives:**
 
@@ -92006,12 +92019,14 @@ not by its name, so renaming or deleting it behaves as on Linux.
 | A full datagram queue makes the sender wait | drop the datagram | Linux waits; a syslog client that drops messages under load loses exactly the messages from the moment something went wrong |
 | Credentials are recorded by the kernel at `connect`/`listen` and per datagram; kernel context records none | report uid 0 for kernel-made sockets | as `ipc::service` records a channel's peer: "unknown" must not read as the strongest credential there is |
 | `SCM_RIGHTS` is refused (`EOPNOTSUPP`) | ignore the control message and send the data | a receiver expecting descriptors that never come fails later and more confusingly than a sender told no now |
+| Credentials a sender states are checked as Linux checks them, then carried | always the kernel's record, the statement ignored | `logger --id=PID` states a pid on root's authority so the log names the process the line is about; ignoring it would name `logger`, and a claim Linux refuses (`EPERM`) would silently succeed |
 | Native names: an absolute path or an abstract name, with a flag | the Linux `struct sockaddr_un` | native calls take absolute paths everywhere (§648: the kernel has no working directory of the C library's to resolve against); the library converts `sun_path` |
 | A new resource type, `UnixSocket` (33), for the holder's `ipc_handles` | reuse `StreamSocket` | the cleanup and fork arms dispatch on the type; a listener or a datagram socket is not a stream end |
 
 **Not done yet** (`known-issues.md` `A-UNIX-SOCKETS-CARRY-NO-DESCRIPTORS-OR-CREDENTIAL-MESSAGES`):
-descriptor passing (`SCM_RIGHTS`), credential control messages on receive,
-`SOCK_SEQPACKET`, and `SO_RCVTIMEO`/`SO_SNDTIMEO`.
+descriptor passing (`SCM_RIGHTS`), `SOCK_SEQPACKET`, and
+`SO_RCVTIMEO`/`SO_SNDTIMEO`. (Credential control messages on receive, first
+listed here, were added the same day.)
 
 **Revisit** if the kernel's datagram queues become a memory concern (a limit
 per process rather than per socket), or if Wayland or D-Bus arrive needing

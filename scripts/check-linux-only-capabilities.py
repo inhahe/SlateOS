@@ -132,7 +132,6 @@ BASELINE: dict[str, str] = {
     # answer is capability transfer over a channel.
     "drm::card_fd": "reached only by pidfd_getfd's dup; no native pidfd exists",
     "evdev_fd": "reached only by pidfd_getfd's dup; no native pidfd exists",
-    "ipc::alsa_pcm": "reached only by pidfd_getfd's dup; no native pidfd exists",
     # --- Linux-flavoured descriptor types, deliberate -----------------------
     # Zero native syscall numbers each, on purpose: readiness and notification
     # here are channels, not descriptors you poll.
@@ -171,6 +170,12 @@ BASELINE: dict[str, str] = {
     # SYS_IO_RING_SETUP reach those modules. The same blind spot reported
     # `ipc::service` as Linux-only when the slate channel calls (Linux 1000-1005)
     # first reached it, with six native SYS_SERVICE_* syscalls wired.
+    #
+    # --- RESOLVED 2026-10-02: ipc::alsa_pcm ---------------------------------
+    # Pinned above as "reached only by pidfd_getfd's dup". The device door
+    # (SYS_DEVICE_OPEN/IOCTL/READ/WRITE/CLOSE, 1119-1123; design-decisions
+    # 1520) now drives a PCM substream natively, so the entry went stale on the
+    # change that made it so -- the ratchet working as intended.
 }
 
 

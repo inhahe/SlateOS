@@ -66,6 +66,16 @@ impl Default for Palette {
     }
 }
 
+/// Upstream's `PR_PROGRAM`, a constant of the build: where `-l` finds `pr`.
+/// A macro as well as a constant so that the messages naming it can be
+/// literals -- see [`Out::finish_output`].
+macro_rules! pr_program {
+    () => {
+        "/usr/bin/pr"
+    };
+}
+pub const PR_PROGRAM: &str = pr_program!();
+
 /// A pipe to `pr`, for `-l`.
 struct Pr {
     child: std::process::Child,
@@ -340,11 +350,27 @@ impl Out {
                 Err(_) => i32::MAX,
             };
             if code != 0 {
+                // Upstream's apostrophes, around a path fixed at build time:
+                // literals, because nothing here was read from anywhere.
                 let msg = match code {
-                    126 => format!("subsidiary program '{PR_PROGRAM}' could not be invoked"),
-                    127 => format!("subsidiary program '{PR_PROGRAM}' not found"),
-                    i32::MAX => format!("subsidiary program '{PR_PROGRAM}' failed"),
-                    n => format!("subsidiary program '{PR_PROGRAM}' failed (exit status {n})"),
+                    126 => concat!(
+                        "subsidiary program '",
+                        pr_program!(),
+                        "' could not be invoked"
+                    )
+                    .to_owned(),
+                    127 => concat!("subsidiary program '", pr_program!(), "' not found").to_owned(),
+                    i32::MAX => {
+                        concat!("subsidiary program '", pr_program!(), "' failed").to_owned()
+                    }
+                    n => format!(
+                        concat!(
+                            "subsidiary program '",
+                            pr_program!(),
+                            "' failed (exit status {})"
+                        ),
+                        n
+                    ),
                 };
                 stdfd::diag_line(&format!("diff: {msg}"));
                 crate::exit_trouble(self);
@@ -353,9 +379,6 @@ impl Out {
         self.begun = false;
     }
 }
-
-/// `PR_PROGRAM`: where `-l` finds `pr`.
-pub const PR_PROGRAM: &str = "/usr/bin/pr";
 
 fn spawn_pr(name: &[u8]) -> std::io::Result<std::process::Child> {
     std::process::Command::new(PR_PROGRAM)

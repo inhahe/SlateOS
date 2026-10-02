@@ -9996,7 +9996,34 @@ stall_wedge_message() {
 scan_own_output_throttled() {
     [ $((ELAPSED - OWN_LAST_SCAN)) -ge "$OWN_SCAN_EVERY" ] || return 0
     OWN_LAST_SCAN=$ELAPSED
+    OWN_SCAN_OWED=0
     scan_own_output "$1"
+}
+
+# note_serial_growth FILE -- the wait loop's record of the serial log, each
+# pass: when it last grew at all (STALL_*), and a throttled scan for the
+# boot's own output whenever one is owed -- after any growth, until a scan
+# has read it, whether or not the log grows again.
+#
+# "Whether or not" is the point. The scan used to run only on a pass that saw
+# growth, so a log that grew inside the throttle's interval and then went
+# quiet kept its last lines unread until the timeout path's final scan, which
+# stamped them with that moment: rq39 (2026-10-02) sat 34 minutes on a hung
+# self-test and was reported as "own output grew 0s ago", a budget too small.
+# With the scan owed, the record is never more than OWN_SCAN_EVERY seconds
+# behind the log, as the throttle's own comment promises.
+note_serial_growth() {
+    local cur_size
+    cur_size=$(wc -c < "$1" 2>/dev/null || echo 0)
+    if [ "$cur_size" -ne "$STALL_LAST_SIZE" ]; then
+        STALL_LAST_SIZE=$cur_size
+        STALL_LAST_GROWTH=$ELAPSED
+        OWN_SCAN_OWED=1
+    fi
+    if [ "$OWN_SCAN_OWED" -eq 1 ]; then
+        scan_own_output_throttled "$1"
+    fi
+    return 0
 }
 
 # own_output_stalled FILE -- true when --stall-secs is set and the boot has
@@ -10033,6 +10060,7 @@ OWN_LAST_GROWTH=0
 OWN_LAST_LINE=""
 OWN_LAST_SCAN=-100
 OWN_SCAN_EVERY=10
+OWN_SCAN_OWED=0
 while kill -0 "$QEMU_PID" 2>/dev/null && [ "$ELAPSED" -lt "$TIMEOUT" ]; do
     sleep 1
     ELAPSED=$(( $(date +%s) - WAIT_START_EPOCH ))
@@ -10085,12 +10113,7 @@ while kill -0 "$QEMU_PID" 2>/dev/null && [ "$ELAPSED" -lt "$TIMEOUT" ]; do
     # slow host that would eventually reach the marker): capture the RIP and
     # exit 2.
     if [ -f "$SERIAL_FILE" ]; then
-        cur_size=$(wc -c < "$SERIAL_FILE" 2>/dev/null || echo 0)
-        if [ "$cur_size" -ne "$STALL_LAST_SIZE" ]; then
-            STALL_LAST_SIZE=$cur_size
-            STALL_LAST_GROWTH=$ELAPSED
-            scan_own_output_throttled "$SERIAL_FILE"
-        fi
+        note_serial_growth "$SERIAL_FILE"
         if own_output_stalled "$SERIAL_FILE"; then
             stall_wedge_message
             if [ "${#MONITOR_ARGS[@]}" -gt 0 ] && kill -0 "$QEMU_PID" 2>/dev/null; then

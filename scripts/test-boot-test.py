@@ -1278,12 +1278,14 @@ def _progress_harness(body):
                 "ELAPSED=0\nSTALL_LAST_GROWTH=0\n"
                 "OWN_LINES_SEEN=0\nOWN_LAST_GROWTH=0\nOWN_LAST_LINE=\"\"\n"
                 "OWN_LAST_SCAN=-100\nOWN_SCAN_EVERY=10\n"
+                "STALL_LAST_SIZE=0\nOWN_SCAN_OWED=0\n"
                 + _watchdog_line_re() + "\n"
                 + extract_shell_function("scan_own_output") + "\n\n"
                 + extract_shell_function("timeout_progress_verdict") + "\n\n"
                 + extract_shell_function("stall_wedge_message") + "\n\n"
                 + extract_shell_function("scan_own_output_throttled") + "\n\n"
                 + extract_shell_function("own_output_stalled") + "\n\n"
+                + extract_shell_function("note_serial_growth") + "\n\n"
                 + body)
         proc = run_harness(tmp, HARNESS_HANG_GUARD_S, "the progress record")
         return None if proc is None else proc.stdout
@@ -1452,6 +1454,33 @@ def test_the_own_output_scan_is_throttled_but_no_verdict_is_stale():
         "STALL_SECS=0\nELAPSED=100000\n"
         "if own_output_stalled serial.txt; then echo STALLED; else echo LIVE; fi\n") or ""
     check("stall verdict: --stall-secs unset never stalls", off.split(), ["LIVE"])
+
+
+def test_a_log_gone_quiet_inside_the_throttle_is_still_read_within_it():
+    """rq39 (2026-10-02): the last own lines landed inside the scan's throttle
+    interval and the log then went quiet for 34 minutes. The loop scanned only
+    on growth, so those lines were first read by the timeout path, which
+    stamped them with the timeout and called the hang a budget too small.
+    The scan is owed now, and paid within OWN_SCAN_EVERY of the growth."""
+    def line(text):
+        return f"printf '%s\\n' {_sq(text)} >> serial.txt\n"
+
+    out = _progress_harness(
+        "ELAPSED=5\n" + line("[a] one") + "note_serial_growth serial.txt\n"
+        "ELAPSED=8\n" + line("[unix_socket] Running self-test...")
+        + "note_serial_growth serial.txt\n"
+        'echo "AT8 GROWTH=$OWN_LAST_GROWTH OWED=$OWN_SCAN_OWED"\n'
+        # No growth from here on: only passes of the loop.
+        "ELAPSED=15\nnote_serial_growth serial.txt\n"
+        'echo "AT15 GROWTH=$OWN_LAST_GROWTH OWED=$OWN_SCAN_OWED LINE=[$OWN_LAST_LINE]"\n'
+        "ELAPSED=2400\nnote_serial_growth serial.txt\nscan_own_output serial.txt\n"
+        "timeout_progress_verdict\n") or ""
+    check("a scan inside the interval is owed, not dropped",
+          "AT8 GROWTH=5 OWED=1" in out, True)
+    check("...and paid on a later pass with no growth, the last line read",
+          "AT15 GROWTH=15 OWED=0 LINE=[[unix_socket] Running self-test...]" in out, True)
+    check("the timeout reads the quiet as a stop, not a budget too small",
+          "STILL PRODUCING OUTPUT" in out, False)
 
 
 def test_the_qemu_priority_watcher_reads_back_and_reports_a_change():

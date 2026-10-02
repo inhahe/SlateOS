@@ -181499,18 +181499,23 @@ caller's filesystem uid, and its group to the caller's filesystem gid -- or
 the parent directory's gid when the parent is setgid -- in the same
 operation as the creation, as Linux's `inode_init_owner` does.
 
-### A-UNIX-SOCKETS-CARRY-NO-DESCRIPTORS-OR-CREDENTIAL-MESSAGES -- 2026-10-02 -- OPEN (lane A)
+### A-UNIX-SOCKETS-CARRY-NO-DESCRIPTORS-OR-CREDENTIAL-MESSAGES -- 2026-10-02 -- FIXED (lane A)
 
-**Status:** OPEN (lane A) -- one thing is left of what the first version of
-named Unix-domain sockets (design-decisions 1519) did not do:
-`SOCK_SEQPACKET`. The entry keeps its name; the descriptors and credential
-messages it was named for are done.
+**Status:** FIXED (lane A), 2026-10-02 -- everything the first version of
+named Unix-domain sockets (design-decisions 1519) left out is done. What
+remains of descriptor passing has entries of its own.
 
-**In short:** programs can meet at a socket's name, talk, pass open files and
-state their credentials, but **`SOCK_SEQPACKET`** -- a connection that keeps
-each message whole -- is still `ENOSYS`.
+**In short:** programs can meet at a socket's name, talk, pass open files,
+state their credentials, and use all three kinds -- stream, datagram and
+sequenced packets.
 
 Done the same day:
+- **`SOCK_SEQPACKET`**: connected like a stream (`listen`, `connect`,
+  `accept`, `socketpair`), each send arriving whole like a datagram, cut to
+  the buffer with `MSG_TRUNC`; what a client sends before `accept` waits in
+  the server's socket, made at `connect` as Linux makes it; the peer's close
+  is end of file after its messages, and a send to it `EPIPE`. `SOCK_RAW`
+  makes a datagram socket, as Linux's `unix_create` does.
 - **Passing open files** (`SCM_RIGHTS`, design-decisions 1521): on a datagram,
   and on a stream riding on the bytes their send wrote; close-on-exec on
   request; `MSG_CTRUNC` with the surplus released; a per-user limit on
@@ -181528,9 +181533,6 @@ Done the same day:
 
 **Where:** `kernel/src/syscall/linux.rs` `sys_socket`, `sys_socketpair`;
 `kernel/src/ipc/unix_socket.rs`.
-
-**Proper fix:** SEQPACKET: a third kind, connected like a stream with
-datagram boundaries -- a channel pair is that already.
 
 ### A-SCM-RIGHTS-DIFFERENCES -- 2026-10-02 -- OPEN (lane A)
 

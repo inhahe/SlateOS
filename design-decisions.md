@@ -92087,15 +92087,15 @@ not by its name, so renaming or deleting it behaves as on Linux.
 | Closing a socket leaves its node, refused to `connect` | remove the node on close | Linux leaves it, and programs expect to `unlink` before `bind`; removing it would break a server that binds, closes and rebinds the same path in a race with a client that checks for the node |
 | A full datagram queue makes the sender wait | drop the datagram | Linux waits; a syslog client that drops messages under load loses exactly the messages from the moment something went wrong |
 | Credentials are recorded by the kernel at `connect`/`listen` and per datagram; kernel context records none | report uid 0 for kernel-made sockets | as `ipc::service` records a channel's peer: "unknown" must not read as the strongest credential there is |
-| `SCM_RIGHTS` is refused (`EOPNOTSUPP`) | ignore the control message and send the data | a receiver expecting descriptors that never come fails later and more confusingly than a sender told no now |
+| `SCM_RIGHTS` is refused (`EOPNOTSUPP`) -- until §1521 built it, the same day | ignore the control message and send the data | a receiver expecting descriptors that never come fails later and more confusingly than a sender told no now |
 | Credentials a sender states are checked as Linux checks them, then carried | always the kernel's record, the statement ignored | `logger --id=PID` states a pid on root's authority so the log names the process the line is about; ignoring it would name `logger`, and a claim Linux refuses (`EPERM`) would silently succeed |
 | Native names: an absolute path or an abstract name, with a flag | the Linux `struct sockaddr_un` | native calls take absolute paths everywhere (§648: the kernel has no working directory of the C library's to resolve against); the library converts `sun_path` |
 | A new resource type, `UnixSocket` (33), for the holder's `ipc_handles` | reuse `StreamSocket` | the cleanup and fork arms dispatch on the type; a listener or a datagram socket is not a stream end |
 
 **Not done yet** (`known-issues.md` `A-UNIX-SOCKETS-CARRY-NO-DESCRIPTORS-OR-CREDENTIAL-MESSAGES`):
-descriptor passing (`SCM_RIGHTS`) and `SOCK_SEQPACKET`. (Credential control
-messages on receive and `SO_RCVTIMEO`/`SO_SNDTIMEO`, first listed here, were
-added the same day.)
+nothing, since the same day -- credential control messages on receive,
+`SO_RCVTIMEO`/`SO_SNDTIMEO`, descriptor passing (`SCM_RIGHTS`, §1521) and
+`SOCK_SEQPACKET`, all first listed here, were built then.
 
 **Revisit** if the kernel's datagram queues become a memory concern (a limit
 per process rather than per socket), or if Wayland or D-Bus arrive needing

@@ -1,4 +1,5 @@
-//! Unix-domain sockets with names: `AF_UNIX` `SOCK_STREAM` and `SOCK_DGRAM`,
+//! Unix-domain sockets with names: `AF_UNIX` `SOCK_STREAM`, `SOCK_DGRAM` and
+//! `SOCK_SEQPACKET`,
 //! bound to a filesystem path or to an abstract name, and reached by
 //! `connect` and `sendto`.
 //!
@@ -35,7 +36,7 @@
 //!
 //! [`EntryType::Socket`]: crate::fs::vfs::EntryType::Socket
 //!
-//! ## The two kinds
+//! ## The three kinds
 //!
 //! - **Stream.** `listen` turns a bound socket into a listener with a
 //!   backlog. `connect` makes a [`super::stream_socket`] pair: the client
@@ -47,6 +48,14 @@
 //!   its sender's address and credentials. `sendto` names a destination;
 //!   `connect` sets the one `send` uses. A full queue makes a sender wait, as
 //!   Linux's does, rather than drop -- a syslog client is the case that cares.
+//! - **Sequenced packets** (`SOCK_SEQPACKET`). Connected like a stream --
+//!   `listen`, `connect`, `accept`, `socketpair` -- but each send arrives
+//!   whole, like a datagram: it is one, queued at the peer socket. `connect`
+//!   makes the server's socket at once, waiting in the backlog (an *embryo*),
+//!   so what the client sends before `accept` is queued there; `accept` hands
+//!   it out. A peer gone, or its writing half shut, is end of file once its
+//!   queue is read; sending to a peer gone, or whose reading half is shut, is
+//!   `EPIPE`.
 //!
 //! ## Credentials
 //!
@@ -163,13 +172,29 @@ impl UnixHandle {
     }
 }
 
-/// Which of the two kinds a socket is.
+/// Which of the three kinds a socket is.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Kind {
     /// `SOCK_STREAM`: a connection carrying a byte stream.
     Stream,
     /// `SOCK_DGRAM`: datagrams, each kept whole.
     Dgram,
+    /// `SOCK_SEQPACKET`: a connection whose sends arrive whole.
+    SeqPacket,
+}
+
+impl Kind {
+    /// Whether this kind connects (`listen`, `connect`, `accept`).
+    #[must_use]
+    pub const fn connects(self) -> bool {
+        matches!(self, Self::Stream | Self::SeqPacket)
+    }
+
+    /// Whether each send arrives whole (a datagram).
+    #[must_use]
+    pub const fn keeps_messages(self) -> bool {
+        matches!(self, Self::Dgram | Self::SeqPacket)
+    }
 }
 
 /// A socket's address, as `getsockname`, `getpeername` and `recvfrom` report
@@ -234,12 +259,22 @@ struct Datagram {
 
 /// A connection waiting in a listener's backlog.
 struct Pending {
-    /// The server's end of the pair; the client holds the other.
-    stream: StreamSocketHandle,
+    /// The server's side of it.
+    link: Link,
     /// The client's address.
     peer: Address,
     /// The client's credentials at `connect`.
     peer_cred: Option<PeerCred>,
+}
+
+/// The server's side of a connection not yet accepted.
+#[derive(Clone, Copy)]
+enum Link {
+    /// A stream: the server's end of the pair; the client holds the other.
+    Stream(StreamSocketHandle),
+    /// Sequenced packets: the server's socket itself, made at `connect` so
+    /// the client can send at once -- an embryo, held by the backlog.
+    Socket(u64),
 }
 
 /// Where a stream socket is in its life.
@@ -257,6 +292,13 @@ enum State {
         peer: Address,
         peer_cred: Option<PeerCred>,
     },
+    /// A sequenced-packet socket after `connect`, `accept` or `socketpair`:
+    /// what it sends is queued at `peer_id`.
+    Paired {
+        peer_id: u64,
+        peer: Address,
+        peer_cred: Option<PeerCred>,
+    },
 }
 
 /// One socket.
@@ -270,9 +312,14 @@ struct Socket {
     /// The credentials a connecting client reads as its peer's: the
     /// listener's, taken at `listen`.
     listen_cred: Option<PeerCred>,
-    /// Datagram sockets: what has arrived and not been received.
+    /// Datagram and sequenced-packet sockets: what has arrived and not been
+    /// received.
     queue: VecDeque<Datagram>,
     queued_bytes: usize,
+    /// A sequenced-packet socket waiting in a listener's backlog, not yet
+    /// accepted: its holder is the backlog, and garbage collection counts
+    /// what is queued at it as queued at the listener.
+    embryo: bool,
     /// Datagram sockets: where `send` without an address goes (`connect`).
     default_peer: Option<u64>,
     /// `shutdown`: a datagram socket's own halves. A stream's are its pair's.
@@ -306,6 +353,7 @@ impl Socket {
             listen_cred: None,
             queue: VecDeque::new(),
             queued_bytes: 0,
+            embryo: false,
             default_peer: None,
             rd_shut: false,
             wr_shut: false,
@@ -560,8 +608,9 @@ pub fn create(kind: Kind) -> KernelResult<UnixHandle> {
     Ok(UnixHandle(id))
 }
 
-/// Two connected sockets of `kind` (`socketpair`): a stream pair, or two
-/// datagram sockets each the other's default destination.
+/// Two connected sockets of `kind` (`socketpair`): a stream pair, two
+/// datagram sockets each the other's default destination, or two
+/// sequenced-packet sockets paired.
 ///
 /// # Errors
 ///
@@ -590,6 +639,18 @@ pub fn pair(kind: Kind) -> KernelResult<(UnixHandle, UnixHandle)> {
             sa.default_peer = Some(b);
             sb.default_peer = Some(a);
         }
+        Kind::SeqPacket => {
+            sa.state = State::Paired {
+                peer_id: b,
+                peer: Address::Unnamed,
+                peer_cred: cred,
+            };
+            sb.state = State::Paired {
+                peer_id: a,
+                peer: Address::Unnamed,
+                peer_cred: cred,
+            };
+        }
     }
     t.sockets.insert(a, sa);
     t.sockets.insert(b, sb);
@@ -614,6 +675,9 @@ pub fn dup(h: UnixHandle) -> KernelResult<UnixHandle> {
 pub fn close(h: UnixHandle) {
     let mut wakes = Vec::new();
     let mut streams = Vec::new();
+    // Sequenced-packet connections waiting in a closed listener's backlog:
+    // ended after TABLE is let go.
+    let mut embryos = Vec::new();
     let ended = {
         let mut t = TABLE.lock();
         let Some(s) = t.sockets.get_mut(&h.0) else {
@@ -632,9 +696,22 @@ pub fn close(h: UnixHandle) {
             wakes.append(&mut s.room.take_all());
             match core::mem::replace(&mut s.state, State::Idle) {
                 State::Listening { backlog, .. } => {
-                    streams.extend(backlog.into_iter().map(|p| p.stream));
+                    for p in backlog {
+                        match p.link {
+                            Link::Stream(stream) => streams.push(stream),
+                            Link::Socket(id) => embryos.push(UnixHandle(id)),
+                        }
+                    }
                 }
                 State::Connected { stream, .. } => streams.push(stream),
+                State::Paired { peer_id, .. } => {
+                    // The peer reads to the end of its queue, then end of
+                    // file; its senders find the pipe broken.
+                    if let Some(p) = t.sockets.get_mut(&peer_id) {
+                        wakes.append(&mut p.readers.take_all());
+                        wakes.append(&mut p.room.take_all());
+                    }
+                }
                 State::Idle => {}
             }
             // `s` ends here, its queue with it: the descriptors queued there
@@ -651,6 +728,11 @@ pub fn close(h: UnixHandle) {
         }
         wake_all(wakes);
         passed::drain();
+        // Each held only by the backlog: this ends it, and its client sees
+        // the end.
+        for embryo in embryos {
+            close(embryo);
+        }
     }
     // One holder fewer can leave sockets that only references in flight
     // hold -- this one, or what its queue held.
@@ -804,7 +886,7 @@ pub fn peer_address(h: UnixHandle) -> KernelResult<Address> {
     let t = TABLE.lock();
     let s = t.socket(h)?;
     match &s.state {
-        State::Connected { peer, .. } => Ok(peer.clone()),
+        State::Connected { peer, .. } | State::Paired { peer, .. } => Ok(peer.clone()),
         _ => {
             let peer = s.default_peer.ok_or(KernelError::NotConnected)?;
             t.sockets
@@ -823,7 +905,7 @@ pub fn peer_address(h: UnixHandle) -> KernelResult<Address> {
 /// `InvalidHandle`; `NotConnected` if `h` is not a connected stream.
 pub fn peer_cred(h: UnixHandle) -> KernelResult<Option<PeerCred>> {
     match &TABLE.lock().socket(h)?.state {
-        State::Connected { peer_cred, .. } => Ok(*peer_cred),
+        State::Connected { peer_cred, .. } | State::Paired { peer_cred, .. } => Ok(*peer_cred),
         _ => Err(KernelError::NotConnected),
     }
 }
@@ -859,9 +941,9 @@ pub fn is_listening(h: UnixHandle) -> bool {
 // Connections
 // ---------------------------------------------------------------------------
 
-/// Listen on the bound stream socket `h`, with up to `backlog` connections
-/// waiting (clamped to 1..=[`MAX_BACKLOG`]). A second `listen` changes the
-/// backlog, as on Linux.
+/// Listen on the bound stream or sequenced-packet socket `h`, with up to
+/// `backlog` connections waiting (clamped to 1..=[`MAX_BACKLOG`]). A second
+/// `listen` changes the backlog, as on Linux.
 ///
 /// # Errors
 ///
@@ -871,7 +953,7 @@ pub fn listen(h: UnixHandle, backlog: usize) -> KernelResult<()> {
     let cred = current_cred();
     let mut t = TABLE.lock();
     let s = t.socket_mut(h)?;
-    if s.kind != Kind::Stream {
+    if !s.kind.connects() {
         return Err(KernelError::NotSupported);
     }
     if s.bound.is_none() {
@@ -891,7 +973,7 @@ pub fn listen(h: UnixHandle, backlog: usize) -> KernelResult<()> {
             *m = max;
             Ok(())
         }
-        State::Connected { .. } => Err(KernelError::InvalidArgument),
+        State::Connected { .. } | State::Paired { .. } => Err(KernelError::InvalidArgument),
     }
 }
 
@@ -922,12 +1004,13 @@ pub fn connect(h: UnixHandle, target: &Name, nonblocking: bool) -> KernelResult<
             t.socket_mut(h)?.default_peer = Some(peer);
             Ok(())
         }
-        Kind::Stream => connect_stream(h, target, nonblocking),
+        Kind::Stream | Kind::SeqPacket => connect_stream(h, kind, target, nonblocking),
     }
 }
 
-/// The stream half of [`connect`].
-fn connect_stream(h: UnixHandle, target: &Name, nonblocking: bool) -> KernelResult<()> {
+/// The connecting half of [`connect`], for a stream or a sequenced-packet
+/// socket (`kind`).
+fn connect_stream(h: UnixHandle, kind: Kind, target: &Name, nonblocking: bool) -> KernelResult<()> {
     let pid = current_user_pid();
     let task = sched::current_task_id();
     let cred = current_cred();
@@ -940,7 +1023,9 @@ fn connect_stream(h: UnixHandle, target: &Name, nonblocking: bool) -> KernelResu
             let mut t = TABLE.lock();
             let me = t.socket(h)?;
             match me.state {
-                State::Connected { .. } => return Err(KernelError::ConnectAlready),
+                State::Connected { .. } | State::Paired { .. } => {
+                    return Err(KernelError::ConnectAlready);
+                }
                 State::Listening { .. } => return Err(KernelError::InvalidArgument),
                 State::Idle => {}
             }
@@ -953,28 +1038,61 @@ fn connect_stream(h: UnixHandle, target: &Name, nonblocking: bool) -> KernelResu
                 .get_mut(&server)
                 .ok_or(KernelError::ConnectionRefused)?;
             s.room.remove(task);
-            if s.kind != Kind::Stream {
+            if s.kind != kind {
                 return Err(KernelError::WrongSocketType);
             }
             let server_cred = s.listen_cred;
             let server_addr = s.local();
-            let State::Listening { backlog, max } = &mut s.state else {
+            let State::Listening { backlog, max } = &s.state else {
                 return Err(KernelError::ConnectionRefused);
             };
             if backlog.len() < *max {
-                let (client_end, server_end) = stream_socket::create();
-                backlog.push_back(Pending {
-                    stream: server_end,
-                    peer: my_addr,
-                    peer_cred: cred,
-                });
+                // The server's side: a stream pair's end, or -- sequenced
+                // packets -- the server's socket itself, so what the client
+                // sends before `accept` has somewhere to wait.
+                let (link, mine) = if kind == Kind::Stream {
+                    let (client_end, server_end) = stream_socket::create();
+                    (
+                        Link::Stream(server_end),
+                        State::Connected {
+                            stream: client_end,
+                            peer: server_addr,
+                            peer_cred: server_cred,
+                        },
+                    )
+                } else {
+                    let id = t.alloc_id();
+                    let mut embryo = Socket::new(Kind::SeqPacket);
+                    embryo.embryo = true;
+                    embryo.state = State::Paired {
+                        peer_id: h.0,
+                        peer: my_addr.clone(),
+                        peer_cred: cred,
+                    };
+                    t.sockets.insert(id, embryo);
+                    (
+                        Link::Socket(id),
+                        State::Paired {
+                            peer_id: id,
+                            peer: server_addr,
+                            peer_cred: server_cred,
+                        },
+                    )
+                };
+                let s = t
+                    .sockets
+                    .get_mut(&server)
+                    .ok_or(KernelError::ConnectionRefused)?;
+                if let State::Listening { backlog, .. } = &mut s.state {
+                    backlog.push_back(Pending {
+                        link,
+                        peer: my_addr,
+                        peer_cred: cred,
+                    });
+                }
                 wakes.append(&mut s.readers.take_all());
                 let me = t.socket_mut(h)?;
-                me.state = State::Connected {
-                    stream: client_end,
-                    peer: server_addr,
-                    peer_cred: server_cred,
-                };
+                me.state = mine;
                 wakes.append(&mut me.readers.take_all());
                 drop(t);
                 wake_all(wakes);
@@ -986,7 +1104,9 @@ fn connect_stream(h: UnixHandle, target: &Name, nonblocking: bool) -> KernelResu
             if deliverable_signal_pending(pid) {
                 return Err(KernelError::Interrupted);
             }
-            s.room.insert(task);
+            if let Some(s) = t.sockets.get_mut(&server) {
+                s.room.insert(task);
+            }
         }
         park_interruptible(pid, task, wait_on(h));
     }
@@ -1019,18 +1139,29 @@ pub fn accept(h: UnixHandle, nonblocking: bool) -> KernelResult<Accepted> {
             match next {
                 Some(p) => {
                     let wakes = s.room.take_all();
-                    let id = t.alloc_id();
-                    let mut sock = Socket::new(Kind::Stream);
-                    sock.state = State::Connected {
-                        stream: p.stream,
-                        peer: p.peer.clone(),
-                        peer_cred: p.peer_cred,
+                    let id = match p.link {
+                        Link::Stream(stream) => {
+                            let id = t.alloc_id();
+                            let mut sock = Socket::new(Kind::Stream);
+                            sock.state = State::Connected {
+                                stream,
+                                peer: p.peer.clone(),
+                                peer_cred: p.peer_cred,
+                            };
+                            t.sockets.insert(id, sock);
+                            id
+                        }
+                        // The embryo, made at connect: its holder is the
+                        // accepting process now, in the backlog's place.
+                        Link::Socket(id) => id,
                     };
-                    sock.bound = bound;
-                    sock.passcred = passcred;
-                    sock.rcvtimeo = rcvtimeo;
-                    sock.sndtimeo = sndtimeo;
-                    t.sockets.insert(id, sock);
+                    if let Some(sock) = t.sockets.get_mut(&id) {
+                        sock.embryo = false;
+                        sock.bound = bound;
+                        sock.passcred = passcred;
+                        sock.rcvtimeo = rcvtimeo;
+                        sock.sndtimeo = sndtimeo;
+                    }
                     drop(t);
                     wake_all(wakes);
                     return Ok(Accepted {
@@ -1141,6 +1272,13 @@ fn send_inner(
                 .ok_or(KernelError::NotConnected)?;
             send_dgram(h, peer, data, stated, rights, nonblocking)
         }
+        Kind::SeqPacket => {
+            let peer = match TABLE.lock().socket(h)?.state {
+                State::Paired { peer_id, .. } => peer_id,
+                _ => return Err(KernelError::NotConnected),
+            };
+            send_dgram(h, peer, data, stated, rights, nonblocking)
+        }
     }
 }
 
@@ -1223,6 +1361,9 @@ pub fn send_to_as(
                 None => Err(KernelError::ConnectionRefused),
             }
         }
+        // Linux's unix_seqpacket_sendmsg ignores the address: a sequenced-
+        // packet socket sends to its peer or not at all.
+        Ok(Kind::SeqPacket) => send_inner(h, data, stated, rights, nonblocking),
     };
     if carried {
         passed::drain();
@@ -1232,7 +1373,9 @@ pub fn send_to_as(
 
 /// Queue one datagram from `h` on the socket `peer`, waiting for room unless
 /// `nonblocking`. It carries `stated`, or else the caller's credentials, and
-/// `rights`.
+/// `rights`. From a sequenced-packet socket `peer` is its peer, and a peer
+/// gone, or one whose reading half is shut, is `BrokenPipe` (`EPIPE`), as
+/// Linux answers.
 fn send_dgram(
     h: UnixHandle,
     peer: u64,
@@ -1255,15 +1398,23 @@ fn send_dgram(
             if me.wr_shut {
                 return Err(KernelError::BrokenPipe);
             }
+            let seq = me.kind == Kind::SeqPacket;
             let from = me.local();
             let Some(dest) = t.sockets.get_mut(&peer) else {
-                return Err(KernelError::ConnectionRefused);
+                return Err(if seq {
+                    KernelError::BrokenPipe
+                } else {
+                    KernelError::ConnectionRefused
+                });
             };
             dest.room.remove(task);
-            if dest.kind != Kind::Dgram {
+            if dest.kind != me_kind(seq) {
                 return Err(KernelError::WrongSocketType);
             }
             if dest.rd_shut {
+                if seq {
+                    return Err(KernelError::BrokenPipe);
+                }
                 // Linux discards datagrams to a socket whose reading half is
                 // shut and reports success; there is no one to tell.
                 return Ok(data.len());
@@ -1354,7 +1505,7 @@ pub fn recv(
                 }
             }
         }
-        Kind::Dgram => recv_dgram(h, buf, nonblocking, peek),
+        Kind::Dgram | Kind::SeqPacket => recv_dgram(h, buf, nonblocking, peek),
     }
 }
 
@@ -1404,6 +1555,11 @@ fn wait_ready(stream: StreamSocketHandle, mask: u16, limit: &Limit) -> KernelRes
     }
 }
 
+/// The kind a datagram's destination must be: the sender's own.
+const fn me_kind(seq: bool) -> Kind {
+    if seq { Kind::SeqPacket } else { Kind::Dgram }
+}
+
 /// The datagram half of [`recv`].
 fn recv_dgram(
     h: UnixHandle,
@@ -1417,6 +1573,17 @@ fn recv_dgram(
     loop {
         {
             let mut t = TABLE.lock();
+            // A sequenced-packet socket reads its peer's end as its own: the
+            // peer gone, or its writing half shut, is end of file once the
+            // queue is read.
+            let peer_done = match t.socket(h)?.state {
+                State::Paired { peer_id, .. } => t.sockets.get(&peer_id).is_none_or(|p| p.wr_shut),
+                State::Idle if t.socket(h)?.kind == Kind::SeqPacket => {
+                    return Err(KernelError::NotConnected);
+                }
+                State::Listening { .. } => return Err(KernelError::NotConnected),
+                _ => false,
+            };
             let s = t.socket_mut(h)?;
             s.readers.remove(task);
             let taken = if peek {
@@ -1448,7 +1615,7 @@ fn recv_dgram(
                     rights,
                 });
             }
-            if s.rd_shut {
+            if s.rd_shut || peer_done {
                 return Ok(Received {
                     len: 0,
                     full_len: 0,
@@ -1510,6 +1677,10 @@ fn take_garbage(t: &mut Table) -> Vec<Bundle> {
     let mut in_flight: BTreeMap<u64, u32> = BTreeMap::new();
     let mut pinned: BTreeSet<u64> = BTreeSet::new();
     for (&id, s) in &t.sockets {
+        if s.embryo {
+            // Counted with its listener, below.
+            continue;
+        }
         let mut carried: Vec<u64> = Vec::new();
         let mut visit = |b: &Bundle| {
             for u in b.unix_sockets() {
@@ -1528,10 +1699,19 @@ fn take_garbage(t: &mut Table) -> Vec<Bundle> {
             State::Connected { stream, .. } => stream_socket::bundles_toward(*stream, &mut visit),
             State::Listening { backlog, .. } => {
                 for p in backlog {
-                    stream_socket::bundles_toward(p.stream, &mut visit);
+                    match p.link {
+                        Link::Stream(stream) => stream_socket::bundles_toward(stream, &mut visit),
+                        Link::Socket(e) => {
+                            for d in t.sockets.get(&e).into_iter().flat_map(|e| &e.queue) {
+                                if let Some(b) = &d.rights {
+                                    visit(b);
+                                }
+                            }
+                        }
+                    }
                 }
             }
-            State::Idle => {}
+            State::Idle | State::Paired { .. } => {}
         }
         for &u in &carried {
             let n = in_flight.entry(u).or_insert(0);
@@ -1579,6 +1759,7 @@ fn take_garbage(t: &mut Table) -> Vec<Bundle> {
     }
     // The rest are garbage: nothing queued at them will ever be received.
     let mut doomed = Vec::new();
+    let mut embryos = Vec::new();
     for g in candidates.difference(&reachable) {
         let Some(s) = t.sockets.get_mut(g) else {
             continue;
@@ -1591,10 +1772,21 @@ fn take_garbage(t: &mut Table) -> Vec<Bundle> {
             }
             State::Listening { backlog, .. } => {
                 for p in backlog {
-                    doomed.extend(stream_socket::take_bundles_toward(p.stream));
+                    match p.link {
+                        Link::Stream(stream) => {
+                            doomed.extend(stream_socket::take_bundles_toward(stream));
+                        }
+                        Link::Socket(e) => embryos.push(e),
+                    }
                 }
             }
-            State::Idle => {}
+            State::Idle | State::Paired { .. } => {}
+        }
+    }
+    for e in embryos {
+        if let Some(s) = t.sockets.get_mut(&e) {
+            doomed.extend(s.queue.drain(..).filter_map(|d| d.rights));
+            s.queued_bytes = 0;
         }
     }
     doomed
@@ -1616,9 +1808,13 @@ pub fn shutdown(h: UnixHandle, how: u32) -> KernelResult<()> {
     let stream = {
         let mut t = TABLE.lock();
         let s = t.socket_mut(h)?;
-        match (&s.state, s.kind) {
+        let paired = match s.state {
+            State::Paired { peer_id, .. } => Some(peer_id),
+            _ => None,
+        };
+        let stream = match (&s.state, s.kind) {
             (State::Connected { stream, .. }, _) => Some(*stream),
-            (_, Kind::Dgram) => {
+            (State::Idle, Kind::Dgram) | (State::Paired { .. }, _) => {
                 if how != SHUT_WR {
                     s.rd_shut = true;
                 }
@@ -1630,7 +1826,13 @@ pub fn shutdown(h: UnixHandle, how: u32) -> KernelResult<()> {
                 None
             }
             _ => return Err(KernelError::NotConnected),
+        };
+        // A sequenced-packet peer reads the end, or finds the pipe broken.
+        if let Some(p) = paired.and_then(|id| t.sockets.get_mut(&id)) {
+            wakes.append(&mut p.readers.take_all());
+            wakes.append(&mut p.room.take_all());
         }
+        stream
     };
     wake_all(wakes);
     match stream {
@@ -1657,9 +1859,27 @@ pub fn poll_status(h: UnixHandle) -> u16 {
             State::Listening { backlog, .. } => {
                 return if backlog.is_empty() { 0 } else { 0x01 };
             }
-            // An unconnected stream socket is writable and hung up, as
-            // Linux's unix_poll reports one.
-            State::Idle if s.kind == Kind::Stream => return 0x04 | 0x10,
+            // An unconnected stream or sequenced-packet socket is writable
+            // and hung up, as Linux's unix_poll reports one.
+            State::Idle if s.kind.connects() => return 0x04 | 0x10,
+            State::Paired { peer_id, .. } => {
+                let peer = t.sockets.get(peer_id);
+                let mut flags = 0u16;
+                let peer_done = peer.is_none_or(|p| p.wr_shut);
+                if !s.queue.is_empty() || s.rd_shut || peer_done {
+                    flags |= 0x01;
+                }
+                if peer_done {
+                    flags |= 0x10;
+                }
+                let broken = s.wr_shut || peer.is_none_or(|p| p.rd_shut);
+                if broken {
+                    flags |= 0x04 | 0x08;
+                } else if peer.is_some_and(|p| p.has_room(0)) {
+                    flags |= 0x04;
+                }
+                return flags;
+            }
             State::Idle => {
                 let mut flags = 0u16;
                 if !s.queue.is_empty() || s.rd_shut {
@@ -1691,10 +1911,17 @@ pub fn register_waiter(h: UnixHandle, task: TaskId) {
         };
         s.readers.insert(task);
         s.room.insert(task);
-        match s.state {
-            State::Connected { stream, .. } => Some(stream),
-            _ => None,
+        let (stream, paired) = match s.state {
+            State::Connected { stream, .. } => (Some(stream), None),
+            State::Paired { peer_id, .. } => (None, Some(peer_id)),
+            _ => (None, None),
+        };
+        // A sequenced-packet socket's room is its peer's to make: the peer's
+        // receives wake its `room`.
+        if let Some(p) = paired.and_then(|id| t.sockets.get_mut(&id)) {
+            p.room.insert(task);
         }
+        stream
     };
     if let Some(stream) = stream {
         stream_socket::register_waiter(stream, task);
@@ -1710,10 +1937,15 @@ pub fn deregister_waiter(h: UnixHandle, task: TaskId) {
         };
         s.readers.remove(task);
         s.room.remove(task);
-        match s.state {
-            State::Connected { stream, .. } => Some(stream),
-            _ => None,
+        let (stream, paired) = match s.state {
+            State::Connected { stream, .. } => (Some(stream), None),
+            State::Paired { peer_id, .. } => (None, Some(peer_id)),
+            _ => (None, None),
+        };
+        if let Some(p) = paired.and_then(|id| t.sockets.get_mut(&id)) {
+            p.room.remove(task);
         }
+        stream
     };
     if let Some(stream) = stream {
         stream_socket::deregister_waiter(stream, task);
@@ -2085,7 +2317,8 @@ fn run_self_test(opened: &mut Vec<UnixHandle>) -> Result<(), &'static str> {
         .map_err(|_| "a closed socket's abstract name was not freed")?;
 
     timeout_checks(opened)?;
-    rights_checks(opened)
+    rights_checks(opened)?;
+    seqpacket_checks(opened)
 }
 
 /// `SO_RCVTIMEO` / `SO_SNDTIMEO`: read back as set, and only the direction
@@ -2297,6 +2530,98 @@ fn rights_checks(opened: &mut Vec<UnixHandle>) -> Result<(), &'static str> {
     // sockets meanwhile.
     if refs(z) != Some(base) {
         return Err("descriptors on bytes a closed end never read were not released");
+    }
+    Ok(())
+}
+
+/// `SOCK_SEQPACKET`: a pair's sends arriving whole and in order, cut to the
+/// buffer with the whole length reported; a listener's connection that sends
+/// before it is accepted, its message waiting for the accepted socket; the
+/// peer's close read as end of file after its messages, and a send to it
+/// refused; descriptors riding on a message; a stream kind refused.
+fn seqpacket_checks(opened: &mut Vec<UnixHandle>) -> Result<(), &'static str> {
+    use crate::proc::linux_fd::FdEntry;
+    let mut buf = [0u8; 16];
+    let (a, b) = pair(Kind::SeqPacket).map_err(|_| "a sequenced-packet pair failed")?;
+    opened.push(a);
+    opened.push(b);
+    if send(a, b"one", true) != Ok(3) || send(a, b"second", true) != Ok(6) {
+        return Err("sends on a sequenced-packet pair failed");
+    }
+    let mut two = [0u8; 2];
+    let first = recv(b, &mut two, true, false).map_err(|_| "recv failed")?;
+    let second = recv(b, &mut buf, true, false).map_err(|_| "recv failed")?;
+    if first.len != 2
+        || first.full_len != 3
+        || second.len != 6
+        || buf.get(..6) != Some(&b"second"[..])
+    {
+        return Err("sequenced packets did not arrive whole, in order, cut to the buffer");
+    }
+    if poll_status(a) & 0x04 == 0 || poll_status(b) & 0x01 != 0 {
+        return Err("a sequenced-packet pair's readiness is wrong");
+    }
+    // Descriptors ride on a message.
+    let x = create(Kind::Dgram).map_err(|_| "create failed")?;
+    let carried = passed::Passed::take(FdEntry::unix_socket(x.raw(), 0, 0))
+        .map_err(|_| "a reference to a live socket could not be taken")?;
+    let sent = send_as(a, b"r", None, Bundle::new(alloc::vec![carried]), true);
+    close(x);
+    let got = recv(b, &mut buf, true, false).map_err(|_| "recv failed")?;
+    let came = got.rights.map(Bundle::into_passed).unwrap_or_default();
+    let ok = sent == Ok(1) && came.len() == 1;
+    drop(came);
+    passed::drain();
+    if !ok || kind(x).is_some() {
+        return Err("descriptors did not ride on a sequenced packet, or were not released");
+    }
+    // The peer's close: what it sent is read, then end of file; a send to it
+    // is refused.
+    if send(a, b"last", true) != Ok(4) {
+        return Err("a send before the close failed");
+    }
+    close_early(opened, a);
+    if recv(b, &mut buf, true, false).map(|r| r.len) != Ok(4)
+        || recv(b, &mut buf, true, false).map(|r| r.len) != Ok(0)
+    {
+        return Err("a closed peer's message, then end of file, did not arrive");
+    }
+    if send(b, b"x", true) != Err(KernelError::BrokenPipe) {
+        return Err("a send to a closed peer was not BrokenPipe");
+    }
+
+    // --- by name: a connection sends before it is accepted ---
+    let listener = opened_socket(opened, Kind::SeqPacket)?;
+    bind_abstract(listener, b"slate-selftest-seqpacket").map_err(|_| "bind failed")?;
+    listen(listener, 2).map_err(|_| "listen failed")?;
+    let name = Name::Abstract(b"slate-selftest-seqpacket".to_vec());
+    let stream = opened_socket(opened, Kind::Stream)?;
+    if connect(stream, &name, true) != Err(KernelError::WrongSocketType) {
+        return Err("a stream connecting to a sequenced-packet listener was not refused");
+    }
+    let client = opened_socket(opened, Kind::SeqPacket)?;
+    connect(client, &name, true).map_err(|_| "connect failed")?;
+    if send(client, b"early", true) != Ok(5) {
+        return Err("a connection could not send before it was accepted");
+    }
+    let accepted = accept(listener, true).map_err(|_| "accept failed")?;
+    opened.push(accepted.handle);
+    let early = recv(accepted.handle, &mut buf, true, false).map_err(|_| "recv failed")?;
+    if early.len != 5 || buf.get(..5) != Some(&b"early"[..]) {
+        return Err("what a connection sent before accept did not reach the accepted socket");
+    }
+    if send(accepted.handle, b"back", true) != Ok(4)
+        || recv(client, &mut buf, true, false).map(|r| r.len) != Ok(4)
+    {
+        return Err("the accepted socket's reply did not arrive");
+    }
+    // A connection still in the backlog when the listener closes: its client
+    // reads the end.
+    let waiting = opened_socket(opened, Kind::SeqPacket)?;
+    connect(waiting, &name, true).map_err(|_| "a second connect failed")?;
+    close_early(opened, listener);
+    if recv(waiting, &mut buf, true, false).map(|r| r.len) != Ok(0) {
+        return Err("a connection in a closed listener's backlog did not read the end");
     }
     Ok(())
 }

@@ -8674,6 +8674,7 @@ fn unix_kind(kind: u64) -> Result<crate::ipc::unix_socket::Kind, KernelError> {
     match kind {
         1 => Ok(crate::ipc::unix_socket::Kind::Stream),
         2 => Ok(crate::ipc::unix_socket::Kind::Dgram),
+        5 => Ok(crate::ipc::unix_socket::Kind::SeqPacket),
         _ => Err(KernelError::InvalidArgument),
     }
 }
@@ -8827,8 +8828,10 @@ pub fn sys_unix_send(args: &super::dispatch::SyscallArgs) -> super::dispatch::Sy
         let len = usize::try_from(args.arg2).unwrap_or(usize::MAX);
         let call_max = match unix_socket::kind(h) {
             Some(Kind::Stream) => UNIX_STREAM_CALL_MAX,
-            Some(Kind::Dgram) if len > MAX_DGRAM => return Err(KernelError::MsgSize),
-            Some(Kind::Dgram) => len,
+            Some(Kind::Dgram | Kind::SeqPacket) if len > MAX_DGRAM => {
+                return Err(KernelError::MsgSize);
+            }
+            Some(Kind::Dgram | Kind::SeqPacket) => len,
             None => return Err(KernelError::InvalidHandle),
         };
         if args.arg1 == 0 && len > 0 {
@@ -8858,7 +8861,7 @@ pub fn sys_unix_recv(args: &super::dispatch::SyscallArgs) -> super::dispatch::Sy
         let h = unix_held(args.arg0)?;
         let call_max = match unix_socket::kind(h) {
             Some(Kind::Stream) => UNIX_STREAM_CALL_MAX,
-            Some(Kind::Dgram) => MAX_DGRAM,
+            Some(Kind::Dgram | Kind::SeqPacket) => MAX_DGRAM,
             None => return Err(KernelError::InvalidHandle),
         };
         let cap = usize::try_from(args.arg2).unwrap_or(usize::MAX);

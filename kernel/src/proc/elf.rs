@@ -3073,6 +3073,14 @@ pub fn build_linux_unix_socket_test_elf() -> alloc::vec::Vec<u8> {
 ///   close(w7); read(d1, buf, 16)                  ; 1, else 0x1D
 ///   read(r4, ...)                                 ; 0 (end of file), else 0x1E
 ///   sendmsg(d0, {"x", SCM_RIGHTS [999]})          ; -EBADF, else 0x1F
+///   ; sequenced packets: each send whole, the peer's close the end
+///   socketpair(AF_UNIX, SOCK_SEQPACKET, 0, [q0, q1])  ; 0, else 0x20
+///   write(q0, "abcd", 4); write(q0, "ef", 2)      ; 4, 2, else 0x21
+///   recvmsg(q1, {2 bytes})                        ; 2, MSG_TRUNC, else 0x22
+///   read(q1, buf, 16)                             ; 2 -- the next send, not the
+///                                                 ; rest of the first -- else 0x23
+///   close(q0); read(q1, buf, 16)                  ; 0 (end of file), else 0x24
+///   write(q1, "x", 1)                             ; -EPIPE, else 0x25
 ///   exit(0x5F)
 /// ```
 ///
@@ -3080,8 +3088,9 @@ pub fn build_linux_unix_socket_test_elf() -> alloc::vec::Vec<u8> {
 /// stream, close-on-exec on request, the stream's bytes stopping at the end of
 /// the stretch the descriptors rode on, a received object the process held
 /// already kept as one reference, `MSG_CTRUNC` with the surplus released, a
-/// plain `read` releasing what it cannot hand on, and `EBADF` for a
-/// descriptor not open -- and, by every pipe's end of file arriving exactly
+/// plain `read` releasing what it cannot hand on, `EBADF` for a descriptor
+/// not open, and `SOCK_SEQPACKET`'s whole messages and end of file -- and, by
+/// every pipe's end of file arriving exactly
 /// when its last writer closes, that no reference leaked or was released
 /// twice. Tagged `ELFOSABI_GNU` for the SysV stack + Linux ABI.
 #[must_use]
@@ -3110,6 +3119,7 @@ pub fn build_linux_scm_rights_test_elf() -> alloc::vec::Vec<u8> {
     const O_NONBLOCK: u32 = 0o4000;
     const MSG_CMSG_CLOEXEC: u32 = 0x4000_0000;
     const MSG_CTRUNC: u32 = 0x8;
+    const MSG_TRUNC: u32 = 0x20;
     // Stack layout (all [rsp + offset]).
     const D0: u32 = 0x00; // socketpair(DGRAM): d0, d1
     const D1: u32 = 0x04;
@@ -3121,6 +3131,8 @@ pub fn build_linux_scm_rights_test_elf() -> alloc::vec::Vec<u8> {
     const P4: u32 = 0x28;
     const BYTES: u32 = 0x30; // "abcdefxy"
     const BUF: u32 = 0x40; // 16 bytes
+    const Q0: u32 = 0x50; // socketpair(SEQPACKET): q0, q1
+    const Q1: u32 = 0x54;
     const IOV: u32 = 0x60; // the send's struct iovec
     const RIOV: u32 = 0x70; // the receive's
     const CTL_OUT: u32 = 0x80; // the send's control, 24 bytes
@@ -3444,13 +3456,48 @@ pub fn build_linux_scm_rights_test_elf() -> alloc::vec::Vec<u8> {
     cmp_rax(&mut code, -9); // EBADF
     jcc_fail(&mut code, &mut fail_jumps, JNZ, 0x1F);
 
+    // --- sequenced packets: each send whole, the peer's close the end ---
+    mov_edi_imm(&mut code, 1);
+    mov_esi_imm(&mut code, 5); // SOCK_SEQPACKET
+    mov_edx_imm(&mut code, 0);
+    lea_r10(&mut code, Q0);
+    syscall(&mut code, SOCKETPAIR);
+    cmp_rax(&mut code, 0);
+    jcc_fail(&mut code, &mut fail_jumps, JNZ, 0x20);
+    write_fd(&mut code, Q0, 0, 4);
+    cmp_rax(&mut code, 4);
+    jcc_fail(&mut code, &mut fail_jumps, JNZ, 0x21);
+    write_fd(&mut code, Q0, 4, 2);
+    cmp_rax(&mut code, 2);
+    jcc_fail(&mut code, &mut fail_jumps, JNZ, 0x21);
+    recv_msg(&mut code, 0);
+    store_imm64(&mut code, RIOV + 8, 2);
+    recvmsg(&mut code, Q1, 0);
+    cmp_rax(&mut code, 2);
+    jcc_fail(&mut code, &mut fail_jumps, JNZ, 0x22);
+    test_mem(&mut code, RMSG + 48, MSG_TRUNC);
+    jcc_fail(&mut code, &mut fail_jumps, JZ, 0x22);
+    read_fd(&mut code, Q1);
+    cmp_rax(&mut code, 2);
+    jcc_fail(&mut code, &mut fail_jumps, JNZ, 0x23);
+    store_imm(&mut code, BUF + 2, 0);
+    cmp_mem(&mut code, BUF, EF);
+    jcc_fail(&mut code, &mut fail_jumps, JNZ, 0x23);
+    close_fd(&mut code, Q0);
+    read_fd(&mut code, Q1);
+    cmp_rax(&mut code, 0);
+    jcc_fail(&mut code, &mut fail_jumps, JNZ, 0x24);
+    write_fd(&mut code, Q1, 6, 1);
+    cmp_rax(&mut code, -32); // EPIPE
+    jcc_fail(&mut code, &mut fail_jumps, JNZ, 0x25);
+
     // exit(0x5F)
     mov_edi_imm(&mut code, 0x5F);
     syscall(&mut code, EXIT);
 
     // One failure exit per sentinel.
     let mut fail_at: alloc::vec::Vec<(u8, usize)> = alloc::vec::Vec::new();
-    for sentinel in 0x01u8..=0x1F {
+    for sentinel in 0x01u8..=0x25 {
         fail_at.push((sentinel, code.len()));
         mov_edi_imm(&mut code, u32::from(sentinel));
         syscall(&mut code, EXIT);

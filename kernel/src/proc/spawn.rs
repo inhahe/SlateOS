@@ -22928,7 +22928,10 @@ pub fn self_test_linux_scm_rights() -> KernelResult<()> {
              \"abcd\", not one descriptor, the bytes after, EAGAIN after closing ours, no end \
              of file after closing the passed one; 0x16-0x1A room for one of two: pipe2, \
              sendmsg, recvmsg, MSG_CTRUNC and the message, no end of file; 0x1B-0x1E read(2): \
-             pipe2, sendmsg, read, no end of file; 0x1F a descriptor not open not EBADF)",
+             pipe2, sendmsg, read, no end of file; 0x1F a descriptor not open not EBADF; \
+             0x20-0x25 SOCK_SEQPACKET: socketpair, the two sends, a short recvmsg not cut \
+             with MSG_TRUNC, the next read not the next message, no end of file after the \
+             peer closed, a send to it not EPIPE)",
             exit_code,
             OK_EXIT
         );
@@ -22937,7 +22940,8 @@ pub fn self_test_linux_scm_rights() -> KernelResult<()> {
     serial_println!(
         "[spawn]   Linux SCM_RIGHTS (ring 3: a datagram and a stream carry a pipe's write \
          end, MSG_CMSG_CLOEXEC, the stream's marked bytes, a held object kept once, \
-         MSG_CTRUNC, read(2) releasing, EBADF, every pipe's end of file on time): OK"
+         MSG_CTRUNC, read(2) releasing, EBADF, every pipe's end of file on time; \
+         SOCK_SEQPACKET's whole messages and end of file): OK"
     );
     Ok(())
 }

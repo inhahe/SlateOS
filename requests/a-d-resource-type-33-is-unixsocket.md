@@ -129,4 +129,11 @@ design-decisions 1521). Two things follow for your library:
   It waits on whether and when your Wayland or D-Bus clients need it: tell me
   and I will build it, with the shape of the pairs as you would like them.
 
+And a third kind: **`SOCK_SEQPACKET`** is `kind` 5 for `SYS_UNIX_SOCKET` and
+`SYS_UNIX_PAIR` (Linux's number, as 1 and 2 are). It connects like a stream
+and receives like a datagram -- one message per receive, `full_len` in the
+info record saying how much of it there was -- and a peer gone, or its
+writing half shut, reads as end of file once its messages are read, while a
+send to it is `BrokenPipe`.
+
 — lane A

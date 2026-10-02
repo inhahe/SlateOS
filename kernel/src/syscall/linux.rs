@@ -38305,16 +38305,12 @@ fn sys_socket(args: &SyscallArgs) -> SyscallResult {
             _ => {}
         }
     }
-    // AF_UNIX stream and datagram sockets are the kernel's own
-    // (`ipc::unix_socket`). The gates above have checked the protocol (0 for
-    // AF_UNIX) and the flag bits. SOCK_SEQPACKET (5) still falls through to
-    // ENOSYS.
-    if domain == 1 && matches!(sock_type, 1 | 2) {
-        let kind = if sock_type == 1 {
-            crate::ipc::unix_socket::Kind::Stream
-        } else {
-            crate::ipc::unix_socket::Kind::Dgram
-        };
+    // AF_UNIX stream, datagram and sequenced-packet sockets are the kernel's
+    // own (`ipc::unix_socket`). The gates above have checked the protocol (0
+    // for AF_UNIX) and the flag bits.
+    if domain == 1
+        && let Some(kind) = unix_kind_of(sock_type)
+    {
         return match crate::ipc::unix_socket::create(kind) {
             Ok(h) => unix_install(h, sock_flags),
             Err(e) => unix_errno(e),
@@ -39060,12 +39056,9 @@ fn sys_socketpair(args: &SyscallArgs) -> SyscallResult {
     if let Err(e) = crate::mm::user::validate_user_write(args.arg3, 8) {
         return linux_err(linux_errno_for(e));
     }
-    // Stream and datagram pairs (`ipc::unix_socket::pair`); SOCK_SEQPACKET
-    // stays ENOSYS.
-    let kind = match sock_type {
-        1 => crate::ipc::unix_socket::Kind::Stream,
-        2 => crate::ipc::unix_socket::Kind::Dgram,
-        _ => return linux_err(errno::ENOSYS),
+    // Stream, datagram and sequenced-packet pairs (`ipc::unix_socket::pair`).
+    let Some(kind) = unix_kind_of(sock_type) else {
+        return linux_err(errno::ENOSYS);
     };
     let (a, b) = match crate::ipc::unix_socket::pair(kind) {
         Ok(p) => p,
@@ -39106,19 +39099,19 @@ fn sys_socketpair(args: &SyscallArgs) -> SyscallResult {
 // ---------------------------------------------------------------------------
 // AF_UNIX: Unix-domain sockets by name (`ipc::unix_socket`)
 //
-// socket(AF_UNIX, SOCK_STREAM | SOCK_DGRAM), socketpair of either, and every
-// call on the descriptors they give: bind to a path or an abstract name,
-// listen, accept, connect, send/recv in all their forms, the two names, the
-// peer's credentials, shutdown. The objects and their names are
+// socket(AF_UNIX, SOCK_STREAM | SOCK_DGRAM | SOCK_SEQPACKET) -- SOCK_RAW
+// being a datagram socket, as unix_create makes it -- socketpair of each, and
+// every call on the descriptors they give: bind to a path or an abstract
+// name, listen, accept, connect, send/recv in all their forms, the two names,
+// the peer's credentials, shutdown. The objects and their names are
 // `ipc::unix_socket`'s; this is the Linux ABI around them -- `struct
 // sockaddr_un`, the flags, and Linux's error for each refusal.
 //
 // Ancillary data: a receive on a socket with SO_PASSCRED on carries the
 // sender's credentials (SCM_CREDENTIALS) -- as the kernel recorded them, or
 // as the sender stated them on its send, checked as Linux checks them (its
-// own; for root, any live process's).
-// Not yet: SOCK_SEQPACKET (ENOSYS, as before); SCM_RIGHTS, refused with
-// EOPNOTSUPP rather than dropped.
+// own; for root, any live process's) -- and descriptors travel both ways
+// (SCM_RIGHTS: `take_rights` on a send, `install_rights` on a receive).
 // ---------------------------------------------------------------------------
 
 /// `AF_UNIX` (`AF_LOCAL`).
@@ -39309,6 +39302,19 @@ fn unix_nonblocking(entry: &FdEntry, msg_flags: u32) -> bool {
     entry.status_flags & oflags::O_NONBLOCK != 0 || msg_flags & msgflags::MSG_DONTWAIT != 0
 }
 
+/// The `ipc::unix_socket` kind a Linux `SOCK_*` type names: `SOCK_STREAM`
+/// (1), `SOCK_DGRAM` (2) -- and `SOCK_RAW` (3), which Linux's `unix_create`
+/// makes a datagram socket -- and `SOCK_SEQPACKET` (5).
+fn unix_kind_of(sock_type: u32) -> Option<crate::ipc::unix_socket::Kind> {
+    use crate::ipc::unix_socket::Kind;
+    match sock_type {
+        1 => Some(Kind::Stream),
+        2 | 3 => Some(Kind::Dgram),
+        5 => Some(Kind::SeqPacket),
+        _ => None,
+    }
+}
+
 /// The socket an `AF_UNIX` descriptor holds.
 fn unix_handle(entry: &FdEntry) -> crate::ipc::unix_socket::UnixHandle {
     crate::ipc::unix_socket::UnixHandle::from_raw(entry.raw_handle)
@@ -39410,8 +39416,10 @@ fn unix_send_bytes(
     let len = usize::try_from(len).unwrap_or(usize::MAX);
     let take = match unix_socket::kind(h) {
         Some(Kind::Stream) => len.min(UNIX_STREAM_CHUNK),
-        Some(Kind::Dgram) if len > MAX_DGRAM => return Err(linux_err(errno::EMSGSIZE)),
-        Some(Kind::Dgram) => len,
+        Some(k) if k.keeps_messages() && len > MAX_DGRAM => {
+            return Err(linux_err(errno::EMSGSIZE));
+        }
+        Some(_) => len,
         None => return Err(linux_err(errno::EBADF)),
     };
     crate::mm::user::read_user_vec(buf, take, take).map_err(|e| linux_err(linux_errno_for(e)))
@@ -39461,7 +39469,7 @@ fn unix_recv(
     let h = unix_handle(entry);
     let limit = match unix_socket::kind(h) {
         Some(Kind::Stream) => UNIX_STREAM_CHUNK,
-        Some(Kind::Dgram) => MAX_DGRAM,
+        Some(Kind::Dgram | Kind::SeqPacket) => MAX_DGRAM,
         None => return linux_err(errno::EBADF),
     };
     let room = usize::try_from(cap).unwrap_or(usize::MAX).min(limit);
@@ -39686,7 +39694,7 @@ fn unix_sendmsg(entry: &FdEntry, msg_ptr: u64, flags: u32) -> SyscallResult {
     let h = unix_handle(entry);
     let limit = match unix_socket::kind(h) {
         Some(Kind::Stream) => UNIX_STREAM_CHUNK,
-        Some(Kind::Dgram) => {
+        Some(Kind::Dgram | Kind::SeqPacket) => {
             let total = iovs
                 .iter()
                 .fold(0usize, |acc, &(_, len)| acc.saturating_add(len));
@@ -39901,7 +39909,7 @@ fn unix_recvmsg(entry: &FdEntry, msg_ptr: u64, flags: u32) -> SyscallResult {
     let h = unix_handle(entry);
     let limit = match unix_socket::kind(h) {
         Some(Kind::Stream) => UNIX_STREAM_CHUNK,
-        Some(Kind::Dgram) => MAX_DGRAM,
+        Some(Kind::Dgram | Kind::SeqPacket) => MAX_DGRAM,
         None => return linux_err(errno::EBADF),
     };
     // Validate every destination first, so a bad pointer loses nothing.
@@ -40358,7 +40366,7 @@ fn sys_accept(args: &SyscallArgs) -> SyscallResult {
 fn unix_accept(entry: &FdEntry, addr_ptr: u64, addrlen_ptr: u64, flags: u32) -> SyscallResult {
     use crate::ipc::unix_socket::{self, Kind};
     let h = unix_handle(entry);
-    if unix_socket::kind(h) == Some(Kind::Dgram) {
+    if unix_socket::kind(h).is_some_and(|k| !k.connects()) {
         return linux_err(errno::EOPNOTSUPP);
     }
     let accepted = match unix_socket::accept(h, unix_nonblocking(entry, 0)) {
@@ -42624,6 +42632,7 @@ fn unix_getsockopt(
         so::SO_TYPE => match unix_socket::kind(h) {
             Some(Kind::Stream) => int(so::SOCK_STREAM),
             Some(Kind::Dgram) => int(so::SOCK_DGRAM),
+            Some(Kind::SeqPacket) => int(5), // SOCK_SEQPACKET
             None => return linux_err(errno::EBADF),
         },
         so::SO_DOMAIN => int(i32::from(AF_UNIX)),
@@ -107343,8 +107352,7 @@ pub fn self_test() -> crate::error::KernelResult<()> {
             //   A. socket(AF_UNIX=1, STREAM=1, 1=PF_UNIX)   -> EBADF
             //      (was: EPROTONOSUPPORT; post: accepted)
             //   B. socket(AF_UNIX, DGRAM=2, 1)              -> EBADF
-            //   C. socket(AF_UNIX, SEQPACKET=5, 1)          -> ENOSYS
-            //      (accepted; no SOCK_SEQPACKET yet)
+            //   C. socket(AF_UNIX, SEQPACKET=5, 1)          -> EBADF
             //   D. Regression: socket(AF_UNIX, STREAM, 0)   -> EBADF
             //      (already accepted; gate 5 skipped for proto=0)
             //   E. Regression: socket(AF_UNIX, STREAM, 2)   -> EPROTONOSUPPORT
@@ -107397,9 +107405,11 @@ pub fn self_test() -> crate::error::KernelResult<()> {
                         arg4: 0,
                         arg5: 0,
                     };
-                    if dispatch_linux(nr::SOCKET, &a).value != -i64::from(errno::ENOSYS) {
+                    if dispatch_linux(nr::SOCKET, &a).value
+                        != i64::from(errno::EBADF).wrapping_neg()
+                    {
                         serial_println!(
-                            "[syscall/linux]   FAIL: socket(AF_UNIX,SEQPACKET,PF_UNIX) not ENOSYS"
+                            "[syscall/linux]   FAIL: socket(AF_UNIX,SEQPACKET,PF_UNIX) not EBADF"
                         );
                         return Err(KernelError::InternalError);
                     }
@@ -107891,7 +107901,8 @@ pub fn self_test() -> crate::error::KernelResult<()> {
                     }
                     // F: Cross-family — AF_UNIX / SOCK_RAW / 0.  AF_UNIX
                     // doesn't use inetsw; SOCK_RAW is aliased to DGRAM in
-                    // unix_create.
+                    // unix_create, so a datagram socket is made -- and, in
+                    // kernel context, closed again: EBADF.
                     let a = SyscallArgs {
                         arg0: 1,
                         arg1: 3,
@@ -107900,9 +107911,11 @@ pub fn self_test() -> crate::error::KernelResult<()> {
                         arg4: 0,
                         arg5: 0,
                     };
-                    if dispatch_linux(nr::SOCKET, &a).value != -i64::from(errno::ENOSYS) {
+                    if dispatch_linux(nr::SOCKET, &a).value
+                        != i64::from(errno::EBADF).wrapping_neg()
+                    {
                         serial_println!(
-                            "[syscall/linux]   FAIL: socket(AF_UNIX,RAW,0) cross-family regression not ENOSYS"
+                            "[syscall/linux]   FAIL: socket(AF_UNIX,RAW,0) cross-family regression not EBADF"
                         );
                         return Err(KernelError::InternalError);
                     }
@@ -108597,8 +108610,7 @@ pub fn self_test() -> crate::error::KernelResult<()> {
             //   A. socketpair(AF_UNIX, STREAM, PF_UNIX=1, sv)    -> EBADF
             //      (was: EPROTONOSUPPORT; post: accepted)
             //   B. socketpair(AF_UNIX, DGRAM, PF_UNIX, sv)       -> EBADF
-            //   C. socketpair(AF_UNIX, SEQPACKET, PF_UNIX, sv)   -> ENOSYS
-            //      (accepted; no SOCK_SEQPACKET yet)
+            //   C. socketpair(AF_UNIX, SEQPACKET, PF_UNIX, sv)   -> EBADF
             //   D. Regression: socketpair(AF_UNIX, STREAM, 0, sv) -> EBADF
             //   E. Regression: socketpair(AF_UNIX, STREAM, 2, sv) -> EPROTONOSUPPORT
             //   F. Regression: socketpair(AF_UNIX, STREAM, -1, sv) -> EPROTONOSUPPORT
@@ -108652,9 +108664,11 @@ pub fn self_test() -> crate::error::KernelResult<()> {
                         arg4: 0,
                         arg5: 0,
                     };
-                    if dispatch_linux(nr::SOCKETPAIR, &a).value != -i64::from(errno::ENOSYS) {
+                    if dispatch_linux(nr::SOCKETPAIR, &a).value
+                        != i64::from(errno::EBADF).wrapping_neg()
+                    {
                         serial_println!(
-                            "[syscall/linux]   FAIL: socketpair(AF_UNIX,SEQPACKET,PF_UNIX) not ENOSYS"
+                            "[syscall/linux]   FAIL: socketpair(AF_UNIX,SEQPACKET,PF_UNIX) not EBADF"
                         );
                         return Err(KernelError::InternalError);
                     }
@@ -109167,7 +109181,8 @@ pub fn self_test() -> crate::error::KernelResult<()> {
                     }
                     // F: Cross-family — AF_UNIX / SOCK_RAW / 0 / sv.  AF_UNIX
                     // doesn't use inetsw; SOCK_RAW aliased to DGRAM in
-                    // unix_create.  Reaches terminal ENOSYS.
+                    // unix_create: a datagram pair is made, and in kernel
+                    // context closed again (EBADF).
                     let a = SyscallArgs {
                         arg0: 1,
                         arg1: 3,
@@ -109176,9 +109191,11 @@ pub fn self_test() -> crate::error::KernelResult<()> {
                         arg4: 0,
                         arg5: 0,
                     };
-                    if dispatch_linux(nr::SOCKETPAIR, &a).value != -i64::from(errno::ENOSYS) {
+                    if dispatch_linux(nr::SOCKETPAIR, &a).value
+                        != i64::from(errno::EBADF).wrapping_neg()
+                    {
                         serial_println!(
-                            "[syscall/linux]   FAIL: socketpair(AF_UNIX,RAW,0,sv) cross-family regression not ENOSYS"
+                            "[syscall/linux]   FAIL: socketpair(AF_UNIX,RAW,0,sv) cross-family regression not EBADF"
                         );
                         return Err(KernelError::InternalError);
                     }

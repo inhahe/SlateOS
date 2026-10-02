@@ -1625,11 +1625,21 @@ def wrapper_env():
     return env
 
 
+def private_tmp_env(tmp):
+    """`wrapper_env()` with every temp-directory variable pointed at `tmp`, so a
+    case can see what the wrapper leaves behind there. Forward slashes: MSYS's
+    `mktemp -t` reads `TMPDIR` as it stands."""
+    env = wrapper_env()
+    for name in ("TMPDIR", "TMP", "TEMP"):
+        env[name] = tmp.replace("\\", "/")
+    return env
+
+
 #: How long one wrapper invocation may take. A dry run parses arguments and
 #: prints a plan; on any host with a core to spare that is a few seconds.
 WRAPPER_TIMEOUT_S = 120
 
-def run_wrapper(args, dry_run=True):
+def run_wrapper(args, dry_run=True, env=None):
     """`canary-load-test.sh <args> [--dry-run]` -> (returncode, stdout+stderr).
 
     With no MSYS bash this returns a sentinel rather than raising, so the
@@ -1650,7 +1660,7 @@ def run_wrapper(args, dry_run=True):
         proc = subprocess.run(
             [BASH, CANARY_LOAD_TEST, *args] + (["--dry-run"] if dry_run else []),
             capture_output=True, text=True, cwd=REPO_ROOT,
-            timeout=WRAPPER_TIMEOUT_S, env=wrapper_env(),
+            timeout=WRAPPER_TIMEOUT_S, env=env if env is not None else wrapper_env(),
         )
     except subprocess.TimeoutExpired:
         reason = note_timeout("`canary-load-test.sh`", WRAPPER_TIMEOUT_S)
@@ -1814,6 +1824,28 @@ live_check_true("a dry run does not delete the previous run's serial log",
            os.path.exists(serial_path) == before
            and (not before or os.path.getsize(serial_path) == before_size),
            f"existed={before} size={before_size}")
+
+# Nothing is left in the temp directory: not by a dry run, and not by a window
+# the names guard refuses -- which exits 2 before the trap that removes the
+# temp files was set, until 2026-10-02, and a dry run always left its empty boot
+# log (1,940 of them, 88 empty history backups and 32 control directories had
+# piled up since 2026-09-25, found by the operator's docs session).
+def leaves_nothing(args, dry_run=True):
+    """Run the wrapper with a private temp directory; (rc, what it left there)."""
+    with tempfile.TemporaryDirectory(prefix="canary-load-tmp-") as tmp:
+        rc, out = run_wrapper(args, dry_run=dry_run, env=private_tmp_env(tmp))
+        return rc, sorted(os.listdir(tmp)), out
+
+
+rc, left, out = leaves_nothing(["--at", WINDOW_AT, "--until", WINDOW_UNTIL])
+live_check_true("a dry run leaves nothing in the temp directory",
+                rc is not None and left == [], f"rc={rc} left={left}; out={out[-300:]}")
+if NAMES is not None:
+    refused = next((n for n in sorted(NAMES[0]) if not usable_bound(n)), None)
+    if refused is not None:
+        rc, left, out = leaves_nothing(["--at", refused])
+        live_check_true("a window the names guard refuses leaves nothing either",
+                        rc == 2 and left == [], f"rc={rc} left={left}; out={out[-300:]}")
 
 # And the registered P23 command itself, verbatim from known-issues.md. This is
 # the specific regression that motivated all of the above: if this line stops

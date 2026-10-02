@@ -509,7 +509,7 @@ def main() -> int:
                       % (test.__name__, type(exc).__name__, exc))
                 FAILURES.append(test.__name__)
     finally:
-        shutil.rmtree(tmp, ignore_errors=True)
+        gitenv.remove_tree(tmp)
 
     if FAILURES:
         print("FAILED: %d of the checks above" % len(FAILURES))

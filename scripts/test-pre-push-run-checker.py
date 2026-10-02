@@ -49,6 +49,12 @@ import sys
 import tempfile
 from pathlib import Path
 
+# At the top, not where the guard group first wanted it: every scratch tree
+# below is removed with it (`gitenv.remove_tree`, which takes git's read-only
+# objects too), in `finally` blocks that may run before that group does.
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import gitenv  # noqa: E402
+
 ROOT = Path(__file__).resolve().parent.parent
 LIB = ROOT / "scripts" / "run-checker.sh"
 HOOK = ROOT / "scripts" / "hooks" / "pre-push"
@@ -1379,7 +1385,7 @@ def main() -> int:
                        capture_output=True)
 
     finally:
-        shutil.rmtree(tmp_root, ignore_errors=True)
+        gitenv.remove_tree(tmp_root)
 
     print()
     if failures:

@@ -473,6 +473,9 @@
 //! - [`ls`] — `ls`, `dir` and `vdir`: `ls.c` built three times.
 //! - [`mbswidth`] — gnulib's `mbswidth`, the columns a string occupies, for
 //!   `df`'s column widths and `pr`'s centred page header.
+//! - [`mkdirp`] — gnulib's `mkdir-p.c`, `mkancesdirs.c` and `dirchownmod.c`:
+//!   a directory and its missing ancestors, then its owner and mode, for
+//!   `install -d` and `install -D`.
 //! - [`parse_datetime`] — gnulib's `parse-datetime`, the date language of
 //!   `date -d`, `touch -d` and `find -newermt`: upstream's Bison tables and
 //!   actions, not a reimplementation of the forms they accept.
@@ -518,6 +521,7 @@ pub mod human;
 pub mod locale;
 pub mod ls;
 pub mod mbswidth;
+pub mod mkdirp;
 pub mod overwrite;
 pub mod parse_datetime;
 pub mod pathname;
@@ -553,7 +557,9 @@ pub mod umask;
 // it with a private parser that tried the NUMBER FIRST. POSIX requires the
 // name first (GNU's manual, "Disambiguating names and IDs"), which is why the
 // `+` escape exists at all — so `install -o 1000` disagreed with `chown 1000`
-// on any system with an account named `1000`.
+// on any system with an account named `1000`. (Since 2026-10-02 `install` is a
+// coreutils bin again and follows `install.c`'s own `get_ids` -- the name, then
+// a number in any base -- so this crate's one user is coreutils' `chown` side.)
 pub use userspec;
 pub mod utimecmp;
 pub mod utsname;

@@ -61,7 +61,6 @@ userspace/ifconfig/src/main.rs:argv-as-string
 userspace/indexer/src/main.rs:argv-as-string
 userspace/inetd/src/main.rs:argv-as-string
 userspace/inotify/src/main.rs:argv-as-string
-userspace/install/src/main.rs:argv-as-string
 userspace/iostat/src/main.rs:argv-as-string
 userspace/ip/src/main.rs:argv-as-string
 userspace/ipcalc/src/main.rs:argv-as-string

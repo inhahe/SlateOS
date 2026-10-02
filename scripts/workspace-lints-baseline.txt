@@ -76,7 +76,6 @@ userspace/hwinfo  # bare deny(clippy::all)
 userspace/ifconfig  # bare deny(clippy::all)
 userspace/indexer
 userspace/inotify  # bare deny(clippy::all)
-userspace/install
 userspace/ip
 userspace/ipcalc  # bare deny(clippy::all)
 userspace/iptables  # bare deny(clippy::all)

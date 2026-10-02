@@ -122,7 +122,7 @@ two disagree.
 | `indexer` | Background File Indexer |  |  |  |
 | `inetd` | Internet Super-Server Daemon (inetd) |  |  |  |
 | `inotifywait` | Filesystem event monitoring utility. |  | `inotify` | `inotifywatch` *(not installed)* |
-| `install` | Copy files and set attributes |  |  |  |
+| `install` | Copy files and set their attributes. |  | `coreutils` |  |
 | `iostat` | I/O Statistics Utility |  |  |  |
 | `ip` | Network Configuration Utility |  |  |  |
 | `ipcalc` | IP Subnet Calculator (`ipcalc`) |  |  |  |

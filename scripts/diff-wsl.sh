@@ -131,6 +131,7 @@
 # | `DIFF_GNU_CACHE` | `$HOME/.cache/slateos-diff-gnu` | where the tarball is downloaded and unpacked |
 # | `DIFF_GNU_EXTRA` | (none) | programs upstream builds only on request (`arch`, `hostname`, `coreutils`: its `no_install__progs`), made in the built tree with `make src/NAME`. Without it `arch` has no reference at all |
 # | `DIFF_GNU_VERIFY_WITH` | the first `DIFF_BINS` entry | which binary in the built tree is asked for its `--version`. For the one utility that cannot answer; see "Why a built reference" below |
+# | `DIFF_GNU_NAME`  | `DIFF_PROG` | the reference's file name in the built tree, for the program upstream builds under another name: `install` is `src/ginstall`, so that it does not shadow its Makefile's own `install` target. It is still run as `DIFF_PROG`, so its diagnostics say `install:`. Single-binary harnesses only |
 # | `DIFF_NEED`      | (none) | other commands that must exist inside WSL, or the run is skipped rather than run without them |
 # | `DIFF_NO_REF`    | (unset) | do not look for a reference; the harness finds its own |
 # | `DIFF_NO_BINDIR` | (unset) | do not build the `PATH` directories; the harness makes its own. See below — this is almost never what a harness wants |
@@ -289,9 +290,12 @@ fi
 # the coreutils tree to ask. `DIFF_BINS` has already been defaulted to
 # `DIFF_PROG` above, so a single-binary harness gets exactly what it would have
 # either way.
+: "${DIFF_GNU_NAME:=$DIFF_PROG}"
 if [ -z "${DIFF_GNU_VERIFY_WITH:-}" ]; then
   for diff_w in $DIFF_BINS; do DIFF_GNU_VERIFY_WITH=$diff_w; break; done
   : "${DIFF_GNU_VERIFY_WITH:=$DIFF_PROG}"
+  # The subject itself, under the name the built tree has it by.
+  [ "$DIFF_GNU_VERIFY_WITH" = "$DIFF_PROG" ] && DIFF_GNU_VERIFY_WITH=$DIFF_GNU_NAME
 fi
 : "${DIFF_NEED:=}"
 
@@ -878,9 +882,9 @@ if [ -z "${DIFF_NO_REF:-}" ]; then
     # No fallback to `PATH` here, on purpose: a harness that asked for 9.4 and
     # silently got Ubuntu's is the one outcome this knob exists to prevent, and
     # it would look green.
-    gnu_real=$gnu_dir/$DIFF_PROG
+    gnu_real=$gnu_dir/$DIFF_GNU_NAME
     if [ ! -x "$gnu_real" ]; then
-      echo "$DIFF_PROG-diff: coreutils $DIFF_GNU_SOURCE has no $DIFF_PROG at $gnu_real" >&2
+      echo "$DIFF_PROG-diff: coreutils $DIFF_GNU_SOURCE has no $DIFF_GNU_NAME at $gnu_real" >&2
       exit 1
     fi
     diff_gnu_verify

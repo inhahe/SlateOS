@@ -2137,7 +2137,27 @@ spawns another (`xargs`, `awk`'s `system()`, `find -exec`). Getting this wrong
 is a silent, tree-wide change to what 50 harnesses measure, so it wants doing
 deliberately with the two-probe rule rather than in passing.
 
-## TD-B-INSTALL-REIMPLEMENTS-A-BACKUP-POLICY-COREUTILS-ALREADY-HAS (lane B, 2026-09-11)
+## TD-B-INSTALL-REIMPLEMENTS-A-BACKUP-POLICY-COREUTILS-ALREADY-HAS (lane B, 2026-09-11) — **FIXED** 2026-10-02
+
+**Fixed** by the route this entry pointed at: `install` is a coreutils bin
+again, `userspace/coreutils/src/bin/install.rs`, a port of GNU coreutils
+9.4's `install.c` on the copy engine `cp` and `mv` share (with GNU's
+`set_mode`, which only `install` sets, added to it) and on a new
+`coreutils::mkdirp` (gnulib's `mkdir-p.c`, `mkancesdirs.c` and
+`dirchownmod.c`). Backups are `backup.rs`'s, so numbered backups,
+`--backup=CONTROL`, `$VERSION_CONTROL` and `$SIMPLE_BACKUP_SUFFIX` all work,
+and argv is bytes. `userspace/install` is deleted (§1005).
+
+Measured, not assumed: `scripts/install-diff.sh` (new; the files left behind
+are compared, not just the output) found the standalone agreeing with GNU on
+22 of 173 cases, and finds the port agreeing on all 189 it has now --
+modes and umask, `-d`, `-D`, `-t`, `-T`, every backup word and both
+variables, `-C`, `-p`, `-o`/`-g`, `-s` with a strip program that records its
+arguments, `-v`, the SELinux options on a kernel without it, one file under
+two names, and names with a newline or a non-UTF-8 byte. `cp-diff.sh`
+(584/0/30) and `mv-diff.sh` (363/0/10) did not move across the engine change.
+
+What follows is the entry as it was filed.
 
 **In short:** `userspace/install` has its own backup handling, and
 `userspace/coreutils/src/backup.rs` has a complete, correct one that `cp`, `mv`
@@ -2178,6 +2198,39 @@ needed.
 in install's backup path, then looking for the same shape elsewhere and finding
 that the correct byte-wise implementation had existed in `backup.rs` the whole
 time.
+
+## TD-B-MKDIRP-WALKS-BY-NAME (lane B, 2026-10-02) — **Status: OPEN**
+
+**In short:** `install -d` and `install -D` make a directory's missing
+ancestors one whole name at a time (`a`, then `a/b`, then `a/b/c`), where GNU
+steps into each directory it makes and creates the next one inside it. Two
+things follow that GNU does not have: a name longer than 4096 bytes cannot be
+made (`File name too long`), and if someone else replaces a directory with a
+symbolic link between two of those steps, the next directory is created
+wherever the link points.
+
+**Where.** `userspace/coreutils/src/mkdirp.rs`: `mkancesdirs` and its
+`step_into`. The *last* step -- giving the directory its owner and mode -- is
+already done GNU's way, through a descriptor opened `O_NOFOLLOW` when this
+call made the directory, so the step that hands out permissions cannot be
+redirected; it is only the walk above it that goes by name.
+
+**Why it is not the descriptor walk already.** A descriptor walk needs to
+step into a directory its user may *search* but not *read* -- `chdir` can, and
+an `O_RDONLY` open cannot; `/home/someone` at `0711` is the ordinary case, and
+`install -D f /home/someone/sub/f` must work. That wants `O_PATH` (or
+`O_SEARCH`) and `mkdirat`/`openat` relative to such a descriptor, which
+`coreutils::dirfd` does not offer: it was built for removal walks, which open
+every directory to read it anyway. Whether SlateOS's `openat` honours
+`O_PATH` has not been checked.
+
+**The proper fix:** give `dirfd::Dir` a search-only descend (`O_PATH`, falling
+back as gnulib's `savewd_chdir` does on `EACCES`) and a follow/no-follow
+choice, then make `mkancesdirs` keep a `Dir` per step -- `O_NOFOLLOW` for a
+directory it just made, following for one it found, exactly upstream's
+`SAVEWD_CHDIR_NOFOLLOW` rule. `scripts/install-diff.sh` cannot see the
+difference (it has no long names and no racing writer), so the test is a
+unit test with a 5000-byte name and one that swaps a component mid-walk.
 
 ## TD-B-INSTALLS-BACKUP-RENAMES-TO-A-PATH-IT-INVENTED (lane B, 2026-09-11) -- FIXED 2026-09-11
 

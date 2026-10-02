@@ -21,6 +21,9 @@ fn main() {
     // stem, `x86_64-slateos`, for our custom target). Only the slateos target
     // wants the bare-metal linker script.
     let target = std::env::var("TARGET").unwrap_or_default();
+    if target.contains("windows") {
+        embed_as_invoker_manifest();
+    }
     if !target.contains("slateos") {
         return;
     }
@@ -30,4 +33,26 @@ fn main() {
     let manifest = env!("CARGO_MANIFEST_DIR");
     let script = format!("{manifest}/linker.ld");
     println!("cargo:rustc-link-arg=-T{script}");
+}
+
+/// On a Windows host, give every binary an `asInvoker` application manifest.
+///
+/// Windows' installer detection demands elevation for an executable whose
+/// name contains an installer keyword -- `install`, `setup`, `update`,
+/// `patch` -- and this crate builds `install.exe` and `patch.exe`, and
+/// `cargo test` runs them as `install-<hash>.exe` and `patch-<hash>.exe`.
+/// Where that detection is on, the harness cannot even start: "The requested
+/// operation requires elevation" (os error 740). `userspace/install` carried
+/// this manifest for its one binary before `install` moved here; the
+/// manifest is harmless for the rest, since `asInvoker` is what any of them
+/// would be run as anyway. `embed-manifest` writes the resource in pure Rust,
+/// so no `windres` is needed.
+fn embed_as_invoker_manifest() {
+    if let Err(e) =
+        embed_manifest::embed_manifest(embed_manifest::new_manifest("SlateOS.coreutils"))
+    {
+        // A build that cannot embed it still builds; it is a host-only
+        // convenience, and the warning says why a test may then need elevation.
+        println!("cargo:warning=could not embed the asInvoker manifest: {e}");
+    }
 }

@@ -519,7 +519,7 @@ const _: () = assert!(core::mem::size_of::<CStat>() == 144);
 /// The `open` flags used here, as Linux numbers them and as
 /// `posix/src/fcntl.rs` declares them.
 #[cfg(unix)]
-mod oflag {
+pub(crate) mod oflag {
     pub const RDONLY: i32 = 0;
     pub const WRONLY: i32 = 1;
     pub const CREAT: i32 = 0o100;

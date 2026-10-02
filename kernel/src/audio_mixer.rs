@@ -122,6 +122,9 @@ struct StreamSlot {
     volume: AtomicU8,
     /// Mute flag.
     muted: AtomicBool,
+    /// Paused (ALSA `PAUSE`): the mix leaves this stream's ring alone, so
+    /// what is queued waits rather than being played or discarded.
+    paused: AtomicBool,
     /// Stream name (for diagnostics).
     ///
     /// `PreemptSpinMutex` leaf lock (Q24 / design-decisions §70): a fixed-size
@@ -216,6 +219,16 @@ static TOTAL_OPENED: AtomicU32 = AtomicU32::new(0);
 /// Total frames mixed (for stats).
 static TOTAL_FRAMES_MIXED: AtomicU32 = AtomicU32::new(0);
 
+/// Tasks waiting for room in a stream's ring, or for it to empty: blocked
+/// writers, `DRAIN`, and `poll`ers of a playback descriptor. The output pump
+/// ([`crate::audio_out`]) wakes them all each time it takes from the rings,
+/// and each re-checks its own stream.
+///
+/// A leaf lock: nothing is taken under it, and the wake happens after it is
+/// released (the [`crate::ipc::waiters`] contract).
+static ROOM_WAITERS: PreemptSpinMutex<crate::ipc::waiters::WaiterSet> =
+    PreemptSpinMutex::named(crate::ipc::waiters::WaiterSet::new(), b"MIXER_ROOM_WAITERS");
+
 /// Stream slots (fixed array — no heap allocation).
 static STREAMS: [StreamSlot; MAX_STREAMS] = [
     StreamSlot::new(),
@@ -234,6 +247,7 @@ impl StreamSlot {
             active: AtomicBool::new(false),
             volume: AtomicU8::new(100),
             muted: AtomicBool::new(false),
+            paused: AtomicBool::new(false),
             name: PreemptSpinMutex::named([0u8; 32], b"MIXER_STREAM_NAME"),
             ring: PreemptSpinMutex::named(RingBuffer::new(), b"MIXER_STREAM_RING"),
         }
@@ -259,6 +273,7 @@ pub fn open_stream(name: &str) -> KernelResult<StreamId> {
             // Initialize the slot.
             slot.volume.store(100, Ordering::Relaxed);
             slot.muted.store(false, Ordering::Relaxed);
+            slot.paused.store(false, Ordering::Relaxed);
 
             // Copy name, truncating on a character boundary rather than a byte
             // one so `stream_name`'s output is never a half-character.
@@ -282,6 +297,9 @@ pub fn open_stream(name: &str) -> KernelResult<StreamId> {
             TOTAL_OPENED.fetch_add(1, Ordering::Relaxed);
 
             serial_println!("[mixer] Opened stream {} (\"{}\")", i, name);
+            // The output pump idles while nothing is open; this wakes it to
+            // start the sound card.
+            crate::audio_out::kick();
             return Ok(i as StreamId);
         }
     }
@@ -298,6 +316,7 @@ pub fn close_stream(id: StreamId) {
     }
     STREAMS[idx].active.store(false, Ordering::Release);
     STREAMS[idx].ring.lock().clear();
+    wake_room_waiters();
 }
 
 /// Write PCM data to a stream's ring buffer.
@@ -353,6 +372,36 @@ pub fn writable(id: StreamId) -> bool {
     space_available(id) >= FRAME_SIZE_BYTES
 }
 
+/// How many streams are open.
+#[must_use]
+pub fn active_streams() -> usize {
+    STREAMS
+        .iter()
+        .filter(|s| s.active.load(Ordering::Acquire))
+        .count()
+}
+
+/// Register `task` to be woken the next time the pump takes from the rings
+/// (see [`ROOM_WAITERS`]). The caller re-checks its stream after
+/// registering and before parking, so a take between its check and its
+/// registration is not missed.
+pub fn register_room_waiter(task: crate::sched::task::TaskId) {
+    ROOM_WAITERS.lock().insert(task);
+}
+
+/// Withdraw `task`'s registration: on every way out of a wait, so a stale
+/// entry never wakes a stranger.
+pub fn deregister_room_waiter(task: crate::sched::task::TaskId) {
+    ROOM_WAITERS.lock().remove(task);
+}
+
+/// Wake every task waiting for room: the pump calls this after each round
+/// of mixing.
+pub fn wake_room_waiters() {
+    let tasks = ROOM_WAITERS.lock().take_all();
+    crate::ipc::waiters::wake_all(tasks);
+}
+
 /// Discard any buffered frames for a stream without deactivating it.
 ///
 /// Mirrors the ALSA `PREPARE` / `DROP` semantics that reset the ring to empty
@@ -363,6 +412,8 @@ pub fn clear(id: StreamId) {
     if let Some(slot) = STREAMS.get(id as usize) {
         slot.ring.lock().clear();
     }
+    // Room appeared all at once; a writer or a drain waiting on it re-checks.
+    wake_room_waiters();
 }
 
 // ---------------------------------------------------------------------------
@@ -414,6 +465,14 @@ pub fn set_muted(id: StreamId, muted: bool) {
     let idx = id as usize;
     if idx < MAX_STREAMS {
         STREAMS[idx].muted.store(muted, Ordering::Relaxed);
+    }
+}
+
+/// Pause (`true`) or resume a stream: while paused the mix leaves its ring
+/// alone, so what is queued neither plays nor drains (ALSA `PAUSE`).
+pub fn set_paused(id: StreamId, paused: bool) {
+    if let Some(slot) = STREAMS.get(id as usize) {
+        slot.paused.store(paused, Ordering::Release);
     }
 }
 
@@ -478,7 +537,7 @@ pub fn mix_output(output: &mut [u8]) -> usize {
     let mut any_active = false;
 
     for slot in &STREAMS {
-        if !slot.active.load(Ordering::Acquire) {
+        if !slot.active.load(Ordering::Acquire) || slot.paused.load(Ordering::Acquire) {
             continue;
         }
         if slot.muted.load(Ordering::Relaxed) {

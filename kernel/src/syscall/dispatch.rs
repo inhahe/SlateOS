@@ -110,6 +110,9 @@ use super::number::{
     SYS_YIELD,
 };
 use super::number::{
+    SYS_DEVICE_CLOSE, SYS_DEVICE_IOCTL, SYS_DEVICE_OPEN, SYS_DEVICE_READ, SYS_DEVICE_WRITE,
+};
+use super::number::{
     SYS_UNIX_ACCEPT, SYS_UNIX_BIND, SYS_UNIX_CLOSE, SYS_UNIX_CONNECT, SYS_UNIX_GET_OPTION,
     SYS_UNIX_LISTEN, SYS_UNIX_NAME, SYS_UNIX_PAIR, SYS_UNIX_PEER_CRED, SYS_UNIX_POLL,
     SYS_UNIX_RECV, SYS_UNIX_SEND, SYS_UNIX_SET_OPTION, SYS_UNIX_SHUTDOWN, SYS_UNIX_SOCKET,
@@ -599,6 +602,14 @@ const fn build_v1_table() -> SyscallTable {
     handlers[SYS_UNIX_POLL as usize] = Some(handlers::sys_unix_poll);
     handlers[SYS_UNIX_SET_OPTION as usize] = Some(handlers::sys_unix_set_option);
     handlers[SYS_UNIX_GET_OPTION as usize] = Some(handlers::sys_unix_get_option);
+
+    // The device door (1119-1123): the Linux device ABI -- today the sound
+    // card's -- reached natively, answering in Linux errnos.
+    handlers[SYS_DEVICE_OPEN as usize] = Some(handlers::sys_device_open);
+    handlers[SYS_DEVICE_IOCTL as usize] = Some(handlers::sys_device_ioctl);
+    handlers[SYS_DEVICE_READ as usize] = Some(handlers::sys_device_read);
+    handlers[SYS_DEVICE_WRITE as usize] = Some(handlers::sys_device_write);
+    handlers[SYS_DEVICE_CLOSE as usize] = Some(handlers::sys_device_close);
 
     // Thread management (510–519).
     handlers[SYS_THREAD_CREATE as usize] = Some(handlers::sys_thread_create);

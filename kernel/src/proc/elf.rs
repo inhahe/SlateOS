@@ -3028,6 +3028,321 @@ pub fn build_linux_unix_socket_test_elf() -> alloc::vec::Vec<u8> {
 ///     (fd 1 survives the exec);
 ///   * the byte traversed the pipe IPC path and the parent's blocking `read`
 ///     woke and returned it.
+/// Build a **native-ABI** ring-3 program that drives the sound card through
+/// the device door (`SYS_DEVICE_*`, 1119-1123) as the C library will, its
+/// answers Linux errnos:
+///
+/// ```text
+///   open("/dev/snd/nope")                         ; -ENOENT, else exit 0xC1
+///   h = open("/dev/snd/pcmC0D0p")                 ; kind 1 in rdx, else 0xC2
+///   ioctl(PCM, h, HW_PARAMS, &zeroed hw_params)   ; 0, else 0xC3
+///   ioctl(PCM, h, PREPARE)                        ; 0, else 0xC4
+///   write(PCM, h, 32 KiB, blocking)               ; all 32 KiB -- two rings,
+///                                                 ; so it waits on the pump -- else 0xC5
+///   ioctl(PCM, h, DRAIN)                          ; 0 once played out, else 0xC6
+///   ioctl(PCM, h, STATUS, &status)                ; 0 and state SETUP, else 0xC7
+///   ioctl(PCM, h, 0x41FF)                         ; -ENOTTY, else 0xC8
+///   ioctl(PCM, h, PREPARE), START, PAUSE 1        ; 0 each, else 0xC9 / 0xCA / 0xCB
+///                                                 ; (paused: nothing drains the ring)
+///   write(PCM, h, 32 KiB, DEVICE_NONBLOCK)        ; one ring, 16 KiB, else 0xCC
+///   write(PCM, h, 4 KiB, DEVICE_NONBLOCK)         ; -EAGAIN (full, held), else 0xCD
+///   ioctl(PCM, h, DROP)                           ; 0, else 0xCE
+///   close(PCM, h)                                 ; 0, else 0xCF
+///   close(PCM, h)                                 ; -EBADF (not held now), else 0xD0
+///   c = open("/dev/snd/controlC0")                ; handle 1, kind 2, else 0xD1
+///   ioctl(CONTROL, c, CARD_INFO, &info)           ; 0, else 0xD2
+///   read(CONTROL, c, buf, 16)                     ; -EINVAL (ioctl-only), else 0xD3
+///   exit(0x5E)
+/// ```
+///
+/// A clean `exit(0x5E)` proves the door end to end: the kernel's Linux
+/// handlers reached natively, a blocking write that outlasts the ring (the
+/// output pump drained it), a blocking drain, a non-blocking write that fills
+/// one ring and then refuses, a pause that holds the queue, the handle owned
+/// by its opener and gone after close, and the control device.
+#[must_use]
+#[allow(
+    clippy::indexing_slicing,
+    clippy::arithmetic_side_effects,
+    clippy::cast_possible_truncation,
+    clippy::cast_possible_wrap,
+    clippy::too_many_lines
+)]
+pub fn build_native_device_door_test_elf() -> alloc::vec::Vec<u8> {
+    use crate::audio_alsa as alsa;
+    use crate::syscall::number as nr;
+    /// `jnz rel32`'s second opcode byte.
+    const JNZ: u8 = 0x85;
+    /// `js rel32`'s second opcode byte.
+    const JS: u8 = 0x88;
+    const SYS_EXIT: u32 = 1;
+    // Stack layout (all [rsp + offset]).
+    const DATA: u32 = 0x0000; // 32 KiB of silence
+    const HWP: u32 = 0x8000; // struct snd_pcm_hw_params, 608 bytes
+    const STATUS: u32 = 0x8280; // struct snd_pcm_status, 152 bytes
+    const CARDINFO: u32 = 0x8340; // struct snd_ctl_card_info, 376 bytes
+    const PATH_PCM: u32 = 0x84C0;
+    const PATH_CTL: u32 = 0x84E0;
+    const PATH_BAD: u32 = 0x8500;
+    const HANDLE: u32 = 0x8520;
+    const FRAME: u32 = 0x8600;
+    const PCM: u32 = nr::DEVICE_KIND_PCM as u32;
+    const CONTROL: u32 = nr::DEVICE_KIND_CONTROL as u32;
+    const NONBLOCK: u32 = nr::DEVICE_NONBLOCK as u32;
+
+    let mut code: alloc::vec::Vec<u8> = alloc::vec::Vec::new();
+    let mut fail_jumps: alloc::vec::Vec<(usize, u8)> = alloc::vec::Vec::new();
+    let le = |v: u32| v.to_le_bytes();
+    let syscall = |c: &mut alloc::vec::Vec<u8>, number: u64| {
+        c.push(0xB8);
+        c.extend_from_slice(&le(number as u32));
+        c.extend_from_slice(&[0x0F, 0x05]);
+    };
+    let mov_edi = |c: &mut alloc::vec::Vec<u8>, v: u32| {
+        c.push(0xBF);
+        c.extend_from_slice(&le(v));
+    };
+    let mov_esi = |c: &mut alloc::vec::Vec<u8>, v: u32| {
+        c.push(0xBE);
+        c.extend_from_slice(&le(v));
+    };
+    let mov_edx = |c: &mut alloc::vec::Vec<u8>, v: u32| {
+        c.push(0xBA);
+        c.extend_from_slice(&le(v));
+    };
+    let mov_r10d = |c: &mut alloc::vec::Vec<u8>, v: u32| {
+        c.extend_from_slice(&[0x41, 0xBA]);
+        c.extend_from_slice(&le(v));
+    };
+    let mov_r8d = |c: &mut alloc::vec::Vec<u8>, v: u32| {
+        c.extend_from_slice(&[0x41, 0xB8]);
+        c.extend_from_slice(&le(v));
+    };
+    // lea rdi / rdx / r10, [rsp + d32]
+    let lea_rdi = |c: &mut alloc::vec::Vec<u8>, d: u32| {
+        c.extend_from_slice(&[0x48, 0x8D, 0xBC, 0x24]);
+        c.extend_from_slice(&le(d));
+    };
+    let lea_rdx = |c: &mut alloc::vec::Vec<u8>, d: u32| {
+        c.extend_from_slice(&[0x48, 0x8D, 0x94, 0x24]);
+        c.extend_from_slice(&le(d));
+    };
+    let lea_r10 = |c: &mut alloc::vec::Vec<u8>, d: u32| {
+        c.extend_from_slice(&[0x4C, 0x8D, 0x94, 0x24]);
+        c.extend_from_slice(&le(d));
+    };
+    // mov rsi, [rsp + d32] -- the handle
+    let load_rsi = |c: &mut alloc::vec::Vec<u8>, d: u32| {
+        c.extend_from_slice(&[0x48, 0x8B, 0xB4, 0x24]);
+        c.extend_from_slice(&le(d));
+    };
+    // mov [rsp + d32], rax
+    let store_rax = |c: &mut alloc::vec::Vec<u8>, d: u32| {
+        c.extend_from_slice(&[0x48, 0x89, 0x84, 0x24]);
+        c.extend_from_slice(&le(d));
+    };
+    // mov dword [rsp + d32], imm32
+    let store_imm = |c: &mut alloc::vec::Vec<u8>, d: u32, v: u32| {
+        c.extend_from_slice(&[0xC7, 0x84, 0x24]);
+        c.extend_from_slice(&le(d));
+        c.extend_from_slice(&le(v));
+    };
+    // cmp dword [rsp + d32], imm32
+    let cmp_mem = |c: &mut alloc::vec::Vec<u8>, d: u32, v: u32| {
+        c.extend_from_slice(&[0x81, 0xBC, 0x24]);
+        c.extend_from_slice(&le(d));
+        c.extend_from_slice(&le(v));
+    };
+    // cmp rax, imm32 (sign-extended)
+    let cmp_rax = |c: &mut alloc::vec::Vec<u8>, v: i32| {
+        c.extend_from_slice(&[0x48, 0x3D]);
+        c.extend_from_slice(&v.to_le_bytes());
+    };
+    // cmp rdx, imm8 (sign-extended)
+    let cmp_rdx = |c: &mut alloc::vec::Vec<u8>, v: i8| {
+        c.extend_from_slice(&[0x48, 0x83, 0xFA, v as u8]);
+    };
+    let test_rax = |c: &mut alloc::vec::Vec<u8>| c.extend_from_slice(&[0x48, 0x85, 0xC0]);
+    let jcc_fail = |c: &mut alloc::vec::Vec<u8>,
+                    fails: &mut alloc::vec::Vec<(usize, u8)>,
+                    op: u8,
+                    sentinel: u8| {
+        c.extend_from_slice(&[0x0F, op, 0, 0, 0, 0]);
+        fails.push((c.len() - 4, sentinel));
+    };
+    // A NUL-terminated string at [rsp + d], a dword at a time.
+    let put_str = |c: &mut alloc::vec::Vec<u8>, d: u32, s: &[u8]| {
+        let mut bytes = alloc::vec::Vec::from(s);
+        bytes.push(0);
+        while bytes.len() % 4 != 0 {
+            bytes.push(0);
+        }
+        for (i, w) in bytes.chunks(4).enumerate() {
+            let word = u32::from_le_bytes([w[0], w[1], w[2], w[3]]);
+            store_imm(c, d + 4 * i as u32, word);
+        }
+    };
+    // ioctl(kind, [rsp + HANDLE] or `handle`, request, arg in r10, flags 0)
+    let ioctl = |c: &mut alloc::vec::Vec<u8>, kind: u32, request: u32| {
+        mov_edi(c, kind);
+        load_rsi(c, HANDLE);
+        mov_edx(c, request);
+        mov_r8d(c, 0);
+        syscall(c, nr::SYS_DEVICE_IOCTL);
+    };
+
+    // sub rsp, FRAME -- a native program starts at the stack's very top.
+    code.extend_from_slice(&[0x48, 0x81, 0xEC]);
+    code.extend_from_slice(&le(FRAME));
+    put_str(&mut code, PATH_PCM, b"/dev/snd/pcmC0D0p");
+    put_str(&mut code, PATH_CTL, b"/dev/snd/controlC0");
+    put_str(&mut code, PATH_BAD, b"/dev/snd/nope");
+    // Zero the hw_params and the status: rep stosq over each.
+    for (at, len) in [(HWP, 608u32), (STATUS, 152)] {
+        lea_rdi(&mut code, at);
+        code.extend_from_slice(&[0x31, 0xC0]); // xor eax, eax
+        code.push(0xB9); // mov ecx, qwords
+        code.extend_from_slice(&le(len / 8));
+        code.extend_from_slice(&[0xF3, 0x48, 0xAB]); // rep stosq
+    }
+
+    // --- open: a path the door does not serve, then the playback node ---
+    lea_rdi(&mut code, PATH_BAD);
+    mov_esi(&mut code, 13);
+    syscall(&mut code, nr::SYS_DEVICE_OPEN);
+    cmp_rax(&mut code, -2); // ENOENT
+    jcc_fail(&mut code, &mut fail_jumps, JNZ, 0xC1);
+    lea_rdi(&mut code, PATH_PCM);
+    mov_esi(&mut code, 17);
+    syscall(&mut code, nr::SYS_DEVICE_OPEN);
+    test_rax(&mut code);
+    jcc_fail(&mut code, &mut fail_jumps, JS, 0xC2);
+    cmp_rdx(&mut code, PCM as i8);
+    jcc_fail(&mut code, &mut fail_jumps, JNZ, 0xC2);
+    store_rax(&mut code, HANDLE);
+
+    // --- configure, prepare, a blocking write of two rings, a drain ---
+    lea_r10(&mut code, HWP);
+    ioctl(&mut code, PCM, alsa::SNDRV_PCM_IOCTL_HW_PARAMS);
+    test_rax(&mut code);
+    jcc_fail(&mut code, &mut fail_jumps, JNZ, 0xC3);
+    mov_r10d(&mut code, 0);
+    ioctl(&mut code, PCM, alsa::SNDRV_PCM_IOCTL_PREPARE);
+    test_rax(&mut code);
+    jcc_fail(&mut code, &mut fail_jumps, JNZ, 0xC4);
+    // write(PCM, h, DATA, 0x8000, 0): rdx = buf, r10 = len, r8 = flags
+    mov_edi(&mut code, PCM);
+    load_rsi(&mut code, HANDLE);
+    lea_rdx(&mut code, DATA);
+    mov_r10d(&mut code, 0x8000);
+    mov_r8d(&mut code, 0);
+    syscall(&mut code, nr::SYS_DEVICE_WRITE);
+    cmp_rax(&mut code, 0x8000);
+    jcc_fail(&mut code, &mut fail_jumps, JNZ, 0xC5);
+    mov_r10d(&mut code, 0);
+    ioctl(&mut code, PCM, alsa::SNDRV_PCM_IOCTL_DRAIN);
+    test_rax(&mut code);
+    jcc_fail(&mut code, &mut fail_jumps, JNZ, 0xC6);
+    lea_r10(&mut code, STATUS);
+    ioctl(&mut code, PCM, alsa::SNDRV_PCM_IOCTL_STATUS);
+    test_rax(&mut code);
+    jcc_fail(&mut code, &mut fail_jumps, JNZ, 0xC7);
+    cmp_mem(&mut code, STATUS, crate::ipc::alsa_pcm::STATE_SETUP);
+    jcc_fail(&mut code, &mut fail_jumps, JNZ, 0xC7);
+    mov_r10d(&mut code, 0);
+    ioctl(&mut code, PCM, 0x41FF);
+    cmp_rax(&mut code, -25); // ENOTTY
+    jcc_fail(&mut code, &mut fail_jumps, JNZ, 0xC8);
+
+    // --- non-blocking, paused so nothing drains the ring between the two
+    // writes: one ring goes in, then nothing ---
+    for (request, arg, sentinel) in [
+        (alsa::SNDRV_PCM_IOCTL_PREPARE, 0u32, 0xC9u8),
+        (alsa::SNDRV_PCM_IOCTL_START, 0, 0xCA),
+        (alsa::SNDRV_PCM_IOCTL_PAUSE, 1, 0xCB),
+    ] {
+        mov_r10d(&mut code, arg);
+        ioctl(&mut code, PCM, request);
+        test_rax(&mut code);
+        jcc_fail(&mut code, &mut fail_jumps, JNZ, sentinel);
+    }
+    mov_edi(&mut code, PCM);
+    load_rsi(&mut code, HANDLE);
+    lea_rdx(&mut code, DATA);
+    mov_r10d(&mut code, 0x8000);
+    mov_r8d(&mut code, NONBLOCK);
+    syscall(&mut code, nr::SYS_DEVICE_WRITE);
+    cmp_rax(&mut code, 0x4000);
+    jcc_fail(&mut code, &mut fail_jumps, JNZ, 0xCC);
+    mov_edi(&mut code, PCM);
+    load_rsi(&mut code, HANDLE);
+    lea_rdx(&mut code, DATA);
+    mov_r10d(&mut code, 0x1000);
+    mov_r8d(&mut code, NONBLOCK);
+    syscall(&mut code, nr::SYS_DEVICE_WRITE);
+    cmp_rax(&mut code, -11); // EAGAIN
+    jcc_fail(&mut code, &mut fail_jumps, JNZ, 0xCD);
+    mov_r10d(&mut code, 0);
+    ioctl(&mut code, PCM, alsa::SNDRV_PCM_IOCTL_DROP);
+    test_rax(&mut code);
+    jcc_fail(&mut code, &mut fail_jumps, JNZ, 0xCE);
+
+    // --- close, and the handle is no longer held ---
+    for sentinel_and_answer in [(0xCFu8, 0i32), (0xD0, -9)] {
+        mov_edi(&mut code, PCM);
+        load_rsi(&mut code, HANDLE);
+        syscall(&mut code, nr::SYS_DEVICE_CLOSE);
+        cmp_rax(&mut code, sentinel_and_answer.1);
+        jcc_fail(&mut code, &mut fail_jumps, JNZ, sentinel_and_answer.0);
+    }
+
+    // --- the control device ---
+    lea_rdi(&mut code, PATH_CTL);
+    mov_esi(&mut code, 18);
+    syscall(&mut code, nr::SYS_DEVICE_OPEN);
+    cmp_rax(&mut code, nr::DEVICE_CONTROL_HANDLE as i32);
+    jcc_fail(&mut code, &mut fail_jumps, JNZ, 0xD1);
+    cmp_rdx(&mut code, CONTROL as i8);
+    jcc_fail(&mut code, &mut fail_jumps, JNZ, 0xD1);
+    store_rax(&mut code, HANDLE);
+    lea_r10(&mut code, CARDINFO);
+    ioctl(
+        &mut code,
+        CONTROL,
+        crate::audio_alsa_ctl::SNDRV_CTL_IOCTL_CARD_INFO,
+    );
+    test_rax(&mut code);
+    jcc_fail(&mut code, &mut fail_jumps, JNZ, 0xD2);
+    mov_edi(&mut code, CONTROL);
+    load_rsi(&mut code, HANDLE);
+    lea_rdx(&mut code, DATA);
+    mov_r10d(&mut code, 16);
+    mov_r8d(&mut code, 0);
+    syscall(&mut code, nr::SYS_DEVICE_READ);
+    cmp_rax(&mut code, -22); // EINVAL
+    jcc_fail(&mut code, &mut fail_jumps, JNZ, 0xD3);
+
+    // exit(0x5E)
+    mov_edi(&mut code, 0x5E);
+    syscall(&mut code, u64::from(SYS_EXIT));
+
+    // One failure exit per sentinel.
+    let mut fail_at: alloc::vec::Vec<(u8, usize)> = alloc::vec::Vec::new();
+    for sentinel in 0xC1u8..=0xD3 {
+        fail_at.push((sentinel, code.len()));
+        mov_edi(&mut code, u32::from(sentinel));
+        syscall(&mut code, u64::from(SYS_EXIT));
+    }
+    code.push(0xCC); // int3
+    for (at, sentinel) in fail_jumps {
+        if let Some(&(_, target)) = fail_at.iter().find(|(s, _)| *s == sentinel) {
+            let disp = (target as i64 - (at as i64 + 4)) as i32;
+            code[at..at + 4].copy_from_slice(&disp.to_le_bytes());
+        }
+    }
+    single_segment_test_elf(&code)
+}
+
 ///
 /// Self-diagnosing sentinels: `0xA4` = `pipe2` failed, `0xA3` = parent
 /// `read` returned `<= 0`, `0xE7` = child `execve` failed.  `path_nul` must

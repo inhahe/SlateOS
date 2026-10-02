@@ -5849,6 +5849,12 @@ fn try_open_alsa_pcm(path: &[u8], flags: u32) -> Option<SyscallResult> {
         crate::proc::linux_fd::FD_CLOEXEC
     } else {
         0
+    // No sound card to play through: ENODEV, so a program can say "no sound
+    // device" rather than seem to play into nothing (audio_out::has_sink).
+    if !crate::audio_out::has_sink() {
+        return Some(linux_err(errno::ENODEV));
+    }
+
     };
     let entry = FdEntry::alsa_pcm(handle.raw(), fd_flags, status_flags);
 
@@ -5902,6 +5908,11 @@ fn try_open_alsa_control(path: &[u8], flags: u32) -> Option<SyscallResult> {
 
     match pcb::linux_fd_install(pid, entry, 0) {
         Ok(fd) => Some(SyscallResult::ok(i64::from(fd))),
+    // No sound card: no card to describe either (as the PCM nodes answer).
+    if !crate::audio_out::has_sink() {
+        return Some(linux_err(errno::ENODEV));
+    }
+
         // No instance or registration to roll back — the control fd is
         // stateless, so a table-install failure is just an errno.
         Err(e) => Some(linux_err(linux_errno_for(e))),
@@ -9804,43 +9815,95 @@ fn sys_ioctl(args: &SyscallArgs) -> SyscallResult {
     }
 }
 
-/// `write(2)` routing for an ALSA PCM playback substream.
-///
-/// Treats the user buffer as native-format interleaved PCM (S16_LE stereo at
-/// 48 kHz, 4 bytes/frame) and hands it to the mixer via
-/// [`crate::ipc::alsa_pcm::write_frames`].  The transfer is bounded to the
-/// mixer ring's capacity so a single `write` never allocates an unbounded
-/// kernel buffer; userspace loops (or `poll(POLLOUT)`s) for the remainder.
-/// Returns the number of bytes accepted.
-#[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
+/// `write(2)` routing for an ALSA PCM playback substream: the user buffer as
+/// native-format interleaved PCM (S16_LE stereo at 48 kHz, 4 bytes/frame),
+/// queued by [`alsa_pcm_write_bytes`]. Returns the bytes accepted.
 fn dispatch_alsa_pcm_write(entry: FdEntry, buf: u64, len: u64) -> SyscallResult {
-    let h = crate::ipc::alsa_pcm::AlsaPcmHandle::from_raw(entry.raw_handle);
+    alsa_pcm_write_bytes(
+        crate::ipc::alsa_pcm::AlsaPcmHandle::from_raw(entry.raw_handle),
+        entry.status_flags & oflags::O_NONBLOCK != 0,
+        buf,
+        len,
+    )
+}
 
-    // Cap the copy to the mixer ring capacity and align down to whole frames:
-    // the write path is frame-granular, and the mixer accepts at most a ring's
-    // worth before reporting "full".
+/// Queue `len` bytes of playback frames from the user buffer at `buf` on `h`,
+/// whole frames only (a sub-frame tail is left):
+///
+/// - `nonblocking`: as much as the mixer ring takes now -- at most a ring's
+///   worth -- and `EAGAIN` when it takes none;
+/// - otherwise: all of it, a ring's worth at a time, waiting for the audio
+///   pump to make room between, as ALSA's `snd_pcm_lib_write` does; a signal
+///   ends the wait with the count queued so far, or the restart sentinel
+///   when nothing was.
+///
+/// The kernel buffer is one ring's worth however long the write, so a large
+/// write never allocates an unbounded kernel buffer. Shared by `write(2)`,
+/// `WRITEI_FRAMES` and the native device door.
+#[allow(
+    clippy::cast_possible_truncation,
+    clippy::cast_possible_wrap,
+    clippy::arithmetic_side_effects
+)]
+pub(crate) fn alsa_pcm_write_bytes(
+    h: crate::ipc::alsa_pcm::AlsaPcmHandle,
+    nonblocking: bool,
+    buf: u64,
+    len: u64,
+) -> SyscallResult {
+    use crate::error::KernelError;
+    /// One mixer ring: the most one step copies in.
     const RING_CAP: usize = 16384;
-    let want = (len.min(RING_CAP as u64) as usize) & !0b11usize;
-    if want == 0 {
+    let total = usize::try_from(len)
+        .unwrap_or(usize::MAX)
+        .min(isize::MAX.unsigned_abs())
+        & !0b11usize;
+    if total == 0 {
         // A sub-frame write transfers nothing but is not an error.
         return SyscallResult::ok(0);
     }
-
-    if crate::mm::user::validate_user_read(buf, want).is_err() {
+    let mut done = 0usize;
+    while done < total {
+        let step = (total - done).min(RING_CAP);
+        let src = buf.wrapping_add(done as u64);
+        if crate::mm::user::validate_user_read(src, step).is_err() {
+            break;
+        }
+        let mut kbuf = alloc::vec![0u8; step];
+        // SAFETY: `kbuf` is a freshly-allocated kernel buffer of exactly
+        // `step` bytes; `copy_from_user` re-validates the user range and
+        // handles SMAP.
+        if unsafe { crate::mm::user::copy_from_user(src, kbuf.as_mut_ptr(), step) }.is_err() {
+            break;
+        }
+        let queued = if nonblocking {
+            crate::ipc::alsa_pcm::write_frames(h, &kbuf)
+        } else {
+            crate::ipc::alsa_pcm::write_frames_blocking(h, &kbuf)
+        };
+        match queued {
+            Ok(n) => {
+                done += n;
+                if n < step || nonblocking {
+                    break;
+                }
+            }
+            Err(e) if done == 0 => {
+                return match e {
+                    KernelError::WouldBlock => linux_err(errno::EAGAIN),
+                    KernelError::Interrupted => restart::restart_result(restart::ERESTARTSYS),
+                    KernelError::InvalidHandle => linux_err(errno::EBADF),
+                    _ => linux_err(errno::EINVAL),
+                };
+            }
+            Err(_) => break,
+        }
+    }
+    if done == 0 {
+        // The first step's user range was unreadable.
         return linux_err(errno::EFAULT);
     }
-    let mut kbuf = alloc::vec![0u8; want];
-    // SAFETY: `kbuf` is a freshly-allocated kernel buffer of exactly `want`
-    // bytes; `copy_from_user` re-validates the user range and handles SMAP.
-    if unsafe { crate::mm::user::copy_from_user(buf, kbuf.as_mut_ptr(), want) }.is_err() {
-        return linux_err(errno::EFAULT);
-    }
-
-    match crate::ipc::alsa_pcm::write_frames(h, &kbuf) {
-        Ok(written) => SyscallResult::ok(written as i64),
-        Err(crate::error::KernelError::WouldBlock) => linux_err(errno::EAGAIN),
-        Err(_) => linux_err(errno::EINVAL),
-    }
+    SyscallResult::ok(done as i64)
 }
 
 /// `read(2)` routing for an ALSA PCM substream.
@@ -9849,9 +9912,22 @@ fn dispatch_alsa_pcm_write(entry: FdEntry, buf: u64, len: u64) -> SyscallResult 
 /// substreams hand back silence: the mixer is output-only, so there is no real
 /// capture source, but returning zeroed frames keeps capture clients (level
 /// meters, loopback probes) running instead of erroring.
-#[allow(clippy::cast_possible_wrap)]
 fn dispatch_alsa_pcm_read(entry: FdEntry, buf: u64, cap: u64) -> SyscallResult {
-    let h = crate::ipc::alsa_pcm::AlsaPcmHandle::from_raw(entry.raw_handle);
+    alsa_pcm_read_bytes(
+        crate::ipc::alsa_pcm::AlsaPcmHandle::from_raw(entry.raw_handle),
+        buf,
+        cap,
+    )
+}
+
+/// [`dispatch_alsa_pcm_read`]'s body, on a substream handle: shared with the
+/// native device door.
+#[allow(clippy::cast_possible_wrap)]
+pub(crate) fn alsa_pcm_read_bytes(
+    h: crate::ipc::alsa_pcm::AlsaPcmHandle,
+    buf: u64,
+    cap: u64,
+) -> SyscallResult {
     if !crate::ipc::alsa_pcm::readable(h) {
         // Playback fd, or a stale instance — neither delivers read data.
         return linux_err(errno::EINVAL);
@@ -9889,13 +9965,34 @@ fn alsa_pcm_ioctl(entry: &FdEntry, request: u32, argp: u64) -> SyscallResult {
     use crate::audio_alsa as alsa;
     use crate::error::KernelError;
 
-    let h = crate::ipc::alsa_pcm::AlsaPcmHandle::from_raw(entry.raw_handle);
-
     // Translate a state-machine Result into an ioctl return (0 on success).
     let map = |r: crate::error::KernelResult<()>| -> SyscallResult {
         match r {
             Ok(()) => SyscallResult::ok(0),
             Err(KernelError::InvalidHandle) => linux_err(errno::EBADF),
+    alsa_pcm_ioctl_on(
+        crate::ipc::alsa_pcm::AlsaPcmHandle::from_raw(entry.raw_handle),
+        entry.status_flags & oflags::O_NONBLOCK != 0,
+        request,
+        argp,
+    )
+}
+
+/// One `SNDRV_PCM_IOCTL_*` request on the substream `h`, whose descriptor is
+/// `nonblocking` or not (it decides whether `WRITEI_FRAMES` and `DRAIN`
+/// wait). Shared by the Linux `ioctl` and the native device door
+/// (`SYS_DEVICE_IOCTL`); the answer is a Linux errno either way.
+#[allow(
+    clippy::cast_possible_truncation,
+    clippy::cast_possible_wrap,
+    clippy::too_many_lines
+)]
+pub(crate) fn alsa_pcm_ioctl_on(
+    h: crate::ipc::alsa_pcm::AlsaPcmHandle,
+    nonblocking: bool,
+    request: u32,
+    argp: u64,
+) -> SyscallResult {
             Err(KernelError::WouldBlock) => linux_err(errno::EAGAIN),
             Err(_) => linux_err(errno::EINVAL),
         }
@@ -9907,6 +10004,7 @@ fn alsa_pcm_ioctl(entry: &FdEntry, request: u32, argp: u64) -> SyscallResult {
             if crate::mm::user::validate_user_write(argp, 4).is_err() {
                 return linux_err(errno::EFAULT);
             }
+            Err(KernelError::Interrupted) => restart::restart_result(restart::ERESTARTSYS),
             let v = alsa::SNDRV_PCM_VERSION;
             // SAFETY: argp validated writable for 4 bytes just above.
             if unsafe {
@@ -9918,7 +10016,7 @@ fn alsa_pcm_ioctl(entry: &FdEntry, request: u32, argp: u64) -> SyscallResult {
             }
             SyscallResult::ok(0)
         }
-        alsa::SNDRV_PCM_IOCTL_INFO => alsa_pcm_ioctl_info(entry, argp),
+        alsa::SNDRV_PCM_IOCTL_INFO => alsa_pcm_ioctl_info(h, argp),
         alsa::SNDRV_PCM_IOCTL_HW_REFINE => {
             // Probe: collapse the supplied config space onto native and echo
             // it back without committing any state.
@@ -9985,21 +10083,21 @@ fn alsa_pcm_ioctl(entry: &FdEntry, request: u32, argp: u64) -> SyscallResult {
         alsa::SNDRV_PCM_IOCTL_PREPARE => map(crate::ipc::alsa_pcm::prepare(h)),
         alsa::SNDRV_PCM_IOCTL_START => map(crate::ipc::alsa_pcm::start(h)),
         alsa::SNDRV_PCM_IOCTL_DROP => map(crate::ipc::alsa_pcm::drop_stream(h)),
-        alsa::SNDRV_PCM_IOCTL_DRAIN => map(crate::ipc::alsa_pcm::drain(h)),
+        alsa::SNDRV_PCM_IOCTL_DRAIN => map(crate::ipc::alsa_pcm::drain(h, nonblocking)),
         alsa::SNDRV_PCM_IOCTL_RESET => map(crate::ipc::alsa_pcm::reset(h)),
         alsa::SNDRV_PCM_IOCTL_PAUSE => {
             // The pause flag is passed by value in the third ioctl arg (an
             // `int`: non-zero = pause, zero = resume), not via a pointer.
             map(crate::ipc::alsa_pcm::pause(h, argp != 0))
         }
-        alsa::SNDRV_PCM_IOCTL_WRITEI_FRAMES => alsa_pcm_ioctl_writei(entry, argp),
-        alsa::SNDRV_PCM_IOCTL_READI_FRAMES => alsa_pcm_ioctl_readi(entry, argp),
-        alsa::SNDRV_PCM_IOCTL_SYNC_PTR => alsa_pcm_ioctl_sync_ptr(entry, argp),
+        alsa::SNDRV_PCM_IOCTL_WRITEI_FRAMES => alsa_pcm_ioctl_writei(h, nonblocking, argp),
+        alsa::SNDRV_PCM_IOCTL_READI_FRAMES => alsa_pcm_ioctl_readi(h, argp),
+        alsa::SNDRV_PCM_IOCTL_SYNC_PTR => alsa_pcm_ioctl_sync_ptr(h, argp),
         // STATUS (_IOR) and STATUS_EXT (_IOWR) both return the same
         // `snd_pcm_status` snapshot; STATUS_EXT additionally lets the client
         // preselect an audio-timestamp type (which we echo back unchanged).
-        alsa::SNDRV_PCM_IOCTL_STATUS => alsa_pcm_ioctl_status(entry, argp, false),
-        alsa::SNDRV_PCM_IOCTL_STATUS_EXT => alsa_pcm_ioctl_status(entry, argp, true),
+        alsa::SNDRV_PCM_IOCTL_STATUS => alsa_pcm_ioctl_status(h, argp, false),
+        alsa::SNDRV_PCM_IOCTL_STATUS_EXT => alsa_pcm_ioctl_status(h, argp, true),
         // HWSYNC / RESUME / XRUN / LINK / UNLINK / TTSTAMP: position-sync and
         // link operations that are no-ops on our software pipeline.  Accept
         // them so clients that issue them during teardown do not error.
@@ -10022,9 +10120,8 @@ fn alsa_pcm_ioctl(entry: &FdEntry, request: u32, argp: u64) -> SyscallResult {
 /// `SNDRV_PCM_IOCTL_INFO` — fill a `snd_pcm_info` describing our single
 /// virtual playback/capture device on card 0.
 #[allow(clippy::cast_possible_wrap)]
-fn alsa_pcm_ioctl_info(entry: &FdEntry, argp: u64) -> SyscallResult {
+fn alsa_pcm_ioctl_info(h: crate::ipc::alsa_pcm::AlsaPcmHandle, argp: u64) -> SyscallResult {
     use crate::audio_alsa as alsa;
-    let h = crate::ipc::alsa_pcm::AlsaPcmHandle::from_raw(entry.raw_handle);
     let capture = match crate::ipc::alsa_pcm::is_capture(h) {
         Some(c) => c,
         None => return linux_err(errno::EBADF),
@@ -10052,54 +10149,39 @@ fn alsa_pcm_ioctl_info(entry: &FdEntry, argp: u64) -> SyscallResult {
 }
 
 /// `SNDRV_PCM_IOCTL_WRITEI_FRAMES` — submit interleaved playback frames whose
-/// user buffer pointer and frame count are carried in a `snd_xferi`.
+/// user buffer pointer and frame count are carried in a `snd_xferi`. A
+/// blocking descriptor waits until every frame is queued, a non-blocking one
+/// queues what fits ([`alsa_pcm_write_bytes`]); `result` says how many went.
 #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
-fn alsa_pcm_ioctl_writei(entry: &FdEntry, argp: u64) -> SyscallResult {
+fn alsa_pcm_ioctl_writei(
+    h: crate::ipc::alsa_pcm::AlsaPcmHandle,
+    nonblocking: bool,
+    argp: u64,
+) -> SyscallResult {
     use crate::audio_alsa as alsa;
-    let h = crate::ipc::alsa_pcm::AlsaPcmHandle::from_raw(entry.raw_handle);
     let mut xfer = match read_user_struct::<alsa::SndXferi>(argp) {
         Ok(v) => v,
         Err(e) => return linux_err(e),
     };
-
-    // bytes = frames * 4 (native S16_LE stereo frame), bounded to the mixer
-    // ring so the kernel buffer is bounded; whole-frame aligned by construction.
-    const RING_CAP: usize = 16384;
+    // bytes = frames * 4 (native S16_LE stereo frame).
     const FRAME_BYTES: u64 = 4;
     let req_bytes = xfer.frames.saturating_mul(FRAME_BYTES);
-    let want = req_bytes.min(RING_CAP as u64) as usize;
-    if want == 0 {
+    if req_bytes == 0 {
         xfer.result = 0;
         return match write_user_struct(argp, &xfer) {
             Ok(()) => SyscallResult::ok(0),
             Err(e) => linux_err(e),
         };
     }
-
-    if crate::mm::user::validate_user_read(xfer.buf, want).is_err() {
-        return linux_err(errno::EFAULT);
+    let r = alsa_pcm_write_bytes(h, nonblocking, xfer.buf, req_bytes);
+    if r.value < 0 {
+        return r;
     }
-    let mut kbuf = alloc::vec![0u8; want];
-    // SAFETY: `kbuf` is a freshly-allocated kernel buffer of exactly `want`
-    // bytes; `copy_from_user` re-validates the user range and handles SMAP.
-    if unsafe { crate::mm::user::copy_from_user(xfer.buf, kbuf.as_mut_ptr(), want) }.is_err() {
-        return linux_err(errno::EFAULT);
-    }
-
-    match crate::ipc::alsa_pcm::write_frames(h, &kbuf) {
-        Ok(written) => {
-            // Report the frame count actually accepted in `result`.
-            xfer.result = written
-                .checked_div(crate::audio_mixer::FRAME_SIZE_BYTES)
-                .unwrap_or(0) as i64;
-            match write_user_struct(argp, &xfer) {
-                Ok(()) => SyscallResult::ok(0),
-                Err(e) => linux_err(e),
-            }
-        }
-        Err(crate::error::KernelError::WouldBlock) => linux_err(errno::EAGAIN),
-        Err(crate::error::KernelError::InvalidHandle) => linux_err(errno::EBADF),
-        Err(_) => linux_err(errno::EINVAL),
+    // Report the frame count actually accepted in `result`.
+    xfer.result = (r.value.unsigned_abs() / FRAME_BYTES) as i64;
+    match write_user_struct(argp, &xfer) {
+        Ok(()) => SyscallResult::ok(0),
+        Err(e) => linux_err(e),
     }
 }
 
@@ -10110,9 +10192,8 @@ fn alsa_pcm_ioctl_writei(entry: &FdEntry, argp: u64) -> SyscallResult {
 /// silence: the user buffer is zero-filled and the full requested frame count
 /// is reported.
 #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
-fn alsa_pcm_ioctl_readi(entry: &FdEntry, argp: u64) -> SyscallResult {
+fn alsa_pcm_ioctl_readi(h: crate::ipc::alsa_pcm::AlsaPcmHandle, argp: u64) -> SyscallResult {
     use crate::audio_alsa as alsa;
-    let h = crate::ipc::alsa_pcm::AlsaPcmHandle::from_raw(entry.raw_handle);
     let mut xfer = match read_user_struct::<alsa::SndXferi>(argp) {
         Ok(v) => v,
         Err(e) => return linux_err(e),
@@ -10164,9 +10245,8 @@ fn alsa_pcm_ioctl_readi(entry: &FdEntry, argp: u64) -> SyscallResult {
 /// `avail_min` the client pushes or returns the kernel's own values.  The
 /// status/control pages sit in 64-byte unions, so the payload size is
 /// independent of the timestamp ABI and matches real ALSA-lib byte-for-byte.
-fn alsa_pcm_ioctl_sync_ptr(entry: &FdEntry, argp: u64) -> SyscallResult {
+fn alsa_pcm_ioctl_sync_ptr(h: crate::ipc::alsa_pcm::AlsaPcmHandle, argp: u64) -> SyscallResult {
     use crate::audio_alsa as alsa;
-    let h = crate::ipc::alsa_pcm::AlsaPcmHandle::from_raw(entry.raw_handle);
     let mut sp = match read_user_struct::<alsa::SndPcmSyncPtr>(argp) {
         Ok(v) => v,
         Err(e) => return linux_err(e),
@@ -10211,9 +10291,12 @@ fn alsa_pcm_ioctl_sync_ptr(entry: &FdEntry, argp: u64) -> SyscallResult {
 /// (PulseAudio/PipeWire/MPD/games).  For `STATUS_EXT` (`ext == true`, `_IOWR`)
 /// the caller preselects an audio-timestamp type in `audio_tstamp_data`, which
 /// we read and echo back unchanged; `STATUS` (`_IOR`) supplies no input.
-fn alsa_pcm_ioctl_status(entry: &FdEntry, argp: u64, ext: bool) -> SyscallResult {
+fn alsa_pcm_ioctl_status(
+    h: crate::ipc::alsa_pcm::AlsaPcmHandle,
+    argp: u64,
+    ext: bool,
+) -> SyscallResult {
     use crate::audio_alsa as alsa;
-    let h = crate::ipc::alsa_pcm::AlsaPcmHandle::from_raw(entry.raw_handle);
 
     let pos = match crate::ipc::alsa_pcm::sync_position(h) {
         Some(p) => p,
@@ -10293,6 +10376,13 @@ fn alsa_control_ioctl(_entry: &FdEntry, request: u32, argp: u64) -> SyscallResul
             }
             let v = ctl::SNDRV_CTL_VERSION;
             // SAFETY: argp validated writable for 4 bytes just above; `v` is a
+    alsa_control_ioctl_on(request, argp)
+}
+
+/// One `SNDRV_CTL_IOCTL_*` request on the card's control device: shared by the
+/// Linux `ioctl` and the native device door. The control device holds nothing
+/// per open, so no descriptor is needed.
+pub(crate) fn alsa_control_ioctl_on(request: u32, argp: u64) -> SyscallResult {
             // local `u32` so the 4-byte source is valid.
             if unsafe {
                 crate::mm::user::copy_to_user(core::ptr::addr_of!(v).cast::<u8>(), argp, 4)
@@ -31574,6 +31664,8 @@ fn poll_compute_revents(pid: Option<u64>, fd: i32, events: u16) -> u16 {
     // Negative fd is ignored entirely by Linux poll().
     if fd < 0 {
         return 0;
+        // An ALSA substream's: the audio pump's every take from the rings.
+        HandleKind::AlsaPcm => WaitTarget::AlsaPcm(raw_handle),
     }
     // In kernel context (no PCB) we cannot look up the Linux fd table;
     // we honestly report POLLNVAL ("this kernel can't see your fd

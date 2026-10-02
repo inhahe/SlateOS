@@ -181556,6 +181556,43 @@ would use.
 ## Lane B: new entries
 
 Lane B (userland) appends new entries at the end of this section, above the
+### A-PCM-UNDERRUN-IS-SILENT -- 2026-10-02 -- OPEN (lane A)
+
+**Status:** OPEN (lane A) -- a difference from Linux ALSA, found with the
+pump.
+
+**In short:** when a playing program does not write fast enough and its
+stream runs dry, the card plays silence and the stream stays `RUNNING`. On
+Linux the stream goes to `XRUN` and the next write fails with `EPIPE`, which
+is how a player learns it stuttered and re-prepares. Here a player never
+learns it; nothing breaks, but a stutter is invisible to it.
+
+**Where:** `kernel/src/audio_mixer.rs` (`mix_output` reads what a ring has
+and does not say a running stream came up short); `kernel/src/ipc/alsa_pcm.rs`
+(no `XRUN` transition).
+
+**Proper fix:** the mixer marks a stream that had fewer frames than a period
+asked of it while its substream was `RUNNING` (not draining, not paused);
+`alsa_pcm` reads the mark and moves the substream to `STATE_XRUN`, where a
+write answers `EPIPE` until `PREPARE` -- as `snd_pcm_lib_write` does.
+
+### A-SOUND-CAPTURE-HAS-NO-SOURCE -- 2026-10-02 -- OPEN (lane A)
+
+**Status:** OPEN (lane A) -- the recording half of lane E's
+`requests/e-ad-no-application-can-reach-the-sound-device.md` (section 3).
+
+**In short:** a program that records -- the sound recorder -- reads silence.
+The capture device opens and answers every request, but nothing from a
+microphone reaches it: the mixer only mixes outward.
+
+**Where:** `kernel/src/ipc/alsa_pcm.rs` `read_frames` (zero-fills);
+`kernel/src/hda.rs` sets up no input stream.
+
+**Proper fix:** an input stream on the card (HDA's input converter and an
+input stream descriptor; AC'97's PCM In channel), pumped by `audio_out` into
+a capture ring per open capture substream, which `read_frames` drains --
+waiting for data on a blocking descriptor as playback waits for room.
+
 next lane's heading (design-decisions §977).
 
 ## B-OILS-UNIT-TESTS-RUN-WHICHEVER-GREP-PATH-FINDS — six `osh` unit tests fail when `cargo test` is run from PowerShell on this machine (lane B, 2026-10-01) — **FIXED** 2026-10-01

@@ -305,6 +305,10 @@ struct VirtioSndDevice {
     /// stream. Comparing the generation recorded at start closes that ABA
     /// window.
     play_gen: u64,
+    /// While the audio pump streams: the descriptor head of the message in
+    /// flight in each of the PCM frame's [`STREAM_SLOTS`] slots, `None` for a
+    /// free one.
+    stream_slots: [Option<u16>; STREAM_SLOTS],
 }
 
 // SAFETY: VirtioSndDevice contains raw pointers (inside Virtqueue) that point
@@ -455,6 +459,7 @@ pub fn init(hhdm_offset: u64) -> KernelResult<()> {
         stream_caps: [None; MAX_STREAMS],
         active_stream: None,
         play_gen: 0,
+        stream_slots: [None; STREAM_SLOTS],
     };
 
     // Query PCM stream info to classify output vs input streams.
@@ -1073,6 +1078,208 @@ pub fn play_test_tone(duration_ms: u32) -> KernelResult<()> {
         serial_println!("[virtio-snd] Stream 0: ended early (stopped by another caller)");
     }
 
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Streaming output -- the audio pump's side (`audio_out`)
+// ---------------------------------------------------------------------------
+//
+// virtio-sound takes playback as messages on the transmit queue -- a header
+// naming the stream, a period of frames, a status the device writes back --
+// rather than a buffer it reads round and round. For streaming, the PCM frame
+// holds STREAM_SLOTS such messages; each time the pump looks, it reaps the
+// ones the device has returned and refills and resubmits them from the mixer,
+// so three periods (64 ms) are always queued ahead of the speaker. Nothing
+// here spins on the device, as `submit_pcm_buffer` does: a sink must not.
+
+/// Bytes of frames in each streaming message: one mixer period.
+const STREAM_PERIOD: usize = 4096;
+/// Messages kept in flight.
+const STREAM_SLOTS: usize = 3;
+/// One slot's place in the PCM frame: header (4), frames, status (8), kept
+/// 8-aligned.
+const STREAM_SLOT_BYTES: usize = (4 + STREAM_PERIOD + 8 + 7) & !7;
+const _: () = assert!(STREAM_SLOT_BYTES * STREAM_SLOTS <= FRAME_SIZE);
+
+/// Whether this device can carry the mixer's output: initialised, with an
+/// output stream that takes 16-bit stereo at 48 kHz as the device reported.
+#[must_use]
+pub fn output_ready() -> bool {
+    is_available()
+        && DEVICE.lock().as_ref().is_some_and(|d| {
+            d.num_output_streams > 0
+                && d.stream_caps.first().copied().flatten().is_some_and(|c| {
+                    c.formats & (1u64 << VIRTIO_SND_PCM_FMT_S16) != 0
+                        && c.rates & (1u64 << VIRTIO_SND_PCM_RATE_48000) != 0
+                        && c.channels_min <= 2
+                        && c.channels_max >= 2
+                })
+        })
+}
+
+/// Set output stream 0 up for streaming (48 kHz, 16-bit, stereo), queue
+/// [`STREAM_SLOTS`] periods of silence, and start it. Returns the claim to
+/// pass to [`stream_fill`] and [`stream_stop`].
+///
+/// # Errors
+///
+/// `NoSuchDevice`; `DeviceBusy` while a test tone plays; the control
+/// transactions' own.
+#[allow(clippy::arithmetic_side_effects, clippy::cast_possible_truncation)]
+pub fn stream_start() -> KernelResult<u64> {
+    let mut guard = DEVICE.lock();
+    let dev = guard.as_mut().ok_or(KernelError::NoSuchDevice)?;
+    if dev.num_output_streams == 0 {
+        return Err(KernelError::NoSuchDevice);
+    }
+    if dev.active_stream.is_some() {
+        return Err(KernelError::DeviceBusy);
+    }
+    set_params(
+        dev,
+        0,
+        2,
+        VIRTIO_SND_PCM_FMT_S16,
+        VIRTIO_SND_PCM_RATE_48000,
+        (STREAM_PERIOD * STREAM_SLOTS) as u32,
+        STREAM_PERIOD as u32,
+    )?;
+    control_stream_cmd(dev, VIRTIO_SND_R_PCM_PREPARE, 0)?;
+    dev.stream_slots = [None; STREAM_SLOTS];
+    // Silence queued before the start, as the spec advises a driver to fill
+    // the queue first, so the device does not begin on an empty one.
+    let queued = refill_slots(dev, &mut |buf| {
+        buf.fill(0);
+        buf.len()
+    })?;
+    if queued > 0 {
+        dev.transport.notify_queue(2);
+    }
+    control_stream_cmd(dev, VIRTIO_SND_R_PCM_START, 0)?;
+    dev.active_stream = Some(0);
+    dev.play_gen = dev.play_gen.wrapping_add(1);
+    Ok(dev.play_gen)
+}
+
+/// Fill every free slot from `fill` (which writes frames into the buffer it
+/// is given and returns how many bytes it wrote) and submit it. Returns the
+/// bytes submitted.
+#[allow(clippy::arithmetic_side_effects, clippy::cast_possible_truncation)]
+fn refill_slots(
+    dev: &mut VirtioSndDevice,
+    fill: &mut dyn FnMut(&mut [u8]) -> usize,
+) -> KernelResult<usize> {
+    let phys = dev.pcm_frame.addr();
+    let virt = (phys + dev.hhdm_offset) as *mut u8;
+    let mut submitted = 0usize;
+    for i in 0..STREAM_SLOTS {
+        if dev.stream_slots.get(i).copied().flatten().is_some() {
+            continue;
+        }
+        let at = i * STREAM_SLOT_BYTES;
+        // SAFETY: slot `i` is `[at, at + STREAM_SLOT_BYTES)` inside the PCM
+        // frame (the const assertion above), mapped for the kernel's lifetime;
+        // no message using it is in flight (its slot is free), so the device
+        // reads none of it now.
+        let data = unsafe {
+            // The header, a `VirtioSndPcmXfer` for stream 0: four zero bytes.
+            core::ptr::write_bytes(virt.add(at), 0, core::mem::size_of::<VirtioSndPcmXfer>());
+            core::ptr::write_bytes(virt.add(at + 4 + STREAM_PERIOD), 0, 8);
+            core::slice::from_raw_parts_mut(virt.add(at + 4), STREAM_PERIOD)
+        };
+        let n = fill(data).min(STREAM_PERIOD) & !3;
+        if n == 0 {
+            break;
+        }
+        let at = phys + at as u64;
+        let head = dev.txq.submit(&[
+            (at, 4, 0),
+            (at + 4, n as u32, 0),
+            (at + 4 + STREAM_PERIOD as u64, 8, VRING_DESC_F_WRITE),
+        ])?;
+        if let Some(slot) = dev.stream_slots.get_mut(i) {
+            *slot = Some(head);
+        }
+        submitted += n;
+    }
+    Ok(submitted)
+}
+
+/// One look by the pump: reap the messages the device has played, refill
+/// and resubmit their slots from `fill`. Returns the bytes submitted, and
+/// whether every slot had come back -- the device ran out before the pump
+/// looked: an underrun.
+///
+/// # Errors
+///
+/// `NoSuchDevice`; `DeviceBusy` if `claim` is no longer the streaming
+/// playback (a [`stop`] took it); the queue's own.
+pub fn stream_fill(
+    claim: u64,
+    fill: &mut dyn FnMut(&mut [u8]) -> usize,
+) -> KernelResult<(usize, bool)> {
+    let mut guard = DEVICE.lock();
+    let dev = guard.as_mut().ok_or(KernelError::NoSuchDevice)?;
+    if dev.active_stream != Some(0) || dev.play_gen != claim {
+        return Err(KernelError::DeviceBusy);
+    }
+    while let Some((head, _)) = dev.txq.poll_used() {
+        dev.txq.free_chain(head);
+        for slot in &mut dev.stream_slots {
+            if *slot == Some(head) {
+                *slot = None;
+            }
+        }
+    }
+    let ran_dry = dev.stream_slots.iter().all(Option::is_none);
+    let submitted = refill_slots(dev, fill)?;
+    if submitted > 0 {
+        dev.transport.notify_queue(2);
+    }
+    Ok((submitted, ran_dry))
+}
+
+/// Stop streaming -- only if `claim` is still the streaming playback -- and
+/// take back the messages the device returns on release.
+///
+/// # Errors
+///
+/// `NoSuchDevice`; the control transactions' own.
+pub fn stream_stop(claim: u64) -> KernelResult<()> {
+    /// Looks at the used ring after release before giving up on a message
+    /// the device keeps: each is a pointer read, so this is microseconds.
+    const REAP_TRIES: u32 = 100_000;
+    let mut guard = DEVICE.lock();
+    let dev = guard.as_mut().ok_or(KernelError::NoSuchDevice)?;
+    if dev.active_stream != Some(0) || dev.play_gen != claim {
+        return Ok(());
+    }
+    dev.active_stream = None;
+    control_stream_cmd(dev, VIRTIO_SND_R_PCM_STOP, 0)?;
+    control_stream_cmd(dev, VIRTIO_SND_R_PCM_RELEASE, 0)?;
+    let mut tries = 0u32;
+    while dev.stream_slots.iter().any(Option::is_some) && tries < REAP_TRIES {
+        match dev.txq.poll_used() {
+            Some((head, _)) => {
+                dev.txq.free_chain(head);
+                for slot in &mut dev.stream_slots {
+                    if *slot == Some(head) {
+                        *slot = None;
+                    }
+                }
+            }
+            None => {
+                tries = tries.saturating_add(1);
+                core::hint::spin_loop();
+            }
+        }
+    }
+    if dev.stream_slots.iter().any(Option::is_some) {
+        // Their descriptors stay taken; say so rather than reuse a slot the
+        // device may still write the status of.
+        serial_println!("[virtio-snd] Streaming stopped with messages the device kept");
+    }
     Ok(())
 }
 

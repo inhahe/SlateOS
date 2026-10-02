@@ -22681,6 +22681,90 @@ pub fn self_test_linux_slate_channels() -> KernelResult<()> {
     Ok(())
 }
 
+/// The device door from a real native process
+/// ([`elf::build_native_device_door_test_elf`]): the sound card's PCM and
+/// control devices opened and driven with the Linux requests, answers in
+/// Linux errnos, a blocking write that outlasts the mixer ring and a blocking
+/// drain (both waiting on the audio output pump), a non-blocking write that
+/// fills one ring and then refuses, the handle its opener's and gone after
+/// close. Skipped without a sound card.
+///
+/// # Errors
+///
+/// `InternalError` if the program does not exit `0x5E`; the exit code names
+/// the step that failed.
+pub fn self_test_native_device_door() -> KernelResult<()> {
+    /// The program's success exit.
+    const OK_EXIT: i32 = 0x5E;
+    /// The program waits on the card twice -- about 85 ms of audio each --
+    /// so this only bounds a broken run.
+    const DEADLINE_NS: u64 = 10_000_000_000;
+
+    serial_println!("[spawn] Running native device door (ring 3) integration test...");
+    if !crate::audio_out::has_sink() {
+        serial_println!("[spawn]   SKIP: no sound card");
+        return Ok(());
+    }
+    let exe_elf = elf::build_native_device_door_test_elf();
+    let argv: &[&[u8]] = &[b"spawn-test-device-door"];
+    let envp: &[&[u8]] = &[b"PATH=/bin"];
+    let options = SpawnOptions {
+        name: "spawn-test-device-door",
+        parent: 0,
+        priority: DEFAULT_PRIORITY,
+        capabilities: &[],
+        fd_map: &[],
+        argv,
+        envp,
+        exe_path: None,
+        cwd: None,
+        uid_gid: None,
+    };
+    let result = match spawn_process(&exe_elf, &options) {
+        Ok(r) => r,
+        Err(e) => {
+            serial_println!("[spawn]   FAIL: device door spawn returned {:?}", e);
+            return Err(e);
+        }
+    };
+    let deadline = crate::hrtimer::now_ns().saturating_add(DEADLINE_NS);
+    while pcb::state(result.pid) != Some(pcb::ProcessState::Zombie)
+        && crate::hrtimer::now_ns() < deadline
+    {
+        crate::sched::sleep_ms(5);
+    }
+    let state = pcb::state(result.pid);
+    let exit_code = pcb::exit_code(result.pid);
+    teardown_fixture(result.pid, result.task_id);
+
+    if state != Some(pcb::ProcessState::Zombie) {
+        serial_println!(
+            "[spawn]   FAIL: device door (ring 3) -- not a zombie after 10 s, got {:?}",
+            state
+        );
+        return Err(KernelError::InternalError);
+    }
+    if exit_code != Some(OK_EXIT) {
+        serial_println!(
+            "[spawn]   FAIL: device door (ring 3) -- exit {:?}, expected {} (0xC1 open of an \
+             unknown node not ENOENT; 0xC2 open of the playback node; 0xC3 HW_PARAMS; 0xC4 \
+             PREPARE; 0xC5 a blocking 32 KiB write not all taken; 0xC6 DRAIN; 0xC7 STATUS not \
+             SETUP; 0xC8 an unknown request not ENOTTY; 0xC9-0xCB PREPARE, START, PAUSE; 0xCC \
+             a non-blocking write not one ring; 0xCD a write into a full paused ring not \
+             EAGAIN; 0xCE DROP; 0xCF close; 0xD0 a second close not EBADF; 0xD1 the control \
+             node's open; 0xD2 CARD_INFO; 0xD3 a read of the control node not EINVAL)",
+            exit_code,
+            OK_EXIT
+        );
+        return Err(KernelError::InternalError);
+    }
+    serial_println!(
+        "[spawn]   native device door (ring 3: PCM configured, a blocking write and drain \
+         through the pump, a non-blocking write, pause, close; the control device): OK"
+    );
+    Ok(())
+}
+
 /// Unix-domain sockets by name from a real Linux-ABI process
 /// ([`elf::build_linux_unix_socket_test_elf`]): datagrams by abstract name
 /// and by path, a stream through listen/connect/accept with the kernel's

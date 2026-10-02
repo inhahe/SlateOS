@@ -2170,6 +2170,157 @@ fn xattr_meta(fs: &mut dyn FileSystem, relative: &Path, follow: bool) -> KernelR
     }
 }
 
+// ---------------------------------------------------------------------------
+// The ACL door: `system.posix_acl_access` (`fs::acl`)
+// ---------------------------------------------------------------------------
+//
+// Linux keeps a file's ACL in that extended attribute, and `getfacl`/`setfacl`
+// reach it there. Here the ACL the kernel enforces is `fs::acl`'s table, so the
+// VFS answers the name from the table, not the filesystem: what is set through
+// it is what refuses. Under the filesystem's lock, by the file's identity, as
+// every other per-file rule is. The default ACL (`system.posix_acl_default`) is
+// not kept -- there are no default ACLs -- and stays `NotSupported`.
+
+/// What the ACL door knows of a file under the filesystem's lock: its
+/// metadata, and the identity and name the ACL table keys it by.
+struct AclDoorFile<'a> {
+    meta: FileMeta,
+    id: Option<FileId>,
+    name: &'a Path,
+}
+
+impl<'a> AclDoorFile<'a> {
+    fn of(meta: FileMeta, fs_id: u64, name: &'a Path) -> Self {
+        let id = (meta.ino != 0).then_some(FileId {
+            fs_id,
+            ino: meta.ino,
+        });
+        Self { meta, id, name }
+    }
+
+    fn held(meta: FileMeta, obj: &FileObject, name: &'a Path) -> Self {
+        Self {
+            meta,
+            id: Some(obj.id()),
+            name,
+        }
+    }
+}
+
+/// `getxattr`: the ACL in Linux's layout; `NoAttribute` (`ENODATA`) for a file
+/// with none, as Linux answers; `NotSupported` for a symlink, which has none.
+fn acl_door_get(subject: &AclDoorFile<'_>) -> KernelResult<Vec<u8>> {
+    if subject.meta.entry_type == EntryType::Symlink {
+        return Err(KernelError::NotSupported);
+    }
+    super::acl::get_acl_for(subject.id, subject.name)
+        .map(|acl| super::acl::encode_xattr(&acl))
+        .ok_or(KernelError::NoAttribute)
+}
+
+/// Who may change a file's ACL: no one, on an immutable or append-only file
+/// (`EPERM`); otherwise its owner or root -- Linux's `inode_owner_or_capable`.
+fn acl_door_may_change(
+    subject: &AclDoorFile<'_>,
+    caller: xattr_policy::Caller,
+) -> KernelResult<()> {
+    if subject.meta.entry_type == EntryType::Symlink {
+        return Err(KernelError::NotSupported);
+    }
+    xattr_policy::namespace_rules(
+        xattr_policy::Namespace::System,
+        xattr_policy::Access::Write,
+        &subject.meta,
+        caller,
+    )?;
+    if caller.privileged || caller.uid == Some(subject.meta.uid) {
+        Ok(())
+    } else {
+        Err(KernelError::NotPermitted)
+    }
+}
+
+/// `setxattr`, in Linux's order (`do_set_acl`): the value parsed
+/// (`InvalidArgument`); who may ([`acl_door_may_change`]); the mode
+/// (`XATTR_CREATE`, `XATTR_REPLACE`). The file's mode becomes the one the ACL
+/// means (`posix_acl_update_mode`), through `chmod`; and an ACL the mode says
+/// all of is not kept, only the mode, as Linux keeps none then.
+fn acl_door_set(
+    subject: &AclDoorFile<'_>,
+    value: &[u8],
+    mode: XattrSetMode,
+    caller: xattr_policy::Caller,
+    chmod: impl FnOnce(u16) -> KernelResult<()>,
+) -> KernelResult<()> {
+    let acl = super::acl::decode_xattr(value)?;
+    acl_door_may_change(subject, caller)?;
+    mode.check(acl_door_get(subject))?;
+    let new_mode = super::acl::mode_of(&acl, subject.meta.permissions);
+    if new_mode != subject.meta.permissions {
+        chmod(new_mode)?;
+    }
+    if super::acl::is_minimal(&acl) {
+        super::acl::remove_acl_for(subject.id, subject.name);
+        Ok(())
+    } else {
+        super::acl::set_acl_for(subject.id, subject.name, acl)
+    }
+}
+
+/// `removexattr`: who may set an ACL may remove it; `NoAttribute` for a file
+/// with none. The mode stays as it is, as Linux leaves it.
+fn acl_door_remove(subject: &AclDoorFile<'_>, caller: xattr_policy::Caller) -> KernelResult<()> {
+    acl_door_may_change(subject, caller)?;
+    if super::acl::remove_acl_for(subject.id, subject.name) {
+        Ok(())
+    } else {
+        Err(KernelError::NoAttribute)
+    }
+}
+
+/// `listxattr`'s part: the ACL's name, when the file has one.
+fn acl_door_listed(subject: &AclDoorFile<'_>, names: &mut Vec<Vec<u8>>) {
+    if super::acl::get_acl_for(subject.id, subject.name).is_some() {
+        names.push(super::acl::XATTR_ACCESS.to_vec());
+    }
+}
+
+/// After a `chmod` of a file with an ACL: the mode written into the ACL, as
+/// Linux's `posix_acl_chmod` writes it, so the permission check and `getfacl`
+/// both see the new mode. Nothing is looked up while no file anywhere has an
+/// ACL, which is almost always.
+fn acl_follow_chmod(id: Option<FileId>, name: &Path, permissions: u16) {
+    if super::acl::count() == 0 {
+        return;
+    }
+    if let Some(acl) = super::acl::get_acl_for(id, name) {
+        // Discarded deliberately: `with_mode` changes no entry's tag, so an
+        // ACL that was valid when stored is valid now, and `set_acl_for` can
+        // refuse only an invalid one.
+        let _ = super::acl::set_acl_for(id, name, super::acl::with_mode(&acl, permissions));
+    }
+}
+
+/// [`acl_follow_chmod`] for what `relative` names on `fs`.
+fn acl_follow_chmod_at(
+    fs: &mut dyn FileSystem,
+    fs_id: u64,
+    relative: &Path,
+    name: &Path,
+    follow: bool,
+    permissions: u16,
+) {
+    if super::acl::count() == 0 {
+        return;
+    }
+    // Discarded deliberately: the chmod has just succeeded on this name under
+    // this lock, so it resolves; a filesystem that cannot answer has no
+    // identity to key an ACL by, and the name fallback below still applies.
+    let ino = xattr_meta(fs, relative, follow).map_or(0, |m| m.ino);
+    let id = (ino != 0).then_some(FileId { fs_id, ino });
+    acl_follow_chmod(id, name, permissions);
+}
+
 /// What [`Vfs::set_xattr_with`] does when the attribute already exists.
 ///
 /// The kernel takes this rather than leaving userspace to probe first
@@ -4446,6 +4597,7 @@ impl Vfs {
                 super::sealing::may_change_mode(seals, meta.permissions, permissions)?;
             }
             guard.chmod_ino(obj.ino, permissions)?;
+            acl_follow_chmod(Some(obj.id()), path, permissions);
         }
         super::notify::emit_metadata(path);
         super::journal::record(super::journal::JournalEventType::Modified, path);
@@ -4513,6 +4665,11 @@ impl Vfs {
     ///
     /// `fs::xattr_policy`'s; the filesystem's (`NoAttribute`).
     pub fn object_get_xattr(obj: &FileObject, name: &[u8]) -> KernelResult<Vec<u8>> {
+        if name == super::acl::XATTR_ACCESS {
+            let mut guard = obj.fs.lock();
+            let meta = guard.metadata_ino(obj.ino)?;
+            return acl_door_get(&AclDoorFile::held(meta, obj, Path::new("")));
+        }
         let caller = xattr_policy::Caller::current();
         Self::object_xattr_on(obj, name, xattr_policy::Access::Read, caller, |fs, ino| {
             fs.get_xattr_ino(ino, name)
@@ -4536,10 +4693,22 @@ impl Vfs {
     ) -> KernelResult<()> {
         check_writable_fs(obj.fs_id)?;
         let caller = xattr_policy::Caller::current();
-        Self::object_xattr_on(obj, name, xattr_policy::Access::Write, caller, |fs, ino| {
-            mode.check(fs.get_xattr_ino(ino, name))?;
-            fs.set_xattr_ino(ino, name, value)
-        })?;
+        if name == super::acl::XATTR_ACCESS {
+            let mut guard = obj.fs.lock();
+            let meta = guard.metadata_ino(obj.ino)?;
+            let subject = AclDoorFile::held(meta, obj, path);
+            acl_door_set(&subject, value, mode, caller, |new_mode| {
+                if let Some((seals, meta)) = seals_held(&mut **guard, obj) {
+                    super::sealing::may_change_mode(seals, meta.permissions, new_mode)?;
+                }
+                guard.chmod_ino(obj.ino, new_mode)
+            })?;
+        } else {
+            Self::object_xattr_on(obj, name, xattr_policy::Access::Write, caller, |fs, ino| {
+                mode.check(fs.get_xattr_ino(ino, name))?;
+                fs.set_xattr_ino(ino, name, value)
+            })?;
+        }
         super::notify::emit_metadata(path);
         super::journal::record(super::journal::JournalEventType::Modified, path);
         Ok(())
@@ -4554,9 +4723,15 @@ impl Vfs {
     pub fn object_remove_xattr(obj: &FileObject, path: &Path, name: &[u8]) -> KernelResult<()> {
         check_writable_fs(obj.fs_id)?;
         let caller = xattr_policy::Caller::current();
-        Self::object_xattr_on(obj, name, xattr_policy::Access::Write, caller, |fs, ino| {
-            fs.remove_xattr_ino(ino, name)
-        })?;
+        if name == super::acl::XATTR_ACCESS {
+            let mut guard = obj.fs.lock();
+            let meta = guard.metadata_ino(obj.ino)?;
+            acl_door_remove(&AclDoorFile::held(meta, obj, path), caller)?;
+        } else {
+            Self::object_xattr_on(obj, name, xattr_policy::Access::Write, caller, |fs, ino| {
+                fs.remove_xattr_ino(ino, name)
+            })?;
+        }
         super::notify::emit_metadata(path);
         super::journal::record(super::journal::JournalEventType::Modified, path);
         Ok(())
@@ -4571,8 +4746,18 @@ impl Vfs {
     /// The filesystem's.
     pub fn object_list_xattrs(obj: &FileObject) -> KernelResult<Vec<Vec<u8>>> {
         let privileged = xattr_policy::Caller::current().privileged;
-        let mut names = obj.fs.lock().list_xattrs_ino(obj.ino)?;
+        let (mut names, meta) = {
+            let mut guard = obj.fs.lock();
+            // Discarded deliberately, as `xattr_list_as`'s.
+            (
+                guard.list_xattrs_ino(obj.ino)?,
+                guard.metadata_ino(obj.ino).ok(),
+            )
+        };
         names.retain(|name| xattr_policy::listed(name, privileged));
+        if let Some(meta) = meta {
+            acl_door_listed(&AclDoorFile::held(meta, obj, Path::new("")), &mut names);
+        }
         Ok(names)
     }
 
@@ -5389,6 +5574,7 @@ impl Vfs {
             guard_metadata(&mut **guard, &child_rel, false)?;
             seal_mode_guard(&mut **guard, fs_id, &child_rel, &child, permissions)?;
             guard.set_permissions_no_follow(&child_rel, permissions)?;
+            acl_follow_chmod_at(&mut **guard, fs_id, &child_rel, &child, false, permissions);
         } else {
             // `name` is a symlink and the caller asked to follow it, so the
             // object being chmod-ed is outside the pinned directory and
@@ -5406,6 +5592,14 @@ impl Vfs {
             } else {
                 guard.set_permissions(&relative, permissions)?;
             }
+            acl_follow_chmod_at(
+                &mut **guard,
+                fs_id,
+                &relative,
+                &target,
+                !no_follow,
+                permissions,
+            );
         }
 
         super::notify::emit_metadata(&target);
@@ -6241,6 +6435,7 @@ impl Vfs {
             guard_metadata(&mut **guard, &relative, true)?;
             seal_mode_guard(&mut **guard, fs_id, &relative, path, permissions)?;
             guard.set_permissions(&relative, permissions)?;
+            acl_follow_chmod_at(&mut **guard, fs_id, &relative, path, true, permissions);
         }
         super::notify::emit_metadata(path);
         super::journal::record(super::journal::JournalEventType::Modified, path);
@@ -6265,6 +6460,7 @@ impl Vfs {
             guard_metadata(&mut **guard, &relative, false)?;
             seal_mode_guard(&mut **guard, fs_id, &relative, &path, permissions)?;
             guard.set_permissions_no_follow(&relative, permissions)?;
+            acl_follow_chmod_at(&mut **guard, fs_id, &relative, &path, false, permissions);
         }
         super::notify::emit_metadata(&path);
         super::journal::record(super::journal::JournalEventType::Modified, &path);
@@ -6587,6 +6783,12 @@ impl Vfs {
         name: &[u8],
         caller: xattr_policy::Caller,
     ) -> KernelResult<Vec<u8>> {
+        if name == super::acl::XATTR_ACCESS {
+            let (fs, fs_id, _opts, relative) = resolve_mount(&target.path)?;
+            let mut guard = fs.lock();
+            let meta = xattr_meta(&mut **guard, &relative, target.follow)?;
+            return acl_door_get(&AclDoorFile::of(meta, fs_id, &target.path));
+        }
         let follow = target.follow;
         Self::xattr_on(
             target,
@@ -6612,6 +6814,24 @@ impl Vfs {
         mode: XattrSetMode,
         caller: xattr_policy::Caller,
     ) -> KernelResult<()> {
+        if name == super::acl::XATTR_ACCESS {
+            if target.access != xattr_policy::Access::Write {
+                return Err(KernelError::InvalidArgument);
+            }
+            let (fs, fs_id, _opts, relative) = resolve_mount(&target.path)?;
+            {
+                let mut guard = fs.lock();
+                let meta = xattr_meta(&mut **guard, &relative, target.follow)?;
+                let subject = AclDoorFile::of(meta, fs_id, &target.path);
+                acl_door_set(&subject, value, mode, caller, |new_mode| {
+                    seal_mode_guard(&mut **guard, fs_id, &relative, &target.path, new_mode)?;
+                    guard.set_permissions_no_follow(&relative, new_mode)
+                })?;
+            }
+            super::notify::emit_metadata(&target.path);
+            super::journal::record(super::journal::JournalEventType::Modified, &target.path);
+            return Ok(());
+        }
         let follow = target.follow;
         Self::xattr_on(
             target,
@@ -6640,6 +6860,20 @@ impl Vfs {
         name: &[u8],
         caller: xattr_policy::Caller,
     ) -> KernelResult<()> {
+        if name == super::acl::XATTR_ACCESS {
+            if target.access != xattr_policy::Access::Write {
+                return Err(KernelError::InvalidArgument);
+            }
+            let (fs, fs_id, _opts, relative) = resolve_mount(&target.path)?;
+            {
+                let mut guard = fs.lock();
+                let meta = xattr_meta(&mut **guard, &relative, target.follow)?;
+                acl_door_remove(&AclDoorFile::of(meta, fs_id, &target.path), caller)?;
+            }
+            super::notify::emit_metadata(&target.path);
+            super::journal::record(super::journal::JournalEventType::Modified, &target.path);
+            return Ok(());
+        }
         let follow = target.follow;
         Self::xattr_on(
             target,
@@ -6668,16 +6902,25 @@ impl Vfs {
         target: &XattrTarget,
         caller: xattr_policy::Caller,
     ) -> KernelResult<Vec<Vec<u8>>> {
-        let (fs, _id, _opts, relative) = resolve_mount(&target.path)?;
-        let mut names = {
+        let (fs, fs_id, _opts, relative) = resolve_mount(&target.path)?;
+        let (mut names, meta) = {
             let mut guard = fs.lock();
-            if target.follow {
+            let names = if target.follow {
                 guard.list_xattrs(&relative)?
             } else {
                 guard.list_xattrs_no_follow(&relative)?
-            }
+            };
+            // Discarded deliberately: the listing above has just found the
+            // file; one whose metadata cannot be read has no ACL to list.
+            (
+                names,
+                xattr_meta(&mut **guard, &relative, target.follow).ok(),
+            )
         };
         names.retain(|name| xattr_policy::listed(name, caller.privileged));
+        if let Some(meta) = meta {
+            acl_door_listed(&AclDoorFile::of(meta, fs_id, &target.path), &mut names);
+        }
         Ok(names)
     }
 
@@ -12994,7 +13237,7 @@ pub fn self_test_xattr_rules() -> KernelResult<()> {
         let absent = Err(KernelError::NoAttribute);
         let unsupported = Err(KernelError::NotSupported);
         // In order: each case may stand on what an earlier one stored.
-        let cases: [(&str, KernelResult<()>, KernelResult<()>); 24] = [
+        let cases: [(&str, KernelResult<()>, KernelResult<()>); 25] = [
             // Names no handler takes are refused, and nothing is stored.
             (
                 "a name in no namespace",
@@ -13006,9 +13249,17 @@ pub fn self_test_xattr_rules() -> KernelResult<()> {
                 set(FILE, true, b"user.", root),
                 Err(KernelError::InvalidArgument),
             ),
+            // The ACL's name reaches the ACL table (`fs::acl`), which parses
+            // the value: one byte is no ACL (`EINVAL`, as Linux answers).
             (
-                "an ACL's name",
+                "an ACL's name with no ACL in it",
                 set(FILE, true, b"system.posix_acl_access", root),
+                Err(KernelError::InvalidArgument),
+            ),
+            // The default ACL is not kept: refused as before.
+            (
+                "the default ACL's name",
+                set(FILE, true, b"system.posix_acl_default", root),
                 unsupported,
             ),
             (
@@ -13803,6 +14054,220 @@ pub fn self_test_seal_rules() -> KernelResult<()> {
         "[vfs]   seals: write, grow, shrink, exec and seal refused on every route (by name, \
          by a second name, through a handle) with EPERM, the refused unchanged, the unsealed \
          control free, and the seals gone with the files: OK"
+    );
+    Ok(())
+}
+
+/// The ACL door (`system.posix_acl_access`) through the VFS, on `/tmp`
+/// (memfs): what `setfacl` and `getfacl` do, by path and through an open
+/// handle, as the file's owner, as root and as a stranger.
+///
+/// Each step is checked against the ACL table the permission check reads
+/// (`fs::acl`), not only against what the door answers, so a door that
+/// stored the bytes and enforced nothing would fail here.
+///
+/// # Errors
+///
+/// `InternalError` naming the first step that answered wrongly; the setup's.
+pub fn self_test_acl_door() -> KernelResult<()> {
+    use super::acl::{self, AccessRequest, AclPerm, AclTag};
+    use super::handle::{self, OpenFlags};
+    use crate::serial_println;
+    use xattr_policy::Caller;
+
+    const FILE: &str = "/tmp/_acl_door";
+    const FROZEN: &str = "/tmp/_acl_door_frozen";
+    let name = acl::XATTR_ACCESS;
+    let root = Caller {
+        privileged: true,
+        uid: Some(0),
+    };
+    let owner = Caller {
+        privileged: false,
+        uid: Some(1000),
+    };
+    let stranger = Caller {
+        privileged: false,
+        uid: Some(3000),
+    };
+    let set = |path: &str, value: &[u8], mode: XattrSetMode, who: Caller| {
+        Vfs::xattr_target(path, true, xattr_policy::Access::Write)
+            .and_then(|t| Vfs::xattr_set_as(&t, acl::XATTR_ACCESS, value, mode, who))
+    };
+    let get = |path: &str| {
+        Vfs::xattr_target(path, true, xattr_policy::Access::Read)
+            .and_then(|t| Vfs::xattr_get_as(&t, acl::XATTR_ACCESS, root))
+    };
+    let remove = |path: &str, who: Caller| {
+        Vfs::xattr_target(path, true, xattr_policy::Access::Write)
+            .and_then(|t| Vfs::xattr_remove_as(&t, acl::XATTR_ACCESS, who))
+    };
+    let mode_of = |path: &str| Vfs::metadata(path).map(|m| m.permissions & 0o7777);
+    let fail = |what: &str| -> KernelResult<()> {
+        serial_println!("[vfs]   FAIL: ACL door: {}", what);
+        Err(KernelError::InternalError)
+    };
+    let cleanup = || {
+        let _ = Vfs::set_attributes(FROZEN, FileAttr::NONE);
+        let _ = Vfs::remove(FROZEN);
+        let _ = Vfs::remove(FILE);
+    };
+    cleanup();
+
+    let run = || -> KernelResult<()> {
+        Vfs::write_file(FILE, b"x")?;
+        Vfs::set_owner(FILE, 1000, 1000)?;
+        Vfs::set_permissions(FILE, 0o640)?;
+        // owner rwx, group r-x, other r--, and user 2000 rw-; the mask is the
+        // union of the group's and the named entry's: rwx.
+        let named = acl::build_acl(
+            AclPerm::ALL,
+            AclPerm(5),
+            AclPerm(4),
+            &[(2000, AclPerm(6))],
+            &[],
+        );
+        let bytes = acl::encode_xattr(&named);
+
+        // Root sets it: stored where the check reads it, and the mode it means.
+        set(FILE, &bytes, XattrSetMode::Any, root)?;
+        if get(FILE)? != bytes || mode_of(FILE)? != 0o774 {
+            return fail("root's ACL did not read back, or did not set the mode it means");
+        }
+        let listed = Vfs::list_xattrs(FILE)?;
+        if !listed.iter().any(|n| n.as_slice() == name) {
+            return fail("a file with an ACL does not list its name");
+        }
+        let check =
+            |uid: u32, want: AccessRequest| acl::check_access(FILE, uid, uid, 1000, 1000, want);
+        if check(2000, AccessRequest::WRITE).is_err() || check(3000, AccessRequest::WRITE).is_ok() {
+            return fail("the stored ACL does not decide as it says");
+        }
+
+        // A chmod is written into the ACL: the mask narrows the named entry.
+        Vfs::set_permissions(FILE, 0o750)?;
+        let after = acl::decode_xattr(&get(FILE)?)?;
+        let mask = after
+            .entries
+            .iter()
+            .find(|e| e.tag == AclTag::Mask)
+            .map(|e| e.perm);
+        let user = after
+            .entries
+            .iter()
+            .find(|e| e.tag == AclTag::User(2000))
+            .map(|e| e.perm);
+        if mask != Some(AclPerm(5)) || user != Some(AclPerm(6)) {
+            return fail("a chmod did not reach the ACL's mask, or moved a named entry");
+        }
+        if check(2000, AccessRequest::WRITE).is_ok() || check(2000, AccessRequest::READ).is_err() {
+            return fail("after the chmod, the narrower mask is not what decides");
+        }
+
+        // Who may: the owner and root; a stranger not.
+        let refusals: [(&str, KernelResult<()>, KernelResult<()>); 6] = [
+            (
+                "a stranger sets one",
+                set(FILE, &bytes, XattrSetMode::Any, stranger),
+                Err(KernelError::NotPermitted),
+            ),
+            (
+                "a stranger removes it",
+                remove(FILE, stranger),
+                Err(KernelError::NotPermitted),
+            ),
+            (
+                "XATTR_CREATE over one",
+                set(FILE, &bytes, XattrSetMode::Create, owner),
+                Err(KernelError::AlreadyExists),
+            ),
+            (
+                "a malformed one",
+                set(
+                    FILE,
+                    bytes.get(..bytes.len().saturating_sub(1)).unwrap_or(&[]),
+                    XattrSetMode::Any,
+                    owner,
+                ),
+                Err(KernelError::InvalidArgument),
+            ),
+            ("the owner removes it", remove(FILE, owner), Ok(())),
+            (
+                "XATTR_REPLACE of none",
+                set(FILE, &bytes, XattrSetMode::Replace, owner),
+                Err(KernelError::NoAttribute),
+            ),
+        ];
+        for (what, got, want) in refusals {
+            if got != want {
+                serial_println!(
+                    "[vfs]   FAIL: ACL door: {}: got {:?}, want {:?}",
+                    what,
+                    got,
+                    want
+                );
+                return Err(KernelError::InternalError);
+            }
+        }
+        if get(FILE) != Err(KernelError::NoAttribute)
+            || acl::check_access(FILE, 3000, 3000, 1000, 1000, AccessRequest::WRITE).is_err()
+        {
+            return fail("a removed ACL still reads back, or still decides");
+        }
+
+        // A minimal ACL is the mode alone: kept as the mode, not as an ACL.
+        set(
+            FILE,
+            &acl::encode_xattr(&acl::from_mode(0o600)),
+            XattrSetMode::Any,
+            owner,
+        )?;
+        if get(FILE) != Err(KernelError::NoAttribute) || mode_of(FILE)? != 0o600 {
+            return fail("a minimal ACL was kept as an ACL, or did not set the mode");
+        }
+
+        // Through an open handle, as `fsetfacl` does: the same table.
+        let h = handle::open(FILE, OpenFlags::READ)?;
+        let through = handle::HandleFile::of(h)
+            .and_then(|f| f.set_xattr(acl::XATTR_ACCESS, &bytes, XattrSetMode::Any));
+        let read_back = handle::HandleFile::of(h).and_then(|f| f.get_xattr(acl::XATTR_ACCESS));
+        handle::close(h)?;
+        if through.is_err() || read_back.as_deref() != Ok(bytes.as_slice()) || get(FILE)? != bytes {
+            serial_println!(
+                "[vfs]   ACL door through a handle: set {:?}, read {:?}",
+                through,
+                read_back.map(|b| b.len())
+            );
+            return fail("an ACL set through a handle is not the file's");
+        }
+
+        // No change to an immutable file's ACL, whoever asks; no default ACLs.
+        Vfs::write_file(FROZEN, b"x")?;
+        Vfs::set_attributes(FROZEN, FileAttr::IMMUTABLE)?;
+        let frozen = set(FROZEN, &bytes, XattrSetMode::Any, root);
+        let default = Vfs::xattr_target(FILE, true, xattr_policy::Access::Write).and_then(|t| {
+            Vfs::xattr_set_as(&t, acl::XATTR_DEFAULT, &bytes, XattrSetMode::Any, root)
+        });
+        if frozen != Err(KernelError::NotPermitted) || default != Err(KernelError::NotSupported) {
+            serial_println!(
+                "[vfs]   ACL door: immutable {:?}, default {:?}",
+                frozen,
+                default
+            );
+            return fail("an immutable file took an ACL, or a default ACL was accepted");
+        }
+        Ok(())
+    };
+    let result = run();
+    cleanup();
+    result?;
+    if acl::get_acl(FILE).is_some() {
+        return fail("the file's ACL outlived it");
+    }
+    serial_println!(
+        "[vfs]   ACL door: set by root and read back, listed, the mode it means, a chmod written into it, enforced as \\
+         stored; refused to a stranger, malformed, over XATTR_CREATE and REPLACE; a minimal one kept as the mode; \\
+         the same through a handle; not on an immutable file; no default ACLs: OK"
     );
     Ok(())
 }

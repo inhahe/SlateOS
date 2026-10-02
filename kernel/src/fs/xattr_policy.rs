@@ -22,12 +22,16 @@
 //! name, and ext4 filed an unprefixed one under index 0. One stored then is
 //! left where it is, and is neither listed nor read.
 //!
-//! **`system.` is refused.** On Linux it holds the POSIX ACLs
-//! (`system.posix_acl_access`), which its filesystems translate into the ACL
-//! they enforce. Here the ACL is `fs::acl`'s, not an attribute, so storing
-//! one under that name would grant nothing while claiming to: `setfacl` meets
-//! `EOPNOTSUPP`, as on a filesystem mounted without ACLs, and falls back to
-//! the mode.
+//! **`system.` is refused, but for the access ACL.** On Linux it holds the
+//! POSIX ACLs (`system.posix_acl_access`), which its filesystems translate
+//! into the ACL they enforce. Here the ACL is `fs::acl`'s, not an attribute:
+//! storing one under that name would grant nothing while claiming to. So the
+//! VFS answers `system.posix_acl_access` itself, from and into `fs::acl`'s
+//! table -- the one the permission check reads (`vfs::acl_door_*`, since
+//! 2026-10-02; until then `setfacl` met `EOPNOTSUPP`) -- before the rules
+//! here are asked. Every other `system.` name, `system.posix_acl_default`
+//! among them (there are no default ACLs), is still `NotSupported`, which is
+//! why [`resolve`] refuses the access ACL's name too: it never reaches it.
 //!
 //! ## Privilege
 //!

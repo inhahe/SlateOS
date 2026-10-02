@@ -6030,6 +6030,13 @@ extern "C" fn kernel_main() -> ! {
                 selftest::Severity::Diagnostic,
                 fs::vfs::self_test_seal_rules(),
             );
+            // The ACL door: `setfacl`'s `system.posix_acl_access`, reaching
+            // the ACL table the permission check reads.
+            selftest::dispatch_debug(
+                "ACL door through the VFS",
+                selftest::Severity::Diagnostic,
+                fs::vfs::self_test_acl_door(),
+            );
             // netmon backs /proc/netmon and the `netmon` kshell command.  Its
             // init_defaults() previously seeded three FABRICATED connections (sshd
             // LISTEN :22, a browser ESTABLISHED to 93.184.216.34:443 with real-looking

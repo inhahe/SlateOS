@@ -122,7 +122,7 @@ use crate::error::{KernelError, KernelResult};
 use crate::fs::path::{Path, PathBuf};
 use crate::fs::vfs::FileId;
 use crate::sched::{self, task::TaskId};
-use crate::sync::PreemptSpinMutex as Mutex;
+use crate::sync::Mutex;
 use alloc::collections::{BTreeMap, BTreeSet, VecDeque};
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicBool, Ordering};
@@ -421,11 +421,22 @@ impl Table {
 }
 
 /// Lock order: `TABLE` -> `PAIRS` -> `SCHED`.
-static TABLE: Mutex<Table> = Mutex::new(Table {
-    sockets: BTreeMap::new(),
-    names: BTreeMap::new(),
-    next_id: 1,
-});
+///
+/// The tracked type, which lockdep watches: `PAIRS` (`stream_socket`) is
+/// taken under it, so it is no leaf. Until 2026-10-02 it was a
+/// `PreemptSpinMutex`, whose claim is that nothing nests inside it, and the
+/// boot's leaf check caught the nesting (design-decisions §975). Never
+/// taken in interrupt context -- a wait's timer wakes the task and touches
+/// nothing here -- and a socket call is no hot path, so the tracking's cost
+/// (about 235 ns an acquisition) is nothing to weigh.
+static TABLE: Mutex<Table> = Mutex::named(
+    Table {
+        sockets: BTreeMap::new(),
+        names: BTreeMap::new(),
+        next_id: 1,
+    },
+    b"UNIX_SOCKETS",
+);
 
 /// The calling process's credentials, or `None` in kernel context -- which
 /// is reported as "unknown", never as root (see `service`'s

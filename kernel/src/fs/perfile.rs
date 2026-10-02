@@ -114,6 +114,9 @@ pub(crate) struct Table {
 /// exercises it with the rest.
 pub(crate) const TABLES: &[Table] = &[
     super::acl::PER_FILE_STATE,
+    // Directories' default ACLs, which their new files inherit: one left behind
+    // would hand a stranger's files an ACL nobody set on them.
+    super::acl::DEFAULT_PER_FILE_STATE,
     super::sealing::PER_FILE_STATE,
     super::queryable::PER_FILE_STATE,
     // Which socket a Unix-domain socket's node leads to: an entry outliving

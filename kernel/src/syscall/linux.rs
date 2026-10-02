@@ -5764,18 +5764,22 @@ fn sys_lseek(args: &SyscallArgs) -> SyscallResult {
     }
 }
 
-/// Translate Linux `O_*` flag bits to the kernel's `OpenFlags`.
-/// The mode a Linux create asks for, as the new file will have it: the twelve
-/// permission bits of `mode`, less the caller's umask (`umask(2)`;
-/// `pcb::get_umask`). A kernel caller has none and gets 022, Linux's default.
+/// The mode a Linux create asks for: the twelve permission bits of `mode`,
+/// the file-type bits dropped.
+///
+/// Not less the umask. The VFS applies the caller's umask where the file is
+/// made (`vfs::creator_umask`), as Linux's does: a directory with a default
+/// ACL gives its new files the ACL's bits instead, and does not apply the
+/// umask at all (`fs::acl::inherit`, design-decisions §1531) -- which needs
+/// the bits the umask would remove still to be there. A kernel caller has no
+/// umask there; this applied Linux's default 022 to one until 2026-10-02.
 ///
 /// Until 2026-10-01 the Linux `open`, `openat`, `openat2`, `creat`, `mkdir`
 /// and `mkdirat` dropped `mode` and the umask both, so every file was made
 /// 0644 and every directory 0755: a key a program created 0600 was readable
 /// by everyone.
 fn linux_create_mode(mode: u64) -> u16 {
-    let umask = caller_pid().and_then(pcb::get_umask).unwrap_or(0o022);
-    u16::try_from(mode & 0o7777).unwrap_or(0) & !umask
+    u16::try_from(mode & 0o7777).unwrap_or(0)
 }
 
 /// What `O_TMPFILE` asks, checked as Linux's `build_open_flags` checks it.
@@ -5807,6 +5811,7 @@ fn linux_tmpfile_flags(flags: u32) -> Result<Option<u32>, i32> {
     Ok(Some(bits))
 }
 
+/// Translate Linux `O_*` flag bits to the kernel's `OpenFlags`.
 fn translate_open_flags(linux_flags: u32) -> u32 {
     use crate::fs::handle::OpenFlags;
     let access = linux_flags & oflags::O_ACCMODE;
@@ -54476,16 +54481,16 @@ pub fn self_test_fs() -> crate::error::KernelResult<()> {
 }
 
 /// What a Linux create stamps on the file it makes (`linux_create_mode`),
-/// against `/tmp`: the `mode` argument less the umask, through `open`,
-/// `creat`, `mkdir` and the byte-path installer `openat` uses; paths past
-/// 255 bytes, up to `PATH_MAX`; a name that is not UTF-8.
+/// against `/tmp`: the `mode` argument, through `open`, `creat`, `mkdir` and
+/// the byte-path installer `openat` uses; paths past 255 bytes, up to
+/// `PATH_MAX`; a name that is not UTF-8.
 ///
-/// Kernel context, whose umask is Linux's default 022, but for one rung that
-/// lends the task a process to read that process's umask: a process's path
-/// argument would have to be in its own memory, which a kernel test's is
-/// not. A kernel caller cannot hold a descriptor, so each open creates the
-/// file, gives its handle back and answers `EBADF`: the file it leaves is the
-/// answer.
+/// Kernel context, which has no umask: a process's path argument would have
+/// to be in its own memory, which a kernel test's is not. A process's umask,
+/// and a default ACL in its place, are the VFS's to apply, and
+/// `vfs::self_test_create_modes` tests them. A kernel caller cannot hold a
+/// descriptor, so each open creates the file, gives its handle back and
+/// answers `EBADF`: the file it leaves is the answer.
 #[inline(never)]
 fn test_linux_create_modes() -> crate::error::KernelResult<()> {
     use crate::serial_println;
@@ -54517,22 +54522,17 @@ fn test_linux_create_modes() -> crate::error::KernelResult<()> {
     let _ = crate::fs::Vfs::remove_recursive(DIR);
     crate::fs::Vfs::mkdir(DIR)?;
 
-    // The umask: the calling process's own, else Linux's default.
-    let pid = pcb::create("linux-create-modes", 0);
-    let _ = pcb::set_umask(pid, 0o027);
-    let theirs = crate::proc::thread::self_test_as_process(pid, || linux_create_mode(0o777));
-    pcb::destroy(pid);
-    if theirs != 0o750
-        || linux_create_mode(0o777) != 0o755
-        || linux_create_mode(0o170_000 | 0o4755) != 0o4755
-    {
-        return fail("the umask was not applied, or a file-type bit got through");
+    // The mode asked for, file-type bits dropped -- and not less the umask,
+    // which is the VFS's to apply (`vfs::self_test_create_modes` holds that,
+    // a process's umask and a default ACL in its place).
+    if linux_create_mode(0o777) != 0o777 || linux_create_mode(0o170_000 | 0o4755) != 0o4755 {
+        return fail("a file-type bit got through, or the umask was applied here");
     }
 
-    // open(O_CREAT): the mode less the umask, setuid kept.
+    // open(O_CREAT): the mode, setuid kept. A kernel caller has no umask.
     for (name, mode, want) in [
         (&b"/tmp/linux-create-modes/key\0"[..], 0o600, 0o600),
-        (&b"/tmp/linux-create-modes/wide\0"[..], 0o777, 0o755),
+        (&b"/tmp/linux-create-modes/wide\0"[..], 0o777, 0o777),
         (&b"/tmp/linux-create-modes/suid\0"[..], 0o4755, 0o4755),
     ] {
         let r = dispatch_linux(nr::OPEN, &args(name.as_ptr() as u64, create, mode)).value;
@@ -54544,7 +54544,7 @@ fn test_linux_create_modes() -> crate::error::KernelResult<()> {
                 r,
                 mode_of(path)
             );
-            return fail("open(O_CREAT) did not stamp its mode less the umask");
+            return fail("open(O_CREAT) did not stamp its mode");
         }
     }
 
@@ -54555,10 +54555,10 @@ fn test_linux_create_modes() -> crate::error::KernelResult<()> {
         return fail("creat did not stamp its mode");
     }
 
-    // mkdir: the permission bits and sticky, less the umask.
+    // mkdir: the permission bits and sticky.
     for (name, mode, want) in [
         (&b"/tmp/linux-create-modes/private\0"[..], 0o700, 0o700),
-        (&b"/tmp/linux-create-modes/shared\0"[..], 0o1777, 0o1755),
+        (&b"/tmp/linux-create-modes/shared\0"[..], 0o1777, 0o1777),
     ] {
         let r = dispatch_linux(nr::MKDIR, &args(name.as_ptr() as u64, mode, 0)).value;
         let path = Path::new(name.strip_suffix(b"\0").unwrap_or(name));
@@ -54569,7 +54569,7 @@ fn test_linux_create_modes() -> crate::error::KernelResult<()> {
                 r,
                 mode_of(path)
             );
-            return fail("mkdir did not stamp its mode less the umask");
+            return fail("mkdir did not stamp its mode");
         }
     }
 

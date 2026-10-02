@@ -6041,6 +6041,13 @@ extern "C" fn kernel_main() -> ! {
                 selftest::Severity::Diagnostic,
                 fs::vfs::self_test_acl_door(),
             );
+            // A new node's mode and ACL: a process's umask on every route
+            // that makes one, and a directory's default ACL in its place.
+            selftest::dispatch_debug(
+                "new nodes' modes, the umask and default ACLs",
+                selftest::Severity::Diagnostic,
+                fs::vfs::self_test_create_modes(),
+            );
             // netmon backs /proc/netmon and the `netmon` kshell command.  Its
             // init_defaults() previously seeded three FABRICATED connections (sshd
             // LISTEN :22, a browser ESTABLISHED to 93.184.216.34:443 with real-looking

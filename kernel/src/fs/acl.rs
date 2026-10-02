@@ -46,6 +46,13 @@
 //! ACL left behind would govern that stranger. The VFS does tell it -- see
 //! [`super::perfile`] and [`PER_FILE_STATE`].
 //!
+//! Directories' **default ACLs** (`system.posix_acl_default`, `setfacl -d`)
+//! are a second table beside it, [`DEFAULTS`], kept and forgotten the same way
+//! ([`DEFAULT_PER_FILE_STATE`]). The permission check never reads one: a
+//! default ACL is what a file made in the directory begins with -- its access
+//! ACL and its mode, by [`inherit`], with no umask (design-decisions §1531).
+//! The VFS applies it when it makes the file.
+//!
 //! ## Reference
 //!
 //! POSIX 1003.1e draft 17 (ACL specification)
@@ -594,7 +601,7 @@ pub fn stats() -> AclStats {
     }
 }
 
-/// Clear all ACLs (for testing).
+/// Clear all ACLs, default ACLs included (for testing).
 #[allow(dead_code)]
 pub fn clear() {
     let mut inner = ACLS.lock();
@@ -602,6 +609,9 @@ pub fn clear() {
     inner.checks_performed = 0;
     inner.denials = 0;
     ACL_COUNT.store(0, Ordering::Relaxed);
+    drop(inner);
+    DEFAULTS.lock().clear();
+    DEFAULT_COUNT.store(0, Ordering::Relaxed);
 }
 
 // ---------------------------------------------------------------------------
@@ -747,7 +757,8 @@ pub fn format_acl(acl: &Acl, mask: Option<AclPerm>) -> Vec<String> {
 
 /// The xattr's name.
 pub const XATTR_ACCESS: &[u8] = b"system.posix_acl_access";
-/// The default ACL's xattr name: not kept here (no default ACLs), so refused.
+/// The default ACL's xattr name: a directory's, which its new files and
+/// directories inherit ([`inherit`]), kept in [`DEFAULTS`].
 pub const XATTR_DEFAULT: &[u8] = b"system.posix_acl_default";
 
 /// `POSIX_ACL_XATTR_VERSION`.
@@ -979,6 +990,195 @@ pub fn remove_acl_for(id: Option<crate::fs::vfs::FileId>, path: &Path) -> bool {
     removed
 }
 
+// ---------------------------------------------------------------------------
+// Default ACLs: `system.posix_acl_default`
+// ---------------------------------------------------------------------------
+//
+// A directory's default ACL is what a file made in it begins with
+// (`setfacl -d`): the new file's access ACL is the default narrowed by the
+// mode its creator asked for, and a new directory takes the default as its
+// own default too -- Linux's `posix_acl_create`. A directory with one gives
+// its new files no umask: the default ACL says what they get instead.
+//
+// Kept beside the access ACLs, in their own table: the permission check never
+// reads a default ACL, so the gate's "no ACLs at all" fast path (`count`) must
+// not stop being taken because a directory has one.
+
+/// Directories' default ACLs, keyed as the access ACLs are ([`AclKey`]).
+static DEFAULTS: Mutex<BTreeMap<AclKey, (PathBuf, Acl)>> = Mutex::new(BTreeMap::new());
+
+/// `DEFAULTS`' length, readable without its lock: every creation asks
+/// whether any directory has a default ACL before it looks for its own's.
+static DEFAULT_COUNT: AtomicUsize = AtomicUsize::new(0);
+
+/// How many directories have a default ACL, without taking the lock.
+#[inline]
+#[must_use]
+pub fn default_count() -> usize {
+    DEFAULT_COUNT.load(Ordering::Relaxed)
+}
+
+/// The default ACL of the directory with identity `id` (or, where its
+/// filesystem gives none, named `path`), for a caller with the identity in
+/// hand -- the VFS, under the filesystem's lock.
+#[must_use]
+pub fn get_default_for(id: Option<crate::fs::vfs::FileId>, path: &Path) -> Option<Acl> {
+    if default_count() == 0 {
+        return None;
+    }
+    let key = key_from(id, path);
+    DEFAULTS.lock().get(&key).map(|(_, acl)| acl.clone())
+}
+
+/// Store `acl` as the default ACL of the directory with identity `id` (or
+/// named `path`). Validated as an access ACL is; one the mode bits could say
+/// is stored all the same, as Linux stores it -- a default ACL is not a mode.
+///
+/// # Errors
+///
+/// `InvalidArgument` for an ACL out of Linux's order or missing an entry.
+pub fn set_default_for(
+    id: Option<crate::fs::vfs::FileId>,
+    path: &Path,
+    acl: Acl,
+) -> KernelResult<()> {
+    validate_order(&acl)?;
+    let key = key_from(id, path);
+    let mut defaults = DEFAULTS.lock();
+    defaults.insert(key, (path.to_path_buf(), acl));
+    DEFAULT_COUNT.store(defaults.len(), Ordering::Relaxed);
+    Ok(())
+}
+
+/// Drop the default ACL of the directory with identity `id` (or named
+/// `path`); whether there was one.
+pub fn remove_default_for(id: Option<crate::fs::vfs::FileId>, path: &Path) -> bool {
+    if default_count() == 0 {
+        return false;
+    }
+    let key = key_from(id, path);
+    let mut defaults = DEFAULTS.lock();
+    let removed = defaults.remove(&key).is_some();
+    DEFAULT_COUNT.store(defaults.len(), Ordering::Relaxed);
+    removed
+}
+
+/// What a file made in a directory whose default ACL is `default`, asked for
+/// with the mode `mode`, begins with -- Linux's `posix_acl_create_masq`: its
+/// mode and its access ACL. Each of the owner entry, the mask (the owning
+/// group's entry where there is none) and the other entry is narrowed to the
+/// matching bits of `mode`, and the mode to what those entries then grant;
+/// named entries are kept, limited by the narrowed mask. The bits above
+/// `0o777` are `mode`'s.
+///
+/// The access ACL is `None` when it says nothing the mode cannot -- Linux
+/// keeps none then.
+#[must_use]
+pub fn inherit(default: &Acl, mode: u16) -> (u16, Option<Acl>) {
+    let bits = |shift: u32| u8::try_from(mode.wrapping_shr(shift) & 7).unwrap_or(0);
+    let has_mask = default.entries.iter().any(|e| e.tag == AclTag::Mask);
+    let entries: Vec<AclEntry> = default
+        .entries
+        .iter()
+        .map(|e| {
+            let perm = match e.tag {
+                AclTag::UserObj => e.perm.0 & bits(6),
+                AclTag::Mask => e.perm.0 & bits(3),
+                AclTag::GroupObj if !has_mask => e.perm.0 & bits(3),
+                AclTag::Other => e.perm.0 & bits(0),
+                AclTag::User(_) | AclTag::Group(_) | AclTag::GroupObj => e.perm.0,
+            };
+            AclEntry {
+                tag: e.tag,
+                perm: AclPerm(perm),
+            }
+        })
+        .collect();
+    let acl = Acl { entries };
+    let mode = mode_of(&acl, mode);
+    if is_minimal(&acl) {
+        (mode, None)
+    } else {
+        (mode, Some(acl))
+    }
+}
+
+/// Self-test support: a default ACL granting everyone everything -- changes
+/// nothing the lifecycle rungs do.
+fn plant_default_for_test(path: &Path) -> KernelResult<()> {
+    let id = crate::fs::Vfs::file_identity(path).unwrap_or(None);
+    set_default_for(id, path, from_mode(0o777))
+}
+
+/// Self-test support: whether a lookup through `path` finds a default ACL.
+fn finds_default_for_test(path: &Path) -> bool {
+    let id = crate::fs::Vfs::file_identity(path).unwrap_or(None);
+    get_default_for(id, path).is_some()
+}
+
+/// Self-test support: whether a default ACL is reported under `name`.
+fn reports_default_for_test(name: &Path) -> bool {
+    DEFAULTS.lock().values().any(|(p, _)| p.as_path() == name)
+}
+
+/// The directory is gone: drop its default ACL.
+fn forget_default(id: Option<crate::fs::vfs::FileId>, path: &Path) {
+    if default_count() == 0 {
+        return;
+    }
+    let key = key_from(id, path);
+    let mut defaults = DEFAULTS.lock();
+    if defaults.remove(&key).is_some() {
+        DEFAULT_COUNT.store(defaults.len(), Ordering::Relaxed);
+    }
+}
+
+/// Names moved: as [`rename_names`] does for the access ACLs.
+fn rename_defaults(rename: &super::perfile::NameMap<'_>) {
+    if default_count() == 0 {
+        return;
+    }
+    let mut defaults = DEFAULTS.lock();
+    let moved: Vec<(AclKey, PathBuf)> = defaults
+        .iter()
+        .filter_map(|(key, (name, _))| rename(name).map(|new| (key.clone(), new)))
+        .collect();
+    for (key, new_name) in moved {
+        let Some((_, acl)) = defaults.remove(&key) else {
+            continue;
+        };
+        let new_key = match key {
+            AclKey::Id(id) => AclKey::Id(id),
+            AclKey::Path(_) => AclKey::Path(new_name.clone()),
+        };
+        defaults.insert(new_key, (new_name, acl));
+    }
+    DEFAULT_COUNT.store(defaults.len(), Ordering::Relaxed);
+}
+
+/// A filesystem was unmounted: its default ACLs are garbage, as its access
+/// ACLs are.
+fn forget_defaults_on(fs_id: u64) {
+    if default_count() == 0 {
+        return;
+    }
+    let mut defaults = DEFAULTS.lock();
+    defaults.retain(|key, _| !matches!(key, AclKey::Id(id) if id.fs_id == fs_id));
+    DEFAULT_COUNT.store(defaults.len(), Ordering::Relaxed);
+}
+
+/// The default-ACL table's part in the file lifecycle ([`super::perfile`]),
+/// as [`PER_FILE_STATE`] is the access ACLs'.
+pub(crate) const DEFAULT_PER_FILE_STATE: super::perfile::Table = super::perfile::Table {
+    name: "acl-default",
+    forget: forget_default,
+    rename: rename_defaults,
+    unmounted: forget_defaults_on,
+    plant: plant_default_for_test,
+    finds: finds_default_for_test,
+    reports: reports_default_for_test,
+};
+
 /// The door's codec and ACL-and-mode arithmetic, alone: what
 /// `vfs::self_test_acl_door` stands on.
 ///
@@ -1087,6 +1287,76 @@ pub fn self_test_xattr() -> KernelResult<()> {
     }
     serial_println!(
         "[acl]   xattr door: Linux's layout both ways, six malformed inputs refused, the mode an ACL means and a chmod written into one: OK"
+    );
+    Ok(())
+}
+
+/// What a new file takes from a default ACL ([`inherit`], Linux's
+/// `posix_acl_create_masq`): the owner, mask and other entries narrowed to
+/// the mode asked for, named entries kept, the mode what the narrowed entries
+/// grant with the special bits asked for, and no access ACL when the result
+/// says nothing the mode cannot.
+///
+/// # Errors
+///
+/// `InternalError` naming the first case that answered wrongly.
+pub fn self_test_inherit() -> KernelResult<()> {
+    let fail = |what: &str| -> KernelResult<()> {
+        serial_println!("[acl]   FAIL: inherit: {}", what);
+        Err(KernelError::InternalError)
+    };
+    let perm = |acl: &Acl, tag: AclTag| acl.entries.iter().find(|e| e.tag == tag).map(|e| e.perm.0);
+    // user::rwx user:2000:rw- group::r-x mask::rwx other::r--
+    let shared = build_acl(
+        AclPerm::ALL,
+        AclPerm(5),
+        AclPerm(4),
+        &[(2000, AclPerm(6))],
+        &[],
+    );
+    // A file asked for 0666, as `touch` and editors ask: the owner and the
+    // mask lose execute, the others keep read, the named user keeps rw-.
+    let (mode, access) = inherit(&shared, 0o666);
+    let Some(access) = access else {
+        return fail("a default with a named entry gave a new file no ACL");
+    };
+    if mode != 0o664
+        || perm(&access, AclTag::UserObj) != Some(6)
+        || perm(&access, AclTag::User(2000)) != Some(6)
+        || perm(&access, AclTag::GroupObj) != Some(5)
+        || perm(&access, AclTag::Mask) != Some(6)
+        || perm(&access, AclTag::Other) != Some(4)
+    {
+        serial_println!("[acl]     mode {:o}, entries {:?}", mode, access.entries);
+        return fail("a file under a default ACL is not what Linux makes");
+    }
+    let cases: [(&str, u16, u16); 3] = [
+        // A directory asked for 0777, as `mkdir` asks.
+        ("a directory under it", inherit(&shared, 0o777).0, 0o774),
+        // A default the mode bits say all of: the narrowed mode alone.
+        (
+            "a minimal default's mode",
+            inherit(&from_mode(0o750), 0o666).0,
+            0o640,
+        ),
+        // The special bits are the request's.
+        (
+            "the set-user-ID bit asked for",
+            inherit(&from_mode(0o777), 0o4755).0,
+            0o4755,
+        ),
+    ];
+    for (what, got, want) in cases {
+        if got != want {
+            serial_println!("[acl]     {}: {:o}, want {:o}", what, got, want);
+            return fail("a mode under a default ACL is wrong");
+        }
+    }
+    if inherit(&from_mode(0o750), 0o666).1.is_some() {
+        return fail("a minimal default gave an ACL, where Linux keeps only the mode");
+    }
+    serial_println!(
+        "[acl]   default ACLs: a new file's and directory's mode and ACL, a minimal default, the special bits: OK"
     );
     Ok(())
 }
@@ -1555,7 +1825,9 @@ pub fn self_test() -> KernelResult<()> {
     }
     // Test 13: the xattr door's codec and mode arithmetic.
     self_test_xattr()?;
+    // Test 14: what a new file takes from a default ACL.
+    self_test_inherit()?;
     skips.report("acl");
-    serial_println!("[acl] Self-test passed (13 tests){}", skips.suffix());
+    serial_println!("[acl] Self-test passed (14 tests){}", skips.suffix());
     Ok(())
 }

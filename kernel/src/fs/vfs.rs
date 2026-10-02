@@ -2223,8 +2223,9 @@ fn xattr_meta(fs: &mut dyn FileSystem, relative: &Path, follow: bool) -> KernelR
 // reach it there. Here the ACL the kernel enforces is `fs::acl`'s table, so the
 // VFS answers the name from the table, not the filesystem: what is set through
 // it is what refuses. Under the filesystem's lock, by the file's identity, as
-// every other per-file rule is. The default ACL (`system.posix_acl_default`) is
-// not kept -- there are no default ACLs -- and stays `NotSupported`.
+// every other per-file rule is. A directory's default ACL
+// (`system.posix_acl_default`) is answered the same way, from `fs::acl`'s
+// table of them, which the VFS reads when it makes a file (`new_node_mode`).
 
 /// What the ACL door knows of a file under the filesystem's lock: its
 /// metadata, and the identity and name the ACL table keys it by.
@@ -2323,10 +2324,68 @@ fn acl_door_remove(subject: &AclDoorFile<'_>, caller: xattr_policy::Caller) -> K
     }
 }
 
-/// `listxattr`'s part: the ACL's name, when the file has one.
+/// `listxattr`'s part: the ACL's name, when the file has one, and a
+/// directory's default ACL's, when it has one.
 fn acl_door_listed(subject: &AclDoorFile<'_>, names: &mut Vec<Vec<u8>>) {
     if super::acl::get_acl_for(subject.id, subject.name).is_some() {
         names.push(super::acl::XATTR_ACCESS.to_vec());
+    }
+    if subject.meta.entry_type == EntryType::Directory
+        && super::acl::get_default_for(subject.id, subject.name).is_some()
+    {
+        names.push(super::acl::XATTR_DEFAULT.to_vec());
+    }
+}
+
+/// `getxattr` of `system.posix_acl_default`: a directory's default ACL in
+/// Linux's layout. `NoAttribute` (`ENODATA`) for a directory with none and for
+/// anything that is not a directory -- only a directory has one, and Linux
+/// answers so; `NotSupported` for a symlink, as for the access ACL.
+fn acl_default_get(subject: &AclDoorFile<'_>) -> KernelResult<Vec<u8>> {
+    if subject.meta.entry_type == EntryType::Symlink {
+        return Err(KernelError::NotSupported);
+    }
+    if subject.meta.entry_type != EntryType::Directory {
+        return Err(KernelError::NoAttribute);
+    }
+    super::acl::get_default_for(subject.id, subject.name)
+        .map(|acl| super::acl::encode_xattr(&acl))
+        .ok_or(KernelError::NoAttribute)
+}
+
+/// `setxattr` of `system.posix_acl_default`, in Linux's order: the value
+/// parsed (`InvalidArgument`); who may ([`acl_door_may_change`]); only a
+/// directory has one -- anything else `PermissionDenied` (`EACCES`), Linux's
+/// answer; the mode (`XATTR_CREATE`, `XATTR_REPLACE`). Kept as given: a
+/// default ACL the mode bits could say is still a default ACL, and the
+/// directory's own mode is not touched.
+fn acl_default_set(
+    subject: &AclDoorFile<'_>,
+    value: &[u8],
+    mode: XattrSetMode,
+    caller: xattr_policy::Caller,
+) -> KernelResult<()> {
+    let acl = super::acl::decode_xattr(value)?;
+    acl_door_may_change(subject, caller)?;
+    if subject.meta.entry_type != EntryType::Directory {
+        return Err(KernelError::PermissionDenied);
+    }
+    mode.check(acl_default_get(subject))?;
+    super::acl::set_default_for(subject.id, subject.name, acl)
+}
+
+/// `removexattr` of `system.posix_acl_default`: who may set one may remove
+/// it. On anything but a directory there is none to remove, and Linux answers
+/// success; on a directory with none, `NoAttribute`.
+fn acl_default_remove(subject: &AclDoorFile<'_>, caller: xattr_policy::Caller) -> KernelResult<()> {
+    acl_door_may_change(subject, caller)?;
+    if subject.meta.entry_type != EntryType::Directory {
+        return Ok(());
+    }
+    if super::acl::remove_default_for(subject.id, subject.name) {
+        Ok(())
+    } else {
+        Err(KernelError::NoAttribute)
     }
 }
 
@@ -3536,7 +3595,26 @@ impl Vfs {
     /// Like [`write_file`](Self::write_file) but on an **already-resolved**
     /// host path (see [`read_at_resolved`](Self::read_at_resolved)).
     pub fn write_file_resolved(path: impl AsRef<Path>, data: &[u8]) -> KernelResult<()> {
-        let path = path.as_ref();
+        Self::write_file_inner(path.as_ref(), data, Creating::AsNeeded)
+    }
+
+    /// Make an empty regular file at the already-resolved host `path`, which
+    /// must not exist yet -- `open(O_CREAT)`'s creation -- with the mode `mode`
+    /// asks for, less the caller's umask or as its directory's default ACL
+    /// gives it, and its owner and ACL, all under the one hold of the
+    /// filesystem's lock that makes it: nothing sees the file without them.
+    ///
+    /// # Errors
+    ///
+    /// `AlreadyExists` when something has the name already; otherwise as
+    /// [`write_file_resolved`](Self::write_file_resolved).
+    pub fn create_file_resolved(path: &Path, mode: u16) -> KernelResult<()> {
+        Self::write_file_inner(path, &[], Creating::New(mode))
+    }
+
+    /// [`write_file_resolved`](Self::write_file_resolved) and
+    /// [`create_file_resolved`](Self::create_file_resolved).
+    fn write_file_inner(path: &Path, data: &[u8], creating: Creating) -> KernelResult<()> {
         check_path_access(path, PathAccess::Write)?;
         check_writable(path)?;
         // Intercept: let pre-operation handlers approve/deny before proceeding.
@@ -3546,27 +3624,50 @@ impl Vfs {
         // uid 0 is the default until per-process identity is wired up.
         enforce_quota_write(path, data.len() as u64)?;
         let creator = creator_ids();
+        let umask = creator_umask();
         let cache_inval = {
             let (fs, fs_id, _opts, relative) = resolve_mount(path)?;
             let mut guard = fs.lock();
-            // A write that makes the file gives it its owner; one that
-            // replaces an existing file's contents leaves the owner be.
+            // A write that makes the file gives it its owner, mode and ACL;
+            // one that replaces an existing file's contents leaves them be.
             let made = guard.lstat(&relative).is_err();
-            if made {
+            if !made && matches!(creating, Creating::New(_)) {
+                return Err(KernelError::AlreadyExists);
+            }
+            // The new file's mode and ACLs, when this write makes it.
+            let new_node = if made {
                 // A new name in its directory (`fs::attr_policy`). Replacing
                 // an existing file's contents is the filesystem's to refuse,
                 // on the inode it writes.
                 attr_policy::may_create(dir_attrs(&mut **guard, &relative))?;
-            } else if let Some((seals, meta)) = seals_at(&mut **guard, fs_id, &relative, path) {
-                // Every byte rewritten, and the size taken from the old to the
-                // new (`fs::sealing`).
-                let len = data.len() as u64;
-                super::sealing::may_write(seals, 0, len, meta.size)?;
-                super::sealing::may_resize(seals, meta.size, len)?;
-            }
+                let requested = match creating {
+                    Creating::AsNeeded => Self::DEFAULT_FILE_MODE,
+                    Creating::New(mode) => mode & 0o7777,
+                };
+                Some(new_node_mode(
+                    &mut **guard,
+                    fs_id,
+                    parent_of(&relative),
+                    parent_of(path),
+                    requested,
+                    umask,
+                    false,
+                ))
+            } else {
+                if let Some((seals, meta)) = seals_at(&mut **guard, fs_id, &relative, path) {
+                    // Every byte rewritten, and the size taken from the old to
+                    // the new (`fs::sealing`).
+                    let len = data.len() as u64;
+                    super::sealing::may_write(seals, 0, len, meta.size)?;
+                    super::sealing::may_resize(seals, meta.size, len)?;
+                }
+                None
+            };
             guard.write_file(&relative, data)?;
-            if made {
+            if let Some((perm, acls)) = new_node {
+                stamp_new_mode(&mut **guard, &relative, perm, Self::DEFAULT_FILE_MODE)?;
                 init_new_owner(&mut **guard, &relative, creator, false)?;
+                acls.store(&mut **guard, fs_id, None, Some(&relative), path)?;
             }
             // Coherence: a full overwrite replaces the file's contents — drop
             // any cached pages so mappers see the new bytes.
@@ -3815,6 +3916,10 @@ impl Vfs {
     /// caller does not specify a mode (the historical 0o755).
     pub const DEFAULT_DIR_MODE: u16 = 0o755;
 
+    /// The mode memfs and ext4 give a regular file `write_file` makes, and so
+    /// the one a creation does not need to stamp again.
+    pub const DEFAULT_FILE_MODE: u16 = 0o644;
+
     pub fn mkdir(path: impl AsRef<Path>) -> KernelResult<()> {
         let path = path.as_ref();
         Self::mkdir_mode(path, Self::DEFAULT_DIR_MODE)
@@ -3851,37 +3956,29 @@ impl Vfs {
         // Quota: check inode creation limit.
         enforce_quota_create(&path)?;
         let creator = creator_ids();
+        let umask = creator_umask();
         {
-            let (fs, _id, _opts, relative) = resolve_mount(&path)?;
+            let (fs, fs_id, _opts, relative) = resolve_mount(&path)?;
             let mut guard = fs.lock();
             guard_create(&mut **guard, &relative)?;
-            guard.mkdir(&relative)?;
-            // Stamp the caller-supplied (umask-masked) permission bits; the
-            // underlying mkdir stamps a 0o755 default, so only override when
-            // the requested mode differs. Under the same lock as the mkdir,
+            // The mode asked for (twelve bits but setuid and setgid, §663),
+            // less the umask or as the parent's default ACL gives it, stamped
+            // under the same lock as the mkdir -- which stamps 0o755 itself --
             // and before the owner, whose set-group-ID inheritance adds a bit
             // this would otherwise overwrite.
-            let perm = mode & 0o1777;
-            if perm != Self::DEFAULT_DIR_MODE {
-                match guard.set_permissions(&relative, perm) {
-                    Ok(()) => {}
-                    // `NotSupported` only, and for the same reason the open
-                    // path tolerates it (see `handle.rs`, `open_resolved`): a
-                    // filesystem with no permission model must not turn a
-                    // directory that WAS created into a reported failure with
-                    // the directory left behind. FAT stores no mode bits and
-                    // answers `NotSupported`; Linux's vfat likewise ignores
-                    // the mode and lets the mount's umask govern.
-                    //
-                    // Any other error still fails the call: on a filesystem
-                    // that can store a mode, failing to stamp one is a real
-                    // failure, and 639's agreement not to silently discard a
-                    // permission bit the caller asked for holds in full.
-                    Err(KernelError::NotSupported) => {}
-                    Err(e) => return Err(e),
-                }
-            }
+            let (perm, acls) = new_node_mode(
+                &mut **guard,
+                fs_id,
+                parent_of(&relative),
+                parent_of(&path),
+                mode & 0o1777,
+                umask,
+                true,
+            );
+            guard.mkdir(&relative)?;
+            stamp_new_mode(&mut **guard, &relative, perm, Self::DEFAULT_DIR_MODE)?;
             init_new_owner(&mut **guard, &relative, creator, true)?;
+            acls.store(&mut **guard, fs_id, None, Some(&relative), &path)?;
         }
         // Charge quota for new inode.
         super::quota::charge_inode(0, 0);
@@ -4390,12 +4487,23 @@ impl Vfs {
             (Arc::clone(&mp.fs), mp.fs_id, relative.to_path_buf())
         };
         let creator = creator_ids();
+        let umask = creator_umask();
         let made = {
             let mut guard = fs.lock();
             // Nothing is made in an immutable directory, named or not.
             let allowed = guard_create_in(&mut **guard, &relative);
+            // The directory it is made in is `relative` itself.
+            let (perm, acls) = new_node_mode(
+                &mut **guard,
+                fs_id,
+                &relative,
+                dir,
+                mode & 0o7777,
+                umask,
+                false,
+            );
             allowed
-                .and_then(|()| guard.create_unnamed(&relative, mode))
+                .and_then(|()| guard.create_unnamed(&relative, perm))
                 .and_then(|ino| {
                     // Its owner, as a named file's (`init_new_owner`), by inode:
                     // it has no name to give it one by.
@@ -4414,6 +4522,13 @@ impl Vfs {
                                 return Err(e);
                             }
                         }
+                    }
+                    // Its ACL from the directory's default, by inode, as its
+                    // owner: it has no name to key it by.
+                    let named = dir.join(alloc::format!("#{ino}"));
+                    if let Err(e) = acls.store(&mut **guard, fs_id, Some(ino), None, &named) {
+                        guard.unpin_ino(ino);
+                        return Err(e);
                     }
                     Ok(ino)
                 })
@@ -4715,6 +4830,11 @@ impl Vfs {
             let meta = guard.metadata_ino(obj.ino)?;
             return acl_door_get(&AclDoorFile::held(meta, obj, Path::new("")));
         }
+        if name == super::acl::XATTR_DEFAULT {
+            let mut guard = obj.fs.lock();
+            let meta = guard.metadata_ino(obj.ino)?;
+            return acl_default_get(&AclDoorFile::held(meta, obj, Path::new("")));
+        }
         let caller = xattr_policy::Caller::current();
         Self::object_xattr_on(obj, name, xattr_policy::Access::Read, caller, |fs, ino| {
             fs.get_xattr_ino(ino, name)
@@ -4748,6 +4868,10 @@ impl Vfs {
                 }
                 guard.chmod_ino(obj.ino, new_mode)
             })?;
+        } else if name == super::acl::XATTR_DEFAULT {
+            let mut guard = obj.fs.lock();
+            let meta = guard.metadata_ino(obj.ino)?;
+            acl_default_set(&AclDoorFile::held(meta, obj, path), value, mode, caller)?;
         } else {
             Self::object_xattr_on(obj, name, xattr_policy::Access::Write, caller, |fs, ino| {
                 mode.check(fs.get_xattr_ino(ino, name))?;
@@ -4772,6 +4896,10 @@ impl Vfs {
             let mut guard = obj.fs.lock();
             let meta = guard.metadata_ino(obj.ino)?;
             acl_door_remove(&AclDoorFile::held(meta, obj, path), caller)?;
+        } else if name == super::acl::XATTR_DEFAULT {
+            let mut guard = obj.fs.lock();
+            let meta = guard.metadata_ino(obj.ino)?;
+            acl_default_remove(&AclDoorFile::held(meta, obj, path), caller)?;
         } else {
             Self::object_xattr_on(obj, name, xattr_policy::Access::Write, caller, |fs, ino| {
                 fs.remove_xattr_ino(ino, name)
@@ -5852,8 +5980,9 @@ impl Vfs {
         // One operation with two masks depending on which route ran is worse
         // than either mask, which is the argument that decided `link`'s error
         // code the same week.
-        let perm = mode & 0o1777;
+        let requested = mode & 0o1777;
         let creator = creator_ids();
+        let umask = creator_umask();
         {
             let (fs, fs_id, _opts, dir_rel) = resolve_mount(&dir.path)?;
             let mut guard = fs.lock();
@@ -5863,37 +5992,27 @@ impl Vfs {
             verify_pinned(&mut guard, fs_id, &dir_rel, dir)?;
             let child_rel = dir_rel.join(name);
             guard_create(&mut **guard, &child_rel)?;
+            // As `mkdir_mode`: the umask or the directory's default ACL. The
+            // stamp is no-follow (`stamp_new_mode`), though what was just
+            // created is a directory: under this lock the two forms are one
+            // operation, and the no-follow one asserts more.
+            let (perm, acls) = new_node_mode(
+                &mut **guard,
+                fs_id,
+                &dir_rel,
+                &dir.path,
+                requested,
+                umask,
+                true,
+            );
             guard.mkdir(&child_rel)?;
-            if perm != Self::DEFAULT_DIR_MODE {
-                // `no_follow`, though what was just created is a directory and
-                // cannot be a symlink: the following variant would be a second
-                // name lookup, and the whole reason this call sits inside the
-                // guard is that a name lookup is what an attacker gets to
-                // answer. Under this lock the two are the same operation, so
-                // the no-follow form costs nothing and asserts more.
-                match guard.set_permissions_no_follow(&child_rel, perm) {
-                    Ok(()) => {}
-                    // `NotSupported` only, and for the same reason the open
-                    // path tolerates it (see `handle.rs`, `open_resolved`): a
-                    // filesystem with no permission model must not turn a
-                    // directory that WAS created into a reported failure with
-                    // the directory left behind. FAT stores no mode bits and
-                    // answers `NotSupported`; Linux's vfat likewise ignores the
-                    // mode and lets the mount's umask govern.
-                    //
-                    // Any other error still fails the call: on a filesystem
-                    // that can store a mode, failing to stamp one is a real
-                    // failure, and 639's agreement not to silently discard a
-                    // permission bit the caller asked for holds in full.
-                    Err(KernelError::NotSupported) => {}
-                    Err(e) => return Err(e),
-                }
-            }
+            stamp_new_mode(&mut **guard, &child_rel, perm, Self::DEFAULT_DIR_MODE)?;
             // Its creator's, after the mode as `mkdir_mode` orders them: a
             // set-group-ID parent's inheritance adds a bit the stamp above
             // would otherwise overwrite. Root's, whoever made it, until
             // 2026-10-02 (`A-PINNED-CREATES-ARE-OWNED-BY-ROOT`).
             init_new_owner(&mut **guard, &child_rel, creator, true)?;
+            acls.store(&mut **guard, fs_id, None, Some(&child_rel), &child)?;
         }
 
         super::quota::charge_inode(0, 0);
@@ -6976,6 +7095,12 @@ impl Vfs {
             let meta = xattr_meta(&mut **guard, &relative, target.follow)?;
             return acl_door_get(&AclDoorFile::of(meta, fs_id, &target.path));
         }
+        if name == super::acl::XATTR_DEFAULT {
+            let (fs, fs_id, _opts, relative) = resolve_mount(&target.path)?;
+            let mut guard = fs.lock();
+            let meta = xattr_meta(&mut **guard, &relative, target.follow)?;
+            return acl_default_get(&AclDoorFile::of(meta, fs_id, &target.path));
+        }
         let follow = target.follow;
         Self::xattr_on(
             target,
@@ -7019,6 +7144,21 @@ impl Vfs {
             super::journal::record(super::journal::JournalEventType::Modified, &target.path);
             return Ok(());
         }
+        if name == super::acl::XATTR_DEFAULT {
+            if target.access != xattr_policy::Access::Write {
+                return Err(KernelError::InvalidArgument);
+            }
+            let (fs, fs_id, _opts, relative) = resolve_mount(&target.path)?;
+            {
+                let mut guard = fs.lock();
+                let meta = xattr_meta(&mut **guard, &relative, target.follow)?;
+                let subject = AclDoorFile::of(meta, fs_id, &target.path);
+                acl_default_set(&subject, value, mode, caller)?;
+            }
+            super::notify::emit_metadata(&target.path);
+            super::journal::record(super::journal::JournalEventType::Modified, &target.path);
+            return Ok(());
+        }
         let follow = target.follow;
         Self::xattr_on(
             target,
@@ -7056,6 +7196,20 @@ impl Vfs {
                 let mut guard = fs.lock();
                 let meta = xattr_meta(&mut **guard, &relative, target.follow)?;
                 acl_door_remove(&AclDoorFile::of(meta, fs_id, &target.path), caller)?;
+            }
+            super::notify::emit_metadata(&target.path);
+            super::journal::record(super::journal::JournalEventType::Modified, &target.path);
+            return Ok(());
+        }
+        if name == super::acl::XATTR_DEFAULT {
+            if target.access != xattr_policy::Access::Write {
+                return Err(KernelError::InvalidArgument);
+            }
+            let (fs, fs_id, _opts, relative) = resolve_mount(&target.path)?;
+            {
+                let mut guard = fs.lock();
+                let meta = xattr_meta(&mut **guard, &relative, target.follow)?;
+                acl_default_remove(&AclDoorFile::of(meta, fs_id, &target.path), caller)?;
             }
             super::notify::emit_metadata(&target.path);
             super::journal::record(super::journal::JournalEventType::Modified, &target.path);
@@ -7177,12 +7331,29 @@ impl Vfs {
         super::intercept::pre_check(super::intercept::FsOp::Write, &path, None)?;
         enforce_quota_create(&path)?;
         let creator = creator_ids();
+        let umask = creator_umask();
         let (fs_id, ino) = {
             let (fs, fs_id, _opts, relative) = resolve_mount(&path)?;
             let mut guard = fs.lock();
             guard_create(&mut **guard, &relative)?;
-            let ino = guard.mknod_socket(&relative, mode & 0o7777)?;
+            let (perm, acls) = new_node_mode(
+                &mut **guard,
+                fs_id,
+                parent_of(&relative),
+                parent_of(&path),
+                mode & 0o7777,
+                umask,
+                false,
+            );
+            let ino = guard.mknod_socket(&relative, perm)?;
             init_new_owner(&mut **guard, &relative, creator, false)?;
+            acls.store(
+                &mut **guard,
+                fs_id,
+                (ino != 0).then_some(ino),
+                Some(&relative),
+                &path,
+            )?;
             (fs_id, ino)
         };
         if ino == 0 {
@@ -9353,6 +9524,152 @@ fn init_new_owner(
         }
     }
     Ok(())
+}
+
+/// The calling process's umask, or none (0) for the kernel -- read, as
+/// [`creator_ids`] is, before a filesystem's lock is taken.
+///
+/// The kernel applies it, as Linux's VFS applies `current_umask()`: a
+/// directory with a default ACL gives its new files no umask
+/// ([`new_node_mode`]), so the bits it removes must still be there when the
+/// creation is decided. Until 2026-10-02 each ABI applied it before calling in
+/// -- the Linux shim, and lane D's libc for native programs -- and a default
+/// ACL could not have restored what was already gone. Applying a umask twice is
+/// applying it once, so a libc that still does is harmless meanwhile.
+fn creator_umask() -> u16 {
+    let task = crate::sched::current_task_id();
+    match crate::proc::thread::acting_process(task) {
+        Some(pid) if pid != 0 => crate::proc::pcb::get_umask(pid).unwrap_or(0),
+        _ => 0,
+    }
+}
+
+/// What `Vfs::write_file_inner` does with a name that has no file yet, and
+/// with one that has.
+#[derive(Clone, Copy)]
+enum Creating {
+    /// Make the file if it is missing, at the default mode; replace an
+    /// existing one's contents -- `write_file`.
+    AsNeeded,
+    /// Make it, asked for this mode; refuse an existing one (`AlreadyExists`)
+    /// -- `open(O_CREAT)`.
+    New(u16),
+}
+
+/// The ACLs a new node takes from its directory's default ACL, stored once the
+/// node exists ([`NewAcls::store`]).
+#[derive(Default)]
+struct NewAcls {
+    /// Its access ACL: `None` when the mode says all of it.
+    access: Option<super::acl::Acl>,
+    /// A new directory's own default ACL: its parent's, unchanged.
+    default: Option<super::acl::Acl>,
+}
+
+impl NewAcls {
+    /// Keep them for the node just made, by its identity -- `ino` when the
+    /// filesystem handed it back, else what `relative` names now -- under the
+    /// lock that made it, so no operation sees the node without them.
+    fn store(
+        self,
+        fs: &mut dyn FileSystem,
+        fs_id: u64,
+        ino: Option<u64>,
+        relative: Option<&Path>,
+        path: &Path,
+    ) -> KernelResult<()> {
+        if self.access.is_none() && self.default.is_none() {
+            return Ok(());
+        }
+        let ino = match (ino, relative) {
+            (Some(ino), _) => ino,
+            (None, Some(rel)) => fs.lmetadata(rel).map_or(0, |m| m.ino),
+            (None, None) => 0,
+        };
+        let id = (ino != 0).then_some(FileId { fs_id, ino });
+        if let Some(acl) = self.access {
+            super::acl::set_acl_for(id, path, acl)?;
+        }
+        if let Some(acl) = self.default {
+            super::acl::set_default_for(id, path, acl)?;
+        }
+        Ok(())
+    }
+}
+
+/// The mode a node about to be made in the directory `parent_rel` (on `fs`;
+/// `parent` on the host) begins with, and the ACLs it takes: `requested` less
+/// the creator's `umask`; or, when the directory has a default ACL, what that
+/// ACL grants of `requested` -- with no umask -- and the access ACL that goes
+/// with it, plus the default again for a new directory: Linux's
+/// `posix_acl_create`. Under the filesystem's lock that will make the node.
+fn new_node_mode(
+    fs: &mut dyn FileSystem,
+    fs_id: u64,
+    parent_rel: &Path,
+    parent: &Path,
+    requested: u16,
+    umask: u16,
+    is_dir: bool,
+) -> (u16, NewAcls) {
+    let default = if super::acl::default_count() == 0 {
+        None
+    } else {
+        // A directory whose identity cannot be read is looked up by its name,
+        // which is what the table keys it by on such a filesystem.
+        let parent_id = fs
+            .metadata(parent_rel)
+            .ok()
+            .filter(|m| m.ino != 0)
+            .map(|m| FileId { fs_id, ino: m.ino });
+        super::acl::get_default_for(parent_id, parent)
+    };
+    match default {
+        Some(default) => {
+            let (mode, access) = super::acl::inherit(&default, requested);
+            let default = is_dir.then_some(default);
+            (mode, NewAcls { access, default })
+        }
+        None => (requested & !umask, NewAcls::default()),
+    }
+}
+
+/// Give the node just made at `relative` the mode `perm`, unless it is the
+/// filesystem's own default for such a node (`default`), which it already
+/// has.
+///
+/// Twelve bits, not nine. The open path once masked to `0o777` "until
+/// setuid/setgid/sticky are plumbed through the create path" -- but they
+/// were: ext4 stores `permissions & 0o7777` and memfs the `u16` whole, so
+/// the mask was the only thing dropping a bit the caller asked for, which is
+/// what lanes A and B agreed to rule out (design-decisions.md §639). A setuid
+/// bit `exec` does not yet honour is stored safely: unenforced, it grants
+/// nothing, so the error is less privilege than the metadata claims.
+///
+/// `NotSupported` is not a failure of the creation: FAT stores no mode, and
+/// reporting a failure for a file that was made and left behind is the worst
+/// of both answers; Linux's vfat likewise ignores the mode and lets the
+/// mount's umask govern. (The boot test never mounts a FAT root, which is how
+/// that arm once survived unseen.) Any other error is a failure: a filesystem
+/// that can store a mode and does not is discarding what the caller asked for.
+fn stamp_new_mode(
+    fs: &mut dyn FileSystem,
+    relative: &Path,
+    perm: u16,
+    default: u16,
+) -> KernelResult<()> {
+    if perm == default {
+        return Ok(());
+    }
+    match fs.set_permissions_no_follow(relative, perm) {
+        Ok(()) | Err(KernelError::NotSupported) => Ok(()),
+        Err(e) => Err(e),
+    }
+}
+
+/// The directory a path is in; the root is its own.
+fn parent_of(path: &Path) -> &Path {
+    path.parent().unwrap_or(Path::new("/"))
 }
 
 /// The calling process's uid and gid, or `None` for a kernel task (or a
@@ -13444,11 +13761,12 @@ pub fn self_test_xattr_rules() -> KernelResult<()> {
                 set(FILE, true, b"system.posix_acl_access", root),
                 Err(KernelError::InvalidArgument),
             ),
-            // The default ACL is not kept: refused as before.
+            // The default ACL's name reaches the default-ACL table, which
+            // parses the value first, as for the access ACL.
             (
-                "the default ACL's name",
+                "the default ACL's name with no ACL in it",
                 set(FILE, true, b"system.posix_acl_default", root),
-                unsupported,
+                Err(KernelError::InvalidArgument),
             ),
             (
                 "no namespace, read",
@@ -14246,6 +14564,254 @@ pub fn self_test_seal_rules() -> KernelResult<()> {
     Ok(())
 }
 
+/// How a new node's mode and ACL are decided, by the VFS for every route that
+/// makes one (design-decisions §1531), on `/tmp` (memfs):
+///
+/// - a process's umask applies -- a directory or socket asked for 0777 and a
+///   file asked for 0666 (or `write_file`'s 0644) come out 0750 and 0640
+///   under umask 027, through all six routes: `mkdir_mode`,
+///   `mkdir_at_pinned`, `mknod_socket`, `create_file_resolved`
+///   (`open(O_CREAT)`'s), `write_file` and `create_unnamed_object`
+///   (`O_TMPFILE`'s); the kernel has none;
+/// - `create_file_resolved` over an existing file refuses (`AlreadyExists`)
+///   and leaves its contents, which is what lets `open(O_CREAT)` that lost a
+///   race open the file instead of emptying it;
+/// - in a directory with a default ACL the umask does not apply: a new file's
+///   mode and access ACL are what the default grants of the mode asked for
+///   (an unnamed file's too, kept by its identity), a new directory takes the
+///   default as its own, and a file in that directory inherits again;
+/// - a default ACL the mode bits say all of gives a new file its mode and no
+///   ACL;
+/// - the door: a default ACL read back and listed as `system.posix_acl_default`,
+///   removed, and `ENODATA` after; removing one from a file succeeds, as on
+///   Linux.
+///
+/// # Errors
+///
+/// `InternalError` naming the first step that answered wrongly; the setup's.
+pub fn self_test_create_modes() -> KernelResult<()> {
+    use super::acl::{self, AclPerm, AclTag};
+    use crate::serial_println;
+    use xattr_policy::Caller;
+
+    const DIR: &str = "/tmp/_cmodes";
+    const SHARED: &str = "/tmp/_cmodes/shared";
+    const PLAIN: &str = "/tmp/_cmodes/plain";
+    let root = Caller {
+        privileged: true,
+        uid: Some(0),
+    };
+    let fail = |what: &str| -> KernelResult<()> {
+        serial_println!("[vfs]   FAIL: create modes: {}", what);
+        Err(KernelError::InternalError)
+    };
+    let mode_of = |p: &str| Vfs::lmetadata(p).map(|m| m.permissions & 0o7777);
+    let set_default = |path: &str, value: &[u8]| {
+        Vfs::xattr_target(path, true, xattr_policy::Access::Write)
+            .and_then(|t| Vfs::xattr_set_as(&t, acl::XATTR_DEFAULT, value, XattrSetMode::Any, root))
+    };
+    let get_default = |path: &str| {
+        Vfs::xattr_target(path, true, xattr_policy::Access::Read)
+            .and_then(|t| Vfs::xattr_get_as(&t, acl::XATTR_DEFAULT, root))
+    };
+    let remove_default = |path: &str| {
+        Vfs::xattr_target(path, true, xattr_policy::Access::Write)
+            .and_then(|t| Vfs::xattr_remove_as(&t, acl::XATTR_DEFAULT, root))
+    };
+    let access_acl = |path: &str| {
+        let id = Vfs::file_identity(path).unwrap_or(None);
+        acl::get_acl_for(id, Path::new(path))
+    };
+    let perm =
+        |a: &acl::Acl, tag: AclTag| a.entries.iter().find(|e| e.tag == tag).map(|e| e.perm.0);
+    // Best effort, both ends: this test's own scratch tree, whose ACLs and
+    // default ACLs end with its files (`fs::perfile`).
+    let cleanup = || {
+        let _ = Vfs::remove_recursive(DIR);
+    };
+    cleanup();
+
+    let run = || -> KernelResult<()> {
+        Vfs::mkdir(DIR)?;
+        Vfs::mkdir(SHARED)?;
+        Vfs::mkdir(PLAIN)?;
+        // user::rwx user:2000:rw- group::r-x mask::rwx other::r--
+        let shared = acl::build_acl(
+            AclPerm::ALL,
+            AclPerm(5),
+            AclPerm(4),
+            &[(2000, AclPerm(6))],
+            &[],
+        );
+        set_default(SHARED, &acl::encode_xattr(&shared))?;
+        set_default(PLAIN, &acl::encode_xattr(&acl::from_mode(0o750)))?;
+        let pinned = Vfs::pin_dir(DIR)?;
+
+        // Everything a process makes, as one with umask 027.
+        let pid = crate::proc::pcb::create("create-modes", 0);
+        // Discarded: the process was made just above, so it is there.
+        let _ = crate::proc::pcb::set_umask(pid, 0o027);
+        // An unnamed file (`O_TMPFILE`) made in `dir`, asked for 0666: its mode
+        // and whether it took an access ACL, read while it is held -- it goes
+        // with the hold, and its ACL with it.
+        let unnamed = |dir: &str| -> KernelResult<(u16, bool)> {
+            let hold = Vfs::create_unnamed_object(Path::new(dir), 0o666, false)?;
+            let mode = hold
+                .fs
+                .lock()
+                .metadata_ino(hold.ino)
+                .map(|m| m.permissions & 0o7777)?;
+            Ok((
+                mode,
+                acl::get_acl_for(Some(hold.id()), Path::new(dir)).is_some(),
+            ))
+        };
+        let made = crate::proc::thread::self_test_as_process(pid, || {
+            Vfs::mkdir_mode("/tmp/_cmodes/d", 0o777)?;
+            Vfs::create_file_resolved(Path::new("/tmp/_cmodes/f"), 0o666)?;
+            Vfs::write_file("/tmp/_cmodes/w", b"w")?;
+            Vfs::mknod_socket("/tmp/_cmodes/s", 0o777)?;
+            Vfs::mkdir_at_pinned(&pinned, b"p", 0o777)?;
+            let plain_unnamed = unnamed(DIR)?;
+            Vfs::create_file_resolved(Path::new("/tmp/_cmodes/shared/f"), 0o666)?;
+            Vfs::mkdir_mode("/tmp/_cmodes/shared/sub", 0o777)?;
+            Vfs::create_file_resolved(Path::new("/tmp/_cmodes/shared/sub/g"), 0o600)?;
+            Vfs::create_file_resolved(Path::new("/tmp/_cmodes/plain/f"), 0o666)?;
+            let shared_unnamed = unnamed(SHARED)?;
+            Ok((plain_unnamed, shared_unnamed))
+        });
+        crate::proc::pcb::destroy(pid);
+        let (plain_unnamed, shared_unnamed) = made?;
+        // And one the kernel makes, which has no umask.
+        Vfs::mkdir_mode("/tmp/_cmodes/k", 0o777)?;
+
+        // `O_TMPFILE`'s route: the umask, or the default ACL and the access
+        // ACL it grants.
+        if plain_unnamed != (0o640, false) || shared_unnamed != (0o664, true) {
+            serial_println!(
+                "[vfs]     unnamed files: {:?} in a plain directory, {:?} under a default ACL",
+                plain_unnamed,
+                shared_unnamed
+            );
+            return fail("an unnamed file's mode or ACL is wrong");
+        }
+
+        // A create that finds the name taken -- `open(O_CREAT)` losing a race
+        // to another's create -- refuses, and leaves what is there alone: the
+        // open goes back to open that file, whose contents a create that
+        // wrote the empty file over it would have lost.
+        Vfs::write_file("/tmp/_cmodes/kept", b"kept")?;
+        let again = Vfs::create_file_resolved(Path::new("/tmp/_cmodes/kept"), 0o600);
+        let kept = Vfs::read_file("/tmp/_cmodes/kept");
+        if again != Err(KernelError::AlreadyExists) || kept.as_deref() != Ok(&b"kept"[..]) {
+            serial_println!("[vfs]     create over a file: {:?}, then {:?}", again, kept);
+            return fail("a create over an existing file did not refuse, or changed it");
+        }
+
+        let modes: [(&str, &str, u16); 10] = [
+            ("mkdir, umask 027", "/tmp/_cmodes/d", 0o750),
+            ("open(O_CREAT), umask 027", "/tmp/_cmodes/f", 0o640),
+            (
+                "write_file making a file, umask 027",
+                "/tmp/_cmodes/w",
+                0o640,
+            ),
+            ("a socket node, umask 027", "/tmp/_cmodes/s", 0o750),
+            (
+                "mkdir through a pinned directory, umask 027",
+                "/tmp/_cmodes/p",
+                0o750,
+            ),
+            ("the kernel's mkdir, no umask", "/tmp/_cmodes/k", 0o777),
+            (
+                "a file under a default ACL: no umask",
+                "/tmp/_cmodes/shared/f",
+                0o664,
+            ),
+            ("a directory under it", "/tmp/_cmodes/shared/sub", 0o774),
+            (
+                "a file asked for 0600 in that directory",
+                "/tmp/_cmodes/shared/sub/g",
+                0o600,
+            ),
+            (
+                "a file under a minimal default",
+                "/tmp/_cmodes/plain/f",
+                0o640,
+            ),
+        ];
+        for (what, path, want) in modes {
+            let got = mode_of(path);
+            if got != Ok(want) {
+                serial_println!("[vfs]     {}: {:?}, want {:o}", what, got, want);
+                return fail("a new node's mode is wrong");
+            }
+        }
+
+        // The ACLs they took.
+        let file = access_acl("/tmp/_cmodes/shared/f");
+        let deep = access_acl("/tmp/_cmodes/shared/sub/g");
+        let file_ok = file.as_ref().is_some_and(|a| {
+            perm(a, AclTag::User(2000)) == Some(6) && perm(a, AclTag::Mask) == Some(6)
+        });
+        let deep_ok = deep.as_ref().is_some_and(|a| {
+            perm(a, AclTag::User(2000)) == Some(6) && perm(a, AclTag::Mask) == Some(0)
+        });
+        if !file_ok || !deep_ok {
+            serial_println!("[vfs]     file {:?}, deeper {:?}", file, deep);
+            return fail("a file under a default ACL did not take the access ACL it grants");
+        }
+        let inherited = get_default("/tmp/_cmodes/shared/sub")
+            .and_then(|b| acl::decode_xattr(&b))
+            .map(|a| a.entries == shared.entries);
+        if inherited != Ok(true) || access_acl("/tmp/_cmodes/plain/f").is_some() {
+            serial_println!("[vfs]     inherited default {:?}", inherited);
+            return fail(
+                "a new directory did not take its parent's default, or a minimal default gave an ACL",
+            );
+        }
+        if access_acl("/tmp/_cmodes/f").is_some() || get_default("/tmp/_cmodes/d").is_ok() {
+            return fail("a node made where there is no default ACL took one");
+        }
+
+        // The door: listed, removed, gone; a file's removal succeeds.
+        let listed = Vfs::list_xattrs(SHARED)?
+            .iter()
+            .any(|n| n.as_slice() == acl::XATTR_DEFAULT);
+        let removed = remove_default(SHARED);
+        let after = get_default(SHARED);
+        let again = remove_default(SHARED);
+        let on_file = remove_default("/tmp/_cmodes/f");
+        if !listed
+            || removed.is_err()
+            || after != Err(KernelError::NoAttribute)
+            || again != Err(KernelError::NoAttribute)
+            || on_file.is_err()
+        {
+            serial_println!(
+                "[vfs]     listed {}, removed {:?}, then read {:?}, removed again {:?}, a file's {:?}",
+                listed,
+                removed,
+                after,
+                again,
+                on_file
+            );
+            return fail("the default ACL's door answered wrongly");
+        }
+        Ok(())
+    };
+    let result = run();
+    cleanup();
+    result?;
+    serial_println!(
+        "[vfs]   create modes: a process's umask on six routes and none for the kernel; a create \
+         over a file refused and the file kept; a default ACL in the umask's place, unnamed \
+         files' included, inherited by a new directory and again below it; a minimal default; \
+         the door: OK"
+    );
+    Ok(())
+}
+
 /// The ACL door (`system.posix_acl_access`) through the VFS, on `/tmp`
 /// (memfs): what `setfacl` and `getfacl` do, by path and through an open
 /// handle, as the file's owner, as root and as a stranger.
@@ -14430,20 +14996,22 @@ pub fn self_test_acl_door() -> KernelResult<()> {
             return fail("an ACL set through a handle is not the file's");
         }
 
-        // No change to an immutable file's ACL, whoever asks; no default ACLs.
+        // No change to an immutable file's ACL, whoever asks; and no default
+        // ACL on a file -- only a directory has one (EACCES, as on Linux).
         Vfs::write_file(FROZEN, b"x")?;
         Vfs::set_attributes(FROZEN, FileAttr::IMMUTABLE)?;
         let frozen = set(FROZEN, &bytes, XattrSetMode::Any, root);
         let default = Vfs::xattr_target(FILE, true, xattr_policy::Access::Write).and_then(|t| {
             Vfs::xattr_set_as(&t, acl::XATTR_DEFAULT, &bytes, XattrSetMode::Any, root)
         });
-        if frozen != Err(KernelError::NotPermitted) || default != Err(KernelError::NotSupported) {
+        if frozen != Err(KernelError::NotPermitted) || default != Err(KernelError::PermissionDenied)
+        {
             serial_println!(
-                "[vfs]   ACL door: immutable {:?}, default {:?}",
+                "[vfs]   ACL door: immutable {:?}, default on a file {:?}",
                 frozen,
                 default
             );
-            return fail("an immutable file took an ACL, or a default ACL was accepted");
+            return fail("an immutable file took an ACL, or a file took a default ACL");
         }
         Ok(())
     };

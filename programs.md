@@ -91,7 +91,7 @@ two disagree.
 | `finger` | User information lookup |  |  |  |
 | `fio` | A flexible I/O tester for SlateOS. |  |  |  |
 | `flock` | Manage file locks from shell scripts. |  |  |  |
-| `fmt` | `fmt` Utility -- Simple Text Formatter |  |  |  |
+| `fmt` | Fill and join lines into paragraphs of a given width. |  | `coreutils` |  |
 | `fold` | Wrap each input line to fit in a given width. | yes | `coreutils` |  |
 | `free` | Report the amount of free and used memory in the system. | yes | `coreutils` |  |
 | `fsck` | Filesystem Check and Repair Utility |  |  |  |

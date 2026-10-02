@@ -212,6 +212,7 @@ promises about its own output, which a one-line summary cannot carry.
 | `scripts/findmnt-diff.sh` | Differential test: our `findmnt` against util-linux 2.39.3's. |
 | `scripts/flake-hunt.sh` | flake-hunt.sh — run a crate's test suite N times and report only the runs |
 | `scripts/flock-diff.sh` | Differential test: our `flock` against util-linux 2.39.3's. |
+| `scripts/fmt-diff.sh` | fmt-diff.sh — compare our `fmt` against GNU coreutils 9.4's, inside WSL. |
 | `scripts/fold-diff.sh` | Differential test: our fold against GNU fold. |
 | `scripts/free-diff.sh` | Differential test: our `free` against procps-ng `free`. |
 | `scripts/frozen-flag-survey.py` | Boolean fields an app reads and can never change. |
@@ -497,4 +498,4 @@ promises about its own output, which a one-line summary cannot carry.
 | `scripts/xargs-diff.sh` | Differential test: our xargs against GNU xargs (findutils 4.9.0). |
 | `scripts/yes-diff.sh` | Differential test: our `yes` against GNU coreutils'. |
 
-_487 scripts._
+_488 scripts._

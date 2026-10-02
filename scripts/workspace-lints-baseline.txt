@@ -61,7 +61,6 @@ userspace/efibootmgr  # bare deny(clippy::all)
 userspace/eject  # bare deny(clippy::all)
 userspace/fdisk
 userspace/fio  # bare deny(clippy::all)
-userspace/fmt
 userspace/fsck
 userspace/fuser  # bare deny(clippy::all)
 userspace/fw

@@ -2981,9 +2981,11 @@ dependencies = [
 name = "powerctl"
 version = "0.1.0"
 dependencies = [
+ "errmsg",
  "libcall",
  "libservicebus",
  "quoting",
+ "stdfdguard",
  "sysroot-dep",
 ]
 

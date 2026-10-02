@@ -1676,6 +1676,19 @@ work is real but it is not research.
 and because a reader looking at a 176-line baseline needs to know it is one
 wall and not 176 separate jobs.
 
+**2026-10-02: 129 left (`python scripts/argv-utf8.py --check`), and the only one
+that shipped is done.** Intersected again with `scripts/rootfs-bin-manifest.txt`:
+of the 130, only `powerctl` was on the image -- added since the count above,
+for the desktop's power buttons (lane C's request) -- and none duplicates a
+coreutils binary, so §1005 deletes none of them. `powerctl` is converted, and
+true to the pattern, the panic was the lesser defect: **a word a command did
+not take was ignored, so `powerctl reboot --help` rebooted the machine** (as
+did `shutdown --dry-run`). It now shows the usage for `--help`/`-h` anywhere,
+refuses any other extra word before acting, quotes what it refuses, does not
+panic on a closed standard output (`println!` did, before the action), and
+reports a cancel it could not perform as that rather than "nothing scheduled".
+Every caller in the tree passes one word, so none is affected.
+
 ## B-AR-MEMBER-NAMES-ARE-STRINGS-IN-THE-FORMAT-LAYER (lane B, 2026-09-14) -- FIXED; ELF symbol names are a separate layer and stay text
 
 `ar` no longer dies on an operand that is not valid UTF-8, but it does not

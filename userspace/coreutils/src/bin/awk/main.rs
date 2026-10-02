@@ -82,6 +82,10 @@
 //! | `RS` longer than one character | a regex, as in gawk without `--posix`, mawk and the one true awk | its first character only |
 //! | standard output's reader goes away (`awk ... \| head -1`) | the run ends quietly with the status it had earned | dies of `SIGPIPE`, status 141 |
 //! | `ENVIRON` when `AWKPATH` or `AWKLIBPATH` is unset | as the environment has it | both added, naming gawk's own library directories |
+//! | `length(arr)` | the number of elements, as POSIX.1-2024 specifies | fatal: gawk 5.2.1's `--posix` predates it |
+//! | a field past `NF`, `$(NF+1) == 0` | the uninitialized value, equal to `0` and `""` alike, as POSIX says | the empty string, unequal to `0` |
+//! | gawk's own variable names: `ARGIND`, `BINMODE`, `ERRNO`, `FIELDWIDTHS`, `FPAT`, `IGNORECASE`, `LINT`, `PREC`, `ROUNDMODE`, `RT`, `TEXTDOMAIN` | the program's, unset until it sets them | predefined (`PREC` is 53, `TEXTDOMAIN` `messages`), refused as arrays and function names; `LINT = 1` turns gawk's lint warnings on |
+//! | a number never yet turned into text, as an `ARGV` entry or as `FILENAME` in a diagnostic | its text, `%d` or `CONVFMT` | none: the `ARGV` entry is skipped as empty, the diagnostic leaves `FILENAME` out |
 //!
 //! The `RS` row is a choice POSIX leaves open ("If RS contains more than one
 //! character, the results are unspecified"), and the regex is what a program
@@ -92,6 +96,19 @@
 //! are where gawk searches for `-f` files and loads extensions, directories of
 //! gawk's own installation; this awk searches no path for `-f` and loads no
 //! extensions, so the entries would name directories it never reads.
+//!
+//! The next three are POSIX's answer where gawk 5.2.1's `--posix` gives
+//! another. `length(arr)` was standardised in POSIX.1-2024 (Austin Group
+//! issue 1566), after gawk 5.2.1 was released. A nonexistent field "shall
+//! evaluate to the uninitialized value". And POSIX reserves no variable names
+//! but its own, so a program that keeps a running `PREC` or its own `RT` must
+//! find them unset; gawk installs all its variables whatever the mode
+//! (`init_vars`), which only a program written for gawk would want. The last
+//! row is gawk's cache leaking out: a number has text in gawk only once
+//! something has formatted it, and whether `ARGV[1] = 5` opens the file `5`
+//! depends on whether an earlier statement happened to print it. Here a
+//! number always has its text; keeping gawk's cache would cost every number
+//! a shared cell for the one place it shows.
 //!
 //! The first two are the same decision twice: this system is UTF-8 throughout,
 //! and gawk's byte answers are an artifact of the C locale on the development

@@ -1474,6 +1474,17 @@ run_case abc3 '{ NF = 2; OFS = "-"; print }'
 run_case abc3 '{ $2 = "y"; OFS = "-"; $3 = "x"; print }'
 run_case abc3 '{ $3 = "x"; ORS = "|\n"; print }'
 
+# --- POSIX's answer where gawk 5.2.1 --posix gives another ---------------------------
+# Deliberate; `main.rs`'s table has the reasons. Each is an xfail, so the
+# self-check (`OURS=/usr/bin/gawk`) shows the harness still tells them apart.
+xfail_case 'length(arr) counts elements as POSIX.1-2024 says; gawk 5.2.1 --posix predates that and refuses it' abc 'BEGIN { a[1]; a[2]; print length(a) }'
+xfail_case 'a field past NF is the uninitialized value, as POSIX says; gawk makes it an empty string' abc '{ print ($5 == 0), ($5 == "") }'
+xfail_file 'gawk predefines its own variable names even under --posix; here they are the programs own' 'BEGIN { print "[" PREC "]", "[" TEXTDOMAIN "]", "[" FPAT "]", "[" ROUNDMODE "]" }'
+xfail_file 'gawk predefines its own variable names even under --posix, so it refuses them as arrays' 'BEGIN { RT[1] = 1; print "ok" }'
+xfail_file 'gawk predefines its own variable names even under --posix, so it refuses them as function names' 'function ERRNO() { return 1 } BEGIN { print ERRNO() }'
+xfail_case 'a number used as an ARGV entry names a file whether or not anything has formatted it; gawk skips one that nothing has' abc 'BEGIN { ARGV[1] = 5; ARGC = 2 } { print FILENAME ": " $0 }'
+xmsg_case 'a number as FILENAME is shown in a diagnostic only once printed, in gawk; here never' abc '{ FILENAME = 5; print FILENAME; x = 0; print 1/x }'
+
 printf '\n%d passed, %d differed, %d differ on purpose' "$pass" "$fail" "$xfail"
 if [ "$xpass" -gt 0 ]; then
   printf ' (%d of which no longer do)' "$xpass"

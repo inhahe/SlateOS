@@ -33,7 +33,8 @@ done/open split the documents always claimed to have:
   T1  no new done-marked paragraph in `todo.txt` (done items are deleted)
   R1  no fully done `[x]` item stays in `roadmap.md` (it moves to
       `roadmap-done.md`; `--fix-roadmap` does it)
-  R2  an `[x]` item containing open sub-items is reported            -- warning
+  R2  an `[x]` item containing open sub-items is reported, one warning per
+      owning lane; `--list-mixed <lane>` lists them                   -- warning
 
 **Whose problem it is.** Rules I*, D*, Q*, F*, T1 and R1 are errors when the
 entry belongs to the lane running the gate (its worktree, via `which-lane.py`)
@@ -53,6 +54,7 @@ never report as a pass.
     python scripts/check-docs.py --next-decision B   # your next section number
     python scripts/check-docs.py --next-question B   # your next question id
     python scripts/check-docs.py --fix-roadmap       # move done items to roadmap-done.md
+    python scripts/check-docs.py --list-mixed B      # your [x] items that still hold open sub-items
 """
 
 from __future__ import annotations
@@ -155,22 +157,59 @@ def fully_done_blocks(text: str) -> list[tuple[int, str, str]]:
     return out
 
 
-def mixed_blocks(text: str) -> list[str]:
-    """Top-level `[x]` items that still contain open sub-items (contradictory marks)."""
+_LANE_TAG = re.compile(r"^`?\[([A-F])\]`?")
+
+
+def mixed_blocks(text: str) -> list[tuple[int, str, list[tuple[str, str]]]]:
+    """(line, first line, [(lane, open sub-item)]) of every top-level `[x]` item that
+    still contains open sub-items.
+
+    The marks contradict each other: the sub-items are done and were never ticked,
+    or the `[x]` no longer holds (e.g. a lane filed new work under a parent
+    finished long before). Whoever owns the open sub-item is the one who can say
+    which, so each is attributed by its own `[X]` tag, falling back to the
+    parent's ('' when neither has one). Measured on 2026-10-02: 294 such items, of
+    which 4 hold a lane-tagged open sub-item and 290 have no tag on either level."""
     out = []
     lines = text.splitlines()
     for i, ln in enumerate(lines):
         m = D.ROADMAP_ITEM_RE.match(ln)
         if not m or m.group(1) or m.group(2) not in "xX":
             continue
+        parent = _LANE_TAG.match(m.group(3))
+        open_subs = []
         j = i + 1
         while j < len(lines) and lines[j].strip() and (len(lines[j]) - len(lines[j].lstrip())) > 0:
             sub = D.ROADMAP_ITEM_RE.match(lines[j])
             if sub and sub.group(2) not in "xX":
-                out.append(ln.strip())
-                break
+                tag = _LANE_TAG.match(sub.group(3)) or parent
+                open_subs.append((tag.group(1) if tag else "", lines[j].strip()))
             j += 1
+        if open_subs:
+            out.append((i + 1, ln.strip(), open_subs))
     return out
+
+
+def _wanted(lane: str, want: str) -> bool:
+    return want == "ALL" or lane == want or (want == "-" and not lane)
+
+
+def list_mixed(root: Path, lane: str) -> str:
+    """The R2 items holding open sub-items of `lane` (a letter, `-` for untagged
+    ones, or `all`), each with those sub-items, for working through them."""
+    want = lane.upper()
+    out, n = [], 0
+    for line, first, subs in mixed_blocks((root / "roadmap.md").read_text(encoding="utf-8")):
+        mine = [(o, s) for o, s in subs if _wanted(o, want)]
+        if not mine:
+            continue
+        n += 1
+        out.append(f"roadmap.md:{line}  {first[:150]}")
+        out.extend(f"      open [{o or 'untagged'}]: {s[:140]}" for o, s in mine)
+    out.append(f"{n} item(s). For each: tick the open sub-items that are done (`--fix-roadmap` then moves a "
+               "finished block to roadmap-done.md), or un-tick the parent if it is not finished -- a new task "
+               "filed under an old finished parent can instead become its own top-level item.")
+    return "\n".join(out)
 
 
 def todo_done_paragraphs(text: str) -> list[tuple[int, str, str]]:
@@ -372,10 +411,19 @@ def check(root: Path, lane: str | None, strict: bool, baseline: dict) -> Result:
             if _hash(first) not in bl_roadmap:
                 add("R1", "roadmap.md", f"a done item stays in roadmap.md; `python scripts/check-docs.py "
                     f"--fix-roadmap` moves it to roadmap-done.md: {first[:90]}", owner)
-        mixed = mixed_blocks(rm)
-        if mixed:
-            res.findings.append(Finding("R2", "roadmap.md", f"{len(mixed)} items are marked [x] but contain open "
-                                        f"sub-items, e.g. {mixed[0][:90]}", "", error=False))
+        # One warning per owning lane, naming its own count and how to list them: a
+        # single total over every lane is a line each lane learns to skip.
+        by_lane: dict[str, list[tuple[int, str]]] = {}
+        for line, first, subs in mixed_blocks(rm):
+            for owner in sorted({o for o, _s in subs}):
+                by_lane.setdefault(owner, []).append((line, first))
+        for owner, items in sorted(by_lane.items()):
+            what = (f"lane {owner}: {len(items)} item(s) marked [x] hold open sub-items of yours" if owner else
+                    f"{len(items)} item(s) marked [x] hold open sub-items that no lane tag claims")
+            res.findings.append(Finding(
+                "R2", f"roadmap.md:{items[0][0]}",
+                f"{what} -- they are done, or the [x] no longer holds; `python scripts/check-docs.py --list-mixed "
+                f"{owner or '-'}` lists them. First: {items[0][1][:80]}", owner, error=False))
     if res.counts["issues"] < MIN_ISSUES:
         res.no_verdict = f"only {res.counts['issues']} issue files found; a parse that sees this few is broken"
     return res
@@ -623,6 +671,24 @@ def self_test() -> int:
         mutate("R2 a checked item with open sub-items is only a warning", "R2",
                lambda r: (r / "roadmap.md").write_text("## Phase 1\n- [x] `[B]` batch\n  - [ ] part\n",
                                                        encoding="utf-8"), error=False)
+        # R2 goes to whoever owns the open sub-item -- its own tag, else its parent's
+        # -- and --list-mixed lists exactly one lane's. The real shape: an untagged
+        # parent finished before the lane split, with a lane's new task filed under it.
+        r2 = _fixture(tmp / "r2-lanes")
+        (r2 / "roadmap.md").write_text(
+            "## Phase 1\n- [x] `[B]` b batch\n  - [ ] b part\n  - [x] b done part\n"
+            "- [x] old untagged batch\n  - [x] old step\n  - [ ] `[C]` c's new task\n  - [ ] `[A]` a's new task\n"
+            "- [x] untagged batch\n  - [ ] u part\n- [x] `[C]` c finished\n  - [x] all done\n", encoding="utf-8")
+        res = check(r2, lane="B", strict=False, baseline={})
+        got = sorted((f.lane, f.error) for f in res.findings if f.rule == "R2")
+        listing = list_mixed(r2, "c")
+        ok = (got == [("", False), ("A", False), ("B", False), ("C", False)]
+              and "c's new task" in listing and "a's new task" not in listing and "b part" not in listing
+              and "all done" not in listing and listing.splitlines()[-1].startswith("1 item(s).")
+              and "u part" in list_mixed(r2, "-") and list_mixed(r2, "all").splitlines()[-1].startswith("3 item(s)."))
+        print(f"  {'ok  ' if ok else 'FAIL'} R2 goes to the lane owning each open sub-item; --list-mixed lists one lane's"
+              + ("" if ok else f" -> {got} / {listing!r}"))
+        failures += 0 if ok else 1
         # no verdict on an implausibly empty tree
         empty = tmp / "empty"
         (empty / D.ISSUES_OPEN_DIR).mkdir(parents=True)
@@ -659,6 +725,8 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--next-decision", metavar="LANE")
     ap.add_argument("--next-question", metavar="LANE")
     ap.add_argument("--fix-roadmap", action="store_true")
+    ap.add_argument("--list-mixed", metavar="LANE",
+                    help="list a lane's [x] roadmap items that still hold open sub-items (R2); `-` untagged, `all`")
     ap.add_argument("--write-baseline", action="store_true", help="(cutover only) grandfather today's findings")
     ap.add_argument("--quiet", action="store_true", help="print errors only")
     # The push hook runs the open-questions rules as their own gate (29), as they
@@ -681,6 +749,9 @@ def main(argv: list[str] | None = None) -> int:
         return 0
     if args.fix_roadmap:
         print(fix_roadmap(root))
+        return 0
+    if args.list_mixed:
+        print(list_mixed(root, args.list_mixed))
         return 0
     if args.write_baseline:
         bl = write_baseline(root)
@@ -727,7 +798,7 @@ def main(argv: list[str] | None = None) -> int:
     warnings = [f for f in res.findings if not f.error]
     for f in errors + ([] if args.quiet else warnings):
         print(f.render())
-    who = f"lane {lane}" if lane else "no lane, so every finding is an error"
+    who = f"lane {lane}" if lane else "no lane, so every lane's findings are errors (R2 is always a warning)"
     print(f"check-docs: {len(errors)} error(s), {len(warnings)} warning(s); checked as {who}; "
           + ", ".join(f"{k}={v}" for k, v in res.counts.items()))
     return 1 if errors else 0

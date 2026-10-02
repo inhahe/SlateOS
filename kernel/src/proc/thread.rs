@@ -1262,23 +1262,44 @@ pub fn set_process_nice(pid: ProcessId, nice: i32) -> Option<i32> {
 /// Returns the number of threads killed.
 pub fn kill_process_threads(pid: ProcessId) -> usize {
     let task_ids = pcb::get_threads(pid).unwrap_or_default();
-    let mut killed: usize = 0;
 
+    // Kill every thread first, and only then run their exit paths, the last
+    // of which publishes the process as dead -- with every thread another CPU
+    // was running gone from that CPU in between. Killing and exiting one
+    // thread at a time let a thread on another CPU go on running its program,
+    // in user mode, for up to a timer tick after its process was declared
+    // dead, its handles closed and its parent told
+    // (A-KILLED-THREAD-RUNS-ON-UNTIL-ITS-CPU-SWITCHES).
+    let mut running_elsewhere = alloc::vec::Vec::new();
     for &task_id in &task_ids {
         // Record the involuntary death *before* `on_thread_exit`, which
         // releases any parked joiner — see `record_killed`.
         record_killed(task_id);
+        // Mark the scheduler task Dead and dequeue it; a running one's CPU is
+        // asked to switch away from it at once.
+        if sched::kill_task_from(task_id) == Some(sched::task::TaskState::Running) {
+            running_elsewhere.push(task_id);
+        }
+    }
+    let stuck = sched::wait_off_cpu(&running_elsewhere);
+    if stuck != 0 {
+        // Not fatal: the address space waits for them anyway
+        // (`pcb::free_address_space_when_unused`). What is lost is only the
+        // promise that nothing of the process runs once it is dead.
+        serial_println!(
+            "[thread] WARNING: {} killed thread(s) of process {} still on a CPU after the wait",
+            stuck,
+            pid
+        );
+    }
 
-        // Mark the scheduler task as Dead and dequeue it.
-        sched::kill_task(task_id);
-
+    let mut killed: usize = 0;
+    for &task_id in &task_ids {
         // Remove the thread→process mapping and update the PCB.
         // This may trigger the zombie transition for the last thread.
         on_thread_exit(task_id);
-
         killed = killed.saturating_add(1);
     }
-
     killed
 }
 
@@ -1298,8 +1319,17 @@ pub fn kill_process_threads(pid: ProcessId) -> usize {
 /// dead.
 pub fn kill_thread(task_id: TaskId) -> bool {
     record_killed(task_id);
-    let accepted = sched::kill_task(task_id);
+    let prior = sched::kill_task_from(task_id);
+    let accepted = prior.is_some();
     if accepted {
+        // As in `kill_process_threads`: a thread another CPU was running
+        // leaves it before its exit path runs and its joiners are told.
+        if prior == Some(sched::task::TaskState::Running) && sched::wait_off_cpu(&[task_id]) != 0 {
+            serial_println!(
+                "[thread] WARNING: killed thread {} still on a CPU after the wait",
+                task_id
+            );
+        }
         on_thread_exit(task_id);
     } else {
         // Nothing died, so do not leave a phantom `Killed` marker behind

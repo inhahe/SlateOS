@@ -5399,6 +5399,17 @@ pub fn request_preempt_on(cpu: usize) {
 /// Returns `true` if the task was found and killed, `false` if it
 /// was already Dead, not found, or is the current task.
 pub fn kill_task(task_id: TaskId) -> bool {
+    kill_task_from(task_id).is_some()
+}
+
+/// [`kill_task`], answering the state the task was killed *from* -- `None`
+/// when the kill was refused (the current task, a dead or unknown one).
+///
+/// `Some(Running)` means another CPU was running it: that CPU has been asked
+/// to reschedule at once ([`request_preempt_on`]), and a killer that must not
+/// publish the death while the task still runs waits for it to leave
+/// ([`wait_off_cpu`]).
+pub fn kill_task_from(task_id: TaskId) -> Option<TaskState> {
     let current = load_current_task();
     if task_id == current {
         // Can't kill the currently running task via this path.
@@ -5407,16 +5418,14 @@ pub fn kill_task(task_id: TaskId) -> bool {
             "[sched] kill_task: refusing to kill current task {}",
             task_id
         );
-        return false;
+        return None;
     }
 
     let mut state = SCHED.lock();
-    let Some(task) = state.tasks.get_mut(&task_id) else {
-        return false;
-    };
+    let task = state.tasks.get_mut(&task_id)?;
 
     if task.state == TaskState::Dead {
-        return false;
+        return None;
     }
     // Every other state ends the same way:
     //
@@ -5424,10 +5433,11 @@ pub fn kill_task(task_id: TaskId) -> bool {
     // * Blocked / Suspended -- no legitimate entry.  If anything tries to
     //   wake() this task later, it'll see it's not Blocked and return false.
     // * Running -- on SMP, the task may be Running on another CPU while we
-    //   kill it from this CPU.  Marking it Dead is enough: the other CPU will
-    //   notice the state change at its next preemption or yield
-    //   (schedule_inner checks state before re-enqueue).  On a single CPU
-    //   this shouldn't be reachable (the current task was refused above).
+    //   kill it from this CPU.  Marking it Dead makes that CPU drop it at its
+    //   next switch (schedule_inner checks state before re-enqueue), and that
+    //   switch is asked for at once below rather than left to the next timer
+    //   tick (A-KILLED-THREAD-RUNS-ON-UNTIL-ITS-CPU-SWITCHES).  On a single
+    //   CPU this shouldn't be reachable (the current task was refused above).
     let prior = task.state;
     task.state = TaskState::Dead;
 
@@ -5446,6 +5456,11 @@ pub fn kill_task(task_id: TaskId) -> bool {
     // Drop the SCHED lock before notifying hooks — hooks may access
     // other subsystems that have their own locks.
     drop(state);
+
+    // Running elsewhere: have its CPU switch now, not at its next tick.
+    if prior == TaskState::Running {
+        request_preempt_on(queued_on);
+    }
 
     TASKS_EXITED.fetch_add(1, Ordering::Relaxed);
     serial_println!("[sched] Killed task {}", task_id);
@@ -5466,7 +5481,37 @@ pub fn kill_task(task_id: TaskId) -> bool {
     // Notify exit hooks after the task is marked Dead and the lock
     // is released.  Hooks see the task as Dead if they check state.
     notify_exit_hooks(task_id);
-    true
+    Some(prior)
+}
+
+/// How long [`wait_off_cpu`] waits for killed tasks to leave their CPUs.
+const OFF_CPU_PATIENCE_NS: u64 = 200_000_000;
+
+/// Wait until none of `tasks` is on a CPU ([`task_is_on_cpu`]), skipping the
+/// caller's own task, which cannot wait for itself.
+///
+/// For a killer: each task was killed while another CPU ran it
+/// ([`kill_task_from`] answered `Running`), its CPU has been asked to
+/// reschedule, and a `Dead` task is never picked again -- so once it has
+/// left, nothing of it runs. Spins rather than yields, because the killer may
+/// be an exception handler.
+///
+/// Returns how many were still on a CPU after [`OFF_CPU_PATIENCE_NS`]: 0
+/// unless a CPU ran that long with interrupts off or preemption held.
+pub fn wait_off_cpu(tasks: &[TaskId]) -> usize {
+    let me = load_current_task();
+    let start = crate::hrtimer::now_ns();
+    let mut stuck = 0usize;
+    for &task in tasks.iter().filter(|&&t| t != me) {
+        while task_is_on_cpu(task) {
+            if crate::hrtimer::now_ns().saturating_sub(start) > OFF_CPU_PATIENCE_NS {
+                stuck = stuck.saturating_add(1);
+                break;
+            }
+            core::hint::spin_loop();
+        }
+    }
+    stuck
 }
 
 /// Reap all dead tasks: free their kernel stacks and remove them from
@@ -8491,6 +8536,8 @@ fn affinity_test_wait(done: impl Fn() -> bool) -> bool {
 /// - A task running on another CPU, pinned to this one, comes here: its CPU is
 ///   asked to reschedule ([`request_preempt_on`]) and the pick there re-homes
 ///   it.
+/// - A task running on another CPU, killed, leaves it: [`kill_task_from`]
+///   reports it was running and [`wait_off_cpu`] sees it go.
 ///
 /// The moves need two online CPUs; with one, it says so and checks the
 /// refusal alone. Run after CPU hotplug has started, so the online mask is
@@ -8584,12 +8631,50 @@ pub fn affinity_self_test() -> KernelResult<()> {
     if !moved {
         return fail("a task running on another CPU, pinned to this one, never came here");
     }
+
+    // 3. A task running on another CPU, killed, leaves it: `kill_task_from`
+    //    says it was running and asks its CPU to switch, and `wait_off_cpu`
+    //    sees it go (A-KILLED-THREAD-RUNS-ON-UNTIL-ITS-CPU-SWITCHES).
+    AFF_SPIN_CPU.store(u64::MAX, Ordering::Release);
+    AFF_SPIN_STOP.store(false, Ordering::Release);
+    AFF_SPIN_DONE.store(false, Ordering::Release);
+    let victim = spawn_with_affinity(
+        b"aff-victim",
+        task::DEFAULT_PRIORITY,
+        aff_spinner,
+        0,
+        0,
+        only(other),
+    )?;
+    if !affinity_test_wait(|| AFF_SPIN_CPU.load(Ordering::Acquire) == other as u64) {
+        AFF_SPIN_STOP.store(true, Ordering::Release);
+        kill_task(victim);
+        reap_dead_tasks();
+        return fail("the task to be killed never ran on the other CPU");
+    }
+    let prior = kill_task_from(victim);
+    let stuck = wait_off_cpu(&[victim]);
+    let left = !task_is_on_cpu(victim);
+    // Stop the spinner's flag too, in case the kill missed it somehow.
+    AFF_SPIN_STOP.store(true, Ordering::Release);
+    reap_dead_tasks();
+    if prior != Some(TaskState::Running) || stuck != 0 || !left {
+        serial_println!(
+            "[sched]   FAIL: affinity: killing a task running on CPU {}: killed from {:?}, {} still on a CPU, left {}",
+            other,
+            prior,
+            stuck,
+            left
+        );
+        return Err(KernelError::InternalError);
+    }
     serial_println!(
-        "[sched]   CPU affinity: a self-pinning task moved {} -> {}, a running one {} -> {}: OK",
+        "[sched]   CPU affinity: a self-pinning task moved {} -> {}, a running one {} -> {}, a killed one left {}: OK",
         here,
         other,
         other,
-        here
+        here,
+        other
     );
     Ok(())
 }

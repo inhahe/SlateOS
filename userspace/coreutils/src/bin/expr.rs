@@ -589,8 +589,11 @@ fn colon(subject: &[u8], pattern: &[u8]) -> Result<Str, Fail> {
     }
     // coreutils' basic syntax: no `RE_CONTEXT_INVALID_DUP` and no
     // `RE_NO_EMPTY_RANGES`, so `a**` and `[z-a]` both compile (measured).
+    // A pattern that will not compile is `die (EXPR_INVALID, 0, "%s",
+    // errmsg)` upstream, where `errmsg` is what `re_compile_pattern` returned:
+    // glibc's sentence, and nothing else -- `expr: Unmatched ( or \(`.
     let re = ere::bre::compile_syntax(pattern, false, ere::bre::BreSyntax::COREUTILS)
-        .map_err(|e| Fail(String::from_utf8_lossy(&e.detail).into_owned()))?;
+        .map_err(|e| Fail(e.message().to_string()))?;
     // A search that gave up is neither a match nor a non-match. `expr` is used
     // for control flow — `expr "$f" : 'lib' >/dev/null || exit` — so reporting
     // it as "no match" would take the failure branch on a question we never

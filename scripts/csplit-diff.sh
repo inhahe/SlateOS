@@ -304,6 +304,16 @@ run_case seq20.txt '{x}'
 run_case seq20.txt 4 '{1'
 run_case seq20.txt '/5/+x'
 
+# A pattern that will not compile: the whole argument quoted -- delimiters and
+# offset with it -- then `invalid regular expression:` and glibc's sentence.
+run_case seq20.txt '/[/'
+run_case seq20.txt '/[/+1'
+run_case seq20.txt '%a\(%'
+run_case seq20.txt '/a\{1/'
+run_case seq20.txt '/[[:foo:]]/'
+run_case seq20.txt '/\1/'
+run_case seq20.txt '/a\{x\}/-2'
+
 # Option arguments that are not numbers, and a suffix format that is not a
 # single integer conversion.
 run_case seq20.txt -n abc 4

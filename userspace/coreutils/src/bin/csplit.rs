@@ -624,12 +624,16 @@ fn extract_regexp(bytes: &[u8], skip: bool) -> Result<Control, Fail> {
 
     // Basic regular expressions: `csplit` is specified in terms of `ed`'s, and
     // compiled in coreutils' basic syntax -- no `RE_CONTEXT_INVALID_DUP`, no
-    // `RE_NO_EMPTY_RANGES`, so `a**` and `[z-a]` both compile (measured).
+    // `RE_NO_EMPTY_RANGES`, so `a**` and `[z-a]` both compile (measured). One
+    // that does not is upstream's `%s: invalid regular expression: %s`, with
+    // the *whole* argument quoted -- delimiters and offset too -- and glibc's
+    // sentence after it: `csplit: '/[/+1': invalid regular expression:
+    // Unmatched [, [^, [:, [., or [=`.
     let re = bre::compile_syntax(pattern, false, bre::BreSyntax::COREUTILS).map_err(|e| {
         Fail::fatal(format!(
-            "{}: {}",
-            quote(pattern),
-            String::from_utf8_lossy(&e.detail)
+            "{}: invalid regular expression: {}",
+            quote(bytes),
+            e.message()
         ))
     })?;
 

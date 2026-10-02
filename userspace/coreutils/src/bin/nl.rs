@@ -644,12 +644,11 @@ fn set_style(
                 // POSIX *basic* expressions, backreferences included, in
                 // coreutils' basic syntax: upstream's `RE_SYNTAX_POSIX_BASIC &
                 // ~RE_CONTEXT_INVALID_DUP & ~RE_NO_EMPTY_RANGES`, so `a**` and
-                // `[z-a]` both compile (measured). What still differs from glibc
-                // is only the wording of a compile error, which
-                // `scripts/nl-diff.sh` marks xfail rather than pretending the
-                // two agree.
+                // `[z-a]` both compile (measured). One that does not is
+                // `error (EXIT_FAILURE, 0, "%s", errmsg)` upstream -- glibc's
+                // sentence alone, `nl: Unmatched [, [^, [:, [., or [=`.
                 let compiled = bre::compile_syntax(pattern, false, bre::BreSyntax::COREUTILS)
-                    .map_err(|e| deferred.fatal(String::from_utf8_lossy(&e.detail).into_owned()))?;
+                    .map_err(|e| deferred.fatal(e.message().to_string()))?;
                 Some(Box::new(compiled))
             });
         }

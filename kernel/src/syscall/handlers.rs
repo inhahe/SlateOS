@@ -14804,6 +14804,12 @@ pub fn sys_fs_readdir_at(args: &SyscallArgs) -> SyscallResult {
 /// (design-decisions §1508). It still refuses on a filesystem that cannot
 /// hold a file with no name (FAT, the pseudo filesystems).
 pub fn sys_fs_tmpfile(args: &SyscallArgs) -> SyscallResult {
+    // The gate first, as every other creating door has it: a caller without
+    // the right learns only that, not which of its arguments were good.
+    // `fs_open_tmpfile_kernel_path` asks again, for the Linux door's sake.
+    if let Err(e) = require_cap_type(crate::cap::ResourceType::File, crate::cap::Rights::WRITE) {
+        return SyscallResult::err(e);
+    }
     let path_len = args.arg1 as usize;
     if args.arg0 == 0 || path_len == 0 {
         return SyscallResult::err(KernelError::InvalidArgument);

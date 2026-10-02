@@ -2070,6 +2070,15 @@ extern "C" fn kernel_main() -> ! {
                 selftest::Severity::Integrity,
                 ipc::timerfd::self_test_blocking_multi_waiter(),
             );
+            // Unix sockets' SO_RCVTIMEO / SO_SNDTIMEO, for the same reason:
+            // a wait's limit is an hrtimer. Inside `unix_socket::self_test()`
+            // (before `cpu::sti()`) it parked the boot on a timer that could
+            // not fire (rq39, 2026-10-02).
+            selftest::dispatch(
+                "Unix-domain socket timeouts",
+                selftest::Severity::Integrity,
+                ipc::unix_socket::self_test_timeouts(),
+            );
         }
         case();
     }

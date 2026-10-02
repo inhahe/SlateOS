@@ -4551,8 +4551,11 @@ fn test_dispatch_flock() -> KernelResult<()> {
 ///   (`PermissionDenied` without it), as `SYS_FS_LIST_DIR` and
 ///   `SYS_FS_TRUNCATE` do. The gate comes before the path is read, so the
 ///   null path cannot be what refuses;
-/// - `SYS_FS_TMPFILE` is `NotSupported` rather than a named file nobody
-///   deletes.
+/// - `SYS_FS_TMPFILE` asks for the File capability before it reads its
+///   path, as the others do (`PermissionDenied`). It answered
+///   `NotSupported` until it was built (b34de449c), and then read the null
+///   path first, so an unprivileged caller learned which arguments were
+///   bad -- caught by the first boot to run both (rq39).
 fn test_dispatch_fs_gates() -> KernelResult<()> {
     use crate::cap::ResourceType;
     use crate::fs::handle::{self, OpenFlags};
@@ -4594,7 +4597,7 @@ fn test_dispatch_fs_gates() -> KernelResult<()> {
         || data_held == code(KernelError::InvalidHandle)
         || readdir != code(KernelError::PermissionDenied)
         || fallocate != code(KernelError::PermissionDenied)
-        || tmpfile != code(KernelError::NotSupported)
+        || tmpfile != code(KernelError::PermissionDenied)
     {
         serial_println!(
             "[syscall]   FAIL: fs gates: seek-data {} / {} held, seek-hole {}, readdir-at {}, fallocate {}, tmpfile {}",
@@ -4608,7 +4611,7 @@ fn test_dispatch_fs_gates() -> KernelResult<()> {
         return Err(KernelError::InternalError);
     }
     serial_println!(
-        "[syscall]   fs gates: seek-data/hole possession, readdir-at/fallocate capability, tmpfile refused: OK"
+        "[syscall]   fs gates: seek-data/hole possession, readdir-at/fallocate/tmpfile capability: OK"
     );
     Ok(())
 }

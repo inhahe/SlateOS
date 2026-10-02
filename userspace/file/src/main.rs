@@ -13,14 +13,14 @@
 //! The library is `userspace/libmagic`. The database is file 5.45's own
 //! (`magic/`, vendored by `scripts/file-magic-vendor.py`), compiled by
 //! `build.rs` with that library exactly as `file -C` compiles it, and carried
-//! inside the program ([`database`]): mapped, as upstream maps its installed
-//! `magic.mgc`, when nothing is installed at the default path.
+//! inside the program ([`database`]): used in place, as upstream uses its
+//! installed `magic.mgc`, when nothing is installed at the default path.
 //!
 //! Where this deliberately differs from upstream:
 //!
 //! | Upstream | Here | Why |
 //! |---|---|---|
-//! | the database is `magic.mgc`, installed | the same `magic.mgc`, built in, its zeros packed (8.5 MB to about 2) | the image need not carry a file only this program reads |
+//! | the database is `magic.mgc`, installed | the same `magic.mgc`, built into the program | the image need not carry a file only this program reads |
 //! | `-S` turns off the seccomp sandbox | accepted, and does nothing | SlateOS has no seccomp; there is no sandbox to turn off |
 
 // The workspace's lint policy, less two of its defensive lints, as for
@@ -31,10 +31,27 @@
 
 mod database {
     //! The database this program carries: file 5.45's magic (`magic/`),
-    //! compiled by the build script exactly as `file -C` compiles it, with its
-    //! runs of zeros packed. It is mapped in place of `magic.mgc` when nothing
-    //! is installed at the default path.
-    pub static BUILTIN: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/magic.mgc.packed"));
+    //! compiled by the build script exactly as `file -C` compiles it. It is
+    //! used in place of an installed `magic.mgc` when nothing is installed at
+    //! the default path -- in place meaning as it lies, which is why it is
+    //! aligned for a rule (`libmagic::magic::Magic`, 8 bytes).
+
+    /// Bytes at the alignment of `A`.
+    #[repr(C)]
+    struct AlignedAs<A, B: ?Sized> {
+        _align: [A; 0],
+        bytes: B,
+    }
+
+    static DATABASE: &AlignedAs<u64, [u8]> = &AlignedAs {
+        _align: [],
+        bytes: *include_bytes!(concat!(env!("OUT_DIR"), "/magic.mgc")),
+    };
+
+    /// The compiled database.
+    pub fn builtin() -> &'static [u8] {
+        &DATABASE.bytes
+    }
 }
 
 use std::ffi::OsString;
@@ -383,7 +400,7 @@ fn applyparam(cli: &Cli, ms: &mut Ms) {
 fn load(cli: &Cli, magicfile: Option<&[u8]>, flags: u32) -> Option<Ms> {
     let mut ms = magicapi::magic_open(flags);
     ms.utf8 = codeset_is_utf8();
-    ms.builtin = Some(database::BUILTIN);
+    ms.builtin = Some(database::builtin());
     if magicapi::magic_load(&mut ms, magicfile) == -1 {
         let e = magicapi::magic_error(&ms).unwrap_or_default();
         file_warn(cli, &e, ms.errno);
@@ -742,7 +759,7 @@ fn main() {
             // Do not check or compile ~/.magic unless asked to.
             let mut ms = magicapi::magic_open(flags | MAGIC_CHECK);
             ms.utf8 = codeset_is_utf8();
-            ms.builtin = Some(database::BUILTIN);
+            ms.builtin = Some(database::builtin());
             let c = match act {
                 Action::Check => magicapi::magic_check(&mut ms, magicfile.as_deref()),
                 Action::Compile => magicapi::magic_compile(&mut ms, magicfile.as_deref()),

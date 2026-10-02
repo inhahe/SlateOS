@@ -52,16 +52,17 @@ pub struct Search {
     pub rm_len: usize,
 }
 
-/// `struct mlist`: one database's rules for one set, and the regexes compiled
-/// from them on first use (`magic_rxcomp`).
+/// `struct mlist`: one database's rules for one set -- borrowed in place from
+/// a database the program carries, or owned -- and the regexes compiled from
+/// them on first use (`magic_rxcomp`).
 pub struct MList {
-    pub magic: Vec<Magic>,
+    pub magic: std::borrow::Cow<'static, [Magic]>,
     pub rx: Vec<OnceCell<Rc<ere::Regex>>>,
 }
 
 impl MList {
     #[must_use]
-    pub fn new(magic: Vec<Magic>) -> MList {
+    pub fn new(magic: std::borrow::Cow<'static, [Magic]>) -> MList {
         let rx = magic.iter().map(|_| OnceCell::new()).collect();
         MList { magic, rx }
     }
@@ -114,9 +115,10 @@ pub struct Ms {
     /// follow no failure of their own), as the last thing that would have set
     /// it. `None` is 0.
     pub errno: Option<Errno>,
-    /// Not upstream's: a compiled database carried by the program, packed by
-    /// [`crate::apprentice::pack_mgc`] -- mapped in place of the default
-    /// path's `magic.mgc` when nothing is installed there.
+    /// Not upstream's: a compiled database carried by the program -- the
+    /// bytes of a `magic.mgc`, aligned for a rule ([`crate::magic::Magic`]) --
+    /// used in place of the default path's `magic.mgc` when nothing is
+    /// installed there.
     pub builtin: Option<&'static [u8]>,
 }
 

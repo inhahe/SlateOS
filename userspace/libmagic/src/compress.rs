@@ -352,12 +352,18 @@ fn uncompress_external(fd: Option<&File>, bytes_max: usize, method: usize, old: 
 /// process's `PATH`, run with an empty environment.
 fn spawn(argv: &[&str], stdin: std::process::Stdio, out: std::io::PipeWriter, err: std::io::PipeWriter) -> Option<std::process::Child> {
     let (prog, args) = argv.split_first()?;
-    let mut cmd = std::process::Command::new(find_program(prog)?);
     #[cfg(unix)]
-    {
+    let mut cmd = {
         use std::os::unix::process::CommandExt;
+        let mut cmd = std::process::Command::new(find_program(prog)?);
         cmd.arg0(prog);
-    }
+        cmd
+    };
+    // Elsewhere -- Windows, where this is built only to be tested -- `Command`
+    // searches this process's `PATH` itself, empty environment or not, and a
+    // program that is not there fails to spawn.
+    #[cfg(not(unix))]
+    let mut cmd = std::process::Command::new(prog);
     cmd.args(args).env_clear().stdin(stdin).stdout(out).stderr(err);
     cmd.spawn().ok()
 }
@@ -365,26 +371,20 @@ fn spawn(argv: &[&str], stdin: std::process::Stdio, out: std::io::PipeWriter, er
 /// Where `posix_spawnp` finds `prog`: itself when it has a slash, otherwise
 /// the first executable file of that name on this process's `PATH` (the
 /// child's environment is empty, so the search cannot be left to it).
+#[cfg(unix)]
 fn find_program(prog: &str) -> Option<std::path::PathBuf> {
+    use std::os::unix::fs::PermissionsExt;
     if prog.contains('/') {
         return Some(prog.into());
     }
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        let path = std::env::var_os("PATH").unwrap_or_else(|| "/bin:/usr/bin".into());
-        std::env::split_paths(&path).find_map(|dir| {
-            // An empty element is the current directory.
-            let dir = if dir.as_os_str().is_empty() { std::path::PathBuf::from(".") } else { dir };
-            let full = dir.join(prog);
-            let md = std::fs::metadata(&full).ok()?;
-            (md.is_file() && md.permissions().mode() & 0o111 != 0).then_some(full)
-        })
-    }
-    #[cfg(not(unix))]
-    {
-        Some(prog.into())
-    }
+    let path = std::env::var_os("PATH").unwrap_or_else(|| "/bin:/usr/bin".into());
+    std::env::split_paths(&path).find_map(|dir| {
+        // An empty element is the current directory.
+        let dir = if dir.as_os_str().is_empty() { std::path::PathBuf::from(".") } else { dir };
+        let full = dir.join(prog);
+        let md = std::fs::metadata(&full).ok()?;
+        (md.is_file() && md.permissions().mode() & 0o111 != 0).then_some(full)
+    })
 }
 
 /// The parent's side of `uncompressbuf`: standard output, up to

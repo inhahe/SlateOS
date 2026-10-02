@@ -13,13 +13,15 @@
 //! # The built-in database
 //!
 //! Upstream reads its default database from a compiled `magic.mgc` installed
-//! next to it, and maps it. A program may instead carry that database inside
-//! itself ([`Ms::builtin`]): `file` does, compiled at its build from file
-//! 5.45's own magic ([`compile_packed`]) -- the same bytes `file -C` writes,
-//! with their runs of zeros packed ([`pack_mgc`]). It is mapped where upstream
-//! would map the file: when the default path is asked for and nothing is
-//! installed there.
+//! next to it, and maps it: the rules are used where they lie, never decoded.
+//! A program may instead carry that database inside itself ([`Ms::builtin`]):
+//! `file` does, compiled at its build from file 5.45's own magic
+//! ([`compile_mgc`], the same bytes `file -C` writes). It is used the same
+//! way, in place -- a rule ([`Magic`]) has the compiled record's layout -- and
+//! where upstream would map the file: when the default path is asked for and
+//! nothing is installed there.
 
+use std::borrow::Cow;
 use std::rc::Rc;
 
 use crate::cstd::{cstr, cstrlen, hexval, isalpha, isdigit, isspace, strtol_i32, strtoul, strtoull};
@@ -1764,10 +1766,12 @@ fn set_last_default(ms: &mut Ms, entries: &[Entry]) {
     }
 }
 
-/// One loaded database: its rules, per set, in order (`struct magic_map`).
+/// One loaded database: its rules, per set, in order (`struct magic_map`) --
+/// read from text or decoded from a compiled file, or borrowed in place from
+/// the database a program carries.
 #[derive(Default, Debug)]
 pub struct MagicMap {
-    pub magic: [Vec<Magic>; MAGIC_SETS],
+    pub magic: [Cow<'static, [Magic]>; MAGIC_SETS],
 }
 
 /// The loaded entries sorted and flattened, as `apprentice_load` finishes.
@@ -1780,7 +1784,7 @@ fn finish_load(ms: &mut Ms, mut mset: EntrySets) -> MagicMap {
         // every call, so each entry's is worked out once.)
         entries.sort_by_cached_key(|e| std::cmp::Reverse(e.mp.first().map_or(0, file_magic_strength)));
         set_last_default(ms, entries);
-        map.magic[j] = std::mem::take(entries).into_iter().flat_map(|e| e.mp).collect();
+        map.magic[j] = Cow::Owned(std::mem::take(entries).into_iter().flat_map(|e| e.mp).collect());
     }
     map
 }
@@ -1922,15 +1926,8 @@ fn apprentice_map(ms: &mut Ms, fn_: &[u8]) -> Option<MagicMap> {
             // Nothing installed at the default path: the database built into
             // the program is the compiled one upstream would map there, and
             // mapping it leaves `errno` as it was.
-            if let Some(packed) = ms.builtin.filter(|_| is_builtin(fn_)) {
-                let Some(data) = unpack_mgc(packed) else {
-                    let mut msg = b"bad magic in `".to_vec();
-                    msg.extend_from_slice(&dbname);
-                    msg.push(b'\'');
-                    ms.error(None, &msg);
-                    return None;
-                };
-                return check_buffer(ms, &data, &dbname);
+            if let Some(data) = ms.builtin.filter(|_| is_builtin(fn_)) {
+                return map_builtin(ms, data, &dbname);
             }
             ms.errno = Some(crate::funcs::Errno::of(&e));
             return None;
@@ -1949,10 +1946,78 @@ fn apprentice_map(ms: &mut Ms, fn_: &[u8]) -> Option<MagicMap> {
 /// `check_buffer`: the header, the version and the counts of a compiled
 /// database, and its rules.
 fn check_buffer(ms: &mut Ms, data: &[u8], dbname: &[u8]) -> Option<MagicMap> {
-    let word = |i: usize| {
-        data.get(i..i + 4)
-            .map_or(0, |w| u32::from_le_bytes([w[0], w[1], w[2], w[3]]))
+    // The header as far as there is one; what is missing reads as zeros.
+    let mut head = [0u8; FILE_MAGICSIZE];
+    let have = data.len().min(FILE_MAGICSIZE);
+    head[..have].copy_from_slice(&data[..have]);
+    let mut at = FILE_MAGICSIZE;
+    map_records(ms, dbname, data.len(), &head, || {
+        let mut rec = [0u8; FILE_MAGICSIZE];
+        rec.copy_from_slice(data.get(at..at + FILE_MAGICSIZE)?);
+        at += FILE_MAGICSIZE;
+        Some(rec)
+    })
+}
+
+/// The database a program carries ([`Ms::builtin`]), mapped as upstream maps
+/// `magic.mgc`: its rules used where they lie. Where that cannot be done --
+/// a big-endian machine, bytes not aligned for a rule, a header that is not
+/// a compiled database's -- it is decoded as a file would be, which reports
+/// what is wrong with it.
+fn map_builtin(ms: &mut Ms, data: &'static [u8], dbname: &[u8]) -> Option<MagicMap> {
+    #[cfg(target_endian = "little")]
+    if let Some(map) = in_place(data) {
+        return Some(map);
+    }
+    check_buffer(ms, data, dbname)
+}
+
+/// A compiled database's rules as the [`Magic`]s they already are, or `None`
+/// when its header is wrong or the bytes are not aligned for a rule.
+#[cfg(target_endian = "little")]
+fn in_place(data: &'static [u8]) -> Option<MagicMap> {
+    let word = |i: usize| -> Option<usize> {
+        let w: [u8; 4] = data.get(i..i + 4)?.try_into().ok()?;
+        usize::try_from(u32::from_le_bytes(w)).ok()
     };
+    if word(0)? != MAGICNO as usize || word(4)? != VERSIONNO as usize {
+        return None;
+    }
+    let (n0, n1) = (word(8)?, word(12)?);
+    let count = n0.checked_add(n1)?;
+    let rules = data.get(FILE_MAGICSIZE..)?;
+    // SAFETY: `align_to` reinterprets the aligned middle of `rules` as rules,
+    // which is sound when any bytes of a `Magic`'s size are a valid `Magic`.
+    // They are: it is `#[repr(C)]`, made only of integers and byte arrays
+    // (`Value` is a transparent byte array), with no padding -- magic.rs
+    // asserts at compile time that it is FILE_MAGICSIZE bytes with the
+    // compiled record's field offsets. `data` is `'static` and shared, so the
+    // borrow outlives every use and nothing writes to it. On a little-endian
+    // machine -- this function's `cfg` -- the integers read as the compiled
+    // file stores them.
+    let (head, all, tail): (&[u8], &'static [Magic], &[u8]) = unsafe { rules.align_to::<Magic>() };
+    // Bytes not aligned for a rule leave a head (`align_to` may also decline
+    // to align at all, which only costs the decoding); bytes that are not
+    // whole rules leave a tail. Either is decoded instead.
+    if !head.is_empty() || !tail.is_empty() || all.len() != count {
+        return None;
+    }
+    let (a, b) = all.split_at(n0);
+    Some(MagicMap {
+        magic: [Cow::Borrowed(a), Cow::Borrowed(b)],
+    })
+}
+
+/// What `check_buffer` checks and decodes, for a database of `len` bytes
+/// whose header record is `head` and whose rules `next` gives in order.
+fn map_records(
+    ms: &mut Ms,
+    dbname: &[u8],
+    len: usize,
+    head: &[u8; FILE_MAGICSIZE],
+    mut next: impl FnMut() -> Option<[u8; FILE_MAGICSIZE]>,
+) -> Option<MagicMap> {
+    let word = |i: usize| u32::from_le_bytes([head[i], head[i + 1], head[i + 2], head[i + 3]]);
     let swap = if word(0) == MAGICNO {
         false
     } else if word(0).swap_bytes() == MAGICNO {
@@ -1973,11 +2038,11 @@ fn check_buffer(ms: &mut Ms, data: &[u8], dbname: &[u8]) -> Option<MagicMap> {
         ms.error(None, &msg);
         return None;
     }
-    let entries = data.len() / FILE_MAGICSIZE;
-    if entries * FILE_MAGICSIZE != data.len() {
+    let entries = len / FILE_MAGICSIZE;
+    if entries * FILE_MAGICSIZE != len {
         let mut msg = b"Size of `".to_vec();
         msg.extend_from_slice(dbname);
-        msg.extend_from_slice(format!("' {} is not a multiple of {FILE_MAGICSIZE}", data.len()).as_bytes());
+        msg.extend_from_slice(format!("' {len} is not a multiple of {FILE_MAGICSIZE}").as_bytes());
         ms.error(None, &msg);
         return None;
     }
@@ -1990,17 +2055,15 @@ fn check_buffer(ms: &mut Ms, data: &[u8], dbname: &[u8]) -> Option<MagicMap> {
         ms.error(None, &msg);
         return None;
     }
-    let rule = |k: usize| {
-        let at = (k + 1) * FILE_MAGICSIZE;
-        let mut b = [0u8; FILE_MAGICSIZE];
-        if let Some(src) = data.get(at..at + FILE_MAGICSIZE) {
-            b.copy_from_slice(src);
-        }
-        Magic::from_bytes(&b, swap)
-    };
+    // The counts agree with the size, so every rule is there to read.
     let mut map = MagicMap::default();
-    map.magic[0] = (0..n0).map(rule).collect();
-    map.magic[1] = (n0..n0 + n1).map(rule).collect();
+    for (set, n) in map.magic.iter_mut().zip([n0, n1]) {
+        let mut rules = Vec::with_capacity(n);
+        for _ in 0..n {
+            rules.push(Magic::from_bytes(&next()?, swap));
+        }
+        *set = Cow::Owned(rules);
+    }
     Some(map)
 }
 
@@ -2017,107 +2080,24 @@ pub fn mgc_bytes(map: &MagicMap) -> Vec<u8> {
         out[12..16].copy_from_slice(&(map.magic[1].len() as u32).to_le_bytes());
     }
     for set in &map.magic {
-        for m in set {
+        for m in set.iter() {
             out.extend_from_slice(&m.to_bytes());
         }
     }
     out
 }
 
-/// What [`pack_mgc`] begins with.
-const PACKED_MAGIC: &[u8; 8] = b"MGCZERO1";
-
-/// LEB128: seven bits a byte, low first, the top bit set on all but the last.
-fn put_leb(out: &mut Vec<u8>, mut v: usize) {
-    loop {
-        #[allow(clippy::cast_possible_truncation)]
-        let b = (v & 0x7f) as u8;
-        v >>= 7;
-        if v == 0 {
-            out.push(b);
-            return;
-        }
-        out.push(b | 0x80);
-    }
-}
-
-/// [`put_leb`] undone, from the front of `p`.
-fn take_leb(p: &mut &[u8]) -> Option<usize> {
-    let mut v = 0usize;
-    let mut shift = 0u32;
-    loop {
-        let (&b, tail) = p.split_first()?;
-        *p = tail;
-        if shift >= usize::BITS {
-            return None;
-        }
-        v |= usize::from(b & 0x7f).checked_shl(shift)?;
-        if b & 0x80 == 0 {
-            return Some(v);
-        }
-        shift += 7;
-    }
-}
-
-/// A compiled database with its runs of zeros packed -- most of a rule is
-/// unused space -- for a program to carry. After [`PACKED_MAGIC`] and the
-/// unpacked length (64 bits, little-endian): runs, each a LEB128 count of
-/// zeros, a LEB128 count of literal bytes, and those bytes.
-#[must_use]
-pub fn pack_mgc(data: &[u8]) -> Vec<u8> {
-    let mut out = PACKED_MAGIC.to_vec();
-    out.extend_from_slice(&(data.len() as u64).to_le_bytes());
-    let mut i = 0usize;
-    while i < data.len() {
-        let zeros = data.get(i..).unwrap_or_default().iter().take_while(|&&b| b == 0).count();
-        i += zeros;
-        // The literal bytes run to the next three zeros, which pack shorter
-        // than they are.
-        let start = i;
-        while i < data.len() && data.get(i..i + 3) != Some(&[0, 0, 0][..]) {
-            i += 1;
-        }
-        put_leb(&mut out, zeros);
-        put_leb(&mut out, i - start);
-        out.extend_from_slice(data.get(start..i).unwrap_or_default());
-    }
-    out
-}
-
-/// [`pack_mgc`] undone; `None` for bytes it did not write.
-#[must_use]
-pub fn unpack_mgc(packed: &[u8]) -> Option<Vec<u8>> {
-    let rest = packed.strip_prefix(PACKED_MAGIC.as_slice())?;
-    let len = usize::try_from(u64::from_le_bytes(rest.get(..8)?.try_into().ok()?)).ok()?;
-    let mut p = rest.get(8..)?;
-    let mut out = Vec::with_capacity(len);
-    while out.len() < len {
-        let zeros = take_leb(&mut p)?;
-        let lit = take_leb(&mut p)?;
-        if zeros > len - out.len() {
-            return None;
-        }
-        out.resize(out.len() + zeros, 0);
-        let bytes = p.get(..lit)?;
-        if bytes.len() > len - out.len() {
-            return None;
-        }
-        out.extend_from_slice(bytes);
-        p = p.get(lit..)?;
-    }
-    p.is_empty().then_some(out)
-}
-
 /// Compile the magic at `path` -- a file, or a directory of them read in
-/// `strcmp` order -- as `file -C -m path` does, and pack the result for a
-/// program to carry: a build script's work.
+/// `strcmp` order -- as `file -C -m path` does, and return the compiled
+/// database's bytes: a build script's work, for a program that carries its
+/// database.
 ///
 /// # Errors
 /// The message `file` would give when the magic does not compile.
-pub fn compile_packed(path: &[u8]) -> Result<Vec<u8>, Vec<u8>> {
+pub fn compile_mgc(path: &[u8]) -> Result<Vec<u8>, Vec<u8>> {
     let mut ms = Ms::new(0);
     match apprentice_load(&mut ms, path, Action::Compile) {
-        Some(map) if !ms.had_err() => Ok(pack_mgc(&mgc_bytes(&map))),
+        Some(map) if !ms.had_err() => Ok(mgc_bytes(&map)),
         _ => Err(ms
             .o_buf
             .as_deref()
@@ -2332,7 +2312,7 @@ mod tests {
         let mut errs = 0;
         load_1(&mut ms, Action::Load, b"t", text.as_bytes(), &mut errs, &mut sets);
         let map = finish_load(&mut ms, sets);
-        (map.magic[0].clone(), errs)
+        (map.magic[0].clone().into_owned(), errs)
     }
 
     #[test]
@@ -2419,5 +2399,54 @@ mod tests {
         for r in &m {
             assert_eq!(Magic::from_bytes(&r.to_bytes(), false).to_bytes(), r.to_bytes());
         }
+    }
+
+    /// `bytes`, kept for good, starting `skip` bytes past an 8-byte boundary.
+    fn leak_at(bytes: &[u8], skip: usize) -> &'static [u8] {
+        let mut v = vec![0u8; skip];
+        v.extend_from_slice(bytes);
+        v.resize(v.len().next_multiple_of(8), 0);
+        let words: Vec<u64> = v.as_chunks::<8>().0.iter().map(|c| u64::from_ne_bytes(*c)).collect();
+        let words: &'static [u64] = Box::leak(words.into_boxed_slice());
+        // SAFETY (test): a `u64` slice viewed as its bytes.
+        let all: &'static [u8] = unsafe { core::slice::from_raw_parts(words.as_ptr().cast::<u8>(), words.len() * 8) };
+        &all[skip..skip + bytes.len()]
+    }
+
+    fn same_rules(a: &MagicMap, b: &MagicMap) {
+        for (a, b) in a.magic.iter().zip(&b.magic) {
+            assert_eq!(a.len(), b.len());
+            for (x, y) in a.iter().zip(b.iter()) {
+                assert_eq!(x.to_bytes(), y.to_bytes());
+            }
+        }
+    }
+
+    #[test]
+    fn a_carried_database_is_used_in_place() {
+        let (m, errs) = load("0\tstring\tABC\tabc\n!:mime\ttext/x-abc\n>3\tbyte\t1\tone\n0\tbelong\t0x7f454c46\tELF\n");
+        assert_eq!(errs, 0);
+        let mut map = MagicMap::default();
+        map.magic[0] = Cow::Owned(m);
+        let mgc = mgc_bytes(&map);
+        let mut ms = Ms::new(0);
+        let decoded = check_buffer(&mut ms, &mgc, b"t.mgc").unwrap();
+        assert_eq!(decoded.magic[0].len(), 3);
+        // Aligned for a rule, as `file` aligns the database it carries, it is
+        // used where it lies.
+        let mapped = map_builtin(&mut ms, leak_at(&mgc, 0), b"t.mgc").unwrap();
+        #[cfg(target_endian = "little")]
+        assert!(matches!(mapped.magic[0], Cow::Borrowed(_)));
+        same_rules(&decoded, &mapped);
+        // Not aligned, it is decoded instead -- to the same rules.
+        let shifted = map_builtin(&mut ms, leak_at(&mgc, 1), b"t.mgc").unwrap();
+        assert!(matches!(shifted.magic[0], Cow::Owned(_)));
+        same_rules(&decoded, &shifted);
+        // Damaged, it is refused as upstream refuses a bad `.mgc`.
+        assert!(map_builtin(&mut ms, leak_at(b"not a database", 0), b"t.mgc").is_none());
+        assert_eq!(ms.o_buf.as_deref(), Some(&b"bad magic in `t.mgc'"[..]));
+        // Cut short, it is refused as a short `.mgc` is.
+        let cut = leak_at(&mgc[..mgc.len() - FILE_MAGICSIZE], 0);
+        assert!(map_builtin(&mut Ms::new(0), cut, b"t.mgc").is_none());
     }
 }

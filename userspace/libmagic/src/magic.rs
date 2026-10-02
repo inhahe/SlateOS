@@ -218,6 +218,7 @@ pub const MAGIC_NO_CHECK_ASCII: u32 = MAGIC_NO_CHECK_TEXT;
 /// members are host order, and the host is little-endian -- x86-64, where
 /// SlateOS runs and where libmagic is measured.
 #[derive(Clone, Copy, PartialEq, Eq)]
+#[repr(transparent)]
 pub struct Value(pub [u8; MAXSTRING]);
 
 impl Default for Value {
@@ -304,7 +305,14 @@ impl Value {
 // ---- one rule (`struct magic`) -------------------------------------------------------
 
 /// One line of the magic database.
+///
+/// Laid out exactly as a compiled database's 376-byte record (`struct
+/// magic`, little-endian) -- the assertions below hold it to that -- so that
+/// the database a program carries can be used where it lies, as upstream uses
+/// a mapped `magic.mgc` (see `apprentice::map_builtin`). Every field is an
+/// integer or a byte array: any bytes are a valid `Magic`.
 #[derive(Clone, Debug)]
+#[repr(C)]
 pub struct Magic {
     /// The number of `>` before the offset.
     pub cont_level: u16,
@@ -317,6 +325,8 @@ pub struct Magic {
     pub in_type: u8,
     pub in_op: u8,
     pub mask_op: u8,
+    /// `cond`: the conditional upstream compiles out, always 0.
+    cond: u8,
     pub factor_op: u8,
     pub offset: i32,
     pub in_offset: i32,
@@ -343,6 +353,7 @@ impl Default for Magic {
             in_type: 0,
             in_op: 0,
             mask_op: 0,
+            cond: 0,
             factor_op: FILE_FACTOR_OP_NONE,
             offset: 0,
             in_offset: 0,
@@ -418,6 +429,7 @@ impl Magic {
         b[7] = self.in_type;
         b[8] = self.in_op;
         b[9] = self.mask_op;
+        b[10] = self.cond;
         b[11] = self.factor_op;
         b[12..16].copy_from_slice(&self.offset.to_le_bytes());
         b[16..20].copy_from_slice(&self.in_offset.to_le_bytes());
@@ -448,6 +460,7 @@ impl Magic {
             in_type: b[7],
             in_op: b[8],
             mask_op: b[9],
+            cond: b[10],
             factor_op: b[11],
             offset: i32::from_le_bytes([b[12], b[13], b[14], b[15]]),
             in_offset: i32::from_le_bytes([b[16], b[17], b[18], b[19]]),
@@ -480,6 +493,27 @@ impl Magic {
 
 /// `FILE_MAGICSIZE`: the bytes of one compiled rule.
 pub const FILE_MAGICSIZE: usize = 376;
+
+// `Magic` is the compiled record, field for field.
+const _: () = {
+    use core::mem::{align_of, offset_of, size_of};
+    assert!(size_of::<Magic>() == FILE_MAGICSIZE);
+    assert!(align_of::<Magic>() == 8);
+    assert!(offset_of!(Magic, cont_level) == 0);
+    assert!(offset_of!(Magic, flag) == 2);
+    assert!(offset_of!(Magic, mask_op) == 9);
+    assert!(offset_of!(Magic, cond) == 10);
+    assert!(offset_of!(Magic, factor_op) == 11);
+    assert!(offset_of!(Magic, offset) == 12);
+    assert!(offset_of!(Magic, in_offset) == 16);
+    assert!(offset_of!(Magic, lineno) == 20);
+    assert!(offset_of!(Magic, u) == 24);
+    assert!(offset_of!(Magic, value) == 32);
+    assert!(offset_of!(Magic, desc) == 160);
+    assert!(offset_of!(Magic, mimetype) == 224);
+    assert!(offset_of!(Magic, apple) == 304);
+    assert!(offset_of!(Magic, ext) == 312);
+};
 /// `MAGICNO`: a compiled file's first word.
 pub const MAGICNO: u32 = 0xF11E_041C;
 /// `VERSIONNO`: the compiled format's version.

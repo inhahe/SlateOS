@@ -371,12 +371,14 @@ fn day_in_year(reform_year: i32, day: i32, month: i32, year: i32) -> i32 {
     let mut m = 1i32;
     while m < month {
         if let Ok(i) = usize::try_from(m) {
-            total += DAYS_IN_MONTH
-                .get(leap)
-                .and_then(|t| t.get(i).copied())
-                .unwrap_or(0);
+            total = total.saturating_add(
+                DAYS_IN_MONTH
+                    .get(leap)
+                    .and_then(|t| t.get(i).copied())
+                    .unwrap_or(0),
+            );
         }
-        m += 1;
+        m = m.saturating_add(1);
     }
     total
 }
@@ -403,13 +405,15 @@ fn day_in_week(reform_year: i32, day: i32, month: i32, year: i32) -> i32 {
     let month = i64::from(month);
     let mut year = i64::from(year);
 
-    if year != reform + 1 {
-        year -= i64::from(month < 3);
+    // Every sum here is of an `i32` promoted to `i64` and a small constant,
+    // so the saturating forms never saturate.
+    if year != reform.saturating_add(1) {
+        year = year.saturating_sub(i64::from(month < 3));
     } else {
-        year -= i64::from(month < 3) + 14;
+        year = year.saturating_sub(i64::from(month < 3).saturating_add(14));
     }
 
-    let Ok(idx) = usize::try_from(month - 1) else {
+    let Ok(idx) = usize::try_from(month.saturating_sub(1)) else {
         return NONEDAY;
     };
     let (Some(&reform_off), Some(&old_off)) = (REFORM.get(idx), OLD.get(idx)) else {
@@ -423,14 +427,22 @@ fn day_in_week(reform_year: i32, day: i32, month: i32, year: i32) -> i32 {
     {
         // Truncating division and remainder, exactly as C's `/` and `%` are and
         // Rust's are; `div_euclid` here would be a different function.
-        let n = year + year / 4 - year / 100 + year / 400 + reform_off + day;
+        let n = year
+            .saturating_add(year / 4)
+            .saturating_sub(year / 100)
+            .saturating_add(year / 400)
+            .saturating_add(reform_off)
+            .saturating_add(day);
         return i32::try_from(n % 7).unwrap_or(NONEDAY);
     }
     if year < reform
         || (year == reform && month < reformation_month)
         || (year == reform && month == reformation_month && day < 3)
     {
-        let n = year + year / 4 + old_off + day;
+        let n = year
+            .saturating_add(year / 4)
+            .saturating_add(old_off)
+            .saturating_add(day);
         return i32::try_from(n % 7).unwrap_or(NONEDAY);
     }
     NONEDAY
@@ -447,12 +459,14 @@ fn day_in_week(reform_year: i32, day: i32, month: i32, year: i32) -> i32 {
 fn week_number(day: i32, mut month: i32, year: i32, ctl: &Ctl) -> i32 {
     let wday = day_in_week(ctl.reform_year, 1, 1, year);
 
+    // `wday` is 0..6 or `NONEDAY`, a year is at most `i32::MAX`, and a day of
+    // the year at most 366, so none of the saturating forms below saturates.
     let mut fday = if ctl.weektype & WEEK_NUM_ISO != 0 {
-        wday + if wday >= FRIDAY { -2 } else { 5 }
+        wday.saturating_add(if wday >= FRIDAY { -2 } else { 5 })
     } else {
         // WEEK_NUM_US: 1 January is always in the first week, which may begin in
         // the previous year — so there is very seldom a week 53.
-        wday + 6
+        wday.saturating_add(6)
     };
 
     // For Julian dates the month can be set to January; the caller's `julian`
@@ -464,11 +478,11 @@ fn week_number(day: i32, mut month: i32, year: i32, ctl: &Ctl) -> i32 {
 
     let yday = day_in_year(ctl.reform_year, day, month, year);
     if year == ctl.reform_year && yday >= YDAY_AFTER_MISSING {
-        fday -= NUMBER_MISSING_DAYS;
+        fday = fday.saturating_sub(NUMBER_MISSING_DAYS);
     }
 
-    if yday + fday < i32::try_from(DAYS_IN_WEEK).unwrap_or(7) {
-        return week_number(31, 12, year - 1, ctl);
+    if yday.saturating_add(fday) < i32::try_from(DAYS_IN_WEEK).unwrap_or(7) {
+        return week_number(31, 12, year.saturating_sub(1), ctl);
     }
 
     // The equality is exact, not a mask test: a `--week=N` request ORs N into
@@ -480,26 +494,27 @@ fn week_number(day: i32, mut month: i32, year: i32, ctl: &Ctl) -> i32 {
         && day_in_week(ctl.reform_year, 31, 12, year) >= MONDAY
         && day_in_week(ctl.reform_year, 31, 12, year) <= WEDNESDAY
     {
-        return week_number(1, 1, year + 1, ctl);
+        return week_number(1, 1, year.saturating_add(1), ctl);
     }
 
-    (yday + fday) / 7
+    yday.saturating_add(fday) / 7
 }
 
 /// `cal.c`'s `week_to_day`: the day-of-year `--week=N` starts at, or 1 if that
 /// day falls in the previous year.
 fn week_to_day(ctl: &Ctl) -> i32 {
     let wday = day_in_week(ctl.reform_year, 1, 1, ctl.req.year);
-    let mut yday = ctl.req.week * 7 - wday;
+    // `--week` is at most 54 and `wday` at most 6, as above.
+    let mut yday = ctl.req.week.saturating_mul(7).saturating_sub(wday);
 
     if ctl.req.year == ctl.reform_year && yday >= YDAY_AFTER_MISSING {
-        yday += NUMBER_MISSING_DAYS;
+        yday = yday.saturating_add(NUMBER_MISSING_DAYS);
     }
 
     if ctl.weektype & WEEK_NUM_ISO != 0 {
-        yday -= if wday >= FRIDAY { -2 } else { 5 };
+        yday = yday.saturating_sub(if wday >= FRIDAY { -2 } else { 5 });
     } else {
-        yday -= 6;
+        yday = yday.saturating_sub(6);
     }
     if yday <= 0 { 1 } else { yday }
 }
@@ -722,7 +737,7 @@ fn parse_sec(t: &[u8]) -> Option<u64> {
 
     loop {
         while t.get(p).is_some_and(|c| TIMEUTILS_WHITESPACE.contains(c)) {
-            p += 1;
+            p = p.saturating_add(1);
         }
         if p >= t.len() {
             return if something { Some(r) } else { None };
@@ -738,7 +753,7 @@ fn parse_sec(t: &[u8]) -> Option<u64> {
                 if sc.negative && sc.magnitude != 0 {
                     return None; // ERANGE
                 }
-                (u64::try_from(sc.magnitude).ok()?, p + sc.end)
+                (u64::try_from(sc.magnitude).ok()?, p.saturating_add(sc.end))
             }
             None => (0u64, p),
         };
@@ -746,20 +761,20 @@ fn parse_sec(t: &[u8]) -> Option<u64> {
         let mut z: u64 = 0;
         let mut n = 0usize;
         if t.get(e) == Some(&b'.') {
-            let b = e + 1;
+            let b = e.saturating_add(1);
             let frac = scan_integer(t.get(b..).unwrap_or_default(), 10)?;
             if frac.saturated || frac.negative {
                 return None;
             }
             z = u64::try_from(frac.magnitude).ok()?;
-            e = b + frac.end;
-            n = e - b;
+            e = b.saturating_add(frac.end);
+            n = e.saturating_sub(b);
         } else if e == p {
             return None; // no digits and no decimal point
         }
 
         while t.get(e).is_some_and(|c| TIMEUTILS_WHITESPACE.contains(c)) {
-            e += 1;
+            e = e.saturating_add(1);
         }
 
         let mut matched = false;
@@ -776,7 +791,7 @@ fn parse_sec(t: &[u8]) -> Option<u64> {
                 k /= 10;
             }
             r = r.saturating_add(l.saturating_mul(*usec)).saturating_add(k);
-            p = e + suffix.len();
+            p = e.saturating_add(suffix.len());
             something = true;
             matched = true;
             break;
@@ -799,7 +814,7 @@ fn parse_subseconds(t: &[u8]) -> Option<u64> {
         if !c.is_ascii_digit() || factor < 1 {
             return None;
         }
-        ret += u64::from(c - b'0') * factor;
+        ret = ret.saturating_add(u64::from(c.saturating_sub(b'0')).saturating_mul(factor));
         factor /= 10;
     }
     Some(ret)
@@ -809,7 +824,7 @@ fn parse_subseconds(t: &[u8]) -> Option<u64> {
 /// most `n` digits, stopping early once another digit could not fit under `to`.
 fn get_number(s: &[u8], rp: &mut usize, from: i64, to: i64, n: u32) -> Option<i64> {
     while s.get(*rp) == Some(&b' ') {
-        *rp += 1;
+        *rp = (*rp).saturating_add(1);
     }
     if !s.get(*rp).is_some_and(u8::is_ascii_digit) {
         return None;
@@ -819,7 +834,7 @@ fn get_number(s: &[u8], rp: &mut usize, from: i64, to: i64, n: u32) -> Option<i6
     loop {
         let d = i64::from(s.get(*rp)?.wrapping_sub(b'0'));
         val = val.checked_mul(10)?.checked_add(d)?;
-        *rp += 1;
+        *rp = (*rp).saturating_add(1);
         left = left.saturating_sub(1);
         if !(left > 0
             && val.checked_mul(10).is_some_and(|v| v <= to)
@@ -851,22 +866,22 @@ fn strptime(s: &[u8], fmt: &str, tm: &mut BrokenDown, zone: &localtime::Zone) ->
         };
         if c_isspace(fc) {
             while s.get(rp).is_some_and(|c| c_isspace(*c)) {
-                rp += 1;
+                rp = rp.saturating_add(1);
             }
-            fi += 1;
+            fi = fi.saturating_add(1);
             continue;
         }
         if fc != b'%' {
             if s.get(rp) != Some(&fc) {
                 return None;
             }
-            rp += 1;
-            fi += 1;
+            rp = rp.saturating_add(1);
+            fi = fi.saturating_add(1);
             continue;
         }
-        fi += 1;
+        fi = fi.saturating_add(1);
         let spec = *fmt.get(fi)?;
-        fi += 1;
+        fi = fi.saturating_add(1);
 
         if spec == b's' {
             // Seconds since the epoch. Deliberately *not* `get_number`: the
@@ -880,8 +895,10 @@ fn strptime(s: &[u8], fmt: &str, tm: &mut BrokenDown, zone: &localtime::Zone) ->
                 if !c.is_ascii_digit() {
                     break;
                 }
-                secs = secs.saturating_mul(10).saturating_add(i64::from(c - b'0'));
-                rp += 1;
+                secs = secs
+                    .saturating_mul(10)
+                    .saturating_add(i64::from(c.saturating_sub(b'0')));
+                rp = rp.saturating_add(1);
             }
             *tm = broken_down(zone, secs);
             continue;
@@ -903,7 +920,13 @@ fn strptime(s: &[u8], fmt: &str, tm: &mut BrokenDown, zone: &localtime::Zone) ->
             b'Y' => tm.year = val,
             // "The Year 2000: The Millennium Rollover" paper's rule, which glibc
             // follows: 69..99 is the twentieth century, 00..68 the twenty-first.
-            b'y' => tm.year = if val >= 69 { 1900 + val } else { 2000 + val },
+            b'y' => {
+                tm.year = if val >= 69 {
+                    val.saturating_add(1900)
+                } else {
+                    val.saturating_add(2000)
+                }
+            }
             b'm' => tm.month = val,
             b'd' => tm.day = val,
             b'H' => tm.hour = val,
@@ -1007,12 +1030,12 @@ fn parse_timestamp(zone: &localtime::Zone, reference: i64, t: &[u8]) -> Option<u
         tm.minute = 0;
         tm.hour = 0;
     } else if t == b"yesterday" {
-        tm.day -= 1;
+        tm.day = tm.day.saturating_sub(1);
         tm.second = 0;
         tm.minute = 0;
         tm.hour = 0;
     } else if t == b"tomorrow" {
-        tm.day += 1;
+        tm.day = tm.day.saturating_add(1);
         tm.second = 0;
         tm.minute = 0;
         tm.hour = 0;
@@ -1092,12 +1115,12 @@ fn parse_timestamp(zone: &localtime::Zone, reference: i64, t: &[u8]) -> Option<u
 fn monthname_to_number(name: &[u8]) -> Option<i32> {
     for (i, m) in FULL_MONTH.iter().enumerate() {
         if name.eq_ignore_ascii_case(m.as_bytes()) {
-            return i32::try_from(i + 1).ok();
+            return i32::try_from(i.saturating_add(1)).ok();
         }
     }
     for (i, m) in ABBR_MONTH.iter().enumerate() {
         if name.eq_ignore_ascii_case(m.as_bytes()) {
-            return i32::try_from(i + 1).ok();
+            return i32::try_from(i.saturating_add(1)).ok();
         }
     }
     None
@@ -1171,7 +1194,7 @@ fn mbsalign(out: &mut String, s: &str, width: usize, align: Align, dest_size: us
     let (start, end) = match align {
         // The odd space goes on the left, which is why "February 2024" sits
         // four columns in from a 20-wide month and three from its right edge.
-        Align::Center => (n_spaces / 2 + n_spaces % 2, n_spaces / 2),
+        Align::Center => ((n_spaces / 2).saturating_add(n_spaces % 2), n_spaces / 2),
         Align::Left => (0, n_spaces),
     };
 
@@ -1180,13 +1203,13 @@ fn mbsalign(out: &mut String, s: &str, width: usize, align: Align, dest_size: us
 
     let n = start.min(room);
     pad(out, n);
-    room -= n;
+    room = room.saturating_sub(n);
 
     let n = shown.len().min(room);
     // Unreachable on a non-ASCII cut, as above; declining to write is the safe
     // answer if the assumption is ever broken.
     out.push_str(shown.get(..n).unwrap_or(""));
-    room -= n;
+    room = room.saturating_sub(n);
 
     pad(out, end.min(room));
 }
@@ -1226,7 +1249,10 @@ fn weekdays_init(ctl: &Ctl) -> [&'static str; DAYS_IN_WEEK] {
     let start = usize::try_from(ctl.weekstart).unwrap_or(0);
     let mut wd = [""; DAYS_IN_WEEK];
     for (i, slot) in wd.iter_mut().enumerate() {
-        *slot = ABDAY.get((i + start) % DAYS_IN_WEEK).copied().unwrap_or("");
+        *slot = ABDAY
+            .get(i.saturating_add(start) % DAYS_IN_WEEK)
+            .copied()
+            .unwrap_or("");
     }
     wd
 }
@@ -1248,20 +1274,26 @@ fn headers_init(ctl: &mut Ctl, weekdays: &[&str; DAYS_IN_WEEK]) {
         // Upstream's guard against overrunning a 133-byte buffer. The widest
         // heading row `cal` can build is 4*7 - 1 = 27 bytes, so this never
         // fires; it is kept because dropping it would be a silent divergence.
-        let space_left = DAY_HEADINGS_SIZE - dh.len();
+        let space_left = DAY_HEADINGS_SIZE.saturating_sub(dh.len());
         // Upstream spells this `space_left <= ctl->day_width - 1`; the two are
         // the same test for every `day_width` cal can produce (3 or 4).
         if space_left < ctl.day_width {
             break;
         }
-        mbsalign(&mut dh, name, ctl.day_width - 1, Align::Center, space_left);
+        mbsalign(
+            &mut dh,
+            name,
+            ctl.day_width.saturating_sub(1),
+            Align::Center,
+            space_left,
+        );
     }
     ctl.day_headings = dh;
 
     // The `+ 1` for the space between name and year that upstream's comment
     // promises is not in upstream's code; this reproduces the code.
     for m in FULL_MONTH {
-        if ctl.week_width < m.len() + year_len {
+        if ctl.week_width < m.len().saturating_add(year_len) {
             ctl.header_hint = true;
         }
     }
@@ -1276,22 +1308,22 @@ fn cal_fill_month(month: &mut CalMonth, ctl: &Ctl) {
     } else {
         1
     };
-    let mut month_days = j + month_length(ctl.reform_year, month.month, month.year);
+    let mut month_days = j.saturating_add(month_length(ctl.reform_year, month.month, month.year));
 
     // True when Sunday is not the first day in the output week.
     if ctl.weekstart != 0 {
-        first_week_day -= ctl.weekstart;
+        first_week_day = first_week_day.saturating_sub(ctl.weekstart);
         if first_week_day < 0 {
-            first_week_day = 7 - ctl.weekstart;
+            first_week_day = 7_i32.saturating_sub(ctl.weekstart);
         }
-        month_days += ctl.weekstart - 1;
+        month_days = month_days.saturating_add(ctl.weekstart.saturating_sub(1));
     }
 
     let mut blank_lines = 0i32;
     for slot in &mut month.days {
         if 0 < first_week_day {
             *slot = SPACE;
-            first_week_day -= 1;
+            first_week_day = first_week_day.saturating_sub(1);
             continue;
         }
         if j < month_days {
@@ -1301,20 +1333,20 @@ fn cal_fill_month(month: &mut CalMonth, ctl: &Ctl) {
                 && month.month == REFORMATION_MONTH
                 && (j == 3 || j == 247)
             {
-                j += NUMBER_MISSING_DAYS;
+                j = j.saturating_add(NUMBER_MISSING_DAYS);
             }
             *slot = j;
-            j += 1;
+            j = j.saturating_add(1);
             continue;
         }
         *slot = SPACE;
-        blank_lines += 1;
+        blank_lines = blank_lines.saturating_add(1);
     }
 
     if ctl.weektype != WEEK_NUM_DISABLED {
         let mut weeknum = week_number(1, month.month, month.year, ctl);
         // How many of the six rows hold at least one day.
-        let mut weeklines = 6 - blank_lines / 7;
+        let mut weeklines = 6_i32.saturating_sub(blank_lines / 7);
         for i in 0..WEEK_LINES {
             if 0 < weeklines {
                 if 52 < weeknum {
@@ -1323,17 +1355,21 @@ fn cal_fill_month(month: &mut CalMonth, ctl: &Ctl) {
                     // the previous month; upstream passes it unchanged and so
                     // does this, because `week_number` treats it as a
                     // day-of-year offset and the answer still lands in range.
-                    let d = month.days.get(i * DAYS_IN_WEEK).copied().unwrap_or(SPACE);
+                    let d = month
+                        .days
+                        .get(i.saturating_mul(DAYS_IN_WEEK))
+                        .copied()
+                        .unwrap_or(SPACE);
                     weeknum = week_number(d, month.month, month.year, ctl);
                 }
                 if let Some(w) = month.weeks.get_mut(i) {
                     *w = weeknum;
                 }
-                weeknum += 1;
+                weeknum = weeknum.saturating_add(1);
             } else if let Some(w) = month.weeks.get_mut(i) {
                 *w = SPACE;
             }
-            weeklines -= 1;
+            weeklines = weeklines.saturating_sub(1);
         }
     }
 }
@@ -1369,7 +1405,7 @@ fn cal_output_header(out: &mut String, months: &[CalMonth], ctl: &Ctl) {
             pad(
                 out,
                 if ctl.julian {
-                    ctl.day_width - 1
+                    ctl.day_width.saturating_sub(1)
                 } else {
                     ctl.day_width
                 },
@@ -1392,7 +1428,12 @@ fn highlighted_day(m: &CalMonth, ctl: &Ctl) -> i32 {
     if ctl.julian {
         ctl.req.day
     } else {
-        ctl.req.day + 1 - day_in_year(ctl.reform_year, 1, m.month, m.year)
+        ctl.req.day.saturating_add(1).saturating_sub(day_in_year(
+            ctl.reform_year,
+            1,
+            m.month,
+            m.year,
+        ))
     }
 }
 
@@ -1423,10 +1464,14 @@ fn cal_output_months(out: &mut String, months: &[CalMonth], ctl: &Ctl) {
             } else {
                 // With no week-number column there is no leading space, so the
                 // first day of the row is one column narrower than the rest.
-                ctl.day_width - 1
+                ctl.day_width.saturating_sub(1)
             };
 
-            for d in DAYS_IN_WEEK * week_line..DAYS_IN_WEEK * week_line + DAYS_IN_WEEK {
+            for d in DAYS_IN_WEEK.saturating_mul(week_line)
+                ..DAYS_IN_WEEK
+                    .saturating_mul(week_line)
+                    .saturating_add(DAYS_IN_WEEK)
+            {
                 let day = m.days.get(d).copied().unwrap_or(SPACE);
                 if 0 < day {
                     if reqday == day {
@@ -1443,7 +1488,7 @@ fn cal_output_months(out: &mut String, months: &[CalMonth], ctl: &Ctl) {
                     pad(out, skip);
                 }
                 if skip < ctl.day_width {
-                    skip += 1;
+                    skip = skip.saturating_add(1);
                 }
             }
             if k != last {
@@ -1460,10 +1505,10 @@ fn cal_output_months(out: &mut String, months: &[CalMonth], ctl: &Ctl) {
 /// trailing spaces the horizontal header does not. That is upstream's
 /// behaviour, byte for byte, and is reproduced deliberately.
 fn cal_vert_output_header(out: &mut String, months: &[CalMonth], ctl: &Ctl) {
-    let month_width = ctl.day_width * WEEK_LINES;
+    let month_width = ctl.day_width.saturating_mul(WEEK_LINES);
 
     // Room for the weekday labels down the left edge.
-    pad(out, ctl.day_width + 1);
+    pad(out, ctl.day_width.saturating_add(1));
 
     if ctl.header_hint || ctl.header_year {
         for m in months {
@@ -1471,7 +1516,7 @@ fn cal_vert_output_header(out: &mut String, months: &[CalMonth], ctl: &Ctl) {
         }
         if !ctl.header_year {
             out.push('\n');
-            pad(out, ctl.day_width + 1);
+            pad(out, ctl.day_width.saturating_add(1));
             for m in months {
                 left(
                     out,
@@ -1512,13 +1557,13 @@ fn cal_vert_output_months(
     let last = months.len().saturating_sub(1);
 
     for (i, wd) in weekdays.iter().enumerate() {
-        left(out, wd, ctl.day_width - 1, 0);
+        left(out, wd, ctl.day_width.saturating_sub(1), 0);
         for (k, m) in months.iter().enumerate() {
             let reqday = highlighted_day(m, ctl);
             for week in 0..WEEK_LINES {
                 let day = m
                     .days
-                    .get(i + DAYS_IN_WEEK * week)
+                    .get(i.saturating_add(DAYS_IN_WEEK.saturating_mul(week)))
                     .copied()
                     .unwrap_or(SPACE);
                 if 0 < day {
@@ -1545,7 +1590,7 @@ fn cal_vert_output_months(
         return;
     }
 
-    pad(out, ctl.day_width - 1);
+    pad(out, ctl.day_width.saturating_sub(1));
     for (k, m) in months.iter().enumerate() {
         for week in 0..WEEK_LINES {
             let w = m.weeks.get(week).copied().unwrap_or(SPACE);
@@ -1579,14 +1624,14 @@ fn monthly(out: &mut String, ctl: &Ctl, weekdays: &[&str; DAYS_IN_WEEK]) {
 
     // `cal -3`, `cal -Y --span`: centre the run on the requested month.
     if ctl.span_months {
-        let mut new_month = month - ctl.num_months / 2;
+        let mut new_month = month.saturating_sub(ctl.num_months / 2);
         if new_month < 1 {
-            new_month = -new_month;
-            year -= new_month / DECEMBER + 1;
+            new_month = new_month.saturating_neg();
+            year = year.saturating_sub((new_month / DECEMBER).saturating_add(1));
             if new_month > DECEMBER {
                 new_month %= DECEMBER;
             }
-            month = DECEMBER - new_month;
+            month = DECEMBER.saturating_sub(new_month);
         } else {
             month = new_month;
         }
@@ -1598,8 +1643,12 @@ fn monthly(out: &mut String, ctl: &Ctl, weekdays: &[&str; DAYS_IN_WEEK]) {
         return;
     }
 
-    let rows = (ctl.num_months - 1) / ctl.months_in_row;
-    let remainder = ctl.num_months % ctl.months_in_row;
+    let rows = ctl
+        .num_months
+        .saturating_sub(1)
+        .checked_div(ctl.months_in_row)
+        .unwrap_or(0);
+    let remainder = ctl.num_months.checked_rem(ctl.months_in_row).unwrap_or(0);
     let mut i = 0;
     while i <= rows {
         // Upstream shortens its fixed-size month list in place for the last
@@ -1619,9 +1668,9 @@ fn monthly(out: &mut String, ctl: &Ctl, weekdays: &[&str; DAYS_IN_WEEK]) {
                 month,
                 year,
             };
-            month += 1;
+            month = month.saturating_add(1);
             if DECEMBER < month {
-                year += 1;
+                year = year.saturating_add(1);
                 month = 1;
             }
             cal_fill_month(&mut m, ctl);
@@ -1639,7 +1688,7 @@ fn monthly(out: &mut String, ctl: &Ctl, weekdays: &[&str; DAYS_IN_WEEK]) {
             cal_output_header(out, &ms, ctl);
             cal_output_months(out, &ms, ctl);
         }
-        i += 1;
+        i = i.saturating_add(1);
     }
 }
 
@@ -1649,7 +1698,9 @@ fn yearly(out: &mut String, ctl: &Ctl, weekdays: &[&str; DAYS_IN_WEEK]) {
     // `saturating_sub` where upstream has `(size_t)months_in_row - 1`: at zero
     // months per row that expression is `SIZE_MAX`, which `main` prevents but
     // this function should not depend on.
-    let year_width = in_row * ctl.week_width + in_row.saturating_sub(1) * ctl.gutter_width;
+    let year_width = in_row
+        .saturating_mul(ctl.week_width)
+        .saturating_add(in_row.saturating_sub(1).saturating_mul(ctl.gutter_width));
 
     if ctl.header_year {
         center(out, &format!("{:04}", ctl.req.year), year_width, 0);
@@ -1822,8 +1873,8 @@ impl Exclusive {
 ///
 /// The parser refuses a required option with no value before this is reached,
 /// so the empty fallback stands for a case that cannot arise.
-fn arg_of(value: &Option<OsString>) -> &OsStr {
-    value.as_deref().unwrap_or(OsStr::new(""))
+fn arg_of(value: Option<&OsString>) -> &OsStr {
+    value.map_or(OsStr::new(""), OsString::as_os_str)
 }
 
 /// `illegal week value: year Y doesn't have week W`, raised from two places.
@@ -1919,7 +1970,7 @@ fn build(
                 // A `uint32_t` stored into an `int`. The narrowing is
                 // upstream's, and it is why `-n 4294967295` asks for -1 months
                 // and prints nothing instead of being rejected.
-                let n = strtou32_or_err(arg_of(&value), "invalid month argument")?;
+                let n = strtou32_or_err(arg_of(value.as_ref()), "invalid month argument")?;
                 ctl.num_months = i32::from_ne_bytes(n.to_ne_bytes());
             }
             Code::Span => ctl.span_months = true,
@@ -1940,11 +1991,11 @@ fn build(
                     ctl.colormode = colormode_or_err(v)?;
                 }
             }
-            Code::Reform => ctl.reform_year = parse_reform_year(arg_of(&value))?,
+            Code::Reform => ctl.reform_year = parse_reform_year(arg_of(value.as_ref()))?,
             Code::Iso => ctl.reform_year = ISO_REFORM,
             Code::Vertical => ctl.vertical = true,
             Code::Columns => {
-                let arg = arg_of(&value);
+                let arg = arg_of(value.as_ref());
                 cols = if os_bytes(arg).as_ref() == b"auto".as_slice() {
                     COLUMNS_AUTO
                 } else {
@@ -1969,13 +2020,13 @@ fn build(
         } else {
             WEEK_NUM_US
         };
-        ctl.week_width = ctl.day_width * DAYS_IN_WEEK + 3;
+        ctl.week_width = ctl.day_width.saturating_mul(DAYS_IN_WEEK).saturating_add(3);
     } else {
-        ctl.week_width = ctl.day_width * DAYS_IN_WEEK;
+        ctl.week_width = ctl.day_width.saturating_mul(DAYS_IN_WEEK);
     }
     // `day_width` counts the space *between* days; there is none before the
     // first, so the row is one column narrower than seven of them.
-    ctl.week_width -= 1;
+    ctl.week_width = ctl.week_width.saturating_sub(1);
 
     let sole = match operands.as_slice() {
         [word] if !isdigit_string(&os_bytes(word)) => Some(*word),
@@ -2070,7 +2121,7 @@ fn build(
             // From here on `req.day` is a day of the *year*.
             ctl.req.day = day_in_year(ctl.reform_year, ctl.req.day, ctl.req.month, ctl.req.year);
         } else if local.year == i64::from(ctl.req.year) {
-            ctl.req.day = local_yday + 1;
+            ctl.req.day = local_yday.saturating_add(1);
         }
         if ctl.req.month == 0 && ctl.req.week == 0 {
             ctl.req.month = local_month;
@@ -2080,7 +2131,7 @@ fn build(
             }
         }
     } else {
-        ctl.req.day = local_yday + 1;
+        ctl.req.day = local_yday.saturating_add(1);
         ctl.req.year = i32::try_from(local.year).unwrap_or(SMALLEST_YEAR);
         if ctl.req.month == 0 {
             ctl.req.month = local_month;
@@ -2098,15 +2149,15 @@ fn build(
             if yday <= len {
                 break;
             }
-            yday -= len;
-            m += 1;
+            yday = yday.saturating_sub(len);
+            m = m.saturating_add(1);
         }
         // Some years (2010 in ISO mode) start with a remnant of the previous
         // year's week 53 yet end inside week 52. Asking for 53 then means that
         // remnant, and nothing else.
         if DECEMBER < m
             && ctl.weektype & WEEK_NUM_ISO != 0
-            && ctl.req.week != week_number(31, DECEMBER, ctl.req.year - 1, &ctl)
+            && ctl.req.week != week_number(31, DECEMBER, ctl.req.year.saturating_sub(1), &ctl)
         {
             return Err(no_such_week(&ctl));
         }
@@ -2160,8 +2211,12 @@ fn build(
             };
             let w = term.width.max(mw);
             let gutter = i32::try_from(ctl.gutter_width).unwrap_or(0);
-            let extra = (w / mw - 1) * gutter;
-            let new_n = (w - extra) / mw;
+            let extra = w
+                .checked_div(mw)
+                .unwrap_or(0)
+                .saturating_sub(1)
+                .saturating_mul(gutter);
+            let new_n = w.saturating_sub(extra).checked_div(mw).unwrap_or(0);
 
             match cols {
                 // The default: three months per row unless the terminal is too

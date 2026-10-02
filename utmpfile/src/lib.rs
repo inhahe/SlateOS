@@ -279,15 +279,6 @@ pub fn parse(data: &[u8]) -> Vec<Record> {
     records
 }
 
-/// The number of records describing a user logged in now.
-///
-/// `uptime` wants only this, and computing it here keeps the record layout in
-/// one place rather than two.
-#[must_use]
-pub fn count_user_sessions(data: &[u8]) -> usize {
-    parse(data).iter().filter(|r| r.is_user_session()).count()
-}
-
 #[cfg(test)]
 // The fixture builder writes fields at fixed offsets into a fixed-size array,
 // so it indexes and adds constants throughout. CLAUDE.md allows these two in
@@ -383,14 +374,13 @@ mod tests {
         data.extend(record(USER_PROCESS, 3, b"tty3", b"", b"c", b"", 30));
         let got = parse(&data);
         assert_eq!(got.len(), 3);
-        assert_eq!(count_user_sessions(&data), 2);
+        assert_eq!(got.iter().filter(|r| r.is_user_session()).count(), 2);
     }
 
     #[test]
     fn an_empty_or_short_file_yields_no_records() {
         assert!(parse(b"").is_empty());
         assert!(parse(&[0u8; RECORD_SIZE - 1]).is_empty());
-        assert_eq!(count_user_sessions(b""), 0);
     }
 
     #[test]
@@ -429,7 +419,6 @@ mod tests {
         let got = parse(&data);
         assert_eq!(got.len(), 1, "a dead record is still a record");
         assert!(!got[0].is_user_session());
-        assert_eq!(count_user_sessions(&data), 0);
     }
 
     #[test]

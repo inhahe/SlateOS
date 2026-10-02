@@ -88,6 +88,15 @@ ziparchive = { path = "../ziparchive" }
 # `default-features = false` here would not have stopped another crate in the
 # kernel's graph from switching `std` back on.
 ere = { path = "../userspace/ere" }
+# Vetted password hashing and authenticated encryption -- Argon2id and
+# XChaCha20-Poly1305, the vendored RustCrypto crates behind `seal`'s one API
+# (design-decisions §539: primitives are ported, not written here). The
+# kernel's disk-encryption key slots derive a key from each passphrase and
+# seal the master key with it (`fs::diskencrypt`, §978). no_std + alloc, and
+# safe in the kernel: their SIMD paths are chosen by `cpufeatures`, which
+# answers "no" on a `target_os = "none"` target, so the soft-float build never
+# touches a vector register.
+seal = { path = "../rustcrypto/seal" }
 
 # build.rs computes the Ada prebuilt-object stamp and had a *third* copy of
 # SHA-256, hand-written again. It runs on the host, so it can take the crate

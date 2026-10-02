@@ -1820,6 +1820,7 @@ dependencies = [
  "netproto",
  "netring",
  "planecompose",
+ "seal",
  "sha2",
  "spin",
  "tzrules",

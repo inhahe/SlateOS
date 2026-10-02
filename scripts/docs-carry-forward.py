@@ -239,7 +239,9 @@ def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     ap.add_argument("--dry-run", action="store_true")
     ap.add_argument("--stray", action="store_true")
-    ap.add_argument("--lane", default="", help="names the grandfather file (default: this worktree's lane)")
+    ap.add_argument("--lane", default="",
+                    help="this lane's letter, which names the grandfather file (default: this "
+                         "worktree's lane; required where which-lane.py does not know the worktree)")
     args = ap.parse_args(argv)
     root = D.repo_root()
     gitdir = D.git_dir(root)
@@ -267,6 +269,18 @@ def main(argv: list[str] | None = None) -> int:
         print("docs-carry-forward: no merge in progress. Run it after `git merge origin/main` stops on "
               "conflicts in the old documents (or use --stray).", file=sys.stderr)
         return 2
+    # The lane names the grandfather file this writes, so it is settled before
+    # anything is read or written. There is no fallback: two lanes carrying
+    # forward from worktrees which-lane.py does not know (the -wip ones) both
+    # wrote `docs-baseline-carried-unknown.json` until 2026-10-02, and would
+    # have collided on main.
+    lane = (args.lane or running_lane(root) or "").lower()
+    if lane not in LANE_LETTERS:
+        what = f"--lane {args.lane!r} is not a lane letter (a-f)" if args.lane else \
+            "cannot tell which lane this worktree belongs to"
+        print(f"docs-carry-forward: {what}; run again with --lane <a-f>. Nothing was written.",
+              file=sys.stderr)
+        return 2
     theirs = git(root, "rev-parse", "MERGE_HEAD").stdout.strip()
     ours = git(root, "rev-parse", "HEAD").stdout.strip()
     base = git(root, "merge-base", ours, theirs).stdout.strip()
@@ -288,7 +302,6 @@ def main(argv: list[str] | None = None) -> int:
     # queue's rules) is merged like any entry above: a lane that opened a new band
     # on its branch (lane A opened §1500 on 2026-10-01) must not lose it, or every
     # decision it numbered there reads as outside any band.
-    lane = (args.lane or running_lane(root) or "unknown").lower()
     grandfather(root, plan, base, ours, lane)
     if not args.dry_run:
         apply(root, plan, their_signposts)
@@ -299,6 +312,9 @@ def main(argv: list[str] | None = None) -> int:
 # Scripts the cutover deleted. A lane that changed one meanwhile gets a
 # modify/delete conflict; the replacement is check-docs.py, so the conflict is
 # resolved as deleted and the lane is told its change needs porting.
+#: The lanes a grandfather file may be named for.
+LANE_LETTERS = frozenset("abcdef")
+
 RETIRED = (
     "scripts/check-known-issues-index.py", "scripts/check-open-questions.py",
     "scripts/check-design-decisions-bands.py", "scripts/test-check-design-decisions-bands.py",

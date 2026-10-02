@@ -458,8 +458,10 @@ def carry_forward_every_kind_of_edit() -> None:
         commit(root, "lane edits the old files")
         merge = run(root, "git", "merge", "--no-edit", "main", check_rc=False)
         check("merging the cutover conflicts in the old file", merge.returncode != 0, True)
-        r = run(root, sys.executable, script("docs-carry-forward.py"), check_rc=False)
+        r = run(root, sys.executable, script("docs-carry-forward.py"), "--lane", "b", check_rc=False)
         check("the carry-forward reports no conflict", r.returncode, 0)
+        check("...and never writes the shared fallback name",
+              (root / "scripts/docs-baseline-carried-unknown.json").exists(), False)
         shared = (root / "known-issues/TD-B-SHARED.md").read_text(encoding="utf-8")
         check("a changed entry carries the lane's edit", "edited by the lane" in shared, True)
         check("a new entry gets its own file", (root / "known-issues/TD-B-BRAND-NEW.md").is_file(), True)
@@ -484,7 +486,7 @@ def carry_forward_stops_on_a_real_conflict() -> None:
         write(root, D.ISSUES_MONO, KI.replace("body one\n", "body one\n\nthe lane added a different line\n"))
         commit(root, "lane edits the entry main also edited")
         run(root, "git", "merge", "--no-edit", "main", check_rc=False)
-        r = run(root, sys.executable, script("docs-carry-forward.py"), check_rc=False)
+        r = run(root, sys.executable, script("docs-carry-forward.py"), "--lane", "a", check_rc=False)
         check("a two-sided edit of one entry is reported, not resolved", r.returncode, 1)
         text = (root / "known-issues/TD-A-OPEN-ONE.md").read_text(encoding="utf-8")
         check("...with conflict markers holding both sides",
@@ -501,6 +503,28 @@ def baseline_keys_survive_dots_in_ids() -> None:
     cd = srcload.load(str(HERE / "check-docs.py"), "check_docs")
     check("a dotted id keeps its dots", cd._entry_key("known-issues/B-CP.RS.md"), "b-cp.rs")
     check("...whether given a path or a key", cd._entry_key("b-cp.rs"), "b-cp.rs")
+
+
+@case
+def carry_forward_will_not_guess_its_lane() -> None:
+    """A worktree which-lane.py does not know, and no --lane: refused, and nothing
+    written -- not a shared `docs-baseline-carried-unknown.json` two such lanes
+    would both write (os-81, 2026-10-02). A --lane that is no lane is refused too."""
+    with tempfile.TemporaryDirectory() as t:
+        root = lane_and_cutover(Path(t))
+        write(root, D.ISSUES_MONO, KI.replace("first copy", "first copy, edited by the lane"))
+        commit(root, "lane edits the old file")
+        run(root, "git", "merge", "--no-edit", "main", check_rc=False)
+        before = run(root, "git", "status", "--porcelain").stdout
+        r = run(root, sys.executable, script("docs-carry-forward.py"), check_rc=False)
+        check("no lane and no --lane is refused", r.returncode, 2)
+        check("...saying how to give one", "--lane" in r.stderr, True)
+        check("...having written nothing",
+              (run(root, "git", "status", "--porcelain").stdout == before,
+               any((root / "scripts").glob("docs-baseline-carried-*.json"))), (True, False))
+        r = run(root, sys.executable, script("docs-carry-forward.py"), "--lane", "unknown",
+                check_rc=False)
+        check("a --lane that is no lane letter is refused", r.returncode, 2)
 
 
 @case

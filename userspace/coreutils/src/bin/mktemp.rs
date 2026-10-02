@@ -35,6 +35,7 @@
 
 use coreutils::diag;
 use coreutils::getopt::{self, Opt, Program, Takes};
+use coreutils::pathname::{file_name_concat, last_component};
 use coreutils::quote::{os_bytes, quote};
 use coreutils::stdfd::{self, Stream};
 use std::ffi::OsString;
@@ -253,62 +254,6 @@ fn plan(set: &Settings, env_tmpdir: Option<&[u8]>) -> Result<Plan, String> {
         x_count,
         suffix_len,
     })
-}
-
-/// gnulib's `last_component`: what follows the last slash that is followed
-/// by something, leading slashes skipped -- the name's own last component,
-/// trailing slashes included.
-fn last_component(name: &[u8]) -> &[u8] {
-    let mut base = name.iter().position(|&b| b != b'/').unwrap_or(name.len());
-    let mut saw_slash = false;
-    let mut i = base;
-    while let Some(&b) = name.get(i) {
-        if b == b'/' {
-            saw_slash = true;
-        } else if saw_slash {
-            base = i;
-            saw_slash = false;
-        }
-        i = i.saturating_add(1);
-    }
-    name.get(base..).unwrap_or_default()
-}
-
-/// gnulib's `base_len`: the length of a last component without its trailing
-/// slashes (but a name of slashes only keeps one).
-fn base_len(name: &[u8]) -> usize {
-    let mut len = name.len();
-    while len > 1 && name.get(len.saturating_sub(1)) == Some(&b'/') {
-        len = len.saturating_sub(1);
-    }
-    len
-}
-
-/// gnulib's `file_name_concat (dir, base, NULL)`: `dir` without its trailing
-/// slashes, a slash, and `base` -- no slash added when either side already
-/// has one, and none taken from a root `dir`, whose `base` loses its own
-/// leading slash instead.
-fn file_name_concat(dir: &[u8], base: &[u8]) -> Vec<u8> {
-    let dirbase = last_component(dir);
-    let dirbase_start = dir.len().saturating_sub(dirbase.len());
-    let dirbaselen = base_len(dirbase);
-    let dirlen = dirbase_start.saturating_add(dirbaselen);
-    let mut base = base;
-    let mut sep = false;
-    if dirbaselen > 0 {
-        let dir_ends_slash = dirlen > 0 && dir.get(dirlen.saturating_sub(1)) == Some(&b'/');
-        if !dir_ends_slash && base.first() != Some(&b'/') {
-            sep = true;
-        }
-    } else if base.first() == Some(&b'/') {
-        base = base.get(1..).unwrap_or_default();
-    }
-    let mut out = dir.get(..dirlen).unwrap_or(dir).to_vec();
-    if sep {
-        out.push(b'/');
-    }
-    out.extend_from_slice(base);
-    out
 }
 
 /// GNU's `--help`, minus the ancillary block of URLs.
@@ -600,18 +545,6 @@ mod tests {
     }
 
     #[test]
-    fn file_name_concat_is_gnulibs() {
-        assert_eq!(file_name_concat(b"/tmp", b"x"), b"/tmp/x");
-        assert_eq!(file_name_concat(b"/tmp/", b"x"), b"/tmp/x");
-        assert_eq!(file_name_concat(b"/tmp//", b"x"), b"/tmp/x");
-        assert_eq!(file_name_concat(b"/", b"x"), b"/x");
-        assert_eq!(file_name_concat(b"/", b"/x"), b"/x");
-        assert_eq!(file_name_concat(b".", b"x"), b"./x");
-        assert_eq!(file_name_concat(b"a//b/", b"x"), b"a//b/x");
-        assert_eq!(file_name_concat(b"a", b"/x"), b"a/x");
-    }
-
-    #[test]
     fn too_many_templates_refers_to_help() {
         let args: Vec<OsString> = ["a", "b"].iter().map(OsString::from).collect();
         let e = parse_args(&args).unwrap_err();
@@ -619,7 +552,10 @@ mod tests {
         assert!(e.referral.is_some());
     }
 
+    /// Unix only: the draws come from `getrandom`, which the Windows build
+    /// host's `randrange` does not offer, so there `next` is `Unavailable`.
     #[test]
+    #[cfg(unix)]
     fn digits_are_from_the_62() {
         let mut d = Digits::new();
         for _ in 0..100 {

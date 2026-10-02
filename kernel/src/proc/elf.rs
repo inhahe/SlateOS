@@ -249,6 +249,18 @@ pub struct ElfFile<'a> {
 }
 
 impl<'a> ElfFile<'a> {
+    /// The program-header table as the file stores it: `e_phnum` entries of
+    /// `e_phentsize` bytes at `e_phoff`. `None` if it runs past the file.
+    /// What a copy of the table is made from when no loaded segment holds it
+    /// (`spawn::place_phdr_table`).
+    #[must_use]
+    pub fn phdr_table_bytes(&self) -> Option<&'a [u8]> {
+        let start = usize::try_from(self.header.e_phoff).ok()?;
+        let len =
+            usize::from(self.header.e_phentsize).checked_mul(usize::from(self.header.e_phnum))?;
+        self.data.get(start..start.checked_add(len)?)
+    }
+
     /// Parse an ELF64 binary from a byte slice.
     ///
     /// Validates:
@@ -1985,6 +1997,196 @@ pub fn build_linux_write_byte_exit_elf(byte: u8) -> alloc::vec::Vec<u8> {
     code.extend_from_slice(&[0xBF, byte, 0x00, 0x00, 0x00]); // mov edi, byte
     code.extend_from_slice(&[0xB8, 0x3C, 0x00, 0x00, 0x00, 0x0F, 0x05]); // mov eax,60; syscall
     code.push(0xCC); // int3
+
+    let code_len = code.len();
+    let file_size = code_offset as usize + code_len;
+    let mut buf = vec![0u8; file_size];
+
+    buf[0] = 0x7F;
+    buf[1] = b'E';
+    buf[2] = b'L';
+    buf[3] = b'F';
+    buf[EI_CLASS] = ELFCLASS64;
+    buf[EI_DATA] = ELFDATA2LSB;
+    buf[EI_VERSION] = EV_CURRENT;
+    buf[EI_OSABI] = ELFOSABI_GNU;
+    write_u16(&mut buf, 16, ET_EXEC);
+    write_u16(&mut buf, 18, EM_X86_64);
+    write_u32(&mut buf, 20, u32::from(EV_CURRENT));
+    write_u64(&mut buf, 24, load_vaddr); // e_entry
+    write_u64(&mut buf, 32, phdr_offset); // e_phoff
+    write_u64(&mut buf, 40, 0);
+    write_u32(&mut buf, 48, 0);
+    write_u16(&mut buf, 52, ELF64_EHDR_SIZE as u16);
+    write_u16(&mut buf, 54, ELF64_PHDR_SIZE as u16);
+    write_u16(&mut buf, 56, 1);
+    write_u16(&mut buf, 58, ELF64_SHDR_SIZE as u16);
+    write_u16(&mut buf, 60, 0);
+    write_u16(&mut buf, 62, 0);
+
+    let ph = phdr_offset as usize;
+    write_u32(&mut buf, ph, PT_LOAD);
+    write_u32(&mut buf, ph + 4, PF_R | PF_X);
+    write_u64(&mut buf, ph + 8, code_offset);
+    write_u64(&mut buf, ph + 16, load_vaddr);
+    write_u64(&mut buf, ph + 24, 0);
+    write_u64(&mut buf, ph + 32, code_len as u64);
+    write_u64(&mut buf, ph + 40, code_len as u64);
+    write_u64(&mut buf, ph + 48, 0x1000);
+
+    buf[code_offset as usize..file_size].copy_from_slice(&code);
+    buf
+}
+
+/// Build a **Linux-ABI** `ET_EXEC` program that drives the SlateOS channel
+/// descriptors (`slate_channel_create`, number 1000) from ring 3:
+///
+/// ```text
+///   slate_channel_create(&fds, 0)      ; 0, else exit 0xC1
+///   write(fds[0], "hi!", 3)            ; 3, else exit 0xC2
+///   read(fds[1], buf, 16)              ; 3 (one message), else 0xC3
+///                                      ; the bytes "hi!", else 0xC4
+///   fork()                             ; < 0: exit 0xC5
+///   child:  write(fds[0], "c", 1); exit(0)
+///   parent: wait4(-1, NULL, 0, NULL)
+///           read(fds[1], buf, 16)      ; 1 and 'c', else exit 0xC6
+///           close(fds[0])
+///           read(fds[1], buf, 16)      ; 0 (end of file), else exit 0xC7
+///           exit(0x5C)
+/// ```
+///
+/// A clean `exit(0x5C)` proves, from a real Linux-ABI process:
+/// - the call made two descriptors and wrote their numbers back;
+/// - one `write` was one message, read back whole, by number of bytes;
+/// - `fork` shared the channel ends: the child's write through its
+///   inherited `fds[0]` reached the parent's `fds[1]`;
+/// - the end closed only with its last holder: the child's exit dropped one
+///   holder of each end, the parent's `close` the other, and only then did
+///   the read see end of file.
+///
+/// Tagged `ELFOSABI_GNU` for the SysV stack + Linux ABI.
+#[must_use]
+#[allow(
+    clippy::indexing_slicing,
+    clippy::arithmetic_side_effects,
+    clippy::cast_possible_truncation,
+    clippy::cast_possible_wrap
+)]
+pub fn build_linux_slate_channel_test_elf() -> alloc::vec::Vec<u8> {
+    use alloc::vec;
+    /// `jnz rel32`'s second opcode byte.
+    const JNZ: u8 = 0x85;
+    /// `js rel32`'s second opcode byte.
+    const JS: u8 = 0x88;
+
+    let phdr_offset: u64 = 64;
+    let code_offset: u64 = 120;
+    let load_vaddr: u64 = 0x0000_0040_0000_0000;
+
+    let mut code: alloc::vec::Vec<u8> = alloc::vec::Vec::new();
+    // (offset of a rel32 to patch, the failure sentinel it jumps to)
+    let mut fail_jumps: alloc::vec::Vec<(usize, u8)> = alloc::vec::Vec::new();
+    // `jcc rel32` (0F op) to the failure exit for `sentinel`.
+    let jcc_fail = |code: &mut alloc::vec::Vec<u8>,
+                    fails: &mut alloc::vec::Vec<(usize, u8)>,
+                    op: u8,
+                    sentinel: u8| {
+        code.extend_from_slice(&[0x0F, op, 0, 0, 0, 0]);
+        fails.push((code.len() - 4, sentinel));
+    };
+
+    code.extend_from_slice(&[0x48, 0x83, 0xEC, 0x40]); // sub rsp, 64
+    // slate_channel_create(&fds, 0): fds at [rsp], [rsp+4]
+    code.extend_from_slice(&[0x48, 0x89, 0xE7]); // mov rdi, rsp
+    code.extend_from_slice(&[0x31, 0xF6]); // xor esi, esi
+    code.extend_from_slice(&[0xB8, 0xE8, 0x03, 0x00, 0x00, 0x0F, 0x05]); // mov eax,1000; syscall
+    code.extend_from_slice(&[0x48, 0x85, 0xC0]); // test rax, rax
+    jcc_fail(&mut code, &mut fail_jumps, JNZ, 0xC1);
+    // "hi!" at [rsp+16]
+    code.extend_from_slice(&[0xC7, 0x44, 0x24, 0x10, 0x68, 0x69, 0x21, 0x00]);
+    // write(fds[0], rsp+16, 3)
+    code.extend_from_slice(&[0x8B, 0x3C, 0x24]); // mov edi, [rsp]
+    code.extend_from_slice(&[0x48, 0x8D, 0x74, 0x24, 0x10]); // lea rsi, [rsp+16]
+    code.extend_from_slice(&[0xBA, 0x03, 0x00, 0x00, 0x00]); // mov edx, 3
+    code.extend_from_slice(&[0xB8, 0x01, 0x00, 0x00, 0x00, 0x0F, 0x05]); // mov eax,1; syscall
+    code.extend_from_slice(&[0x48, 0x83, 0xF8, 0x03]); // cmp rax, 3
+    jcc_fail(&mut code, &mut fail_jumps, JNZ, 0xC2);
+    // read(fds[1], rsp+32, 16)
+    code.extend_from_slice(&[0x8B, 0x7C, 0x24, 0x04]); // mov edi, [rsp+4]
+    code.extend_from_slice(&[0x48, 0x8D, 0x74, 0x24, 0x20]); // lea rsi, [rsp+32]
+    code.extend_from_slice(&[0xBA, 0x10, 0x00, 0x00, 0x00]); // mov edx, 16
+    code.extend_from_slice(&[0x31, 0xC0, 0x0F, 0x05]); // xor eax, eax; syscall
+    code.extend_from_slice(&[0x48, 0x83, 0xF8, 0x03]); // cmp rax, 3
+    jcc_fail(&mut code, &mut fail_jumps, JNZ, 0xC3);
+    code.extend_from_slice(&[0x8B, 0x44, 0x24, 0x20]); // mov eax, [rsp+32]
+    code.extend_from_slice(&[0x25, 0xFF, 0xFF, 0xFF, 0x00]); // and eax, 0x00FFFFFF
+    code.extend_from_slice(&[0x3D, 0x68, 0x69, 0x21, 0x00]); // cmp eax, "hi!"
+    jcc_fail(&mut code, &mut fail_jumps, JNZ, 0xC4);
+    // fork
+    code.extend_from_slice(&[0xB8, 0x39, 0x00, 0x00, 0x00, 0x0F, 0x05]); // mov eax,57; syscall
+    code.extend_from_slice(&[0x48, 0x85, 0xC0]); // test rax, rax
+    jcc_fail(&mut code, &mut fail_jumps, JS, 0xC5);
+    code.extend_from_slice(&[0x0F, 0x84, 0, 0, 0, 0]); // jz child
+    let jz_child = code.len() - 4;
+    // parent: wait4(-1, NULL, 0, NULL)
+    code.extend_from_slice(&[0x48, 0xC7, 0xC7, 0xFF, 0xFF, 0xFF, 0xFF]); // mov rdi, -1
+    code.extend_from_slice(&[0x31, 0xF6]); // xor esi, esi
+    code.extend_from_slice(&[0x31, 0xD2]); // xor edx, edx
+    code.extend_from_slice(&[0x45, 0x31, 0xD2]); // xor r10d, r10d
+    code.extend_from_slice(&[0xB8, 0x3D, 0x00, 0x00, 0x00, 0x0F, 0x05]); // mov eax,61; syscall
+    // the child's message: read(fds[1], rsp+32, 16) == 1, 'c'
+    code.extend_from_slice(&[0x8B, 0x7C, 0x24, 0x04]);
+    code.extend_from_slice(&[0x48, 0x8D, 0x74, 0x24, 0x20]);
+    code.extend_from_slice(&[0xBA, 0x10, 0x00, 0x00, 0x00]);
+    code.extend_from_slice(&[0x31, 0xC0, 0x0F, 0x05]);
+    code.extend_from_slice(&[0x48, 0x83, 0xF8, 0x01]); // cmp rax, 1
+    jcc_fail(&mut code, &mut fail_jumps, JNZ, 0xC6);
+    code.extend_from_slice(&[0x80, 0x7C, 0x24, 0x20, 0x63]); // cmp byte [rsp+32], 'c'
+    jcc_fail(&mut code, &mut fail_jumps, JNZ, 0xC6);
+    // close(fds[0])
+    code.extend_from_slice(&[0x8B, 0x3C, 0x24]); // mov edi, [rsp]
+    code.extend_from_slice(&[0xB8, 0x03, 0x00, 0x00, 0x00, 0x0F, 0x05]); // mov eax,3; syscall
+    // read(fds[1], ...) == 0: every holder of the write end is gone
+    code.extend_from_slice(&[0x8B, 0x7C, 0x24, 0x04]);
+    code.extend_from_slice(&[0x48, 0x8D, 0x74, 0x24, 0x20]);
+    code.extend_from_slice(&[0xBA, 0x10, 0x00, 0x00, 0x00]);
+    code.extend_from_slice(&[0x31, 0xC0, 0x0F, 0x05]);
+    code.extend_from_slice(&[0x48, 0x85, 0xC0]); // test rax, rax
+    jcc_fail(&mut code, &mut fail_jumps, JNZ, 0xC7);
+    // exit(0x5C)
+    code.extend_from_slice(&[0xBF, 0x5C, 0x00, 0x00, 0x00]);
+    code.extend_from_slice(&[0xB8, 0x3C, 0x00, 0x00, 0x00, 0x0F, 0x05]);
+
+    // child: write(fds[0], "c", 1); exit(0)
+    let child = code.len();
+    code.extend_from_slice(&[0xC6, 0x44, 0x24, 0x10, 0x63]); // mov byte [rsp+16], 'c'
+    code.extend_from_slice(&[0x8B, 0x3C, 0x24]); // mov edi, [rsp]
+    code.extend_from_slice(&[0x48, 0x8D, 0x74, 0x24, 0x10]); // lea rsi, [rsp+16]
+    code.extend_from_slice(&[0xBA, 0x01, 0x00, 0x00, 0x00]); // mov edx, 1
+    code.extend_from_slice(&[0xB8, 0x01, 0x00, 0x00, 0x00, 0x0F, 0x05]); // write
+    code.extend_from_slice(&[0x31, 0xFF]); // xor edi, edi
+    code.extend_from_slice(&[0xB8, 0x3C, 0x00, 0x00, 0x00, 0x0F, 0x05]); // exit(0)
+
+    // One failure exit per sentinel.
+    let mut fail_at: alloc::vec::Vec<(u8, usize)> = alloc::vec::Vec::new();
+    for sentinel in [0xC1u8, 0xC2, 0xC3, 0xC4, 0xC5, 0xC6, 0xC7] {
+        fail_at.push((sentinel, code.len()));
+        code.extend_from_slice(&[0xBF, sentinel, 0x00, 0x00, 0x00]); // mov edi, sentinel
+        code.extend_from_slice(&[0xB8, 0x3C, 0x00, 0x00, 0x00, 0x0F, 0x05]); // exit
+    }
+    code.push(0xCC); // int3
+
+    // Patch the rel32s: displacement from the byte after the field.
+    let patch = |code: &mut alloc::vec::Vec<u8>, at: usize, target: usize| {
+        let disp = (target as i64 - (at as i64 + 4)) as i32;
+        code[at..at + 4].copy_from_slice(&disp.to_le_bytes());
+    };
+    patch(&mut code, jz_child, child);
+    for (at, sentinel) in fail_jumps {
+        if let Some(&(_, target)) = fail_at.iter().find(|(s, _)| *s == sentinel) {
+            patch(&mut code, at, target);
+        }
+    }
 
     let code_len = code.len();
     let file_size = code_offset as usize + code_len;

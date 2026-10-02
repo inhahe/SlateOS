@@ -8874,10 +8874,14 @@ if [ "$NO_STAGE" -eq 0 ] && [ "$STAGED_KERNEL" -ot "$KERNEL_BIN" ]; then
     exit 1
 fi
 
-cp "$PROJECT_ROOT/limine.conf" "$ESP_DIR/limine.conf"
-
-# Kernel cmdline injection (a Limine `cmdline:` line on the single boot entry;
-# indented so it associates with that entry).
+# Kernel cmdline injection: a Limine `cmdline:` line in the *first* boot entry
+# -- the one Limine starts when its timeout runs out -- placed on the line after
+# that entry's `kernel_path:` and indented so it belongs to the entry. This
+# appended the line to the end of the file while the file had one entry; since
+# limine.conf gained a second (the recovery entry), the end of the file is the
+# recovery entry, so appending would leave the entry actually booted without
+# the deadline below. The first entry may not carry a `cmdline:` of its own:
+# Limine would see two, and which one wins is not something to depend on.
 #
 # Always passed: `sched.boot_deadline_ms`, this harness's own boot timeout. The
 # kernel's boot-window liveness watchdog derives its wall-clock deadline from it
@@ -8896,7 +8900,37 @@ KERNEL_CMDLINE="sched.boot_deadline_ms=$((TIMEOUT * 1000))"
 if [ -n "${SLATE_CMDLINE:-}" ]; then
     KERNEL_CMDLINE="$KERNEL_CMDLINE $SLATE_CMDLINE"
 fi
-printf '    cmdline: %s\n' "$KERNEL_CMDLINE" >> "$ESP_DIR/limine.conf"
+# ENVIRON rather than `awk -v`, which would read backslash escapes in an
+# SLATE_CMDLINE value as escapes.
+limine_rc=0
+KERNEL_CMDLINE_LINE="    cmdline: $KERNEL_CMDLINE" awk '
+    substr($0, 1, 1) == "/" { entry++ }
+    entry == 1 && $1 == "cmdline:" { clash = 1 }
+    { print }
+    entry == 1 && !done && $1 == "kernel_path:" {
+        print ENVIRON["KERNEL_CMDLINE_LINE"]
+        done = 1
+    }
+    END { exit clash ? 3 : (done ? 0 : 2) }
+' "$PROJECT_ROOT/limine.conf" > "$ESP_DIR/limine.conf" || limine_rc=$?
+case "$limine_rc" in
+    0) ;;
+    2)
+        echo "ERROR: limine.conf's first entry has no kernel_path: line to put" >&2
+        echo "       the kernel command line after." >&2
+        exit 1
+        ;;
+    3)
+        echo "ERROR: limine.conf's first entry has a cmdline: of its own, and" >&2
+        echo "       this harness would give it a second. Put its words in" >&2
+        echo "       SLATE_CMDLINE, or merge them into KERNEL_CMDLINE here." >&2
+        exit 1
+        ;;
+    *)
+        echo "ERROR: could not write $ESP_DIR/limine.conf (awk exit $limine_rc)." >&2
+        exit 1
+        ;;
+esac
 echo "=== Kernel cmdline: $KERNEL_CMDLINE ==="
 
 # Step 2b: Build the real USB image, if asked for.

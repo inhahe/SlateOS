@@ -145,6 +145,12 @@ struct ServiceEntry {
     /// Whether the service has been unregistered (closed).
     closed: bool,
 
+    /// How many holders the listener has: 1 when registered, one more for
+    /// each [`dup_listener`] -- a Linux-ABI listener descriptor inherited
+    /// across `fork`. [`unregister`] drops one, and the name goes with the
+    /// last, as a listening socket closes with its last descriptor.
+    refs: u32,
+
     /// Namespace in which this service was registered.
     ///
     /// Services in the root namespace (0) are visible to all processes.
@@ -283,6 +289,7 @@ pub fn register(name: &[u8]) -> KernelResult<ServiceListenerHandle> {
         accept_waiter: None,
         ready_waiters: WaiterSet::new(),
         closed: false,
+        refs: 1,
         namespace_id: ns_id,
         provider_pid,
     };
@@ -363,6 +370,9 @@ pub fn connect(name: &[u8]) -> KernelResult<ChannelHandle> {
 
     // Create a fresh channel pair: client_ep ↔ server_ep.
     let (client_ep, server_ep) = channel::create();
+    // Which service it is a connection to, for the key check
+    // (`SYS_CHANNEL_PEER_HAS_KEY`). A fresh channel has none, so this holds.
+    let _ = channel::set_service_key(client_ep, key_id(name));
 
     // Snapshot the connecting process onto its own end *before* the server
     // end becomes reachable.  Both queueing paths below (`entry.pending`
@@ -699,10 +709,51 @@ pub fn provider_pid(name: &[u8]) -> Option<u64> {
     Some(entry.provider_pid)
 }
 
-/// Unregister a service and close its listener.
+/// The key id of the service named `name`: the `resource_id` of a
+/// `(ResourceType::Service, key_id(name), Rights::READ)` capability -- the
+/// "system-issued key" a program must hold to be served by a service that
+/// asks for one (design-decisions 1518; the credential service is the
+/// first).
 ///
-/// All pending (unaccepted) connections are closed.  If the service
-/// is blocked on `accept`, it is woken with `ChannelClosed`.
+/// FNV-1a over the name's bytes, 64 bits, with 0 -- the class-wide id --
+/// mapped to 1, so a key is always for one name. Deterministic and public,
+/// so whoever grants keys at spawn computes the same id: the id names a key,
+/// it does not *make* one -- a capability table entry is the key, and only a
+/// holder may hand it on.
+#[must_use]
+pub fn key_id(name: &[u8]) -> u64 {
+    const OFFSET: u64 = 0xcbf2_9ce4_8422_2325;
+    const PRIME: u64 = 0x0000_0100_0000_01b3;
+    let hash = name
+        .iter()
+        .fold(OFFSET, |h, &b| (h ^ u64::from(b)).wrapping_mul(PRIME));
+    if hash == 0 { 1 } else { hash }
+}
+
+/// Give a listener one more holder: a Linux-ABI listener descriptor copied
+/// into a forked child, which closes it independently. The name stays
+/// registered until every holder has called [`unregister`].
+///
+/// # Errors
+///
+/// - [`InvalidHandle`] -- the listener does not exist, or is already closed.
+pub fn dup_listener(listener: ServiceListenerHandle) -> KernelResult<()> {
+    let mut reg = SERVICE_REGISTRY.lock();
+    let entry = reg
+        .listeners
+        .get_mut(&listener.0)
+        .filter(|e| !e.closed)
+        .ok_or(KernelError::InvalidHandle)?;
+    entry.refs = entry.refs.saturating_add(1);
+    Ok(())
+}
+
+/// Drop one holder of a listener; with the last, unregister the service and
+/// close its listener.
+///
+/// All pending (unaccepted) connections are closed then.  If the service
+/// is blocked on `accept`, it is woken with `ChannelClosed`. A listener with
+/// one holder -- every native one -- closes at once, as it always did.
 ///
 /// # Errors
 ///
@@ -719,6 +770,11 @@ pub fn unregister(listener: ServiceListenerHandle) -> KernelResult<()> {
             .get_mut(&listener.0)
             .ok_or(KernelError::InvalidHandle)?;
 
+        entry.refs = entry.refs.saturating_sub(1);
+        if entry.refs > 0 {
+            // Another holder still serves the name.
+            return Ok(());
+        }
         entry.closed = true;
         wake_task = entry.accept_waiter.take();
         ready = entry.ready_waiters.take_all();

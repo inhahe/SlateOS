@@ -329,7 +329,7 @@ pub fn build_sysv_stack(
 /// `e_phoff`; whichever `PT_LOAD` segment maps that file range exposes
 /// them at `p_vaddr + (e_phoff - p_offset)`.  Returns `None` if no loaded
 /// segment covers the header table (then `AT_PHDR` is simply omitted).
-fn phdr_vaddr(elf: &ElfFile<'_>) -> Option<u64> {
+pub(crate) fn phdr_vaddr(elf: &ElfFile<'_>) -> Option<u64> {
     let phoff = elf.header.e_phoff;
     let phdr_table_len =
         u64::from(elf.header.e_phentsize).checked_mul(u64::from(elf.header.e_phnum))?;
@@ -368,7 +368,12 @@ fn phdr_vaddr(elf: &ElfFile<'_>) -> Option<u64> {
 /// `AT_PHDR` (= program-header vaddr + bias) must report the *runtime*
 /// address so glibc/musl and the dynamic loader find the headers and
 /// entry where they were actually mapped.
-fn base_auxv(elf: &ElfFile<'_>, interp_base: Option<u64>, exec_load_bias: u64) -> Vec<AuxEntry> {
+fn base_auxv(
+    elf: &ElfFile<'_>,
+    interp_base: Option<u64>,
+    exec_load_bias: u64,
+    phdr: Option<u64>,
+) -> Vec<AuxEntry> {
     // Auxv entry order is irrelevant to libc (it scans by `a_type`), so the
     // unconditional entries are built as one literal and the optional
     // `AT_PHDR` is appended afterwards.
@@ -391,8 +396,11 @@ fn base_auxv(elf: &ElfFile<'_>, interp_base: Option<u64>, exec_load_bias: u64) -
         AuxEntry::new(AT_GID, 0),
         AuxEntry::new(AT_EGID, 0),
     ];
-    if let Some(phdr) = phdr_vaddr(elf) {
-        aux.push(AuxEntry::new(AT_PHDR, phdr.saturating_add(exec_load_bias)));
+    // The table's runtime address, found or placed by the loader
+    // (`spawn::place_phdr_table`): a loaded segment's, or a copy's when no
+    // segment holds the headers. Absent only for an image with none.
+    if let Some(phdr) = phdr {
+        aux.push(AuxEntry::new(AT_PHDR, phdr));
     }
     // AT_BASE: where the program interpreter (ld.so) was mapped.  Omitted
     // entirely for static binaries — glibc/musl treat a missing AT_BASE
@@ -489,8 +497,9 @@ pub fn install_linux_stack(
     random16: &[u8; 16],
     interp_base: Option<u64>,
     exec_load_bias: u64,
+    phdr: Option<u64>,
 ) -> KernelResult<InstalledLinuxStack> {
-    let aux = base_auxv(elf, interp_base, exec_load_bias);
+    let aux = base_auxv(elf, interp_base, exec_load_bias, phdr);
     let built = build_sysv_stack(stack_top, stack_limit, argv, envp, &aux, random16)?;
     // `built.image` spans exactly [built.rsp, stack_top), with
     // built.rsp >= stack_limit, so every byte lands in the stack region
@@ -820,8 +829,8 @@ pub fn self_test() -> KernelResult<()> {
         let elf = crate::proc::elf::ElfFile::parse(&elf_data)?;
         const FAKE_BIAS: u64 = 0x0000_5555_5555_4000;
 
-        let aux0 = base_auxv(&elf, None, 0);
-        let auxb = base_auxv(&elf, None, FAKE_BIAS);
+        let aux0 = base_auxv(&elf, None, 0, None);
+        let auxb = base_auxv(&elf, None, FAKE_BIAS, None);
 
         let find = |aux: &[AuxEntry], ty: u64| -> Option<u64> {
             aux.iter().find(|e| e.a_type == ty).map(|e| e.a_val)
@@ -841,15 +850,19 @@ pub fn self_test() -> KernelResult<()> {
             "[linux_stack] FAIL: AT_ENTRY at bias 0 != e_entry"
         );
 
-        // AT_PHDR is optional (only when a PT_LOAD covers the header
-        // table), but the test ELF does carry it; if present in both, the
-        // delta must also equal the bias.
-        if let (Some(phdr0), Some(phdrb)) = (find(&aux0, AT_PHDR), find(&auxb, AT_PHDR)) {
-            require!(
-                phdrb.wrapping_sub(phdr0) == FAKE_BIAS,
-                "[linux_stack] FAIL: AT_PHDR not shifted by exec_load_bias"
-            );
-        }
+        // AT_PHDR is the address the loader found or placed the table at
+        // (`spawn::place_phdr_table`, which applies the bias itself): passed
+        // through as given, and absent only when there is none.
+        const PLACED: u64 = 0x0000_7FFF_ABCD_0000;
+        let placed = base_auxv(&elf, None, FAKE_BIAS, Some(PLACED));
+        require!(
+            find(&placed, AT_PHDR) == Some(PLACED),
+            "[linux_stack] FAIL: AT_PHDR is not the address the loader gave"
+        );
+        require!(
+            find(&aux0, AT_PHDR).is_none() && find(&auxb, AT_PHDR).is_none(),
+            "[linux_stack] FAIL: AT_PHDR present with no table placed"
+        );
     }
 
     serial_println!("[linux_stack] SysV initial-stack self-test PASSED");

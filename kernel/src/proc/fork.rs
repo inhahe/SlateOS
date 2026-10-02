@@ -354,10 +354,29 @@ fn dup_one(rtype: ResourceType, id: u64) -> KernelResult<Option<(ResourceType, u
             crate::net::socket::dup(crate::net::socket::SocketHandle::from_raw(id))?;
             Ok(Some((rtype, id)))
         }
+        ResourceType::Channel => {
+            // Bump the end's holder count so parent and child each own one
+            // reference to the same channel end -- same id, since the handle
+            // *is* the end. A Linux-ABI channel descriptor inherited across
+            // `fork` works as an inherited socket does: the end closes only
+            // when the last holder closes it.
+            crate::ipc::channel::dup(crate::ipc::channel::ChannelHandle::from_raw(id))?;
+            Ok(Some((rtype, id)))
+        }
+        ResourceType::Service => {
+            // A registered listener (the only `Service` entries in this list
+            // are listeners; the capability to register is in the cloned
+            // capability table). Parent and child each hold it, as an
+            // inherited listening socket, and the name stays registered until
+            // both have let it go.
+            crate::ipc::service::dup_listener(
+                crate::ipc::service::ServiceListenerHandle::from_raw(id),
+            )?;
+            Ok(Some((rtype, id)))
+        }
         // No refcounted same-id dup yet — not inherited.  Documented
         // limitation in todo.txt; revisit when these gain dup support.
-        ResourceType::Channel
-        | ResourceType::SharedMemory
+        ResourceType::SharedMemory
         | ResourceType::CompletionPort
         | ResourceType::Timer
         | ResourceType::Semaphore => {
@@ -388,7 +407,6 @@ fn dup_one(rtype: ResourceType, id: u64) -> KernelResult<Option<(ResourceType, u
         | ResourceType::DeviceIrq
         | ResourceType::Socket
         | ResourceType::IoScheduler
-        | ResourceType::Service
         | ResourceType::NetRaw
         | ResourceType::SystemClock
         | ResourceType::PrivilegedPort

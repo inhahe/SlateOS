@@ -91852,3 +91852,117 @@ one.
 
 **Revisit** when users other than uid 0 exist, and whether a parent should
 inspect its children without a capability (Linux does not).
+
+## 1517. Channels reach the Linux ABI as file descriptors, through five calls Linux will not number
+
+**Date:** 2026-10-02 · **Decided by:** Claude (autonomous) · **Lane:** A
+
+**In short:** SlateOS's own way for programs to talk -- channels and named
+services, with the kernel vouching for who is on the other end -- was out of
+reach of every program written against the Linux interface. That means every
+Rust program, the compositor (the program that draws every window) among
+them. Now a Linux-interface program can make a channel, register or reach a
+service, and ask who is at the other end, and it gets back ordinary file
+descriptors. Everything a program already knows how to do with a descriptor
+then works on them: read, write, wait on several at once, pass them to a
+child. Lane F asked for this to build a local display connection whose
+clients the kernel identifies
+(`requests/f-a-a-channel-handle-can-be-guessed-and-any-process-can-use-it.md`,
+point 3).
+
+**What changed:**
+- **Five calls, 1000-1004 in the Linux table:**
+  - `slate_channel_create(fds[2], flags)`;
+  - `slate_service_register(name, len, flags)`, which answers a listener;
+  - `slate_service_accept(listener, flags)`;
+  - `slate_service_connect(name, len, flags)`;
+  - `slate_channel_peer_cred(fd, out)`.
+- **What the descriptors do:**
+  - `read` and `write` move one whole message each, as `SOCK_SEQPACKET`
+    does: a short buffer gets the start and the rest is dropped, and a
+    write over 64 KiB is `EMSGSIZE`.
+  - A blocking wait can be interrupted by a signal.
+  - `poll` and `epoll` see `POLLIN`/`POLLOUT`/`POLLHUP` (a listener:
+    `POLLIN`).
+  - `fstat` says `S_IFSOCK`.
+- **Shared ends:** channel ends and listeners gained holder counts
+  (`channel::dup`, `service::dup_listener`), so `fork` shares them and the
+  last close releases them. A receive that empties a full queue now wakes
+  the writers polling for room.
+
+**Alternatives:**
+
+| | What changes | For | Against |
+|---|---|---|---|
+| **A. Channels as descriptors, five dedicated calls (chosen)** | a program holds fds; every Linux mechanism works on them | poll/epoll, `fork`, `dup`, close-on-exec and `/proc/<pid>/fd` come free; settles point 4 for the Linux ABI too | five numbers of our own in the Linux table; a capability inside a message cannot yet travel as an fd |
+| B. A reserved range that forwards to the native table | any native call reachable from the Linux ABI | one mechanism for every future native call | the native calls take native handles, which a Linux program has no way to wait on, share across `fork`, or close with the rest of its descriptors |
+| C. `AF_UNIX`-style sockets that happen to be channels | `socket(AF_SLATE, SOCK_SEQPACKET, 0)`, names via `bind`/`connect` | no new call numbers | a fake address family, and `sockaddr` names for what is a registry, for the same five operations |
+
+**Smaller decisions:**
+
+| decision | alternative | why this one |
+|---|---|---|
+| Numbers 1000-1004 | the x32 range, or right after Linux's last | Linux's own numbers end in the 400s and grow by a handful a year; x32 is taken. `ENOSYS` on any other kernel makes them probe-able |
+| A short read truncates, as `SOCK_SEQPACKET` | refuse with the message left queued | the behaviour socket programs already handle; the limit is fixed and known |
+| A closed peer reads 0 and writes `EPIPE`, no `SIGPIPE` | raise `SIGPIPE` | this kernel's Linux layer raises it nowhere; raising it here alone would be a surprise |
+| Capabilities attached by a native sender go into the reader's table | drop them | dropping them would lose authority silently; the descriptor form for them is the next step |
+| `fork` now shares channel ends and listeners for native processes too | keep them uninherited natively | one rule for a resource whatever the ABI; inherited listening sockets work the same way |
+
+**Revisit** when the display transport needs to pass a channel end or a
+buffer inside a message (`SCM_RIGHTS` and the native capability transfer
+it would map to).
+
+## 1518. A service's key is a capability for its name, checked by the kernel on the connection's peer
+
+**Date:** 2026-10-02 · **Decided by:** Claude (autonomous), within the policy the operator set in C-Q25 (§1417) · **Lane:** A
+
+**In short:** the operator decided that a program may ask the password
+manager for a stored password only if it holds "a system-issued key" for
+exactly that. This entry is what that key is, and how the password manager
+checks it.
+- **The key** is an entry in the program's capability table (the list of
+  things the kernel lets it do), naming the service. Like every other
+  capability, it can only be handed on by someone who holds it, typically
+  the launcher when it starts the program, following the user's choices in
+  Settings.
+- **The check:** the password manager asks the kernel one question about the
+  program connected to it: "does the program at the other end hold my key?"
+  The kernel answers from its own records. The password manager never
+  handles the key and cannot be fooled about who is asking
+  (`requests/c-a-a-capability-to-ask-the-credential-service-for-a-password.md`).
+
+**What changed:**
+- A service's key is `(ResourceType::Service, key_id(name), Rights::READ)`.
+  `ipc::service::key_id(name)` is FNV-1a-64 of the name, never 0, so it never
+  names the class.
+- A connection remembers which service it was made to
+  (`channel::service_key`, recorded by `service::connect`).
+- `SYS_CHANNEL_PEER_HAS_KEY` (1103), and `slate_channel_peer_has_key` (1005)
+  by descriptor, answer 1 or 0. The peer is the process the kernel recorded
+  at connect time, and it must still hold its end.
+
+**Alternatives:**
+
+| | What changes | For | Against |
+|---|---|---|---|
+| **A. The service asks the kernel about its peer (chosen)** | one call: "does my peer hold my key?" | the client does nothing special to be checked; the service cannot name the wrong key, since the kernel takes it from the connection; nothing moves out of anyone's table | the service learns only yes or no, not what else the client holds -- which is the right amount |
+| B. The client presents the key in its request | the client transfers the capability with the message; the service asks "is this genuine?" | the textbook capability shape: the request carries its authority | this kernel's transfer *moves* a capability, so presenting it spends it -- the client would need a fresh one per request, or the service would have to give it back |
+| C. A key the service issues and checks itself | the service keeps its own list | no kernel work | an allowlist, not a capability -- what lane C said it must not invent |
+
+**Smaller decisions:**
+
+| decision | alternative | why this one |
+|---|---|---|
+| The key is a `Service` capability with a per-name id and `READ` | a new resource type | the type already means "about services" (`WRITE` on the class lets a process register names); a per-name id with `READ` reads as "may use this service", with no new type for every table and match |
+| The id is a public, unkeyed FNV-1a of the name | a registry id handed out at registration | keys are granted at spawn, often before the service has registered; anyone may compute the id, but an id is not a key -- only a table entry is, and only a holder can hand one on |
+| The peer must still hold its end of the channel | trust the recorded pid alone | a client that exited could have its pid reused; a reused pid holds no end of this channel, so it answers 0 |
+| No class-wide "any service" key | a `(Service, 0, READ)` that opens every service | a superkey is a policy the operator has not asked for; `has_resource` matches ids exactly, so none exists |
+
+**Who grants keys:** whoever starts the program, from its own table (the
+spawn subset rules). Lane C's Settings page records the user's choice; the
+launcher that reads it must itself hold the key it passes on. Which process
+first holds each key -- the session manager, given them at boot -- belongs
+to the launcher's design, not this entry.
+
+**Revisit** if a service needs to tell a client which keys it would accept,
+or if keys should expire.

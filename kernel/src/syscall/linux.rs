@@ -781,6 +781,16 @@ pub mod nr {
     pub const EPOLL_WAIT_OLD: u64 = 215;
     pub const VSERVER: u64 = 236;
     pub const FUTIMESAT: u64 = 261;
+    // SlateOS extensions: channels as descriptors (see `slate_channel_create`
+    // and its siblings). A range Linux will not reach -- its own numbers end
+    // in the 400s and grow by a handful a year -- so a program can probe for
+    // them and read `ENOSYS` on any kernel without them.
+    pub const SLATE_CHANNEL_CREATE: u64 = 1000;
+    pub const SLATE_SERVICE_REGISTER: u64 = 1001;
+    pub const SLATE_SERVICE_ACCEPT: u64 = 1002;
+    pub const SLATE_SERVICE_CONNECT: u64 = 1003;
+    pub const SLATE_CHANNEL_PEER_CRED: u64 = 1004;
+    pub const SLATE_CHANNEL_PEER_HAS_KEY: u64 = 1005;
 }
 
 // ---------------------------------------------------------------------------
@@ -1036,6 +1046,10 @@ pub mod errno {
     pub const ELOOP: i32 = 40;
     pub const ENOMSG: i32 = 42;
     pub const EOVERFLOW: i32 = 75;
+    /// `ENOTSOCK` -- a socket operation on a descriptor that is not one
+    /// (here: `slate_service_accept` on a non-listener,
+    /// `slate_channel_peer_cred` on a non-channel).
+    pub const ENOTSOCK: i32 = 88;
     pub const EDESTADDRREQ: i32 = 89;
     pub const EMSGSIZE: i32 = 90;
     pub const ENOPROTOOPT: i32 = 92;
@@ -3595,6 +3609,12 @@ pub fn dispatch_linux(nr: u64, args: &SyscallArgs) -> SyscallResult {
         nr::EPOLL_WAIT_OLD => sys_epoll_wait_old(args),
         nr::VSERVER => sys_vserver(args),
         nr::FUTIMESAT => sys_futimesat(args),
+        nr::SLATE_CHANNEL_CREATE => slate_channel_create(args),
+        nr::SLATE_SERVICE_REGISTER => slate_service_register(args),
+        nr::SLATE_SERVICE_ACCEPT => slate_service_accept(args),
+        nr::SLATE_SERVICE_CONNECT => slate_service_connect(args),
+        nr::SLATE_CHANNEL_PEER_CRED => slate_channel_peer_cred(args),
+        nr::SLATE_CHANNEL_PEER_HAS_KEY => slate_channel_peer_has_key(args),
         _ => linux_err(errno::ENOSYS),
     };
     account_io_syscall(nr, result.value);
@@ -3980,6 +4000,38 @@ pub fn close_handle(entry: FdEntry) -> SyscallResult {
             crate::net::socket::close(h);
             SyscallResult::ok(0)
         }
+        HandleKind::Channel => {
+            // Deregister, as the arms above, then drop this process's hold
+            // on the end; the end closes with its last holder.
+            if let Some(pid) = caller_pid() {
+                pcb::deregister_ipc_handle(
+                    pid,
+                    crate::cap::ResourceType::Channel,
+                    entry.raw_handle,
+                );
+            }
+            crate::ipc::channel::close(crate::ipc::channel::ChannelHandle::from_raw(
+                entry.raw_handle,
+            ));
+            SyscallResult::ok(0)
+        }
+        HandleKind::ServiceListener => {
+            // The same for a listener: the name is unregistered with its
+            // last holder.
+            if let Some(pid) = caller_pid() {
+                pcb::deregister_ipc_handle(
+                    pid,
+                    crate::cap::ResourceType::Service,
+                    entry.raw_handle,
+                );
+            }
+            // Gone already (unregistered by another path) is the same end
+            // state; nothing to report on a close.
+            let _ = crate::ipc::service::unregister(
+                crate::ipc::service::ServiceListenerHandle::from_raw(entry.raw_handle),
+            );
+            SyscallResult::ok(0)
+        }
     }
 }
 
@@ -4071,6 +4123,10 @@ fn dispatch_write(entry: FdEntry, buf: u64, len: u64) -> SyscallResult {
         HandleKind::MemFd => dispatch_memfd_write(entry, buf, len),
         // AF_INET stream socket — `write(2)` is `send(2)` with no flags.
         HandleKind::Socket => dispatch_socket_write(entry, buf, len, false),
+        // A channel end: one write, one message.
+        HandleKind::Channel => dispatch_channel_write(entry, buf, len),
+        // A listener has no data: `accept` is its only operation.
+        HandleKind::ServiceListener => linux_err(errno::EINVAL),
     }
 }
 
@@ -4501,6 +4557,9 @@ fn dispatch_read(entry: FdEntry, buf: u64, cap: u64) -> SyscallResult {
         HandleKind::AlsaPcm => dispatch_alsa_pcm_read(entry, buf, cap),
         // AF_INET stream socket — `read(2)` is `recv(2)` with no flags.
         HandleKind::Socket => dispatch_socket_read(entry, buf, cap, false, false),
+        // A channel end: one read, one message.
+        HandleKind::Channel => dispatch_channel_read(entry, buf, cap),
+        HandleKind::ServiceListener => linux_err(errno::EINVAL),
     }
 }
 
@@ -5476,7 +5535,9 @@ fn fcntl_flock_apply(
         | HandleKind::AlsaControl
         | HandleKind::DrmCard
         | HandleKind::Evdev
-        | HandleKind::Socket => {
+        | HandleKind::Socket
+        | HandleKind::Channel
+        | HandleKind::ServiceListener => {
             return linux_err(errno::EBADF);
         }
     };
@@ -5605,7 +5666,9 @@ fn sys_lseek(args: &SyscallArgs) -> SyscallResult {
         | HandleKind::AlsaControl
         | HandleKind::DrmCard
         | HandleKind::Evdev
-        | HandleKind::Socket => linux_err(errno::ESPIPE),
+        | HandleKind::Socket
+        | HandleKind::Channel
+        | HandleKind::ServiceListener => linux_err(errno::ESPIPE),
     }
 }
 
@@ -17497,7 +17560,9 @@ fn sys_fsync(args: &SyscallArgs) -> SyscallResult {
         | HandleKind::AlsaControl
         | HandleKind::DrmCard
         | HandleKind::Evdev
-        | HandleKind::Socket => linux_err(errno::EINVAL),
+        | HandleKind::Socket
+        | HandleKind::Channel
+        | HandleKind::ServiceListener => linux_err(errno::EINVAL),
     }
 }
 
@@ -18387,7 +18452,9 @@ fn sys_readahead(args: &SyscallArgs) -> SyscallResult {
         | HandleKind::AlsaControl
         | HandleKind::DrmCard
         | HandleKind::Evdev
-        | HandleKind::Socket => return linux_err(errno::EINVAL),
+        | HandleKind::Socket
+        | HandleKind::Channel
+        | HandleKind::ServiceListener => return linux_err(errno::EINVAL),
     }
     SyscallResult::ok(0)
 }
@@ -20467,6 +20534,9 @@ fn fill_stat_for_fd(buf: &mut [u8; STAT_SIZE], entry: &crate::proc::linux_fd::Fd
         // A daemon-backed AF_INET stream socket: Linux stat reports
         // S_IFSOCK with 0777 perms (srwxrwxrwx on the anon socket inode).
         HandleKind::Socket => (S_IFSOCK | 0o777, 4096),
+        // Message-moving ends and listeners: the nearest Linux type is a
+        // socket, which is what a program asking `S_ISSOCK` should hear.
+        HandleKind::Channel | HandleKind::ServiceListener => (S_IFSOCK | 0o777, 4096),
     };
 
     // Inode: use the raw_handle as a stable-ish identity.
@@ -20836,6 +20906,7 @@ fn fill_statx_for_fd(buf: &mut [u8; STATX_SIZE], entry: &crate::proc::linux_fd::
         HandleKind::Evdev => ((S_IFCHR | 0o660) as u16, 4096),
         // Daemon-backed AF_INET stream socket — S_IFSOCK | 0777, like Linux.
         HandleKind::Socket => ((S_IFSOCK | 0o777) as u16, 4096),
+        HandleKind::Channel | HandleKind::ServiceListener => ((S_IFSOCK | 0o777) as u16, 4096),
     };
     let st_ino: u64 = entry.raw_handle;
     // Surface the live memfd data length so stx_size reflects what callers
@@ -22550,7 +22621,9 @@ fn sys_ftruncate(args: &SyscallArgs) -> SyscallResult {
         | HandleKind::AlsaControl
         | HandleKind::DrmCard
         | HandleKind::Evdev
-        | HandleKind::Socket => linux_err(errno::EINVAL),
+        | HandleKind::Socket
+        | HandleKind::Channel
+        | HandleKind::ServiceListener => linux_err(errno::EINVAL),
     }
 }
 
@@ -27924,6 +27997,18 @@ fn sys_pidfd_getfd(args: &SyscallArgs) -> SyscallResult {
                 return linux_err(errno::EBADF);
             }
         }
+        HandleKind::Channel => {
+            let h = crate::ipc::channel::ChannelHandle::from_raw(entry.raw_handle);
+            if crate::ipc::channel::dup(h).is_err() {
+                return linux_err(errno::EBADF);
+            }
+        }
+        HandleKind::ServiceListener => {
+            let h = crate::ipc::service::ServiceListenerHandle::from_raw(entry.raw_handle);
+            if crate::ipc::service::dup_listener(h).is_err() {
+                return linux_err(errno::EBADF);
+            }
+        }
     }
 
     // Linux always sets FD_CLOEXEC on the new fd, regardless of the
@@ -27964,6 +28049,8 @@ fn sys_pidfd_getfd(args: &SyscallArgs) -> SyscallResult {
         HandleKind::DrmCard => Some(crate::cap::ResourceType::Drm),
         HandleKind::Evdev => Some(crate::cap::ResourceType::InputDevice),
         HandleKind::Socket => Some(crate::cap::ResourceType::NetSocket),
+        HandleKind::Channel => Some(crate::cap::ResourceType::Channel),
+        HandleKind::ServiceListener => Some(crate::cap::ResourceType::Service),
         HandleKind::Console | HandleKind::PidFd | HandleKind::AlsaControl => None,
     };
     if let Some(rt) = resource {
@@ -28054,6 +28141,15 @@ fn release_handle_ref(kind: HandleKind, raw_handle: u64) {
         HandleKind::Socket => {
             let h = crate::net::socket::SocketHandle::from_raw(raw_handle);
             crate::net::socket::close(h);
+        }
+        HandleKind::Channel => {
+            crate::ipc::channel::close(crate::ipc::channel::ChannelHandle::from_raw(raw_handle));
+        }
+        HandleKind::ServiceListener => {
+            // Gone already is the same end state for a dropped reference.
+            let _ = crate::ipc::service::unregister(
+                crate::ipc::service::ServiceListenerHandle::from_raw(raw_handle),
+            );
         }
     }
 }
@@ -31259,6 +31355,34 @@ pub(crate) fn revents_for_handle(
                 Err(_) => poll_bits::POLLNVAL,
             }
         }
+        HandleKind::Channel => {
+            // A message waiting (or a closed peer, which reads as end of
+            // file) is POLLIN; room in the peer's queue is POLLOUT; a closed
+            // peer is POLLHUP as well, as a socket whose peer has gone.
+            let h = crate::ipc::channel::ChannelHandle::from_raw(raw_handle);
+            let mut r = 0u16;
+            if crate::ipc::channel::readable(h) {
+                r |= poll_bits::POLLIN | poll_bits::POLLRDNORM;
+            }
+            if crate::ipc::channel::writable(h) {
+                r |= poll_bits::POLLOUT | poll_bits::POLLWRNORM;
+            }
+            if crate::ipc::channel::peer_closed(h) {
+                r |= poll_bits::POLLHUP;
+            }
+            r
+        }
+        HandleKind::ServiceListener => {
+            // A client waiting to be accepted, or a listener gone (accept
+            // then answers its error), is POLLIN -- a listening socket's
+            // readiness.
+            let l = crate::ipc::service::ServiceListenerHandle::from_raw(raw_handle);
+            if crate::ipc::service::readable(l) {
+                poll_bits::POLLIN | poll_bits::POLLRDNORM
+            } else {
+                0
+            }
+        }
     }
 }
 
@@ -31270,7 +31394,7 @@ pub(crate) fn revents_for_handle(
 /// waiter set has to appear in exactly one place for every caller to start
 /// blocking on it properly.
 ///
-/// Only three of the fifteen kinds have a kernel waiter set. The rest are
+/// Five of the seventeen kinds have a kernel waiter set. The rest are
 /// [`WaitTarget::PollOnly`], and the reasons differ in kind rather than in
 /// degree: `Socket`, `AlsaPcm`, `AlsaControl`, `DrmCard` and `Evdev` live behind
 /// a userspace daemon or a device that has no way to push readiness into the
@@ -31293,6 +31417,11 @@ pub(crate) fn wait_target_for_handle(
         HandleKind::Pipe => WaitTarget::Pipe(raw_handle),
         HandleKind::EventFd => WaitTarget::EventFd(raw_handle),
         HandleKind::Timerfd => WaitTarget::TimerFd(raw_handle),
+        // A channel end's readiness set is woken by a message, a closed peer,
+        // and a receive that makes room in a full queue (`POLLOUT`); a
+        // listener's by a client waiting.
+        HandleKind::Channel => WaitTarget::Channel(raw_handle),
+        HandleKind::ServiceListener => WaitTarget::Listener(raw_handle),
         _ => WaitTarget::PollOnly,
     }
 }
@@ -32361,7 +32490,9 @@ fn sys_epoll_ctl(args: &SyscallArgs) -> SyscallResult {
         | HandleKind::AlsaControl
         | HandleKind::DrmCard
         | HandleKind::Evdev
-        | HandleKind::Socket => {}
+        | HandleKind::Socket
+        | HandleKind::Channel
+        | HandleKind::ServiceListener => {}
     }
 
     // Gate 5: f.file == tf.file || !is_file_epoll(f.file) -> EINVAL.
@@ -35588,6 +35719,8 @@ fn handle_kind_ord(k: crate::proc::linux_fd::HandleKind) -> u64 {
         HandleKind::DrmCard => 12,
         HandleKind::Socket => 13,
         HandleKind::Evdev => 14,
+        HandleKind::Channel => 15,
+        HandleKind::ServiceListener => 16,
     }
 }
 
@@ -36723,7 +36856,9 @@ fn sys_cachestat(args: &SyscallArgs) -> SyscallResult {
                 | HandleKind::AlsaControl
                 | HandleKind::DrmCard
                 | HandleKind::Evdev
-                | HandleKind::Socket => {
+                | HandleKind::Socket
+                | HandleKind::Channel
+                | HandleKind::ServiceListener => {
                     return linux_err(errno::EOPNOTSUPP);
                 }
             }
@@ -38199,6 +38334,446 @@ fn sys_socket(args: &SyscallArgs) -> SyscallResult {
     }
     // No networking yet → ENOSYS.
     linux_err(errno::ENOSYS)
+}
+
+// ---------------------------------------------------------------------------
+// SlateOS extensions: channels as descriptors
+//
+// A Linux-ABI program -- every Rust `std` program on `x86_64-slateos`, the
+// compositor among them -- had no way into SlateOS's own IPC: channels, the
+// service registry and the kernel-attested peer identity were reachable only
+// through the native table, which a Linux-ABI process does not use
+// (requests/f-a-a-channel-handle-can-be-guessed-and-any-process-can-use-it.md,
+// point 3). These five calls, at numbers Linux will not reach, hand channels
+// and listeners out as file descriptors, which every Linux mechanism then
+// works on: `read`/`write` move whole messages, `poll`/`epoll` see their
+// readiness, `dup`/`fork`/`close` share and release them.
+// ---------------------------------------------------------------------------
+
+/// `O_NONBLOCK | O_CLOEXEC` from a SlateOS channel call's `flags` (as
+/// `socketpair`'s `SOCK_NONBLOCK | SOCK_CLOEXEC`, which have the same
+/// values), as `(status_flags, fd_flags)` for the new descriptor; any other
+/// bit is `EINVAL`.
+fn slate_fd_flags(flags: u64) -> Result<(u32, u32), SyscallResult> {
+    let nonblock = u64::from(oflags::O_NONBLOCK);
+    let cloexec = u64::from(oflags::O_CLOEXEC);
+    if flags & !(nonblock | cloexec) != 0 {
+        return Err(linux_err(errno::EINVAL));
+    }
+    let status = if flags & nonblock != 0 {
+        oflags::O_RDWR | oflags::O_NONBLOCK
+    } else {
+        oflags::O_RDWR
+    };
+    // FD_CLOEXEC is the per-fd flag bit 1.
+    let fd_flags = u32::from(flags & cloexec != 0);
+    Ok((status, fd_flags))
+}
+
+/// Install a channel end as a new descriptor of `pid`, registered with the
+/// process (so `fork` shares it and exit closes it). On failure the end is
+/// closed and the errno answered.
+fn slate_install_channel(
+    pid: u64,
+    handle: crate::ipc::channel::ChannelHandle,
+    status: u32,
+    fd_flags: u32,
+) -> Result<i32, SyscallResult> {
+    pcb::register_ipc_handle(pid, crate::cap::ResourceType::Channel, handle.raw());
+    let mut entry = FdEntry::channel(handle.raw(), status);
+    entry.fd_flags = fd_flags;
+    pcb::linux_fd_install(pid, entry, 0).map_err(|e| {
+        pcb::deregister_ipc_handle(pid, crate::cap::ResourceType::Channel, handle.raw());
+        crate::ipc::channel::close(handle);
+        linux_err(linux_errno_for(e))
+    })
+}
+
+/// `slate_channel_create(int fds[2], int flags)` (SlateOS 1000): a new
+/// channel, its two ends as two descriptors written to `fds`.
+///
+/// `flags`: `O_NONBLOCK`, `O_CLOEXEC`, for both. The channel is
+/// asynchronous: a write queues its message (up to
+/// `ipc::channel::MAX_MESSAGE_SIZE` bytes) and returns. Its ends carry no
+/// recorded peer identity -- as a native `channel_create`'s -- so
+/// `slate_channel_peer_cred` answers `ENODATA` on them.
+///
+/// Errors: `EINVAL` (flags), `EFAULT` (`fds`), `EMFILE`; `EBADF` from a
+/// kernel task, which has no descriptor table.
+fn slate_channel_create(args: &SyscallArgs) -> SyscallResult {
+    let (status, fd_flags) = match slate_fd_flags(args.arg1) {
+        Ok(f) => f,
+        Err(e) => return e,
+    };
+    let Some(pid) = caller_pid() else {
+        return linux_err(errno::EBADF);
+    };
+    // The answer's room first, so a bad pointer creates nothing.
+    if let Err(e) = crate::mm::user::validate_user_write(args.arg0, 8) {
+        return linux_err(linux_errno_for(e));
+    }
+    let (a, b) = crate::ipc::channel::create();
+    let fd_a = match slate_install_channel(pid, a, status, fd_flags) {
+        Ok(fd) => fd,
+        Err(e) => {
+            crate::ipc::channel::close(b);
+            return e;
+        }
+    };
+    let fd_b = match slate_install_channel(pid, b, status, fd_flags) {
+        Ok(fd) => fd,
+        Err(e) => {
+            // Closing the descriptor releases end `a` as any close does.
+            let _ = sys_close(&SyscallArgs {
+                arg0: u64::from(fd_a.unsigned_abs()),
+                arg1: 0,
+                arg2: 0,
+                arg3: 0,
+                arg4: 0,
+                arg5: 0,
+            });
+            return e;
+        }
+    };
+    let mut answer = [0u8; 8];
+    answer[..4].copy_from_slice(&fd_a.to_ne_bytes());
+    answer[4..].copy_from_slice(&fd_b.to_ne_bytes());
+    // SAFETY: validated as 8 writable bytes above; the copy re-checks.
+    if let Err(e) = unsafe { crate::mm::user::copy_to_user(answer.as_ptr(), args.arg0, 8) } {
+        for fd in [fd_a, fd_b] {
+            // The caller never learnt these numbers: take them back.
+            let _ = sys_close(&SyscallArgs {
+                arg0: u64::from(fd.unsigned_abs()),
+                arg1: 0,
+                arg2: 0,
+                arg3: 0,
+                arg4: 0,
+                arg5: 0,
+            });
+        }
+        return linux_err(linux_errno_for(e));
+    }
+    SyscallResult::ok(0)
+}
+
+/// `slate_service_register(const char *name, size_t len, int flags)`
+/// (SlateOS 1001): register a service and answer its listener as a
+/// descriptor.
+///
+/// The native `SYS_SERVICE_REGISTER` underneath, so the same rules hold: the
+/// caller needs the `Service` capability with `WRITE`, and the name is the
+/// caller's until the listener's last holder closes it. `flags`:
+/// `O_NONBLOCK` (an accept on it does not wait), `O_CLOEXEC`.
+///
+/// Errors: `EINVAL` (flags, an empty name), `EFAULT`, `EACCES` (no
+/// capability), `EADDRINUSE` (the name is taken), `EMFILE`.
+fn slate_service_register(args: &SyscallArgs) -> SyscallResult {
+    let (status, fd_flags) = match slate_fd_flags(args.arg2) {
+        Ok(f) => f,
+        Err(e) => return e,
+    };
+    let Some(pid) = caller_pid() else {
+        return linux_err(errno::EBADF);
+    };
+    let native = handlers::sys_service_register(&SyscallArgs {
+        arg0: args.arg0,
+        arg1: args.arg1,
+        arg2: 0,
+        arg3: 0,
+        arg4: 0,
+        arg5: 0,
+    });
+    if native.value < 0 {
+        #[allow(clippy::cast_possible_truncation)]
+        return match kernel_error_from_code(native.value as i32) {
+            Some(KernelError::AlreadyExists) => linux_err(errno::EADDRINUSE),
+            Some(e) => linux_err(linux_errno_for(e)),
+            None => linux_from_native(native),
+        };
+    }
+    // A listener handle, registered with the caller by the native call.
+    #[allow(clippy::cast_sign_loss)]
+    let raw = native.value as u64;
+    let mut entry = FdEntry::service_listener(raw, status);
+    entry.fd_flags = fd_flags;
+    match pcb::linux_fd_install(pid, entry, 0) {
+        Ok(fd) => SyscallResult::ok(i64::from(fd)),
+        Err(e) => {
+            pcb::deregister_ipc_handle(pid, crate::cap::ResourceType::Service, raw);
+            // The listener was this call's own; it is gone either way.
+            let _ = crate::ipc::service::unregister(
+                crate::ipc::service::ServiceListenerHandle::from_raw(raw),
+            );
+            linux_err(linux_errno_for(e))
+        }
+    }
+}
+
+/// `slate_service_accept(int listener, int flags)` (SlateOS 1002): the next
+/// client of a listener descriptor, as a channel descriptor -- `accept4`.
+///
+/// Waits for a client unless the *listener* is `O_NONBLOCK` (then `EAGAIN`),
+/// as `accept` on a listening socket does; the wait is interrupted by a
+/// signal (`ERESTARTSYS`). `flags` (`O_NONBLOCK`, `O_CLOEXEC`) are the new
+/// descriptor's. The accepted end carries the server's identity, so the
+/// client's `slate_channel_peer_cred` names this process.
+///
+/// Errors: `EBADF`, `ENOTSOCK` (not a listener), `EINVAL` (flags), `EAGAIN`,
+/// `EMFILE`.
+fn slate_service_accept(args: &SyscallArgs) -> SyscallResult {
+    use crate::ipc::service::{self, ServiceListenerHandle};
+    let (status, fd_flags) = match slate_fd_flags(args.arg1) {
+        Ok(f) => f,
+        Err(e) => return e,
+    };
+    #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
+    let fd = args.arg0 as i32;
+    let entry = match lookup_caller_fd(fd) {
+        Ok(e) => e,
+        Err(e) => return e,
+    };
+    if entry.kind != HandleKind::ServiceListener {
+        return linux_err(errno::ENOTSOCK);
+    }
+    let Some(pid) = caller_pid() else {
+        return linux_err(errno::EBADF);
+    };
+    let listener = ServiceListenerHandle::from_raw(entry.raw_handle);
+    let nonblock = entry.status_flags & oflags::O_NONBLOCK != 0;
+    let task = crate::sched::current_task_id();
+    let accepted = loop {
+        match service::try_accept(listener) {
+            Ok(Some(h)) => break h,
+            Ok(None) if nonblock => return linux_err(errno::EAGAIN),
+            Ok(None) => {}
+            Err(e) => return linux_err(linux_errno_for(e)),
+        }
+        if crate::ipc::waiters::deliverable_signal_pending(pid) {
+            return restart::restart_result(restart::ERESTARTSYS);
+        }
+        service::register_waiter(listener, task);
+        if !service::readable(listener) {
+            crate::ipc::waiters::park_interruptible(
+                pid,
+                task,
+                crate::wchan::Wait::new(crate::wchan::WaitChannel::Service, entry.raw_handle),
+            );
+        }
+        service::deregister_waiter(listener, task);
+    };
+    match slate_install_channel(pid, accepted, status, fd_flags) {
+        Ok(fd) => SyscallResult::ok(i64::from(fd)),
+        Err(e) => e,
+    }
+}
+
+/// `slate_service_connect(const char *name, size_t len, int flags)`
+/// (SlateOS 1003): connect to a registered service and answer the channel
+/// end as a descriptor.
+///
+/// The native `SYS_SERVICE_CONNECT` underneath: the end is bound to this
+/// process's identity, which the service reads with
+/// `slate_channel_peer_cred`. `flags`: `O_NONBLOCK`, `O_CLOEXEC`.
+///
+/// Errors: `EINVAL` (flags, an empty name), `EFAULT`, `ECONNREFUSED` (no
+/// such service), `EMFILE`.
+fn slate_service_connect(args: &SyscallArgs) -> SyscallResult {
+    let (status, fd_flags) = match slate_fd_flags(args.arg2) {
+        Ok(f) => f,
+        Err(e) => return e,
+    };
+    let Some(pid) = caller_pid() else {
+        return linux_err(errno::EBADF);
+    };
+    let native = handlers::sys_service_connect(&SyscallArgs {
+        arg0: args.arg0,
+        arg1: args.arg1,
+        arg2: 0,
+        arg3: 0,
+        arg4: 0,
+        arg5: 0,
+    });
+    if native.value < 0 {
+        #[allow(clippy::cast_possible_truncation)]
+        return match kernel_error_from_code(native.value as i32) {
+            // Nothing listening under that name: a Unix socket's answer.
+            Some(KernelError::NotFound) => linux_err(errno::ECONNREFUSED),
+            Some(e) => linux_err(linux_errno_for(e)),
+            None => linux_from_native(native),
+        };
+    }
+    // The native call registered the end with the caller; the descriptor now
+    // owns that registration -- its last close deregisters and closes the end.
+    #[allow(clippy::cast_sign_loss)]
+    let raw = native.value as u64;
+    let mut entry = FdEntry::channel(raw, status);
+    entry.fd_flags = fd_flags;
+    match pcb::linux_fd_install(pid, entry, 0) {
+        Ok(fd) => SyscallResult::ok(i64::from(fd)),
+        Err(e) => {
+            pcb::deregister_ipc_handle(pid, crate::cap::ResourceType::Channel, raw);
+            crate::ipc::channel::close(crate::ipc::channel::ChannelHandle::from_raw(raw));
+            linux_err(linux_errno_for(e))
+        }
+    }
+}
+
+/// `slate_channel_peer_cred(int fd, struct { u32 pid, uid, gid; } *out)`
+/// (SlateOS 1004): the identity of the process at the other end of a channel
+/// descriptor, as the kernel recorded it when that end was bound -- what the
+/// native `SYS_CHANNEL_PEER_CRED` answers, and what `SO_PEERCRED` is to a
+/// socket. A service authorises on this, never on a pid a client states.
+///
+/// Errors: `EBADF`, `ENOTSOCK` (not a channel), `EFAULT`, `ENODATA` (no
+/// identity recorded: a channel from `slate_channel_create`).
+fn slate_channel_peer_cred(args: &SyscallArgs) -> SyscallResult {
+    #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
+    let fd = args.arg0 as i32;
+    let entry = match lookup_caller_fd(fd) {
+        Ok(e) => e,
+        Err(e) => return e,
+    };
+    if entry.kind != HandleKind::Channel {
+        return linux_err(errno::ENOTSOCK);
+    }
+    let handle = crate::ipc::channel::ChannelHandle::from_raw(entry.raw_handle);
+    let Some(cred) = crate::ipc::channel::peer_cred(handle) else {
+        return linux_err(errno::ENODATA);
+    };
+    let Ok(peer_pid) = u32::try_from(cred.pid) else {
+        return linux_err(errno::EOVERFLOW);
+    };
+    let mut out = [0u8; 12];
+    out[..4].copy_from_slice(&peer_pid.to_ne_bytes());
+    out[4..8].copy_from_slice(&cred.uid.to_ne_bytes());
+    out[8..].copy_from_slice(&cred.gid.to_ne_bytes());
+    // SAFETY: `out` is 12 initialised bytes; `copy_to_user` validates the
+    // destination.
+    match unsafe { crate::mm::user::copy_to_user(out.as_ptr(), args.arg1, 12) } {
+        Ok(()) => SyscallResult::ok(0),
+        Err(e) => linux_err(linux_errno_for(e)),
+    }
+}
+
+/// `slate_channel_peer_has_key(int fd)` (SlateOS 1005): whether the process
+/// at the other end of a service connection holds the service's key -- the
+/// native `SYS_CHANNEL_PEER_HAS_KEY` by descriptor (design-decisions 1518).
+/// 1 or 0.
+///
+/// Errors: `EBADF`, `ENOTSOCK` (not a channel), `ENODATA` (a channel not made
+/// by connecting to a service, or a peer with no recorded identity).
+fn slate_channel_peer_has_key(args: &SyscallArgs) -> SyscallResult {
+    #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
+    let fd = args.arg0 as i32;
+    let entry = match lookup_caller_fd(fd) {
+        Ok(e) => e,
+        Err(e) => return e,
+    };
+    if entry.kind != HandleKind::Channel {
+        return linux_err(errno::ENOTSOCK);
+    }
+    let handle = crate::ipc::channel::ChannelHandle::from_raw(entry.raw_handle);
+    match handlers::peer_holds_key(handle) {
+        Ok(holds) => SyscallResult::ok(i64::from(holds)),
+        Err(KernelError::NotFound) => linux_err(errno::ENODATA),
+        Err(e) => linux_err(linux_errno_for(e)),
+    }
+}
+
+/// `write(2)` on a channel descriptor: the whole buffer as one message, as a
+/// `SOCK_SEQPACKET` socket sends -- `EMSGSIZE` above the channel's limit.
+/// Waits (interruptibly) while the peer's queue is full, unless `O_NONBLOCK`
+/// (`EAGAIN`). A closed peer is `EPIPE` (no `SIGPIPE`, as nowhere in this
+/// ABI).
+fn dispatch_channel_write(entry: FdEntry, buf: u64, len: u64) -> SyscallResult {
+    use crate::ipc::channel::{self, ChannelHandle, MAX_MESSAGE_SIZE};
+    let Ok(len) = usize::try_from(len) else {
+        return linux_err(errno::EMSGSIZE);
+    };
+    if len > MAX_MESSAGE_SIZE {
+        return linux_err(errno::EMSGSIZE);
+    }
+    let data = match crate::mm::user::read_user_vec(buf, len, MAX_MESSAGE_SIZE) {
+        Ok(d) => d,
+        Err(e) => return linux_err(linux_errno_for(e)),
+    };
+    let msg = match channel::Message::from_bytes(&data) {
+        Ok(m) => m,
+        Err(e) => return linux_err(linux_errno_for(e)),
+    };
+    let handle = ChannelHandle::from_raw(entry.raw_handle);
+    let sent = if entry.status_flags & oflags::O_NONBLOCK != 0 {
+        channel::send(handle, msg)
+    } else {
+        channel::send_interruptible(handle, msg)
+    };
+    match sent {
+        #[allow(clippy::cast_possible_wrap)]
+        Ok(()) => SyscallResult::ok(len as i64),
+        Err(KernelError::ChannelFull) => linux_err(errno::EAGAIN),
+        Err(KernelError::ChannelClosed) => linux_err(errno::EPIPE),
+        Err(KernelError::Interrupted) => restart::restart_result(restart::ERESTARTSYS),
+        Err(KernelError::InvalidHandle) => linux_err(errno::EBADF),
+        Err(e) => linux_err(linux_errno_for(e)),
+    }
+}
+
+/// `read(2)` on a channel descriptor: one whole message, as a
+/// `SOCK_SEQPACKET` socket receives -- a buffer shorter than the message gets
+/// its start, and the rest is dropped. Waits (interruptibly) for a message
+/// unless `O_NONBLOCK` (`EAGAIN`). A closed peer with nothing queued reads as
+/// end of file (0).
+///
+/// The buffer is checked before a message is taken, so a bad pointer loses
+/// nothing. Capabilities a native sender attached go into the reader's
+/// capability table, as a native receive puts them -- a descriptor has no
+/// way to carry them yet, and dropping them would lose the authority.
+fn dispatch_channel_read(entry: FdEntry, buf: u64, cap: u64) -> SyscallResult {
+    use crate::ipc::channel::{self, ChannelHandle, MAX_MESSAGE_SIZE};
+    let room = usize::try_from(cap)
+        .unwrap_or(usize::MAX)
+        .min(MAX_MESSAGE_SIZE);
+    if room > 0 {
+        if let Err(e) = crate::mm::user::validate_user_write(buf, room) {
+            return linux_err(linux_errno_for(e));
+        }
+    }
+    let handle = ChannelHandle::from_raw(entry.raw_handle);
+    let received = if entry.status_flags & oflags::O_NONBLOCK != 0 {
+        channel::try_recv(handle).and_then(|m| m.ok_or(KernelError::WouldBlock))
+    } else {
+        channel::recv_interruptible(handle)
+    };
+    let mut msg = match received {
+        Ok(m) => m,
+        Err(KernelError::WouldBlock) => return linux_err(errno::EAGAIN),
+        Err(KernelError::ChannelClosed) => return SyscallResult::ok(0),
+        Err(KernelError::Interrupted) => return restart::restart_result(restart::ERESTARTSYS),
+        Err(KernelError::InvalidHandle) => return linux_err(errno::EBADF),
+        Err(e) => return linux_err(linux_errno_for(e)),
+    };
+    let caps = msg.take_caps();
+    if !caps.is_empty() {
+        if let Some(pid) = caller_pid() {
+            let entries: alloc::vec::Vec<_> = caps
+                .iter()
+                .map(|c| (c.resource_type, c.resource_id, c.rights))
+                .collect();
+            // A full capability table drops what does not fit, as a native
+            // receive does; the message itself is still delivered.
+            let _ = pcb::insert_caps(pid, &entries);
+        }
+    }
+    let data = msg.data();
+    let n = data.len().min(room);
+    if n > 0 {
+        // SAFETY: `n` <= `room` bytes at `buf` were validated writable above.
+        if let Err(e) = unsafe { crate::mm::user::copy_to_user(data.as_ptr(), buf, n) } {
+            return linux_err(linux_errno_for(e));
+        }
+    }
+    #[allow(clippy::cast_possible_wrap)]
+    SyscallResult::ok(n as i64)
 }
 
 /// `socketpair(domain, type, protocol, sv[2])`.
@@ -43271,7 +43846,9 @@ fn sys_pread64(args: &SyscallArgs) -> SyscallResult {
         | HandleKind::AlsaControl
         | HandleKind::DrmCard
         | HandleKind::Evdev
-        | HandleKind::Socket => linux_err(errno::ESPIPE),
+        | HandleKind::Socket
+        | HandleKind::Channel
+        | HandleKind::ServiceListener => linux_err(errno::ESPIPE),
     }
 }
 
@@ -43340,7 +43917,9 @@ fn sys_pwrite64(args: &SyscallArgs) -> SyscallResult {
         | HandleKind::AlsaControl
         | HandleKind::DrmCard
         | HandleKind::Evdev
-        | HandleKind::Socket => linux_err(errno::ESPIPE),
+        | HandleKind::Socket
+        | HandleKind::Channel
+        | HandleKind::ServiceListener => linux_err(errno::ESPIPE),
     }
 }
 
@@ -45202,7 +45781,9 @@ fn sys_preadv(args: &SyscallArgs) -> SyscallResult {
         | HandleKind::AlsaControl
         | HandleKind::DrmCard
         | HandleKind::Evdev
-        | HandleKind::Socket => linux_err(errno::ESPIPE),
+        | HandleKind::Socket
+        | HandleKind::Channel
+        | HandleKind::ServiceListener => linux_err(errno::ESPIPE),
     }
 }
 
@@ -45245,7 +45826,9 @@ fn sys_pwritev(args: &SyscallArgs) -> SyscallResult {
         | HandleKind::AlsaControl
         | HandleKind::DrmCard
         | HandleKind::Evdev
-        | HandleKind::Socket => linux_err(errno::ESPIPE),
+        | HandleKind::Socket
+        | HandleKind::Channel
+        | HandleKind::ServiceListener => linux_err(errno::ESPIPE),
     }
 }
 
@@ -45319,7 +45902,9 @@ fn sys_preadv2(args: &SyscallArgs) -> SyscallResult {
         | HandleKind::AlsaControl
         | HandleKind::DrmCard
         | HandleKind::Evdev
-        | HandleKind::Socket => linux_err(errno::ESPIPE),
+        | HandleKind::Socket
+        | HandleKind::Channel
+        | HandleKind::ServiceListener => linux_err(errno::ESPIPE),
     }
 }
 
@@ -45375,7 +45960,9 @@ fn sys_pwritev2(args: &SyscallArgs) -> SyscallResult {
         | HandleKind::AlsaControl
         | HandleKind::DrmCard
         | HandleKind::Evdev
-        | HandleKind::Socket => linux_err(errno::ESPIPE),
+        | HandleKind::Socket
+        | HandleKind::Channel
+        | HandleKind::ServiceListener => linux_err(errno::ESPIPE),
     }
 }
 
@@ -61723,73 +62310,82 @@ pub fn self_test() -> crate::error::KernelResult<()> {
             // not the process-level pcb.name — so /proc/<pid>/comm,
             // /proc/<pid>/stat field 2, /proc/<pid>/status `Name:`, and
             // prctl(PR_GET_NAME) all read one source of truth.  Exercise the
-            // sched::{set,copy}_task_name storage layer directly against the
-            // running self-test task, snapshotting and restoring its comm so
-            // the test leaves no side effect:
+            // sched::{set,copy}_task_name storage layer directly, on a task
+            // the test creates for the purpose and removes afterwards:
+            //   - the idle task is refused;
             //   - set installs a new comm, copy reads it back;
             //   - the 15-byte truncation the syscall applies (mirrored here);
             //   - an unknown task id is rejected (returns false).
             {
                 #[inline(never)]
                 fn case() -> crate::error::KernelResult<()> {
+                    /// The named task's body, which never runs: it is created
+                    /// suspended and killed before it is admitted.
+                    extern "C" fn never_runs(_arg: u64) {}
+
                     // Task 0 (the BSP idle task) is deliberately not renameable — its
                     // name is a kernel-owned diagnostic label, not a thread's comm.
-                    // Assert that first, because it is the invariant the rest of this
+                    // Check that first, because it is the invariant the rest of this
                     // block has to work around: these self-tests run in kernel context
                     // where `current_task_id()` is 0, so naming "the current task" is
                     // exactly the call that must be refused.  Before the refusal
                     // existed, a sibling prctl self-test permanently relabelled the
                     // idle task and its name then showed up as the running task in a
                     // liveness hang dump.  See `sched::set_task_name`.
-                    assert!(!crate::sched::set_task_name(0, b"nope"));
-
-                    // Round-trip the storage layer on a real, renameable task rather
-                    // than on `current_task_id()`.  Picking the lowest non-zero id
-                    // makes the choice deterministic across boots, so a failure here
-                    // names the same task every time instead of whichever one happened
-                    // to be scheduled.
-                    let Some(cur) = crate::sched::task_list()
-                        .iter()
-                        .map(|t| t.id)
-                        .filter(|&id| id != 0)
-                        .min()
-                    else {
+                    if crate::sched::set_task_name(0, b"nope") {
                         serial_println!(
-                            "[syscall/linux]   FAIL: no non-idle task exists to exercise \
-                         the PR_SET/GET_NAME storage round-trip"
+                            "[syscall/linux]   FAIL: PR_SET/GET_NAME: the idle task was renamed"
                         );
                         return Err(KernelError::InternalError);
-                    };
+                    }
 
-                    // Snapshot the live task's comm so we can restore it.
-                    let mut saved = [0u8; 32];
-                    let saved_len = crate::sched::copy_task_name(cur, &mut saved);
+                    // The round trip runs on a task of the test's own.  It used to
+                    // borrow the lowest non-zero id in the task table, and at this
+                    // point in the boot every such task is a Dead leftover of an
+                    // earlier self-test, waiting to be reaped -- so the test passed
+                    // only for as long as nothing reaped them, and failed outright
+                    // ("no non-idle task exists") once an earlier test did.
+                    let task = crate::sched::spawn_suspended(b"prctl-comm", 16, never_runs, 0, 0)?;
+                    let result = (|| -> Result<(), &'static str> {
+                        let mut buf = [0u8; 32];
 
-                    // Set then read back.
-                    assert!(crate::sched::set_task_name(cur, b"new-comm"));
-                    let mut buf = [0u8; 32];
-                    let n = crate::sched::copy_task_name(cur, &mut buf);
-                    assert_eq!(buf.get(..n), Some(&b"new-comm"[..]));
+                        // Set then read back.
+                        if !crate::sched::set_task_name(task, b"new-comm") {
+                            return Err("a live task's name could not be set");
+                        }
+                        let n = crate::sched::copy_task_name(task, &mut buf);
+                        if buf.get(..n) != Some(&b"new-comm"[..]) {
+                            return Err("the name set did not read back");
+                        }
 
-                    // 15-byte truncation invariant: the syscall handler truncates
-                    // a 16-byte input to 15 visible bytes before storing (the
-                    // 16th storage byte is the implicit NUL).  Mirror the
-                    // call-site truncation and verify the storage layer keeps it.
-                    let long = b"abcdefghijklmnop"; // 16 bytes
-                    assert_eq!(long.len(), 16);
-                    let truncated = long.get(..15).unwrap_or(&[]);
-                    assert!(crate::sched::set_task_name(cur, truncated));
-                    let mut buf2 = [0u8; 32];
-                    let n2 = crate::sched::copy_task_name(cur, &mut buf2);
-                    assert_eq!(buf2.get(..n2), Some(&b"abcdefghijklmno"[..]));
+                        // 15-byte truncation invariant: the syscall handler
+                        // truncates a 16-byte input to 15 visible bytes before
+                        // storing (the 16th storage byte is the implicit NUL).
+                        // Mirror the call-site truncation and verify the storage
+                        // layer keeps it.
+                        let truncated = b"abcdefghijklmnop".get(..15).unwrap_or(&[]);
+                        if !crate::sched::set_task_name(task, truncated) {
+                            return Err("a 15-byte name could not be set");
+                        }
+                        let n = crate::sched::copy_task_name(task, &mut buf);
+                        if buf.get(..n) != Some(&b"abcdefghijklmno"[..]) {
+                            return Err("a 15-byte name did not read back whole");
+                        }
 
-                    // Unknown task id -> false (no such task to name).
-                    assert!(!crate::sched::set_task_name(u64::MAX, b"nope"));
-                    assert_eq!(crate::sched::copy_task_name(u64::MAX, &mut buf), 0);
-
-                    // Restore the original comm so the running task is unchanged.
-                    let restore = saved.get(..saved_len).unwrap_or(&[]);
-                    assert!(crate::sched::set_task_name(cur, restore));
+                        // Unknown task id -> false (no such task to name).
+                        if crate::sched::set_task_name(u64::MAX, b"nope")
+                            || crate::sched::copy_task_name(u64::MAX, &mut buf) != 0
+                        {
+                            return Err("a task that does not exist was named, or read");
+                        }
+                        Ok(())
+                    })();
+                    crate::sched::kill_task(task);
+                    crate::sched::reap_dead_tasks();
+                    if let Err(why) = result {
+                        serial_println!("[syscall/linux]   FAIL: PR_SET/GET_NAME: {}", why);
+                        return Err(KernelError::InternalError);
+                    }
                     serial_println!(
                         "[syscall/linux]   OK: PR_SET/GET_NAME -> sched task comm round-trip"
                     );
@@ -66483,6 +67079,8 @@ pub fn self_test() -> crate::error::KernelResult<()> {
                     HandleKind::DrmCard => Some(crate::cap::ResourceType::Drm),
                     HandleKind::Evdev => Some(crate::cap::ResourceType::InputDevice),
                     HandleKind::Socket => Some(crate::cap::ResourceType::NetSocket),
+                    HandleKind::Channel => Some(crate::cap::ResourceType::Channel),
+                    HandleKind::ServiceListener => Some(crate::cap::ResourceType::Service),
                     HandleKind::Console | HandleKind::PidFd | HandleKind::AlsaControl => None,
                 }
             };
@@ -94012,6 +94610,224 @@ pub fn self_test() -> crate::error::KernelResult<()> {
                 return Err(KernelError::InternalError);
             }
         }
+        Ok(())
+    }
+
+    self_test_slate_channels()?;
+
+    /// The SlateOS channel descriptors (1000-1004): the gates a kernel task
+    /// meets (it has no descriptor table), then the descriptor machinery
+    /// driven directly with synthetic entries -- one write one message,
+    /// truncation, `EMSGSIZE`, a full queue's `EAGAIN` and its `POLLOUT`
+    /// coming back, a closed peer's `POLLHUP`, end of file and `EPIPE`, an
+    /// end's holder count, and a listener's readiness and holder count.
+    #[inline(never)]
+    fn self_test_slate_channels() -> crate::error::KernelResult<()> {
+        use crate::ipc::channel::{self, MAX_MESSAGE_SIZE};
+        use crate::ipc::service;
+        use crate::serial_println;
+
+        fn fail(what: &str) -> crate::error::KernelResult<()> {
+            serial_println!("[syscall/linux]   FAIL: slate channels: {}", what);
+            Err(KernelError::InternalError)
+        }
+        let args = |arg0: u64, arg1: u64, arg2: u64| SyscallArgs {
+            arg0,
+            arg1,
+            arg2,
+            arg3: 0,
+            arg4: 0,
+            arg5: 0,
+        };
+        let neg = |e: i32| i64::from(e).wrapping_neg();
+        let mut fds = [0u8; 8];
+        let fds_ptr = fds.as_mut_ptr() as u64;
+
+        // -- The gates a kernel task meets ---------------------------------
+        for (nr_, a, want, what) in [
+            (
+                nr::SLATE_CHANNEL_CREATE,
+                args(fds_ptr, 0x1, 0),
+                errno::EINVAL,
+                "create: an unknown flag",
+            ),
+            (
+                nr::SLATE_CHANNEL_CREATE,
+                args(fds_ptr, 0, 0),
+                errno::EBADF,
+                "create: no descriptor table",
+            ),
+            (
+                nr::SLATE_SERVICE_ACCEPT,
+                args(u64::MAX, 0, 0),
+                errno::EBADF,
+                "accept: no such fd",
+            ),
+            (
+                nr::SLATE_SERVICE_ACCEPT,
+                args(3, 0x2, 0),
+                errno::EINVAL,
+                "accept: an unknown flag",
+            ),
+            (
+                nr::SLATE_CHANNEL_PEER_CRED,
+                args(u64::MAX, fds_ptr, 0),
+                errno::EBADF,
+                "peer_cred: no such fd",
+            ),
+            (
+                nr::SLATE_SERVICE_CONNECT,
+                args(fds_ptr, 4, 0x8),
+                errno::EINVAL,
+                "connect: an unknown flag",
+            ),
+        ] {
+            if dispatch_linux(nr_, &a).value != neg(want) {
+                serial_println!(
+                    "[syscall/linux]   FAIL: slate channels: {} was not errno {}",
+                    what,
+                    want
+                );
+                return Err(KernelError::InternalError);
+            }
+        }
+
+        // -- One write, one message ----------------------------------------
+        let (a, b) = channel::create();
+        let a_end = FdEntry::channel(a.raw(), oflags::O_RDWR | oflags::O_NONBLOCK);
+        let b_end = FdEntry::channel(b.raw(), oflags::O_RDWR | oflags::O_NONBLOCK);
+        // Any pointer will do for a write refused on its length alone.
+        let spare = [0u8; 8];
+        let spare_ptr = spare.as_ptr() as u64;
+        let send = |e: FdEntry, bytes: &[u8]| {
+            dispatch_channel_write(e, bytes.as_ptr() as u64, bytes.len() as u64).value
+        };
+        let result = (|| -> Result<(), &'static str> {
+            let recv = |e: FdEntry, cap: u64| {
+                let mut got = [0u8; 64];
+                let n = dispatch_channel_read(e, got.as_mut_ptr() as u64, cap).value;
+                (n, got)
+            };
+            if recv(b_end, 64).0 != neg(errno::EAGAIN) {
+                return Err("an empty channel did not read EAGAIN");
+            }
+            if revents_for_handle(HandleKind::Channel, b.raw(), 0, None) & poll_bits::POLLIN != 0 {
+                return Err("an empty channel was POLLIN");
+            }
+            if send(a_end, b"ab") != 2 || send(a_end, b"cde") != 3 {
+                return Err("two writes were not accepted whole");
+            }
+            if revents_for_handle(HandleKind::Channel, b.raw(), 0, None) & poll_bits::POLLIN == 0 {
+                return Err("a channel with a message waiting was not POLLIN");
+            }
+            let (n, got) = recv(b_end, 64);
+            if n != 2 || got.get(..2) != Some(b"ab".as_slice()) {
+                return Err("the first read was not exactly the first message");
+            }
+            let (n, got) = recv(b_end, 64);
+            if n != 3 || got.get(..3) != Some(b"cde".as_slice()) {
+                return Err("the second read was not exactly the second message");
+            }
+            // A short buffer gets the start, and the rest is dropped.
+            if send(a_end, b"0123456789") != 10 {
+                return Err("a ten-byte write was not accepted");
+            }
+            let (n, got) = recv(b_end, 4);
+            if n != 4 || got.get(..4) != Some(b"0123".as_slice()) {
+                return Err("a short read did not get the message's start");
+            }
+            if recv(b_end, 64).0 != neg(errno::EAGAIN) {
+                return Err("a truncated message's rest was not dropped");
+            }
+            // Over the limit: refused before anything is read.
+            if dispatch_channel_write(a_end, spare_ptr, (MAX_MESSAGE_SIZE + 1) as u64).value
+                != neg(errno::EMSGSIZE)
+            {
+                return Err("a message over the limit was not EMSGSIZE");
+            }
+            // A full queue: EAGAIN, no POLLOUT, and POLLOUT back when a read
+            // makes room.
+            let mut queued = 0usize;
+            while send(a_end, b"x") == 1 {
+                queued = queued.saturating_add(1);
+                if queued > 4096 {
+                    return Err("the queue never filled");
+                }
+            }
+            if send(a_end, b"x") != neg(errno::EAGAIN) {
+                return Err("a full queue's write was not EAGAIN");
+            }
+            if revents_for_handle(HandleKind::Channel, a.raw(), 0, None) & poll_bits::POLLOUT != 0 {
+                return Err("a writer facing a full queue was POLLOUT");
+            }
+            if recv(b_end, 64).0 != 1 {
+                return Err("a full queue did not read");
+            }
+            if revents_for_handle(HandleKind::Channel, a.raw(), 0, None) & poll_bits::POLLOUT == 0 {
+                return Err("a read that made room did not bring POLLOUT back");
+            }
+            // The peer goes: POLLHUP, what was queued, then end of file; and
+            // a write is EPIPE.
+            channel::close(a);
+            let r = revents_for_handle(HandleKind::Channel, b.raw(), 0, None);
+            if r & poll_bits::POLLHUP == 0 || r & poll_bits::POLLIN == 0 {
+                return Err("a closed peer was not POLLHUP | POLLIN");
+            }
+            while recv(b_end, 64).0 == 1 {}
+            if recv(b_end, 64).0 != 0 {
+                return Err("a closed peer did not read as end of file");
+            }
+            if send(b_end, b"late") != neg(errno::EPIPE) {
+                return Err("a write to a closed peer was not EPIPE");
+            }
+            Ok(())
+        })();
+        channel::close(b);
+        if let Err(what) = result {
+            return fail(what);
+        }
+
+        // -- An end with two holders closes with the second ----------------
+        let (c, d) = channel::create();
+        let held = channel::dup(c).is_ok();
+        channel::close(c);
+        let open_after_one = !channel::peer_closed(d);
+        channel::close(c);
+        let closed_after_two = channel::peer_closed(d);
+        channel::close(d);
+        if !held || !open_after_one || !closed_after_two {
+            return fail("an end with two holders did not stay open until the second closed");
+        }
+
+        // -- A listener: readiness, and its holder count -------------------
+        const NAME: &[u8] = b"slate.selftest.listener";
+        let Ok(listener) = service::register(NAME) else {
+            return fail("could not register the test service");
+        };
+        let l_raw = listener.raw();
+        let quiet = revents_for_handle(HandleKind::ServiceListener, l_raw, 0, None);
+        let client = service::connect(NAME);
+        let waiting = revents_for_handle(HandleKind::ServiceListener, l_raw, 0, None);
+        let shared = service::dup_listener(listener).is_ok();
+        let _ = service::unregister(listener); // one holder of two lets go
+        let still = service::is_registered(NAME);
+        let _ = service::unregister(listener); // the last
+        let gone = !service::is_registered(NAME);
+        if let Ok(h) = client {
+            channel::close(h);
+        }
+        if quiet & poll_bits::POLLIN != 0 || waiting & poll_bits::POLLIN == 0 {
+            return fail("a listener's POLLIN did not follow a waiting client");
+        }
+        if !shared || !still || !gone {
+            return fail(
+                "a listener with two holders did not stay registered until the second let go",
+            );
+        }
+
+        serial_println!(
+            "[syscall/linux]   slate channels (1000-1004): gates, messages, truncation, EMSGSIZE, full queue, POLLHUP/EOF/EPIPE, holder counts, listener readiness: OK"
+        );
         Ok(())
     }
 

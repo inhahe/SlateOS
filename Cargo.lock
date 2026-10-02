@@ -4077,13 +4077,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "timeout"
-version = "0.1.0"
-dependencies = [
- "quoting",
-]
-
-[[package]]
 name = "tmux-app"
 version = "0.1.0"
 dependencies = [

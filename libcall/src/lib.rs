@@ -66,7 +66,9 @@ use core::ffi::CStr;
 pub mod conf;
 pub mod inotify;
 pub mod netdb;
+pub mod process;
 pub mod pty;
+pub mod signal;
 pub mod utmp;
 
 // ---------------------------------------------------------------------------
@@ -264,10 +266,17 @@ fn last_errno() -> i32 {
 /// can only tell from failure if it cleared `errno` first.
 #[cfg(unix)]
 fn clear_errno() {
+    set_errno(0);
+}
+
+/// Set this thread's `errno` to `value`: [`clear_errno`]'s general case, and
+/// what [`signal::ErrnoGuard`] puts back when a handler returns.
+#[cfg(unix)]
+fn set_errno(value: i32) {
     // SAFETY: as for `last_errno` -- the pointer is valid, aligned and
     // thread-local for the life of the thread, so writing an `i32` through it
     // is a write to this thread's own `errno` and nothing else.
-    unsafe { *sys::__errno_location() = 0 };
+    unsafe { *sys::__errno_location() = value };
 }
 
 // ---------------------------------------------------------------------------
@@ -618,6 +627,43 @@ fn kill_one(_pid: i32, _sig: i32) -> Result<(), i32> {
     Err(ENOSYS)
 }
 
+/// Send `sig` to every process in this one's process group, this one
+/// included: `kill (0, sig)`.
+///
+/// The broadcast [`kill`] refuses, under a name that says it is one -- the
+/// "differently-named function, on the day something actually wants one" that
+/// [`kill`]'s documentation promised. GNU `timeout` is that day. It makes
+/// itself the leader of a new process group before starting its command, so
+/// that when time runs out one call reaches everything the command has started
+/// too, however deep; signalling the command alone would leave its children
+/// running.
+///
+/// The caller is in the group and receives the signal as well. `timeout`
+/// ignores it first, which is the right precaution for everything but
+/// `SIGKILL` -- which cannot be ignored, and is why `timeout -s KILL` exits
+/// 137 rather than 124: it is killed along with its command.
+///
+/// # Errors
+///
+/// The `errno` set by `kill(2)`: `EINVAL` for a number that is no signal,
+/// `EPERM` when no process in the group may be signalled, and [`ENOSYS`] off
+/// Unix.
+pub fn kill_own_group(sig: i32) -> Result<(), i32> {
+    kill_group_one(sig)
+}
+
+#[cfg(unix)]
+fn kill_group_one(sig: i32) -> Result<(), i32> {
+    // SAFETY: as for `kill_one` -- two scalars, and no memory of ours.
+    let rc = unsafe { sys::kill(0, sig) };
+    if rc == 0 { Ok(()) } else { Err(last_errno()) }
+}
+
+#[cfg(not(unix))]
+fn kill_group_one(_sig: i32) -> Result<(), i32> {
+    Err(ENOSYS)
+}
+
 /// Leave signal `sig` ignored: `signal (sig, SIG_IGN)`.
 ///
 /// Async-signal-safe, so it may run between `fork` and `exec` -- which is what
@@ -854,6 +900,7 @@ mod tests {
         assert_eq!(klog_size(), Err(ENOSYS));
         assert_eq!(klog_read_all(&mut [0u8; 8]), Err(ENOSYS));
         assert_eq!(klog_clear(), Err(ENOSYS));
+        assert_eq!(kill_own_group(SIGTERM), Err(ENOSYS));
         // `sync` has no failure to report on either arm; calling it here
         // asserts only that the host arm exists and does not panic.
         sync();

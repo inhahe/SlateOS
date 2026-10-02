@@ -269,7 +269,7 @@ two disagree.
 | `telnet` | `Slate OS` Telnet Client |  |  |  |
 | `test` | Evaluate a conditional expression. | yes | `coreutils` |  |
 | `time_cmd` | Run a command and report its resource usage. | yes | `coreutils` |  |
-| `timeout` | Run a command with a time limit, for Slate OS |  |  |  |
+| `timeout` | Run a command, and stop it if it is still running after a time limit. |  | `coreutils` |  |
 | `top` | Interactive Process Monitor |  |  |  |
 | `touch` | Create files, and set their access and modification times. | yes | `coreutils` |  |
 | `tput` | Terminal capability tools |  |  | `clear` *(not installed)*, `reset` *(not installed)*, `tset` *(not installed)* |

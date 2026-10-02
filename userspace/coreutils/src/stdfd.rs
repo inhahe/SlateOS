@@ -564,6 +564,23 @@ pub fn diag_bytes(bytes: &[u8]) {
     diag_to(2, bytes);
 }
 
+/// [`diag_bytes`] for a signal handler: the same write, and the same record of
+/// one that failed, without flushing standard output first.
+///
+/// That flush takes the lock around this crate's stdout buffer, and a handler
+/// that interrupted code holding it would wait for itself forever. What is
+/// left is one `write(2)` loop and an atomic store, both safe in a handler.
+///
+/// For `timeout -v`, which announces the signal it is sending from inside the
+/// handler that sends it, as upstream does. Nothing has been written to its
+/// standard output by then, so there is nothing the skipped flush would have
+/// put first.
+pub fn diag_bytes_in_handler(bytes: &[u8]) {
+    if write_all(2, bytes).is_err() {
+        DIAGNOSTIC_LOST.store(true, Ordering::Relaxed);
+    }
+}
+
 /// [`diag_bytes`] with the descriptor spelled out, so that the failure path can
 /// be exercised on a descriptor that is not the test runner's own stderr.
 fn diag_to(fd: i32, bytes: &[u8]) {

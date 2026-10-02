@@ -23,9 +23,9 @@
 //! # The number is read the way `strtod` reads one
 //!
 //! Upstream is `xstrtod (argv[i], &p, &s, cl_strtod)`, and `cl_strtod` is the
-//! C-locale `strtod`. [`coreutils::extfloat::strtod`] is that function, measured
-//! against glibc's by `scripts/extfloat-diff.sh`, and it reports how much of the
-//! input it claimed -- which is the `p` upstream then inspects for a suffix.
+//! C-locale `strtod`. [`coreutils::interval`] is that reading, suffix and all;
+//! it is shared with `timeout`, whose `parse_duration` is the same code copied
+//! into another file upstream.
 //!
 //! It rounds once, at 53 bits, as glibc does. Until 2026-10-01 this read the
 //! 80-bit `strtold` and narrowed the result, which rounds twice and can land a
@@ -43,8 +43,8 @@
 //! the whole command line before the operand loop starts. `sleep abc --help`
 //! likewise prints the help rather than complaining about `abc`.
 
-use coreutils::extfloat;
 use coreutils::getopt::{self, Opt, Program, Report, Takes};
+use coreutils::interval;
 use coreutils::quote::{os_bytes, quote};
 use coreutils::stdfd::{self, Stream};
 use std::ffi::OsString;
@@ -98,53 +98,6 @@ specified by the sum of their values.
 
 // ---------------------------------------------------------------- parsing ---
 
-/// Upstream's `apply_suffix`: what one trailing letter multiplies by.
-///
-/// `None` is upstream's `multiplier == 0`, which is the *only* way a suffix is
-/// rejected -- so an unknown letter and a second letter after a good one are
-/// both `invalid time interval`, and neither says anything about suffixes.
-fn suffix_multiplier(c: u8) -> Option<f64> {
-    match c {
-        b's' => Some(1.0),
-        b'm' => Some(60.0),
-        b'h' => Some(60.0 * 60.0),
-        b'd' => Some(60.0 * 60.0 * 24.0),
-        _ => None,
-    }
-}
-
-/// One operand, as seconds.
-///
-/// `None` is upstream's four-way `||`, collapsed: no conversion at all, a
-/// negative or NaN value, more than one character after the number, or a
-/// trailing character that is not a suffix.
-///
-/// A range error is deliberately *not* a rejection. Upstream writes
-/// `! (xstrtod (…) || errno == ERANGE)`, so `sleep 1e400` pauses forever and
-/// `sleep 1e-400` pauses for no time at all, both successfully.
-fn operand_seconds(arg: &[u8]) -> Option<f64> {
-    let scanned = extfloat::strtod(arg);
-    if scanned.consumed == 0 {
-        return None;
-    }
-    let value = scanned.value;
-    // `0 <= s` upstream, which admits `-0.0` and refuses NaN. Written as two
-    // tests rather than `!(value >= 0.0)` because the negation of a partial
-    // order is the shape that reads as a typo.
-    if value.is_nan() || value < 0.0 {
-        return None;
-    }
-    let multiplier = match arg.get(scanned.consumed..) {
-        None | Some([]) => 1.0,
-        Some(&[c]) => suffix_multiplier(c)?,
-        // Upstream's `*p && *(p+1)`: two or more characters left over is a
-        // rejection before any suffix is looked at, so `1s2` never reaches
-        // `apply_suffix`.
-        Some(_) => return None,
-    };
-    Some(value * multiplier)
-}
-
 /// Parse `sleep`'s argv.
 ///
 /// # Errors
@@ -172,7 +125,7 @@ fn parse_args(args: &[OsString]) -> Result<Request, getopt::Error> {
             // prints the help and exits 0.
             Opt::Long("help", _) => return Ok(Request::Help),
             Opt::Long("version", _) => return Ok(Request::Version),
-            Opt::Operand(arg) => match operand_seconds(&os_bytes(arg.as_os_str())) {
+            Opt::Operand(arg) => match interval::seconds(&os_bytes(arg.as_os_str())) {
                 Some(s) => seconds += s,
                 None => bad.push(format!(
                     "invalid time interval {}",

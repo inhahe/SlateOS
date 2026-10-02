@@ -467,6 +467,9 @@
 //! - [`sum`] — the BSD and System V checksums, for `sum` and for `cksum -a
 //!   bsd` and `-a sysv`.
 //! - [`grouplist`] — the group list `id -G`, `id` and `groups` print.
+//! - [`interval`] — a time interval, `strtod` and an `s`/`m`/`h`/`d` suffix:
+//!   `sleep`'s operands and `timeout`'s durations, which upstream copies
+//!   between the two files.
 //! - [`locale`] — the locale `setlocale (LC_ALL, "")` would select, and
 //!   gnulib's `hard_locale`, for `ls`, `cmp` and `pinky`. Two private copies
 //!   had disagreed about whether `LC_ALL=` is set.
@@ -489,7 +492,9 @@
 //!   --field` (`set-fields.c`).
 //! - [`sig2str`] — gnulib's `sig2str.c`, signal names and numbers in GNU's
 //!   spelling (`POLL` for 29, `RTMIN+2`), for `split --filter`'s report of the
-//!   signal that ended its command.
+//!   signal that ended its command, and coreutils' `operand2sig.c`, for
+//!   `timeout -s` -- with a name that needs no allocation, for `timeout -v`'s
+//!   report from inside a signal handler.
 //! - [`utsname`] — the `uname(2)` answers `uname` and `arch` both print.
 //!
 //! The regex engine, which is the other thing they must not disagree about,
@@ -521,6 +526,7 @@ pub mod getopt;
 pub mod grouplist;
 pub mod hardlink;
 pub mod human;
+pub mod interval;
 pub mod locale;
 pub mod ls;
 pub mod mbswidth;

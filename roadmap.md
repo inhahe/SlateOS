@@ -4886,12 +4886,18 @@ _Port ext4 first. Don't write a custom filesystem._
   which `ere` gained for it along with buffer anchors, newline anchoring and windowed searches);
   `install` (2026-10-02, replacing the standalone `userspace/install`, which was not GNU's; it
   brought `coreutils::mkdirp`, gnulib's `mkdir-p.c`, `mkancesdirs.c` and `dirchownmod.c`, and moved
-  `copy.c`'s `set_mode` into `coreutils::copy`); and `nproc`,
+  `copy.c`'s `set_mode` into `coreutils::copy`); `timeout` (2026-10-02, replacing the standalone
+  `userspace/timeout`, which agreed with GNU on 51 of `scripts/timeout-diff.sh`'s 280 cases to the
+  port's 280: upstream's fork, process group, `sigsuspend` and re-raised signal deaths through the
+  new `libcall::signal` and `libcall::process`, its timer on upstream's `setitimer` arm because
+  SlateOS's `timer_settime` arms nothing, `known-issues/B-POSIX-TIMER-SETTIME-REPORTS-SUCCESS-AND-ARMS-NOTHING.md`;
+  `coreutils::interval` now `sleep`'s and its duration reader, and `coreutils::sig2str` gained
+  `operand2sig`); and `nproc`,
   re-ported because the standalone crate that had it was not GNU's and is retired. The multi-personality crates that answered some of these
   names in part lost those branches (§1005: `getopt` printenv/sync/cksum, `pv` truncate and shred, `nproc` arch/pathchk/users, `shuf` numfmt and factor, `base64` base32, `finger` pinky).
-  **Next:** four 9.4 programs exist here only as standalone crates that were not ported from it,
-  and none is on the image: `timeout`, `chroot`, `who` and `stty`. Each comes into coreutils from
-  the 9.4 source with a harness, as `install` did, and its crate is retired. Beyond those,
+  **Next:** three 9.4 programs exist here only as standalone crates that were not ported from it,
+  and none is on the image: `chroot`, `who` and `stty`. Each comes into coreutils from
+  the 9.4 source with a harness, as `install` and `timeout` did, and its crate is retired. Beyond those,
   **nothing of GNU 9.4 is missing** that has something here to act on. Not ported, for want of what they act on: `chcon`/`runcon` (SELinux contexts) and `stdbuf` (works by
   `LD_PRELOAD` into a dynamically linked program). `[` is `test` under another name and needs only the image alias. None
   ships until lane D lists it: `requests/b-d-new-coreutils-programs-for-the-rootfs-manifest.md`.

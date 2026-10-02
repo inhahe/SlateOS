@@ -1637,7 +1637,7 @@ fn strtol(s: &[u8]) -> (i64, &[u8], bool) {
         if magnitude <= i128::from(i64::MAX) {
             magnitude = magnitude
                 .saturating_mul(10)
-                .saturating_add(i128::from(digit - b'0'));
+                .saturating_add(i128::from(digit.saturating_sub(b'0')));
         }
         at = at.saturating_add(1);
     }
@@ -1647,7 +1647,7 @@ fn strtol(s: &[u8]) -> (i64, &[u8], bool) {
     }
 
     let value = if negative {
-        i64::try_from(-magnitude).unwrap_or(i64::MIN)
+        i64::try_from(magnitude.saturating_neg()).unwrap_or(i64::MIN)
     } else {
         i64::try_from(magnitude).unwrap_or(i64::MAX)
     };

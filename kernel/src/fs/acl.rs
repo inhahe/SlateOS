@@ -31,12 +31,15 @@
 //! ## Storage
 //!
 //! **In memory only.** ACLs live in this module's table and nowhere else: they
-//! do not survive a reboot, and nothing reads or writes the
-//! `system.posix_acl_access` xattr that Linux keeps them in. (This section
-//! used to say they were stored there, with the table as a cache; no code ever
-//! did that.) The xattr is where they belong -- it would make an ACL persist,
-//! and end with its inode -- and `known-issues.md`
-//! `A-PER-FILE-STATE-OUTLIVED-ITS-FILE` records that as the long-term home.
+//! do not survive a reboot. A program reaches them through the
+//! `system.posix_acl_access` extended attribute, as on Linux -- `setfacl` and
+//! `getfacl` -- which the VFS answers from this table and writes into it (the
+//! ACL door, `vfs::acl_door_*`, design-decisions §1527), but no filesystem
+//! stores that attribute. (This section once said they were stored there, with
+//! the table as a cache; no code ever did that.) The filesystem's xattr is
+//! where they belong -- it would make an ACL persist, and end with its inode --
+//! and `known-issues.md` `A-PER-FILE-STATE-OUTLIVED-ITS-FILE` records that as
+//! the long-term home.
 //!
 //! The table is keyed on the file's identity, so it has to be told when a
 //! file goes: an ext4 inode number is reused by the next file created, and an
@@ -231,7 +234,7 @@ struct AclInner {
 /// traditional permissions"), so the protection simply did not apply under
 /// the other name.
 ///
-/// That was not exploitable when it was found -- there is no ACL syscall, so
+/// That was not exploitable when it was found -- there was no ACL syscall, so
 /// only a `kshell` command can put an entry in this table at all -- and the
 /// reason to fix it anyway is that it is pre-positioned: adding
 /// `SYS_ACL_SET` later would arm it, and the new syscall would look correct
@@ -733,6 +736,362 @@ pub fn format_acl(acl: &Acl, mask: Option<AclPerm>) -> Vec<String> {
 }
 
 // ---------------------------------------------------------------------------
+// The Linux door: `system.posix_acl_access`
+// ---------------------------------------------------------------------------
+//
+// Linux keeps a file's ACL in the extended attribute `system.posix_acl_access`,
+// and `getfacl`/`setfacl` reach it there. The VFS (`Vfs::xattr_*`) answers that
+// name from this table rather than from the filesystem, through the functions
+// below: the codec, and get/set/remove by an identity the VFS already has, so
+// they can run under the filesystem's lock without calling back into the VFS.
+
+/// The xattr's name.
+pub const XATTR_ACCESS: &[u8] = b"system.posix_acl_access";
+/// The default ACL's xattr name: not kept here (no default ACLs), so refused.
+pub const XATTR_DEFAULT: &[u8] = b"system.posix_acl_default";
+
+/// `POSIX_ACL_XATTR_VERSION`.
+const XATTR_VERSION: u32 = 2;
+/// `ACL_UNDEFINED_ID`: the id of an entry that names no one.
+const UNDEFINED_ID: u32 = u32::MAX;
+// Linux's `e_tag` values.
+const TAG_USER_OBJ: u16 = 0x01;
+const TAG_USER: u16 = 0x02;
+const TAG_GROUP_OBJ: u16 = 0x04;
+const TAG_GROUP: u16 = 0x08;
+const TAG_MASK: u16 = 0x10;
+const TAG_OTHER: u16 = 0x20;
+
+/// An ACL as the xattr's bytes: Linux's `posix_acl_xattr_header` (version 2,
+/// little-endian) and one 8-byte `posix_acl_xattr_entry` per entry, in the
+/// ACL's order.
+#[must_use]
+pub fn encode_xattr(acl: &Acl) -> Vec<u8> {
+    let mut out = Vec::new();
+    out.extend_from_slice(&XATTR_VERSION.to_le_bytes());
+    for e in &acl.entries {
+        let (tag, id) = match e.tag {
+            AclTag::UserObj => (TAG_USER_OBJ, UNDEFINED_ID),
+            AclTag::User(uid) => (TAG_USER, uid),
+            AclTag::GroupObj => (TAG_GROUP_OBJ, UNDEFINED_ID),
+            AclTag::Group(gid) => (TAG_GROUP, gid),
+            AclTag::Mask => (TAG_MASK, UNDEFINED_ID),
+            AclTag::Other => (TAG_OTHER, UNDEFINED_ID),
+        };
+        out.extend_from_slice(&tag.to_le_bytes());
+        out.extend_from_slice(&u16::from(e.perm.0 & 7).to_le_bytes());
+        out.extend_from_slice(&id.to_le_bytes());
+    }
+    out
+}
+
+/// The xattr's bytes as an ACL, refused as Linux's `posix_acl_from_xattr`
+/// and `posix_acl_valid` refuse it.
+///
+/// # Errors
+///
+/// `InvalidArgument` (`EINVAL`) for: a length that is not a header and whole
+/// entries; a version other than 2; an unknown tag; a permission outside
+/// `rwx`; entries out of Linux's order (owner, named users, owning group,
+/// named groups, mask, other) or missing one of the three every ACL has; a
+/// named entry without a mask. (A mask with no named entry is allowed, as
+/// Linux allows it.)
+pub fn decode_xattr(bytes: &[u8]) -> KernelResult<Acl> {
+    let body = bytes.get(4..).ok_or(KernelError::InvalidArgument)?;
+    let version = bytes
+        .get(..4)
+        .and_then(|b| <[u8; 4]>::try_from(b).ok())
+        .map(u32::from_le_bytes)
+        .ok_or(KernelError::InvalidArgument)?;
+    let entries_raw = body.chunks_exact(8);
+    if version != XATTR_VERSION || !entries_raw.remainder().is_empty() {
+        return Err(KernelError::InvalidArgument);
+    }
+    let mut entries = Vec::new();
+    for raw in entries_raw {
+        let half = |b: Option<&[u8]>| b.and_then(|b| <[u8; 2]>::try_from(b).ok());
+        let (Some(tag), Some(perm), Some(id)) = (
+            half(raw.get(0..2)).map(u16::from_le_bytes),
+            half(raw.get(2..4)).map(u16::from_le_bytes),
+            raw.get(4..8)
+                .and_then(|b| <[u8; 4]>::try_from(b).ok())
+                .map(u32::from_le_bytes),
+        ) else {
+            return Err(KernelError::InvalidArgument);
+        };
+        if perm & !7 != 0 {
+            return Err(KernelError::InvalidArgument);
+        }
+        let tag = match tag {
+            TAG_USER_OBJ => AclTag::UserObj,
+            TAG_USER => AclTag::User(id),
+            TAG_GROUP_OBJ => AclTag::GroupObj,
+            TAG_GROUP => AclTag::Group(id),
+            TAG_MASK => AclTag::Mask,
+            TAG_OTHER => AclTag::Other,
+            _ => return Err(KernelError::InvalidArgument),
+        };
+        entries.push(AclEntry {
+            tag,
+            perm: AclPerm(u8::try_from(perm).map_err(|_| KernelError::InvalidArgument)?),
+        });
+    }
+    let acl = Acl { entries };
+    validate_order(&acl)?;
+    Ok(acl)
+}
+
+/// Linux's `posix_acl_valid`: the entries in its order -- the owner, named
+/// users, the owning group, named groups, the mask, the others -- each of the
+/// three base entries once, and a mask wherever there is a named entry.
+fn validate_order(acl: &Acl) -> KernelResult<()> {
+    #[derive(PartialEq)]
+    enum State {
+        UserObj,
+        User,
+        Group,
+        Other,
+        Done,
+    }
+    let mut state = State::UserObj;
+    let mut needs_mask = false;
+    for e in &acl.entries {
+        state = match (e.tag, &state) {
+            (AclTag::UserObj, State::UserObj) => State::User,
+            (AclTag::User(_), State::User) => {
+                needs_mask = true;
+                State::User
+            }
+            (AclTag::GroupObj, State::User) => State::Group,
+            (AclTag::Group(_), State::Group) => {
+                needs_mask = true;
+                State::Group
+            }
+            (AclTag::Mask, State::Group) => State::Other,
+            (AclTag::Other, State::Other) => State::Done,
+            (AclTag::Other, State::Group) if !needs_mask => State::Done,
+            _ => return Err(KernelError::InvalidArgument),
+        };
+    }
+    if state == State::Done {
+        Ok(())
+    } else {
+        Err(KernelError::InvalidArgument)
+    }
+}
+
+/// The mode bits an ACL means: the owner's from its owner entry, the group's
+/// from its mask when it has one (the owning group's otherwise), the others'
+/// from its other entry -- Linux's `posix_acl_equiv_mode` and
+/// `posix_acl_update_mode`. The bits above `0o777` are `mode`'s, kept.
+#[must_use]
+pub fn mode_of(acl: &Acl, mode: u16) -> u16 {
+    let perm = |tag: AclTag| {
+        acl.entries
+            .iter()
+            .find(|e| e.tag == tag)
+            .map_or(0, |e| u16::from(e.perm.0 & 7))
+    };
+    let group = if acl.entries.iter().any(|e| e.tag == AclTag::Mask) {
+        perm(AclTag::Mask)
+    } else {
+        perm(AclTag::GroupObj)
+    };
+    (mode & !0o777)
+        | perm(AclTag::UserObj).wrapping_shl(6)
+        | group.wrapping_shl(3)
+        | perm(AclTag::Other)
+}
+
+/// Whether the ACL says nothing the mode cannot: the three base entries and
+/// no more. Linux stores no ACL then, only the mode it means
+/// (`posix_acl_equiv_mode` answering 0).
+#[must_use]
+pub fn is_minimal(acl: &Acl) -> bool {
+    acl.entries
+        .iter()
+        .all(|e| matches!(e.tag, AclTag::UserObj | AclTag::GroupObj | AclTag::Other))
+}
+
+/// An ACL with the mode `mode` written into it, as Linux's `posix_acl_chmod`
+/// writes a chmod into a file's ACL: the owner entry, the mask (or, without
+/// one, the owning group's entry) and the other entry take the mode's three
+/// sets of bits; named entries keep theirs, limited by the new mask.
+#[must_use]
+pub fn with_mode(acl: &Acl, mode: u16) -> Acl {
+    let has_mask = acl.entries.iter().any(|e| e.tag == AclTag::Mask);
+    let bits = |shift: u32| AclPerm(u8::try_from(mode.wrapping_shr(shift) & 7).unwrap_or(0));
+    let entries = acl
+        .entries
+        .iter()
+        .map(|e| {
+            let perm = match e.tag {
+                AclTag::UserObj => bits(6),
+                AclTag::Mask => bits(3),
+                AclTag::GroupObj if !has_mask => bits(3),
+                AclTag::Other => bits(0),
+                _ => e.perm,
+            };
+            AclEntry { tag: e.tag, perm }
+        })
+        .collect();
+    Acl { entries }
+}
+
+/// The ACL of the file with identity `id` (or, where its filesystem gives
+/// none, named `path`): [`get_acl`] for a caller that has the identity
+/// already -- the VFS, under the filesystem's lock, which must not call back
+/// into the VFS as `get_acl` does.
+#[must_use]
+pub fn get_acl_for(id: Option<crate::fs::vfs::FileId>, path: &Path) -> Option<Acl> {
+    if count() == 0 {
+        return None;
+    }
+    let key = key_from(id, path);
+    ACLS.lock().acls.get(&key).map(|(_, acl)| acl.clone())
+}
+
+/// Store `acl` for the file with identity `id` (or named `path`), as
+/// [`set_acl`] does; validated as the xattr door validates it.
+///
+/// # Errors
+///
+/// `InvalidArgument` for an ACL out of Linux's order or missing an entry.
+pub fn set_acl_for(id: Option<crate::fs::vfs::FileId>, path: &Path, acl: Acl) -> KernelResult<()> {
+    validate_order(&acl)?;
+    let key = key_from(id, path);
+    let mut inner = ACLS.lock();
+    inner.acls.insert(key, (path.to_path_buf(), acl));
+    ACL_COUNT.store(inner.acls.len(), Ordering::Relaxed);
+    Ok(())
+}
+
+/// Drop the ACL of the file with identity `id` (or named `path`); whether
+/// there was one.
+pub fn remove_acl_for(id: Option<crate::fs::vfs::FileId>, path: &Path) -> bool {
+    if count() == 0 {
+        return false;
+    }
+    let key = key_from(id, path);
+    let mut inner = ACLS.lock();
+    let removed = inner.acls.remove(&key).is_some();
+    ACL_COUNT.store(inner.acls.len(), Ordering::Relaxed);
+    removed
+}
+
+/// The door's codec and ACL-and-mode arithmetic, alone: what
+/// `vfs::self_test_acl_door` stands on.
+///
+/// # Errors
+///
+/// `InternalError` naming the first case that answered wrongly.
+pub fn self_test_xattr() -> KernelResult<()> {
+    let named = build_acl(
+        AclPerm::ALL,
+        AclPerm(5),
+        AclPerm(4),
+        &[(1000, AclPerm(6))],
+        &[(50, AclPerm(4))],
+    );
+    // Round trip, and the bytes Linux would write for it.
+    let bytes = encode_xattr(&named);
+    let back = decode_xattr(&bytes)?;
+    let expected_len = named
+        .entries
+        .len()
+        .checked_mul(8)
+        .and_then(|n| n.checked_add(4));
+    if back.entries != named.entries || Some(bytes.len()) != expected_len {
+        serial_println!("[acl]   FAIL: the xattr round trip changed the ACL");
+        return Err(KernelError::InternalError);
+    }
+    if bytes.get(..4) != Some(&2u32.to_le_bytes()[..])
+        || bytes.get(12..14) != Some(&TAG_USER.to_le_bytes()[..])
+        || bytes.get(16..20) != Some(&1000u32.to_le_bytes()[..])
+    {
+        serial_println!("[acl]   FAIL: the xattr is not Linux's layout: {:?}", bytes);
+        return Err(KernelError::InternalError);
+    }
+    // Refusals: each a way setfacl's input could be malformed.
+    let mut wrong_version = bytes.clone();
+    if let Some(v) = wrong_version.get_mut(0) {
+        *v = 1;
+    }
+    let minimal = encode_xattr(&from_mode(0o640));
+    let mut no_mask = encode_xattr(&build_acl(
+        AclPerm::ALL,
+        AclPerm(5),
+        AclPerm(4),
+        &[(1000, AclPerm(6))],
+        &[],
+    ));
+    // Cut the mask entry (the one before the last) out.
+    let len = no_mask.len();
+    no_mask.drain(len.saturating_sub(16)..len.saturating_sub(8));
+    let mut out_of_order = minimal.clone();
+    // Swap the owner and other entries: bytes 4..12 and 20..28.
+    for k in 4..12_usize {
+        out_of_order.swap(k, k.saturating_add(16));
+    }
+    let mut bad_perm = minimal.clone();
+    if let Some(p) = bad_perm.get_mut(6) {
+        *p = 8;
+    }
+    let refusals: [(&str, &[u8]); 6] = [
+        ("no header", &[]),
+        (
+            "a ragged entry",
+            bytes.get(..bytes.len().saturating_sub(1)).unwrap_or(&[]),
+        ),
+        ("version 1", &wrong_version),
+        ("a named entry and no mask", &no_mask),
+        ("other before owner", &out_of_order),
+        ("a permission outside rwx", &bad_perm),
+    ];
+    for (what, input) in refusals {
+        if decode_xattr(input).map(|_| ()) != Err(KernelError::InvalidArgument) {
+            serial_println!("[acl]   FAIL: {} was accepted", what);
+            return Err(KernelError::InternalError);
+        }
+    }
+    // The mode an ACL means, and a chmod written back into one.
+    let checks = [
+        (
+            "mode of a minimal ACL",
+            mode_of(&from_mode(0o640), 0o100_000),
+            0o100_640,
+        ),
+        // The mask is the union of the group's and the named entries': rwx.
+        ("mode of a masked ACL", mode_of(&named, 0o644), 0o774),
+        (
+            "chmod into a masked ACL",
+            mode_of(&with_mode(&named, 0o710), 0),
+            0o710,
+        ),
+    ];
+    for (what, got, want) in checks {
+        if got != want {
+            serial_println!("[acl]   FAIL: {}: {:o}, want {:o}", what, got, want);
+            return Err(KernelError::InternalError);
+        }
+    }
+    let chmodded = with_mode(&named, 0o710);
+    let kept = chmodded
+        .entries
+        .iter()
+        .find(|e| e.tag == AclTag::User(1000))
+        .map(|e| e.perm);
+    if kept != Some(AclPerm(6)) || !is_minimal(&from_mode(0o600)) || is_minimal(&named) {
+        serial_println!("[acl]   FAIL: a chmod moved a named entry, or minimality is wrong");
+        return Err(KernelError::InternalError);
+    }
+    serial_println!(
+        "[acl]   xattr door: Linux's layout both ways, six malformed inputs refused, the mode an ACL means and a chmod written into one: OK"
+    );
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
 // Self-test
 // ---------------------------------------------------------------------------
 
@@ -1194,7 +1553,9 @@ pub fn self_test() -> KernelResult<()> {
             }
         }
     }
+    // Test 13: the xattr door's codec and mode arithmetic.
+    self_test_xattr()?;
     skips.report("acl");
-    serial_println!("[acl] Self-test passed (12 tests){}", skips.suffix());
+    serial_println!("[acl] Self-test passed (13 tests){}", skips.suffix());
     Ok(())
 }

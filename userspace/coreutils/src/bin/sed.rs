@@ -1324,7 +1324,8 @@ fn strverscmp(a: &[u8], b: &[u8]) -> Ordering {
     // it is a byte lower than every digit, so a string that ends is less than
     // one that carries on. Reading past the end as 0 reproduces that.
     let at = |s: &[u8], i: usize| -> u8 { s.get(i).copied().unwrap_or(0) };
-    let class = |c: u8| -> usize { usize::from(c == b'0') + usize::from(c.is_ascii_digit()) };
+    let class =
+        |c: u8| -> usize { usize::from(c == b'0').saturating_add(usize::from(c.is_ascii_digit())) };
     let sign = |d: i32| -> Ordering {
         if d < 0 {
             Ordering::Less
@@ -1338,7 +1339,7 @@ fn strverscmp(a: &[u8], b: &[u8]) -> Ordering {
     let mut c1 = at(a, 0);
     let mut c2 = at(b, 0);
     let mut state = S_N.saturating_add(class(c1));
-    let mut diff = i32::from(c1) - i32::from(c2);
+    let mut diff = i32::from(c1).saturating_sub(i32::from(c2));
     while diff == 0 {
         if c1 == 0 {
             return Ordering::Equal;
@@ -1349,7 +1350,7 @@ fn strverscmp(a: &[u8], b: &[u8]) -> Ordering {
         c1 = at(a, p1);
         c2 = at(b, p2);
         state = state.saturating_add(class(c1));
-        diff = i32::from(c1) - i32::from(c2);
+        diff = i32::from(c1).saturating_sub(i32::from(c2));
     }
 
     match RESULT_TYPE
@@ -3579,6 +3580,9 @@ fn locate(script: &[u8], segments: &[Segment], pos: Pos) -> Option<Vec<u8>> {
         }
         Origin::File(name) => {
             let counted = script.get(seg.start..at).unwrap_or_default();
+            // Once, for one diagnostic, over one script: the `bytecount`
+            // crate's speed would be a dependency bought for nothing.
+            #[allow(clippy::naive_bytecount)]
             let line = counted
                 .iter()
                 .filter(|&&b| b == b'\n')

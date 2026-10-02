@@ -340,11 +340,11 @@ enum Outcome {
 /// The old and new modes are printed both in octal and as `rwxrwxrwx`, which is
 /// the whole reason `-v` is worth having: `4644` and `0644` differ by a bit that
 /// the octal makes easy to miss and that the `S` in `rwSr--r--` does not.
-fn describe_change(file: &OsStr, outcome: Outcome, old_mode: u32, new_mode: u32) -> Option<String> {
+fn describe_change(file: &OsStr, outcome: Outcome, old_mode: u32, new_mode: u32) -> String {
     let quoted = quoteaf_os(file);
     let old_m = old_mode & modechange::CHMOD_MODE_BITS;
     let new_m = new_mode & modechange::CHMOD_MODE_BITS;
-    Some(match outcome {
+    match outcome {
         Outcome::NotApplied => {
             format!("neither symbolic link {quoted} nor referent has been changed")
         }
@@ -363,7 +363,7 @@ fn describe_change(file: &OsStr, outcome: Outcome, old_mode: u32, new_mode: u32)
             permission_string(old_mode),
             permission_string(new_mode)
         ),
-    })
+    }
 }
 
 /// GNU's surprise check, for a mode written as option letters.
@@ -551,10 +551,8 @@ mod imp {
                     quoteaf_os(path),
                     strerror(&e)
                 ));
-                if job.settings.verbosity == Verbosity::High
-                    && let Some(line) = describe_change(path.as_os_str(), Outcome::NoStat, 0, 0)
-                {
-                    job.say(&line);
+                if job.settings.verbosity == Verbosity::High {
+                    job.say(&describe_change(path.as_os_str(), Outcome::NoStat, 0, 0));
                 }
                 return;
             }
@@ -563,10 +561,13 @@ mod imp {
         // A link below the top level is left alone entirely — see the module
         // docs. `-v` still says so, as GNU does.
         if !top_level && meta.file_type().is_symlink() {
-            if job.settings.verbosity == Verbosity::High
-                && let Some(line) = describe_change(path.as_os_str(), Outcome::NotApplied, 0, 0)
-            {
-                job.say(&line);
+            if job.settings.verbosity == Verbosity::High {
+                job.say(&describe_change(
+                    path.as_os_str(),
+                    Outcome::NotApplied,
+                    0,
+                    0,
+                ));
             }
             return;
         }
@@ -621,11 +622,15 @@ mod imp {
             }
         }
 
-        if (job.settings.verbosity == Verbosity::High
-            || (job.settings.verbosity == Verbosity::ChangesOnly && outcome == Outcome::Succeeded))
-            && let Some(line) = describe_change(path.as_os_str(), outcome, old_mode, new_mode)
+        if job.settings.verbosity == Verbosity::High
+            || (job.settings.verbosity == Verbosity::ChangesOnly && outcome == Outcome::Succeeded)
         {
-            job.say(&line);
+            job.say(&describe_change(
+                path.as_os_str(),
+                outcome,
+                old_mode,
+                new_mode,
+            ));
         }
 
         if !job.settings.recursive || !is_dir {
@@ -958,15 +963,15 @@ mod tests {
     #[test]
     fn a_change_is_described_in_octal_and_in_letters() {
         assert_eq!(
-            describe_change(OsStr::new("f"), Outcome::Succeeded, 0o644, 0o755).unwrap(),
+            describe_change(OsStr::new("f"), Outcome::Succeeded, 0o644, 0o755),
             "mode of 'f' changed from 0644 (rw-r--r--) to 0755 (rwxr-xr-x)"
         );
         assert_eq!(
-            describe_change(OsStr::new("f"), Outcome::NoChangeRequested, 0o755, 0o755).unwrap(),
+            describe_change(OsStr::new("f"), Outcome::NoChangeRequested, 0o755, 0o755),
             "mode of 'f' retained as 0755 (rwxr-xr-x)"
         );
         assert_eq!(
-            describe_change(OsStr::new("f"), Outcome::Failed, 0o644, 0o755).unwrap(),
+            describe_change(OsStr::new("f"), Outcome::Failed, 0o644, 0o755),
             "failed to change mode of 'f' from 0644 (rw-r--r--) to 0755 (rwxr-xr-x)"
         );
     }
@@ -975,7 +980,7 @@ mod tests {
     #[test]
     fn a_setuid_bit_shows_as_an_s_in_the_execute_column() {
         assert_eq!(
-            describe_change(OsStr::new("f"), Outcome::Succeeded, 0o644, 0o4644).unwrap(),
+            describe_change(OsStr::new("f"), Outcome::Succeeded, 0o644, 0o4644),
             "mode of 'f' changed from 0644 (rw-r--r--) to 4644 (rwSr--r--)"
         );
     }
@@ -983,11 +988,11 @@ mod tests {
     #[test]
     fn a_link_and_an_unreadable_file_have_their_own_wordings() {
         assert_eq!(
-            describe_change(OsStr::new("l"), Outcome::NotApplied, 0, 0).unwrap(),
+            describe_change(OsStr::new("l"), Outcome::NotApplied, 0, 0),
             "neither symbolic link 'l' nor referent has been changed"
         );
         assert_eq!(
-            describe_change(OsStr::new("f"), Outcome::NoStat, 0, 0).unwrap(),
+            describe_change(OsStr::new("f"), Outcome::NoStat, 0, 0),
             "'f' could not be accessed"
         );
     }

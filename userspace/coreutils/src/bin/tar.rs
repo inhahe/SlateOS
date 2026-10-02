@@ -937,7 +937,7 @@ fn parse_record_size(value: &OsStr) -> Result<u64, getopt::Error> {
     let size = parse_decimal(digits)
         .and_then(|n| n.checked_mul(scale))
         .ok_or_else(invalid)?;
-    if size % BLOCK_SIZE as u64 != 0 {
+    if !size.is_multiple_of(BLOCK_SIZE as u64) {
         return Err(usage_error(
             "Record size must be a multiple of 512.".to_string(),
         ));
@@ -1127,7 +1127,7 @@ fn explode_old_option(args: &[OsString]) -> Result<Vec<OsString>, getopt::Error>
     if letters.first() == Some(&b'-') {
         return Ok(args.to_vec());
     }
-    let mut out = Vec::with_capacity(args.len() + letters.len());
+    let mut out = Vec::with_capacity(args.len().saturating_add(letters.len()));
     let mut rest = args.get(1..).unwrap_or_default().iter();
     for &letter in letters {
         out.push(os_from_bytes(&[b'-', letter]));
@@ -1165,7 +1165,7 @@ fn takes_a_value(letter: u8) -> bool {
     let spec = option_letters().as_bytes();
     spec.iter()
         .position(|&b| b == letter)
-        .is_some_and(|i| spec.get(i + 1) == Some(&b':'))
+        .is_some_and(|i| spec.get(i.saturating_add(1)) == Some(&b':'))
 }
 
 /// The full option list, on stdout, for `-?` and `--help`.
@@ -3240,8 +3240,11 @@ fn report_stop(stop: Stop, label: &[u8]) -> i32 {
 
 /// Number of 512-byte blocks a member of `size` bytes occupies.
 fn data_blocks(size: u64) -> u64 {
-    size.saturating_add(BLOCK_SIZE as u64 - 1)
-        .saturating_div(BLOCK_SIZE as u64)
+    // The divisor is the constant 512, so the division always happens.
+    const BLOCK: u64 = BLOCK_SIZE as u64;
+    size.saturating_add(BLOCK - 1)
+        .checked_div(BLOCK)
+        .unwrap_or(0)
 }
 
 /// Consume and discard a member's data blocks so the next header is read from
@@ -4409,11 +4412,13 @@ impl Located {
     }
 
     /// A no-op: there are no symlinks here to stamp.
+    #[allow(clippy::unnecessary_wraps)] // The signature is the unix arm's.
     fn set_symlink_mtime(&self, _mtime: i64) -> io::Result<()> {
         Ok(())
     }
 
     /// A no-op off unix, where there are no permission bits to set.
+    #[allow(clippy::unnecessary_wraps)] // The signature is the unix arm's.
     fn set_mode(&self, _mode: u32) -> io::Result<()> {
         Ok(())
     }

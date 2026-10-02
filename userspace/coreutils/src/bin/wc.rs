@@ -116,11 +116,16 @@ impl Options {
     /// together in exactly this way, because one count of one input is printed
     /// with no padding at all.
     fn selected(self) -> usize {
-        usize::from(self.lines)
-            + usize::from(self.words)
-            + usize::from(self.chars)
-            + usize::from(self.bytes)
-            + usize::from(self.max_line)
+        [
+            self.lines,
+            self.words,
+            self.chars,
+            self.bytes,
+            self.max_line,
+        ]
+        .into_iter()
+        .filter(|&on| on)
+        .count()
     }
 }
 
@@ -378,7 +383,7 @@ fn long_option(
         // rather than resolving to `--debug` alone.
         "debug" => {}
         "total" => {
-            options.total = WC.argmatch(&value.unwrap_or_default(), "--total", TOTAL_WORDS)?
+            options.total = WC.argmatch(&value.unwrap_or_default(), "--total", TOTAL_WORDS)?;
         }
         "files0-from" => *files0_from = Some(os_from_bytes(&value.unwrap_or_default())),
         "help" => return Ok(Some(Request::Help)),

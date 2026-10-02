@@ -2955,7 +2955,16 @@ one that says nothing at exactly that moment.
 The existing docstring's care about `var_os` versus `var` stays relevant: a tty
 name is a path under `/dev` and may not be UTF-8.
 
-## TD-B-MKTEMPS-ACCOUNT-LOOKUPS-CANNOT-TELL-ABSENT-FROM-UNREADABLE (lane B, 2026-09-11)
+## TD-B-MKTEMPS-ACCOUNT-LOOKUPS-CANNOT-TELL-ABSENT-FROM-UNREADABLE (lane B, 2026-09-11) — **CLOSED** 2026-10-02
+
+**Status:** CLOSED 2026-10-02 — the crate is gone. `userspace/mktemp` was
+deleted when `mktemp` became coreutils 9.4's port, and `id`, `whoami` and
+`groups` had already been coreutils' (`userspace/coreutils/src/bin/id.rs` and
+its neighbours) since §1005. Those ports also read an unreadable database as an
+empty one, and that is upstream's behaviour rather than this defect again:
+glibc's `getpwnam` answers NULL when `/etc/passwd` cannot be read, and `id.c`
+turns any NULL into `'alice': no such user` without consulting `errno`. The
+four `mktemp:` lines left `scripts/read-defaults-baseline.txt` with the crate.
 
 **In short:** `userspace/mktemp` -- which is also `id`, `whoami` and `groups` --
 reads `/etc/passwd` and `/etc/group` with `Err(_) => return Vec::new()`. An
@@ -78953,6 +78962,11 @@ gnulib's three rendering choices (soft hyphen 0, prepended concatenation marks 1
 Hangul Jamo Extended-B 0) and UAX #11's defaults for unassigned code points.
 `--compare` against a dump of either upstream lists every code point where it
 differs; the entry below is kept as the record of how the question was measured.
+**One visible consequence, found 2026-10-02:** GNU `ls` measures names with
+glibc's `wcwidth`, not gnulib's `uc_width`, so the soft hyphen is one column
+there and zero here. `scripts/ls-diff.sh`'s two `y/shy<U+00AD>` cases had gone
+red with the table (sorted first by `--sort=width`, one row at `-C -w 22`
+where GNU makes two) and are deliberate differences now, citing §1042.
 
 > **Measured 2026-09-12, and it dwarfs the 626 this is blocked on.** Our own
 > terminal (`apps/terminal`) has **no notion of character width at all**: it
@@ -181066,7 +181080,9 @@ is `B-D-XATTR-SIZES-AND-BUFFERS-WERE-NOT-LINUXS`).
 **Not changed:** a name stored before this under no namespace is left on
 disk, neither listed nor read.
 
-### A-XATTR-ACLS-NOT-REACHABLE-AS-ATTRIBUTES -- 2026-10-01 -- OPEN (lane A)
+### A-XATTR-ACLS-NOT-REACHABLE-AS-ATTRIBUTES -- 2026-10-01 -- FIXED (lane A)
+
+**Status:** FIXED on lane-a-wip 2026-10-02, awaiting a boot, as the fix below describes it (design-decisions §1527): the VFS answers `system.posix_acl_access` from `fs::acl` and writes it there, with the mode rules; `vfs::self_test_acl_door` covers it. The default ACL is its own entry now, `A-NO-DEFAULT-ACLS`.
 
 **In short:** on Linux, a file's POSIX ACL is also an extended attribute,
 `system.posix_acl_access` (and `system.posix_acl_default` for a
@@ -181867,6 +181883,27 @@ and lane D's `mkdirat` use -- belongs to root, whoever made it: the path-based
 **Proper fix:** call `init_new_owner` under the same guard as the creation,
 as `mkdir_mode` and `symlink` do, with the set-group-ID directory rule.
 
+### A-NO-DEFAULT-ACLS -- 2026-10-02 -- OPEN (lane A)
+
+**Status:** OPEN (lane A) -- the half of
+`A-XATTR-ACLS-NOT-REACHABLE-AS-ATTRIBUTES` that its fix left.
+
+**In short:** on Linux a directory can carry a *default* ACL, which every
+file made in it inherits as its own ACL (`setfacl -d`). Here `fs::acl` keeps
+no default ACLs, so `system.posix_acl_default` answers "Operation not
+supported", as on a Linux filesystem mounted without them: `setfacl -d`
+says so, and `cp -a` or `tar --acls` of a directory with one drops it.
+
+**Where:** `kernel/src/fs/acl.rs` (one ACL per file); the creation paths in
+`kernel/src/fs/vfs.rs` (`write_file_resolved`, `mkdir_mode`, the pinned
+creates, `create_unnamed_object`), which would apply it.
+
+**Proper fix:** a second ACL per directory in the table; the xattr door
+answering `system.posix_acl_default` from it; and every creation in a
+directory with one giving the new file the default as its access ACL (a new
+directory also as its default), the creation mode masked by it -- Linux's
+`posix_acl_create`.
+
 ## Lane B: new entries
 
 Lane B (userland) appends new entries at the end of this section, above the
@@ -182460,6 +182497,118 @@ changes nothing about text -- option A?). The answer decides this entry:
 
 Until then the tools read UTF-8 as `osh` does by the operator's §104, and `tac`
 alone reads bytes under `LC_ALL=C` -- the reading B would give everything.
+
+## `shuf` shuffled its own way, so `--random-source` reproduced nothing; it is GNU's now (lane B, 2026-10-02) — **FIXED** 2026-10-02
+
+**In short:** `userspace/shuf` was written by hand: its own shuffle, its own
+reading of the options, and argv read as `String` (a file name that was not
+UTF-8 killed it before its first statement). `--random-source=FILE` exists so
+that a run can be reproduced, and with a different shuffle it reproduced
+nothing GNU's would. It is replaced by `coreutils/src/bin/shuf.rs`, a port of
+GNU coreutils 9.4's `shuf.c` with gnulib's `randperm` beside it and `randint`
+from `coreutils::randint` (already ported for `shred`), and the standalone
+crate is deleted (§1005). `scripts/shuf-diff.sh`: 89 cases, none differing
+from GNU's -- full permutations, head counts, reservoir samples and sparse
+samples all identical from the same random bytes.
+
+**What the port had to reproduce, because it is observable:**
+
+- `-n` with input whose size is unknown (a pipe) or over 8 MiB samples a
+  reservoir, which draws one random number per line past the head *and one
+  more* -- so `cat f | shuf -n 2` and `shuf -n 2 f` print different lines
+  from one random source.
+- gnulib's permutation keeps its swaps in a hash table for a large range
+  sampled sparsely (`n >= 131072`, `n / h >= 32`), and a step that swaps an
+  element with itself after it was moved loses the moved value there; the
+  dense algorithm does not. Reproduced, since the output is the point.
+- `-i 5-4` is an empty range and `-i 6-4` an error; `-n` beyond any count is
+  no limit; `-o FILE` is opened after the input is read, so `shuf -o f f`
+  works in place; a write failure is reported with its reason by
+  `write_error`, once.
+
+## `mktemp` was one personality of a hand-written four; it is GNU's now (lane B, 2026-10-02) — **FIXED** 2026-10-02
+
+**In short:** `userspace/mktemp` was a "multi-personality utility: mktemp / id /
+groups / whoami". The other three duplicated coreutils' own `id`, `groups` and
+`whoami`, and nothing linked to them; the `mktemp` read argv as `String` (a
+template that was not UTF-8 killed it before its first statement) and its
+options its own way. It is replaced by `coreutils/src/bin/mktemp.rs`, a port of
+GNU coreutils 9.4's `mktemp.c` with gnulib's `gen_tempname_len`,
+`last_component` and `file_name_concat`, and the crate is deleted (§1005).
+`scripts/mktemp-diff.sh`: 58 cases, none differing from GNU's -- the random
+characters turned back into X's, and what was made compared instead (type,
+permissions, nothing made by `-u` or by a run whose output failed).
+
+**What the port had to reproduce, because it is observable:** the X's are the
+last run before the suffix, the suffix everything after the last `X` unless
+`--suffix` says otherwise; `-t` ranks `$TMPDIR` above `-p`'s directory and `-p`
+ranks it below; `-t` refuses a template with a slash and `-p` an absolute
+one; `-u` makes nothing but still requires the name to be free; and a name
+that cannot be printed takes its file with it, with `write error` and its
+reason.
+
+## `fmt` filled lines greedily, so its breaks were not GNU's; it is GNU's now (lane B, 2026-10-02) — **FIXED** 2026-10-02
+
+**In short:** `userspace/fmt` was a hand-written "simple text formatter". It
+read argv as `String` (a file name that was not UTF-8 killed it before its
+first statement), and it filled each line as full as it would go, where GNU
+chooses all of a paragraph's breaks at once by minimising a cost -- so on any
+paragraph of more than a line the output differed. It is replaced by
+`coreutils/src/bin/fmt.rs`, a port of GNU coreutils 9.4's `fmt.c`, and the
+crate is deleted (§1005). `scripts/fmt-diff.sh`: 187 cases, none differing
+from GNU's -- most of them real prose (coreutils' README, NEWS, manual and the
+comments of its sources) at many widths and goals in every mode, and three of
+them 300 seeded random texts formatted with random options. A scratch run of
+1500 more random texts agreed byte for byte as well.
+
+**What the port had to reproduce, because it is observable:**
+
+- the cost function, constant for constant: a line costs the square of its
+  distance from the goal (93% of the width) and half the square of its
+  difference from the next; breaks are cheaper after a sentence or other
+  punctuation and before an opening bracket, dearer after a period that
+  ends no sentence, before a sentence's last word and after its first; and
+  no line but a single word reaches the width itself (`fmt -w 10` will not
+  print a ten-column line);
+- the 1000-word and 5000-byte paragraph limits: past either, the paragraph
+  is printed to a cheap break and continued, its continuation's first line
+  indented as the paragraph's first; a word over 5000 bytes is printed raw;
+- one tab anywhere in a file's white space switches the output to tabs for
+  the rest of that file;
+- `fmt DIR` says `fmt: read error` and nothing more -- upstream hands the
+  name to a format string with no place for it -- and `fmt <&-` adds
+  `closing standard input: Bad file descriptor`, which needed
+  `stdfd::close_stdin` (and `stdfd::close`, for an input whose close fails).
+
+## TD-B-DIFF-CHOOSES-ITS-OWN-EDIT-SCRIPT (lane B, 2026-10-02)
+
+**In short:** our `diff` finds *a* shortest set of changes between two files,
+but not the one GNU `diff` prints. On random pairs of small files it prints
+something different from GNU diffutils 3.10 about half the time (503 of 1000
+seeded pairs) -- other lines marked as changed, hunks placed elsewhere, and
+`-c` marking a hunk's changes `!` where GNU marks separate `-` and `+`. Both
+outputs are correct diffs; only GNU's is the one scripts, `patch` fuzz and
+anyone comparing outputs expect.
+
+**Where.** `userspace/coreutils/src/bin/diff.rs`: `lcs_diff` (a textbook LCS
+table, up to 10,000 lines a side) and `myers_diff` (above that), and the
+hunk and context printers. GNU's choice comes from `analyze.c` -- gnulib's
+`diffseq.h` (Myers with its heuristics and the middle-snake split), then
+`discard_confusing_lines` before and `shift_boundaries` after, which slides
+each run of changes to a canonical place -- and `context.c`'s grouping of a
+hunk's changes. None of that is reproduced, and `scripts/diff-diff.sh`'s
+200 hand-written cases are too simple to show it.
+
+**Repro:** `target/drafts/diff-fuzz.py` (scratch; random pairs from a small
+vocabulary, random modes) -- e.g. `a b a b b` against `a b`: GNU `3,5d2`,
+ours `1,2d0` then `4d1`.
+
+**The proper fix** is to port GNU diffutils 3.10's `diff` the way coreutils'
+utilities were ported here: `analyze.c`, `diffseq.h`, `io.c` (line hashing
+and equivalence classes), `context.c`, `normal.c`, `ed.c`, `ifdef.c`,
+`side.c`, `util.c` and `diff.c`'s option handling, with the fuzz above turned
+into a harness case. Found by fuzzing `diff` against GNU while clearing its
+clippy warnings; next in lane B's queue.
 
 ## Lane C: new entries
 

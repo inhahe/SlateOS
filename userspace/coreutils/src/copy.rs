@@ -3024,6 +3024,7 @@ fn set_mode(path: &Path, mode: u32) -> io::Result<()> {
 /// what POSIX is asking for; doing nothing is the honest answer. The target OS
 /// is the `#[cfg(unix)]` arm above.
 #[cfg(not(unix))]
+#[allow(clippy::unnecessary_wraps)] // The signature is the unix arm's.
 fn set_mode(_path: &Path, _mode: u32) -> io::Result<()> {
     Ok(())
 }

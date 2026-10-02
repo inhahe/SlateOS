@@ -876,7 +876,7 @@ fn process_optimisation_option(arg: &[u8]) -> Result<(), Leading> {
     }
     // `strtoul` overflow, then the `USHRT_MAX` ceiling. Both refuse; only the
     // wording differs, and only the second one names the level.
-    let Some(level) = level.filter(|l| *l <= u64::from(u16::MAX)) else {
+    let Some(level) = level.filter(|l| u16::try_from(*l).is_ok()) else {
         return Err(Leading::Die(match level {
             Some(l) => format!(
                 "Optimisation level {l} is too high.  If you want to find files very quickly, \
@@ -2480,7 +2480,9 @@ fn compile_format(fmt: &[u8], warnings: &mut Vec<String>) -> Parsed<Vec<Seg>> {
                             .copied()
                         {
                             Some(o) if (b'0'..=b'7').contains(&o) => {
-                                n = n.wrapping_mul(8).wrapping_add(u32::from(o - b'0'));
+                                n = n
+                                    .wrapping_mul(8)
+                                    .wrapping_add(u32::from(o.wrapping_sub(b'0')));
                                 k = k.saturating_add(1);
                             }
                             _ => break,
@@ -3055,7 +3057,7 @@ fn parse_spec(spec: &[u8], conv: u8) -> extfloat::Spec {
         }
         width = width
             .saturating_mul(10)
-            .saturating_add(usize::from(b - b'0'));
+            .saturating_add(usize::from(b.saturating_sub(b'0')));
         i = i.saturating_add(1);
     }
     out.width = width;
@@ -3068,7 +3070,7 @@ fn parse_spec(spec: &[u8], conv: u8) -> extfloat::Spec {
             }
             prec = prec
                 .saturating_mul(10)
-                .saturating_add(usize::from(b - b'0'));
+                .saturating_add(usize::from(b.saturating_sub(b'0')));
             i = i.saturating_add(1);
         }
         out.precision = Some(prec);
@@ -3765,7 +3767,8 @@ fn render_ls(
 fn ts_difference(a: Ts, b: Ts) -> f64 {
     #[allow(clippy::cast_precision_loss)]
     {
-        (a.sec as f64 - b.sec as f64) + 1.0e-9 * (i64::from(a.nsec) - i64::from(b.nsec)) as f64
+        (a.sec as f64 - b.sec as f64)
+            + 1.0e-9 * i64::from(a.nsec).saturating_sub(i64::from(b.nsec)) as f64
     }
 }
 
@@ -4212,9 +4215,9 @@ impl Ctx<'_> {
                         return false;
                     }
                     let mut sec = m.ctime.sec.saturating_sub(m.atime.sec);
-                    let mut nsec = i64::from(m.ctime.nsec) - i64::from(m.atime.nsec);
+                    let mut nsec = i64::from(m.ctime.nsec).saturating_sub(i64::from(m.atime.nsec));
                     if nsec < 0 {
-                        nsec += 1_000_000_000;
+                        nsec = nsec.saturating_add(1_000_000_000);
                         sec = sec.saturating_sub(1);
                     }
                     let delta = Ts {

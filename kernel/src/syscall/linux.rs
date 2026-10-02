@@ -51595,10 +51595,12 @@ pub fn self_test_xattr_calls() -> crate::error::KernelResult<()> {
             call(set, [p(&file), p(&bare), p(hello), 1, 0]),
             err(errno::EINVAL),
         )?;
+        // The ACL's name reaches the ACL table, which parses the value: one
+        // byte is no ACL, `EINVAL` as on Linux (`posix_acl_from_xattr`).
         check(
-            "an ACL's name",
+            "an ACL's name with no ACL in it",
             call(set, [p(&file), p(&acl), p(hello), 1, 0]),
-            err(errno::EOPNOTSUPP),
+            err(errno::EINVAL),
         )?;
         check(
             "a 255-byte name",

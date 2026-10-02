@@ -91,7 +91,7 @@ two disagree.
 | `finger` | User information lookup |  |  |  |
 | `fio` | A flexible I/O tester for SlateOS. |  |  |  |
 | `flock` | Manage file locks from shell scripts. |  |  |  |
-| `fmt` | `fmt` Utility -- Simple Text Formatter |  |  |  |
+| `fmt` | Fill and join lines into paragraphs of a given width. |  | `coreutils` |  |
 | `fold` | Wrap each input line to fit in a given width. | yes | `coreutils` |  |
 | `free` | Report the amount of free and used memory in the system. | yes | `coreutils` |  |
 | `fsck` | Filesystem Check and Repair Utility |  |  |  |
@@ -170,7 +170,7 @@ two disagree.
 | `mkfifo` | Make FIFOs (named pipes). | yes | `coreutils` |  |
 | `mkfs` | Create Filesystems |  |  |  |
 | `mknod` | Make block or character special files, or FIFOs. |  | `coreutils` |  |
-| `mktemp` | Multi-Personality Utility: mktemp / id / groups / whoami |  |  |  |
+| `mktemp` | Create a temporary file or directory, safely, and print its name. |  | `coreutils` |  |
 | `monctl` | Monitor/Display Control Utility |  |  |  |
 | `more` | File perusal filter for viewing text one screen at a time. | yes | `coreutils` |  |
 | `mount` | Mount/Umount Utility |  |  |  |
@@ -239,7 +239,7 @@ two disagree.
 | `sha512sum` | Print or check SHA-512 (512-bit) checksums. |  | `coreutils` |  |
 | `shell` | Toolchain validation program — exercises key std features to verify our custom Rust target and POSIX sysroot work correctly. |  |  |  |
 | `shred` | Overwrite files so their contents are harder to recover, and optionally delete them. |  | `coreutils` |  |
-| `shuf` | Randomly permute lines, or select random lines. |  |  |  |
+| `shuf` | Write a random permutation of the input lines. |  | `coreutils` |  |
 | `sleep` | Pause for a length of time. | yes | `coreutils` |  |
 | `sort` | Sort, merge or check lines of text. | yes | `coreutils` |  |
 | `split` | Split a file into pieces. | yes | `coreutils` |  |

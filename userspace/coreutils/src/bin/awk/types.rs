@@ -386,7 +386,7 @@ impl Pass {
                 self.stmt(ctx, body);
             }
             Stmt::ForIn { var, array, body } => {
-                self.lvalue(ctx, var);
+                self.mark(ctx, *var, Use::Scalar);
                 self.mark(ctx, *array, Use::Array);
                 self.stmt(ctx, body);
             }

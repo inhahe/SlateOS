@@ -45,7 +45,8 @@
 //! | [`value`] | the strnum rule: a field that looks like a number compares as one, a program literal never does |
 //! | [`fmt`] | C's `printf` over bytes |
 //! | [`io`] | records (three `RS` modes) and redirections |
-//! | [`interp`] | the tree-walking interpreter |
+//! | [`compile`] | the parsed program to instructions, in gawk's order and with gawk's lines |
+//! | [`interp`] | the running program's state, and the loop that runs the instructions |
 //!
 //! ## Text is bytes
 //!
@@ -61,9 +62,8 @@
 //! `scripts/awk-diff.sh` runs both awks over the same inputs and requires them
 //! to agree. The cases it exempts are recorded there with their reasons, and
 //! the script reports one that stops differing. Most are these — each a
-//! decision, not an omission; the rest are gaps of ours (a statement that
-//! spans lines is placed on its first, where gawk names the operator's),
-//! tracked in `known-issues.md`.
+//! decision, not an omission; the rest are gaps of ours, tracked in
+//! `known-issues.md` (B-AWK-GAWK-FIDELITY-SWEEP).
 //!
 //! A diagnostic says where it happened as gawk's does: `awk: cmd. line:2:
 //! (FILENAME=f FNR=7) fatal: ...`, the program's line (or `prog.awk:2:` for a
@@ -100,6 +100,7 @@
 //! here, not a non-match; see [`interp`]'s `From<ere::MatchLimit> for Fatal`.
 
 mod ast;
+mod compile;
 mod fmt;
 mod interp;
 mod io;

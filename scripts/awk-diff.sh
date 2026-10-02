@@ -153,6 +153,12 @@ run_side() {
   local side=$1 stdin=$2 out=$3 err=$4; shift 4
   local flags=
   [ "$side" = gnu ] && flags=$GNUFLAGS
+  # The self-check (`OURS=/usr/bin/gawk`, see the header) runs gawk on both
+  # sides, and it must be the same gawk: without `--posix` on this side too,
+  # every row about a `--posix` behaviour -- `\y` as a literal, a
+  # backslash-newline in a string being fatal, a directory operand being an
+  # error -- would differ for a reason that has nothing to do with the harness.
+  [ "$side" = ours ] && [ -n "${OURS:-}" ] && flags=$GNUFLAGS
   if [ "$stdin" = "-" ]; then
     # shellcheck disable=SC2086
     diff_run timeout -k 2 30 env PATH="$bindir/$side:/usr/bin:/bin" awk $flags "$@" \
@@ -729,6 +735,91 @@ END { print "end" }' /definitely/not/here
 fmsg_case 'BEGIN { x = 1 }
 END { print NR }' /definitely/not/here
 fmsg_case '{ nextfile }' abc.txt /definitely/not/here
+
+# --- what the tree walk got wrong --------------------------------------------
+# Until 2026-10-01 the interpreter walked the parsed tree; it runs compiled
+# instructions now (compile.rs, interp/run.rs). Every row here differed then.
+#
+# Recursion: the walk recursed natively once per awk call, so 3000 calls deep
+# was a stack overflow, exit 134. gawk's frames are on the heap; ours are too.
+fmsg_case 'function f(n) { return n ? f(n-1) : 7 } BEGIN { print f(3000) }'
+fmsg_case 'function f(n) { return n ? f(n-1) : 7 } BEGIN { print f(30000) }'
+# `exit`, `next` and `nextfile` from inside a function. The walk could not
+# carry them out through the expression that made the call: `exit` printed an
+# empty `awk: ` line and exited 2, `next` was ignored.
+fmsg_case 'function f() { exit 3 } BEGIN { f(); print "no" }'
+fmsg_case 'function f() { exit 4 } { f() } END { print "end" }' abc.txt
+fmsg_case 'function f() { exit 5 } END { f(); print "no" }' abc.txt
+fmsg_case 'function f() { exit 6 } f() { print "no" } END { print "end" }' abc.txt
+fmsg_case 'function f() { next } { f(); print "no" } END { print NR }' abc.txt
+fmsg_case 'function f() { next } f() { print "no" } { print "yes" }' abc.txt
+fmsg_case 'function f() { nextfile } { print; f() } END { print NR }' abc.txt abc.txt
+fmsg_case 'function f() { next } BEGIN { f() }'
+fmsg_case 'function f() { next } END { f() }' abc.txt
+fmsg_case 'function f() { nextfile } BEGIN { f() }'
+# A read-modify-write evaluates its target once: the walk read `a[i++]` and
+# then wrote a second `a[i++]`.
+fmsg_case 'BEGIN { i = 1; a[i++] += 5; for (k in a) print k, a[k]; print "i=" i }'
+fmsg_case 'BEGIN { i = 1; a[i++]++; for (k in a) print k, a[k]; print "i=" i }'
+fmsg_case 'BEGIN { i = 1; ++a[i++]; for (k in a) print k, a[k]; print "i=" i }'
+msg_case abc '{ i = 1; $(i++) += 0; print; print "i=" i }'
+fmsg_case 'BEGIN { i = 1; a[1] = "xx"; sub(/x/, "y", a[i++]); for (k in a) print k, a[k]; print "i=" i }'
+# gawk's order of evaluation: a print's redirection before its arguments, an
+# assignment's value before its target, a `getline` target before the read.
+wfile_case 'a print evaluates its redirection first' 'BEGIN { i = 1; print i++ > ("out" i ".txt") }'
+fmsg_case 'BEGIN { i = 1; a[i++] = i; for (k in a) print k, a[k] }'
+fmsg_case 'BEGIN { i = 1; r = (getline a[i++] < "/definitely/not/here"); print r, i }'
+# A statement that spans lines is placed on the line of the operation that
+# failed, the instruction's line, as gawk places it.
+fmsg_case 'BEGIN {
+  if (1 &&
+      1/z) print }'
+fmsg_case 'BEGIN { print 1,
+ 1/z }'
+fmsg_case 'NR==1,
+1/z { print }' abc.txt
+fmsg_case 'BEGIN { x = 1
+ if (x &&
+     "q" ~ "\\q") print "m" }'
+fmsg_case 'BEGIN { for (i = 0;
+  i < 1/z; i++) print i }'
+fmsg_case 'BEGIN { printf "%d %d\n", 1,
+ 1/z }'
+fmsg_case 'BEGIN { do { x++ }
+ while (1/z) }'
+# Wordings the walk had its own way of saying.
+fmsg_case 'BEGIN { x = 4
+ x /= z }'
+fmsg_case 'BEGIN { x = 4
+ x %= z }'
+fmsg_case 'BEGIN { x = 4; x /= 0 }'
+fmsg_case 'BEGIN { x = 1 }
+{ print $(-1) }' abc.txt
+fmsg_case '{ print $(-0.5) }' abc.txt
+fmsg_case '{ x = 1
+ NF = -1 }' abc.txt
+# More arguments than a function declares: gawk warns on every such call --
+# placed at the call, after what was printed before it -- and drops the
+# extras, which it has evaluated.
+fmsg_case 'function f(a) { return a }
+BEGIN { print f(1, 2); print f(3, 4, 5) }'
+fmsg_case 'function f(a) { return a }
+BEGIN { x = f(1,
+ 2) ; print f(1/z) }'
+fmsg_case 'function f(a) { return a }
+BEGIN { print f(1, i++); print i }'
+fmsg_case 'function f(a) { return a }
+BEGIN { b[1] = 1; print f(1, b) }'
+# Plain `getline` that reaches an operand that will not open is fatal, as the
+# main loop is; it was -1.
+fmsg_case 'NR == 3 { r = getline line; print "r=" r }' abc.txt /definitely/not/here
+fmsg_case 'BEGIN { r = getline; print "r=" r }' /definitely/not/here
+# A directory operand is refused as it is opened, not when it is read.
+fmsg_case '{ print }' /
+fmsg_case '{ print }' abc.txt /
+# `exit`'s status is C's conversion of the value, so 1e30 is 0.
+fmsg_case 'BEGIN { exit 1e30 }'
+fmsg_case 'BEGIN { exit -1 }'
 
 # --- errors -----------------------------------------------------------------
 # Parse errors: only *whether* there was a diagnostic is compared.

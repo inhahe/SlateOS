@@ -399,16 +399,13 @@ impl Parser {
                 prog.end.extend(body);
             } else if self.peek() == &Tok::LBrace {
                 self.action = Action::Rule;
-                let loc = self.loc_here();
                 let action = self.block()?;
                 prog.rules.push(Rule {
                     pattern: Pattern::Always,
                     action: Some(action),
-                    loc,
                 });
             } else {
                 self.action = Action::Rule;
-                let loc = self.loc_here();
                 let first = self.expr(false)?;
                 let pattern = if self.eat(&Tok::Comma) {
                     self.skip_newlines();
@@ -424,11 +421,7 @@ impl Parser {
                 } else {
                     None
                 };
-                prog.rules.push(Rule {
-                    pattern,
-                    action,
-                    loc,
-                });
+                prog.rules.push(Rule { pattern, action });
             }
             self.skip_terms();
         }
@@ -725,7 +718,7 @@ impl Parser {
             && self.peek_at(3) == &Tok::RParen
         {
             self.i = self.i.saturating_add(4);
-            let var = Lvalue::Var(self.var(&n));
+            let var = self.var(&n);
             let array = self.var(&arr);
             self.skip_newlines();
             self.loop_depth = self.loop_depth.saturating_add(1);

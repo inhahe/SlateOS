@@ -316,6 +316,16 @@ impl Outputs {
         Some(finish(sink))
     }
 
+    /// Flush standard output alone: what gawk's `err()` does before it writes
+    /// a diagnostic (`fflush(output_fp)`), so that a warning lands after the
+    /// lines printed before it when both go to one place.
+    ///
+    /// # Errors
+    /// Propagates the flush failure.
+    pub fn flush_stdout(&mut self) -> io::Result<()> {
+        self.stdout.flush()
+    }
+
     /// Flush everything, or just one target.
     ///
     /// # Errors

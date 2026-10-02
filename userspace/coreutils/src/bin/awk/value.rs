@@ -311,7 +311,10 @@ fn trim_blanks(s: &[u8]) -> &[u8] {
     clippy::arithmetic_side_effects,
     // The values compared are exactly representable; an epsilon would only
     // hide a conversion that came out a bit off.
-    clippy::float_cmp
+    clippy::float_cmp,
+    // The expected values are written as gawk printed them with `%.17g`,
+    // which is the point of them, not the shortest literal for the `f64`.
+    clippy::excessive_precision
 )]
 mod tests {
     use super::*;

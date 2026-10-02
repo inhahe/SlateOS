@@ -232,8 +232,9 @@ pub enum Stmt {
         step: Option<Box<Stmt>>,
         body: Box<Stmt>,
     },
+    /// `for (var in array)`: POSIX allows only a name for `var`.
     ForIn {
-        var: Lvalue,
+        var: VarRef,
         array: VarRef,
         body: Box<Stmt>,
     },
@@ -263,9 +264,6 @@ pub struct Rule {
     pub pattern: Pattern,
     /// `None` means the default action, `{ print }`.
     pub action: Option<Vec<Stmt>>,
-    /// Where the rule begins, which is where a diagnostic raised while its
-    /// pattern is evaluated points.
-    pub loc: Loc,
 }
 
 #[derive(Clone, Debug)]

@@ -88519,7 +88519,7 @@ indistinguishable from a hang — which is correct, because that description als
 fits a hang. The remaining false-positive risk is a long stretch of pure
 arithmetic over a fixed buffer, which no rung currently does.
 
-## TD-AWK-RUNTIME-DIAGNOSTICS-CARRY-NO-SOURCE-LOCATION (lane B, 2026-08-24) — **open**
+## TD-AWK-RUNTIME-DIAGNOSTICS-CARRY-NO-SOURCE-LOCATION (lane B, 2026-08-24) — **FIXED** 2026-10-01
 
 **In short:** when an `awk` program dies partway through — a division by zero,
 say — we print `awk: fatal: division by zero attempted` and stop. gawk prints
@@ -88591,6 +88591,12 @@ agrees now rather than being special-cased. **Left:** gawk's line is the
 so is `print 1,\n 1/z` — so a statement that spans lines can still be
 placed on its first line where gawk names a later one. That needs a location
 on every expression node, which is the next change.
+
+**Status: FIXED 2026-10-01.** Every expression node now carries its token's
+line, and the program is compiled to instructions that each carry one, run by
+a loop that updates the current line at every instruction as gawk's
+`interpret.h` does (`design-decisions.md` §1056) -- so placement is gawk's
+for multi-line statements too. `awk-diff.sh` has the multi-line rows.
 
 #### TD-A-SED-KEPT-TWO-COPIES-OF-ITS-TRANSFORM-LOOP (lane A, 2026-08-25) — ✅ FIXED (`5e523d20a`)
 
@@ -179744,7 +179750,7 @@ rather than to a boolean, and measure every row in `find-diff.sh`.
 
 ## B-AWK-GAWK-FIDELITY-SWEEP -- 33 ways our awk and gawk --posix part, three of them losing data (lane B, 2026-10-01) — **open**
 
-**Status:** OPEN — the worklist below; each row is closed by the commit that fixes it. **FIXED so far:** 5, 16, 28 (2026-10-01, the parser half: the print list, `next` in BEGIN/END, constant zero divisors).
+**Status:** OPEN — the worklist below; each row is closed by the commit that fixes it. **FIXED so far:** 5, 16, 28 (the parser half: the print list, `next` in BEGIN/END, constant zero divisors); 1, 2, 3, 6, 11, 12, 13, 17, 18, 25, 26, 29, 31 (compiling to instructions, §1056: recursion, `exit`/`next` through calls, one evaluation of a read-modify-write target, gawk's `^`, `getline` and directory operands, the reworded fatals, extra arguments, multi-line placement, stdout flushed before a warning). All 2026-10-01.
 
 **In short:** four probe batches of `awk` against `gawk --posix` (about 230
 programs, `target/drafts/loc-probe*.sh`) found real bugs well beyond the

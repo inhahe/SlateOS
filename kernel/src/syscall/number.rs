@@ -6240,6 +6240,29 @@ pub const SCHED_AFFINITY_THREAD: u64 = 1;
 /// Chosen number 1102, the next free slot after 1101.
 pub const SYS_PROCESS_GET_PHDR: u64 = 1102;
 
+/// Whether the process at the other end of a service connection holds that
+/// service's key -- the "system-issued key" a service may require before it
+/// serves (design-decisions §1518: the credential service will not reveal a
+/// password to a program without one).
+///
+/// - `arg0`: a channel handle the caller holds -- for a service, the end it
+///   accepted.
+///
+/// A key is a `(Service, key_id(name), READ)` capability for the service's
+/// own name; the channel remembers which service it was made to, so the
+/// caller never names the key and cannot be made to check another
+/// service's. The peer is the process the kernel recorded at connect time,
+/// and it must still hold its end, so a pid that has since been reused by
+/// another process does not answer for it.
+///
+/// Returns 1 (the peer holds the key) or 0. Errors: `NotFound` for a channel
+/// not made by connecting to a service, or whose peer has no recorded
+/// identity; `InvalidHandle` / `PermissionDenied` for a handle the caller
+/// does not hold.
+///
+/// Chosen number 1103, the next free slot after 1102.
+pub const SYS_CHANNEL_PEER_HAS_KEY: u64 = 1103;
+
 // ---------------------------------------------------------------------------
 // Version info
 // ---------------------------------------------------------------------------

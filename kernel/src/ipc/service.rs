@@ -370,6 +370,9 @@ pub fn connect(name: &[u8]) -> KernelResult<ChannelHandle> {
 
     // Create a fresh channel pair: client_ep ↔ server_ep.
     let (client_ep, server_ep) = channel::create();
+    // Which service it is a connection to, for the key check
+    // (`SYS_CHANNEL_PEER_HAS_KEY`). A fresh channel has none, so this holds.
+    let _ = channel::set_service_key(client_ep, key_id(name));
 
     // Snapshot the connecting process onto its own end *before* the server
     // end becomes reachable.  Both queueing paths below (`entry.pending`
@@ -704,6 +707,27 @@ pub fn provider_pid(name: &[u8]) -> Option<u64> {
         return None;
     }
     Some(entry.provider_pid)
+}
+
+/// The key id of the service named `name`: the `resource_id` of a
+/// `(ResourceType::Service, key_id(name), Rights::READ)` capability -- the
+/// "system-issued key" a program must hold to be served by a service that
+/// asks for one (design-decisions 1518; the credential service is the
+/// first).
+///
+/// FNV-1a over the name's bytes, 64 bits, with 0 -- the class-wide id --
+/// mapped to 1, so a key is always for one name. Deterministic and public,
+/// so whoever grants keys at spawn computes the same id: the id names a key,
+/// it does not *make* one -- a capability table entry is the key, and only a
+/// holder may hand it on.
+#[must_use]
+pub fn key_id(name: &[u8]) -> u64 {
+    const OFFSET: u64 = 0xcbf2_9ce4_8422_2325;
+    const PRIME: u64 = 0x0000_0100_0000_01b3;
+    let hash = name
+        .iter()
+        .fold(OFFSET, |h, &b| (h ^ u64::from(b)).wrapping_mul(PRIME));
+    if hash == 0 { 1 } else { hash }
 }
 
 /// Give a listener one more holder: a Linux-ABI listener descriptor copied

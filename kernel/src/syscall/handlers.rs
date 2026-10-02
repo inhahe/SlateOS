@@ -8596,6 +8596,51 @@ pub fn sys_signal_get_ignored(
     }
 }
 
+/// Whether the process at the other end of `handle` -- a connection made to
+/// a service -- holds that service's key: a `(Service, key_id, READ)`
+/// capability for the name the channel was made to
+/// ([`crate::ipc::service::key_id`]), while it still holds its end of the
+/// channel. Shared by `SYS_CHANNEL_PEER_HAS_KEY` and the Linux ABI's
+/// `slate_channel_peer_has_key`.
+///
+/// # Errors
+///
+/// `NotFound`: the channel was not made by connecting to a service, or its
+/// peer has no recorded identity.
+pub(crate) fn peer_holds_key(handle: crate::ipc::channel::ChannelHandle) -> KernelResult<bool> {
+    use crate::ipc::channel;
+    let key = channel::service_key(handle).ok_or(KernelError::NotFound)?;
+    let peer = channel::peer_cred(handle).ok_or(KernelError::NotFound)?;
+    // The recorded process must still hold its end: one that exited, and
+    // whose pid another process has taken since, holds no end of this
+    // channel and answers nothing.
+    let holds_end = pcb::owns_ipc_handle(peer.pid, ResourceType::Channel, handle.peer_end().raw());
+    Ok(holds_end
+        && pcb::has_capability_for(
+            peer.pid,
+            ResourceType::Service,
+            key,
+            crate::cap::Rights::READ,
+        ))
+}
+
+/// `SYS_CHANNEL_PEER_HAS_KEY` (1103) — whether a service connection's peer
+/// holds the service's key. See
+/// [`SYS_CHANNEL_PEER_HAS_KEY`](super::number::SYS_CHANNEL_PEER_HAS_KEY).
+pub fn sys_channel_peer_has_key(
+    args: &super::dispatch::SyscallArgs,
+) -> super::dispatch::SyscallResult {
+    use super::dispatch::SyscallResult;
+    let handle = crate::ipc::channel::ChannelHandle::from_raw(args.arg0);
+    if let Err(e) = require_ipc_handle(ResourceType::Channel, handle.raw()) {
+        return SyscallResult::err(e);
+    }
+    match peer_holds_key(handle) {
+        Ok(holds) => SyscallResult::ok(i64::from(holds)),
+        Err(e) => SyscallResult::err(e),
+    }
+}
+
 /// `SYS_PROCESS_GET_PHDR` (1102) — where the caller's main image's program
 /// headers are. See
 /// [`SYS_PROCESS_GET_PHDR`](super::number::SYS_PROCESS_GET_PHDR).

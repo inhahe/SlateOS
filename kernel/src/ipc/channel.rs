@@ -151,6 +151,14 @@ impl ChannelHandle {
         (self.0 & 1) as usize
     }
 
+    /// The other end of the same channel.
+    #[must_use]
+    pub fn peer_end(self) -> Self {
+        // `peer_side()` is 0 or 1, so the cast is exact.
+        #[allow(clippy::cast_possible_truncation)]
+        Self::new(self.channel_id(), self.peer_side() as u8)
+    }
+
     /// The other side's index (0 ↔ 1).
     #[allow(clippy::arithmetic_side_effects)]
     fn peer_side(self) -> usize {
@@ -368,6 +376,13 @@ struct Channel {
     /// before the service handles it can still be identified.
     creds: [Option<PeerCred>; 2],
 
+    /// The key id of the service this channel was made to by
+    /// [`super::service::connect`] (`service::key_id` of its name), or `None`
+    /// for a channel from `channel_create`. What
+    /// `SYS_CHANNEL_PEER_HAS_KEY` checks the peer for: the service never
+    /// names the key itself, so it cannot be made to check another's.
+    service_key: Option<u64>,
+
     /// How many holders each side has: 1 when made, one more for each
     /// [`dup`] -- a channel end held by two processes after a `fork`, as a
     /// Linux-ABI descriptor is. [`close`] drops one, and the side closes with
@@ -401,6 +416,7 @@ impl Channel {
             sync: false,
             rendezvous_slots: [None, None],
             creds: [None, None],
+            service_key: None,
             refs: [1, 1],
         }
     }
@@ -415,6 +431,7 @@ impl Channel {
             sync: true,
             rendezvous_slots: [None, None],
             creds: [None, None],
+            service_key: None,
             refs: [1, 1],
         }
     }
@@ -511,6 +528,28 @@ pub fn set_side_cred(handle: ChannelHandle, cred: PeerCred) -> bool {
     }
     *slot = Some(cred);
     true
+}
+
+/// Record the service a connection channel was made to (its
+/// `service::key_id`), once: a recorded key is never replaced, as a side's
+/// credential is not ([`set_side_cred`]). `false` if the channel is gone or
+/// already has one.
+pub fn set_service_key(handle: ChannelHandle, key: u64) -> bool {
+    let mut channels = CHANNELS.lock();
+    match channels.get_mut(&handle.channel_id()) {
+        Some(ch) if ch.service_key.is_none() => {
+            ch.service_key = Some(key);
+            true
+        }
+        _ => false,
+    }
+}
+
+/// The key id of the service `handle`'s channel was made to, or `None` (a
+/// channel from `channel_create`, or one that is gone).
+#[must_use]
+pub fn service_key(handle: ChannelHandle) -> Option<u64> {
+    CHANNELS.lock().get(&handle.channel_id())?.service_key
 }
 
 /// Report the credentials of the process on the *other* end of a channel.

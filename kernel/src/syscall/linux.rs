@@ -790,6 +790,7 @@ pub mod nr {
     pub const SLATE_SERVICE_ACCEPT: u64 = 1002;
     pub const SLATE_SERVICE_CONNECT: u64 = 1003;
     pub const SLATE_CHANNEL_PEER_CRED: u64 = 1004;
+    pub const SLATE_CHANNEL_PEER_HAS_KEY: u64 = 1005;
 }
 
 // ---------------------------------------------------------------------------
@@ -3613,6 +3614,7 @@ pub fn dispatch_linux(nr: u64, args: &SyscallArgs) -> SyscallResult {
         nr::SLATE_SERVICE_ACCEPT => slate_service_accept(args),
         nr::SLATE_SERVICE_CONNECT => slate_service_connect(args),
         nr::SLATE_CHANNEL_PEER_CRED => slate_channel_peer_cred(args),
+        nr::SLATE_CHANNEL_PEER_HAS_KEY => slate_channel_peer_has_key(args),
         _ => linux_err(errno::ENOSYS),
     };
     account_io_syscall(nr, result.value);
@@ -38649,6 +38651,31 @@ fn slate_channel_peer_cred(args: &SyscallArgs) -> SyscallResult {
     // destination.
     match unsafe { crate::mm::user::copy_to_user(out.as_ptr(), args.arg1, 12) } {
         Ok(()) => SyscallResult::ok(0),
+        Err(e) => linux_err(linux_errno_for(e)),
+    }
+}
+
+/// `slate_channel_peer_has_key(int fd)` (SlateOS 1005): whether the process
+/// at the other end of a service connection holds the service's key -- the
+/// native `SYS_CHANNEL_PEER_HAS_KEY` by descriptor (design-decisions 1518).
+/// 1 or 0.
+///
+/// Errors: `EBADF`, `ENOTSOCK` (not a channel), `ENODATA` (a channel not made
+/// by connecting to a service, or a peer with no recorded identity).
+fn slate_channel_peer_has_key(args: &SyscallArgs) -> SyscallResult {
+    #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
+    let fd = args.arg0 as i32;
+    let entry = match lookup_caller_fd(fd) {
+        Ok(e) => e,
+        Err(e) => return e,
+    };
+    if entry.kind != HandleKind::Channel {
+        return linux_err(errno::ENOTSOCK);
+    }
+    let handle = crate::ipc::channel::ChannelHandle::from_raw(entry.raw_handle);
+    match handlers::peer_holds_key(handle) {
+        Ok(holds) => SyscallResult::ok(i64::from(holds)),
+        Err(KernelError::NotFound) => linux_err(errno::ENODATA),
         Err(e) => linux_err(linux_errno_for(e)),
     }
 }

@@ -99,8 +99,12 @@ const RX_BUF: usize = 4096;
 const RX_COUNT: usize = FRAME_SIZE / RX_BUF;
 /// The most received bytes kept for a port until read.
 pub const RX_LIMIT: usize = 1 << 20;
-/// How long a control message or a write waits for the device to take it.
+/// How long a control message waits for the device to take it, spinning
+/// under the device's lock: QEMU answers one in microseconds.
 const SEND_TIMEOUT_NS: u64 = 1_000_000_000;
+/// How long a write waits for the device to take one frame -- as long as the
+/// host on the port's far end leaves it unread -- sleeping, without the lock.
+pub const WRITE_TIMEOUT_NS: u64 = 30_000_000_000;
 /// How long [`init`] waits for the device to announce and name its ports.
 const SETTLE_NS: u64 = 200_000_000;
 
@@ -183,6 +187,9 @@ struct Port {
     tx_frame: PhysFrame,
     /// The descriptor head of each receive buffer the device holds, by slot.
     rx_posted: [Option<u16>; RX_COUNT],
+    /// The descriptor head of the transmit buffer the device holds; `None`
+    /// while `tx_frame` is free to fill.
+    tx_head: Option<u16>,
     /// Received and not yet read.
     received: VecDeque<u8>,
     /// The device announced it (DEVICE_ADD) and was told it is ready.
@@ -506,10 +513,33 @@ impl Console {
     fn poll(&mut self) {
         self.poll_control();
         self.poll_ports();
+        for index in 0..self.ports.len() {
+            self.reap_tx(index);
+        }
     }
 
-    /// Send `data` on port `index`, a frame at a time.
-    fn write(&mut self, index: usize, data: &[u8]) -> KernelResult<usize> {
+    /// Take back port `index`'s transmit buffer if the device is done with it;
+    /// whether the buffer is free now.
+    fn reap_tx(&mut self, index: usize) -> bool {
+        let Some(port) = self.ports.get_mut(index) else {
+            return false;
+        };
+        while let Some((head, _)) = port.txq.poll_used() {
+            port.txq.free_chain(head);
+            if port.tx_head == Some(head) {
+                port.tx_head = None;
+            }
+        }
+        port.tx_head.is_none()
+    }
+
+    /// Hand `chunk` (at most a frame) to the device on port `index`, if its
+    /// one transmit buffer is free: `Ok(true)` when it was handed over,
+    /// `Ok(false)` when the device still holds the last one.
+    fn start_write(&mut self, index: usize, chunk: &[u8]) -> KernelResult<bool> {
+        if !self.reap_tx(index) {
+            return Ok(false);
+        }
         let hhdm = self.hhdm;
         let Some(port) = self.ports.get_mut(index) else {
             return Err(KernelError::NoSuchDevice);
@@ -520,18 +550,14 @@ impl Console {
         if !port.host_connected {
             return Err(KernelError::NotConnected);
         }
-        let mut written = 0usize;
-        for chunk in data.chunks(FRAME_SIZE) {
-            if !frame_write(&port.tx_frame, hhdm, 0, chunk) {
-                return Err(KernelError::InternalError);
-            }
-            let len = u32::try_from(chunk.len()).map_err(|_| KernelError::InternalError)?;
-            let head = port.txq.submit(&[(port.tx_frame.addr(), len, 0)])?;
-            self.transport.notify_queue(port.tx_index);
-            wait_for(&mut port.txq, head)?;
-            written = written.saturating_add(chunk.len());
+        if !frame_write(&port.tx_frame, hhdm, 0, chunk) {
+            return Err(KernelError::InternalError);
         }
-        Ok(written)
+        let len = u32::try_from(chunk.len()).map_err(|_| KernelError::InternalError)?;
+        let head = port.txq.submit(&[(port.tx_frame.addr(), len, 0)])?;
+        port.tx_head = Some(head);
+        self.transport.notify_queue(port.tx_index);
+        Ok(true)
     }
 }
 
@@ -729,6 +755,7 @@ fn set_up(
             rx_frame,
             tx_frame,
             rx_posted: [None; RX_COUNT],
+            tx_head: None,
             received: VecDeque::new(),
             added: false,
             name: None,
@@ -875,13 +902,12 @@ pub fn read(id: u32, buf: &mut [u8]) -> KernelResult<usize> {
     Ok(n)
 }
 
-/// Send `data` on port `id`; the count sent, which is all of it.
-///
-/// # Errors
-///
-/// `NoSuchDevice` for a port not announced; `NotConnected` when its host end
-/// is not connected; `TimedOut` when the device did not take a buffer.
-pub fn write(id: u32, data: &[u8]) -> KernelResult<usize> {
+/// Run `f` on the device and the index of port `id`, under the lock, after a
+/// poll.
+fn with_port<R>(
+    id: u32,
+    f: impl FnOnce(&mut Console, usize) -> KernelResult<R>,
+) -> KernelResult<R> {
     let mut guard = CONSOLE.lock();
     let console = guard.as_mut().ok_or(KernelError::NoSuchDevice)?;
     console.poll();
@@ -890,7 +916,55 @@ pub fn write(id: u32, data: &[u8]) -> KernelResult<usize> {
         .iter()
         .position(|p| p.id == id)
         .ok_or(KernelError::NoSuchDevice)?;
-    console.write(index, data)
+    f(console, index)
+}
+
+/// Let a little time pass while the device works: a sleep where the timer can
+/// end it, a spin where it cannot (interrupts off), never holding the
+/// device's lock.
+fn pause() {
+    if crate::cpu::interrupts_enabled() {
+        crate::sched::sleep_ms(1);
+    } else {
+        core::hint::spin_loop();
+    }
+}
+
+/// Send `data` on port `id`, a frame at a time; the count sent, which is all
+/// of it, every frame taken by the device before this returns.
+///
+/// Each frame is handed over under the device's lock and waited for without
+/// it: a host that reads slowly makes the writer sleep, not spin with the lock
+/// held. A port has one transmit buffer, so two writers to one port take turns
+/// at it, frame by frame.
+///
+/// # Errors
+///
+/// `NoSuchDevice` for a port not announced; `NotConnected` when its host end
+/// is not connected; `TimedOut` when the device took no frame for
+/// [`WRITE_TIMEOUT_NS`] -- a host that has stopped reading. What it had taken
+/// was sent; the rest was not.
+pub fn write(id: u32, data: &[u8]) -> KernelResult<usize> {
+    let mut written = 0usize;
+    for chunk in data.chunks(FRAME_SIZE) {
+        let deadline = crate::hrtimer::now_ns().saturating_add(WRITE_TIMEOUT_NS);
+        while !with_port(id, |console, index| console.start_write(index, chunk))? {
+            if crate::hrtimer::now_ns() >= deadline {
+                return Err(KernelError::TimedOut);
+            }
+            pause();
+        }
+        written = written.saturating_add(chunk.len());
+    }
+    // And the last frame taken, so the bytes are the device's when this returns.
+    let deadline = crate::hrtimer::now_ns().saturating_add(WRITE_TIMEOUT_NS);
+    while !with_port(id, |console, index| Ok(console.reap_tx(index)))? {
+        if crate::hrtimer::now_ns() >= deadline {
+            return Err(KernelError::TimedOut);
+        }
+        pause();
+    }
+    Ok(written)
 }
 
 // ---------------------------------------------------------------------------

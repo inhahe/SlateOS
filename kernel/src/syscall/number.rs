@@ -3817,7 +3817,10 @@ pub const SYS_FS_LINKAT_PINNED: u64 = 668;
 /// Zero-means-unchanged is this kernel's existing convention (`SYS_FS_SET_TIMES`),
 /// not `utimensat(2)`'s `UTIME_OMIT`/`UTIME_NOW` sentinels. Translating those is
 /// the POSIX layer's job, and it already does it for the path-based call; making
-/// the pinned variant differ would mean two conventions for one operation.
+/// the pinned variant differ would mean two conventions for one operation. The
+/// convention's other half is the same here too: `u64::MAX` is now
+/// (`fs::vfs::TIME_NOW`), and both now is `touch`, which an append-only file
+/// allows where given times are `NotPermitted` (`SYS_FS_SET_TIMES`).
 ///
 /// This is the member of the set that runs on *every* copied entry rather than
 /// once per directory, since restoring mtime is the last thing `cp -p` and every
@@ -4146,9 +4149,16 @@ pub const SYS_FS_SET_PERMS: u64 = 631;
 
 /// Set file timestamps.
 ///
-/// `arg0`: pointer to null-terminated path string.
-/// `arg1`: accessed_ns (0 = leave unchanged).
-/// `arg2`: modified_ns (0 = leave unchanged).
+/// `arg0`: path pointer.  `arg1`: path length.
+/// `arg2`: accessed_ns, nanoseconds since the epoch; 0 leaves it unchanged,
+/// `u64::MAX` makes it now (`fs::vfs::TIME_NOW`, Linux's `UTIME_NOW`).
+/// `arg3`: modified_ns, likewise.
+/// `arg4`: flags — bit 0 `NO_FOLLOW` stamps a final symlink itself.
+///
+/// Both now is `touch`, which an append-only file allows; any other change
+/// to its times is `NotPermitted`, as on Linux, and so is any change to an
+/// immutable file's (`fs::attr_policy`). A caller that reads the clock and
+/// passes the time is setting a given time.
 ///
 /// Returns: 0 on success, negative error code.
 pub const SYS_FS_SET_TIMES: u64 = 632;

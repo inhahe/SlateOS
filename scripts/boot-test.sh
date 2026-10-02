@@ -353,6 +353,13 @@ check_selftest_failures() {
     if grep -iq "self-test failed" "$file"; then
         echo "SELF-TEST FAILURE detected in serial log:"
         grep -in "self-test failed" "$file" || true
+        # A keep-going boot ran on past each failure so as to list them all:
+        # list what each one said, too, since the line above names only the
+        # subsystem (see report_kernel_death's context window for why).
+        if keep_going_boot; then
+            echo "Every FAIL: line (selftest.keep_going=1):"
+            grep -an "FAIL:" "$file" | head -200 || true
+        fi
 
         # Lane A's own dropbox is a record of findings, not only a queue of
         # asks.  On 2026-09-21 a whole session re-derived two diagnoses that
@@ -597,10 +604,29 @@ check_identity_rungs() {
     fi
     return 0
 }
+#
+# Under `selftest.keep_going=1` (SLATE_CMDLINE) a FATAL: line is a self-test
+# failure the kernel reported and carried on past -- it prints "[selftest]
+# selftest.keep_going: carrying on past ..." next -- so it is not a death, and
+# stopping there would throw away the rest of the list the mode exists to
+# collect. rq33 (2026-10-02) was stopped 93 s into QEMU, two failures in, for
+# exactly that. Only a panic is a death then; the FATAL lines still fail the
+# boot at the end (`check_selftest_failures` when the marker is reached, the
+# post-loop check when it is not).
+keep_going_boot() {
+    case " ${KERNEL_CMDLINE:-} " in
+        *" selftest.keep_going=1 "*) return 0 ;;
+    esac
+    return 1
+}
 kernel_is_dead() {
     local file="$1"
     [ -f "$file" ] || return 1
-    grep -aEq '^(FATAL:|!!! KERNEL PANIC !!!|!!! DOUBLE PANIC)' "$file" 2>/dev/null
+    if keep_going_boot; then
+        grep -aEq '^(!!! KERNEL PANIC !!!|!!! DOUBLE PANIC)' "$file" 2>/dev/null
+    else
+        grep -aEq '^(FATAL:|!!! KERNEL PANIC !!!|!!! DOUBLE PANIC)' "$file" 2>/dev/null
+    fi
 }
 
 # Print the death evidence from a serial log.  Shared by the in-loop early exit

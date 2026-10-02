@@ -26455,8 +26455,13 @@ fn cmd_touch(args: &str) {
     // Check if file exists.
     match crate::fs::Vfs::stat(&path) {
         Ok(_) => {
-            // File exists — update timestamps.
-            let timestamp = requested.unwrap_or_else(crate::hpet::elapsed_ns);
+            // File exists — update timestamps: to the time asked for, or
+            // to now. "Now" is the VFS's to read (`TIME_NOW`): it reads the
+            // wall clock, where this read `hpet::elapsed_ns` -- time since
+            // boot -- until 2026-10-02, so `touch` dated a file to the first
+            // minutes of 1970. And a time passed as a request is `touch`'s
+            // own, which an append-only file allows.
+            let timestamp = requested.unwrap_or(crate::fs::vfs::TIME_NOW);
             match crate::fs::Vfs::set_times(&path, timestamp, timestamp) {
                 Ok(()) => {
                     shell_println!("{}: timestamps updated", path.display());
@@ -64628,17 +64633,17 @@ fn cmd_diskencrypt(args: &str) {
                         shell_println!("  Mount:     {}", v.mount_point.display());
                     }
                     shell_println!("  Recovery:  {}", v.has_recovery_key);
-                    shell_println!("  TPM:       {}", v.tpm_sealed);
                     if !v.key_slots.is_empty() {
                         shell_println!("  Key slots:");
                         for s in &v.key_slots {
-                            let act = if s.active { "active" } else { "inactive" };
                             shell_println!(
-                                "    #{}: {} ({}) [{}]",
+                                "    #{}: {} (Argon2id, {} KiB x {} pass(es), {} lane(s)){}",
                                 s.slot,
                                 s.label,
-                                s.kdf.label(),
-                                act
+                                s.cost.memory_kib,
+                                s.cost.iterations,
+                                s.cost.lanes,
+                                if s.recovery { " [recovery]" } else { "" }
                             );
                         }
                     }
@@ -64663,7 +64668,7 @@ fn cmd_diskencrypt(args: &str) {
                     return;
                 }
             };
-            match diskencrypt::unlock_volume(id, parts[2]) {
+            match diskencrypt::unlock_volume(id, parts[2].as_bytes()) {
                 Ok(()) => shell_println!("Volume {} unlocked.", id),
                 Err(e) => {
                     shell_println!("Error: {:?}", e);
@@ -64693,9 +64698,31 @@ fn cmd_diskencrypt(args: &str) {
                 }
             }
         }
+        "format" => {
+            if parts.len() < 3 {
+                shell_println!("Usage: dencrypt format <device> <passphrase> [label]");
+                set_exit(1);
+                return;
+            }
+            let label = parts.get(3).copied().unwrap_or("Encrypted");
+            match diskencrypt::register_volume(
+                parts[1],
+                label,
+                diskencrypt::EncryptAlgorithm::Aes256Xts,
+                0,
+                parts[2].as_bytes(),
+                diskencrypt::PASSPHRASE_COST,
+            ) {
+                Ok(id) => shell_println!("Volume {} registered, locked.", id),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
+            }
+        }
         "encrypt" => {
-            if parts.len() < 2 {
-                shell_println!("Usage: dencrypt encrypt <id> [algorithm]");
+            if parts.len() < 3 {
+                shell_println!("Usage: dencrypt encrypt <id> <passphrase> [algorithm]");
                 shell_println!("  algorithms: aes256|aes128|serpent|twofish|chacha20");
                 set_exit(1);
                 return;
@@ -64708,8 +64735,8 @@ fn cmd_diskencrypt(args: &str) {
                     return;
                 }
             };
-            let alg = if parts.len() > 2 {
-                match parts[2] {
+            let alg = if parts.len() > 3 {
+                match parts[3] {
                     "aes256" => diskencrypt::EncryptAlgorithm::Aes256Xts,
                     "aes128" => diskencrypt::EncryptAlgorithm::Aes128Xts,
                     "serpent" => diskencrypt::EncryptAlgorithm::Serpent256Xts,
@@ -64724,7 +64751,12 @@ fn cmd_diskencrypt(args: &str) {
             } else {
                 diskencrypt::EncryptAlgorithm::Aes256Xts
             };
-            match diskencrypt::start_encryption(id, alg) {
+            match diskencrypt::start_encryption(
+                id,
+                alg,
+                parts[2].as_bytes(),
+                diskencrypt::PASSPHRASE_COST,
+            ) {
                 Ok(()) => {
                     shell_println!("Started encryption of volume {} with {}.", id, alg.label())
                 }
@@ -64762,7 +64794,7 @@ fn cmd_diskencrypt(args: &str) {
         }
         "addslot" => {
             if parts.len() < 3 {
-                shell_println!("Usage: dencrypt addslot <id> <label> [kdf]");
+                shell_println!("Usage: dencrypt addslot <id> <passphrase> [label]");
                 set_exit(1);
                 return;
             }
@@ -64774,17 +64806,13 @@ fn cmd_diskencrypt(args: &str) {
                     return;
                 }
             };
-            let kdf = if parts.len() > 3 {
-                match parts[3] {
-                    "argon2id" | "argon2" => diskencrypt::Kdf::Argon2id,
-                    "pbkdf2" => diskencrypt::Kdf::Pbkdf2,
-                    "scrypt" => diskencrypt::Kdf::Scrypt,
-                    _ => diskencrypt::Kdf::Argon2id,
-                }
-            } else {
-                diskencrypt::Kdf::Argon2id
-            };
-            match diskencrypt::add_key_slot(id, kdf, parts[2]) {
+            let label = parts.get(3).copied().unwrap_or("Passphrase");
+            match diskencrypt::add_key_slot(
+                id,
+                parts[2].as_bytes(),
+                label,
+                diskencrypt::PASSPHRASE_COST,
+            ) {
                 Ok(slot) => shell_println!("Added key slot #{} to volume {}.", slot, id),
                 Err(e) => {
                     shell_println!("Error: {:?}", e);
@@ -64815,11 +64843,12 @@ fn cmd_diskencrypt(args: &str) {
             shell_println!("diskencrypt (dencrypt) — disk encryption management");
             shell_println!("  show                  List volumes");
             shell_println!("  info <id>             Volume details");
-            shell_println!("  unlock <id> <pass>    Unlock volume");
+            shell_println!("  format <dev> <pass> [label]  Register an encrypted volume");
+            shell_println!("  unlock <id> <pass>    Unlock volume (passphrase or recovery key)");
             shell_println!("  lock <id>             Lock volume");
-            shell_println!("  encrypt <id> [alg]    Start encryption");
-            shell_println!("  recovery <id>         Generate recovery key");
-            shell_println!("  addslot <id> <label>  Add key slot");
+            shell_println!("  encrypt <id> <pass> [alg]  Start encrypting in place");
+            shell_println!("  recovery <id>         Make a recovery key (volume unlocked)");
+            shell_println!("  addslot <id> <pass> [label]  Add a key slot (volume unlocked)");
             shell_println!("  stats / test / init");
         }
         _ => {

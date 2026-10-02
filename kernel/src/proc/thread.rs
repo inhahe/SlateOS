@@ -1027,6 +1027,37 @@ pub(crate) fn self_test_as_process<R>(pid: ProcessId, body: impl FnOnce() -> R) 
     result
 }
 
+/// [`self_test_as_process`] with `pid`'s page tables loaded as well, for a
+/// self-test that makes a syscall which reads or writes the caller's memory:
+/// a user pointer is checked and copied through the loaded page tables
+/// (`mm::user::validate_user_range` walks CR3's), and the boot task's are the
+/// kernel's, which map no process memory -- so under `self_test_as_process`
+/// alone every such pointer is `InvalidAddress`. The record-lock door's test
+/// met exactly that on its first boot (rq33, 2026-10-02).
+///
+/// Interrupts are off throughout, as in `mm::vmalloc`'s test that loads a
+/// process's tables: nothing can switch tasks while another process's page
+/// tables are loaded. `body` must therefore not block.
+///
+/// `None` if `pid` has no address space. For self-tests only.
+pub(crate) fn self_test_in_process<R>(pid: ProcessId, body: impl FnOnce() -> R) -> Option<R> {
+    let pml4 = pcb::get_pml4(pid).filter(|&p| p != 0)?;
+    Some(self_test_as_process(pid, || {
+        crate::cpu::without_interrupts(|| {
+            let saved = crate::mm::page_table::read_cr3();
+            // SAFETY: a process's PML4 carries the kernel half of the
+            // kernel's own (`page_table::alloc_pml4`), so it maps this code,
+            // this stack and every kernel structure; CR3 is restored below,
+            // before interrupts come back.
+            unsafe { crate::mm::page_table::write_cr3(pml4) };
+            let result = body();
+            // SAFETY: restoring the value read above.
+            unsafe { crate::mm::page_table::write_cr3(saved) };
+            result
+        })
+    }))
+}
+
 /// Run `body` with task id `tid` counted as a thread of `pid`, as
 /// [`self_test_as_process`] counts the calling task: for a self-test that
 /// must name one of a process's threads. The calling task cannot always be
@@ -1378,7 +1409,8 @@ pub fn self_test() -> KernelResult<()> {
     test_thread_exit_with_value()?;
     test_thread_join()?;
     test_blocking_join()?;
-    test_join_timeout()?;
+    // Not `test_join_timeout`: its limit is an hrtimer, and this runs before
+    // the timers do -- see [`self_test_join_timeout`].
     test_join_self_fails()?;
     test_detached_exit_not_retained()?;
     test_killed_thread_does_not_join_normally()?;
@@ -2200,6 +2232,21 @@ extern "C" fn jt_joiner_entry(target: u64) {
 /// `join_timeout` (`requests/d-a-a-thread-join-that-does-not-wait.md`): a
 /// zero limit and a 20 ms limit both answer `TimedOut` while the target
 /// lives, and a long one returns the value once it exits.
+///
+/// Its own entry point, dispatched once interrupts are on, rather than a step
+/// of [`self_test`]: the 20 ms limit is an hrtimer, which fires from the APIC
+/// timer's interrupt, and `self_test` runs in "Process management", before
+/// `hrtimer::init` and the APIC timer. There the timer was armed and never
+/// fired, and the call waited 10 s for the target to exit by itself
+/// (rq33, 2026-10-02 -- the first boot to reach it).
+///
+/// # Errors
+///
+/// `InternalError`, naming what answered wrongly; the spawns'.
+pub fn self_test_join_timeout() -> KernelResult<()> {
+    test_join_timeout()
+}
+
 fn test_join_timeout() -> KernelResult<()> {
     use core::sync::atomic::Ordering::SeqCst;
     JT_RELEASE.store(0, SeqCst);

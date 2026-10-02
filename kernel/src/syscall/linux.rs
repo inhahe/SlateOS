@@ -5194,6 +5194,28 @@ fn sys_fcntl(args: &SyscallArgs) -> SyscallResult {
         },
         fcntl_cmd::F_SETFL => {
             let new_flags = arg as u32;
+            // A file's O_APPEND belongs to its open description -- the
+            // handle every write consults -- and is set there first, so a
+            // refusal (a change on an append-only file, `EPERM`,
+            // `fs::attr_policy::may_change_appending`) leaves the
+            // descriptor's flags as they were. It was recorded only in the
+            // descriptor's entry until 2026-10-02, where it changed what
+            // F_GETFL showed and not where a write landed. A directory has
+            // no position to append at; Linux records the flag on one all
+            // the same, and so does this.
+            if let Some(entry) = pcb::linux_fd_lookup(pid, fd)
+                && entry.kind == HandleKind::File
+            {
+                let append = if new_flags & oflags::O_APPEND != 0 {
+                    crate::fs::handle::OpenFlags::APPEND
+                } else {
+                    crate::fs::handle::OpenFlags::NONE
+                };
+                match crate::fs::handle::set_status_flags(entry.raw_handle, append) {
+                    Ok(()) | Err(KernelError::IsADirectory) => {}
+                    Err(e) => return linux_err(linux_errno_for(e)),
+                }
+            }
             match pcb::linux_fd_set_status_flags(pid, fd, new_flags) {
                 Ok(()) => SyscallResult::ok(0),
                 Err(e) => linux_err(linux_errno_for(e)),
@@ -9190,6 +9212,17 @@ pub mod ioctl_cmd {
     /// ioctl claim device support that does not exist.
     pub const BLKZEROOUT: u32 = 0x127F;
 
+    /// `FS_IOC_GETFLAGS` -- a file's inode flags, as `lsattr` reads them,
+    /// into an `int` (the number says `long`; Linux reads and writes an
+    /// `int`, as its `FS_IOC32_*` twin does).
+    pub const FS_IOC_GETFLAGS: u32 = 0x8008_6601;
+    /// `FS_IOC_SETFLAGS` -- set them, as `chattr` does.
+    pub const FS_IOC_SETFLAGS: u32 = 0x4008_6602;
+    /// `FS_IOC32_GETFLAGS` -- the same, numbered for 32-bit callers.
+    pub const FS_IOC32_GETFLAGS: u32 = 0x8004_6601;
+    /// `FS_IOC32_SETFLAGS`.
+    pub const FS_IOC32_SETFLAGS: u32 = 0x4004_6602;
+
     pub const FIOCLEX: u32 = 0x5451;
     /// `FIONBIO` — toggle `O_NONBLOCK` on `fd`.  `arg` is a pointer
     /// to an `int`: non-zero sets `O_NONBLOCK`, zero clears it.
@@ -9599,6 +9632,92 @@ pub fn self_test_blk_discard_range() -> crate::error::KernelResult<()> {
     Ok(())
 }
 
+/// `FS_IOC_GETFLAGS`/`FS_IOC_SETFLAGS` (and their 32-bit twins): a file's
+/// inode flags, as `lsattr` reads and `chattr` sets them. Two are kept by
+/// every filesystem here and enforced by all of them -- `FS_IMMUTABLE_FL`
+/// (no change to the contents, the name or the metadata) and `FS_APPEND_FL`
+/// (writes only at the end, no name or metadata change), the VFS's
+/// `FileAttr::IMMUTABLE` and `APPEND_ONLY` (`fs::attr_policy`) -- so those
+/// are the two read and set. Setting any other is `EOPNOTSUPP`, rather than
+/// a flag `chattr` would report set and `lsattr` would not show.
+///
+/// Who may set them is `Vfs::set_attributes`'s rule, Linux's: the owner,
+/// except that the two need root (`CAP_LINUX_IMMUTABLE`); anyone else
+/// `EPERM` -- decided before the unsupported flags are, as Linux's
+/// `vfs_fileattr_set` asks before the filesystem does. On the file the
+/// descriptor holds, whatever its name now (`fs::handle::HandleFile`), as
+/// `fchmod` acts. Not a regular file or a directory: `ENOTTY`.
+fn file_flags_ioctl(pid: u64, fd: i32, request: u32, arg: u64) -> SyscallResult {
+    /// `FS_IMMUTABLE_FL`.
+    const FS_IMMUTABLE_FL: u32 = 0x10;
+    /// `FS_APPEND_FL`.
+    const FS_APPEND_FL: u32 = 0x20;
+    use crate::fs::FileAttr;
+    let Some(entry) = pcb::linux_fd_lookup(pid, fd) else {
+        return linux_err(errno::EBADF);
+    };
+    if entry.kind != HandleKind::File {
+        return linux_err(errno::ENOTTY);
+    }
+    let file = match crate::fs::handle::HandleFile::of(entry.raw_handle) {
+        Ok(f) => f,
+        Err(e) => return linux_err(linux_errno_for(e)),
+    };
+    let meta = match file.metadata() {
+        Ok(m) => m,
+        Err(e) => return linux_err(linux_errno_for(e)),
+    };
+    let attrs = meta.attributes;
+    if matches!(
+        request,
+        ioctl_cmd::FS_IOC_GETFLAGS | ioctl_cmd::FS_IOC32_GETFLAGS
+    ) {
+        let mut flags = 0u32;
+        if attrs.contains(FileAttr::IMMUTABLE) {
+            flags |= FS_IMMUTABLE_FL;
+        }
+        if attrs.contains(FileAttr::APPEND_ONLY) {
+            flags |= FS_APPEND_FL;
+        }
+        let bytes = flags.to_ne_bytes();
+        // SAFETY: four initialised bytes; copy_to_user validates `arg`.
+        return match unsafe { crate::mm::user::copy_to_user(bytes.as_ptr(), arg, 4) } {
+            Ok(()) => SyscallResult::ok(0),
+            Err(e) => linux_err(linux_errno_for(e)),
+        };
+    }
+    let mut raw = [0u8; 4];
+    // SAFETY: four bytes into a four-byte buffer; copy_from_user validates
+    // `arg`.
+    if let Err(e) = unsafe { crate::mm::user::copy_from_user(arg, raw.as_mut_ptr(), 4) } {
+        return linux_err(linux_errno_for(e));
+    }
+    let flags = u32::from_ne_bytes(raw);
+    // The other attributes (FAT's hidden and system) are kept as they are.
+    let kept = FileAttr::from_bits(
+        attrs.bits() & !(FileAttr::IMMUTABLE.bits() | FileAttr::APPEND_ONLY.bits()),
+    );
+    let mut new = kept;
+    if flags & FS_IMMUTABLE_FL != 0 {
+        new = new.union(FileAttr::IMMUTABLE);
+    }
+    if flags & FS_APPEND_FL != 0 {
+        new = new.union(FileAttr::APPEND_ONLY);
+    }
+    if flags & !(FS_IMMUTABLE_FL | FS_APPEND_FL) != 0 {
+        // Who may not change this file's flags at all is told so first.
+        let uid = pcb::get_credentials(pid).map_or(0, |c| c.uid);
+        return match crate::fs::vfs::attribute_change_verdict(uid, meta.uid, attrs, new) {
+            Ok(()) => linux_err(errno::EOPNOTSUPP),
+            Err(e) => linux_err(linux_errno_for(e)),
+        };
+    }
+    match file.set_attributes(new) {
+        Ok(()) => SyscallResult::ok(0),
+        Err(e) => linux_err(linux_errno_for(e)),
+    }
+}
+
 /// `BLKDISCARD`, `BLKSECDISCARD` and `BLKZEROOUT`.
 ///
 /// All three take a pointer to `[u64; 2]` = `{ start_byte, length_bytes }`
@@ -9802,6 +9921,10 @@ fn sys_ioctl(args: &SyscallArgs) -> SyscallResult {
         ioctl_cmd::BLKDISCARD | ioctl_cmd::BLKSECDISCARD | ioctl_cmd::BLKZEROOUT => {
             block_discard_ioctl(pid, fd, request, args.arg2)
         }
+        ioctl_cmd::FS_IOC_GETFLAGS
+        | ioctl_cmd::FS_IOC_SETFLAGS
+        | ioctl_cmd::FS_IOC32_GETFLAGS
+        | ioctl_cmd::FS_IOC32_SETFLAGS => file_flags_ioctl(pid, fd, request, args.arg2),
         _ => {
             // Device-specific ioctls: route by handle kind.  An ALSA PCM
             // substream answers the `SNDRV_PCM_IOCTL_*` family ('A' magic);
@@ -20293,26 +20416,23 @@ fn sys_pause(_args: &SyscallArgs) -> SyscallResult {
 
 const ACCESS_VALID_MODE: u32 = 0x07; // R_OK=4 | W_OK=2 | X_OK=1 (F_OK=0)
 
-/// `access`/`faccessat` mode bit for "writable".
-const W_OK: u32 = 0x02;
-
 /// Shared back-end for the `access` / `faccessat` / `faccessat2` family.
 ///
 /// Resolves `path_ptr` through the VFS (canonicalised against the caller's
 /// cwd) and reports accessibility under our **capability-based, no-DAC**
-/// security model:
+/// security model: what the gates a real open or exec would meet answer
+/// (`Vfs::access_gates`), and nothing else.
 ///
-///   * `F_OK`/`R_OK`/`X_OK` succeed for any existing file or directory.
-///     There are no Unix owner/group/other permission gates in this OS —
+///   * There are no Unix owner/group/other permission gates in this OS —
 ///     authority is conferred by capabilities, not by file mode bits, and
 ///     `execve` itself ignores the on-disk execute bits.  Reporting X_OK as
 ///     grantable for an existing file is therefore *consistent* with what a
 ///     subsequent `execve` would actually do (matching the strace ground
 ///     truth that GNU make's `access(shell, X_OK)` returns 0 before it
 ///     spawns the recipe shell).
-///   * `W_OK` is granted unless the backing filesystem is known to be
-///     read-only, in which case it returns `EROFS` (Linux's own answer for
-///     W_OK on a read-only mount).
+///   * What does gate: an ACL or a capability file-tag (`EACCES`), for each
+///     of R_OK, W_OK and X_OK asked; for W_OK, an immutable file (`EPERM`)
+///     and a read-only mount (`EROFS`, Linux's own answer for W_OK there).
 ///
 /// `follow` selects symlink-follow (`access`/`faccessat`) vs no-follow
 /// (`faccessat2` with `AT_SYMLINK_NOFOLLOW`).
@@ -20352,19 +20472,26 @@ fn access_path_common(path_ptr: u64, mode: u32, follow: bool) -> SyscallResult {
     // name.  Linux's `getname()` copies bytes and validates nothing either.
     let canon_path = Path::new(canon.as_slice());
 
-    // The lookup answers existence (F_OK) and, by extension, R_OK/X_OK under
-    // our no-DAC model.  A NotFound maps to ENOENT.
-    let _meta = match stat_meta_for_path(canon_path, follow) {
-        Ok(m) => m,
-        Err(r) => return r,
-    };
+    // The lookup answers existence (F_OK).  A NotFound maps to ENOENT.
+    if let Err(r) = stat_meta_for_path(canon_path, follow) {
+        return r;
+    }
+    if mode & ACCESS_VALID_MODE == 0 {
+        return SyscallResult::ok(0);
+    }
 
-    // W_OK against a known read-only filesystem must fail with EROFS, as on
-    // Linux.  We don't yet track per-mount read-only state here, so writes are
-    // granted; this is documented in known-issues.md.
-    let _ = mode & W_OK;
-
-    SyscallResult::ok(0)
+    // R_OK, W_OK and X_OK: the gates a real open or exec would meet, and only
+    // those (`Vfs::access_gates`) -- an immutable file is EPERM for W_OK, a
+    // read-only mount EROFS, an ACL or a capability tag EACCES. Not the mode
+    // bits, which nothing enforces: answering from them would refuse what a
+    // write gets. Until 2026-10-02 this consulted no gate at all and
+    // answered every existing file writable, so `test -w` passed on a file
+    // `chattr +i` protects
+    // (TD-B-ACCESS-CANNOT-SEE-THE-ONE-PERMISSION-MECHANISM-THAT-IS-ENFORCED).
+    match crate::fs::Vfs::access_gates(canon_path, mode, follow) {
+        Ok(()) => SyscallResult::ok(0),
+        Err(e) => linux_err(linux_errno_for(e)),
+    }
 }
 
 /// `access(path, mode)` — accessibility check (follows symlinks).
@@ -23371,9 +23498,13 @@ fn sys_utimensat(args: &SyscallArgs) -> SyscallResult {
             Err(r) => return r,
         }
     };
-    let now = crate::timekeeping::clock_realtime();
     // Convert a parsed (tv_sec, tv_nsec) into the VFS ns-since-epoch value,
-    // mapping UTIME_OMIT → 0 ("leave unchanged") and UTIME_NOW → wall clock.
+    // mapping UTIME_OMIT → 0 ("leave unchanged") and UTIME_NOW → the VFS's
+    // `TIME_NOW`, which it makes the wall clock itself. Passed as a request
+    // rather than the time: an append-only file may be touched to now but
+    // not set to given times (`fs::attr_policy::may_touch`), and a time
+    // computed here would read as given.
+    let now = crate::fs::vfs::TIME_NOW;
     #[allow(clippy::cast_sign_loss)]
     let conv = |t: (i64, i64)| -> u64 {
         match t.1 {
@@ -23482,10 +23613,11 @@ fn sys_utimes(args: &SyscallArgs) -> SyscallResult {
         Ok(p) => p,
         Err(r) => return r,
     };
-    let now = crate::timekeeping::clock_realtime();
-    // NULL times → both NOW; otherwise tv_sec*1e9 + tv_usec*1e3.  A
-    // non-positive instant collapses to 0 ("leave unchanged") — see the
-    // module fidelity note.
+    // NULL times → both NOW (the VFS's `TIME_NOW`, as `sys_utimensat`
+    // passes it); otherwise tv_sec*1e9 + tv_usec*1e3.  A non-positive
+    // instant collapses to 0 ("leave unchanged") — see the module fidelity
+    // note.
+    let now = crate::fs::vfs::TIME_NOW;
     #[allow(clippy::cast_sign_loss)]
     let (atime_ns, mtime_ns) = match times {
         None => (now, now),
@@ -23572,9 +23704,10 @@ fn sys_utime(args: &SyscallArgs) -> SyscallResult {
         Ok(p) => p,
         Err(r) => return r,
     };
-    let now = crate::timekeeping::clock_realtime();
-    // NULL utimbuf → both NOW; otherwise seconds → ns.  Non-positive
-    // collapses to 0 ("leave unchanged") — see the module fidelity note.
+    // NULL utimbuf → both NOW (the VFS's `TIME_NOW`, as `sys_utimensat`
+    // passes it); otherwise seconds → ns.  Non-positive collapses to 0
+    // ("leave unchanged") — see the module fidelity note.
+    let now = crate::fs::vfs::TIME_NOW;
     #[allow(clippy::cast_sign_loss)]
     let (atime_ns, mtime_ns) = match times {
         None => (now, now),
@@ -40364,7 +40497,7 @@ fn sys_accept(args: &SyscallArgs) -> SyscallResult {
 /// listening `EINVAL`, as on Linux; the listener's `O_NONBLOCK` makes an
 /// empty backlog `EAGAIN`.
 fn unix_accept(entry: &FdEntry, addr_ptr: u64, addrlen_ptr: u64, flags: u32) -> SyscallResult {
-    use crate::ipc::unix_socket::{self, Kind};
+    use crate::ipc::unix_socket;
     let h = unix_handle(entry);
     if unix_socket::kind(h).is_some_and(|k| !k.connects()) {
         return linux_err(errno::EOPNOTSUPP);

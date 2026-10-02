@@ -3975,7 +3975,7 @@ fn test_dispatch_record_lock() -> KernelResult<()> {
     use crate::fs::handle::{self, OpenFlags};
     use crate::mm::user::{copy_from_user_as, copy_to_user_as};
     use crate::proc::pcb::{self, ProcessId};
-    use crate::proc::thread::self_test_as_process;
+    use crate::proc::thread::{self, self_test_as_process};
 
     const PATH: &str = "/tmp/record-lock-dispatch";
 
@@ -4031,14 +4031,17 @@ fn test_dispatch_record_lock() -> KernelResult<()> {
         return fail("a scratch process has no address space", &pids);
     };
     // One call: the flock written to the caller's memory, the syscall made
-    // as the caller, and the flock read back.
+    // as the caller with its page tables loaded -- the door reads and writes
+    // the flock through them (`self_test_in_process`) -- and the flock read
+    // back.
     let call = |pid: ProcessId, pml4: u64, buf: u64, h: u64, op: u64, f: Flock| {
         if copy_to_user_as(pml4, buf, &f.to_bytes()).is_err() {
             return (i64::MIN, None);
         }
-        let r = self_test_as_process(pid, || {
+        let r = thread::self_test_in_process(pid, || {
             dispatch(SYS_FS_RECORD_LOCK, &args(h, op, buf)).value
-        });
+        })
+        .unwrap_or(i64::MIN);
         let mut back = [0u8; Flock::SIZE];
         let f = copy_from_user_as(pml4, buf, &mut back)
             .ok()

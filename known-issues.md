@@ -1681,6 +1681,19 @@ work is real but it is not research.
 and because a reader looking at a 176-line baseline needs to know it is one
 wall and not 176 separate jobs.
 
+**2026-10-02: 129 left (`python scripts/argv-utf8.py --check`), and the only one
+that shipped is done.** Intersected again with `scripts/rootfs-bin-manifest.txt`:
+of the 130, only `powerctl` was on the image -- added since the count above,
+for the desktop's power buttons (lane C's request) -- and none duplicates a
+coreutils binary, so §1005 deletes none of them. `powerctl` is converted, and
+true to the pattern, the panic was the lesser defect: **a word a command did
+not take was ignored, so `powerctl reboot --help` rebooted the machine** (as
+did `shutdown --dry-run`). It now shows the usage for `--help`/`-h` anywhere,
+refuses any other extra word before acting, quotes what it refuses, does not
+panic on a closed standard output (`println!` did, before the action), and
+reports a cancel it could not perform as that rather than "nothing scheduled".
+Every caller in the tree passes one word, so none is affected.
+
 ## B-AR-MEMBER-NAMES-ARE-STRINGS-IN-THE-FORMAT-LAYER (lane B, 2026-09-14) -- FIXED; ELF symbol names are a separate layer and stay text
 
 `ar` no longer dies on an operand that is not valid UTF-8, but it does not
@@ -68095,6 +68108,12 @@ not get worse with time on its own. But it is the one remaining defect in ssh
 that a rewrite cannot be argued out of: every other finding from the lint sweep
 was fixed in place, and this one was left because the correct fix is a new
 primitive rather than an edit.
+
+**Status 2026-10-02: waiting on lane E for the primitive.** The port C-Q5 set in
+motion now exists -- `rustcrypto/` (§539, 2026-09-27: XChaCha20-Poly1305 and
+Argon2id, lane E's) -- and has no X25519. Asked of lane E in
+`requests/b-e-vendor-x25519-for-ssh.md` (`x25519-dalek` 2.x); lane B writes the
+`curve25519-sha256` exchange in `sshwire` once it lands.
 
 ## TD-B-THREE-C-VISIBLE-TYPES-ARE-SMALLER-THAN-THEIR-HEADERS (lane B, 2026-08-21) — FIXED 2026-08-21
 
@@ -150399,6 +150418,7 @@ just a boundary and is fine to document. The grep that finds them is the phrase
 
 
 ## TD-B-ACCESS-CANNOT-SEE-THE-ONE-PERMISSION-MECHANISM-THAT-IS-ENFORCED (lane B, 2026-09-13)
+**Status:** FIXED by lane A on lane-a-wip 2026-10-02, awaiting a boot -- the Linux `access` answers the gates a real open or exec meets (`Vfs::access_gates`): `EPERM` for `W_OK` on an immutable file, the ACLs and capability tags (`EACCES`), `EROFS` for `W_OK` on a read-only mount; not the mode bits (design-decisions §1524)
 
 **In short:** `access(path, W_OK)` answers "yes" for any file that exists. On a
 stock system that is correct. On a system where someone has set an ACL or a
@@ -166452,7 +166472,7 @@ Those are features, and dd-950's point is that these modules are the outline
 of them rather than dead weight.
 
 ### [A] Two implementations of file immutability: one real and tested, one decorative -- and I nearly recorded the real one as fake -- 2026-09-18
-**Status:** OPEN
+**Status:** OPEN -- the real one is complete as of 2026-10-02 (design-decisions §1524: Linux's rules on every filesystem, every refusal `EPERM`, `chattr`'s ioctls); the decorative `fs::immutable` remains, and is lane A's next removal
 
 **In short:** the kernel can mark a file unchangeable, and that genuinely
 works -- writes, truncates and deletes are all refused, checked on every
@@ -180124,7 +180144,50 @@ all). Neither has a workaround in lane B's code.
 (§1053's staging request). On the device, `/proc/<logind pid>/task` would
 list one thread per connected client plus the accepting thread.
 
-## B-FILE-IS-A-HAND-WRITTEN-APPROXIMATION-OF-LIBMAGIC — `file` names most formats in its own words, not file 5.45's (lane B, 2026-10-01) — **Status: OPEN (debt; the ISO media branch is done)**
+## B-FILE-IS-A-HAND-WRITTEN-APPROXIMATION-OF-LIBMAGIC — `file` names most formats in its own words, not file 5.45's (lane B, 2026-10-01) — **Status: FIXED 2026-10-02**
+
+**Fixed:** `file` is now file 5.45 and its libmagic, ported source file by
+source file. The library is its own crate, `userspace/libmagic` --
+`apprentice` (the database reader, checker and compiler), `softmagic` (the
+rule interpreter), `funcs`/`magic` (the order the tests run in, the library
+calls), `encoding`, `ascmagic`, `is_tar`/`is_json`/`is_csv`/`is_simh`,
+`fsmagic`, `der`, `print`, `readelf` (with `elfclass.h`), `cdf`/`readcdf`,
+`compress` -- and `userspace/file` is `file.c` on top of it. The database is
+file 5.45's own (`userspace/file/magic/`, vendored by
+`scripts/file-magic-vendor.py`), compiled at build time exactly as `file -C`
+compiles it and carried in the program, which maps it as upstream maps an
+installed `magic.mgc` (design-decisions §1058). `-i`, `--mime-type`,
+`--mime-encoding`, `--extension`, `--apple`, `-k`, `-z`/`-Z`, `-l`, `-C`,
+`-P`, `-e` and the rest are upstream's, and so are its quirks where they
+show in the output: `errno` printed after the fact (the CDF probe leaves
+`EFTYPE` behind and a later ELF message names it; parsing a number resets
+it), zlib's own messages for a damaged gzip stream (§1059), and the
+decompressors upstream runs as programs, run the same way.
+
+`scripts/file-diff.sh` builds file 5.45 from the release tarball and holds
+ours to it byte for byte: upstream's 71 test files in seven modes, a sample
+of the machine's own files, generated ELF files (every note, core file and
+limit readelf.c reads), Composite Document Files and compressed files,
+random mutations of all of them, standard input as a pipe and as a redirect,
+names that are not files, wrong options, and the compiled database itself.
+On 2026-10-02 it passed 42,266 cases. Getting there found two bugs of the
+port's own, both fixed: an `!:mime` value exactly 80 bytes long panicked
+where upstream writes its NUL into the next field, and getopt's complaints
+named the program by its basename where upstream prints `argv[0]` as given.
+A debug build, with overflow checks, ran 14,601 crafted and real files in
+five modes without a panic.
+
+Deliberately different, documented at the head of `userspace/file/src/main.rs`:
+`-v` names the built-in database, and `-S` is accepted though there is no
+sandbox.
+
+The ISO media branch's generator and harness
+(`scripts/file-isomedia-gen.py`, `scripts/file-isomedia-diff.sh`) are gone:
+that branch is the database's own `animation` rules now, run by the
+interpreter.
+
+**Original report.**
+
 
 **In short:** `file` tells you what kind of file something is. Ours checks a
 few dozen formats with rules written by hand, so for most of them it uses
@@ -181622,6 +181685,30 @@ cache's rule exists to avoid, so the declaration would need its own check),
 or (b) the independent suites run in parallel, each in its own temp tree,
 which keeps every run and spends cores instead of wall time.
 
+### A-DISK-ENCRYPTION-HAS-NO-BLOCK-LAYER -- 2026-10-02 -- OPEN (lane A)
+
+**Status:** OPEN (lane A) -- the second half of design-decisions §978's
+`diskencrypt` item; the first (real key derivation, §1523) is done.
+
+**In short:** the kernel can now make a disk-encryption key, seal it under
+passphrases and a recovery key, and get it back only with one of them -- but
+nothing encrypts or decrypts a disk's data with it. There is no encrypting
+layer between a block device and the filesystem mounted on it (Linux's
+`dm-crypt`), so an "encrypted volume" is a key in memory and nothing more,
+and the volumes and their slots are forgotten at reboot (their header has
+nowhere to live but the disk, and nothing writes it there).
+
+**Where:** `kernel/src/fs/diskencrypt.rs` (the keys); the block layer
+(`kernel/src/blkdev*`) and the mount path, which do not call it.
+
+**Proper fix:** a block device that wraps another and encrypts each sector
+with the master key (AES-256-XTS, the sector number as the tweak -- a vetted
+AES, per §539, not the hand-written `aes` crate); a volume header at the start
+of the device holding the slots (a LUKS2-like format, or LUKS2 itself so
+existing tools can read it); unlock at mount time, which opens the header,
+asks for the passphrase and hands the mount the decrypting device; and
+in-place encryption driving `update_progress`.
+
 ### A-SOCKETS-HAVE-NO-PENDING-ERROR -- 2026-10-02 -- OPEN (lane A)
 
 **Status:** OPEN (lane A) -- a small difference from Linux, found while
@@ -181680,6 +181767,105 @@ microphone reaches it: the mixer only mixes outward.
 input stream descriptor; AC'97's PCM In channel), pumped by `audio_out` into
 a capture ring per open capture substream, which `read_frames` drains --
 waiting for data on a blocking descriptor as playback waits for room.
+
+### A-CHATTR-MARKS-WERE-HONOURED-PIECEMEAL -- 2026-10-02 -- FIXED (lane A)
+
+**Status:** FIXED on lane-a-wip 2026-10-02, awaiting a boot (design-decisions
+§1524).
+
+**In short:** a file marked immutable could still be replaced by renaming
+another file onto it, re-moded, re-owned and hard-linked; an append-only file
+could be deleted and renamed, and on ext4 overwritten whole; a file in an
+immutable ext4 directory could be created or deleted; on FAT, whose read-only
+bit was reported as the immutable mark, nothing was refused at all, and
+`chattr +a` on a FAT file succeeded and did nothing. What was refused said
+"Permission denied" (`EACCES`), where Linux -- and `rm`, `mv` and `chattr`
+quoting it -- says "Operation not permitted" (`EPERM`). `access(W_OK)` on an
+immutable file answered yes, and opening one for writing succeeded until the
+first write.
+
+**Where it was:** each filesystem checked a different subset on its own:
+memfs most, ext4 the write path, unlink and unnamed files, FAT none, and none
+of them `rename`, `link`, `chmod`, `chown` or `utimes`.
+
+**Fix:** `fs::attr_policy` holds Linux's rules once; the VFS applies the
+name and metadata rules on every filesystem under its lock (every path,
+pinned-directory and held-file entry point), the filesystems the content
+rules on the inode they write, the handle layer `may_open` and `F_SETFL`, and
+the Linux `access` the `W_OK` rule. Every refusal is `NotPermitted`.
+Verified by `fs::attr_policy::self_test` (the rules, 41 cases),
+`fs::vfs::self_test_attr_rules` (50 operations through the VFS on `/tmp`,
+each refused one checked unchanged after, each allowed once cleared),
+`fat::format_self_test` (a read-only FAT file), the ext4 and memfs self-tests
+(now expecting `EPERM`), and the ring-3 `Linux file flags` test
+(`chattr`'s ioctls as root and as the file's owner).
+
+### A-LSTAT-REPORTED-NOTHING-ON-FAT-PROCFS-DEVFS -- 2026-10-02 -- FIXED (lane A)
+
+**Status:** FIXED on lane-a-wip 2026-10-02, awaiting a boot.
+
+**In short:** `ls -l` on a FAT volume dated every file 1970 and showed no
+owner or mode: `ls` lists by `lstat`, and `lstat` reached the `FileSystem`
+trait's default `lmetadata`, which built an empty record for every name. Any
+filesystem without its own `lmetadata` -- FAT, which has no symlinks to need
+one, procfs, devfs, the overlay -- answered that way, while `stat` of the
+same file answered fully. It also hid FAT's read-only bit from the
+immutable rules, which look at a name without following it.
+
+**Fix:** the default gives `metadata` for anything but a symlink
+(`vfs.rs`, `FileSystem::lmetadata`). A symlink on such a filesystem still
+gets the minimal record; none of the four has symlinks of its own except
+procfs (`/proc/self`), whose record was minimal before too.
+
+### A-KSHELL-TOUCH-DATED-FILES-1970 -- 2026-10-02 -- FIXED (lane A)
+
+**Status:** FIXED on lane-a-wip 2026-10-02, awaiting a boot.
+
+**In short:** kshell's `touch` of an existing file without `-d` set its
+times to `hpet::elapsed_ns` -- the time since boot -- so the file showed a
+date in the first minutes of 1970. It now asks for `TIME_NOW`, which the VFS
+makes the wall clock.
+
+### A-LINUX-F_SETFL-O_APPEND-REACHES-NOTHING -- 2026-10-02 -- FIXED (lane A)
+
+**Status:** FIXED on lane-a-wip 2026-10-02, awaiting a boot -- found while
+giving append-only files Linux's `setfl` rule, and fixed with it: the ring-3
+`Linux file flags` test sets `O_APPEND` by `F_SETFL`, rewinds, writes, and
+finds the byte at the end.
+
+**In short:** `fcntl(fd, F_SETFL, O_APPEND)` on a Linux descriptor answers 0
+and `F_GETFL` then shows `O_APPEND`, but the writes do not start appending:
+the flag is recorded in the descriptor's entry and never reaches the open
+file (`fs::handle`'s `OpenFlags::APPEND`), which is what every write
+consults. Clearing it likewise changes nothing. The native
+`SYS_FS_SET_STATUS_FLAGS` reaches the open file and is right.
+
+**Where:** `kernel/src/syscall/linux.rs` `sys_fcntl`, `F_SETFL` arm.
+
+**Proper fix:** for a file descriptor, set the open file's `APPEND` through
+`fs::handle::set_status_flags` (which also refuses a change on an
+append-only file, `EPERM`) before recording the flag in the entry, so a
+refusal leaves both as they were; a directory keeps answering 0, as on Linux.
+
+### A-PINNED-CREATES-ARE-OWNED-BY-ROOT -- 2026-10-02 -- FIXED (lane A)
+
+**Status:** FIXED on lane-a-wip 2026-10-02, awaiting a boot -- found while
+putting the attribute rules into the pinned-directory calls. Both now call
+`init_new_owner` under the creation's guard; `vfs::owner_self_test` makes a
+directory and a symlink through a held directory as a uid-1000 process, and
+a directory through a held set-group-ID one.
+
+**In short:** a directory or symlink made through a held directory --
+`SYS_FS_MKDIRAT_PINNED`, `SYS_FS_SYMLINKAT_PINNED`, which lane B's `cp -r`
+and lane D's `mkdirat` use -- belongs to root, whoever made it: the path-based
+`mkdir` and `symlink` give a new node its creator's owner and group
+(`init_new_owner`, since 2026-10-02), and these two were missed.
+
+**Where:** `kernel/src/fs/vfs.rs`, `Vfs::mkdir_at_pinned` and
+`Vfs::symlink_at_pinned`.
+
+**Proper fix:** call `init_new_owner` under the same guard as the creation,
+as `mkdir_mode` and `symlink` do, with the set-group-ID directory rule.
 
 ## Lane B: new entries
 
@@ -182130,6 +182316,150 @@ the right one: compile to instructions and run them in a loop whose frames are
 on the heap. That one change also gives gawk's line model exactly (its
 `sourceline` is per instruction), resolves an lvalue once by construction (6),
 and makes `exit`/`next` from inside a function an ordinary unwind (2, 3, 17).
+
+## B-A-PUSH-PIPED-INTO-HEAD-SKIPPED-EVERY-PRE-PUSH-GATE -- on Git for Windows a hook killed by SIGPIPE reads as a pass (lane B, 2026-10-02) — **FIXED** 2026-10-02
+
+**In short:** a `git push` whose output was piped into something that stops
+reading early -- `git push origin lane-b 2>&1 | head -60` -- went through even
+when a pre-push gate refused it. When `head` exits, the hook's next write to
+the pipe kills its shell with SIGPIPE, and `git.exe`, a native Windows program,
+reads that death as exit 0. Every gate in `scripts/hooks/pre-push` could be
+skipped this way without anyone choosing to skip it. Fixed by having the hook
+ignore SIGPIPE (`trap '' PIPE`) before it writes anything.
+
+**Found by** a push of lane B's that should have been refused. The
+text-mode-writes gate logged a refusal at 03:13:23
+(`pre-push-text-mode-writes.776805.log` in the worktree's git dir) and
+`refs/remotes/origin/lane-b` records "update by push" at 03:13:32 -- the push
+that had been piped into `head -60`. (The finding itself was the gate's false
+positive on `tarfile.open(..., mode="w")`, fixed in the same change; the
+bypass was real either way.)
+
+**Reproduced in isolation:** a scratch repository whose pre-push hook prints a
+line, sleeps, prints ten more and exits 1. `git push` refused; `git push 2>&1 |
+head -1` published the commit. The same hook with `trap '' PIPE` as its second
+line refused both ways, and a passing hook still passed. Then against the real
+hook: with a text-mode finding planted in the worktree, a push to a throwaway
+bare clone through `| head -5` succeeded.
+
+**The fix:** `scripts/hooks/pre-push` ignores SIGPIPE before its first write, so
+a write to a closed pipe fails with EPIPE and the hook reaches the exit it
+decided on. No pipeline in the hook needs SIGPIPE to stop a producer (each is
+finite, and git exits quietly on EPIPE regardless).
+`scripts/test-pre-push-gates.py` asserts the trap is in code rather than prose,
+precedes the first write, and is never reset; it fails against a mutant without
+it.
+
+**What it may have let through before.** Any push made from a Windows host with
+its output piped into `head`, `grep -q`, `sed ...q` or anything else that stops
+reading. A refusal leaves a `pre-push-<gate>.<pid>.log` in the pushing
+worktree's git dir; one followed within seconds by "update by push" in
+`git reflog show refs/remotes/origin/<branch>` is the sign. Most gates grade the
+whole working tree rather than the pushed range, so the next push made under
+the fixed hook re-asks most of what was skipped.
+
+## B-ERE-DOT-TOOK-A-BYTE-GLIBC-LEAVES -- in a UTF-8 reading, `.` and brackets matched an undecodable byte; glibc's never do (lane B, 2026-10-02) — **FIXED** 2026-10-02
+
+**In short:** our regular-expression engine, which `grep`, `sed`, `awk`,
+`find`, `expr`, `nl`, `csplit`, `ptx`, `tac` and the shell's `[[ =~ ]]` all
+use, let `.` match a byte that is not valid UTF-8, and let `[^x]` (any bracket
+expression that could take it) match it too. Every program it stands in for
+says the opposite. Measured under `LC_ALL=C.UTF-8` with `a\xffb` as the input:
+GNU `grep -c 'a.b'`, `grep -c 'a[^x]b'`, `grep -E` of both, `sed -n '/a.b/p'`
+and bash's `[[ $s =~ ^a.b$ ]]` all find **no** match; under `LC_ALL=C` all of
+them match. Ours matched in both. Found porting `tac`, whose `-r -s '.'` on such
+a file printed the records in a different order from GNU's.
+
+**Why glibc answers that way.** In a multibyte locale its `.` is
+`OP_UTF8_PERIOD`, which accepts a complete valid sequence or an ASCII byte and
+nothing else; and a bracket expression keeps only the bytes that are
+characters on their own (`bitset_mask (sbcset, dfa->sb_char)`, ASCII in a UTF-8
+locale), negated or not -- measured, `[[ $'a\xffb' =~ ^a[$'\xff']b$ ]]` fails
+under `C.UTF-8` too. A literal byte in the pattern is a `CHARACTER` node and
+still matches itself. GNU grep's own matcher documents the same rule.
+
+**The fix.** `ere::engine::takes` -- the one predicate the Pike VM, the
+backtracker and the prefilter share -- refuses an undecodable byte to `.` and
+to every bracket expression when the subject is read as characters; read as
+bytes (`with_byte_chars`, the C locale) nothing changes. The unanchored
+search's own step over a character, which had been the same `.` instruction,
+became a separate `Skip` that takes anything, so a search still passes over
+such a byte to the text beyond it. And the C locale now reads the *pattern* a
+byte at a time as well (`Regex::new_syntax_bytes`, `emacs::compile_bytes`), so
+`LC_ALL=C tac -r -s '[é]'` sees a bracket of two bytes, as glibc does.
+
+**Who sees a difference.** Anyone matching `.` or a bracket against bytes that
+are not UTF-8 in a program that reads characters -- now the GNU answer. libmagic
+reads bytes and is unaffected. The engine's own tests that asserted the old
+reading now assert both readings, each against its measured GNU behaviour;
+every dependent's tests and the thirteen differential harnesses of the programs
+built on it were rerun: four cases annotated as deliberate differences now agree
+with GNU and are ordinary cases again (`sed` one, `expr` two, `find` one).
+
+## `tac` was a "reverse line printer and character reverser for Slate OS"; it is GNU's now (lane B, 2026-10-02) — **FIXED** 2026-10-02
+
+**In short:** `userspace/tac` was hand-written: no `-b`, `-r` or `-s`, options
+of its own that no `tac` has, and its arguments read as `String`, so a file
+name that was not UTF-8 killed it before its first statement. It is replaced by
+`coreutils/src/bin/tac.rs`, a port of GNU coreutils 9.4's `tac.c` function by
+function, and the standalone crate is deleted (§1005: coreutils is the one
+home). `scripts/tac-diff.sh`: 98 cases, none differing from GNU's (two more,
+`--help` and `--version`, differ on purpose).
+
+**What the port had to reproduce, because it is observable:**
+
+- `-s ''` without `-r` separates on NUL (upstream compares the empty string's
+  terminator); with `-r` it is "separator cannot be empty".
+- `-r` reads glibc's Emacs syntax with the newline anchor, and searches
+  *backwards* within the part of the read buffer not yet printed -- so `^` and
+  `$` also hold where that window begins and ends. The port reads the file the
+  same way (8 KiB, doubling for long records, the size carried from file to
+  file) so those windows fall where GNU's do. `ere` gained the backward search
+  for it (`Search::rsearch`, glibc's `re_search` with a negative range).
+- Output goes through upstream's own 8 KiB buffer before standard output, so a
+  diagnostic about a later file comes out *before* earlier files' output, and
+  a full device fails an earlier write (a bare "write error").
+- Standard input that is a file is seeked to its end once per `-`, so
+  `tac - - <f` prints it twice; a pipe is copied to an unlinked temporary file
+  named as gnulib's `temp_stream` names it, in `$TMPDIR` only if that exists.
+
+**Found on the way, and fixed in the engine:** `.` and bracket expressions
+matched a byte that is not UTF-8, where glibc's never do --
+`B-ERE-DOT-TOOK-A-BYTE-GLIBC-LEAVES`.
+
+## TD-B-REGEX-TOOLS-IGNORE-LC-ALL-C -- `grep`, `sed`, `awk`, `expr`, `find`, `csplit`, `nl` and `ptx` read UTF-8 whatever the locale says (lane B, 2026-10-02) — open
+
+**In short:** GNU's regex tools read the input -- and the pattern -- a byte
+at a time when the locale is `C` (`LC_ALL=C grep ...`, the idiom scripts use
+for speed and for files that are not text), and as UTF-8 characters in a UTF-8
+locale. Ours always read UTF-8. Until 2026-10-02 that mostly did not show,
+because our `.` also matched a byte that is not UTF-8; since the engine took
+glibc's rule (`B-ERE-DOT-TOOK-A-BYTE-GLIBC-LEAVES`), `.*` stops at such a byte
+as GNU's does in a UTF-8 locale -- and `LC_ALL=C`, GNU's way past it, does
+nothing here. `expr "$path" : '.*/\(.*\)'` on a path that is not UTF-8 is the
+case a script meets.
+
+**What the fix is.** Each tool asks `coreutils::locale::ctype_is_utf8()` once
+and, when it is false, compiles with the engine's byte reading:
+`Regex::new_syntax_bytes` (pattern and subject a byte at a time), and for the
+translated dialects the byte variants their translators need (`emacs` has
+`compile_bytes`; `bre` and `awk` would need the same). `tac` already does
+this (`coreutils/src/bin/tac.rs`, `compile`), and its harness checks
+`LC_ALL=C` against GNU. Then each harness gains `LC_ALL=C` cases over the
+fixtures that are not UTF-8.
+
+**Waiting on D-Q7** (lane D's open question in `open-questions.md`: is the "C"
+locale one byte a character, as on Linux and as POSIX requires -- option B,
+Claude's recommendation -- or is SlateOS UTF-8 everywhere, so that `LC_ALL=C`
+changes nothing about text -- option A?). The answer decides this entry:
+
+| D-Q7 | This entry |
+|---|---|
+| B (as Linux) | do the fix above, tool by tool, with `LC_ALL=C` harness cases |
+| A (UTF-8 everywhere) | close it: `LC_ALL=C` means nothing anywhere, and `tac`'s switch (`compile` in `tac.rs`) comes out too |
+
+Until then the tools read UTF-8 as `osh` does by the operator's §104, and `tac`
+alone reads bytes under `LC_ALL=C` -- the reading B would give everything.
 
 ## Lane C: new entries
 

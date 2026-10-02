@@ -819,9 +819,10 @@ pub fn bind_path(h: UnixHandle, path: &Path, reported: Vec<u8>, mode: u16) -> Ke
 ///
 /// `NotFound` if nothing is there; `ConnectionRefused` if it is not a
 /// socket's node (or has no identity to find one by); `PermissionDenied` if
-/// the caller may not write the node -- Linux asks for write permission, and
-/// a read-only mount does not stop a connect (its `sb_permission` spares
-/// sockets), so that refusal alone is passed over.
+/// the caller may not write the node, and `NotPermitted` if it is immutable
+/// -- Linux asks for write permission, and a read-only mount does not stop a
+/// connect (its `sb_permission` spares sockets), so that refusal alone is
+/// passed over.
 pub fn name_at(path: &Path) -> KernelResult<Name> {
     let st = crate::fs::Vfs::stat(path)?;
     if st.entry_type != crate::fs::vfs::EntryType::Socket {

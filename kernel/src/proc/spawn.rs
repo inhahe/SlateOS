@@ -22946,6 +22946,113 @@ pub fn self_test_linux_scm_rights() -> KernelResult<()> {
     Ok(())
 }
 
+/// `FS_IOC_GETFLAGS` and `FS_IOC_SETFLAGS` from ring 3, as `lsattr` and
+/// `chattr` call them ([`elf::build_linux_file_flags_test_elf`]), run twice:
+/// as root, which may set the immutable flag and then finds a write, a
+/// writable open, an unlink and `access(W_OK)` refused with `EPERM`, a flag
+/// not kept refused with `EOPNOTSUPP`, and everything allowed again once it
+/// is cleared; and as uid 1000, the file's owner, which may not set it.
+///
+/// # Errors
+///
+/// `InternalError` with the program's sentinel exit, naming the step.
+pub fn self_test_linux_file_flags() -> KernelResult<()> {
+    /// The program's success exit.
+    const OK_EXIT: i32 = 0x60;
+    /// The program never blocks. This only bounds a broken run.
+    const MAX_YIELDS: usize = 1024;
+    /// The file the program makes.
+    const PATH: &str = "/tmp/_fflags";
+
+    serial_println!(
+        "[spawn] Running Linux file flags (FS_IOC_GETFLAGS/SETFLAGS, ring 3) integration test..."
+    );
+    // A run that fails between setting the flag and clearing it leaves the
+    // file immutable, and the next run could not remove it: cleared and
+    // removed from here, before each run and after the last, best effort.
+    let leftover = || {
+        let _ = crate::fs::Vfs::set_attributes(PATH, crate::fs::FileAttr::NONE);
+        let _ = crate::fs::Vfs::remove(PATH);
+    };
+    let exe_elf = elf::build_linux_file_flags_test_elf();
+    let argv: &[&[u8]] = &[b"spawn-test-file-flags"];
+    let envp: &[&[u8]] = &[b"PATH=/bin"];
+    let caps = [(ResourceType::File, 1u64, Rights::READ | Rights::WRITE)];
+    for (who, uid_gid) in [("root", None), ("uid 1000", Some((1000u32, 1000u32)))] {
+        leftover();
+        let options = SpawnOptions {
+            name: "spawn-test-file-flags",
+            parent: 0,
+            priority: DEFAULT_PRIORITY,
+            capabilities: &caps,
+            fd_map: &[],
+            argv,
+            envp,
+            exe_path: None,
+            cwd: None,
+            uid_gid,
+        };
+        let result = match spawn_process(&exe_elf, &options) {
+            Ok(r) => r,
+            Err(e) => {
+                serial_println!(
+                    "[spawn]   FAIL: file flags ({}) spawn returned {:?}",
+                    who,
+                    e
+                );
+                leftover();
+                return Err(e);
+            }
+        };
+        for _ in 0..MAX_YIELDS {
+            crate::sched::yield_now();
+            if pcb::state(result.pid) == Some(pcb::ProcessState::Zombie) {
+                break;
+            }
+        }
+        let state = pcb::state(result.pid);
+        let exit_code = pcb::exit_code(result.pid);
+        teardown_fixture(result.pid, result.task_id);
+        if state != Some(pcb::ProcessState::Zombie) {
+            serial_println!(
+                "[spawn]   FAIL: file flags ({}) -- not a zombie after {} yields, got {:?}",
+                who,
+                MAX_YIELDS,
+                state
+            );
+            leftover();
+            return Err(KernelError::InternalError);
+        }
+        if exit_code != Some(OK_EXIT) {
+            serial_println!(
+                "[spawn]   FAIL: file flags ({}) -- exit {:?}, expected {} (0x01 the open; \
+                 0x02-0x03 GETFLAGS not 0; as root: 0x04 SETFLAGS immutable refused, 0x05 \
+                 GETFLAGS not 0x10, then not EPERM for 0x06 a write, 0x07 a writable open, \
+                 0x08 an unlink, 0x09 access(W_OK); 0x0A a flag not kept not EOPNOTSUPP, \
+                 0x0B clearing refused, 0x0C the write after it, 0x0D the unlink after it, \
+                 0x0E a pipe's GETFLAGS not ENOTTY, 0x13 F_SETFL O_APPEND or the rewind, \
+                 0x14 the write, 0x15 not appended, 0x16 F_SETFL clearing O_APPEND on an \
+                 append-only file not EPERM; as uid 1000: 0x10 setting immutable not EPERM, \
+                 0x11 a change of nothing refused, 0x12 the unlink)",
+                who,
+                exit_code,
+                OK_EXIT
+            );
+            leftover();
+            return Err(KernelError::InternalError);
+        }
+    }
+    leftover();
+    serial_println!(
+        "[spawn]   Linux file flags (ring 3: root sets FS_IMMUTABLE_FL and reads it back; a \
+         write through an open descriptor, a writable open, an unlink and access(W_OK) are \
+         EPERM; FS_NODUMP_FL is EOPNOTSUPP; cleared, the same descriptor writes; O_APPEND by \
+         F_SETFL appends, and stays on an append-only file; a pipe is ENOTTY; the owner, uid \
+         1000, may not set it): OK"
+    );
+    Ok(())
+}
+
 /// Where a process's program headers are (`place_phdr_table`,
 /// `pcb::main_phdr`, `AT_PHDR`): found in a loaded segment, and copied into a
 /// page of their own when no segment holds them.

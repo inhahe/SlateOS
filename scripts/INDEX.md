@@ -188,12 +188,15 @@ promises about its own output, which a one-line summary cannot carry.
 | `scripts/expand-diff.sh` | Differential test: our expand against GNU expand. |
 | `scripts/expr-diff.sh` | Differential test: our expr against GNU expr, both run inside WSL. |
 | `scripts/extfloat-cases.py` | Generate cases for `scripts/extfloat-diff.sh`. |
-| `scripts/extfloat-diff.sh` | Differential test: our `coreutils::extfloat` against glibc's `strtold` and |
+| `scripts/extfloat-diff.sh` | Differential test: our `cprintf::extfloat` against glibc's `strtold` and |
 | `scripts/extract-tcc-strace.sh` | Extract tcc + crt + libtcc1.a from rootfs.ext4 and strace a hosted compile. |
 | `scripts/factor-diff.sh` | factor-diff.sh — compare our `factor` against GNU's, inside WSL. |
 | `scripts/fastpy-slateos-bundle.py` | Build the tree that puts the fastpy compiler on a SlateOS image. |
-| `scripts/file-isomedia-diff.sh` | Differential test: our `file` against file 5.45's on ISO base media files. |
-| `scripts/file-isomedia-gen.py` | Generate `userspace/file/src/isomedia_table.rs` from file 5.45's magic. |
+| `scripts/file-diff.sh` | Differential test: our `file` against file 5.45, built from the release. |
+| `scripts/file-gen-cdf.py` | Generate Composite Document Files (OLE2) for testing libmagic's readcdf.c. |
+| `scripts/file-gen-elf.py` | Generate ELF files exercising every path of libmagic's readelf.c. |
+| `scripts/file-gen-z.py` | Generate compressed files for testing `file -z` (libmagic's compress.c). |
+| `scripts/file-magic-vendor.py` | Vendor file 5.45's magic database into `userspace/file/magic/`. |
 | `scripts/find-claimed-acts.py` | Which programs tell the user they DID something they cannot do? |
 | `scripts/find-diff.sh` | Differential test: our find against GNU find. |
 | `scripts/find-drawn-only-settings.py` | Which settings does a window let you change, and then only draw? |
@@ -411,6 +414,7 @@ promises about its own output, which a one-line summary cannot carry.
 | `scripts/symbolize.py` | Turn the raw addresses in a kernel panic into `symbol+offset`. |
 | `scripts/sync-diff.sh` | sync-diff.sh — compare our `sync` against the real GNU one, inside WSL. |
 | `scripts/syslog-client-check.sh` | What `libcsyslog`'s callers actually send to the system log, end to end. |
+| `scripts/tac-diff.sh` | tac-diff.sh — compare our `tac` against GNU coreutils 9.4's, inside WSL. |
 | `scripts/tail-diff.sh` | Differential test: our tail against GNU tail. |
 | `scripts/tar-diff.sh` | Differential test: our tar against GNU tar. |
 | `scripts/tee-diff.sh` | Differential test: our tee against GNU coreutils' tee. |
@@ -503,4 +507,4 @@ promises about its own output, which a one-line summary cannot carry.
 | `scripts/xargs-diff.sh` | Differential test: our xargs against GNU xargs (findutils 4.9.0). |
 | `scripts/yes-diff.sh` | Differential test: our `yes` against GNU coreutils'. |
 
-_493 scripts._
+_497 scripts._

@@ -151,11 +151,14 @@ pub fn self_test() -> KernelResult<()> {
         crate::fs::Vfs::write_file(path, b"one")?;
         crate::fs::Vfs::set_attributes(path, crate::fs::vfs::FileAttr::IMMUTABLE)?;
 
+        // `NotPermitted` (`EPERM`), as Linux answers -- not the
+        // `PermissionDenied` (`EACCES`) of a permission bit, which is what
+        // this answered until 2026-10-02.
         match crate::fs::Vfs::write_file(path, b"two") {
-            Err(crate::error::KernelError::PermissionDenied) => {}
+            Err(crate::error::KernelError::NotPermitted) => {}
             other => {
                 serial_println!(
-                    "[ext4]   FAIL: writing an immutable file returned {:?}, want PermissionDenied",
+                    "[ext4]   FAIL: writing an immutable file returned {:?}, want NotPermitted",
                     other.map(|()| "Ok")
                 );
                 let _ = crate::fs::Vfs::set_attributes(path, crate::fs::vfs::FileAttr::NONE);
@@ -169,14 +172,26 @@ pub fn self_test() -> KernelResult<()> {
         // test that only covered `write_file` would have passed with both of
         // them missing, which is how the write path came to be the only one
         // enforced in the first place.
-        if crate::fs::Vfs::truncate(path, 0).is_ok() {
-            serial_println!("[ext4]   FAIL: truncating an immutable file succeeded");
+        let truncated = crate::fs::Vfs::truncate(path, 0);
+        if truncated != Err(crate::error::KernelError::NotPermitted) {
+            serial_println!(
+                "[ext4]   FAIL: truncating an immutable file returned {:?}, want NotPermitted",
+                truncated
+            );
             let _ = crate::fs::Vfs::set_attributes(path, crate::fs::vfs::FileAttr::NONE);
             let _ = crate::fs::Vfs::remove(path);
             return Err(crate::error::KernelError::IoError);
         }
-        if crate::fs::Vfs::remove(path).is_ok() {
-            serial_println!("[ext4]   FAIL: removing an immutable file succeeded");
+        let removed = crate::fs::Vfs::remove(path);
+        if removed != Err(crate::error::KernelError::NotPermitted) {
+            serial_println!(
+                "[ext4]   FAIL: removing an immutable file returned {:?}, want NotPermitted",
+                removed
+            );
+            if removed.is_err() {
+                let _ = crate::fs::Vfs::set_attributes(path, crate::fs::vfs::FileAttr::NONE);
+                let _ = crate::fs::Vfs::remove(path);
+            }
             return Err(crate::error::KernelError::IoError);
         }
 
@@ -191,7 +206,7 @@ pub fn self_test() -> KernelResult<()> {
         }
         crate::fs::Vfs::remove(path)?;
         serial_println!(
-            "[ext4]   immutable: write, truncate and unlink are all refused, and allowed again once cleared: OK"
+            "[ext4]   immutable: write, truncate and unlink are all refused (EPERM), and allowed again once cleared: OK"
         );
     }
 

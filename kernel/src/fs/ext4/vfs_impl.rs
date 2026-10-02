@@ -12,6 +12,7 @@ use alloc::string::String;
 use alloc::vec::Vec;
 
 use crate::error::{KernelError, KernelResult};
+use crate::fs::attr_policy;
 use crate::fs::path::{Path, PathBuf};
 use crate::fs::vfs::{DirEntry, EntryType, FileAttr, FileMeta, FileSystem, FsInfo};
 
@@ -84,14 +85,7 @@ impl Ext4Fs {
         let size = inode_file_size(&inode);
         let permissions = inode.i_mode & 0o7777; // lower 12 bits
 
-        // Map inode flags to our FileAttr.
-        let mut attrs = FileAttr::NONE;
-        if inode.i_flags & inode_flags::IMMUTABLE != 0 {
-            attrs = attrs.union(FileAttr::IMMUTABLE);
-        }
-        if inode.i_flags & inode_flags::APPEND != 0 {
-            attrs = attrs.union(FileAttr::APPEND_ONLY);
-        }
+        let attrs = attrs_of(&inode);
 
         // ext4 extra inode fields provide nanosecond precision and epoch
         // extension bits.  Layout of each *_extra field (u32, LE):
@@ -344,18 +338,19 @@ impl FileSystem for Ext4Fs {
             return Err(KernelError::IsADirectory);
         }
 
-        // An immutable file cannot be unlinked. This is the half of
-        // `chattr +i` people actually rely on -- a file you can still `rm`
-        // is not protected, whatever its contents do -- and Linux denies
-        // unlink for the same reason. Same inode this call already read.
-        if inode.i_flags & inode_flags::IMMUTABLE != 0 {
-            return Err(KernelError::PermissionDenied);
-        }
-
         // Remove the directory entry from the parent.
         let (parent_path, name) = split_parent_name(path)?;
         let parent_ino = self.driver.resolve_path(parent_path)?;
         let mut parent_inode = self.driver.read_inode(parent_ino)?;
+
+        // An immutable or append-only file cannot be unlinked, nor any file
+        // from such a directory (`fs::attr_policy::may_delete`, Linux's
+        // `may_delete`). This is the half of `chattr +i` people actually
+        // rely on -- a file you can still `rm` is not protected, whatever its
+        // contents do. On the inodes this call already read. The VFS asks
+        // the same before it calls here; this is the filesystem holding
+        // itself to it.
+        attr_policy::may_delete(attrs_of(&parent_inode), attrs_of(&inode))?;
 
         self.remove_dir_entry(&mut parent_inode, parent_ino, name)?;
 
@@ -738,9 +733,7 @@ impl FileSystem for Ext4Fs {
             return Err(KernelError::NotADirectory);
         }
         // Nothing is made in an immutable directory, named or not.
-        if dir_inode.i_flags & inode_flags::IMMUTABLE != 0 {
-            return Err(KernelError::PermissionDenied);
-        }
+        attr_policy::may_create(attrs_of(&dir_inode))?;
         // In the directory's group, as a named file would be.
         let group = self.driver.superblock().inode_group(dir_ino);
         let (ino, inode) = self
@@ -807,6 +800,10 @@ impl FileSystem for Ext4Fs {
 
     fn chmod_ino(&mut self, ino: u64, permissions: u16) -> KernelResult<()> {
         self.set_permissions_ino(ext4_ino(ino)?, permissions)
+    }
+
+    fn set_attributes_ino(&mut self, ino: u64, attrs: FileAttr) -> KernelResult<()> {
+        self.set_attributes_ino_u32(ext4_ino(ino)?, attrs)
     }
 
     fn chown_ino(&mut self, ino: u64, uid: u32, gid: u32) -> KernelResult<()> {
@@ -890,27 +887,7 @@ impl FileSystem for Ext4Fs {
 
     fn set_attributes(&mut self, path: &Path, attrs: FileAttr) -> KernelResult<()> {
         let ino = self.driver.resolve_path(path)?;
-        let mut inode = self.driver.read_inode(ino)?;
-
-        // Map our FileAttr flags to ext4 inode flags.
-        // Preserve all other inode flags (like EXTENTS).
-        let mut flags = inode.i_flags;
-
-        // Clear the bits we manage, then set them if requested.
-        flags &= !(inode_flags::IMMUTABLE | inode_flags::APPEND);
-        if attrs.contains(FileAttr::IMMUTABLE) {
-            flags |= inode_flags::IMMUTABLE;
-        }
-        if attrs.contains(FileAttr::APPEND_ONLY) {
-            flags |= inode_flags::APPEND;
-        }
-        inode.i_flags = flags;
-
-        // Attribute changes advance ctime (metadata change), not mtime.
-        stamp_inode_ctime(&mut inode);
-        self.driver.write_inode(ino, &inode)?;
-        self.driver.flush()?;
-        Ok(())
+        self.set_attributes_ino_u32(ino, attrs)
     }
 
     fn xattrs_supported(&self) -> bool {
@@ -1237,22 +1214,22 @@ impl Ext4Fs {
         if mode != file_type::S_IFREG {
             return Err(KernelError::NotSupported);
         }
-        // An immutable file cannot be overwritten. Checked HERE, on the
-        // inode this write already read, rather than in the VFS: the VFS
-        // write path holds no metadata, so a check there would cost a
-        // second lookup per write and open a TOCTOU window between the
-        // check and the write. This inode is the one the overwrite below
-        // uses.
+        // An immutable file cannot be overwritten, nor an append-only one,
+        // which is written only at its end (`fs::attr_policy::may_rewrite`).
+        // Checked HERE, on the inode this write already read, rather than in
+        // the VFS: the VFS write path holds no metadata, so a check there
+        // would cost a second lookup per write and open a TOCTOU window
+        // between the check and the write. This inode is the one the
+        // overwrite below uses.
         //
         // Until 2026-09-14 the bit was stored, reported through `stat`,
         // written back when set, and enforced only by `access(W_OK)` --
         // which a program that simply writes never calls. So `chattr +i`
         // would have reported success and protected nothing. A
         // protection that reports success without protecting is worse
-        // than an absent one: it gives a reason to rely on it.
-        if inode.i_flags & inode_flags::IMMUTABLE != 0 {
-            return Err(KernelError::PermissionDenied);
-        }
+        // than an absent one: it gives a reason to rely on it. An
+        // append-only file could be overwritten whole until 2026-10-02.
+        attr_policy::may_rewrite(attrs_of(&inode))?;
 
         // Crash-safe overwrite ordering:
         // 1. Save old inode (holds extent tree pointing to old blocks)
@@ -1311,15 +1288,11 @@ impl Ext4Fs {
 
         let file_size = inode_file_size(&inode);
         // `chattr +i` and `+a`, on the inode just read: nothing into an
-        // immutable file, and only at the end of an append-only one -- as
-        // memfs's `write_range` has it. The in-place paths below never
+        // immutable file, and only at the end of an append-only one
+        // (`fs::attr_policy::may_write_at`). The in-place paths below never
         // looked, so a write through a handle went into either; `write_file`
         // was the only path that checked.
-        if inode.i_flags & inode_flags::IMMUTABLE != 0
-            || (inode.i_flags & inode_flags::APPEND != 0 && offset != file_size)
-        {
-            return Err(KernelError::PermissionDenied);
-        }
+        attr_policy::may_write_at(attrs_of(&inode), offset, file_size)?;
         let end = offset.saturating_add(data.len() as u64);
 
         if end <= file_size {
@@ -1438,11 +1411,9 @@ impl Ext4Fs {
         // An immutable file cannot be truncated: `chattr +i` means the
         // contents cannot change, and truncation changes them. Nor can an
         // append-only one (`chattr +a`), as on Linux and in memfs: cutting it
-        // rewrites history. Same inode this call already read -- no second
-        // lookup, no TOCTOU window.
-        if inode.i_flags & (inode_flags::IMMUTABLE | inode_flags::APPEND) != 0 {
-            return Err(KernelError::PermissionDenied);
-        }
+        // rewrites history (`fs::attr_policy::may_rewrite`). Same inode this
+        // call already read -- no second lookup, no TOCTOU window.
+        attr_policy::may_rewrite(attrs_of(&inode))?;
 
         let current_size = inode_file_size(&inode);
 
@@ -1890,6 +1861,32 @@ impl Ext4Fs {
         Ok(())
     }
 
+    /// [`FileSystem::set_attributes`] on inode `ino`: `EXT4_IMMUTABLE_FL`
+    /// and `EXT4_APPEND_FL` from `attrs`, every other flag kept.
+    fn set_attributes_ino_u32(&mut self, ino: u32, attrs: FileAttr) -> KernelResult<()> {
+        let mut inode = self.driver.read_inode(ino)?;
+
+        // Map our FileAttr flags to ext4 inode flags.
+        // Preserve all other inode flags (like EXTENTS).
+        let mut flags = inode.i_flags;
+
+        // Clear the bits we manage, then set them if requested.
+        flags &= !(inode_flags::IMMUTABLE | inode_flags::APPEND);
+        if attrs.contains(FileAttr::IMMUTABLE) {
+            flags |= inode_flags::IMMUTABLE;
+        }
+        if attrs.contains(FileAttr::APPEND_ONLY) {
+            flags |= inode_flags::APPEND;
+        }
+        inode.i_flags = flags;
+
+        // Attribute changes advance ctime (metadata change), not mtime.
+        stamp_inode_ctime(&mut inode);
+        self.driver.write_inode(ino, &inode)?;
+        self.driver.flush()?;
+        Ok(())
+    }
+
     /// Shared body for [`set_owner`]/[`set_owner_no_follow`]: chown an
     /// already-resolved inode.  Writes the full 32-bit UID/GID and advances
     /// ctime (chown is a metadata change, not a data change).
@@ -2244,6 +2241,20 @@ fn dirent_type_for_mode(mode_type: u16) -> u8 {
 }
 
 /// Get the full 64-bit file size from an inode.
+/// The VFS attributes an inode's flags carry: `EXT4_IMMUTABLE_FL` and
+/// `EXT4_APPEND_FL`, the two `chattr` sets that the VFS knows
+/// (`FileAttr::IMMUTABLE`, `FileAttr::APPEND_ONLY`).
+fn attrs_of(inode: &super::ondisk::Ext4Inode) -> FileAttr {
+    let mut attrs = FileAttr::NONE;
+    if inode.i_flags & inode_flags::IMMUTABLE != 0 {
+        attrs = attrs.union(FileAttr::IMMUTABLE);
+    }
+    if inode.i_flags & inode_flags::APPEND != 0 {
+        attrs = attrs.union(FileAttr::APPEND_ONLY);
+    }
+    attrs
+}
+
 fn inode_file_size(inode: &super::ondisk::Ext4Inode) -> u64 {
     let lo = u64::from(inode.i_size_lo);
     let is_file = (inode.i_mode & file_type::S_IFMT) == file_type::S_IFREG;
@@ -2623,17 +2634,24 @@ fn test_dir_type_conversions() -> KernelResult<()> {
         crate::serial_println!("[ext4-vfs]   FAIL: SYMLINK type");
         return Err(KernelError::InternalError);
     }
-    // Types the VFS has no `EntryType` for fall back to File.  All three are
-    // checked because the fallback is a catch-all `_` arm: one of them passing
-    // does not show the others are not matched earlier by mistake, and
-    // UNKNOWN (0) in particular is the value a directory entry carries when
-    // the filesystem was built without the filetype feature.
+    // A socket's node is a socket since Unix-domain sockets got names
+    // (design-decisions §1519); this checked for the File fallback until
+    // 2026-10-02, the first boot that reached it after.
+    if dir_type_to_entry_type(dir_type::SOCK) != EntryType::Socket {
+        crate::serial_println!("[ext4-vfs]   FAIL: SOCK type");
+        return Err(KernelError::InternalError);
+    }
+    // Types the VFS has no `EntryType` for fall back to File.  More than one
+    // is checked because the fallback is a catch-all `_` arm: one of them
+    // passing does not show the others are not matched earlier by mistake,
+    // and UNKNOWN (0) in particular is the value a directory entry carries
+    // when the filesystem was built without the filetype feature.
     if dir_type_to_entry_type(dir_type::CHRDEV) != EntryType::File {
         crate::serial_println!("[ext4-vfs]   FAIL: CHRDEV fallback");
         return Err(KernelError::InternalError);
     }
-    if dir_type_to_entry_type(dir_type::SOCK) != EntryType::File {
-        crate::serial_println!("[ext4-vfs]   FAIL: SOCK fallback");
+    if dir_type_to_entry_type(dir_type::FIFO) != EntryType::File {
+        crate::serial_println!("[ext4-vfs]   FAIL: FIFO fallback");
         return Err(KernelError::InternalError);
     }
     if dir_type_to_entry_type(dir_type::UNKNOWN) != EntryType::File {
@@ -2652,6 +2670,10 @@ fn test_dir_type_conversions() -> KernelResult<()> {
     }
     if mode_to_entry_type(file_type::S_IFLNK) != EntryType::Symlink {
         crate::serial_println!("[ext4-vfs]   FAIL: mode LNK");
+        return Err(KernelError::InternalError);
+    }
+    if mode_to_entry_type(file_type::S_IFSOCK) != EntryType::Socket {
+        crate::serial_println!("[ext4-vfs]   FAIL: mode SOCK");
         return Err(KernelError::InternalError);
     }
     // Modes with no `EntryType` fall back to File — same catch-all reasoning

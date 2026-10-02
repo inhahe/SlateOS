@@ -83982,6 +83982,83 @@ and with a function's parameter, copied into a variable or element
 **Revisit when** the reference changes: if this awk is ever held to POSIX
 alone, or to a different awk, option B becomes the better fit.
 
+## 1058. `file` carries file 5.45's database compiled and uses it in place, and libmagic is a library of its own
+
+**Date:** 2026-10-02
+**Lane:** B
+**Decided by:** Claude (autonomous)
+
+**In short:** `file` needs its database of 22,642 rules. Upstream installs
+it as an 8.5 MB compiled file (`magic.mgc`) and uses the rules straight from
+it, without converting them, which is why it starts in about 2 ms. Ours first
+carried the rules' *text* and parsed it at every start -- about 30 ms, fifteen
+times slower, which a script that runs `file` once per name pays every time.
+Now the build compiles the text exactly as `file -C` does, the program carries
+the compiled bytes, and it uses them where they lie, as upstream does: 2.1 ms
+a run against upstream's 1.8. The price is size: the program is 9.4 MB, the
+database 8.5 MB of it -- about what upstream's install takes too, in separate
+files. So that the build could do the compiling, the library half of
+the port moved out of `file` into a crate of its own, `userspace/libmagic`,
+which is also what lets any other program identify files without running
+`file`.
+
+| Option | For | Against |
+|---|---|---|
+| **A. Compile at build time, carry the `.mgc`, use it in place** (chosen) | Starts as upstream starts: 2.1 ms a run against upstream's 1.8 (an ELF file; best of 5 x 100 runs). The bytes are the ones `file -C` writes, which `scripts/file-diff.sh` holds equal to upstream's compiler, so the rules the program runs are exactly the rules upstream runs from `magic.mgc`. The database is part of the program's read-only data: paged in as it is touched and shared by every `file` running at once, as upstream's mapped file is. A rule that does not compile fails the build. | A 9.4 MB program. Using the bytes in place needs a rule (`Magic`) laid out exactly as the compiled record, which `magic.rs` asserts field by field at compile time, and one `unsafe` reinterpretation, which checks the header, the counts and the alignment first and otherwise decodes. A build script, and a crate split so it can call the library, which a build then compiles twice (for the build script, for the program). |
+| D. The same database with its runs of zeros packed (8.5 MB to 0.8), decoded at start | A 1.7 MB program. This entry's first choice, in commit 9ef81fa88 (`pack_mgc`, `unpack_mgc`). | 10.7 ms a run: decoding 22,642 records into structures is most of it. |
+| E. Packed, and unpacked at start into memory that is then used in place | A 1.7 MB program; not measured, but writing 8.5 MB of fresh memory at every start is about 2-3 ms more than A. | Each run's own 8.5 MB, where A's is shared. |
+| B. Carry the text, parse at start | One crate; nothing generated. | ~30 ms a run. |
+| C. Install `magic.mgc` in the image | Exactly upstream's layout. | A file that can go missing, or go stale against the program. Still supported: a database installed at the default path is read in preference, as upstream reads it. |
+
+**Where it bites.** `userspace/file/build.rs` (the compile);
+`userspace/file/src/main.rs`, whose `database` carries the bytes aligned for a
+rule; `libmagic::magic::Magic` (`#[repr(C)]`, the layout assertions);
+`libmagic::apprentice::{compile_mgc, map_builtin, in_place}`; and
+`apprentice_map`, which uses the carried database when nothing is installed at
+`/usr/share/misc/magic` (`Ms::builtin`). Rules are held as
+`Cow<'static, [Magic]>` (`MagicMap`, `MList`): borrowed when in place, owned
+when read from text or a file. A big-endian machine would decode rather than
+borrow; SlateOS has none. One visible consequence, and it is upstream's:
+`file -C` and `file -c` with no `-m` look for the *text* at the default path,
+as they do on an ordinary install, and say "could not find any valid magic
+files!"; `file -l` lists the carried database.
+
+**Revisit when** the image's size matters more than `file`'s start: D's code
+is in the history, and E is a small change from it. `file` is not yet in the
+image (`scripts/rootfs-bin-manifest.txt`), so today the size costs nothing
+there.
+
+## 1059. `file -z` inflates with zlib's semantics, in a decoder of its own
+
+**Date:** 2026-10-02
+**Lane:** B
+**Decided by:** Claude (autonomous)
+
+**In short:** `file -z` describes what is inside a gzip or zlib stream, and
+for a damaged one it prints the error zlib gives, word for word --
+`ERROR:[zlib: invalid distance too far back]`. The system's decoder, the
+`deflate` crate, cannot give those answers: it folds a dozen of zlib's
+messages into one error, treats a truncated stream as an error where zlib
+hands back what it decoded, and stops at a full buffer where zlib reads on
+to the next block's header. So `libmagic` has its own small decoder
+(`src/zlib.rs`) written to answer as zlib's `inflate` answers. That is a
+second DEFLATE decoder in the tree, which the `deflate` crate's documentation
+argues against.
+
+| Option | For | Against |
+|---|---|---|
+| **A. A decoder with zlib's semantics in libmagic** (chosen) | `file -z`'s output is upstream's, damaged and truncated streams included: `scripts/file-diff.sh` reaches every message zlib gives on 2,000 crafted streams with no difference. Small (one file), safe Rust, no `unsafe`. | A second parser of untrusted compressed data to keep correct; the `deflate` crate's doc warns against exactly this. |
+| B. Use the `deflate` crate | One decoder. | Different words for errors, and different *answers* for truncated input -- `file -z` on a cut-off download would print an error where upstream describes the contents. |
+| C. Give the `deflate` crate zlib's error detail and partial-output behaviour | One decoder, exact. | Changes a crate the kernel and three other lanes use, for one caller's fidelity, and its table-driven decoder's structure differs from zlib's enough that "the point zlib raises it" would be a redesign, not a variant. |
+
+**Mitigations.** The decoder reads bit by bit with every access checked
+(`get`), and it is exercised by the harness's crafted streams in a debug
+build with overflow checks. It decodes only for identification -- never
+into anything kept.
+
+**Revisit when** the `deflate` crate grows a zlib-compatible mode for other
+reasons; then this should become a call to it.
+
 ## 834. Selection is a change of colour, not of weight
 
 **Date:** 2026-09-12
@@ -92282,3 +92359,136 @@ ordinary pass, since nothing changes until something fails.
 **Revisit** if failures seen only after an earlier one keep failing to
 reproduce on their own: that would mean the tests lean on each other's state,
 which is a bug in the tests, and the switch would be reporting noise.
+
+## 1523. A disk's master key is sealed in key slots, each under an Argon2id-derived key, with the vendored XChaCha20-Poly1305
+
+**Date:** 2026-10-02 · **Decided by:** Claude (operator-approved scope: §978's "real key derivation with a ported, vetted password hash") · **Lane:** A
+
+**In short:** `diskencrypt::unlock_volume` used to accept any passphrase that
+was not empty. Now a volume has a random master key that is never kept in the
+clear while it is locked. Each key slot holds that key sealed under a key
+derived from one passphrase -- or from a recovery key -- and unlocking works
+only if a slot's seal opens. This is how LUKS2, the format Linux's
+`cryptsetup` writes, does it. The derivation is Argon2id and the seal is
+XChaCha20-Poly1305, both from the vendored RustCrypto crates through `seal`
+(§539: ported, not written here).
+
+**What changed:**
+- A slot is: a random salt, the Argon2id cost it was made with, a random
+  nonce, and the 64-byte master key sealed with the derived key. The volume's
+  random identity and the slot's number are the seal's associated data, so a
+  slot copied to another volume or position does not open.
+- A wrong secret opens no slot: the cipher's tag is the check, and nothing
+  derived from a secret is stored to compare against.
+- Adding a slot or a recovery key needs the volume unlocked, as `cryptsetup
+  luksAddKey` needs an existing passphrase; the last slot cannot be removed.
+- A recovery key is 256 random bits shown once as eight groups of eight hex
+  digits; its slot costs the least Argon2 allows, since a random 256-bit
+  secret gains nothing from stretching.
+- The derivation runs with no lock held; the master key is wiped from memory
+  when the volume is locked; keys are drawn only once the random-number
+  generator has been seeded.
+- The made-up "System, /dev/sda1, 512 GiB" volume the table used to start
+  with is gone: it starts empty.
+
+| | What changes | For | Against |
+|---|---|---|---|
+| **Key slots sealing one master key (chosen, as LUKS)** | several passphrases and a recovery key open one volume; changing a passphrase rewrites one slot, not the disk | the design every Linux tool expects; the disk's key never depends on a passphrase | more to store |
+| The passphrase's derived key is the disk key | one secret | simplest | a passphrase change re-encrypts the disk; no recovery key |
+
+| | What changes | For | Against |
+|---|---|---|---|
+| **Passphrase slots at 19 MiB, two passes, one lane (chosen)** | an unlock costs a fraction of a second on hardware | OWASP's floor for Argon2id (and the `argon2` crate's default); kernel memory is the whole machine's | weaker against a GPU attacker than `seal::KdfParams::RECOMMENDED`'s 64 MiB in four lanes |
+| 64 MiB, three passes, four lanes | stronger | RFC 9106's second recommendation | 64 MiB of kernel memory per unlock attempt |
+
+The cost is stored in each slot, so it can rise later without breaking
+existing slots.
+
+**Not done** (`known-issues.md` `A-DISK-ENCRYPTION-HAS-NO-BLOCK-LAYER`):
+nothing encrypts a disk's data with the key yet, and the slots live only in
+memory.
+
+**Revisit** when the block layer is built: the slots' on-disk form should be
+LUKS2's if existing tools are to read SlateOS disks, which would fix this
+format's details (it is LUKS-like now, not LUKS).
+
+## 1524. `chattr +i` and `+a` hold on every filesystem: the VFS applies Linux's rules to names and metadata, the filesystems to contents, and every refusal is `EPERM`
+
+**Date:** 2026-10-02 · **Decided by:** Claude (autonomous) · **Lane:** A
+
+**In short:** a file marked immutable (`chattr +i`) is meant to be
+untouchable -- not written, renamed, deleted, re-moded or linked until root
+clears the mark -- and an append-only one (`chattr +a`) only to grow at its
+end. Here those marks were honoured piecemeal: on ext4 a rename *onto* an
+immutable file replaced it, any `chmod` or `chown` went through, an
+append-only file could be deleted; on FAT nothing was refused at all; and
+the refusals that did happen said "Permission denied" (`EACCES`) where Linux
+says "Operation not permitted" (`EPERM`). Now one module holds Linux's rules
+(`fs::attr_policy`), the VFS applies them to every change of a name or of
+metadata on every filesystem, the filesystems apply them to every change of
+contents, and every refusal is `EPERM`. Lane B's `chattr` and `lsattr` reach
+them through `FS_IOC_GETFLAGS`/`FS_IOC_SETFLAGS`.
+
+**The rules** (`fs::attr_policy`, each Linux's):
+
+| Operation | Immutable | Append-only |
+|---|---|---|
+| write, truncate, whole-file overwrite | refused | only at the end; truncate and overwrite refused |
+| open for writing / with `O_TRUNC` | refused | only with `O_APPEND`; `O_TRUNC` refused |
+| `fcntl(F_SETFL)` changing `O_APPEND` | -- | refused |
+| `fallocate` | refused | allowed |
+| unlink, rmdir, rename away, rename onto, link | refused | refused |
+| `chmod`, `chown`, times set to given values | refused | refused |
+| times set to now (`touch`) | refused | allowed |
+| a name added to the directory | refused (immutable directory) | allowed (append-only directory) |
+| a name removed from the directory | refused | refused |
+| `access(W_OK)` | `EPERM` | -- |
+
+They bind root and kernel tasks too; what only root may do is set or clear
+the two marks (Linux's `CAP_LINUX_IMMUTABLE`), and the file's owner may
+change any other attribute. Linux's orderings are kept where they are
+visible: a missing name is `ENOENT` and a taken one `EEXIST` before `EPERM`,
+a chown of (-1, -1) is not refused, a rename of a file onto itself succeeds.
+
+| Where the rules are applied | What changes | For | Against |
+|---|---|---|---|
+| **Names and metadata in the VFS, under the filesystem's lock; contents in each filesystem, on the inode it writes (chosen -- Linux's split)** | every filesystem that reports the marks is held to them, FAT included, and one added later is too | the data path costs nothing; the check and the change are atomic; one copy of the rules | one or two extra lookups per name or metadata change |
+| Each filesystem applies everything | no extra lookups | -- | how ext4 and memfs drifted apart and FAT applied nothing; every new filesystem must re-learn ten rules |
+| The VFS applies everything | one place | -- | a metadata lookup per write, and a window between the check and the write |
+
+**FAT's read-only bit** (`fat.rs` `entry_attrs`):
+
+| | What changes | For | Against |
+|---|---|---|---|
+| **Immutable on a file, nothing on a directory (chosen)** | a read-only file on a stick refuses writes, deletion and renaming; Windows' customised folders take new files | `FileAttr::IMMUTABLE` keeps its one meaning; Windows refuses writing and deleting such a file too, and itself ignores the bit on a folder (`desktop.ini`), as Linux's vfat does unless mounted `rodir` | Windows allows renaming a read-only file, which this refuses |
+| Mode bits without `w`, as Linux's vfat | a read-only file is `r--r--r--` | Linux's behaviour | root writes straight through it; FAT's `IMMUTABLE` would mean something else again |
+
+`chattr +a` on FAT, and `+i` on a FAT directory, are refused (`EOPNOTSUPP`)
+rather than accepted and ignored, as they were: a mark that reports success
+and protects nothing gives a reason to rely on it.
+
+**"Now" is a request** (`fs::vfs::TIME_NOW`, `u64::MAX`): an append-only file
+may be touched to now but not set to given times, which could backdate a log,
+so the VFS must be able to tell the two apart -- as Linux tells `ATTR_TOUCH`
+from `ATTR_TIMES_SET`. The Linux `utime` calls pass `UTIME_NOW` and NULL times
+through as `TIME_NOW`; the native `SYS_FS_SET_TIMES` takes it too. Lane D's C
+library still reads the clock itself for `UTIME_NOW`
+(`requests/a-d-utime-now-is-a-request.md`), so until it passes `TIME_NOW` a
+native `touch` of an append-only file is refused.
+
+**Found and fixed on the way:**
+- The `FileSystem` trait's default `lmetadata` built a minimal record for
+  every name, so on a filesystem that does not override it -- FAT, procfs,
+  devfs, the overlay -- `lstat` reported no times, owner, mode or attributes,
+  and `ls -l` dated every FAT file 1970. It now gives `metadata` for anything
+  but a symlink.
+- The Linux `access` consulted no gate and answered every existing file
+  writable. It now answers the gates a real open or exec meets: an immutable
+  file, the ACLs and capability tags, a read-only mount -- not the mode bits,
+  which nothing enforces
+  (`TD-B-ACCESS-CANNOT-SEE-THE-ONE-PERMISSION-MECHANISM-THAT-IS-ENFORCED`).
+- kshell's `touch` stamped an existing file with the time since boot.
+
+**Not done:** `fs::immutable`, the second, decorative store of the same marks
+(known-issues `[A] Two implementations of file immutability`), still exists;
+it is the next thing to remove, now that the real one is complete.

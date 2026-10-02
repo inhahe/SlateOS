@@ -3513,6 +3513,339 @@ pub fn build_linux_scm_rights_test_elf() -> alloc::vec::Vec<u8> {
     elf
 }
 
+/// Build a **Linux-ABI** ring-3 program that sets and reads a file's inode
+/// flags as `chattr` and `lsattr` do (`FS_IOC_SETFLAGS`, `FS_IOC_GETFLAGS`),
+/// and finds them enforced, exiting `0x60` when every step answers as
+/// Linux's would and a sentinel naming the first that did not:
+///
+/// ```text
+///   unlink("/tmp/_fflags")                        ; a leftover, if any
+///   fd = open("/tmp/_fflags", O_RDWR|O_CREAT, 0644)  ; >= 0, else 0x01
+///   ioctl(fd, FS_IOC_GETFLAGS, &f)                ; 0, else 0x02
+///   f == 0                                        ; else 0x03
+///   if getuid() != 0 goto not_root
+///   ioctl(fd, FS_IOC_SETFLAGS, &FS_IMMUTABLE_FL)  ; 0, else 0x04
+///   ioctl(fd, FS_IOC_GETFLAGS, &f), f == 0x10     ; else 0x05
+///   write(fd, "x", 1)                             ; -EPERM, else 0x06
+///   open("/tmp/_fflags", O_WRONLY)                ; -EPERM, else 0x07
+///   unlink("/tmp/_fflags")                        ; -EPERM, else 0x08
+///   access("/tmp/_fflags", W_OK)                  ; -EPERM, else 0x09
+///   ioctl(fd, FS_IOC_SETFLAGS, &0x50)             ; -EOPNOTSUPP (FS_NODUMP_FL
+///                                                 ; is not kept), else 0x0A
+///   ioctl(fd, FS_IOC_SETFLAGS, &0)                ; 0, else 0x0B
+///   write(fd, "x", 1)                             ; 1, else 0x0C
+///   fcntl(fd, F_SETFL, O_APPEND); lseek(fd, 0)    ; 0, 0, else 0x13
+///   write(fd, "x", 1)                             ; 1, else 0x14
+///   lseek(fd, 0); read(fd, buf, 16)               ; 2 -- the write appended,
+///                                                 ; else 0x15
+///   ioctl(fd, FS_IOC_SETFLAGS, &FS_APPEND_FL)     ; 0, then
+///   fcntl(fd, F_SETFL, 0)                         ; -EPERM, then
+///   ioctl(fd, FS_IOC_SETFLAGS, &0)                ; 0, else 0x16
+///   close(fd); unlink("/tmp/_fflags")             ; 0, else 0x0D
+///   pipe2(p, 0); ioctl(p[0], FS_IOC_GETFLAGS, &f) ; -ENOTTY, else 0x0E
+///   exit(0x60)
+/// not_root:                                       ; the file's owner
+///   ioctl(fd, FS_IOC_SETFLAGS, &FS_IMMUTABLE_FL)  ; -EPERM, else 0x10
+///   ioctl(fd, FS_IOC_SETFLAGS, &0)                ; 0 (no change), else 0x11
+///   close(fd); unlink("/tmp/_fflags")             ; 0, else 0x12
+///   exit(0x60)
+/// ```
+///
+/// Run twice by [`super::spawn::self_test_linux_file_flags`], as root and as
+/// uid 1000: the immutable flag is root's to set (`CAP_LINUX_IMMUTABLE`),
+/// and set, it refuses a write through a descriptor opened before it, a new
+/// writable open, an unlink and `access(W_OK)` alike -- and is lifted by the
+/// same ioctl, after which the same descriptor writes again, so the
+/// refusals were the flag's. `O_APPEND` set by `fcntl(F_SETFL)` moves the next
+/// write to the end, and on an append-only file may not be cleared. Tagged
+/// `ELFOSABI_GNU` for the SysV stack + Linux ABI.
+#[must_use]
+#[allow(
+    clippy::indexing_slicing,
+    clippy::arithmetic_side_effects,
+    clippy::cast_possible_truncation,
+    clippy::cast_possible_wrap,
+    clippy::too_many_lines
+)]
+pub fn build_linux_file_flags_test_elf() -> alloc::vec::Vec<u8> {
+    /// `jnz rel32`'s second opcode byte.
+    const JNZ: u8 = 0x85;
+    /// `jl rel32`'s second opcode byte.
+    const JL: u8 = 0x8C;
+    // Linux x86-64 syscall numbers.
+    const READ: u32 = 0;
+    const WRITE: u32 = 1;
+    const OPEN: u32 = 2;
+    const CLOSE: u32 = 3;
+    const LSEEK: u32 = 8;
+    const IOCTL: u32 = 16;
+    const FCNTL: u32 = 72;
+    const ACCESS: u32 = 21;
+    const EXIT: u32 = 60;
+    const UNLINK: u32 = 87;
+    const GETUID: u32 = 102;
+    const PIPE2: u32 = 293;
+    const O_WRONLY: u32 = 0o1;
+    const O_RDWR_CREAT: u32 = 0o102;
+    const W_OK: u32 = 2;
+    const FS_IOC_GETFLAGS: u32 = 0x8008_6601;
+    const FS_IOC_SETFLAGS: u32 = 0x4008_6602;
+    const FS_IMMUTABLE_FL: u32 = 0x10;
+    const FS_APPEND_FL: u32 = 0x20;
+    const F_SETFL: u32 = 4;
+    const O_APPEND: u32 = 0o2000;
+    /// `FS_IMMUTABLE_FL | FS_NODUMP_FL`: one kept, one not.
+    const WITH_NODUMP: u32 = 0x50;
+    const EPERM: i32 = -1;
+    const ENOTTY: i32 = -25;
+    const EOPNOTSUPP: i32 = -95;
+    // Stack layout (all [rsp + offset]).
+    const PATH: u32 = 0x00; // "/tmp/_fflags\0", 16 bytes
+    const FD: u32 = 0x10;
+    const FLAGS: u32 = 0x18; // the ioctl's int, 8 bytes reserved
+    const P: u32 = 0x20; // pipe2's two descriptors
+    const BYTE: u32 = 0x28; // "x"
+    const BUF: u32 = 0x30; // 16 bytes
+    const FRAME: u32 = 0x40;
+
+    let mut code: alloc::vec::Vec<u8> = alloc::vec::Vec::new();
+    let mut fail_jumps: alloc::vec::Vec<(usize, u8)> = alloc::vec::Vec::new();
+    let le = |v: u32| v.to_le_bytes();
+    // Emitters, every stack operand as [rsp + disp32].
+    let mov_edi_mem = |c: &mut alloc::vec::Vec<u8>, d: u32| {
+        c.extend_from_slice(&[0x8B, 0xBC, 0x24]);
+        c.extend_from_slice(&le(d));
+    };
+    let mov_edi_imm = |c: &mut alloc::vec::Vec<u8>, v: u32| {
+        c.push(0xBF);
+        c.extend_from_slice(&le(v));
+    };
+    let mov_esi_imm = |c: &mut alloc::vec::Vec<u8>, v: u32| {
+        c.push(0xBE);
+        c.extend_from_slice(&le(v));
+    };
+    let mov_edx_imm = |c: &mut alloc::vec::Vec<u8>, v: u32| {
+        c.push(0xBA);
+        c.extend_from_slice(&le(v));
+    };
+    let lea_rdi = |c: &mut alloc::vec::Vec<u8>, d: u32| {
+        c.extend_from_slice(&[0x48, 0x8D, 0xBC, 0x24]);
+        c.extend_from_slice(&le(d));
+    };
+    let lea_rsi = |c: &mut alloc::vec::Vec<u8>, d: u32| {
+        c.extend_from_slice(&[0x48, 0x8D, 0xB4, 0x24]);
+        c.extend_from_slice(&le(d));
+    };
+    let lea_rdx = |c: &mut alloc::vec::Vec<u8>, d: u32| {
+        c.extend_from_slice(&[0x48, 0x8D, 0x94, 0x24]);
+        c.extend_from_slice(&le(d));
+    };
+    // mov dword [rsp + d], imm32
+    let store_imm = |c: &mut alloc::vec::Vec<u8>, d: u32, v: u32| {
+        c.extend_from_slice(&[0xC7, 0x84, 0x24]);
+        c.extend_from_slice(&le(d));
+        c.extend_from_slice(&le(v));
+    };
+    // mov [rsp + d], eax
+    let store_eax = |c: &mut alloc::vec::Vec<u8>, d: u32| {
+        c.extend_from_slice(&[0x89, 0x84, 0x24]);
+        c.extend_from_slice(&le(d));
+    };
+    let syscall = |c: &mut alloc::vec::Vec<u8>, nr: u32| {
+        c.push(0xB8);
+        c.extend_from_slice(&le(nr));
+        c.extend_from_slice(&[0x0F, 0x05]);
+    };
+    let cmp_rax = |c: &mut alloc::vec::Vec<u8>, v: i32| {
+        c.extend_from_slice(&[0x48, 0x3D]);
+        c.extend_from_slice(&v.to_le_bytes());
+    };
+    // cmp dword [rsp + d], imm32
+    let cmp_mem = |c: &mut alloc::vec::Vec<u8>, d: u32, v: u32| {
+        c.extend_from_slice(&[0x81, 0xBC, 0x24]);
+        c.extend_from_slice(&le(d));
+        c.extend_from_slice(&le(v));
+    };
+    let jcc_fail = |c: &mut alloc::vec::Vec<u8>,
+                    fails: &mut alloc::vec::Vec<(usize, u8)>,
+                    op: u8,
+                    sentinel: u8| {
+        c.extend_from_slice(&[0x0F, op, 0, 0, 0, 0]);
+        fails.push((c.len() - 4, sentinel));
+    };
+    // ioctl(fd at `fd`, request, &FLAGS) with FLAGS set to `flags` first.
+    let ioctl_flags = |c: &mut alloc::vec::Vec<u8>, fd: u32, request: u32, flags: u32| {
+        store_imm(c, FLAGS, flags);
+        mov_edi_mem(c, fd);
+        mov_esi_imm(c, request);
+        lea_rdx(c, FLAGS);
+        syscall(c, IOCTL);
+    };
+    let path_call = |c: &mut alloc::vec::Vec<u8>, nr: u32, esi: u32, edx: u32| {
+        lea_rdi(c, PATH);
+        mov_esi_imm(c, esi);
+        mov_edx_imm(c, edx);
+        syscall(c, nr);
+    };
+    let write_x = |c: &mut alloc::vec::Vec<u8>| {
+        mov_edi_mem(c, FD);
+        lea_rsi(c, BYTE);
+        mov_edx_imm(c, 1);
+        syscall(c, WRITE);
+    };
+    // fcntl(fd, F_SETFL, flags)
+    let setfl = |c: &mut alloc::vec::Vec<u8>, flags: u32| {
+        mov_edi_mem(c, FD);
+        mov_esi_imm(c, F_SETFL);
+        mov_edx_imm(c, flags);
+        syscall(c, FCNTL);
+    };
+    // lseek(fd, 0, SEEK_SET)
+    let rewind = |c: &mut alloc::vec::Vec<u8>| {
+        mov_edi_mem(c, FD);
+        mov_esi_imm(c, 0);
+        mov_edx_imm(c, 0);
+        syscall(c, LSEEK);
+    };
+
+    // sub rsp, FRAME
+    code.extend_from_slice(&[0x48, 0x81, 0xEC]);
+    code.extend_from_slice(&le(FRAME));
+    store_imm(&mut code, PATH, 0x706D_742F); // "/tmp"
+    store_imm(&mut code, PATH + 4, 0x6666_5F2F); // "/_ff"
+    store_imm(&mut code, PATH + 8, 0x7367_616C); // "lags"
+    store_imm(&mut code, PATH + 12, 0);
+    store_imm(&mut code, BYTE, u32::from(b'x'));
+
+    // A leftover from an earlier run, if any; its answer does not matter.
+    path_call(&mut code, UNLINK, 0, 0);
+    path_call(&mut code, OPEN, O_RDWR_CREAT, 0o644);
+    cmp_rax(&mut code, 0);
+    jcc_fail(&mut code, &mut fail_jumps, JL, 0x01);
+    store_eax(&mut code, FD);
+    // Not yet set: GETFLAGS writes 0 over the all-ones it is given.
+    ioctl_flags(&mut code, FD, FS_IOC_GETFLAGS, u32::MAX);
+    cmp_rax(&mut code, 0);
+    jcc_fail(&mut code, &mut fail_jumps, JNZ, 0x02);
+    cmp_mem(&mut code, FLAGS, 0);
+    jcc_fail(&mut code, &mut fail_jumps, JNZ, 0x03);
+
+    syscall(&mut code, GETUID);
+    cmp_rax(&mut code, 0);
+    code.extend_from_slice(&[0x0F, JNZ, 0, 0, 0, 0]);
+    let to_not_root = code.len() - 4;
+
+    // --- root: set, enforced, refused for a flag not kept, cleared ---
+    ioctl_flags(&mut code, FD, FS_IOC_SETFLAGS, FS_IMMUTABLE_FL);
+    cmp_rax(&mut code, 0);
+    jcc_fail(&mut code, &mut fail_jumps, JNZ, 0x04);
+    ioctl_flags(&mut code, FD, FS_IOC_GETFLAGS, 0);
+    cmp_rax(&mut code, 0);
+    jcc_fail(&mut code, &mut fail_jumps, JNZ, 0x05);
+    cmp_mem(&mut code, FLAGS, FS_IMMUTABLE_FL);
+    jcc_fail(&mut code, &mut fail_jumps, JNZ, 0x05);
+    write_x(&mut code);
+    cmp_rax(&mut code, EPERM);
+    jcc_fail(&mut code, &mut fail_jumps, JNZ, 0x06);
+    path_call(&mut code, OPEN, O_WRONLY, 0);
+    cmp_rax(&mut code, EPERM);
+    jcc_fail(&mut code, &mut fail_jumps, JNZ, 0x07);
+    path_call(&mut code, UNLINK, 0, 0);
+    cmp_rax(&mut code, EPERM);
+    jcc_fail(&mut code, &mut fail_jumps, JNZ, 0x08);
+    path_call(&mut code, ACCESS, W_OK, 0);
+    cmp_rax(&mut code, EPERM);
+    jcc_fail(&mut code, &mut fail_jumps, JNZ, 0x09);
+    ioctl_flags(&mut code, FD, FS_IOC_SETFLAGS, WITH_NODUMP);
+    cmp_rax(&mut code, EOPNOTSUPP);
+    jcc_fail(&mut code, &mut fail_jumps, JNZ, 0x0A);
+    ioctl_flags(&mut code, FD, FS_IOC_SETFLAGS, 0);
+    cmp_rax(&mut code, 0);
+    jcc_fail(&mut code, &mut fail_jumps, JNZ, 0x0B);
+    write_x(&mut code);
+    cmp_rax(&mut code, 1);
+    jcc_fail(&mut code, &mut fail_jumps, JNZ, 0x0C);
+    // O_APPEND by fcntl reaches the open file: written after a rewind, the
+    // byte lands at the end, and the file holds two.
+    setfl(&mut code, O_APPEND);
+    cmp_rax(&mut code, 0);
+    jcc_fail(&mut code, &mut fail_jumps, JNZ, 0x13);
+    rewind(&mut code);
+    cmp_rax(&mut code, 0);
+    jcc_fail(&mut code, &mut fail_jumps, JNZ, 0x13);
+    write_x(&mut code);
+    cmp_rax(&mut code, 1);
+    jcc_fail(&mut code, &mut fail_jumps, JNZ, 0x14);
+    rewind(&mut code);
+    mov_edi_mem(&mut code, FD);
+    lea_rsi(&mut code, BUF);
+    mov_edx_imm(&mut code, 16);
+    syscall(&mut code, READ);
+    cmp_rax(&mut code, 2);
+    jcc_fail(&mut code, &mut fail_jumps, JNZ, 0x15);
+    // Append-only, the descriptor keeps O_APPEND.
+    ioctl_flags(&mut code, FD, FS_IOC_SETFLAGS, FS_APPEND_FL);
+    cmp_rax(&mut code, 0);
+    jcc_fail(&mut code, &mut fail_jumps, JNZ, 0x16);
+    setfl(&mut code, 0);
+    cmp_rax(&mut code, EPERM);
+    jcc_fail(&mut code, &mut fail_jumps, JNZ, 0x16);
+    ioctl_flags(&mut code, FD, FS_IOC_SETFLAGS, 0);
+    cmp_rax(&mut code, 0);
+    jcc_fail(&mut code, &mut fail_jumps, JNZ, 0x16);
+    mov_edi_mem(&mut code, FD);
+    syscall(&mut code, CLOSE);
+    path_call(&mut code, UNLINK, 0, 0);
+    cmp_rax(&mut code, 0);
+    jcc_fail(&mut code, &mut fail_jumps, JNZ, 0x0D);
+    // Not a regular file: a pipe has no inode flags.
+    lea_rdi(&mut code, P);
+    mov_esi_imm(&mut code, 0);
+    syscall(&mut code, PIPE2);
+    cmp_rax(&mut code, 0);
+    jcc_fail(&mut code, &mut fail_jumps, JNZ, 0x0E);
+    ioctl_flags(&mut code, P, FS_IOC_GETFLAGS, 0);
+    cmp_rax(&mut code, ENOTTY);
+    jcc_fail(&mut code, &mut fail_jumps, JNZ, 0x0E);
+    mov_edi_imm(&mut code, 0x60);
+    syscall(&mut code, EXIT);
+
+    // --- not root: the owner, who may not set it ---
+    let not_root = code.len();
+    let disp = (not_root as i64 - (to_not_root as i64 + 4)) as i32;
+    code[to_not_root..to_not_root + 4].copy_from_slice(&disp.to_le_bytes());
+    ioctl_flags(&mut code, FD, FS_IOC_SETFLAGS, FS_IMMUTABLE_FL);
+    cmp_rax(&mut code, EPERM);
+    jcc_fail(&mut code, &mut fail_jumps, JNZ, 0x10);
+    ioctl_flags(&mut code, FD, FS_IOC_SETFLAGS, 0);
+    cmp_rax(&mut code, 0);
+    jcc_fail(&mut code, &mut fail_jumps, JNZ, 0x11);
+    mov_edi_mem(&mut code, FD);
+    syscall(&mut code, CLOSE);
+    path_call(&mut code, UNLINK, 0, 0);
+    cmp_rax(&mut code, 0);
+    jcc_fail(&mut code, &mut fail_jumps, JNZ, 0x12);
+    mov_edi_imm(&mut code, 0x60);
+    syscall(&mut code, EXIT);
+
+    // One failure exit per sentinel.
+    let mut fail_at: alloc::vec::Vec<(u8, usize)> = alloc::vec::Vec::new();
+    for sentinel in 0x01u8..=0x16 {
+        fail_at.push((sentinel, code.len()));
+        mov_edi_imm(&mut code, u32::from(sentinel));
+        syscall(&mut code, EXIT);
+    }
+    for (at, sentinel) in fail_jumps {
+        if let Some(&(_, target)) = fail_at.iter().find(|(s, _)| *s == sentinel) {
+            let disp = (target as i64 - (at as i64 + 4)) as i32;
+            code[at..at + 4].copy_from_slice(&disp.to_le_bytes());
+        }
+    }
+    let mut elf = single_segment_test_elf(&code);
+    elf[EI_OSABI] = ELFOSABI_GNU;
+    elf
+}
+
 /// Build a **native-ABI** ring-3 program that drives the sound card through
 /// the device door (`SYS_DEVICE_*`, 1119-1123) as the C library will, its
 /// answers Linux errnos:

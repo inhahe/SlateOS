@@ -41,7 +41,6 @@ userspace/diskutil/src/main.rs:argv-as-string
 userspace/dmesg/src/main.rs:argv-as-string
 userspace/dmidecode/src/main.rs:argv-as-string
 userspace/efibootmgr/src/main.rs:argv-as-string
-userspace/file/src/main.rs:argv-as-string
 userspace/finger/src/main.rs:argv-as-string
 userspace/fio/src/main.rs:argv-as-string
 userspace/fmt/src/main.rs:argv-as-string
@@ -105,7 +104,6 @@ userspace/pgrep/src/main.rs:argv-as-string
 userspace/ping/src/main.rs:argv-as-string
 userspace/pkg/src/main.rs:argv-as-string
 userspace/polkit/src/main.rs:argv-as-string
-userspace/powerctl/src/main.rs:argv-as-string
 userspace/pstree/src/main.rs:argv-as-string
 userspace/pv/src/main.rs:argv-as-string
 userspace/readelf/src/main.rs:argv-as-string
@@ -128,7 +126,6 @@ userspace/sysinfo/src/main.rs:argv-as-string
 userspace/syslogd/src/main.rs:argv-as-string
 userspace/sysstat/src/main.rs:argv-as-string
 userspace/systemctl/src/main.rs:argv-as-string
-userspace/tac/src/main.rs:argv-as-string
 userspace/tcpdump/src/main.rs:argv-as-string
 userspace/telnet/src/main.rs:argv-as-string
 userspace/top/src/main.rs:argv-as-string

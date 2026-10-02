@@ -17,7 +17,11 @@ fn bytewise(data: &[u8]) -> u32 {
     let table: [u32; 256] = core::array::from_fn(|i| {
         let mut crc = u32::try_from(i).unwrap_or(0);
         for _ in 0..8 {
-            crc = if crc & 1 != 0 { (crc >> 1) ^ 0xEDB8_8320 } else { crc >> 1 };
+            crc = if crc & 1 != 0 {
+                (crc >> 1) ^ 0xEDB8_8320
+            } else {
+                crc >> 1
+            };
         }
         crc
     });
@@ -62,7 +66,10 @@ fn main() {
     println!("crc32 over {} MiB, {rounds} rounds:", LEN >> 20);
     println!("  slicing by 8:   {:8.1} MiB/s", mib / sliced.as_secs_f64());
     println!("  byte at a time: {:8.1} MiB/s", mib / old.as_secs_f64());
-    println!("  speed-up:       {:8.2}x", old.as_secs_f64() / sliced.as_secs_f64());
+    println!(
+        "  speed-up:       {:8.2}x",
+        old.as_secs_f64() / sliced.as_secs_f64()
+    );
     println!(
         "  checksums agree: {} ({new_crc:#010x}; sums {acc:#010x}, {acc_old:#010x})",
         new_crc == old_crc

@@ -3795,6 +3795,11 @@ impl Shell {
     ///
     /// There is no `fork` behind this. See [`Shell::restore`] for what that
     /// costs and what it covers.
+    ///
+    /// Always `Ok`: a subshell absorbs its body's flow, which is the point of
+    /// one. It answers [`Run`] anyway because it stands wherever a command
+    /// does, and every way of running a command answers [`Run`].
+    #[allow(clippy::unnecessary_wraps)]
     fn subshell(&mut self, body: impl FnOnce(&mut Self) -> Run<()>) -> Run<()> {
         let snap = self.snapshot();
         let r = body(self);
@@ -4729,7 +4734,9 @@ fn echo_escapes(src: &[u8], out: &mut Vec<u8>) -> bool {
                     && d.is_ascii_digit()
                     && d < b'8'
                 {
-                    v = v.saturating_mul(8).saturating_add(u32::from(d - b'0'));
+                    v = v
+                        .saturating_mul(8)
+                        .saturating_add(u32::from(d.saturating_sub(b'0')));
                     i = i.saturating_add(1);
                     k = k.saturating_add(1);
                 }
@@ -4850,6 +4857,13 @@ impl Shell {
         );
     }
 
+    /// Run the builtin `argv` names.
+    ///
+    /// Every builtin returns [`Run`], including the ones that never stop the
+    /// shell (`echo`, `pwd`, `cd` and others answer with `self.status`), so
+    /// that each arm below reads alike and a builtin that later learns to stop
+    /// the shell, `exit`'s way, does not change its caller. Those carry
+    /// `allow(clippy::unnecessary_wraps)` pointing here.
     fn run_builtin(&mut self, argv: &[Vec<u8>], io: &Io) -> Run<()> {
         let name = argv.first().cloned().unwrap_or_default();
         let args = argv.get(1..).unwrap_or_default();
@@ -4866,11 +4880,11 @@ impl Shell {
             b"pwd" => self.bi_pwd(io),
             b"cd" => self.bi_cd(args, io),
             b"exit" => {
-                let n = self.number_arg(args, self.status)?;
+                let n = self.number_arg(args, self.status);
                 Err(Flow::Exit(n))
             }
             b"return" => {
-                let n = self.number_arg(args, self.status)?;
+                let n = self.number_arg(args, self.status);
                 Err(Flow::Return(n))
             }
             b"break" => self.bi_loopctl(args, false),
@@ -4895,21 +4909,22 @@ impl Shell {
     }
 
     /// The optional numeric argument of `exit`, `return` and friends.
-    fn number_arg(&mut self, args: &[Vec<u8>], default: u8) -> Run<u8> {
+    fn number_arg(&mut self, args: &[Vec<u8>], default: u8) -> u8 {
         match args.first() {
-            None => Ok(default),
+            None => default,
             Some(a) => match parse_int(a) {
                 // `exit 300` is `exit 44`: the status is a byte, and truncating
                 // is what every shell does with a wider number.
-                Some(v) => Ok(status_byte(i32::try_from(v).unwrap_or(0))),
+                Some(v) => status_byte(i32::try_from(v).unwrap_or(0)),
                 None => {
                     diag!("sh: illegal number: {}", String::from_utf8_lossy(a));
-                    Ok(2)
+                    2
                 }
             },
         }
     }
 
+    #[allow(clippy::unnecessary_wraps)] // One signature for every builtin: see `run_builtin`.
     fn bi_echo(&mut self, args: &[Vec<u8>], io: &Io) -> Run<()> {
         let mut newline = true;
         let mut rest = args;
@@ -4937,6 +4952,7 @@ impl Shell {
         Ok(())
     }
 
+    #[allow(clippy::unnecessary_wraps)] // One signature for every builtin: see `run_builtin`.
     fn bi_pwd(&mut self, io: &Io) -> Run<()> {
         match env::current_dir() {
             Ok(d) => {
@@ -4953,6 +4969,7 @@ impl Shell {
         Ok(())
     }
 
+    #[allow(clippy::unnecessary_wraps)] // One signature for every builtin: see `run_builtin`.
     fn bi_cd(&mut self, args: &[Vec<u8>], io: &Io) -> Run<()> {
         // `-L` and `-P` are accepted and ignored: this shell has no logical
         // path to keep, since it tracks `PWD` from the kernel's answer.
@@ -5103,6 +5120,7 @@ impl Shell {
     /// function otherwise*, which is POSIX's rule and not the obvious one:
     /// `unset f` after `f() { … }` really does remove the function, so a
     /// script can retract a definition without knowing it was one.
+    #[allow(clippy::unnecessary_wraps)] // One signature for every builtin: see `run_builtin`.
     fn bi_unset(&mut self, args: &[Vec<u8>]) -> Run<()> {
         // `None` is "neither option given" — the fall-back rule above.
         let mut kind: Option<bool> = None;
@@ -5288,6 +5306,7 @@ impl Shell {
         }
     }
 
+    #[allow(clippy::unnecessary_wraps)] // One signature for every builtin: see `run_builtin`.
     fn bi_read(&mut self, args: &[Vec<u8>], io: &Io) -> Run<()> {
         let mut raw = false;
         let mut i = 0usize;
@@ -5436,6 +5455,7 @@ impl Shell {
         }
     }
 
+    #[allow(clippy::unnecessary_wraps)] // One signature for every builtin: see `run_builtin`.
     fn bi_wait(&mut self, args: &[Vec<u8>]) -> Run<()> {
         let mut children = std::mem::take(&mut self.bg);
         if args.is_empty() {
@@ -5558,7 +5578,7 @@ impl Shell {
             }
             pending.extend_from_slice(&line);
             match parse(&pending) {
-                Err(ParseErr::Incomplete) => continue,
+                Err(ParseErr::Incomplete) => {}
                 Err(e) => {
                     // A syntax error only skips a line at a prompt; the script
                     // case is `run_text`'s, and it stops there.

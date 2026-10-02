@@ -337,16 +337,20 @@ Files are created u+rw, and directories u+rwx, minus umask restrictions.
 ";
 
 /// gnulib's `letters`: the 62 characters an `X` becomes.
+// Used by `imp`, which is unix-only; the host build keeps it for its tests.
+#[cfg_attr(not(unix), allow(dead_code))]
 const LETTERS: &[u8; 62] = b"abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789";
 
 /// Random base-62 digits, unbiased: gnulib's `try_tempname_len` draws 64 bits
 /// and takes ten digits from them, discarding a draw from the biased top of
 /// the range.
+#[cfg_attr(not(unix), allow(dead_code))] // As `LETTERS`.
 struct Digits {
     value: u64,
     left: u32,
 }
 
+#[cfg_attr(not(unix), allow(dead_code))] // As `LETTERS`.
 impl Digits {
     /// 62^10, the most digits one draw gives without bias.
     const POWER: u64 = 839_299_365_868_340_224;

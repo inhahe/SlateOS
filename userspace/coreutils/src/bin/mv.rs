@@ -1393,7 +1393,15 @@ fn move_one<O: Write, E: Write>(
     // upstream's block is inside the same `if (dst_exists)`, which is why `-b`
     // onto a free name makes no `~` file.
     if let Some(dst_meta) = &dst_meta {
-        match refuse_overwrite_checks(src, &src_meta, target, dst_meta, relname, seen, job) {
+        match refuse_overwrite_checks(
+            src,
+            &src_meta,
+            target,
+            dst_meta,
+            relname,
+            seen.as_ref(),
+            job,
+        ) {
             Verdict::Proceed => {}
             Verdict::Refused => return false,
             // Deliberately *not* [`record_move`]: upstream's `skip:` label
@@ -1851,7 +1859,7 @@ fn refuse_overwrite_checks<O: Write, E: Write>(
     target: &Path,
     dst_meta: &fs::Metadata,
     relname: &OsString,
-    seen: &Option<DestInfo>,
+    seen: Option<&DestInfo>,
     job: &mut Job<'_, O, E>,
 ) -> Verdict {
     // 1. Is the destination the source? (`copy.c:2345`)

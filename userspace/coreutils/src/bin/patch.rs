@@ -2013,8 +2013,8 @@ fn main() {
             .map(<[u8]>::to_vec)
             .collect();
         let mut offset: i64 = 0;
-        let mut hunks_applied = 0;
-        let mut hunks_failed = 0;
+        let mut hunks_applied = 0usize;
+        let mut hunks_failed = 0usize;
         // Did any hunk land INEXACTLY -- needing fuzz, or having to slide
         // off the line its header named? GNU treats either as the patch not
         // matching the file, which decides whether a `.orig` is written.
@@ -2195,17 +2195,17 @@ fn main() {
                         let _ = out.write_all(
                             format!(
                                 "Hunk #{} succeeded at {at}{fuzz_note}{offset_note}.\n",
-                                hunk_idx + 1
+                                hunk_idx.saturating_add(1)
                             )
                             .as_bytes(),
                         );
                     }
                     lines = applied.lines;
                     offset = applied.offset;
-                    hunks_applied += 1;
+                    hunks_applied = hunks_applied.saturating_add(1);
                 }
                 None => {
-                    hunks_failed += 1;
+                    hunks_failed = hunks_failed.saturating_add(1);
                     rejected.push(hunk.clone());
                     if !opts.silent {
                         // GNU: `Hunk #1 FAILED at 1.` -- on stdout, with a
@@ -2216,7 +2216,7 @@ fn main() {
                             format!(
                                 "Hunk #{} FAILED at {}.
 ",
-                                hunk_idx + 1,
+                                hunk_idx.saturating_add(1),
                                 hunk.old_start
                             )
                             .as_bytes(),
@@ -2318,7 +2318,7 @@ fn main() {
                 // `1 out of 1 hunk FAILED -- saving rejects to file X.rej`,
                 // singular when there is one. Ours said `hunks FAILED for X`
                 // and never mentioned the reject file, because there was none.
-                let total = hunks_applied + hunks_failed;
+                let total = hunks_applied.saturating_add(hunks_failed);
                 let plural = if total == 1 { "hunk" } else { "hunks" };
                 // Bytes, so the reject path goes in raw -- see the sibling
                 // summary above. The reject clause is omitted under

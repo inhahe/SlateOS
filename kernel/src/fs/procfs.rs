@@ -2451,15 +2451,6 @@ fn format_bitmap_list(mask: u64, nbits_in: usize) -> String {
     s
 }
 
-/// Build a Linux `/proc/<pid>/status` body.
-///
-/// Thread-specific fields come from `task` (Name, State, Pid = `task.id`,
-/// context switches); process-wide fields come from `proc_id` (Tgid, PPid,
-/// Umask, Uid/Gid/Groups, Vm*, Threads).  For a process's own
-/// `/proc/<pid>/status`, the caller passes `proc_id == task.id` so Pid ==
-/// Tgid and the two id sources coincide; for a thread's `task/<tid>/status`
-/// they differ (`task.id == tid`, `proc_id == owning pid`), so Pid is the
-/// thread id while Tgid is the process id — exactly as Linux reports.
 /// `RLIMIT_SIGPENDING`'s index in a process's resource limits: the cap on
 /// signals queued for its real user, which `SigQ` reports against.
 const RLIMIT_SIGPENDING: u32 = 11;
@@ -2482,6 +2473,15 @@ fn proc_signal_sets(proc_id: u64) -> (crate::proc::signal::SignalSets, u64) {
     (sets, caught)
 }
 
+/// Build a Linux `/proc/<pid>/status` body.
+///
+/// Thread-specific fields come from `task` (Name, State, Pid = `task.id`,
+/// context switches); process-wide fields come from `proc_id` (Tgid, PPid,
+/// Umask, Uid/Gid/Groups, Vm*, Threads).  For a process's own
+/// `/proc/<pid>/status`, the caller passes `proc_id == task.id` so Pid ==
+/// Tgid and the two id sources coincide; for a thread's `task/<tid>/status`
+/// they differ (`task.id == tid`, `proc_id == owning pid`), so Pid is the
+/// thread id while Tgid is the process id — exactly as Linux reports.
 fn build_pid_status(task: &crate::sched::TaskInfo, proc_id: u64) -> Vec<u8> {
     use crate::sched::task::TaskState;
     use core::fmt::Write as _;

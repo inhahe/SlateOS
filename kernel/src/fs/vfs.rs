@@ -8199,6 +8199,22 @@ fn mount_matches(mount_path: &Path, path: &Path) -> bool {
     path.starts_with(mount_path)
 }
 
+/// Where `path` lands when the subtree at `from` moves to `to`: `from` itself
+/// becomes `to`, `from/x` becomes `to/x`, and `None` means `path` is not in
+/// that subtree. [`crate::fs::pathutil::rebase`], except that `from` may be
+/// `/`: a pivot moves the root, which no rename does.
+fn rebase_under(path: &Path, from: &Path, to: &Path) -> Option<PathBuf> {
+    if from.components().next().is_none() {
+        // Everything is under `/`: `/x` becomes `to/x`.
+        let mut out = to.to_path_buf();
+        for c in path.components() {
+            out.push(c);
+        }
+        return Some(out);
+    }
+    crate::fs::pathutil::rebase(path, from, to)
+}
+
 /// A mount path in its canonical spelling: absolute, with no trailing
 /// separator and no repeated ones — except the root mount, which *is* a
 /// single separator.
@@ -8223,22 +8239,6 @@ fn mount_matches(mount_path: &Path, path: &Path) -> bool {
 ///
 /// Note this normalises *separators only*.  `.` and `..` are rejected
 /// outright at registration instead — see [`Vfs::mount_with_options`].
-/// Where `path` lands when the subtree at `from` moves to `to`: `from` itself
-/// becomes `to`, `from/x` becomes `to/x`, and `None` means `path` is not in
-/// that subtree. [`crate::fs::pathutil::rebase`], except that `from` may be
-/// `/`: a pivot moves the root, which no rename does.
-fn rebase_under(path: &Path, from: &Path, to: &Path) -> Option<PathBuf> {
-    if from.components().next().is_none() {
-        // Everything is under `/`: `/x` becomes `to/x`.
-        let mut out = to.to_path_buf();
-        for c in path.components() {
-            out.push(c);
-        }
-        return Some(out);
-    }
-    crate::fs::pathutil::rebase(path, from, to)
-}
-
 fn normalize_mount_path(p: &Path) -> PathBuf {
     // Starting from `/` rather than the empty path is what gives the
     // zero-component case (`/`, `//`, `///`) the root mount's spelling;
@@ -8547,22 +8547,6 @@ pub(crate) enum PathAccess {
     Execute,
 }
 
-/// The single permission gate every path operation passes through.
-///
-/// Two independent checks live here, and they live *together* on purpose:
-/// before this existed, `check_file_tags` was called individually from
-/// sixteen places in this file plus a seventeenth copy in `fs/handle.rs`, and
-/// `acl::check_access` — the whole POSIX 1003.1e evaluation algorithm — was
-/// called from none of them, so `setfacl` reported success while governing
-/// nothing. A hook that has to be remembered at every entry point is a hook
-/// the next entry point will not have.
-///
-/// Order matters: capability tags are checked first because they are a
-/// system-policy restriction that an ACL must not be able to grant past.
-///
-/// Both checks bypass for kernel tasks (no owning process) and for uid 0, and
-/// both fail *open* when no tag/ACL covers the path — deferring to the
-/// traditional permission bits checked elsewhere.
 /// The set-group-ID bit of a mode.
 pub const S_ISGID: u16 = 0o2000;
 
@@ -8624,6 +8608,22 @@ fn init_new_owner(
     Ok(())
 }
 
+/// The single permission gate every path operation passes through.
+///
+/// Two independent checks live here, and they live *together* on purpose:
+/// before this existed, `check_file_tags` was called individually from
+/// sixteen places in this file plus a seventeenth copy in `fs/handle.rs`, and
+/// `acl::check_access` — the whole POSIX 1003.1e evaluation algorithm — was
+/// called from none of them, so `setfacl` reported success while governing
+/// nothing. A hook that has to be remembered at every entry point is a hook
+/// the next entry point will not have.
+///
+/// Order matters: capability tags are checked first because they are a
+/// system-policy restriction that an ACL must not be able to grant past.
+///
+/// Both checks bypass for kernel tasks (no owning process) and for uid 0, and
+/// both fail *open* when no tag/ACL covers the path — deferring to the
+/// traditional permission bits checked elsewhere.
 pub(crate) fn check_path_access(path: &Path, want: PathAccess) -> KernelResult<()> {
     // Fast path: nothing is configured, so nothing can deny. Both counts are
     // relaxed atomic loads, so an unconfigured system pays two loads per VFS

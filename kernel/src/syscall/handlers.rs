@@ -6505,7 +6505,6 @@ pub fn sys_pty_master_try_write(args: &SyscallArgs) -> SyscallResult {
     pty_master_write_common(args, true)
 }
 
-/// Body shared by the blocking and non-blocking master writes.
 /// The most bytes one pty master write takes: the terminal's input queue,
 /// [`crate::tty::INPUT_QUEUE_CAPACITY`] (4 KiB, Linux's `N_TTY_BUF_SIZE`).
 ///
@@ -6524,6 +6523,7 @@ const PTY_WRITE_CALL_MAX: usize = crate::tty::INPUT_QUEUE_CAPACITY;
 /// ring holds.
 const PTY_READ_CALL_MAX: usize = crate::tty::pty::OUTPUT_CAPACITY;
 
+/// Body shared by the blocking and non-blocking master writes.
 fn pty_master_write_common(args: &SyscallArgs, non_blocking: bool) -> SyscallResult {
     let handle = match owned_pty_handle(args.arg0) {
         Ok(h) => h,
@@ -16874,13 +16874,6 @@ pub fn sys_sched_get_profile(args: &SyscallArgs) -> SyscallResult {
     }
 }
 
-/// `SYS_CPU_COUNT` — get the number of online CPUs.
-///
-/// Reads `crate::smp::cpu_count()` which is updated by the SMP
-/// bootstrap as each AP comes online and stays stable thereafter.
-/// Always returns at least 1 (the BSP).
-///
-/// Returns: number of online CPUs.
 /// The CPU the caller is running on and its NUMA node, as `getcpu(2)`
 /// reports them; one answer for both ABIs. The node is 0: there is no NUMA
 /// topology yet (Linux's `cpu_to_node` on a single-node machine), and this
@@ -16904,6 +16897,13 @@ pub fn sys_cpu_current(args: &SyscallArgs) -> SyscallResult {
     SyscallResult::ok(i64::try_from(packed).unwrap_or(i64::MAX))
 }
 
+/// `SYS_CPU_COUNT` — get the number of online CPUs.
+///
+/// Reads `crate::smp::cpu_count()` which is updated by the SMP
+/// bootstrap as each AP comes online and stays stable thereafter.
+/// Always returns at least 1 (the BSP).
+///
+/// Returns: number of online CPUs.
 pub fn sys_cpu_count(args: &SyscallArgs) -> SyscallResult {
     let _ = args;
 

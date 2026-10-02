@@ -701,6 +701,14 @@ fn open_resolved(norm: PathBuf, flags: OpenFlags, create_mode: u16) -> KernelRes
                 return Err(KernelError::NotADirectory);
             }
 
+            // A Unix-domain socket's name has nothing behind it to read or
+            // write: what it names is reached by `connect`. `ENXIO`, as on
+            // Linux -- `ntpdate` opening `/dev/log` as a file is the case
+            // that meets this.
+            if entry.entry_type == crate::fs::EntryType::Socket {
+                return Err(KernelError::NoSuchDeviceOrAddress);
+            }
+
             let mut size = entry.size;
 
             // Handle TRUNCATE flag.

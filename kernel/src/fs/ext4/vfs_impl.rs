@@ -289,6 +289,8 @@ impl FileSystem for Ext4Fs {
                 self.read_symlink_target(ino, &inode)
             }
             file_type::S_IFDIR => Err(KernelError::IsADirectory),
+            // A socket's node has nothing behind it to read.
+            file_type::S_IFSOCK => Err(KernelError::NoSuchDeviceOrAddress),
             _ => Err(KernelError::NotSupported),
         }
     }
@@ -507,12 +509,7 @@ impl FileSystem for Ext4Fs {
         let src_mode = src_inode.i_mode & file_type::S_IFMT;
 
         // Determine the directory entry file type for re-insertion.
-        let ft_byte = match src_mode {
-            file_type::S_IFDIR => super::ondisk::dir_type::DIR,
-            file_type::S_IFREG => super::ondisk::dir_type::REG_FILE,
-            file_type::S_IFLNK => super::ondisk::dir_type::SYMLINK,
-            _ => super::ondisk::dir_type::UNKNOWN,
-        };
+        let ft_byte = dirent_type_for_mode(src_mode);
 
         // Split source and destination into parent + name.  Hoisted above the
         // destination unlink below because the loop check needs the destination
@@ -1038,6 +1035,49 @@ impl FileSystem for Ext4Fs {
         self.driver.write_group_descs()?;
         self.driver.flush()?;
         Ok(())
+    }
+
+    /// A socket's node: an inode of type `S_IFSOCK` with no data, as Linux's
+    /// `ext4_mknod` makes one -- no extent tree (Linux gives one only to
+    /// directories, files and symlinks), `i_block` zero.
+    fn mknod_socket(&mut self, path: &Path, mode: u16) -> KernelResult<u64> {
+        let (parent_path, name) = split_parent_name(path)?;
+        let parent_ino = self.driver.resolve_path(parent_path)?;
+        let mut parent_inode = self.driver.read_inode(parent_ino)?;
+
+        if (parent_inode.i_mode & file_type::S_IFMT) != file_type::S_IFDIR {
+            return Err(KernelError::NotADirectory);
+        }
+        if self
+            .driver
+            .dir_lookup(&parent_inode, parent_ino, name)
+            .is_ok()
+        {
+            return Err(KernelError::AlreadyExists);
+        }
+
+        let preferred_group = self.driver.superblock().inode_group(parent_ino);
+        let (sock_ino, mut sock_inode) = self
+            .driver
+            .create_inode(file_type::S_IFSOCK | (mode & 0o7777), preferred_group)?;
+        sock_inode.i_flags &= !inode_flags::EXTENTS;
+        super::driver::inode_block_as_bytes_mut(&mut sock_inode).fill(0);
+        sock_inode.i_size_lo = 0;
+        sock_inode.i_size_high = 0;
+        self.driver.write_inode(sock_ino, &sock_inode)?;
+
+        self.driver.add_dir_entry(
+            &mut parent_inode,
+            parent_ino,
+            sock_ino,
+            name,
+            super::ondisk::dir_type::SOCK,
+        )?;
+
+        self.driver.write_superblock()?;
+        self.driver.write_group_descs()?;
+        self.driver.flush()?;
+        Ok(u64::from(sock_ino))
     }
 
     fn readlink(&mut self, path: &Path) -> KernelResult<PathBuf> {
@@ -1785,9 +1825,11 @@ impl Ext4Fs {
     /// vs no-follow distinction lives entirely in how `existing_ino` was
     /// resolved by the caller; from here the two paths are identical.
     ///
-    /// Regular files and symlinks may be hard-linked (a symlink inode is the
-    /// no-follow `link(2)` target); directories are rejected (EISDIR), as is
-    /// any other inode type (EINVAL).
+    /// Regular files, symlinks and sockets' nodes may be hard-linked (a
+    /// symlink inode is the no-follow `link(2)` target; a second name for a
+    /// socket's node reaches the same socket, since a socket is found by the
+    /// node's inode); directories are rejected (EISDIR), as is any other inode
+    /// type (EINVAL).
     fn link_ino_checked(&mut self, existing_ino: u32, new_path: &Path) -> KernelResult<()> {
         let mut inode = self.driver.read_inode(existing_ino)?;
 
@@ -1795,8 +1837,10 @@ impl Ext4Fs {
         if mode_type == file_type::S_IFDIR {
             return Err(KernelError::IsADirectory);
         }
-        // Regular files and symlinks are hard-linkable; nothing else.
-        if mode_type != file_type::S_IFREG && mode_type != file_type::S_IFLNK {
+        if !matches!(
+            mode_type,
+            file_type::S_IFREG | file_type::S_IFLNK | file_type::S_IFSOCK
+        ) {
             return Err(KernelError::InvalidArgument);
         }
 
@@ -1827,11 +1871,7 @@ impl Ext4Fs {
         }
 
         // Determine the directory entry file type byte.
-        let ftype_byte = match mode_type {
-            file_type::S_IFREG => super::ondisk::dir_type::REG_FILE,
-            file_type::S_IFLNK => super::ondisk::dir_type::SYMLINK,
-            _ => super::ondisk::dir_type::UNKNOWN,
-        };
+        let ftype_byte = dirent_type_for_mode(mode_type);
 
         // Add the directory entry.
         self.driver.add_dir_entry(
@@ -2164,7 +2204,10 @@ fn dir_type_to_entry_type(ftype: u8) -> EntryType {
         dir_type::DIR => EntryType::Directory,
         dir_type::REG_FILE => EntryType::File,
         dir_type::SYMLINK => EntryType::Symlink,
-        _ => EntryType::File, // Fallback for block/char/fifo/socket.
+        dir_type::SOCK => EntryType::Socket,
+        // Fallback for block/char/fifo: known-issues
+        // A-NO-NAMED-PIPES-AND-EXT4-DEVICE-NODES-READ-AS-FILES.
+        _ => EntryType::File,
     }
 }
 
@@ -2174,7 +2217,29 @@ fn mode_to_entry_type(mode: u16) -> EntryType {
         file_type::S_IFDIR => EntryType::Directory,
         file_type::S_IFREG => EntryType::File,
         file_type::S_IFLNK => EntryType::Symlink,
+        file_type::S_IFSOCK => EntryType::Socket,
         _ => EntryType::File,
+    }
+}
+
+/// The directory-entry type byte for an inode of type `mode_type`
+/// (`i_mode & S_IFMT`), as a rename or a new hard link writes it.
+///
+/// Every type has its byte. These two writers each had a match of their own
+/// covering directories, files and symlinks only, so anything else -- a
+/// socket's node, a device -- was written as `UNKNOWN` and read back, by a
+/// directory listing, as a regular file.
+fn dirent_type_for_mode(mode_type: u16) -> u8 {
+    use super::ondisk::dir_type;
+    match mode_type {
+        file_type::S_IFDIR => dir_type::DIR,
+        file_type::S_IFREG => dir_type::REG_FILE,
+        file_type::S_IFLNK => dir_type::SYMLINK,
+        file_type::S_IFSOCK => dir_type::SOCK,
+        file_type::S_IFCHR => dir_type::CHRDEV,
+        file_type::S_IFBLK => dir_type::BLKDEV,
+        file_type::S_IFIFO => dir_type::FIFO,
+        _ => dir_type::UNKNOWN,
     }
 }
 

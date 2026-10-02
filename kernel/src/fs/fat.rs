@@ -4601,6 +4601,7 @@ pub fn self_test() -> KernelResult<()> {
                     EntryType::VolumeLabel => "VOL ",
                     EntryType::CharDevice => "CHR ",
                     EntryType::BlockDevice => "BLK ",
+                    EntryType::Socket => "SOCK",
                 };
                 crate::serial_println!(
                     "[fat]     {} {:12} {} bytes",

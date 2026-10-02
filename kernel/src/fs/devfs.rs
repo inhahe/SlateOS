@@ -104,9 +104,13 @@ use alloc::string::String;
 use alloc::vec;
 use alloc::vec::Vec;
 
+use alloc::collections::BTreeMap;
+
 use crate::error::{KernelError, KernelResult};
 use crate::fs::path::{Path, PathBuf};
-use crate::fs::vfs::{DirEntry, EntryType, FileAttr, FileMeta, FileSystem, FsInfo};
+use crate::fs::vfs::{
+    DirEntry, EntryType, FileAttr, FileMeta, FileSystem, FsInfo, Timestamp, metadata_now_ns,
+};
 
 // ---------------------------------------------------------------------------
 // Random bytes — delegates to kernel CSPRNG (rng module)
@@ -125,13 +129,67 @@ fn fill_random(buf: &mut [u8]) {
 // ---------------------------------------------------------------------------
 
 /// Virtual filesystem exposing standard device files.
-pub struct DevFs;
+pub struct DevFs {
+    /// Unix-domain socket nodes created here by `bind` -- `/dev/log`, where
+    /// every ported program's `syslog()` sends -- by name. The one part of
+    /// devfs a program adds to; see [`DevSocket`].
+    sockets: BTreeMap<String, DevSocket>,
+}
 
 impl DevFs {
     /// Create a new DevFs instance.
     #[must_use]
     pub fn new() -> Self {
-        Self
+        Self {
+            sockets: BTreeMap::new(),
+        }
+    }
+
+    /// The socket node `rel` names, if it is one.
+    fn socket(&self, rel: &str) -> Option<&DevSocket> {
+        self.sockets.get(rel)
+    }
+}
+
+/// A Unix-domain socket's node in devfs ([`EntryType::Socket`]).
+///
+/// Everything else here is a fixed table or enumerated from a driver, and has
+/// no inode number (`ino: 0`). A socket node needs one, because the socket
+/// bound to it is found by the node's identity ([`crate::fs::vfs::FileId`]),
+/// so these are numbered from [`NEXT_SOCKET_INO`], which counts up and never
+/// reuses a number. They are root-level only: `/dev/log` is the name that
+/// matters, and nothing asks for one in a subdirectory.
+struct DevSocket {
+    ino: u64,
+    permissions: u16,
+    uid: u32,
+    gid: u32,
+    created_ns: Timestamp,
+    changed_ns: Timestamp,
+}
+
+/// The next socket node's inode number: far above anything that could be
+/// mistaken for another filesystem's, and never reused (see [`DevSocket`]).
+static NEXT_SOCKET_INO: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(1 << 40);
+
+impl DevSocket {
+    fn meta(&self) -> FileMeta {
+        FileMeta {
+            size: 0,
+            entry_type: EntryType::Socket,
+            permissions: self.permissions,
+            attributes: FileAttr::NONE,
+            nlinks: 1,
+            blocks: 0,
+            ino: self.ino,
+            uid: self.uid,
+            gid: self.gid,
+            created_ns: self.created_ns,
+            modified_ns: self.created_ns,
+            accessed_ns: self.created_ns,
+            changed_ns: self.changed_ns,
+            ..FileMeta::minimal(EntryType::Socket, 0)
+        }
     }
 }
 
@@ -645,7 +703,17 @@ impl FileSystem for DevFs {
         let rel = strip_root(path)?;
 
         if rel.is_empty() {
-            return Ok(children_of(""));
+            let mut entries = children_of("");
+            entries.extend(self.sockets.iter().map(|(name, s)| DirEntry {
+                ino: s.ino,
+                name: PathBuf::from(name.as_str()),
+                entry_type: EntryType::Socket,
+                size: 0,
+            }));
+            return Ok(entries);
+        }
+        if self.socket(rel).is_some() {
+            return Err(KernelError::NotADirectory);
         }
         match find_node(rel) {
             Some(node) if node.entry_type == EntryType::Directory => Ok(children_of(rel)),
@@ -697,6 +765,9 @@ impl FileSystem for DevFs {
         if rel.is_empty() {
             return Err(KernelError::IsADirectory);
         }
+        if self.socket(rel).is_some() {
+            return Err(KernelError::NoSuchDeviceOrAddress);
+        }
 
         match find_node(rel) {
             // Root nodes served from here: the character devices plus
@@ -716,6 +787,10 @@ impl FileSystem for DevFs {
 
     fn read_at(&mut self, path: &Path, offset: u64, len: usize) -> KernelResult<Vec<u8>> {
         let rel = strip_root(path)?;
+        // A socket's name has nothing behind it to read (`ENXIO`).
+        if self.socket(rel).is_some() {
+            return Err(KernelError::NoSuchDeviceOrAddress);
+        }
 
         // For streaming devices, offset is ignored — they always produce
         // fresh data.  This is important for file-handle reads that advance
@@ -766,6 +841,9 @@ impl FileSystem for DevFs {
 
     fn write_file(&mut self, path: &Path, data: &[u8]) -> KernelResult<()> {
         let rel = strip_root(path)?;
+        if self.socket(rel).is_some() {
+            return Err(KernelError::NoSuchDeviceOrAddress);
+        }
 
         match rel {
             "" => Err(KernelError::IsADirectory),
@@ -867,6 +945,15 @@ impl FileSystem for DevFs {
             });
         }
 
+        if let Some(s) = self.socket(rel) {
+            return Ok(DirEntry {
+                ino: s.ino,
+                name: PathBuf::from(rel),
+                entry_type: EntryType::Socket,
+                size: 0,
+            });
+        }
+
         let node = find_node(rel).ok_or(KernelError::NotFound)?;
         Ok(DirEntry {
             ino: 0,
@@ -911,6 +998,10 @@ impl FileSystem for DevFs {
             });
         }
 
+        if let Some(s) = self.socket(rel) {
+            return Ok(s.meta());
+        }
+
         let node = find_node(rel).ok_or(KernelError::NotFound)?;
         Ok(FileMeta {
             size: 0,
@@ -925,6 +1016,77 @@ impl FileSystem for DevFs {
         })
     }
 
+    fn metadata_ino(&mut self, ino: u64) -> KernelResult<FileMeta> {
+        self.sockets
+            .values()
+            .find(|s| s.ino == ino)
+            .map(DevSocket::meta)
+            .ok_or(KernelError::NotFound)
+    }
+
+    /// A socket node at the root: the one kind of name a program adds here.
+    fn mknod_socket(&mut self, path: &Path, mode: u16) -> KernelResult<u64> {
+        let rel = strip_root(path)?;
+        if rel.is_empty() || find_node(rel).is_some() || find_block(rel).is_some() {
+            return Err(KernelError::AlreadyExists);
+        }
+        if self.sockets.contains_key(rel) {
+            return Err(KernelError::AlreadyExists);
+        }
+        if rel.contains('/') {
+            // In a subdirectory -- `input/`, `dri/`, `snd/` hold the drivers'
+            // nodes, and nothing asks for a socket beside them.
+            return Err(KernelError::NotSupported);
+        }
+        let ino = NEXT_SOCKET_INO.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+        let now = metadata_now_ns();
+        self.sockets.insert(
+            String::from(rel),
+            DevSocket {
+                ino,
+                permissions: mode & 0o7777,
+                uid: 0,
+                gid: 0,
+                created_ns: now,
+                changed_ns: now,
+            },
+        );
+        Ok(ino)
+    }
+
+    /// Only a socket node can be removed: everything else here is the
+    /// kernel's own and comes back on the next boot regardless.
+    fn remove(&mut self, path: &Path) -> KernelResult<()> {
+        let rel = strip_root(path)?;
+        if self.sockets.remove(rel).is_some() {
+            return Ok(());
+        }
+        if rel.is_empty() || find_node(rel).is_some_and(|n| n.entry_type == EntryType::Directory) {
+            return Err(KernelError::IsADirectory);
+        }
+        if find_node(rel).is_some() || find_block(rel).is_some() {
+            return Err(KernelError::PermissionDenied);
+        }
+        Err(KernelError::NotFound)
+    }
+
+    fn set_permissions(&mut self, path: &Path, permissions: u16) -> KernelResult<()> {
+        let rel = strip_root(path)?;
+        let s = self.sockets.get_mut(rel).ok_or(KernelError::NotSupported)?;
+        s.permissions = permissions & 0o7777;
+        s.changed_ns = metadata_now_ns();
+        Ok(())
+    }
+
+    fn set_owner(&mut self, path: &Path, uid: u32, gid: u32) -> KernelResult<()> {
+        let rel = strip_root(path)?;
+        let s = self.sockets.get_mut(rel).ok_or(KernelError::NotSupported)?;
+        s.uid = uid;
+        s.gid = gid;
+        s.changed_ns = metadata_now_ns();
+        Ok(())
+    }
+
     fn statvfs(&mut self) -> KernelResult<FsInfo> {
         Ok(FsInfo {
             fs_type: String::from("devfs"),
@@ -932,7 +1094,7 @@ impl FileSystem for DevFs {
             block_size: 0,
             total_blocks: 0,
             free_blocks: 0,
-            total_inodes: DEV_NODES.len() as u64,
+            total_inodes: (DEV_NODES.len() as u64).saturating_add(self.sockets.len() as u64),
             free_inodes: 0,
             max_name_len: 255,
             read_only: false,
@@ -940,7 +1102,11 @@ impl FileSystem for DevFs {
     }
 
     fn debug_stats(&self) -> String {
-        format!("devfs: {} nodes", DEV_NODES.len())
+        format!(
+            "devfs: {} nodes, {} sockets",
+            DEV_NODES.len(),
+            self.sockets.len()
+        )
     }
 }
 

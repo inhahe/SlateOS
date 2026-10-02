@@ -101,6 +101,10 @@ enum MemFsNodeKind {
     /// (starts with `/`) or relative (resolved from the symlink's
     /// parent directory).  Resolution happens during path traversal.
     Symlink(PathBuf),
+    /// A Unix-domain socket's name ([`EntryType::Socket`]). It holds
+    /// nothing: the socket bound to it is found by this node's inode number
+    /// in [`crate::ipc::unix_socket`]'s table.
+    Socket,
 }
 
 /// A single node in the memory filesystem tree.
@@ -221,9 +225,21 @@ fn node_set_times(node: &mut MemFsNode, accessed_ns: Timestamp, modified_ns: Tim
 }
 
 impl MemFsNode {
+    /// The error for reading or writing contents this node does not have: a
+    /// socket's name has nothing behind it to open (`ENXIO`, as `open` on one
+    /// answers); anything else that is not a file is a directory here, since
+    /// symlinks are followed before a node is read.
+    fn not_a_file(&self) -> KernelError {
+        if matches!(self.kind, MemFsNodeKind::Socket) {
+            KernelError::NoSuchDeviceOrAddress
+        } else {
+            KernelError::IsADirectory
+        }
+    }
+
     /// `len` bytes of the file from `offset`, fewer at its end; none past it.
     fn read_range(&self, offset: u64, len: usize) -> KernelResult<Vec<u8>> {
-        let data = self.file_data().ok_or(KernelError::IsADirectory)?;
+        let data = self.file_data().ok_or_else(|| self.not_a_file())?;
         let start = usize::try_from(offset)
             .unwrap_or(usize::MAX)
             .min(data.len());
@@ -240,7 +256,7 @@ impl MemFsNode {
             return Err(KernelError::PermissionDenied);
         }
         if !self.is_file() {
-            return Err(KernelError::IsADirectory);
+            return Err(self.not_a_file());
         }
         if attrs.contains(FileAttr::APPEND_ONLY) && offset != self.size() {
             return Err(KernelError::PermissionDenied);
@@ -249,7 +265,8 @@ impl MemFsNode {
         let end = start
             .checked_add(data.len())
             .ok_or(KernelError::FileTooLarge)?;
-        let file_data = self.file_data_mut().ok_or(KernelError::IsADirectory)?;
+        let not_a_file = self.not_a_file();
+        let file_data = self.file_data_mut().ok_or(not_a_file)?;
         if end > file_data.len() {
             file_data.resize(end, 0);
         }
@@ -268,7 +285,8 @@ impl MemFsNode {
             return Err(KernelError::PermissionDenied);
         }
         let size = usize::try_from(size).map_err(|_| KernelError::FileTooLarge)?;
-        let file_data = self.file_data_mut().ok_or(KernelError::IsADirectory)?;
+        let not_a_file = self.not_a_file();
+        let file_data = self.file_data_mut().ok_or(not_a_file)?;
         file_data.resize(size, 0);
         self.touch_modified();
         Ok(())
@@ -370,10 +388,11 @@ impl MemFsNode {
     /// - Files: data length.
     /// - Directories: 0.
     /// - Symlinks: length of the target path string (like Linux `lstat`).
+    /// - Sockets: 0.
     fn size(&self) -> u64 {
         match &self.kind {
             MemFsNodeKind::File(data) => data.len() as u64,
-            MemFsNodeKind::Dir(_) => 0,
+            MemFsNodeKind::Dir(_) | MemFsNodeKind::Socket => 0,
             MemFsNodeKind::Symlink(target) => target.len() as u64,
         }
     }
@@ -384,6 +403,7 @@ impl MemFsNode {
             MemFsNodeKind::File(_) => EntryType::File,
             MemFsNodeKind::Dir(_) => EntryType::Directory,
             MemFsNodeKind::Symlink(_) => EntryType::Symlink,
+            MemFsNodeKind::Socket => EntryType::Socket,
         }
     }
 
@@ -943,7 +963,7 @@ impl FileSystem for MemFs {
         // Two-phase: resolve immutably to get data, then update atime.
         let data = {
             let node = self.resolve(path)?;
-            let d = node.file_data().ok_or(KernelError::IsADirectory)?;
+            let d = node.file_data().ok_or_else(|| node.not_a_file())?;
             d.clone()
         };
         // Relatime: update access timestamp if stale.
@@ -992,7 +1012,8 @@ impl FileSystem for MemFs {
                 if existing.attributes.contains(FileAttr::APPEND_ONLY) {
                     return Err(KernelError::PermissionDenied);
                 }
-                let file_data = existing.file_data_mut().ok_or(KernelError::IsADirectory)?;
+                let not_a_file = existing.not_a_file();
+                let file_data = existing.file_data_mut().ok_or(not_a_file)?;
                 file_data.clear();
                 file_data.extend_from_slice(data);
                 // NLL: file_data borrow ends here (last use above).
@@ -1379,6 +1400,7 @@ impl FileSystem for MemFs {
         let mut files = 0usize;
         let mut dirs = 0usize;
         let mut links = 0usize;
+        let mut sockets = 0usize;
         let mut bytes = 0u64;
         for node in self.inodes.values() {
             match &node.kind {
@@ -1388,6 +1410,7 @@ impl FileSystem for MemFs {
                 }
                 MemFsNodeKind::Dir(_) => dirs = dirs.wrapping_add(1),
                 MemFsNodeKind::Symlink(_) => links = links.wrapping_add(1),
+                MemFsNodeKind::Socket => sockets = sockets.wrapping_add(1),
             }
         }
 
@@ -1395,8 +1418,8 @@ impl FileSystem for MemFs {
         let mut s = String::new();
         let _ = write!(
             s,
-            "memfs: {} files, {} dirs, {} symlinks, {} bytes",
-            files, dirs, links, bytes
+            "memfs: {} files, {} dirs, {} symlinks, {} sockets, {} bytes",
+            files, dirs, links, sockets, bytes
         );
         s
     }
@@ -1574,6 +1597,24 @@ impl FileSystem for MemFs {
             MemFsNode::new_symlink(target.to_path_buf()),
         )?;
         Ok(())
+    }
+
+    fn mknod_socket(&mut self, path: &Path, mode: u16) -> KernelResult<u64> {
+        let (parent_ino, name) = self.resolve_parent(path)?;
+        if self
+            .node(parent_ino)?
+            .attributes
+            .contains(FileAttr::IMMUTABLE)
+        {
+            return Err(KernelError::PermissionDenied);
+        }
+        if self.child_ino(parent_ino, name)?.is_some() {
+            return Err(KernelError::AlreadyExists);
+        }
+        let node = MemFsNode::new(MemFsNodeKind::Socket, mode & 0o7777);
+        let ino = node.ino;
+        self.insert_new(parent_ino, name.to_path_buf(), node)?;
+        Ok(ino)
     }
 
     fn readlink(&mut self, path: &Path) -> KernelResult<PathBuf> {

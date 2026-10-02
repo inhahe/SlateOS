@@ -1509,6 +1509,7 @@ pub const fn linux_errno_for(e: KernelError) -> i32 {
         KernelError::NoAttribute => errno::ENODATA,
         KernelError::IoError => errno::EIO,
         KernelError::NoSuchDevice => errno::ENODEV,
+        KernelError::NoSuchDeviceOrAddress => errno::ENXIO,
         KernelError::DeviceBusy => errno::EBUSY,
         KernelError::ConnectionRefused => errno::ECONNREFUSED,
         KernelError::NotConnected => errno::ENOTCONN,
@@ -19652,24 +19653,29 @@ fn sys_chroot(args: &SyscallArgs) -> SyscallResult {
 ///    non-{0,S_IFREG,S_IFCHR,S_IFBLK,S_IFIFO,S_IFSOCK} (e.g. `S_IFLNK`).
 /// 3. `filename_create` — `ENOENT`/`ENOTDIR`/`EEXIST`/... from path
 ///    resolution.
-/// 4. `CAP_MKNOD` check inside vfs — terminal `EPERM` for an unprivileged
-///    caller passing a well-formed mode and an existing parent directory.
+/// 4. `CAP_MKNOD` check inside `vfs_mknod` -- for `S_IFCHR`/`S_IFBLK` only.
+///    A regular file (`vfs_create`), a FIFO and a socket's node need no
+///    capability, only write permission on the directory.
 ///
-/// ## Divergence (pre-batch → post-batch)
+/// ## Divergence (pre-batch → post-batch → 2026-10-02)
 ///
-/// | Probe                              | Linux       | Pre-batch | Post-batch |
-/// |------------------------------------|-------------|-----------|------------|
-/// | `mknod(NULL, S_IFREG, 0)`          | `EFAULT`    | `EFAULT`  | `EFAULT`   |
-/// | `mknod("", S_IFREG, 0)`            | `ENOENT`    | `EPERM`   | `ENOENT`   |
-/// | `mknod(<no-NUL 4097B>, S_IFREG, 0)`| `ENAMETOO…` | `EPERM`   | `ENAMETOO…`|
-/// | `mknod("/x", S_IFDIR, 0)`          | `EPERM`*    | `EPERM`   | `EPERM`    |
-/// | `mknod("/x", S_IFLNK, 0)`          | `EINVAL`    | `EPERM`   | `EINVAL`   |
-/// | `mknod("/x", 0xF000-junk, 0)`      | `EINVAL`    | `EPERM`   | `EINVAL`   |
-/// | `mknod("/x", S_IFREG, 0)`          | `EPERM`     | `EPERM`   | `EPERM`    |
+/// | Probe                              | Linux       | Pre-batch | Post-batch | Now |
+/// |------------------------------------|-------------|-----------|------------|-----|
+/// | `mknod(NULL, S_IFREG, 0)`          | `EFAULT`    | `EFAULT`  | `EFAULT`   | `EFAULT` |
+/// | `mknod("", S_IFREG, 0)`            | `ENOENT`    | `EPERM`   | `ENOENT`   | `ENOENT` |
+/// | `mknod(<no-NUL 4097B>, S_IFREG, 0)`| `ENAMETOO…` | `EPERM`   | `ENAMETOO…`| `ENAMETOO…` |
+/// | `mknod("/x", S_IFDIR, 0)`          | `EPERM`*    | `EPERM`   | `EPERM`    | `EPERM` |
+/// | `mknod("/x", S_IFLNK, 0)`          | `EINVAL`    | `EPERM`   | `EINVAL`   | `EINVAL` |
+/// | `mknod("/x", 0xF000-junk, 0)`      | `EINVAL`    | `EPERM`   | `EINVAL`   | `EINVAL` |
+/// | `mknod("/x", S_IFCHR, 0)`          | `EPERM`     | `EPERM`   | `EPERM`    | `EPERM` |
+/// | `mknod("/x", S_IFREG, 0)`          | 0, a file   | `EPERM`   | `EPERM`    | 0, a file |
+/// | `mknod("/x", S_IFSOCK, 0)`         | 0, a node   | `EPERM`   | `EPERM`    | 0, a node |
+/// | `mknod("/x", S_IFIFO, 0)`          | 0, a FIFO   | `EPERM`   | `EPERM`    | `EPERM`** |
 ///
 /// *Linux's `may_mknod` returns `EPERM` for `S_IFDIR`; we agree on that
 /// terminal value — it just arrives via the mode-switch, not the
-/// `CAP_MKNOD` check.
+/// `CAP_MKNOD` check. **No named pipes exist to make (known-issues
+/// `A-NO-NAMED-PIPES-AND-EXT4-DEVICE-NODES-READ-AS-FILES`).
 ///
 /// ## Why it matters
 ///
@@ -19682,13 +19688,6 @@ fn sys_chroot(args: &SyscallArgs) -> SyscallResult {
 /// `EPERM` makes the kernel look like it has CAP_MKNOD missing but
 /// otherwise functional, which fools the probe.
 ///
-/// ## Architectural directive
-///
-/// This is a translator-only fix: the *answers* (terminal `EPERM`) remain
-/// truthful for a kernel that does not yet implement `CAP_MKNOD`-bearing
-/// callers.  The native VFS and capability model are untouched.  Linux
-/// orders its gates this way; we mirror it.
-///
 /// ## ABI truncation
 ///
 /// `umode_t` is `unsigned short` (16-bit) on x86_64 Linux, and the
@@ -19697,22 +19696,29 @@ fn sys_chroot(args: &SyscallArgs) -> SyscallResult {
 /// truncation explicitly via `args.arg1 as u16` so that high bits in the
 /// 64-bit register are discarded the same way Linux discards them.
 fn sys_mknod(args: &SyscallArgs) -> SyscallResult {
-    sys_mknod_common(args.arg0, args.arg1)
+    sys_mknod_common(AT_FDCWD, args.arg0, args.arg1)
 }
 
-/// `mknodat(dirfd, path, mode, dev)` — same ladder as `mknod`, with the
-/// `dirfd` slot ignored until we implement `*at` resolution.  Linux
-/// validates `dirfd` only when the path is relative; for our terminal-
-/// `EPERM` model it isn't observable.
+/// `mknodat(dirfd, path, mode, dev)` — same ladder as `mknod`, relative to
+/// `dirfd`.
 fn sys_mknodat(args: &SyscallArgs) -> SyscallResult {
     // arg0 = dirfd, arg1 = path, arg2 = mode, arg3 = dev.
-    sys_mknod_common(args.arg1, args.arg2)
+    #[allow(clippy::cast_possible_truncation)]
+    let dirfd = args.arg0 as i32;
+    sys_mknod_common(dirfd, args.arg1, args.arg2)
 }
 
-/// Shared `mknod` / `mknodat` body: getname → `may_mknod` → terminal
-/// `EPERM`.  We don't grant `CAP_MKNOD` to any caller, so paths that
-/// pass the mode switch all bottom out at `EPERM`.
-fn sys_mknod_common(path: u64, mode_raw: u64) -> SyscallResult {
+/// Shared `mknod` / `mknodat` body: getname → `may_mknod` → the node.
+///
+/// As Linux's `vfs_mknod`, only a device node needs `CAP_MKNOD`, which no
+/// caller here holds, so `S_IFCHR`/`S_IFBLK` are `EPERM`. A regular file
+/// (`S_IFREG`, or no type) and a socket's node (`S_IFSOCK` -- one nothing is
+/// bound to, which `connect` then refuses) are made, with the mode's
+/// permission bits less the umask. A FIFO is `EPERM` too, but for want of
+/// named pipes rather than of authority (known-issues
+/// `A-NO-NAMED-PIPES-AND-EXT4-DEVICE-NODES-READ-AS-FILES`). All of these
+/// were `EPERM` until 2026-10-02.
+fn sys_mknod_common(dirfd: i32, path: u64, mode_raw: u64) -> SyscallResult {
     // S_IF* constants mirrored locally — `umode_t` is 16-bit on x86_64
     // Linux, but the bit fields are the same as our module-level u32
     // constants.  We compare against the full 17-bit S_IFMT mask.
@@ -19745,13 +19751,16 @@ fn sys_mknod_common(path: u64, mode_raw: u64) -> SyscallResult {
     // Gate 2: may_mknod(mode) — Linux truncates to umode_t (u16) first.
     #[allow(clippy::cast_possible_truncation)]
     let mode = (mode_raw as u16) as u32;
-    match mode & S_IFMT_BITS {
-        0 | S_IFREG_BITS | S_IFCHR_BITS | S_IFBLK_BITS | S_IFIFO_BITS | S_IFSOCK_BITS => {
-            // Falls through to the terminal CAP_MKNOD refusal below.
+    let kind = mode & S_IFMT_BITS;
+    match kind {
+        0 | S_IFREG_BITS | S_IFSOCK_BITS => {}
+        S_IFCHR_BITS | S_IFBLK_BITS | S_IFIFO_BITS => {
+            // A device needs CAP_MKNOD, which no caller holds; a FIFO needs
+            // named pipes, which do not exist (see this function's doc).
+            return linux_err(errno::EPERM);
         }
         S_IFDIR_BITS => {
-            // Linux: `may_mknod` returns -EPERM for S_IFDIR.  Terminal
-            // value matches our default, but the gate point differs.
+            // Linux: `may_mknod` returns -EPERM for S_IFDIR.
             return linux_err(errno::EPERM);
         }
         _ => {
@@ -19760,11 +19769,33 @@ fn sys_mknod_common(path: u64, mode_raw: u64) -> SyscallResult {
         }
     }
 
-    // Gate 4: terminal EPERM.  No caller in this kernel holds CAP_MKNOD;
-    // Linux returns -EPERM at the vfs_mknod / vfs_create CAP check after
-    // path resolution succeeds.  We short-circuit because we have nothing
-    // to resolve against, and EPERM is the truthful answer.
-    linux_err(errno::EPERM)
+    let resolved = match resolve_at_path(dirfd, path) {
+        Ok(p) => p,
+        Err(r) => return r,
+    };
+    if let Err(r) = require_fs_write() {
+        return r;
+    }
+    let perm = linux_create_mode(u64::from(mode & 0o7777));
+    if kind == S_IFSOCK_BITS {
+        return match crate::fs::Vfs::mknod_socket(&resolved, perm) {
+            Ok(_) => SyscallResult::ok(0),
+            Err(e) => linux_err(linux_errno_for(e)),
+        };
+    }
+    // A regular file: created here and nowhere else, as O_CREAT|O_EXCL.
+    let flags = crate::fs::handle::OpenFlags::WRITE
+        .union(crate::fs::handle::OpenFlags::CREATE)
+        .union(crate::fs::handle::OpenFlags::EXCL);
+    match crate::fs::handle::open_with_mode(&resolved, flags, perm) {
+        Ok(h) => {
+            // The file exists now; the handle was only the way to make it.
+            // A close failure leaves nothing for the caller to act on.
+            let _ = crate::fs::handle::close(h);
+            SyscallResult::ok(0)
+        }
+        Err(e) => linux_err(linux_errno_for(e)),
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -20311,6 +20342,10 @@ fn meta_mode_bits(meta: &crate::fs::FileMeta) -> u32 {
         // fallback for a filesystem that tracks no permissions -- devfs
         // supplies its own, dropping the write bits for a read-only device.
         crate::fs::EntryType::BlockDevice => (S_IFBLK, 0o660),
+        // A Unix-domain socket's node: `S_ISSOCK` is how a program tells a
+        // stale socket it may remove (`bind` refuses an existing name) from a
+        // file it must not.
+        crate::fs::EntryType::Socket => (S_IFSOCK, 0o755),
     };
     let perm = if meta.permissions == 0 {
         default_perm
@@ -44644,6 +44679,7 @@ fn sys_getdents64(args: &SyscallArgs) -> SyscallResult {
             crate::fs::EntryType::VolumeLabel => 0, // DT_UNKNOWN
             crate::fs::EntryType::CharDevice => 2,  // DT_CHR
             crate::fs::EntryType::BlockDevice => 6, // DT_BLK
+            crate::fs::EntryType::Socket => 12,     // DT_SOCK
         };
 
         out.extend_from_slice(&d_ino.to_le_bytes());
@@ -74347,34 +74383,82 @@ pub fn self_test() -> crate::error::KernelResult<()> {
                 return Err(KernelError::InternalError);
             }
 
-            // Gate 4: terminal EPERM — well-formed path + valid mode
-            // (S_IFREG) bottoms out at the no-CAP_MKNOD refusal.
-            let a = SyscallArgs {
-                arg0: dummy_ptr,
-                arg1: 0o100000,
-                arg2: 0,
-                arg3: 0,
-                arg4: 0,
-                arg5: 0,
+            // The nodes themselves, as Linux's vfs_mknod: a device needs
+            // CAP_MKNOD (no caller holds it), a FIFO needs named pipes (none
+            // exist); a regular file and a socket's node are made, in /tmp.
+            let probe = b"/tmp/syscall_mknod_probe\0";
+            let probe_path = "/tmp/syscall_mknod_probe";
+            let probe_ptr = probe.as_ptr() as u64;
+            let mknod = |mode: u64| {
+                dispatch_linux(
+                    nr::MKNOD,
+                    &SyscallArgs {
+                        arg0: probe_ptr,
+                        arg1: mode,
+                        arg2: 0,
+                        arg3: 0,
+                        arg4: 0,
+                        arg5: 0,
+                    },
+                )
+                .value
             };
-            if dispatch_linux(nr::MKNOD, &a).value != -i64::from(errno::EPERM) {
-                serial_println!("[syscall/linux]   FAIL: mknod(S_IFREG) not EPERM");
-                return Err(KernelError::InternalError);
-            }
-            let a = SyscallArgs {
-                arg0: 0,
-                arg1: dummy_ptr,
-                arg2: 0o100000,
-                arg3: 0,
-                arg4: 0,
-                arg5: 0,
-            };
-            if dispatch_linux(nr::MKNODAT, &a).value != -i64::from(errno::EPERM) {
-                serial_println!("[syscall/linux]   FAIL: mknodat(S_IFREG) not EPERM");
+            // A leftover from an interrupted boot would make the first
+            // creation EEXIST.
+            let _ = crate::fs::Vfs::remove(probe_path);
+            let result = (|| -> Result<(), &'static str> {
+                for (mode, what) in [
+                    (0o020644u64, "S_IFCHR"),
+                    (0o060644, "S_IFBLK"),
+                    (0o010644, "S_IFIFO"),
+                ] {
+                    if mknod(mode) != i64::from(errno::EPERM).wrapping_neg() {
+                        serial_println!("[syscall/linux]   mknod({}) was not EPERM", what);
+                        return Err("a device or FIFO node was not refused");
+                    }
+                }
+                if mknod(0o100644) != 0 {
+                    return Err("mknod(S_IFREG) did not make a regular file");
+                }
+                if !matches!(crate::fs::Vfs::stat(probe_path), Ok(e) if e.entry_type == crate::fs::EntryType::File)
+                {
+                    return Err("mknod(S_IFREG) made something that is not a regular file");
+                }
+                if mknod(0o100644) != i64::from(errno::EEXIST).wrapping_neg() {
+                    return Err("mknod over an existing name was not EEXIST");
+                }
+                crate::fs::Vfs::remove(probe_path)
+                    .map_err(|_| "the probe file could not be removed")?;
+                // mknodat, absolute path, so the dirfd is not consulted.
+                let r = dispatch_linux(
+                    nr::MKNODAT,
+                    &SyscallArgs {
+                        arg0: 0,
+                        arg1: probe_ptr,
+                        arg2: 0o140644,
+                        arg3: 0,
+                        arg4: 0,
+                        arg5: 0,
+                    },
+                )
+                .value;
+                if r != 0 {
+                    return Err("mknodat(S_IFSOCK) did not make a socket's node");
+                }
+                if !matches!(crate::fs::Vfs::stat(probe_path), Ok(e) if e.entry_type == crate::fs::EntryType::Socket)
+                {
+                    return Err("mknodat(S_IFSOCK) made something that is not a socket's node");
+                }
+                Ok(())
+            })();
+            let _ = crate::fs::Vfs::remove(probe_path);
+            if let Err(why) = result {
+                serial_println!("[syscall/linux]   FAIL: mknod: {}", why);
                 return Err(KernelError::InternalError);
             }
             serial_println!(
-                "[syscall/linux]   mknod Linux gate ladder (EFAULT/ENOENT/ENAMETOOLONG/EINVAL/EPERM): OK"
+                "[syscall/linux]   mknod Linux gate ladder (EFAULT/ENOENT/ENAMETOOLONG/EINVAL/EPERM), \
+                 and the regular file and socket node it makes: OK"
             );
         }
         Ok(())

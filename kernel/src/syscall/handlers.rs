@@ -10612,16 +10612,12 @@ pub fn sys_fs_list_dir(args: &SyscallArgs) -> SyscallResult {
 
         // A volume label is metadata, not a directory entry, and must not
         // consume a record.  `Vfs::readdir` now drops them, so this `continue`
-        // is unreachable; it stays because it is the only arm that would be
-        // *wrong* to write as a type byte, and leaving it costs nothing.
-        let type_byte = match entry.entry_type {
-            crate::fs::EntryType::File => 0u8,
-            crate::fs::EntryType::Directory => 1u8,
-            crate::fs::EntryType::Symlink => 3u8,
-            crate::fs::EntryType::VolumeLabel => continue,
-            crate::fs::EntryType::CharDevice => 4u8,
-            crate::fs::EntryType::BlockDevice => 5u8,
-        };
+        // is unreachable; it stays because a label is the only type that would
+        // be *wrong* to write as a record, and leaving it costs nothing.
+        if entry.entry_type == crate::fs::EntryType::VolumeLabel {
+            continue;
+        }
+        let type_byte = entry.entry_type.type_byte();
 
         let base = packed.len();
         if packed.try_reserve(FS_DIR_ENTRY_SIZE).is_err() {
@@ -10817,17 +10813,7 @@ pub const FS_STAT_RESULT_LEN: usize = 80;
 /// pages outside a copy primitive.
 fn encode_fs_stat_result(meta: &crate::fs::FileMeta) -> [u8; FS_STAT_RESULT_LEN] {
     let mut out = [0u8; FS_STAT_RESULT_LEN];
-    let type_byte = match meta.entry_type {
-        crate::fs::EntryType::File => 0u8,
-        crate::fs::EntryType::Directory => 1u8,
-        crate::fs::EntryType::VolumeLabel => 2u8,
-        crate::fs::EntryType::Symlink => 3u8,
-        crate::fs::EntryType::CharDevice => 4u8,
-        // 5 is new with block device nodes. It is appended rather than
-        // inserted because these bytes are ABI: an older binary that does not
-        // know 5 must still read 0..=4 as it always did.
-        crate::fs::EntryType::BlockDevice => 5u8,
-    };
+    let type_byte = meta.entry_type.type_byte();
 
     // Each field is written through `get_mut`, so a future change to
     // FS_STAT_RESULT_LEN that no longer covers the layout drops fields rather
@@ -11751,14 +11737,7 @@ pub fn sys_fs_getdents_pinned(args: &SyscallArgs) -> SyscallResult {
                 // drops volume labels, and it drops them before `needed` is
                 // folded above, so the byte requirement this call reports
                 // counts exactly the records it will write.
-                let type_byte = match entry.entry_type {
-                    crate::fs::EntryType::File => 0u8,
-                    crate::fs::EntryType::Directory => 1,
-                    crate::fs::EntryType::VolumeLabel => 2,
-                    crate::fs::EntryType::Symlink => 3,
-                    crate::fs::EntryType::CharDevice => 4,
-                    crate::fs::EntryType::BlockDevice => 5,
-                };
+                let type_byte = entry.entry_type.type_byte();
                 // The `break` above proves the room exists, but a bounds-
                 // checked write that drops an entry beats a panic if the two
                 // ever disagree.
@@ -13153,17 +13132,7 @@ fn pack_fs_meta_to_user(meta: &crate::fs::FileMeta, dst: u64) -> KernelResult<()
             }
         };
         put(0, &meta.size.to_le_bytes());
-        put(
-            8,
-            &[match meta.entry_type {
-                crate::fs::EntryType::File => 0u8,
-                crate::fs::EntryType::Directory => 1,
-                crate::fs::EntryType::VolumeLabel => 2,
-                crate::fs::EntryType::Symlink => 3,
-                crate::fs::EntryType::CharDevice => 4,
-                crate::fs::EntryType::BlockDevice => 5,
-            }],
-        );
+        put(8, &[meta.entry_type.type_byte()]);
         // [9..16] and [62..64] stay zero: the array starts zeroed.
         put(16, &meta.created_ns.to_le_bytes());
         put(24, &meta.modified_ns.to_le_bytes());
@@ -14219,14 +14188,7 @@ pub fn sys_fs_readdir_at(args: &SyscallArgs) -> SyscallResult {
                 // packed; that argument was always for a location, never for
                 // passing labels through.
                 if let Some(b) = out_slice.get_mut(pos) {
-                    *b = match entry.entry_type {
-                        crate::fs::vfs::EntryType::File => 0,
-                        crate::fs::vfs::EntryType::Directory => 1,
-                        crate::fs::vfs::EntryType::VolumeLabel => 2,
-                        crate::fs::vfs::EntryType::Symlink => 3,
-                        crate::fs::vfs::EntryType::CharDevice => 4,
-                        crate::fs::vfs::EntryType::BlockDevice => 5,
-                    };
+                    *b = entry.entry_type.type_byte();
                 }
                 pos = pos.saturating_add(1);
 

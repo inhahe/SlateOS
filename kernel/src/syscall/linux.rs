@@ -51278,6 +51278,86 @@ pub fn self_test_xattr_calls() -> crate::error::KernelResult<()> {
     Ok(())
 }
 
+/// The nodes `mknod` and `mknodat` make, as Linux's `vfs_create` and
+/// `vfs_mknod` do: a regular file (`S_IFREG`), which a second `mknod` of the
+/// name finds there (`EEXIST`), and a socket's node (`S_IFSOCK`) -- each of
+/// the type `stat` then reports.
+///
+/// Runs once the `/tmp` memfs is mounted rather than in [`self_test`], which
+/// runs before any writable filesystem exists: there `mknod(S_IFREG)` could
+/// only fail, which is how this first came to light (the boot of
+/// 2026-10-02, `rq29`). The refusals that need no filesystem stay in
+/// [`self_test`].
+///
+/// # Errors
+///
+/// `InternalError` naming the check that failed.
+pub fn self_test_mknod_nodes() -> crate::error::KernelResult<()> {
+    use crate::error::KernelError;
+    use crate::serial_println;
+
+    let probe = b"/tmp/syscall_mknod_probe\0";
+    let probe_path = "/tmp/syscall_mknod_probe";
+    let probe_ptr = probe.as_ptr() as u64;
+    let call = |nr: u64, arg0: u64, arg1: u64, arg2: u64| {
+        dispatch_linux(
+            nr,
+            &SyscallArgs {
+                arg0,
+                arg1,
+                arg2,
+                arg3: 0,
+                arg4: 0,
+                arg5: 0,
+            },
+        )
+        .value
+    };
+    let is = |want: crate::fs::EntryType| matches!(crate::fs::Vfs::stat(probe_path), Ok(e) if e.entry_type == want);
+    // A leftover from an interrupted boot would make the first creation
+    // EEXIST.
+    let _ = crate::fs::Vfs::remove(probe_path);
+    let result = (|| -> Result<(), &'static str> {
+        let made = call(nr::MKNOD, probe_ptr, 0o100644, 0);
+        if made != 0 {
+            serial_println!("[syscall/linux]   mknod(S_IFREG) answered {}", made);
+            return Err("mknod(S_IFREG) did not make a regular file");
+        }
+        if !is(crate::fs::EntryType::File) {
+            return Err("mknod(S_IFREG) made something that is not a regular file");
+        }
+        if call(nr::MKNOD, probe_ptr, 0o100644, 0) != i64::from(errno::EEXIST).wrapping_neg() {
+            return Err("mknod over an existing name was not EEXIST");
+        }
+        crate::fs::Vfs::remove(probe_path).map_err(|_| "the probe file could not be removed")?;
+        // mknod with no type bits makes a regular file too.
+        if call(nr::MKNOD, probe_ptr, 0o644, 0) != 0 || !is(crate::fs::EntryType::File) {
+            return Err("mknod with no type bits did not make a regular file");
+        }
+        crate::fs::Vfs::remove(probe_path).map_err(|_| "the probe file could not be removed")?;
+        // mknodat with an absolute path, so the dirfd is not consulted.
+        let r = call(nr::MKNODAT, 0, probe_ptr, 0o140644);
+        if r != 0 {
+            serial_println!("[syscall/linux]   mknodat(S_IFSOCK) answered {}", r);
+            return Err("mknodat(S_IFSOCK) did not make a socket's node");
+        }
+        if !is(crate::fs::EntryType::Socket) {
+            return Err("mknodat(S_IFSOCK) made something that is not a socket's node");
+        }
+        Ok(())
+    })();
+    let _ = crate::fs::Vfs::remove(probe_path);
+    if let Err(why) = result {
+        serial_println!("[syscall/linux]   FAIL: mknod nodes: {}", why);
+        return Err(KernelError::InternalError);
+    }
+    serial_println!(
+        "[syscall/linux]   mknod nodes: a regular file (with and without S_IFREG), EEXIST over \
+         it, a socket's node: OK"
+    );
+    Ok(())
+}
+
 /// End-to-end test of `Vfs::rename_noreplace` / `Vfs::rename_exchange` and the
 /// Linux-ABI `renameat2(RENAME_NOREPLACE | RENAME_EXCHANGE)` paths that route
 /// through them.
@@ -75553,82 +75633,31 @@ pub fn self_test() -> crate::error::KernelResult<()> {
                 return Err(KernelError::InternalError);
             }
 
-            // The nodes themselves, as Linux's vfs_mknod: a device needs
+            // The refused node types, as Linux's vfs_mknod: a device needs
             // CAP_MKNOD (no caller holds it), a FIFO needs named pipes (none
-            // exist); a regular file and a socket's node are made, in /tmp.
-            let probe = b"/tmp/syscall_mknod_probe\0";
-            let probe_path = "/tmp/syscall_mknod_probe";
-            let probe_ptr = probe.as_ptr() as u64;
-            let mknod = |mode: u64| {
-                dispatch_linux(
-                    nr::MKNOD,
-                    &SyscallArgs {
-                        arg0: probe_ptr,
-                        arg1: mode,
-                        arg2: 0,
-                        arg3: 0,
-                        arg4: 0,
-                        arg5: 0,
-                    },
-                )
-                .value
-            };
-            // A leftover from an interrupted boot would make the first
-            // creation EEXIST.
-            let _ = crate::fs::Vfs::remove(probe_path);
-            let result = (|| -> Result<(), &'static str> {
-                for (mode, what) in [
-                    (0o020644u64, "S_IFCHR"),
-                    (0o060644, "S_IFBLK"),
-                    (0o010644, "S_IFIFO"),
-                ] {
-                    if mknod(mode) != i64::from(errno::EPERM).wrapping_neg() {
-                        serial_println!("[syscall/linux]   mknod({}) was not EPERM", what);
-                        return Err("a device or FIFO node was not refused");
-                    }
+            // exist). Refused before the path is looked at, so no filesystem
+            // is needed; the nodes that are made are `self_test_mknod_nodes`'s,
+            // which runs once /tmp is writable.
+            for (mode, what) in [
+                (0o020644u64, "S_IFCHR"),
+                (0o060644, "S_IFBLK"),
+                (0o010644, "S_IFIFO"),
+            ] {
+                let a = SyscallArgs {
+                    arg0: dummy_ptr,
+                    arg1: mode,
+                    arg2: 0,
+                    arg3: 0,
+                    arg4: 0,
+                    arg5: 0,
+                };
+                if dispatch_linux(nr::MKNOD, &a).value != i64::from(errno::EPERM).wrapping_neg() {
+                    serial_println!("[syscall/linux]   FAIL: mknod({}) was not EPERM", what);
+                    return Err(KernelError::InternalError);
                 }
-                if mknod(0o100644) != 0 {
-                    return Err("mknod(S_IFREG) did not make a regular file");
-                }
-                if !matches!(crate::fs::Vfs::stat(probe_path), Ok(e) if e.entry_type == crate::fs::EntryType::File)
-                {
-                    return Err("mknod(S_IFREG) made something that is not a regular file");
-                }
-                if mknod(0o100644) != i64::from(errno::EEXIST).wrapping_neg() {
-                    return Err("mknod over an existing name was not EEXIST");
-                }
-                crate::fs::Vfs::remove(probe_path)
-                    .map_err(|_| "the probe file could not be removed")?;
-                // mknodat, absolute path, so the dirfd is not consulted.
-                let r = dispatch_linux(
-                    nr::MKNODAT,
-                    &SyscallArgs {
-                        arg0: 0,
-                        arg1: probe_ptr,
-                        arg2: 0o140644,
-                        arg3: 0,
-                        arg4: 0,
-                        arg5: 0,
-                    },
-                )
-                .value;
-                if r != 0 {
-                    return Err("mknodat(S_IFSOCK) did not make a socket's node");
-                }
-                if !matches!(crate::fs::Vfs::stat(probe_path), Ok(e) if e.entry_type == crate::fs::EntryType::Socket)
-                {
-                    return Err("mknodat(S_IFSOCK) made something that is not a socket's node");
-                }
-                Ok(())
-            })();
-            let _ = crate::fs::Vfs::remove(probe_path);
-            if let Err(why) = result {
-                serial_println!("[syscall/linux]   FAIL: mknod: {}", why);
-                return Err(KernelError::InternalError);
             }
             serial_println!(
-                "[syscall/linux]   mknod Linux gate ladder (EFAULT/ENOENT/ENAMETOOLONG/EINVAL/EPERM), \
-                 and the regular file and socket node it makes: OK"
+                "[syscall/linux]   mknod Linux gate ladder (EFAULT/ENOENT/ENAMETOOLONG/EINVAL/EPERM): OK"
             );
         }
         Ok(())

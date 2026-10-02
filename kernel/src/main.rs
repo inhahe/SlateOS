@@ -2120,6 +2120,14 @@ extern "C" fn kernel_main() -> ! {
         syscall::linux::self_test_rename_noreplace(),
     );
 
+    // The regular files and socket nodes mknod makes (the writable /tmp,
+    // for the same reason; self_test() has mknod's refusals).
+    selftest::dispatch_debug(
+        "mknod nodes",
+        selftest::Severity::Diagnostic,
+        syscall::linux::self_test_mknod_nodes(),
+    );
+
     // The twelve xattr calls on files (needs the writable /tmp, so it runs
     // here; `syscall::linux::self_test()` has their argument checks).
     selftest::dispatch_debug(

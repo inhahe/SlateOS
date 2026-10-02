@@ -62310,73 +62310,82 @@ pub fn self_test() -> crate::error::KernelResult<()> {
             // not the process-level pcb.name — so /proc/<pid>/comm,
             // /proc/<pid>/stat field 2, /proc/<pid>/status `Name:`, and
             // prctl(PR_GET_NAME) all read one source of truth.  Exercise the
-            // sched::{set,copy}_task_name storage layer directly against the
-            // running self-test task, snapshotting and restoring its comm so
-            // the test leaves no side effect:
+            // sched::{set,copy}_task_name storage layer directly, on a task
+            // the test creates for the purpose and removes afterwards:
+            //   - the idle task is refused;
             //   - set installs a new comm, copy reads it back;
             //   - the 15-byte truncation the syscall applies (mirrored here);
             //   - an unknown task id is rejected (returns false).
             {
                 #[inline(never)]
                 fn case() -> crate::error::KernelResult<()> {
+                    /// The named task's body, which never runs: it is created
+                    /// suspended and killed before it is admitted.
+                    extern "C" fn never_runs(_arg: u64) {}
+
                     // Task 0 (the BSP idle task) is deliberately not renameable — its
                     // name is a kernel-owned diagnostic label, not a thread's comm.
-                    // Assert that first, because it is the invariant the rest of this
+                    // Check that first, because it is the invariant the rest of this
                     // block has to work around: these self-tests run in kernel context
                     // where `current_task_id()` is 0, so naming "the current task" is
                     // exactly the call that must be refused.  Before the refusal
                     // existed, a sibling prctl self-test permanently relabelled the
                     // idle task and its name then showed up as the running task in a
                     // liveness hang dump.  See `sched::set_task_name`.
-                    assert!(!crate::sched::set_task_name(0, b"nope"));
-
-                    // Round-trip the storage layer on a real, renameable task rather
-                    // than on `current_task_id()`.  Picking the lowest non-zero id
-                    // makes the choice deterministic across boots, so a failure here
-                    // names the same task every time instead of whichever one happened
-                    // to be scheduled.
-                    let Some(cur) = crate::sched::task_list()
-                        .iter()
-                        .map(|t| t.id)
-                        .filter(|&id| id != 0)
-                        .min()
-                    else {
+                    if crate::sched::set_task_name(0, b"nope") {
                         serial_println!(
-                            "[syscall/linux]   FAIL: no non-idle task exists to exercise \
-                         the PR_SET/GET_NAME storage round-trip"
+                            "[syscall/linux]   FAIL: PR_SET/GET_NAME: the idle task was renamed"
                         );
                         return Err(KernelError::InternalError);
-                    };
+                    }
 
-                    // Snapshot the live task's comm so we can restore it.
-                    let mut saved = [0u8; 32];
-                    let saved_len = crate::sched::copy_task_name(cur, &mut saved);
+                    // The round trip runs on a task of the test's own.  It used to
+                    // borrow the lowest non-zero id in the task table, and at this
+                    // point in the boot every such task is a Dead leftover of an
+                    // earlier self-test, waiting to be reaped -- so the test passed
+                    // only for as long as nothing reaped them, and failed outright
+                    // ("no non-idle task exists") once an earlier test did.
+                    let task = crate::sched::spawn_suspended(b"prctl-comm", 16, never_runs, 0, 0)?;
+                    let result = (|| -> Result<(), &'static str> {
+                        let mut buf = [0u8; 32];
 
-                    // Set then read back.
-                    assert!(crate::sched::set_task_name(cur, b"new-comm"));
-                    let mut buf = [0u8; 32];
-                    let n = crate::sched::copy_task_name(cur, &mut buf);
-                    assert_eq!(buf.get(..n), Some(&b"new-comm"[..]));
+                        // Set then read back.
+                        if !crate::sched::set_task_name(task, b"new-comm") {
+                            return Err("a live task's name could not be set");
+                        }
+                        let n = crate::sched::copy_task_name(task, &mut buf);
+                        if buf.get(..n) != Some(&b"new-comm"[..]) {
+                            return Err("the name set did not read back");
+                        }
 
-                    // 15-byte truncation invariant: the syscall handler truncates
-                    // a 16-byte input to 15 visible bytes before storing (the
-                    // 16th storage byte is the implicit NUL).  Mirror the
-                    // call-site truncation and verify the storage layer keeps it.
-                    let long = b"abcdefghijklmnop"; // 16 bytes
-                    assert_eq!(long.len(), 16);
-                    let truncated = long.get(..15).unwrap_or(&[]);
-                    assert!(crate::sched::set_task_name(cur, truncated));
-                    let mut buf2 = [0u8; 32];
-                    let n2 = crate::sched::copy_task_name(cur, &mut buf2);
-                    assert_eq!(buf2.get(..n2), Some(&b"abcdefghijklmno"[..]));
+                        // 15-byte truncation invariant: the syscall handler
+                        // truncates a 16-byte input to 15 visible bytes before
+                        // storing (the 16th storage byte is the implicit NUL).
+                        // Mirror the call-site truncation and verify the storage
+                        // layer keeps it.
+                        let truncated = b"abcdefghijklmnop".get(..15).unwrap_or(&[]);
+                        if !crate::sched::set_task_name(task, truncated) {
+                            return Err("a 15-byte name could not be set");
+                        }
+                        let n = crate::sched::copy_task_name(task, &mut buf);
+                        if buf.get(..n) != Some(&b"abcdefghijklmno"[..]) {
+                            return Err("a 15-byte name did not read back whole");
+                        }
 
-                    // Unknown task id -> false (no such task to name).
-                    assert!(!crate::sched::set_task_name(u64::MAX, b"nope"));
-                    assert_eq!(crate::sched::copy_task_name(u64::MAX, &mut buf), 0);
-
-                    // Restore the original comm so the running task is unchanged.
-                    let restore = saved.get(..saved_len).unwrap_or(&[]);
-                    assert!(crate::sched::set_task_name(cur, restore));
+                        // Unknown task id -> false (no such task to name).
+                        if crate::sched::set_task_name(u64::MAX, b"nope")
+                            || crate::sched::copy_task_name(u64::MAX, &mut buf) != 0
+                        {
+                            return Err("a task that does not exist was named, or read");
+                        }
+                        Ok(())
+                    })();
+                    crate::sched::kill_task(task);
+                    crate::sched::reap_dead_tasks();
+                    if let Err(why) = result {
+                        serial_println!("[syscall/linux]   FAIL: PR_SET/GET_NAME: {}", why);
+                        return Err(KernelError::InternalError);
+                    }
                     serial_println!(
                         "[syscall/linux]   OK: PR_SET/GET_NAME -> sched task comm round-trip"
                     );

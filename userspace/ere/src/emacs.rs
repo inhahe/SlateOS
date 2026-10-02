@@ -94,6 +94,18 @@ pub fn compile_dot_newline(pattern: BStr<'_>, ci: bool) -> Result<Regex, EreErro
     Regex::new_syntax(&ere, ci, SYNTAX)
 }
 
+/// [`compile`], with the pattern and the subject read a byte at a time -- how
+/// glibc reads both in the C locale, where a byte above 0x7f is a character of
+/// its own: `[é]` is a bracket of two bytes, and `.` takes one. See
+/// [`Regex::new_syntax_bytes`].
+///
+/// # Errors
+/// As [`compile`].
+pub fn compile_bytes(pattern: BStr<'_>, ci: bool) -> Result<Regex, EreError> {
+    let ere = translate_with(pattern, false, true)?;
+    Regex::new_syntax_bytes(&ere, ci, SYNTAX)
+}
+
 /// Translate an Emacs-syntax pattern into the equivalent ERE.
 ///
 /// # Errors
@@ -107,7 +119,16 @@ pub fn to_ere(pattern: BStr<'_>) -> Result<Str, EreError> {
 
 /// [`to_ere`], with `dot_newline` choosing whether `.` matches a newline.
 fn translate(pattern: BStr<'_>, dot_newline: bool) -> Result<Str, EreError> {
-    let cs: Vec<Ch> = chars(pattern).collect();
+    translate_with(pattern, dot_newline, false)
+}
+
+/// [`translate`], with `bytes` reading the pattern a byte at a time.
+fn translate_with(pattern: BStr<'_>, dot_newline: bool, bytes: bool) -> Result<Str, EreError> {
+    let cs: Vec<Ch> = if bytes {
+        crate::ch::byte_positions(pattern).map(|(_, c)| c).collect()
+    } else {
+        chars(pattern).collect()
+    };
     let mut out = Str::new();
     let mut i = 0usize;
     // Whether a repetition operator here has something to repeat.
@@ -392,6 +413,34 @@ mod tests {
             .unwrap()
             .find(text.as_bytes())
             .unwrap()
+    }
+
+    /// Read as the C locale reads it, a pattern's bytes above 0x7f are each a
+    /// character: `[é]` takes either byte of an `é`, `é*` repeats the second,
+    /// and `.` takes one byte.
+    #[test]
+    fn the_c_locale_reads_the_pattern_a_byte_at_a_time() {
+        let bytes = |p: &str, text: &[u8]| {
+            super::compile_bytes(p.as_bytes(), false)
+                .unwrap()
+                .find(text)
+                .unwrap()
+        };
+        let e = "\u{e9}".as_bytes(); // C3 A9
+        assert_eq!(bytes("[\u{e9}]", b"x\xa9"), Some((1, 2)));
+        assert_eq!(bytes("[\u{e9}]", e), Some((0, 1)));
+        assert_eq!(bytes("\u{e9}*x", b"\xc3\xa9\xa9x"), Some((0, 4)));
+        assert_eq!(bytes("a.b", b"a\xffb"), Some((0, 3)));
+        assert_eq!(bytes("a..b", "a\u{e9}b".as_bytes()), Some((0, 4)));
+        // Read as UTF-8, `[é]` is one character, which a lone byte is not.
+        assert_eq!(find("[\u{e9}]", "x\u{e9}"), Some((1, 3)));
+        assert_eq!(
+            compile("[\u{e9}]".as_bytes(), false)
+                .unwrap()
+                .find(b"x\xa9")
+                .unwrap(),
+            None
+        );
     }
 
     #[test]

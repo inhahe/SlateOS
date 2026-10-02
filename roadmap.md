@@ -1575,6 +1575,19 @@ list moved to lane D on 2026-09-22):
     separate gap (eleven readers, one writer, and no gid allocator in
     `userdb`).
 
+- `[x]` `[B]` **`file` is file 5.45 and libmagic, ported** (2026-10-02;
+  `known-issues.md` → `B-FILE-IS-A-HAND-WRITTEN-APPROXIMATION-OF-LIBMAGIC`).
+  Function by function, upstream's quirks kept: `userspace/libmagic` (the
+  library, any program may use it) and `userspace/file` (the command), with
+  upstream's own magic database vendored, compiled at build time exactly as
+  `file -C` compiles it, and used in place as upstream uses `magic.mgc`
+  (design-decisions.md §1058); `-z` has zlib's inflate semantics (§1059).
+  `scripts/file-diff.sh` holds it byte for byte to a reference build of the
+  release: 42,269 cases, none differing. A run takes 2.1 ms on an ELF file
+  (upstream 1.9) and 5.4 ms on a text file (upstream 6.8). Not in the image
+  yet: `scripts/rootfs-bin-manifest.txt` ships only what something there
+  needs, and the program is 9.4 MB.
+
 Known-issues (open, userland-owned): the whole **`TD-OILS-*` family** — 631
 entries as of 2026-08-14, of which ~325 are still open (the count is a heading
 scan: an entry is "closed" only when its title carries `✅ FIXED`, so a few

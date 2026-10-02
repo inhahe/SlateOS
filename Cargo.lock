@@ -647,6 +647,7 @@ dependencies = [
  "bignum",
  "blake2 0.1.0",
  "charwidth",
+ "cprintf",
  "ere",
  "errmsg",
  "fnmatch",
@@ -678,6 +679,13 @@ name = "cpio"
 version = "0.1.0"
 dependencies = [
  "modechange",
+ "quoting",
+]
+
+[[package]]
+name = "cprintf"
+version = "0.1.0"
+dependencies = [
  "quoting",
 ]
 
@@ -1155,6 +1163,13 @@ version = "0.1.0"
 [[package]]
 name = "file"
 version = "0.1.0"
+dependencies = [
+ "charwidth",
+ "errmsg",
+ "getoptlong",
+ "libmagic",
+ "sysroot-dep",
+]
 
 [[package]]
 name = "fileassoc"
@@ -1922,6 +1937,17 @@ name = "libm"
 version = "0.2.16"
 dependencies = [
  "no-panic",
+]
+
+[[package]]
+name = "libmagic"
+version = "0.1.0"
+dependencies = [
+ "charwidth",
+ "cprintf",
+ "ere",
+ "errmsg",
+ "localtime",
 ]
 
 [[package]]
@@ -2961,9 +2987,11 @@ dependencies = [
 name = "powerctl"
 version = "0.1.0"
 dependencies = [
+ "errmsg",
  "libcall",
  "libservicebus",
  "quoting",
+ "stdfdguard",
  "sysroot-dep",
 ]
 
@@ -3988,13 +4016,6 @@ dependencies = [
  "scratchdir",
  "settingsfile",
  "snapstore",
-]
-
-[[package]]
-name = "tac"
-version = "0.1.0"
-dependencies = [
- "quoting",
 ]
 
 [[package]]

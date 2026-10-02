@@ -492,9 +492,11 @@
 
 pub mod backup;
 pub mod basenc;
-pub mod bignat;
+// Exact big naturals, C's printf conversions and the x87 `long double` -- the
+// shared `cprintf` crate since 2026-10-01, re-exported here so
+// `coreutils::{bignat, cfmt, extfloat}` and their `crate::` paths stand.
+pub use ::cprintf::{bignat, cfmt, extfloat};
 pub mod canon;
-pub mod cfmt;
 pub mod chowncore;
 pub mod cksum;
 pub mod copy;
@@ -503,7 +505,6 @@ pub mod dirfd;
 // strerror(3)'s wording for an io::Error -- the shared `errmsg` crate since
 // 2026-09-26, re-exported here so `coreutils::errmsg` and `crate::errmsg` stand.
 pub use ::errmsg;
-pub mod extfloat;
 pub mod fileid;
 pub mod filekind;
 // POSIX fnmatch over bytes -- the shared `fnmatch` crate since 2026-10-01,

@@ -1,10 +1,10 @@
 /* The glibc side of the `extfloat` differential test.
  *
  * `scripts/extfloat-diff.sh` compiles this inside WSL and runs it against
- * `userspace/coreutils/examples/extfloat-probe.rs` over the same cases. The two
+ * `userspace/cprintf/examples/extfloat-probe.rs` over the same cases. The two
  * must agree byte for byte: that is the whole claim `extfloat` makes.
  *
- * Both modes are described in the Rust file. Keep the two in step -- an output
+ * The modes are described in the Rust file. Keep the two in step -- an output
  * line here that the Rust side cannot also produce is a harness bug that reads
  * as a real difference.
  *
@@ -47,6 +47,33 @@ read_case (char const *line)
   long double v = strtold (line, &end);
   printf ("consumed=%td range=%d value=%La\n", end - line,
           errno == ERANGE ? 1 : 0, v);
+}
+
+/* `strtod` and `strtof`, the same grammar rounded to 53 and 24 bits. The value
+ * is printed as its bits rather than with `%a`: `%a` writes every NaN as `nan`,
+ * and a NaN's payload is part of what these return. */
+static void
+read_double_case (char const *line)
+{
+  char *end;
+  errno = 0;
+  double v = strtod (line, &end);
+  int range = errno == ERANGE ? 1 : 0;
+  unsigned long long bits;
+  memcpy (&bits, &v, sizeof bits);
+  printf ("consumed=%td range=%d bits=%016llx\n", end - line, range, bits);
+}
+
+static void
+read_float_case (char const *line)
+{
+  char *end;
+  errno = 0;
+  float v = strtof (line, &end);
+  int range = errno == ERANGE ? 1 : 0;
+  unsigned int bits;
+  memcpy (&bits, &v, sizeof bits);
+  printf ("consumed=%td range=%d bits=%08x\n", end - line, range, bits);
 }
 
 /* Copy FMT, inserting an `L` before the conversion character if it has none.
@@ -110,13 +137,21 @@ main (int argc, char **argv)
 {
   if (argc != 2)
     {
-      fprintf (stderr, "extfloat-probe: expected 'read' or 'write'\n");
+      fprintf (stderr,
+               "extfloat-probe: expected 'read', 'readd', 'readf' or 'write'\n");
       return 2;
     }
-  bool reading = strcmp (argv[1], "read") == 0;
-  if (!reading && strcmp (argv[1], "write") != 0)
+  void (*read_one) (char const *) = NULL;
+  if (strcmp (argv[1], "read") == 0)
+    read_one = read_case;
+  else if (strcmp (argv[1], "readd") == 0)
+    read_one = read_double_case;
+  else if (strcmp (argv[1], "readf") == 0)
+    read_one = read_float_case;
+  else if (strcmp (argv[1], "write") != 0)
     {
-      fprintf (stderr, "extfloat-probe: expected 'read' or 'write'\n");
+      fprintf (stderr,
+               "extfloat-probe: expected 'read', 'readd', 'readf' or 'write'\n");
       return 2;
     }
 
@@ -131,8 +166,8 @@ main (int argc, char **argv)
        * an absence of one. Skipping it here would shift every later answer up
        * by one line against the case file and report the file as all
        * different, which is exactly what the first run of this harness did. */
-      if (reading)
-        read_case (line);
+      if (read_one)
+        read_one (line);
       else
         write_case (line);
     }

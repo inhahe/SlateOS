@@ -95562,7 +95562,10 @@ pub fn self_test() -> crate::error::KernelResult<()> {
                 serial_println!("[syscall/linux]   FAIL: socketpair NULL sv not EFAULT");
                 return Err(KernelError::InternalError);
             }
-            // socketpair valid -> ENOSYS.
+            // socketpair valid -> EBADF: past every gate the pair is made
+            // (`ipc::unix_socket::pair`), and kernel context has no
+            // descriptor table to install it in, so both ends are closed
+            // again. (ENOSYS until AF_UNIX pairs existed.)
             let a = SyscallArgs {
                 arg0: 1,
                 arg1: 1,
@@ -95571,8 +95574,8 @@ pub fn self_test() -> crate::error::KernelResult<()> {
                 arg4: 0,
                 arg5: 0,
             };
-            if dispatch_linux(nr::SOCKETPAIR, &a).value != -i64::from(errno::ENOSYS) {
-                serial_println!("[syscall/linux]   FAIL: socketpair valid not ENOSYS");
+            if dispatch_linux(nr::SOCKETPAIR, &a).value != i64::from(errno::EBADF).wrapping_neg() {
+                serial_println!("[syscall/linux]   FAIL: socketpair valid not EBADF");
                 return Err(KernelError::InternalError);
             }
 
@@ -106127,8 +106130,10 @@ pub fn self_test() -> crate::error::KernelResult<()> {
 
                     // Discriminator E: socketpair(domain=1 (AF_UNIX),
                     //   type=SOCK_STREAM, sv=valid)
-                    //   Acceptance: AF_UNIX still falls through to the
-                    //   terminal -ENOSYS (no socketpair backend yet).
+                    //   Acceptance: past every gate the pair is made, and
+                    //   kernel context has no descriptor table to install
+                    //   it in: -EBADF, both ends closed again. (-ENOSYS
+                    //   until AF_UNIX pairs existed.)
                     let a = SyscallArgs {
                         arg0: 1,
                         arg1: 1,
@@ -106137,8 +106142,10 @@ pub fn self_test() -> crate::error::KernelResult<()> {
                         arg4: 0,
                         arg5: 0,
                     };
-                    if dispatch_linux(nr::SOCKETPAIR, &a).value != -i64::from(errno::ENOSYS) {
-                        serial_println!("[syscall/linux]   FAIL: socketpair(AF_UNIX) not ENOSYS");
+                    if dispatch_linux(nr::SOCKETPAIR, &a).value
+                        != i64::from(errno::EBADF).wrapping_neg()
+                    {
+                        serial_println!("[syscall/linux]   FAIL: socketpair(AF_UNIX) not EBADF");
                         return Err(KernelError::InternalError);
                     }
 
@@ -107153,13 +107160,16 @@ pub fn self_test() -> crate::error::KernelResult<()> {
             // `(1, _) => EPROTONOSUPPORT` for any non-zero protocol,
             // over-rejecting (AF_UNIX, *, 1).
             //
-            // Sub-probes:
-            //   A. socket(AF_UNIX=1, STREAM=1, 1=PF_UNIX)   -> ENOSYS
-            //      (was: EPROTONOSUPPORT; post: accepted, falls
-            //      through to terminal ENOSYS)
-            //   B. socket(AF_UNIX, DGRAM=2, 1)              -> ENOSYS
+            // Sub-probes (kernel context, which has no descriptor table: an
+            // accepted stream or datagram socket is made, then closed again
+            // for want of a table to install it in -- EBADF; ENOSYS until
+            // AF_UNIX sockets existed):
+            //   A. socket(AF_UNIX=1, STREAM=1, 1=PF_UNIX)   -> EBADF
+            //      (was: EPROTONOSUPPORT; post: accepted)
+            //   B. socket(AF_UNIX, DGRAM=2, 1)              -> EBADF
             //   C. socket(AF_UNIX, SEQPACKET=5, 1)          -> ENOSYS
-            //   D. Regression: socket(AF_UNIX, STREAM, 0)   -> ENOSYS
+            //      (accepted; no SOCK_SEQPACKET yet)
+            //   D. Regression: socket(AF_UNIX, STREAM, 0)   -> EBADF
             //      (already accepted; gate 5 skipped for proto=0)
             //   E. Regression: socket(AF_UNIX, STREAM, 2)   -> EPROTONOSUPPORT
             //      (non-PF_UNIX non-zero protocol still rejected)
@@ -107179,7 +107189,7 @@ pub fn self_test() -> crate::error::KernelResult<()> {
                     };
                     if dispatch_linux(nr::SOCKET, &a).value != -i64::from(errno::ENOSYS) {
                         serial_println!(
-                            "[syscall/linux]   FAIL: socket(AF_UNIX,STREAM,PF_UNIX) not ENOSYS"
+                            "[syscall/linux]   FAIL: socket(AF_UNIX,STREAM,PF_UNIX) not EBADF"
                         );
                         return Err(KernelError::InternalError);
                     }
@@ -107194,7 +107204,7 @@ pub fn self_test() -> crate::error::KernelResult<()> {
                     };
                     if dispatch_linux(nr::SOCKET, &a).value != -i64::from(errno::ENOSYS) {
                         serial_println!(
-                            "[syscall/linux]   FAIL: socket(AF_UNIX,DGRAM,PF_UNIX) not ENOSYS"
+                            "[syscall/linux]   FAIL: socket(AF_UNIX,DGRAM,PF_UNIX) not EBADF"
                         );
                         return Err(KernelError::InternalError);
                     }
@@ -107224,7 +107234,7 @@ pub fn self_test() -> crate::error::KernelResult<()> {
                     };
                     if dispatch_linux(nr::SOCKET, &a).value != -i64::from(errno::ENOSYS) {
                         serial_println!(
-                            "[syscall/linux]   FAIL: socket(AF_UNIX,STREAM,0) regression not ENOSYS"
+                            "[syscall/linux]   FAIL: socket(AF_UNIX,STREAM,0) regression not EBADF"
                         );
                         return Err(KernelError::InternalError);
                     }
@@ -107323,7 +107333,9 @@ pub fn self_test() -> crate::error::KernelResult<()> {
                         arg4: 0,
                         arg5: 0,
                     };
-                    if dispatch_linux(nr::SOCKET, &a).value != -i64::from(errno::ENOSYS) {
+                    if dispatch_linux(nr::SOCKET, &a).value
+                        != i64::from(errno::EBADF).wrapping_neg()
+                    {
                         serial_println!(
                             "[syscall/linux]   FAIL: socket(AF_INET6,DGRAM,ICMPV6) not ENOSYS"
                         );
@@ -107355,7 +107367,9 @@ pub fn self_test() -> crate::error::KernelResult<()> {
                         arg4: 0,
                         arg5: 0,
                     };
-                    if dispatch_linux(nr::SOCKET, &a).value != -i64::from(errno::ENOSYS) {
+                    if dispatch_linux(nr::SOCKET, &a).value
+                        != i64::from(errno::EBADF).wrapping_neg()
+                    {
                         serial_println!(
                             "[syscall/linux]   FAIL: socket(AF_INET,DGRAM,UDPLITE) regression not ENOSYS"
                         );
@@ -107417,7 +107431,9 @@ pub fn self_test() -> crate::error::KernelResult<()> {
                         arg4: 0,
                         arg5: 0,
                     };
-                    if dispatch_linux(nr::SOCKET, &a).value != -i64::from(errno::ENOSYS) {
+                    if dispatch_linux(nr::SOCKET, &a).value
+                        != i64::from(errno::EBADF).wrapping_neg()
+                    {
                         serial_println!(
                             "[syscall/linux]   FAIL: socket(AF_INET6,DGRAM,UDPLITE) regression not ENOSYS"
                         );

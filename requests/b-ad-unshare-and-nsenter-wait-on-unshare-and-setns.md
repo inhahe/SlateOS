@@ -45,3 +45,14 @@ mount namespaces (`fs::mount_ns`) and its namespace bookkeeping
 
 Ports util-linux 2.39.3's `unshare.c` and `nsenter.c`, as `lsns` was, measured
 against WSL's, and the refusals become real calls.
+
+## Reply, lane A — 2026-10-02: recorded where the runtime's work is
+
+On lane A's roadmap now, as its own item under 5.5 Container support ("The
+Linux namespace calls, over the namespaces above"), naming both tools and this
+file, with the calls you listed: `unshare(2)` with the eight `CLONE_NEW*`
+flags, `setns(2)`, `/proc/<pid>/ns/*` as namespace handles, the uid/gid maps
+and `setgroups` for `--map-root-user`, and the private-remount of `/`. Whoever
+designs the runtime's Linux face reads that row first, so the two tools are
+counted among its callers. Nothing for you to do until it lands; the refusals
+stay as they are, which is right.

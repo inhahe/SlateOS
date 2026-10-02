@@ -6264,6 +6264,91 @@ pub const SYS_PROCESS_GET_PHDR: u64 = 1102;
 pub const SYS_CHANNEL_PEER_HAS_KEY: u64 = 1103;
 
 // ---------------------------------------------------------------------------
+// Unix-domain sockets by name (1104-1116)
+//
+// The native door to `ipc::unix_socket`, which the Linux table reaches through
+// socket/bind/connect/... (`AF_UNIX`): the C library's `socket(AF_UNIX, ...)`
+// is built on these. A socket is a handle the calling process holds (its
+// `ipc_handles`, type `UnixSocket`): closed when it exits, one more holder
+// when it forks.
+//
+// Names. Calls that take a name take `name_ptr`/`name_len` and a flags bit:
+// with `UNIX_NAME_ABSTRACT` the bytes are an abstract name (no node, Linux's
+// `sun_path[0] == 0`); without it they are an **absolute** path -- the
+// library resolves a relative `sun_path` against its own working directory,
+// as every native path call expects.
+//
+// Errors are the kernel's own: `AddrInUse` for a name in use,
+// `ConnectionRefused` for nothing listening (or not a socket's node),
+// `WrongSocketType` for a socket of the other kind, `NotConnected`,
+// `ConnectAlready` for a connected stream connecting again, `MsgSize` for a
+// datagram over 64 KiB, `WouldBlock` for `UNIX_NONBLOCK` when the call would
+// wait, `ChannelClosed` for a stream whose peer has gone.
+// ---------------------------------------------------------------------------
+
+/// Name flag: the name is abstract, not a path.
+pub const UNIX_NAME_ABSTRACT: u64 = 1 << 0;
+/// Call flag: return `WouldBlock` rather than wait.
+pub const UNIX_NONBLOCK: u64 = 1 << 1;
+/// Receive flag: leave what was read in place (`MSG_PEEK`).
+pub const UNIX_PEEK: u64 = 1 << 2;
+
+/// `SYS_UNIX_SOCKET(kind)` -- a new socket: `kind` 1 stream, 2 datagram.
+/// Returns its handle.
+pub const SYS_UNIX_SOCKET: u64 = 1104;
+/// `SYS_UNIX_PAIR(kind)` -- two connected sockets of `kind` (`socketpair`).
+/// Returns both handles (the two-value return).
+pub const SYS_UNIX_PAIR: u64 = 1105;
+/// `SYS_UNIX_BIND(handle, name_ptr, name_len, mode, flags)` -- bind to a name.
+/// A path makes a socket node there with permission bits `mode` (already
+/// umask-masked); `mode` is ignored for an abstract name.
+pub const SYS_UNIX_BIND: u64 = 1106;
+/// `SYS_UNIX_LISTEN(handle, backlog)` -- listen on a bound stream socket;
+/// `backlog` is clamped to 1..=128.
+pub const SYS_UNIX_LISTEN: u64 = 1107;
+/// `SYS_UNIX_ACCEPT(handle, flags)` -- the next connection, as a new handle
+/// (`UNIX_NONBLOCK`: `WouldBlock` when none is waiting). The client's
+/// address is `SYS_UNIX_NAME(new, 1, ...)`.
+pub const SYS_UNIX_ACCEPT: u64 = 1108;
+/// `SYS_UNIX_CONNECT(handle, name_ptr, name_len, flags)` -- connect a stream
+/// (waits while the listener's backlog is full, unless `UNIX_NONBLOCK`), or
+/// set a datagram socket's destination.
+pub const SYS_UNIX_CONNECT: u64 = 1109;
+/// `SYS_UNIX_SEND(handle, buf, len, name_ptr, name_len, flags)` -- send:
+/// with `name_ptr` 0, down the connection (or to the datagram destination
+/// `connect` set); with a name, one datagram there. Returns bytes sent (a
+/// stream may take fewer than `len`).
+pub const SYS_UNIX_SEND: u64 = 1110;
+/// `SYS_UNIX_RECV(handle, buf, cap, info_ptr, flags)` -- receive into `buf`;
+/// returns bytes copied (0 is end of file). If `info_ptr` is not 0 it
+/// receives a [`UNIX_RECV_INFO_LEN`]-byte record: the datagram's whole length
+/// (u64), the sender's pid (u64), uid (u32), gid (u32), whether those are
+/// known (u32), and the sender's address as [`SYS_UNIX_NAME`] writes one.
+pub const SYS_UNIX_RECV: u64 = 1111;
+/// `SYS_UNIX_NAME(handle, which, out_ptr)` -- the socket's own address
+/// (`which` 0) or its peer's (1), as a [`UNIX_ADDR_LEN`]-byte record: kind
+/// (u32: 0 unnamed, 1 path, 2 abstract), length (u32), then the bytes
+/// (108, unused ones zero).
+pub const SYS_UNIX_NAME: u64 = 1112;
+/// `SYS_UNIX_PEER_CRED(handle, out_ptr)` -- the connected peer's pid (u64),
+/// uid (u32) and gid (u32), as the kernel recorded them at connect/listen.
+/// `NoAddress` when there is no process to report (a kernel peer).
+pub const SYS_UNIX_PEER_CRED: u64 = 1113;
+/// `SYS_UNIX_SHUTDOWN(handle, how)` -- 0 receives, 1 sends, 2 both.
+pub const SYS_UNIX_SHUTDOWN: u64 = 1114;
+/// `SYS_UNIX_CLOSE(handle)` -- let go of the socket; it ends with its last
+/// holder, its name then leading nowhere.
+pub const SYS_UNIX_CLOSE: u64 = 1115;
+/// `SYS_UNIX_POLL(handle)` -- readiness: 0x01 readable, 0x04 writable, 0x08
+/// error, 0x10 hang-up.
+pub const SYS_UNIX_POLL: u64 = 1116;
+
+/// Bytes [`SYS_UNIX_NAME`] writes: kind, length, 108 bytes of name.
+pub const UNIX_ADDR_LEN: usize = 116;
+/// Bytes [`SYS_UNIX_RECV`] writes at `info_ptr`.
+pub const UNIX_RECV_INFO_LEN: usize = 28 + UNIX_ADDR_LEN;
+
+// ---------------------------------------------------------------------------
 // Version info
 // ---------------------------------------------------------------------------
 

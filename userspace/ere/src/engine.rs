@@ -625,6 +625,18 @@ pub struct Syntax {
     /// awk -regex 't/a\1'` finds the file `a1`, where every other type refuses
     /// the pattern ("Invalid back reference").
     pub no_backrefs: bool,
+    /// `.` does not match a newline.
+    ///
+    /// glibc's syntax *without* `RE_DOT_NEWLINE`. Every POSIX syntax sets that
+    /// bit, so `.` matches a newline everywhere -- except after `regcomp`'s
+    /// `REG_NEWLINE`, which clears it; see [`Syntax::reg_newline`].
+    pub dot_not_newline: bool,
+    /// A bracket that begins with `^` does not match a newline: `[^a]` matches
+    /// every character except `a` and the newline.
+    ///
+    /// glibc's `RE_HAT_LISTS_NOT_NEWLINE`, which only `REG_NEWLINE` sets among
+    /// the dialects here; see [`Syntax::reg_newline`].
+    pub hat_lists_not_newline: bool,
 }
 
 impl Syntax {
@@ -638,6 +650,8 @@ impl Syntax {
         leading_repeat_literal: false,
         no_intervals: false,
         no_backrefs: false,
+        dot_not_newline: false,
+        hat_lists_not_newline: false,
     };
 
     /// `RE_SYNTAX_EGREP` as GNU `grep -E` applies it.
@@ -650,6 +664,8 @@ impl Syntax {
         leading_repeat_literal: false,
         no_intervals: false,
         no_backrefs: false,
+        dot_not_newline: false,
+        hat_lists_not_newline: false,
     };
 
     /// `RE_SYNTAX_GNU_AWK`, findutils' `gnu-awk` type: POSIX-extended with a
@@ -665,6 +681,8 @@ impl Syntax {
         leading_repeat_literal: true,
         no_intervals: false,
         no_backrefs: false,
+        dot_not_newline: false,
+        hat_lists_not_newline: false,
     };
 
     /// `RE_SYNTAX_AWK`, findutils' `awk` type: traditional awk's regexes --
@@ -679,6 +697,8 @@ impl Syntax {
         leading_repeat_literal: true,
         no_intervals: true,
         no_backrefs: true,
+        dot_not_newline: false,
+        hat_lists_not_newline: false,
     };
 
     /// `RE_SYNTAX_POSIX_AWK`: what `gawk --posix` compiles a regex with, and so
@@ -698,7 +718,26 @@ impl Syntax {
         leading_repeat_literal: false,
         no_intervals: false,
         no_backrefs: false,
+        dot_not_newline: false,
+        hat_lists_not_newline: false,
     };
+
+    /// This syntax as POSIX `regcomp` adjusts it for `REG_NEWLINE`: neither `.`
+    /// nor a `[^...]` bracket matches a newline.
+    ///
+    /// That is two of `REG_NEWLINE`'s three effects. The third -- `^` and `$`
+    /// also matching at each newline -- belongs to the compiled regex rather
+    /// than to the syntax, as it does in glibc, and is
+    /// [`Regex::with_newline_anchor`]; a `REG_NEWLINE` caller wants both.
+    /// libmagic is one: every `regex` rule is compiled with it.
+    #[must_use]
+    pub const fn reg_newline(self) -> Syntax {
+        Syntax {
+            dot_not_newline: true,
+            hat_lists_not_newline: true,
+            ..self
+        }
+    }
 }
 
 impl Default for Syntax {
@@ -1297,7 +1336,15 @@ impl EParser {
             Some('[') => self.parse_class(),
             Some('.') => {
                 self.bump(1);
-                Ok(Node::Any)
+                if self.syntax.dot_not_newline {
+                    Ok(Node::Class(ClassData {
+                        negated: true,
+                        ranges: vec![(Ch::U('\n'), Ch::U('\n'))],
+                        posix: Vec::new(),
+                    }))
+                } else {
+                    Ok(Node::Any)
+                }
             }
             Some('^') => {
                 self.bump(1);
@@ -1495,6 +1542,10 @@ impl EParser {
             } else {
                 ranges.push((lo, lo));
             }
+        }
+        if negated && self.syntax.hat_lists_not_newline {
+            // Excluded from the negation by being a member of what it negates.
+            ranges.push((Ch::U('\n'), Ch::U('\n')));
         }
         Ok(Node::Class(ClassData {
             negated,
@@ -1794,6 +1845,9 @@ pub struct Regex {
     /// Whether `^` and `$` also match next to a newline inside the subject.
     /// See [`Regex::with_newline_anchor`].
     newline_anchor: bool,
+    /// Whether the subject is read a byte at a time. See
+    /// [`Regex::with_byte_chars`].
+    bytes: bool,
 }
 
 /// A compiled regex prints as its shape, not its program.
@@ -1956,6 +2010,7 @@ impl Regex {
                 ci,
                 has_backref: c.has_backref,
                 newline_anchor: false,
+                bytes: false,
             },
             warnings,
         ))
@@ -1979,6 +2034,27 @@ impl Regex {
     pub fn with_newline_anchor(mut self, on: bool) -> Regex {
         self.newline_anchor = on;
         self
+    }
+
+    /// Read the subject a byte at a time, as glibc's `regexec` does in the C
+    /// locale: `.` matches one byte, a bracket's members are bytes, and a
+    /// UTF-8 sequence is as many characters as it has bytes -- each above
+    /// 0x7f matching nothing but itself, `.` and a negated bracket, and
+    /// folding to nothing under case-insensitivity.
+    ///
+    /// libmagic is the caller that wants it: it switches to the C locale for
+    /// every `regcomp` and `regexec` it makes, so a magic rule's `x.y` does
+    /// not match `x`, `é`, `y`. The pattern itself is read as before; a magic
+    /// rule's pattern is ASCII.
+    #[must_use]
+    pub fn with_byte_chars(mut self, on: bool) -> Regex {
+        self.bytes = on;
+        self
+    }
+
+    /// The subject decoded as this regex reads it.
+    fn decode(&self, text: BStr<'_>) -> Scan {
+        Scan::new(text, self.bytes)
     }
 
     /// Whether `^` holds at character position `sp` of `input`.
@@ -2045,7 +2121,7 @@ impl Regex {
     /// # Errors
     /// [`MatchLimit`] if a backreference search exceeded its budget.
     pub fn captures(&self, text: BStr<'_>) -> Result<Option<Vec<Option<Str>>>, MatchLimit> {
-        let chars: Vec<Ch> = bytes::chars(text).collect();
+        let chars: Vec<Ch> = self.decode(text).chars;
         let Some(slots) = self.run(&chars, 0, StartOfLine::Yes)? else {
             return Ok(None);
         };
@@ -2110,7 +2186,7 @@ impl Regex {
         text: BStr<'_>,
         from: usize,
     ) -> Result<Option<(usize, usize)>, MatchLimit> {
-        let scan = Scan::new(text);
+        let scan = self.decode(text);
         let Some(slots) = self.run(&scan.chars, scan.char_index(from), StartOfLine::Yes)? else {
             return Ok(None);
         };
@@ -2132,7 +2208,7 @@ impl Regex {
     pub fn find_iter(&self, text: BStr<'_>) -> Matches<'_> {
         Matches {
             re: self,
-            cur: Cursor::new(text),
+            cur: Cursor::new(self.decode(text)),
         }
     }
 
@@ -2147,7 +2223,7 @@ impl Regex {
     pub fn capture_spans_iter(&self, text: BStr<'_>) -> CaptureMatches<'_> {
         CaptureMatches {
             re: self,
-            cur: Cursor::new(text),
+            cur: Cursor::new(self.decode(text)),
         }
     }
 
@@ -2194,7 +2270,7 @@ impl Regex {
     pub fn search(&self, text: BStr<'_>) -> Search<'_> {
         Search {
             re: self,
-            scan: Scan::new(text),
+            scan: self.decode(text),
         }
     }
 
@@ -2818,7 +2894,7 @@ impl Search<'_> {
             return Ok(self.scan.span(clo.saturating_add(s), clo.saturating_add(e)));
         }
         let bytes = self.window_bytes(lo, hi);
-        let sub = Scan::new(&bytes);
+        let sub = self.re.decode(&bytes);
         let Some((s, e)) = search(self.re, &sub.chars)? else {
             return Ok(None);
         };
@@ -2867,12 +2943,19 @@ struct Scan {
 }
 
 impl Scan {
-    fn new(text: BStr<'_>) -> Scan {
+    /// Decode `text` -- a byte at a time when `bytes`, see
+    /// [`Regex::with_byte_chars`].
+    fn new(text: BStr<'_>, bytes: bool) -> Scan {
         let mut chars = Vec::new();
         let mut offs = Vec::new();
-        for (at, c) in bytes::char_positions(text) {
+        let mut take = |(at, c)| {
             offs.push(at);
             chars.push(c);
+        };
+        if bytes {
+            bytes::byte_positions(text).for_each(&mut take);
+        } else {
+            bytes::char_positions(text).for_each(&mut take);
         }
         offs.push(text.len());
         Scan { chars, offs }
@@ -2908,9 +2991,9 @@ struct Cursor {
 }
 
 impl Cursor {
-    fn new(text: BStr<'_>) -> Cursor {
+    fn new(scan: Scan) -> Cursor {
         Cursor {
-            scan: Scan::new(text),
+            scan,
             next: 0,
             last_end: None,
             done: false,
@@ -3071,6 +3154,51 @@ mod tests {
         // The backtracker agrees with the Pike VM.
         let br = Regex::new(br"^(b)\1$").unwrap().with_newline_anchor(true);
         assert_eq!(br.find(b"a\nbb\nc").unwrap(), Some((2, 4)));
+    }
+
+    /// Read a byte at a time, as the C locale reads, a UTF-8 sequence is as
+    /// many characters as it has bytes: `.` takes one, a bracket's negation
+    /// takes one, and nothing above 0x7f is a letter or folds.
+    #[test]
+    fn byte_chars_read_a_byte_at_a_time() {
+        let re = |p: &[u8], ci: bool| Regex::new_flags(p, ci).unwrap().with_byte_chars(true);
+        let e_acute = "x\u{e9}y".as_bytes();
+        assert_eq!(re(b"x.y", false).find(e_acute).unwrap(), None);
+        assert_eq!(re(b"x..y", false).find(e_acute).unwrap(), Some((0, 4)));
+        assert_eq!(re(b"[^x]", false).find(e_acute).unwrap(), Some((1, 2)));
+        assert_eq!(re(b"[[:alpha:]]+", false).find(e_acute).unwrap(), Some((0, 1)));
+        assert_eq!(re(b"y", true).find(b"\xc3\x9fY").unwrap(), Some((2, 3)));
+        // Captures come back as the bytes they covered.
+        let caps = re(b"x(.)", false).captures(e_acute).unwrap().unwrap();
+        assert_eq!(caps.get(1).cloned().flatten(), Some(b"\xc3".to_vec()));
+        // Every match a scan finds is on byte offsets.
+        let all: Vec<_> = re(b".", false)
+            .find_iter(e_acute)
+            .map(|m| m.unwrap())
+            .collect();
+        assert_eq!(all, vec![(0, 1), (1, 2), (2, 3), (3, 4)]);
+        // Off by default: the same subject is three characters.
+        assert_eq!(found("x.y", "x\u{e9}y"), Some((0, 4)));
+    }
+
+    /// `REG_NEWLINE`'s syntax half keeps `.` and `[^...]` off a newline, and
+    /// nothing else: a bracket that names the newline still matches it.
+    #[test]
+    fn reg_newline_keeps_dot_and_negated_brackets_off_a_newline() {
+        let nl = Syntax::POSIX_EXTENDED.reg_newline();
+        let re = |p: &[u8]| Regex::new_syntax(p, false, nl).unwrap();
+        assert_eq!(re(b"a.b").find(b"a\nb a-b").unwrap(), Some((4, 7)));
+        assert_eq!(re(b"a[^x]b").find(b"a\nb a-b").unwrap(), Some((4, 7)));
+        assert_eq!(re(b"a[\n]b").find(b"a\nb").unwrap(), Some((0, 3)));
+        assert_eq!(re(b"a[^\n]b").find(b"a\nb").unwrap(), None);
+        // With the newline anchor too, as `regcomp` gives it.
+        let both = re(b"^b.*$").with_newline_anchor(true);
+        assert_eq!(both.find(b"a\nbcd\ne").unwrap(), Some((2, 5)));
+        // Without it, the plain syntax lets both through.
+        let plain = Regex::new(b"a.b").unwrap();
+        assert_eq!(plain.find(b"a\nb").unwrap(), Some((0, 3)));
+        let plain = Regex::new(b"a[^x]b").unwrap();
+        assert_eq!(plain.find(b"a\nb").unwrap(), Some((0, 3)));
     }
 
     /// A window of a subject is searched as though it were the whole subject:

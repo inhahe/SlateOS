@@ -188,6 +188,20 @@ pub fn char_positions(s: BStr<'_>) -> impl Iterator<Item = (usize, Ch)> + '_ {
     })
 }
 
+/// `s` as the C locale reads it: every byte one character -- ASCII as itself,
+/// anything above 0x7f as an undecodable byte, whether or not it begins a valid
+/// UTF-8 sequence. Each paired with its offset, which is its index.
+pub fn byte_positions(s: BStr<'_>) -> impl Iterator<Item = (usize, Ch)> + '_ {
+    s.iter().enumerate().map(|(at, &b)| {
+        let ch = if b.is_ascii() {
+            Ch::U(char::from(b))
+        } else {
+            Ch::B(b)
+        };
+        (at, ch)
+    })
+}
+
 /// Collect the characters of `s` back into a byte string.
 pub fn from_chars<I: IntoIterator<Item = Ch>>(chars: I) -> Str {
     let mut out = Str::new();

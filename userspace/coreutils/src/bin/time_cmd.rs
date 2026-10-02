@@ -1229,6 +1229,9 @@ mod tests {
     }
 
     #[test]
+    // Counting 22 newlines in a test does not need the `bytecount` crate
+    // this lint recommends.
+    #[allow(clippy::naive_bytecount)]
     fn the_verbose_format_is_the_longstats_run_together() {
         let text = Format::Verbose.text();
         assert!(text.starts_with(b"\tCommand being timed: \"%C\"\n"));

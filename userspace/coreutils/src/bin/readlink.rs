@@ -616,20 +616,28 @@ mod tests {
     /// run identically on every host and cover the cases the host cannot build
     /// — a name that is not UTF-8, and a symlink at all, which an unprivileged
     /// Windows process cannot create.
-    struct FakeFs(BTreeMap<&'static [u8], Option<&'static [u8]>>);
+    struct FakeFs(BTreeMap<&'static [u8], Node>);
+
+    /// What a name in [`FakeFs`] is.
+    #[derive(Clone, Copy)]
+    enum Node {
+        /// A regular file or a directory.
+        Plain,
+        /// A symbolic link, and its target.
+        Link(&'static [u8]),
+    }
 
     impl FakeFs {
-        /// `None` is a regular file or directory; `Some(target)` is a symlink.
         fn new() -> Self {
-            let mut m: BTreeMap<&'static [u8], Option<&'static [u8]>> = BTreeMap::new();
-            m.insert(b"/", None);
-            m.insert(b"/w", None);
-            m.insert(b"/w/real", None);
-            m.insert(b"/w/link", Some(b"real"));
-            m.insert(b"/w/link2", Some(b"real"));
+            let mut m: BTreeMap<&'static [u8], Node> = BTreeMap::new();
+            m.insert(b"/", Node::Plain);
+            m.insert(b"/w", Node::Plain);
+            m.insert(b"/w/real", Node::Plain);
+            m.insert(b"/w/link", Node::Link(b"real"));
+            m.insert(b"/w/link2", Node::Link(b"real"));
             // A target that is not valid UTF-8, which is the case the output
             // path has to survive; see defect 3's output half.
-            m.insert(b"/w/oddlink", Some(b"od\xffd"));
+            m.insert(b"/w/oddlink", Node::Link(b"od\xffd"));
             Self(m)
         }
 
@@ -642,13 +650,13 @@ mod tests {
         /// through, exactly as `readlink(2)` receives it. A fake that only
         /// understood absolute names would answer `ENOENT` for every
         /// non-canonicalising call and quietly test nothing.
-        fn lookup(&self, path: &[u8]) -> Option<&Option<&'static [u8]>> {
+        fn lookup(&self, path: &[u8]) -> Option<Node> {
             if path.first() == Some(&b'/') {
-                return self.0.get(path);
+                return self.0.get(path).copied();
             }
             let mut abs = b"/w/".to_vec();
             abs.extend_from_slice(path);
-            self.0.get(abs.as_slice())
+            self.0.get(abs.as_slice()).copied()
         }
     }
 
@@ -661,15 +669,15 @@ mod tests {
                 // EINVAL is how "exists and is not a symlink" is reported, and
                 // it is what makes `-v` on a regular file say `Invalid
                 // argument` rather than something about links.
-                Some(None) => Err(io::Error::from(io::ErrorKind::InvalidInput)),
-                Some(Some(t)) => Ok((*t).to_vec()),
+                Some(Node::Plain) => Err(io::Error::from(io::ErrorKind::InvalidInput)),
+                Some(Node::Link(t)) => Ok(t.to_vec()),
                 None => Err(io::Error::from(io::ErrorKind::NotFound)),
             }
         }
         fn dir_check(&self, path: &[u8]) -> io::Result<()> {
             match self.lookup(path) {
-                Some(None) => Ok(()),
-                Some(Some(_)) => Err(io::Error::from(io::ErrorKind::NotADirectory)),
+                Some(Node::Plain) => Ok(()),
+                Some(Node::Link(_)) => Err(io::Error::from(io::ErrorKind::NotADirectory)),
                 None => Err(io::Error::from(io::ErrorKind::NotFound)),
             }
         }
@@ -681,8 +689,8 @@ mod tests {
         /// recursion to fall into.
         fn exists(&self, path: &[u8]) -> io::Result<()> {
             match self.lookup(path) {
-                Some(None) => Ok(()),
-                Some(Some(target)) => self.exists(target),
+                Some(Node::Plain) => Ok(()),
+                Some(Node::Link(target)) => self.exists(target),
                 None => Err(io::Error::from(io::ErrorKind::NotFound)),
             }
         }

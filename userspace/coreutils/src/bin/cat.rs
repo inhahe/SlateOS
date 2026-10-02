@@ -821,7 +821,7 @@ mod tests {
         let e = fail_msg(&["--fo\ncat: /etc/shadow: Permission denied"]);
         assert_eq!(
             e,
-            r#"unrecognized option '--fo\ncat: /etc/shadow: Permission denied'"#
+            r"unrecognized option '--fo\ncat: /etc/shadow: Permission denied'"
         );
         assert_eq!(e.lines().count(), 1);
     }

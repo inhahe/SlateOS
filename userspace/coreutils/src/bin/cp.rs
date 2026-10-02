@@ -1912,7 +1912,8 @@ fn resolve_as_far_as_exists(path: &Path) -> Option<PathBuf> {
     clippy::unwrap_used,
     clippy::panic,
     clippy::indexing_slicing,
-    clippy::expect_used
+    clippy::expect_used,
+    clippy::arithmetic_side_effects
 )]
 mod tests {
     use super::*;

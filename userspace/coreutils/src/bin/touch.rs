@@ -1680,7 +1680,7 @@ mod tests {
     /// advanced cannot pass on clock granularity alone.
     fn backdate(path: &Path) -> SystemTime {
         let old = SystemTime::now()
-            .checked_sub(Duration::from_secs(3600))
+            .checked_sub(Duration::from_hours(1))
             .expect("an hour before now is representable");
         File::options()
             .write(true)
@@ -1768,7 +1768,7 @@ mod tests {
         fs::create_dir(&sub).unwrap();
 
         let old = SystemTime::now()
-            .checked_sub(Duration::from_secs(3600))
+            .checked_sub(Duration::from_hours(1))
             .unwrap();
         // Backdate the directory itself, through the same door the program uses,
         // so "it moved forward" cannot pass on clock granularity.
@@ -2095,7 +2095,7 @@ mod tests {
 
         // The link's own time is `old`; give the target a different one, so
         // which of the two was read is visible in the answer.
-        let newer = old.checked_add(Duration::from_secs(1800)).unwrap();
+        let newer = old.checked_add(Duration::from_mins(30)).unwrap();
         fsattr::set_times(
             On::Path(&d.join("target"), Link::Follow),
             Times::both(newer),

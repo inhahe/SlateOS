@@ -1780,7 +1780,7 @@ mod tests {
         assert!(dir.stamp(b"d/e", 0, true).is_err());
         assert!(dir.read_link(b"d/e").is_err());
         // ...and nothing was created under the path it refused to walk.
-        assert!(dir.names().unwrap().len() == 1);
+        assert_eq!(dir.names().unwrap().len(), 1);
     }
 
     /// A NUL is refused in a target as firmly as in a name, because a C call

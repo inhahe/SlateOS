@@ -3616,7 +3616,7 @@ mod tests {
     /// reason the real line does — a temp directory on the development host can
     /// hold a space, and then the quoted form is not the bare path.
     fn shown(p: &Path) -> String {
-        quoteaf_os(p).to_string()
+        quoteaf_os(p)
     }
 
     #[test]
@@ -5334,7 +5334,7 @@ mod tests {
         fs::write(d.join("b"), b"old").unwrap();
         // Forced back a decade so it is older than the sources on any
         // granularity; `d/a` is written afterwards and so is newer than both.
-        let old = SystemTime::UNIX_EPOCH + Duration::from_secs(978_307_200);
+        let old = SystemTime::UNIX_EPOCH + Duration::new(978_307_200, 0);
         fsattr::set_times(On::Path(&d.join("b"), Link::Follow), Times::both(old)).unwrap();
         fs::write(&a, b"hello").unwrap();
         fs::hard_link(&a, &b).unwrap();

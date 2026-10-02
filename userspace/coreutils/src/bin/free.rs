@@ -1803,7 +1803,7 @@ mod tests {
         // Divergence 4: the file is read again for each iteration rather than
         // being cached for a second.
         assert_eq!(reads, 3);
-        assert_eq!(naps, vec![Duration::from_micros(250_000); 2]);
+        assert_eq!(naps, vec![Duration::from_millis(250); 2]);
     }
 
     /// `-L` withholds its newline until the last iteration, and the repeat tail
@@ -1820,6 +1820,8 @@ mod tests {
     /// `-s` alone never reaches the counter, so the `-L` newline never comes
     /// from the line itself.
     #[test]
+    // Two seconds in microseconds is exactly 2e6 in a double.
+    #[allow(clippy::float_cmp)]
     fn seconds_without_count_is_open_ended() {
         let flags = match scan(&[OsString::from("-s"), OsString::from("2")]).unwrap() {
             Request::Run { flags, args } => {

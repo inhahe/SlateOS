@@ -1903,6 +1903,10 @@ fn arg_bytes(a: &OsString) -> Vec<u8> {
 #[cfg(test)]
 #[allow(clippy::expect_used, clippy::arithmetic_side_effects)]
 #[allow(clippy::unwrap_used, clippy::panic, clippy::indexing_slicing)]
+// `sleep_interval` is parsed from decimal text that binary floating point
+// holds exactly (0, 0.5, 1, 2, 10, 12, 16), so comparing it exactly is what
+// the tests mean, not a rounding hazard.
+#[allow(clippy::float_cmp)]
 mod tests {
     use super::*;
 

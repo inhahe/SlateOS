@@ -4076,7 +4076,8 @@ mod tests {
             match exec.cycle(&compiled.cmds, &mut inp, &mut out) {
                 Ok(_) => false,
                 Err(Stop::NoRegex) => true,
-                Err(_) => panic!("{script} failed for some other reason"),
+                Err(Stop::Io(e)) => panic!("{script} failed reading or writing: {e}"),
+                Err(Stop::Limit(_)) => panic!("{script} hit the match limit"),
             }
         };
         if stopped { Err(sink) } else { Ok(sink) }

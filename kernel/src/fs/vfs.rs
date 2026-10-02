@@ -3361,6 +3361,12 @@ impl Vfs {
                 // an existing file's contents is the filesystem's to refuse,
                 // on the inode it writes.
                 attr_policy::may_create(dir_attrs(&mut **guard, &relative))?;
+            } else if let Some((seals, meta)) = seals_at(&mut **guard, fs_id, &relative, path) {
+                // Every byte rewritten, and the size taken from the old to the
+                // new (`fs::sealing`).
+                let len = data.len() as u64;
+                super::sealing::may_write(seals, 0, len, meta.size)?;
+                super::sealing::may_resize(seals, meta.size, len)?;
             }
             guard.write_file(&relative, data)?;
             if made {
@@ -3974,6 +3980,9 @@ impl Vfs {
         let cache_inval = {
             let (fs, fs_id, _opts, relative) = resolve_mount(path)?;
             let mut guard = fs.lock();
+            if let Some((seals, meta)) = seals_at(&mut **guard, fs_id, &relative, path) {
+                super::sealing::may_write(seals, offset, data.len() as u64, meta.size)?;
+            }
             guard.write_at(&relative, offset, data)?;
             // Coherence: drop any cached pages of this file so a later mapper
             // (or re-fault) reads the post-write bytes, not stale cached ones.
@@ -4030,6 +4039,10 @@ impl Vfs {
             // same hold, so a second creator finds it and appends.
             let at = match guard.stat(&relative) {
                 Ok(entry) => {
+                    if let Some((seals, _)) = seals_at(&mut **guard, fs_id, &relative, path) {
+                        let len = data.len() as u64;
+                        super::sealing::may_write(seals, entry.size, len, entry.size)?;
+                    }
                     guard.write_at(&relative, entry.size, data)?;
                     entry.size
                 }
@@ -4073,6 +4086,9 @@ impl Vfs {
         let cache_inval = {
             let (fs, fs_id, _opts, relative) = resolve_mount(path)?;
             let mut guard = fs.lock();
+            if let Some((seals, meta)) = seals_at(&mut **guard, fs_id, &relative, path) {
+                super::sealing::may_resize(seals, meta.size, size)?;
+            }
             guard.truncate(&relative, size)?;
             // Coherence: truncation changes (or zeroes the tail of) the file's
             // pages — drop cached copies.
@@ -4357,7 +4373,13 @@ impl Vfs {
         data: &[u8],
     ) -> KernelResult<()> {
         Self::object_write_checks(obj, path, data.len())?;
-        obj.fs.lock().write_ino(obj.ino, offset, data)?;
+        {
+            let mut guard = obj.fs.lock();
+            if let Some((seals, meta)) = seals_held(&mut **guard, obj) {
+                super::sealing::may_write(seals, offset, data.len() as u64, meta.size)?;
+            }
+            guard.write_ino(obj.ino, offset, data)?;
+        }
         Self::object_written(obj, path, data.len());
         Ok(())
     }
@@ -4371,7 +4393,13 @@ impl Vfs {
     /// As [`object_write`](Self::object_write).
     pub fn object_append(obj: &FileObject, path: &Path, data: &[u8]) -> KernelResult<u64> {
         Self::object_write_checks(obj, path, data.len())?;
-        let at = obj.fs.lock().append_ino(obj.ino, data)?;
+        let at = {
+            let mut guard = obj.fs.lock();
+            if let Some((seals, meta)) = seals_held(&mut **guard, obj) {
+                super::sealing::may_write(seals, meta.size, data.len() as u64, meta.size)?;
+            }
+            guard.append_ino(obj.ino, data)?
+        };
         Self::object_written(obj, path, data.len());
         Ok(at)
     }
@@ -4384,7 +4412,13 @@ impl Vfs {
     /// `ReadOnlyFilesystem`, the filesystem's own.
     pub fn object_truncate(obj: &FileObject, path: &Path, size: u64) -> KernelResult<()> {
         check_writable_fs(obj.fs_id)?;
-        obj.fs.lock().truncate_ino(obj.ino, size)?;
+        {
+            let mut guard = obj.fs.lock();
+            if let Some((seals, meta)) = seals_held(&mut **guard, obj) {
+                super::sealing::may_resize(seals, meta.size, size)?;
+            }
+            guard.truncate_ino(obj.ino, size)?;
+        }
         crate::mm::page_cache::invalidate_identity(obj.fs_id, obj.ino);
         super::notify::emit_modified(path);
         super::journal::record(super::journal::JournalEventType::Modified, path);
@@ -4408,6 +4442,9 @@ impl Vfs {
         {
             let mut guard = obj.fs.lock();
             attr_policy::may_change_metadata(ino_attrs(&mut **guard, obj.ino))?;
+            if let Some((seals, meta)) = seals_held(&mut **guard, obj) {
+                super::sealing::may_change_mode(seals, meta.permissions, permissions)?;
+            }
             guard.chmod_ino(obj.ino, permissions)?;
         }
         super::notify::emit_metadata(path);
@@ -4583,6 +4620,9 @@ impl Vfs {
         check_writable_fs(obj.fs_id)?;
         let mut guard = obj.fs.lock();
         attr_policy::may_allocate(ino_attrs(&mut **guard, obj.ino))?;
+        if let Some((seals, meta)) = seals_held(&mut **guard, obj) {
+            super::sealing::may_resize(seals, meta.size, meta.size.max(size))?;
+        }
         guard.fallocate_ino(obj.ino, size)
     }
 
@@ -4646,10 +4686,15 @@ impl Vfs {
     pub fn fallocate_resolved(path: &Path, size: u64) -> KernelResult<()> {
         check_writable(path)?;
         check_path_access(path, PathAccess::Write)?;
-        let (fs, _id, _opts, relative) = resolve_mount(path)?;
+        let (fs, fs_id, _opts, relative) = resolve_mount(path)?;
         let mut guard = fs.lock();
         if let Some(meta) = attr_meta(&mut **guard, &relative, true) {
             attr_policy::may_allocate(meta.attributes)?;
+        }
+        // Space past the end is growth, as Linux's `shmem_fallocate` counts
+        // it under `F_SEAL_GROW`, whether or not the size moves.
+        if let Some((seals, meta)) = seals_at(&mut **guard, fs_id, &relative, path) {
+            super::sealing::may_resize(seals, meta.size, meta.size.max(size))?;
         }
         guard.fallocate(&relative, size)
     }
@@ -5342,6 +5387,7 @@ impl Vfs {
             // For a non-symlink the two calls are the same operation, so this
             // costs nothing and closes that window.
             guard_metadata(&mut **guard, &child_rel, false)?;
+            seal_mode_guard(&mut **guard, fs_id, &child_rel, &child, permissions)?;
             guard.set_permissions_no_follow(&child_rel, permissions)?;
         } else {
             // `name` is a symlink and the caller asked to follow it, so the
@@ -5351,9 +5397,10 @@ impl Vfs {
             // link's own contents is the one plain `chmod` has too.  Operating
             // through the target's own mount also avoids holding two
             // filesystem locks at once.
-            let (fs, _id, _opts, relative) = resolve_mount(&target)?;
+            let (fs, fs_id, _opts, relative) = resolve_mount(&target)?;
             let mut guard = fs.lock();
             guard_metadata(&mut **guard, &relative, !no_follow)?;
+            seal_mode_guard(&mut **guard, fs_id, &relative, &target, permissions)?;
             if no_follow {
                 guard.set_permissions_no_follow(&relative, permissions)?;
             } else {
@@ -6189,9 +6236,10 @@ impl Vfs {
         check_writable(path)?;
         check_path_access(path, PathAccess::Metadata)?;
         {
-            let (fs, _id, _opts, relative) = resolve_mount(path)?;
+            let (fs, fs_id, _opts, relative) = resolve_mount(path)?;
             let mut guard = fs.lock();
             guard_metadata(&mut **guard, &relative, true)?;
+            seal_mode_guard(&mut **guard, fs_id, &relative, path, permissions)?;
             guard.set_permissions(&relative, permissions)?;
         }
         super::notify::emit_metadata(path);
@@ -6212,9 +6260,10 @@ impl Vfs {
         check_writable(&path)?;
         check_path_access(&path, PathAccess::Metadata)?;
         {
-            let (fs, _id, _opts, relative) = resolve_mount(&path)?;
+            let (fs, fs_id, _opts, relative) = resolve_mount(&path)?;
             let mut guard = fs.lock();
             guard_metadata(&mut **guard, &relative, false)?;
+            seal_mode_guard(&mut **guard, fs_id, &relative, &path, permissions)?;
             guard.set_permissions_no_follow(&relative, permissions)?;
         }
         super::notify::emit_metadata(&path);
@@ -9104,6 +9153,73 @@ fn resolve_time(requested: Timestamp, now: Timestamp) -> Timestamp {
         now
     } else {
         requested
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Seals (`fs::sealing`), as the VFS applies them
+// ---------------------------------------------------------------------------
+//
+// Asked on every change of a file's contents or size and on every chmod, under
+// the filesystem's lock, as the attribute rules are -- filesystem lock, then
+// module state, is the kernel's order, and the seal table calls nothing back.
+// By the file's identity, so a seal holds whichever name or descriptor the
+// change comes through. The fast path is one relaxed load: on a system that
+// has sealed nothing, which is almost every system, nothing is looked up.
+
+/// The seals on what `relative` names on `fs`, with its metadata: `None` when
+/// no file anywhere is sealed, or when it cannot be looked up -- the
+/// operation then reports why, as with [`attr_meta`]. `host` is the name a
+/// seal is keyed by on a filesystem without identities.
+fn seals_at(
+    fs: &mut dyn FileSystem,
+    fs_id: u64,
+    relative: &Path,
+    host: &Path,
+) -> Option<(super::sealing::SealFlags, FileMeta)> {
+    if !super::sealing::any_sealed() {
+        return None;
+    }
+    // Discarded deliberately, as `attr_meta`'s.
+    let meta = fs.metadata(relative).ok()?;
+    let id = (meta.ino != 0).then_some(FileId {
+        fs_id,
+        ino: meta.ino,
+    });
+    Some((super::sealing::seals_of(id, host), meta))
+}
+
+/// [`seals_at`] for a held file, by its inode. A held file always has an
+/// identity, so no name is needed to key a seal by.
+fn seals_held(
+    fs: &mut dyn FileSystem,
+    obj: &FileObject,
+) -> Option<(super::sealing::SealFlags, FileMeta)> {
+    if !super::sealing::any_sealed() {
+        return None;
+    }
+    // Discarded deliberately, as `attr_meta`'s.
+    let meta = fs.metadata_ino(obj.ino).ok()?;
+    Some((
+        super::sealing::seals_of(Some(obj.id()), Path::new("")),
+        meta,
+    ))
+}
+
+/// The seal rules for a chmod of what `relative` names to `permissions`
+/// ([`super::sealing::may_change_mode`]).
+fn seal_mode_guard(
+    fs: &mut dyn FileSystem,
+    fs_id: u64,
+    relative: &Path,
+    host: &Path,
+    permissions: u16,
+) -> KernelResult<()> {
+    match seals_at(fs, fs_id, relative, host) {
+        Some((seals, meta)) => {
+            super::sealing::may_change_mode(seals, meta.permissions, permissions)
+        }
+        None => Ok(()),
     }
 }
 
@@ -13508,6 +13624,185 @@ pub fn self_test_attr_rules() -> KernelResult<()> {
     serial_println!(
         "[vfs]   immutable and append-only: 50 operations refused or allowed as on \
          Linux (EPERM), the refused left unchanged, and each allowed once cleared: OK"
+    );
+    Ok(())
+}
+
+/// Seals (`fs::sealing`) through every VFS route that changes a file's
+/// contents, size or mode, on `/tmp` (memfs): by the name the seal was placed
+/// under, by a second name for the same file, and through an open handle --
+/// each refusal `NotPermitted`, each refused file unchanged after, and the
+/// unsealed neighbour, a control, taking every change. A file's seals end
+/// with it: removed, the table is empty again.
+///
+/// # Errors
+///
+/// `InternalError` naming the first case that answered wrongly; the setup's.
+pub fn self_test_seal_rules() -> KernelResult<()> {
+    use super::handle::{self, OpenFlags};
+    use super::sealing::{self, SealFlags};
+    use crate::serial_println;
+
+    const WRITE: &str = "/tmp/_seal_write";
+    const ALIAS: &str = "/tmp/_seal_write_alias";
+    const GROW: &str = "/tmp/_seal_grow";
+    const SHRINK: &str = "/tmp/_seal_shrink";
+    const EXEC: &str = "/tmp/_seal_exec";
+    const PLAIN: &str = "/tmp/_seal_plain";
+    let all = [WRITE, ALIAS, GROW, SHRINK, EXEC, PLAIN];
+
+    // Best effort, before and after: seals end with their files, so removing
+    // the files is the whole of the cleanup.
+    let cleanup = || {
+        for path in all {
+            let _ = Vfs::remove(path);
+        }
+    };
+    cleanup();
+
+    let run = || -> KernelResult<()> {
+        for path in [WRITE, GROW, SHRINK, EXEC, PLAIN] {
+            Vfs::write_file(path, b"0123456789")?;
+        }
+        Vfs::set_permissions(EXEC, 0o644)?;
+        Vfs::link(WRITE, ALIAS)?;
+        sealing::add_seals(WRITE, SealFlags::WRITE)?;
+        sealing::add_seals(GROW, SealFlags::GROW)?;
+        sealing::add_seals(SHRINK, SealFlags::SHRINK)?;
+        sealing::add_seals(EXEC, SealFlags::EXEC.union(SealFlags::SEAL))?;
+        let held = handle::open(WRITE, OpenFlags::READ.union(OpenFlags::WRITE))?;
+        let through_handle = handle::write(held, b"x").map(|_| ());
+        handle::close(held)?;
+
+        let no = Err(KernelError::NotPermitted);
+        let ok = Ok(());
+        // In order: each case may stand on what an earlier one did.
+        let cases: [(&str, KernelResult<()>, KernelResult<()>); 22] = [
+            // WRITE: nothing about the contents or the size changes.
+            (
+                "write into a write-sealed file",
+                Vfs::write_at(WRITE, 0, b"x"),
+                no,
+            ),
+            (
+                "overwrite it whole",
+                Vfs::write_file(WRITE, b"0123456789"),
+                no,
+            ),
+            ("append to it", Vfs::append(WRITE, b"x"), no),
+            ("truncate it", Vfs::truncate(WRITE, 4), no),
+            (
+                "write it by another name",
+                Vfs::write_at(ALIAS, 0, b"x"),
+                no,
+            ),
+            ("write it through an open handle", through_handle, no),
+            (
+                "chmod it (no EXEC seal)",
+                Vfs::set_permissions(WRITE, 0o600),
+                ok,
+            ),
+            // GROW: inside the file, yes; past its end, no.
+            (
+                "write inside a grow-sealed file",
+                Vfs::write_at(GROW, 2, b"ab"),
+                ok,
+            ),
+            ("write past its end", Vfs::write_at(GROW, 8, b"abcd"), no),
+            ("append to it", Vfs::append(GROW, b"x"), no),
+            ("truncate it larger", Vfs::truncate(GROW, 20), no),
+            ("allocate past its end", Vfs::fallocate(GROW, 4096), no),
+            ("truncate it smaller", Vfs::truncate(GROW, 8), ok),
+            // SHRINK: it may grow, and may not shrink.
+            (
+                "truncate a shrink-sealed file smaller",
+                Vfs::truncate(SHRINK, 4),
+                no,
+            ),
+            (
+                "overwrite it shorter",
+                Vfs::write_file(SHRINK, b"short"),
+                no,
+            ),
+            ("append to it", Vfs::append(SHRINK, b"+"), ok),
+            // EXEC (and SEAL): the execute bits are fixed; no seal is added.
+            (
+                "set an execute bit on an exec-sealed file",
+                Vfs::set_permissions(EXEC, 0o755),
+                no,
+            ),
+            (
+                "change no execute bit",
+                Vfs::set_permissions(EXEC, 0o600),
+                ok,
+            ),
+            (
+                "add a seal after SEAL",
+                sealing::add_seals(EXEC, SealFlags::GROW).map(|_| ()),
+                no,
+            ),
+            // The control: the same changes to an unsealed file.
+            (
+                "write the unsealed file",
+                Vfs::write_at(PLAIN, 8, b"abcd"),
+                ok,
+            ),
+            ("truncate it", Vfs::truncate(PLAIN, 2), ok),
+            (
+                "chmod it executable",
+                Vfs::set_permissions(PLAIN, 0o755),
+                ok,
+            ),
+        ];
+        for (what, got, want) in cases {
+            if got != want {
+                serial_println!(
+                    "[vfs]   FAIL: seals: {}: got {:?}, want {:?}",
+                    what,
+                    got,
+                    want
+                );
+                return Err(KernelError::InternalError);
+            }
+        }
+        // What was refused is as it was.
+        let kept: [(&str, &[u8]); 3] = [
+            (WRITE, b"0123456789"),
+            (GROW, b"01ab4567"),
+            (SHRINK, b"0123456789+"),
+        ];
+        for (path, want) in kept {
+            let got = Vfs::read_file(path)?;
+            if got.as_slice() != want {
+                serial_println!(
+                    "[vfs]   FAIL: seals: {} holds {:?}, want {:?}",
+                    path,
+                    got.as_slice(),
+                    want
+                );
+                return Err(KernelError::InternalError);
+            }
+        }
+        if Vfs::metadata(EXEC)?.permissions & 0o777 != 0o600 {
+            serial_println!("[vfs]   FAIL: seals: the exec-sealed file's mode moved");
+            return Err(KernelError::InternalError);
+        }
+        Ok(())
+    };
+    let result = run();
+    cleanup();
+    result?;
+    // Seals end with their files: removed, nothing of them is left.
+    for path in all {
+        if !sealing::seals_of(None, Path::new(path)).is_empty() {
+            serial_println!("[vfs]   FAIL: seals: {} kept its seal after removal", path);
+            return Err(KernelError::InternalError);
+        }
+    }
+    serial_println!(
+        "[vfs]   seals: write, grow, shrink, exec and seal refused on every route (by name, \
+         by a second name, through a handle) with EPERM, the refused unchanged, the unsealed \
+         control free, and the seals gone with the files: OK"
     );
     Ok(())
 }

@@ -14841,6 +14841,94 @@ pub fn sys_fs_link_handle(args: &SyscallArgs) -> SyscallResult {
     }
 }
 
+// Seals on a file (SYS_FS_ADD_SEALS / SYS_FS_GET_SEALS, 1124-1125)
+
+/// Linux's `F_SEAL_*` bits, which the door speaks, as `fs::sealing`'s flags:
+/// `None` for a bit the door does not take.
+fn seals_from_linux(bits: u64) -> Option<crate::fs::sealing::SealFlags> {
+    use crate::fs::sealing::SealFlags;
+    const KNOWN: u64 = 0x01 | 0x02 | 0x04 | 0x08 | 0x20;
+    if bits & !KNOWN != 0 {
+        return None;
+    }
+    let mut flags = SealFlags::NONE;
+    for (bit, seal) in [
+        (0x01, SealFlags::SEAL),
+        (0x02, SealFlags::SHRINK),
+        (0x04, SealFlags::GROW),
+        (0x08, SealFlags::WRITE),
+        (0x20, SealFlags::EXEC),
+    ] {
+        if bits & bit != 0 {
+            flags = flags.union(seal);
+        }
+    }
+    Some(flags)
+}
+
+/// `fs::sealing`'s flags as Linux's `F_SEAL_*` bits.
+fn seals_to_linux(flags: crate::fs::sealing::SealFlags) -> u64 {
+    use crate::fs::sealing::SealFlags;
+    [
+        (0x01, SealFlags::SEAL),
+        (0x02, SealFlags::SHRINK),
+        (0x04, SealFlags::GROW),
+        (0x08, SealFlags::WRITE),
+        (0x20, SealFlags::EXEC),
+    ]
+    .into_iter()
+    .filter(|&(_, seal)| flags.contains(seal))
+    .fold(0, |bits, (bit, _)| bits | bit)
+}
+
+/// `SYS_FS_ADD_SEALS(handle, seals)` (1124). See the number's doc.
+pub fn sys_fs_add_seals(args: &SyscallArgs) -> SyscallResult {
+    let handle = args.arg0;
+    let Some(seals) = seals_from_linux(args.arg1).filter(|s| !s.is_empty()) else {
+        return SyscallResult::err(KernelError::InvalidArgument);
+    };
+    if let Err(e) = require_file_handle_owner(handle) {
+        return SyscallResult::err(e);
+    }
+    // Open for writing, as Linux's `memfd_add_seals` requires `FMODE_WRITE`:
+    // whoever may write the file may restrict how it is written, and a reader
+    // may not restrict the writers. `EPERM`, Linux's answer, not `EBADF`.
+    let file = match crate::fs::handle::HandleFile::writable(handle) {
+        Ok(f) => f,
+        Err(KernelError::PermissionDenied) => {
+            return SyscallResult::err(KernelError::NotPermitted);
+        }
+        Err(e) => return SyscallResult::err(e),
+    };
+    let (id, path) = match file.identity() {
+        Ok(found) => found,
+        Err(e) => return SyscallResult::err(e),
+    };
+    match crate::fs::sealing::add_seals_to(id, &path, seals) {
+        Ok(all) => SyscallResult::ok(i64::try_from(seals_to_linux(all)).unwrap_or(0)),
+        Err(e) => SyscallResult::err(e),
+    }
+}
+
+/// `SYS_FS_GET_SEALS(handle)` (1125). See the number's doc.
+pub fn sys_fs_get_seals(args: &SyscallArgs) -> SyscallResult {
+    let handle = args.arg0;
+    if let Err(e) = require_file_handle_owner(handle) {
+        return SyscallResult::err(e);
+    }
+    let file = match crate::fs::handle::HandleFile::of(handle) {
+        Ok(f) => f,
+        Err(e) => return SyscallResult::err(e),
+    };
+    match file.identity() {
+        Ok((id, path)) => {
+            let seals = crate::fs::sealing::seals_of(id, &path);
+            SyscallResult::ok(i64::try_from(seals_to_linux(seals)).unwrap_or(0))
+        }
+        Err(e) => SyscallResult::err(e),
+    }
+}
+
 /// `SYS_FS_SET_STATUS_FLAGS` — set an open description's status flags, as
 /// Linux's `fcntl(F_SETFL)` does. See the number's doc.
 pub fn sys_fs_set_status_flags(args: &SyscallArgs) -> SyscallResult {

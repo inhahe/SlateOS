@@ -111,6 +111,7 @@ use super::number::{
 };
 use super::number::{
     SYS_DEVICE_CLOSE, SYS_DEVICE_IOCTL, SYS_DEVICE_OPEN, SYS_DEVICE_READ, SYS_DEVICE_WRITE,
+    SYS_FS_ADD_SEALS, SYS_FS_GET_SEALS,
 };
 use super::number::{
     SYS_UNIX_ACCEPT, SYS_UNIX_BIND, SYS_UNIX_CLOSE, SYS_UNIX_CONNECT, SYS_UNIX_GET_OPTION,
@@ -610,6 +611,9 @@ const fn build_v1_table() -> SyscallTable {
     handlers[SYS_DEVICE_READ as usize] = Some(handlers::sys_device_read);
     handlers[SYS_DEVICE_WRITE as usize] = Some(handlers::sys_device_write);
     handlers[SYS_DEVICE_CLOSE as usize] = Some(handlers::sys_device_close);
+    // Seals on a file (1124-1125): `fs::sealing`, by handle.
+    handlers[SYS_FS_ADD_SEALS as usize] = Some(handlers::sys_fs_add_seals);
+    handlers[SYS_FS_GET_SEALS as usize] = Some(handlers::sys_fs_get_seals);
 
     // Thread management (510–519).
     handlers[SYS_THREAD_CREATE as usize] = Some(handlers::sys_thread_create);
@@ -1279,6 +1283,7 @@ pub fn self_test_fs() -> KernelResult<()> {
     // /tmp, so after the mount (they were put in the Step 11 list first, and
     // would have failed there for want of a filesystem).
     test_dispatch_record_lock()?;
+    test_dispatch_seals()?;
     test_dispatch_flock()?;
     test_dispatch_fs_gates()?;
     test_dispatch_status_flags()?;
@@ -3950,6 +3955,104 @@ fn test_dispatch_shared_anonymous_memory() -> KernelResult<()> {
     pcb::destroy(pid);
     serial_println!(
         "[syscall]   shared anonymous memory (native MAP_SHARED, Linux MAP_SHARED|MAP_ANONYMOUS): OK"
+    );
+    Ok(())
+}
+
+/// `SYS_FS_ADD_SEALS` / `SYS_FS_GET_SEALS` (1124-1125) as a scratch process
+/// calls them, on handles of its own (design-decisions 1526):
+///
+/// - an unknown bit and no bits are `InvalidArgument`, and a handle open
+///   only for reading may not seal (`NotPermitted`, Linux's rule);
+/// - a handle open for writing seals, the answer is the file's seals in
+///   Linux's `F_SEAL_*` bits, and the read-only handle reads them back;
+/// - the seal binds the VFS: a write to the file is then `NotPermitted`.
+///
+/// Every route's enforcement is `vfs::self_test_seal_rules`; this is the
+/// door.
+fn test_dispatch_seals() -> KernelResult<()> {
+    use crate::cap::ResourceType;
+    use crate::fs::handle::{self, OpenFlags};
+    use crate::proc::pcb;
+    use crate::proc::thread::self_test_as_process;
+
+    const PATH: &str = "/tmp/seal-dispatch";
+    const F_SEAL_GROW: u64 = 0x04;
+    const F_SEAL_WRITE: u64 = 0x08;
+    const F_SEAL_FUTURE_WRITE: u64 = 0x10;
+
+    fn fail(msg: &str, pid: pcb::ProcessId) -> KernelResult<()> {
+        serial_println!("[syscall]   FAIL: seals: {}", msg);
+        pcb::destroy(pid);
+        // Best effort: the file is this test's scratch, and its seals go
+        // with it.
+        let _ = crate::fs::Vfs::remove(PATH);
+        Err(KernelError::InternalError)
+    }
+    let args = |arg0: u64, arg1: u64| SyscallArgs {
+        arg0,
+        arg1,
+        arg2: 0,
+        arg3: 0,
+        arg4: 0,
+        arg5: 0,
+    };
+    let code = |e: KernelError| i64::from(e.code());
+
+    let pid = pcb::create("seal-door", 0);
+    // Best effort: a leftover from an earlier boot's failure.
+    let _ = crate::fs::Vfs::remove(PATH);
+    if crate::fs::Vfs::write_file(PATH, b"sealed").is_err() {
+        return fail("could not create the scratch file", pid);
+    }
+    let rw = OpenFlags::READ.union(OpenFlags::WRITE);
+    let (Ok(writer), Ok(reader)) = (handle::open(PATH, rw), handle::open(PATH, OpenFlags::READ))
+    else {
+        return fail("could not open the scratch file twice", pid);
+    };
+    // Given to the process as an open would give them; its teardown closes
+    // them.
+    pcb::register_ipc_handle(pid, ResourceType::File, writer);
+    pcb::register_ipc_handle(pid, ResourceType::File, reader);
+    let call = |nr: u64, h: u64, bits: u64| {
+        self_test_as_process(pid, || dispatch(nr, &args(h, bits)).value)
+    };
+
+    let unknown = call(SYS_FS_ADD_SEALS, writer, F_SEAL_FUTURE_WRITE);
+    let nothing = call(SYS_FS_ADD_SEALS, writer, 0);
+    let by_reader = call(SYS_FS_ADD_SEALS, reader, F_SEAL_WRITE);
+    if unknown != code(KernelError::InvalidArgument)
+        || nothing != code(KernelError::InvalidArgument)
+        || by_reader != code(KernelError::NotPermitted)
+    {
+        serial_println!(
+            "[syscall]     an unknown bit {}, no bits {}, a read-only handle {}",
+            unknown,
+            nothing,
+            by_reader
+        );
+        return fail("a refusal answered wrongly", pid);
+    }
+    let sealed = call(SYS_FS_ADD_SEALS, writer, F_SEAL_WRITE | F_SEAL_GROW);
+    let read_back = call(SYS_FS_GET_SEALS, reader, 0);
+    let want = i64::try_from(F_SEAL_WRITE | F_SEAL_GROW).unwrap_or(-1);
+    let refused = crate::fs::Vfs::write_at(PATH, 0, b"x");
+    if sealed != want || read_back != want || refused != Err(KernelError::NotPermitted) {
+        serial_println!(
+            "[syscall]     sealed {}, read back {}, then a write {:?}",
+            sealed,
+            read_back,
+            refused
+        );
+        return fail("a seal through the door did not take, or did not bind", pid);
+    }
+
+    pcb::destroy(pid);
+    // The file's seals end with it.
+    let _ = crate::fs::Vfs::remove(PATH);
+    serial_println!(
+        "[syscall]   SYS_FS_ADD_SEALS/GET_SEALS (1124-1125): refusals, a seal by a writable \
+         handle, read back by another, binding the VFS: OK"
     );
     Ok(())
 }

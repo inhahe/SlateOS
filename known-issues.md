@@ -162788,7 +162788,7 @@ a reader that was never wired up. That one the gate *did* find. This one it
 did not, and the difference between the two is the thing worth knowing.
 ### [A] Eight security-named `fs/` modules claim to enforce something and nothing calls them; `sealing` is the worst of them -- 2026-09-17
 
-**Status:** OPEN
+**Status:** OPEN -- `sealing` FIXED on lane-a-wip 2026-10-02, awaiting a boot: the VFS asks the seal rules on every change of a file's contents, size or mode, by identity (design-decisions §1526); `secureboot` (§1501) and `diskencrypt`'s keys (§1523) done earlier; the rest per §978
 
 **In short:** the kernel has a feature that lets a program mark a file
 permanently unchangeable. You can set the mark, `/proc` will list the file as

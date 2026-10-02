@@ -3762,6 +3762,12 @@ fn fd_link_target(entry: &crate::proc::linux_fd::FdEntry) -> PathBuf {
         // A daemon-backed AF_INET stream socket resolves to Linux's
         // `socket:[inode]` label; we use the raw handle as the inode.
         HandleKind::Socket => PathBuf::from(format!("socket:[{}]", entry.raw_handle)),
+        // A channel end, as the socket a Linux program takes it for, named by
+        // its handle -- the number `/proc/<pid>/wchan` shows for a wait on it.
+        HandleKind::Channel => PathBuf::from(format!("socket:[channel {}]", entry.raw_handle)),
+        HandleKind::ServiceListener => {
+            PathBuf::from(format!("socket:[listener {}]", entry.raw_handle))
+        }
     }
 }
 

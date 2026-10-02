@@ -145,6 +145,12 @@ struct ServiceEntry {
     /// Whether the service has been unregistered (closed).
     closed: bool,
 
+    /// How many holders the listener has: 1 when registered, one more for
+    /// each [`dup_listener`] -- a Linux-ABI listener descriptor inherited
+    /// across `fork`. [`unregister`] drops one, and the name goes with the
+    /// last, as a listening socket closes with its last descriptor.
+    refs: u32,
+
     /// Namespace in which this service was registered.
     ///
     /// Services in the root namespace (0) are visible to all processes.
@@ -283,6 +289,7 @@ pub fn register(name: &[u8]) -> KernelResult<ServiceListenerHandle> {
         accept_waiter: None,
         ready_waiters: WaiterSet::new(),
         closed: false,
+        refs: 1,
         namespace_id: ns_id,
         provider_pid,
     };
@@ -699,10 +706,30 @@ pub fn provider_pid(name: &[u8]) -> Option<u64> {
     Some(entry.provider_pid)
 }
 
-/// Unregister a service and close its listener.
+/// Give a listener one more holder: a Linux-ABI listener descriptor copied
+/// into a forked child, which closes it independently. The name stays
+/// registered until every holder has called [`unregister`].
 ///
-/// All pending (unaccepted) connections are closed.  If the service
-/// is blocked on `accept`, it is woken with `ChannelClosed`.
+/// # Errors
+///
+/// - [`InvalidHandle`] -- the listener does not exist, or is already closed.
+pub fn dup_listener(listener: ServiceListenerHandle) -> KernelResult<()> {
+    let mut reg = SERVICE_REGISTRY.lock();
+    let entry = reg
+        .listeners
+        .get_mut(&listener.0)
+        .filter(|e| !e.closed)
+        .ok_or(KernelError::InvalidHandle)?;
+    entry.refs = entry.refs.saturating_add(1);
+    Ok(())
+}
+
+/// Drop one holder of a listener; with the last, unregister the service and
+/// close its listener.
+///
+/// All pending (unaccepted) connections are closed then.  If the service
+/// is blocked on `accept`, it is woken with `ChannelClosed`. A listener with
+/// one holder -- every native one -- closes at once, as it always did.
 ///
 /// # Errors
 ///
@@ -719,6 +746,11 @@ pub fn unregister(listener: ServiceListenerHandle) -> KernelResult<()> {
             .get_mut(&listener.0)
             .ok_or(KernelError::InvalidHandle)?;
 
+        entry.refs = entry.refs.saturating_sub(1);
+        if entry.refs > 0 {
+            // Another holder still serves the name.
+            return Ok(());
+        }
         entry.closed = true;
         wake_task = entry.accept_waiter.take();
         ready = entry.ready_waiters.take_all();

@@ -217,6 +217,23 @@ pub enum HandleKind {
     /// instance model, exactly like `DrmCard`, so `needs_kernel_close()`
     /// returns `true`.
     Evdev,
+    /// One end of a SlateOS IPC channel, reached through the SlateOS
+    /// extension calls (`slate_channel_create`, `slate_service_connect`,
+    /// `slate_service_accept`; `syscall::linux`'s `slate` module).
+    /// `raw_handle` holds the `ipc::channel::ChannelHandle` raw u64. `read`
+    /// and `write` move one whole message each, as `SOCK_SEQPACKET` does;
+    /// `poll` reports a waiting message, room in the peer's queue and a
+    /// closed peer. Shared across `fork` by the end's holder count
+    /// (`ipc::channel::dup`), so `needs_kernel_close()` is `true`: close drops
+    /// one, and the end closes with the last.
+    Channel,
+    /// A registered service's listener (`slate_service_register`).
+    /// `raw_handle` holds the `ipc::service::ServiceListenerHandle` raw u64.
+    /// `read`/`write` are `EINVAL`; `slate_service_accept` takes its next
+    /// client, and `poll` reports one waiting. Shared across `fork` by the
+    /// listener's holder count (`ipc::service::dup_listener`); the name is
+    /// unregistered when the last holder closes it.
+    ServiceListener,
 }
 
 impl HandleKind {
@@ -237,7 +254,9 @@ impl HandleKind {
             | Self::AlsaPcm
             | Self::DrmCard
             | Self::Evdev
-            | Self::Socket => true,
+            | Self::Socket
+            | Self::Channel
+            | Self::ServiceListener => true,
         }
     }
 }
@@ -312,6 +331,35 @@ impl FdEntry {
     pub const fn pipe(handle: u64, status_flags: u32) -> Self {
         Self {
             kind: HandleKind::Pipe,
+            raw_handle: handle,
+            fd_flags: 0,
+            status_flags,
+            f_owner: 0,
+            f_owner_sig: 0,
+        }
+    }
+
+    /// Construct an entry for a channel end (`ipc::channel::ChannelHandle`
+    /// raw u64): [`HandleKind::Channel`].
+    #[must_use]
+    pub const fn channel(handle: u64, status_flags: u32) -> Self {
+        Self {
+            kind: HandleKind::Channel,
+            raw_handle: handle,
+            fd_flags: 0,
+            status_flags,
+            f_owner: 0,
+            f_owner_sig: 0,
+        }
+    }
+
+    /// Construct an entry for a service listener
+    /// (`ipc::service::ServiceListenerHandle` raw u64):
+    /// [`HandleKind::ServiceListener`].
+    #[must_use]
+    pub const fn service_listener(handle: u64, status_flags: u32) -> Self {
+        Self {
+            kind: HandleKind::ServiceListener,
             raw_handle: handle,
             fd_flags: 0,
             status_flags,

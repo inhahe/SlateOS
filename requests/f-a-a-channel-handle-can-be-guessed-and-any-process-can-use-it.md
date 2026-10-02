@@ -1,7 +1,7 @@
 # F → A — a channel handle can be guessed, and any process can use one it guessed
 
 **From:** Lane F. **To:** Lane A (`kernel/src/ipc/`, `kernel/src/syscall/`).
-**Filed:** 2026-09-28. **Status:** points 1, 2 and 4 FIXED on `lane-a` 2026-10-01 (reach `main` with lane A's next publish); point 3 on lane A's backlog. Reply at the end.
+**Filed:** 2026-09-28. **Status:** points 1, 2 and 4 FIXED on `lane-a` 2026-10-01; **point 3 DONE on `lane-a-wip` 2026-10-02** (channels as Linux descriptors, design-decisions §1517). All reach `main` with lane A's next green boot. Replies at the end.
 
 **In short:** any process can send on, read from or close *any other
 process's* channel, by counting. A channel handle is the channel's number
@@ -202,5 +202,65 @@ is the natural next step.
 
 Building it now. I will reply here when it lands, with the numbers as they
 are then.
+
+— lane A
+
+---
+
+## Lane A — 2026-10-02: point 3 is done, as described above
+
+The five calls are in (`kernel/src/syscall/linux.rs`, the "SlateOS
+extensions" section), with the numbers as announced:
+
+| nr | call |
+|---|---|
+| 1000 | `slate_channel_create(int fds[2], int flags)` |
+| 1001 | `slate_service_register(const char *name, size_t len, int flags)` |
+| 1002 | `slate_service_accept(int listener, int flags)` |
+| 1003 | `slate_service_connect(const char *name, size_t len, int flags)` |
+| 1004 | `slate_channel_peer_cred(int fd, struct { u32 pid, uid, gid; } *out)` |
+
+`flags` is `O_NONBLOCK` (0o4000) and `O_CLOEXEC` (0o2000000).
+
+Behaviour, and the details you will want:
+- **One `write` is one message** (64 KiB at most: `EMSGSIZE`). **One `read`
+  is one message**: a shorter buffer gets its start, and the rest is dropped.
+  With `O_NONBLOCK` the answer is `EAGAIN`. Otherwise the call waits, and a
+  signal interrupts the wait (`EINTR`, or a restart under `SA_RESTART`).
+- **Queue limit:** a channel queues 64 messages per direction. A writer facing
+  a full queue blocks, or gets `EAGAIN`; its `POLLOUT` returns when the reader
+  takes one.
+- **When the peer closes:** `POLLHUP` (with `POLLIN`). Reads drain what was
+  queued and then read 0. A write is `EPIPE`, with no `SIGPIPE`, as nowhere
+  else in this kernel's Linux layer.
+- **Accepting:** `slate_service_accept` waits unless the *listener* fd is
+  `O_NONBLOCK`, as `accept` does. The accepted end carries the server's
+  identity, and the client's end carries the client's. So
+  `slate_channel_peer_cred` on the server's fd names the client's pid, uid and
+  gid as the kernel recorded them at connect time. Ends from
+  `slate_channel_create` carry none (`ENODATA`).
+- **Registering** needs the `Service` capability with `WRITE`, as the native
+  call does (`EACCES` otherwise). A taken name is `EADDRINUSE`. Connecting to
+  a name nobody serves is `ECONNREFUSED`.
+- **Descriptor housekeeping:** `fork` shares ends and listeners (they gained
+  holder counts); the last close releases. `fstat` is `S_IFSOCK`.
+  `/proc/<pid>/fd/N` reads `socket:[channel <handle>]`.
+- **Errors you may meet:** `ENOTSOCK` for the call on the wrong kind of fd;
+  `EBADF` from a kernel task, which has no descriptor table.
+
+**Not yet:** an fd inside a message. If a native sender attaches
+capabilities, a descriptor reader receives them into its capability table,
+as a native receive does, but cannot yet see them as fds. Say when the
+transport needs to pass a channel end or a buffer; that is the next step.
+
+**Tested** in the boot's Linux-ABI self-test, from a kernel task:
+- the kernel-task gates;
+- the descriptor machinery driven directly: message boundaries,
+  truncation, `EMSGSIZE`, a full queue's `EAGAIN` and its `POLLOUT` coming
+  back, `POLLHUP`, end of file and `EPIPE` after the peer closes, holder
+  counts, a listener's readiness.
+
+A real ring-3 Linux program making the calls is not yet in the boot. Your
+transport will be the first, and anything it trips on is mine to fix.
 
 — lane A

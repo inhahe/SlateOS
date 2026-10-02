@@ -367,6 +367,12 @@ struct Channel {
     /// *both* sides are closed, so a client that sends a request and exits
     /// before the service handles it can still be identified.
     creds: [Option<PeerCred>; 2],
+
+    /// How many holders each side has: 1 when made, one more for each
+    /// [`dup`] -- a channel end held by two processes after a `fork`, as a
+    /// Linux-ABI descriptor is. [`close`] drops one, and the side closes with
+    /// the last, as a socket closes with its last descriptor.
+    refs: [u32; 2],
 }
 
 /// A snapshot of the identity of the process owning one end of a channel.
@@ -395,6 +401,7 @@ impl Channel {
             sync: false,
             rendezvous_slots: [None, None],
             creds: [None, None],
+            refs: [1, 1],
         }
     }
 
@@ -408,6 +415,7 @@ impl Channel {
             sync: true,
             rendezvous_slots: [None, None],
             creds: [None, None],
+            refs: [1, 1],
         }
     }
 }
@@ -548,6 +556,16 @@ pub fn peer_cred(handle: ChannelHandle) -> Option<PeerCred> {
 /// [`ChannelFull`]: KernelError::ChannelFull
 /// [`InvalidHandle`]: KernelError::InvalidHandle
 pub fn send(handle: ChannelHandle, msg: Message) -> KernelResult<()> {
+    send_or_return(handle, msg).map_err(|(e, _)| e)
+}
+
+/// [`send`], handing the message back with a [`KernelError::ChannelFull`]
+/// refusal, so a caller that waits for room can retry with the same message
+/// ([`send_interruptible`]). Every other refusal drops it, as [`send`] does.
+fn send_or_return(
+    handle: ChannelHandle,
+    msg: Message,
+) -> Result<(), (KernelError, Option<Message>)> {
     let msg_len = msg.len() as u64;
     let wake_task: Option<TaskId>;
 
@@ -555,18 +573,18 @@ pub fn send(handle: ChannelHandle, msg: Message) -> KernelResult<()> {
         let mut channels = CHANNELS.lock();
         let ch = channels
             .get_mut(&handle.channel_id())
-            .ok_or(KernelError::InvalidHandle)?;
+            .ok_or((KernelError::InvalidHandle, None))?;
 
         // Check if OUR side is closed (can't send from a closed endpoint).
         let our_side = handle.side();
         if ch.closed[our_side] {
-            return Err(KernelError::ChannelClosed);
+            return Err((KernelError::ChannelClosed, None));
         }
 
         // Check if the PEER side is closed.
         let peer = handle.peer_side();
         if ch.closed[peer] {
-            return Err(KernelError::ChannelClosed);
+            return Err((KernelError::ChannelClosed, None));
         }
 
         if ch.sync {
@@ -578,12 +596,12 @@ pub fn send(handle: ChannelHandle, msg: Message) -> KernelResult<()> {
                 wake_task = ch.waiters[peer].take();
             } else {
                 // No receiver waiting — cannot buffer.
-                return Err(KernelError::ChannelFull);
+                return Err((KernelError::ChannelFull, Some(msg)));
             }
         } else {
             // Async channel: enqueue in peer's queue.
             if ch.queues[peer].len() >= MAX_QUEUE_DEPTH {
-                return Err(KernelError::ChannelFull);
+                return Err((KernelError::ChannelFull, Some(msg)));
             }
             ch.queues[peer].push_back(msg);
             wake_task = ch.waiters[peer].take();
@@ -1143,6 +1161,133 @@ pub fn has_pending(handle: ChannelHandle) -> bool {
     }
 }
 
+/// Receive a message, waiting until one arrives -- interruptibly: a
+/// deliverable signal ends the wait with [`KernelError::Interrupted`], which
+/// the Linux ABI turns into `ERESTARTSYS`. For a Linux-ABI channel
+/// descriptor's blocking `read`; the native [`recv`] waits uninterruptibly,
+/// as it always has.
+///
+/// Waits on the end's readiness set ([`register_waiter`]), so a message, a
+/// closed peer (answered as [`KernelError::ChannelClosed`]) and a signal all
+/// end the wait; it re-checks after registering, so a message sent in between
+/// is not slept through.
+///
+/// # Errors
+///
+/// [`KernelError::ChannelClosed`] once the peer has closed and the queue is
+/// empty; [`KernelError::Interrupted`]; [`KernelError::InvalidHandle`].
+pub fn recv_interruptible(handle: ChannelHandle) -> KernelResult<Message> {
+    let pid = super::waiters::current_user_pid();
+    let task = sched::current_task_id();
+    loop {
+        if let Some(msg) = try_recv(handle)? {
+            return Ok(msg);
+        }
+        if super::waiters::deliverable_signal_pending(pid) {
+            return Err(KernelError::Interrupted);
+        }
+        register_waiter(handle, task);
+        if readable(handle) {
+            deregister_waiter(handle, task);
+            continue;
+        }
+        super::waiters::park_interruptible(
+            pid,
+            task,
+            crate::wchan::Wait::new(crate::wchan::WaitChannel::Channel, handle.raw()),
+        );
+        deregister_waiter(handle, task);
+    }
+}
+
+/// Send `msg`, waiting while the peer's queue is full -- interruptibly, as
+/// [`recv_interruptible`]: for a Linux-ABI channel descriptor's blocking
+/// `write`. The wait ends when a receive makes room (`room_waiters` wakes the
+/// sending side's readiness set), when the peer closes, or on a signal.
+///
+/// An asynchronous channel's room is its queue; a synchronous one is never
+/// handed to a descriptor (both the Linux calls make asynchronous channels).
+///
+/// # Errors
+///
+/// [`KernelError::ChannelClosed`] if either end is closed;
+/// [`KernelError::Interrupted`]; [`KernelError::InvalidHandle`].
+pub fn send_interruptible(handle: ChannelHandle, msg: Message) -> KernelResult<()> {
+    let pid = super::waiters::current_user_pid();
+    let task = sched::current_task_id();
+    let mut msg = msg;
+    loop {
+        match send_or_return(handle, msg) {
+            Ok(()) => return Ok(()),
+            Err((KernelError::ChannelFull, Some(back))) => msg = back,
+            Err((e, _)) => return Err(e),
+        }
+        if super::waiters::deliverable_signal_pending(pid) {
+            return Err(KernelError::Interrupted);
+        }
+        register_waiter(handle, task);
+        if writable(handle) {
+            deregister_waiter(handle, task);
+            continue;
+        }
+        super::waiters::park_interruptible(
+            pid,
+            task,
+            crate::wchan::Wait::new(crate::wchan::WaitChannel::Channel, handle.raw()),
+        );
+        deregister_waiter(handle, task);
+    }
+}
+
+/// Whether a send on `handle` would not block: the peer's queue has room, or
+/// the peer has closed (the send answers `ChannelClosed` at once), or the
+/// channel is gone. `POLLOUT` for a Linux-ABI channel descriptor. A
+/// synchronous channel is writable while its peer is blocked receiving.
+///
+/// A task waiting for this registers as for [`readable`]: a receive that
+/// frees a full queue wakes the sending side's readiness waiters
+/// (`room_waiters`), so a writer polling on a full queue is woken when room
+/// is made.
+#[must_use]
+pub fn writable(handle: ChannelHandle) -> bool {
+    let channels = CHANNELS.lock();
+    let Some(ch) = channels.get(&handle.channel_id()) else {
+        return true;
+    };
+    let peer = handle.peer_side();
+    if ch.closed.get(peer).copied().unwrap_or(true) {
+        return true;
+    }
+    if ch.sync {
+        ch.waiters.get(peer).is_some_and(Option::is_some)
+    } else {
+        ch.queues
+            .get(peer)
+            .is_some_and(|q| q.len() < MAX_QUEUE_DEPTH)
+    }
+}
+
+/// Whether `handle`'s peer has closed, or the channel is gone: `POLLHUP` for
+/// a Linux-ABI channel descriptor.
+#[must_use]
+pub fn peer_closed(handle: ChannelHandle) -> bool {
+    CHANNELS
+        .lock()
+        .get(&handle.channel_id())
+        .is_none_or(|ch| ch.closed.get(handle.peer_side()).copied().unwrap_or(true))
+}
+
+/// The readiness waiters of `sender_side` to wake once a receive has made room
+/// in the queue it sends to: only when that queue was full (`was_full`), and
+/// only when anyone is waiting at all. A writer polling for `POLLOUT` waits on
+/// its own side's set ([`writable`]). Call with `CHANNELS` held.
+fn room_waiters(ch: &mut Channel, sender_side: usize, was_full: bool) -> Vec<TaskId> {
+    if !was_full || READY_WAITERS.load(Ordering::Relaxed) == 0 {
+        return Vec::new();
+    }
+    take_ready(ch, sender_side)
+}
+
 /// Try to receive a message (non-blocking).
 ///
 /// **Async channels:** returns `Ok(Some(msg))` if a message was in
@@ -1183,13 +1328,19 @@ pub fn try_recv(handle: ChannelHandle) -> KernelResult<Option<Message>> {
         }
     } else {
         // Async channel: dequeue from our queue.
+        let was_full = ch
+            .queues
+            .get(our_side)
+            .is_some_and(|q| q.len() >= MAX_QUEUE_DEPTH);
         if let Some(msg) = ch.queues[our_side].pop_front() {
             let wake_sender = ch.sender_waiters[peer].take();
+            let room = room_waiters(ch, peer, was_full);
             drop(channels);
 
             if let Some(task_id) = wake_sender {
                 sched::wake(task_id);
             }
+            wake_all(room);
             super::stats::channel_recv();
             return Ok(Some(msg));
         }
@@ -1249,13 +1400,19 @@ pub fn recv(handle: ChannelHandle) -> KernelResult<Message> {
                 }
             } else {
                 // Async channel: dequeue from our queue.
+                let was_full = ch
+                    .queues
+                    .get(our_side)
+                    .is_some_and(|q| q.len() >= MAX_QUEUE_DEPTH);
                 if let Some(msg) = ch.queues[our_side].pop_front() {
                     let ch_id = handle.channel_id();
                     let wake_sender = ch.sender_waiters[peer].take();
+                    let room = room_waiters(ch, peer, was_full);
                     drop(channels);
                     if let Some(task_id) = wake_sender {
                         sched::wake(task_id);
                     }
+                    wake_all(room);
                     crate::ktrace::record(
                         crate::ktrace::Category::Ipc,
                         crate::ktrace::event::CHANNEL_RECV,
@@ -1345,6 +1502,11 @@ pub fn recv_timeout(handle: ChannelHandle, timeout_ns: u64) -> KernelResult<Mess
             let peer = handle.peer_side();
 
             // Try to get a message (sync vs async).
+            let was_full = !ch.sync
+                && ch
+                    .queues
+                    .get(our_side)
+                    .is_some_and(|q| q.len() >= MAX_QUEUE_DEPTH);
             let got_msg = if ch.sync {
                 ch.rendezvous_slots[peer].take()
             } else {
@@ -1355,10 +1517,12 @@ pub fn recv_timeout(handle: ChannelHandle, timeout_ns: u64) -> KernelResult<Mess
                 // Got a message — cancel timer, wake blocked sender.
                 crate::hrtimer::cancel(timer_handle);
                 let wake_sender = ch.sender_waiters[peer].take();
+                let room = room_waiters(ch, peer, was_full);
                 drop(channels);
                 if let Some(sid) = wake_sender {
                     sched::wake(sid);
                 }
+                wake_all(room);
                 super::stats::channel_recv();
                 return Ok(msg);
             }
@@ -1390,6 +1554,29 @@ pub fn recv_timeout(handle: ChannelHandle, timeout_ns: u64) -> KernelResult<Mess
     }
 }
 
+/// Give a channel endpoint one more holder: the endpoint copied into a forked
+/// child, which closes it independently (`proc::fork`'s `dup_one`). The
+/// endpoint stays open until every holder has called [`close`].
+///
+/// # Errors
+///
+/// [`KernelError::InvalidHandle`] if the channel does not exist or the
+/// endpoint is already closed.
+pub fn dup(handle: ChannelHandle) -> KernelResult<()> {
+    let mut channels = CHANNELS.lock();
+    let ch = channels
+        .get_mut(&handle.channel_id())
+        .ok_or(KernelError::InvalidHandle)?;
+    let side = handle.side();
+    if ch.closed.get(side).copied().unwrap_or(true) {
+        return Err(KernelError::InvalidHandle);
+    }
+    if let Some(refs) = ch.refs.get_mut(side) {
+        *refs = refs.saturating_add(1);
+    }
+    Ok(())
+}
+
 /// Close a channel endpoint.
 ///
 /// Any task blocked on `recv` on the peer side is woken (it will
@@ -1398,6 +1585,10 @@ pub fn recv_timeout(handle: ChannelHandle, timeout_ns: u64) -> KernelResult<Mess
 ///
 /// Closing an already-closed endpoint or an invalid handle is a
 /// no-op.
+///
+/// An endpoint with more than one holder ([`dup`]) loses one, and closes
+/// with the last; one holder -- every endpoint not shared across `fork` --
+/// closes at once, as it always did.
 pub fn close(handle: ChannelHandle) {
     let mut wake_tasks: [Option<TaskId>; 2] = [None, None];
     let ready: Vec<TaskId>;
@@ -1409,6 +1600,16 @@ pub fn close(handle: ChannelHandle) {
         };
 
         let our_side = handle.side();
+        if ch.closed.get(our_side).copied().unwrap_or(true) {
+            return;
+        }
+        // `side()` masks to bit 0, so the index is 0 or 1.
+        if let Some(refs) = ch.refs.get_mut(our_side) {
+            *refs = refs.saturating_sub(1);
+            if *refs > 0 {
+                return;
+            }
+        }
         ch.closed[our_side] = true;
 
         // Wake the peer if it's blocked on recv — it will get

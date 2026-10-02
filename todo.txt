@@ -4523,9 +4523,11 @@
 
 ## fork() LIMITATIONS (2026-05-31, documented, not yet implemented):
 ##   (a) HANDLE INHERITANCE is limited to refcount-capable same-id types: File, Pipe, EventFd,
-##       StreamSocket (kernel/src/proc/fork.rs::dup_one). Channel, SharedMemory, CompletionPort,
-##       and Timer handles are SKIPPED (child does not inherit them) because they lack a
-##       refcounted same-id dup. A forked child that expected an inherited channel/shm/timer will
+##       StreamSocket (kernel/src/proc/fork.rs::dup_one) -- and, since 2026-10-02, Channel and
+##       Service listeners (ipc::channel::dup, ipc::service::dup_listener: per-side and per-listener
+##       holder counts, for the Linux-ABI channel descriptors). SharedMemory, CompletionPort,
+##       and Timer handles are still SKIPPED (child does not inherit them) because they lack a
+##       refcounted same-id dup. A forked child that expected an inherited shm/timer will
 ##       find it missing. FIX: add same-id refcounted dup to those subsystems (mirror pipe/eventfd),
 ##       then extend dup_one. Until then, programs needing those across fork must re-establish them
 ##       after fork (or use posix_spawn with an explicit handle map).

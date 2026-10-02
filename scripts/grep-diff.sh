@@ -1234,6 +1234,11 @@ GREP_COLORS='rv:sl=33:cx=34' grep --color=always -v foo words
 GREP_COLORS='rv:sl=33:cx=34' grep --color=always foo words
 GREP_COLORS='zz=1' grep --color=always foo words
 GREP_COLORS='ms=zz' grep --color=always foo words
+# ...and a malformed item ends the reading there: nothing after it is applied.
+GREP_COLORS='ms=01;3x:fn=35' grep --color=always -H foo words
+GREP_COLORS='ms=1=2:fn=35' grep --color=always -H foo words
+GREP_COLORS='=01:fn=35' grep --color=always -H foo words
+GREP_COLORS='fn=35:ms=zz:ln=33' grep --color=always -Hn foo words
 GREP_COLORS='' grep --color=always foo words
 # A value capability with no `=` is *ignored*, not read as "set it to empty":
 # `ms` leaves the default highlight alone where `ms=` removes it. The two
@@ -1278,9 +1283,19 @@ GREP_COLORS='sl=33' grep --color=always -TnbHZ HIT w99
 GREP_COLOR='01;35' grep --color=always foo words
 # An empty one is not a setting: no warning, and the default highlight stands.
 GREP_COLOR='' grep --color=always foo words
+# Only digits and `;` are a GREP_COLOR at all; anything else is ignored in
+# silence -- the default highlight, and no warning.
+GREP_COLOR=$'01;3\xff' grep --color=always foo words
+GREP_COLOR='0x1' grep --color=always foo words
+GREP_COLOR='red' grep --color=always foo words
 # GREP_COLOR loses to a GREP_COLORS that names the same capability, and neither
 # is read at all when colour is off — the deprecation warning included.
 GREP_COLOR='01;35' GREP_COLORS='ms=01;36' grep --color=always foo words
+# The warning is for a GREP_COLOR still in effect once GREP_COLORS is read:
+# `mt=` replaces both match colours and silences it, `mc=` alone does not.
+GREP_COLOR='01;35' GREP_COLORS='mt=01;36' grep --color=always foo words
+GREP_COLOR='01;35' GREP_COLORS='mc=01;36' grep --color=always -C 1 HIT ctx
+GREP_COLOR='01;35' GREP_COLORS='ms=:mc=' grep --color=always foo words
 GREP_COLOR='01;35' grep foo words
 GREP_COLOR='01;35' grep --color=never foo words
 # `--color=` with a word that is none of the three is not an error: GNU sets

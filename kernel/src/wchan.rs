@@ -27,6 +27,9 @@
 //! <kind> <arg> holder <pid> thread <tid>  the holding thread is known too
 //! ```
 //!
+//! A reader who may not inspect the process reads `0` whatever it waits on,
+//! as on Linux (`crate::proc::pcb::may_inspect`, design-decisions §1516).
+//!
 //! The first token is always the kind, so a reader that wants Linux's single
 //! word takes the first token. An argument of 0 means "none" and is left out.
 //! An address argument (futex, mutex) is in hex with `0x`; every other

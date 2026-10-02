@@ -223,11 +223,13 @@ Also: `/proc/<pid>/stat` field 35 is 1 while the task waits and 0 otherwise,
 as Linux has printed since it stopped publishing the address. The kernel
 shell's `wchan` lists every waiting task the same way.
 
-Who may read it: anyone, today, like every other `/proc/<pid>` file here --
-`environ` included. That is a gap lane A is fixing next
-(`A-PROC-PID-FILES-CHECK-NO-READER`). When it closes, `wchan` will read `0` to
-a reader not allowed to inspect the process, as on Linux. Plan the panel for
-that answer.
+Who may read it (design-decisions §1516, the same day): a reader allowed to
+inspect the process -- the process itself, uid 0, the same user while the
+process is dumpable, or a holder of a `Process` capability for it with
+`READ`. Anyone else reads `0`, as on Linux, so plan the panel for that
+answer. Every process is uid 0 today, so the explorer sees every wait for
+now. The same rule now guards `environ`, `maps`, `auxv`, `io`, the links and
+`fd/`, which the Environment and Memory tabs read.
 
 ### Part 2: which CPUs a process may run on
 

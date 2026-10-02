@@ -2799,7 +2799,7 @@ fn gen_pid_stat(task_id: u64) -> KernelResult<Vec<u8>> {
     // thread's `/proc/<tid>` it is the thread's process; a kernel task has
     // none, and reports zeros.
     let proc_id = crate::proc::thread::owner_process(task_id).unwrap_or(0);
-    Ok(build_pid_stat(task, proc_id))
+    Ok(build_pid_stat(task, proc_id, reader_may_inspect(task_id)))
 }
 
 /// `/proc/<pid>/wchan` and `/proc/<pid>/task/<tid>/wchan` — what the task
@@ -2809,15 +2809,51 @@ fn gen_pid_stat(task_id: u64) -> KernelResult<Vec<u8>> {
 /// doc). For `/proc/<pid>` the task is the process's main thread, whose id is
 /// the pid.
 ///
-/// Linux prints only a kernel function's name here, and only to a reader
-/// allowed to trace the task. No `/proc/<pid>` file here checks its reader
-/// yet (`environ` included); this one reveals no kernel address -- every
-/// argument is one the waiting program itself holds, a handle, a pid or its
-/// own futex address.
+/// A reader not allowed to inspect the task's process
+/// ([`reader_may_inspect`]) reads `0`, as on Linux, which prints `0` rather
+/// than refusing.
 fn gen_wchan(task_id: u64) -> KernelResult<Vec<u8>> {
     let report = crate::wchan::report(task_id).ok_or(KernelError::NotFound)?;
+    if !reader_may_inspect(task_id) {
+        return Ok(b"0".to_vec());
+    }
     Ok(format!("{report}").into_bytes())
 }
+
+/// The process a `/proc` call runs for: the reader its checks are made for,
+/// `None` for a kernel task.
+fn proc_reader() -> Option<u64> {
+    crate::proc::thread::owner_process(crate::sched::current_task_id()).filter(|&p| p != 0)
+}
+
+/// The process the task `/proc/<task>` names belongs to: the thread's
+/// process, or the process with that id once its threads have gone (a
+/// zombie); `None` for a kernel task.
+fn proc_target(task: u64) -> Option<u64> {
+    crate::proc::thread::owner_process(task)
+        .filter(|&p| p != 0)
+        .or_else(|| crate::proc::pcb::state(task).map(|_| task))
+}
+
+/// Whether the process this call runs for may inspect `task`'s process
+/// ([`crate::proc::pcb::may_inspect`], Linux's `PTRACE_MODE_READ` check).
+///
+/// What it guards, as on Linux: reading `environ`, `auxv`, `maps` and `io`
+/// ([`INSPECT_FILES`]); the `cwd`, `root`, `exe` and `fd/<n>` links; listing
+/// `fd/` and `fdinfo/` and reading `fdinfo/<n>`. Content-level: `wchan`
+/// reads `0`, and `stat` field 35 is 0, for a reader who may not.
+/// (A-PROC-PID-FILES-CHECK-NO-READER: until 2026-10-01 nothing here checked
+/// its reader.)
+fn reader_may_inspect(task: u64) -> bool {
+    crate::proc::pcb::may_inspect(proc_reader(), proc_target(task))
+}
+
+/// The `/proc/<pid>/` files only a reader who may inspect the process reads
+/// ([`reader_may_inspect`]); to anyone else they are `PermissionDenied`
+/// (`EACCES`). Linux's mode-0400 and `mm_access` files: the environment, the
+/// auxiliary vector (its `AT_RANDOM` bytes seed the program's stack canary),
+/// the memory layout (which undoes address randomisation), and I/O counters.
+const INSPECT_FILES: &[&str] = &["environ", "auxv", "maps", "io"];
 
 /// `/proc/<pid>/task/<tid>/stat` — per-thread task statistics.
 ///
@@ -2834,7 +2870,7 @@ fn gen_thread_stat(proc_id: u64, tid: u64) -> KernelResult<Vec<u8>> {
         .iter()
         .find(|t| t.id == tid)
         .ok_or(KernelError::NotFound)?;
-    Ok(build_pid_stat(task, proc_id))
+    Ok(build_pid_stat(task, proc_id, reader_may_inspect(tid)))
 }
 
 /// Length of Linux's `comm` field minus the trailing NUL: `TASK_COMM_LEN - 1`.
@@ -2860,7 +2896,11 @@ fn comm_truncate(name: &[u8]) -> &[u8] {
 /// process's own `/proc/<pid>/stat`, the caller passes `proc_id == task.id`
 /// so the two id sources coincide; for a thread's `task/<tid>/stat` they
 /// differ (`task.id == tid`, `proc_id == owning pid`).
-fn build_pid_stat(task: &crate::sched::TaskInfo, proc_id: u64) -> Vec<u8> {
+///
+/// `inspect` is whether the reader may inspect the task
+/// ([`reader_may_inspect`]): Linux fills the fields that say where the task
+/// is -- here, field 35 -- only for such a reader, and 0 for anyone else.
+fn build_pid_stat(task: &crate::sched::TaskInfo, proc_id: u64, inspect: bool) -> Vec<u8> {
     use crate::sched::task::TaskState;
 
     // Field 2 (`comm`) must match `/proc/<pid>/comm` exactly, including the
@@ -2982,7 +3022,7 @@ fn build_pid_stat(task: &crate::sched::TaskInfo, proc_id: u64) -> Vec<u8> {
     // what Linux has printed since it stopped publishing a kernel address
     // here; `/proc/<pid>/wchan` says what the wait is. A literal 0 until
     // 2026-10-01.
-    let wchan = u8::from(task.wait.is_waiting());
+    let wchan = u8::from(inspect && task.wait.is_waiting());
 
     // Field order matches proc(5) / Linux fs/proc/array.c do_task_stat().
     // 1:pid 2:comm 3:state 4:ppid 5:pgrp 6:session 7:tty_nr 8:tpgid 9:flags
@@ -3538,6 +3578,21 @@ fn set_pid_oom_score_adj(task_id: u64, data: &[u8]) -> KernelResult<()> {
     }
     let adj = parse_oom_score_adj(data)?;
     let pid = u32::try_from(task_id).map_err(|_| KernelError::InvalidArgument)?;
+    // Who may: Linux's file is 0644 and its owner's, and lowering it -- making
+    // the process the last the OOM killer picks -- needs CAP_SYS_RESOURCE.
+    // Here: a writer who may inspect the process and also control it (uid 0,
+    // the process itself, its user's processes, or a `Process` capability with
+    // `WRITE`); lowering, uid 0 or the kernel only.
+    let writer = proc_reader();
+    let target = proc_target(task_id);
+    if !crate::proc::pcb::may_access(writer, target, crate::cap::Rights::WRITE) {
+        return Err(KernelError::PermissionDenied);
+    }
+    let current = crate::fs::oomkiller::get_score(pid).map_or(0, |s| s.adj);
+    let privileged = writer.is_none_or(|w| crate::proc::pcb::process_uid(w) == Some(0));
+    if adj < current && !privileged {
+        return Err(KernelError::PermissionDenied);
+    }
     crate::fs::oomkiller::adjust_score(pid, adj)
 }
 
@@ -4025,7 +4080,14 @@ fn gen_pid_limits(task_id: u64) -> KernelResult<Vec<u8>> {
 }
 
 /// Generate content for a per-PID virtual file.
+///
+/// The [`INSPECT_FILES`] are refused to a reader who may not inspect the
+/// process -- here, so a `stat` of one, which sizes it by generating it,
+/// reports 0 bytes rather than leaking its length.
 fn generate_pid(task_id: u64, file_name: &str) -> KernelResult<Vec<u8>> {
+    if INSPECT_FILES.contains(&file_name) && !reader_may_inspect(task_id) {
+        return Err(KernelError::PermissionDenied);
+    }
     match file_name {
         "status" => gen_pid_status(task_id),
         "cmdline" => gen_pid_cmdline(task_id),
@@ -15257,6 +15319,9 @@ impl FileSystem for ProcFs {
                 if !task_exists(pid) {
                     return Err(KernelError::NotFound);
                 }
+                if !reader_may_inspect(pid) {
+                    return Err(KernelError::PermissionDenied);
+                }
                 let entries = crate::proc::pcb::linux_fd_list(pid)
                     .unwrap_or_default()
                     .into_iter()
@@ -15281,6 +15346,9 @@ impl FileSystem for ProcFs {
                 // legitimately empty rather than fabricated.
                 if !task_exists(pid) {
                     return Err(KernelError::NotFound);
+                }
+                if !reader_may_inspect(pid) {
+                    return Err(KernelError::PermissionDenied);
                 }
                 let entries = crate::proc::pcb::linux_fd_list(pid)
                     .unwrap_or_default()
@@ -15374,6 +15442,9 @@ impl FileSystem for ProcFs {
             ProcPath::PidFdInfoFile(pid, fd) => {
                 if !task_exists(pid) {
                     return Err(KernelError::NotFound);
+                }
+                if !reader_may_inspect(pid) {
+                    return Err(KernelError::PermissionDenied);
                 }
                 gen_pid_fdinfo(pid, fd)
             }
@@ -15571,7 +15642,16 @@ impl FileSystem for ProcFs {
     /// canonical cwds are ASCII/UTF-8, so this is a theoretical edge.
     fn readlink(&mut self, path: &Path) -> KernelResult<PathBuf> {
         let rel = strip_root(path)?;
-        match classify_path(rel) {
+        let link = classify_path(rel);
+        // Where a process runs from, what it runs and what it has open: only
+        // a reader who may inspect it, as Linux's `proc_fd_access_allowed`.
+        if let ProcPath::PidLink(pid, _) | ProcPath::PidFdLink(pid, _) = link
+            && task_exists(pid)
+            && !reader_may_inspect(pid)
+        {
+            return Err(KernelError::PermissionDenied);
+        }
+        match link {
             ProcPath::PidLink(pid, "root") => {
                 if !task_exists(pid) {
                     return Err(KernelError::NotFound);
@@ -16477,6 +16557,60 @@ pub fn self_test() -> KernelResult<()> {
         serial_println!("[procfs]   thread status: Pid/Tgid=={} OK", probe);
     }
 
+    // --- who may read what of a process (A-PROC-PID-FILES-CHECK-NO-READER) ---
+    // Read as a process, through `self_test_as_process`: a user may not read
+    // another user's environment or memory layout, may read their own, and
+    // still sees everyone's `cmdline`; a kernel task's wait reads `0` to a
+    // user and is the wait itself to the kernel. A process with no threads
+    // stands in for each user's process -- the check keys on the process.
+    {
+        use crate::proc::pcb::{self, ProcessCredentials};
+        use crate::proc::thread::self_test_as_process;
+        /// A kernel task's body that never runs: it is created suspended.
+        extern "C" fn never_runs(_arg: u64) {}
+
+        let alice = pcb::create("procfs-alice", 0);
+        let bob = pcb::create("procfs-bob", 0);
+        let parked = crate::sched::spawn_suspended(b"procfs-parked", 16, never_runs, 0, 0)?;
+        let outcome = (|| -> Result<(), &'static str> {
+            for (pid, uid) in [(alice, 1000), (bob, 1001)] {
+                pcb::set_credentials(pid, ProcessCredentials::new(uid, uid))
+                    .map_err(|_| "set_credentials")?;
+            }
+            let as_alice = |f: &dyn Fn() -> KernelResult<Vec<u8>>| self_test_as_process(alice, f);
+            for file in INSPECT_FILES {
+                if as_alice(&|| generate_pid(bob, file)) != Err(KernelError::PermissionDenied) {
+                    serial_println!("[procfs]   FAIL: a user read another user's {}", file);
+                    return Err("an inspect file was not refused");
+                }
+            }
+            if as_alice(&|| generate_pid(alice, "environ")).is_err() {
+                return Err("a user could not read their own environ");
+            }
+            if as_alice(&|| generate_pid(bob, "cmdline")).is_err() {
+                return Err("a user could not read another user's cmdline");
+            }
+            if as_alice(&|| gen_wchan(parked)) != Ok(b"0".to_vec()) {
+                return Err("a kernel task's wait was not 0 to a user");
+            }
+            if gen_wchan(parked) != Ok(b"wait".to_vec()) {
+                return Err("a suspended kernel task's wait was not `wait` to the kernel");
+            }
+            Ok(())
+        })();
+        crate::sched::kill_task(parked);
+        crate::sched::reap_dead_tasks();
+        pcb::destroy(bob);
+        pcb::destroy(alice);
+        if let Err(what) = outcome {
+            serial_println!("[procfs]   FAIL: reader check: {}", what);
+            return Err(KernelError::InternalError);
+        }
+        serial_println!(
+            "[procfs]   reader check: environ/auxv/maps/io guarded, cmdline open, wchan 0: OK"
+        );
+    }
+
     // --- build_pid_stat starttime wiring (deterministic) ---
     // The live stat test above runs in the boot task (start_tick 0), so it
     // would still pass if field 22 were hardcoded 0.  Drive build_pid_stat
@@ -16514,7 +16648,7 @@ pub fn self_test() -> KernelResult<()> {
             stack_pct: None,
             wait: crate::wchan::Wait::new(crate::wchan::WaitChannel::Futex, 0x7f00_1000),
         };
-        let data = build_pid_stat(&synth, 999_999);
+        let data = build_pid_stat(&synth, 999_999, true);
         let text = core::str::from_utf8(&data).unwrap_or("");
         let line = text.strip_suffix('\n').unwrap_or(text);
         let close = line.rfind(')').unwrap_or(0);
@@ -16572,9 +16706,22 @@ pub fn self_test() -> KernelResult<()> {
             );
             return Err(KernelError::InternalError);
         }
+        // ... and 0 to a reader who may not inspect the task, waiting or not.
+        let hidden_data = build_pid_stat(&synth, 999_999, false);
+        let hidden_text = core::str::from_utf8(&hidden_data).unwrap_or("");
+        let hidden_field = hidden_text
+            .get(hidden_text.rfind(')').unwrap_or(0)..)
+            .and_then(|t| t.split(' ').filter(|s| !s.is_empty()).nth(33));
+        if hidden_field != Some("0") {
+            serial_println!(
+                "[procfs]   FAIL: synthetic stat wchan (field 35) = {:?} to a reader who may not inspect, want 0",
+                hidden_field
+            );
+            return Err(KernelError::InternalError);
+        }
         let mut idle = synth;
         idle.wait = crate::wchan::Wait::NONE;
-        let idle_data = build_pid_stat(&idle, 999_999);
+        let idle_data = build_pid_stat(&idle, 999_999, true);
         let idle_text = core::str::from_utf8(&idle_data).unwrap_or("");
         let idle_field = idle_text
             .get(idle_text.rfind(')').unwrap_or(0)..)
@@ -16639,7 +16786,7 @@ pub fn self_test() -> KernelResult<()> {
             };
             // stat field 3 is the first token after the `(comm) ` prefix.  The
             // synthetic comm has no parens, so `") "` locates the boundary.
-            let stat = build_pid_stat(&synth, 999_999);
+            let stat = build_pid_stat(&synth, 999_999, true);
             let stat_text = core::str::from_utf8(&stat).unwrap_or("");
             let stat_char = stat_text
                 .rfind(") ")
@@ -16712,7 +16859,7 @@ pub fn self_test() -> KernelResult<()> {
             stack_pct: None,
             wait: crate::wchan::Wait::NONE,
         };
-        let data = build_pid_stat(&synth, 999_999);
+        let data = build_pid_stat(&synth, 999_999, true);
         let text = core::str::from_utf8(&data).unwrap_or("");
         // comm is the token between the first '(' and the last ')'.
         let open = text.find('(').map_or(0, |i| i.saturating_add(1));
@@ -18697,7 +18844,7 @@ fn test_pid_signal_sets() -> KernelResult<()> {
             return Err("SigQ is not queued/limit");
         }
 
-        let stat = build_pid_stat(&synth, PID);
+        let stat = build_pid_stat(&synth, PID, true);
         let text = core::str::from_utf8(&stat).unwrap_or("");
         let close = text.rfind(')').unwrap_or(0);
         let fields: Vec<&str> = text

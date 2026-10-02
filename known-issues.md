@@ -181235,7 +181235,7 @@ a negative value can be one. Every producer already went through
 `restart_result`, so nothing else changed. The restart self-test now checks
 that 512-516 of either sign and the three native codes are not sentinels.
 
-### A-PROC-PID-FILES-CHECK-NO-READER -- 2026-10-01 -- OPEN (lane A)
+### A-PROC-PID-FILES-CHECK-NO-READER -- 2026-10-01 -- FIXED the same day (lane A)
 
 **In short:** any program can read what `/proc/<pid>/` says about any other
 program, whoever runs either of them. That includes `environ` (the other
@@ -181253,15 +181253,21 @@ users.
 `ProcFs::readlink` serve every file to every reader; `ProcFs::stat` reports
 no owner or mode, so the VFS has nothing to check either.
 
-**Proper fix:** one predicate, "may the calling process inspect process X",
-as Linux's `ptrace_may_access(PTRACE_MODE_READ_FSCREDS)`: the same process;
-or the reader's uid and gid equal the target's and the target is dumpable
-(`PR_SET_DUMPABLE`); or the reader is uid 0; or the reader holds a `Process`
-capability for the target, which is how this kernel already lets a process
-signal another (`check_signal_target`). Apply it to the files Linux guards --
-`environ`, `auxv`, `maps`, `io`, `wchan`'s content (Linux prints `0` rather
-than refusing), `stat`'s address fields, and the three links -- and have
-`stat` report each file's owner and Linux's mode for it.
+**Fixed** (design-decisions 1516): one predicate, `pcb::may_inspect`, as
+Linux's `ptrace_may_access(PTRACE_MODE_READ_FSCREDS)`. The reader may inspect
+if it is the kernel, the process itself, or uid 0; or has the target's uid
+and gid while the target is dumpable; or holds a `Process` capability for it
+with `READ`.
+- Refused to anyone else (`EACCES`): `environ`, `auxv`, `maps`, `io`, the
+  `cwd`/`root`/`exe`/`fd/<n>` links, `fd/` and `fdinfo/`.
+- Blanked instead: `wchan` reads `0` and `stat` field 35 is 0, as on Linux.
+- Writing `oom_score_adj` needs the same rule with `WRITE`, and lowering it
+  needs uid 0.
+
+**Still open:** `stat` of these files reports no owner or mode, so
+`ls -l /proc/<pid>` does not show Linux's `0400`. The VFS's directory entry
+has no field for them; the check when a file is generated is the
+enforcement either way.
 
 ### A-CPU-AFFINITY-DID-NOT-MOVE-A-RUNNING-THREAD -- 2026-10-01 -- FIXED the same day (lane A)
 

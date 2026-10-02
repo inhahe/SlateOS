@@ -22,6 +22,13 @@
 //! Every answer is measured against glibc rather than recalled: see
 //! `scripts/extfloat-diff.sh` and `scripts/printf-diff.sh`.
 
+// Limb and exponent arithmetic is what these modules are: every product
+// is formed in a type twice the width of its factors, every carry and borrow
+// is explicit, and exponents are bounded by the formats' ranges before they
+// are added -- the properties `scripts/extfloat-diff.sh` measures against
+// glibc case by case. `arithmetic_side_effects` would flag each line of it.
+#![allow(clippy::arithmetic_side_effects)]
+
 pub mod bignat;
 pub mod cfmt;
 pub mod extfloat;

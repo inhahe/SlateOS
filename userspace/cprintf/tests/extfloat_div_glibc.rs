@@ -15,6 +15,9 @@
 //! run, and its x87 control word is set to 53 bits, so the hardware beside the
 //! test would not give the answer the target gives.
 
+// A test: a malformed recording is a failure, and says so.
+#![allow(clippy::expect_used, clippy::panic)]
+
 use cprintf::extfloat::ExtF80;
 
 fn bytes(hex: &str) -> [u8; 10] {

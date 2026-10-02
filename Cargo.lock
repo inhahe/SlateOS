@@ -1163,6 +1163,14 @@ version = "0.1.0"
 [[package]]
 name = "file"
 version = "0.1.0"
+dependencies = [
+ "charwidth",
+ "cprintf",
+ "ere",
+ "errmsg",
+ "getoptlong",
+ "localtime",
+]
 
 [[package]]
 name = "fileassoc"

@@ -2213,7 +2213,8 @@ fn hex_value(c: u8) -> u32 {
     clippy::indexing_slicing,
     clippy::arithmetic_side_effects
 )]
-#[allow(clippy::unwrap_used, clippy::panic)]
+// The tests compare floats exactly: the bits glibc reads are the point.
+#[allow(clippy::unwrap_used, clippy::panic, clippy::float_cmp)]
 mod tests {
     use super::*;
 

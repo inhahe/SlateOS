@@ -203,7 +203,7 @@ impl Nat {
 
     /// `self - other`, which the caller must know is non-negative.
     pub fn sub(&self, other: &Self) -> Self {
-        debug_assert!(self.cmp(other) != Ordering::Less);
+        debug_assert_ne!(self.cmp(other), Ordering::Less);
         let mut out = Vec::with_capacity(self.limbs.len());
         let mut borrow: i64 = 0;
         for (i, &a) in self.limbs.iter().enumerate() {

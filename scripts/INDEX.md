@@ -191,8 +191,11 @@ promises about its own output, which a one-line summary cannot carry.
 | `scripts/extract-tcc-strace.sh` | Extract tcc + crt + libtcc1.a from rootfs.ext4 and strace a hosted compile. |
 | `scripts/factor-diff.sh` | factor-diff.sh — compare our `factor` against GNU's, inside WSL. |
 | `scripts/fastpy-slateos-bundle.py` | Build the tree that puts the fastpy compiler on a SlateOS image. |
-| `scripts/file-isomedia-diff.sh` | Differential test: our `file` against file 5.45's on ISO base media files. |
-| `scripts/file-isomedia-gen.py` | Generate `userspace/file/src/isomedia_table.rs` from file 5.45's magic. |
+| `scripts/file-diff.sh` | Differential test: our `file` against file 5.45, built from the release. |
+| `scripts/file-gen-cdf.py` | Generate Composite Document Files (OLE2) for testing libmagic's readcdf.c. |
+| `scripts/file-gen-elf.py` | Generate ELF files exercising every path of libmagic's readelf.c. |
+| `scripts/file-gen-z.py` | Generate compressed files for testing `file -z` (libmagic's compress.c). |
+| `scripts/file-magic-vendor.py` | Vendor file 5.45's magic database into `userspace/file/magic/`. |
 | `scripts/find-claimed-acts.py` | Which programs tell the user they DID something they cannot do? |
 | `scripts/find-diff.sh` | Differential test: our find against GNU find. |
 | `scripts/find-drawn-only-settings.py` | Which settings does a window let you change, and then only draw? |
@@ -491,4 +494,4 @@ promises about its own output, which a one-line summary cannot carry.
 | `scripts/xargs-diff.sh` | Differential test: our xargs against GNU xargs (findutils 4.9.0). |
 | `scripts/yes-diff.sh` | Differential test: our `yes` against GNU coreutils'. |
 
-_481 scripts._
+_484 scripts._

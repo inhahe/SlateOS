@@ -208,7 +208,17 @@ def merge(trace_dir: str) -> tuple[dict | None, list[str]]:
     why: list[str] = []
     procs = []
     records = {}
-    for name in sorted(os.listdir(trace_dir)):
+    try:
+        names = sorted(os.listdir(trace_dir))
+    except FileNotFoundError:
+        # Something removed the temp directory while the checker ran (seen on
+        # 2026-10-02, rq38: another session's sweep, most likely). The run is
+        # simply untraced: not stored, and its verdict -- which the caller
+        # already has -- stands. Raising here turned a passing gate into a
+        # boot refused for "never reached a verdict".
+        return None, ["the trace directory vanished before it was read -- "
+                      "something else removed it"]
+    for name in names:
         path = os.path.join(trace_dir, name)
         if name.endswith(".tmp"):
             why.append(f"a trace file was never finished: {name}")
@@ -386,7 +396,9 @@ def main(argv: list[str] | None = None) -> int:
             return entry["rc"]
 
     started_ns = time.time_ns()
-    with tempfile.TemporaryDirectory(prefix="gate-trace-") as trace_dir:
+    # `ignore_cleanup_errors`: a directory already gone (see `merge`) must not
+    # fail the gate on the way out either.
+    with tempfile.TemporaryDirectory(prefix="gate-trace-", ignore_cleanup_errors=True) as trace_dir:
         rc, output = run_traced(command, trace_dir)
         inputs, why = merge(trace_dir)
 

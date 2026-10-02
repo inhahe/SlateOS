@@ -98,6 +98,19 @@ def kind(note: str) -> str:
     return note.split()[1] if note.startswith("gate-cache:") else note
 
 
+def vanished_trace() -> None:
+    """A trace directory something else removed mid-run leaves the run
+    untraced -- not stored, its verdict standing -- rather than raising. It
+    raised on 2026-10-02 (rq38), and a gate that had passed was reported as
+    never reaching a verdict, refusing the boot."""
+    import srcload
+    gc = srcload.load(DRIVER, "gate_cache")
+    gone = os.path.join(tempfile.gettempdir(), "gate-trace-never-made-by-this-test")
+    inputs, why = gc.merge(gone)
+    check("a vanished trace directory is an untraced run, not an error",
+          (inputs, any("vanished" in w for w in why)), (None, True))
+
+
 def main() -> int:
     # The checkers these cases trace run `git -C <scratch repo>` with the
     # environment they inherit, and under a git hook that environment binds a
@@ -115,6 +128,7 @@ def main() -> int:
         cases(fx)
     finally:
         fx.cleanup()
+    vanished_trace()
     print()
     if failures:
         print(f"{len(failures)} FAILED: {', '.join(failures)}")

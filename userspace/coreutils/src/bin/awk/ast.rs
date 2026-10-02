@@ -278,6 +278,9 @@ pub struct Func {
     /// 2 of f" would send the reader counting commas.
     pub params: Vec<String>,
     pub body: Vec<Stmt>,
+    /// Where the name was written: gawk reports a `-v` assignment to the
+    /// same name there, as the definition that conflicts with it.
+    pub loc: Loc,
 }
 
 #[derive(Debug, Default)]

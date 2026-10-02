@@ -87,6 +87,16 @@ DIFF_REF='/usr/bin/gawk /usr/local/bin/gawk /usr/bin/awk'
 
 GNUFLAGS=${GNUFLAGS:---posix}
 
+# The self-check (`OURS=/usr/bin/gawk`, see the header) runs the reference on
+# both sides, and it must then be the same gawk on both: without `--posix` on
+# our side too, every row about a `--posix` behaviour -- `\y` a literal, a
+# backslash-newline in a string fatal, a directory operand an error -- would
+# differ for a reason that has nothing to do with the harness. It is told by
+# the two sides' `awk` being one file; `OURS` cannot tell it, because
+# `diff-wsl.sh` sets `OURS` to the built binary on every ordinary run.
+selfcheck=
+[ "$(readlink -f "$bindir/ours/awk")" = "$(readlink -f "$bindir/gnu/awk")" ] && selfcheck=yes
+
 pass=0; fail=0; xfail=0; xpass=0
 
 fixtures=$DIFF_TMP/fixtures
@@ -153,12 +163,7 @@ run_side() {
   local side=$1 stdin=$2 out=$3 err=$4; shift 4
   local flags=
   [ "$side" = gnu ] && flags=$GNUFLAGS
-  # The self-check (`OURS=/usr/bin/gawk`, see the header) runs gawk on both
-  # sides, and it must be the same gawk: without `--posix` on this side too,
-  # every row about a `--posix` behaviour -- `\y` as a literal, a
-  # backslash-newline in a string being fatal, a directory operand being an
-  # error -- would differ for a reason that has nothing to do with the harness.
-  [ "$side" = ours ] && [ -n "${OURS:-}" ] && flags=$GNUFLAGS
+  [ "$side" = ours ] && [ -n "$selfcheck" ] && flags=$GNUFLAGS
   if [ "$stdin" = "-" ]; then
     # shellcheck disable=SC2086
     diff_run timeout -k 2 30 env PATH="$bindir/$side:/usr/bin:/bin" awk $flags "$@" \
@@ -247,6 +252,60 @@ xfail_case() { local r="$1" i="$2"; shift 2; compare "$(fx "$i")" "$@"; report_x
 xmsg_case()  { local r="$1" i="$2"; shift 2; compare "$(fx "$i")" "$@"; report_x "$AGREED_MSG" "$r" "[$i] awk $*"; }
 xfail_file() { local r="$1"; shift;          compare - "$@";            report_x "$AGREED"     "$r" "awk $*"; }
 xfmsg_file() { local r="$1"; shift;          compare - "$@";            report_x "$AGREED_MSG" "$r" "awk $*"; }
+
+# `fsh_case PROGRAM WORDS` — PROGRAM run by `sh -c`, with WORDS after it as a
+# shell reads them (operands, redirections), for the cases that are about
+# standard output itself: `> /dev/full`. Where standard output went is the
+# words' business; the diagnostics are compared as text, and the status.
+fsh_case() {
+  local prog=$1 words=$2 side err flags rc o_rc g_rc o_msg g_msg o_err g_err
+  o_err=$(mktemp); g_err=$(mktemp)
+  for side in ours gnu; do
+    flags=
+    [ "$side" = gnu ] && flags=$GNUFLAGS
+    [ "$side" = ours ] && [ -n "$selfcheck" ] && flags=$GNUFLAGS
+    err=$o_err; [ "$side" = gnu ] && err=$g_err
+    # The program is `$0` to the shell, so it needs no quoting of its own;
+    # standard output defaults to nowhere, for words that do not say.
+    # shellcheck disable=SC2086
+    diff_run timeout -k 2 30 env PATH="$bindir/$side:/usr/bin:/bin" \
+      sh -c "awk $flags \"\$0\" $words" "$prog" </dev/null >/dev/null 2>"$err"
+    rc=$?
+    if [ "$side" = ours ]; then o_rc=$rc; else g_rc=$rc; fi
+  done
+  o_msg=$(cat "$o_err"); g_msg=$(cat "$g_err")
+  rm -f "$o_err" "$g_err"
+  AGREED_MSG=no
+  [ "$o_rc" = "$g_rc" ] && [ "$o_msg" = "$g_msg" ] && AGREED_MSG=yes
+  REPORT=$(printf '  ours (rc=%s): {%s}\n  gnu  (rc=%s): {%s}' \
+    "$o_rc" "$(printf '%s' "$o_msg" | tr '\n' '|')" \
+    "$g_rc" "$(printf '%s' "$g_msg" | tr '\n' '|')")
+  report "$AGREED_MSG" "sh -c 'awk $prog $words'"
+}
+
+# `tty_case PROGRAM` — PROGRAM with standard output and standard error on one
+# pseudo-terminal (`script(1)`), the bytes the terminal received compared as a
+# dump. On a terminal gawk flushes after every print (`output_is_tty`), so
+# output and diagnostics interleave as they happen; a run that buffered
+# standard output would show the stderr line first.
+tty_case() {
+  local prog=$1 side flags out o_out g_out
+  for side in ours gnu; do
+    flags=
+    [ "$side" = gnu ] && flags=$GNUFLAGS
+    [ "$side" = ours ] && [ -n "$selfcheck" ] && flags=$GNUFLAGS
+    # The program goes through the environment, so it needs no quoting.
+    # shellcheck disable=SC2016
+    out=$(diff_run timeout -k 2 30 env PATH="$bindir/$side:/usr/bin:/bin" AWKPROG="$prog" \
+      script -qec "awk $flags \"\$AWKPROG\"" /dev/null </dev/null | od -An -c)
+    if [ "$side" = ours ]; then o_out=$out; else g_out=$out; fi
+  done
+  AGREED=no
+  [ "$o_out" = "$g_out" ] && AGREED=yes
+  REPORT=$(printf '  ours: %s\n  gnu:  %s' "$(printf '%s' "$o_out" | tr -s ' \n' ' ')" \
+    "$(printf '%s' "$g_out" | tr -s ' \n' ' ')")
+  report "$AGREED" "tty: awk $prog"
+}
 
 # `wfile_case LABEL ARGS...` — for a program that writes files of its own.
 # Each side runs in its own copy of the fixtures, and the comparison covers
@@ -820,6 +879,144 @@ fmsg_case '{ print }' abc.txt /
 # `exit`'s status is C's conversion of the value, so 1e30 is 0.
 fmsg_case 'BEGIN { exit 1e30 }'
 fmsg_case 'BEGIN { exit -1 }'
+
+# --- output, and how it fails ------------------------------------------------
+# gawk's model, measured: a redirection that will not open is fatal at the
+# statement (`cannot redirect to`); a write that fails is fatal there too,
+# naming the statement (`print to "f" failed`) -- for a small write that is
+# when the buffer is flushed, at `close`, `fflush` or exit. At exit gawk
+# closes every redirection first, a failure there fatal and placed nowhere but
+# the input, then flushes standard output, where a failure is only a warning
+# and status 1 unless the program said `exit`. After a fatal error nothing
+# more is said. All of it differed until 2026-10-01: a full disk under a
+# redirection was silent, exit 0.
+fmsg_case 'BEGIN { x = 1
+ print "x" > "/nonexistent/dir/f" }'
+fmsg_case 'BEGIN { print "x" >> "/nonexistent/dir/f" }'
+fmsg_case 'BEGIN { printf "x" > "/nonexistent/dir/f" }'
+fmsg_case 'BEGIN { print "x" > "/" }'
+fmsg_case 'BEGIN { x = 1
+ print "x" > "" }'
+fmsg_case 'BEGIN { printf "x" >> "" }'
+fmsg_case 'BEGIN { print "x" | "" }'
+fmsg_case 'BEGIN { x = 1
+ r = (getline line < ""); print r }'
+fmsg_case 'BEGIN { x = 1
+ r = ("" | getline line); print r }'
+fmsg_case 'BEGIN { r = (getline l < "/"); print "r=" r }'
+fmsg_case 'BEGIN { print "x" > "/dev/full"; print "after" }'
+fmsg_case 'BEGIN { printf "x" > "/dev/full"; print "after" }'
+fmsg_case 'BEGIN { print "x" > "/dev/full"; print "y" >> "/dev/full" }'
+fmsg_case '{ print > "/dev/full" }' abc.txt
+fmsg_case 'BEGIN { print "x" > "/dev/full"; r = close("/dev/full"); print "r=" r }'
+fmsg_case 'BEGIN { s = sprintf("%9000s", "x"); x = 1
+ print s > "/dev/full"; print "after" }'
+fmsg_case 'BEGIN { print "x" > "/dev/full"; print 1/z }'
+fmsg_case 'BEGIN { for (i = 0; i < 100000; i++) print i | "head -1"; print "after" }'
+fmsg_case 'BEGIN { for (i = 0; i < 3000; i++) print i | "true"; r = close("true"); print "r=" r }'
+# Standard output itself, on a full device.
+fsh_case 'BEGIN { print "x" }' '> /dev/full'
+fsh_case 'BEGIN { print "x"; exit 0 }' '> /dev/full'
+fsh_case 'BEGIN { print "x"; exit 3 }' '> /dev/full'
+fsh_case '{ print }' 'abc.txt > /dev/full'
+fsh_case 'END { print "x"; exit 0 }' 'abc.txt > /dev/full'
+fsh_case 'BEGIN { s = sprintf("%9000s", "x"); x = 1
+ print s; print "after" > "/dev/stderr" }' '> /dev/full'
+fsh_case 'BEGIN { print "x"; r = fflush(); print "r=" r > "/dev/stderr" }' '> /dev/full'
+fsh_case 'BEGIN { print "x"; print 1/z }' '> /dev/full'
+# Standard output on a terminal is flushed after every print, as gawk's is.
+# It was not until 2026-10-01: an interactive `awk '{ print $1 }'` held its
+# answers until 8 KiB had built up or input ended.
+if command -v script >/dev/null 2>&1; then
+  tty_case 'BEGIN { print "a"; printf "b" > "/dev/stderr"; print "c" }'
+  tty_case 'BEGIN { printf "a\n"; printf "b" > "/dev/stderr"; printf "c\n" }'
+fi
+# `close`, `fflush` and `system`, as `--posix` answers them: `close` is 0 once
+# it succeeds (not the command's status), `system` is the full wait status,
+# `fflush` warns about what it cannot flush.
+fmsg_case 'BEGIN { print "x" | "cat >/dev/null; exit 3"; r = close("cat >/dev/null; exit 3"); print "r=" r }'
+fmsg_case 'BEGIN { "echo hi; exit 3" | getline x; r = close("echo hi; exit 3"); print "r=" r, x }'
+fmsg_case 'BEGIN { print "x" > "f.txt"; r = close("f.txt"); print "r=" r }'
+fmsg_case 'BEGIN { getline l < "abc.txt"; r = close("abc.txt"); print "r=" r }'
+fmsg_case 'BEGIN { print "x" > "f.txt"; close("f.txt"); r = close("f.txt"); print "r=" r }'
+fmsg_case 'BEGIN { r = system("exit 3"); print "r=" r }'
+fmsg_case 'BEGIN { r = system(""); print "r=" r }'
+fmsg_case 'BEGIN { print "a"; system("echo b"); print "c" }'
+fmsg_case 'BEGIN { print "a" > "f.txt"; system("cat f.txt"); print "c" }'
+fmsg_case 'BEGIN { print "x" > "/dev/full"; r = system("true"); print "r=" r }'
+fmsg_case 'BEGIN { r = fflush("nope"); print "r=" r }'
+fmsg_case 'BEGIN { getline l < "abc.txt"; r = fflush("abc.txt"); print "r=" r }'
+fmsg_case 'BEGIN { "echo hi" | getline l; r = fflush("echo hi"); print "r=" r }'
+fmsg_case 'BEGIN { print "x" > "f.txt"; r = fflush("f.txt"); print "r=" r }'
+fmsg_case 'BEGIN { r = fflush(""); print "r=" r }'
+fmsg_case 'BEGIN { print "x"; r = fflush("/dev/stdout"); print "r=" r }'
+fmsg_case 'BEGIN { print "x" > "/dev/full"; r = fflush("/dev/full"); print "r=" r }'
+fmsg_case 'BEGIN { print "x" > "/dev/full"; r = fflush(); print "r=" r }'
+
+# --- the command line's assignments ------------------------------------------
+# gawk's `arg_assign`, for `-v` and for a `var=value` operand: refused if the
+# name is a keyword or built-in, or the value holds a newline; said with no
+# line and no input position, FNR being zeroed for the assignment -- and
+# restored after it, which undoes an assignment *to* FNR.
+fmsg_case '{ print $1 }' abc.txt 'FS=((' abc.txt
+fmsg_case '{print}' abc.txt 'v=\q' abc.txt
+fmsg_case 'END { print FNR }' abc.txt FNR=10
+fmsg_case 'END { print NR }' abc.txt NR=10
+fmsg_case '{ print FNR }' FNR=10 abc.txt
+fmsg_case '{ print }' abc.txt v=1 /definitely/not/here
+fmsg_case '{ a[1] = 1; print }' abc.txt a=1 abc.txt
+fmsg_case 'function f() { } { print }' abc.txt f=1
+fmsg_case '{ print NF }' abc.txt NF=-1 abc.txt
+fmsg_case '{ print }' abc.txt if=1
+fmsg_case '{ print }' abc.txt length=1
+fmsg_case '{ print }' abc.txt ARGV=1
+fmsg_case '{ print x }' 'x=a
+b' abc.txt
+fmsg_case 'END { print NR }' abc.txt NR=2.5
+fmsg_case -v NF=-1 'BEGIN { print NF }'
+fmsg_case -v FNR=2.5 'BEGIN { print FNR }'
+fmsg_case -v 'FS=((' 'BEGIN { print "x" }'
+fmsg_case -v a=1 'BEGIN { a[1] = 1 }'
+fmsg_case -v f=1 'function f() { } BEGIN { print "x" }'
+fmsg_case -v if=1 'BEGIN { print "x" }'
+fmsg_case -v substr=1 'BEGIN { print "x" }'
+fmsg_case -v ENVIRON=1 'BEGIN { print "x" }'
+fmsg_case -v 'x=a
+b' 'BEGIN { print x }'
+fmsg_case -v '1x=1' 'BEGIN { print "x" }'
+file_case -v x 'BEGIN { print "x" }'
+
+# --- NR and FNR are C longs ----------------------------------------------------
+# gawk keeps a `long` beside each: an assignment sets both, a record counts the
+# long, and a read gives the long whenever the two disagree.
+fmsg_case '{ NR = 2.5; print NR; NR = "7x"; print NR; exit }' abc.txt
+fmsg_case 'NR == 1 { NR = 10.5 } { print NR, FNR }' abc.txt
+fmsg_case '{ NR = -0; print NR; x = NR ""; print x; exit }' abc.txt
+fmsg_case '{ NR = "10"; print (NR < 9); exit }' abc.txt
+fmsg_case '{ FNR = 7.9 } END { print FNR, NR }' abc.txt
+fmsg_case 'BEGIN { getline NR < "abc.txt"; print NR }'
+fmsg_case 'BEGIN { NR = 2.5; print NR }'
+# And in a diagnostic's prefix: FILENAME as a number has no text to show,
+# and C's `%s` stops at a NUL.
+fmsg_case '{ FILENAME = 5; print 1/z }' abc.txt
+fmsg_case '{ FILENAME = "a" sprintf("%c", 0) "b"; print 1/z }' abc.txt
+fmsg_case '{ FNR = 1e30; print 1/z }' abc.txt
+fmsg_case '{ FNR = 2.9; print 1/z }' abc.txt
+
+# --- substr, and the math functions' warnings -----------------------------------
+# gawk 5.2.1 truncates substr's arguments; it does not round them.
+fmsg_case 'BEGIN { print substr("hello", 1.5, 2.4) "|" substr("hello", 2.7) "|" substr("hello", 0.9, 2) "|" substr("hello", 2, 0.9) "|" substr("hello", 2, 1.9) "|" }'
+fmsg_case 'BEGIN { print substr("hello", "x") "|" substr("hello", 2, "x") "|" substr("hello", 1e30) "|" substr("hello", -1e30, 1e30) "|" substr("hello", 0, 2) "|" substr("hello", -1, 3) "|" substr("", 1) "|" }'
+fmsg_case 'BEGIN { n = log(-1); print substr("hello", n) "|" substr("hello", 2, n) "|" }'
+fmsg_case 'BEGIN { print exp(-746) }'
+fmsg_case 'BEGIN { print log(-1); x = -0; print log(x); print log(0); print sqrt(-4); print sqrt(x); print log(-0.5) }'
+fmsg_case 'BEGIN { x = 1
+ print log(-2.5e10) }'
+
+# A multi-character RS is a regex here, as in gawk without --posix, mawk and
+# the one true awk; gawk --posix takes its first character. See main.rs.
+xfail_case 'a multi-character RS is a regex here; gawk --posix uses its first character' \
+  abc 'BEGIN { RS = "ab" } { print NR ": " $0 }'
 
 # --- errors -----------------------------------------------------------------
 # Parse errors: only *whether* there was a diagnostic is compared.

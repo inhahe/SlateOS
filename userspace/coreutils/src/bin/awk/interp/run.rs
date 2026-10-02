@@ -10,8 +10,9 @@
 //! ([`Interp::loc`]) -- gawk's `sourceline` -- which is what every diagnostic
 //! raised while it runs names.
 
+use super::null_redirect;
 use super::{Array, Cell, Fatal, Flow, Fs, Interp, MainRead, R, count_chars, expand_ampersand};
-use super::{index_of, round_half_up, seconds_since_epoch, split_with};
+use super::{index_of, seconds_since_epoch, split_with};
 use crate::ast::{BinOp, Builtin, CmpOp, RedirMode, V_NR, V_RLENGTH, V_RSTART, V_SUBSEP, VarRef};
 use crate::compile::{Code, Instr, Op};
 use crate::value::{Str, Value, c_long, calc_exp, compare};
@@ -81,7 +82,7 @@ impl Ctx {
 /// An instruction stream that broke its own invariants: the compiler emitted
 /// something the loop cannot run. It is a bug here, never the program's.
 fn internal(what: &str) -> Fatal {
-    Fatal(format!("fatal: internal error: {what}"))
+    Fatal::Said(format!("fatal: internal error: {what}"))
 }
 
 impl Interp {
@@ -125,12 +126,12 @@ impl Interp {
                     self.push(val);
                 }
                 Op::Arr(v) => {
-                    let a = self.array_ref(*v);
+                    let a = self.array_of(*v)?;
                     self.stack.push(Item::Arr(a));
                 }
                 Op::Elem(v, n) => {
                     let key = self.pop_key(*n)?;
-                    let a = self.array_ref(*v);
+                    let a = self.array_of(*v)?;
                     // Referring to `a[k]` *creates* it, which is why `if (a[k]
                     // == "") ...` makes `k in a` true afterwards. Every awk does
                     // this and programs test for it.
@@ -147,7 +148,7 @@ impl Interp {
                 Op::PlaceVar(v) => self.stack.push(Item::Place(Place::Var(*v))),
                 Op::PlaceElem(v, n) => {
                     let key = self.pop_key(*n)?;
-                    let a = self.array_ref(*v);
+                    let a = self.array_of(*v)?;
                     self.stack.push(Item::Place(Place::Elem(a, key)));
                 }
                 Op::PlaceField => {
@@ -233,7 +234,7 @@ impl Interp {
                 }
                 Op::In(arr, n) => {
                     let key = self.pop_key(*n)?;
-                    let a = self.array_ref(*arr);
+                    let a = self.array_of(*arr)?;
                     let present = a.borrow().contains_key(&key);
                     self.push(Value::Num(f64::from(u8::from(present))));
                 }
@@ -289,7 +290,7 @@ impl Interp {
                     self.push(v);
                 }
                 Op::LengthArr(v) => {
-                    let a = self.array_ref(*v);
+                    let a = self.array_of(*v)?;
                     let n = a.borrow().len();
                     self.push(Value::Num(f64::from(u32::try_from(n).unwrap_or(u32::MAX))));
                 }
@@ -319,7 +320,7 @@ impl Interp {
                     };
                     let fmt = self.to_str(fmt);
                     let convfmt = self.string_of(crate::ast::V_CONVFMT);
-                    let text = crate::fmt::sprintf(&fmt, rest, &convfmt).map_err(Fatal)?;
+                    let text = crate::fmt::sprintf(&fmt, rest, &convfmt).map_err(Fatal::Said)?;
                     self.push(Value::str(text));
                 }
 
@@ -353,16 +354,16 @@ impl Interp {
 
                 Op::Delete(arr, n) => {
                     let key = self.pop_key(*n)?;
-                    let a = self.array_ref(*arr);
+                    let a = self.array_of(*arr)?;
                     a.borrow_mut().remove(&key);
                 }
                 Op::DeleteAll(arr) => {
-                    let a = self.array_ref(*arr);
+                    let a = self.array_of(*arr)?;
                     a.borrow_mut().clear();
                 }
                 Op::Next => {
                     if ctx != Ctx::Rule {
-                        return Err(Fatal(format!(
+                        return Err(Fatal::Said(format!(
                             "fatal: `next' cannot be called from a `{}' rule",
                             ctx.name()
                         )));
@@ -371,7 +372,7 @@ impl Interp {
                 }
                 Op::NextFile => {
                     if ctx != Ctx::Rule {
-                        return Err(Fatal(format!(
+                        return Err(Fatal::Said(format!(
                             "fatal: `nextfile' cannot be called from a `{}' rule",
                             ctx.name()
                         )));
@@ -379,6 +380,7 @@ impl Interp {
                     return Ok(Flow::NextFile);
                 }
                 Op::Exit(has) => {
+                    self.exited = true;
                     if *has {
                         // gawk's `(int) get_number_si(v)`: the C conversion,
                         // so `exit 1e30` is 0, not a saturated 255.
@@ -391,7 +393,7 @@ impl Interp {
                     return Ok(Flow::Exit);
                 }
                 Op::ForInStart(arr) => {
-                    let array = self.array_ref(*arr);
+                    let array = self.array_of(*arr)?;
                     let keys: Vec<Str> = array.borrow().keys().cloned().collect();
                     self.iters.push(ForIter {
                         keys,
@@ -546,14 +548,14 @@ impl Interp {
     fn field_number(&self, v: &Value) -> R<usize> {
         let n = c_long(v.to_num());
         if n < 0 {
-            return Err(Fatal(format!("fatal: attempt to access field {n}")));
+            return Err(Fatal::Said(format!("fatal: attempt to access field {n}")));
         }
         let i = usize::try_from(n).unwrap_or(usize::MAX);
         // A field number this large is a typo, not a record; without the bound
         // `$1000000000 = "x"` allocates until the machine gives up. gawk has
         // no such bound, and would try.
         if i > 16_000_000 {
-            return Err(Fatal(format!(
+            return Err(Fatal::Said(format!(
                 "fatal: field {i} is beyond any plausible record"
             )));
         }
@@ -661,6 +663,9 @@ impl Interp {
 
     fn getline_file(&mut self, file: &Value, into: Option<&Place>) -> R<Value> {
         let name = self.to_str(file).as_ref().clone();
+        if name.is_empty() {
+            return Err(null_redirect("<"));
+        }
         let rs = self.rs.clone();
         let rec = match self.inputs.file(&name).and_then(|r| r.next(&rs)) {
             Ok(Some(r)) => r,
@@ -679,11 +684,12 @@ impl Interp {
 
     fn getline_cmd(&mut self, cmd: &Value, into: Option<&Place>) -> R<Value> {
         let name = self.to_str(cmd).as_ref().clone();
+        if name.is_empty() {
+            return Err(null_redirect("|"));
+        }
         let rs = self.rs.clone();
-        // The child inherits our standard output, so anything buffered has to
-        // be flushed before it can write. A flush that fails here is said
-        // again, and acted on, when the output is next written or closed.
-        let _ = self.out.flush(None);
+        // Nothing is flushed first: the command writes into our pipe, not to
+        // our standard output, and gawk's `gawk_popen` does not flush either.
         let rec = match self.inputs.command(&name).and_then(|r| r.next(&rs)) {
             Ok(Some(r)) => r,
             Ok(None) => return Ok(Value::Num(0.0)),
@@ -712,51 +718,7 @@ impl Interp {
             Builtin::Substr => {
                 let s = self.to_str(&arg(0));
                 let chars: Vec<ch::Ch> = ch::chars(&s).collect();
-                let len = chars.len();
-                // The start and the length are *rounded*, not truncated, so
-                // `substr(s, 1.5, 2.4)` takes two characters from the second.
-                //
-                // A start below 1 becomes 1 and the length is kept, so
-                // `substr("Alpha1", 0, 3)` is `Alp` rather than `Al`. The awks
-                // are split on this -- mawk measures the length from the
-                // out-of-range start and drops the part that falls off the
-                // front -- and POSIX's wording ("the at most n-character
-                // substring that begins at position m") does not settle it.
-                // This follows gawk and the one true awk, which are the two a
-                // script is most likely to have been written against.
-                let m = round_half_up(num(1));
-                let n = if args.len() > 2 {
-                    round_half_up(num(2))
-                } else {
-                    f64::INFINITY
-                };
-                let lo = m.max(1.0);
-                let end = if n.is_infinite() {
-                    f64::INFINITY
-                } else {
-                    lo + n
-                };
-                #[allow(clippy::cast_precision_loss)]
-                let hi = if end.is_infinite() {
-                    (len as f64) + 1.0
-                } else {
-                    end.min((len as f64) + 1.0)
-                };
-                // Not `hi <= lo`: either may be NaN -- `substr($0, "x")` is a
-                // legal call -- and an empty result is the right answer then.
-                if hi.partial_cmp(&lo) != Some(std::cmp::Ordering::Greater) {
-                    return Ok(Value::str(Str::new()));
-                }
-                #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
-                let (a, bnd) = (
-                    (lo as usize).saturating_sub(1),
-                    (hi as usize).saturating_sub(1),
-                );
-                let mut out = Str::new();
-                for c in chars.get(a..bnd).unwrap_or_default() {
-                    c.push_to(&mut out);
-                }
-                Value::str(out)
+                Value::str(substr(&chars, num(1), (args.len() > 2).then(|| num(2))))
             }
             Builtin::Index => {
                 let hay = self.to_str(&arg(0));
@@ -766,9 +728,33 @@ impl Interp {
             Builtin::Sin => Value::Num(num(0).sin()),
             Builtin::Cos => Value::Num(num(0).cos()),
             Builtin::Atan2 => Value::Num(num(0).atan2(num(1))),
-            Builtin::Exp => Value::Num(num(0).exp()),
-            Builtin::Log => Value::Num(num(0).ln()),
-            Builtin::Sqrt => Value::Num(num(0).sqrt()),
+            Builtin::Exp => {
+                let d = num(0);
+                let res = d.exp();
+                // gawk warns when C's `exp` sets ERANGE: a finite argument
+                // whose result overflowed to infinity or underflowed to 0.
+                // (A subnormal result is not one: `exp(-710)` is quiet.)
+                if d.is_finite() && (res.is_infinite() || res == 0.0) {
+                    let shown = crate::fmt::sprintf_one_number(b"%g", d);
+                    let mut message = b"exp: argument ".to_vec();
+                    message.extend_from_slice(&shown);
+                    message.extend_from_slice(b" is out of range");
+                    self.warning(&message);
+                }
+                Value::Num(res)
+            }
+            Builtin::Log | Builtin::Sqrt => {
+                let d = num(0);
+                // `-0` is not negative here, as it is not to C's `<`.
+                if d < 0.0 {
+                    let name = if b == Builtin::Log { "log" } else { "sqrt" };
+                    let shown = crate::fmt::sprintf_one_number(b"%g", d);
+                    let mut message = format!("{name}: received negative argument ").into_bytes();
+                    message.extend_from_slice(&shown);
+                    self.warning(&message);
+                }
+                Value::Num(if b == Builtin::Log { d.ln() } else { d.sqrt() })
+            }
             Builtin::Int => Value::Num(num(0).trunc()),
             Builtin::Rand => Value::Num(self.next_random()),
             Builtin::Srand => {
@@ -800,31 +786,56 @@ impl Interp {
                 Value::str(out)
             }
             Builtin::System => {
+                // Everything buffered is written first, every redirection
+                // too (gawk's `flush_io`), or the command's output and ours
+                // come out in the wrong order.
+                self.flush_io()?;
                 let cmd = self.to_str(&arg(0));
-                // Everything buffered must be written before the child runs, or
-                // the child's output and ours come out in the wrong order.
-                self.out
-                    .flush(None)
-                    .map_err(|e| Fatal(format!("flush: {}", coreutils::errmsg::strerror(&e))))?;
+                // An empty command runs nothing and is 0.
+                if cmd.is_empty() {
+                    return Ok(Value::Num(0.0));
+                }
                 match crate::io::shell(&cmd).status() {
-                    Ok(s) => Value::Num(f64::from(s.code().unwrap_or(0))),
+                    Ok(s) => Value::Num(f64::from(raw_status(s))),
                     Err(_) => Value::Num(-1.0),
                 }
             }
             Builtin::Close => {
                 let name = self.to_str(&arg(0));
-                if let Some(code) = self.inputs.close(&name) {
-                    return Ok(Value::Num(f64::from(code)));
+                // gawk syncs standard output first; a failure there is not
+                // this close's to report.
+                let _ = self.out.flush_stdout();
+                if self.inputs.close(&name) {
+                    return Ok(Value::Num(0.0));
                 }
                 match self.out.close(&name) {
-                    Some(code) => Value::Num(f64::from(code)),
+                    // Under `--posix` a successful close is 0, whatever a
+                    // command exited with.
+                    Some(Ok(())) => Value::Num(0.0),
+                    Some(Err(e)) => {
+                        return Err(Fatal::Said(format!(
+                            "fatal: flush to \"{}\" failed: {}",
+                            String::from_utf8_lossy(&name),
+                            coreutils::errmsg::strerror(&e)
+                        )));
+                    }
                     None => Value::Num(-1.0),
                 }
             }
             Builtin::Fflush => {
                 let name = args.first().map(|v| self.to_str(v).as_ref().clone());
-                let res = self.out.flush(name.as_deref());
-                Value::Num(if res.is_ok() { 0.0 } else { -1.0 })
+                match name {
+                    // `fflush()` and `fflush("")` both flush everything.
+                    None => {
+                        self.flush_io()?;
+                        Value::Num(0.0)
+                    }
+                    Some(n) if n.is_empty() => {
+                        self.flush_io()?;
+                        Value::Num(0.0)
+                    }
+                    Some(n) => self.fflush_one(&n)?,
+                }
             }
             // These take arrays, patterns or targets, and have instructions
             // of their own.
@@ -832,6 +843,50 @@ impl Interp {
                 return Err(internal("a built-in with its own instruction"));
             }
         })
+    }
+
+    /// `fflush(name)`, as gawk's `do_fflush` answers it.
+    fn fflush_one(&mut self, name: &[u8]) -> R<Value> {
+        let shown = String::from_utf8_lossy(name).into_owned();
+        if let Some(pipe) = self.inputs.open_as(name) {
+            let what = if pipe { "pipe" } else { "file" };
+            let message =
+                format!("fflush: cannot flush: {what} `{shown}' opened for reading, not writing");
+            self.warning(message.as_bytes());
+            return Ok(Value::Num(-1.0));
+        }
+        match self.out.flush_one(name) {
+            Some(Ok(())) => return Ok(Value::Num(0.0)),
+            Some(Err(e)) if coreutils::stdfd::reader_gone(&e) && name == b"/dev/stdout" => {
+                return Err(Fatal::ReaderGone);
+            }
+            Some(Err(e)) => {
+                return Err(Fatal::Said(format!(
+                    "fatal: fflush: cannot flush file `{shown}': {}",
+                    coreutils::errmsg::strerror(&e)
+                )));
+            }
+            None => {}
+        }
+        // The standard streams flush by name whether or not anything was
+        // redirected to them (`stdfile`).
+        if name == b"/dev/stdout" {
+            return match self.out.flush_stdout() {
+                Ok(()) => Ok(Value::Num(0.0)),
+                Err(e) if coreutils::stdfd::reader_gone(&e) => Err(Fatal::ReaderGone),
+                Err(e) => Err(Fatal::Said(format!(
+                    "fatal: fflush: cannot flush standard output: {}",
+                    coreutils::errmsg::strerror(&e)
+                ))),
+            };
+        }
+        if name == b"/dev/stderr" {
+            // Standard error is not buffered here; there is nothing to flush.
+            return Ok(Value::Num(0.0));
+        }
+        let message = format!("fflush: `{shown}' is not an open file, pipe or co-process");
+        self.warning(message.as_bytes());
+        Ok(Value::Num(-1.0))
     }
 
     /// `split(s, arr [, sep])`: `sep` a regex literal, text, or the current
@@ -851,7 +906,7 @@ impl Interp {
             None => self.split_record(&s)?,
             Some(f) => split_with(f, &s, false)?,
         };
-        let a = self.array_ref(arr);
+        let a = self.array_of(arr)?;
         {
             let mut m = a.borrow_mut();
             m.clear();
@@ -919,6 +974,64 @@ impl Interp {
     }
 }
 
+/// `substr(s, m [, n])` over `s`'s characters, as gawk 5.2.1's `do_substr`
+/// computes it: the start and the length are *truncated*, not rounded --
+/// `substr("hello", 1.5, 2.4)` is `he` -- a start below 1 (or NaN) is 1 with
+/// the length kept, so `substr("hello", 0, 2)` is `he` too, and a length
+/// below 1 (or NaN) is the empty string.
+///
+/// (This rounded once, on the belief that gawk did. Its source says
+/// otherwise, and so does running it.)
+fn substr(chars: &[ch::Ch], start: f64, length: Option<f64>) -> Str {
+    // `! (d >= 1)`, so NaN takes the branch, as in gawk.
+    let start = if start >= 1.0 { start } else { 1.0 };
+    let length = match length {
+        Some(n) if n >= 1.0 => Some(n),
+        Some(_) => return Str::new(),
+        None => None,
+    };
+    // C's conversion to `size_t`: truncation, saturating where gawk clamps.
+    #[allow(
+        clippy::cast_possible_truncation,
+        clippy::cast_sign_loss,
+        clippy::cast_precision_loss
+    )]
+    let to_size = |d: f64| -> usize {
+        if d >= usize::MAX as f64 {
+            usize::MAX
+        } else {
+            d as usize
+        }
+    };
+    let indx = to_size(start - 1.0);
+    let len = chars.len();
+    if indx >= len {
+        return Str::new();
+    }
+    let rest = len.saturating_sub(indx);
+    let n = length.map_or(rest, |n| to_size(n).min(rest));
+    let mut out = Str::new();
+    for c in chars.get(indx..indx.saturating_add(n)).unwrap_or_default() {
+        c.push_to(&mut out);
+    }
+    out
+}
+
+/// `system`'s answer under `--posix`: the full wait status, as POSIX says
+/// (`exit 3` is 768, death by signal 9 is 9), where gawk otherwise gives the
+/// exit code.
+#[cfg(unix)]
+fn raw_status(s: std::process::ExitStatus) -> i32 {
+    use std::os::unix::process::ExitStatusExt;
+    s.into_raw()
+}
+
+/// Where there is no wait status to give, the exit code is all there is.
+#[cfg(not(unix))]
+fn raw_status(s: std::process::ExitStatus) -> i32 {
+    s.code().unwrap_or(0)
+}
+
 /// `l op r`, with gawk's refusal of a zero divisor.
 fn arith(op: BinOp, l: f64, r: f64) -> R<f64> {
     Ok(match op {
@@ -931,13 +1044,13 @@ fn arith(op: BinOp, l: f64, r: f64) -> R<f64> {
         // hard error rather than a value.
         BinOp::Div => {
             if r == 0.0 {
-                return Err(Fatal("fatal: division by zero attempted".to_string()));
+                return Err(Fatal::Said("fatal: division by zero attempted".to_string()));
             }
             l / r
         }
         BinOp::Mod => {
             if r == 0.0 {
-                return Err(Fatal(
+                return Err(Fatal::Said(
                     "fatal: division by zero attempted in `%'".to_string(),
                 ));
             }
@@ -952,12 +1065,73 @@ fn arith(op: BinOp, l: f64, r: f64) -> R<f64> {
 /// `l op= r`: gawk names the assignment operator in its refusal.
 fn arith_assign(op: BinOp, l: f64, r: f64) -> R<f64> {
     match op {
-        BinOp::Div if r == 0.0 => Err(Fatal(
+        BinOp::Div if r == 0.0 => Err(Fatal::Said(
             "fatal: division by zero attempted in `/='".to_string(),
         )),
-        BinOp::Mod if r == 0.0 => Err(Fatal(
+        BinOp::Mod if r == 0.0 => Err(Fatal::Said(
             "fatal: division by zero attempted in `%='".to_string(),
         )),
         _ => arith(op, l, r),
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::panic, clippy::indexing_slicing)]
+mod tests {
+    use super::*;
+
+    fn sub(s: &str, start: f64, length: Option<f64>) -> String {
+        let chars: Vec<ch::Ch> = ch::chars(s.as_bytes()).collect();
+        String::from_utf8(substr(&chars, start, length)).unwrap()
+    }
+
+    /// gawk 5.2.1's `do_substr`, case by case as gawk printed them.
+    #[test]
+    fn substr_truncates_its_arguments_as_gawk_does() {
+        assert_eq!(sub("hello", 1.5, Some(2.4)), "he");
+        assert_eq!(sub("hello", 2.7, None), "ello");
+        assert_eq!(sub("hello", 0.9, Some(2.0)), "he");
+        assert_eq!(sub("hello", 2.0, Some(0.9)), "");
+        assert_eq!(sub("hello", 2.0, Some(1.9)), "e");
+        // A start below 1 is 1, the length kept.
+        assert_eq!(sub("hello", 0.0, Some(2.0)), "he");
+        assert_eq!(sub("hello", -1.0, Some(3.0)), "hel");
+        assert_eq!(sub("hello", -1e30, Some(1e30)), "hello");
+        // Past the end, or from nothing, is empty.
+        assert_eq!(sub("hello", 1e30, None), "");
+        assert_eq!(sub("", 1.0, None), "");
+        // NaN: a start that is not `>= 1` is 1; a length that is not is empty.
+        assert_eq!(sub("hello", f64::NAN, None), "hello");
+        assert_eq!(sub("hello", 2.0, Some(f64::NAN)), "");
+        // Characters, not bytes.
+        assert_eq!(sub("héllo", 2.0, Some(2.0)), "él");
+    }
+
+    /// The divisions gawk refuses at run time, worded as it words them.
+    #[test]
+    fn a_zero_divisor_names_its_operator() {
+        let said = |r: R<f64>| match r {
+            Err(Fatal::Said(m)) => m,
+            _ => panic!("expected a refusal"),
+        };
+        assert_eq!(
+            said(arith(BinOp::Div, 1.0, 0.0)),
+            "fatal: division by zero attempted"
+        );
+        assert_eq!(
+            said(arith(BinOp::Mod, 1.0, -0.0)),
+            "fatal: division by zero attempted in `%'"
+        );
+        assert_eq!(
+            said(arith_assign(BinOp::Div, 1.0, 0.0)),
+            "fatal: division by zero attempted in `/='"
+        );
+        assert_eq!(
+            said(arith_assign(BinOp::Mod, 1.0, 0.0)),
+            "fatal: division by zero attempted in `%='"
+        );
+        assert!(arith_assign(BinOp::Add, 1.0, 0.0).is_ok());
+        // `^` is gawk's, by squaring.
+        assert!(matches!(arith(BinOp::Pow, 2.0, -1074.0), Ok(v) if v == 0.0));
     }
 }

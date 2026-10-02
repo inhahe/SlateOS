@@ -40,12 +40,21 @@ use std::io::Read;
 use std::rc::Rc;
 
 /// An error that stops the program. awk has no exceptions; every one of these
-/// ends the run with a diagnostic and status 2.
-pub struct Fatal(pub String);
+/// ends the run.
+pub enum Fatal {
+    /// gawk's `fatal:` and its kin: said after `awk: ` and where the program
+    /// was, and the run ends with status 2.
+    Said(String),
+    /// Standard output's reader went away. gawk dies of `SIGPIPE` there; this
+    /// system does not use signals for process control, so -- as everywhere
+    /// in coreutils (`stdfd::reader_gone`) -- the run ends quietly, with the
+    /// status it had already earned.
+    ReaderGone,
+}
 
 impl From<String> for Fatal {
     fn from(s: String) -> Fatal {
-        Fatal(s)
+        Fatal::Said(s)
     }
 }
 
@@ -58,7 +67,7 @@ impl From<String> for Fatal {
 /// reading, and it is what `gawk` does with its own regex-cost limits.
 impl From<ere::MatchLimit> for Fatal {
     fn from(e: ere::MatchLimit) -> Fatal {
-        Fatal(e.to_string())
+        Fatal::Said(e.to_string())
     }
 }
 
@@ -170,8 +179,17 @@ pub struct Interp {
     inputs: Inputs,
     re_cache: HashMap<Str, Rc<Regex>>,
     main: MainInput,
+    /// gawk's C `long`s behind `NR` and `FNR`. The variables keep whatever was
+    /// assigned to them, but a read gives the long whenever the two disagree
+    /// -- `NR = 2.5` reads back 2, `NR = "7x"` reads back `7x` -- and the
+    /// counting is the long's (see [`Interp::counter`]).
+    nr: i64,
+    fnr: i64,
     /// Set by `exit`; also the process's status.
     exit_code: Option<i32>,
+    /// An `exit` statement ran: gawk's `exiting`, which keeps an error writing
+    /// standard output at exit from turning a 0 into a 1.
+    exited: bool,
     rng: u64,
     seed: f64,
     /// The run's escape warnings: gawk says each once per run, so this is the
@@ -228,7 +246,10 @@ impl Interp {
                 stdin_used: false,
                 done: false,
             },
+            nr: 0,
+            fnr: 0,
             exit_code: None,
+            exited: false,
             rng: 0,
             seed: 0.0,
             warnings: Warnings::default(),
@@ -313,12 +334,18 @@ impl Interp {
             Some(loc) => crate::source::prefix(&self.prog.sources, loc),
             None => Str::new(),
         };
-        // gawk keeps FNR in a C `long`, truncated from whatever was assigned.
-        let fnr = self.get_global(V_FNR).to_num().trunc();
-        if fnr.is_finite() && fnr > 0.0 {
-            out.extend_from_slice(b"(FILENAME=");
-            out.extend_from_slice(&self.string_of(V_FILENAME));
-            out.extend_from_slice(format!(" FNR={fnr:.0}) ").as_bytes());
+        // gawk tests its C `long` FNR, not the variable.
+        if self.fnr > 0 {
+            out.push(b'(');
+            // `FILENAME=%.*s `, printed only when the value has a string at
+            // all -- a number assigned to it has none (`(FNR=1)` alone) --
+            // and, being C's `%s`, only up to a NUL.
+            if let Some(name) = self.filename_shown() {
+                out.extend_from_slice(b"FILENAME=");
+                out.extend_from_slice(&name);
+                out.push(b' ');
+            }
+            out.extend_from_slice(format!("FNR={}) ", self.fnr).as_bytes());
         }
         out
     }
@@ -335,6 +362,20 @@ impl Interp {
         coreutils::stdfd::diag_bytes(&line);
     }
 
+    /// `FILENAME` as gawk's `err()` prints it: nothing for a value that is
+    /// only a number (gawk's `stptr` is NULL until something formats it),
+    /// else the text up to its first NUL.
+    fn filename_shown(&self) -> Option<Str> {
+        match self.get_global(V_FILENAME) {
+            Value::Num(_) => None,
+            other => {
+                let text = self.to_str(&other);
+                let end = text.iter().position(|b| *b == 0).unwrap_or(text.len());
+                Some(text.get(..end).unwrap_or_default().to_vec())
+            }
+        }
+    }
+
     /// Write whatever the escape layers have said since last time with no
     /// location: what gawk does for a `var=value` operand, whose escapes are
     /// resolved between records rather than by a statement (measured: `awk:
@@ -347,17 +388,61 @@ impl Interp {
         emit_warnings(&mut self.warnings, b"");
     }
 
-    /// Set a variable named on the command line by `-v` or as `var=value`.
-    ///
-    /// The value is a strnum, so `-v n=10` compares numerically — which is what
-    /// makes `awk -v n=10 '$1 == n'` work on a numeric column. Its escapes are
-    /// already resolved: [`escape::string`] is the caller's, since `-v` is
-    /// resolved before the program is even parsed.
+    /// A `var=value` operand, as gawk's `arg_assign` takes one: refused if
+    /// the name is a keyword, a built-in or a function, or the value holds a
+    /// newline; then the value's escapes, said where nothing is placed, and
+    /// the assignment.
     ///
     /// # Errors
-    /// Returns a diagnostic if the name is one of the built-in arrays, or if
-    /// the variable is `FS` or `RS` and its value will not compile as a regex.
-    pub fn assign_cli(&mut self, name: &str, value: Str) -> Result<(), String> {
+    /// gawk's fatal error for each refusal, and for an assignment that fails.
+    fn assign_operand(&mut self, name: &str, raw: &[u8]) -> R<()> {
+        // gawk forgets where it was for this: what it says has no line, and
+        // the line stays forgotten until the next instruction sets it. And it
+        // zeroes FNR for the whole of it, so nothing said has an input
+        // position either; FNR comes back only if the assignment succeeds.
+        self.loc = None;
+        let saved = self.fnr;
+        self.fnr = 0;
+        if let Some(refusal) = cli_refusal(name, raw) {
+            return Err(Fatal::Said(refusal));
+        }
+        if self.prog.funcs.iter().any(|f| f.name == name) {
+            return Err(Fatal::Said(format!(
+                "fatal: cannot use function `{name}' as variable name"
+            )));
+        }
+        let value = escape::string(raw, true, &mut self.warnings);
+        self.say_warnings_unplaced();
+        self.assign_value(name, value)?;
+        self.fnr = saved;
+        Ok(())
+    }
+
+    /// Set a variable named by `-v` (or `-F`), its name and value already
+    /// checked and its escapes already resolved before the program was
+    /// parsed, as gawk does it.
+    ///
+    /// gawk zeroes `FNR` around the assignment and restores it after, so a
+    /// failure is said with no input position, and an assignment *to* `FNR`
+    /// is undone: `-v FNR=2.5` leaves BEGIN reading 0, as `awk 'END { print
+    /// FNR }' f FNR=10` reads `f`'s count. Measured.
+    ///
+    /// # Errors
+    /// gawk's fatal error for a name that is an array, or a variable whose
+    /// assignment fails (`NF` negative, `FS` not compiling).
+    pub fn assign_cli(&mut self, name: &str, value: Str) -> R<()> {
+        self.loc = None;
+        let saved = self.fnr;
+        self.fnr = 0;
+        self.assign_value(name, value)?;
+        self.fnr = saved;
+        Ok(())
+    }
+
+    /// The assignment itself: refused for a name that holds an array, else
+    /// through `set_var` -- a strnum, so `-v n=10` compares numerically, which
+    /// is what makes `awk -v n=10 '$1 == n'` work on a numeric column.
+    fn assign_value(&mut self, name: &str, value: Str) -> R<()> {
         let Some(slot) = self.prog.global_names.iter().position(|n| n == name) else {
             // A name the program never mentions still has to be settable: a
             // script that reads `-v debug=1` only in a branch it does not have
@@ -365,17 +450,14 @@ impl Interp {
             return Ok(());
         };
         if matches!(self.globals.get(slot), Some(Cell::Arr(_))) {
-            return Err(format!(
-                "{name} is an array and cannot be assigned on the command line"
-            ));
+            return Err(Fatal::Said(format!(
+                "fatal: attempt to use array `{name}' in a scalar context"
+            )));
         }
         // Through `set_var`, not `set_global`: `-F:` and `-v RS=;` have to take
         // effect, and it is `set_var` that recompiles the splitter when `FS` or
-        // `RS` changes. Writing the slot directly stored the new value where
-        // nothing would read it until the next assignment.
+        // `RS` changes.
         self.set_var(VarRef::Global(slot), Value::from_input(value))
-            .map_err(|e| e.0)?;
-        Ok(())
     }
 
     /// Run the whole program, returning the process exit status.
@@ -389,33 +471,55 @@ impl Interp {
     /// fatal error does not retract the lines that were written before it.
     /// `awk '{print}' good.txt missing.txt` prints `good.txt` and then fails;
     /// so does any program that prints for an hour and then divides by zero.
+    /// (It did not, once: the body was one `?`-chain that skipped its flush on
+    /// the error path, and `process::exit` runs no destructors. Measured
+    /// against gawk, which prints it.)
     ///
-    /// It did not, and the bug was invisible for as long as it existed. The
-    /// body below is one `?`-chain, so a fatal skipped the `finish_all` at the
-    /// end of it; `die` then reached `process::exit`, which does not run
-    /// destructors, so the `BufWriter` holding an entire run's output was
-    /// dropped without being written. Nothing reported it — the output simply
-    /// was not there. Measured against gawk, which prints it.
+    /// # Exit is gawk's `Op_atexit`
     ///
-    /// The old harness could not have caught this: it compared stdout through
-    /// `$(...)` for cases that were all a single line, and it had no file
-    /// operands at all, so the two-file case that shows it plainly could not
-    /// be written.
+    /// With the program done, gawk forgets where it was (its line, not its
+    /// input position), closes every redirection -- one that will not flush is
+    /// a fatal error, `flush to "f" failed` -- and then flushes standard
+    /// output, where a failure is only a warning: `error writing standard
+    /// output`, and status 1 unless the program said `exit`. After a fatal
+    /// error none of that is said; C's `exit` flushes what it can, quietly.
     pub fn run(&mut self) -> R<i32> {
         let outcome = self.run_to_end();
-        let flushed = self
-            .out
-            .finish_all()
-            .map_err(|e| Fatal(format!("write error: {}", coreutils::errmsg::strerror(&e))));
         match outcome {
-            // The program's own failure is the cause and wins the report; a
-            // flush that also failed is a consequence of the same full disk.
-            Err(e) => Err(e),
             Ok(code) => {
-                flushed?;
-                Ok(code)
+                self.loc = None;
+                if let Err((name, e)) = self.out.finish_redirects() {
+                    self.out.finish_quietly();
+                    return Err(Fatal::Said(format!(
+                        "fatal: flush to \"{}\" failed: {}",
+                        String::from_utf8_lossy(&name),
+                        coreutils::errmsg::strerror(&e)
+                    )));
+                }
+                match self.out.finish_stdout() {
+                    Ok(()) => Ok(code),
+                    Err(e) if coreutils::stdfd::reader_gone(&e) => Err(Fatal::ReaderGone),
+                    Err(e) => {
+                        let message = format!(
+                            "error writing standard output: {}",
+                            coreutils::errmsg::strerror(&e)
+                        );
+                        self.warning(message.as_bytes());
+                        Ok(if code == 0 && !self.exited { 1 } else { code })
+                    }
+                }
+            }
+            Err(e) => {
+                self.out.finish_quietly();
+                Err(e)
             }
         }
+    }
+
+    /// The status the run had earned: what `exit` said, or 0.
+    #[must_use]
+    pub fn exit_status(&self) -> i32 {
+        self.exit_code.unwrap_or(0)
     }
 
     /// The program itself, without the flush that has to happen either way.
@@ -440,7 +544,7 @@ impl Interp {
                 MainRead::Record(r) => r,
                 MainRead::Eof => return Ok(()),
                 MainRead::Failed(e) => {
-                    return Err(Fatal(format!(
+                    return Err(Fatal::Said(format!(
                         "fatal: error reading input file `{}': {}",
                         String::from_utf8_lossy(&self.string_of(V_FILENAME)),
                         coreutils::errmsg::strerror(&e)
@@ -508,7 +612,7 @@ impl Interp {
                 // `echo x | gawk --posix '{print FILENAME}'` prints `-`
                 // (measured), and so does its diagnostics' `(FILENAME=- FNR=1)`.
                 self.set_global(V_FILENAME, Value::str(b"-".to_vec()));
-                self.set_global(V_FNR, Value::Num(0.0));
+                self.set_counter(V_FNR, 0);
                 return Ok(true);
             }
             let key = format!("{}", self.main.argv).into_bytes();
@@ -525,18 +629,12 @@ impl Interp {
                 continue;
             }
             if let Some((name, value)) = command_assignment(&text) {
-                // gawk's `arg_assign`: escapes resolved with `ELIDE_BACK_NL`,
-                // the same as `-v`.
-                let value = escape::string(&value, true, &mut self.warnings);
-                self.say_warnings_unplaced();
-                // A refusal (an array named, or an `FS` that will not compile)
-                // is gawk's fatal error here too.
-                self.assign_cli(&name, value).map_err(Fatal)?;
+                self.assign_operand(&name, &value)?;
                 continue;
             }
             self.main.opened_any = true;
             self.set_global(V_FILENAME, Value::str(text.as_ref().clone()));
-            self.set_global(V_FNR, Value::Num(0.0));
+            self.set_counter(V_FNR, 0);
             let src: Box<dyn Read> = if text.as_ref() == b"-" || text.as_ref() == b"/dev/stdin" {
                 self.main.stdin_used = true;
                 Box::new(std::io::stdin())
@@ -554,7 +652,7 @@ impl Interp {
                         // rendering of a parser's internals but a plain report
                         // about a file, and a script that greps awk's stderr
                         // should not have to know which awk it got.
-                        return Err(Fatal(format!(
+                        return Err(Fatal::Said(format!(
                             "fatal: cannot open file `{}' for reading: {}",
                             String::from_utf8_lossy(&text),
                             coreutils::errmsg::strerror(&e)
@@ -589,37 +687,92 @@ impl Interp {
             }
         }
         line.extend_from_slice(&ors);
-        self.emit(&line, target)
+        self.emit(&line, target, "print")
     }
 
     fn printf_values(&mut self, vals: &[Value], target: Option<(RedirMode, Str)>) -> R<()> {
         let Some(fmt) = vals.first() else {
-            return Err(Fatal("printf: no format string".to_string()));
+            return Err(Fatal::Said("printf: no format string".to_string()));
         };
         let fmt = self.to_str(fmt);
         let convfmt = self.string_of(V_CONVFMT);
         let rest = vals.get(1..).unwrap_or_default();
-        let text = crate::fmt::sprintf(&fmt, rest, &convfmt).map_err(Fatal)?;
-        self.emit(&text, target)
+        let text = crate::fmt::sprintf(&fmt, rest, &convfmt).map_err(Fatal::Said)?;
+        self.emit(&text, target, "printf")
     }
 
-    fn emit(&mut self, bytes: &[u8], target: Option<(RedirMode, Str)>) -> R<()> {
-        let res = match &target {
-            None => self.out.write_stdout(bytes),
-            Some((mode, name)) => self.out.write_to(name, *mode, bytes),
-        };
-        res.map_err(|e| {
-            let where_ = match &target {
-                None => "standard output".to_string(),
-                Some((_, n)) => String::from_utf8_lossy(n).into_owned(),
+    /// Write a print's output where it goes, failing as gawk's `efwrite`
+    /// fails: `from` is the statement, `print` or `printf`, which gawk names.
+    fn emit(&mut self, bytes: &[u8], target: Option<(RedirMode, Str)>, from: &str) -> R<()> {
+        let Some((mode, name)) = target else {
+            return match self.out.write_stdout(bytes) {
+                Ok(()) => Ok(()),
+                Err(e) if coreutils::stdfd::reader_gone(&e) => Err(Fatal::ReaderGone),
+                Err(e) => Err(Fatal::Said(format!(
+                    "fatal: {from} to \"standard output\" failed: {}",
+                    coreutils::errmsg::strerror(&e)
+                ))),
             };
-            Fatal(format!("{where_}: {}", coreutils::errmsg::strerror(&e)))
-        })
+        };
+        if name.is_empty() {
+            return Err(null_redirect(redirect_symbol(mode)));
+        }
+        let shown = String::from_utf8_lossy(&name);
+        match self.out.write_to(&name, mode, bytes) {
+            Ok(()) => Ok(()),
+            Err(crate::io::OutError::Open(e)) => Err(Fatal::Said(match mode {
+                RedirMode::Pipe => format!(
+                    "fatal: cannot open pipe `{shown}' for output: {}",
+                    coreutils::errmsg::strerror(&e)
+                ),
+                RedirMode::Truncate | RedirMode::Append => format!(
+                    "fatal: cannot redirect to `{shown}': {}",
+                    coreutils::errmsg::strerror(&e)
+                ),
+            })),
+            // A write that reached standard output through `/dev/stdout`
+            // meets its reader going away as standard output does.
+            Err(crate::io::OutError::Write(e))
+                if coreutils::stdfd::reader_gone(&e)
+                    && (name.as_slice() == b"/dev/stdout" || name.as_slice() == b"-") =>
+            {
+                Err(Fatal::ReaderGone)
+            }
+            Err(crate::io::OutError::Write(e)) => Err(Fatal::Said(format!(
+                "fatal: {from} to \"{shown}\" failed: {}",
+                coreutils::errmsg::strerror(&e)
+            ))),
+        }
+    }
+
+    /// gawk's `flush_io`: standard output, then every redirection, each
+    /// failure fatal as gawk words it. What `fflush()` is, and what `system`
+    /// does before it runs anything.
+    fn flush_io(&mut self) -> R<()> {
+        match self.out.flush_all() {
+            Ok(()) => Ok(()),
+            Err(crate::io::FlushError::Stdout(e)) if coreutils::stdfd::reader_gone(&e) => {
+                Err(Fatal::ReaderGone)
+            }
+            Err(crate::io::FlushError::Stdout(e)) => Err(Fatal::Said(format!(
+                "fatal: fflush: cannot flush standard output: {}",
+                coreutils::errmsg::strerror(&e)
+            ))),
+            Err(crate::io::FlushError::Sink { name, pipe, err }) => Err(Fatal::Said(format!(
+                "fatal: {} flush of `{}' failed: {}",
+                if pipe { "pipe" } else { "file" },
+                String::from_utf8_lossy(&name),
+                coreutils::errmsg::strerror(&err)
+            ))),
+        }
     }
 
     // ---- variables and fields --------------------------------------------
 
     fn get_var(&mut self, v: VarRef) -> R<Value> {
+        if let VarRef::Global(slot @ (V_NR | V_FNR)) = v {
+            return Ok(self.counter(slot));
+        }
         if v == VarRef::Global(V_NF) {
             self.ensure_split()?;
             let n = self.f.fields.len();
@@ -643,7 +796,7 @@ impl Interp {
                     // one refused rather than read as 0.
                     let n = c_long(val.to_num());
                     if n < 0 {
-                        return Err(Fatal("fatal: NF set to negative value".to_string()));
+                        return Err(Fatal::Said("fatal: NF set to negative value".to_string()));
                     }
                     let n = usize::try_from(n).unwrap_or(usize::MAX).min(16_000_000);
                     self.f.fields.resize(n, Str::new());
@@ -654,6 +807,17 @@ impl Interp {
                 V_FS | V_RS => {
                     self.set_global(slot, val);
                     return self.refresh_separators();
+                }
+                V_NR | V_FNR => {
+                    // gawk's `set_NR`: the long is the value's, truncated.
+                    let n = c_long(val.to_num());
+                    self.set_global(slot, val);
+                    if slot == V_NR {
+                        self.nr = n;
+                    } else {
+                        self.fnr = n;
+                    }
+                    return Ok(());
                 }
                 _ => {}
             }
@@ -675,9 +839,35 @@ impl Interp {
         }
     }
 
+    /// Count one more record in `NR` or `FNR`: the long, as gawk counts.
     fn bump(&mut self, slot: usize) {
-        let n = self.get_global(slot).to_num();
-        self.set_global(slot, Value::Num(n + 1.0));
+        let n = if slot == V_NR { self.nr } else { self.fnr }.wrapping_add(1);
+        self.set_counter(slot, n);
+    }
+
+    /// Set `NR` or `FNR` to a count, the variable and the long both.
+    fn set_counter(&mut self, slot: usize, n: i64) {
+        if slot == V_NR {
+            self.nr = n;
+        } else {
+            self.fnr = n;
+        }
+        #[allow(clippy::cast_precision_loss)]
+        self.set_global(slot, Value::Num(n as f64));
+    }
+
+    /// `NR` or `FNR` as a read gives it: gawk's `update_NR` replaces the
+    /// variable's value with the long whenever the two disagree, and keeps
+    /// what was assigned when they agree -- a string included.
+    fn counter(&self, slot: usize) -> Value {
+        let long = if slot == V_NR { self.nr } else { self.fnr };
+        let stored = self.get_global(slot);
+        #[allow(clippy::cast_precision_loss, clippy::float_cmp)]
+        if stored.to_num() == long as f64 {
+            stored
+        } else {
+            Value::Num(long as f64)
+        }
     }
 
     fn cell(&self, v: VarRef) -> Option<&Cell> {
@@ -695,6 +885,22 @@ impl Interp {
         if let Some(slot) = slot {
             *slot = c;
         }
+    }
+
+    /// The array a program names, refusing a global the command line made a
+    /// scalar first: `-v a=1` with `a[1]` in the program is gawk's `attempt to
+    /// use scalar `a' as an array`, said where the array is used.
+    fn array_of(&mut self, v: VarRef) -> R<Array> {
+        if let VarRef::Global(slot) = v
+            && let Some(Cell::Val(val)) = self.globals.get(slot)
+            && !matches!(val, Value::Uninit)
+        {
+            let name = self.prog.global_names.get(slot).map_or("?", String::as_str);
+            return Err(Fatal::Said(format!(
+                "fatal: attempt to use scalar `{name}' as an array"
+            )));
+        }
+        Ok(self.array_ref(v))
     }
 
     /// The array in a slot, creating it if the slot is still untouched.
@@ -824,7 +1030,7 @@ impl Interp {
     fn dynamic_regex(&mut self, text: &[u8]) -> R<Regex> {
         let compiled = crate::parse::compile_dynamic(text, &mut self.warnings);
         self.say_warnings();
-        compiled.map_err(Fatal)
+        compiled.map_err(Fatal::Said)
     }
 
     fn string_of(&self, slot: usize) -> Str {
@@ -969,15 +1175,6 @@ fn index_of(hay: &[u8], needle: &[u8]) -> f64 {
     }
 }
 
-/// POSIX rounds `substr`'s arguments to the nearest integer, halves away from
-/// zero — not C's truncation, which is why this is not `trunc`.
-fn round_half_up(v: f64) -> f64 {
-    if v.is_nan() {
-        return 0.0;
-    }
-    v.round()
-}
-
 /// Write `repl` into `out`, with `&` replaced by `matched`.
 fn expand_ampersand(repl: &[u8], matched: &[u8], out: &mut Str) {
     let mut i = 0usize;
@@ -1012,6 +1209,23 @@ fn expand_ampersand(repl: &[u8], matched: &[u8], out: &mut Str) {
     }
 }
 
+/// How gawk writes a redirection's operator in a diagnostic.
+fn redirect_symbol(mode: RedirMode) -> &'static str {
+    match mode {
+        RedirMode::Truncate => ">",
+        RedirMode::Append => ">>",
+        RedirMode::Pipe => "|",
+    }
+}
+
+/// gawk's refusal of a redirection to or from the empty string, which
+/// `redirect_string` makes before it tries anything.
+fn null_redirect(symbol: &str) -> Fatal {
+    Fatal::Said(format!(
+        "fatal: expression for `{symbol}' redirection has null string value"
+    ))
+}
+
 /// Open a main-input operand, refusing a directory as gawk does when it opens
 /// one (`iop_alloc` checks), rather than letting the first read fail.
 fn open_input(name: &[u8]) -> std::io::Result<std::fs::File> {
@@ -1020,6 +1234,35 @@ fn open_input(name: &[u8]) -> std::io::Result<std::fs::File> {
         return Err(std::io::Error::from(std::io::ErrorKind::IsADirectory));
     }
     Ok(f)
+}
+
+/// The names gawk refuses as a command-line variable under `--posix`
+/// (`check_special`): its keywords and built-in functions, less those marked
+/// as extensions (`func` is an ordinary name under `--posix`). `eval` is on the
+/// list because gawk's table does not mark it.
+const RESERVED: &[&str] = &[
+    "BEGIN", "END", "atan2", "break", "close", "continue", "cos", "delete", "do", "else", "eval",
+    "exit", "exp", "fflush", "for", "function", "getline", "gsub", "if", "in", "index", "int",
+    "length", "log", "match", "next", "nextfile", "print", "printf", "rand", "return", "sin",
+    "split", "sprintf", "sqrt", "srand", "sub", "substr", "system", "tolower", "toupper", "while",
+];
+
+/// What gawk's `arg_assign` refuses about a command-line assignment before it
+/// looks at the program -- a reserved name, a newline in the value -- worded
+/// as gawk words it; `None` if nothing.
+#[must_use]
+pub fn cli_refusal(name: &str, raw: &[u8]) -> Option<String> {
+    if RESERVED.contains(&name) {
+        return Some(format!(
+            "fatal: cannot use gawk builtin `{name}' as variable name"
+        ));
+    }
+    // POSIX allows no newline inside a string; the lexer says so for the
+    // program text, and this for the command line.
+    if raw.contains(&b'\n') {
+        return Some("fatal: POSIX does not allow physical newlines in string values".to_string());
+    }
+    None
 }
 
 /// Split `var=value` if that is what the argument is.
@@ -1046,4 +1289,53 @@ fn seconds_since_epoch() -> f64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map_or(0.0, |d| d.as_secs_f64())
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::panic)]
+mod tests {
+    use super::*;
+
+    /// gawk's `arg_assign` refusals that need no program: a reserved name
+    /// (`check_special`, POSIX names only) and a newline in the value.
+    #[test]
+    fn a_command_line_assignment_is_refused_as_gawk_refuses_it() {
+        assert_eq!(
+            cli_refusal("if", b"1").as_deref(),
+            Some("fatal: cannot use gawk builtin `if' as variable name")
+        );
+        assert_eq!(
+            cli_refusal("length", b"1").as_deref(),
+            Some("fatal: cannot use gawk builtin `length' as variable name")
+        );
+        // An extension is an ordinary name under `--posix`.
+        assert_eq!(cli_refusal("func", b"1"), None);
+        assert_eq!(cli_refusal("gensub", b"1"), None);
+        assert_eq!(
+            cli_refusal("x", b"a\nb").as_deref(),
+            Some("fatal: POSIX does not allow physical newlines in string values")
+        );
+        assert_eq!(cli_refusal("x", b"a b"), None);
+    }
+
+    /// A `var=value` operand is one only with an identifier before the `=`;
+    /// anything else is a file name.
+    #[test]
+    fn an_operand_is_an_assignment_only_with_a_name() {
+        assert_eq!(
+            command_assignment(b"x=1"),
+            Some(("x".to_string(), b"1".to_vec()))
+        );
+        assert_eq!(
+            command_assignment(b"_a1=="),
+            Some(("_a1".to_string(), b"=".to_vec()))
+        );
+        assert_eq!(command_assignment(b"1x=1"), None);
+        assert_eq!(
+            command_assignment(b"file=1.txt/x"),
+            Some(("file".to_string(), b"1.txt/x".to_vec()))
+        );
+        assert_eq!(command_assignment(b"=1"), None);
+        assert_eq!(command_assignment(b"a.txt"), None);
+    }
 }

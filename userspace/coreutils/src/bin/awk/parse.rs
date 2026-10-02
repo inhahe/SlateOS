@@ -450,6 +450,7 @@ impl Parser {
                     name: String::new(),
                     params: Vec::new(),
                     body: Vec::new(),
+                    loc: Loc::default(),
                 })
             })
             .collect();
@@ -460,7 +461,9 @@ impl Parser {
     }
 
     fn function(&mut self) -> Result<(), String> {
-        let name = match self.bump() {
+        let tok = self.bump();
+        let loc = self.loc_prev();
+        let name = match tok {
             Tok::Name(n) | Tok::FuncName(n) => n,
             other => {
                 return Err(format!(
@@ -516,7 +519,12 @@ impl Parser {
         self.in_function = false;
         self.locals.clear();
         if let Some(entry) = self.funcs.get_mut(slot) {
-            *entry = Some(Func { name, params, body });
+            *entry = Some(Func {
+                name,
+                params,
+                body,
+                loc,
+            });
         }
         Ok(())
     }

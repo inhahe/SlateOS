@@ -179748,9 +179748,9 @@ the fix needs a case per row that the approximation gets wrong, measured.
 there yet (no intervals, a context-dependent leading `*`, limited operators) --
 rather than to a boolean, and measure every row in `find-diff.sh`.
 
-## B-AWK-GAWK-FIDELITY-SWEEP -- 33 ways our awk and gawk --posix part, three of them losing data (lane B, 2026-10-01) — **open**
+## B-AWK-GAWK-FIDELITY-SWEEP -- 39 ways our awk and gawk --posix part, three of them losing data (lane B, 2026-10-01) — **open**
 
-**Status:** OPEN — the worklist below; each row is closed by the commit that fixes it. **FIXED so far:** 5, 16, 28 (the parser half: the print list, `next` in BEGIN/END, constant zero divisors); 1, 2, 3, 6, 11, 12, 13, 17, 18, 25, 26, 29, 31 (compiling to instructions, §1056: recursion, `exit`/`next` through calls, one evaluation of a read-modify-write target, gawk's `^`, `getline` and directory operands, the reworded fatals, extra arguments, multi-line placement, stdout flushed before a warning). All 2026-10-01.
+**Status:** OPEN — the worklist below; each row is closed by the commit that fixes it. **FIXED so far:** 5, 16, 28 (the parser half: the print list, `next` in BEGIN/END, constant zero divisors); 1, 2, 3, 6, 11, 12, 13, 17, 18, 25, 26, 29, 31 (compiling to instructions, §1056: recursion, `exit`/`next` through calls, one evaluation of a read-modify-write target, gawk's `^`, `getline` and directory operands, the reworded fatals, extra arguments, multi-line placement, stdout flushed before a warning); 4, 14, 15, 19, 20, 21, 22, 23, 27, 30, 33 (gawk's output errors, `close`/`fflush`/`system`, `NR`/`FNR` as longs, `arg_assign` for operands and `-v`, `substr`, the math warnings, the null and failed redirections). All 2026-10-01.
 
 **In short:** four probe batches of `awk` against `gawk --posix` (about 230
 programs, `target/drafts/loc-probe*.sh`) found real bugs well beyond the
@@ -179799,6 +179799,12 @@ This entry is the worklist; each item is closed by the commit that fixes it.
 | 31 | stdout and a diagnostic interleaved on one fd | diagnostic first | stdout flushed first (`err()` flushes) | ordering |
 | 32 | newline after `(`, `[`, `=`, `==`, `?`, `:` | accepted | syntax error (`?`/`:` only under `--posix`) | accepts invalid |
 | 33 | `FILENAME` numeric in a diagnostic | `(FILENAME=5 FNR=1)` | `(FNR=1)` (no string value) | wording |
+| 34 | `func` as a name: `func = 3`, `func f() {...}` | a keyword, `function` | an ordinary name under `--posix`; the definition is a syntax error | accepts invalid |
+| 35 | an interactive `awk` -- standard output a terminal | output held until 8 KiB or exit | flushed after every print (`output_is_tty`), and a redirection to a tty too | **fixed** 2026-10-01 |
+| 36 | `-v` checks: no `=`, a name like `1x`, a keyword, a function's name, a newline | `invalid -v assignment`, usage, exit 1, for all | usage; `not a legal variable name`; `cannot use gawk builtin`; the definition's `error: function name ... previously defined`; `POSIX does not allow physical newlines` | **fixed** 2026-10-01 |
+| 37 | `for (k in a)` order | Rust's randomly seeded `HashMap`: it can differ between two runs of one program | deterministic (gawk's own array layouts) | nondeterministic output |
+| 38 | `FILENAME = 5` then something prints it, then a diagnostic | `(FNR=1)` | `(FILENAME=5 FNR=1)`: printing gave the number a cached string | wording; needs a number's cached string, which `Value` does not keep |
+| 39 | `cmd \| getline` flushed every output first | yes | no (`gawk_popen` does not) | **fixed** 2026-10-01 |
 
 **Proper fix.** Each row, faithfully, against gawk 5.2.1's own source
 (`/tmp/gawk-ref` in WSL), with a harness row. Structural ones first. Every

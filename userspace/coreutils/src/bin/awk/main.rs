@@ -78,17 +78,26 @@
 //! | an undefined function is called | refused before the program runs | fatal when first reached |
 //! | a name used as both an array and a scalar | refused before the program runs | fatal when first reached |
 //! | a built-in given the wrong number of arguments | refused before the program runs | fatal when first reached |
+//! | `RS` longer than one character | a regex, as in gawk without `--posix`, mawk and the one true awk | its first character only |
+//! | standard output's reader goes away (`awk ... \| head -1`) | the run ends quietly with the status it had earned | dies of `SIGPIPE`, status 141 |
+//!
+//! The `RS` row is a choice POSIX leaves open ("If RS contains more than one
+//! character, the results are unspecified"), and the regex is what a program
+//! that sets one means: `RS = "\r\n"` for a file with CRLF line ends would
+//! otherwise split at the `\r` and glue each `\n` to the next record. The
+//! `SIGPIPE` row is this system's, for every utility: it does not use signals
+//! for process control (`stdfd::reader_gone`).
 //!
 //! The first two are the same decision twice: this system is UTF-8 throughout,
 //! and gawk's byte answers are an artifact of the C locale on the development
-//! host rather than something a user wants. The last three are one decision as
-//! well — a program is checked whole before any of it runs, so a typo in a
+//! host rather than something a user wants. The three refused before the
+//! program runs are one decision as well — a program is checked whole before any of it runs, so a typo in a
 //! branch that is rarely taken is found before the report is half printed
 //! instead of after. That costs the gawk exit code for those cases (1 rather
 //! than 2), which is the right trade: exit 1 already means "this program will
 //! not run" and that is exactly what has happened.
 //!
-//! There was an eighth row until 2026-10-01: `\1`–`\9` in a pattern was a
+//! There was another row until 2026-10-01: `\1`–`\9` in a pattern was a
 //! backreference here, as in GNU `grep -E`, and the octal escape `\001` in
 //! gawk. It was recorded as a choice between two extensions on the belief that
 //! POSIX leaves `\1` undefined, and that belief was wrong for awk: POSIX's awk
@@ -157,7 +166,8 @@ fn run_main() -> ExitCode {
         Ok(Some(a)) => a,
         // The help and version paths have already printed.
         Ok(None) => return ExitCode::SUCCESS,
-        Err(e) => die_usage(&e),
+        Err(ArgError::Usage(e)) => die_usage(&e),
+        Err(ArgError::Fatal(e)) => die(&e),
     };
 
     let (text, map) = match program_source(&args) {
@@ -165,23 +175,27 @@ fn run_main() -> ExitCode {
         Err(e) => die(&e),
     };
 
-    // gawk resolves the command line's assignments before it parses the
-    // program, so their escape warnings come first -- and through the run's
-    // one table of warnings, which the parse and then the run carry on with.
-    // `-v` elides a backslash-newline and `-F` does not: gawk's `arg_assign`
-    // and `cmdline_fs` differ in exactly that.
+    // gawk resolves the command line's assignments as it reads its options,
+    // before it parses the program: each is refused there if its name is
+    // reserved or its value holds a newline, and its escape warnings are said
+    // there -- through the run's one table of warnings, which the parse and
+    // then the run carry on with. `-v` elides a backslash-newline and `-F`
+    // does not: gawk's `arg_assign` and `cmdline_fs` differ in exactly that.
     let mut warnings = ere::awk::Warnings::default();
-    let preassigns: Vec<(&str, Str)> = args
-        .preassigns
-        .iter()
-        .map(|p| match p {
+    let mut preassigns: Vec<(&str, Str)> = Vec::with_capacity(args.preassigns.len());
+    for p in &args.preassigns {
+        let (name, value) = match p {
             Preassign::Var(name, value) => {
+                if let Some(refusal) = interp::cli_refusal(name, value) {
+                    die(&refusal);
+                }
                 (name.as_str(), ere::awk::string(value, true, &mut warnings))
             }
             Preassign::Fs(value) => ("FS", ere::awk::string(value, false, &mut warnings)),
-        })
-        .collect();
-    interp::emit_warnings(&mut warnings, b"");
+        };
+        interp::emit_warnings(&mut warnings, b"");
+        preassigns.push((name, value));
+    }
 
     // A program that will not compile is a *usage* failure — the script is
     // wrong before anything ran — and exits 1. A failure once it is running
@@ -213,6 +227,26 @@ fn run_main() -> ExitCode {
     if let Err(e) = types::resolve(&mut prog) {
         die_program(&e);
     }
+    // A `-v` name that the program defines as a function: gawk made the name
+    // a variable before it parsed, so the definition is what it refuses --
+    // `error: function name `f' previously defined`, where the name is.
+    let mut clashed = false;
+    for p in &args.preassigns {
+        if let Preassign::Var(name, _) = p
+            && let Some(f) = prog.funcs.iter().find(|f| &f.name == name)
+        {
+            let mut line = b"awk: ".to_vec();
+            line.extend_from_slice(&source::prefix(&names, f.loc));
+            line.extend_from_slice(
+                format!("error: function name `{name}' previously defined\n").as_bytes(),
+            );
+            stdfd::diag_bytes(&line);
+            clashed = true;
+        }
+    }
+    if clashed {
+        stdfd::exit_now(1, 2);
+    }
 
     let env: Vec<(Str, Str)> = std::env::vars_os()
         .map(|(k, v)| (arg_bytes(&k), arg_bytes(&v)))
@@ -223,8 +257,11 @@ fn run_main() -> ExitCode {
     // In the order given, and all before BEGIN, so a BEGIN block can read
     // what the command line set and can override it.
     for (name, value) in preassigns {
-        if let Err(e) = it.assign_cli(name, value) {
-            die(&e);
+        match it.assign_cli(name, value) {
+            Ok(()) => {}
+            Err(interp::Fatal::Said(message)) => die(&message),
+            // Nothing was written yet, so nothing can have lost its reader.
+            Err(interp::Fatal::ReaderGone) => stdfd::exit_now(0, 2),
         }
     }
 
@@ -235,21 +272,40 @@ fn run_main() -> ExitCode {
         // Said where the program was when it stopped, as gawk's `err()` does:
         // `awk: cmd. line:2: (FILENAME=f FNR=7) fatal: division by zero
         // attempted`. The prefix holds `FILENAME`, which is any bytes.
-        Err(e) => {
+        Err(interp::Fatal::Said(message)) => {
             let mut line = b"awk: ".to_vec();
             line.extend_from_slice(&it.diagnostic_prefix());
-            line.extend_from_slice(e.0.as_bytes());
+            line.extend_from_slice(message.as_bytes());
             line.push(b'\n');
             stdfd::diag_bytes(&line);
             stdfd::exit_now(2, 2)
         }
+        // Nobody is reading standard output any more: end quietly with the
+        // status earned, as every utility here does (`stdfd::reader_gone`).
+        Err(interp::Fatal::ReaderGone) => {
+            ExitCode::from(u8::try_from(it.exit_status() & 0xff).unwrap_or(0))
+        }
+    }
+}
+
+/// Why the command line could not be used.
+enum ArgError {
+    /// Malformed: said with the usage, exit 1.
+    Usage(String),
+    /// A `-v` gawk refuses as it reads it: fatal, exit 2.
+    Fatal(String),
+}
+
+impl From<String> for ArgError {
+    fn from(e: String) -> ArgError {
+        ArgError::Usage(e)
     }
 }
 
 /// Split the command line into options and operands.
 ///
 /// Returns `Ok(None)` when `--help` or `--version` has already answered.
-fn parse_args(raw: &[Str]) -> Result<Option<Args>, String> {
+fn parse_args(raw: &[Str]) -> Result<Option<Args>, ArgError> {
     let mut args = Args {
         progfiles: Vec::new(),
         preassigns: Vec::new(),
@@ -286,7 +342,10 @@ fn parse_args(raw: &[Str]) -> Result<Option<Args>, String> {
                 b'F' | b'v' | b'f' => {
                     let value = if rest.is_empty() {
                         let Some(next) = raw.get(i) else {
-                            return Err(format!("option -{} requires an argument", flag as char));
+                            return Err(ArgError::Usage(format!(
+                                "option -{} requires an argument",
+                                flag as char
+                            )));
                         };
                         i = i.saturating_add(1);
                         next.clone()
@@ -299,11 +358,20 @@ fn parse_args(raw: &[Str]) -> Result<Option<Args>, String> {
                         b'F' => args.preassigns.push(Preassign::Fs(value)),
                         b'f' => args.progfiles.push(value),
                         _ => {
-                            let Some((name, v)) = interp::command_assignment(&value) else {
-                                return Err(format!(
-                                    "invalid -v assignment: {}",
+                            // gawk's two refusals, worded as gawk words them:
+                            // no `=` is a usage error, a name that is not one
+                            // is fatal.
+                            let Some(eq) = value.iter().position(|b| *b == b'=') else {
+                                return Err(ArgError::Usage(format!(
+                                    "`{}' argument to `-v' not in `var=value' form",
                                     String::from_utf8_lossy(&value)
-                                ));
+                                )));
+                            };
+                            let Some((name, v)) = interp::command_assignment(&value) else {
+                                return Err(ArgError::Fatal(format!(
+                                    "fatal: `{}' is not a legal variable name",
+                                    String::from_utf8_lossy(value.get(..eq).unwrap_or_default())
+                                )));
                             };
                             args.preassigns.push(Preassign::Var(name, v));
                         }
@@ -319,7 +387,7 @@ fn parse_args(raw: &[Str]) -> Result<Option<Args>, String> {
                 // so names the whole character -- see `lex.rs`.)
                 other => {
                     let shown = coreutils::quote::escape_unprintable(&[other]);
-                    return Err(format!("unknown option -{shown}"));
+                    return Err(ArgError::Usage(format!("unknown option -{shown}")));
                 }
             }
         }
@@ -327,7 +395,7 @@ fn parse_args(raw: &[Str]) -> Result<Option<Args>, String> {
 
     if args.progfiles.is_empty() {
         let Some(text) = raw.get(i) else {
-            return Err("no program text".to_string());
+            return Err(ArgError::Usage("no program text".to_string()));
         };
         i = i.saturating_add(1);
         args.program = Some(text.clone());
@@ -430,7 +498,7 @@ mod tests {
     fn err(argv: &[&[u8]]) -> String {
         let raw: Vec<Str> = argv.iter().map(|a| a.to_vec()).collect();
         match parse_args(&raw) {
-            Err(message) => message,
+            Err(ArgError::Usage(message) | ArgError::Fatal(message)) => message,
             Ok(_) => panic!("expected these arguments to be refused: {argv:?}"),
         }
     }

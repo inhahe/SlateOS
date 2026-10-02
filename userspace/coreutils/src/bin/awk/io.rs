@@ -234,7 +234,9 @@ fn find(hay: &[u8], needle: &[u8]) -> Option<usize> {
 
 /// One place output goes.
 enum Sink {
-    File(BufWriter<File>),
+    /// A file, and whether it is a terminal: gawk's `RED_NOBUF`, which flushes
+    /// it after every print so a redirection to `/dev/tty` is seen at once.
+    File(BufWriter<File>, bool),
     /// A command reading our output. The child is kept so `close` can wait for
     /// it and report its status, as awk's `close` is specified to.
     Pipe(BufWriter<std::process::ChildStdin>, Child),
@@ -245,9 +247,36 @@ enum Sink {
 /// The redirections a program has open, and the standard streams.
 pub struct Outputs {
     stdout: BufWriter<io::Stdout>,
+    /// Standard output is a terminal: gawk's `output_is_tty`, which flushes it
+    /// after every print, so a line typed at an interactive `awk` comes back
+    /// when it is processed rather than when 8 KiB have built up.
+    stdout_tty: bool,
     sinks: HashMap<Str, Sink>,
-    /// Insertion order, so `close`-less exit flushes in a predictable order.
+    /// The order the redirections were opened in. At exit they are closed
+    /// newest first, as gawk walks its list (each new one goes on the front),
+    /// which decides which failure is the one reported when two fail.
     order: Vec<Str>,
+}
+
+/// Why output to a redirection failed.
+pub enum OutError {
+    /// It could not be opened: gawk's `cannot redirect to ...`.
+    Open(io::Error),
+    /// Writing to it failed -- for a buffered one, the flush a write caused:
+    /// gawk's `print to "..." failed`.
+    Write(io::Error),
+}
+
+/// What `fflush()` with no name, and `system()` before it runs, met.
+pub enum FlushError {
+    /// Standard output would not flush.
+    Stdout(io::Error),
+    /// A redirection would not flush; `pipe` says whether it is a command.
+    Sink {
+        name: Str,
+        pipe: bool,
+        err: io::Error,
+    },
 }
 
 impl Outputs {
@@ -255,6 +284,7 @@ impl Outputs {
     pub fn new() -> Outputs {
         Outputs {
             stdout: BufWriter::new(io::stdout()),
+            stdout_tty: coreutils::stdfd::is_tty(1),
             sinks: HashMap::new(),
             order: Vec::new(),
         }
@@ -266,31 +296,40 @@ impl Outputs {
     /// Propagates the write failure. awk cannot carry on after one — a report
     /// with a hole in it is worse than no report — so callers make it fatal.
     pub fn write_stdout(&mut self, bytes: &[u8]) -> io::Result<()> {
-        self.stdout.write_all(bytes)
+        self.stdout.write_all(bytes)?;
+        if self.stdout_tty {
+            self.stdout.flush()?;
+        }
+        Ok(())
     }
 
     /// Write to a redirection, opening it if this is its first use.
     ///
     /// # Errors
-    /// Propagates a failure to open or to write.
+    /// [`OutError::Open`] for a redirection that would not open,
+    /// [`OutError::Write`] for a write that failed.
     pub fn write_to(
         &mut self,
         name: &[u8],
         mode: crate::ast::RedirMode,
         bytes: &[u8],
-    ) -> io::Result<()> {
+    ) -> Result<(), OutError> {
         if !self.sinks.contains_key(name) {
             // A pipe's child inherits our standard output, so anything already
             // buffered has to be on its way out before the child can write.
-            self.stdout.flush()?;
-            let sink = open_sink(name, mode)?;
+            // A failure here is standard output's, and the next write to it,
+            // or the exit, reports it; it is not this redirection's.
+            let _ = self.stdout.flush();
+            let sink = open_sink(name, mode).map_err(OutError::Open)?;
             self.sinks.insert(name.to_vec(), sink);
             self.order.push(name.to_vec());
         }
-        match self.sinks.get_mut(name) {
-            Some(Sink::File(f)) => f.write_all(bytes),
+        let written = match self.sinks.get_mut(name) {
+            Some(Sink::File(f, tty)) => f
+                .write_all(bytes)
+                .and_then(|()| if *tty { f.flush() } else { Ok(()) }),
             Some(Sink::Pipe(w, _)) => w.write_all(bytes),
-            Some(Sink::Stdout) => self.stdout.write_all(bytes),
+            Some(Sink::Stdout) => self.write_stdout(bytes),
             Some(Sink::Stderr) => {
                 // stderr is unbuffered, as C's is, so a diagnostic appears when
                 // it is written rather than when awk exits.
@@ -305,12 +344,17 @@ impl Outputs {
                 coreutils::stdfd::write_all(2, bytes)
             }
             None => Ok(()),
-        }
+        };
+        written.map_err(OutError::Write)
     }
 
-    /// Close one redirection, returning what awk's `close` returns: the child's
-    /// exit status for a pipe, 0 for a file, -1 for a name that was not open.
-    pub fn close(&mut self, name: &[u8]) -> Option<i32> {
+    /// Close one redirection, flushing it first as gawk's `close_redir` does.
+    /// `None` if nothing by that name is open for output.
+    ///
+    /// A pipe's command is waited for, but its status is not the result:
+    /// under `--posix` gawk's `close` is 0 once the close succeeds, whatever
+    /// the command exited with.
+    pub fn close(&mut self, name: &[u8]) -> Option<io::Result<()>> {
         let sink = self.sinks.remove(name)?;
         self.order.retain(|n| n != name);
         Some(finish(sink))
@@ -326,43 +370,72 @@ impl Outputs {
         self.stdout.flush()
     }
 
-    /// Flush everything, or just one target.
+    /// Flush standard output and then every redirection: gawk's `flush_io`,
+    /// which `fflush()` is and which `system()` does first.
     ///
     /// # Errors
-    /// Propagates the flush failure, which is how a full disk is noticed.
-    pub fn flush(&mut self, name: Option<&[u8]>) -> io::Result<()> {
-        match name {
-            // `fflush()` and `fflush("")` both mean everything.
-            None | Some([]) => {
-                self.stdout.flush()?;
-                for sink in self.sinks.values_mut() {
-                    // One unflushable sink must not stop the others being
-                    // flushed; standard output is the one whose failure the
-                    // caller has to hear about, and it is checked above.
-                    let _ = flush_sink(sink);
-                }
-                Ok(())
+    /// The first failure, standard output's before any redirection's: each is
+    /// gawk's fatal error, so the caller stops at it.
+    pub fn flush_all(&mut self) -> Result<(), FlushError> {
+        self.stdout.flush().map_err(FlushError::Stdout)?;
+        for name in &self.order {
+            if let Some(sink) = self.sinks.get_mut(name)
+                && let Err(err) = flush_sink(sink)
+            {
+                return Err(FlushError::Sink {
+                    name: name.clone(),
+                    pipe: matches!(sink, Sink::Pipe(..)),
+                    err,
+                });
             }
-            Some(n) => match self.sinks.get_mut(n) {
-                Some(sink) => flush_sink(sink),
-                None => self.stdout.flush(),
-            },
         }
+        Ok(())
     }
 
-    /// Close everything at exit, in the order the redirections were opened.
+    /// `fflush(name)` for an output redirection; `None` if `name` is not one.
+    pub fn flush_one(&mut self, name: &[u8]) -> Option<io::Result<()>> {
+        let sink = self.sinks.get_mut(name)?;
+        Some(match sink {
+            Sink::Stdout => self.stdout.flush(),
+            other => flush_sink(other),
+        })
+    }
+
+    /// Close every redirection at exit, newest first, as gawk's `close_io`
+    /// walks its list.
     ///
     /// # Errors
-    /// Propagates a failure flushing standard output, which is the one that has
-    /// to change the exit status: output silently lost to a full disk is the
-    /// failure a script cannot detect any other way.
-    pub fn finish_all(&mut self) -> io::Result<()> {
-        for name in std::mem::take(&mut self.order) {
+    /// The first one that would not flush, with its name: gawk's fatal `flush
+    /// to "..." failed`, which ends the closing there.
+    pub fn finish_redirects(&mut self) -> Result<(), (Str, io::Error)> {
+        while let Some(name) = self.order.pop() {
             if let Some(sink) = self.sinks.remove(&name) {
-                finish(sink);
+                finish(sink).map_err(|e| (name, e))?;
             }
         }
+        Ok(())
+    }
+
+    /// Flush standard output at exit, after the redirections.
+    ///
+    /// # Errors
+    /// The flush failure: gawk warns about it and exits 1 unless the program
+    /// said `exit`.
+    pub fn finish_stdout(&mut self) -> io::Result<()> {
         self.stdout.flush()
+    }
+
+    /// What a fatal error leaves behind: C's `exit` flushes every stream it
+    /// has, saying nothing about any that fail, and so does this.
+    pub fn finish_quietly(&mut self) {
+        while let Some(name) = self.order.pop() {
+            if let Some(sink) = self.sinks.remove(&name) {
+                // The run is already ending with a diagnostic; a second one
+                // about the same full disk would be noise, as it is in gawk.
+                let _ = finish(sink);
+            }
+        }
+        let _ = self.stdout.flush();
     }
 }
 
@@ -374,26 +447,31 @@ impl Default for Outputs {
 
 fn flush_sink(sink: &mut Sink) -> io::Result<()> {
     match sink {
-        Sink::File(f) => f.flush(),
+        Sink::File(f, _) => f.flush(),
         Sink::Pipe(w, _) => w.flush(),
         Sink::Stdout | Sink::Stderr => Ok(()),
     }
 }
 
-/// Close a sink and give awk's `close` result.
-fn finish(sink: Sink) -> i32 {
+/// Flush and close a sink.
+///
+/// # Errors
+/// The flush failure. A pipe's command is still waited for -- the child must
+/// not outlive the close -- whatever the flush did.
+fn finish(sink: Sink) -> io::Result<()> {
     match sink {
-        Sink::File(mut f) => {
-            let _ = f.flush();
-            0
-        }
-        Sink::Pipe(w, mut child) => {
+        Sink::File(mut f, _) => f.flush(),
+        Sink::Pipe(mut w, mut child) => {
+            let flushed = w.flush();
             // The child sees end-of-file only once our write end is gone, so
             // the writer has to be dropped before the wait or this deadlocks.
             drop(w);
-            child.wait().ok().map_or(-1, |s| s.code().unwrap_or(0))
+            // Its status is not `close`'s answer under `--posix` (see
+            // `Outputs::close`), and a wait that fails leaves nothing to do.
+            let _ = child.wait();
+            flushed
         }
-        Sink::Stdout | Sink::Stderr => 0,
+        Sink::Stdout | Sink::Stderr => Ok(()),
     }
 }
 
@@ -420,7 +498,15 @@ fn open_sink(name: &[u8], mode: crate::ast::RedirMode) -> io::Result<Sink> {
         .append(mode == crate::ast::RedirMode::Append)
         .truncate(mode == crate::ast::RedirMode::Truncate)
         .open(path)?;
-    Ok(Sink::File(BufWriter::new(f)))
+    let tty = is_terminal(&f);
+    Ok(Sink::File(BufWriter::new(f), tty))
+}
+
+/// Whether an open file is a terminal, which decides whether output to it is
+/// flushed after every print.
+fn is_terminal(f: &File) -> bool {
+    use std::io::IsTerminal;
+    f.is_terminal()
 }
 
 /// The input redirections a program has open.
@@ -477,17 +563,32 @@ impl Inputs {
             .ok_or_else(|| io::Error::other("the input redirection vanished"))
     }
 
-    /// Close one input redirection. Returns None if nothing by that name was
-    /// open, so the caller can try the outputs.
-    pub fn close(&mut self, name: &[u8]) -> Option<i32> {
+    /// Close one input redirection. Returns false if nothing by that name was
+    /// open, so the caller can try the outputs. A command is waited for; its
+    /// status is not `close`'s answer under `--posix` (see `Outputs::close`).
+    pub fn close(&mut self, name: &[u8]) -> bool {
         if self.files.remove(name).is_some() {
-            return Some(0);
+            return true;
         }
-        let (reader, mut child) = self.cmds.remove(name)?;
+        let Some((reader, mut child)) = self.cmds.remove(name) else {
+            return false;
+        };
         // Dropping the reader closes the pipe, so a child still writing gets a
         // broken pipe and stops rather than blocking us in `wait`.
         drop(reader);
-        Some(child.wait().ok().map_or(-1, |s| s.code().unwrap_or(0)))
+        // A wait that fails leaves nothing to do, and no status to report.
+        let _ = child.wait();
+        true
+    }
+
+    /// Whether `name` is open for input, as a file (`Some(false)`) or as a
+    /// command (`Some(true)`): what `fflush` says it cannot flush.
+    #[must_use]
+    pub fn open_as(&self, name: &[u8]) -> Option<bool> {
+        if self.files.contains_key(name) {
+            return Some(false);
+        }
+        self.cmds.contains_key(name).then_some(true)
     }
 }
 

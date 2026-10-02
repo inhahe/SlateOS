@@ -624,6 +624,9 @@ impl CpFlags {
             require_preserve_xattr: self.require_preserve_xattr,
             reduce_diagnostics: self.reduce_diagnostics,
             explicit_no_preserve_mode: self.explicit_no_preserve_mode,
+            // `cp_option_init`'s `x->set_mode = false` (`cp.c:854`): a copy's
+            // mode comes from its source and the umask, never from an option.
+            set_mode: None,
             // `cp` is never `mv`. The field decides only what `-v` says, and
             // what `cp -v` says is the arrow line; see [`copy::Opts::move_mode`].
             move_mode: false,

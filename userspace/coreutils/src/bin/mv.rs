@@ -521,6 +521,7 @@ fn mv_opts(flags: &MvFlags, umask: u32) -> copy::Opts<'_> {
         require_preserve_xattr: false,    // mv.c:146
         reduce_diagnostics: false,        // mv.c:141
         explicit_no_preserve_mode: false, // mv.c:138
+        set_mode: None,                   // mv.c:150
         move_mode: true,                  // mv.c:131
         umask,
     }

@@ -192,14 +192,19 @@ pub fn char_positions(s: BStr<'_>) -> impl Iterator<Item = (usize, Ch)> + '_ {
 /// anything above 0x7f as an undecodable byte, whether or not it begins a valid
 /// UTF-8 sequence. Each paired with its offset, which is its index.
 pub fn byte_positions(s: BStr<'_>) -> impl Iterator<Item = (usize, Ch)> + '_ {
-    s.iter().enumerate().map(|(at, &b)| {
-        let ch = if b.is_ascii() {
-            Ch::U(char::from(b))
-        } else {
-            Ch::B(b)
-        };
-        (at, ch)
-    })
+    s.iter().enumerate().map(|(at, &b)| (at, byte_ch(b)))
+}
+
+/// The character byte `b` is when a subject is read a byte at a time (see
+/// [`byte_positions`]): an ASCII byte is its character, any other byte is
+/// undecodable.
+#[must_use]
+pub fn byte_ch(b: u8) -> Ch {
+    if b.is_ascii() {
+        Ch::U(char::from(b))
+    } else {
+        Ch::B(b)
+    }
 }
 
 /// Collect the characters of `s` back into a byte string.

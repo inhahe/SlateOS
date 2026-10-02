@@ -62,6 +62,7 @@
 //! arises in the parser.
 
 use alloc::boxed::Box;
+use alloc::collections::BTreeMap;
 use alloc::format;
 use alloc::string::String;
 use alloc::vec;
@@ -415,13 +416,12 @@ impl WordAssert {
     ///
     /// Off either end counts as "not a word character", which is what makes
     /// `\bx\b` match the whole of a one-character subject.
-    fn holds_at(self, input: &[Ch], sp: usize) -> bool {
+    fn holds_at<S: Subject + ?Sized>(self, input: &S, sp: usize) -> bool {
         let before = sp
             .checked_sub(1)
-            .and_then(|i| input.get(i))
-            .copied()
+            .and_then(|i| input.at(i))
             .is_some_and(is_word_ch);
-        let after = input.get(sp).copied().is_some_and(is_word_ch);
+        let after = input.at(sp).is_some_and(is_word_ch);
         match self {
             WordAssert::Boundary => before != after,
             WordAssert::NotBoundary => before == after,
@@ -459,15 +459,71 @@ impl ClassData {
     /// this reduces to the plain test.
     fn matches_ci(&self, c: Ch, ci: bool) -> bool {
         let mut hit = self.hit_positive(c);
-        if ci && !hit {
-            for alt in c.to_lowercase().into_iter().chain(c.to_uppercase()) {
-                if alt != c && self.hit_positive(alt) {
-                    hit = true;
-                    break;
-                }
-            }
+        if ci
+            && !hit
+            && let Ch::U(u) = c
+        {
+            hit = u
+                .to_lowercase()
+                .chain(u.to_uppercase())
+                .any(|alt| alt != u && self.hit_positive(Ch::U(alt)));
         }
         hit ^ self.negated
+    }
+}
+
+/// A set of the 256 characters a byte can be read as ([`bytes::byte_ch`]),
+/// one bit each.
+type ByteSet = [u64; 4];
+
+/// The byte character `c` is read from -- the inverse of [`bytes::byte_ch`] --
+/// or `None` for a character no byte is read as (a decoded non-ASCII one).
+fn byte_index(c: Ch) -> Option<u8> {
+    match c {
+        Ch::U(u) => u8::try_from(u).ok().filter(u8::is_ascii),
+        Ch::B(b) => Some(b).filter(|b| !b.is_ascii()),
+    }
+}
+
+/// The byte characters for which `test` holds.
+fn byte_set(mut test: impl FnMut(Ch) -> bool) -> ByteSet {
+    let mut set = [0u64; 4];
+    for b in 0..=u8::MAX {
+        if test(bytes::byte_ch(b))
+            && let Some(word) = set.get_mut(usize::from(b >> 6))
+        {
+            *word |= 1 << (b & 63);
+        }
+    }
+    set
+}
+
+/// Whether byte character `b` is in `set`.
+fn in_byte_set(set: &ByteSet, b: u8) -> bool {
+    set.get(usize::from(b >> 6))
+        .is_some_and(|word| (word >> (b & 63)) & 1 != 0)
+}
+
+/// A bracket expression as the matchers run it: the class, and its answer for
+/// every byte character worked out when the pattern is compiled -- which is
+/// every character of a subject read a byte at a time, and the ASCII ones of
+/// any other. Testing one is then a bit, where the class itself is a walk of
+/// its ranges and named classes, with case folding on top.
+#[derive(Debug, Clone)]
+struct ClassInst {
+    data: ClassData,
+    /// [`ClassData::matches_ci`] of each byte character, under the regex's
+    /// case sensitivity.
+    set: ByteSet,
+}
+
+impl ClassInst {
+    /// [`ClassData::matches_ci`], `ci` being the one the set was made with.
+    fn matches(&self, c: Ch, ci: bool) -> bool {
+        match byte_index(c) {
+            Some(b) => in_byte_set(&self.set, b),
+            None => self.data.matches_ci(c, ci),
+        }
     }
 }
 
@@ -1619,7 +1675,7 @@ fn nothing_to_repeat() -> EreError {
 enum Inst {
     Char(Ch),
     Any,
-    Class(ClassData),
+    Class(ClassInst),
     Match,
     Jmp(usize),
     Split(usize, usize),
@@ -1649,6 +1705,14 @@ struct Compiler {
     /// pattern asking for 10⁹ instructions costs the cap plus one iteration per
     /// nesting level rather than 10⁹ no-ops. `new_flags` turns it into an error.
     over: bool,
+    /// Whether the pattern is matched without regard to case, which a
+    /// class's byte set ([`ClassInst`]) is worked out under.
+    ci: bool,
+    /// The byte sets worked out so far, by the address of the class in the
+    /// syntax tree they were worked out for: a repetition compiles one class
+    /// once per copy, and `[a-z]{30000}` should not work out the same set
+    /// thirty thousand times.
+    sets: BTreeMap<usize, ByteSet>,
 }
 
 impl Compiler {
@@ -1678,7 +1742,15 @@ impl Compiler {
                 self.emit(Inst::Any);
             }
             Node::Class(d) => {
-                self.emit(Inst::Class(d.clone()));
+                let ci = self.ci;
+                let set = *self
+                    .sets
+                    .entry(core::ptr::from_ref(d).addr())
+                    .or_insert_with(|| byte_set(|c| d.matches_ci(c, ci)));
+                self.emit(Inst::Class(ClassInst {
+                    data: d.clone(),
+                    set,
+                }));
             }
             Node::Start => {
                 self.emit(Inst::AssertStart);
@@ -1819,10 +1891,167 @@ fn char_eq(input: Option<Ch>, lit: Ch, ci: bool) -> bool {
 /// A byte that decodes to no character has no case — [`Ch::to_lowercase`] maps
 /// it to itself — so two *different* undecodable bytes never fold together, and
 /// none of them ever folds into a letter.
+///
+/// Compared without allocating: this runs for every character a
+/// case-insensitive literal is tried against.
 fn char_fold_eq(a: Ch, b: Ch) -> bool {
-    a.to_ascii_lowercase() == b.to_ascii_lowercase()
-        || a.to_lowercase() == b.to_lowercase()
-        || a.to_uppercase() == b.to_uppercase()
+    match (a, b) {
+        (Ch::U(x), Ch::U(y)) if x.is_ascii() && y.is_ascii() => x.eq_ignore_ascii_case(&y),
+        (Ch::U(x), Ch::U(y)) => {
+            x.to_lowercase().eq(y.to_lowercase()) || x.to_uppercase().eq(y.to_uppercase())
+        }
+        // An undecodable byte is above 0x7f, where ASCII folding is the
+        // identity, and folds to nothing but itself.
+        _ => a == b,
+    }
+}
+
+/// Whether consuming instruction `inst` takes character `c` (`None` past the
+/// end of the subject, which none takes). The one definition of "takes", for
+/// the Pike VM, the backtracker and the [`Prefilter`] alike: if they ever
+/// disagreed, a position the prefilter stepped over could be one the VM would
+/// have matched at.
+fn takes(inst: &Inst, c: Option<Ch>, ci: bool) -> bool {
+    match inst {
+        Inst::Char(lit) => char_eq(c, *lit, ci),
+        Inst::Any => c.is_some(),
+        Inst::Class(k) => c.is_some_and(|ch| k.matches(ch, ci)),
+        _ => false,
+    }
+}
+
+/// What the matchers read: a subject's characters, by index.
+///
+/// A subject is either characters decoded once into a slice, or bytes read
+/// where they lie ([`Bytes`]) by a regex that reads a byte at a time
+/// ([`Regex::with_byte_chars`]): there character `i` is byte `i`, and decoding
+/// would only copy the subject into something sixteen times its size first.
+/// The matchers are generic over the two, so each is compiled for each and
+/// neither pays for the other.
+trait Subject {
+    /// The number of characters.
+    fn len(&self) -> usize;
+    /// Character `i`, or `None` past the end.
+    fn at(&self, i: usize) -> Option<Ch>;
+}
+
+impl Subject for [Ch] {
+    fn len(&self) -> usize {
+        <[Ch]>::len(self)
+    }
+
+    fn at(&self, i: usize) -> Option<Ch> {
+        self.get(i).copied()
+    }
+}
+
+/// A subject read a byte at a time, where it lies: character `i` is byte `i`,
+/// read as [`bytes::byte_ch`] reads it -- the characters
+/// [`bytes::byte_positions`] would decode it to.
+struct Bytes<'a>(&'a [u8]);
+
+impl Subject for Bytes<'_> {
+    fn len(&self) -> usize {
+        self.0.len()
+    }
+
+    fn at(&self, i: usize) -> Option<Ch> {
+        self.0.get(i).copied().map(bytes::byte_ch)
+    }
+}
+
+/// Where a match can begin, worked out once from the program, so that the
+/// unanchored search can step over the positions where none can -- most of a
+/// subject, for most patterns. See [`Regex::scan`].
+///
+/// It is a superset, never a guess: every character that can begin a match
+/// is in it, and a position is stepped over only when the character there is
+/// not. A pattern that can match the empty string can match anywhere and has
+/// none.
+#[derive(Debug, Clone)]
+struct Prefilter {
+    /// Which byte characters can begin a match.
+    set: ByteSet,
+    /// The instructions a match's first character is taken by, asked directly
+    /// about a character that is not a byte character.
+    firsts: Vec<usize>,
+    /// Whether every match begins at `^` or `` \` `` -- so only where a line,
+    /// or the subject, begins.
+    line_start: bool,
+}
+
+impl Prefilter {
+    /// The prefilter of the pattern entered at `entry`, or `None` when it would
+    /// step over nothing: the pattern can match empty, or begins with a
+    /// backreference, or can begin with any character anywhere.
+    ///
+    /// The instructions a match's first character can be taken by are those
+    /// reached from `entry` without consuming anything. An assertion between
+    /// is taken to hold -- a superset, which is what is wanted -- except that
+    /// whether every way to them passed `^` or `` \` `` is kept, and makes
+    /// [`Prefilter::line_start`].
+    fn of(prog: &[Inst], entry: usize, ci: bool) -> Option<Prefilter> {
+        // Each instruction is visited at most once unanchored and once
+        // anchored.
+        let mut visited = vec![[false; 2]; prog.len()];
+        let mut stack = vec![(entry, false)];
+        let mut firsts: Vec<usize> = Vec::new();
+        let mut line_start = true;
+        while let Some((pc, anchored)) = stack.pop() {
+            let seen = visited.get_mut(pc)?.get_mut(usize::from(anchored))?;
+            if *seen {
+                continue;
+            }
+            *seen = true;
+            let next = pc.saturating_add(1);
+            match prog.get(pc)? {
+                Inst::Char(_) | Inst::Any | Inst::Class(_) => {
+                    // At most twice, anchored and not; deduplicated below.
+                    firsts.push(pc);
+                    line_start &= anchored;
+                }
+                // A match reachable without consuming is an empty one; a
+                // backreference first takes what no instruction says.
+                Inst::Match | Inst::Backref(_) => return None,
+                Inst::Jmp(x) => stack.push((*x, anchored)),
+                Inst::Split(x, y) => {
+                    // Order is immaterial: the closure is a set.
+                    stack.push((*x, anchored));
+                    stack.push((*y, anchored));
+                }
+                Inst::Save(_) | Inst::AssertEnd | Inst::AssertBufEnd | Inst::AssertWord(_) => {
+                    stack.push((next, anchored));
+                }
+                Inst::AssertStart | Inst::AssertBufStart => stack.push((next, true)),
+            }
+        }
+        firsts.sort_unstable();
+        firsts.dedup();
+        let set = byte_set(|c| {
+            firsts
+                .iter()
+                .any(|&pc| prog.get(pc).is_some_and(|inst| takes(inst, Some(c), ci)))
+        });
+        if !line_start && set == [u64::MAX; 4] {
+            return None;
+        }
+        Some(Prefilter {
+            set,
+            firsts,
+            line_start,
+        })
+    }
+
+    /// Whether character `c` can begin a match.
+    fn first(&self, prog: &[Inst], c: Ch, ci: bool) -> bool {
+        match byte_index(c) {
+            Some(b) => in_byte_set(&self.set, b),
+            None => self
+                .firsts
+                .iter()
+                .any(|&pc| prog.get(pc).is_some_and(|inst| takes(inst, Some(c), ci))),
+        }
+    }
 }
 
 /// A compiled ERE. Compile once with [`Regex::new`], then match repeatedly.
@@ -1848,7 +2077,17 @@ pub struct Regex {
     /// Whether the subject is read a byte at a time. See
     /// [`Regex::with_byte_chars`].
     bytes: bool,
+    /// Where a match can begin, for the unanchored search to step over the
+    /// rest; `None` when that would step over nothing. See [`Prefilter`].
+    prefilter: Option<Prefilter>,
 }
+
+/// The capture slots a search that wants only where the whole match lies
+/// keeps: group 0's two. The other groups' slots change nothing about where a
+/// match is -- the threads' priorities decide that -- so leaving them out
+/// changes no answer, and saves copying them for every thread at every
+/// character.
+const MATCH_SLOTS: usize = 2;
 
 /// A compiled regex prints as its shape, not its program.
 ///
@@ -1871,14 +2110,29 @@ impl core::fmt::Debug for Regex {
 /// Per-step NFA thread frontier with a `seen` set for `O(1)` dedupe, so each
 /// program counter is added at most once per input position (keeps the run
 /// linear and terminates epsilon cycles like `()*`).
+///
+/// The threads' capture slots live in one arena, `slots`, a thread's at
+/// `at..at + nslots`, rather than in a `Vec` of each thread's own: a step
+/// copies every live thread's slots, and with a `Vec` apiece that was an
+/// allocation and a free per thread per character -- most of the time a
+/// search took. The arena keeps its capacity across [`ThreadList::clear`], so
+/// a search allocates while its frontier first grows and not after.
+///
+/// `seen` holds, for each instruction, the generation of the list it was last
+/// added to: the list holds it when that is the current `generation`. So
+/// clearing the list is a new generation, where clearing a set of flags was a
+/// pass over every instruction of the program -- at every character.
 struct ThreadList {
     threads: Vec<Thread>,
-    seen: Vec<bool>,
+    seen: Vec<u32>,
+    generation: u32,
+    slots: Vec<Option<usize>>,
 }
 
 struct Thread {
     pc: usize,
-    caps: Vec<Option<usize>>,
+    /// Where this thread's capture slots begin in its list's `slots`.
+    at: usize,
 }
 
 /// One point the backreference backtracker may return to.
@@ -1903,13 +2157,27 @@ impl ThreadList {
     fn new(n: usize) -> Self {
         ThreadList {
             threads: Vec::new(),
-            seen: vec![false; n],
+            seen: vec![0; n],
+            generation: 1,
+            slots: Vec::new(),
         }
     }
 
     fn clear(&mut self) {
         self.threads.clear();
-        self.seen.fill(false);
+        self.slots.clear();
+        self.generation = self.generation.wrapping_add(1);
+        // After four billion generations the stamps start again, and the old
+        // ones must not be mistaken for new.
+        if self.generation == 0 {
+            self.seen.fill(0);
+            self.generation = 1;
+        }
+    }
+
+    /// Thread `th`'s capture slots.
+    fn caps(&self, th: &Thread, nslots: usize) -> &[Option<usize>] {
+        self.slots.get(th.at..th.at.saturating_add(nslots)).unwrap_or_default()
     }
 }
 
@@ -1979,6 +2247,8 @@ impl Regex {
             prog: Vec::new(),
             has_backref: false,
             over: false,
+            ci,
+            sets: BTreeMap::new(),
         };
         // Unanchored search prefix: prefer entering the match at the current
         // position (leftmost) over skipping one char and retrying.
@@ -2002,6 +2272,7 @@ impl Regex {
             return Err(EreError::new(RegCode::TooBig, b"regex too large".to_vec()));
         }
 
+        let prefilter = Prefilter::of(&c.prog, real, ci);
         Ok((
             Regex {
                 prog: c.prog,
@@ -2011,6 +2282,7 @@ impl Regex {
                 has_backref: c.has_backref,
                 newline_anchor: false,
                 bytes: false,
+                prefilter,
             },
             warnings,
         ))
@@ -2046,6 +2318,11 @@ impl Regex {
     /// every `regcomp` and `regexec` it makes, so a magic rule's `x.y` does
     /// not match `x`, `é`, `y`. The pattern itself is read as before; a magic
     /// rule's pattern is ASCII.
+    ///
+    /// [`Regex::find`], [`Regex::find_at`], [`Regex::is_match`] and
+    /// [`Regex::captures`] then read the subject where it lies, with nothing
+    /// decoded first; the iterators and [`Regex::search`] still decode it
+    /// once, to the same characters.
     #[must_use]
     pub fn with_byte_chars(mut self, on: bool) -> Regex {
         self.bytes = on;
@@ -2058,20 +2335,38 @@ impl Regex {
     }
 
     /// Whether `^` holds at character position `sp` of `input`.
-    fn line_start_at(&self, input: &[Ch], sp: usize, bol: StartOfLine) -> bool {
+    fn line_start_at<S: Subject + ?Sized>(&self, input: &S, sp: usize, bol: StartOfLine) -> bool {
         if sp == 0 {
             return bol == StartOfLine::Yes;
         }
         self.newline_anchor
             && sp
                 .checked_sub(1)
-                .and_then(|i| input.get(i))
-                .is_some_and(|&c| c == Ch::U('\n'))
+                .and_then(|i| input.at(i))
+                .is_some_and(|c| c == Ch::U('\n'))
     }
 
     /// Whether `$` holds at character position `sp` of `input`.
-    fn line_end_at(&self, input: &[Ch], sp: usize) -> bool {
-        sp == input.len() || (self.newline_anchor && input.get(sp) == Some(&Ch::U('\n')))
+    fn line_end_at<S: Subject + ?Sized>(&self, input: &S, sp: usize) -> bool {
+        sp == input.len() || (self.newline_anchor && input.at(sp) == Some(Ch::U('\n')))
+    }
+
+    /// The first position at or after `from` where a match can begin, by the
+    /// prefilter `pf`, or `None` if there is none before the end. (At the end
+    /// none can: a pattern with a prefilter cannot match empty.)
+    fn next_start<S: Subject + ?Sized>(
+        &self,
+        pf: &Prefilter,
+        input: &S,
+        from: usize,
+        bol: StartOfLine,
+    ) -> Option<usize> {
+        if pf.line_start && !self.newline_anchor {
+            // A line starts only where the subject does.
+            return (from == 0 && input.at(0).is_some_and(|c| pf.first(&self.prog, c, self.ci)))
+                .then_some(0);
+        }
+        (from..input.len()).find(|&p| self.can_start(pf, input, p, bol))
     }
 
     /// Number of capturing groups (excluding the whole-match group 0).
@@ -2107,7 +2402,7 @@ impl Regex {
     /// [`MatchLimit`] if a backreference search exceeded its budget. A pattern
     /// without a backreference cannot return one.
     pub fn is_match(&self, text: BStr<'_>) -> Result<bool, MatchLimit> {
-        Ok(self.captures(text)?.is_some())
+        Ok(self.find(text)?.is_some())
     }
 
     /// Find the leftmost match and return the captured substrings: index `0` is
@@ -2121,29 +2416,48 @@ impl Regex {
     /// # Errors
     /// [`MatchLimit`] if a backreference search exceeded its budget.
     pub fn captures(&self, text: BStr<'_>) -> Result<Option<Vec<Option<Str>>>, MatchLimit> {
+        if self.bytes {
+            // Read where it lies: character `i` is byte `i`, so a group's
+            // characters are its bytes.
+            let Some(slots) = self.run(&Bytes(text), 0, StartOfLine::Yes, self.all_slots())? else {
+                return Ok(None);
+            };
+            return Ok(Some(self.groups(&slots, |s, e| text.get(s..e).map(<[u8]>::to_vec))));
+        }
         let chars: Vec<Ch> = self.decode(text).chars;
-        let Some(slots) = self.run(&chars, 0, StartOfLine::Yes)? else {
+        let Some(slots) = self.run(chars.as_slice(), 0, StartOfLine::Yes, self.all_slots())? else {
             return Ok(None);
         };
-        let mut out = Vec::with_capacity(self.ngroups.saturating_add(1));
-        for g in 0..=self.ngroups {
-            // The open and close slots of group `g`. A group is an opening paren
-            // in the pattern, so `2·g + 1` is bounded by the pattern's length;
-            // the slots are read with `get`, so even a saturated index is a
-            // missing capture rather than a panic.
-            let (open, close) = (g.saturating_mul(2), g.saturating_mul(2).saturating_add(1));
-            match (
-                slots.get(open).copied().flatten(),
-                slots.get(close).copied().flatten(),
-            ) {
-                (Some(s), Some(e)) if s <= e && e <= chars.len() => {
-                    let span = chars.get(s..e).unwrap_or_default();
-                    out.push(Some(bytes::from_chars(span.iter().copied())));
+        Ok(Some(self.groups(&slots, |s, e| {
+            chars
+                .get(s..e)
+                .map(|span| bytes::from_chars(span.iter().copied()))
+        })))
+    }
+
+    /// Each group's text, by `text_of` its span of characters; `None` for a
+    /// group that did not participate.
+    fn groups(
+        &self,
+        slots: &[Option<usize>],
+        text_of: impl Fn(usize, usize) -> Option<Str>,
+    ) -> Vec<Option<Str>> {
+        (0..=self.ngroups)
+            .map(|g| {
+                // The open and close slots of group `g`. A group is an opening
+                // paren in the pattern, so `2·g + 1` is bounded by the
+                // pattern's length; the slots are read with `get`, so even a
+                // saturated index is a missing capture rather than a panic.
+                let (open, close) = (g.saturating_mul(2), g.saturating_mul(2).saturating_add(1));
+                match (
+                    slots.get(open).copied().flatten(),
+                    slots.get(close).copied().flatten(),
+                ) {
+                    (Some(s), Some(e)) if s <= e => text_of(s, e),
+                    _ => None,
                 }
-                _ => out.push(None),
-            }
-        }
-        Ok(Some(out))
+            })
+            .collect()
     }
 
     /// Where the leftmost match begins and ends, as **byte** offsets into
@@ -2176,8 +2490,9 @@ impl Regex {
     /// `from` is rounded forward to a character boundary, so a caller that
     /// resumes from an arbitrary byte cannot start a match inside a character.
     ///
-    /// Prefer [`Regex::find_iter`] for a scan: this decodes `text` on every
-    /// call, so stepping through a long subject with it is quadratic.
+    /// Prefer [`Regex::find_iter`] for a scan: unless the regex reads bytes
+    /// ([`Regex::with_byte_chars`]), this decodes `text` on every call, so
+    /// stepping through a long subject with it is quadratic.
     ///
     /// # Errors
     /// [`MatchLimit`] if a backreference search exceeded its budget.
@@ -2186,8 +2501,28 @@ impl Regex {
         text: BStr<'_>,
         from: usize,
     ) -> Result<Option<(usize, usize)>, MatchLimit> {
+        if self.bytes {
+            // Read where it lies: every byte offset is a character boundary,
+            // and character offsets are byte offsets.
+            let start = from.min(text.len());
+            let Some(slots) = self.run(&Bytes(text), start, StartOfLine::Yes, MATCH_SLOTS)? else {
+                return Ok(None);
+            };
+            return Ok(
+                match (slots.first().copied().flatten(), slots.get(1).copied().flatten()) {
+                    (Some(s), Some(e)) if s <= text.len() && e <= text.len() => Some((s, e)),
+                    _ => None,
+                },
+            );
+        }
         let scan = self.decode(text);
-        let Some(slots) = self.run(&scan.chars, scan.char_index(from), StartOfLine::Yes)? else {
+        let Some(slots) = self.run(
+            scan.chars.as_slice(),
+            scan.char_index(from),
+            StartOfLine::Yes,
+            MATCH_SLOTS,
+        )?
+        else {
             return Ok(None);
         };
         let (Some(s), Some(e)) = (
@@ -2324,16 +2659,22 @@ impl Regex {
     /// # Errors
     /// [`MatchLimit`] if a backreference search ran out of budget. A pattern
     /// without a backreference never returns one.
-    fn run(
+    ///
+    /// `nslots` is how many capture slots the caller will read: all of them
+    /// ([`Regex::all_slots`]) for the groups, or [`MATCH_SLOTS`] for where the
+    /// match lies. The backtracker keeps them all regardless -- a
+    /// backreference reads its group's.
+    fn run<S: Subject + ?Sized>(
         &self,
-        input: &[Ch],
+        input: &S,
         start: usize,
         bol: StartOfLine,
+        nslots: usize,
     ) -> Result<Option<Vec<Option<usize>>>, MatchLimit> {
         if self.has_backref {
             return self.run_backtrack(input, start, bol);
         }
-        let Some(first) = self.scan(input, start, 0, false, bol) else {
+        let Some(first) = self.scan(input, start, 0, false, bol, nslots) else {
             return Ok(None);
         };
         let Some(at) = first.first().copied().flatten() else {
@@ -2343,7 +2684,14 @@ impl Regex {
         // was just found at exactly that position — and is written out rather
         // than unwrapped so a future change to the prefix cannot turn a shorter
         // answer into no answer at all.
-        Ok(self.scan(input, at, self.entry, true, bol).or(Some(first)))
+        Ok(self
+            .scan(input, at, self.entry, true, bol, nslots)
+            .or(Some(first)))
+    }
+
+    /// Every capture slot: two for each group and two for the whole match.
+    fn all_slots(&self) -> usize {
+        self.ngroups.saturating_add(1).saturating_mul(2)
     }
 
     /// How many steps one search of `input` may take before it is abandoned.
@@ -2374,9 +2722,9 @@ impl Regex {
     /// [`MatchLimit`] when the budget runs out. The budget is shared across all
     /// the start positions of one search, so the cost of a call is bounded, not
     /// just the cost of each attempt within it.
-    fn run_backtrack(
+    fn run_backtrack<S: Subject + ?Sized>(
         &self,
-        input: &[Ch],
+        input: &S,
         start: usize,
         bol: StartOfLine,
     ) -> Result<Option<Vec<Option<usize>>>, MatchLimit> {
@@ -2435,14 +2783,14 @@ impl Regex {
     /// answer Perl gives (an iteration that consumed nothing ends the loop). And
     /// the budget bounds the genuinely exponential patterns, which no structural
     /// rule can.
-    fn backtrack_at(
+    fn backtrack_at<S: Subject + ?Sized>(
         &self,
-        input: &[Ch],
+        input: &S,
         start: usize,
         budget: &mut u64,
         bol: StartOfLine,
     ) -> Result<Option<Vec<Option<usize>>>, MatchLimit> {
-        let nslots = self.ngroups.saturating_add(1).saturating_mul(2);
+        let nslots = self.all_slots();
         let mut best: Option<Vec<Option<usize>>> = None;
         let mut best_end: Option<usize> = None;
         let mut stack: Vec<BtFrame> = vec![BtFrame {
@@ -2470,16 +2818,8 @@ impl Regex {
                 // and `sp` is an index into `input`.
                 let next_pc = f.pc.saturating_add(1);
                 match inst {
-                    Inst::Char(ch) if char_eq(input.get(f.sp).copied(), *ch, self.ci) => {
-                        f.pc = next_pc;
-                        f.sp = f.sp.saturating_add(1);
-                    }
-                    Inst::Any if f.sp < input.len() => {
-                        f.pc = next_pc;
-                        f.sp = f.sp.saturating_add(1);
-                    }
-                    Inst::Class(d)
-                        if input.get(f.sp).is_some_and(|c| d.matches_ci(*c, self.ci)) =>
+                    Inst::Char(_) | Inst::Any | Inst::Class(_)
+                        if takes(inst, input.at(f.sp), self.ci) =>
                     {
                         f.pc = next_pc;
                         f.sp = f.sp.saturating_add(1);
@@ -2565,9 +2905,9 @@ impl Regex {
     /// re-compares a long capture many times pays for it. Charging one step per
     /// instruction alone would make `\(.*\)\1\1\1…` almost free to the budget
     /// and expensive to the machine, which is the wrong way round.
-    fn backref_step(
+    fn backref_step<S: Subject + ?Sized>(
         &self,
-        input: &[Ch],
+        input: &S,
         f: &BtFrame,
         n: usize,
         budget: &mut u64,
@@ -2586,36 +2926,47 @@ impl Regex {
             Some(left) => left,
             None => return Err(MatchLimit),
         };
-        let (Some(want), Some(have)) = (input.get(s..e), input.get(f.sp..f.sp.saturating_add(len)))
-        else {
+        // The group's text and as much again from here must both be there.
+        let Some(have_end) = f.sp.checked_add(len) else {
             return Ok(None);
         };
-        if want
-            .iter()
-            .zip(have)
-            .all(|(&w, &h)| char_eq(Some(h), w, self.ci))
-        {
-            Ok(Some(f.sp.saturating_add(len)))
-        } else {
-            Ok(None)
+        if e > input.len() || have_end > input.len() {
+            return Ok(None);
         }
+        let same = (0..len).all(|k| {
+            match (input.at(s.saturating_add(k)), input.at(f.sp.saturating_add(k))) {
+                (Some(w), have @ Some(_)) => char_eq(have, w, self.ci),
+                _ => false,
+            }
+        });
+        Ok(same.then_some(have_end))
     }
 
     /// One pass of the Pike VM: threads seeded at `seed_pc` and character index
-    /// `start`, returning the winning thread's capture slots (`2 × (ngroups +
-    /// 1)` positions). With `longest`, a thread reaching `Match` records its
-    /// slots and the pass continues, so a later — longer — match supersedes it;
-    /// without it the pass stops at the first, highest-priority `Match`.
-    fn scan(
+    /// `start`, returning the winning thread's first `nslots` capture slots.
+    /// With `longest`, a thread reaching `Match` records its slots and the pass
+    /// continues, so a later — longer — match supersedes it; without it the
+    /// pass stops at the first, highest-priority `Match`.
+    ///
+    /// The unanchored pass (`seed_pc` 0) steps over the positions where no
+    /// match can begin, by the [`Prefilter`] -- but only while every live
+    /// thread is one the search seeded at this position, since a thread that
+    /// began earlier may be partway through a match the character here
+    /// continues. Seeded here, the pattern's threads stand at instructions
+    /// that take a match's first character, so if the prefilter says this
+    /// character cannot be one they all die at this step, and what is left is
+    /// the search prefix's thread, which seeds the pattern again at the next
+    /// position. Seeding it instead at the next position the prefilter allows
+    /// is the same search without the steps between.
+    fn scan<S: Subject + ?Sized>(
         &self,
-        input: &[Ch],
+        input: &S,
         start: usize,
         seed_pc: usize,
         longest: bool,
         bol: StartOfLine,
+        nslots: usize,
     ) -> Option<Vec<Option<usize>>> {
-        // Two slots — open and close — for every group plus the whole match.
-        let nslots = self.ngroups.saturating_add(1).saturating_mul(2);
         let mut clist = ThreadList::new(self.prog.len());
         let mut nlist = ThreadList::new(self.prog.len());
         let mut matched: Option<Vec<Option<usize>>> = None;
@@ -2625,17 +2976,45 @@ impl Regex {
         let mut matched_at: Option<usize> = None;
 
         let mut caps = vec![None; nslots];
+        let prefilter = self.prefilter.as_ref().filter(|_| seed_pc == 0);
         // `start` past the end is not an error — it is a scan that has run off
         // the subject, which `find_iter` does on its last step.
-        let start = start.min(input.len());
-        self.add_thread(&mut clist, seed_pc, start, &mut caps, input, bol);
+        let mut sp = start.min(input.len());
+        if let Some(pf) = prefilter {
+            sp = self.next_start(pf, input, sp, bol)?;
+        }
+        self.add_thread(&mut clist, seed_pc, sp, &mut caps, input, bol);
+        // Whether every thread in `clist` was seeded at `sp`.
+        let mut fresh = true;
 
-        for sp in start..=input.len() {
+        while sp <= input.len() {
             if clist.threads.is_empty() {
                 break;
             }
-            let c = input.get(sp).copied();
+            if let Some(pf) = prefilter
+                && fresh
+                && !self.can_start(pf, input, sp, bol)
+            {
+                // No match begins here, and none is under way: on to where one
+                // can begin, if anywhere.
+                let Some(p) = self.next_start(pf, input, sp.saturating_add(1), bol) else {
+                    break;
+                };
+                clist.clear();
+                caps.clear();
+                caps.resize(nslots, None);
+                self.add_thread(&mut clist, seed_pc, p, &mut caps, input, bol);
+                sp = p;
+                continue;
+            }
+            let c = input.at(sp);
             nlist.clear();
+            // How many threads of the next list descend from threads that
+            // began before the next position, counted when the search prefix's
+            // thread -- the last, lowest-priority one -- seeds the pattern
+            // there; and how many there were once it had.
+            let mut older: Option<usize> = None;
+            let mut seeded = 0;
             let mut i = 0;
             // Indexed rather than iterated because the threads are consulted in
             // priority order and the loop may stop early at `Match`; `get`
@@ -2656,21 +3035,27 @@ impl Regex {
                 // (`Match` is), and `sp` is an index into `input`.
                 let next = (pc.saturating_add(1), sp.saturating_add(1));
                 match inst {
-                    Inst::Char(ch) if char_eq(c, *ch, self.ci) => {
-                        let mut caps = th.caps.clone();
+                    Inst::Char(_) | Inst::Any | Inst::Class(_) if takes(inst, c, self.ci) => {
+                        // The search prefix is the instructions before the
+                        // pattern's entry; its one consuming instruction is
+                        // the `Any` whose successor seeds the pattern again.
+                        let prefix = pc < self.entry;
+                        if prefix {
+                            older = Some(nlist.threads.len());
+                        }
+                        // The thread's slots, copied into the scratch buffer
+                        // `add_thread` threads through the successor's epsilon
+                        // closure and leaves where it found them.
+                        caps.clear();
+                        caps.extend_from_slice(clist.caps(th, nslots));
                         self.add_thread(&mut nlist, next.0, next.1, &mut caps, input, bol);
-                    }
-                    Inst::Any if c.is_some() => {
-                        let mut caps = th.caps.clone();
-                        self.add_thread(&mut nlist, next.0, next.1, &mut caps, input, bol);
-                    }
-                    Inst::Class(d) if c.is_some_and(|ch| d.matches_ci(ch, self.ci)) => {
-                        let mut caps = th.caps.clone();
-                        self.add_thread(&mut nlist, next.0, next.1, &mut caps, input, bol);
+                        if prefix {
+                            seeded = nlist.threads.len();
+                        }
                     }
                     Inst::Match => {
                         if matched_at.is_none_or(|at| sp > at) {
-                            matched = Some(th.caps.clone());
+                            matched = Some(clist.caps(th, nslots).to_vec());
                             matched_at = Some(sp);
                         }
                         if !longest {
@@ -2696,21 +3081,42 @@ impl Regex {
                 }
                 i = i.saturating_add(1);
             }
+            // The prefix's thread is the last, so nothing follows what it
+            // seeded; were anything to, the list would not be all fresh, and
+            // the next step simply would not skip.
+            fresh = older == Some(0) && seeded == nlist.threads.len();
             core::mem::swap(&mut clist, &mut nlist);
+            sp = sp.saturating_add(1);
         }
         matched
+    }
+
+    /// Whether a match can begin at position `p` of `input`, by the prefilter
+    /// `pf`: the character there can begin one, and -- for a pattern whose
+    /// every match begins at `^` or `` \` `` -- a line or the subject begins
+    /// there. (`p == 0` is let through for `` \` ``, which holds there whatever
+    /// `bol` says.)
+    fn can_start<S: Subject + ?Sized>(
+        &self,
+        pf: &Prefilter,
+        input: &S,
+        p: usize,
+        bol: StartOfLine,
+    ) -> bool {
+        input.at(p).is_some_and(|c| pf.first(&self.prog, c, self.ci))
+            && (!pf.line_start || p == 0 || self.line_start_at(input, p, bol))
     }
 
     /// Add `pc` (following epsilon transitions) to `list` at input position
     /// `sp`, threading capture slots. Deduped via `list.seen` so the first
     /// (highest-priority) path to each pc wins.
-    fn add_thread(
+    fn add_thread<S: Subject + ?Sized>(
         &self,
         list: &mut ThreadList,
         pc: usize,
         sp: usize,
         caps: &mut Vec<Option<usize>>,
-        input: &[Ch],
+        input: &S,
         bol: StartOfLine,
     ) {
         // `seen` is sized to the program, so a `pc` it cannot index is one no
@@ -2720,10 +3126,10 @@ impl Regex {
         let Some(seen) = list.seen.get_mut(pc) else {
             return;
         };
-        if *seen {
+        if *seen == list.generation {
             return;
         }
-        *seen = true;
+        *seen = list.generation;
         let Some(inst) = self.prog.get(pc) else {
             return;
         };
@@ -2775,10 +3181,13 @@ impl Regex {
                 }
             }
             // Consuming/terminal instruction — becomes a live thread.
-            _ => list.threads.push(Thread {
-                pc,
-                caps: caps.clone(),
-            }),
+            _ => {
+                list.threads.push(Thread {
+                    pc,
+                    at: list.slots.len(),
+                });
+                list.slots.extend_from_slice(caps);
+            }
         }
     }
 }
@@ -2812,9 +3221,12 @@ impl Search<'_> {
         from: usize,
         bol: StartOfLine,
     ) -> Result<Option<GroupSpans>, MatchLimit> {
-        let Some(slots) = self
-            .re
-            .run(&self.scan.chars, self.scan.char_index(from), bol)?
+        let Some(slots) = self.re.run(
+            self.scan.chars.as_slice(),
+            self.scan.char_index(from),
+            bol,
+            self.re.all_slots(),
+        )?
         else {
             return Ok(None);
         };
@@ -2836,7 +3248,7 @@ impl Search<'_> {
     /// [`MatchLimit`] if a backreference search exceeded its budget.
     pub fn find_window(&self, lo: usize, hi: usize) -> Result<Option<(usize, usize)>, MatchLimit> {
         self.in_window(lo, hi, |re, input| {
-            let Some(slots) = re.run(input, 0, StartOfLine::Yes)? else {
+            let Some(slots) = re.run(input, 0, StartOfLine::Yes, MATCH_SLOTS)? else {
                 return Ok(None);
             };
             Ok(slots
@@ -2859,7 +3271,7 @@ impl Search<'_> {
                 let mut budget = Regex::backtrack_budget(input.len());
                 re.backtrack_at(input, 0, &mut budget, StartOfLine::Yes)?
             } else {
-                re.scan(input, 0, re.entry, true, StartOfLine::Yes)
+                re.scan(input, 0, re.entry, true, StartOfLine::Yes, MATCH_SLOTS)
             };
             Ok(slots
                 .and_then(|s| s.get(1).copied().flatten())
@@ -3006,12 +3418,21 @@ impl Cursor {
     /// abandoned rather than finished — a distinction the caller has to keep,
     /// because a truncated `gsub` that reported success would silently write
     /// half a substitution.
-    fn step(&mut self, re: &Regex) -> Option<Result<Vec<Option<usize>>, MatchLimit>> {
+    ///
+    /// `nslots` is how many capture slots the caller reads (see
+    /// [`Regex::run`]); at least the whole match's two are kept, which the
+    /// stepping itself reads.
+    fn step(
+        &mut self,
+        re: &Regex,
+        nslots: usize,
+    ) -> Option<Result<Vec<Option<usize>>, MatchLimit>> {
+        let nslots = nslots.max(MATCH_SLOTS);
         loop {
             if self.done {
                 return None;
             }
-            let slots = match re.run(&self.scan.chars, self.next, StartOfLine::Yes) {
+            let slots = match re.run(self.scan.chars.as_slice(), self.next, StartOfLine::Yes, nslots) {
                 Ok(Some(slots)) => slots,
                 Ok(None) => {
                     self.done = true;
@@ -3083,7 +3504,7 @@ impl Iterator for Matches<'_> {
     type Item = Result<(usize, usize), MatchLimit>;
 
     fn next(&mut self) -> Option<Self::Item> {
-        let slots = match self.cur.step(self.re)? {
+        let slots = match self.cur.step(self.re, MATCH_SLOTS)? {
             Ok(slots) => slots,
             Err(limit) => return Some(Err(limit)),
         };
@@ -3105,7 +3526,7 @@ impl Iterator for CaptureMatches<'_> {
     type Item = Result<GroupSpans, MatchLimit>;
 
     fn next(&mut self) -> Option<Self::Item> {
-        let slots = match self.cur.step(self.re)? {
+        let slots = match self.cur.step(self.re, self.re.all_slots())? {
             Ok(slots) => slots,
             Err(limit) => return Some(Err(limit)),
         };
@@ -4677,5 +5098,190 @@ mod tests {
         assert_eq!(whole("^(a)\\1*", "aaa", 0, StartOfLine::Yes), Some((0, 3)));
         assert_eq!(whole("^(a)\\1*", "aaa", 0, StartOfLine::No), None);
         assert_eq!(whole("(a)\\1*", "aaa", 0, StartOfLine::No), Some((0, 3)));
+    }
+
+    /// A small deterministic generator for the equivalence test below
+    /// (xorshift64*): the same cases every run, so a failure reproduces.
+    struct Rng(u64);
+
+    impl Rng {
+        fn next(&mut self) -> u64 {
+            self.0 ^= self.0 >> 12;
+            self.0 ^= self.0 << 25;
+            self.0 ^= self.0 >> 27;
+            self.0.wrapping_mul(0x2545_f491_4f6c_dd1d)
+        }
+
+        fn below(&mut self, n: usize) -> usize {
+            usize::try_from(self.next() % u64::try_from(n).unwrap()).unwrap()
+        }
+
+        fn pick<'a>(&mut self, from: &[&'a [u8]]) -> &'a [u8] {
+            from[self.below(from.len())]
+        }
+    }
+
+    /// A random pattern over a small alphabet that still reaches every kind
+    /// of instruction: literals in and out of ASCII, `.`, brackets, every
+    /// anchor and word assertion, groups, alternation and repetition.
+    fn random_pattern(r: &mut Rng, depth: usize) -> Vec<u8> {
+        const ATOMS: &[&[u8]] = &[
+            b"a", b"b", b"A", b".", b"[ab]", b"[^a]", b"[[:alpha:]]", b"[a-z]", b"[^\n]",
+            b"\n", "\u{e9}".as_bytes(), b"\x80", b"x", b"()", b"\\b", b"\\B", b"\\<", b"\\>",
+            b"^", b"$", b"\\`", b"\\'", b"\\w", b"\\W", b"\\1",
+        ];
+        let mut p = Vec::new();
+        for _ in 0..=r.below(4) {
+            if depth > 0 && r.below(4) == 0 {
+                p.push(b'(');
+                p.extend(random_pattern(r, depth - 1));
+                if r.below(3) == 0 {
+                    p.push(b'|');
+                    p.extend(random_pattern(r, depth - 1));
+                }
+                p.push(b')');
+            } else {
+                p.extend_from_slice(r.pick(ATOMS));
+            }
+            p.extend_from_slice(r.pick(&[b"", b"", b"", b"", b"*", b"+", b"?", b"{1,2}", b"{0,1}"]));
+        }
+        if r.below(6) == 0 {
+            p.push(b'|');
+            p.extend(random_pattern(r, depth.saturating_sub(1)));
+        }
+        p
+    }
+
+    fn random_subject(r: &mut Rng) -> Vec<u8> {
+        const PIECES: &[&[u8]] = &[b"a", b"b", b"A", b"x", b"\n", b" ", b"_", "\u{e9}".as_bytes(), b"\x80"];
+        let mut s = Vec::new();
+        for _ in 0..r.below(12) {
+            s.extend_from_slice(r.pick(PIECES));
+        }
+        s
+    }
+
+    /// Skipping by the prefilter, reading bytes where they lie, keeping only
+    /// the whole match's slots and the allocation-free folds change no answer:
+    /// every search, by every entry point, agrees with the same regex run
+    /// with no prefilter, over random patterns and subjects, in each reading
+    /// (characters or bytes), with and without the newline anchor and case
+    /// folding.
+    fn equivalence(cases: usize, seed: u64) {
+        let mut r = Rng(seed);
+        let mut compiled = 0;
+        let mut filtered = 0;
+        for _ in 0..cases {
+            let pattern = random_pattern(&mut r, 2);
+            let subjects: Vec<Vec<u8>> = (0..8).map(|_| random_subject(&mut r)).collect();
+            for (ci, newline, bytes) in [
+                (false, false, false),
+                (false, false, true),
+                (false, true, false),
+                (true, false, true),
+                (true, true, false),
+                (false, true, true),
+            ] {
+                let make = || {
+                    Regex::new_flags(&pattern, ci)
+                        .ok()
+                        .map(|re| re.with_newline_anchor(newline).with_byte_chars(bytes))
+                };
+                let (Some(re), Some(mut plain)) = (make(), make()) else {
+                    continue;
+                };
+                compiled += 1;
+                filtered += usize::from(re.prefilter.is_some());
+                plain.prefilter = None;
+                let what = |s: &[u8]| {
+                    alloc::format!(
+                        "pattern {:?} subject {:?} ci {ci} newline {newline} bytes {bytes}",
+                        alloc::string::String::from_utf8_lossy(&pattern),
+                        alloc::string::String::from_utf8_lossy(s)
+                    )
+                };
+                for s in &subjects {
+                    assert_eq!(re.captures(s), plain.captures(s), "{}", what(s));
+                    assert_eq!(re.is_match(s), plain.is_match(s), "{}", what(s));
+                    let all: Vec<_> = re.find_iter(s).collect();
+                    let all_plain: Vec<_> = plain.find_iter(s).collect();
+                    assert_eq!(all, all_plain, "{}", what(s));
+                    let groups: Vec<_> = re.capture_spans_iter(s).collect();
+                    let groups_plain: Vec<_> = plain.capture_spans_iter(s).collect();
+                    assert_eq!(groups, groups_plain, "{}", what(s));
+                    let (search, search_plain) = (re.search(s), plain.search(s));
+                    for from in 0..=s.len().saturating_add(1) {
+                        let found = re.find_at(s, from);
+                        assert_eq!(found, plain.find_at(s, from), "{} from {from}", what(s));
+                        for bol in [StartOfLine::Yes, StartOfLine::No] {
+                            let spans = search.capture_spans_from(from, bol);
+                            assert_eq!(
+                                spans,
+                                search_plain.capture_spans_from(from, bol),
+                                "{} from {from} bol {bol:?}",
+                                what(s)
+                            );
+                            if bol == StartOfLine::Yes {
+                                // `find_at` (bytes in place, two slots) and the
+                                // decoded search (every slot) find one match.
+                                let whole = spans.unwrap().and_then(|g| g.first().copied().flatten());
+                                assert_eq!(found.unwrap(), whole, "{} from {from}", what(s));
+                            }
+                        }
+                        let ends = [from, from.midpoint(s.len()), s.len()];
+                        for hi in ends.into_iter().filter(|&hi| hi >= from) {
+                            assert_eq!(
+                                search.find_window(from, hi),
+                                search_plain.find_window(from, hi),
+                                "{} window {from}..{hi}",
+                                what(s)
+                            );
+                        }
+                    }
+                }
+            }
+        }
+        // The test is only worth something if it reached both kinds.
+        assert!(compiled > cases, "{compiled} of {cases} patterns compiled");
+        assert!(filtered > compiled / 4, "{filtered} of {compiled} had a prefilter");
+        assert!(filtered < compiled, "{filtered} of {compiled} had a prefilter");
+    }
+
+    #[test]
+    fn the_fast_paths_change_no_answer() {
+        equivalence(300, 0x0005_eed0_fe4e);
+    }
+
+    /// The same, at scale: `cargo test -p ere -- --ignored`.
+    #[test]
+    #[ignore = "a minute or more; run when the engine changes"]
+    fn the_fast_paths_change_no_answer_at_scale() {
+        equivalence(20_000, 0xdead_beef_cafe);
+    }
+
+    /// The prefilter of a few shapes of pattern, as worked out.
+    #[test]
+    fn what_the_prefilter_knows() {
+        let pf = |p: &str| Regex::new(p.as_bytes()).unwrap().prefilter;
+        // A literal first character: only it can begin a match.
+        let lit = pf("ab*").unwrap();
+        assert!(in_byte_set(&lit.set, b'a'));
+        assert!(!in_byte_set(&lit.set, b'b'));
+        assert!(!lit.line_start);
+        // Anchored: only at a line's start, and only with the right character.
+        let anchored = pf("^#!").unwrap();
+        assert!(anchored.line_start && in_byte_set(&anchored.set, b'#'));
+        // Not on every path, so not anchored.
+        assert!(!pf("^a|b").unwrap().line_start);
+        // Matching empty, or beginning anywhere with anything: none.
+        assert!(pf("a*").is_none());
+        assert!(pf("a?b?").is_none());
+        assert!(pf(".b").is_none());
+        assert!(pf("^.").is_some_and(|p| p.line_start));
+        // A backreference first: none.
+        assert!(pf(r"(a)|\1").is_none());
+        // Case folding widens the set.
+        let ci = Regex::new_flags(b"q", true).unwrap().prefilter.unwrap();
+        assert!(in_byte_set(&ci.set, b'q') && in_byte_set(&ci.set, b'Q'));
     }
 }

@@ -7533,6 +7533,69 @@ pub fn linux_fd_install(
     Ok(fd)
 }
 
+/// Install a descriptor that came from another process -- `SCM_RIGHTS`,
+/// `pidfd_getfd` -- at the lowest free number, and say whether the process
+/// held its object already.
+///
+/// A process holds one reference per object however many of its
+/// descriptors name it, and `close` releases it with the last of them. So
+/// the caller keeps the reference it brought only when the object is new to
+/// the process -- this then records it in `ipc_handles`, for exit to release
+/// and fork to share -- and drops it when the answer is `true`. The check and
+/// the install are one step under the process table's lock: apart, another
+/// thread closing the process's other descriptor for the object in between
+/// would release the object while this one was installed as though still
+/// covered by it.
+///
+/// Enforces `RLIMIT_NOFILE` as [`linux_fd_install`] does.
+///
+/// # Errors
+///
+/// As [`linux_fd_install`].
+pub fn linux_fd_install_passed(
+    pid: ProcessId,
+    entry: super::linux_fd::FdEntry,
+) -> KernelResult<(i32, bool)> {
+    let mut table = PROCESS_TABLE.lock();
+    let proc = table.get_mut(&pid).ok_or(KernelError::NoSuchProcess)?;
+    let nofile_soft = proc
+        .rlimits
+        .get(RLIMIT_NOFILE as usize)
+        .map_or(RLIM_INFINITY, |r| r.0);
+    let fd_table = proc
+        .linux_fd_table
+        .as_mut()
+        .ok_or(KernelError::InvalidHandle)?;
+    let held = fd_table.is_handle_referenced(entry.kind, entry.raw_handle, -1);
+    let fd = fd_table.install_lowest_from(0, entry)?;
+    if nofile_soft != RLIM_INFINITY && u64::try_from(fd).unwrap_or(u64::MAX) >= nofile_soft {
+        // We installed it; we take it back out.
+        let _ = fd_table.take(fd);
+        return Err(KernelError::TooManyOpenFiles);
+    }
+    if !held && let Some(resource) = entry.kind.resource_type() {
+        proc.ipc_handles.push((resource, entry.raw_handle));
+    }
+    Ok((fd, held))
+}
+
+/// Take descriptor `fd` out of `pid`'s table and say whether it was the
+/// process's last for its object -- the one whose close releases it.
+///
+/// One step under the process table's lock: as two (take, then ask), two
+/// threads closing two descriptors for one object at once could each find
+/// the other's already gone, and release the process's one reference twice
+/// -- the second time a reference some other process holds.
+#[must_use]
+pub fn linux_fd_take_last(pid: ProcessId, fd: i32) -> Option<(super::linux_fd::FdEntry, bool)> {
+    let mut table = PROCESS_TABLE.lock();
+    let proc = table.get_mut(&pid)?;
+    let fd_table = proc.linux_fd_table.as_mut()?;
+    let entry = fd_table.take(fd)?;
+    let last = !fd_table.is_handle_referenced(entry.kind, entry.raw_handle, -1);
+    Some((entry, last))
+}
+
 /// Install `entry` at a specific `fd`, overwriting any existing entry.
 ///
 /// The caller is responsible for closing the previous handle if it held
@@ -7569,26 +7632,6 @@ pub fn linux_fd_take(pid: ProcessId, fd: i32) -> Option<super::linux_fd::FdEntry
     fd_table.take(fd)
 }
 
-/// Check whether any fd OTHER than `excluded_fd` references the same
-/// `(kind, raw_handle)`.  Used by `close()` to decide whether to
-/// release the underlying kernel resource.
-#[must_use]
-pub fn linux_fd_is_handle_referenced(
-    pid: ProcessId,
-    kind: super::linux_fd::HandleKind,
-    raw_handle: u64,
-    excluded_fd: i32,
-) -> bool {
-    let table = PROCESS_TABLE.lock();
-    let Some(proc) = table.get(&pid) else {
-        return false;
-    };
-    let Some(fd_table) = proc.linux_fd_table.as_ref() else {
-        return false;
-    };
-    fd_table.is_handle_referenced(kind, raw_handle, excluded_fd)
-}
-
 /// Duplicate `oldfd` onto the lowest free slot >= `min_fd`.
 ///
 /// Implements both `dup` (min_fd=0) and `fcntl(F_DUPFD, min_fd)`.
@@ -7610,9 +7653,12 @@ pub fn linux_fd_dup(pid: ProcessId, oldfd: i32, min_fd: i32) -> KernelResult<i32
     fd_table.dup_lowest(oldfd, min_fd)
 }
 
-/// Duplicate `oldfd` onto exactly `newfd`, returning `(newfd,
-/// previous_occupant)`.  The caller is responsible for closing the
-/// previous occupant (if `Some`) after dropping the lock.
+/// Duplicate `oldfd` onto exactly `newfd`, returning `newfd` and the
+/// previous occupant, if there was one, with whether it was the process's
+/// last descriptor for its object (decided in the same step as the
+/// displacement, as [`linux_fd_take_last`] decides it). The caller closes
+/// the previous occupant after dropping the lock -- releasing its object
+/// only when it was the last.
 ///
 /// # Errors
 ///
@@ -7625,14 +7671,21 @@ pub fn linux_fd_dup2(
     pid: ProcessId,
     oldfd: i32,
     newfd: i32,
-) -> KernelResult<(i32, Option<super::linux_fd::FdEntry>)> {
+) -> KernelResult<(i32, Option<(super::linux_fd::FdEntry, bool)>)> {
     let mut table = PROCESS_TABLE.lock();
     let proc = table.get_mut(&pid).ok_or(KernelError::NoSuchProcess)?;
     let fd_table = proc
         .linux_fd_table
         .as_mut()
         .ok_or(KernelError::InvalidHandle)?;
-    fd_table.dup2(oldfd, newfd)
+    let (fd, prev) = fd_table.dup2(oldfd, newfd)?;
+    Ok((
+        fd,
+        prev.map(|e| {
+            let last = !fd_table.is_handle_referenced(e.kind, e.raw_handle, -1);
+            (e, last)
+        }),
+    ))
 }
 
 /// Set `FD_CLOEXEC` (and any other future fd flags) for `fd`.

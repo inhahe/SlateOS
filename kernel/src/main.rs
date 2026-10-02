@@ -3594,6 +3594,14 @@ extern "C" fn kernel_main() -> ! {
         proc::spawn::self_test_linux_unix_sockets(),
     );
 
+    // Ring-3 end-to-end test of SCM_RIGHTS: pipes' write ends passed on a
+    // datagram and on a stream, every reference shown by an end of file.
+    selftest::dispatch_debug(
+        "Linux SCM_RIGHTS (ring 3)",
+        selftest::Severity::Diagnostic,
+        proc::spawn::self_test_linux_scm_rights(),
+    );
+
     // Where each process's program headers are: found in a loaded segment,
     // or copied into a read-only page when none holds them -- recorded for
     // SYS_PROCESS_GET_PHDR and given to Linux programs as AT_PHDR.

@@ -3028,6 +3028,444 @@ pub fn build_linux_unix_socket_test_elf() -> alloc::vec::Vec<u8> {
     buf
 }
 
+/// Build a **Linux-ABI** `ET_EXEC` that passes descriptors over Unix-domain
+/// sockets (`SCM_RIGHTS`) from ring 3, each a pipe's write end, so that
+/// whether every reference was given back shows as the pipe's end of file
+/// (all its pipes non-blocking: a reference left over reads `EAGAIN`, never
+/// a hang):
+///
+/// ```text
+///   ; a datagram carries a pipe's write end W; ours closed, the passed one
+///   ; writes, and its close is the pipe's end
+///   socketpair(AF_UNIX, SOCK_DGRAM, 0, [d0, d1])  ; 0, else exit 0x01
+///   pipe2([r, w], O_NONBLOCK)                     ; 0, else 0x02
+///   sendmsg(d0, {"x", SCM_RIGHTS [w]})            ; 1, else 0x03
+///   close(w)                                      ; 0, else 0x04
+///   recvmsg(d1, {16 bytes, 32 of control}, MSG_CMSG_CLOEXEC)  ; 1, else 0x05
+///   one SCM_RIGHTS message (cmsg_len 20), msg_controllen 24, msg_flags 0
+///                                                 ; else 0x06
+///   w2 = its descriptor; fcntl(w2, F_GETFD)       ; FD_CLOEXEC, else 0x07
+///   write(w2, "xy", 2)                            ; 2, else 0x08
+///   read(r, buf, 16)                              ; 2, else 0x09
+///   close(w2)                                     ; 0, else 0x0A
+///   read(r, buf, 16)                              ; 0 (end of file), else 0x0B
+///   ; a stream: the descriptors ride on their send's bytes
+///   socketpair(AF_UNIX, SOCK_STREAM, 0, [s0, s1]) ; 0, else 0x0C
+///   pipe2([r2, w3], O_NONBLOCK)                   ; 0, else 0x0D
+///   write(s0, "ab"); sendmsg(s0, {"cd", SCM_RIGHTS [w3]}); write(s0, "ef")
+///                                                 ; 2 each, else 0x0E / 0x0F / 0x10
+///   recvmsg(s1, {16 bytes, 32 of control})        ; 4, "abcd" -- read on into
+///                                                 ; the marked bytes -- else 0x11
+///   one descriptor, w4 (w3 still open: the process
+///   held the pipe already, one reference kept)    ; else 0x12
+///   read(s1, buf, 16)                             ; 2, "ef", else 0x13
+///   close(w3); read(r2, ...)                      ; -EAGAIN (w4 writes still), else 0x14
+///   close(w4); read(r2, ...)                      ; 0 (end of file), else 0x15
+///   ; room for one of two: MSG_CTRUNC, the other released
+///   pipe2([r3, w5], O_NONBLOCK)                   ; 0, else 0x16
+///   sendmsg(d0, {"y", SCM_RIGHTS [w5, w5]})       ; 1, else 0x17
+///   close(w5); recvmsg(d1, {16 bytes, 20 of control})  ; 1, else 0x18
+///   MSG_CTRUNC, one descriptor (cmsg_len 20), msg_controllen 20  ; else 0x19
+///   close(w6); read(r3, ...)                      ; 0 (end of file), else 0x1A
+///   ; read(2) cannot hand descriptors on: released
+///   pipe2([r4, w7], O_NONBLOCK)                   ; 0, else 0x1B
+///   sendmsg(d0, {"x", SCM_RIGHTS [w7]})           ; 1, else 0x1C
+///   close(w7); read(d1, buf, 16)                  ; 1, else 0x1D
+///   read(r4, ...)                                 ; 0 (end of file), else 0x1E
+///   sendmsg(d0, {"x", SCM_RIGHTS [999]})          ; -EBADF, else 0x1F
+///   exit(0x5F)
+/// ```
+///
+/// A clean `exit(0x5F)` proves a descriptor passed on a datagram and on a
+/// stream, close-on-exec on request, the stream's bytes stopping at the end of
+/// the stretch the descriptors rode on, a received object the process held
+/// already kept as one reference, `MSG_CTRUNC` with the surplus released, a
+/// plain `read` releasing what it cannot hand on, and `EBADF` for a
+/// descriptor not open -- and, by every pipe's end of file arriving exactly
+/// when its last writer closes, that no reference leaked or was released
+/// twice. Tagged `ELFOSABI_GNU` for the SysV stack + Linux ABI.
+#[must_use]
+#[allow(
+    clippy::indexing_slicing,
+    clippy::arithmetic_side_effects,
+    clippy::cast_possible_truncation,
+    clippy::cast_possible_wrap,
+    clippy::too_many_lines
+)]
+pub fn build_linux_scm_rights_test_elf() -> alloc::vec::Vec<u8> {
+    /// `jnz rel32`'s second opcode byte.
+    const JNZ: u8 = 0x85;
+    /// `jz rel32`'s second opcode byte.
+    const JZ: u8 = 0x84;
+    // Linux x86-64 syscall numbers.
+    const READ: u32 = 0;
+    const WRITE: u32 = 1;
+    const CLOSE: u32 = 3;
+    const SENDMSG: u32 = 46;
+    const RECVMSG: u32 = 47;
+    const SOCKETPAIR: u32 = 53;
+    const EXIT: u32 = 60;
+    const FCNTL: u32 = 72;
+    const PIPE2: u32 = 293;
+    const O_NONBLOCK: u32 = 0o4000;
+    const MSG_CMSG_CLOEXEC: u32 = 0x4000_0000;
+    const MSG_CTRUNC: u32 = 0x8;
+    // Stack layout (all [rsp + offset]).
+    const D0: u32 = 0x00; // socketpair(DGRAM): d0, d1
+    const D1: u32 = 0x04;
+    const S0: u32 = 0x08; // socketpair(STREAM): s0, s1
+    const S1: u32 = 0x0C;
+    const P1: u32 = 0x10; // pipes: read end, write end
+    const P2: u32 = 0x18;
+    const P3: u32 = 0x20;
+    const P4: u32 = 0x28;
+    const BYTES: u32 = 0x30; // "abcdefxy"
+    const BUF: u32 = 0x40; // 16 bytes
+    const IOV: u32 = 0x60; // the send's struct iovec
+    const RIOV: u32 = 0x70; // the receive's
+    const CTL_OUT: u32 = 0x80; // the send's control, 24 bytes
+    const CTL_IN: u32 = 0xA0; // the receive's, 32 bytes
+    const MSG: u32 = 0xC0; // the send's struct msghdr, 56 bytes
+    const RMSG: u32 = 0x100; // the receive's
+    const FRAME: u32 = 0x140;
+    /// "abcd", little-endian.
+    const ABCD: u32 = 0x6463_6261;
+    /// "ef", little-endian, as the low half of a dword.
+    const EF: u32 = 0x6665;
+
+    let mut code: alloc::vec::Vec<u8> = alloc::vec::Vec::new();
+    let mut fail_jumps: alloc::vec::Vec<(usize, u8)> = alloc::vec::Vec::new();
+    let le = |v: u32| v.to_le_bytes();
+    // Emitters, every stack operand as [rsp + disp32].
+    let mov_edi_mem = |c: &mut alloc::vec::Vec<u8>, d: u32| {
+        c.extend_from_slice(&[0x8B, 0xBC, 0x24]);
+        c.extend_from_slice(&le(d));
+    };
+    let mov_edi_imm = |c: &mut alloc::vec::Vec<u8>, v: u32| {
+        c.push(0xBF);
+        c.extend_from_slice(&le(v));
+    };
+    let mov_esi_imm = |c: &mut alloc::vec::Vec<u8>, v: u32| {
+        c.push(0xBE);
+        c.extend_from_slice(&le(v));
+    };
+    let mov_edx_imm = |c: &mut alloc::vec::Vec<u8>, v: u32| {
+        c.push(0xBA);
+        c.extend_from_slice(&le(v));
+    };
+    let lea_rdi = |c: &mut alloc::vec::Vec<u8>, d: u32| {
+        c.extend_from_slice(&[0x48, 0x8D, 0xBC, 0x24]);
+        c.extend_from_slice(&le(d));
+    };
+    let lea_rsi = |c: &mut alloc::vec::Vec<u8>, d: u32| {
+        c.extend_from_slice(&[0x48, 0x8D, 0xB4, 0x24]);
+        c.extend_from_slice(&le(d));
+    };
+    let lea_r10 = |c: &mut alloc::vec::Vec<u8>, d: u32| {
+        c.extend_from_slice(&[0x4C, 0x8D, 0x94, 0x24]);
+        c.extend_from_slice(&le(d));
+    };
+    // lea rax, [rsp + d]; mov [rsp + at], rax -- a pointer into the frame.
+    let store_ptr = |c: &mut alloc::vec::Vec<u8>, at: u32, d: u32| {
+        c.extend_from_slice(&[0x48, 0x8D, 0x84, 0x24]);
+        c.extend_from_slice(&le(d));
+        c.extend_from_slice(&[0x48, 0x89, 0x84, 0x24]);
+        c.extend_from_slice(&le(at));
+    };
+    // mov dword [rsp + d], imm32
+    let store_imm = |c: &mut alloc::vec::Vec<u8>, d: u32, v: u32| {
+        c.extend_from_slice(&[0xC7, 0x84, 0x24]);
+        c.extend_from_slice(&le(d));
+        c.extend_from_slice(&le(v));
+    };
+    // mov qword [rsp + d], imm32 (zero-extended: every value here is small)
+    let store_imm64 = |c: &mut alloc::vec::Vec<u8>, d: u32, v: u32| {
+        c.extend_from_slice(&[0x48, 0xC7, 0x84, 0x24]);
+        c.extend_from_slice(&le(d));
+        c.extend_from_slice(&le(v));
+    };
+    // mov eax, [rsp + from]; mov [rsp + to], eax -- copy a descriptor number.
+    let copy_dword = |c: &mut alloc::vec::Vec<u8>, to: u32, from: u32| {
+        c.extend_from_slice(&[0x8B, 0x84, 0x24]);
+        c.extend_from_slice(&le(from));
+        c.extend_from_slice(&[0x89, 0x84, 0x24]);
+        c.extend_from_slice(&le(to));
+    };
+    let syscall = |c: &mut alloc::vec::Vec<u8>, nr: u32| {
+        c.push(0xB8);
+        c.extend_from_slice(&le(nr));
+        c.extend_from_slice(&[0x0F, 0x05]);
+    };
+    let cmp_rax = |c: &mut alloc::vec::Vec<u8>, v: i32| {
+        c.extend_from_slice(&[0x48, 0x3D]);
+        c.extend_from_slice(&v.to_le_bytes());
+    };
+    // cmp dword [rsp + d], imm32
+    let cmp_mem = |c: &mut alloc::vec::Vec<u8>, d: u32, v: u32| {
+        c.extend_from_slice(&[0x81, 0xBC, 0x24]);
+        c.extend_from_slice(&le(d));
+        c.extend_from_slice(&le(v));
+    };
+    // test dword [rsp + d], imm32
+    let test_mem = |c: &mut alloc::vec::Vec<u8>, d: u32, v: u32| {
+        c.extend_from_slice(&[0xF7, 0x84, 0x24]);
+        c.extend_from_slice(&le(d));
+        c.extend_from_slice(&le(v));
+    };
+    let jcc_fail = |c: &mut alloc::vec::Vec<u8>,
+                    fails: &mut alloc::vec::Vec<(usize, u8)>,
+                    op: u8,
+                    sentinel: u8| {
+        c.extend_from_slice(&[0x0F, op, 0, 0, 0, 0]);
+        fails.push((c.len() - 4, sentinel));
+    };
+    // The send's msghdr: no name, one iovec (`len` bytes at BYTES + `from`),
+    // and an SCM_RIGHTS message naming the descriptors stored at `fds`.
+    let send_msg = |c: &mut alloc::vec::Vec<u8>, from: u32, len: u32, fds: &[u32]| {
+        store_ptr(c, IOV, BYTES + from);
+        store_imm64(c, IOV + 8, len);
+        let cmsg_len = 16 + 4 * fds.len() as u32;
+        store_imm64(c, CTL_OUT, cmsg_len);
+        store_imm(c, CTL_OUT + 8, 1); // SOL_SOCKET
+        store_imm(c, CTL_OUT + 12, 1); // SCM_RIGHTS
+        for (i, &fd) in fds.iter().enumerate() {
+            copy_dword(c, CTL_OUT + 16 + 4 * i as u32, fd);
+        }
+        store_imm64(c, MSG, 0);
+        store_imm64(c, MSG + 8, 0);
+        store_ptr(c, MSG + 16, IOV);
+        store_imm64(c, MSG + 24, 1);
+        store_ptr(c, MSG + 32, CTL_OUT);
+        store_imm64(c, MSG + 40, (cmsg_len + 7) & !7);
+        store_imm64(c, MSG + 48, 0);
+    };
+    // The receive's msghdr: 16 bytes into BUF, `room` bytes of control.
+    let recv_msg = |c: &mut alloc::vec::Vec<u8>, room: u32| {
+        store_ptr(c, RIOV, BUF);
+        store_imm64(c, RIOV + 8, 16);
+        for off in (0..32).step_by(8) {
+            store_imm64(c, CTL_IN + off, 0);
+        }
+        store_imm64(c, RMSG, 0);
+        store_imm64(c, RMSG + 8, 0);
+        store_ptr(c, RMSG + 16, RIOV);
+        store_imm64(c, RMSG + 24, 1);
+        store_ptr(c, RMSG + 32, CTL_IN);
+        store_imm64(c, RMSG + 40, room);
+        store_imm64(c, RMSG + 48, 0);
+    };
+    let close_fd = |c: &mut alloc::vec::Vec<u8>, fd: u32| {
+        mov_edi_mem(c, fd);
+        syscall(c, CLOSE);
+    };
+    // read(fd, BUF, 16)
+    let read_fd = |c: &mut alloc::vec::Vec<u8>, fd: u32| {
+        mov_edi_mem(c, fd);
+        lea_rsi(c, BUF);
+        mov_edx_imm(c, 16);
+        syscall(c, READ);
+    };
+    // write(fd, BYTES + from, len)
+    let write_fd = |c: &mut alloc::vec::Vec<u8>, fd: u32, from: u32, len: u32| {
+        mov_edi_mem(c, fd);
+        lea_rsi(c, BYTES + from);
+        mov_edx_imm(c, len);
+        syscall(c, WRITE);
+    };
+    // sendmsg(fd, MSG, 0) / recvmsg(fd, RMSG, flags)
+    let sendmsg = |c: &mut alloc::vec::Vec<u8>, fd: u32| {
+        mov_edi_mem(c, fd);
+        lea_rsi(c, MSG);
+        mov_edx_imm(c, 0);
+        syscall(c, SENDMSG);
+    };
+    let recvmsg = |c: &mut alloc::vec::Vec<u8>, fd: u32, flags: u32| {
+        mov_edi_mem(c, fd);
+        lea_rsi(c, RMSG);
+        mov_edx_imm(c, flags);
+        syscall(c, RECVMSG);
+    };
+    // pipe2(at, O_NONBLOCK)
+    let pipe = |c: &mut alloc::vec::Vec<u8>, at: u32| {
+        lea_rdi(c, at);
+        mov_esi_imm(c, O_NONBLOCK);
+        syscall(c, PIPE2);
+    };
+
+    // sub rsp, FRAME
+    code.extend_from_slice(&[0x48, 0x81, 0xEC]);
+    code.extend_from_slice(&le(FRAME));
+    store_imm(&mut code, BYTES, ABCD);
+    store_imm(&mut code, BYTES + 4, 0x7978_6665); // "efxy"
+
+    // --- a datagram carries a pipe's write end ---
+    mov_edi_imm(&mut code, 1); // AF_UNIX
+    mov_esi_imm(&mut code, 2); // SOCK_DGRAM
+    mov_edx_imm(&mut code, 0);
+    lea_r10(&mut code, D0);
+    syscall(&mut code, SOCKETPAIR);
+    cmp_rax(&mut code, 0);
+    jcc_fail(&mut code, &mut fail_jumps, JNZ, 0x01);
+    pipe(&mut code, P1);
+    cmp_rax(&mut code, 0);
+    jcc_fail(&mut code, &mut fail_jumps, JNZ, 0x02);
+    send_msg(&mut code, 6, 1, &[P1 + 4]);
+    sendmsg(&mut code, D0);
+    cmp_rax(&mut code, 1);
+    jcc_fail(&mut code, &mut fail_jumps, JNZ, 0x03);
+    close_fd(&mut code, P1 + 4);
+    cmp_rax(&mut code, 0);
+    jcc_fail(&mut code, &mut fail_jumps, JNZ, 0x04);
+    recv_msg(&mut code, 32);
+    recvmsg(&mut code, D1, MSG_CMSG_CLOEXEC);
+    cmp_rax(&mut code, 1);
+    jcc_fail(&mut code, &mut fail_jumps, JNZ, 0x05);
+    for (at, want) in [
+        (CTL_IN, 20u32),
+        (CTL_IN + 4, 0),
+        (CTL_IN + 8, 1),
+        (CTL_IN + 12, 1),
+        (RMSG + 40, 24),
+        (RMSG + 48, 0),
+    ] {
+        cmp_mem(&mut code, at, want);
+        jcc_fail(&mut code, &mut fail_jumps, JNZ, 0x06);
+    }
+    // fcntl(w2, F_GETFD)
+    mov_edi_mem(&mut code, CTL_IN + 16);
+    mov_esi_imm(&mut code, 1);
+    syscall(&mut code, FCNTL);
+    cmp_rax(&mut code, 1);
+    jcc_fail(&mut code, &mut fail_jumps, JNZ, 0x07);
+    write_fd(&mut code, CTL_IN + 16, 6, 2);
+    cmp_rax(&mut code, 2);
+    jcc_fail(&mut code, &mut fail_jumps, JNZ, 0x08);
+    read_fd(&mut code, P1);
+    cmp_rax(&mut code, 2);
+    jcc_fail(&mut code, &mut fail_jumps, JNZ, 0x09);
+    close_fd(&mut code, CTL_IN + 16);
+    cmp_rax(&mut code, 0);
+    jcc_fail(&mut code, &mut fail_jumps, JNZ, 0x0A);
+    read_fd(&mut code, P1);
+    cmp_rax(&mut code, 0);
+    jcc_fail(&mut code, &mut fail_jumps, JNZ, 0x0B);
+
+    // --- a stream: the descriptors ride on their send's bytes ---
+    mov_edi_imm(&mut code, 1);
+    mov_esi_imm(&mut code, 1); // SOCK_STREAM
+    mov_edx_imm(&mut code, 0);
+    lea_r10(&mut code, S0);
+    syscall(&mut code, SOCKETPAIR);
+    cmp_rax(&mut code, 0);
+    jcc_fail(&mut code, &mut fail_jumps, JNZ, 0x0C);
+    pipe(&mut code, P2);
+    cmp_rax(&mut code, 0);
+    jcc_fail(&mut code, &mut fail_jumps, JNZ, 0x0D);
+    write_fd(&mut code, S0, 0, 2);
+    cmp_rax(&mut code, 2);
+    jcc_fail(&mut code, &mut fail_jumps, JNZ, 0x0E);
+    send_msg(&mut code, 2, 2, &[P2 + 4]);
+    sendmsg(&mut code, S0);
+    cmp_rax(&mut code, 2);
+    jcc_fail(&mut code, &mut fail_jumps, JNZ, 0x0F);
+    write_fd(&mut code, S0, 4, 2);
+    cmp_rax(&mut code, 2);
+    jcc_fail(&mut code, &mut fail_jumps, JNZ, 0x10);
+    recv_msg(&mut code, 32);
+    recvmsg(&mut code, S1, 0);
+    cmp_rax(&mut code, 4);
+    jcc_fail(&mut code, &mut fail_jumps, JNZ, 0x11);
+    cmp_mem(&mut code, BUF, ABCD);
+    jcc_fail(&mut code, &mut fail_jumps, JNZ, 0x11);
+    cmp_mem(&mut code, CTL_IN, 20);
+    jcc_fail(&mut code, &mut fail_jumps, JNZ, 0x12);
+    cmp_mem(&mut code, CTL_IN + 12, 1);
+    jcc_fail(&mut code, &mut fail_jumps, JNZ, 0x12);
+    copy_dword(&mut code, P3 + 8, CTL_IN + 16); // w4, kept past the next receive
+    read_fd(&mut code, S1);
+    cmp_rax(&mut code, 2);
+    jcc_fail(&mut code, &mut fail_jumps, JNZ, 0x13);
+    store_imm(&mut code, BUF + 2, 0);
+    cmp_mem(&mut code, BUF, EF);
+    jcc_fail(&mut code, &mut fail_jumps, JNZ, 0x13);
+    close_fd(&mut code, P2 + 4);
+    read_fd(&mut code, P2);
+    cmp_rax(&mut code, -11); // EAGAIN: w4 still writes
+    jcc_fail(&mut code, &mut fail_jumps, JNZ, 0x14);
+    close_fd(&mut code, P3 + 8);
+    read_fd(&mut code, P2);
+    cmp_rax(&mut code, 0);
+    jcc_fail(&mut code, &mut fail_jumps, JNZ, 0x15);
+
+    // --- room for one of two: MSG_CTRUNC, the other released ---
+    pipe(&mut code, P3);
+    cmp_rax(&mut code, 0);
+    jcc_fail(&mut code, &mut fail_jumps, JNZ, 0x16);
+    send_msg(&mut code, 7, 1, &[P3 + 4, P3 + 4]);
+    sendmsg(&mut code, D0);
+    cmp_rax(&mut code, 1);
+    jcc_fail(&mut code, &mut fail_jumps, JNZ, 0x17);
+    close_fd(&mut code, P3 + 4);
+    recv_msg(&mut code, 20);
+    recvmsg(&mut code, D1, 0);
+    cmp_rax(&mut code, 1);
+    jcc_fail(&mut code, &mut fail_jumps, JNZ, 0x18);
+    test_mem(&mut code, RMSG + 48, MSG_CTRUNC);
+    jcc_fail(&mut code, &mut fail_jumps, JZ, 0x19);
+    cmp_mem(&mut code, CTL_IN, 20);
+    jcc_fail(&mut code, &mut fail_jumps, JNZ, 0x19);
+    cmp_mem(&mut code, RMSG + 40, 20);
+    jcc_fail(&mut code, &mut fail_jumps, JNZ, 0x19);
+    close_fd(&mut code, CTL_IN + 16);
+    read_fd(&mut code, P3);
+    cmp_rax(&mut code, 0);
+    jcc_fail(&mut code, &mut fail_jumps, JNZ, 0x1A);
+
+    // --- read(2) cannot hand descriptors on: released ---
+    pipe(&mut code, P4);
+    cmp_rax(&mut code, 0);
+    jcc_fail(&mut code, &mut fail_jumps, JNZ, 0x1B);
+    send_msg(&mut code, 6, 1, &[P4 + 4]);
+    sendmsg(&mut code, D0);
+    cmp_rax(&mut code, 1);
+    jcc_fail(&mut code, &mut fail_jumps, JNZ, 0x1C);
+    close_fd(&mut code, P4 + 4);
+    read_fd(&mut code, D1);
+    cmp_rax(&mut code, 1);
+    jcc_fail(&mut code, &mut fail_jumps, JNZ, 0x1D);
+    read_fd(&mut code, P4);
+    cmp_rax(&mut code, 0);
+    jcc_fail(&mut code, &mut fail_jumps, JNZ, 0x1E);
+
+    // --- a descriptor that is not open ---
+    store_imm(&mut code, P4 + 4, 999);
+    send_msg(&mut code, 6, 1, &[P4 + 4]);
+    sendmsg(&mut code, D0);
+    cmp_rax(&mut code, -9); // EBADF
+    jcc_fail(&mut code, &mut fail_jumps, JNZ, 0x1F);
+
+    // exit(0x5F)
+    mov_edi_imm(&mut code, 0x5F);
+    syscall(&mut code, EXIT);
+
+    // One failure exit per sentinel.
+    let mut fail_at: alloc::vec::Vec<(u8, usize)> = alloc::vec::Vec::new();
+    for sentinel in 0x01u8..=0x1F {
+        fail_at.push((sentinel, code.len()));
+        mov_edi_imm(&mut code, u32::from(sentinel));
+        syscall(&mut code, EXIT);
+    }
+    for (at, sentinel) in fail_jumps {
+        if let Some(&(_, target)) = fail_at.iter().find(|(s, _)| *s == sentinel) {
+            let disp = (target as i64 - (at as i64 + 4)) as i32;
+            code[at..at + 4].copy_from_slice(&disp.to_le_bytes());
+        }
+    }
+    let mut elf = single_segment_test_elf(&code);
+    elf[EI_OSABI] = ELFOSABI_GNU;
+    elf
+}
+
 /// Build a **native-ABI** ring-3 program that drives the sound card through
 /// the device door (`SYS_DEVICE_*`, 1119-1123) as the C library will, its
 /// answers Linux errnos:

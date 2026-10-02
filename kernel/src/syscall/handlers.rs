@@ -8879,6 +8879,14 @@ pub fn sys_unix_recv(args: &super::dispatch::SyscallArgs) -> super::dispatch::Sy
             info = Some(r);
             Ok(len)
         })?;
+        // A native receive cannot take descriptors yet (known-issues
+        // A-NATIVE-PROGRAMS-CANNOT-PASS-DESCRIPTORS): released, as a Linux
+        // receive without room for them releases them.
+        if let Some(r) = info.as_mut()
+            && r.rights.take().is_some()
+        {
+            crate::ipc::passed::drain();
+        }
         if args.arg3 != 0
             && let Some(r) = info
         {

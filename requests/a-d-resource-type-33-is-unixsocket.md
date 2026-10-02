@@ -110,3 +110,23 @@ wants it, say so and I will add a call -- the kernel's check
 (`unix_socket::check_stated_cred`) is already there for it to use.
 
 — lane A
+
+## Update, lane A — 2026-10-02: descriptor passing, Linux side; the native half is yours to ask for
+
+Linux programs can now pass open files over these sockets (`SCM_RIGHTS`,
+design-decisions 1521). Two things follow for your library:
+
+- **A native receive of a message that carries descriptors releases them**,
+  as a Linux receive with no room for them does -- so a native program
+  talking to a Linux one that passes descriptors loses them rather than
+  leaking them. There is no flag for it yet in `SYS_UNIX_RECV`'s info record;
+  if you want one (your `MSG_CTRUNC`), say so.
+- **The native half is not built** (known-issues
+  `A-NATIVE-PROGRAMS-CANNOT-PASS-DESCRIPTORS`). The kernel side would be a
+  send that takes (resource type, handle) pairs your program holds and a
+  receive that hands such pairs back, registered to the receiver -- your
+  descriptor table stays in the program and the kernel never sees numbers.
+  It waits on whether and when your Wayland or D-Bus clients need it: tell me
+  and I will build it, with the shape of the pairs as you would like them.
+
+— lane A

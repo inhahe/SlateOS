@@ -1064,6 +1064,9 @@ pub mod errno {
     /// `ENOBUFS` -- no buffer space: a send's control data is longer than
     /// the kernel will copy in.
     pub const ENOBUFS: i32 = 105;
+    /// `ETOOMANYREFS` -- a user with more descriptors in flight than its
+    /// `RLIMIT_NOFILE` sent more (`SCM_RIGHTS`).
+    pub const ETOOMANYREFS: i32 = 109;
     pub const EALREADY: i32 = 114;
     pub const EINPROGRESS: i32 = 115;
     pub const EISCONN: i32 = 106;
@@ -1173,6 +1176,12 @@ mod msgflags {
     /// (`O_NONBLOCK`/`MSG_DONTWAIT`), in which case it degrades to a single-shot
     /// receive of whatever is available.
     pub const MSG_WAITALL: u32 = 0x100;
+    /// On the result (`msg_flags`): a control message did not fit, or was
+    /// cut -- the credentials, or descriptors that did not all fit.
+    pub const MSG_CTRUNC: u32 = 0x8;
+    /// On a receive: the descriptors an `SCM_RIGHTS` message brings are
+    /// installed close-on-exec.
+    pub const MSG_CMSG_CLOEXEC: u32 = 0x4000_0000;
 }
 
 // ---------------------------------------------------------------------------
@@ -4954,14 +4963,14 @@ fn sys_close(args: &SyscallArgs) -> SyscallResult {
 /// not open. Also how a call that installed descriptors takes them back out
 /// when it fails partway (`socketpair`).
 fn linux_close_fd(pid: u64, fd: i32) -> SyscallResult {
-    let entry = match pcb::linux_fd_take(pid, fd) {
-        Some(e) => e,
+    // Taken and judged last in one step (pcb::linux_fd_take_last), so two
+    // threads closing two descriptors for one object cannot both release it.
+    let (entry, last) = match pcb::linux_fd_take_last(pid, fd) {
+        Some(t) => t,
         None => return linux_err(errno::EBADF),
     };
     release_record_locks_on_close(pid, &entry);
-    if entry.kind.needs_kernel_close()
-        && !pcb::linux_fd_is_handle_referenced(pid, entry.kind, entry.raw_handle, -1)
-    {
+    if entry.kind.needs_kernel_close() && last {
         // No other fd still references this handle — release it.
         let _ = close_handle(entry);
     }
@@ -4997,11 +5006,9 @@ fn sys_dup2_impl(oldfd: i32, newfd: i32, cloexec: bool) -> SyscallResult {
     // If the duplicate displaced an entry, close it (refcount-aware). It is
     // a descriptor closed, so its process's record locks on the file go with
     // it, whether or not its handle survives.
-    if let Some(prev_entry) = prev {
+    if let Some((prev_entry, last)) = prev {
         release_record_locks_on_close(pid, &prev_entry);
-        if prev_entry.kind.needs_kernel_close()
-            && !pcb::linux_fd_is_handle_referenced(pid, prev_entry.kind, prev_entry.raw_handle, -1)
-        {
+        if prev_entry.kind.needs_kernel_close() && last {
             let _ = close_handle(prev_entry);
         }
     }
@@ -18676,11 +18683,9 @@ fn sys_close_range(args: &SyscallArgs) -> SyscallResult {
     for fd in first..=stop {
         #[allow(clippy::cast_possible_wrap)]
         let fd_i = fd as i32;
-        if let Some(entry) = pcb::linux_fd_take(pid, fd_i) {
+        if let Some((entry, last)) = pcb::linux_fd_take_last(pid, fd_i) {
             release_record_locks_on_close(pid, &entry);
-            if entry.kind.needs_kernel_close()
-                && !pcb::linux_fd_is_handle_referenced(pid, entry.kind, entry.raw_handle, -1)
-            {
+            if entry.kind.needs_kernel_close() && last {
                 let _ = close_handle(entry);
             }
         }
@@ -28118,257 +28123,54 @@ fn sys_pidfd_getfd(args: &SyscallArgs) -> SyscallResult {
     }
 
     // Reach into the target's Linux fd table.
-    let mut entry = match pcb::linux_fd_lookup(target_pid, target_fd) {
-        Some(e) => e,
-        None => return linux_err(errno::EBADF),
+    let Some(mut entry) = pcb::linux_fd_lookup(target_pid, target_fd) else {
+        return linux_err(errno::EBADF);
     };
 
-    // Bump the per-kind refcount on the underlying kernel resource so
-    // both processes own one ref each.  Failure here surfaces as
-    // EBADF (the target's fd just lost its backing — race with target
-    // closing the fd) and we have NOT yet allocated anything in the
-    // caller's table, so there's no rollback to do.
-    match entry.kind {
-        HandleKind::Console | HandleKind::PidFd | HandleKind::AlsaControl => {
-            // No kernel resource to refcount (stateless fd kinds).
-        }
-        HandleKind::File => {
-            if crate::fs::handle::dup_shared(entry.raw_handle).is_err() {
-                return linux_err(errno::EBADF);
-            }
-        }
-        HandleKind::Pipe => {
-            let h = crate::ipc::pipe::PipeHandle::from_raw(entry.raw_handle);
-            if crate::ipc::pipe::dup(h).is_err() {
-                return linux_err(errno::EBADF);
-            }
-        }
-        HandleKind::EventFd => {
-            let h = crate::ipc::eventfd::EventFdHandle::from_raw(entry.raw_handle);
-            if crate::ipc::eventfd::dup(h).is_err() {
-                return linux_err(errno::EBADF);
-            }
-        }
-        HandleKind::MemFd => {
-            let h = crate::ipc::memfd::MemFdHandle::from_raw(entry.raw_handle);
-            if crate::ipc::memfd::dup(h).is_err() {
-                return linux_err(errno::EBADF);
-            }
-        }
-        HandleKind::Epoll => {
-            let h = crate::ipc::epoll::EpollHandle::from_raw(entry.raw_handle);
-            if crate::ipc::epoll::dup(h).is_err() {
-                return linux_err(errno::EBADF);
-            }
-        }
-        HandleKind::SignalFd => {
-            let h = crate::ipc::signalfd::SignalFdHandle::from_raw(entry.raw_handle);
-            if crate::ipc::signalfd::dup(h).is_err() {
-                return linux_err(errno::EBADF);
-            }
-        }
-        HandleKind::Timerfd => {
-            let h = crate::ipc::timerfd::TimerFdHandle::from_raw(entry.raw_handle);
-            if crate::ipc::timerfd::dup(h).is_err() {
-                return linux_err(errno::EBADF);
-            }
-        }
-        HandleKind::Inotify => {
-            let h = crate::ipc::inotify::InotifyHandle::from_raw(entry.raw_handle);
-            if crate::ipc::inotify::dup(h).is_err() {
-                return linux_err(errno::EBADF);
-            }
-        }
-        HandleKind::AlsaPcm => {
-            let h = crate::ipc::alsa_pcm::AlsaPcmHandle::from_raw(entry.raw_handle);
-            if crate::ipc::alsa_pcm::dup(h).is_err() {
-                return linux_err(errno::EBADF);
-            }
-        }
-        HandleKind::DrmCard => {
-            let h = crate::drm::card_fd::DrmCardHandle::from_raw(entry.raw_handle);
-            if crate::drm::card_fd::dup(h).is_err() {
-                return linux_err(errno::EBADF);
-            }
-        }
-        HandleKind::Evdev => {
-            let h = crate::evdev_fd::EvdevHandle::from_raw(entry.raw_handle);
-            if crate::evdev_fd::dup(h).is_err() {
-                return linux_err(errno::EBADF);
-            }
-        }
-        HandleKind::Socket => {
-            let h = crate::net::socket::SocketHandle::from_raw(entry.raw_handle);
-            if crate::net::socket::dup(h).is_err() {
-                return linux_err(errno::EBADF);
-            }
-        }
-        HandleKind::Channel => {
-            let h = crate::ipc::channel::ChannelHandle::from_raw(entry.raw_handle);
-            if crate::ipc::channel::dup(h).is_err() {
-                return linux_err(errno::EBADF);
-            }
-        }
-        HandleKind::ServiceListener => {
-            let h = crate::ipc::service::ServiceListenerHandle::from_raw(entry.raw_handle);
-            if crate::ipc::service::dup_listener(h).is_err() {
-                return linux_err(errno::EBADF);
-            }
-        }
-        HandleKind::UnixSocket => {
-            if crate::ipc::unix_socket::dup(unix_handle(&entry)).is_err() {
-                return linux_err(errno::EBADF);
-            }
-        }
-    }
+    // One more reference to the object behind it, for the caller
+    // (`Passed::take`, the per-kind dup). EBADF when the target's descriptor
+    // lost its object in between -- the target closing it -- with nothing yet
+    // given to the caller.
+    let Ok(passed) = crate::ipc::passed::Passed::take(entry) else {
+        return linux_err(errno::EBADF);
+    };
 
     // Linux always sets FD_CLOEXEC on the new fd, regardless of the
     // target's per-fd flags.  We follow.
     entry.fd_flags = crate::proc::linux_fd::FD_CLOEXEC;
 
-    let caller = match caller_pid() {
-        Some(p) => p,
-        None => {
-            // Roll back the refcount we just bumped — kernel-context
-            // has no caller to install into.
-            release_handle_ref(entry.kind, entry.raw_handle);
-            return linux_err(errno::EBADF);
-        }
+    let Some(caller) = caller_pid() else {
+        // Kernel context has no table to install into: the reference goes
+        // back.
+        drop(passed);
+        crate::ipc::passed::drain();
+        return linux_err(errno::EBADF);
     };
 
-    // Register the duplicated handle in the *caller's* per-process
-    // ipc_handles list before the fd-table install.  The earlier
-    // refcount bump represents "one ref per process holding the
-    // resource"; the ipc_handles entry is what lets process-exit
-    // cleanup and fork's dup_one see that ref.  Without this the
-    // caller's reference would leak on exit and not be propagated
-    // across fork — the same class bug that batches 127–129 closed
-    // for the create paths, now applied to the cross-process dup
-    // path.  PidFd / Console map to no kernel resource, so we skip
-    // them (matches the dup-arm above and `release_handle_ref`'s
-    // no-op cases).
-    let resource = match entry.kind {
-        HandleKind::File => Some(crate::cap::ResourceType::File),
-        HandleKind::Pipe => Some(crate::cap::ResourceType::Pipe),
-        HandleKind::EventFd => Some(crate::cap::ResourceType::EventFd),
-        HandleKind::MemFd => Some(crate::cap::ResourceType::MemFd),
-        HandleKind::Epoll => Some(crate::cap::ResourceType::Epoll),
-        HandleKind::SignalFd => Some(crate::cap::ResourceType::SignalFd),
-        HandleKind::Timerfd => Some(crate::cap::ResourceType::Timerfd),
-        HandleKind::Inotify => Some(crate::cap::ResourceType::Inotify),
-        HandleKind::AlsaPcm => Some(crate::cap::ResourceType::AlsaPcm),
-        HandleKind::DrmCard => Some(crate::cap::ResourceType::Drm),
-        HandleKind::Evdev => Some(crate::cap::ResourceType::InputDevice),
-        HandleKind::Socket => Some(crate::cap::ResourceType::NetSocket),
-        HandleKind::Channel => Some(crate::cap::ResourceType::Channel),
-        HandleKind::ServiceListener => Some(crate::cap::ResourceType::Service),
-        HandleKind::UnixSocket => Some(crate::cap::ResourceType::UnixSocket),
-        HandleKind::Console | HandleKind::PidFd | HandleKind::AlsaControl => None,
-    };
-    if let Some(rt) = resource {
-        pcb::register_ipc_handle(caller, rt, entry.raw_handle);
-    }
-
-    match pcb::linux_fd_install(caller, entry, 0) {
-        Ok(new_fd) => SyscallResult::ok(i64::from(new_fd)),
-        Err(e) => {
-            // Install failed (table full) — roll back BOTH the
-            // ipc_handles entry we just added AND the refcount bump.
-            // deregister_ipc_handle is a no-op if `resource` was None;
-            // release_handle_ref for File routes through
-            // `handlers::sys_fs_close`, which itself deregisters —
-            // that's safe because deregister_ipc_handle is a no-op on
-            // a missing tuple (the explicit deregister below already
-            // removed it).
-            if let Some(rt) = resource {
-                pcb::deregister_ipc_handle(caller, rt, entry.raw_handle);
+    // Installed, and recorded in the caller's `ipc_handles` -- so exit
+    // releases it and fork shares it -- unless the caller held the object
+    // already: a process holds one reference per object however many
+    // descriptors name it, so the one brought is then dropped
+    // (`pcb::linux_fd_install_passed`). Until 2026-10-02 it was registered
+    // regardless, and the reference leaked when a process took back a
+    // descriptor it shared with the target -- after a fork, the usual case.
+    let answer = match pcb::linux_fd_install_passed(caller, entry) {
+        Ok((new_fd, held)) => {
+            if held {
+                drop(passed);
+            } else {
+                // The reference is the caller's now.
+                let _ = passed.land();
             }
-            release_handle_ref(entry.kind, entry.raw_handle);
+            SyscallResult::ok(i64::from(new_fd))
+        }
+        Err(e) => {
+            drop(passed);
             linux_err(linux_errno_for(e))
         }
-    }
-}
-
-/// Drop one reference to a handle obtained via the per-kind `dup`
-/// helper.  Used by `sys_pidfd_getfd` to roll back a successful
-/// refcount bump when the subsequent table install fails.
-///
-/// `Console` and `PidFd` have no kernel resource, so this is a no-op
-/// for them.  The other kinds delegate to their subsystem's `close`,
-/// which is the matching half of `dup` / `dup_shared`.
-fn release_handle_ref(kind: HandleKind, raw_handle: u64) {
-    match kind {
-        HandleKind::Console | HandleKind::PidFd | HandleKind::AlsaControl => {}
-        HandleKind::File => {
-            let a = SyscallArgs {
-                arg0: raw_handle,
-                arg1: 0,
-                arg2: 0,
-                arg3: 0,
-                arg4: 0,
-                arg5: 0,
-            };
-            let _ = handlers::sys_fs_close(&a);
-        }
-        HandleKind::Pipe => {
-            let h = crate::ipc::pipe::PipeHandle::from_raw(raw_handle);
-            crate::ipc::pipe::close(h);
-        }
-        HandleKind::EventFd => {
-            let h = crate::ipc::eventfd::EventFdHandle::from_raw(raw_handle);
-            crate::ipc::eventfd::close(h);
-        }
-        HandleKind::MemFd => {
-            let h = crate::ipc::memfd::MemFdHandle::from_raw(raw_handle);
-            crate::ipc::memfd::close(h);
-        }
-        HandleKind::Epoll => {
-            let h = crate::ipc::epoll::EpollHandle::from_raw(raw_handle);
-            crate::ipc::epoll::close(h);
-        }
-        HandleKind::SignalFd => {
-            let h = crate::ipc::signalfd::SignalFdHandle::from_raw(raw_handle);
-            crate::ipc::signalfd::close(h);
-        }
-        HandleKind::Timerfd => {
-            let h = crate::ipc::timerfd::TimerFdHandle::from_raw(raw_handle);
-            crate::ipc::timerfd::close(h);
-        }
-        HandleKind::Inotify => {
-            let h = crate::ipc::inotify::InotifyHandle::from_raw(raw_handle);
-            crate::ipc::inotify::close(h);
-        }
-        HandleKind::AlsaPcm => {
-            let h = crate::ipc::alsa_pcm::AlsaPcmHandle::from_raw(raw_handle);
-            crate::ipc::alsa_pcm::close(h);
-        }
-        HandleKind::DrmCard => {
-            let h = crate::drm::card_fd::DrmCardHandle::from_raw(raw_handle);
-            crate::drm::card_fd::close(h);
-        }
-        HandleKind::Evdev => {
-            let h = crate::evdev_fd::EvdevHandle::from_raw(raw_handle);
-            crate::evdev_fd::close(h);
-        }
-        HandleKind::Socket => {
-            let h = crate::net::socket::SocketHandle::from_raw(raw_handle);
-            crate::net::socket::close(h);
-        }
-        HandleKind::Channel => {
-            crate::ipc::channel::close(crate::ipc::channel::ChannelHandle::from_raw(raw_handle));
-        }
-        HandleKind::ServiceListener => {
-            // Gone already is the same end state for a dropped reference.
-            let _ = crate::ipc::service::unregister(
-                crate::ipc::service::ServiceListenerHandle::from_raw(raw_handle),
-            );
-        }
-        HandleKind::UnixSocket => {
-            crate::ipc::unix_socket::close(crate::ipc::unix_socket::UnixHandle::from_raw(
-                raw_handle,
-            ));
-        }
-    }
+    };
+    crate::ipc::passed::drain();
+    answer
 }
 
 /// `process_vm_readv(pid, local_iov, liovcnt, remote_iov, riovcnt, flags)`.
@@ -39688,6 +39490,12 @@ fn unix_recv(
             return linux_err(linux_errno_for(e));
         }
     }
+    if got.rights.is_some() {
+        // Descriptors a receive without control space cannot hand on: released,
+        // as Linux's recv and read release them.
+        drop(got.rights);
+        crate::ipc::passed::drain();
+    }
     if let Err(r) = write_sender_sockaddr(&got.from, addr_ptr, addrlen_ptr) {
         return r;
     }
@@ -39738,8 +39546,9 @@ fn read_iovecs(iov_ptr: u64, count: u64) -> Result<alloc::vec::Vec<(u64, usize)>
 /// What a send's `msg_control` carries.
 #[derive(Default)]
 struct SendControl {
-    /// `SCM_RIGHTS`: descriptors to pass, which this layer cannot yet carry.
-    rights: bool,
+    /// `SCM_RIGHTS`: the descriptors to pass, in order, from every such
+    /// message -- not yet looked up.
+    rights: alloc::vec::Vec<i32>,
     /// `SCM_CREDENTIALS`: the credentials the sender states -- `pid_t`, uid,
     /// gid -- not yet checked. The last such message counts, as on Linux.
     cred: Option<(i32, u32, u32)>,
@@ -39752,9 +39561,13 @@ struct SendControl {
 /// - each header (length, level, type), aligned to 8, must cover at least
 ///   itself and no more than is left (`EINVAL`), and the walk ends where no
 ///   whole header is left;
-/// - levels other than `SOL_SOCKET` are skipped; `SCM_RIGHTS` is noted;
-///   `SCM_CREDENTIALS` must be exactly `CMSG_LEN(sizeof(struct ucred))`
-///   long (`EINVAL`); any other `SOL_SOCKET` type is `EINVAL`.
+/// - levels other than `SOL_SOCKET` are skipped; `SCM_RIGHTS` gives the whole
+///   `int`s after its header, more than [`MAX_PER_MESSAGE`] in all being
+///   `EINVAL` (Linux's `scm_fp_copy`); `SCM_CREDENTIALS` must be exactly
+///   `CMSG_LEN(sizeof(struct ucred))` long (`EINVAL`); any other `SOL_SOCKET`
+///   type is `EINVAL`.
+///
+/// [`MAX_PER_MESSAGE`]: crate::ipc::passed::MAX_PER_MESSAGE
 fn parse_send_control(control: u64, controllen: u64) -> Result<SendControl, SyscallResult> {
     const SOL_SOCKET: i32 = 1;
     const SCM_RIGHTS: i32 = 1;
@@ -39788,7 +39601,22 @@ fn parse_send_control(control: u64, controllen: u64) -> Result<SendControl, Sysc
         }
         if level == SOL_SOCKET {
             match kind {
-                SCM_RIGHTS => out.rights = true,
+                SCM_RIGHTS => {
+                    let count = len.saturating_sub(HDR) / 4;
+                    if out.rights.len().saturating_add(count) > crate::ipc::passed::MAX_PER_MESSAGE
+                    {
+                        return Err(linux_err(errno::EINVAL));
+                    }
+                    let body = at.saturating_add(HDR);
+                    for i in 0..count {
+                        let from = body.saturating_add(i.saturating_mul(4));
+                        let word = bytes
+                            .get(from..from.saturating_add(4))
+                            .and_then(|w| <[u8; 4]>::try_from(w).ok())
+                            .unwrap_or([0xFF; 4]);
+                        out.rights.push(i32::from_ne_bytes(word));
+                    }
+                }
                 SCM_CREDENTIALS => {
                     if len != CRED_LEN {
                         return Err(linux_err(errno::EINVAL));
@@ -39817,7 +39645,8 @@ fn parse_send_control(control: u64, controllen: u64) -> Result<SendControl, Sysc
 /// send (one datagram, or up to [`UNIX_STREAM_CHUNK`] of a stream), to
 /// `msg_name` if it names an address. Credentials the sender states
 /// (`SCM_CREDENTIALS`) are checked as Linux checks them and carried by a
-/// datagram; `SCM_RIGHTS` is `EOPNOTSUPP`.
+/// datagram; descriptors (`SCM_RIGHTS`) travel with the datagram, or on the
+/// bytes this send puts on a stream ([`take_rights`]).
 fn unix_sendmsg(entry: &FdEntry, msg_ptr: u64, flags: u32) -> SyscallResult {
     use crate::ipc::unix_socket::{self, Kind, MAX_DGRAM};
     let mut mh = UserMsgHdr::default();
@@ -39839,11 +39668,6 @@ fn unix_sendmsg(entry: &FdEntry, msg_ptr: u64, flags: u32) -> SyscallResult {
         Ok(c) => c,
         Err(r) => return r,
     };
-    if control.rights {
-        // Refused rather than sent without them: a receiver expecting
-        // descriptors that never come is worse than a sender told no.
-        return linux_err(errno::EOPNOTSUPP);
-    }
     // Checked before anything is sent, as Linux's scm_send runs first. A
     // stream checks them too, but reports its connection's (unix_socket's
     // "Credentials").
@@ -39885,8 +39709,8 @@ fn unix_sendmsg(entry: &FdEntry, msg_ptr: u64, flags: u32) -> SyscallResult {
         }
     }
     let nonblocking = unix_nonblocking(entry, flags);
-    let sent = if mh.msg_name == 0 || mh.msg_namelen == 0 {
-        unix_socket::send_as(h, &data, stated, nonblocking)
+    let target = if mh.msg_name == 0 || mh.msg_namelen == 0 {
+        None
     } else {
         let addr = match read_sockaddr_un(mh.msg_name, i32::try_from(mh.msg_namelen).unwrap_or(-1))
         {
@@ -39894,9 +39718,19 @@ fn unix_sendmsg(entry: &FdEntry, msg_ptr: u64, flags: u32) -> SyscallResult {
             Err(r) => return r,
         };
         match unix_target(&addr) {
-            Ok(name) => unix_socket::send_to_as(h, &data, &name, stated, nonblocking),
+            Ok(name) => Some(name),
             Err(r) => return r,
         }
+    };
+    // Last, as Linux's unix_attach_fds comes after the address and the size:
+    // a reference taken is a reference to give back.
+    let rights = match take_rights(&control.rights) {
+        Ok(r) => r,
+        Err(r) => return r,
+    };
+    let sent = match target {
+        None => unix_socket::send_as(h, &data, stated, rights, nonblocking),
+        Some(name) => unix_socket::send_to_as(h, &data, &name, stated, rights, nonblocking),
     };
     match sent {
         Ok(n) => SyscallResult::ok(i64::try_from(n).unwrap_or(i64::MAX)),
@@ -39904,12 +39738,152 @@ fn unix_sendmsg(entry: &FdEntry, msg_ptr: u64, flags: u32) -> SyscallResult {
     }
 }
 
+/// Take a reference to each descriptor `fds` names, for a send to carry
+/// (`SCM_RIGHTS`) -- `None` for none -- as Linux's `scm_fp_copy` and
+/// `unix_attach_fds` take them: each must be open (`EBADF`), and a sender
+/// whose user already has more descriptors in flight than its
+/// `RLIMIT_NOFILE` sends no more (`ETOOMANYREFS`; root is exempt, as
+/// `CAP_SYS_RESOURCE` is). What is taken counts against the sender's user
+/// until it is received or dropped ([`crate::ipc::passed`]).
+fn take_rights(fds: &[i32]) -> Result<Option<crate::ipc::passed::Bundle>, SyscallResult> {
+    use crate::ipc::passed::{self, Bundle, Passed};
+    if fds.is_empty() {
+        return Ok(None);
+    }
+    let Some(pid) = caller_pid() else {
+        return Err(linux_err(errno::EBADF));
+    };
+    let mut taken = alloc::vec::Vec::new();
+    let mut refused = None;
+    for &fd in fds {
+        let held = lookup_caller_fd(fd)
+            .and_then(|entry| Passed::take(entry).map_err(|_| linux_err(errno::EBADF)));
+        match held {
+            Ok(p) => taken.push(p),
+            Err(r) => {
+                refused = Some(r);
+                break;
+            }
+        }
+    }
+    let uid = pcb::process_uid_gid(pid).map_or(u32::MAX, |(uid, _)| uid);
+    let nofile = pcb::get_rlimit(pid, 7).map_or(u64::MAX, |(cur, _)| cur);
+    if refused.is_none() && uid != 0 && u64::from(passed::in_flight_for(uid)) > nofile {
+        refused = Some(linux_err(errno::ETOOMANYREFS));
+    }
+    if let Some(r) = refused {
+        // What was taken goes back.
+        drop(taken);
+        passed::drain();
+        return Err(r);
+    }
+    for p in &mut taken {
+        p.charge(uid);
+    }
+    Ok(Bundle::new(taken))
+}
+
+/// Install the descriptors a received message carried, and write their
+/// numbers as one `SCM_RIGHTS` control message at `at`, which has `room`
+/// bytes of control space -- as Linux's `scm_detach_fds`: as many as fit
+/// after the 16-byte header, four bytes each, in order, each at the lowest
+/// free number, close-on-exec with `MSG_CMSG_CLOEXEC`. Those that do not fit,
+/// and any after one the process has no number for (`RLIMIT_NOFILE`), are
+/// released, and the message reports `MSG_CTRUNC`. No control buffer at all
+/// (`at` 0) takes none. Returns the control space used (`CMSG_SPACE`, as far
+/// as `room` reaches) and whether the message was cut.
+fn install_rights(
+    passed: alloc::vec::Vec<crate::ipc::passed::Passed>,
+    at: u64,
+    room: u64,
+    cloexec: bool,
+) -> Result<(u64, bool), SyscallResult> {
+    /// `sizeof(struct cmsghdr)`.
+    const HDR: u64 = 16;
+    let count = passed.len();
+    let fit = if at == 0 || room <= HDR {
+        0
+    } else {
+        usize::try_from(room.saturating_sub(HDR) / 4).unwrap_or(usize::MAX)
+    };
+    let n = count.min(fit);
+    let pid = caller_pid();
+    let wanted_bytes =
+        HDR.saturating_add(4u64.saturating_mul(u64::try_from(n).unwrap_or(u64::MAX)));
+    // Where the numbers go must take them before any is installed: a
+    // descriptor installed and never told of is one the process cannot close.
+    if n > 0
+        && let Err(e) = crate::mm::user::validate_user_write(
+            at,
+            usize::try_from(wanted_bytes).unwrap_or(usize::MAX),
+        )
+    {
+        drop(passed);
+        crate::ipc::passed::drain();
+        return Err(linux_err(linux_errno_for(e)));
+    }
+    let mut fds: alloc::vec::Vec<i32> = alloc::vec::Vec::new();
+    let mut rest = passed.into_iter();
+    if let Some(pid) = pid {
+        for p in rest.by_ref().take(n) {
+            let mut entry = p.entry();
+            entry.fd_flags = if cloexec {
+                crate::proc::linux_fd::FD_CLOEXEC
+            } else {
+                0
+            };
+            match pcb::linux_fd_install_passed(pid, entry) {
+                Ok((fd, held)) => {
+                    if held {
+                        // The process holds the object already, and one
+                        // reference per object is all it keeps.
+                        drop(p);
+                    } else {
+                        // The reference is the process's now.
+                        let _ = p.land();
+                    }
+                    fds.push(fd);
+                }
+                Err(_) => {
+                    // Linux stops at the first it cannot install.
+                    drop(p);
+                    break;
+                }
+            }
+        }
+    }
+    // Whatever is left was not delivered: released.
+    drop(rest);
+    crate::ipc::passed::drain();
+    let cut = fds.len() < count;
+    if fds.is_empty() {
+        return Ok((0, cut));
+    }
+    let len = HDR.saturating_add(4u64.saturating_mul(u64::try_from(fds.len()).unwrap_or(u64::MAX)));
+    let mut msg: alloc::vec::Vec<u8> = alloc::vec::Vec::new();
+    msg.extend_from_slice(&len.to_ne_bytes());
+    msg.extend_from_slice(&1i32.to_ne_bytes()); // SOL_SOCKET
+    msg.extend_from_slice(&1i32.to_ne_bytes()); // SCM_RIGHTS
+    for fd in &fds {
+        msg.extend_from_slice(&fd.to_ne_bytes());
+    }
+    // SAFETY: `msg` holds `msg.len()` initialised bytes, no more than were
+    // validated writable at `at`; copy_to_user re-checks.
+    if let Err(e) = unsafe { crate::mm::user::copy_to_user(msg.as_ptr(), at, msg.len()) } {
+        return Err(linux_err(linux_errno_for(e)));
+    }
+    // CMSG_SPACE: the message padded to 8, as far as the buffer reaches.
+    let space = len.saturating_add(7) & !7;
+    Ok((space.min(room), cut))
+}
+
 /// `recvmsg(2)` on an `AF_UNIX` descriptor: one receive scattered across the
 /// iovecs; the sender's address to `msg_name`; when the socket has
 /// `SO_PASSCRED` on, the sender's credentials as one `SCM_CREDENTIALS`
-/// control message, otherwise none (`msg_controllen` 0); `MSG_TRUNC` in
-/// `msg_flags` when a datagram was cut, `MSG_CTRUNC` when the control message
-/// was.
+/// control message; then any descriptors the message carried, installed, as
+/// one `SCM_RIGHTS` message ([`install_rights`]) -- or neither
+/// (`msg_controllen` 0); `MSG_TRUNC` in `msg_flags` when a datagram was cut,
+/// `MSG_CTRUNC` when a control message was.
 fn unix_recvmsg(entry: &FdEntry, msg_ptr: u64, flags: u32) -> SyscallResult {
     use crate::ipc::unix_socket::{self, Kind, MAX_DGRAM};
     let mut mh = UserMsgHdr::default();
@@ -39945,7 +39919,7 @@ fn unix_recvmsg(entry: &FdEntry, msg_ptr: u64, flags: u32) -> SyscallResult {
         Ok(v) => v,
         Err(e) => return linux_err(linux_errno_for(e)),
     };
-    let got = match unix_socket::recv(
+    let mut got = match unix_socket::recv(
         h,
         &mut kbuf,
         unix_nonblocking(entry, flags),
@@ -39954,6 +39928,13 @@ fn unix_recvmsg(entry: &FdEntry, msg_ptr: u64, flags: u32) -> SyscallResult {
         Ok(r) => r,
         Err(e) => return unix_errno_timed(e, h, crate::ipc::unix_socket::Direction::Receive),
     };
+    // The descriptors, as references this call now holds -- given to the
+    // process below, or released. A peek's are new ones.
+    let passed = got
+        .rights
+        .take()
+        .map(crate::ipc::passed::Bundle::into_passed)
+        .unwrap_or_default();
     let mut done = 0usize;
     for (base, len) in iovs {
         if done >= got.len {
@@ -40031,6 +40012,23 @@ fn unix_recvmsg(entry: &FdEntry, msg_ptr: u64, flags: u32) -> SyscallResult {
             // The space the message takes, padding included, as Linux counts
             // it into msg_controllen.
             control_used = mh.msg_controllen.min(CRED_SPACE);
+        }
+    }
+    if !passed.is_empty() {
+        let at = if mh.msg_control == 0 {
+            0
+        } else {
+            mh.msg_control.wrapping_add(control_used)
+        };
+        let room = mh.msg_controllen.saturating_sub(control_used);
+        match install_rights(passed, at, room, flags & msgflags::MSG_CMSG_CLOEXEC != 0) {
+            Ok((used, cut)) => {
+                control_used = control_used.saturating_add(used);
+                if cut {
+                    out_flags |= msgflags::MSG_CTRUNC;
+                }
+            }
+            Err(r) => return r,
         }
     }
     // msg_controllen (offset 40): what the control messages used; msg_flags
@@ -68713,9 +68711,10 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         // linux_fd_install, register the handle in the caller's
         // ipc_handles under the matching ResourceType (File / Pipe /
         // EventFd / MemFd).  Console and PidFd map to no kernel resource
-        // and are skipped, matching the dup-arm and release_handle_ref.
-        // Install-failure rollback now also deregisters before calling
-        // release_handle_ref.
+        // and are skipped. (Since 2026-10-02 the map is
+        // `HandleKind::resource_type`, the reference an `ipc::passed::Passed`,
+        // and the install `pcb::linux_fd_install_passed`, which registers only
+        // an object new to the caller.)
         //
         // Self-test surface:
         //   * Resource-type mapping table: assert each FdEntry kind maps to
@@ -68729,30 +68728,9 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         //     returns -EBADF without registering anything (the existing
         //     `caller_pid().is_none()` branch fires before the register).
         {
-            // (a) The kind→ResourceType map used by the new register call.
-            //     If a future HandleKind variant is added, this assertion
-            //     fails and forces the author to decide whether the new
-            //     kind needs a register_ipc_handle entry.
-            let kind_to_rt = |k: HandleKind| -> Option<crate::cap::ResourceType> {
-                match k {
-                    HandleKind::File => Some(crate::cap::ResourceType::File),
-                    HandleKind::Pipe => Some(crate::cap::ResourceType::Pipe),
-                    HandleKind::EventFd => Some(crate::cap::ResourceType::EventFd),
-                    HandleKind::MemFd => Some(crate::cap::ResourceType::MemFd),
-                    HandleKind::Epoll => Some(crate::cap::ResourceType::Epoll),
-                    HandleKind::SignalFd => Some(crate::cap::ResourceType::SignalFd),
-                    HandleKind::Timerfd => Some(crate::cap::ResourceType::Timerfd),
-                    HandleKind::Inotify => Some(crate::cap::ResourceType::Inotify),
-                    HandleKind::AlsaPcm => Some(crate::cap::ResourceType::AlsaPcm),
-                    HandleKind::DrmCard => Some(crate::cap::ResourceType::Drm),
-                    HandleKind::Evdev => Some(crate::cap::ResourceType::InputDevice),
-                    HandleKind::Socket => Some(crate::cap::ResourceType::NetSocket),
-                    HandleKind::Channel => Some(crate::cap::ResourceType::Channel),
-                    HandleKind::ServiceListener => Some(crate::cap::ResourceType::Service),
-                    HandleKind::UnixSocket => Some(crate::cap::ResourceType::UnixSocket),
-                    HandleKind::Console | HandleKind::PidFd | HandleKind::AlsaControl => None,
-                }
-            };
+            // (a) The kind→ResourceType map the install registers by
+            //     (`HandleKind::resource_type`), spot-checked.
+            let kind_to_rt = HandleKind::resource_type;
             assert_eq!(
                 kind_to_rt(HandleKind::File),
                 Some(crate::cap::ResourceType::File)
@@ -108674,9 +108652,7 @@ pub fn self_test() -> crate::error::KernelResult<()> {
                         arg4: 0,
                         arg5: 0,
                     };
-                    if dispatch_linux(nr::SOCKETPAIR, &a).value
-                        != i64::from(errno::EBADF).wrapping_neg()
-                    {
+                    if dispatch_linux(nr::SOCKETPAIR, &a).value != -i64::from(errno::ENOSYS) {
                         serial_println!(
                             "[syscall/linux]   FAIL: socketpair(AF_UNIX,SEQPACKET,PF_UNIX) not ENOSYS"
                         );
@@ -108691,7 +108667,9 @@ pub fn self_test() -> crate::error::KernelResult<()> {
                         arg4: 0,
                         arg5: 0,
                     };
-                    if dispatch_linux(nr::SOCKETPAIR, &a).value != -i64::from(errno::ENOSYS) {
+                    if dispatch_linux(nr::SOCKETPAIR, &a).value
+                        != i64::from(errno::EBADF).wrapping_neg()
+                    {
                         serial_println!(
                             "[syscall/linux]   FAIL: socketpair(AF_UNIX,STREAM,0) regression not EBADF"
                         );

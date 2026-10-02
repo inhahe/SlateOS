@@ -30,6 +30,7 @@ pub mod io_ring;
 pub mod memfd;
 pub mod multiwait;
 pub mod namespace;
+pub mod passed;
 pub mod pipe;
 pub mod semaphore;
 pub mod service;

@@ -9041,9 +9041,15 @@ fn test_controlling_terminal() -> KernelResult<()> {
     ctty_set_fg_pgrp(shell, job)?;
 
     // (6) A zombie group member does not keep the group eligible. Kill the
-    //     job's group off and confirm the terminal cannot be handed to it.
-    //     (The shell keeps the terminal it already holds — releasing it is
-    //     the shell's job, not the kernel's.)
+    //     job's group off and confirm the terminal cannot be handed to it:
+    //     a group whose members are all zombies has no live member, so it is
+    //     ESRCH, as (4)'s empty group is -- the rule `judge_fg_group` has kept
+    //     since lane D's request of 2026-10-01; this step still expected the
+    //     EPERM it used to give until the first boot that ran it (rq26).
+    //     (Linux would hand it over: a zombie stays on its group's list until
+    //     reaped. Refusing is deliberate -- a dead group could never hand the
+    //     terminal back.) The shell keeps the terminal it already holds --
+    //     releasing it is the shell's job, not the kernel's.
     add_thread(job, 91_010)?;
     let (became_zombie, _wake, _any) = remove_thread(job, 91_010, ThreadExitAccounting::default())?;
     if !became_zombie || state(job) != Some(ProcessState::Zombie) {
@@ -9052,9 +9058,9 @@ fn test_controlling_terminal() -> KernelResult<()> {
             &[shell, job, stranger],
         );
     }
-    if ctty_set_fg_pgrp(shell, job) != Err(KernelError::PermissionDenied) {
+    if ctty_set_fg_pgrp(shell, job) != Err(KernelError::NoSuchProcess) {
         return fail(
-            "tcsetpgrp to an all-zombie group should be EPERM",
+            "tcsetpgrp to an all-zombie group should be ESRCH",
             &[shell, job, stranger],
         );
     }

@@ -150417,7 +150417,7 @@ just a boundary and is fine to document. The grep that finds them is the phrase
 *accepted but*, and there are nine.
 
 
-## TD-B-ACCESS-CANNOT-SEE-THE-ONE-PERMISSION-MECHANISM-THAT-IS-ENFORCED (lane B, 2026-09-13)
+## TD-B-ACCESS-CANNOT-SEE-THE-ONE-PERMISSION-MECHANISM-THAT-IS-ENFORCED (lane B, 2026-09-13) -- FIXED 2026-10-02
 **Status:** FIXED by lane A on lane-a-wip 2026-10-02, awaiting a boot -- the Linux `access` answers the gates a real open or exec meets (`Vfs::access_gates`): `EPERM` for `W_OK` on an immutable file, the ACLs and capability tags (`EACCES`), `EROFS` for `W_OK` on a read-only mount; not the mode bits (design-decisions §1524)
 
 **In short:** `access(path, W_OK)` answers "yes" for any file that exists. On a

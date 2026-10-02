@@ -948,7 +948,9 @@ impl Reporter {
         let now = self.start.elapsed();
         if self.next_time <= now {
             self.xfer_stats(stats, Some(now));
-            self.next_time += std::time::Duration::from_secs(1);
+            self.next_time = self
+                .next_time
+                .saturating_add(std::time::Duration::from_secs(1));
         }
     }
 
@@ -1005,7 +1007,7 @@ impl Reporter {
             // the `fprintf` whose return value becomes `stats_len`.
             let stats_len = i64::try_from(body.len()).unwrap_or(i64::MAX);
             if stats_len < self.progress_len {
-                let pad = usize::try_from(self.progress_len - stats_len).unwrap_or(0);
+                let pad = usize::try_from(self.progress_len.saturating_sub(stats_len)).unwrap_or(0);
                 line.extend(std::iter::repeat_n(' ', pad));
             }
             self.progress_len = stats_len;
@@ -1201,7 +1203,7 @@ impl Reader {
             if ncurr == 0 {
                 break;
             }
-            nread += ncurr;
+            nread = nread.saturating_add(ncurr);
         }
         Ok(nread)
     }
@@ -1236,7 +1238,7 @@ impl Reader {
                 if offset == self.offset {
                     return true;
                 }
-                let diff = self.offset - offset;
+                let diff = self.offset.saturating_sub(offset);
                 if !self.quiet && !(0..=nbytes).contains(&diff) {
                     stdfd::diag_line("dd: warning: invalid file offset after failed read");
                 }
@@ -1328,7 +1330,7 @@ impl Writer {
                 }
             }
 
-            total += nwritten;
+            total = total.saturating_add(nwritten);
         }
 
         total
@@ -1510,14 +1512,17 @@ impl Dd {
     fn write_output(&mut self) -> Result<(), Aborted> {
         let obs = self.obuf.len();
         let nwritten = self.out.iwrite(&self.obuf);
-        self.stats.w_bytes += i64::try_from(nwritten).unwrap_or(i64::MAX);
+        self.stats.w_bytes = self
+            .stats
+            .w_bytes
+            .saturating_add(i64::try_from(nwritten).unwrap_or(i64::MAX));
         self.oc = 0;
         if nwritten == obs {
-            self.stats.w_full += 1;
+            self.stats.w_full = self.stats.w_full.saturating_add(1);
             return Ok(());
         }
         if nwritten != 0 {
-            self.stats.w_partial += 1;
+            self.stats.w_partial = self.stats.w_partial.saturating_add(1);
         }
         stdfd::diag_line(&format!(
             "dd: writing to {}: {}",
@@ -1551,7 +1556,7 @@ impl Dd {
             dst.copy_from_slice(src);
             nread = nread.saturating_sub(nfree);
             start = from;
-            self.oc += nfree;
+            self.oc = self.oc.saturating_add(nfree);
             if self.oc >= self.obuf.len() {
                 self.write_output()?;
             }
@@ -1573,11 +1578,11 @@ impl Dd {
                 self.col = 0;
             } else {
                 if self.col == self.cbs {
-                    self.stats.r_truncate += 1;
+                    self.stats.r_truncate = self.stats.r_truncate.saturating_add(1);
                 } else if self.col < self.cbs {
                     self.output_char(b)?;
                 }
-                self.col += 1;
+                self.col = self.col.saturating_add(1);
             }
         }
         Ok(())
@@ -1593,7 +1598,7 @@ impl Dd {
         let mut i = 0;
         while let Some(&c) = buf.get(i) {
             let col = self.col;
-            self.col += 1;
+            self.col = self.col.saturating_add(1);
 
             if col >= self.cbs {
                 self.col = 0;
@@ -1603,17 +1608,17 @@ impl Dd {
             }
 
             if c == self.trans.space_character {
-                self.pending_spaces += 1;
+                self.pending_spaces = self.pending_spaces.saturating_add(1);
             } else {
                 // A run of spaces that turned out not to be at the end of the
                 // record after all; they are real data and must go out.
                 while 0 < self.pending_spaces {
                     self.output_char(self.trans.space_character)?;
-                    self.pending_spaces -= 1;
+                    self.pending_spaces = self.pending_spaces.saturating_sub(1);
                 }
                 self.output_char(c)?;
             }
-            i += 1;
+            i = i.saturating_add(1);
         }
         Ok(())
     }
@@ -1786,8 +1791,11 @@ fn skip_input(
                     && 0 <= reader.offset
                     && size.saturating_sub(reader.offset) < offset
                 {
-                    records = (offset - size) / blocksize;
-                    moved = size - reader.offset;
+                    records = offset
+                        .saturating_sub(size)
+                        .checked_div(blocksize)
+                        .unwrap_or(0);
+                    moved = size.saturating_sub(reader.offset);
                 } else {
                     records = 0;
                 }
@@ -1849,7 +1857,7 @@ fn skip_input(
         }
 
         if records != 0 {
-            records -= 1;
+            records = records.saturating_sub(1);
         } else {
             *bytes = 0;
         }
@@ -1934,7 +1942,7 @@ fn seek_output(dd: &mut Dd, records: i64, bytes: &mut i64) -> Result<Skipped, Dd
         }
 
         if records != 0 {
-            records -= 1;
+            records = records.saturating_sub(1);
         } else {
             *bytes = 0;
         }
@@ -1978,6 +1986,13 @@ fn win_mut(buf: &mut [u8], start: usize, end: usize) -> Result<&mut [u8], DdErro
     })
 }
 
+/// `dd_copy`: the copy loop, statement for statement.
+// Upstream's function is this long too, and its order -- when a short read is
+// padded, when a record is counted, when the output block is flushed -- is
+// what `dd`'s statistics and `conv=` options are measured against. Split for
+// length, it would stop reading side by side with `dd.c`, which is how it is
+// checked.
+#[allow(clippy::too_many_lines)]
 fn dd_copy(dd: &mut Dd, reader: &mut Reader, set: &Settings) -> Result<u8, DdError> {
     let mut exit_status = 0u8;
     // Size of the previous read if it was short, else 0. What makes
@@ -1999,8 +2014,8 @@ fn dd_copy(dd: &mut Dd, reader: &mut Reader, set: &Settings) -> Result<u8, DdErr
         // pipe held less than the skip, or the reads that did the skipping
         // were partial. POSIX does not say what to do about any of them;
         // upstream warns and carries on, and so does this.
-        let short =
-            0 <= reader.offset && requested.is_none_or(|want| want != reader.offset - offset0);
+        let short = 0 <= reader.offset
+            && requested.is_none_or(|want| want != reader.offset.saturating_sub(offset0));
         if (unskipped.records != 0 || short) && dd.rep.level != StatusLevel::None {
             stdfd::diag_line(&format!(
                 "dd: {}: cannot skip to specified offset",
@@ -2037,7 +2052,7 @@ fn dd_copy(dd: &mut Dd, reader: &mut Reader, set: &Settings) -> Result<u8, DdErr
                     return Err(DdError::Aborted);
                 }
                 if write_records != 0 {
-                    write_records -= 1;
+                    write_records = write_records.saturating_sub(1);
                 } else {
                     bytes = 0;
                 }
@@ -2058,14 +2073,14 @@ fn dd_copy(dd: &mut Dd, reader: &mut Reader, set: &Settings) -> Result<u8, DdErr
         ibuf = alloc_buffer(dd.ibs, usize::from(swab), "input")?;
     }
     dd.ensure_obuf()?;
-    let ibs = ibuf.len() - usize::from(swab);
+    let ibs = ibuf.len().saturating_sub(usize::from(swab));
     let mut saved_byte: i32 = -1;
 
     loop {
         let stats = dd.stats;
         dd.rep.tick(&stats);
 
-        if dd.stats.r_partial + dd.stats.r_full
+        if dd.stats.r_partial.saturating_add(dd.stats.r_full)
             >= dd.max_records.saturating_add(i64::from(dd.max_bytes != 0))
         {
             break;
@@ -2084,7 +2099,7 @@ fn dd_copy(dd: &mut Dd, reader: &mut Reader, set: &Settings) -> Result<u8, DdErr
         }
 
         // The last record of a `count=` given in bytes is short by design.
-        let want = if dd.stats.r_partial + dd.stats.r_full >= dd.max_records {
+        let want = if dd.stats.r_partial.saturating_add(dd.stats.r_full) >= dd.max_records {
             usize::try_from(dd.max_bytes).unwrap_or(0).min(ibs)
         } else {
             ibs
@@ -2112,7 +2127,7 @@ fn dd_copy(dd: &mut Dd, reader: &mut Reader, set: &Settings) -> Result<u8, DdErr
                 }
                 let stats = dd.stats;
                 dd.rep.print_stats(&stats);
-                let bad_portion = dd.ibs - i64::try_from(partread).unwrap_or(0);
+                let bad_portion = dd.ibs.saturating_sub(i64::try_from(partread).unwrap_or(0));
                 if !reader.advance_after_read_error(bad_portion) {
                     exit_status = 1;
                     // One diagnostic for a bad region, not one per block.
@@ -2130,7 +2145,7 @@ fn dd_copy(dd: &mut Dd, reader: &mut Reader, set: &Settings) -> Result<u8, DdErr
         };
 
         if n_bytes_read < ibs {
-            dd.stats.r_partial += 1;
+            dd.stats.r_partial = dd.stats.r_partial.saturating_add(1);
             partread = n_bytes_read;
             if dd.conversions & C_SYNC != 0 {
                 if dd.conversions & C_NOERROR == 0 {
@@ -2144,7 +2159,7 @@ fn dd_copy(dd: &mut Dd, reader: &mut Reader, set: &Settings) -> Result<u8, DdErr
                 n_bytes_read = ibs;
             }
         } else {
-            dd.stats.r_full += 1;
+            dd.stats.r_full = dd.stats.r_full.saturating_add(1);
             partread = 0;
         }
 
@@ -2153,7 +2168,10 @@ fn dd_copy(dd: &mut Dd, reader: &mut Reader, set: &Settings) -> Result<u8, DdErr
         // reports `0+2 records out` where `ibs=4096 obs=4096` reports `0+1`.
         if !dd.two_bufs {
             let nwritten = dd.out.iwrite(win(&ibuf, 0, n_bytes_read)?);
-            dd.stats.w_bytes += i64::try_from(nwritten).unwrap_or(i64::MAX);
+            dd.stats.w_bytes = dd
+                .stats
+                .w_bytes
+                .saturating_add(i64::try_from(nwritten).unwrap_or(i64::MAX));
             if nwritten != n_bytes_read {
                 stdfd::diag_line(&format!(
                     "dd: error writing {}: {}",
@@ -2163,9 +2181,9 @@ fn dd_copy(dd: &mut Dd, reader: &mut Reader, set: &Settings) -> Result<u8, DdErr
                 return Ok(1);
             }
             if n_bytes_read == ibs {
-                dd.stats.w_full += 1;
+                dd.stats.w_full = dd.stats.w_full.saturating_add(1);
             } else {
-                dd.stats.w_partial += 1;
+                dd.stats.w_partial = dd.stats.w_partial.saturating_add(1);
             }
             continue;
         }
@@ -2215,9 +2233,12 @@ fn dd_copy(dd: &mut Dd, reader: &mut Reader, set: &Settings) -> Result<u8, DdErr
     if dd.oc != 0 {
         let oc = dd.oc;
         let nwritten = dd.out.iwrite(win(&dd.obuf, 0, oc)?);
-        dd.stats.w_bytes += i64::try_from(nwritten).unwrap_or(i64::MAX);
+        dd.stats.w_bytes = dd
+            .stats
+            .w_bytes
+            .saturating_add(i64::try_from(nwritten).unwrap_or(i64::MAX));
         if nwritten != 0 {
-            dd.stats.w_partial += 1;
+            dd.stats.w_partial = dd.stats.w_partial.saturating_add(1);
         }
         if nwritten != oc {
             stdfd::diag_line(&format!(

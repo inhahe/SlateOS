@@ -290,6 +290,9 @@ impl Ctx {
         }
     }
 
+    // Cannot fail, unlike its siblings; it answers `Answer` so that the
+    // dispatch on the argument count above reads alike for every count.
+    #[allow(clippy::unnecessary_wraps)]
     fn one_argument(&mut self) -> Answer {
         let value = !self.at(self.pos).is_empty();
         self.pos = self.pos.saturating_add(1);

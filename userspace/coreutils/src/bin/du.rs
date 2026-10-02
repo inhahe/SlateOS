@@ -1064,11 +1064,11 @@ struct RealTree;
 #[cfg(unix)]
 impl Tree for RealTree {
     fn lstat(&self, path: &[u8]) -> io::Result<Meta> {
-        meta_of(&std::fs::symlink_metadata(os_from_bytes(path))?)
+        Ok(meta_of(&std::fs::symlink_metadata(os_from_bytes(path))?))
     }
 
     fn stat(&self, path: &[u8]) -> io::Result<Meta> {
-        meta_of(&std::fs::metadata(os_from_bytes(path))?)
+        Ok(meta_of(&std::fs::metadata(os_from_bytes(path))?))
     }
 
     fn read_dir(&self, path: &[u8]) -> io::Result<Vec<Vec<u8>>> {
@@ -1081,16 +1081,16 @@ impl Tree for RealTree {
 }
 
 #[cfg(unix)]
-fn meta_of(meta: &std::fs::Metadata) -> io::Result<Meta> {
+fn meta_of(meta: &std::fs::Metadata) -> Meta {
     use std::os::unix::fs::MetadataExt;
-    Ok(Meta {
+    Meta {
         dev: meta.dev(),
         ino: meta.ino(),
         size: meta.size(),
         blocks: meta.blocks(),
         is_dir: meta.is_dir(),
         is_symlink: meta.file_type().is_symlink(),
-    })
+    }
 }
 
 /// Read a whole file, or standard input when the name is exactly `-`.

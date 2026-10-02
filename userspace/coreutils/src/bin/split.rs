@@ -911,8 +911,8 @@ impl Namer {
         let base = u64::try_from(alphabet.len()).unwrap_or(26);
         let mut left = start;
         for slot in body.iter_mut().rev() {
-            *slot = usize::try_from(left % base).unwrap_or(0);
-            left /= base;
+            *slot = usize::try_from(left.checked_rem(base).unwrap_or(0)).unwrap_or(0);
+            left = left.checked_div(base).unwrap_or(0);
         }
         Namer {
             prefix,
@@ -970,8 +970,10 @@ impl Namer {
 fn digits_needed(value: u64, base: u64) -> usize {
     let mut needed = 1usize;
     let mut left = value;
-    while left >= base {
-        left /= base;
+    // Every alphabet has at least two digits; a base below two would never
+    // finish dividing, so it gets the one digit it can have.
+    while base > 1 && left >= base {
+        left = left.checked_div(base).unwrap_or(0);
         needed = needed.saturating_add(1);
     }
     needed
@@ -1235,8 +1237,8 @@ fn line_byte_pieces(data: &[u8], separator: u8, limit: u64) -> Vec<(usize, usize
 fn chunk_byte_pieces(data: &[u8], count: u64) -> Vec<(usize, usize)> {
     let size = u128::try_from(data.len()).unwrap_or(0);
     let count = u128::from(count.max(1));
-    let share = size / count;
-    let extra = size % count;
+    let share = size.checked_div(count).unwrap_or(0);
+    let extra = size.checked_rem(count).unwrap_or(0);
     let mut pieces = Vec::new();
     let mut start = 0usize;
     let mut index = 1u128;
@@ -1256,8 +1258,8 @@ fn chunk_byte_pieces(data: &[u8], count: u64) -> Vec<(usize, usize)> {
 fn chunk_line_pieces(data: &[u8], separator: u8, count: u64) -> Vec<(usize, usize)> {
     let size = u128::try_from(data.len()).unwrap_or(0);
     let total = u128::from(count.max(1));
-    let share = size / total;
-    let extra = size % total;
+    let share = size.checked_div(total).unwrap_or(0);
+    let extra = size.checked_rem(total).unwrap_or(0);
     // The end of partition *m*, in bytes. GNU accumulates this with
     // `chunk_end += chunk_size + (chunk_no < rem)`, which comes to the same
     // closed form the byte chunks use — that equality is what lets `-n l/K/N`
@@ -1328,7 +1330,7 @@ fn round_robin_pieces(data: &[u8], separator: u8, count: u64) -> Vec<Vec<u8>> {
     let count = usize::try_from(count).unwrap_or(usize::MAX).max(1);
     let mut pieces: Vec<Vec<u8>> = vec![Vec::new(); count];
     for (index, (start, end)) in records(data, separator).into_iter().enumerate() {
-        let Some(slot) = pieces.get_mut(index % count) else {
+        let Some(slot) = pieces.get_mut(index.checked_rem(count).unwrap_or(0)) else {
             continue;
         };
         if let Some(bytes) = data.get(start..end) {

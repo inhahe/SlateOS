@@ -325,7 +325,11 @@ fn hex_float(s: &[u8]) -> Option<f64> {
         // A `p` with no digits after it is not an exponent; the number simply
         // ends before it.
         if digits > 0 {
-            exponent = if negative { -value } else { value };
+            exponent = if negative {
+                value.saturating_neg()
+            } else {
+                value
+            };
         }
     }
     Some(sign * mantissa * (2.0f64).powi(exponent))
@@ -394,7 +398,7 @@ fn unit_order(key: &[u8]) -> i32 {
     if !nonzero {
         return 0;
     }
-    let order = match key.get(i).copied() {
+    let order: i32 = match key.get(i).copied() {
         Some(b'K' | b'k') => 1,
         Some(b'M') => 2,
         Some(b'G') => 3,
@@ -405,7 +409,11 @@ fn unit_order(key: &[u8]) -> i32 {
         Some(b'Y') => 8,
         _ => 0,
     };
-    if negative { -order } else { order }
+    if negative {
+        order.saturating_neg()
+    } else {
+        order
+    }
 }
 
 // ── -M, the ordering that knows the calendar ────────────────────────────────

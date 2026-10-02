@@ -175,6 +175,8 @@ Mandatory arguments to long options are mandatory for short options too.
 const INITIAL_READSIZE: usize = 8192;
 
 /// How the separator is found: as a string, or by a regular expression.
+// Read by `imp`, which is unix-only: the host build is a stub that says so.
+#[cfg_attr(not(unix), allow(dead_code))]
 enum Separator {
     /// The separator's bytes. Upstream's `sentinel_length` is their length,
     /// and its `match_length` the same.
@@ -186,6 +188,7 @@ enum Separator {
 /// Upstream's file-scope state, which outlives a file: the buffer and its
 /// read size grow and shrink as files are read, and the next file is read
 /// with whatever they were left at.
+#[cfg_attr(not(unix), allow(dead_code))] // As `Separator`.
 struct Tac {
     separator: Separator,
     /// `separator_ends_record`.
@@ -264,6 +267,7 @@ impl Tac {
     }
 
     /// `sentinel_length`.
+    #[cfg_attr(not(unix), allow(dead_code))] // As `Separator`.
     fn sentinel_length(&self) -> usize {
         match &self.separator {
             Separator::Fixed(s) => s.len(),

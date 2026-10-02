@@ -1307,13 +1307,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "fmt"
-version = "0.1.0"
-dependencies = [
- "quoting",
-]
-
-[[package]]
 name = "fnmatch"
 version = "0.1.0"
 
@@ -2417,13 +2410,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "mktemp"
-version = "0.1.0"
-dependencies = [
- "quoting",
-]
-
-[[package]]
 name = "modechange"
 version = "0.1.0"
 
@@ -3512,13 +3498,6 @@ dependencies = [
 [[package]]
 name = "shellcmd"
 version = "0.1.0"
-
-[[package]]
-name = "shuf"
-version = "0.1.0"
-dependencies = [
- "quoting",
-]
 
 [[package]]
 name = "simon"

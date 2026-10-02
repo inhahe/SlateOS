@@ -181,6 +181,7 @@ mod imp {
         fn write(fd: i32, buf: *const core::ffi::c_void, count: usize) -> isize;
         // The same, and for the same reason, as `write` above.
         fn read(fd: i32, buf: *mut core::ffi::c_void, count: usize) -> isize;
+        fn close(fd: i32) -> i32;
     }
 
     pub fn is_tty(fd: i32) -> bool {
@@ -275,6 +276,23 @@ mod imp {
             return Ok(usize::try_from(n).unwrap_or(0));
         }
     }
+
+    pub fn close_fd(fd: i32) -> io::Result<()> {
+        // SAFETY: `close` is defined for any integer: it closes the
+        // descriptor if it is open and answers `EBADF` if it is not. Every
+        // caller passes a descriptor it owns and does not use again.
+        if unsafe { close(fd) } == 0 {
+            Ok(())
+        } else {
+            Err(io::Error::last_os_error())
+        }
+    }
+
+    pub fn close_file(file: std::fs::File) -> io::Result<()> {
+        use std::os::fd::IntoRawFd;
+
+        close_fd(file.into_raw_fd())
+    }
 }
 
 // ------------------------------------------------------------ elsewhere ----
@@ -289,6 +307,7 @@ mod imp {
         false
     }
 
+    #[allow(clippy::unnecessary_wraps)] // The signature is the Linux arm's.
     pub fn probe(_fd: i32) -> io::Result<()> {
         // Nothing here answers the question `fstat` answers, and a wrong `Err`
         // would stop a utility before it started. The lie this module exists to
@@ -329,6 +348,20 @@ mod imp {
             0 => io::stdin().read(buf),
             _ => Err(io::Error::from(io::ErrorKind::Unsupported)),
         }
+    }
+
+    /// The runtime's standard input is not this program's to close, and
+    /// there is no `close(2)` here to ask.
+    #[allow(clippy::unnecessary_wraps)] // The signature is the Linux arm's.
+    pub fn close_fd(_fd: i32) -> io::Result<()> {
+        Ok(())
+    }
+
+    /// Dropping the `File` closes it; nothing here reports how that went.
+    #[allow(clippy::unnecessary_wraps)] // The signature is the Linux arm's.
+    pub fn close_file(file: std::fs::File) -> io::Result<()> {
+        drop(file);
+        Ok(())
     }
 }
 
@@ -456,6 +489,38 @@ pub fn write_all(fd: i32, bytes: &[u8]) -> io::Result<()> {
 /// Whatever `read(2)` reports.
 pub fn read(fd: i32, buf: &mut [u8]) -> io::Result<usize> {
     imp::read_fd(fd, buf)
+}
+
+/// Close a file this process opened, reporting the failure that dropping it
+/// would discard.
+///
+/// The `fclose` at the end of reading an input. A `std::fs::File` closes on
+/// drop and throws the result away, but upstream checks it -- `fmt` reports a
+/// failed close of an input as `fmt: FILE: <reason>` -- and a network file
+/// system can deliver a deferred error there and nowhere else.
+///
+/// # Errors
+///
+/// Whatever `close(2)` reports. Always `Ok` off Linux.
+pub fn close(file: std::fs::File) -> io::Result<()> {
+    imp::close_file(file)
+}
+
+/// Close descriptor 0: upstream's `fclose (stdin)` after the last read of
+/// standard input, whose failure the utilities that do it report -- `fmt` as
+/// `closing standard input`, `tac` as `-`.
+///
+/// After [`restore`] that is not a formality. Measured, GNU answers `fmt <&-`
+/// with `fmt: read error` and then
+/// `fmt: closing standard input: Bad file descriptor`: the close is the second
+/// place a closed descriptor 0 is noticed.
+///
+/// # Errors
+///
+/// Whatever `close(2)` reports. Always `Ok` off Linux, where the runtime's
+/// standard input is not this program's to close.
+pub fn close_stdin() -> io::Result<()> {
+    imp::close_fd(0)
 }
 
 /// Whether a diagnostic failed to reach descriptor 2 — `ferror (stderr)`,
@@ -1511,6 +1576,27 @@ mod tests {
         // 4096 is above any descriptor a test harness has open and below the
         // usual `RLIMIT_NOFILE`, so this is `EBADF` and not a limit error.
         let e = super::probe(4096).expect_err("an unopened descriptor probed ok");
+        assert_eq!(e.raw_os_error(), Some(9), "want EBADF, got {e}");
+    }
+
+    #[test]
+    fn closing_a_file_this_process_opened_succeeds() {
+        let path = std::env::temp_dir().join(format!("stdfd-close-{}", std::process::id()));
+        std::fs::write(&path, b"x").unwrap();
+        let file = std::fs::File::open(&path).unwrap();
+        let closed = super::close(file);
+        // Removed before asserting, so a failure leaves nothing behind.
+        let _ = std::fs::remove_file(&path);
+        assert!(closed.is_ok(), "{closed:?}");
+    }
+
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn closing_a_descriptor_that_is_not_open_reports_it() {
+        // `close_stdin`'s failure, without closing this process's standard
+        // input to provoke it: the same call on a descriptor nobody opened.
+        // 4096 is above any descriptor a test harness has open, as above.
+        let e = super::imp::close_fd(4096).expect_err("closing an unopened descriptor succeeded");
         assert_eq!(e.raw_os_error(), Some(9), "want EBADF, got {e}");
     }
 

@@ -99,7 +99,8 @@ pub fn is_utf8(name: Option<&[u8]>) -> bool {
     name.and_then(|n| {
         n.iter()
             .rposition(|&b| b == b'.')
-            .and_then(|dot| n.get(dot + 1..))
+            .and_then(|dot| n.get(dot..))
+            .and_then(|from_dot| from_dot.get(1..))
     })
     .map(|codeset| codeset.split(|&b| b == b'@').next().unwrap_or(codeset))
     .is_some_and(|c| c.eq_ignore_ascii_case(b"UTF-8") || c.eq_ignore_ascii_case(b"utf8"))

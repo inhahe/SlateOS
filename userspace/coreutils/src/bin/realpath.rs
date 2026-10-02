@@ -258,10 +258,10 @@ fn parse_args(args: &[OsString]) -> Result<Request, getopt::Error> {
         match item? {
             Opt::Operand(file) => files.push(file.clone()),
             Opt::Short(b'e', _) | Opt::Long("canonicalize-existing", _) => {
-                flags.mode = Mode::Existing
+                flags.mode = Mode::Existing;
             }
             Opt::Short(b'm', _) | Opt::Long("canonicalize-missing", _) => {
-                flags.mode = Mode::Missing
+                flags.mode = Mode::Missing;
             }
             // The three link flags each set *both* fields, which is what makes
             // them last-wins as a group rather than three independent toggles.

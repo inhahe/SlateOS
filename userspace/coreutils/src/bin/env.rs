@@ -586,7 +586,7 @@ fn parse_args(args: &[OsString]) -> Result<Config, Failure> {
                     cfg.unset.push(v.unwrap_or_default());
                 }
                 Opt::Long("chdir", v) | Opt::Short(b'C', v) => {
-                    cfg.chdir = Some(v.unwrap_or_default())
+                    cfg.chdir = Some(v.unwrap_or_default());
                 }
                 Opt::Long("split-string", v) | Opt::Short(b'S', v) => {
                     let mut next = split_string(&v.unwrap_or_default())?;

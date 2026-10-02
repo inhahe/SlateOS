@@ -605,7 +605,11 @@ struct Numbers {
 
 /// A memory field averaged over the CPU time the child used.
 fn per_tick(value: i64, ticks: i64) -> i64 {
-    if ticks == 0 { 0 } else { value / ticks }
+    if ticks == 0 {
+        0
+    } else {
+        value.checked_div(ticks).unwrap_or(0)
+    }
 }
 
 /// Upstream's `summarize`.
@@ -763,9 +767,12 @@ fn directive(out: &mut dyn Out, c: u8, command: &[OsString], resp: &Resuse, n: &
             // for a command too short to register a millisecond, and to `?`
             // for one too short to register a microsecond.
             if n.r > 0 {
-                format!("{}%", n.v.saturating_mul(100) / n.r)
+                format!("{}%", n.v.saturating_mul(100).checked_div(n.r).unwrap_or(0))
             } else if n.us_r > 0 {
-                format!("{}%", n.us_v.saturating_mul(100) / n.us_r)
+                format!(
+                    "{}%",
+                    n.us_v.saturating_mul(100).checked_div(n.us_r).unwrap_or(0)
+                )
             } else {
                 "?%".to_string()
             }

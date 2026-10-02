@@ -232,10 +232,13 @@ fn strtol(bytes: &[u8]) -> (i64, usize) {
         }
         let digit = i64::from(c.wrapping_sub(b'0'));
         if !saturated {
-            match value
-                .checked_mul(10)
-                .and_then(|v| v.checked_add(if negative { -digit } else { digit }))
-            {
+            match value.checked_mul(10).and_then(|v| {
+                v.checked_add(if negative {
+                    digit.saturating_neg()
+                } else {
+                    digit
+                })
+            }) {
                 Some(v) => value = v,
                 None => saturated = true,
             }

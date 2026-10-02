@@ -186,9 +186,14 @@ mkdir -p w
 # of how we configure the reference. So they are ordinary cases now.
 #
 # That question (B-Q8, "which width table should `charwidth` follow") has since
-# been answered: design-decisions §1042 gives U+00AD zero columns, as gnulib
-# does, so the two tables now agree on it too. The fixture stays as the check
-# that the soft hyphen's width reaches `ls`'s layout at all.
+# been answered, and the answer undid the agreement: design-decisions §1042
+# gives U+00AD zero columns, as gnulib's `uc_width` does -- but GNU `ls` asks
+# glibc's `wcwidth`, which says one. Measured 2026-10-02 against the 9.4
+# reference: GNU sorts `shy` among the four-column names and lays the four
+# out in two rows at `-w 22`; ours sorts it first and fits one row. Both cases
+# are therefore deliberate differences now, kept as the check that the soft
+# hyphen's width reaches `ls`'s layout at all -- if they ever agree again,
+# either the table or `ls` stopped consulting it.
 mkdir -p y
 : > "$(printf 'y/shy\u00ad')"
 : > y/AAAA
@@ -517,10 +522,10 @@ TERM=xterm ls --color=always t
 TERM=dumb ls --color=always t
 COLORTERM=truecolor ls --color=always t
 
-# Soft-hyphen width. See the `y/` fixture above for why these agree despite
-# our width table and gnulib's disagreeing about U+00AD.
-ls --sort=width -1 y
-ls -C -w 22 y
+# Soft-hyphen width. See the `y/` fixture above for why these differ: U+00AD is
+# zero columns in our table (design-decisions §1042) and one in glibc's.
+!U+00AD is 0 columns here, 1 in glibc's wcwidth (design-decisions §1042)|ls --sort=width -1 y
+!U+00AD is 0 columns here, 1 in glibc's wcwidth (design-decisions §1042)|ls -C -w 22 y
 
 # --- dir and vdir: ls with other defaults ---
 # Neither side has a terminal, which is exactly what makes these worth

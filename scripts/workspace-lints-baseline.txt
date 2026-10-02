@@ -61,7 +61,6 @@ userspace/efibootmgr  # bare deny(clippy::all)
 userspace/eject  # bare deny(clippy::all)
 userspace/fdisk
 userspace/fio  # bare deny(clippy::all)
-userspace/fmt
 userspace/fsck
 userspace/fuser  # bare deny(clippy::all)
 userspace/fw
@@ -104,7 +103,6 @@ userspace/m4
 userspace/make
 userspace/man
 userspace/mkfs
-userspace/mktemp
 userspace/monctl
 userspace/mount
 userspace/nano
@@ -131,7 +129,6 @@ userspace/scp  # bare deny(clippy::all)
 userspace/screen
 userspace/service
 userspace/shell
-userspace/shuf
 userspace/ss
 userspace/sysctl
 userspace/syslogd

@@ -63,6 +63,83 @@ static THREAD_OWNERS: Mutex<BTreeMap<TaskId, ProcessId>> =
     Mutex::named(BTreeMap::new(), b"THRDOWN");
 
 // ---------------------------------------------------------------------------
+// Acting with the kernel's own authority
+// ---------------------------------------------------------------------------
+
+/// The tasks inside [`as_kernel`] now, each with how deeply it is nested.
+///
+/// A leaf lock: nothing is called while it is held.
+static KERNEL_ACTING: Mutex<BTreeMap<TaskId, u32>> = Mutex::named(BTreeMap::new(), b"KACTING");
+
+/// How many tasks are inside [`as_kernel`] now, so [`acting_process`] answers
+/// without the lock in the common case of none: it is asked on every path
+/// operation.
+static KERNEL_ACTING_COUNT: core::sync::atomic::AtomicUsize =
+    core::sync::atomic::AtomicUsize::new(0);
+
+/// The process a permission decision should treat `task` as acting for: the
+/// one it belongs to ([`owner_process`]), or none -- the kernel -- while it is
+/// inside [`as_kernel`].
+///
+/// What the VFS asks wherever it judges a caller (its permission gate, who a
+/// new file belongs to, whose namespace a path is resolved in, which xattr
+/// names it may touch). Everything else that wants a task's process --
+/// joining it, signalling it, accounting for it -- asks `owner_process`, which
+/// `as_kernel` leaves alone.
+#[must_use]
+pub(crate) fn acting_process(task: TaskId) -> Option<ProcessId> {
+    if KERNEL_ACTING_COUNT.load(core::sync::atomic::Ordering::Acquire) != 0
+        && KERNEL_ACTING.lock().contains_key(&task)
+    {
+        return None;
+    }
+    owner_process(task)
+}
+
+/// Run `body` with the calling task acting with the kernel's own authority,
+/// as Linux's `override_creds(prepare_kernel_cred(..))` does: for the length
+/// of `body` the VFS treats the task as a kernel task -- no permission gate,
+/// no namespace, new files root's -- although it is still the process's thread
+/// in every other respect (it can be joined, signalled and accounted for as
+/// before).
+///
+/// For a kernel subsystem keeping its own state in files during a system call
+/// made on behalf of a process -- the deferred-operation queue (`fs::deferred_ops`),
+/// whose entries no process may write but the kernel writes for any of them.
+/// Never with a path or contents the caller chose without the subsystem having
+/// checked them first: inside, the caller's rights are not consulted at all.
+///
+/// Nests: an inner call ends only its own part.
+pub(crate) fn as_kernel<R>(body: impl FnOnce() -> R) -> R {
+    use core::sync::atomic::Ordering;
+    let task = sched::current_task_id();
+    {
+        let mut acting = KERNEL_ACTING.lock();
+        let depth = acting.entry(task).or_insert(0);
+        if *depth == 0 {
+            KERNEL_ACTING_COUNT.fetch_add(1, Ordering::AcqRel);
+        }
+        *depth = depth.saturating_add(1);
+    }
+    let result = body();
+    {
+        let mut acting = KERNEL_ACTING.lock();
+        let ended = match acting.get_mut(&task) {
+            Some(depth) => {
+                *depth = depth.saturating_sub(1);
+                *depth == 0
+            }
+            None => false,
+        };
+        if ended {
+            acting.remove(&task);
+            KERNEL_ACTING_COUNT.fetch_sub(1, Ordering::AcqRel);
+        }
+    }
+    result
+}
+
+// ---------------------------------------------------------------------------
 // Thread exit values and join waiters
 // ---------------------------------------------------------------------------
 

@@ -888,7 +888,9 @@ where
         return Ok(Cow::Borrowed(path));
     }
     let task_id = crate::sched::current_task_id();
-    let process_id = crate::proc::thread::owner_process(task_id).unwrap_or(0);
+    // `acting_process`: a task acting with the kernel's authority
+    // (`proc::thread::as_kernel`) resolves host paths, as a kernel task does.
+    let process_id = crate::proc::thread::acting_process(task_id).unwrap_or(0);
 
     resolve_path_for(process_id, path)
 }
@@ -984,7 +986,7 @@ pub fn check_writable(path: impl AsRef<Path>) -> KernelResult<()> {
         return Ok(());
     }
     let task_id = crate::sched::current_task_id();
-    let process_id = crate::proc::thread::owner_process(task_id).unwrap_or(0);
+    let process_id = crate::proc::thread::acting_process(task_id).unwrap_or(0);
     check_writable_for(process_id, path.as_ref())
 }
 

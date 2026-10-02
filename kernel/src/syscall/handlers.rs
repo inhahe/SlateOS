@@ -14929,6 +14929,143 @@ pub fn sys_fs_get_seals(args: &SyscallArgs) -> SyscallResult {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Deferred filesystem operations (1126-1128): `fs::deferred_ops`,
+// design-decisions 1529.
+// ---------------------------------------------------------------------------
+
+/// Largest `SYS_FS_DEFER_LIST` buffer honoured: the listing is built in the
+/// kernel before it is copied out, so this bounds what one call can make the
+/// kernel hold. Every entry a volume may have fits several times over.
+const DEFER_LIST_MAX: usize = 16 * 1024 * 1024;
+
+/// The caller as a deferred operation's requester: who it is checked as when
+/// queued and again when it runs. A kernel caller is root.
+fn defer_requester() -> Result<crate::fs::deferred_ops::Requester, KernelError> {
+    use crate::fs::deferred_ops::Requester;
+    let Some(pid) = caller_pid().filter(|&p| p != 0) else {
+        return Ok(Requester {
+            uid: 0,
+            gid: 0,
+            groups: alloc::vec::Vec::new(),
+        });
+    };
+    let creds = crate::proc::pcb::get_credentials(pid).ok_or(KernelError::NoSuchProcess)?;
+    Ok(Requester {
+        uid: creds.uid,
+        gid: creds.gid,
+        groups: creds.groups,
+    })
+}
+
+/// A `(pointer, length)` path argument, which may not be empty.
+fn defer_path_arg(ptr: u64, len: u64) -> Result<crate::fs::path::PathBuf, KernelError> {
+    let len = usize::try_from(len).map_err(|_| KernelError::InvalidArgument)?;
+    if ptr == 0 || len == 0 {
+        return Err(KernelError::InvalidArgument);
+    }
+    read_user_path(ptr, len)
+}
+
+/// `SYS_FS_DEFER` -- queue a delete or rename that cannot happen now, to run
+/// when its volume can take it. See the number's doc.
+pub fn sys_fs_defer(args: &SyscallArgs) -> SyscallResult {
+    use crate::fs::deferred_ops::{self, DeferredOpKind, DeferredReason};
+    let (Some(op), Some(reason)) = (
+        DeferredOpKind::from_code(args.arg0),
+        DeferredReason::from_code(args.arg5),
+    ) else {
+        return SyscallResult::err(KernelError::InvalidArgument);
+    };
+    // What the operation itself would need: `SYS_FS_DELETE`'s right for a
+    // delete, `SYS_FS_RENAME`'s for a rename.
+    let rights = match op {
+        DeferredOpKind::Delete => crate::cap::Rights::DELETE,
+        DeferredOpKind::Rename => crate::cap::Rights::WRITE,
+    };
+    if let Err(e) = require_cap_type(crate::cap::ResourceType::File, rights) {
+        return SyscallResult::err(e);
+    }
+    let path = match defer_path_arg(args.arg1, args.arg2) {
+        Ok(p) => p,
+        Err(e) => return SyscallResult::err(e),
+    };
+    let dest = match op {
+        DeferredOpKind::Rename => match defer_path_arg(args.arg3, args.arg4) {
+            Ok(p) => Some(p),
+            Err(e) => return SyscallResult::err(e),
+        },
+        DeferredOpKind::Delete if args.arg3 != 0 || args.arg4 != 0 => {
+            return SyscallResult::err(KernelError::InvalidArgument);
+        }
+        DeferredOpKind::Delete => None,
+    };
+    let who = match defer_requester() {
+        Ok(w) => w,
+        Err(e) => return SyscallResult::err(e),
+    };
+    let now = crate::timekeeping::clock_realtime() / 1_000_000_000;
+    match deferred_ops::queue(&path, op, dest.as_deref(), reason, &who, now) {
+        Ok(id) => match i64::try_from(id) {
+            Ok(id) => SyscallResult::ok(id),
+            Err(_) => SyscallResult::err(KernelError::ResourceExhausted),
+        },
+        Err(e) => SyscallResult::err(e),
+    }
+}
+
+/// `SYS_FS_DEFER_LIST` -- the queued operations of the volume a path is on
+/// that the caller may see. See the number's doc.
+pub fn sys_fs_defer_list(args: &SyscallArgs) -> SyscallResult {
+    if let Err(e) = require_cap_type(crate::cap::ResourceType::File, crate::cap::Rights::READ) {
+        return SyscallResult::err(e);
+    }
+    let path = match defer_path_arg(args.arg0, args.arg1) {
+        Ok(p) => p,
+        Err(e) => return SyscallResult::err(e),
+    };
+    let Ok(cap) = usize::try_from(args.arg3) else {
+        return SyscallResult::err(KernelError::InvalidArgument);
+    };
+    let who = match defer_requester() {
+        Ok(w) => w,
+        Err(e) => return SyscallResult::err(e),
+    };
+    let text = match crate::fs::deferred_ops::listing(&path, who.uid, cap.min(DEFER_LIST_MAX)) {
+        Ok(t) => t,
+        Err(e) => return SyscallResult::err(e),
+    };
+    if !text.is_empty()
+        && let Err(e) = crate::mm::user::write_user_items(args.arg2, &text)
+    {
+        return SyscallResult::err(e);
+    }
+    match i64::try_from(text.len()) {
+        Ok(n) => SyscallResult::ok(n),
+        Err(_) => SyscallResult::err(KernelError::BufferTooSmall),
+    }
+}
+
+/// `SYS_FS_DEFER_CANCEL` -- cancel a queued operation, for whoever queued it
+/// or root. See the number's doc.
+pub fn sys_fs_defer_cancel(args: &SyscallArgs) -> SyscallResult {
+    if let Err(e) = require_cap_type(crate::cap::ResourceType::File, crate::cap::Rights::DELETE) {
+        return SyscallResult::err(e);
+    }
+    let path = match defer_path_arg(args.arg0, args.arg1) {
+        Ok(p) => p,
+        Err(e) => return SyscallResult::err(e),
+    };
+    let who = match defer_requester() {
+        Ok(w) => w,
+        Err(e) => return SyscallResult::err(e),
+    };
+    match crate::fs::deferred_ops::cancel(&path, args.arg2, who.uid) {
+        Ok(()) => SyscallResult::ok(0),
+        Err(e) => SyscallResult::err(e),
+    }
+}
+
 /// `SYS_FS_SET_STATUS_FLAGS` — set an open description's status flags, as
 /// Linux's `fcntl(F_SETFL)` does. See the number's doc.
 pub fn sys_fs_set_status_flags(args: &SyscallArgs) -> SyscallResult {

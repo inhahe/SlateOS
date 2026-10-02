@@ -181914,6 +181914,79 @@ directory with one giving the new file the default as its access ACL (a new
 directory also as its default), the creation mode masked by it -- Linux's
 `posix_acl_create`.
 
+### A-DEFERRED-OPS-REPLAYED-FORGED-ENTRIES-AS-ROOT -- 2026-10-02 -- FIXED (lane A)
+
+**Status:** FIXED 2026-10-02 on `lane-a-wip` (design-decisions §1529), found
+while building the system calls lane B asked for.
+
+**In short:** the queue of deferred deletes and renames ran its entries as
+whoever the entry said had queued them, trusted any file in the queue
+directory, and checked only the target's inode *number* -- not which volume
+it was on. Since every mount replays its queue, an ext4 USB stick carrying a
+hand-written entry ("delete `/etc/shadow`, inode 1234, queued by uid 0")
+would have deleted that file on the system the moment it was mounted. And
+any process could write such an entry into the system volume's own queue
+directly: the kernel enforces no mode bits.
+
+**What was wrong, all in `kernel/src/fs/deferred_ops.rs`:**
+- `replay_one` compared `stat(target_path).ino` with the stored number:
+  the same number on another volume passed, and `stat` followed a final
+  symlink that `remove` then did not.
+- Every file named by a number in the queue was an entry; nothing said the
+  kernel had written it.
+- `queue_dir_path` pushed `/.deferred-ops` onto the mount path, and
+  `PathBuf::push` replaces a path with an absolute one: every volume's queue
+  was the root volume's, and every mount replayed the root's.
+
+**Fixed by:** an entry acts only if its name, not followed, still leads to
+its inode *on the volume being replayed* (`FileId` with that mount's
+`fs_id`); only entries sealed immutable -- which only root can do -- are
+honoured, and the kernel verifies each after sealing it; the queue path is
+`<mount>/.deferred-ops` (relative name). `fs::deferred_ops::self_test` 11
+and 12 hold the first two: an unsealed root entry and a sealed entry naming
+a file on `/tmp` both leave their targets alone.
+
+### A-DEFERRED-OPS-ENTRIES-ARE-READABLE-BY-ANYONE -- 2026-10-02 -- OPEN (lane A)
+
+**Status:** OPEN (lane A). Waits on the kernel enforcing mode bits, or on
+ACLs that persist (`A-PER-FILE-STATE-OUTLIVED-ITS-FILE`).
+
+**In short:** a queued delete or rename records the name of the file it is
+for. `SYS_FS_DEFER_LIST` shows a user only their own entries, but the entry
+files themselves (`<volume>/.deferred-ops/<id>`,
+`/var/lib/deferred-ops/<uuid>/<id>`) can be read by any process: they are
+mode 0600 and root's, and the kernel enforces neither. So anyone who looks
+in the directory can see which files other users have asked to delete.
+Integrity is not affected -- each entry is sealed immutable and only sealed
+entries are acted on (`A-DEFERRED-OPS-REPLAYED-FORGED-ENTRIES-AS-ROOT`).
+
+**Where:** `kernel/src/fs/deferred_ops.rs` (`write_sealed`); the missing
+enforcement is the VFS's (`check_path_access` judges ACLs and tags only).
+
+**Proper fix:** enforcing mode bits for every process, which makes the 0600
+already set mean what it says. Until then a capability tag on the two
+queue directories would do it, but tags are in memory and keyed by path, so
+they would have to be re-applied at every mount; not done.
+
+### A-DEFERRED-OPS-AN-INODE-NUMBER-CAN-BE-REUSED -- 2026-10-02 -- OPEN (lane A)
+
+**Status:** OPEN (lane A) -- a limit of the agreed format, not a bug in the
+code.
+
+**In short:** an entry names its file by inode number. If the file is
+deleted and a new file created under the same name before the entry runs,
+ext4 may give the new file the old number, and the entry then acts on the
+new file. Linux tells the two apart with the inode's *generation* number
+(`i_generation`), which ext4 bumps on every reuse; the entry format has no
+field for it.
+
+**Where:** `kernel/src/fs/deferred_ops.rs` (`DeferredEntry`, `replay_one`);
+`FileId` has no generation either.
+
+**Proper fix:** a `target_generation=` key, read from the inode when queued
+and compared at replay, with `FileMeta` reporting ext4's `i_generation`.
+The key is new, so older entries without it would keep today's behaviour.
+
 ## Lane B: new entries
 
 Lane B (userland) appends new entries at the end of this section, above the

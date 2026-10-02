@@ -176,6 +176,11 @@ impl FileSystem for Ext4Fs {
         "ext4"
     }
 
+    fn volume_uuid(&self) -> Option<[u8; 16]> {
+        let uuid = self.driver.superblock().raw.s_uuid;
+        (uuid != [0; 16]).then_some(uuid)
+    }
+
     fn readdir(&mut self, path: &Path) -> KernelResult<Vec<DirEntry>> {
         let ino = self.driver.resolve_path(path)?;
         let inode = self.driver.read_inode(ino)?;

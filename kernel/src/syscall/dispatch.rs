@@ -111,7 +111,7 @@ use super::number::{
 };
 use super::number::{
     SYS_DEVICE_CLOSE, SYS_DEVICE_IOCTL, SYS_DEVICE_OPEN, SYS_DEVICE_READ, SYS_DEVICE_WRITE,
-    SYS_FS_ADD_SEALS, SYS_FS_GET_SEALS,
+    SYS_FS_ADD_SEALS, SYS_FS_DEFER, SYS_FS_DEFER_CANCEL, SYS_FS_DEFER_LIST, SYS_FS_GET_SEALS,
 };
 use super::number::{
     SYS_UNIX_ACCEPT, SYS_UNIX_BIND, SYS_UNIX_CLOSE, SYS_UNIX_CONNECT, SYS_UNIX_GET_OPTION,
@@ -614,6 +614,10 @@ const fn build_v1_table() -> SyscallTable {
     // Seals on a file (1124-1125): `fs::sealing`, by handle.
     handlers[SYS_FS_ADD_SEALS as usize] = Some(handlers::sys_fs_add_seals);
     handlers[SYS_FS_GET_SEALS as usize] = Some(handlers::sys_fs_get_seals);
+    // Deferred filesystem operations (1126-1128): `fs::deferred_ops`.
+    handlers[SYS_FS_DEFER as usize] = Some(handlers::sys_fs_defer);
+    handlers[SYS_FS_DEFER_LIST as usize] = Some(handlers::sys_fs_defer_list);
+    handlers[SYS_FS_DEFER_CANCEL as usize] = Some(handlers::sys_fs_defer_cancel);
 
     // Thread management (510–519).
     handlers[SYS_THREAD_CREATE as usize] = Some(handlers::sys_thread_create);
@@ -1284,6 +1288,7 @@ pub fn self_test_fs() -> KernelResult<()> {
     // would have failed there for want of a filesystem).
     test_dispatch_record_lock()?;
     test_dispatch_seals()?;
+    test_dispatch_deferred()?;
     test_dispatch_flock()?;
     test_dispatch_fs_gates()?;
     test_dispatch_status_flags()?;
@@ -4053,6 +4058,186 @@ fn test_dispatch_seals() -> KernelResult<()> {
     serial_println!(
         "[syscall]   SYS_FS_ADD_SEALS/GET_SEALS (1124-1125): refusals, a seal by a writable \
          handle, read back by another, binding the VFS: OK"
+    );
+    Ok(())
+}
+
+/// `SYS_FS_DEFER` / `SYS_FS_DEFER_LIST` / `SYS_FS_DEFER_CANCEL` (1126-1128)
+/// as a scratch process of uid 1000 calls them, its paths in its own memory
+/// (design-decisions 1529):
+///
+/// - without a `File` capability, `PermissionDenied`;
+/// - an unknown op or reason, an empty path, a rename with no destination
+///   and a delete with one are `InvalidArgument`;
+/// - a name on memfs is `NotSupported` (no UUID, no queue) and a missing one
+///   `NotFound`;
+/// - a listing of a volume with no queue is empty, and a cancel there
+///   `NotFound`.
+///
+/// On memfs because the call runs with interrupts off
+/// (`thread::self_test_in_process`) and must not wait on a disk. Queueing,
+/// listing, cancelling and replaying on ext4, each user's view and each
+/// rule, are `fs::deferred_ops::self_test`, through the same functions the
+/// door calls; this is the door.
+fn test_dispatch_deferred() -> KernelResult<()> {
+    use super::number::{MAP_READ, MAP_WRITE};
+    use crate::cap::{ResourceType, Rights};
+    use crate::mm::user::copy_to_user_as;
+    use crate::proc::pcb::{self, ProcessCredentials};
+    use crate::proc::thread::{self, self_test_as_process};
+
+    const PRESENT: &[u8] = b"/tmp/_dfo_door";
+    const MISSING: &[u8] = b"/tmp/_dfo_door_missing";
+    const TMP: &[u8] = b"/tmp";
+    // Where each path sits in the process's page, and the listing buffer.
+    const AT_PRESENT: u64 = 0;
+    const AT_MISSING: u64 = 256;
+    const AT_TMP: u64 = 512;
+    const AT_LIST: u64 = 1024;
+    const LIST_LEN: u64 = 4096;
+
+    fn fail(msg: &str, pid: pcb::ProcessId) -> KernelResult<()> {
+        serial_println!("[syscall]   FAIL: deferred operations: {}", msg);
+        pcb::destroy(pid);
+        // Best effort: the file is this test's own scratch.
+        let _ = crate::fs::Vfs::remove("/tmp/_dfo_door");
+        Err(KernelError::InternalError)
+    }
+    let code = |e: KernelError| i64::from(e.code());
+    let len = |p: &[u8]| u64::try_from(p.len()).unwrap_or(0);
+
+    let pid = pcb::create("defer-door", 0);
+    if pcb::set_credentials(
+        pid,
+        ProcessCredentials {
+            uid: 1000,
+            gid: 1000,
+            groups: alloc::vec::Vec::new(),
+        },
+    )
+    .is_err()
+    {
+        return fail("could not give the scratch process its identity", pid);
+    }
+    // Best effort: a leftover from an earlier boot's failure.
+    let _ = crate::fs::Vfs::remove("/tmp/_dfo_door");
+    if crate::fs::Vfs::write_file("/tmp/_dfo_door", b"door").is_err() {
+        return fail("could not create the scratch file", pid);
+    }
+    let map = self_test_as_process(pid, || {
+        dispatch(
+            SYS_MMAP,
+            &SyscallArgs {
+                arg0: 0,
+                arg1: 0x4000,
+                arg2: MAP_READ | MAP_WRITE,
+                arg3: 0,
+                arg4: 0,
+                arg5: 0,
+            },
+        )
+        .value
+    });
+    let Ok(page) = u64::try_from(map) else {
+        return fail("could not map the scratch process's memory", pid);
+    };
+    let Some(pml4) = pcb::get_pml4(pid).filter(|&p| p != 0) else {
+        return fail("the scratch process has no address space", pid);
+    };
+    for (at, path) in [(AT_PRESENT, PRESENT), (AT_MISSING, MISSING), (AT_TMP, TMP)] {
+        if copy_to_user_as(pml4, page.saturating_add(at), path).is_err() {
+            return fail("could not write a path into the scratch process", pid);
+        }
+    }
+    let call = |nr: u64, a: [u64; 6]| {
+        thread::self_test_in_process(pid, || {
+            dispatch(
+                nr,
+                &SyscallArgs {
+                    arg0: a[0],
+                    arg1: a[1],
+                    arg2: a[2],
+                    arg3: a[3],
+                    arg4: a[4],
+                    arg5: a[5],
+                },
+            )
+            .value
+        })
+        .unwrap_or(i64::MIN)
+    };
+    let present = page.saturating_add(AT_PRESENT);
+    let missing = page.saturating_add(AT_MISSING);
+    let tmp = page.saturating_add(AT_TMP);
+    let list_buf = page.saturating_add(AT_LIST);
+    let delete = |path: u64, path_len: u64, reason: u64| {
+        call(SYS_FS_DEFER, [1, path, path_len, 0, 0, reason])
+    };
+
+    let no_cap = delete(present, len(PRESENT), 1);
+    if no_cap != code(KernelError::PermissionDenied) {
+        serial_println!("[syscall]     without a File capability: {}", no_cap);
+        return fail("a process with no File capability was let in", pid);
+    }
+    if pcb::grant_capability(
+        pid,
+        ResourceType::File,
+        0,
+        Rights::READ | Rights::WRITE | Rights::DELETE,
+    )
+    .is_err()
+    {
+        return fail("could not grant the File capability", pid);
+    }
+
+    let refusals = [
+        (
+            "an unknown op",
+            call(SYS_FS_DEFER, [0, present, len(PRESENT), 0, 0, 1]),
+        ),
+        ("reason 0", delete(present, len(PRESENT), 0)),
+        ("reason 4", delete(present, len(PRESENT), 4)),
+        ("an empty path", delete(present, 0, 1)),
+        (
+            "a rename with no destination",
+            call(SYS_FS_DEFER, [2, present, len(PRESENT), 0, 0, 1]),
+        ),
+        (
+            "a delete with a destination",
+            call(SYS_FS_DEFER, [1, present, len(PRESENT), tmp, len(TMP), 1]),
+        ),
+    ];
+    for (what, got) in refusals {
+        if got != code(KernelError::InvalidArgument) {
+            serial_println!("[syscall]     {}: {}", what, got);
+            return fail("an argument the door should refuse was taken", pid);
+        }
+    }
+    let on_memfs = delete(present, len(PRESENT), 1);
+    let not_there = delete(missing, len(MISSING), 1);
+    let listed = call(SYS_FS_DEFER_LIST, [tmp, len(TMP), list_buf, LIST_LEN, 0, 0]);
+    let cancelled = call(SYS_FS_DEFER_CANCEL, [tmp, len(TMP), 1, 0, 0, 0]);
+    if on_memfs != code(KernelError::NotSupported)
+        || not_there != code(KernelError::NotFound)
+        || listed != 0
+        || cancelled != code(KernelError::NotFound)
+    {
+        serial_println!(
+            "[syscall]     memfs {}, missing {}, listing {}, cancel {}",
+            on_memfs,
+            not_there,
+            listed,
+            cancelled
+        );
+        return fail("the door answered a volume with no queue wrongly", pid);
+    }
+
+    pcb::destroy(pid);
+    // Best effort: this test's own scratch.
+    let _ = crate::fs::Vfs::remove("/tmp/_dfo_door");
+    serial_println!(
+        "[syscall]   SYS_FS_DEFER/_LIST/_CANCEL (1126-1128): the capability gate, refused \
+         arguments, a volume with no queue: OK"
     );
     Ok(())
 }

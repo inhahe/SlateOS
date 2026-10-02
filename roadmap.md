@@ -4796,6 +4796,15 @@ _Port ext4 first. Don't write a custom filesystem._
     `cancel()`, `list()`, `replay_on_mount()` hook in `Vfs::mount_with_options`.
     Security: re-checks ACLs against stored UID/GID/groups at execution time;
     drops entries on inode mismatch or permission revocation. 9 self-tests.
+    - [x] **The way in, done on lane-a-wip 2026-10-02, awaiting a boot**
+      (design-decisions §1529): `SYS_FS_DEFER`/`_LIST`/`_CANCEL` (1126-1128),
+      refused at once when the user could not do it anyway; a read-only or
+      full volume's entries kept on the system volume under its UUID and
+      replayed on mount and on remount read-write; only entries the kernel
+      sealed are honoured, and an entry acts only on its own volume (it
+      used to replay forged entries as root:
+      `A-DEFERRED-OPS-REPLAYED-FORGED-ENTRIES-AS-ROOT`). Lane D's libc entry
+      points are next, then `[B]` below.
   - `[B]` `rm`/`mv` offering the deferral when a failure is deferrable —
     interactively only, with an explicit flag for scripts, and never silently:
     a batch job must not queue a deletion that happens an hour after it exits.
@@ -4803,6 +4812,8 @@ _Port ext4 first. Don't write a custom filesystem._
     `fs::deferred_ops`, and reading it found that three of the four reasons
     (read-only, full, absent volume) cannot be queued where the queue lives.
     Both are in `requests/b-ade-deferred-ops-needs-a-syscall-and-a-queue-that-can-live-off-the-volume.md`.
+    **Kernel half of the way in done 2026-10-02 (lane A, §1529)**; waits on
+    lane D's libc entry points.
   - `[E]` the file manager asking in the same dialog that reports the failure,
     plus a visible, cancellable queue view and a report when a deferred
     operation finally runs or is dropped.

@@ -2228,6 +2228,582 @@ pub fn build_linux_slate_channel_test_elf() -> alloc::vec::Vec<u8> {
     buf
 }
 
+/// Build a **Linux-ABI** `ET_EXEC` that drives Unix-domain sockets by name
+/// (`ipc::unix_socket`) from ring 3, through the ordinary Linux calls:
+///
+/// ```text
+///   ; datagrams by abstract name "@slt-dg"
+///   a = socket(AF_UNIX, SOCK_DGRAM, 0)        ; >= 0, else exit 0xD1
+///   bind(a, "@slt-dg", 9)                     ; 0, else 0xD2
+///   b = socket(AF_UNIX, SOCK_DGRAM, 0)        ; else 0xD3
+///   sendto(b, "ping", 4, 0, "@slt-dg", 9)     ; 4, else 0xD4
+///   recvfrom(a, buf, 64, 0, NULL, NULL)       ; 4, else 0xD5; "ping", else 0xD6
+///   ; a stream by abstract name "@slt-st"
+///   l = socket(AF_UNIX, SOCK_STREAM, 0)       ; else 0xD7
+///   bind(l, "@slt-st", 9)                     ; else 0xD8
+///   listen(l, 4)                              ; else 0xD9
+///   c = socket(AF_UNIX, SOCK_STREAM, 0)       ; else 0xDA
+///   connect(c, "@slt-st", 9)                  ; 0, else 0xDB
+///   s = accept(l, NULL, NULL)                 ; >= 0, else 0xDC
+///   write(c, "ping", 4)                       ; 4, else 0xDD
+///   read(s, buf, 64)                          ; 4, else 0xDE
+///   getsockopt(s, SOL_SOCKET, SO_PEERCRED, &ucred, &12)  ; 0, else 0xDF
+///   ucred.pid == getpid()                     ; else 0xE0: the kernel's record
+///   close(c); read(s, buf, 64)                ; 0 (end of file), else 0xE1
+///   ; datagrams by path "/tmp/slt.sock"
+///   d1 = socket(..DGRAM..); bind(d1, path, 16)  ; 0, else 0xE2
+///   d2 = socket(..DGRAM..); bind(d2, path, 16)  ; -EADDRINUSE, else 0xE3
+///   sendto(d2, "ping", 4, 0, path, 16)        ; 4, else 0xE4
+///   recvfrom(d1, buf, 64, 0, &from, &110)     ; 4, else 0xE5
+///   fromlen == 0 (an unbound sender: none)    ; else 0xE6
+///   ; the sender's credentials, as syslog asks for them
+///   setsockopt(d1, SOL_SOCKET, SO_PASSCRED, &1, 4)  ; 0, else 0xE9
+///   sendto(d2, "ping", 4, 0, path, 16)        ; 4, else 0xEA
+///   recvmsg(d1, {iov: buf/64, control: 32 bytes}, 0)  ; 4, "ping", else 0xEB
+///   control = one whole message (cmsg_len 28) at SOL_SOCKET /
+///     SCM_CREDENTIALS, msg_controllen 32, msg_flags 0  ; else 0xEC
+///   its pid == getpid()                       ; else 0xED
+///   ; credentials the sender states, as logger --id does
+///   sendmsg(d2, {path, "ping", SCM_CREDENTIALS{getpid(), 4242, 4343}})
+///                                             ; 4 (root may claim any id), else 0xEE
+///   recvmsg(d1, ...)                          ; 4, and the stated pid, uid
+///                                             ; and gid, else 0xEF
+///   the same with a pid naming no process     ; -ESRCH, else 0xF0
+///   the same with cmsg_len 24                 ; -EINVAL, else 0xF1
+///   unlink("/tmp/slt.sock")                   ; 0, else 0xE7
+///   sendto(d2, "ping", 4, 0, path, 16)        ; -ENOENT, else 0xE8
+///   exit(0x5D)
+/// ```
+///
+/// A clean `exit(0x5D)` proves: abstract names; a node made by `bind` that a
+/// second `bind` finds in use and `unlink` takes away, after which the name
+/// leads nowhere; datagrams kept whole, with an unnamed sender reported as
+/// such; a listener's backlog, connect and accept; bytes both ways over the
+/// accepted stream; the kernel's record of the peer, both as `SO_PEERCRED`
+/// and as an `SCM_CREDENTIALS` control message; end of file when the client
+/// closes. Tagged `ELFOSABI_GNU` for the SysV stack + Linux ABI.
+#[must_use]
+#[allow(
+    clippy::indexing_slicing,
+    clippy::arithmetic_side_effects,
+    clippy::cast_possible_truncation,
+    clippy::cast_possible_wrap,
+    clippy::too_many_lines
+)]
+pub fn build_linux_unix_socket_test_elf() -> alloc::vec::Vec<u8> {
+    use alloc::vec;
+    /// `jnz rel32`'s second opcode byte.
+    const JNZ: u8 = 0x85;
+    /// `js rel32`'s second opcode byte.
+    const JS: u8 = 0x88;
+    // Linux x86-64 syscall numbers.
+    const READ: u32 = 0;
+    const WRITE: u32 = 1;
+    const CLOSE: u32 = 3;
+    const GETPID: u32 = 39;
+    const SOCKET: u32 = 41;
+    const CONNECT: u32 = 42;
+    const ACCEPT: u32 = 43;
+    const SENDTO: u32 = 44;
+    const RECVFROM: u32 = 45;
+    const BIND: u32 = 49;
+    const LISTEN: u32 = 50;
+    const GETSOCKOPT: u32 = 55;
+    const SETSOCKOPT: u32 = 54;
+    const SENDMSG: u32 = 46;
+    const RECVMSG: u32 = 47;
+    const EXIT: u32 = 60;
+    const UNLINK: u32 = 87;
+    // Stack layout (all [rsp + offset]).
+    const FD_A: u32 = 0x00;
+    const FD_B: u32 = 0x04;
+    const FD_L: u32 = 0x08;
+    const FD_C: u32 = 0x0C;
+    const FD_S: u32 = 0x10;
+    const FD_D1: u32 = 0x14;
+    const FD_D2: u32 = 0x18;
+    const DG_ADDR: u32 = 0x20; // "@slt-dg", 9 bytes
+    const ST_ADDR: u32 = 0x40; // "@slt-st", 9 bytes
+    const PING: u32 = 0x60;
+    const BUF: u32 = 0x80; // 64 bytes
+    const LEN: u32 = 0xC0; // a socklen_t in/out
+    const FROM: u32 = 0xD0; // 110 bytes
+    const UCRED: u32 = 0x150; // 12 bytes
+    const PATH_ADDR: u32 = 0x170; // "/tmp/slt.sock", 16 bytes
+    const IOV: u32 = 0x1D0; // struct iovec: base, len
+    const SEND_IOV: u32 = 0x1E0; // the iovec sendmsg sends from
+    const CONTROL: u32 = 0x200; // 32 bytes of control messages
+    const MSGHDR: u32 = 0x240; // struct msghdr, 56 bytes
+    const ONE: u32 = 0x280; // the int 1
+    const SEND_MSGHDR: u32 = 0x2C0; // the msghdr sendmsg sends, 56 bytes
+    const SEND_CONTROL: u32 = 0x300; // its control messages, 32 bytes
+    const FRAME: u32 = 0x340;
+    /// "ping", little-endian.
+    const PING_WORD: u32 = 0x676E_6970;
+
+    let phdr_offset: u64 = 64;
+    let code_offset: u64 = 120;
+    let load_vaddr: u64 = 0x0000_0040_0000_0000;
+
+    let mut code: alloc::vec::Vec<u8> = alloc::vec::Vec::new();
+    let mut fail_jumps: alloc::vec::Vec<(usize, u8)> = alloc::vec::Vec::new();
+    let le = |v: u32| v.to_le_bytes();
+
+    // Instruction emitters, every stack operand as [rsp + disp32].
+    let mov_edi_mem = |c: &mut alloc::vec::Vec<u8>, d: u32| {
+        c.extend_from_slice(&[0x8B, 0xBC, 0x24]);
+        c.extend_from_slice(&le(d));
+    };
+    let lea_rdi = |c: &mut alloc::vec::Vec<u8>, d: u32| {
+        c.extend_from_slice(&[0x48, 0x8D, 0xBC, 0x24]);
+        c.extend_from_slice(&le(d));
+    };
+    let lea_rsi = |c: &mut alloc::vec::Vec<u8>, d: u32| {
+        c.extend_from_slice(&[0x48, 0x8D, 0xB4, 0x24]);
+        c.extend_from_slice(&le(d));
+    };
+    let lea_r8 = |c: &mut alloc::vec::Vec<u8>, d: u32| {
+        c.extend_from_slice(&[0x4C, 0x8D, 0x84, 0x24]);
+        c.extend_from_slice(&le(d));
+    };
+    let lea_r9 = |c: &mut alloc::vec::Vec<u8>, d: u32| {
+        c.extend_from_slice(&[0x4C, 0x8D, 0x8C, 0x24]);
+        c.extend_from_slice(&le(d));
+    };
+    let lea_r10 = |c: &mut alloc::vec::Vec<u8>, d: u32| {
+        c.extend_from_slice(&[0x4C, 0x8D, 0x94, 0x24]);
+        c.extend_from_slice(&le(d));
+    };
+    let mov_edi_imm = |c: &mut alloc::vec::Vec<u8>, v: u32| {
+        c.push(0xBF);
+        c.extend_from_slice(&le(v));
+    };
+    let mov_esi_imm = |c: &mut alloc::vec::Vec<u8>, v: u32| {
+        c.push(0xBE);
+        c.extend_from_slice(&le(v));
+    };
+    let mov_edx_imm = |c: &mut alloc::vec::Vec<u8>, v: u32| {
+        c.push(0xBA);
+        c.extend_from_slice(&le(v));
+    };
+    let mov_r9d_imm = |c: &mut alloc::vec::Vec<u8>, v: u32| {
+        c.extend_from_slice(&[0x41, 0xB9]);
+        c.extend_from_slice(&le(v));
+    };
+    let xor_r10d = |c: &mut alloc::vec::Vec<u8>| c.extend_from_slice(&[0x45, 0x31, 0xD2]);
+    let xor_r8d = |c: &mut alloc::vec::Vec<u8>| c.extend_from_slice(&[0x45, 0x31, 0xC0]);
+    let xor_r9d = |c: &mut alloc::vec::Vec<u8>| c.extend_from_slice(&[0x45, 0x31, 0xC9]);
+    let syscall = |c: &mut alloc::vec::Vec<u8>, nr: u32| {
+        c.push(0xB8);
+        c.extend_from_slice(&le(nr));
+        c.extend_from_slice(&[0x0F, 0x05]);
+    };
+    let store_eax = |c: &mut alloc::vec::Vec<u8>, d: u32| {
+        c.extend_from_slice(&[0x89, 0x84, 0x24]);
+        c.extend_from_slice(&le(d));
+    };
+    let store_imm = |c: &mut alloc::vec::Vec<u8>, d: u32, v: u32| {
+        c.extend_from_slice(&[0xC7, 0x84, 0x24]);
+        c.extend_from_slice(&le(d));
+        c.extend_from_slice(&le(v));
+    };
+    let cmp_eax_mem = |c: &mut alloc::vec::Vec<u8>, d: u32| {
+        c.extend_from_slice(&[0x3B, 0x84, 0x24]);
+        c.extend_from_slice(&le(d));
+    };
+    let cmp_mem_imm = |c: &mut alloc::vec::Vec<u8>, d: u32, v: u32| {
+        c.extend_from_slice(&[0x81, 0xBC, 0x24]);
+        c.extend_from_slice(&le(d));
+        c.extend_from_slice(&le(v));
+    };
+    // cmp rax, imm8 (sign-extended)
+    let cmp_rax_i8 = |c: &mut alloc::vec::Vec<u8>, v: i8| {
+        c.extend_from_slice(&[0x48, 0x83, 0xF8, v as u8]);
+    };
+    let test_rax = |c: &mut alloc::vec::Vec<u8>| c.extend_from_slice(&[0x48, 0x85, 0xC0]);
+    let jcc_fail = |c: &mut alloc::vec::Vec<u8>,
+                    fails: &mut alloc::vec::Vec<(usize, u8)>,
+                    op: u8,
+                    sentinel: u8| {
+        c.extend_from_slice(&[0x0F, op, 0, 0, 0, 0]);
+        fails.push((c.len() - 4, sentinel));
+    };
+    // socket(AF_UNIX, kind, 0) into [rsp + slot], or exit `sentinel`.
+    let unix_socket = |c: &mut alloc::vec::Vec<u8>,
+                       fails: &mut alloc::vec::Vec<(usize, u8)>,
+                       kind: u32,
+                       slot: u32,
+                       sentinel: u8| {
+        mov_edi_imm(c, 1);
+        mov_esi_imm(c, kind);
+        mov_edx_imm(c, 0);
+        syscall(c, SOCKET);
+        test_rax(c);
+        jcc_fail(c, fails, JS, sentinel);
+        store_eax(c, slot);
+    };
+
+    // sub rsp, FRAME
+    code.extend_from_slice(&[0x48, 0x81, 0xEC]);
+    code.extend_from_slice(&le(FRAME));
+    // The addresses: family 1, a NUL, then the name ("slt-dg" / "slt-st").
+    store_imm(&mut code, DG_ADDR, 0x7300_0001);
+    store_imm(&mut code, DG_ADDR + 4, 0x642D_746C);
+    store_imm(&mut code, DG_ADDR + 8, 0x0000_0067);
+    store_imm(&mut code, ST_ADDR, 0x7300_0001);
+    store_imm(&mut code, ST_ADDR + 4, 0x732D_746C);
+    store_imm(&mut code, ST_ADDR + 8, 0x0000_0074);
+    // "/tmp/slt.sock": family 1, the path, its NUL.
+    store_imm(&mut code, PATH_ADDR, 0x742F_0001);
+    store_imm(&mut code, PATH_ADDR + 4, 0x732F_706D);
+    store_imm(&mut code, PATH_ADDR + 8, 0x732E_746C);
+    store_imm(&mut code, PATH_ADDR + 12, 0x006B_636F);
+    store_imm(&mut code, PING, PING_WORD);
+
+    // --- datagrams by abstract name ---
+    unix_socket(&mut code, &mut fail_jumps, 2, FD_A, 0xD1);
+    mov_edi_mem(&mut code, FD_A);
+    lea_rsi(&mut code, DG_ADDR);
+    mov_edx_imm(&mut code, 9);
+    syscall(&mut code, BIND);
+    test_rax(&mut code);
+    jcc_fail(&mut code, &mut fail_jumps, JNZ, 0xD2);
+    unix_socket(&mut code, &mut fail_jumps, 2, FD_B, 0xD3);
+    mov_edi_mem(&mut code, FD_B);
+    lea_rsi(&mut code, PING);
+    mov_edx_imm(&mut code, 4);
+    xor_r10d(&mut code);
+    lea_r8(&mut code, DG_ADDR);
+    mov_r9d_imm(&mut code, 9);
+    syscall(&mut code, SENDTO);
+    cmp_rax_i8(&mut code, 4);
+    jcc_fail(&mut code, &mut fail_jumps, JNZ, 0xD4);
+    mov_edi_mem(&mut code, FD_A);
+    lea_rsi(&mut code, BUF);
+    mov_edx_imm(&mut code, 64);
+    xor_r10d(&mut code);
+    xor_r8d(&mut code);
+    xor_r9d(&mut code);
+    syscall(&mut code, RECVFROM);
+    cmp_rax_i8(&mut code, 4);
+    jcc_fail(&mut code, &mut fail_jumps, JNZ, 0xD5);
+    cmp_mem_imm(&mut code, BUF, PING_WORD);
+    jcc_fail(&mut code, &mut fail_jumps, JNZ, 0xD6);
+
+    // --- a stream by abstract name ---
+    unix_socket(&mut code, &mut fail_jumps, 1, FD_L, 0xD7);
+    mov_edi_mem(&mut code, FD_L);
+    lea_rsi(&mut code, ST_ADDR);
+    mov_edx_imm(&mut code, 9);
+    syscall(&mut code, BIND);
+    test_rax(&mut code);
+    jcc_fail(&mut code, &mut fail_jumps, JNZ, 0xD8);
+    mov_edi_mem(&mut code, FD_L);
+    mov_esi_imm(&mut code, 4);
+    syscall(&mut code, LISTEN);
+    test_rax(&mut code);
+    jcc_fail(&mut code, &mut fail_jumps, JNZ, 0xD9);
+    unix_socket(&mut code, &mut fail_jumps, 1, FD_C, 0xDA);
+    mov_edi_mem(&mut code, FD_C);
+    lea_rsi(&mut code, ST_ADDR);
+    mov_edx_imm(&mut code, 9);
+    syscall(&mut code, CONNECT);
+    test_rax(&mut code);
+    jcc_fail(&mut code, &mut fail_jumps, JNZ, 0xDB);
+    mov_edi_mem(&mut code, FD_L);
+    mov_esi_imm(&mut code, 0);
+    mov_edx_imm(&mut code, 0);
+    syscall(&mut code, ACCEPT);
+    test_rax(&mut code);
+    jcc_fail(&mut code, &mut fail_jumps, JS, 0xDC);
+    store_eax(&mut code, FD_S);
+    mov_edi_mem(&mut code, FD_C);
+    lea_rsi(&mut code, PING);
+    mov_edx_imm(&mut code, 4);
+    syscall(&mut code, WRITE);
+    cmp_rax_i8(&mut code, 4);
+    jcc_fail(&mut code, &mut fail_jumps, JNZ, 0xDD);
+    mov_edi_mem(&mut code, FD_S);
+    lea_rsi(&mut code, BUF);
+    mov_edx_imm(&mut code, 64);
+    syscall(&mut code, READ);
+    cmp_rax_i8(&mut code, 4);
+    jcc_fail(&mut code, &mut fail_jumps, JNZ, 0xDE);
+    // getsockopt(s, SOL_SOCKET, SO_PEERCRED, &ucred, &len) with len = 12
+    store_imm(&mut code, LEN, 12);
+    mov_edi_mem(&mut code, FD_S);
+    mov_esi_imm(&mut code, 1);
+    mov_edx_imm(&mut code, 17);
+    lea_r10(&mut code, UCRED);
+    lea_r8(&mut code, LEN);
+    syscall(&mut code, GETSOCKOPT);
+    test_rax(&mut code);
+    jcc_fail(&mut code, &mut fail_jumps, JNZ, 0xDF);
+    syscall(&mut code, GETPID);
+    cmp_eax_mem(&mut code, UCRED);
+    jcc_fail(&mut code, &mut fail_jumps, JNZ, 0xE0);
+    // close(c), then end of file on s
+    mov_edi_mem(&mut code, FD_C);
+    syscall(&mut code, CLOSE);
+    mov_edi_mem(&mut code, FD_S);
+    lea_rsi(&mut code, BUF);
+    mov_edx_imm(&mut code, 64);
+    syscall(&mut code, READ);
+    test_rax(&mut code);
+    jcc_fail(&mut code, &mut fail_jumps, JNZ, 0xE1);
+
+    // --- datagrams by path ---
+    unix_socket(&mut code, &mut fail_jumps, 2, FD_D1, 0xE2);
+    mov_edi_mem(&mut code, FD_D1);
+    lea_rsi(&mut code, PATH_ADDR);
+    mov_edx_imm(&mut code, 16);
+    syscall(&mut code, BIND);
+    test_rax(&mut code);
+    jcc_fail(&mut code, &mut fail_jumps, JNZ, 0xE2);
+    unix_socket(&mut code, &mut fail_jumps, 2, FD_D2, 0xE3);
+    mov_edi_mem(&mut code, FD_D2);
+    lea_rsi(&mut code, PATH_ADDR);
+    mov_edx_imm(&mut code, 16);
+    syscall(&mut code, BIND);
+    cmp_rax_i8(&mut code, -98); // EADDRINUSE
+    jcc_fail(&mut code, &mut fail_jumps, JNZ, 0xE3);
+    mov_edi_mem(&mut code, FD_D2);
+    lea_rsi(&mut code, PING);
+    mov_edx_imm(&mut code, 4);
+    xor_r10d(&mut code);
+    lea_r8(&mut code, PATH_ADDR);
+    mov_r9d_imm(&mut code, 16);
+    syscall(&mut code, SENDTO);
+    cmp_rax_i8(&mut code, 4);
+    jcc_fail(&mut code, &mut fail_jumps, JNZ, 0xE4);
+    store_imm(&mut code, LEN, 110);
+    mov_edi_mem(&mut code, FD_D1);
+    lea_rsi(&mut code, BUF);
+    mov_edx_imm(&mut code, 64);
+    xor_r10d(&mut code);
+    lea_r8(&mut code, FROM);
+    lea_r9(&mut code, LEN);
+    syscall(&mut code, RECVFROM);
+    cmp_rax_i8(&mut code, 4);
+    jcc_fail(&mut code, &mut fail_jumps, JNZ, 0xE5);
+    cmp_mem_imm(&mut code, LEN, 0);
+    jcc_fail(&mut code, &mut fail_jumps, JNZ, 0xE6);
+
+    // --- the sender's credentials, as syslog asks for them ---
+    // lea rax, [rsp + d32]
+    let lea_rax = |c: &mut alloc::vec::Vec<u8>, d: u32| {
+        c.extend_from_slice(&[0x48, 0x8D, 0x84, 0x24]);
+        c.extend_from_slice(&le(d));
+    };
+    // mov [rsp + d32], rax
+    let store_rax = |c: &mut alloc::vec::Vec<u8>, d: u32| {
+        c.extend_from_slice(&[0x48, 0x89, 0x84, 0x24]);
+        c.extend_from_slice(&le(d));
+    };
+    // mov qword [rsp + d32], imm32 (sign-extended)
+    let store_qword = |c: &mut alloc::vec::Vec<u8>, d: u32, v: u32| {
+        c.extend_from_slice(&[0x48, 0xC7, 0x84, 0x24]);
+        c.extend_from_slice(&le(d));
+        c.extend_from_slice(&le(v));
+    };
+    let mov_r8d_imm = |c: &mut alloc::vec::Vec<u8>, v: u32| {
+        c.extend_from_slice(&[0x41, 0xB8]);
+        c.extend_from_slice(&le(v));
+    };
+    // setsockopt(d1, SOL_SOCKET, SO_PASSCRED, &1, 4)
+    store_imm(&mut code, ONE, 1);
+    mov_edi_mem(&mut code, FD_D1);
+    mov_esi_imm(&mut code, 1);
+    mov_edx_imm(&mut code, 16);
+    lea_r10(&mut code, ONE);
+    mov_r8d_imm(&mut code, 4);
+    syscall(&mut code, SETSOCKOPT);
+    test_rax(&mut code);
+    jcc_fail(&mut code, &mut fail_jumps, JNZ, 0xE9);
+    mov_edi_mem(&mut code, FD_D2);
+    lea_rsi(&mut code, PING);
+    mov_edx_imm(&mut code, 4);
+    xor_r10d(&mut code);
+    lea_r8(&mut code, PATH_ADDR);
+    mov_r9d_imm(&mut code, 16);
+    syscall(&mut code, SENDTO);
+    cmp_rax_i8(&mut code, 4);
+    jcc_fail(&mut code, &mut fail_jumps, JNZ, 0xEA);
+    // recvmsg(d1, MSGHDR, 0) into rax. The iovec is the 64-byte buffer,
+    // emptied so the datagram has to land in it; the msghdr has no name, one
+    // iovec, and 32 bytes of control, emptied so nothing left over can pass
+    // for the kernel's answer.
+    let recvmsg_d1 = |c: &mut alloc::vec::Vec<u8>| {
+        store_imm(c, BUF, 0);
+        lea_rax(c, BUF);
+        store_rax(c, IOV);
+        store_qword(c, IOV + 8, 64);
+        for off in [0u32, 8, 16, 24] {
+            store_qword(c, CONTROL + off, 0);
+        }
+        store_qword(c, MSGHDR, 0); // msg_name
+        store_qword(c, MSGHDR + 8, 0); // msg_namelen
+        lea_rax(c, IOV);
+        store_rax(c, MSGHDR + 16); // msg_iov
+        store_qword(c, MSGHDR + 24, 1); // msg_iovlen
+        lea_rax(c, CONTROL);
+        store_rax(c, MSGHDR + 32); // msg_control
+        store_qword(c, MSGHDR + 40, 32); // msg_controllen
+        store_qword(c, MSGHDR + 48, 0); // msg_flags
+        mov_edi_mem(c, FD_D1);
+        lea_rsi(c, MSGHDR);
+        mov_edx_imm(c, 0);
+        syscall(c, RECVMSG);
+    };
+    recvmsg_d1(&mut code);
+    cmp_rax_i8(&mut code, 4);
+    jcc_fail(&mut code, &mut fail_jumps, JNZ, 0xEB);
+    cmp_mem_imm(&mut code, BUF, PING_WORD);
+    jcc_fail(&mut code, &mut fail_jumps, JNZ, 0xEB);
+    // One whole SCM_CREDENTIALS message: cmsg_len 28, SOL_SOCKET,
+    // SCM_CREDENTIALS, and msg_controllen 32 (its space) on the way back.
+    cmp_mem_imm(&mut code, CONTROL, 28);
+    jcc_fail(&mut code, &mut fail_jumps, JNZ, 0xEC);
+    cmp_mem_imm(&mut code, CONTROL + 8, 1);
+    jcc_fail(&mut code, &mut fail_jumps, JNZ, 0xEC);
+    cmp_mem_imm(&mut code, CONTROL + 12, 2);
+    jcc_fail(&mut code, &mut fail_jumps, JNZ, 0xEC);
+    cmp_mem_imm(&mut code, MSGHDR + 40, 32);
+    jcc_fail(&mut code, &mut fail_jumps, JNZ, 0xEC);
+    cmp_mem_imm(&mut code, MSGHDR + 48, 0);
+    jcc_fail(&mut code, &mut fail_jumps, JNZ, 0xEC);
+    syscall(&mut code, GETPID);
+    cmp_eax_mem(&mut code, CONTROL + 16);
+    jcc_fail(&mut code, &mut fail_jumps, JNZ, 0xED);
+
+    // --- credentials the sender states (SCM_CREDENTIALS on sendmsg) ---
+    // The msghdr: to the path, one iovec of "ping", 32 bytes of control
+    // holding one SCM_CREDENTIALS message -- this pid, and the uid and gid
+    // 4242 and 4343, which only root may claim (the test runs as root).
+    lea_rax(&mut code, PATH_ADDR);
+    store_rax(&mut code, SEND_MSGHDR); // msg_name
+    store_qword(&mut code, SEND_MSGHDR + 8, 16); // msg_namelen
+    lea_rax(&mut code, PING);
+    store_rax(&mut code, SEND_IOV);
+    store_qword(&mut code, SEND_IOV + 8, 4);
+    lea_rax(&mut code, SEND_IOV);
+    store_rax(&mut code, SEND_MSGHDR + 16); // msg_iov
+    store_qword(&mut code, SEND_MSGHDR + 24, 1); // msg_iovlen
+    lea_rax(&mut code, SEND_CONTROL);
+    store_rax(&mut code, SEND_MSGHDR + 32); // msg_control
+    store_qword(&mut code, SEND_MSGHDR + 40, 32); // msg_controllen
+    store_qword(&mut code, SEND_MSGHDR + 48, 0); // msg_flags
+    store_qword(&mut code, SEND_CONTROL, 28); // cmsg_len
+    store_imm(&mut code, SEND_CONTROL + 8, 1); // SOL_SOCKET
+    store_imm(&mut code, SEND_CONTROL + 12, 2); // SCM_CREDENTIALS
+    syscall(&mut code, GETPID);
+    store_eax(&mut code, SEND_CONTROL + 16);
+    store_imm(&mut code, SEND_CONTROL + 20, 4242);
+    store_imm(&mut code, SEND_CONTROL + 24, 4343);
+    store_imm(&mut code, SEND_CONTROL + 28, 0);
+    // sendmsg(d2, SEND_MSGHDR, 0) into rax.
+    let sendmsg_d2 = |c: &mut alloc::vec::Vec<u8>| {
+        mov_edi_mem(c, FD_D2);
+        lea_rsi(c, SEND_MSGHDR);
+        mov_edx_imm(c, 0);
+        syscall(c, SENDMSG);
+    };
+    sendmsg_d2(&mut code);
+    cmp_rax_i8(&mut code, 4);
+    jcc_fail(&mut code, &mut fail_jumps, JNZ, 0xEE);
+    recvmsg_d1(&mut code);
+    cmp_rax_i8(&mut code, 4);
+    jcc_fail(&mut code, &mut fail_jumps, JNZ, 0xEF);
+    syscall(&mut code, GETPID);
+    cmp_eax_mem(&mut code, CONTROL + 16);
+    jcc_fail(&mut code, &mut fail_jumps, JNZ, 0xEF);
+    cmp_mem_imm(&mut code, CONTROL + 20, 4242);
+    jcc_fail(&mut code, &mut fail_jumps, JNZ, 0xEF);
+    cmp_mem_imm(&mut code, CONTROL + 24, 4343);
+    jcc_fail(&mut code, &mut fail_jumps, JNZ, 0xEF);
+    // A pid that names no process: ESRCH, and nothing sent.
+    store_imm(&mut code, SEND_CONTROL + 16, 0x7FFF_FFF0);
+    sendmsg_d2(&mut code);
+    cmp_rax_i8(&mut code, -3); // ESRCH
+    jcc_fail(&mut code, &mut fail_jumps, JNZ, 0xF0);
+    // A credentials message of the wrong length: EINVAL, and nothing sent.
+    store_qword(&mut code, SEND_CONTROL, 24);
+    sendmsg_d2(&mut code);
+    cmp_rax_i8(&mut code, -22); // EINVAL
+    jcc_fail(&mut code, &mut fail_jumps, JNZ, 0xF1);
+
+    // unlink(path): the sun_path inside the address, NUL-terminated
+    lea_rdi(&mut code, PATH_ADDR + 2);
+    syscall(&mut code, UNLINK);
+    test_rax(&mut code);
+    jcc_fail(&mut code, &mut fail_jumps, JNZ, 0xE7);
+    mov_edi_mem(&mut code, FD_D2);
+    lea_rsi(&mut code, PING);
+    mov_edx_imm(&mut code, 4);
+    xor_r10d(&mut code);
+    lea_r8(&mut code, PATH_ADDR);
+    mov_r9d_imm(&mut code, 16);
+    syscall(&mut code, SENDTO);
+    cmp_rax_i8(&mut code, -2); // ENOENT
+    jcc_fail(&mut code, &mut fail_jumps, JNZ, 0xE8);
+
+    // exit(0x5D)
+    mov_edi_imm(&mut code, 0x5D);
+    syscall(&mut code, EXIT);
+
+    // One failure exit per sentinel.
+    let mut fail_at: alloc::vec::Vec<(u8, usize)> = alloc::vec::Vec::new();
+    for sentinel in 0xD1u8..=0xF1 {
+        fail_at.push((sentinel, code.len()));
+        mov_edi_imm(&mut code, u32::from(sentinel));
+        syscall(&mut code, EXIT);
+    }
+    code.push(0xCC); // int3
+
+    for (at, sentinel) in fail_jumps {
+        if let Some(&(_, target)) = fail_at.iter().find(|(s, _)| *s == sentinel) {
+            let disp = (target as i64 - (at as i64 + 4)) as i32;
+            code[at..at + 4].copy_from_slice(&disp.to_le_bytes());
+        }
+    }
+
+    let code_len = code.len();
+    let file_size = code_offset as usize + code_len;
+    let mut buf = vec![0u8; file_size];
+    buf[0] = 0x7F;
+    buf[1] = b'E';
+    buf[2] = b'L';
+    buf[3] = b'F';
+    buf[EI_CLASS] = ELFCLASS64;
+    buf[EI_DATA] = ELFDATA2LSB;
+    buf[EI_VERSION] = EV_CURRENT;
+    buf[EI_OSABI] = ELFOSABI_GNU;
+    write_u16(&mut buf, 16, ET_EXEC);
+    write_u16(&mut buf, 18, EM_X86_64);
+    write_u32(&mut buf, 20, u32::from(EV_CURRENT));
+    write_u64(&mut buf, 24, load_vaddr);
+    write_u64(&mut buf, 32, phdr_offset);
+    write_u64(&mut buf, 40, 0);
+    write_u32(&mut buf, 48, 0);
+    write_u16(&mut buf, 52, ELF64_EHDR_SIZE as u16);
+    write_u16(&mut buf, 54, ELF64_PHDR_SIZE as u16);
+    write_u16(&mut buf, 56, 1);
+    write_u16(&mut buf, 58, ELF64_SHDR_SIZE as u16);
+    write_u16(&mut buf, 60, 0);
+    write_u16(&mut buf, 62, 0);
+    let ph = phdr_offset as usize;
+    write_u32(&mut buf, ph, PT_LOAD);
+    write_u32(&mut buf, ph + 4, PF_R | PF_X);
+    write_u64(&mut buf, ph + 8, code_offset);
+    write_u64(&mut buf, ph + 16, load_vaddr);
+    write_u64(&mut buf, ph + 24, 0);
+    write_u64(&mut buf, ph + 32, code_len as u64);
+    write_u64(&mut buf, ph + 40, code_len as u64);
+    write_u64(&mut buf, ph + 48, 0x1000);
+    buf[code_offset as usize..file_size].copy_from_slice(&code);
+    buf
+}
+
 /// Build a **Linux-ABI** `ET_EXEC` launcher ELF that exercises the canonical
 /// **shell-pipeline** primitive end to end: `pipe2` + `fork` + `dup2` +
 /// `execve` + blocking `read`.

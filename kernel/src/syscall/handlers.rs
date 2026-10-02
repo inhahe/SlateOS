@@ -6505,7 +6505,6 @@ pub fn sys_pty_master_try_write(args: &SyscallArgs) -> SyscallResult {
     pty_master_write_common(args, true)
 }
 
-/// Body shared by the blocking and non-blocking master writes.
 /// The most bytes one pty master write takes: the terminal's input queue,
 /// [`crate::tty::INPUT_QUEUE_CAPACITY`] (4 KiB, Linux's `N_TTY_BUF_SIZE`).
 ///
@@ -6524,6 +6523,7 @@ const PTY_WRITE_CALL_MAX: usize = crate::tty::INPUT_QUEUE_CAPACITY;
 /// ring holds.
 const PTY_READ_CALL_MAX: usize = crate::tty::pty::OUTPUT_CAPACITY;
 
+/// Body shared by the blocking and non-blocking master writes.
 fn pty_master_write_common(args: &SyscallArgs, non_blocking: bool) -> SyscallResult {
     let handle = match owned_pty_handle(args.arg0) {
         Ok(h) => h,
@@ -8637,6 +8637,380 @@ pub fn sys_channel_peer_has_key(
     }
     match peer_holds_key(handle) {
         Ok(holds) => SyscallResult::ok(i64::from(holds)),
+        Err(e) => SyscallResult::err(e),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Unix-domain sockets by name (SYS_UNIX_*, 1104-1118)
+//
+// The native door to `ipc::unix_socket`; see the block in `number.rs` for the
+// ABI. Every call on a handle checks the caller holds it.
+// ---------------------------------------------------------------------------
+
+/// The most one stream send or receive moves, as `stream_socket` allows.
+const UNIX_STREAM_CALL_MAX: usize = crate::ipc::stream_socket::MAX_TRANSFER;
+
+/// A socket handle the caller holds, or the refusal.
+fn unix_held(raw: u64) -> Result<crate::ipc::unix_socket::UnixHandle, KernelError> {
+    require_ipc_handle(ResourceType::UnixSocket, raw)?;
+    Ok(crate::ipc::unix_socket::UnixHandle::from_raw(raw))
+}
+
+/// Record `h` as the caller's -- closed at exit, duplicated at fork -- and
+/// return it, or close it again for a caller with no process.
+fn unix_hand_out(h: crate::ipc::unix_socket::UnixHandle) -> super::dispatch::SyscallResult {
+    use super::dispatch::SyscallResult;
+    let Some(pid) = caller_pid() else {
+        crate::ipc::unix_socket::close(h);
+        return SyscallResult::err(KernelError::NoSuchProcess);
+    };
+    pcb::register_ipc_handle(pid, ResourceType::UnixSocket, h.raw());
+    SyscallResult::ok(i64::try_from(h.raw()).unwrap_or(i64::MAX))
+}
+
+/// The socket kind a native `kind` argument names.
+fn unix_kind(kind: u64) -> Result<crate::ipc::unix_socket::Kind, KernelError> {
+    match kind {
+        1 => Ok(crate::ipc::unix_socket::Kind::Stream),
+        2 => Ok(crate::ipc::unix_socket::Kind::Dgram),
+        _ => Err(KernelError::InvalidArgument),
+    }
+}
+
+/// A name argument: an abstract name with `UNIX_NAME_ABSTRACT`, else an
+/// absolute path (both at most 108 bytes, as `sun_path` holds).
+enum UnixNameArg {
+    Path(crate::fs::path::PathBuf),
+    Abstract(alloc::vec::Vec<u8>),
+}
+
+/// Read a name argument.
+fn unix_name_arg(ptr: u64, len: u64, flags: u64) -> Result<UnixNameArg, KernelError> {
+    use super::number::UNIX_NAME_ABSTRACT;
+    let len = usize::try_from(len).map_err(|_| KernelError::InvalidArgument)?;
+    if len == 0 || len > 108 {
+        return Err(KernelError::InvalidArgument);
+    }
+    let bytes = crate::mm::user::read_user_vec(ptr, len, len)?;
+    if flags & UNIX_NAME_ABSTRACT != 0 {
+        return Ok(UnixNameArg::Abstract(bytes));
+    }
+    if bytes.first() != Some(&b'/') {
+        // A relative path is the library's to resolve against its own
+        // working directory; the kernel has no ambient one to use.
+        return Err(KernelError::InvalidArgument);
+    }
+    Ok(UnixNameArg::Path(crate::fs::path::PathBuf::from(bytes)))
+}
+
+/// What a name argument leads to, for connect and send.
+fn unix_target_of(arg: &UnixNameArg) -> Result<crate::ipc::unix_socket::Name, KernelError> {
+    match arg {
+        UnixNameArg::Abstract(name) => Ok(crate::ipc::unix_socket::Name::Abstract(name.clone())),
+        UnixNameArg::Path(path) => crate::ipc::unix_socket::name_at(path),
+    }
+}
+
+/// An address as the [`UNIX_ADDR_LEN`](super::number::UNIX_ADDR_LEN)-byte
+/// record `SYS_UNIX_NAME` and `SYS_UNIX_RECV` write.
+fn unix_addr_record(addr: &crate::ipc::unix_socket::Address) -> [u8; super::number::UNIX_ADDR_LEN] {
+    use crate::ipc::unix_socket::Address;
+    let mut out = [0u8; super::number::UNIX_ADDR_LEN];
+    let (kind, bytes): (u32, &[u8]) = match addr {
+        Address::Unnamed => (0, &[]),
+        Address::Path(p) => (1, p),
+        Address::Abstract(n) => (2, n),
+    };
+    let n = bytes.len().min(108);
+    out[..4].copy_from_slice(&kind.to_le_bytes());
+    out[4..8].copy_from_slice(&u32::try_from(n).unwrap_or(0).to_le_bytes());
+    if let (Some(dst), Some(src)) = (
+        out.get_mut(8..).and_then(|o| o.get_mut(..n)),
+        bytes.get(..n),
+    ) {
+        dst.copy_from_slice(src);
+    }
+    out
+}
+
+/// `SYS_UNIX_SOCKET` (1104).
+pub fn sys_unix_socket(args: &super::dispatch::SyscallArgs) -> super::dispatch::SyscallResult {
+    use super::dispatch::SyscallResult;
+    match unix_kind(args.arg0).and_then(crate::ipc::unix_socket::create) {
+        Ok(h) => unix_hand_out(h),
+        Err(e) => SyscallResult::err(e),
+    }
+}
+
+/// `SYS_UNIX_PAIR` (1105).
+pub fn sys_unix_pair(args: &super::dispatch::SyscallArgs) -> super::dispatch::SyscallResult {
+    use super::dispatch::SyscallResult;
+    let (a, b) = match unix_kind(args.arg0).and_then(crate::ipc::unix_socket::pair) {
+        Ok(p) => p,
+        Err(e) => return SyscallResult::err(e),
+    };
+    let Some(pid) = caller_pid() else {
+        crate::ipc::unix_socket::close(a);
+        crate::ipc::unix_socket::close(b);
+        return SyscallResult::err(KernelError::NoSuchProcess);
+    };
+    pcb::register_ipc_handle(pid, ResourceType::UnixSocket, a.raw());
+    pcb::register_ipc_handle(pid, ResourceType::UnixSocket, b.raw());
+    SyscallResult::ok2(
+        i64::try_from(a.raw()).unwrap_or(i64::MAX),
+        i64::try_from(b.raw()).unwrap_or(i64::MAX),
+    )
+}
+
+/// `SYS_UNIX_BIND` (1106).
+pub fn sys_unix_bind(args: &super::dispatch::SyscallArgs) -> super::dispatch::SyscallResult {
+    use super::dispatch::SyscallResult;
+    let done = (|| {
+        let h = unix_held(args.arg0)?;
+        match unix_name_arg(args.arg1, args.arg2, args.arg4)? {
+            UnixNameArg::Abstract(name) => crate::ipc::unix_socket::bind_abstract(h, &name),
+            UnixNameArg::Path(path) => {
+                let mode = u16::try_from(args.arg3 & 0o7777).unwrap_or(0);
+                let reported = path.as_bytes().to_vec();
+                crate::ipc::unix_socket::bind_path(h, &path, reported, mode)
+            }
+        }
+    })();
+    match done {
+        Ok(()) => SyscallResult::ok(0),
+        Err(e) => SyscallResult::err(e),
+    }
+}
+
+/// `SYS_UNIX_LISTEN` (1107).
+pub fn sys_unix_listen(args: &super::dispatch::SyscallArgs) -> super::dispatch::SyscallResult {
+    use super::dispatch::SyscallResult;
+    let backlog = usize::try_from(args.arg1).unwrap_or(crate::ipc::unix_socket::MAX_BACKLOG);
+    match unix_held(args.arg0).and_then(|h| crate::ipc::unix_socket::listen(h, backlog)) {
+        Ok(()) => SyscallResult::ok(0),
+        Err(e) => SyscallResult::err(e),
+    }
+}
+
+/// `SYS_UNIX_ACCEPT` (1108).
+pub fn sys_unix_accept(args: &super::dispatch::SyscallArgs) -> super::dispatch::SyscallResult {
+    use super::dispatch::SyscallResult;
+    let nonblocking = args.arg1 & super::number::UNIX_NONBLOCK != 0;
+    match unix_held(args.arg0).and_then(|h| crate::ipc::unix_socket::accept(h, nonblocking)) {
+        Ok(accepted) => unix_hand_out(accepted.handle),
+        Err(e) => SyscallResult::err(e),
+    }
+}
+
+/// `SYS_UNIX_CONNECT` (1109).
+pub fn sys_unix_connect(args: &super::dispatch::SyscallArgs) -> super::dispatch::SyscallResult {
+    use super::dispatch::SyscallResult;
+    let done = (|| {
+        let h = unix_held(args.arg0)?;
+        let name = unix_target_of(&unix_name_arg(args.arg1, args.arg2, args.arg3)?)?;
+        let nonblocking = args.arg3 & super::number::UNIX_NONBLOCK != 0;
+        crate::ipc::unix_socket::connect(h, &name, nonblocking)
+    })();
+    match done {
+        Ok(()) => SyscallResult::ok(0),
+        Err(e) => SyscallResult::err(e),
+    }
+}
+
+/// `SYS_UNIX_SEND` (1110).
+pub fn sys_unix_send(args: &super::dispatch::SyscallArgs) -> super::dispatch::SyscallResult {
+    use super::dispatch::SyscallResult;
+    use crate::ipc::unix_socket::{self, Kind, MAX_DGRAM};
+    let sent = (|| {
+        let h = unix_held(args.arg0)?;
+        let len = usize::try_from(args.arg2).unwrap_or(usize::MAX);
+        let call_max = match unix_socket::kind(h) {
+            Some(Kind::Stream) => UNIX_STREAM_CALL_MAX,
+            Some(Kind::Dgram) if len > MAX_DGRAM => return Err(KernelError::MsgSize),
+            Some(Kind::Dgram) => len,
+            None => return Err(KernelError::InvalidHandle),
+        };
+        if args.arg1 == 0 && len > 0 {
+            return Err(KernelError::InvalidArgument);
+        }
+        let data = read_call_buffer(args.arg1, len, call_max)?;
+        let nonblocking = args.arg5 & super::number::UNIX_NONBLOCK != 0;
+        if args.arg3 == 0 {
+            unix_socket::send(h, &data, nonblocking)
+        } else {
+            let name = unix_target_of(&unix_name_arg(args.arg3, args.arg4, args.arg5)?)?;
+            unix_socket::send_to(h, &data, &name, nonblocking)
+        }
+    })();
+    match sent {
+        Ok(n) => SyscallResult::ok(i64::try_from(n).unwrap_or(i64::MAX)),
+        Err(e) => SyscallResult::err(e),
+    }
+}
+
+/// `SYS_UNIX_RECV` (1111).
+pub fn sys_unix_recv(args: &super::dispatch::SyscallArgs) -> super::dispatch::SyscallResult {
+    use super::dispatch::SyscallResult;
+    use super::number::{UNIX_ADDR_LEN, UNIX_NONBLOCK, UNIX_PEEK, UNIX_RECV_INFO_LEN};
+    use crate::ipc::unix_socket::{self, Kind, MAX_DGRAM};
+    let got = (|| {
+        let h = unix_held(args.arg0)?;
+        let call_max = match unix_socket::kind(h) {
+            Some(Kind::Stream) => UNIX_STREAM_CALL_MAX,
+            Some(Kind::Dgram) => MAX_DGRAM,
+            None => return Err(KernelError::InvalidHandle),
+        };
+        let cap = usize::try_from(args.arg2).unwrap_or(usize::MAX);
+        if args.arg1 == 0 && cap > 0 {
+            return Err(KernelError::InvalidArgument);
+        }
+        if args.arg3 != 0 {
+            // Checked before anything is taken, so a bad pointer loses no
+            // datagram.
+            crate::mm::user::validate_user_write(args.arg3, UNIX_RECV_INFO_LEN)?;
+        }
+        let nonblocking = args.arg4 & UNIX_NONBLOCK != 0;
+        let peek = args.arg4 & UNIX_PEEK != 0;
+        let mut info = None;
+        let n = with_call_out_buf(args.arg1, cap, call_max, |buf| {
+            let r = unix_socket::recv(h, buf, nonblocking, peek)?;
+            let len = r.len;
+            info = Some(r);
+            Ok(len)
+        })?;
+        if args.arg3 != 0
+            && let Some(r) = info
+        {
+            let mut rec = [0u8; UNIX_RECV_INFO_LEN];
+            rec[..8].copy_from_slice(&u64::try_from(r.full_len).unwrap_or(u64::MAX).to_le_bytes());
+            if let Some(c) = r.cred {
+                rec[8..16].copy_from_slice(&c.pid.to_le_bytes());
+                rec[16..20].copy_from_slice(&c.uid.to_le_bytes());
+                rec[20..24].copy_from_slice(&c.gid.to_le_bytes());
+                rec[24..28].copy_from_slice(&1u32.to_le_bytes());
+            }
+            rec[28..28 + UNIX_ADDR_LEN].copy_from_slice(&unix_addr_record(&r.from));
+            // SAFETY: `rec` is UNIX_RECV_INFO_LEN initialised bytes; the
+            // destination was validated above and copy_to_user re-checks.
+            unsafe { crate::mm::user::copy_to_user(rec.as_ptr(), args.arg3, UNIX_RECV_INFO_LEN) }?;
+        }
+        Ok(n)
+    })();
+    match got {
+        Ok(n) => SyscallResult::ok(i64::try_from(n).unwrap_or(i64::MAX)),
+        Err(e) => SyscallResult::err(e),
+    }
+}
+
+/// `SYS_UNIX_NAME` (1112).
+pub fn sys_unix_name(args: &super::dispatch::SyscallArgs) -> super::dispatch::SyscallResult {
+    use super::dispatch::SyscallResult;
+    use super::number::UNIX_ADDR_LEN;
+    let done = (|| {
+        let h = unix_held(args.arg0)?;
+        let addr = match args.arg1 {
+            0 => crate::ipc::unix_socket::local_address(h)?,
+            1 => crate::ipc::unix_socket::peer_address(h)?,
+            _ => return Err(KernelError::InvalidArgument),
+        };
+        let rec = unix_addr_record(&addr);
+        // SAFETY: UNIX_ADDR_LEN initialised bytes; copy_to_user validates the
+        // destination.
+        unsafe { crate::mm::user::copy_to_user(rec.as_ptr(), args.arg2, UNIX_ADDR_LEN) }
+    })();
+    match done {
+        Ok(()) => SyscallResult::ok(0),
+        Err(e) => SyscallResult::err(e),
+    }
+}
+
+/// `SYS_UNIX_PEER_CRED` (1113).
+pub fn sys_unix_peer_cred(args: &super::dispatch::SyscallArgs) -> super::dispatch::SyscallResult {
+    use super::dispatch::SyscallResult;
+    let done = (|| {
+        let h = unix_held(args.arg0)?;
+        let cred = crate::ipc::unix_socket::peer_cred(h)?.ok_or(KernelError::NoAddress)?;
+        let mut out = [0u8; 16];
+        out[..8].copy_from_slice(&cred.pid.to_le_bytes());
+        out[8..12].copy_from_slice(&cred.uid.to_le_bytes());
+        out[12..].copy_from_slice(&cred.gid.to_le_bytes());
+        // SAFETY: sixteen initialised bytes; copy_to_user validates the
+        // destination.
+        unsafe { crate::mm::user::copy_to_user(out.as_ptr(), args.arg1, 16) }
+    })();
+    match done {
+        Ok(()) => SyscallResult::ok(0),
+        Err(e) => SyscallResult::err(e),
+    }
+}
+
+/// `SYS_UNIX_SHUTDOWN` (1114).
+pub fn sys_unix_shutdown(args: &super::dispatch::SyscallArgs) -> super::dispatch::SyscallResult {
+    use super::dispatch::SyscallResult;
+    let how = u32::try_from(args.arg1).unwrap_or(u32::MAX);
+    match unix_held(args.arg0).and_then(|h| crate::ipc::unix_socket::shutdown(h, how)) {
+        Ok(()) => SyscallResult::ok(0),
+        Err(e) => SyscallResult::err(e),
+    }
+}
+
+/// `SYS_UNIX_CLOSE` (1115).
+pub fn sys_unix_close(args: &super::dispatch::SyscallArgs) -> super::dispatch::SyscallResult {
+    use super::dispatch::SyscallResult;
+    let h = match unix_held(args.arg0) {
+        Ok(h) => h,
+        Err(e) => return SyscallResult::err(e),
+    };
+    if let Some(pid) = caller_pid() {
+        pcb::deregister_ipc_handle(pid, ResourceType::UnixSocket, h.raw());
+    }
+    crate::ipc::unix_socket::close(h);
+    SyscallResult::ok(0)
+}
+
+/// `SYS_UNIX_POLL` (1116).
+pub fn sys_unix_poll(args: &super::dispatch::SyscallArgs) -> super::dispatch::SyscallResult {
+    use super::dispatch::SyscallResult;
+    match unix_held(args.arg0) {
+        Ok(h) => SyscallResult::ok(i64::from(crate::ipc::unix_socket::poll_status(h))),
+        Err(e) => SyscallResult::err(e),
+    }
+}
+
+/// `SYS_UNIX_SET_OPTION` (1117).
+pub fn sys_unix_set_option(args: &super::dispatch::SyscallArgs) -> super::dispatch::SyscallResult {
+    use super::dispatch::SyscallResult;
+    use super::number::UNIX_OPT_PASSCRED;
+    let done = unix_held(args.arg0).and_then(|h| match args.arg1 {
+        UNIX_OPT_PASSCRED => {
+            // Strictly 0 or 1, unlike Linux's "any nonzero": a value with
+            // more bits keeps them free for a later meaning.
+            let on = match args.arg2 {
+                0 => false,
+                1 => true,
+                _ => return Err(KernelError::InvalidArgument),
+            };
+            crate::ipc::unix_socket::set_passcred(h, on)
+        }
+        _ => Err(KernelError::NotSupported),
+    });
+    match done {
+        Ok(()) => SyscallResult::ok(0),
+        Err(e) => SyscallResult::err(e),
+    }
+}
+
+/// `SYS_UNIX_GET_OPTION` (1118).
+pub fn sys_unix_get_option(args: &super::dispatch::SyscallArgs) -> super::dispatch::SyscallResult {
+    use super::dispatch::SyscallResult;
+    use super::number::UNIX_OPT_PASSCRED;
+    let got = unix_held(args.arg0).and_then(|h| match args.arg1 {
+        UNIX_OPT_PASSCRED => Ok(i64::from(crate::ipc::unix_socket::passcred(h))),
+        _ => Err(KernelError::NotSupported),
+    });
+    match got {
+        Ok(v) => SyscallResult::ok(v),
         Err(e) => SyscallResult::err(e),
     }
 }
@@ -16500,13 +16874,6 @@ pub fn sys_sched_get_profile(args: &SyscallArgs) -> SyscallResult {
     }
 }
 
-/// `SYS_CPU_COUNT` — get the number of online CPUs.
-///
-/// Reads `crate::smp::cpu_count()` which is updated by the SMP
-/// bootstrap as each AP comes online and stays stable thereafter.
-/// Always returns at least 1 (the BSP).
-///
-/// Returns: number of online CPUs.
 /// The CPU the caller is running on and its NUMA node, as `getcpu(2)`
 /// reports them; one answer for both ABIs. The node is 0: there is no NUMA
 /// topology yet (Linux's `cpu_to_node` on a single-node machine), and this
@@ -16530,6 +16897,13 @@ pub fn sys_cpu_current(args: &SyscallArgs) -> SyscallResult {
     SyscallResult::ok(i64::try_from(packed).unwrap_or(i64::MAX))
 }
 
+/// `SYS_CPU_COUNT` — get the number of online CPUs.
+///
+/// Reads `crate::smp::cpu_count()` which is updated by the SMP
+/// bootstrap as each AP comes online and stays stable thereafter.
+/// Always returns at least 1 (the BSP).
+///
+/// Returns: number of online CPUs.
 pub fn sys_cpu_count(args: &SyscallArgs) -> SyscallResult {
     let _ = args;
 

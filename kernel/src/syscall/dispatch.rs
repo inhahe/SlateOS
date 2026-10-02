@@ -109,6 +109,11 @@ use super::number::{
     SYS_UDP_RECV, SYS_UDP_RX_FRONT_BYTES, SYS_UDP_RX_READY, SYS_UDP_SEND, SYS_WAIT_MULTIPLE,
     SYS_YIELD,
 };
+use super::number::{
+    SYS_UNIX_ACCEPT, SYS_UNIX_BIND, SYS_UNIX_CLOSE, SYS_UNIX_CONNECT, SYS_UNIX_GET_OPTION,
+    SYS_UNIX_LISTEN, SYS_UNIX_NAME, SYS_UNIX_PAIR, SYS_UNIX_PEER_CRED, SYS_UNIX_POLL,
+    SYS_UNIX_RECV, SYS_UNIX_SEND, SYS_UNIX_SET_OPTION, SYS_UNIX_SHUTDOWN, SYS_UNIX_SOCKET,
+};
 use crate::drm::syscall as drm_handlers;
 
 // ---------------------------------------------------------------------------
@@ -577,6 +582,24 @@ const fn build_v1_table() -> SyscallTable {
     handlers[SYS_PROCESS_GET_PHDR as usize] = Some(handlers::sys_process_get_phdr);
     handlers[SYS_CHANNEL_PEER_HAS_KEY as usize] = Some(handlers::sys_channel_peer_has_key);
 
+    // Unix-domain sockets by name (1104-1118): the native door to
+    // `ipc::unix_socket`, which the Linux table reaches through AF_UNIX.
+    handlers[SYS_UNIX_SOCKET as usize] = Some(handlers::sys_unix_socket);
+    handlers[SYS_UNIX_PAIR as usize] = Some(handlers::sys_unix_pair);
+    handlers[SYS_UNIX_BIND as usize] = Some(handlers::sys_unix_bind);
+    handlers[SYS_UNIX_LISTEN as usize] = Some(handlers::sys_unix_listen);
+    handlers[SYS_UNIX_ACCEPT as usize] = Some(handlers::sys_unix_accept);
+    handlers[SYS_UNIX_CONNECT as usize] = Some(handlers::sys_unix_connect);
+    handlers[SYS_UNIX_SEND as usize] = Some(handlers::sys_unix_send);
+    handlers[SYS_UNIX_RECV as usize] = Some(handlers::sys_unix_recv);
+    handlers[SYS_UNIX_NAME as usize] = Some(handlers::sys_unix_name);
+    handlers[SYS_UNIX_PEER_CRED as usize] = Some(handlers::sys_unix_peer_cred);
+    handlers[SYS_UNIX_SHUTDOWN as usize] = Some(handlers::sys_unix_shutdown);
+    handlers[SYS_UNIX_CLOSE as usize] = Some(handlers::sys_unix_close);
+    handlers[SYS_UNIX_POLL as usize] = Some(handlers::sys_unix_poll);
+    handlers[SYS_UNIX_SET_OPTION as usize] = Some(handlers::sys_unix_set_option);
+    handlers[SYS_UNIX_GET_OPTION as usize] = Some(handlers::sys_unix_get_option);
+
     // Thread management (510–519).
     handlers[SYS_THREAD_CREATE as usize] = Some(handlers::sys_thread_create);
     handlers[SYS_THREAD_EXIT as usize] = Some(handlers::sys_thread_exit);
@@ -1039,6 +1062,7 @@ pub fn self_test() -> KernelResult<()> {
     test_dispatch_sched_affinity()?;
     test_dispatch_process_get_phdr()?;
     test_dispatch_channel_peer_has_key()?;
+    test_dispatch_unix_sockets()?;
     test_dispatch_priority_doors()?;
     test_dispatch_exec_close()?;
     test_dispatch_tioc_and_watch_records()?;
@@ -2913,6 +2937,221 @@ fn test_dispatch_process_get_phdr() -> KernelResult<()> {
         }
         Err(what) => {
             serial_println!("[syscall]   FAIL: SYS_PROCESS_GET_PHDR: {}", what);
+            Err(KernelError::InternalError)
+        }
+    }
+}
+
+/// The native Unix-domain socket calls (`SYS_UNIX_*`, 1104-1118):
+///
+/// - a socket is handed out to the process that makes it, and another
+///   process may not use it (`InvalidHandle`); an unknown kind is refused;
+/// - datagrams by abstract name: bind, a second bind of the name
+///   (`AddrInUse`), a relative path (`InvalidArgument` -- the library
+///   resolves those), send to the name, receive with the info record (whole
+///   length, an unnamed sender), `WouldBlock` when empty;
+/// - the `UNIX_OPT_PASSCRED` option: off on a new socket, set and read back,
+///   a value other than 0 or 1 refused, an unknown option `NotSupported`;
+/// - a stream: listen, connect, accept (handed out, with its listener's
+///   `UNIX_OPT_PASSCRED`), bytes across, the accepted socket's own name, no
+///   credentials for a kernel-context peer (`NoAddress`), end of file after
+///   the peer shuts its sending half;
+/// - a pair; and close, after which the handle is no longer held.
+///
+/// Sockets are made in the owner's name (so they are handed out) and used
+/// from kernel context, which holds every handle, so the buffers can be
+/// kernel memory. The owner's teardown closes whatever is left.
+#[allow(clippy::too_many_lines)] // one linear script
+fn test_dispatch_unix_sockets() -> KernelResult<()> {
+    use super::number::{UNIX_NAME_ABSTRACT, UNIX_NONBLOCK, UNIX_OPT_PASSCRED, UNIX_RECV_INFO_LEN};
+    use crate::proc::pcb;
+    use crate::proc::thread::self_test_as_process;
+
+    let a = |arg0: u64, arg1: u64, arg2: u64, arg3: u64, arg4: u64, arg5: u64| SyscallArgs {
+        arg0,
+        arg1,
+        arg2,
+        arg3,
+        arg4,
+        arg5,
+    };
+    let code = |e: KernelError| i64::from(e.code());
+    let call = |nr: u64, args: SyscallArgs| dispatch(nr, &args).value;
+    let owner = pcb::create("unix-owner", 0);
+    let other = pcb::create("unix-other", 0);
+    let as_owner = |nr: u64, args: SyscallArgs| self_test_as_process(owner, || dispatch(nr, &args));
+    let ptr = |b: &[u8]| b.as_ptr() as u64;
+    let handle = |v: i64| u64::try_from(v).map_err(|_| "a socket was not handed out");
+
+    let result = (|| -> Result<(), &'static str> {
+        // --- handed out, and held ---
+        let srv = handle(as_owner(SYS_UNIX_SOCKET, a(2, 0, 0, 0, 0, 0)).value)?;
+        let cli = handle(as_owner(SYS_UNIX_SOCKET, a(2, 0, 0, 0, 0, 0)).value)?;
+        if as_owner(SYS_UNIX_SOCKET, a(3, 0, 0, 0, 0, 0)).value
+            != code(KernelError::InvalidArgument)
+        {
+            return Err("an unknown socket kind was not refused");
+        }
+        let foreign = self_test_as_process(other, || {
+            dispatch(SYS_UNIX_POLL, &a(srv, 0, 0, 0, 0, 0)).value
+        });
+        if foreign != code(KernelError::InvalidHandle) {
+            return Err("another process used a socket it does not hold");
+        }
+
+        // --- datagrams by abstract name ---
+        let name = b"slt-native";
+        let abs = UNIX_NAME_ABSTRACT;
+        let nb = UNIX_NONBLOCK;
+        let len = |b: &[u8]| b.len() as u64;
+        if call(SYS_UNIX_BIND, a(srv, ptr(name), len(name), 0, abs, 0)) != 0 {
+            return Err("bind to an abstract name failed");
+        }
+        if call(SYS_UNIX_BIND, a(cli, ptr(name), len(name), 0, abs, 0))
+            != code(KernelError::AddrInUse)
+        {
+            return Err("a second bind of a name in use was not AddrInUse");
+        }
+        if call(SYS_UNIX_BIND, a(cli, ptr(b"rel"), 3, 0o600, 0, 0))
+            != code(KernelError::InvalidArgument)
+        {
+            return Err("a relative path was not refused");
+        }
+        if call(
+            SYS_UNIX_SEND,
+            a(cli, ptr(b"hey"), 3, ptr(name), len(name), abs | nb),
+        ) != 3
+        {
+            return Err("a send to an abstract name failed");
+        }
+        let mut buf = [0u8; 8];
+        let mut info = [0u8; UNIX_RECV_INFO_LEN];
+        let got = call(
+            SYS_UNIX_RECV,
+            a(
+                srv,
+                buf.as_mut_ptr() as u64,
+                8,
+                info.as_mut_ptr() as u64,
+                nb,
+                0,
+            ),
+        );
+        if got != 3 || buf.get(..3) != Some(&b"hey"[..]) {
+            return Err("the datagram did not arrive whole");
+        }
+        if info.get(..8) != Some(&3u64.to_le_bytes()[..]) || info.get(28..32) != Some(&[0u8; 4][..])
+        {
+            return Err("the receive record has the wrong length or sender");
+        }
+        if call(SYS_UNIX_RECV, a(srv, buf.as_mut_ptr() as u64, 8, 0, nb, 0))
+            != code(KernelError::WouldBlock)
+        {
+            return Err("an empty socket did not answer WouldBlock");
+        }
+
+        // --- options ---
+        let passcred = UNIX_OPT_PASSCRED;
+        if call(SYS_UNIX_GET_OPTION, a(srv, passcred, 0, 0, 0, 0)) != 0 {
+            return Err("a new socket asks for credentials");
+        }
+        if call(SYS_UNIX_SET_OPTION, a(srv, passcred, 1, 0, 0, 0)) != 0
+            || call(SYS_UNIX_GET_OPTION, a(srv, passcred, 0, 0, 0, 0)) != 1
+        {
+            return Err("UNIX_OPT_PASSCRED did not set, or did not read back");
+        }
+        if call(SYS_UNIX_SET_OPTION, a(srv, passcred, 2, 0, 0, 0))
+            != code(KernelError::InvalidArgument)
+        {
+            return Err("UNIX_OPT_PASSCRED took a value other than 0 or 1");
+        }
+        if call(SYS_UNIX_SET_OPTION, a(srv, passcred, 0, 0, 0, 0)) != 0
+            || call(SYS_UNIX_GET_OPTION, a(srv, passcred, 0, 0, 0, 0)) != 0
+        {
+            return Err("UNIX_OPT_PASSCRED did not turn off again");
+        }
+        if call(SYS_UNIX_SET_OPTION, a(srv, 0x7FFF, 1, 0, 0, 0)) != code(KernelError::NotSupported)
+            || call(SYS_UNIX_GET_OPTION, a(srv, 0x7FFF, 0, 0, 0, 0))
+                != code(KernelError::NotSupported)
+        {
+            return Err("an unknown option was not NotSupported");
+        }
+
+        // --- a stream ---
+        let st = b"slt-native-st";
+        let lst = handle(as_owner(SYS_UNIX_SOCKET, a(1, 0, 0, 0, 0, 0)).value)?;
+        let con = handle(as_owner(SYS_UNIX_SOCKET, a(1, 0, 0, 0, 0, 0)).value)?;
+        if call(SYS_UNIX_BIND, a(lst, ptr(st), len(st), 0, abs, 0)) != 0
+            || call(SYS_UNIX_LISTEN, a(lst, 2, 0, 0, 0, 0)) != 0
+            || call(SYS_UNIX_SET_OPTION, a(lst, passcred, 1, 0, 0, 0)) != 0
+        {
+            return Err("bind, listen and UNIX_OPT_PASSCRED failed");
+        }
+        if call(SYS_UNIX_CONNECT, a(con, ptr(st), len(st), abs | nb, 0, 0)) != 0 {
+            return Err("connect failed");
+        }
+        let acc = handle(as_owner(SYS_UNIX_ACCEPT, a(lst, nb, 0, 0, 0, 0)).value)?;
+        if call(SYS_UNIX_GET_OPTION, a(acc, passcred, 0, 0, 0, 0)) != 1
+            || call(SYS_UNIX_GET_OPTION, a(con, passcred, 0, 0, 0, 0)) != 0
+        {
+            return Err("the accepted socket did not take its listener's UNIX_OPT_PASSCRED");
+        }
+        if call(SYS_UNIX_SEND, a(con, ptr(b"ok"), 2, 0, 0, nb)) != 2
+            || call(SYS_UNIX_RECV, a(acc, buf.as_mut_ptr() as u64, 8, 0, nb, 0)) != 2
+        {
+            return Err("the stream did not carry the bytes");
+        }
+        let mut rec = [0u8; super::number::UNIX_ADDR_LEN];
+        if call(SYS_UNIX_NAME, a(acc, 0, rec.as_mut_ptr() as u64, 0, 0, 0)) != 0
+            || rec.get(..4) != Some(&2u32.to_le_bytes()[..])
+            || rec.get(8..).and_then(|r| r.get(..st.len())) != Some(&st[..])
+        {
+            return Err("the accepted socket does not report the listener's abstract name");
+        }
+        let mut cred = [0u8; 16];
+        if call(
+            SYS_UNIX_PEER_CRED,
+            a(acc, cred.as_mut_ptr() as u64, 0, 0, 0, 0),
+        ) != code(KernelError::NoAddress)
+        {
+            return Err("a kernel-context peer was reported with credentials");
+        }
+        if call(SYS_UNIX_SHUTDOWN, a(con, 1, 0, 0, 0, 0)) != 0
+            || call(SYS_UNIX_RECV, a(acc, buf.as_mut_ptr() as u64, 8, 0, nb, 0)) != 0
+        {
+            return Err("end of file did not follow the peer's shutdown of its sending half");
+        }
+
+        // --- a pair, and close ---
+        let pair = as_owner(SYS_UNIX_PAIR, a(1, 0, 0, 0, 0, 0));
+        let (p0, p1) = (handle(pair.value)?, handle(pair.value2)?);
+        if call(SYS_UNIX_SEND, a(p0, ptr(b"p"), 1, 0, 0, nb)) != 1
+            || call(SYS_UNIX_RECV, a(p1, buf.as_mut_ptr() as u64, 8, 0, nb, 0)) != 1
+        {
+            return Err("a pair did not carry a byte");
+        }
+        if as_owner(SYS_UNIX_CLOSE, a(srv, 0, 0, 0, 0, 0)).value != 0
+            || as_owner(SYS_UNIX_POLL, a(srv, 0, 0, 0, 0, 0)).value
+                != code(KernelError::InvalidHandle)
+        {
+            return Err("a closed socket is still held");
+        }
+        Ok(())
+    })();
+    pcb::destroy(other);
+    // Closes every socket the owner still holds.
+    pcb::destroy(owner);
+    match result {
+        Ok(()) => {
+            serial_println!(
+                "[syscall]   SYS_UNIX_* (1104-1118): held by their maker, datagrams by abstract \
+                 name, the credentials option, a stream through listen/connect/accept, names, \
+                 a pair, close: OK"
+            );
+            Ok(())
+        }
+        Err(why) => {
+            serial_println!("[syscall]   FAIL: unix sockets: {}", why);
             Err(KernelError::InternalError)
         }
     }

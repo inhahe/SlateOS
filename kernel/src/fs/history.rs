@@ -823,7 +823,6 @@ pub fn list_tracked(prefix: Option<&Path>, max: usize) -> Vec<(PathBuf, usize)> 
 // Self-test
 // ---------------------------------------------------------------------------
 
-/// Self-test for the file version history module.
 /// Test 7's body: a save to the enrolled `test_path` returns with its version
 /// still pending, the worker then records it, and two saves leave the history
 /// ending `[.., v1, v2]`.  The caller cleans up and un-pauses the worker however
@@ -918,6 +917,7 @@ fn history_after_save_test(test_path: &str, v1: &[u8], v2: &[u8]) -> KernelResul
     Ok(())
 }
 
+/// Self-test for the file version history module.
 pub fn self_test() -> KernelResult<()> {
     serial_println!("[history] Running self-test...");
     let mut skips = crate::fs::selftest::Skips::new();

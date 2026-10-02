@@ -1052,12 +1052,18 @@ pub mod errno {
     pub const ENOTSOCK: i32 = 88;
     pub const EDESTADDRREQ: i32 = 89;
     pub const EMSGSIZE: i32 = 90;
+    /// `EPROTOTYPE` -- a socket of the wrong type for the operation: a stream
+    /// connecting to a datagram socket's name, or the reverse.
+    pub const EPROTOTYPE: i32 = 91;
     pub const ENOPROTOOPT: i32 = 92;
     pub const EPROTONOSUPPORT: i32 = 93;
     pub const ESOCKTNOSUPPORT: i32 = 94;
     pub const EOPNOTSUPP: i32 = 95;
     pub const EAFNOSUPPORT: i32 = 97;
     pub const EADDRINUSE: i32 = 98;
+    /// `ENOBUFS` -- no buffer space: a send's control data is longer than
+    /// the kernel will copy in.
+    pub const ENOBUFS: i32 = 105;
     pub const EALREADY: i32 = 114;
     pub const EINPROGRESS: i32 = 115;
     pub const EISCONN: i32 = 106;
@@ -1104,9 +1110,23 @@ mod so {
     pub const SO_LINGER: i32 = 13;
     /// `SO_REUSEPORT` — allow multiple binds to the same port (a `bool`/`int`).
     pub const SO_REUSEPORT: i32 = 15;
+    /// `SO_PASSCRED` — ask for the sender's credentials with each receive
+    /// (an `int`).
+    pub const SO_PASSCRED: i32 = 16;
+    /// `SO_PEERCRED` — the connected peer's `struct ucred` (pid, uid, gid:
+    /// 12 bytes).
+    pub const SO_PEERCRED: i32 = 17;
+    /// `SO_ACCEPTCONN` — whether the socket is listening (an `int`).
+    pub const SO_ACCEPTCONN: i32 = 30;
+    /// `SO_PROTOCOL` — the protocol the socket was made with (an `int`).
+    pub const SO_PROTOCOL: i32 = 38;
+    /// `SO_DOMAIN` — the address family the socket was made with (an `int`).
+    pub const SO_DOMAIN: i32 = 39;
 
     /// `SOCK_STREAM` — the value `SO_TYPE` reports for a stream socket.
     pub const SOCK_STREAM: i32 = 1;
+    /// `SOCK_DGRAM` — the value `SO_TYPE` reports for a datagram socket.
+    pub const SOCK_DGRAM: i32 = 2;
 }
 
 /// `IPPROTO_TCP`-level option names (Linux `TCP_*`).
@@ -1129,6 +1149,9 @@ mod msgflags {
     /// data.  Honoured on daemon-backed stream receives via the ring's
     /// `RECV_PEEK` flag.
     pub const MSG_PEEK: u32 = 0x2;
+    /// On a receive: return a datagram's whole length even when the buffer
+    /// held less of it. On the result (`msg_flags`): the datagram was cut.
+    pub const MSG_TRUNC: u32 = 0x20;
     /// Per-call non-blocking override.  Behaves like the fd's `O_NONBLOCK` was
     /// set for this one call, regardless of the fd's actual status flags: a
     /// receive with no data ready, or a send whose window is full, returns
@@ -1510,6 +1533,7 @@ pub const fn linux_errno_for(e: KernelError) -> i32 {
         KernelError::IoError => errno::EIO,
         KernelError::NoSuchDevice => errno::ENODEV,
         KernelError::NoSuchDeviceOrAddress => errno::ENXIO,
+        KernelError::WrongSocketType => errno::EPROTOTYPE,
         KernelError::DeviceBusy => errno::EBUSY,
         KernelError::ConnectionRefused => errno::ECONNREFUSED,
         KernelError::NotConnected => errno::ENOTCONN,
@@ -4033,6 +4057,19 @@ pub fn close_handle(entry: FdEntry) -> SyscallResult {
             );
             SyscallResult::ok(0)
         }
+        HandleKind::UnixSocket => {
+            // Deregister, then drop this process's hold on the socket; it
+            // ends with its last holder.
+            if let Some(pid) = caller_pid() {
+                pcb::deregister_ipc_handle(
+                    pid,
+                    crate::cap::ResourceType::UnixSocket,
+                    entry.raw_handle,
+                );
+            }
+            crate::ipc::unix_socket::close(unix_handle(&entry));
+            SyscallResult::ok(0)
+        }
     }
 }
 
@@ -4128,6 +4165,8 @@ fn dispatch_write(entry: FdEntry, buf: u64, len: u64) -> SyscallResult {
         HandleKind::Channel => dispatch_channel_write(entry, buf, len),
         // A listener has no data: `accept` is its only operation.
         HandleKind::ServiceListener => linux_err(errno::EINVAL),
+        // A Unix-domain socket: `send` with no flags.
+        HandleKind::UnixSocket => dispatch_unix_write(entry, buf, len),
     }
 }
 
@@ -4561,6 +4600,8 @@ fn dispatch_read(entry: FdEntry, buf: u64, cap: u64) -> SyscallResult {
         // A channel end: one read, one message.
         HandleKind::Channel => dispatch_channel_read(entry, buf, cap),
         HandleKind::ServiceListener => linux_err(errno::EINVAL),
+        // A Unix-domain socket: `recv` with no flags.
+        HandleKind::UnixSocket => dispatch_unix_read(entry, buf, cap),
     }
 }
 
@@ -4894,6 +4935,15 @@ fn sys_close(args: &SyscallArgs) -> SyscallResult {
         Some(p) => p,
         None => return linux_err(errno::EBADF),
     };
+    linux_close_fd(pid, fd)
+}
+
+/// Close descriptor `fd` of process `pid`, as `close(2)` does: take it out of
+/// the table, drop its record locks, and release the object behind it if no
+/// other descriptor of the process still refers to it. `EBADF` if `fd` is
+/// not open. Also how a call that installed descriptors takes them back out
+/// when it fails partway (`socketpair`).
+fn linux_close_fd(pid: u64, fd: i32) -> SyscallResult {
     let entry = match pcb::linux_fd_take(pid, fd) {
         Some(e) => e,
         None => return linux_err(errno::EBADF),
@@ -5538,7 +5588,8 @@ fn fcntl_flock_apply(
         | HandleKind::Evdev
         | HandleKind::Socket
         | HandleKind::Channel
-        | HandleKind::ServiceListener => {
+        | HandleKind::ServiceListener
+        | HandleKind::UnixSocket => {
             return linux_err(errno::EBADF);
         }
     };
@@ -5669,7 +5720,8 @@ fn sys_lseek(args: &SyscallArgs) -> SyscallResult {
         | HandleKind::Evdev
         | HandleKind::Socket
         | HandleKind::Channel
-        | HandleKind::ServiceListener => linux_err(errno::ESPIPE),
+        | HandleKind::ServiceListener
+        | HandleKind::UnixSocket => linux_err(errno::ESPIPE),
     }
 }
 
@@ -17563,7 +17615,8 @@ fn sys_fsync(args: &SyscallArgs) -> SyscallResult {
         | HandleKind::Evdev
         | HandleKind::Socket
         | HandleKind::Channel
-        | HandleKind::ServiceListener => linux_err(errno::EINVAL),
+        | HandleKind::ServiceListener
+        | HandleKind::UnixSocket => linux_err(errno::EINVAL),
     }
 }
 
@@ -18455,7 +18508,8 @@ fn sys_readahead(args: &SyscallArgs) -> SyscallResult {
         | HandleKind::Evdev
         | HandleKind::Socket
         | HandleKind::Channel
-        | HandleKind::ServiceListener => return linux_err(errno::EINVAL),
+        | HandleKind::ServiceListener
+        | HandleKind::UnixSocket => return linux_err(errno::EINVAL),
     }
     SyscallResult::ok(0)
 }
@@ -20571,7 +20625,9 @@ fn fill_stat_for_fd(buf: &mut [u8; STAT_SIZE], entry: &crate::proc::linux_fd::Fd
         HandleKind::Socket => (S_IFSOCK | 0o777, 4096),
         // Message-moving ends and listeners: the nearest Linux type is a
         // socket, which is what a program asking `S_ISSOCK` should hear.
-        HandleKind::Channel | HandleKind::ServiceListener => (S_IFSOCK | 0o777, 4096),
+        HandleKind::Channel | HandleKind::ServiceListener | HandleKind::UnixSocket => {
+            (S_IFSOCK | 0o777, 4096)
+        }
     };
 
     // Inode: use the raw_handle as a stable-ish identity.
@@ -20941,7 +20997,9 @@ fn fill_statx_for_fd(buf: &mut [u8; STATX_SIZE], entry: &crate::proc::linux_fd::
         HandleKind::Evdev => ((S_IFCHR | 0o660) as u16, 4096),
         // Daemon-backed AF_INET stream socket — S_IFSOCK | 0777, like Linux.
         HandleKind::Socket => ((S_IFSOCK | 0o777) as u16, 4096),
-        HandleKind::Channel | HandleKind::ServiceListener => ((S_IFSOCK | 0o777) as u16, 4096),
+        HandleKind::Channel | HandleKind::ServiceListener | HandleKind::UnixSocket => {
+            ((S_IFSOCK | 0o777) as u16, 4096)
+        }
     };
     let st_ino: u64 = entry.raw_handle;
     // Surface the live memfd data length so stx_size reflects what callers
@@ -21254,6 +21312,18 @@ fn resolve_at_path(dirfd: i32, path_ptr: u64) -> Result<crate::fs::path::PathBuf
         Ok(b) => b,
         Err(e) => return Err(linux_err(e)),
     };
+    resolve_caller_path_bytes(&bytes)
+}
+
+/// A path already in kernel memory, resolved as [`resolve_at_path`] resolves
+/// one under `AT_FDCWD`: an absolute path normalised, a relative one joined
+/// onto the caller's working directory ("/" in kernel context). An empty path
+/// is `ENOENT`.
+///
+/// For a path that did not come in as a string argument -- the `sun_path` of a
+/// `struct sockaddr_un`, which a socket call copies in with the rest of the
+/// address.
+fn resolve_caller_path_bytes(bytes: &[u8]) -> Result<crate::fs::path::PathBuf, SyscallResult> {
     if bytes.is_empty() {
         return Err(linux_err(errno::ENOENT));
     }
@@ -21261,7 +21331,7 @@ fn resolve_at_path(dirfd: i32, path_ptr: u64) -> Result<crate::fs::path::PathBuf
         Some(pid) => pcb::get_cwd(pid).unwrap_or_else(|| alloc::vec![b'/']),
         None => alloc::vec![b'/'],
     };
-    let canon = match canonicalize_path(&cwd, &bytes) {
+    let canon = match canonicalize_path(&cwd, bytes) {
         Ok(p) => p,
         Err(e) => return Err(linux_err(e)),
     };
@@ -22658,7 +22728,8 @@ fn sys_ftruncate(args: &SyscallArgs) -> SyscallResult {
         | HandleKind::Evdev
         | HandleKind::Socket
         | HandleKind::Channel
-        | HandleKind::ServiceListener => linux_err(errno::EINVAL),
+        | HandleKind::ServiceListener
+        | HandleKind::UnixSocket => linux_err(errno::EINVAL),
     }
 }
 
@@ -28044,6 +28115,11 @@ fn sys_pidfd_getfd(args: &SyscallArgs) -> SyscallResult {
                 return linux_err(errno::EBADF);
             }
         }
+        HandleKind::UnixSocket => {
+            if crate::ipc::unix_socket::dup(unix_handle(&entry)).is_err() {
+                return linux_err(errno::EBADF);
+            }
+        }
     }
 
     // Linux always sets FD_CLOEXEC on the new fd, regardless of the
@@ -28086,6 +28162,7 @@ fn sys_pidfd_getfd(args: &SyscallArgs) -> SyscallResult {
         HandleKind::Socket => Some(crate::cap::ResourceType::NetSocket),
         HandleKind::Channel => Some(crate::cap::ResourceType::Channel),
         HandleKind::ServiceListener => Some(crate::cap::ResourceType::Service),
+        HandleKind::UnixSocket => Some(crate::cap::ResourceType::UnixSocket),
         HandleKind::Console | HandleKind::PidFd | HandleKind::AlsaControl => None,
     };
     if let Some(rt) = resource {
@@ -28185,6 +28262,11 @@ fn release_handle_ref(kind: HandleKind, raw_handle: u64) {
             let _ = crate::ipc::service::unregister(
                 crate::ipc::service::ServiceListenerHandle::from_raw(raw_handle),
             );
+        }
+        HandleKind::UnixSocket => {
+            crate::ipc::unix_socket::close(crate::ipc::unix_socket::UnixHandle::from_raw(
+                raw_handle,
+            ));
         }
     }
 }
@@ -31418,6 +31500,28 @@ pub(crate) fn revents_for_handle(
                 0
             }
         }
+        HandleKind::UnixSocket => {
+            // `unix_socket::poll_status`'s bits, as `stream_socket`'s: 0x01
+            // readable (data, a datagram, a connection to accept, or end of
+            // file), 0x04 writable, 0x08 error, 0x10 hang-up.
+            let s = crate::ipc::unix_socket::poll_status(
+                crate::ipc::unix_socket::UnixHandle::from_raw(raw_handle),
+            );
+            let mut r = 0u16;
+            if s & 0x01 != 0 {
+                r |= poll_bits::POLLIN | poll_bits::POLLRDNORM;
+            }
+            if s & 0x04 != 0 {
+                r |= poll_bits::POLLOUT | poll_bits::POLLWRNORM;
+            }
+            if s & 0x08 != 0 {
+                r |= poll_bits::POLLERR;
+            }
+            if s & 0x10 != 0 {
+                r |= poll_bits::POLLHUP;
+            }
+            r
+        }
     }
 }
 
@@ -31457,6 +31561,9 @@ pub(crate) fn wait_target_for_handle(
         // listener's by a client waiting.
         HandleKind::Channel => WaitTarget::Channel(raw_handle),
         HandleKind::ServiceListener => WaitTarget::Listener(raw_handle),
+        // A Unix-domain socket's: a datagram, a connection to accept, room to
+        // send, and for a connected stream, its pair's every change.
+        HandleKind::UnixSocket => WaitTarget::UnixSocket(raw_handle),
         _ => WaitTarget::PollOnly,
     }
 }
@@ -32527,7 +32634,8 @@ fn sys_epoll_ctl(args: &SyscallArgs) -> SyscallResult {
         | HandleKind::Evdev
         | HandleKind::Socket
         | HandleKind::Channel
-        | HandleKind::ServiceListener => {}
+        | HandleKind::ServiceListener
+        | HandleKind::UnixSocket => {}
     }
 
     // Gate 5: f.file == tf.file || !is_file_epoll(f.file) -> EINVAL.
@@ -35756,6 +35864,7 @@ fn handle_kind_ord(k: crate::proc::linux_fd::HandleKind) -> u64 {
         HandleKind::Evdev => 14,
         HandleKind::Channel => 15,
         HandleKind::ServiceListener => 16,
+        HandleKind::UnixSocket => 17,
     }
 }
 
@@ -36893,7 +37002,8 @@ fn sys_cachestat(args: &SyscallArgs) -> SyscallResult {
                 | HandleKind::Evdev
                 | HandleKind::Socket
                 | HandleKind::Channel
-                | HandleKind::ServiceListener => {
+                | HandleKind::ServiceListener
+                | HandleKind::UnixSocket => {
                     return linux_err(errno::EOPNOTSUPP);
                 }
             }
@@ -38291,6 +38401,21 @@ fn sys_socket(args: &SyscallArgs) -> SyscallResult {
             _ => {}
         }
     }
+    // AF_UNIX stream and datagram sockets are the kernel's own
+    // (`ipc::unix_socket`). The gates above have checked the protocol (0 for
+    // AF_UNIX) and the flag bits. SOCK_SEQPACKET (5) still falls through to
+    // ENOSYS.
+    if domain == 1 && matches!(sock_type, 1 | 2) {
+        let kind = if sock_type == 1 {
+            crate::ipc::unix_socket::Kind::Stream
+        } else {
+            crate::ipc::unix_socket::Kind::Dgram
+        };
+        return match crate::ipc::unix_socket::create(kind) {
+            Ok(h) => unix_install(h, sock_flags),
+            Err(e) => unix_errno(e),
+        };
+    }
     // Path B userspace-netstack cutover (design-decisions.md §63/§66):
     // when the `net.userspace` boot switch is set, an AF_INET/AF_INET6
     // SOCK_STREAM socket becomes a real daemon-backed stream socket, and a
@@ -39031,7 +39156,778 @@ fn sys_socketpair(args: &SyscallArgs) -> SyscallResult {
     if let Err(e) = crate::mm::user::validate_user_write(args.arg3, 8) {
         return linux_err(linux_errno_for(e));
     }
-    linux_err(errno::ENOSYS)
+    // Stream and datagram pairs (`ipc::unix_socket::pair`); SOCK_SEQPACKET
+    // stays ENOSYS.
+    let kind = match sock_type {
+        1 => crate::ipc::unix_socket::Kind::Stream,
+        2 => crate::ipc::unix_socket::Kind::Dgram,
+        _ => return linux_err(errno::ENOSYS),
+    };
+    let (a, b) = match crate::ipc::unix_socket::pair(kind) {
+        Ok(p) => p,
+        Err(e) => return unix_errno(e),
+    };
+    let fd_a = unix_install(a, sock_flags);
+    if fd_a.value < 0 {
+        crate::ipc::unix_socket::close(b);
+        return fd_a;
+    }
+    let fd_b = unix_install(b, sock_flags);
+    let undo_a = |r: SyscallResult| {
+        // The first descriptor was installed; take it back out so a failed
+        // call leaves nothing behind. Closing a descriptor just made cannot
+        // fail in a way that changes what is reported.
+        if let (Some(pid), Ok(fd)) = (caller_pid(), i32::try_from(fd_a.value)) {
+            let _ = linux_close_fd(pid, fd);
+        }
+        r
+    };
+    if fd_b.value < 0 {
+        return undo_a(fd_b);
+    }
+    let mut sv = [0u8; 8];
+    sv[..4].copy_from_slice(&i32::try_from(fd_a.value).unwrap_or(-1).to_ne_bytes());
+    sv[4..].copy_from_slice(&i32::try_from(fd_b.value).unwrap_or(-1).to_ne_bytes());
+    // SAFETY: eight initialised bytes; the destination was validated above and
+    // copy_to_user re-checks.
+    if let Err(e) = unsafe { crate::mm::user::copy_to_user(sv.as_ptr(), args.arg3, 8) } {
+        if let (Some(pid), Ok(fd)) = (caller_pid(), i32::try_from(fd_b.value)) {
+            let _ = linux_close_fd(pid, fd);
+        }
+        return undo_a(linux_err(linux_errno_for(e)));
+    }
+    SyscallResult::ok(0)
+}
+
+// ---------------------------------------------------------------------------
+// AF_UNIX: Unix-domain sockets by name (`ipc::unix_socket`)
+//
+// socket(AF_UNIX, SOCK_STREAM | SOCK_DGRAM), socketpair of either, and every
+// call on the descriptors they give: bind to a path or an abstract name,
+// listen, accept, connect, send/recv in all their forms, the two names, the
+// peer's credentials, shutdown. The objects and their names are
+// `ipc::unix_socket`'s; this is the Linux ABI around them -- `struct
+// sockaddr_un`, the flags, and Linux's error for each refusal.
+//
+// Ancillary data: a receive on a socket with SO_PASSCRED on carries the
+// sender's credentials (SCM_CREDENTIALS) -- as the kernel recorded them, or
+// as the sender stated them on its send, checked as Linux checks them (its
+// own; for root, any live process's).
+// Not yet: SOCK_SEQPACKET (ENOSYS, as before); SCM_RIGHTS, refused with
+// EOPNOTSUPP rather than dropped.
+// ---------------------------------------------------------------------------
+
+/// `AF_UNIX` (`AF_LOCAL`).
+const AF_UNIX: u16 = 1;
+
+/// `sizeof(struct sockaddr_un)`: a 2-byte family and a 108-byte `sun_path`.
+const SOCKADDR_UN_LEN: usize = 110;
+
+/// What a `struct sockaddr_un` names.
+enum UnixSockaddr {
+    /// A filesystem path, as given (to its first NUL), not yet resolved.
+    Path(alloc::vec::Vec<u8>),
+    /// An abstract name, without the NUL that marks it.
+    Abstract(alloc::vec::Vec<u8>),
+    /// The family alone: to `bind`, a request for a name chosen by the kernel.
+    Unnamed,
+}
+
+/// Read a `struct sockaddr_un` of `addr_len` bytes from `addr_ptr`, as
+/// Linux's `unix_validate_addr` and `unix_mkname_bsd` read one: a length
+/// outside `2..=110` or a family other than `AF_UNIX` is `EINVAL`; a path
+/// ends at its first NUL or at `addr_len`; a `sun_path` starting with NUL is
+/// an abstract name of every byte after it.
+fn read_sockaddr_un(addr_ptr: u64, addr_len: i32) -> Result<UnixSockaddr, SyscallResult> {
+    let len = usize::try_from(addr_len).map_err(|_| linux_err(errno::EINVAL))?;
+    if !(2..=SOCKADDR_UN_LEN).contains(&len) {
+        return Err(linux_err(errno::EINVAL));
+    }
+    let mut raw = [0u8; SOCKADDR_UN_LEN];
+    // SAFETY: `len` <= SOCKADDR_UN_LEN bytes into a buffer of that size;
+    // copy_from_user validates the source range under SMAP.
+    unsafe { crate::mm::user::copy_from_user(addr_ptr, raw.as_mut_ptr(), len) }
+        .map_err(|e| linux_err(linux_errno_for(e)))?;
+    if u16::from_ne_bytes([raw[0], raw[1]]) != AF_UNIX {
+        return Err(linux_err(errno::EINVAL));
+    }
+    let path = raw.get(2..len).unwrap_or(&[]);
+    match path.split_first() {
+        None => Ok(UnixSockaddr::Unnamed),
+        Some((0, name)) => Ok(UnixSockaddr::Abstract(name.to_vec())),
+        Some(_) => {
+            let end = path.iter().position(|&b| b == 0).unwrap_or(path.len());
+            Ok(UnixSockaddr::Path(path.get(..end).unwrap_or(&[]).to_vec()))
+        }
+    }
+}
+
+/// The socket a `connect` or `sendto` address leads to, with Linux's errors:
+/// a path that does not exist is `ENOENT`, one that is not a socket's node
+/// `ECONNREFUSED`, one the caller may not write `EACCES`; the family alone is
+/// `EINVAL`.
+fn unix_target(addr: &UnixSockaddr) -> Result<crate::ipc::unix_socket::Name, SyscallResult> {
+    use crate::ipc::unix_socket::Name;
+    match addr {
+        UnixSockaddr::Unnamed => Err(linux_err(errno::EINVAL)),
+        UnixSockaddr::Abstract(name) => Ok(Name::Abstract(name.clone())),
+        UnixSockaddr::Path(given) => {
+            let path = resolve_caller_path_bytes(given)?;
+            crate::ipc::unix_socket::name_at(&path).map_err(unix_errno)
+        }
+    }
+}
+
+/// Write `addr` as a `struct sockaddr_un` to `addr_ptr`, as Linux's
+/// `unix_getname` does: `*addrlen_ptr` is read as the room there, at most
+/// that much is written, and the address's whole length goes back to
+/// `*addrlen_ptr`. A path's length counts its terminating NUL; an unnamed
+/// socket is the family alone. A null `addr_ptr` writes nothing (`accept`,
+/// `recvfrom`).
+fn write_sockaddr_un(
+    addr: &crate::ipc::unix_socket::Address,
+    addr_ptr: u64,
+    addrlen_ptr: u64,
+) -> Result<(), SyscallResult> {
+    use crate::ipc::unix_socket::Address;
+    if addr_ptr == 0 {
+        return Ok(());
+    }
+    if addrlen_ptr == 0 {
+        return Err(linux_err(errno::EFAULT));
+    }
+    let mut room_raw = [0u8; 4];
+    // SAFETY: four bytes into a four-byte buffer; copy_from_user validates.
+    unsafe { crate::mm::user::copy_from_user(addrlen_ptr, room_raw.as_mut_ptr(), 4) }
+        .map_err(|e| linux_err(linux_errno_for(e)))?;
+    let room = i32::from_ne_bytes(room_raw);
+    let Ok(room) = usize::try_from(room) else {
+        return Err(linux_err(errno::EINVAL));
+    };
+    /// The most name bytes either form leaves room for (110 less the family
+    /// and the NUL that ends a path or starts an abstract name).
+    const NAME_MAX: usize = SOCKADDR_UN_LEN - 3;
+    let mut out = [0u8; SOCKADDR_UN_LEN];
+    out[..2].copy_from_slice(&AF_UNIX.to_ne_bytes());
+    // (offset of the name, its bytes, length past them): a path is followed
+    // by its NUL, which the reported length counts; an abstract name is
+    // preceded by its NUL.
+    let (at, name, extra): (usize, &[u8], usize) = match addr {
+        Address::Unnamed => (2, &[], 0),
+        Address::Path(p) => (2, p, 1),
+        Address::Abstract(n) => (3, n, 0),
+    };
+    let n = name.len().min(NAME_MAX);
+    if let (Some(dst), Some(src)) = (
+        out.get_mut(at..).and_then(|o| o.get_mut(..n)),
+        name.get(..n),
+    ) {
+        dst.copy_from_slice(src);
+    }
+    let len = at.saturating_add(n).saturating_add(extra);
+    let n = len.min(room);
+    if n > 0 {
+        // SAFETY: `n` <= `len` <= the initialised bytes of `out`;
+        // copy_to_user validates the destination.
+        unsafe { crate::mm::user::copy_to_user(out.as_ptr(), addr_ptr, n) }
+            .map_err(|e| linux_err(linux_errno_for(e)))?;
+    }
+    let len32 = u32::try_from(len).unwrap_or(u32::MAX).to_ne_bytes();
+    // SAFETY: four initialised bytes; copy_to_user validates the destination.
+    unsafe { crate::mm::user::copy_to_user(len32.as_ptr(), addrlen_ptr, 4) }
+        .map_err(|e| linux_err(linux_errno_for(e)))?;
+    Ok(())
+}
+
+/// Write a received message's sender to `addr_ptr` for `recvfrom`/`recvmsg`:
+/// as [`write_sockaddr_un`], except that an unbound sender has no address at
+/// all -- length 0, nothing written -- as Linux's `unix_copy_addr` leaves it.
+/// (`getsockname`, `getpeername` and `accept` report an unnamed socket as the
+/// family alone, length 2; a receive reports nothing.)
+fn write_sender_sockaddr(
+    addr: &crate::ipc::unix_socket::Address,
+    addr_ptr: u64,
+    addrlen_ptr: u64,
+) -> Result<(), SyscallResult> {
+    if *addr != crate::ipc::unix_socket::Address::Unnamed {
+        return write_sockaddr_un(addr, addr_ptr, addrlen_ptr);
+    }
+    if addr_ptr == 0 {
+        return Ok(());
+    }
+    if addrlen_ptr == 0 {
+        return Err(linux_err(errno::EFAULT));
+    }
+    let zero = 0u32.to_ne_bytes();
+    // SAFETY: four initialised bytes; copy_to_user validates the destination.
+    unsafe { crate::mm::user::copy_to_user(zero.as_ptr(), addrlen_ptr, 4) }
+        .map_err(|e| linux_err(linux_errno_for(e)))
+}
+
+/// The Linux answer for an `ipc::unix_socket` refusal: a wait a signal ended
+/// restarts or fails `EINTR` as `SA_RESTART` says; a closed peer is `EPIPE`
+/// (no `SIGPIPE`, as nowhere in this ABI); a second connect is `EISCONN`.
+fn unix_errno(e: KernelError) -> SyscallResult {
+    match e {
+        KernelError::Interrupted => restart::restart_result(restart::ERESTARTSYS),
+        KernelError::WouldBlock => linux_err(errno::EAGAIN),
+        KernelError::ChannelClosed | KernelError::BrokenPipe => linux_err(errno::EPIPE),
+        KernelError::ConnectAlready => linux_err(errno::EISCONN),
+        KernelError::NotSupported => linux_err(errno::EOPNOTSUPP),
+        KernelError::InvalidHandle => linux_err(errno::EBADF),
+        e => linux_err(linux_errno_for(e)),
+    }
+}
+
+/// Whether a call on `entry` with `msg_flags` must not wait: the
+/// descriptor's `O_NONBLOCK`, or `MSG_DONTWAIT` for this call.
+fn unix_nonblocking(entry: &FdEntry, msg_flags: u32) -> bool {
+    entry.status_flags & oflags::O_NONBLOCK != 0 || msg_flags & msgflags::MSG_DONTWAIT != 0
+}
+
+/// The socket an `AF_UNIX` descriptor holds.
+fn unix_handle(entry: &FdEntry) -> crate::ipc::unix_socket::UnixHandle {
+    crate::ipc::unix_socket::UnixHandle::from_raw(entry.raw_handle)
+}
+
+/// Install `h` as a descriptor of the calling process: recorded in its
+/// `ipc_handles` (closed at exit, one more holder at fork), then given the
+/// lowest free number. On failure the socket is closed again.
+fn unix_install(h: crate::ipc::unix_socket::UnixHandle, flags: u32) -> SyscallResult {
+    let Some(caller) = caller_pid() else {
+        crate::ipc::unix_socket::close(h);
+        return linux_err(errno::EBADF);
+    };
+    pcb::register_ipc_handle(caller, crate::cap::ResourceType::UnixSocket, h.raw());
+    let status = oflags::O_RDWR
+        | if flags & 0o4000 != 0 {
+            oflags::O_NONBLOCK
+        } else {
+            0
+        };
+    let fd_flags = if flags & 0o2_000_000 != 0 {
+        crate::proc::linux_fd::FD_CLOEXEC
+    } else {
+        0
+    };
+    let entry = crate::proc::linux_fd::FdEntry::unix_socket(h.raw(), fd_flags, status);
+    match pcb::linux_fd_install(caller, entry, 0) {
+        Ok(fd) => SyscallResult::ok(i64::from(fd)),
+        Err(e) => {
+            pcb::deregister_ipc_handle(caller, crate::cap::ResourceType::UnixSocket, h.raw());
+            crate::ipc::unix_socket::close(h);
+            linux_err(linux_errno_for(e))
+        }
+    }
+}
+
+/// `bind(2)` on an `AF_UNIX` descriptor: make the node and bind to it, or
+/// take the abstract name -- or, for the family alone, an abstract name of
+/// five hex digits, as Linux's `unix_autobind` chooses one.
+fn unix_bind(entry: &FdEntry, addr_ptr: u64, addr_len: i32) -> SyscallResult {
+    use crate::ipc::unix_socket;
+    let h = unix_handle(entry);
+    let addr = match read_sockaddr_un(addr_ptr, addr_len) {
+        Ok(a) => a,
+        Err(r) => return r,
+    };
+    match unix_socket::is_bound(h) {
+        Ok(false) => {}
+        Ok(true) => return linux_err(errno::EINVAL),
+        Err(e) => return unix_errno(e),
+    }
+    match addr {
+        UnixSockaddr::Abstract(name) => match unix_socket::bind_abstract(h, &name) {
+            Ok(()) => SyscallResult::ok(0),
+            Err(e) => unix_errno(e),
+        },
+        UnixSockaddr::Unnamed => {
+            // The first free name of the 2^20 five-digit ones, starting from a
+            // counter so successive binds do not all probe from 00000.
+            static NEXT: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
+            for _ in 0..0x10_0000u32 {
+                let n = NEXT.fetch_add(1, core::sync::atomic::Ordering::Relaxed) & 0xF_FFFF;
+                let name = alloc::format!("{n:05x}");
+                match unix_socket::bind_abstract(h, name.as_bytes()) {
+                    Ok(()) => return SyscallResult::ok(0),
+                    Err(KernelError::AddrInUse) => {}
+                    Err(e) => return unix_errno(e),
+                }
+            }
+            linux_err(errno::ENOSPC)
+        }
+        UnixSockaddr::Path(given) => {
+            let path = match resolve_caller_path_bytes(&given) {
+                Ok(p) => p,
+                Err(r) => return r,
+            };
+            // Linux makes the node `S_IFSOCK | 0777` less the umask.
+            match unix_socket::bind_path(h, &path, given, linux_create_mode(0o777)) {
+                Ok(()) => SyscallResult::ok(0),
+                Err(e) => unix_errno(e),
+            }
+        }
+    }
+}
+
+/// The most one stream send or receive moves here; a larger request is
+/// partial, as a stream's always may be.
+const UNIX_STREAM_CHUNK: usize = crate::ipc::stream_socket::MAX_TRANSFER;
+
+/// Copy `len` bytes in from `buf` for a send on `h`: a stream takes up to
+/// [`UNIX_STREAM_CHUNK`] (the rest is the caller's to send again); a datagram
+/// must fit whole (`EMSGSIZE`).
+fn unix_send_bytes(
+    h: crate::ipc::unix_socket::UnixHandle,
+    buf: u64,
+    len: u64,
+) -> Result<alloc::vec::Vec<u8>, SyscallResult> {
+    use crate::ipc::unix_socket::{self, Kind, MAX_DGRAM};
+    let len = usize::try_from(len).unwrap_or(usize::MAX);
+    let take = match unix_socket::kind(h) {
+        Some(Kind::Stream) => len.min(UNIX_STREAM_CHUNK),
+        Some(Kind::Dgram) if len > MAX_DGRAM => return Err(linux_err(errno::EMSGSIZE)),
+        Some(Kind::Dgram) => len,
+        None => return Err(linux_err(errno::EBADF)),
+    };
+    crate::mm::user::read_user_vec(buf, take, take).map_err(|e| linux_err(linux_errno_for(e)))
+}
+
+/// `send`/`sendto`/`write` on an `AF_UNIX` descriptor: `target` is the
+/// address a `sendto` named, if it named one.
+fn unix_send(
+    entry: &FdEntry,
+    buf: u64,
+    len: u64,
+    flags: u32,
+    target: Option<&UnixSockaddr>,
+) -> SyscallResult {
+    use crate::ipc::unix_socket;
+    let h = unix_handle(entry);
+    let data = match unix_send_bytes(h, buf, len) {
+        Ok(d) => d,
+        Err(r) => return r,
+    };
+    let nonblocking = unix_nonblocking(entry, flags);
+    let sent = match target {
+        None => unix_socket::send(h, &data, nonblocking),
+        Some(addr) => match unix_target(addr) {
+            Ok(name) => unix_socket::send_to(h, &data, &name, nonblocking),
+            Err(r) => return r,
+        },
+    };
+    match sent {
+        Ok(n) => SyscallResult::ok(i64::try_from(n).unwrap_or(i64::MAX)),
+        Err(e) => unix_errno(e),
+    }
+}
+
+/// `recv`/`recvfrom`/`read` on an `AF_UNIX` descriptor: into `buf` (room
+/// `cap`), the sender's address to `addr_ptr` if it is not null. Returns the
+/// bytes copied -- or, with `MSG_TRUNC`, a datagram's whole length.
+fn unix_recv(
+    entry: &FdEntry,
+    buf: u64,
+    cap: u64,
+    flags: u32,
+    addr_ptr: u64,
+    addrlen_ptr: u64,
+) -> SyscallResult {
+    use crate::ipc::unix_socket::{self, Kind, MAX_DGRAM};
+    let h = unix_handle(entry);
+    let limit = match unix_socket::kind(h) {
+        Some(Kind::Stream) => UNIX_STREAM_CHUNK,
+        Some(Kind::Dgram) => MAX_DGRAM,
+        None => return linux_err(errno::EBADF),
+    };
+    let room = usize::try_from(cap).unwrap_or(usize::MAX).min(limit);
+    if room > 0
+        && let Err(e) = crate::mm::user::validate_user_write(buf, room)
+    {
+        return linux_err(linux_errno_for(e));
+    }
+    let mut kbuf = match crate::mm::user::alloc_zeroed_vec(room) {
+        Ok(v) => v,
+        Err(e) => return linux_err(linux_errno_for(e)),
+    };
+    let got = match unix_socket::recv(
+        h,
+        &mut kbuf,
+        unix_nonblocking(entry, flags),
+        flags & msgflags::MSG_PEEK != 0,
+    ) {
+        Ok(r) => r,
+        Err(e) => return unix_errno(e),
+    };
+    if got.len > 0 {
+        // SAFETY: `got.len` <= `room` bytes at `buf` were validated writable;
+        // `kbuf` holds them.
+        if let Err(e) = unsafe { crate::mm::user::copy_to_user(kbuf.as_ptr(), buf, got.len) } {
+            return linux_err(linux_errno_for(e));
+        }
+    }
+    if let Err(r) = write_sender_sockaddr(&got.from, addr_ptr, addrlen_ptr) {
+        return r;
+    }
+    let n = if flags & msgflags::MSG_TRUNC != 0 {
+        got.full_len
+    } else {
+        got.len
+    };
+    SyscallResult::ok(i64::try_from(n).unwrap_or(i64::MAX))
+}
+
+/// `write(2)` on an `AF_UNIX` descriptor: `send` with no flags.
+fn dispatch_unix_write(entry: FdEntry, buf: u64, len: u64) -> SyscallResult {
+    unix_send(&entry, buf, len, 0, None)
+}
+
+/// `read(2)` on an `AF_UNIX` descriptor: `recv` with no flags.
+fn dispatch_unix_read(entry: FdEntry, buf: u64, cap: u64) -> SyscallResult {
+    unix_recv(&entry, buf, cap, 0, 0, 0)
+}
+
+/// The iovecs of a `struct msghdr`, as (base, length) pairs -- at most
+/// `UIO_MAXIOV` (1024) of them, as Linux allows (`EMSGSIZE` past that).
+fn read_iovecs(iov_ptr: u64, count: u64) -> Result<alloc::vec::Vec<(u64, usize)>, SyscallResult> {
+    if count > 1024 {
+        return Err(linux_err(errno::EMSGSIZE));
+    }
+    let mut out = alloc::vec::Vec::new();
+    for i in 0..count {
+        let mut raw = [0u8; 16];
+        // SAFETY: sixteen bytes into a sixteen-byte buffer; copy_from_user
+        // validates the source.
+        unsafe {
+            crate::mm::user::copy_from_user(
+                iov_ptr.wrapping_add(i.wrapping_mul(16)),
+                raw.as_mut_ptr(),
+                16,
+            )
+        }
+        .map_err(|e| linux_err(linux_errno_for(e)))?;
+        let base = u64::from_ne_bytes(raw[..8].try_into().unwrap_or([0; 8]));
+        let len = u64::from_ne_bytes(raw[8..].try_into().unwrap_or([0; 8]));
+        out.push((base, usize::try_from(len).unwrap_or(usize::MAX)));
+    }
+    Ok(out)
+}
+
+/// What a send's `msg_control` carries.
+#[derive(Default)]
+struct SendControl {
+    /// `SCM_RIGHTS`: descriptors to pass, which this layer cannot yet carry.
+    rights: bool,
+    /// `SCM_CREDENTIALS`: the credentials the sender states -- `pid_t`, uid,
+    /// gid -- not yet checked. The last such message counts, as on Linux.
+    cred: Option<(i32, u32, u32)>,
+}
+
+/// Walk a send's `msg_control` as Linux's `____sys_sendmsg` and
+/// `__scm_send` do:
+/// - a length past `INT_MAX`, or past what Linux's `optmem_max` (128 KiB)
+///   lets it copy in, is `ENOBUFS`; a buffer that cannot be read is `EFAULT`;
+/// - each header (length, level, type), aligned to 8, must cover at least
+///   itself and no more than is left (`EINVAL`), and the walk ends where no
+///   whole header is left;
+/// - levels other than `SOL_SOCKET` are skipped; `SCM_RIGHTS` is noted;
+///   `SCM_CREDENTIALS` must be exactly `CMSG_LEN(sizeof(struct ucred))`
+///   long (`EINVAL`); any other `SOL_SOCKET` type is `EINVAL`.
+fn parse_send_control(control: u64, controllen: u64) -> Result<SendControl, SyscallResult> {
+    const SOL_SOCKET: i32 = 1;
+    const SCM_RIGHTS: i32 = 1;
+    const SCM_CREDENTIALS: i32 = 2;
+    /// `sizeof(struct cmsghdr)`.
+    const HDR: usize = 16;
+    /// `CMSG_LEN(sizeof(struct ucred))`.
+    const CRED_LEN: usize = 28;
+    /// Linux's `optmem_max` default: the most control data a send copies in.
+    const OPTMEM_MAX: usize = 128 * 1024;
+    let mut out = SendControl::default();
+    if controllen == 0 {
+        return Ok(out);
+    }
+    let total = match usize::try_from(controllen) {
+        Ok(n) if n <= OPTMEM_MAX => n,
+        _ => return Err(linux_err(errno::ENOBUFS)),
+    };
+    let bytes = crate::mm::user::read_user_vec(control, total, total)
+        .map_err(|e| linux_err(linux_errno_for(e)))?;
+    let mut at = 0usize;
+    while let Some(head) = bytes.get(at..at.saturating_add(HDR)) {
+        let field = |from: usize, to: usize| head.get(from..to).unwrap_or(&[]);
+        let len = usize::try_from(u64::from_ne_bytes(field(0, 8).try_into().unwrap_or([0; 8])))
+            .unwrap_or(usize::MAX);
+        let level = i32::from_ne_bytes(field(8, 12).try_into().unwrap_or([0; 4]));
+        let kind = i32::from_ne_bytes(field(12, 16).try_into().unwrap_or([0; 4]));
+        // CMSG_OK: the message covers its own header and fits in what is left.
+        if len < HDR || len > total.saturating_sub(at) {
+            return Err(linux_err(errno::EINVAL));
+        }
+        if level == SOL_SOCKET {
+            match kind {
+                SCM_RIGHTS => out.rights = true,
+                SCM_CREDENTIALS => {
+                    if len != CRED_LEN {
+                        return Err(linux_err(errno::EINVAL));
+                    }
+                    let word = |from: usize| {
+                        bytes
+                            .get(at.saturating_add(from)..at.saturating_add(from).saturating_add(4))
+                            .and_then(|w| <[u8; 4]>::try_from(w).ok())
+                            .unwrap_or([0; 4])
+                    };
+                    out.cred = Some((
+                        i32::from_ne_bytes(word(16)),
+                        u32::from_ne_bytes(word(20)),
+                        u32::from_ne_bytes(word(24)),
+                    ));
+                }
+                _ => return Err(linux_err(errno::EINVAL)),
+            }
+        }
+        at = at.saturating_add(len.saturating_add(7) & !7);
+    }
+    Ok(out)
+}
+
+/// `sendmsg(2)` on an `AF_UNIX` descriptor: the iovecs gathered into one
+/// send (one datagram, or up to [`UNIX_STREAM_CHUNK`] of a stream), to
+/// `msg_name` if it names an address. Credentials the sender states
+/// (`SCM_CREDENTIALS`) are checked as Linux checks them and carried by a
+/// datagram; `SCM_RIGHTS` is `EOPNOTSUPP`.
+fn unix_sendmsg(entry: &FdEntry, msg_ptr: u64, flags: u32) -> SyscallResult {
+    use crate::ipc::unix_socket::{self, Kind, MAX_DGRAM};
+    let mut mh = UserMsgHdr::default();
+    // SAFETY: the caller validated [msg_ptr, +56) readable; copy_from_user
+    // re-checks under SMAP.
+    if let Err(e) =
+        unsafe { crate::mm::user::copy_from_user(msg_ptr, (&raw mut mh).cast::<u8>(), 56) }
+    {
+        return linux_err(linux_errno_for(e));
+    }
+    let control = match parse_send_control(mh.msg_control, mh.msg_controllen) {
+        Ok(c) => c,
+        Err(r) => return r,
+    };
+    if control.rights {
+        // Refused rather than sent without them: a receiver expecting
+        // descriptors that never come is worse than a sender told no.
+        return linux_err(errno::EOPNOTSUPP);
+    }
+    // Checked before anything is sent, as Linux's scm_send runs first. A
+    // stream checks them too, but reports its connection's (unix_socket's
+    // "Credentials").
+    let stated = match control.cred {
+        None => None,
+        Some((pid, uid, gid)) => {
+            // A negative pid names no process; nor does 0, the kernel's.
+            let pid = u64::try_from(pid).unwrap_or(0);
+            let claim = crate::ipc::channel::PeerCred { pid, uid, gid };
+            match unix_socket::check_stated_cred(claim) {
+                Ok(c) => Some(c),
+                Err(e) => return unix_errno(e),
+            }
+        }
+    };
+    let iovs = match read_iovecs(mh.msg_iov, mh.msg_iovlen) {
+        Ok(v) => v,
+        Err(r) => return r,
+    };
+    let h = unix_handle(entry);
+    let limit = match unix_socket::kind(h) {
+        Some(Kind::Stream) => UNIX_STREAM_CHUNK,
+        Some(Kind::Dgram) => {
+            let total = iovs
+                .iter()
+                .fold(0usize, |acc, &(_, len)| acc.saturating_add(len));
+            if total > MAX_DGRAM {
+                return linux_err(errno::EMSGSIZE);
+            }
+            total
+        }
+        None => return linux_err(errno::EBADF),
+    };
+    let mut data = alloc::vec::Vec::new();
+    for (base, len) in iovs {
+        let take = len.min(limit.saturating_sub(data.len()));
+        if take == 0 {
+            continue;
+        }
+        match crate::mm::user::read_user_vec(base, take, take) {
+            Ok(mut part) => data.append(&mut part),
+            Err(e) => return linux_err(linux_errno_for(e)),
+        }
+    }
+    let nonblocking = unix_nonblocking(entry, flags);
+    let sent = if mh.msg_name == 0 || mh.msg_namelen == 0 {
+        unix_socket::send_as(h, &data, stated, nonblocking)
+    } else {
+        let addr = match read_sockaddr_un(mh.msg_name, i32::try_from(mh.msg_namelen).unwrap_or(-1))
+        {
+            Ok(a) => a,
+            Err(r) => return r,
+        };
+        match unix_target(&addr) {
+            Ok(name) => unix_socket::send_to_as(h, &data, &name, stated, nonblocking),
+            Err(r) => return r,
+        }
+    };
+    match sent {
+        Ok(n) => SyscallResult::ok(i64::try_from(n).unwrap_or(i64::MAX)),
+        Err(e) => unix_errno(e),
+    }
+}
+
+/// `recvmsg(2)` on an `AF_UNIX` descriptor: one receive scattered across the
+/// iovecs; the sender's address to `msg_name`; when the socket has
+/// `SO_PASSCRED` on, the sender's credentials as one `SCM_CREDENTIALS`
+/// control message, otherwise none (`msg_controllen` 0); `MSG_TRUNC` in
+/// `msg_flags` when a datagram was cut, `MSG_CTRUNC` when the control message
+/// was.
+fn unix_recvmsg(entry: &FdEntry, msg_ptr: u64, flags: u32) -> SyscallResult {
+    use crate::ipc::unix_socket::{self, Kind, MAX_DGRAM};
+    let mut mh = UserMsgHdr::default();
+    // SAFETY: the caller validated [msg_ptr, +56) readable and writable;
+    // copy_from_user re-checks under SMAP.
+    if let Err(e) =
+        unsafe { crate::mm::user::copy_from_user(msg_ptr, (&raw mut mh).cast::<u8>(), 56) }
+    {
+        return linux_err(linux_errno_for(e));
+    }
+    let iovs = match read_iovecs(mh.msg_iov, mh.msg_iovlen) {
+        Ok(v) => v,
+        Err(r) => return r,
+    };
+    let h = unix_handle(entry);
+    let limit = match unix_socket::kind(h) {
+        Some(Kind::Stream) => UNIX_STREAM_CHUNK,
+        Some(Kind::Dgram) => MAX_DGRAM,
+        None => return linux_err(errno::EBADF),
+    };
+    // Validate every destination first, so a bad pointer loses nothing.
+    let mut room = 0usize;
+    for &(base, len) in &iovs {
+        let take = len.min(limit.saturating_sub(room));
+        if take > 0 {
+            if let Err(e) = crate::mm::user::validate_user_write(base, take) {
+                return linux_err(linux_errno_for(e));
+            }
+            room = room.saturating_add(take);
+        }
+    }
+    let mut kbuf = match crate::mm::user::alloc_zeroed_vec(room) {
+        Ok(v) => v,
+        Err(e) => return linux_err(linux_errno_for(e)),
+    };
+    let got = match unix_socket::recv(
+        h,
+        &mut kbuf,
+        unix_nonblocking(entry, flags),
+        flags & msgflags::MSG_PEEK != 0,
+    ) {
+        Ok(r) => r,
+        Err(e) => return unix_errno(e),
+    };
+    let mut done = 0usize;
+    for (base, len) in iovs {
+        if done >= got.len {
+            break;
+        }
+        let take = len.min(got.len.saturating_sub(done));
+        if take == 0 {
+            continue;
+        }
+        let Some(src) = kbuf.get(done..done.saturating_add(take)) else {
+            break;
+        };
+        // SAFETY: [base, +take) was validated writable above; `src` holds
+        // `take` bytes.
+        if let Err(e) = unsafe { crate::mm::user::copy_to_user(src.as_ptr(), base, take) } {
+            return linux_err(linux_errno_for(e));
+        }
+        done = done.saturating_add(take);
+    }
+    // msg_namelen is a socklen_t at offset 8; write_sockaddr_un reads the room
+    // there and writes the length back.
+    if mh.msg_name != 0
+        && let Err(r) = write_sender_sockaddr(&got.from, mh.msg_name, msg_ptr.wrapping_add(8))
+    {
+        return r;
+    }
+    // The control messages: the sender's credentials (SCM_CREDENTIALS) when
+    // SO_PASSCRED asks for them, written as Linux's put_cmsg writes one -- a
+    // 16-byte header (length, SOL_SOCKET, SCM_CREDENTIALS) and a 12-byte
+    // ucred, taking 32 bytes of space. A buffer with room for the header but
+    // not the whole message gets as much as fits, its cmsg_len saying how
+    // much; one without room for even the header gets nothing. Both are
+    // MSG_CTRUNC.
+    let mut out_flags = if got.full_len > got.len {
+        msgflags::MSG_TRUNC
+    } else {
+        0
+    };
+    let mut control_used = 0u64;
+    if unix_socket::passcred(h) {
+        /// `sizeof(struct cmsghdr)`.
+        const CMSG_HDR: u64 = 16;
+        /// `CMSG_LEN(sizeof(struct ucred))` and `CMSG_SPACE` of it.
+        const CRED_LEN: u64 = 28;
+        const CRED_SPACE: u64 = 32;
+        /// Linux's `overflowuid`/`overflowgid`, for a sender with no process.
+        const NOBODY: u32 = 65_534;
+        /// `MSG_CTRUNC` -- a control message did not fit.
+        const MSG_CTRUNC: u32 = 0x8;
+        if mh.msg_control == 0 || mh.msg_controllen < CMSG_HDR {
+            out_flags |= MSG_CTRUNC;
+        } else {
+            if mh.msg_controllen < CRED_LEN {
+                out_flags |= MSG_CTRUNC;
+            }
+            let cmsg_len = mh.msg_controllen.min(CRED_LEN);
+            let (pid, uid, gid) = got.cred.map_or((0u32, NOBODY, NOBODY), |c| {
+                (u32::try_from(c.pid).unwrap_or(0), c.uid, c.gid)
+            });
+            let mut cmsg = [0u8; 28];
+            cmsg[..8].copy_from_slice(&cmsg_len.to_ne_bytes());
+            cmsg[8..12].copy_from_slice(&1i32.to_ne_bytes()); // SOL_SOCKET
+            cmsg[12..16].copy_from_slice(&2i32.to_ne_bytes()); // SCM_CREDENTIALS
+            cmsg[16..20].copy_from_slice(&pid.to_ne_bytes());
+            cmsg[20..24].copy_from_slice(&uid.to_ne_bytes());
+            cmsg[24..28].copy_from_slice(&gid.to_ne_bytes());
+            let n = usize::try_from(cmsg_len).unwrap_or(0);
+            // SAFETY: `n` <= 28 initialised bytes of `cmsg`; the destination
+            // is the caller's msg_control, which copy_to_user validates.
+            if let Err(e) =
+                unsafe { crate::mm::user::copy_to_user(cmsg.as_ptr(), mh.msg_control, n) }
+            {
+                return linux_err(linux_errno_for(e));
+            }
+            // The space the message takes, padding included, as Linux counts
+            // it into msg_controllen.
+            control_used = mh.msg_controllen.min(CRED_SPACE);
+        }
+    }
+    // msg_controllen (offset 40): what the control messages used; msg_flags
+    // (offset 48): whether the datagram or a control message was cut.
+    let used = control_used.to_ne_bytes();
+    let flag_bytes = out_flags.to_ne_bytes();
+    // SAFETY: both writes land inside [msg_ptr, +56), validated writable by
+    // the caller; copy_to_user re-checks.
+    let wrote = unsafe {
+        crate::mm::user::copy_to_user(used.as_ptr(), msg_ptr.wrapping_add(40), 8).and_then(|()| {
+            crate::mm::user::copy_to_user(flag_bytes.as_ptr(), msg_ptr.wrapping_add(48), 4)
+        })
+    };
+    if let Err(e) = wrote {
+        return linux_err(linux_errno_for(e));
+    }
+    let n = if flags & msgflags::MSG_TRUNC != 0 {
+        got.full_len
+    } else {
+        got.len
+    };
+    SyscallResult::ok(i64::try_from(n).unwrap_or(i64::MAX))
 }
 
 /// `bind(sockfd, addr*, addrlen)`.
@@ -39076,6 +39972,11 @@ fn sys_bind(args: &SyscallArgs) -> SyscallResult {
     // Linux gate 2: move_addr_to_kernel — pointer + length sanity.
     if let Err(r) = validate_sockaddr_in(args.arg1, addr_len) {
         return r;
+    }
+    if let Ok(entry) = lookup_caller_fd(fd)
+        && entry.kind == HandleKind::UnixSocket
+    {
+        return unix_bind(&entry, args.arg1, addr_len);
     }
     // Path B userspace-netstack cutover: `bind(2)` on a daemon-backed datagram
     // (`SOCK_DGRAM`) socket reserves a local UDP port. Stream sockets stay EBADF
@@ -39209,6 +40110,17 @@ fn sys_listen(args: &SyscallArgs) -> SyscallResult {
     // backlog), so a raw i32 is fine.
     #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
     let backlog = args.arg1 as i32;
+    if let Ok(entry) = lookup_caller_fd(fd)
+        && entry.kind == HandleKind::UnixSocket
+    {
+        // Linux clamps a negative or huge backlog rather than refusing it;
+        // unix_socket clamps to 1..=MAX_BACKLOG.
+        let backlog = usize::try_from(backlog).unwrap_or(crate::ipc::unix_socket::MAX_BACKLOG);
+        return match crate::ipc::unix_socket::listen(unix_handle(&entry), backlog) {
+            Ok(()) => SyscallResult::ok(0),
+            Err(e) => unix_errno(e),
+        };
+    }
     // Path B userspace-netstack cutover: `listen(2)` on a real daemon-backed
     // stream socket registers a passive listener (`OP_LISTEN`) and moves the
     // socket into the shared-session server state (Q23 Option A).
@@ -39287,6 +40199,11 @@ fn sys_accept(args: &SyscallArgs) -> SyscallResult {
     if let Err(r) = validate_sockaddr_out(args.arg1, args.arg2) {
         return r;
     }
+    if let Ok(entry) = lookup_caller_fd(fd)
+        && entry.kind == HandleKind::UnixSocket
+    {
+        return unix_accept(&entry, args.arg1, args.arg2, 0);
+    }
     // Path B: a real daemon-backed listening socket dequeues a connection.
     // `accept(2)` is `accept4(2)` with flags == 0.
     if crate::net::netstack_client::userspace_enabled()
@@ -39296,6 +40213,36 @@ fn sys_accept(args: &SyscallArgs) -> SyscallResult {
         return socket_accept_from_user(entry, args.arg1, args.arg2, 0);
     }
     linux_err(errno::EBADF)
+}
+
+/// `accept`/`accept4` on an `AF_UNIX` descriptor: the next connection as a
+/// new descriptor (`flags`: `SOCK_CLOEXEC`, `SOCK_NONBLOCK`), the client's
+/// address to `addr_ptr`. A datagram socket is `EOPNOTSUPP` and one not
+/// listening `EINVAL`, as on Linux; the listener's `O_NONBLOCK` makes an
+/// empty backlog `EAGAIN`.
+fn unix_accept(entry: &FdEntry, addr_ptr: u64, addrlen_ptr: u64, flags: u32) -> SyscallResult {
+    use crate::ipc::unix_socket::{self, Kind};
+    let h = unix_handle(entry);
+    if unix_socket::kind(h) == Some(Kind::Dgram) {
+        return linux_err(errno::EOPNOTSUPP);
+    }
+    let accepted = match unix_socket::accept(h, unix_nonblocking(entry, 0)) {
+        Ok(a) => a,
+        Err(e) => return unix_errno(e),
+    };
+    let installed = unix_install(accepted.handle, flags);
+    if installed.value < 0 {
+        return installed;
+    }
+    if let Err(r) = write_sockaddr_un(&accepted.peer, addr_ptr, addrlen_ptr) {
+        // As Linux: an address that cannot be written fails the call, and the
+        // descriptor just made goes with it.
+        if let (Some(pid), Ok(fd)) = (caller_pid(), i32::try_from(installed.value)) {
+            let _ = linux_close_fd(pid, fd);
+        }
+        return r;
+    }
+    installed
 }
 
 /// `accept4(sockfd, addr*, addrlen*, flags)`.
@@ -39351,6 +40298,11 @@ fn sys_accept4(args: &SyscallArgs) -> SyscallResult {
     // upeer_sockaddr != NULL.
     if let Err(r) = validate_sockaddr_out(args.arg1, args.arg2) {
         return r;
+    }
+    if let Ok(entry) = lookup_caller_fd(fd)
+        && entry.kind == HandleKind::UnixSocket
+    {
+        return unix_accept(&entry, args.arg1, args.arg2, flags);
     }
     // Path B: a real daemon-backed listening socket dequeues a connection,
     // honouring accept4's SOCK_CLOEXEC / SOCK_NONBLOCK on the new fd.
@@ -39499,6 +40451,28 @@ fn sys_connect(args: &SyscallArgs) -> SyscallResult {
     // Linux gate 2: move_addr_to_kernel pointer + length sanity.
     if let Err(r) = validate_sockaddr_in(args.arg1, addr_len) {
         return r;
+    }
+    if let Ok(entry) = lookup_caller_fd(fd)
+        && entry.kind == HandleKind::UnixSocket
+    {
+        let addr = match read_sockaddr_un(args.arg1, addr_len) {
+            Ok(a) => a,
+            Err(r) => return r,
+        };
+        let name = match unix_target(&addr) {
+            Ok(n) => n,
+            Err(r) => return r,
+        };
+        // A Unix-domain connect completes or fails here; a full backlog with
+        // O_NONBLOCK is EAGAIN, as Linux's unix_stream_connect answers.
+        return match crate::ipc::unix_socket::connect(
+            unix_handle(&entry),
+            &name,
+            unix_nonblocking(&entry, 0),
+        ) {
+            Ok(()) => SyscallResult::ok(0),
+            Err(e) => unix_errno(e),
+        };
     }
     // Path B userspace-netstack cutover: a real daemon-backed AF_INET stream
     // socket connects for real through [`crate::net::socket`].  When the switch
@@ -39758,6 +40732,17 @@ fn sys_getsockname(args: &SyscallArgs) -> SyscallResult {
     if let Err(r) = validate_sockaddr_out(args.arg1, args.arg2) {
         return r;
     }
+    if let Ok(entry) = lookup_caller_fd(fd)
+        && entry.kind == HandleKind::UnixSocket
+    {
+        return match crate::ipc::unix_socket::local_address(unix_handle(&entry)) {
+            Ok(addr) => match write_sockaddr_un(&addr, args.arg1, args.arg2) {
+                Ok(()) => SyscallResult::ok(0),
+                Err(r) => r,
+            },
+            Err(e) => unix_errno(e),
+        };
+    }
     // Path B: getsockname on a connected daemon-backed stream socket returns the
     // local endpoint (interface IP + ephemeral source port) the daemon assigned.
     // An unconnected socket has no assigned local port → ENOTCONN (matching a
@@ -39830,6 +40815,17 @@ fn sys_getpeername(args: &SyscallArgs) -> SyscallResult {
     }
     if let Err(r) = validate_sockaddr_out(args.arg1, args.arg2) {
         return r;
+    }
+    if let Ok(entry) = lookup_caller_fd(fd)
+        && entry.kind == HandleKind::UnixSocket
+    {
+        return match crate::ipc::unix_socket::peer_address(unix_handle(&entry)) {
+            Ok(addr) => match write_sockaddr_un(&addr, args.arg1, args.arg2) {
+                Ok(()) => SyscallResult::ok(0),
+                Err(r) => r,
+            },
+            Err(e) => unix_errno(e),
+        };
     }
     // Path B: getpeername on a connected daemon-backed stream socket
     // returns the remote endpoint the socket is connected to.  A socket
@@ -40140,6 +41136,21 @@ fn sys_sendto(args: &SyscallArgs) -> SyscallResult {
             return r;
         }
     }
+    if let Ok(entry) = lookup_caller_fd(fd)
+        && entry.kind == HandleKind::UnixSocket
+    {
+        #[allow(clippy::cast_possible_truncation)]
+        let msg_flags = args.arg3 as u32;
+        if args.arg4 == 0 {
+            return unix_send(&entry, buf, args.arg2, msg_flags, None);
+        }
+        #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
+        let addr_len = args.arg5 as i32;
+        return match read_sockaddr_un(args.arg4, addr_len) {
+            Ok(addr) => unix_send(&entry, buf, args.arg2, msg_flags, Some(&addr)),
+            Err(r) => r,
+        };
+    }
     // Path B: `send(2)`/`sendto(2)` on a connected daemon-backed stream socket
     // forwards the payload to the daemon.  A destination address on a connected
     // stream socket is ignored (Linux ignores it too, or returns EISCONN — we
@@ -40365,6 +41376,13 @@ fn sys_recvfrom(args: &SyscallArgs) -> SyscallResult {
     // and half-NULL cases.
     if let Err(r) = validate_sockaddr_out(args.arg4, args.arg5) {
         return r;
+    }
+    if let Ok(entry) = lookup_caller_fd(fd)
+        && entry.kind == HandleKind::UnixSocket
+    {
+        #[allow(clippy::cast_possible_truncation)]
+        let msg_flags = args.arg3 as u32;
+        return unix_recv(&entry, buf, args.arg2, msg_flags, args.arg4, args.arg5);
     }
     // Path B: `recv(2)`/`recvfrom(2)` on a connected daemon-backed stream socket
     // returns bytes from the daemon.  The fd's `O_NONBLOCK` status flag is honoured
@@ -40743,6 +41761,13 @@ fn sys_sendmsg(args: &SyscallArgs) -> SyscallResult {
     if let Err(e) = crate::mm::user::validate_user_read(args.arg1, 56) {
         return linux_err(linux_errno_for(e));
     }
+    if let Ok(entry) = lookup_caller_fd(fd)
+        && entry.kind == HandleKind::UnixSocket
+    {
+        #[allow(clippy::cast_possible_truncation)]
+        let flags = args.arg2 as u32;
+        return unix_sendmsg(&entry, args.arg1, flags);
+    }
     // Path B: a connected daemon-backed stream socket.  MSG_DONTWAIT (arg2) is
     // honoured; other MSG_* flags and msg_control are ignored.
     if crate::net::netstack_client::userspace_enabled()
@@ -40792,6 +41817,13 @@ fn sys_recvmsg(args: &SyscallArgs) -> SyscallResult {
     }
     if let Err(e) = crate::mm::user::validate_user_write(args.arg1, 56) {
         return linux_err(linux_errno_for(e));
+    }
+    if let Ok(entry) = lookup_caller_fd(fd)
+        && entry.kind == HandleKind::UnixSocket
+    {
+        #[allow(clippy::cast_possible_truncation)]
+        let flags = args.arg2 as u32;
+        return unix_recvmsg(&entry, args.arg1, flags);
     }
     // Path B: a connected daemon-backed stream socket.  MSG_DONTWAIT (arg2) is
     // honoured; msg_name is filled with the peer, msg_control is ignored.
@@ -41010,6 +42042,45 @@ fn sys_setsockopt(args: &SyscallArgs) -> SyscallResult {
     let level = args.arg1 as i32;
     #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
     let optname = args.arg2 as i32;
+    if let Ok(entry) = lookup_caller_fd(fd)
+        && entry.kind == HandleKind::UnixSocket
+    {
+        // SO_PASSCRED: an int, nonzero to ask for the sender's credentials
+        // with each recvmsg (SCM_CREDENTIALS).
+        if level == sol::SOL_SOCKET && optname == so::SO_PASSCRED {
+            if optlen < 4 {
+                return linux_err(errno::EINVAL);
+            }
+            let mut raw = [0u8; 4];
+            // SAFETY: four bytes into a four-byte buffer; optval was validated
+            // readable for optlen (>= 4) bytes above, and copy_from_user
+            // re-checks.
+            if let Err(e) =
+                unsafe { crate::mm::user::copy_from_user(args.arg3, raw.as_mut_ptr(), 4) }
+            {
+                return linux_err(linux_errno_for(e));
+            }
+            let on = i32::from_ne_bytes(raw) != 0;
+            return match crate::ipc::unix_socket::set_passcred(unix_handle(&entry), on) {
+                Ok(()) => SyscallResult::ok(0),
+                Err(e) => unix_errno(e),
+            };
+        }
+        // The other options Unix-domain programs set while starting up. None
+        // changes anything here: buffers are fixed and there is no address
+        // reuse to allow. Anything else is ENOPROTOOPT, so a program can
+        // tell.
+        let accepted = level == sol::SOL_SOCKET
+            && matches!(
+                optname,
+                so::SO_SNDBUF | so::SO_RCVBUF | so::SO_REUSEADDR | so::SO_KEEPALIVE
+            );
+        return if accepted {
+            SyscallResult::ok(0)
+        } else {
+            linux_err(errno::ENOPROTOOPT)
+        };
+    }
     if crate::net::netstack_client::userspace_enabled()
         && let Ok(entry) = lookup_caller_fd(fd)
         && entry.kind == HandleKind::Socket
@@ -41084,6 +42155,11 @@ fn sys_getsockopt(args: &SyscallArgs) -> SyscallResult {
     let level = args.arg1 as i32;
     #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
     let optname = args.arg2 as i32;
+    if let Ok(entry) = lookup_caller_fd(fd)
+        && entry.kind == HandleKind::UnixSocket
+    {
+        return unix_getsockopt(&entry, level, optname, args.arg3, args.arg4);
+    }
     if crate::net::netstack_client::userspace_enabled()
         && level == sol::SOL_SOCKET
         && optname == so::SO_ERROR
@@ -41164,6 +42240,83 @@ fn sys_getsockopt(args: &SyscallArgs) -> SyscallResult {
     linux_err(errno::EBADF)
 }
 
+/// `getsockopt(2)` on an `AF_UNIX` descriptor: `SO_TYPE`, `SO_DOMAIN`,
+/// `SO_PROTOCOL`, `SO_ACCEPTCONN`, `SO_ERROR` (always 0: a Unix-domain
+/// connect fails at once or not at all), the buffer sizes, `SO_PASSCRED`, and
+/// `SO_PEERCRED` -- the peer's pid, uid and gid as the kernel recorded them,
+/// or Linux's `{0, 65534, 65534}` ("nobody") for a socket with no peer or a
+/// peer with no process. As Linux, a value longer than `*optlen` is cut to
+/// it, and `*optlen` is set to what was written.
+fn unix_getsockopt(
+    entry: &FdEntry,
+    level: i32,
+    optname: i32,
+    optval: u64,
+    optlen_ptr: u64,
+) -> SyscallResult {
+    use crate::ipc::unix_socket::{self, Kind};
+    /// Linux's `overflowuid`/`overflowgid`: who an unknown peer is said to be.
+    const NOBODY: u32 = 65_534;
+    let h = unix_handle(entry);
+    if level != sol::SOL_SOCKET {
+        return linux_err(errno::ENOPROTOOPT);
+    }
+    let int = |v: i32| v.to_ne_bytes().to_vec();
+    let value: alloc::vec::Vec<u8> = match optname {
+        so::SO_TYPE => match unix_socket::kind(h) {
+            Some(Kind::Stream) => int(so::SOCK_STREAM),
+            Some(Kind::Dgram) => int(so::SOCK_DGRAM),
+            None => return linux_err(errno::EBADF),
+        },
+        so::SO_DOMAIN => int(i32::from(AF_UNIX)),
+        so::SO_PROTOCOL | so::SO_ERROR => int(0),
+        so::SO_PASSCRED => int(i32::from(unix_socket::passcred(h))),
+        so::SO_ACCEPTCONN => int(i32::from(unix_socket::is_listening(h))),
+        so::SO_SNDBUF | so::SO_RCVBUF => {
+            int(i32::try_from(unix_socket::MAX_DGRAM).unwrap_or(i32::MAX))
+        }
+        so::SO_PEERCRED => {
+            let cred = unix_socket::peer_cred(h).ok().flatten();
+            let (pid, uid, gid) = cred.map_or((0u32, NOBODY, NOBODY), |c| {
+                (u32::try_from(c.pid).unwrap_or(0), c.uid, c.gid)
+            });
+            let mut v = alloc::vec::Vec::with_capacity(12);
+            v.extend_from_slice(&pid.to_ne_bytes());
+            v.extend_from_slice(&uid.to_ne_bytes());
+            v.extend_from_slice(&gid.to_ne_bytes());
+            v
+        }
+        _ => return linux_err(errno::ENOPROTOOPT),
+    };
+    let mut room_raw = [0u8; 4];
+    // SAFETY: four bytes into a four-byte buffer; the caller validated the
+    // source, and copy_from_user re-checks.
+    if let Err(e) = unsafe { crate::mm::user::copy_from_user(optlen_ptr, room_raw.as_mut_ptr(), 4) }
+    {
+        return linux_err(linux_errno_for(e));
+    }
+    let Ok(room) = usize::try_from(i32::from_ne_bytes(room_raw)) else {
+        return linux_err(errno::EINVAL);
+    };
+    let n = value.len().min(room);
+    if n > 0 {
+        if optval == 0 {
+            return linux_err(errno::EFAULT);
+        }
+        // SAFETY: `n` <= `value.len()` initialised bytes; copy_to_user
+        // validates the destination.
+        if let Err(e) = unsafe { crate::mm::user::copy_to_user(value.as_ptr(), optval, n) } {
+            return linux_err(linux_errno_for(e));
+        }
+    }
+    let written = u32::try_from(n).unwrap_or(0).to_ne_bytes();
+    // SAFETY: four initialised bytes; the caller validated the destination.
+    if let Err(e) = unsafe { crate::mm::user::copy_to_user(written.as_ptr(), optlen_ptr, 4) } {
+        return linux_err(linux_errno_for(e));
+    }
+    SyscallResult::ok(0)
+}
+
 /// `shutdown(sockfd, how)`.
 ///
 /// Linux's net/socket.c __sys_shutdown does:
@@ -41181,6 +42334,16 @@ fn sys_shutdown(args: &SyscallArgs) -> SyscallResult {
     let fd = args.arg0 as i32;
     if let Err(r) = validate_linux_fd(fd) {
         return r;
+    }
+    if let Ok(entry) = lookup_caller_fd(fd)
+        && entry.kind == HandleKind::UnixSocket
+    {
+        // `how` past SHUT_RDWR (2) is EINVAL, from unix_socket::shutdown.
+        let how = u32::try_from(args.arg1).unwrap_or(u32::MAX);
+        return match crate::ipc::unix_socket::shutdown(unix_handle(&entry), how) {
+            Ok(()) => SyscallResult::ok(0),
+            Err(e) => unix_errno(e),
+        };
     }
     // Path B: shutdown on a daemon-backed stream socket half/full-closes the
     // connection without releasing the fd (SHUT_RD → recv EOF, SHUT_WR → send
@@ -43883,7 +45046,8 @@ fn sys_pread64(args: &SyscallArgs) -> SyscallResult {
         | HandleKind::Evdev
         | HandleKind::Socket
         | HandleKind::Channel
-        | HandleKind::ServiceListener => linux_err(errno::ESPIPE),
+        | HandleKind::ServiceListener
+        | HandleKind::UnixSocket => linux_err(errno::ESPIPE),
     }
 }
 
@@ -43954,7 +45118,8 @@ fn sys_pwrite64(args: &SyscallArgs) -> SyscallResult {
         | HandleKind::Evdev
         | HandleKind::Socket
         | HandleKind::Channel
-        | HandleKind::ServiceListener => linux_err(errno::ESPIPE),
+        | HandleKind::ServiceListener
+        | HandleKind::UnixSocket => linux_err(errno::ESPIPE),
     }
 }
 
@@ -45819,7 +46984,8 @@ fn sys_preadv(args: &SyscallArgs) -> SyscallResult {
         | HandleKind::Evdev
         | HandleKind::Socket
         | HandleKind::Channel
-        | HandleKind::ServiceListener => linux_err(errno::ESPIPE),
+        | HandleKind::ServiceListener
+        | HandleKind::UnixSocket => linux_err(errno::ESPIPE),
     }
 }
 
@@ -45864,7 +47030,8 @@ fn sys_pwritev(args: &SyscallArgs) -> SyscallResult {
         | HandleKind::Evdev
         | HandleKind::Socket
         | HandleKind::Channel
-        | HandleKind::ServiceListener => linux_err(errno::ESPIPE),
+        | HandleKind::ServiceListener
+        | HandleKind::UnixSocket => linux_err(errno::ESPIPE),
     }
 }
 
@@ -45940,7 +47107,8 @@ fn sys_preadv2(args: &SyscallArgs) -> SyscallResult {
         | HandleKind::Evdev
         | HandleKind::Socket
         | HandleKind::Channel
-        | HandleKind::ServiceListener => linux_err(errno::ESPIPE),
+        | HandleKind::ServiceListener
+        | HandleKind::UnixSocket => linux_err(errno::ESPIPE),
     }
 }
 
@@ -45998,7 +47166,8 @@ fn sys_pwritev2(args: &SyscallArgs) -> SyscallResult {
         | HandleKind::Evdev
         | HandleKind::Socket
         | HandleKind::Channel
-        | HandleKind::ServiceListener => linux_err(errno::ESPIPE),
+        | HandleKind::ServiceListener
+        | HandleKind::UnixSocket => linux_err(errno::ESPIPE),
     }
 }
 
@@ -50105,6 +51274,86 @@ pub fn self_test_xattr_calls() -> crate::error::KernelResult<()> {
         "[syscall/linux]   xattr calls: values, lists, flags, names, sizes, a link, \
          Linux's order; through a descriptor's file across a rename and an \
          unlink; objects on no filesystem: OK"
+    );
+    Ok(())
+}
+
+/// The nodes `mknod` and `mknodat` make, as Linux's `vfs_create` and
+/// `vfs_mknod` do: a regular file (`S_IFREG`), which a second `mknod` of the
+/// name finds there (`EEXIST`), and a socket's node (`S_IFSOCK`) -- each of
+/// the type `stat` then reports.
+///
+/// Runs once the `/tmp` memfs is mounted rather than in [`self_test`], which
+/// runs before any writable filesystem exists: there `mknod(S_IFREG)` could
+/// only fail, which is how this first came to light (the boot of
+/// 2026-10-02, `rq29`). The refusals that need no filesystem stay in
+/// [`self_test`].
+///
+/// # Errors
+///
+/// `InternalError` naming the check that failed.
+pub fn self_test_mknod_nodes() -> crate::error::KernelResult<()> {
+    use crate::error::KernelError;
+    use crate::serial_println;
+
+    let probe = b"/tmp/syscall_mknod_probe\0";
+    let probe_path = "/tmp/syscall_mknod_probe";
+    let probe_ptr = probe.as_ptr() as u64;
+    let call = |nr: u64, arg0: u64, arg1: u64, arg2: u64| {
+        dispatch_linux(
+            nr,
+            &SyscallArgs {
+                arg0,
+                arg1,
+                arg2,
+                arg3: 0,
+                arg4: 0,
+                arg5: 0,
+            },
+        )
+        .value
+    };
+    let is = |want: crate::fs::EntryType| matches!(crate::fs::Vfs::stat(probe_path), Ok(e) if e.entry_type == want);
+    // A leftover from an interrupted boot would make the first creation
+    // EEXIST.
+    let _ = crate::fs::Vfs::remove(probe_path);
+    let result = (|| -> Result<(), &'static str> {
+        let made = call(nr::MKNOD, probe_ptr, 0o100644, 0);
+        if made != 0 {
+            serial_println!("[syscall/linux]   mknod(S_IFREG) answered {}", made);
+            return Err("mknod(S_IFREG) did not make a regular file");
+        }
+        if !is(crate::fs::EntryType::File) {
+            return Err("mknod(S_IFREG) made something that is not a regular file");
+        }
+        if call(nr::MKNOD, probe_ptr, 0o100644, 0) != i64::from(errno::EEXIST).wrapping_neg() {
+            return Err("mknod over an existing name was not EEXIST");
+        }
+        crate::fs::Vfs::remove(probe_path).map_err(|_| "the probe file could not be removed")?;
+        // mknod with no type bits makes a regular file too.
+        if call(nr::MKNOD, probe_ptr, 0o644, 0) != 0 || !is(crate::fs::EntryType::File) {
+            return Err("mknod with no type bits did not make a regular file");
+        }
+        crate::fs::Vfs::remove(probe_path).map_err(|_| "the probe file could not be removed")?;
+        // mknodat with an absolute path, so the dirfd is not consulted.
+        let r = call(nr::MKNODAT, 0, probe_ptr, 0o140644);
+        if r != 0 {
+            serial_println!("[syscall/linux]   mknodat(S_IFSOCK) answered {}", r);
+            return Err("mknodat(S_IFSOCK) did not make a socket's node");
+        }
+        if !is(crate::fs::EntryType::Socket) {
+            return Err("mknodat(S_IFSOCK) made something that is not a socket's node");
+        }
+        Ok(())
+    })();
+    let _ = crate::fs::Vfs::remove(probe_path);
+    if let Err(why) = result {
+        serial_println!("[syscall/linux]   FAIL: mknod nodes: {}", why);
+        return Err(KernelError::InternalError);
+    }
+    serial_println!(
+        "[syscall/linux]   mknod nodes: a regular file (with and without S_IFREG), EEXIST over \
+         it, a socket's node: OK"
     );
     Ok(())
 }
@@ -67117,6 +68366,7 @@ pub fn self_test() -> crate::error::KernelResult<()> {
                     HandleKind::Socket => Some(crate::cap::ResourceType::NetSocket),
                     HandleKind::Channel => Some(crate::cap::ResourceType::Channel),
                     HandleKind::ServiceListener => Some(crate::cap::ResourceType::Service),
+                    HandleKind::UnixSocket => Some(crate::cap::ResourceType::UnixSocket),
                     HandleKind::Console | HandleKind::PidFd | HandleKind::AlsaControl => None,
                 }
             };
@@ -74383,82 +75633,31 @@ pub fn self_test() -> crate::error::KernelResult<()> {
                 return Err(KernelError::InternalError);
             }
 
-            // The nodes themselves, as Linux's vfs_mknod: a device needs
+            // The refused node types, as Linux's vfs_mknod: a device needs
             // CAP_MKNOD (no caller holds it), a FIFO needs named pipes (none
-            // exist); a regular file and a socket's node are made, in /tmp.
-            let probe = b"/tmp/syscall_mknod_probe\0";
-            let probe_path = "/tmp/syscall_mknod_probe";
-            let probe_ptr = probe.as_ptr() as u64;
-            let mknod = |mode: u64| {
-                dispatch_linux(
-                    nr::MKNOD,
-                    &SyscallArgs {
-                        arg0: probe_ptr,
-                        arg1: mode,
-                        arg2: 0,
-                        arg3: 0,
-                        arg4: 0,
-                        arg5: 0,
-                    },
-                )
-                .value
-            };
-            // A leftover from an interrupted boot would make the first
-            // creation EEXIST.
-            let _ = crate::fs::Vfs::remove(probe_path);
-            let result = (|| -> Result<(), &'static str> {
-                for (mode, what) in [
-                    (0o020644u64, "S_IFCHR"),
-                    (0o060644, "S_IFBLK"),
-                    (0o010644, "S_IFIFO"),
-                ] {
-                    if mknod(mode) != i64::from(errno::EPERM).wrapping_neg() {
-                        serial_println!("[syscall/linux]   mknod({}) was not EPERM", what);
-                        return Err("a device or FIFO node was not refused");
-                    }
+            // exist). Refused before the path is looked at, so no filesystem
+            // is needed; the nodes that are made are `self_test_mknod_nodes`'s,
+            // which runs once /tmp is writable.
+            for (mode, what) in [
+                (0o020644u64, "S_IFCHR"),
+                (0o060644, "S_IFBLK"),
+                (0o010644, "S_IFIFO"),
+            ] {
+                let a = SyscallArgs {
+                    arg0: dummy_ptr,
+                    arg1: mode,
+                    arg2: 0,
+                    arg3: 0,
+                    arg4: 0,
+                    arg5: 0,
+                };
+                if dispatch_linux(nr::MKNOD, &a).value != i64::from(errno::EPERM).wrapping_neg() {
+                    serial_println!("[syscall/linux]   FAIL: mknod({}) was not EPERM", what);
+                    return Err(KernelError::InternalError);
                 }
-                if mknod(0o100644) != 0 {
-                    return Err("mknod(S_IFREG) did not make a regular file");
-                }
-                if !matches!(crate::fs::Vfs::stat(probe_path), Ok(e) if e.entry_type == crate::fs::EntryType::File)
-                {
-                    return Err("mknod(S_IFREG) made something that is not a regular file");
-                }
-                if mknod(0o100644) != i64::from(errno::EEXIST).wrapping_neg() {
-                    return Err("mknod over an existing name was not EEXIST");
-                }
-                crate::fs::Vfs::remove(probe_path)
-                    .map_err(|_| "the probe file could not be removed")?;
-                // mknodat, absolute path, so the dirfd is not consulted.
-                let r = dispatch_linux(
-                    nr::MKNODAT,
-                    &SyscallArgs {
-                        arg0: 0,
-                        arg1: probe_ptr,
-                        arg2: 0o140644,
-                        arg3: 0,
-                        arg4: 0,
-                        arg5: 0,
-                    },
-                )
-                .value;
-                if r != 0 {
-                    return Err("mknodat(S_IFSOCK) did not make a socket's node");
-                }
-                if !matches!(crate::fs::Vfs::stat(probe_path), Ok(e) if e.entry_type == crate::fs::EntryType::Socket)
-                {
-                    return Err("mknodat(S_IFSOCK) made something that is not a socket's node");
-                }
-                Ok(())
-            })();
-            let _ = crate::fs::Vfs::remove(probe_path);
-            if let Err(why) = result {
-                serial_println!("[syscall/linux]   FAIL: mknod: {}", why);
-                return Err(KernelError::InternalError);
             }
             serial_println!(
-                "[syscall/linux]   mknod Linux gate ladder (EFAULT/ENOENT/ENAMETOOLONG/EINVAL/EPERM), \
-                 and the regular file and socket node it makes: OK"
+                "[syscall/linux]   mknod Linux gate ladder (EFAULT/ENOENT/ENAMETOOLONG/EINVAL/EPERM): OK"
             );
         }
         Ok(())

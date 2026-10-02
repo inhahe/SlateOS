@@ -1904,6 +1904,13 @@ extern "C" fn kernel_main() -> ! {
                 selftest::Severity::Diagnostic,
                 fs::vfs::socket_node_self_test(),
             );
+            // Who owns a new node: its creator, a set-group-ID directory's
+            // group, root for the kernel.
+            selftest::dispatch_debug(
+                "VFS new-node owner",
+                selftest::Severity::Diagnostic,
+                fs::vfs::owner_self_test(),
+            );
             // Unix-domain sockets by name: datagrams and streams over abstract
             // names and /tmp nodes (needs the socket nodes above).
             selftest::dispatch_debug(
@@ -2111,6 +2118,14 @@ extern "C" fn kernel_main() -> ! {
         "rename_noreplace",
         selftest::Severity::Diagnostic,
         syscall::linux::self_test_rename_noreplace(),
+    );
+
+    // The regular files and socket nodes mknod makes (the writable /tmp,
+    // for the same reason; self_test() has mknod's refusals).
+    selftest::dispatch_debug(
+        "mknod nodes",
+        selftest::Severity::Diagnostic,
+        syscall::linux::self_test_mknod_nodes(),
     );
 
     // The twelve xattr calls on files (needs the writable /tmp, so it runs
@@ -3567,6 +3582,15 @@ extern "C" fn kernel_main() -> ! {
         "Linux slate channel descriptors (ring 3)",
         selftest::Severity::Diagnostic,
         proc::spawn::self_test_linux_slate_channels(),
+    );
+
+    // Ring-3 end-to-end test of AF_UNIX sockets by name: datagrams by
+    // abstract name and by a /tmp path, a stream through listen/connect/
+    // accept, SO_PEERCRED, end of file, EADDRINUSE and unlink.
+    selftest::dispatch_debug(
+        "Linux Unix-domain sockets (ring 3)",
+        selftest::Severity::Diagnostic,
+        proc::spawn::self_test_linux_unix_sockets(),
     );
 
     // Where each process's program headers are: found in a loaded segment,

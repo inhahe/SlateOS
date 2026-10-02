@@ -53,8 +53,16 @@
 //! A connected stream socket knows its peer's process, uid and gid as they
 //! were at `connect` (on the server side) or `listen` (on the client side),
 //! which is Linux's `SO_PEERCRED`. Every datagram carries its sender's, which
-//! is what `SCM_CREDENTIALS` reports. A process cannot state these; the
-//! kernel records them. Kernel context has none to record.
+//! is what `SCM_CREDENTIALS` reports. The kernel records them; a sender may
+//! instead state them for one datagram (`SCM_CREDENTIALS` on a send), but
+//! only what Linux would let it claim -- its own, or, for root, another live
+//! process's ([`check_stated_cred`]). Kernel context has none to record.
+//!
+//! A stream reports the credentials of its connection, not of each write:
+//! the bytes are a [`super::stream_socket`] pair's, which keeps no boundaries
+//! to hang them on. Linux records them per write, which differs only when
+//! one connection is written by several processes, or root states another
+//! process's credentials on a stream.
 //!
 //! ## Lock order
 //!
@@ -230,6 +238,10 @@ struct Socket {
     /// `shutdown`: a datagram socket's own halves. A stream's are its pair's.
     rd_shut: bool,
     wr_shut: bool,
+    /// `SO_PASSCRED`: each receive asks for the sender's credentials as a
+    /// control message. The credentials are recorded either way; this only
+    /// says whether a receive hands them back.
+    passcred: bool,
     /// Tasks waiting for something to take -- a datagram, a connection to
     /// accept -- or polling.
     readers: WaiterSet,
@@ -251,6 +263,7 @@ impl Socket {
             default_peer: None,
             rd_shut: false,
             wr_shut: false,
+            passcred: false,
             readers: WaiterSet::new(),
             room: WaiterSet::new(),
         }
@@ -328,6 +341,57 @@ fn current_cred() -> Option<PeerCred> {
     }
     let (uid, gid) = crate::proc::pcb::process_uid_gid(pid)?;
     Some(PeerCred { pid, uid, gid })
+}
+
+/// Check credentials the caller states for one message it sends
+/// (`SCM_CREDENTIALS` on a send), as Linux's `scm_check_creds` and
+/// `__scm_send` do: the pid must be the caller's own, or -- for root
+/// (`CAP_SYS_ADMIN`) -- any live process's; the uid and gid the caller's own,
+/// or any for root (`CAP_SETUID`, `CAP_SETGID`). Root is uid 0, as the Linux
+/// layer's `set*id` calls take it; the caller has one uid and one gid, so
+/// "one of its real, effective or saved ids" is that one. Kernel context may
+/// state anything that names a live process.
+///
+/// # Errors
+///
+/// `InvalidArgument` for a uid or gid of -1 (no id); `NotPermitted`
+/// (`EPERM`) for a claim the caller may not make, or a caller whose identity
+/// cannot be read; `NoSuchProcess` (`ESRCH`) for a pid naming no process.
+pub fn check_stated_cred(stated: PeerCred) -> KernelResult<PeerCred> {
+    let caller = match crate::proc::thread::owner_process(sched::current_task_id()) {
+        None | Some(0) => None,
+        Some(pid) => {
+            let (uid, gid) =
+                crate::proc::pcb::process_uid_gid(pid).ok_or(KernelError::NotPermitted)?;
+            Some(PeerCred { pid, uid, gid })
+        }
+    };
+    check_stated_cred_for(caller, stated, |pid| crate::proc::pcb::state(pid).is_some())
+}
+
+/// [`check_stated_cred`] for a caller whose own credentials are `caller`
+/// (`None`: kernel context), with `alive` saying whether a pid names a
+/// process -- a zombie counts, as Linux finds a pid until it is reaped.
+fn check_stated_cred_for(
+    caller: Option<PeerCred>,
+    stated: PeerCred,
+    alive: impl Fn(crate::proc::pcb::ProcessId) -> bool,
+) -> KernelResult<PeerCred> {
+    if stated.uid == u32::MAX || stated.gid == u32::MAX {
+        return Err(KernelError::InvalidArgument);
+    }
+    if let Some(me) = caller {
+        // Root may claim anything; anyone else only exactly themselves.
+        let may =
+            me.uid == 0 || (stated.pid == me.pid && stated.uid == me.uid && stated.gid == me.gid);
+        if !may {
+            return Err(KernelError::NotPermitted);
+        }
+    }
+    if !alive(stated.pid) {
+        return Err(KernelError::NoSuchProcess);
+    }
+    Ok(stated)
 }
 
 /// The wait record a task parked on `h` publishes.
@@ -487,6 +551,56 @@ pub fn bind_node(h: UnixHandle, id: FileId, path: &Path, addr: Address) -> Kerne
     Ok(())
 }
 
+/// Bind `h` to a new socket node at the resolved path `path`, with
+/// permission bits `mode` (already umask-masked), reporting `reported` -- the
+/// path as the binder gave it -- as its address. Both ABIs' `bind` to a path.
+///
+/// # Errors
+///
+/// `InvalidHandle`; `InvalidArgument` if `h` is bound already (checked before
+/// a node is made, so a refused `bind` leaves none behind); `AddrInUse` if the
+/// name exists; what [`crate::fs::Vfs::mknod_socket`] reports otherwise.
+pub fn bind_path(h: UnixHandle, path: &Path, reported: Vec<u8>, mode: u16) -> KernelResult<()> {
+    if is_bound(h)? {
+        return Err(KernelError::InvalidArgument);
+    }
+    // No lock held here: the VFS is never entered with TABLE held.
+    let id = crate::fs::Vfs::mknod_socket(path, mode).map_err(|e| match e {
+        KernelError::AlreadyExists => KernelError::AddrInUse,
+        e => e,
+    })?;
+    bind_node(h, id, path, Address::Path(reported)).inspect_err(|_| {
+        // Bound meanwhile by another thread: the node this call made leads
+        // nowhere, so it goes again. A failure to remove it leaves only an
+        // inert node.
+        let _ = crate::fs::Vfs::remove(path);
+    })
+}
+
+/// The socket a resolved filesystem path leads to, for `connect` and
+/// `sendto`: Linux's checks, in its order.
+///
+/// # Errors
+///
+/// `NotFound` if nothing is there; `ConnectionRefused` if it is not a
+/// socket's node (or has no identity to find one by); `PermissionDenied` if
+/// the caller may not write the node -- Linux asks for write permission, and
+/// a read-only mount does not stop a connect (its `sb_permission` spares
+/// sockets), so that refusal alone is passed over.
+pub fn name_at(path: &Path) -> KernelResult<Name> {
+    let st = crate::fs::Vfs::stat(path)?;
+    if st.entry_type != crate::fs::vfs::EntryType::Socket {
+        return Err(KernelError::ConnectionRefused);
+    }
+    match crate::fs::Vfs::access(path, crate::fs::vfs::W_OK) {
+        Ok(()) | Err(KernelError::ReadOnlyFilesystem) => {}
+        Err(e) => return Err(e),
+    }
+    crate::fs::Vfs::file_identity(path)?
+        .map(Name::Node)
+        .ok_or(KernelError::ConnectionRefused)
+}
+
 /// Bind `h` to the abstract name `name` (without its leading NUL).
 ///
 /// # Errors
@@ -561,6 +675,23 @@ pub fn peer_cred(h: UnixHandle) -> KernelResult<Option<PeerCred>> {
     }
 }
 
+/// Ask (or stop asking) for the sender's credentials with each receive on
+/// `h` (`SO_PASSCRED`).
+///
+/// # Errors
+///
+/// `InvalidHandle`.
+pub fn set_passcred(h: UnixHandle, on: bool) -> KernelResult<()> {
+    TABLE.lock().socket_mut(h)?.passcred = on;
+    Ok(())
+}
+
+/// Whether receives on `h` hand back the sender's credentials.
+#[must_use]
+pub fn passcred(h: UnixHandle) -> bool {
+    TABLE.lock().sockets.get(&h.0).is_some_and(|s| s.passcred)
+}
+
 /// Whether `h` is listening (`SO_ACCEPTCONN`).
 #[must_use]
 pub fn is_listening(h: UnixHandle) -> bool {
@@ -621,12 +752,11 @@ pub fn listen(h: UnixHandle, backlog: usize) -> KernelResult<()> {
 /// # Errors
 ///
 /// `InvalidHandle`; `ConnectionRefused` if nothing live is bound there, or
-/// it is not listening; `ProtocolType`-shaped mismatches (a stream to a
-/// datagram socket, or the reverse) are `ConnectionRefused` too, which Linux
-/// reports as `EPROTOTYPE` -- see the syscall layer; `AlreadyExists`-shaped
-/// `ConnectAlready` if `h` is connected (`EISCONN`); `InvalidArgument` if it
-/// is listening; `WouldBlock` for a full backlog when `nonblocking`;
-/// `Interrupted`.
+/// a stream socket bound there is not listening; `WrongSocketType`
+/// (`EPROTOTYPE`) if the socket there is of the other kind;
+/// `ConnectAlready` if `h` is a connected stream (`EISCONN`);
+/// `InvalidArgument` if it is listening; `WouldBlock` for a full backlog
+/// when `nonblocking`; `Interrupted`.
 pub fn connect(h: UnixHandle, target: &Name, nonblocking: bool) -> KernelResult<()> {
     let kind = kind(h).ok_or(KernelError::InvalidHandle)?;
     match kind {
@@ -634,7 +764,7 @@ pub fn connect(h: UnixHandle, target: &Name, nonblocking: bool) -> KernelResult<
             let mut t = TABLE.lock();
             let peer = t.lookup(target).ok_or(KernelError::ConnectionRefused)?;
             if t.sockets.get(&peer).map(|s| s.kind) != Some(Kind::Dgram) {
-                return Err(KernelError::ConnectionRefused);
+                return Err(KernelError::WrongSocketType);
             }
             t.socket_mut(h)?.default_peer = Some(peer);
             Ok(())
@@ -668,7 +798,7 @@ fn connect_stream(h: UnixHandle, target: &Name, nonblocking: bool) -> KernelResu
                 .ok_or(KernelError::ConnectionRefused)?;
             s.room.remove(task);
             if s.kind != Kind::Stream {
-                return Err(KernelError::ConnectionRefused);
+                return Err(KernelError::WrongSocketType);
             }
             let server_cred = s.listen_cred;
             let server_addr = s.local();
@@ -720,8 +850,10 @@ pub fn accept(h: UnixHandle, nonblocking: bool) -> KernelResult<Accepted> {
             let mut t = TABLE.lock();
             let s = t.socket_mut(h)?;
             s.readers.remove(task);
-            // Linux: an accepted socket reports the listener's name.
+            // Linux: an accepted socket reports the listener's name, and
+            // inherits its SO_PASSCRED.
             let bound = s.bound.clone();
+            let passcred = s.passcred;
             let State::Listening { backlog, .. } = &mut s.state else {
                 return Err(KernelError::InvalidArgument);
             };
@@ -737,6 +869,7 @@ pub fn accept(h: UnixHandle, nonblocking: bool) -> KernelResult<Accepted> {
                         peer_cred: p.peer_cred,
                     };
                     sock.bound = bound;
+                    sock.passcred = passcred;
                     t.sockets.insert(id, sock);
                     drop(t);
                     wake_all(wakes);
@@ -783,6 +916,22 @@ fn stream_of(h: UnixHandle) -> KernelResult<StreamSocketHandle> {
 /// `ConnectionRefused` when the datagram destination has closed;
 /// `WouldBlock` when `nonblocking` and there is no room; `Interrupted`.
 pub fn send(h: UnixHandle, data: &[u8], nonblocking: bool) -> KernelResult<usize> {
+    send_as(h, data, None, nonblocking)
+}
+
+/// [`send`], with the credentials a datagram carries stated by the sender
+/// (`Some`, already through [`check_stated_cred`]) rather than recorded by the
+/// kernel (`None`). A stream ignores them: it reports its connection's.
+///
+/// # Errors
+///
+/// As [`send`].
+pub fn send_as(
+    h: UnixHandle,
+    data: &[u8],
+    stated: Option<PeerCred>,
+    nonblocking: bool,
+) -> KernelResult<usize> {
     match kind(h).ok_or(KernelError::InvalidHandle)? {
         Kind::Stream => {
             let stream = stream_of(h)?;
@@ -801,7 +950,7 @@ pub fn send(h: UnixHandle, data: &[u8], nonblocking: bool) -> KernelResult<usize
                 .socket(h)?
                 .default_peer
                 .ok_or(KernelError::NotConnected)?;
-            send_dgram(h, peer, data, nonblocking)
+            send_dgram(h, peer, data, stated, nonblocking)
         }
     }
 }
@@ -810,14 +959,32 @@ pub fn send(h: UnixHandle, data: &[u8], nonblocking: bool) -> KernelResult<usize
 ///
 /// # Errors
 ///
-/// As [`send`]; `ConnectionRefused` if nothing live is bound at `target` or
-/// it is not a datagram socket. On a stream socket, `ConnectAlready`
-/// (`EISCONN`) if connected and `NotSupported` (`EOPNOTSUPP`) if not, as
-/// Linux answers a stream `sendto` that names an address.
+/// As [`send`]; `ConnectionRefused` if nothing live is bound at `target`,
+/// `WrongSocketType` (`EPROTOTYPE`) if a stream socket is. On a stream
+/// socket, `ConnectAlready` (`EISCONN`) if connected and `NotSupported`
+/// (`EOPNOTSUPP`) if not, as Linux answers a stream `sendto` that names an
+/// address.
 pub fn send_to(
     h: UnixHandle,
     data: &[u8],
     target: &Name,
+    nonblocking: bool,
+) -> KernelResult<usize> {
+    send_to_as(h, data, target, None, nonblocking)
+}
+
+/// [`send_to`], with the datagram's credentials stated by the sender (`Some`,
+/// already through [`check_stated_cred`]) rather than recorded by the kernel
+/// (`None`).
+///
+/// # Errors
+///
+/// As [`send_to`].
+pub fn send_to_as(
+    h: UnixHandle,
+    data: &[u8],
+    target: &Name,
+    stated: Option<PeerCred>,
     nonblocking: bool,
 ) -> KernelResult<usize> {
     match kind(h).ok_or(KernelError::InvalidHandle)? {
@@ -830,20 +997,26 @@ pub fn send_to(
                 .lock()
                 .lookup(target)
                 .ok_or(KernelError::ConnectionRefused)?;
-            send_dgram(h, peer, data, nonblocking)
+            send_dgram(h, peer, data, stated, nonblocking)
         }
     }
 }
 
 /// Queue one datagram from `h` on the socket `peer`, waiting for room unless
-/// `nonblocking`.
-fn send_dgram(h: UnixHandle, peer: u64, data: &[u8], nonblocking: bool) -> KernelResult<usize> {
+/// `nonblocking`. It carries `stated`, or else the caller's credentials.
+fn send_dgram(
+    h: UnixHandle,
+    peer: u64,
+    data: &[u8],
+    stated: Option<PeerCred>,
+    nonblocking: bool,
+) -> KernelResult<usize> {
     if data.len() > MAX_DGRAM {
         return Err(KernelError::MsgSize);
     }
     let pid = current_user_pid();
     let task = sched::current_task_id();
-    let cred = current_cred();
+    let cred = stated.or_else(current_cred);
     loop {
         {
             let mut t = TABLE.lock();
@@ -857,7 +1030,7 @@ fn send_dgram(h: UnixHandle, peer: u64, data: &[u8], nonblocking: bool) -> Kerne
             };
             dest.room.remove(task);
             if dest.kind != Kind::Dgram {
-                return Err(KernelError::ConnectionRefused);
+                return Err(KernelError::WrongSocketType);
             }
             if dest.rd_shut {
                 // Linux discards datagrams to a socket whose reading half is
@@ -1222,31 +1395,15 @@ fn reports_node(name: &Path) -> bool {
         .any(|b| b.reported.as_path() == name)
 }
 
-/// Every bound name and its socket's kind, for a listing of bound sockets:
-/// `(reported name, kind, listening)`.
-#[must_use]
-pub fn bound_names() -> Vec<(PathBuf, Kind, bool)> {
-    let t = TABLE.lock();
-    t.names
-        .values()
-        .filter_map(|b| {
-            let s = t.sockets.get(&b.socket)?;
-            Some((
-                b.reported.clone(),
-                s.kind,
-                matches!(s.state, State::Listening { .. }),
-            ))
-        })
-        .collect()
-}
-
 // ---------------------------------------------------------------------------
 // Self-test
 // ---------------------------------------------------------------------------
 
 /// The socket objects, in kernel context: datagrams and streams over
-/// abstract and path names, a node's rename and removal, the backlog's
-/// limit, refusals, `socketpair`, readiness, and what closing ends.
+/// abstract and path names, a node's rename and removal, credentials a
+/// sender states and who may state them, `SO_PASSCRED` and its inheritance
+/// by an accepted connection, the backlog's limit, refusals, `socketpair`,
+/// readiness, and what closing ends.
 ///
 /// Nothing here blocks: every call that could wait is made when it need
 /// not, or with `nonblocking`.
@@ -1345,6 +1502,65 @@ fn run_self_test(opened: &mut Vec<UnixHandle>) -> Result<(), &'static str> {
         return Err("send_to a name nothing has was not refused");
     }
 
+    // --- credentials a sender states (SCM_CREDENTIALS on a send) ---
+    let claim = |pid, uid, gid| PeerCred { pid, uid, gid };
+    let alive = |pid: crate::proc::pcb::ProcessId| pid == 7 || pid == 9;
+    let me = claim(7, 1000, 100);
+    if check_stated_cred_for(Some(me), me, alive) != Ok(me) {
+        return Err("a process may not state its own credentials");
+    }
+    for (stated, why) in [
+        (
+            claim(9, 1000, 100),
+            "a process claimed another process's pid",
+        ),
+        (claim(7, 0, 100), "a process claimed another uid"),
+        (claim(7, 1000, 0), "a process claimed another gid"),
+    ] {
+        if check_stated_cred_for(Some(me), stated, alive) != Err(KernelError::NotPermitted) {
+            return Err(why);
+        }
+    }
+    let root = claim(7, 0, 0);
+    if check_stated_cred_for(Some(root), claim(9, 1000, 100), alive) != Ok(claim(9, 1000, 100)) {
+        return Err("root may not state another live process's credentials");
+    }
+    if check_stated_cred_for(Some(root), claim(8, 0, 0), alive) != Err(KernelError::NoSuchProcess) {
+        return Err("a claim naming no process was not NoSuchProcess");
+    }
+    if check_stated_cred_for(Some(root), claim(7, u32::MAX, 0), alive)
+        != Err(KernelError::InvalidArgument)
+        || check_stated_cred_for(Some(me), claim(7, 1000, u32::MAX), alive)
+            != Err(KernelError::InvalidArgument)
+    {
+        return Err("a uid or gid of -1 was not InvalidArgument");
+    }
+    if check_stated_cred_for(None, claim(9, 5, 5), alive) != Ok(claim(9, 5, 5)) {
+        return Err("kernel context may not state credentials");
+    }
+    let stated = claim(9, 1000, 100);
+    if send_to_as(client, b"s", &name, Some(stated), true) != Ok(1) {
+        return Err("send_to_as failed");
+    }
+    let carried = recv(server, &mut buf, true, false).map_err(|_| "recv failed")?;
+    if carried.cred != Some(stated) {
+        return Err("a datagram did not carry the credentials its sender stated");
+    }
+    if send_as(client, b"t", Some(stated), true) != Ok(1)
+        || recv(server, &mut buf, true, false).map(|r| r.cred) != Ok(Some(stated))
+    {
+        return Err("a datagram to the connected destination did not carry stated credentials");
+    }
+    // SO_PASSCRED: off on a new socket, and settable.
+    if passcred(server) {
+        return Err("a new socket asks for credentials");
+    }
+    set_passcred(server, true).map_err(|_| "set_passcred failed")?;
+    if !passcred(server) {
+        return Err("set_passcred did not take");
+    }
+    set_passcred(server, false).map_err(|_| "set_passcred failed")?;
+
     // --- datagrams by path: the node's identity leads to the socket ---
     let path = Path::new("/tmp/unix-selftest.sock");
     let moved = Path::new("/tmp/unix-selftest-moved.sock");
@@ -1384,6 +1600,7 @@ fn run_self_test(opened: &mut Vec<UnixHandle>) -> Result<(), &'static str> {
     }
     bind_abstract(listener, b"slate-selftest-stream").map_err(|_| "bind failed")?;
     listen(listener, 1).map_err(|_| "listen failed")?;
+    set_passcred(listener, true).map_err(|_| "set_passcred on the listener failed")?;
     if accept(listener, true).map(|a| a.handle) != Err(KernelError::WouldBlock) {
         return Err("accept with nothing waiting did not answer WouldBlock");
     }
@@ -1402,6 +1619,11 @@ fn run_self_test(opened: &mut Vec<UnixHandle>) -> Result<(), &'static str> {
     let accepted = accept(listener, true).map_err(|_| "accept failed")?;
     opened.push(accepted.handle);
     let s1 = accepted.handle;
+    if !passcred(s1) || passcred(c1) {
+        return Err(
+            "the accepted socket did not take its listener's SO_PASSCRED, or the client did",
+        );
+    }
     if accepted.peer != Address::Unnamed {
         return Err("an unbound client was reported with a name");
     }
@@ -1437,8 +1659,8 @@ fn run_self_test(opened: &mut Vec<UnixHandle>) -> Result<(), &'static str> {
     if connect(c3, &stream_name, true) != Err(KernelError::ConnectionRefused) {
         return Err("a closed listener's name still took connections");
     }
-    if connect(c3, &name, true) != Err(KernelError::ConnectionRefused) {
-        return Err("a stream connected to a datagram socket");
+    if connect(c3, &name, true) != Err(KernelError::WrongSocketType) {
+        return Err("a stream connecting to a datagram socket was not WrongSocketType");
     }
 
     // --- socketpair ---

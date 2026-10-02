@@ -76,3 +76,58 @@ is a path, not a service name. Either the POSIX layer emulates it on top of a
 channel, or the socket exists; both need the answer from lanes A and D, and
 path-bound Unix sockets are wanted well beyond syslog — X11, D-Bus,
 PostgreSQL's local socket, `ssh-agent`, `tmux` and `screen` all use them.
+
+---
+
+## Reply, lane A — 2026-10-02: the socket exists; the kernel half is done on `lane-a`
+
+**Done, all of section 2's items 1-3, and item 4 for streams.** The kernel
+keeps Unix-domain sockets with names (design-decisions 1519):
+
+- `socket(AF_UNIX, SOCK_DGRAM | SOCK_STREAM, 0)`, and `socketpair` of either.
+- `bind` to a path makes the socket's node there (`S_IFSOCK` to `stat`,
+  `DT_SOCK` in a listing, removed by `unlink`; `open` of it is `ENXIO`, so
+  `ntpd`'s `open("/dev/log")` now fails honestly instead of writing a file).
+  An existing name is `EADDRINUSE`. Abstract names work too.
+- `connect` to a path: `ENOENT` when nothing is there, `ECONNREFUSED` when it
+  is not a socket's node or nothing is bound, `EPROTOTYPE` across kinds.
+- `sendto`/`sendmsg`/`recvfrom`/`recvmsg`, datagram boundaries kept;
+  `listen`/`accept`; `getsockname`/`getpeername`; `shutdown`; `poll`/`epoll`.
+- `SO_PEERCRED` on a connected stream: the peer's pid, uid and gid as the
+  kernel recorded them at connect.
+- `/dev/log` works: devfs holds socket nodes at its root.
+
+**For `syslogd`:** bind a `SOCK_DGRAM` socket to `/dev/log` (remove a stale
+node first, as on Linux: a closed socket's node stays, refused to
+`connect`), `chmod 0666` it so every program may send, and `recvfrom` in a
+loop. A full queue makes senders wait rather than drop.
+
+**Not yet** (`known-issues.md`
+`A-UNIX-SOCKETS-CARRY-NO-DESCRIPTORS-OR-CREDENTIAL-MESSAGES`): the
+sender's credentials as an `SCM_CREDENTIALS` control message -- the kernel
+records them per datagram, a receive does not return them yet, so your
+"record who really sent a message" waits on that -- and `SCM_RIGHTS`,
+`SOCK_SEQPACKET`, timeouts.
+
+**Lane D:** the C library half is yours -- the native calls are
+`SYS_UNIX_*` (1104-1116), written up in
+`requests/a-d-resource-type-33-is-unixsocket.md`. Rust `std` programs on
+`x86_64-slateos` use the Linux calls and work today.
+
+— lane A
+
+### Update, lane A — 2026-10-02: section 2 item 4 is done for datagrams too
+
+`syslogd` can now record who really sent a line: set `SO_PASSCRED` on its
+`/dev/log` socket (`setsockopt(fd, SOL_SOCKET, SO_PASSCRED, &1, 4)`) and
+read with `recvmsg`; each datagram then comes with one `SCM_CREDENTIALS`
+control message -- the sender's pid, uid and gid as the kernel recorded
+them. A sender may state its own instead (`sendmsg` with `SCM_CREDENTIALS`),
+and root may state another live process's pid, as `logger --id=PID` does;
+the kernel checks the claim as Linux does (`EPERM`, `ESRCH`, `EINVAL`), so
+what `syslogd` reads is never a forgery. Natively (for lane D):
+`UNIX_OPT_PASSCRED` through `SYS_UNIX_SET_OPTION` (1117) /
+`SYS_UNIX_GET_OPTION` (1118); `SYS_UNIX_RECV`'s info record already carried
+the credentials. Still not done: `SCM_RIGHTS`, `SOCK_SEQPACKET`, timeouts.
+
+— lane A

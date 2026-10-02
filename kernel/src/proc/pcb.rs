@@ -9801,8 +9801,6 @@ fn test_exit_notice() -> KernelResult<()> {
     result
 }
 
-/// Test: [`inherit_job`] puts a child in its parent's group and session, and
-/// fails cleanly for a missing parent.
 /// [`may_inspect`] and [`may_access`], the rule `/proc` applies to who may
 /// read what of a process (design-decisions §1516): the kernel, the process
 /// itself, uid 0, its own user's processes while it is dumpable, and a holder
@@ -9890,6 +9888,8 @@ fn test_may_inspect() -> KernelResult<()> {
     }
 }
 
+/// Test: [`inherit_job`] puts a child in its parent's group and session, and
+/// fails cleanly for a missing parent.
 fn test_inherit_job() -> KernelResult<()> {
     let leader = create("job-leader", 0);
     let member = create("job-member", leader);

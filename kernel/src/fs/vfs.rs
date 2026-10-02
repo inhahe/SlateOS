@@ -3316,10 +3316,17 @@ impl Vfs {
         // Quota: check whether this write would exceed the user's quota.
         // uid 0 is the default until per-process identity is wired up.
         enforce_quota_write(path, data.len() as u64)?;
+        let creator = creator_ids();
         let cache_inval = {
             let (fs, fs_id, _opts, relative) = resolve_mount(path)?;
             let mut guard = fs.lock();
+            // A write that makes the file gives it its owner; one that
+            // replaces an existing file's contents leaves the owner be.
+            let made = guard.lstat(&relative).is_err();
             guard.write_file(&relative, data)?;
+            if made {
+                init_new_owner(&mut **guard, &relative, creator, false)?;
+            }
             // Coherence: a full overwrite replaces the file's contents — drop
             // any cached pages so mappers see the new bytes.
             cache_identity(&mut guard, fs_id, &relative)
@@ -3601,34 +3608,37 @@ impl Vfs {
         super::intercept::pre_mkdir(&path)?;
         // Quota: check inode creation limit.
         enforce_quota_create(&path)?;
+        let creator = creator_ids();
         {
             let (fs, _id, _opts, relative) = resolve_mount(&path)?;
-            fs.lock().mkdir(&relative)?;
-        }
-        // Stamp the caller-supplied (umask-masked) permission bits; the
-        // underlying mkdir stamps a 0o755 default, so only override when the
-        // requested mode differs.
-        let perm = mode & 0o1777;
-        if perm != Self::DEFAULT_DIR_MODE {
-            // `_resolved`: `path` is resolved, and `set_permissions` would
-            // apply a jailed caller's jail to it a second time.
-            match Self::set_permissions_resolved(&path, perm) {
-                Ok(()) => {}
-                // `NotSupported` only, and for the same reason the open
-                // path tolerates it (see `handle.rs`, `open_resolved`): a
-                // filesystem with no permission model must not turn a
-                // directory that WAS created into a reported failure with
-                // the directory left behind. FAT stores no mode bits and
-                // answers `NotSupported`; Linux's vfat likewise ignores the
-                // mode and lets the mount's umask govern.
-                //
-                // Any other error still fails the call: on a filesystem
-                // that can store a mode, failing to stamp one is a real
-                // failure, and 639's agreement not to silently discard a
-                // permission bit the caller asked for holds in full.
-                Err(KernelError::NotSupported) => {}
-                Err(e) => return Err(e),
+            let mut guard = fs.lock();
+            guard.mkdir(&relative)?;
+            // Stamp the caller-supplied (umask-masked) permission bits; the
+            // underlying mkdir stamps a 0o755 default, so only override when
+            // the requested mode differs. Under the same lock as the mkdir,
+            // and before the owner, whose set-group-ID inheritance adds a bit
+            // this would otherwise overwrite.
+            let perm = mode & 0o1777;
+            if perm != Self::DEFAULT_DIR_MODE {
+                match guard.set_permissions(&relative, perm) {
+                    Ok(()) => {}
+                    // `NotSupported` only, and for the same reason the open
+                    // path tolerates it (see `handle.rs`, `open_resolved`): a
+                    // filesystem with no permission model must not turn a
+                    // directory that WAS created into a reported failure with
+                    // the directory left behind. FAT stores no mode bits and
+                    // answers `NotSupported`; Linux's vfat likewise ignores
+                    // the mode and lets the mount's umask govern.
+                    //
+                    // Any other error still fails the call: on a filesystem
+                    // that can store a mode, failing to stamp one is a real
+                    // failure, and 639's agreement not to silently discard a
+                    // permission bit the caller asked for holds in full.
+                    Err(KernelError::NotSupported) => {}
+                    Err(e) => return Err(e),
+                }
             }
+            init_new_owner(&mut **guard, &relative, creator, true)?;
         }
         // Charge quota for new inode.
         super::quota::charge_inode(0, 0);
@@ -4124,7 +4134,31 @@ impl Vfs {
             mp.objects = mp.objects.saturating_add(1);
             (Arc::clone(&mp.fs), mp.fs_id, relative.to_path_buf())
         };
-        let made = fs.lock().create_unnamed(&relative, mode);
+        let creator = creator_ids();
+        let made = {
+            let mut guard = fs.lock();
+            guard.create_unnamed(&relative, mode).and_then(|ino| {
+                // Its owner, as a named file's (`init_new_owner`), by inode:
+                // it has no name to give it one by.
+                let parent = guard.metadata(&relative).ok();
+                let gid = match parent {
+                    Some(p) if p.permissions & S_ISGID != 0 => p.gid,
+                    _ => creator.1,
+                };
+                if (creator.0, gid) != (0, 0) {
+                    match guard.chown_ino(ino, creator.0, gid) {
+                        Ok(()) | Err(KernelError::NotSupported) => {}
+                        Err(e) => {
+                            // Let go of the hold the creation gave it, so the
+                            // nameless file does not outlive the failure.
+                            guard.unpin_ino(ino);
+                            return Err(e);
+                        }
+                    }
+                }
+                Ok(ino)
+            })
+        };
         let ino = match made {
             Ok(ino) => ino,
             Err(e) => {
@@ -6463,9 +6497,12 @@ impl Vfs {
         // name created in its directory, as a file is.
         super::intercept::pre_check(super::intercept::FsOp::Write, &path, None)?;
         enforce_quota_create(&path)?;
+        let creator = creator_ids();
         let (fs_id, ino) = {
             let (fs, fs_id, _opts, relative) = resolve_mount(&path)?;
-            let ino = fs.lock().mknod_socket(&relative, mode & 0o7777)?;
+            let mut guard = fs.lock();
+            let ino = guard.mknod_socket(&relative, mode & 0o7777)?;
+            init_new_owner(&mut **guard, &relative, creator, false)?;
             (fs_id, ino)
         };
         if ino == 0 {
@@ -6505,9 +6542,12 @@ impl Vfs {
         super::intercept::pre_check(super::intercept::FsOp::Symlink, &path, Some(target))?;
         // Quota: creating a symlink consumes an inode.
         enforce_quota_create(&path)?;
+        let creator = creator_ids();
         {
             let (fs, _id, _opts, relative) = resolve_mount(&path)?;
-            fs.lock().symlink(&relative, target)?;
+            let mut guard = fs.lock();
+            guard.symlink(&relative, target)?;
+            init_new_owner(&mut **guard, &relative, creator, false)?;
         }
         // Charge inode quota for new symlink.
         super::quota::charge_inode(0, 0);
@@ -8159,6 +8199,22 @@ fn mount_matches(mount_path: &Path, path: &Path) -> bool {
     path.starts_with(mount_path)
 }
 
+/// Where `path` lands when the subtree at `from` moves to `to`: `from` itself
+/// becomes `to`, `from/x` becomes `to/x`, and `None` means `path` is not in
+/// that subtree. [`crate::fs::pathutil::rebase`], except that `from` may be
+/// `/`: a pivot moves the root, which no rename does.
+fn rebase_under(path: &Path, from: &Path, to: &Path) -> Option<PathBuf> {
+    if from.components().next().is_none() {
+        // Everything is under `/`: `/x` becomes `to/x`.
+        let mut out = to.to_path_buf();
+        for c in path.components() {
+            out.push(c);
+        }
+        return Some(out);
+    }
+    crate::fs::pathutil::rebase(path, from, to)
+}
+
 /// A mount path in its canonical spelling: absolute, with no trailing
 /// separator and no repeated ones — except the root mount, which *is* a
 /// single separator.
@@ -8183,22 +8239,6 @@ fn mount_matches(mount_path: &Path, path: &Path) -> bool {
 ///
 /// Note this normalises *separators only*.  `.` and `..` are rejected
 /// outright at registration instead — see [`Vfs::mount_with_options`].
-/// Where `path` lands when the subtree at `from` moves to `to`: `from` itself
-/// becomes `to`, `from/x` becomes `to/x`, and `None` means `path` is not in
-/// that subtree. [`crate::fs::pathutil::rebase`], except that `from` may be
-/// `/`: a pivot moves the root, which no rename does.
-fn rebase_under(path: &Path, from: &Path, to: &Path) -> Option<PathBuf> {
-    if from.components().next().is_none() {
-        // Everything is under `/`: `/x` becomes `to/x`.
-        let mut out = to.to_path_buf();
-        for c in path.components() {
-            out.push(c);
-        }
-        return Some(out);
-    }
-    crate::fs::pathutil::rebase(path, from, to)
-}
-
 fn normalize_mount_path(p: &Path) -> PathBuf {
     // Starting from `/` rather than the empty path is what gives the
     // zero-component case (`/`, `//`, `///`) the root mount's spelling;
@@ -8505,6 +8545,67 @@ pub(crate) enum PathAccess {
     Write,
     /// The operation executes the object.
     Execute,
+}
+
+/// The set-group-ID bit of a mode.
+pub const S_ISGID: u16 = 0o2000;
+
+/// Who makes a node now: the calling process's uid and gid, or root's in
+/// kernel context.
+///
+/// Read before a filesystem's lock is taken -- as [`check_path_access`]
+/// reads credentials -- so the process table is never locked inside a
+/// filesystem's lock.
+fn creator_ids() -> (u32, u32) {
+    let task = crate::sched::current_task_id();
+    match crate::proc::thread::owner_process(task) {
+        Some(pid) if pid != 0 => crate::proc::pcb::process_uid_gid(pid).unwrap_or((0, 0)),
+        _ => (0, 0),
+    }
+}
+
+/// Give the node just made at `relative` its owner, under the same hold of
+/// the filesystem's lock that made it -- so no other operation sees it
+/// owned by anyone else -- as Linux's `inode_init_owner` does at creation:
+///
+/// - the owner is the creator (`creator`, from [`creator_ids`]);
+/// - the group is the creator's, unless the directory it was made in is
+///   set-group-ID, when it is the directory's (a shared project directory
+///   keeps its group), and a directory made there is set-group-ID too.
+///
+/// A filesystem with no owners (FAT) answers `NotSupported`, which is not a
+/// failure of the creation. Until 2026-10-02 nothing set an owner at all, so
+/// every node was root's whoever made it
+/// (`A-NEW-FILES-ARE-OWNED-BY-UID-0-WHOEVER-CREATES-THEM`).
+fn init_new_owner(
+    fs: &mut dyn FileSystem,
+    relative: &Path,
+    creator: (u32, u32),
+    is_dir: bool,
+) -> KernelResult<()> {
+    let parent = relative.parent().unwrap_or(Path::new("/"));
+    let (parent_mode, parent_gid) = match fs.metadata(parent) {
+        Ok(m) => (m.permissions, m.gid),
+        // No metadata for the directory: the creator's group, as an ordinary
+        // directory would give.
+        Err(_) => (0, creator.1),
+    };
+    let setgid_dir = parent_mode & S_ISGID != 0;
+    let gid = if setgid_dir { parent_gid } else { creator.1 };
+    if (creator.0, gid) != (0, 0) {
+        match fs.set_owner_no_follow(relative, creator.0, gid) {
+            Ok(()) | Err(KernelError::NotSupported) => {}
+            Err(e) => return Err(e),
+        }
+    }
+    if is_dir && setgid_dir {
+        let mode = fs.lmetadata(relative).map_or(0, |m| m.permissions);
+        match fs.set_permissions_no_follow(relative, mode | S_ISGID) {
+            Ok(()) | Err(KernelError::NotSupported) => {}
+            Err(e) => return Err(e),
+        }
+    }
+    Ok(())
 }
 
 /// The single permission gate every path operation passes through.
@@ -11746,6 +11847,96 @@ pub fn socket_node_self_test() -> KernelResult<()> {
     );
 
     serial_println!("[vfs] Socket-node self-test PASSED");
+    Ok(())
+}
+
+/// Who owns a new node (`init_new_owner`): a file, directory, symlink and
+/// socket node made by a uid-1000 process are its; a file it overwrites
+/// keeps its owner; in a set-group-ID directory the group is the
+/// directory's and a new directory is set-group-ID too; kernel context
+/// makes root's.
+///
+/// # Errors
+///
+/// `InternalError` naming the first check that failed.
+pub fn owner_self_test() -> KernelResult<()> {
+    use crate::proc::pcb;
+    use crate::proc::thread::self_test_as_process;
+    use crate::serial_println;
+
+    serial_println!("[vfs] Running new-node owner self-test...");
+    let dir = "/_owner_selftest";
+    if Vfs::mounts()
+        .iter()
+        .any(|(p, _)| p.as_path() == Path::new(dir))
+    {
+        // A previous boot's leftover; the test needs the name.
+        let _ = Vfs::unmount(dir);
+    }
+    crate::fs::memfs::mount(dir)?;
+    let pid = pcb::create("owner-selftest", 0);
+    let result = (|| -> Result<(), &'static str> {
+        pcb::set_credentials(pid, pcb::ProcessCredentials::new(1000, 1000))
+            .map_err(|_| "set_credentials failed")?;
+        let owner = |p: &str| Vfs::lmetadata(p).map(|m| (m.uid, m.gid, m.permissions));
+        // Made by the kernel: root's.
+        Vfs::write_file("/_owner_selftest/rootfile", b"r").map_err(|_| "kernel write")?;
+        if owner("/_owner_selftest/rootfile").map(|o| (o.0, o.1)) != Ok((0, 0)) {
+            return Err("a file the kernel made is not root's");
+        }
+        // A set-group-ID directory of group 50.
+        Vfs::mkdir_mode("/_owner_selftest/shared", 0o775).map_err(|_| "mkdir shared")?;
+        Vfs::set_owner("/_owner_selftest/shared", 0, 50).map_err(|_| "chown shared")?;
+        Vfs::set_permissions("/_owner_selftest/shared", 0o2775).map_err(|_| "chmod shared")?;
+        let made = self_test_as_process(pid, || -> KernelResult<()> {
+            Vfs::write_file("/_owner_selftest/f", b"x")?;
+            Vfs::mkdir_mode("/_owner_selftest/d", 0o755)?;
+            Vfs::symlink("/_owner_selftest/l", "f")?;
+            Vfs::mknod_socket("/_owner_selftest/s", 0o755)?;
+            Vfs::write_file("/_owner_selftest/rootfile", b"overwritten")?;
+            Vfs::write_file("/_owner_selftest/shared/g", b"y")?;
+            Vfs::mkdir_mode("/_owner_selftest/shared/sub", 0o755)?;
+            Ok(())
+        });
+        made.map_err(|_| "a creation as the uid-1000 process failed")?;
+        for p in [
+            "/_owner_selftest/f",
+            "/_owner_selftest/d",
+            "/_owner_selftest/l",
+            "/_owner_selftest/s",
+        ] {
+            if owner(p).map(|o| (o.0, o.1)) != Ok((1000, 1000)) {
+                serial_println!("[vfs]   {} is {:?}", p, owner(p));
+                return Err("a node a uid-1000 process made is not its");
+            }
+        }
+        if owner("/_owner_selftest/rootfile").map(|o| (o.0, o.1)) != Ok((0, 0)) {
+            return Err("overwriting a file changed its owner");
+        }
+        if owner("/_owner_selftest/shared/g").map(|o| (o.0, o.1)) != Ok((1000, 50)) {
+            return Err("a file in a set-group-ID directory did not take the directory's group");
+        }
+        match owner("/_owner_selftest/shared/sub") {
+            Ok((1000, 50, mode)) if mode & S_ISGID != 0 && mode & 0o777 == 0o755 => {}
+            other => {
+                serial_println!("[vfs]   shared/sub is {:?}", other);
+                return Err(
+                    "a directory in a set-group-ID directory is not set-group-ID with its group",
+                );
+            }
+        }
+        Ok(())
+    })();
+    pcb::destroy(pid);
+    let _ = Vfs::unmount(dir);
+    if let Err(why) = result {
+        serial_println!("[vfs]   FAIL: new-node owner: {}", why);
+        return Err(KernelError::InternalError);
+    }
+    serial_println!(
+        "[vfs]   new nodes are their creator's; an overwrite keeps the owner; a set-group-ID \
+         directory gives its group: OK"
+    );
     Ok(())
 }
 

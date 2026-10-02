@@ -320,8 +320,6 @@ IGNORE = (
      "the tab's label after a save; `doc.path`, set beside it, is what is "
      "saved to and opened"),
 
-    ("strings", "let text = String::from_utf8_lossy(&bytes)",
-     "`text` reaches only STRINGS.usage(format!(...))"),
 )
 
 

@@ -8994,6 +8994,29 @@ if [ "$NO_ROOTFS" -eq 0 ] && [ -f "$ROOTFS_IMG" ]; then
     echo "=== Attaching Path-Z glibc rootfs: $ROOTFS_IMG (vdb) ==="
 fi
 
+# The virtio console's self-test port (`virtio::console::self_test`,
+# design-decisions 1534). Behind it, a UDP chardev that sends to its own
+# receiving address: what the guest writes to the port comes straight back in
+# on it, so the guest checks both directions itself, and nothing on this side
+# has to feed it or read it. (Not a file: QEMU on Windows takes no input file
+# for a file chardev, and one that reaches the end of its input closes the
+# port's host end.) The port number is one the OS hands out as free, so it is
+# outside the ranges Windows reserves; between this probe and QEMU binding it,
+# another process could take it, and QEMU would then refuse to start, loudly.
+#
+# The device costs four of the 16 queues the virtio descriptor pool holds for
+# every device together (`ada::MAX_QUEUES`): two for its control channel and
+# two for the port. With the two disks, the NIC, the GPU and the sound card,
+# this boot uses 14.
+VCON_PORT="$(python -c 'import socket; s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM); s.bind(("127.0.0.1", 0)); print(s.getsockname()[1]); s.close()')"
+# SC2054: the commas are QEMU's property separators within one argument.
+# shellcheck disable=SC2054
+VCON_ARGS=(
+    -device virtio-serial-pci,max_ports=2
+    -chardev "udp,id=vcon0,host=127.0.0.1,port=$VCON_PORT,localaddr=127.0.0.1,localport=$VCON_PORT"
+    -device virtserialport,chardev=vcon0,name=org.slateos.selftest.0
+)
+
 # CPU model.  QEMU's default (`qemu64`) advertises no SMEP, SMAP or UMIP, so
 # without this the kernel's supervisor-mode protections are silently inert under
 # test: `smep_smap::init()` logs "not supported by CPU", never touches CR4, and
@@ -9800,6 +9823,7 @@ QEMU_START_EPOCH=$(date +%s)
     -device virtio-blk-pci,drive=swap-disk \
     -drive "id=swap-disk,if=none,format=raw,file=$SWAP_IMG_WIN" \
     "${ROOTFS_ARGS[@]}" \
+    "${VCON_ARGS[@]}" \
     "${WATCHDOG_ARGS[@]}" \
     "${MONITOR_ARGS[@]}" \
     -device "$GPU_DEVICE" \

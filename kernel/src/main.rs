@@ -106,6 +106,7 @@ mod fb;
 mod font;
 mod fs;
 mod gdt;
+mod guestagent;
 mod hardlockup;
 mod hda;
 mod hpet;
@@ -1359,6 +1360,13 @@ extern "C" fn kernel_main() -> ! {
             // QEMU: `-device virtio-sound-pci,audiodev=a0 -audiodev sdl,id=a0`
             if let Err(e) = virtio::sound::init(boot_info.hhdm_offset) {
                 serial_println!("[virtio-snd] Init: {:?} (non-fatal)", e);
+            }
+
+            // Virtio console: named byte channels to the host -- the boot
+            // test's self-test port, and the guest agent's (design-decisions
+            // §1534). QEMU: `-device virtio-serial-pci -device virtserialport,...`
+            if let Err(e) = virtio::console::init(boot_info.hhdm_offset) {
+                serial_println!("[virtio-con] Init: {:?} (non-fatal)", e);
             }
 
             // AC97 audio controller: legacy audio for older hardware/VMs.
@@ -9182,6 +9190,20 @@ extern "C" fn kernel_main() -> ! {
         virtio::sound::self_test(),
     );
 
+    // The virtio console: its protocol, and the boot test's port end to end
+    // (scripts/boot-test.sh checks the reply on the host). Then the guest
+    // agent's reading of requests, which needs no host (§1534).
+    selftest::dispatch_debug(
+        "virtio console",
+        selftest::Severity::Diagnostic,
+        virtio::console::self_test(),
+    );
+    selftest::dispatch_debug(
+        "guest agent",
+        selftest::Severity::Diagnostic,
+        guestagent::self_test(),
+    );
+
     // AC97 audio self-test.
     selftest::dispatch_debug("Ac97", selftest::Severity::Diagnostic, ac97::self_test());
 
@@ -10063,6 +10085,11 @@ extern "C" fn kernel_main() -> ! {
     // (design-decisions §1513). The self-tests above ran with the in-memory
     // root and the image at /mnt, and keep doing so.
     let image_is_root = switch_root_to_image();
+
+    // The host's way into this running system, when QEMU attached the
+    // agent's port (scripts/guest.py; design-decisions §1534). Now, not
+    // earlier: what it runs looks for programs on the image, at /bin.
+    guestagent::start();
 
     // Write embedded binaries to the VFS so init can spawn them -- onto an
     // image root only where the image has none, so an image that provides

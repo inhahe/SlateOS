@@ -132,6 +132,20 @@ pub fn capture_command(cmd: &str) -> Vec<u8> {
     capture.finish()
 }
 
+/// [`capture_command`], and the exit status the command left (`$?`): what the
+/// guest agent's `sh` request answers with (`guestagent`).
+///
+/// The status is the shell's one global, as `$?` is, so a command typed at
+/// the console in the same instant could set it first. Started from 0, so a
+/// command that sets none reads as success, as it does at the prompt.
+pub fn capture_command_with_status(cmd: &str) -> (Vec<u8>, u8) {
+    let capture = capture_start();
+    set_exit(0);
+    execute(cmd);
+    let status = last_exit();
+    (capture.finish(), status)
+}
+
 /// Write captured shell output to `path`, appending when `append` is set.
 ///
 /// The VFS has no append mode, so `>>` is a read-modify-write. That is the

@@ -11405,7 +11405,9 @@ pub fn self_test_cscanf() -> KernelResult<()> {
 ///
 /// A fixture's own children are its to reap: one that forks waits for them
 /// before it exits, or leaves orphans no rung can see.
-fn teardown_fixture(pid: ProcessId, task_id: TaskId) {
+///
+/// The guest agent's `run` ends its programs the same way (`guestagent`).
+pub(crate) fn teardown_fixture(pid: ProcessId, task_id: TaskId) {
     if pcb::state(pid) != Some(pcb::ProcessState::Zombie) {
         thread::kill_process_threads(pid);
         for _ in 0..2000 {
@@ -11451,7 +11453,9 @@ enum GenericOutcome {
 /// A closed vocabulary rather than capabilities spelled out in the list: the
 /// list is lane D's and grants are the kernel's decision, so a fixture that
 /// needs a new one asks for a new word, and this table says what it means.
-fn ctest_generic_grant(word: &str) -> Option<(ResourceType, u64, Rights)> {
+/// The guest agent's `run` takes the same words (`guestagent`), so a program
+/// tried in a running guest holds what its fixture would at boot.
+pub(crate) fn ctest_generic_grant(word: &str) -> Option<(ResourceType, u64, Rights)> {
     match word {
         // One wildcard File capability, which every file-touching fixture so
         // far has needed (`requests/d-a-one-rung-for-every-c-fixture.md`).

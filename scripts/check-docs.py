@@ -15,6 +15,9 @@ done/open split the documents always claimed to have:
       after the cutover, or an unfinished carry-forward)              -- error
   S2  every file in an entry directory starts with its heading         -- error
   S3  no two issue files differ only in case, across both directories  -- error
+  S4  no merge-conflict markers in an entry file: `docs-carry-forward.py` leaves
+      them in files git does not know are conflicted, so git would let them be
+      committed                                                         -- error
   I1  a new issue has a `**Status:**` line under its heading
   I2  a status marker is upper-case (`FIXED`, not `fixed`): a lower-case one was
       counted open by triage greps and worked three weeks after it was done
@@ -72,6 +75,7 @@ import doc_entries as D  # noqa: E402
 import docs_layout as L  # noqa: E402
 
 BASELINE = SCRIPTS / "docs-baseline.json"
+_CONFLICT = re.compile(r"(?m)^(<{7}|>{7})( |$)")
 MIN_ISSUES = 50  # a real tree has thousands; fewer means the parse failed
 _MARKER_WORD = re.compile(r"\b(fixed|resolved|closed|done|open)\b", re.IGNORECASE)
 _TRIGGER = re.compile(r"(?im)^\s*[-*]?\s*\**Trigger\b")
@@ -159,9 +163,18 @@ def check(root: Path, lane: str | None, strict: bool, baseline: dict) -> Result:
     res = Result()
 
     def add(rule: str, path: str, msg: str, owner: str = "", structural: bool = False) -> None:
-        own = strict or structural or (lane is not None and owner == lane)
+        # An unknown running lane (the integration checkout, a scratch worktree,
+        # a test repository) is judged strictly: a gate that cannot tell whose
+        # push it is must refuse rather than wave every finding through.
+        own = strict or structural or lane is None or owner == lane
         res.findings.append(Finding(rule, path, msg, owner, error=own))
 
+    has_dirs = any((root / d).is_dir() for d in D.ENTRY_DIRS)
+    has_monos = any((root / m).is_file() for m in D.MONOLITHS)
+    if not has_dirs and not has_monos:
+        res.no_verdict = (f"no shared entry documents here ({D.DECISIONS_DIR}/README.md and "
+                          f"{D.DECISIONS_MONO} do not exist)")
+        return res
     layout = D.layout_of(root)
     res.counts["layout"] = layout
     # S1
@@ -176,8 +189,11 @@ def check(root: Path, lane: str | None, strict: bool, baseline: dict) -> Result:
                           "`python scripts/docs-carry-forward.py` (the 2026-10-02 cutover)")
         return res
 
-    bl_status = set(baseline.get("issue_without_status", []))
-    bl_lower = set(baseline.get("lowercase_marker", []))
+    # Issue grandfathering is keyed by the entry (its file name, lower-cased), not
+    # its path: an issue moves between known-issues/ and known-issues-resolved/
+    # when its status changes, and must not lose its grandfathering on the way.
+    bl_status = {Path(x).stem.lower() for x in baseline.get("issue_without_status", [])}
+    bl_lower = {Path(x).stem.lower() for x in baseline.get("lowercase_marker", [])}
     bl_decisions = set(baseline.get("decision_files", []))
     bl_dupes = set(baseline.get("duplicate_numbers", []))
     bl_deferred = set(baseline.get("deferred_without_trigger", []))
@@ -206,10 +222,10 @@ def check(root: Path, lane: str | None, strict: bool, baseline: dict) -> Result:
                 m.group(1) if (m := re.match(r"^([A-F])-[a-z0-9]", p.stem)) else "")
             issues.append(rel)
             has_status = any(ln.lstrip().startswith("**Status") for ln in lines[1:8])
-            if not has_status and rel not in bl_status:
+            if not has_status and p.stem.lower() not in bl_status:
                 add("I1", rel, "has no `**Status:**` line under its heading (OPEN / FIXED <date> / ...)", owner)
             lower = [t for t in status_marker_tokens(title, lines) if t != t.upper()]
-            if lower and rel not in bl_lower:
+            if lower and p.stem.lower() not in bl_lower:
                 add("I2", rel, f"status marker {lower[0]!r} must be upper-case ({lower[0].upper()}): a triage "
                     "grep for FIXED|RESOLVED|CLOSED counts it as open", owner)
             status = D.issue_status(title, lines, archived=False)
@@ -221,9 +237,23 @@ def check(root: Path, lane: str | None, strict: bool, baseline: dict) -> Result:
                     f"`git mv {rel} {D.ISSUES_OPEN_DIR}/`", owner)
     res.counts["issues"] = len(issues)
 
+    # --- S4: conflict markers anywhere in the entry documents
+    for d in (*D.ENTRY_DIRS, D.QUESTIONS_RESOLVED_DIR):
+        for p in sorted((root / d).glob("*.md")) if (root / d).is_dir() else []:
+            if _CONFLICT.search(p.read_text(encoding="utf-8", errors="replace")):
+                add("S4", p.relative_to(root).as_posix(), "holds merge-conflict markers; resolve them "
+                    "(docs-carry-forward.py lists every file it left that way)", structural=True)
+    for name in ("roadmap.md", "roadmap-done.md", "todo.txt"):
+        p = root / name
+        if p.is_file() and _CONFLICT.search(p.read_text(encoding="utf-8", errors="replace")):
+            add("S4", name, "holds merge-conflict markers; resolve them", structural=True)
+
     # --- decisions
     readme = root / D.DECISIONS_DIR / "README.md"
-    bands = D.parse_bands(readme.read_text(encoding="utf-8")) if readme.is_file() else []
+    if not readme.is_file():
+        res.no_verdict = f"{D.DECISIONS_DIR}/README.md does not exist, so the numbering bands cannot be read"
+        return res
+    bands = D.parse_bands(readme.read_text(encoding="utf-8"))
     if not bands:
         res.no_verdict = f"{D.DECISIONS_DIR}/README.md has no numbering-band table this gate can read"
         return res
@@ -373,9 +403,9 @@ def write_baseline(root: Path) -> dict:
                 "question_reuses_resolved_id": [], "todo_done_paragraphs": [], "roadmap_done_items": []}
     for f in res.findings:
         if f.rule == "I1":
-            bl["issue_without_status"].append(f.path)
+            bl["issue_without_status"].append(Path(f.path).stem.lower())
         elif f.rule == "I2":
-            bl["lowercase_marker"].append(f.path)
+            bl["lowercase_marker"].append(Path(f.path).stem.lower())
         elif f.rule == "F1":
             bl["deferred_without_trigger"].append(f.path)
         elif f.rule == "Q2":
@@ -414,22 +444,45 @@ def fix_roadmap(root: Path) -> str:
 
 # --- reading a commit instead of the working tree ------------------------------------------
 
-DOC_PATHS = [*D.ENTRY_DIRS, D.QUESTIONS_RESOLVED_DIR, *D.MONOLITHS, "roadmap.md", "roadmap-done.md", "todo.txt"]
+BASELINE_REL = "scripts/docs-baseline.json"
+DOC_PATHS = [*D.ENTRY_DIRS, D.QUESTIONS_RESOLVED_DIR, *D.MONOLITHS, "roadmap.md", "roadmap-done.md", "todo.txt",
+             BASELINE_REL]
+
+
+class NoVerdict(Exception):
+    pass
+
+
+def is_commit(root: Path, rev: str) -> bool:
+    r = subprocess.run(["git", "-C", str(root), "rev-parse", "--verify", "--quiet", f"{rev}^{{commit}}"],
+                       capture_output=True, text=True)
+    return r.returncode == 0
 
 
 def materialise(root: Path, rev: str, into: Path) -> None:
-    """The documents as they are at `rev`, written under `into` (via `git archive`)."""
-    ls = subprocess.run(["git", "-C", str(root), "ls-tree", "--name-only", rev, "--", *DOC_PATHS],
+    """The documents *and the baseline* as they are at `rev`, written under `into`.
+
+    The baseline comes from the same tree as the documents, never from the disk:
+    it is the input that forgives, and an uncommitted `--write-baseline` would
+    otherwise waive a finding in the very commit being pushed (the defect the
+    numbering-band gate shipped with, test-checkers-honour-head.py gate 13)."""
+    ls = subprocess.run(["git", "-C", str(root), "ls-tree", "--name-only", rev, "--",
+                         *[p for p in DOC_PATHS if "/" not in p], "scripts"],
                         capture_output=True, text=True)
-    present = [p for p in ls.stdout.splitlines() if p]
-    if not present:
-        raise SystemExit(f"--head {rev}: none of the documents exist at that revision")
-    out = subprocess.run(["git", "-C", str(root), "archive", "--format=tar", rev, "--", *present],
-                         capture_output=True)
+    names = set(ls.stdout.splitlines())
+    present = [p for p in DOC_PATHS if p in names or (p == BASELINE_REL and "scripts" in names)]
+    if not any(p for p in present if p != BASELINE_REL):
+        raise NoVerdict(f"--head {rev}: the shared documents do not exist at that revision")
+    out = subprocess.run(["git", "-C", str(root), "archive", "--format=tar", rev, "--",
+                          *[p for p in present if p != BASELINE_REL]], capture_output=True)
     if out.returncode != 0:
-        raise SystemExit(f"--head {rev}: git archive failed: {out.stderr.decode(errors='replace')[:300]}")
+        raise NoVerdict(f"--head {rev}: git archive failed: {out.stderr.decode(errors='replace')[:300]}")
     with tarfile.open(fileobj=io.BytesIO(out.stdout)) as tf:
         tf.extractall(into, filter="data")
+    blob = subprocess.run(["git", "-C", str(root), "show", f"{rev}:{BASELINE_REL}"], capture_output=True)
+    if blob.returncode == 0:
+        (into / "scripts").mkdir(parents=True, exist_ok=True)
+        (into / BASELINE_REL).write_bytes(blob.stdout)
 
 
 # --- self-test ---------------------------------------------------------------------------------
@@ -497,6 +550,10 @@ def self_test() -> int:
                lambda r: (r / D.ISSUES_CLOSED_DIR / "td-b-live.md").write_text(
                    "## td-b-live (lane B) — FIXED 2026-10-02\n**Status:** FIXED 2026-10-02\n", encoding="utf-8")
                if not (r / D.ISSUES_CLOSED_DIR / "TD-B-LIVE.md").exists() else None)
+        mutate("S4 conflict markers left in an entry", "S4",
+               lambda r: (r / D.ISSUES_OPEN_DIR / "TD-B-LIVE.md").write_text(
+                   "## TD-B-LIVE (lane B, 2026-10-01) — OPEN\n**Status:** OPEN\n<<<<<<< ours\na\n=======\nb\n"
+                   ">>>>>>> theirs\n", encoding="utf-8"))
         mutate("I1 a new issue without a Status line", "I1",
                lambda r: (r / D.ISSUES_OPEN_DIR / "TD-B-NEW.md").write_text("## TD-B-NEW (lane B) — OPEN\nbody\n",
                                                                             encoding="utf-8"))
@@ -573,15 +630,25 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--head", default=None, help="check the documents at this revision instead of the working tree")
     ap.add_argument("--lane", default=None, help="the lane whose entries are errors (default: this worktree's)")
     ap.add_argument("--strict", action="store_true", help="every finding is an error")
-    ap.add_argument("--self-test", action="store_true")
+    # Both spellings: the push hook uses `--selftest` (test-pre-push-gates.py keys
+    # on it), the boot test `--self-test`.
+    ap.add_argument("--self-test", "--selftest", dest="self_test", action="store_true")
     ap.add_argument("--next-decision", metavar="LANE")
     ap.add_argument("--next-question", metavar="LANE")
     ap.add_argument("--fix-roadmap", action="store_true")
     ap.add_argument("--write-baseline", action="store_true", help="(cutover only) grandfather today's findings")
     ap.add_argument("--quiet", action="store_true", help="print errors only")
+    # The push hook runs the open-questions rules as their own gate (29), as they
+    # were before the cutover, so each gate's bypass covers exactly one concern.
+    ap.add_argument("--only-rules", default="", help="comma-separated rule prefixes to report, e.g. Q")
+    ap.add_argument("--exclude-rules", default="", help="comma-separated rule prefixes not to report")
     args = ap.parse_args(argv)
     if args.self_test:
         return self_test()
+    if args.head and (args.write_baseline or args.fix_roadmap):
+        print("check-docs: --head and --write-baseline/--fix-roadmap are mutually exclusive: those write the "
+              "worktree, which --head is defined not to read", file=sys.stderr)
+        return 2
     root = D.repo_root()
     if args.next_decision:
         print(next_decision(root, args.next_decision))
@@ -594,25 +661,50 @@ def main(argv: list[str] | None = None) -> int:
         return 0
     if args.write_baseline:
         bl = write_baseline(root)
-        BASELINE.write_text(json.dumps(bl, indent=1, ensure_ascii=False) + "\n", encoding="utf-8", newline="\n")
-        print(f"wrote {BASELINE.name}: " + ", ".join(f"{k}={len(v)}" for k, v in bl.items()))
+        # Into the checkout being judged, not next to this script: the two differ
+        # when the script is run against another tree (the test suites do).
+        target = root / BASELINE_REL
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(json.dumps(bl, indent=1, ensure_ascii=False) + "\n", encoding="utf-8", newline="\n")
+        print(f"wrote {BASELINE_REL}: " + ", ".join(f"{k}={len(v)}" for k, v in bl.items()))
         return 0
     lane = args.lane.upper() if args.lane and args.lane.lower() != "none" else (None if args.lane else running_lane(root))
-    baseline = load_baseline()
-    if args.head:
-        with tempfile.TemporaryDirectory() as t:
-            materialise(root, args.head, Path(t))
-            res = check(Path(t), lane, args.strict, baseline)
-    else:
-        res = check(root, lane, args.strict, baseline)
-    if res.no_verdict:
-        print(f"check-docs: NO VERDICT -- {res.no_verdict}")
+
+    def judge(tree: Path, where: str) -> Result:
+        """Check `tree` with the baseline from that same tree. A tree that has the
+        per-entry documents but no baseline gets no verdict: without it, every
+        finding the cutover inherited would read as new."""
+        bl_path = tree / BASELINE_REL
+        if any((tree / d).is_dir() for d in D.ENTRY_DIRS) and not bl_path.is_file():
+            res = Result()
+            res.no_verdict = f"{BASELINE_REL} does not exist {where}, so new findings cannot be told from inherited ones"
+            return res
+        return check(tree, lane, args.strict, load_baseline(bl_path))
+
+    try:
+        if args.head:
+            if not is_commit(root, args.head):
+                raise NoVerdict(f"--head {args.head}: not a commit")
+            with tempfile.TemporaryDirectory() as t:
+                materialise(root, args.head, Path(t))
+                res = judge(Path(t), f"at {args.head}")
+        else:
+            res = judge(root, "in the worktree")
+    except NoVerdict as exc:
+        print(f"check-docs: NO VERDICT -- {exc}", file=sys.stderr)
         return 2
+    if res.no_verdict:
+        print(f"check-docs: NO VERDICT -- {res.no_verdict}", file=sys.stderr)
+        return 2
+    only = [r.strip() for r in args.only_rules.split(",") if r.strip()]
+    exclude = [r.strip() for r in args.exclude_rules.split(",") if r.strip()]
+    res.findings = [f for f in res.findings if (not only or f.rule.startswith(tuple(only)))
+                    and not (exclude and f.rule.startswith(tuple(exclude)))]
     errors = [f for f in res.findings if f.error]
     warnings = [f for f in res.findings if not f.error]
     for f in errors + ([] if args.quiet else warnings):
         print(f.render())
-    who = f"lane {lane}" if lane else "no lane (warnings only for lane-owned entries)"
+    who = f"lane {lane}" if lane else "no lane, so every finding is an error"
     print(f"check-docs: {len(errors)} error(s), {len(warnings)} warning(s); checked as {who}; "
           + ", ".join(f"{k}={v}" for k, v in res.counts.items()))
     return 1 if errors else 0

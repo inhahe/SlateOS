@@ -123,7 +123,9 @@ def announces_closure(head):
 # ("TD-C-THE-ORPHAN-LEDGER-IS-NOT-A-QUEUE-OF-READY-WORK"), so neither shape nor
 # length separates them. Four names, checked by the selftest, is honest; a
 # clever regex here would be wrong the first time someone writes a fifth.
-ENTRY_HEAD = re.compile(r"^## [A-Z`]")
+# `[` admits a lane-tagged heading, `## [B] TD-OILS-...`, which the per-entry
+# layout files like any other.
+ENTRY_HEAD = re.compile(r"^## [A-Z`\[]")
 STRUCTURAL = {
     "Active Bugs",
     "Fixed Bugs",
@@ -151,6 +153,57 @@ def request_states(requests_dir):
         text = f.read_text(encoding="utf-8", errors="replace")
         out[f.name] = bool(RESOLVED_REQUEST.search(text))
     return out
+
+
+def issues_corpus():
+    """(text, locate): the open issues as one text, and a function that maps a line
+    of that text back to "path:line" in the file it came from.
+
+    Since the 2026-10-02 cutover each open issue is its own file under
+    `known-issues/` (closed ones are in `known-issues-resolved/`, and this gate
+    only ever judged open entries -- a closed entry's blocker is moot). Joining
+    the files, each led by a `## ` heading, lets every function here go on
+    reading one text, so the self-tests and their fixtures stay as they are. On
+    a lane branch from before the cutover the single file is read as it always
+    was. Returns (None, None) when neither exists."""
+    d = ROOT / "known-issues"
+    if d.is_dir():
+        parts, starts, line = [], [], 1
+        for p in sorted(d.glob("*.md")):
+            if p.name == "README.md":
+                continue
+            lines = p.read_text(encoding="utf-8", errors="surrogateescape").rstrip("\n").split("\n")
+            if lines and lines[0].startswith("#"):
+                lines[0] = "## " + lines[0].lstrip("#").lstrip()
+            starts.append((line, p.relative_to(ROOT).as_posix()))
+            parts.append("\n".join(lines))
+            line += len(lines)
+
+        def locate(n):
+            start, rel = max((s for s in starts if s[0] <= n), default=(1, "known-issues/"))
+            return "%s:%d" % (rel, n - start + 1)
+
+        return "\n".join(parts), locate
+    f = ROOT / "known-issues.md"
+    if f.is_file():
+        return f.read_text(encoding="utf-8", errors="surrogateescape"), (lambda n: "known-issues.md:%d" % n)
+    return None, None
+
+
+def question_corpus():
+    """`open-questions.md`'s shape, rebuilt from the per-entry layout when present:
+    a `## <id>` line per file in `open-questions/` (the live half), then
+    `# Resolved` and the one-line records of `open-questions-resolved/`, so
+    `question_states` reads either layout the same way."""
+    d = ROOT / "open-questions"
+    if d.is_dir():
+        live = ["## %s" % p.stem for p in sorted(d.glob("*.md")) if p.name != "README.md"]
+        rdir = ROOT / "open-questions-resolved"
+        archive = [p.read_text(encoding="utf-8", errors="surrogateescape")
+                   for p in sorted(rdir.glob("*.md"))] if rdir.is_dir() else []
+        return "\n".join(live) + "\n# Resolved\n" + "\n".join(archive)
+    f = ROOT / "open-questions.md"
+    return f.read_text(encoding="utf-8", errors="surrogateescape") if f.is_file() else None
 
 
 def entries(text):
@@ -507,11 +560,10 @@ def floors_selftest():
     not that the floor should quietly follow the tree down.
     """
     requests_dir = ROOT / "requests"
-    issues = ROOT / "known-issues.md"
-    if not requests_dir.is_dir() or not issues.is_file():
+    text, _locate = issues_corpus()
+    if not requests_dir.is_dir() or text is None:
         print("ok   (floors not checked: no tree here)")
         return 0
-    text = issues.read_text(encoding="utf-8", errors="surrogateescape")
     entries_n = sum(1 for _ in entries(text))
     requests_n = len(list(requests_dir.glob("*.md")))
     docs_n = len(tracked_documents())
@@ -1264,9 +1316,9 @@ def main(argv=None):
         return selftest()
 
     requests_dir = ROOT / "requests"
-    issues = ROOT / "known-issues.md"
-    if not requests_dir.is_dir() or not issues.is_file():
-        print("check-stale-blockers: no requests/ or known-issues.md here", file=sys.stderr)
+    text, locate = issues_corpus()
+    if not requests_dir.is_dir() or text is None:
+        print("check-stale-blockers: no requests/ or known issues here", file=sys.stderr)
         return 2
 
     # A SCAN THAT READ ALMOST NOTHING IS REFUSED, which several gates in this
@@ -1278,19 +1330,14 @@ def main(argv=None):
     # human has to read is weaker than a status a hook can act on.
 
     resolved = request_states(requests_dir)
-    text = issues.read_text(encoding="utf-8", errors="surrogateescape")
     hits = stale(text, resolved)
 
-    # The same question asked of `open-questions.md`. An entry waiting on an
+    # The same question asked of the open questions. An entry waiting on an
     # ANSWERED question is as stuck as one waiting on a landed request, and
     # reads more convincingly because a question sounds like it is still being
     # thought about.
-    questions = ROOT / "open-questions.md"
-    answered = (
-        question_states(questions.read_text(encoding="utf-8", errors="surrogateescape"))
-        if questions.is_file()
-        else {}
-    )
+    qtext = question_corpus()
+    answered = question_states(qtext) if qtext is not None else {}
     qhits = stale_questions(text, answered)
 
     # Second pass: prose pointing at a script that is not there any more.
@@ -1325,20 +1372,20 @@ def main(argv=None):
     disabled, deliberate = disabled_tests(sources)
 
     for lineno, title, request in hits:
-        print("known-issues.md:%d: %s" % (lineno, title.strip()))
+        print("%s: %s" % (locate(lineno), title.strip()))
         print("    cites requests/%s, which reports itself finished." % request)
         print("    Re-read it: the thing it waits for may already exist.")
         print()
 
     for lineno, title, question in qhits:
-        print("known-issues.md:%d: %s" % (lineno, title.strip()))
-        print("    says it is blocked on %s, which open-questions.md records"
-              " as answered." % question)
+        print("%s: %s" % (locate(lineno), title.strip()))
+        print("    says it is blocked on %s, which the resolved-question index"
+              " records as answered." % question)
         print("    Re-read it: the decision it waits for has been made.")
         print()
 
     for lineno, title, when, paths in moved:
-        print("known-issues.md:%d: %s" % (lineno, title.strip()))
+        print("%s: %s" % (locate(lineno), title.strip()))
         print("    says it is parked, and the source it names has moved since"
               " %s:" % when)
         for path, n, last in paths:

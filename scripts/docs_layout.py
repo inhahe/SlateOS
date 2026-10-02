@@ -11,7 +11,7 @@
   deterministic: the same entry text always becomes the same file with the same
   bytes. Nothing here may depend on the date, the machine, or dictionary order.
 
-Placement rules (each one a decision recorded in design-decisions/1500-*.md):
+Placement rules (the rationale for the layout as a whole is in docs-migrate.py's docstring):
 
 * An issue lives in `known-issues/` while open and in `known-issues-resolved/`
   once closed. Status is read by `doc_entries.issue_status` -- conservatively: any
@@ -457,7 +457,7 @@ reissuing it makes an old citation resolve to the wrong entry:
 prints the number and the file name to create. Write a `**Lane:** X` field near
 the heading and a `**Decided by:**` field (see the format above).
 
-**What changed, and why** (2026-10-02, section 1500): with one file per decision
+**What changed, and why** (2026-10-02): with one file per decision
 two lanes can no longer write the same lines, so the old rule that each band must
 ascend in *file order* -- the rule that kept merges conflict-free in the single
 file -- is gone. The bands remain because two lanes must still never take the same
@@ -470,7 +470,6 @@ number. `scripts/check-docs.py` enforces the numbering; it replaced
 `§lo–§hi` row for its owner and for the word `open` or `closed`. Keep the shape.
 
 {chr(10).join(bands)}
-| §1500–§1599 | operator sessions (not a lane) | **open** | sessions the operator starts outside the six lanes |
 
 Bands below the open ones are closed but **not free**: every number in them is
 spent, and spent numbers are never reissued. §217–§220 are lane C's although they

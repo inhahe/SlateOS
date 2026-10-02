@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 r"""Verify that checked-in generated tables still match what their generator emits.
 
-Run this after every merge, next to ``scripts/ki_dupes.py``::
+Run this after every merge::
 
     python scripts/check-generated-tables.py
 

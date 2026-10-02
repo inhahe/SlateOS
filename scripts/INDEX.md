@@ -237,6 +237,7 @@ promises about its own output, which a one-line summary cannot carry.
 | `scripts/gittree.py` | Read many blobs out of *one* git process instead of one process per blob. |
 | `scripts/grade-positional.py` | Grade the positional drift model against a *known* disturbance window. |
 | `scripts/grep-diff.sh` | Differential test: our grep against the host's GNU grep. |
+| `scripts/guest.py` | A SlateOS guest that stays up, and a way into it from the host. |
 | `scripts/hang-repro-loop.sh` | hang-repro-loop.sh — Repeatedly boot the (already-built) kernel to try to |
 | `scripts/head-diff.sh` | Differential test: our head against GNU head. |
 | `scripts/host-errmsg.py` | Find utilities that print the *host's* error text instead of POSIX's. |
@@ -448,6 +449,7 @@ promises about its own output, which a one-line summary cannot carry.
 | `scripts/test-gather-notices.py` | The gate that keeps the image's third-party notices complete (design-decisions §1433). |
 | `scripts/test-gittree.py` | Tests for `scripts/gittree.py` — reading many blobs out of one git process. |
 | `scripts/test-grade-positional.py` | Regression tests for `scripts/grade-positional.py`. |
+| `scripts/test-guest.py` | Tests for `guest.py`, the host's end of the guest agent's protocol. |
 | `scripts/test-hostload.py` | Tests for `hostload.py`, the harness's measurement of how much CPU a process gets. |
 | `scripts/test-lane-claims.py` | Tests for `scripts/lane-claims.py` through its command line. |
 | `scripts/test-layout-sweep.py` | Regression tests for `scripts/layout-sweep.py`. |
@@ -510,4 +512,4 @@ promises about its own output, which a one-line summary cannot carry.
 | `scripts/xargs-diff.sh` | Differential test: our xargs against GNU xargs (findutils 4.9.0). |
 | `scripts/yes-diff.sh` | Differential test: our `yes` against GNU coreutils'. |
 
-_500 scripts._
+_502 scripts._

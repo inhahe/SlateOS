@@ -1648,6 +1648,22 @@ fn spawn_process_inner(
         return Err(e);
     }
 
+    // Step 3a: the program headers, where the image's C library will look
+    // for them -- found in a loaded segment, or copied into a page of their
+    // own (`place_phdr_table`).
+    //
+    // SAFETY: as Step 3 -- the new process's address space, run by no CPU.
+    let main_phdr = match unsafe { place_phdr_table(&elf_file, pml4_phys, exec_load_bias, pid) } {
+        Ok(p) => p,
+        Err(e) => {
+            serial_println!("[spawn] Failed to place the program headers: {:?}", e);
+            pcb::destroy(pid);
+            return Err(e);
+        }
+    };
+    // `pid` was created above and nothing has removed it.
+    let _ = pcb::set_main_phdr(pid, main_phdr);
+
     // Step 3b (Linux ABI, dynamically-linked only): load the program
     // interpreter (ld.so) named in the executable's PT_INTERP segment.
     //
@@ -1728,6 +1744,7 @@ fn spawn_process_inner(
             options.envp,
             interp_base,
             exec_load_bias,
+            main_phdr.map(|p| p.vaddr),
         ) {
             Ok(installed) => {
                 serial_println!(
@@ -2480,6 +2497,21 @@ pub fn exec_process(
         return Err(e);
     }
 
+    // Step 4a: the new image's program headers, as spawn's Step 3a.
+    //
+    // SAFETY: the process's freshly emptied address space; its only thread
+    // is this one, in the kernel.
+    let main_phdr = match unsafe { place_phdr_table(&elf_file, pml4_phys, exec_load_bias, pid) } {
+        Ok(p) => p,
+        Err(e) => {
+            serial_println!("[exec] Failed to place the program headers: {:?}", e);
+            let _ = pcb::set_exit_code(pid, KILLED_EXIT_CODE);
+            return Err(e);
+        }
+    };
+    // The process is this exec's caller, and live.
+    let _ = pcb::set_main_phdr(pid, main_phdr);
+
     // Step 4b (Linux ABI, dynamically-linked only): load the program
     // interpreter (ld.so) for the new image.  Mirrors spawn_process's
     // Step 3b — a dynamically-linked Linux binary enters its interpreter
@@ -2577,6 +2609,7 @@ pub fn exec_process(
             envp,
             interp_base,
             exec_load_bias,
+            main_phdr.map(|p| p.vaddr),
         ) {
             Ok(installed) => {
                 serial_println!(
@@ -3122,6 +3155,7 @@ fn build_linux_initial_stack(
     envp: &[&[u8]],
     interp_base: Option<u64>,
     exec_load_bias: u64,
+    phdr: Option<u64>,
 ) -> KernelResult<crate::proc::linux_stack::InstalledLinuxStack> {
     let stack_bottom = USER_STACK_TOP
         .checked_sub(USER_STACK_SIZE)
@@ -3138,7 +3172,121 @@ fn build_linux_initial_stack(
         &random16,
         interp_base,
         exec_load_bias,
+        phdr,
     )
+}
+
+// ---------------------------------------------------------------------------
+// The main image's program headers
+// ---------------------------------------------------------------------------
+
+/// Where a process's main image's program headers are in its address space:
+/// what its C library reads at start-up to find its thread-local storage
+/// template (`PT_TLS`). A Linux-ABI process is told through `AT_PHDR`,
+/// `AT_PHNUM` and `AT_PHENT`; a native one asks `SYS_PROCESS_GET_PHDR`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct MainPhdr {
+    /// The table's address in the process.
+    pub vaddr: u64,
+    /// How many entries it has.
+    pub phnum: u16,
+    /// How large each entry is.
+    pub phentsize: u16,
+}
+
+/// Where [`place_phdr_table`] maps a copy of the program headers when no
+/// loaded segment holds them: one read-only frame, below the stack's region
+/// with a frame's gap between them, far above the mmap window and the image.
+/// Recorded as a `Fixed` VMA, so nothing else is placed over it.
+pub const PHDR_COPY_VADDR: u64 = USER_STACK_TOP - USER_STACK_SIZE - 2 * FRAME_SIZE as u64;
+
+/// The end of the frame at [`PHDR_COPY_VADDR`].
+const PHDR_COPY_END: u64 = PHDR_COPY_VADDR + FRAME_SIZE as u64;
+
+/// Find the main image's program headers in its address space, or put them
+/// there -- `requests/d-a-native-processes-could-be-told-where-their-program-headers-are.md`.
+///
+/// Usually a loaded segment holds them (lld's default layout always maps
+/// them): then their address is that segment's, plus the load bias. When none
+/// does -- a linker script that leaves them out of every segment -- a copy is
+/// mapped read-only at [`PHDR_COPY_VADDR`], so a C library still finds its
+/// `PT_TLS` instead of starting every `__thread` variable at zero. Until
+/// 2026-10-02 such an image had no `AT_PHDR` at all, and a native process
+/// was never told.
+///
+/// `None` for an image with no program headers, or with a table larger than
+/// a frame (more than 292 entries), which no linker produces.
+///
+/// # Errors
+///
+/// Frame allocation and mapping failures.
+///
+/// # Safety
+///
+/// `pml4_phys` must be the process `pid`'s address space, which no other CPU
+/// is running (spawn and exec, before the image's first instruction).
+unsafe fn place_phdr_table(
+    elf_file: &elf::ElfFile<'_>,
+    pml4_phys: u64,
+    bias: u64,
+    pid: ProcessId,
+) -> KernelResult<Option<MainPhdr>> {
+    let (phnum, phentsize) = (elf_file.header.e_phnum, elf_file.header.e_phentsize);
+    if phnum == 0 {
+        return Ok(None);
+    }
+    if let Some(vaddr) = crate::proc::linux_stack::phdr_vaddr(elf_file) {
+        return Ok(Some(MainPhdr {
+            vaddr: vaddr.saturating_add(bias),
+            phnum,
+            phentsize,
+        }));
+    }
+    let Some(table) = elf_file
+        .phdr_table_bytes()
+        .filter(|t| t.len() <= FRAME_SIZE)
+    else {
+        return Ok(None);
+    };
+    let hhdm = page_table::hhdm().ok_or(KernelError::InternalError)?;
+    let phys = frame::alloc_frame()?;
+    let virt_in_kernel = phys.to_virt(hhdm) as *mut u8;
+    // SAFETY: `phys` is freshly allocated and exclusively ours; its HHDM view
+    // is FRAME_SIZE writable bytes, and `table.len()` <= FRAME_SIZE.
+    unsafe {
+        core::ptr::write_bytes(virt_in_kernel, 0, FRAME_SIZE);
+        core::ptr::copy_nonoverlapping(table.as_ptr(), virt_in_kernel, table.len());
+    }
+    let flags = PageFlags::PRESENT | PageFlags::USER_ACCESSIBLE | PageFlags::NO_EXECUTE;
+    // SAFETY: the caller's invariant on `pml4_phys`; `phys` is ours and
+    // unmapped; the address is in user space.
+    if let Err(e) =
+        unsafe { page_table::map_frame(pml4_phys, VirtAddr::new(PHDR_COPY_VADDR), phys, flags) }
+    {
+        // SAFETY: never mapped, so ours alone to free.
+        let _ = unsafe { frame::free_frame(phys) };
+        return Err(e);
+    }
+    // Record it, so the mmap window's gap search never hands it out. The
+    // frame is freed with the address space either way.
+    let vma = crate::mm::vma::Vma {
+        start: PHDR_COPY_VADDR,
+        end: PHDR_COPY_END,
+        kind: crate::mm::vma::VmaKind::Fixed,
+        flags,
+    };
+    if let Err(e) = pcb::add_vma(pid, vma) {
+        serial_println!(
+            "[spawn] WARNING: the program-header copy at {:#x} is mapped but not recorded: {:?}",
+            PHDR_COPY_VADDR,
+            e
+        );
+    }
+    Ok(Some(MainPhdr {
+        vaddr: PHDR_COPY_VADDR,
+        phnum,
+        phentsize,
+    }))
 }
 
 // ---------------------------------------------------------------------------
@@ -22529,6 +22677,107 @@ pub fn self_test_linux_slate_channels() -> KernelResult<()> {
     serial_println!(
         "[spawn]   Linux slate channel descriptors (ring 3: create, one write one message, \
          an end shared across fork, end of file with the last holder): OK"
+    );
+    Ok(())
+}
+
+/// Where a process's program headers are (`place_phdr_table`,
+/// `pcb::main_phdr`, `AT_PHDR`): found in a loaded segment, and copied into a
+/// page of their own when no segment holds them.
+///
+/// - The test ELF of the auxv self-test maps its headers: they are found at
+///   their segment's address plus the bias, and nothing is mapped.
+/// - The hand-built Linux test programs map none (their one segment starts
+///   after the headers): spawned, the process records the copy at
+///   [`PHDR_COPY_VADDR`], the page holds exactly the file's table, and the
+///   process's auxiliary vector says so in `AT_PHDR`.
+pub fn self_test_main_phdr() -> KernelResult<()> {
+    /// A load bias for the found case.
+    const BIAS: u64 = 0x0000_0000_4000_0000;
+    /// `AT_PHDR`'s auxv tag.
+    const AT_PHDR: u64 = 3;
+    let fail = |what: &str| {
+        serial_println!("[spawn]   FAIL: program headers: {}", what);
+        Err(KernelError::InternalError)
+    };
+    serial_println!("[spawn] Running program-header placement test...");
+
+    // Found: no mapping, the segment's address plus the bias.
+    let mapped = elf::build_test_elf_public();
+    let mapped_elf = elf::ElfFile::parse(&mapped)?;
+    let Some(in_segment) = crate::proc::linux_stack::phdr_vaddr(&mapped_elf) else {
+        return fail("the auxv test ELF's headers are not in a segment any more");
+    };
+    // SAFETY: a table a segment holds is answered before the address space
+    // is touched, so no address space is needed.
+    let found = unsafe { place_phdr_table(&mapped_elf, 0, BIAS, 0) }?;
+    if found.map(|p| p.vaddr) != Some(in_segment.saturating_add(BIAS)) {
+        return fail("headers in a segment were not found at its address plus the bias");
+    }
+
+    // Copied: a real spawn of a program whose segment leaves them out.
+    let exe = elf::build_linux_exit_elf(0);
+    let exe_elf = elf::ElfFile::parse(&exe)?;
+    let Some(table) = exe_elf.phdr_table_bytes() else {
+        return fail("the exit test ELF has no program-header table");
+    };
+    if crate::proc::linux_stack::phdr_vaddr(&exe_elf).is_some() {
+        return fail("the exit test ELF's segment holds its headers; the copy path is untested");
+    }
+    let argv: &[&[u8]] = &[b"spawn-test-phdr"];
+    let options = SpawnOptions {
+        name: "spawn-test-phdr",
+        parent: 0,
+        priority: DEFAULT_PRIORITY,
+        capabilities: &[],
+        fd_map: &[],
+        argv,
+        envp: &[],
+        exe_path: None,
+        cwd: None,
+        uid_gid: None,
+    };
+    let spawned = spawn_process(&exe, &options)?;
+    let recorded = pcb::main_phdr(spawned.pid);
+    let mut copy = alloc::vec![0u8; table.len()];
+    let read = pcb::get_pml4(spawned.pid)
+        .ok_or(KernelError::NoSuchProcess)
+        .and_then(|pml4| crate::mm::user::copy_from_user_as(pml4, PHDR_COPY_VADDR, &mut copy));
+    let auxv = pcb::linux_saved_auxv(spawned.pid).unwrap_or_default();
+    let le = |s: &[u8]| -> Option<u64> { Some(u64::from_le_bytes(s.try_into().ok()?)) };
+    let at_phdr = auxv
+        .chunks_exact(16)
+        .find(|e| e.get(..8).and_then(le) == Some(AT_PHDR))
+        .and_then(|e| e.get(8..16).and_then(le));
+    teardown_fixture(spawned.pid, spawned.task_id);
+
+    let want = MainPhdr {
+        vaddr: PHDR_COPY_VADDR,
+        phnum: exe_elf.header.e_phnum,
+        phentsize: exe_elf.header.e_phentsize,
+    };
+    if recorded != Some(want) {
+        serial_println!(
+            "[spawn]   FAIL: program headers: recorded {:?}, expected the copy {:?}",
+            recorded,
+            want
+        );
+        return Err(KernelError::InternalError);
+    }
+    if read.is_err() || copy.as_slice() != table {
+        return fail("the copied page does not hold the file's program-header table");
+    }
+    if at_phdr != Some(PHDR_COPY_VADDR) {
+        serial_println!(
+            "[spawn]   FAIL: program headers: AT_PHDR {:?}, expected the copy at {:#x}",
+            at_phdr,
+            PHDR_COPY_VADDR
+        );
+        return Err(KernelError::InternalError);
+    }
+    serial_println!(
+        "[spawn]   program headers: found in a segment (+bias), copied to {:#x} when none holds them, AT_PHDR agrees: OK",
+        PHDR_COPY_VADDR
     );
     Ok(())
 }

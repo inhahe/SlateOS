@@ -608,6 +608,13 @@ pub struct Process {
     /// in the sense of being rebuilt (a forked child shares the parent's
     /// already-constructed stack, so the copy is cloned verbatim).
     pub linux_saved_auxv: Option<alloc::vec::Vec<u8>>,
+    /// Where the main image's program headers are in this process
+    /// (`spawn::place_phdr_table`): what its C library reads to find its
+    /// thread-local storage template. Set at spawn and exec, for both ABIs
+    /// (a Linux-ABI process is told through `AT_PHDR` as well); a forked
+    /// child, with the same image, has the same. `None` before an image is
+    /// loaded, and for one with no program headers.
+    pub main_phdr: Option<crate::proc::spawn::MainPhdr>,
     /// Current working directory, stored as a canonical absolute path.
     ///
     /// Invariants maintained by [`set_cwd`]:
@@ -1419,6 +1426,7 @@ impl Process {
             abi_mode: AbiMode::Native,
             linux_fd_table: None,
             linux_saved_auxv: None,
+            main_phdr: None,
             // Every process starts at the filesystem root.  `chdir`
             // changes this; `fork_create` clones the parent's value.
             cwd: alloc::vec![b'/'],
@@ -1682,6 +1690,7 @@ pub fn fork_create(
         abi_mode,
         linux_fd_table,
         linux_saved_auxv,
+        main_phdr,
         cwd,
         root_dir,
         rlimits,
@@ -1753,6 +1762,8 @@ pub fn fork_create(
             // initial stack via CoW, so it carries the same auxv until
             // it execve's (which rebuilds it).
             parent.linux_saved_auxv.clone(),
+            // The same image, so the same program headers.
+            parent.main_phdr,
             parent.cwd.clone(),
             parent.root_dir.clone(),
             parent.rlimits,
@@ -1892,6 +1903,7 @@ pub fn fork_create(
         abi_mode,
         linux_fd_table,
         linux_saved_auxv,
+        main_phdr,
         // POSIX: the child inherits the parent's cwd at the moment
         // of fork.  Subsequent chdirs in either process do not affect
         // the other (each owns its own Vec).
@@ -7349,6 +7361,30 @@ pub fn linux_saved_auxv(pid: ProcessId) -> Option<alloc::vec::Vec<u8>> {
     let table = PROCESS_TABLE.lock();
     let proc = table.get(&pid)?;
     proc.linux_saved_auxv.clone()
+}
+
+/// Record where `pid`'s main image's program headers are
+/// ([`Process::main_phdr`]): at spawn, and again at each exec.
+///
+/// # Errors
+///
+/// [`KernelError::NoSuchProcess`] if `pid` is not a live process.
+pub fn set_main_phdr(
+    pid: ProcessId,
+    phdr: Option<crate::proc::spawn::MainPhdr>,
+) -> KernelResult<()> {
+    let mut table = PROCESS_TABLE.lock();
+    let proc = table.get_mut(&pid).ok_or(KernelError::NoSuchProcess)?;
+    proc.main_phdr = phdr;
+    Ok(())
+}
+
+/// Where `pid`'s main image's program headers are, or `None` (no such
+/// process, no image yet, or an image with none). `SYS_PROCESS_GET_PHDR`'s
+/// answer.
+#[must_use]
+pub fn main_phdr(pid: ProcessId) -> Option<crate::proc::spawn::MainPhdr> {
+    PROCESS_TABLE.lock().get(&pid)?.main_phdr
 }
 
 /// Drop `pid`'s saved Linux auxiliary vector, if any.

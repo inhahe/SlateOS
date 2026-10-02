@@ -71,9 +71,9 @@ use super::number::{
     SYS_PIPE_WAIT_READABLE, SYS_PIPE_WRITE, SYS_PIPE_WRITE_TIMEOUT, SYS_PORT_READ, SYS_PORT_WRITE,
     SYS_PROCESS_CHROOT, SYS_PROCESS_COUNT, SYS_PROCESS_CRASH_INFO, SYS_PROCESS_GET_ARGS,
     SYS_PROCESS_GET_CREDENTIALS, SYS_PROCESS_GET_CWD, SYS_PROCESS_GET_INITIAL_FDS,
-    SYS_PROCESS_GET_NICE, SYS_PROCESS_GET_PGID, SYS_PROCESS_GET_PRIORITY, SYS_PROCESS_GET_RUSAGE,
-    SYS_PROCESS_GET_SID, SYS_PROCESS_ID, SYS_PROCESS_IS_READY, SYS_PROCESS_KILL,
-    SYS_PROCESS_PARENT_ID, SYS_PROCESS_SET_CREDENTIALS, SYS_PROCESS_SET_CWD,
+    SYS_PROCESS_GET_NICE, SYS_PROCESS_GET_PGID, SYS_PROCESS_GET_PHDR, SYS_PROCESS_GET_PRIORITY,
+    SYS_PROCESS_GET_RUSAGE, SYS_PROCESS_GET_SID, SYS_PROCESS_ID, SYS_PROCESS_IS_READY,
+    SYS_PROCESS_KILL, SYS_PROCESS_PARENT_ID, SYS_PROCESS_SET_CREDENTIALS, SYS_PROCESS_SET_CWD,
     SYS_PROCESS_SET_EXEC_CLOSE, SYS_PROCESS_SET_EXEC_FDS, SYS_PROCESS_SET_NICE,
     SYS_PROCESS_SET_PGID, SYS_PROCESS_SET_PRIORITY, SYS_PROCESS_SET_SID, SYS_PROCESS_SETGROUPS,
     SYS_PROCESS_SPAWN, SYS_PROCESS_SPAWN_EX, SYS_PROCESS_SPAWN_EX2, SYS_PROCESS_TRY_WAIT,
@@ -573,6 +573,7 @@ const fn build_v1_table() -> SyscallTable {
     handlers[SYS_SIGNAL_GET_IGNORED as usize] = Some(handlers::sys_signal_get_ignored);
     handlers[SYS_SCHED_SET_AFFINITY as usize] = Some(handlers::sys_sched_set_affinity);
     handlers[SYS_SCHED_GET_AFFINITY as usize] = Some(handlers::sys_sched_get_affinity);
+    handlers[SYS_PROCESS_GET_PHDR as usize] = Some(handlers::sys_process_get_phdr);
 
     // Thread management (510–519).
     handlers[SYS_THREAD_CREATE as usize] = Some(handlers::sys_thread_create);
@@ -1034,6 +1035,7 @@ pub fn self_test() -> KernelResult<()> {
     test_dispatch_signal_siginfo_frame()?;
     test_dispatch_signal_ignored()?;
     test_dispatch_sched_affinity()?;
+    test_dispatch_process_get_phdr()?;
     test_dispatch_priority_doors()?;
     test_dispatch_exec_close()?;
     test_dispatch_tioc_and_watch_records()?;
@@ -2846,6 +2848,68 @@ fn test_dispatch_sched_affinity() -> KernelResult<()> {
         }
         Err(what) => {
             serial_println!("[syscall]   FAIL: affinity: {}", what);
+            Err(KernelError::InternalError)
+        }
+    }
+}
+
+/// `SYS_PROCESS_GET_PHDR` (1102), as a kernel task and as a process
+/// (`thread::self_test_as_process`): a kernel task has no process
+/// (`NoSuchProcess`); a null pointer is `InvalidArgument`; a process with no
+/// table recorded is `NotFound`; one with a table gets as far as the copy-out,
+/// which a process-context self-test cannot write (`InvalidAddress`). The
+/// table's placement itself is `spawn::self_test_main_phdr`'s.
+fn test_dispatch_process_get_phdr() -> KernelResult<()> {
+    use crate::proc::pcb;
+    use crate::proc::thread::self_test_as_process;
+
+    let args = |arg0: u64| SyscallArgs {
+        arg0,
+        arg1: 0,
+        arg2: 0,
+        arg3: 0,
+        arg4: 0,
+        arg5: 0,
+    };
+    let code = |e: KernelError| i64::from(e.code());
+    let mut out = [0u8; 16];
+    let out_ptr = out.as_mut_ptr() as u64;
+    let pid = pcb::create("phdr-door", 0);
+    let as_pid =
+        |a: SyscallArgs| self_test_as_process(pid, || dispatch(SYS_PROCESS_GET_PHDR, &a).value);
+    let result = (|| -> Result<(), &'static str> {
+        if dispatch(SYS_PROCESS_GET_PHDR, &args(out_ptr)).value != code(KernelError::NoSuchProcess)
+        {
+            return Err("a kernel task was not NoSuchProcess");
+        }
+        if as_pid(args(0)) != code(KernelError::InvalidArgument) {
+            return Err("a null pointer was not InvalidArgument");
+        }
+        if as_pid(args(out_ptr)) != code(KernelError::NotFound) {
+            return Err("a process with no table recorded was not NotFound");
+        }
+        let table = crate::proc::spawn::MainPhdr {
+            vaddr: 0x40_0000,
+            phnum: 3,
+            phentsize: 56,
+        };
+        pcb::set_main_phdr(pid, Some(table)).map_err(|_| "set_main_phdr")?;
+        if pcb::main_phdr(pid) != Some(table) {
+            return Err("a recorded table did not read back");
+        }
+        if as_pid(args(out_ptr)) != code(KernelError::InvalidAddress) {
+            return Err("a recorded table did not reach the copy-out");
+        }
+        Ok(())
+    })();
+    pcb::destroy(pid);
+    match result {
+        Ok(()) => {
+            serial_println!("[syscall]   SYS_PROCESS_GET_PHDR (1102): OK");
+            Ok(())
+        }
+        Err(what) => {
+            serial_println!("[syscall]   FAIL: SYS_PROCESS_GET_PHDR: {}", what);
             Err(KernelError::InternalError)
         }
     }

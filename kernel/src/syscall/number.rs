@@ -6219,6 +6219,27 @@ pub const SYS_SCHED_GET_AFFINITY: u64 = 1101;
 /// target is a thread id, not a process id.
 pub const SCHED_AFFINITY_THREAD: u64 = 1;
 
+/// Where the calling process's main image's program headers are -- what a
+/// C library reads at start-up to find its thread-local storage template
+/// (`PT_TLS`), and what a Linux-ABI process is told through `AT_PHDR`,
+/// `AT_PHNUM` and `AT_PHENT`.
+///
+/// - `arg0`: a pointer to 16 bytes that receive `{ u64 vaddr; u16 phnum;
+///   u16 phentsize; u32 reserved = 0 }`.
+///
+/// The address is a loaded segment's when one holds the headers, and
+/// otherwise a read-only copy the loader mapped for the purpose, so a
+/// linker script that leaves the headers out of every segment no longer
+/// costs a program its `__thread` variables
+/// (`requests/d-a-native-processes-could-be-told-where-their-program-headers-are.md`).
+///
+/// Returns 0. Errors: `NotFound` for an image with no program headers;
+/// `InvalidArgument` for a null pointer; `InvalidAddress` for an
+/// unwritable one; `NoSuchProcess` from a kernel task.
+///
+/// Chosen number 1102, the next free slot after 1101.
+pub const SYS_PROCESS_GET_PHDR: u64 = 1102;
+
 // ---------------------------------------------------------------------------
 // Version info
 // ---------------------------------------------------------------------------

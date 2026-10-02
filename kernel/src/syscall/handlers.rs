@@ -8596,6 +8596,31 @@ pub fn sys_signal_get_ignored(
     }
 }
 
+/// `SYS_PROCESS_GET_PHDR` (1102) — where the caller's main image's program
+/// headers are. See
+/// [`SYS_PROCESS_GET_PHDR`](super::number::SYS_PROCESS_GET_PHDR).
+pub fn sys_process_get_phdr(args: &super::dispatch::SyscallArgs) -> super::dispatch::SyscallResult {
+    use super::dispatch::SyscallResult;
+    let pid = match caller_process_or_err() {
+        Ok(p) => p,
+        Err(e) => return SyscallResult::err(e),
+    };
+    if args.arg0 == 0 {
+        return SyscallResult::err(KernelError::InvalidArgument);
+    }
+    let Some(phdr) = pcb::main_phdr(pid) else {
+        return SyscallResult::err(KernelError::NotFound);
+    };
+    let mut out = [0u8; 16];
+    out[..8].copy_from_slice(&phdr.vaddr.to_le_bytes());
+    out[8..10].copy_from_slice(&phdr.phnum.to_le_bytes());
+    out[10..12].copy_from_slice(&phdr.phentsize.to_le_bytes());
+    match crate::mm::user::write_user_value::<[u8; 16]>(args.arg0, out) {
+        Ok(()) => SyscallResult::ok(0),
+        Err(e) => SyscallResult::err(e),
+    }
+}
+
 /// The threads an affinity call acts on, for its target and flags
 /// ([`SYS_SCHED_SET_AFFINITY`](super::number::SYS_SCHED_SET_AFFINITY)): one
 /// thread, or every thread of a process with its main thread first.

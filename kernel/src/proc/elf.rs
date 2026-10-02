@@ -249,6 +249,18 @@ pub struct ElfFile<'a> {
 }
 
 impl<'a> ElfFile<'a> {
+    /// The program-header table as the file stores it: `e_phnum` entries of
+    /// `e_phentsize` bytes at `e_phoff`. `None` if it runs past the file.
+    /// What a copy of the table is made from when no loaded segment holds it
+    /// (`spawn::place_phdr_table`).
+    #[must_use]
+    pub fn phdr_table_bytes(&self) -> Option<&'a [u8]> {
+        let start = usize::try_from(self.header.e_phoff).ok()?;
+        let len =
+            usize::from(self.header.e_phentsize).checked_mul(usize::from(self.header.e_phnum))?;
+        self.data.get(start..start.checked_add(len)?)
+    }
+
     /// Parse an ELF64 binary from a byte slice.
     ///
     /// Validates:

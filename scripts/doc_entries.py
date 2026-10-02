@@ -283,6 +283,20 @@ def issue_status_text(title: str, lines: list[str]) -> str:
     return tail
 
 
+def prose_of(title: str) -> str:
+    """A prose heading without its lane tag and its status tail, for a file name
+    that does not go stale when the status changes:
+    "[E] The terminal's shell ran on pipes -- 2026-09-24 -- **FIXED**"
+    -> "The terminals shell ran on pipes"."""
+    t = re.sub(r"^\s*`?\[[A-F]\]`?\s*", "", title)
+    segs = _TAIL_SEP.split(t)
+    for i in range(1, len(segs)):
+        if ki_split._TAIL_START.match(segs[i].strip().lstrip("*`").strip()):  # noqa: SLF001 - shared grammar
+            t = " ".join(segs[:i])
+            break
+    return re.sub(r"['’`]", "", t)
+
+
 def issue_status(title: str, lines: list[str], archived: bool) -> str:
     """'closed' or 'open', reading the markers as conservatively as ki_split does:
     any OPEN or hedge ("partly", "pending", "FIXED?") keeps an entry open, because
@@ -375,8 +389,7 @@ def parse_issues_monolith(text: str, path: str, archived: bool) -> tuple[list[st
         if not lane and sect.startswith("Lane "):
             lane = sect[-1]
         if not key:
-            prose = re.sub(r"^\s*`?\[[A-F]\]`?\s*", "", title)
-            key = (f"{lane}-" if lane else "") + slugify(prose)
+            key = (f"{lane}-" if lane else "") + slugify(prose_of(title))
         entries.append(DocEntry(
             kind="issue", key=key, title=title, text="".join(chunk), path=path,
             line=i + 1, end_line=i + len(chunk), lane=lane,

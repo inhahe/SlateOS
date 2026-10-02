@@ -135,8 +135,11 @@ def index_dir(root: Path) -> Path:
 
 def open_index(root: Path, rebuild: bool = False) -> sqlite3.Connection:
     path = index_dir(root) / "index.sqlite"
-    if rebuild and path.exists():
-        path.unlink()
+    if rebuild:
+        # The WAL and shared-memory files too: a fresh database next to an old
+        # write-ahead log would have the old pages replayed into it.
+        for p in (path, path.with_name(path.name + "-wal"), path.with_name(path.name + "-shm")):
+            p.unlink(missing_ok=True)
     db = sqlite3.connect(path, timeout=30)
     db.execute("PRAGMA journal_mode=WAL")
     db.executescript(INDEX_SCHEMA)

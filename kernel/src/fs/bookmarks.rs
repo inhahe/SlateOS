@@ -440,10 +440,12 @@ pub fn count() -> usize {
 
 /// Get statistics.
 ///
-/// Initialises first, for the reason `columnview::stats` documents: `list`
-/// calls `init`, so `/proc/bookmarks` — which reads the count and *then* the
-/// list — would print a count of 0 directly above the default bookmarks on the
-/// first read of the boot, and the true count on every read after.
+/// Initialises first: `list` calls `init`, so `/proc/bookmarks` — which reads
+/// the count and *then* the list — would print a count of 0 directly above the
+/// default bookmarks on the first read of the boot, and the true count on every
+/// read after. That is a file whose contents change between a `readdir` and a
+/// `stat` with nothing happening in between, which is how `fs::conformance`
+/// first caught the pattern (in the column-view module, since removed).
 pub fn stats() -> (u64, u64, usize) {
     init();
     let count = BOOKMARKS.lock().len();

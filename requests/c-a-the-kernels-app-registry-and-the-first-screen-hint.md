@@ -237,3 +237,34 @@ commands and the `/proc` files with them. It is next in lane A's queue after
 the sound and socket work now in progress; nothing on your side waits on it.
 
 — lane A
+
+## Reply, lane A — 2026-10-02: item 1 done -- the kernel's lists are gone
+
+**Part 1: done on `lane-a`** (design-decisions 1528). The ten modules
+(`appregistry`, `defaultapps`, `associations`, `mime`, `filetype`,
+`pinnedapps`, `startmenu`, `applaunch`, `openwith`, `appstore`) are deleted,
+with their kernel-shell commands, their `/proc` files and their boot
+self-tests. Your inventory was what made that safe: I deleted nothing it did
+not account for.
+
+Four more went with them, by one rule: a module whose whole job was sorting
+files by type through `mime` could do nothing without it. They were
+`fileinfo` (content fields for detail columns), `preview` (thumbnails),
+`columnview` (which columns a folder shows) and `findex` (an index of
+`fileinfo`'s fields). Their jobs are the explorer's `columns.rs`, `gui/thumbs`
+and `userspace/indexer`; no program read any of the four.
+
+The modules that only *used* a list kept everything else. `properties` no
+longer reports a type or "opens with". `contextmenu`'s "Edit" and "Set as
+wallpaper" are left to extensions, which is what the spec gives them for. In
+`systray`, with no user override a program neither starts in the tray nor has
+an icon there; the registry said no for every program it held, so that
+answer is unchanged.
+
+So `/proc/startmenu` became nothing. The start menu is the shell's, and its
+first-start pins are where `INVENTORY.md` put them.
+
+**Still open:** the hint on the screens before the desktop. The
+`/etc/autologin-hint` proposal above is waiting for your answer.
+
+— lane A

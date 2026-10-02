@@ -148,9 +148,7 @@ const ROOT_FILES: &[&str] = &[
     "freeze",
     "sealing",
     "recent",
-    "fileinfo",
     "fswalk",
-    "findex",
     "thumbcache",
     "bookmarks",
     "clipboard",
@@ -158,9 +156,6 @@ const ROOT_FILES: &[&str] = &[
     "contextmenu",
     "fileops",
     "fileselect",
-    "filetype",
-    "openwith",
-    "preview",
     "sidebar",
     "statusbar",
     "templates",
@@ -169,10 +164,8 @@ const ROOT_FILES: &[&str] = &[
     "fcomment",
     "rundialog",
     "notifcenter",
-    "appregistry",
     "systray",
     "taskbar",
-    "startmenu",
     "filepicker",
     "theme",
     "hotkeys",
@@ -228,7 +221,6 @@ const ROOT_FILES: &[&str] = &[
     "mousesettings",
     "touchpad",
     "powerprofile",
-    "defaultapps",
     "monitors",
     "fwsettings",
     "updatemgr",
@@ -283,7 +275,6 @@ const ROOT_FILES: &[&str] = &[
     "speechio",
     "mobilelink",
     "screenlock",
-    "appstore",
     "wintiling",
     "peninput",
     "brightness",
@@ -315,7 +306,6 @@ const ROOT_FILES: &[&str] = &[
     "snaplayout",
     "haptfeedback",
     "eyeprotect",
-    "pinnedapps",
     "inputmethod",
     "storagesense",
     "autofix",
@@ -339,7 +329,6 @@ const ROOT_FILES: &[&str] = &[
     "sysresource",
     "faceunlock",
     "usbpolicy",
-    "applaunch",
     "sysprofiler",
     "clipsync",
     "netusage",
@@ -411,7 +400,6 @@ const ROOT_FILES: &[&str] = &[
     "userprofile",
     "diskclean",
     "acl",
-    "associations",
     "logrotate",
     "powerwake",
     "diskio",
@@ -532,7 +520,6 @@ const ROOT_FILES: &[&str] = &[
     "cgmem",
     "vmfrag",
     "pidfd",
-    "columnview",
     "pathbar",
     "viewstate",
     "properties",
@@ -5530,31 +5517,6 @@ fn gen_recent() -> Vec<u8> {
     out.into_bytes()
 }
 
-fn gen_fileinfo() -> Vec<u8> {
-    use alloc::format;
-    let mut out = String::new();
-
-    let (extractions, fields, errors) = super::fileinfo::stats();
-
-    out.push_str("File Info Metadata Extraction\n");
-    out.push_str("=============================\n\n");
-    out.push_str(&format!("Extractions: {}\n", extractions));
-    out.push_str(&format!("Fields:      {}\n", fields));
-    out.push_str(&format!("Errors:      {}\n\n", errors));
-
-    out.push_str("Supported formats:\n");
-    out.push_str("  audio/mpeg    — MP3 (ID3v1, ID3v2, MPEG frame)\n");
-    out.push_str("  audio/wav     — WAV (RIFF/PCM headers)\n");
-    out.push_str("  image/jpeg    — JPEG (EXIF, SOF dimensions)\n");
-    out.push_str("  image/png     — PNG (IHDR, tEXt chunks)\n");
-    out.push_str("  image/gif     — GIF (dimensions, version)\n");
-    out.push_str("  image/bmp     — BMP (dimensions, bit depth)\n");
-    out.push_str("  application/pdf — PDF (version, linearized)\n");
-    out.push_str("  application/x-elf — ELF (class, machine, type)\n");
-
-    out.into_bytes()
-}
-
 fn gen_fswalk() -> Vec<u8> {
     use alloc::format;
     let mut out = String::new();
@@ -5573,31 +5535,6 @@ fn gen_fswalk() -> Vec<u8> {
     out.push_str(&format!("Max results:     {}\n", 65536));
     out.push_str(&format!("Default depth:   {}\n", 64));
     out.push_str("Default excl:    /proc, /sys, /dev\n");
-
-    out.into_bytes()
-}
-
-fn gen_findex() -> Vec<u8> {
-    use alloc::format;
-    let mut out = String::new();
-
-    let (builds, index_ops, queries, indexed, fields) = super::findex::stats();
-
-    out.push_str("File Metadata Index\n");
-    out.push_str("===================\n\n");
-    out.push_str(&format!("Indexed files: {}/{}\n", indexed, 16384));
-    out.push_str(&format!("Known fields:  {}/{}\n", fields, 256));
-    out.push_str(&format!("Builds:        {}\n", builds));
-    out.push_str(&format!("Index ops:     {}\n", index_ops));
-    out.push_str(&format!("Queries:       {}\n\n", queries));
-
-    let known = super::findex::known_fields();
-    if !known.is_empty() {
-        out.push_str("Known field names:\n");
-        for (name, label) in &known {
-            out.push_str(&format!("  {:30} {}\n", name, label));
-        }
-    }
 
     out.into_bytes()
 }
@@ -5762,35 +5699,6 @@ fn gen_fileops() -> Vec<u8> {
                 kind.label(),
                 state_str,
                 label
-            ));
-        }
-    }
-
-    out.into_bytes()
-}
-
-fn gen_preview() -> Vec<u8> {
-    use alloc::format;
-    let mut out = String::new();
-
-    let (generate_calls, cache_hits, failures, total_bytes) = super::preview::stats();
-
-    out.push_str("Preview Generation\n");
-    out.push_str("==================\n\n");
-    out.push_str(&format!("Generate calls: {}\n", generate_calls));
-    out.push_str(&format!("Cache hits:     {}\n", cache_hits));
-    out.push_str(&format!("Failures:       {}\n", failures));
-    out.push_str(&format!("Bytes generated:{}\n\n", total_bytes));
-
-    let generators = super::preview::list_generators();
-    if !generators.is_empty() {
-        out.push_str("Custom generators:\n");
-        for g in &generators {
-            out.push_str(&format!(
-                "  {} ({}): {}\n",
-                g.id,
-                g.app_name,
-                g.mime_types.join(", ")
             ));
         }
     }
@@ -6022,36 +5930,6 @@ fn gen_notifcenter() -> Vec<u8> {
     out.into_bytes()
 }
 
-fn gen_appregistry() -> Vec<u8> {
-    use alloc::format;
-    let mut out = String::new();
-
-    let (app_count, mime_count, register_ops, lookup_ops) = super::appregistry::stats();
-
-    out.push_str("Application Registry\n");
-    out.push_str("====================\n\n");
-    out.push_str(&format!("Apps:         {}/{}\n", app_count, 4096));
-    out.push_str(&format!("MIME types:   {}\n", mime_count));
-    out.push_str(&format!("Register ops: {}\n", register_ops));
-    out.push_str(&format!("Lookup ops:   {}\n\n", lookup_ops));
-
-    let tree = super::appregistry::menu_tree();
-    if !tree.is_empty() {
-        for (cat, entries) in &tree {
-            out.push_str(&format!("[{}]\n", cat.label()));
-            for entry in entries {
-                out.push_str(&format!(
-                    "  {} ({})\n",
-                    entry.name,
-                    entry.exec_path.display()
-                ));
-            }
-        }
-    }
-
-    out.into_bytes()
-}
-
 fn gen_systray() -> Vec<u8> {
     use alloc::format;
     let mut out = String::new();
@@ -6161,53 +6039,6 @@ fn gen_taskbar() -> Vec<u8> {
                 e.name,
                 e.windows.len(),
                 state
-            ));
-        }
-    }
-
-    out.into_bytes()
-}
-
-fn gen_startmenu() -> Vec<u8> {
-    use alloc::format;
-    let mut out = String::new();
-
-    let (fav_n, ql_n, recent_n, open_ops, search_ops, launch_ops) = super::startmenu::stats();
-
-    out.push_str("Start Menu\n");
-    out.push_str("==========\n\n");
-    out.push_str(&format!("Favorites:   {}/{}\n", fav_n, 32));
-    out.push_str(&format!("Quick links: {}/{}\n", ql_n, 16));
-    out.push_str(&format!("Recent apps: {}/{}\n", recent_n, 20));
-    out.push_str(&format!("Open ops:    {}\n", open_ops));
-    out.push_str(&format!("Search ops:  {}\n", search_ops));
-    out.push_str(&format!("Launch ops:  {}\n\n", launch_ops));
-
-    let favs = super::startmenu::favorites();
-    if !favs.is_empty() {
-        out.push_str("Favorites:\n");
-        for f in &favs {
-            out.push_str(&format!("  [{}] {} ({})\n", f.position, f.name, f.app_id));
-        }
-        out.push('\n');
-    }
-
-    let links = super::startmenu::quick_links();
-    if !links.is_empty() {
-        out.push_str("Quick Links:\n");
-        for ql in &links {
-            out.push_str(&format!("  {} ({})\n", ql.label, ql.app_id));
-        }
-        out.push('\n');
-    }
-
-    let recent = super::startmenu::recent_apps();
-    if !recent.is_empty() {
-        out.push_str("Recent:\n");
-        for r in &recent {
-            out.push_str(&format!(
-                "  {} (x{}) — {}\n",
-                r.name, r.launch_count, r.app_id
             ));
         }
     }
@@ -8491,27 +8322,6 @@ fn gen_powerprofile() -> Vec<u8> {
     out.into_bytes()
 }
 
-fn gen_defaultapps() -> Vec<u8> {
-    use alloc::format;
-    let mut out = String::new();
-
-    let (types, cats, overrides, ops) = super::defaultapps::stats();
-    out.push_str(&format!("type_mappings: {}\n", types));
-    out.push_str(&format!("category_defaults: {}\n", cats));
-    out.push_str(&format!("user_overrides: {}\n", overrides));
-    out.push_str(&format!("ops: {}\n", ops));
-
-    let cat_defaults = super::defaultapps::list_category_defaults(0);
-    if !cat_defaults.is_empty() {
-        out.push_str("categories:\n");
-        for cd in &cat_defaults {
-            out.push_str(&format!("  {}: {}\n", cd.category.label(), cd.app_id));
-        }
-    }
-
-    out.into_bytes()
-}
-
 fn gen_monitors() -> Vec<u8> {
     use alloc::format;
     let mut out = String::new();
@@ -9504,18 +9314,6 @@ fn gen_screenlock() -> Vec<u8> {
     out.into_bytes()
 }
 
-fn gen_appstore() -> Vec<u8> {
-    use crate::fs::appstore;
-    let (apps, installed, installs, updates, ops) = appstore::stats();
-    let mut out = String::from("app_count: ");
-    out.push_str(&format!("{}\n", apps));
-    out.push_str(&format!("installed: {}\n", installed));
-    out.push_str(&format!("total_installs: {}\n", installs));
-    out.push_str(&format!("total_updates: {}\n", updates));
-    out.push_str(&format!("ops: {}\n", ops));
-    out.into_bytes()
-}
-
 fn gen_wintiling() -> Vec<u8> {
     use crate::fs::wintiling;
     let (ws, wins, tiles, retiles, ops) = wintiling::stats();
@@ -9962,19 +9760,6 @@ fn gen_eyeprotect() -> Vec<u8> {
     out.push_str(&format!("total_breaks: {}\n", breaks));
     out.push_str(&format!("total_snoozes: {}\n", snoozes));
     out.push_str(&format!("total_skips: {}\n", skips));
-    out.push_str(&format!("ops: {}\n", ops));
-    out.into_bytes()
-}
-
-fn gen_pinnedapps() -> Vec<u8> {
-    use super::pinnedapps;
-    use alloc::format;
-    let (total, taskbar, start, launches, ops) = pinnedapps::stats();
-    let mut out = String::from("total_pinned: ");
-    out.push_str(&format!("{}\n", total));
-    out.push_str(&format!("taskbar_pins: {}\n", taskbar));
-    out.push_str(&format!("startmenu_pins: {}\n", start));
-    out.push_str(&format!("total_launches: {}\n", launches));
     out.push_str(&format!("ops: {}\n", ops));
     out.into_bytes()
 }
@@ -10494,19 +10279,6 @@ fn gen_usbpolicy() -> Vec<u8> {
     out.push_str(&format!("log_size: {}\n", log_size));
     out.push_str(&format!("total_allowed: {}\n", total_allowed));
     out.push_str(&format!("total_denied: {}\n", total_denied));
-    out.push_str(&format!("ops: {}\n", ops));
-    out.into_bytes()
-}
-
-fn gen_applaunch() -> Vec<u8> {
-    use alloc::format;
-    let mut out = String::new();
-
-    let (item_count, total_searches, total_launches, ops) = super::applaunch::stats();
-    out.push_str("subsystem: applaunch\n");
-    out.push_str(&format!("item_count: {}\n", item_count));
-    out.push_str(&format!("total_searches: {}\n", total_searches));
-    out.push_str(&format!("total_launches: {}\n", total_launches));
     out.push_str(&format!("ops: {}\n", ops));
     out.into_bytes()
 }
@@ -11161,17 +10933,6 @@ fn gen_acl() -> Vec<u8> {
     out.push_str(&format!("total_entries: {}\n", s.total_entries));
     out.push_str(&format!("checks_performed: {}\n", s.checks_performed));
     out.push_str(&format!("denials: {}\n", s.denials));
-    out.into_bytes()
-}
-
-fn gen_associations() -> Vec<u8> {
-    use alloc::format;
-    let mut out = String::new();
-    out.push_str("=== File Associations ===\n");
-    let s = crate::fs::associations::stats();
-    out.push_str(&format!("mime_types: {}\n", s.mime_types));
-    out.push_str(&format!("total_entries: {}\n", s.total_entries));
-    out.push_str(&format!("user_entries: {}\n", s.user_entries));
     out.into_bytes()
 }
 
@@ -14085,49 +13846,6 @@ fn gen_pidfd() -> Vec<u8> {
     out.into_bytes()
 }
 
-fn gen_columnview() -> Vec<u8> {
-    use alloc::format;
-    let mut out = String::new();
-
-    let (col_count, pref_count, compute_count) = super::columnview::stats();
-
-    out.push_str("Column View\n");
-    out.push_str("===========\n\n");
-    out.push_str(&format!("Columns:    {}/{}\n", col_count, 512));
-    out.push_str(&format!("User prefs: {}/{}\n", pref_count, 256));
-    out.push_str(&format!("Computes:   {}\n\n", compute_count));
-
-    let cols = super::columnview::list_columns();
-    if !cols.is_empty() {
-        out.push_str(&format!(
-            "{:24} {:16} {:8} {:6} {}\n",
-            "ID", "HEADER", "TYPE", "WIDTH", "APPLIES TO"
-        ));
-        for c in cols.iter().take(30) {
-            let type_str = match c.col_type {
-                super::columnview::ColumnType::Text => "text",
-                super::columnview::ColumnType::Integer => "int",
-                super::columnview::ColumnType::Size => "size",
-                super::columnview::ColumnType::DateTime => "date",
-                super::columnview::ColumnType::Duration => "dur",
-                super::columnview::ColumnType::Boolean => "bool",
-                super::columnview::ColumnType::Dimensions => "dim",
-            };
-            let applies = if c.applies_to.is_empty() {
-                String::from("*")
-            } else {
-                format!("{}", c.applies_to.len())
-            };
-            out.push_str(&format!(
-                "{:24} {:16} {:8} {:6} {}\n",
-                c.id, c.header, type_str, c.default_width, applies
-            ));
-        }
-    }
-
-    out.into_bytes()
-}
-
 fn gen_pathbar() -> Vec<u8> {
     use alloc::format;
     let mut out = String::new();
@@ -14231,22 +13949,6 @@ fn gen_fileselect() -> Vec<u8> {
     out.into_bytes()
 }
 
-fn gen_filetype() -> Vec<u8> {
-    use alloc::format;
-    let mut out = String::new();
-
-    let (lookups, registers, type_count, app_icons) = super::filetype::stats();
-
-    out.push_str("File Types\n");
-    out.push_str("==========\n\n");
-    out.push_str(&format!("Types:       {}\n", type_count));
-    out.push_str(&format!("App icons:   {}\n", app_icons));
-    out.push_str(&format!("Lookups:     {}\n", lookups));
-    out.push_str(&format!("Registers:   {}\n", registers));
-
-    out.into_bytes()
-}
-
 fn gen_sidebar() -> Vec<u8> {
     use alloc::format;
     let mut out = String::new();
@@ -14281,22 +13983,6 @@ fn gen_statusbar() -> Vec<u8> {
     out.push_str("Status Bar\n");
     out.push_str("==========\n\n");
     out.push_str(&format!("Generates: {}\n", gen_count));
-
-    out.into_bytes()
-}
-
-fn gen_openwith() -> Vec<u8> {
-    use alloc::format;
-    let mut out = String::new();
-
-    let (opens, defaults, recent, apps) = super::openwith::stats();
-
-    out.push_str("Open With\n");
-    out.push_str("=========\n\n");
-    out.push_str(&format!("Opens:           {}\n", opens));
-    out.push_str(&format!("Default changes: {}\n", defaults));
-    out.push_str(&format!("Recent entries:  {}\n", recent));
-    out.push_str(&format!("Known apps:      {}\n", apps));
 
     out.into_bytes()
 }
@@ -14432,9 +14118,7 @@ fn generate(name: &str) -> KernelResult<Vec<u8>> {
         "freeze" => Ok(gen_freeze()),
         "sealing" => Ok(gen_sealing()),
         "recent" => Ok(gen_recent()),
-        "fileinfo" => Ok(gen_fileinfo()),
         "fswalk" => Ok(gen_fswalk()),
-        "findex" => Ok(gen_findex()),
         "thumbcache" => Ok(gen_thumbcache()),
         "bookmarks" => Ok(gen_bookmarks()),
         "clipboard" => Ok(gen_clipboard()),
@@ -14442,9 +14126,6 @@ fn generate(name: &str) -> KernelResult<Vec<u8>> {
         "contextmenu" => Ok(gen_contextmenu()),
         "fileops" => Ok(gen_fileops()),
         "fileselect" => Ok(gen_fileselect()),
-        "filetype" => Ok(gen_filetype()),
-        "openwith" => Ok(gen_openwith()),
-        "preview" => Ok(gen_preview()),
         "sidebar" => Ok(gen_sidebar()),
         "statusbar" => Ok(gen_statusbar()),
         "templates" => Ok(gen_templates()),
@@ -14453,10 +14134,8 @@ fn generate(name: &str) -> KernelResult<Vec<u8>> {
         "fcomment" => Ok(gen_fcomment()),
         "rundialog" => Ok(gen_rundialog()),
         "notifcenter" => Ok(gen_notifcenter()),
-        "appregistry" => Ok(gen_appregistry()),
         "systray" => Ok(gen_systray()),
         "taskbar" => Ok(gen_taskbar()),
-        "startmenu" => Ok(gen_startmenu()),
         "filepicker" => Ok(gen_filepicker()),
         "theme" => Ok(gen_theme()),
         "hotkeys" => Ok(gen_hotkeys()),
@@ -14512,7 +14191,6 @@ fn generate(name: &str) -> KernelResult<Vec<u8>> {
         "mousesettings" => Ok(gen_mousesettings()),
         "touchpad" => Ok(gen_touchpad()),
         "powerprofile" => Ok(gen_powerprofile()),
-        "defaultapps" => Ok(gen_defaultapps()),
         "monitors" => Ok(gen_monitors()),
         "fwsettings" => Ok(gen_fwsettings()),
         "updatemgr" => Ok(gen_updatemgr()),
@@ -14567,7 +14245,6 @@ fn generate(name: &str) -> KernelResult<Vec<u8>> {
         "speechio" => Ok(gen_speechio()),
         "mobilelink" => Ok(gen_mobilelink()),
         "screenlock" => Ok(gen_screenlock()),
-        "appstore" => Ok(gen_appstore()),
         "wintiling" => Ok(gen_wintiling()),
         "peninput" => Ok(gen_peninput()),
         "brightness" => Ok(gen_brightness()),
@@ -14599,7 +14276,6 @@ fn generate(name: &str) -> KernelResult<Vec<u8>> {
         "snaplayout" => Ok(gen_snaplayout()),
         "haptfeedback" => Ok(gen_haptfeedback()),
         "eyeprotect" => Ok(gen_eyeprotect()),
-        "pinnedapps" => Ok(gen_pinnedapps()),
         "inputmethod" => Ok(gen_inputmethod()),
         "storagesense" => Ok(gen_storagesense()),
         "autofix" => Ok(gen_autofix()),
@@ -14623,7 +14299,6 @@ fn generate(name: &str) -> KernelResult<Vec<u8>> {
         "sysresource" => Ok(gen_sysresource()),
         "faceunlock" => Ok(gen_faceunlock()),
         "usbpolicy" => Ok(gen_usbpolicy()),
-        "applaunch" => Ok(gen_applaunch()),
         "sysprofiler" => Ok(gen_sysprofiler()),
         "clipsync" => Ok(gen_clipsync()),
         "netusage" => Ok(gen_netusage()),
@@ -14695,7 +14370,6 @@ fn generate(name: &str) -> KernelResult<Vec<u8>> {
         "userprofile" => Ok(gen_userprofile()),
         "diskclean" => Ok(gen_diskclean()),
         "acl" => Ok(gen_acl()),
-        "associations" => Ok(gen_associations()),
         "logrotate" => Ok(gen_logrotate()),
         "powerwake" => Ok(gen_powerwake()),
         "diskio" => Ok(gen_diskio()),
@@ -14816,7 +14490,6 @@ fn generate(name: &str) -> KernelResult<Vec<u8>> {
         "cgmem" => Ok(gen_cgmem()),
         "vmfrag" => Ok(gen_vmfrag()),
         "pidfd" => Ok(gen_pidfd()),
-        "columnview" => Ok(gen_columnview()),
         "pathbar" => Ok(gen_pathbar()),
         "viewstate" => Ok(gen_viewstate()),
         "properties" => Ok(gen_properties()),

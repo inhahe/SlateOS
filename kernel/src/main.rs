@@ -4700,11 +4700,6 @@ extern "C" fn kernel_main() -> ! {
                 selftest::Severity::Diagnostic,
                 fs::history::self_test(),
             );
-            selftest::dispatch_debug(
-                "MIME detection",
-                selftest::Severity::Diagnostic,
-                fs::mime::self_test(),
-            );
             // taskstats backs /proc/taskstats; its self-test builds fixtures via the
             // real accounting API and resets the table afterward (leaving no
             // fabricated rows), so it is safe to run during boot and gives the
@@ -6256,13 +6251,6 @@ extern "C" fn kernel_main() -> ! {
                 selftest::Severity::Diagnostic,
                 fs::eventlog::self_test(),
             );
-            // Register default file type associations, then self-test.
-            fs::associations::register_defaults();
-            selftest::dispatch_debug(
-                "File associations",
-                selftest::Severity::Diagnostic,
-                fs::associations::self_test(),
-            );
         }
         case();
     }
@@ -6446,8 +6434,10 @@ extern "C" fn kernel_main() -> ! {
     {
         #[inline(never)]
         fn case() {
-            // The 21 modules converted to `PreemptSpinMutex` by the Q24 leaf-lock
-            // sweep (see known-issues.md). Every one of them already had a
+            // The modules converted to `PreemptSpinMutex` by the Q24 leaf-lock
+            // sweep (see known-issues.md; 21 then, four of them -- columnview,
+            // fileinfo, findex and preview -- since removed with the kernel's
+            // file-type list, design-decisions 1528). Every one of them already had a
             // `self_test()` and not one of them was called from anywhere, so the
             // conversion would otherwise have shipped with zero boot coverage --
             // the same "a test that never runs is not a test" trap as locale and
@@ -6470,11 +6460,6 @@ extern "C" fn kernel_main() -> ! {
                 fs::clipboard::self_test(),
             );
             selftest::dispatch_debug(
-                "column view",
-                selftest::Severity::Diagnostic,
-                fs::columnview::self_test(),
-            );
-            selftest::dispatch_debug(
                 "direct I/O",
                 selftest::Severity::Diagnostic,
                 fs::directio::self_test(),
@@ -6484,32 +6469,20 @@ extern "C" fn kernel_main() -> ! {
                 selftest::Severity::Diagnostic,
                 fs::dragdrop::self_test(),
             );
-            // fcomment and immutable were reachable only from a `kshell`
-            // subcommand, so neither `self_test()` had ever run in the boot
-            // test -- including `immutable`'s, which covers the table that
-            // decides whether a write, truncate, delete or link is refused.
-            // Same "a test that never runs is not a test" trap as the batch
-            // above. See known-issues TD-A-FS-SELFTESTS-NEVER-RUN for the
-            // ~220 further `fs` modules still in that state.
+            // fcomment was reachable only from a `kshell` subcommand, so its
+            // `self_test()` had never run in the boot test. Same "a test that
+            // never runs is not a test" trap as the batch above. See
+            // known-issues TD-A-FS-SELFTESTS-NEVER-RUN for the ~220 further
+            // `fs` modules still in that state.
             selftest::dispatch_debug(
                 "file comments",
                 selftest::Severity::Diagnostic,
                 fs::fcomment::self_test(),
             );
             selftest::dispatch_debug(
-                "fileinfo",
-                selftest::Severity::Diagnostic,
-                fs::fileinfo::self_test(),
-            );
-            selftest::dispatch_debug(
                 "file operations",
                 selftest::Severity::Diagnostic,
                 fs::fileops::self_test(),
-            );
-            selftest::dispatch_debug(
-                "findex",
-                selftest::Severity::Diagnostic,
-                fs::findex::self_test(),
             );
             selftest::dispatch_debug(
                 "fs freeze",
@@ -6530,11 +6503,6 @@ extern "C" fn kernel_main() -> ! {
                 "prefetch",
                 selftest::Severity::Diagnostic,
                 fs::prefetch::self_test(),
-            );
-            selftest::dispatch_debug(
-                "preview",
-                selftest::Severity::Diagnostic,
-                fs::preview::self_test(),
             );
             selftest::dispatch_debug(
                 "fs profile",
@@ -6689,11 +6657,6 @@ extern "C" fn kernel_main() -> ! {
                 fs::filevault::self_test(),
             );
             selftest::dispatch_debug(
-                "filetype",
-                selftest::Severity::Diagnostic,
-                fs::filetype::self_test(),
-            );
-            selftest::dispatch_debug(
                 "fswalk",
                 selftest::Severity::Diagnostic,
                 fs::fswalk::self_test(),
@@ -6726,11 +6689,6 @@ extern "C" fn kernel_main() -> ! {
                 "Netshare",
                 selftest::Severity::Diagnostic,
                 fs::netshare::self_test(),
-            );
-            selftest::dispatch_debug(
-                "open-with",
-                selftest::Severity::Diagnostic,
-                fs::openwith::self_test(),
             );
             // partmgr was reachable only from a `kshell` subcommand, so its
             // suite had never run in the boot test (TD-A-FS-SELFTESTS-NEVER-RUN).
@@ -6940,30 +6898,6 @@ extern "C" fn kernel_main() -> ! {
                 "Screenrec",
                 selftest::Severity::Diagnostic,
                 fs::screenrec::self_test(),
-            );
-            // appregistry and startmenu were reachable only from `kshell`
-            // subcommands (TD-A-FS-SELFTESTS-NEVER-RUN). Both decline to run
-            // against a populated store rather than clearing it, and both end
-            // at the empty state a fresh boot has -- nothing outside their
-            // shell commands populates either.
-            selftest::dispatch_debug(
-                "appregistry",
-                selftest::Severity::Diagnostic,
-                fs::appregistry::self_test(),
-            );
-            selftest::dispatch_debug(
-                "startmenu",
-                selftest::Severity::Diagnostic,
-                fs::startmenu::self_test(),
-            );
-            // pinnedapps was reachable only from a `kshell` subcommand
-            // (TD-A-FS-SELFTESTS-NEVER-RUN). Safe here: it resets `STATE` to
-            // `None` at both ends, which is what a fresh boot has -- nothing
-            // calls `init_defaults()` outside the `pinnedapps` commands.
-            selftest::dispatch_debug(
-                "Pinnedapps",
-                selftest::Severity::Diagnostic,
-                fs::pinnedapps::self_test(),
             );
             // kernelbuild was reachable only from a `kshell` subcommand
             // (TD-A-FS-SELFTESTS-NEVER-RUN). Safe here: it declines to run
@@ -7374,11 +7308,6 @@ extern "C" fn kernel_main() -> ! {
                 fs::appdefaults::self_test(),
             );
             selftest::dispatch_debug(
-                "Applaunch",
-                selftest::Severity::Diagnostic,
-                fs::applaunch::self_test(),
-            );
-            selftest::dispatch_debug(
                 "Apppermissions",
                 selftest::Severity::Diagnostic,
                 fs::apppermissions::self_test(),
@@ -7387,11 +7316,6 @@ extern "C" fn kernel_main() -> ! {
                 "Appsandbox",
                 selftest::Severity::Diagnostic,
                 fs::appsandbox::self_test(),
-            );
-            selftest::dispatch_debug(
-                "Appstore",
-                selftest::Severity::Diagnostic,
-                fs::appstore::self_test(),
             );
             selftest::dispatch_debug(
                 "Audiodevice",
@@ -7477,11 +7401,6 @@ extern "C" fn kernel_main() -> ! {
                 "Cputhr",
                 selftest::Severity::Diagnostic,
                 fs::cputhr::self_test(),
-            );
-            selftest::dispatch_debug(
-                "Defaultapps",
-                selftest::Severity::Diagnostic,
-                fs::defaultapps::self_test(),
             );
         }
         case();

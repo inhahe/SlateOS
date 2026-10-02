@@ -19,7 +19,6 @@
 //!   → a11y (reduce motion accessibility)
 //!   → theme (animation matches theme)
 //!   → winsnap (snap animations)
-//!   → startmenu (menu animations)
 //! ```
 
 #![allow(dead_code)]

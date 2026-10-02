@@ -68086,6 +68086,12 @@ that a rewrite cannot be argued out of: every other finding from the lint sweep
 was fixed in place, and this one was left because the correct fix is a new
 primitive rather than an edit.
 
+**Status 2026-10-02: waiting on lane E for the primitive.** The port C-Q5 set in
+motion now exists -- `rustcrypto/` (§539, 2026-09-27: XChaCha20-Poly1305 and
+Argon2id, lane E's) -- and has no X25519. Asked of lane E in
+`requests/b-e-vendor-x25519-for-ssh.md` (`x25519-dalek` 2.x); lane B writes the
+`curve25519-sha256` exchange in `sshwire` once it lands.
+
 ## TD-B-THREE-C-VISIBLE-TYPES-ARE-SMALLER-THAN-THEIR-HEADERS (lane B, 2026-08-21) — FIXED 2026-08-21
 
 **In short:** three of our opaque libc types are *smaller* than the type the C

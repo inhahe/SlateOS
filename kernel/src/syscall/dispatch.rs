@@ -3087,6 +3087,20 @@ fn test_dispatch_unix_sockets() -> KernelResult<()> {
         {
             return Err("an unknown option was not NotSupported");
         }
+        // The timeouts: nanoseconds, 0 for none; each its own.
+        let (rcv, snd) = (
+            super::number::UNIX_OPT_RCVTIMEO,
+            super::number::UNIX_OPT_SNDTIMEO,
+        );
+        if call(SYS_UNIX_GET_OPTION, a(srv, rcv, 0, 0, 0, 0)) != 0
+            || call(SYS_UNIX_SET_OPTION, a(srv, rcv, 5_000_000, 0, 0, 0)) != 0
+            || call(SYS_UNIX_GET_OPTION, a(srv, rcv, 0, 0, 0, 0)) != 5_000_000
+            || call(SYS_UNIX_GET_OPTION, a(srv, snd, 0, 0, 0, 0)) != 0
+            || call(SYS_UNIX_SET_OPTION, a(srv, rcv, 0, 0, 0, 0)) != 0
+            || call(SYS_UNIX_GET_OPTION, a(srv, rcv, 0, 0, 0, 0)) != 0
+        {
+            return Err("UNIX_OPT_RCVTIMEO did not set, read back, clear, or keep to itself");
+        }
 
         // --- a stream ---
         let st = b"slt-native-st";

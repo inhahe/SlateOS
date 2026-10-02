@@ -89,9 +89,14 @@ For your `recvmsg`, two more native calls:
 | 1117 | `SYS_UNIX_SET_OPTION` | handle, option, value | 0 |
 | 1118 | `SYS_UNIX_GET_OPTION` | handle, option | the value |
 
-The one option so far is `UNIX_OPT_PASSCRED` (1), value 0 or 1 (anything
-else is `InvalidArgument`; an unknown option is `NotSupported`, your
-`ENOPROTOOPT`). It is the socket's, not your library's -- an accepted
+The options so far: `UNIX_OPT_PASSCRED` (1), value 0 or 1 (anything else is
+`InvalidArgument`); `UNIX_OPT_RCVTIMEO` (2) and `UNIX_OPT_SNDTIMEO` (3),
+nanoseconds with 0 for no limit -- your `SO_RCVTIMEO`/`SO_SNDTIMEO`, converted
+from a `struct timeval` (`EDOM` for a microsecond count outside 0..1e6 is
+yours to answer before the call). A blocking call that runs out answers
+`WouldBlock`; a signal during a wait with a limit answers `Interrupted`, which
+Linux reports as `EINTR` rather than restarting. An unknown option is
+`NotSupported`, your `ENOPROTOOPT`. It is the socket's, not your library's -- an accepted
 connection starts with its listener's, and every holder after `fork` or
 `exec` sees one setting -- so please keep `SO_PASSCRED` there rather than in
 the descriptor table. When it is 1, `recvmsg` builds the `SCM_CREDENTIALS`

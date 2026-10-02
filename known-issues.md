@@ -181504,16 +181504,20 @@ operation as the creation, as Linux's `inode_init_owner` does.
 **Status:** OPEN (lane A) -- what the first version of named Unix-domain
 sockets (design-decisions 1519) does not do yet.
 
-**In short:** programs can now meet at a socket's name and talk, but three
+**In short:** programs can now meet at a socket's name and talk, but two
 things Linux's Unix-domain sockets also do are missing:
 - **Passing open files to another program** (`SCM_RIGHTS`). Wayland, D-Bus
   and many servers hand descriptors across a socket. A send that tries is
   refused with `EOPNOTSUPP`, so the program knows.
 - **`SOCK_SEQPACKET`**: still `ENOSYS`.
-- **Receive and send timeouts** (`SO_RCVTIMEO`/`SO_SNDTIMEO`): `ENOPROTOOPT`.
 
-A fourth, **credentials as a control message** (`SCM_CREDENTIALS` with
-`SO_PASSCRED`), was done the same day: `recvmsg` hands back the sender's
+Receive and send timeouts (`SO_RCVTIMEO`/`SO_SNDTIMEO`) were done the same
+day: a blocking call waits at most the limit and then answers `EAGAIN`, a
+signal during such a wait answers `EINTR`, and an accepted socket starts
+with its listener's limits, as on Linux.
+
+So was **credentials as a control message** (`SCM_CREDENTIALS` with
+`SO_PASSCRED`): `recvmsg` hands back the sender's
 credentials, and a sender may state its own (or, as root, another live
 process's) on `sendmsg`, checked as Linux checks them. One difference is
 left there: a stream reports its connection's credentials rather than each
@@ -181528,8 +181532,7 @@ message, as `ipc::channel` moves capabilities -- a stream needs the rights
 attached to a byte offset, as Linux attaches them to the skb they arrive
 with (and per-write credentials would hang off the same boundaries).
 SEQPACKET: a third kind, connected like a stream with datagram boundaries
--- a channel pair is that already. Timeouts: a deadline on the waits in
-`unix_socket`, as `stream_socket`'s `*_timeout` calls have.
+-- a channel pair is that already.
 
 ### A-SOCKETS-HAVE-NO-PENDING-ERROR -- 2026-10-02 -- OPEN (lane A)
 
@@ -181553,9 +181556,6 @@ partial run, taken and cleared by the next receive and by `SO_ERROR` -- the
 same slot an asynchronous error (a refused datagram, a reset connection)
 would use.
 
-## Lane B: new entries
-
-Lane B (userland) appends new entries at the end of this section, above the
 ### A-PCM-UNDERRUN-IS-SILENT -- 2026-10-02 -- OPEN (lane A)
 
 **Status:** OPEN (lane A) -- a difference from Linux ALSA, found with the
@@ -181593,6 +181593,9 @@ input stream descriptor; AC'97's PCM In channel), pumped by `audio_out` into
 a capture ring per open capture substream, which `read_frames` drains --
 waiting for data on a blocking descriptor as playback waits for room.
 
+## Lane B: new entries
+
+Lane B (userland) appends new entries at the end of this section, above the
 next lane's heading (design-decisions §977).
 
 ## B-OILS-UNIT-TESTS-RUN-WHICHEVER-GREP-PATH-FINDS — six `osh` unit tests fail when `cargo test` is run from PowerShell on this machine (lane B, 2026-10-01) — **FIXED** 2026-10-01

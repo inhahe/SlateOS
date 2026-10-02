@@ -22848,7 +22848,8 @@ pub fn self_test_linux_unix_sockets() -> KernelResult<()> {
              process not ESRCH, a short message not EINVAL; 0xF2-0xFA batches: sendmmsg, its \
              msg_lens, recvmmsg, what it received, MSG_DONTWAIT not EAGAIN, MSG_WAITFORONE, a \
              NULL vector not EFAULT, a bad second entry not answered 1, a directory not \
-             ENOTSOCK)",
+             ENOTSOCK; 0xFB-0xFD SO_RCVTIMEO: setsockopt, a blocking receive not EAGAIN when \
+             it ran out, a whole second of microseconds not EDOM)",
             exit_code,
             OK_EXIT
         );
@@ -22857,7 +22858,7 @@ pub fn self_test_linux_unix_sockets() -> KernelResult<()> {
     serial_println!(
         "[spawn]   Linux Unix-domain sockets (ring 3: datagrams by abstract name and by path, \
          listen/connect/accept, SO_PEERCRED, SCM_CREDENTIALS received and stated, \
-         sendmmsg/recvmmsg, ENOTSOCK, end of file, EADDRINUSE, unlink): OK"
+         sendmmsg/recvmmsg, ENOTSOCK, SO_RCVTIMEO, end of file, EADDRINUSE, unlink): OK"
     );
     Ok(())
 }

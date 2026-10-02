@@ -2280,6 +2280,9 @@ pub fn build_linux_slate_channel_test_elf() -> alloc::vec::Vec<u8> {
 ///   sendmmsg with the 2nd entry's bytes at 0x10 ; 1 (the first sent), else 0xF9
 ///   d = open("/", O_DIRECTORY); sendmmsg(d, ...), getpeername(d, ...)
 ///                                             ; -ENOTSOCK both, else 0xFA
+///   setsockopt(d1, SO_RCVTIMEO, {0, 50000})   ; 0, else 0xFB
+///   recvfrom(d1, ...) on nothing, blocking    ; -EAGAIN after 50 ms, else 0xFC
+///   setsockopt(d1, SO_RCVTIMEO, {0, 1000000}) ; -EDOM, else 0xFD
 ///   unlink("/tmp/slt.sock")                   ; 0, else 0xE7
 ///   sendto(d2, "ping", 4, 0, path, 16)        ; -ENOENT, else 0xE8
 ///   exit(0x5D)
@@ -2922,6 +2925,37 @@ pub fn build_linux_unix_socket_test_elf() -> alloc::vec::Vec<u8> {
     cmp_rax_i8(&mut code, -88); // ENOTSOCK
     jcc_fail(&mut code, &mut fail_jumps, JNZ, 0xFA);
 
+    // --- SO_RCVTIMEO: a blocking receive gives up with EAGAIN ---
+    // setsockopt(d1, SOL_SOCKET, SO_RCVTIMEO, &{0 s, 50000 us}, 16)
+    let setsockopt_timeo = |c: &mut alloc::vec::Vec<u8>| {
+        mov_edi_mem(c, FD_D1);
+        mov_esi_imm(c, 1);
+        mov_edx_imm(c, 20);
+        lea_r10(c, RBUF2);
+        mov_r8d_imm(c, 16);
+        syscall(c, SETSOCKOPT);
+    };
+    store_qword(&mut code, RBUF2, 0);
+    store_qword(&mut code, RBUF2 + 8, 50_000);
+    setsockopt_timeo(&mut code);
+    test_rax(&mut code);
+    jcc_fail(&mut code, &mut fail_jumps, JNZ, 0xFB);
+    // recvfrom(d1, BUF, 64, 0, NULL, NULL) on an empty queue, blocking.
+    mov_edi_mem(&mut code, FD_D1);
+    lea_rsi(&mut code, BUF);
+    mov_edx_imm(&mut code, 64);
+    xor_r10d(&mut code);
+    xor_r8d(&mut code);
+    xor_r9d(&mut code);
+    syscall(&mut code, RECVFROM);
+    cmp_rax_i8(&mut code, -11); // EAGAIN
+    jcc_fail(&mut code, &mut fail_jumps, JNZ, 0xFC);
+    // A microsecond count of a whole second is EDOM.
+    store_qword(&mut code, RBUF2 + 8, 1_000_000);
+    setsockopt_timeo(&mut code);
+    cmp_rax_i8(&mut code, -33); // EDOM
+    jcc_fail(&mut code, &mut fail_jumps, JNZ, 0xFD);
+
     // unlink(path): the sun_path inside the address, NUL-terminated
     lea_rdi(&mut code, PATH_ADDR + 2);
     syscall(&mut code, UNLINK);
@@ -2943,7 +2977,7 @@ pub fn build_linux_unix_socket_test_elf() -> alloc::vec::Vec<u8> {
 
     // One failure exit per sentinel.
     let mut fail_at: alloc::vec::Vec<(u8, usize)> = alloc::vec::Vec::new();
-    for sentinel in 0xD1u8..=0xFA {
+    for sentinel in 0xD1u8..=0xFD {
         fail_at.push((sentinel, code.len()));
         mov_edi_imm(&mut code, u32::from(sentinel));
         syscall(&mut code, EXIT);
@@ -2994,40 +3028,6 @@ pub fn build_linux_unix_socket_test_elf() -> alloc::vec::Vec<u8> {
     buf
 }
 
-/// Build a **Linux-ABI** `ET_EXEC` launcher ELF that exercises the canonical
-/// **shell-pipeline** primitive end to end: `pipe2` + `fork` + `dup2` +
-/// `execve` + blocking `read`.
-///
-/// ```text
-///   sub  rsp, 32                 ; [rsp+0]=fds[0] [rsp+4]=fds[1]
-///                                ; [rsp+8]=status [rsp+12]=read buf
-///   pipe2(&fds, 0) ; test rax,rax ; js pipe_fail
-///   fork           ; test rax,rax ; jz child
-///   parent: read(fds[0], &buf, 1) ; test rax,rax ; jle parent_fail
-///           wait4(-1, &status, 0, NULL)
-///           exit(buf[0])         ; movzx edi, byte [rsp+12]
-///   parent_fail: exit(0xA3)      ; read returned <= 0 (no byte / error)
-///   pipe_fail:   exit(0xA4)      ; pipe2 returned < 0
-///   child:  dup2(fds[1], 1)      ; redirect the pipe write end onto stdout
-///           execve(path, argv=[path,NULL], envp=[NULL])
-///           exit(0xE7)           ; only if execve returned (failed)
-/// ```
-///
-/// The exec target is staged by the harness as
-/// [`build_linux_write_byte_exit_elf`]`(sentinel)`: it writes `sentinel` to
-/// fd 1 (which `dup2` aliased to the pipe's write end) and exits.  A clean
-/// parent `exit(sentinel)` therefore proves the full chain:
-///
-///   * `pipe2` allocated a read/write fd pair in the launcher's table;
-///   * `fork` cloned the **fd table** into the child (the child uses
-///     `fds[1]`, inherited across the CoW fork, to feed `dup2`);
-///   * `dup2` aliased the inherited write end onto a fixed fd (1) that the
-///     `execve`'d target — which knows nothing of the dynamic pipe fds —
-///     can write to;
-///   * `execve` replaced the child image **without** disturbing the fd table
-///     (fd 1 survives the exec);
-///   * the byte traversed the pipe IPC path and the parent's blocking `read`
-///     woke and returned it.
 /// Build a **native-ABI** ring-3 program that drives the sound card through
 /// the device door (`SYS_DEVICE_*`, 1119-1123) as the C library will, its
 /// answers Linux errnos:
@@ -3343,6 +3343,40 @@ pub fn build_native_device_door_test_elf() -> alloc::vec::Vec<u8> {
     single_segment_test_elf(&code)
 }
 
+/// Build a **Linux-ABI** `ET_EXEC` launcher ELF that exercises the canonical
+/// **shell-pipeline** primitive end to end: `pipe2` + `fork` + `dup2` +
+/// `execve` + blocking `read`.
+///
+/// ```text
+///   sub  rsp, 32                 ; [rsp+0]=fds[0] [rsp+4]=fds[1]
+///                                ; [rsp+8]=status [rsp+12]=read buf
+///   pipe2(&fds, 0) ; test rax,rax ; js pipe_fail
+///   fork           ; test rax,rax ; jz child
+///   parent: read(fds[0], &buf, 1) ; test rax,rax ; jle parent_fail
+///           wait4(-1, &status, 0, NULL)
+///           exit(buf[0])         ; movzx edi, byte [rsp+12]
+///   parent_fail: exit(0xA3)      ; read returned <= 0 (no byte / error)
+///   pipe_fail:   exit(0xA4)      ; pipe2 returned < 0
+///   child:  dup2(fds[1], 1)      ; redirect the pipe write end onto stdout
+///           execve(path, argv=[path,NULL], envp=[NULL])
+///           exit(0xE7)           ; only if execve returned (failed)
+/// ```
+///
+/// The exec target is staged by the harness as
+/// [`build_linux_write_byte_exit_elf`]`(sentinel)`: it writes `sentinel` to
+/// fd 1 (which `dup2` aliased to the pipe's write end) and exits.  A clean
+/// parent `exit(sentinel)` therefore proves the full chain:
+///
+///   * `pipe2` allocated a read/write fd pair in the launcher's table;
+///   * `fork` cloned the **fd table** into the child (the child uses
+///     `fds[1]`, inherited across the CoW fork, to feed `dup2`);
+///   * `dup2` aliased the inherited write end onto a fixed fd (1) that the
+///     `execve`'d target — which knows nothing of the dynamic pipe fds —
+///     can write to;
+///   * `execve` replaced the child image **without** disturbing the fd table
+///     (fd 1 survives the exec);
+///   * the byte traversed the pipe IPC path and the parent's blocking `read`
+///     woke and returned it.
 ///
 /// Self-diagnosing sentinels: `0xA4` = `pipe2` failed, `0xA3` = parent
 /// `read` returned `<= 0`, `0xE7` = child `execve` failed.  `path_nul` must

@@ -8981,7 +8981,8 @@ pub fn sys_unix_poll(args: &super::dispatch::SyscallArgs) -> super::dispatch::Sy
 /// `SYS_UNIX_SET_OPTION` (1117).
 pub fn sys_unix_set_option(args: &super::dispatch::SyscallArgs) -> super::dispatch::SyscallResult {
     use super::dispatch::SyscallResult;
-    use super::number::UNIX_OPT_PASSCRED;
+    use super::number::{UNIX_OPT_PASSCRED, UNIX_OPT_RCVTIMEO, UNIX_OPT_SNDTIMEO};
+    use crate::ipc::unix_socket::{self, Direction};
     let done = unix_held(args.arg0).and_then(|h| match args.arg1 {
         UNIX_OPT_PASSCRED => {
             // Strictly 0 or 1, unlike Linux's "any nonzero": a value with
@@ -8991,7 +8992,17 @@ pub fn sys_unix_set_option(args: &super::dispatch::SyscallArgs) -> super::dispat
                 1 => true,
                 _ => return Err(KernelError::InvalidArgument),
             };
-            crate::ipc::unix_socket::set_passcred(h, on)
+            unix_socket::set_passcred(h, on)
+        }
+        UNIX_OPT_RCVTIMEO | UNIX_OPT_SNDTIMEO => {
+            let dir = if args.arg1 == UNIX_OPT_RCVTIMEO {
+                Direction::Receive
+            } else {
+                Direction::Send
+            };
+            // Nanoseconds; 0 is no limit, as Linux's {0, 0}.
+            let limit = (args.arg2 != 0).then_some(args.arg2);
+            unix_socket::set_timeout(h, dir, limit)
         }
         _ => Err(KernelError::NotSupported),
     });
@@ -9004,9 +9015,19 @@ pub fn sys_unix_set_option(args: &super::dispatch::SyscallArgs) -> super::dispat
 /// `SYS_UNIX_GET_OPTION` (1118).
 pub fn sys_unix_get_option(args: &super::dispatch::SyscallArgs) -> super::dispatch::SyscallResult {
     use super::dispatch::SyscallResult;
-    use super::number::UNIX_OPT_PASSCRED;
+    use super::number::{UNIX_OPT_PASSCRED, UNIX_OPT_RCVTIMEO, UNIX_OPT_SNDTIMEO};
+    use crate::ipc::unix_socket::{self, Direction};
     let got = unix_held(args.arg0).and_then(|h| match args.arg1 {
-        UNIX_OPT_PASSCRED => Ok(i64::from(crate::ipc::unix_socket::passcred(h))),
+        UNIX_OPT_PASSCRED => Ok(i64::from(unix_socket::passcred(h))),
+        UNIX_OPT_RCVTIMEO | UNIX_OPT_SNDTIMEO => {
+            let dir = if args.arg1 == UNIX_OPT_RCVTIMEO {
+                Direction::Receive
+            } else {
+                Direction::Send
+            };
+            unix_socket::timeout(h, dir)
+                .map(|limit| i64::try_from(limit.unwrap_or(0)).unwrap_or(i64::MAX))
+        }
         _ => Err(KernelError::NotSupported),
     });
     match got {
@@ -9015,27 +9036,6 @@ pub fn sys_unix_get_option(args: &super::dispatch::SyscallArgs) -> super::dispat
     }
 }
 
-/// `SYS_PROCESS_GET_PHDR` (1102) — where the caller's main image's program
-/// headers are. See
-/// [`SYS_PROCESS_GET_PHDR`](super::number::SYS_PROCESS_GET_PHDR).
-pub fn sys_process_get_phdr(args: &super::dispatch::SyscallArgs) -> super::dispatch::SyscallResult {
-    use super::dispatch::SyscallResult;
-    let pid = match caller_process_or_err() {
-        Ok(p) => p,
-        Err(e) => return SyscallResult::err(e),
-    };
-    if args.arg0 == 0 {
-        return SyscallResult::err(KernelError::InvalidArgument);
-    }
-    let Some(phdr) = pcb::main_phdr(pid) else {
-        return SyscallResult::err(KernelError::NotFound);
-    };
-    let mut out = [0u8; 16];
-    out[..8].copy_from_slice(&phdr.vaddr.to_le_bytes());
-    out[8..10].copy_from_slice(&phdr.phnum.to_le_bytes());
-    out[10..12].copy_from_slice(&phdr.phentsize.to_le_bytes());
-    match crate::mm::user::write_user_value::<[u8; 16]>(args.arg0, out) {
-        Ok(()) => SyscallResult::ok(0),
 // ---------------------------------------------------------------------------
 // The device door (SYS_DEVICE_*, 1119-1123)
 //
@@ -9177,6 +9177,27 @@ pub fn sys_device_close(args: &super::dispatch::SyscallArgs) -> super::dispatch:
     }
 }
 
+/// `SYS_PROCESS_GET_PHDR` (1102) — where the caller's main image's program
+/// headers are. See
+/// [`SYS_PROCESS_GET_PHDR`](super::number::SYS_PROCESS_GET_PHDR).
+pub fn sys_process_get_phdr(args: &super::dispatch::SyscallArgs) -> super::dispatch::SyscallResult {
+    use super::dispatch::SyscallResult;
+    let pid = match caller_process_or_err() {
+        Ok(p) => p,
+        Err(e) => return SyscallResult::err(e),
+    };
+    if args.arg0 == 0 {
+        return SyscallResult::err(KernelError::InvalidArgument);
+    }
+    let Some(phdr) = pcb::main_phdr(pid) else {
+        return SyscallResult::err(KernelError::NotFound);
+    };
+    let mut out = [0u8; 16];
+    out[..8].copy_from_slice(&phdr.vaddr.to_le_bytes());
+    out[8..10].copy_from_slice(&phdr.phnum.to_le_bytes());
+    out[10..12].copy_from_slice(&phdr.phentsize.to_le_bytes());
+    match crate::mm::user::write_user_value::<[u8; 16]>(args.arg0, out) {
+        Ok(()) => SyscallResult::ok(0),
         Err(e) => SyscallResult::err(e),
     }
 }

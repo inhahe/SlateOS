@@ -242,6 +242,12 @@ struct Socket {
     /// control message. The credentials are recorded either way; this only
     /// says whether a receive hands them back.
     passcred: bool,
+    /// `SO_RCVTIMEO`: how long a blocking receive or `accept` waits before
+    /// `WouldBlock` -- `None` for as long as it takes (the default), `Some(0)`
+    /// not at all.
+    rcvtimeo: Option<u64>,
+    /// `SO_SNDTIMEO`: the same for a blocking send or `connect`.
+    sndtimeo: Option<u64>,
     /// Tasks waiting for something to take -- a datagram, a connection to
     /// accept -- or polling.
     readers: WaiterSet,
@@ -264,6 +270,8 @@ impl Socket {
             rd_shut: false,
             wr_shut: false,
             passcred: false,
+            rcvtimeo: None,
+            sndtimeo: None,
             readers: WaiterSet::new(),
             room: WaiterSet::new(),
         }
@@ -397,6 +405,102 @@ fn check_stated_cred_for(
 /// The wait record a task parked on `h` publishes.
 fn wait_on(h: UnixHandle) -> crate::wchan::Wait {
     crate::wchan::Wait::new(crate::wchan::WaitChannel::Socket, h.0)
+}
+
+/// Which of a socket's two timeouts a wait obeys.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Direction {
+    /// `SO_RCVTIMEO`: receiving, and `accept`.
+    Receive,
+    /// `SO_SNDTIMEO`: sending, and `connect`.
+    Send,
+}
+
+/// Set `h`'s timeout for `dir`: `None` waits as long as it takes, `Some(0)`
+/// not at all, `Some(ns)` at most `ns` before a blocking call answers
+/// `WouldBlock` (`EAGAIN`), as Linux's `SO_RCVTIMEO`/`SO_SNDTIMEO`.
+///
+/// # Errors
+///
+/// `InvalidHandle`.
+pub fn set_timeout(h: UnixHandle, dir: Direction, limit: Option<u64>) -> KernelResult<()> {
+    let mut t = TABLE.lock();
+    let s = t.socket_mut(h)?;
+    match dir {
+        Direction::Receive => s.rcvtimeo = limit,
+        Direction::Send => s.sndtimeo = limit,
+    }
+    Ok(())
+}
+
+/// `h`'s timeout for `dir`, as [`set_timeout`] takes it.
+///
+/// # Errors
+///
+/// `InvalidHandle`.
+pub fn timeout(h: UnixHandle, dir: Direction) -> KernelResult<Option<u64>> {
+    let t = TABLE.lock();
+    let s = t.socket(h)?;
+    Ok(match dir {
+        Direction::Receive => s.rcvtimeo,
+        Direction::Send => s.sndtimeo,
+    })
+}
+
+/// The limit a blocking call on `h` waits under: its timeout for `dir`, or
+/// none for a non-blocking call (which never waits) or a stale handle (whose
+/// call fails before it would).
+fn limit_for(h: UnixHandle, dir: Direction, nonblocking: bool) -> Option<u64> {
+    if nonblocking {
+        return None;
+    }
+    timeout(h, dir).ok().flatten()
+}
+
+/// A blocking wait's limit: the socket's timeout made a deadline when the
+/// wait begins, and a timer that wakes the waiter at it -- cancelled when the
+/// wait ends, however it ends.
+struct Limit {
+    deadline: Option<u64>,
+    timer: Option<crate::hrtimer::HrTimerHandle>,
+}
+
+impl Limit {
+    /// The limit for a wait by `task` that may last `limit` (see
+    /// [`set_timeout`]).
+    fn new(limit: Option<u64>, task: TaskId) -> Self {
+        /// The timer's wake, from any context: a direct one, or deferred if
+        /// the scheduler's lock is taken.
+        fn wake(task: u64) {
+            if !sched::try_wake(task) {
+                sched::defer_wake(task);
+            }
+        }
+        match limit {
+            None => Self {
+                deadline: None,
+                timer: None,
+            },
+            Some(ns) => Self {
+                deadline: Some(crate::hrtimer::now_ns().saturating_add(ns)),
+                timer: (ns > 0).then(|| crate::hrtimer::schedule_ns(ns, wake, task)),
+            },
+        }
+    }
+
+    /// Whether the wait has run out of time.
+    fn passed(&self) -> bool {
+        self.deadline.is_some_and(|d| crate::hrtimer::now_ns() >= d)
+    }
+}
+
+impl Drop for Limit {
+    fn drop(&mut self) {
+        if let Some(t) = self.timer.take() {
+            // A timer that already fired is simply not found.
+            crate::hrtimer::cancel(t);
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -778,6 +882,9 @@ fn connect_stream(h: UnixHandle, target: &Name, nonblocking: bool) -> KernelResu
     let pid = current_user_pid();
     let task = sched::current_task_id();
     let cred = current_cred();
+    // SO_SNDTIMEO bounds the wait for room in the backlog, as Linux's
+    // unix_stream_connect waits under sock_sndtimeo.
+    let limit = Limit::new(limit_for(h, Direction::Send, nonblocking), task);
     loop {
         let mut wakes = Vec::new();
         {
@@ -824,7 +931,7 @@ fn connect_stream(h: UnixHandle, target: &Name, nonblocking: bool) -> KernelResu
                 wake_all(wakes);
                 return Ok(());
             }
-            if nonblocking {
+            if nonblocking || limit.passed() {
                 return Err(KernelError::WouldBlock);
             }
             if deliverable_signal_pending(pid) {
@@ -845,15 +952,17 @@ fn connect_stream(h: UnixHandle, target: &Name, nonblocking: bool) -> KernelResu
 pub fn accept(h: UnixHandle, nonblocking: bool) -> KernelResult<Accepted> {
     let pid = current_user_pid();
     let task = sched::current_task_id();
+    let limit = Limit::new(limit_for(h, Direction::Receive, nonblocking), task);
     loop {
         {
             let mut t = TABLE.lock();
             let s = t.socket_mut(h)?;
             s.readers.remove(task);
             // Linux: an accepted socket reports the listener's name, and
-            // inherits its SO_PASSCRED.
+            // inherits its SO_PASSCRED and timeouts (sk_clone copies them).
             let bound = s.bound.clone();
             let passcred = s.passcred;
+            let (rcvtimeo, sndtimeo) = (s.rcvtimeo, s.sndtimeo);
             let State::Listening { backlog, .. } = &mut s.state else {
                 return Err(KernelError::InvalidArgument);
             };
@@ -870,6 +979,8 @@ pub fn accept(h: UnixHandle, nonblocking: bool) -> KernelResult<Accepted> {
                     };
                     sock.bound = bound;
                     sock.passcred = passcred;
+                    sock.rcvtimeo = rcvtimeo;
+                    sock.sndtimeo = sndtimeo;
                     t.sockets.insert(id, sock);
                     drop(t);
                     wake_all(wakes);
@@ -879,7 +990,7 @@ pub fn accept(h: UnixHandle, nonblocking: bool) -> KernelResult<Accepted> {
                     });
                 }
                 None => {
-                    if nonblocking {
+                    if nonblocking || limit.passed() {
                         return Err(KernelError::WouldBlock);
                     }
                     if deliverable_signal_pending(pid) {
@@ -938,10 +1049,13 @@ pub fn send_as(
             if data.is_empty() {
                 return Ok(0);
             }
-            if nonblocking {
-                stream_socket::try_send(stream, data)
-            } else {
-                stream_socket::send(stream, data)
+            match (nonblocking, limit_for(h, Direction::Send, nonblocking)) {
+                (true, _) | (false, Some(0)) => stream_socket::try_send(stream, data),
+                (false, None) => stream_socket::send(stream, data),
+                // SO_SNDTIMEO: the timed send's TimedOut is Linux's EAGAIN.
+                (false, Some(ns)) => {
+                    stream_socket::send_timeout(stream, data, ns).map_err(timed_out_is_would_block)
+                }
             }
         }
         Kind::Dgram => {
@@ -1017,6 +1131,7 @@ fn send_dgram(
     let pid = current_user_pid();
     let task = sched::current_task_id();
     let cred = stated.or_else(current_cred);
+    let limit = Limit::new(limit_for(h, Direction::Send, nonblocking), task);
     loop {
         {
             let mut t = TABLE.lock();
@@ -1049,7 +1164,7 @@ fn send_dgram(
                 wake_all(wakes);
                 return Ok(data.len());
             }
-            if nonblocking {
+            if nonblocking || limit.passed() {
                 return Err(KernelError::WouldBlock);
             }
             if deliverable_signal_pending(pid) {
@@ -1086,23 +1201,30 @@ pub fn recv(
                 } => (*stream, peer.clone(), *peer_cred),
                 _ => return Err(KernelError::NotConnected),
             };
+            let limit = limit_for(h, Direction::Receive, nonblocking);
             let len = if buf.is_empty() {
                 0
             } else if peek {
                 // Peeking never waits here; a blocking peek waits by
                 // receiving nothing until something arrives.
+                let task = sched::current_task_id();
+                let limit = Limit::new(limit, task);
                 loop {
                     match stream_socket::peek(stream, buf) {
-                        Err(KernelError::WouldBlock) if !nonblocking => {
-                            wait_readable(stream)?;
+                        Err(KernelError::WouldBlock) if !nonblocking && !limit.passed() => {
+                            wait_readable(stream, &limit)?;
                         }
                         other => break other?,
                     }
                 }
-            } else if nonblocking {
-                stream_socket::try_recv(stream, buf)?
             } else {
-                stream_socket::recv(stream, buf)?
+                match (nonblocking, limit) {
+                    (true, _) | (false, Some(0)) => stream_socket::try_recv(stream, buf)?,
+                    (false, None) => stream_socket::recv(stream, buf)?,
+                    // SO_RCVTIMEO: the timed receive's TimedOut is EAGAIN.
+                    (false, Some(ns)) => stream_socket::recv_timeout(stream, buf, ns)
+                        .map_err(timed_out_is_would_block)?,
+                }
             };
             Ok(Received {
                 len,
@@ -1115,14 +1237,26 @@ pub fn recv(
     }
 }
 
+/// A timed wait's `TimedOut`, as Linux answers an expired `SO_RCVTIMEO` or
+/// `SO_SNDTIMEO`: `WouldBlock` (`EAGAIN`).
+fn timed_out_is_would_block(e: KernelError) -> KernelError {
+    match e {
+        KernelError::TimedOut => KernelError::WouldBlock,
+        other => other,
+    }
+}
+
 /// Wait until the stream end `stream` has something to receive or is at its
-/// end.
-fn wait_readable(stream: StreamSocketHandle) -> KernelResult<()> {
+/// end, or `limit` passes (`WouldBlock`).
+fn wait_readable(stream: StreamSocketHandle, limit: &Limit) -> KernelResult<()> {
     let pid = current_user_pid();
     let task = sched::current_task_id();
     loop {
         if stream_socket::poll_status(stream) & 0x11 != 0 {
             return Ok(());
+        }
+        if limit.passed() {
+            return Err(KernelError::WouldBlock);
         }
         if deliverable_signal_pending(pid) {
             return Err(KernelError::Interrupted);
@@ -1152,6 +1286,7 @@ fn recv_dgram(
 ) -> KernelResult<Received> {
     let pid = current_user_pid();
     let task = sched::current_task_id();
+    let limit = Limit::new(limit_for(h, Direction::Receive, nonblocking), task);
     loop {
         {
             let mut t = TABLE.lock();
@@ -1191,7 +1326,7 @@ fn recv_dgram(
                     cred: None,
                 });
             }
-            if nonblocking {
+            if nonblocking || limit.passed() {
                 return Err(KernelError::WouldBlock);
             }
             if deliverable_signal_pending(pid) {
@@ -1686,5 +1821,58 @@ fn run_self_test(opened: &mut Vec<UnixHandle>) -> Result<(), &'static str> {
     let again = opened_socket(opened, Kind::Dgram)?;
     bind_abstract(again, b"slate-selftest-dgram")
         .map_err(|_| "a closed socket's abstract name was not freed")?;
+
+    timeout_checks(opened)
+}
+
+/// `SO_RCVTIMEO` / `SO_SNDTIMEO`: read back as set, and only the direction
+/// set; a blocking receive that waits its whole limit and then answers
+/// `WouldBlock`; a zero limit that does not wait; `accept` likewise; an
+/// accepted socket starting with its listener's limits; a connected
+/// stream's receive giving up the same way.
+fn timeout_checks(opened: &mut Vec<UnixHandle>) -> Result<(), &'static str> {
+    const LIMIT_NS: u64 = 30_000_000;
+    let mut buf = [0u8; 16];
+    let quiet = opened_socket(opened, Kind::Dgram)?;
+    if timeout(quiet, Direction::Receive) != Ok(None) {
+        return Err("a new socket has a receive timeout");
+    }
+    set_timeout(quiet, Direction::Receive, Some(LIMIT_NS)).map_err(|_| "set_timeout failed")?;
+    if timeout(quiet, Direction::Receive) != Ok(Some(LIMIT_NS))
+        || timeout(quiet, Direction::Send) != Ok(None)
+    {
+        return Err("a timeout did not read back, or set the other direction too");
+    }
+    let began = crate::hrtimer::now_ns();
+    if recv(quiet, &mut buf, false, false).map(|r| r.len) != Err(KernelError::WouldBlock) {
+        return Err("a blocking receive past its timeout was not WouldBlock");
+    }
+    if crate::hrtimer::now_ns().saturating_sub(began) < LIMIT_NS {
+        return Err("a receive with a 30 ms timeout gave up early");
+    }
+    set_timeout(quiet, Direction::Receive, Some(0)).map_err(|_| "set_timeout failed")?;
+    if recv(quiet, &mut buf, false, false).map(|r| r.len) != Err(KernelError::WouldBlock) {
+        return Err("a receive with a zero timeout did not answer at once");
+    }
+
+    let listener = opened_socket(opened, Kind::Stream)?;
+    let name = Name::Abstract(b"slate-selftest-timeo".to_vec());
+    bind_abstract(listener, b"slate-selftest-timeo").map_err(|_| "bind failed")?;
+    listen(listener, 1).map_err(|_| "listen failed")?;
+    set_timeout(listener, Direction::Receive, Some(LIMIT_NS)).map_err(|_| "set_timeout failed")?;
+    if accept(listener, false).map(|a| a.handle) != Err(KernelError::WouldBlock) {
+        return Err("an accept past its timeout was not WouldBlock");
+    }
+    let client = opened_socket(opened, Kind::Stream)?;
+    connect(client, &name, true).map_err(|_| "connect failed")?;
+    let accepted = accept(listener, false).map_err(|_| "accept failed")?;
+    opened.push(accepted.handle);
+    if timeout(accepted.handle, Direction::Receive) != Ok(Some(LIMIT_NS)) {
+        return Err("an accepted socket did not start with its listener's timeout");
+    }
+    if recv(accepted.handle, &mut buf, false, false).map(|r| r.len) != Err(KernelError::WouldBlock)
+    {
+        return Err("a stream receive past its timeout was not WouldBlock");
+    }
     Ok(())
 }

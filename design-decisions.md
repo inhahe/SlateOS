@@ -92093,9 +92093,9 @@ not by its name, so renaming or deleting it behaves as on Linux.
 | A new resource type, `UnixSocket` (33), for the holder's `ipc_handles` | reuse `StreamSocket` | the cleanup and fork arms dispatch on the type; a listener or a datagram socket is not a stream end |
 
 **Not done yet** (`known-issues.md` `A-UNIX-SOCKETS-CARRY-NO-DESCRIPTORS-OR-CREDENTIAL-MESSAGES`):
-descriptor passing (`SCM_RIGHTS`), `SOCK_SEQPACKET`, and
-`SO_RCVTIMEO`/`SO_SNDTIMEO`. (Credential control messages on receive, first
-listed here, were added the same day.)
+descriptor passing (`SCM_RIGHTS`) and `SOCK_SEQPACKET`. (Credential control
+messages on receive and `SO_RCVTIMEO`/`SO_SNDTIMEO`, first listed here, were
+added the same day.)
 
 **Revisit** if the kernel's datagram queues become a memory concern (a limit
 per process rather than per socket), or if Wayland or D-Bus arrive needing

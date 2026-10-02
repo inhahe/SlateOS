@@ -6359,6 +6359,14 @@ pub const SYS_UNIX_GET_OPTION: u64 = 1118;
 /// is the socket's rather than the library's so that every holder of the
 /// socket (after `fork` or `exec`) sees the same one, as on Linux.
 pub const UNIX_OPT_PASSCRED: u64 = 1;
+/// Option: how long a blocking receive or accept waits before `WouldBlock`
+/// (Linux's `SO_RCVTIMEO`), in nanoseconds; 0 for as long as it takes, as
+/// Linux's `{0, 0}`. An accepted connection starts with its listener's. A
+/// signal ends a wait that has a limit with `Interrupted`, which the library
+/// reports as `EINTR`, not a restart (Linux's `sock_intr_errno`).
+pub const UNIX_OPT_RCVTIMEO: u64 = 2;
+/// Option: the same for a blocking send or connect (Linux's `SO_SNDTIMEO`).
+pub const UNIX_OPT_SNDTIMEO: u64 = 3;
 
 // ---------------------------------------------------------------------------
 // The device door (1119-1123)

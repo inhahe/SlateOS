@@ -2269,6 +2269,14 @@ fn test_join_timeout() -> KernelResult<()> {
             JOIN_TIMEOUT_WAKES.load(SeqCst).saturating_sub(wakes_before),
             ms(t[0], JOIN_TIMEOUT_WAKE_LAST_NS.load(SeqCst)),
         );
+        // A timer refused at the hard ceiling never fires: the one way the
+        // joiner could sleep through its deadline with nothing else wrong.
+        serial_println!(
+            "[thread]     hrtimer: {} refused since boot, {} pending on this CPU, {} fired",
+            crate::hrtimer::refused_count(),
+            crate::hrtimer::pending_count(),
+            crate::hrtimer::fired_count(),
+        );
         let describe = |info: &Option<sched::TaskInfo>| match info {
             Some(i) => alloc::format!(
                 "{:?} priority {} cpu {} waited {} ticks",

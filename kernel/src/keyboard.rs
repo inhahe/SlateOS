@@ -1296,7 +1296,11 @@ fn read_char_inner_loop(
                 // Park until woken by a keystroke, a signal, or the deadline
                 // timer.  `park_interruptible` handles the signal-waiter
                 // registration internally.
-                crate::ipc::waiters::park_interruptible(pid, task);
+                crate::ipc::waiters::park_interruptible(
+                    pid,
+                    task,
+                    crate::wchan::Wait::on(crate::wchan::WaitChannel::Terminal),
+                );
                 // Woken — loop back to consume whatever woke us.
             } else {
                 // Waiter array full: fall back to HLT (bounded by the timer

@@ -675,7 +675,10 @@ fn join_until(target_task: TaskId, deadline: Option<u64>) -> KernelResult<i64> {
         )
     });
     loop {
-        sched::block_current();
+        sched::block_current_on(crate::wchan::Wait::new(
+            crate::wchan::WaitChannel::Join,
+            target_task,
+        ));
         let released = {
             let waiters = THREAD_JOIN_WAITERS.lock();
             waiters.get(&target_task) != Some(&caller_task)

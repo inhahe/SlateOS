@@ -248,7 +248,11 @@ pub fn write(handle: EventFdHandle, value: u64) -> KernelResult<()> {
             efd.writer_waiters.insert(task);
         }
 
-        park_interruptible(pid, task);
+        park_interruptible(
+            pid,
+            task,
+            crate::wchan::Wait::new(crate::wchan::WaitChannel::Event, handle.raw()),
+        );
     }
 }
 
@@ -410,7 +414,11 @@ pub fn write_timeout(handle: EventFdHandle, value: u64, timeout_ns: u64) -> Kern
             efd.writer_waiters.insert(task);
         }
 
-        park_interruptible(pid, task);
+        park_interruptible(
+            pid,
+            task,
+            crate::wchan::Wait::new(crate::wchan::WaitChannel::Event, handle.raw()),
+        );
     }
 }
 
@@ -476,7 +484,11 @@ pub fn read(handle: EventFdHandle) -> KernelResult<u64> {
             efd.reader_waiters.insert(task);
         }
 
-        park_interruptible(pid, task);
+        park_interruptible(
+            pid,
+            task,
+            crate::wchan::Wait::new(crate::wchan::WaitChannel::Event, handle.raw()),
+        );
     }
 }
 
@@ -634,7 +646,11 @@ pub fn read_timeout(handle: EventFdHandle, timeout_ns: u64) -> KernelResult<u64>
             efd.reader_waiters.insert(task);
         }
 
-        park_interruptible(pid, task);
+        park_interruptible(
+            pid,
+            task,
+            crate::wchan::Wait::new(crate::wchan::WaitChannel::Event, handle.raw()),
+        );
     }
 }
 

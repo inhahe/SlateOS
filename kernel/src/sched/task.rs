@@ -388,6 +388,19 @@ pub struct Task {
     ///
     /// Always accessed under the `SCHED` lock, like `pending_wake`.
     pub sleep_timer_id: u64,
+    /// What this task's most recent real park waited on: the kind and its
+    /// argument (a futex address, a channel handle, a pid), as the blocking
+    /// code described it to [`block_current_on`](super::block_current_on).
+    ///
+    /// Not diagnostic only: `/proc/<pid>/wchan` and `/proc/<pid>/stat` field
+    /// 35 publish it. It means something only while `state` is `Blocked` --
+    /// it is left in place when the task wakes, so readers go through
+    /// [`wait_of`](super::wait_of), which answers "not waiting" for a task in
+    /// any other state. Written in the same `SCHED` critical section that
+    /// sets `Blocked`, so the two can never disagree.
+    ///
+    /// Always accessed under the `SCHED` lock, like `pending_wake`.
+    pub wait: crate::wchan::Wait,
     /// Base priority level (0 = highest, 31 = lowest).
     ///
     /// This is the user-assigned priority.  The effective scheduling
@@ -1054,6 +1067,7 @@ impl Task {
             block_tick: 0,
             block_seq: 0,
             sleep_timer_id: 0,
+            wait: crate::wchan::Wait::NONE,
             priority: IDLE_PRIORITY,
             context: Context::empty(),
             stack_phys: 0,
@@ -1141,6 +1155,7 @@ impl Task {
             block_tick: 0,
             block_seq: 0,
             sleep_timer_id: 0,
+            wait: crate::wchan::Wait::NONE,
             priority: IDLE_PRIORITY,
             context: Context::empty(),
             stack_phys: 0,
@@ -1295,6 +1310,7 @@ impl Task {
             block_tick: 0,
             block_seq: 0,
             sleep_timer_id: 0,
+            wait: crate::wchan::Wait::NONE,
             priority,
             context,
             stack_phys,

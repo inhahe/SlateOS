@@ -608,7 +608,11 @@ pub fn master_write(handle: PtyHandle, data: &[u8]) -> KernelResult<MasterWrite>
         if let Some(done) = receive_input(handle.id(), data, Some((pid, task)))? {
             return Ok(done);
         }
-        park_interruptible(pid, task);
+        park_interruptible(
+            pid,
+            task,
+            crate::wchan::Wait::on(crate::wchan::WaitChannel::Terminal),
+        );
     }
 }
 
@@ -697,7 +701,11 @@ pub fn master_read(handle: PtyHandle, out: &mut [u8]) -> KernelResult<usize> {
             }
             pty.output_waiters.insert(task);
         }
-        park_interruptible(pid, task);
+        park_interruptible(
+            pid,
+            task,
+            crate::wchan::Wait::on(crate::wchan::WaitChannel::Terminal),
+        );
     }
 }
 
@@ -811,7 +819,11 @@ pub fn slave_write(handle: PtyHandle, data: &[u8]) -> KernelResult<usize> {
             // Space is freed by the master *reading*, which wakes this set.
             pty.output_waiters.insert(task);
         }
-        park_interruptible(pid, task);
+        park_interruptible(
+            pid,
+            task,
+            crate::wchan::Wait::on(crate::wchan::WaitChannel::Terminal),
+        );
     }
 }
 

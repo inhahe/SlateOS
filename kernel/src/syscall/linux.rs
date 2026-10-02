@@ -4148,14 +4148,20 @@ fn dispatch_socket_write(
 /// flight, then fall to 1 ms interruptible sleeps. `poll`/`select` use 10 ms
 /// slices for the same job; 1 ms here because a read that has already decided to
 /// wait is more latency-sensitive than a poller holding a whole fd set.
-fn socket_read_backoff(spins: &mut u32) {
+///
+/// The sleeps are reported to `/proc/<pid>/wchan` as a wait on `socket` (the
+/// raw socket handle), which is what the reader is doing.
+fn socket_read_backoff(spins: &mut u32, socket: u64) {
     /// Yields before falling back to sleeping.
     const SPIN_YIELDS: u32 = 16;
     if *spins < SPIN_YIELDS {
         *spins = spins.saturating_add(1);
         crate::sched::yield_now();
     } else {
-        crate::sched::sleep_ms_interruptible(1);
+        crate::sched::sleep_ms_interruptible_as(
+            1,
+            crate::wchan::Wait::new(crate::wchan::WaitChannel::Socket, socket),
+        );
     }
 }
 
@@ -4210,7 +4216,7 @@ fn dispatch_socket_read(
                 if nonblock {
                     return linux_err(linux_errno_for(KernelError::WouldBlock));
                 }
-                socket_read_backoff(&mut spins);
+                socket_read_backoff(&mut spins, h.raw());
             }
             Err(e) => return linux_err(linux_errno_for(e)),
         }
@@ -4262,7 +4268,7 @@ fn socket_recv_waitall(entry: FdEntry, buf: u64, len: u64) -> SyscallResult {
         let n = loop {
             match crate::net::socket::recv(h, &mut kbuf[..chunk], true, false) {
                 Ok(v) => break v,
-                Err(KernelError::WouldBlock) => socket_read_backoff(&mut spins),
+                Err(KernelError::WouldBlock) => socket_read_backoff(&mut spins, h.raw()),
                 Err(e) => {
                     if done > 0 {
                         return SyscallResult::ok(done as i64);
@@ -4614,7 +4620,7 @@ fn dispatch_signalfd_read(entry: FdEntry, buf: u64, cap: u64) -> SyscallResult {
             crate::proc::signal::deregister_signalfd_waiter(caller, task);
             continue;
         }
-        crate::sched::block_current();
+        crate::sched::block_current_on(crate::wchan::Wait::on(crate::wchan::WaitChannel::Signal));
         // Woken (watched/other signal arrived, or spurious) — deregister (a
         // no-op if the waker already removed us) and loop to re-evaluate.
         crate::proc::signal::deregister_signalfd_waiter(caller, task);
@@ -8264,7 +8270,10 @@ fn interruptible_sleep_until(
             let _ = crate::hrtimer::cancel(handle); // discard: nothing to wake
             return false;
         }
-        crate::sched::block_current();
+        crate::sched::block_current_on(crate::wchan::Wait::new(
+            crate::wchan::WaitChannel::Timer,
+            deadline_ns,
+        ));
         crate::proc::signal::deregister_signalfd_waiter(pid, task);
         // Cancel the timer if it has not fired; harmless (false) if it already
         // did.  The next loop iteration decides completed-vs-interrupted.
@@ -19973,7 +19982,7 @@ fn sys_pause(_args: &SyscallArgs) -> SyscallResult {
             crate::proc::signal::deregister_signalfd_waiter(caller, task);
             continue;
         }
-        crate::sched::block_current();
+        crate::sched::block_current_on(crate::wchan::Wait::on(crate::wchan::WaitChannel::Signal));
         crate::proc::signal::deregister_signalfd_waiter(caller, task);
     }
 }
@@ -23937,7 +23946,10 @@ fn dispatch_inotify_read(entry: FdEntry, buf: u64, cap: u64) -> SyscallResult {
                     }
                     continue;
                 }
-                crate::sched::block_current();
+                crate::sched::block_current_on(crate::wchan::Wait::new(
+                    crate::wchan::WaitChannel::Event,
+                    entry.raw_handle,
+                ));
                 crate::fs::notify::deregister_notify_waiter(token, task);
                 if let Some(p) = caller {
                     crate::proc::signal::deregister_signalfd_waiter(p, task);
@@ -37178,7 +37190,7 @@ fn sys_rt_sigsuspend(args: &SyscallArgs) -> SyscallResult {
             crate::proc::signal::deregister_signalfd_waiter(caller, task);
             continue;
         }
-        crate::sched::block_current();
+        crate::sched::block_current_on(crate::wchan::Wait::on(crate::wchan::WaitChannel::Signal));
         crate::proc::signal::deregister_signalfd_waiter(caller, task);
     }
 }
@@ -37421,7 +37433,7 @@ fn sys_rt_sigtimedwait(args: &SyscallArgs) -> SyscallResult {
             }
             None => None,
         };
-        crate::sched::block_current();
+        crate::sched::block_current_on(crate::wchan::Wait::on(crate::wchan::WaitChannel::Signal));
         if let Some(th) = timer {
             crate::hrtimer::cancel(th);
         }
@@ -40282,7 +40294,7 @@ fn socket_recvmsg(entry: FdEntry, msg_ptr: u64, flags: u32) -> SyscallResult {
                     if nonblock {
                         return linux_err(linux_errno_for(KernelError::WouldBlock));
                     }
-                    socket_read_backoff(&mut spins);
+                    socket_read_backoff(&mut spins, h.raw());
                 }
                 Err(e) => return linux_err(linux_errno_for(e)),
             }

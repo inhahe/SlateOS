@@ -696,7 +696,10 @@ pub fn send_blocking(handle: ChannelHandle, msg: Message) -> KernelResult<()> {
 
         wake_ready(handle);
         super::stats::channel_send_block();
-        sched::block_current();
+        sched::block_current_on(crate::wchan::Wait::new(
+            crate::wchan::WaitChannel::Channel,
+            handle.raw(),
+        ));
 
         // For sync channels: on wake, check if the receiver took our
         // message (rendezvous slot was cleared).
@@ -885,7 +888,10 @@ pub fn send_timeout(handle: ChannelHandle, msg: Message, timeout_ns: u64) -> Ker
 
         wake_ready(handle);
         super::stats::channel_send_block();
-        sched::block_current();
+        sched::block_current_on(crate::wchan::Wait::new(
+            crate::wchan::WaitChannel::Channel,
+            handle.raw(),
+        ));
     }
 }
 
@@ -1274,7 +1280,10 @@ pub fn recv(handle: ChannelHandle) -> KernelResult<Message> {
 
         // Block until woken by a send or close.
         super::stats::channel_recv_block();
-        sched::block_current();
+        sched::block_current_on(crate::wchan::Wait::new(
+            crate::wchan::WaitChannel::Channel,
+            handle.raw(),
+        ));
 
         // When we wake up, loop back and try to receive again.
         // (We re-check because the wake could be spurious or the
@@ -1371,7 +1380,10 @@ pub fn recv_timeout(handle: ChannelHandle, timeout_ns: u64) -> KernelResult<Mess
         }
 
         super::stats::channel_recv_block();
-        sched::block_current();
+        sched::block_current_on(crate::wchan::Wait::new(
+            crate::wchan::WaitChannel::Channel,
+            handle.raw(),
+        ));
 
         // We woke up — either from send/close or from the timer.
         // Loop back to check which.

@@ -613,7 +613,11 @@ pub fn set_wait(
             // A release between the registration above and this park is not
             // lost: its wake finds the task not yet blocked and leaves a
             // pending wake, which this park consumes (`sched::wake`).
-            None => waiters::park_interruptible(pid, task),
+            None => waiters::park_interruptible(
+                pid,
+                task,
+                crate::wchan::Wait::on(crate::wchan::WaitChannel::FileLock),
+            ),
         }
     }
 }

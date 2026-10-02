@@ -1826,7 +1826,11 @@ fn pty_wait_for<R>(
             }
             pty::insert_input_waiter(id, task);
         }
-        park_interruptible(pid, task);
+        park_interruptible(
+            pid,
+            task,
+            crate::wchan::Wait::on(crate::wchan::WaitChannel::Terminal),
+        );
     };
 
     if let Some(t) = timer {

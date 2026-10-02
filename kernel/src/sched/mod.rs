@@ -2507,23 +2507,46 @@ pub fn set_task_cgroup(task_id: TaskId, new_cgroup: crate::cgroup::CgroupId) -> 
 ///
 /// This is used by IPC channels, futexes, and other blocking
 /// primitives.
+///
+/// Records the wait as undescribed (`/proc/<pid>/wchan` reads `wait`); a
+/// blocking primitive that knows what it waits on uses [`block_current_on`].
 #[track_caller]
 pub fn block_current() {
-    block_current_inner(core::panic::Location::caller(), 0);
+    block_current_inner(
+        core::panic::Location::caller(),
+        0,
+        crate::wchan::Wait::UNDESCRIBED,
+    );
 }
 
-/// [`block_current`], but also records the hrtimer id armed to wake this task.
+/// [`block_current`], saying what the task waits on: the kind and its
+/// argument that `/proc/<pid>/wchan` publishes (see [`crate::wchan`]).
 ///
-/// Only `sleep_ns_interruptible` uses this.  Recording the id *inside* the same
+/// The wait is stored in the same `SCHED` critical section that sets the task
+/// `Blocked`, so no reader can see the one without the other; [`wait_of`]
+/// reads it back.
+#[track_caller]
+pub fn block_current_on(wait: crate::wchan::Wait) {
+    block_current_inner(core::panic::Location::caller(), 0, wait);
+}
+
+/// [`block_current_on`], but also records the hrtimer id armed to wake this
+/// task.
+///
+/// Only `sleep_ns_interruptible_as` uses this.  Recording the id *inside* the same
 /// `SCHED` critical section that parks the task is what makes it trustworthy —
 /// a separate setter would need its own lock acquisition and could interleave
 /// with the park it is describing.
 #[track_caller]
-pub fn block_current_for_timer(timer_id: u64) {
-    block_current_inner(core::panic::Location::caller(), timer_id);
+pub fn block_current_for_timer(timer_id: u64, wait: crate::wchan::Wait) {
+    block_current_inner(core::panic::Location::caller(), timer_id, wait);
 }
 
-fn block_current_inner(site: &'static core::panic::Location<'static>, timer_id: u64) {
+fn block_current_inner(
+    site: &'static core::panic::Location<'static>,
+    timer_id: u64,
+    wait: crate::wchan::Wait,
+) {
     // `site` is recorded before the lock so it is set even on the
     // `pending_wake` early return: the two hang dumps need to name the wait
     // that parked a task, and reconstructing that from a serial log is
@@ -2561,6 +2584,7 @@ fn block_current_inner(site: &'static core::panic::Location<'static>, timer_id: 
             task.block_tick = crate::apic::tick_count();
             task.block_seq = task.block_seq.saturating_add(1);
             task.sleep_timer_id = timer_id;
+            task.wait = wait;
         }
     }
     // Park.  `requeue = true` reads as a contradiction but is not: the guard in
@@ -3848,7 +3872,8 @@ fn dump_all_tasks_serial() {
         };
         serial_println!(
             "[liveness]   tid={} state={:?} cpu={} prio={} pending_wake={} \
-             ready_since={} waited={} blocked_on_pi={:#x} block_site={}              block_tick={} block_seq={} sleep_timer={} name={:?}",
+             ready_since={} waited={} blocked_on_pi={:#x} block_site={} wait=({}) \
+             block_tick={} block_seq={} sleep_timer={} name={:?}",
             id,
             task.state,
             task.last_cpu,
@@ -3858,6 +3883,7 @@ fn dump_all_tasks_serial() {
             waited,
             task.blocked_on_pi.map_or(0, |key| key.0),
             BlockSite(task.block_site),
+            task.wait,
             task.block_tick,
             task.block_seq,
             task.sleep_timer_id,
@@ -4164,6 +4190,64 @@ pub fn cpu_ticks(tid: TaskId) -> Option<(u64, u64)> {
 pub fn task_state(tid: TaskId) -> Option<TaskState> {
     let state = SCHED.lock();
     Some(state.tasks.get(&tid)?.state)
+}
+
+/// What a task is waiting on, as `/proc/<pid>/wchan` reports it: its recorded
+/// wait while it is `Blocked` ([`crate::wchan::Wait::UNDESCRIBED`] if the code
+/// that parked it said nothing), a stop while it is `Suspended`, and
+/// [`crate::wchan::Wait::NONE`] while it is running, ready or exiting.
+/// `None` if there is no such task.
+///
+/// The recorded wait outlives the park it describes ([`Task::wait`] is not
+/// cleared on wake), which is why this, not the field, is the reader: the
+/// state decides whether the record is current.
+#[must_use]
+pub fn wait_of(tid: TaskId) -> Option<crate::wchan::Wait> {
+    let state = SCHED.lock();
+    Some(current_wait(state.tasks.get(&tid)?))
+}
+
+/// [`wait_of`] for a task already in hand, under the `SCHED` lock.
+fn current_wait(task: &Task) -> crate::wchan::Wait {
+    use crate::wchan::Wait;
+    match task.state {
+        TaskState::Blocked if task.wait.is_waiting() => task.wait,
+        TaskState::Blocked => Wait::UNDESCRIBED,
+        TaskState::Suspended => Wait::STOPPED,
+        TaskState::Ready | TaskState::Running | TaskState::Dead => Wait::NONE,
+    }
+}
+
+/// How many tasks wait on each kind of thing, indexed by
+/// `WaitChannel as usize` (index 0: the tasks not waiting). One pass under
+/// the `SCHED` lock.
+#[must_use]
+pub fn wait_census() -> [usize; crate::wchan::KINDS] {
+    let mut counts = [0usize; crate::wchan::KINDS];
+    let state = SCHED.lock();
+    for task in state.tasks.values() {
+        if let Some(n) = counts.get_mut(current_wait(task).channel as usize) {
+            *n = n.saturating_add(1);
+        }
+    }
+    counts
+}
+
+/// Every waiting task with its wait (as [`wait_of`] reports it), in task-id
+/// order, into `buf`; returns how many were written (at most `buf.len()`).
+pub fn waiting_tasks(buf: &mut [(TaskId, crate::wchan::Wait)]) -> usize {
+    let state = SCHED.lock();
+    let waiting = state
+        .tasks
+        .iter()
+        .map(|(id, task)| (*id, current_wait(task)))
+        .filter(|(_, wait)| wait.is_waiting());
+    let mut written = 0usize;
+    for (slot, entry) in buf.iter_mut().zip(waiting) {
+        *slot = entry;
+        written = written.saturating_add(1);
+    }
+    written
 }
 
 /// Charge a page fault to a task's per-task fault counters.
@@ -5827,11 +5911,12 @@ pub struct TaskInfo {
     pub stack_used: Option<usize>,
     /// Stack usage percentage (0-100).  `None` for idle tasks.
     pub stack_pct: Option<u8>,
+    /// What the task waits on, as [`wait_of`] reports it -- read in the same
+    /// critical section as `state`, so the two agree. `/proc/<pid>/stat`
+    /// field 35 is 1 when this is a wait.
+    pub wait: crate::wchan::Wait,
 }
 
-/// Return a snapshot of all tasks in the scheduler.
-///
-/// Used by the kernel debug shell to implement the `ps` command.
 /// How many tasks the scheduler knows about.
 ///
 /// Exists because five callers wanted exactly this and the only way to get it
@@ -5848,6 +5933,9 @@ pub fn task_count() -> usize {
     SCHED.lock().tasks.len()
 }
 
+/// Return a snapshot of all tasks in the scheduler.
+///
+/// Used by the kernel debug shell to implement the `ps` command.
 pub fn task_list() -> alloc::vec::Vec<TaskInfo> {
     let state = SCHED.lock();
     state
@@ -5876,6 +5964,7 @@ pub fn task_list() -> alloc::vec::Vec<TaskInfo> {
             max_wait_ticks: task.max_wait_ticks,
             stack_used: task.stack_usage_bytes(),
             stack_pct: task.stack_usage_pct(),
+            wait: current_wait(task),
         })
         .collect()
 }
@@ -5920,6 +6009,7 @@ pub fn task_info(task_id: TaskId) -> Option<TaskInfo> {
         // Deliberately skip the volatile stack scan — see fn docs.
         stack_used: None,
         stack_pct: None,
+        wait: current_wait(task),
     })
 }
 
@@ -6338,6 +6428,15 @@ static SLEEP_QUEUE: [SleepEntry; MAX_SLEEPERS] = {
 /// This split mirrors Linux, where `schedule_timeout()` may return early and
 /// `msleep()` loops around it until the deadline is genuinely reached.
 pub fn sleep_until_tick_interruptible(wake_tick: u64) {
+    sleep_until_tick_interruptible_as(wake_tick, None);
+}
+
+/// [`sleep_until_tick_interruptible`], reported to `/proc/<pid>/wchan` as
+/// `wait` when one is given, and otherwise as a timer (see
+/// [`sleep_ns_interruptible_as`]).
+fn sleep_until_tick_interruptible_as(wake_tick: u64, wait: Option<crate::wchan::Wait>) {
+    /// One tick on the monotonic clock, to say when the sleep ends.
+    const NS_PER_TICK: u64 = 1_000_000_000 / crate::apic::TICK_RATE_HZ as u64;
     let task_id = load_current_task();
 
     let Some(slot) = claim_sleep_slot(wake_tick, task_id) else {
@@ -6368,8 +6467,15 @@ pub fn sleep_until_tick_interruptible(wake_tick: u64) {
 
     // Block the task.  The timer ISR will wake it at the deadline — but any
     // other wake can return us here first, which is the whole point of the
-    // `_interruptible` variant.
-    block_current();
+    // `_interruptible` variant.  `/proc` reads the deadline on the monotonic
+    // clock, which is what a reader can compare with its own.
+    let wait = wait.unwrap_or_else(|| {
+        let ticks_left = wake_tick.saturating_sub(crate::apic::tick_count());
+        let deadline_ns =
+            crate::hrtimer::now_ns().saturating_add(ticks_left.saturating_mul(NS_PER_TICK));
+        crate::wchan::Wait::new(crate::wchan::WaitChannel::Timer, deadline_ns)
+    });
+    block_current_on(wait);
 
     // Release the slot on *both* paths.  If the ISR retired it at the deadline
     // this is a no-op (the CAS fails); if we were woken early it hands the slot
@@ -6764,7 +6870,8 @@ fn dump_idle_fallback_wedge(state: &SchedState, cpu: usize, blocked_id: TaskId) 
     if let Some(task) = state.tasks.get(&blocked_id) {
         serial_println!(
             "[sched]   parked task {}: state={:?} pending_wake={} last_cpu={} \
-             prio={} ready_since_tick={} block_site={} block_tick={}              block_seq={} sleep_timer={}",
+             prio={} ready_since_tick={} block_site={} wait=({}) block_tick={} \
+             block_seq={} sleep_timer={}",
             blocked_id,
             task.state,
             task.pending_wake,
@@ -6772,6 +6879,7 @@ fn dump_idle_fallback_wedge(state: &SchedState, cpu: usize, blocked_id: TaskId) 
             task.priority,
             task.ready_since_tick,
             BlockSite(task.block_site),
+            task.wait,
             task.block_tick,
             task.block_seq,
             task.sleep_timer_id,
@@ -6794,13 +6902,14 @@ fn dump_idle_fallback_wedge(state: &SchedState, cpu: usize, blocked_id: TaskId) 
     for (&id, task) in state.tasks.iter() {
         serial_println!(
             "[sched]     tid={} state={:?} pending_wake={} last_cpu={} prio={} \
-             block_site={} block_tick={} block_seq={} sleep_timer={}",
+             block_site={} wait=({}) block_tick={} block_seq={} sleep_timer={}",
             id,
             task.state,
             task.pending_wake,
             task.last_cpu,
             task.priority,
             BlockSite(task.block_site),
+            task.wait,
             task.block_tick,
             task.block_seq,
             task.sleep_timer_id,
@@ -6827,6 +6936,17 @@ fn dump_idle_fallback_wedge(state: &SchedState, cpu: usize, blocked_id: TaskId) 
 ///
 /// - `duration_ns` — sleep duration in nanoseconds (0 = yield)
 pub fn sleep_ns_interruptible(duration_ns: u64) {
+    sleep_ns_interruptible_as(duration_ns, None);
+}
+
+/// [`sleep_ns_interruptible`], reported to `/proc/<pid>/wchan` as `wait`
+/// rather than as a timer, when one is given.
+///
+/// For a wait built from timed sleeps -- a socket read that re-asks the
+/// network service every millisecond -- so that the task reads as waiting on
+/// the socket, which is what it is doing, and not as sleeping. Without `wait`
+/// it reads as a timer with the sleep's deadline.
+pub fn sleep_ns_interruptible_as(duration_ns: u64, wait: Option<crate::wchan::Wait>) {
     if duration_ns == 0 {
         yield_now();
         return;
@@ -6852,7 +6972,7 @@ pub fn sleep_ns_interruptible(duration_ns: u64) {
             .saturating_add(9_999_999)
             .saturating_div(10_000_000);
         let wake_tick = crate::apic::tick_count().saturating_add(ticks);
-        sleep_until_tick_interruptible(wake_tick);
+        sleep_until_tick_interruptible_as(wake_tick, wait);
         return;
     }
 
@@ -6871,12 +6991,19 @@ pub fn sleep_ns_interruptible(duration_ns: u64) {
         }
     }
 
+    let deadline_ns = crate::hrtimer::now_ns().saturating_add(duration_ns);
     let handle = crate::hrtimer::schedule_ns(duration_ns, wake_callback, task_id);
 
     // Block until the timer fires and wakes us — or until anything else does,
     // which is what `_interruptible` means.  The handle's id goes on the task
     // so a hang dump can say what happened to *this* sleep's timer.
-    block_current_for_timer(handle.id());
+    block_current_for_timer(
+        handle.id(),
+        wait.unwrap_or(crate::wchan::Wait::new(
+            crate::wchan::WaitChannel::Timer,
+            deadline_ns,
+        )),
+    );
 
     // Disarm on the early-wake path.  A no-op if the timer already fired.
     //
@@ -6956,6 +7083,13 @@ pub fn sleep_ms(ms: u64) {
 #[inline]
 pub fn sleep_ms_interruptible(ms: u64) {
     sleep_ns_interruptible(ms.saturating_mul(1_000_000));
+}
+
+/// [`sleep_ms_interruptible`], reported to `/proc/<pid>/wchan` as `wait`
+/// rather than as a timer (see [`sleep_ns_interruptible_as`]).
+#[inline]
+pub fn sleep_ms_interruptible_as(ms: u64, wait: crate::wchan::Wait) {
+    sleep_ns_interruptible_as(ms.saturating_mul(1_000_000), Some(wait));
 }
 
 /// Sleep the current task for a given number of microseconds.

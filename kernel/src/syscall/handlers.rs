@@ -650,7 +650,10 @@ pub fn sys_irq_wait(args: &SyscallArgs) -> SyscallResult {
         // The ISR will increment the pending counter and attempt to wake
         // us immediately (via try_wake).  If that fails, the timer ISR's
         // deferred-wake scan will catch it within ~10 ms.
-        sched::block_current();
+        sched::block_current_on(crate::wchan::Wait::new(
+            crate::wchan::WaitChannel::Io,
+            u64::from(irq_u32),
+        ));
     }
 }
 

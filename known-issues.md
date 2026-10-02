@@ -181235,6 +181235,34 @@ a negative value can be one. Every producer already went through
 `restart_result`, so nothing else changed. The restart self-test now checks
 that 512-516 of either sign and the three native codes are not sentinels.
 
+### A-PROC-PID-FILES-CHECK-NO-READER -- 2026-10-01 -- OPEN (lane A)
+
+**In short:** any program can read what `/proc/<pid>/` says about any other
+program, whoever runs either of them. That includes `environ` (the other
+program's environment variables, where passwords and access tokens are often
+passed), `auxv` and `maps` (where its code and data sit in memory, which
+undoes address randomisation), `io`, the `cwd`/`root`/`exe` links, and since
+2026-10-01 `wchan`. Linux lets only a reader allowed to trace the program
+(the same user, with the program not marked undumpable, or an administrator)
+read those. Nothing is exposed in practice yet -- every process still runs as
+uid 0, the "administrator" who may read them anyway -- but the first login
+service that starts a second user's programs makes this a real leak between
+users.
+
+**Where:** `kernel/src/fs/procfs.rs` -- `generate_pid`, `generate_task` and
+`ProcFs::readlink` serve every file to every reader; `ProcFs::stat` reports
+no owner or mode, so the VFS has nothing to check either.
+
+**Proper fix:** one predicate, "may the calling process inspect process X",
+as Linux's `ptrace_may_access(PTRACE_MODE_READ_FSCREDS)`: the same process;
+or the reader's uid and gid equal the target's and the target is dumpable
+(`PR_SET_DUMPABLE`); or the reader is uid 0; or the reader holds a `Process`
+capability for the target, which is how this kernel already lets a process
+signal another (`check_signal_target`). Apply it to the files Linux guards --
+`environ`, `auxv`, `maps`, `io`, `wchan`'s content (Linux prints `0` rather
+than refusing), `stat`'s address fields, and the three links -- and have
+`stat` report each file's owner and Linux's mode for it.
+
 ## Lane B: new entries
 
 Lane B (userland) appends new entries at the end of this section, above the

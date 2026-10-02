@@ -553,7 +553,10 @@ pub fn accept(listener: ServiceListenerHandle) -> KernelResult<ChannelHandle> {
             return Ok(bind_accepted(handle));
         }
 
-        sched::block_current();
+        sched::block_current_on(crate::wchan::Wait::new(
+            crate::wchan::WaitChannel::Service,
+            listener.raw(),
+        ));
     }
 }
 
@@ -670,7 +673,10 @@ pub fn accept_timeout(
             return Ok(bind_accepted(handle));
         }
 
-        sched::block_current();
+        sched::block_current_on(crate::wchan::Wait::new(
+            crate::wchan::WaitChannel::Service,
+            listener.raw(),
+        ));
     }
 }
 

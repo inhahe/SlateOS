@@ -591,6 +591,7 @@ const PID_FILES: &[&str] = &[
     "loginuid",
     "sessionid",
     "io",
+    "wchan",
 ];
 
 /// Per-PID symbolic links, served via [`FileSystem::readlink`].
@@ -621,14 +622,11 @@ const PID_LINKS: &[&str] = &["cwd", "root", "exe"];
 ///   from each other; `prctl(PR_SET_NAME)` is per-thread).
 /// - `schedstat` — the thread's own CPU time, run-queue wait, and dispatch
 ///   count, all from real per-task accounting.
-///
-/// `stat`/`status` are intentionally omitted for now: their `ppid`,
-/// `tgid`, and `num_threads` fields need the owning process's context
-/// (a thread tid is not a process-table key), so serving them here would
-/// either fabricate those fields or require threading the owner pid
-/// through the per-thread generators — tracked as a follow-up in
-/// `todo.txt` rather than shipped wrong.
-const TASK_FILES: &[&str] = &["comm", "schedstat", "stat", "status"];
+/// - `stat`/`status` — the thread's own fields from its task, the
+///   process-wide ones (`ppid`, `Tgid`, `num_threads`, ...) from the owning
+///   process ([`gen_thread_stat`], [`gen_thread_status`]).
+/// - `wchan` — what the thread is waiting on ([`gen_wchan`]).
+const TASK_FILES: &[&str] = &["comm", "schedstat", "stat", "status", "wchan"];
 
 // ---------------------------------------------------------------------------
 // Content generators
@@ -2804,6 +2802,23 @@ fn gen_pid_stat(task_id: u64) -> KernelResult<Vec<u8>> {
     Ok(build_pid_stat(task, proc_id))
 }
 
+/// `/proc/<pid>/wchan` and `/proc/<pid>/task/<tid>/wchan` — what the task
+/// is waiting on: one line with no trailing newline, as Linux's -- `0` when it
+/// is not waiting, else the kind of wait, its argument, and who holds what it
+/// waits on where the kernel knows (the format is [`crate::wchan`]'s module
+/// doc). For `/proc/<pid>` the task is the process's main thread, whose id is
+/// the pid.
+///
+/// Linux prints only a kernel function's name here, and only to a reader
+/// allowed to trace the task. No `/proc/<pid>` file here checks its reader
+/// yet (`environ` included); this one reveals no kernel address -- every
+/// argument is one the waiting program itself holds, a handle, a pid or its
+/// own futex address.
+fn gen_wchan(task_id: u64) -> KernelResult<Vec<u8>> {
+    let report = crate::wchan::report(task_id).ok_or(KernelError::NotFound)?;
+    Ok(format!("{report}").into_bytes())
+}
+
 /// `/proc/<pid>/task/<tid>/stat` — per-thread task statistics.
 ///
 /// Same 52-field layout as [`gen_pid_stat`], but the thread-specific fields
@@ -2963,6 +2978,12 @@ fn build_pid_stat(task: &crate::sched::TaskInfo, proc_id: u64) -> Vec<u8> {
         caught & OLD_SIGNALS,
     );
 
+    // wchan (field 35): 1 while the task waits on something, 0 otherwise --
+    // what Linux has printed since it stopped publishing a kernel address
+    // here; `/proc/<pid>/wchan` says what the wait is. A literal 0 until
+    // 2026-10-01.
+    let wchan = u8::from(task.wait.is_waiting());
+
     // Field order matches proc(5) / Linux fs/proc/array.c do_task_stat().
     // 1:pid 2:comm 3:state 4:ppid 5:pgrp 6:session 7:tty_nr 8:tpgid 9:flags
     // 10:minflt 11:cminflt 12:majflt 13:cmajflt 14:utime 15:stime 16:cutime
@@ -2978,7 +2999,7 @@ fn build_pid_stat(task: &crate::sched::TaskInfo, proc_id: u64) -> Vec<u8> {
     // <tty_nr/tpgid/flags=0/-1/0> <minflt..cmajflt=0> utime stime
     // cutime cstime priority nice num_threads itrealvalue=0
     // starttime vsize rss rsslim <startcode..kstkeip=0> signal=0 blocked
-    // sigignore sigcatch wchan=0 <nswap/cnswap=0> exit_signal=17 processor
+    // sigignore sigcatch wchan <nswap/cnswap=0> exit_signal=17 processor
     // <rt_priority..env_end=0> exit_code.
     // Split around the comm so the name can be raw bytes. Field 2 is
     // parenthesised precisely because it may contain anything, and Linux
@@ -2990,7 +3011,7 @@ fn build_pid_stat(task: &crate::sched::TaskInfo, proc_id: u64) -> Vec<u8> {
     out.extend_from_slice(name);
     let text = format!(
         ") {} {} {} {} 0 -1 0 {} {} {} {} {} {} {} {} {} {} {} 0 {} {} {} {} \
-         0 0 0 0 0 0 {} {} {} 0 0 0 17 {} 0 0 0 0 0 0 0 0 0 0 0 0 {}\n",
+         0 0 0 0 0 0 {} {} {} {} 0 0 17 {} 0 0 0 0 0 0 0 0 0 0 0 0 {}\n",
         state_char,
         ppid,
         pgrp,
@@ -3013,6 +3034,7 @@ fn build_pid_stat(task: &crate::sched::TaskInfo, proc_id: u64) -> Vec<u8> {
         blocked,
         sigignore,
         sigcatch,
+        wchan,
         processor,
         exit_code,
     );
@@ -4025,6 +4047,7 @@ fn generate_pid(task_id: u64, file_name: &str) -> KernelResult<Vec<u8>> {
         "loginuid" => gen_pid_loginuid(task_id),
         "sessionid" => gen_pid_sessionid(task_id),
         "io" => gen_pid_io(task_id),
+        "wchan" => gen_wchan(task_id),
         _ => Err(KernelError::NotFound),
     }
 }
@@ -4047,6 +4070,7 @@ fn generate_task(pid: u64, tid: u64, file_name: &str) -> KernelResult<Vec<u8>> {
         "schedstat" => gen_pid_schedstat(tid),
         "stat" => gen_thread_stat(pid, tid),
         "status" => gen_thread_status(pid, tid),
+        "wchan" => gen_wchan(tid),
         _ => Err(KernelError::NotFound),
     }
 }
@@ -16131,6 +16155,7 @@ pub fn self_test() -> KernelResult<()> {
             ("5/task/7/schedstat", "file"),
             ("5/task/7/stat", "file"),       // stat is a thread file too
             ("5/task/7/status", "file"),     // status is a thread file too
+            ("5/task/7/wchan", "file"),      // so is wchan
             ("5/task/7/maps", "notfound"),   // maps not in TASK_FILES
             ("5/task/abc", "notfound"),      // non-numeric tid
             ("5/task/7/comm/x", "notfound"), // nested beyond a thread file
@@ -16487,6 +16512,7 @@ pub fn self_test() -> KernelResult<()> {
             max_wait_ticks: 0,
             stack_used: None,
             stack_pct: None,
+            wait: crate::wchan::Wait::new(crate::wchan::WaitChannel::Futex, 0x7f00_1000),
         };
         let data = build_pid_stat(&synth, 999_999);
         let text = core::str::from_utf8(&data).unwrap_or("");
@@ -16537,7 +16563,32 @@ pub fn self_test() -> KernelResult<()> {
             serial_println!("[procfs]   FAIL: synthetic stat field1 != 4242");
             return Err(KernelError::InternalError);
         }
-        serial_println!("[procfs]   build_pid_stat: synthetic starttime+processor+utime/stime OK");
+        // field 35 (wchan) sits at index 32: 1 while the task waits, and 0
+        // for the same task not waiting.
+        if rest.get(32).copied() != Some("1") {
+            serial_println!(
+                "[procfs]   FAIL: synthetic stat wchan (field 35) = {:?} for a waiting task, want 1",
+                rest.get(32)
+            );
+            return Err(KernelError::InternalError);
+        }
+        let mut idle = synth;
+        idle.wait = crate::wchan::Wait::NONE;
+        let idle_data = build_pid_stat(&idle, 999_999);
+        let idle_text = core::str::from_utf8(&idle_data).unwrap_or("");
+        let idle_field = idle_text
+            .get(idle_text.rfind(')').unwrap_or(0)..)
+            .and_then(|t| t.split(' ').filter(|s| !s.is_empty()).nth(33));
+        if idle_field != Some("0") {
+            serial_println!(
+                "[procfs]   FAIL: synthetic stat wchan (field 35) = {:?} for a task not waiting, want 0",
+                idle_field
+            );
+            return Err(KernelError::InternalError);
+        }
+        serial_println!(
+            "[procfs]   build_pid_stat: synthetic starttime+processor+utime/stime+wchan OK"
+        );
     }
 
     // --- stat <-> status State-char consistency (deterministic) ---
@@ -16584,6 +16635,7 @@ pub fn self_test() -> KernelResult<()> {
                 max_wait_ticks: 0,
                 stack_used: None,
                 stack_pct: None,
+                wait: crate::wchan::Wait::NONE,
             };
             // stat field 3 is the first token after the `(comm) ` prefix.  The
             // synthetic comm has no parens, so `") "` locates the boundary.
@@ -16658,6 +16710,7 @@ pub fn self_test() -> KernelResult<()> {
             max_wait_ticks: 0,
             stack_used: None,
             stack_pct: None,
+            wait: crate::wchan::Wait::NONE,
         };
         let data = build_pid_stat(&synth, 999_999);
         let text = core::str::from_utf8(&data).unwrap_or("");
@@ -18613,6 +18666,7 @@ fn test_pid_signal_sets() -> KernelResult<()> {
         max_wait_ticks: 0,
         stack_used: None,
         stack_pct: None,
+        wait: crate::wchan::Wait::NONE,
     };
     // SIGHUP and SIGRTMAX (64) ignored, SIGINT blocked, SIGTERM pending.
     let ignored = 1u64 | (1u64 << 63);

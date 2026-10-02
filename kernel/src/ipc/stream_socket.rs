@@ -372,7 +372,11 @@ pub fn send(handle: StreamSocketHandle, data: &[u8]) -> KernelResult<usize> {
         }
 
         super::stats::stream_socket_write_block();
-        park_interruptible(pid, task);
+        park_interruptible(
+            pid,
+            task,
+            crate::wchan::Wait::new(crate::wchan::WaitChannel::Socket, handle.raw()),
+        );
     }
 }
 
@@ -471,7 +475,11 @@ pub fn recv(handle: StreamSocketHandle, buf: &mut [u8]) -> KernelResult<usize> {
         }
 
         super::stats::stream_socket_read_block();
-        park_interruptible(pid, task);
+        park_interruptible(
+            pid,
+            task,
+            crate::wchan::Wait::new(crate::wchan::WaitChannel::Socket, handle.raw()),
+        );
     }
 }
 
@@ -623,7 +631,11 @@ pub fn recv_timeout(
         }
 
         super::stats::stream_socket_read_block();
-        park_interruptible(pid, task);
+        park_interruptible(
+            pid,
+            task,
+            crate::wchan::Wait::new(crate::wchan::WaitChannel::Socket, handle.raw()),
+        );
     }
 }
 
@@ -732,7 +744,11 @@ pub fn send_timeout(
         }
 
         super::stats::stream_socket_write_block();
-        park_interruptible(pid, task);
+        park_interruptible(
+            pid,
+            task,
+            crate::wchan::Wait::new(crate::wchan::WaitChannel::Socket, handle.raw()),
+        );
     }
 }
 

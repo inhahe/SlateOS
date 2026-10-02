@@ -144237,56 +144237,52 @@ fn cmd_migrate(args: &str) {
     }
 }
 
-/// `wchan` — show what blocked tasks are waiting on.
+/// `wchan` — show what waiting tasks are waiting on, and who holds it.
+///
+/// The same lines `/proc/<pid>/wchan` prints (see [`crate::wchan`]), for
+/// every waiting task, kernel tasks included.
 fn cmd_wchan() {
     use crate::wchan;
+
+    /// Tasks listed; the census above the list counts them all.
+    const SHOWN: usize = 64;
 
     let s = wchan::stats();
 
     shell_println!("=== Wait Channels (WCHAN) ===");
     shell_println!("");
-    shell_println!(
-        "  Total set/clear operations: {} / {}",
-        s.total_sets,
-        s.total_clears
-    );
-    shell_println!("  Currently blocked tasks: {}", s.currently_blocked);
+    shell_println!("  Tasks waiting: {}", s.currently_blocked);
     shell_println!("");
+    if s.currently_blocked == 0 {
+        shell_println!("  No task is waiting.");
+        return;
+    }
 
-    // Breakdown by channel type.
-    if s.currently_blocked > 0 {
-        shell_println!("  By channel:");
-        let channels = [
-            (wchan::WaitChannel::Timer, "Timer"),
-            (wchan::WaitChannel::Channel, "IPC Channel"),
-            (wchan::WaitChannel::Pipe, "Pipe"),
-            (wchan::WaitChannel::Futex, "Futex"),
-            (wchan::WaitChannel::Mutex, "Mutex"),
-            (wchan::WaitChannel::Event, "Event"),
-            (wchan::WaitChannel::Join, "Join"),
-            (wchan::WaitChannel::Completion, "Completion"),
-            (wchan::WaitChannel::Io, "I/O"),
-            (wchan::WaitChannel::Other, "Other"),
-        ];
-        for (ch, label) in &channels {
-            let count = s.by_channel[*ch as usize];
-            if count > 0 {
-                shell_println!("    {:<14} {}", label, count);
-            }
+    shell_println!("  By kind:");
+    for kind in wchan::WaitChannel::ALL {
+        if kind == wchan::WaitChannel::None {
+            continue;
         }
+        let count = s.by_channel.get(kind as usize).copied().unwrap_or(0);
+        if count > 0 {
+            shell_println!("    {:<12} {}", kind.proc_name(), count);
+        }
+    }
 
-        // Show individual blocked tasks.
-        shell_println!("");
-        shell_println!("  Blocked tasks:");
-        shell_println!("    {:>6}  {:>8}  {:>16}", "TASK", "WCHAN", "ARG");
-        let mut buf = [(0u64, wchan::WaitChannel::None, 0u64); 32];
-        let n = wchan::blocked_list(&mut buf);
-        for i in 0..n {
-            let (tid, ch, arg) = buf[i];
-            shell_println!("    {:>6}  {:>8}  {:#016x}", tid, ch.name(), arg);
-        }
-    } else {
-        shell_println!("  No tasks currently blocked (or no wchan data recorded)");
+    shell_println!("");
+    shell_println!("  Waiting tasks:");
+    shell_println!("    {:>6}  {}", "TASK", "WCHAN");
+    let mut buf = alloc::vec![(0u64, wchan::Wait::NONE); SHOWN];
+    let n = wchan::blocked_list(&mut buf);
+    for &(tid, wait) in buf.iter().take(n) {
+        let report = wchan::Report {
+            wait,
+            holder: wchan::holder(tid, wait),
+        };
+        shell_println!("    {:>6}  {}", tid, report);
+    }
+    if s.currently_blocked > n {
+        shell_println!("    ... and {} more", s.currently_blocked.saturating_sub(n));
     }
 }
 

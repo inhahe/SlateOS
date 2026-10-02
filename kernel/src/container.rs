@@ -4262,7 +4262,10 @@ pub fn wait(id: ContainerId) -> KernelResult<WaitOutcome> {
                 // init pid was unknown we already yielded above, so loop back to
                 // re-register once the init exists.
                 if init_pid.is_some() {
-                    crate::sched::block_current();
+                    crate::sched::block_current_on(crate::wchan::Wait::new(
+                        crate::wchan::WaitChannel::Child,
+                        init_pid.unwrap_or(0),
+                    ));
                 }
             }
         }
@@ -4336,7 +4339,10 @@ pub fn wait_process(pid: u64) -> KernelResult<i32> {
             }
             // Still running: park until the exit wake fires, then loop to
             // re-register and re-check.
-            Some(_) => crate::sched::block_current(),
+            Some(_) => crate::sched::block_current_on(crate::wchan::Wait::new(
+                crate::wchan::WaitChannel::Child,
+                pid,
+            )),
         }
     }
 }

@@ -179976,3 +179976,68 @@ reading now assert both readings, each against its measured GNU behaviour;
 every dependent's tests and the thirteen differential harnesses of the programs
 built on it were rerun: four cases annotated as deliberate differences now agree
 with GNU and are ordinary cases again (`sed` one, `expr` two, `find` one).
+
+## `tac` was a "reverse line printer and character reverser for Slate OS"; it is GNU's now (lane B, 2026-10-02) — **FIXED** 2026-10-02
+
+**In short:** `userspace/tac` was hand-written: no `-b`, `-r` or `-s`, options
+of its own that no `tac` has, and its arguments read as `String`, so a file
+name that was not UTF-8 killed it before its first statement. It is replaced by
+`coreutils/src/bin/tac.rs`, a port of GNU coreutils 9.4's `tac.c` function by
+function, and the standalone crate is deleted (§1005: coreutils is the one
+home). `scripts/tac-diff.sh`: 98 cases, none differing from GNU's (two more,
+`--help` and `--version`, differ on purpose).
+
+**What the port had to reproduce, because it is observable:**
+
+- `-s ''` without `-r` separates on NUL (upstream compares the empty string's
+  terminator); with `-r` it is "separator cannot be empty".
+- `-r` reads glibc's Emacs syntax with the newline anchor, and searches
+  *backwards* within the part of the read buffer not yet printed -- so `^` and
+  `$` also hold where that window begins and ends. The port reads the file the
+  same way (8 KiB, doubling for long records, the size carried from file to
+  file) so those windows fall where GNU's do. `ere` gained the backward search
+  for it (`Search::rsearch`, glibc's `re_search` with a negative range).
+- Output goes through upstream's own 8 KiB buffer before standard output, so a
+  diagnostic about a later file comes out *before* earlier files' output, and
+  a full device fails an earlier write (a bare "write error").
+- Standard input that is a file is seeked to its end once per `-`, so
+  `tac - - <f` prints it twice; a pipe is copied to an unlinked temporary file
+  named as gnulib's `temp_stream` names it, in `$TMPDIR` only if that exists.
+
+**Found on the way, and fixed in the engine:** `.` and bracket expressions
+matched a byte that is not UTF-8, where glibc's never do --
+`B-ERE-DOT-TOOK-A-BYTE-GLIBC-LEAVES`.
+
+## TD-B-REGEX-TOOLS-IGNORE-LC-ALL-C -- `grep`, `sed`, `awk`, `expr`, `find`, `csplit`, `nl` and `ptx` read UTF-8 whatever the locale says (lane B, 2026-10-02) — open
+
+**In short:** GNU's regex tools read the input -- and the pattern -- a byte
+at a time when the locale is `C` (`LC_ALL=C grep ...`, the idiom scripts use
+for speed and for files that are not text), and as UTF-8 characters in a UTF-8
+locale. Ours always read UTF-8. Until 2026-10-02 that mostly did not show,
+because our `.` also matched a byte that is not UTF-8; since the engine took
+glibc's rule (`B-ERE-DOT-TOOK-A-BYTE-GLIBC-LEAVES`), `.*` stops at such a byte
+as GNU's does in a UTF-8 locale -- and `LC_ALL=C`, GNU's way past it, does
+nothing here. `expr "$path" : '.*/\(.*\)'` on a path that is not UTF-8 is the
+case a script meets.
+
+**What the fix is.** Each tool asks `coreutils::locale::ctype_is_utf8()` once
+and, when it is false, compiles with the engine's byte reading:
+`Regex::new_syntax_bytes` (pattern and subject a byte at a time), and for the
+translated dialects the byte variants their translators need (`emacs` has
+`compile_bytes`; `bre` and `awk` would need the same). `tac` already does
+this (`coreutils/src/bin/tac.rs`, `compile`), and its harness checks
+`LC_ALL=C` against GNU. Then each harness gains `LC_ALL=C` cases over the
+fixtures that are not UTF-8.
+
+**Waiting on D-Q7** (lane D's open question in `open-questions.md`: is the "C"
+locale one byte a character, as on Linux and as POSIX requires -- option B,
+Claude's recommendation -- or is SlateOS UTF-8 everywhere, so that `LC_ALL=C`
+changes nothing about text -- option A?). The answer decides this entry:
+
+| D-Q7 | This entry |
+|---|---|
+| B (as Linux) | do the fix above, tool by tool, with `LC_ALL=C` harness cases |
+| A (UTF-8 everywhere) | close it: `LC_ALL=C` means nothing anywhere, and `tac`'s switch (`compile` in `tac.rs`) comes out too |
+
+Until then the tools read UTF-8 as `osh` does by the operator's §104, and `tac`
+alone reads bytes under `LC_ALL=C` -- the reading B would give everything.

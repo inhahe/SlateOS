@@ -83964,6 +83964,72 @@ and with a function's parameter, copied into a variable or element
 **Revisit when** the reference changes: if this awk is ever held to POSIX
 alone, or to a different awk, option B becomes the better fit.
 
+## 1058. `file` carries file 5.45's database compiled, and libmagic is a library of its own
+
+**Date:** 2026-10-02
+**Lane:** B
+**Decided by:** Claude (autonomous)
+
+**In short:** `file` needs its database of 22,642 rules. Upstream installs
+it as a 8.5 MB compiled file (`magic.mgc`) and reads it in about 2 ms. Ours
+first carried the rules' *text* and parsed it at every start -- about 30 ms,
+fifteen times slower, which a script that runs `file` once per name pays
+every time. Now the build compiles the text exactly as `file -C` does, packs
+the compiled file's runs of zeros (8.5 MB becomes 0.8 MB), and the program
+carries that and reads it as upstream reads `magic.mgc`. To let the build do
+that compile, the library half of the port moved out of `file` into its own
+crate, `userspace/libmagic` -- which is also what lets any other program use
+file's identification without running `file`.
+
+| Option | For | Against |
+|---|---|---|
+| **A. Compile at build time, carry the packed `.mgc`** (chosen) | Starts as upstream does: map a compiled database, no parsing. The bytes are the ones `file -C` writes, which `scripts/file-diff.sh` holds equal to upstream's compiler, so the rules the program runs are exactly the rules upstream runs from `magic.mgc`. The binary shrank (2.5 MB to 1.7 MB): the packed database is half the text's size. A rule that does not compile fails the build. | A build script, and a crate split so it can call the library; the library is compiled twice in a build (for the host, for the build script). |
+| B. Carry the text, parse at start | One crate; nothing generated. | ~30 ms per run, against upstream's ~2. |
+| C. Install `magic.mgc` in the image | Exactly upstream's layout. | 8.5 MB in the image for one program, and a file that can go missing or go stale against the binary. Still supported: an installed database at the default path is read in preference, as upstream reads it. |
+
+**Where it bites.** `userspace/file/build.rs` (the compile),
+`libmagic::apprentice::{compile_packed, pack_mgc, unpack_mgc}`, and
+`apprentice_map`, which maps the carried database when nothing is installed
+at `/usr/share/misc/magic` (`Ms::builtin`). One visible consequence, and it
+is upstream's: `file -C` and `file -c` with no `-m` look for the *text* at the
+default path, as they do on an ordinary install, and say "could not find any
+valid magic files!"; `file -l` lists the carried database.
+
+**Revisit when** startup matters more than this: the remaining cost is
+decoding 22,642 records into structures, which a zero-copy view of the
+compiled bytes would remove.
+
+## 1059. `file -z` inflates with zlib's semantics, in a decoder of its own
+
+**Date:** 2026-10-02
+**Lane:** B
+**Decided by:** Claude (autonomous)
+
+**In short:** `file -z` describes what is inside a gzip or zlib stream, and
+for a damaged one it prints the error zlib gives, word for word --
+`ERROR:[zlib: invalid distance too far back]`. The system's decoder, the
+`deflate` crate, cannot give those answers: it folds a dozen of zlib's
+messages into one error, treats a truncated stream as an error where zlib
+hands back what it decoded, and stops at a full buffer where zlib reads on
+to the next block's header. So `libmagic` has its own small decoder
+(`src/zlib.rs`) written to answer as zlib's `inflate` answers. That is a
+second DEFLATE decoder in the tree, which the `deflate` crate's documentation
+argues against.
+
+| Option | For | Against |
+|---|---|---|
+| **A. A decoder with zlib's semantics in libmagic** (chosen) | `file -z`'s output is upstream's, damaged and truncated streams included: `scripts/file-diff.sh` reaches every message zlib gives on 2,000 crafted streams with no difference. Small (one file), safe Rust, no `unsafe`. | A second parser of untrusted compressed data to keep correct; the `deflate` crate's doc warns against exactly this. |
+| B. Use the `deflate` crate | One decoder. | Different words for errors, and different *answers* for truncated input -- `file -z` on a cut-off download would print an error where upstream describes the contents. |
+| C. Give the `deflate` crate zlib's error detail and partial-output behaviour | One decoder, exact. | Changes a crate the kernel and three other lanes use, for one caller's fidelity, and its table-driven decoder's structure differs from zlib's enough that "the point zlib raises it" would be a redesign, not a variant. |
+
+**Mitigations.** The decoder reads bit by bit with every access checked
+(`get`), and it is exercised by the harness's crafted streams in a debug
+build with overflow checks. It decodes only for identification -- never
+into anything kept.
+
+**Revisit when** the `deflate` crate grows a zlib-compatible mode for other
+reasons; then this should become a call to it.
+
 ## 834. Selection is a change of colour, not of weight
 
 **Date:** 2026-09-12

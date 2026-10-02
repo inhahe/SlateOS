@@ -37,11 +37,14 @@ set -u
 
 DIFF_PROG='file'
 DIFF_PKG='file'
-DIFF_NEED='python3 curl sha256sum make gcc unshare tar'
+DIFF_NEED='python3 curl sha256sum make gcc unshare setpriv tar'
 # The reference is built below, after the preamble: the preamble re-execs this
 # file inside WSL, and nothing may run before it.
 DIFF_NO_REF=1
 DIFF_NO_BINDIR=1
+# About twenty minutes against the debug build the preamble makes, near its
+# thirty-minute bound on a busy machine.
+DIFF_TIMEOUT=${DIFF_TIMEOUT:-3600}
 # shellcheck source=diff-wsl.sh
 . "$(dirname "$0")/diff-wsl.sh"
 
@@ -82,19 +85,30 @@ MGC=$ref_dir/magic/magic.mgc
 
 # Ours, with no installed database to find. `unshare -r` needs user
 # namespaces, which WSL has; a machine without a database there needs none.
+# The namespace makes ours root in it, able to read a mode-000 file the
+# reference cannot: so once the mount is made, every capability is dropped
+# before ours runs.
+#
+# Both are run as `file`, found on a PATH of their own, so that argv[0] -- which
+# getopt's complaints print -- is the same word on both sides.
+w=$DIFF_TMP
+mkdir -p "$w/bin-ref" "$w/bin-ours" &&
+  ln -s "$REF" "$w/bin-ref/file" && ln -s "$OURS" "$w/bin-ours/file" || exit 1
 if [ -e /usr/share/misc/magic ] || [ -e /usr/share/misc/magic.mgc ]; then
   if ! unshare -rm true 2>/dev/null; then
     echo "file-diff: /usr/share/misc holds a magic database and unshare -rm is refused" >&2
     exit 1
   fi
-  ours() { unshare -rm sh -c 'mount -t tmpfs none /usr/share/misc && exec "$0" "$@"' "$OURS" "$@"; }
+  ours() {
+    PATH="$w/bin-ours:$PATH" unshare -rm sh -c 'mount -t tmpfs none /usr/share/misc &&
+      exec setpriv --bounding-set -all --inh-caps -all file "$@"' sh "$@"
+  }
 else
-  ours() { "$OURS" "$@"; }
+  ours() { PATH="$w/bin-ours:$PATH" file "$@"; }
 fi
-ref() { "$REF" -m "$MGC" "$@"; }
+ref() { PATH="$w/bin-ref:$PATH" file -m "$MGC" "$@"; }
 
 pass=0; fail=0
-w=$DIFF_TMP
 
 # Both sides on every name in LIST, in each of the modes after it, as one
 # `-f LIST` run a side; each line that differs is a failure.
@@ -120,17 +134,18 @@ bulk() {
   done
 }
 
-# One case: the same arguments to both, stdout, stderr and status compared.
+# One case: the same arguments to both, stdout, stderr and status compared --
+# as bytes, since `-0` writes NULs.
 one() {
   local what=$1; shift
-  local r o
-  r=$(ref "$@" 2>&1; echo "rc=$?")
-  o=$(ours "$@" 2>&1; echo "rc=$?")
-  if [ "$r" = "$o" ]; then
+  { ref "$@"; echo "rc=$?"; } >"$w/one-ref" 2>&1
+  { ours "$@"; echo "rc=$?"; } >"$w/one-ours" 2>&1
+  if cmp -s "$w/one-ref" "$w/one-ours"; then
     pass=$((pass + 1))
   else
     fail=$((fail + 1))
-    printf 'FAIL %s\n  ref:  %s\n  ours: %s\n' "$what" "$r" "$o"
+    echo "FAIL $what"
+    diff <(cat -v "$w/one-ref") <(cat -v "$w/one-ours") | head -"$SHOW"
   fi
 }
 

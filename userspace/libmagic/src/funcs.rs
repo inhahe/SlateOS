@@ -114,6 +114,10 @@ pub struct Ms {
     /// follow no failure of their own), as the last thing that would have set
     /// it. `None` is 0.
     pub errno: Option<Errno>,
+    /// Not upstream's: a compiled database carried by the program, packed by
+    /// [`crate::apprentice::pack_mgc`] -- mapped in place of the default
+    /// path's `magic.mgc` when nothing is installed there.
+    pub builtin: Option<&'static [u8]>,
 }
 
 /// C's `errno`, as far as it is followed.
@@ -188,6 +192,7 @@ impl Ms {
             quiet: false,
             utf8: false,
             errno: None,
+            builtin: None,
         }
     }
 

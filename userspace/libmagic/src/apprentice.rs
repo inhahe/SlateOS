@@ -13,11 +13,12 @@
 //! # The built-in database
 //!
 //! Upstream reads its default database from a compiled `magic.mgc` installed
-//! next to it. This program carries that database's source instead
-//! ([`crate::magdir`], vendored from the release), and reads it where upstream
-//! would read the file: when the default path is asked for and nothing is
-//! installed there. It is parsed as upstream's build compiles it -- the
-//! checks on, the warnings printed then and not now.
+//! next to it, and maps it. A program may instead carry that database inside
+//! itself ([`Ms::builtin`]): `file` does, compiled at its build from file
+//! 5.45's own magic ([`compile_packed`]) -- the same bytes `file -C` writes,
+//! with their runs of zeros packed ([`pack_mgc`]). It is mapped where upstream
+//! would map the file: when the default path is asked for and nothing is
+//! installed there.
 
 use std::rc::Rc;
 
@@ -1834,41 +1835,31 @@ pub fn apprentice_load(ms: &mut Ms, fn_: &[u8], action: Action) -> Option<MagicM
         w.push(b'\n');
         let _written = std::io::stderr().write_all(&w);
     }
-    if is_builtin(fn_) {
-        // The database upstream compiles from the directory these came from.
-        for (name, text) in crate::magdir::FRAGMENTS {
-            let mut path = fn_.to_vec();
-            path.push(b'/');
-            path.extend_from_slice(name.as_bytes());
-            load_1(ms, action, &path, text, &mut errs, &mut mset);
-        }
-    } else {
-        match std::fs::metadata(os_path(fn_)) {
-            Ok(md) if md.is_dir() => {
-                let Ok(rd) = std::fs::read_dir(os_path(fn_)) else {
-                    return None;
-                };
-                let mut files: Vec<Vec<u8>> = Vec::new();
-                for d in rd.flatten() {
-                    let name = os_bytes(&d.file_name());
-                    if name.first() == Some(&b'.') {
-                        continue;
-                    }
-                    let mut mfn = fn_.to_vec();
-                    mfn.push(b'/');
-                    mfn.extend_from_slice(&name);
-                    match std::fs::metadata(os_path(&mfn)) {
-                        Ok(st) if st.is_file() => files.push(mfn),
-                        _ => {}
-                    }
+    match std::fs::metadata(os_path(fn_)) {
+        Ok(md) if md.is_dir() => {
+            let Ok(rd) = std::fs::read_dir(os_path(fn_)) else {
+                return None;
+            };
+            let mut files: Vec<Vec<u8>> = Vec::new();
+            for d in rd.flatten() {
+                let name = os_bytes(&d.file_name());
+                if name.first() == Some(&b'.') {
+                    continue;
                 }
-                files.sort();
-                for f in &files {
-                    load_one_file(ms, action, f, &mut errs, &mut mset);
+                let mut mfn = fn_.to_vec();
+                mfn.push(b'/');
+                mfn.extend_from_slice(&name);
+                match std::fs::metadata(os_path(&mfn)) {
+                    Ok(st) if st.is_file() => files.push(mfn),
+                    _ => {}
                 }
             }
-            _ => load_one_file(ms, action, fn_, &mut errs, &mut mset),
+            files.sort();
+            for f in &files {
+                load_one_file(ms, action, f, &mut errs, &mut mset);
+            }
         }
+        _ => load_one_file(ms, action, fn_, &mut errs, &mut mset),
     }
     if errs != 0 {
         return None;
@@ -1928,6 +1919,19 @@ fn apprentice_map(ms: &mut Ms, fn_: &[u8]) -> Option<MagicMap> {
     let data = match std::fs::read(os_path(&dbname)) {
         Ok(d) => d,
         Err(e) => {
+            // Nothing installed at the default path: the database built into
+            // the program is the compiled one upstream would map there, and
+            // mapping it leaves `errno` as it was.
+            if let Some(packed) = ms.builtin.filter(|_| is_builtin(fn_)) {
+                let Some(data) = unpack_mgc(packed) else {
+                    let mut msg = b"bad magic in `".to_vec();
+                    msg.extend_from_slice(&dbname);
+                    msg.push(b'\'');
+                    ms.error(None, &msg);
+                    return None;
+                };
+                return check_buffer(ms, &data, &dbname);
+            }
             ms.errno = Some(crate::funcs::Errno::of(&e));
             return None;
         }
@@ -2000,10 +2004,10 @@ fn check_buffer(ms: &mut Ms, data: &[u8], dbname: &[u8]) -> Option<MagicMap> {
     Some(map)
 }
 
-/// `apprentice_compile`: write `map` as `fn`'s compiled database, in the
-/// current directory.
-fn apprentice_compile(ms: &mut Ms, map: &MagicMap, fn_: &[u8]) -> i32 {
-    let dbname = mkdbname(ms, fn_, true);
+/// The bytes of a compiled database: a header record (the magic number, the
+/// version, the count of each set's rules) and every rule, 376 bytes each.
+#[must_use]
+pub fn mgc_bytes(map: &MagicMap) -> Vec<u8> {
     let mut out = vec![0u8; FILE_MAGICSIZE];
     out[0..4].copy_from_slice(&MAGICNO.to_le_bytes());
     out[4..8].copy_from_slice(&VERSIONNO.to_le_bytes());
@@ -2017,6 +2021,115 @@ fn apprentice_compile(ms: &mut Ms, map: &MagicMap, fn_: &[u8]) -> i32 {
             out.extend_from_slice(&m.to_bytes());
         }
     }
+    out
+}
+
+/// What [`pack_mgc`] begins with.
+const PACKED_MAGIC: &[u8; 8] = b"MGCZERO1";
+
+/// LEB128: seven bits a byte, low first, the top bit set on all but the last.
+fn put_leb(out: &mut Vec<u8>, mut v: usize) {
+    loop {
+        #[allow(clippy::cast_possible_truncation)]
+        let b = (v & 0x7f) as u8;
+        v >>= 7;
+        if v == 0 {
+            out.push(b);
+            return;
+        }
+        out.push(b | 0x80);
+    }
+}
+
+/// [`put_leb`] undone, from the front of `p`.
+fn take_leb(p: &mut &[u8]) -> Option<usize> {
+    let mut v = 0usize;
+    let mut shift = 0u32;
+    loop {
+        let (&b, tail) = p.split_first()?;
+        *p = tail;
+        if shift >= usize::BITS {
+            return None;
+        }
+        v |= usize::from(b & 0x7f).checked_shl(shift)?;
+        if b & 0x80 == 0 {
+            return Some(v);
+        }
+        shift += 7;
+    }
+}
+
+/// A compiled database with its runs of zeros packed -- most of a rule is
+/// unused space -- for a program to carry. After [`PACKED_MAGIC`] and the
+/// unpacked length (64 bits, little-endian): runs, each a LEB128 count of
+/// zeros, a LEB128 count of literal bytes, and those bytes.
+#[must_use]
+pub fn pack_mgc(data: &[u8]) -> Vec<u8> {
+    let mut out = PACKED_MAGIC.to_vec();
+    out.extend_from_slice(&(data.len() as u64).to_le_bytes());
+    let mut i = 0usize;
+    while i < data.len() {
+        let zeros = data.get(i..).unwrap_or_default().iter().take_while(|&&b| b == 0).count();
+        i += zeros;
+        // The literal bytes run to the next three zeros, which pack shorter
+        // than they are.
+        let start = i;
+        while i < data.len() && data.get(i..i + 3) != Some(&[0, 0, 0][..]) {
+            i += 1;
+        }
+        put_leb(&mut out, zeros);
+        put_leb(&mut out, i - start);
+        out.extend_from_slice(data.get(start..i).unwrap_or_default());
+    }
+    out
+}
+
+/// [`pack_mgc`] undone; `None` for bytes it did not write.
+#[must_use]
+pub fn unpack_mgc(packed: &[u8]) -> Option<Vec<u8>> {
+    let rest = packed.strip_prefix(PACKED_MAGIC.as_slice())?;
+    let len = usize::try_from(u64::from_le_bytes(rest.get(..8)?.try_into().ok()?)).ok()?;
+    let mut p = rest.get(8..)?;
+    let mut out = Vec::with_capacity(len);
+    while out.len() < len {
+        let zeros = take_leb(&mut p)?;
+        let lit = take_leb(&mut p)?;
+        if zeros > len - out.len() {
+            return None;
+        }
+        out.resize(out.len() + zeros, 0);
+        let bytes = p.get(..lit)?;
+        if bytes.len() > len - out.len() {
+            return None;
+        }
+        out.extend_from_slice(bytes);
+        p = p.get(lit..)?;
+    }
+    p.is_empty().then_some(out)
+}
+
+/// Compile the magic at `path` -- a file, or a directory of them read in
+/// `strcmp` order -- as `file -C -m path` does, and pack the result for a
+/// program to carry: a build script's work.
+///
+/// # Errors
+/// The message `file` would give when the magic does not compile.
+pub fn compile_packed(path: &[u8]) -> Result<Vec<u8>, Vec<u8>> {
+    let mut ms = Ms::new(0);
+    match apprentice_load(&mut ms, path, Action::Compile) {
+        Some(map) if !ms.had_err() => Ok(pack_mgc(&mgc_bytes(&map))),
+        _ => Err(ms
+            .o_buf
+            .as_deref()
+            .map_or(b"could not find any valid magic files!".to_vec(), |b| cstr(b).to_vec())),
+    }
+}
+
+/// `apprentice_compile`: write `map` as `fn`'s compiled database, in the
+/// current directory.
+fn apprentice_compile(ms: &mut Ms, map: &MagicMap, fn_: &[u8]) -> i32 {
+    let dbname = mkdbname(ms, fn_, true);
+    let out = mgc_bytes(map);
     if let Err(e) = std::fs::write(os_path(&dbname), &out) {
         let mut msg = b"cannot open `".to_vec();
         msg.extend_from_slice(&dbname);
@@ -2037,35 +2150,16 @@ fn apprentice_1(ms: &mut Ms, fn_: &[u8], action: Action) -> i32 {
         ms.quiet = quiet;
         return apprentice_compile(ms, &map, fn_);
     }
-    let errno = ms.errno;
     let map = match apprentice_map(ms, fn_) {
         Some(m) => m,
         None => {
-            let builtin = is_builtin(fn_);
-            // The built-in database stands for a compiled one, which upstream
-            // maps without this warning.
-            if ms.flags & MAGIC_CHECK != 0 && !builtin {
+            if ms.flags & MAGIC_CHECK != 0 {
                 let mut w = b"using regular magic file `".to_vec();
                 w.extend_from_slice(fn_);
                 w.push(b'\'');
                 ms.magwarn_bare(&w);
             }
-            // The built-in database is parsed as upstream's build compiled it:
-            // checked, quietly, and leaving no trace in the flags, the
-            // warnings' file name or `errno` -- mapping a compiled one, which
-            // is what it stands for, touches none of them.
-            let (flags, quiet, file) = (ms.flags, ms.quiet, ms.file.clone());
-            if builtin {
-                ms.quiet = true;
-            }
-            let loaded = apprentice_load(ms, fn_, action);
-            if builtin {
-                ms.flags = flags;
-                ms.quiet = quiet;
-                ms.file = file;
-                ms.errno = errno;
-            }
-            match loaded {
+            match apprentice_load(ms, fn_, action) {
                 Some(m) => m,
                 None => return -1,
             }

@@ -3,72 +3,50 @@
 //! included.
 //!
 //! This is `src/file.c`: the command line. Everything it reports comes from
-//! the library modules, each a port of the libmagic source file of the same
+//! libmagic's modules, each a port of the libmagic source file of the same
 //! name -- `apprentice` reads the magic database, `softmagic` runs its rules,
 //! `funcs::file_buffer` decides which tests run in which order, `encoding` and
 //! `ascmagic` describe text. They are ports function by function, measured
 //! against file 5.45 by `scripts/file-diff.sh`, and keep upstream's behaviour
 //! where it is odd, because what `file` prints is read by scripts.
 //!
-//! The database is file 5.45's own (`magic/`, vendored by
-//! `scripts/file-magic-vendor.py`), built into the program and read when no
-//! installed database is at the default path; see [`apprentice`].
+//! The library is `userspace/libmagic`. The database is file 5.45's own
+//! (`magic/`, vendored by `scripts/file-magic-vendor.py`), compiled by
+//! `build.rs` with that library exactly as `file -C` compiles it, and carried
+//! inside the program ([`database`]): mapped, as upstream maps its installed
+//! `magic.mgc`, when nothing is installed at the default path.
 //!
 //! Where this deliberately differs from upstream:
 //!
 //! | Upstream | Here | Why |
 //! |---|---|---|
-//! | the database is `magic.mgc`, installed | the same rules, built in | the image need not carry a 9 MB file for the one program that reads it |
+//! | the database is `magic.mgc`, installed | the same `magic.mgc`, built in, its zeros packed (8.5 MB to about 2) | the image need not carry a file only this program reads |
 //! | `-S` turns off the seccomp sandbox | accepted, and does nothing | SlateOS has no seccomp; there is no sandbox to turn off |
 
-// Lint policy is the workspace's (`[lints] workspace = true`), less two of its
-// defensive lints. The port keeps C's arithmetic and C's array accesses with
-// the bounds C checks: every index is checked in the function that makes it,
-// against a buffer's length or a fixed array's size (reviewed site by site,
-// 2026-10-02 -- the one that was not, `parse_extra`'s terminator, now writes
-// where upstream's does), and unsigned arithmetic that wraps in C wraps here
-// explicitly (`wrapping_*`). `scripts/file-diff.sh` holds both to upstream on
-// crafted ELF, CDF and compressed files and on random mutations; a debug
-// build, with overflow checks, ran those corpora -- 14,601 files in five
-// modes -- without a panic.
+// The workspace's lint policy, less two of its defensive lints, as for
+// libmagic: this is file.c's arithmetic and indexing -- counts of arguments
+// and errors, columns of a name, offsets into the option documentation's
+// fixed strings -- each bounded where it is made.
 #![allow(clippy::arithmetic_side_effects, clippy::indexing_slicing)]
 
-mod apprentice;
-mod ascmagic;
-mod buffer;
-mod cdf;
-mod cdf_time;
-mod compress;
-mod cstd;
-mod der;
-mod encoding;
-mod fmtcheck;
-mod fsmagic;
-mod funcs;
-mod is_csv;
-mod is_json;
-mod is_simh;
-mod is_tar;
-mod magdir;
-mod magic;
-mod magicapi;
-mod out;
-mod print;
-mod printf;
-mod readcdf;
-mod readelf;
-mod softmagic;
-mod zlib;
+mod database {
+    //! The database this program carries: file 5.45's magic (`magic/`),
+    //! compiled by the build script exactly as `file -C` compiles it, with its
+    //! runs of zeros packed. It is mapped in place of `magic.mgc` when nothing
+    //! is installed at the default path.
+    pub static BUILTIN: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/magic.mgc.packed"));
+}
 
 use std::ffi::OsString;
 use std::io::{BufRead, Write};
 
 use getoptlong::{Opt, Program, Takes};
 
-use crate::apprentice::{Action, os_bytes};
-use crate::funcs::{Ms, decode_utf8, iswprint};
-use crate::magic::*;
-use crate::magicapi::Param;
+use libmagic::apprentice::{self, Action, os_bytes};
+use libmagic::funcs::{self, Ms, decode_utf8, iswprint};
+use libmagic::magic::{self, *};
+use libmagic::magicapi::{self, Param};
+use libmagic::{cstd, out};
 
 /// The option string: upstream's `OPTSTRING`.
 const OPTSTRING: &str = "bcCde:Ef:F:hiklLm:nNpP:rsSvzZ0";
@@ -405,6 +383,7 @@ fn applyparam(cli: &Cli, ms: &mut Ms) {
 fn load(cli: &Cli, magicfile: Option<&[u8]>, flags: u32) -> Option<Ms> {
     let mut ms = magicapi::magic_open(flags);
     ms.utf8 = codeset_is_utf8();
+    ms.builtin = Some(database::BUILTIN);
     if magicapi::magic_load(&mut ms, magicfile) == -1 {
         let e = magicapi::magic_error(&ms).unwrap_or_default();
         file_warn(cli, &e, ms.errno);
@@ -632,10 +611,11 @@ fn main() {
     for item in prog.parse(args, OPTSTRING, LONG_OPTIONS).keep_going(true) {
         let (c, optarg): (u8, Option<Vec<u8>>) = match item {
             Err(err) => {
-                // glibc's getopt prints its complaint as it goes; `file`
-                // counts it and shows the usage at the end.
+                // glibc's getopt prints its complaint as it goes, named by
+                // `argv[0]` as given -- not the basename `file` names itself
+                // by -- and `file` counts it and shows the usage at the end.
                 out::flush();
-                let mut w = cli.progname.clone();
+                let mut w = arg0.clone();
                 w.extend_from_slice(b": ");
                 w.extend_from_slice(err.sentence.as_bytes());
                 w.push(b'\n');
@@ -762,6 +742,7 @@ fn main() {
             // Do not check or compile ~/.magic unless asked to.
             let mut ms = magicapi::magic_open(flags | MAGIC_CHECK);
             ms.utf8 = codeset_is_utf8();
+            ms.builtin = Some(database::BUILTIN);
             let c = match act {
                 Action::Check => magicapi::magic_check(&mut ms, magicfile.as_deref()),
                 Action::Compile => magicapi::magic_compile(&mut ms, magicfile.as_deref()),

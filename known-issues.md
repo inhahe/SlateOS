@@ -179281,7 +179281,50 @@ all). Neither has a workaround in lane B's code.
 (§1053's staging request). On the device, `/proc/<logind pid>/task` would
 list one thread per connected client plus the accepting thread.
 
-## B-FILE-IS-A-HAND-WRITTEN-APPROXIMATION-OF-LIBMAGIC — `file` names most formats in its own words, not file 5.45's (lane B, 2026-10-01) — **Status: OPEN (debt; the ISO media branch is done)**
+## B-FILE-IS-A-HAND-WRITTEN-APPROXIMATION-OF-LIBMAGIC — `file` names most formats in its own words, not file 5.45's (lane B, 2026-10-01) — **Status: FIXED 2026-10-02**
+
+**Fixed:** `file` is now file 5.45 and its libmagic, ported source file by
+source file. The library is its own crate, `userspace/libmagic` --
+`apprentice` (the database reader, checker and compiler), `softmagic` (the
+rule interpreter), `funcs`/`magic` (the order the tests run in, the library
+calls), `encoding`, `ascmagic`, `is_tar`/`is_json`/`is_csv`/`is_simh`,
+`fsmagic`, `der`, `print`, `readelf` (with `elfclass.h`), `cdf`/`readcdf`,
+`compress` -- and `userspace/file` is `file.c` on top of it. The database is
+file 5.45's own (`userspace/file/magic/`, vendored by
+`scripts/file-magic-vendor.py`), compiled at build time exactly as `file -C`
+compiles it and carried in the program, which maps it as upstream maps an
+installed `magic.mgc` (design-decisions §1058). `-i`, `--mime-type`,
+`--mime-encoding`, `--extension`, `--apple`, `-k`, `-z`/`-Z`, `-l`, `-C`,
+`-P`, `-e` and the rest are upstream's, and so are its quirks where they
+show in the output: `errno` printed after the fact (the CDF probe leaves
+`EFTYPE` behind and a later ELF message names it; parsing a number resets
+it), zlib's own messages for a damaged gzip stream (§1059), and the
+decompressors upstream runs as programs, run the same way.
+
+`scripts/file-diff.sh` builds file 5.45 from the release tarball and holds
+ours to it byte for byte: upstream's 71 test files in seven modes, a sample
+of the machine's own files, generated ELF files (every note, core file and
+limit readelf.c reads), Composite Document Files and compressed files,
+random mutations of all of them, standard input as a pipe and as a redirect,
+names that are not files, wrong options, and the compiled database itself.
+On 2026-10-02 it passed 42,266 cases. Getting there found two bugs of the
+port's own, both fixed: an `!:mime` value exactly 80 bytes long panicked
+where upstream writes its NUL into the next field, and getopt's complaints
+named the program by its basename where upstream prints `argv[0]` as given.
+A debug build, with overflow checks, ran 14,601 crafted and real files in
+five modes without a panic.
+
+Deliberately different, documented at the head of `userspace/file/src/main.rs`:
+`-v` names the built-in database, and `-S` is accepted though there is no
+sandbox.
+
+The ISO media branch's generator and harness
+(`scripts/file-isomedia-gen.py`, `scripts/file-isomedia-diff.sh`) are gone:
+that branch is the database's own `animation` rules now, run by the
+interpreter.
+
+**Original report.**
+
 
 **In short:** `file` tells you what kind of file something is. Ours checks a
 few dozen formats with rules written by hand, so for most of them it uses

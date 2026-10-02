@@ -1165,11 +1165,10 @@ name = "file"
 version = "0.1.0"
 dependencies = [
  "charwidth",
- "cprintf",
- "ere",
  "errmsg",
  "getoptlong",
- "localtime",
+ "libmagic",
+ "sysroot-dep",
 ]
 
 [[package]]
@@ -1936,6 +1935,17 @@ name = "libm"
 version = "0.2.16"
 dependencies = [
  "no-panic",
+]
+
+[[package]]
+name = "libmagic"
+version = "0.1.0"
+dependencies = [
+ "charwidth",
+ "cprintf",
+ "ere",
+ "errmsg",
+ "localtime",
 ]
 
 [[package]]

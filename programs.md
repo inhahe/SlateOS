@@ -84,7 +84,7 @@ two disagree.
 | `false` | Do nothing, unsuccessfully. | yes | `coreutils` |  |
 | `fdisk` | Partition table manipulator (GPT/MBR) |  |  |  |
 | `fetch` | HTTP fetch utility (wget/curl-like). | yes | `coreutils` |  |
-| `file` | File Type Identifier |  |  |  |
+| `file` | Determine the type of a file. |  |  |  |
 | `find` | Search for files in a directory hierarchy. | yes | `coreutils` |  |
 | `findfs` | Find a filesystem by label or UUID. |  |  |  |
 | `findmnt` | Find a filesystem. |  |  |  |

@@ -463,19 +463,6 @@ fn filter_error(ubuf: Vec<u8>) -> Vec<u8> {
     out
 }
 
-/// Whether `f` is standard input, which `sread` reads without looking first.
-fn is_stdin(f: &File) -> bool {
-    #[cfg(unix)]
-    {
-        use std::os::unix::io::AsRawFd;
-        f.as_raw_fd() == 0
-    }
-    #[cfg(not(unix))]
-    {
-        let _ = f;
-        false
-    }
-}
 
 #[cfg(unix)]
 mod sys {
@@ -524,37 +511,21 @@ mod sys {
 /// and given a tenth of a second for something to arrive -- and only that
 /// much is read.
 pub fn sread(f: &File, buf: &mut [u8], canbepipe: bool) -> std::io::Result<usize> {
-    let mut n = buf.len();
     #[cfg(unix)]
-    if canbepipe && !is_stdin(f) {
-        use std::os::unix::io::AsRawFd;
-        let fd = f.as_raw_fd();
-        let mut t = sys::fionread(fd).unwrap_or(-1);
-        if t <= 0 {
-            // Upstream's loop: an error tries again; a timeout gives up at
-            // once on the first round, and on any later one after five.
-            let mut cnt = 0;
-            loop {
-                let selrv = sys::wait_readable(fd);
-                if selrv == -1 {
-                    cnt += 1;
-                    continue;
-                }
-                if selrv == 0 && cnt >= 5 {
-                    return Ok(0);
-                }
-                break;
-            }
-            t = sys::fionread(fd).unwrap_or(t.max(0));
+    let n = if canbepipe {
+        match waiting(f, buf.len()) {
+            Some(n) => n,
+            None => return Ok(0),
         }
-        if let Ok(tu) = usize::try_from(t) {
-            if tu > 0 && tu < n {
-                n = tu;
-            }
-        }
-    }
+    } else {
+        buf.len()
+    };
+    // Elsewhere there is no `FIONREAD` to ask.
     #[cfg(not(unix))]
-    let _ = canbepipe;
+    let n = {
+        let _ = canbepipe;
+        buf.len()
+    };
     let mut got = 0usize;
     while got < n {
         match (&*f).read(&mut buf[got..n]) {
@@ -565,6 +536,42 @@ pub fn sread(f: &File, buf: &mut [u8], canbepipe: bool) -> std::io::Result<usize
         }
     }
     Ok(got)
+}
+
+/// The part of `sread` that looks first: how much of `n` to read from a
+/// descriptor that may be a pipe -- what `FIONREAD` says is waiting, when that
+/// is less, after a tenth of a second's wait if nothing is -- or `None` when
+/// the wait gives up. Standard input is read without looking.
+#[cfg(unix)]
+fn waiting(f: &File, n: usize) -> Option<usize> {
+    use std::os::unix::io::AsRawFd;
+    let fd = f.as_raw_fd();
+    if fd == 0 {
+        return Some(n);
+    }
+    // `t` starts at 0, and a failed `ioctl` leaves it there.
+    let mut t = sys::fionread(fd).unwrap_or(0);
+    if t == 0 {
+        // Upstream's loop: an error tries again; a timeout gives up at once
+        // on the first round, and on any later one after five.
+        let mut cnt = 0;
+        loop {
+            let selrv = sys::wait_readable(fd);
+            if selrv == -1 {
+                cnt += 1;
+                continue;
+            }
+            if selrv == 0 && cnt >= 5 {
+                return None;
+            }
+            break;
+        }
+        t = sys::fionread(fd).unwrap_or(t);
+    }
+    Some(match usize::try_from(t) {
+        Ok(tu) if tu > 0 && tu < n => tu,
+        _ => n,
+    })
 }
 
 /// `lseek(fd, 0, SEEK_SET)` failing with `ESPIPE`: a pipe, socket or FIFO,

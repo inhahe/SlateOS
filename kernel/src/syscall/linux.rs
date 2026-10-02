@@ -40364,7 +40364,7 @@ fn sys_accept(args: &SyscallArgs) -> SyscallResult {
 /// listening `EINVAL`, as on Linux; the listener's `O_NONBLOCK` makes an
 /// empty backlog `EAGAIN`.
 fn unix_accept(entry: &FdEntry, addr_ptr: u64, addrlen_ptr: u64, flags: u32) -> SyscallResult {
-    use crate::ipc::unix_socket::{self, Kind};
+    use crate::ipc::unix_socket;
     let h = unix_handle(entry);
     if unix_socket::kind(h).is_some_and(|k| !k.connects()) {
         return linux_err(errno::EOPNOTSUPP);

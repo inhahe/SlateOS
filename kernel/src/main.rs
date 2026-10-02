@@ -8390,6 +8390,13 @@ extern "C" fn kernel_main() -> ! {
                 selftest::Severity::Integrity,
                 sched::test_sleep_ns_postboot(),
             );
+            // A thread join with a time limit, for the same reason: the
+            // limit is an hrtimer (`proc::thread::self_test_join_timeout`).
+            selftest::dispatch_debug(
+                "thread join_timeout",
+                selftest::Severity::Diagnostic,
+                proc::thread::self_test_join_timeout(),
+            );
         }
         case();
     }

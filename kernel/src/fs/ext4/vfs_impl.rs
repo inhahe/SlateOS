@@ -2623,17 +2623,24 @@ fn test_dir_type_conversions() -> KernelResult<()> {
         crate::serial_println!("[ext4-vfs]   FAIL: SYMLINK type");
         return Err(KernelError::InternalError);
     }
-    // Types the VFS has no `EntryType` for fall back to File.  All three are
-    // checked because the fallback is a catch-all `_` arm: one of them passing
-    // does not show the others are not matched earlier by mistake, and
-    // UNKNOWN (0) in particular is the value a directory entry carries when
-    // the filesystem was built without the filetype feature.
+    // A socket's node is a socket since Unix-domain sockets got names
+    // (design-decisions §1519); this checked for the File fallback until
+    // 2026-10-02, the first boot that reached it after.
+    if dir_type_to_entry_type(dir_type::SOCK) != EntryType::Socket {
+        crate::serial_println!("[ext4-vfs]   FAIL: SOCK type");
+        return Err(KernelError::InternalError);
+    }
+    // Types the VFS has no `EntryType` for fall back to File.  More than one
+    // is checked because the fallback is a catch-all `_` arm: one of them
+    // passing does not show the others are not matched earlier by mistake,
+    // and UNKNOWN (0) in particular is the value a directory entry carries
+    // when the filesystem was built without the filetype feature.
     if dir_type_to_entry_type(dir_type::CHRDEV) != EntryType::File {
         crate::serial_println!("[ext4-vfs]   FAIL: CHRDEV fallback");
         return Err(KernelError::InternalError);
     }
-    if dir_type_to_entry_type(dir_type::SOCK) != EntryType::File {
-        crate::serial_println!("[ext4-vfs]   FAIL: SOCK fallback");
+    if dir_type_to_entry_type(dir_type::FIFO) != EntryType::File {
+        crate::serial_println!("[ext4-vfs]   FAIL: FIFO fallback");
         return Err(KernelError::InternalError);
     }
     if dir_type_to_entry_type(dir_type::UNKNOWN) != EntryType::File {
@@ -2652,6 +2659,10 @@ fn test_dir_type_conversions() -> KernelResult<()> {
     }
     if mode_to_entry_type(file_type::S_IFLNK) != EntryType::Symlink {
         crate::serial_println!("[ext4-vfs]   FAIL: mode LNK");
+        return Err(KernelError::InternalError);
+    }
+    if mode_to_entry_type(file_type::S_IFSOCK) != EntryType::Socket {
+        crate::serial_println!("[ext4-vfs]   FAIL: mode SOCK");
         return Err(KernelError::InternalError);
     }
     // Modes with no `EntryType` fall back to File — same catch-all reasoning

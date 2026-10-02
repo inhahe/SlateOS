@@ -101,6 +101,9 @@ const NABM_PCMO_CIV: u16 = 0x14;
 const NABM_PCMO_LVI: u16 = 0x15;
 /// PCM Out Status register.
 const NABM_PCMO_SR: u16 = 0x16;
+/// PCM Out Position In Current Buffer: 16-bit samples still to play in the
+/// entry `CIV` names.
+const NABM_PCMO_PICB: u16 = 0x18;
 /// PCM Out Control register.
 const NABM_PCMO_CR: u16 = 0x1B;
 
@@ -155,7 +158,10 @@ const BDL_SIZE: usize = 32;
 ///
 /// Layout:
 /// - `addr`: 32-bit physical address of audio data buffer
-/// - `samples_and_flags`: bits[15:0] = number of samples (16-bit, stereo = 4 bytes/sample)
+/// - `samples_and_flags`: bits[15:0] = number of **16-bit samples** -- one
+///   channel's sample, so a stereo frame is two and a 512-byte chunk is 256
+///   (the ICH AC'97 spec's "buffer length", and what QEMU's `ac97.c`
+///   transfers: `picb << 1` bytes)
 ///   bit[30] = BUP (buffer underrun policy: 0=last valid, 1=zero fill)
 ///   bit[31] = IOC (interrupt on completion)
 #[repr(C)]
@@ -546,7 +552,10 @@ pub fn play_test_tone(duration_ms: u32) -> KernelResult<()> {
     // Use the full frame for audio data (minus a small reservation).
     let pcm_buf_size = FRAME_SIZE; // 16384 bytes
     let chunk_size = pcm_buf_size / BDL_SIZE; // 512 bytes per chunk
-    let samples_per_chunk = chunk_size / 4; // 128 stereo samples (4 bytes each)
+    // The BDL length counts 16-bit samples, not stereo frames: 256 for a
+    // 512-byte chunk. (It said 128 until 2026-10-02, so each entry played
+    // half its chunk.)
+    let samples_per_chunk = chunk_size / 2;
 
     // Generate the waveform into the PCM buffer.
     generate_tone_buffer(pcm_virt, pcm_buf_size, dev.sample_rate);
@@ -645,6 +654,153 @@ fn stop_playback_inner(dev: &mut Ac97Device) {
         port::outw(dev.nabm_base.wrapping_add(NABM_PCMO_SR), SR_BCIS);
     }
     dev.playing = false;
+}
+
+// ---------------------------------------------------------------------------
+// Streaming output -- the audio pump's side (`audio_out`)
+// ---------------------------------------------------------------------------
+//
+// For streaming, the PCM Out channel cycles through all 32 descriptors over
+// the whole PCM frame, for as long as anything plays: every look at the
+// position also moves the last valid index to the entry before the current
+// one, so the engine never reaches the end of its list -- and if a late pump
+// lets it, the new LVI restarts it. No logging on these paths.
+
+/// Bytes each descriptor covers when streaming: the PCM frame split evenly.
+const STREAM_CHUNK: usize = FRAME_SIZE / BDL_SIZE;
+
+/// `SR`'s write-1-to-clear status bits: last-valid completion, buffer
+/// completion, FIFO error.
+const SR_CLEAR_ALL: u16 = 0x04 | SR_BCIS | 0x10;
+
+/// Whether this controller can carry the mixer's output: initialised, and
+/// running at the mixer's rate (a codec without variable-rate audio left at
+/// another rate would play everything at the wrong speed).
+#[must_use]
+pub fn output_ready() -> bool {
+    is_available()
+        && DEVICE
+            .lock()
+            .as_ref()
+            .is_some_and(|d| d.sample_rate == crate::audio_mixer::SAMPLE_RATE)
+}
+
+/// Start the PCM Out channel cycling over a buffer of silence. Returns the
+/// buffer's length in bytes, where the hardware is in it, and the claim to
+/// pass to [`stream_stop`].
+///
+/// # Errors
+///
+/// `NoSuchDevice` without a controller; `DeviceBusy` while a test tone plays.
+#[allow(clippy::cast_possible_truncation)] // offsets within one 16 KiB frame
+pub fn stream_start() -> KernelResult<(usize, usize, u64)> {
+    let mut guard = DEVICE.lock();
+    let dev = guard.as_mut().ok_or(KernelError::NoSuchDevice)?;
+    if dev.playing {
+        return Err(KernelError::DeviceBusy);
+    }
+    let pcm_phys = dev.pcm_frame.addr();
+    let pcm_virt = pcm_phys.saturating_add(dev.hhdm_offset) as *mut u8;
+    let bdl_virt = dev.bdl_frame.addr().saturating_add(dev.hhdm_offset) as *mut BdlEntry;
+    // SAFETY: both frames are the driver's own, allocated in `init` and mapped
+    // through the HHDM for the kernel's lifetime; the channel's run bit is
+    // clear, so the controller reads neither while they are rewritten. The
+    // BDL frame holds BDL_SIZE entries.
+    unsafe {
+        core::ptr::write_bytes(pcm_virt, 0, FRAME_SIZE);
+        for i in 0..BDL_SIZE {
+            bdl_virt.add(i).write_volatile(BdlEntry {
+                addr: (pcm_phys as u32).wrapping_add(i.wrapping_mul(STREAM_CHUNK) as u32),
+                samples_and_flags: (STREAM_CHUNK / 2) as u32,
+            });
+        }
+    }
+    let nabm = dev.nabm_base;
+    // SAFETY: `nabm` is the validated NABM I/O base; CIV is the PCM Out
+    // channel's current index register.
+    let civ = usize::from(unsafe { port::inb(nabm.wrapping_add(NABM_PCMO_CIV)) } & 0x1F);
+    // The last valid index one behind the current: the engine runs on round
+    // the list and never reaches its end (`position_of` keeps it so).
+    let lvi = civ.wrapping_add(BDL_SIZE - 1) % BDL_SIZE;
+    // SAFETY: as above; LVI, SR and CR are the same channel's last valid
+    // index, status and control registers.
+    unsafe {
+        port::outb(nabm.wrapping_add(NABM_PCMO_LVI), lvi as u8);
+        port::outw(nabm.wrapping_add(NABM_PCMO_SR), SR_CLEAR_ALL);
+        port::outb(nabm.wrapping_add(NABM_PCMO_CR), CR_RPBM);
+    }
+    dev.playing = true;
+    dev.play_gen = dev.play_gen.wrapping_add(1);
+    let claim = dev.play_gen;
+    let pos = position_of(nabm);
+    Ok((FRAME_SIZE, pos, claim))
+}
+
+/// Where the engine is in the PCM frame, in bytes, from its current index and
+/// the samples left in that entry -- and the last valid index moved to the
+/// entry before the current one.
+fn position_of(nabm: u16) -> usize {
+    // SAFETY: `nabm` is the validated NABM I/O base; CIV, PICB and LVI are the
+    // PCM Out channel's registers.
+    let (civ, picb) = unsafe {
+        (
+            usize::from(port::inb(nabm.wrapping_add(NABM_PCMO_CIV)) & 0x1F),
+            usize::from(port::inw(nabm.wrapping_add(NABM_PCMO_PICB))),
+        )
+    };
+    let lvi = civ.wrapping_add(BDL_SIZE - 1) % BDL_SIZE;
+    // SAFETY: as above.
+    #[allow(clippy::cast_possible_truncation)] // below BDL_SIZE (32)
+    unsafe {
+        port::outb(nabm.wrapping_add(NABM_PCMO_LVI), lvi as u8);
+    }
+    let into = STREAM_CHUNK.saturating_sub(picb.saturating_mul(2));
+    civ.saturating_mul(STREAM_CHUNK).saturating_add(into) % FRAME_SIZE
+}
+
+/// Where the hardware is in the PCM frame, in bytes.
+#[must_use]
+pub fn stream_position() -> Option<usize> {
+    let guard = DEVICE.lock();
+    let dev = guard.as_ref()?;
+    Some(position_of(dev.nabm_base))
+}
+
+/// Copy `data` into the PCM frame at byte `offset`.
+///
+/// # Errors
+///
+/// `NoSuchDevice`; `InvalidArgument` if `data` would run past the frame's end.
+pub fn stream_write(offset: usize, data: &[u8]) -> KernelResult<()> {
+    let guard = DEVICE.lock();
+    let dev = guard.as_ref().ok_or(KernelError::NoSuchDevice)?;
+    if offset.saturating_add(data.len()) > FRAME_SIZE {
+        return Err(KernelError::InvalidArgument);
+    }
+    let pcm_virt = dev.pcm_frame.addr().saturating_add(dev.hhdm_offset) as *mut u8;
+    // SAFETY: `[offset, offset + len)` lies inside the PCM frame (checked
+    // above), the driver's own and mapped for the kernel's lifetime; the
+    // controller only reads it.
+    unsafe {
+        core::ptr::copy_nonoverlapping(data.as_ptr(), pcm_virt.add(offset), data.len());
+    }
+    Ok(())
+}
+
+/// Stop the PCM Out channel -- only if `claim` (from [`stream_start`]) is
+/// still the playback running, so a stream ended meanwhile by [`stop`] and
+/// replaced by a test tone is left alone.
+///
+/// # Errors
+///
+/// `NoSuchDevice` without a controller.
+pub fn stream_stop(claim: u64) -> KernelResult<()> {
+    let mut guard = DEVICE.lock();
+    let dev = guard.as_mut().ok_or(KernelError::NoSuchDevice)?;
+    if dev.playing && dev.play_gen == claim {
+        stop_playback_inner(dev);
+    }
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------

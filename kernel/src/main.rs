@@ -72,6 +72,7 @@ mod audio_alsa_ctl;
 mod audio_history;
 mod audio_mixer;
 mod audio_notify;
+mod audio_out;
 mod backtrace;
 mod bench;
 mod blkdev;
@@ -9261,6 +9262,25 @@ extern "C" fn kernel_main() -> ! {
         "Audio History",
         selftest::Severity::Diagnostic,
         audio_history::self_test(),
+    );
+
+    // The audio output pump: the first usable sound card becomes the sink and a
+    // kernel task keeps it fed from the mixer. Started only now, after the
+    // drivers' own self-tests above, which reconfigure the cards and play
+    // through them directly. Then the end-to-end check: a ring of sound
+    // empties through the card.
+    audio_out::init();
+    selftest::dispatch(
+        "audio output",
+        selftest::Severity::Diagnostic,
+        audio_out::self_test(),
+    );
+    // The same card from a native program, through the device door
+    // (SYS_DEVICE_*): what the C library's open/ioctl/write will do.
+    selftest::dispatch(
+        "native device door",
+        selftest::Severity::Diagnostic,
+        proc::spawn::self_test_native_device_door(),
     );
 
     // Framebuffer graphics self-test.

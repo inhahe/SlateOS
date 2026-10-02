@@ -8981,7 +8981,8 @@ pub fn sys_unix_poll(args: &super::dispatch::SyscallArgs) -> super::dispatch::Sy
 /// `SYS_UNIX_SET_OPTION` (1117).
 pub fn sys_unix_set_option(args: &super::dispatch::SyscallArgs) -> super::dispatch::SyscallResult {
     use super::dispatch::SyscallResult;
-    use super::number::UNIX_OPT_PASSCRED;
+    use super::number::{UNIX_OPT_PASSCRED, UNIX_OPT_RCVTIMEO, UNIX_OPT_SNDTIMEO};
+    use crate::ipc::unix_socket::{self, Direction};
     let done = unix_held(args.arg0).and_then(|h| match args.arg1 {
         UNIX_OPT_PASSCRED => {
             // Strictly 0 or 1, unlike Linux's "any nonzero": a value with
@@ -8991,7 +8992,17 @@ pub fn sys_unix_set_option(args: &super::dispatch::SyscallArgs) -> super::dispat
                 1 => true,
                 _ => return Err(KernelError::InvalidArgument),
             };
-            crate::ipc::unix_socket::set_passcred(h, on)
+            unix_socket::set_passcred(h, on)
+        }
+        UNIX_OPT_RCVTIMEO | UNIX_OPT_SNDTIMEO => {
+            let dir = if args.arg1 == UNIX_OPT_RCVTIMEO {
+                Direction::Receive
+            } else {
+                Direction::Send
+            };
+            // Nanoseconds; 0 is no limit, as Linux's {0, 0}.
+            let limit = (args.arg2 != 0).then_some(args.arg2);
+            unix_socket::set_timeout(h, dir, limit)
         }
         _ => Err(KernelError::NotSupported),
     });
@@ -9004,14 +9015,165 @@ pub fn sys_unix_set_option(args: &super::dispatch::SyscallArgs) -> super::dispat
 /// `SYS_UNIX_GET_OPTION` (1118).
 pub fn sys_unix_get_option(args: &super::dispatch::SyscallArgs) -> super::dispatch::SyscallResult {
     use super::dispatch::SyscallResult;
-    use super::number::UNIX_OPT_PASSCRED;
+    use super::number::{UNIX_OPT_PASSCRED, UNIX_OPT_RCVTIMEO, UNIX_OPT_SNDTIMEO};
+    use crate::ipc::unix_socket::{self, Direction};
     let got = unix_held(args.arg0).and_then(|h| match args.arg1 {
-        UNIX_OPT_PASSCRED => Ok(i64::from(crate::ipc::unix_socket::passcred(h))),
+        UNIX_OPT_PASSCRED => Ok(i64::from(unix_socket::passcred(h))),
+        UNIX_OPT_RCVTIMEO | UNIX_OPT_SNDTIMEO => {
+            let dir = if args.arg1 == UNIX_OPT_RCVTIMEO {
+                Direction::Receive
+            } else {
+                Direction::Send
+            };
+            unix_socket::timeout(h, dir)
+                .map(|limit| i64::try_from(limit.unwrap_or(0)).unwrap_or(i64::MAX))
+        }
         _ => Err(KernelError::NotSupported),
     });
     match got {
         Ok(v) => SyscallResult::ok(v),
         Err(e) => SyscallResult::err(e),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// The device door (SYS_DEVICE_*, 1119-1123)
+//
+// The Linux device ABI, reached natively; see the block in `number.rs`. The
+// answers are Linux errnos, from the same handlers a Linux `ioctl`, `read` and
+// `write` reach.
+// ---------------------------------------------------------------------------
+
+/// A device the caller may drive through the door.
+enum DoorDevice {
+    /// A PCM substream the caller holds.
+    Pcm(crate::ipc::alsa_pcm::AlsaPcmHandle),
+    /// The card's control device.
+    Control,
+}
+
+/// The device a `(kind, handle)` pair names, if the caller may use it:
+/// `EBADF` otherwise -- a PCM handle it does not hold, an unknown kind, a
+/// control handle other than [`DEVICE_CONTROL_HANDLE`].
+///
+/// [`DEVICE_CONTROL_HANDLE`]: super::number::DEVICE_CONTROL_HANDLE
+fn door_device(kind: u64, handle: u64) -> Result<DoorDevice, super::dispatch::SyscallResult> {
+    use super::linux::{errno, linux_err};
+    use super::number::{DEVICE_CONTROL_HANDLE, DEVICE_KIND_CONTROL, DEVICE_KIND_PCM};
+    match kind {
+        DEVICE_KIND_PCM => {
+            require_ipc_handle(ResourceType::AlsaPcm, handle)
+                .map_err(|_| linux_err(errno::EBADF))?;
+            Ok(DoorDevice::Pcm(
+                crate::ipc::alsa_pcm::AlsaPcmHandle::from_raw(handle),
+            ))
+        }
+        DEVICE_KIND_CONTROL if handle == DEVICE_CONTROL_HANDLE => Ok(DoorDevice::Control),
+        _ => Err(linux_err(errno::EBADF)),
+    }
+}
+
+/// `SYS_DEVICE_OPEN` (1119).
+pub fn sys_device_open(args: &super::dispatch::SyscallArgs) -> super::dispatch::SyscallResult {
+    use super::dispatch::SyscallResult;
+    use super::linux::{errno, linux_err};
+    use super::number::{DEVICE_CONTROL_HANDLE, DEVICE_KIND_CONTROL, DEVICE_KIND_PCM};
+    /// Linux's `PATH_MAX`.
+    const PATH_MAX: usize = 4096;
+    let len = usize::try_from(args.arg1).unwrap_or(usize::MAX);
+    if len == 0 {
+        return linux_err(errno::ENOENT);
+    }
+    if len > PATH_MAX {
+        return linux_err(errno::ENAMETOOLONG);
+    }
+    let path = match crate::mm::user::read_user_vec(args.arg0, len, len) {
+        Ok(p) => p,
+        Err(_) => return linux_err(errno::EFAULT),
+    };
+    let Some(pid) = caller_pid() else {
+        return linux_err(errno::EBADF);
+    };
+    let capture = match path.as_slice() {
+        b"/dev/snd/pcmC0D0p" => false,
+        b"/dev/snd/pcmC0D0c" => true,
+        b"/dev/snd/controlC0" => {
+            if !crate::audio_out::has_sink() {
+                return linux_err(errno::ENODEV);
+            }
+            return SyscallResult::ok2(
+                i64::try_from(DEVICE_CONTROL_HANDLE).unwrap_or(i64::MAX),
+                i64::try_from(DEVICE_KIND_CONTROL).unwrap_or(i64::MAX),
+            );
+        }
+        _ => return linux_err(errno::ENOENT),
+    };
+    // No card to play through: as the Linux open of the node answers.
+    if !crate::audio_out::has_sink() {
+        return linux_err(errno::ENODEV);
+    }
+    let h = crate::ipc::alsa_pcm::create(capture);
+    pcb::register_ipc_handle(pid, ResourceType::AlsaPcm, h.raw());
+    SyscallResult::ok2(
+        i64::try_from(h.raw()).unwrap_or(i64::MAX),
+        i64::try_from(DEVICE_KIND_PCM).unwrap_or(i64::MAX),
+    )
+}
+
+/// `SYS_DEVICE_IOCTL` (1120).
+pub fn sys_device_ioctl(args: &super::dispatch::SyscallArgs) -> super::dispatch::SyscallResult {
+    use super::number::DEVICE_NONBLOCK;
+    // Linux's `ioctl` reads its command as an `unsigned int`.
+    #[allow(clippy::cast_possible_truncation)]
+    let request = args.arg2 as u32;
+    let nonblocking = args.arg4 & DEVICE_NONBLOCK != 0;
+    match door_device(args.arg0, args.arg1) {
+        Ok(DoorDevice::Pcm(h)) => {
+            super::linux::alsa_pcm_ioctl_on(h, nonblocking, request, args.arg3)
+        }
+        Ok(DoorDevice::Control) => super::linux::alsa_control_ioctl_on(request, args.arg3),
+        Err(r) => r,
+    }
+}
+
+/// `SYS_DEVICE_READ` (1121).
+pub fn sys_device_read(args: &super::dispatch::SyscallArgs) -> super::dispatch::SyscallResult {
+    use super::linux::{errno, linux_err};
+    match door_device(args.arg0, args.arg1) {
+        Ok(DoorDevice::Pcm(h)) => super::linux::alsa_pcm_read_bytes(h, args.arg2, args.arg3),
+        // The control device is ioctl-only, as its Linux `read` answers.
+        Ok(DoorDevice::Control) => linux_err(errno::EINVAL),
+        Err(r) => r,
+    }
+}
+
+/// `SYS_DEVICE_WRITE` (1122).
+pub fn sys_device_write(args: &super::dispatch::SyscallArgs) -> super::dispatch::SyscallResult {
+    use super::linux::{errno, linux_err};
+    use super::number::DEVICE_NONBLOCK;
+    let nonblocking = args.arg4 & DEVICE_NONBLOCK != 0;
+    match door_device(args.arg0, args.arg1) {
+        Ok(DoorDevice::Pcm(h)) => {
+            super::linux::alsa_pcm_write_bytes(h, nonblocking, args.arg2, args.arg3)
+        }
+        Ok(DoorDevice::Control) => linux_err(errno::EINVAL),
+        Err(r) => r,
+    }
+}
+
+/// `SYS_DEVICE_CLOSE` (1123).
+pub fn sys_device_close(args: &super::dispatch::SyscallArgs) -> super::dispatch::SyscallResult {
+    use super::dispatch::SyscallResult;
+    match door_device(args.arg0, args.arg1) {
+        Ok(DoorDevice::Pcm(h)) => {
+            if let Some(pid) = caller_pid() {
+                pcb::deregister_ipc_handle(pid, ResourceType::AlsaPcm, h.raw());
+            }
+            crate::ipc::alsa_pcm::close(h);
+            SyscallResult::ok(0)
+        }
+        Ok(DoorDevice::Control) => SyscallResult::ok(0),
+        Err(r) => r,
     }
 }
 

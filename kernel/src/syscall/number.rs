@@ -6359,6 +6359,64 @@ pub const SYS_UNIX_GET_OPTION: u64 = 1118;
 /// is the socket's rather than the library's so that every holder of the
 /// socket (after `fork` or `exec`) sees the same one, as on Linux.
 pub const UNIX_OPT_PASSCRED: u64 = 1;
+/// Option: how long a blocking receive or accept waits before `WouldBlock`
+/// (Linux's `SO_RCVTIMEO`), in nanoseconds; 0 for as long as it takes, as
+/// Linux's `{0, 0}`. An accepted connection starts with its listener's. A
+/// signal ends a wait that has a limit with `Interrupted`, which the library
+/// reports as `EINTR`, not a restart (Linux's `sock_intr_errno`).
+pub const UNIX_OPT_RCVTIMEO: u64 = 2;
+/// Option: the same for a blocking send or connect (Linux's `SO_SNDTIMEO`).
+pub const UNIX_OPT_SNDTIMEO: u64 = 3;
+
+// ---------------------------------------------------------------------------
+// The device door (1119-1123)
+//
+// The Linux device ABI, reached natively: a native program opens a device
+// node through the door and drives it with exactly the requests and argument
+// layouts a Linux program's `ioctl`/`read`/`write` carry -- the kernel's own
+// Linux handlers answer both, so the C library passes them straight through
+// (`requests/e-ad-no-application-can-reach-the-sound-device.md`). Today's
+// devices are the sound card's: the PCM substreams (`/dev/snd/pcmC0D0p`
+// playback, `/dev/snd/pcmC0D0c` capture) and the control device
+// (`/dev/snd/controlC0`).
+//
+// **Every call in the family answers as the device's ABI does: a value >= 0,
+// or a negated Linux errno** -- not a kernel error code -- which the C library
+// hands to `errno` unchanged. An interrupted wait answers the restart sentinel,
+// as every slow native call does.
+//
+// A PCM handle is held by the process that opened it (its `ipc_handles`, type
+// `AlsaPcm`, 22): closed when it exits, one more holder when it forks, and
+// waitable with `SYS_WAIT_MULTIPLE` (kind 22) -- writable while its ring has
+// room, readable for capture. The control device keeps nothing per open: its
+// handle is always [`DEVICE_CONTROL_HANDLE`].
+// ---------------------------------------------------------------------------
+
+/// Call flag: the descriptor is non-blocking (`O_NONBLOCK`): a write or a
+/// `DRAIN` that would wait answers `EAGAIN` instead.
+pub const DEVICE_NONBLOCK: u64 = 1 << 0;
+/// Device kind: an ALSA PCM substream.
+pub const DEVICE_KIND_PCM: u64 = 1;
+/// Device kind: the ALSA control device.
+pub const DEVICE_KIND_CONTROL: u64 = 2;
+/// The control device's handle: it holds nothing per open.
+pub const DEVICE_CONTROL_HANDLE: u64 = 1;
+
+/// `SYS_DEVICE_OPEN(path_ptr, path_len)` -- open a device node by its path;
+/// returns the handle, and its kind as the second value. `ENOENT` for a path
+/// the door does not serve, `ENODEV` when the device is absent (no sound card).
+pub const SYS_DEVICE_OPEN: u64 = 1119;
+/// `SYS_DEVICE_IOCTL(kind, handle, request, arg, flags)` -- one request, as a
+/// Linux `ioctl(fd, request, arg)` on the node (`request` is the low 32 bits,
+/// as Linux reads it). `ENOTTY` for a request the device does not know.
+pub const SYS_DEVICE_IOCTL: u64 = 1120;
+/// `SYS_DEVICE_READ(kind, handle, buf, len, flags)` -- as `read(2)` on the node.
+pub const SYS_DEVICE_READ: u64 = 1121;
+/// `SYS_DEVICE_WRITE(kind, handle, buf, len, flags)` -- as `write(2)` on the
+/// node: a blocking PCM write waits until all of it is queued.
+pub const SYS_DEVICE_WRITE: u64 = 1122;
+/// `SYS_DEVICE_CLOSE(kind, handle)` -- let go of the handle.
+pub const SYS_DEVICE_CLOSE: u64 = 1123;
 
 /// Bytes [`SYS_UNIX_NAME`] writes: kind, length, 108 bytes of name.
 pub const UNIX_ADDR_LEN: usize = 116;

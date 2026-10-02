@@ -1116,6 +1116,16 @@ mod so {
     /// `SO_PEERCRED` — the connected peer's `struct ucred` (pid, uid, gid:
     /// 12 bytes).
     pub const SO_PEERCRED: i32 = 17;
+    /// `SO_RCVTIMEO` — how long a blocking receive waits (`struct timeval`,
+    /// 16 bytes on x86-64). `SO_RCVTIMEO_NEW` (66) is the same struct here.
+    pub const SO_RCVTIMEO: i32 = 20;
+    /// `SO_SNDTIMEO` — how long a blocking send waits; as `SO_RCVTIMEO`.
+    pub const SO_SNDTIMEO: i32 = 21;
+    /// `SO_RCVTIMEO_NEW` — `SO_RCVTIMEO` with a `__kernel_sock_timeval`,
+    /// which on x86-64 has `SO_RCVTIMEO`'s layout.
+    pub const SO_RCVTIMEO_NEW: i32 = 66;
+    /// `SO_SNDTIMEO_NEW` — likewise for `SO_SNDTIMEO`.
+    pub const SO_SNDTIMEO_NEW: i32 = 67;
     /// `SO_ACCEPTCONN` — whether the socket is listening (an `int`).
     pub const SO_ACCEPTCONN: i32 = 30;
     /// `SO_PROTOCOL` — the protocol the socket was made with (an `int`).
@@ -5839,6 +5849,12 @@ fn try_open_alsa_pcm(path: &[u8], flags: u32) -> Option<SyscallResult> {
         None => return Some(linux_err(errno::EBADF)),
     };
 
+    // No sound card to play through: ENODEV, so a program can say "no sound
+    // device" rather than seem to play into nothing (audio_out::has_sink).
+    if !crate::audio_out::has_sink() {
+        return Some(linux_err(errno::ENODEV));
+    }
+
     // Create the per-open substream instance and register it as a per-process
     // IPC resource so exit-cleanup and fork-sharing see it.
     let handle = crate::ipc::alsa_pcm::create(capture);
@@ -5891,6 +5907,11 @@ fn try_open_alsa_control(path: &[u8], flags: u32) -> Option<SyscallResult> {
         Some(p) => p,
         None => return Some(linux_err(errno::EBADF)),
     };
+
+    // No sound card: no card to describe either (as the PCM nodes answer).
+    if !crate::audio_out::has_sink() {
+        return Some(linux_err(errno::ENODEV));
+    }
 
     let status_flags = flags & oflags::O_NONBLOCK;
     let fd_flags = if flags & oflags::O_CLOEXEC != 0 {
@@ -9804,43 +9825,95 @@ fn sys_ioctl(args: &SyscallArgs) -> SyscallResult {
     }
 }
 
-/// `write(2)` routing for an ALSA PCM playback substream.
-///
-/// Treats the user buffer as native-format interleaved PCM (S16_LE stereo at
-/// 48 kHz, 4 bytes/frame) and hands it to the mixer via
-/// [`crate::ipc::alsa_pcm::write_frames`].  The transfer is bounded to the
-/// mixer ring's capacity so a single `write` never allocates an unbounded
-/// kernel buffer; userspace loops (or `poll(POLLOUT)`s) for the remainder.
-/// Returns the number of bytes accepted.
-#[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
+/// `write(2)` routing for an ALSA PCM playback substream: the user buffer as
+/// native-format interleaved PCM (S16_LE stereo at 48 kHz, 4 bytes/frame),
+/// queued by [`alsa_pcm_write_bytes`]. Returns the bytes accepted.
 fn dispatch_alsa_pcm_write(entry: FdEntry, buf: u64, len: u64) -> SyscallResult {
-    let h = crate::ipc::alsa_pcm::AlsaPcmHandle::from_raw(entry.raw_handle);
+    alsa_pcm_write_bytes(
+        crate::ipc::alsa_pcm::AlsaPcmHandle::from_raw(entry.raw_handle),
+        entry.status_flags & oflags::O_NONBLOCK != 0,
+        buf,
+        len,
+    )
+}
 
-    // Cap the copy to the mixer ring capacity and align down to whole frames:
-    // the write path is frame-granular, and the mixer accepts at most a ring's
-    // worth before reporting "full".
+/// Queue `len` bytes of playback frames from the user buffer at `buf` on `h`,
+/// whole frames only (a sub-frame tail is left):
+///
+/// - `nonblocking`: as much as the mixer ring takes now -- at most a ring's
+///   worth -- and `EAGAIN` when it takes none;
+/// - otherwise: all of it, a ring's worth at a time, waiting for the audio
+///   pump to make room between, as ALSA's `snd_pcm_lib_write` does; a signal
+///   ends the wait with the count queued so far, or the restart sentinel
+///   when nothing was.
+///
+/// The kernel buffer is one ring's worth however long the write, so a large
+/// write never allocates an unbounded kernel buffer. Shared by `write(2)`,
+/// `WRITEI_FRAMES` and the native device door.
+#[allow(
+    clippy::cast_possible_truncation,
+    clippy::cast_possible_wrap,
+    clippy::arithmetic_side_effects
+)]
+pub(crate) fn alsa_pcm_write_bytes(
+    h: crate::ipc::alsa_pcm::AlsaPcmHandle,
+    nonblocking: bool,
+    buf: u64,
+    len: u64,
+) -> SyscallResult {
+    use crate::error::KernelError;
+    /// One mixer ring: the most one step copies in.
     const RING_CAP: usize = 16384;
-    let want = (len.min(RING_CAP as u64) as usize) & !0b11usize;
-    if want == 0 {
+    let total = usize::try_from(len)
+        .unwrap_or(usize::MAX)
+        .min(isize::MAX.unsigned_abs())
+        & !0b11usize;
+    if total == 0 {
         // A sub-frame write transfers nothing but is not an error.
         return SyscallResult::ok(0);
     }
-
-    if crate::mm::user::validate_user_read(buf, want).is_err() {
+    let mut done = 0usize;
+    while done < total {
+        let step = (total - done).min(RING_CAP);
+        let src = buf.wrapping_add(done as u64);
+        if crate::mm::user::validate_user_read(src, step).is_err() {
+            break;
+        }
+        let mut kbuf = alloc::vec![0u8; step];
+        // SAFETY: `kbuf` is a freshly-allocated kernel buffer of exactly
+        // `step` bytes; `copy_from_user` re-validates the user range and
+        // handles SMAP.
+        if unsafe { crate::mm::user::copy_from_user(src, kbuf.as_mut_ptr(), step) }.is_err() {
+            break;
+        }
+        let queued = if nonblocking {
+            crate::ipc::alsa_pcm::write_frames(h, &kbuf)
+        } else {
+            crate::ipc::alsa_pcm::write_frames_blocking(h, &kbuf)
+        };
+        match queued {
+            Ok(n) => {
+                done += n;
+                if n < step || nonblocking {
+                    break;
+                }
+            }
+            Err(e) if done == 0 => {
+                return match e {
+                    KernelError::WouldBlock => linux_err(errno::EAGAIN),
+                    KernelError::Interrupted => restart::restart_result(restart::ERESTARTSYS),
+                    KernelError::InvalidHandle => linux_err(errno::EBADF),
+                    _ => linux_err(errno::EINVAL),
+                };
+            }
+            Err(_) => break,
+        }
+    }
+    if done == 0 {
+        // The first step's user range was unreadable.
         return linux_err(errno::EFAULT);
     }
-    let mut kbuf = alloc::vec![0u8; want];
-    // SAFETY: `kbuf` is a freshly-allocated kernel buffer of exactly `want`
-    // bytes; `copy_from_user` re-validates the user range and handles SMAP.
-    if unsafe { crate::mm::user::copy_from_user(buf, kbuf.as_mut_ptr(), want) }.is_err() {
-        return linux_err(errno::EFAULT);
-    }
-
-    match crate::ipc::alsa_pcm::write_frames(h, &kbuf) {
-        Ok(written) => SyscallResult::ok(written as i64),
-        Err(crate::error::KernelError::WouldBlock) => linux_err(errno::EAGAIN),
-        Err(_) => linux_err(errno::EINVAL),
-    }
+    SyscallResult::ok(done as i64)
 }
 
 /// `read(2)` routing for an ALSA PCM substream.
@@ -9849,9 +9922,22 @@ fn dispatch_alsa_pcm_write(entry: FdEntry, buf: u64, len: u64) -> SyscallResult 
 /// substreams hand back silence: the mixer is output-only, so there is no real
 /// capture source, but returning zeroed frames keeps capture clients (level
 /// meters, loopback probes) running instead of erroring.
-#[allow(clippy::cast_possible_wrap)]
 fn dispatch_alsa_pcm_read(entry: FdEntry, buf: u64, cap: u64) -> SyscallResult {
-    let h = crate::ipc::alsa_pcm::AlsaPcmHandle::from_raw(entry.raw_handle);
+    alsa_pcm_read_bytes(
+        crate::ipc::alsa_pcm::AlsaPcmHandle::from_raw(entry.raw_handle),
+        buf,
+        cap,
+    )
+}
+
+/// [`dispatch_alsa_pcm_read`]'s body, on a substream handle: shared with the
+/// native device door.
+#[allow(clippy::cast_possible_wrap)]
+pub(crate) fn alsa_pcm_read_bytes(
+    h: crate::ipc::alsa_pcm::AlsaPcmHandle,
+    buf: u64,
+    cap: u64,
+) -> SyscallResult {
     if !crate::ipc::alsa_pcm::readable(h) {
         // Playback fd, or a stale instance — neither delivers read data.
         return linux_err(errno::EINVAL);
@@ -9886,10 +9972,31 @@ fn dispatch_alsa_pcm_read(entry: FdEntry, buf: u64, cap: u64) -> SyscallResult {
     clippy::too_many_lines
 )]
 fn alsa_pcm_ioctl(entry: &FdEntry, request: u32, argp: u64) -> SyscallResult {
+    alsa_pcm_ioctl_on(
+        crate::ipc::alsa_pcm::AlsaPcmHandle::from_raw(entry.raw_handle),
+        entry.status_flags & oflags::O_NONBLOCK != 0,
+        request,
+        argp,
+    )
+}
+
+/// One `SNDRV_PCM_IOCTL_*` request on the substream `h`, whose descriptor is
+/// `nonblocking` or not (it decides whether `WRITEI_FRAMES` and `DRAIN`
+/// wait). Shared by the Linux `ioctl` and the native device door
+/// (`SYS_DEVICE_IOCTL`); the answer is a Linux errno either way.
+#[allow(
+    clippy::cast_possible_truncation,
+    clippy::cast_possible_wrap,
+    clippy::too_many_lines
+)]
+pub(crate) fn alsa_pcm_ioctl_on(
+    h: crate::ipc::alsa_pcm::AlsaPcmHandle,
+    nonblocking: bool,
+    request: u32,
+    argp: u64,
+) -> SyscallResult {
     use crate::audio_alsa as alsa;
     use crate::error::KernelError;
-
-    let h = crate::ipc::alsa_pcm::AlsaPcmHandle::from_raw(entry.raw_handle);
 
     // Translate a state-machine Result into an ioctl return (0 on success).
     let map = |r: crate::error::KernelResult<()>| -> SyscallResult {
@@ -9897,6 +10004,7 @@ fn alsa_pcm_ioctl(entry: &FdEntry, request: u32, argp: u64) -> SyscallResult {
             Ok(()) => SyscallResult::ok(0),
             Err(KernelError::InvalidHandle) => linux_err(errno::EBADF),
             Err(KernelError::WouldBlock) => linux_err(errno::EAGAIN),
+            Err(KernelError::Interrupted) => restart::restart_result(restart::ERESTARTSYS),
             Err(_) => linux_err(errno::EINVAL),
         }
     };
@@ -9918,7 +10026,7 @@ fn alsa_pcm_ioctl(entry: &FdEntry, request: u32, argp: u64) -> SyscallResult {
             }
             SyscallResult::ok(0)
         }
-        alsa::SNDRV_PCM_IOCTL_INFO => alsa_pcm_ioctl_info(entry, argp),
+        alsa::SNDRV_PCM_IOCTL_INFO => alsa_pcm_ioctl_info(h, argp),
         alsa::SNDRV_PCM_IOCTL_HW_REFINE => {
             // Probe: collapse the supplied config space onto native and echo
             // it back without committing any state.
@@ -9985,21 +10093,21 @@ fn alsa_pcm_ioctl(entry: &FdEntry, request: u32, argp: u64) -> SyscallResult {
         alsa::SNDRV_PCM_IOCTL_PREPARE => map(crate::ipc::alsa_pcm::prepare(h)),
         alsa::SNDRV_PCM_IOCTL_START => map(crate::ipc::alsa_pcm::start(h)),
         alsa::SNDRV_PCM_IOCTL_DROP => map(crate::ipc::alsa_pcm::drop_stream(h)),
-        alsa::SNDRV_PCM_IOCTL_DRAIN => map(crate::ipc::alsa_pcm::drain(h)),
+        alsa::SNDRV_PCM_IOCTL_DRAIN => map(crate::ipc::alsa_pcm::drain(h, nonblocking)),
         alsa::SNDRV_PCM_IOCTL_RESET => map(crate::ipc::alsa_pcm::reset(h)),
         alsa::SNDRV_PCM_IOCTL_PAUSE => {
             // The pause flag is passed by value in the third ioctl arg (an
             // `int`: non-zero = pause, zero = resume), not via a pointer.
             map(crate::ipc::alsa_pcm::pause(h, argp != 0))
         }
-        alsa::SNDRV_PCM_IOCTL_WRITEI_FRAMES => alsa_pcm_ioctl_writei(entry, argp),
-        alsa::SNDRV_PCM_IOCTL_READI_FRAMES => alsa_pcm_ioctl_readi(entry, argp),
-        alsa::SNDRV_PCM_IOCTL_SYNC_PTR => alsa_pcm_ioctl_sync_ptr(entry, argp),
+        alsa::SNDRV_PCM_IOCTL_WRITEI_FRAMES => alsa_pcm_ioctl_writei(h, nonblocking, argp),
+        alsa::SNDRV_PCM_IOCTL_READI_FRAMES => alsa_pcm_ioctl_readi(h, argp),
+        alsa::SNDRV_PCM_IOCTL_SYNC_PTR => alsa_pcm_ioctl_sync_ptr(h, argp),
         // STATUS (_IOR) and STATUS_EXT (_IOWR) both return the same
         // `snd_pcm_status` snapshot; STATUS_EXT additionally lets the client
         // preselect an audio-timestamp type (which we echo back unchanged).
-        alsa::SNDRV_PCM_IOCTL_STATUS => alsa_pcm_ioctl_status(entry, argp, false),
-        alsa::SNDRV_PCM_IOCTL_STATUS_EXT => alsa_pcm_ioctl_status(entry, argp, true),
+        alsa::SNDRV_PCM_IOCTL_STATUS => alsa_pcm_ioctl_status(h, argp, false),
+        alsa::SNDRV_PCM_IOCTL_STATUS_EXT => alsa_pcm_ioctl_status(h, argp, true),
         // HWSYNC / RESUME / XRUN / LINK / UNLINK / TTSTAMP: position-sync and
         // link operations that are no-ops on our software pipeline.  Accept
         // them so clients that issue them during teardown do not error.
@@ -10022,9 +10130,8 @@ fn alsa_pcm_ioctl(entry: &FdEntry, request: u32, argp: u64) -> SyscallResult {
 /// `SNDRV_PCM_IOCTL_INFO` — fill a `snd_pcm_info` describing our single
 /// virtual playback/capture device on card 0.
 #[allow(clippy::cast_possible_wrap)]
-fn alsa_pcm_ioctl_info(entry: &FdEntry, argp: u64) -> SyscallResult {
+fn alsa_pcm_ioctl_info(h: crate::ipc::alsa_pcm::AlsaPcmHandle, argp: u64) -> SyscallResult {
     use crate::audio_alsa as alsa;
-    let h = crate::ipc::alsa_pcm::AlsaPcmHandle::from_raw(entry.raw_handle);
     let capture = match crate::ipc::alsa_pcm::is_capture(h) {
         Some(c) => c,
         None => return linux_err(errno::EBADF),
@@ -10052,54 +10159,39 @@ fn alsa_pcm_ioctl_info(entry: &FdEntry, argp: u64) -> SyscallResult {
 }
 
 /// `SNDRV_PCM_IOCTL_WRITEI_FRAMES` — submit interleaved playback frames whose
-/// user buffer pointer and frame count are carried in a `snd_xferi`.
+/// user buffer pointer and frame count are carried in a `snd_xferi`. A
+/// blocking descriptor waits until every frame is queued, a non-blocking one
+/// queues what fits ([`alsa_pcm_write_bytes`]); `result` says how many went.
 #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
-fn alsa_pcm_ioctl_writei(entry: &FdEntry, argp: u64) -> SyscallResult {
+fn alsa_pcm_ioctl_writei(
+    h: crate::ipc::alsa_pcm::AlsaPcmHandle,
+    nonblocking: bool,
+    argp: u64,
+) -> SyscallResult {
     use crate::audio_alsa as alsa;
-    let h = crate::ipc::alsa_pcm::AlsaPcmHandle::from_raw(entry.raw_handle);
     let mut xfer = match read_user_struct::<alsa::SndXferi>(argp) {
         Ok(v) => v,
         Err(e) => return linux_err(e),
     };
-
-    // bytes = frames * 4 (native S16_LE stereo frame), bounded to the mixer
-    // ring so the kernel buffer is bounded; whole-frame aligned by construction.
-    const RING_CAP: usize = 16384;
+    // bytes = frames * 4 (native S16_LE stereo frame).
     const FRAME_BYTES: u64 = 4;
     let req_bytes = xfer.frames.saturating_mul(FRAME_BYTES);
-    let want = req_bytes.min(RING_CAP as u64) as usize;
-    if want == 0 {
+    if req_bytes == 0 {
         xfer.result = 0;
         return match write_user_struct(argp, &xfer) {
             Ok(()) => SyscallResult::ok(0),
             Err(e) => linux_err(e),
         };
     }
-
-    if crate::mm::user::validate_user_read(xfer.buf, want).is_err() {
-        return linux_err(errno::EFAULT);
+    let r = alsa_pcm_write_bytes(h, nonblocking, xfer.buf, req_bytes);
+    if r.value < 0 {
+        return r;
     }
-    let mut kbuf = alloc::vec![0u8; want];
-    // SAFETY: `kbuf` is a freshly-allocated kernel buffer of exactly `want`
-    // bytes; `copy_from_user` re-validates the user range and handles SMAP.
-    if unsafe { crate::mm::user::copy_from_user(xfer.buf, kbuf.as_mut_ptr(), want) }.is_err() {
-        return linux_err(errno::EFAULT);
-    }
-
-    match crate::ipc::alsa_pcm::write_frames(h, &kbuf) {
-        Ok(written) => {
-            // Report the frame count actually accepted in `result`.
-            xfer.result = written
-                .checked_div(crate::audio_mixer::FRAME_SIZE_BYTES)
-                .unwrap_or(0) as i64;
-            match write_user_struct(argp, &xfer) {
-                Ok(()) => SyscallResult::ok(0),
-                Err(e) => linux_err(e),
-            }
-        }
-        Err(crate::error::KernelError::WouldBlock) => linux_err(errno::EAGAIN),
-        Err(crate::error::KernelError::InvalidHandle) => linux_err(errno::EBADF),
-        Err(_) => linux_err(errno::EINVAL),
+    // Report the frame count actually accepted in `result`.
+    xfer.result = (r.value.unsigned_abs() / FRAME_BYTES) as i64;
+    match write_user_struct(argp, &xfer) {
+        Ok(()) => SyscallResult::ok(0),
+        Err(e) => linux_err(e),
     }
 }
 
@@ -10110,9 +10202,8 @@ fn alsa_pcm_ioctl_writei(entry: &FdEntry, argp: u64) -> SyscallResult {
 /// silence: the user buffer is zero-filled and the full requested frame count
 /// is reported.
 #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
-fn alsa_pcm_ioctl_readi(entry: &FdEntry, argp: u64) -> SyscallResult {
+fn alsa_pcm_ioctl_readi(h: crate::ipc::alsa_pcm::AlsaPcmHandle, argp: u64) -> SyscallResult {
     use crate::audio_alsa as alsa;
-    let h = crate::ipc::alsa_pcm::AlsaPcmHandle::from_raw(entry.raw_handle);
     let mut xfer = match read_user_struct::<alsa::SndXferi>(argp) {
         Ok(v) => v,
         Err(e) => return linux_err(e),
@@ -10164,9 +10255,8 @@ fn alsa_pcm_ioctl_readi(entry: &FdEntry, argp: u64) -> SyscallResult {
 /// `avail_min` the client pushes or returns the kernel's own values.  The
 /// status/control pages sit in 64-byte unions, so the payload size is
 /// independent of the timestamp ABI and matches real ALSA-lib byte-for-byte.
-fn alsa_pcm_ioctl_sync_ptr(entry: &FdEntry, argp: u64) -> SyscallResult {
+fn alsa_pcm_ioctl_sync_ptr(h: crate::ipc::alsa_pcm::AlsaPcmHandle, argp: u64) -> SyscallResult {
     use crate::audio_alsa as alsa;
-    let h = crate::ipc::alsa_pcm::AlsaPcmHandle::from_raw(entry.raw_handle);
     let mut sp = match read_user_struct::<alsa::SndPcmSyncPtr>(argp) {
         Ok(v) => v,
         Err(e) => return linux_err(e),
@@ -10211,9 +10301,12 @@ fn alsa_pcm_ioctl_sync_ptr(entry: &FdEntry, argp: u64) -> SyscallResult {
 /// (PulseAudio/PipeWire/MPD/games).  For `STATUS_EXT` (`ext == true`, `_IOWR`)
 /// the caller preselects an audio-timestamp type in `audio_tstamp_data`, which
 /// we read and echo back unchanged; `STATUS` (`_IOR`) supplies no input.
-fn alsa_pcm_ioctl_status(entry: &FdEntry, argp: u64, ext: bool) -> SyscallResult {
+fn alsa_pcm_ioctl_status(
+    h: crate::ipc::alsa_pcm::AlsaPcmHandle,
+    argp: u64,
+    ext: bool,
+) -> SyscallResult {
     use crate::audio_alsa as alsa;
-    let h = crate::ipc::alsa_pcm::AlsaPcmHandle::from_raw(entry.raw_handle);
 
     let pos = match crate::ipc::alsa_pcm::sync_position(h) {
         Some(p) => p,
@@ -10283,6 +10376,13 @@ fn alsa_pcm_ioctl_status(entry: &FdEntry, argp: u64, ext: bool) -> SyscallResult
 /// `audio_mixer`; until then those — and every unrecognised request — return
 /// `ENOTTY`, exactly as Linux does for an unsupported control ioctl.
 fn alsa_control_ioctl(_entry: &FdEntry, request: u32, argp: u64) -> SyscallResult {
+    alsa_control_ioctl_on(request, argp)
+}
+
+/// One `SNDRV_CTL_IOCTL_*` request on the card's control device: shared by the
+/// Linux `ioctl` and the native device door. The control device holds nothing
+/// per open, so no descriptor is needed.
+pub(crate) fn alsa_control_ioctl_on(request: u32, argp: u64) -> SyscallResult {
     use crate::audio_alsa_ctl as ctl;
 
     match request {
@@ -31564,6 +31664,8 @@ pub(crate) fn wait_target_for_handle(
         // A Unix-domain socket's: a datagram, a connection to accept, room to
         // send, and for a connected stream, its pair's every change.
         HandleKind::UnixSocket => WaitTarget::UnixSocket(raw_handle),
+        // An ALSA substream's: the audio pump's every take from the rings.
+        HandleKind::AlsaPcm => WaitTarget::AlsaPcm(raw_handle),
         _ => WaitTarget::PollOnly,
     }
 }
@@ -39379,6 +39481,26 @@ fn unix_errno(e: KernelError) -> SyscallResult {
     }
 }
 
+/// [`unix_errno`] for a call that may have waited under one of `h`'s
+/// timeouts (`SO_RCVTIMEO`/`SO_SNDTIMEO`): a signal ends such a wait with
+/// `EINTR`, never a restart, as Linux's `sock_intr_errno` answers for a wait
+/// with a limit.
+fn unix_errno_timed(
+    e: crate::error::KernelError,
+    h: crate::ipc::unix_socket::UnixHandle,
+    dir: crate::ipc::unix_socket::Direction,
+) -> SyscallResult {
+    if e == crate::error::KernelError::Interrupted
+        && crate::ipc::unix_socket::timeout(h, dir)
+            .ok()
+            .flatten()
+            .is_some()
+    {
+        return linux_err(errno::EINTR);
+    }
+    unix_errno(e)
+}
+
 /// Whether a call on `entry` with `msg_flags` must not wait: the
 /// descriptor's `O_NONBLOCK`, or `MSG_DONTWAIT` for this call.
 fn unix_nonblocking(entry: &FdEntry, msg_flags: u32) -> bool {
@@ -39518,7 +39640,7 @@ fn unix_send(
     };
     match sent {
         Ok(n) => SyscallResult::ok(i64::try_from(n).unwrap_or(i64::MAX)),
-        Err(e) => unix_errno(e),
+        Err(e) => unix_errno_timed(e, h, crate::ipc::unix_socket::Direction::Send),
     }
 }
 
@@ -39557,7 +39679,7 @@ fn unix_recv(
         flags & msgflags::MSG_PEEK != 0,
     ) {
         Ok(r) => r,
-        Err(e) => return unix_errno(e),
+        Err(e) => return unix_errno_timed(e, h, crate::ipc::unix_socket::Direction::Receive),
     };
     if got.len > 0 {
         // SAFETY: `got.len` <= `room` bytes at `buf` were validated writable;
@@ -39778,7 +39900,7 @@ fn unix_sendmsg(entry: &FdEntry, msg_ptr: u64, flags: u32) -> SyscallResult {
     };
     match sent {
         Ok(n) => SyscallResult::ok(i64::try_from(n).unwrap_or(i64::MAX)),
-        Err(e) => unix_errno(e),
+        Err(e) => unix_errno_timed(e, h, crate::ipc::unix_socket::Direction::Send),
     }
 }
 
@@ -39830,7 +39952,7 @@ fn unix_recvmsg(entry: &FdEntry, msg_ptr: u64, flags: u32) -> SyscallResult {
         flags & msgflags::MSG_PEEK != 0,
     ) {
         Ok(r) => r,
-        Err(e) => return unix_errno(e),
+        Err(e) => return unix_errno_timed(e, h, crate::ipc::unix_socket::Direction::Receive),
     };
     let mut done = 0usize;
     for (base, len) in iovs {
@@ -40243,7 +40365,7 @@ fn unix_accept(entry: &FdEntry, addr_ptr: u64, addrlen_ptr: u64, flags: u32) -> 
     }
     let accepted = match unix_socket::accept(h, unix_nonblocking(entry, 0)) {
         Ok(a) => a,
-        Err(e) => return unix_errno(e),
+        Err(e) => return unix_errno_timed(e, h, crate::ipc::unix_socket::Direction::Receive),
     };
     let installed = unix_install(accepted.handle, flags);
     if installed.value < 0 {
@@ -40497,7 +40619,11 @@ fn sys_connect(args: &SyscallArgs) -> SyscallResult {
             unix_nonblocking(&entry, 0),
         ) {
             Ok(()) => SyscallResult::ok(0),
-            Err(e) => unix_errno(e),
+            Err(e) => unix_errno_timed(
+                e,
+                unix_handle(&entry),
+                crate::ipc::unix_socket::Direction::Send,
+            ),
         };
     }
     // Path B userspace-netstack cutover: a real daemon-backed AF_INET stream
@@ -42243,6 +42369,59 @@ fn sys_setsockopt(args: &SyscallArgs) -> SyscallResult {
                 Err(e) => unix_errno(e),
             };
         }
+        // SO_RCVTIMEO / SO_SNDTIMEO: a struct timeval, as Linux's
+        // sock_set_timeout reads it -- EINVAL when shorter, EDOM for a
+        // microsecond count outside 0..1e6; {0, 0} waits for ever, a negative
+        // second count not at all.
+        if level == sol::SOL_SOCKET
+            && matches!(
+                optname,
+                so::SO_RCVTIMEO | so::SO_SNDTIMEO | so::SO_RCVTIMEO_NEW | so::SO_SNDTIMEO_NEW
+            )
+        {
+            use crate::ipc::unix_socket::Direction;
+            let dir = if matches!(optname, so::SO_RCVTIMEO | so::SO_RCVTIMEO_NEW) {
+                Direction::Receive
+            } else {
+                Direction::Send
+            };
+            if optlen < 16 {
+                return linux_err(errno::EINVAL);
+            }
+            let mut raw = [0u8; 16];
+            // SAFETY: sixteen bytes into a sixteen-byte buffer; optval was
+            // validated readable for optlen (>= 16) bytes above, and
+            // copy_from_user re-checks.
+            if let Err(e) =
+                unsafe { crate::mm::user::copy_from_user(args.arg3, raw.as_mut_ptr(), 16) }
+            {
+                return linux_err(linux_errno_for(e));
+            }
+            let field = |at: usize| {
+                raw.get(at..at.saturating_add(8))
+                    .and_then(|b| <[u8; 8]>::try_from(b).ok())
+                    .map_or(0, i64::from_ne_bytes)
+            };
+            let (sec, usec) = (field(0), field(8));
+            if !(0..1_000_000).contains(&usec) {
+                return linux_err(errno::EDOM);
+            }
+            let limit = if sec < 0 {
+                Some(0)
+            } else if sec == 0 && usec == 0 {
+                None
+            } else {
+                Some(
+                    sec.unsigned_abs()
+                        .saturating_mul(1_000_000_000)
+                        .saturating_add(usec.unsigned_abs().saturating_mul(1_000)),
+                )
+            };
+            return match crate::ipc::unix_socket::set_timeout(unix_handle(&entry), dir, limit) {
+                Ok(()) => SyscallResult::ok(0),
+                Err(e) => unix_errno(e),
+            };
+        }
         // The other options Unix-domain programs set while starting up. None
         // changes anything here: buffers are fixed and there is no address
         // reuse to allow. Anything else is ENOPROTOOPT, so a program can
@@ -42465,6 +42644,25 @@ fn unix_getsockopt(
             v.extend_from_slice(&pid.to_ne_bytes());
             v.extend_from_slice(&uid.to_ne_bytes());
             v.extend_from_slice(&gid.to_ne_bytes());
+            v
+        }
+        // A struct timeval, as Linux's sock_get_timeout: {0, 0} for no limit
+        // and, as Linux's own reading of its 0, for "do not wait".
+        so::SO_RCVTIMEO | so::SO_SNDTIMEO | so::SO_RCVTIMEO_NEW | so::SO_SNDTIMEO_NEW => {
+            let dir = if matches!(optname, so::SO_RCVTIMEO | so::SO_RCVTIMEO_NEW) {
+                unix_socket::Direction::Receive
+            } else {
+                unix_socket::Direction::Send
+            };
+            let ns = match unix_socket::timeout(h, dir) {
+                Ok(limit) => limit.unwrap_or(0),
+                Err(e) => return unix_errno(e),
+            };
+            let sec = i64::try_from(ns / 1_000_000_000).unwrap_or(i64::MAX);
+            let usec = i64::try_from(ns % 1_000_000_000 / 1_000).unwrap_or(0);
+            let mut v = alloc::vec::Vec::with_capacity(16);
+            v.extend_from_slice(&sec.to_ne_bytes());
+            v.extend_from_slice(&usec.to_ne_bytes());
             v
         }
         _ => return linux_err(errno::ENOPROTOOPT),
@@ -95562,7 +95760,10 @@ pub fn self_test() -> crate::error::KernelResult<()> {
                 serial_println!("[syscall/linux]   FAIL: socketpair NULL sv not EFAULT");
                 return Err(KernelError::InternalError);
             }
-            // socketpair valid -> ENOSYS.
+            // socketpair valid -> EBADF: past every gate the pair is made
+            // (`ipc::unix_socket::pair`), and kernel context has no
+            // descriptor table to install it in, so both ends are closed
+            // again. (ENOSYS until AF_UNIX pairs existed.)
             let a = SyscallArgs {
                 arg0: 1,
                 arg1: 1,
@@ -95571,8 +95772,8 @@ pub fn self_test() -> crate::error::KernelResult<()> {
                 arg4: 0,
                 arg5: 0,
             };
-            if dispatch_linux(nr::SOCKETPAIR, &a).value != -i64::from(errno::ENOSYS) {
-                serial_println!("[syscall/linux]   FAIL: socketpair valid not ENOSYS");
+            if dispatch_linux(nr::SOCKETPAIR, &a).value != i64::from(errno::EBADF).wrapping_neg() {
+                serial_println!("[syscall/linux]   FAIL: socketpair valid not EBADF");
                 return Err(KernelError::InternalError);
             }
 
@@ -106127,8 +106328,10 @@ pub fn self_test() -> crate::error::KernelResult<()> {
 
                     // Discriminator E: socketpair(domain=1 (AF_UNIX),
                     //   type=SOCK_STREAM, sv=valid)
-                    //   Acceptance: AF_UNIX still falls through to the
-                    //   terminal -ENOSYS (no socketpair backend yet).
+                    //   Acceptance: past every gate the pair is made, and
+                    //   kernel context has no descriptor table to install
+                    //   it in: -EBADF, both ends closed again. (-ENOSYS
+                    //   until AF_UNIX pairs existed.)
                     let a = SyscallArgs {
                         arg0: 1,
                         arg1: 1,
@@ -106137,8 +106340,10 @@ pub fn self_test() -> crate::error::KernelResult<()> {
                         arg4: 0,
                         arg5: 0,
                     };
-                    if dispatch_linux(nr::SOCKETPAIR, &a).value != -i64::from(errno::ENOSYS) {
-                        serial_println!("[syscall/linux]   FAIL: socketpair(AF_UNIX) not ENOSYS");
+                    if dispatch_linux(nr::SOCKETPAIR, &a).value
+                        != i64::from(errno::EBADF).wrapping_neg()
+                    {
+                        serial_println!("[syscall/linux]   FAIL: socketpair(AF_UNIX) not EBADF");
                         return Err(KernelError::InternalError);
                     }
 
@@ -107153,13 +107358,16 @@ pub fn self_test() -> crate::error::KernelResult<()> {
             // `(1, _) => EPROTONOSUPPORT` for any non-zero protocol,
             // over-rejecting (AF_UNIX, *, 1).
             //
-            // Sub-probes:
-            //   A. socket(AF_UNIX=1, STREAM=1, 1=PF_UNIX)   -> ENOSYS
-            //      (was: EPROTONOSUPPORT; post: accepted, falls
-            //      through to terminal ENOSYS)
-            //   B. socket(AF_UNIX, DGRAM=2, 1)              -> ENOSYS
+            // Sub-probes (kernel context, which has no descriptor table: an
+            // accepted stream or datagram socket is made, then closed again
+            // for want of a table to install it in -- EBADF; ENOSYS until
+            // AF_UNIX sockets existed):
+            //   A. socket(AF_UNIX=1, STREAM=1, 1=PF_UNIX)   -> EBADF
+            //      (was: EPROTONOSUPPORT; post: accepted)
+            //   B. socket(AF_UNIX, DGRAM=2, 1)              -> EBADF
             //   C. socket(AF_UNIX, SEQPACKET=5, 1)          -> ENOSYS
-            //   D. Regression: socket(AF_UNIX, STREAM, 0)   -> ENOSYS
+            //      (accepted; no SOCK_SEQPACKET yet)
+            //   D. Regression: socket(AF_UNIX, STREAM, 0)   -> EBADF
             //      (already accepted; gate 5 skipped for proto=0)
             //   E. Regression: socket(AF_UNIX, STREAM, 2)   -> EPROTONOSUPPORT
             //      (non-PF_UNIX non-zero protocol still rejected)
@@ -107177,9 +107385,11 @@ pub fn self_test() -> crate::error::KernelResult<()> {
                         arg4: 0,
                         arg5: 0,
                     };
-                    if dispatch_linux(nr::SOCKET, &a).value != -i64::from(errno::ENOSYS) {
+                    if dispatch_linux(nr::SOCKET, &a).value
+                        != i64::from(errno::EBADF).wrapping_neg()
+                    {
                         serial_println!(
-                            "[syscall/linux]   FAIL: socket(AF_UNIX,STREAM,PF_UNIX) not ENOSYS"
+                            "[syscall/linux]   FAIL: socket(AF_UNIX,STREAM,PF_UNIX) not EBADF"
                         );
                         return Err(KernelError::InternalError);
                     }
@@ -107192,9 +107402,11 @@ pub fn self_test() -> crate::error::KernelResult<()> {
                         arg4: 0,
                         arg5: 0,
                     };
-                    if dispatch_linux(nr::SOCKET, &a).value != -i64::from(errno::ENOSYS) {
+                    if dispatch_linux(nr::SOCKET, &a).value
+                        != i64::from(errno::EBADF).wrapping_neg()
+                    {
                         serial_println!(
-                            "[syscall/linux]   FAIL: socket(AF_UNIX,DGRAM,PF_UNIX) not ENOSYS"
+                            "[syscall/linux]   FAIL: socket(AF_UNIX,DGRAM,PF_UNIX) not EBADF"
                         );
                         return Err(KernelError::InternalError);
                     }
@@ -107222,9 +107434,11 @@ pub fn self_test() -> crate::error::KernelResult<()> {
                         arg4: 0,
                         arg5: 0,
                     };
-                    if dispatch_linux(nr::SOCKET, &a).value != -i64::from(errno::ENOSYS) {
+                    if dispatch_linux(nr::SOCKET, &a).value
+                        != i64::from(errno::EBADF).wrapping_neg()
+                    {
                         serial_println!(
-                            "[syscall/linux]   FAIL: socket(AF_UNIX,STREAM,0) regression not ENOSYS"
+                            "[syscall/linux]   FAIL: socket(AF_UNIX,STREAM,0) regression not EBADF"
                         );
                         return Err(KernelError::InternalError);
                     }

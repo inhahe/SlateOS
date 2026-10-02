@@ -1306,6 +1306,133 @@ fn sine_approx(phase: u16, amplitude: i16) -> i16 {
 }
 
 // ---------------------------------------------------------------------------
+// Streaming output -- the audio pump's side (`audio_out`)
+// ---------------------------------------------------------------------------
+//
+// The output stream runs over the cyclic PCM buffer for as long as anything
+// plays: the pump starts it over silence, writes the mixer's output ahead of
+// the hardware's position (`LPIB`), and stops it again once nothing has
+// played for a while. No logging on these paths -- they run every time a
+// program starts or stops playing.
+
+/// Whether this controller can play: initialised, with an output path (a DAC
+/// and a pin) found on its codec.
+#[must_use]
+pub fn output_ready() -> bool {
+    is_initialized()
+        && DEVICE
+            .lock()
+            .as_ref()
+            .is_some_and(|d| d.dac_nid != 0 && d.pin_nid != 0)
+}
+
+/// The output stream descriptor's register offset, and the MMIO base.
+fn output_stream(dev: &HdaDevice) -> (u64, usize) {
+    let stream_idx = usize::from(dev.iss.saturating_add(dev.out_stream_idx));
+    (
+        dev.mmio_base,
+        STREAM_BASE.saturating_add(stream_idx.saturating_mul(STREAM_SIZE)),
+    )
+}
+
+/// Configure the output path once, for streaming: the stream descriptor, the
+/// codec's converter and pin ([`configure_output`]). Returns the cyclic
+/// buffer's length in bytes.
+///
+/// # Errors
+///
+/// As [`configure_output`].
+pub fn stream_configure() -> KernelResult<usize> {
+    configure_output()?;
+    let guard = DEVICE.lock();
+    let dev = guard.as_ref().ok_or(KernelError::NoSuchDevice)?;
+    Ok(dev.pcm_size as usize)
+}
+
+/// Start the output stream over a buffer of silence. Returns where the
+/// hardware is in the buffer, in bytes, as it starts.
+///
+/// # Errors
+///
+/// `NoSuchDevice` without a controller.
+pub fn stream_start() -> KernelResult<usize> {
+    let guard = DEVICE.lock();
+    let dev = guard.as_ref().ok_or(KernelError::NoSuchDevice)?;
+    // SAFETY: `pcm_virt` is the driver's own DMA buffer of `pcm_size` bytes,
+    // mapped through the HHDM for the kernel's lifetime. The stream is not
+    // running, so the controller is not reading it while it is cleared.
+    unsafe {
+        core::ptr::write_bytes(dev.pcm_virt as *mut u8, 0, dev.pcm_size as usize);
+    }
+    let (base, off) = output_stream(dev);
+    let pos = (mmio_read32(base, off.saturating_add(SD_LPIB)) as usize)
+        .checked_rem(dev.pcm_size as usize)
+        .unwrap_or(0);
+    // Run without the completion interrupt `configure_output` enables: the
+    // pump polls the position, and `handle_irq` is wired to no vector, so an
+    // interrupt raised at each wrap would go unacknowledged.
+    let ctl = mmio_read32(base, off.saturating_add(SD_CTL));
+    mmio_write32(
+        base,
+        off.saturating_add(SD_CTL),
+        (ctl & !SDCTL_IOCE) | SDCTL_RUN,
+    );
+    Ok(pos)
+}
+
+/// Where the hardware is in the cyclic buffer (`LPIB`), in bytes.
+#[must_use]
+pub fn stream_position() -> Option<usize> {
+    let guard = DEVICE.lock();
+    let dev = guard.as_ref()?;
+    let (base, off) = output_stream(dev);
+    Some(
+        (mmio_read32(base, off.saturating_add(SD_LPIB)) as usize)
+            .checked_rem(dev.pcm_size as usize)
+            .unwrap_or(0),
+    )
+}
+
+/// Copy `data` into the cyclic buffer at byte `offset`.
+///
+/// # Errors
+///
+/// `NoSuchDevice`; `InvalidArgument` if `data` would run past the buffer's
+/// end (the caller splits a write at the wrap).
+pub fn stream_write(offset: usize, data: &[u8]) -> KernelResult<()> {
+    let guard = DEVICE.lock();
+    let dev = guard.as_ref().ok_or(KernelError::NoSuchDevice)?;
+    if offset.saturating_add(data.len()) > dev.pcm_size as usize {
+        return Err(KernelError::InvalidArgument);
+    }
+    // SAFETY: `[offset, offset + len)` lies inside the driver's DMA buffer
+    // (checked above), mapped for the kernel's lifetime; the controller only
+    // reads it, so a concurrent DMA read sees old or new bytes, never a fault.
+    unsafe {
+        core::ptr::copy_nonoverlapping(
+            data.as_ptr(),
+            (dev.pcm_virt as *mut u8).add(offset),
+            data.len(),
+        );
+    }
+    Ok(())
+}
+
+/// Stop the output stream (it keeps its configuration for the next start).
+///
+/// # Errors
+///
+/// `NoSuchDevice` without a controller.
+pub fn stream_stop() -> KernelResult<()> {
+    let guard = DEVICE.lock();
+    let dev = guard.as_ref().ok_or(KernelError::NoSuchDevice)?;
+    let (base, off) = output_stream(dev);
+    let ctl = mmio_read32(base, off.saturating_add(SD_CTL));
+    mmio_write32(base, off.saturating_add(SD_CTL), ctl & !SDCTL_RUN);
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
 // Public query API
 // ---------------------------------------------------------------------------
 

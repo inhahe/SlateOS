@@ -435,7 +435,10 @@ mod tests {
         // Read as UTF-8, `[é]` is one character, which a lone byte is not.
         assert_eq!(find("[\u{e9}]", "x\u{e9}"), Some((1, 3)));
         assert_eq!(
-            compile("[\u{e9}]".as_bytes(), false).unwrap().find(b"x\xa9").unwrap(),
+            compile("[\u{e9}]".as_bytes(), false)
+                .unwrap()
+                .find(b"x\xa9")
+                .unwrap(),
             None
         );
     }

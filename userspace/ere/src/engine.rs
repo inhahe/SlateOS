@@ -2054,9 +2054,10 @@ impl Prefilter {
         firsts.sort_unstable();
         firsts.dedup();
         let set = byte_set(|c| {
-            firsts
-                .iter()
-                .any(|&pc| prog.get(pc).is_some_and(|inst| takes(inst, Some(c), ci, true)))
+            firsts.iter().any(|&pc| {
+                prog.get(pc)
+                    .is_some_and(|inst| takes(inst, Some(c), ci, true))
+            })
         });
         if !line_start && set == [u64::MAX; 4] {
             return None;
@@ -2072,10 +2073,10 @@ impl Prefilter {
     fn first(&self, prog: &[Inst], c: Ch, ci: bool) -> bool {
         match byte_index(c) {
             Some(b) => in_byte_set(&self.set, b),
-            None => self
-                .firsts
-                .iter()
-                .any(|&pc| prog.get(pc).is_some_and(|inst| takes(inst, Some(c), ci, true))),
+            None => self.firsts.iter().any(|&pc| {
+                prog.get(pc)
+                    .is_some_and(|inst| takes(inst, Some(c), ci, true))
+            }),
         }
     }
 }
@@ -2203,7 +2204,9 @@ impl ThreadList {
 
     /// Thread `th`'s capture slots.
     fn caps(&self, th: &Thread, nslots: usize) -> &[Option<usize>] {
-        self.slots.get(th.at..th.at.saturating_add(nslots)).unwrap_or_default()
+        self.slots
+            .get(th.at..th.at.saturating_add(nslots))
+            .unwrap_or_default()
     }
 }
 
@@ -2420,8 +2423,11 @@ impl Regex {
     ) -> Option<usize> {
         if pf.line_start && !self.newline_anchor {
             // A line starts only where the subject does.
-            return (from == 0 && input.at(0).is_some_and(|c| pf.first(&self.prog, c, self.ci)))
-                .then_some(0);
+            return (from == 0
+                && input
+                    .at(0)
+                    .is_some_and(|c| pf.first(&self.prog, c, self.ci)))
+            .then_some(0);
         }
         (from..input.len()).find(|&p| self.can_start(pf, input, p, bol))
     }
@@ -2479,7 +2485,9 @@ impl Regex {
             let Some(slots) = self.run(&Bytes(text), 0, StartOfLine::Yes, self.all_slots())? else {
                 return Ok(None);
             };
-            return Ok(Some(self.groups(&slots, |s, e| text.get(s..e).map(<[u8]>::to_vec))));
+            return Ok(Some(
+                self.groups(&slots, |s, e| text.get(s..e).map(<[u8]>::to_vec)),
+            ));
         }
         let chars: Vec<Ch> = self.decode(text).chars;
         let Some(slots) = self.run(chars.as_slice(), 0, StartOfLine::Yes, self.all_slots())? else {
@@ -2566,7 +2574,10 @@ impl Regex {
                 return Ok(None);
             };
             return Ok(
-                match (slots.first().copied().flatten(), slots.get(1).copied().flatten()) {
+                match (
+                    slots.first().copied().flatten(),
+                    slots.get(1).copied().flatten(),
+                ) {
                     (Some(s), Some(e)) if s <= text.len() && e <= text.len() => Some((s, e)),
                     _ => None,
                 },
@@ -2991,7 +3002,10 @@ impl Regex {
             return Ok(None);
         }
         let same = (0..len).all(|k| {
-            match (input.at(s.saturating_add(k)), input.at(f.sp.saturating_add(k))) {
+            match (
+                input.at(s.saturating_add(k)),
+                input.at(f.sp.saturating_add(k)),
+            ) {
                 (Some(w), have @ Some(_)) => char_eq(have, w, self.ci),
                 _ => false,
             }
@@ -3162,7 +3176,9 @@ impl Regex {
         p: usize,
         bol: StartOfLine,
     ) -> bool {
-        input.at(p).is_some_and(|c| pf.first(&self.prog, c, self.ci))
+        input
+            .at(p)
+            .is_some_and(|c| pf.first(&self.prog, c, self.ci))
             && (!pf.line_start || p == 0 || self.line_start_at(input, p, bol))
     }
 
@@ -3534,7 +3550,12 @@ impl Cursor {
             if self.done {
                 return None;
             }
-            let slots = match re.run(self.scan.chars.as_slice(), self.next, StartOfLine::Yes, nslots) {
+            let slots = match re.run(
+                self.scan.chars.as_slice(),
+                self.next,
+                StartOfLine::Yes,
+                nslots,
+            ) {
                 Ok(Some(slots)) => slots,
                 Ok(None) => {
                     self.done = true;
@@ -3689,7 +3710,10 @@ mod tests {
         assert_eq!(re(b"x.y", false).find(e_acute).unwrap(), None);
         assert_eq!(re(b"x..y", false).find(e_acute).unwrap(), Some((0, 4)));
         assert_eq!(re(b"[^x]", false).find(e_acute).unwrap(), Some((1, 2)));
-        assert_eq!(re(b"[[:alpha:]]+", false).find(e_acute).unwrap(), Some((0, 1)));
+        assert_eq!(
+            re(b"[[:alpha:]]+", false).find(e_acute).unwrap(),
+            Some((0, 1))
+        );
         assert_eq!(re(b"y", true).find(b"\xc3\x9fY").unwrap(), Some((2, 3)));
         // Captures come back as the bytes they covered.
         let caps = re(b"x(.)", false).captures(e_acute).unwrap().unwrap();
@@ -3767,8 +3791,14 @@ mod tests {
         assert_eq!(re("a+").search(b"baaa").rsearch(4).unwrap(), Some((3, 4)));
         assert_eq!(re("ba+").search(b"baaab").rsearch(5).unwrap(), Some((0, 4)));
         // Newlines, as tac's default separator would find them.
-        assert_eq!(re("\n").search(b"a\nb\nc").rsearch(5).unwrap(), Some((3, 4)));
-        assert_eq!(re("\n").search(b"a\nb\nc").rsearch(3).unwrap(), Some((1, 2)));
+        assert_eq!(
+            re("\n").search(b"a\nb\nc").rsearch(5).unwrap(),
+            Some((3, 4))
+        );
+        assert_eq!(
+            re("\n").search(b"a\nb\nc").rsearch(3).unwrap(),
+            Some((1, 2))
+        );
         assert_eq!(re("\n").search(b"abc").rsearch(3).unwrap(), None);
         assert_eq!(re("\n").search(b"abc").rsearch(0).unwrap(), None);
         // `^` holds at the window's start and after a newline; `$` at its end.
@@ -5325,9 +5355,31 @@ mod tests {
     /// anchor and word assertion, groups, alternation and repetition.
     fn random_pattern(r: &mut Rng, depth: usize) -> Vec<u8> {
         const ATOMS: &[&[u8]] = &[
-            b"a", b"b", b"A", b".", b"[ab]", b"[^a]", b"[[:alpha:]]", b"[a-z]", b"[^\n]",
-            b"\n", "\u{e9}".as_bytes(), b"\x80", b"x", b"()", b"\\b", b"\\B", b"\\<", b"\\>",
-            b"^", b"$", b"\\`", b"\\'", b"\\w", b"\\W", b"\\1",
+            b"a",
+            b"b",
+            b"A",
+            b".",
+            b"[ab]",
+            b"[^a]",
+            b"[[:alpha:]]",
+            b"[a-z]",
+            b"[^\n]",
+            b"\n",
+            "\u{e9}".as_bytes(),
+            b"\x80",
+            b"x",
+            b"()",
+            b"\\b",
+            b"\\B",
+            b"\\<",
+            b"\\>",
+            b"^",
+            b"$",
+            b"\\`",
+            b"\\'",
+            b"\\w",
+            b"\\W",
+            b"\\1",
         ];
         let mut p = Vec::new();
         for _ in 0..=r.below(4) {
@@ -5342,7 +5394,9 @@ mod tests {
             } else {
                 p.extend_from_slice(r.pick(ATOMS));
             }
-            p.extend_from_slice(r.pick(&[b"", b"", b"", b"", b"*", b"+", b"?", b"{1,2}", b"{0,1}"]));
+            p.extend_from_slice(
+                r.pick(&[b"", b"", b"", b"", b"*", b"+", b"?", b"{1,2}", b"{0,1}"]),
+            );
         }
         if r.below(6) == 0 {
             p.push(b'|');
@@ -5352,7 +5406,17 @@ mod tests {
     }
 
     fn random_subject(r: &mut Rng) -> Vec<u8> {
-        const PIECES: &[&[u8]] = &[b"a", b"b", b"A", b"x", b"\n", b" ", b"_", "\u{e9}".as_bytes(), b"\x80"];
+        const PIECES: &[&[u8]] = &[
+            b"a",
+            b"b",
+            b"A",
+            b"x",
+            b"\n",
+            b" ",
+            b"_",
+            "\u{e9}".as_bytes(),
+            b"\x80",
+        ];
         let mut s = Vec::new();
         for _ in 0..r.below(12) {
             s.extend_from_slice(r.pick(PIECES));
@@ -5423,7 +5487,8 @@ mod tests {
                             if bol == StartOfLine::Yes {
                                 // `find_at` (bytes in place, two slots) and the
                                 // decoded search (every slot) find one match.
-                                let whole = spans.unwrap().and_then(|g| g.first().copied().flatten());
+                                let whole =
+                                    spans.unwrap().and_then(|g| g.first().copied().flatten());
                                 assert_eq!(found.unwrap(), whole, "{} from {from}", what(s));
                             }
                         }
@@ -5442,8 +5507,14 @@ mod tests {
         }
         // The test is only worth something if it reached both kinds.
         assert!(compiled > cases, "{compiled} of {cases} patterns compiled");
-        assert!(filtered > compiled / 4, "{filtered} of {compiled} had a prefilter");
-        assert!(filtered < compiled, "{filtered} of {compiled} had a prefilter");
+        assert!(
+            filtered > compiled / 4,
+            "{filtered} of {compiled} had a prefilter"
+        );
+        assert!(
+            filtered < compiled,
+            "{filtered} of {compiled} had a prefilter"
+        );
     }
 
     #[test]

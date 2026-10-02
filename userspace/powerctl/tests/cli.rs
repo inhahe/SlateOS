@@ -58,7 +58,11 @@ fn help_after_a_command_never_runs_the_command() {
         assert!(text.starts_with("Slate OS Power Control"), "{cmd}: {text}");
         // Nothing was asked of anyone: no progress note, no fallback.
         assert!(!text.contains("Initiating"), "{cmd}: {text}");
-        assert!(out.stderr.is_empty(), "{cmd}: {}", out.stderr.escape_ascii());
+        assert!(
+            out.stderr.is_empty(),
+            "{cmd}: {}",
+            out.stderr.escape_ascii()
+        );
     }
 }
 
@@ -85,7 +89,11 @@ fn an_argument_that_is_not_text_is_refused_not_a_crash() {
     let out = powerctl(&[std::ffi::OsStr::from_bytes(b"re\xffboot")]);
     assert_eq!(out.status.code(), Some(1));
     let err = out.stderr;
-    assert!(err.starts_with(b"unknown command: "), "{}", err.escape_ascii());
+    assert!(
+        err.starts_with(b"unknown command: "),
+        "{}",
+        err.escape_ascii()
+    );
     assert!(
         !err.windows(8).any(|w| w == b"panicked"),
         "{}",

@@ -96,9 +96,13 @@ pub fn hard_locale(category: Category) -> bool {
 /// `C`, `POSIX` and no name at all read bytes.
 #[must_use]
 pub fn is_utf8(name: Option<&[u8]>) -> bool {
-    name.and_then(|n| n.iter().rposition(|&b| b == b'.').and_then(|dot| n.get(dot + 1..)))
-        .map(|codeset| codeset.split(|&b| b == b'@').next().unwrap_or(codeset))
-        .is_some_and(|c| c.eq_ignore_ascii_case(b"UTF-8") || c.eq_ignore_ascii_case(b"utf8"))
+    name.and_then(|n| {
+        n.iter()
+            .rposition(|&b| b == b'.')
+            .and_then(|dot| n.get(dot + 1..))
+    })
+    .map(|codeset| codeset.split(|&b| b == b'@').next().unwrap_or(codeset))
+    .is_some_and(|c| c.eq_ignore_ascii_case(b"UTF-8") || c.eq_ignore_ascii_case(b"utf8"))
 }
 
 /// Whether this process's `LC_CTYPE` reads text as UTF-8 -- which decides,
@@ -120,7 +124,13 @@ mod tests {
 
     #[test]
     fn a_utf8_codeset_is_recognised_in_either_spelling() {
-        for name in ["C.UTF-8", "en_US.UTF-8", "en_US.utf8", "de_DE.utf-8", "sr_RS.UTF-8@latin"] {
+        for name in [
+            "C.UTF-8",
+            "en_US.UTF-8",
+            "en_US.utf8",
+            "de_DE.utf-8",
+            "sr_RS.UTF-8@latin",
+        ] {
             assert!(is_utf8(Some(name.as_bytes())), "{name}");
         }
         for name in ["C", "POSIX", "en_US", "en_US.ISO-8859-1", "UTF-8", ""] {

@@ -90860,9 +90860,8 @@ st=1
         assert_eq!(run("f=$'a\\xffb'; [[ $f =~ $'\\xfe' ]]").1, 1);
         // And the capture that reaches BASH_REMATCH is the bytes themselves —
         // read through `run_raw`, since `run`'s lossy decode would hide it.
-        let (o, s) = run_raw(
-            "f=$'a\\xffb'; [[ $f =~ ^a($'\\xff')b$ ]]; printf %s \"${BASH_REMATCH[1]}\"",
-        );
+        let (o, s) =
+            run_raw("f=$'a\\xffb'; [[ $f =~ ^a($'\\xff')b$ ]]; printf %s \"${BASH_REMATCH[1]}\"");
         assert_eq!(o, b"\xff");
         assert_eq!(s, 0);
         // A `.` that cannot take it leaves no match and an empty capture.

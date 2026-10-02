@@ -111,7 +111,11 @@ fn run_main() -> ExitCode {
         Request::Run(settings) => match Tac::new(&settings) {
             Ok(mut tac) => {
                 let ok = imp::run(&mut tac, &settings.files, &mut out);
-                if ok { ExitCode::SUCCESS } else { ExitCode::FAILURE }
+                if ok {
+                    ExitCode::SUCCESS
+                } else {
+                    ExitCode::FAILURE
+                }
             }
             Err(message) => {
                 diag!("tac: {message}");
@@ -235,7 +239,9 @@ impl Tac {
             .checked_add(sentinel_length)
             .and_then(|n| n.checked_add(1))
             .ok_or_else(|| "memory exhausted".to_string())?;
-        let size = half.checked_mul(2).ok_or_else(|| "memory exhausted".to_string())?;
+        let size = half
+            .checked_mul(2)
+            .ok_or_else(|| "memory exhausted".to_string())?;
         let mut buf = vec![0u8; size];
         let (offset, match_length) = match &separator {
             Separator::Fixed(s) => {
@@ -312,7 +318,11 @@ mod imp {
     /// Upstream's loop in `main`, and its close of standard input after it.
     pub fn run(tac: &mut Tac, files: &[OsString], out: &mut Stream) -> bool {
         let stdin_only = [OsString::from("-")];
-        let files = if files.is_empty() { &stdin_only[..] } else { files };
+        let files = if files.is_empty() {
+            &stdin_only[..]
+        } else {
+            files
+        };
         let mut ok = true;
         let mut have_read_stdin = false;
         for name in files {
@@ -360,7 +370,12 @@ mod imp {
 
     /// `tac_file`: print one file in reverse, copying it to a temporary file
     /// first if it cannot be seeked.
-    fn tac_file(tac: &mut Tac, name: &OsString, out: &mut Stream, have_read_stdin: &mut bool) -> bool {
+    fn tac_file(
+        tac: &mut Tac,
+        name: &OsString,
+        out: &mut Stream,
+        have_read_stdin: &mut bool,
+    ) -> bool {
         let bytes = os_bytes(name);
         let is_stdin = bytes.as_ref() == b"-";
         let (input, label) = if is_stdin {
@@ -368,16 +383,34 @@ mod imp {
             // SAFETY: descriptor 0 is standard input, open for the life of
             // the process; `owned` is false, so it is never closed here.
             let file = ManuallyDrop::new(unsafe { File::from_raw_fd(0) });
-            (Input { file, owned: false, fd: 0 }, b"standard input".to_vec())
+            (
+                Input {
+                    file,
+                    owned: false,
+                    fd: 0,
+                },
+                b"standard input".to_vec(),
+            )
         } else {
             match File::open(os_from_bytes(&bytes)) {
                 Ok(f) => {
                     use std::os::fd::AsRawFd;
                     let fd = f.as_raw_fd();
-                    (Input { file: ManuallyDrop::new(f), owned: true, fd }, bytes.to_vec())
+                    (
+                        Input {
+                            file: ManuallyDrop::new(f),
+                            owned: true,
+                            fd,
+                        },
+                        bytes.to_vec(),
+                    )
                 }
                 Err(e) => {
-                    diag!("tac: failed to open {} for reading: {}", quoteaf_os(name), strerror(&e));
+                    diag!(
+                        "tac: failed to open {} for reading: {}",
+                        quoteaf_os(name),
+                        strerror(&e)
+                    );
                     return false;
                 }
             }
@@ -395,7 +428,11 @@ mod imp {
             // SAFETY: the descriptor was opened by this function and is closed
             // once, here, with `owned` cleared so `Drop` does not close it again.
             if unsafe { libc_close(fd) } != 0 {
-                diag!("tac: {}: read error: {}", quotef(&label), strerror(&io::Error::last_os_error()));
+                diag!(
+                    "tac: {}: read error: {}",
+                    quotef(&label),
+                    strerror(&io::Error::last_os_error())
+                );
                 return false;
             }
         }
@@ -448,7 +485,13 @@ mod imp {
     /// written checked so that a broken invariant ends this file's output
     /// rather than the process.
     #[allow(clippy::too_many_lines)]
-    fn tac_seekable(tac: &mut Tac, file: &File, label: &[u8], file_pos: u64, out: &mut Stream) -> bool {
+    fn tac_seekable(
+        tac: &mut Tac,
+        file: &File,
+        label: &[u8],
+        file_pos: u64,
+        out: &mut Stream,
+    ) -> bool {
         let sentinel = tac.sentinel_length();
         let mut file_pos = file_pos;
         let mut first_time = true;
@@ -469,7 +512,10 @@ mod imp {
             saved = safe_read(file, g_mut(&mut tac.buf, tac.offset, 0, read));
             match saved {
                 Ok(0) if file_pos != 0 => {
-                    let back = i64::try_from(read).ok().and_then(i64::checked_neg).unwrap_or(i64::MIN);
+                    let back = i64::try_from(read)
+                        .ok()
+                        .and_then(i64::checked_neg)
+                        .unwrap_or(i64::MIN);
                     seek_or_warn(file, SeekFrom::Current(back), label);
                     file_pos = file_pos.saturating_sub(as_u64(read));
                 }
@@ -552,7 +598,9 @@ mod imp {
                         };
                         if tac.buf.get(at) == Some(&first)
                             && (rest.is_empty()
-                                || tac.buf.get(at.saturating_add(1)..at.saturating_add(sep.len()))
+                                || tac
+                                    .buf
+                                    .get(at.saturating_add(1)..at.saturating_add(sep.len()))
                                     == Some(rest))
                         {
                             break;
@@ -564,7 +612,11 @@ mod imp {
             if match_start < 0 {
                 if file_pos == 0 {
                     // The beginning of the file: print the remaining record.
-                    output(&mut tac.pending, out, g_slice(&tac.buf, tac.offset, 0, past_end));
+                    output(
+                        &mut tac.pending,
+                        out,
+                        g_slice(&tac.buf, tac.offset, 0, past_end),
+                    );
                     return true;
                 }
                 let saved_record = past_end;
@@ -601,10 +653,8 @@ mod imp {
                 // Shift the pending record right to make room for the new.
                 let g = tac.offset;
                 let read = tac.read_size;
-                tac.buf.copy_within(
-                    g..g.saturating_add(saved_record),
-                    g.saturating_add(read),
-                );
+                tac.buf
+                    .copy_within(g..g.saturating_add(saved_record), g.saturating_add(read));
                 past_end = read.saturating_add(saved_record);
                 match_start = as_isize(if sentinel > 0 { read } else { past_end });
                 window = None;
@@ -623,12 +673,20 @@ mod imp {
                     // Unless this match is the very end of the file, print the
                     // record after it.
                     if !first_time || match_end != past_end {
-                        output(&mut tac.pending, out, g_slice(&tac.buf, tac.offset, match_end, past_end));
+                        output(
+                            &mut tac.pending,
+                            out,
+                            g_slice(&tac.buf, tac.offset, match_end, past_end),
+                        );
                     }
                     past_end = match_end;
                     first_time = false;
                 } else {
-                    output(&mut tac.pending, out, g_slice(&tac.buf, tac.offset, start, past_end));
+                    output(
+                        &mut tac.pending,
+                        out,
+                        g_slice(&tac.buf, tac.offset, start, past_end),
+                    );
                     past_end = start;
                 }
                 if sentinel > 0 {
@@ -782,7 +840,12 @@ mod imp {
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic, clippy::indexing_slicing)]
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::panic,
+    clippy::indexing_slicing
+)]
 mod tests {
     use super::*;
 

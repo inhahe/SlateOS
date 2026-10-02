@@ -533,7 +533,10 @@ fn report(text: &str) -> ExitCode {
     match write_stdout(text) {
         Ok(()) => ExitCode::SUCCESS,
         Err(e) => {
-            warn(&format!("powerctl: write error: {}\n", errmsg::strerror(&e)));
+            warn(&format!(
+                "powerctl: write error: {}\n",
+                errmsg::strerror(&e)
+            ));
             ExitCode::FAILURE
         }
     }
@@ -715,7 +718,10 @@ fn cmd_schedule(minutes: u64, action: &'static str) {
     // not shut down read as the success case with a footnote.
     let minutes_arg = minutes.to_string();
     let plural = if minutes == 1 { "" } else { "s" };
-    match ask_service_manager("SchedulePower", &[minutes_arg.as_bytes(), action.as_bytes()]) {
+    match ask_service_manager(
+        "SchedulePower",
+        &[minutes_arg.as_bytes(), action.as_bytes()],
+    ) {
         Ok(Answer::Accepted) => {
             note(&format!(
                 "Scheduled {action} in {minutes} minute{plural}.\nRun 'powerctl cancel' to abort.\n"
@@ -726,7 +732,9 @@ fn cmd_schedule(minutes: u64, action: &'static str) {
             // The record was written before asking; a refused schedule must
             // not linger in `powerctl status` as one that is merely waiting.
             if let Err(e) = cancel_schedule() {
-                warn(&format!("error: {SCHEDULE_FILE} could not be removed: {e}\n"));
+                warn(&format!(
+                    "error: {SCHEDULE_FILE} could not be removed: {e}\n"
+                ));
             }
             warn(&format!(
                 "Nothing is scheduled; the machine will not {action} on its own.\n"
@@ -871,7 +879,10 @@ enum Command {
     Hibernate,
     Status,
     Cancel,
-    Schedule { minutes: u64, action: &'static str },
+    Schedule {
+        minutes: u64,
+        action: &'static str,
+    },
 }
 
 /// Why a command line was refused: what to say on standard error. Nothing
@@ -1114,7 +1125,10 @@ mod tests {
         assert_eq!(parse(&[]), Ok(Command::Usage));
         assert_eq!(
             parse(&words(&["sched", "5", "restart"])),
-            Ok(Command::Schedule { minutes: 5, action: "reboot" })
+            Ok(Command::Schedule {
+                minutes: 5,
+                action: "reboot"
+            })
         );
     }
 

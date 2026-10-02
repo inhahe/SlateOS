@@ -1970,7 +1970,11 @@ fn compile_patterns(
             // character rather than an operator with nothing to repeat, so
             // there is nothing to remark on. Measured — `grep -G '*a'` and
             // `grep -F '*a'` are both silent.
-            Syntax::Basic => bre::compile(p, opts.ignore_case).map(|re| (re, Vec::new())),
+            // grep's own basic syntax, which is not sed's: a repetition may
+            // repeat a repetition (`a**`), and a `\{` with nothing before it
+            // is the character. See `ere::bre::BreSyntax`.
+            Syntax::Basic => bre::compile_syntax(p, opts.ignore_case, bre::BreSyntax::GREP)
+                .map(|re| (re, Vec::new())),
             // `-E` is *egrep* syntax, which is not the POSIX-extended syntax
             // the same engine gives `osh`, `find -regextype posix-extended`
             // and `awk`. The two differ on what happens to nonsense: GNU

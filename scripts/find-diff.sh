@@ -147,6 +147,17 @@ printf '#!/bin/sh\nexit 0\n' > t/exe && chmod 755 t/exe
 chmod 1777 t/sticky
 mkfifo t/fifo
 
+# Beside the tree, for the -regextype cases only: one name per reading a
+# pattern could have -- `a{2}` or `aa`, `a+` or `a`, `a|b`, `(a)`, `*a`, `a1`,
+# `aw`, a backslash, a dot, and a newline -- so each type's answer shows which
+# glibc syntax it compiled with. Its own directory, because adding these to
+# `t` would change every listing above.
+mkdir rt
+for n in a aa aaa 'a{2}' 'a+' 'a?' 'a|b' b ab 'a\b' 'a.b' '(a)' a1 aw '*a' ']'; do
+  : > "rt/$n"
+done
+: > "$(printf 'rt/a\nb')"
+
 # Distinct, fixed times, so `-newer`, `-mtime`, `-newermt` and `%T@` mean the
 # same thing in June as in December. Set after the tree is built because
 # creating a file inside a directory bumps that directory's mtime.
@@ -682,6 +693,14 @@ find t -regextype posix-extended -regex 'a{1,0}'
 find t -regextype posix-extended -regex '[[:foo:]]'
 find t -regextype posix-extended -regex '[z-a]'
 find t -regextype posix-extended -regex 'a\'
+# A repetition straight after an assertion: refused, whichever assertion --
+# glibc returns from an anchor before it looks for one (TD-B-ERE-QUANTIFIED-ANCHOR).
+find t -regextype posix-extended -regex 't/f$*'
+find t -regextype posix-extended -regex 't/f\b+'
+find t -regextype posix-extended -regex 't/\<?f'
+find t -regextype posix-extended -regex 't/f(\b)*'
+# In a basic one, `\+` with nothing to repeat is the character.
+find t -regextype posix-basic -regex 't/\+f'
 find t -regextype posix-extended -regex ''
 find t -regextype posix-basic -regex 'a\('
 find t -regextype posix-basic -regex 'a\)'
@@ -809,6 +828,25 @@ find ../mut -depth -name f -delete
 find ../mut -name f -exec rm '{}' ';' -print
 MUTCASES
 rm -rf ../mut
+
+# --- -regextype: every type against a pattern for each syntax bit ------------
+# Generated, because the point is the matrix. Each pattern is one that a single
+# glibc syntax bit decides -- intervals (`a{2}`, `a\{2\}`), `+` and `\+`, `|`
+# and `\|`, grouping, the GNU operators (`a\w`), escapes in brackets
+# (`[a\]b]`), a leading repetition (`(*a)`), consecutive repetitions (`a**`),
+# `.` and newline, backreferences (`a\1`), an anchor beside a newline
+# (`a$.b`), an empty range, a leading interval -- and every type has to answer
+# all of them as findutils' syntax for it does (lib/regextype.c). The `rt`
+# names are chosen so each reading finds something different. Until
+# 2026-10-01 find knew only "basic" and "extended" (known-issues.md
+# TD-B-FIND-REGEXTYPES-ARE-TWO-DIALECTS).
+for ty in findutils-default emacs gnu-awk awk posix-awk egrep posix-egrep grep \
+          posix-basic posix-minimal-basic ed sed posix-extended; do
+    for p in 'a{2}' 'a\{2\}' 'a+' 'a\+' 'a|b' 'a\|b' '\(a\)' '(a)' 'a\w' \
+             '[a\]b]' '(*a)' 'a**' 'a.b' 'a\1' 'a$.b' 'a[z-a]*' '\{2\}a'; do
+        run_case "find rt -mindepth 1 -regextype $ty -regex 'rt/$p'"
+    done
+done
 
 # --------------------------------------------------- the unreadable cases ---
 #

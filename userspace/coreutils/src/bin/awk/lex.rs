@@ -154,7 +154,9 @@ fn keyword(name: &str) -> Option<Kw> {
     Some(match name {
         "BEGIN" => Kw::Begin,
         "END" => Kw::End,
-        "function" | "func" => Kw::Function,
+        // Not `func`: POSIX does not reserve it, so a program may name a
+        // variable `func`, and gawk --posix reads it as a name too.
+        "function" => Kw::Function,
         "if" => Kw::If,
         "else" => Kw::Else,
         "while" => Kw::While,
@@ -184,6 +186,9 @@ pub struct Lexer<'a> {
     /// What the escape layers had to say about the strings and regexes read
     /// so far; see [`Lexer::tokenize`].
     warnings: Warnings,
+    /// Those warnings once said, each with the offset of the token that
+    /// earned it, so the caller can name the line as gawk does.
+    said: Vec<(usize, Str)>,
 }
 
 impl<'a> Lexer<'a> {
@@ -194,24 +199,42 @@ impl<'a> Lexer<'a> {
             i: 0,
             prev: None,
             warnings: Warnings::default(),
+            said: Vec::new(),
         }
     }
 
-    /// Tokenise the whole program, its escape warnings going to `warnings`.
+    /// Tokenise the whole program, its escape warnings going to `warnings`'
+    /// tables and to `said`, each message beside the offset of its token.
     ///
-    /// The warnings are gawk's, each said once per run, so they are kept in
-    /// the run's one [`Warnings`] rather than this lexer's: the interpreter
-    /// carries on with the same one, and a `\q` the program text has already
-    /// warned about does not warn again when a dynamic regex repeats it.
+    /// The warnings are gawk's, each said once per run, so the tables are the
+    /// run's one [`Warnings`] rather than this lexer's: the interpreter carries
+    /// on with the same one, and a `\q` the program text has already warned
+    /// about does not warn again when a dynamic regex repeats it.
     ///
-    /// # Errors
-    /// As [`Lexer::tokens`].
-    pub fn tokenize(src: &'a [u8], warnings: &mut Warnings) -> Result<Vec<Token>, String> {
+    /// Every token the lexer made, and the error it stopped at, if it did:
+    /// with the offset it had reached. The tokens end in an `Eof` either way,
+    /// at that offset when the lexer stopped early, so the parser can run over
+    /// what came before the error -- which is what gawk, whose parser asks
+    /// for one token at a time, has read when its lexer complains; see
+    /// `parse::parse` for why the order matters.
+    pub fn tokenize(
+        src: &'a [u8],
+        warnings: &mut Warnings,
+        said: &mut Vec<(usize, Str)>,
+    ) -> (Vec<Token>, Option<(usize, String)>) {
         let mut lx = Lexer::new(src);
         lx.warnings = std::mem::take(warnings);
-        let toks = lx.run();
+        let mut toks = Vec::new();
+        let stopped = lx.run(&mut toks).err().map(|e| {
+            toks.push(Token {
+                kind: Tok::Eof,
+                at: lx.i,
+            });
+            (lx.i, e)
+        });
         *warnings = std::mem::take(&mut lx.warnings);
-        toks
+        said.append(&mut lx.said);
+        (toks, stopped)
     }
 
     /// Tokenise the whole program, dropping any escape warnings.
@@ -221,18 +244,26 @@ impl<'a> Lexer<'a> {
     /// character that cannot begin a token.
     #[cfg(test)]
     pub fn tokens(mut self) -> Result<Vec<Token>, String> {
-        self.run()
+        let mut out = Vec::new();
+        self.run(&mut out)?;
+        Ok(out)
     }
 
-    fn run(&mut self) -> Result<Vec<Token>, String> {
-        let mut out = Vec::new();
+    /// Lex onto the end of `out`, up to and including the `Eof`, or to the
+    /// first error, leaving behind it every token made before.
+    fn run(&mut self, out: &mut Vec<Token>) -> Result<(), String> {
         loop {
             let t = self.next_token()?;
+            // Whatever a string or regex literal earned, it earned at this
+            // token's offset.
+            for message in self.warnings.take() {
+                self.said.push((t.at, message));
+            }
             let end = t.kind == Tok::Eof;
             self.prev = Some(t.kind.clone());
             out.push(t);
             if end {
-                return Ok(out);
+                return Ok(());
             }
         }
     }
@@ -255,7 +286,9 @@ impl<'a> Lexer<'a> {
     ///
     /// POSIX lists the tokens a newline may follow without ending anything:
     /// `{ && || do else , ;` and the two `)` cases the *parser* handles (after
-    /// `if (…)`, `while (…)`, `for (…)`), which is why `)` is not here.
+    /// `if (…)`, `while (…)`, `for (…)`), which is why `)` is not here. `?`
+    /// and `:` are not here either: gawk lets a newline follow them only
+    /// outside `--posix`.
     fn newline_is_significant(&self) -> bool {
         !matches!(
             self.prev,
@@ -266,8 +299,6 @@ impl<'a> Lexer<'a> {
                     | Tok::Comma
                     | Tok::Semi
                     | Tok::Newline
-                    | Tok::Question
-                    | Tok::Colon
                     | Tok::Keyword(Kw::Do | Kw::Else)
             )
         )
@@ -436,29 +467,14 @@ impl<'a> Lexer<'a> {
         t
     }
 
+    /// A numeric constant: decimal only. gawk's `--posix` implies its
+    /// `--traditional`, under which its scanner stops a number at the `x` of
+    /// `0x1A` (and reads `011` as eleven), so `print 0x1A` prints `0` joined
+    /// to the variable `x1A`. Measured; this read hexadecimal until
+    /// 2026-10-01.
     fn number(&mut self) -> f64 {
-        // Hexadecimal constants are not POSIX awk, but every implementation
-        // that reads them agrees on the syntax and a program containing `0xff`
-        // means it.
-        if self.peek() == Some(b'0') && matches!(self.at(1), Some(b'x' | b'X')) {
-            let start = self.i.saturating_add(2);
-            let mut j = start;
-            while matches!(self.src.get(j), Some(d) if d.is_ascii_hexdigit()) {
-                j = j.saturating_add(1);
-            }
-            if j > start {
-                let text = self.src.get(start..j).unwrap_or_default();
-                self.i = j;
-                let mut n: f64 = 0.0;
-                for d in text {
-                    let v = f64::from(char::from(*d).to_digit(16).unwrap_or(0));
-                    n = n.mul_add(16.0, v);
-                }
-                return n;
-            }
-        }
         let rest = self.src.get(self.i..).unwrap_or_default();
-        match crate::value::num_prefix(rest) {
+        match crate::value::decimal_prefix(rest) {
             Some((n, used)) => {
                 self.i = self.i.saturating_add(used);
                 n
@@ -523,6 +539,11 @@ impl<'a> Lexer<'a> {
                     match c {
                         None => return Err("unterminated string".to_string()),
                         Some(b'\n') => {
+                            // gawk raises this before it counts the newline, so
+                            // the line it names is the backslash's. The error is
+                            // placed at the lexer's position, which `bump` has
+                            // already moved past the newline: step back onto it.
+                            self.i = self.i.saturating_sub(1);
                             return Err(
                                 "fatal: POSIX does not allow physical newlines in string values"
                                     .to_string(),
@@ -674,17 +695,26 @@ mod tests {
     /// The tokens of `src`, and every warning the lexing produced.
     fn toks_warned(src: &[u8]) -> (Vec<Tok>, Vec<String>) {
         let mut w = Warnings::default();
-        let toks = Lexer::tokenize(src, &mut w)
-            .unwrap()
+        let mut said = Vec::new();
+        let (toks, stopped) = Lexer::tokenize(src, &mut w, &mut said);
+        assert!(stopped.is_none(), "{stopped:?}");
+        let toks = toks.into_iter().map(|t| t.kind).collect();
+        let said = said
             .into_iter()
-            .map(|t| t.kind)
-            .collect();
-        let said = w
-            .take()
-            .into_iter()
-            .map(|m| String::from_utf8(m).unwrap())
+            .map(|(_, m)| String::from_utf8(m).unwrap())
             .collect();
         (toks, said)
+    }
+
+    /// Each warning keeps the offset of the token that earned it.
+    #[test]
+    fn a_warning_is_tied_to_its_tokens_offset() {
+        let mut w = Warnings::default();
+        let mut said = Vec::new();
+        let (_, stopped) = Lexer::tokenize(b"x = 1\ny = \"\\q\"\n", &mut w, &mut said);
+        assert!(stopped.is_none());
+        assert_eq!(said.len(), 1);
+        assert_eq!(said[0].0, 10, "the offset of the string literal");
     }
 
     #[test]
@@ -902,14 +932,34 @@ mod tests {
     #[test]
     fn numbers_in_every_shape_awk_accepts() {
         assert_eq!(
-            toks("1 1.5 .5 1e3 1E-2 0x1f"),
+            toks("1 1.5 .5 1e3 1E-2 5. 011"),
             vec![
                 Tok::Number(1.0),
                 Tok::Number(1.5),
                 Tok::Number(0.5),
                 Tok::Number(1000.0),
                 Tok::Number(0.01),
-                Tok::Number(31.0),
+                Tok::Number(5.0),
+                // Decimal, not octal: gawk's `--posix` is `--traditional`.
+                Tok::Number(11.0),
+                Tok::Eof
+            ]
+        );
+    }
+
+    /// gawk's `--posix` scanner stops a number at the `x` of `0x1f`, so it is
+    /// the number 0 and then the name `x1f`: `print 0x1A` prints `0`.
+    #[test]
+    fn a_hexadecimal_constant_is_a_zero_and_a_name() {
+        assert_eq!(
+            toks("0x1f 1e 1.2.3"),
+            vec![
+                Tok::Number(0.0),
+                Tok::Name("x1f".into()),
+                Tok::Number(1.0),
+                Tok::Name("e".into()),
+                Tok::Number(1.2),
+                Tok::Number(0.3),
                 Tok::Eof
             ]
         );

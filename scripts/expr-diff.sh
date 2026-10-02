@@ -248,6 +248,20 @@ run_case aab : 'a\{2\}'
 run_case abc : 'a\{2\}'
 run_case abc : '^abc'
 run_case abc : 'abc$'
+# With nothing to repeat, `\+` and `\?` are characters in a basic expression,
+# and a `*` after an assertion is one too (TD-B-ERE-QUANTIFIED-ANCHOR).
+run_case +a : '\+a'
+run_case '?a' : '\?a'
+run_case 'a*' : 'a\>*'
+run_case ab : 'a\>*'
+# coreutils' basic syntax: no RE_CONTEXT_INVALID_DUP and no RE_NO_EMPTY_RANGES
+# (ere::bre::BreSyntax::COREUTILS), and a `\}` closing nothing is the character.
+run_case aa : 'a**'
+run_case aa : 'a\{1\}*'
+run_case '{2}a' : '\{2\}a'
+run_case a : 'a[z-a]*'
+run_case a : '[z-a]'
+run_case 'a}' : 'a\}'
 run_case abc : 'c$'
 run_case abc : '.'
 run_case abc : '.*'

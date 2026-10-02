@@ -587,7 +587,9 @@ fn colon(subject: &[u8], pattern: &[u8]) -> Result<Str, Fail> {
     if pattern.is_empty() {
         return Ok(b"0".to_vec());
     }
-    let re = ere::bre::compile(pattern, false)
+    // coreutils' basic syntax: no `RE_CONTEXT_INVALID_DUP` and no
+    // `RE_NO_EMPTY_RANGES`, so `a**` and `[z-a]` both compile (measured).
+    let re = ere::bre::compile_syntax(pattern, false, ere::bre::BreSyntax::COREUTILS)
         .map_err(|e| Fail(String::from_utf8_lossy(&e.detail).into_owned()))?;
     // A search that gave up is neither a match nor a non-match. `expr` is used
     // for control flow — `expr "$f" : 'lib' >/dev/null || exit` — so reporting

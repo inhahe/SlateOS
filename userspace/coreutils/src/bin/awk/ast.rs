@@ -62,8 +62,9 @@ const _: () = assert!(SPECIALS.len() == SPECIAL_COUNT);
 #[derive(Clone, Debug)]
 pub enum Lvalue {
     Var(VarRef),
-    /// `$expr`.
-    Field(Box<Expr>),
+    /// `$expr`, and where the `$` is: a field number below 0 is refused there,
+    /// whatever the field is being used for.
+    Field(Box<Expr>, Loc),
     /// `name[i, j]` — the subscripts are joined with SUBSEP into one key.
     Index(VarRef, Vec<Expr>),
 }
@@ -132,8 +133,29 @@ pub struct Getline {
     pub src: GetlineSrc,
 }
 
+/// An expression, and where its operator was written.
+///
+/// gawk places a diagnostic on the line of the instruction that raised it, and
+/// an instruction takes its line from the token it was made from: `/` for a
+/// division, `~` for a match, the name for a call or a built-in, `getline`
+/// for a read. So `if (1 &&\n 1/z)` fails on line 2, the line of the `/`,
+/// not on line 1 where the statement began; and a node with no operator of
+/// its own (a concatenation) takes its left operand's. `loc` is that token's.
 #[derive(Clone, Debug)]
-pub enum Expr {
+pub struct Expr {
+    pub kind: ExprKind,
+    pub loc: Loc,
+}
+
+impl Expr {
+    #[must_use]
+    pub fn new(kind: ExprKind, loc: Loc) -> Expr {
+        Expr { kind, loc }
+    }
+}
+
+#[derive(Clone, Debug)]
+pub enum ExprKind {
     Num(f64),
     Str(Rc<Str>),
     /// A `/re/` literal. In a value context this means `$0 ~ /re/`; as an
@@ -181,8 +203,22 @@ pub struct Redirect {
     pub target: Expr,
 }
 
+/// Where in the program text something was written: which source -- the
+/// program operand, or one of the `-f` files, by index into
+/// [`Program::sources`] -- and the line in it, counted from 1 in each source
+/// as gawk counts them.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Loc {
+    pub source: usize,
+    pub line: usize,
+}
+
 #[derive(Clone, Debug)]
 pub enum Stmt {
+    /// A statement, and the line it begins on: what a diagnostic raised while
+    /// it runs names, as gawk's `cmd. line:3:` does. The parser wraps every
+    /// statement of a block in one.
+    At(Loc, Box<Stmt>),
     Expr(Expr),
     Print(Vec<Expr>, Option<Redirect>),
     Printf(Vec<Expr>, Option<Redirect>),
@@ -196,8 +232,9 @@ pub enum Stmt {
         step: Option<Box<Stmt>>,
         body: Box<Stmt>,
     },
+    /// `for (var in array)`: POSIX allows only a name for `var`.
     ForIn {
-        var: Lvalue,
+        var: VarRef,
         array: VarRef,
         body: Box<Stmt>,
     },
@@ -208,7 +245,14 @@ pub enum Stmt {
     Break,
     Continue,
     /// `delete a[i]`, or `delete a` when the subscripts are empty.
-    Delete(VarRef, Vec<Expr>),
+    Delete {
+        array: VarRef,
+        subs: Vec<Expr>,
+        /// The subscript's variable when the subscript is exactly one bare
+        /// name -- no parentheses -- which is the shape gawk's parser looks
+        /// for in `for (k in a) delete a[k]` (see `compile::delete_loop`).
+        bare: Option<VarRef>,
+    },
     Nop,
 }
 
@@ -241,6 +285,9 @@ pub struct Func {
     /// 2 of f" would send the reader counting commas.
     pub params: Vec<String>,
     pub body: Vec<Stmt>,
+    /// Where the name was written: gawk reports a `-v` assignment to the
+    /// same name there, as the definition that conflicts with it.
+    pub loc: Loc,
 }
 
 #[derive(Debug, Default)]
@@ -260,4 +307,8 @@ pub struct Program {
     pub global_is_array: Vec<bool>,
     /// The same, per function parameter.
     pub param_is_array: Vec<Vec<bool>>,
+    /// The program's sources, which [`Loc::source`] indexes: `None` for the
+    /// program given as an operand -- gawk's `cmd. line` -- and each `-f` file
+    /// by the name it was given as.
+    pub sources: Vec<Option<Vec<u8>>>,
 }

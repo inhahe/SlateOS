@@ -46,7 +46,9 @@
 //! array rather than about a value: the bare name in `length(a)`, and `a` in
 //! `split(s, a)` — which is the array-marking use itself.
 
-use crate::ast::{Builtin, Expr, Lvalue, Pattern, Program, Stmt, V_ARGV, V_ENVIRON, VarRef};
+use crate::ast::{
+    Builtin, Expr, ExprKind, Lvalue, Pattern, Program, Stmt, V_ARGV, V_ENVIRON, VarRef,
+};
 
 /// One `f(…, v, …)` argument, recorded so the two ends can agree later.
 struct Link {
@@ -340,6 +342,7 @@ impl Pass {
 
     fn stmt(&mut self, ctx: Option<usize>, s: &Stmt) {
         match s {
+            Stmt::At(_, inner) => self.stmt(ctx, inner),
             Stmt::Expr(e) => self.expr(ctx, e),
             Stmt::Print(args, r) | Stmt::Printf(args, r) => {
                 for a in args {
@@ -383,7 +386,7 @@ impl Pass {
                 self.stmt(ctx, body);
             }
             Stmt::ForIn { var, array, body } => {
-                self.lvalue(ctx, var);
+                self.mark(ctx, *var, Use::Scalar);
                 self.mark(ctx, *array, Use::Array);
                 self.stmt(ctx, body);
             }
@@ -392,7 +395,9 @@ impl Pass {
                     self.expr(ctx, e);
                 }
             }
-            Stmt::Delete(arr, subs) => {
+            Stmt::Delete {
+                array: arr, subs, ..
+            } => {
                 self.mark(ctx, *arr, Use::Array);
                 for s in subs {
                     self.expr(ctx, s);
@@ -405,7 +410,7 @@ impl Pass {
     fn lvalue(&mut self, ctx: Option<usize>, lv: &Lvalue) {
         match lv {
             Lvalue::Var(v) => self.mark(ctx, *v, Use::Scalar),
-            Lvalue::Field(e) => self.expr(ctx, e),
+            Lvalue::Field(e, _) => self.expr(ctx, e),
             Lvalue::Index(v, subs) => {
                 self.mark(ctx, *v, Use::Array);
                 for s in subs {
@@ -416,47 +421,47 @@ impl Pass {
     }
 
     fn expr(&mut self, ctx: Option<usize>, e: &Expr) {
-        match e {
-            Expr::Num(_) | Expr::Str(_) | Expr::Regex(_) => {}
-            Expr::Get(lv) => self.lvalue(ctx, lv),
-            Expr::Assign(lv, rhs) => {
+        match &e.kind {
+            ExprKind::Num(_) | ExprKind::Str(_) | ExprKind::Regex(_) => {}
+            ExprKind::Get(lv) => self.lvalue(ctx, lv),
+            ExprKind::Assign(lv, rhs) => {
                 self.lvalue(ctx, lv);
                 self.expr(ctx, rhs);
             }
-            Expr::AugAssign(lv, _, rhs) => {
+            ExprKind::AugAssign(lv, _, rhs) => {
                 self.lvalue(ctx, lv);
                 self.expr(ctx, rhs);
             }
-            Expr::Cond(a, b, c) => {
+            ExprKind::Cond(a, b, c) => {
                 self.expr(ctx, a);
                 self.expr(ctx, b);
                 self.expr(ctx, c);
             }
-            Expr::Or(a, b)
-            | Expr::And(a, b)
-            | Expr::Concat(a, b)
-            | Expr::Bin(_, a, b)
-            | Expr::Cmp(_, a, b) => {
+            ExprKind::Or(a, b)
+            | ExprKind::And(a, b)
+            | ExprKind::Concat(a, b)
+            | ExprKind::Bin(_, a, b)
+            | ExprKind::Cmp(_, a, b) => {
                 self.expr(ctx, a);
                 self.expr(ctx, b);
             }
-            Expr::Match { lhs, rhs, .. } => {
+            ExprKind::Match { lhs, rhs, .. } => {
                 self.expr(ctx, lhs);
                 self.expr(ctx, rhs);
             }
-            Expr::In(subs, arr) => {
+            ExprKind::In(subs, arr) => {
                 for s in subs {
                     self.expr(ctx, s);
                 }
                 self.mark(ctx, *arr, Use::Array);
             }
-            Expr::Neg(a) | Expr::Pos(a) | Expr::Not(a) => self.expr(ctx, a),
-            Expr::PreIncr(lv, _) | Expr::PostIncr(lv, _) => self.lvalue(ctx, lv),
-            Expr::Call(f, args) => {
+            ExprKind::Neg(a) | ExprKind::Pos(a) | ExprKind::Not(a) => self.expr(ctx, a),
+            ExprKind::PreIncr(lv, _) | ExprKind::PostIncr(lv, _) => self.lvalue(ctx, lv),
+            ExprKind::Call(f, args) => {
                 for (i, a) in args.iter().enumerate() {
                     // Only a *bare* variable can be an array argument; anything
                     // else is an expression and therefore a scalar.
-                    if let Expr::Get(Lvalue::Var(v)) = a {
+                    if let ExprKind::Get(Lvalue::Var(v)) = &a.kind {
                         self.links.push(Link {
                             caller: ctx,
                             callee: *f,
@@ -468,10 +473,10 @@ impl Pass {
                     }
                 }
             }
-            Expr::Builtin(b, args) => {
+            ExprKind::Builtin(b, args) => {
                 for (i, a) in args.iter().enumerate() {
                     if *b == Builtin::Split && i == 1 {
-                        if let Expr::Get(Lvalue::Var(v)) = a {
+                        if let ExprKind::Get(Lvalue::Var(v)) = &a.kind {
                             self.mark(ctx, *v, Use::Array);
                         }
                         continue;
@@ -481,20 +486,20 @@ impl Pass {
                     // length. It is therefore no evidence at all, so it must not
                     // be allowed to record a scalar use — that would make
                     // `split(s, a); print length(a)` a conflict.
-                    if *b == Builtin::Length && matches!(a, Expr::Get(Lvalue::Var(_))) {
+                    if *b == Builtin::Length && matches!(a.kind, ExprKind::Get(Lvalue::Var(_))) {
                         continue;
                     }
                     self.expr(ctx, a);
                 }
             }
-            Expr::Getline(g) => {
+            ExprKind::Getline(g) => {
                 if let Some(lv) = &g.into {
                     self.lvalue(ctx, lv);
                 }
                 match &g.src {
                     crate::ast::GetlineSrc::Main => {}
                     crate::ast::GetlineSrc::File(e) | crate::ast::GetlineSrc::Cmd(e) => {
-                        self.expr(ctx, e)
+                        self.expr(ctx, e);
                     }
                 }
             }
@@ -510,7 +515,12 @@ mod tests {
 
     /// Run the pass, and report which globals it decided are arrays, by name.
     fn arrays(src: &str) -> Result<Vec<String>, String> {
-        let mut prog = parse(src.as_bytes(), &mut ere::awk::Warnings::default())?;
+        let mut prog = parse(
+            src.as_bytes(),
+            &crate::source::SourceMap::operand(src.as_bytes()),
+            &mut ere::awk::Warnings::default(),
+            &mut Vec::new(),
+        )?;
         resolve(&mut prog)?;
         Ok(prog
             .global_names

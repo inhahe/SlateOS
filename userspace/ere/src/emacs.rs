@@ -78,7 +78,19 @@ const SYNTAX: Syntax = Syntax {
 /// # Errors
 /// Returns the translation's error, or the ERE engine's, whichever stops first.
 pub fn compile(pattern: BStr<'_>, ci: bool) -> Result<Regex, EreError> {
-    let ere = to_ere(pattern)?;
+    let ere = translate(pattern, false)?;
+    Regex::new_syntax(&ere, ci, SYNTAX)
+}
+
+/// Compile a pattern in `RE_SYNTAX_EMACS | RE_DOT_NEWLINE`, where `.` matches
+/// a newline as well: findutils' default `-regextype`, `findutils-default`.
+/// Measured, findutils 4.9: `-regextype findutils-default -regex 't/a.b'`
+/// finds a file named `a<newline>b`, and `-regextype emacs` does not.
+///
+/// # Errors
+/// As [`compile`].
+pub fn compile_dot_newline(pattern: BStr<'_>, ci: bool) -> Result<Regex, EreError> {
+    let ere = translate(pattern, true)?;
     Regex::new_syntax(&ere, ci, SYNTAX)
 }
 
@@ -90,6 +102,11 @@ pub fn compile(pattern: BStr<'_>, ci: bool) -> Result<Regex, EreError> {
 /// `[.x.]`/`[=x=]` naming no single character. A backwards range is not an
 /// error here; see the module docs.
 pub fn to_ere(pattern: BStr<'_>) -> Result<Str, EreError> {
+    translate(pattern, false)
+}
+
+/// [`to_ere`], with `dot_newline` choosing whether `.` matches a newline.
+fn translate(pattern: BStr<'_>, dot_newline: bool) -> Result<Str, EreError> {
     let cs: Vec<Ch> = chars(pattern).collect();
     let mut out = Str::new();
     let mut i = 0usize;
@@ -185,8 +202,13 @@ pub fn to_ere(pattern: BStr<'_>) -> Result<Str, EreError> {
                 i = i.saturating_add(1);
             }
             Some('.') => {
-                // `RE_DOT_NEWLINE` is not in this syntax.
-                out.extend_from_slice(b"[^\n]");
+                // `RE_DOT_NEWLINE` is not in Emacs syntax itself; findutils
+                // adds it for its default type.
+                if dot_newline {
+                    out.push(b'.');
+                } else {
+                    out.extend_from_slice(b"[^\n]");
+                }
                 prev_atom = true;
                 i = i.saturating_add(1);
             }

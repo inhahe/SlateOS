@@ -83913,6 +83913,75 @@ it was pinned by in `awk-diff.sh` is an ordinary case now.
 **Revisit when** a caller needs C escapes without being awk or sed -- it should
 then get a layer of its own, not a flag in the engine.
 
+## 1056. awk is compiled to instructions run by a loop, as gawk is, rather than walked as a tree
+
+**Date:** 2026-10-01
+**Lane:** B
+**Decided by:** Claude (autonomous)
+
+**In short:** our `awk` used to run a program by walking its parsed tree,
+calling itself once for every awk function call. A recursive awk function
+3000 calls deep therefore ran the process out of stack and killed it, where
+gawk runs 30000 without noticing. It now translates the program into a list
+of simple instructions and runs them in a loop that keeps its own call
+records in ordinary memory, which is how gawk works -- so recursion is as
+deep as memory allows. The same change fixed four other bugs at once, because
+each was a consequence of the tree walk's shape.
+
+| Option | For | Against |
+|---|---|---|
+| **A. Compile to instructions; heap-allocated call frames** (chosen) | Recursion bounded by memory, as gawk's. gawk places a diagnostic on the line of the instruction that raised it and updates that line at every instruction, so an instruction carrying its token's line reproduces gawk's placement exactly, multi-line statements included. An lvalue is resolved once into a target, so `a[i++] += 1` touches one element (the walk evaluated `i++` twice). `exit`, `next` and `nextfile` inside a function are an ordinary return from the loop (the walk could not carry them out through an expression: `exit` printed an empty `awk: ` line). gawk's evaluation order -- a print's redirection before its arguments, a `getline` target before the read -- is the order of the instructions. | A rewrite of the evaluator; 343 harness rows and the probe batches (`target/drafts/loc-probe*.sh`) were the safety net. |
+| B. Keep the walk; run it on a thread with a very large stack | Small change | On SlateOS anonymous memory is committed when mapped (`MAP_LAZY` is opt-in, and `posix/src/pthread.rs` maps thread stacks without it), so a 1 GiB stack costs 1 GiB of memory per `awk` up front. Fixes none of the other four bugs. |
+| C. Keep the walk; a depth limit checked against the remaining stack | No crash | Still refuses programs gawk runs; fixes none of the other four. |
+| D. Keep the walk; grow the stack in segments (`stacker`-style) | Unbounded depth | Stack-switching assembly per target, and `x86_64-slateos` is not one the crates know; fixes none of the other four. |
+
+**What the instructions are.** gawk's, in effect: each made from the token
+gawk makes its own from (the `/` of a division, the `~` of a match, the name of
+a call), `None` for those gawk makes without a line (jumps, pops, `?:`'s, a
+concatenation). See `compile.rs` for the list and its stack effects, and
+`interp/run.rs` for the loop.
+
+**Revisit when** profiling shows the loop's dispatch dominating a real
+workload -- the next step would be specialising hot instruction pairs, not a
+return to the walk.
+
+## 1057. awk's arrays and the values they hand back are gawk's, quirks included
+
+**Date:** 2026-10-01
+**Lane:** B
+**Decided by:** Claude (autonomous)
+
+**In short:** `for (k in a)` visits an array's elements in an order POSIX
+leaves to the implementation, and ours came from Rust's hash map, which is
+seeded at random -- so the same program could print its report in a
+different order every run. Arrays are now built the way gawk builds them
+(its three table layouts, its hash functions, its growth rules), so the order
+is gawk's. The catch is that gawk's tables also decide *what kind of value*
+`k` is, and gawk's answer is surprising: with indices 9, 10 and 100, the
+common idiom `for (k in a) if (k > max) max = k` answers 9, because `k`
+starts out a number and turns into a string the first time it is compared.
+We reproduce that too, rather than giving the "obvious" 100.
+
+| Option | For | Against |
+|---|---|---|
+| **A. Port gawk's layouts and its lazily typed values** (chosen) | Output identical to gawk's, order and answers, for every program the harness has: 89 new rows, each measured. gawk is the reference this awk is held to (B-AWK-GAWK-FIDELITY-SWEEP), and a script moved between the two prints the same thing. | Reproduces gawk's surprises on purpose: the `max` idiom's 9; a field compared before it is stored keeps a different kind of index than one that was not (`$1 > 0` first makes `a[$1]`'s index a string). `value.rs` carries two shared state cells to model it. |
+| B. Port only the order; hand back indices as strnums | The `max` idiom gives 100, as most people expect. Simpler values. | Disagrees with gawk on programs whose loop compares or tests its index -- most of the 42 harness rows on the index -- with nothing to point at but our own taste. And still not POSIX's answer, which leaves the index's type unsaid. |
+| C. Keep a hash map, sorted iteration | Deterministic; easy to explain | Matches no awk at all: neither gawk's order nor its answers. |
+
+**What "gawk's lazily typed values" are.** gawk keeps type flags on a value's
+node and settles them in place the first time something asks, on the one node
+every copy shares. Two settlements show: an index from an integer array (its
+`INTIND` number) becomes a string at its first comparison, truth test or
+string use; and input that looks numeric is flagged a string until its first
+numeric use, which decides whether a string array keeps it as input or as
+text. Which values are one node is gawk's too: a field is shared on the stack
+and with a function's parameter, copied into a variable or element
+(`UNFIELD`). `value.rs`'s module documentation has the whole model;
+`array.rs` the layouts.
+
+**Revisit when** the reference changes: if this awk is ever held to POSIX
+alone, or to a different awk, option B becomes the better fit.
+
 ## 834. Selection is a change of colour, not of weight
 
 **Date:** 2026-09-12

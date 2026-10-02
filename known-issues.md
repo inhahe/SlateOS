@@ -88529,7 +88529,7 @@ indistinguishable from a hang — which is correct, because that description als
 fits a hang. The remaining false-positive risk is a long stretch of pure
 arithmetic over a fixed buffer, which no rung currently does.
 
-## TD-AWK-RUNTIME-DIAGNOSTICS-CARRY-NO-SOURCE-LOCATION (lane B, 2026-08-24) — **open**
+## TD-AWK-RUNTIME-DIAGNOSTICS-CARRY-NO-SOURCE-LOCATION (lane B, 2026-08-24) — **FIXED** 2026-10-01
 
 **In short:** when an `awk` program dies partway through — a division by zero,
 say — we print `awk: fatal: division by zero attempted` and stop. gawk prints
@@ -88584,6 +88584,29 @@ patch.
 **Severity.** Low for correctness — the exit status, the message text and
 everything already written to stdout all match gawk exactly. Medium for
 usability on long scripts, which is the case that most needs it.
+
+**Progress (2026-10-01).** Statements and rules now carry the line they begin
+on (`ast::Loc`, `source.rs` maps an offset to `cmd. line:N` or `file:N` per
+`-f` file), every runtime diagnostic is placed as gawk's `err()` places it,
+and parse-time warnings and fatals are placed too. `awk-diff.sh` gained 60
+placement rows, all agreeing; the two xfails above are `msg_case` again. Two
+claims above were measured wrong and are corrected here: the `(FILENAME=…
+FNR=…)` part is present whenever gawk's integer `FNR` is above 0 — END after
+input has it, a rule that set `FNR = 0.5` does not — not "only while a main
+rule runs"; and the unopenable-second-operand location is not stale state to
+avoid but the same "line of the last instruction executed" (`interpret.h`
+sets `sourceline` from every instruction) that places everything else, so it
+agrees now rather than being special-cased. **Left:** gawk's line is the
+*operator's*, not the statement's — `if (1 &&\n 1/z)` is line 2's `/`, and
+so is `print 1,\n 1/z` — so a statement that spans lines can still be
+placed on its first line where gawk names a later one. That needs a location
+on every expression node, which is the next change.
+
+**Status: FIXED 2026-10-01.** Every expression node now carries its token's
+line, and the program is compiled to instructions that each carry one, run by
+a loop that updates the current line at every instruction as gawk's
+`interpret.h` does (`design-decisions.md` §1056) -- so placement is gawk's
+for multi-line statements too. `awk-diff.sh` has the multi-line rows.
 
 #### TD-A-SED-KEPT-TWO-COPIES-OF-ITS-TRANSFORM-LOOP (lane A, 2026-08-25) — ✅ FIXED (`5e523d20a`)
 
@@ -151298,7 +151321,21 @@ on any host whose name is in the hosts table.
 
 ---
 
-## TD-B-PATCH-AUTO-DETECTS-A-BARE-NORMAL-DIFF-WHERE-GNU-CALLS-IT-GARBAGE (lane B, 2026-09-16) — **open**
+## TD-B-PATCH-AUTO-DETECTS-A-BARE-NORMAL-DIFF-WHERE-GNU-CALLS-IT-GARBAGE (lane B, 2026-09-16) — **FIXED** 2026-10-01
+
+**Resolution (2026-10-01).** GNU's reading was adopted, because it is GNU's
+rule and not a choice: `patch.c` passes `need_header = !(inname ||
+posixly_correct)` to `intuit_diff_type`, which skips every line that is not a
+header naming a file (`*** `, `+++ `, `Index:`, `diff --git `, `--- `) until
+one has -- so with no file operand a bare normal diff is never seen, and the
+input is garbage. `detect_dialect` now takes the same flag, and also requires
+a `< `/`> ` line after a normal command, as GNU's test does. Two related
+differences went with it, found by the `Index:` row: a normal diff's leading
+text is quoted under "The text leading up to this was:", and the `-p` hint is
+given by dialect (never for a normal diff) rather than by whether there was
+text to quote. Rows in `patch-diff.sh`: `patch -i n.patch` and
+`patch -i ni.patch`. (POSIXLY_CORRECT clears `need_header` as well; that row
+is not in the harness because GNU then reads its prompt from /dev/tty.)
 
 **In short:** a "normal" diff — the bare `2c2` kind, with no `---`/`+++` header
 naming a file — carries no filename at all. Handed one with **no target on the
@@ -181499,7 +181536,17 @@ SEQPACKET: a third kind, connected like a stream with datagram boundaries
 Lane B (userland) appends new entries at the end of this section, above the
 next lane's heading (design-decisions §977).
 
-## B-OILS-UNIT-TESTS-RUN-WHICHEVER-GREP-PATH-FINDS — six `osh` unit tests fail when `cargo test` is run from PowerShell on this machine (lane B, 2026-10-01) — **Status: OPEN (debt)**
+## B-OILS-UNIT-TESTS-RUN-WHICHEVER-GREP-PATH-FINDS — six `osh` unit tests fail when `cargo test` is run from PowerShell on this machine (lane B, 2026-10-01) — **FIXED** 2026-10-01
+
+**Resolution.** Every unit test that piped the shell's output through `grep`
+now captures it and keeps the lines in Rust (`lines_where` beside `run` in
+`interp.rs`'s tests) -- the ten sites that executed one, including the four
+whose answer happened to survive Embarcadero's `grep`. The one child left is
+`env`, which is what the test it sits in is about (what reaches a child's
+environment); its lines are read in Rust too. From PowerShell, with
+Embarcadero's `grep` first on `PATH`, all 1507 pass. (The `tests/corpus`
+scripts still use `grep`, as shell scripts do, and are not affected: the
+differ runs bash and `osh` under the same `PATH`.)
 
 **In short:** some of `osh`'s unit tests pipe the shell's output through an
 external `grep` to pick out the lines under test (22 sites in
@@ -181717,9 +181764,36 @@ on the same file); no `-o`/`-p` owner and mode checks, no `@include`d files, no
 **Where:** `userspace/sudo/src/main.rs` (`edit_sudoers`, `ask_what_now`,
 `sudoers_temp_path`); the `.lck` lock and `SudoError::LockError` are gone.
 
-## TD-B-ERE-QUANTIFIED-ANCHOR -- a `*` after `$` or a word assertion compiles here and is refused by glibc (lane B, 2026-10-01)
+## TD-B-ERE-QUANTIFIED-ANCHOR -- a `*` after `$` or a word assertion compiles here and is refused by glibc (lane B, 2026-10-01) — **FIXED** 2026-10-01
 
-**Status:** open
+**Status:** FIXED 2026-10-01
+
+**Resolution (2026-10-01, the same day).** Measured again tool by tool --
+grep 3.11 and grep -E, sed 4.9 and sed -E, ed 1.20, bash 5.2 `=~`, gawk 5.2.1
+`--posix` -- because GNU grep turned out to be two engines that do not agree
+with each other:
+
+| dialect | after `^ $` and the buffer anchors | after `\b \B \< \>` |
+|---|---|---|
+| POSIX extended, awk (glibc only) | `REG_BADRPT` | `REG_BADRPT` |
+| egrep (`grep -E`) | repeated; zero repetitions is the empty string | `*`, `+`, `?` leave the assertion as it was |
+| basic (glibc: sed, ed, expr, find) | `*`, `\+`, `\?` literal; `\{` refused | the same |
+
+So: the engine refuses any quantifier after any assertion unless the syntax
+has `context_indep_ops`; under egrep a word assertion is left as it was by `*`,
+`+` and `?`; and `bre::to_ere` treats every assertion as ending what can be
+repeated, with a second flag (`at_start`) so that a `^` after one stays a
+literal. On the way: a leading `\+` or `\?` in a basic expression was refused
+here ("nothing to repeat") where grep, sed and ed all read the character --
+`grep '\+a'` matches `+a` -- and now does too.
+
+**Where GNU grep is followed only halfway, deliberately:** its dfa matcher
+repeats a buffer anchor in a basic expression (``grep 'a\`*'`` matches every
+line with an `a`) where glibc -- and so GNU sed, ed and expr, which share this
+translation -- reads a literal `*`; and an interval on a word assertion under
+`-E` is self-contradicting there (`\b{1}` alone matches the line `a{1}`, while
+`a\b{1}` matches nothing at all). Ours follows glibc for the first and plain
+repetition for the second; both are xfail rows in `scripts/grep-diff.sh`.
 
 **In short:** in a regular expression, `$` means "end of line" and `\b` means
 "word edge" -- they match a position, not a character, so there is nothing for
@@ -181754,6 +181828,158 @@ assertion and keeps the repetition after the line and buffer anchors -- which
 the extended engine must then accept, so `to_ere` should rewrite it (zero or
 more of a zero-width assertion is the empty string; one or more is the
 assertion). Harness rows in `grep-diff.sh`, `find-diff.sh` and `awk-diff.sh`.
+
+## TD-B-FIND-REGEXTYPES-ARE-TWO-DIALECTS -- `find -regextype` maps thirteen glibc syntaxes onto two (lane B, 2026-10-01) — **FIXED** 2026-10-01
+
+**Status:** FIXED 2026-10-01
+
+**Resolution.** Every type is now the dialect it is: the two Emacs types
+through `ere::emacs` (`findutils-default` with `.` matching a newline,
+`emacs::compile_dot_newline`), the basic types through `ere::bre::BreSyntax`,
+the extended through `ere::Syntax` -- which grew `GNU_AWK` and `AWK` and the
+three bits they need (`leading_repeat_literal`, `no_intervals`,
+`no_backrefs`) -- and every type with glibc's `newline_anchor`, which
+`re_compile_pattern` sets (`-regextype posix-extended -regex 't/a$.b'` finds
+`a<newline>b`). `find-diff.sh` runs all thirteen types against seventeen
+patterns, each chosen so that one syntax bit decides it: 221 rows, all agreeing.
+
+Measuring the basic types turned up the same split in the tools themselves,
+fixed in the same change -- `ere::bre::BreSyntax`, one per GNU syntax:
+
+| | sed, ed, `more` | grep, `diff -I` | `expr`, `csplit`, `nl` |
+|---|---|---|---|
+| `a**`, `a\{2\}*` | refused | accepted | accepted |
+| `\{2\}a` | refused | the text `{2}a` | the text `{2}a` |
+| `[z-a]` | refused | refused | matches nothing |
+
+Ours had accepted the first everywhere, refused the second everywhere and
+refused the third everywhere; and a `\}` that closes no interval, which every
+one of them reads as `}`, was refused here as "unmatched \}". The original
+entry follows.
+
+**In short:** `find -regex` matches a file's whole path against a regular
+expression, and `-regextype` picks which of GNU's thirteen regex dialects the
+pattern is written in. Ours reduces every one of them to "basic" or
+"extended", so a pattern that means one thing in the dialect a user named can
+mean another here. The default dialect, `findutils-default`, is Emacs syntax
+in GNU find, and ours reads it as POSIX basic: GNU's `find -regex '.*\(a\|b\)'`
+and ours agree, but `\w` inside a default pattern, `[z-a]`, and a `.` against
+a newline in a name do not. `find.rs` (`regex_is_extended`) says this is
+"documented in known-issues.md"; it was not, until this entry.
+
+**What each name is in findutils 4.9** (`lib/regextype.c`), and what it needs
+here:
+
+| `-regextype` | glibc syntax | here today | the faithful reading |
+|---|---|---|---|
+| `findutils-default` | `RE_SYNTAX_EMACS \| RE_DOT_NEWLINE` | POSIX basic | `ere::emacs`, with `.` matching a newline |
+| `emacs` | `RE_SYNTAX_EMACS` | POSIX basic | `ere::emacs` (as `ptx` uses it) |
+| `posix-awk` | `RE_SYNTAX_POSIX_AWK` | POSIX extended | `Syntax::POSIX_AWK` (exists since 2026-10-01) |
+| `gnu-awk` | `RE_SYNTAX_GNU_AWK` | POSIX extended | escapes in lists, malformed interval literal, a leading `*` literal, GNU operators on |
+| `awk` | `RE_SYNTAX_AWK` | POSIX extended | escapes in lists, **no intervals** (`{` literal), no backreferences, no GNU operators |
+| `egrep`, `posix-egrep` | `RE_SYNTAX_EGREP` / `POSIX_EGREP` | POSIX extended | `Syntax::EGREP` |
+| `grep` | `RE_SYNTAX_GREP` | POSIX basic | basic with newline-as-alternation |
+| `posix-minimal-basic` | `RE_SYNTAX_POSIX_MINIMAL_BASIC` | POSIX basic | basic without `\+ \? \|` (`RE_LIMITED_OPS`) |
+| `posix-basic`, `ed`, `sed` | `RE_SYNTAX_POSIX_BASIC` (and `_ED`, `_SED`, equal to it) | POSIX basic | already right |
+| `posix-extended` | `RE_SYNTAX_POSIX_EXTENDED` | POSIX extended | already right |
+
+**Where:** `userspace/coreutils/src/bin/find.rs`, `regex_is_extended` and
+`compile_regex`. `find-diff.sh` has one case per type (`-regextype emacs -regex
+'t/su.'` and so on), each written so that the approximation happens to agree;
+the fix needs a case per row that the approximation gets wrong, measured.
+
+**The proper fix:** map each name to the dialect it is -- `ere::emacs`, the
+`Syntax` constants, and the two or three syntax bits the table shows are not
+there yet (no intervals, a context-dependent leading `*`, limited operators) --
+rather than to a boolean, and measure every row in `find-diff.sh`.
+
+## B-AWK-GAWK-FIDELITY-SWEEP -- 56 ways our awk and gawk --posix part, three of them losing data (lane B, 2026-10-01) — **FIXED** 2026-10-01
+
+**Status:** FIXED 2026-10-01 — every row of the worklist below is fixed or recorded as a deliberate difference (`main.rs`'s table, an xfail each in `scripts/awk-diff.sh`); a newly found difference gets an entry of its own. **Fixed:** 5, 16, 28 (the parser half: the print list, `next` in BEGIN/END, constant zero divisors); 1, 2, 3, 6, 11, 12, 13, 17, 18, 25, 26, 29, 31 (compiling to instructions, §1056: recursion, `exit`/`next` through calls, one evaluation of a read-modify-write target, gawk's `^`, `getline` and directory operands, the reworded fatals, extra arguments, multi-line placement, stdout flushed before a warning); 4, 14, 15, 19, 20, 21, 22, 23, 27, 30, 33 (gawk's output errors, `close`/`fflush`/`system`, `NR`/`FNR` as longs, `arg_assign` for operands and `-v`, `substr`, the math warnings, the null and failed redirections); 7, 8, 9, 10, 24 (`printf` as gawk's `format_tree`, numbers as strings as its `format_val`); 32, 34 (gawk --posix's newline and separator grammar; `func` an ordinary name); 37, 40, 41, 42, 43, 44, 45, 51 (arrays as gawk lays them out, and the values they hand back: `array.rs`, and gawk's lazily-typed nodes in `value.rs`). 46, 55 (numbers as `strtod` reads them; program constants decimal only); 52, 53 (a field and `$0` hold what was assigned; `OFS` assignment rebuilds first). 38, 47, 48, 49, 50, 54, 56 are deliberate differences, each a row of `main.rs`'s table with its reason and an xfail in the harness. All 2026-10-01.
+
+**In short:** four probe batches of `awk` against `gawk --posix` (about 230
+programs, `target/drafts/loc-probe*.sh`) found real bugs well beyond the
+diagnostic placement they were written for. Three can lose or corrupt a
+user's result: a recursive function 3000 calls deep crashes the process with
+a stack overflow; `exit` inside a function prints an empty `awk: ` line and
+exits 2 instead of exiting with its code; and `print > "/dev/full"` loses the
+output and exits 0. The everyday `printf("%s\n", x)` form is a syntax error.
+This entry is the worklist; each item is closed by the commit that fixes it.
+
+**Where.** `userspace/coreutils/src/bin/awk/` (all files), and
+`scripts/awk-diff.sh`, which gains a row for every item as it is fixed.
+
+| # | What | Ours | gawk --posix | Severity |
+|---|---|---|---|---|
+| 1 | recursion 3000 deep | stack overflow, exit 134 | works (30000 too) | crash |
+| 2 | `exit` in a function | `awk: cmd. line:1: ` (empty), exit 2 | exits with the code; END runs | wrong control flow |
+| 3 | `next`/`nextfile` in a function | ignored, record carries on | skips the record / file | wrong control flow |
+| 4 | `print > "/dev/full"`, `close()` of it | silent, exit 0 | `fatal: flush to "/dev/full" failed: No space left on device` | silent data loss |
+| 5 | `printf("%s-%s\n", 1, 2)`, `print("a", "b")` | syntax error | prints | rejects valid programs |
+| 6 | `a[i++] += 5`, `a[i++]++`, `$(i++) += 0`, `sub(re, s, a[i++])` | subscript evaluated twice | once | wrong answer |
+| 7 | number to string: `print 1e30`, `print 2^63` | `1e+30`, `9.22337e+18` | `1000000000000000019884624838656`, `9223372036854775808` (integral values print whole) | wrong output |
+| 8 | subnormal: `print 1e-320`, `printf "%g"` | `infe-320` | `9.99989e-321` | wrong output |
+| 9 | `print 2^1024`, `log(-1)` | `inf`, `nan` | `+inf`, `-nan`/`+nan` | wording |
+| 10 | `printf "%d", 2^64` / of inf, nan | saturates / `0` | `18446744073709551616` / `inf -inf -nan` | wrong output |
+| 11 | `x^n` for integer n | `powf` | gawk's `calc_exp` (repeated squaring): `1.1^50` differs in the last digits | precision |
+| 12 | plain `getline` reaching an unopenable operand | returns -1 | fatal `cannot open file` | wrong control flow |
+| 13 | a directory operand | `read error: Is a directory` | `fatal: cannot open file `/' for reading: Is a directory` | wording |
+| 14 | `NR`/`FNR` assigned a fraction, a string, 1e30 | kept as given | C `long`: truncated, `LONG_MIN` out of range | wrong answer |
+| 15 | an `FNR=10` operand | `FNR` becomes 10 | undone (`arg_assign` restores its C `FNR`) | quirk |
+| 16 | `next`/`nextfile` in BEGIN/END | ignored | parse `error:` (`next' used in BEGIN action`) | accepts invalid |
+| 17 | `next` from a function called in BEGIN/END | ignored | fatal `` `next' cannot be called from a `BEGIN' rule`` | accepts invalid |
+| 18 | a function called with extra arguments | fatal | warning per call, extras evaluated and dropped | rejects valid |
+| 19 | `close()` of a pipe that exited 3 | 3 | 0 (`--posix`) | wrong answer |
+| 20 | `system("exit 3")`, killed by signal 9 | 3, 0 | 768, 9 (raw wait status under `--posix`) | wrong answer |
+| 21 | `fflush("nope")` | 0 | warning, -1 | wrong answer |
+| 22 | `substr("hello", 1.5)` | `ello` | `hello` | wrong answer |
+| 23 | `log(-1)`, and the other math domain errors | silent | `warning: log: received negative argument -1` | missing warning |
+| 24 | printf conversions: `%k` `%5` `%-]`; `%h %l %L %j %t %z`; `%a` | error; accepted; `%e`-style | printed literally; fatal under `--posix`; hex float | wrong output |
+| 25 | `x /= 0`, `x %= 0` messages | `...attempted` / `in `%'` | `in `/='` / `in `%='` | wording |
+| 26 | `$(-1)`, `NF = -1` | no `fatal:`; NF clamps to 0 silently | `fatal: attempt to access field -1`; `fatal: NF set to negative value` | wording / silent |
+| 27 | redirection to `""`, or that cannot open | `: No such file...`; `getline < ""` is -1 | `fatal: expression for `>' redirection has null string value`; `fatal: cannot redirect to `f': ...` | wording / wrong control flow |
+| 28 | `1/0`, `x/-0`, `x/0.0` (constant zero divisor) | runtime fatal, exit 2 | parse `error:` at the `/`, exit 1, parsing continues | wrong status |
+| 29 | multi-line expression placement (`if (1 &&\n 1/z)`) | the statement's first line | the operator's line | placement |
+| 30 | `var=value` operand diagnostics | placed, with FILENAME/FNR | unplaced (`arg_assign` zeroes the line and FNR) | placement |
+| 31 | stdout and a diagnostic interleaved on one fd | diagnostic first | stdout flushed first (`err()` flushes) | ordering |
+| 32 | newline after `(`, `[`, `=`, `==`, `?`, `:` | accepted | syntax error (`?`/`:` only under `--posix`) | accepts invalid |
+| 33 | `FILENAME` numeric in a diagnostic | `(FILENAME=5 FNR=1)` | `(FNR=1)` (no string value) | wording |
+| 34 | `func` as a name: `func = 3`, `func f() {...}` | a keyword, `function` | an ordinary name under `--posix`; the definition is a syntax error | accepts invalid |
+| 35 | an interactive `awk` -- standard output a terminal | output held until 8 KiB or exit | flushed after every print (`output_is_tty`), and a redirection to a tty too | **fixed** 2026-10-01 |
+| 36 | `-v` checks: no `=`, a name like `1x`, a keyword, a function's name, a newline | `invalid -v assignment`, usage, exit 1, for all | usage; `not a legal variable name`; `cannot use gawk builtin`; the definition's `error: function name ... previously defined`; `POSIX does not allow physical newlines` | **fixed** 2026-10-01 |
+| 37 | `for (k in a)` order | Rust's randomly seeded `HashMap`: it can differ between two runs of one program | deterministic (gawk's own array layouts) | **fixed** 2026-10-01 |
+| 38 | `FILENAME = 5` then something prints it, then a diagnostic | `(FNR=1)` | `(FILENAME=5 FNR=1)`: printing gave the number a cached string | **deliberate** (`main.rs`): gawk's text cache, see 49 |
+| 39 | `cmd \| getline` flushed every output first | yes | no (`gawk_popen` does not) | **fixed** 2026-10-01 |
+| 40 | the index `for (k in a)` hands out from an integer array | a strnum, numeric always | a number until its text or type is asked for, then a string for good (`INTIND`): `for (k in a) if (k > max) max = k` over 9, 10, 100 gives 9 | **fixed** 2026-10-01 |
+| 41 | an index deleted during `for (k in a)` | skipped | visited: the loop walks the list it took | **fixed** 2026-10-01 |
+| 42 | `for (k in a) delete a[k]` | `k` left at the last index | `k` left at the first (one `Op_K_delete_loop`), in exactly that shape | **fixed** 2026-10-01 |
+| 43 | `getline a[k] < f` at end of file, `sub(re, s, a[k])` matching nothing | no element made | the element exists (`Op_subscript_lhs`) | **fixed** 2026-10-01 |
+| 44 | a string array's index that came from input | a strnum, always | a strnum only while the input is unsettled (its `STRING` flag); after a comparison, and for a `-v` value, a plain string. A field stored in a variable or element is a copy (`UNFIELD`) | **fixed** 2026-10-01 |
+| 45 | comparing a NaN | C's rule always | C's when neither side is flagged a string, else `cmp_awknums` (NaN equal to NaN and above everything) | **fixed** 2026-10-01 |
+| 46 | `"0x1A"+0`, `"inf"+0`, `"nan"+0`; input `0x1A`, `inf`, `nan` | 0, 0, 0; strings | 26, `+inf`, `+nan`; numbers -- `--posix` takes `strtod` whole, hex and all | **fixed** 2026-10-01 |
+| 47 | `TEXTDOMAIN` | unset | `messages`: gawk installs it under `--posix` too | **deliberate** (`main.rs`), with 56 |
+| 48 | `ENVIRON` with `AWKPATH`/`AWKLIBPATH` unset | absent | both added, naming gawk's library directories | **deliberate** (`main.rs`): this awk searches no path and loads no extensions |
+| 49 | `ARGV[1] = 5` with the 5 never converted to text | opens `5` | skipped: the number has no string (`stlen` 0) | **deliberate** (`main.rs`): whether a number has text is gawk's cache, and keeping it would cost every number a shared cell |
+| 50 | `length(arr)` | the count | fatal `length: received array argument` under `--posix` | **deliberate** (`main.rs`): POSIX.1-2024 standardised it (Austin Group 1566) after gawk 5.2.1 |
+| 51 | assigning an index from `for (k in a)` to `OFS`, `ORS`, `SUBSEP`, `CONVFMT`, `OFMT` | left a number | made a string at once (`set_OFS` and the rest call `force_string`) | **fixed** 2026-10-01 |
+| 52 | `OFS = x` after `$3 = "y"` | `$0` rebuilt with the new `OFS` when read | rebuilt with the old one at the assignment (`set_OFS` rebuilds first): `a b y` | **fixed** 2026-10-01 |
+| 53 | a field or `$0` assigned a string; `$0` after `sub()` or a rebuild | read back as input, a strnum | the assigned value's type kept; a rebuilt `$0` a plain string: `$2 = "10.0"; $2 == 10` is false | **fixed** 2026-10-01 |
+| 54 | `$5` past `NF` compared with 0 | equal (POSIX's uninitialized value) | unequal: gawk's `Null_field` is the string `""` | **deliberate** (`main.rs`): POSIX's answer |
+| 55 | a hexadecimal constant `0x1A` in the program; `011` | 26; 11 | the number 0 and then the variable `x1A`; 11 (`--posix` implies gawk's `--traditional`, whose scanner stops at the `x`) | **fixed** 2026-10-01 |
+| 56 | gawk's own variables, `ARGIND` `BINMODE` `ERRNO` `FIELDWIDTHS` `FPAT` `IGNORECASE` `LINT` `PREC` `ROUNDMODE` `RT` `TEXTDOMAIN` | the program's names, unset | installed even under `--posix` (`init_vars` installs every one): `PREC` 53, `ROUNDMODE` `N`, `FPAT` a pattern; arrays and functions of those names refused; `IGNORECASE`/`BINMODE` assignments warn, `LINT = 1` turns lint on | **deliberate** (`main.rs`): POSIX reserves only its own names |
+
+**Proper fix.** Each row, faithfully, against gawk 5.2.1's own source
+(`/tmp/gawk-ref` in WSL), with a harness row. Structural ones first. Every
+expression node carrying its token's line (29) is a change to `ast.rs`. Deep
+recursion (1) decides the rest: the tree walk recurses natively once per awk
+call, and the obvious cure -- run it on a thread with a huge stack -- is the
+wrong one *here*, because SlateOS commits anonymous mappings when they are made
+(`MAP_LAZY` is opt-in; `posix/src/pthread.rs` maps thread stacks without it),
+so a 1 GiB stack would cost 1 GiB of memory up front. gawk's own answer is
+the right one: compile to instructions and run them in a loop whose frames are
+on the heap. That one change also gives gawk's line model exactly (its
+`sourceline` is per instruction), resolves an lvalue once by construction (6),
+and makes `exit`/`next` from inside a function an ordinary unwind (2, 3, 17).
 
 ## Lane C: new entries
 

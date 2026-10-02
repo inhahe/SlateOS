@@ -86,6 +86,12 @@ impl Warnings {
         core::mem::take(&mut self.said)
     }
 
+    /// Whether anything has been said that [`Warnings::take`] has not taken.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.said.is_empty()
+    }
+
     /// `parse_escape`'s last resort: an escape awk does not know is the
     /// character itself.
     fn plain(&mut self, c: u8) {

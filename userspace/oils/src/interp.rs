@@ -70425,6 +70425,22 @@ mod tests {
         (String::from_utf8_lossy(&buf).into_owned(), status)
     }
 
+    /// The lines of `out` that `keep` accepts, each with its newline -- what
+    /// `| grep` would have printed, decided here rather than by a process.
+    ///
+    /// These tests used to pipe the shell's output through an external `grep`,
+    /// so they tested whichever `grep` `PATH` found first: from PowerShell on
+    /// the development machine that is Embarcadero's, which prints a `STDIN`
+    /// header and CRLF line ends, and six tests failed with nothing wrong in
+    /// the shell (`known-issues.md`, B-OILS-UNIT-TESTS-RUN-WHICHEVER-GREP-PATH-
+    /// FINDS). A unit test of the shell now depends on nothing but the shell.
+    fn lines_where(out: &str, keep: impl Fn(&str) -> bool) -> String {
+        out.lines()
+            .filter(|l| keep(l))
+            .map(|l| format!("{l}\n"))
+            .collect()
+    }
+
     /// [`run`], but returning stdout as raw bytes.
     ///
     /// [`run`] lossily decodes what the shell wrote, which is exactly the thing
@@ -73516,7 +73532,7 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
         );
         assert!(!run("echo \"$SHELLOPTS\"").0.contains("posix"));
         assert_eq!(
-            run("set -o posix; set -o | grep '^posix'").0,
+            lines_where(&run("set -o posix; set -o").0, |l| l.starts_with("posix")),
             "posix          \ton\n"
         );
         assert_eq!(run("shopt -qo posix").1, 1);
@@ -81373,9 +81389,11 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
         // `local -` makes the `set` options local to the function: options
         // changed after the `local -` are reverted on return, matching bash.
         // xtrace enabled inside must not persist after the function returns.
-        let src =
-            "f(){ local -; set -x; :; }; f; echo \"$-\" | grep -q x && echo leaked || echo clean";
-        assert_eq!(run(src).0, "clean\n");
+        let src = "f(){ local -; set -x; :; }; f; echo \"$-\"";
+        assert!(
+            !run(src).0.contains('x'),
+            "xtrace leaked out of the function"
+        );
         // The `$-` letters visible after the call must not include `x`.
         let src2 = "f(){ local -; set -x; :; }; f; case $- in *x*) echo has;; *) echo none;; esac";
         assert_eq!(run(src2).0, "none\n");
@@ -81395,9 +81413,9 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
     #[test]
     fn local_dash_restores_set_o_pipefail() {
         // `local -` also covers `set -o` options such as pipefail.
-        let src = "f(){ local -; set -o pipefail; :; }; f; \
-                   case $(set -o | grep pipefail) in *on*) echo on;; *) echo off;; esac";
-        assert_eq!(run(src).0, "off\n");
+        let src = "f(){ local -; set -o pipefail; :; }; f; set -o";
+        let pipefail = lines_where(&run(src).0, |l| l.starts_with("pipefail"));
+        assert!(pipefail.trim_end().ends_with("off"), "{pipefail}");
     }
 
     #[test]
@@ -81441,13 +81459,15 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
             "same\n"
         );
         // No listing that walks the variable table reports it.
-        let hidden = "f(){ local -; \
-                      declare -p | grep -c '^declare -- -$'; \
-                      declare | grep -c '^-$'; \
-                      set | grep -c '^-='; \
-                      compgen -v | grep -c '^-$'; \
-                      declare -x | grep -c -- ' -$'; }; f";
-        assert_eq!(run(hidden).0, "0\n0\n0\n0\n0\n");
+        let listed = |listing: &str, is_dash: fn(&str) -> bool| {
+            let out = run(&format!("f(){{ local -; {listing}; }}; f")).0;
+            out.lines().filter(|l| is_dash(l)).count()
+        };
+        assert_eq!(listed("declare -p", |l| l == "declare -- -"), 0);
+        assert_eq!(listed("declare", |l| l == "-"), 0);
+        assert_eq!(listed("set", |l| l.starts_with("-=")), 0);
+        assert_eq!(listed("compgen -v", |l| l == "-"), 0);
+        assert_eq!(listed("declare -x", |l| l.ends_with(" -")), 0);
         // `local -p` does report it — as the declaration that made it, first,
         // and once however many `local -` the frame ran.
         assert_eq!(
@@ -84184,9 +84204,10 @@ st=1
         // and the `x`, which an array still never puts in the environment.
         let (out, _) = run("f() { local g=5; readonly -a g=9; }; ( f; g=7; echo \"st=$?\" )");
         assert_eq!(out, "");
-        let (out, _) =
-            run("f() { local g=5; export -a g=9; }; ( f; env | grep '^g=' || echo none )");
-        assert_eq!(out, "none\n");
+        // `env` is the child that shows what was exported; its lines are read
+        // here rather than through a `grep` from `PATH`.
+        let (out, _) = run("f() { local g=5; export -a g=9; }; ( f; env )");
+        assert_eq!(lines_where(&out, |l| l.starts_with("g=")), "");
     }
 
     /// A declaration builtin's operand can name two variables at once, and the
@@ -85768,8 +85789,11 @@ st=1
         // `readonly -p` reuses `declare -p` formatting (bash), not the old
         // `readonly name=value` form. Filter to the names under test so the
         // always-readonly BASH_VERSINFO line doesn't interfere.
-        let (o, _) = run("readonly a=1; readonly b=2; readonly -p | grep ' [ab]='");
-        assert_eq!(o, "declare -r a=\"1\"\ndeclare -r b=\"2\"\n");
+        let (o, _) = run("readonly a=1; readonly b=2; readonly -p");
+        assert_eq!(
+            lines_where(&o, |l| l.contains(" a=") || l.contains(" b=")),
+            "declare -r a=\"1\"\ndeclare -r b=\"2\"\n"
+        );
     }
 
     #[test]
@@ -85852,7 +85876,10 @@ st=1
                 .count(),
             1
         );
-        assert_eq!(run("declare -i zq; set | grep -c '^zq'").0, "0\n");
+        assert_eq!(
+            lines_where(&run("declare -i zq; set").0, |l| l.starts_with("zq")),
+            ""
+        );
         assert_eq!(run("declare -i zq; echo [${!zq@}]").0, "[]\n");
         // `unset` takes it away again — and because it *is* a variable, it is the
         // variable that goes, leaving a function of the same name callable.
@@ -92011,11 +92038,11 @@ st=1
         );
         // A listing prints the cell, not a fresh reading, so it goes stale
         // where the named form does not: the same `RANDOM` twice running.
-        let (out, _) = run("declare -p RANDOM >/dev/null; \
-             a=$(declare -p | grep '^declare -i RANDOM'); \
-             b=$(declare -p | grep '^declare -i RANDOM'); \
-             [ \"$a\" = \"$b\" ] && echo same || echo differ");
-        assert_eq!(out, "same\n");
+        let (out, _) = run("declare -p RANDOM >/dev/null; declare -p; echo ---; declare -p");
+        let (first, second) = out.split_once("---\n").unwrap_or_default();
+        let random = |listing: &str| lines_where(listing, |l| l.starts_with("declare -i RANDOM"));
+        assert_ne!(random(first), "", "RANDOM is listed");
+        assert_eq!(random(first), random(second));
         // `unset` empties the cell with the rest of the binding, and what a
         // later assignment makes is an ordinary variable.
         assert_eq!(
@@ -92034,13 +92061,25 @@ st=1
         // slot's `-i`: an arithmetic expression with it, a plain decimal
         // without — so `3+4` is 7 for `RANDOM` and 0 for `SECONDS`, until a
         // lookup has given `SECONDS` its `-i` too.
+        // The listing's line for `name` -- `declare -FLAGS name=VALUE` -- and
+        // what follows its last `=`, which is what `${x##*=}` kept when this
+        // was written as a `grep -E` pipeline; `none` when it is not listed.
         let cell = |src: &str, name: &str| {
-            run(&format!(
-                "{src}; case \"$(declare -p)\" in \
-                 *'{name}=\"'*) x=\"$(declare -p | grep -E '^declare -[^ ]+ {name}=')\"; \
-                 echo \"${{x##*=}}\";; *) echo none;; esac"
-            ))
-            .0
+            let listing = run(&format!("{src}; declare -p")).0;
+            let line = listing.lines().find(|l| {
+                let mut words = l.splitn(3, ' ');
+                words.next() == Some("declare")
+                    && words.next().is_some_and(|flags| flags.starts_with('-'))
+                    && words
+                        .next()
+                        .is_some_and(|rest| rest.starts_with(&format!("{name}=")))
+            });
+            match line {
+                Some(l) if listing.contains(&format!("{name}=\"")) => {
+                    format!("{}\n", l.rsplit_once('=').map_or(l, |(_, value)| value))
+                }
+                _ => "none\n".to_string(),
+            }
         };
         for (val, secs, rand) in [
             ("7", "\"7\"\n", "\"7\"\n"),
@@ -95182,7 +95221,10 @@ st=1
             "declare -a BASH_LINENO=()\n"
         );
         // The flag-filtered listings report it too…
-        assert_eq!(run("declare -a | grep -c '^declare -a FUNCNAME$'").0, "1\n");
+        assert_eq!(
+            lines_where(&run("declare -a").0, |l| l == "declare -a FUNCNAME"),
+            "declare -a FUNCNAME\n"
+        );
         // …while every listing built from *values* passes over it, exactly as
         // it passes over a bare `declare -a q`.
         assert_eq!(run("echo [${!FUNCNAME*}]").0, "[]\n");

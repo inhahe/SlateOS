@@ -622,9 +622,10 @@ fn extract_regexp(bytes: &[u8], skip: bool) -> Result<Control, Fail> {
         })?
     };
 
-    // Basic regular expressions: `csplit` is specified in terms of `ed`'s, the
-    // same dialect `grep` and `sed` use without `-E`.
-    let re = bre::compile(pattern, false).map_err(|e| {
+    // Basic regular expressions: `csplit` is specified in terms of `ed`'s, and
+    // compiled in coreutils' basic syntax -- no `RE_CONTEXT_INVALID_DUP`, no
+    // `RE_NO_EMPTY_RANGES`, so `a**` and `[z-a]` both compile (measured).
+    let re = bre::compile_syntax(pattern, false, bre::BreSyntax::COREUTILS).map_err(|e| {
         Fail::fatal(format!(
             "{}: {}",
             quote(pattern),

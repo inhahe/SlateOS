@@ -38,13 +38,16 @@
 //! |---|---|
 //! | [`lex`] | bytes to tokens, and the two context-sensitive decisions awk's grammar needs |
 //! | `ere::awk` | gawk's two escape layers -- a string's text, and a regex's before the compiler sees it -- shared with the kernel shell's awk |
+//! | [`source`] | which file and line an offset in the program text is, as a diagnostic names it |
 //! | [`ast`] | the parsed shape; names are already resolved to slots |
 //! | [`parse`] | recursive descent, POSIX precedence |
 //! | [`types`] | which names are arrays — decided before the run, because arrays pass by reference |
 //! | [`value`] | the strnum rule: a field that looks like a number compares as one, a program literal never does |
-//! | [`fmt`] | C's `printf` over bytes |
+//! | [`array`] | arrays laid out as gawk lays them -- its three layouts, hashes and growth -- so `for (k in a)` runs in gawk's order |
+//! | [`fmt`] | `printf`: gawk's `format_tree` over bytes, on Rust's exact float digits |
 //! | [`io`] | records (three `RS` modes) and redirections |
-//! | [`interp`] | the tree-walking interpreter |
+//! | [`compile`] | the parsed program to instructions, in gawk's order and with gawk's lines |
+//! | [`interp`] | the running program's state, and the loop that runs the instructions |
 //!
 //! ## Text is bytes
 //!
@@ -60,8 +63,13 @@
 //! `scripts/awk-diff.sh` runs both awks over the same inputs and requires them
 //! to agree. The cases it exempts are recorded there with their reasons, and
 //! the script reports one that stops differing. Most are these — each a
-//! decision, not an omission; the rest are gaps of ours (diagnostics with no
-//! source location), tracked in `known-issues.md`.
+//! decision, not an omission; the rest are gaps of ours, tracked in
+//! `known-issues.md` (B-AWK-GAWK-FIDELITY-SWEEP).
+//!
+//! A diagnostic says where it happened as gawk's does: `awk: cmd. line:2:
+//! (FILENAME=f FNR=7) fatal: ...`, the program's line (or `prog.awk:2:` for a
+//! `-f` file) and, once a record has been read, the input's place. See
+//! [`source`] and `Interp::diagnostic_prefix`.
 //!
 //! | Case | Ours | `gawk --posix` |
 //! |---|---|---|
@@ -71,17 +79,47 @@
 //! | an undefined function is called | refused before the program runs | fatal when first reached |
 //! | a name used as both an array and a scalar | refused before the program runs | fatal when first reached |
 //! | a built-in given the wrong number of arguments | refused before the program runs | fatal when first reached |
+//! | `RS` longer than one character | a regex, as in gawk without `--posix`, mawk and the one true awk | its first character only |
+//! | standard output's reader goes away (`awk ... \| head -1`) | the run ends quietly with the status it had earned | dies of `SIGPIPE`, status 141 |
+//! | `ENVIRON` when `AWKPATH` or `AWKLIBPATH` is unset | as the environment has it | both added, naming gawk's own library directories |
+//! | `length(arr)` | the number of elements, as POSIX.1-2024 specifies | fatal: gawk 5.2.1's `--posix` predates it |
+//! | a field past `NF`, `$(NF+1) == 0` | the uninitialized value, equal to `0` and `""` alike, as POSIX says | the empty string, unequal to `0` |
+//! | gawk's own variable names: `ARGIND`, `BINMODE`, `ERRNO`, `FIELDWIDTHS`, `FPAT`, `IGNORECASE`, `LINT`, `PREC`, `ROUNDMODE`, `RT`, `TEXTDOMAIN` | the program's, unset until it sets them | predefined (`PREC` is 53, `TEXTDOMAIN` `messages`), refused as arrays and function names; `LINT = 1` turns gawk's lint warnings on |
+//! | a number never yet turned into text, as an `ARGV` entry or as `FILENAME` in a diagnostic | its text, `%d` or `CONVFMT` | none: the `ARGV` entry is skipped as empty, the diagnostic leaves `FILENAME` out |
+//!
+//! The `RS` row is a choice POSIX leaves open ("If RS contains more than one
+//! character, the results are unspecified"), and the regex is what a program
+//! that sets one means: `RS = "\r\n"` for a file with CRLF line ends would
+//! otherwise split at the `\r` and glue each `\n` to the next record. The
+//! `SIGPIPE` row is this system's, for every utility: it does not use signals
+//! for process control (`stdfd::reader_gone`). The `ENVIRON` row: those two
+//! are where gawk searches for `-f` files and loads extensions, directories of
+//! gawk's own installation; this awk searches no path for `-f` and loads no
+//! extensions, so the entries would name directories it never reads.
+//!
+//! The next three are POSIX's answer where gawk 5.2.1's `--posix` gives
+//! another. `length(arr)` was standardised in POSIX.1-2024 (Austin Group
+//! issue 1566), after gawk 5.2.1 was released. A nonexistent field "shall
+//! evaluate to the uninitialized value". And POSIX reserves no variable names
+//! but its own, so a program that keeps a running `PREC` or its own `RT` must
+//! find them unset; gawk installs all its variables whatever the mode
+//! (`init_vars`), which only a program written for gawk would want. The last
+//! row is gawk's cache leaking out: a number has text in gawk only once
+//! something has formatted it, and whether `ARGV[1] = 5` opens the file `5`
+//! depends on whether an earlier statement happened to print it. Here a
+//! number always has its text; keeping gawk's cache would cost every number
+//! a shared cell for the one place it shows.
 //!
 //! The first two are the same decision twice: this system is UTF-8 throughout,
 //! and gawk's byte answers are an artifact of the C locale on the development
-//! host rather than something a user wants. The last three are one decision as
-//! well — a program is checked whole before any of it runs, so a typo in a
+//! host rather than something a user wants. The three refused before the
+//! program runs are one decision as well — a program is checked whole before any of it runs, so a typo in a
 //! branch that is rarely taken is found before the report is half printed
 //! instead of after. That costs the gawk exit code for those cases (1 rather
 //! than 2), which is the right trade: exit 1 already means "this program will
 //! not run" and that is exactly what has happened.
 //!
-//! There was an eighth row until 2026-10-01: `\1`–`\9` in a pattern was a
+//! There was another row until 2026-10-01: `\1`–`\9` in a pattern was a
 //! backreference here, as in GNU `grep -E`, and the octal escape `\001` in
 //! gawk. It was recorded as a choice between two extensions on the belief that
 //! POSIX leaves `\1` undefined, and that belief was wrong for awk: POSIX's awk
@@ -92,12 +130,15 @@
 //! A pattern whose search exceeds the engine's budget is still a fatal error
 //! here, not a non-match; see [`interp`]'s `From<ere::MatchLimit> for Fatal`.
 
+mod array;
 mod ast;
+mod compile;
 mod fmt;
 mod interp;
 mod io;
 mod lex;
 mod parse;
+mod source;
 mod types;
 mod value;
 
@@ -148,46 +189,86 @@ fn run_main() -> ExitCode {
         Ok(Some(a)) => a,
         // The help and version paths have already printed.
         Ok(None) => return ExitCode::SUCCESS,
-        Err(e) => die_usage(&e),
+        Err(ArgError::Usage(e)) => die_usage(&e),
+        Err(ArgError::Fatal(e)) => die(&e),
     };
 
-    let source = match program_source(&args) {
+    let (text, map) = match program_source(&args) {
         Ok(s) => s,
         Err(e) => die(&e),
     };
 
-    // gawk resolves the command line's assignments before it parses the
-    // program, so their escape warnings come first -- and through the run's
-    // one table of warnings, which the parse and then the run carry on with.
-    // `-v` elides a backslash-newline and `-F` does not: gawk's `arg_assign`
-    // and `cmdline_fs` differ in exactly that.
+    // gawk resolves the command line's assignments as it reads its options,
+    // before it parses the program: each is refused there if its name is
+    // reserved or its value holds a newline, and its escape warnings are said
+    // there -- through the run's one table of warnings, which the parse and
+    // then the run carry on with. `-v` elides a backslash-newline and `-F`
+    // does not: gawk's `arg_assign` and `cmdline_fs` differ in exactly that.
     let mut warnings = ere::awk::Warnings::default();
-    let preassigns: Vec<(&str, Str)> = args
-        .preassigns
-        .iter()
-        .map(|p| match p {
+    let mut preassigns: Vec<(&str, Str)> = Vec::with_capacity(args.preassigns.len());
+    for p in &args.preassigns {
+        let (name, value) = match p {
             Preassign::Var(name, value) => {
+                if let Some(refusal) = interp::cli_refusal(name, value) {
+                    die(&refusal);
+                }
                 (name.as_str(), ere::awk::string(value, true, &mut warnings))
             }
             Preassign::Fs(value) => ("FS", ere::awk::string(value, false, &mut warnings)),
-        })
-        .collect();
-    interp::emit_warnings(&mut warnings);
+        };
+        interp::emit_warnings(&mut warnings, b"");
+        preassigns.push((name, value));
+    }
 
     // A program that will not compile is a *usage* failure — the script is
     // wrong before anything ran — and exits 1. A failure once it is running
     // exits 2. That split is gawk's, and a shell script that distinguishes them
     // at all has been written against gawk. A few things gawk finds while
-    // parsing are fatal rather than syntax errors, and those say so.
-    let parsed = parse::parse(&source, &mut warnings);
-    interp::emit_warnings(&mut warnings);
+    // parsing are fatal rather than syntax errors, and those say so, after
+    // where they were.
+    let mut said = Vec::new();
+    let parsed = parse::parse(&text, &map, &mut warnings, &mut said);
+    let names = map.names();
+    for (loc, message) in said {
+        let mut line = b"awk: ".to_vec();
+        line.extend_from_slice(&source::prefix(&names, loc));
+        line.extend_from_slice(b"warning: ");
+        line.extend_from_slice(&message);
+        line.push(b'\n');
+        stdfd::diag_bytes(&line);
+    }
     let mut prog = match parsed {
         Ok(p) => p,
-        Err(e) if e.starts_with("fatal: ") => die(&e),
-        Err(e) => die_program(&e),
+        // gawk can report several `error:`s before it stops; each is a line.
+        Err(e) => {
+            for message in &e.messages {
+                diag!("awk: {message}");
+            }
+            stdfd::exit_now(if e.fatal { 2 } else { 1 }, 2)
+        }
     };
     if let Err(e) = types::resolve(&mut prog) {
         die_program(&e);
+    }
+    // A `-v` name that the program defines as a function: gawk made the name
+    // a variable before it parsed, so the definition is what it refuses --
+    // `error: function name `f' previously defined`, where the name is.
+    let mut clashed = false;
+    for p in &args.preassigns {
+        if let Preassign::Var(name, _) = p
+            && let Some(f) = prog.funcs.iter().find(|f| &f.name == name)
+        {
+            let mut line = b"awk: ".to_vec();
+            line.extend_from_slice(&source::prefix(&names, f.loc));
+            line.extend_from_slice(
+                format!("error: function name `{name}' previously defined\n").as_bytes(),
+            );
+            stdfd::diag_bytes(&line);
+            clashed = true;
+        }
+    }
+    if clashed {
+        stdfd::exit_now(1, 2);
     }
 
     let env: Vec<(Str, Str)> = std::env::vars_os()
@@ -199,8 +280,11 @@ fn run_main() -> ExitCode {
     // In the order given, and all before BEGIN, so a BEGIN block can read
     // what the command line set and can override it.
     for (name, value) in preassigns {
-        if let Err(e) = it.assign_cli(name, value) {
-            die(&e);
+        match it.assign_cli(name, value) {
+            Ok(()) => {}
+            Err(interp::Fatal::Said(message)) => die(&message),
+            // Nothing was written yet, so nothing can have lost its reader.
+            Err(interp::Fatal::ReaderGone) => stdfd::exit_now(0, 2),
         }
     }
 
@@ -208,14 +292,43 @@ fn run_main() -> ExitCode {
         // Only the low byte of an `exit` expression survives into the wait
         // status, which is why `awk 'BEGIN{exit 300}'` leaves `$?` at 44.
         Ok(code) => ExitCode::from(u8::try_from(code & 0xff).unwrap_or(0)),
-        Err(e) => die(&e.0),
+        // Said where the program was when it stopped, as gawk's `err()` does:
+        // `awk: cmd. line:2: (FILENAME=f FNR=7) fatal: division by zero
+        // attempted`. The prefix holds `FILENAME`, which is any bytes.
+        Err(interp::Fatal::Said(message)) => {
+            let mut line = b"awk: ".to_vec();
+            line.extend_from_slice(&it.diagnostic_prefix());
+            line.extend_from_slice(message.as_bytes());
+            line.push(b'\n');
+            stdfd::diag_bytes(&line);
+            stdfd::exit_now(2, 2)
+        }
+        // Nobody is reading standard output any more: end quietly with the
+        // status earned, as every utility here does (`stdfd::reader_gone`).
+        Err(interp::Fatal::ReaderGone) => {
+            ExitCode::from(u8::try_from(it.exit_status() & 0xff).unwrap_or(0))
+        }
+    }
+}
+
+/// Why the command line could not be used.
+enum ArgError {
+    /// Malformed: said with the usage, exit 1.
+    Usage(String),
+    /// A `-v` gawk refuses as it reads it: fatal, exit 2.
+    Fatal(String),
+}
+
+impl From<String> for ArgError {
+    fn from(e: String) -> ArgError {
+        ArgError::Usage(e)
     }
 }
 
 /// Split the command line into options and operands.
 ///
 /// Returns `Ok(None)` when `--help` or `--version` has already answered.
-fn parse_args(raw: &[Str]) -> Result<Option<Args>, String> {
+fn parse_args(raw: &[Str]) -> Result<Option<Args>, ArgError> {
     let mut args = Args {
         progfiles: Vec::new(),
         preassigns: Vec::new(),
@@ -252,7 +365,10 @@ fn parse_args(raw: &[Str]) -> Result<Option<Args>, String> {
                 b'F' | b'v' | b'f' => {
                     let value = if rest.is_empty() {
                         let Some(next) = raw.get(i) else {
-                            return Err(format!("option -{} requires an argument", flag as char));
+                            return Err(ArgError::Usage(format!(
+                                "option -{} requires an argument",
+                                flag as char
+                            )));
                         };
                         i = i.saturating_add(1);
                         next.clone()
@@ -265,11 +381,20 @@ fn parse_args(raw: &[Str]) -> Result<Option<Args>, String> {
                         b'F' => args.preassigns.push(Preassign::Fs(value)),
                         b'f' => args.progfiles.push(value),
                         _ => {
-                            let Some((name, v)) = interp::command_assignment(&value) else {
-                                return Err(format!(
-                                    "invalid -v assignment: {}",
+                            // gawk's two refusals, worded as gawk words them:
+                            // no `=` is a usage error, a name that is not one
+                            // is fatal.
+                            let Some(eq) = value.iter().position(|b| *b == b'=') else {
+                                return Err(ArgError::Usage(format!(
+                                    "`{}' argument to `-v' not in `var=value' form",
                                     String::from_utf8_lossy(&value)
-                                ));
+                                )));
+                            };
+                            let Some((name, v)) = interp::command_assignment(&value) else {
+                                return Err(ArgError::Fatal(format!(
+                                    "fatal: `{}' is not a legal variable name",
+                                    String::from_utf8_lossy(value.get(..eq).unwrap_or_default())
+                                )));
                             };
                             args.preassigns.push(Preassign::Var(name, v));
                         }
@@ -285,7 +410,7 @@ fn parse_args(raw: &[Str]) -> Result<Option<Args>, String> {
                 // so names the whole character -- see `lex.rs`.)
                 other => {
                     let shown = coreutils::quote::escape_unprintable(&[other]);
-                    return Err(format!("unknown option -{shown}"));
+                    return Err(ArgError::Usage(format!("unknown option -{shown}")));
                 }
             }
         }
@@ -293,7 +418,7 @@ fn parse_args(raw: &[Str]) -> Result<Option<Args>, String> {
 
     if args.progfiles.is_empty() {
         let Some(text) = raw.get(i) else {
-            return Err("no program text".to_string());
+            return Err(ArgError::Usage("no program text".to_string()));
         };
         i = i.saturating_add(1);
         args.program = Some(text.clone());
@@ -303,12 +428,16 @@ fn parse_args(raw: &[Str]) -> Result<Option<Args>, String> {
 }
 
 /// The program text: the `-f` files joined by newlines, or the operand.
-fn program_source(args: &Args) -> Result<Str, String> {
+fn program_source(args: &Args) -> Result<(Str, source::SourceMap), String> {
     if let Some(text) = &args.program {
-        return Ok(text.clone());
+        return Ok((text.clone(), source::SourceMap::operand(text)));
     }
     let mut out = Str::new();
+    // Where each file begins in the joined text, so a diagnostic can name the
+    // file and its own line, as gawk's `prog.awk:3:` does.
+    let mut spans: Vec<(usize, Option<Str>)> = Vec::new();
     for name in &args.progfiles {
+        spans.push((out.len(), Some(name.clone())));
         // `source file`, not `file`: gawk distinguishes a program it could not
         // read from an *input* file it could not read, and the two failures are
         // worth telling apart — one is a broken command line, the other a
@@ -338,7 +467,8 @@ fn program_source(args: &Args) -> Result<Str, String> {
             out.push(b'\n');
         }
     }
-    Ok(out)
+    let map = source::SourceMap::new(&out, spans);
+    Ok((out, map))
 }
 
 /// An argument as bytes.
@@ -391,7 +521,7 @@ mod tests {
     fn err(argv: &[&[u8]]) -> String {
         let raw: Vec<Str> = argv.iter().map(|a| a.to_vec()).collect();
         match parse_args(&raw) {
-            Err(message) => message,
+            Err(ArgError::Usage(message) | ArgError::Fatal(message)) => message,
             Ok(_) => panic!("expected these arguments to be refused: {argv:?}"),
         }
     }

@@ -377,6 +377,16 @@ def carry_forward_stops_on_a_real_conflict() -> None:
 
 
 @case
+def baseline_keys_survive_dots_in_ids() -> None:
+    """An id with a dot (`B-CP.RS`) must stay grandfathered: the key is the file name
+    without `.md`, and stripping a second "extension" lost 13 entries on 2026-10-02."""
+    import srcload  # the repo's loader: by path, from source, registered (dataclasses need that)
+    cd = srcload.load(str(HERE / "check-docs.py"), "check_docs")
+    check("a dotted id keeps its dots", cd._entry_key("known-issues/B-CP.RS.md"), "b-cp.rs")
+    check("...whether given a path or a key", cd._entry_key("b-cp.rs"), "b-cp.rs")
+
+
+@case
 def carry_forward_refuses_outside_a_merge() -> None:
     with tempfile.TemporaryDirectory() as t:
         root = new_repo(Path(t))

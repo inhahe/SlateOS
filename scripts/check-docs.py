@@ -106,6 +106,17 @@ def _hash(text: str) -> str:
     return hashlib.sha1(" ".join(text.split()).encode("utf-8")).hexdigest()[:16]
 
 
+def _entry_key(name: str) -> str:
+    """An issue's grandfathering key: its file name without `.md`, lower-cased.
+
+    Not `Path(name).stem` on a key that is already a stem: ids contain dots
+    (`B-CP.RS`, `...-history.jsonl-recorded-...`), and a second `.stem` strips
+    them as if they were extensions -- 13 grandfathered entries failed that way
+    the moment the baseline was written."""
+    base = name.rsplit("/", 1)[-1]
+    return (base[:-3] if base.endswith(".md") else base).lower()
+
+
 def load_baseline(path: Path = BASELINE) -> dict:
     if not path.is_file():
         return {}
@@ -192,8 +203,8 @@ def check(root: Path, lane: str | None, strict: bool, baseline: dict) -> Result:
     # Issue grandfathering is keyed by the entry (its file name, lower-cased), not
     # its path: an issue moves between known-issues/ and known-issues-resolved/
     # when its status changes, and must not lose its grandfathering on the way.
-    bl_status = {Path(x).stem.lower() for x in baseline.get("issue_without_status", [])}
-    bl_lower = {Path(x).stem.lower() for x in baseline.get("lowercase_marker", [])}
+    bl_status = {_entry_key(x) for x in baseline.get("issue_without_status", [])}
+    bl_lower = {_entry_key(x) for x in baseline.get("lowercase_marker", [])}
     bl_decisions = set(baseline.get("decision_files", []))
     bl_dupes = set(baseline.get("duplicate_numbers", []))
     bl_deferred = set(baseline.get("deferred_without_trigger", []))
@@ -222,10 +233,10 @@ def check(root: Path, lane: str | None, strict: bool, baseline: dict) -> Result:
                 m.group(1) if (m := re.match(r"^([A-F])-[a-z0-9]", p.stem)) else "")
             issues.append(rel)
             has_status = any(ln.lstrip().startswith("**Status") for ln in lines[1:8])
-            if not has_status and p.stem.lower() not in bl_status:
+            if not has_status and _entry_key(p.name) not in bl_status:
                 add("I1", rel, "has no `**Status:**` line under its heading (OPEN / FIXED <date> / ...)", owner)
             lower = [t for t in status_marker_tokens(title, lines) if t != t.upper()]
-            if lower and p.stem.lower() not in bl_lower:
+            if lower and _entry_key(p.name) not in bl_lower:
                 add("I2", rel, f"status marker {lower[0]!r} must be upper-case ({lower[0].upper()}): a triage "
                     "grep for FIXED|RESOLVED|CLOSED counts it as open", owner)
             status = D.issue_status(title, lines, archived=False)
@@ -403,9 +414,9 @@ def write_baseline(root: Path) -> dict:
                 "question_reuses_resolved_id": [], "todo_done_paragraphs": [], "roadmap_done_items": []}
     for f in res.findings:
         if f.rule == "I1":
-            bl["issue_without_status"].append(Path(f.path).stem.lower())
+            bl["issue_without_status"].append(_entry_key(f.path))
         elif f.rule == "I2":
-            bl["lowercase_marker"].append(Path(f.path).stem.lower())
+            bl["lowercase_marker"].append(_entry_key(f.path))
         elif f.rule == "F1":
             bl["deferred_without_trigger"].append(f.path)
         elif f.rule == "Q2":

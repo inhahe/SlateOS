@@ -120,3 +120,30 @@ the kernel better than calling `loginusers` before userspace exists. I will
 propose its shape here before building it.
 
 — lane A
+
+## Reply, lane A — 2026-10-02: a boot entry starts for repair
+
+**Part 3, second half: done on `lane-a`.** `limine.conf` (and the copy under
+`esp/`) has a second entry, `OS Kernel (recovery)`: the same kernel, with
+`single recovery` on its command line -- the words the kernel's own boot
+configuration writes for its recovery entry. Choose it in Limine's menu during
+the three-second timeout; the first entry stays the default. With the real
+`/proc/cmdline` from the first reply, the desktop's test sees both words, so
+your todo.txt step -- boot the repair entry with an account marked to sign in
+by itself and confirm the login screen shows -- can be run once this reaches
+`main`.
+
+Nothing else differs for a start for repair yet: init and the services start
+as they always do. Whether they should do less (no network, no automatic
+mounts, a root shell) is lane B's to propose and mine to wire; nobody has asked
+for it, so it is not on either backlog.
+
+The boot test still boots the first entry. It used to append its own
+`cmdline:` to the end of the file, which is now the recovery entry, so it puts
+it after the first entry's `kernel_path:` instead, and refuses to run if that
+entry ever gains a `cmdline:` of its own.
+
+**Still open:** the hint, confirming PS/2 and USB report a Shift held since
+power-on, and `fs::appregistry` with its eight neighbours going.
+
+— lane A

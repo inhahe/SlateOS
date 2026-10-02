@@ -78952,6 +78952,11 @@ gnulib's three rendering choices (soft hyphen 0, prepended concatenation marks 1
 Hangul Jamo Extended-B 0) and UAX #11's defaults for unassigned code points.
 `--compare` against a dump of either upstream lists every code point where it
 differs; the entry below is kept as the record of how the question was measured.
+**One visible consequence, found 2026-10-02:** GNU `ls` measures names with
+glibc's `wcwidth`, not gnulib's `uc_width`, so the soft hyphen is one column
+there and zero here. `scripts/ls-diff.sh`'s two `y/shy<U+00AD>` cases had gone
+red with the table (sorted first by `--sort=width`, one row at `-C -w 22`
+where GNU makes two) and are deliberate differences now, citing §1042.
 
 > **Measured 2026-09-12, and it dwarfs the 626 this is blocked on.** Our own
 > terminal (`apps/terminal`) has **no notion of character width at all**: it

@@ -250,6 +250,18 @@ impl CompletionPort {
 /// → `SCHED`.
 static CP_TABLE: Mutex<BTreeMap<CpId, CompletionPort>> = Mutex::new(BTreeMap::new());
 
+/// Serialises [`register`] and [`unregister`] across the wiring they do
+/// outside `CP_TABLE`: telling an io_ring which port to notify takes the ring
+/// table's lock and, for its owner check, the thread table's. `CP_TABLE` is a
+/// leaf -- held across no other lock -- because `try_notify` takes it from the
+/// timer interrupt; until 2026-10-02 both functions wired the ring while
+/// holding it, two of the nestings design-decisions §975 converts or removes.
+/// Held across both the table edit and the wiring, so a register and an
+/// unregister of one source cannot interleave and leave a ring wired to a
+/// port that does not list it. Never taken in interrupt context, so the
+/// tracked type, which lockdep watches.
+static CP_WIRING: crate::sync::Mutex<()> = crate::sync::Mutex::named((), b"CP_WIRING");
+
 // ---------------------------------------------------------------------------
 // Source polling helpers
 // ---------------------------------------------------------------------------
@@ -353,49 +365,66 @@ pub fn create() -> CpHandle {
 /// - `InvalidArgument` — source already registered, or too many
 ///   registrations.
 pub fn register(cp: CpHandle, source: WaitSource, user_data: u64) -> KernelResult<()> {
-    let mut table = CP_TABLE.lock();
-    let port = table.get_mut(&cp.id()).ok_or(KernelError::InvalidHandle)?;
-
-    if port.closed {
-        return Err(KernelError::ChannelClosed);
-    }
-
-    // Check for duplicate registration.
+    let _wiring = CP_WIRING.lock();
     let key = source.key();
-    let already = port.registrations.iter().any(|r| r.source.key() == key);
-    if already {
-        return Err(KernelError::AlreadyExists);
+    {
+        let mut table = CP_TABLE.lock();
+        let port = table.get_mut(&cp.id()).ok_or(KernelError::InvalidHandle)?;
+
+        if port.closed {
+            return Err(KernelError::ChannelClosed);
+        }
+
+        // Check for duplicate registration.
+        let already = port.registrations.iter().any(|r| r.source.key() == key);
+        if already {
+            return Err(KernelError::AlreadyExists);
+        }
+
+        // Check capacity.
+        if port.registrations.len() >= MAX_REGISTRATIONS {
+            return Err(KernelError::InvalidArgument);
+        }
+
+        port.registrations.push(Registration { source, user_data });
+        port.generation = port.generation.wrapping_add(1);
     }
 
-    // Check capacity.
-    if port.registrations.len() >= MAX_REGISTRATIONS {
-        return Err(KernelError::InvalidArgument);
-    }
-
-    port.registrations.push(Registration { source, user_data });
-    port.generation = port.generation.wrapping_add(1);
-
-    // For timer and io_ring sources, tell the subsystem which CP to
-    // notify.  This enables push-based notification instead of poll-only.
-    match source {
+    // For timer and io_ring sources, tell the subsystem which CP to notify:
+    // push-based notification instead of poll-only. Outside `CP_TABLE`, which
+    // is a leaf (see `CP_WIRING`).
+    let wired = match source {
         WaitSource::Timer(timer_handle) => {
             super::timer::set_cp(timer_handle, cp.raw());
+            Ok(())
         }
-        WaitSource::IoCompletion(ring_handle) => {
-            // A ring the caller does not own must not be wired to its port:
-            // that would let it observe, and later detach, another process's
-            // completion stream.  Roll the registration back so the port is
-            // left exactly as it was.
-            if let Err(e) = super::io_ring::set_cp(ring_handle, cp.raw()) {
-                port.registrations.pop();
-                return Err(e);
-            }
+        // A ring the caller does not own must not be wired to its port: that
+        // would let it observe, and later detach, another process's
+        // completion stream.
+        WaitSource::IoCompletion(ring_handle) => super::io_ring::set_cp(ring_handle, cp.raw()),
+        _ => Ok(()),
+    };
+
+    let mut table = CP_TABLE.lock();
+    let port = table.get_mut(&cp.id());
+    if let Err(e) = wired {
+        // Roll the registration back, so the port is left as it was. Found by
+        // its key: only `CP_WIRING`'s holder adds or removes registrations,
+        // but a `close` in between may have taken them all already.
+        if let Some(port) = port
+            && let Some(pos) = port
+                .registrations
+                .iter()
+                .rposition(|r| r.source.key() == key)
+        {
+            port.registrations.remove(pos);
+            port.generation = port.generation.wrapping_add(1);
         }
-        _ => {}
+        return Err(e);
     }
 
     // A waiter parked on the old set must take the new one.
-    let waiter = port.waiter.take();
+    let waiter = port.and_then(|p| p.waiter.take());
     drop(table);
     if let Some(task) = waiter {
         sched::wake(task);
@@ -412,39 +441,43 @@ pub fn register(cp: CpHandle, source: WaitSource, user_data: u64) -> KernelResul
 /// - `InvalidHandle` — completion port not found.
 /// - `NotFound` — source was not registered.
 pub fn unregister(cp: CpHandle, source: WaitSource) -> KernelResult<()> {
-    let mut table = CP_TABLE.lock();
-    let port = table.get_mut(&cp.id()).ok_or(KernelError::InvalidHandle)?;
-
+    let _wiring = CP_WIRING.lock();
     let key = source.key();
-    let pos = port
-        .registrations
-        .iter()
-        .position(|r| r.source.key() == key)
-        .ok_or(KernelError::NotFound)?;
+    let waiter = {
+        let mut table = CP_TABLE.lock();
+        let port = table.get_mut(&cp.id()).ok_or(KernelError::InvalidHandle)?;
 
-    port.registrations.swap_remove(pos);
-    port.generation = port.generation.wrapping_add(1);
+        let pos = port
+            .registrations
+            .iter()
+            .position(|r| r.source.key() == key)
+            .ok_or(KernelError::NotFound)?;
 
-    // Remove any queued events for this source.
-    port.event_queue.retain(|e| e.source.key() != key);
+        port.registrations.swap_remove(pos);
+        port.generation = port.generation.wrapping_add(1);
 
-    // Clear the CP association for timer and io_ring sources.
+        // Remove any queued events for this source.
+        port.event_queue.retain(|e| e.source.key() != key);
+
+        // A waiter parked on the old set must take the new one.
+        port.waiter.take()
+    };
+
+    // Clear the CP association for timer and io_ring sources, outside
+    // `CP_TABLE` (see `CP_WIRING`).
     match source {
         WaitSource::Timer(timer_handle) => {
             super::timer::set_cp(timer_handle, 0);
         }
         WaitSource::IoCompletion(ring_handle) => {
             // A failure here means the ring is gone or belongs to someone else
-            // — in which case *not* clearing its association is the correct
+            // -- in which case *not* clearing its association is the correct
             // outcome, and the local registration has already been dropped.
             let _ = super::io_ring::set_cp(ring_handle, 0);
         }
         _ => {}
     }
 
-    // A waiter parked on the old set must take the new one.
-    let waiter = port.waiter.take();
-    drop(table);
     if let Some(task) = waiter {
         sched::wake(task);
     }

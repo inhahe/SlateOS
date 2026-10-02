@@ -64,3 +64,18 @@ already written down: that is `open-questions.md`, not a unilateral sweep.
 **2026-10-02:** the pairs in `startmenu` -> `appregistry`, `columnview`,
 `filetype`, `openwith` and `findex` are gone with those modules
 (design-decisions 1528), so the next boot's count is the one to read.
+
+**2026-10-02, later (on lane-a-wip):** rq39's leaf check named nine site pairs
+on four outer locks, and all four are dealt with, two ways. Where the nesting
+was needless it is gone and the lock stays a cheap true leaf: `bookmarks` and
+`templates` kept their one-time-init flag as a lock of its own, held across the
+store it filled; it is an `AtomicBool` read and set under the store's lock now.
+`ipc::completion`'s `CP_TABLE` -- `try_lock`ed from the timer interrupt by
+`try_notify`, so a conversion would have had to settle lockdep's view of
+interrupt-context use first -- no longer wires an io_ring (`RING_TABLE`, then
+`THRDOWN`) while held: `register` and `unregister` do that outside it, under a
+new tracked `CP_WIRING` that serialises the two. Where the nesting is the design
+the lock is converted: `ipc::unix_socket`'s `TABLE` takes `stream_socket`'s
+`PAIRS` under it, is never taken in interrupt context and is no hot path, so it
+is a `crate::sync::Mutex` (`UNIX_SOCKETS`) that lockdep now watches. rq39 hung
+before the battery's end, so the count after these is the next full boot's.

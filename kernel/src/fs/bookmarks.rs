@@ -34,7 +34,7 @@
 
 use alloc::string::String;
 use alloc::vec::Vec;
-use core::sync::atomic::{AtomicU64, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 use crate::error::{KernelError, KernelResult};
 use crate::fs::path::{Path, PathBuf};
@@ -123,8 +123,12 @@ pub struct Bookmark {
 static BOOKMARKS: PreemptSpinMutex<Vec<Bookmark>> =
     PreemptSpinMutex::named(Vec::new(), b"BOOKMARKS");
 
-/// Whether system defaults have been initialized.
-static INITIALIZED: PreemptSpinMutex<bool> = PreemptSpinMutex::named(false, b"INITIALIZED");
+/// Whether system defaults have been initialized. Read and set only while
+/// `BOOKMARKS` is held, so it is that lock's state. Until 2026-10-02 it was a
+/// lock of its own, held across `BOOKMARKS` while `init` filled it -- one of
+/// the "leaf" locks with another taken under it (design-decisions §975),
+/// and needlessly: one lock serialises both.
+static INITIALIZED: AtomicBool = AtomicBool::new(false);
 
 /// Statistics.
 static RESOLVE_COUNT: AtomicU64 = AtomicU64::new(0);
@@ -138,12 +142,10 @@ static ADD_COUNT: AtomicU64 = AtomicU64::new(0);
 ///
 /// Called once at startup. Creates standard desktop directory bookmarks.
 pub fn init() {
-    let mut inited = INITIALIZED.lock();
-    if *inited {
+    let mut bm = BOOKMARKS.lock();
+    if INITIALIZED.load(Ordering::Relaxed) {
         return;
     }
-
-    let mut bm = BOOKMARKS.lock();
 
     let defaults = [
         ("home", "/home/user", "Home", "folder-home", 0),
@@ -194,7 +196,7 @@ pub fn init() {
         });
     }
 
-    *inited = true;
+    INITIALIZED.store(true, Ordering::Relaxed);
 }
 
 // ---------------------------------------------------------------------------
@@ -484,8 +486,9 @@ pub fn self_test() -> KernelResult<()> {
 fn test_init() {
     // Reset for clean test.
     {
-        BOOKMARKS.lock().clear();
-        *INITIALIZED.lock() = false;
+        let mut bm = BOOKMARKS.lock();
+        bm.clear();
+        INITIALIZED.store(false, Ordering::Relaxed);
     }
 
     init();

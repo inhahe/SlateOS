@@ -371,6 +371,18 @@ pub fn begin_text_drag(source: &str, text: &str) -> KernelResult<u64> {
 /// Returns the drop zone ID if the cursor is over one, and the
 /// visual feedback effect.
 pub fn update_position(x: i32, y: i32) -> Option<(u64, DropEffect)> {
+    // The zones first, copied out under their own lock. Hit-testing used to
+    // take `DROP_ZONES` while `ACTIVE_SESSION` was held, a "leaf" lock with
+    // another under it (design-decisions §975); now neither is held across the
+    // other. A zone that goes in between is answered at most once more, which a
+    // drag's feedback can bear: the drop itself looks the zone up again.
+    let zones: Vec<DropZone> = DROP_ZONES
+        .lock()
+        .iter()
+        .filter(|z| z.active)
+        .cloned()
+        .collect();
+
     let mut session_guard = ACTIVE_SESSION.lock();
     let session = session_guard.as_mut()?;
 
@@ -381,7 +393,6 @@ pub fn update_position(x: i32, y: i32) -> Option<(u64, DropEffect)> {
     session.cursor = (x, y);
 
     // Check all zones for hit-test.
-    let zones = DROP_ZONES.lock();
     let mut hit_zone: Option<(u64, DropEffect)> = None;
 
     for zone in zones.iter() {

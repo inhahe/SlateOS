@@ -530,6 +530,10 @@ struct XhciController {
     ports: Vec<UsbPort>,
     /// Configured HID interfaces.
     hid_interfaces: Vec<UsbHidInterface>,
+    /// The keyboard's answer to GET_REPORT at configuration -- the keys
+    /// already down -- until the first poll hands it out, ahead of any
+    /// interrupt report ([`XhciController::hid_get_keyboard_report`]).
+    keyboard_baseline: Option<HidKeyboardReport>,
 }
 
 // SAFETY: The controller is only accessed from the BSP during init.
@@ -937,6 +941,7 @@ impl XhciController {
             devices: Vec::new(),
             ports: Vec::new(),
             hid_interfaces: Vec::new(),
+            keyboard_baseline: None,
         });
 
         // Scan ports for connected devices.
@@ -1531,10 +1536,58 @@ const USB_HID_PROTOCOL_MOUSE: u8 = 0x02;
 const USB_REQ_TYPE_HOST_TO_DEVICE: u8 = 0x00;
 /// Class-specific interface request (host to device).
 const USB_REQ_TYPE_CLASS_IFACE_OUT: u8 = 0x21;
+/// Class-specific interface request (device to host).
+const USB_REQ_TYPE_CLASS_IFACE_IN: u8 = 0xA1;
+/// HID GET_REPORT request code.
+const USB_HID_GET_REPORT: u8 = 0x01;
+/// GET_REPORT's report type for an input report, the high byte of `wValue`.
+const USB_HID_REPORT_TYPE_INPUT: u16 = 1;
+/// A boot keyboard's input report: modifiers, a reserved byte, six key slots.
+const BOOT_KEYBOARD_REPORT_LEN: u16 = 8;
 /// HID SET_IDLE request code.
 const USB_HID_SET_IDLE: u8 = 0x0A;
 /// HID SET_PROTOCOL request code.
 const USB_HID_SET_PROTOCOL: u8 = 0x0B;
+
+/// What became of asking the USB keyboard which keys were already down when
+/// it was configured ([`XhciController::hid_get_keyboard_report`]): one of
+/// the `BASELINE_*` values. Read by the keyboard self-test, which holds the
+/// boot test's USB keyboard to having answered.
+static KEYBOARD_BASELINE: core::sync::atomic::AtomicU8 = core::sync::atomic::AtomicU8::new(0);
+/// No USB boot keyboard has been configured.
+pub const BASELINE_NO_KEYBOARD: u8 = 0;
+/// The keyboard answered GET_REPORT, and its answer is the first report the
+/// poller hands out.
+pub const BASELINE_TAKEN: u8 = 1;
+/// The keyboard refused GET_REPORT, or the transfer failed: a key held since
+/// before configuration is not seen until it is released and pressed again.
+pub const BASELINE_FAILED: u8 = 2;
+
+/// The keyboard [`KEYBOARD_BASELINE`] is about: its vendor id in the high
+/// half, its product id in the low.
+static KEYBOARD_BASELINE_DEVICE: core::sync::atomic::AtomicU32 =
+    core::sync::atomic::AtomicU32::new(0);
+
+/// QEMU's `usb-kbd`, the boot test's USB keyboard: vendor and product id.
+pub const QEMU_USB_KBD: (u16, u16) = (0x0627, 0x0001);
+
+/// What became of asking the USB keyboard for its keys already down: one of
+/// [`BASELINE_NO_KEYBOARD`], [`BASELINE_TAKEN`], [`BASELINE_FAILED`].
+#[must_use]
+pub fn keyboard_baseline() -> u8 {
+    KEYBOARD_BASELINE.load(core::sync::atomic::Ordering::Acquire)
+}
+
+/// The vendor and product id of the keyboard [`keyboard_baseline`] is about,
+/// or `(0, 0)` before one has been configured.
+#[must_use]
+pub fn keyboard_baseline_device() -> (u16, u16) {
+    let both = KEYBOARD_BASELINE_DEVICE.load(core::sync::atomic::Ordering::Acquire);
+    // The two halves of the word, each 16 bits by construction.
+    let vendor = u16::try_from(both >> 16).unwrap_or(0);
+    let product = u16::try_from(both & 0xFFFF).unwrap_or(0);
+    (vendor, product)
+}
 
 /// Describes a HID interface found on a USB device.
 #[derive(Debug, Clone)]
@@ -1605,6 +1658,21 @@ pub struct HidKeyboardReport {
     pub reserved: u8,
     /// Up to 6 simultaneous key codes.
     pub keycodes: [u8; 6],
+}
+
+impl HidKeyboardReport {
+    /// The report in a boot keyboard's eight bytes, or `None` for fewer.
+    #[must_use]
+    pub fn from_bytes(data: &[u8]) -> Option<Self> {
+        let &[modifiers, reserved, k0, k1, k2, k3, k4, k5, ..] = data else {
+            return None;
+        };
+        Some(Self {
+            modifiers,
+            reserved,
+            keycodes: [k0, k1, k2, k3, k4, k5],
+        })
+    }
 }
 
 /// Boot protocol mouse input report (3-4 bytes).
@@ -1790,6 +1858,64 @@ impl XhciController {
         Ok(())
     }
 
+    /// Ask a boot keyboard which keys are down right now (GET_REPORT, input).
+    ///
+    /// With the idle rate at 0 a keyboard reports only changes, and whether it
+    /// sends one report straight after configuration is up to the device. A
+    /// key held since before then -- Shift, held from power-on to choose an
+    /// account rather than be signed in automatically (design-decisions
+    /// §1427) -- then has no change to report until it is let go, and the
+    /// driver, and `EVIOCGKEY` after it, would call it up. GET_REPORT is
+    /// mandatory for every HID device (HID 1.11 §7.2.1) and answers with the
+    /// state now, whatever has or has not been sent.
+    fn hid_get_keyboard_report(
+        &mut self,
+        slot_id: u8,
+        interface: u8,
+    ) -> KernelResult<HidKeyboardReport> {
+        let buf_frame = frame::alloc_frame()?;
+        let buf_phys = buf_frame.addr();
+        let buf_virt = buf_phys.wrapping_add(self.hhdm_offset) as *mut u8;
+        let len = usize::from(BOOT_KEYBOARD_REPORT_LEN);
+        // SAFETY: the frame was just allocated, is ours alone, and is far
+        // larger than `len`; the HHDM maps all of physical memory.
+        unsafe {
+            core::ptr::write_bytes(buf_virt, 0, len);
+        }
+        let transferred = self.control_transfer(
+            slot_id,
+            USB_REQ_TYPE_CLASS_IFACE_IN,
+            USB_HID_GET_REPORT,
+            USB_HID_REPORT_TYPE_INPUT << 8, // report id 0: boot reports have none
+            u16::from(interface),
+            buf_phys,
+            BOOT_KEYBOARD_REPORT_LEN,
+            true,
+        );
+        if matches!(transferred, Err(KernelError::TimedOut)) {
+            // No completion event came, so the transfer may still be on the
+            // ring and the controller may yet write the buffer: freeing the
+            // frame could hand memory it is about to DMA into to someone
+            // else. One frame is the price of a keyboard that never answered.
+            return Err(KernelError::TimedOut);
+        }
+        let mut data = [0u8; 8];
+        // SAFETY: as above -- `len` bytes at `buf_virt` are ours and were
+        // zeroed, so reading them is defined whatever the device wrote.
+        unsafe {
+            core::ptr::copy_nonoverlapping(buf_virt, data.as_mut_ptr(), len);
+        }
+        // SAFETY: the frame is ours and nothing reads it after this; the
+        // transfer completed -- successfully or with a failure code -- so the
+        // controller is done with it. The result is discarded because there
+        // is nothing to do about a frame that would not go back.
+        let _ = unsafe { frame::free_frame(buf_frame) };
+        if transferred? < len {
+            return Err(KernelError::IoError);
+        }
+        HidKeyboardReport::from_bytes(&data).ok_or(KernelError::IoError)
+    }
+
     /// Configure all detected HID devices for boot protocol.
     ///
     /// This sets the configuration, switches to boot protocol, and
@@ -1839,19 +1965,65 @@ impl XhciController {
                 };
 
                 // Set boot protocol (simpler fixed-format reports).
+                let mut boot_protocol = false;
                 if hid.subclass == USB_HID_SUBCLASS_BOOT {
-                    if let Err(e) = self.hid_set_boot_protocol(slot_id, hid.interface_num) {
-                        crate::serial_println!(
+                    match self.hid_set_boot_protocol(slot_id, hid.interface_num) {
+                        Ok(()) => boot_protocol = true,
+                        Err(e) => crate::serial_println!(
                             "[xhci] SET_PROTOCOL failed for slot {} {}: {:?}",
                             slot_id,
                             protocol_name,
                             e
-                        );
+                        ),
                     }
                 }
 
                 // Set idle rate to 0 (report only on change).
                 let _ = self.hid_set_idle(slot_id, hid.interface_num);
+
+                // The keys already down, for the keyboard the poller reads --
+                // the first one configured (`poll_keyboard_locked`). Only in
+                // boot protocol, whose eight-byte report is the one the poller
+                // reads; see `hid_get_keyboard_report` for why it is asked.
+                let first_keyboard = hid.protocol == USB_HID_PROTOCOL_KEYBOARD
+                    && !configured
+                        .iter()
+                        .any(|h: &UsbHidInterface| h.protocol == USB_HID_PROTOCOL_KEYBOARD);
+                if first_keyboard && boot_protocol {
+                    let (vendor, product) = self
+                        .devices
+                        .iter()
+                        .find(|d| d.slot_id == slot_id)
+                        .map_or((0, 0), |d| (d.vendor_id, d.product_id));
+                    KEYBOARD_BASELINE_DEVICE.store(
+                        (u32::from(vendor) << 16) | u32::from(product),
+                        core::sync::atomic::Ordering::Release,
+                    );
+                    let outcome = match self.hid_get_keyboard_report(slot_id, hid.interface_num) {
+                        Ok(report) => {
+                            crate::serial_println!(
+                                "[xhci] Keyboard on slot {}: modifiers {:#04x} and keys {:02x?} \
+                                 already down",
+                                slot_id,
+                                report.modifiers,
+                                report.keycodes
+                            );
+                            self.keyboard_baseline = Some(report);
+                            BASELINE_TAKEN
+                        }
+                        Err(e) => {
+                            crate::serial_println!(
+                                "[xhci] GET_REPORT failed for slot {} keyboard: {:?} -- a key \
+                                 held since before now is not seen until it is let go",
+                                slot_id,
+                                e
+                            );
+                            self.keyboard_baseline = None;
+                            BASELINE_FAILED
+                        }
+                    };
+                    KEYBOARD_BASELINE.store(outcome, core::sync::atomic::Ordering::Release);
+                }
 
                 // Configure the interrupt endpoint for receiving reports.
                 let dev_speed = self
@@ -2299,14 +2471,15 @@ fn poll_keyboard_locked(ctrl: &mut XhciController) -> Option<HidKeyboardReport> 
     let slot_id = kb_iface.slot_id;
     let slot_idx = (slot_id as usize).wrapping_sub(1);
 
+    // The keys that were already down when the keyboard was configured come
+    // first, before any change the device reports after them.
+    if let Some(report) = ctrl.keyboard_baseline.take() {
+        return Some(report);
+    }
+
     // Poll for a report.
     if let Some(data) = ctrl.poll_hid_report(slot_id) {
-        if data.len() >= 8 {
-            let report = HidKeyboardReport {
-                modifiers: data[0],
-                reserved: data[1],
-                keycodes: [data[2], data[3], data[4], data[5], data[6], data[7]],
-            };
+        if let Some(report) = HidKeyboardReport::from_bytes(data) {
             // Re-post receive buffer for next report.
             let max_pkt = ctrl
                 .hid_interfaces
@@ -2545,6 +2718,26 @@ pub fn self_test() -> crate::error::KernelResult<()> {
     // Test 6: HID report structures.
     assert_eq!(core::mem::size_of::<HidKeyboardReport>(), 8);
     assert_eq!(core::mem::size_of::<HidMouseReport>(), 4);
+
+    // Test 7: a boot keyboard's eight bytes, as the poller and GET_REPORT
+    // read them: left Shift held with `a`; seven bytes are not a report; a
+    // longer packet is read for its first eight.
+    let shift_a = [0x02, 0, 0x04, 0, 0, 0, 0, 0];
+    let report = HidKeyboardReport::from_bytes(&shift_a);
+    if report.map(|r| (r.modifiers, r.keycodes)) != Some((0x02, [0x04, 0, 0, 0, 0, 0])) {
+        crate::serial_println!("[xhci]   FAIL: from_bytes read {:?}", report);
+        return Err(KernelError::InternalError);
+    }
+    let short = shift_a.get(..7).unwrap_or(&[]);
+    let long = [0x20, 0, 0x05, 0x06, 0, 0, 0, 0x07, 0xFF];
+    if HidKeyboardReport::from_bytes(short).is_some()
+        || HidKeyboardReport::from_bytes(&long).map(|r| (r.modifiers, r.keycodes))
+            != Some((0x20, [0x05, 0x06, 0, 0, 0, 0x07]))
+    {
+        crate::serial_println!("[xhci]   FAIL: from_bytes on seven or nine bytes");
+        return Err(KernelError::InternalError);
+    }
+    crate::serial_println!("[xhci]   Boot keyboard report from bytes: OK");
 
     crate::serial_println!("[xhci] Self-test PASSED");
     Ok(())

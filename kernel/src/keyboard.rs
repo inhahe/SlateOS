@@ -2158,7 +2158,59 @@ fn usb_hid_poller_self_test() -> Result<(), &'static str> {
         if has_ctrl { "present" } else { "absent" },
         if has_kbd { "present" } else { "absent" },
     );
-    Ok(())
+    usb_baseline_self_test(has_kbd)
+}
+
+/// Check that the USB keyboard was asked which keys were already down.
+///
+/// A key held since before the keyboard was configured -- Shift, held from
+/// power-on to choose an account (design-decisions §1427) -- is otherwise
+/// called up until it is let go, because with the idle rate at 0 the
+/// keyboard reports only changes (`xhci::hid_get_keyboard_report`).
+///
+/// Strict only for the boot test's own keyboard, QEMU's `usb-kbd`, which
+/// answers GET_REPORT: there a refusal is this driver asking wrongly. A real
+/// keyboard that refuses breaks only the held-key case, and halting the boot
+/// for that -- this is an integrity self-test -- would cost every other key
+/// too, so it is reported and passed.
+fn usb_baseline_self_test(has_kbd: bool) -> Result<(), &'static str> {
+    use crate::xhci::{BASELINE_FAILED, BASELINE_NO_KEYBOARD, BASELINE_TAKEN};
+    let device = crate::xhci::keyboard_baseline_device();
+    match crate::xhci::keyboard_baseline() {
+        BASELINE_TAKEN => {
+            crate::serial_println!(
+                "[keyboard]   USB keyboard {:04x}:{:04x} said which keys were already down: OK",
+                device.0,
+                device.1
+            );
+            Ok(())
+        }
+        BASELINE_FAILED if device == crate::xhci::QEMU_USB_KBD => {
+            crate::serial_println!(
+                "[keyboard]   FAIL: QEMU's usb-kbd refused GET_REPORT, which it answers -- \
+                 the request is wrong, and a key held since power-on reads as up"
+            );
+            Err("the USB keyboard was not asked which keys were already down")
+        }
+        BASELINE_FAILED => {
+            crate::serial_println!(
+                "[keyboard]   USB keyboard {:04x}:{:04x} refused GET_REPORT: a key held since \
+                 before it was configured reads as up until it is let go (reported, not fatal)",
+                device.0,
+                device.1
+            );
+            Ok(())
+        }
+        BASELINE_NO_KEYBOARD if has_kbd => {
+            // A keyboard outside boot protocol, whose reports this driver does
+            // not read as eight bytes; nothing was asked, and nothing is wrong.
+            crate::serial_println!(
+                "[keyboard]   USB keyboard not in boot protocol: keys already down not asked"
+            );
+            Ok(())
+        }
+        _ => Ok(()),
+    }
 }
 
 /// Exercise the three exits of [`read_char_inner`] without needing a keypress.

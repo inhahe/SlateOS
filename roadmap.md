@@ -4896,12 +4896,20 @@ _Port ext4 first. Don't write a custom filesystem._
   every step as unimplemented although the kernel has had native `chroot` and `setgroups` since
   2026-09-07: upstream's two lookup passes, outside the new root and inside it, with the values
   carrying over between them as they do there, and the credentials through `libcall::process`);
+  `who` (2026-10-02, replacing `userspace/who`, written from the manual, which agreed with GNU on 4 of
+  `scripts/who-diff.sh`'s 105 cases to the port's 105: gnulib's `readutmp` as `coreutils::utmp`, which
+  `users` and `pinky` now share, with the boot entry made up from boot-touched files or the uptime when
+  utmp has none); `w` (2026-10-02 too, procps-ng 4.0.4's rather than GNU's, from the same deleted crate,
+  whose `argv[0]` branch agreed on none of `scripts/w-diff.sh`'s 144 cases to the port's 144: real
+  sessions on fixture ptys, `procps_uptime_sprint` shared with `uptime` as `coreutils::procps`, and the
+  process table read through `readproc`'s rules, which on SlateOS still wants the kernel to name each
+  process's terminal, `requests/b-ad-proc-stat-reports-no-controlling-terminal.md`);
   and `nproc`,
   re-ported because the standalone crate that had it was not GNU's and is retired. The multi-personality crates that answered some of these
   names in part lost those branches (§1005: `getopt` printenv/sync/cksum, `pv` truncate and shred, `nproc` arch/pathchk/users, `shuf` numfmt and factor, `base64` base32, `finger` pinky).
-  **Next:** two 9.4 programs exist here only as standalone crates that were not ported from it,
-  and neither is on the image: `who` and `stty`. Each comes into coreutils from
-  the 9.4 source with a harness, as `install`, `timeout` and `chroot` did, and its crate is retired. Beyond those,
+  **Next:** one 9.4 program exists here only as a standalone crate that was not ported from it,
+  and it is not on the image: `stty`. It comes into coreutils from the 9.4 source with a harness,
+  as `install`, `timeout`, `chroot` and `who` did, and its crate is retired. Beyond that,
   **nothing of GNU 9.4 is missing** that has something here to act on. Not ported, for want of what they act on: `chcon`/`runcon` (SELinux contexts) and `stdbuf` (works by
   `LD_PRELOAD` into a dynamically linked program). `[` is `test` under another name and needs only the image alias. None
   ships until lane D lists it: `requests/b-d-new-coreutils-programs-for-the-rootfs-manifest.md`.

@@ -39,6 +39,8 @@ pub const IFF_LOOPBACK: u32 = 8;
 pub const NI_MAXHOST: usize = 1025;
 /// Room for the longest numeric IPv6 address and its terminator.
 pub const INET6_ADDRSTRLEN: usize = 46;
+/// `inet_ntop`: the address family is neither IPv4 nor IPv6.
+pub const EAFNOSUPPORT: i32 = 97;
 
 /// `struct sockaddr`.
 #[repr(C)]
@@ -88,9 +90,10 @@ struct Hostent {
 
 #[cfg(unix)]
 mod sys {
-    use super::{Addrinfo, Hostent, Ifaddrs, Sockaddr, c_char, c_int};
+    use super::{Addrinfo, Hostent, Ifaddrs, Sockaddr, c_char, c_int, c_void};
 
     unsafe extern "C" {
+        pub fn inet_ntop(af: c_int, src: *const c_void, dst: *mut c_char, size: u32) -> *const c_char;
         pub fn getaddrinfo(
             node: *const c_char,
             service: *const c_char,
@@ -354,6 +357,61 @@ pub fn hstrerror(code: i32) -> &'static CStr {
     }
 }
 
+/// `inet_ntop(af, src, dst, dst.len())`: the address in `src` -- four bytes
+/// for [`AF_INET`], sixteen for [`AF_INET6`], in network order -- as text in
+/// `dst`, which then holds the text and a NUL after it. Returns the text's
+/// length.
+///
+/// The library's own formatter rather than one written here, because which run
+/// of zeros becomes `::`, and when an IPv6 address ends in a dotted quad
+/// instead, are the library's decisions: `w -i` prints what `inet_ntop`
+/// prints, and a second formatter would be a second answer.
+///
+/// # Errors
+///
+/// * `ENOSPC` -- `dst` cannot hold the text and its NUL. A caller may rely on
+///   this: `w` offers a buffer only as wide as its column, and an address that
+///   does not fit is shown as the host name instead.
+/// * [`EINVAL`](crate::EINVAL) -- `src` is shorter than `af`'s address.
+/// * [`EAFNOSUPPORT`] -- `af` is neither family.
+/// * [`ENOSYS`](crate::ENOSYS) -- built for a host with no C library of ours.
+pub fn inet_ntop(af: i32, src: &[u8], dst: &mut [u8]) -> Result<usize, i32> {
+    let need = match af {
+        AF_INET => 4,
+        AF_INET6 => 16,
+        _ => return Err(EAFNOSUPPORT),
+    };
+    if src.len() < need {
+        return Err(crate::EINVAL);
+    }
+    #[cfg(unix)]
+    {
+        // `socklen_t` is 32 bits. A larger buffer is offered as its first
+        // 4 GiB, which holds any address many times over.
+        let size = u32::try_from(dst.len()).unwrap_or(u32::MAX);
+        // SAFETY: `src` holds at least the address `af` names (checked above)
+        // and is only read; `dst` is writable for `size` bytes, no more than
+        // its length, and the library writes at most that many, NUL included.
+        let text = unsafe {
+            sys::inet_ntop(
+                af,
+                src.as_ptr().cast::<c_void>(),
+                dst.as_mut_ptr().cast::<c_char>(),
+                size,
+            )
+        };
+        if text.is_null() {
+            return Err(crate::last_errno());
+        }
+        Ok(dst.iter().position(|&b| b == 0).unwrap_or(dst.len()))
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = dst;
+        Err(crate::ENOSYS)
+    }
+}
+
 /// The library's interface list (`getifaddrs`), freed on drop.
 pub struct IfAddrs {
     head: *mut Ifaddrs,
@@ -553,6 +611,52 @@ mod tests {
         assert_eq!(IFF_LOOPBACK, posix::socket::IFF_LOOPBACK);
         assert_eq!(NI_NUMERICHOST, posix::gai::NI_NUMERICHOST);
         assert_eq!(NI_NAMEREQD, posix::gai::NI_NAMEREQD);
+        assert_eq!(EAFNOSUPPORT, posix::errno::EAFNOSUPPORT);
+    }
+
+    /// The refusals made before the library is asked, on every build.
+    #[test]
+    fn inet_ntop_refuses_an_unknown_family_and_a_short_address() {
+        let mut buf = [0u8; INET6_ADDRSTRLEN];
+        assert_eq!(inet_ntop(99, &[0; 16], &mut buf), Err(EAFNOSUPPORT));
+        assert_eq!(inet_ntop(AF_INET, &[127, 0, 1], &mut buf), Err(crate::EINVAL));
+        assert_eq!(inet_ntop(AF_INET6, &[0; 15], &mut buf), Err(crate::EINVAL));
+    }
+
+    /// The library's text, and its `ENOSPC` for a buffer one byte short --
+    /// which `w -i` turns into "show the host name instead".
+    #[cfg(unix)]
+    #[test]
+    fn inet_ntop_is_the_librarys() {
+        let check = |af: i32, src: &[u8], want: &[u8]| {
+            let mut buf = [0u8; INET6_ADDRSTRLEN];
+            let len = inet_ntop(af, src, &mut buf);
+            assert_eq!(len, Ok(want.len()));
+            assert_eq!(buf.get(..want.len()), Some(want));
+            assert_eq!(buf.get(want.len()), Some(&0), "the text is NUL-terminated");
+        };
+        check(AF_INET, &[127, 0, 0, 1], b"127.0.0.1");
+        check(AF_INET, &[255, 255, 255, 255], b"255.255.255.255");
+        check(AF_INET6, &[0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1], b"::1");
+        let doc = [0x20, 0x01, 0x0d, 0xb8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1];
+        check(AF_INET6, &doc, b"2001:db8::1");
+        let mapped = [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0xff, 0xff, 1, 2, 3, 4];
+        check(AF_INET6, &mapped, b"::ffff:1.2.3.4");
+        let compatible = [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 2, 3, 4];
+        check(AF_INET6, &compatible, b"::1.2.3.4");
+
+        // "127.0.0.1" is nine bytes; with its NUL it needs ten.
+        let mut short = [0u8; 9];
+        assert_eq!(inet_ntop(AF_INET, &[127, 0, 0, 1], &mut short), Err(28));
+        let mut exact = [0u8; 10];
+        assert_eq!(inet_ntop(AF_INET, &[127, 0, 0, 1], &mut exact), Ok(9));
+    }
+
+    #[cfg(not(unix))]
+    #[test]
+    fn inet_ntop_has_no_library_on_the_host() {
+        let mut buf = [0u8; INET6_ADDRSTRLEN];
+        assert_eq!(inet_ntop(AF_INET, &[127, 0, 0, 1], &mut buf), Err(crate::ENOSYS));
     }
 
     #[test]

@@ -9,8 +9,8 @@
 //! It replaces the `who` of `userspace/who`, written from the manual: it had
 //! a `--json` upstream does not, printed `system boot` from an invented time
 //! when utmp had none, and read session files of its own besides utmp. The
-//! `w` that crate also answered to is procps' program, not this one, and
-//! moves to a port of its own (`userspace/coreutils/src/bin/w.rs`).
+//! `w` that crate also answered to is procps' program, not this one, and is a
+//! port of its own (`userspace/coreutils/src/bin/w.rs`); the crate is gone.
 //!
 //! # One line per entry, in upstream's columns
 //!

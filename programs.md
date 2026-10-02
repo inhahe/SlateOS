@@ -11,9 +11,9 @@ A new program is recorded here in the commit that creates it (§1053): run
 the script, commit `programs.md` with the program. `--check` fails when the
 two disagree.
 
-**450 programs; 88 on the image, 6 carried inside the kernel.**
+**451 programs; 88 on the image, 6 carried inside the kernel.**
 
-## Userland utilities and services (`userspace/`, lane B) -- 295
+## Userland utilities and services (`userspace/`, lane B) -- 296
 
 | Program | What it does | On image | Crate | Other names |
 |---|---|---|---|---|
@@ -297,12 +297,13 @@ two disagree.
 | `vi` | Modal terminal text editor for SlateOS. |  |  |  |
 | `visudo` | Edit the sudoers file with syntax checking. |  | `sudo` |  |
 | `vmstat` | Virtual Memory Statistics Utility |  |  |  |
+| `w` | Show who is logged on and what they are doing. |  | `coreutils` |  |
 | `wall` | Terminal messaging utilities for Slate OS |  |  |  |
 | `watch` | Watch Utility -- Execute a Command Periodically |  |  |  |
 | `wc` | Line, word, character, byte and display-width counts. | yes | `coreutils` |  |
 | `wget` | HTTP File Download Utility |  |  |  |
 | `which` | Locate a command, the way GNU which 2.21 does. | yes | `coreutils` |  |
-| `who` | Logged-In Users Display (`who` / `w`) |  |  | `w` *(not installed)* |
+| `who` | Print information about users who are currently logged in. |  | `coreutils` |  |
 | `whoami` | Print the user name associated with the effective user ID. | yes | `coreutils` |  |
 | `whois` | WHOIS Lookup Utility |  |  |  |
 | `wipefs` | Wipe signatures from a device. |  |  |  |

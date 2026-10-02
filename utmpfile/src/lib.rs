@@ -7,7 +7,7 @@
 //!
 //! | Reader | Layout | Result |
 //! |---|---|---|
-//! | `userspace/who` | 384-byte records, every field | correct |
+//! | `userspace/who` | 384-byte records, every field | correct; crate retired 2026-10-02 |
 //! | `userspace/uptime` | 384-byte records, `ut_type` only | correct; crate retired 2026-09-12 |
 //! | `userspace/w` | **colon-separated text** | never matches anything |
 //!

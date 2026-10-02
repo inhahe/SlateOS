@@ -328,6 +328,7 @@ promises about its own output, which a one-line summary cannot carry.
 | `scripts/probe-env-split-options.sh` | Round 3 of the -S measurement: are OPTIONS inside the split string honoured? |
 | `scripts/probe-env-split-string.sh` | Measure GNU env's -S/--split-string grammar. NOT a gate and not a harness -- |
 | `scripts/probe-tcc-hosted.sh` | Probe: what files does tcc open to compile+link a hosted dynamic glibc program? |
+| `scripts/procps-ref.sh` | Builds procps-ng 4.0.4's `w` from the release, for a harness whose reference |
 | `scripts/proctree.py` | proctree.py — launch a child process so that its *whole tree* can be killed. |
 | `scripts/program-catalogue.py` | The catalogue of every program the workspace builds: `programs.md`. |
 | `scripts/prune-build-cache.py` | Prune the parts of a cargo `target/` that no recent build has used. |
@@ -486,6 +487,7 @@ promises about its own output, which a one-line summary cannot carry.
 | `scripts/util-linux-source.sh` | Fetches util-linux 2.39.3's source and test data, for harnesses that need them. |
 | `scripts/uu-diff.sh` | Differential test: our `uuencode` and `uudecode` against GNU sharutils 4.15.2's. |
 | `scripts/verify_mutations.py` | Check a `mutate.py` table against the source it claims to break. |
+| `scripts/w-diff.sh` | Differential test: our `w` against procps-ng 4.0.4's, built as SlateOS's |
 | `scripts/wc-diff.sh` | Differential test: our wc against GNU wc. |
 | `scripts/wdog-nmi-soak.sh` | wdog-nmi-soak.sh — DIAGNOSTIC (throwaway): boot repeatedly under the |
 | `scripts/wdog-reset-experiment.sh` | wdog-reset-experiment.sh — DIAGNOSTIC (throwaway) loop to discriminate, for the |
@@ -500,4 +502,4 @@ promises about its own output, which a one-line summary cannot carry.
 | `scripts/xargs-diff.sh` | Differential test: our xargs against GNU xargs (findutils 4.9.0). |
 | `scripts/yes-diff.sh` | Differential test: our `yes` against GNU coreutils'. |
 
-_490 scripts._
+_492 scripts._

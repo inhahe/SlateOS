@@ -136,7 +136,6 @@ userspace/vmstat/src/main.rs:argv-as-string
 userspace/wall/src/main.rs:argv-as-string
 userspace/watch/src/main.rs:argv-as-string
 userspace/wget/src/main.rs:argv-as-string
-userspace/who/src/main.rs:argv-as-string
 userspace/whois/src/main.rs:argv-as-string
 userspace/wpa/src/main.rs:argv-as-string
 userspace/xdg/src/main.rs:argv-as-string

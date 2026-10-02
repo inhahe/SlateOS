@@ -61,7 +61,6 @@ useradd:groupdel
 useradd:groupmod
 useradd:userdel
 useradd:usermod
-who:w
 xdg:mimeopen
 xdg:xdg-mime
 zip:unzip

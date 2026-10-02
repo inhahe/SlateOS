@@ -144,7 +144,6 @@ userspace/vi
 userspace/vmstat
 userspace/wall
 userspace/watch
-userspace/who
 userspace/wpa  # bare deny(clippy::all)
 userspace/xdg
 userspace/yacc

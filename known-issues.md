@@ -93290,8 +93290,14 @@ working at all.
 
 ---
 
-## `A-KSHELL-A-HUNDRED-AND-NINETEEN-FUNCTIONS-GUESS-A-VALUE-FOR-A-WORD-THEY-COULD-NOT-READ` (lane A, 2026-08-25) — **open**, carried as counted debt — **77 of 800 remain**
+## `A-KSHELL-A-HUNDRED-AND-NINETEEN-FUNCTIONS-GUESS-A-VALUE-FOR-A-WORD-THEY-COULD-NOT-READ` (lane A, 2026-08-25) — **open**, carried as counted debt — **74 of 800 remain**
 
+> **Burn-down log.** 2026-10-02: 77 → 74; `cmd_applaunch`, `cmd_appstore`
+> and `cmd_findex` left the ledger with their commands: the modules behind
+> them were removed with the kernel's program and file-type lists
+> (design-decisions §1528). Nothing was fixed; the sites went with the code.
+> `check-option-refusal.py` confirms the count.
+>
 > **Burn-down log.** 2026-10-01: 78 → 77; `cmd_secureboot` left the ledger.
 > `secureboot records 1O` printed the ten newest records, a default standing in
 > for a count it could not read. It is refused with a usage line now. Fixed in

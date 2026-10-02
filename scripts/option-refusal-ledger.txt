@@ -46,9 +46,7 @@
 # sites it exposed landed in one commit rather than two.
 cmd_acpistat 1
 cmd_alloc_trace 1
-cmd_applaunch 1
 cmd_apppermissions 1
-cmd_appstore 1
 cmd_bluetooth 1
 cmd_bootcfg 1
 cmd_cliphistory 1
@@ -61,7 +59,6 @@ cmd_dnssettings 1
 cmd_faceunlock 1
 cmd_filerules 1
 cmd_filevault 1
-cmd_findex 1
 cmd_fnotify 1
 cmd_focussession 1
 cmd_fscache 1

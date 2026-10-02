@@ -884,8 +884,12 @@ mod tests {
         // start still applies.
         assert_eq!(eval(&["abcabcx", ":", "\\(abc\\)\\1"]), "abc");
         // A reference to a group that does not exist is still a diagnostic,
-        // not a literal digit — `\2` must not quietly match a `2`.
-        assert!(eval_err(&["a2", ":", "\\(a\\)\\2"]).contains("backreference"));
+        // not a literal digit — `\2` must not quietly match a `2` — and it is
+        // glibc's sentence, as upstream prints it.
+        assert_eq!(
+            eval_err(&["a2", ":", "\\(a\\)\\2"]),
+            "Invalid back reference"
+        );
     }
 
     #[test]

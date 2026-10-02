@@ -685,6 +685,7 @@ prerequisite that is no longer in `roadmap.md` is done: look for it here, or
   - [x] Configurable colors (6 built-in schemes: default/solarized-dark/monokai/dracula/gruvbox/light, custom FG/BG via hex RGB, runtime palette swap, SGR uses scheme defaults, `color` kshell command)
   - [x] tmux-like session detach/reattach (termsession module: 10 sessions, per-session screen/scrollback/history/CWD/env, Ctrl+B quick-switch, tsession command)
   - [x] Find in backscroll (Ctrl+F interactive search with Ctrl+N/P navigation, 1000-line scrollback ring buffer, `scrollback` command with search/list/screen dump, per-cell screen text buffer for capture)
+- [x] Port coreutils (85 binaries: echo, cat, ls, head, wc, mkdir, rm, cp, mv, touch, tail, sort, grep, ln, pwd, env, sleep, true, false, uname, basename, dirname, tee, rmdir, seq, yes, which, date, uniq, cut, tr, chmod, chown, id, whoami, hostname, readlink, realpath, stat, printf, test, kill, dd, df, du, xargs, find, ps, nohup, nice, mkfifo, expr, nl, paste, comm, expand, fold, md5sum, sha256sum, tty, diff, cmp, od, strings, uptime, free, unexpand, cal, time, sed, awk, ed, more, sh, tar, bc, patch, split, join, csplit, logger, logname, who, tsort, renice)
 
 # OS Development Roadmap — SIX-AGENT EDITION
 ## Phase 2: Basic Userspace

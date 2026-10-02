@@ -126,6 +126,12 @@ pub struct Record {
     pub pid: i32,
     /// `ut_tv.tv_sec` as Unix epoch seconds, or 0 if it was negative.
     pub login_time: u64,
+    /// `ut_tv.tv_sec` exactly as stored: signed, and sign-extended from the
+    /// record's 32 bits. GNU's readers hand this to `localtime` without
+    /// asking whether it is plausible, so `who` prints a 1969 date for a
+    /// negative one; [`login_time`](Self::login_time) is for the readers that
+    /// treat such a record as corrupt.
+    pub tv_sec: i64,
     /// `ut_tv.tv_usec`, the microseconds part of the timestamp.
     pub login_usec: u32,
     /// `ut_exit`, the two `short`s a DEAD_PROCESS record carries: the
@@ -257,8 +263,10 @@ pub fn parse(data: &[u8]) -> Vec<Record> {
             id,
             pid,
             // tv_sec is signed but holds a positive epoch time. A negative one
-            // is a corrupt record, and 0 is the only honest reading of it.
+            // is a corrupt record, and 0 is the only honest reading of it --
+            // for a reader that wants a time. `tv_sec` keeps it as stored.
             login_time: u64::try_from(tv_sec).unwrap_or(0),
+            tv_sec: i64::from(tv_sec),
             login_usec,
             exit_status,
             session,
@@ -403,6 +411,16 @@ mod tests {
         // 18446744073709551615 and prints as a date in the year 584942417355.
         let data = record(USER_PROCESS, 1, b"tty1", b"", b"alice", b"", -1);
         assert_eq!(parse(&data)[0].login_time, 0);
+    }
+
+    /// ...while `tv_sec` keeps the value as stored, sign and all: what GNU's
+    /// readers hand to `localtime`.
+    #[test]
+    fn tv_sec_is_the_stored_time_sign_extended() {
+        for stored in [-1, -86_400, i32::MIN, 0, 1_700_000_000, i32::MAX] {
+            let data = record(USER_PROCESS, 1, b"tty1", b"", b"alice", b"", stored);
+            assert_eq!(parse(&data)[0].tv_sec, i64::from(stored), "{stored}");
+        }
     }
 
     #[test]

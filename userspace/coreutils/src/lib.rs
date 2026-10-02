@@ -495,6 +495,9 @@
 //!   signal that ended its command, and coreutils' `operand2sig.c`, for
 //!   `timeout -s` -- with a name that needs no allocation, for `timeout -v`'s
 //!   report from inside a signal handler.
+//! - [`utmp`] — gnulib's `readutmp`: which login records `who`, `users` and
+//!   `pinky` are given, the boot entry made up when a Linux utmp has none, and
+//!   the readings of a record's fields the three share.
 //! - [`utsname`] — the `uname(2)` answers `uname` and `arch` both print.
 //!
 //! The regex engine, which is the other thing they must not disagree about,
@@ -572,6 +575,7 @@ pub mod umask;
 // a number in any base -- so this crate's one user is coreutils' `chown` side.)
 pub use userspec;
 pub mod utimecmp;
+pub mod utmp;
 pub mod utsname;
 pub mod vercmp;
 pub mod xnum;

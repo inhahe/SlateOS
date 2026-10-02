@@ -63,6 +63,7 @@
 
 use core::ffi::CStr;
 
+pub mod clock;
 pub mod conf;
 pub mod inotify;
 pub mod netdb;

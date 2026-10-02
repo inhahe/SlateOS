@@ -5,9 +5,10 @@
 //! Usage: pinky [OPTION]... [USER]...
 //! ```
 //!
-//! A port of GNU coreutils 9.4's `src/pinky.c`. The login records come from the
-//! shared `utmpfile` crate and the user records from `pwdb`, as for `users`
-//! and `id`; this file is what `pinky` does with them. It replaces the `pinky`
+//! A port of GNU coreutils 9.4's `src/pinky.c`. The login records come from
+//! [`coreutils::utmp`] -- gnulib's `readutmp`, over the shared `utmpfile`
+//! parser, as for `who` and `users` -- and the user records from `pwdb`, as
+//! for `id`; this file is what `pinky` does with them. It replaces the `pinky`
 //! personality of `userspace/finger`, which nothing installed under that name
 //! (`scripts/multicall-aliases-baseline.txt`), and which printed finger's
 //! layout under pinky's options -- `-b` hid the plan where it should hide the
@@ -56,14 +57,12 @@
 #![cfg_attr(not(unix), allow(dead_code))]
 
 use coreutils::getopt::{self, Opt, Program, Takes};
+use coreutils::utmp::UTMP_FILE;
 use std::ffi::OsString;
 
 coreutils::guard_std_fds!();
 
 const PINKY: Program = Program::new("pinky", 1);
-
-/// glibc's `_PATH_UTMP`, which gnulib's `UTMP_FILE` is.
-const UTMP_FILE: &str = "/var/run/utmp";
 
 /// `parse_gnu_standard_options_only`'s table, which is upstream's `longopts`.
 const LONG_OPTIONS: &[(&str, Takes)] = &[("help", Takes::Nothing), ("version", Takes::Nothing)];
@@ -262,42 +261,11 @@ fn heading(out: &mut Vec<u8>, show: &Show, time_width: usize) {
     out.push(b'\n');
 }
 
-/// The device a `ut_line` names, relative to `/dev` unless absolute: the part
-/// after the first space if there is one ("If ut_line contains a space, the
-/// device name starts after the space"). `None` for an empty name, which
-/// upstream's `fstatat` rejects -- joined to `/dev/` it would stat `/dev`.
-fn tty_device(line: &[u8]) -> Option<Vec<u8>> {
-    let name = match line.iter().position(|&c| c == b' ') {
-        Some(at) => line.get(at.saturating_add(1)..).unwrap_or_default(),
-        None => line,
-    };
-    if name.is_empty() {
-        return None;
-    }
-    if name.first() == Some(&b'/') {
-        return Some(name.to_vec());
-    }
-    let mut path = b"/dev/".to_vec();
-    path.extend_from_slice(name);
-    Some(path)
-}
-
-/// A `ut_host` split at its first `:` into the host and the X display after it.
-fn split_display(host: &[u8]) -> (&[u8], Option<&[u8]>) {
-    match host.iter().position(|&c| c == b':') {
-        Some(at) => (
-            host.get(..at).unwrap_or_default(),
-            Some(host.get(at.saturating_add(1)..).unwrap_or_default()),
-        ),
-        None => (host, None),
-    }
-}
-
 #[cfg(unix)]
 mod imp {
     use super::{
         PINKY, Request, Show, UTMP_FILE, create_fullname, gecos_name, heading, help_text,
-        idle_string, pad, pad_cut, pad_left, parse_args, split_display, tty_device,
+        idle_string, pad, pad_cut, pad_left, parse_args,
     };
     use coreutils::diag;
     use coreutils::errmsg::strerror;
@@ -305,12 +273,11 @@ mod imp {
     use coreutils::locale::{Category, hard_locale};
     use coreutils::quote::{os_bytes, os_from_bytes, quotef};
     use coreutils::stdfd::{self, Stream};
+    use coreutils::utmp::{self, Record, Want, canon_host, split_display, tty_device};
     use std::ffi::OsString;
     use std::io::{Read, Write};
     use std::os::unix::fs::MetadataExt;
-    use std::path::Path;
     use std::process::ExitCode;
-    use utmpfile::{Record, USER_PROCESS};
 
     /// `S_IWGRP`: a terminal whose group may write to it accepts `write(1)`.
     const S_IWGRP: u32 = 0o020;
@@ -343,16 +310,20 @@ mod imp {
         let db = pwdb::Db::load();
 
         if show.short {
-            // A system with no utmp has nobody logged in; one whose utmp is
+            // Upstream's `read_utmp (UTMP_FILE, …, READ_UTMP_USER_PROCESS)`. A
+            // system with no utmp has nobody logged in; one whose utmp is
             // there and cannot be read does not.
-            let data = match optionalfile::read_bytes_or_empty(Path::new(UTMP_FILE)) {
-                Ok(d) => d,
+            let want = Want {
+                users_only: true,
+                live_only: false,
+            };
+            let records = match utmp::read_utmp(UTMP_FILE.as_bytes(), false, want) {
+                Ok(records) => records,
                 Err(e) => {
                     diag!("pinky: {}: {}", quotef(UTMP_FILE.as_bytes()), strerror(&e));
                     return ExitCode::FAILURE;
                 }
             };
-            let records = utmpfile::parse(&data);
             let _ = out.write_all(&short_pinky(&show, &db, &records, &users));
         } else {
             for user in &users {
@@ -377,8 +348,10 @@ mod imp {
         let zone = localtime::Zone::from_env();
         let now = now();
         for r in records {
-            // gnulib's `IS_USER_PROCESS`.
-            if r.record_type != USER_PROCESS || r.user.is_empty() {
+            // Read with `users_only`, so every record is already a user
+            // process; asked again because nothing in this function's
+            // signature says so.
+            if !utmp::is_user_process(r) {
                 continue;
             }
             if !users.is_empty() && !users.contains(&r.user) {
@@ -457,92 +430,6 @@ mod imp {
             }
         }
         out.push(b'\n');
-    }
-
-    /// gnulib's `canon_host`: the resolver's canonical name for `host`, or
-    /// `None` when it has none to give -- upstream then prints `host` as it is.
-    ///
-    /// Through the C library's `getaddrinfo` because that is the resolver:
-    /// `/etc/hosts`, DNS and whatever `nsswitch.conf` adds. On SlateOS the
-    /// answer is currently the query echoed back (`known-issues.md` ->
-    /// `B-HOSTNAME-RESOLVES-THE-DOMAIN-WITHOUT-ETC-HOSTS`), which prints the
-    /// host unchanged -- the same line as not asking.
-    fn canon_host(host: &[u8]) -> Option<Vec<u8>> {
-        /// `struct addrinfo`, as glibc lays it out and as `posix::socket`
-        /// declares it (`scripts/check-libc-abi.py` holds the two together).
-        #[repr(C)]
-        struct AddrInfo {
-            ai_flags: i32,
-            ai_family: i32,
-            ai_socktype: i32,
-            ai_protocol: i32,
-            ai_addrlen: u32,
-            ai_addr: *mut u8,
-            ai_canonname: *mut u8,
-            ai_next: *mut AddrInfo,
-        }
-        /// `AI_CANONNAME`: 2 in glibc and in `posix::socket`.
-        const AI_CANONNAME: i32 = 2;
-        unsafe extern "C" {
-            fn getaddrinfo(
-                node: *const u8,
-                service: *const u8,
-                hints: *const AddrInfo,
-                res: *mut *mut AddrInfo,
-            ) -> i32;
-            fn freeaddrinfo(res: *mut AddrInfo);
-        }
-
-        // A name with a NUL in it cannot be passed as a C string; `ut_host`
-        // is cut at its first NUL, so this cannot happen, but it is checked
-        // rather than assumed because the pointer below depends on it.
-        if host.contains(&0) {
-            return None;
-        }
-        let mut node = host.to_vec();
-        node.push(0);
-        let hints = AddrInfo {
-            ai_flags: AI_CANONNAME,
-            ai_family: 0,
-            ai_socktype: 0,
-            ai_protocol: 0,
-            ai_addrlen: 0,
-            ai_addr: std::ptr::null_mut(),
-            ai_canonname: std::ptr::null_mut(),
-            ai_next: std::ptr::null_mut(),
-        };
-        let mut res: *mut AddrInfo = std::ptr::null_mut();
-        // SAFETY: `node` is NUL-terminated and outlives the call; `service` may
-        // be null when `node` is not; `hints` is a valid `addrinfo` with only
-        // the flags set; `res` is a valid place for the result pointer.
-        let rc = unsafe {
-            getaddrinfo(
-                node.as_ptr(),
-                std::ptr::null(),
-                &raw const hints,
-                &raw mut res,
-            )
-        };
-        if rc != 0 || res.is_null() {
-            return None;
-        }
-        // SAFETY: `res` is the non-null list `getaddrinfo` returned. Its first
-        // entry's `ai_canonname`, when set, is a NUL-terminated string owned by
-        // the list; it is copied out before the list is freed, exactly once.
-        unsafe {
-            let canon = (*res).ai_canonname;
-            let copied = if canon.is_null() {
-                None
-            } else {
-                // `CStr` rather than a declared `strlen`: rustc's
-                // `suspicious_runtime_symbol_definitions` rejects a
-                // redeclaration of a symbol the runtime itself links whose
-                // pointer type differs from the runtime's own.
-                Some(std::ffi::CStr::from_ptr(canon.cast()).to_bytes().to_vec())
-            };
-            freeaddrinfo(res);
-            copied
-        }
     }
 
     /// Upstream's `print_long_entry`: everything known about one user.
@@ -692,25 +579,8 @@ mod tests {
         );
     }
 
-    #[test]
-    fn the_device_is_under_dev_unless_absolute() {
-        assert_eq!(tty_device(b"pts/0"), Some(b"/dev/pts/0".to_vec()));
-        assert_eq!(tty_device(b"/dev/tty1"), Some(b"/dev/tty1".to_vec()));
-        assert_eq!(tty_device(b"x pts/3"), Some(b"/dev/pts/3".to_vec()));
-        // Not `/dev` itself, which upstream's `fstatat (fd, "")` never stats.
-        assert_eq!(tty_device(b""), None);
-        assert_eq!(tty_device(b"x "), None);
-    }
-
-    #[test]
-    fn a_display_is_split_off_the_host() {
-        assert_eq!(split_display(b"host"), (&b"host"[..], None));
-        assert_eq!(
-            split_display(b"host:0.0"),
-            (&b"host"[..], Some(&b"0.0"[..]))
-        );
-        assert_eq!(split_display(b":0"), (&b""[..], Some(&b"0"[..])));
-    }
+    // The device and display readings moved to `coreutils::utmp` with the
+    // functions, and are tested there.
 
     #[test]
     fn long_format_needs_users() {

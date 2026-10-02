@@ -557,22 +557,30 @@ fn from_field(
         addr = [0; 16];
         addr[..4].copy_from_slice(&v4);
     }
+    // The address as text, or `None` -- there is no address, or the library
+    // would not write it -- in which case upstream shows the host instead
+    // (`strcpy (buf, "")`, then `print_host`). For IPv4 the refusal is the
+    // expected one: `inet_ntop` answers `ENOSPC` for an address longer than
+    // the column, and the column then shows the host.
     let text = if addr[4..].iter().any(|&b| b != 0) {
-        let mut t = ntop(AF_INET6, &addr, INET6_ADDRSTRLEN).unwrap_or_default();
-        t.truncate(fromlen);
-        t
+        ntop(AF_INET6, &addr, INET6_ADDRSTRLEN).map(|mut t| {
+            // `strncpy (buf, buf_ipv6, fromlen)`: cut to the column.
+            t.truncate(fromlen);
+            t
+        })
     } else if addr[..4] != [0; 4] {
-        ntop(AF_INET, &addr[..4], fromlen.saturating_add(1)).unwrap_or_default()
+        ntop(AF_INET, &addr[..4], fromlen.saturating_add(1))
     } else {
-        Vec::new()
+        None
     };
-    if text.is_empty() {
-        return print_host(&rec.host, fromlen);
+    match text.filter(|t| !t.is_empty()) {
+        Some(mut out) => {
+            let rest = i64::try_from(fromlen.saturating_sub(out.len())).unwrap_or(0);
+            out.extend_from_slice(&display_or_interface(&rec.host, rest));
+            out
+        }
+        None => print_host(&rec.host, fromlen),
     }
-    let rest = i64::try_from(fromlen.saturating_sub(text.len())).unwrap_or(0);
-    let mut out = text;
-    out.extend_from_slice(&display_or_interface(&rec.host, rest));
-    out
 }
 
 /// `showinfo`'s cleanup of `ut_line`: the name up to its first byte that is

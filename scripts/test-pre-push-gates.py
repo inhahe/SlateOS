@@ -291,7 +291,7 @@ HEAD_GATES = {
     "quote-names.py": "gate 8, file names in diagnostics",
     "check-requests-not-deleted.py": "gate 9, request deletion",
     "check-doc-links.py": "gate 11, dead doc links",
-    "check-design-decisions-bands.py": "gate 13, per-lane numbering bands",
+    "check-docs.py": "gate 13, the shared entry documents",
     "check-accidental-headings.py": "gate 14, `---` that renders as a heading",
 }
 

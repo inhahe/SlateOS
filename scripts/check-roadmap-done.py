@@ -103,6 +103,7 @@ def _load_multicall():
 _multicall = _load_multicall()
 
 ROADMAP_REL = "roadmap.md"
+ROADMAP_DONE_REL = "roadmap-done.md"
 BASELINE = Path(__file__).resolve().parent / "roadmap-done-baseline.txt"
 CRATE_ROOT = "userspace"
 COREUTILS_BIN = "userspace/coreutils/src/bin"
@@ -525,6 +526,14 @@ def main() -> int:
                     file=sys.stderr,
                 )
                 return 2
+            # Since 2026-10-02 fully done items move to roadmap-done.md (check-docs.py
+            # rule R1), so that is where nearly every `[x]` claim now lives. Both
+            # files are judged; an absent roadmap-done.md is a tree from before the
+            # cutover, not an error.
+            texts = {ROADMAP_REL: text}
+            done_text = tree.read_text(ROADMAP_DONE_REL)
+            if done_text is not None:
+                texts[ROADMAP_DONE_REL] = done_text
             # A tree with no crates would make every entry look stale. That is
             # the no-corpus failure the other gates here learned to refuse: an
             # empty answer about an empty subject is not a verdict about
@@ -543,14 +552,14 @@ def main() -> int:
                     file=sys.stderr,
                 )
                 return 2
-            found = violations(text, known=known)
+            found = [(rel, n, name, s) for rel, t in texts.items() for n, name, s in violations(t, known=known)]
             # Lane A's shape, checked in the same pass over the same file.
             # Deliberately NOT a second script: two ratchets counting adjacent
             # populations is how "N remain" stops meaning anything, and lane A
             # asked for exactly one so it would not be duplicated.
             mod_full, mod_bare = kernel_modules(tree)
             mod_found = (
-                modpath_violations(text, mod_full, mod_bare)
+                [(rel, *v) for rel, t in texts.items() for v in modpath_violations(t, mod_full, mod_bare)]
                 if len(mod_full) >= 100
                 else None
             )
@@ -562,7 +571,7 @@ def main() -> int:
         print(f"check-roadmap-done: cannot read the tree: {e}", file=sys.stderr)
         return 2
 
-    names = sorted({name for _n, name, _s in found})
+    names = sorted({name for _rel, _n, name, _s in found})
 
     # -- lane A's module paths, judged before the name ratchet ----------------
     #
@@ -591,8 +600,8 @@ def main() -> int:
             f" resolves to nothing under {MODROOT}/:\n",
             file=sys.stderr,
         )
-        for n, path, line in mod_found[:40]:
-            print(f"  roadmap.md:{n}: ({path})", file=sys.stderr)
+        for rel, n, path, line in mod_found[:40]:
+            print(f"  {rel}:{n}: ({path})", file=sys.stderr)
             print(f"      {line[:100]}", file=sys.stderr)
         if len(mod_found) > 40:
             print(f"  … and {len(mod_found) - 40} more", file=sys.stderr)
@@ -629,7 +638,7 @@ def main() -> int:
         # failure. A gate that says nothing when it passes cannot be told from
         # one that did not run -- which is how a checker goes quietly blind
         # after a refactor moves what it was reading.
-        mod_seen = len({p for _n, p, _s in modpath_sightings(text)})
+        mod_seen = len({p for t in texts.values() for _n, p, _s in modpath_sightings(t)})
         print(
             f"ok — {len(names)} known unresolved, 0 new ({present} crates,"
             f" {len(fixed)} improved); {mod_seen} module path(s) all resolve"
@@ -637,14 +646,14 @@ def main() -> int:
         )
         return 0
 
-    found = [(n, name, s) for n, name, s in found if name in set(new_names)]
+    found = [(rel, n, name, s) for rel, n, name, s in found if name in set(new_names)]
 
     print(
         f"{len(found)} roadmap entr{'y' if len(found) == 1 else 'ies'} marked `[x]`"
         f" nam{'es' if len(found) == 1 else 'e'} something that does not exist:\n"
     )
-    for n, name, line in found[:40]:
-        print(f"  roadmap.md:{n}: {CRATE_ROOT}/{name}/ is absent")
+    for rel, n, name, line in found[:40]:
+        print(f"  {rel}:{n}: {CRATE_ROOT}/{name}/ is absent")
         print(f"      {line[:100]}")
     if len(found) > 40:
         print(f"  … and {len(found) - 40} more")

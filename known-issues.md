@@ -160862,6 +160862,10 @@ on measurements that, as recorded above, were never taken for this type until
 today. 489 instances, a cost/correctness trade, and a decision that is
 already written down: that is `open-questions.md`, not a unilateral sweep.
 
+**2026-10-02:** the pairs in `startmenu` -> `appregistry`, `columnview`,
+`filetype`, `openwith` and `findex` are gone with those modules
+(design-decisions 1528), so the next boot's count is the one to read.
+
 ### [A] `devpower` reports device power states it never applies, and `/proc` published them undisclosed -- 2026-09-17
 
 **Status:** OPEN

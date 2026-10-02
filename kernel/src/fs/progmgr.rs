@@ -178,7 +178,7 @@ pub enum UninstallOption {
 /// A registered program with its management settings.
 #[derive(Debug, Clone)]
 pub struct ProgramEntry {
-    /// Application ID (matches appregistry).
+    /// Application ID: a desktop entry's id, from userspace's program list (`gui/programs`).
     pub app_id: String,
     /// Display name.
     pub name: String,

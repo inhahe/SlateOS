@@ -14,8 +14,6 @@
 //! Integration:
 //!   → notifcenter (notification center)
 //!   → taskbar (taskbar icon badges)
-//!   → appregistry (app identity)
-//!   → startmenu (launcher badges)
 //! ```
 
 #![allow(dead_code)]

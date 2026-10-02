@@ -14070,7 +14070,7 @@ pub fn self_test_seal_rules() -> KernelResult<()> {
 ///
 /// `InternalError` naming the first step that answered wrongly; the setup's.
 pub fn self_test_acl_door() -> KernelResult<()> {
-    use super::acl::{self, AccessRequest, AclPerm, AclTag};
+    use super::acl::{self, AclPerm, AclTag};
     use super::handle::{self, OpenFlags};
     use crate::serial_println;
     use xattr_policy::Caller;
@@ -14138,9 +14138,13 @@ pub fn self_test_acl_door() -> KernelResult<()> {
         if !listed.iter().any(|n| n.as_slice() == name) {
             return fail("a file with an ACL does not list its name");
         }
-        let check =
-            |uid: u32, want: AccessRequest| acl::check_access(FILE, uid, uid, 1000, 1000, want);
-        if check(2000, AccessRequest::WRITE).is_err() || check(3000, AccessRequest::WRITE).is_ok() {
+        // Through the permission gate's own decision, with the caller's
+        // identity given (`path_access_verdict`): a self-test runs as a kernel
+        // task, which `check_path_access` lets through before asking.
+        let check = |uid: u32, want: PathAccess| {
+            path_access_verdict(Path::new(FILE), uid, uid, &[], want)
+        };
+        if check(2000, PathAccess::Write).is_err() || check(3000, PathAccess::Write).is_ok() {
             return fail("the stored ACL does not decide as it says");
         }
 
@@ -14160,7 +14164,7 @@ pub fn self_test_acl_door() -> KernelResult<()> {
         if mask != Some(AclPerm(5)) || user != Some(AclPerm(6)) {
             return fail("a chmod did not reach the ACL's mask, or moved a named entry");
         }
-        if check(2000, AccessRequest::WRITE).is_ok() || check(2000, AccessRequest::READ).is_err() {
+        if check(2000, PathAccess::Write).is_ok() || check(2000, PathAccess::Read).is_err() {
             return fail("after the chmod, the narrower mask is not what decides");
         }
 
@@ -14209,9 +14213,7 @@ pub fn self_test_acl_door() -> KernelResult<()> {
                 return Err(KernelError::InternalError);
             }
         }
-        if get(FILE) != Err(KernelError::NoAttribute)
-            || acl::check_access(FILE, 3000, 3000, 1000, 1000, AccessRequest::WRITE).is_err()
-        {
+        if get(FILE) != Err(KernelError::NoAttribute) || check(3000, PathAccess::Write).is_err() {
             return fail("a removed ACL still reads back, or still decides");
         }
 

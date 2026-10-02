@@ -4898,10 +4898,7 @@ const COMMANDS: &[&str] = &[
     "alias",
     "ansi",
     "append",
-    "appregistry",
-    "appreg",
     "archive",
-    "assoc",
     "atime",
     "audio",
     "awk",
@@ -4916,8 +4913,6 @@ const COMMANDS: &[&str] = &[
     "systray",
     "tray",
     "taskbar",
-    "startmenu",
-    "smenu",
     "filepicker",
     "fpick",
     "theme",
@@ -5019,8 +5014,6 @@ const COMMANDS: &[&str] = &[
     "tpad",
     "powerprofile",
     "pprofile",
-    "defaultapps",
-    "defapp",
     "monitors",
     "monitor",
     "fwsettings",
@@ -5129,8 +5122,6 @@ const COMMANDS: &[&str] = &[
     "mlink",
     "screenlock",
     "slock",
-    "appstore",
-    "store",
     "wintiling",
     "tile",
     "peninput",
@@ -5193,8 +5184,6 @@ const COMMANDS: &[&str] = &[
     "haptic",
     "eyeprotect",
     "eye",
-    "pinnedapps",
-    "pinned",
     "inputmethod",
     "imf",
     "storagesense",
@@ -5272,8 +5261,6 @@ const COMMANDS: &[&str] = &[
     "color",
     "colorscheme",
     "column",
-    "columnview",
-    "colview",
     "comm",
     "command",
     "contextmenu",
@@ -5316,17 +5303,12 @@ const COMMANDS: &[&str] = &[
     "false",
     "fhist",
     "file",
-    "fileinfo",
     "filehist",
     "fileops",
     "fileselect",
-    "filetype",
     "find",
-    "findex",
-    "finfo",
     "fops",
     "fsel",
-    "ftype",
     "fold",
     "free",
     "firewall",
@@ -5382,8 +5364,6 @@ const COMMANDS: &[&str] = &[
     "mapfile",
     "mem",
     "meminfo",
-    "mime",
-    "mimetype",
     "mkdir",
     "mkelf",
     "mkfs",
@@ -5400,8 +5380,6 @@ const COMMANDS: &[&str] = &[
     "nproc",
     "nslookup",
     "od",
-    "openw",
-    "openwith",
     "paste",
     "pci",
     "ping",
@@ -5410,7 +5388,6 @@ const COMMANDS: &[&str] = &[
     "udp6",
     "pathbar",
     "prefetch",
-    "preview",
     "printf",
     "profile",
     "prop",
@@ -5434,8 +5411,6 @@ const COMMANDS: &[&str] = &[
     "rm",
     "usbpolicy",
     "usbpol",
-    "applaunch",
-    "alaunch",
     "sysprofiler",
     "sprof",
     "clipsync",
@@ -7857,8 +7832,6 @@ fn dispatch(line: &str) {
         "dedup" => cmd_dedup(args),
         "integrity" => cmd_integrity(args),
         "fhist" | "filehist" => cmd_fhist(args),
-        "mime" | "mimetype" => cmd_mime(args),
-        "assoc" | "openwith" => cmd_assoc(args),
         "quota" => cmd_quota(args),
         "getfacl" => cmd_getfacl(args),
         "setfacl" => cmd_setfacl(args),
@@ -7903,9 +7876,7 @@ fn dispatch(line: &str) {
         "fsfreeze" => cmd_fsfreeze(args),
         "seal" => cmd_seal(args),
         "recent" => cmd_recent(args),
-        "fileinfo" | "finfo" => cmd_fileinfo(args),
         "fswalk" | "walk" => cmd_fswalk(args),
-        "findex" => cmd_findex(args),
         "thumbcache" | "tcache" => cmd_thumbcache(args),
         "bookmark" | "bm" => cmd_bookmark(args),
         "clipboard" | "clip" => cmd_clipboard(args),
@@ -7913,8 +7884,6 @@ fn dispatch(line: &str) {
         "dragdrop" => cmd_dragdrop(args),
         "fileops" | "fops" => cmd_fileops(args),
         "fileselect" | "fsel" => cmd_fileselect(args),
-        "filetype" | "ftype" => cmd_filetype(args),
-        "openw" => cmd_openwith(args),
         "sidebar" => cmd_sidebar(args),
         "statusbar" => cmd_statusbar(args),
         "toolbar" => cmd_toolbar(args),
@@ -7922,10 +7891,8 @@ fn dispatch(line: &str) {
         "fcomment" => cmd_fcomment(args),
         "rundialog" | "rund" => cmd_rundialog(args),
         "notifcenter" | "notif" => cmd_notifcenter(args),
-        "appregistry" | "appreg" => cmd_appregistry(args),
         "systray" | "tray" => cmd_systray(args),
         "taskbar" => cmd_taskbar(args),
-        "startmenu" | "smenu" => cmd_startmenu(args),
         "filepicker" | "fpick" => cmd_filepicker(args),
         "theme" => cmd_theme(args),
         "hotkey" => cmd_hotkey(args),
@@ -7983,7 +7950,6 @@ fn dispatch(line: &str) {
         "mousesettings" | "mouse" => cmd_mousesettings(args),
         "touchpad" | "tpad" => cmd_touchpad(args),
         "powerprofile" | "pprofile" => cmd_powerprofile(args),
-        "defaultapps" | "defapp" => cmd_defaultapps(args),
         "monitors" | "monitor" => cmd_monitors(args),
         "fwsettings" | "firewall" => cmd_fwsettings(args),
         "updatemgr" | "updates" => cmd_updatemgr(args),
@@ -8039,7 +8005,6 @@ fn dispatch(line: &str) {
         "speechio" | "speech" => cmd_speechio(args),
         "mobilelink" | "mlink" => cmd_mobilelink(args),
         "screenlock" | "slock" => cmd_screenlock(args),
-        "appstore" | "store" => cmd_appstore(args),
         "wintiling" | "tile" => cmd_wintiling(args),
         "peninput" | "pen" => cmd_peninput(args),
         "brightness" | "bright" => cmd_brightness(args),
@@ -8071,7 +8036,6 @@ fn dispatch(line: &str) {
         "snaplayout" | "snlayout" => cmd_snaplayout(args),
         "haptfeedback" | "haptic" => cmd_haptfeedback(args),
         "eyeprotect" | "eye" => cmd_eyeprotect(args),
-        "pinnedapps" | "pinned" => cmd_pinnedapps(args),
         "inputmethod" | "imf" => cmd_inputmethod(args),
         "storagesense" | "ssense" => cmd_storagesense(args),
         "autofix" | "afix" => cmd_autofix(args),
@@ -8095,7 +8059,6 @@ fn dispatch(line: &str) {
         "sysresource" | "sres" => cmd_sysresource(args),
         "faceunlock" | "face" => cmd_faceunlock(args),
         "usbpolicy" | "usbpol" => cmd_usbpolicy(args),
-        "applaunch" | "alaunch" => cmd_applaunch(args),
         "sysprofiler" => cmd_sysprofiler(args),
         "clipsync" | "clsync" => cmd_clipsync(args),
         "netusage" | "nusage" => cmd_netusage(args),
@@ -8247,9 +8210,7 @@ fn dispatch(line: &str) {
         "cgmem" | "cgm" => cmd_cgmem(args),
         "vmfrag" | "vfrag" => cmd_vmfrag(args),
         "pidfd" | "pfd" => cmd_pidfd(args),
-        "preview" => cmd_preview(args),
         "template" => cmd_template(args),
-        "columnview" | "colview" => cmd_columnview(args),
         "pathbar" => cmd_pathbar(args),
         "viewstate" => cmd_viewstate(args),
         "properties" | "prop" => cmd_properties(args),
@@ -8664,7 +8625,6 @@ fn cmd_help() {
     shell_println!("  unalias N Remove command alias");
     shell_println!("  dmesg [-n] Show kernel log messages");
     shell_println!("  file F    Identify file type by extension");
-    shell_println!("  mime F    Show MIME content type (magic + extension)");
     shell_println!("  printf FMT .. Formatted output (%s %d %x %o %c)");
     shell_println!("  trash F   Move file to recycle bin (--list/--restore/--empty/--prune)");
     shell_println!("  cut -d/-f/-c  Extract columns/fields from text");
@@ -28285,193 +28245,6 @@ fn cmd_fhist(args: &str) {
     }
 }
 
-/// `mime PATH [PATH...]` — show the MIME content type of files.
-///
-/// Uses magic byte detection first, falling back to extension-based
-/// detection.  Also shows the content category (Image, Audio, etc.).
-fn cmd_mime(args: &str) {
-    if args.is_empty() {
-        shell_println!("Usage: mime <path> [path...]");
-        set_exit(1);
-        return;
-    }
-
-    for word in args.split_whitespace() {
-        let path = resolve_path(word);
-        match crate::fs::mime::detect(&path) {
-            Ok(mime) => {
-                let cat = crate::fs::mime::category(mime);
-                shell_println!("{}: {} ({})", path.display(), mime, cat);
-            }
-            Err(e) => {
-                shell_println!("{}: error: {:?}", path.display(), e);
-                set_exit(1);
-            }
-        }
-    }
-}
-
-/// `file PATH` — identify a file's type and basic info.
-///
-/// `assoc` — manage file type associations.
-///
-/// Subcommands:
-///   assoc list             - list all MIME types with associations
-///   assoc show MIME        - show apps registered for a MIME type
-///   assoc add MIME APP NAME [PRIO] - register an app
-///   assoc remove MIME APP  - unregister an app
-///   assoc lookup FILE      - show default app for a file
-///   assoc stats            - show registry statistics
-fn cmd_assoc(args: &str) {
-    use crate::fs::associations;
-
-    let parts: Vec<&str> = args.split_whitespace().collect();
-
-    if parts.is_empty() {
-        shell_println!("Usage: assoc <list|show|add|remove|lookup|stats> [args...]");
-        set_exit(1);
-        return;
-    }
-
-    match parts.first().copied().unwrap_or("") {
-        "list" | "ls" => {
-            let types = associations::list_types();
-            if types.is_empty() {
-                shell_println!("No file type associations registered.");
-            } else {
-                shell_println!("{:>3}  {}", "Apps", "MIME Type");
-                shell_println!("{}", "-".repeat(50));
-                for (mime, count) in &types {
-                    shell_println!("{:>3}  {}", count, mime);
-                }
-                shell_println!("({} types)", types.len());
-            }
-        }
-
-        "show" => {
-            let mime = match parts.get(1) {
-                Some(m) => *m,
-                None => {
-                    shell_println!("Usage: assoc show <MIME_TYPE>");
-                    set_exit(1);
-                    return;
-                }
-            };
-
-            let apps = associations::apps_for(mime);
-            if apps.is_empty() {
-                shell_println!("No applications registered for '{}'.", mime);
-            } else {
-                shell_println!("Applications for '{}':", mime);
-                for (i, app) in apps.iter().enumerate() {
-                    let default_marker = if i == 0 { " [default]" } else { "" };
-                    let user_marker = if app.user_set { " (user)" } else { "" };
-                    shell_println!(
-                        "  {:>3}  {} — {}{}{}",
-                        app.priority,
-                        app.app_path.display(),
-                        app.app_name,
-                        default_marker,
-                        user_marker
-                    );
-                }
-            }
-        }
-
-        "add" => {
-            if parts.len() < 4 {
-                shell_println!("Usage: assoc add <MIME> <APP_PATH> <APP_NAME> [PRIORITY]");
-                set_exit(1);
-                return;
-            }
-            let mime = parts[1];
-            let app_path = parts[2];
-            let app_name = parts[3];
-            // `[PRIORITY]` is optional, so 100 is the right answer when it is
-            // ABSENT and the wrong one when it is present and unreadable. The
-            // `and_then(...).ok()` folded those two into one, so
-            // `assoc add text/plain /bin/ed ed 1O` registered the association at
-            // the default priority and printed no complaint -- and priority
-            // decides which application actually opens the file type.
-            let priority: u32 = match parts.get(4) {
-                None => 100,
-                Some(s) => match s.parse() {
-                    Ok(v) => v,
-                    Err(_) => {
-                        shell_println!("Invalid priority: {} (expected a number)", s);
-                        set_exit(1);
-                        return;
-                    }
-                },
-            };
-
-            associations::register(mime, app_path, app_name, priority, true);
-            shell_println!(
-                "Registered '{}' for {} (priority {})",
-                app_name,
-                mime,
-                priority
-            );
-        }
-
-        "remove" | "rm" => {
-            if parts.len() < 3 {
-                shell_println!("Usage: assoc remove <MIME> <APP_PATH>");
-                set_exit(1);
-                return;
-            }
-            let mime = parts[1];
-            let app_path = parts[2];
-
-            if associations::unregister(mime, app_path) {
-                shell_println!("Removed '{}' from {}", app_path, mime);
-            } else {
-                shell_println!("No association found for '{}' in {}", app_path, mime);
-            }
-        }
-
-        "lookup" => {
-            let path = match parts.get(1) {
-                Some(p) => resolve_path(p),
-                None => {
-                    shell_println!("Usage: assoc lookup <FILE>");
-                    set_exit(1);
-                    return;
-                }
-            };
-
-            let mime = crate::fs::mime::detect(&path).unwrap_or("unknown");
-            shell_println!("File:     {}", path.display());
-            shell_println!("MIME:     {}", mime);
-
-            match associations::default_app_for_file(&path) {
-                Some(app) => {
-                    shell_println!("Open with: {} ({})", app.app_name, app.app_path.display());
-                }
-                None => {
-                    shell_println!("Open with: (no application registered)");
-                }
-            }
-        }
-
-        "stats" | "st" => {
-            let st = associations::stats();
-            shell_println!("=== File Association Statistics ===");
-            shell_println!("  MIME types:     {}", st.mime_types);
-            shell_println!("  Total entries:  {}", st.total_entries);
-            shell_println!("  User entries:   {}", st.user_entries);
-        }
-
-        _ => {
-            shell_println!(
-                "Unknown subcommand '{}'. Use: list, show, add, remove, lookup, stats",
-                parts[0]
-            );
-            set_exit(1);
-        }
-    }
-}
-
 /// `quota` — manage filesystem quotas.
 ///
 /// Subcommands:
@@ -36073,75 +35846,6 @@ fn cmd_recent(args: &str) {
     }
 }
 
-fn cmd_fileinfo(args: &str) {
-    use crate::fs::fileinfo;
-    let parts: Vec<&str> = args.split_whitespace().collect();
-    let sub = parts.first().copied().unwrap_or("");
-    match sub {
-        "stats" => {
-            let (extractions, fields, errors) = fileinfo::stats();
-            shell_println!("File Info Statistics");
-            shell_println!("  Extractions: {}", extractions);
-            shell_println!("  Fields:      {}", fields);
-            shell_println!("  Errors:      {}", errors);
-        }
-        "reset" => {
-            fileinfo::reset_stats();
-            shell_println!("File info statistics reset.");
-        }
-        "fields" => {
-            // Show known fields for a MIME type.
-            if parts.len() < 2 {
-                shell_println!("Usage: fileinfo fields <mime-type>");
-                shell_println!("  Example: fileinfo fields audio/mpeg");
-                set_exit(1);
-                return;
-            }
-            let fields = fileinfo::fields_for_mime(parts[1]);
-            if fields.is_empty() {
-                shell_println!("No known fields for: {}", parts[1]);
-            } else {
-                shell_println!("Fields for {}:", parts[1]);
-                for (name, label) in &fields {
-                    shell_println!("  {:30} {}", name, label);
-                }
-            }
-        }
-        "" => {
-            shell_println!("Usage: fileinfo <path> | fileinfo <command>");
-            shell_println!("  <path>                       Extract metadata from file");
-            shell_println!("  fields <mime-type>           List known fields for MIME type");
-            shell_println!("  stats                        Show statistics");
-            shell_println!("  reset                        Reset counters");
-            set_exit(1);
-        }
-        _ => {
-            // Treat as file path.
-            let path = resolve_path(sub);
-            match fileinfo::extract(&path) {
-                Ok(info) => {
-                    shell_println!("File:   {}", info.path.display());
-                    shell_println!("MIME:   {}", info.mime);
-                    shell_println!("Format: {}", info.format_desc);
-                    if info.fields.is_empty() {
-                        shell_println!("\nNo metadata fields extracted.");
-                    } else {
-                        shell_println!("\n{:30} {}", "FIELD", "VALUE");
-                        shell_println!("{}", "-".repeat(60));
-                        for field in &info.fields {
-                            shell_println!("{:30} {}", field.label, field.value.display());
-                        }
-                    }
-                }
-                Err(e) => {
-                    shell_println!("Error: {:?}", e);
-                    set_exit(1);
-                }
-            }
-        }
-    }
-}
-
 /// The optional trailing `max-depth` operand shared by `fswalk count`, `size`
 /// and `find`.
 ///
@@ -36409,165 +36113,6 @@ fn cmd_fswalk(args: &str) {
                     set_exit(1);
                 }
             }
-        }
-    }
-}
-
-fn cmd_findex(args: &str) {
-    use crate::fs::findex;
-    let parts: Vec<&str> = args.split_whitespace().collect();
-    let sub = parts.first().copied().unwrap_or("");
-    match sub {
-        "build" => {
-            let path = if parts.len() > 1 {
-                resolve_path(parts[1])
-            } else {
-                get_cwd()
-            };
-            let depth = parts
-                .get(2)
-                .and_then(|s| s.parse::<usize>().ok())
-                .unwrap_or(3);
-            shell_println!("Indexing {}  (depth {})...", path.display(), depth);
-            match findex::build(&path, depth) {
-                Ok(count) => shell_println!("Indexed {} files.", count),
-                Err(e) => {
-                    shell_println!("Error: {:?}", e);
-                    set_exit(1);
-                }
-            }
-        }
-        "add" | "index" => {
-            if parts.len() < 2 {
-                shell_println!("Usage: findex add <path>");
-                set_exit(1);
-                return;
-            }
-            let path = resolve_path(parts[1]);
-            match findex::index_file(&path) {
-                Ok(fields) => shell_println!("Indexed {}: {} fields", path.display(), fields),
-                Err(e) => {
-                    shell_println!("Error: {:?}", e);
-                    set_exit(1);
-                }
-            }
-        }
-        "remove" | "rm" => {
-            if parts.len() < 2 {
-                shell_println!("Usage: findex remove <path>");
-                set_exit(1);
-                return;
-            }
-            let path = resolve_path(parts[1]);
-            if findex::remove_file(&path) {
-                shell_println!("Removed: {}", path.display());
-            } else {
-                shell_println!("Not indexed: {}", path.display());
-            }
-        }
-        "query" | "q" => {
-            if parts.len() < 2 {
-                shell_println!("Usage: findex query <field op value [AND ...]>");
-                shell_println!("  Ops: = != < > <= >= ~ (contains) ^ (starts) $ (ends)");
-                shell_println!("  Example: findex query audio.artist=Radiohead");
-                shell_println!("  Example: findex query image.width>=1920 AND image.height>=1080");
-                set_exit(1);
-                return;
-            }
-            let query_str = parts[1..].join(" ");
-            let predicates = findex::parse_query(&query_str);
-            if predicates.is_empty() {
-                shell_println!("No valid predicates in query.");
-                return;
-            }
-            let results = findex::query(&predicates);
-            if results.is_empty() {
-                shell_println!("No matching files.");
-            } else {
-                for path in &results {
-                    shell_println!("{}", path.display());
-                }
-                shell_println!("\n{} matches.", results.len());
-            }
-        }
-        "get" | "show" => {
-            if parts.len() < 2 {
-                shell_println!("Usage: findex get <path>");
-                set_exit(1);
-                return;
-            }
-            let path = resolve_path(parts[1]);
-            let fields = findex::get_fields(&path);
-            if fields.is_empty() {
-                shell_println!("No indexed fields for: {}", path.display());
-            } else {
-                shell_println!("{:30} {}", "FIELD", "VALUE");
-                shell_println!("{}", "-".repeat(60));
-                for (name, value) in &fields {
-                    shell_println!("{:30} {}", name, value);
-                }
-            }
-        }
-        "columns" | "cols" => {
-            let path = if parts.len() > 1 {
-                resolve_path(parts[1])
-            } else {
-                get_cwd()
-            };
-            let columns = findex::columns_for_dir(&path);
-            if columns.is_empty() {
-                shell_println!("No indexed files in: {}", path.display());
-            } else {
-                shell_println!("Recommended columns for {}:", path.display());
-                shell_println!("{:30} {:20} {:>5}", "FIELD", "LABEL", "FILES");
-                shell_println!("{}", "-".repeat(60));
-                for col in &columns {
-                    shell_println!("{:30} {:20} {:>5}", col.name, col.label, col.count);
-                }
-            }
-        }
-        "fields" => {
-            let fields = findex::known_fields();
-            if fields.is_empty() {
-                shell_println!("No fields indexed yet.");
-            } else {
-                shell_println!("{:30} {}", "FIELD NAME", "LABEL");
-                shell_println!("{}", "-".repeat(50));
-                for (name, label) in &fields {
-                    shell_println!("{:30} {}", name, label);
-                }
-            }
-        }
-        "clear" => {
-            findex::clear();
-            shell_println!("Index cleared.");
-        }
-        "stats" => {
-            let (builds, ops, queries, indexed, fields) = findex::stats();
-            shell_println!("File Index Statistics");
-            shell_println!("  Indexed files: {}/16384", indexed);
-            shell_println!("  Known fields:  {}/256", fields);
-            shell_println!("  Builds:        {}", builds);
-            shell_println!("  Index ops:     {}", ops);
-            shell_println!("  Queries:       {}", queries);
-        }
-        "reset" => {
-            findex::reset_stats();
-            shell_println!("Index statistics reset.");
-        }
-        _ => {
-            shell_println!("Usage: findex <command>");
-            shell_println!("  build [path] [depth]         Build index for directory");
-            shell_println!("  add <path>                   Index a single file");
-            shell_println!("  remove <path>                Remove from index");
-            shell_println!("  query <predicates>           Search by attributes");
-            shell_println!("  get <path>                   Show fields for a file");
-            shell_println!("  columns [dir]                Discover columns for dir");
-            shell_println!("  fields                       List all known field names");
-            shell_println!("  clear                        Clear entire index");
-            shell_println!("  stats                        Show statistics");
-            shell_println!("  reset                        Reset counters");
-            set_exit(1);
         }
     }
 }
@@ -37797,283 +37342,6 @@ fn check_char(state: crate::fs::fileselect::CheckState) -> char {
         crate::fs::fileselect::CheckState::Checked => 'X',
         crate::fs::fileselect::CheckState::Unchecked => ' ',
         crate::fs::fileselect::CheckState::Partial => '-',
-    }
-}
-
-/// `filetype` / `ftype` — file type and icon registry.
-fn cmd_filetype(args: &str) {
-    let parts: Vec<&str> = args.split_whitespace().collect();
-    let sub = parts.first().copied().unwrap_or("");
-    match sub {
-        "init" => {
-            crate::fs::filetype::init();
-            let (_, _, types, _) = crate::fs::filetype::stats();
-            shell_println!("File type registry initialized ({} types)", types);
-        }
-        "list" => {
-            let types = crate::fs::filetype::list_types();
-            if types.is_empty() {
-                shell_println!("(no file types registered — run 'filetype init')");
-            } else {
-                shell_println!(
-                    "{:<25} {:<20} {:<15} {}",
-                    "MIME",
-                    "Description",
-                    "Icon",
-                    "Exts"
-                );
-                shell_println!("{}", "-".repeat(70));
-                for (mime, desc, icon, ext_count) in &types {
-                    shell_println!("{:<25} {:<20} {:<15} {}", mime, desc, icon, ext_count);
-                }
-            }
-        }
-        "icon" => {
-            // filetype icon <path>
-            if let Some(path) = parts.get(1) {
-                let resolved = resolve_path(path);
-                let icon = crate::fs::filetype::icon_for_file(&resolved);
-                shell_println!("File: {}", resolved.display());
-                shell_println!("  MIME:        {}", icon.mime);
-                shell_println!("  Description: {}", icon.description);
-                shell_println!("  Icon:        {}", icon.icon);
-                shell_println!("  Category:    {:?}", icon.category);
-                shell_println!("  Source:      {:?}", icon.source);
-            } else {
-                shell_println!("Usage: filetype icon <path>");
-                set_exit(1);
-            }
-        }
-        "register" => {
-            // filetype register <mime> <description> <icon> [ext1 ext2...]
-            if parts.len() < 4 {
-                shell_println!("Usage: filetype register <mime> <desc> <icon> [ext...]");
-                set_exit(1);
-                return;
-            }
-            let mime = parts[1];
-            let desc = parts[2];
-            let icon = parts[3];
-            let exts: Vec<&str> = parts[4..].to_vec();
-            match crate::fs::filetype::register_type(mime, desc, icon, &exts) {
-                Ok(()) => shell_println!("Registered: {} ({})", mime, desc),
-                Err(e) => {
-                    shell_println!("Error: {:?}", e);
-                    set_exit(1);
-                }
-            }
-        }
-        "ext" => {
-            // filetype ext <extension>
-            if let Some(ext) = parts.get(1) {
-                match crate::fs::filetype::mime_for_extension(ext) {
-                    Some(mime) => shell_println!(".{} → {}", ext, mime),
-                    None => shell_println!("No type registered for .{}", ext),
-                }
-            } else {
-                shell_println!("Usage: filetype ext <extension>");
-                set_exit(1);
-            }
-        }
-        "stats" => {
-            let (lookups, registers, types, app_icons) = crate::fs::filetype::stats();
-            shell_println!("Types:       {}", types);
-            shell_println!("App icons:   {}", app_icons);
-            shell_println!("Lookups:     {}", lookups);
-            shell_println!("Registers:   {}", registers);
-        }
-        "reset" => {
-            crate::fs::filetype::reset_stats();
-            shell_println!("File type stats reset");
-        }
-        _ => {
-            shell_println!("Usage: filetype <subcommand>");
-            shell_println!("  init                Initialize defaults");
-            shell_println!("  list                List registered types");
-            shell_println!("  icon <path>         Resolve icon for file");
-            shell_println!("  register <m> <d> <i> [ext...]  Register type");
-            shell_println!("  ext <extension>     Lookup MIME by extension");
-            shell_println!("  stats               Show statistics");
-            shell_println!("  reset               Reset statistics");
-            set_exit(1);
-        }
-    }
-}
-
-/// `openw` — Open With dialog infrastructure.
-fn cmd_openwith(args: &str) {
-    let parts: Vec<&str> = args.split_whitespace().collect();
-    let sub = parts.first().copied().unwrap_or("");
-    match sub {
-        "choices" => {
-            // openw choices <file>
-            if let Some(path) = parts.get(1) {
-                let resolved = resolve_path(path);
-                match crate::fs::openwith::build_choices(&resolved) {
-                    Ok(choices) => {
-                        if choices.is_empty() {
-                            shell_println!("No applications found for {}", resolved.display());
-                        } else {
-                            shell_println!("Open With choices for {}:", resolved.display());
-                            shell_println!(
-                                "{:<25} {:<15} {:<8} {}",
-                                "Application",
-                                "Reason",
-                                "Default",
-                                "Uses"
-                            );
-                            shell_println!("{}", "-".repeat(60));
-                            for c in &choices {
-                                let reason = match c.reason {
-                                    crate::fs::openwith::ChoiceReason::RegisteredHandler => {
-                                        "registered"
-                                    }
-                                    crate::fs::openwith::ChoiceReason::RecentlyUsed => "recent",
-                                    crate::fs::openwith::ChoiceReason::InstalledApp => "installed",
-                                };
-                                let def = if c.is_default { "*" } else { "" };
-                                shell_println!(
-                                    "{:<25} {:<15} {:<8} {}",
-                                    c.app_name,
-                                    reason,
-                                    def,
-                                    c.use_count
-                                );
-                            }
-                        }
-                    }
-                    Err(e) => {
-                        shell_println!("Error: {:?}", e);
-                        set_exit(1);
-                    }
-                }
-            } else {
-                shell_println!("Usage: openw choices <file>");
-                set_exit(1);
-            }
-        }
-        "open" => {
-            // openw open <file> <app-path> [--default]
-            if parts.len() < 3 {
-                shell_println!("Usage: openw open <file> <app-path> [--default]");
-                set_exit(1);
-                return;
-            }
-            let file = resolve_path(parts[1]);
-            let app_path = parts[2];
-            let set_default = parts.contains(&"--default");
-            let app_name = app_path.rsplit('/').next().unwrap_or(app_path);
-            match crate::fs::openwith::open_with(&file, app_path, app_name, set_default) {
-                Ok(result) => {
-                    shell_println!(
-                        "Opened {} with {}",
-                        result.file_path.display(),
-                        result.app_path.display()
-                    );
-                    if result.default_changed {
-                        shell_println!("  (set as default for this type)");
-                    }
-                }
-                Err(e) => {
-                    shell_println!("Error: {:?}", e);
-                    set_exit(1);
-                }
-            }
-        }
-        "default" => {
-            // openw default <file>
-            if let Some(path) = parts.get(1) {
-                let resolved = resolve_path(path);
-                match crate::fs::openwith::current_default(&resolved) {
-                    Some(name) => {
-                        shell_println!("Default app for {}: {}", resolved.display(), name)
-                    }
-                    None => shell_println!("No default app for {}", resolved.display()),
-                }
-            } else {
-                shell_println!("Usage: openw default <file>");
-                set_exit(1);
-            }
-        }
-        "recent" => {
-            // openw recent <mime-type>
-            if let Some(mime) = parts.get(1) {
-                let entries = crate::fs::openwith::recent_for_type(mime);
-                if entries.is_empty() {
-                    shell_println!("No recent choices for {}", mime);
-                } else {
-                    shell_println!("Recent apps for {}:", mime);
-                    for (path, name, count) in &entries {
-                        shell_println!("  {} ({}) — {} uses", name, path.display(), count);
-                    }
-                }
-            } else {
-                shell_println!("Usage: openw recent <mime-type>");
-                set_exit(1);
-            }
-        }
-        "apps" => {
-            let apps = crate::fs::openwith::list_apps();
-            if apps.is_empty() {
-                shell_println!("(no registered applications)");
-            } else {
-                shell_println!("{:<30} {}", "Path", "Name");
-                shell_println!("{}", "-".repeat(50));
-                for (path, name) in &apps {
-                    shell_println!("{:<30} {}", path.display(), name);
-                }
-            }
-        }
-        "register" => {
-            // openw register <app-path> <app-name>
-            if parts.len() < 3 {
-                shell_println!("Usage: openw register <app-path> <app-name>");
-                set_exit(1);
-                return;
-            }
-            let app_path = parts[1];
-            let app_name = parts[2..].join(" ");
-            match crate::fs::openwith::register_app(app_path, &app_name) {
-                Ok(()) => shell_println!("Registered: {} ({})", app_name, app_path),
-                Err(e) => {
-                    shell_println!("Error: {:?}", e);
-                    set_exit(1);
-                }
-            }
-        }
-        "clear" => {
-            if let Some(mime) = parts.get(1) {
-                crate::fs::openwith::clear_recent_for_type(mime);
-                shell_println!("Cleared recent choices for {}", mime);
-            } else {
-                crate::fs::openwith::clear_recent();
-                shell_println!("Cleared all recent choices");
-            }
-        }
-        "stats" => {
-            let (opens, defaults, recent, apps) = crate::fs::openwith::stats();
-            shell_println!("Opens:           {}", opens);
-            shell_println!("Default changes: {}", defaults);
-            shell_println!("Recent entries:  {}", recent);
-            shell_println!("Known apps:      {}", apps);
-        }
-        "reset" => {
-            crate::fs::openwith::reset_stats();
-            shell_println!("Open With stats reset");
-        }
-        _ => {
-            shell_println!("Usage: openw <subcommand>");
-            shell_println!("  choices <file>       Show app choices for file");
-            shell_println!("  open <file> <app>    Open file with app [--default]");
-            shell_println!("  default <file>       Show default app for file");
-            shell_println!("  recent <mime>        Show recent choices for type");
-            shell_println!("  apps                 List known applications");
-            shell_println!("  register <path> <name>  Register an application");
-            shell_println!("  clear [mime]         Clear recent choices");
-            shell_println!("  stats                Show statistics");
-            shell_println!("  reset                Reset statistics");
-            set_exit(1);
-        }
     }
 }
 
@@ -39461,260 +38729,6 @@ fn cmd_notifcenter(args: &str) {
             shell_println!("  test                    Run self-tests");
             shell_println!("  stats                   Show statistics");
             shell_println!("  reset                   Clear all data and stats");
-            set_exit(1);
-        }
-    }
-}
-
-/// `appregistry` / `appreg` — application registry for start menu, file associations, search.
-fn cmd_appregistry(args: &str) {
-    use crate::fs::appregistry;
-    let parts: Vec<&str> = args.split_whitespace().collect();
-    let sub = parts.first().copied().unwrap_or("");
-    match sub {
-        "register" | "reg" => {
-            // appreg register <id> <name> <exec_path> [category]
-            let id = parts.get(1).copied().unwrap_or("");
-            let name = parts.get(2).copied().unwrap_or("");
-            let exec_path = parts.get(3).copied().unwrap_or("");
-            if id.is_empty() || name.is_empty() || exec_path.is_empty() {
-                shell_println!("Usage: appreg register <id> <name> <exec_path> [category]");
-                shell_println!("  Categories: system, office, graphics, multimedia, internet,");
-                shell_println!(
-                    "              games, development, education, science, accessories,"
-                );
-                shell_println!("              terminal, filemanager, settings, other");
-                set_exit(1);
-                return;
-            }
-            let cat = parts
-                .get(4)
-                .and_then(|s| appregistry::AppCategory::from_str(s));
-            let categories = match cat {
-                Some(c) => alloc::vec![c],
-                None => alloc::vec![appregistry::AppCategory::Other],
-            };
-            let now = crate::timekeeping::clock_monotonic();
-            match appregistry::register(appregistry::AppInfo {
-                id: String::from(id),
-                name: String::from(name),
-                description: String::new(),
-                exec_path: PathBuf::from(exec_path),
-                icon: String::new(),
-                categories,
-                mime_types: Vec::new(),
-                keywords: Vec::new(),
-                show_in_menu: true,
-                tray_icon: false,
-                start_hidden: false,
-                version: String::from("1.0"),
-                installed_ns: now,
-            }) {
-                Ok(()) => shell_println!("Registered: {} ({})", name, id),
-                Err(e) => {
-                    shell_println!("Error: {:?}", e);
-                    set_exit(1);
-                }
-            }
-        }
-        "unregister" | "unreg" => {
-            let id = parts.get(1).copied().unwrap_or("");
-            if id.is_empty() {
-                shell_println!("Usage: appreg unregister <app-id>");
-                set_exit(1);
-                return;
-            }
-            match appregistry::unregister(id) {
-                Ok(()) => shell_println!("Unregistered: {}", id),
-                Err(e) => {
-                    shell_println!("Error: {:?}", e);
-                    set_exit(1);
-                }
-            }
-        }
-        "get" | "info" => {
-            let id = parts.get(1).copied().unwrap_or("");
-            if id.is_empty() {
-                shell_println!("Usage: appreg get <app-id>");
-                set_exit(1);
-                return;
-            }
-            match appregistry::get(id) {
-                Some(app) => {
-                    shell_println!("ID:          {}", app.id);
-                    shell_println!("Name:        {}", app.name);
-                    shell_println!("Description: {}", app.description);
-                    shell_println!("Exec:        {}", app.exec_path.display());
-                    shell_println!("Icon:        {}", app.icon);
-                    shell_println!("Version:     {}", app.version);
-                    shell_println!(
-                        "Menu:        {}",
-                        if app.show_in_menu { "yes" } else { "no" }
-                    );
-                    shell_println!("Tray:        {}", if app.tray_icon { "yes" } else { "no" });
-                    if !app.categories.is_empty() {
-                        let cats: Vec<&str> = app.categories.iter().map(|c| c.label()).collect();
-                        shell_println!("Categories:  {}", cats.join(", "));
-                    }
-                    if !app.mime_types.is_empty() {
-                        shell_println!("MIME types:  {}", app.mime_types.join(", "));
-                    }
-                    if !app.keywords.is_empty() {
-                        shell_println!("Keywords:    {}", app.keywords.join(", "));
-                    }
-                }
-                None => shell_println!("App not found: {}", id),
-            }
-        }
-        "list" | "" => {
-            let apps = appregistry::list_all();
-            if apps.is_empty() {
-                shell_println!("No registered applications");
-            } else {
-                shell_println!("{} applications:", apps.len());
-                shell_println!("{:32} {:20} {}", "ID", "NAME", "EXEC");
-                for app in &apps {
-                    shell_println!("{:32} {:20} {}", app.id, app.name, app.exec_path.display());
-                }
-            }
-        }
-        "category" | "cat" => {
-            let cat_name = parts.get(1).copied().unwrap_or("");
-            if cat_name.is_empty() {
-                // List all categories with counts.
-                for &cat in appregistry::AppCategory::all() {
-                    let apps = appregistry::by_category(cat);
-                    if !apps.is_empty() {
-                        shell_println!("  {:16} {} apps", cat.label(), apps.len());
-                    }
-                }
-                return;
-            }
-            match appregistry::AppCategory::from_str(cat_name) {
-                Some(cat) => {
-                    let apps = appregistry::by_category(cat);
-                    if apps.is_empty() {
-                        shell_println!("No apps in category: {}", cat.label());
-                    } else {
-                        shell_println!("{} — {} apps:", cat.label(), apps.len());
-                        for app in &apps {
-                            shell_println!("  {} — {}", app.name, app.exec_path.display());
-                        }
-                    }
-                }
-                None => {
-                    shell_println!("Unknown category: {}", cat_name);
-                    set_exit(1);
-                }
-            }
-        }
-        "mime" => {
-            let mime = parts.get(1).copied().unwrap_or("");
-            if mime.is_empty() {
-                shell_println!("Usage: appreg mime <mime-type>");
-                set_exit(1);
-                return;
-            }
-            let handlers = appregistry::handlers_for_mime(mime);
-            if handlers.is_empty() {
-                shell_println!("No handlers for: {}", mime);
-            } else {
-                shell_println!("{} handlers for {}:", handlers.len(), mime);
-                for app in &handlers {
-                    shell_println!("  {} ({}) — {}", app.name, app.id, app.exec_path.display());
-                }
-            }
-        }
-        "menu" => {
-            let tree = appregistry::menu_tree();
-            if tree.is_empty() {
-                shell_println!("No menu entries");
-            } else {
-                for (cat, entries) in &tree {
-                    shell_println!("[{}]", cat.label());
-                    for entry in entries {
-                        shell_println!("  {} — {}", entry.name, entry.exec_path.display());
-                    }
-                }
-            }
-        }
-        "search" => {
-            let query = parts.get(1).copied().unwrap_or("");
-            if query.is_empty() {
-                shell_println!("Usage: appreg search <query>");
-                set_exit(1);
-                return;
-            }
-            let results = appregistry::search(query);
-            if results.is_empty() {
-                shell_println!("No matches for: {}", query);
-            } else {
-                shell_println!("{} matches:", results.len());
-                for app in &results {
-                    shell_println!("  {} ({}) — {}", app.name, app.id, app.description);
-                }
-            }
-        }
-        "tray" => {
-            let apps = appregistry::tray_apps();
-            if apps.is_empty() {
-                shell_println!("No tray applications");
-            } else {
-                shell_println!("{} tray apps:", apps.len());
-                for app in &apps {
-                    let hidden = if app.start_hidden {
-                        " (start hidden)"
-                    } else {
-                        ""
-                    };
-                    shell_println!("  {} — {}{}", app.name, app.exec_path.display(), hidden);
-                }
-            }
-        }
-        "init" => match appregistry::register_builtins() {
-            Ok(()) => shell_println!(
-                "Registered built-in applications ({} total)",
-                appregistry::app_count()
-            ),
-            Err(e) => {
-                shell_println!("Error registering builtins: {:?}", e);
-                set_exit(1);
-            }
-        },
-        "test" => match appregistry::self_test() {
-            Ok(()) => shell_println!("All app registry self-tests passed"),
-            Err(e) => {
-                shell_println!("App registry self-test failed: {:?}", e);
-                set_exit(1);
-            }
-        },
-        "stats" => {
-            let (apps, mimes, reg_ops, lookup_ops) = appregistry::stats();
-            shell_println!("Apps:         {}", apps);
-            shell_println!("MIME types:   {}", mimes);
-            shell_println!("Register ops: {}", reg_ops);
-            shell_println!("Lookup ops:   {}", lookup_ops);
-        }
-        "reset" => {
-            appregistry::clear_all();
-            appregistry::reset_stats();
-            shell_println!("App registry cleared and stats reset");
-        }
-        _ => {
-            shell_println!("Usage: appreg <subcommand>");
-            shell_println!("  register <id> <name> <path> [cat]  Register an application");
-            shell_println!("  unregister <id>                    Remove an application");
-            shell_println!("  get <id>                           Show app details");
-            shell_println!("  list                               List all apps");
-            shell_println!("  category [cat]                     List by category");
-            shell_println!("  mime <mime-type>                   Find handlers for type");
-            shell_println!("  menu                               Show start menu tree");
-            shell_println!("  search <query>                     Search apps");
-            shell_println!("  tray                               List tray apps");
-            shell_println!("  init                               Register built-in apps");
-            shell_println!("  test                               Run self-tests");
-            shell_println!("  stats                              Show statistics");
-            shell_println!("  reset                              Clear all data and stats");
             set_exit(1);
         }
     }
@@ -60728,199 +59742,6 @@ fn cmd_powerprofile(args: &str) {
     }
 }
 
-/// `defaultapps` / `defapp` — default application management.
-fn cmd_defaultapps(args: &str) {
-    use crate::fs::defaultapps;
-    use alloc::format;
-
-    let parts: Vec<&str> = args.split_whitespace().collect();
-    let sub = parts.first().copied().unwrap_or("");
-
-    match sub {
-        "show" | "" => {
-            let (types, cats, overrides, ops) = defaultapps::stats();
-            shell_println!("=== Default Applications ===");
-            shell_println!("  Type mappings    : {}", types);
-            shell_println!("  Category defaults: {}", cats);
-            shell_println!("  User overrides   : {}", overrides);
-            shell_println!("  Operations       : {}", ops);
-        }
-        "list" => {
-            let cats = defaultapps::list_category_defaults(0);
-            if cats.is_empty() {
-                shell_println!("No category defaults configured.");
-            } else {
-                shell_println!("{:<20} {}", "CATEGORY", "APPLICATION");
-                for cd in &cats {
-                    shell_println!("{:<20} {}", cd.category.label(), cd.app_id);
-                }
-            }
-        }
-        "get" => {
-            if let Some(mime) = parts.get(1) {
-                // `[uid]` is documented optional and 0 means the system-wide
-                // default, so an omission keeps meaning that.  An unreadable
-                // one must not: 0 is a *security principal* -- root -- so
-                // `defaultapps rm text/html 100O` would have removed root's
-                // default rather than uid 1000's, and said it had succeeded.
-                let Some(uid) = optional_num::<u32>(&parts, 2, "defaultapps", sub, "a UID", 0)
-                else {
-                    return;
-                };
-                match defaultapps::default_for_type(mime, uid) {
-                    Some(app) => shell_println!("{} → {}", mime, app),
-                    None => shell_println!("No default for '{}'", mime),
-                }
-            } else {
-                shell_println!("Usage: defaultapps get <mime_type> [uid]");
-                set_exit(1);
-            }
-        }
-        "set" => {
-            // defapp set <mime> <app> [uid]
-            if parts.len() >= 3 {
-                let mime = parts[1];
-                let app = parts[2];
-                // Same as the `get(2)` arms above: absent still means the
-                // system-wide default, but a mistyped uid is refused rather
-                // than silently resolving to root.
-                let Some(uid) = optional_num::<u32>(&parts, 3, "defaultapps", sub, "a UID", 0)
-                else {
-                    return;
-                };
-                match defaultapps::set_default(mime, app, uid) {
-                    Ok(()) => shell_println!("{} → {}", mime, app),
-                    Err(e) => {
-                        shell_println!("Error: {:?}", e);
-                        set_exit(1);
-                    }
-                }
-            } else {
-                shell_println!("Usage: defaultapps set <mime> <app> [uid]");
-                set_exit(1);
-            }
-        }
-        "rm" | "remove" => {
-            if let Some(mime) = parts.get(1) {
-                // `[uid]` is documented optional and 0 means the system-wide
-                // default, so an omission keeps meaning that.  An unreadable
-                // one must not: 0 is a *security principal* -- root -- so
-                // `defaultapps rm text/html 100O` would have removed root's
-                // default rather than uid 1000's, and said it had succeeded.
-                let Some(uid) = optional_num::<u32>(&parts, 2, "defaultapps", sub, "a UID", 0)
-                else {
-                    return;
-                };
-                match defaultapps::remove_default(mime, uid) {
-                    Ok(()) => shell_println!("Removed default for '{}'", mime),
-                    Err(e) => {
-                        shell_println!("Error: {:?}", e);
-                        set_exit(1);
-                    }
-                }
-            } else {
-                shell_println!("Usage: defaultapps rm <mime> [uid]");
-                set_exit(1);
-            }
-        }
-        "category" | "cat" => {
-            // defapp category <cat> <app> [uid]
-            if parts.len() >= 3 {
-                let cat_name = parts[1];
-                let app = parts[2];
-                // Same as the `get(2)` arms above: absent still means the
-                // system-wide default, but a mistyped uid is refused rather
-                // than silently resolving to root.
-                let Some(uid) = optional_num::<u32>(&parts, 3, "defaultapps", sub, "a UID", 0)
-                else {
-                    return;
-                };
-                let cat = match cat_name {
-                    "browser" | "web" => Some(defaultapps::AppCategory::WebBrowser),
-                    "email" | "mail" => Some(defaultapps::AppCategory::EmailClient),
-                    "files" | "filemgr" => Some(defaultapps::AppCategory::FileManager),
-                    "editor" | "text" => Some(defaultapps::AppCategory::TextEditor),
-                    "terminal" | "term" => Some(defaultapps::AppCategory::Terminal),
-                    "image" | "viewer" => Some(defaultapps::AppCategory::ImageViewer),
-                    "video" => Some(defaultapps::AppCategory::VideoPlayer),
-                    "music" | "audio" => Some(defaultapps::AppCategory::MusicPlayer),
-                    "pdf" => Some(defaultapps::AppCategory::PdfViewer),
-                    "archive" | "zip" => Some(defaultapps::AppCategory::ArchiveManager),
-                    _ => None,
-                };
-                match cat {
-                    Some(c) => match defaultapps::set_category_default(c, app, uid) {
-                        Ok(()) => shell_println!("{} → {}", c.label(), app),
-                        Err(e) => {
-                            shell_println!("Error: {:?}", e);
-                            set_exit(1);
-                        }
-                    },
-                    None => {
-                        shell_println!(
-                            "Unknown category '{}'. Try: browser email files editor terminal image video music pdf archive",
-                            cat_name
-                        );
-                        set_exit(1);
-                    }
-                }
-            } else {
-                shell_println!("Usage: defaultapps category <type> <app> [uid]");
-                set_exit(1);
-            }
-        }
-        "search" => {
-            if let Some(query) = parts.get(1) {
-                let results = defaultapps::search(query);
-                if results.is_empty() {
-                    shell_println!("No matches for '{}'.", query);
-                } else {
-                    for d in &results {
-                        let user = if d.user_override {
-                            format!(" (user {})", d.uid)
-                        } else {
-                            String::new()
-                        };
-                        shell_println!("  {} → {}{}", d.content_type, d.app_id, user);
-                    }
-                }
-            } else {
-                shell_println!("Usage: defaultapps search <query>");
-                set_exit(1);
-            }
-        }
-        "stats" => {
-            let (types, cats, overrides, ops) = defaultapps::stats();
-            shell_println!(
-                "Default apps stats: types={} categories={} overrides={} ops={}",
-                types,
-                cats,
-                overrides,
-                ops
-            );
-        }
-        "test" => {
-            let _ = defaultapps::self_test();
-            shell_println!("defaultapps: self-tests completed (see serial).");
-        }
-        "init" => {
-            defaultapps::init_defaults();
-            shell_println!("Default apps initialized.");
-        }
-        _ => {
-            shell_println!("defaultapps (defapp) — default applications");
-            shell_println!("  show                       Overview");
-            shell_println!("  list                       Category defaults");
-            shell_println!("  get <mime> [uid]           Get default for type");
-            shell_println!("  set <mime> <app> [uid]     Set default for type");
-            shell_println!("  rm <mime> [uid]            Remove default");
-            shell_println!("  category <cat> <app> [uid] Set category default");
-            shell_println!("  search <query>             Search mappings");
-            shell_println!("  stats / test / init");
-        }
-    }
-}
-
 /// `monitors` / `monitor` — multi-monitor layout and configuration.
 fn cmd_monitors(args: &str) {
     use crate::fs::monitors;
@@ -80136,257 +78957,6 @@ fn cmd_screenlock(args: &str) {
     }
 }
 
-/// `appstore` / `store` — application marketplace.
-fn cmd_appstore(args: &str) {
-    use crate::fs::appstore;
-    let parts: Vec<&str> = args.split_whitespace().collect();
-    let sub = parts.first().copied().unwrap_or("");
-    match sub {
-        "" | "show" | "list" => {
-            appstore::init_defaults();
-            let apps = appstore::list_apps();
-            if apps.is_empty() {
-                shell_println!("No apps in store.");
-            } else {
-                shell_println!(
-                    "{:<4} {:<22} {:<14} {:<12} {:<10} {:<8}",
-                    "ID",
-                    "Name",
-                    "Developer",
-                    "Category",
-                    "Version",
-                    "State"
-                );
-                for a in &apps {
-                    shell_println!(
-                        "{:<4} {:<22} {:<14} {:<12} {:<10} {:<8}",
-                        a.id,
-                        a.name,
-                        a.developer,
-                        a.category.label(),
-                        a.version,
-                        a.state.label()
-                    );
-                }
-            }
-        }
-        "search" => {
-            let query = if parts.len() > 1 {
-                parts[1..].join(" ")
-            } else {
-                shell_println!("Usage: store search <query>");
-                set_exit(1);
-                return;
-            };
-            let results = appstore::search(&query);
-            if results.is_empty() {
-                shell_println!("No results for '{}'.", query);
-            } else {
-                for a in &results {
-                    shell_println!(
-                        "[{}] {} — {} ({})",
-                        a.id,
-                        a.name,
-                        a.description,
-                        a.state.label()
-                    );
-                }
-            }
-        }
-        "install" => {
-            if let Some(id_str) = parts.get(1) {
-                let Some(id) = readable_num::<u32>(id_str, "store", sub, "app id") else {
-                    return;
-                };
-                match appstore::install(id) {
-                    Ok(()) => shell_println!("Installed app {}.", id),
-                    Err(e) => {
-                        shell_println!("Error: {:?}", e);
-                        set_exit(1);
-                    }
-                }
-            } else {
-                shell_println!("Usage: store install <app_id>");
-                set_exit(1);
-            }
-        }
-        "uninstall" => {
-            if let Some(id_str) = parts.get(1) {
-                let Some(id) = readable_num::<u32>(id_str, "store", sub, "app id") else {
-                    return;
-                };
-                match appstore::uninstall(id) {
-                    Ok(()) => shell_println!("Uninstalled app {}.", id),
-                    Err(e) => {
-                        shell_println!("Error: {:?}", e);
-                        set_exit(1);
-                    }
-                }
-            } else {
-                shell_println!("Usage: store uninstall <app_id>");
-                set_exit(1);
-            }
-        }
-        "update" => {
-            if let Some(id_str) = parts.get(1) {
-                let Some(id) = readable_num::<u32>(id_str, "store", sub, "app id") else {
-                    return;
-                };
-                match appstore::update_app(id) {
-                    Ok(()) => shell_println!("Updated app {}.", id),
-                    Err(e) => {
-                        shell_println!("Error: {:?}", e);
-                        set_exit(1);
-                    }
-                }
-            } else {
-                shell_println!("Usage: store update <app_id>");
-                set_exit(1);
-            }
-        }
-        "check" => match appstore::check_updates() {
-            Ok(ids) => {
-                if ids.is_empty() {
-                    shell_println!("All apps up to date.");
-                } else {
-                    shell_println!("Updates available for: {:?}", ids);
-                }
-            }
-            Err(e) => {
-                shell_println!("Error: {:?}", e);
-                set_exit(1);
-            }
-        },
-        "installed" => {
-            let installed = appstore::list_installed();
-            if installed.is_empty() {
-                shell_println!("No installed apps.");
-            } else {
-                for a in &installed {
-                    shell_println!(
-                        "[{}] {} v{} (store: v{})",
-                        a.id,
-                        a.name,
-                        a.installed_version,
-                        a.version
-                    );
-                }
-            }
-        }
-        "review" => {
-            let id_str = parts.get(1).copied().unwrap_or("");
-            let rating = parts.get(2).and_then(|s| s.parse::<u8>().ok()).unwrap_or(0);
-            let comment = if parts.len() > 3 {
-                parts[3..].join(" ")
-            } else {
-                String::new()
-            };
-            if let Ok(id) = id_str.parse::<u32>() {
-                if rating == 0 {
-                    // Show reviews.
-                    let reviews = appstore::list_reviews(id);
-                    if reviews.is_empty() {
-                        shell_println!("No reviews.");
-                    } else {
-                        for r in &reviews {
-                            shell_println!("{} — {}/5 — {}", r.user, r.rating, r.comment);
-                        }
-                    }
-                } else {
-                    match appstore::add_review(id, "kshell_user", rating, &comment) {
-                        Ok(rid) => shell_println!("Review {} added ({}/5).", rid, rating),
-                        Err(e) => {
-                            shell_println!("Error: {:?}", e);
-                            set_exit(1);
-                        }
-                    }
-                }
-            } else {
-                shell_println!("Usage: store review <app_id> [rating] [comment]");
-                set_exit(1);
-            }
-        }
-        "add" => {
-            let name = parts.get(1).copied().unwrap_or("");
-            let dev = parts.get(2).copied().unwrap_or("Unknown");
-            let cat_str = parts.get(3).copied().unwrap_or("other");
-            let cat = match cat_str {
-                "productivity" => appstore::AppCategory::Productivity,
-                "dev" | "development" => appstore::AppCategory::Development,
-                "graphics" => appstore::AppCategory::Graphics,
-                "multimedia" | "media" => appstore::AppCategory::Multimedia,
-                "games" => appstore::AppCategory::Games,
-                "utilities" | "util" => appstore::AppCategory::Utilities,
-                "system" => appstore::AppCategory::System,
-                "comm" | "communication" => appstore::AppCategory::Communication,
-                "education" | "edu" => appstore::AppCategory::Education,
-                _ => appstore::AppCategory::Other,
-            };
-            if name.is_empty() {
-                shell_println!("Usage: store add <name> [developer] [category]");
-                set_exit(1);
-            } else {
-                match appstore::add_app(name, dev, "", cat, "1.0.0", 1024) {
-                    Ok(id) => shell_println!("Added app {} '{}'.", id, name),
-                    Err(e) => {
-                        shell_println!("Error: {:?}", e);
-                        set_exit(1);
-                    }
-                }
-            }
-        }
-        "rm" | "remove" => {
-            if let Some(id_str) = parts.get(1) {
-                let Some(id) = readable_num::<u32>(id_str, "store", sub, "app id") else {
-                    return;
-                };
-                match appstore::remove_app(id) {
-                    Ok(()) => shell_println!("Removed app {}.", id),
-                    Err(e) => {
-                        shell_println!("Error: {:?}", e);
-                        set_exit(1);
-                    }
-                }
-            } else {
-                shell_println!("Usage: store remove <app_id>");
-                set_exit(1);
-            }
-        }
-        "stats" => {
-            let (apps, installed, installs, updates, ops) = appstore::stats();
-            shell_println!(
-                "Catalog: {}, Installed: {}, Total installs: {}",
-                apps,
-                installed,
-                installs
-            );
-            shell_println!("Updates: {}, Ops: {}", updates, ops);
-        }
-        "test" => {
-            let _ = appstore::self_test();
-            shell_println!("App store self-test complete.");
-        }
-        "init" => {
-            appstore::init_defaults();
-            shell_println!("App store initialized.");
-        }
-        _ => {
-            shell_println!("appstore (store) — application marketplace");
-            shell_println!("  list / show              Browse catalog");
-            shell_println!("  search <query>           Search apps");
-            shell_println!("  install <id>             Install app");
-            shell_println!("  uninstall <id>           Uninstall app");
-            shell_println!("  update <id>              Update app");
-            shell_println!("  check                    Check for updates");
-            shell_println!("  installed                List installed");
-            shell_println!("  review <id> [rating]     View/add review");
-            shell_println!("  add <name> [dev] [cat]   Add to catalog");
-            shell_println!("  remove <id>              Remove from catalog");
-            shell_println!("  stats / test / init");
-        }
-    }
-}
-
 /// `wintiling` / `tile` — window tiling and workspace management.
 fn cmd_wintiling(args: &str) {
     use crate::fs::wintiling;
@@ -86373,213 +84943,6 @@ fn cmd_eyeprotect(args: &str) {
     }
 }
 
-/// `pinnedapps` / `pinned` — taskbar/start menu pinned app management.
-fn cmd_pinnedapps(args: &str) {
-    use crate::fs::pinnedapps;
-    use alloc::format;
-    let parts: Vec<&str> = args.split_whitespace().collect();
-    let sub = parts.first().copied().unwrap_or("");
-    match sub {
-        "init" => {
-            pinnedapps::init_defaults();
-            shell_println!("Pinned apps initialised.");
-        }
-        "show" | "" => {
-            pinnedapps::init_defaults();
-            for loc in &[
-                pinnedapps::PinLocation::Taskbar,
-                pinnedapps::PinLocation::StartMenu,
-                pinnedapps::PinLocation::Desktop,
-            ] {
-                let pins = pinnedapps::list_pins(*loc);
-                if !pins.is_empty() {
-                    shell_println!("{} ({}):", loc.label(), pins.len());
-                    for p in &pins {
-                        let group = if p.group.is_empty() {
-                            String::new()
-                        } else {
-                            format!(" [{}]", p.group)
-                        };
-                        shell_println!(
-                            "  #{} {} ({}){} launches={}",
-                            p.position,
-                            p.display_name,
-                            p.app_name,
-                            group,
-                            p.launch_count
-                        );
-                        shell_println!("      exec: {}", p.exec_path.display());
-                        if !p.icon_path.is_empty() {
-                            shell_println!("      icon: {}", p.icon_path.display());
-                        }
-                    }
-                }
-            }
-        }
-        "pin" => {
-            let loc_str = parts.get(1).copied().unwrap_or("");
-            let app = parts.get(2).copied().unwrap_or("");
-            let display = parts.get(3..).map(|s| s.join(" ")).unwrap_or_default();
-            let loc = match loc_str {
-                "taskbar" | "tb" => pinnedapps::PinLocation::Taskbar,
-                "start" | "sm" => pinnedapps::PinLocation::StartMenu,
-                "desktop" | "dt" => pinnedapps::PinLocation::Desktop,
-                _ => {
-                    shell_println!(
-                        "Usage: pinnedapps pin <taskbar|start|desktop> <app> [display_name]"
-                    );
-                    set_exit(1);
-                    return;
-                }
-            };
-            if app.is_empty() {
-                shell_println!("Usage: pinnedapps pin <location> <app> [display_name]");
-                set_exit(1);
-                return;
-            }
-            let dname = if display.is_empty() { app } else { &display };
-            match pinnedapps::pin(loc, app, dname, format!("/usr/bin/{app}")) {
-                Ok(()) => shell_println!("'{}' pinned to {}.", app, loc.label()),
-                Err(e) => {
-                    shell_println!("Error: {:?}", e);
-                    set_exit(1);
-                }
-            }
-        }
-        "unpin" => {
-            let loc_str = parts.get(1).copied().unwrap_or("");
-            let app = parts.get(2).copied().unwrap_or("");
-            let loc = match loc_str {
-                "taskbar" | "tb" => pinnedapps::PinLocation::Taskbar,
-                "start" | "sm" => pinnedapps::PinLocation::StartMenu,
-                "desktop" | "dt" => pinnedapps::PinLocation::Desktop,
-                _ => {
-                    shell_println!("Usage: pinnedapps unpin <location> <app>");
-                    set_exit(1);
-                    return;
-                }
-            };
-            if app.is_empty() {
-                shell_println!("Usage: pinnedapps unpin <location> <app>");
-                set_exit(1);
-                return;
-            }
-            match pinnedapps::unpin(loc, app) {
-                Ok(()) => shell_println!("'{}' unpinned from {}.", app, loc.label()),
-                Err(e) => {
-                    shell_println!("Error: {:?}", e);
-                    set_exit(1);
-                }
-            }
-        }
-        "move" | "reorder" => {
-            let loc_str = parts.get(1).copied().unwrap_or("");
-            let app = parts.get(2).copied().unwrap_or("");
-            let pos = parts.get(3).and_then(|s| s.parse::<u32>().ok());
-            let loc = match loc_str {
-                "taskbar" | "tb" => pinnedapps::PinLocation::Taskbar,
-                "start" | "sm" => pinnedapps::PinLocation::StartMenu,
-                "desktop" | "dt" => pinnedapps::PinLocation::Desktop,
-                _ => {
-                    shell_println!("Usage: pinnedapps move <location> <app> <position>");
-                    set_exit(1);
-                    return;
-                }
-            };
-            match pos {
-                Some(p) => match pinnedapps::reorder(loc, app, p) {
-                    Ok(()) => shell_println!("'{}' moved to position {}.", app, p),
-                    Err(e) => {
-                        shell_println!("Error: {:?}", e);
-                        set_exit(1);
-                    }
-                },
-                None => {
-                    shell_println!("Usage: pinnedapps move <location> <app> <position>");
-                    set_exit(1);
-                }
-            }
-        }
-        "icon" | "exec" => {
-            let loc_str = parts.get(1).copied().unwrap_or("");
-            let app = parts.get(2).copied().unwrap_or("");
-            // The rest of the line, not just one token: a path may legally
-            // contain spaces (our only forbidden bytes are `/` and NUL).
-            let path = parts.get(3..).map(|s| s.join(" ")).unwrap_or_default();
-            let loc = match loc_str {
-                "taskbar" | "tb" => pinnedapps::PinLocation::Taskbar,
-                "start" | "sm" => pinnedapps::PinLocation::StartMenu,
-                "desktop" | "dt" => pinnedapps::PinLocation::Desktop,
-                _ => {
-                    shell_println!(
-                        "Usage: pinnedapps {} <taskbar|start|desktop> <app> <path>",
-                        sub
-                    );
-                    set_exit(1);
-                    return;
-                }
-            };
-            if app.is_empty() {
-                shell_println!("Usage: pinnedapps {} <location> <app> <path>", sub);
-                set_exit(1);
-                return;
-            }
-            let res = if sub == "icon" {
-                pinnedapps::set_icon(loc, app, &path)
-            } else {
-                pinnedapps::set_exec(loc, app, &path)
-            };
-            match res {
-                Ok(()) => shell_println!("'{}' {} set to '{}'.", app, sub, path),
-                Err(e) => {
-                    shell_println!("Error: {:?}", e);
-                    set_exit(1);
-                }
-            }
-        }
-        "launch" => {
-            let app = parts.get(1).copied().unwrap_or("");
-            if app.is_empty() {
-                shell_println!("Usage: pinnedapps launch <app>");
-                set_exit(1);
-                return;
-            }
-            match pinnedapps::record_launch(app) {
-                Ok(c) => shell_println!("Launch recorded for '{}' (count: {}).", app, c),
-                Err(e) => {
-                    shell_println!("Error: {:?}", e);
-                    set_exit(1);
-                }
-            }
-        }
-        "stats" => {
-            let (total, tb, sm, launches, ops) = pinnedapps::stats();
-            shell_println!("Pinned apps stats:");
-            shell_println!("  Total pinned:    {}", total);
-            shell_println!("  Taskbar pins:    {}", tb);
-            shell_println!("  Start menu pins: {}", sm);
-            shell_println!("  Total launches:  {}", launches);
-            shell_println!("  Operations:      {}", ops);
-        }
-        "test" => {
-            let _ = pinnedapps::self_test();
-        }
-        _ => {
-            shell_println!("Usage: pinnedapps <subcommand>");
-            shell_println!("  show                  List all pinned apps");
-            shell_println!("  pin <loc> <app> [name] Pin app");
-            shell_println!("  unpin <loc> <app>      Unpin app");
-            shell_println!("  move <loc> <app> <pos>  Reorder");
-            shell_println!("  exec <loc> <app> <path> Set executable");
-            shell_println!("  icon <loc> <app> <path> Set icon (empty clears)");
-            shell_println!("  launch <app>           Record launch");
-            shell_println!("  Locations: taskbar(tb), start(sm), desktop(dt)");
-            shell_println!("  stats / test / init");
-            set_exit(1);
-        }
-    }
-}
-
 /// `inputmethod` / `imf` — input method framework.
 fn cmd_inputmethod(args: &str) {
     use crate::fs::inputmethod;
@@ -91177,177 +89540,6 @@ fn parse_usb_decision(s: &str) -> Option<crate::fs::usbpolicy::Decision> {
         "readonly" | "ro" => Decision::ReadOnly,
         _ => return None,
     })
-}
-
-/// `applaunch` / `alaunch` — search-based application launcher.
-fn cmd_applaunch(args: &str) {
-    use crate::fs::applaunch;
-    let parts: Vec<&str> = args.split_whitespace().collect();
-    let sub = parts.first().copied().unwrap_or("");
-    match sub {
-        "search" | "find" => {
-            if parts.len() < 2 {
-                shell_println!("Usage: applaunch search <query>");
-                set_exit(1);
-                return;
-            }
-            let query = parts[1..].join(" ");
-            let max = 10;
-            let results = applaunch::search(&query, max);
-            if results.is_empty() {
-                shell_println!("No results for '{}'", query);
-            } else {
-                for r in &results {
-                    shell_println!(
-                        "  #{}: {} [{}] score={} launches={}",
-                        r.id,
-                        r.name,
-                        r.result_type.label(),
-                        r.score,
-                        r.launch_count
-                    );
-                }
-            }
-        }
-        "launch" => {
-            if let Some(id_s) = parts.get(1) {
-                if let Ok(id) = id_s.parse::<u32>() {
-                    match applaunch::record_launch(id) {
-                        Ok(action) => shell_println!("Launched #{}: {}", id, action),
-                        Err(e) => {
-                            shell_println!("Error: {:?}", e);
-                            set_exit(1);
-                        }
-                    }
-                } else {
-                    shell_println!("Invalid item ID");
-                    set_exit(1);
-                }
-            } else {
-                shell_println!("Usage: applaunch launch <id>");
-                set_exit(1);
-            }
-        }
-        "register" | "add" => {
-            if parts.len() < 3 {
-                shell_println!("Usage: applaunch register <name> <type> [action] [icon]");
-                set_exit(1);
-                return;
-            }
-            let name = parts[1];
-            let rtype = parse_result_type(parts[2]);
-            let action = if parts.len() > 3 {
-                parts[3]
-            } else {
-                "launch:default"
-            };
-            let icon = if parts.len() > 4 { parts[4] } else { "app" };
-            match applaunch::register(name, alloc::vec![], rtype, action, icon) {
-                Ok(id) => shell_println!("Registered '{}' as #{} [{}]", name, id, rtype.label()),
-                Err(e) => {
-                    shell_println!("Error: {:?}", e);
-                    set_exit(1);
-                }
-            }
-        }
-        "unregister" | "remove" => {
-            if let Some(id_s) = parts.get(1) {
-                if let Ok(id) = id_s.parse::<u32>() {
-                    match applaunch::unregister(id) {
-                        Ok(()) => shell_println!("Unregistered #{}", id),
-                        Err(e) => {
-                            shell_println!("Error: {:?}", e);
-                            set_exit(1);
-                        }
-                    }
-                } else {
-                    shell_println!("Invalid item ID");
-                    set_exit(1);
-                }
-            } else {
-                shell_println!("Usage: applaunch unregister <id>");
-                set_exit(1);
-            }
-        }
-        "list" => {
-            let items = applaunch::list_items();
-            if items.is_empty() {
-                shell_println!("No registered items");
-            } else {
-                for i in &items {
-                    shell_println!(
-                        "  #{}: {} [{}] → {} (launches={})",
-                        i.id,
-                        i.name,
-                        i.result_type.label(),
-                        i.action,
-                        i.launch_count
-                    );
-                }
-            }
-        }
-        "top" => {
-            let max = parts
-                .get(1)
-                .and_then(|s| s.parse::<usize>().ok())
-                .unwrap_or(5);
-            let top = applaunch::top_launched(max);
-            if top.is_empty() {
-                shell_println!("No launch history");
-            } else {
-                for (i, item) in top.iter().enumerate() {
-                    shell_println!(
-                        "  {}. {} — {} launches",
-                        i + 1,
-                        item.name,
-                        item.launch_count
-                    );
-                }
-            }
-        }
-        "stats" => {
-            let (items, searches, launches, ops) = applaunch::stats();
-            shell_println!(
-                "App Launcher: {} items, {} searches, {} launches, {} ops",
-                items,
-                searches,
-                launches,
-                ops
-            );
-        }
-        "test" => {
-            let _ = applaunch::self_test();
-            shell_println!("applaunch self-test complete");
-        }
-        "init" => {
-            applaunch::init_defaults();
-            shell_println!("applaunch initialised");
-        }
-        _ => {
-            shell_println!("applaunch — search-based application launcher");
-            shell_println!("  search <query>           Search for items");
-            shell_println!("  launch <id>              Launch and record");
-            shell_println!("  register <name> <type>   Register item");
-            shell_println!("  unregister <id>          Remove item");
-            shell_println!("  list                     List all items");
-            shell_println!("  top [n]                  Top launched items");
-            shell_println!("  stats / test / init");
-        }
-    }
-}
-
-fn parse_result_type(s: &str) -> crate::fs::applaunch::ResultType {
-    use crate::fs::applaunch::ResultType;
-    match s.to_lowercase().as_str() {
-        "app" | "application" => ResultType::Application,
-        "file" => ResultType::File,
-        "setting" | "settings" => ResultType::Setting,
-        "command" | "cmd" => ResultType::Command,
-        "calc" | "calculation" => ResultType::Calculation,
-        "web" | "websearch" => ResultType::WebSearch,
-        "bookmark" | "bm" => ResultType::Bookmark,
-        _ => ResultType::Application,
-    }
 }
 
 /// `sysprofiler` / `sprof` — detailed hardware/software inventory.
@@ -112093,288 +110285,6 @@ fn cmd_taskbar(args: &str) {
     }
 }
 
-/// `startmenu` / `smenu` — start menu: favorites, search, power actions.
-fn cmd_startmenu(args: &str) {
-    use crate::fs::startmenu;
-    let parts: Vec<&str> = args.split_whitespace().collect();
-    let sub = parts.first().copied().unwrap_or("");
-    match sub {
-        "fav" | "favorite" => {
-            let action = parts.get(1).copied().unwrap_or("");
-            match action {
-                "add" => {
-                    let app_id = parts.get(2).copied().unwrap_or("");
-                    if app_id.is_empty() {
-                        shell_println!("Usage: smenu fav add <app-id>");
-                        set_exit(1);
-                        return;
-                    }
-                    match startmenu::add_favorite(app_id) {
-                        Ok(()) => shell_println!("Added favorite: {}", app_id),
-                        Err(e) => {
-                            shell_println!("Error: {:?}", e);
-                            set_exit(1);
-                        }
-                    }
-                }
-                "rm" | "remove" => {
-                    let app_id = parts.get(2).copied().unwrap_or("");
-                    if app_id.is_empty() {
-                        shell_println!("Usage: smenu fav rm <app-id>");
-                        set_exit(1);
-                        return;
-                    }
-                    match startmenu::remove_favorite(app_id) {
-                        Ok(()) => shell_println!("Removed favorite: {}", app_id),
-                        Err(e) => {
-                            shell_println!("Error: {:?}", e);
-                            set_exit(1);
-                        }
-                    }
-                }
-                "reorder" => {
-                    let app_id = parts.get(2).copied().unwrap_or("");
-                    let pos = parts.get(3).and_then(|s| s.parse::<usize>().ok());
-                    if app_id.is_empty() || pos.is_none() {
-                        shell_println!("Usage: smenu fav reorder <app-id> <position>");
-                        set_exit(1);
-                        return;
-                    }
-                    match startmenu::reorder_favorite(app_id, pos.unwrap_or(0)) {
-                        Ok(()) => shell_println!("Reordered: {}", app_id),
-                        Err(e) => {
-                            shell_println!("Error: {:?}", e);
-                            set_exit(1);
-                        }
-                    }
-                }
-                _ => {
-                    let favs = startmenu::favorites();
-                    if favs.is_empty() {
-                        shell_println!("No favorites set");
-                    } else {
-                        shell_println!("{} favorites:", favs.len());
-                        for f in &favs {
-                            shell_println!("  [{}] {} ({})", f.position, f.name, f.app_id);
-                        }
-                    }
-                }
-            }
-        }
-        "link" | "quicklink" => {
-            let action = parts.get(1).copied().unwrap_or("");
-            match action {
-                "add" => {
-                    let app_id = parts.get(2).copied().unwrap_or("");
-                    let label = parts.get(3).copied().unwrap_or("");
-                    if app_id.is_empty() || label.is_empty() {
-                        shell_println!("Usage: smenu link add <app-id> <label> [icon]");
-                        set_exit(1);
-                        return;
-                    }
-                    let icon = parts.get(4).copied().unwrap_or("icon-default");
-                    match startmenu::add_quick_link(app_id, label, icon) {
-                        Ok(()) => shell_println!("Added quick link: {}", label),
-                        Err(e) => {
-                            shell_println!("Error: {:?}", e);
-                            set_exit(1);
-                        }
-                    }
-                }
-                "rm" | "remove" => {
-                    let app_id = parts.get(2).copied().unwrap_or("");
-                    if app_id.is_empty() {
-                        shell_println!("Usage: smenu link rm <app-id>");
-                        set_exit(1);
-                        return;
-                    }
-                    match startmenu::remove_quick_link(app_id) {
-                        Ok(()) => shell_println!("Removed quick link: {}", app_id),
-                        Err(e) => {
-                            shell_println!("Error: {:?}", e);
-                            set_exit(1);
-                        }
-                    }
-                }
-                _ => {
-                    let links = startmenu::quick_links();
-                    if links.is_empty() {
-                        shell_println!("No quick links");
-                    } else {
-                        shell_println!("{} quick links:", links.len());
-                        for ql in &links {
-                            shell_println!("  {} ({})", ql.label, ql.app_id);
-                        }
-                    }
-                }
-            }
-        }
-        "recent" => {
-            let action = parts.get(1).copied().unwrap_or("");
-            match action {
-                "clear" => {
-                    startmenu::clear_recent();
-                    shell_println!("Recent apps cleared");
-                }
-                "hide" | "off" => {
-                    startmenu::set_show_recent(false);
-                    shell_println!("Recent apps section hidden");
-                }
-                "show" | "on" => {
-                    startmenu::set_show_recent(true);
-                    shell_println!("Recent apps section shown");
-                }
-                _ => {
-                    let recent = startmenu::recent_apps();
-                    if recent.is_empty() {
-                        shell_println!("No recent apps");
-                    } else {
-                        shell_println!("{} recent apps:", recent.len());
-                        for r in &recent {
-                            shell_println!("  {} (x{}) — {}", r.name, r.launch_count, r.app_id);
-                        }
-                    }
-                }
-            }
-        }
-        "launch" => {
-            let app_id = parts.get(1).copied().unwrap_or("");
-            if app_id.is_empty() {
-                shell_println!("Usage: smenu launch <app-id>");
-                set_exit(1);
-                return;
-            }
-            match startmenu::record_launch(app_id) {
-                Ok(()) => shell_println!("Recorded launch: {}", app_id),
-                Err(e) => {
-                    shell_println!("Error: {:?}", e);
-                    set_exit(1);
-                }
-            }
-        }
-        "search" => {
-            let query = parts.get(1).copied().unwrap_or("");
-            if query.is_empty() {
-                shell_println!("Usage: smenu search <query>");
-                set_exit(1);
-                return;
-            }
-            let results = startmenu::search(query);
-            if results.is_empty() {
-                shell_println!("No matches for: {}", query);
-            } else {
-                shell_println!("{} matches:", results.len());
-                for r in &results {
-                    shell_println!("  {} ({}) [{}]", r.name, r.app_id, r.match_desc);
-                }
-            }
-        }
-        "show" | "" => {
-            let sections = startmenu::build_menu();
-            for section in &sections {
-                match section {
-                    startmenu::MenuSection::Favorites(favs) => {
-                        shell_println!("★ Favorites:");
-                        for f in favs {
-                            shell_println!("  {}", f.name);
-                        }
-                    }
-                    startmenu::MenuSection::AllApps(groups) => {
-                        shell_println!("All Apps:");
-                        for g in groups {
-                            shell_println!("  [{}] ({} apps)", g.label, g.apps.len());
-                        }
-                    }
-                    startmenu::MenuSection::QuickLinks(links) => {
-                        shell_println!("Quick Links:");
-                        for ql in links {
-                            shell_println!("  {}", ql.label);
-                        }
-                    }
-                    startmenu::MenuSection::RecentApps(recent) => {
-                        shell_println!("Recent:");
-                        for r in recent {
-                            shell_println!("  {} (x{})", r.name, r.launch_count);
-                        }
-                    }
-                    startmenu::MenuSection::SystemActions(actions) => {
-                        shell_println!("Power:");
-                        for a in actions {
-                            shell_println!("  {}", a.label());
-                        }
-                    }
-                    startmenu::MenuSection::SearchResults(results) => {
-                        shell_println!("Search Results:");
-                        for r in results {
-                            shell_println!("  {} [{}]", r.name, r.match_desc);
-                        }
-                    }
-                }
-            }
-        }
-        "power" => {
-            let action = parts.get(1).copied().unwrap_or("");
-            if action.is_empty() {
-                shell_println!("Available power actions:");
-                for a in startmenu::SystemAction::all() {
-                    shell_println!("  {}", a.label());
-                }
-                return;
-            }
-            match startmenu::SystemAction::from_str(action) {
-                Some(a) => shell_println!("Power action: {} (simulated)", a.label()),
-                None => {
-                    shell_println!("Unknown action: {}", action);
-                    set_exit(1);
-                }
-            }
-        }
-        "init" => match startmenu::init_defaults() {
-            Ok(()) => shell_println!("Default start menu configured"),
-            Err(e) => {
-                shell_println!("Error: {:?}", e);
-                set_exit(1);
-            }
-        },
-        "test" => match startmenu::self_test() {
-            Ok(()) => shell_println!("All start menu self-tests passed"),
-            Err(e) => {
-                shell_println!("Start menu self-test failed: {:?}", e);
-                set_exit(1);
-            }
-        },
-        "stats" => {
-            let (favs, qls, recent, opens, searches, launches) = startmenu::stats();
-            shell_println!("Favorites:   {}", favs);
-            shell_println!("Quick links: {}", qls);
-            shell_println!("Recent apps: {}", recent);
-            shell_println!("Open ops:    {}", opens);
-            shell_println!("Search ops:  {}", searches);
-            shell_println!("Launch ops:  {}", launches);
-        }
-        "reset" => {
-            startmenu::clear_all();
-            startmenu::reset_stats();
-            shell_println!("Start menu cleared and stats reset");
-        }
-        _ => {
-            shell_println!("Usage: smenu <subcommand>");
-            shell_println!("  show                           Display start menu");
-            shell_println!("  fav [add|rm|reorder] [args]    Manage favorites");
-            shell_println!("  link [add|rm] [args]           Manage quick links");
-            shell_println!("  recent [clear|hide|show]       Recent apps");
-            shell_println!("  launch <app-id>                Record a launch");
-            shell_println!("  search <query>                 Search apps");
-            shell_println!("  power [action]                 Power/session actions");
-            shell_println!("  init                           Set up defaults");
-            shell_println!("  test                           Run self-tests");
-            shell_println!("  stats                          Show statistics");
-            shell_println!("  reset                          Clear all data");
-            set_exit(1);
-        }
-    }
-}
-
 /// `systray` / `tray` — system tray icon management.
 fn cmd_systray(args: &str) {
     use crate::fs::systray;
@@ -112690,126 +110600,6 @@ fn cmd_systray(args: &str) {
     }
 }
 
-/// `preview` — file preview/thumbnail generation.
-fn cmd_preview(args: &str) {
-    use crate::fs::preview;
-    let parts: Vec<&str> = args.split_whitespace().collect();
-    let sub = parts.first().copied().unwrap_or("");
-    match sub {
-        "generate" | "gen" => {
-            let path_arg = parts.get(1).copied().unwrap_or("");
-            if path_arg.is_empty() {
-                shell_println!("Usage: preview generate <path> [small|medium|large]");
-                set_exit(1);
-                return;
-            }
-            let path = resolve_path(path_arg);
-            let size = match parts.get(2).copied() {
-                Some("small") | Some("s") => preview::PreviewSize::Small,
-                Some("large") | Some("l") => preview::PreviewSize::Large,
-                _ => preview::PreviewSize::Medium,
-            };
-            match preview::generate(&path, size) {
-                Ok(p) => {
-                    let (w, h) = size.dimensions();
-                    let kind = match p.kind {
-                        preview::PreviewKind::Image => "image",
-                        preview::PreviewKind::Text => "text",
-                        preview::PreviewKind::AlbumArt => "album-art",
-                        preview::PreviewKind::Listing => "listing",
-                        preview::PreviewKind::Icon => "icon",
-                        preview::PreviewKind::Custom => "custom",
-                    };
-                    shell_println!(
-                        "Generated {} preview: {}x{}, {} bytes, mime={}",
-                        kind,
-                        w,
-                        h,
-                        p.data_size(),
-                        p.mime
-                    );
-                }
-                Err(e) => {
-                    shell_println!("Error: {:?}", e);
-                    set_exit(1);
-                }
-            }
-        }
-        "check" => {
-            let path_arg = parts.get(1).copied().unwrap_or("");
-            if path_arg.is_empty() {
-                shell_println!("Usage: preview check <path>");
-                set_exit(1);
-                return;
-            }
-            let path = resolve_path(path_arg);
-            if preview::supports_preview(&path) {
-                shell_println!("{}: preview supported", path.display());
-            } else {
-                shell_println!("{}: no preview available", path.display());
-            }
-        }
-        "dir" => {
-            let dir_arg = parts.get(1).copied().unwrap_or("");
-            if dir_arg.is_empty() {
-                shell_println!("Usage: preview dir <path> [size]");
-                set_exit(1);
-                return;
-            }
-            let dir = resolve_path(dir_arg);
-            let size = match parts.get(2).copied() {
-                Some("small") | Some("s") => preview::PreviewSize::Small,
-                Some("large") | Some("l") => preview::PreviewSize::Large,
-                _ => preview::PreviewSize::Medium,
-            };
-            match preview::generate_for_directory(&dir, size) {
-                Ok(count) => shell_println!("Generated {} previews for {}", count, dir.display()),
-                Err(e) => {
-                    shell_println!("Error: {:?}", e);
-                    set_exit(1);
-                }
-            }
-        }
-        "generators" | "gens" => {
-            let gens = preview::list_generators();
-            if gens.is_empty() {
-                shell_println!("No custom generators registered.");
-            } else {
-                shell_println!("{:6} {:20} {}", "ID", "APP", "MIME TYPES");
-                for g in &gens {
-                    shell_println!("{:6} {:20} {}", g.id, g.app_name, g.mime_types.join(", "));
-                }
-            }
-        }
-        "stats" | "" => {
-            let (gen_calls, cache_hits, failures, total_bytes) = preview::stats();
-            shell_println!("Preview generation statistics:");
-            shell_println!("  Generate calls: {}", gen_calls);
-            shell_println!("  Cache hits:     {}", cache_hits);
-            shell_println!("  Failures:       {}", failures);
-            shell_println!("  Bytes generated:{}", total_bytes);
-            let gens = preview::list_generators();
-            shell_println!("  Custom gens:    {}", gens.len());
-        }
-        "reset" => {
-            preview::reset_stats();
-            shell_println!("Preview statistics reset.");
-        }
-        _ => {
-            shell_println!("Usage: preview <command>");
-            shell_println!("  generate <path> [size]  Generate preview for file");
-            shell_println!("  check <path>            Check if preview is supported");
-            shell_println!("  dir <path> [size]       Generate previews for directory");
-            shell_println!("  generators              List custom generators");
-            shell_println!("  stats                   Show statistics (default)");
-            shell_println!("  reset                   Reset counters");
-            shell_println!("");
-            shell_println!("Sizes: small (48px), medium (128px), large (256px)");
-            set_exit(1);
-        }
-    }
-}
-
 /// `template` — file template management.
 fn cmd_template(args: &str) {
     use crate::fs::templates;
@@ -112978,147 +110768,6 @@ fn cmd_template(args: &str) {
             shell_println!("  add <n> <ext> <def>   Register custom template");
             shell_println!("  remove <id>           Remove template");
             shell_println!("  info <name_or_id>     Show template details");
-            shell_println!("  stats                 Show statistics");
-            shell_println!("  reset                 Reset counters");
-            set_exit(1);
-        }
-    }
-}
-
-/// `columnview` — file explorer detail column configuration.
-fn cmd_columnview(args: &str) {
-    use crate::fs::columnview;
-    columnview::init();
-    let parts: Vec<&str> = args.split_whitespace().collect();
-    let sub = parts.first().copied().unwrap_or("");
-    match sub {
-        "compute" | "dir" => {
-            let dir_arg = parts.get(1).copied().unwrap_or("");
-            if dir_arg.is_empty() {
-                shell_println!("Usage: columnview compute <dir>");
-                set_exit(1);
-                return;
-            }
-            let dir = resolve_path(dir_arg);
-            match columnview::compute_columns(&dir) {
-                Ok(cols) => {
-                    shell_println!("Columns for {}:", dir.display());
-                    shell_println!(
-                        "{:4} {:24} {:16} {:8} {:6}",
-                        "POS",
-                        "ID",
-                        "HEADER",
-                        "TYPE",
-                        "WIDTH"
-                    );
-                    for c in &cols {
-                        let type_str = match c.def.col_type {
-                            columnview::ColumnType::Text => "text",
-                            columnview::ColumnType::Integer => "int",
-                            columnview::ColumnType::Size => "size",
-                            columnview::ColumnType::DateTime => "date",
-                            columnview::ColumnType::Duration => "dur",
-                            columnview::ColumnType::Boolean => "bool",
-                            columnview::ColumnType::Dimensions => "dim",
-                        };
-                        shell_println!(
-                            "{:4} {:24} {:16} {:8} {:6}",
-                            c.position,
-                            c.def.id,
-                            c.def.header,
-                            type_str,
-                            c.width
-                        );
-                    }
-                }
-                Err(e) => {
-                    shell_println!("Error: {:?}", e);
-                    set_exit(1);
-                }
-            }
-        }
-        "list" | "ls" | "" => {
-            let cols = columnview::list_columns();
-            shell_println!(
-                "{:24} {:16} {:8} {:6} {:10}",
-                "ID",
-                "HEADER",
-                "TYPE",
-                "WIDTH",
-                "APPLIES"
-            );
-            for c in &cols {
-                let type_str = match c.col_type {
-                    columnview::ColumnType::Text => "text",
-                    columnview::ColumnType::Integer => "int",
-                    columnview::ColumnType::Size => "size",
-                    columnview::ColumnType::DateTime => "date",
-                    columnview::ColumnType::Duration => "dur",
-                    columnview::ColumnType::Boolean => "bool",
-                    columnview::ColumnType::Dimensions => "dim",
-                };
-                let applies = if c.applies_to.is_empty() {
-                    String::from("*")
-                } else {
-                    alloc::format!("{} types", c.applies_to.len())
-                };
-                shell_println!(
-                    "{:24} {:16} {:8} {:6} {:10}",
-                    c.id,
-                    c.header,
-                    type_str,
-                    c.default_width,
-                    applies
-                );
-            }
-        }
-        "prefs" => {
-            let prefs = columnview::list_preferences();
-            if prefs.is_empty() {
-                shell_println!("No user preferences set.");
-            } else {
-                shell_println!(
-                    "{:30} {:24} {:8} {:6} {:4}",
-                    "DIR",
-                    "COLUMN",
-                    "VISIBLE",
-                    "WIDTH",
-                    "POS"
-                );
-                for p in &prefs {
-                    // `directory: None` is the global default, not a directory
-                    // named "*" — see `ColumnPref::directory`.
-                    let dir = p.directory.as_deref().map_or_else(
-                        || String::from("(global)"),
-                        |d| alloc::format!("{}", d.display()),
-                    );
-                    shell_println!(
-                        "{:30} {:24} {:8} {:6} {:4}",
-                        dir,
-                        p.column_id,
-                        p.visible,
-                        p.width,
-                        p.position
-                    );
-                }
-            }
-        }
-        "stats" => {
-            let (col_count, pref_count, compute_count) = columnview::stats();
-            shell_println!("Column view statistics:");
-            shell_println!("  Columns:    {}/{}", col_count, 512);
-            shell_println!("  User prefs: {}/{}", pref_count, 256);
-            shell_println!("  Computes:   {}", compute_count);
-        }
-        "reset" => {
-            columnview::reset_stats();
-            shell_println!("Column view statistics reset.");
-        }
-        _ => {
-            shell_println!("Usage: columnview <command>");
-            shell_println!("  list|ls               List all column definitions (default)");
-            shell_println!("  compute <dir>         Compute columns for a directory");
-            shell_println!("  prefs                 Show user preferences");
             shell_println!("  stats                 Show statistics");
             shell_println!("  reset                 Reset counters");
             set_exit(1);
@@ -113424,11 +111073,6 @@ fn cmd_properties(args: &str) {
             // General tab.
             shell_println!("=== General ===");
             shell_println!("  Name:        {}", props.general.name.display());
-            shell_println!("  Type:        {}", props.general.type_description);
-            shell_println!("  MIME:        {}", props.general.mime_type);
-            if !props.general.opens_with.is_empty() {
-                shell_println!("  Opens with:  {}", props.general.opens_with);
-            }
             shell_println!("  Location:    {}", props.general.location.display());
             shell_println!("  Size:        {} bytes", props.general.size);
             if props.general.size_on_disk > 0 {
@@ -113477,14 +111121,6 @@ fn cmd_properties(args: &str) {
                 shell_println!("  Extended attributes:");
                 for (k, v) in &props.security.xattrs {
                     shell_println!("    {} = {}", k, v);
-                }
-            }
-
-            // Details tab.
-            if !props.details.is_empty() {
-                shell_println!("\n=== Details ===");
-                for field in &props.details {
-                    shell_println!("  {:20} {}", field.name, field.value);
                 }
             }
 
@@ -129444,7 +127080,7 @@ fn is_builtin(name: &str) -> bool {
         | "blkinfo" | "blkread" | "ls" | "dir" | "cat" | "type" | "write" | "rm"
         | "del" | "mkdir" | "rmdir" | "stat" | "ln" | "link" | "df" | "cp" | "copy"
         | "mv" | "move" | "ren" | "chmod" | "chown" | "touch" | "append" | "tree"
-        | "du" | "file" | "find" | "locate" | "updatedb" | "dedup" | "integrity" | "intercept" | "fhist" | "filehist" | "mime" | "mimetype" | "assoc" | "openwith" | "quota" | "getfacl" | "setfacl" | "ulimit" | "overlay" | "mkfifo" | "lspipe" | "pipes" | "tmpwatch" | "audit" | "namespace" | "ns" | "fssnapshot" | "fssnap" | "reclaim" | "fstx" | "changetrack" | "ct" | "fcompress" | "fc" | "encrypt" | "fsearch" | "tag" | "diskuse" | "fshealth" | "fswatch" | "dirsync" | "backup" | "undelete" | "archive" | "batch" | "linkcheck" | "fsprofile" | "fspolicy" | "fsbench" | "ionice" | "atime" | "prefetch" | "splice" | "directio" | "fstrim" | "fstune" | "fontmgr" | "fonts" | "sparse" | "lsplus" | "fsfreeze" | "seal" | "recent" | "fileinfo" | "finfo" | "fswalk" | "walk" | "findex" | "thumbcache" | "tcache" | "bookmark" | "bm" | "clipboard" | "clip" | "dragdrop" | "contextmenu" | "ctxmenu" | "fileops" | "filetype" | "ftype" | "openw" | "sidebar" | "statusbar" | "toolbar" | "queryable" | "qattr" | "fcomment" | "rundialog" | "rund" | "notifcenter" | "notif" | "appregistry" | "appreg" | "systray" | "tray" | "taskbar" | "startmenu" | "smenu" | "filepicker" | "fpick" | "theme" | "hotkey" | "widgets" | "widget" | "soundmixer" | "smixer" | "wallpaper" | "wp" | "credentials" | "cred" | "power" | "display" | "vdesktop" | "vd" | "keylayout" | "kbl" | "screenshot" | "scap" | "a11y" | "accessibility" | "ime" | "netindicator" | "netind" | "winsnap" | "wsnap" | "colorpicker" | "cpick" | "cursorsettings" | "cursor" | "kbsettings" | "kbs" | "detailcols" | "dcols" | "partmgr" | "pmgr" | "locale" | "lcl" | "useracct" | "uacct" | "progmgr" | "prog" | "scriptlang" | "slang" | "osreset" | "reset" | "bootcfg" | "boot" | "swapcfg" | "swap" | "certmgr" | "cert" | "installer" | "timezone" | "tz" | "autostart" | "astart" | "schedtune" | "stune" | "mmtune" | "mtune" | "capsettings" | "caps" | "vpn" | "dyndns" | "ddns" | "loginscreen" | "logscr" | "appnotify" | "anotify" | "kernelbuild" | "kbuild" | "wakesensor" | "wsensor" | "netsettings" | "netcfg" | "sysinfo" | "hwinfo" | "perfmon" | "resmon" | "focusassist" | "dnd" | "storageclean" | "sclean" | "sysdiag" | "diag" | "nightlight" | "nlight" | "tasksched" | "schtask" | "envvars" | "envmgr" | "bluetooth" | "bt" | "printmgr" | "lp" | "screenrec" | "srec" | "datausage" | "dusage" | "mousesettings" | "mouse" | "touchpad" | "tpad" | "powerprofile" | "pprofile" | "defaultapps" | "defapp" | "monitors" | "monitor" | "fwsettings" | "firewall" | "updatemgr" | "updates" | "notifprefs" | "nprefs" | "fileshare" | "share" | "parental" | "pctl" | "audiodevice" | "adev" | "sessionmgr" | "session" | "crashreport" | "crash" | "netproxy" | "proxy" | "fileversion" | "fver" | "devicemgr" | "devmgr" | "location" | "loc" | "diskencrypt" | "dencrypt" | "pkgmgr" | "pkg" | "remotedesktop" | "rdp" | "restorepoint" | "rpoint" | "battery" | "batt" | "dictation" | "dict" | "screenreader" | "sr" | "langpack" | "lpack" | "spellcheck" | "spell" | "screentime" | "stime" | "disksmart" | "smart" | "magnifier" | "mag" | "cloudsync" | "csync" | "gestures" | "gesture" | "soundevents" | "sevents" | "usbmgr" | "usb" | "cliphistory" | "cliphist" | "displaycolor" | "dcolor" | "syslog" | "slog" | "inputa11y" | "ia11y" | "driverupdate" | "dupdate" | "netshare" | "nshare" | "startuprepair" | "srepair" | "remoteassist" | "rassist" | "taskmon" | "tmon" | "printqueue" | "pqueue" | "servicemgr" | "svcmgr" | "hwmonitor" | "hwmon" | "appsandbox" | "sandbox" | "gamepadinput" | "gamepad" | "sysrestore" | "srestore" | "audiomux" | "amux" | "netthrottle" | "nthrottle" | "dumpanalyzer" | "dump" | "memdiag" | "mdiag" | "parentaltime" | "ptime" | "mediakeys" | "mkeys" | "webcam" | "cam" | "speechio" | "speech" | "mobilelink" | "mlink" | "screenlock" | "slock" | "appstore" | "store" | "wintiling" | "tile" | "peninput" | "pen" | "brightness" | "bright" | "quicksettings" | "qs" | "volumeosd" | "vosd" | "netdiag" | "ndiag" | "sharesheet" | "ssheet" | "oobe" | "setup" | "hdrdisplay" | "hdr" | "surroundsound" | "ssound" | "audioeq" | "aeq" | "screensaver" | "ssaver" | "colortemp" | "ctemp" | "gamemode" | "gmode" | "dpiscaling" | "dpi" | "netprofile" | "nprof" | "apppermissions" | "apperm" | "kbshortcuts" | "kbsc" | "displayarrange" | "darr" | "sysanimations" | "sanim" | "filevault" | "fvault" | "mousegestures" | "mgest" | "fontsettings" | "fntset" | "notifbadge" | "nbadge" | "lockwallpaper" | "lwp" | "systemsounds" | "ssounds" | "hotcorners" | "hcorn" | "dynlock" | "dlock" | "snaplayout" | "snlayout" | "haptfeedback" | "haptic" | "eyeprotect" | "eye" | "pinnedapps" | "pinned" | "inputmethod" | "imf" | "storagesense" | "ssense" | "autofix" | "afix" | "recentsearch" | "rsearch" | "sysmaint" | "maint" | "multiclip" | "mclip" | "focussession" | "fsess" | "quicknote" | "qnote" | "cscheme" | "uischeme" | "appcompat" | "acompat" | "windowrules" | "wrules" | "spatialaudio" | "spatial" | "filetransfer" | "ftrans" | "startupopt" | "sopt" | "usagetime" | "utime" | "voicecontrol" | "vctl" | "devpair" | "dpair" | "notifgroup" | "ngroup" | "playmedia" | "pmedia" | "kbmacro" | "macro" | "sysresource" | "sres" | "faceunlock" | "face" | "usbpolicy" | "usbpol" | "applaunch" | "alaunch" | "sysprofiler" | "sprof" | "clipsync" | "clsync" | "netusage" | "nusage" | "touchscreen" | "tscreen" | "diskquota" | "dquota" | "appdefaults" | "adef" | "policyengine" | "pengine" | "fontpreview" | "fprev" | "wifiscan" | "wifi" | "splitview" | "split" | "iotdevice" | "iot" | "prochistory" | "phist" | "notiffilter" | "nfilter" | "colorblind" | "cvd" | "clipaction" | "caction" | "energysaver" | "esaver" | "filerules" | "frules" | "secureboot" | "sboot" | "eventlog" | "systemimage" | "simg" | "raidmgr" | "raid" | "networkbridge" | "nbridge" | "secureerase" | "serase" | "dnssettings" | "dns" | "backupsched" | "bsched" | "displaycal" | "dcal" | "vpnprofile" | "vpnp" | "diskhealth" | "dhealth" | "recoverypart" | "rpart" | "userprofile" | "uprof" | "diskclean" | "dclean" | "cas" | "logrotate" | "lrot" | "powerwake" | "pwake" | "diskio" | "dio" | "sysuptime" | "suptime" | "netspeed" | "nspeed" | "cfreq" | "therm" | "swapmon" | "smon" | "sysctlfs" | "sctlfs" | "cputopo" | "ctopo" | "memlayout" | "mlayout" | "irqbal" | "lavg" | "kernlog" | "klog" | "coredump" | "cdump" | "fwupdate" | "fwup" | "timesync" | "tsync" | "kmod" | "entropy" | "epool" | "iosched" | "ioq" | "netmon" | "nmon" | "groupmgr" | "grp" | "sysrq" | "telemetry" | "telem" | "fscache" | "fcache" | "nameservice" | "nsvc" | "oomkiller" | "oom" | "blktrace" | "btrace" | "cgroupfs" | "cgrp" | "secpolicy" | "spol" | "procstat" | "pstat" | "kernparam" | "kparam" | "tracemon" | "trcmon" | "authbroker" | "abroker" | "prociso" | "piso" | "dmevent" | "dmev" | "pftrack" | "pft" | "ipclog" | "ipcl" | "numastat" | "nstat" | "shmem" | "shm" | "wqstat" | "wqs" | "slabstat" | "slab" | "timerq" | "tq" | "fdtable" | "fdt" | "rcustat" | "rcu" | "kconsole" | "kcon" | "signalq" | "sigq" | "memcg" | "mcg" | "tlbstat" | "tstat" | "pagestat" | "pgstat" | "dmastat" | "dma" | "compstat" | "cstat" | "irqstat" | "istat" | "epollstat" | "epoll" | "vmmap" | "vmap" | "softirq" | "sirq" | "netfilter" | "nfilt" | "schedclass" | "sclass" | "cpuidle" | "cidle" | "futexstat" | "fxstat" | "writeback" | "wback" | "iolatency" | "iolat" | "taskstats" | "tstats" | "kprobes" | "kprb" | "netsock" | "nsock" | "blkqueue" | "bqueue" | "powerstat" | "pwstat" | "inodestat" | "icache" | "migstat" | "mig" | "pagecache" | "pcache" | "netdev" | "ndev" | "cpustat" | "cpust" | "filelock" | "flkstat" | "pidstat" | "pidst" | "binfmt" | "bfmt" | "pipestat" | "pipest" | "sockbuf" | "sbuf" | "schedlat" | "slat" | "mempress" | "mpress" | "cpucache" | "ccache" | "aiostat" | "aio" | "kthread" | "kthr" | "mmapstat" | "mmap" | "rqstat" | "runq" | "thpstat" | "thp" | "cgiostat" | "cgio" | "bpfstat" | "bpf" | "pgtable" | "pgtbl" | "zramstat" | "zram" | "ksmstat" | "ksm" | "clocksrc" | "clksrc" | "pmcstat" | "pmc" | "cputhr" | "cthr" | "ipcns" | "ipcn" | "netqueue" | "nq" | "secmod" | "smod" | "vmballoon" | "vbal" | "devfreq" | "dfreq" | "hwrng" | "hrng" | "acpistat" | "acpi" | "userfault" | "uffd" | "ioport" | "iop" | "msivec" | "msi" | "cpuset" | "cset" | "ftrace" | "ftr" | "kstack" | "kstk" | "fnotify" | "fnot" | "netlat" | "nlat" | "diskstat" | "dstat" | "taskio" | "tio" | "ttystat" | "ttys" | "swapact" | "swact" | "schedwait" | "swait" | "ratestat" | "rstat" | "iomem" | "imem" | "vmzone" | "vzone" | "buddyinfo" | "binfo" | "cgmem" | "cgm" | "vmfrag" | "vfrag" | "pidfd" | "pfd" | "fops" | "fileselect" | "fsel" | "preview" | "template" | "columnview" | "colview" | "pathbar" | "viewstate" | "properties" | "prop" | "sync" | "mount" | "umount" | "unmount" | "wc" | "head"
+        | "du" | "file" | "find" | "locate" | "updatedb" | "dedup" | "integrity" | "intercept" | "fhist" | "filehist" | "quota" | "getfacl" | "setfacl" | "ulimit" | "overlay" | "mkfifo" | "lspipe" | "pipes" | "tmpwatch" | "audit" | "namespace" | "ns" | "fssnapshot" | "fssnap" | "reclaim" | "fstx" | "changetrack" | "ct" | "fcompress" | "fc" | "encrypt" | "fsearch" | "tag" | "diskuse" | "fshealth" | "fswatch" | "dirsync" | "backup" | "undelete" | "archive" | "batch" | "linkcheck" | "fsprofile" | "fspolicy" | "fsbench" | "ionice" | "atime" | "prefetch" | "splice" | "directio" | "fstrim" | "fstune" | "fontmgr" | "fonts" | "sparse" | "lsplus" | "fsfreeze" | "seal" | "recent" | "fswalk" | "walk" | "thumbcache" | "tcache" | "bookmark" | "bm" | "clipboard" | "clip" | "dragdrop" | "contextmenu" | "ctxmenu" | "fileops" | "sidebar" | "statusbar" | "toolbar" | "queryable" | "qattr" | "fcomment" | "rundialog" | "rund" | "notifcenter" | "notif" | "systray" | "tray" | "taskbar" | "filepicker" | "fpick" | "theme" | "hotkey" | "widgets" | "widget" | "soundmixer" | "smixer" | "wallpaper" | "wp" | "credentials" | "cred" | "power" | "display" | "vdesktop" | "vd" | "keylayout" | "kbl" | "screenshot" | "scap" | "a11y" | "accessibility" | "ime" | "netindicator" | "netind" | "winsnap" | "wsnap" | "colorpicker" | "cpick" | "cursorsettings" | "cursor" | "kbsettings" | "kbs" | "detailcols" | "dcols" | "partmgr" | "pmgr" | "locale" | "lcl" | "useracct" | "uacct" | "progmgr" | "prog" | "scriptlang" | "slang" | "osreset" | "reset" | "bootcfg" | "boot" | "swapcfg" | "swap" | "certmgr" | "cert" | "installer" | "timezone" | "tz" | "autostart" | "astart" | "schedtune" | "stune" | "mmtune" | "mtune" | "capsettings" | "caps" | "vpn" | "dyndns" | "ddns" | "loginscreen" | "logscr" | "appnotify" | "anotify" | "kernelbuild" | "kbuild" | "wakesensor" | "wsensor" | "netsettings" | "netcfg" | "sysinfo" | "hwinfo" | "perfmon" | "resmon" | "focusassist" | "dnd" | "storageclean" | "sclean" | "sysdiag" | "diag" | "nightlight" | "nlight" | "tasksched" | "schtask" | "envvars" | "envmgr" | "bluetooth" | "bt" | "printmgr" | "lp" | "screenrec" | "srec" | "datausage" | "dusage" | "mousesettings" | "mouse" | "touchpad" | "tpad" | "powerprofile" | "pprofile" | "monitors" | "monitor" | "fwsettings" | "firewall" | "updatemgr" | "updates" | "notifprefs" | "nprefs" | "fileshare" | "share" | "parental" | "pctl" | "audiodevice" | "adev" | "sessionmgr" | "session" | "crashreport" | "crash" | "netproxy" | "proxy" | "fileversion" | "fver" | "devicemgr" | "devmgr" | "location" | "loc" | "diskencrypt" | "dencrypt" | "pkgmgr" | "pkg" | "remotedesktop" | "rdp" | "restorepoint" | "rpoint" | "battery" | "batt" | "dictation" | "dict" | "screenreader" | "sr" | "langpack" | "lpack" | "spellcheck" | "spell" | "screentime" | "stime" | "disksmart" | "smart" | "magnifier" | "mag" | "cloudsync" | "csync" | "gestures" | "gesture" | "soundevents" | "sevents" | "usbmgr" | "usb" | "cliphistory" | "cliphist" | "displaycolor" | "dcolor" | "syslog" | "slog" | "inputa11y" | "ia11y" | "driverupdate" | "dupdate" | "netshare" | "nshare" | "startuprepair" | "srepair" | "remoteassist" | "rassist" | "taskmon" | "tmon" | "printqueue" | "pqueue" | "servicemgr" | "svcmgr" | "hwmonitor" | "hwmon" | "appsandbox" | "sandbox" | "gamepadinput" | "gamepad" | "sysrestore" | "srestore" | "audiomux" | "amux" | "netthrottle" | "nthrottle" | "dumpanalyzer" | "dump" | "memdiag" | "mdiag" | "parentaltime" | "ptime" | "mediakeys" | "mkeys" | "webcam" | "cam" | "speechio" | "speech" | "mobilelink" | "mlink" | "screenlock" | "slock" | "wintiling" | "tile" | "peninput" | "pen" | "brightness" | "bright" | "quicksettings" | "qs" | "volumeosd" | "vosd" | "netdiag" | "ndiag" | "sharesheet" | "ssheet" | "oobe" | "setup" | "hdrdisplay" | "hdr" | "surroundsound" | "ssound" | "audioeq" | "aeq" | "screensaver" | "ssaver" | "colortemp" | "ctemp" | "gamemode" | "gmode" | "dpiscaling" | "dpi" | "netprofile" | "nprof" | "apppermissions" | "apperm" | "kbshortcuts" | "kbsc" | "displayarrange" | "darr" | "sysanimations" | "sanim" | "filevault" | "fvault" | "mousegestures" | "mgest" | "fontsettings" | "fntset" | "notifbadge" | "nbadge" | "lockwallpaper" | "lwp" | "systemsounds" | "ssounds" | "hotcorners" | "hcorn" | "dynlock" | "dlock" | "snaplayout" | "snlayout" | "haptfeedback" | "haptic" | "eyeprotect" | "eye" | "inputmethod" | "imf" | "storagesense" | "ssense" | "autofix" | "afix" | "recentsearch" | "rsearch" | "sysmaint" | "maint" | "multiclip" | "mclip" | "focussession" | "fsess" | "quicknote" | "qnote" | "cscheme" | "uischeme" | "appcompat" | "acompat" | "windowrules" | "wrules" | "spatialaudio" | "spatial" | "filetransfer" | "ftrans" | "startupopt" | "sopt" | "usagetime" | "utime" | "voicecontrol" | "vctl" | "devpair" | "dpair" | "notifgroup" | "ngroup" | "playmedia" | "pmedia" | "kbmacro" | "macro" | "sysresource" | "sres" | "faceunlock" | "face" | "usbpolicy" | "usbpol" | "sysprofiler" | "sprof" | "clipsync" | "clsync" | "netusage" | "nusage" | "touchscreen" | "tscreen" | "diskquota" | "dquota" | "appdefaults" | "adef" | "policyengine" | "pengine" | "fontpreview" | "fprev" | "wifiscan" | "wifi" | "splitview" | "split" | "iotdevice" | "iot" | "prochistory" | "phist" | "notiffilter" | "nfilter" | "colorblind" | "cvd" | "clipaction" | "caction" | "energysaver" | "esaver" | "filerules" | "frules" | "secureboot" | "sboot" | "eventlog" | "systemimage" | "simg" | "raidmgr" | "raid" | "networkbridge" | "nbridge" | "secureerase" | "serase" | "dnssettings" | "dns" | "backupsched" | "bsched" | "displaycal" | "dcal" | "vpnprofile" | "vpnp" | "diskhealth" | "dhealth" | "recoverypart" | "rpart" | "userprofile" | "uprof" | "diskclean" | "dclean" | "cas" | "logrotate" | "lrot" | "powerwake" | "pwake" | "diskio" | "dio" | "sysuptime" | "suptime" | "netspeed" | "nspeed" | "cfreq" | "therm" | "swapmon" | "smon" | "sysctlfs" | "sctlfs" | "cputopo" | "ctopo" | "memlayout" | "mlayout" | "irqbal" | "lavg" | "kernlog" | "klog" | "coredump" | "cdump" | "fwupdate" | "fwup" | "timesync" | "tsync" | "kmod" | "entropy" | "epool" | "iosched" | "ioq" | "netmon" | "nmon" | "groupmgr" | "grp" | "sysrq" | "telemetry" | "telem" | "fscache" | "fcache" | "nameservice" | "nsvc" | "oomkiller" | "oom" | "blktrace" | "btrace" | "cgroupfs" | "cgrp" | "secpolicy" | "spol" | "procstat" | "pstat" | "kernparam" | "kparam" | "tracemon" | "trcmon" | "authbroker" | "abroker" | "prociso" | "piso" | "dmevent" | "dmev" | "pftrack" | "pft" | "ipclog" | "ipcl" | "numastat" | "nstat" | "shmem" | "shm" | "wqstat" | "wqs" | "slabstat" | "slab" | "timerq" | "tq" | "fdtable" | "fdt" | "rcustat" | "rcu" | "kconsole" | "kcon" | "signalq" | "sigq" | "memcg" | "mcg" | "tlbstat" | "tstat" | "pagestat" | "pgstat" | "dmastat" | "dma" | "compstat" | "cstat" | "irqstat" | "istat" | "epollstat" | "epoll" | "vmmap" | "vmap" | "softirq" | "sirq" | "netfilter" | "nfilt" | "schedclass" | "sclass" | "cpuidle" | "cidle" | "futexstat" | "fxstat" | "writeback" | "wback" | "iolatency" | "iolat" | "taskstats" | "tstats" | "kprobes" | "kprb" | "netsock" | "nsock" | "blkqueue" | "bqueue" | "powerstat" | "pwstat" | "inodestat" | "icache" | "migstat" | "mig" | "pagecache" | "pcache" | "netdev" | "ndev" | "cpustat" | "cpust" | "filelock" | "flkstat" | "pidstat" | "pidst" | "binfmt" | "bfmt" | "pipestat" | "pipest" | "sockbuf" | "sbuf" | "schedlat" | "slat" | "mempress" | "mpress" | "cpucache" | "ccache" | "aiostat" | "aio" | "kthread" | "kthr" | "mmapstat" | "mmap" | "rqstat" | "runq" | "thpstat" | "thp" | "cgiostat" | "cgio" | "bpfstat" | "bpf" | "pgtable" | "pgtbl" | "zramstat" | "zram" | "ksmstat" | "ksm" | "clocksrc" | "clksrc" | "pmcstat" | "pmc" | "cputhr" | "cthr" | "ipcns" | "ipcn" | "netqueue" | "nq" | "secmod" | "smod" | "vmballoon" | "vbal" | "devfreq" | "dfreq" | "hwrng" | "hrng" | "acpistat" | "acpi" | "userfault" | "uffd" | "ioport" | "iop" | "msivec" | "msi" | "cpuset" | "cset" | "ftrace" | "ftr" | "kstack" | "kstk" | "fnotify" | "fnot" | "netlat" | "nlat" | "diskstat" | "dstat" | "taskio" | "tio" | "ttystat" | "ttys" | "swapact" | "swact" | "schedwait" | "swait" | "ratestat" | "rstat" | "iomem" | "imem" | "vmzone" | "vzone" | "buddyinfo" | "binfo" | "cgmem" | "cgm" | "vmfrag" | "vfrag" | "pidfd" | "pfd" | "fops" | "fileselect" | "fsel" | "template" | "pathbar" | "viewstate" | "properties" | "prop" | "sync" | "mount" | "umount" | "unmount" | "wc" | "head"
         | "tail" | "hexdump" | "xxd" | "lsof" | "lsp" | "grep" | "cmp" | "diff"
         | "fallocate" | "sort" | "uniq" | "tee" | "truncate" | "sha256" | "hash"
         | "sysctl" | "hostname" | "dd" | "free" | "vmstat" | "flock"

@@ -154,7 +154,9 @@ fn keyword(name: &str) -> Option<Kw> {
     Some(match name {
         "BEGIN" => Kw::Begin,
         "END" => Kw::End,
-        "function" | "func" => Kw::Function,
+        // Not `func`: POSIX does not reserve it, so a program may name a
+        // variable `func`, and gawk --posix reads it as a name too.
+        "function" => Kw::Function,
         "if" => Kw::If,
         "else" => Kw::Else,
         "while" => Kw::While,
@@ -284,7 +286,9 @@ impl<'a> Lexer<'a> {
     ///
     /// POSIX lists the tokens a newline may follow without ending anything:
     /// `{ && || do else , ;` and the two `)` cases the *parser* handles (after
-    /// `if (…)`, `while (…)`, `for (…)`), which is why `)` is not here.
+    /// `if (…)`, `while (…)`, `for (…)`), which is why `)` is not here. `?`
+    /// and `:` are not here either: gawk lets a newline follow them only
+    /// outside `--posix`.
     fn newline_is_significant(&self) -> bool {
         !matches!(
             self.prev,
@@ -295,8 +299,6 @@ impl<'a> Lexer<'a> {
                     | Tok::Comma
                     | Tok::Semi
                     | Tok::Newline
-                    | Tok::Question
-                    | Tok::Colon
                     | Tok::Keyword(Kw::Do | Kw::Else)
             )
         )

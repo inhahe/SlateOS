@@ -337,6 +337,13 @@ impl Parser {
             describe(self.peek())
         ))
     }
+    /// After an action's `}`: newlines, at most one `;`, newlines.
+    fn after_action(&mut self) {
+        self.skip_newlines();
+        self.eat(&Tok::Semi);
+        self.skip_newlines();
+    }
+
     /// Skip newlines and semicolons that separate items or statements.
     fn skip_terms(&mut self) {
         while matches!(self.peek(), Tok::Newline | Tok::Semi) {
@@ -380,23 +387,32 @@ impl Parser {
 
     // ---- program ----------------------------------------------------------
 
+    /// The whole program: rules, separated as gawk's grammar separates them.
+    ///
+    /// Newlines may stand anywhere between rules. After a rule's `}` one `;`
+    /// may follow, with newlines either side (`action: l_brace statements
+    /// r_brace opt_semi opt_nls`); a rule that is only a pattern ends at a
+    /// newline or one `;`. So a leading `;`, or `;;` between rules, is a syntax
+    /// error, as it is in gawk. And BEGIN and END take their `{` on the same
+    /// line.
     fn program(&mut self) -> Result<Program, String> {
         let mut prog = Program::default();
-        self.skip_terms();
+        self.skip_newlines();
         while self.peek() != &Tok::Eof {
             if self.eat(&Tok::Keyword(Kw::Function)) {
                 self.action = Action::Function;
                 self.function()?;
+                self.after_action();
             } else if self.eat(&Tok::Keyword(Kw::Begin)) {
                 self.action = Action::Begin;
-                self.skip_newlines();
                 let body = self.block()?;
                 prog.begin.extend(body);
+                self.after_action();
             } else if self.eat(&Tok::Keyword(Kw::End)) {
                 self.action = Action::End;
-                self.skip_newlines();
                 let body = self.block()?;
                 prog.end.extend(body);
+                self.after_action();
             } else if self.peek() == &Tok::LBrace {
                 self.action = Action::Rule;
                 let action = self.block()?;
@@ -404,6 +420,7 @@ impl Parser {
                     pattern: Pattern::Always,
                     action: Some(action),
                 });
+                self.after_action();
             } else {
                 self.action = Action::Rule;
                 let first = self.expr(false)?;
@@ -421,9 +438,19 @@ impl Parser {
                 } else {
                     None
                 };
+                let has_action = action.is_some();
                 prog.rules.push(Rule { pattern, action });
+                if has_action {
+                    self.after_action();
+                } else {
+                    // A pattern alone ends at a newline, one `;`, or the end.
+                    if !matches!(self.peek(), Tok::Newline | Tok::Semi | Tok::Eof) {
+                        return Err(format!("syntax error at {}", describe(self.peek())));
+                    }
+                    self.eat(&Tok::Semi);
+                    self.skip_newlines();
+                }
             }
-            self.skip_terms();
         }
 
         // Ours, not gawk's (which finds an undefined function when it is
@@ -477,10 +504,10 @@ impl Parser {
         }
         self.expect(&Tok::LParen, "`(' after the function name")?;
         let mut params: Vec<String> = Vec::new();
-        self.skip_newlines();
+        // A newline may follow a comma here, and nowhere else in the list
+        // (the lexer swallows that one): not after `(`, not before `,` or `)`.
         if !self.eat(&Tok::RParen) {
             loop {
-                self.skip_newlines();
                 match self.bump() {
                     Tok::Name(p) => {
                         if params.contains(&p) {
@@ -495,7 +522,6 @@ impl Parser {
                         ));
                     }
                 }
-                self.skip_newlines();
                 if self.eat(&Tok::Comma) {
                     continue;
                 }
@@ -666,11 +692,13 @@ impl Parser {
         self.expect(&Tok::RParen, "`)' after the if condition")?;
         self.skip_newlines();
         let then = Box::new(self.stmt()?);
-        // The `else` may be separated from the then-branch by any number of
-        // terminators; that is why this looks ahead rather than trusting that
-        // `stmt` stopped on it.
+        // The `else` may be separated from the then-branch by newlines; that
+        // is why this looks ahead rather than trusting that `stmt` stopped on
+        // it. Not by a further `;`: the then-branch took its own terminator,
+        // and another is an empty statement, after which `else` has no `if`
+        // (gawk: a syntax error).
         let save = self.i;
-        self.skip_terms();
+        self.skip_newlines();
         if self.eat(&Tok::Keyword(Kw::Else)) {
             self.skip_newlines();
             let other = Box::new(self.stmt()?);
@@ -920,17 +948,18 @@ impl Parser {
 
     // ---- expressions ------------------------------------------------------
 
+    /// The expressions of a call, a grouping, a subscript or an `in` list, up
+    /// to (not including) `end`. A newline may follow a comma -- the lexer
+    /// swallows it -- and nowhere else: not after the `(` or `[`, not before a
+    /// `,` or the close, as in gawk's grammar.
     fn expr_list(&mut self, end: &Tok) -> Result<Vec<Expr>, String> {
         let mut out = Vec::new();
-        self.skip_newlines();
         if self.peek() == end {
             return Ok(out);
         }
         loop {
             out.push(self.expr(false)?);
-            self.skip_newlines();
             if self.eat(&Tok::Comma) {
-                self.skip_newlines();
                 continue;
             }
             return Ok(out);
@@ -957,7 +986,6 @@ impl Parser {
         };
         self.i = self.i.saturating_add(1);
         let loc = self.loc_prev();
-        self.skip_newlines();
         let ExprKind::Get(target) = lhs.kind else {
             return Err("syntax error: the left side of an assignment must be a variable, a field or an array element".to_string());
         };
@@ -976,12 +1004,11 @@ impl Parser {
         if !self.eat(&Tok::Question) {
             return Ok(cond);
         }
+        // No newline around `?` or `:`: gawk allows one only outside
+        // `--posix`.
         let loc = self.loc_prev();
-        self.skip_newlines();
         let yes = self.expr(no_gt)?;
-        self.skip_newlines();
         self.expect(&Tok::Colon, "`:' in a ?: expression")?;
-        self.skip_newlines();
         let no = self.expr(no_gt)?;
         Ok(Expr::new(
             ExprKind::Cond(Box::new(cond), Box::new(yes), Box::new(no)),
@@ -1070,7 +1097,6 @@ impl Parser {
         };
         self.i = self.i.saturating_add(1);
         let loc = self.loc_prev();
-        self.skip_newlines();
         let rhs = self.pipe_getline(no_gt)?;
         Ok(Expr::new(
             ExprKind::Cmp(op, Box::new(lhs), Box::new(rhs)),
@@ -2037,6 +2063,71 @@ mod tests {
     fn a_newline_inside_a_continued_construct_is_not_a_terminator() {
         let _ = ok("BEGIN {\n  if (1 &&\n      2)\n    print \"y\"\n  else\n    print \"n\"\n}");
         let _ = ok("BEGIN { print 1,\n 2 }");
+    }
+
+    /// Where gawk --posix lets a newline stand: after `{ && || , ; do else`,
+    /// a statement's `)` and a rule's `}`. Measured, case by case.
+    #[test]
+    fn a_newline_stands_only_where_gawk_lets_it() {
+        for src in [
+            "BEGIN { print 1,\n 2 }",
+            "BEGIN { print (1 &&\n 1) }",
+            "BEGIN { if (1)\n\n print 1 }",
+            "BEGIN { for (i = 0;\n i < 1;\n i++) print i }",
+            "function f(a,\n b) { return 1 }\nBEGIN { print f() }",
+            "function f(a)\n{ return 1 }\nBEGIN { print f() }",
+            "BEGIN { a[1,\n 2] = 1 }",
+            "NR==1,\nNR==2",
+            "BEGIN { if (1) print 1\n\nelse print 2 }",
+        ] {
+            let _ = ok(src);
+        }
+        for src in [
+            "BEGIN\n{ print 1 }",
+            "BEGIN { print (\n1) }",
+            "BEGIN { print (1\n) }",
+            "BEGIN { a[1] = 1; print a[\n1] }",
+            "function f(\na) { return 1 }",
+            "function f(a\n, b) { return 1 }",
+            "BEGIN { x =\n1 }",
+            "BEGIN { print (1 ==\n1) }",
+            "BEGIN { print (1 ?\n2 : 3) }",
+            "BEGIN { print (1 ? 2\n: 3) }",
+            "BEGIN { print (1 ? 2 :\n3) }",
+        ] {
+            assert!(err(src).contains("syntax error"), "{src:?}: {}", err(src));
+        }
+    }
+
+    /// One `;` may follow a rule's `}`, with newlines about it; a pattern
+    /// alone ends at a newline or one `;`; nothing else separates rules.
+    #[test]
+    fn rules_are_separated_as_gawk_separates_them() {
+        for src in [
+            "BEGIN { print 1 };",
+            "BEGIN { print 1 }; END { print 2 }",
+            "BEGIN { print 1 }\n;\nEND { print 2 }",
+            "NR==1;NR==2",
+            "BEGIN { print 1 } END { print 2 }",
+        ] {
+            let _ = ok(src);
+        }
+        for src in [
+            ";BEGIN { print 1 }",
+            "BEGIN { print 1 };; END { print 2 }",
+            "NR==1;;NR==2",
+            ";",
+            "BEGIN { if (1) print 1;; else print 2 }",
+        ] {
+            assert!(err(src).contains("syntax error"), "{src:?}: {}", err(src));
+        }
+    }
+
+    /// `func` is an ordinary name: POSIX does not reserve it.
+    #[test]
+    fn func_is_a_name() {
+        let _ = ok("BEGIN { func = 3; print func }");
+        assert!(!err("func f() { return 1 }\nBEGIN { print f() }").is_empty());
     }
 
     #[test]

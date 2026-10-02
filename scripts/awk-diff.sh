@@ -1084,6 +1084,112 @@ fmsg_case '{ NR = 1e30; print NR; exit }' abc.txt
 fmsg_case 'BEGIN { x = 2; print x^1024, x^-1075, x^-1074, 0^0, (-0)^-1 }'
 fmsg_case 'BEGIN { printf "%.17g %.17g\n", 3^33, 1.1^50 }'
 
+# --- where a newline may stand ------------------------------------------------
+# gawk --posix lets a newline follow `{ && || , ; do else`, the `)` of an `if`,
+# `while`, `for` or a function's header, and a rule's `}`; nowhere else. Until
+# 2026-10-01 ours also took one after `(`, `[`, `=`, `==`, `?` and `:`, before a
+# `,` or a `)`, and between BEGIN and its `{` -- programs gawk refuses. Whether
+# each is accepted, and the status, is compared.
+run_case abc 'BEGIN
+{ print "b" }'
+run_case abc 'END
+{ print "e" }'
+run_case abc 'function f(a)
+{ return 1 }
+BEGIN { print f() }'
+run_case abc 'function f(
+a) { return 1 }
+BEGIN { print f() }'
+run_case abc 'function f(a
+, b) { return 1 }
+BEGIN { print f() }'
+run_case abc 'function f(a,
+b) { return 1 }
+BEGIN { print f() }'
+run_case abc 'function f(a
+) { return 1 }
+BEGIN { print f() }'
+run_case abc 'BEGIN { if (
+1) print "y" }'
+run_case abc 'BEGIN { if (1
+) print "y" }'
+run_case abc 'BEGIN { for (i = 0
+; i < 1; i++) print i }'
+run_case abc 'BEGIN { for (i = 0; i < 1; i++
+) print i }'
+run_case abc 'function f(a) { return a }
+BEGIN { print f(
+1) }'
+run_case abc 'function f(a, b) { return a b }
+BEGIN { print f(1
+, 2) }'
+run_case abc 'function f(a) { return a }
+BEGIN { print f(1
+) }'
+run_case abc 'BEGIN { print length(
+"ab") }'
+run_case abc 'BEGIN { print substr("abc",
+2) }'
+run_case abc 'BEGIN { print (
+1) }'
+run_case abc 'BEGIN { print (1
+) }'
+run_case abc 'BEGIN { a[1] = 2; print a[
+1] }'
+run_case abc 'BEGIN { a[1,2] = 2; print a[1,
+2] }'
+run_case abc 'BEGIN { a[1] = 2; print a[1
+] }'
+run_case abc 'BEGIN { a[1,2]; print ((
+1,2) in a) }'
+run_case abc 'BEGIN { printf(
+"x\n") }'
+run_case abc 'BEGIN { x =
+1; print x }'
+run_case abc 'BEGIN { x +=
+1; print x }'
+run_case abc 'BEGIN { print (1 ==
+1) }'
+run_case abc 'BEGIN { print (1 <
+2) }'
+run_case abc 'BEGIN { print (1 ?
+2 : 3) }'
+run_case abc 'BEGIN { print (1 ? 2 :
+3) }'
+run_case abc 'BEGIN { print (1 ? 2
+: 3) }'
+run_case abc 'BEGIN { a[1]; delete a[
+1]; print length(a) }'
+run_case abc 'BEGIN { print (1 && # c
+
+1) }'
+# One `;` after a rule's `}`, with newlines about it; not two, and not one
+# before the first rule.
+run_case abc ';BEGIN { print 1 }'
+run_case abc 'BEGIN { print 1 };'
+run_case abc 'BEGIN { print 1 }; END { print 2 }'
+run_case abc 'BEGIN { print 1 };; END { print 2 }'
+run_case abc 'BEGIN { print 1 };
+;END { print 2 }'
+run_case abc 'BEGIN { print 1 }
+;
+END { print 2 }'
+run_case abc 'NR==1;NR==2'
+run_case abc 'NR==1;;NR==2'
+run_case abc ';'
+run_case abc 'BEGIN { if (1) print 1;; else print 2 }'
+run_case abc 'BEGIN { if (1) print 1
+
+else print 2 }'
+run_case abc 'BEGIN { if (1) { print 1 }; else print 2 }'
+# `func` is not reserved by POSIX: a variable may have the name, and a function
+# may not be defined with it (gawk --posix, which bwk's awk and gawk's own
+# default mode do not follow).
+run_case abc 'BEGIN { func = 3; print func }'
+run_case abc '{ func = $1; print func }'
+run_case abc 'func f() { return 1 }
+BEGIN { print f() }'
+
 # --- errors -----------------------------------------------------------------
 # Parse errors: only *whether* there was a diagnostic is compared.
 run_case abc '{print'
